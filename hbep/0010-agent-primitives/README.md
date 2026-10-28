@@ -56,12 +56,12 @@ A past project ran a fleet of agents against several Slurm clusters, sharing one
 
 ### User stories
 
-- An agent starting its shift runs the inventory query and sees every deployment, Allocation and Instance, which owner holds each, why, and when each Allocation ends.
+- An agent starting its shift runs the inventory query and sees every deployment, Allocation and Instance, which owner holds each, why, and when each Allocation ends. Allocations that a retention policy keeps with no Instance are listed too.
 - An agent's session dies mid-handover. Its successor holds the same identity, finds the open operation by its idempotency key, and retries without submitting a second job.
 - An agent plans the release of three Allocations on two providers. The dry run lists exactly which jobs would be cancelled. The owner approves that plan. The confirm runs it, and the report shows one cancellation failed on one provider.
 - Two experiment runners reserve sessions on one deployment for the same night. The front admits each up to its booking, and neither can double the load.
 - An agent subscribed to "ending soon" is restarted. It resumes from its cursor and receives the events it missed.
-- After a project ends, deleting its ModelDeployments releases everything they own. No keyword sweep is needed.
+- After a project ends, deleting its ModelDeployments ends their Instances and cancels their pending Allocations. Each started Allocation is released as its retention policy says, and the inventory lists any still kept. No keyword sweep is needed.
 
 ### Notes, constraints and caveats
 
@@ -72,7 +72,7 @@ A past project ran a fleet of agents against several Slurm clusters, sharing one
 - **The inventory says how fresh each fact is.** Each provider fact carries when it was last observed, so a stale view looks stale.
 - **"Guaranteed delivery" (proposed meaning):** at least once, ordered per resource, durable across restarts, resumable from a cursor, each event with a unique ID for de-duplication. A subscriber that falls behind retention receives an explicit gap marker and must re-read status (HBEP-8, HBEP-11). Nothing is dropped silently.
 - **Dry run is enforced by the server.** A dry-run request never reaches a provider, whatever the client sends.
-- **Actions under an agreed spec need no approval.** The lifecycle controller (HBEP-7) cancels hedge losers, releases an old Allocation once its replacement serves, and ends a deployment at its "until when" without approval, because the ModelDeployment's spec already agreed to them. Approvals apply to actions outside the spec. Replacement before release (HBEP-3) holds regardless of approvals while the deployment keeps its desired capacity. It does not cover shutdown at the end time, scale-down, deletion or an approved early termination: these drain and release without a replacement, because they lower the desired capacity rather than keep it.
+- **Actions under an agreed spec need no approval.** The lifecycle controller (HBEP-7) cancels hedge losers, releases an old Allocation once its replacement serves, releases what over-allocation does not keep or retain, releases an Allocation when its retention policy says, and ends a deployment at its "until when" without approval, because the ModelDeployment's spec and the retention policy already agreed to them. Approvals apply to actions outside the spec. Replacement before release (HBEP-3) holds regardless of approvals while the deployment keeps its desired capacity. It does not cover shutdown at the end time, scale-down, deletion, an approved early termination or a repurpose: their Instances drain and end without a replacement, because they lower a deployment's capacity rather than keep it. Each Allocation left with no Instance then follows its retention policy.
 - **Bulk actions select by label,** with a dry run that lists every match by name. There is no pattern matching on process or job names.
 
 ### Risks and mitigations
@@ -89,7 +89,8 @@ A past project ran a fleet of agents against several Slurm clusters, sharing one
 ### Open questions
 
 - The interface agents use: the Kubernetes API directly (HBEP-11), a framework CLI, or also a tool server for language-model agents. Lean: the API first, a CLI over it, a tool server later.
-- Which actions outside a spec are irreversible. Lean: cancelling a running Allocation before its spec says; cancelling a pending Allocation that holds queue age, other than a hedge loser; releasing the last ready Instance of a deployment before its end; deleting usage or audit records. HBEP-7 asks the same question about its own actions.
+- Which actions outside a spec are irreversible. Lean: cancelling a running Allocation before its spec or retention policy says; cancelling a pending Allocation that holds queue age, other than a hedge loser; releasing the last ready Instance of a deployment before its end; deleting usage or audit records. HBEP-7 asks the same question about its own actions.
+- Whether a repurpose under an agreed policy needs approval. A repurpose drains a serving Instance and moves its Allocation to another ModelDeployment (HBEP-7, open question 8). The same question covers the controller placing Instances on warm capacity by itself (HBEP-7, open question 14).
 - Who may approve. Lean: approvers listed per namespace or per ModelDeployment, people only by default. At a grant's end, an approver approves an early termination or a scale-down. That is not an override of replacement before release, which applies only while desired capacity is kept (HBEP-3). Discussion with HBEP-7.
 - What an owner lease's expiry does. Lean: the resource becomes "orphaned", stops taking new Allocations and emits an event; release then needs the usual approval. Another identity may take the owner lease over.
 - The unit of a reservation: sessions, concurrent requests or tokens per second, and whether a booking can trigger new Allocations. Lean: concurrent sessions on a deployment for a window; future capacity is a ModelDeployment with a start time.
@@ -114,6 +115,7 @@ Tests for the failure modes in Motivation and Risks:
 - Kill a client mid-operation: the operation's state is readable by ID afterwards.
 - Stop a subscriber, emit events, restart it: it receives them all, in order per resource; past retention it receives a gap marker.
 - Let an owner lease expire on a deployment that serves other clients: it is not released without approval.
+- Let a retention policy release an Allocation with no Instance: no approval is asked, and the audit log names the policy.
 - Run two agents as one Unix user with two identities: the audit log tells their actions apart.
 - Create a provider job with the framework's tag and no owning resource: the inventory lists it as an orphan.
 
@@ -156,6 +158,7 @@ TBD. Lean: alpha when the inventory, owner leases, dry run and the audit log exi
 ## Implementation history
 
 - 2026-10-28: proposed (provisional), tracking issue #10.
+- 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
 
 ## Amendments
 

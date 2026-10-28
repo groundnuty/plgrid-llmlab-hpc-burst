@@ -39,7 +39,8 @@ Each needs one store of desired and observed state, with owners, watches, access
 
 - A team runs the control plane on a small k3s cluster. Each agent has its own identity, and the audit log shows which agent cancelled which Allocation.
 - A single researcher runs one binary on a workstation or small VM. It bundles the API server, its storage, the controllers and the front.
-- An agent lists everything it owns with one label selector. Deleting its ModelDeployment drains and releases the Instances and Allocations under it without replacement (HBEP-3), and the provider jobs are cancelled before the objects disappear.
+- An agent lists everything it owns with one label selector. Deleting its ModelDeployment drains its Instances without replacement (HBEP-3) and cancels its pending Allocations. Each started Allocation is released or kept as its retention policy says (HBEP-7); a released Allocation's provider job is cancelled before its object disappears.
+- An agent selects every Provider on one platform by its platform label, two grants included, and attaches them to a model name in routing policy (HBEP-5).
 - The lifecycle controller crashes during a handover. On restart it re-reads every resource and every provider's job list, and continues from what it observes.
 
 ### Notes, constraints and caveats
@@ -47,7 +48,7 @@ Each needs one store of desired and observed state, with owners, watches, access
 What the framework takes from Kubernetes:
 - **Level-triggered reconciliation.** Controllers compare desired and observed state on every pass. A missed event is corrected on the next pass, and a restarted controller re-reads everything.
 - **Owner references and garbage collection.** Deleting an owner deletes what it owns. Finalizers make a deletion wait until the provider job is cancelled.
-- **Labels and selectors** for the inventory, for pools and for bulk actions.
+- **Labels and selectors** for the inventory, for pools and for bulk actions, and for providers: organization, platform, partition and account are labels on each Provider (HBEP-3).
 - **Watches,** so the front and agents follow changes without polling, resuming from a resource version.
 - **RBAC** per identity, verb, resource type and namespace.
 - **Audit** of every API call by the API server.
@@ -102,9 +103,11 @@ Deployment options:
 ## Design details
 
 Decided so far, as a sketch:
-- HBEP-3's ModelDeployment, Allocation and Instance are custom resources. Lean: a ModelDeployment owns its Allocations, pending hedges included, and an Allocation owns its Instances; HBEP-3 decides.
+- HBEP-3's Provider, ModelDeployment, Allocation and Instance are custom resources.
+- A Provider's name is the operator's choice. Its labels carry organization, platform, partition and account, and its spec holds the provider settings, with credentials by reference (HBEP-4).
+- Lean: a ModelDeployment owns its Instances, as a ReplicaSet owns its pods, and each Instance is bound to one Allocation, as a pod to a node. No ModelDeployment owns an Allocation, because an Allocation can outlive its Instances and host another deployment's (HBEP-3); its retention policy decides when it is released (HBEP-7). A pending Allocation records the deployment that requested it and is cancelled when that deployment ends. HBEP-3 decides.
 - An Allocation's finalizer cancels its provider job through the provider plugin (HBEP-4), and the deletion completes only when the provider confirms.
-- The lifecycle and hedging controller (HBEP-7) owns Allocations. Verification (HBEP-9) and observers (HBEP-8) run as controllers. The front (HBEP-5) watches Instances to build its routing table.
+- The lifecycle and hedging controller (HBEP-7) manages Allocations, including their retention and repurposing. Verification (HBEP-9) and observers (HBEP-8) run as controllers. The front (HBEP-5) watches Instances to build its routing table.
 - Desired state is in each spec; observed state, with observation times, is in each status.
 
 Everything else is TBD.
@@ -112,7 +115,8 @@ Everything else is TBD.
 ### Test plan
 
 - Kill the lifecycle controller mid-handover: on restart it continues, and no second job is submitted.
-- Delete a ModelDeployment: its Instances drain, no replacement is submitted, and every provider job under it is cancelled before its objects disappear.
+- Delete a ModelDeployment: its Instances drain, no replacement is submitted, its pending Allocations are cancelled, and each started Allocation is released or kept as its retention policy says. A released Allocation's provider job is cancelled before its object disappears.
+- Select Providers by the platform label: every provider on that platform is returned, two grants included.
 - Delete a custom resource definition without approval: refused.
 - Stop the API server: the front keeps serving from its last table and marks it stale.
 - Let a watch fall behind compaction: the client lists again and loses no state.
@@ -142,7 +146,7 @@ TBD. Lean: alpha with one deployment option and one batch provider; beta when th
 1. **Working:** the API server's health endpoint answers, each controller's leader `Lease` is current, and each resource's status shows a recent reconcile. A status older than its controller's resync period says a controller is not working.
 2. **Restart:** controllers re-list resources and provider jobs, and continue from observed state. Nothing is held only in memory.
 3. **Silent failure:** a controller that holds its `Lease` but reconciles nothing. Reconcile times in status show it.
-4. **Provider limits:** controllers poll providers at rates set in provider profiles (HBEP-4), within login throttles.
+4. **Provider limits:** controllers poll providers at rates set in platform profiles (HBEP-4), within login throttles.
 5. **Capacity:** the API store holds tens to hundreds of objects, since bulk data stays out. Storage full: TBD.
 6. **Idle cost:** one small host or one process; no grant hours and no provider connections when nothing is deployed.
 7. **Rollback:** stopping the control plane leaves provider jobs running until their hard ends, and the front serving from its last table. Removing the framework needs releasing every Allocation first, with approval.
@@ -160,6 +164,7 @@ TBD. Lean: alpha with one deployment option and one batch provider; beta when th
 ## Implementation history
 
 - 2026-10-28: proposed (provisional), tracking issue #11.
+- 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
 
 ## Amendments
 

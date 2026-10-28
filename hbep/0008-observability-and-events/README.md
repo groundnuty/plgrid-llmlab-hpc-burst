@@ -39,7 +39,7 @@ A past project served models on several Slurm clusters behind its own fronts. It
 ### Non-goals
 
 - Choosing a metrics database or dashboard. Design details may name one later.
-- Alerting policy: which threshold pages whom. Thresholds are provider-profile parameters (HBEP-4); routing alerts to people is the user's choice.
+- Alerting policy: which threshold pages whom. Thresholds are platform-profile parameters (HBEP-4); routing alerts to people is the user's choice.
 - Delivery guarantees to event subscribers. HBEP-10 owns subscriptions, cursors and acknowledgement. This HBEP owns what an event is and which types exist.
 - Logging prompts or responses. Usage metering records counts and identities only.
 - Engine metrics inside a managed provider. LLMLab exposes none, so the framework measures it from the front.
@@ -64,8 +64,8 @@ A past project served models on several Slurm clusters behind its own fronts. It
 - **Events are typed.** Each has a type, a reason code, the resource's stable name, a time in UTC from the emitter's clock, and an optional message. Tools act on type and reason, never on the message.
 - **Planned and unplanned stops differ.** An event for a stop that someone asked for names the actor and the operation (HBEP-10). A stop without them is a failure.
 - **Usage records carry the request's own time,** not the time the record was written or copied.
-- **Provider accounting** comes from the provider's own billing source, never from the framework's logs. Formulas differ per cluster (some charge the largest of a core, GPU or memory share), so the formula is provider-profile data. A pending Allocation with an unknown start is unknown, never "starting now".
-- **Contingencies stay on.** Every check here is a provider-profile parameter with a threshold, on by default and cheap when idle, as for every contingency in this framework.
+- **Provider accounting** comes from the platform's own billing source, per provider, never from the framework's logs. Formulas differ per cluster (some charge the largest of a core, GPU or memory share), so the formula is platform-profile data. A pending Allocation with an unknown start is unknown, never "starting now".
+- **Contingencies stay on.** Every check here is a platform-profile parameter with a threshold, on by default and cheap when idle, as for every contingency in this framework.
 
 ### Risks and mitigations
 
@@ -75,15 +75,15 @@ A past project served models on several Slurm clusters behind its own fronts. It
 - **A metric some engines cannot give.** With few chunks, the front cannot derive time per token. Engine-side timing is used where reported; otherwise the value is unknown.
 - **Metering on the request path** adds latency, or loses records when the front crashes. A lost record must show as a gap in the usage record, never as silence.
 - **Billing sources lag or undercount,** as a report of finished jobs only does. Where a center report and the scheduler's accounting differ, both are shown with the gap.
-- **Managed providers are opaque.** LLMLab's periodic stalls show only in front-side time to first token. Its "degraded" events come from front measurements and probes, against the provider profile's thresholds.
+- **Managed providers are opaque.** LLMLab's periodic stalls show only in front-side time to first token. Its "degraded" events come from front measurements and probes, against the platform profile's thresholds.
 - **Series multiply with handovers.** Each handover adds a series per metric, so retention and roll-up per deployment are needed (see Open questions).
 
 ### Open questions
 
 - Metric names and units: vLLM's Prometheus names, OpenTelemetry's conventions for generative AI, or our own? A spike maps two engines' metrics onto the Goals list.
 - How engine metrics leave the job: scraped through the dial-home tunnel, or pushed by a process in the job. Depends on HBEP-6.
-- Where "degraded" and "failing" are defined: per metric in the provider profile, or per deployment. Discussion with HBEP-4.
-- How "ending soon" is timed: one lead time per provider profile, or derived from the handover's measured start-up time (HBEP-7). Lean: from the profile, repeated at fixed steps.
+- Where "degraded" and "failing" are defined: per metric in the platform profile, or per deployment. Discussion with HBEP-4.
+- How "ending soon" is timed: one lead time per platform profile, or derived from the handover's measured start-up time (HBEP-7). Lean: from the profile, repeated at fixed steps.
 - Whether a usage count comes from the engine's usage report only, or also from the front's own count when the engine sends none, marked as such. Lean: both, marked.
 - Retention of metrics, usage and events. Lean: usage for the life of the grant; per-instance series rolled up per deployment after a period; events as long as the audit log (HBEP-10).
 - Whether each client key can read its own usage through the front, as LLMLab users may expect. Discussion with HBEP-5.
@@ -128,7 +128,7 @@ TBD. Lean: alpha when every Goals metric and event exists for one batch provider
 1. **Working:** every observer's heartbeat is current, and a probe request through the front appears in metrics and usage with the right deployment and instance. A `failing` event for an observer, or a probe that never appears, says it is not.
 2. **Restart:** an observer re-reads the inventory and resumes. Engine counters start new series. Missed transitions: see Open questions.
 3. **Silent failure:** an observer that runs but reads nothing. Its samples are unknown, and the share of unknown samples is itself a metric. A display that draws unknown as zero would hide this, so displays must draw unknown distinctly.
-4. **Provider limits:** reading queue state and accounting meets rate limits and login throttles on some clusters. Reads are paced per provider profile (HBEP-4).
+4. **Provider limits:** reading queue state and accounting meets rate limits and login throttles on some clusters. Reads are paced per platform profile (HBEP-4).
 5. **Capacity:** at a full KV cache, waiting requests and preemptions rise; those are the signals. Behaviour of a full metrics store: TBD.
 6. **Idle cost:** observers run on the control plane's host; nothing runs on providers. TBD in numbers.
 7. **Rollback:** observation can be switched off per provider. Serving continues, and every reading that depended on it turns unknown.
@@ -148,6 +148,7 @@ TBD. Lean: alpha when every Goals metric and event exists for one batch provider
 ## Implementation history
 
 - 2026-10-28: proposed (provisional), tracking issue #8.
+- 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
 
 ## Amendments
 

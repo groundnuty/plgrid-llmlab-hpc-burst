@@ -39,16 +39,16 @@ Problems:
 ### User stories
 
 - An instance starts on Helios. Its tunnel agent connects out to the front and registers with its allocation's credential. Once the controller marks the instance ready, the front routes to it. Nobody opens a port or a login session.
-- On a cluster whose compute nodes cannot connect out, the provider profile says so. The framework then uses a login-node relay, which it owns and records.
+- On a cluster whose compute nodes cannot connect out, the platform profile says so. The framework then uses a login-node relay, which it owns and records.
 - The allocation reaches its hard end. The tunnel closes with it, the front marks the path gone, and nothing is left on login nodes.
 - An operator or agent lists every path, with its owner, instance, kind and last heartbeat.
 
 ### Notes, constraints and caveats
 
-- Helios compute nodes can make outbound connections, so dial home works there. Whether it works on Athena and on other clusters is a per-partition fact in the provider profile (HBEP-4): outbound allowed or not, through which protocols and ports, directly or through a proxy.
+- Helios compute nodes can make outbound connections, so dial home works there. Whether it works on Athena and on other clusters is a per-partition fact in the platform profile (HBEP-4): outbound allowed or not, through which protocols and ports, directly or through a proxy.
 - The front needs an address that compute nodes can reach. Where it runs is HBEP-11's decision.
 - A center may need to consent to tunnels from compute nodes. The fix owner is then the center.
-- Inside the instance, the engine and its router listen on loopback or a Unix socket, and the tunnel agent connects to them locally. On a shared node, other users' jobs can reach loopback too, so the local listener uses a key or a socket protected by file permissions. A key covers only part of the engine's HTTP API (Risks).
+- Inside the instance, the engine and its router listen on loopback or a Unix socket, and the tunnel agent connects to them locally. On a shared node, other users' jobs can reach loopback too, so the local listener uses the Instance's own key, which the front sends (HBEP-9), or a socket protected by file permissions. That key is not the allocation's credential, which registers the Instance. A key covers only part of the engine's HTTP API (Risks).
 - All tokens of every reply cross the path. Its throughput and latency under many concurrent streams are part of serving capacity.
 
 ### Risks and mitigations
@@ -58,7 +58,7 @@ Problems:
 - **The tunnel drops while the instance is healthy.** The agent reconnects with backoff. Meanwhile the front holds the instance as unreachable, not dead, and the controller checks the allocation through the provider (HBEP-7).
 - **A false instance registers and receives prompts.** Each allocation gets its own credential, and registration is bound to the provider's identity for the job. The instance takes traffic only after the controller's verification (HBEP-7, HBEP-9).
 - **The tunnel's ping succeeds while the engine is dead.** The liveness probe goes through the path to the engine.
-- **An engine API key is taken for isolation.** A vLLM API key covers only part of the engine's HTTP API (vLLM's security documentation), and traffic between an engine's ranks is unauthenticated by default. So engine HTTP listeners bind to loopback and are reached through the tunnel agent. A multi-node instance's rank traffic still crosses the cluster network unauthenticated. That is a known limitation, recorded in each provider profile (HBEP-4).
+- **An engine API key is taken for isolation.** A vLLM API key covers only part of the engine's HTTP API (vLLM's security documentation), and traffic between an engine's ranks is unauthenticated by default. So engine HTTP listeners bind to loopback and are reached through the tunnel agent. A multi-node instance's rank traffic still crosses the cluster network unauthenticated. That is a known limitation, recorded in each platform profile (HBEP-4).
 - **Relays trip login throttles.** One pooled connection per login node, with the login rate limit as a profile parameter.
 - **A center's login-node policy kills relays.** Relays are supervised. A relay death is an event (HBEP-8), and the instance stays unrouted until its path returns.
 - **Paths outlive their owner.** Owner references and garbage collection (HBEP-11) remove the front-side records. A relay outside the allocation carries the allocation's end time and exits at that time on its own.
@@ -87,7 +87,7 @@ Problems:
 
 | Path | Owner | Liveness | Teardown |
 |---|---|---|---|
-| Dial-home tunnel | the instance | heartbeat, plus a probe through the path to the engine | closes with the allocation; the front expires its record |
+| Dial-home tunnel | the instance | heartbeat, plus a probe through the path to the engine | closes with the instance, at the latest at its allocation's end; the front expires its record |
 | Login-node relay | candidate: the Allocation (Open question 3) | candidate: heartbeat through the relay, plus the same engine probe | candidate: exits on its own at the allocation's end; if the allocation ends early, the controller kills it by recorded process ID and start time |
 | Port forward | candidate: the operator who opens it, for debugging only (Open question 4) | none: never used for routing | candidate: closed by its owner, and listed in the inventory until closed |
 
@@ -145,6 +145,7 @@ TBD. Candidate for alpha: dial home on Helios passes the test plan.
 ## Implementation history
 
 - 2026-10-28: proposed (provisional), tracking issue #6.
+- 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
 
 ## Amendments
 

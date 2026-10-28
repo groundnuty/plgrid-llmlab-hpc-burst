@@ -46,7 +46,7 @@ A past project served one set of models across several clusters and a managed ga
 
 ### User stories
 
-- A researcher pins `example-27b@helios/<deployment-id>` for a whole study. Handovers within Helios keep the name resolving (HBEP-3). Every response carries that ID, and the front's attribution log shows that no other deployment answered.
+- A researcher pins `example-27b@helios-a/<deployment-id>` for a whole study, where `helios-a` is the name the operator gave its provider on Helios. Handovers within that provider keep the name resolving (HBEP-3). Every response carries that ID, and the front's attribution log shows that no other deployment answered.
 - A user sends `example-27b` and is served by whichever deployment the front picks. Each response says which one it was, so a mix can be found afterwards.
 - An agent replaces an Instance before its Allocation ends. The new Instance verifies against the same record and keeps the deployment ID. Clients see only the Instance ID change.
 - A maintainer changes the chat template. That gives a new deployment ID with its own identity record, never an edit to the record under the old ID.
@@ -59,8 +59,9 @@ A past project served one set of models across several clusters and a managed ga
   - Chat template: the one in use, from the revision or an override, hashed.
   - Engine: name, version, container image digest, and every local patch, hashed.
   - Settings that can change outputs: data type and quantisation, context length, attention backend, KV-cache data type, parallel layout, tool-call and reasoning parsers, default generation settings, speculative decoding.
-  - Excluded: Instance and Allocation metadata (HBEP-3), such as job ID, node, port, URL and hard end; and operational settings, such as router policy and session caps.
+  - Excluded: Instance and Allocation metadata (HBEP-3), such as job ID, node, port, URL and hard end; operational settings, such as router policy and session caps; and every key, including the Instance's own key.
 - **The identity record behind a deployment ID is immutable.** Changing any record field gives a new deployment ID, with its own record; no record is edited under an existing ID. Whether the new ID is a new ModelDeployment or a rollout inside the existing one is HBEP-3's open question 7, and HBEP-11's admission restriction depends on it. Operational settings outside the record change in place.
+- **Each Instance has its own key.** It is generated when the Instance starts and kept in its identity package: the identity data the Instance holds about itself. The front uses the key toward the Instance. The key is never an input to the deployment ID: rotating it must not change the ID, and a hash of a short secret can be guessed.
 - **The engine fingerprint is recorded beside the ID, never used as it.** It is not unique per Instance, differs per site and is sometimes missing.
 - **The URL is not identity.** Each handover brings a new Instance with a new URL; the deployment ID does not change.
 - **Attribution is decided at serving time** by the front, which knows which Instance it sent the request to. Nothing is reconstructed afterwards.
@@ -84,8 +85,8 @@ A past project served one set of models across several clusters and a managed ga
 - Whether batch-shaping settings (maximum sequences, prefill budget) enter the record. They can change numerics slightly and are often tuned. A measurement on two settings of one deployment decides.
 - Which checks verification runs at start. Lean: file hashes against the revision; engine version and image digest; resolved settings as the engine reports them; a fixed conversation rendered through the template and tokenizer, compared token by token with an offline render. Output checks are not identity checks, since outputs vary.
 - Where attribution travels: response headers only, or also an extension field in the body for clients that log only bodies. Header names are hard to change, so the owner decides. Discussion with HBEP-5.
-- Which deployments `model` may mix. Lean: every deployment of the model, LLMLab's included, with attribution on each response; a client that needs one identity pins it. Alternative: `model` mixes only deployments with the same record apart from provider.
-- The identity record of a managed catalog entry, whose revision and settings are not published. Lean: known fields filled, the rest "unknown", a flag for gateway request changes, and an ID over the known fields plus provider and catalog name.
+- Which deployments `model` may mix. Decided in part (HBEP-3): only those on the providers the operator attached to the name, none by default. Lean: every deployment of the model on those providers, with attribution on each response; a client that needs one identity pins it. Alternative: `model` mixes only deployments with the same record apart from provider.
+- The identity record of a managed catalog entry, whose revision and settings are not published. Lean: known fields filled, the rest "unknown", a flag for gateway request changes, and an ID over the known fields plus platform and catalog name. The platform, not the provider, because provider names are arbitrary (HBEP-3, open question 2).
 - How a client fetches the record for an ID: an endpoint on the front, an export for a replication package, or both. Discussion with HBEP-5.
 
 ## Design details
@@ -99,6 +100,8 @@ TBD. Decided so far: the deployment ID is a hash the framework computes over wha
 - Start an Instance whose files differ from the pinned revision (one tokenizer file changed): verification fails, and it never joins a pool.
 - Start an Instance where the engine resolves a setting other than the declared one: verification fails.
 - Hand over an Instance: the deployment ID stays and the Instance ID changes, in responses and in the attribution log.
+- Rotate an Instance's key: the deployment ID stays.
+- Repurpose an Allocation: responses name the new deployment ID and a new Instance ID.
 - Send a pinned request while its deployment has no ready Instance: no other deployment answers, and the error names the front with the deployment and Instance fields absent. The same holds for an unknown model and a failed authentication.
 - Stream a reply and drop its headers: the attribution log still names the deployment and Instance for that request ID.
 - Run two deployments of one checkpoint on two GPU types under `model`: each response's attribution tells them apart.
@@ -143,6 +146,7 @@ TBD. Lean: alpha when one batch provider verifies and attributes every response;
 ## Implementation history
 
 - 2026-10-28: proposed (provisional), tracking issue #9.
+- 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
 
 ## Amendments
 
