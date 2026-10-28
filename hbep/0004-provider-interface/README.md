@@ -15,7 +15,7 @@ Problems this addresses, in general terms:
   - a freed slot goes to another user at once;
   - cancelling a parent starts its pending follow-on at once;
   - a dependency offset counts from the parent's start, not its end;
-  - time limits cannot be extended, and a running job's account cannot be changed;
+  - users cannot extend a job's time limit, and a running job's account cannot be changed;
   - a fast-start partition allows one job per user, pending jobs included.
 - **A managed gateway has its own failure modes:**
   - it cuts replies that send no byte for a fixed time, and stalls periodically;
@@ -56,7 +56,7 @@ Problems this addresses, in general terms:
 - **Kinds** (HBEP-3): managed (a fixed catalog, no start or restart), batch (leases with unknown start and hard end, continuity through follow-ons) and static (later).
 - **LLMLab will improve but keeps the same kinds of characteristics.** Its contingencies stay in its profile even when they rarely fire; thresholds keep them cheap.
 - **Hedging is the framework's lever** (HBEP-3, HBEP-7). The core must therefore let the controller submit on several providers, read start estimates marked advisory, see promptly when an allocation starts, cancel a pending allocation with its dependents first, and read each allocation's hard end.
-- **Agent primitives** (HBEP-10) require idempotent operations and reports of partial failure, so every core operation is idempotent and reports per-allocation results.
+- **Agent primitives** (HBEP-10) require idempotent operations and reports of partial failure, so every core operation reports per-allocation results, and every one except submission is idempotent. For submission, a tag on the job supports recovery but does not enforce uniqueness (HBEP-7).
 
 ### Risks and mitigations
 
@@ -75,14 +75,14 @@ Problems this addresses, in general terms:
 ### Open questions
 
 1. **Core operations.** Candidate set: describe, estimate, submit, status, cancel, follow-on, launch an instance, stop an instance, usage, remaining quota, and catalog for managed providers. Decided by walking stages 2, 3 and 7 against LLMLab, Helios and Athena in a spike.
-2. **Capability flags.** Candidates: can start; can restart; has a hard end; gives start estimates; supports follow-on dependencies; supports node pinning; can extend a time limit; can change a running job's account; compute nodes can connect out; compute nodes are reachable in; reports model state; exposes revisions and limits; rewrites requests; requires streaming. Decided with question 1.
+2. **Capability flags.** Candidates: can start; can restart; has a hard end; gives start estimates; supports follow-on dependencies; supports node pinning; a hard end that can move later, for example when a center extends a time limit (the controller re-reads it and never plans for it, HBEP-3); can change a running job's account; compute nodes can connect out; compute nodes are reachable in; reports model state; exposes revisions and limits; rewrites requests; requires streaming. Decided with question 1.
 3. **Profile schema.** Candidate field groups:
    - identity: center, system, partition or node type, kind;
    - capability flags;
    - hardware: accelerator, CPU architecture, memory, interconnect;
-   - scheduling and submission rules;
+   - scheduling and submission rules, including requeue behaviour: whether jobs requeue by default, and whether the framework submits with no-requeue (HBEP-3, HBEP-7);
    - environment: container runtime, filesystems, host software;
-   - reachability facts;
+   - reachability facts, including the known limitation on multi-node engine traffic (HBEP-6);
    - version pins;
    - billing formula and behaviour at grant exhaustion;
    - managed-gateway behaviour: no-byte cut, stall pattern, error mapping;
@@ -108,7 +108,7 @@ Problems this addresses, in general terms:
 ### Test plan
 
 - **Simulated providers** exercise every core rule and the failure modes in Risks. Candidates:
-  - a batch fake with swinging estimates, freed slots taken at once, a parent cancel that starts its follow-on, local-time output across a daylight-saving change, a one-job-per-user partition and a login throttle;
+  - a batch fake with swinging estimates, freed slots taken at once, a parent cancel that starts its follow-on, a requeue that reruns a job under the same job ID, local-time output across a daylight-saving change, a one-job-per-user partition and a login throttle;
   - a managed fake with a no-byte cut, periodic stalls, models going inactive, ambiguous errors, key expiry and request rewriting.
 - **One regression test per register entry.** Once CI exists, an entry without a test fails it.
 - **A profile is never verified against values derived from itself.** Writing a profile from a probe's output and then checking the probe against that profile proves nothing; expectations come from documentation or an independent measurement.
@@ -138,7 +138,7 @@ TBD. Candidate: alpha with LLMLab and one Slurm system; beta with hedging across
 4. **Provider limits:** this HBEP is where they are recorded, per profile.
 5. **Capacity and exhaustion:** TBD per profile: grant exhaustion, per-user job limits and a managed gateway's concurrency ceiling.
 6. **Idle cost:** polling and probes only, bounded by the profile's connection budget and probe rate. No allocation is held while idle.
-7. **Rollback:** disabling a provider stops new submissions. Its running allocations keep serving until their deployments hand over, because no instance is released before its replacement serves. Profile changes revert by PR.
+7. **Rollback:** disabling a provider stops new submissions. Its running allocations keep serving until their deployments hand over, because no instance is released before its replacement serves while its deployment keeps its desired capacity (HBEP-3). An instance whose replacement is late still drains before its lease end. Profile changes revert by PR.
 
 ## Drawbacks
 

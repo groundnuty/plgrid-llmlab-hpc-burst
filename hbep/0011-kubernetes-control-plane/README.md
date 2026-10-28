@@ -39,7 +39,7 @@ Each needs one store of desired and observed state, with owners, watches, access
 
 - A team runs the control plane on a small k3s cluster. Each agent has its own identity, and the audit log shows which agent cancelled which Allocation.
 - A single researcher runs one binary on a workstation or small VM. It bundles the API server, its storage, the controllers and the front.
-- An agent lists everything it owns with one label selector. Deleting its ModelDeployment releases the Allocations and Instances under it, and the provider jobs are cancelled before the objects disappear.
+- An agent lists everything it owns with one label selector. Deleting its ModelDeployment drains and releases the Instances and Allocations under it without replacement (HBEP-3), and the provider jobs are cancelled before the objects disappear.
 - The lifecycle controller crashes during a handover. On restart it re-reads every resource and every provider's job list, and continues from what it observes.
 
 ### Notes, constraints and caveats
@@ -51,7 +51,9 @@ What the framework takes from Kubernetes:
 - **Watches,** so the front and agents follow changes without polling, resuming from a resource version.
 - **RBAC** per identity, verb, resource type and namespace.
 - **Audit** of every API call by the API server.
-- **Admission webhooks** that refuse invalid specs before they are stored: an unpinned revision (HBEP-9), or an edit to an identity field of a running deployment.
+- **Admission webhooks** that refuse invalid specs before they are stored, such as an unpinned revision (HBEP-9).
+  - Candidate, depending on HBEP-3's open question 7: refuse an edit to an identity field of an existing ModelDeployment, if a changed spec must be a new ModelDeployment. If it is a rollout inside one instead, the edit is allowed and rolls out to a new deployment ID.
+  - Either way, the identity record behind an existing deployment ID is never edited (HBEP-9).
 - Also: server-side dry run, optimistic concurrency on resource versions, a status subresource with conditions, API versions with conversion, and client libraries.
 
 What it does not solve:
@@ -75,7 +77,7 @@ Deployment options:
 
 - **Uninstalling the custom resource definitions deletes every resource of those kinds,** and their finalizers would cancel every provider job. Lean: admission guards deletion of definitions and namespaces, which then needs an approval (HBEP-10).
 - **The API server is down.** The front keeps serving from its last routing table, marked stale (HBEP-8). Running jobs keep running; Allocations are provider leases with hard ends, and nothing in them depends on the control plane being up.
-- **A controller is up but stuck.** Each status carries the generation it last reconciled and when. A stale value raises an event; a leader Lease shows which replica is acting.
+- **A controller is up but stuck.** Each status carries the generation it last reconciled and when. A stale value raises an event; a leader `Lease` shows which replica is acting.
 - **The control plane's view and the provider disagree,** for example a job that the controller never recorded. On start, controllers list provider jobs that carry the framework's tag and match them to Allocations. Unmatched jobs are reported as orphans and never cancelled without approval.
 - **Too heavy for one user.** If the bundled binary is too large or slow to start on a small VM, the single-user option fails. A spike measures it (see Open questions).
 - **Agents bypass the API** and act on providers directly, outside the inventory and the audit. Lean: the controllers hold the provider credentials, and agents do not.
@@ -110,7 +112,7 @@ Everything else is TBD.
 ### Test plan
 
 - Kill the lifecycle controller mid-handover: on restart it continues, and no second job is submitted.
-- Delete a ModelDeployment: every provider job under it is cancelled before its objects disappear.
+- Delete a ModelDeployment: its Instances drain, no replacement is submitted, and every provider job under it is cancelled before its objects disappear.
 - Delete a custom resource definition without approval: refused.
 - Stop the API server: the front keeps serving from its last table and marks it stale.
 - Let a watch fall behind compaction: the client lists again and loses no state.
@@ -137,9 +139,9 @@ TBD. Lean: alpha with one deployment option and one batch provider; beta when th
 
 ## Operational readiness
 
-1. **Working:** the API server's health endpoint answers, each controller's leader Lease is current, and each resource's status shows a recent reconcile. A status older than its controller's resync period says a controller is not working.
+1. **Working:** the API server's health endpoint answers, each controller's leader `Lease` is current, and each resource's status shows a recent reconcile. A status older than its controller's resync period says a controller is not working.
 2. **Restart:** controllers re-list resources and provider jobs, and continue from observed state. Nothing is held only in memory.
-3. **Silent failure:** a controller that holds its Lease but reconciles nothing. Reconcile times in status show it.
+3. **Silent failure:** a controller that holds its `Lease` but reconciles nothing. Reconcile times in status show it.
 4. **Provider limits:** controllers poll providers at rates set in provider profiles (HBEP-4), within login throttles.
 5. **Capacity:** the API store holds tens to hundreds of objects, since bulk data stays out. Storage full: TBD.
 6. **Idle cost:** one small host or one process; no grant hours and no provider connections when nothing is deployed.
@@ -153,7 +155,7 @@ TBD. Lean: alpha with one deployment option and one batch provider; beta when th
 ## Alternatives
 
 - **Our own API and database.** Lighter for one user, with full control over event semantics. We would rebuild watches, RBAC, audit, garbage collection, admission and versioning, and agents would lose standard tooling.
-- **Virtual-kubelet pods on Slurm.** Models as pods on a virtual node that submits Slurm jobs, managed by standard workload controllers. Rejected for the compute layer: squeezing leases into pods hides the facts the scheduler needs. A pod has no start estimate or hard end the controllers can plan with, one pod cannot be submitted to several providers and the losers cancelled, and a replacement that starts before its predecessor ends is not how pods are replaced. It may still suit auxiliary parts; see the later evaluation in Open questions.
+- **Virtual-kubelet pods on Slurm.** Models as pods on a virtual node that submits Slurm jobs, managed by standard workload controllers. Rejected for the compute layer: squeezing leases into pods hides the facts the scheduler needs. A pod has no start estimate or hard end the controllers can plan with, and one pod cannot be submitted to several providers and the losers cancelled. A rolling update with `maxSurge` does start a replacement before its predecessor ends, but it cannot plan that from a lease end it does not see. It may still suit auxiliary parts; see the later evaluation in Open questions.
 
 ## Implementation history
 

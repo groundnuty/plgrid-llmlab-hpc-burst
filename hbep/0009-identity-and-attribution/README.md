@@ -5,7 +5,7 @@
 This HBEP decides what the framework records as the identity of a deployment, how each Instance proves that identity before it serves, and how every response names what produced it. It proposes:
 - the fields of the deployment identity record, which HBEP-3's deployment ID is computed over, with the checkpoint revision always pinned;
 - one verification that every Instance passes at start, before it joins any pool;
-- attribution of every response with its deployment ID, Instance ID and engine fingerprint;
+- attribution of every response with its deployment ID, Instance ID and engine fingerprint, or, for an error raised before any Instance is chosen, with the front as the emitting component;
 - how a client chooses between "any deployment of this model" and "exactly this one".
 
 It serves researchers who must say which model answered, for example in a paper's replication package, and the agents that operate deployments for them.
@@ -29,7 +29,9 @@ A past project served one set of models across several clusters and a managed ga
 - A deployment identity record that lists everything about what is served that can change a response. HBEP-3's deployment ID is the hash over it.
 - A pinned checkpoint revision in every record of a deployment the framework serves on batch and static providers. A branch name or "latest" is refused. Managed catalog entries record what their provider publishes (see Open questions).
 - One verification for every Instance at start, recorded, before it serves any request.
-- Attribution of every response, streamed or not, errors included: deployment ID, Instance ID, and the engine fingerprint when the engine reports one.
+- Attribution of every response, streamed or not, errors included.
+  - A response from an Instance names its deployment ID, its Instance ID, and the engine fingerprint when the engine reports one.
+  - An error raised before any Instance is chosen (unknown model, authentication failure, no ready Instance) names the component that emitted it, the front, and leaves the deployment and Instance fields absent. An Instance is never fabricated.
 - A client choice, through the naming levels of HBEP-3, between any deployment of a model and exactly one.
 - Per-site differences behind one checkpoint, and request changes made by a managed gateway, visible in the record rather than hidden by a shared name.
 
@@ -44,10 +46,10 @@ A past project served one set of models across several clusters and a managed ga
 
 ### User stories
 
-- A researcher pins `example-27b@helios/<deployment-id>` for a whole study. Every response carries that ID, and the front's attribution log shows that no other deployment answered.
+- A researcher pins `example-27b@helios/<deployment-id>` for a whole study. Handovers within Helios keep the name resolving (HBEP-3). Every response carries that ID, and the front's attribution log shows that no other deployment answered.
 - A user sends `example-27b` and is served by whichever deployment the front picks. Each response says which one it was, so a mix can be found afterwards.
 - An agent replaces an Instance before its Allocation ends. The new Instance verifies against the same record and keeps the deployment ID. Clients see only the Instance ID change.
-- A maintainer changes the chat template. That is a new deployment with a new ID, never an edit to a running one.
+- A maintainer changes the chat template. That gives a new deployment ID with its own identity record, never an edit to the record under the old ID.
 - A reviewer of a paper fetches the identity record for a deployment ID and sees the checkpoint revision, engine version, flags and template.
 
 ### Notes, constraints and caveats
@@ -58,13 +60,13 @@ A past project served one set of models across several clusters and a managed ga
   - Engine: name, version, container image digest, and every local patch, hashed.
   - Settings that can change outputs: data type and quantisation, context length, attention backend, KV-cache data type, parallel layout, tool-call and reasoning parsers, default generation settings, speculative decoding.
   - Excluded: Instance and Allocation metadata (HBEP-3), such as job ID, node, port, URL and hard end; and operational settings, such as router policy and session caps.
-- **A change to any record field is a new deployment.** Admission refuses an in-place edit of a running deployment's record fields (HBEP-11). Operational settings outside the record change in place.
+- **The identity record behind a deployment ID is immutable.** Changing any record field gives a new deployment ID, with its own record; no record is edited under an existing ID. Whether the new ID is a new ModelDeployment or a rollout inside the existing one is HBEP-3's open question 7, and HBEP-11's admission restriction depends on it. Operational settings outside the record change in place.
 - **The engine fingerprint is recorded beside the ID, never used as it.** It is not unique per Instance, differs per site and is sometimes missing.
-- **The URL is not identity.** Instances change URL at each handover; the deployment ID does not.
+- **The URL is not identity.** Each handover brings a new Instance with a new URL; the deployment ID does not change.
 - **Attribution is decided at serving time** by the front, which knows which Instance it sent the request to. Nothing is reconstructed afterwards.
 - **No allowlist of fingerprints.** An Instance joins a pool because it passed verification against the record, never because its fingerprint was on a list.
 - **Our own front changes no prompt and filters no field** (HBEP-5). A managed gateway that does is recorded as doing so.
-- **A pinned name never falls back.** With no ready Instance, the front returns the inactive-model error, as HBEP-5 proposes, and no other deployment answers.
+- **A pinned name never falls back.** With no ready Instance, the front returns the inactive-model error, as HBEP-5 proposes, and no other deployment answers. That error names the front, with no deployment or Instance (Goals).
 
 ### Risks and mitigations
 
@@ -72,7 +74,7 @@ A past project served one set of models across several clusters and a managed ga
 - **A record that holds a noisy field** (a path, a time stamp) gives each start a new ID and breaks handovers. Fields are normalised; paths and times are excluded.
 - **Verification that checks only liveness.** A test chat proves the engine answers, not what it serves. Verification compares resolved state with the record (see Open questions for which checks).
 - **The engine resolves a setting differently than asked,** for example by choosing an attention backend per GPU type. A record that stores the request would then hide the difference. See HBEP-3's open question 1.
-- **The router inside a deployment picks the worker,** and may not say which. The front then knows the deployment but not the Instance. HBEP-5 must make the worker known to the front, or the front picks it.
+- **The Instance's router picks the worker,** and may not say which. The front still knows the Instance, because it picks the Instance itself (HBEP-3); only the worker may be unknown, which is HBEP-5's open question 7. Pooling workers across Instances would lose the Instance, so it is not part of this design (HBEP-3, open question 11).
 - **A managed provider changes what it serves without notice.** The framework can see that only if the engine fingerprint or a probe changes. Such a change raises an event (HBEP-8).
 - **Headers get dropped** by proxies or client libraries that keep only the body. The front's attribution log, keyed by request ID, holds the same facts.
 
@@ -88,7 +90,7 @@ A past project served one set of models across several clusters and a managed ga
 
 ## Design details
 
-TBD. Decided so far: the deployment ID is a hash the framework computes over what is served (HBEP-3), not the job ID and not the engine fingerprint; a handover keeps it; every response names the deployment and Instance that produced it. The record schema and the verification are decided by the open questions above.
+TBD. Decided so far: the deployment ID is a hash the framework computes over what is served (HBEP-3), not the job ID and not the engine fingerprint; a handover keeps it; every response from an Instance names the deployment and Instance that produced it, and an error the front raises before it chooses an Instance names the front. The record schema and the verification are decided by the open questions above.
 
 ### Test plan
 
@@ -97,14 +99,14 @@ TBD. Decided so far: the deployment ID is a hash the framework computes over wha
 - Start an Instance whose files differ from the pinned revision (one tokenizer file changed): verification fails, and it never joins a pool.
 - Start an Instance where the engine resolves a setting other than the declared one: verification fails.
 - Hand over an Instance: the deployment ID stays and the Instance ID changes, in responses and in the attribution log.
-- Send a pinned request while its deployment has no ready Instance: no other deployment answers.
+- Send a pinned request while its deployment has no ready Instance: no other deployment answers, and the error names the front with the deployment and Instance fields absent. The same holds for an unknown model and a failed authentication.
 - Stream a reply and drop its headers: the attribution log still names the deployment and Instance for that request ID.
 - Run two deployments of one checkpoint on two GPU types under `model`: each response's attribution tells them apart.
 
 ### Compatibility and upgrades
 
 - Clients written for LLMLab keep working: attribution is added, nothing they read changes. The engine fingerprint, when present, stays in the OpenAI-compatible `system_fingerprint` field.
-- An engine upgrade changes the engine version, so it is a new deployment, never a change under a running ID.
+- An engine upgrade changes the engine version, so it gives a new deployment ID, never a change under a running ID.
 - A change to the record's field list changes every ID. HBEP-3's hashing scheme version covers it, so IDs already issued stay valid for their records.
 
 ### Security
@@ -129,7 +131,7 @@ TBD. Lean: alpha when one batch provider verifies and attributes every response;
 
 ## Drawbacks
 
-- Strict records give more deployment IDs: a template fix or an engine upgrade starts a new deployment.
+- Strict records give more deployment IDs: a template fix or an engine upgrade gives a new deployment ID.
 - Verification adds start-up time to every Instance, inside a time-limited Allocation.
 
 ## Alternatives

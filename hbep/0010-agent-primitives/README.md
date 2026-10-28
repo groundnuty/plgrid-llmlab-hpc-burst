@@ -72,7 +72,7 @@ A past project ran a fleet of agents against several Slurm clusters, sharing one
 - **The inventory says how fresh each fact is.** Each provider fact carries when it was last observed, so a stale view looks stale.
 - **"Guaranteed delivery" (proposed meaning):** at least once, ordered per resource, durable across restarts, resumable from a cursor, each event with a unique ID for de-duplication. A subscriber that falls behind retention receives an explicit gap marker and must re-read status (HBEP-8, HBEP-11). Nothing is dropped silently.
 - **Dry run is enforced by the server.** A dry-run request never reaches a provider, whatever the client sends.
-- **Actions under an agreed spec need no approval.** The lifecycle controller (HBEP-7) cancels hedge losers, releases an old Allocation once its replacement serves, and ends a deployment at its "until when" without approval, because the ModelDeployment's spec already agreed to them. Approvals apply to actions outside the spec. The rule that no serving Instance is released before its replacement serves holds regardless of approvals.
+- **Actions under an agreed spec need no approval.** The lifecycle controller (HBEP-7) cancels hedge losers, releases an old Allocation once its replacement serves, and ends a deployment at its "until when" without approval, because the ModelDeployment's spec already agreed to them. Approvals apply to actions outside the spec. Replacement before release (HBEP-3) holds regardless of approvals while the deployment keeps its desired capacity. It does not cover shutdown at the end time, scale-down, deletion or an approved early termination: these drain and release without a replacement, because they lower the desired capacity rather than keep it.
 - **Bulk actions select by label,** with a dry run that lists every match by name. There is no pattern matching on process or job names.
 
 ### Risks and mitigations
@@ -90,7 +90,7 @@ A past project ran a fleet of agents against several Slurm clusters, sharing one
 
 - The interface agents use: the Kubernetes API directly (HBEP-11), a framework CLI, or also a tool server for language-model agents. Lean: the API first, a CLI over it, a tool server later.
 - Which actions outside a spec are irreversible. Lean: cancelling a running Allocation before its spec says; cancelling a pending Allocation that holds queue age, other than a hedge loser; releasing the last ready Instance of a deployment before its end; deleting usage or audit records. HBEP-7 asks the same question about its own actions.
-- Who may approve. Lean: approvers listed per namespace or per ModelDeployment, people only by default. Can an approver override the replacement-before-release rule, for example at a grant's end? Discussion with HBEP-7.
+- Who may approve. Lean: approvers listed per namespace or per ModelDeployment, people only by default. At a grant's end, an approver approves an early termination or a scale-down. That is not an override of replacement before release, which applies only while desired capacity is kept (HBEP-3). Discussion with HBEP-7.
 - What an owner lease's expiry does. Lean: the resource becomes "orphaned", stops taking new Allocations and emits an event; release then needs the usual approval. Another identity may take the owner lease over.
 - The unit of a reservation: sessions, concurrent requests or tokens per second, and whether a booking can trigger new Allocations. Lean: concurrent sessions on a deployment for a window; future capacity is a ModelDeployment with a start time.
 - How confirm binds to a plan: a hash of the plan, or the resource versions it read. Lean: the plan carries the resource versions; confirm sends the plan's ID back.
@@ -123,7 +123,7 @@ TBD. Operation and audit records outlive the components that wrote them, so thei
 
 ### Security
 
-- Agent credentials live in files readable only by that agent, or in the control plane's secret store; never on command lines or in logs.
+- Agent credentials live in files readable only by that agent's Unix user, or in the control plane's secret store; never on command lines or in logs. Agents that share a Unix user are mutually trusted; separate credentials give them attribution only.
 - Approvals and the audit log are writable only by the server, never directly by agents.
 - Purposes are free text that others read. They must not hold credentials, prompts or private data.
 - Admin operations on the front (adding and removing models) need keys (HBEP-5); this HBEP's approvals add a second gate for the irreversible ones.

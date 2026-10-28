@@ -22,7 +22,7 @@ Problems a front must not repeat:
 ### Goals
 
 - A client written for LLMLab works against the front with no change beyond its base URL (and its key, if Open question 8 requires one).
-- Every response, streamed or not, success or error, names what produced it: for our instances, the deployment and instance; for a managed provider, what that provider exposes.
+- Every response, streamed or not, success or error, names what produced it: for our instances, the deployment and instance; for a managed provider, what that provider exposes; for an error the front raises before it chooses an Instance, the front itself, with no deployment or Instance (HBEP-9).
 - A conversation stays where its cache is warm, and moves only when load or a lease end requires it.
 - No hop between client and engine imposes a total deadline below the client's.
 - No request starts on an instance after its drain begins, so a lease end the front could see coming cuts nothing.
@@ -41,7 +41,7 @@ Problems a front must not repeat:
 ### User stories
 
 - A researcher's agent calls LLMLab's `example-27b`. They change the base URL to the front. Requests go to LLMLab while their own deployment queues, then spread over both once it serves.
-- A researcher who needs one fixed configuration sends `example-27b@helios/<deployment-id>`. Through a handover, every response still names that deployment ID; only the instance changes.
+- A researcher who needs one fixed configuration sends `example-27b@helios/<deployment-id>`. Through a handover within Helios, every response still names that deployment ID; only the Instance changes.
 - An agent adds a deployment as a routing target with an admin key. A client key cannot.
 - A reply streams for over an hour, or spends many minutes in prefill before its first byte. It completes.
 - A user who sent plain `example-27b` reads the response headers to learn whether LLMLab or their own instance answered.
@@ -83,7 +83,7 @@ Keys are required on the front, at least for admin operations such as adding and
 ### Open questions
 
 1. **Conversation key.** Which session headers the front honours, and which part of the opening it hashes: the system prompt plus first user message, or a fixed token prefix. Decided by measuring prefix-cache hit rates on a synthetic multi-turn workload.
-2. **The inner router.** Does it run per instance, so the front also picks the instance, or per deployment, pooling the workers of all its instances? Is it vllm-router, our own, or a component from the evaluated projects (Gateway API Inference Extension, llm-d, the vLLM production stack)? Candidate: the front passes its conversation key downstream as a session header, so a hashing router gets one even when the client sends none. Decided by that evaluation.
+2. **The inner router.** Each Instance has its own router, and pooling workers across Instances is not part of this design (HBEP-3, open question 11). Is that router vllm-router, our own, or a component from the evaluated projects (Gateway API Inference Extension, llm-d, the vLLM production stack)? Candidate: the front passes its conversation key downstream as a session header, so a hashing router gets one even when the client sends none. Decided by that evaluation.
 3. **Load measure and bound.** In-flight requests, sessions, or KV use; KV percentage does not compare across engines and attention backends. And the bound factor. Measurement.
 4. **Choice under `model`.** Weight by capacity, prefer our own, or spill to LLMLab only at our caps. Whether managed providers are in `model` by default, and whether a conversation may move between providers. Owner decision.
 5. **Retries.** Candidate: retry only before the first byte reaches the client, to a different instance, within a per-deployment budget. A request during which two instances have died is never sent again. Spike with fault injection.
@@ -103,15 +103,17 @@ Keys are required on the front, at least for admin operations such as adding and
 - `model@provider` matches those on that provider;
 - `model@provider/<deployment-id>` matches the instances of that deployment only.
 
-A name with no ready instance returns the inactive-model error. It never widens to a broader level.
+A name with no ready instance returns the inactive-model error. It never widens to a broader level. The error's attribution names the front as the emitting component, with the deployment and Instance fields absent (HBEP-9).
 
-**Two-level affinity.** The front picks a deployment by a conversation key: a client session header, or a hash of the conversation's opening. It uses consistent hashing with bounded loads: a key maps to a point on a ring of eligible targets, and a target above its bound passes the key to the next one on the ring. Inside the deployment, the router picks a worker; how it picks is Open questions 2 and 3.
+**Two-level affinity.** The front picks the deployment and the Instance by a conversation key: a client session header, or a hash of the conversation's opening. It uses consistent hashing with bounded loads: a key maps to a point on a ring of eligible targets, each target one Instance, and a target above its bound passes the key to the next one on the ring. So the front always knows which Instance answered. Inside the Instance, its own router picks a worker (HBEP-3); how it picks is Open questions 2 and 3.
 
-**Draining.** The front reads each instance's lease end from the control plane. At the lease end minus the drain window, it sends the instance no new requests, from new conversations or old ones. Keys move to the next target on the ring, and in-flight requests finish.
+**Draining.** Drain rule (the same text in HBEP-3, HBEP-5 and HBEP-7): The framework cannot move a lease end, so an Instance starts draining at the latest at its hard end minus the drain window, whether or not its replacement is ready. Make-before-break is the goal: the controller plans the replacement to be ready before that drain start, and the old Instance never drains before its replacement is ready unless that deadline forces it. If the replacement is late, the old Instance still drains on time, capacity drops, and an event is emitted (HBEP-8).
+
+The front enforces the deadline itself. It reads each Instance's lease end from the control plane, and from the lease end minus the drain window it sends the Instance no new requests, from new conversations or old ones, even if the controller has not marked it `draining`. A drain before that deadline, once the replacement is ready, is the controller's decision (HBEP-7). Keys move to the next target on the ring, and in-flight requests finish.
 
 **Time-outs.** No hop sets a total deadline below the client's. The front's maximum request duration is a published setting, at or above the longest deadline a supported client sets. Inner hops have none, or a longer one. Every cut is logged with the hop that made it.
 
-**Attribution and keys.** Every response names its deployment and instance (fields per HBEP-9). Admin operations need a key. Retries, caps and header names: TBD (Open questions 5–7).
+**Attribution and keys.** Every response from an Instance names its deployment and Instance. An error the front raises before it chooses an Instance names the front, with no deployment or Instance (fields per HBEP-9). Admin operations need a key. Retries, caps and header names: TBD (Open questions 5–7).
 
 ### Test plan
 
@@ -119,8 +121,9 @@ A name with no ready instance returns the inactive-model error. It never widens 
 - Unknown request fields reach the engine unchanged. Prompt token counts match a direct call to the same instance, proving no injected text.
 - A stream outlives every known default deadline. A reply sends no byte for longer than LLMLab's cut. Both complete.
 - Affinity under a skewed key distribution: no target exceeds its bound. Prefix-cache hit rate is compared with round-robin.
-- An instance with a near lease end receives no request after its drain starts, and no request is cut at the end.
-- Attribution headers appear on successes, errors, streams and LLMLab-served replies.
+- An Instance with a near lease end and no ready replacement stops receiving requests at its lease end minus the drain window, although the controller has not marked it `draining`. No request is cut at the end, and an event reports the lost capacity.
+- An Instance that the controller marks `draining` earlier, once its replacement is ready, receives no new request after that.
+- Attribution headers appear on successes, errors, streams and LLMLab-served replies. An unknown model, a failed authentication and a pinned name with no ready Instance each return an error naming the front, with no deployment or Instance.
 - An admin call without a key is refused.
 - Fault injection: kill an instance mid-stream; saturate one instance; flap one until the controller marks it ready again.
 
