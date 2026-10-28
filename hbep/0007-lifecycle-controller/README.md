@@ -158,10 +158,22 @@ Each question below has a proposed answer taken from operating LLM serving on Sl
     - **Proposed:** no automatic spill to a provider that is not attached to the model name. Within the attached providers the front balances as usual, capacity drops, and an event fires. An agent decides whether to attach more.
     - **Why:** a gateway deployment and a self-hosted one of the same checkpoint behaved as different deployments, so mixing them silently changes results.
     - **Still open:** none.
-11. **Submission protocol.**
-    - **Proposed:** one acting controller per provider, through a Kubernetes `Lease` (HBEP-11). Before any resubmission it lists submissions by tag. A duplicate found later is cancelled while pending, with an event.
-    - **Why:** collisions came when several agents allocated names, ports or copies in parallel. A single submitter per cluster kept the queue consistent.
-    - **Still open:** the provider's tag mechanism (job name or comment) per platform.
+11. **Submission protocol and concurrency.**
+    - **Proposed:** one acting controller per provider, elected through a Kubernetes `Lease` (HBEP-11). That makes it the single writer for its provider's submissions, but it is never a sequential bottleneck. It follows Kubernetes controller practice:
+      - **A work queue of keyed items** (one key per ModelDeployment or Allocation), processed by several workers at once. The same key is never processed by two workers at the same time; different keys run in parallel.
+      - **Every reconcile is idempotent and level-triggered:** it re-reads the current state, so a repeated or reordered item does no harm.
+      - **Failures requeue the item with rate-limited exponential backoff,** without blocking the other items.
+      - **Writes to the control plane use optimistic concurrency** (resource versions), so parallel workers and other controllers never overwrite each other.
+      - **Providers are independent shards.** Each provider's controller runs on its own, so one slow or unreachable cluster never delays another.
+      - **The parallelism toward each provider is bounded by its platform profile:** concurrent submissions, logins and API calls. All of them share one multiplexed connection.
+    - **Proposed:** before any resubmission, the controller lists submissions by tag. A duplicate found later is cancelled while still pending, with an event.
+    - **Why:**
+      - collisions came when several agents allocated names, ports or copies in parallel, and a single submitter per cluster kept the queue consistent;
+      - too many parallel logins tripped the clusters' and a VM's connection limits, so the bound belongs to the provider;
+      - hand-run sequential operations were slow; work on different deployments never needed to wait for each other.
+    - **Still open:**
+      - the provider's tag mechanism (job name or comment) per platform;
+      - the worker count and the bounds per platform, from measurement.
 12. **Over-allocation and qualification.**
     - **Proposed:** qualify every Instance, also when k is 0. The checks:
       - health, engine version, model names and maximum length;
