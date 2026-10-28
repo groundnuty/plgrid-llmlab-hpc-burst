@@ -1,0 +1,17 @@
+# N is the tracking issue number, unpadded (the folder name pads it to four digits).
+hbep: 10
+title: Agent primitives
+# provisional | implementable | implemented | deferred | rejected | withdrawn | replaced
+status: provisional
+# none | alpha | beta | stable: the maturity reached (an HBEP without stages stays none)
+stage: none
+authors:
+  - www-2027-code-agent[bot]
+approvers:
+  - groundnuty
+tracking-issue: https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/10
+created: 2026-10-28
+last-updated: 2026-10-28
+replaces: []
+superseded-by: []
+see-also: [3, 5, 7, 8, 11]
