@@ -84,13 +84,19 @@ What counts as approval:
 - **An approving GitHub review by an approver, on the PR's current head commit.**
   - An approval from any other account does not count, including another agent's bot.
   - Any push after the approval needs a new approval.
+- **A direct approval recorded by the author.**
+  - The approver may approve in a direct session with the author, such as a chat.
+  - Before merging, the author records it as a PR comment. The comment quotes the approver's words and gives the time and the approved head commit.
+  - It counts like an approving review on that commit, and any push after it needs a new approval.
+  - Only an author who received the approval directly may record it. An approval relayed through another agent does not count.
 - **A PR opened by the approver** cannot be approved by them, since GitHub forbids approving your own PR. The approver's own merge of it is the decision. Agents never merge a PR the approver opened.
 - **Changing `approvers`**, `CODEOWNERS` or this HBEP needs approval like any status change.
 
 Enforcement:
 - `.github/CODEOWNERS` assigns `hbep/` and itself to the approver.
-- Branch protection on `main` should require a pull request, require review from code owners, and dismiss stale approvals when new commits are pushed. The repository owner turns this on.
-- Until it is on, the author checks before merging, with `gh pr view <N> --json reviews,headRefOid`, that an approver's APPROVED review names the current head commit.
+- Branch protection on `main` should require a pull request. Requiring code-owner review would block merges on a recorded direct approval, so it stays off unless the approver chooses to give every approval on GitHub.
+- The author checks before merging that the current head commit has an approver's APPROVED review, or a recorded direct approval naming that commit (`gh pr view <N> --json reviews,headRefOid,comments`).
+- The merge must name the approved commit (`gh pr merge --match-head-commit <sha>`), so a push in between makes the merge fail.
 
 The author merges a PR once the approval it needs is in place.
 
@@ -110,7 +116,7 @@ The author merges a PR once the approval it needs is in place.
 - **A deviation found while building:**
   - If it is an erratum, it may go in the same PR as the code.
   - If it is an amendment, it is merged first, with approval. The code that depends on it is built after.
-- **An agent may author and review HBEPs.** It never approves, never merges a PR that lacks the approval it needs, and never merges a PR the approver opened.
+- **An agent may author and review HBEPs.** It never approves, never merges a PR that lacks the approval it needs, and never merges a PR the approver opened. It records a direct approval only when it received it itself.
 
 ### Changes after an HBEP is implementable
 
@@ -155,6 +161,9 @@ This repository is public.
   - graduation;
   - drawbacks and alternatives;
   - history.
+- **What the template adds to KEPs:** a "Prior art and reuse" section.
+  - KEPs leave prior art to Motivation and Alternatives.
+  - This framework is composed from community software, so each HBEP states what it reuses (with licence), which designs and papers it borrows, and which field lessons it answers.
 - **What the template changes:** it replaces KEP's production-readiness questionnaire with seven operational-readiness questions written for this framework:
   - health and end-to-end signals;
   - restart behaviour;
@@ -234,4 +243,8 @@ N/A: a process HBEP has no stages. It is `implemented` once three HBEPs after it
 
 ## Amendments
 
-None.
+- **2026-10-29: direct approval.**
+  - The approver directed that a chat approval counts.
+  - The author records it on the PR and merges with the approved commit named.
+  - Branch protection requires a PR but not code-owner review.
+- **2026-10-29: prior art and reuse.** The template gains a "Prior art and reuse" section, and HBEP-15 is to define the catalogue of field lessons and the dependency policy.
