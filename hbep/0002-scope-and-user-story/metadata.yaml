@@ -1,0 +1,14 @@
+hbep: 2
+title: Scope and user story
+status: provisional
+stage: none
+authors:
+  - www-2027-code-agent[bot]
+approvers:
+  - groundnuty
+tracking-issue: https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/2
+created: 2026-10-28
+last-updated: 2026-10-28
+replaces: []
+superseded-by: []
+see-also: [3, 4, 5, 6, 7, 8, 9, 10, 11]

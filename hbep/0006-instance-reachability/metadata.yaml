@@ -1,0 +1,14 @@
+hbep: 6
+title: Instance reachability
+status: provisional
+stage: none
+authors:
+  - www-2027-code-agent[bot]
+approvers:
+  - groundnuty
+tracking-issue: https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/6
+created: 2026-10-28
+last-updated: 2026-10-28
+replaces: []
+superseded-by: []
+see-also: [3, 4, 5, 7, 9, 11]
