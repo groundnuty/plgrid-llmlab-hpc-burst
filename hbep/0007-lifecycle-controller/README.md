@@ -92,32 +92,120 @@ Problems:
 
 ### Open questions
 
-1. **Hedge winner milestone (a proposed change to HBEP-3's definition).** HBEP-3 provisionally keeps the first allocation to start and cancels the losers then. Proposed change: cancel the losers only when the winner serves. The trade-off is queue age kept against time to serve. Cancelling at start loses the losers' queue age when the winner then fails, for example at environment build or verification. Cancelling at serving keeps that queue age, but the losers hold queue slots, and may start and spend grant hours, for the whole time the winner takes to serve. Owner decision, informed by measured start-up failure rates; an accepted change amends HBEP-3.
-2. **Lead time and hedge width.** How early to submit before a needed start, and on how many providers. The inputs are the profile's typical waits, observed recent waits, and start estimates as planning input only. Measurement per provider.
-3. **Follow-on form.** Independent hedged submissions, provider dependencies, or same-node pins? Spike per provider.
-4. **Overlap policy.** Once the replacement serves, keep the predecessor until its drain starts (more capacity, more grant hours), or release it early? Owner decision, kept as a profile parameter.
-5. **Warm-up.** Which shapes (context lengths, output lengths, tool calls, concurrency), and when is warm-up done (per-shape latency stops falling)? Measurement per engine version.
-6. **Health and restarts.** Signals: the engine's health endpoint, an end-to-end request through the front's path, and token progress of in-flight requests. Thresholds, and a restart ladder: worker, then instance inside the allocation, then a new allocation. A grace period before a forced kill. Spike with fault injection.
-7. **Repurposing fit.** Repurposing is decided (Design details). Which moves fit an Allocation: hardware fit, checkpoint staged, engine compatible? Whether an Allocation hosts several Instances at once is HBEP-3's open question 8. Decided with HBEP-3.
-8. **Approvals.** Which controller actions need an approval (HBEP-10)? HBEP-10 proposes none for actions the spec already agreed to, such as a release at the deployment's end time. Candidate outside the spec: cancelling a running allocation early. Whether a repurpose under an agreed policy needs one is HBEP-10's open question.
-9. **Spec change while serving.** A new spec has a new deployment ID. Is moving to it a make-before-break rollout like a handover? With HBEP-3.
-10. **Degraded mode.** No replacement is ready by the predecessor's drain start. Does `model` spill automatically to an LLMLab provider attached to the name (HBEP-5), or does an agent decide? Owner decision.
-11. **Submission protocol.** Tags do not enforce uniqueness, so how does the controller avoid and repair duplicates? Candidates: one acting controller per provider, through a Kubernetes `Lease` (HBEP-11); a list by tag before any resubmission; cancelling a duplicate found later, with an event. Spike per provider.
-12. **Over-allocation and qualification.** How large k is per provider, from the spread of performance the profile records; the benchmark's shapes and length; how "best" is ranked; and whether every Instance is qualified when k is 0, since the gate also catches broken nodes. Measurement per platform.
-13. **Default retention policy.** Candidate: release when idle, so that a deployment's end leaves nothing running unless a policy keeps it. How long "idle" lasts is a policy parameter. Owner decision.
-14. **Placing Instances on warm capacity.** May the controller place a replacement or an added Instance on a warm Allocation by itself, or does only an operator's repurpose move one? With HBEP-10.
+Each question below has a proposed answer taken from operating LLM serving on Slurm systems for a deadline-driven experiment. "Still open" names what that experience did not settle. The owner confirms or changes each proposal.
+
+1. **Hedge winner milestone (a proposed change to HBEP-3's definition).**
+   - **Proposed:** the winner is the first Allocation whose Instance serves, not the first to start. Pending losers are cancelled only then. A loser that starts before the winner serves becomes an over-allocation candidate (question 12), not waste.
+   - **Why:** start-up failures were common: broken environment builds, out-of-memory at start, collective-communication failures in new steps, scripts that killed their own stack seconds after start, engines dying minutes into use. A cancelled job's queue age is lost, and a new submission can wait days. Holding a pending loser costs no grant hours.
+   - **Still open:** the measured start-up failure rate per platform. An accepted answer amends HBEP-3.
+2. **Lead time and hedge width.**
+   - **Proposed:** submit as early as possible: the replacement when its predecessor starts, and on every provider the deployment allows whenever the observed waits on the preferred one exceed the time left. Submissions are eligible at once, so they gain queue age.
+   - **Proposed:** use observed waits, never start estimates, for planning. Request time limits that backfill (shorter than the partition maximum) when the profile shows long ones wait longer.
+   - **Why:** start estimates swung by hours and went "unknown" on every scheduler pass. Jobs with limits up to about 2.5 days started within a minute while 3-day ones waited hours. Age counts only from eligibility, so a dependency-held job lost priority to everyone else.
+   - **Still open:** the backfill limit per platform, from the profile.
+3. **Follow-on form.**
+   - **Proposed:** independent submissions without dependencies or node pins, by default. Same-node pins only on platforms whose profile shows they start reliably.
+   - **Why:** jobs pinned to their predecessor's node waited for days on nodes other users had planned. Chained dependencies on jobs that could sit in the queue blocked the rest. "After N minutes" dependencies counted from the parent's start, not its end. Node and URL changes no longer matter, because Instances dial home and clients use names.
+   - **Still open:** none beyond per-platform profile values.
+4. **Overlap policy.**
+   - **Proposed:** keep the predecessor until its drain starts. An early release happens only under a retention policy that asks for it.
+   - **Why:** a design that cancelled the predecessor as soon as its follow-on answered gave back about 6 h of every 48 h allocation. Overlap capacity was used, not wasted.
+   - **Still open:** none.
+5. **Warm-up.**
+   - **Proposed:** warm up with real-shape requests: the deployment's short, typical and longest context lengths; its typical and longest outputs; tool calls; and concurrency up to the target sessions. Warm-up is done when a repeat of each shape is not slower than the one before. It includes a corruption check that compares repeated identical requests.
+   - **Why:**
+     - a fresh engine compiled kernels per new shape, stalling everything for 10–15 s;
+     - one first request took about 600 s against 22 s a minute later;
+     - an unwarmed replacement tripped a load guard on its first pass;
+     - a newly joined worker stalled for 23 s;
+     - long contexts were cold after short warm-ups.
+   - **Still open:** shape lists per engine version.
+6. **Health and restarts.**
+   - **Proposed:** a malfunction gets a prompt restart; plain load does not. Malfunction signals:
+     - the health endpoint fails;
+     - only errors come back;
+     - in-flight requests make no token progress past a threshold;
+     - one worker sits at a full KV cache with requests waiting while others idle.
+   - **Proposed restart ladder:** the Instance's router (seconds; it does not touch the workers) → a worker → the whole Instance inside its Allocation → a new Allocation. A forced kill follows a few seconds after a polite stop: one router held its connections for minutes after a stop signal.
+   - **Proposed:** after a restart, the identity check runs again, and an event says that in-flight requests were cut.
+   - **Why:** waiting out failing servers cost hours, and restarts cleared them in seconds to minutes. Router-only restarts took about 20 s; full stack restarts took 2–4 min, up to 17.
+   - **Still open:** the thresholds, from fault injection.
+7. **Repurposing fit.**
+   - **Proposed fit check:**
+     - GPU count and memory;
+     - CPU architecture (engine builds and images differ for arm64 and x86);
+     - the checkpoint staged on shared storage;
+     - the engine version available on the platform.
+   - **Proposed:** repurpose only an Allocation whose current deployment has no remaining work, reservation or fallback role, and only when the time saved exceeds the cost (stop, start, verify, warm up). A pending Allocation that starts directly as the new model costs nothing extra.
+   - **Why:** each conversion took about 3 min to serve plus verification. Ad-hoc conversions cost hours of checks and, once, silently retired a deployment a later run needed.
+   - **Still open:** several Instances per Allocation stays with HBEP-3's open question 8.
+8. **Approvals.**
+   - **Proposed: needs approval:**
+     - releasing or cancelling a started Allocation before its hard end, outside the spec;
+     - any release while a retention policy says keep.
+   - **Proposed: needs none:**
+     - cancelling pending hedge losers;
+     - releasing at the deployment's end time;
+     - restarting a failing Instance;
+     - handovers.
+   - **Why:** irreversible releases needed the owner's own word, and one cancellation relayed second-hand by mistake was caught only because the owner was asked directly. Resource steps that follow agreed rules (restarts, joins, step-downs) ran without asking.
+   - **Still open:** whether a repurpose under an agreed policy needs one (HBEP-10).
+9. **Spec change while serving.**
+   - **Proposed:** the new deployment ID rolls out make-before-break, like a handover, at the next natural handover by default. It rolls out at once only when it fixes a malfunction.
+   - **Why:** a setting fix was applied at each stack's next restart and never as a restart of its own, so live work was not cut. Edits to files a live deployment's identity depends on held live work, so changes went into new files.
+   - **Still open:** none.
+10. **Degraded mode.**
+    - **Proposed:** no automatic spill to a provider that is not attached to the model name. Within the attached providers the front balances as usual, capacity drops, and an event fires. An agent decides whether to attach more.
+    - **Why:** a gateway deployment and a self-hosted one of the same checkpoint behaved as different deployments, so mixing them silently changes results.
+    - **Still open:** none.
+11. **Submission protocol and concurrency.**
+    - **Proposed:** one acting controller per provider, elected through a Kubernetes `Lease` (HBEP-11). That makes it the single writer for its provider's submissions, but it is never a sequential bottleneck. It follows Kubernetes controller practice:
+      - **A work queue of keyed items** (one key per ModelDeployment or Allocation), processed by several workers at once. The same key is never processed by two workers at the same time; different keys run in parallel.
+      - **Every reconcile is idempotent and level-triggered:** it re-reads the current state, so a repeated or reordered item does no harm.
+      - **Failures requeue the item with rate-limited exponential backoff,** without blocking the other items.
+      - **Writes to the control plane use optimistic concurrency** (resource versions), so parallel workers and other controllers never overwrite each other.
+      - **Providers are independent shards.** Each provider's controller runs on its own, so one slow or unreachable cluster never delays another.
+      - **The parallelism toward each provider is bounded by its platform profile:** concurrent submissions, logins and API calls. All of them share one multiplexed connection.
+    - **Proposed:** before any resubmission, the controller lists submissions by tag. A duplicate found later is cancelled while still pending, with an event.
+    - **Why:**
+      - collisions came when several agents allocated names, ports or copies in parallel, and a single submitter per cluster kept the queue consistent;
+      - too many parallel logins tripped the clusters' and a VM's connection limits, so the bound belongs to the provider;
+      - hand-run sequential operations were slow; work on different deployments never needed to wait for each other.
+    - **Still open:**
+      - the provider's tag mechanism (job name or comment) per platform;
+      - the worker count and the bounds per platform, from measurement.
+12. **Over-allocation and qualification.**
+    - **Proposed:** qualify every Instance, also when k is 0. The checks:
+      - health, engine version, model names and maximum length;
+      - a chat request with its engine fingerprint;
+      - a tool-call smoke test;
+      - KV capacity from start-up;
+      - a corruption check;
+      - a short behaviour check on the workload's own long-context shape (malformed or looping tool calls);
+      - throughput at the target sessions against absolute gates from the platform profile, such as ms per token and time to first token.
+    - **Proposed:** start with k = 1 per provider and adjust it from the measured qualification failure rate. Rank by throughput at the target sessions.
+    - **Why:** the same checkpoint behaved differently per node and per deployment. One deployment failed a malfunction check that its twin passed, and malfunctions showed mostly on long loops. Measured KV per session was twice the estimate.
+    - **Still open:** benchmark length per platform.
+13. **Default retention policy.**
+    - **Proposed:** keep until the deployment's end time, or until the grant's end or the deadline when one is set. Release-when-idle is opt-in, and a release needs certainty that no reader, reservation, fallback or re-run needs the Allocation.
+    - **Why:** a released slot went to another user within seconds, a new submission started with no queue age, and Allocations kept through the deadline were repurposed as plans changed. Releases before new capacity was running prevented that reuse.
+    - **Still open:** the owner's confirmation. This reverses the earlier candidate, "release when idle".
+14. **Placing Instances on warm capacity.**
+    - **Proposed:** the controller may place a replacement or an added Instance of the same deployment on a warm Allocation by itself. Moving an Allocation to a different model is a repurpose, decided by an operator under question 7's cost rule.
+    - **Why:** idle capacity was given work at once. Model changes needed a stated gain.
+    - **Still open:** none.
 
 ## Design details
 
 **Reconciliation** (decided). The controller is level-triggered. It compares desired state (ModelDeployment specs) with observed state (Allocations from the providers, Instances from registrations and health), then acts. Its state lives in custom resources (HBEP-11). After a restart it re-lists both sides and resumes.
 
-**Provisioning** (decided core). To get an instance, the controller submits Allocations early, on one or more providers. It keeps the first to start (provisional, Open question 1) and cancels the pending losers. Timing and width: TBD (Open question 2).
+**Provisioning** (decided core). To get an instance, the controller submits Allocations early, on one or more providers. It keeps the first to start (provisional; Open question 1 proposes the first to serve) and cancels the pending losers. Timing and width: Open question 2 proposes submitting as early as possible, eligible at once, from observed waits.
 
 **Over-allocation and qualification** (decided core). For N instances the controller may obtain N+k Allocations. It qualifies each Instance with an identity check (HBEP-9) plus a short benchmark against the expected performance in the platform profile (HBEP-4), and keeps the best N that pass. An Allocation whose Instance fails is released. The rest follow their retention policy: released, or kept as warm capacity. The gate catches broken nodes, not only slow ones. Hedging acts on pending Allocations, over-allocation on started ones. k, the benchmark and the ranking: TBD (Open question 12).
 
 **Admission** (decided: both before traffic). A started instance is verified and warmed with real-shape requests before it is marked ready. Under over-allocation, qualification comes first, and only kept Instances are warmed. The front routes only to ready instances. Checks and shapes: TBD (Open question 5).
 
-**Handover** (decided core). For each serving instance, the controller plans its replacement backwards from the lease's hard end. The submission time is the predecessor's latest drain start, minus verification and warm-up, minus start-up, minus the queue lead time. The replacement is a new instance of the same deployment ID. The predecessor is released only after the replacement serves. Overlap: TBD (Open question 4).
+**Handover** (decided core). For each serving instance, the controller plans its replacement backwards from the lease's hard end. The submission time is the earlier of two times: the predecessor's start (proposed default, Open question 2), and the predecessor's latest drain start minus verification, warm-up, start-up and the observed queue wait. The replacement is a new instance of the same deployment ID. The predecessor is released only after the replacement serves. Overlap: TBD (Open question 4).
 
 Drain rule (the same text in HBEP-3, HBEP-5 and HBEP-7): The framework cannot move a lease end, so an Instance starts draining at the latest at its hard end minus the drain window, whether or not its replacement is ready. Make-before-break is the goal: the controller plans the replacement to be ready before that drain start, and the old Instance never drains before its replacement is ready unless that deadline forces it. If the replacement is late, the old Instance still drains on time, capacity drops, and an event is emitted (HBEP-8).
 
@@ -137,7 +225,7 @@ A late replacement leaves the deployment degraded (Open question 10).
 - keep it, as warm capacity, until a date, a grant's end or a deadline;
 - or release it when idle.
 
-A kept Allocation still ends at its hard end. The default policy is Open question 13; placing Instances on warm capacity is Open question 14.
+A kept Allocation still ends at its hard end. The proposed default is keep until the deployment's end, the grant's end or the deadline (Open question 13). Placing Instances on warm capacity: Open question 14.
 
 **Repurposing** (decided core). An operator, often an agent that needs throughput across several models, may move an Allocation to another ModelDeployment when a model's work finishes. The controller then:
 1. drains the old Instance;
@@ -208,6 +296,7 @@ TBD. Candidate for alpha: the simulated test plan passes, and one real handover 
 
 - 2026-10-28: proposed (provisional), tracking issue #7.
 - 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
+- 2026-10-28: open questions answered with proposals from past operation, for the owner to confirm.
 
 ## Amendments
 

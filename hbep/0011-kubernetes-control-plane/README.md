@@ -56,6 +56,12 @@ What the framework takes from Kubernetes:
   - Candidate, depending on HBEP-3's open question 7: refuse an edit to an identity field of an existing ModelDeployment, if a changed spec must be a new ModelDeployment. If it is a rollout inside one instead, the edit is allowed and rolls out to a new deployment ID.
   - Either way, the identity record behind an existing deployment ID is never edited (HBEP-9).
 - Also: server-side dry run, optimistic concurrency on resource versions, a status subresource with conditions, API versions with conversion, and client libraries.
+- **Controller concurrency follows Kubernetes practice:**
+  - keyed work queues with several workers per controller;
+  - one key never processed by two workers at once;
+  - idempotent, level-triggered reconciles;
+  - rate-limited backoff on failure;
+  - providers as independent shards (HBEP-7, open question 11).
 
 What it does not solve:
 - **Provider facts.** Start estimates, hard ends, queue state and billing come from provider plugins (HBEP-4). Kubernetes has no notion of a lease with an unknown start and a hard end.
