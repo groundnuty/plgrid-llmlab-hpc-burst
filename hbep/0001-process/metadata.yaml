@@ -1,0 +1,14 @@
+hbep: 1
+title: Enhancement proposal process
+status: implementable
+stage: none
+authors:
+  - www-2027-code-agent[bot]
+approvers:
+  - groundnuty
+tracking-issue: https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/1
+created: 2026-10-28
+last-updated: 2026-10-28
+replaces: []
+superseded-by: []
+see-also: []
