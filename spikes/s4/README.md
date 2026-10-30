@@ -39,10 +39,11 @@ Both hold in every scenario and race the reviews raised, including:
 - two reconcilers racing a same-second failure and retry;
 - deletion while a submission is in flight.
 
-**Not proven.** Three facts need a real cluster:
-- whether a plain user can `scontrol release` their own `--hold` job on Helios and Athena, where a Lua `job_submit` plugin runs;
-- the real JSON shapes;
-- the real `sbatch` latency over ssh.
+**Checked on a real cluster since this spike ran:**
+- **Hold and release.** A plain user's `sbatch --hold` is honoured (`PENDING|JobHeldUser`), and the same user's `scontrol release` succeeds, on Helios `plgrid`, Helios `plgrid-gpu-gh200` and Athena `plgrid-gpu-a100`. The Lua `job_submit` plugin did not drop the hold. This was one trial per partition, recorded as `slurm.hold_release` in the draft profiles on the S1 branch (commit 35babef). Sano is not measured.
+- **Real JSON shapes.** The squeue/sacct JSON shapes and the squeue-to-sacct gap (at most about 2 s) were captured on Helios and Athena, in `spikes/s7/slurm-json-real.md`.
+
+**Not proven:** the real `sbatch` latency over ssh.
 
 The protocol ([state machine](#the-submission-protocol)):
 1. **The external name is a deterministic job tag**, set by an Initializer before any `sbatch`: `hb-<name>-<12 hex of sha256(namespace/name/uid)>`, passed as `--job-name`. Observe, Create, Delete and status all use the persisted name. Submission is refused when the name is empty or not the canonical tag.
