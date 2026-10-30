@@ -51,7 +51,7 @@ Problems:
 ### User stories
 
 - A researcher declares `example-27b` with two instances on Helios or Athena until a given date. Helios' GH200 partition and Athena's A100 partition are two accelerator classes, so the deployment has two current IDs, one per class (HBEP-3). The controller submits early to both and keeps the first Allocation whose Instance serves. That Instance takes the current ID of its Allocation's class. The controller cancels the pending loser, and the front routes to the Instance under `example-27b`. Before that lease's drain starts, a replacement already serves. Hedging across providers at once comes after alpha.
-- In alpha, the same researcher allows only a Helios provider and sets a lease limit of four hours, to try a handover in an afternoon. The controller submits one Allocation. When it starts, it submits the replacement at once. The replacement's Instance is verified and warmed, and serves beside the first. At the first lease's drain start, the first Instance drains, and no request is cut.
+- In alpha, the same researcher allows only a Helios provider and sets a lease limit of four hours, to try a handover in an afternoon. The controller submits one Allocation. It submits the replacement at the time open question 2 plans from the queue waits observed on that Provider, or when the first Allocation starts while none has been observed. The replacement's Instance is verified and warmed, and serves beside the first. At the first lease's drain start, the first Instance drains, and no request is cut.
 - A researcher needs four instances of `example-27b`. The controller obtains six Allocations and qualifies each Instance with an identity check and a short benchmark. One node fails outright, and its Allocation is released. The controller keeps the best four; the one that passed but ranked fifth is kept as warm capacity, as its retention policy says. Over-allocation with k above 0 comes after alpha.
 - An instance stalls with requests in flight. The controller records the restart as an event, then restarts the instance within minutes.
 - An agent's work on `example-8b` ends while its Allocations have hours left, and `example-27b` needs the same GPU type. The agent repurposes the Allocations. The controller drains each `example-8b` Instance, starts an `example-27b` Instance in the same Allocation, then verifies and warms it, and the front routes to it. No new job is queued. Repurposing across models comes after alpha.
@@ -97,7 +97,7 @@ Problems:
 - **A restart runs a different spec.** An edited script reached an older job's restart. Mitigation: each Instance's launch (command line, environment, image digest and checkpoint) is fixed in its immutable spec when it is created, and every restart reuses it (Design details).
 - **Edits to pending jobs break them.** Mitigation: never edit a submitted allocation; cancel and resubmit.
 - **Our own jobs compete with each other.** Hedges, over-allocations and follow-ons of different deployments compete for the same nodes and per-user limits. Mitigation: plan per provider, with its per-user limits from the profile.
-- **The controller dies quietly.** Instances keep serving until their leases end, and handovers are missed. Mitigation: for each deployment, an event when a replacement's latest submission time passes with no replacement started (Handover).
+- **The controller dies quietly.** Instances keep serving until their leases end, and handovers are missed. Mitigation: for each deployment, the condition `ReplacementLate` and an event when a replacement has not started by its predecessor's drain start minus the class's start-to-ready time (Handover).
 - **A path outage looks like dead Instances.** When the dial-home path or the control-plane host's endpoint is down, every agent stops reporting at once. Mitigation: an agent that stops reporting makes its Instance unreachable, not failed; the front stops routing to it, and the controller restarts nothing on that basis alone (HBEP-6).
 - **Staged files vanish.** Scratch filesystems delete old files (Helios purges files older than 30 days; spike S5, PR #19). Mitigation: the provider checks the agent's binary by digest before every submission (HBEP-4), and the agent re-stages any image or checkpoint file whose rehash fails.
 
@@ -112,9 +112,9 @@ Each question below had a proposed answer taken from operating LLM serving on Sl
 2. **Lead time and hedge width.**
    - **Decided:** plan each replacement from observed queue waits. It is submitted at the predecessor's drain start minus (the p90 of recent observed queue waits on that Provider + start-up + verification + warm-up + a margin), never earlier than the predecessor's own start. On a long queue that is the predecessor's start, as in past operation; on a short queue the replacement overlaps only by the margin. With hedging, further providers are added when the observed waits on the preferred one exceed the time left. Submissions are eligible at once, so they gain queue age. Use observed waits, never start estimates, for planning. Source: owner, 29 Oct 2026 (PR #14), refined by the owner on 30 Oct 2026 to plan from observed waits instead of always submitting at the predecessor's start, which doubled grant hours on short queues.
    - **Why:** start estimates swung by hours and went "unknown" on every scheduler pass. Jobs with limits up to about 2.5 days started within a minute while 3-day ones waited hours. Age counts only from eligibility, so a dependency-held job lost priority to everyone else.
-   - In alpha the replacement is planned this way on the predecessor's Provider. Until a wait has been observed there, it is submitted at the predecessor's start. The margin is a profile value with a default of 30 min.
+   - In alpha the replacement is planned this way on the predecessor's Provider (Handover). The p90 is taken over the last 20 queue waits observed there, which the Provider's status keeps (HBEP-4). With fewer than 20, the largest observed wait is used; with none, the replacement is submitted at the predecessor's start. Start-up, verification and warm-up are the class's last measured start-to-ready time, which the ModelDeployment's status keeps, or 30 min until one is measured. The margin is the profile's `handoverMargin`, 30 min by default. Source: science-agent decision, 30 Oct 2026, for the window and the fallbacks.
    - **Not needed for alpha:** submitting on further providers from observed waits, and time limits chosen to backfill. Alpha asks for the partition's `maxTime`, or the deployment's `leaseLimit` when shorter (HBEP-4, open question 11).
-   - **Open (blocks beta):** the backfill limit per platform, from the profile. Also the p90 window (how many recent waits) per platform.
+   - **Open (blocks beta):** the backfill limit per platform, from the profile, and whether the p90 window should differ per platform.
 3. **Follow-on form.**
    - **Decided:** independent submissions without dependencies or node pins. Source: owner, 29 Oct 2026 (PR #14). Alpha uses neither on any platform.
    - **Why:** jobs pinned to their predecessor's node waited for days on nodes other users had planned. Chained dependencies on jobs that could sit in the queue blocked the rest. "After N minutes" dependencies counted from the parent's start, not its end. Node and URL changes no longer matter, because Instances dial home and clients use names.
@@ -224,7 +224,7 @@ Each question below had a proposed answer taken from operating LLM serving on Sl
 14. **Placing Instances on warm capacity.**
     - **Decided:** the controller may place a replacement or an added Instance of the same deployment on a warm Allocation by itself. Moving an Allocation to a different model is a repurpose, decided by an operator under question 7's cost rule. Source: owner, 29 Oct 2026 (PR #14).
     - **Why:** idle capacity was given work at once. Model changes needed a stated gain.
-    - In alpha the warm Allocation must be in the class the Instance needs, with lease left above twice that class's last measured start-up time plus the drain window.
+    - In alpha the warm Allocation must be in the class the Instance needs, with lease left above twice that class's last measured start-to-ready time (30 min until one is measured) plus the drain window.
 
 ## Design details
 
@@ -236,7 +236,7 @@ Each question below had a proposed answer taken from operating LLM serving on Sl
   - Allocations: it creates and deletes them;
   - Instances: it creates and deletes them, writes their phase and conditions, and writes restart generations as annotations;
   - identity records, and through its verification controller the verification records (HBEP-11);
-  - ModelDeployment status;
+  - ModelDeployment status, including each class's last measured start-to-ready time (Handover);
   - Events.
 - **It never calls a provider.** The Provider's controller acts on each Allocation (HBEP-4; open question 11).
 - **It serves the agent endpoint** for the allocation agents (The allocation agent).
@@ -249,10 +249,12 @@ Each question below had a proposed answer taken from operating LLM serving on Sl
   - `leaseLimit` (duration, optional): the longest time limit of its Allocations, when shorter than the partition's `maxTime`.
   - `workload`: the shapes for warm-up and qualification.
     - `contextTokens.typical`, `outputTokens.typical` and `targetSessions` are required.
-    - `contextTokens.short` defaults to 512 tokens, and `contextTokens.longest` to the serving spec's `max-model-len`.
-    - `outputTokens.longest` defaults to 4,096 tokens.
+    - `contextTokens.short` defaults to 512 tokens, and `outputTokens.longest` to 4,096 tokens.
+    - `contextTokens.longest` defaults to the resolved context limit (the `max-model-len` the engine reports) minus `outputTokens.typical`, the output paired with it, minus the template overhead. It is therefore fixed at verification. The overhead is measured by rendering an empty conversation (one user message with no content, plus the generation prompt) through the engine's chat template. vLLM counts input and output tokens against one limit (`max_total_tokens` in [`vllm/renderers/params.py` at v0.32.0](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/renderers/params.py), accessed 2026-10-30), so a prompt that fills the context leaves no room for the answer.
+    - **Every shape must fit.** The shapes are each context length with the typical output, and the typical context with the longest output (Instance start). A shape that does not fit is an error, never shortened. When the serving spec declares `max-model-len`, the controller checks the declared shapes against it before it provisions, and a shape that does not fit sets `Degraded` with reason `SpecUnsupported`. At verification each rendered request, overhead included, is checked against the context limit the engine reports, and one that does not fit fails verification and stops provisioning in that class, like a settings contradiction.
     - `toolCalls` defaults to whether the serving spec enables automatic tool choice.
-- **From the PlatformProfile** (HBEP-4): per partition, the accelerator class, `maxTime`, `gpusPerNode`, `cpusPerGpu` and `memPerGpu`. For the platform: `drainWindow`, `maxIdle`, and the `health` and `restart` groups.
+- **From the PlatformProfile** (HBEP-4): per partition, the accelerator class, `maxTime`, `gpusPerNode`, `cpusPerGpu` and `memPerGpu`. For the platform: `drainWindow`, `handoverMargin`, `maxIdle`, and the `health` and `restart` groups.
+- **From the Provider's status** (HBEP-4): the last 20 observed queue waits, which plan replacements (Handover).
 - **The Instance's spec** gains `launch` (an amendment to HBEP-11's API). It is the command line and environment rendered from the serving spec, the image reference and digest, the checkpoint repository, revision and identity record, and the GPU count. It is written when the Instance is created, and it is immutable like the rest of the spec. Every start and restart of that Instance runs exactly this.
 
 ### Reconcile loop
@@ -262,22 +264,22 @@ One pass for one ModelDeployment. Every step is idempotent and re-reads what it 
 2. **Current IDs.** For each accelerator class that the allowed partitions offer, compute the class's current ID from the serving spec (HBEP-3), and create its identity record if absent (HBEP-11). A display-form collision refuses the ID (HBEP-3). Status lists the IDs by class. No Allocation is created for a class without a current ID.
 3. **Observe** its Allocations (by the `model-deployment` label), its Instances (by owner), and each agent's latest report.
 4. **Shutdown.** At the end time, on deletion, or at zero desired instances, apply Release's shutdown case and stop here.
-5. **Failed Allocations.** An Allocation whose provider phase is `Failed` (a requeue included), `Lost` or `Refused`, or which has the condition `SubmittedAsOther`, ends its Instance with that reason and is deleted; its finalizer cancels whatever carries its tag (HBEP-4). A `Lost` job is absent from the queue listing, so it is neither pending nor running.
+5. **Failed Allocations.** An Allocation whose provider phase is `Failed` (a requeue included), `Lost` or `Refused`, or which has the condition `SubmittedAsOther`, ends its Instance with that reason and is deleted; its finalizer cancels whatever carries its tag (HBEP-4). A `Lost` job is absent from the queue listing, so it is neither pending nor running. An Allocation that is `Ended` while its Instance is not `ended` ends the Instance with reason `AllocationEndedEarly`, raises a `failing` event with that reason, and is deleted; step 7 then provisions the replacement. An Instance already past its hard end ends as Handover's draining says, without that reason.
 6. **Instances.** Advance each Instance through its phases (Instance start), apply the health rules (Health and restarts) and the drain deadline (Handover).
 7. **Capacity.** A primary Instance is one that is not draining or ended, and that has no predecessor still counted.
    - Fewer primaries than desired: create one Allocation and its Instance, in phase `pending`, per missing primary (Provisioning).
    - More primaries than desired: scale down. Delete pending Allocations first, newest first; then drain the ready primaries with the nearest hard end. A surplus primary's replacement, if any, is deleted with it, never promoted.
-8. **Replacements.** Every primary whose Allocation is `Running` and that has no live replacement gets one at once (Handover).
+8. **Replacements.** Every primary whose Allocation is `Running`, that has no live replacement, and whose replacement's planned submission time has come gets one (Handover).
 9. **Retention.** Apply each empty Allocation's retention policy (Retention), and place Instances on warm Allocations where question 14 allows.
-10. **Status.** Write the ready and desired counts, the current IDs, every ID that still has Instances, the conditions, and the generation reconciled with its time.
-11. **Requeue** the key at the earliest coming deadline (a drain start, a replacement's latest submission time, a retention end), and after 30 s at the latest.
+10. **Status.** Write the ready and desired counts, the current IDs, every ID that still has Instances, each class's last measured start-to-ready time, the conditions, and the generation reconciled with its time.
+11. **Requeue** the key at the earliest coming deadline (a drain start, a replacement's planned submission time or lateness deadline, a registration or start timeout, a retention end), and after 30 s at the latest.
 
 ### Provisioning
 
 - **Where.** A new primary goes to the first allowed Provider, in order, that is `Ready`, is batch, and whose partition's class has a current ID. A replacement goes to its predecessor's Provider first, which keeps the ID, and otherwise to the next one in order.
 - **The Allocation's submission parameters** (HBEP-4, Submission):
   - `partition`: the Provider's one allowed partition;
-  - `gpus`: `tensor-parallel-size` times `pipeline-parallel-size` from the serving spec, each 1 when absent. It must not exceed `gpusPerNode`, since alpha Instances are single-node;
+  - `gpus`: `tensor-parallel-size` times `pipeline-parallel-size` from the serving spec, each 1 when absent. It must not exceed `gpusPerNode`, since alpha Instances are single-node. A `data-parallel-size` above 1 is refused, with `Degraded` reason `SpecUnsupported` and no Allocation, because alpha runs one engine worker per Instance. Beta sizes GPUs as DP × TP × PP;
   - `cpusPerTask` and `memory`: `gpus` times `cpusPerGpu` and `memPerGpu`;
   - `timeLimit`: the partition's `maxTime`, or `leaseLimit` when shorter;
   - `nodes`: 1;
@@ -295,52 +297,57 @@ The process that an Allocation's job runs. It is a static binary, one build per 
 - **Registration.** The agent connects to the control-plane host over HBEP-6's dial-home path. In alpha that is direct on the dial-home port, or through ssh on port 22 with a restricted key (HBEP-11, open question 8).
   - It presents the Allocation's credential, read from its mode-600 file, with its job ID, its node's CPU architecture and its GPUs.
   - The endpoint accepts it only when the credential is the Allocation's and the job ID is the one the provider recorded. That binds the registration to the provider's identity for the job (HBEP-6).
-  - It reads the control-plane host's address and the dial-home mode from `agent.json` in its directory (HBEP-4, Submission).
-  - In ssh mode the agent keeps the forward itself: `ssh -N -L` over port 22, in a reconnect loop, as spike S1's kit does. It uses a dedicated, restricted key that the operator generated on the platform once, so that its private half never travels, and a pinned host key. Both are read by path, mode 600, from `<stagingDir>/dial-home/`. The key's line in `authorized_keys` on the control-plane host allows forwarding to the agent endpoint's and the front's loopback ports only. No ssh forward from a compute node has run yet (HBEP-6).
-- **Desired state, pulled.** The agent long-polls for what its Allocation should run now: nothing, one Instance with its `launch` and the restart generation of each part, or stop. It converges on that state, as a kubelet converges on its pods, so a missed message is corrected by the next poll.
+  - It reads the control-plane host's address, the dial-home mode, the pin of the agent endpoint's certificate and the absolute staging directory from `agent.json` in its directory (HBEP-4, Submission).
+  - An agent that has not registered within `health.registrationTimeout` (15 min by default) of its job's start fails its Instance, with reason `RegistrationTimeout`, and the Allocation is released.
+  - In ssh mode the agent keeps the forward itself: `ssh -N -L` over port 22, in a reconnect loop, as spike S1's kit does. It uses a dedicated, restricted key that the operator generated on the platform once, so that its private half never travels, and a pinned host key. Both are read by path, mode 600, from `~/.hpcburst/dial-home/` on the cluster. They live outside `stagingDir`, on storage that is not purged, because Helios purges scratch files older than 30 days (spike S5, PR #19). The Provider's controller checks that they exist before any submission, and sets `DialHomeKeyMissing` otherwise (HBEP-4). The key's line in `authorized_keys` on the control-plane host allows forwarding to the agent endpoint's and the front's loopback ports only. No ssh forward from a compute node has run yet (HBEP-6).
+- **Desired state, pulled.** The agent long-polls for what its Allocation should run now: nothing, one Instance with its `launch` and the restart generation of each part, or stop. For that Instance it also says whether to verify, qualify or warm up now, with the identity record's file list and the workload's shapes. It converges on that state, as a kubelet converges on its pods, so a missed message is corrected by the next poll.
 - **Reports.** At least every 15 s, and at every change, the agent posts:
   - for each part: its phase, process ID and start time, exit code, and the restart generation it applied;
   - staging progress;
   - for verification: the file rehash results, the engine's resolved settings, its version and the image digest it ran;
-  - for health: a local health probe every `health.probe_interval`, and from the engine's metrics, the running and waiting requests, the generated-token counter, the KV-cache use and the responses by HTTP status.
+  - for qualification and warm-up: each check's outcome, the timings of every request by shape and round, the KV capacity the engine reported at start-up, the served model names, and the measured template overhead;
+  - for health: a local health probe every `health.probeInterval`, and from the engine's metrics, the running and waiting requests, the generated-token counter, the KV-cache use and the responses by HTTP status.
 - **What it runs.**
   - Staging. It pulls the image by digest into `<stagingDir>/images/`, and downloads missing checkpoint files from the Hub at the full commit id into `<stagingDir>/checkpoints/<repository>/<revision>/`. Each file goes to a temporary name, then is renamed into place, so two Allocations staging at once never see a partial file.
   - The worker. It starts it with Apptainer from the image, with GPU support, the checkpoint bound read-only, and a clean environment plus the launch's variables. The engine listens on a Unix socket in the job's private temporary directory, so no port can clash on a shared node (L-7.7). The agent forwards the Instance's serving path to that socket (HBEP-6).
-  - Restarts and stops. When a part's desired generation rises, it stops the part politely, kills it after `restart.stop_grace`, and starts it again from the same `launch`. It never restarts a part by itself: restarts are the controller's decisions, recorded first.
+  - Checks. When the desired state asks it to verify, qualify or warm up, the agent runs the checks and the warm-up rounds against the engine's local socket, with synthetic prompts, and reports each outcome. The controller judges the reports: it applies the thresholds and sets the verdicts (Instance start).
+  - Restarts and stops. When a part's desired generation rises, it stops the part politely, kills it after `restart.stopGrace`, and starts it again from the same `launch`. It never restarts a part by itself: restarts are the controller's decisions, recorded first.
 - **Keys.** The agent generates the Instance's key at Instance start (HBEP-9), passes it to the engine through the environment, and sends it once over its channel. The controller keeps it in a mode-600 file named by the Instance's UID, which the front reads. A Hub token for a gated checkpoint comes over the same channel, and reaches the download only through the environment.
 - **After the Instance.** The agent stays when its Instance ends, and idles until it is told to stop or the job reaches its hard end. That is what lets a kept Allocation host a later Instance.
-- **Unreachable.** An agent that sends no report for `health.agent_timeout` makes its Instance's condition `AgentUnreachable`. The front stops routing to it, and the controller restarts nothing on that basis alone (HBEP-6: a path that is down is not a dead Instance). It returns when the reports resume. Its lease still ends on time, and the drain rule still applies.
+- **Unreachable.** An agent that sends no report for `health.agentTimeout` makes its Instance's condition `AgentUnreachable`. The front stops routing to it, and the controller restarts nothing on that basis alone (HBEP-6: a path that is down is not a dead Instance). It returns when the reports resume. Its lease still ends on time, and the drain rule still applies.
 - **The endpoint,** in the lifecycle controller, has three calls over HTTPS: `POST /agent/v1/register`, `GET /agent/v1/desired` (a long poll from the last generation seen) and `POST /agent/v1/report`. The version is in the path. HBEP-6 carries the requests.
+  - It listens on loopback on the control-plane host. In ssh mode the agent reaches it through the forwarded loopback port. In direct mode the front passes `/agent/v1/` through, on the dial-home port, to that loopback endpoint.
+  - The launcher creates the endpoint's certificate, and `agent.json` carries its pin (HBEP-11). In direct mode the front's dial-home listener presents the same certificate, so one pin holds on both paths.
 
 ### Instance start
 
 The Instance phases are HBEP-3's.
-- **`pending`** until its Allocation is `Running` and its agent has registered.
-- **`starting`:** the agent stages what is missing, rehashes the checkpoint files present, and starts the worker. An Instance that does not reach `ready` within `health.start_timeout` of its Allocation's start fails (Health and restarts).
+- **`pending`** until its Allocation is `Running` and its agent has registered. Registration has its own deadline, `health.registrationTimeout` from the job's start (The allocation agent).
+- **`starting`:** the agent stages what is missing, rehashes the checkpoint files present, and starts the worker. An Instance that does not reach `ready` within `health.startTimeout` of its own start instruction fails (Health and restarts). The start instruction is the first desired state that tells the agent to run that Instance, and its time is kept in the Instance's status, so the deadline survives a controller restart. An Instance placed on an older warm Allocation therefore gets the full timeout.
 - **`verifying`.** Verification is HBEP-9's alpha checks, the file rehash and the settings comparison:
   - **File rehash:** every checkpoint file present matches its entry in the identity record. A listed file that was never staged, because the engine does not load it, is not a failure (HBEP-3).
   - **Settings comparison:** the engine version, the image digest and `max-model-len` must be reported. The version and the digest must equal the declared ones, and `max-model-len` must equal its declared value when the spec declares one. Every other declared input that the engine reports must equal its declared value. A declared input it does not report is recorded as not reported. A setting it reports that the spec does not declare is recorded (HBEP-3).
   - The engine fingerprint is recorded. HBEP-3 mentions a render check through the template and tokenizer; it is HBEP-9's candidate, and not in alpha.
-  - The verification record, with the reported settings, the GPU type, the fingerprint, the rehash outcome and the verdict, is written before the Instance can become ready (HBEP-11).
+  - **One record per verification.** Each verification, at start and after every restart that reverifies, writes its own immutable verification record, with the reported settings, the GPU type, the fingerprint, the rehash outcome and the verdict, before the Instance can become ready (HBEP-11). It is named `ver-<instance UID>-<generation>`, where the generation counts the Instance's verifications from 1. The Instance's status names the latest record. A record that already exists under its name, as after a controller restart, is read and never rewritten.
   - A failed rehash moves the staged copy aside and restarts the Instance at the whole-Instance rung, which stages and rehashes again. A second failure fails the Instance.
   - A settings contradiction fails the Instance at once. Provisioning in that class stops, with the condition `VerificationFailed` and an event, until the serving spec changes (Risks).
-- **Qualification,** still in `verifying` (open question 12). With k = 0, every Instance passes:
+- **Qualification,** still in `verifying` (open question 12). The agent runs the checks and reports each outcome; the controller judges them. With k = 0, every Instance passes:
   - health, the engine version, the served model names and the maximum length;
   - one chat request, whose engine fingerprint is recorded;
   - a tool-call smoke test, when `workload.toolCalls` is set;
   - KV capacity from start-up of at least `targetSessions` times `contextTokens.typical` tokens;
-  - the corruption check: one greedy request sent three times in a row returns the same non-empty text, with no output that repeats a short pattern to its end;
-  - the behaviour check: one request at `contextTokens.longest` returns a well-formed answer, and a well-formed tool call when tool calls are on, with no loop.
+  - the corruption check: one greedy request sent three times in a row gives three outputs that share their first 32 tokens (every token, if an output is shorter), and none is empty or a single repeated token. Identical text is not required, because vLLM does not guarantee reproducible results by default ([reproducibility](https://docs.vllm.ai/en/latest/usage/reproducibility.html), accessed 2026-10-30);
+  - the behaviour check: one request at `contextTokens.longest` with the typical output returns a well-formed answer, and a well-formed tool call when tool calls are on, with no loop.
 
   A failed check fails the Instance, and its Allocation is released.
-- **Warm-up,** still in `verifying` (open question 5). Synthetic prompts only. Each round sends:
+- **Warm-up,** still in `verifying` (open question 5). The agent runs the rounds and reports their timings; the controller decides when warm-up is done. Synthetic prompts only. Each round sends:
   - one request at each of the three context lengths with the typical output;
   - one at the typical context with the longest output;
   - one tool call, when tool calls are on;
   - then `targetSessions` concurrent requests of the typical shape.
 
   Warm-up is done when no shape in a round is more than 10% slower than in the round before; the tolerance absorbs timing noise. A warm-up that has not settled after five rounds fails qualification. The last round's time per output token and time to first token are recorded as the Instance's throughput at the target sessions.
-- **`ready`** once verification, qualification and warm-up pass. The conditions `Verified`, `Qualified` and `WarmedUp` are true, the verification record exists, and the front routes to the Instance (HBEP-5).
+- **`ready`** once verification, qualification and warm-up pass. The conditions `Verified`, `Qualified` and `WarmedUp` are true, the latest verification record exists and passed, and the front routes to the Instance (HBEP-5).
 
 ### Health and restarts
 
@@ -353,12 +360,12 @@ The Instance phases are HBEP-3's.
 
   Plain load never triggers a restart: long queues, high latency, or a full KV cache on the only worker with requests waiting.
 - **The alpha ladder:**
-  1. restart the worker: the settings comparison and warm-up run again;
+  1. restart the worker: the settings comparison and warm-up run again, with a new verification record;
   2. restart the whole Instance in its Allocation: stop, rehash, start, verify, qualify and warm up;
   3. a new Allocation: the Instance fails, a replacement Allocation and Instance are created (Provisioning), and the failed Allocation is released at once, since nothing on it serves.
 
   The router rung comes first once Instances have routers (HBEP-5, open question 2).
-- **Attempts.** Each rung is tried `restart.attempts_per_rung` times within `restart.window`, `restart.backoff` apart, before the next rung.
+- **Attempts.** Each rung is tried `restart.attemptsPerRung` times within `restart.window`, `restart.backoff` apart, before the next rung.
 - **Recorded first.** Before each restart, the controller emits an event (type `failing`, the rung as reason, naming the signal and the controller as actor), then raises that part's restart generation on the Instance by compare-and-swap. The agent acts on the generation. The event says that in-flight requests were cut.
 - **Not routable while restarting.** A restarting Instance leaves `ready` for `verifying`, so the front stops routing to it, and returns after its checks.
 - **Restart and provisioning loops.** When three Allocations in a row in one class fail before or at rung 3 within `restart.window` (a refused or failed job, a failed check, or a failed whole-Instance restart), the deployment is degraded. Provisioning in that class pauses with backoff, and an event fires.
@@ -366,9 +373,14 @@ The Instance phases are HBEP-3's.
 
 ### Handover
 
-- **When the replacement is submitted.** For each primary, the replacement Allocation and Instance are created as soon as the primary's Allocation is `Running` (open question 2). The replacement carries an annotation naming its predecessor. Each primary has at most one live replacement.
-- **Both serve.** When the replacement becomes `ready` before the primary's drain starts, both serve, and the front balances across them (open question 4). At the primary's drain start, the replacement becomes the primary, and its own replacement is submitted at once.
-- **The backwards plan.** The same formula sets the submission time (open question 2) and the lateness event. The latest submission time is the predecessor's drain start minus the class's last measured time from Allocation start to `ready` (30 min until one is measured), minus the last observed queue wait on that Provider. When that time passes and the replacement's Allocation has not started, the deployment gets the condition `ReplacementLate` and an event.
+- **When the replacement is submitted** (open question 2). For each primary, the replacement Allocation and Instance are created at the primary's drain start minus (the p90 of the Provider's observed queue waits + the class's start-to-ready time + `handoverMargin`), and never before the primary's Allocation is `Running`.
+  - The p90 is taken over the last 20 waits in the Provider's status (HBEP-4). With fewer than 20, the largest observed wait is used. With none, the replacement is created as soon as the primary's Allocation is `Running`.
+  - The start-to-ready time is the class's last measured time from an Allocation's start to the first `ready` of the Instance created with it, which the ModelDeployment's status keeps. It is 30 min until one is measured.
+  - Both inputs live in status, never only in memory (HBEP-11), so a restarted controller plans the same time.
+  - On a short queue the replacement is ready about the margin before the drain starts, so the overlap is about the margin. On a long queue the plan reaches back to the primary's start, as in past operation.
+  - The replacement carries an annotation naming its predecessor. Each primary has at most one live replacement.
+- **Both serve.** When the replacement becomes `ready` before the primary's drain starts, both serve, and the front balances across them (open question 4). At the primary's drain start, the replacement becomes the primary, and its own replacement is planned the same way.
+- **Lateness.** When the replacement's Allocation has not started by the predecessor's drain start minus the class's start-to-ready time, the deployment gets the condition `ReplacementLate` and an event. A replacement that starts later cannot be ready before the drain starts.
 - **Same class, same ID.** A replacement in the same accelerator class is a new Instance of the same deployment ID. In another class, it is a new Instance with that class's current ID, and a name pinned to the old ID does not reach it (HBEP-3). The predecessor is released only after the replacement serves.
 
 Drain rule (the same text in HBEP-3, HBEP-5 and HBEP-7): The framework cannot move a lease end, so an Instance starts draining at the latest at its hard end minus the drain window, whether or not its replacement is ready. Make-before-break is the goal: the controller plans the replacement to be ready before that drain start, and the old Instance never drains before its replacement is ready unless that deadline forces it. If the replacement is late, the old Instance still drains on time, capacity drops, and an event is emitted (HBEP-8).
@@ -412,7 +424,7 @@ The Allocation keeps its name, and the new Instance has the new deployment's ID.
 - **Conditions are the level truth** (HBEP-11). Events are best-effort Kubernetes Events in alpha, whose reason carries HBEP-8's type and reason code.
 - **On a ModelDeployment:**
   - `Ready`: ready Instances at least as many as desired;
-  - `Degraded`, with a reason: `ReplacementLate`, `CapacityDropped`, `RestartLoop`, `VerificationFailed`, `SubmissionRejected` or `ProviderUnavailable`;
+  - `Degraded`, with a reason: `ReplacementLate`, `CapacityDropped`, `RestartLoop`, `VerificationFailed`, `SubmissionRejected`, `ProviderUnavailable` or `SpecUnsupported` (a `data-parallel-size` above 1, or a workload shape that does not fit the declared context limit);
   - `Progressing`.
 - **On an Instance:** `Verified`, `Qualified`, `WarmedUp`, `Healthy` and `AgentUnreachable`. A qualification with no throughput reference records that in `Qualified`'s message.
 - **Events:**
@@ -424,10 +436,12 @@ The Allocation keeps its name, and the new Instance has the new deployment's ID.
 Against the fake Slurm of spike S4, through the Slurm plugin (HBEP-4). The fake has queue delays, start failures, hard ends, requeues, finished jobs purged from the queue listing within seconds, and local-time clocks. A fake agent, and an engine double behind a real agent, stand in for the job:
 - Hedging, once hedging is on: the first Allocation whose Instance serves is kept, a loser that starts earlier but fails its checks is released, and the pending losers are cancelled only then.
 - Provisioning: the submission parameters follow the serving spec and the profile (GPUs, CPUs, memory, and the time limit capped by `leaseLimit`), and a GPU count above `gpusPerNode` is refused.
-- The replacement is created when the primary's Allocation starts, never before, and never twice for one primary.
-- Both serve, then the primary drains at its drain start, not earlier, and its replacement's own replacement is created at once.
+- The replacement is created at its planned time, never before the primary's Allocation starts, and never twice for one primary. With no wait observed on the Provider, that is the primary's start. With observed waits, it is the drain start minus the p90 wait (the largest wait while fewer than 20 are observed), the class's start-to-ready time and the margin. The expected times are worked out by hand from the fake's fixed waits, never by the planner's own code. On a short queue the replacement is ready about the margin before the drain starts.
+- The controller restarts between the primary's start and the planned time: it plans the same time from the waits and start-to-ready times in status.
+- Both serve, then the primary drains at its drain start, not earlier, and its replacement's own replacement is planned the same way.
 - The replacement fails verification: the predecessor keeps serving until its hard end minus the drain window, not earlier, then drains. No request is cut at the hard end, and a degraded event fires.
-- The replacement's Allocation has not started by its latest submission time: `ReplacementLate` is set.
+- The replacement's Allocation has not started by the predecessor's drain start minus the class's start-to-ready time: `ReplacementLate` is set.
+- An Allocation ends early (a cancel outside the framework) while its Instance serves: the Instance ends with `AllocationEndedEarly`, a `failing` event fires, the Allocation is deleted, and a replacement is provisioned. An Allocation that reaches its hard end with its Instance draining raises no such event.
 - Scale-down, shutdown at the end time and deletion: instances drain and end, no replacement is submitted, and each Allocation follows its retention policy.
 - Retention: an Allocation kept until a date stays, with no Instance, until that date and is then released; one under release-when-idle is released after its idle limit; one on a profile with `maxIdle` is released after it under keep; none outlives its hard end.
 - The controller is killed at each step of a handover: after restart there are no duplicate submissions and no orphan allocations.
@@ -439,13 +453,16 @@ Against the fake Slurm of spike S4, through the Slurm plugin (HBEP-4). The fake 
 - A hedge across two accelerator classes, once hedging is on: the winner's Instance carries its class's current ID.
 - A job ends and leaves the queue listing seconds later: the controller reads it as ended, from accounting, and submits nothing again for it.
 - No instance gets traffic before it is ready.
+- Spec checks: a `data-parallel-size` of 2 is refused with `SpecUnsupported`, and no Allocation is created. A workload whose longest context and typical output exceed a declared `max-model-len` is refused the same way. With the default longest context, every rendered warm-up request fits the limit the engine double reports.
+- Timeouts: an Instance placed on a warm Allocation that started more than `health.startTimeout` ago gets the full timeout from its own start instruction. An agent that never registers fails its Instance after `health.registrationTimeout`.
+- Verification records: a worker restart and a whole-Instance restart each write a new record, `ver-<instance UID>-2` then `-3`; the Instance's status names the latest, and the earlier records are unchanged. A controller killed after writing a record and before updating status reads that record on restart and writes no second one.
 - Verification: a changed checkpoint file fails the rehash, is re-staged once, then fails the Instance; an engine that reports another `max-model-len` fails at once and stops provisioning in that class; an engine that reports nothing fails, because the version, the image digest and the context length are required.
-- Qualification: an engine double with too little KV capacity, one that returns different text to identical greedy requests, and one that loops at the long context each fail, and their Allocations are released.
+- Qualification: an engine double with too little KV capacity, one whose three greedy outputs differ within their first 32 tokens, one that returns a single repeated token, and one that loops at the long context each fail, and their Allocations are released. One whose greedy outputs differ only after the 32nd token passes.
 - Warm-up: an engine double that is slow on the first request of each shape settles in two rounds; one whose latency never settles fails after five.
 - Health: a stalled Instance with requests in flight is restarted at the worker rung within the threshold. Repeated failures climb the ladder in order. A process that ignores TERM is killed after `stopGrace`. Plain load with long queues restarts nothing.
 - A part that exits cleanly without being told to counts as failed.
 - Each restart's event is emitted before the agent sees the raised generation.
-- The agent: a registration with a wrong credential, or with the right credential and another job ID, is refused. A missed desired-state message is corrected by the next poll. An agent that stops reporting makes its Instance unreachable, and nothing is restarted.
+- The agent: a registration with a wrong credential, or with the right credential and another job ID, is refused. A missed desired-state message is corrected by the next poll. An agent that stops reporting makes its Instance unreachable, and nothing is restarted. When the desired state asks it to verify, qualify or warm up, the real agent runs the checks against the engine double's socket and reports them, and the controller's verdicts follow the reports.
 - A restart runs the Instance's original `launch`, even after the ModelDeployment's serving spec has changed.
 - An operation interrupted on one of several providers reports each provider's outcome.
 - A repurpose, once it is on: the old Instance drains, the new deployment's Instance starts in the same Allocation, and the front routes to it only after verification and warm-up. The Allocation keeps its name, and the deployment ID changes.
@@ -484,12 +501,12 @@ On real providers: on each alpha platform, one deployment with a short `leaseLim
 
 ## Operational readiness
 
-1. **Working:** reconcile age per deployment, and ready instances against desired ones. End to end, each deployment answers a synthetic request through the front. Ready below desired past `health.start_timeout`, `ReplacementLate`, or agents that stop reporting say it is not working.
+1. **Working:** reconcile age per deployment, and ready instances against desired ones. End to end, each deployment answers a synthetic request through the front. Ready below desired past `health.startTimeout`, `ReplacementLate`, or agents that stop reporting say it is not working.
 2. **Restart:** it re-reads ModelDeployments, lists Allocations by label and Instances by owner, and reads the agents' next reports. Then it resumes planned handovers, and applies each empty Allocation's retention policy. Agents keep their Instances running while it is down; their reports resume when it returns.
 3. **Silent failure:** "planned" handovers that were never submitted; Instances marked ready that serve nothing; a verification that read nothing. The lateness event, the front's synthetic requests, and the required settings in verification show the difference.
 4. **Provider limits:** hard time limits, unknown start times, per-user job limits, fixed accounts, and center response times.
 5. **Capacity:** no provider starts a replacement. The deployment degrades, and the question goes to agents (open question 10).
-6. **Idle cost:** pending replacements cost no grant hours, but they hold queue slots under per-user limits. Overlap costs the hours of both allocations: on a short queue, about two Allocations per desired Instance (open question 2). Over-allocation costs the k extra Allocations until qualification ends. Warm capacity costs each kept Allocation's hours until its policy, or `maxIdle`, releases it. Each agent holds one connection to the control-plane host.
+6. **Idle cost:** pending replacements cost no grant hours, but they hold queue slots under per-user limits. Overlap costs the hours of both Allocations while both run. On a short queue the replacement is planned from observed waits, so the two serve together for about the margin (open question 2). Before any wait is observed, or on a long queue, the replacement is submitted at the predecessor's start and can overlap it for most of the lease. Over-allocation costs the k extra Allocations until qualification ends. Warm capacity costs each kept Allocation's hours until its policy, or `maxIdle`, releases it. Each agent holds one connection to the control-plane host.
 7. **Rollback:** scale the deployment to zero. Instances drain and end without replacement (Release); pending Allocations are cancelled, and started ones follow their retention policy, which an operator can set to release when idle.
 
 ## Drawbacks

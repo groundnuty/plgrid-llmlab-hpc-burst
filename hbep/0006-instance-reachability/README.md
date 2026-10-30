@@ -85,7 +85,7 @@ Problems:
 
 ## Design details
 
-**Dial home** (decided). The allocation agent that the Allocation's job runs (HBEP-7) starts the tunnel agent inside the allocation; the tunnel agent is part of it. The allocation agent's own connection to the control-plane host, which carries what the Allocation should run and its reports, belongs to the Allocation; the serving tunnel belongs to the Instance. The tunnel agent opens an outbound connection to the front, presents the allocation's credential and registers the instance. The instance owns the tunnel: it starts with the instance and ends with it.
+**Dial home** (decided). The allocation agent that the Allocation's job runs (HBEP-7) starts the tunnel agent inside the allocation; the tunnel agent is part of it. The allocation agent's own connection to the control-plane host, which carries what the Allocation should run and its reports, belongs to the Allocation; the serving tunnel belongs to the Instance. The control connection reaches the lifecycle controller's agent endpoint, which listens on loopback on the control-plane host: in ssh mode through the forwarded loopback port, and in direct mode through the front, which passes `/agent/v1/` through on the dial-home port (HBEP-7). The tunnel agent opens an outbound connection to the front, presents the allocation's credential and registers the instance. The instance owns the tunnel: it starts with the instance and ends with it.
 
 **Local listeners** (proposed; follows from the Goals). The engine's and router's HTTP listeners bind loopback or a Unix socket, on a port the operating system chooses, and report it to the agent; clients reach them through the agent. Rank traffic between the nodes of a multi-node instance is the engine's own and stays unauthenticated by default, a known limitation (Risks). Nothing is computed from job IDs or indices.
 
@@ -195,6 +195,7 @@ Dial home replaces www-2027's central relays and forward watchdogs, which kept h
 - 2026-10-30: spike S1 step 0 (issue #18) carried in: outbound 443 from compute nodes.
 - 2026-10-30: open question 8 decided for alpha by HBEP-11: the front is reached directly or through ssh on port 22.
 - 2026-10-30: the allocation agent (HBEP-7) starts the tunnel agent and owns the Allocation's control connection; HBEP-7's alpha credential noted under open question 7.
+- 2026-10-30: the agent endpoint listens on loopback, reached through the ssh forward or through the front's `/agent/v1/` pass-through (HBEP-7).
 
 ## Amendments
 

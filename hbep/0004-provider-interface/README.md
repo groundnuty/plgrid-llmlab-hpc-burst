@@ -102,7 +102,7 @@ Problems this addresses, in general terms:
 - **Plugins find their own jobs by scanning.** The newest matching job may belong to someone else. Decided in HBEP-3, from spike S4 (PR #32): every job carries its Allocation's tag in `--job-name`, and jobs are found only by tag.
 - **A site rewrites the job name.** A `job_submit` plugin could shorten or change it, and a job then can never be found by tag. Mitigation: the read-back compares the name with the tag; a mismatch refuses the Allocation and cancels the job. A 56-character name is checked on each alpha partition before alpha (Graduation criteria).
 - **A failed read looks like absence.** A transport error, a time-out or an unparseable reply says nothing about the job. Mitigation: only reads that succeeded count towards `lostGrace`; a failed read keeps the last known state and raises a condition.
-- **A Slurm upgrade changes the JSON.** A new data_parser version renames or moves fields. Mitigation: every reply's `meta.plugin.data_parser` must equal the profile's; otherwise the reply is not interpreted and the Provider gets a condition.
+- **A Slurm upgrade changes the JSON.** A new data_parser version renames or moves fields. Mitigation: every reply's `meta.plugin.data_parser`, without its `data_parser/` prefix, must equal the profile's; otherwise the reply is not interpreted and the Provider gets a condition.
 - **A workaround outlives its bug, or masks another fault,** for example a raised time-out hiding a hang. Mitigation: each register entry names the symptom it covers and the version range it applies to (open question 6).
 - **Contingencies cost when idle.** Probing a shared managed gateway adds load to it. Mitigation: each contingency's idle cost is stated in the profile, and the alpha managed provider reads the catalog at most once a minute.
 - **Flags too coarse for real providers** push provider-specific code into the core. A new flag is an amendment to this HBEP.
@@ -116,18 +116,18 @@ Problems this addresses, in general terms:
 3. **Profile schema.** **Decided:** for alpha, the typed fields in Design details (Platform profile schema), plus an untyped `profile` block that keeps the drafts' `facts` with their envelope. Provider settings are decided (owner decision): account, grant, credentials reference, allowed partitions and labels. The format of both is decided by HBEP-11: the PlatformProfile and Provider kinds. Source: HBEP-11's list of typed fields; spikes S4 (PR #32), S5 (PR #19) and S1 (issue #18) for the values; science-agent decision, 30 Oct 2026, for the fields the lifecycle controller reads. **Open (blocks beta):** the typed schema of the remaining field groups (hardware, environment, reachability, version pins, billing and exhaustion, managed-gateway behaviour, references to known issues) and the form of expected performance, decided with HBEP-7's open question 12. The LLMLab draft profile is still to come.
 4. **Plugin granularity.** **Decided:** one plugin per scheduler type, here Slurm, with one platform profile per platform. The three drafts express every alpha difference between Helios and Athena as data: the JSON version, the GPU model, the GRES form and the time zone. Source: spike S5 (PR #19) and S7's capture; science-agent decision, 30 Oct 2026.
 5. **Plugin boundary.** **Decided:** an in-process Go library inside each Provider's controller, a controller-runtime manager of its own (HBEP-11). There is one binary in alpha, so the core's version is the binary's. Source: spike S4 (PR #32), HBEP-11 (Controllers). **Not needed for alpha:** plugins in separate binaries that declare the core version they implement.
-6. **Register format.** **Not needed for alpha:** alpha reads no register. The known workarounds for alpha are plain configuration in HBEP-5's front and the ModelDeployment's engine flags. The candidate entry fields stay: identifier, symptom, component and affected versions, fixed-in version, platform scope and stage (HBEP-2 dimensions), fix owner, detection check, workaround configuration, regression test, upstream link. **Open (blocks beta):** the format, so that each entry's regression test can run in CI.
+6. **Register format.** **Not needed for alpha:** alpha reads no register. The known workarounds for alpha are plain configuration in HBEP-5's front and the ModelDeployment's engine flags. The candidate entry fields stay: identifier, symptom, component and affected versions, fixed-in version, platform scope and stage (HBEP-2 dimensions), fix owner, detection check, workaround configuration, regression test, upstream link. **Open (blocks beta):** the format, so that each entry's regression test can run in CI. Source: science-agent decision, 30 Oct 2026, within the alpha scope (Notes).
 7. **Profile provenance and probes.** **Decided:** for alpha, each fact in the untyped block keeps the drafts' envelope (value, method, source, date), and each typed value is copied from such a fact or is a framework default. The Slurm provider re-checks the JSON version on every reply. Source: spike S5 (PR #19); science-agent decision, 30 Oct 2026. **Open (blocks beta):** which other fields are re-checked by probes, how often and at what cost; decided by a spike on one batch and one managed provider.
 8. **Public and private profiles.** **Decided:** accounts, grants and credentials references are provider settings, never platform-profile data, so they never ship in this repository. The Helios, Athena and Sano profiles ship here, since their drafts are already public (PR #19); the LLMLab profile ships with alpha. Login node names and gateway addresses are kept with the credentials, so no shipped profile holds one. Source: owner decision, 28 Oct 2026, for the provider settings; science-agent decision, 30 Oct 2026, for the rest. **Not needed for alpha:** how a private cluster's profile stays local. Alpha uses only the shipped profiles.
 9. **Engine-wide data.** **Decided:** for alpha, HBEP-3 keeps the deployment-ID input table in code, with its scheme `v1`. Source: HBEP-3. **Not needed for alpha:** where engine-wide known issues and pins live beyond alpha.
 10. **A managed allocation's hard end.** **Decided:** none for alpha (HBEP-3). A key about to expire, or a rejected key, sets a condition on the Provider (Managed provider in alpha); it is not a lease end. Source: HBEP-3, open question 10.
 11. **Overrides.** **Decided:** for alpha, a ModelDeployment overrides one profile value, the lease length: an Allocation's time limit is the partition's `maxTime`, or the ModelDeployment's `leaseLimit` when that is shorter (HBEP-7). A short lease is what makes a real handover testable in hours. Source: science-agent decision, 30 Oct 2026. **Not needed for alpha:** other overrides.
 12. **The partition label.** **Decided:** for alpha, a Provider allows exactly one partition, so its `partition` label holds one value. Source: science-agent decision, 30 Oct 2026. **Open (blocks beta):** how a provider that allows several partitions is labelled: one label per partition, or one provider per partition. On the Cyfronet systems an account is tied to one resource kind, so one provider per partition may be enough. Owner discussion.
-13. **A REST job API.** **Not needed for alpha:** the transport is decided as the command line over ssh. Spike S5 (PR #19) found the slurmrestd binary on the Helios and Athena login nodes, none on Sano's, and no REST service that any center advertises; JWT is not enabled on any of the three. Asking each center stays the way to answer it, for a later transport.
+13. **A REST job API.** **Not needed for alpha:** the transport is decided as the command line over ssh. Spike S5 (PR #19) found the slurmrestd binary on the Helios and Athena login nodes, none on Sano's, and no REST service that any center advertises; JWT is not enabled on any of the three. Asking each center stays the way to answer it, for a later transport. Source: spike S5 (PR #19).
 14. **A long-running process on a login node.** **Decided:** no framework process runs on a login node. The Provider's controller polls from the control-plane host over ssh, and each command exits when done. Source: science-agent decision, 30 Oct 2026, following Cyfronet's prohibition of computation on login nodes and Sano's lack of a policy (spike S5, PR #19). **Not needed for alpha:** the centers' answer on lightweight processes, which a login-node relay (HBEP-6) would need.
 15. **Launch without containers.** **Decided:** for alpha, an Instance runs from an OCI image named by digest, which HBEP-3 already hashes, run with Apptainer on the compute node (HBEP-7). Apptainer on the compute nodes of each alpha partition is a precondition, verified like `holdRelease`: a partition where it is missing hosts no Instance in alpha. Source: science-agent decision, 30 Oct 2026. **Open (blocks beta):** a launch path that needs no container runtime, such as a packed engine environment, and how its digest enters the deployment ID. Its need depends on what S1's next jobs find on Athena's compute nodes.
 16. **Compute-node facts.** **Decided:** spike S1's step 0 (issue #18) measured outbound 443 to public endpoints from Helios CPU, Helios GH200 and Athena A100 (reached, no proxy) and compute-node Python (3.9); its hold check measured `holdRelease` true on those three partitions (commit 35babef). Two more facts are alpha preconditions, measured per alpha partition: Apptainer on the compute nodes (question 15), and a 56-character job name that comes back unchanged. Source: spike S1 (issue #18) for the measurements; science-agent decision, 30 Oct 2026, for the preconditions. **Not needed for alpha:** Sano, inbound reachability, user namespaces, node-local disk sizes and GPU drivers.
-17. **A connection budget per platform.** **Not needed for alpha:** one multiplexed connection per login node and credential, and at most four commands at once on it, are code defaults. **Open (blocks beta):** a per-platform budget in the profile, sized from the login nodes' measured ssh limits, which S5 could not read.
+17. **A connection budget per platform.** **Not needed for alpha:** one multiplexed connection per login node and credential, and at most four commands at once on it, are code defaults. **Open (blocks beta):** a per-platform budget in the profile, sized from the login nodes' measured ssh limits, which S5 could not read. Source: spike S5 (PR #19); science-agent decision, 30 Oct 2026, for the defaults.
 
 ## Design details
 
@@ -137,10 +137,11 @@ Problems this addresses, in general terms:
 - **For a Slurm Provider** that manager runs crossplane-runtime's managed reconciler over the Allocations whose `providerConfigRef` names the Provider. The management policies exclude Update, so a submitted job is never edited. Its external client maps onto the core operations as follows, and HBEP-7's open question 11 gives the full protocol:
   - **Connect:** the profile reader. A failure sets a condition on the Provider and makes no call.
   - **Observe:** find by tag; adopt a job when none is recorded; settle (cancel every held job with the tag except the recorded one, then lift the recorded job's hold once); read the recorded job back; report Lost after `lostGrace`; report a requeue as Failed.
-  - **Create:** ensure the agent's binary and the Allocation's credential file, claim an attempt by compare-and-swap, submit, record the job ID by compare-and-swap, then settle in the same reconcile.
+  - **Create:** in ssh dial-home mode, check that the dial-home key files exist (Submission), and otherwise set the Provider condition `DialHomeKeyMissing` and submit nothing; ensure the agent's binary and the Allocation's files; claim an attempt by compare-and-swap, submit, record the job ID by compare-and-swap, then settle in the same reconcile.
   - **Delete:** cancel every live job with the tag. The finalizer stays while any job with the tag is live, or an attempt is unresolved. Then remove the Allocation's files.
   - **Update:** never.
   - crossplane-runtime's critical-annotation updater is replaced by one that re-applies only crossplane's own keys (spike S4; HBEP-11).
+  - The reconciler runs with `managed.WithDeterministicExternalName(true)`, because the tag is a deterministic external name. Without it, a create interrupted before its outcome is recorded stops the reconciler before Observe, and the Allocation stays stuck until a person removes the annotation (S4: `spikes/s4/README.md`; `spikes/s4/cmd/provider-slurm/main.go`).
 - **The lifecycle controller** (HBEP-7) creates Allocations with their submission parameters, deletes them, and reads their status. It never calls a provider.
 - **The managed Provider's controller** runs the catalog loop under Managed provider in alpha.
 
@@ -152,7 +153,7 @@ For a batch provider (Slurm):
 - **`ReadProfile(provider) → (profile, settings, error)`.** The platform-profile reader. It reads the Provider, its PlatformProfile and the credentials reference, and validates them:
   - the profile's kind matches the plugin;
   - the Provider allows exactly one partition, and the profile lists it;
-  - `jobName.max_length` is at least 56, and no tag can match a name in `jobName.refused`;
+  - `jobName.maxLength` is at least 56, and no tag can match a name in `jobName.refused`;
   - `dataParser` is one the plugin knows;
   - `inflightWindow` is set and exceeds the `sbatch` time-out (60 s);
   - the credentials file, and for ssh the key file it names, are mode 600 and owned by the controller's user (HBEP-11).
@@ -198,6 +199,7 @@ For a managed provider:
 - **One OpenSSH master connection per login node and credential,** shared by every command of that Provider (`ControlMaster`, `ControlPersist`, and a `ControlPath` private to the Provider). `BatchMode` is on. The master carries no port forward and no other session, because tunnels on a shared master broke kill-by-PID (L-7.3).
 - **Where the login node is, and as whom,** is in the ssh client configuration that the Provider's credentials reference names (Provider settings). It is never in the profile, the API or a log.
 - **Commands are fixed argument templates.** Every value placed in one (tag, partition, account, time limit, path) is first checked against a safe pattern of letters, digits and `._:=,/-`. A value that fails is refused before any call. The remote command runs in the login node's non-interactive shell, as S5 measured it.
+- **The staging directory is resolved once per connection.** When `stagingDir` starts with an environment variable, the plugin reads it on the login node with `printenv <VAR>` after each new master connection. The result must be an absolute path that matches the safe pattern. An unset or empty variable, or a result that fails the check, sets a condition on the Provider, and no call that needs the directory is made. Commands, the bootstrap and `agent.json` hold only the resolved absolute path, never the variable.
 - **Time-outs:** 60 s for `sbatch`, 30 s for every other command. A time-out on `sbatch` is Unknown; on a read it is an error, so the state is unknown.
 - **Concurrency:** at most four commands at once on one connection (a code default; open question 17).
 - **Reconnects:** when the master fails, the plugin closes it and reconnects with exponential backoff from 1 s to 1 min. Calls in flight report transport errors.
@@ -219,7 +221,7 @@ For a managed provider:
 - **JSON fields,** per data_parser version. The v0.0.42 table is checked against S7's real captures on Helios. The v0.0.40 table follows Slurm's source, as S4's fake does; Athena's real v0.0.40 documents were not kept, so it is checked there before alpha (Graduation criteria).
   - **queue listing:** `job_id`, `name`, `job_state` (a list: base state plus flags), `state_reason`, `hold`, `priority`, `restart_cnt`, `partition`, `time_limit`, `tres_req_str`, and `submit_time`, `start_time` and `end_time` as `{set, infinite, number}` triples in epoch seconds;
   - **accounting:** `job_id`, `name`, `state.current` (a list) and `state.reason`, and `time.submission`, `time.start` and `time.end` as epoch integers. `restart_cnt` exists only in v0.0.42; on v0.0.40 an earlier execution shows as a record with the `REQUEUED` state.
-  - Each reply's `meta.plugin.data_parser` must equal the profile's `dataParser`. Otherwise the reply is not interpreted, the read is unknown, and the Provider gets the condition `DialectMismatch`.
+  - Each reply's `meta.plugin.data_parser`, after its `data_parser/` prefix is stripped, must equal the profile's `dataParser`. Helios's real replies carry `data_parser/v0.0.42` (`spikes/s7/slurm-json-real.md`), which matches a profile value of `v0.0.42`. Otherwise the reply is not interpreted, the read is unknown, and the Provider gets the condition `DialectMismatch`.
 - **Held:** `hold` true, or a set `priority` of 0, or a `state_reason` that starts with `JobHeld`. `JobHeldUser` is a user hold, which the job's user may lift. `JobHeldAdmin` is an admin hold.
 - **Requeue:** `restart_cnt` above 0, or a `REQUEUED` record in accounting.
 - **Times:** every epoch value is converted to UTC.
@@ -233,6 +235,7 @@ For a managed provider:
 ### Submission
 
 - **The Allocation's submission parameters,** immutable (HBEP-11): `partition`, `timeLimit`, `gpus`, `cpusPerTask`, `memory`, `nodes` (1 in alpha) and `agentDigest`, the SHA-256 of the allocation agent's binary for the partition's `cpuArch` (HBEP-7). The lifecycle controller sets them; the plugin adds the account, the tag and the fixed options. S4's `account` and `wrap` are not parameters: the account comes from the Provider's settings, and the batch script is the fixed bootstrap.
+- **GPU sizing.** In alpha the lifecycle controller sets `gpus` to the tensor-parallel size times the pipeline-parallel size, and refuses a `data-parallel-size` above 1 with a ModelDeployment condition, because alpha runs one engine worker per Instance (HBEP-7). Beta sizes GPUs as DP × TP × PP.
 - **Refused before any call:**
   - a partition that the Provider does not allow or the profile does not list;
   - no GPU on a partition whose `gpuModel` is not `none`;
@@ -244,21 +247,20 @@ For a managed provider:
 
   The credential is the token the lifecycle controller generated for the Allocation (HBEP-7). It never appears in the batch script, on a command line or in a log (HBEP-6).
 
-  A third file, `alloc/<tag>/agent.json`, mode 600, tells the agent where the control-plane host is and which dial-home mode it uses, direct or ssh, from the launcher's configuration (HBEP-11). It names a private address, so it is never in the repository. The restricted key for the ssh mode is not staged: the operator creates it on the platform once (HBEP-7).
+  A third file, `alloc/<tag>/agent.json`, mode 600, tells the agent where the control-plane host is, which dial-home mode it uses (direct or ssh) and the pin of the agent endpoint's certificate, from the launcher's configuration (HBEP-11), and the resolved staging directory (Transport). It names a private address, so it is never in the repository.
+- **The dial-home key** for the ssh mode is not staged. The operator generates the restricted key and places the pinned host key on the platform once, in `~/.hpcburst/dial-home/`, mode 600 (HBEP-7). They live outside `stagingDir`, on storage that is not purged, because Helios purges scratch files older than 30 days (spike S5, PR #19). Create checks that both files exist before any submission, and sets `DialHomeKeyMissing` when they do not (Two controllers).
 - **The bootstrap** is the `--wrap` command. It checks the binary's SHA-256 against the digest, then runs it with the Allocation's directory as its only argument. Nothing else runs in the batch script.
 
 ### Platform profile schema
 
 The PlatformProfile's spec has its kind, the typed fields below, and an untyped block, `profile`, which holds the drafts' `facts` groups with their envelope (value, method, source, date). No alpha code reads the untyped block. Typed fields are refused when unknown; the untyped block accepts anything.
 
-PlatformProfile fields are written in snake_case, as the drafts and the CRD write them. The fields of the other kinds are camelCase.
-
 **Typed fields that the Slurm provider and the deployment ID read.** This is HBEP-11's list.
 
 | Field | Type and default | Use | Source in the drafts |
 |---|---|---|---|
 | `kind` | `managed` or `batch` | selects the plugin | `kind` |
-| `partitions[].name`, `.gpu_model`, `.cpu_arch` | strings; `gpuModel` is `none` for a CPU partition | the accelerator class, a deployment-ID input (HBEP-3); the GPU rule at submission | `facts.partitions.<p>.arch` and `.gres`; for Athena also `facts.hardware.node_documented.accelerator`; for Helios GH200, whose GRES has no type, the center's documentation |
+| `partitions[].name`, `.gpuModel`, `.cpuArch` | strings; `gpuModel` is `none` for a CPU partition | the accelerator class, a deployment-ID input (HBEP-3); the GPU rule at submission | `facts.partitions.<p>.arch` and `.gres`; for Athena also `facts.hardware.node_documented.accelerator`; for Helios GH200, whose GRES has no type, the center's documentation |
 | `holdRelease` | bool, default false | hold mode or fallback mode (HBEP-7, open question 11); false, fallback mode, until verified | `facts.slurm.hold_release`, on S1's branch: true on Helios `plgrid` and `plgrid-gpu-gh200`, and on Athena `plgrid-gpu-a100`. Sano: not measured, so false |
 | `lostGrace` | duration, 2 min | time absent from both sources before Lost | none; above the measured gap between queue and accounting, about 2 s on Helios and Athena (S7's capture). The gap has no bound while accounting is down (S4), which Lost's revisability covers |
 | `inflightWindow` | duration, required for batch, no default | time an unresolved attempt is waited on; must exceed the `sbatch` time-out | none. The alpha profiles set 5 min until the `sbatch` latency over ssh is measured, before alpha (Graduation criteria) |
@@ -266,9 +268,9 @@ PlatformProfile fields are written in snake_case, as the drafts and the CRD writ
 | `timeZone` | IANA name | diagnostics only | `facts.time.slurm_time_zone` (Helios, Athena: Europe/Warsaw); `facts.time.scheduler_time_zone` (Sano: UTC) |
 | `jobRequeueDefault` | bool | recorded; the plugin always submits `--no-requeue` | `facts.slurm.job_requeue` (Helios, Athena: 1); `facts.slurm.requeue` (Sano) |
 | `minJobAge` | duration | how long the queue listing keeps a finished job | `facts.slurm.min_job_age_s` (Helios: 10 s; Sano: 300 s); `facts.slurm.min_job_age` (Athena: 10 s) |
-| `jobName.max_length`, `jobName.refused` | integer; list of strings | the 56-character tag must fit; names a site refuses | `facts.slurm.submit_rules` on Sano (`wrap` and `job` refused). No draft records a maximum length, so it is measured before alpha |
+| `jobName.maxLength`, `jobName.refused` | integer; list of strings | the 56-character tag must fit; names a site refuses | `facts.slurm.submit_rules` on Sano (`wrap` and `job` refused). No draft records a maximum length, so it is measured before alpha |
 | `accountingKeepsComment` | bool, optional | recorded; the tag is in the job name either way (S4) | not in the drafts |
-| `dataParser` | `v0.0.40` or `v0.0.42` | the JSON field table; checked on every reply | `facts.slurm.squeue_json` (Helios: v0.0.42; Athena, Sano: v0.0.40) |
+| `dataParser` | `v0.0.40` or `v0.0.42` | the JSON field table; checked on every reply, against the reply's value without its `data_parser/` prefix | `facts.slurm.squeue_json` (Helios: v0.0.42; Athena, Sano: v0.0.40) |
 
 The GPU model is a deployment-ID input, so its strings are fixed here. It is the product name without the vendor and the memory size, upper case: `GH200` (Helios `plgrid-gpu-gh200`), `A100` (Athena `plgrid-gpu-a100`). The CPU architecture is the kernel's machine name: `aarch64` or `x86_64`.
 
@@ -278,14 +280,14 @@ A partition enters the typed list only when `holdRelease` has been verified on i
 
 | Field | Type and default | Use | Source in the drafts |
 |---|---|---|---|
-| `partitions[].max_time` | duration | the longest time limit | `facts.partitions.<p>.max_time` (2 days on both alpha GPU partitions) |
-| `partitions[].gpus_per_node`, `.cpus_per_gpu`, `.mem_per_gpu` | integer; integer; quantity | GPUs per Allocation, and CPUs and memory in proportion | `facts.partitions.<p>.gres`, `.cpus_per_node` and `.max_mem_per_node_mb` (Helios); `facts.hardware.node_documented.proportional_cpus_per_gpu` and `.proportional_ram_per_gpu_mb` (Athena) |
-| `stagingDir` | string: an absolute path, or one that starts with an environment variable set on login and compute nodes | where the agent binary, Allocation directories, images and checkpoints live | `facts.storage.scratch` (Helios, Athena: `$SCRATCH`) |
+| `partitions[].maxTime` | duration | the longest time limit | `facts.partitions.<p>.max_time` (2 days on both alpha GPU partitions) |
+| `partitions[].gpusPerNode`, `.cpusPerGpu`, `.memPerGpu` | integer; integer; quantity | the most GPUs per Allocation, and CPUs and memory in proportion to its GPUs (Submission, GPU sizing) | `facts.partitions.<p>.gres`, `.cpus_per_node` and `.max_mem_per_node_mb` (Helios); `facts.hardware.node_documented.proportional_cpus_per_gpu` and `.proportional_ram_per_gpu_mb` (Athena) |
+| `stagingDir` | string: an absolute path, or one that starts with an environment variable set on login and compute nodes | where the agent binary, Allocation directories, images and checkpoints live; a variable is resolved on the login node once per connection (Transport) | `facts.storage.scratch` (Helios, Athena: `$SCRATCH`) |
 | `drainWindow` | duration, 30 min | HBEP-5's drain window, read by the front and the controller; at least the front's maximum request duration | none (HBEP-5) |
-| `handoverMargin` | duration, 30 min | the margin in HBEP-7's submission plan: a replacement is submitted at drain start minus (p90 observed wait + start-up + verification + warm-up + this margin) | none (HBEP-7) |
+| `handoverMargin` | duration, 30 min | the margin in HBEP-7's submission plan: a replacement is submitted at drain start minus (p90 observed wait + start-to-ready time + this margin), never before its predecessor's start | none (HBEP-7) |
 | `maxIdle` | duration, optional | an Allocation with no Instance is released after this long, even when its retention policy says keep (HBEP-7) | `facts.login_node_policy.gpu_only` (Athena) motivates it. Athena: 30 min (HBEP-7); unset elsewhere |
-| `health.probe_interval`, `.failure_threshold`, `.no_progress_timeout`, `.error_only_window`, `.kv_skew_timeout`, `.agent_timeout`, `.start_timeout` | 10 s, 3, 2 min, 1 min, 2 min, 2 min, 1 h | HBEP-7's malfunction signals, and the longest time from an Allocation's start to its Instance being ready | none; defaults, tuned in beta |
-| `restart.stop_grace`, `.attempts_per_rung`, `.window`, `.backoff` | 10 s, 2, 30 min, 30 s | HBEP-7's restart ladder | none; defaults, tuned in beta |
+| `health.probeInterval`, `.failureThreshold`, `.noProgressTimeout`, `.errorOnlyWindow`, `.kvSkewTimeout`, `.agentTimeout`, `.registrationTimeout`, `.startTimeout` | 10 s, 3, 2 min, 1 min, 2 min, 2 min, 15 min, 1 h | HBEP-7's malfunction signals; the longest time from the job's start to its agent's registration; the longest time from an Instance's own start instruction to `ready` | none; defaults, tuned in beta |
+| `restart.stopGrace`, `.attemptsPerRung`, `.window`, `.backoff` | 10 s, 2, 30 min, 30 s | HBEP-7's restart ladder | none; defaults, tuned in beta |
 
 **Draft fields that alpha reads.** Only through the typed fields above, whose values are copied from the draft paths named in their last column. Alpha code reads nothing in the untyped `profile` block.
 
@@ -298,6 +300,12 @@ A partition enters the typed list only when `holdRelease` has been verified on i
 - The credentials reference names a mode-600 file owned by the controller's user (HBEP-11). For a Slurm provider it is an ssh client configuration naming the login node, the user and the key file, which must be mode 600 too. For a managed provider it holds the key, the gateway's base URL, and the key's expiry date when one is known.
 - The grant is recorded in alpha but not read, since billing comes after alpha.
 - There is no QoS field, and Sano's partition `gpu` requires `--qos` (spike S5, PR #19). Sano is therefore outside alpha.
+
+### Provider status
+
+- The age of the last successful queue read, the `Ready` condition (Operational readiness 1) and the other conditions.
+- **The last 20 observed queue waits,** oldest dropped first. Each is one recorded job's wait from submission to start, taken from Slurm's recorded times (the queue listing's `submit_time` and `start_time`, or accounting's `time.submission` and `time.start`), never from when the controller saw the change. Entries are keyed by job ID, so a repeated observe adds nothing. The lifecycle controller plans replacements from them (HBEP-7, open question 2). They live in status, not only in memory (HBEP-11), so a restarted controller plans from the same waits.
+- For a managed Provider, its catalog (Managed provider in alpha).
 
 ### Managed provider in alpha
 
@@ -317,7 +325,7 @@ The register holds upstream bugs tied to versions. Each entry has one regression
 - **S4's suite, ported to the plugin, against the fake Slurm.** It covers every scenario S4 ran, and the fake gains:
   - the real v0.0.40 and v0.0.42 shapes from S7's captures;
   - both "not listed" shapes, and Helios' three phases after a job ends (listed, empty list, then the error);
-  - a reply whose data_parser differs from the profile's;
+  - a reply whose data_parser differs from the profile's, and one with the `data_parser/v0.0.42` value of S7's real capture, which matches a `v0.0.42` profile;
   - a job name the fake shortens.
 - **Batch fake behaviours:**
   - swinging estimates;
@@ -335,6 +343,10 @@ The register holds upstream bugs tied to versions. Each entry has one regression
 - **Read-back.** A job established with another time limit sets `SubmittedAsOther`; one whose name came back shortened is refused and cancelled.
 - **Time.** Hard ends parsed from epoch fields equal the expected UTC instants across a daylight-saving change.
 - **Files.** `EnsureFile` places a file once, and a second call does nothing. The credential's content never reaches the fake's argv log.
+- **The staging directory.** A `stagingDir` of `$SCRATCH` is resolved once per master connection to the fake's absolute path, and only that path appears in commands, the bootstrap and `agent.json`. An unset variable sets a condition, and no file call is made.
+- **The dial-home key.** In ssh mode, with a key file missing from `~/.hpcburst/dial-home/`, Create sets `DialHomeKeyMissing` and no `sbatch` runs.
+- **An interrupted create.** The controller is killed between the claim and the job-ID record: after restart the reconciler reaches Observe, because it runs with `WithDeterministicExternalName(true)`, and finds the job by tag.
+- **Queue waits.** Each started job adds one wait, from its Slurm submit and start times; a repeated observe adds none; a 21st wait drops the oldest; the waits survive a controller restart.
 - **One regression test per register entry,** once the register exists. Once CI exists, an entry without a test fails it.
 - **A profile is never verified against values derived from itself.** Writing a profile from a probe's output and then checking the probe against that profile proves nothing; expectations come from documentation or an independent measurement. Expected performance likewise never comes from the Instances that qualification judges. The fake's JSON is checked against S7's real captures, not against the parser it feeds.
 - **Conformance probes** against real providers stay cheap, read-only where possible, and rate-limited.
