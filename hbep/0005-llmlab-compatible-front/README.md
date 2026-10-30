@@ -173,12 +173,60 @@ TBD. Candidate for alpha: the test plan passes against LLMLab and one batch prov
 - **One URL per instance, chosen by the client.** It breaks at every handover and gives no attribution.
 - **A stock router at the edge.** It has no naming levels, no LLMLab route and no lease-end drain, and its default deadline cuts long streams.
 - **Pure load balancing or pure session affinity.** Both failed on long multi-turn sessions (Motivation).
-- **Gateway API Inference Extension or llm-d.** Both are built around Kubernetes pods. To be evaluated later; either may become a component.
+- **Gateway API Inference Extension or llm-d.** Both are built around Kubernetes pods. The evaluation (28 Oct 2026) found that the Inference Extension routes only to pods. llm-d's router can run without Kubernetes, through file discovery, which makes it a candidate for the router inside each Instance (Prior art and reuse). Neither offers the naming levels, the bounded-load affinity or the drain before a lease ends, so the front core is ours.
+
+## Prior art and reuse
+
+The front grows from www-2027's hand-tuned per-stack routers: affinity and policy switches, a load report written for the router, a hand-run join script that re-added workers within milliseconds of a router restart, and worker removals scheduled by hand before each job ended.
+
+### Community software reused
+
+| Component | Origin (project, URL) | Licence | How used (dependency, copied code, optional) |
+|---|---|---|---|
+| llm-d router endpoint picker + Envoy | [llm-d/llm-d-router](https://github.com/llm-d/llm-d-router); [Envoy](https://github.com/envoyproxy/envoy) | llm-d router Apache-2.0; Envoy Apache-2.0 | Candidate Instance router in Beta file-discovery mode, decided by spike S2 (open question 2) |
+| vllm-router (not separately evaluated) | [vllm-project/router](https://github.com/vllm-project/router) | Apache-2.0 | Optional: the lighter Instance router, compared in spike S2 |
+| KubeAI CHWBL balancer | [balance_chwbl.go](https://raw.githubusercontent.com/kubeai-project/kubeai/main/internal/loadbalancer/balance_chwbl.go) in [kubeai-project/kubeai](https://github.com/kubeai-project/kubeai) | Apache-2.0 | Candidate copied code, vendored because it sits under Go `internal/` and cannot be imported: the bounded-load ring. Spike S10 sets its key and bound |
+| Agent Router (optional) | [theagentrouter/agent-router](https://github.com/theagentrouter/agent-router) | Apache-2.0 | Optional edge for a team (keys, token limits, metrics), decided by spike S6 |
+| llm-d-inference-sim | [llm-d/llm-d-inference-sim](https://github.com/llm-d/llm-d-inference-sim) | Apache-2.0 | Candidate test dependency, no spike assigned: a GPU-free engine double |
+
+### Designs and published work borrowed
+
+| Idea | Origin (project, paper or document) | Where it lands here |
+|---|---|---|
+| Drop an expiring job from routing once another job is ready | GWDG SAIA ([services.py](https://raw.githubusercontent.com/gwdg/saia-hpc/main/scheduler_core/services.py)) | Draining, made lease-aware |
+| Affinity key as an HMAC over user, model and session; a per-user `cache_salt` | ALCF FIRST (Minerva) ([argonne-lcf/FIRST](https://github.com/argonne-lcf/FIRST)) | Two-level affinity; open question 1 |
+| Consistent hashing with bounded loads | KubeAI's CHWBL balancer | The ring on a conversation key |
+| Session headers to honour; SSE comment keepalives during long prefill | LiteLLM ([BerriAI/litellm](https://github.com/BerriAI/litellm)); NVIDIA Dynamo ([session IDs](https://docs.nvidia.com/dynamo/v1.6.1/agents/session-i-ds.md)) | Open questions 1 and 10 |
+| Endpoint-picker protocol (`x-gateway-destination-endpoint`, fallback list, served-endpoint feedback); the dropped-reason header | Gateway API Inference Extension ([kubernetes-sigs/gateway-api-inference-extension](https://github.com/kubernetes-sigs/gateway-api-inference-extension)); llm-d | The seam to the Instance router (open question 2); error semantics |
+| Measure front capacity in concurrent streams | ExaServe ([arXiv 2609.10812](https://arxiv.org/abs/2609.10812)) | Open question 11 |
+
+### Field lessons answered
+
+| Lesson | Lesson ID (from the lessons catalogue, HBEP-15) | How this HBEP answers it |
+|---|---|---|
+| A router's default total deadline cut long streams without a log line. | L-4.1 | No hop sets a total deadline below the client's; a test streams past each known default. |
+| A managed gateway cuts replies that send no byte for a fixed time. | L-6.1 | The front does not copy the cut; routes to LLMLab still pass through it. |
+| A gateway that injects prompt text or filters fields changes the deployment. | L-6.6 | The front injects nothing and passes unknown fields through. |
+| No routing policy fit long multi-turn sessions. | L-4.3 | Consistent hashing with bounded loads on a conversation key. |
+| Sessions piled onto one worker while others idled. | L-4.4 | Bounded loads, with a load measure that counts cut requests. |
+| Requests stayed on a saturated worker, and nothing said which one answered. | L-4.6 | Per-instance caps; every response names its Instance. |
+| Only global caps existed. | L-4.7 | Caps per deployment, Instance and worker (open question 6). |
+| Servers ran out of KV cache with no per-server concurrency cap. | L-3.12 | Requests over an Instance's cap wait at the front. |
+| Workers added to a router were lost when it restarted. | L-4.8 | Membership comes from the controller's ready set, read by watch. |
+| Pool membership went stale. | L-4.11 | Membership comes from the controller's ready set, read by watch. |
+| A router's admin API had no authentication. | L-4.9 | Admin operations need a key; Instance admin endpoints stay inside the Instance. |
+| Workers were removed by hand before each job ended. | L-4.10 | The front stops sending to an Instance at its lease end minus the drain window. |
+| A balancer ejected backends for good, with a time-out below the client's. | L-4.14 | Failure counters pause a target, never remove it; no deadline below the client's. |
+| An engine's keep-alive dropped connections a router reused. | L-2.5 | The side that reuses connections has the shorter idle time-out. |
+| Some streamed tool-call arguments arrived cut. | L-6.7 | A stream that ends without a finish reason counts as truncated and is reported. |
+| Errors for unknown, inactive and blocked models looked alike. | L-6.5 | Open question 9: keep the status codes and add a reason field. |
+| A follow-on on a new node changed the URL. | L-1.22 | Clients keep the front's base URL; handovers happen behind it. |
 
 ## Implementation history
 
 - 2026-10-28: proposed (provisional), tracking issue #5.
 - 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
+- 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation.
 
 ## Amendments
 

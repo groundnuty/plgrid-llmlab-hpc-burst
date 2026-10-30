@@ -143,10 +143,45 @@ TBD. Lean: alpha when one batch provider verifies and attributes every response;
 - **The job ID or URL as identity.** Changes at every handover, so a study could not pin a deployment across handovers. Rejected.
 - **Identity by model name only,** as LLMLab presents it. Hides every difference this HBEP exists to show.
 
+## Prior art and reuse
+
+Verification grows from www-2027's endpoint check, run on each new endpoint (health, versions, models and context length, a chat reply with its fingerprint, a tool-call smoke test), and from a scanner that looked for mixed deployments after the fact.
+
+### Community software reused
+
+| Component | Origin (project, URL) | Licence | How used (dependency, copied code, optional) |
+|---|---|---|---|
+| vLLM | [vllm-project/vllm](https://github.com/vllm-project/vllm) | Apache-2.0 | Dependency: the engine whose version, image and resolved settings the record holds |
+| model_signing | [sigstore/model-transparency](https://github.com/sigstore/model-transparency) | Apache-2.0 | Candidate, decided by spike S7: a per-file SHA-256 manifest in file mode, over an explicit list of the files the engine loads |
+| huggingface_hub | [huggingface/huggingface_hub](https://github.com/huggingface/huggingface_hub) | Apache-2.0 | Candidate, decided by spike S7: expected hashes from the Hub, and `hf cache verify` at staging |
+
+### Designs and published work borrowed
+
+| Idea | Origin (project, paper or document) | Where it lands here |
+|---|---|---|
+| Response headers that name the serving worker | NVIDIA Dynamo's `worker_id` ([ai-dynamo/dynamo](https://github.com/ai-dynamo/dynamo)); AIBrix's `target-pod` ([vllm-project/aibrix](https://github.com/vllm-project/aibrix)); OpenTela's `X-Computing-Node` ([eth-easl/opentela](https://github.com/eth-easl/opentela)) | Attribution headers, which name the deployment and Instance instead |
+| Model-equality testing | Gao et al. ([arXiv 2410.20247](https://arxiv.org/abs/2410.20247)) | Managed catalog entries: detecting changes, not proving identity |
+
+### Field lessons answered
+
+| Lesson | Lesson ID (from the lessons catalogue, HBEP-15) | How this HBEP answers it |
+|---|---|---|
+| Checkpoints were served without a pinned revision. | L-8.3 | A pinned revision in every record; a branch name is refused. |
+| Engine fingerprints differed per site and could not be reproduced offline. | L-8.1 | The fingerprint is recorded beside the deployment ID, never used as it. |
+| One checkpoint name hid differences in kernels and local patches. | L-8.2 | Resolved settings and every local patch are record fields. |
+| An allowlist of fingerprints let a second configuration pass. | L-8.4 | No allowlist; an Instance joins by verification against the record. |
+| Verification was not uniform. | L-8.6 | One verification for every Instance at start. |
+| Configuration was attributed after the fact. | L-8.7 | The front decides attribution at serving time. |
+| The route URL became part of the identity. | L-8.5 | The URL is not identity. |
+| A managed gateway's request changes made its deployment differ. | L-6.6 | The record flags a gateway's request changes. |
+| Center-run endpoints hid their revisions and limits. | L-6.8 | A managed entry's unknown fields are recorded as unknown. |
+| Live serve scripts could not be edited, because identity hashed them. | L-3.7 | Records are immutable; a change gives a new deployment ID. |
+
 ## Implementation history
 
 - 2026-10-28: proposed (provisional), tracking issue #9.
 - 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
+- 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation.
 
 ## Amendments
 

@@ -137,10 +137,37 @@ N/A: a scope HBEP has no stages of its own.
 - **Scope by a list of past problems.** Rejected: problems are evidence with different weights, not requirements. They feed Motivation, Risks and test plans instead.
 - **Evaluate existing projects first:** interLink and other virtual-kubelet offloading, Slinky / slurm-bridge, KubeAI, the vLLM production stack, the Gateway API Inference Extension, llm-d. Deferred by decision: proposals first, then evaluation, which may change the proposals or turn these projects into components.
 
+## Prior art and reuse
+
+### Community software reused
+
+| Component | Origin (project, URL) | Licence | How used (dependency, copied code, optional) |
+|---|---|---|---|
+| None | | | |
+
+### Designs and published work borrowed
+
+| Idea | Origin (project, paper or document) | Where it lands here |
+|---|---|---|
+| None | | |
+
+### Field lessons answered
+
+| Lesson | Lesson ID (from the lessons catalogue, HBEP-15) | How this HBEP answers it |
+|---|---|---|
+| A managed gateway's shared capacity binds under load. | L-6.3 | Stage 1: the reason to burst onto the user's own grants. |
+| A managed gateway stalls periodically for every model. | L-6.2 | Stage 1; HBEP-4 and HBEP-8 own the response. |
+| Models on a managed gateway go inactive without the listing showing it. | L-6.5 | Stage 1; HBEP-4 and HBEP-5 own the response. |
+| Job priority came only from a manual push by center staff. | L-1.10 | Non-goals: no design depends on a priority push; hedging is the lever. |
+| Time limits cannot be extended, and centers may not act at weekends. | L-1.6 | Risks: no stage waits on center staff; stage 3 hands over before each lease ends. |
+| Converting idle capacity between models was done by hand. | L-3.9 | User stories: an agent repurposes Allocations as one model's work ends (HBEP-7). |
+| Releasing capacity saves grant hours but can lose the node. | L-13.5 | User stories: the operator's retention policy decides (HBEP-7). |
+
 ## Implementation history
 
 - 2026-10-28: proposed (provisional), tracking issue #2.
 - 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
+- 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation.
 
 ## Amendments
 
