@@ -283,7 +283,7 @@ A partition enters the typed list only when `holdRelease` has been verified on i
 | `partitions[].maxTime` | duration | the longest time limit | `facts.partitions.<p>.max_time` (2 days on both alpha GPU partitions) |
 | `partitions[].gpusPerNode`, `.cpusPerGpu`, `.memPerGpu` | integer; integer; quantity | the most GPUs per Allocation, and CPUs and memory in proportion to its GPUs (Submission, GPU sizing) | `facts.partitions.<p>.gres`, `.cpus_per_node` and `.max_mem_per_node_mb` (Helios); `facts.hardware.node_documented.proportional_cpus_per_gpu` and `.proportional_ram_per_gpu_mb` (Athena) |
 | `stagingDir` | string: an absolute path, or one that starts with an environment variable set on login and compute nodes | where the agent binary, Allocation directories, images and checkpoints live; a variable is resolved on the login node once per connection (Transport) | `facts.storage.scratch` (Helios, Athena: `$SCRATCH`) |
-| `drainWindow` | duration, 30 min | HBEP-5's drain window, read by the front and the controller; at least the front's maximum request duration | none (HBEP-5) |
+| `drainWindow` | duration, 2 h 10 min | HBEP-5's drain window, read by the front and the controller; at least the front's `maxRequestDuration` (2 h) plus `drainMargin` (10 min), owner decision of 30 Oct 2026. A ModelDeployment may only shorten it (HBEP-5) | none (HBEP-5) |
 | `handoverMargin` | duration, 30 min | the margin in HBEP-7's submission plan: a replacement is submitted at drain start minus (p90 observed wait + start-to-ready time + this margin), never before its predecessor's start | none (HBEP-7) |
 | `maxIdle` | duration, optional | an Allocation with no Instance is released after this long, even when its retention policy says keep (HBEP-7) | `facts.login_node_policy.gpu_only` (Athena) motivates it. Athena: 30 min (HBEP-7); unset elsewhere |
 | `health.probeInterval`, `.failureThreshold`, `.noProgressTimeout`, `.errorOnlyWindow`, `.kvSkewTimeout`, `.agentTimeout`, `.registrationTimeout`, `.startTimeout` | 10 s, 3, 2 min, 1 min, 2 min, 2 min, 15 min, 1 h | HBEP-7's malfunction signals; the longest time from the job's start to its agent's registration; the longest time from an Instance's own start instruction to `ready` | none; defaults, tuned in beta |
@@ -477,6 +477,7 @@ The Slurm provider plugin grows from www-2027's per-cluster ssh over one shared 
 - 2026-10-30: aligned with HBEP-3 and HBEP-11 becoming implementable: requeue, the job tag, the profile and provider kinds, a managed allocation's hard end, and where credentials live.
 - 2026-10-30: the alpha typed profile fields (accelerator class per partition, `holdRelease`, `lostGrace`, the in-flight window, the Unknown bound) and held submission carried in from HBEP-11 and HBEP-7.
 - 2026-10-30: implementable. Design completed for alpha: the two controllers, the core operations as an interface, the ssh transport, the Slurm dialect (S4's protocol, S7's real JSON, S1's hold check), submission and its files, the typed profile fields with their draft sources, provider settings, and the read-only LLMLab catalog. Every open question is decided, not needed for alpha, or open for beta; question 17 added.
+- 2026-10-30: amendment with HBEP-5 becoming implementable: `drainWindow` defaults to 2 h 10 min (owner decision).
 
 ## Amendments
 

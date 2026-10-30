@@ -260,7 +260,7 @@ Each question below had a proposed answer taken from operating LLM serving on Sl
 ### Reconcile loop
 
 One pass for one ModelDeployment. Every step is idempotent and re-reads what it acts on.
-1. **Read** the ModelDeployment, its allowed Providers in order, and their PlatformProfiles. A Provider that is missing, not `Ready` or managed is skipped, with a condition naming it.
+1. **Read** the ModelDeployment, its allowed Providers in order, and their PlatformProfiles. A batch Provider that is missing or not `Ready` is skipped, with a condition naming it. A managed Provider is not provisioned here and sets no condition; the front routes to it (HBEP-5).
 2. **Current IDs.** For each accelerator class that the allowed partitions offer, compute the class's current ID from the serving spec (HBEP-3), and create its identity record if absent (HBEP-11). A display-form collision refuses the ID (HBEP-3). Status lists the IDs by class. No Allocation is created for a class without a current ID.
 3. **Observe** its Allocations (by the `model-deployment` label), its Instances (by owner), and each agent's latest report.
 4. **Shutdown.** At the end time, on deletion, or at zero desired instances, apply Release's shutdown case and stop here.
@@ -309,7 +309,7 @@ The process that an Allocation's job runs. It is a static binary, one build per 
   - for health: a local health probe every `health.probeInterval`, and from the engine's metrics, the running and waiting requests, the generated-token counter, the KV-cache use and the responses by HTTP status.
 - **What it runs.**
   - Staging. It pulls the image by digest into `<stagingDir>/images/`, and downloads missing checkpoint files from the Hub at the full commit id into `<stagingDir>/checkpoints/<repository>/<revision>/`. Each file goes to a temporary name, then is renamed into place, so two Allocations staging at once never see a partial file.
-  - The worker. It starts it with Apptainer from the image, with GPU support, the checkpoint bound read-only, and a clean environment plus the launch's variables. The engine listens on a Unix socket in the job's private temporary directory, so no port can clash on a shared node (L-7.7). The agent forwards the Instance's serving path to that socket (HBEP-6).
+  - The worker. It starts it with Apptainer from the image, with GPU support, the checkpoint bound read-only, and a clean environment plus the launch's variables. The engine listens on a Unix socket in the job's private temporary directory, so no port can clash on a shared node (L-7.7). It runs with `--served-model-name` set to the ModelDeployment's model name, which the front's name rewrite relies on (HBEP-5), and with the Instance's own key in `VLLM_API_KEY`, which the agent sets from the key file; the key is never written in the spec (HBEP-3). The agent forwards the Instance's serving path to that socket (HBEP-6).
   - Checks. When the desired state asks it to verify, qualify or warm up, the agent runs the checks and the warm-up rounds against the engine's local socket, with synthetic prompts, and reports each outcome. The controller judges the reports: it applies the thresholds and sets the verdicts (Instance start).
   - Restarts and stops. When a part's desired generation rises, it stops the part politely, kills it after `restart.stopGrace`, and starts it again from the same `launch`. It never restarts a part by itself: restarts are the controller's decisions, recorded first.
 - **Keys.** The agent generates the Instance's key at Instance start (HBEP-9), passes it to the engine through the environment, and sends it once over its channel. The controller keeps it in a mode-600 file named by the Instance's UID, which the front reads. A Hub token for a gated checkpoint comes over the same channel, and reaches the download only through the environment.
@@ -326,7 +326,7 @@ The Instance phases are HBEP-3's.
 - **`starting`:** the agent stages what is missing, rehashes the checkpoint files present, and starts the worker. An Instance that does not reach `ready` within `health.startTimeout` of its own start instruction fails (Health and restarts). The start instruction is the first desired state that tells the agent to run that Instance, and its time is kept in the Instance's status, so the deadline survives a controller restart. An Instance placed on an older warm Allocation therefore gets the full timeout.
 - **`verifying`.** Verification is HBEP-9's alpha checks, the file rehash and the settings comparison:
   - **File rehash:** every checkpoint file present matches its entry in the identity record. A listed file that was never staged, because the engine does not load it, is not a failure (HBEP-3).
-  - **Settings comparison:** the engine version, the image digest and `max-model-len` must be reported. The version and the digest must equal the declared ones, and `max-model-len` must equal its declared value when the spec declares one. Every other declared input that the engine reports must equal its declared value. A declared input it does not report is recorded as not reported. A setting it reports that the spec does not declare is recorded (HBEP-3).
+  - **Settings comparison:** the engine version, the image digest, `max-model-len` and `max-num-seqs` must be reported; the front's per-Instance cap reads `max-num-seqs` when the spec does not declare it (HBEP-5). The version and the digest must equal the declared ones, and `max-model-len` must equal its declared value when the spec declares one. Every other declared input that the engine reports must equal its declared value. A declared input it does not report is recorded as not reported. A setting it reports that the spec does not declare is recorded (HBEP-3).
   - The engine fingerprint is recorded. HBEP-3 mentions a render check through the template and tokenizer; it is HBEP-9's candidate, and not in alpha.
   - **One record per verification.** Each verification, at start and after every restart that reverifies, writes its own immutable verification record, with the reported settings, the GPU type, the fingerprint, the rehash outcome and the verdict, before the Instance can become ready (HBEP-11). It is named `ver-<instance UID>-<generation>`, where the generation counts the Instance's verifications from 1. The Instance's status names the latest record. A record that already exists under its name, as after a controller restart, is read and never rewritten.
   - A failed rehash moves the staged copy aside and restarts the Instance at the whole-Instance rung, which stages and rehashes again. A second failure fails the Instance.
@@ -385,7 +385,7 @@ The Instance phases are HBEP-3's.
 
 Drain rule (the same text in HBEP-3, HBEP-5 and HBEP-7): The framework cannot move a lease end, so an Instance starts draining at the latest at its hard end minus the drain window, whether or not its replacement is ready. Make-before-break is the goal: the controller plans the replacement to be ready before that drain start, and the old Instance never drains before its replacement is ready unless that deadline forces it. If the replacement is late, the old Instance still drains on time, capacity drops, and an event is emitted (HBEP-8).
 
-- **Draining.** At its drain start, the hard end minus `drainWindow`, the Instance becomes `draining`; the front also enforces this deadline itself (HBEP-5). It becomes `ended` when the agent reports no running request, or at the hard end. The controller then tells the agent to stop the worker and removes the Instance's drain finalizer (HBEP-11). The Allocation follows its retention policy until its hard end.
+- **Draining.** At its drain start, the hard end minus the Instance's drain window (the profile's `drainWindow`, or shorter per deployment: HBEP-5), the Instance becomes `draining`; the front also enforces this deadline itself (HBEP-5). It becomes `ended` when the agent reports no running request, or at the hard end. The controller then tells the agent to stop the worker and removes the Instance's drain finalizer (HBEP-11). The Allocation follows its retention policy until its hard end.
 - **A late replacement** leaves the deployment degraded (open question 10).
 
 ### Release
@@ -467,7 +467,7 @@ Against the fake Slurm of spike S4, through the Slurm plugin (HBEP-4). The fake 
 - An operation interrupted on one of several providers reports each provider's outcome.
 - A repurpose, once it is on: the old Instance drains, the new deployment's Instance starts in the same Allocation, and the front routes to it only after verification and warm-up. The Allocation keeps its name, and the deployment ID changes.
 
-On real providers: on each alpha platform, one deployment with a short `leaseLimit` completes one handover end to end through the front, with no request cut.
+On real providers: on each alpha platform, one deployment with a short `leaseLimit` and a short `routing.maxRequestDuration` (so its drain window fits the lease) completes one handover end to end through the front, with no request cut.
 
 ### Compatibility and upgrades
 
@@ -606,6 +606,7 @@ The controller applies by policy what www-2027 operators did per job: holder bat
 - 2026-10-30: S4's implemented submission protocol written into open question 11; one current deployment ID per accelerator class carried into hedging and handover; verification compares settings and rehashes files, never recomputes the ID.
 - 2026-10-30: design completed for implementable. The owner's approval of the proposals (29 Oct 2026, PR #14) recorded as decisions; the alpha scope marked; the controllers, the reconcile loop, provisioning, the allocation agent, Instance start with HBEP-9's alpha checks, health and restarts, handover, release and retention written for alpha.
 - 2026-10-30: implementable. The owner's approval of the proposed answers (29 Oct 2026, PR #14) and spikes S1 (issue #18), S4 (PR #32), S5 (PR #19) and S7 (PR #33) carried in; every open question decided, not needed for alpha, or open for beta.
+- 2026-10-30: amendment with HBEP-5 becoming implementable: managed Providers set no condition here; the launch sets `--served-model-name` and `VLLM_API_KEY`; `max-num-seqs` is a required report; the drain window may be shortened per deployment; the real handover test shortens it.
 
 ## Amendments
 

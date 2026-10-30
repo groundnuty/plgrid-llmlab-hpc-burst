@@ -111,7 +111,7 @@ Routes to LLMLab still pass through LLMLab's own cut and injection. The front ca
    - S10b and S10c switch at "ready ≥ desired". This HBEP keeps that reading, so the overlap of a handover, when both Instances serve, keeps the tight bound.
    - c is a per-deployment parameter (`spec.routing.loadBound`).
 4. **Choice under `model`.**
-   - **Decided for alpha, a science-agent proposal of 30 Oct 2026 that needs the owner's word before merge (HBEP-1):** routing policy is the ModelDeployments of the name (Notes). Our own deployments come first. An attached managed provider takes a request only when no Instance of ours can: none is routable, or every one is at its cap. A conversation then moves to the managed provider and returns at its next turn once its home has room. Among several of our own ModelDeployments, the key's home on one ring over all their routable Instances names the ModelDeployment (Request path). Source of the spill rule: HBEP-7, open question 10 (owner, 29 Oct 2026, PR #14): no spill to a provider that is not attached.
+   - **Decided** (owner decision, 30 Oct 2026): routing policy is the ModelDeployments of the name (Notes). Our own deployments come first. An attached managed provider takes a request only when no Instance of ours can: none is routable, or every one is at its cap. A conversation then moves to the managed provider and returns at its next turn once its home has room. Among several of our own ModelDeployments, the key's home on one ring over all their routable Instances names the ModelDeployment (Request path). Source of the spill rule: HBEP-7, open question 10 (owner, 29 Oct 2026, PR #14): no spill to a provider that is not attached.
    - **Open (blocks beta):** weighting by measured capacity, and whether LLMLab should share load while our Instances have room.
 5. **Retries.**
    - **Decided for alpha** (science-agent decision, 30 Oct 2026; the guard HBEP-7's poison-request risk relies on): the front sends a request again only when no byte of it was written to the upstream: a refused or timed-out connection, or a reused idle connection closed before the write. It sends it once more, to the next Instance on the ring, or on a fresh connection to the same one. A request that reached an engine is never sent again; the client sees its error.
@@ -121,7 +121,7 @@ Routes to LLMLab still pass through LLMLab's own cut and injection. The front ca
    - **Not needed for alpha:** per-deployment and per-worker caps. Workers are the inner router's and the engine's.
    - **Open (blocks beta):** the status LLMLab returns when its shared capacity binds (L-6.3). Alpha returns 503.
 7. **Attribution headers.**
-   - **Decided for alpha, a proposal that needs the owner's word before merge** (HBEP-9 leaves header names to the owner, since they are hard to change): the `x-hpcburst-*` headers under Attribution headers, and the usage log as the attribution log. No body field carries attribution; the engine fingerprint stays in `system_fingerprint` (HBEP-9).
+   - **Decided** (owner decision, 30 Oct 2026; HBEP-9 leaves header names to the owner, since they are hard to change): the `hpcburst-*` headers under Attribution headers, without the old `X-` prefix, and the usage log as the attribution log. No body field carries attribution; the engine fingerprint stays in `system_fingerprint` (HBEP-9).
    - **Not needed for alpha:** naming the worker. An alpha Instance has one; in beta vllm-router does not report which worker answered, and the Instance is the unit HBEP-3 attributes to.
    - **Decided:** the pinned form exists for a managed provider (HBEP-3, open question 2; HBEP-4): `model@<provider>/<deployment-id>` with the catalog entry's managed ID resolves while the Provider's status lists that entry.
 8. **Authentication.** **Decided** (owner decision): clients send the front's client key, which the operator sets and may set to the user's LLMLab key. The front calls LLMLab with the provider's configured upstream key, and an Instance with that Instance's own key (Notes). Admin is the Kubernetes API's (Notes).
@@ -134,7 +134,7 @@ Routes to LLMLab still pass through LLMLab's own cut and injection. The front ca
     - **Not needed for alpha:** comment lines during long prefill. No hop between client and engine in alpha has an idle time-out below 30 min, and LLMLab's 180 s cut sits upstream of the front, where comments from the front cannot reset it.
 11. **Front replicas.** **Not needed for alpha:** alpha has one user and one front (HBEP-11, open question 8). A restart cuts the streams through it and rebuilds the rest from the control plane (Operational readiness 2). **Open (blocks beta):** replicas for the team option, with HBEP-11's open questions 3 and 6.
 12. **The drain window and the maximum request duration.**
-    - **Decided** (science-agent decision, 30 Oct 2026): `maxRequestDuration` is 2 h by default, the deadline www-2027 raised its router to (L-4.1) and the stream length S2 phase A carried with no router and through each configured router. `drainWindow` must be at least `maxRequestDuration` plus `drainMargin` (10 min), so its default is 2 h 10 min. In beta, vllm-router's `--request-timeout-secs` is `maxRequestDuration` plus 1 h, 10,800 s at the defaults, the value S2 ran.
+    - **Decided** (owner decision, 30 Oct 2026, on the science agent's proposal): `maxRequestDuration` is 2 h by default, the deadline www-2027 raised its router to (L-4.1) and the stream length S2 phase A carried with no router and through each configured router. `drainWindow` must be at least `maxRequestDuration` plus `drainMargin` (10 min), so its default is 2 h 10 min. That costs about 4.5% of a 48 h lease, which the owner accepted so that no request under 2 h is cut at a handover. A ModelDeployment with short requests may shorten its own `routing.maxRequestDuration`, and so its Instances' drain window (Draining). In beta, vllm-router's `--request-timeout-secs` is `maxRequestDuration` plus 1 h, 10,800 s at the defaults, the value S2 ran.
     - HBEP-4's default of 30 min was a placeholder "until this HBEP sets it"; it changes to 2 h 10 min. A platform that needs a shorter window lowers both values.
 13. **Reachability.**
     - **Decided:** Instance addresses come from the inventory (HBEP-11). In alpha the front reaches an Instance through the dial-home path HBEP-11 requires, direct or through ssh on port 22. Its dial-home listener also passes `/agent/v1/` through to the lifecycle controller (HBEP-7, HBEP-11).
@@ -232,7 +232,7 @@ HBEP-7 runs the Instance's processes; this HBEP sets what the front needs from t
 Drain rule (the same text in HBEP-3, HBEP-5 and HBEP-7): The framework cannot move a lease end, so an Instance starts draining at the latest at its hard end minus the drain window, whether or not its replacement is ready. Make-before-break is the goal: the controller plans the replacement to be ready before that drain start, and the old Instance never drains before its replacement is ready unless that deadline forces it. If the replacement is late, the old Instance still drains on time, capacity drops, and an event is emitted (HBEP-8).
 
 The front enforces the deadline itself. It reads each Instance's lease end from the control plane (`status.leaseEnd`, HBEP-11), and from the lease end minus the drain window it sends the Instance no new requests, from new conversations or old ones, even if the controller has not marked it `draining`. A drain before that deadline, once the replacement is ready, is the controller's decision (HBEP-7). Keys move to the next target on the ring, and in-flight requests finish.
-- **The window** is the `drainWindow` of the PlatformProfile of the Instance's Provider. A later lease end, once observed, moves the drain start; nothing plans for one (HBEP-3).
+- **The window** is the `drainWindow` of the PlatformProfile of the Instance's Provider, or, when the ModelDeployment sets `routing.maxRequestDuration`, that value plus `drainMargin` if it is shorter. A deployment never lengthens the window. A later lease end, once observed, moves the drain start; nothing plans for one (HBEP-3).
 - **The clock** is the front host's, in UTC.
 - **The release.** At drain start the Instance leaves its balancer group, and its open requests are released from the count (Load bound and cap).
 - **The end.** A request still running when the lease ends is cut. The front ends that stream with an error event and records it as cut by the lease end.
@@ -271,12 +271,12 @@ The proposal of open question 7, on every response, streamed or not, success or 
 
 | Header | Value | When |
 |---|---|---|
-| `x-hpcburst-request-id` | the front's request ID | always |
-| `x-hpcburst-emitter` | `front`, `instance` or `provider` | always |
-| `x-hpcburst-provider` | the Provider's name | once a target is chosen |
-| `x-hpcburst-deployment-id` | the display form, 12 hex characters | once a target is chosen; a managed entry's managed ID |
-| `x-hpcburst-instance` | the Instance's namespace and name, as `<namespace>/<name>` | an Instance of ours |
-| `x-hpcburst-instance-uid` | the Instance's UID, which labels its verification records (HBEP-11) | an Instance of ours |
+| `hpcburst-request-id` | the front's request ID | always |
+| `hpcburst-emitter` | `front`, `instance` or `provider` | always |
+| `hpcburst-provider` | the Provider's name | once a target is chosen |
+| `hpcburst-deployment-id` | the display form, 12 hex characters | once a target is chosen; a managed entry's managed ID |
+| `hpcburst-instance` | the Instance's namespace and name, as `<namespace>/<name>` | an Instance of ours |
+| `hpcburst-instance-uid` | the Instance's UID, which labels its verification records (HBEP-11) | an Instance of ours |
 
 An error the front raises before it chooses a target carries only the first two, with emitter `front`. A response without the headers is a failure of the front (Operational readiness 3). Each response's usage record holds the same facts, keyed by request ID, so dropped headers lose nothing (HBEP-9).
 
@@ -328,6 +328,7 @@ Per deployment, in the ModelDeployment's `spec.routing` (an amendment to HBEP-11
 | `loadBound.tight` | `"1.25"` | c while at least the desired Instances are ready; the cap is in force |
 | `loadBound.loose` | `"2.0"` | c while fewer are ready; no cap |
 | `instanceCap` | from `max-num-seqs` times workers | the per-Instance cap at full membership |
+| `maxRequestDuration` | the front's (2 h) | shorter only: the deployment's own request deadline, which also shortens its Instances' drain window (Draining) |
 
 Elsewhere: `drainWindow` in the PlatformProfile (HBEP-4), 2 h 10 min by this HBEP; in beta, the router's and workers' launch settings under Inside an Instance.
 
