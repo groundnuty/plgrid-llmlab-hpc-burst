@@ -8,7 +8,9 @@
 # 2 s samples (gzipped), and the before/after metrics reduced to the vllm: counters and gauges the
 # analysis reads; per regime the placement logs (gzipped), kv-*.txt and the listener lists; env.txt.
 # Not kept: worker, router, EPP and Envoy logs and configs (they carry paths and are large).
-# The script refuses to finish if a kept file contains a path under /net/, /home/ or /tmp/, or "plg".
+# The script refuses to finish unless pubcheck.py passes over everything it kept (private paths, account
+# names and non-loopback addresses, in compressed contents too). Run pubcheck.py again on the whole diff
+# before every push: it is the same check, applied to files collect.sh never saw.
 set -euo pipefail
 RAW=${1:?raw results dir}; DEST=${2:?destination}
 mkdir -p "$DEST/arms"
@@ -20,7 +22,7 @@ for a in "$RAW"/arms/*/; do
   for f in "$a"/before-w*.prom "$a"/after-w*.prom; do [[ -f $f ]] && grep -E "$KEEP_METRICS" "$f" > "$d/$(basename "$f")" || true; done
 done
 for f in "$RAW"/placement-*.tsv; do [[ -f $f ]] && gzip -9 -c "$f" > "$DEST/$(basename "$f").gz"; done
-for f in "$RAW"/kv-*.txt "$RAW"/env.txt; do [[ -f $f ]] && cp "$f" "$DEST/"; done
+for f in "$RAW"/kv-*.txt "$RAW"/env.txt "$RAW"/failures.txt; do [[ -f $f ]] && cp "$f" "$DEST/"; done
 # Listener lists: keep loopback addresses; any other IPv4 address (the node's) becomes <node-address>.
 scrub() { sed -E 's/\b(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])){3}\b/<ip>/g; s/<ip>:/<node-address>:/g' "$1" | sed -E 's/^(.*) <node-address>:/\1 <node-address>:/'; }
 for f in "$RAW"/listeners-*.txt "$RAW"/arms/*/listeners.txt; do
@@ -28,10 +30,5 @@ for f in "$RAW"/listeners-*.txt "$RAW"/arms/*/listeners.txt; do
   rel=${f#"$RAW"/}; mkdir -p "$DEST/$(dirname "$rel")"
   sed -E 's/(^| )127\.0\.0\.1:/\1LOOPBACK4:/' "$f" | scrub /dev/stdin | sed 's/LOOPBACK4:/127.0.0.1:/' > "$DEST/$rel"
 done
-ip_leak() { grep -o -E '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' | grep -v -x '127.0.0.1' | head -1; }
-for f in $(find "$DEST" -type f); do
-  if [[ $f == *.gz ]]; then txt() { zcat "$f"; }; else txt() { cat "$f"; }; fi
-  if txt | grep -q -E '/net/|/home/|/tmp/|plg'; then echo "collect: $f names a path or account" >&2; exit 1; fi
-  leak=$(txt | ip_leak || true); [[ -z $leak ]] || { echo "collect: $f holds a non-loopback address" >&2; exit 1; }
-done
+python3 -I -B "$(dirname "$0")/pubcheck.py" --ips "$DEST" || { echo "collect: the publication check refused $DEST" >&2; exit 1; }
 echo "collected into $DEST"
