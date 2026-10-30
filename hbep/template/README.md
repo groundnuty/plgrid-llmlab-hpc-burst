@@ -70,6 +70,27 @@ Answer each question.
 
 ## Alternatives
 
+## Prior art and reuse
+
+What this HBEP reuses or borrows, and where it came from. Use "None" for an empty table.
+
+### Community software reused
+
+| Component | Origin (project, URL) | Licence | How used (dependency, copied code, optional) |
+|---|---|---|---|
+
+### Designs and published work borrowed
+
+| Idea | Origin (project, paper or document) | Where it lands here |
+|---|---|---|
+
+### Field lessons answered
+
+Until HBEP-15 defines the lessons catalogue, write `pending` as the ID and state the lesson in general terms (HBEP-1, Content rules). The IDs are filled in later as an erratum.
+
+| Lesson | Lesson ID (from the lessons catalogue, HBEP-15) | How this HBEP answers it |
+|---|---|---|
+
 ## Implementation history
 
 - YYYY-MM-DD: proposed (provisional).
