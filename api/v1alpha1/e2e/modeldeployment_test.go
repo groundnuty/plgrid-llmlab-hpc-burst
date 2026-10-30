@@ -424,12 +424,12 @@ func TestDeploymentStatusHoldsFullIDs(t *testing.T) {
 		t.Run("refuse the 12-character form in "+what, func(t *testing.T) {
 			got := get()
 			set(got, short)
-			requireRefused(t, c.Status().Update(bg(), got), "id")
+			requireRefused(t, c.Status().Update(bg(), got), "should match '^[0-9a-f]{64}$'")
 		})
 		t.Run("refuse uppercase hex in "+what, func(t *testing.T) {
 			got := get()
 			set(got, v1alpha1.FullDeploymentID(strings.ToUpper(fullID)))
-			requireRefused(t, c.Status().Update(bg(), got), "id")
+			requireRefused(t, c.Status().Update(bg(), got), "should match '^[0-9a-f]{64}$'")
 		})
 		t.Run("accept the full ID in "+what, func(t *testing.T) {
 			got := get()
