@@ -109,3 +109,35 @@ func TestHarness_KillStrictRequiresASigkill(t *testing.T) {
 		})
 	}
 }
+
+// TerminatedBy must say how the child really ended, so that a crash test can tell a SIGKILL
+// from a child that died of something else (a SIGTERM, a panic, an exit status).
+func TestHarness_TerminatedByReportsHowTheChildEnded(t *testing.T) {
+	t.Run("sigterm_is_not_sigkill", func(t *testing.T) {
+		c, err := harness.Spawn("sleep", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = c.Kill() })
+		if _, err := c.WaitLine("READY", 10*time.Second); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Cmd.Process.Signal(syscall.SIGTERM); err != nil {
+			t.Fatal(err)
+		}
+		sig, err := c.TerminatedBy()
+		if err != nil || sig != syscall.SIGTERM {
+			t.Fatalf("TerminatedBy = %v, %v, want SIGTERM", sig, err)
+		}
+	})
+	t.Run("exit_status_is_not_a_signal", func(t *testing.T) {
+		c, err := harness.Spawn("exit3", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = c.Kill() })
+		if sig, err := c.TerminatedBy(); err == nil {
+			t.Fatalf("a child that exited with status 3 was reported as terminated by %v", sig)
+		}
+	})
+}
