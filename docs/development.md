@@ -13,6 +13,8 @@ Code under `spikes/` and `third_party/forked/*` is not part of this module.
 | `api/v1alpha1/` | Go types for the custom resources, with kubebuilder and CEL markers | HBEP-3, HBEP-11 |
 | `config/crd/` | CRD manifests generated from `api/`, committed. #40 adds `hack/verify-generated.sh` to check they match a fresh generation. | HBEP-11 |
 | `pkg/deploymentid/` | deployment ID, scheme `v1`: canonical object, RFC 8785 bytes, SHA-256 | HBEP-3 |
+| `pkg/provider/` | the provider core interface: operations, outcomes, error kinds, the capability flag, the Slurm phase table. `fake/`: an in-memory Slurm (`Batch`) and a stand-in for a Provider's controller (`Controller`) | HBEP-4 |
+| `pkg/agentapi/` | the agent protocol, standard library only: wire types, HTTP framing, `agent.json`, the shared file layout, the certificate pin, and the `Backend` seam. `fake/`: a fake agent and a fake `Backend` | HBEP-7 |
 | `internal/launcher/` | starts and supervises the single-user control-plane host (user-level k3s); the only code that starts k3s | HBEP-11 |
 | `cmd/hpcburst/` | the `hpcburst` command (`up`, `down`, `status`, `upgrade`) | HBEP-11 |
 | `hack/` | scripts for generation, verification and pinned tools | |
@@ -20,6 +22,63 @@ Code under `spikes/` and `third_party/forked/*` is not part of this module.
 | `spikes/<id>/` | spike code and results; each Go spike is its own module | |
 
 `pkg/` is for packages other components import. `internal/` is for packages only this module uses.
+
+## Controllers and the agent
+
+### Process layout
+
+- **One controller binary** in alpha, `cmd/hpcburst-controller` (#61 owns its `main`). `hpcburst up` starts and supervises it, and restarts it when it exits (#61, in `internal/launcher`).
+- **Inside it, one controller-runtime manager per Provider** (HBEP-4, Two controllers; HBEP-11, Controllers).
+  - Each runs crossplane-runtime's managed reconciler over the Allocations naming its Provider.
+  - Each has its own leader `Lease`, `v1alpha1.ProviderLeaseName(<provider>)`.
+  - A supervisor starts a manager when a Provider appears and stops it when the Provider goes, so one Provider's failure does not stop the others (#59 owns it, and `main` calls it).
+- **The lifecycle controller** is one more manager in the same binary (#61), with the `Lease` `v1alpha1.LeaseLifecycle`. Every `Lease` lives in `v1alpha1.ControllerNamespace`, which the launcher creates.
+- **The agent API** runs inside the lifecycle controller's process:
+  - #60's HTTP server handles TLS, the routes, authentication and the long poll;
+  - it calls the lifecycle controller through `agentapi.Backend`, which #61 implements.
+- **The allocation agent** is a separate static binary, `cmd/hb-agent` (#60), built for `aarch64` and `x86_64`, that runs inside the job.
+
+### Package boundaries
+
+| Path | Owner | What |
+|---|---|---|
+| `api/v1alpha1/`, `config/crd/`, `pkg/provider/`, `pkg/agentapi/` | contracts owner | shared types, interfaces and fakes |
+| `internal/slurm/` | #59 | `provider.Batch` and `provider.ProfileReader` for Slurm over ssh |
+| `internal/providerctl/` | #59 | the managed reconciler and the per-Provider manager supervisor |
+| `internal/agentserver/` | #60 | the agent API's HTTP server, calling `agentapi.Backend` |
+| `internal/agent/`, `cmd/hb-agent/` | #60 | the allocation agent |
+| `internal/lifecycle/` | #61 | the lifecycle manager, its verification controller and the `Backend` |
+| `cmd/hpcburst-controller/`, `internal/launcher/` | #61 | the controller binary, and supervising it from `hpcburst up` |
+
+The lifecycle controller never imports `internal/slurm` or `internal/providerctl`. It acts on providers only through Allocation objects, and reads Allocation and Provider status (HBEP-7, Controllers). Its tests drive `pkg/provider/fake.Controller` until the real provider lands. #59's reconciler tests use `fake.Batch` for the protocol and S4's fake Slurm for the dialect.
+
+### Single writer of the API
+
+- **Only the contracts owner edits `api/` and `config/crd/`.** A builder who needs a field, a condition type or a reason asks for it and gets a small PR. Builders never regenerate or hand-edit the CRDs.
+- **Each field of each object has one writer.** Every write carries a resourceVersion precondition: an Update, or a patch with an optimistic lock. A conflict means re-read, never overwrite (HBEP-7, open question 11).
+
+| Object, part | Writer |
+|---|---|
+| Allocation: creation, deletion, spec, labels | lifecycle controller |
+| Allocation: annotations `external-name`, `submission`, `job-id`, `hold-lifted`; finalizer `cancel-all`; all of status, including `status.retention` (a mirror of the spec) | the Provider's controller (crossplane-runtime rewrites the whole status) |
+| Allocation: annotation `abandon-attempt` | an operator |
+| Instance: creation, deletion, spec, status, annotations (`restart-<part>`, `predecessor`), finalizer `drain` | lifecycle controller, including its `Backend` |
+| ModelDeployment status | lifecycle controller |
+| Provider status | the Provider's controller. One exception: the lifecycle controller writes only the condition `DialHomeUnreachable`, and the Provider's controller keeps a condition it does not own |
+| identity and verification records | lifecycle controller (its verification controller) |
+
+### Runtime conventions
+
+- **The controller's credentials directory** is mode 700 under the launcher's state directory.
+  - `agentapi.AllocationCredentialPath(dir, <Allocation UID>)` holds each Allocation's credential: 64 lowercase hex characters, no newline, mode 600. The lifecycle controller writes it as soon as the create returns the UID. Until the file exists, the provider's Create waits and requeues: it neither submits nor marks the attempt Rejected. The provider reads the file to stage it (`alloc/<tag>/credential`), and the agent API reads it to authenticate.
+  - `agentapi.InstanceKeyPath(dir, <Instance UID>)` holds each Instance's key, which the front reads.
+- **Agent builds** are a directory of `agentapi.AgentBuildName(<cpuArch>)` files. The lifecycle controller sets `agentDigest` to the SHA-256 of the build for the partition's `cpuArch`. The provider finds the file by that digest and stages it at `agentapi.StagedAgentPath(digest)`.
+- **`agent.json`** is `agentapi.AgentConfig`, written by the provider from the launcher's front settings, the agent endpoint's port and certificate pin, and the paths it resolved.
+  - In ssh mode its user is the user who runs the controller.
+  - The launcher creates the endpoint's certificate and key, and binds the endpoint to loopback on a port from its own block.
+- **Time limits** are durations in whole minutes. The lifecycle controller rounds `min(maxTime, leaseLimit)` down to a minute, and the provider refuses any other value before a call.
+- **Restart generations** live in Instance annotations, `v1alpha1.RestartGenerationAnnotation(part)`. Part is `instance` for the whole Instance, or `worker-<i>`. The controller emits the restart's event first, then raises the generation by compare-and-swap.
+- **Verification records** are one per verification, `ver-<instance UID>-<generation>`, with the generation counting from 1 (`v1alpha1.NewVerificationRecord`). The Instance's status names the latest. A record that already exists is read, never rewritten.
 
 ## Pinned versions
 
@@ -63,7 +122,7 @@ The launcher's block is 29220 to 29239 and the suite refuses a kubeconfig that p
 
 ## API field names
 
-Every field of the CRDs is camelCase, as the Kubernetes API conventions ask (owner decision, PR #48): `holdRelease`, `lostGrace`, `imageDigest`, `gpuModel`, `timeZone`, `jobName.maxLength`. HBEP-3's hash object keeps its snake_case keys (`image_digest`, `gpu_model`, `cpu_arch`); `pkg/deploymentid` maps the API's fields onto them, and nothing in the API changes the hash. `TestEveryCRDFieldIsCamelCase` scans the committed manifests. HBEP text that writes a field in snake_case (`hold_release` in HBEP-11) means the camelCase field.
+Every field of the CRDs is camelCase, as the Kubernetes API conventions ask (owner decision, PR #48): `holdRelease`, `lostGrace`, `imageDigest`, `gpuModel`, `timeZone`, `jobName.maxLength`, `cpusPerGpu`, `memPerGpu`, `gpusPerNode`. HBEP-3's hash object keeps its snake_case keys (`image_digest`, `gpu_model`, `cpu_arch`); `pkg/deploymentid` maps the API's fields onto them, and nothing in the API changes the hash. `TestEveryCRDFieldIsCamelCase` scans the committed manifests. HBEP text that writes a field in snake_case (`hold_release` in HBEP-11) means the camelCase field.
 
 ## Rules for every change
 

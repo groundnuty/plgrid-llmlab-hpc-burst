@@ -93,7 +93,9 @@ func ContainerEngineSocket(worker string) string { return path.Join(ContainerRun
 // AllocationCredentialPath is where the lifecycle controller keeps an
 // Allocation's credential: <dir>/allocations/<Allocation UID>, mode 600, where
 // dir is the controller's credentials directory (HBEP-7, Provisioning). The
-// provider reads it to stage it, and the agent API's server to authenticate.
+// lifecycle controller writes it once the create has returned the UID; the
+// provider waits for it before it submits (docs/development.md), reads it to
+// stage it, and the agent API's server reads it to authenticate.
 func AllocationCredentialPath(dir, allocationUID string) string {
 	return filepath.Join(dir, "allocations", allocationUID)
 }

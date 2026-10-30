@@ -498,8 +498,10 @@ spec:
                 type: integer
               retention:
                 description: |-
-                  Retention shows the retention mode the controller applies; an unset mode
-                  in the spec reads as Keep.
+                  Retention shows the retention mode that applies; an unset mode in the
+                  spec reads as Keep. The Provider's controller, the only writer of
+                  Allocation status, mirrors it from the spec (docs/development.md,
+                  Writers); the lifecycle controller applies the policy.
                 properties:
                   effectiveMode:
                     description: |-

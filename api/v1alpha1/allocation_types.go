@@ -396,8 +396,10 @@ type AllocationStatus struct {
 	// +optional
 	LastReconcileTime *metav1.Time `json:"lastReconcileTime,omitempty"`
 
-	// Retention shows the retention mode the controller applies; an unset mode
-	// in the spec reads as Keep.
+	// Retention shows the retention mode that applies; an unset mode in the
+	// spec reads as Keep. The Provider's controller, the only writer of
+	// Allocation status, mirrors it from the spec (docs/development.md,
+	// Writers); the lifecycle controller applies the policy.
 	//
 	// +optional
 	Retention *RetentionStatus `json:"retention,omitempty"`

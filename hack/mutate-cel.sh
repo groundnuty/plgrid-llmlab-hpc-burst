@@ -48,6 +48,7 @@ allocations:$.spec.retentionPolicy#0|^TestAllocationRetentionPolicyRule$
 allocations:$.spec.retentionPolicy#1|^TestAllocationRetentionUntilGoesWithKeep$
 instances:$.spec#0|^TestInstanceSpecIsImmutable$
 instances:$.spec#1|^TestInstanceIdentityReference$
+modeldeployments:$.spec#0|^TestServedDeploymentNeedsAWorkload$
 modeldeployments:$.spec.providers#0|^TestModelDeploymentProvidersAndInstances$
 modeldeployments:$.spec.retentionPolicy#0|^TestRetentionPolicy$
 modeldeployments:$.spec.retentionPolicy#1|^TestRetentionPolicy$
