@@ -34,7 +34,7 @@ Set on 2026-10-30, before the hashing job was submitted:
    - per file: wall time, process CPU time, and the difference in `/proc/self/io` `rchar` and `read_bytes` before and after (the read of `/proc/self/io` itself is subtracted from `rchar`);
    - symlinks (a cache snapshot is made of them) are followed, and results are keyed by the path inside the snapshot. The name of the blob a symlink points to is never used: in a Hugging Face cache it equals the Hub's hash, so using it would compare the Hub with itself.
 4. **model_signing.** `ms_manifest.py` builds a file-mode manifest with model-signing 1.1.1 on a `uv`-managed Python 3.11 kept in the job's scratch directory (no root; the cluster's `Python/3.11.5` module is built for the compute nodes' newer glibc and does not start on the login node; it was not tried on a compute node). It passes the explicit list of files and compares the digests with the plain pass.
-5. **Single-stream sweep, cheap-check probe, CPU ceiling.** One process reads one ~4 GB shard with a 1, 8 and 64 MiB buffer, and two further times with the cache warm; a stat-only pass over both checkpoints before and after hashing; a 4 KiB file changed in place four ways on Lustre; SHA-256 of zeroed memory with no I/O.
+5. **Single-stream sweep, cheap-check probe, CPU ceiling.** One process reads one ~4 GB shard each with a 1, 8 and 64 MiB buffer (evicted afterwards), and a fourth shard twice in a row without eviction, the second time from the page cache; a stat-only pass over both checkpoints before and after hashing; a 4 KiB file changed in place four ways on Lustre; SHA-256 of zeroed memory with no I/O.
 6. **Compare.** `compare.py` checks every file's SHA-256 against `lfs.sha256` and, for non-LFS files, the git blob SHA-1 against the Hub's `oid`. `summarize_run.py` produces the tables below.
 
 Run the tests (no network, no cluster):
@@ -170,7 +170,7 @@ One 4 KiB file changed in place on Lustre, four ways (`probe_cheap_check.py`):
 
 ## Recommendation
 
-**Rehash every file of the checkpoint at every Instance start. Do not add a rehash-at-staging-plus-cheap-check design on account of cost.**
+**On Helios x86 CPU nodes: rehash every file of the checkpoint at every Instance start. Do not add a rehash-at-staging-plus-cheap-check design on account of cost. Confirm with one start on a GH200 node before HBEP-9 relies on this; verification runs on the GPU node, which was not measured.**
 
 Against the budget set before measuring (at most 5 minutes up to 170 GB on 4 CPUs): the largest staged checkpoint, 166.9 GB, took 46.5 s and 77.2 s in two runs, 16% and 26% of the budget. The 33.3 GB checkpoint took 22.5 s and 32.6 s. The decision rule committed with the budget gives the full rehash. The extra mechanism of a staging-time record plus a size-and-mtime check would also be weaker: it does not see an in-place edit that keeps the size and restores the mtime, and it does not see one made in the same second as the recorded stat.
 

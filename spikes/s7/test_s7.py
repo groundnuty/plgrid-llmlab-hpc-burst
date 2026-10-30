@@ -20,6 +20,7 @@ sys.path.insert(0, HERE)
 import compare  # noqa: E402
 import fetch_ref  # noqa: E402
 import hash_tree  # noqa: E402
+import summarize_run  # noqa: E402
 
 HASH_TREE = os.path.join(HERE, "hash_tree.py")
 SHA256_ABC = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
@@ -217,6 +218,53 @@ class RpcStatsTests(unittest.TestCase):
         self.assertEqual(got["osc_read_bytes_high"], (10 * 1 + 5 * 4 + 2 * 1024 + 4 * 2) * 4096)
         # lower: 10 one-page, 5 of at least 3, 2 of at least 513, 4 of at least 2 pages
         self.assertEqual(got["osc_read_bytes_low"], (10 * 1 + 5 * 3 + 2 * 513 + 4 * 2) * 4096)
+
+
+class PublishTests(TempDirCase):
+    """summarize_run.publish() is the only step between raw run files and the public repository."""
+
+    def fixture_run(self):
+        run, refs = self.p("run"), self.p("refs")
+        os.makedirs(run)
+        os.makedirs(refs)
+        private_row = {"kind": "file", "path": "model.safetensors", "size": 3, "sha256": SHA256_ABC,
+                       "git_blob_sha1": None, "bytes_hashed": 3, "wall_s": 0.5, "cpu_s": 0.4, "rchar": 3,
+                       "read_bytes": 0, "done_at_s": 0.6, "ino": 144115238826934273, "pid": 424242,
+                       "mtime_ns": 1761000000123456789, "ctime_ns": 1761000001123456789,
+                       "changed_during_read": False}
+        summary = {"kind": "summary", "label": "gemma", "files": 1, "wall_s": 0.6}
+        for name in ("hash-gemma.jsonl", "sweep-8MiB.jsonl"):
+            with open(os.path.join(run, name), "w") as f:
+                f.write(json.dumps(private_row) + "\n" + json.dumps(summary) + "\n")
+        with open(os.path.join(run, "stat-before-gemma.jsonl"), "w") as f:
+            f.write(json.dumps({"kind": "file", "path": "a", "size": 3, "ino": 987654321, "mtime_ns": 5,
+                                "ctime_ns": 6}) + "\n")
+            f.write(json.dumps({"kind": "summary", "label": "gemma", "mode": "stat-only", "files": 1,
+                                "wall_s": 0.001}) + "\n")
+        with open(os.path.join(run, "env.txt"), "w") as f:
+            f.write("date_utc=2026-10-30T08:41:08Z\nnode=x1234c0s0b0n0\nkernel=5.14.0\n")
+        for label in ("gemma", "deepseek"):  # deepseek was never hashed in this run
+            with open(os.path.join(refs, label + ".json"), "w") as f:
+                json.dump({"repo": "example/" + label, "revision": "0" * 40, "files": []}, f)
+        return run, refs
+
+    def test_no_host_identifiers_survive_and_only_hashed_labels_are_copied(self):
+        run, refs = self.fixture_run()
+        out = self.p("public")
+        summarize_run.publish(run, refs, out)
+        text = ""
+        for dirpath, _, names in os.walk(out):
+            for name in names:
+                with open(os.path.join(dirpath, name)) as f:
+                    text += f.read()
+        for private in ("144115238826934273", "424242", "1761000000123456789", "1761000001123456789",
+                        "987654321", "x1234c0s0b0n0", "node=", '"ino"', '"pid"', "mtime_ns", "ctime_ns"):
+            self.assertNotIn(private, text)
+        self.assertIn(SHA256_ABC, text)  # the public part is kept
+        self.assertEqual(os.listdir(os.path.join(out, "hub")), ["gemma.json"])
+        self.assertIn("kernel=5.14.0", text)
+        with open(os.path.join(out, "stat-timings.json")) as f:
+            self.assertEqual(json.load(f)["stat-before-gemma"]["wall_s"], 0.001)
 
 
 class FetchRefTests(unittest.TestCase):
