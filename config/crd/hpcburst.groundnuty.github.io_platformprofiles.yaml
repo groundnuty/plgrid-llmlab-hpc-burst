@@ -1,0 +1,237 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: platformprofiles.hpcburst.groundnuty.github.io
+spec:
+  group: hpcburst.groundnuty.github.io
+  names:
+    categories:
+    - hpcburst
+    kind: PlatformProfile
+    listKind: PlatformProfileList
+    plural: platformprofiles
+    singular: platformprofile
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.providerKind
+      name: ProviderKind
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          PlatformProfile is what is true for everyone on a platform, as data
+          (HBEP-3, HBEP-4). All Providers of one platform share one.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              PlatformProfileSpec is the platform's kind and its profile data. HBEP-4
+              owns the schema. For alpha the fields that the Slurm provider and the
+              deployment ID read are typed; the rest of the profile is an untyped block.
+              The typed fields carry the names HBEP-11 gives them, in camelCase like every
+              field of the API (HBEP-11's hold_release is holdRelease), and the scheduling
+              facts of spikes S4 and S5 are typed beside them (HBEP-11, API, PlatformProfile
+              schema). A fact the platform does not state, or one
+              that does not apply to its kind, is absent: an absent bool is unknown, not
+              false.
+            properties:
+              holdRelease:
+                default: false
+                description: |-
+                  HoldRelease says whether a plain user's sbatch --hold is honoured and
+                  that user can lift it. It is verified per platform. False runs the
+                  fallback mode of spike S4 (HBEP-7, open question 11).
+                type: boolean
+              inflightWindow:
+                description: |-
+                  InflightWindow is how long an unresolved submission attempt is waited
+                  on. It must exceed the worst remote sbatch time, because a local timeout
+                  does not stop a remote sbatch. The platform's measured value is set
+                  here; there is no default.
+                maxLength: 63
+                pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                type: string
+              jobCommentAccounted:
+                description: |-
+                  JobCommentAccounted says whether accounting keeps the job comment. Where
+                  it does not, the job name is the only tag that survives in accounting
+                  (spike S4).
+                type: boolean
+              jobName:
+                description: JobName holds the platform's job-name rules.
+                properties:
+                  maxLength:
+                    description: |-
+                      MaxLength is the longest job name the platform accepts. Absent when the
+                      platform states none.
+                    format: int32
+                    maximum: 4096
+                    minimum: 1
+                    type: integer
+                  pattern:
+                    description: |-
+                      Pattern is a regular expression (RE2) that a job name matches, when the
+                      platform restricts the characters of a name. Absent when it does not.
+                    maxLength: 256
+                    minLength: 1
+                    type: string
+                type: object
+              jsonDataParser:
+                description: |-
+                  JSONDataParser is the version of the scheduler's JSON output, for
+                  example "data_parser/v0.0.42" for Slurm. A plugin parses only the
+                  versions it knows.
+                maxLength: 64
+                minLength: 1
+                pattern: ^[A-Za-z0-9][A-Za-z0-9_./-]*$
+                type: string
+              lostGrace:
+                default: 2m
+                description: |-
+                  LostGrace is how long a recorded job may be absent from both the queue
+                  listing and accounting before it is reported Lost.
+                maxLength: 63
+                pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                type: string
+              minJobAge:
+                description: |-
+                  MinJobAge is how long a finished job stays in the queue listing before
+                  the scheduler purges it (for Slurm, MinJobAge). A plugin that reads only
+                  the queue loses the final state of a job older than this, so it asks
+                  accounting (HBEP-4).
+                maxLength: 63
+                pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                type: string
+              partitions:
+                description: Partitions lists the accelerator class of each partition.
+                items:
+                  description: |-
+                    PartitionProfile is what the framework reads of one partition: its name and
+                    its accelerator class (HBEP-11, API, PlatformProfile schema).
+                  properties:
+                    cpuArch:
+                      description: CPUArch is the CPU architecture, for example "aarch64"
+                        or "x86_64".
+                      maxLength: 63
+                      minLength: 1
+                      type: string
+                    gpuModel:
+                      description: GPUModel is the GPU model. A partition without
+                        GPUs names "none".
+                      maxLength: 63
+                      minLength: 1
+                      type: string
+                    name:
+                      description: Name of the partition.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                  required:
+                  - cpuArch
+                  - gpuModel
+                  - name
+                  type: object
+                maxItems: 256
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              profile:
+                description: |-
+                  Profile is the rest of the profile, untyped: the facts that are not typed
+                  above, with the provenance envelope of each (value, method, source and
+                  date; HBEP-4, open question 7), until HBEP-4 fixes the schema.
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+              providerKind:
+                description: |-
+                  ProviderKind is managed, batch or static: the kind of provider the
+                  platform offers (HBEP-3, Vocabulary, Provider). It is not the object's
+                  own kind, which is PlatformProfile.
+                enum:
+                - managed
+                - batch
+                - static
+                type: string
+              requeueDefault:
+                description: |-
+                  RequeueDefault says whether the scheduler requeues a job by default (for
+                  Slurm, JobRequeue). The framework submits with --no-requeue either way;
+                  the fact records what a job without it would do (HBEP-4).
+                type: boolean
+              timeZone:
+                description: |-
+                  TimeZone is the IANA name of the time zone in which the scheduler prints
+                  local times, for example "Europe/Warsaw" or "UTC". A plugin that has to
+                  parse a text time uses it, and converts every time to UTC; epoch fields
+                  need no zone (HBEP-4, local time in scheduler output).
+                maxLength: 64
+                minLength: 1
+                pattern: ^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+)*$
+                type: string
+              unknownBound:
+                default: 10m
+                description: |-
+                  UnknownBound is how long, in fallback mode, an Unknown attempt may stay
+                  unresolved before an operator is asked.
+                maxLength: 63
+                pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                type: string
+            required:
+            - providerKind
+            type: object
+            x-kubernetes-validations:
+            - message: jobName.maxLength must allow the job tag's 56 characters (HBEP-3,
+                Allocation and job identity)
+              rule: '!has(self.jobName) || !has(self.jobName.maxLength) || self.jobName.maxLength
+                >= 56'
+          status:
+            description: PlatformProfileStatus is the observed state of a PlatformProfile.
+            properties:
+              lastChecked:
+                description: LastChecked is when the profile's facts were last checked.
+                format: date-time
+                type: string
+              lastReconcileTime:
+                description: LastReconcileTime is when the controller last reconciled
+                  the object.
+                format: date-time
+                type: string
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the metadata.generation the controller last
+                  reconciled.
+                format: int64
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
