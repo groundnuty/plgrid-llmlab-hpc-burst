@@ -26,9 +26,10 @@ permissions:
   contents: read
 
 # A new push to a pull request cancels the run in progress for it. A push to main is never
-# cancelled: every commit on main keeps its own result.
+# cancelled: its group is its own commit, so every commit on main keeps its own result (a shared
+# group would let a newer waiting run replace an older waiting one).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
