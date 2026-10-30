@@ -10,7 +10,7 @@ Design decisions for this framework are made as HBEPs, modelled on Kubernetes En
 | [4](0004-provider-interface/README.md) | Provider interface and profiles | implementable | none |
 | [5](0005-llmlab-compatible-front/README.md) | LLMLab-compatible front | provisional | none |
 | [6](0006-instance-reachability/README.md) | Instance reachability | provisional | none |
-| [7](0007-lifecycle-controller/README.md) | Lifecycle controller | provisional | none |
+| [7](0007-lifecycle-controller/README.md) | Lifecycle controller | implementable | none |
 | [8](0008-observability-and-events/README.md) | Observability and events | provisional | none |
 | [9](0009-identity-and-attribution/README.md) | Identity and attribution | provisional | none |
 | [10](0010-agent-primitives/README.md) | Agent primitives | provisional | none |
