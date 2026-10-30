@@ -93,6 +93,10 @@ type TailConfig struct {
 	Store     CursorStore
 	SaveEvery int           // persist the cursor after this many handled records (default 1)
 	IdleCheck time.Duration // how long to wait for a message before checking for a gap (default 500ms)
+	// PullMaxMessages is how many messages the client may hold ahead of the handler
+	// (the nats.go default is 500). A slow subscriber holds that many events in memory,
+	// so retention reaches it only after it has worked through them.
+	PullMaxMessages int
 }
 
 // Tail delivers every record after the stored cursor, in stream order, on an
@@ -137,7 +141,11 @@ func tail(ctx context.Context, js jetstream.JetStream, cfg TailConfig, h Handler
 	if err != nil {
 		return err
 	}
-	it, err := cons.Messages()
+	var popts []jetstream.PullMessagesOpt
+	if cfg.PullMaxMessages > 0 {
+		popts = append(popts, jetstream.PullMaxMessages(cfg.PullMaxMessages))
+	}
+	it, err := cons.Messages(popts...)
 	if err != nil {
 		return err
 	}

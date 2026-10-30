@@ -97,6 +97,52 @@ func TestGap_Durable_SlowSubscriber_MaxMsgs(t *testing.T) {
 	t.Logf("RESULT slow durable subscriber: handled %d, gap-marked %d sequences in %d markers, of %d acknowledged", handled, gapped, countGaps(recs), len(acks))
 }
 
+// slowTail runs a stored-cursor subscriber with a slow handler while the publisher
+// outruns retention, and checks the coverage contract.
+func slowTail(t *testing.T, pull int) (handled, gapped, markers int, acks []acked) {
+	n, _ := inProcNode(t, jsnode.SyncAlways)
+	js := connect(t, n.URL())
+	ctx := ctxT(t, 120*time.Second)
+	if _, err := evlayer.EnsureStream(ctx, js, evlayer.StreamOptions{Name: streamName, MaxMsgs: gapLimit}); err != nil {
+		t.Fatal(err)
+	}
+	cur := evlayer.FileCursor{Path: scratchDir(t, "cursor") + "/cursor.json"}
+	c := &collector{delay: 15 * time.Millisecond}
+	runCtx, stop := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() {
+		done <- evlayer.Tail(runCtx, js, evlayer.TailConfig{Stream: streamName, Store: cur, PullMaxMessages: pull}, c.handle)
+	}()
+	acks = publishConcurrent(ctx, t, js, "s", 600, 8)
+	assertLimitReached(t, js, acks)
+	waitFor(t, 90*time.Second, "the subscriber to drain", func() bool { return c.maxCovered() >= maxSeq(acks) })
+	stop()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	recs := c.snapshot()
+	handled, gapped = assertCoverage(t, recs, acks, 1)
+	return handled, gapped, countGaps(recs), acks
+}
+
+// Acceptance test 2 (stored cursor): a slow live subscriber is overtaken by retention.
+// The client holds only 5 messages ahead, as the durable test does with Batch 5.
+func TestGap_Tail_SlowSubscriber_MaxMsgs(t *testing.T) {
+	handled, gapped, markers, acks := slowTail(t, 5)
+	if gapped == 0 {
+		t.Fatal("retention evicted unread messages but the subscriber saw no gap marker")
+	}
+	t.Logf("RESULT slow stored-cursor subscriber (5 ahead): handled %d, gap-marked %d sequences in %d markers, of %d acknowledged", handled, gapped, markers, len(acks))
+}
+
+// Finding: with the default client buffer (500 messages) a slow subscriber has already
+// pulled most of the stream into memory when retention evicts it, so it sees few or no
+// gaps while coverage still holds. Nothing is lost; the eviction simply has not reached it.
+func TestGap_Tail_SlowSubscriber_DefaultBuffer_Finding(t *testing.T) {
+	handled, gapped, markers, acks := slowTail(t, 0)
+	t.Logf("RESULT slow stored-cursor subscriber (default buffer of 500): handled %d, gap-marked %d sequences in %d markers, of %d acknowledged; coverage exact", handled, gapped, markers, len(acks))
+}
+
 func countGaps(recs []rec) int {
 	n := 0
 	for _, r := range recs {

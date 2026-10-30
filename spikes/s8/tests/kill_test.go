@@ -178,12 +178,12 @@ func TestKill_DefaultSync_LosesNoAckedMessage(t *testing.T) {
 }
 
 // Positive control: persist_mode async acknowledges before the write, so SIGKILL
-// can lose acknowledged messages. This shows the harness can see a loss. It never
-// fails the suite; the result is logged.
+// can lose acknowledged messages. This shows the harness can see a loss, so it fails
+// when it sees none.
 func TestKill_Control_AsyncPersist_CanLose(t *testing.T) {
 	st := killLoop(t, jsnode.SyncDefault, true, envInt("S8_KILL_ITERS", 30))
 	if st.LostAcked+st.WrongID == 0 {
-		t.Logf("CONTROL INCONCLUSIVE: async persist lost nothing in %d iterations, so the harness has not been shown to detect a loss", st.Iterations)
+		t.Fatalf("CONTROL FAILED: async persist lost nothing in %d iterations, so the zero losses of the other two modes prove nothing about the harness", st.Iterations)
 	} else {
 		t.Logf("CONTROL OK: async persist lost %d acknowledged messages in %d of %d iterations (max %d in one)", st.LostAcked+st.WrongID, st.IterationsWithLoss, st.Iterations, st.MaxLostInIteration)
 	}
