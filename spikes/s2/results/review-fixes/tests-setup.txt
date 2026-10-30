@@ -1,0 +1,25 @@
+$ spikes/s2/scripts/test-setup.sh "$S2_HOME/src"
+== end to end: setup.sh patched, with unpatched binaries left over from an earlier S2_HOME
+ok   sources start unpatched
+ok   setup.sh patched exits 0
+ok   both existing binaries were rebuilt, not reused
+ok   the simulator binary is the rebuilt one
+ok   the EPP binary is the rebuilt one
+ok   stamps were written
+ok   the sources got the loopback patch and the notice
+ok   the EPP source binds 127.0.0.1
+ok   a second run with matching stamps builds nothing
+ok   an edited source tree rebuilds the EPP only
+ok   with every stamp current, go is not invoked even when it would fail
+ok   a failing build makes setup.sh fail
+ok   a failed build leaves no stamp
+ok   a stamp-less binary is rebuilt on the next run
+== unit: what makes a stamp stale
+ok   first build
+ok   same commit, patch and tree: no build
+ok   different patch contents: rebuild
+ok   edited tree: rebuild
+ok   different source commit: rebuild
+ok   stamp without a binary: rebuild
+
+test-setup: all passed

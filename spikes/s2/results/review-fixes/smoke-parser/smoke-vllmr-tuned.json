@@ -1,0 +1,28 @@
+{
+  "label": "smoke-vllmr-tuned",
+  "url": "http://127.0.0.1:19204/v1/chat/completions",
+  "session": "smoke",
+  "started_utc": "2026-10-30T11:38:45Z",
+  "expect_tokens": 5,
+  "tokens": 5,
+  "finish_reason": "length",
+  "done_seen": true,
+  "http_status": 200,
+  "resp_headers": {
+    "server": "fasthttp",
+    "x-request-id": "chatcmpl-jBC5ixL3C5GyA6lxQmMpULl6"
+  },
+  "elapsed_sec": 5.008333897,
+  "response_headers_sec": 1.004840069,
+  "first_token_sec": 1.00516016,
+  "last_token_sec": 5.007902075,
+  "gap_min_ms": 998.638322,
+  "gap_mean_ms": 1000.68547875,
+  "gap_p50_ms": 1001.264636,
+  "gap_p99_ms": 1001.264636,
+  "gap_max_ms": 1001.577655,
+  "gap_max_at_token": 4,
+  "gaps_over_2s": 0,
+  "sse_comment_lines": 0,
+  "complete": true
+}
