@@ -8,12 +8,10 @@
 #
 # The workflow reads no secret and pushes nothing. Every action is pinned by commit SHA.
 #
-# Two jobs depend on scripts that arrive in other PRs. Until a script exists on the ref being
-# tested, the job says so in its summary and in a check annotation, and does nothing else:
-#   crd           needs hack/check.sh            (#48)
-#   launcher-k3s  needs hack/test-launcher.sh and hack/fetch-k3s.sh (#49)
-# TODO(#54): when #48 and #49 are on main, delete these guards, so that a missing script fails
-# the job instead of skipping it.
+# crd and launcher-k3s call scripts from hack/. A missing script fails the job: a job that
+# skipped for lack of its script would turn a rename into a check that quietly stopped running.
+# The one skip that remains is explicit: launcher-k3s leaves out the store-full tests on a runner
+# without FUSE, and says so in the job summary and in a check annotation.
 
 name: ci
 
@@ -47,7 +45,8 @@ jobs:
   go:
     name: go
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # No build cache is restored, so the Kubernetes libraries compile from scratch.
+    timeout-minutes: 30
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -123,6 +122,7 @@ jobs:
           if [ -n "$(find "$modcache" -mindepth 1 -print -quit 2>/dev/null)" ]; then
             echo "::error title=module cache::$modcache is not empty, so a cache was restored"
             du -sh "$modcache"
+            find "$modcache" -mindepth 1 -maxdepth 3 | head -20
             exit 1
           fi
           echo "module cache $modcache is empty: nothing was restored"
@@ -138,40 +138,37 @@ jobs:
   crd:
     name: crd and envtest
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      # TODO(#54): delete this step, and the "if" on the two below, once #48 is on main.
-      - name: Is hack/check.sh on this ref?
-        id: present
-        run: |
-          if [ -f hack/check.sh ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            msg="skipped: hack/check.sh is not on this ref (#48 is not merged), so the CRD drift check and the envtest tests did not run"
-            echo "::notice title=crd and envtest skipped::$msg"
-            echo "### crd and envtest" >> "$GITHUB_STEP_SUMMARY"
-            echo "$msg" >> "$GITHUB_STEP_SUMMARY"
-          fi
-
       # cache: false here too, because hack/check.sh runs go mod tidy -diff itself.
       - name: Set up Go from go.mod
-        if: steps.present.outputs.run == 'true'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: false
 
-      # check.sh runs the CRD drift check (hack/verify-generated.sh), and the tests, which fetch
-      # the pinned Kubernetes binaries through hack/test-binaries.sh and check their sha256.
+      # check.sh runs gofmt, vet, tidy, the CRD drift check (hack/verify-generated.sh) and the
+      # tests. The tests fetch the pinned Kubernetes binaries through hack/test-binaries.sh,
+      # which checks their sha256. The go and tidy jobs repeat some of this on purpose: each
+      # failure then shows up under its own check.
       - name: hack/check.sh
-        if: steps.present.outputs.run == 'true'
-        run: bash hack/check.sh
+        run: |
+          log="$RUNNER_TEMP/check.log"
+          rc=0
+          bash hack/check.sh 2>&1 | tee "$log" || rc=$?
+          # check.sh ends with the list of skipped tests; put it in the job summary.
+          {
+            echo "### crd and envtest"
+            echo '```'
+            sed -n '/^== skipped tests/,$p' "$log" | head -100
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
 
   launcher-k3s:
     name: launcher-k3s
@@ -185,34 +182,19 @@ jobs:
         with:
           persist-credentials: false
 
-      # TODO(#54): delete this step, and the "if" on the ones below, once #49 is on main. Until
-      # then the job runs by itself on any ref that carries the two scripts: #49's own pull
-      # request is the first real run, after it is retargeted to main with this workflow in it.
-      - name: Are the launcher scripts on this ref?
-        id: present
-        run: |
-          if [ -f hack/test-launcher.sh ] && [ -f hack/fetch-k3s.sh ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-            echo "HPCBURST_BIN_DIR=$RUNNER_TEMP/k3s-bin" >> "$GITHUB_ENV"
-          else
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            msg="skipped: hack/test-launcher.sh or hack/fetch-k3s.sh is not on this ref (#49 is not merged), so the launcher tests against k3s did not run"
-            echo "::notice title=launcher-k3s skipped::$msg"
-            echo "### launcher-k3s" >> "$GITHUB_STEP_SUMMARY"
-            echo "$msg" >> "$GITHUB_STEP_SUMMARY"
-          fi
+      - name: Choose where the k3s binaries go
+        run: echo "HPCBURST_BIN_DIR=$RUNNER_TEMP/k3s-bin" >> "$GITHUB_ENV"
 
       - name: Set up Go from go.mod
-        if: steps.present.outputs.run == 'true'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: false
 
-      # Downloads the pinned k3s releases and checks their sha256 against internal/launcher/k3s-pins.txt.
+      # Downloads the two pinned k3s releases the tests start (1.35.9, then upgraded to 1.36.5) and
+      # checks their sha256 against internal/launcher/k3s-pins.txt.
       - name: Fetch the pinned k3s binaries
-        if: steps.present.outputs.run == 'true'
-        run: bash hack/fetch-k3s.sh "$HPCBURST_BIN_DIR"
+        run: bash hack/fetch-k3s.sh "$HPCBURST_BIN_DIR" 1.35.9 1.36.5
 
       # k3s runs as the invoking user (server --rootless --disable-agent), which needs no user
       # namespace, so AppArmor's restriction on them does not matter to it. The size-limited
@@ -220,7 +202,6 @@ jobs:
       # and a setuid fusermount3. The job cannot install either, because it never uses sudo.
       - name: Probe what this runner offers
         id: probe
-        if: steps.present.outputs.run == 'true'
         run: |
           fuse=yes
           reason=""
@@ -245,7 +226,6 @@ jobs:
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: hack/test-launcher.sh
-        if: steps.present.outputs.run == 'true'
         env:
           FUSE: ${{ steps.probe.outputs.fuse }}
           FUSE_REASON: ${{ steps.probe.outputs.reason }}
