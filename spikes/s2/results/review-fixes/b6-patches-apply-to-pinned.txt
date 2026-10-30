@@ -1,0 +1,13 @@
+== llm-d-router pinned b9393d1a9f1d5a72ecd86f8d2b643ab54c2a9b92
+   index equals the pinned commit (git diff --cached is empty)
+   working tree (the patched sources):
+      M cmd/epp/runner/runner.go
+      M internal/runnable/grpc.go
+   git apply --cached --check loopback-bind.patch: applies cleanly to the pinned commit
+   the patch file equals git diff of the patched tree
+== llm-d-inference-sim pinned 7bda03f9fef85139617cb4f724dccafe1cf8cbbf
+   index equals the pinned commit (git diff --cached is empty)
+   working tree (the patched sources):
+      M pkg/communication/http.go
+   git apply --cached --check loopback-bind.patch: applies cleanly to the pinned commit
+   the patch file equals git diff of the patched tree

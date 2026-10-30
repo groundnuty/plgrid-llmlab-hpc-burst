@@ -1,0 +1,16 @@
+10:23:01 waiting: load=5.10 mem_avail_gb=19
+10:24:01 waiting: load=4.07 mem_avail_gb=19
+ok $S2_HOME/run/llmd-guide
+started llmd-guide: http://127.0.0.1:19207/v1/chat/completions
+removed worker 0 from llmd-guide at 10:25:06
+EPP of llmd-guide stopped at 10:25:36
+EPP of llmd-guide started at 10:25:36
+llm-d: sessions on removed worker 0 after the EPP restart: 0 (expected 0)
+stopped llmd-guide
+started vllmr-affinity: http://127.0.0.1:19206/v1/chat/completions
+Successfully removed worker: http://127.0.0.1:18160removed worker 0 from vllmr-affinity at 10:26:20
+vllm-router workers after removal: {"urls":["http://127.0.0.1:18161","http://127.0.0.1:18162"]}
+router of vllmr-affinity restarted at 10:26:22
+vllm-router workers after restart: {"urls":["http://127.0.0.1:18162","http://127.0.0.1:18161","http://127.0.0.1:18160"]}
+vllm-router: removed worker is back (expected)
+stopped vllmr-affinity

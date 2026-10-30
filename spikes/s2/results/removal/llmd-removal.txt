@@ -1,0 +1,17 @@
+bound session rm-662305988 to worker 0
+stream running on worker 0; removing it at 10:29:39
+removed worker 0 from llmd-removal at 10:29:39
++0s same session -> worker 2 (not X)
++0s fresh sessions on X: 0 of 8
++0s running per worker: [1 0 0] (stream still on X: true)
++2m0s same session -> worker 2 (not X)
++2m0s fresh sessions on X: 0 of 8
++2m0s running per worker: [1 0 0] (stream still on X: true)
++5m0s same session -> worker 2 (not X)
++5m0s fresh sessions on X: 0 of 8
++5m0s running per worker: [1 0 0] (stream still on X: true)
++9m0s same session -> worker 2 (not X)
++9m0s fresh sessions on X: 0 of 8
++9m0s running per worker: [1 0 0] (stream still on X: true)
+stream: complete=true tokens=2100/2100 elapsed=2107s after_removal=2086s maxgap=1027ms err=""
+RESULT removal worker=0 removal_effective=true stream_survived=true pass=true

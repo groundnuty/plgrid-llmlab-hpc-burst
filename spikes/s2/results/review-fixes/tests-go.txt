@@ -1,0 +1,2 @@
+$ (cd spikes/s2 && go test ./...)
+ok  	github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s2/cmd/s2probe	0.931s

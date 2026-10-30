@@ -1,0 +1,7 @@
+started vllmr-short: http://127.0.0.1:19209/v1/chat/completions
+ok $S2_HOME/run/llmd-probe
+started llmd-probe: http://127.0.0.1:19208/v1/chat/completions
+OK   ctrl-vllmr-short: expected cut in [55,70] s; got complete=False tokens=59/150 elapsed=60s err='read: unexpected EOF'
+OK   probe-llmd-5s-timers: expected pass; got complete=True tokens=600/600 elapsed=600s err=''
+stopped vllmr-short
+stopped llmd-probe

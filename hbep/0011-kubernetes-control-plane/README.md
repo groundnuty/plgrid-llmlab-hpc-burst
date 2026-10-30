@@ -172,7 +172,8 @@ For alpha, no webhook server runs.
   - a Provider name is a DNS-1123 label;
   - an Instance's spec is immutable;
   - an Allocation's submission parameters are immutable;
-  - a ModelDeployment's engine flags use long names without leading dashes, and none is a key (`api-key`, `hf-token`; HBEP-3);
+  - a ModelDeployment's engine flags use long names without leading dashes, matching `[a-z0-9][a-z0-9_-]*`, and env names match `[A-Z_][A-Z0-9_]*`;
+  - refusals compare names after replacing `_` with `-`, and refuse the credential names (flags and env), the short aliases, `config`, `no-` forms and dotted sub-keys (HBEP-3; the library applies the full prefix rule);
   - a ModelDeployment's serving spec may change, which rolls out new IDs (HBEP-3).
 - **The job ID is not guarded here.** It is an annotation, and a CRD's validation rules reach no metadata beyond the name and generated name ([documentation source](https://github.com/kubernetes/website/blob/main/content/en/docs/tasks/extend-kubernetes/custom-resources/custom-resource-definitions.md), accessed 2026-10-30). The provider's compare-and-swap writes keep it written once (Ownership, records and deletion).
 - **A ValidatingAdmissionPolicy** refuses deleting the framework's CRDs. Such policies are stable since Kubernetes 1.30, and see the existing object on a delete ([documentation source](https://github.com/kubernetes/website/blob/main/content/en/docs/reference/access-authn-authz/validating-admission-policy.md), accessed 2026-10-30).

@@ -1,0 +1,28 @@
+{
+  "label": "stream-through-frozen-epp",
+  "url": "http://127.0.0.1:19207/v1/chat/completions",
+  "session": "s1",
+  "started_utc": "2026-10-30T10:17:26Z",
+  "expect_tokens": 150,
+  "tokens": 150,
+  "finish_reason": "length",
+  "done_seen": true,
+  "http_status": 200,
+  "resp_headers": {
+    "server": "fasthttp",
+    "x-went-into-resp-headers": "true"
+  },
+  "elapsed_sec": 150.212969468,
+  "response_headers_sec": 1.010893592,
+  "first_token_sec": 1.011195543,
+  "last_token_sec": 150.212893402,
+  "gap_min_ms": 0.004434,
+  "gap_mean_ms": 1001.3536769060402,
+  "gap_p50_ms": 0.00539,
+  "gap_p99_ms": 1005.94554,
+  "gap_max_ms": 90999.427309,
+  "gap_max_at_token": 20,
+  "gaps_over_2s": 1,
+  "sse_comment_lines": 0,
+  "complete": true
+}
