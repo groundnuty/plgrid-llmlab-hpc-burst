@@ -1,0 +1,1 @@
+{"name":"A1-vr-hash","regime":"A","rep":1,"arm":"vr-hash","kv_blocks_override":"","start_unix":1793366989.760452417,"end_unix":1793367071.245769024,"client_rc":0,"nwork":4,"load_args":"-sessions 96 -turns 12 -concurrency 32 -agents 0.5,0.3,0.2 -sys-words 2000 -task-words 250 -tool-min 200 -tool-max 800 -think-min 500ms -think-max 2500ms -reply-tokens 48 -seed 1"}
