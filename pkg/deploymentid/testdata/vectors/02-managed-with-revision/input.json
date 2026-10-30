@@ -1,0 +1,4 @@
+{
+  "kind": "managed",
+  "catalog": {"platform": "llmlab", "catalog_name": "example-27b", "revision": "2026-09"}
+}

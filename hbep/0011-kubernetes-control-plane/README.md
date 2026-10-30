@@ -120,10 +120,10 @@ Deployment options:
 | Kind | Scope | Spec holds | Status holds |
 |---|---|---|---|
 | PlatformProfile | cluster | the platform's kind (managed, batch or static) and its profile data (HBEP-4) | when its facts were last checked |
-| Provider | cluster | a PlatformProfile reference; the provider settings (account, grant, allowed partitions; HBEP-4); a credentials reference | the age of its last successful status read; for a managed provider, its catalog (HBEP-4); conditions |
-| ModelDeployment | namespaced | the model name, the serving spec (engine flags as ordered `{name, value}` pairs, HBEP-3), the number of instances, the allowed providers, the end time, the default retention policy, and the lease limit and workload (HBEP-7) | the current deployment ID of each accelerator class, every ID that still has Instances, ready and desired counts, conditions |
+| Provider | cluster | a PlatformProfile reference; the provider settings (account, grant, allowed partitions; HBEP-4); a credentials reference | the age of its last successful status read; the last 20 observed queue waits (HBEP-4); for a managed provider, its catalog (HBEP-4); conditions |
+| ModelDeployment | namespaced | the model name, the serving spec (engine flags as ordered `{name, value}` pairs, HBEP-3), the number of instances, the allowed providers, the end time, the default retention policy, and the lease limit and workload (HBEP-7) | the current deployment ID of each accelerator class, every ID that still has Instances, each class's last measured start-to-ready time (HBEP-7), ready and desired counts, conditions |
 | Allocation | namespaced | crossplane-runtime's managed-resource fields, declared by us with crossplane's types and JSON names (not embedded): `providerConfigRef` naming a Provider, immutable; `managementPolicies` defaulting to `[Observe, Create, Delete, LateInitialize]`, the set the provider registers, immutable; `writeConnectionSecretToRef`. Exactly one of `batch` (the submission parameters, never edited; HBEP-4 lists them) or `managed` (a catalog name). The assigned ModelDeployment; the retention policy, optional with no schema default (the controller applies HBEP-7's default, `Keep`, and shows the effective value in status) | a mirror of the job ID and the submission record, for display only (they live in annotations: Ownership, records and deletion); phase, start and hard end; duplicates; conditions (S4) |
-| Instance | namespaced | the full deployment ID, its identity record, its Allocation and its launch (HBEP-7), all immutable | the phase (HBEP-3), the name of its verification record and its verdict, conditions |
+| Instance | namespaced | the full deployment ID, its identity record, its Allocation and its launch (HBEP-7), all immutable | the phase (HBEP-3), the time of its start instruction (HBEP-7), the name of its latest verification record and its verdict, conditions |
 
 - **PlatformProfile schema.** HBEP-4 owns it (its open question 3). For alpha, the fields that the Slurm provider and the deployment ID read are typed. The rest of the profile is kept as an untyped block until HBEP-4 fixes the schema.
   - Per partition: the GPU model and the CPU architecture. Together they are the accelerator class, a deployment-ID input (HBEP-3).
@@ -160,9 +160,9 @@ Deployment options:
   - **One record per ID per namespace, content-addressed.** It is named `id-<first 12 hex of the ID>`. A ModelDeployment that computes an ID creates its record only if it is absent; one that already exists is reused, never rewritten, since the same inputs give the same bytes. A record whose stored hash differs from the one recomputed for its name is a collision or a bug: admission stops, and an event is raised.
   - The API server refuses any change to a ControllerRevision's data (Kubernetes' own update validation, [`pkg/apis/apps/validation/validation.go` at v1.36.2](https://github.com/kubernetes/kubernetes/blob/v1.36.2/pkg/apis/apps/validation/validation.go), accessed 2026-10-30).
   - Each Instance's spec names its record and its full ID. A CEL rule (`self == oldSelf`) makes that spec immutable.
-- **Verification records.** Each Instance's verification result is its own `ControllerRevision`, written once, pass or fail, before the Instance can become ready.
+- **Verification records.** Each verification of an Instance, at start and after every restart that reverifies, is its own `ControllerRevision`, named `ver-<instance UID>-<generation>` (HBEP-7). It is written once, pass or fail, before the Instance can become ready.
   - Its data holds the resolved settings the Instance reported, its GPU type, its engine fingerprint, the outcome of the file rehash, and the verdict (HBEP-3, HBEP-9).
-  - The Instance's status names the record and mirrors its verdict.
+  - The Instance's status names the latest record and mirrors its verdict.
 - **Records outlive deletion.** Identity and verification records have no owner reference to the ModelDeployment or to the Instance, so garbage collection never removes them. They carry the labels listed under API: the deployment ID's display form, and on verification records the Instance's UID. They live in the ModelDeployment's namespace, and are deleted only by an explicit operator action or by a retention policy for records, which HBEP-9 sets; until then they stay. Deleting the namespace deletes them too, so an operator exports them first (HBEP-9).
 - Exporting records, for a replication package, is HBEP-9's.
 
@@ -212,6 +212,7 @@ Decided for alpha (amended 2026-10-30, after S3's fix, PR #36):
 - verifies the pinned host binaries against their checksums, recorded in `build/dependencies.yaml` (HBEP-15), and starts them;
 - binds the API server to loopback, because nothing outside the host talks to it. Instances reach the front, never the API (HBEP-6);
 - issues one kubeconfig per identity: the user, each controller, and each agent identity (HBEP-10), with RBAC enabled;
+- creates the certificate of the lifecycle controller's agent endpoint, which listens on loopback; `agent.json` carries its pin, and in direct mode the front passes `/agent/v1/` through to it on the dial-home port (HBEP-7);
 - installs the CRDs and the admission policy, then starts the controllers and restarts any that exit;
 - checks the front's reachability (open question 8). It warns when no front address and dial-home mode (direct, or ssh on port 22) are configured, and checks that a configured address answers on that port. While none is configured, the lifecycle controller submits no Allocation, and each ModelDeployment carries a condition saying why (decided while building the launcher, PR #49). The first Instance on each Provider then confirms reachability from a compute node by registering through its dial-home tunnel. An Instance that cannot register fails at start, and its Provider carries a condition naming reachability;
 - has the API server write its audit log at the Metadata level, with no request bodies, so a Secret's content is never logged;
@@ -387,6 +388,8 @@ The control plane replaces the files and scripts that held www-2027's state: per
   - on the PlatformProfile, the typed fields that the lifecycle controller and the file staging read (HBEP-4, Platform profile schema). The fields this HBEP listed for the Slurm provider and the deployment ID are unchanged;
   - on the ModelDeployment, `leaseLimit` and `workload` (HBEP-7);
   - on the Instance, its immutable `launch` (HBEP-7);
-  - on a managed Provider's status, its catalog (HBEP-4).
+  - on a managed Provider's status, its catalog (HBEP-4);
+  - on the Provider's status, the last 20 observed queue waits (HBEP-4); on the ModelDeployment's status, each class's last measured start-to-ready time; on the Instance's status, the time of its start instruction (HBEP-7). They plan replacements and time-outs, and live in status so that nothing is held only in memory;
+  - one verification record per verification, at start and after every restart that reverifies, named `ver-<instance UID>-<generation>`; the Instance's status names the latest (HBEP-7).
 
-  HBEP-4 also lists the Allocation's submission parameters. Verification runs as its own controller in the lifecycle controller's manager in alpha (HBEP-7), as Controllers allows.
+  The launcher also creates the agent endpoint's certificate (HBEP-7). HBEP-4 also lists the Allocation's submission parameters. Verification runs as its own controller in the lifecycle controller's manager in alpha (HBEP-7), as Controllers allows.
