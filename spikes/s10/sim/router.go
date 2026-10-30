@@ -5,7 +5,7 @@ import (
 	"math"
 	"strconv"
 
-	"github.com/groundnuty/plgrid-llmlab-hpc-burst/third_party/forked/kubeai/loadbalancer"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s10/front"
 )
 
 // KeyKind is a choice of conversation key.
@@ -81,8 +81,10 @@ type Policy struct {
 	Key     KeyKind
 	Percent int // CHWBL MeanLoadPercentage (125 = bound 1.25x the mean)
 	// ReleaseOnDrain makes the front release a draining Instance's open
-	// requests from the balancer's count when the drain starts, so KubeAI's
-	// mean covers members only. The copied algorithm is unchanged.
+	// requests from the balancer's count when the drain starts
+	// (front.Balancer.Drain), so KubeAI's mean covers members only. Without
+	// it a drain keeps them counted until they finish, as KubeAI does
+	// (front.Balancer.Remove). The copied algorithm is unchanged.
 	ReleaseOnDrain bool
 }
 
@@ -111,19 +113,20 @@ func (p Policy) Bound() float64 {
 func (p Policy) Hashed() bool { return p.Kind == Affinity || p.Kind == CHWBL }
 
 // router places requests on member instances. For hashed policies every
-// placement goes through the copied KubeAI group.
+// placement goes through the copied KubeAI group, behind the front's
+// serializing, release-once wrapper (package front).
 type router struct {
 	pol     Policy
 	names   []string
 	members []int // instance indices, in join order
 	rr      int
-	group   *loadbalancer.Group
+	group   *front.Balancer
 }
 
 func newRouter(pol Policy, names []string, initial []int) *router {
 	r := &router{pol: pol, names: names, members: append([]int(nil), initial...)}
 	if pol.Hashed() {
-		r.group = loadbalancer.NewGroup(256)
+		r.group = front.New(256)
 		r.group.SetEndpoints(r.memberNames())
 	}
 	return r
@@ -185,16 +188,24 @@ func (r *router) leastLoad(inflight []int) int {
 	return best
 }
 
-func (r *router) remove(inst int) {
+// remove takes an Instance out of the ring. With release, its open
+// requests leave the balancer's count now (front.Balancer.Drain) and the
+// number released is returned; otherwise they stay counted until they end.
+func (r *router) remove(inst int, release bool) int {
 	for i, m := range r.members {
 		if m == inst {
 			r.members = append(r.members[:i:i], r.members[i+1:]...)
 			break
 		}
 	}
-	if r.group != nil {
-		r.group.RemoveEndpoint(r.names[inst])
+	if r.group == nil {
+		return 0
 	}
+	if release {
+		return r.group.Drain(r.names[inst])
+	}
+	r.group.Remove(r.names[inst])
+	return 0
 }
 
 func (r *router) add(inst int) {

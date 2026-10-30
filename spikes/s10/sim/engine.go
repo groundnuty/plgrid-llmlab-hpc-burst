@@ -281,13 +281,15 @@ func (e *Engine) decodeDone(r *request) {
 }
 
 // finish ends a request's life on its Instance and releases its load count.
+// The release is once-guarded (package front): for a request already
+// released at drain start it does nothing, and if it did not, the next
+// placement's crossCheck would fail the run.
 func (e *Engine) finish(in *instance, r *request) {
 	in.inflight--
 	if r.detached {
 		in.detached--
-	} else {
-		r.release()
 	}
+	r.release()
 	for i, a := range in.active {
 		if a == r {
 			in.active = append(in.active[:i:i], in.active[i+1:]...)
@@ -305,17 +307,20 @@ func (e *Engine) cluster(k int, ev Event) {
 		e.rt.add(ev.Instance)
 	case Drain:
 		in.member = false
-		e.rt.remove(ev.Instance)
-		if e.pol.ReleaseOnDrain {
+		released := e.rt.remove(ev.Instance, e.pol.ReleaseOnDrain)
+		if e.pol.ReleaseOnDrain && e.rt.group != nil {
+			if released != len(in.active) {
+				e.err = fmt.Errorf("drain of %s released %d requests, %d were open", in.name, released, len(in.active))
+				return
+			}
 			for _, r := range in.active {
-				r.release()
 				r.detached = true
 				in.detached++
 			}
 		}
 	case Leave:
 		in.member = false
-		e.rt.remove(ev.Instance)
+		e.rt.remove(ev.Instance, false)
 		cut := append([]*request(nil), in.active...)
 		for _, r := range cut {
 			r.aborted = true
