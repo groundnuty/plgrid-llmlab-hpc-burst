@@ -3,7 +3,8 @@
 # the end-to-end scenarios (envtest kube-apiserver + etcd, provider-slurm
 # processes, fake Slurm on PATH).
 #
-# Needs Go 1.27.x on PATH and the envtest binaries:
+# Needs Go 1.26.0 or newer on PATH (the go.mod minimum; tested with 1.27.3)
+# and the envtest binaries:
 #   go install sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.24.1
 #   export KUBEBUILDER_ASSETS=$(setup-envtest use 1.35.0 -p path)
 # Optional: S4_WORK_ROOT (builds, logs, fake state; default: system temp

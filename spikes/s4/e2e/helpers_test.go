@@ -62,7 +62,7 @@ func (f *fakeSlurm) ctl(t *testing.T, args ...string) string {
 	return string(out)
 }
 
-// squeueNames returns the job IDs the fake's squeue lists for a name. The
+// squeueIDs returns the job IDs the fake's squeue lists for a name. The
 // test decodes the JSON itself rather than with the provider's parser.
 func (f *fakeSlurm) squeueIDs(t *testing.T, name string) []int64 {
 	t.Helper()
@@ -99,6 +99,7 @@ type logEntry struct {
 	PID    int       `json:"pid"`
 	JobID  int64     `json:"job_id"`
 	Exit   int       `json:"exit"`
+	Note   string    `json:"note"`
 }
 
 func (f *fakeSlurm) entries(t *testing.T) []logEntry {
@@ -188,6 +189,7 @@ func startProvider(t *testing.T, ns string, f *fakeSlurm, pc provCfg) *proc {
 		"--kubeconfig=" + h.kubeconfig, "--namespace=" + ns, "--identity=" + pc.name,
 		"--poll=" + pollInterval.String(), "--timeout=" + reconcileTO.String(),
 		"--inflight-window=" + inflightWindow.String(), "--creation-grace=2s", "--max-backoff=1s",
+		"--unknown-bound=" + unknownBound.String(), "--lost-grace=" + lostGrace.String(), "--unresolved-poll=1s",
 	}, pc.args...)
 	cmd := exec.Command(h.provider, args...)
 	cmd.Env = f.cmdEnv(pc.name, pc.env...)
@@ -303,8 +305,7 @@ func waitAlloc(t *testing.T, key client.ObjectKey, d time.Duration, what string,
 	return a
 }
 
-// expectedTag recomputes the tag from the object (namespace/name/uid); the
-// provider writes it into the external-name annotation.
+// externalName is the persisted external name (the tag the provider set).
 func externalName(a *v1alpha1.Allocation) string { return meta.GetExternalName(a) }
 
 func hasAnno(a *v1alpha1.Allocation, k string) bool { _, ok := a.GetAnnotations()[k]; return ok }
@@ -344,4 +345,75 @@ func waitMarker(t *testing.T, path string, d time.Duration) marker {
 func sanitize(s string) string {
 	r := strings.NewReplacer("/", "-", "_", "-", ".", "-", " ", "-")
 	return r.Replace(s)
+}
+
+// modes are the two submission protocols: the platform profile's
+// hold_release true (the default) and false (fallback).
+var modes = []struct {
+	name string
+	args []string
+}{
+	{"hold", nil},
+	{"fallback", []string{"--hold-release=false"}},
+}
+
+func withArgs(base []string, more ...string) []string {
+	return append(append([]string(nil), base...), more...)
+}
+
+// holdTimes returns, per released job, the time from sbatch registering it
+// to its release: how long the job sat held without gaining queue age.
+func (f *fakeSlurm) holdTimes(t *testing.T) map[int64]time.Duration {
+	sub := map[int64]time.Time{}
+	out := map[int64]time.Duration{}
+	for _, e := range f.entries(t) {
+		switch {
+		case e.Event == "sbatch_submitted":
+			sub[e.JobID] = e.TS
+		case e.Event == "scontrol_release" && e.Exit == 0 && e.Note == "":
+			if s, ok := sub[e.JobID]; ok {
+				if _, done := out[e.JobID]; !done {
+					out[e.JobID] = e.TS.Sub(s)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// assertRunsOnce checks the hold-mode safety claim from the fake's log: at
+// most one job with the tag was ever released (only a released job can
+// run), and every other job with the tag ended CANCELLED without starting.
+func assertRunsOnce(t *testing.T, f *fakeSlurm, tag string, maxHold time.Duration) int64 {
+	t.Helper()
+	rel := f.releasedIDs(t)
+	if len(rel) != 1 {
+		t.Errorf("released jobs %v, want exactly one", rel)
+		return 0
+	}
+	for _, j := range f.jobs(t, tag) {
+		if j.ID != rel[0] && (j.started() || j.state() != "CANCELLED") {
+			t.Errorf("extra job %d: state %s, started %v; want CANCELLED, never started", j.ID, j.state(), j.started())
+		}
+	}
+	if d, ok := f.holdTimes(t)[rel[0]]; ok && maxHold > 0 && d > maxHold {
+		t.Errorf("job %d was held %s before its release, want at most %s", rel[0], d, maxHold)
+	} else if ok {
+		t.Logf("job %d held for %s before its release", rel[0], d.Round(time.Millisecond))
+	}
+	return rel[0]
+}
+
+func keyOf(ns, name string) client.ObjectKey { return client.ObjectKey{Namespace: ns, Name: name} }
+
+// annotate sets one annotation, re-reading on a conflict with the provider's
+// own writes.
+func annotate(t *testing.T, key client.ObjectKey, k, v string) {
+	t.Helper()
+	eventually(t, 10*time.Second, func() (bool, string) {
+		a := getAlloc(t, key)
+		meta.AddAnnotations(a, map[string]string{k: v})
+		err := h.k8s.Update(context.Background(), a)
+		return err == nil, fmt.Sprintf("annotate: %v", err)
+	})
 }

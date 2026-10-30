@@ -28,6 +28,8 @@ const (
 	pollInterval   = time.Second
 	reconcileTO    = 5 * time.Second
 	inflightWindow = 12 * time.Second
+	unknownBound   = 15 * time.Second // fallback mode: operator condition after this
+	lostGrace      = 8 * time.Second  // profile lost_grace, shortened for the tests
 )
 
 type harness struct {
@@ -138,7 +140,7 @@ func setup() (*harness, error) {
 			return nil, fmt.Errorf("go build %s: %w", pkg, err)
 		}
 	}
-	for _, name := range []string{"sbatch", "squeue", "sacct", "scancel", "fakeslurmctl"} {
+	for _, name := range []string{"sbatch", "squeue", "sacct", "scancel", "scontrol", "fakeslurmctl"} {
 		if err := os.Symlink(filepath.Join(bin, "fakeslurm"), filepath.Join(slurmBin, name)); err != nil {
 			return nil, err
 		}
