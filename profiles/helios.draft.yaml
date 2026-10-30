@@ -10,6 +10,9 @@ collected: 2026-10-30         # UTC date
 # "ssh <login> <command>"), plus the centre's documentation, read with
 # certificate verification on. Measured values describe the login node's view
 # of the cluster at the collection time; counts of nodes and states are a snapshot.
+# Updated later the same day by spike S1 (issue #18): the entries under reachability and
+# compute_node were measured inside short Slurm jobs, one job per partition, by S1's step-0
+# probe (plgrid and plgrid-gpu-gh200). Everything else is still the login-node view.
 facts:
   slurm:
     version: {value: "24.11.5", method: measured, source: "sinfo --version", date: 2026-10-30, note: "scontrol show config SLURM_VERSION and the slurmd version of every reporting node agree"}
@@ -271,18 +274,41 @@ facts:
     ssh_connection_limits: {value: unknown, method: unknown, source: "attempted read of /etc/ssh/sshd_config and sshd_config.d/*.conf for MaxSessions, MaxStartups, MaxAuthTries, LoginGraceTime, ClientAlive*, AllowTcpForwarding; the files were not readable", date: 2026-10-30, note: "sshd_config and sshd_config.d are not readable by a plain user (no file printed at all), so the limits are not known. Login throttling noted in HBEP-4 cannot be sized from this."}
   reachability:
     compute_outbound_internet:
-      value: unknown
-      method: unknown
-      source: "needs a job; S5 runs none"
+      value:
+        plgrid: {https_443_github_com: "reached (HTTP 200)", https_443_pypi_org: "reached (HTTP 206, a one-byte range request)", proxy_env_set: false}
+        plgrid-gpu-gh200: {https_443_github_com: "reached (HTTP 200)", https_443_pypi_org: "reached (HTTP 206, a one-byte range request)", proxy_env_set: false}
+      method: measured
+      source: "S1 step-0 probe job (issue #18), one job per partition, on one compute node of each: curl to https://github.com/ and to https://pypi.org/simple/ (range 0-0), 8 s connect limit; the job also checked whether https_proxy, HTTPS_PROXY, all_proxy or ALL_PROXY was set (presence only)"
       date: 2026-10-30
-      prior_observation: "In an earlier project, jobs on Helios compute nodes reached an external code-hosting service and an external HTTPS API. This is not a fact for this profile."
-      note: "the documentation does not say. Indirect hint, not a statement: the GPU/ML example batch script installs packages with pip from inside the job (https://docs.hpc.cyfronet.pl/supercomputers/helios/GPU/). No http(s)_proxy variables are set in the login-node ssh environment (measured with env)."
+      note: "Only these two public endpoints on port 443 were tried, and each partition was tried once on one node. This is not a statement about other ports, other hosts or a general internet policy. Documentation is silent; the GPU/ML example batch script on the Helios GPU page (cited under other.module_system) installs packages with pip from inside the job, which agrees with the measurement."
+    compute_to_agents_vm_ports:
+      value:
+        plgrid: {tcp_ssh_port_22: "reached, the ssh banner (SSH-2.0) was read", tcp_port_7000: "timed out after 6 s (filtered or dropped somewhere on the path); nothing listened there"}
+        plgrid-gpu-gh200: {tcp_ssh_port_22: "reached, the ssh banner (SSH-2.0) was read", tcp_port_7000: "timed out after 6 s (filtered or dropped somewhere on the path); nothing listened there"}
+      method: measured
+      source: "S1 step-0 probe job (issue #18), bash TCP connect from a compute node to the agents VM's ssh port and to port 7000, 6 s limit, banner read for the ssh port. The probe ran in direct mode: no ssh forward was set up"
+      date: 2026-10-30
+      note: "A TCP connect plus a banner only. It does not show that an ssh forward works from a compute node. The 7000 result is not a finding about the cluster's egress policy: the agents VM itself admits only its ssh port from the Cyfronet side, and the probe cannot tell which hop dropped the packets."
     compute_inbound_from_outside:
       value: unknown
       method: unknown
       source: "documentation search (249 pages) for inbound, firewall, proxy, tunnel, port forward found nothing about Helios compute nodes"
       date: 2026-10-30
       prior_observation: "In an earlier project, a listener on a Helios compute node could be reached only from the login node. This is not a fact for this profile."
+  compute_node:
+    # Read on a compute node inside S1's step-0 probe job (issue #18), one node of each partition.
+    host_python3:
+      value: {plgrid: "3.9.25", plgrid-gpu-gh200: "3.9.25"}
+      method: measured
+      source: "S1 step-0 probe job: python3 --version, run by the job's own non-interactive shell on the node"
+      date: 2026-10-30
+      note: "The host interpreter on the node, with no module loaded and no container. S1's step-0 notes record the login node's python3 as 3.6.8, a different interpreter."
+    architecture:
+      value: {plgrid: x86_64, plgrid-gpu-gh200: aarch64}
+      method: measured
+      source: "S1 step-0 probe job: uname -m on the node"
+      date: 2026-10-30
+      note: "Agrees with the scheduler-reported arch of the partition entries above."
   other:
     partition_access: {value: "every plgrid* partition has an AllowAccounts list of grant accounts (list not recorded); this is how the grant requirements in the documentation are enforced", method: measured, source: "scontrol show partition: AllowAccounts", date: 2026-10-30}
     restricted_partitions:
@@ -299,8 +325,6 @@ facts:
     gh200_node_tres: {value: "CfgTRES per GH200 node: cpu=288, mem=489500M, billing=4, gres/gpu=4", method: measured, source: "scontrol show node <one plgrid-gpu-gh200 node> (name not recorded)", date: 2026-10-30}
     accounting_tres: {value: "cpu,mem,energy,node,billing,fs/disk,vmem,pages,gres/gpu,gres/gpumem,gres/gpuutil", method: measured, source: "scontrol show config: AccountingStorageTRES", date: 2026-10-30}
 unknown:
-  - fact: "compute-node outbound internet"
-    reason: "needs a job; S5 runs none"
   - fact: "compute-node inbound from outside"
     reason: "documentation silent; verifying it needs a job with a listener"
   - fact: "user namespaces on compute nodes"

@@ -3,8 +3,11 @@
 #
 # method is measured (a command run on a login node on the date shown),
 # documented (the centre's user docs, fetched on the date shown) or unknown.
-# All measured facts come from one login node of the platform, read-only,
+# Most measured facts come from one login node of the platform, read-only,
 # with no job run. Node-level numbers are a snapshot of the collection time.
+# Updated later the same day by spike S1 (issue #18): the entries under reachability and
+# compute_node were measured inside one short Slurm job on plgrid-gpu-a100 (S1's step-0
+# probe), not on the login node.
 draft: s5
 platform: athena              # helios | athena | sano
 organization: cyfronet        # cyfronet | sano
@@ -542,20 +545,41 @@ facts:
 
   reachability:
     compute_node_outbound_internet:
-      value: null
-      method: unknown
-      source: "needs a job; S5 runs none"
+      value:
+        plgrid-gpu-a100: {https_443_github_com: "reached (HTTP 200)", https_443_pypi_org: "reached (HTTP 206, a one-byte range request)", proxy_env_set: false}
+      method: measured
+      source: "S1 step-0 probe job (issue #18) on one compute node of plgrid-gpu-a100: curl to https://github.com/ and to https://pypi.org/simple/ (range 0-0), 8 s connect limit; the job also checked whether https_proxy, HTTPS_PROXY, all_proxy or ALL_PROXY was set (presence only)"
       date: 2026-10-30
-      prior_observation: "none for Athena; its compute-node outbound access was never tested. The docs pages searched do not mention internet access, proxies or firewalls."
+      note: "Only these two public endpoints on port 443 were tried, once, on one node. This is not a statement about other ports, other hosts or a general internet policy. The docs pages searched do not mention internet access, proxies or firewalls. The job asked for one GPU and left it idle; plgrid-now was not tried."
+    compute_node_to_agents_vm_ports:
+      value:
+        plgrid-gpu-a100: {tcp_ssh_port_22: "reached, the ssh banner (SSH-2.0) was read", tcp_port_7000: "timed out after 6 s (filtered or dropped somewhere on the path); nothing listened there"}
+      method: measured
+      source: "S1 step-0 probe job (issue #18), bash TCP connect from a compute node to the agents VM's ssh port and to port 7000, 6 s limit, banner read for the ssh port. The probe ran in direct mode: no ssh forward was set up"
+      date: 2026-10-30
+      note: "A TCP connect plus a banner only. It does not show that an ssh forward works from a compute node. The 7000 result is not a finding about the cluster's egress policy: the agents VM itself admits only its ssh port from the Cyfronet side, and the probe cannot tell which hop dropped the packets."
     compute_node_inbound_from_outside:
       value: null
       method: unknown
       source: "https://docs.hpc.cyfronet.pl/ (pages listed under slurmrestd_advertised) say nothing on inbound access to compute nodes; measuring it needs a job"
       date: 2026-10-30
 
+  compute_node:
+    # Read on a compute node inside S1's step-0 probe job (issue #18), one node of plgrid-gpu-a100.
+    host_python3:
+      value: {plgrid-gpu-a100: "3.9.25"}
+      method: measured
+      source: "S1 step-0 probe job: python3 --version, run by the job's own non-interactive shell on the node"
+      date: 2026-10-30
+      note: "The host interpreter on the node, with no module loaded and no container."
+    architecture:
+      value: {plgrid-gpu-a100: x86_64}
+      method: measured
+      source: "S1 step-0 probe job: uname -m on the node"
+      date: 2026-10-30
+      note: "Agrees with the scheduler-reported arch of the partition entry above."
+
 unknown:
-  - fact: "compute-node outbound internet"
-    reason: "needs a job; S5 runs none. No prior observation; the docs are silent."
   - fact: "compute-node inbound from outside"
     reason: "the docs are silent and a test needs a job"
   - fact: "container runtimes on compute nodes (Apptainer, Singularity, enroot or others), their versions, and whether Slurm's native OCI support is configured there"

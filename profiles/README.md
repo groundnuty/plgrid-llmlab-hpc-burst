@@ -1,15 +1,15 @@
 # Draft platform profiles (spike S5)
 
-These are draft platform profiles for the three batch platforms. They come from spike S5 (issue #17) and were collected on 2026-10-30.
+These are draft platform profiles for the three batch platforms. They come from spike S5 (issue #17) and were collected on 2026-10-30. Spike S1 (issue #18) added the first compute-node facts to the Helios and Athena files the same day.
 
 - They are inputs to HBEP-4's open question 3 (the profile schema), not that schema. The three files share their main groups (`slurm`, `partitions`, `containers`, `storage`, `time`, `login_node_policy`, `reachability`), and each adds groups for what it found.
 - Every fact records `value`, `method`, `source` and `date`. `method` is one of:
-  - `measured`: a read-only command on the login node;
+  - `measured`: a read-only command on the login node (S5), or a command inside a short probe job on a compute node (S1's step 0, for the entries under `reachability` and `compute_node`);
   - `documented`: the centre's documentation, with the URL as the source;
   - `unknown`: the reason is given.
 - When a command was available, the fact was measured even where documentation exists. Where the two disagree, a `note` says so.
 - The partition entries group their provenance (`method`, `source`, `date`) over the whole entry instead of per field. The final envelope is HBEP-4's open question 3.
-- No Slurm job was run. Runtime behaviour that needs a job is therefore unknown: connectivity, namespaces, usable container runtimes, local disk and drivers. Scheduler-reported node shape (architecture, CPUs, memory, GRES) and documented hardware are in the profiles. The S1 test job (issue #18) is the next source for the unknowns.
+- S5 ran no Slurm job. The compute-node facts that S1's step 0 measured (below) came from one short probe job per partition: Helios `plgrid` and `plgrid-gpu-gh200`, Athena `plgrid-gpu-a100`. Sano has no S1 data. What still needs a job is unknown: inbound reachability, namespaces, usable container runtimes, local disk sizes and GPU drivers. Scheduler-reported node shape (architecture, CPUs, memory, GRES) and documented hardware are in the profiles. S1's one-hour runs are the next source.
 - As HBEP-4 requires, the profiles hold no host names, addresses, user names, accounts, grants or job IDs. Raw command output is kept privately.
 
 ## The facts that matter most
@@ -29,6 +29,11 @@ These are draft platform profiles for the three batch platforms. They come from 
 | Container runtime (login node) | Apptainer 1.5.4, setuid; no Pyxis or enroot | none of apptainer, singularity, enroot, podman or docker found; no Pyxis | Apptainer 1.5.3; no Pyxis or enroot |
 | User namespaces (login node) | off (`max_user_namespaces=0`) | off (`max_user_namespaces=0`) | on: `unshare -U` works, `unshare -Ur` fails (likely the AppArmor restriction) |
 | Lightweight long-running process (a poller) on a login node | unknown: docs prohibit computations but do not address a poller | unknown: docs prohibit computations but do not address a poller | unknown (no public docs) |
+| Compute node: outbound HTTPS on 443 to github.com and pypi.org (S1 step 0) | reached on `plgrid` and on `plgrid-gpu-gh200` (HTTP 200 and 206), no proxy variable set | reached on `plgrid-gpu-a100` (HTTP 200 and 206), no proxy variable set | not measured by S1 |
+| Compute node: host `python3` and architecture (S1 step 0) | 3.9.25 on both; x86_64 on `plgrid`, aarch64 on `plgrid-gpu-gh200` | 3.9.25; x86_64 on `plgrid-gpu-a100` | not measured by S1 |
+| Compute node to the agents VM: its ssh port, and port 7000 (S1 step 0) | ssh port reached (banner read); port 7000 timed out (filtered or dropped on the path), on both partitions | same as Helios, on `plgrid-gpu-a100` | not measured by S1 |
+
+The three compute-node rows come from a probe in direct mode: a TCP connect and a banner, and `curl` to two public endpoints, with no ssh forward set up. They do not show that an ssh forward works from a compute node, and the port 7000 timeout is not a finding about the cluster's egress policy, because the agents VM itself admits only its ssh port from the Cyfronet side.
 
 ## What this means for the design (for the HBEP author to weigh)
 
@@ -42,7 +47,7 @@ These are draft platform profiles for the three batch platforms. They come from 
 ## Unknown, and why
 
 Each profile ends with an `unknown:` list. All three share these:
-- compute-node outbound internet and inbound reachability: needs a job, which is spike S1;
+- compute-node inbound reachability: needs a job with a listener. Compute-node outbound HTTPS on 443 is no longer unknown for Helios and Athena (S1 step 0, above); it stays unknown for Sano;
 - user namespaces and the container runtime on compute nodes: needs a job;
 - the login node's effective ssh connection limits: Helios's `sshd_config` is not readable by a plain user, Sano's readable files set none and the effective values were not read, and Athena's was not probed.
 
