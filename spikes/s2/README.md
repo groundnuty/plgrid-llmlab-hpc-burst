@@ -55,7 +55,8 @@ the operational findings below (two processes and an Alpha plugin against one pr
   fresh sessions alone would avoid a busy X even before the removal.
 - **Controls** (so that a pass can be told from a test that cannot fail): vllm-router with a 60 s
   deadline must cut a 150 s stream at about 60 s; llm-d with 5 s `ext_proc` timers must stream 600 s.
-- **Shared host.** Everything ran at `nice -n 10` on a 6-core VM shared with other work, loopback only.
+- **Shared host.** Everything ran at `nice -n 10` on a 6-core VM shared with other work. Clients, Envoy and
+  vllm-router listened on 127.0.0.1; the simulators and EPPs did so only from the patched builds on (see Incidents).
 
 ## Components and provenance
 
@@ -239,7 +240,7 @@ stream. `stack.sh` now refuses to start when a port is in use.
    configuration. Keep the body modes at `FULL_DUPLEX_STREAMED`; a change to another mode arms the timer.
 2. **Inner router (HBEP-5 open question 2).** Both candidates carry the 2 h stream and survive a removal. The
    differences that matter for the decision are not deadlines:
-   - llm-d needs two processes (EPP and Envoy, 109 MB and 75 MB), literal IPv4 worker addresses, and for header
+   - llm-d needs two processes (EPP and Envoy; binaries of 109 MB and 75 MB), literal IPv4 worker addresses, and for header
      affinity an Alpha plugin and its flag. The endpoints file is the only state, so a restart keeps removals
      (lesson L-4.8): the file *is* the membership.
    - vllm-router is one process, but its membership lives in memory: the removal API changes nothing on disk,
