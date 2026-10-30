@@ -6,7 +6,7 @@ Design decisions for this framework are made as HBEPs, modelled on Kubernetes En
 |---|---|---|---|
 | [1](0001-process/README.md) | Enhancement proposal process | implementable | none |
 | [2](0002-scope-and-user-story/README.md) | Scope and user story | provisional | none |
-| [3](0003-resource-model-and-naming/README.md) | Resource model and naming | provisional | none |
+| [3](0003-resource-model-and-naming/README.md) | Resource model and naming | implementable | none |
 | [4](0004-provider-interface/README.md) | Provider interface and profiles | provisional | none |
 | [5](0005-llmlab-compatible-front/README.md) | LLMLab-compatible front | provisional | none |
 | [6](0006-instance-reachability/README.md) | Instance reachability | provisional | none |

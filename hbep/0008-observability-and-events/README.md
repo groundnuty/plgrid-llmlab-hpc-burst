@@ -162,7 +162,7 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 | CloudEvents 1.0.2 and sdk-go | [cloudevents/sdk-go](https://github.com/cloudevents/sdk-go); [spec](https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/spec.md) | sdk-go Apache-2.0; spec Apache-2.0 | Candidate, no spike assigned: the envelope for events and usage records |
 | OTel GenAI semantic conventions | [semantic-conventions-genai](https://github.com/open-telemetry/semantic-conventions-genai) | Apache-2.0 | Candidate, no spike assigned: names for front metrics, pinned to a commit; no code |
 | vLLM metric names | [vllm-project/vllm](https://github.com/vllm-project/vllm) | Apache-2.0 | Candidate, no spike assigned: engine metric names kept at the source and mapped by recording rules |
-| Kubernetes Events | the control plane's API host (HBEP-11): [k3s](https://github.com/k3s-io/k3s), or [kcp](https://github.com/kcp-dev/kcp) | k3s Apache-2.0; kcp Apache-2.0 | Candidate, no spike assigned: a mirror for people only, never the event stream |
+| Kubernetes Events | the control plane's API host (HBEP-11): [Kubernetes](https://github.com/kubernetes/kubernetes), on k3s or on the single-user host that HBEP-11's rule picks | Apache-2.0 | Candidate, no spike assigned: a mirror for people only, never the event stream |
 | llm-d-inference-sim | [llm-d/llm-d-inference-sim](https://github.com/llm-d/llm-d-inference-sim) | Apache-2.0 | Candidate test dependency, no spike assigned: an engine double for the metric tests |
 
 ### Designs and published work borrowed
@@ -201,6 +201,7 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
 - 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation.
 - 2026-10-30: spike S8 (PR #28) findings carried in.
+- 2026-10-30: aligned with HBEP-11 becoming implementable: the API host row.
 
 ## Amendments
 
