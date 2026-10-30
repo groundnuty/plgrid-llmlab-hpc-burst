@@ -1,4 +1,4 @@
-// Modified for plgrid-llmlab-hpc-burst (spike S10): import paths only. See ../NOTES.md.
+// Modified for plgrid-llmlab-hpc-burst (spike S10): import paths only. See ../ORIGIN.md.
 
 package loadbalancer
 

@@ -2,7 +2,7 @@
 // internal/metrics/metrics.go keeping only the instruments that
 // internal/loadbalancer/balance_chwbl.go records. Upstream creates them from a
 // meter in Init; here they are OpenTelemetry no-op instruments, so recording
-// does nothing and needs no setup. See ../../NOTES.md.
+// does nothing and needs no setup. See ../../ORIGIN.md.
 
 package metrics
 

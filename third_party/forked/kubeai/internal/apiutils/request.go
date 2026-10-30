@@ -2,7 +2,7 @@
 // internal/apiutils/request.go keeping only the Request fields that
 // internal/loadbalancer/group.go reads (Model, Adapter, LoadBalancing, Prefix).
 // Request parsing, which fills Prefix from the first user message, is not
-// copied. See ../../NOTES.md.
+// copied. See ../../ORIGIN.md.
 
 package apiutils
 

@@ -4,6 +4,10 @@
 // simulator in another module can drive the copied algorithm directly. Every
 // call goes through upstream code paths: reconcileEndpoints, removeEndpoint
 // and getBestAddr. Nothing here re-implements a selection rule.
+//
+// SetSelectionHook is a test seam. It lets a test stop a selector between
+// CHWBL's load check and the reservation, to force an interleaving of
+// concurrent selectors without relying on timing.
 
 package loadbalancer
 
@@ -12,6 +16,9 @@ import (
 
 	v1 "github.com/groundnuty/plgrid-llmlab-hpc-burst/third_party/forked/kubeai/api/k8s/v1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/third_party/forked/kubeai/internal/apiutils"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/third_party/forked/kubeai/internal/metrics"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
 )
 
 // Group wraps KubeAI's endpoint group.
@@ -36,7 +43,9 @@ func (G *Group) SetEndpoints(names []string) {
 }
 
 // RemoveEndpoint stops new selections of one endpoint while its in-flight
-// requests keep their counters (KubeAI's terminating-pod path).
+// requests keep their counters. Upstream calls removeEndpoint for a pod
+// already gone from the cache; a terminating pod leaves through
+// reconcileEndpoints, which changes the ring and the counters the same way.
 func (G *Group) RemoveEndpoint(name string) {
 	G.g.removeEndpoint(name)
 }
@@ -93,4 +102,30 @@ func (G *Group) Members() int {
 	G.g.mtx.RLock()
 	defer G.g.mtx.RUnlock()
 	return len(G.g.endpoints)
+}
+
+// hookCounter is an OpenTelemetry counter whose Add calls a hook with the
+// endpoint attribute it is given.
+type hookCounter struct {
+	noop.Int64Counter
+	hook func(endpoint string)
+}
+
+func (c hookCounter) Add(_ context.Context, _ int64, opts ...metric.AddOption) {
+	attrs := metric.NewAddConfig(opts).Attributes()
+	v, _ := attrs.Value(metrics.AttrEndpoint)
+	c.hook(v.AsString())
+}
+
+// SetSelectionHook makes every CHWBL selection call hook(endpoint) after the
+// load check has chosen the endpoint and before getBestAddr increments its
+// in-flight counter, while the group's read lock is held. It works through
+// the instrument upstream records at exactly that point
+// (metrics.InferenceRequestsHashLookupFinal), so no upstream line changes.
+// The returned function restores the no-op instrument. The hook is global:
+// tests that set it must not run in parallel.
+func SetSelectionHook(hook func(endpoint string)) (restore func()) {
+	prev := metrics.InferenceRequestsHashLookupFinal
+	metrics.InferenceRequestsHashLookupFinal = hookCounter{hook: hook}
+	return func() { metrics.InferenceRequestsHashLookupFinal = prev }
 }
