@@ -1,0 +1,30 @@
+{
+  "label": "ctrl-vllmr-short",
+  "url": "http://127.0.0.1:19209/v1/chat/completions",
+  "session": "c1",
+  "started_utc": "2026-10-30T10:06:24Z",
+  "expect_tokens": 150,
+  "tokens": 59,
+  "finish_reason": "",
+  "done_seen": false,
+  "http_status": 200,
+  "resp_headers": {
+    "server": "fasthttp",
+    "x-request-id": "chatcmpl-QpO0eZSlquzAUKbGMEJQW80y"
+  },
+  "error": "read: unexpected EOF",
+  "elapsed_sec": 60.00458468,
+  "response_headers_sec": 1.013762848,
+  "first_token_sec": 1.013905219,
+  "last_token_sec": 59.057881691,
+  "gap_min_ms": 998.693361,
+  "gap_mean_ms": 1000.7582150344826,
+  "gap_p50_ms": 1000.731406,
+  "gap_p99_ms": 1002.632619,
+  "gap_max_ms": 1003.123532,
+  "gap_max_at_token": 17,
+  "gaps_over_2s": 0,
+  "sse_comment_lines": 0,
+  "complete": false,
+  "cut_after_sec": 60.00458468
+}

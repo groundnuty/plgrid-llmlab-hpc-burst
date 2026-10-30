@@ -1,0 +1,30 @@
+{
+  "label": "inflight-during-epp-kill",
+  "url": "http://127.0.0.1:19207/v1/chat/completions",
+  "session": "k1",
+  "started_utc": "2026-10-30T10:06:23Z",
+  "expect_tokens": 120,
+  "tokens": 40,
+  "finish_reason": "",
+  "done_seen": false,
+  "http_status": 200,
+  "resp_headers": {
+    "server": "fasthttp",
+    "x-went-into-resp-headers": "true"
+  },
+  "error": "read: unexpected EOF",
+  "elapsed_sec": 40.078575706,
+  "response_headers_sec": 1.00955475,
+  "first_token_sec": 1.00976377,
+  "last_token_sec": 40.039376558,
+  "gap_min_ms": 992.756618,
+  "gap_mean_ms": 1000.7593022564103,
+  "gap_p50_ms": 1000.507463,
+  "gap_p99_ms": 1006.330504,
+  "gap_max_ms": 1007.253222,
+  "gap_max_at_token": 30,
+  "gaps_over_2s": 0,
+  "sse_comment_lines": 0,
+  "complete": false,
+  "cut_after_sec": 40.078575706
+}

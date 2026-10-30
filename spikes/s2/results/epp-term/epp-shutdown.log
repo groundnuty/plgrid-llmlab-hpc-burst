@@ -1,0 +1,5 @@
+2026-10-30T11:39:53.792354007Z logger/logger.go:57 Shutting down prometheus metrics thread 
+2026-10-30T11:39:53.792480761Z runnable/grpc.go:71 gRPC server shutting down ext-proc
+2026-10-30T11:39:53.793001103Z runnable/grpc.go:71 gRPC server shutting down health
+2026-10-30T11:39:53.79319024Z runnable/grpc.go:81 gRPC server terminated health
+2026-10-30T11:41:53.945790191Z runnable/grpc.go:81 gRPC server terminated ext-proc

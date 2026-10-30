@@ -1,0 +1,28 @@
+{
+  "label": "vllmr-default-ttft",
+  "url": "http://127.0.0.1:19213/v1/chat/completions",
+  "session": "t2",
+  "started_utc": "2026-10-30T09:46:29Z",
+  "expect_tokens": 30,
+  "tokens": 30,
+  "finish_reason": "length",
+  "done_seen": true,
+  "http_status": 200,
+  "resp_headers": {
+    "server": "fasthttp",
+    "x-request-id": "chatcmpl-oSEvo1xZ9rbtfPSYM09syq9d"
+  },
+  "elapsed_sec": 1129.03376485,
+  "response_headers_sec": 1100.007922378,
+  "first_token_sec": 1100.008211041,
+  "last_token_sec": 1129.033403634,
+  "gap_min_ms": 995.479233,
+  "gap_mean_ms": 1000.8687101034483,
+  "gap_p50_ms": 1000.990818,
+  "gap_p99_ms": 1002.871219,
+  "gap_max_ms": 1006.669752,
+  "gap_max_at_token": 7,
+  "gaps_over_2s": 0,
+  "sse_comment_lines": 0,
+  "complete": true
+}

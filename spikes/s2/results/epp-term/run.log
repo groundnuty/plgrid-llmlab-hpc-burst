@@ -1,0 +1,14 @@
+ok $S2_HOME/run/llmd-guide
+started llmd-guide: http://127.0.0.1:19207/v1/chat/completions
++0s SIGTERM sent to the EPP only (stream running since 30 s)
+EPP of llmd-guide: SIGTERM at 11:39:53
++5s EPP still alive
++5s a 3-token request sent 5 s after the SIGTERM ended with exit 2 (0 = complete)
++121s stream process ended
++121s EPP exited
+the in-flight stream ended with exit 0 (0 = complete)
+a 3-token request after the EPP exited ended with exit 2 (0 = complete)
+label                        complete        tokens  elapsed_s cut_after_s max_gap_ms gaps>2s  error
+inflight-during-epp-term     True        150/150           150           0       1088       0  
+new-after-epp-exit           False         0/3               0           0          0       0  http 500: 
+new-during-epp-term          False         0/3               0           0          0       0  http 500: 
