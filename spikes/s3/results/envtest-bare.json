@@ -1,0 +1,210 @@
+{
+  "option": "envtest-bare",
+  "version_old": "1.35.0",
+  "version_new": "1.36.2",
+  "started_utc": "2026-10-30T09:14:35Z",
+  "cold_starts": [
+    {
+      "readyz_ms": 3327,
+      "ready_ms": 3327,
+      "usable_ms": 3527,
+      "load1_at_start": 3.45
+    },
+    {
+      "readyz_ms": 3253,
+      "ready_ms": 3253,
+      "usable_ms": 3401,
+      "load1_at_start": 3.53
+    },
+    {
+      "readyz_ms": 3525,
+      "ready_ms": 3525,
+      "usable_ms": 3625,
+      "load1_at_start": 3.49
+    }
+  ],
+  "warm_starts": [
+    {
+      "readyz_ms": 2549,
+      "ready_ms": 2549,
+      "usable_ms": 2603,
+      "load1_at_start": 3.8
+    },
+    {
+      "readyz_ms": 2579,
+      "ready_ms": 2579,
+      "usable_ms": 2631,
+      "load1_at_start": 3.75
+    },
+    {
+      "readyz_ms": 2799,
+      "ready_ms": 2799,
+      "usable_ms": 2871,
+      "load1_at_start": 3.53
+    }
+  ],
+  "cold_median": {
+    "readyz_ms": 3327,
+    "ready_ms": 3327,
+    "usable_ms": 3527,
+    "load1_at_start": 0
+  },
+  "warm_median": {
+    "readyz_ms": 2579,
+    "ready_ms": 2579,
+    "usable_ms": 2631,
+    "load1_at_start": 0
+  },
+  "rss_idle": {
+    "samples_mib": [
+      304.2,
+      304.2,
+      304.4
+    ],
+    "median_mib": 304.2,
+    "by_process_mib": {
+      "etcd": 44.6,
+      "kube-apiserver": 259.6
+    },
+    "load1_at_samples": [
+      3.45,
+      3.73,
+      3.67
+    ],
+    "mem_available_gib_at_samples": [
+      20.6,
+      20.6,
+      20.5
+    ]
+  },
+  "rss_loaded": {
+    "samples_mib": [
+      309,
+      309.7,
+      310
+    ],
+    "median_mib": 309.7,
+    "by_process_mib": {
+      "etcd": 50.8,
+      "kube-apiserver": 258.9
+    },
+    "controller_mib": 39,
+    "load1_at_samples": [
+      4.62,
+      4.49,
+      4.29
+    ],
+    "mem_available_gib_at_samples": [
+      20.5,
+      20.5,
+      20.5
+    ]
+  },
+  "listeners": [
+    "127.0.0.1:29101",
+    "127.0.0.1:29102",
+    "127.0.0.1:29103"
+  ],
+  "stop_ms": 1184,
+  "data_dir_mib_after_load": 138.1,
+  "e2e": {
+    "passed": [
+      "TestConflict",
+      "TestDiscovery",
+      "TestFinalizerHoldsDeletion",
+      "TestReconcileAndScale",
+      "TestRestartConvergence",
+      "TestSelectors",
+      "TestValidation",
+      "TestWatch"
+    ],
+    "failed": [
+      "TestCascadeBackground",
+      "TestCascadeForeground",
+      "TestFinalizerThroughCascade"
+    ],
+    "skipped": [
+      "TestPhaseLoad",
+      "TestPhasePostUpgrade"
+    ],
+    "exit": 1,
+    "log": "$SCRATCH/logs/envtest-bare-main-e2e.log"
+  },
+  "upgrade": {
+    "server_version_before": "v1.35.0",
+    "server_version_after": "v1.36.2",
+    "objects_before": 103,
+    "objects_identical_after": 103,
+    "stop_to_ready_ms": 2582,
+    "e2e_after": {
+      "passed": [
+        "TestConflict",
+        "TestDiscovery",
+        "TestFinalizerHoldsDeletion",
+        "TestReconcileAndScale",
+        "TestRestartConvergence",
+        "TestSelectors",
+        "TestValidation",
+        "TestWatch"
+      ],
+      "failed": [
+        "TestCascadeBackground",
+        "TestCascadeForeground",
+        "TestFinalizerThroughCascade"
+      ],
+      "skipped": [
+        "TestPhaseLoad",
+        "TestPhasePostUpgrade"
+      ],
+      "exit": 1,
+      "log": "$SCRATCH/logs/envtest-bare-upgrade-e2e.log"
+    },
+    "post_upgrade_test": {
+      "passed": null,
+      "failed": [
+        "TestPhasePostUpgrade"
+      ],
+      "skipped": null,
+      "exit": 1,
+      "log": "$SCRATCH/logs/envtest-bare-postupgrade-e2e.log"
+    }
+  },
+  "budget": [
+    {
+      "line": "RSS idle",
+      "limit": "\u003c= 600 MiB",
+      "actual": "304 MiB",
+      "pass": true
+    },
+    {
+      "line": "RSS with ~100 objects",
+      "limit": "\u003c= 800 MiB",
+      "actual": "310 MiB",
+      "pass": true
+    },
+    {
+      "line": "cold start to ready",
+      "limit": "\u003c= 30 s",
+      "actual": "3.3 s (median of 3)",
+      "pass": true
+    },
+    {
+      "line": "warm start to ready",
+      "limit": "\u003c= 30 s",
+      "actual": "2.6 s (median of 3)",
+      "pass": true
+    },
+    {
+      "line": "minor upgrade",
+      "limit": "all objects kept, e2e passes, stop to ready \u003c= 60 s",
+      "actual": "103/103 kept, e2e failed=3, post-upgrade failed=1, stop to ready 2.6 s ",
+      "pass": false
+    },
+    {
+      "line": "e2e suite",
+      "limit": "every test passes",
+      "actual": "8 passed, 3 failed [TestCascadeBackground TestCascadeForeground TestFinalizerThroughCascade]",
+      "pass": false
+    }
+  ]
+}

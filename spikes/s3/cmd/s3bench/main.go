@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -26,12 +27,16 @@ type bench struct {
 }
 
 func main() {
-	scratch := flag.String("scratch", envOr("SCRATCH", "/tmp/hpc-burst-tools/spikes/s3"), "scratch directory (binaries, data, logs)")
+	scratch := flag.String("scratch", os.Getenv("SCRATCH"), "scratch directory for binaries, data and logs (required; default $SCRATCH)")
 	option := flag.String("option", "", "envtest-bare | envtest-gc | kcp")
 	e2e := flag.String("e2e", "", "compiled e2e test binary (default $SCRATCH/bin/e2e.test)")
 	out := flag.String("out", "results", "directory for result JSON and scrubbed e2e logs")
 	only := flag.String("only", "all", "all | main | upgrade (which parts to run)")
 	flag.Parse()
+	if *scratch == "" {
+		fmt.Fprintln(os.Stderr, "set -scratch or $SCRATCH")
+		os.Exit(2)
+	}
 	if *e2e == "" {
 		*e2e = filepath.Join(*scratch, "bin/e2e.test")
 	}
@@ -47,7 +52,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "unknown or missing -option")
 		os.Exit(2)
 	}
-	for _, d := range []string{"logs", "data", "work/home"} {
+	for _, d := range []string{"logs", "data", "work/kcphome"} {
 		if err := os.MkdirAll(filepath.Join(*scratch, d), 0o700); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -61,6 +66,14 @@ func main() {
 	b := &bench{scratch: *scratch, e2eBin: *e2e, outDir: *out, h: h, res: newResult(h)}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	if *only != "all" { // a partial run adds to the stored result of the same option
+		if bs, rerr := os.ReadFile(filepath.Join(*out, h.name()+".json")); rerr == nil {
+			var prev result
+			if json.Unmarshal(bs, &prev) == nil {
+				b.res = &prev
+			}
+		}
+	}
 	err := b.runAll(ctx, *only)
 	b.cleanup() // nothing of ours may keep running
 	b.res.finish()
@@ -72,13 +85,6 @@ func main() {
 		fmt.Fprintln(os.Stderr, "ERROR:", err)
 		os.Exit(1)
 	}
-}
-
-func envOr(k, d string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return d
 }
 
 func (b *bench) cleanup() {
@@ -93,5 +99,7 @@ func (b *bench) writeResult() error {
 	if err != nil {
 		return err
 	}
+	// Result files are committed: no local path may appear in them.
+	bs = bytes.ReplaceAll(bs, []byte(b.scratch), []byte("$SCRATCH"))
 	return os.WriteFile(filepath.Join(b.outDir, b.h.name()+".json"), append(bs, '\n'), 0o644)
 }

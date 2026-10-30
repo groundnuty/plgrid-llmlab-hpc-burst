@@ -1,0 +1,30 @@
+=== RUN   TestDiscovery
+--- PASS: TestDiscovery (0.00s)
+=== RUN   TestValidation
+--- PASS: TestValidation (0.04s)
+=== RUN   TestReconcileAndScale
+--- PASS: TestReconcileAndScale (2.67s)
+=== RUN   TestRestartConvergence
+--- PASS: TestRestartConvergence (5.21s)
+=== RUN   TestSelectors
+--- PASS: TestSelectors (0.08s)
+=== RUN   TestConflict
+--- PASS: TestConflict (0.04s)
+=== RUN   TestWatch
+--- PASS: TestWatch (0.03s)
+=== RUN   TestCascadeBackground
+    gc_test.go:58: garbage collection of 5 dependents (2 levels) took 120ms
+--- PASS: TestCascadeBackground (0.24s)
+=== RUN   TestCascadeForeground
+--- PASS: TestCascadeForeground (0.18s)
+=== RUN   TestFinalizerHoldsDeletion
+--- PASS: TestFinalizerHoldsDeletion (3.93s)
+=== RUN   TestFinalizerThroughCascade
+--- PASS: TestFinalizerThroughCascade (5.85s)
+=== RUN   TestPhaseLoad
+    phase_test.go:28: only runs with S3_PHASE=load
+--- SKIP: TestPhaseLoad (0.00s)
+=== RUN   TestPhasePostUpgrade
+    phase_test.go:28: only runs with S3_PHASE=postupgrade
+--- SKIP: TestPhasePostUpgrade (0.00s)
+PASS

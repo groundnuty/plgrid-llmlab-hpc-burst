@@ -4,8 +4,8 @@
 # modules with in-repo staging directories; a consumer must repeat those replaces, so this
 # script generates the embedded module's go.mod from kcp's own. Everything stays in $SCRATCH.
 set -euo pipefail
-SCRATCH=${SCRATCH:-/tmp/hpc-burst-tools/spikes/s3}
-. "${GO_ENV:-/tmp/hpc-burst-tools/env.sh}"
+SCRATCH=${SCRATCH:?set SCRATCH to a writable directory with at least 6 GB free}
+command -v go >/dev/null || { echo "go (1.26 or newer) must be on PATH" >&2; exit 1; }
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 KCP_TAG=v0.33.3
 KCP_SRC=$SCRATCH/src/kcp-${KCP_TAG#v}
@@ -24,5 +24,5 @@ cd "$W"
 # Same pins as kcp for everything else: start from kcp's go.sum.
 cp "$KCP_SRC/go.sum" "$W/go.sum"
 GOFLAGS=-mod=mod go mod tidy
-nice -n 10 go build -tags s3embedded -o "$SCRATCH/bin/s3-embedded" .
+nice -n 10 go build -buildvcs=false -tags s3embedded -o "$SCRATCH/bin/s3-embedded" .
 ls -la "$SCRATCH/bin/s3-embedded"

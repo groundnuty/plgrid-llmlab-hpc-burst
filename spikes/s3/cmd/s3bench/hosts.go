@@ -221,11 +221,12 @@ func (h kcpHost) start(ver, dir, tag string) (*running, error) {
 		return nil, err
 	}
 	admin := filepath.Join(root, "admin.kubeconfig")
-	// A leftover admin.kubeconfig from a previous run must not make a not-yet-started server look ready.
-	_ = os.Remove(admin)
+	// Do not delete a leftover admin.kubeconfig: kcp reads the shard-admin token back from it
+	// on a restart and refuses to start without it. Nothing else listens on our port (checked
+	// before every start), so a stale file cannot make a not-yet-started server look ready.
 	r := &running{t0: time.Now(), admin: admin, ctxName: "root", hostPorts: []int{portKCP, portKCPEtcd, portKCPPeer, portKCPMetrics}}
 	p, err := startProc("kcp", filepath.Join(h.scratch, "logs", tag+"-kcp.log"),
-		[]string{"HOME=" + filepath.Join(h.scratch, "work/home")},
+		[]string{"HOME=" + filepath.Join(h.scratch, "work/kcphome")},
 		filepath.Join(h.scratch, "bin/kcp-"+ver+"/bin/kcp"), "start",
 		"--root-directory", root, "--bind-address", "127.0.0.1", "--secure-port", fmt.Sprint(portKCP),
 		"--embedded-etcd-directory", filepath.Join(root, "etcd-server"),

@@ -212,19 +212,21 @@ func (b *bench) upgradeRun(ctx context.Context) {
 	}
 	u.ObjectsBefore, u.ServerBefore = len(before), serverVersion(kc, r.ctxName)
 	b.logf("snapshot of %d objects on %s; stopping the old host (no controller running)", len(before), u.ServerBefore)
-	stopAt := time.Now()
-	if _, err := r.stopAll(60 * time.Second); err != nil {
+	// Stop to ready = how long the old host takes to stop plus how long the new one takes to be
+	// ready. The wait for a quiet VM between the two (b.gate) is not part of it.
+	stopDur, err := r.stopAll(60 * time.Second)
+	if err != nil {
 		fail(err)
 		return
 	}
 	b.live = nil
 
-	r2, _, err := b.startReady(ctx, newV, dir, "upgrade-new")
+	r2, tNew, err := b.startReady(ctx, newV, dir, "upgrade-new")
 	if err != nil {
 		fail(err)
 		return
 	}
-	u.StopToReadyMS = time.Since(stopAt).Milliseconds()
+	u.StopToReadyMS = stopDur.Milliseconds() + tNew.ReadyMS
 	kc2, err := b.usable(ctx, r2)
 	if err != nil {
 		fail(err)
