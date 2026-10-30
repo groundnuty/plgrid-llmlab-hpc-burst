@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s8/evlayer"
@@ -23,6 +24,8 @@ func RunRole() bool {
 		hostMain()
 	case "pub":
 		pubMain()
+	case "spew", "longline", "exit3", "sleep":
+		selfTestRole(os.Getenv("S8_ROLE"))
 	default:
 		fmt.Fprintln(os.Stderr, "s8: unknown role", os.Getenv("S8_ROLE"))
 		os.Exit(2)
@@ -50,7 +53,9 @@ func hostMain() {
 
 // pubMain publishes events from several workers and prints one line per
 // acknowledgement ("ACK <stream seq> <event id>") with a single write each, so
-// the parent sees an acknowledgement only after the broker sent it.
+// the parent sees an acknowledgement only after the broker sent it. When every
+// worker has stopped (the server is gone) it prints "DONE <n>", n being the
+// number of ACK lines it wrote, so the parent can tell that it read all of them.
 func pubMain() {
 	url, tag := os.Getenv("S8_URL"), os.Getenv("S8_TAG")
 	workers, _ := strconv.Atoi(os.Getenv("S8_WORKERS"))
@@ -74,6 +79,7 @@ func pubMain() {
 	go func() { _, _ = io.Copy(io.Discard, os.Stdin); os.Exit(0) }()
 	var wg sync.WaitGroup
 	var mu sync.Mutex
+	var written atomic.Int64
 	sent := 0
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
@@ -99,9 +105,14 @@ func pubMain() {
 				if err != nil {
 					return // the server is gone or not answering: stop, never retry here
 				}
-				_, _ = os.Stdout.WriteString(fmt.Sprintf("ACK %d %s\n", ack.Sequence, id))
+				if _, err := os.Stdout.WriteString(fmt.Sprintf("ACK %d %s\n", ack.Sequence, id)); err != nil {
+					fmt.Fprintln(os.Stderr, "s8 pub: stdout:", err)
+					os.Exit(5)
+				}
+				written.Add(1)
 			}
 		}(w)
 	}
 	wg.Wait()
+	fmt.Printf("DONE %d\n", written.Load())
 }

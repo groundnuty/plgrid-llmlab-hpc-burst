@@ -16,10 +16,21 @@ import (
 // Cursor is the position a stored-cursor subscriber has handled up to. EventID is
 // the id of the event at Seq, so a resumed subscriber can tell that the stream
 // still holds the same history (see ErrHistoryRewritten).
+//
+// Started is set once the subscription has fixed its starting boundary. A cursor
+// at Seq 0 that is Started means "everything from sequence 1 is owed to me"; a
+// zero Cursor that is not Started is a new subscription, which has no boundary
+// yet. Without the flag the two look the same, and a subscription whose first
+// events were evicted before it handled any of them would restart as a new one
+// and skip them without a gap marker.
 type Cursor struct {
 	Seq     uint64 `json:"seq"`
 	EventID string `json:"event_id,omitempty"`
+	Started bool   `json:"started,omitempty"`
 }
+
+// isNew reports whether the cursor belongs to a subscription that never started.
+func (c Cursor) isNew() bool { return !c.Started && c.Seq == 0 && c.EventID == "" }
 
 // CursorStore keeps a Cursor across restarts. In the framework this is a control
 // plane object (HBEP-10, HBEP-11); the spike uses a file.
@@ -130,10 +141,20 @@ func tail(ctx context.Context, js jetstream.JetStream, cfg TailConfig, h Handler
 	if err := verifyCursor(ctx, st, cur); err != nil {
 		return err
 	}
-	gaps := gapTracker{stream: cfg.Stream}
+	if cur.isNew() {
+		// A new subscription is owed everything the stream holds now. Fix that boundary and
+		// store it before anything is delivered, so that it survives a failing handler, an
+		// eviction and a restart (see Cursor).
+		if cur, err = startBoundary(ctx, st); err != nil {
+			return err
+		}
+		if err := cfg.Store.Save(cur); err != nil {
+			return err
+		}
+	}
+	gaps := gapTracker{stream: cfg.Stream, next: cur.Seq + 1}
 	oc := jetstream.OrderedConsumerConfig{FilterSubjects: []string{SubjectsAll}}
 	if cur.Seq > 0 {
-		gaps.next = cur.Seq + 1
 		oc.DeliverPolicy = jetstream.DeliverByStartSequencePolicy
 		oc.OptStartSeq = cur.Seq + 1
 	}
@@ -181,7 +202,7 @@ func tail(ctx context.Context, js jetstream.JetStream, cfg TailConfig, h Handler
 				if err := h(ctx, Record{Seq: gap.To, Gap: gap}); err != nil {
 					return err
 				}
-				cur = Cursor{Seq: gap.To, EventID: cur.EventID}
+				cur = Cursor{Seq: gap.To, EventID: cur.EventID, Started: true}
 				sinceSave++
 			}
 			continue
@@ -210,12 +231,26 @@ func tail(ctx context.Context, js jetstream.JetStream, cfg TailConfig, h Handler
 		if err := h(ctx, rec); err != nil {
 			return err
 		}
-		cur = Cursor{Seq: seq, EventID: rec.Event.ID()}
+		cur = Cursor{Seq: seq, EventID: rec.Event.ID(), Started: true}
 		sinceSave++
 		if err := save(false); err != nil {
 			return err
 		}
 	}
+}
+
+// startBoundary is the cursor of a subscription that starts now: it has handled
+// everything before the stream's oldest retained message, so nothing earlier is owed.
+func startBoundary(ctx context.Context, st jetstream.Stream) (Cursor, error) {
+	si, err := st.Info(ctx)
+	if err != nil {
+		return Cursor{}, err
+	}
+	c := Cursor{Started: true}
+	if si.State.FirstSeq > 0 {
+		c.Seq = si.State.FirstSeq - 1
+	}
+	return c, nil
 }
 
 // verifyCursor checks that the stream still holds the history the cursor refers to.

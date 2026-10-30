@@ -95,8 +95,9 @@ func Publish(ctx context.Context, js jetstream.JetStream, e cloudevents.Event) (
 }
 
 // PublishRetry retries Publish on timeouts and temporary errors until the
-// context ends. It is at-least-once on the wire and exactly-once in the stream
-// (the id de-duplicates).
+// context ends. It is at-least-once on the wire. The stream stores one copy as
+// long as the retries fall inside its duplicate window (two minutes in
+// StreamConfig); a retry later than that stores a second copy.
 func PublishRetry(ctx context.Context, js jetstream.JetStream, e cloudevents.Event) (*jetstream.PubAck, error) {
 	var last error
 	for {

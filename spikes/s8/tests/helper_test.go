@@ -48,7 +48,7 @@ func startHost(t *testing.T, store string, mode jsnode.SyncMode, wrap ...string)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { h.Kill() })
+	t.Cleanup(func() { _ = h.Kill() }) // already stopped is fine
 	line, err := h.WaitLine("READY ", 60*time.Second)
 	if err != nil {
 		t.Fatalf("host start: %v", err)

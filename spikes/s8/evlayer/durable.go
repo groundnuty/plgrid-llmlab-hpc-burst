@@ -19,6 +19,7 @@ type DurableConfig struct {
 	NakDelay      time.Duration // redelivery delay after a handler error
 	Batch         int
 	FetchWait     time.Duration
+	AckTimeout    time.Duration // how long to wait for the server to confirm the acknowledgement of a NAKed message (default 2s)
 }
 
 // Durable is a subscriber whose cursor lives in the broker (the consumer's ack
@@ -32,10 +33,15 @@ type Durable struct {
 	applied map[string]uint64        // resource key -> highest stream seq handled for it
 	floor   uint64                   // ack floor at attach: everything at or below is done
 	held    map[uint64]jetstream.Msg // NAKed messages of this session, acknowledged when a later delivery re-sequences them
+	nc      *nats.Conn               // the connection behind js, for acknowledging a NAKed message by its reply subject
 	// Resequenced counts predecessors the layer fetched ahead of a later delivery.
 	Resequenced int
 	// Duplicates counts redelivered copies dropped because they were already handled.
 	Duplicates int
+	// HeldAckErrors counts acknowledgements of a NAKed message that the server did not confirm.
+	// Such a message stays pending at the server until its redelivery, which is then dropped
+	// as a duplicate and acknowledged; nothing is lost, but the ack floor is held back until then.
+	HeldAckErrors int
 }
 
 // NewDurable attaches to (or creates) the durable consumer.
@@ -48,6 +54,9 @@ func NewDurable(ctx context.Context, js jetstream.JetStream, cfg DurableConfig) 
 	}
 	if cfg.NakDelay == 0 {
 		cfg.NakDelay = 200 * time.Millisecond
+	}
+	if cfg.AckTimeout == 0 {
+		cfg.AckTimeout = 2 * time.Second
 	}
 	st, err := js.Stream(ctx, cfg.Stream)
 	if err != nil {
@@ -68,11 +77,12 @@ func NewDurable(ctx context.Context, js jetstream.JetStream, cfg DurableConfig) 
 	if err != nil {
 		return nil, err
 	}
-	d := &Durable{cfg: cfg, stream: st, cons: cons, applied: map[string]uint64{}, held: map[uint64]jetstream.Msg{}, floor: ci.AckFloor.Stream}
+	d := &Durable{cfg: cfg, stream: st, cons: cons, applied: map[string]uint64{}, held: map[uint64]jetstream.Msg{}, floor: ci.AckFloor.Stream, nc: js.Conn()}
+	// The server fixes the consumer's starting point when it creates it: for a consumer that
+	// delivers everything, Delivered.Stream is the stream's first sequence minus one, so
+	// Delivered.Stream+1 is the first sequence it owes the subscriber, also when nothing has
+	// been delivered yet (a message evicted before the first delivery is then a gap).
 	d.gaps = gapTracker{stream: cfg.Stream, next: ci.Delivered.Stream + 1}
-	if ci.Delivered.Stream == 0 {
-		d.gaps.next = 0 // fresh consumer: no history owed
-	}
 	return d, nil
 }
 
@@ -134,6 +144,20 @@ func (d *Durable) checkIdle(ctx context.Context, h Handler) error {
 	return nil
 }
 
+// ackHeld acknowledges a message that was NAKed earlier in this session and waits
+// for the server to confirm. After a NAK the nats.go message object refuses every
+// further acknowledgement (ErrMsgAlreadyAckd), so the +ACK is sent as a request to
+// the message's reply subject. The server keeps a NAKed message pending (with a
+// later redelivery time) and an acknowledgement removes it, so no redelivery follows.
+func (d *Durable) ackHeld(ctx context.Context, hm jetstream.Msg) error {
+	actx, cancel := context.WithTimeout(ctx, d.cfg.AckTimeout)
+	defer cancel()
+	if _, err := d.nc.RequestWithContext(actx, hm.Reply(), []byte("+ACK")); err != nil {
+		return fmt.Errorf("evlayer: acknowledging a NAKed message: %w", err)
+	}
+	return nil
+}
+
 func (d *Durable) process(ctx context.Context, m jetstream.Msg, h Handler) error {
 	md, err := m.Metadata()
 	if err != nil {
@@ -185,8 +209,11 @@ func (d *Durable) process(ctx context.Context, m jetstream.Msg, h Handler) error
 		d.applied[rec.Resource] = raw.Sequence
 		last = raw.Sequence
 		if hm, ok := d.held[raw.Sequence]; ok { // we hold its delivery: acknowledge it now, so the ack floor can advance
-			_ = hm.Ack()
-			delete(d.held, raw.Sequence)
+			if err := d.ackHeld(ctx, hm); err != nil {
+				d.HeldAckErrors++ // stays pending; its redelivery is dropped as a duplicate and acknowledged then
+			} else {
+				delete(d.held, raw.Sequence)
+			}
 		}
 	}
 	if err := h(ctx, rec); err != nil {

@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -64,6 +65,39 @@ func assertLimitReached(t *testing.T, js jetstream.JetStream, acks []acked) {
 	t.Logf("limit reached: published %d, stream holds %d of limit %d, first seq now %d", len(acks), si.State.Msgs, gapLimit, si.State.FirstSeq)
 }
 
+// assertRetainedSuffixDelivered is the oracle that coverage alone cannot give. Once publishing
+// has stopped, the stream holds exactly the top `limit` acknowledged sequences, and a
+// subscriber must have handed every one of them over as an event, once. An implementation
+// that marked retained messages as a gap would still cover every sequence.
+func assertRetainedSuffixDelivered(t *testing.T, js jetstream.JetStream, recs []rec, acks []acked, limit int) {
+	t.Helper()
+	last := maxSeq(acks)
+	first := last - uint64(limit) + 1
+	// The expected suffix comes from the publisher's acknowledgements; check it against the stream.
+	st, err := js.Stream(ctxT(t, 10*time.Second), streamName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	si, err := st.Info(ctxT(t, 10*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if si.State.FirstSeq != first || si.State.LastSeq != last || si.State.Msgs != uint64(limit) {
+		t.Fatalf("oracle wrong: stream holds %d messages %d..%d, the acknowledgements say %d..%d", si.State.Msgs, si.State.FirstSeq, si.State.LastSeq, first, last)
+	}
+	handled := map[string]int{}
+	for _, r := range recs {
+		if !r.Gap {
+			handled[r.ID]++
+		}
+	}
+	for _, a := range acks {
+		if a.Seq >= first && handled[a.ID] != 1 {
+			t.Errorf("retained event %s (sequence %d of the final %d..%d) was handled %d times, want once", a.ID, a.Seq, first, last, handled[a.ID])
+		}
+	}
+}
+
 // Acceptance test 2 (durable consumer): a slow subscriber is overtaken by retention
 // and sees an explicit gap marker; nothing is missing without a marker.
 func TestGap_Durable_SlowSubscriber_MaxMsgs(t *testing.T) {
@@ -94,6 +128,7 @@ func TestGap_Durable_SlowSubscriber_MaxMsgs(t *testing.T) {
 	if gapped == 0 {
 		t.Fatal("retention evicted unread messages but the subscriber saw no gap marker")
 	}
+	assertRetainedSuffixDelivered(t, js, recs, acks, gapLimit)
 	t.Logf("RESULT slow durable subscriber: handled %d, gap-marked %d sequences in %d markers, of %d acknowledged", handled, gapped, countGaps(recs), len(acks))
 }
 
@@ -122,6 +157,7 @@ func slowTail(t *testing.T, pull int) (handled, gapped, markers int, acks []acke
 	}
 	recs := c.snapshot()
 	handled, gapped = assertCoverage(t, recs, acks, 1)
+	assertRetainedSuffixDelivered(t, js, recs, acks, gapLimit)
 	return handled, gapped, countGaps(recs), acks
 }
 
@@ -235,6 +271,20 @@ func stoppedThenEvicted(t *testing.T, run func(ctx context.Context, js jetstream
 	if gapped == 0 || countGaps(recs) != 1 {
 		t.Fatalf("expected exactly one gap marker after the stop, got %d marking %d sequences", countGaps(recs), gapped)
 	}
+	// Coverage accepts any contiguous gap, so also pin the exact one. Ten events were handled
+	// before the stop (1..10), 310 were published, the stream keeps the last 50 (261..310):
+	// the gap is 11..260 and the 50 retained events are all delivered.
+	const handledBeforeStop, published = 10, 310
+	if last := maxSeq(acks); last != published {
+		t.Fatalf("setup: the last acknowledged sequence is %d, want %d", last, published)
+	}
+	wantFrom, wantTo := uint64(handledBeforeStop+1), uint64(published-gapLimit)
+	for _, r := range recs {
+		if r.Gap && (r.From != wantFrom || r.To != wantTo) {
+			t.Errorf("gap marker %d..%d, want %d..%d", r.From, r.To, wantFrom, wantTo)
+		}
+	}
+	assertRetainedSuffixDelivered(t, js, recs, acks, gapLimit)
 	t.Logf("RESULT stopped then evicted: handled %d, one gap marker covering %d sequences, of %d acknowledged", handled, gapped, len(acks))
 }
 
@@ -370,4 +420,259 @@ func TestGap_NoFalsePositive_WithoutEviction(t *testing.T) {
 			}
 		})
 	}
+}
+
+// publishOn publishes n events one after another on one resource and returns the acknowledgements.
+func publishOn(ctx context.Context, t *testing.T, js jetstream.JetStream, tag, name string, n int) []acked {
+	t.Helper()
+	var out []acked
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("%s-%d", tag, i)
+		e, err := evlayer.NewEvent(id, "allocation", name, "io.hpcburst.test.v1", time.Now(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ack, err := evlayer.Publish(ctx, js, e)
+		if err != nil {
+			t.Fatalf("publish %s: %v", id, err)
+		}
+		out = append(out, acked{Seq: ack.Sequence, ID: id, Resource: evlayer.ResourceKey("allocation", name)})
+	}
+	return out
+}
+
+// assertOneGapThenSuffix checks the exact outcome of a subscriber that had handled nothing when
+// retention overtook it: one marker for 1..last-limit, then every retained event once.
+func assertOneGapThenSuffix(t *testing.T, js jetstream.JetStream, recs []rec, acks []acked, limit int) {
+	t.Helper()
+	assertCoverage(t, recs, acks, 1)
+	wantTo := maxSeq(acks) - uint64(limit)
+	if countGaps(recs) != 1 || !recs[0].Gap || recs[0].From != 1 || recs[0].To != wantTo {
+		t.Fatalf("records %+v: want one gap marker 1..%d first, then the %d retained events", recs, wantTo, limit)
+	}
+	assertRetainedSuffixDelivered(t, js, recs, acks, limit)
+}
+
+// A subscription's starting boundary is fixed and stored when it starts, not when its first
+// handler call succeeds. If it is only kept after a success, a subscription whose first events
+// are evicted before any succeeded restarts as a new one and skips them without a marker.
+func TestGap_Tail_BoundarySurvivesEvictionBeforeTheFirstSuccess(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		firstBatch int // events published before the subscriber starts
+	}{
+		{"handler_fails_on_the_first_event", 5},
+		{"stopped_before_any_event_arrived", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n, _ := inProcNode(t, jsnode.SyncAlways)
+			js := connect(t, n.URL())
+			ctx := ctxT(t, 120*time.Second)
+			if _, err := evlayer.EnsureStream(ctx, js, evlayer.StreamOptions{Name: streamName, MaxMsgs: gapLimit}); err != nil {
+				t.Fatal(err)
+			}
+			var acks []acked
+			if tc.firstBatch > 0 {
+				acks = publishSeq(ctx, t, js, "e", tc.firstBatch, 2)
+			}
+			cur := evlayer.FileCursor{Path: scratchDir(t, "cursor") + "/cursor.json"}
+			tail := func(c *collector) (done chan error, cancel context.CancelFunc) {
+				rctx, cancel := context.WithCancel(ctx)
+				done = make(chan error, 1)
+				go func() {
+					done <- evlayer.Tail(rctx, js, evlayer.TailConfig{Stream: streamName, Store: cur, IdleCheck: 100 * time.Millisecond}, c.handle)
+				}()
+				return done, cancel
+			}
+
+			// First run: no handler call ever succeeds.
+			first := &collector{}
+			if tc.firstBatch > 0 {
+				first.failOnce = map[string]bool{acks[0].ID: true}
+			}
+			done, cancel := tail(first)
+			if tc.firstBatch > 0 {
+				select {
+				case err := <-done: // the failing handler stops the subscriber with its error
+					if err == nil {
+						t.Fatal("the subscriber ended without an error although its handler failed")
+					}
+				case <-time.After(10 * time.Second):
+					t.Fatal("the subscriber did not stop at its failing handler")
+				}
+			} else {
+				waitFor(t, 10*time.Second, "the starting boundary to be stored", func() bool { c, err := cur.Load(); return err == nil && c.Started })
+				cancel()
+				if err := <-done; err != nil {
+					t.Fatal(err)
+				}
+			}
+			cancel()
+			if got := first.snapshot(); len(got) != 0 {
+				t.Fatalf("setup: %d records were handled in the first run, want none", len(got))
+			}
+			if c, err := cur.Load(); err != nil || !c.Started || c.Seq != 0 {
+				t.Fatalf("stored boundary after the first run: %+v, %v; want a started subscription at sequence 0", c, err)
+			}
+
+			// Retention evicts everything the subscriber was owed.
+			acks = append(acks, publishConcurrent(ctx, t, js, "m", 200, 8)...)
+			assertLimitReached(t, js, acks)
+
+			second := &collector{}
+			done2, cancel2 := tail(second)
+			waitFor(t, 60*time.Second, "the restarted subscriber to catch up", func() bool { return second.maxCovered() >= maxSeq(acks) })
+			cancel2()
+			if err := <-done2; err != nil {
+				t.Fatal(err)
+			}
+			assertOneGapThenSuffix(t, js, second.snapshot(), acks, gapLimit)
+		})
+	}
+}
+
+// The same for a durable subscriber: the consumer exists on the server before any delivery,
+// and retention overtakes it before its first fetch.
+func TestGap_Durable_BoundarySurvivesEvictionBeforeTheFirstDelivery(t *testing.T) {
+	n, _ := inProcNode(t, jsnode.SyncAlways)
+	js := connect(t, n.URL())
+	ctx := ctxT(t, 120*time.Second)
+	if _, err := evlayer.EnsureStream(ctx, js, evlayer.StreamOptions{Name: streamName, MaxMsgs: gapLimit}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := evlayer.DurableConfig{Stream: streamName, Durable: "early", AckWait: 5 * time.Second, MaxAckPending: 64, Batch: 8}
+	if _, err := evlayer.NewDurable(ctx, js, cfg); err != nil { // creates the consumer; it never runs
+		t.Fatal(err)
+	}
+	acks := publishConcurrent(ctx, t, js, "m", 200, 8)
+	assertLimitReached(t, js, acks)
+
+	d, err := evlayer.NewDurable(ctx, js, cfg) // attaches to the existing consumer
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &collector{}
+	rctx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- d.Run(rctx, c.handle) }()
+	waitFor(t, 60*time.Second, "the subscriber to catch up", func() bool { return c.maxCovered() >= maxSeq(acks) })
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	assertOneGapThenSuffix(t, js, c.snapshot(), acks, gapLimit)
+}
+
+// The boundary must not be too wide either: what was evicted before a subscription ever
+// started is not owed to it, so a fresh subscriber on a stream that has already evicted
+// reports no marker.
+func TestGap_FreshSubscriptionIsNotOwedWhatWasEvictedBeforeItStarted(t *testing.T) {
+	for _, kind := range []string{"durable", "tail"} {
+		t.Run(kind, func(t *testing.T) {
+			n, _ := inProcNode(t, jsnode.SyncAlways)
+			js := connect(t, n.URL())
+			ctx := ctxT(t, 120*time.Second)
+			if _, err := evlayer.EnsureStream(ctx, js, evlayer.StreamOptions{Name: streamName, MaxMsgs: gapLimit}); err != nil {
+				t.Fatal(err)
+			}
+			acks := publishConcurrent(ctx, t, js, "old", 200, 8)
+			assertLimitReached(t, js, acks)
+			c := &collector{}
+			rctx, cancel := context.WithCancel(ctx)
+			done := make(chan error, 1)
+			if kind == "durable" {
+				d, err := evlayer.NewDurable(ctx, js, evlayer.DurableConfig{Stream: streamName, Durable: "fresh", AckWait: 5 * time.Second, MaxAckPending: 64})
+				if err != nil {
+					t.Fatal(err)
+				}
+				go func() { done <- d.Run(rctx, c.handle) }()
+			} else {
+				cur := evlayer.FileCursor{Path: scratchDir(t, "cursor") + "/cursor.json"}
+				go func() {
+					done <- evlayer.Tail(rctx, js, evlayer.TailConfig{Stream: streamName, Store: cur, IdleCheck: 100 * time.Millisecond}, c.handle)
+				}()
+			}
+			waitFor(t, 30*time.Second, "the subscriber to catch up", func() bool { return c.maxCovered() >= maxSeq(acks) })
+			time.Sleep(400 * time.Millisecond) // give an idle check the chance to misfire
+			cancel()
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			recs := c.snapshot()
+			if countGaps(recs) != 0 {
+				t.Fatalf("a fresh subscriber was given a gap marker for history evicted before it started: %+v", recs[0])
+			}
+			assertRetainedSuffixDelivered(t, js, recs, acks, gapLimit)
+		})
+	}
+}
+
+// Documented limitation of the durable subscriber, pinned so that a change shows up: the gap
+// tracker advances when a message is delivered, not when its handler succeeds, and the
+// re-sequencer reads only retained predecessors. An event whose handler keeps failing until
+// retention evicts it therefore disappears without a handled record and without a marker, while
+// the subscriber stays up. (The stored-cursor subscriber stops at the failing event instead.)
+func TestFinding_Durable_FailedThenEvictedEventLeavesNoMarkerWhileRunning(t *testing.T) {
+	n, _ := inProcNode(t, jsnode.SyncAlways)
+	js := connect(t, n.URL())
+	ctx := ctxT(t, 120*time.Second)
+	if _, err := evlayer.EnsureStream(ctx, js, evlayer.StreamOptions{Name: streamName, MaxMsgs: gapLimit}); err != nil {
+		t.Fatal(err)
+	}
+	early := publishSeq(ctx, t, js, "f", 5, 5) // sequences 1..5, one resource each
+	victim := early[0]
+	c := &collector{}
+	var mu sync.Mutex
+	attempts := 0
+	handle := func(ctx context.Context, r evlayer.Record) error {
+		if r.Gap == nil && r.Event.ID() == victim.ID {
+			mu.Lock()
+			attempts++
+			mu.Unlock()
+			return errors.New("handler failure that outlasts retention")
+		}
+		return c.handle(ctx, r)
+	}
+	// The NAK delay is longer than the test: the failed event waits until retention evicts it.
+	d, err := evlayer.NewDurable(ctx, js, evlayer.DurableConfig{Stream: streamName, Durable: "fail", AckWait: 5 * time.Second, MaxAckPending: 64, Batch: 8, NakDelay: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rctx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- d.Run(rctx, handle) }()
+	waitFor(t, 10*time.Second, "the other four early events", func() bool { return len(c.snapshot()) == 4 })
+
+	acks := append(early, publishOn(ctx, t, js, "late", "other", 200)...)
+	assertLimitReached(t, js, acks)
+	waitFor(t, 60*time.Second, "the subscriber to reach the last event", func() bool { return c.maxCovered() >= maxSeq(acks) })
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if attempts != 1 {
+		t.Fatalf("setup: the failing event was handled %d times, want exactly one failed attempt", attempts)
+	}
+	covered := map[uint64]int{} // sequence -> how many records (events or markers) cover it
+	for _, r := range c.snapshot() {
+		if r.Gap {
+			for s := r.From; s <= r.To; s++ {
+				covered[s]++
+			}
+		} else {
+			covered[r.Seq]++
+		}
+	}
+	if covered[victim.Seq] != 0 {
+		t.Fatalf("the failed, evicted event (sequence %d) was reported after all (%d record(s)): the documented limitation no longer holds, update the README", victim.Seq, covered[victim.Seq])
+	}
+	for s := victim.Seq + 1; s <= maxSeq(acks); s++ {
+		if covered[s] != 1 {
+			t.Errorf("sequence %d is covered %d times, want once", s, covered[s])
+		}
+	}
+	t.Logf("RESULT limitation: sequence %d failed once and was evicted while the subscriber ran; no record and no marker mentions it (all of %d..%d are covered once)", victim.Seq, victim.Seq+1, maxSeq(acks))
 }

@@ -242,3 +242,58 @@ func TestOrder_Tail_StreamOrder(t *testing.T) {
 	}
 	assertExactlyOncePerResourceInOrder(t, c.snapshot(), acks)
 }
+
+// A message the layer NAKed and then hands over early (re-sequenced) must be acknowledged
+// at the server at once, not left pending until its NAK delay ends. After a NAK the
+// nats.go message object refuses every further acknowledgement (ErrMsgAlreadyAckd), so the
+// layer acknowledges by the reply subject. The assertion looks at the server's own pending
+// state BEFORE the NAK delay has run out: afterwards the redelivery would clear it anyway.
+func TestOrder_NakedMessageIsAcknowledgedBeforeItsDelayEnds(t *testing.T) {
+	const nakDelay = 4 * time.Second
+	n, _ := inProcNode(t, jsnode.SyncAlways)
+	js := connect(t, n.URL())
+	ctx := ctxT(t, 60*time.Second)
+	if _, err := evlayer.EnsureStream(ctx, js, evlayer.StreamOptions{Name: streamName}); err != nil {
+		t.Fatal(err)
+	}
+	acks := publishSeq(ctx, t, js, "hold", 2, 1) // sequences 1 and 2, the same resource
+	c := &collector{failOnce: map[string]bool{acks[0].ID: true}}
+	cfg := evlayer.DurableConfig{Stream: streamName, Durable: "hold", AckWait: 30 * time.Second, MaxAckPending: 64, Batch: 8, NakDelay: nakDelay}
+	d, err := evlayer.NewDurable(ctx, js, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cons, err := js.Consumer(ctx, streamName, "hold")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rctx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() { done <- d.Run(rctx, c.handle) }()
+	// Sequence 1 fails and is NAKed with a 4 s delay; sequence 2 arrives, the layer hands
+	// over sequence 1 ahead of it (re-sequenced), then sequence 2.
+	waitFor(t, 3*time.Second, "both events handled", func() bool { return len(c.snapshot()) == 2 })
+	var ci *jetstream.ConsumerInfo
+	waitFor(t, time.Second, "the server to show nothing pending", func() bool {
+		ci, err = cons.Info(ctx)
+		return err == nil && ci.NumAckPending == 0 && ci.AckFloor.Stream == 2
+	})
+	if since := time.Since(start); since >= nakDelay {
+		t.Fatalf("the check ran %s after the start, not before the %s NAK delay ended: it proves nothing", since, nakDelay)
+	}
+	t.Logf("RESULT %s after the NAK (delay %s): server shows pending=%d ack floor=%d", time.Since(start).Round(time.Millisecond), nakDelay, ci.NumAckPending, ci.AckFloor.Stream)
+
+	// And no redelivery follows when the delay would have ended.
+	time.Sleep(nakDelay + time.Second - time.Since(start))
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if d.Duplicates != 0 || d.HeldAckErrors != 0 || d.Resequenced != 1 {
+		t.Errorf("duplicates=%d held-ack errors=%d re-sequenced=%d, want 0, 0, 1", d.Duplicates, d.HeldAckErrors, d.Resequenced)
+	}
+	if got := ids(c.snapshot()); !equalStrings(got, []string{acks[0].ID, acks[1].ID}) {
+		t.Errorf("handled %v, want each event once in publish order", got)
+	}
+}

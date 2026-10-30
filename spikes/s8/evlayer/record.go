@@ -22,7 +22,8 @@ type Record struct {
 type Handler func(ctx context.Context, r Record) error
 
 // gapTracker finds sequence jumps. next is the lowest stream sequence that has
-// not been delivered or reported yet; 0 means "fresh subscription, no history owed".
+// not been delivered or reported yet. A subscriber always starts with a boundary
+// (Cursor.Started, or the consumer's start at the server), so next is at least 1.
 type gapTracker struct {
 	stream string
 	next   uint64
@@ -34,7 +35,7 @@ const reasonEvicted = "evicted by retention before delivery"
 // gap that precedes it, if any, and advances next.
 func (g *gapTracker) observe(seq uint64) *GapInfo {
 	var gap *GapInfo
-	if g.next != 0 && seq > g.next {
+	if seq > g.next {
 		gap = &GapInfo{Stream: g.stream, From: g.next, To: seq - 1, FirstSeq: seq, Reason: reasonEvicted}
 	}
 	if seq >= g.next {
@@ -46,7 +47,7 @@ func (g *gapTracker) observe(seq uint64) *GapInfo {
 // idle is called when nothing is left to deliver. firstSeq is the oldest
 // sequence the stream still holds (lastSeq+1 when the stream is empty).
 func (g *gapTracker) idle(firstSeq uint64) *GapInfo {
-	if g.next == 0 || firstSeq <= g.next {
+	if firstSeq <= g.next {
 		return nil
 	}
 	gap := &GapInfo{Stream: g.stream, From: g.next, To: firstSeq - 1, FirstSeq: firstSeq, Reason: reasonEvicted}
