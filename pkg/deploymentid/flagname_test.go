@@ -24,7 +24,7 @@ func TestResolveFlagReadsUnderscoresAsDashes(t *testing.T) {
 		"a_b_c":                  "a-b-c",
 		"gpu_memory_utilization": "gpu-memory-utilization",
 		"dtype":                  "dtype",
-		"x1":                     "x1",
+		"x1":                     "x2",
 	} {
 		got, err := vllm.resolveFlag(in)
 		if err != nil || got != want {
