@@ -60,7 +60,7 @@ A past project served one set of models across several clusters and a managed ga
   - engine: name, version and container image digest. A local engine patch enters only through the image digest: a patched engine is a different image;
   - the accelerator class, and the engine flags and environment variables that HBEP-3's `v1` table marks as inputs. That table covers the settings that can change outputs: data type and quantisation, context length, attention backend, KV-cache data type, parallel layout, tool-call and reasoning parsers, default generation settings and speculative decoding;
   - excluded: Instance and Allocation metadata (HBEP-3), such as job ID, node, port, URL and hard end; placement, capacity, transport and logging settings, such as router policy and session caps; and every key, including the Instance's own key.
-- **The identity record behind a deployment ID is immutable.** Changing any record field gives a new deployment ID, with its own record; no record is edited under an existing ID. HBEP-3 decides that the new ID is a rollout inside the existing ModelDeployment (open question 7), so HBEP-11's admission refuses only an edit to an existing record. The record's inputs never change. Each Instance's verification result is its own immutable record beside it, labelled with the deployment ID and the Instance's UID (HBEP-11). Neither is deleted with the ModelDeployment. Operational settings outside the record change in place.
+- **The identity record behind a deployment ID is immutable.** Changing any record field gives a new deployment ID, with its own record; no record is edited under an existing ID. HBEP-3 decides that the new ID is a rollout inside the existing ModelDeployment (open question 7), so HBEP-11's admission refuses only an edit to an existing record. The record's inputs never change. Each verification of an Instance, at start and after every restart that reverifies, is its own immutable record beside it, labelled with the deployment ID and the Instance's UID (HBEP-7, HBEP-11). Neither is deleted with the ModelDeployment. Operational settings outside the record change in place.
 - **Each Instance has its own key.** It is generated when the Instance starts and kept in its identity package: the identity data the Instance holds about itself. The front uses the key toward the Instance. The key is never an input to the deployment ID: rotating it must not change the ID, and a hash of a short secret can be guessed.
 - **The engine fingerprint is recorded beside the ID, never used as it.** It is not unique per Instance, differs per site and is sometimes missing.
 - **The URL is not identity.** Each handover brings a new Instance with a new URL; the deployment ID does not change.
@@ -83,7 +83,7 @@ A past project served one set of models across several clusters and a managed ga
 
 - Declared or resolved values: HBEP-3 decides its open question 1 for alpha. Scheme `v1` hashes the declared spec with the accelerator class, so one spec on two GPU types gives two deployment IDs, and each Instance's resolved settings are recorded beside the ID. Still open here: whether to refuse "auto" for identity-relevant settings. Verification works either way: it compares the Instance's reported resolved settings with the record.
 - Whether batch-shaping settings (maximum sequences, prefill budget) enter the record. They can change numerics slightly and are often tuned. A measurement on two settings of one deployment decides.
-- **Which checks verification runs at start.**
+- **Which checks verification runs at start.** For alpha, HBEP-7 runs the file rehash and the settings comparison. The engine version, the image digest and the context length must be reported there, and the render check below comes after alpha.
   - **File hashes, from spike S7 (issue #30, PR #33) (candidate):**
     - The record holds one SHA-256 for every file of the pinned revision (HBEP-3), the configuration, tokenizer and template included.
     - **Rehash at every start,** of the files present, each against its entry. Measured on Helios x86 CPU nodes only: 167 GB took 46–77 s, inside a 5-minute budget set beforehand. Still due: Helios GH200, Athena A100 and Sano (CephFS).
@@ -194,6 +194,8 @@ Verification grows from www-2027's endpoint check, run on each new endpoint (hea
 - 2026-10-30: spike S7 (PR #33) carried in: per-file SHA-256, rehash at every start.
 - 2026-10-30: aligned with HBEP-3 and HBEP-11 becoming implementable: a changed spec rolls out a new ID, and `v1` hashes declared settings and the accelerator class, with resolved settings recorded beside them.
 - 2026-10-30: the record's fields point to HBEP-3's `v1` object (every file of the pinned revision; local patches only through the image digest); verification results are retained records of their own.
+- 2026-10-30: the alpha checks at start (file rehash and settings comparison) noted from HBEP-7.
+- 2026-10-30: one verification record per verification, at start and after every restart that reverifies, as HBEP-7 and HBEP-11 now say.
 
 ## Amendments
 

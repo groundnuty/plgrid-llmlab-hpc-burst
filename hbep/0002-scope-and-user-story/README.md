@@ -102,7 +102,7 @@ Every problem, risk and known-issue entry can be tagged on four dimensions.
 ### Test plan
 
 - The reviewer of each HBEP PR checks that its Motivation names a stage from this HBEP, or says N/A with a reason.
-- Open: an end-to-end story test that walks stages 0–7 against simulated providers, as the framework's top-level acceptance test. Decided once HBEP-4 and HBEP-7 define their test doubles.
+- Open: an end-to-end story test that walks stages 0–7 against simulated providers, as the framework's top-level acceptance test. Decided once HBEP-4 and HBEP-7 define their test doubles. They now do: S4's fake Slurm, a fake allocation agent and an engine double (HBEP-4 and HBEP-7, Test plan).
 
 ### Compatibility and upgrades
 
@@ -169,6 +169,7 @@ N/A: a scope HBEP has no stages of its own.
 - 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
 - 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation.
 - 2026-10-30: open question 3 notes that HBEP-11's alpha is for one user.
+- 2026-10-30: the story test's test doubles point to HBEP-4's and HBEP-7's test plans.
 
 ## Amendments
 

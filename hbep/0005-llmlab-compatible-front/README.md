@@ -81,7 +81,7 @@ Routes to LLMLab still pass through LLMLab's own cut and injection. The front ca
 - **A saturated instance holds requests.** Per-instance caps; requests over the cap wait at the front, not on the instance.
 - **Retries multiply harm.** A request that crashes an engine, sent again, can crash the next one. Retries need a budget and a guard (Open questions).
 - **Ejected backends never return.** Membership comes from the controller's ready set (HBEP-7), read by watch. Failure counters may pause a target but never remove it for good.
-- **The drain window is wrong.** Too short cuts in-flight requests at the lease end; too long wastes lease time. Candidate: the front's maximum request duration plus a margin, as a platform-profile parameter (HBEP-4).
+- **The drain window is wrong.** Too short cuts in-flight requests at the lease end; too long wastes lease time. Candidate: the front's maximum request duration plus a margin. HBEP-4 holds it as the platform profile's `drainWindow`, 30 min by default until this HBEP sets it, and HBEP-7 reads the same value.
 - **The admin surface is exposed.** All admin goes through the authenticated front. Instance-side admin endpoints are reachable only inside the instance (HBEP-6).
 - **A stream is cut and looks complete.** The front counts a stream that ends without a finish reason as truncated, and reports it (HBEP-8).
 - **The front is a single point of failure.** Open question 11.
@@ -227,6 +227,7 @@ The front grows from www-2027's hand-tuned per-stack routers: affinity and polic
 - 2026-10-28: proposed (provisional), tracking issue #5.
 - 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
 - 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation.
+- 2026-10-30: the drain window is the profile's `drainWindow` (HBEP-4), read by both the front and the lifecycle controller (HBEP-7).
 
 ## Amendments
 
