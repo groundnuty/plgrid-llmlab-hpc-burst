@@ -162,3 +162,23 @@ func TestJoinMovesKeysOnlyToNewInstance(t *testing.T) {
 		t.Errorf("no conversation moved to the joining Instance")
 	}
 }
+
+// During a drain KubeAI keeps the drained Instance's open requests in its
+// total while n drops, so its mean exceeds the members' mean and a
+// placement can pass KubeAI's check yet break HBEP-5's bound. Here 64
+// conversations are in flight when instance-2 drains at 3 s: unfixed, some
+// placements must break the members' bound; with the drained requests
+// released from the count at drain start, none may.
+func TestDrainInflatesKubeAIMeanUnlessReleased(t *testing.T) {
+	ev := []Event{{Time: 3, Kind: Drain, Instance: 2}}
+	pol := Policy{Kind: CHWBL, Key: KeySystem, Percent: 125}
+	plain := runSim(t, slowCluster(4), pol, loadedConvs(64, true), ev)
+	if plain.MaxKubeInflation == 0 || plain.KubeRuleViol == 0 {
+		t.Errorf("unfixed drain: inflation %d, violations %d; want both above 0", plain.MaxKubeInflation, plain.KubeRuleViol)
+	}
+	pol.ReleaseOnDrain = true
+	fixed := runSim(t, slowCluster(4), pol, loadedConvs(64, true), ev)
+	if fixed.MaxKubeInflation != 0 || fixed.KubeRuleViol != 0 {
+		t.Errorf("release on drain: inflation %d, violations %d; want 0 and 0", fixed.MaxKubeInflation, fixed.KubeRuleViol)
+	}
+}

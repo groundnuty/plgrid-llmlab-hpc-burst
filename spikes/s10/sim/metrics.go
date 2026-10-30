@@ -176,7 +176,7 @@ func (m *Metrics) crossCheck(e *Engine, idx int) error {
 	}
 	var all int64
 	for _, in := range e.inst {
-		all += int64(in.inflight)
+		all += int64(in.inflight - in.detached)
 	}
 	if g.TotalInFlight() != all+1 {
 		return fmt.Errorf("kubeai total in-flight %d, simulator %d+1", g.TotalInFlight(), all)

@@ -126,7 +126,7 @@ func writeSteadyRow(md *strings.Builder, g []result, rrOut float64) {
 		bound, paper, above)
 }
 
-const csvHeader = "scenario,kv_tokens,seed,policy,key,requests,output_tokens,prompt_tokens,hit_tokens,prefill_tokens,later_prompt_tokens,later_hit_tokens,mean_latency_s,p95_latency_s,move_rate,distinct_keys,top_key_share,peak_inflight,max_place_ratio,bound_violations,paper_violations,max_place_excess,time_above_bound,max_kubeai_inflation,aborted,compactions,active_convs,active_context_tokens,mean_inflight,inst_requests,inst_hit_rate,inst_peak_inflight\n"
+const csvHeader = "scenario,kv_tokens,seed,policy,key,requests,output_tokens,prompt_tokens,hit_tokens,prefill_tokens,later_prompt_tokens,later_hit_tokens,mean_latency_s,p95_latency_s,move_rate,distinct_keys,top_key_share,peak_inflight,max_place_ratio,bound_violations,paper_violations,max_place_excess,time_above_bound,max_kubeai_inflation,max_rule_excess,aborted,compactions,active_convs,active_context_tokens,mean_inflight,inst_requests,inst_hit_rate,inst_peak_inflight\n"
 
 func writeSteadyCSV(csv *strings.Builder, x result) {
 	m := x.m
@@ -138,10 +138,10 @@ func writeSteadyCSV(csv *strings.Builder, x result) {
 		hits = append(hits, fmt.Sprintf("%.3f", ratioF(st.Hit, st.Prompt)))
 		peaks = append(peaks, fmt.Sprint(st.PeakInFlight))
 	}
-	fmt.Fprintf(csv, "%s,%d,%d,%s,%s,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.5f,%d,%.4f,%d,%.3f,%d,%d,%.3f,%.5f,%d,%d,%d,%.2f,%.0f,%.2f,%s,%s,%s\n",
+	fmt.Fprintf(csv, "%s,%d,%d,%s,%s,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.5f,%d,%.4f,%d,%.3f,%d,%d,%.3f,%.5f,%d,%.2f,%d,%d,%.2f,%.0f,%.2f,%s,%s,%s\n",
 		x.scen, x.kv, x.seed, x.pol.Name(), x.pol.Key, m.Requests, m.OutputTokens, m.PromptTokens, m.HitTokens, m.PrefillTokens,
 		m.PromptTokens1, m.HitTokens1, m.MeanLatency(), m.Latency(0.95), m.MoveRate(), d, top, m.PeakLoad, m.MaxPlaceRatio,
-		m.KubeRuleViol, m.PaperViol, m.MaxPlaceExcess, m.TimeAboveBound(), m.MaxKubeInflation, m.Aborted, m.Compactions,
+		m.KubeRuleViol, m.PaperViol, m.MaxPlaceExcess, m.TimeAboveBound(), m.MaxKubeInflation, m.MaxRuleExcess, m.Aborted, m.Compactions,
 		c, tok, inf, strings.Join(reqs, ";"), strings.Join(hits, ";"), strings.Join(peaks, ";"))
 }
 
@@ -164,10 +164,12 @@ func eventPolicies() []sim.Policy {
 	return ps
 }
 
-var scenarios = []struct {
+type scenario struct {
 	name   string
 	events []sim.Event
-}{
+}
+
+var scenarios = []scenario{
 	{"none", nil},
 	{"drain", []sim.Event{{Time: evTime, Kind: sim.Drain, Instance: 1}}},
 	{"leave", []sim.Event{{Time: evTime, Kind: sim.Leave, Instance: 1}}},
@@ -177,14 +179,28 @@ var scenarios = []struct {
 // eventRuns measures what a drain, a leave and a handover do.
 func (r *runner) eventRuns(dir string, kvs []int) {
 	for _, kv := range kvs {
-		r.eventRunsAt(dir, kv)
+		r.eventRunsAt(dir, kv, "events", eventPolicies(), scenarios)
 	}
 }
 
-func (r *runner) eventRunsAt(dir string, kv int) {
+// drainFix runs the drain with the front releasing the draining Instance's
+// requests from the balancer's count (Policy.ReleaseOnDrain).
+func (r *runner) drainFix(dir string, kvs []int) {
+	var ps []sim.Policy
+	for _, k := range []sim.KeyKind{sim.KeyHeaderOpening, sim.KeyOpening} {
+		for _, pct := range []int{125, 150, 200} {
+			ps = append(ps, sim.Policy{Kind: sim.CHWBL, Key: k, Percent: pct, ReleaseOnDrain: true})
+		}
+	}
+	for _, kv := range kvs {
+		r.eventRunsAt(dir, kv, "drainfix", ps, scenarios[:2])
+	}
+}
+
+func (r *runner) eventRunsAt(dir string, kv int, name string, pols []sim.Policy, scens []scenario) {
 	var jobs []job
-	for _, sc := range scenarios {
-		for _, p := range eventPolicies() {
+	for _, sc := range scens {
+		for _, p := range pols {
 			for _, seed := range r.seeds {
 				jobs = append(jobs, job{kv: kv, seed: seed, pol: p, events: sc.events, scen: sc.name})
 			}
@@ -202,19 +218,19 @@ func (r *runner) eventRunsAt(dir string, kv int) {
 	for _, x := range res {
 		writeSteadyCSV(&csv, x)
 	}
-	writeFile(dir, fmt.Sprintf("events-%d.csv", kv), csv.String())
+	writeFile(dir, fmt.Sprintf("%s-%d.csv", name, kv), csv.String())
 	var md strings.Builder
 	fmt.Fprintf(&md, "## Membership events (KV cache %d tokens per Instance; event at %.0f s; mean over seeds)\n", kv, evTime)
-	for _, sc := range scenarios[1:] {
+	for _, sc := range scens[1:] {
 		writeEventTable(&md, sc.name, groupBy(res, func(x result) bool { return x.scen == sc.name }), base)
 	}
-	writeFile(dir, fmt.Sprintf("events-%d.md", kv), md.String())
+	writeFile(dir, fmt.Sprintf("%s-%d.md", name, kv), md.String())
 }
 
 func writeEventTable(md *strings.Builder, scen string, groups [][]result, base map[string]*sim.Metrics) {
 	fmt.Fprintf(md, "\n### %s\n\n", scen)
-	md.WriteString("| policy / key | event | checked | re-homed: forced | collateral | to new | cut | hit before | hit 0-5 min after (baseline) | hit 5-15 min after (baseline) | above bound (HBEP-5 rule) | +1 over ceil | KubeAI mean inflation (max req.) |\n")
-	md.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+	md.WriteString("| policy / key | event | checked | re-homed: forced | collateral | to new | cut | hit before | hit 0-5 min after (baseline) | hit 5-15 min after (baseline) | above bound (HBEP-5 rule) | max over bound (req.) | +1 over ceil | KubeAI mean inflation (max req.) |\n")
+	md.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
 	for _, g := range groups {
 		for k := range g[0].m.Rehomed {
 			writeEventRow(md, g, k, base)
@@ -241,19 +257,20 @@ func writeEventRow(md *strings.Builder, g []result, k int, base map[string]*sim.
 		before, _ := win(evTime-600, evTime)
 		a1, b1 := win(evTime, evTime+300)
 		a2, b2 := win(evTime+300, evTime+900)
-		bound, paper := "-", "-"
+		bound, paper, excess := "-", "-", "-"
 		if p.Kind == sim.CHWBL {
+			excess = fmt.Sprintf("%.1f", maxOf(g, func(m *sim.Metrics) float64 { return m.MaxRuleExcess }))
 			bound = fmt.Sprintf("%.0f", sumOf(g, func(m *sim.Metrics) float64 { return float64(m.KubeRuleViol) }))
 			paper = fmt.Sprintf("%.0f", sumOf(g, func(m *sim.Metrics) float64 { return float64(m.PaperViol) }))
 		}
 		ev := g[0].m.Rehomed[k].Event
-		fmt.Fprintf(md, "| %s | %s %s at %.0f s | %.0f | %.0f | %.0f | %.0f | %.0f | %s | %s (%s) | %s (%s) | %s | %s | %.0f |\n",
+		fmt.Fprintf(md, "| %s | %s %s at %.0f s | %.0f | %.0f | %.0f | %.0f | %.0f | %s | %s (%s) | %s (%s) | %s | %s | %s | %.0f |\n",
 			label(p), ev.Kind, fmt.Sprintf("instance-%d", ev.Instance), ev.Time, rc(func(c sim.RehomeCount) int { return c.Checked }),
 			rc(func(c sim.RehomeCount) int { return c.Forced }),
 			rc(func(c sim.RehomeCount) int { return c.Collateral }),
 			rc(func(c sim.RehomeCount) int { return c.ToJoined }),
 			mean(g, func(m *sim.Metrics) float64 { return float64(m.Aborted) }),
-			pct(before), pct(a1), pct(b1), pct(a2), pct(b2), bound, paper,
+			pct(before), pct(a1), pct(b1), pct(a2), pct(b2), bound, excess, paper,
 			maxOf(g, func(m *sim.Metrics) float64 { return float64(m.MaxKubeInflation) }))
 	}
 }

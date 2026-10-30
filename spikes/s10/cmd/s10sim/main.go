@@ -38,7 +38,7 @@ type result struct {
 }
 
 func main() {
-	mode := flag.String("mode", "all", "calibrate | steady | events | all")
+	mode := flag.String("mode", "all", "calibrate | steady | events | drainfix | all")
 	seedsF := flag.String("seeds", "1,2,3", "workload seeds")
 	kvF := flag.String("kv", "750000,1500000,3000000", "KV cache tokens per Instance (steady sweep)")
 	evKV := flag.String("events-kv", "1500000,3000000", "KV cache tokens per Instance for the event runs")
@@ -64,9 +64,12 @@ func main() {
 		r.steady(*out, kvs)
 	case "events":
 		r.eventRuns(*out, parseList(*evKV))
+	case "drainfix":
+		r.drainFix(*out, parseList(*evKV))
 	case "all":
 		r.steady(*out, kvs)
 		r.eventRuns(*out, parseList(*evKV))
+		r.drainFix(*out, parseList(*evKV))
 	default:
 		log.Fatalf("unknown mode %q", *mode)
 	}

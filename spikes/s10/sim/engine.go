@@ -59,6 +59,7 @@ type request struct {
 	hold      *Hold
 	dispatchT float64
 	aborted   bool
+	detached  bool // released from the balancer's count before it ended
 }
 
 type instance struct {
@@ -72,6 +73,7 @@ type instance struct {
 	prefillQ    []*request
 	prefillBusy bool
 	active      []*request // dispatched here and not finished
+	detached    int        // active requests no longer in the balancer's count
 }
 
 // Engine runs one simulation.
@@ -281,7 +283,11 @@ func (e *Engine) decodeDone(r *request) {
 // finish ends a request's life on its Instance and releases its load count.
 func (e *Engine) finish(in *instance, r *request) {
 	in.inflight--
-	r.release()
+	if r.detached {
+		in.detached--
+	} else {
+		r.release()
+	}
 	for i, a := range in.active {
 		if a == r {
 			in.active = append(in.active[:i:i], in.active[i+1:]...)
@@ -300,6 +306,13 @@ func (e *Engine) cluster(k int, ev Event) {
 	case Drain:
 		in.member = false
 		e.rt.remove(ev.Instance)
+		if e.pol.ReleaseOnDrain {
+			for _, r := range in.active {
+				r.release()
+				r.detached = true
+				in.detached++
+			}
+		}
 	case Leave:
 		in.member = false
 		e.rt.remove(ev.Instance)

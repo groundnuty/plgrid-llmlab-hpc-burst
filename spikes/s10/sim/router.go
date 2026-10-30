@@ -80,12 +80,19 @@ type Policy struct {
 	Kind    PolicyKind
 	Key     KeyKind
 	Percent int // CHWBL MeanLoadPercentage (125 = bound 1.25x the mean)
+	// ReleaseOnDrain makes the front release a draining Instance's open
+	// requests from the balancer's count when the drain starts, so KubeAI's
+	// mean covers members only. The copied algorithm is unchanged.
+	ReleaseOnDrain bool
 }
 
 // Name is the policy's label in reports.
 func (p Policy) Name() string {
 	switch p.Kind {
 	case CHWBL:
+		if p.ReleaseOnDrain {
+			return fmt.Sprintf("chwbl-%.2f+release-on-drain", float64(p.Percent)/100)
+		}
 		return fmt.Sprintf("chwbl-%.2f", float64(p.Percent)/100)
 	default:
 		return string(p.Kind)
