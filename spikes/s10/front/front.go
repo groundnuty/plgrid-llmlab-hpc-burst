@@ -27,9 +27,13 @@ import (
 
 // Balancer serializes KubeAI's CHWBL group and tracks open reservations.
 type Balancer struct {
-	mu   sync.Mutex
-	g    *loadbalancer.Group
-	open map[string]map[*reservation]struct{}
+	mu          sync.Mutex
+	g           *loadbalancer.Group
+	open        map[string]map[*reservation]struct{}
+	replication int
+	members     []string          // current members, in the order they were set
+	rg          *ring             // replica of the fork's ring; nil when stale
+	pins        map[string]string // member -> key whose ring home is that member
 
 	// onContended, when set, runs in a caller that finds the lock held,
 	// before it waits. A test seam: it tells a test that the caller is
@@ -46,7 +50,30 @@ type reservation struct {
 // New returns a Balancer over a fresh group with `replication` points per
 // endpoint on the ring.
 func New(replication int) *Balancer {
-	return &Balancer{g: loadbalancer.NewGroup(replication), open: map[string]map[*reservation]struct{}{}}
+	return &Balancer{g: loadbalancer.NewGroup(replication), open: map[string]map[*reservation]struct{}{}, replication: replication}
+}
+
+// ringLocked returns the ring replica for the current members.
+func (b *Balancer) ringLocked() *ring {
+	if b.rg == nil {
+		b.rg = newRing(b.members, b.replication)
+	}
+	return b.rg
+}
+
+// membersChanged drops what was derived from the old membership.
+func (b *Balancer) membersChanged(members []string) {
+	b.members, b.rg, b.pins = members, nil, nil
+}
+
+func (b *Balancer) withoutMember(name string) []string {
+	var out []string
+	for _, m := range b.members {
+		if m != name {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 func (b *Balancer) lock() {
@@ -70,12 +97,18 @@ func (b *Balancer) PickPrefixHash(key string, meanLoadPercentage int) (string, f
 	if err != nil {
 		return "", func() {}, err
 	}
+	return addr, b.registerLocked(addr, done), nil
+}
+
+// registerLocked records an open reservation on addr, made with upstream's
+// release function done, and returns the once-only release for the caller.
+func (b *Balancer) registerLocked(addr string, done func()) func() {
 	r := &reservation{addr: addr, release: done}
 	if b.open[addr] == nil {
 		b.open[addr] = map[*reservation]struct{}{}
 	}
 	b.open[addr][r] = struct{}{}
-	return addr, func() { b.releaseOnce(r) }, nil
+	return func() { b.releaseOnce(r) }
 }
 
 func (b *Balancer) releaseOnce(r *reservation) {
@@ -98,6 +131,7 @@ func (b *Balancer) SetEndpoints(names []string) {
 	b.lock()
 	defer b.mu.Unlock()
 	b.g.SetEndpoints(names)
+	b.membersChanged(append([]string(nil), names...))
 }
 
 // Remove stops new selections of an endpoint and leaves its open
@@ -107,6 +141,7 @@ func (b *Balancer) Remove(name string) {
 	b.lock()
 	defer b.mu.Unlock()
 	b.g.RemoveEndpoint(name)
+	b.membersChanged(b.withoutMember(name))
 }
 
 // Drain stops new selections of an endpoint and releases its open
@@ -115,6 +150,7 @@ func (b *Balancer) Drain(name string) int {
 	b.lock()
 	defer b.mu.Unlock()
 	b.g.RemoveEndpoint(name)
+	b.membersChanged(b.withoutMember(name))
 	n := 0
 	for r := range b.open[name] {
 		b.releaseLocked(r)

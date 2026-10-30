@@ -1,0 +1,28 @@
+{
+  "label": "inflight-during-epp-term",
+  "url": "http://127.0.0.1:19207/v1/chat/completions",
+  "session": "e1",
+  "started_utc": "2026-10-30T11:39:23Z",
+  "expect_tokens": 150,
+  "tokens": 150,
+  "finish_reason": "length",
+  "done_seen": true,
+  "http_status": 200,
+  "resp_headers": {
+    "server": "fasthttp",
+    "x-went-into-resp-headers": "true"
+  },
+  "elapsed_sec": 150.172839347,
+  "response_headers_sec": 1.008478359,
+  "first_token_sec": 1.008721857,
+  "last_token_sec": 150.172719536,
+  "gap_min_ms": 936.533549,
+  "gap_mean_ms": 1001.100655563758,
+  "gap_p50_ms": 1000.602516,
+  "gap_p99_ms": 1026.14057,
+  "gap_max_ms": 1087.675879,
+  "gap_max_at_token": 79,
+  "gaps_over_2s": 0,
+  "sse_comment_lines": 0,
+  "complete": true
+}

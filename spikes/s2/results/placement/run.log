@@ -1,0 +1,125 @@
+ok $S2_HOME/run/llmd-affinity
+started llmd-affinity: http://127.0.0.1:19205/v1/chat/completions
+== llmd-affinity header=x-session-id fresh_prompts=0
+session            worker per turn
+sess-00-761737     [1 1 1 1 1] sticky=true
+sess-01-780764     [0 0 0 0 0] sticky=true
+sess-02-785014     [1 1 1 1 1] sticky=true
+sess-03-786437     [2 2 2 2 2] sticky=true
+sess-04-791472     [0 0 0 0 0] sticky=true
+sess-05-795293     [2 2 2 2 2] sticky=true
+sess-06-796829     [2 2 2 2 2] sticky=true
+sess-07-801144     [1 1 1 1 1] sticky=true
+sess-08-804822     [0 0 0 0 0] sticky=true
+sessions per worker (by first turn): [3 3 3] ; distinct workers used: [0 1 2]
+RESULT placement key="x-session-id" fresh_prompts=false all_sessions_sticky=true spread_over_workers=true expect_sticky=true expect_spread=true pass=true
+stopped llmd-affinity
+ok $S2_HOME/run/llmd-affinity
+started llmd-affinity: http://127.0.0.1:19205/v1/chat/completions
+== llmd-affinity header=x-session-id fresh_prompts=1
+session            worker per turn
+sess-00-152643     [2 2 2 2 2] sticky=true
+sess-01-170798     [1 1 1 1 1] sticky=true
+sess-02-177704     [2 2 2 2 2] sticky=true
+sess-03-179309     [0 0 0 0 0] sticky=true
+sess-04-184644     [1 1 1 1 1] sticky=true
+sess-05-188649     [0 0 0 0 0] sticky=true
+sess-06-190212     [0 0 0 0 0] sticky=true
+sess-07-194966     [2 2 2 2 2] sticky=true
+sess-08-199104     [1 1 1 1 1] sticky=true
+sessions per worker (by first turn): [3 3 3] ; distinct workers used: [0 1 2]
+RESULT placement key="x-session-id" fresh_prompts=true all_sessions_sticky=true spread_over_workers=true expect_sticky=true expect_spread=true pass=true
+stopped llmd-affinity
+started vllmr-affinity: http://127.0.0.1:19206/v1/chat/completions
+== vllmr-affinity header=x-session-id fresh_prompts=0
+session            worker per turn
+sess-00-71875      [0 0 0 0 0] sticky=true
+sess-01-94845      [0 0 0 0 0] sticky=true
+sess-02-102991     [2 2 2 2 2] sticky=true
+sess-03-104800     [0 0 0 0 0] sticky=true
+sess-04-111768     [1 1 1 1 1] sticky=true
+sess-05-116400     [1 1 1 1 1] sticky=true
+sess-06-118238     [2 2 2 2 2] sticky=true
+sess-07-123393     [2 2 2 2 2] sticky=true
+sess-08-127945     [2 2 2 2 2] sticky=true
+sessions per worker (by first turn): [3 2 4] ; distinct workers used: [0 1 2]
+RESULT placement key="x-session-id" fresh_prompts=false all_sessions_sticky=true spread_over_workers=true expect_sticky=true expect_spread=true pass=true
+stopped vllmr-affinity
+started vllmr-affinity: http://127.0.0.1:19206/v1/chat/completions
+== vllmr-affinity header=x-session-id fresh_prompts=1
+session            worker per turn
+sess-00-294471     [1 1 1 1 1] sticky=true
+sess-01-311806     [2 2 2 2 2] sticky=true
+sess-02-316104     [1 1 1 1 1] sticky=true
+sess-03-317536     [2 2 2 2 2] sticky=true
+sess-04-322459     [1 1 1 1 1] sticky=true
+sess-05-327225     [0 0 0 0 0] sticky=true
+sess-06-328805     [2 2 2 2 2] sticky=true
+sess-07-333191     [2 2 2 2 2] sticky=true
+sess-08-336983     [0 0 0 0 0] sticky=true
+sessions per worker (by first turn): [2 3 4] ; distinct workers used: [0 1 2]
+RESULT placement key="x-session-id" fresh_prompts=true all_sessions_sticky=true spread_over_workers=true expect_sticky=true expect_spread=true pass=true
+stopped vllmr-affinity
+ok $S2_HOME/run/llmd-guide
+started llmd-guide: http://127.0.0.1:19207/v1/chat/completions
+== llmd-guide header=x-session-id fresh_prompts=0
+session            worker per turn
+sess-00-222201     [2 2 2 2 2] sticky=true
+sess-01-250189     [1 1 1 1 1] sticky=true
+sess-02-254599     [2 2 2 2 2] sticky=true
+sess-03-256076     [0 0 0 0 0] sticky=true
+sess-04-263104     [1 1 1 1 1] sticky=true
+sess-05-267061     [0 0 0 0 0] sticky=true
+sess-06-268652     [0 0 0 0 0] sticky=true
+sess-07-272883     [2 2 2 2 2] sticky=true
+sess-08-276779     [1 1 1 1 1] sticky=true
+sessions per worker (by first turn): [3 3 3] ; distinct workers used: [0 1 2]
+RESULT placement key="x-session-id" fresh_prompts=false all_sessions_sticky=true spread_over_workers=true expect_sticky=true expect_spread=true pass=true
+stopped llmd-guide
+ok $S2_HOME/run/llmd-guide
+started llmd-guide: http://127.0.0.1:19207/v1/chat/completions
+== llmd-guide header=x-session-id fresh_prompts=1
+session            worker per turn
+sess-00-801613     [2 1 0 0 2] sticky=false
+sess-01-828383     [1 0 0 2 2] sticky=false
+sess-02-835492     [2 1 2 0 0] sticky=false
+sess-03-838195     [0 2 2 1 2] sticky=false
+sess-04-846297     [1 2 2 0 1] sticky=false
+sess-05-853043     [0 0 1 1 1] sticky=false
+sess-06-855841     [0 1 1 1 0] sticky=false
+sess-07-863122     [2 0 0 2 0] sticky=false
+sess-08-869351     [1 2 1 2 1] sticky=false
+sessions per worker (by first turn): [3 3 3] ; distinct workers used: [0 1 2]
+RESULT placement key="x-session-id" fresh_prompts=true all_sessions_sticky=false spread_over_workers=true expect_sticky=false expect_spread=true pass=true
+stopped llmd-guide
+ok $S2_HOME/run/llmd-guide
+started llmd-guide: http://127.0.0.1:19207/v1/chat/completions
+== llmd-guide header=none fresh_prompts=0
+session            worker per turn
+sess-00-684415     [0 0 0 0 0] sticky=true
+sess-01-712339     [2 2 2 2 2] sticky=true
+sess-02-719041     [0 0 0 0 0] sticky=true
+sess-03-721485     [1 1 1 1 1] sticky=true
+sess-04-728965     [2 2 2 2 2] sticky=true
+sess-05-734603     [1 1 1 1 1] sticky=true
+sess-06-736965     [1 1 1 1 1] sticky=true
+sess-07-743400     [0 0 0 0 0] sticky=true
+sess-08-749155     [2 2 2 2 2] sticky=true
+sessions per worker (by first turn): [3 3 3] ; distinct workers used: [0 1 2]
+RESULT placement key="" fresh_prompts=false all_sessions_sticky=true spread_over_workers=true expect_sticky=true expect_spread=true pass=true
+stopped llmd-guide
+started vllmr-affinity: http://127.0.0.1:19206/v1/chat/completions
+== vllmr-affinity header=none fresh_prompts=0
+session            worker per turn
+sess-00-696612     [2 2 2 2 2] sticky=true
+sess-01-719482     [2 2 2 2 2] sticky=true
+sess-02-725873     [2 2 2 2 2] sticky=true
+sess-03-728104     [2 2 2 2 2] sticky=true
+sess-04-734990     [2 2 2 2 2] sticky=true
+sess-05-740446     [2 2 2 2 2] sticky=true
+sess-06-742589     [2 2 2 2 2] sticky=true
+sess-07-748853     [2 2 2 2 2] sticky=true
+sess-08-754202     [2 2 2 2 2] sticky=true
+sessions per worker (by first turn): [0 0 9] ; distinct workers used: [2]
+RESULT placement key="" fresh_prompts=false all_sessions_sticky=true spread_over_workers=false expect_sticky=true expect_spread=false pass=true
+stopped vllmr-affinity

@@ -1,6 +1,7 @@
 package sim
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -86,22 +87,54 @@ type Policy struct {
 	// it a drain keeps them counted until they finish, as KubeAI does
 	// (front.Balancer.Remove). The copied algorithm is unchanged.
 	ReleaseOnDrain bool
+
+	// Cap, when positive, is a hard per-Instance limit on in-flight requests
+	// (spike S10b, option 3), at the engine's maximum sequences: a request
+	// whose CHWBL choice holds Cap requests goes to the next Instance on the
+	// ring that holds fewer, and waits at the front when none does. CHWBL only.
+	Cap int
+	// AdaptiveLoose, when positive, makes the bound adaptive (spike S10b,
+	// option 4): Percent while every desired Instance is ready, AdaptiveLoose
+	// while fewer are. The deployment checks readiness every ControlStep
+	// seconds. CHWBL only.
+	AdaptiveLoose int
+	ControlStep   float64
+}
+
+// DefaultControlStep is the adaptive bound's control period in seconds when
+// Policy.ControlStep is zero. It is an assumption.
+const DefaultControlStep = 10.0
+
+func (p Policy) controlStep() float64 {
+	if p.ControlStep > 0 {
+		return p.ControlStep
+	}
+	return DefaultControlStep
 }
 
 // Name is the policy's label in reports.
 func (p Policy) Name() string {
 	switch p.Kind {
 	case CHWBL:
-		if p.ReleaseOnDrain {
-			return fmt.Sprintf("chwbl-%.2f+release-on-drain", float64(p.Percent)/100)
+		n := fmt.Sprintf("chwbl-%.2f", float64(p.Percent)/100)
+		if p.AdaptiveLoose > 0 {
+			n = fmt.Sprintf("chwbl-adaptive-%.2f-%.2f", float64(p.Percent)/100, float64(p.AdaptiveLoose)/100)
 		}
-		return fmt.Sprintf("chwbl-%.2f", float64(p.Percent)/100)
+		if p.Cap > 0 {
+			n += fmt.Sprintf("+cap%d", p.Cap)
+		}
+		if p.ReleaseOnDrain {
+			n += "+release-on-drain"
+		}
+		return n
 	default:
 		return string(p.Kind)
 	}
 }
 
-// Bound returns c, the load bound factor (+Inf when there is none).
+// Bound returns c, the load bound factor (+Inf when there is none). For an
+// adaptive policy it is the tight bound; the bound in effect is the
+// router's.
 func (p Policy) Bound() float64 {
 	if p.Kind == CHWBL {
 		return float64(p.Percent) / 100
@@ -121,10 +154,39 @@ type router struct {
 	members []int // instance indices, in join order
 	rr      int
 	group   *front.Balancer
+
+	// percent is the CHWBL bound in effect: the policy's, or for an adaptive
+	// policy whichever the last control step chose.
+	percent int
+	// lastSpilled is whether the latest route spilled past a full Instance.
+	lastSpilled bool
+}
+
+// errAllAtCap is route's signal that every member holds the hard cap.
+var errAllAtCap = front.ErrAllAtCap
+
+// bound is c in effect (+Inf when there is none).
+func (r *router) bound() float64 {
+	if r.pol.Kind == CHWBL {
+		return float64(r.percent) / 100
+	}
+	return math.Inf(1)
+}
+
+// control applies the adaptive rule to the current readiness and returns the
+// old and new bound when it changed.
+func (r *router) control(ready, desired int) (from, to int, changed bool) {
+	if r.pol.AdaptiveLoose <= 0 {
+		return r.percent, r.percent, false
+	}
+	to = front.AdaptiveBound{Tight: r.pol.Percent, Loose: r.pol.AdaptiveLoose}.Percent(ready, desired)
+	from = r.percent
+	r.percent = to
+	return from, to, from != to
 }
 
 func newRouter(pol Policy, names []string, initial []int) *router {
-	r := &router{pol: pol, names: names, members: append([]int(nil), initial...)}
+	r := &router{pol: pol, names: names, members: append([]int(nil), initial...), percent: pol.Percent}
 	if pol.Hashed() {
 		r.group = front.New(256)
 		r.group.SetEndpoints(r.memberNames())
@@ -161,11 +223,22 @@ func (r *router) route(cs *convState, reqID int, inflight []int) (int, func(), e
 		return r.leastLoad(inflight), func() {}, nil
 	}
 	key, _ := r.pol.Key.Key(cs, reqID)
-	pct := r.pol.Percent
+	pct := r.percent
 	if r.pol.Kind == Affinity {
 		pct = AffinityPercent
 	}
-	addr, done, err := r.group.PickPrefixHash(key, pct)
+	r.lastSpilled = false
+	var addr string
+	var done func()
+	var err error
+	if r.pol.Cap > 0 && r.pol.Kind == CHWBL {
+		addr, done, r.lastSpilled, err = r.group.PickPrefixHashCapped(key, pct, r.pol.Cap)
+		if errors.Is(err, front.ErrAllAtCap) {
+			return 0, nil, errAllAtCap
+		}
+	} else {
+		addr, done, err = r.group.PickPrefixHash(key, pct)
+	}
 	if err != nil {
 		return 0, nil, fmt.Errorf("kubeai pick: %w", err)
 	}

@@ -1,0 +1,59 @@
+diff --git a/cmd/epp/runner/runner.go b/cmd/epp/runner/runner.go
+index 7422e01..83fae6d 100644
+--- a/cmd/epp/runner/runner.go
++++ b/cmd/epp/runner/runner.go
+@@ -15,6 +15,11 @@ See the License for the specific language governing permissions and
+ limitations under the License.
+ */
+ 
++// Modified from upstream (https://github.com/llm-d/llm-d-router, tag v1.0.0) by the plgrid-llmlab-hpc-burst
++// project, spike S2, 2026-10-30: the listeners in this file bind 127.0.0.1 instead of all interfaces.
++// Nothing else is changed. See third_party/forked/llm-d-router/ORIGIN.md in
++// https://github.com/groundnuty/plgrid-llmlab-hpc-burst.
++
+ package runner
+ 
+ import (
+@@ -585,7 +590,7 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
+ // enabled because exemplars only exist in that format.
+ func newMetricsServerOptions(port uint16, authEnabled bool) metricsserver.Options {
+ 	opts := metricsserver.Options{
+-		BindAddress: fmt.Sprintf(":%d", port),
++		BindAddress: fmt.Sprintf("127.0.0.1:%d", port),
+ 		HandlerOpts: []func(*promhttp.HandlerOpts){
+ 			func(o *promhttp.HandlerOpts) { o.EnableOpenMetrics = true },
+ 		},
+@@ -1361,7 +1366,7 @@ func serveMetrics(ctx context.Context, port uint16, enablePprof bool) error {
+ 			mux.Handle(path, h)
+ 		}
+ 	}
+-	srv := &http.Server{Addr: fmt.Sprintf(":%d", port), Handler: mux, ReadHeaderTimeout: 10 * time.Second}
++	srv := &http.Server{Addr: fmt.Sprintf("127.0.0.1:%d", port), Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+ 	go func() {
+ 		<-ctx.Done()
+ 		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), metricsShutdownTimeout)
+diff --git a/internal/runnable/grpc.go b/internal/runnable/grpc.go
+index ec6c730..41d833c 100644
+--- a/internal/runnable/grpc.go
++++ b/internal/runnable/grpc.go
+@@ -15,6 +15,11 @@ See the License for the specific language governing permissions and
+ limitations under the License.
+ */
+ 
++// Modified from upstream (https://github.com/llm-d/llm-d-router, tag v1.0.0) by the plgrid-llmlab-hpc-burst
++// project, spike S2, 2026-10-30: the listeners in this file bind 127.0.0.1 instead of all interfaces.
++// Nothing else is changed. See third_party/forked/llm-d-router/ORIGIN.md in
++// https://github.com/groundnuty/plgrid-llmlab-hpc-burst.
++
+ package runnable
+ 
+ import (
+@@ -36,7 +41,7 @@ func GRPCServer(name string, srv *grpc.Server, port uint16) manager.Runnable {
+ 		log := ctrl.Log.WithValues("name", name)
+ 		log.Info("gRPC server starting")
+ 
+-		lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
++		lis, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+ 		if err != nil {
+ 			return fmt.Errorf("gRPC server failed to listen - %w", err)
+ 		}

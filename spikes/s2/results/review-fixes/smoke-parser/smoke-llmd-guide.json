@@ -1,0 +1,28 @@
+{
+  "label": "smoke-llmd-guide",
+  "url": "http://127.0.0.1:19207/v1/chat/completions",
+  "session": "smoke",
+  "started_utc": "2026-10-30T11:38:58Z",
+  "expect_tokens": 5,
+  "tokens": 5,
+  "finish_reason": "length",
+  "done_seen": true,
+  "http_status": 200,
+  "resp_headers": {
+    "server": "fasthttp",
+    "x-went-into-resp-headers": "true"
+  },
+  "elapsed_sec": 5.023357996,
+  "response_headers_sec": 1.020858791,
+  "first_token_sec": 1.021266058,
+  "last_token_sec": 5.023212385,
+  "gap_min_ms": 998.331379,
+  "gap_mean_ms": 1000.48658175,
+  "gap_p50_ms": 1000.678741,
+  "gap_p99_ms": 1000.678741,
+  "gap_max_ms": 1002.346864,
+  "gap_max_at_token": 5,
+  "gaps_over_2s": 0,
+  "sse_comment_lines": 0,
+  "complete": true
+}

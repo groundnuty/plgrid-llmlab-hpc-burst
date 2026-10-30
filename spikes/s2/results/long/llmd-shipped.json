@@ -1,0 +1,27 @@
+{
+  "label": "llmd-shipped",
+  "url": "http://127.0.0.1:18201/v1/chat/completions",
+  "session": "long-llmd-shipped",
+  "started_utc": "2026-10-30T08:48:12Z",
+  "expect_tokens": 7300,
+  "tokens": 7300,
+  "finish_reason": "length",
+  "done_seen": true,
+  "http_status": 200,
+  "resp_headers": {
+    "server": "fasthttp",
+    "x-went-into-resp-headers": "true"
+  },
+  "elapsed_sec": 7306.336184148,
+  "first_token_sec": 1.017608798,
+  "last_token_sec": 7306.335980721,
+  "gap_min_ms": 983.496583,
+  "gap_mean_ms": 1000.8656489824649,
+  "gap_p50_ms": 1000.723885,
+  "gap_p99_ms": 1007.203591,
+  "gap_max_ms": 1043.812369,
+  "gap_max_at_token": 108,
+  "gaps_over_2s": 0,
+  "sse_comment_lines": 0,
+  "complete": true
+}
