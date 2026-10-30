@@ -1,0 +1,28 @@
+{
+  "label": "probe-llmd-5s-timers",
+  "url": "http://127.0.0.1:19208/v1/chat/completions",
+  "session": "c2",
+  "started_utc": "2026-10-30T10:06:24Z",
+  "expect_tokens": 600,
+  "tokens": 600,
+  "finish_reason": "length",
+  "done_seen": true,
+  "http_status": 200,
+  "resp_headers": {
+    "server": "fasthttp",
+    "x-went-into-resp-headers": "true"
+  },
+  "elapsed_sec": 600.434928657,
+  "response_headers_sec": 1.015936157,
+  "first_token_sec": 1.016362646,
+  "last_token_sec": 600.434665466,
+  "gap_min_ms": 994.773382,
+  "gap_mean_ms": 1000.6983352587646,
+  "gap_p50_ms": 1000.651148,
+  "gap_p99_ms": 1005.908084,
+  "gap_max_ms": 1009.889926,
+  "gap_max_at_token": 348,
+  "gaps_over_2s": 0,
+  "sse_comment_lines": 0,
+  "complete": true
+}

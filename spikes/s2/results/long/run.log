@@ -1,0 +1,26 @@
+08:45:56 waiting: load=4.52 mem_avail_gb=20
+08:46:56 waiting: load=4.16 mem_avail_gb=20
+started none: http://127.0.0.1:18100/v1/chat/completions
+ok $S2_HOME/run/llmd-shipped
+started llmd-shipped: http://127.0.0.1:18201/v1/chat/completions
+ok $S2_HOME/run/llmd-tuned
+started llmd-tuned: http://127.0.0.1:18202/v1/chat/completions
+started vllmr-default: http://127.0.0.1:18203/v1/chat/completions
+started vllmr-tuned: http://127.0.0.1:18204/v1/chat/completions
+08:48:12 5 streams of 7300 tokens started
+label                        complete        tokens  elapsed_s cut_after_s max_gap_ms gaps>2s  error
+llmd-shipped                 True       7300/7300         7306           0       1044       0  
+llmd-tuned                   True       7300/7300         7306           0       1044       0  
+none                         True       7300/7300         7325           0       1032       0  
+vllmr-default                False      1794/7300         1800        1800       1017       0  read: unexpected EOF
+vllmr-tuned                  True       7300/7300         7324           0       1024       0  
+OK   none: expected pass; got complete=True tokens=7300/7300 elapsed=7325s err=''
+OK   llmd-tuned: expected pass; got complete=True tokens=7300/7300 elapsed=7306s err=''
+OK   vllmr-tuned: expected pass; got complete=True tokens=7300/7300 elapsed=7324s err=''
+OK   vllmr-default: expected cut in [1795,1815] s; got complete=False tokens=1794/7300 elapsed=1800s err='read: unexpected EOF'
+llmd-shipped                 True       7300/7300         7306           0       1044       0  
+stopped none
+stopped llmd-shipped
+stopped llmd-tuned
+stopped vllmr-default
+stopped vllmr-tuned

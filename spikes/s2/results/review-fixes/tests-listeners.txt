@@ -1,0 +1,12 @@
+$ spikes/s2/scripts/test-listeners.sh
+ok   a loopback listener passes
+ok   two loopback listeners pass
+ok   a listener on 0.0.0.0 fails
+ok   the message names the address
+ok   one loopback and one all-interface process fail
+ok   a listener on [::] fails
+ok   a process with no listener fails: unseen is not a pass
+ok   the message says it cannot verify
+ok   a child listening on 0.0.0.0 under a loopback parent fails
+
+test-listeners: all passed
