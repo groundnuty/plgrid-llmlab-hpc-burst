@@ -62,7 +62,9 @@ func (g *gen) hex(n int) string {
 // unknownName returns a valid flag (or, with env, variable) name that the vLLM
 // table does not list.
 func (g *gen) unknownName(env bool) string {
-	for {
+	// A bound turns a table that lists every generated name into a failure
+	// rather than a hang.
+	for tries := 0; tries < 10000; tries++ {
 		var b strings.Builder
 		for n := 1 + g.r.Intn(4); n > 0; n-- {
 			b.WriteString(g.pick(namePieces))
@@ -72,6 +74,7 @@ func (g *gen) unknownName(env bool) string {
 			return name
 		}
 	}
+	panic("gen: no unlisted name found in 10000 tries")
 }
 
 // pathPieces are textPieces without the separator.

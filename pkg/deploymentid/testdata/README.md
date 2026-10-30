@@ -17,7 +17,7 @@ Python does only the canonicalisation and the hash. It never sees the flag table
 - `gen_vectors.py`: Python 3.12.14 with `rfc8785` 0.1.4 (PyPI; Trail of Bits, Apache-2.0; https://github.com/trailofbits/rfc8785.py), and `hashlib`.
 - `crosscheck.mjs`: Node v26.10.0 with `canonicalize` 5.1.0 (npm; Samuel Erdtman, Apache-2.0; https://github.com/erdtman/canonicalize). A second JCS implementation, written independently of the first. Its output matches `canonical.json` byte for byte for all seven vectors.
 - `sha256sum` (coreutils): `cd vectors/<name> && sha256sum -c sha256.txt` is `OK` for all seven.
-- Both libraries were first run on the sample of RFC 8785 section 3.2.3 and reproduce the RFC's property order and the byte string of section 3.2.4.
+- Both libraries were run once, before the vectors, on two samples from the RFC: the seven-key sorting sample of section 3.2.3, where both give the RFC's property order, and the string member of the section 3.2.2 sample, where both give the bytes of the section 3.2.4 hex dump that belong to it (`e2 82 ac 24 5c 75 30 30 30 66 ...`). Those throwaway snippets are not kept; `jcs_test.go` holds the same two samples for the Go serialiser.
 
 Neither tool is a dependency of the Go module. To regenerate:
 

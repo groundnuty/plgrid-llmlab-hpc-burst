@@ -39,8 +39,10 @@ func TestJCSRFC8785SortingSample(t *testing.T) {
 	}
 }
 
-// The string of RFC 8785 section 3.2.2, "€$\u000F\u000aA'B"\\\\"\/"
-// once parsed, and its serialisation as the hex dump of section 3.2.4 prints it.
+// The string member of the sample in RFC 8785 section 3.2.2, once parsed:
+// U+20AC, '$', U+000F, a line feed, 'A', an apostrophe, 'B', a quote, two
+// backslashes, a quote and a slash. Expected is its serialisation as the hex
+// dump of section 3.2.4 prints it (e2 82 ac 24 5c 75 30 30 30 66 ...).
 func TestJCSRFC8785StringSample(t *testing.T) {
 	in := "\xe2\x82\xac$\x0f\nA'B\"\\\\\"/"
 	want := []byte{
