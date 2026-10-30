@@ -1,0 +1,112 @@
+{
+ "all_match": true,
+ "counts": {
+  "git-ok": 15,
+  "lfs-ok": 3
+ },
+ "files": [
+  {
+   "path": ".gitattributes",
+   "size": 1708,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "README.md",
+   "size": 13375,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "chat_template.jinja",
+   "size": 18682,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "config.json",
+   "size": 6022,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "every_eval_ever/aime25.json",
+   "size": 3745,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "every_eval_ever/gpqa_diamond.json",
+   "size": 2341,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "every_eval_ever/gsm8k_platinum.json",
+   "size": 3926,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "every_eval_ever/ifeval.json",
+   "size": 6161,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "every_eval_ever/lcb_codegeneration_v6.json",
+   "size": 2352,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "every_eval_ever/math_500.json",
+   "size": 2211,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "every_eval_ever/mmlu_pro.json",
+   "size": 1828,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "generation_config.json",
+   "size": 208,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "model-00001-of-00002.safetensors",
+   "size": 26881224964,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00002-of-00002.safetensors",
+   "size": 6382013964,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model.safetensors.index.json",
+   "size": 162119,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "processor_config.json",
+   "size": 1689,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "tokenizer.json",
+   "size": 32169626,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "tokenizer_config.json",
+   "size": 3082,
+   "verdict": "git-ok"
+  }
+ ],
+ "hub_files": 18,
+ "lfs_bytes_matched": 33295408554,
+ "model_signing_vs_own": {
+  "differ": [],
+  "equal": 17,
+  "not_in_manifest": [
+   ".gitattributes"
+  ],
+  "only_in_manifest": []
+ },
+ "repo": "RedHatAI/gemma-4-31B-it-FP8-block",
+ "revision": "d7242548c457ab4b45bd3adb8937f2659af4739d",
+ "staged_files": 18
+}

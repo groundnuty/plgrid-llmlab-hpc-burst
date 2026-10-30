@@ -45,7 +45,12 @@ Problems:
 
 ### Notes, constraints and caveats
 
-- Whether compute nodes can connect out is not yet known on Helios, Athena or Sano. Spike S5 (PR #19) ran no job, so it could not measure this; spike S1 (issue #18) will (open question 10). An earlier project saw Helios jobs reach outside services, which makes Helios the first candidate for dial home. Where dial home works is a per-partition fact in the platform profile (HBEP-4): outbound allowed or not, through which protocols and ports, directly or through a proxy.
+- **Compute nodes connect out on port 443,** measured by spike S1's step 0 (issue #18) on 30 Oct 2026.
+  - Short jobs on Helios CPU, Helios GH200 and Athena A100 all reached public HTTPS endpoints (two well-known public services) directly, with no proxy configured. No connection to an endpoint the framework runs has been made yet.
+  - So a front that is publicly reachable on 443 could take dial-home connections directly, which makes an HTTPS reverse tunnel a strong candidate for open question 1. A TLS-terminating front for it is not yet decided (HBEP-11).
+  - The development VM behind a NAT accepted only port 22 from those nodes. There, the dial-home tunnel will run inside an ssh forward over port 22, with a restricted key (not yet run from a compute node).
+  - Sano was not measured.
+  - Where dial home works stays a per-partition fact in the platform profile (HBEP-4): outbound allowed or not, through which protocols and ports, directly or through a proxy.
 - The front needs an address that compute nodes can reach. Where it runs is HBEP-11's decision.
 - A center may need to consent to tunnels from compute nodes. The fix owner is then the center.
 - Inside the instance, the engine and its router listen on loopback or a Unix socket, and the tunnel agent connects to them locally. On a shared node, other users' jobs can reach loopback too, so the local listener uses the Instance's own key, which the front sends (HBEP-9), or a socket protected by file permissions. That key is not the allocation's credential, which registers the Instance. A key covers only part of the engine's HTTP API (Risks).
@@ -67,7 +72,7 @@ Problems:
 
 ### Open questions
 
-1. **Tunnel protocol.** Candidates: an ssh reverse forward to an endpoint the framework runs; an HTTP/2 or WebSocket reverse tunnel over HTTPS; userspace WireGuard. Decided by a spike on Helios: which egress works, throughput, and time to first token under many concurrent streams.
+1. **Tunnel protocol.** Candidates: an ssh reverse forward to an endpoint the framework runs; an HTTP/2 or WebSocket reverse tunnel over HTTPS; userspace WireGuard. Partly informed by spike S1 (issue #18): outbound 443 to public endpoints works on all three measured partitions. S1's one-hour runs test one long stream through frp tcp inside an ssh forward, for cuts, reconnects and added latency. Still open, with no spike assigned yet: throughput and time to first token under many concurrent streams, and the HTTPS (wss) path.
 2. **Encryption.** Where TLS terminates. Should front and engine be encrypted end to end inside the tunnel? Decided with HBEP-9.
 3. **Relay fallback form.** An ssh forward from the front through the login node, or a process on the login node? Who supervises it? Is its owner the Allocation or the Instance? Spike on a cluster without outbound. A process on a login node waits on the centers' answer to HBEP-4's open question 14.
 4. **Port forwards.** Are they a supported path, or only an operator's debugging tool? If supported, with which owner and teardown? Owner decision.
@@ -76,7 +81,7 @@ Problems:
 7. **Credential.** Its format, its lifetime against the lease length, and renewal over the tunnel. Decided with HBEP-9.
 8. **A front behind NAT,** as in a single-user setup: does it need a rendezvous relay? Decided with HBEP-11.
 9. **Center consent.** Ask Cyfronet, and each other center, whether outbound tunnels from compute nodes are acceptable use. Owner.
-10. **Compute-node reachability.** Spike S5 (PR #19) ran no job. So on all three platforms these are unknown: outbound access from compute nodes, inbound reachability, and whether a compute-node listener can be reached from the login node. Decided by spike S1 (issue #18), which also answers question 1. Whether the tunnel agent must run without a container runtime is HBEP-4's open question 15.
+10. **Compute-node reachability.** Partly answered by spike S1's step 0 (issue #18): outbound 443 works on Helios CPU, Helios GH200 and Athena, and compute-node Python is 3.9 on all three. Still unknown: Sano, inbound reachability, and whether a compute-node listener can be reached from the login node. Whether the tunnel agent must run without a container runtime is HBEP-4's open question 15.
 
 ## Design details
 
@@ -187,6 +192,7 @@ Dial home replaces www-2027's central relays and forward watchdogs, which kept h
 - 2026-10-28: proposed (provisional), tracking issue #6.
 - 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
 - 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation; spike S5 facts carried in (HBEP-4, HBEP-6, HBEP-7 only).
+- 2026-10-30: spike S1 step 0 (issue #18) carried in: outbound 443 from compute nodes.
 
 ## Amendments
 

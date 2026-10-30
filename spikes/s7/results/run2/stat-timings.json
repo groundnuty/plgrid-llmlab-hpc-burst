@@ -1,0 +1,38 @@
+{
+ "stat-after-deepseek": {
+  "bytes_on_disk": 166898661074,
+  "files": 74,
+  "kind": "summary",
+  "label": "deepseek",
+  "mode": "stat-only",
+  "skipped": [],
+  "wall_s": 0.001775979995727539
+ },
+ "stat-after-gemma": {
+  "bytes_on_disk": 33295638003,
+  "files": 18,
+  "kind": "summary",
+  "label": "gemma",
+  "mode": "stat-only",
+  "skipped": [],
+  "wall_s": 0.00032583100255578756
+ },
+ "stat-before-deepseek": {
+  "bytes_on_disk": 166898661074,
+  "files": 74,
+  "kind": "summary",
+  "label": "deepseek",
+  "mode": "stat-only",
+  "skipped": [],
+  "wall_s": 0.0022141720401123166
+ },
+ "stat-before-gemma": {
+  "bytes_on_disk": 33295638003,
+  "files": 18,
+  "kind": "summary",
+  "label": "gemma",
+  "mode": "stat-only",
+  "skipped": [],
+  "wall_s": 0.0003425279865041375
+ }
+}
