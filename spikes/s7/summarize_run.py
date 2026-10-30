@@ -8,10 +8,15 @@ Usage: summarize_run.py <run_dir> <hub_ref_dir> [<publish_dir>]
   publish_dir  optional: write a copy of the results that is safe to commit (see publish())
 
 Prints Markdown. Also writes <run_dir>/compare-<label>.json for each checkpoint.
+
+Exit status: 0 only when every checkpoint's comparison passed (compare.py: a valid run, every
+file equal to the Hub, and the model_signing manifest, when there is one, equal to our hashes);
+1 otherwise. With publish_dir, the sanitized copy is written in either case.
 """
 import glob
 import json
 import os
+import re
 import shutil
 import statistics
 import sys
@@ -27,14 +32,22 @@ def gb(x):
     return "%.1f" % (x / 1e9)
 
 
+def mb_or_na(mb_per_s):
+    return "n/a" if mb_per_s is None else "%.0f" % mb_per_s
+
+
 def hash_tables(run, refs):
-    print("### Hash pass (4 processes, 8 MiB reads, files evicted from cache after reading)\n")
+    print("### Hash pass (4 processes, 8 MiB reads, eviction from the page cache requested after each file)\n")
     print("| checkpoint | files | size GB | wall s | MB/s | CPU s | CPU busy | rchar / size | read_bytes | files changed during read |")
     print("|---|---|---|---|---|---|---|---|---|---|")
-    details = []
+    details, invalid = [], []
     for path in sorted(glob.glob(os.path.join(run, "hash-*.jsonl"))):
         label = os.path.basename(path)[5:-6]
         rows, s = compare.load_jsonl(path)
+        problems = compare.run_problems(rows, s)
+        if problems:  # no table row for a run that did not finish cleanly; compare_tables fails it
+            invalid.append((label, problems))
+            continue
         ok = [r for r in rows if "error" not in r]
         busy = s["cpu_s"] / (s["wall_s"] * s["workers"])
         print("| %s | %d | %s | %.1f | %s | %.1f | %.0f%% | %.4f | %s | %d |" % (
@@ -48,23 +61,28 @@ def hash_tables(run, refs):
     print("| checkpoint | largest file GB | its wall s | per-file MB/s min / median / max |")
     print("|---|---|---|---|")
     for label, big, med, lo, hi, _, _ in details:
-        print("| %s | %s | %.1f | %s / %s / %s |" % (label, gb(big["size"]), big["wall_s"], mb(lo * 1e6), mb(med * 1e6), mb(hi * 1e6)))
+        print("| %s | %s | %.1f | %s / %s / %s |" % (label, gb(big["size"]), big["wall_s"], mb_or_na(lo), mb_or_na(med), mb_or_na(hi)))
     print("\nLustre client read RPC counters over the pass (node-wide, includes other jobs on the node):\n")
     for label, _, _, _, _, lustre, errors in details:
         d = lustre.get("delta")
-        print("- %s: %s; read errors: %d" % (label, json.dumps(d) if d else "unavailable (%s)" % lustre.get("after", lustre), len(errors)))
+        unavailable = json.dumps(public_record(lustre.get("after", lustre)), sort_keys=True)  # error text reduced to its type
+        print("- %s: %s; read errors: %d" % (label, json.dumps(d) if d else "unavailable (%s)" % unavailable, len(errors)))
+    for label, problems in invalid:
+        print("- %s: INVALID RUN, not tabulated: %s" % (label, "; ".join(problems)))
     print()
 
 
 def compare_tables(run, refs):
+    """Print the comparison tables; return True only if every comparison passed."""
+    passed = True
     print("### Staged hashes against the Hub\n")
     print("| checkpoint | repo @ revision | Hub files | staged files | lfs-ok | git-ok | MISMATCH | not-staged | not-on-hub | unchecked | LFS GB matched |")
     print("|---|---|---|---|---|---|---|---|---|---|---|")
     for path in sorted(glob.glob(os.path.join(run, "hash-*.jsonl"))):
         label = os.path.basename(path)[5:-6]
         hub = json.load(open(os.path.join(refs, label + ".json")))
-        rows, _ = compare.load_jsonl(path)
-        report = compare.compare(hub, rows)
+        rows, summary = compare.load_jsonl(path)
+        report = compare.compare(hub, rows, summary)
         ms_path = os.path.join(run, "ms-%s.json" % label)
         if os.path.exists(ms_path):
             report["model_signing_vs_own"] = compare.compare_manifest(rows, json.load(open(ms_path)))
@@ -78,7 +96,15 @@ def compare_tables(run, refs):
         for item in report["files"]:
             if item["verdict"] not in ("lfs-ok", "git-ok"):
                 print("  - %s: %s" % (item["path"], item["verdict"]))
+        for reason in report["invalid_reasons"]:
+            print("  - INVALID RUN: %s" % reason)
+        manifest = report.get("model_signing_vs_own")
+        if manifest and not manifest["all_match"]:
+            print("  - model_signing manifest does not match: %s" % json.dumps(
+                {k: v for k, v in manifest.items() if v}, sort_keys=True))
+        passed = passed and report["all_match"] and (manifest is None or manifest["all_match"])
     print()
+    return passed
 
 
 def other_tables(run):
@@ -96,8 +122,8 @@ def other_tables(run):
             s["label"][6:], s["bufsize"] // 2 ** 20, r["wall_s"], mb(r["size"] / r["wall_s"]), r["cpu_s"],
             r["rchar"] / r["size"], r["read_bytes"]))
     print()
-    print("### Cheap check (stat only)\n")
-    print("| checkpoint | files | wall s before | wall s after | size, mtime, ctime, inode all unchanged between passes |")
+    print("### Cheap check (stat calls only; the directory listing is not in the times)\n")
+    print("| checkpoint | files | stat wall s before | stat wall s after | size, mtime, ctime, inode all unchanged between passes |")
     print("|---|---|---|---|---|")
     for path in sorted(glob.glob(os.path.join(run, "stat-before-*.jsonl"))):
         label = os.path.basename(path)[12:-6]
@@ -131,22 +157,54 @@ def other_tables(run):
 
 
 PUBLIC_ROW_FIELDS = ("kind", "path", "size", "sha256", "git_blob_sha1", "bytes_hashed", "wall_s", "cpu_s",
-                     "rchar", "read_bytes", "done_at_s", "error")
+                     "rchar", "read_bytes", "done_at_s", "changed_during_read", "error")
 PRIVATE_ENV_PREFIXES = ("node=",)
+# An error string is "<ExceptionClass>: <message>" (hash_tree.hash_one) or repr(exception)
+# (hash_tree.lustre_counters). The message carries absolute paths and tool output; the class does not.
+ERROR_CLASS = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*(?:Error|Exception|Expired))(?=[:(]|$)")
+RELATIVE_PATH_LISTS = ("changed_during_read", "skipped")
+
+
+def error_type(text):
+    """Return the exception class name at the start of an error string, or "UnknownError"."""
+    match = ERROR_CLASS.match(text) if isinstance(text, str) else None
+    return match.group(1) if match else "UnknownError"
+
+
+def check_relative(path):
+    """Refuse a path that is not relative to the checkpoint directory."""
+    if not isinstance(path, str) or os.path.isabs(path) or ".." in path.split("/"):
+        raise ValueError("refusing to publish a path that is not checkpoint-relative: %r" % (path,))
+
+
+def public_record(rec):
+    """Return a copy of a hash_tree.py record or summary that is safe to commit.
+
+    File records keep only PUBLIC_ROW_FIELDS (no inode, mtime, ctime or process id). Every
+    "error" value, at any depth (a file record, an entry of the summary's errors list, a Lustre
+    counter failure), is reduced to its exception class. Paths must be checkpoint-relative.
+    """
+    if isinstance(rec, list):
+        return [public_record(item) for item in rec]
+    if not isinstance(rec, dict):
+        return rec
+    if rec.get("kind") == "file":
+        check_relative(rec["path"])
+        rec = {k: v for k, v in rec.items() if k in PUBLIC_ROW_FIELDS}
+    out = {}
+    for key, value in rec.items():
+        if key in RELATIVE_PATH_LISTS and isinstance(value, list):
+            for entry in value:
+                check_relative(entry)
+        out[key] = error_type(value) if key == "error" else public_record(value)
+    return out
 
 
 def public_jsonl(src, dst):
-    """Copy a JSON-lines file keeping only the fields that carry no host-specific identifiers.
-
-    Dropped: inode numbers, mtime/ctime, process ids. Summary lines are kept whole: they hold
-    counts, times and the Lustre RPC counters only.
-    """
+    """Copy a JSON-lines file with every record passed through public_record()."""
     with open(src) as fin, open(dst, "w") as fout:
         for line in fin:
-            rec = json.loads(line)
-            if rec.get("kind") == "file":
-                rec = {k: v for k, v in rec.items() if k in PUBLIC_ROW_FIELDS}
-            fout.write(json.dumps(rec, sort_keys=True) + "\n")
+            fout.write(json.dumps(public_record(json.loads(line)), sort_keys=True) + "\n")
 
 
 def publish(run, refs, out):
@@ -163,23 +221,25 @@ def publish(run, refs, out):
     stat = {}
     for path in sorted(glob.glob(os.path.join(run, "stat-*.jsonl"))):
         with open(path) as f:
-            stat[os.path.basename(path)[:-6]] = json.loads(f.readlines()[-1])
+            stat[os.path.basename(path)[:-6]] = public_record(json.loads(f.readlines()[-1]))
     with open(os.path.join(out, "stat-timings.json"), "w") as f:
         json.dump(stat, f, indent=1, sort_keys=True)
     with open(os.path.join(run, "env.txt")) as fin, open(os.path.join(out, "env.txt"), "w") as fout:
         fout.writelines(l for l in fin if not l.startswith(PRIVATE_ENV_PREFIXES))
 
 
-def main():
-    if len(sys.argv) not in (3, 4):
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if len(argv) not in (2, 3):
         sys.exit(__doc__)
-    run, refs = sys.argv[1:3]
+    run, refs = argv[:2]
     hash_tables(run, refs)
-    compare_tables(run, refs)
+    passed = compare_tables(run, refs)
     other_tables(run)
-    if len(sys.argv) == 4:
-        publish(run, refs, sys.argv[3])
+    if len(argv) == 3:
+        publish(run, refs, argv[2])
+    return 0 if passed else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

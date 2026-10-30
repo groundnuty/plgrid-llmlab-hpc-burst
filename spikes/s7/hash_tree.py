@@ -19,7 +19,9 @@ that hits its time limit still leaves the finished files. The last line is a sum
 
 Modes:
   default       hash all files (or --only the named ones) with --workers processes
-  --stat-only   stat all files (the "cheap check") and time it; no file is opened
+  --stat-only   stat all files (the "cheap check") and time the stat calls (wall_s); no file is
+                opened. The directory listing is timed apart (list_s) and is not in wall_s: the
+                runs committed under results/ predate list_s, so their wall_s is stat-only.
   --cpu-ceiling hash zeroed memory only, to show the SHA-256 rate the CPU can reach
 """
 import argparse
@@ -177,6 +179,8 @@ def hash_one(task):
             "pid": os.getpid(),
         })
     except OSError as exc:
+        # "<ExceptionClass>: <message>". The message names the absolute path, so it stays in the
+        # raw run; summarize_run.public_record() publishes the class only.
         rec["error"] = "%s: %s" % (type(exc).__name__, exc)
     return rec
 
@@ -255,7 +259,9 @@ def summarise(args, records, wall, cpu, lustre0, lustre1, skipped):
 
 
 def run_stat_only(args):
+    t_list = time.perf_counter()
     files, skipped = list_files(args.root)
+    list_s = time.perf_counter() - t_list
     t0 = time.perf_counter()
     recs = []
     for rel, path in files:
@@ -264,7 +270,8 @@ def run_stat_only(args):
         recs.append(rec)
     wall = time.perf_counter() - t0
     summary = {"kind": "summary", "label": args.label, "mode": "stat-only", "files": len(recs),
-               "bytes_on_disk": sum(r["size"] for r in recs), "wall_s": wall, "skipped": skipped}
+               "bytes_on_disk": sum(r["size"] for r in recs), "wall_s": wall, "list_s": list_s,
+               "skipped": skipped}
     with open(args.out, "w") as out:
         for rec in recs:
             out.write(json.dumps(rec, sort_keys=True) + "\n")
