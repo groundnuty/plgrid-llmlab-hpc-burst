@@ -1,0 +1,109 @@
+{
+ "chunk": 8388608,
+ "cpu_s": 29.510261,
+ "files_offered": 18,
+ "label": "gemma",
+ "model_signing_version": "1.1.1",
+ "rchar": 33295647533,
+ "read_bytes": 770670592,
+ "resources": [
+  {
+   "algorithm": "sha256",
+   "digest": "4c9e4e3440cd22cb702d5f638bb595ffe6437fbe4bd84cd7208390bb51c17c99",
+   "name": "README.md"
+  },
+  {
+   "algorithm": "sha256",
+   "digest": "6a1015c47ccfcfa67c3b772385bccee357a4d37c3cda37bd202e9047f391ab82",
+   "name": "chat_template.jinja"
+  },
+  {
+   "algorithm": "sha256",
+   "digest": "f83680dca1680f7dcc507bc801549a99f5b4346aa3fdf2a48b549b782a8ca999",
+   "name": "config.json"
+  },
+  {
+   "algorithm": "sha256",
+   "digest": "c6759f4777f1ee3c6aeaf7f2f8c8e76efedd51f7bd41a7d2f6e7dc0093848263",
+   "name": "every_eval_ever/aime25.json"
+  },
+  {
+   "algorithm": "sha256",
+   "digest": "52c7c857dc89014a8779ba33432338fd71fd4dedc225cd179231bc8a3e5d0682",
+   "name": "every_eval_ever/gpqa_diamond.json"
+  },
+  {
+   "algorithm": "sha256",
+   "digest": "ba0383204f8501c1cf786f544ff43771ee623575cb8ec46682d5a6559d5e78c8",
+   "name": "every_eval_ever/gsm8k_platinum.json"
+  },
+  {
+   "algorithm": "sha256",
+   "digest": "fa506c0f12377980b862f92b462161e122f9e2c06f9f0644230140f450f9ae8e",
+   "name": "every_eval_ever/ifeval.json"
+  },
+  {
+   "algorithm": "sha256",
+   "digest": "e0ac7baea34450cc75a5f571126333c6da19ecb784a63e9221ee7160e347cfb9",
+   "name": "every_eval_ever/lcb_codegeneration_v6.json"
+  },
+  {
+   "algorithm": "sha256",
+   "digest": "9e3edfc01ada3acba27e31d05149f93cb060803b5532a2d839e503639b379ace",
+   "name": "every_eval_ever/math_500.json"
+  },
+  {
+   "algorithm": "sha256",
+   "digest": "6fd4b9b55743f15140d2af1a8b3b39d37fdccc2d507b46b96b9c35bc78941cfc",
+   "name": "every_eval_ever/mmlu_pro.json"
+  },
+  {
+   "algorithm": "sha256",
+   "digest": "d4226bbe3117d2d253ba4609720ba82c6c4ce4627a9a6ae05387c78983ac03de",
+   "name": "generation_config.json"
+  },
+  {
+   "algorithm": "sha256",
+   "digest": "af0753963ba92662910620a1b2b155a39455c1ac5253f8fe6139e0f0a5a85547",
+   "name": "model-00001-of-00002.safetensors"
+  },
+  {
+   "algorithm": "sha256",
+   "digest": "4e84a7a6b74c900c300e8300397c8545f33c80d9ec3db660e35169ef53cd2afb",
+   "name": "model-00002-of-00002.safetensors"
+  },
+  {
+   "algorithm": "sha256",
+   "digest": "de0e034aa6479d1214c1f3af2d28063322896752f8837cd3b2167fcf1d633637",
+   "name": "model.safetensors.index.json"
+  },
+  {
+   "algorithm": "sha256",
+   "digest": "32bdf45d2ad4cc29a0822ddd157a182de76644f0419a6228d151495256e9813c",
+   "name": "processor_config.json"
+  },
+  {
+   "algorithm": "sha256",
+   "digest": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+   "name": "tokenizer.json"
+  },
+  {
+   "algorithm": "sha256",
+   "digest": "9f4fec4b1dc6ecddf8f4a92e9caea5971c0e67d81309f3f9066a2bee8c362633",
+   "name": "tokenizer_config.json"
+  }
+ ],
+ "serialization": {
+  "allow_symlinks": true,
+  "hash_type": "sha256",
+  "ignore_paths": [
+   ".github",
+   ".git",
+   ".gitattributes",
+   ".gitignore"
+  ],
+  "method": "files"
+ },
+ "wall_s": 23.78925357805565,
+ "workers": 4
+}

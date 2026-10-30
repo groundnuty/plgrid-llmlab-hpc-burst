@@ -67,7 +67,7 @@ Problems:
   - Hedging across providers is our own controller, built on the Kubernetes API (HBEP-11).
 - **Prior art for over-allocation.** Farley et al. call the strategy placement gaming: launch extra instances up front and keep the strongest ("More for your money: exploiting performance heterogeneity in public clouds", ACM SoCC 2012). Ou et al. take a keep-good, discard-bad approach to EC2 instance heterogeneity ("Is the same instance type created equal? Exploiting heterogeneity of public clouds", IEEE Transactions on Cloud Computing, 2013).
 - An Allocation outlives its Instances (HBEP-3). Ending an Instance and releasing its Allocation are separate steps: the Instance ends, and the Allocation then follows its retention policy.
-- Every provider action goes through the provider interface (HBEP-4). Submission rules, per-user job limits, time-limit effects on queueing and time zones are profile data. Timestamps reach the controller in UTC.
+- Every provider action goes through the provider interface (HBEP-4). Submission rules, per-user job limits, time-limit effects on queueing and time zones are profile data. Timestamps reach the controller in UTC: Slurm prints local time (Europe/Warsaw) on Helios and Athena and UTC on Sano (spike S5, PR #19), and the provider plugin converts it (HBEP-4).
 - An allocation's account cannot change once it runs, so the controller picks the account at submission. Each provider has one account (HBEP-3), so picking the account is picking the provider.
 - The drain window is defined in HBEP-5. The controller plans so that a replacement serves before the predecessor's drain starts; the drain rule under Handover says what happens when it does not.
 
@@ -76,7 +76,9 @@ Problems:
 - **The node is lost.** Releasing before the replacement serves gives the slot to another user. Mitigation: the decided rule, checked by a test. A retention policy can also keep an Allocation after its Instance ends.
 - **Cancelling a loser starts its dependents.** Mitigation: cancel dependents first, or use no provider-side dependencies (Open question 3).
 - **A restart submits twice.** Every submission carries a tag in a field the provider stores, and the controller finds its allocations by that tag, never by scanning names. The tag supports recovery but does not enforce uniqueness: a provider can accept two submissions with one tag, and a lost submission reply leaves the outcome unknown until the controller lists by tag. The submission protocol stays open (Open question 11).
-- **The scheduler requeues a job.** Slurm can requeue a batch job and run its script again under the same job ID. That can leave stale registrations, verification results or replacement work from the first execution behind. Each platform profile records its requeue behaviour (HBEP-4); identity across executions is HBEP-3's open question 13. Candidate: submit with no-requeue and treat a requeue as a failure.
+- **The scheduler requeues a job.** Slurm can requeue a batch job and run its script again under the same job ID, and requeue is on by default on Helios, Athena and Sano (spike S5, PR #19). That can leave stale registrations, verification results or replacement work from the first execution behind. Each platform profile records its requeue behaviour (HBEP-4); identity across executions is HBEP-3's open question 13. Proposed: submit every Allocation with `--no-requeue`, and treat a requeue that still happens as a failure of its Instance.
+- **An ended job is read as missing.** Helios and Athena drop a finished job from `squeue` about 10 s after it ends (spike S5, PR #19). A controller that reads a missing job as never submitted would submit it again. Mitigation: the provider plugin reports an ended lease as existing and terminal, from accounting (HBEP-4), and the controller never resubmits only because a job is missing from the queue.
+- **A job without GPUs on a GPU-only platform.** Athena is meant for GPU jobs only, and its documentation warns that workloads without GPUs can lead to account suspension (spike S5, PR #19). Mitigation: the controller sends no job without GPUs, such as a staging or relay job, to a platform whose profile marks it GPU-only. Still open: whether a GPU Allocation kept idle as warm capacity counts, which bears on the default retention policy (Open question 13).
 - **Overlap costs grant hours.** A replacement can start hours early, and both then run. Mitigation: an overlap policy (Open question 4).
 - **Warm-up misleads.** A warm-up on short prompts leaves long-context shapes cold. Mitigation: warm-up shapes come from the deployment spec, and warm-up runs on the new instance before admission, never on live workers.
 - **Verification checks a proxy.** The engine's fingerprint differs per site and is sometimes missing. Mitigation: verification recomputes the deployment ID from the settings the instance reports (HBEP-9).
@@ -85,7 +87,7 @@ Problems:
 - **A repurpose inherits the old model's state.** Files staged for the old model, or another engine, are left in the Allocation. Mitigation: the new Instance passes the same verification as any other, against its own deployment's identity record (HBEP-9).
 - **Restart loops.** Mitigation: backoff, then a new allocation, then a degraded deployment and an event (HBEP-8).
 - **A poison request kills each restarted instance.** Mitigation: the front's retry guard (HBEP-5) and a crash-correlation event.
-- **A restart runs a different spec.** An edited script reached an older job's restart. Mitigation (candidate): each instance runs from an immutable launch bundle for its deployment ID, and a restart reuses it.
+- **A restart runs a different spec.** An edited script reached an older job's restart. Mitigation (candidate): each instance runs from an immutable launch bundle for its deployment ID, and a restart reuses it. Whether that bundle can be a container image is HBEP-4's open question 15: none of Apptainer, Singularity, enroot, Podman or Docker was found on Athena's login node, other runtimes were not searched for, and no compute node has been checked (spike S5, PR #19).
 - **Edits to pending jobs break them.** Mitigation: never edit a submitted allocation; cancel and resubmit.
 - **Our own jobs compete with each other.** Hedges, over-allocations and follow-ons of different deployments compete for the same nodes and per-user limits. Mitigation: plan per provider, with its per-user limits from the profile.
 - **The controller dies quietly.** Instances keep serving until their leases end, and handovers are missed. Mitigation: for each deployment, an event when its planned submission time passes with no submission.
@@ -238,7 +240,7 @@ The Allocation keeps its name, and the new Instance has the new deployment's ID.
 
 ### Test plan
 
-Against a simulated provider with queue delays, start failures, hard ends, dependency semantics, requeues and local-time clocks:
+Against a simulated provider with queue delays, start failures, hard ends, dependency semantics, requeues, finished jobs purged from the queue listing within seconds, and local-time clocks:
 - Hedging: the first to start is kept and the pending losers are cancelled, and no cancellation ever starts a dependent job.
 - Over-allocation of N+k on a fake with one broken node and one slow node: the broken one fails qualification and its Allocation is released, the best N are kept, and each remaining one follows its retention policy.
 - The replacement fails verification: the predecessor keeps serving until its hard end minus the drain window, not earlier, then drains. No request is cut at the hard end, and a degraded event fires.
@@ -248,6 +250,7 @@ Against a simulated provider with queue delays, start failures, hard ends, depen
 - The reply to a submission is lost: the controller resolves the unknown outcome, and exactly one allocation remains.
 - Two controllers reconcile one deployment at once: any duplicate submission is found by tag and reported, and no more allocations than desired remain.
 - The scheduler requeues a serving allocation under the same job ID: no registration or verification from the first execution is reused, no replacement is planned twice, and the outcome follows HBEP-3's open question 13.
+- A job ends and leaves the queue listing seconds later: the controller reads it as ended, from accounting, and submits nothing again for it.
 - No instance gets traffic before it is ready.
 - A stalled instance with requests in flight is restarted within the threshold. A process that ignores TERM is killed after the grace period.
 - Rank 0 exits cleanly while another rank hangs: the instance counts as failed.
@@ -290,13 +293,78 @@ TBD. Candidate for alpha: the simulated test plan passes, and one real handover 
 - **Hand-run handovers by operators or agents.** This was the starting point, and it led to most of the problems in Motivation.
 - **Slurm dependencies alone.** Same-node pins pended for days, dependencies counted from the wrong moment, and a cancel started dependents.
 - **Keep whatever starts.** Simpler than over-allocation, but a broken or slow node then serves until someone notices.
-- **Models in pods on Slurm (interLink and other virtual-kubelet offloading, Slinky's slurm-bridge).** Pods hide lease ends and start estimates, which the controller needs. To be evaluated later; parts may become components.
+- **Models in pods on Slurm (interLink and other virtual-kubelet offloading, Slinky's slurm-bridge).** Pods hide lease ends and start estimates, which the controller needs. The evaluation (28 Oct 2026) confirmed this; parts may become components.
+
+## Prior art and reuse
+
+The controller applies by policy what www-2027 operators did per job: holder batch scripts that restarted on a control file, follow-ons that published a next endpoint for clients to switch to, a hand-run hedge that cancelled the loser only after the winner passed identity and timing checks, verified and warmed spares, and real-shape warm-ups.
+
+### Community software reused
+
+| Component | Origin (project, URL) | Licence | How used (dependency, copied code, optional) |
+|---|---|---|---|
+| vLLM | [vllm-project/vllm](https://github.com/vllm-project/vllm) | Apache-2.0 | Dependency: the engine each Instance starts |
+| controller-runtime | [kubernetes-sigs/controller-runtime](https://github.com/kubernetes-sigs/controller-runtime) | Apache-2.0 | Candidate, no spike assigned: the controller's keyed work queues, leader election and reconcile loop (open question 11) |
+| inference-perf | [kubernetes-sigs/inference-perf](https://github.com/kubernetes-sigs/inference-perf) | Apache-2.0 | Candidate, no spike assigned: the qualification benchmark (open question 12) |
+| llm-d-inference-sim | [llm-d/llm-d-inference-sim](https://github.com/llm-d/llm-d-inference-sim) | Apache-2.0 | Candidate test dependency, no spike assigned: a GPU-free engine double for the test plan |
+
+### Designs and published work borrowed
+
+| Idea | Origin (project, paper or document) | Where it lands here |
+|---|---|---|
+| Placement gaming: launch extra instances up front and keep the strongest | Farley et al., "More for your money: exploiting performance heterogeneity in public clouds", ACM SoCC 2012 | Over-allocation |
+| Keep good instances and discard bad ones within one instance type | Ou et al., "Is the same instance type created equal? Exploiting heterogeneity of public clouds", IEEE Transactions on Cloud Computing, 2013 | Qualification and keep-best-N |
+| Over-provisioning to absorb preemption (SpotHedge) | SkyServe ([arXiv 2411.01438](https://arxiv.org/abs/2411.01438)) | Cited beside over-allocation: it absorbs loss and does not qualify |
+| Copy a workload to several clusters, keep the first admitted, withdraw the rest; add targets in rounds | Kueue MultiKueue ([kubernetes-sigs/kueue](https://github.com/kubernetes-sigs/kueue)) | Hedging, with the milestone moved to first to serve (open questions 1 and 2) |
+| Submit a replacement once remaining time falls below a per-service window | GWDG SAIA ([services.py](https://raw.githubusercontent.com/gwdg/saia-hpc/main/scheduler_core/services.py)) | Prior art for handover; new here are lead time, hedging and qualification |
+| Pilot demand law: split by site, a pending cap per site, ramp-up attenuation, halving at limits, a reserve, withdrawal with hysteresis; late binding; a randomised retire spread | GlideinWMS ([glideinFrontendElement.py](https://raw.githubusercontent.com/glideinWMS/glideinwms/master/frontend/glideinFrontendElement.py)) | Open questions 1 and 2; staggered handovers |
+| MachineHealthCheck short-circuit (`triggerIf`) and external remediation | Cluster API ([kubernetes-sigs/cluster-api](https://github.com/kubernetes-sigs/cluster-api)) | Open question 6: incidents that hit a whole platform |
+| `delete-machine` priority annotation; `readinessGates` and `minReadySeconds` | Cluster API | Open question 12: keep-best-N; gates Verified, Qualified and WarmedUp |
+| A desired pool with limits and budgets, apart from single units of capacity | Karpenter NodePool ([kubernetes-sigs/karpenter](https://github.com/kubernetes-sigs/karpenter)) | Instance counts and limits per deployment |
+| RepairPolicy as data; a DisruptionBlocked event; a kwok-style simulated provider | Karpenter | Restarts, the event when a replacement cannot be staged, and the test plan's simulated provider |
+| Retry budgets that separate "never started" from "started, then lost" | Armada ([retry policies](https://raw.githubusercontent.com/armadaproject/armada/master/docs/retry_policies.md)) | Open question 6 |
+| Desired counts from an external alert | RAMSES ([arXiv 2511.21413](https://arxiv.org/abs/2511.21413)) | Desired state set from outside the controller |
+| A lease with a holder identity and a duration | Kubernetes `Lease` | Open question 11: one acting controller per provider |
+| `--no-requeue`; a staged TERM, then cancel | SkyPilot's Slurm provisioner ([skypilot-org/skypilot](https://github.com/skypilot-org/skypilot)) | The requeue proposal; a forced kill after a polite stop (open question 6) |
+
+### Field lessons answered
+
+| Lesson | Lesson ID (from the lessons catalogue, HBEP-15) | How this HBEP answers it |
+|---|---|---|
+| Follow-ons pinned to the predecessor's node pended for days. | L-1.1 | Open question 3: independent submissions without node pins by default. |
+| A freed slot went to another user within seconds. | L-1.2 | Replacement before release; the predecessor stays until its drain starts. |
+| One handover design gave back a large share of every lease. | L-1.21 | Open question 4: keep the predecessor until its drain starts. |
+| Time limits cannot be extended, and centers may not act at weekends. | L-1.6 | Handovers are planned back from the hard end. |
+| Dependencies counted from the parent's start, not its end. | L-1.8 | Open question 3: no provider-side dependencies by default. |
+| Cancelling a parent started its pending follow-on at once. | L-1.20 | Dependents are cancelled first, or no dependencies are used. |
+| Chained starts on queued jobs blocked each other. | L-1.13 | Open question 3: independent submissions. |
+| Start estimates swung by hours. | L-1.9 | Open question 2: plan on observed waits, never on estimates. |
+| The time limit decided how long a job queued. | L-1.12 | Open question 2: request time limits that backfill. |
+| A cluster's GPU nodes were blocked for days. | L-1.15 | Hedging across providers. |
+| Our own jobs competed with each other for nodes. | L-1.3, L-1.17 | Planning per provider, within its per-user limits. |
+| Editing a pending job left it unschedulable. | L-1.5 | A submitted allocation is never edited; it is cancelled and resubmitted. |
+| An unwarmed follow-on tripped a client's load guard. | L-5.3 | Real-shape warm-up on the new Instance before admission. |
+| Compiles on unseen shapes stalled or killed engines. | L-2.8 | Warm-up ends only when a repeat of each shape is no slower. |
+| Capacity measured on short contexts overstated long-context capacity. | L-5.2 | Warm-up and qualification shapes come from the deployment spec. |
+| Measured KV cache per session was far above the estimate. | L-5.1 | Qualification measures throughput at the target sessions. |
+| Failing servers were waited out instead of restarted. | L-3.11 | Open question 6: prompt restarts on malfunction signals. |
+| Rank 0 exited cleanly while another rank hung, so nothing restarted. | L-2.9 | Such an Instance counts as failed (test plan). |
+| A follow-on aborted itself on a failed status query of its ended predecessor. | L-3.1 | The controller reads ended jobs from accounting; no job script tracks another. |
+| Restart helpers for one topology stopped their own workers on another. | L-3.2 | Restarts follow the topology the spec declares. |
+| A router hung in graceful shutdown. | L-3.3 | A forced kill follows a few seconds after a polite stop. |
+| A live serve script could not be edited, and an old job's restart ran a newer one. | L-3.7 | An immutable launch bundle per deployment ID. |
+| Converting idle stacks between models was manual. | L-3.9 | Repurposing is one declared operation. |
+| A deliberate restart was counted as a crash. | L-10.16 | The controller records a restart as an event before it acts. |
+| An interrupted multi-cluster release had already cancelled jobs. | L-11.7 | Partial failures are reported item by item. |
+| Releasing capacity saves grant hours but risks the node. | L-13.5 | Open question 13: keep by default; release-when-idle is opt-in. |
+| A relayed cancellation was taken as the owner's decision. | L-14.3 | Open question 8: irreversible releases need approval. |
 
 ## Implementation history
 
 - 2026-10-28: proposed (provisional), tracking issue #7.
 - 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
 - 2026-10-28: open questions answered with proposals from past operation, for the owner to confirm.
+- 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation; spike S5 facts carried in (HBEP-4, HBEP-6, HBEP-7 only).
 
 ## Amendments
 

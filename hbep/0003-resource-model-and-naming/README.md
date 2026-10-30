@@ -79,7 +79,7 @@ In these stories, `helios-a`, `helios-b` and `athena-a` are names an operator ga
 10. **A managed allocation's hard end.** Is it none, or the expiry of the key that reaches the catalog? Shared with HBEP-4 and HBEP-7.
 11. **Pooling workers across Instances.** One router over the workers of several Instances could balance load across them, but the front would then not know which Instance answered. It is not part of this design, because it breaks Instance attribution. It is reconsidered only by amendment.
 12. **A provider-independent pinned name.** `model@<provider>/<deployment-id>` stops resolving once the deployment has no ready Instance on that provider, for example after its last Instance there is replaced on another provider. Should there be a pinned form without a provider, such as `model@*/<deployment-id>`? It depends on open question 1, which decides whether the ID changes across accelerator classes, and on the grammar of open question 5.
-13. **Executions under one job ID.** Slurm can requeue a batch job and run its script again under the same job ID. Is the second execution the same Allocation and the same Instance? Candidates: submit with no-requeue and treat a requeue as a failure; or treat each execution as a new Instance in the same Allocation, which open question 8 allows, since an Allocation may host Instances one after another. Shared with HBEP-4 and HBEP-7.
+13. **Executions under one job ID.** Slurm can requeue a batch job and run its script again under the same job ID. Is the second execution the same Allocation and the same Instance? Leaning, from spike S5 (requeue is on by default on every platform): submit with `--no-requeue`, as HBEP-4 and HBEP-7 propose, and treat a requeue that still happens as a failure of that Instance. The alternative, each execution as a new Instance in the same Allocation (open question 8 allows it), stays open for platforms that force requeue. Shared with HBEP-4 and HBEP-7.
 
 ## Design details
 
@@ -235,10 +235,52 @@ TBD. Candidate: alpha when IDs are computed and named on responses for LLMLab an
 - **An Allocation bound to one deployment for life.** Rejected: capacity left when one model's work ends would go back to the queue, and a new job would wait again.
 - **Kubernetes' `pod-template-hash`.** A Deployment names each ReplicaSet by a hash of its pod template, and a replaced pod keeps that hash. The deployment ID follows the same idea, over what is served instead of over a pod template.
 
+## Prior art and reuse
+
+The resource model replaces state that www-2027 operators kept by hand: per-job endpoint, control and configuration files on each cluster, and a script that listed jobs across clusters.
+
+### Community software reused
+
+| Component | Origin (project, URL) | Licence | How used (dependency, copied code, optional) |
+|---|---|---|---|
+| Kubernetes custom resources, on k3s or kcp | [k3s](https://github.com/k3s-io/k3s); [kcp](https://github.com/kcp-dev/kcp) | k3s Apache-2.0; kcp Apache-2.0 | Candidate host, as HBEP-11 decides: k3s for the team option, and the single-user host by spike S3 |
+| crossplane-runtime | [crossplane/crossplane-runtime](https://github.com/crossplane/crossplane-runtime) | Apache-2.0 | Candidate, decided by spike S4: the Allocation as a managed resource whose external name is its deterministic job tag. Not Crossplane core or compositions |
+| model_signing | [sigstore/model-transparency](https://github.com/sigstore/model-transparency) | Apache-2.0 | Candidate, decided by spike S7: the checkpoint input to the deployment ID as a sorted per-file SHA-256 list, never the library's root digest |
+
+### Designs and published work borrowed
+
+| Idea | Origin (project, paper or document) | Where it lands here |
+|---|---|---|
+| Name a replica set by a hash of its template; a replaced pod keeps the hash | Kubernetes Deployment's `pod-template-hash` | Deployment ID, hashed over what is served |
+| Two address families, version-agnostic and per-version; per-cluster routes | KServe LLMInferenceService ([kserve/kserve](https://github.com/kserve/kserve)); ALCF FIRST ([argonne-lcf/FIRST](https://github.com/argonne-lcf/FIRST)) | Naming levels, kept inside the `model` field |
+| ModelDeployment field names | KServe LLMInferenceService | ModelDeployment fields |
+| v1beta2 condition vocabulary | Cluster API ([kubernetes-sigs/cluster-api](https://github.com/kubernetes-sigs/cluster-api)) | Allocation and Instance conditions |
+| A desired pool kept apart from one unit of capacity with conditions and a finalizer (NodePool and NodeClaim) | Karpenter ([kubernetes-sigs/karpenter](https://github.com/kubernetes-sigs/karpenter)) | The Allocation as a NodeClaim-like resource |
+| Launched, Registered and Initialized conditions plus a Ready summary | Karpenter ([NodeClaim docs](https://karpenter.sh/docs/concepts/nodeclaims/)) | Allocation conditions, beside the Instance phases |
+| Management policies without Update; deterministic external names | Crossplane ([crossplane/crossplane](https://github.com/crossplane/crossplane)) | The job tag as the Allocation's external name; a submitted job is never edited |
+| `--no-requeue` | SkyPilot's Slurm provisioner ([skypilot-org/skypilot](https://github.com/skypilot-org/skypilot)) | Open question 13: the no-requeue candidate |
+| A scale subresource for external autoscalers | Slinky NodeSets ([SlinkyProject/slurm-operator](https://github.com/SlinkyProject/slurm-operator)); KubeAI ([kubeai-project/kubeai](https://github.com/kubeai-project/kubeai)) | ModelDeployment's number of instances |
+
+### Field lessons answered
+
+| Lesson | Lesson ID (from the lessons catalogue, HBEP-15) | How this HBEP answers it |
+|---|---|---|
+| A follow-on on a new node changed the URL, so every client had to re-point. | L-1.22 | URLs are Instance metadata; names survive handovers within a provider. |
+| Job names stopped matching contents once jobs were reused for other models. | L-10.11 | Allocations are named without a model; what is served is named by the deployment ID. |
+| Engine fingerprints differed per site and could not be reproduced offline. | L-8.1 | The fingerprint is recorded beside the deployment ID, never used as it. |
+| One checkpoint name hid real differences in kernels and local patches. | L-8.2 | Open question 1: hash resolved settings and refuse an Instance whose settings differ. |
+| Checkpoints were served without a pinned revision. | L-8.3 | The revision is a hashed input, resolved to an immutable revision at admission. |
+| Proving that only one configuration answered under a name was hard. | L-8.4 | Pinned names; every response names its deployment and Instance. |
+| The route URL became part of the identity. | L-8.5 | A URL is never a name or a deployment-ID input. |
+| Serving configuration was reconstructed afterwards from fingerprints. | L-8.7 | The framework computes the deployment ID from what is served. |
+| A freed slot went to another user at once. | L-1.2 | Replacement before release: no serving Instance is released before its replacement serves. |
+| Converting idle jobs between models was done by hand with per-job files. | L-3.9 | Repurposing: an Allocation moves to another ModelDeployment as one operation. |
+
 ## Implementation history
 
 - 2026-10-28: proposed (provisional), tracking issue #3.
 - 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
+- 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation.
 
 ## Amendments
 
