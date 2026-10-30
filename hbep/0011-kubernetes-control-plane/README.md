@@ -363,7 +363,8 @@ The control plane replaces the files and scripts that held www-2027's state: per
 - 2026-10-28: proposed (provisional), tracking issue #11.
 - 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
 - 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation.
-- 2026-10-30: design completed for implementable (the status change follows in its own PR, per HBEP-1). Owner decisions on the API group, kinds and version folded in; spikes S3 (PR #36, the host rule), S4 (PR #32), S5 (PR #19) and S8 (PR #28) carried in; every open question decided or marked for alpha.
+- 2026-10-30: design completed for implementable.
+- 2026-10-30: implementable. Owner decisions on the API group, kinds and version folded in; spikes S3 (PR #36, the host rule), S4 (PR #32), S5 (PR #19) and S8 (PR #28) carried in; every open question decided or marked for alpha.
 
 ## Amendments
 
