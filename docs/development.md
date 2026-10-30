@@ -31,9 +31,39 @@ The Kubernetes libraries match crossplane-runtime v2.4.3, which HBEP-4's provide
 | `k8s.io/apiextensions-apiserver` | v0.35.0 |
 | `sigs.k8s.io/controller-runtime` | v0.23.1 |
 | `sigs.k8s.io/controller-tools` (`controller-gen`) | v0.20.0 |
+| `github.com/crossplane/crossplane-runtime/v2` | v2.4.3 (Apache-2.0) |
+| `sigs.k8s.io/yaml` | v1.6.0 (MIT, with BSD-3-Clause parts; direct, for `hack/mutate-cel`) |
+| `github.com/crossplane/crossplane/apis/v2` | v2.3.4 (Apache-2.0), the version crossplane-runtime v2.4.3 requires |
 | k3s (single-user and team host) | v1.36.5+k3s1 |
+| `kube-apiserver`, `kube-controller-manager` (the assembled test host of `internal/testenv`) | v1.36.2, sha256-pinned in `hack/test-binaries.sh` |
+| `etcd` (the assembled test host) | v3.6.8, sha256-pinned in `hack/test-binaries.sh` |
 
 Kubernetes' explicit ±1-minor skew rule is written for kubectl. client-go instead documents compatibility through the APIs a client and a cluster share ([client-go compatibility](https://github.com/kubernetes/client-go/blob/v0.35.3/README.md#compatibility-client-go---kubernetes-clusters)). A 0.35 client against a 1.36 server is a reasonable choice for shared stable APIs, and the tests against k3s 1.36 check the APIs we use. A change to any of these pins is its own PR.
+
+## Checks
+
+- `hack/check.sh` runs gofmt, vet, `go mod tidy -diff`, the generated-file check and the tests, then lists every skipped test. Run it under `nice` and the shared build lock.
+- `hack/mutate-cel.sh` neutralises each CEL admission rule in a copy of the CRDs and runs the test that covers it, which must fail. It takes about ten minutes, so it is not part of `hack/check.sh`; run it when a rule or its test changes. A rule with no entry in its table fails the script.
+- The flag-name tests read the known flag names from HBEP-3's v1 table, so the admission rules' lists of known names are checked against the specification. A flag added to the table fails `TestEngineFlagsRefuseEveryPrefixOfAKnownFlag` until the list in the `EngineFlag` markers (`api/v1alpha1/modeldeployment_types.go`) gains it.
+- The test host (`internal/testenv`) binds only loopback ports 29200 to 29219 and, in k3s mode, accepts only a kubeconfig whose server is loopback on 29200 to 29239. The control-plane binaries are always sha256-checked; `HPCBURST_TESTENV_UNPINNED=1` is the explicit override for a binary you built yourself.
+
+## Running the e2e suite on the launcher's k3s
+
+`hack/check.sh` runs the e2e suite on the assembled host of `internal/testenv`. The same suite also runs on the user-level k3s that `hpcburst up` starts, which is the host HBEP-11 specifies; `TestRunsOnK3s` then passes instead of skipping. Run it before merging a change to the CRDs:
+
+```
+hack/fetch-k3s.sh <bin-dir>      # once: the pinned k3s binaries
+go build -o <tmp>/hpcburst ./cmd/hpcburst
+<tmp>/hpcburst up --state-dir <state> --port-base 29220 --bin-dir <bin-dir> --manifests config/crd
+HPCBURST_TEST_HOST=k3s HPCBURST_KUBECONFIG=<state>/kubeconfig go test -count=1 ./api/v1alpha1/e2e/
+<tmp>/hpcburst down --state-dir <state>
+```
+
+The launcher's block is 29220 to 29239 and the suite refuses a kubeconfig that points elsewhere. The deletion-guard policy in `config/admission/` is not applied by `--manifests`: `TestCRDDeletionGuard` installs and removes it itself, so keep it out of the manifests directory.
+
+## API field names
+
+Every field of the CRDs is camelCase, as the Kubernetes API conventions ask (owner decision, PR #48): `holdRelease`, `lostGrace`, `imageDigest`, `gpuModel`, `timeZone`, `jobName.maxLength`. HBEP-3's hash object keeps its snake_case keys (`image_digest`, `gpu_model`, `cpu_arch`); `pkg/deploymentid` maps the API's fields onto them, and nothing in the API changes the hash. `TestEveryCRDFieldIsCamelCase` scans the committed manifests. HBEP text that writes a field in snake_case (`hold_release` in HBEP-11) means the camelCase field.
 
 ## Rules for every change
 
