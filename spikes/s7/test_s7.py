@@ -416,7 +416,7 @@ class CompareCliTests(TempDirCase):
 
     def assert_invalid(self, reason, **change):
         code, report, err = self.cli(**change)
-        self.assertEqual(code, 1, "exit status; report: %s" % report["invalid_reasons"])
+        self.assertEqual(code, 1, "exit status; report: %s" % report.get("invalid_reasons"))
         self.assertFalse(report["all_match"])
         self.assertFalse(report["valid"])
         self.assertTrue(any(reason in r for r in report["invalid_reasons"]),
@@ -484,6 +484,7 @@ class CompareCliTests(TempDirCase):
         rows = [wrong] + self.rows  # the mismatching a.bin row is read first, the matching one later
         code, report, _ = self.cli(rows=rows, summary=dict(self.summary, files=len(rows)))
         self.assertEqual(code, 1)
+        self.assertFalse(report["all_match"])
         self.assertFalse(report["valid"])
         self.assertTrue(any("more than once" in r for r in report["invalid_reasons"]))
         self.assertEqual({f["path"]: f["verdict"] for f in report["files"]}["a.bin"], "duplicate-path")
@@ -501,9 +502,9 @@ class CompareCliTests(TempDirCase):
                                 ("an extra file", {"resources": self.manifest["resources"] + [
                                     {"name": "c.bin", "algorithm": "sha256", "digest": SHA256_ABC}]})):
             code, report, _ = self.cli(manifest=manifest)
+            self.assertEqual(code, 1, label)
             self.assertTrue(report["all_match"], label)
             self.assertFalse(report["model_signing_vs_own"]["all_match"], label)
-            self.assertEqual(code, 1, label)
 
 
 class SummarizeRunExitStatusTests(TempDirCase):
