@@ -126,7 +126,7 @@ Problems this addresses, in general terms:
 13. **A REST job API.** **Not needed for alpha:** the transport is decided as the command line over ssh. Spike S5 (PR #19) found the slurmrestd binary on the Helios and Athena login nodes, none on Sano's, and no REST service that any center advertises; JWT is not enabled on any of the three. Asking each center stays the way to answer it, for a later transport. Source: spike S5 (PR #19).
 14. **A long-running process on a login node.** **Decided:** no framework process runs on a login node. The Provider's controller polls from the control-plane host over ssh, and each command exits when done. Source: science-agent decision, 30 Oct 2026, following Cyfronet's prohibition of computation on login nodes and Sano's lack of a policy (spike S5, PR #19). **Not needed for alpha:** the centers' answer on lightweight processes, which a login-node relay (HBEP-6) would need.
 15. **Launch without containers.** **Decided:** for alpha, an Instance runs from an OCI image named by digest, which HBEP-3 already hashes, run with Apptainer on the compute node (HBEP-7). Apptainer on the compute nodes of each alpha partition is a precondition, verified like `holdRelease`: a partition where it is missing hosts no Instance in alpha. Source: science-agent decision, 30 Oct 2026. **Open (blocks beta):** a launch path that needs no container runtime, such as a packed engine environment, and how its digest enters the deployment ID. Its need depends on what S1's next jobs find on Athena's compute nodes.
-16. **Compute-node facts.** **Decided:** spike S1's step 0 (issue #18) measured outbound 443 to public endpoints from Helios CPU, Helios GH200 and Athena A100 (reached, no proxy) and compute-node Python (3.9); its hold check measured `holdRelease` true on those three partitions (commit 35babef). Two more facts are alpha preconditions, measured per alpha partition: Apptainer on the compute nodes (question 15), and a 56-character job name that comes back unchanged. Source: spike S1 (issue #18) for the measurements; science-agent decision, 30 Oct 2026, for the preconditions. **Not needed for alpha:** Sano, inbound reachability, user namespaces, node-local disk sizes and GPU drivers.
+16. **Compute-node facts.** **Decided:** spike S1's step 0 (issue #18) measured outbound 443 to public endpoints from Helios CPU, Helios GH200 and Athena A100 (reached, no proxy) and compute-node Python (3.9); its hold check measured `holdRelease` true on those three partitions (commit 35babef). Three more facts are alpha preconditions, measured per alpha partition: Apptainer on the compute nodes (question 15); a 56-character job name that comes back unchanged; and, for ssh dial-home mode, the user's home directory readable from compute nodes, since the dial-home key lives there (HBEP-7). The first Instance's registration also confirms the last one; a failure sets the Provider condition `DialHomeKeyMissing`. Source: spike S1 (issue #18) for the measurements; science-agent decision, 30 Oct 2026, for the preconditions. **Not needed for alpha:** Sano, inbound reachability, user namespaces, node-local disk sizes and GPU drivers.
 17. **A connection budget per platform.** **Not needed for alpha:** one multiplexed connection per login node and credential, and at most four commands at once on it, are code defaults. **Open (blocks beta):** a per-platform budget in the profile, sized from the login nodes' measured ssh limits, which S5 could not read. Source: spike S5 (PR #19); science-agent decision, 30 Oct 2026, for the defaults.
 
 ## Design details
@@ -153,8 +153,8 @@ For a batch provider (Slurm):
 - **`ReadProfile(provider) → (profile, settings, error)`.** The platform-profile reader. It reads the Provider, its PlatformProfile and the credentials reference, and validates them:
   - the profile's kind matches the plugin;
   - the Provider allows exactly one partition, and the profile lists it;
-  - `jobName.maxLength` is at least 56, and no tag can match a name in `jobName.refused`;
-  - `dataParser` is one the plugin knows;
+  - `jobName.maxLength` is at least 56, and the tag form matches `jobName.pattern` when one is set;
+  - `jsonDataParser` is one the plugin knows;
   - `inflightWindow` is set and exceeds the `sbatch` time-out (60 s);
   - the credentials file, and for ssh the key file it names, are mode 600 and owned by the controller's user (HBEP-11).
 
@@ -221,7 +221,7 @@ For a managed provider:
 - **JSON fields,** per data_parser version. The v0.0.42 table is checked against S7's real captures on Helios. The v0.0.40 table follows Slurm's source, as S4's fake does; Athena's real v0.0.40 documents were not kept, so it is checked there before alpha (Graduation criteria).
   - **queue listing:** `job_id`, `name`, `job_state` (a list: base state plus flags), `state_reason`, `hold`, `priority`, `restart_cnt`, `partition`, `time_limit`, `tres_req_str`, and `submit_time`, `start_time` and `end_time` as `{set, infinite, number}` triples in epoch seconds;
   - **accounting:** `job_id`, `name`, `state.current` (a list) and `state.reason`, and `time.submission`, `time.start` and `time.end` as epoch integers. `restart_cnt` exists only in v0.0.42; on v0.0.40 an earlier execution shows as a record with the `REQUEUED` state.
-  - Each reply's `meta.plugin.data_parser`, after its `data_parser/` prefix is stripped, must equal the profile's `dataParser`. Helios's real replies carry `data_parser/v0.0.42` (`spikes/s7/slurm-json-real.md`), which matches a profile value of `v0.0.42`. Otherwise the reply is not interpreted, the read is unknown, and the Provider gets the condition `DialectMismatch`.
+  - Each reply's `meta.plugin.data_parser`, after its `data_parser/` prefix is stripped, must equal the profile's `jsonDataParser`. Helios's real replies carry `data_parser/v0.0.42` (`spikes/s7/slurm-json-real.md`), which matches a profile value of `v0.0.42`. Otherwise the reply is not interpreted, the read is unknown, and the Provider gets the condition `DialectMismatch`.
 - **Held:** `hold` true, or a set `priority` of 0, or a `state_reason` that starts with `JobHeld`. `JobHeldUser` is a user hold, which the job's user may lift. `JobHeldAdmin` is an admin hold.
 - **Requeue:** `restart_cnt` above 0, or a `REQUEUED` record in accounting.
 - **Times:** every epoch value is converted to UTC.
@@ -259,18 +259,18 @@ The PlatformProfile's spec has its kind, the typed fields below, and an untyped 
 
 | Field | Type and default | Use | Source in the drafts |
 |---|---|---|---|
-| `kind` | `managed` or `batch` | selects the plugin | `kind` |
+| `providerKind` | `managed` or `batch` | selects the plugin; named so, not `kind`, because the object's own kind is PlatformProfile | `kind` |
 | `partitions[].name`, `.gpuModel`, `.cpuArch` | strings; `gpuModel` is `none` for a CPU partition | the accelerator class, a deployment-ID input (HBEP-3); the GPU rule at submission | `facts.partitions.<p>.arch` and `.gres`; for Athena also `facts.hardware.node_documented.accelerator`; for Helios GH200, whose GRES has no type, the center's documentation |
 | `holdRelease` | bool, default false | hold mode or fallback mode (HBEP-7, open question 11); false, fallback mode, until verified | `facts.slurm.hold_release`, on S1's branch: true on Helios `plgrid` and `plgrid-gpu-gh200`, and on Athena `plgrid-gpu-a100`. Sano: not measured, so false |
 | `lostGrace` | duration, 2 min | time absent from both sources before Lost | none; above the measured gap between queue and accounting, about 2 s on Helios and Athena (S7's capture). The gap has no bound while accounting is down (S4), which Lost's revisability covers |
 | `inflightWindow` | duration, required for batch, no default | time an unresolved attempt is waited on; must exceed the `sbatch` time-out | none. The alpha profiles set 5 min until the `sbatch` latency over ssh is measured, before alpha (Graduation criteria) |
 | `unknownBound` | duration, 10 min | in fallback mode, time before an operator is asked | none; S4's default |
 | `timeZone` | IANA name | diagnostics only | `facts.time.slurm_time_zone` (Helios, Athena: Europe/Warsaw); `facts.time.scheduler_time_zone` (Sano: UTC) |
-| `jobRequeueDefault` | bool | recorded; the plugin always submits `--no-requeue` | `facts.slurm.job_requeue` (Helios, Athena: 1); `facts.slurm.requeue` (Sano) |
+| `requeueDefault` | bool | recorded; the plugin always submits `--no-requeue` | `facts.slurm.job_requeue` (Helios, Athena: 1); `facts.slurm.requeue` (Sano) |
 | `minJobAge` | duration | how long the queue listing keeps a finished job | `facts.slurm.min_job_age_s` (Helios: 10 s; Sano: 300 s); `facts.slurm.min_job_age` (Athena: 10 s) |
-| `jobName.maxLength`, `jobName.refused` | integer; list of strings | the 56-character tag must fit; names a site refuses | `facts.slurm.submit_rules` on Sano (`wrap` and `job` refused). No draft records a maximum length, so it is measured before alpha |
-| `accountingKeepsComment` | bool, optional | recorded; the tag is in the job name either way (S4) | not in the drafts |
-| `dataParser` | `v0.0.40` or `v0.0.42` | the JSON field table; checked on every reply, against the reply's value without its `data_parser/` prefix | `facts.slurm.squeue_json` (Helios: v0.0.42; Athena, Sano: v0.0.40) |
+| `jobName.maxLength`, `jobName.pattern` | integer; RE2 pattern | the 56-character tag must fit and, when a pattern is set, match it | `facts.slurm.submit_rules` on Sano refuses the generic names `wrap` and `job`, which the tag form can never be, so Sano needs no pattern. No draft records a maximum length, so it is measured before alpha |
+| `jobCommentAccounted` | bool, optional | recorded; the tag is in the job name either way (S4) | not in the drafts |
+| `jsonDataParser` | `v0.0.40` or `v0.0.42` | the JSON field table; checked on every reply, against the reply's value without its `data_parser/` prefix | `facts.slurm.squeue_json` (Helios: v0.0.42; Athena, Sano: v0.0.40) |
 
 The GPU model is a deployment-ID input, so its strings are fixed here. It is the product name without the vendor and the memory size, upper case: `GH200` (Helios `plgrid-gpu-gh200`), `A100` (Athena `plgrid-gpu-a100`). The CPU architecture is the kernel's machine name: `aarch64` or `x86_64`.
 
