@@ -1,0 +1,37 @@
+$ spikes/s2/scripts/test-run.sh
+== baseline: everything as the issue expects
+ok   long exits 0 when all five arms are as expected
+ok   the shipped llm-d arm is reported
+ok   controls exits 0
+ok   all exits 0 (controls and long)
+ok   placement exits 0
+ok   ttft exits 0 when the first byte comes after 1,000 s
+== llm-d as shipped must pass the 2 h criterion
+ok   a cut at 1,000 s fails run.sh
+ok   the output names the shipped arm
+ok   a complete but too short stream (3,600 s) fails run.sh
+ok   the output says why
+ok   a client that dies without a result file fails run.sh
+ok   the output names the missing result
+ok   vllm-router default surviving 2 h (no cut) fails run.sh
+== stack start failures
+ok   a stack that fails to start fails long
+ok   the stacks already started are stopped, not left running
+ok   controls fails when a stack does not start
+ok   placement fails when a stack does not start
+ok   ttft fails when a stack does not start
+== failures hidden inside all
+ok   all fails when controls cannot start a stack
+ok   all fails when only the background long scenario fails
+ok   all still runs the later scenarios after one failed
+ok   and still exits non-zero
+ok   all fails when the shipped llm-d arm fails
+== minimum duration of a pass, ttft
+ok   ttft fails when the first byte came before 1,000 s
+== setup missing
+ok   a missing s2probe is a setup failure (exit 2)
+ok   with a message
+ok   an empty S2_HOME is a setup failure (exit 2)
+ok   an unknown scenario exits 64
+
+test-run: all passed

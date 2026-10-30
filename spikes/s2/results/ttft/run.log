@@ -1,0 +1,10 @@
+ok $S2_HOME/run/llmd-ttft
+started llmd-ttft: http://127.0.0.1:19212/v1/chat/completions
+started vllmr-ttft: http://127.0.0.1:19213/v1/chat/completions
+label                        complete        tokens  elapsed_s cut_after_s max_gap_ms gaps>2s  error
+llmd-shipped-ttft            True         30/30           1129           0       1009       0  
+vllmr-default-ttft           True         30/30           1129           0       1007       0  
+OK   llmd-shipped-ttft: expected pass; got complete=True tokens=30/30 elapsed=1129s err=''
+OK   vllmr-default-ttft: expected pass; got complete=True tokens=30/30 elapsed=1129s err=''
+stopped llmd-ttft
+stopped vllmr-ttft

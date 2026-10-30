@@ -1,0 +1,27 @@
+{
+  "label": "smoke-none",
+  "url": "http://127.0.0.1:18100/v1/chat/completions",
+  "session": "smoke",
+  "started_utc": "2026-10-30T11:38:37Z",
+  "expect_tokens": 5,
+  "tokens": 5,
+  "finish_reason": "length",
+  "done_seen": true,
+  "http_status": 200,
+  "resp_headers": {
+    "server": "fasthttp"
+  },
+  "elapsed_sec": 5.006809998,
+  "response_headers_sec": 1.004869783,
+  "first_token_sec": 1.00509386,
+  "last_token_sec": 5.006581893,
+  "gap_min_ms": 999.817361,
+  "gap_mean_ms": 1000.37200825,
+  "gap_p50_ms": 1000.316568,
+  "gap_p99_ms": 1000.316568,
+  "gap_max_ms": 1001.177063,
+  "gap_max_at_token": 5,
+  "gaps_over_2s": 0,
+  "sse_comment_lines": 0,
+  "complete": true
+}

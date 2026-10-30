@@ -1,0 +1,12 @@
+session            worker per turn
+sess-00-801613     [2 1 0 0 2] sticky=false
+sess-01-828383     [1 0 0 2 2] sticky=false
+sess-02-835492     [2 1 2 0 0] sticky=false
+sess-03-838195     [0 2 2 1 2] sticky=false
+sess-04-846297     [1 2 2 0 1] sticky=false
+sess-05-853043     [0 0 1 1 1] sticky=false
+sess-06-855841     [0 1 1 1 0] sticky=false
+sess-07-863122     [2 0 0 2 0] sticky=false
+sess-08-869351     [1 2 1 2 1] sticky=false
+sessions per worker (by first turn): [3 3 3] ; distinct workers used: [0 1 2]
+RESULT placement key="x-session-id" fresh_prompts=true all_sessions_sticky=false spread_over_workers=true expect_sticky=false expect_spread=true pass=true

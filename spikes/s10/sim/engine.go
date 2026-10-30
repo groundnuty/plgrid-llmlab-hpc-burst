@@ -2,6 +2,7 @@ package sim
 
 import (
 	"container/heap"
+	"errors"
 	"fmt"
 )
 
@@ -60,6 +61,7 @@ type request struct {
 	dispatchT float64
 	aborted   bool
 	detached  bool // released from the balancer's count before it ended
+	held      bool // waited at the front because every Instance was at the hard cap
 }
 
 type instance struct {
@@ -92,6 +94,9 @@ type Engine struct {
 	err    error
 	// Conversations started and not finished, and their context tokens.
 	activeConvs, activeTokens int
+	// frontQ holds, in arrival order, the requests that found every Instance
+	// at the hard cap (Policy.Cap). It is empty for every other policy.
+	frontQ []*request
 }
 
 // NewEngine prepares a run under pol on cl, with membership events. With
@@ -111,6 +116,7 @@ func NewEngine(cl Cluster, pol Policy, wl Workload, convs []Conversation, events
 	}
 	e.rt = newRouter(pol, names, initial)
 	e.M = newMetrics(pol, len(names))
+	e.M.EngineLimit = cl.MaxRunning
 	return e
 }
 
@@ -129,6 +135,11 @@ func (e *Engine) Run() error {
 	}
 	for i, ev := range e.events {
 		e.push(ev.Time, func() { e.cluster(i, ev) })
+	}
+	if e.pol.AdaptiveLoose > 0 && e.pol.Kind == CHWBL {
+		// Control ticks are offset by half a step so a membership change
+		// never coincides with one, and the switch delay is non-zero.
+		e.push(e.pol.controlStep()/2, e.controlTick)
 	}
 	for e.q.Len() > 0 && e.err == nil {
 		it := heap.Pop(&e.q).(*item)
@@ -189,31 +200,73 @@ func (e *Engine) dispatch(cs *convState) {
 		e.err = fmt.Errorf("conversation %d turn %d needs %d tokens, more than an Instance's KV cache", cs.c.ID, cs.turn, r.promptLen+r.outLen)
 		return
 	}
-	e.place(r)
+	if len(e.frontQ) > 0 || !e.place(r) {
+		// Behind earlier waiters, or every Instance is at the hard cap.
+		r.held = true
+		e.frontQ = append(e.frontQ, r)
+		e.M.heldAtFront(e)
+	}
 }
 
-func (e *Engine) place(r *request) {
+// drainFront places held requests, oldest first, while an Instance has room.
+// With every Instance at the cap no request can be placed whatever its key,
+// so the first failure ends the pass.
+func (e *Engine) drainFront() {
+	for len(e.frontQ) > 0 && e.err == nil {
+		r := e.frontQ[0]
+		if !e.place(r) {
+			return
+		}
+		e.frontQ = e.frontQ[1:]
+		e.M.leftFront(e, r, e.now-r.dispatchT)
+	}
+}
+
+// controlTick is the deployment's periodic readiness check (Policy
+// AdaptiveLoose): ready Instances against the desired count, the cluster's
+// size at time 0.
+func (e *Engine) controlTick() {
+	from, to, changed := e.rt.control(len(e.rt.members), e.cl.Instances)
+	if changed {
+		e.M.switched(e, from, to)
+	}
+	if e.q.Len() > 0 { // stop once nothing else is pending
+		e.push(e.now+e.pol.controlStep(), e.controlTick)
+	}
+}
+
+// place sends r to an Instance. It returns false, having changed nothing,
+// when every Instance is at the hard cap; on a simulation error it records
+// the error and returns true.
+func (e *Engine) place(r *request) bool {
 	inflight := make([]int, len(e.inst))
 	for i, in := range e.inst {
 		inflight[i] = in.inflight
 	}
 	idx, release, err := e.rt.route(r.cs, r.id, inflight)
+	if errors.Is(err, errAllAtCap) {
+		return false
+	}
 	if err != nil {
 		e.err = err
-		return
+		return true
 	}
 	in := e.inst[idx]
 	if !in.member || !in.alive {
 		e.err = fmt.Errorf("request %d placed on non-member %s", r.id, in.name)
-		return
+		return true
 	}
 	e.M.placement(e, r, idx)
+	if e.err != nil {
+		return true
+	}
 	r.inst, r.release = idx, release
 	r.cs.lastInst = idx
 	in.inflight++
 	in.active = append(in.active, r)
 	in.waiting = append(in.waiting, r)
 	e.tryAdmit(in)
+	return true
 }
 
 func (e *Engine) tryAdmit(in *instance) {
@@ -266,6 +319,7 @@ func (e *Engine) decodeDone(r *request) {
 	e.finish(in, r)
 	e.M.completed(e, r)
 	e.tryAdmit(in)
+	e.drainFront()
 	if cs.turn+1 < len(cs.c.Turns) {
 		e.push(e.now+cs.c.Turns[cs.turn].Think, func() { e.next(cs) })
 		return
@@ -305,6 +359,7 @@ func (e *Engine) cluster(k int, ev Event) {
 	case Join:
 		in.member, in.alive = true, true
 		e.rt.add(ev.Instance)
+		e.drainFront()
 	case Drain:
 		in.member = false
 		released := e.rt.remove(ev.Instance, e.pol.ReleaseOnDrain)
@@ -333,6 +388,7 @@ func (e *Engine) cluster(k int, ev Event) {
 		for _, r := range cut {
 			e.dispatch(r.cs)
 		}
+		e.drainFront()
 	}
 }
 

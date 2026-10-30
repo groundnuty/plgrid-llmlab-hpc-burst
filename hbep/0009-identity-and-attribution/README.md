@@ -56,7 +56,7 @@ A past project served one set of models across several clusters and a managed ga
 
 - **Record fields (decided in HBEP-3).** The record's inputs are exactly HBEP-3's `v1` canonical object, whose field list and worked example are under HBEP-3's Deployment ID:
   - checkpoint: the repository, the full commit id, and every file of the pinned revision with its SHA-256;
-  - chat template: the SHA-256 of the one in use, from an override or from the revision;
+  - chat template: the SHA-256 of what HBEP-3's lookup chain gives, from an override or from the revision. The render check compares the engine's resolved template, which can differ when the chain gives empty content (HBEP-3);
   - engine: name, version and container image digest. A local engine patch enters only through the image digest: a patched engine is a different image;
   - the accelerator class, and the engine flags and environment variables that HBEP-3's `v1` table marks as inputs. That table covers the settings that can change outputs: data type and quantisation, context length, attention backend, KV-cache data type, parallel layout, tool-call and reasoning parsers, default generation settings and speculative decoding;
   - excluded: Instance and Allocation metadata (HBEP-3), such as job ID, node, port, URL and hard end; placement, capacity, transport and logging settings, such as router policy and session caps; and every key, including the Instance's own key.
