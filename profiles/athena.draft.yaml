@@ -1,0 +1,552 @@
+# Draft platform profile from spike S5 (issue #17). Not the final schema:
+# HBEP-4 open question 3 decides that. Each fact: value, method, source, date.
+#
+# method is measured (a command run on a login node on the date shown),
+# documented (the centre's user docs, fetched on the date shown) or unknown.
+# All measured facts come from one login node of the platform, read-only,
+# with no job run. Node-level numbers are a snapshot of the collection time.
+draft: s5
+platform: athena              # helios | athena | sano
+organization: cyfronet        # cyfronet | sano
+kind: batch
+collected: 2026-10-30         # UTC date
+facts:
+  slurm:
+    version:
+      value: "23.11.7"
+      method: measured
+      source: "sinfo --version; scontrol show config (SLURM_VERSION)"
+      date: 2026-10-30
+    squeue_json:
+      value: true
+      method: measured
+      source: "squeue --me --json"
+      date: 2026-10-30
+      note: "Exit 0, output parses as JSON. Top-level keys: errors, jobs, last_backfill, last_update, meta, warnings. meta.plugin names data_parser/v0.0.40 and accounting_storage/slurmdbd."
+    sacct_json:
+      value: true
+      method: measured
+      source: "sacct --json -S now-1hours -X"
+      date: 2026-10-30
+      note: "Exit 0, output parses as JSON. Top-level keys: errors, jobs, meta, warnings."
+    jwt_token:
+      value: false
+      method: measured
+      source: "scontrol token lifespan=60 >/dev/null 2>&1; echo $?"
+      date: 2026-10-30
+      note: "Exit code 1. Consistent with the auth lines below: JWT is not an enabled alternative auth type."
+    auth_type:
+      value: "auth/munge"
+      method: measured
+      source: "scontrol show config (AuthType)"
+      date: 2026-10-30
+    auth_alt_types:
+      value: "(null)"
+      method: measured
+      source: "scontrol show config (AuthAltTypes)"
+      date: 2026-10-30
+    auth_alt_parameters:
+      value: "(null)"
+      method: measured
+      source: "scontrol show config (AuthAltParameters)"
+      date: 2026-10-30
+    slurmrestd_binary:
+      value: "present on PATH of the login node, executable, version 23.11.7"
+      method: measured
+      source: "command -v slurmrestd; slurmrestd -V"
+      date: 2026-10-30
+      note: "Lives in the site's Slurm release tree, not in /usr. Without JWT (see jwt_token) a plain user has no token to present to it. Whether a slurmrestd service runs and where is not known."
+    slurmrestd_advertised:
+      value: false
+      method: documented
+      source: "https://docs.hpc.cyfronet.pl/ (pages: supercomputers/athena, environment/general-rules, environment/batch-system/{overview,commands,accounts-and-grants,examples}, environment/{variables,hpc-tools,local-storage-features}, software/{modules,services}, support)"
+      date: 2026-10-30
+      note: "Negative result: a text search of these pages for slurmrestd, REST API and JWT found nothing, and a web search for a Cyfronet REST API page found nothing. This is an absence of mention, not a statement by the centre."
+    min_job_age:
+      value: "10 sec"
+      method: measured
+      source: "scontrol show config (MinJobAge)"
+      date: 2026-10-30
+      note: "A finished job leaves squeue and scontrol show job after about 10 s; later state must come from sacct."
+    job_requeue:
+      value: "1"
+      method: measured
+      source: "scontrol show config (JobRequeue)"
+      date: 2026-10-30
+      note: "Jobs are requeueable by default."
+    requeue_exit:
+      value: "(null)"
+      method: measured
+      source: "scontrol show config (RequeueExit)"
+      date: 2026-10-30
+    requeue_exit_hold:
+      value: "(null)"
+      method: measured
+      source: "scontrol show config (RequeueExitHold)"
+      date: 2026-10-30
+    max_job_count:
+      value: 100000
+      method: measured
+      source: "scontrol show config (MaxJobCount)"
+      date: 2026-10-30
+    max_array_size:
+      value: 20001
+      method: measured
+      source: "scontrol show config (MaxArraySize)"
+      date: 2026-10-30
+    kill_wait:
+      value: "180 sec"
+      method: measured
+      source: "scontrol show config (KillWait)"
+      date: 2026-10-30
+      note: "Grace between SIGTERM and SIGKILL when a job is cancelled or reaches its time limit."
+    over_time_limit:
+      value: "0 min"
+      method: measured
+      source: "scontrol show config (OverTimeLimit)"
+      date: 2026-10-30
+    other_limits:
+      value:
+        MaxStepCount: 40000
+        MaxTasksPerNode: 512
+        MaxNodeCount: 48
+        UnkillableStepTimeout: "300 sec"
+        BatchStartTimeout: "10 sec"
+        EnforcePartLimits: "ANY"
+        AccountingStorageEnforce: "associations,limits,qos"
+        SelectType: "select/cons_tres"
+        SelectTypeParameters: "CR_CPU_MEMORY"
+        TaskPlugin: "task/cgroup,task/affinity"
+        ProctrackType: "proctrack/cgroup"
+        GresTypes: "gpu"
+        PreemptMode: "OFF"
+        PriorityType: "priority/multifactor"
+        SchedulerType: "sched/backfill"
+        PrologFlags: "Alloc,DeferBatch,NoHold"
+        JobSubmitPlugins: "lua"
+        SrunPortRange: "0-0"
+      method: measured
+      source: "scontrol show config"
+      date: 2026-10-30
+      note: "A Lua job_submit plugin runs at submission and may reject or rewrite jobs (its content was not read). AccountingStorageEnforce makes a valid association mandatory."
+    scheduler_parameters:
+      value: "max_switch_wait=86400,default_queue_depth=2000,bf_max_job_test=2000,bf_max_job_part=1000,bf_continue,assoc_limit_continue,batch_sched_delay=10,bf_interval=30,kill_invalid_depend,sbatch_wait_nodes,salloc_wait_nodes,pack_serial_at_end,max_rpc_cnt=5000,bf_window=4320,bf_max_job_start=10000,disable_hetero_steps,sched_min_interval=2000000,sched_max_job_start=10000,max_script_size=1048576"
+      method: measured
+      source: "scontrol show config (SchedulerParameters)"
+      date: 2026-10-30
+      note: "Full string as printed. bf_window=4320 minutes (3 days)."
+    qos:
+      value:
+        - {name: normal, max_wall: "", priority: 0, max_jobs_per_user: "", max_submit_per_user: "", max_tres_per_user: "", flags: ""}
+        - {name: plgrid, max_wall: "", priority: 0, max_jobs_per_user: "", max_submit_per_user: 1000, max_tres_per_user: "", flags: "DenyOnLimit"}
+        - {name: plgrid-now, max_wall: "", priority: 0, max_jobs_per_user: 1, max_submit_per_user: 1, max_tres_per_user: "cpu=16,gres/gpu=1,mem=125G", flags: "DenyOnLimit"}
+        - {name: plgrid-services, max_wall: "", priority: 0, max_jobs_per_user: 2, max_submit_per_user: "", max_tres_per_user: "", flags: ""}
+        - {name: 1week, max_wall: "7-00:00:00", priority: 0, max_jobs_per_user: 2, max_submit_per_user: "", max_tres_per_user: "", flags: "DenyOnLimit,PartitionTimeLimit"}
+        - {name: tutorial, max_wall: "", priority: 100000, max_jobs_per_user: "", max_submit_per_user: "", max_tres_per_user: "", flags: "DenyOnLimit"}
+        - {name: vip, max_wall: "", priority: 100000, max_jobs_per_user: "", max_submit_per_user: "", max_tres_per_user: "", flags: "DenyOnLimit"}
+        - {name: ip, max_wall: "", priority: 50000, max_jobs_per_user: "", max_submit_per_user: "", max_tres_per_user: "", flags: "DenyOnLimit"}
+        - {name: lip, max_wall: "", priority: 20000, max_jobs_per_user: "", max_submit_per_user: "", max_tres_per_user: "", flags: "DenyOnLimit"}
+        - {name: llip, max_wall: "", priority: 10000, max_jobs_per_user: "", max_submit_per_user: "", max_tres_per_user: "", flags: "DenyOnLimit"}
+      method: measured
+      source: "sacctmgr -n -P show qos format=Name,MaxWall,Priority,MaxJobsPU,MaxSubmitPU,MaxTRESPU,Flags,Preempt"
+      date: 2026-10-30
+      note: "Empty string means no limit. The partition QoS is applied to every job in that partition: plgrid for plgrid-gpu-a100, plgrid-now for plgrid-now (see partitions). So a plain user may hold 1000 submitted jobs in plgrid-gpu-a100, but only one job (one GPU, 16 CPUs, 125 GB) in plgrid-now."
+
+  # One entry per partition seen by a plain user (scontrol show partition lists
+  # eight, none hidden). Per-node numbers are the same on every partition: the
+  # 48 nodes are one hardware type. "arch_not_reported" counts nodes that were
+  # DOWN+FAIL+NOT_RESPONDING at collection and so show an empty Arch field.
+  # Node counts include those nodes.
+  partitions:
+    - name: plgrid-gpu-a100
+      max_time: "2-00:00:00"
+      default_time: "00:15:00"
+      nodes: 48
+      cpus_per_node: 128
+      mem_per_node_mb: 1024000
+      gres: "gpu:a100:8"
+      arch: "x86_64"
+      arch_not_reported: 23
+      features: "memfs,localfs,gpustats (scratch on 5 of 48 nodes)"
+      qos: "plgrid"
+      default_partition: false
+      priority_tier: 1
+      priority_job_factor: 1000
+      def_mem_per_cpu_mb: 8000
+      access: "AllowAccounts lists grant accounts that end in -gpu-a100 plus a few administrative accounts (names omitted). This is the general-user GPU partition."
+      method: measured
+      source: "sinfo -h -o '%P|%a|%l|%L|%D|%c|%m|%G|%f|%d|%z'; scontrol show partition; scontrol show node -o (Arch, aggregated)"
+      date: 2026-10-30
+      note: "Docs list this partition with a 48 h limit, which agrees with the measured 2-00:00:00 (https://docs.hpc.cyfronet.pl/supercomputers/athena/)."
+    - name: plgrid-now
+      max_time: "01:00:00"
+      default_time: "00:15:00"
+      nodes: 24
+      cpus_per_node: 128
+      mem_per_node_mb: 1024000
+      gres: "gpu:a100:8"
+      arch: "x86_64"
+      arch_not_reported: 3
+      features: "memfs,localfs,gpustats (scratch on 2 of 24 nodes)"
+      qos: "plgrid-now"
+      default_partition: false
+      priority_tier: 1
+      priority_job_factor: 15000
+      def_mem_per_cpu_mb: 8000
+      access: "Same AllowAccounts pattern as plgrid-gpu-a100. The partition QoS caps a user at one running and one submitted job, with at most cpu=16, one GPU and 125 GB."
+      method: measured
+      source: "sinfo -h -o '%P|%a|%l|%L|%D|%c|%m|%G|%f|%d|%z'; scontrol show partition; sacctmgr show qos; scontrol show node -o"
+      date: 2026-10-30
+      note: "A short-job, high-priority lane on the first half of the nodes. The Athena docs page does not list it."
+    - name: gpu-a100
+      max_time: "2-00:00:00"
+      default_time: "00:15:00"
+      nodes: 48
+      cpus_per_node: 128
+      mem_per_node_mb: 1024000
+      gres: "gpu:a100:8"
+      arch: "x86_64"
+      arch_not_reported: 23
+      features: "memfs,localfs,gpustats (scratch on 5 of 48 nodes)"
+      qos: "N/A"
+      default_partition: true
+      priority_tier: 2
+      priority_job_factor: 1000
+      def_mem_per_cpu_mb: 8000
+      access: "AllowAccounts is a short list of non-grant (laboratory) accounts plus administrative ones. It is the cluster's default partition, so a plain user who names no partition is refused (see submission.sbatch_test_only)."
+      method: measured
+      source: "sinfo (partition name carries a * for default); scontrol show partition; scontrol show node -o"
+      date: 2026-10-30
+    - name: tutorial
+      max_time: "2-00:00:00"
+      default_time: "00:15:00"
+      nodes: 48
+      cpus_per_node: 128
+      mem_per_node_mb: 1024000
+      gres: "gpu:a100:8"
+      arch: "x86_64"
+      arch_not_reported: 23
+      features: "memfs,localfs,gpustats (scratch on 5 of 48 nodes)"
+      qos: "N/A"
+      default_partition: false
+      priority_tier: 1
+      priority_job_factor: 5000
+      def_mem_per_cpu_mb: 8000
+      access: "AllowAccounts is a single training account plus administrative ones: training events only."
+      method: measured
+      source: "sinfo; scontrol show partition; scontrol show node -o"
+      date: 2026-10-30
+    - name: all
+      max_time: "3-00:00:00"
+      default_time: "00:15:00"
+      nodes: 48
+      cpus_per_node: 128
+      mem_per_node_mb: 1024000
+      gres: "gpu:a100:8"
+      arch: "x86_64"
+      arch_not_reported: 23
+      features: "memfs,localfs,gpustats (scratch on 5 of 48 nodes)"
+      qos: "N/A"
+      default_partition: false
+      priority_tier: 2
+      priority_job_factor: 1000
+      def_mem_per_cpu_mb: 8000
+      access: "AllowAccounts lists three administrative accounts only: not for users."
+      method: measured
+      source: "sinfo; scontrol show partition; scontrol show node -o"
+      date: 2026-10-30
+    - name: 8k3-gpu
+      max_time: "14-00:00:00"
+      default_time: "00:15:00"
+      nodes: 41
+      cpus_per_node: 128
+      mem_per_node_mb: 1024000
+      gres: "gpu:a100:8"
+      arch: "x86_64"
+      arch_not_reported: 23
+      features: "memfs,localfs,gpustats (scratch on 5 of 41 nodes)"
+      qos: "N/A"
+      default_partition: false
+      priority_tier: 2
+      priority_job_factor: 1000
+      def_mem_per_cpu_mb: 8000
+      access: "Dedicated to one project: AllowAccounts lists 16 project accounts, a reservation is required (ReqResv=YES) and submission is allowed from one named host only."
+      method: measured
+      source: "sinfo; scontrol show partition; scontrol show node -o"
+      date: 2026-10-30
+    - name: 8k3-gpu-r1
+      max_time: "14-00:00:00"
+      default_time: "00:15:00"
+      nodes: 48
+      cpus_per_node: 128
+      mem_per_node_mb: 1024000
+      gres: "gpu:a100:8"
+      arch: "x86_64"
+      arch_not_reported: 23
+      features: "memfs,localfs,gpustats (scratch on 5 of 48 nodes)"
+      qos: "N/A"
+      default_partition: false
+      priority_tier: 2
+      priority_job_factor: 1000
+      def_mem_per_cpu_mb: 8000
+      access: "Same restriction as 8k3-gpu (project accounts, reservation required, one submit host)."
+      method: measured
+      source: "sinfo; scontrol show partition; scontrol show node -o"
+      date: 2026-10-30
+    - name: 8k3-gpu-r2
+      max_time: "14-00:00:00"
+      default_time: "00:15:00"
+      nodes: 48
+      cpus_per_node: 128
+      mem_per_node_mb: 1024000
+      gres: "gpu:a100:8"
+      arch: "x86_64"
+      arch_not_reported: 23
+      features: "memfs,localfs,gpustats (scratch on 5 of 48 nodes)"
+      qos: "N/A"
+      default_partition: false
+      priority_tier: 2
+      priority_job_factor: 1000
+      def_mem_per_cpu_mb: 8000
+      access: "Same restriction as 8k3-gpu (project accounts, reservation required, one submit host)."
+      method: measured
+      source: "sinfo; scontrol show partition; scontrol show node -o"
+      date: 2026-10-30
+
+  hardware:
+    node_shape:
+      value:
+        sockets: 2
+        cores_per_socket: 64
+        threads_per_core: 1
+        cpus: 128
+        real_memory_mb: 1024000
+        gpus_per_node: 8
+        gres_name: "gpu:a100:8"
+        tmp_disk_mb: 0
+        arch: "x86_64"
+      method: measured
+      source: "scontrol show node -o (Sockets, CoresPerSocket, ThreadsPerCore, CPUTot, RealMemory, Gres, TmpDisk, Arch), aggregated; sinfo -h -o '%P|%d'"
+      date: 2026-10-30
+      note: "All 48 nodes have the same configured shape. Nodes that report their Arch report x86_64. Some nodes show the GRES as gpu:a100:8(S:0-1), a socket-affinity annotation of the same resource."
+    node_documented:
+      value:
+        cpu: "2x AMD EPYC 7742 64-Core at 2.25 GHz"
+        ram_gb: 1024
+        ram_available_for_jobs_mb: 1024000
+        proportional_ram_per_gpu_mb: 128000
+        proportional_cpus_per_gpu: 16
+        accelerator: "8x NVIDIA A100-SXM4-40GB"
+        interconnect: "InfiniBand HDR"
+      method: documented
+      source: "https://docs.hpc.cyfronet.pl/supercomputers/athena/"
+      date: 2026-10-30
+      note: "The GPU model and its 40 GB memory size are known only from the docs; the Slurm GRES name a100 does not carry the memory size. The measured shape above agrees on CPUs, sockets and RAM."
+    billing_weights:
+      value: "cpu=0.0625, mem=0.0078125G, GRES/gpu=1 (every partition); DefMemPerCPU=8000 MB"
+      method: measured
+      source: "scontrol show partition (TRESBillingWeights, DefMemPerCPU)"
+      date: 2026-10-30
+    state_snapshot:
+      value: "48 nodes: 23 DOWN+FAIL+NOT_RESPONDING, 4 MIXED, 20 MIXED+RESERVED, 1 IDLE+RESERVED"
+      method: measured
+      source: "sinfo -h -o '%T|%D'; scontrol show node -o (State, aggregated)"
+      date: 2026-10-30
+      note: "A transient snapshot, not a platform property. At collection time 23 of 48 nodes did not respond and 21 of the 25 responding nodes carried a reservation flag (reservation names and owners were not read). Capacity open to ordinary jobs can be far below the nominal 48 nodes."
+
+  submission:
+    sbatch_test_only:
+      value: "refused: Invalid account or account/partition combination specified (needs an explicit account)"
+      method: measured
+      source: "sbatch --test-only --job-name=s5probe --time=00:05:00 --wrap=true"
+      date: 2026-10-30
+      note: "Exit 1, 'allocation failure: Invalid account or account/partition combination specified'. No -A or -p was given, so the default partition gpu-a100 and the default account were tried; the partition's AllowAccounts excludes a plain user. No grant was chosen and no further test was run, per the spike rules. That a plain user also needs an explicit partition, plgrid-gpu-a100, is inferred from the default partition's AllowAccounts and the docs, not tested. Whether plgrid-gpu-a100 with a valid -A accepts a test-only job is not measured."
+    account_naming:
+      value: "grantname-gpu-a100 (the suffix is mandatory; sbatch -A grantname alone fails)"
+      method: documented
+      source: "https://docs.hpc.cyfronet.pl/environment/batch-system/accounts-and-grants/"
+      date: 2026-10-30
+      note: "The same page lists the error 'Invalid account or account/partition combination specified' as the symptom of a missing suffix, an inactive grant, an exhausted grant or an expired grant. New grants synchronise with the PLGrid portal every hour."
+    grant_helper_tools:
+      value: "hpc-grants, hpc-fs, hpc-jobs, hpc-jobs-history"
+      method: measured
+      source: "command -v hpc-grants hpc-fs hpc-jobs hpc-jobs-history"
+      date: 2026-10-30
+      note: "All four exist on the login node. Documented in https://docs.hpc.cyfronet.pl/environment/hpc-tools/. Their output was not collected (it holds grant and quota data)."
+
+  login_node:
+    os_and_arch:
+      value: "Rocky Linux 9.8, x86_64, AMD EPYC-Rome, 32 CPUs"
+      method: measured
+      source: "cat /etc/os-release; uname -m; lscpu"
+      date: 2026-10-30
+      note: "One login node. python3 and jq are on PATH (python3 is the system one)."
+
+  containers:
+    apptainer_or_singularity_login_node:
+      value: false
+      method: measured
+      source: "command -v apptainer singularity; bash -lc 'module -t spider Apptainer / Singularity' (Lmod: Unable to find)"
+      date: 2026-10-30
+      note: "Neither binary is on PATH and neither is a module on the login node. The docs say the module tree on Athena is unsupported and that module spider should be run on a compute node for the full list (https://docs.hpc.cyfronet.pl/software/modules/), so this says nothing about compute nodes. The Athena docs pages searched do not mention containers or Apptainer at all."
+    apptainer_version:
+      value: "none installed on the login node"
+      method: measured
+      source: "apptainer --version (command not found)"
+      date: 2026-10-30
+    pyxis_enroot:
+      value: false
+      method: measured
+      source: "command -v enroot; srun --help | grep -i container; ls /etc/slurm/plugstack.conf*; scontrol show config (PlugStackConfig)"
+      date: 2026-10-30
+      note: "No enroot, no plugstack.conf and PlugStackConfig=(null), so no SPANK plugin is configured. srun --help shows only the stock --container and --container-id (OCI bundle) flags, no --container-image. Pyxis is absent."
+    slurm_oci_support:
+      value: "flags exist, plugin not configured"
+      method: measured
+      source: "srun --help | grep -i container; scontrol show config (JobContainerType); ls /etc/slurm"
+      date: 2026-10-30
+      note: "JobContainerType=(null) and /etc/slurm has no oci.conf file name, so stock Slurm OCI container support is not set up (an inference from the missing config, not a job test)."
+    user_namespaces_login_node:
+      value: false
+      method: measured
+      source: "cat /proc/sys/user/max_user_namespaces; unshare -U true; echo $?"
+      date: 2026-10-30
+      note: "max_user_namespaces is 0. unshare -U and unshare -Ur both exit 1 with 'No space left on device', the error the kernel gives when the namespace limit is 0."
+    user_namespaces_compute_nodes:
+      value: null
+      method: unknown
+      source: "needs a job"
+      date: 2026-10-30
+
+  storage:
+    home_fstype:
+      value: "nfs"
+      method: measured
+      source: "stat -f -c %T $HOME"
+      date: 2026-10-30
+    home_limit:
+      value: "10 GB"
+      method: documented
+      source: "https://docs.hpc.cyfronet.pl/environment/variables/"
+      date: 2026-10-30
+    scratch_fstype:
+      value: "lustre"
+      method: measured
+      source: "stat -f -c %T $SCRATCH"
+      date: 2026-10-30
+    scratch_retention:
+      value: "files older than 30 days and job directories older than 7 days are deleted automatically"
+      method: documented
+      source: "https://docs.hpc.cyfronet.pl/supercomputers/athena/ ; https://docs.hpc.cyfronet.pl/environment/variables/"
+      date: 2026-10-30
+      note: "The docs say working data belongs in $SCRATCH and computations must not use /tmp; use $SCRATCH or $TMPDIR (https://docs.hpc.cyfronet.pl/environment/general-rules/)."
+    group_storage_fstype:
+      value: "lustre"
+      method: measured
+      source: "stat -f -c %T $PLG_GROUPS_STORAGE"
+      date: 2026-10-30
+    group_storage_properties:
+      value: "long-term storage for the life of the grant; transparent compression; quota counts actual disk use (du), not apparent size (ls)"
+      method: documented
+      source: "https://docs.hpc.cyfronet.pl/supercomputers/athena/ ; https://docs.hpc.cyfronet.pl/environment/variables/"
+      date: 2026-10-30
+    node_features:
+      value: "memfs and localfs on every node; scratch on 5 of 48 nodes; gpustats on every node"
+      method: measured
+      source: "sinfo -h -o '%P|%f'; scontrol show node -o (AvailableFeatures)"
+      date: 2026-10-30
+      note: "memfs and localfs are the two local-storage features the docs describe (below). The scratch and gpustats features are not described in the docs pages searched."
+    node_local_tmpdisk:
+      value: 0
+      method: measured
+      source: "sinfo -h -o '%P|%d'; scontrol show node -o (TmpDisk)"
+      date: 2026-10-30
+      note: "TmpDisk is 0 on every partition, so Slurm does not track node-local disk. Local space comes from the memfs and localfs features below."
+    memfs:
+      value: "RAM-backed volume for the job, requested with -C memfs, path in $MEMFS; counts against the job's memory (--mem); single-node jobs only"
+      method: documented
+      source: "https://docs.hpc.cyfronet.pl/environment/local-storage-features/"
+      date: 2026-10-30
+    localfs:
+      value: "per-node scratch volume for the job, requested with -C localfs, path in $SCRATCH_LOCAL; optimised for many small files; lost when the job ends"
+      method: documented
+      source: "https://docs.hpc.cyfronet.pl/environment/local-storage-features/"
+      date: 2026-10-30
+      note: "Size and filesystem type of the volume are not stated in the docs and are unknown without a job."
+    tmpdir_variable:
+      value: "unset on the login node"
+      method: measured
+      source: "shell test for a non-empty $TMPDIR on the login node (printed: unset)"
+      date: 2026-10-30
+      note: "Value on compute nodes is unknown (needs a job). The docs name $TMPDIR as an allowed temp location."
+
+  time:
+    slurm_time_zone:
+      value: "Europe/Warsaw, CET +0100 on 2026-10-30"
+      method: measured
+      source: "date +'%Z %z'; echo TZ=$TZ; timedatectl | grep -i zone; scontrol show config | head -1 compared with date -u"
+      date: 2026-10-30
+      note: "TZ is unset; timedatectl reports Europe/Warsaw. Slurm client output is in local time: scontrol printed 07:15:25 when date -u printed 06:15:25. Warsaw observes daylight saving, so expect +0200 (CEST) in summer; that part is inferred from the zone name, not measured. Compute-node zone is unknown."
+
+  login_node_policy:
+    long_running_user_process_allowed:
+      value: false
+      method: documented
+      source: "https://docs.hpc.cyfronet.pl/environment/general-rules/"
+      date: 2026-10-30
+      note: "The docs say any computation launched on the access host is killed without notice and the host is for preparing input files and submitting jobs. A per-user memory limit applies to all processes on the host and a process over it is killed (the limit is not stated). The docs do not mention a light poller or daemon; not tested, per the spike rules."
+    gpu_only:
+      value: "Athena is for GPU-enabled jobs only; extensive workloads that do not use GPUs lead to account suspension"
+      method: documented
+      source: "https://docs.hpc.cyfronet.pl/supercomputers/athena/"
+      date: 2026-10-30
+    compile_and_build:
+      value: "not on the login node: it has no development libraries; compile inside a job on a compute node"
+      method: documented
+      source: "https://docs.hpc.cyfronet.pl/supercomputers/athena/ and https://docs.hpc.cyfronet.pl/environment/general-rules/"
+      date: 2026-10-30
+    software_tree:
+      value: "Lmod modules; the module tree on Athena is unsupported, install your own software in $HOME or the group directory"
+      method: documented
+      source: "https://docs.hpc.cyfronet.pl/supercomputers/athena/"
+      date: 2026-10-30
+    lmod_on_login_node:
+      value: "Lmod is present; module spider lists CUDA and Python modules"
+      method: measured
+      source: "bash -lc 'type module; module -t spider CUDA; module -t spider Python'"
+      date: 2026-10-30
+
+  reachability:
+    compute_node_outbound_internet:
+      value: null
+      method: unknown
+      source: "needs a job; S5 runs none"
+      date: 2026-10-30
+      prior_observation: "none for Athena; its compute-node outbound access was never tested. The docs pages searched do not mention internet access, proxies or firewalls."
+    compute_node_inbound_from_outside:
+      value: null
+      method: unknown
+      source: "https://docs.hpc.cyfronet.pl/ (pages listed under slurmrestd_advertised) say nothing on inbound access to compute nodes; measuring it needs a job"
+      date: 2026-10-30
+
+unknown:
+  - fact: "compute-node outbound internet"
+    reason: "needs a job; S5 runs none. No prior observation; the docs are silent."
+  - fact: "compute-node inbound from outside"
+    reason: "the docs are silent and a test needs a job"
+  - fact: "Apptainer or Singularity on compute nodes (and version)"
+    reason: "not on the login node; the docs do not mention containers; a check needs a job"
+  - fact: "user namespaces on compute nodes"
+    reason: "needs a job; the login node has max_user_namespaces=0, which says nothing about compute nodes"
+  - fact: "size, filesystem type and permissions of $SCRATCH_LOCAL and $MEMFS on a compute node, and the value of $TMPDIR there"
+    reason: "variables exist only inside a job"
+  - fact: "GPU driver and CUDA version on compute nodes"
+    reason: "not visible from the login node; needs a job"
+  - fact: "time zone of compute nodes"
+    reason: "needs a job; only the login node was read"
+  - fact: "whether sbatch --test-only succeeds with a valid grant account on plgrid-gpu-a100"
+    reason: "the default test failed on account/partition; the spike rules forbid choosing a grant"
+  - fact: "the login node's per-user memory limit and any process-count or CPU-time limit"
+    reason: "the docs state that a limit exists but not its value; probing it was out of scope"
+  - fact: "whether a slurmrestd service is running and where it is reachable"
+    reason: "the binary exists but JWT is off and the docs do not advertise a service"
