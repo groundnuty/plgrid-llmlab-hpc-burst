@@ -387,6 +387,43 @@ test_b9_the_jobs_own_baseline_does_not_count_as_a_watcher() {
   expect "exit 5 even though the engine saw the baseline requests (got $rc)" test "$rc" = 5
 }
 
+# ---- the job directory root (RUN_ROOT) ----------------------------------------------------------------------
+# Step 0 found operators could not put the job directory under their own subdirectory without overriding SCRATCH.
+test_run_root_unset_means_scratch_slash_s1_frp() {
+  fake_env closed || return 1
+  start_job 1090 VM_SSH_PORT="$(free_port)"; job_rc 40
+  expect "the job ended (got $RC)" test "$RC" != running || return 1
+  expect "the job directory is SCRATCH/s1-frp/<jobid>-r0" test -s "$W/scratch/s1-frp/1090-r0/job.log"
+}
+test_run_root_override_puts_the_job_directory_there() {
+  fake_env closed || return 1
+  # ssh's own message names the override and the bare SCRATCH (not under RUN_ROOT): both must be scrubbed from what leaves the job
+  FAKE_SSH_LEAK="ssh: root $W/mine/sub/s1/x and scratch $W/scratch/y" \
+    start_job 1091 VM_SSH_PORT="$(free_port)" RUN_ROOT="$W/mine/sub/s1"; JD="$W/mine/sub/s1/1091-r0"
+  job_rc 40
+  expect "the job ended (got $RC)" test "$RC" != running || return 1
+  expect "the job directory is RUN_ROOT/<jobid>-r0, created with its parents" test -s "$JD/job.log" || return 1
+  expect "nothing was put under SCRATCH" bash -c "! ls '$W/scratch/s1-frp' 2>/dev/null | grep -q ." || return 1
+  expect "the raw ssh stderr holds both paths (so the leak check below is not vacuous)" bash -c "grep -qF '$W/mine' '$JD/ssh-probe.err' && grep -qF '$W/scratch' '$JD/ssh-probe.err'" || return 1
+  expect "the message itself reached export/probe.jsonl (so the check can fail)" file_has "$JD/export/probe.jsonl" "ssh said: ssh: root" || return 1
+  local s bad=0
+  for s in "$W/mine" "$W/scratch"; do
+    if grep -rqF -- "$s" "$JD/export"; then echo "leaked into export/: $s"; bad=1; fi
+  done
+  return "$bad"
+}
+test_run_root_must_be_absolute_and_without_whitespace() {
+  fake_env closed || return 1
+  cd "$W" || return 1          # a broken check must not create the relative directory inside the repository
+  start_job 1092 VM_SSH_PORT="$(free_port)" RUN_ROOT="relative/dir"; job_rc 20
+  expect "a relative RUN_ROOT exits 1 (got $RC)" test "$RC" = 1 || return 1
+  expect "the reason is stated" file_has "$W/job.out" "absolute" || return 1
+  start_job 1093 VM_SSH_PORT="$(free_port)" RUN_ROOT="$W/my dir"; job_rc 20
+  expect "a RUN_ROOT with a space exits 1 (got $RC)" test "$RC" = 1 || return 1
+  expect "the reason is stated" file_has "$W/job.out" "whitespace" || return 1
+  expect "nothing was created" bash -c "! ls '$W/my dir' '$W/relative' '$W/scratch/s1-frp' 2>/dev/null | grep -q ."
+}
+
 # ---- the run-book -------------------------------------------------------------------------------------------
 test_docs_runbook_says_what_the_review_asked() {
   local bad=0 r="$KIT/README.md"
@@ -405,6 +442,21 @@ test_docs_runbook_says_what_the_review_asked() {
   chk 'expected case' "20 s as the expected case (nit)"
   chk 'invalid' "an invalid fault measurement (B3)"
   grep -qE '^\s*restrict,port-forwarding,permitopen="127.0.0.1:7000",command="/bin/false"' "$r" && { echo "README still shows the old key line"; bad=1; }
+  return "$bad"
+}
+
+test_docs_runbook_matches_the_step0_findings() {
+  local bad=0 r="$KIT/README.md"
+  chk() { grep -qiE -- "$1" "$r" || { echo "README lacks: $2"; bad=1; }; }
+  chk 'ACCOUNT_ATHENA_A100' "the Athena settings variable ACCOUNT_ATHENA_A100"
+  chk 'ACCOUNT_HELIOS_GH200' "the Helios GH200 settings variable"
+  chk 'RUN_ROOT' "the configurable job directory root"
+  chk '--streams 4' "the 1 h runs use four concurrent streams"
+  chk 'does not test' "what --streams does not test"
+  chk 'throughput at many streams' "throughput is not tested"
+  chk 'wss' "the wss path is not tested"
+  grep -qE 'ACCOUNT_ATHENA([^_]|$)' "$r" && { echo "README still has the old name ACCOUNT_ATHENA"; bad=1; }
+  grep -qE -- '--partition=plgrid-now' "$r" && { echo "README still tells Athena runs to use plgrid-now"; bad=1; }
   return "$bad"
 }
 

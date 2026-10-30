@@ -72,6 +72,20 @@ M = [
     ("M29", "B1", "probe_responder.py", 'TOKEN = b"S1-PROBE-TOKEN-OK\\n"', 'TOKEN = b"S1-PROBE-TOKEN-NO\\n"', "job", "b1_responder_and_job_share_the_token"),
     ("M30", "nit", "fake_streamer.py", "                    fh.write(\"%.3f GET %s\\n\" % (time.time(), self.path.split(\"?\")[0]))", "                    pass", "py",
      "test_engine_and_responder.Engine.test_every_request_is_appended_to_the_request_log"),
+    ("M31", "streams", "verdict.py", "    for lane in range(1, n + 1):\n        problems = lane_problems", "    for lane in range(1, 2):\n        problems = lane_problems",
+     "py", "test_verdict.PerStreamC2.test_a_cut_in_one_stream_fails_c2_even_when_the_others_complete"),
+    ("M32", "streams", "stream_watch.py", "        lt.daemon = True\n        lt.start()\n", "        lt.daemon = True\n        lt.start()\n        lt.join()\n",
+     "py", "test_stream_watch.ThreeStreamsLive.test_three_streams_run_at_once_and_each_completes"),
+    ("M33", "streams", "stream_watch.py", "reconnects += sum(1 for s in mine[:-1] if", "reconnects += sum(1 for s in st.streams[:-1] if",
+     "py", "test_stream_watch.PerStreamReport.test_a_lane_that_was_cut_last_has_not_reconnected"),
+    ("M34", "streams", "fake_streamer.py", "class Server(ThreadingHTTPServer):", "class Server(HTTPServer):",
+     "py", "test_engine_and_responder.Engine.test_three_concurrent_streams_take_as_long_as_one_and_health_keeps_answering"),
+    ("M35", "run_root", J, """case "$RUN_ROOT" in /*) ;; *) die "RUN_ROOT must be an absolute path, got '$RUN_ROOT'" ;; esac""", ":",
+     "job", "run_root_must_be_absolute_and_without_whitespace"),
+    ("M36", "run_root", J, "RUN_ROOT:run-root RUN_BASE:scratch SCRATCH:scratch VM_ADDR:vm", "RUN_ROOT:run-root VM_ADDR:vm",
+     "job", "run_root_override_puts_the_job_directory_there"),
+    ("M37", "streams", "stream_watch.py", "        for cur in list(self.current.values()):\n", "        for cur in list(self.current.values())[:1]:\n",
+     "py", "test_stream_watch.SignalHandlerSurvives.test_sigterm_with_three_streams_interrupts_every_one_of_them"),
 ]
 
 

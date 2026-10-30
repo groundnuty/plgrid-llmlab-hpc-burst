@@ -10,6 +10,9 @@ by hand, flushed after every token, on a fixed one-second schedule (no drift).
 
 --request-log FILE appends one line per request ("<epoch> GET <path>"). The job uses it to see that
 the watcher has attached: a request that arrives through frpc after the job's own loopback baseline.
+
+Requests are served concurrently, one thread each, so several /stream replies run at once while
+/health keeps answering (stream_watch.py --streams N relies on it).
 """
 import argparse
 import datetime
@@ -18,14 +21,22 @@ import os
 import socket
 import socketserver
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
+
+try:                                    # Python 3.7 and newer
+    from http.server import ThreadingHTTPServer
+except ImportError:                     # Python 3.6, the oldest this kit supports: the same thing, spelled out
+    class ThreadingHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
+        daemon_threads = True
 
 MAX_SECONDS = 86400
 BIND = "127.0.0.1"
 HEALTH_BODY = b'{"status": "ok"}'
 REQUEST_LOG = None
+LOG_LOCK = threading.Lock()             # one line at a time into the request log and stderr, whatever the thread count
 
 
 def utc_stamp():
@@ -34,8 +45,9 @@ def utc_stamp():
 
 
 def log(msg):
-    sys.stderr.write("%s %s\n" % (utc_stamp(), msg))
-    sys.stderr.flush()
+    with LOG_LOCK:
+        sys.stderr.write("%s %s\n" % (utc_stamp(), msg))
+        sys.stderr.flush()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -59,8 +71,9 @@ class Handler(BaseHTTPRequestHandler):
     def _note_request(self):
         if REQUEST_LOG:
             try:
-                with open(REQUEST_LOG, "a") as fh:
-                    fh.write("%.3f GET %s\n" % (time.time(), self.path.split("?")[0]))
+                with LOG_LOCK:
+                    with open(REQUEST_LOG, "a") as fh:
+                        fh.write("%.3f GET %s\n" % (time.time(), self.path.split("?")[0]))
             except OSError as exc:
                 log("cannot write --request-log: %s" % exc)
 
@@ -114,8 +127,8 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
 
 
-class Server(socketserver.ThreadingMixIn, HTTPServer):
-    daemon_threads = True
+class Server(ThreadingHTTPServer):
+    daemon_threads = True               # a stream thread never keeps the process alive
     allow_reuse_address = True
 
 

@@ -5,6 +5,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.request
@@ -23,6 +24,37 @@ def wait_port_file(path, timeout=10):
                 return int(fh.read().strip())
         time.sleep(0.05)
     raise AssertionError("no port file %s" % path)
+
+
+def check_concurrent_streams(case, port):
+    """stream_watch.py --streams N needs the engine to serve N /stream replies at once. Served one after
+    the other, three 3-second streams would take about 9 s and /health would wait behind them."""
+    counts, errors = [], []
+
+    def one_stream():
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:%d/stream?seconds=3" % port, timeout=20) as r:
+                counts.append(r.read().decode("ascii").count("token "))
+        except Exception as exc:                          # a failure must show in the assertion, not vanish in the thread
+            errors.append(repr(exc))
+
+    threads = [threading.Thread(target=one_stream) for _ in range(3)]
+    t0 = time.monotonic()
+    for th in threads:
+        th.start()
+    time.sleep(1.0)
+    h0 = time.monotonic()
+    with urllib.request.urlopen("http://127.0.0.1:%d/health" % port, timeout=5) as r:
+        case.assertEqual(r.read(), b'{"status": "ok"}')
+    health_s = time.monotonic() - h0
+    for th in threads:
+        th.join(20)
+    elapsed = time.monotonic() - t0
+    case.assertEqual(errors, [])
+    case.assertEqual(counts, [3, 3, 3])
+    case.assertGreaterEqual(elapsed, 3.0)
+    case.assertLess(elapsed, 5.5, "three 3 s streams took %.1f s: they ran one after another" % elapsed)
+    case.assertLess(health_s, 1.0, "/health waited %.1f s behind the streams" % health_s)
 
 
 class Engine(unittest.TestCase):
@@ -63,10 +95,43 @@ class Engine(unittest.TestCase):
         sw.run_stream(st, sw.Target("direct", "127.0.0.1", self.port), 1, 2)
         self.assertTrue(st.streams[0]["completed"], st.streams[0])
 
+    def test_three_concurrent_streams_take_as_long_as_one_and_health_keeps_answering(self):
+        check_concurrent_streams(self, self.port)
+
     def test_the_strict_health_check_accepts_the_engine(self):
         target = sw.Target("direct", "127.0.0.1", self.port)
         res = sw.http_get_health(target, time.monotonic() + 3, "/health", "engine", expect=b'{"status": "ok"}')
         sw.close_quiet(res[2], res[3])
+
+
+class EngineWithoutThreadingHTTPServer(unittest.TestCase):
+    """Python 3.6 has no http.server.ThreadingHTTPServer. The engine then falls back to ThreadingMixIn plus
+    HTTPServer. No 3.6 interpreter is available, so the class is removed from http.server before the engine
+    is imported, in a child process, and the same concurrency check is run against it."""
+
+    def test_the_fallback_server_also_serves_streams_concurrently(self):
+        tmp = tempfile.mkdtemp(prefix="s1-eng36-")
+        portfile = os.path.join(tmp, "port")
+        code = ("import http.server, importlib.util, sys\n"
+                "del http.server.ThreadingHTTPServer\n"
+                "spec = importlib.util.spec_from_file_location('fake_streamer_fallback', sys.argv[1])\n"
+                "mod = importlib.util.module_from_spec(spec)\n"
+                "spec.loader.exec_module(mod)\n"
+                "assert mod.ThreadingHTTPServer.__module__ == 'fake_streamer_fallback', 'the stdlib class was used'\n"
+                "sys.argv = ['fake_streamer.py', '--port', '0', '--port-file', sys.argv[2]]\n"
+                "mod.main()\n")
+        proc = subprocess.Popen([sys.executable, "-c", code, _kit.path("fake_streamer.py"), portfile],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        try:
+            port = wait_port_file(portfile)
+            check_concurrent_streams(self, port)
+        finally:
+            proc.terminate()
+            err = proc.communicate(timeout=10)[1]
+            self.assertNotIn(b"Traceback", err)
+            for f in os.listdir(tmp):
+                os.unlink(os.path.join(tmp, f))
+            os.rmdir(tmp)
 
 
 class Responder(unittest.TestCase):

@@ -5,7 +5,9 @@ Runs on the frps host. It reaches the instance the way the front would: a TCP co
 frps' tcpmux port, "CONNECT <instance>:80", then plain HTTP over the piped connection. It
 
   * keeps a long GET /stream?seconds=N open and records every inter-token gap, every cut and
-    every reconnect;
+    every reconnect. With --streams N it keeps N of them open at once, over the same frps tcpmux
+    route (so through the same frpc), and records gaps and cuts per stream; a stream that is cut
+    is reopened on its own lane, as the single stream always was;
   * probes GET /health on a fresh tunnel connection every few seconds, classifies failures and
     declares the path down after --fail-threshold failures in a row;
   * takes a mark (SIGUSR1) at the moment you inject a fault, and reports time-to-detect from it;
@@ -22,7 +24,7 @@ Failure classes of one probe:
                    stub log mean the agent is alive and the engine is down.
   http_error       an HTTP status other than 200
 
-    stream_watch.py --tcpmux 127.0.0.1:PORT --domain NAME --duration 3900 --out summary.json
+    stream_watch.py --tcpmux 127.0.0.1:PORT --domain NAME --duration 3900 [--streams 4] --out summary.json
     kill -USR1 <pid>      # mark: run it right before you inject a fault
 """
 import argparse
@@ -274,7 +276,7 @@ class State(object):
         self.marks = []                 # epoch seconds, from SIGUSR1
         self.mark_pre = {}              # mark epoch -> what the probe said at that moment (see precondition)
         self.streams = []               # one dict per stream attempt that opened
-        self.gaps = []                  # (epoch, gap_s, seq, stream_id)
+        self.gaps = []                  # (epoch, gap_s, seq, stream_id, lane)
         self.offsets = []               # receive time minus the token's own UTC stamp
         self.connect_fail = {}          # class -> {count, first_utc, last_utc}: attempts that never delivered a token
         self.probes = {"total": 0, "ok": 0}
@@ -287,7 +289,7 @@ class State(object):
         self.last_ok_epoch = None
         self.down = False
         self.transitions = []
-        self.current = None             # (sock, reader) of the stream being read
+        self.current = {}               # lane -> (sock, reader) of the stream that lane is reading
 
     def precondition(self, epoch):
         """What the /health probe says at 'epoch': 'up' only when the last probe was good and recent.
@@ -346,16 +348,27 @@ class State(object):
                                          "declared_utc": utc(epoch), "declared_epoch": round(epoch, 3)})
                 self.announce("probe: path DOWN declared at %s (class %s)" % (utc(epoch), cls))
 
+    def interrupt_streams(self):
+        """Shut down the socket of every stream being read: the blocked reads return EOF and each lane
+        marks its stream interrupted. It takes no lock, because the SIGTERM handler calls it in the main
+        thread, which may hold self.lock; list() copies the dict in one step."""
+        for cur in list(self.current.values()):
+            try:
+                cur[0].shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
     def announce(self, text):
         """One line on stdout, for the operator who waits for 'path UP' before the next fault."""
         print("stream_watch: " + text, flush=True)
 
 
-# --- stream thread (main) -------------------------------------------------------------------------
+# --- stream lanes ---------------------------------------------------------------------------------
+# Lane 1 runs on the main thread (so one stream behaves exactly as it always did), lanes 2..N on daemon threads.
 
-def run_stream(st, target, sid, seconds):
+def run_stream(st, target, sid, seconds, lane=1):
     a = st.args
-    rec = {"id": sid, "requested_s": seconds, "start_utc": utc(time.time()), "tokens": 0, "seq_breaks": 0,
+    rec = {"id": sid, "lane": lane, "requested_s": seconds, "start_utc": utc(time.time()), "tokens": 0, "seq_breaks": 0,
            "ttfb_s": None, "completed": False, "interrupted": False, "reason": None}
     t0 = time.monotonic()
     sock = rd = None
@@ -366,7 +379,7 @@ def run_stream(st, target, sid, seconds):
             st.note_open_failure(exc.cls)
         return None
     rec["start_utc"] = utc(time.time())
-    st.current = (sock, rd)
+    st.current[lane] = (sock, rd)
     try:
         sock.settimeout(a.stall_timeout)
         send_get(sock, target.domain or "engine", "/stream?seconds=%d" % seconds)
@@ -417,7 +430,7 @@ def run_stream(st, target, sid, seconds):
                     if last is None:
                         rec["ttfb_s"] = round(now_m - t0, 3)
                     else:
-                        st.gaps.append((now_e, now_m - last, seq, sid))
+                        st.gaps.append((now_e, now_m - last, seq, sid, lane))
                 last = now_m
         rec["completed"] = rec["tokens"] == seconds and rec["seq_breaks"] == 0
         rec["reason"] = None if rec["completed"] else "token count %d of %d, seq breaks %d" % (
@@ -429,7 +442,7 @@ def run_stream(st, target, sid, seconds):
     except (OSError, ValueError) as exc:
         rec["reason"] = "%s: %s" % (exc.__class__.__name__, exc)
     finally:
-        st.current = None
+        st.current.pop(lane, None)
         close_quiet(sock, rd)
     if st.stop.is_set() and not rec["completed"]:
         rec["interrupted"] = True                    # the watcher was told to stop: not a cut
@@ -445,7 +458,7 @@ def run_stream(st, target, sid, seconds):
     return rec
 
 
-def stream_loop(st, target, t_end_mono):
+def stream_loop(st, target, t_end_mono, lane=1):
     a = st.args
     sid = 0
     while not st.stop.is_set():
@@ -454,7 +467,7 @@ def stream_loop(st, target, t_end_mono):
             break
         seconds = max(1, min(a.stream_seconds, left - 2))
         sid += 1
-        rec = run_stream(st, target, sid, seconds)
+        rec = run_stream(st, target, sid, seconds, lane)
         if rec is None:
             sid -= 1                                # nothing opened: not a stream
         st.stop.wait(1.0)                            # fixed 1 s retry spacing
@@ -502,19 +515,42 @@ def read_stub_log(path):
     return out
 
 
+def lane_report(lane, streams, gaps, threshold, near):
+    """One lane (one of the --streams concurrent streams): its streams, cuts, completion and gaps.
+    'first_stream_completed' is the lane's first stream (lowest id) having run to its full length uncut."""
+    mine = [s for s in streams if s.get("lane", 1) == lane]
+    lane_gaps = [(e, g) for (e, g, _, _, ln) in gaps if ln == lane]
+    first = min(mine, key=lambda s: s["id"]) if mine else None
+    unfaulted = [g for (e, g) in lane_gaps if not near(e)]
+    done = [s for s in mine if s["completed"]]
+    return {"lane": lane, "streams": len(mine), "completed": len(done),
+            "cuts": sum(1 for s in mine if not s["completed"] and not s["interrupted"]),
+            "first_stream_completed": bool(first and first["completed"]),
+            "longest_completed_stream_s": max([s["duration_s"] for s in done] or [0]),
+            "tokens": sum(s["tokens"] for s in mine),
+            "max_gap_s": round(max([g for (_, g) in lane_gaps]), 3) if lane_gaps else None,
+            "max_gap_unfaulted_s": round(max(unfaulted), 3) if unfaulted else None,
+            "gaps_over_threshold_unfaulted": sum(1 for g in unfaulted if g > threshold)}
+
+
 def analyse(st, started_epoch, ended_epoch, args):
     gaps = [g for g in st.gaps]
     near = lambda e: any(m <= e <= m + args.fault_window for m in st.marks)   # noqa: E731
-    over = [{"utc": utc(e), "gap_s": round(g, 3), "seq": s, "stream": sid, "near_mark": near(e)}
-            for (e, g, s, sid) in gaps if g > args.gap_threshold]
-    unfaulted = [g for (e, g, s, sid) in gaps if not near(e)]
+    over = [{"utc": utc(e), "gap_s": round(g, 3), "seq": s, "stream": sid, "lane": lane, "near_mark": near(e)}
+            for (e, g, s, sid, lane) in gaps if g > args.gap_threshold]
+    unfaulted = [g for (e, g, s, sid, lane) in gaps if not near(e)]
     buckets = [("lt_1.5", 0, 1.5), ("1.5_to_2", 1.5, 2), ("2_to_5", 2, 5), ("5_to_10", 5, 10), ("ge_10", 10, 1e9)]
-    hist = dict((name, sum(1 for (_, g, _, _) in gaps if lo <= g < hi)) for name, lo, hi in buckets)
+    hist = dict((name, sum(1 for (_, g, _, _, _) in gaps if lo <= g < hi)) for name, lo, hi in buckets)
     cuts = []
     for s in st.streams:
         if not s["completed"] and not s["interrupted"]:
-            cuts.append({"stream": s["id"], "end_utc": s["end_utc"], "after_s": s["duration_s"],
-                         "reason": s["reason"], "near_mark": near(s["end_epoch"])})
+            cuts.append({"stream": s["id"], "lane": s.get("lane", 1), "end_utc": s["end_utc"],
+                         "after_s": s["duration_s"], "reason": s["reason"], "near_mark": near(s["end_epoch"])})
+    reconnects = 0                    # a cut stream that was followed by another one on its lane
+    for lane in range(1, args.streams + 1):
+        mine = [x for x in st.streams if x.get("lane", 1) == lane]
+        reconnects += sum(1 for s in mine[:-1] if not s["completed"] and not s["interrupted"])
+    per_stream = [lane_report(lane, st.streams, gaps, args.gap_threshold, near) for lane in range(1, args.streams + 1)]
     completed = [s for s in st.streams if s["completed"]]
     stub = read_stub_log(args.stub_log) if args.stub_log else None
     domain_events = [e for e in (stub or []) if e.get("user") == args.domain]
@@ -560,12 +596,19 @@ def analyse(st, started_epoch, ended_epoch, args):
         "run_s": round(ended_epoch - started_epoch, 1),
         "target": {"tcpmux": "%s:%d" % (args.tcpmux_host, args.tcpmux_port), "domain": args.domain},
         "streams": st.streams,
+        "streams_requested": args.streams,
+        "per_stream": per_stream,
+        "overall": {"streams": args.streams,
+                    "streams_whose_first_stream_completed": sum(1 for r in per_stream if r["first_stream_completed"]),
+                    "cuts": len(cuts),
+                    "max_gap_s": round(max([g for (_, g, _, _, _) in gaps]), 3) if gaps else None,
+                    "max_gap_unfaulted_s": round(max(unfaulted), 3) if unfaulted else None},
         "streams_completed": len(completed),
         "longest_completed_stream_s": max([s["duration_s"] for s in completed] or [0]),
         "cuts": cuts,
-        "reconnects_after_cut": sum(1 for s in st.streams[:-1] if not s["completed"] and not s["interrupted"]),
+        "reconnects_after_cut": reconnects,
         "stream_open_failures": st.connect_fail,
-        "gaps": {"threshold_s": args.gap_threshold, "stats_s": stats([g for (_, g, _, _) in gaps]),
+        "gaps": {"threshold_s": args.gap_threshold, "stats_s": stats([g for (_, g, _, _, _) in gaps]),
                  "stats_unfaulted_s": stats(unfaulted), "over_threshold": over[:200],
                  "over_threshold_unfaulted": sum(1 for o in over if not o["near_mark"]), "histogram": hist},
         "clock_offset_plus_one_way_s": stats(st.offsets, 4),
@@ -595,6 +638,10 @@ def parse_args(argv):
                     help="wait up to this many seconds for the first good /health probe before the run clock "
                          "starts (start the watcher before the job; 0 = do not wait)")
     ap.add_argument("--stream-seconds", type=int, default=3720, help="seconds asked of each /stream (default 3720)")
+    ap.add_argument("--streams", type=int, default=1,
+                    help="how many /stream requests to keep open at once, all through the same tcpmux route and the "
+                         "same frpc (default 1). A cut stream is reopened on its own lane. Gaps, cuts and completion "
+                         "are recorded per stream")
     ap.add_argument("--gap-threshold", type=float, default=2.0, help="report token gaps above this (s)")
     ap.add_argument("--fault-window", type=float, default=60.0,
                     help="a gap or cut within this many seconds after a mark is attributed to that fault (default 60)")
@@ -613,6 +660,8 @@ def parse_args(argv):
     ap.add_argument("--stub-log", help="plugin_stub.py's JSON-lines log, for CloseProxy/Ping/Login after marks")
     ap.add_argument("--out", default="stream_watch_summary.json")
     args = ap.parse_args(argv)
+    if args.streams < 1:
+        ap.error("--streams must be at least 1")
     args.health_expect_bytes = args.health_expect.encode("utf-8")
     if args.direct_only:
         if not args.direct_url:
@@ -652,6 +701,14 @@ def digest(summary):
                  summary["gaps"]["threshold_s"], summary["gaps"]["over_threshold_unfaulted"]),
              "  probes %d ok %d, failure classes %s" % (summary["health"]["probes"], summary["health"]["ok"],
                                                           json.dumps(summary["health"]["fail_classes"], sort_keys=True))]
+    if summary.get("streams_requested", 1) > 1:
+        for r in summary["per_stream"]:
+            lines.append("  stream %d: first stream completed %s, completed %d of %d, cuts %d, max gap %s s (outside fault windows %s s)" % (
+                r["lane"], "yes" if r["first_stream_completed"] else "NO", r["completed"], r["streams"], r["cuts"],
+                r["max_gap_s"], r["max_gap_unfaulted_s"]))
+        o = summary["overall"]
+        lines.append("  overall: %d streams, first stream completed on %d, cuts %d, max gap %s s (outside fault windows %s s)" % (
+            o["streams"], o["streams_whose_first_stream_completed"], o["cuts"], o["max_gap_s"], o["max_gap_unfaulted_s"]))
     for m in summary["marks"]:
         lines.append("  mark " + json.dumps(m, sort_keys=True))
     lines.append("  this digest is collection, not a verdict: run verdict.py on the summary for PASS or FAIL per criterion")
@@ -692,15 +749,10 @@ def main(argv):
     def stop(signum, frame):
         # The handler runs in the main thread, possibly inside a read on the buffered reader, so it
         # must not close the reader (that raises "reentrant call"). It sets the flag and shuts the
-        # socket down: the blocked read returns EOF, run_stream marks the stream interrupted and
-        # closes both in its normal unwinding.
+        # sockets of all lanes down (interrupt_streams): each blocked read returns EOF, run_stream
+        # marks its stream interrupted and closes both in its normal unwinding.
         st.stop.set()
-        cur = st.current
-        if cur is not None:
-            try:
-                cur[0].shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
+        st.interrupt_streams()
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
 
@@ -727,9 +779,18 @@ def main(argv):
     th = threading.Thread(target=health_loop, args=(st, target, t_end))
     th.daemon = True
     th.start()
-    stream_loop(st, target, t_end)
+    lane_threads = []
+    for lane in range(2, args.streams + 1):               # lane 1 stays on this thread
+        lt = threading.Thread(target=stream_loop, args=(st, target, t_end, lane))
+        lt.daemon = True
+        lt.start()
+        lane_threads.append(lt)
+    stream_loop(st, target, t_end, 1)
     st.stop.wait(max(0.0, t_end - time.monotonic()) if not st.stop.is_set() else 0)
     st.stop.set()
+    st.interrupt_streams()                                 # a stream still being read now is interrupted, not cut
+    for lt in lane_threads:
+        lt.join(timeout=args.stall_timeout + 2)
     th.join(timeout=args.health_timeout + 2)
 
     summary = analyse(st, started, time.time(), args)

@@ -14,7 +14,9 @@ budget fixed before any run:
 
   C1  frpc registered through the stub: "login to server success" in the job log, and a Login and a
       NewProxy call in the stub log
-  C2  one stream completed and lasted at least 3600 s
+  C2  every stream completed, uncut, and lasted at least 3600 s. With stream_watch.py --streams N there
+      are N streams (lanes); one cut or missing stream fails C2 whatever the others did. A summary
+      without lane tags is one stream.
   C3  no stream cut over the hour: before the first mark, no cut, no token gap over the threshold,
       no failed stream open and no failed /health probe
   C4a frozen frpc (first mark): CloseProxy within 30 s, probe declared down within 10 s
@@ -64,17 +66,60 @@ def c1_registered(summary, job_log):
     return ok, "job log login line: %s; stub Login %d, NewProxy %d" % ("yes" if in_log else "NO", login, newproxy)
 
 
-def c2_stream(summary):
-    done = [s for s in summary.get("streams", []) if s.get("completed") and (s.get("duration_s") or 0) >= MIN_STREAM_S]
-    best = max([s.get("duration_s") or 0 for s in summary.get("streams", []) if s.get("completed")] or [0])
-    return bool(done), "longest completed stream %.0f s (need %d s)" % (best, MIN_STREAM_S)
-
-
 def first_mark(summary):
     marks = summary.get("marks") or []
     if marks:
         return parse_utc(marks[0]["mark_utc"])
     return None
+
+
+def lane_of(record):
+    """The lane (which of the concurrent streams) a stream or cut record belongs to; untagged is lane 1."""
+    return record.get("lane", 1)
+
+
+def lane_count(summary):
+    """How many streams the run was told to keep open: the declared count, else the highest lane seen."""
+    declared = summary.get("streams_requested")
+    if isinstance(declared, int) and not isinstance(declared, bool) and declared >= 1:
+        return declared
+    seen = [lane_of(r) for r in summary.get("streams", [])]
+    return max(seen or [1])
+
+
+def lane_problems(summary, lane, limit):
+    """Why this lane fails C2, as a list of phrases (empty: it passes). A lane passes when it has a
+    completed stream of at least MIN_STREAM_S and no cut before the first mark (limit; None = no mark,
+    so every cut counts). A lane with no record at all never opened a stream."""
+    records = [s for s in summary.get("streams", []) if lane_of(s) == lane]
+    if not records:
+        return ["no stream record (it never delivered a token)"]
+    cut_records = [s for s in records if not s.get("completed") and not s.get("interrupted")
+                   and (limit is None or before(s.get("end_utc"), limit))]
+    cut_entries = [c for c in summary.get("cuts", []) if lane_of(c) == lane
+                   and (limit is None or before(c.get("end_utc"), limit))]
+    problems = []
+    if cut_records or cut_entries:
+        first = (cut_records or cut_entries)[0]
+        problems.append("cut before the first mark (%s)" % (first.get("reason") or "no reason recorded"))
+    done = [s for s in records if s.get("completed") and (s.get("duration_s") or 0) >= MIN_STREAM_S]
+    if not done:
+        best = max([s.get("duration_s") or 0 for s in records if s.get("completed")] or [0])
+        problems.append("no completed stream of at least %d s (longest completed %.0f s)" % (MIN_STREAM_S, best))
+    return problems
+
+
+def c2_stream(summary):
+    limit = first_mark(summary)
+    n = lane_count(summary)
+    failed = []
+    for lane in range(1, n + 1):
+        problems = lane_problems(summary, lane, limit)
+        if problems:
+            failed.append("stream %d: %s" % (lane, "; ".join(problems)))
+    if failed:
+        return False, "%d of %d stream(s) fail: %s" % (len(failed), n, " | ".join(failed))
+    return True, "all %d stream(s) completed at least %d s with no cut before the first mark" % (n, MIN_STREAM_S)
 
 
 def c3_no_cuts(summary):
@@ -158,6 +203,9 @@ def info_lines(summary, ssh_counters):
             ssh_counters.get("disconnects"), ssh_counters.get("recoveries")))
     gaps = (summary.get("gaps") or {}).get("stats_unfaulted_s") or {}
     out.append("token gaps outside fault windows: max %s s, p99 %s s" % (gaps.get("max"), gaps.get("p99")))
+    for r in summary.get("per_stream") or []:
+        out.append("stream %s: max gap %s s (outside fault windows %s s), cuts %s, first stream completed %s" % (
+            r.get("lane"), r.get("max_gap_s"), r.get("max_gap_unfaulted_s"), r.get("cuts"), r.get("first_stream_completed")))
     out.append("added latency: %s" % json.dumps(summary.get("added_latency_ms"), sort_keys=True))
     return out
 

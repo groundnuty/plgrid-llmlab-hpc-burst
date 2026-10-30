@@ -124,6 +124,102 @@ class Criteria(unittest.TestCase):
         self.assertFalse(verdicts(GOOD, job_log=JOB_LOG + "RESULT: TRANSPORT FAILED (auth)\n")["C5"])
 
 
+def lane_stream(lane, **kw):
+    """The first stream of one lane, as stream_watch.py --streams N records it (written by hand from the README)."""
+    rec = {"id": 1, "lane": lane, "requested_s": 3660, "completed": True, "interrupted": False, "duration_s": 3661.0,
+           "tokens": 3660, "end_utc": "2026-10-30T13:01:30.000Z"}
+    rec.update(kw)
+    return rec
+
+
+def three_streams(*records, **edits):
+    """GOOD with three declared streams; 'records' replaces the stream list (default: three good lanes)."""
+    return changed(streams=list(records) or [lane_stream(1), lane_stream(2), lane_stream(3)], streams_requested=3, **edits)
+
+
+def c2_text(summary):
+    return [t for cid, ok, t in verdict.evaluate(summary, JOB_LOG, PROBE, None) if cid == "C2"][0]
+
+
+class PerStreamC2(unittest.TestCase):
+    """C2 (no cut, full length) holds for every one of the --streams N concurrent streams, not for the best one.
+    The case that matters is a cut in one stream while the others complete: the old rule ('some stream completed')
+    passed it."""
+
+    def test_three_good_streams_pass(self):
+        self.assertTrue(verdicts(three_streams())["C2"])
+
+    def test_a_cut_in_one_stream_fails_c2_even_when_the_others_complete(self):
+        cut = lane_stream(2, completed=False, duration_s=812.0, tokens=811, end_utc=BEFORE,
+                          reason="cut: EOF before the final chunk")
+        s = three_streams(lane_stream(1), cut, lane_stream(3), cuts=[{"stream": 1, "lane": 2, "end_utc": BEFORE,
+                                                                       "reason": "cut: EOF before the final chunk"}])
+        v = verdicts(s)
+        self.assertFalse(v["C2"])
+        text = c2_text(s)
+        self.assertIn("stream 2", text)
+        self.assertNotIn("stream 1:", text)
+        self.assertNotIn("stream 3:", text)
+        self.assertIn("1 of 3", text)
+        self.assertTrue(v["C1"] and v["C4a"] and v["C4b"] and v["C4c"] and v["C5"], "only the stream criteria react")
+
+    def test_the_cut_is_found_in_the_stream_record_alone(self):
+        # the cuts list is derived from the records; C2 must not depend on it
+        cut = lane_stream(3, completed=False, duration_s=100.0, tokens=99, end_utc=BEFORE, reason="stall")
+        self.assertFalse(verdicts(three_streams(lane_stream(1), lane_stream(2), cut))["C2"])
+
+    def test_a_declared_stream_that_never_opened_fails(self):
+        s = three_streams(lane_stream(1), lane_stream(3))          # three declared, lane 2 has no record
+        self.assertFalse(verdicts(s)["C2"])
+        self.assertIn("stream 2: no stream record", c2_text(s))
+
+    def test_two_records_for_three_declared_streams_fails(self):
+        self.assertFalse(verdicts(three_streams(lane_stream(1), lane_stream(2)))["C2"])
+
+    def test_a_short_stream_fails_and_is_named(self):
+        s = three_streams(lane_stream(1), lane_stream(2), lane_stream(3, duration_s=3599.0))
+        self.assertFalse(verdicts(s)["C2"])
+        self.assertIn("stream 3", c2_text(s))
+
+    def test_an_interrupted_stream_is_not_a_completed_one(self):
+        s = three_streams(lane_stream(1), lane_stream(2, completed=False, interrupted=True, duration_s=2000.0), lane_stream(3))
+        self.assertFalse(verdicts(s)["C2"])
+
+    def test_cuts_after_the_first_mark_are_fault_effects_and_do_not_fail_c2(self):
+        # the faults cut the streams that were opened after the first hour, by design
+        later = lane_stream(1, id=2, completed=False, duration_s=40.0, tokens=39, end_utc=AFTER, reason="cut")
+        s = three_streams(lane_stream(1), lane_stream(2), lane_stream(3), later,
+                          cuts=[{"stream": 2, "lane": 1, "end_utc": AFTER, "reason": "cut"}])
+        self.assertTrue(verdicts(s)["C2"])
+
+    def test_a_summary_without_lane_tags_is_one_stream(self):
+        self.assertTrue(verdicts(GOOD)["C2"])
+        self.assertFalse(verdicts(changed(streams=[]))["C2"], "no stream at all")
+
+    def test_the_command_line_prints_fail_c2_naming_the_cut_stream(self):
+        cut = lane_stream(2, completed=False, duration_s=812.0, end_utc=BEFORE, reason="cut")
+        d = tempfile.mkdtemp(prefix="s1-vd-")
+        try:
+            for name, text in (("summary.json", json.dumps(three_streams(lane_stream(1), cut, lane_stream(3)))),
+                               ("job.log", JOB_LOG)):
+                with open(os.path.join(d, name), "w") as fh:
+                    fh.write(text)
+            import io
+            out, old = io.StringIO(), sys.stdout
+            sys.stdout = out
+            try:
+                rc = verdict.main(["--summary", os.path.join(d, "summary.json"), "--job-log", os.path.join(d, "job.log")])
+            finally:
+                sys.stdout = old
+        finally:
+            for f in os.listdir(d):
+                os.unlink(os.path.join(d, f))
+            os.rmdir(d)
+        self.assertEqual(rc, 1)
+        line = [ln for ln in out.getvalue().splitlines() if ln.startswith("FAIL C2")][0]
+        self.assertIn("stream 2", line)
+
+
 class CommandLine(unittest.TestCase):
     def run_main(self, summary, job_log):
         d = tempfile.mkdtemp(prefix="s1-vd-")

@@ -32,6 +32,9 @@
 #   (default)      step 0, then the fake engine, the ssh forward (ssh-forward mode) and frpc, a gate on
 #                  frpc's own "login to server success", a gate on the watcher attaching, and then
 #                  stay up until TERM or the time limit.
+#   RUN_ROOT            the directory that holds the job directories (default $SCRATCH/s1-frp, or $TMPDIR/s1-frp when
+#                       SCRATCH is unset). An override must be an absolute path without whitespace; it is created when
+#                       missing, so an operator can use a subdirectory of their own without changing SCRATCH.
 #   VM_SSH_PORT         the VM's ssh port (default 22; tests use a throwaway sshd on another port)
 #   OUTAGE_DEADLINE_S   (default 300) the forward may be down this long, counted from the last time it was
 #                       established or from the start; then the job stops with exit 4
@@ -46,7 +49,7 @@
 #   3 = the path does not work (step 0, or frpc's login did not reach frps); the spike records "not reachable" and stops;
 #   4 = the ssh forward failed for good (authentication, host key, forwarding) or stayed down past the outage deadline;
 #   5 = no watcher attached in time. Port 7000 and 443 never decide the exit code by themselves.
-# Files in $JOB_DIR (<scratch>/s1-frp/<jobid>-r<restart count>):
+# Files in $JOB_DIR ($RUN_ROOT/<jobid>-r<restart count>):
 #   PRIVATE, never copy them out: job.log (node name, paths), ssh-raw.err and ssh-cur.err (raw ssh stderr),
 #     ssh-probe.err, .redact.sed, frpc.stdout, frpc.toml, streamer.log, curl.err, pids, ssh.pid
 #   COLLECT ONLY export/: redacted copies of job.log, probe.jsonl, ssh-exits.jsonl, ssh-counters.json,
@@ -136,11 +139,19 @@ esac
 case "$FRPS_PORT" in ''|*[!0-9]*) die "FRPS_PORT must be a port number, got '$FRPS_PORT'" ;; esac
 
 # --- the job's own directory and log: fresh, never reused -----------------------------------------
-RUN_ROOT="${SCRATCH:-${TMPDIR:-}}"
-[ -n "$RUN_ROOT" ] && [ -d "$RUN_ROOT" ] || die "neither \$SCRATCH nor \$TMPDIR is a directory"
+# RUN_ROOT is read from the submit-time environment like TRANSPORT. Unset, it is $SCRATCH/s1-frp (the base
+# directory must exist); set, it is used as given, after the checks below, and created if missing.
+RUN_ROOT="${RUN_ROOT:-}"
+if [ -z "$RUN_ROOT" ]; then
+  RUN_BASE="${SCRATCH:-${TMPDIR:-}}"
+  [ -n "$RUN_BASE" ] && [ -d "$RUN_BASE" ] || die "neither \$SCRATCH nor \$TMPDIR is a directory (or set RUN_ROOT)"
+  RUN_ROOT="$RUN_BASE/s1-frp"
+fi
+case "$RUN_ROOT" in /*) ;; *) die "RUN_ROOT must be an absolute path, got '$RUN_ROOT'" ;; esac
+case "$RUN_ROOT" in *[[:space:]]*) die "RUN_ROOT must not contain whitespace, got '$RUN_ROOT'" ;; esac
 umask 077
-JOB_DIR="$RUN_ROOT/s1-frp/${SLURM_JOB_ID:-nojob}-r${RESTART_COUNT}"
-mkdir -p "$RUN_ROOT/s1-frp" || die "cannot create $RUN_ROOT/s1-frp"
+JOB_DIR="$RUN_ROOT/${SLURM_JOB_ID:-nojob}-r${RESTART_COUNT}"
+mkdir -p "$RUN_ROOT" || die "cannot create $RUN_ROOT"
 mkdir "$JOB_DIR" 2>/dev/null || die "$JOB_DIR already exists: refusing to reuse the state of an earlier run"
 exec >>"$JOB_DIR/job.log" 2>&1
 
@@ -193,7 +204,7 @@ build_redact() {
   local f="$REDACT_SED" pair name val repl
   : > "$f" || return 1
   for pair in SSH_KEY:key-file SSH_KNOWN_HOSTS:known-hosts-file TOKEN_FILE:token-file JOB_DIR:job-dir KIT_DIR:kit-dir \
-              RUN_ROOT:scratch VM_ADDR:vm VM_USER:vm-user LOCAL_USER:user HOME:home NODE_NAME:node JOB_ID:jobid; do
+              RUN_ROOT:run-root RUN_BASE:scratch SCRATCH:scratch VM_ADDR:vm VM_USER:vm-user LOCAL_USER:user HOME:home NODE_NAME:node JOB_ID:jobid; do
     name="${pair%%:*}"; repl="${pair#*:}"
     val="${!name:-}"
     case "$val" in ''|none|?) continue ;; esac            # empty, "none" or a single character: nothing to strip
