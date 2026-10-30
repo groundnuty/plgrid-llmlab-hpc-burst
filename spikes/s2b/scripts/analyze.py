@@ -82,12 +82,17 @@ def client_stats(records):
 
 
 def reuse_bound(records, block=16):
-    """Share of prompt tokens that a perfect router with an unbounded cache could serve from cache.
+    """An ESTIMATE of the share of prompt tokens that a perfect router with an unbounded cache could serve
+    from cache. It is not a theoretical ceiling.
 
-    For turn t >= 1 of a session: the previous turn's prompt plus its reply, at most this prompt.
-    For turn 0: the agent type's shared system prompt, for every session but the first of its type,
-    estimated as the largest cached-token count any turn-0 request of that type reported.
-    Rounded down to whole cache blocks. An estimate (re-tokenised replies can differ slightly)."""
+    For turn t >= 1 of a session: the previous turn's prompt plus its reply, less the last sampled token
+    (its KV is only computed when the next step feeds it back), at most this prompt.
+    For turn 0: the agent type's shared system prompt, for every session but the first of its type. Its
+    length is inferred from the run itself: the largest cached-token count any turn-0 request of that type
+    reported. That depends on the router and cache under test (a type that never hit would count as 0), so
+    the estimate is not independent of the arms it is compared with. A ceiling would need the tokenised
+    histories and the materialised KV, which the client does not record.
+    Everything is rounded down to whole cache blocks; re-tokenised replies can differ slightly."""
     ok = sorted((r for r in records if not r.get("err")), key=lambda r: r["start_unix"])
     by_sess = defaultdict(dict)
     for r in ok:
@@ -106,7 +111,7 @@ def reuse_bound(records, block=16):
         else:
             prev = by_sess[r["session"]].get(r["turn"] - 1)
             if prev:
-                reusable += min(prev["prompt_tokens"] + prev["completion_tokens"], r["prompt_tokens"]) // block * block
+                reusable += min(prev["prompt_tokens"] + prev["completion_tokens"] - 1, r["prompt_tokens"]) // block * block
     return reusable / total if total else None
 
 
@@ -156,6 +161,8 @@ def load_placement(results, regime, nwork):
 
 
 def samples(arm_dir):
+    """Maxima over the 2 s samples of each worker. They are sampled maxima: a spike shorter than the
+    sampling interval can fall between two samples, so they bound what was seen, not what happened."""
     kv, waiting = defaultdict(float), defaultdict(float)
     f_in = opened(os.path.join(arm_dir, "samples.tsv"))
     if f_in is None:
@@ -203,7 +210,7 @@ def fmt(v, spec):
 
 
 def markdown(rows):
-    out = ["| Run | Router | Hit rate (workers) | Hit rate (client) | Reuse bound | TTFT p50 / p95 ms | Sessions per worker | Sticky sessions | Requests max/mean | Preemptions | OK / failed | Wall s |",
+    out = ["| Run | Router | Hit rate (workers) | Hit rate (client) | Reuse bound (estimate) | TTFT p50 / p95 ms | Sessions per worker | Sticky sessions | Requests max/mean | Preemptions | OK / failed | Wall s |",
            "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in rows:
         p = r["placement"] or {}

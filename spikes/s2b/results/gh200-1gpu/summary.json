@@ -25,7 +25,7 @@
   "latency_p50_ms": 689.085,
   "client_hit_rate": 0.7019214557820806,
   "prompt_tokens": 6678582,
-  "reuse_bound": 0.9055023955684006,
+  "reuse_bound": 0.9051478292847194,
   "placement": {
    "sessions_per_worker": [
     24,
@@ -87,7 +87,7 @@
   "latency_p50_ms": 557.771,
   "client_hit_rate": 0.9024175637498826,
   "prompt_tokens": 6687228,
-  "reuse_bound": 0.905465762495312,
+  "reuse_bound": 0.905307849530478,
   "placement": {
    "sessions_per_worker": [
     23,
@@ -149,7 +149,7 @@
   "latency_p50_ms": 678.683,
   "client_hit_rate": 0.7026374715540258,
   "prompt_tokens": 6687238,
-  "reuse_bound": 0.9054668010918708,
+  "reuse_bound": 0.9053064957460764,
   "placement": {
    "sessions_per_worker": [
     22,
@@ -211,7 +211,7 @@
   "latency_p50_ms": 412.841,
   "client_hit_rate": 0.9051010929336669,
   "prompt_tokens": 6704524,
-  "reuse_bound": 0.9052347340392846,
+  "reuse_bound": 0.9051010929336669,
   "placement": {
    "sessions_per_worker": [
     26,
@@ -273,7 +273,7 @@
   "latency_p50_ms": 412.18,
   "client_hit_rate": 0.9052199829029296,
   "prompt_tokens": 6695884,
-  "reuse_bound": 0.9053370697580783,
+  "reuse_bound": 0.9052199829029296,
   "placement": {
    "sessions_per_worker": [
     26,
@@ -335,7 +335,7 @@
   "latency_p50_ms": 704.904,
   "client_hit_rate": 0.6347298144699874,
   "prompt_tokens": 6678596,
-  "reuse_bound": 0.9055052888361566,
+  "reuse_bound": 0.9051483275826236,
   "placement": {
    "sessions_per_worker": [
     22,
@@ -397,7 +397,7 @@
   "latency_p50_ms": 532.851,
   "client_hit_rate": 0.9024145692133789,
   "prompt_tokens": 6687197,
-  "reuse_bound": 0.905469959984729,
+  "reuse_bound": 0.9053072610243126,
   "placement": {
    "sessions_per_worker": [
     27,
@@ -459,7 +459,7 @@
   "latency_p50_ms": 694.708,
   "client_hit_rate": 0.6419170588062885,
   "prompt_tokens": 6687244,
-  "reuse_bound": 0.9054659886793424,
+  "reuse_bound": 0.9053056834773787,
   "placement": {
    "sessions_per_worker": [
     22,
@@ -521,7 +521,7 @@
   "latency_p50_ms": 418.65,
   "client_hit_rate": 0.8797295553817092,
   "prompt_tokens": 6704515,
-  "reuse_bound": 0.9052359492073625,
+  "reuse_bound": 0.9050951485677935,
   "placement": {
    "sessions_per_worker": [
     0,
@@ -583,7 +583,7 @@
   "latency_p50_ms": 424.987,
   "client_hit_rate": 0.8819811678479138,
   "prompt_tokens": 6695889,
-  "reuse_bound": 0.9053363937185936,
+  "reuse_bound": 0.9052193069508768,
   "placement": {
    "sessions_per_worker": [
     18,
@@ -645,7 +645,7 @@
   "latency_p50_ms": 706.973,
   "client_hit_rate": 0.6537955846661623,
   "prompt_tokens": 6678589,
-  "reuse_bound": 0.9055038422037949,
+  "reuse_bound": 0.9051492762917437,
   "placement": {
    "sessions_per_worker": [
     18,
@@ -707,7 +707,7 @@
   "latency_p50_ms": 536.902,
   "client_hit_rate": 0.9024102509425055,
   "prompt_tokens": 6687229,
-  "reuse_bound": 0.9054656270930754,
+  "reuse_bound": 0.9053077141518557,
   "placement": {
    "sessions_per_worker": [
     28,
@@ -769,7 +769,7 @@
   "latency_p50_ms": 425.213,
   "client_hit_rate": 0.8840707744171724,
   "prompt_tokens": 6704513,
-  "reuse_bound": 0.9052362192451562,
+  "reuse_bound": 0.9051025779202755,
   "placement": {
    "sessions_per_worker": [
     0,

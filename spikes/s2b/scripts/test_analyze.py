@@ -55,6 +55,12 @@ class ReuseBoundTest(unittest.TestCase):
         # reusable = 0 (first session of its type) + 96 + 64 = 160 of 350 prompt tokens
         self.assertAlmostEqual(analyze.reuse_bound(recs), 160 / 350)
 
+    def test_the_last_sampled_token_has_no_kv_yet(self):
+        # Turn 0: prompt 96 + reply 16 = 112, an exact multiple of the 16-token block. The reply's last token
+        # was sampled but never fed back, so only 111 tokens have KV: 6 blocks = 96, not 7 blocks = 112.
+        recs = [rec(0, 0, 0, 1.0, 96, 0, completion=16), rec(0, 1, 0, 2.0, 150, 96)]
+        self.assertAlmostEqual(analyze.reuse_bound(recs), 96 / 246)
+
     def test_failed_requests_ignored(self):
         recs = [rec(0, 0, 0, 1.0, 100, 0), rec(0, 1, 0, 2.0, 150, 0, err="boom")]
         self.assertAlmostEqual(analyze.reuse_bound(recs), 0.0)
