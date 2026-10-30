@@ -1,0 +1,262 @@
+# Draft platform profile from spike S5 (issue #17). Not the final schema:
+# HBEP-4 open question 3 decides that. Each fact: value, method, source, date.
+draft: s5
+platform: sano                # helios | athena | sano
+organization: sano            # cyfronet | sano
+kind: batch
+collected: 2026-10-30         # UTC date
+# Provenance: every `measured` fact comes from a command run on the login node
+# on the collection date (read-only; sbatch --test-only creates no job). Sano
+# has no public user documentation (two web searches on 2026-10-30 found none),
+# so there is no `documented` fact with a URL. The centre's admin guide of
+# 2026-10-13 is private ("centre admin guide, not public"); it is cited in a
+# note only for the four facts it covers, and each of them is also measured.
+facts:
+  slurm:
+    version: {value: "23.11.4", method: measured, source: "sinfo --version (prints 'slurm-wlm 23.11.4'); scontrol show config SLURM_VERSION", date: 2026-10-30}
+    squeue_json:
+      value: true
+      method: measured
+      source: "squeue --me --json"
+      date: 2026-10-30
+      note: "exit 0, output parses as JSON. Top-level keys: errors, jobs, last_backfill, last_update, meta, warnings. meta names data_parser/v0.0.40."
+    sacct_json:
+      value: true
+      method: measured
+      source: "sacct --json -S now-1hours -X"
+      date: 2026-10-30
+      note: "exit 0, output parses as JSON. Top-level keys: errors, jobs, meta, warnings. Accounting storage is slurmdbd."
+    jwt_token:
+      value: false
+      method: measured
+      source: "scontrol token lifespan=60 >/dev/null 2>&1 (output discarded); scontrol show config"
+      date: 2026-10-30
+      note: "token command exit 1. AuthType=auth/munge, AuthAltTypes=(null), AuthAltParameters=(null): JWT is not configured, so a plain user cannot mint a token."
+    slurmrestd:
+      value: false
+      method: measured
+      source: "command -v slurmrestd; systemctl list-units | grep slurmrestd; scontrol show config | grep -i -E 'rest|jwt'"
+      date: 2026-10-30
+      note: "Not on PATH on the login node, no systemd unit, no REST or JWT line in the config. A slurmrestd on another host is not excluded by this check. No public documentation advertises one."
+    min_job_age_s: {value: 300, method: measured, source: "scontrol show config: MinJobAge = 300 sec", date: 2026-10-30}
+    requeue:
+      value: {job_requeue: 1, requeue_exit: null, requeue_exit_hold: null}
+      method: measured
+      source: "scontrol show config: JobRequeue, RequeueExit, RequeueExitHold"
+      date: 2026-10-30
+      note: "Batch jobs are requeueable by default. sbatch --test-only --no-requeue was accepted."
+    limits:
+      value:
+        max_job_count: 10000
+        max_array_size: 1001
+        kill_wait_s: 30
+        over_time_limit_min: 0
+        unkillable_step_timeout_s: 60
+        scheduler_type: "sched/backfill"
+        scheduler_parameters: null
+        enforce_part_limits: "ALL"
+        accounting_storage_enforce: "associations,limits,qos"
+        select_type: "select/cons_tres"
+        select_type_parameters: "CR_CORE_MEMORY"
+        def_mem_per_node: "UNLIMITED"
+        max_mem_per_node: "UNLIMITED"
+        propagate_resource_limits: "ALL"
+      method: measured
+      source: "scontrol show config"
+      date: 2026-10-30
+      note: "A job with no --mem is not capped by a default; the submit rule below makes --mem mandatory."
+    priority:
+      value:
+        type: "priority/multifactor"
+        weight_fairshare: 1000000
+        weight_age: 20000
+        weight_qos: 0
+        weight_partition: 0
+        weight_jobsize: 0
+        decay_half_life: "7-00:00:00"
+        max_age: "1-00:00:00"
+        flags: "NO_FAIR_TREE"
+        calc_period: "00:05:00"
+      method: measured
+      source: "scontrol show config: PriorityType, PriorityWeight*, PriorityDecayHalfLife, PriorityMaxAge, PriorityFlags, PriorityCalcPeriod"
+      date: 2026-10-30
+      note: "Fair share carries 98% of the weight sum (1,000,000 of 1,020,000), so it dominates priority. Also stated in the centre admin guide, not public. The QOS priority column is not used (weight_qos 0). The test partition has PriorityTier 10 against 1 for gpu."
+    preemption:
+      value: false
+      method: measured
+      source: "scontrol show config: PreemptType=(null), PreemptMode=OFF; sacctmgr -P show qos: Preempt column empty for every QOS; scontrol show partition: PreemptMode=OFF"
+      date: 2026-10-30
+      note: "No preemption. Also stated in the centre admin guide, not public."
+    qos:
+      value:
+        - {name: normal, max_wall: null, max_tres_per_job: null}
+        - {name: gpu1, max_wall: "3-00:00:00", max_tres_per_job: "cpu=12,gres/gpu=1,mem=140G"}
+        - {name: gpu2, max_wall: "3-00:00:00", max_tres_per_job: "cpu=24,gres/gpu=2,mem=280G"}
+        - {name: gpu4, max_wall: "3-00:00:00", max_tres_per_job: "cpu=48,gres/gpu=4,mem=560G"}
+        - {name: gpu8, max_wall: "3-00:00:00", max_tres_per_job: "cpu=92,gres/gpu=8,mem=1087232M"}
+        - {name: cpu_s, max_wall: "5-00:00:00", max_tres_per_job: "cpu=24,mem=280G"}
+        - {name: cpu_m, max_wall: "5-00:00:00", max_tres_per_job: "cpu=48,mem=560G"}
+        - {name: cpu_l, max_wall: "3-00:00:00", max_tres_per_job: "cpu=72,mem=840G"}
+        - {name: cpu_xl, max_wall: "3-00:00:00", max_tres_per_job: "cpu=92,mem=1087232M"}
+        - {name: test, max_wall: "02:00:00", max_tres_per_job: "cpu=12,gres/gpu=1,mem=140G"}
+      method: measured
+      source: "sacctmgr -P show qos (MaxWall, MaxTRES columns); scontrol show assoc_mgr flags=qos"
+      date: 2026-10-30
+      note: "The QOS class names and the 2 h limit of test match the centre admin guide (not public). The class, not the partition, sets the effective wall limit: partition gpu allows 7-00:00:00 but no gpu or cpu_l/cpu_xl QOS allows more than 3 days. Which QOS a user may use is per association (the QOS list above is the cluster's, not any one user's); --qos=test was refused for the probing user. A literal 'scontrol show qos' is refused ('invalid entity:qos for keyword:show'); 'scontrol show assoc_mgr flags=qos' and sacctmgr work."
+    submit_rules:
+      value:
+        required_flags_partition_gpu: ["--qos", "--mem or --mem-per-cpu", "--cpus-per-task", "non-generic --job-name"]
+        generic_names_rejected: ["wrap (the default of --wrap)", "job"]
+        test_partition: "submit with --partition=test and no --qos: the partition's own QoS=test applies, and --qos=test is refused for the probing user. Whether --mem, --cpus-per-task and --job-name are required there was not tested (the accepted probe carried all three)."
+        qos_checked_at_submit: true
+        typed_gres_quirk: "--gres=gpu:a100:1 is rejected with 'GPUs: requested 100, limit 1'; the untyped form --gres=gpu:1 is accepted"
+        account_flag_needed: false
+      method: measured
+      source: "sbatch --test-only with each flag left out in turn (job_submit lua plugin: JobSubmitPlugins=lua); sbatch --test-only --gres=gpu:a100:1"
+      date: 2026-10-30
+      note: "On partition gpu, a submission without one of the required flags fails with a message that names the flag, so the rule is enforced at submit time. The centre admin guide (not public) lists the same four flags as required for every job; the measurement agrees for partition gpu but disagrees for partition test, where a submission with no --qos was accepted. The measurement is recorded. A submission over the QOS wall time or GPU cap is refused with a message naming the QOS and suggesting the next class. No --account was needed for the probing user (default association); other associations may differ. The typed-GRES rejection looks like a parsing fault in the submit script (the model name 'a100' read as a count); not reported to the centre."
+    test_only:
+      value: true
+      method: measured
+      source: "sbatch --test-only --job-name=s5probe --partition=gpu --qos=gpu1 --gres=gpu:1 --mem=1G --cpus-per-task=1 --time=00:05:00 --wrap=true"
+      date: 2026-10-30
+      note: "Exit 0, creates no job, prints an estimated start time and the partition. Also accepted: --partition=test with no --qos; --qos=cpu_s (lands in partition gpu); --gres=gpu:1,scratch:10. Refused: --qos=test with either partition ('Invalid qos specification' for the probing user; the test partition itself carries QoS=test)."
+  partitions:
+    - name: gpu
+      default: true
+      max_time: "7-00:00:00"
+      default_time: "NONE"
+      nodes: 2
+      cpus_per_node: "48 (1 node); 96 (1 node)"
+      mem_per_node_mb: "560000 (1 node); 1120000 (1 node)"
+      gres: "gpu:a100:4,scratch:3000 (48-CPU node); gpu:a100:8,scratch:12000 (96-CPU node)"
+      arch: "x86_64"
+      features: "(null)"
+      node_classes:
+        - {cpus: 48, allocatable_cpus: 44, mem_mb: 560000, mem_reserved_for_system_mb: 16384, gpus: 4, gpu_type: a100, scratch_gres: 3000, tmp_disk_mb: 3000000, kernel: "Linux 6.8.0-146-generic (Ubuntu)", sockets: 2, threads_per_core: 1}
+        - {cpus: 96, allocatable_cpus: 92, mem_mb: 1120000, mem_reserved_for_system_mb: 32768, gpus: 8, gpu_type: a100, scratch_gres: 12000, tmp_disk_mb: 12000000, kernel: "Linux 6.8.0-139-generic (Ubuntu)", sockets: 2, threads_per_core: 1}
+      priority_tier: 1
+      allow_qos: "ALL"
+      oversubscribe: "NO"
+      method: measured
+      source: "sinfo -h -o '%P|%l|%L|%D|%c|%m|%G|%f|%d'; scontrol show partition; scontrol show node -o (aggregated per partition, node names dropped)"
+      date: 2026-10-30
+      note: "The only default partition. No CPU-only partition is visible to this user (sinfo and scontrol without -a skip hidden ones): the cpu_* QOS classes ran in this one under sbatch --test-only. DefaultTime is unset (sinfo prints n/a); what a submission with no --time gets was not tested. Both nodes are x86_64. The CPU model of the compute nodes is not exposed by scontrol; the login node is an Intel Xeon Gold 5220R."
+    - name: test
+      default: false
+      max_time: "02:00:00"
+      default_time: "00:30:00"
+      nodes: 1
+      cpus_per_node: "48"
+      mem_per_node_mb: "560000"
+      gres: "gpu:a100:4,scratch:3000"
+      arch: "x86_64"
+      features: "(null)"
+      priority_tier: 10
+      partition_qos: "test"
+      allow_qos: "ALL"
+      oversubscribe: "NO"
+      method: measured
+      source: "sinfo -h -o '%P|%l|%L|%D|%c|%m|%G|%f|%d'; scontrol show partition; scontrol show node -o (Partitions field)"
+      date: 2026-10-30
+      note: "Its one node is the 48-CPU node that also belongs to partition gpu, so test jobs and gpu jobs compete for the same hardware. The 2 h limit matches the centre admin guide (not public). A --test-only submission to this partition with no --qos estimated an immediate start."
+  gpu:
+    value: {model: "a100", gres_name: "gpu", typed_gres_name: "gpu:a100", counts_per_node: [4, 8], memory_per_gpu_gb: null}
+    method: measured
+    source: "sinfo -h -o '%G'; scontrol show node -o: Gres=gpu:a100:4,scratch:3000 and gpu:a100:8,scratch:12000; scontrol show config: GresTypes = gpu,scratch"
+    date: 2026-10-30
+    note: "The A100 model name comes from the GRES type. The memory size (40 or 80 GB) is not exposed: no nvidia-smi on the login node and the GRES type carries no size. Request GPUs untyped (--gres=gpu:N); see submit_rules. AccountingStorageTRES also lists gres/gpumem and gres/gpuutil; whether they are used is not known. Interconnect between the two nodes is not recorded (unknown)."
+  login_node:
+    value: {arch: "x86_64", cpu_model: "Intel(R) Xeon(R) Gold 5220R, 2.20 GHz", kernel: "6.8.0-117-generic", python3: true, jq: true, nvidia_smi: false}
+    method: measured
+    source: "uname -m; lscpu; uname -r; command -v python3 jq nvidia-smi"
+    date: 2026-10-30
+    note: "The login-node kernel differs from both compute-node kernels listed under the gpu partition."
+  containers:
+    apptainer:
+      value: "1.5.3"
+      method: measured
+      source: "apptainer --version (prints 'apptainer version 1.5.3'); command -v apptainer"
+      date: 2026-10-30
+      note: "On the login node. 'singularity' is a symlink to apptainer and reports the same version. Whether the compute nodes carry the same version is unknown."
+    apptainer_mode:
+      value: {allow_setuid: true, allow_user_ns: true, allow_pid_ns: true, starter_suid_present: false, helpers: ["fuse-overlayfs", "squashfuse_ll", "mksquashfs", "unsquashfs", "gocryptfs", "proot", "fuse2fs"]}
+      method: measured
+      source: "grep of /etc/apptainer/apptainer.conf; ls -l /usr/libexec/apptainer/bin/"
+      date: 2026-10-30
+      note: "No starter-suid binary in the helper directory, so Apptainer can probably only run unprivileged, through user namespaces (inferred); the setuid setting in the config would have nothing to apply to. An /etc/apparmor.d profile named apptainer exists (file name only, content not read)."
+    enroot: {value: false, method: measured, source: "command -v enroot", date: 2026-10-30}
+    pyxis:
+      value: false
+      method: measured
+      source: "srun --help | grep -i container; ls /etc/slurm; scontrol show config: PlugStackConfig, JobContainerType"
+      date: 2026-10-30
+      note: "srun lists only Slurm's native OCI options (--container, --container-id), no pyxis options. PlugStackConfig=(null), JobContainerType=(null), and /etc/slurm/plugstack.conf.d holds no readable entry. Whether Slurm's native OCI support is configured (oci.conf) was not checked."
+    userns_login_node:
+      value: {max_user_namespaces: 192540, unprivileged_userns_clone: 1, unshare_U_exit: 0, unshare_Ur_exit: 1, apparmor_restrict_unprivileged_userns: 1, apparmor_enabled: true}
+      method: measured
+      source: "cat /proc/sys/user/max_user_namespaces; cat /proc/sys/kernel/unprivileged_userns_clone; unshare -U true; unshare -Ur true; cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns"
+      date: 2026-10-30
+      note: "A plain user can create a user namespace (unshare -U exit 0) but cannot map root into it (unshare -Ur exit 1: 'write failed /proc/self/uid_map: Operation not permitted'; also with -Urm). The likely cause is the Ubuntu AppArmor restriction on unprivileged user namespaces (sysctl apparmor_restrict_unprivileged_userns=1) applied to an unconfined shell. Whether Apptainer, with its own AppArmor profile, can create the namespace was not tested, since no container was run."
+    userns_compute_nodes: {value: null, method: unknown, source: "needs a job; S5 runs none", date: 2026-10-30}
+  storage:
+    node_local:
+      value: {tmpfs_config: "/scratch", tmp_disk_mb_per_node: [3000000, 12000000], scratch_gres_per_node: [3000, 12000]}
+      method: measured
+      source: "sinfo -h -o '%P|%d'; scontrol show node -o: TmpDisk, Gres; scontrol show config: TmpFS, GresTypes"
+      date: 2026-10-30
+      note: "TmpDisk is 3000000 MB on the 48-CPU node and 12000000 MB on the 96-CPU node. 'scratch' is also a countable GRES with the same 1:1000 ratio to TmpDisk, so one unit is probably 1 GB (inferred, not documented). A job can ask for it with --gres=scratch:N (accepted by sbatch --test-only). That a filesystem of that size is mounted at /scratch on the compute nodes, and its speed, need a job to confirm; no public documentation."
+  time:
+    scheduler_time_zone:
+      value: "UTC"
+      method: measured
+      source: "date +'%Z %z' (UTC +0000); echo TZ (empty); timedatectl (Etc/UTC); first line of scontrol show config ('Configuration data as of ...') against date -u in the same second; sbatch --test-only start estimate for partition test against date -u"
+      date: 2026-10-30
+      note: "Slurm client output is formatted in the session's zone, which is UTC here, so squeue, sacct and sbatch print UTC. Not tested with a TZ override or from a client in another zone. This is the zone of a login session's text output, not a property of the scheduler. Epoch fields (for example in JSON output) are unaffected by the session zone, so plugins should prefer epoch or JSON timestamps over parsing text."
+  login_node_policy:
+    long_running_process_allowed:
+      value: null
+      method: unknown
+      source: "no published source: two web searches on 2026-10-30 found no Sano user documentation"
+      date: 2026-10-30
+      note: "Not tested, by rule. The centre admin guide (not public) was cited only for the four facts above and is not a source here."
+    ssh_connection_limits:
+      value: "no MaxStartups, MaxSessions or LoginGraceTime line in the readable sshd configuration files"
+      method: measured
+      source: "grep of /etc/ssh/sshd_config and /etc/ssh/sshd_config.d/*.conf"
+      date: 2026-10-30
+      note: "The values in force are therefore OpenSSH's defaults unless set elsewhere; the effective limit was not read (sshd -T needs root) and the default is not verified here. Parallel logins tripped a connection throttle in an earlier project, so the framework should still share one connection per login."
+  reachability:
+    compute_outbound_internet:
+      value: null
+      method: unknown
+      source: "needs a job; S5 runs none"
+      date: 2026-10-30
+      prior_observation: "In an earlier project, compute nodes had internet access. This is not a fact for this profile."
+    compute_inbound_from_outside:
+      value: null
+      method: unknown
+      source: "no published source; needs a job"
+      date: 2026-10-30
+      prior_observation: "In an earlier project a compute-node port was reachable only through the login node. This is not a fact for this profile."
+unknown:
+  - fact: "compute-node outbound internet"
+    reason: "needs a job; S5 runs none"
+  - fact: "compute-node inbound from outside"
+    reason: "no published source; needs a job"
+  - fact: "user namespaces on compute nodes (and whether the AppArmor restriction applies there)"
+    reason: "needs a job; compute kernels differ from the login node's"
+  - fact: "Apptainer on compute nodes: version, and whether a container runs"
+    reason: "needs a job"
+  - fact: "memory per A100 (40 or 80 GB)"
+    reason: "not exposed by scontrol or the GRES type; needs nvidia-smi on a compute node"
+  - fact: "node-local /scratch: filesystem size actually mounted and its speed"
+    reason: "needs a job; only the configured TmpDisk and GRES counts are known"
+  - fact: "interconnect between the two GPU nodes (multi-node engine traffic, HBEP-6)"
+    reason: "not exposed by Slurm; needs a job or documentation"
+  - fact: "login-node policy for long-running user processes"
+    reason: "no published source found (two searches, 2026-10-30); never tested"
+  - fact: "effective sshd connection limits"
+    reason: "not set in readable config; sshd -T needs root"
+  - fact: "slurmrestd on a host other than the login node"
+    reason: "only the login node was checked"
