@@ -6,10 +6,14 @@
 #   stack.sh remove <stack> <index>  remove worker <index> from the router's discovery
 #   stack.sh url    <stack>          print the router's chat completions URL
 #   stack.sh metrics <stack>         print the workers' /metrics URLs, comma-separated
-#   stack.sh kill-epp <stack>        SIGTERM the EPP of an llm-d stack (fault injection)
+#   stack.sh kill-epp <stack>        SIGTERM the EPP of an llm-d stack, and SIGKILL it if it is still alive after 10 s
+#                                    (fault injection: a forced kill)
 #   stack.sh start-epp <stack>       start it again
 #   stack.sh restart-router <stack>  restart a vllm-router with its original arguments
-#   stack.sh signal-epp <stack> STOP|CONT   freeze or thaw the EPP (fault injection)
+#   stack.sh signal-epp <stack> STOP|CONT|TERM   freeze or thaw the EPP, or send it SIGTERM and nothing else
+#                                    (fault injection: a graceful stop with no SIGKILL behind it)
+#   stack.sh epp-alive <stack>       exit 0 if the recorded EPP process is alive
+#   stack.sh check-listeners <stack> verify that every listener of the stack's recorded processes is on loopback
 #   stack.sh status [stack...]       show recorded PIDs and whether they are alive
 #
 # Stacks: name idx kind sims | envoy variant | epp variant | router options
@@ -27,6 +31,10 @@
 #   llmd-ttft     12 llmd  3  shipped guide     (for the slow-first-token test; start with SIM_TTFT=1100s)
 #   vllmr-ttft    13 vllmr 3  default timeouts (likewise)
 #   vllmr-short    9 vllmr 3  --request-timeout-secs 60 (positive control: must cut a long stream)
+#
+# Every start (start, start-epp, restart-router) ends by checking, with ss -ltnp, that each process it launched
+# owns at least one TCP listener and that all of them are on 127.0.0.1 or [::1]. A listener on any other
+# address, or a process whose listeners cannot be seen, fails the start and stops what was started.
 #
 # Environment: S2_HOME (required) holds bin/, src/, venv/ (made by setup.sh); runtime state goes
 # to $S2_HOME/run/<stack>/. SIM_ITL is the simulators' inter-token latency (default 1s); EPP_V is the EPP log verbosity (default 2).
@@ -82,6 +90,38 @@ start_router() {
 
 port_free() { ! (exec 3<> "/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 
+descendants() { local c; echo "$1"; for c in $(ps -o pid= --ppid "$1" 2>/dev/null); do descendants "$c"; done; }
+
+# verify_listeners [name...] : for each recorded process of this stack (default: all), every TCP
+# listener owned by it or by its descendants must be loopback, and it must own at least one.
+# A process that shows no listener within LISTENER_WAIT_S (default 30) seconds counts as a failure: what cannot be seen is not a pass.
+verify_listeners() {
+  local names=("$@") f name pid st pids p out n tries bad=0 a b c laddr e users mine
+  if [[ ${#names[@]} -eq 0 ]]; then for f in "$RUN"/*.pid; do [[ -e $f ]] && names+=("$(basename "$f" .pid)"); done; fi
+  [[ ${#names[@]} -gt 0 ]] || { echo "check-listeners: no recorded process for stack $stack" >&2; return 1; }
+  for name in "${names[@]}"; do
+    read -r pid st < "$RUN/$name.pid"
+    for tries in $(seq 1 "${LISTENER_WAIT_S:-30}"); do
+      out=$(ss -H -ltnp 2>/dev/null) || { echo "check-listeners: ss failed; cannot verify" >&2; return 1; }
+      pids=$(descendants "$pid" | tr '\n' ' '); n=0
+      while read -r a b c laddr e users; do
+        [[ -n ${laddr:-} ]] || continue
+        mine=0; for p in $pids; do [[ ${users:-} == *"pid=$p,"* ]] && mine=1; done
+        [[ $mine -eq 1 ]] || continue
+        n=$((n + 1))
+        case $laddr in
+        127.0.0.1:* | "[::1]:"*) ;;
+        *) echo "check-listeners: $stack/$name (pid $pid) listens on $laddr, not loopback" >&2; bad=1 ;;
+        esac
+      done <<< "$out"
+      [[ $bad -eq 1 || $n -gt 0 ]] && break
+      sleep 1
+    done
+    [[ $n -gt 0 ]] || { echo "check-listeners: $stack/$name (pid $pid) shows no listener; cannot verify" >&2; bad=1; }
+  done
+  return $bad
+}
+
 cmd_start() {
   mkdir -p "$RUN"
   # A listener left over from an earlier stack would answer the health checks of this one and receive its traffic.
@@ -110,6 +150,7 @@ cmd_start() {
     wait_http "http://127.0.0.1:$ROUTER_PORT/health" 60
     ;;
   esac
+  verify_listeners || { cmd_stop; return 1; }
   echo "started $stack: $(cmd_url)"
 }
 
@@ -167,9 +208,14 @@ cmd_status() {
 
 case ${1:-} in
 kill-epp) stop_pid "$RUN/epp.pid"; echo "EPP of $stack stopped at $(date -u +%T)" ;;
-restart-router) stop_pid "$RUN/router.pid"; start_router; wait_http "http://127.0.0.1:$ROUTER_PORT/health" 60; echo "router of $stack restarted at $(date -u +%T)" ;;
-signal-epp) read -r pid st < "$RUN/epp.pid"; [[ $(awk '{print $22}' "/proc/$pid/stat") == "$st" ]] && kill -"${3:?STOP|CONT}" "$pid"; echo "EPP of $stack: SIG${3} at $(date -u +%T)" ;;
-start-epp) start_epp; echo "EPP of $stack started at $(date -u +%T)" ;;
+restart-router) stop_pid "$RUN/router.pid"; start_router; wait_http "http://127.0.0.1:$ROUTER_PORT/health" 60
+  verify_listeners router || { stop_pid "$RUN/router.pid"; exit 1; }
+  echo "router of $stack restarted at $(date -u +%T)" ;;
+signal-epp) read -r pid st < "$RUN/epp.pid"; [[ $(awk '{print $22}' "/proc/$pid/stat") == "$st" ]] || { echo "EPP of $stack is not running" >&2; exit 1; }
+  kill -"${3:?STOP|CONT|TERM}" "$pid"; echo "EPP of $stack: SIG${3} at $(date -u +%T)" ;;
+epp-alive) read -r pid st < "$RUN/epp.pid"; [[ -r /proc/$pid/stat && $(awk '{print $22}' "/proc/$pid/stat") == "$st" && $(awk '{print $3}' "/proc/$pid/stat") != Z ]] ;;
+check-listeners) verify_listeners && echo "listeners of $stack: all on loopback" ;;
+start-epp) start_epp; verify_listeners epp || { stop_pid "$RUN/epp.pid"; exit 1; }; echo "EPP of $stack started at $(date -u +%T)" ;;
 start) cmd_start ;; stop) cmd_stop ;; remove) cmd_remove "$@" ;; url) cmd_url ;; metrics) cmd_metrics ;;
 status) shift; cmd_status "$@" ;;
 *) sed -n 2,12p "$0"; exit 64 ;;
