@@ -31,10 +31,42 @@ type PartitionProfile struct {
 	AcceleratorClass `json:",inline"`
 }
 
+// JobTagLength is the length of the job tag (HBEP-3, Allocation and job
+// identity): hb-<40 characters>-<12 hex>. A platform whose job-name rules allow
+// fewer cannot take the tag, so its profile is refused.
+const JobTagLength = 56
+
+// JobNameRules are the platform's rules for the name of a job (HBEP-4). The
+// provider submits each job under its tag as the job name, so the rules must
+// allow JobTagLength characters.
+type JobNameRules struct {
+	// MaxLength is the longest job name the platform accepts. Absent when the
+	// platform states none.
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=4096
+	MaxLength *int32 `json:"max_length,omitempty"`
+
+	// Pattern is a regular expression (RE2) that a job name matches, when the
+	// platform restricts the characters of a name. Absent when it does not.
+	//
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	Pattern string `json:"pattern,omitempty"`
+}
+
 // PlatformProfileSpec is the platform's kind and its profile data. HBEP-4
 // owns the schema. For alpha the fields that the Slurm provider and the
 // deployment ID read are typed; the rest of the profile is an untyped block.
-// The typed fields carry the names HBEP-11 gives them.
+// The typed fields carry the names HBEP-11 gives them, and the scheduling
+// facts of spikes S4 and S5 are typed beside them (HBEP-11, API, PlatformProfile
+// schema) in the same snake_case. A fact the platform does not state, or one
+// that does not apply to its kind, is absent: an absent bool is unknown, not
+// false.
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.job_name) || !has(self.job_name.max_length) || self.job_name.max_length >= 56",message="job_name.max_length must allow the job tag's 56 characters (HBEP-3, Allocation and job identity)"
 type PlatformProfileSpec struct {
 	// ProviderKind is managed, batch or static: the kind of provider the
 	// platform offers (HBEP-3, Vocabulary, Provider). It is not the object's
@@ -79,10 +111,57 @@ type PlatformProfileSpec struct {
 	// +kubebuilder:default="10m"
 	UnknownBound *Duration `json:"unknown_bound,omitempty"`
 
-	// Profile is the rest of the profile, untyped until HBEP-4 fixes the
-	// schema: the time zone, the requeue default, how long a finished job stays
-	// in the queue listing, job-name rules, whether accounting keeps the job
-	// comment and the JSON output version (spikes S4 and S5).
+	// TimeZone is the IANA name of the time zone in which the scheduler prints
+	// local times, for example "Europe/Warsaw" or "UTC". A plugin that has to
+	// parse a text time uses it, and converts every time to UTC; epoch fields
+	// need no zone (HBEP-4, local time in scheduler output).
+	//
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern=`^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+)*$`
+	TimeZone string `json:"time_zone,omitempty"`
+
+	// RequeueDefault says whether the scheduler requeues a job by default (for
+	// Slurm, JobRequeue). The framework submits with --no-requeue either way;
+	// the fact records what a job without it would do (HBEP-4).
+	//
+	// +optional
+	RequeueDefault *bool `json:"requeue_default,omitempty"`
+
+	// MinJobAge is how long a finished job stays in the queue listing before
+	// the scheduler purges it (for Slurm, MinJobAge). A plugin that reads only
+	// the queue loses the final state of a job older than this, so it asks
+	// accounting (HBEP-4).
+	//
+	// +optional
+	MinJobAge *Duration `json:"min_job_age,omitempty"`
+
+	// JobName holds the platform's job-name rules.
+	//
+	// +optional
+	JobName *JobNameRules `json:"job_name,omitempty"`
+
+	// JobCommentAccounted says whether accounting keeps the job comment. Where
+	// it does not, the job name is the only tag that survives in accounting
+	// (spike S4).
+	//
+	// +optional
+	JobCommentAccounted *bool `json:"job_comment_accounted,omitempty"`
+
+	// JSONDataParser is the version of the scheduler's JSON output, for
+	// example "data_parser/v0.0.42" for Slurm. A plugin parses only the
+	// versions it knows.
+	//
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9_./-]*$`
+	JSONDataParser string `json:"json_data_parser,omitempty"`
+
+	// Profile is the rest of the profile, untyped: the facts that are not typed
+	// above, with the provenance envelope of each (value, method, source and
+	// date; HBEP-4, open question 7), until HBEP-4 fixes the schema.
 	//
 	// +optional
 	// +kubebuilder:validation:Type=object

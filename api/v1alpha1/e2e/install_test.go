@@ -1,9 +1,11 @@
 package e2e
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
+	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/discovery"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -99,14 +101,15 @@ func TestObjectsOfEveryKindRoundTripWithDefaults(t *testing.T) {
 		t.Errorf("a ModelDeployment without a retention policy got %v", md.Spec.RetentionPolicy)
 	}
 	md.Status.CurrentIDs = []v1alpha1.ClassDeploymentID{{
-		AcceleratorClass: v1alpha1.AcceleratorClass{GPUModel: "GH200", CPUArch: "aarch64"}, ID: fullID}}
+		AcceleratorClass: &v1alpha1.AcceleratorClass{GPUModel: "GH200", CPUArch: "aarch64"}, ID: fullID}}
 	md.Status.ReadyInstances, md.Status.DesiredInstances = 1, 2
 	must(t, c.Status().Update(bg(), md), "write ModelDeployment status")
 
 	al := newAllocation(ns, "alloc")
 	must(t, c.Create(bg(), al), "create Allocation")
-	if len(al.Spec.ManagementPolicies) != 1 || al.Spec.ManagementPolicies[0] != "*" {
-		t.Errorf("managementPolicies default = %v, want crossplane's [*]", al.Spec.ManagementPolicies)
+	// S4's set, not crossplane's "*", which includes Update (TestAllocationManagementPolicies).
+	if want := []xpv2.ManagementAction{"Observe", "Create", "Delete", "LateInitialize"}; !reflect.DeepEqual([]xpv2.ManagementAction(al.Spec.ManagementPolicies), want) {
+		t.Errorf("managementPolicies default = %v, want %v", al.Spec.ManagementPolicies, want)
 	}
 
 	in := newInstance(ns, "inst")

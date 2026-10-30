@@ -237,11 +237,11 @@ func newModelDeployment(ns, name string) *v1alpha1.ModelDeployment {
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 		Spec: v1alpha1.ModelDeploymentSpec{
 			Model: "example-27b",
-			Serving: v1alpha1.ServingSpec{
+			Source: v1alpha1.ModelSource{Served: &v1alpha1.ServingSpec{
 				Checkpoint: v1alpha1.CheckpointSpec{Repository: "example-org/example-1b", Revision: commit40},
 				Engine:     v1alpha1.EngineSpec{Name: "vllm", Version: "0.32.0", ImageDigest: digest},
 				Flags:      []v1alpha1.EngineFlag{{Name: "dtype", Value: "bfloat16"}, {Name: "max-model-len", Value: "32768"}},
-			},
+			}},
 			Instances: 2,
 			Providers: v1alpha1.ProviderSelection{Names: []string{"helios-a"}},
 		},
@@ -251,7 +251,7 @@ func newModelDeployment(ns, name string) *v1alpha1.ModelDeployment {
 func newAllocation(ns, name string) *v1alpha1.Allocation {
 	a := &v1alpha1.Allocation{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
 	a.Spec.ProviderConfigReference = &xpv2.ProviderConfigReference{Kind: v1alpha1.ProviderConfigKind, Name: "helios-a"}
-	a.Spec.ForProvider = v1alpha1.AllocationParameters{Partition: "example-gpu", TimeLimit: "01:00:00"}
+	a.Spec.ForProvider = v1alpha1.AllocationParameters{Batch: &v1alpha1.BatchParameters{Partition: "example-gpu", TimeLimit: "01:00:00"}}
 	return a
 }
 

@@ -54,33 +54,52 @@ type EngineSpec struct {
 
 // EngineFlag is one engine flag. The spec lists flags as ordered pairs, so no
 // command line is parsed (HBEP-3, Deployment ID). The name rules keep every key
-// of the hashed object ASCII and give one spelling per flag.
+// of the hashed object ASCII and refuse the other spellings that reach the same
+// flag. A name is written with lowercase letters, digits, dashes and
+// underscores; every refusal below compares it after replacing "_" with "-",
+// because vLLM reads max_num_seqs and max-num-seqs as one flag
+// (vllm/utils/argparse_utils.py, v0.32.0, lines 120 and 338-344), so api_key is
+// refused as api-key is. HBEP-3 and the deployment-ID library normalise the
+// same way.
 //
-//   - vLLM reads max_num_seqs and max-num-seqs as the same flag
-//     (vllm/utils/argparse_utils.py, v0.32.0, lines 120 and 338-344), so only
-//     the dashed spelling is admitted.
 //   - vLLM's parsers never set allow_abbrev, so Python's argparse expands a
-//     unique prefix: "--api-ke SECRET" is "--api-key SECRET". Every prefix of
-//     a refused long name is therefore refused with it (api-key, hf-token,
-//     model, revision, chat-template, config). A prefix of any other flag only
-//     splits one setting into two IDs, which is visible; checking names
-//     against the engine's real option list belongs to the launcher.
+//     unique prefix: "--api-ke SECRET" is "--api-key SECRET". Every proper
+//     prefix of a known long name is refused. The known names are the flags of
+//     HBEP-3's v1 table, with the refused, framework-passed and boolean ones;
+//     a flag outside that list is an input of unknown name, and its prefixes
+//     are not checked here (the deployment-ID library has the engine's full
+//     list). A name that is itself a known flag stays admitted even when it is
+//     the prefix of another (tokenizer, tokenizer-mode), because argparse takes
+//     an exact match first.
+//   - Short aliases (tp, pp, dp and the others vLLM v0.32.0 defines) and dotted
+//     sub-keys (X.k, which the parser folds into a JSON value) are refused.
 //   - vLLM's --config replaces itself with every key of a file, so a config
-//     flag could carry the flags the rules above refuse, and only its path
-//     would be hashed. It is refused.
+//     flag could carry the flags refused here, and only its path would be
+//     hashed. It is refused. So is lora-modules in alpha: it names other
+//     checkpoints without a pinned revision.
 //   - vLLM generates --no-<name> for each boolean flag (argparse's
-//     BooleanOptionalAction, vllm/engine/arg_utils.py, v0.32.0, line 380),
-//     but HBEP-3 gives a boolean under its positive name with "true" or
-//     "false", so a no- prefix is refused and a boolean's value is checked.
+//     BooleanOptionalAction, vllm/engine/arg_utils.py, v0.32.0, line 380), but
+//     HBEP-3 gives a boolean under its positive name with "true" or "false", so
+//     a no- prefix is refused and a boolean's value is checked.
+//   - A speculative-config that names a draft model is refused in alpha, and
+//     a tokenizer other than the checkpoint's needs a pinned tokenizer-revision
+//     (ServingSpec).
+//
+// The alias list is vLLM v0.32.0's. The lists of known names and booleans are
+// the table's; a change to the table changes these markers (HBEP-3).
 //
 // +kubebuilder:validation:XValidation:rule="!self.name.startsWith('-')",message="an engine flag name is a long name without leading dashes: write 'max-model-len', not '--max-model-len', and never a short alias such as '-tp'"
-// +kubebuilder:validation:XValidation:rule="self.name.matches('^[a-z0-9][a-z0-9-]*$')",message="an engine flag name matches ^[a-z0-9][a-z0-9-]*$: lowercase ASCII letters, digits and hyphens, so no underscores, no uppercase and no '='"
-// +kubebuilder:validation:XValidation:rule="!(self.name in ['ac', 'asc', 'cc', 'dc', 'dcp', 'dp', 'dpa', 'dpb', 'dpe', 'dph', 'dpl', 'dpm', 'dpn', 'dpp', 'dpr', 'ep', 'n', 'pcp', 'pp', 'q', 'r', 'sc', 'tp'])",message="a short flag alias such as tp, pp or dp is refused: write the long flag name, for example tensor-parallel-size"
-// +kubebuilder:validation:XValidation:rule="!self.name.startsWith('no-')",message="a boolean flag is given under its positive name with the value 'true' or 'false': write enable-prefix-caching with 'false', not no-enable-prefix-caching"
-// +kubebuilder:validation:XValidation:rule="!(self.name in ['trust-remote-code', 'enforce-eager', 'enable-expert-parallel', 'enable-auto-tool-choice', 'enable-prefix-caching', 'enable-chunked-prefill', 'enable-log-requests']) || self.value in ['true', 'false']",message="a boolean flag takes exactly 'true' or 'false': write enable-prefix-caching with the value 'true' or 'false', not '1', 'True' or an empty value"
-// +kubebuilder:validation:XValidation:rule="!['api-key', 'hf-token'].exists(k, k.startsWith(self.name))",message="a key is never written in a spec: the framework issues each Instance's API key, and a Hub token goes in checkpoint.hubTokenRef (api-key and hf-token are refused, and so is any abbreviation of them, because vLLM expands a unique prefix)"
-// +kubebuilder:validation:XValidation:rule="!['model', 'revision', 'chat-template'].exists(k, k.startsWith(self.name))",message="the framework passes model, revision and chat-template itself: set checkpoint and chatTemplate instead (an abbreviation of these names is refused too, because vLLM expands a unique prefix)"
-// +kubebuilder:validation:XValidation:rule="!'config'.startsWith(self.name)",message="config is refused: vLLM's --config reads a file that can set any flag, so the flags hashed here would not be the flags that run; write each flag in flags (an abbreviation of config is refused too)"
+// +kubebuilder:validation:XValidation:rule="self.name.matches('^[a-z0-9][a-z0-9_-]*$')",message="an engine flag name matches ^[a-z0-9][a-z0-9_-]*$: lowercase ASCII letters, digits, hyphens and underscores, starting with a letter or digit, so no uppercase, no '=' and no space"
+// +kubebuilder:validation:XValidation:rule="!self.name.contains('.')",message="a dotted sub-key such as hf-overrides.rope is refused: give the JSON value under the long name, hf-overrides"
+// +kubebuilder:validation:XValidation:rule="!(self.name.replace('_', '-') in ['ac', 'asc', 'cc', 'dc', 'dcp', 'dp', 'dpa', 'dpb', 'dpe', 'dph', 'dpl', 'dpm', 'dpn', 'dpp', 'dpr', 'ep', 'n', 'pcp', 'pp', 'q', 'r', 'sc', 'tp'])",message="a short flag alias such as tp, pp or dp is refused: write the long flag name, for example tensor-parallel-size"
+// +kubebuilder:validation:XValidation:rule="!self.name.replace('_', '-').startsWith('no-')",message="a boolean flag is given under its positive name with the value 'true' or 'false': write enable-prefix-caching with 'false', not no-enable-prefix-caching"
+// +kubebuilder:validation:XValidation:rule="!(self.name.replace('_', '-') in ['trust-remote-code', 'enforce-eager', 'enable-expert-parallel', 'enable-auto-tool-choice', 'enable-prefix-caching', 'enable-chunked-prefill', 'enable-log-requests']) || self.value in ['true', 'false']",message="a boolean flag takes exactly 'true' or 'false': write enable-prefix-caching with the value 'true' or 'false', not '1', 'True' or an empty value"
+// +kubebuilder:validation:XValidation:rule="!['api-key', 'hf-token'].exists(k, k.startsWith(self.name.replace('_', '-')))",message="a key is never written in a spec: the framework issues each Instance's API key, and a Hub token goes in checkpoint.hubTokenRef (api-key and hf-token are refused, in either spelling, and so is any abbreviation of them, because vLLM expands a unique prefix)"
+// +kubebuilder:validation:XValidation:rule="!['model', 'revision', 'chat-template'].exists(k, k.startsWith(self.name.replace('_', '-')))",message="the framework passes model, revision and chat-template itself: set checkpoint and chatTemplate instead (an abbreviation of these names is refused too, because vLLM expands a unique prefix)"
+// +kubebuilder:validation:XValidation:rule="!'config'.startsWith(self.name.replace('_', '-'))",message="config is refused: vLLM's --config reads a file that can set any flag, so the flags hashed here would not be the flags that run; write each flag in flags (an abbreviation of config is refused too)"
+// +kubebuilder:validation:XValidation:rule="!'lora-modules'.startsWith(self.name.replace('_', '-'))",message="lora-modules is refused in alpha: it names other checkpoints without a pinned revision (a pinned form is for beta); an abbreviation of it is refused too"
+// +kubebuilder:validation:XValidation:rule="self.name.replace('_', '-') != 'speculative-config' || !self.value.matches('[\"]model[\"][[:space:]]*:')",message="a speculative-config that names a draft model is refused in alpha: the draft model is another checkpoint without a pinned revision (a pinned form is for beta)"
+// +kubebuilder:validation:XValidation:rule="self.name.replace('_', '-') in ['dtype', 'quantization', 'kv-cache-dtype', 'max-model-len', 'tokenizer', 'tokenizer-mode', 'tokenizer-revision', 'trust-remote-code', 'load-format', 'hf-overrides', 'enforce-eager', 'compilation-config', 'attention-backend', 'tensor-parallel-size', 'pipeline-parallel-size', 'enable-expert-parallel', 'speculative-config', 'seed', 'generation-config', 'override-generation-config', 'tool-call-parser', 'enable-auto-tool-choice', 'reasoning-parser', 'chat-template-content-format', 'default-chat-template-kwargs', 'model', 'revision', 'chat-template', 'enable-prefix-caching', 'max-num-seqs', 'max-num-batched-tokens', 'enable-chunked-prefill', 'gpu-memory-utilization', 'kv-cache-memory-bytes', 'cpu-offload-gb', 'host', 'port', 'uds', 'served-model-name', 'download-dir', 'distributed-executor-backend', 'log-level', 'disable-log-stats', 'enable-log-requests', 'api-key', 'hf-token', 'config', 'lora-modules'] || !['dtype', 'quantization', 'kv-cache-dtype', 'max-model-len', 'tokenizer', 'tokenizer-mode', 'tokenizer-revision', 'trust-remote-code', 'load-format', 'hf-overrides', 'enforce-eager', 'compilation-config', 'attention-backend', 'tensor-parallel-size', 'pipeline-parallel-size', 'enable-expert-parallel', 'speculative-config', 'seed', 'generation-config', 'override-generation-config', 'tool-call-parser', 'enable-auto-tool-choice', 'reasoning-parser', 'chat-template-content-format', 'default-chat-template-kwargs', 'model', 'revision', 'chat-template', 'enable-prefix-caching', 'max-num-seqs', 'max-num-batched-tokens', 'enable-chunked-prefill', 'gpu-memory-utilization', 'kv-cache-memory-bytes', 'cpu-offload-gb', 'host', 'port', 'uds', 'served-model-name', 'download-dir', 'distributed-executor-backend', 'log-level', 'disable-log-stats', 'enable-log-requests', 'api-key', 'hf-token', 'config', 'lora-modules'].exists(k, k.startsWith(self.name.replace('_', '-')))",message="a proper prefix of a known flag name is refused: vLLM's parser expands an abbreviation, so two spellings of one flag would give two deployment IDs; write the full long name"
 type EngineFlag struct {
 	// Name is the flag's long name without its leading dashes.
 	//
@@ -114,6 +133,16 @@ type EnvVar struct {
 // the engine and its version, engine flags, the chat template and the
 // environment (HBEP-3, Vocabulary). The deployment ID's inputs come from it.
 // An edit to it is allowed and rolls out new IDs (HBEP-3, open question 7).
+//
+// A tokenizer other than the checkpoint's carries the same risk as an unpinned
+// checkpoint (L-8.3): it needs a tokenizer-revision flag that is a full commit
+// id, or the spec is refused (HBEP-3, References to other checkpoints inside
+// input values). A tokenizer-revision must be a full commit id wherever it
+// appears, since a branch name is mutable. Flag names compare after replacing
+// "_" with "-".
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.flags) || !self.flags.exists(f, f.name.replace('_', '-') == 'tokenizer' && f.value != self.checkpoint.repository) || self.flags.exists(f, f.name.replace('_', '-') == 'tokenizer-revision' && f.value.matches('^[0-9a-f]{40}$'))",message="a tokenizer other than the checkpoint's needs a tokenizer-revision flag that is a full commit id: 40 lowercase hex characters"
+// +kubebuilder:validation:XValidation:rule="!has(self.flags) || self.flags.all(f, f.name.replace('_', '-') != 'tokenizer-revision' || f.value.matches('^[0-9a-f]{40}$'))",message="tokenizer-revision must be a full commit id: 40 lowercase hex characters; a branch name or a tag is mutable"
 type ServingSpec struct {
 	Checkpoint CheckpointSpec `json:"checkpoint"`
 	Engine     EngineSpec     `json:"engine"`
@@ -146,6 +175,53 @@ type ServingSpec struct {
 	ChatTemplate *string `json:"chatTemplate,omitempty"`
 }
 
+// ManagedCatalogEntry is a model a managed platform serves from its catalog
+// (HBEP-3, open question 2). The platform decides what runs, so the entry has
+// no checkpoint, engine, flags or template: everything else is opaque, and the
+// deployment ID is over the platform, the catalog name and any revision the
+// platform reports.
+type ManagedCatalogEntry struct {
+	// Platform is the managed platform that serves the entry.
+	//
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	Platform string `json:"platform"`
+
+	// CatalogName is the name of the entry in the platform's catalog.
+	//
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	CatalogName string `json:"catalogName"`
+
+	// Revision is the revision the platform reports for the entry. It is
+	// omitted when the platform reports none; an empty revision is not the
+	// same.
+	//
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	Revision *string `json:"revision,omitempty"`
+}
+
+// ModelSource says what a ModelDeployment serves. Exactly one of Served (a
+// checkpoint run on an engine of ours, on a batch platform) and Managed (a
+// catalog entry of a managed platform) is set, so a managed entry carries no
+// checkpoint, engine digest or flags that do not exist for it.
+//
+// +kubebuilder:validation:XValidation:rule="has(self.served) != has(self.managed)",message="source names exactly one of served and managed"
+type ModelSource struct {
+	// Served is a checkpoint served by an engine we run. It may change while
+	// the deployment serves.
+	//
+	// +optional
+	Served *ServingSpec `json:"served,omitempty"`
+
+	// Managed is a catalog entry of a managed platform.
+	//
+	// +optional
+	Managed *ManagedCatalogEntry `json:"managed,omitempty"`
+}
+
 // ProviderSelection says which providers a deployment may use: providers by
 // name, by label selector, or both.
 //
@@ -176,8 +252,9 @@ type ModelDeploymentSpec struct {
 	// +kubebuilder:validation:MaxLength=256
 	Model string `json:"model"`
 
-	// Serving is the serving spec. It may change while the deployment serves.
-	Serving ServingSpec `json:"serving"`
+	// Source says what is served: a checkpoint on our engine, or a catalog
+	// entry of a managed platform. Exactly one.
+	Source ModelSource `json:"source"`
 
 	// Instances is the number of Instances wanted. It is the scale
 	// subresource's replica count.
@@ -205,7 +282,11 @@ type ModelDeploymentSpec struct {
 
 // ClassDeploymentID is the current deployment ID of one accelerator class.
 type ClassDeploymentID struct {
-	AcceleratorClass AcceleratorClass `json:"acceleratorClass"`
+	// AcceleratorClass is the class the ID is current for. A managed catalog
+	// entry has no accelerator class, and none is invented for it.
+	//
+	// +optional
+	AcceleratorClass *AcceleratorClass `json:"acceleratorClass,omitempty"`
 
 	// ID is the full deployment ID, as an Instance carries it, so that a
 	// controller never compares two forms of one ID.
@@ -215,7 +296,11 @@ type ClassDeploymentID struct {
 // ActiveDeploymentID is a deployment ID that still has Instances, as a
 // Deployment lists its ReplicaSets.
 type ActiveDeploymentID struct {
-	AcceleratorClass AcceleratorClass `json:"acceleratorClass"`
+	// AcceleratorClass is the class of the ID's Instances; absent for a
+	// managed catalog entry.
+	//
+	// +optional
+	AcceleratorClass *AcceleratorClass `json:"acceleratorClass,omitempty"`
 
 	// ID is the full deployment ID, as an Instance carries it.
 	ID FullDeploymentID `json:"id"`

@@ -61,53 +61,81 @@ spec:
             type: object
           spec:
             description: |-
-              AllocationSpec is the desired state of an Allocation. It embeds
-              crossplane-runtime's managed-resource fields (HBEP-11, Ownership, records and
-              deletion): providerConfigRef names a Provider, managementPolicies and
-              writeConnectionSecretToRef are crossplane's.
+              AllocationSpec is the desired state of an Allocation. It declares the three
+              fields of crossplane-runtime's managed-resource spec that it uses, with
+              crossplane's types and JSON names, instead of embedding the structure: the
+              embedded structure defaults providerConfigRef to ClusterProviderConfig and
+              managementPolicies to "*", which allows Update (HBEP-11, Ownership, records
+              and deletion). The wire format is the same.
             properties:
               forProvider:
-                description: ForProvider holds the submission parameters. They are
-                  immutable.
+                description: ForProvider says what the Allocation is a lease on. It
+                  is immutable.
                 properties:
-                  account:
-                    description: Account the job is charged to.
-                    maxLength: 253
-                    type: string
-                  partition:
-                    description: Partition the job is submitted to.
-                    maxLength: 253
-                    minLength: 1
-                    type: string
-                  timeLimit:
-                    description: TimeLimit in the platform's format, for example "01:00:00".
-                    maxLength: 63
-                    minLength: 1
-                    type: string
-                  wrap:
-                    description: Wrap is the command passed to the submission, as
-                      in sbatch --wrap.
-                    maxLength: 8192
-                    type: string
-                required:
-                - partition
-                - timeLimit
+                  batch:
+                    description: Batch holds the parameters of a job on a batch platform.
+                    properties:
+                      account:
+                        description: Account the job is charged to.
+                        maxLength: 253
+                        type: string
+                      partition:
+                        description: Partition the job is submitted to.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      timeLimit:
+                        description: TimeLimit in the platform's format, for example
+                          "01:00:00".
+                        maxLength: 63
+                        minLength: 1
+                        type: string
+                      wrap:
+                        description: Wrap is the command passed to the submission,
+                          as in sbatch --wrap.
+                        maxLength: 8192
+                        type: string
+                    required:
+                    - partition
+                    - timeLimit
+                    type: object
+                  managed:
+                    description: Managed holds the catalog entry of a managed platform.
+                    properties:
+                      catalogName:
+                        description: CatalogName is the name of the entry in the platform's
+                          catalog.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                    required:
+                    - catalogName
+                    type: object
                 type: object
                 x-kubernetes-validations:
                 - message: 'an Allocation''s submission parameters are immutable:
                     a submitted job is never edited; delete the Allocation and create
                     a new one'
                   rule: self == oldSelf
+                - message: forProvider names exactly one of batch and managed
+                  rule: has(self.batch) != has(self.managed)
               managementPolicies:
                 default:
-                - '*'
+                - Observe
+                - Create
+                - Delete
+                - LateInitialize
                 description: |-
-                  THIS IS A BETA FIELD. It is on by default but can be opted out
-                  through a Crossplane feature flag.
-                  ManagementPolicies specify the array of actions Crossplane is allowed to
-                  take on the managed and external resources.
-                  See the design doc for more information: https://github.com/crossplane/crossplane/blob/499895a25d1a1a0ba1604944ef98ac7a1a71f197/design/design-doc-observe-only-resources.md?plain=1#L223
-                  and this one: https://github.com/crossplane/crossplane/blob/444267e84783136daa93568b364a5f01228cacbe/design/one-pager-ignore-changes.md
+                  ManagementPolicies are the actions the managed reconciler may take. An
+                  Allocation takes exactly Observe, Create, Delete and LateInitialize, in
+                  any order, and that is the default; the set is immutable. Update is not
+                  in it: a submitted job is never edited. Leaving Delete out would orphan
+                  the job, and an empty list would pause the reconciler, so a deletion
+                  would hang.
+
+                  The Go type is a slice of crossplane's ManagementAction, not its
+                  ManagementPolicies, because the schema markers cannot bound a named slice
+                  type; the JSON is the same, and the accessors convert.
                 items:
                   description: |-
                     A ManagementAction represents an action that the Crossplane controllers
@@ -120,7 +148,18 @@ spec:
                   - LateInitialize
                   - '*'
                   type: string
+                maxItems: 8
                 type: array
+                x-kubernetes-validations:
+                - message: 'managementPolicies must be exactly Observe, Create, Delete
+                    and LateInitialize: a submitted job is never updated, and the
+                    provider registers exactly this set; leave the field out to take
+                    it'
+                  rule: self.size() == 4 && self.exists(p, p == 'Observe') && self.exists(p,
+                    p == 'Create') && self.exists(p, p == 'Delete') && self.exists(p,
+                    p == 'LateInitialize')
+                - message: an Allocation's managementPolicies are immutable
+                  rule: self == oldSelf
               modelDeploymentRef:
                 description: |-
                   ModelDeploymentRef names the ModelDeployment, in the Allocation's
@@ -135,13 +174,9 @@ spec:
                 - name
                 type: object
               providerConfigRef:
-                default:
-                  kind: ClusterProviderConfig
-                  name: default
                 description: |-
-                  ProviderConfigReference specifies how the provider that will be used to
-                  create, observe, update, and delete this managed resource should be
-                  configured.
+                  ProviderConfigReference names the Provider that holds the job. It is
+                  required, has no default, and is immutable.
                 properties:
                   kind:
                     description: Kind of the referenced object.
@@ -165,8 +200,7 @@ spec:
                     pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                     type: string
                   mode:
-                    default: Keep
-                    description: Mode is Keep (the default) or ReleaseWhenIdle.
+                    description: Mode is Keep or ReleaseWhenIdle. Unset means Keep.
                     enum:
                     - Keep
                     - ReleaseWhenIdle
@@ -175,23 +209,23 @@ spec:
                     description: |-
                       Until is the date a kept Allocation is kept until: a date, a grant's end
                       or a deadline. When it is absent, the default is the deployment's end
-                      time (HBEP-7, open question 13).
+                      time (HBEP-7, open question 13). It goes with mode Keep.
                     format: date-time
                     type: string
-                required:
-                - mode
                 type: object
                 x-kubernetes-validations:
                 - message: idleLimit is required with mode ReleaseWhenIdle and refused
                     with mode Keep
-                  rule: 'self.mode == ''ReleaseWhenIdle'' ? has(self.idleLimit) :
-                    !has(self.idleLimit)'
+                  rule: '(has(self.mode) && self.mode == ''ReleaseWhenIdle'') ? has(self.idleLimit)
+                    : !has(self.idleLimit)'
+                - message: 'until is refused with mode ReleaseWhenIdle: an Allocation
+                    released when idle is not kept until a date'
+                  rule: '!(has(self.mode) && self.mode == ''ReleaseWhenIdle'') ||
+                    !has(self.until)'
               writeConnectionSecretToRef:
                 description: |-
-                  WriteConnectionSecretToReference specifies the namespace and name of a
-                  Secret to which any connection details for this managed resource should
-                  be written. Connection details frequently include the endpoint, username,
-                  and password required to connect to the managed resource.
+                  WriteConnectionSecretToReference names a Secret for connection details.
+                  An Allocation has none; the field keeps crossplane's wire format.
                 properties:
                   name:
                     description: Name of the secret.
@@ -201,10 +235,11 @@ spec:
                 type: object
             required:
             - forProvider
+            - providerConfigRef
             type: object
             x-kubernetes-validations:
             - message: 'providerConfigRef must name a Provider: set kind to ''Provider''
-                (crossplane''s default, ClusterProviderConfig, is refused)'
+                (a crossplane ProviderConfig or ClusterProviderConfig is refused)'
               rule: has(self.providerConfigRef) && self.providerConfigRef.kind ==
                 'Provider'
             - message: providerConfigRef.name must be a Provider name, a DNS-1123
@@ -217,7 +252,10 @@ spec:
               rule: '!has(oldSelf.providerConfigRef) || (has(self.providerConfigRef)
                 && self.providerConfigRef == oldSelf.providerConfigRef)'
           status:
-            description: AllocationStatus is the observed state of an Allocation.
+            description: |-
+              AllocationStatus is the observed state of an Allocation. Conditions,
+              observedGeneration and lastHandledReconcileAt are crossplane-runtime's
+              managed-resource status, declared here with its types and JSON names.
             properties:
               atProvider:
                 description: AtProvider is the observed state of the job.
@@ -291,7 +329,8 @@ spec:
                     type: string
                 type: object
               conditions:
-                description: Conditions of the resource.
+                description: Conditions of the Allocation. Only one condition of each
+                  type exists.
                 items:
                   description: A Condition that may apply to a resource.
                   properties:
@@ -338,10 +377,8 @@ spec:
                 x-kubernetes-list-type: map
               lastHandledReconcileAt:
                 description: |-
-                  LastHandledReconcileAt holds the value of the most recent
-                  reconcile-requested-at annotation token that the controller has
-                  processed. Users can compare this to the annotation to determine
-                  whether a reconcile request has been handled.
+                  LastHandledReconcileAt is the most recent reconcile-requested-at token
+                  the controller handled.
                 type: string
               lastReconcileTime:
                 description: LastReconcileTime is when the controller last reconciled
@@ -350,9 +387,8 @@ spec:
                 type: string
               observedGeneration:
                 description: |-
-                  ObservedGeneration is the latest metadata.generation
-                  which resulted in either a ready state, or stalled due to error
-                  it can not recover from without human intervention.
+                  ObservedGeneration is the latest metadata.generation that resulted in
+                  either a ready state or a stall that needs a human.
                 format: int64
                 type: integer
             type: object

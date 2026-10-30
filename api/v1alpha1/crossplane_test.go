@@ -5,6 +5,7 @@ import (
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
+	corev1 "k8s.io/api/core/v1"
 )
 
 // Compile-time assertions: Allocation is a crossplane-runtime managed resource
@@ -43,11 +44,29 @@ func TestAllocationAccessorsForwardToTheEmbeddedFields(t *testing.T) {
 		t.Errorf("observed generation not forwarded: %d", a.Status.ObservedGeneration)
 	}
 
+	a.SetObservedGeneration(0)
+	a.SetLastHandledReconcileAt("2026-10-30T12:00:00Z")
+	if a.Status.LastHandledReconcileAt != "2026-10-30T12:00:00Z" || a.GetLastHandledReconcileAt() != "2026-10-30T12:00:00Z" {
+		t.Errorf("reconcile token not forwarded: %q", a.Status.LastHandledReconcileAt)
+	}
+
 	a.SetConditions(xpv2.Available())
 	if got := a.GetCondition(xpv2.TypeReady); got.Status != xpv2.Available().Status {
 		t.Errorf("condition not forwarded: %+v", got)
 	}
-	if got := a.Status.GetCondition(xpv2.TypeReady); got.Reason != xpv2.ReasonAvailable {
-		t.Errorf("condition not stored on the status: %+v", got)
+	if len(a.Status.Conditions) != 1 || a.Status.Conditions[0].Reason != xpv2.ReasonAvailable {
+		t.Errorf("condition not stored on the status: %+v", a.Status.Conditions)
+	}
+	// A condition of the same type replaces the old one; another type is added.
+	a.SetConditions(xpv2.Unavailable(), xpv2.ReconcileSuccess())
+	if got := a.GetCondition(xpv2.TypeReady); got.Reason != xpv2.ReasonUnavailable {
+		t.Errorf("the Ready condition was not replaced: %+v", got)
+	}
+	if len(a.Status.Conditions) != 2 {
+		t.Errorf("conditions = %+v, want one per type", a.Status.Conditions)
+	}
+	// A type that was never set reads as Unknown, not as a zero value.
+	if got := (&Allocation{}).GetCondition(xpv2.TypeSynced); got.Status != corev1.ConditionUnknown {
+		t.Errorf("an unset condition = %+v, want Unknown", got)
 	}
 }

@@ -22,6 +22,17 @@ func TestPlatformProfileTypedFields(t *testing.T) {
 		{"unknown_bound is not a duration", func(p *v1alpha1.PlatformProfile) { p.Spec.UnknownBound = ptr.To(v1alpha1.Duration("10 minutes")) }, "unknown_bound"},
 		{"partition without a GPU model", func(p *v1alpha1.PlatformProfile) { p.Spec.Partitions[0].GPUModel = "" }, "gpu_model"},
 		{"partition without a CPU architecture", func(p *v1alpha1.PlatformProfile) { p.Spec.Partitions[0].CPUArch = "" }, "cpu_arch"},
+		{"time_zone is not a zone name", func(p *v1alpha1.PlatformProfile) { p.Spec.TimeZone = "Warsaw time" }, "time_zone"},
+		{"time_zone is empty text of spaces", func(p *v1alpha1.PlatformProfile) { p.Spec.TimeZone = " " }, "time_zone"},
+		{"min_job_age is not a duration", func(p *v1alpha1.PlatformProfile) { p.Spec.MinJobAge = ptr.To(v1alpha1.Duration("ten seconds")) }, "min_job_age"},
+		{"job_name.max_length is zero", func(p *v1alpha1.PlatformProfile) {
+			p.Spec.JobName = &v1alpha1.JobNameRules{MaxLength: ptr.To(int32(0))}
+		}, "max_length"},
+		{"job_name.max_length is below the tag's 56 characters", func(p *v1alpha1.PlatformProfile) {
+			p.Spec.JobName = &v1alpha1.JobNameRules{MaxLength: ptr.To(int32(55))}
+		},
+			"job_name.max_length must allow the job tag's 56 characters"},
+		{"json_data_parser has a space", func(p *v1alpha1.PlatformProfile) { p.Spec.JSONDataParser = "data parser" }, "json_data_parser"},
 		{"two entries for one partition", func(p *v1alpha1.PlatformProfile) { p.Spec.Partitions[1].Name = p.Spec.Partitions[0].Name }, "Duplicate value"},
 	}
 	for _, tc := range refused {
@@ -42,6 +53,21 @@ func TestPlatformProfileTypedFields(t *testing.T) {
 			p.Spec.InflightWindow = ptr.To(v1alpha1.Duration("1m30s"))
 			p.Spec.UnknownBound = ptr.To(v1alpha1.Duration("15m"))
 		}},
+		{"every scheduling fact set", func(p *v1alpha1.PlatformProfile) {
+			p.Spec.TimeZone = "Europe/Warsaw"
+			p.Spec.RequeueDefault = ptr.To(true)
+			p.Spec.MinJobAge = ptr.To(v1alpha1.Duration("10s"))
+			p.Spec.JobName = &v1alpha1.JobNameRules{MaxLength: ptr.To(int32(64)), Pattern: `^[A-Za-z0-9_.-]+$`}
+			p.Spec.JobCommentAccounted = ptr.To(false)
+			p.Spec.JSONDataParser = "data_parser/v0.0.42"
+		}},
+		{"a job-name limit of exactly the tag's 56 characters", func(p *v1alpha1.PlatformProfile) {
+			p.Spec.JobName = &v1alpha1.JobNameRules{MaxLength: ptr.To(int32(v1alpha1.JobTagLength))}
+		}},
+		{"job-name rules with a pattern and no limit", func(p *v1alpha1.PlatformProfile) {
+			p.Spec.JobName = &v1alpha1.JobNameRules{Pattern: `^[a-z]+$`}
+		}},
+		{"UTC as the time zone", func(p *v1alpha1.PlatformProfile) { p.Spec.TimeZone = "UTC" }},
 		{"a managed platform without partitions", func(p *v1alpha1.PlatformProfile) {
 			p.Spec.ProviderKind, p.Spec.Partitions = v1alpha1.PlatformManaged, nil
 		}},
@@ -53,6 +79,43 @@ func TestPlatformProfileTypedFields(t *testing.T) {
 			must(t, c.Create(bg(), p), "create PlatformProfile")
 			cleanup(t, p)
 		})
+	}
+}
+
+// The scheduling facts of spikes S4 and S5 are typed fields, and a fact that is
+// not stated is absent: an absent bool is unknown, not false, and it round-trips
+// as absent.
+func TestPlatformProfileSchedulingFactsRoundTrip(t *testing.T) {
+	full := newProfile(uniq("prof"))
+	full.Spec.TimeZone = "Europe/Warsaw"
+	full.Spec.RequeueDefault = ptr.To(false)
+	full.Spec.MinJobAge = ptr.To(v1alpha1.Duration("300s"))
+	full.Spec.JobName = &v1alpha1.JobNameRules{MaxLength: ptr.To(int32(1024))}
+	full.Spec.JobCommentAccounted = ptr.To(false)
+	full.Spec.JSONDataParser = "data_parser/v0.0.42"
+	must(t, c.Create(bg(), full), "create")
+	cleanup(t, full)
+	got := &v1alpha1.PlatformProfile{}
+	must(t, c.Get(bg(), objKey(full), got), "get")
+	s := got.Spec
+	if s.TimeZone != "Europe/Warsaw" || s.JSONDataParser != "data_parser/v0.0.42" || s.MinJobAge == nil || *s.MinJobAge != "300s" ||
+		s.JobName == nil || s.JobName.MaxLength == nil || *s.JobName.MaxLength != 1024 {
+		t.Fatalf("spec = %+v", s)
+	}
+	// false is a stated fact and stays; absent is unknown and stays absent.
+	if s.RequeueDefault == nil || *s.RequeueDefault || s.JobCommentAccounted == nil || *s.JobCommentAccounted {
+		t.Fatalf("a stated false came back as %v / %v", s.RequeueDefault, s.JobCommentAccounted)
+	}
+	bare := newProfile(uniq("prof"))
+	must(t, c.Create(bg(), bare), "create a profile that states none")
+	cleanup(t, bare)
+	must(t, c.Get(bg(), objKey(bare), got), "get")
+	s = got.Spec
+	if s.TimeZone != "" || s.RequeueDefault != nil || s.MinJobAge != nil || s.JobName != nil || s.JobCommentAccounted != nil || s.JSONDataParser != "" {
+		t.Fatalf("unstated facts came back as %+v", s)
+	}
+	if v1alpha1.JobTagLength != len("hb-")+40+len("-")+12 {
+		t.Errorf("JobTagLength = %d; HBEP-3's tag hb-<40>-<12 hex> has %d characters", v1alpha1.JobTagLength, len("hb-")+40+len("-")+12)
 	}
 }
 

@@ -1,10 +1,13 @@
 package e2e
 
 import (
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -40,14 +43,14 @@ func runMDCases(t *testing.T, refused, accepted []mdCase) {
 }
 
 func setFlags(flags ...v1alpha1.EngineFlag) func(*v1alpha1.ModelDeployment) {
-	return func(md *v1alpha1.ModelDeployment) { md.Spec.Serving.Flags = flags }
+	return func(md *v1alpha1.ModelDeployment) { md.Spec.Source.Served.Flags = flags }
 }
 
 // A branch name is refused; only a full commit id is admitted (HBEP-3, HBEP-9).
 func TestCheckpointRevisionIsAFullCommitID(t *testing.T) {
 	const msg = "revision must be a full commit id"
 	rev := func(r string) func(*v1alpha1.ModelDeployment) {
-		return func(md *v1alpha1.ModelDeployment) { md.Spec.Serving.Checkpoint.Revision = r }
+		return func(md *v1alpha1.ModelDeployment) { md.Spec.Source.Served.Checkpoint.Revision = r }
 	}
 	runMDCases(t, []mdCase{
 		{"a branch name", rev("main"), msg},
@@ -74,19 +77,19 @@ func TestEngineDigestKeyIsTheCanonicalOne(t *testing.T) {
 	u := &unstructured.Unstructured{}
 	u.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("ModelDeployment"))
 	must(t, c.Get(bg(), objKey(md), u), "get unstructured")
-	engine, _, _ := unstructured.NestedMap(u.Object, "spec", "serving", "engine")
+	engine, _, _ := unstructured.NestedMap(u.Object, "spec", "source", "served", "engine")
 	if engine["image_digest"] != digest {
-		t.Errorf("spec.serving.engine.image_digest = %v, want %s; keys %v", engine["image_digest"], digest, engine)
+		t.Errorf("spec.source.served.engine.image_digest = %v, want %s; keys %v", engine["image_digest"], digest, engine)
 	}
 	if _, wrong := engine["imageDigest"]; wrong {
-		t.Errorf("spec.serving.engine.imageDigest is written: %v", engine)
+		t.Errorf("spec.source.served.engine.imageDigest is written: %v", engine)
 	}
 }
 
 func TestEngineImageDigest(t *testing.T) {
 	const msg = "image_digest must be 'sha256:'"
 	dig := func(d string) func(*v1alpha1.ModelDeployment) {
-		return func(md *v1alpha1.ModelDeployment) { md.Spec.Serving.Engine.ImageDigest = d }
+		return func(md *v1alpha1.ModelDeployment) { md.Spec.Source.Served.Engine.ImageDigest = d }
 	}
 	runMDCases(t, []mdCase{
 		{"a tag instead of a digest", dig("latest"), msg},
@@ -114,16 +117,63 @@ var vllmBooleanFlags = []string{
 	"enable-prefix-caching", "enable-chunked-prefill", "enable-log-requests",
 }
 
+// underscored returns name with every dash written as an underscore: the other
+// spelling vLLM's parser reads as the same flag (HBEP-3, how the serving spec
+// gives flags).
+func underscored(name string) string { return strings.ReplaceAll(name, "-", "_") }
+
+// hbep3FlagNames reads the flag names of HBEP-3's v1 table for vLLM from the
+// HBEP itself, so that the admission rule's list of known names is checked
+// against the specification and not against a copy made by the same hand. The
+// first column of each row holds the names in code font; environment variables
+// (uppercase) are not flags.
+func hbep3FlagNames(t *testing.T) []string {
+	t.Helper()
+	text := string(readAll(t, filepath.Join("..", "..", "..", "hbep", "0003-resource-model-and-naming", "README.md")))
+	_, table, ok := strings.Cut(text, "| Flag or variable | `v1` | Reason |")
+	if !ok {
+		t.Fatal("HBEP-3 has no v1 table for vLLM: the header row was not found")
+	}
+	var names []string
+	seen := map[string]bool{}
+	tick := regexp.MustCompile("`([a-z0-9][a-z0-9-]*)`")
+	for _, line := range strings.Split(table, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "|") {
+			if len(names) > 0 {
+				break // the table ends at its first non-row line
+			}
+			continue
+		}
+		cells := strings.Split(line, "|")
+		if len(cells) < 3 {
+			continue
+		}
+		for _, m := range tick.FindAllStringSubmatch(cells[1], -1) {
+			if !seen[m[1]] {
+				seen[m[1]] = true
+				names = append(names, m[1])
+			}
+		}
+	}
+	if len(names) < 40 {
+		t.Fatalf("read only %d flag names from HBEP-3's table; the table's format changed: %v", len(names), names)
+	}
+	return names
+}
+
 // Short flag aliases and secret flags are refused in specs (HBEP-3, HBEP-11),
-// and flag and environment names are ASCII with one spelling (HBEP-3 owner
-// decision, PR #46 comment 6521536735).
+// and flag and environment names are ASCII. A flag name as written is lowercase
+// letters, digits, dashes and underscores, and every refusal compares it after
+// "_" is replaced with "-" (HBEP-3 amendment, PR #47).
 func TestEngineFlagsUseLongNamesAndCarryNoKeys(t *testing.T) {
 	flag := func(name string) func(*v1alpha1.ModelDeployment) {
 		return setFlags(v1alpha1.EngineFlag{Name: name, Value: "1"})
 	}
 	const (
 		dashes  = "an engine flag name is a long name without leading dashes"
-		charset = "an engine flag name matches ^[a-z0-9][a-z0-9-]*$"
+		charset = "an engine flag name matches ^[a-z0-9][a-z0-9_-]*$"
+		dotted  = "a dotted sub-key"
 		alias   = "a short flag alias such as tp, pp or dp is refused"
 		keys    = "a key is never written in a spec"
 		passed  = "the framework passes model, revision and chat-template itself"
@@ -136,18 +186,23 @@ func TestEngineFlagsUseLongNamesAndCarryNoKeys(t *testing.T) {
 		{"a dashed short alias, -tp", flag("-tp"), dashes},
 		{"a dashed short alias, -O", flag("-O"), dashes},
 		{"a long name with its dashes", flag("--max-model-len"), dashes},
-		{"underscores, max_model_len", flag("max_model_len"), charset},
-		{"underscores, max_num_seqs", flag("max_num_seqs"), charset},
 		{"uppercase", flag("Max-Model-Len"), charset},
 		{"a value glued to the name", flag("max-model-len=4096"), charset},
 		{"a space in the name", flag("max model len"), charset},
 		{"a non-ASCII letter", flag("max-modèl-len"), charset},
+		{"a name that starts with an underscore", flag("_max_model_len"), charset},
 		{"an empty name", flag(""), "name"},
+		{"a dotted sub-key", flag("hf-overrides.rope"), dotted},
+		{"a dotted sub-key with underscores", flag("hf_overrides.rope"), dotted},
+		{"a dot alone", flag("a.b"), dotted},
 		{"the api-key flag", flag("api-key"), keys},
+		{"the api_key spelling", flag("api_key"), keys},
 		{"the hf-token flag", flag("hf-token"), keys},
+		{"the hf_token spelling", flag("hf_token"), keys},
 		{"the model flag", flag("model"), passed},
 		{"the revision flag", flag("revision"), passed},
 		{"the chat-template flag", flag("chat-template"), passed},
+		{"the chat_template spelling", flag("chat_template"), passed},
 	}...)
 	runMDCases(t, refused, []mdCase{
 		{"long names", setFlags(
@@ -155,6 +210,11 @@ func TestEngineFlagsUseLongNamesAndCarryNoKeys(t *testing.T) {
 			v1alpha1.EngineFlag{Name: "pipeline-parallel-size", Value: "2"},
 			v1alpha1.EngineFlag{Name: "data-parallel-size", Value: "1"},
 			v1alpha1.EngineFlag{Name: "enable-auto-tool-choice", Value: "true"}), ""},
+		// An underscore is one spelling of the dash, normalised by the engine's
+		// parser and by the deployment-ID library, so it is admitted.
+		{"max_model_len, the underscore spelling of a known flag", flag("max_model_len"), ""},
+		{"max_num_seqs", flag("max_num_seqs"), ""},
+		{"tensor_parallel_size", setFlags(v1alpha1.EngineFlag{Name: "tensor_parallel_size", Value: "4"}), ""},
 		{"a boolean set to true", setFlags(v1alpha1.EngineFlag{Name: "enable-prefix-caching", Value: "true"}), ""},
 		{"a boolean set to false", setFlags(v1alpha1.EngineFlag{Name: "enable-prefix-caching", Value: "false"}), ""},
 		{"a flag whose name merely contains token or key", setFlags(
@@ -171,9 +231,10 @@ func TestEngineFlagsUseLongNamesAndCarryNoKeys(t *testing.T) {
 
 // vLLM's parsers never set allow_abbrev, so argparse expands a unique prefix:
 // "--api-ke SECRET" is "--api-key SECRET" (review finding B3; checked against
-// FlexibleArgumentParser in vllm/utils/argparse_utils.py, v0.32.0). Every prefix of
-// a refused long name is refused with it, and config is refused outright
-// because --config can carry any flag.
+// FlexibleArgumentParser in vllm/utils/argparse_utils.py, v0.32.0). Every proper
+// prefix of a known long name is refused, in either spelling (HBEP-3), and the
+// names with their own refusal (keys, the flags the framework passes, config)
+// say so.
 func TestEngineFlagsRefuseAbbreviationsOfRefusedNames(t *testing.T) {
 	flag := func(name string) func(*v1alpha1.ModelDeployment) {
 		return setFlags(v1alpha1.EngineFlag{Name: name, Value: "x"})
@@ -182,22 +243,28 @@ func TestEngineFlagsRefuseAbbreviationsOfRefusedNames(t *testing.T) {
 		keys   = "a key is never written in a spec"
 		passed = "the framework passes model, revision and chat-template itself"
 		config = "config is refused"
+		lora   = "lora-modules is refused in alpha"
 	)
 	var refused []mdCase
-	for _, n := range []string{"api-ke", "api-k", "api-", "api", "ap", "hf-tok", "hf-t", "hf-", "hf", "h"} {
+	for _, n := range []string{"api-ke", "api-k", "api-", "api", "ap", "hf-tok", "hf-t", "hf-", "hf", "h",
+		"api_ke", "api_k", "api_", "hf_tok", "hf_t", "hf_"} {
 		refused = append(refused, mdCase{"the abbreviation " + n + " of a key flag", flag(n), keys})
 	}
-	for _, n := range []string{"mode", "mod", "mo", "revisio", "revis", "rev", "chat-templat", "chat-temp", "chat-", "chat", "ch"} {
+	for _, n := range []string{"mode", "mod", "mo", "revisio", "revis", "rev", "chat-templat", "chat-temp", "chat-", "chat", "ch",
+		"chat_templat", "chat_temp", "chat_"} {
 		refused = append(refused, mdCase{"the abbreviation " + n + " of a flag the framework passes", flag(n), passed})
 	}
 	for _, n := range []string{"config", "confi", "conf", "con", "co"} {
 		refused = append(refused, mdCase{"config or its abbreviation " + n, flag(n), config})
 	}
+	for _, n := range []string{"lora-modules", "lora_modules", "lora-module", "lora-m", "lora_", "lora"} {
+		refused = append(refused, mdCase{"lora-modules or its abbreviation " + n, flag(n), lora})
+	}
 	runMDCases(t, refused, []mdCase{
-		// Neighbours that are not prefixes of a refused name stay admitted.
+		// Neighbours that are not prefixes of a known name stay admitted.
 		{"served-model-name", flag("served-model-name"), ""},
 		{"model-impl, which extends model but is not a prefix of it", flag("model-impl"), ""},
-		{"tokenizer-revision", flag("tokenizer-revision"), ""},
+		{"tokenizer-revision", setFlags(v1alpha1.EngineFlag{Name: "tokenizer-revision", Value: commit40}), ""},
 		{"compilation-config", flag("compilation-config"), ""},
 		{"hf-overrides", flag("hf-overrides"), ""},
 		{"api-server-count", flag("api-server-count"), ""},
@@ -209,22 +276,94 @@ func TestEngineFlagsRefuseAbbreviationsOfRefusedNames(t *testing.T) {
 	})
 	// A refused flag after ordinary ones, on create and on update.
 	ordinary := []v1alpha1.EngineFlag{{Name: "dtype", Value: "bfloat16"}, {Name: "seed", Value: "7"}}
+	after := func(f v1alpha1.EngineFlag) func(*v1alpha1.ModelDeployment) {
+		return setFlags(append(append([]v1alpha1.EngineFlag{}, ordinary...), f)...)
+	}
 	runMDCases(t, []mdCase{
-		{"an abbreviated key flag after ordinary flags", setFlags(append(append([]v1alpha1.EngineFlag{}, ordinary...), v1alpha1.EngineFlag{Name: "api-ke", Value: "SECRET"})...), keys},
-		{"config after ordinary flags", setFlags(append(append([]v1alpha1.EngineFlag{}, ordinary...), v1alpha1.EngineFlag{Name: "config", Value: "/x.yaml"})...), config},
+		{"an abbreviated key flag after ordinary flags", after(v1alpha1.EngineFlag{Name: "api-ke", Value: "SECRET"}), keys},
+		{"an underscored abbreviated key flag after ordinary flags", after(v1alpha1.EngineFlag{Name: "api_ke", Value: "SECRET"}), keys},
+		{"config after ordinary flags", after(v1alpha1.EngineFlag{Name: "config", Value: "/x.yaml"}), config},
+		{"lora-modules after ordinary flags", after(v1alpha1.EngineFlag{Name: "lora-modules", Value: "a=org/adapter"}), lora},
 	}, nil)
 	ns := newNamespace(t)
 	md := newModelDeployment(ns, "abbrev-update")
 	must(t, c.Create(bg(), md), "create")
 	got := &v1alpha1.ModelDeployment{}
 	must(t, c.Get(bg(), objKey(md), got), "get")
-	got.Spec.Serving.Flags = append(got.Spec.Serving.Flags, v1alpha1.EngineFlag{Name: "revisio", Value: "main"})
+	got.Spec.Source.Served.Flags = append(got.Spec.Source.Served.Flags, v1alpha1.EngineFlag{Name: "revisio", Value: "main"})
 	requireRefused(t, c.Update(bg(), got), passed)
+}
+
+// Every proper prefix of every flag in HBEP-3's v1 table is refused, in the
+// dashed and the underscored spelling, unless it is itself a flag of the table
+// (argparse takes an exact match first, so tokenizer stays admitted although it
+// is a prefix of tokenizer-mode). The names are read from the HBEP, not from the
+// rule, so a flag missing from the rule's list fails here.
+func TestEngineFlagsRefuseEveryPrefixOfAKnownFlag(t *testing.T) {
+	const msg = "a proper prefix of a known flag name is refused"
+	known := hbep3FlagNames(t)
+	isKnown := map[string]bool{}
+	for _, k := range known {
+		isKnown[k] = true
+	}
+	ns := newNamespace(t)
+	try := func(name, value string) error {
+		md := newModelDeployment(ns, uniq("md"))
+		md.Spec.Source.Served.Flags = []v1alpha1.EngineFlag{{Name: name, Value: value}}
+		return c.Create(bg(), md)
+	}
+	for _, k := range known {
+		t.Run(k, func(t *testing.T) {
+			var accepted []string
+			for i := 1; i < len(k); i++ {
+				p := k[:i]
+				if isKnown[p] {
+					continue
+				}
+				for _, spelling := range []string{p, underscored(p)} {
+					if err := try(spelling, "x"); err == nil {
+						accepted = append(accepted, spelling)
+					} else if !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), msg) {
+						t.Errorf("prefix %q of %q: want the refusal %q, got %v", spelling, k, msg, err)
+					}
+				}
+			}
+			if len(accepted) > 0 {
+				t.Errorf("prefixes of %q were accepted: %v", k, accepted)
+			}
+		})
+	}
+	// The other side: every known name is admitted with a value that suits it,
+	// except the ones with a refusal of their own.
+	own := map[string]bool{"api-key": true, "hf-token": true, "model": true, "revision": true, "chat-template": true, "config": true, "lora-modules": true}
+	isBool := map[string]bool{}
+	for _, b := range vllmBooleanFlags {
+		isBool[b] = true
+	}
+	for _, k := range known {
+		if own[k] {
+			continue
+		}
+		value := "x"
+		switch {
+		case isBool[k]:
+			value = "true"
+		case k == "tokenizer":
+			value = "example-org/example-1b" // the checkpoint's own
+		case k == "tokenizer-revision":
+			value = commit40
+		}
+		for _, spelling := range []string{k, underscored(k)} {
+			if err := try(spelling, value); err != nil {
+				t.Errorf("the known flag %q was refused: %v", spelling, err)
+			}
+		}
+	}
 }
 
 // A boolean flag is given under its positive name with "true" or "false"
 // (HBEP-3); the launcher passes "false" as --no-<name>. A second spelling would
-// split one setting into two deployment IDs (review findings B5).
+// split one setting into two deployment IDs (review finding B5).
 func TestBooleanEngineFlagsTakeTrueOrFalse(t *testing.T) {
 	const (
 		negative = "a boolean flag is given under its positive name"
@@ -237,13 +376,16 @@ func TestBooleanEngineFlagsTakeTrueOrFalse(t *testing.T) {
 	for _, b := range vllmBooleanFlags {
 		accepted = append(accepted,
 			mdCase{b + " is true", flag(b, "true"), ""},
-			mdCase{b + " is false", flag(b, "false"), ""})
+			mdCase{b + " is false", flag(b, "false"), ""},
+			mdCase{underscored(b) + " is false", flag(underscored(b), "false"), ""})
 		for _, v := range []string{"1", "0", "True", "FALSE", "yes", "no", "on", " true", "true ", ""} {
 			refused = append(refused, mdCase{b + " set to " + `"` + v + `"`, flag(b, v), value})
 		}
+		refused = append(refused, mdCase{underscored(b) + ` set to "1"`, flag(underscored(b), "1"), value})
 		for _, v := range []string{"true", "false"} {
 			refused = append(refused, mdCase{"no-" + b + " set to " + v, flag("no-"+b, v), negative})
 		}
+		refused = append(refused, mdCase{"no_" + underscored(b) + " set to true", flag("no_"+underscored(b), "true"), negative})
 	}
 	refused = append(refused,
 		mdCase{"the negated spelling the review found", flag("no-enable-prefix-caching", "true"), negative},
@@ -263,9 +405,68 @@ func TestBooleanEngineFlagsTakeTrueOrFalse(t *testing.T) {
 	runMDCases(t, refused, accepted)
 }
 
+// lora-modules and a speculative-config that names a draft model refer to other
+// checkpoints without a pinned revision, the risk behind L-8.3: both are refused
+// in alpha, with a pinned form left for beta (HBEP-3, references to other
+// checkpoints inside input values).
+func TestEngineFlagsThatNameOtherCheckpointsAreRefused(t *testing.T) {
+	const draft = "a speculative-config that names a draft model is refused in alpha"
+	spec := func(name, value string) func(*v1alpha1.ModelDeployment) {
+		return setFlags(v1alpha1.EngineFlag{Name: name, Value: value})
+	}
+	runMDCases(t, []mdCase{
+		{"a draft model", spec("speculative-config", `{"model":"org/draft-1b","num_speculative_tokens":5}`), draft},
+		{"a draft model, spaced as JSON allows", spec("speculative-config", "{\"num_speculative_tokens\": 5,\n  \"model\" : \"org/draft-1b\"}"), draft},
+		{"an EAGLE head, which is another checkpoint too", spec("speculative-config", `{"method":"eagle","model":"org/eagle-head"}`), draft},
+		{"the underscore spelling of the name", spec("speculative_config", `{"model":"org/draft-1b"}`), draft},
+	}, []mdCase{
+		{"n-gram speculation, which names no model", spec("speculative-config", `{"method":"ngram","num_speculative_tokens":3,"prompt_lookup_max":4}`), ""},
+		{"multi-token prediction, which names no model", spec("speculative-config", `{"method":"mtp","num_speculative_tokens":1}`), ""},
+		{"an empty speculative-config", spec("speculative-config", `{}`), ""},
+		{"a model key that is not the draft's, as a longer key name", spec("speculative-config", `{"method":"ngram","max_model_len":4096}`), ""},
+		{"a flag that is not speculative-config may carry a model key", spec("hf-overrides", `{"model":"x"}`), ""},
+	})
+}
+
+// A tokenizer other than the checkpoint's is another unpinned checkpoint (L-8.3):
+// it needs a tokenizer-revision that is a full commit id (HBEP-3). A
+// tokenizer-revision is a full commit id wherever it appears.
+func TestTokenizerOtherThanTheCheckpointsIsPinned(t *testing.T) {
+	const (
+		needsPin = "a tokenizer other than the checkpoint's needs a tokenizer-revision flag"
+		hexOnly  = "tokenizer-revision must be a full commit id"
+	)
+	const own = "example-org/example-1b" // newModelDeployment's checkpoint repository
+	f := func(pairs ...string) func(*v1alpha1.ModelDeployment) {
+		var flags []v1alpha1.EngineFlag
+		for i := 0; i < len(pairs); i += 2 {
+			flags = append(flags, v1alpha1.EngineFlag{Name: pairs[i], Value: pairs[i+1]})
+		}
+		return setFlags(flags...)
+	}
+	const other = "other-org/other-tokenizer"
+	runMDCases(t, []mdCase{
+		{"another tokenizer with no revision", f("tokenizer", other), needsPin},
+		{"another tokenizer with a branch as its revision", f("tokenizer", other, "tokenizer-revision", "main"), needsPin},
+		{"another tokenizer with an abbreviated revision", f("tokenizer", other, "tokenizer-revision", commit40[:12]), needsPin},
+		{"another tokenizer, underscored, with no revision", f("tokenizer", other, "tokenizer_revision", "v1.0"), needsPin},
+		{"another tokenizer with a revision of 41 hex characters", f("tokenizer", other, "tokenizer-revision", commit40+"a"), needsPin},
+		{"a branch as the revision of the checkpoint's own tokenizer", f("tokenizer-revision", "main"), hexOnly},
+		{"a branch given after a good revision, which would win", f("tokenizer", other, "tokenizer-revision", commit40, "tokenizer-revision", "main"), hexOnly},
+		{"an uppercase revision", f("tokenizer", other, "tokenizer-revision", strings.ToUpper(commit40)), needsPin},
+	}, []mdCase{
+		{"another tokenizer, pinned", f("tokenizer", other, "tokenizer-revision", commit40), ""},
+		{"another tokenizer, pinned, in the other order", f("tokenizer-revision", commit40, "tokenizer", other), ""},
+		{"another tokenizer, pinned, with underscores", f("tokenizer", other, "tokenizer_revision", commit40), ""},
+		{"the checkpoint's own tokenizer, named", f("tokenizer", own), ""},
+		{"no tokenizer flag", f("tokenizer-mode", "auto"), ""},
+		{"a pinned revision of the checkpoint's own tokenizer", f("tokenizer-revision", commit40), ""},
+	})
+}
+
 func TestEngineEnvironment(t *testing.T) {
 	env := func(vars ...v1alpha1.EnvVar) func(*v1alpha1.ModelDeployment) {
-		return func(md *v1alpha1.ModelDeployment) { md.Spec.Serving.Env = vars }
+		return func(md *v1alpha1.ModelDeployment) { md.Spec.Source.Served.Env = vars }
 	}
 	one := func(name string) func(*v1alpha1.ModelDeployment) {
 		return env(v1alpha1.EnvVar{Name: name, Value: "1"})
@@ -320,7 +521,7 @@ func TestEngineEnvironmentCredentialsAreRefusedOnUpdate(t *testing.T) {
 	const key = "a key is never written in a spec"
 	ns := newNamespace(t)
 	md := newModelDeployment(ns, "env-update")
-	md.Spec.Serving.Env = []v1alpha1.EnvVar{{Name: "HF_HOME", Value: "/data/hf"}}
+	md.Spec.Source.Served.Env = []v1alpha1.EnvVar{{Name: "HF_HOME", Value: "/data/hf"}}
 	must(t, c.Create(bg(), md), "create")
 	get := func() *v1alpha1.ModelDeployment {
 		got := &v1alpha1.ModelDeployment{}
@@ -330,13 +531,13 @@ func TestEngineEnvironmentCredentialsAreRefusedOnUpdate(t *testing.T) {
 	for _, name := range []string{"HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "VLLM_API_KEY", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"} {
 		t.Run("refuse adding "+name, func(t *testing.T) {
 			got := get()
-			got.Spec.Serving.Env = append(got.Spec.Serving.Env, v1alpha1.EnvVar{Name: name, Value: "example-secret"})
+			got.Spec.Source.Served.Env = append(got.Spec.Source.Served.Env, v1alpha1.EnvVar{Name: name, Value: "example-secret"})
 			requireRefused(t, c.Update(bg(), got), key)
 		})
 	}
 	t.Run("accept adding an ordinary variable", func(t *testing.T) {
 		got := get()
-		got.Spec.Serving.Env = append(got.Spec.Serving.Env, v1alpha1.EnvVar{Name: "VLLM_LOGGING_LEVEL", Value: "INFO"})
+		got.Spec.Source.Served.Env = append(got.Spec.Source.Served.Env, v1alpha1.EnvVar{Name: "VLLM_LOGGING_LEVEL", Value: "INFO"})
 		must(t, c.Update(bg(), got), "update")
 	})
 }
@@ -347,7 +548,7 @@ func TestEngineEnvironmentCredentialsAreRefusedOnUpdate(t *testing.T) {
 func TestCheckpointHubTokenReferenceNamesExactlyOneSource(t *testing.T) {
 	const want = "name exactly one of file and secretRef"
 	ref := func(r v1alpha1.CredentialsReference) func(*v1alpha1.ModelDeployment) {
-		return func(md *v1alpha1.ModelDeployment) { md.Spec.Serving.Checkpoint.HubTokenRef = &r }
+		return func(md *v1alpha1.ModelDeployment) { md.Spec.Source.Served.Checkpoint.HubTokenRef = &r }
 	}
 	secret := &v1alpha1.SecretKeyReference{Name: "hub", Namespace: "team", Key: "token"}
 	runMDCases(t, []mdCase{
@@ -375,17 +576,17 @@ func TestChatTemplatePresenceIsKept(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			md := newModelDeployment(ns, uniq("tpl"))
-			md.Spec.Serving.ChatTemplate = tc.set
+			md.Spec.Source.Served.ChatTemplate = tc.set
 			must(t, c.Create(bg(), md), "create")
 			got := &v1alpha1.ModelDeployment{}
 			must(t, c.Get(bg(), objKey(md), got), "get")
 			switch {
-			case tc.set == nil && got.Spec.Serving.ChatTemplate != nil:
-				t.Errorf("an omitted template came back as %q", *got.Spec.Serving.ChatTemplate)
-			case tc.set != nil && got.Spec.Serving.ChatTemplate == nil:
+			case tc.set == nil && got.Spec.Source.Served.ChatTemplate != nil:
+				t.Errorf("an omitted template came back as %q", *got.Spec.Source.Served.ChatTemplate)
+			case tc.set != nil && got.Spec.Source.Served.ChatTemplate == nil:
 				t.Errorf("the template %q came back omitted", *tc.set)
-			case tc.set != nil && *got.Spec.Serving.ChatTemplate != *tc.set:
-				t.Errorf("the template %q came back as %q", *tc.set, *got.Spec.Serving.ChatTemplate)
+			case tc.set != nil && *got.Spec.Source.Served.ChatTemplate != *tc.set:
+				t.Errorf("the template %q came back as %q", *tc.set, *got.Spec.Source.Served.ChatTemplate)
 			}
 		})
 	}
@@ -395,7 +596,7 @@ func TestChatTemplatePresenceIsKept(t *testing.T) {
 	for _, set := range []*string{ptr.To(""), nil, ptr.To("x")} {
 		got := &v1alpha1.ModelDeployment{}
 		must(t, c.Get(bg(), objKey(md), got), "get")
-		got.Spec.Serving.ChatTemplate = set
+		got.Spec.Source.Served.ChatTemplate = set
 		must(t, c.Update(bg(), got), "edit the template")
 	}
 }
@@ -415,10 +616,10 @@ func TestDeploymentStatusHoldsFullIDs(t *testing.T) {
 	}
 	for what, set := range map[string]func(*v1alpha1.ModelDeployment, v1alpha1.FullDeploymentID){
 		"currentIDs": func(m *v1alpha1.ModelDeployment, id v1alpha1.FullDeploymentID) {
-			m.Status.CurrentIDs = []v1alpha1.ClassDeploymentID{{AcceleratorClass: class, ID: id}}
+			m.Status.CurrentIDs = []v1alpha1.ClassDeploymentID{{AcceleratorClass: &class, ID: id}}
 		},
 		"activeIDs": func(m *v1alpha1.ModelDeployment, id v1alpha1.FullDeploymentID) {
-			m.Status.ActiveIDs = []v1alpha1.ActiveDeploymentID{{AcceleratorClass: class, ID: id, Instances: 1}}
+			m.Status.ActiveIDs = []v1alpha1.ActiveDeploymentID{{AcceleratorClass: &class, ID: id, Instances: 1}}
 		},
 	} {
 		t.Run("refuse the 12-character form in "+what, func(t *testing.T) {
@@ -443,6 +644,26 @@ func TestDeploymentStatusHoldsFullIDs(t *testing.T) {
 	}
 }
 
+// A managed catalog entry has no accelerator class, so its status entries name
+// none: the class is optional, and none is invented for the entry.
+func TestManagedDeploymentStatusNamesNoAcceleratorClass(t *testing.T) {
+	ns := newNamespace(t)
+	md := newModelDeployment(ns, "managed-status")
+	md.Spec.Source = v1alpha1.ModelSource{Managed: &v1alpha1.ManagedCatalogEntry{Platform: "example-managed", CatalogName: "example-model-27b"}}
+	must(t, c.Create(bg(), md), "create")
+	md.Status.CurrentIDs = []v1alpha1.ClassDeploymentID{{ID: fullID}}
+	md.Status.ActiveIDs = []v1alpha1.ActiveDeploymentID{{ID: fullID, Instances: 1}}
+	must(t, c.Status().Update(bg(), md), "write a status without an accelerator class")
+	got := &v1alpha1.ModelDeployment{}
+	must(t, c.Get(bg(), objKey(md), got), "get")
+	if len(got.Status.CurrentIDs) != 1 || got.Status.CurrentIDs[0].AcceleratorClass != nil || got.Status.ActiveIDs[0].AcceleratorClass != nil {
+		t.Fatalf("status IDs = %+v / %+v", got.Status.CurrentIDs, got.Status.ActiveIDs)
+	}
+	// A class that is given still has both of its fields.
+	got.Status.CurrentIDs[0].AcceleratorClass = &v1alpha1.AcceleratorClass{GPUModel: "GH200"}
+	requireRefused(t, c.Status().Update(bg(), got), "cpu_arch")
+}
+
 func TestModelDeploymentProvidersAndInstances(t *testing.T) {
 	sel := &metav1.LabelSelector{MatchLabels: map[string]string{v1alpha1.LabelPlatform: "example-platform"}}
 	runMDCases(t, []mdCase{
@@ -465,24 +686,32 @@ func TestModelDeploymentProvidersAndInstances(t *testing.T) {
 
 func TestRetentionPolicy(t *testing.T) {
 	const msg = "idleLimit is required with mode ReleaseWhenIdle and refused with mode Keep"
+	const until = "until is refused with mode ReleaseWhenIdle"
 	pol := func(p v1alpha1.RetentionPolicy) func(*v1alpha1.ModelDeployment) {
 		return func(md *v1alpha1.ModelDeployment) { md.Spec.RetentionPolicy = &p }
 	}
-	until := &metav1.Time{Time: metav1.Now().Add(86400e9)}
+	date := &metav1.Time{Time: metav1.Now().Add(86400e9)}
 	runMDCases(t, []mdCase{
 		{"release when idle without an idle limit", pol(v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionReleaseWhenIdle}), msg},
 		{"keep with an idle limit", pol(v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionKeep, IdleLimit: ptr.To(v1alpha1.Duration("10m"))}), msg},
+		{"an idle limit with no mode, which is keep", pol(v1alpha1.RetentionPolicy{IdleLimit: ptr.To(v1alpha1.Duration("10m"))}), msg},
+		{"release when idle with a date to keep until", pol(v1alpha1.RetentionPolicy{
+			Mode: v1alpha1.RetentionReleaseWhenIdle, IdleLimit: ptr.To(v1alpha1.Duration("10m")), Until: date}), until},
 		{"an unknown mode", pol(v1alpha1.RetentionPolicy{Mode: "Forever"}), "Unsupported value"},
 		{"an idle limit that is not a duration", pol(v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionReleaseWhenIdle, IdleLimit: ptr.To(v1alpha1.Duration("soon"))}), "idleLimit"},
 	}, []mdCase{
-		{"keep until a date", pol(v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionKeep, Until: until}), ""},
+		{"keep until a date", pol(v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionKeep, Until: date}), ""},
+		{"a date with no mode, which is keep", pol(v1alpha1.RetentionPolicy{Until: date}), ""},
 		{"keep with no date (the deployment's end time)", pol(v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionKeep}), ""},
+		{"an empty policy", pol(v1alpha1.RetentionPolicy{}), ""},
 		{"release when idle after a limit", pol(v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionReleaseWhenIdle, IdleLimit: ptr.To(v1alpha1.Duration("30m"))}), ""},
 	})
 }
 
-// A field the spec omits takes its schema default: one instance, and the Keep
-// mode of an empty retention policy.
+// A field the spec omits takes its schema default: one instance. The retention
+// mode has none: the stored object keeps an unset mode, and the controller reads
+// it as Keep (HBEP-7's decided default), so a later change of that default
+// leaves no stale stored values.
 func TestModelDeploymentDefaults(t *testing.T) {
 	ns := newNamespace(t)
 	md := newModelDeployment(ns, "defaults")
@@ -500,9 +729,55 @@ func TestModelDeploymentDefaults(t *testing.T) {
 	if got.Spec.Instances != 1 {
 		t.Errorf("spec.instances defaulted to %d, want 1", got.Spec.Instances)
 	}
-	if got.Spec.RetentionPolicy == nil || got.Spec.RetentionPolicy.Mode != v1alpha1.RetentionKeep {
-		t.Errorf("an empty retention policy = %+v, want mode Keep", got.Spec.RetentionPolicy)
+	if got.Spec.RetentionPolicy == nil || got.Spec.RetentionPolicy.Mode != "" {
+		t.Errorf("an empty retention policy = %+v; the schema must not write a mode", got.Spec.RetentionPolicy)
 	}
+	if got.Spec.RetentionPolicy.EffectiveMode() != v1alpha1.RetentionKeep {
+		t.Errorf("the effective mode of an empty policy is %q, want Keep", got.Spec.RetentionPolicy.EffectiveMode())
+	}
+}
+
+// A ModelDeployment serves a checkpoint on our engine or a catalog entry of a
+// managed platform, never both and never neither (review finding B9). A catalog
+// entry carries no checkpoint, engine or flags, and none is invented for it.
+func TestModelDeploymentSourceIsServedOrManaged(t *testing.T) {
+	const msg = "source names exactly one of served and managed"
+	managed := &v1alpha1.ManagedCatalogEntry{Platform: "example-managed", CatalogName: "example-model-27b"}
+	src := func(s v1alpha1.ModelSource) func(*v1alpha1.ModelDeployment) {
+		return func(md *v1alpha1.ModelDeployment) { md.Spec.Source = s }
+	}
+	served := newModelDeployment("x", "x").Spec.Source.Served
+	runMDCases(t, []mdCase{
+		{"neither served nor managed", src(v1alpha1.ModelSource{}), msg},
+		{"both served and managed", src(v1alpha1.ModelSource{Served: served, Managed: managed}), msg},
+		{"a managed entry without a platform", src(v1alpha1.ModelSource{Managed: &v1alpha1.ManagedCatalogEntry{CatalogName: "m"}}), "platform"},
+		{"a managed entry without a catalog name", src(v1alpha1.ModelSource{Managed: &v1alpha1.ManagedCatalogEntry{Platform: "p"}}), "catalogName"},
+		{"a managed entry with an empty revision", src(v1alpha1.ModelSource{Managed: &v1alpha1.ManagedCatalogEntry{
+			Platform: "p", CatalogName: "m", Revision: ptr.To("")}}), "revision"},
+		{"a served source without a checkpoint revision", func(md *v1alpha1.ModelDeployment) { md.Spec.Source.Served.Checkpoint.Revision = "" }, "revision"},
+	}, []mdCase{
+		{"a served source", src(v1alpha1.ModelSource{Served: served}), ""},
+		{"a managed entry with no checkpoint, engine or flags", src(v1alpha1.ModelSource{Managed: managed}), ""},
+		{"a managed entry with a revision", src(v1alpha1.ModelSource{Managed: &v1alpha1.ManagedCatalogEntry{
+			Platform: "example-managed", CatalogName: "example-model-27b", Revision: ptr.To("2026-10-01")}}), ""},
+	})
+	// A catalog entry's stored form has no served block, and a served one no managed block.
+	ns := newNamespace(t)
+	md := newModelDeployment(ns, "managed-stored")
+	md.Spec.Source = v1alpha1.ModelSource{Managed: managed}
+	must(t, c.Create(bg(), md), "create")
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("ModelDeployment"))
+	must(t, c.Get(bg(), objKey(md), u), "get unstructured")
+	source, _, _ := unstructured.NestedMap(u.Object, "spec", "source")
+	if _, has := source["served"]; has || source["managed"] == nil {
+		t.Errorf("spec.source = %v", source)
+	}
+	// Switching between the two is an edit of what is served: allowed, and it rolls out new IDs.
+	got := &v1alpha1.ModelDeployment{}
+	must(t, c.Get(bg(), objKey(md), got), "get")
+	got.Spec.Source = v1alpha1.ModelSource{Served: served}
+	must(t, c.Update(bg(), got), "switch from a catalog entry to a served checkpoint")
 }
 
 // An edit to a ModelDeployment's serving spec is allowed: it rolls out new
@@ -514,13 +789,13 @@ func TestServingSpecMayChange(t *testing.T) {
 	must(t, c.Create(bg(), md), "create")
 	for step, edit := range []func(*v1alpha1.ModelDeployment){
 		func(m *v1alpha1.ModelDeployment) {
-			m.Spec.Serving.Checkpoint.Revision = "fedcba9876543210fedcba9876543210fedcba98"
+			m.Spec.Source.Served.Checkpoint.Revision = "fedcba9876543210fedcba9876543210fedcba98"
 		},
 		func(m *v1alpha1.ModelDeployment) {
-			m.Spec.Serving.Flags = append(m.Spec.Serving.Flags, v1alpha1.EngineFlag{Name: "seed", Value: "7"})
+			m.Spec.Source.Served.Flags = append(m.Spec.Source.Served.Flags, v1alpha1.EngineFlag{Name: "seed", Value: "7"})
 		},
-		func(m *v1alpha1.ModelDeployment) { m.Spec.Serving.ChatTemplate = ptr.To("{{ messages }}") },
-		func(m *v1alpha1.ModelDeployment) { m.Spec.Serving.Engine.Version = "0.33.0" },
+		func(m *v1alpha1.ModelDeployment) { m.Spec.Source.Served.ChatTemplate = ptr.To("{{ messages }}") },
+		func(m *v1alpha1.ModelDeployment) { m.Spec.Source.Served.Engine.Version = "0.33.0" },
 		func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 3 },
 	} {
 		got := &v1alpha1.ModelDeployment{}
@@ -535,7 +810,7 @@ func TestServingSpecMayChange(t *testing.T) {
 	// The same edit that the create-time rule refuses stays refused on update.
 	got := &v1alpha1.ModelDeployment{}
 	must(t, c.Get(bg(), objKey(md), got), "get")
-	got.Spec.Serving.Checkpoint.Revision = "main"
+	got.Spec.Source.Served.Checkpoint.Revision = "main"
 	requireRefused(t, c.Update(bg(), got), "revision must be a full commit id")
 }
 

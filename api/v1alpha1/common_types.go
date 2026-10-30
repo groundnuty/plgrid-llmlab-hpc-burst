@@ -129,16 +129,22 @@ const (
 // RetentionPolicy is what an Allocation with no Instance does. A kept
 // Allocation still ends at its hard end.
 //
-// +kubebuilder:validation:XValidation:rule="self.mode == 'ReleaseWhenIdle' ? has(self.idleLimit) : !has(self.idleLimit)",message="idleLimit is required with mode ReleaseWhenIdle and refused with mode Keep"
+// The mode has no schema default. An unset mode means Keep, HBEP-7's decided
+// default, and the controller applies it (EffectiveMode) and shows the
+// effective value in status. Writing the default into every stored object
+// would leave stale values behind when the default changes (review finding).
+//
+// +kubebuilder:validation:XValidation:rule="(has(self.mode) && self.mode == 'ReleaseWhenIdle') ? has(self.idleLimit) : !has(self.idleLimit)",message="idleLimit is required with mode ReleaseWhenIdle and refused with mode Keep"
+// +kubebuilder:validation:XValidation:rule="!(has(self.mode) && self.mode == 'ReleaseWhenIdle') || !has(self.until)",message="until is refused with mode ReleaseWhenIdle: an Allocation released when idle is not kept until a date"
 type RetentionPolicy struct {
-	// Mode is Keep (the default) or ReleaseWhenIdle.
+	// Mode is Keep or ReleaseWhenIdle. Unset means Keep.
 	//
-	// +kubebuilder:default=Keep
-	Mode RetentionMode `json:"mode"`
+	// +optional
+	Mode RetentionMode `json:"mode,omitempty"`
 
 	// Until is the date a kept Allocation is kept until: a date, a grant's end
 	// or a deadline. When it is absent, the default is the deployment's end
-	// time (HBEP-7, open question 13).
+	// time (HBEP-7, open question 13). It goes with mode Keep.
 	//
 	// +optional
 	Until *metav1.Time `json:"until,omitempty"`
@@ -147,6 +153,15 @@ type RetentionPolicy struct {
 	//
 	// +optional
 	IdleLimit *Duration `json:"idleLimit,omitempty"`
+}
+
+// EffectiveMode returns the mode that applies: Keep when none is set. A nil
+// policy is an unset one.
+func (r *RetentionPolicy) EffectiveMode() RetentionMode {
+	if r == nil || r.Mode == "" {
+		return RetentionKeep
+	}
+	return r.Mode
 }
 
 // ReconcileStatus is what every status carries so that a stuck controller
