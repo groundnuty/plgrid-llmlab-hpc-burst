@@ -303,38 +303,39 @@ Captured on 2026-10-30 from the S1 step-0 probe jobs (direct mode, probe only, 2
 |---|---|---|---|---|
 | 09:07:30.020-31.053 | -2.9 to -2.0 | RUNNING | -2.0 to -2.0 | RUNNING |
 | 09:07:32.019-33.549 | -0.9 to +0.5 | RUNNING | +0.5 to +0.5 | RUNNING |
-| 09:07:34.020-35.242 | +1.1 to +2.2 | GONE | +2.2 to +2.2 | FAILED |
+| 09:07:34.020-35.242 | +1.1 to +2.2 | not listed | +2.2 to +2.2 | FAILED |
 
-`GONE` is a poll whose `squeue` answer lists no job (see the next section for its exact shape).
+`not listed` is a poll whose `squeue` answer contains no job object (its exact shape is in the section on the not-listed answer below).
 
 **Measured gap, Helios CPU.** In the poll that ended at end+0.5 s, `squeue` and `sacct` both still said RUNNING. In the next poll (its `squeue` call from end+1.1 s to end+2.2 s, its `sacct` call right after) `squeue` no longer listed the job **and** `sacct` already said FAILED. So:
 
 - end to left-squeue: at most 2.2 s (the `squeue` call that did not list the job returned at end+2.2 s);
 - end to sacct terminal: at most 2.2 s;
 - squeue→sacct gap: **0 s within the 2 s resolution.** There was no poll in which `squeue` had forgotten the job and `sacct` could not yet answer a terminal state. A poller that asks `sacct` as soon as `squeue` stops listing the job got the terminal state on its first try, on all three platforms below.
-- `squeue` never showed a terminal or COMPLETING state for this job: it went RUNNING to not-listed within one 2 s poll.
+- `squeue` never showed a terminal or COMPLETING state for this job: it went from RUNNING to not listed within one 2 s poll. The ID was still known to the controller at that point (the answer was an empty list, not an error; see below).
 
 ### Comparison: the same poller on the other two platforms
 
 | Platform (Slurm) | last `squeue` call that said RUNNING returned at (s from end) | first `squeue` terminal state, call returned at | first `sacct` terminal, call returned at | first `squeue` call not listing the job returned at |
 |---|---|---|---|---|
-| Helios CPU (24.11.5) | +0.5 s | none seen (went straight to not listed) | FAILED, by +2.2 s | GONE, by +2.2 s |
-| Helios GH200 (24.11.5) | +0.7 s | FAILED, by +2.7 s | FAILED, by +2.8 s | GONE, by +3.4 s |
-| Athena A100 (23.11.7) | -1.4 s | FAILED, by +0.6 s | FAILED, by +3.0 s | GONE, by +12.5 s |
+| Helios CPU (24.11.5) | +0.5 s | none seen (went straight to not listed) | FAILED, by +2.2 s | not listed, by +2.2 s |
+| Helios GH200 (24.11.5) | +0.7 s | FAILED, by +2.7 s | FAILED, by +2.8 s | not listed, by +3.4 s |
+| Athena A100 (23.11.7) | -1.4 s | FAILED, by +0.6 s | FAILED, by +3.0 s | not listed, by +12.5 s |
 
-- **Helios** forgets a finished job almost at once (not listed by 2.2 s after the end on CPU and by 3.4 s on GH200; on GH200 `squeue` showed `["FAILED","COMPLETING"]` for one poll, and `sacct` already said FAILED in that same poll).
-- **Athena** keeps the finished job in `squeue` for about 12 s, in state FAILED with `state_reason` `NonZeroExitCode`, and `sacct` caught up one poll (2 s) after `squeue` first said FAILED (that poll: `squeue` FAILED, `sacct` still RUNNING). So on Athena `sacct` trailed `squeue`'s first terminal state by one poll, and `squeue` stopped listing the job about 10 s after `sacct` said terminal. The two sources never disagreed for longer than one poll.
+- **Helios** (24.11.5) stopped listing the job by 2.2 s after the end on CPU and by 3.4 s on GH200, but it still answered with an empty list and exit 0, not an error: the controller still knew the ID. On GH200 `squeue` showed `["FAILED","COMPLETING"]` for one poll, and `sacct` already said FAILED in that same poll.
+- **Athena** (23.11.7) kept listing the finished job for about 12 s, in state FAILED with `state_reason` `NonZeroExitCode`, and `sacct` caught up one poll (2 s) after `squeue` first said FAILED (that poll: `squeue` FAILED, `sacct` still RUNNING). So on Athena `sacct` trailed `squeue`'s first terminal state by one poll, and `squeue` stopped listing the job about 10 s after `sacct` said terminal, which fits `MinJobAge` = 10 s (read with `scontrol show config` on both clusters). The two sources never disagreed for longer than one poll.
 - At the very start, `sacct` can trail `squeue`: on Athena the first poll after RUNNING had `squeue` RUNNING and `sacct` PENDING.
-- **Not measured:** how long a Helios job stays in `squeue` when it runs longer, how `MinJobAge` applies, and the time at which the Helios not-listed answer turns from the empty list below into an error. S7's note of `MinJobAge` 10 s on Helios is not what these polls saw (not listed within 2.2 s of the end).
+- **Inference, not tested:** `squeue`'s documented default state filter is pending, running and completing (`man squeue`, both clusters). Helios 24.11.5 stopped listing the FAILED job at once, as that filter would, and answered with the empty list, while Athena 23.11.7 listed the same kind of job in state FAILED under the same command. A Helios `squeue` with `--states=all` was not tried, because that needs another job. So treat "not listed" as "not in the default states" rather than "forgotten" on Helios.
+- **Not measured:** when the Helios answer turns from the empty list into the error. It had turned by 0.4 min after the GH200 job end (the polls stopped at the first empty list). `MinJobAge` is 10 s on both clusters (same `scontrol show config` read), which fits the turn at about the end+10 s, but this was not observed. The S7 note of `MinJobAge` 10 s on Helios is consistent with these polls.
 
 ### What `squeue --json -j <id>` returns once the job is not listed
 
 | Platform | Shortly after the job end | Minutes later (0.4 after the GH200 job end, 1.6 after the CPU job end) |
 |---|---|---|
-| Helios (24.11.5) | exit 0, JSON with `"jobs": []` (top-level keys `jobs`, `last_backfill`, `last_update`, `meta`, `errors`, `warnings`; `errors` and `warnings` empty) | exit 1, no JSON, stderr `slurm_load_jobs error: Invalid job id specified` (same as the first part of this file) |
+| Helios (24.11.5) | **Phases seen:** listed (RUNNING; on GH200 also `["FAILED","COMPLETING"]` for one poll), then exit 0 with JSON `"jobs": []` (top-level keys `jobs`, `last_backfill`, `last_update`, `meta`, `errors`, `warnings`; `errors` and `warnings` empty), the ID still known. The empty list was the last answer the poller saw; it stopped there. | exit 1, no JSON, stderr `slurm_load_jobs error: Invalid job id specified` (same as the first part of this file): the ID is purged |
 | Athena (23.11.7) | exit 1, no JSON, stderr `slurm_load_jobs error: Invalid job id specified` (first not-listed poll) | not queried |
 
-A poller must therefore treat BOTH an empty `jobs` list and the error exit as "the controller no longer has the job", then ask `sacct`. A fake Slurm that returns only the error will not exercise the empty-list path that a real Helios returned right after the end.
+A poller must therefore treat BOTH an empty `jobs` list (exit 0) and the error exit (exit 1) as "`squeue` no longer lists the job", then ask `sacct`. A fake Slurm should model all three Helios phases (listed, empty list with exit 0, then the error), and on Athena the listed-as-FAILED phase before the error. A fake that returns only the error never exercises the empty-list path that a real Helios returned right after the end.
 
 ### `squeue --json -j <id>` while the job is RUNNING (Helios CPU, one document)
 
