@@ -13,7 +13,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -85,9 +84,11 @@ func run(m *testing.M) int {
 		if kc == "" {
 			return fail("HPCBURST_TEST_HOST=k3s needs HPCBURST_KUBECONFIG, the kubeconfig of the k3s the launcher (#41) started")
 		}
+		// The kubeconfig's server is checked before any client exists: it must be
+		// loopback on 29200-29239, never the root k3s on this machine (6443, 6444).
 		var err error
-		if cfg, err = clientcmd.BuildConfigFromFlags("", kc); err != nil {
-			return fail("kubeconfig %s: %v", kc, err)
+		if cfg, err = testenv.ExternalConfig(kc); err != nil {
+			return fail("%v", err)
 		}
 	default:
 		return fail("HPCBURST_TEST_HOST=%q: want %q or %q", host, hostAssembled, hostK3s)

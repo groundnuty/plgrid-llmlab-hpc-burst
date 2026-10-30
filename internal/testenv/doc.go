@@ -13,12 +13,23 @@
 //	HPCBURST_ENVTEST_ASSETS            directory holding etcd and kube-apiserver
 //	HPCBURST_KUBE_CONTROLLER_MANAGER   path of kube-controller-manager
 //
-// When either is unset, Start runs hack/test-binaries.sh, which finds or
-// fetches them and checks their sha256. HPCBURST_TOOLS_CACHE chooses the
-// script's cache directory.
+// Start always runs hack/test-binaries.sh, which finds or fetches the binaries
+// and checks their sha256; the two variables say where it looks, and a binary
+// that differs from its pin is refused. HPCBURST_TOOLS_CACHE chooses the
+// script's cache directory. HPCBURST_TESTENV_UNPINNED=1 is the explicit
+// development override: with both variables set it uses the binaries without
+// the check, and says so on stderr.
 //
-// Every listener is on loopback in a block of ports starting at
+// Every listener is on loopback in a block of four ports starting at
 // HPCBURST_TESTENV_PORT_BASE (default 29200): etcd client, etcd peer,
-// kube-apiserver, kube-controller-manager. The block must be free: a second
-// control plane started at the same time on the same block is refused.
+// kube-apiserver, kube-controller-manager. The whole block must lie inside
+// 29200-29219, issue #40's range, so the base is 29200 to 29216; any other
+// value is refused. The block must be free: a second control plane started at
+// the same time on the same block is refused.
+//
+// A root k3s may run on the same machine (ports 6443, 6444 and 10250). Nothing
+// here connects to those ports: GuardSystemPorts reads the kernel's table of
+// listening sockets, and ExternalConfig refuses a kubeconfig whose server is
+// not loopback on 29200-29239 before any client exists. Children are killed
+// when the test process dies (Pdeathsig).
 package testenv

@@ -27,31 +27,6 @@ const DefaultPortBase = 29200
 
 const envPortBase = "HPCBURST_TESTENV_PORT_BASE"
 
-// systemPorts are ports of a server another user of the machine may run (the
-// Kubernetes API server and the kubelet, as k3s uses them). A test run that
-// starts and stops a control plane must leave the ones that listened before it
-// listening.
-var systemPorts = []int{6443, 10250}
-
-// GuardSystemPorts records which system ports listen now and returns a check
-// that reports one that listened then and does not now. Call the check after
-// every test run that started anything.
-func GuardSystemPorts() func() error {
-	before := map[int]bool{}
-	for _, p := range systemPorts {
-		before[p] = listening(p)
-	}
-	return func() error {
-		var errs []error
-		for _, p := range systemPorts {
-			if before[p] && !listening(p) {
-				errs = append(errs, fmt.Errorf("port %d listened before the run and does not any more", p))
-			}
-		}
-		return errors.Join(errs...)
-	}
-}
-
 // ControlPlane is a running etcd, kube-apiserver and kube-controller-manager.
 type ControlPlane struct {
 	// Config reaches the API server as cluster admin.
@@ -85,15 +60,15 @@ type Options struct {
 // and the controller manager answers, and returns it. On error everything
 // already started is stopped.
 func Start(ctx context.Context, dir string, opts Options) (*ControlPlane, error) {
-	bins, err := FindBinaries()
+	// The port block is checked first: a bad value is refused before anything is
+	// looked up or started.
+	base, err := portBase(os.Getenv(envPortBase))
 	if err != nil {
 		return nil, err
 	}
-	base := DefaultPortBase
-	if v := os.Getenv(envPortBase); v != "" {
-		if base, err = strconv.Atoi(v); err != nil {
-			return nil, fmt.Errorf("%s: %w", envPortBase, err)
-		}
+	bins, err := FindBinaries()
+	if err != nil {
+		return nil, err
 	}
 	ports := struct{ etcdClient, etcdPeer, api, kcm int }{base, base + 1, base + 2, base + 3}
 	// A listener on our ports would answer health checks for a server that is not ours.

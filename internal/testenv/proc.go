@@ -25,7 +25,12 @@ func startProc(name, logPath string, argv ...string) (*proc, error) {
 	defer log.Close()
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdout, cmd.Stderr = log, log
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Pdeathsig makes the kernel kill the child when its parent dies, so a test
+	// run that times out, panics or is killed does not leave etcd and the API
+	// server running on the port block. Linux sends it when the thread that
+	// started the child exits; the Go runtime keeps its threads for the life of
+	// the process, which is the parent's.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start %s: %w", name, err)
 	}
