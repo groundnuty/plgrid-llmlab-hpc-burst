@@ -51,7 +51,7 @@ Problems:
   - The development VM behind a NAT accepted only port 22 from those nodes. There, the dial-home tunnel will run inside an ssh forward over port 22, with a restricted key (not yet run from a compute node).
   - Sano was not measured.
   - Where dial home works stays a per-partition fact in the platform profile (HBEP-4): outbound allowed or not, through which protocols and ports, directly or through a proxy.
-- The front needs an address that compute nodes can reach. Where it runs is HBEP-11's decision.
+- The front needs an address that compute nodes can reach. Where it runs is HBEP-11's decision. For alpha, HBEP-11 requires one of two ways (its open question 8): directly on the dial-home port, or through ssh on port 22 with a restricted key, the development path above (S1's option B). A host reachable by neither is out of alpha, and HBEP-11's launcher checks it.
 - A center may need to consent to tunnels from compute nodes. The fix owner is then the center.
 - Inside the instance, the engine and its router listen on loopback or a Unix socket, and the tunnel agent connects to them locally. On a shared node, other users' jobs can reach loopback too, so the local listener uses the Instance's own key, which the front sends (HBEP-9), or a socket protected by file permissions. That key is not the allocation's credential, which registers the Instance. A key covers only part of the engine's HTTP API (Risks).
 - All tokens of every reply cross the path. Its throughput and latency under many concurrent streams are part of serving capacity.
@@ -79,7 +79,7 @@ Problems:
 5. **Multi-node instances.** Candidate: only the entry rank dials home. Pooling workers across Instances is not part of this design (HBEP-3, open question 11), so no traffic between Instances needs a path.
 6. **Heartbeats.** Interval and miss count, a trade of detection time against connections and log volume. Measurement.
 7. **Credential.** Its format, its lifetime against the lease length, and renewal over the tunnel. Decided with HBEP-9.
-8. **A front behind NAT,** as in a single-user setup: does it need a rendezvous relay? Decided with HBEP-11.
+8. **A front behind NAT,** as in a single-user setup: does it need a rendezvous relay? Decided for alpha by HBEP-11 (its open question 8): no relay. The alpha host is reached directly on the dial-home port, or through ssh on port 22 with a restricted key. A host reachable by neither is out of alpha. A relay for other setups stays open.
 9. **Center consent.** Ask Cyfronet, and each other center, whether outbound tunnels from compute nodes are acceptable use. Owner.
 10. **Compute-node reachability.** Partly answered by spike S1's step 0 (issue #18): outbound 443 works on Helios CPU, Helios GH200 and Athena, and compute-node Python is 3.9 on all three. Still unknown: Sano, inbound reachability, and whether a compute-node listener can be reached from the login node. Whether the tunnel agent must run without a container runtime is HBEP-4's open question 15.
 
@@ -193,6 +193,7 @@ Dial home replaces www-2027's central relays and forward watchdogs, which kept h
 - 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
 - 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation; spike S5 facts carried in (HBEP-4, HBEP-6, HBEP-7 only).
 - 2026-10-30: spike S1 step 0 (issue #18) carried in: outbound 443 from compute nodes.
+- 2026-10-30: open question 8 decided for alpha by HBEP-11: the front is reached directly or through ssh on port 22.
 
 ## Amendments
 

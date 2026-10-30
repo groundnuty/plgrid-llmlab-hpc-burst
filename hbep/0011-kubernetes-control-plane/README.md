@@ -54,7 +54,7 @@ What the framework takes from Kubernetes:
 - **RBAC** per identity, verb, resource type and namespace.
 - **Audit** of every API call by the API server.
 - **Admission** that refuses invalid specs before they are stored, such as an unpinned revision (HBEP-9). For alpha it uses CRD schema validation and CEL rules, which spike S3 (PR #36) exercised, plus a ValidatingAdmissionPolicy to guard deletions.
-  - An edit to a ModelDeployment's serving spec is allowed. It rolls out a new deployment ID (HBEP-3, open question 7).
+  - An edit to a ModelDeployment's serving spec is allowed. It rolls out a new deployment ID in each accelerator class (HBEP-3, open question 7).
   - An existing identity record is never edited: the API server refuses it (Design details).
 - Also: server-side dry run, optimistic concurrency on resource versions, a status subresource with conditions, API versions with conversion, and client libraries.
 - **Controller concurrency follows Kubernetes practice:**
@@ -63,7 +63,7 @@ What the framework takes from Kubernetes:
   - idempotent, level-triggered reconciles;
   - rate-limited backoff on failure;
   - providers as independent shards (HBEP-7, open question 11);
-  - a leader `Lease` per provider controller, as an extra guard. Spike S4 (PR #32) showed that the lookup of a job by its tag, not the `Lease`, is what prevents duplicate submissions.
+  - a leader `Lease` per provider controller, as an extra guard. Spike S4 (PR #32) showed that the `Lease` does not prevent duplicate jobs, since a deposed leader's submission can still land. What keeps one job per Allocation running, in hold mode, is that only the recorded job's hold is ever lifted (HBEP-7, open question 11).
 
 What it does not solve:
 - **Provider facts.** Start estimates, hard ends, queue state and billing come from provider plugins (HBEP-4). Kubernetes has no notion of a lease with an unknown start and a hard end.
@@ -103,7 +103,11 @@ Deployment options:
 5. **How provider credentials are held.** Decided: for alpha, they are referenced, not stored. A Provider names a mode-600 file on the host, or a Secret in the team option. HBEP-1's content rules apply. Encryption at rest for the team option's Secrets is decided with question 3.
 6. **Replicas and leader election.** Not needed for alpha: one replica per controller, restarted by the launcher on failure. Each provider controller still takes its leader `Lease`. Several replicas come with the team option (question 3).
 7. **Which evaluated projects become components.** Decided: for the control plane, the Kubernetes API host (question 2), controller-runtime for our controllers, and crossplane-runtime under the Slurm provider (spike S4; HBEP-4). None of the other evaluated projects is a control-plane component; Alternatives says why.
-8. **The front's place and reachability.** HBEP-2 (open question 3), HBEP-5 (open question 11) and HBEP-6 (open question 8, and its TLS-terminating front) leave parts of these to this HBEP. Not needed for alpha: alpha has one user and one front. It assumes the front is reachable by the Instances' dial-home connections (HBEP-6). Whether several users share a front is HBEP-2's question, and is not decided here.
+8. **The front's place and reachability.** HBEP-2 (open question 3), HBEP-5 (open question 11) and HBEP-6 (open question 8, and its TLS-terminating front) leave parts of these to this HBEP. Decided for alpha: alpha has one user and one front, on the alpha host. That host must have an address that compute nodes reach, in one of two ways:
+   - directly, on the dial-home port;
+   - through ssh on port 22 with a restricted key, which carries the dial-home tunnel. This is HBEP-6's development path, option B of spike S1 (issue #18).
+
+   A host reachable by neither is out of alpha. The launcher checks this (Single-user host). Whether several users share a front is HBEP-2's question, and is not decided here.
 
 ## Design details
 
@@ -115,29 +119,48 @@ Deployment options:
 |---|---|---|---|
 | PlatformProfile | cluster | the platform's kind (managed, batch or static) and its profile data (HBEP-4) | when its facts were last checked |
 | Provider | cluster | a PlatformProfile reference; the provider settings (account, grant, allowed partitions; HBEP-4); a credentials reference | the age of its last successful status read; conditions |
-| ModelDeployment | namespaced | the model name, the serving spec, the number of instances, the allowed providers, the end time and the default retention policy | the current deployment ID, every ID that still has Instances, ready and desired counts, conditions |
-| Allocation | namespaced | crossplane-runtime's managed-resource fields, with `providerConfigRef` naming a Provider; the submission parameters, never edited; the assigned ModelDeployment; the retention policy | the job ID, written once; phase, start and hard end; duplicates; conditions (S4) |
-| Instance | namespaced | the full deployment ID, its identity record and its Allocation, all immutable | the phase (HBEP-3), the verification result with resolved settings, conditions |
+| ModelDeployment | namespaced | the model name, the serving spec (engine flags as ordered `{name, value}` pairs, HBEP-3), the number of instances, the allowed providers, the end time and the default retention policy | the current deployment ID of each accelerator class, every ID that still has Instances, ready and desired counts, conditions |
+| Allocation | namespaced | crossplane-runtime's managed-resource fields, with `providerConfigRef` naming a Provider; the submission parameters, never edited; the assigned ModelDeployment; the retention policy | a mirror of the job ID and the submission record, for display only (they live in annotations: Ownership, records and deletion); phase, start and hard end; duplicates; conditions (S4) |
+| Instance | namespaced | the full deployment ID, its identity record and its Allocation, all immutable | the phase (HBEP-3), the name of its verification record and its verdict, conditions |
 
-- **PlatformProfile schema.** HBEP-4 owns it (its open question 3). For alpha, the fields the Slurm provider reads are typed: the time zone, the requeue default, how long a finished job stays in the queue listing, job-name rules, whether accounting keeps the job comment, and the JSON output version (spikes S4 and S5). The rest of the profile is kept as an untyped block until HBEP-4 fixes the schema.
+- **PlatformProfile schema.** HBEP-4 owns it (its open question 3). For alpha, the fields that the Slurm provider and the deployment ID read are typed. The rest of the profile is kept as an untyped block until HBEP-4 fixes the schema.
+  - Per partition: the GPU model and the CPU architecture. Together they are the accelerator class, a deployment-ID input (HBEP-3).
+  - `hold_release` (bool): whether a plain user's `sbatch --hold` is honoured and that user can lift it. It is verified per platform. False runs S4's fallback mode (HBEP-7, open question 11).
+  - `lost_grace` (duration, default 2 min): how long a recorded job may be absent from both the queue listing and accounting before it is reported Lost.
+  - `inflight_window` (duration): how long an unresolved submission attempt is waited on. It must exceed the worst remote `sbatch` time, because a local timeout does not stop a remote `sbatch`.
+  - `unknown_bound` (duration, S4's default 10 min): in fallback mode, how long an Unknown attempt may stay unresolved before an operator is asked.
+  - From spikes S4 and S5: the time zone, the requeue default, how long a finished job stays in the queue listing, job-name rules, whether accounting keeps the job comment, and the JSON output version.
+- **Alpha precondition: `hold_release` is verified on the alpha platform;** otherwise S4's fallback mode runs. Spike S1 (issue #18) measured it true on 30 Oct 2026 on Helios CPU, Helios GH200 and Athena A100, with one trial per partition: the hold was honoured as `JobHeldUser`, and the same user lifted it. So Helios and Athena run hold mode. Sano is not verified, so it runs fallback mode until checked.
 - **Labels** under the group's prefix:
   - on Providers: `organization`, `platform`, `partition` and `account` (HBEP-3);
   - on Allocations and Instances: `provider` and `model-deployment`;
-  - on Instances: `deployment-id`, with the display form, because a label value holds at most 63 characters.
+  - on Instances: `deployment-id`, with the display form, because a label value holds at most 63 characters;
+  - on identity and verification records: `record` (`identity` or `verification`), `deployment-id` and `model-deployment`, and on verification records also `instance-uid`.
+  - **Long values.** A value longer than 63 characters, such as a long ModelDeployment name, is written as its first 50 characters, then `-`, then the first 12 hex characters of the SHA-256 of the full value. The full value stays where the object names it in full: an owner reference, a spec field or an annotation.
 - **Names.** Provider names are DNS-1123 labels (HBEP-3). Allocation and Instance names are generated by the controllers. An Allocation's name never derives from a model (HBEP-3, Allocation and job identity).
 
 ### Ownership, records and deletion
 
 - A ModelDeployment owns its Instances through a controller owner reference, as a ReplicaSet owns its pods. Each Instance is bound to one Allocation for life.
-- No ModelDeployment owns an Allocation (HBEP-3). An Allocation names the ModelDeployment it is assigned to. The lifecycle controller cancels a pending Allocation when its deployment ends, and applies a started one's retention policy (HBEP-7).
-- An Allocation's finalizer cancels its provider job through the provider plugin (HBEP-4), and the deletion completes only when the provider confirms.
+- **Draining before deletion.** Each Instance carries a drain finalizer, `hpcburst.groundnuty.github.io/drain`. The lifecycle controller removes it only once the Instance is `ended`. So deleting a ModelDeployment drains its Instances before they go: garbage collection marks them for deletion, and each drains without a replacement (HBEP-3) and ends. The ModelDeployment may already be gone by then, since draining needs only the Instance and its Allocation.
+- No ModelDeployment owns an Allocation (HBEP-3). An Allocation names the ModelDeployment it is assigned to. The lifecycle controller cancels a pending Allocation when its deployment ends, deletion included, and applies a started one's retention policy (HBEP-7).
+- **The Allocation's record** (spike S4). The provider keeps an Allocation's submission record and job ID as annotations. It writes each with a resourceVersion precondition, so a conflict means re-read, never overwrite.
+  - `crossplane.io/external-name`: the job tag (HBEP-3).
+  - `hpcburst.groundnuty.github.io/submission`: the latest attempt, with its number, token, state, writer, time and reason (HBEP-7, open question 11).
+  - `hpcburst.groundnuty.github.io/job-id`: the established job ID, written once, never changed or removed.
+  - `hpcburst.groundnuty.github.io/hold-lifted`: the job ID whose hold was lifted. The hold is never lifted again.
+  - `hpcburst.groundnuty.github.io/abandon-attempt`: an operator's decision on an unresolved attempt, in fallback mode.
+  - Status mirrors them for display. Annotations hold the record because they survive a restore without status. crossplane-runtime's critical-annotation updater re-applies every in-memory annotation on a conflict, which could roll the record back, so the provider replaces it with one that re-applies only crossplane's own keys (S4).
+- **The Allocation's finalizer** cancels, through the provider plugin (HBEP-4), every live job carrying the Allocation's tag: held, pending, running or suspended, not only the recorded one. It stays while any job with the tag is live, or while a submission attempt is unresolved (HBEP-7, open question 11). The deletion completes only then.
 - **Identity records** (HBEP-3, HBEP-9). Each deployment ID's inputs are stored as a `ControllerRevision`, a built-in Kubernetes kind for immutable snapshots, so no sixth kind is needed.
-  - Its data holds the canonical `v1` inputs and the full hash.
+  - Its data holds the canonical `v1` object and the full hash.
   - The API server refuses any change to a ControllerRevision's data (Kubernetes' own update validation, [`pkg/apis/apps/validation/validation.go` at v1.36.2](https://github.com/kubernetes/kubernetes/blob/v1.36.2/pkg/apis/apps/validation/validation.go), accessed 2026-10-30).
-  - It is labelled with its ModelDeployment and display form. It is not owned by the ModelDeployment, so it outlives the deployment for later attribution.
   - Each Instance's spec names its record and its full ID. A CEL rule (`self == oldSelf`) makes that spec immutable.
-  - Verification results, with the resolved settings each Instance reports, live in that Instance's status, beside the record (HBEP-3).
-  - Exporting records, for a replication package, is HBEP-9's.
+- **Verification records.** Each Instance's verification result is its own `ControllerRevision`, written once, pass or fail, before the Instance can become ready.
+  - Its data holds the resolved settings the Instance reported, its GPU type, its engine fingerprint, the outcome of the file rehash, and the verdict (HBEP-3, HBEP-9).
+  - The Instance's status names the record and mirrors its verdict.
+- **Records outlive deletion.** Identity and verification records have no owner reference to the ModelDeployment or to the Instance, so garbage collection never removes them. They carry the labels listed under API: the deployment ID's display form, and on verification records the Instance's UID. They live in the ModelDeployment's namespace, and are deleted only by an explicit operator action or by a retention policy for records, which HBEP-9 sets; until then they stay. Deleting the namespace deletes them too, so an operator exports them first (HBEP-9).
+- Exporting records, for a replication package, is HBEP-9's.
 
 ### Admission
 
@@ -146,8 +169,10 @@ For alpha, no webhook server runs.
   - a revision is a full commit id (HBEP-9);
   - a Provider name is a DNS-1123 label;
   - an Instance's spec is immutable;
-  - an Allocation's submission parameters are immutable, and its job ID, once set, never changes;
-  - a ModelDeployment's serving spec may change, which rolls out a new ID (HBEP-3).
+  - an Allocation's submission parameters are immutable;
+  - a ModelDeployment's engine flags use long names without leading dashes, and none is a key (`api-key`, `hf-token`; HBEP-3);
+  - a ModelDeployment's serving spec may change, which rolls out new IDs (HBEP-3).
+- **The job ID is not guarded here.** It is an annotation, and a CRD's validation rules reach no metadata beyond the name and generated name ([documentation source](https://github.com/kubernetes/website/blob/main/content/en/docs/tasks/extend-kubernetes/custom-resources/custom-resource-definitions.md), accessed 2026-10-30). The provider's compare-and-swap writes keep it written once (Ownership, records and deletion).
 - **A ValidatingAdmissionPolicy** refuses deleting the framework's CRDs. Such policies are stable since Kubernetes 1.30, and see the existing object on a delete ([documentation source](https://github.com/kubernetes/website/blob/main/content/en/docs/reference/access-authn-authz/validating-admission-policy.md), accessed 2026-10-30).
 - **A webhook** is added only for a rule that neither form can express. The approval gates of HBEP-10 are one case, after alpha.
 
@@ -156,7 +181,7 @@ For alpha, no webhook server runs.
 - Each controller is a controller-runtime manager, with the keyed work queues and backoff listed in Notes.
 - **The Provider reference.** An Allocation's `providerConfigRef` names a cluster-scoped Provider, and the Slurm provider resolves it itself. crossplane-runtime's ProviderConfig usage helpers treat only a kind whose name starts with `Cluster` as cluster-scoped (`pkg/resource/enqueue_handlers.go`, v2.4.3), so the provider does not use them.
 - **One manager per provider.** controller-runtime elects a leader per manager, so each provider's controller runs as its own manager with its own `Lease`, named after its Provider. S4 ran its provider this way.
-- **Alpha runs one replica of each.** The launcher restarts a controller that exits. The `Lease` then guards against a stale second copy, for example one an earlier launcher left running. The tag lookup stays the protection against duplicates, because a deposed leader's submission can still land (S4).
+- **Alpha runs one replica of each.** The launcher restarts a controller that exits. The `Lease` then guards against a stale second copy, for example one an earlier launcher left running. It does not prevent duplicate jobs, because a deposed leader's submission can still land (S4). In hold mode only the recorded job's hold is ever lifted, so a duplicate stays held and is cancelled (HBEP-7, open question 11).
 - The lifecycle and hedging controller (HBEP-7) manages Allocations, including their retention and repurposing. Verification (HBEP-9) and observers (HBEP-8) run as controllers. The front (HBEP-5) watches Instances to build its routing table.
 - Desired state is in each spec; observed state, with observation times, is in each status.
 
@@ -177,6 +202,7 @@ Decided for alpha, by a rule that S3's fixed PR (#36) settles:
 - binds the API server to loopback, because nothing outside the host talks to it. Instances reach the front, never the API (HBEP-6);
 - issues one kubeconfig per identity: the user, each controller, and each agent identity (HBEP-10), with RBAC enabled;
 - installs the CRDs and the admission policy, then starts the controllers and restarts any that exit;
+- checks the front's reachability (open question 8). It refuses to start without a front address and a dial-home mode, direct or ssh on port 22, and checks that the address answers on that port. The first Instance on each Provider then confirms reachability from a compute node by registering through its dial-home tunnel. An Instance that cannot register fails at start, and its Provider carries a condition naming reachability;
 - has the API server write its audit log at the Metadata level, with no request bodies, so a Secret's content is never logged;
 - backs up the store before every upgrade: an etcd snapshot, or a copy of the SQLite file;
 - upgrades the host one minor version at a time, as S3 tested.
@@ -202,17 +228,22 @@ Not in alpha. Status conditions are the level truth, and Kubernetes Events are a
 Against the single-user host S3 picks, and, for beta, the team option:
 - Kill the lifecycle controller mid-handover: on restart it continues, and no second job is submitted.
 - Delete a ModelDeployment: its Instances drain, no replacement is submitted, its pending Allocations are cancelled, and each started Allocation is released or kept as its retention policy says. A released Allocation's provider job is cancelled before its object disappears.
+- **Drain finalizer.** Delete a ModelDeployment with a ready Instance: the Instance stays until it is `ended`, and only then goes.
+- **Records survive deletion.** Delete a ModelDeployment and its Instances: their identity and verification records remain, found by the `deployment-id` and `instance-uid` labels, with their data unchanged. The check reads them by label after the Instances are gone; reading Instance status proves nothing, since it goes with the Instance.
+- **Allocation finalizer.** Delete an Allocation while its submission attempt is unresolved, against S4's fake Slurm: the finalizer stays until the attempt resolves, every live job with the tag is cancelled, and only then does the object go.
+- **Long label values.** A ModelDeployment with a 100-character name gets a 63-character `model-deployment` label, matching a golden value computed outside our code.
 - **Garbage collection.** Delete an owner whose dependents no controller deletes: they are gone, checked by UID. A test that reads only the host's `/readyz` proves nothing here, since S3's bare host was ready and collected nothing.
 - Select Providers by the platform label: every provider on that platform is returned, two grants included.
 - Delete a custom resource definition while the admission policy is in place: refused.
 - Stop the API server: the front keeps serving from its last table and marks it stale.
 - Let a watch fall behind compaction: the client lists again and loses no state.
 - Submit a spec with an unpinned revision: admission refuses it.
-- **Identity records.** Edit a record's data: refused by the API server. Edit an Instance's spec: refused. Edit a ModelDeployment's serving spec: accepted, a new current ID appears, and old-ID Instances keep theirs.
+- **Identity records.** Edit a record's data: refused by the API server. Edit an Instance's spec: refused. Edit a ModelDeployment's serving spec: accepted, a new current ID appears for each class, and old-ID Instances keep theirs.
 - An agent's identity tries to cancel another owner's Allocation without the right role: refused, and the audit log shows the attempt.
 - Start the controllers beside a provider job with the framework's tag and no Allocation: it is reported as an orphan, not cancelled.
-- **Lease.** Start a second copy of a provider controller: it makes no provider call while the first holds the `Lease`. Kill the first mid-submit: the second takes over, finds the job by its tag and submits nothing (S4).
+- **Lease.** Start a second copy of a provider controller: it makes no provider call while the first holds the `Lease`. Kill the first mid-submit: the second takes over and finds the job by its tag. Whatever it then submits, at most one job with the tag has its hold lifted, and any other is cancelled (S4).
 - **Credentials.** A Provider whose credentials file is readable by others: refused with a condition, and no provider call is made.
+- **Front reachability.** The launcher refuses to start with no front address or dial-home mode. An Instance whose tunnel cannot reach the front fails at start, and its Provider carries a condition.
 - **Upgrade and downgrade.** Upgrade the host one minor version with objects present: every object is kept with its UID. Downgrade by restoring the backup with the earlier binaries: the objects from before the upgrade are back.
 - **Store full.** Fill the store to its quota: writes are refused, no controller submits a new job, and the launcher's health reports it.
 
@@ -240,6 +271,7 @@ S3 exercised validation, watches, conflicts, cascades and finalizers. Leases, Ev
 
 - **Alpha:**
   - the single-user host that S3 picks serves the five kinds at `v1alpha1`;
+  - the alpha host passes the front-reachability check (open question 8), and the alpha platform has `hold_release` verified, or runs fallback mode;
   - the Test plan passes on it with one batch provider;
   - the host starts within S3's budget on a 2 vCPU, 4 GiB VM.
 - **Beta:**

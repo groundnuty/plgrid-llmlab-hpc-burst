@@ -65,7 +65,7 @@ Problems this addresses, in general terms:
 - **Kinds** (HBEP-3) follow the platform: managed (a fixed catalog, no start or restart), batch (leases with unknown start and hard end, continuity through follow-ons) and static (later).
 - **LLMLab will improve but keeps the same kinds of characteristics.** Its contingencies stay in its platform profile even when they rarely fire; thresholds keep them cheap.
 - **Hedging is the framework's lever** (HBEP-3, HBEP-7). The core must therefore let the controller submit on several providers, read start estimates marked advisory, see promptly when an allocation starts, cancel a pending allocation with its dependents first, and read each allocation's hard end.
-- **Agent primitives** (HBEP-10) require idempotent operations and reports of partial failure, so every core operation reports per-allocation results, and every one except submission is idempotent. For submission, a tag on the job supports recovery but does not enforce uniqueness (HBEP-7).
+- **Agent primitives** (HBEP-10) require idempotent operations and reports of partial failure, so every core operation reports per-allocation results, and every one except submission is idempotent. For submission, a tag on the job supports recovery but does not enforce uniqueness. In hold mode every job is submitted held and only the recorded job's hold is ever lifted, so at most one job per Allocation runs (HBEP-7, open question 11).
 - **Spike S5 (PR #19).** S5 recorded login-node facts for Helios, Athena and Sano as draft platform profiles in `profiles/`. It ran no job, so compute-node facts come from spike S1 (issue #18; open question 16). The entries below that cite S5 rest on its measurements and on the centers' documentation.
 - **The job transport.** Proposed: the Slurm command-line tools over one multiplexed ssh connection per login node and credential are the default transport. `squeue --json` and `sacct --json` work for a plain user on all three platforms (spike S5, PR #19). A REST job API is unverified (open question 13).
 - **The container runtime is a per-platform fact.** Apptainer is on the Helios and Sano login nodes. None of Apptainer, Singularity, enroot, Podman or Docker was found on Athena's login node, and other runtimes were not searched for. User namespaces are off on both Cyfronet login nodes (spike S5, PR #19). Compute nodes were not checked. Whether Instances need a launch path without containers is open question 15.
@@ -91,7 +91,7 @@ Problems this addresses, in general terms:
 
 ### Open questions
 
-1. **Core operations.** Candidate set: describe, estimate, submit, status, cancel, follow-on, launch an instance, stop an instance, usage, remaining quota, and catalog for managed providers. Decided by walking stages 2, 3 and 7 against LLMLab, Helios and Athena in a spike.
+1. **Core operations.** Candidate set: describe, estimate, submit held, lift the hold, find by tag, status, cancel, follow-on, launch an instance, stop an instance, usage, remaining quota, and catalog for managed providers. Decided by walking stages 2, 3 and 7 against LLMLab, Helios and Athena in a spike.
 2. **Capability flags.** Candidates: can start; can restart; has a hard end; gives start estimates; supports follow-on dependencies; supports node pinning; a hard end that can move later, for example when a center extends a time limit (the controller re-reads it and never plans for it, HBEP-3); can change a running job's account; compute nodes can connect out; compute nodes are reachable in; reports model state; exposes revisions and limits; rewrites requests; requires streaming. Decided with question 1.
 3. **Profile schema.** Candidate field groups for a platform profile:
    - identity: organization, platform, partitions and node types, kind;
@@ -107,7 +107,7 @@ Problems this addresses, in general terms:
    - contingency parameters with thresholds;
    - references to known-issue entries.
 
-   Provider settings are decided (owner decision): account, grant, credentials reference, allowed partitions and labels. The format of both is decided by HBEP-11: the PlatformProfile and Provider kinds. Their schema stays open here; for alpha, HBEP-11 types only the profile fields the Slurm provider reads. Decided by writing the LLMLab, Helios and Athena platform profiles as drafts. Spike S5 (PR #19) drafted Helios, Athena and Sano; the LLMLab draft is still to come.
+   Provider settings are decided (owner decision): account, grant, credentials reference, allowed partitions and labels. The format of both is decided by HBEP-11: the PlatformProfile and Provider kinds. Their schema stays open here. For alpha, HBEP-11 types only the profile fields that the Slurm provider and the deployment ID read: per partition, the GPU model and CPU architecture (the accelerator class, a deployment-ID input, HBEP-3); `hold_release`, verified per platform; `lost_grace` (default 2 min); the in-flight window, which must exceed the worst remote `sbatch` time; the Unknown bound for fallback mode; and S5's scheduling facts (HBEP-11, API). Decided by writing the LLMLab, Helios and Athena platform profiles as drafts. Spike S5 (PR #19) drafted Helios, Athena and Sano; the LLMLab draft is still to come.
 4. **Plugin granularity.** One plugin per scheduler type with per-platform profiles, or one plugin per platform? Decided by drafting the Helios and Athena platform profiles as data first: whatever data cannot express becomes plugin code.
 5. **Plugin boundary.** In-process library or separate process, the language, and how plugins declare the core version they implement. Decided with HBEP-11.
 6. **Register format.** Candidate entry fields: identifier, symptom, component and affected versions, fixed-in version, platform scope and stage (HBEP-2 dimensions), fix owner, detection check, workaround configuration, regression test, upstream link. Decided in design.
@@ -244,6 +244,7 @@ The Slurm provider plugin grows from www-2027's per-cluster ssh over one shared 
 - 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
 - 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation; spike S5 facts carried in (HBEP-4, HBEP-6, HBEP-7 only).
 - 2026-10-30: aligned with HBEP-3 and HBEP-11 becoming implementable: requeue, the job tag, the profile and provider kinds, a managed allocation's hard end, and where credentials live.
+- 2026-10-30: the alpha typed profile fields (accelerator class per partition, `hold_release`, `lost_grace`, the in-flight window, the Unknown bound) and held submission carried in from HBEP-11 and HBEP-7.
 
 ## Amendments
 

@@ -46,21 +46,21 @@ A past project served one set of models across several clusters and a managed ga
 
 ### User stories
 
-- A researcher pins `example-27b@helios-a/<deployment-id>` for a whole study, where `helios-a` is the name the operator gave its provider on Helios. Handovers within that provider keep the name resolving (HBEP-3). Every response carries that ID, and the front's attribution log shows that no other deployment answered.
+- A researcher pins `example-27b@helios-a/<deployment-id>` for a whole study, where `helios-a` is the name the operator gave its provider on Helios. Handovers within that provider and its accelerator class keep the name resolving (HBEP-3). Every response carries that ID, and the front's attribution log shows that no other deployment answered.
 - A user sends `example-27b` and is served by whichever deployment the front picks. Each response says which one it was, so a mix can be found afterwards.
-- An agent replaces an Instance before its Allocation ends. The new Instance verifies against the same record and keeps the deployment ID. Clients see only the Instance ID change.
+- An agent replaces an Instance before its Allocation ends, in an Allocation of the same accelerator class. The new Instance verifies against the same record and keeps the deployment ID. Clients see only the Instance ID change.
 - A maintainer changes the chat template. That gives a new deployment ID with its own identity record, never an edit to the record under the old ID.
 - A reviewer of a paper fetches the identity record for a deployment ID and sees the checkpoint revision, engine version, flags and template.
 
 ### Notes, constraints and caveats
 
-- **Record fields (proposed; they detail HBEP-3's inputs).**
-  - Checkpoint: repository, pinned revision, and a hash of the weight, configuration, tokenizer and template files actually loaded.
-  - Chat template: the one in use, from the revision or an override, hashed.
-  - Engine: name, version, container image digest, and every local patch, hashed.
-  - Settings that can change outputs: data type and quantisation, context length, attention backend, KV-cache data type, parallel layout, tool-call and reasoning parsers, default generation settings, speculative decoding.
-  - Excluded: Instance and Allocation metadata (HBEP-3), such as job ID, node, port, URL and hard end; operational settings, such as router policy and session caps; and every key, including the Instance's own key.
-- **The identity record behind a deployment ID is immutable.** Changing any record field gives a new deployment ID, with its own record; no record is edited under an existing ID. HBEP-3 decides that the new ID is a rollout inside the existing ModelDeployment (open question 7), so HBEP-11's admission refuses only an edit to an existing record. The record's inputs never change; each Instance's verification result is added beside them (HBEP-3). Operational settings outside the record change in place.
+- **Record fields (decided in HBEP-3).** The record's inputs are exactly HBEP-3's `v1` canonical object, whose field list and worked example are under HBEP-3's Deployment ID:
+  - checkpoint: the repository, the full commit id, and every file of the pinned revision with its SHA-256;
+  - chat template: the SHA-256 of the one in use, from an override or from the revision;
+  - engine: name, version and container image digest. A local engine patch enters only through the image digest: a patched engine is a different image;
+  - the accelerator class, and the engine flags and environment variables that HBEP-3's `v1` table marks as inputs. That table covers the settings that can change outputs: data type and quantisation, context length, attention backend, KV-cache data type, parallel layout, tool-call and reasoning parsers, default generation settings and speculative decoding;
+  - excluded: Instance and Allocation metadata (HBEP-3), such as job ID, node, port, URL and hard end; placement, capacity, transport and logging settings, such as router policy and session caps; and every key, including the Instance's own key.
+- **The identity record behind a deployment ID is immutable.** Changing any record field gives a new deployment ID, with its own record; no record is edited under an existing ID. HBEP-3 decides that the new ID is a rollout inside the existing ModelDeployment (open question 7), so HBEP-11's admission refuses only an edit to an existing record. The record's inputs never change. Each Instance's verification result is its own immutable record beside it, labelled with the deployment ID and the Instance's UID (HBEP-11). Neither is deleted with the ModelDeployment. Operational settings outside the record change in place.
 - **Each Instance has its own key.** It is generated when the Instance starts and kept in its identity package: the identity data the Instance holds about itself. The front uses the key toward the Instance. The key is never an input to the deployment ID: rotating it must not change the ID, and a hash of a short secret can be guessed.
 - **The engine fingerprint is recorded beside the ID, never used as it.** It is not unique per Instance, differs per site and is sometimes missing.
 - **The URL is not identity.** Each handover brings a new Instance with a new URL; the deployment ID does not change.
@@ -85,11 +85,11 @@ A past project served one set of models across several clusters and a managed ga
 - Whether batch-shaping settings (maximum sequences, prefill budget) enter the record. They can change numerics slightly and are often tuned. A measurement on two settings of one deployment decides.
 - **Which checks verification runs at start.**
   - **File hashes, from spike S7 (issue #30, PR #33) (candidate):**
-    - The record holds one SHA-256 for every file the engine loads, over an explicit list of files, the configuration, tokenizer and template included.
-    - **Rehash at every start.** Measured on Helios x86 CPU nodes only: 167 GB took 46–77 s, inside a 5-minute budget set beforehand. Still due: Helios GH200, Athena A100 and Sano (CephFS).
+    - The record holds one SHA-256 for every file of the pinned revision (HBEP-3), the configuration, tokenizer and template included.
+    - **Rehash at every start,** of the files present, each against its entry. Measured on Helios x86 CPU nodes only: 167 GB took 46–77 s, inside a 5-minute budget set beforehand. Still due: Helios GH200, Athena A100 and Sano (CephFS).
     - **No size-and-mtime shortcut where rehash fits the budget.** Lustre timestamps have one-second resolution, and an edit in the same second as the last write left both unchanged. Where a platform breaks the budget, S7's fallback applies: record size, mtime, ctime and inode at least two seconds after the last write, and rehash when any differs.
-  - **At staging, compare each file with the Hub:**
-    - LFS files by `lfs.sha256`, other files by the git blob id, because the Hub gives SHA-256 only for LFS files;
+  - **At staging, compare each staged file with the record's list (HBEP-3).** The list's entries come from the Hub:
+    - an LFS file's `lfs.oid`, which is a SHA-256. The controller downloads each other file, checks it against its git blob id, and hashes it with SHA-256, because the Hub gives SHA-256 only for LFS files;
     - fetch the listing at a full commit id, with pagination, because the Hub's tree listing silently stops at 50 entries.
   - **Measuring bytes read:** use `rchar` for the bytes returned to the process, together with the Lustre RPC counters for the bytes read from the filesystem. On the measured installation `read_bytes` undercounted Lustre reads (2–11% of the bytes), for a reason not established.
   - **Lean for the rest:** engine version and image digest; resolved settings as the engine reports them; a fixed conversation rendered through the template and tokenizer, compared token by token with an offline render. Output checks are not identity checks, since outputs vary.
@@ -177,7 +177,7 @@ Verification grows from www-2027's endpoint check, run on each new endpoint (hea
 |---|---|---|
 | Checkpoints were served without a pinned revision. | L-8.3 | A pinned revision in every record; a branch name is refused. |
 | Engine fingerprints differed per site and could not be reproduced offline. | L-8.1 | The fingerprint is recorded beside the deployment ID, never used as it. |
-| One checkpoint name hid differences in kernels and local patches. | L-8.2 | Resolved settings and every local patch are record fields. |
+| One checkpoint name hid differences in kernels and local patches. | L-8.2 | The accelerator class and every input setting are record fields; a local patch is a different image digest; resolved settings are recorded per Instance beside the record. |
 | An allowlist of fingerprints let a second configuration pass. | L-8.4 | No allowlist; an Instance joins by verification against the record. |
 | Verification was not uniform. | L-8.6 | One verification for every Instance at start. |
 | Configuration was attributed after the fact. | L-8.7 | The front decides attribution at serving time. |
@@ -193,6 +193,7 @@ Verification grows from www-2027's endpoint check, run on each new endpoint (hea
 - 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation.
 - 2026-10-30: spike S7 (PR #33) carried in: per-file SHA-256, rehash at every start.
 - 2026-10-30: aligned with HBEP-3 and HBEP-11 becoming implementable: a changed spec rolls out a new ID, and `v1` hashes declared settings and the accelerator class, with resolved settings recorded beside them.
+- 2026-10-30: the record's fields point to HBEP-3's `v1` object (every file of the pinned revision; local patches only through the image digest); verification results are retained records of their own.
 
 ## Amendments
 
