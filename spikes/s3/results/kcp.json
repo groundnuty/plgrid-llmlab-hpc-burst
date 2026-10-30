@@ -2,100 +2,122 @@
   "option": "kcp",
   "version_old": "0.32.5",
   "version_new": "0.33.3",
-  "started_utc": "2026-10-30T09:10:02Z",
+  "phases": [
+    {
+      "phase": "main",
+      "started_utc": "2026-10-30T10:25:56Z",
+      "finished_utc": "2026-10-30T10:32:57Z",
+      "e2e_binary_sha256": "a5e38208a37957fec8d9e401e652c568afbd8e92604bc2c237e50437da6f1fcb",
+      "s3bench_binary_sha256": "5f1eaee9b2b3a3435c6407e4608435749d22fc314e47212d2d7ddc4de0ee23f9",
+      "host_binaries_sha256": {
+        "kcp 0.33.3": "9116b50b20f4bfe1c00929034157683695072ccb46c769fe2283623e490092da"
+      }
+    },
+    {
+      "phase": "upgrade",
+      "started_utc": "2026-10-30T10:32:57Z",
+      "finished_utc": "2026-10-30T10:35:41Z",
+      "e2e_binary_sha256": "a5e38208a37957fec8d9e401e652c568afbd8e92604bc2c237e50437da6f1fcb",
+      "s3bench_binary_sha256": "5f1eaee9b2b3a3435c6407e4608435749d22fc314e47212d2d7ddc4de0ee23f9",
+      "host_binaries_sha256": {
+        "kcp 0.32.5": "0bcbe1c4342c25ddadc56382665fbe255b6884d1e6a77ef57104f4baea42cafd",
+        "kcp 0.33.3": "9116b50b20f4bfe1c00929034157683695072ccb46c769fe2283623e490092da"
+      }
+    }
+  ],
   "cold_starts": [
     {
-      "readyz_ms": 12889,
-      "ready_ms": 12889,
-      "usable_ms": 13999,
-      "load1_at_start": 3.23
+      "readyz_ms": 14132,
+      "ready_ms": 14132,
+      "usable_ms": 15294,
+      "load1_at_start": 2.68
     },
     {
-      "readyz_ms": 12979,
-      "ready_ms": 12979,
-      "usable_ms": 14337,
-      "load1_at_start": 3.85
+      "readyz_ms": 12762,
+      "ready_ms": 12762,
+      "usable_ms": 14360,
+      "load1_at_start": 3.55
     },
     {
-      "readyz_ms": 14005,
-      "ready_ms": 14005,
-      "usable_ms": 15457,
-      "load1_at_start": 3.87
+      "readyz_ms": 13915,
+      "ready_ms": 13915,
+      "usable_ms": 15250,
+      "load1_at_start": 3.94
     }
   ],
   "warm_starts": [
     {
-      "readyz_ms": 9520,
-      "ready_ms": 9520,
-      "usable_ms": 9588,
-      "load1_at_start": 3.51
-    },
-    {
       "readyz_ms": 8821,
       "ready_ms": 8821,
-      "usable_ms": 9759,
-      "load1_at_start": 3.66
+      "usable_ms": 9495,
+      "load1_at_start": 3.58
     },
     {
-      "readyz_ms": 8860,
-      "ready_ms": 8860,
-      "usable_ms": 9788,
-      "load1_at_start": 3.65
+      "readyz_ms": 7873,
+      "ready_ms": 7873,
+      "usable_ms": 8057,
+      "load1_at_start": 3.57
+    },
+    {
+      "readyz_ms": 9096,
+      "ready_ms": 9096,
+      "usable_ms": 9193,
+      "load1_at_start": 3.47
     }
   ],
   "cold_median": {
-    "readyz_ms": 12979,
-    "ready_ms": 12979,
-    "usable_ms": 14337,
+    "readyz_ms": 13915,
+    "ready_ms": 13915,
+    "usable_ms": 15250,
     "load1_at_start": 0
   },
   "warm_median": {
-    "readyz_ms": 8860,
-    "ready_ms": 8860,
-    "usable_ms": 9759,
+    "readyz_ms": 8821,
+    "ready_ms": 8821,
+    "usable_ms": 9193,
     "load1_at_start": 0
   },
   "rss_idle": {
     "samples_mib": [
-      519,
-      519,
-      519
+      499.8,
+      499.8,
+      499.8
     ],
-    "median_mib": 519,
+    "median_mib": 499.8,
     "by_process_mib": {
-      "kcp": 519
+      "kcp": 499.8
     },
     "load1_at_samples": [
-      3.37,
-      3.26,
-      3.32
+      4.54,
+      4.33,
+      4.23
     ],
     "mem_available_gib_at_samples": [
-      20.3,
-      20.3,
-      20.2
+      19.3,
+      19.3,
+      19.3
     ]
   },
   "rss_loaded": {
     "samples_mib": [
-      465.5,
-      466.1,
-      466.2
+      477.9,
+      478,
+      478.1
     ],
-    "median_mib": 466.1,
+    "median_mib": 478,
     "by_process_mib": {
-      "kcp": 466.1
+      "kcp": 478
     },
-    "controller_mib": 37.6,
+    "controller_mib": 37.5,
     "load1_at_samples": [
-      3.91,
-      3.76,
-      3.62
+      3.71,
+      3.58,
+      3.45
     ],
     "mem_available_gib_at_samples": [
-      20.3,
-      20.3,
-      20.3
+      19.7,
+      19.7,
+      19.7
     ]
   },
   "listeners": [
@@ -104,7 +126,7 @@
     "127.0.0.1:29113",
     "127.0.0.1:29114"
   ],
-  "stop_ms": 1210,
+  "stop_ms": 1182,
   "data_dir_mib_after_load": 138.1,
   "e2e": {
     "passed": [
@@ -133,7 +155,7 @@
     "server_version_after": "v1.36.0+kcp-v0.33.3",
     "objects_before": 103,
     "objects_identical_after": 103,
-    "stop_to_ready_ms": 10535,
+    "stop_to_ready_ms": 10277,
     "e2e_after": {
       "passed": [
         "TestCascadeBackground",
@@ -170,31 +192,31 @@
     {
       "line": "RSS idle",
       "limit": "\u003c= 600 MiB",
-      "actual": "519 MiB",
+      "actual": "500 MiB",
       "pass": true
     },
     {
       "line": "RSS with ~100 objects",
       "limit": "\u003c= 800 MiB",
-      "actual": "466 MiB",
+      "actual": "478 MiB",
       "pass": true
     },
     {
       "line": "cold start to ready",
       "limit": "\u003c= 30 s",
-      "actual": "13.0 s (median of 3)",
+      "actual": "13.9 s (median of 3)",
       "pass": true
     },
     {
       "line": "warm start to ready",
       "limit": "\u003c= 30 s",
-      "actual": "8.9 s (median of 3)",
+      "actual": "8.8 s (median of 3)",
       "pass": true
     },
     {
       "line": "minor upgrade",
       "limit": "all objects kept, e2e passes, stop to ready \u003c= 60 s",
-      "actual": "103/103 kept, e2e failed=0, post-upgrade failed=0, stop to ready 10.5 s ",
+      "actual": "103/103 kept, e2e failed=0, post-upgrade failed=0, stop to ready 10.3 s ",
       "pass": true
     },
     {
@@ -203,5 +225,6 @@
       "actual": "11 passed, 0 failed []",
       "pass": true
     }
-  ]
+  ],
+  "state_dir_mib_after_load": 138.1
 }
