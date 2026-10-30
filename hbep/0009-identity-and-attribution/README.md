@@ -83,7 +83,16 @@ A past project served one set of models across several clusters and a managed ga
 
 - Declared or resolved values, and whether one spec on two GPU types is one deployment, are HBEP-3's open question 1. Input from this HBEP: kernels differ per GPU type even with the same settings, so record the GPU type and refuse "auto" for identity-relevant settings. Verification works either way: it compares the Instance's reported resolved settings with the record.
 - Whether batch-shaping settings (maximum sequences, prefill budget) enter the record. They can change numerics slightly and are often tuned. A measurement on two settings of one deployment decides.
-- Which checks verification runs at start. Lean: file hashes against the revision; engine version and image digest; resolved settings as the engine reports them; a fixed conversation rendered through the template and tokenizer, compared token by token with an offline render. Output checks are not identity checks, since outputs vary.
+- **Which checks verification runs at start.**
+  - **File hashes, from spike S7 (issue #30, PR #33) (candidate):**
+    - The record holds one SHA-256 for every file the engine loads, over an explicit list of files, the configuration, tokenizer and template included.
+    - **Rehash at every start.** Measured on Helios x86 CPU nodes only: 167 GB took 46–77 s, inside a 5-minute budget set beforehand. Still due: Helios GH200, Athena A100 and Sano (CephFS).
+    - **No size-and-mtime shortcut where rehash fits the budget.** Lustre timestamps have one-second resolution, and an edit in the same second as the last write left both unchanged. Where a platform breaks the budget, S7's fallback applies: record size, mtime, ctime and inode at least two seconds after the last write, and rehash when any differs.
+  - **At staging, compare each file with the Hub:**
+    - LFS files by `lfs.sha256`, other files by the git blob id, because the Hub gives SHA-256 only for LFS files;
+    - fetch the listing at a full commit id, with pagination, because the Hub's tree listing silently stops at 50 entries.
+  - **Measuring bytes read:** use `rchar` for the bytes returned to the process, together with the Lustre RPC counters for the bytes read from the filesystem. On the measured installation `read_bytes` undercounted Lustre reads (2–11% of the bytes), for a reason not established.
+  - **Lean for the rest:** engine version and image digest; resolved settings as the engine reports them; a fixed conversation rendered through the template and tokenizer, compared token by token with an offline render. Output checks are not identity checks, since outputs vary.
 - Where attribution travels: response headers only, or also an extension field in the body for clients that log only bodies. Header names are hard to change, so the owner decides. Discussion with HBEP-5.
 - Which deployments `model` may mix. Decided in part (HBEP-3): only those on the providers the operator attached to the name, none by default. Lean: every deployment of the model on those providers, with attribution on each response; a client that needs one identity pins it. Alternative: `model` mixes only deployments with the same record apart from provider.
 - The identity record of a managed catalog entry, whose revision and settings are not published. Lean: known fields filled, the rest "unknown", a flag for gateway request changes, and an ID over the known fields plus platform and catalog name. The platform, not the provider, because provider names are arbitrary (HBEP-3, open question 2).
@@ -152,8 +161,8 @@ Verification grows from www-2027's endpoint check, run on each new endpoint (hea
 | Component | Origin (project, URL) | Licence | How used (dependency, copied code, optional) |
 |---|---|---|---|
 | vLLM | [vllm-project/vllm](https://github.com/vllm-project/vllm) | Apache-2.0 | Dependency: the engine whose version, image and resolved settings the record holds |
-| model_signing | [sigstore/model-transparency](https://github.com/sigstore/model-transparency) | Apache-2.0 | Candidate, decided by spike S7: a per-file SHA-256 manifest in file mode, over an explicit list of the files the engine loads |
-| huggingface_hub | [huggingface/huggingface_hub](https://github.com/huggingface/huggingface_hub) | Apache-2.0 | Candidate, decided by spike S7: expected hashes from the Hub, and `hf cache verify` at staging |
+| model_signing | [sigstore/model-transparency](https://github.com/sigstore/model-transparency) | Apache-2.0 | Candidate, exercised by spike S7 (PR #33): not needed for hashing, acceptable if signing is wanted later. If used, set `Config.set_allow_symlinks(True)` (a Hugging Face cache snapshot is symlinks, and without it every call fails), set the thread count to the Allocation's CPUs, install pyOpenSSL explicitly (not declared), and note that it skips `.git*` paths by default, so the explicit file list is ours: a per-file SHA-256 manifest in file mode, over an explicit list of the files the engine loads |
+| huggingface_hub | [huggingface/huggingface_hub](https://github.com/huggingface/huggingface_hub) | Apache-2.0 | Candidate, not exercised by S7, which used the Hub's tree endpoint directly: expected hashes from the Hub (paginated listing, full commit id), and `hf cache verify` at staging, untested |
 
 ### Designs and published work borrowed
 
@@ -182,6 +191,7 @@ Verification grows from www-2027's endpoint check, run on each new endpoint (hea
 - 2026-10-28: proposed (provisional), tracking issue #9.
 - 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
 - 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation.
+- 2026-10-30: spike S7 (PR #33) carried in: per-file SHA-256, rehash at every start.
 
 ## Amendments
 
