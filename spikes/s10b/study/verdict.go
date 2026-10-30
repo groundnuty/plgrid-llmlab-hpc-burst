@@ -100,7 +100,7 @@ func Pass(vs []OptionVerdict, cond func(OptionVerdict) bool) (qualifying []strin
 func VerdictMarkdown(cells []Cell, key string) string {
 	vs := Evaluate(cells, key)
 	var b strings.Builder
-	fmt.Fprintf(&b, "Key %s, seeds %d.\n\n", key, len(Groups(cells)[0].Cells))
+	fmt.Fprintf(&b, "Key %s, %d seeds.\n\n", key, len(Groups(cells)[0].Cells))
 	b.WriteString("| option | peak in flight: tight / scarce / half prefill (max over seeds) | time above 48, summed over seeds (s): tight / scarce / half prefill | condition 1, tight | condition 1, all three | hit 0-5 min after drain (drop vs no drain) | hit 5-15 min after drain (drop) | scarce hit (vs RR) |\n|---|---|---|---|---|---|---|---|\n")
 	for _, v := range vs {
 		fmt.Fprintf(&b, "| %s | %d / %d / %d | %.0f / %.0f / %.0f | %v | %v | %s (%.1f pts) | %s (%.1f pts) | %s (%+.1f pts) |\n",
@@ -120,6 +120,8 @@ func VerdictMarkdown(cells []Cell, key string) string {
 		switch {
 		case len(q) == 0:
 			b.WriteString(" None meets the engine limit, so none passes.")
+		case w != "" && len(q) == 1:
+			fmt.Fprintf(&b, " It is the only qualifier, so it passes by default; the drain and scarce comparison does not discriminate.")
 		case w != "":
 			fmt.Fprintf(&b, " Best after the drain and in the scarce regime: %s. It passes.", w)
 		default:
