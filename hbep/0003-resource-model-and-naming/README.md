@@ -455,6 +455,7 @@ The resource model replaces state that www-2027 operators kept by hand: per-job 
 - 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
 - 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation.
 - 2026-10-30: implementable. Owner decisions on the API group, kinds and version folded in; spikes S4 (PR #32), S5 (PR #19) and S7 (PR #33) carried in; every open question decided or marked for alpha.
+- 2026-10-30: amendment with HBEP-5 becoming implementable: an Instance with one worker may have no router.
 
 ## Amendments
 
