@@ -1,0 +1,19 @@
+{
+  "kind": "served",
+  "spec": {
+    "checkpoint": {"repository": "example-org/example-reasoner-32b", "revision": "1111111111111111111111111111111111111111"},
+    "engine": {"name": "vllm", "version": "0.32.0", "image_digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999"},
+    "flags": [
+      {"name": "tensor-parallel-size", "value": "2"},
+      {"name": "reasoning-parser", "value": "deepseek_r1"},
+      {"name": "chat-template-content-format", "value": "string"}
+    ],
+    "env": [{"name": "VLLM_USE_DEEP_GEMM", "value": "0"}]
+  },
+  "chat_template_sources": {"tokenizer_config": "tokenizer_config.json"},
+  "accelerator": {"gpu_model": "H100", "cpu_arch": "x86_64"},
+  "files": [
+    {"path": "tokenizer_config.json", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    {"path": "model.safetensors.index.json", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+  ]
+}
