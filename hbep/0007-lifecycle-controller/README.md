@@ -244,7 +244,7 @@ Each question below had a proposed answer taken from operating LLM serving on Sl
 
 ### What the controller reads
 
-- **From the ModelDeployment** (HBEP-11): the model name, the serving spec, the number of instances, the allowed providers, the end time and the retention policy. In alpha the order of the allowed providers is the order of preference.
+- **From the ModelDeployment** (HBEP-11): the model name, the serving spec, the number of instances, the allowed providers, the end time and the retention policy. In alpha the allowed providers are tried in the order their names are listed, then those that only the label selector matches, by name.
 - **Fields this HBEP adds to the ModelDeployment's spec** (an amendment to HBEP-11's API):
   - `leaseLimit` (duration, optional): the longest time limit of its Allocations, when shorter than the partition's `max_time`.
   - `workload`: the shapes for warm-up and qualification.
@@ -295,6 +295,8 @@ The process that an Allocation's job runs. It is a static binary, one build per 
 - **Registration.** The agent connects to the control-plane host over HBEP-6's dial-home path. In alpha that is direct on the dial-home port, or through ssh on port 22 with a restricted key (HBEP-11, open question 8).
   - It presents the Allocation's credential, read from its mode-600 file, with its job ID, its node's CPU architecture and its GPUs.
   - The endpoint accepts it only when the credential is the Allocation's and the job ID is the one the provider recorded. That binds the registration to the provider's identity for the job (HBEP-6).
+  - It reads the control-plane host's address and the dial-home mode from `agent.json` in its directory (HBEP-4, Submission).
+  - In ssh mode the agent keeps the forward itself: `ssh -N -L` over port 22, in a reconnect loop, as spike S1's kit does. It uses a dedicated, restricted key that the operator generated on the platform once, so that its private half never travels, and a pinned host key. Both are read by path, mode 600, from `<staging_dir>/dial-home/`. The key's line in `authorized_keys` on the control-plane host allows forwarding to the agent endpoint's and the front's loopback ports only. No ssh forward from a compute node has run yet (HBEP-6).
 - **Desired state, pulled.** The agent long-polls for what its Allocation should run now: nothing, one Instance with its `launch` and the restart generation of each part, or stop. It converges on that state, as a kubelet converges on its pods, so a missed message is corrected by the next poll.
 - **Reports.** At least every 15 s, and at every change, the agent posts:
   - for each part: its phase, process ID and start time, exit code, and the restart generation it applied;
