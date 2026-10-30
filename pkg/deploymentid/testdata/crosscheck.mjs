@@ -1,7 +1,8 @@
 // Second independent check of the golden vectors: canonicalise each
 // expected-object.json with the `canonicalize` npm package (a JCS implementation
-// in JavaScript by Samuel Erdtman, Apache-2.0) and compare the bytes with
-// canonical.json, which gen_vectors.py produced with a different library.
+// in JavaScript by Samuel Erdtman, Apache-2.0) and compare the bytes with the
+// committed canonical.json. A verifier: it never writes a file. The other is
+// verify_vectors.py, which uses a different library.
 //
 //   npm install canonicalize@<version in README.md>
 //   node crosscheck.mjs [vectors-dir]
