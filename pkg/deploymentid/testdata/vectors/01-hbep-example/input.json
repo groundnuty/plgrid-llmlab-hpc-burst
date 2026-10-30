@@ -1,0 +1,15 @@
+{
+  "kind": "served",
+  "spec": {
+    "checkpoint": {"repository": "example-org/example-1b", "revision": "0123456789abcdef0123456789abcdef01234567"},
+    "engine": {"name": "vllm", "version": "0.32.0", "image_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+    "flags": [{"name": "dtype", "value": "bfloat16"}, {"name": "max-model-len", "value": "32768"}],
+    "env": [],
+    "chat_template_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "accelerator": {"gpu_model": "GH200", "cpu_arch": "aarch64"},
+  "files": [
+    {"path": "config.json", "sha256": "3333333333333333333333333333333333333333333333333333333333333333"},
+    {"path": "model.safetensors", "sha256": "4444444444444444444444444444444444444444444444444444444444444444"}
+  ]
+}
