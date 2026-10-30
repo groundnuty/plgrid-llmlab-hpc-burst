@@ -137,7 +137,7 @@ Unchanged from S10b: tight (1.5 M KV tokens per Instance, 25,000 prefill tokens/
 
 The agents VM: 6 cores, 31 GB, no GPU. Go 1.27.3, `GOMAXPROCS=2`, `nice -n 10`, two simulations at a time. The simulated clock makes the results independent of host load; repeated runs of the sweep gave identical files.
 
-- The sweep behind `results/` (12 runs of option 5, 8 re-runs of options 3 and 4, 3 control runs) took about 1.5 min and started at a 1-minute load of 3.10. The first sweep, without the control, started at 3.97.
+- The sweep behind `results/` (12 runs of option 5, 8 re-runs of options 3 and 4, 3 control runs) took about 1.5 min and started at a 1-minute load of 3.10; a reading taken about 90 s after it started showed 7.5, from other sessions and the sweep's own two workers. The first sweep, without the control, started at 3.97. Every file the sweep wrote was identical across the runs, as a simulated clock gives.
 - Test suites: `spikes/s10` started at load 2.55, `spikes/s10b` at 4.07 (just above the 4.0 rule; others' builders were running), `spikes/s10c` at 3.85. The root disk had 4.2 GB free throughout.
 
 ## How to run
