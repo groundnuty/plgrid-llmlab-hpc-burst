@@ -1,0 +1,34 @@
+{
+ "later": {
+  "content_changed": true,
+  "ctime_changed": true,
+  "ino_changed": false,
+  "mtime_changed": true,
+  "mtime_delta_ns": 2000000000,
+  "size_changed": false
+ },
+ "replaced": {
+  "content_changed": true,
+  "ctime_changed": true,
+  "ino_changed": true,
+  "mtime_changed": false,
+  "mtime_delta_ns": 0,
+  "size_changed": false
+ },
+ "restored": {
+  "content_changed": true,
+  "ctime_changed": true,
+  "ino_changed": false,
+  "mtime_changed": false,
+  "mtime_delta_ns": 0,
+  "size_changed": false
+ },
+ "same-second": {
+  "content_changed": true,
+  "ctime_changed": true,
+  "ino_changed": false,
+  "mtime_changed": true,
+  "mtime_delta_ns": 1000000000,
+  "size_changed": false
+ }
+}

@@ -70,7 +70,17 @@ A past project ran a fleet of agents against several Slurm clusters, sharing one
 - **Facts come from the server.** Every answer carries the server's observation time in UTC and the server's IDs. An agent quotes them; it does not compute times or hashes.
 - **The inventory includes what does not match.** Provider jobs that carry the framework's tag but have no owning resource, and resources whose provider job is gone, are listed as orphans.
 - **The inventory says how fresh each fact is.** Each provider fact carries when it was last observed, so a stale view looks stale.
-- **"Guaranteed delivery" (proposed meaning):** at least once, ordered per resource, durable across restarts, resumable from a cursor, each event with a unique ID for de-duplication. A subscriber that falls behind retention receives an explicit gap marker and must re-read status (HBEP-8, HBEP-11). Nothing is dropped silently.
+- **"Guaranteed delivery" (proposed meaning):** at least once, ordered per resource, durable across restarts, resumable from a cursor, each event with a unique ID for de-duplication. A subscriber that falls behind retention receives an explicit gap marker and must re-read status (HBEP-8, HBEP-11). Nothing is dropped silently, with one known exception: the lost-tail case below.
+- **How, from spike S8 (issue #25, PR #28) (candidate, pending this HBEP's next status change):**
+  - The log is embedded NATS JetStream with `sync_interval: always`, CloudEvents 1.0.2, and one subject per resource.
+  - **Cursors are the subscriber's own.** Each subscriber keeps a cursor (stream sequence plus last event id) in the control plane and saves it after handling. A server-side durable consumer is not enough: S8 found that a message delivered, not acknowledged and then evicted vanishes from its state with no marker.
+  - **Gaps and rewritten history are derived, not read from JetStream.**
+    - A gap is the range of sequences evicted unread. It is found from the sequence jump, or from the stream's first sequence.
+    - **The subscriber reads the whole stream and filters events on its own side.** A server-side subject filter would make other subjects' sequences look like gaps. That is S8 Finding 2, holding by construction; it was not tested.
+    - A cursor whose event id no longer matches the log means rewritten history, and the subscriber re-reads status.
+    - **Lost-tail exception:** that check catches a lost tail only for a cursor already past the lost range. A subscriber still behind it reads the refilled sequences as the originals, and cannot see the loss. This arises only if acknowledged writes are lost, that is, on power loss or a kernel crash, which is not tested.
+  - **Handlers de-duplicate by event id,** because a crash replays recently handled events.
+  - **Not yet tested:** power loss or a kernel crash, the only cases where the fsync policy differs from the default. S8 did not test them; a FUSE test without root might work but was not attempted.
 - **Dry run is enforced by the server.** A dry-run request never reaches a provider, whatever the client sends.
 - **Actions under an agreed spec need no approval.** The lifecycle controller (HBEP-7) cancels hedge losers, releases an old Allocation once its replacement serves, releases what over-allocation does not keep or retain, releases an Allocation when its retention policy says, and ends a deployment at its "until when" without approval, because the ModelDeployment's spec and the retention policy already agreed to them. Approvals apply to actions outside the spec. Replacement before release (HBEP-3) holds regardless of approvals while the deployment keeps its desired capacity. It does not cover shutdown at the end time, scale-down, deletion, an approved early termination or a repurpose: their Instances drain and end without a replacement, because they lower a deployment's capacity rather than keep it. Each Allocation left with no Instance then follows its retention policy.
 - **Bulk actions select by label,** with a dry run that lists every match by name. There is no pattern matching on process or job names.
@@ -82,7 +92,7 @@ A past project ran a fleet of agents against several Slurm clusters, sharing one
 - **An owner lease expires while others depend on the resource.** Expiry must not release a serving deployment that other clients use. See Open questions.
 - **Owner leases that never expire** recreate the clean-up problem. Every owner lease has an expiry, and the inventory shows leases near it.
 - **Idempotency keys reused for a different request** would return the wrong result. A key reused with a different request is refused.
-- **Subscriptions nobody reads** fill storage and give senders false comfort. Each subscription's unacknowledged backlog is visible to its owner and to the inventory.
+- **Subscriptions nobody reads** give senders false comfort. Each subscription's backlog (the stream's last sequence minus its cursor) is visible to its owner and to the inventory. Under subscriber-kept cursors, an unread subscription holds no storage: retention evicts by age or size, and the subscriber gets a gap marker.
 - **Agents treat a timed-out call as failed** while it ran. Every mutating call is an operation with an ID, so the agent can ask what happened.
 - **Too many approvals stall work overnight.** Only actions listed as irreversible need one; everything else is dry-run and confirm.
 
@@ -95,7 +105,7 @@ A past project ran a fleet of agents against several Slurm clusters, sharing one
 - What an owner lease's expiry does. Lean: the resource becomes "orphaned", stops taking new Allocations and emits an event; release then needs the usual approval. Another identity may take the owner lease over.
 - The unit of a reservation: sessions, concurrent requests or tokens per second, and whether a booking can trigger new Allocations. Lean: concurrent sessions on a deployment for a window; future capacity is a ModelDeployment with a start time.
 - How confirm binds to a plan: a hash of the plan, or the resource versions it read. Lean: the plan carries the resource versions; confirm sends the plan's ID back.
-- Push or pull delivery for subscriptions: long-lived watch with cursor, callback with acknowledgement, or both. Retention of the durable log. Depends on HBEP-11's choice of store.
+- Push or pull delivery for subscriptions. Leaning, from spike S8 (issue #25, PR #28): a long-lived ordered watch from the subscriber's stored cursor. A callback with acknowledgement needs a re-sequencer, and cannot mark ranges that were delivered, not acknowledged and then evicted. The store itself is HBEP-11's choice, and S8 makes JetStream its candidate. Still open: retention per event class, and competing consumers of one subscription, which need partitioning by resource.
 - How long idempotency keys are kept, and their scope (per identity or global). Lean: per identity, at least as long as the longest operation's retries.
 - Audit retention and who may read it. Lean: as long as the grant, readable by approvers.
 - Whether names are ever reused for different content. Lean: never; a name refers to one resource for life.
@@ -140,7 +150,7 @@ TBD. Lean: alpha when the inventory, owner leases, dry run and the audit log exi
 2. **Restart:** operations, owner leases, reservations, cursors and approvals live in the control plane (HBEP-11), so a restarted server re-reads them. Operations in flight resume or report their state.
 3. **Silent failure:** a dry run that reached a provider, or a confirm that ran a different plan than the one approved. The provider plugin's call log and the audit log's plan references show the difference.
 4. **Provider limits:** an inventory that reads every provider live meets login throttles. It reads the control plane's last observation and shows its age.
-5. **Capacity:** a full durable event log. Lean: refuse new subscriptions before dropping events.
+5. **Capacity:** a full durable event log. Reopened by spike S8: with subscriber-kept cursors, the log evicts the oldest events by retention whatever subscribers do, and subscribers behind them get a gap marker. Retention per event class sizes the log.
 6. **Idle cost:** storage for the log, operations and audit; one process on the control plane's host.
 7. **Rollback:** primitives can be switched off only together with agent access, since agents without them fall back to the unsafe practices in Motivation.
 
@@ -155,10 +165,56 @@ TBD. Lean: alpha when the inventory, owner leases, dry run and the audit log exi
 - **Rules in agents' instructions only.** The past project fixed most of the problems above by written rules. Rules are skipped under pressure and do not bind new agents; primitives in the server do.
 - **Provider access control alone.** A Slurm account says who may cancel a job, not why it runs, who approved its release, or what else belongs to the same purpose.
 
+## Prior art and reuse
+
+The primitives replace www-2027 practices: a shared gate on a common host (slots per class, load and memory floors, a hold file), scripts that ran dry by default and acted only with an explicit go flag, and restart notices and approvals sent by message.
+
+### Community software reused
+
+| Component | Origin (project, URL) | Licence | How used (dependency, copied code, optional) |
+|---|---|---|---|
+| Kubernetes API (RBAC, server-side dry run, audit, `Lease`), on k3s or kcp | [k3s](https://github.com/k3s-io/k3s); [kcp](https://github.com/kcp-dev/kcp) | k3s Apache-2.0; kcp Apache-2.0 | Candidate host, as HBEP-11 decides: k3s for the team option, and the single-user host by spike S3 |
+| NATS JetStream | [nats-io/nats-server](https://github.com/nats-io/nats-server) | Apache-2.0 | Candidate, confirmed by spike S8 (PR #28): an embedded log; subscriptions are subscriber-kept cursors over stream sequences, with a thin layer of our own for gaps and order |
+
+### Designs and published work borrowed
+
+| Idea | Origin (project, paper or document) | Where it lands here |
+|---|---|---|
+| Pre-drain and pre-terminate hooks; `paused`, `skip-remediation` and `remediate-machine` annotations | Cluster API ([kubernetes-sigs/cluster-api](https://github.com/kubernetes-sigs/cluster-api)) | Approval gates and switches |
+| Management policies; Observe-only import | Crossplane ([crossplane/crossplane](https://github.com/crossplane/crossplane)) | Orphans imported without being managed |
+| Usages for deletion ordering and protection | Crossplane (beta, needs Crossplane core) | Our own kind, when Crossplane core is absent |
+| A lease with a holder identity and a duration; server-side dry run | Kubernetes `Lease`; Kubernetes API dry run | Owner leases; dry run and confirm |
+| Dry-run estimates of a submission | Slurm's `sbatch --test-only` | Dry-run plans |
+| Queue fields `guarantee` and `capability`; Open, Closing and Closed states | Volcano | Reservation vocabulary |
+
+### Field lessons answered
+
+| Lesson | Lesson ID (from the lessons catalogue, HBEP-15) | How this HBEP answers it |
+|---|---|---|
+| No inventory said who had started what. | L-10.17 | One inventory query across providers. |
+| Every agent ran as one Unix user. | L-11.1 | Identity is a credential, not a Unix user. |
+| Our own job took nodes our pinned follow-on needed. | L-1.3 | The inventory shows every holder and purpose; reservations book capacity. |
+| Kill by pattern killed other agents' work. | L-11.2 | Bulk actions select by label, never by pattern. |
+| Recorded process IDs pointed at the wrong process. | L-11.3 | Agents address resources by stable names, never by process ID. |
+| A dry check ran for real. | L-11.6 | The server enforces dry run. |
+| An interrupted command had already acted on two clusters. | L-11.7 | Per-target reports; every mutating call is an operation with an ID. |
+| A relayed directive was taken as the owner's decision. | L-14.3 | An approval counts only from the approver's own identity. |
+| Rules changed mid-run, so earlier rulings went stale. | L-14.5 | An approval names its plan, and confirm refuses a stale plan. |
+| Messages to a session were lost when it restarted. | L-14.1 | Subscriptions survive restarts and resume from a cursor. |
+| A request channel went unwatched for long stretches. | L-14.4 | Each subscription's backlog is visible to its owner and the inventory. |
+| Agents failed mid-operation, and successors could not tell what was done. | L-14.9 | Idempotency keys and operation IDs. |
+| Restart announcements were sent by hand. | L-14.7 | Subscribed events replace manual notices. |
+| Clients did not coordinate their load on a shared gateway. | L-5.8 | Reservations, which the front honours. |
+| Watchers died with the session that started them. | L-10.2 | Durable subscriptions resume from a cursor. |
+| Alert pipes delivered late or never. | L-10.4 | At-least-once delivery, durable, with explicit gap markers. |
+| Keyword sweeps missed processes, and a respawner revived killed ones. | L-15.2, L-15.1 | Deleting a ModelDeployment ends what it owns; no sweep is needed. |
+
 ## Implementation history
 
 - 2026-10-28: proposed (provisional), tracking issue #10.
 - 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
+- 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation.
+- 2026-10-30: spike S8 (PR #28) findings carried in.
 
 ## Amendments
 
