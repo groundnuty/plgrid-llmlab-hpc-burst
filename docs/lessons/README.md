@@ -53,7 +53,7 @@ Terms used below:
 - **L-1.12 The time limit decides queueing.** [worked around]
   On Helios' CPU partitions, jobs with limits from 1 h to 2.5 days started within a minute, while 3-day jobs waited hours. Request a limit under the threshold and renew.
 - **L-1.13 Chained starts block each other.** [worked around]
-  An `afterany` chain on a job that can sit in the queue blocks every job after it, and jobs that started in the same second clashed on a shared git lock. Space starts with `--begin` instead.
+  An `afterany` chain on a job that can sit in the queue blocks every job after it, and jobs that started in the same second clashed on a shared git lock. `--begin` only delays when a job becomes eligible, so jobs can still start together; serialise the shared operation (a lock held across start-up) or give each job its own checkout.
 - **L-1.14 An express partition takes one job per user.** [worked around]
   A partition that starts jobs at once, for at most 12 h, allows one job per user, pending jobs included. Jobs for it must be sequenced.
 - **L-1.15 A cluster was blocked for days.** [open]
@@ -150,7 +150,7 @@ Terms used below:
 - **L-4.8 `add_worker` and `remove_worker` are not persistent.** [fixed]
   A router restart dropped joined workers, and a five-minute gap re-pinned every session. One adder skipped routers with no extra workers. Workers are now re-added within milliseconds of a restart.
 - **L-4.9 Cross-node pools are unsafe and awkward.** [worked around; security open]
-  Workers had to listen on all interfaces without a key, because `--api-key` is command-line only and also checks clients. The router's admin API (add and remove worker) is unauthenticated, so anyone on the cluster network can call it.
+  Workers had to listen on all interfaces without a key, because vllm-router's `--api-key` is command-line only and also checks clients. The router's admin API (add and remove worker) is unauthenticated, so anyone on the cluster network can call it.
 - **L-4.10 Worker removals before a job ends were scheduled by hand.** [fixed]
   Removals were planned 30 min ahead, and one sweep failed silently on an ssh glitch. Drain from each lease's end automatically, and check the result.
 - **L-4.11 Stale pool membership.** [fixed by hand]
@@ -166,8 +166,8 @@ Terms used below:
 
 ## 5. Capacity sizing and load
 
-- **L-5.1 Estimates from development runs were off by about 2×.** [fixed]
-  Measured KV cache per session was double the estimate, which caused repeated step-downs overnight. Size capacity on the real workload.
+- **L-5.1 Estimates from development runs were far off.** [fixed]
+  Measured KV cache per session was well above the estimate, which caused repeated step-downs overnight. Size capacity on the real workload.
 - **L-5.2 Capacity differs by workload.** [worked around]
   A short-context ramp overstated long-context capacity, so each deployment needs its own ramp for each workload.
 - **L-5.3 An unwarmed follow-on tripped a run's load guard.** [worked around]
@@ -190,7 +190,7 @@ Terms used below:
 - **L-6.2 Periodic all-model stalls.** [open: gateway side]
   A database sync every 30 min, and other periodic events, raised time to first byte many times over, more under load. They confounded every probe.
 - **L-6.3 Shared capacity.** [open]
-  A second API key shared the first key's GPUs, and the gateway saturated at two to three dozen concurrent sessions in total.
+  A second API key shared the first key's GPUs, and the gateway saturated at a modest total number of concurrent sessions.
 - **L-6.4 Keys expire mid-run.** [open]
   A key expired during a run, and requests failed with 401.
 - **L-6.5 Models flap without warning.** [open]

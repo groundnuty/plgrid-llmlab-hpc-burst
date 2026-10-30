@@ -60,17 +60,17 @@ Problems this addresses:
 - **CNCF's automatic approval does not cover modified copies.** It requires a component to be stored unmodified in a designated third-party folder, or fetched at installation or build time. A changed copy under `third_party/forked/` falls outside it, so copies get their own rule (Copied code).
 - **`go.mod` sees only Go.** go-licenses states that it cannot check non-Go code inside a dependency. Engines, routers, images and binaries are recorded separately, in `build/dependencies.yaml`, as Kubernetes does for its own external versions.
 - **Agents have no GitHub accounts** (HBEP-1), so the dependency reviewers are named as a role, not as a GitHub team (open question 2).
-- **The catalogue's numbering is inherited.** The lessons were first kept in a private problem list. The catalogue keeps its section and item numbers, so IDs cited from that list stay valid. Its header names the research project the lessons come from, which the owner allowed on 29 Oct 2026 (open question 7).
-- **Errata that follow this HBEP.** Once it merges, the template's sentence about writing `pending` is updated, and HBEPs that wrote `pending` get their IDs, as errata (HBEP-1, 2026-10-29 amendment). HBEP-2's open question 5, on a public problem catalogue, is answered here.
+- **The catalogue's numbering is inherited.** The lessons were first kept in a private problem list. The catalogue keeps its section and item numbers, so IDs cited from that list stay valid. Its header names the research project the lessons come from, as HBEP-1's content-rules amendment of 2026-10-30 allows.
+- **Relation to HBEP-1.** HBEP-1's content-rules amendment of 2026-10-30 lets HBEPs name the research project and cite lessons by catalogue ID, and drops `pending`: a lesson the catalogue lacks is added to it first. That amendment and this HBEP merge together. HBEP-2's open question 5, on a public problem catalogue, is answered here.
 
 ### Risks and mitigations
 
 - **A licence check that passes while wrong.** A check that only validates SPDX identifiers, as Kubernetes' does, passes every known licence. Mitigation: compare with the allowlist file, and keep a fixture whose licence is off the list, which must fail (Test plan).
 - **An unknown licence passes as "no licence found".** go-licenses can fail to classify a licence. Mitigation: an unknown licence fails the check.
-- **Components outside Go escape the record.** Mitigation: every image, binary or package version that the launcher or deployment files pin must match an entry in `build/dependencies.yaml`.
+- **Components outside Go escape the record.** Mitigation: every image, binary or top-level package version that the launcher or deployment files pin must match an entry in `build/dependencies.yaml`; an image's transitive contents are in its SBOM.
 - **A copy loses its origin.** Mitigation: `ORIGIN.md` has required fields, checked in CI; resyncing with upstream is a PR that updates it.
 - **Lesson IDs change and citations break.** Mitigation: IDs are only appended; CI checks that every ID on `main` still exists and that every ID an HBEP cites exists.
-- **A lesson leaks private data.** Mitigation: the catalogue's content rules, a CI grep for forbidden patterns, and the reviewer's check.
+- **A lesson leaks private data.** Mitigation: the catalogue's content rules, a CI grep for generic forbidden shapes, a private pre-push scan for named patterns, and the reviewer's check.
 - **Review overhead.** Mitigation: only licence exceptions and non-Apache modified copies need the approver's word; routine updates need the checklist alone.
 
 ### Open questions
@@ -78,10 +78,10 @@ Problems this addresses:
 1. **The project's licence.** The repository has none (GitHub reports no licence, read 2026-10-30). The CNCF policy is written relative to Apache-2.0, and every component named in this HBEP is under Apache-2.0. Candidate: Apache-2.0. Owner decision, and hard to change once others contribute.
 2. **Who the dependency reviewers are.** Candidate: the role is filled by the code pipeline's fresh-context reviewers, with the checklist below; the approver decides exceptions. Whether `.github/CODEOWNERS` also lists the owner for `go.mod`, `go.sum`, `build/dependencies.yaml`, `third_party/` and `LICENSES/` needs the approver's word, as every CODEOWNERS change does (HBEP-1). Owner decision.
 3. **Components fetched at run time.** The launcher installs some components inside jobs on the cluster, so the framework never redistributes them. Do they need an allowlisted licence? CNCF's condition 2 covers components fetched at installation or build time. Candidate: yes, the same allowlist, because the framework chooses and installs them.
-4. **SBOM tool and format.** Candidates: kubernetes-sigs/bom (SPDX, the tool behind Kubernetes' release SBOMs) or syft (SPDX and CycloneDX). Decided by a spike on the first release artefacts: Go binaries plus job images.
+4. **SBOM tool.** The format is SPDX 2.3. Candidates: kubernetes-sigs/bom (the tool behind Kubernetes' release SBOMs) or syft, which also emits SPDX. Decided by a spike on the first release artefacts: Go binaries plus job images.
 5. **The format of `build/dependencies.yaml`.** zeitgeist checks Kubernetes' file. Can its entries carry licence and upstream fields, or do those go in a parallel list? Decided when the first non-Go component is added.
 6. **Classifying lessons.** Tag each lesson with HBEP-2's dimensions (stage, platform, weight, fix owner)? Useful for test plans and the known-issues register. Decided once HBEP-2 resolves its open questions.
-7. **Naming the source project.** HBEP-1's Content rules forbid project or study names in an HBEP. This HBEP keeps to that, but the catalogue's header names the project, as the owner allowed on 29 Oct 2026. Candidate: amend HBEP-1's Content rules to allow naming the originating project in `docs/lessons/`. Owner decision.
+7. **Naming the source project.** Resolved by HBEP-1's content-rules amendment of 2026-10-30: the research project and its tools may be named; no other project or study, and no study's results or data.
 8. **Vendoring.** Kubernetes vendors its modules. Candidate: no `vendor/` directory; `go.sum` and the Go checksum database are enough at this size. Revisit if builds must run offline on a cluster.
 
 ## Design details
@@ -91,7 +91,7 @@ Problems this addresses:
 | Origin | Record | Checked by |
 |---|---|---|
 | Go library | `go.mod`, `go.sum` | `go mod verify`; the licence check |
-| Component outside Go: engine, router, tunnel, metrics server, container image, Python package in a job image | `build/dependencies.yaml`: name, version or digest, upstream URL, SPDX licence, where it is pinned, the HBEP that adopted it | a drift check (zeitgeist, open question 5); the licence check |
+| Component outside Go that the framework pins directly: engine, router, tunnel, metrics server, container image digest, top-level package of a job image | `build/dependencies.yaml`: name, version or digest, upstream URL, SPDX licence, where it is pinned, the HBEP that adopted it. Transitive contents of an image are listed by its SBOM, not here | a drift check (zeitgeist, open question 5); the licence check |
 | Code copied from another project | `third_party/forked/<project>/` | the copy check |
 | Licence texts of what the framework ships | `LICENSES/` | regenerate and diff |
 | A design or paper borrowed | the adopting HBEP's "Designs and published work borrowed" table | HBEP review |
@@ -101,7 +101,7 @@ Problems this addresses:
 ### Dependencies
 
 - A Go module enters only through `go.mod` and `go.sum`, as in Kubernetes. Prefer tagged releases. A module pinned to a commit needs a trailing comment naming the release it corresponds to, and a tracking issue to move to a tag, as Kubernetes asks.
-- A component outside Go gets an entry in `build/dependencies.yaml` before anything pins it. Images are pinned by digest, packages by version in a lock file.
+- A component outside Go that the framework pins directly gets an entry in `build/dependencies.yaml` before anything pins it. Images are pinned by digest, packages by version in a lock file. The packages an image pulls in transitively are listed by the image's SBOM.
 - No `vendor/` directory for now (open question 8).
 
 ### Licence allowlist
@@ -113,7 +113,7 @@ Problems this addresses:
   - (3) substantial use outside the project (a standard library, or created at least 12 months ago with at least 10 stars or forks): a checklist item for the reviewer, not a CI check.
 - **Exceptions:** anything else, an unknown licence included, needs the approver's word. It is recorded in `hack/license-exceptions.yaml` with the package, licence, reason, PR and date.
 - **The machine-readable list** is `hack/allowed-licenses.txt`. It changes only by amendment of this HBEP.
-- **The check:** `go-licenses check ./... --allowed_licenses=<the list>` for Go code; a lookup of each `build/dependencies.yaml` licence for the rest. Both fail on an unknown licence. A licence that changes in an update is flagged in the PR, as Kubernetes asks.
+- **The check:** `go-licenses check ./... --allowed_licenses=<the list>` for Go code; a lookup of each `build/dependencies.yaml` licence for the rest. Both fail on an unknown licence. The allowlist applies to what the framework itself distributes: its Go binaries, copied code and the entries of `build/dependencies.yaml`. A job image's transitive packages are recorded in its SBOM and not checked against the allowlist, because GPU vendor runtime wheels (licence undeclared, or proprietary) and MPL-2.0 packages are part of every engine image. Whether the framework publishes engine images, and so redistributes them, is open question 3. A licence that changes in an update is flagged in the PR, as Kubernetes asks.
 
 ### LICENSES/
 
@@ -157,7 +157,7 @@ Problems this addresses:
 
 - Each release publishes an SPDX 2.3 SBOM, generated in CI from the tagged commit and attached to the release. It covers the Go modules of every binary and the components of every published image.
 - Kubernetes does the same: it publishes an SPDX 2.3 document per release at `sbom.k8s.io`, generated by its `bom` tool.
-- Tool and format: open question 4.
+- Tool: open question 4.
 
 ### Lessons catalogue
 
@@ -184,7 +184,7 @@ Problems this addresses:
   - IDs are unique and well formed;
   - every ID on `main` still exists in the PR;
   - every ID cited under `hbep/` exists;
-  - a grep for forbidden patterns (host and node names, addresses, job IDs, private paths) finds nothing in `docs/lessons/`.
+  - a committed CI grep for generic shapes only (IPv4 addresses, host-name-like tokens, long digit runs such as job IDs, absolute home or scratch paths) finds nothing in `docs/lessons/`. Named host and node patterns never enter the repository; they live in a CI secret or the private pre-push scan.
 - **The first catalogue:** the author lists the private list's item numbers independently, diffs them against the catalogue's IDs, and records the result on the PR. Counting entries is not enough, because a count produced in the same pass that wrote the catalogue would agree with it anyway.
 
 ### Compatibility and upgrades
@@ -226,7 +226,7 @@ N/A: a repository policy has no stages. It is `implemented` once the licence, de
 - **REUSE's `LICENSES/`:** one file per SPDX licence identifier, and nothing else in the folder. It suits a project whose own files carry several licences, but it does not record which dependency uses which licence. The two layouts cannot share one folder, so this HBEP follows Kubernetes'.
 - **Vendoring every module,** as Kubernetes does. Offline builds and a visible diff of every change, at the cost of large PRs. Not now (open question 8).
 - **Review alone, with no CI allowlist check,** as Kubernetes does in practice. Rejected: agents open most PRs here, and a mechanical check costs little.
-- **CycloneDX instead of SPDX.** Both are standard. SPDX follows Kubernetes; open question 4 keeps CycloneDX possible.
+- **CycloneDX instead of SPDX.** Both are standard. SPDX is chosen because Kubernetes uses it; a later amendment can add a CycloneDX copy if users need one.
 - **Lessons inline in each HBEP.** Rejected: a lesson cited by several HBEPs would be copied and drift.
 - **A fresh numbering (L-1, L-2, …).** Cleaner, but IDs already cited from the private list would break.
 - **Lessons as GitHub issues.** Stable numbers, but they would mix with tracking issues, and their text would not be reviewed by PR.
