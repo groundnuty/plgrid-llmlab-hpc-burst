@@ -7,7 +7,8 @@
 # with no job run. Node-level numbers are a snapshot of the collection time.
 # Updated later the same day by spike S1 (issue #18): the entries under reachability and
 # compute_node were measured inside one short Slurm job on plgrid-gpu-a100 (S1's step-0
-# probe), not on the login node.
+# probe), not on the login node. slurm.hold_release was measured later the same day by one
+# hold/release probe job on plgrid-gpu-a100 (submitted held, released, cancelled at once; it never ran).
 draft: s5
 platform: athena              # helios | athena | sano
 organization: cyfronet        # cyfronet | sano
@@ -87,6 +88,13 @@ facts:
       method: measured
       source: "scontrol show config (RequeueExitHold)"
       date: 2026-10-30
+    hold_release:
+      method: measured
+      date: 2026-10-30
+      source: "One job as a plain user with the grant account for the A100 jobs: sbatch --hold --no-requeue --parsable --time=00:02:00 --cpus-per-task=1 --mem=1G --job-name=hb-holdcheck-athena-a100 --partition=plgrid-gpu-a100 --account=<account> --gres=gpu:1 --wrap='sleep 30'; squeue -j <id> -h -o '%T|%r' at once; scontrol release <id>; squeue again after 2 s; scancel <id>; sacct -j <id> -X -n -P -o State -S now-1hours."
+      value:
+        plgrid-gpu-a100: {hold_honoured: true, state_reason_after_submit: "PENDING|JobHeldUser", user_release_ok: true, release_exit: 0, state_reason_after_release: "PENDING|Priority", final_state: "CANCELLED"}
+      note: "A plain user's sbatch --hold was honoured (reason JobHeldUser, not JobHeldAdmin) and the same user released it with scontrol release (exit 0, no message). Two seconds later the job was PENDING with reason Priority, so the release took effect and the job queued normally; it was cancelled at once and never ran. One job, one trial. Not tested: other job shapes (arrays, --begin), how long a held job may stay held before the site purges it, and the other partitions."
     max_job_count:
       value: 100000
       method: measured

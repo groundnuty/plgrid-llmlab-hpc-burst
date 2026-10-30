@@ -12,7 +12,9 @@ collected: 2026-10-30         # UTC date
 # of the cluster at the collection time; counts of nodes and states are a snapshot.
 # Updated later the same day by spike S1 (issue #18): the entries under reachability and
 # compute_node were measured inside short Slurm jobs, one job per partition, by S1's step-0
-# probe (plgrid and plgrid-gpu-gh200). Everything else is still the login-node view.
+# probe (plgrid and plgrid-gpu-gh200). Everything else is still the login-node view, except
+# slurm.hold_release, which one hold/release probe job per partition hold/release probe jobs measured later the same day
+# (submitted held, released, cancelled at once; none ran).
 facts:
   slurm:
     version: {value: "24.11.5", method: measured, source: "sinfo --version", date: 2026-10-30, note: "scontrol show config SLURM_VERSION and the slurmd version of every reporting node agree"}
@@ -48,6 +50,14 @@ facts:
     job_requeue: {value: 1, method: measured, source: "scontrol show config: JobRequeue", date: 2026-10-30, note: "jobs are requeueable by default. Submit with --no-requeue to prevent it."}
     requeue_exit: {value: null, method: measured, source: "scontrol show config: RequeueExit", date: 2026-10-30, note: "scontrol prints (null)"}
     requeue_exit_hold: {value: null, method: measured, source: "scontrol show config: RequeueExitHold", date: 2026-10-30, note: "scontrol prints (null)"}
+    hold_release:
+      method: measured
+      date: 2026-10-30
+      source: "Per partition, one job as a plain user with the grant account of that job kind: sbatch --hold --no-requeue --parsable --time=00:02:00 --cpus-per-task=1 --mem=1G --job-name=hb-holdcheck-<label> --partition=<p> --account=<account> [--gres=gpu:1] --wrap='sleep 30'; squeue -j <id> -h -o '%T|%r' at once; scontrol release <id>; squeue again after 2 s; scancel <id>; sacct -j <id> -X -n -P -o State -S now-1hours. The --gres=gpu:1 option was used on plgrid-gpu-gh200 only."
+      value:
+        plgrid: {hold_honoured: true, state_reason_after_submit: "PENDING|JobHeldUser", user_release_ok: true, release_exit: 0, state_reason_after_release: "PENDING|Priority", final_state: "CANCELLED"}
+        plgrid-gpu-gh200: {hold_honoured: true, state_reason_after_submit: "PENDING|JobHeldUser", user_release_ok: true, release_exit: 0, state_reason_after_release: "PENDING|Priority", final_state: "CANCELLED"}
+      note: "On both partitions a plain user's sbatch --hold was honoured (reason JobHeldUser, not JobHeldAdmin) and the same user released it with scontrol release (exit 0, no message). Two seconds later the job was PENDING with reason Priority, so the release took effect and the job queued normally; it was cancelled at once and never ran. One job per partition, one trial each. Not tested: other job shapes (arrays, --begin), how long a held job may stay held before the site purges it, and the other partitions."
     limits:
       max_job_count: {value: 500000, method: measured, source: "scontrol show config: MaxJobCount", date: 2026-10-30}
       max_array_size: {value: 10001, method: measured, source: "scontrol show config: MaxArraySize", date: 2026-10-30}
