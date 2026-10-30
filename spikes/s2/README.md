@@ -61,7 +61,7 @@ the operational findings below (two processes and an Alpha plugin against one pr
   2,100-token stream (35 min) then starts on the same session, so it runs on X. After 20 s, X is removed
   from discovery (EPP: atomic rewrite of the endpoints file; vllm-router: `POST /remove_worker`). The
   removal counts as effective only if the same session then lands on another worker, and 8 fresh
-  sessions avoid X, at five probes. Only then is the survival of the stream judged. The
+  sessions avoid X, at four probes. Only then is the survival of the stream judged. The
   session is the lever on purpose: a router that still held X would send the session back to X, whereas
   fresh sessions alone would avoid a busy X even before the removal.
   The first probe comes 30 s after the removal command returns (a settle time), and the later ones are
@@ -189,7 +189,7 @@ deadline below the total deadline.
 ### 3. Removal of a worker from discovery
 
 A 2,100-token stream (35 min) runs on worker X, which is removed 20 s later. The removal is proven first
-(same session now on another worker, fresh sessions off X), at +30 s, +2, +5 and +9 min; then the stream is judged.
+(same session now on another worker, fresh sessions off X) at four probes: the first 30 s after the removal command returned, the others planned for +2, +5 and +9 min (Method); then the stream is judged.
 
 | Router | How X is removed | Proof the removal worked | Stream on X | Result |
 |---|---|---|---|---|
