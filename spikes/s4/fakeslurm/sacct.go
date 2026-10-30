@@ -9,7 +9,8 @@ var sacctDefs = []optDef{
 	{name: "allocations", short: 'X'},
 	{name: "duplicates", short: 'D'},
 	{name: "allusers", short: 'a'},
-	{name: "name", short: 'n', value: valSoft},
+	{name: "noheader", short: 'n'}, // sacct --name has no short form
+	{name: "name", value: valRequired},
 	{name: "jobs", short: 'j', value: valRequired},
 	{name: "user", short: 'u', value: valRequired},
 	{name: "starttime", short: 'S', value: valRequired},
@@ -80,6 +81,14 @@ func (a *app) sacct(args []string) int {
 		if err != nil {
 			return fail(err.Error())
 		}
+		// sacct lists the invoking user's jobs unless -u names others or
+		// -a asks for everyone (-a wins over -u).
+		switch {
+		case p.has("allusers"):
+			f.users = nil
+		case len(f.users) == 0:
+			f.users = []string{a.cfg.User}
+		}
 		now := a.env.Now()
 		from, to, err := a.sacctWindow(p, now)
 		if err != nil {
@@ -88,7 +97,7 @@ func (a *app) sacct(args []string) int {
 		asOf := now.Add(-a.cfg.AcctDelay)
 		resp := sacctResp{Jobs: []sacctJob{}, Meta: newMeta(a.cfg.DataParser), Errors: []any{}, Warnings: []any{}}
 		for _, j := range t.st.Jobs {
-			if !f.match(j) {
+			if j.AcctHidden || !f.match(j) {
 				continue
 			}
 			for _, rec := range a.accountingRecords(j, asOf, p.has("duplicates")) {
@@ -137,7 +146,8 @@ type acctRecord struct {
 
 // accountingRecords is slurmdbd's view of j as of asOf: the executions
 // submitted by then, the latest one in the state it had at asOf and, with
-// duplicates, the earlier ones as REQUEUED.
+// duplicates, the earlier ones as PENDING plus the REQUEUED flag (Slurm sets
+// a requeued job PENDING, and slurmdbd keeps the flag on the closed record).
 func (a *app) accountingRecords(j *Job, asOf time.Time, duplicates bool) []acctRecord {
 	var visible []*Exec
 	for _, e := range j.Execs {
@@ -151,9 +161,11 @@ func (a *app) accountingRecords(j *Job, asOf time.Time, duplicates bool) []acctR
 		if !latest && !duplicates {
 			continue
 		}
+		current := []string{Pending, Requeued}
 		state := Requeued
 		if latest {
 			state = e.StateAt(asOf)
+			current = []string{state}
 		}
 		start, end := e.StartAt(asOf), e.EndAt(asOf)
 		var elapsed int64
@@ -167,7 +179,7 @@ func (a *app) accountingRecords(j *Job, asOf time.Time, duplicates bool) []acctR
 		job := sacctJob{
 			JobID: j.ID, Name: j.Name, User: j.User, Partition: j.Partition, Account: j.Account,
 			Comment: sacctComment{},
-			State:   sacctState{Current: []string{state}, Reason: "None"},
+			State:   sacctState{Current: current, Reason: "None"},
 			Time: sacctTime{
 				Submission: epoch(e.Submit), Start: epoch(start), End: epoch(end),
 				Elapsed: elapsed, Eligible: epoch(e.Submit), Limit: limitNV(j.TimeLimit),

@@ -5,7 +5,7 @@ import (
 	"strconv"
 )
 
-const ctlUsage = `usage: fakeslurmctl start <id> | end <id> [STATE] | requeue <id> | dump | count-sbatch [name]`
+const ctlUsage = `usage: fakeslurmctl start <id> | end <id> [STATE] | requeue <id> | requeue-hold <id> | hold-admin <id> | acct-hide <id> | acct-show <id> | forget-requeue <id> | dump | count-sbatch [name]`
 
 // ctl is fakeslurmctl, the test's handle on the fake cluster: Slurm moves
 // jobs on its own, the fake only when told.
@@ -30,7 +30,7 @@ func (a *app) ctl(args []string) int {
 			return result{out: out}
 		case "count-sbatch":
 			return a.countSbatch(t, rest, fail)
-		case "start", "end", "requeue":
+		case "start", "end", "requeue", "requeue-hold", "hold-admin", "acct-hide", "acct-show", "forget-requeue":
 			if len(rest) == 0 {
 				return fail(0, ctlUsage)
 			}
@@ -53,6 +53,23 @@ func (a *app) ctl(args []string) int {
 				err = j.markEnd(now, state)
 			case "requeue":
 				j.markRequeue(now)
+			case "requeue-hold":
+				// Slurm holds the new execution (user hold) for requeue-hold
+				// and for launch-failed requeues.
+				j.markRequeue(now)
+				j.hold(HeldUser)
+			case "hold-admin":
+				if st := j.Cur().StateAt(now); st != Pending {
+					err = fmt.Errorf("job %d is %s, not PENDING", id, st)
+					break
+				}
+				j.hold(HeldAdmin)
+			case "acct-hide":
+				j.AcctHidden = true
+			case "acct-show":
+				j.AcctHidden = false
+			case "forget-requeue":
+				j.forgetRequeues()
 			}
 			if err != nil {
 				return fail(id, err.Error())

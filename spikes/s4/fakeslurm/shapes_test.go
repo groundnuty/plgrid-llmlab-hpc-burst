@@ -111,13 +111,18 @@ func TestJSONShapes(t *testing.T) {
 	j, pend := js[0], js[1]
 	wantKeys(t, "squeue job", j, "job_id", "name", "comment", "job_state", "restart_cnt", "requeue",
 		"submit_time", "start_time", "end_time", "user_name", "partition", "account", "state_reason",
-		"time_limit", "exit_code")
+		"hold", "priority", "time_limit", "exit_code")
 	if j["job_id"] != 1001.0 || j["name"] != "shape" || j["comment"] != "note" ||
 		j["user_name"] != "someone" || j["partition"] != "p1" || j["account"] != "acc" ||
 		j["state_reason"] != "None" || j["restart_cnt"] != 0.0 || j["requeue"] != true {
 		t.Errorf("squeue job scalar fields: %v", j)
 	}
 	wantStrings(t, "job_state", j["job_state"], "RUNNING")
+	// Not held: hold false, a positive priority (1000).
+	if j["hold"] != false {
+		t.Errorf("hold = %v, want false", j["hold"])
+	}
+	wantNV(t, "priority", j["priority"], true, 1000)
 	wantNV(t, "submit_time", j["submit_time"], true, submit)
 	wantNV(t, "start_time", j["start_time"], true, start)
 	wantNV(t, "end_time", j["end_time"], false, 0)

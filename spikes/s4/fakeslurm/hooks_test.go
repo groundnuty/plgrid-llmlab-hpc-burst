@@ -188,7 +188,7 @@ func TestSbatchFail(t *testing.T) {
 	r := newRig(t)
 	r.env["FAKE_SLURM_SBATCH_FAIL"] = "1"
 	out, errOut, code := r.run("sbatch", "--parsable", "x.sh")
-	if want := "sbatch: error: Batch job submission failed: fake failure\n"; code != 1 || out != "" || errOut != want {
+	if want := "sbatch: error: Batch job submission failed: Invalid account or account/partition combination specified\n"; code != 1 || out != "" || errOut != want {
 		t.Errorf("exit %d stdout %q stderr %q, want exit 1 and stderr %q", code, out, errOut, want)
 	}
 	if n := len(ids(t, r.squeue())); n != 0 {

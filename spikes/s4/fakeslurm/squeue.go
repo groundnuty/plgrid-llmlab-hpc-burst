@@ -2,9 +2,13 @@ package fakeslurm
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"time"
 )
+
+// defaultPriority is the priority of every job that is not held.
+const defaultPriority = 1000
 
 var squeueDefs = []optDef{
 	{name: "json"}, {name: "yaml"}, {name: "me"},
@@ -37,6 +41,8 @@ type squeueJob struct {
 	Partition   string   `json:"partition"`
 	Account     string   `json:"account"`
 	StateReason string   `json:"state_reason"`
+	Hold        bool     `json:"hold"`
+	Priority    NV       `json:"priority"`
 	TimeLimit   NV       `json:"time_limit"`
 	ExitCode    exitCode `json:"exit_code"`
 }
@@ -136,6 +142,12 @@ func (a *app) squeue(args []string) int {
 			}
 			resp.Jobs = append(resp.Jobs, squeueJobOf(j, now))
 		}
+		sort.SliceStable(resp.Jobs, func(i, k int) bool {
+			if a.cfg.SqueueDesc {
+				return resp.Jobs[i].JobID > resp.Jobs[k].JobID
+			}
+			return resp.Jobs[i].JobID < resp.Jobs[k].JobID
+		})
 		out, err := marshalOut(resp)
 		if err != nil {
 			return fail(err.Error())
@@ -148,9 +160,13 @@ func (a *app) squeue(args []string) int {
 func squeueJobOf(j *Job, now time.Time) squeueJob {
 	e := j.Cur()
 	state := e.StateAt(now)
+	// A requeued job is plain PENDING in Slurm 23.11 and 24.11: no REQUEUED
+	// flag; only restart_cnt tells.
 	js := []string{state}
-	if state == Pending && j.RestartCnt > 0 {
-		js = append(js, Requeued)
+	// Slurm reports hold = (priority == 0); derive it the same way.
+	prio := nv(defaultPriority)
+	if state == Pending && j.Held {
+		prio = nv(0)
 	}
 	reason := "None"
 	if state == Pending {
@@ -168,7 +184,7 @@ func squeueJobOf(j *Job, now time.Time) squeueJob {
 		RestartCnt: j.RestartCnt, Requeue: j.Requeue,
 		SubmitTime: nvTime(e.Submit), StartTime: nvTime(e.Start), EndTime: nvTime(end),
 		UserName: j.User, Partition: j.Partition, Account: j.Account,
-		StateReason: reason, TimeLimit: limitNV(j.TimeLimit), ExitCode: exitCodeFor(state),
+		StateReason: reason, Hold: prio.Number == 0, Priority: prio, TimeLimit: limitNV(j.TimeLimit), ExitCode: exitCodeFor(state),
 	}
 }
 

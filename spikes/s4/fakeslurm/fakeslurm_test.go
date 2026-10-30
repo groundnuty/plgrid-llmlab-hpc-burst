@@ -110,20 +110,31 @@ func TestFilters(t *testing.T) {
 			t.Errorf("squeue %s: ids %v, want %v", tc.name, got, tc.want)
 		}
 	}
+	// sacct lists the invoking user's jobs (spike) unless -a or -u says
+	// otherwise; -n is --noheader and --name has no short form.
 	for _, tc := range []struct {
 		name string
 		args []string
 		want []int
 	}{
-		{"no filter", nil, []int{1001, 1002, 1003, 1004}},
+		{"default is the invoking user", nil, []int{1001, 1002}},
+		{"-a", []string{"-a"}, []int{1001, 1002, 1003, 1004}},
+		{"--allusers", []string{"--allusers"}, []int{1001, 1002, 1003, 1004}},
 		{"--me", []string{"--me"}, []int{1001, 1002}},
 		{"-u other", []string{"-u", "other"}, []int{1003, 1004}},
 		{"--user=spike", []string{"--user=spike"}, []int{1001, 1002}},
-		{"--name=alpha", []string{"--name=alpha"}, []int{1001, 1003}},
-		{"-n alpha", []string{"-n", "alpha"}, []int{1001, 1003}},
+		{"-u spike,other", []string{"-u", "spike,other"}, []int{1001, 1002, 1003, 1004}},
+		{"--name=alpha is the user's alpha only", []string{"--name=alpha"}, []int{1001}},
+		{"-a --name=alpha", []string{"-a", "--name=alpha"}, []int{1001, 1003}},
+		{"-a --name alpha,gamma", []string{"-a", "--name", "alpha,gamma"}, []int{1001, 1003, 1004}},
 		{"--me --name=alpha", []string{"--me", "--name=alpha"}, []int{1001}},
 		{"-u other --name alpha", []string{"-u", "other", "--name", "alpha"}, []int{1003}},
-		{"-j 1002,1003", []string{"-j", "1002,1003"}, []int{1002, 1003}},
+		{"-n is --noheader, not --name", []string{"-n"}, []int{1001, 1002}},
+		{"-n takes no value", []string{"-n", "alpha"}, []int{1001, 1002}},
+		{"-n with --name", []string{"-n", "--name=beta"}, []int{1002}},
+		{"clustered -na", []string{"-na"}, []int{1001, 1002, 1003, 1004}},
+		{"-j keeps the user default", []string{"-j", "1002,1003"}, []int{1002}},
+		{"-a -j 1002,1003", []string{"-a", "-j", "1002,1003"}, []int{1002, 1003}},
 		{"-X -D keep their meaning", []string{"-X", "-D", "--me"}, []int{1001, 1002}},
 	} {
 		if got := ids(t, r.sacct(tc.args...)); !sameInts(got, tc.want) {
@@ -267,10 +278,8 @@ func TestRequeue(t *testing.T) {
 			if sq[0]["restart_cnt"].(float64) != 1 {
 				t.Errorf("squeue restart_cnt %v, want 1", sq[0]["restart_cnt"])
 			}
-			state := sq[0]["job_state"].([]any)
-			if len(state) != 2 || state[0] != "PENDING" || state[1] != "REQUEUED" {
-				t.Errorf("squeue job_state %v, want [PENDING REQUEUED]", state)
-			}
+			// Slurm sets a requeued job plain PENDING: no REQUEUED flag.
+			wantStrings(t, "squeue job_state", sq[0]["job_state"], "PENDING")
 			if sq[0]["state_reason"] != "BeginTime" {
 				t.Errorf("state_reason %v, want BeginTime", sq[0]["state_reason"])
 			}
@@ -289,12 +298,10 @@ func TestRequeue(t *testing.T) {
 			if len(two) != 2 {
 				t.Fatalf("sacct -D: %d records, want 2", len(two))
 			}
-			if s := firstState(t, two[0], "state"); s != "REQUEUED" {
-				t.Errorf("first record state %s, want REQUEUED", s)
-			}
-			if s := firstState(t, two[1], "state"); s != "PENDING" {
-				t.Errorf("second record state %s, want PENDING", s)
-			}
+			// The closed execution is base state PENDING plus the REQUEUED flag.
+			wantStrings(t, "first record state.current", two[0]["state"].(map[string]any)["current"], "PENDING", "REQUEUED")
+			wantStrings(t, "second record state.current", two[1]["state"].(map[string]any)["current"], "PENDING")
+			wantStrings(t, "sacct without -D state.current", one[0]["state"].(map[string]any)["current"], "PENDING")
 			t0s := float64(t0.Unix())
 			first := two[0]["time"].(map[string]any)
 			if first["submission"] != t0s || first["start"] != t0s+5 || first["end"] != t0s+10 {

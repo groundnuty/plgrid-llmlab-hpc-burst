@@ -23,6 +23,7 @@ type Event struct {
 	PID    int      `json:"pid"`
 	JobID  int      `json:"job_id,omitempty"`
 	Exit   *int     `json:"exit"`
+	Note   string   `json:"note,omitempty"`
 }
 
 // tx is one locked transaction: the loaded state plus the events to append.
@@ -35,11 +36,16 @@ type tx struct {
 
 // emit queues a log event; exit nil logs null (sbatch_start).
 func (t *tx) emit(event, cmd string, jobID int, exit *int) {
+	t.emitNote(event, cmd, jobID, exit, "")
+}
+
+// emitNote is emit with a free-text note ("held", "already released").
+func (t *tx) emitNote(event, cmd string, jobID int, exit *int, note string) {
 	now := t.app.env.Now().UTC()
 	t.events = append(t.events, Event{
 		TS: now.Format(time.RFC3339Nano), UnixMS: now.UnixMilli(),
 		Event: event, Cmd: cmd, Argv: t.app.argv, Caller: t.app.cfg.Caller,
-		PID: t.app.env.Pid, JobID: jobID, Exit: exit,
+		PID: t.app.env.Pid, JobID: jobID, Exit: exit, Note: note,
 	})
 }
 

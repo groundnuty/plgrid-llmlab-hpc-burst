@@ -73,6 +73,11 @@ type Config struct {
 	DelayAfter   time.Duration
 	BlockMarker  string
 	Fail         bool
+	GatePath     string // FAKE_SLURM_SBATCH_GATE
+	FailOnce     string // FAKE_SLURM_SBATCH_FAIL_ONCE marker path
+	FailAlign    bool   // FAKE_SLURM_SBATCH_FAIL_ALIGN=1
+	LostReply    string // FAKE_SLURM_SBATCH_LOST_REPLY_ONCE marker path
+	SqueueDesc   bool   // FAKE_SLURM_SQUEUE_ORDER=desc
 	Zone         *time.Location
 }
 
@@ -87,6 +92,9 @@ func loadConfig(getenv func(string) string) (Config, []string) {
 		DataParser:  getenv("FAKE_SLURM_DATA_PARSER"),
 		User:        getenv("FAKE_SLURM_USER"),
 		BlockMarker: getenv("FAKE_SLURM_SBATCH_BLOCK_MARKER"),
+		GatePath:    getenv("FAKE_SLURM_SBATCH_GATE"),
+		FailOnce:    getenv("FAKE_SLURM_SBATCH_FAIL_ONCE"),
+		LostReply:   getenv("FAKE_SLURM_SBATCH_LOST_REPLY_ONCE"),
 		Zone:        time.UTC,
 	}
 	if c.StatePath == "" {
@@ -106,6 +114,14 @@ func loadConfig(getenv func(string) string) (Config, []string) {
 	}
 	c.StoreComment = getenv("FAKE_SLURM_STORE_COMMENT") == "1"
 	c.Fail = getenv("FAKE_SLURM_SBATCH_FAIL") == "1"
+	c.FailAlign = getenv("FAKE_SLURM_SBATCH_FAIL_ALIGN") == "1"
+	switch order := getenv("FAKE_SLURM_SQUEUE_ORDER"); order {
+	case "", "asc":
+	case "desc":
+		c.SqueueDesc = true
+	default:
+		errs = append(errs, fmt.Sprintf("FAKE_SLURM_SQUEUE_ORDER=%q is not asc or desc", order))
+	}
 
 	c.MinJobAge = envSeconds(getenv, "FAKE_SLURM_MIN_JOB_AGE", 10, &errs)
 	c.AcctDelay = envSeconds(getenv, "FAKE_SLURM_ACCT_DELAY", 0, &errs)

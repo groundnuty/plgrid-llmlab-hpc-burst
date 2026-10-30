@@ -1,6 +1,7 @@
 // Command fakeslurm is the multi-call fake Slurm binary: install it under the
-// names sbatch, squeue, sacct, scancel and fakeslurmctl (symlinks), or run it
-// as "fakeslurm <command> args...". See package fakeslurm for the environment.
+// names sbatch, squeue, sacct, scancel, scontrol and fakeslurmctl (symlinks),
+// or run it as "fakeslurm <command> args...". See package fakeslurm for the
+// environment.
 package main
 
 import (

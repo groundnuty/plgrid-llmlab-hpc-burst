@@ -10,9 +10,6 @@ type valueMode int
 const (
 	valNone valueMode = iota
 	valRequired
-	// valSoft: the short form takes the next argument only when it does not
-	// start with '-' (sacct -n is --noheader in Slurm but --name in the brief).
-	valSoft
 )
 
 // optDef describes one option. Unknown options are ignored by the parser.
@@ -114,19 +111,11 @@ func parseOpts(args []string, defs []optDef) (parsed, error) {
 					p.opts = append(p.opts, opt{Name: d.name, Val: rest, HasVal: true})
 					break
 				}
-				next := ""
-				if i+1 < len(args) {
-					next = args[i+1]
-				}
-				switch {
-				case d.value == valSoft && (next == "" || strings.HasPrefix(next, "-")):
-					p.opts = append(p.opts, opt{Name: d.name})
-				case next == "" && i+1 >= len(args):
+				if i+1 >= len(args) {
 					return p, fmt.Errorf("option requires an argument -- '%c'", a[j])
-				default:
-					i++
-					p.opts = append(p.opts, opt{Name: d.name, Val: next, HasVal: true})
 				}
+				i++
+				p.opts = append(p.opts, opt{Name: d.name, Val: args[i], HasVal: true})
 				break
 			}
 		default:

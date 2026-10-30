@@ -12,6 +12,7 @@ import (
 // ignores, so that their values are not taken for the script path.
 var sbatchDefs = []optDef{
 	{name: "parsable"}, {name: "requeue"}, {name: "no-requeue"},
+	{name: "hold", short: 'H'},
 	{name: "job-name", short: 'J', value: valRequired},
 	{name: "comment", value: valRequired},
 	{name: "time", short: 't', value: valRequired},
@@ -52,7 +53,7 @@ var sbatchDefs = []optDef{
 type sbatchSpec struct {
 	name, comment, partition, account, script string
 	timeLimit                                 int
-	requeue, parsable                         bool
+	requeue, parsable, hold                   bool
 }
 
 func parseSbatch(args []string) (sbatchSpec, error) {
@@ -60,7 +61,7 @@ func parseSbatch(args []string) (sbatchSpec, error) {
 	if err != nil {
 		return sbatchSpec{}, err
 	}
-	s := sbatchSpec{requeue: p.last("requeue", "no-requeue") != "no-requeue", parsable: p.has("parsable")}
+	s := sbatchSpec{requeue: p.last("requeue", "no-requeue") != "no-requeue", parsable: p.has("parsable"), hold: p.has("hold")}
 	s.name, _ = p.get("job-name")
 	s.comment, _ = p.get("comment")
 	s.partition, _ = p.get("partition")
@@ -78,8 +79,10 @@ func parseSbatch(args []string) (sbatchSpec, error) {
 	return s, nil
 }
 
-// sbatch registers a job. The locked section ends before any sleep or block,
-// so a hung sbatch never holds the lock.
+// sbatch registers a job. The locked sections end before any sleep, wait or
+// block, so a hung sbatch never holds the lock. Order of events: sbatch_start,
+// the fail-once check, the gate, delay_before, the parse and FAIL check, the
+// registration, the block marker, delay_after, the block, the lost reply.
 func (a *app) sbatch(args []string) int {
 	if err := a.locked(func(t *tx) error {
 		t.emit("sbatch_start", "sbatch", 0, nil)
@@ -87,35 +90,24 @@ func (a *app) sbatch(args []string) int {
 	}); err != nil {
 		return a.internalError(err)
 	}
+	if code, done := a.failOnce(); done {
+		return code
+	}
+	if code, done := a.waitGate(); done {
+		return code
+	}
 	a.pause("delay_before", a.cfg.DelayBefore)
 
-	var spec sbatchSpec
-	var perr error
-	if spec, perr = parseSbatch(args); perr != nil || a.cfg.Fail {
-		msg := "sbatch: error: Batch job submission failed: fake failure\n"
-		if perr != nil {
-			msg = fmt.Sprintf("sbatch: error: %v\n", perr)
-		}
-		if err := a.locked(func(t *tx) error {
-			t.emit("sbatch_failed", "sbatch", 0, intp(1))
-			return nil
-		}); err != nil {
-			return a.internalError(err)
-		}
-		fmt.Fprint(a.env.Stderr, msg)
-		return 1
+	spec, perr := parseSbatch(args)
+	if perr != nil {
+		return a.sbatchFailed(fmt.Sprintf("sbatch: error: %v\n", perr))
+	}
+	if a.cfg.Fail {
+		return a.sbatchFailed(sbatchRejectMsg)
 	}
 
-	var id int
-	if err := a.locked(func(t *tx) error {
-		now := a.env.Now()
-		id = t.st.NextID
-		t.st.NextID++
-		t.st.Jobs = append(t.st.Jobs, a.newJob(id, spec, now))
-		t.dirty = true
-		t.emit("sbatch_submitted", "sbatch", id, intp(0))
-		return nil
-	}); err != nil {
+	id, err := a.register(spec)
+	if err != nil {
 		return a.internalError(err)
 	}
 
@@ -131,6 +123,9 @@ func (a *app) sbatch(args []string) int {
 		a.env.Block()
 		return 0 // only reached when a test's Block hook returns
 	}
+	if code, done := a.loseReply(); done {
+		return code
+	}
 	if spec.parsable {
 		fmt.Fprintf(a.env.Stdout, "%d\n", id)
 	} else {
@@ -139,12 +134,35 @@ func (a *app) sbatch(args []string) int {
 	return 0
 }
 
+// register adds the job to the state and logs sbatch_submitted (note "held"
+// for a job submitted with --hold).
+func (a *app) register(spec sbatchSpec) (int, error) {
+	var id int
+	err := a.locked(func(t *tx) error {
+		now := a.env.Now()
+		id = t.st.NextID
+		t.st.NextID++
+		t.st.Jobs = append(t.st.Jobs, a.newJob(id, spec, now))
+		t.dirty = true
+		note := ""
+		if spec.hold {
+			note = "held"
+		}
+		t.emitNote("sbatch_submitted", "sbatch", id, intp(0), note)
+		return nil
+	})
+	return id, err
+}
+
 func (a *app) newJob(id int, s sbatchSpec, now time.Time) *Job {
 	j := &Job{
 		ID: id, Name: s.name, Comment: s.comment, User: a.cfg.User,
 		Partition: s.partition, Account: s.account, TimeLimit: s.timeLimit,
 		Requeue: s.requeue, Argv: a.argv, Script: s.script,
 		Execs: []*Exec{newExec(now, "None")},
+	}
+	if s.hold {
+		j.hold(HeldUser)
 	}
 	if j.Name == "" {
 		switch {

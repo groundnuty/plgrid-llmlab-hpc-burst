@@ -26,11 +26,12 @@ var commands = map[string]func(*app, []string) int{
 	"squeue":       (*app).squeue,
 	"sacct":        (*app).sacct,
 	"scancel":      (*app).scancel,
+	"scontrol":     (*app).scontrol,
 	"fakeslurmctl": (*app).ctl,
 }
 
 // Main dispatches on the base name of argv[0] (sbatch, squeue, sacct,
-// scancel, fakeslurmctl). Under any other name, such as the multi-call binary
+// scancel, scontrol, fakeslurmctl). Under any other name, such as the multi-call binary
 // itself, the first argument names the command. It returns the exit code.
 func Main(env Env, argv []string) int {
 	env = env.withDefaults()
@@ -61,7 +62,7 @@ func Main(env Env, argv []string) int {
 }
 
 func commandNames() string {
-	return "sbatch|squeue|sacct|scancel|fakeslurmctl"
+	return "sbatch|squeue|sacct|scancel|scontrol|fakeslurmctl"
 }
 
 // run executes fn in a locked transaction and prints its result after the

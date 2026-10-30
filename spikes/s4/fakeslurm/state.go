@@ -19,6 +19,12 @@ const (
 
 const firstJobID = 1001
 
+// Hold reasons, as squeue prints them in state_reason.
+const (
+	HeldUser  = "JobHeldUser"
+	HeldAdmin = "JobHeldAdmin"
+)
+
 // IsTerminal reports whether s is a final state.
 func IsTerminal(s string) bool {
 	switch s {
@@ -58,6 +64,11 @@ type Job struct {
 	Argv       []string `json:"argv"`
 	Script     string   `json:"script,omitempty"`
 	Execs      []*Exec  `json:"execs"`
+	// Held is true while the job waits on a hold; the reason (HeldUser or
+	// HeldAdmin) is the latest execution's Reason.
+	Held bool `json:"held"`
+	// AcctHidden hides every accounting record of the job from sacct.
+	AcctHidden bool `json:"acct_hidden,omitempty"`
 }
 
 // State is the whole fake cluster.
@@ -136,6 +147,9 @@ func (j *Job) markStart(now time.Time) error {
 	if e.StateAt(now) != Pending {
 		return fmt.Errorf("job %d is %s, not PENDING", j.ID, e.StateAt(now))
 	}
+	if j.Held {
+		return fmt.Errorf("job %d is held (%s); a held job never starts, release it first", j.ID, e.Reason)
+	}
 	e.Start = now
 	e.setState(now, Running)
 	return nil
@@ -155,7 +169,8 @@ func (j *Job) markEnd(now time.Time, state string) error {
 }
 
 // markRequeue closes the current execution as REQUEUED and opens a new
-// PENDING one, whatever the job's requeue flag says.
+// PENDING one, whatever the job's requeue flag says. The new execution is not
+// held.
 func (j *Job) markRequeue(now time.Time) {
 	e := j.Cur()
 	if e.End.IsZero() {
@@ -163,5 +178,25 @@ func (j *Job) markRequeue(now time.Time) {
 	}
 	e.setState(now, Requeued)
 	j.RestartCnt++
+	j.Held = false
 	j.Execs = append(j.Execs, newExec(now, "BeginTime"))
+}
+
+// hold puts the job on a hold with the given reason (HeldUser or HeldAdmin).
+func (j *Job) hold(reason string) {
+	j.Held = true
+	j.Cur().Reason = reason
+}
+
+// release clears the hold; the pending reason goes back to "None".
+func (j *Job) release() {
+	j.Held = false
+	j.Cur().Reason = "None"
+}
+
+// forgetRequeues models an accounting purge of the earlier records: only the
+// latest execution stays and the restart count is 0.
+func (j *Job) forgetRequeues() {
+	j.Execs = []*Exec{j.Cur()}
+	j.RestartCnt = 0
 }
