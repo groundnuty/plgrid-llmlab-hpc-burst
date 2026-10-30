@@ -49,9 +49,11 @@ The lost-tail detection test emulates a power failure by restoring an older copy
 
 | Policy | Iterations | Acknowledged | Lost acknowledged | Wrong event at an acknowledged sequence |
 |---|---|---|---|---|
-| `sync_interval: always` | 30 | 5,183 | **0** | 0 |
-| default (about 2 minutes) | 30 | 52,955 | **0** | 0 |
-| control: `persist_mode: async` | 30 | 50,261 | **1,249** (30 of 30 iterations lose some, up to 137) | 0 |
+| `sync_interval: always` | 30 | 4,921 | **0** | 0 |
+| default (about 2 minutes) | 30 | 53,675 | **0** | 0 |
+| control: `persist_mode: async` | 30 | 61,100 | **1,091** (28 of 30 iterations lose some, up to 131) | 0 |
+
+These are the final run, on the committed code. An earlier full run gave 5,183 and 52,955 acknowledged with 0 lost, and 1,249 lost of 50,261 in 30 of 30 iterations for the control.
 
 In the control, the restarted server also handed out sequences that had been acknowledged to the publisher before. Without the control, the zero for the default policy would say nothing about the harness.
 
@@ -64,9 +66,9 @@ In the control, the restarted server also handed out sequences that had been ack
 | Scenario | Limit reached | Result |
 |---|---|---|
 | Slow durable subscriber (5 per fetch), `MaxMsgs` 50, 600 published | 600 published, stream holds 50, first sequence 551 | 80 handled, 520 sequences in 6 markers; every acknowledged sequence covered once |
-| Slow stored-cursor subscriber (5 held ahead), same run | same | 82 handled, 518 sequences in 10 markers; every acknowledged sequence covered once |
+| Slow stored-cursor subscriber (5 held ahead), same run | same | 79 handled, 521 sequences in 9 markers; every acknowledged sequence covered once |
 | Slow stored-cursor subscriber with the default client buffer (500 ahead), same run | same | 550 handled, 50 sequences in 1 marker; coverage exact. The subscriber had already pulled most of the stream into memory, so retention reached it late (Finding 9) |
-| Control: plain consumer, same run | same | 8 to 9 silent jumps in sequence, 90 of 600 delivered, no marker |
+| Control: plain consumer, same run | same | 7 to 9 silent jumps in sequence, 85 to 95 of 600 delivered, no marker |
 | Subscriber stopped after 10, `MaxMsgs` 50, 310 published (durable and cursor) | first sequence 261 | one marker for 11 to 260 (250 sequences), then the 50 retained |
 | Subscriber stopped, `MaxAge` 1 s, all expired (durable and cursor) | stream empty | marker for the 40 expired sequences before any new event; the next event follows it contiguously |
 | No eviction, slow subscriber (durable and cursor) | n/a | no marker |
@@ -81,7 +83,7 @@ In the control, the restarted server also handed out sequences that had been ack
 
 ### 4. Resume from a cursor
 
-- **Durable consumer:** subscriber restarted twice, then the server SIGKILLed and restarted: all 200 acknowledged events delivered. If the SIGKILL comes within about 100 ms of the last handled event, the server's consumer state is older (it writes consumer state at most every 100 ms, `flushLoop` in nats-server `filestore.go`), so tens of events were delivered a second time (42 in the recorded run; replay, no loss). After a pause of 600 ms: 0 repeats.
+- **Durable consumer:** subscriber restarted twice, then the server SIGKILLed and restarted: all 200 acknowledged events delivered. If the SIGKILL comes within about 100 ms of the last handled event, the server's consumer state is older (it writes consumer state at most every 100 ms, `flushLoop` in nats-server `filestore.go`), so tens of events were delivered a second time (42 and 80 in two runs; replay, no loss). After a pause of 600 ms: 0 repeats.
 - **Stored cursor:** the same sequence of restarts: all 200 delivered, 0 repeats (the cursor file is saved after each handled event, with fsync).
 - **Lost acknowledged tail** (power failure emulated by restoring an older store copy): cursor at 50, stream ends at 30 gives `ErrHistoryRewritten`; the stream refilled with different events up to 70 gives `ErrHistoryRewritten` too (sequence 50 holds another event id). A server-side consumer cannot see this: its state is restored together with the stream.
 
@@ -102,7 +104,7 @@ Median of 3 interleaved runs per cell (individual runs in brackets), publish to 
 
 ## Findings
 
-1. **Default policy, SIGKILL:** no acknowledged loss in 52,955 acknowledged messages. See Results 1.
+1. **Default policy, SIGKILL:** no acknowledged loss in 106,630 acknowledged messages over two full runs (60 SIGKILLs). See Results 1.
 2. **JetStream gives no gap signal.** After eviction the consumer silently continues at the oldest retained message. The marker has to be derived from the sequence jump (and from the stream's first sequence when idle). It works for `MaxMsgs` and `MaxAge`; a consumer filtered to some subjects would also see jumps for other subjects' messages (by construction, not tested), so the subscriber uses the whole subject space.
 3. **A delivered but unacknowledged message that is then evicted vanishes from the consumer's ack state** (nats-server 2.15.2): the ack floor jumps past it, pending goes to zero, nothing is redelivered (`TestFinding_...`). A durable subscriber that restarts afterwards cannot mark that range; the stored-cursor subscriber can (its own cursor is the truth). The test pins this behaviour, so a change in a later release shows up.
 4. **A durable consumer's ack state lags by up to about 100 ms,** so a server SIGKILL can replay recently handled events. At-least-once is kept; handlers must de-duplicate by event id.
