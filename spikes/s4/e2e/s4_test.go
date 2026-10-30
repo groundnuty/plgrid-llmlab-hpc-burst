@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s4/apis/v1alpha1"
 )
 
@@ -90,10 +92,20 @@ func TestS4TwoReconcilersCrossplaneDefault(t *testing.T) {
 // guard. The second reconciler observes during the first's sbatch, finds
 // nothing, wins its own create-pending update and submits again.
 func TestS4ControlNoGuardDuplicates(t *testing.T) {
-	f, _, _ := twoReconcilers(t, []string{"--guard-inflight=false"})
+	f, _, ns := twoReconcilers(t, []string{"--guard-inflight=false"})
 	eventually(t, 20*time.Second, func() (bool, string) {
 		n := len(f.sbatch(t, "sbatch_submitted", ""))
 		return n >= 2, fmt.Sprintf("%d submissions", n)
+	})
+	// The duplicate is found by tag and reported; the older job is kept.
+	subs := f.sbatch(t, "sbatch_submitted", "")
+	older, newer := subs[0].JobID, subs[1].JobID
+	if older > newer {
+		older, newer = newer, older
+	}
+	waitAlloc(t, client.ObjectKey{Namespace: ns, Name: "a1"}, 10*time.Second, "duplicate reported", func(a *v1alpha1.Allocation) bool {
+		o := a.Status.AtProvider
+		return o.JobID == older && len(o.Duplicates) == 1 && o.Duplicates[0] == newer
 	})
 	callers := map[string]bool{}
 	for _, e := range f.sbatch(t, "sbatch_start", "") {

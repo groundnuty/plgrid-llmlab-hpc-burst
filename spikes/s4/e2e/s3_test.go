@@ -22,10 +22,12 @@ func TestS3RequeueReportedFailed(t *testing.T) {
 			f := newFakeSlurm(t, "FAKE_SLURM_DATA_PARSER="+parser)
 			startProvider(t, ns, f, provCfg{name: "r1"})
 			key := createAllocation(t, ns, "a1")
-			a := waitAlloc(t, key, 20*time.Second, "submitted", func(a *v1alpha1.Allocation) bool { return a.Status.AtProvider.JobID != 0 })
-			tag, id := externalName(a), a.Status.AtProvider.JobID
+			eventually(t, 20*time.Second, func() (bool, string) { return len(f.sbatch(t, "sbatch_submitted", "")) == 1, "no submission" })
+			id := f.sbatch(t, "sbatch_submitted", "")[0].JobID
+			a := waitAlloc(t, key, 10*time.Second, "job observed", func(a *v1alpha1.Allocation) bool { return a.Status.AtProvider.JobID == id })
+			tag := externalName(a)
 
-			starts := f.sbatch(t, "sbatch_start", tag)
+			starts := f.sbatch(t, "sbatch_start", "")
 			if len(starts) != 1 || !slices.Contains(starts[0].Argv, "--no-requeue") {
 				t.Fatalf("want one sbatch with --no-requeue, got %d calls, argv %v", len(starts), starts)
 			}
@@ -47,7 +49,7 @@ func TestS3RequeueReportedFailed(t *testing.T) {
 			if o := a.Status.AtProvider; o.Phase != v1alpha1.PhaseFailed || !o.Requeued || o.Source != "sacct" || o.JobID != id {
 				t.Errorf("after purge: got phase %q requeued %v source %q job %d; want Failed, true, sacct, %d", o.Phase, o.Requeued, o.Source, o.JobID, id)
 			}
-			assertSubmissions(t, f, tag, 1)
+			assertSubmissions(t, f, "", 1)
 
 			// Deleting the Allocation of an ended job releases its finalizer
 			// without scancel.
@@ -71,7 +73,6 @@ func TestDeletePendingCancels(t *testing.T) {
 	startProvider(t, ns, f, provCfg{name: "r1"})
 	key := createAllocation(t, ns, "a1")
 	a := waitAlloc(t, key, 20*time.Second, "submitted", func(a *v1alpha1.Allocation) bool { return a.Status.AtProvider.JobID != 0 })
-	tag := externalName(a)
 	if err := h.k8s.Delete(context.Background(), a); err != nil {
 		t.Fatal(err)
 	}
@@ -79,5 +80,5 @@ func TestDeletePendingCancels(t *testing.T) {
 	if n := f.calls(t, "scancel", "", time.Time{}); n != 1 {
 		t.Errorf("scancel calls: %d, want 1", n)
 	}
-	assertSubmissions(t, f, tag, 1)
+	assertSubmissions(t, f, "", 1)
 }

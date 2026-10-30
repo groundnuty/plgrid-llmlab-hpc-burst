@@ -17,8 +17,10 @@ import (
 func runToPurge(t *testing.T, ns string, f *fakeSlurm) (client.ObjectKey, string, int64, time.Time) {
 	t.Helper()
 	key := createAllocation(t, ns, "a1")
-	a := waitAlloc(t, key, 20*time.Second, "job submitted", func(a *v1alpha1.Allocation) bool { return a.Status.AtProvider.JobID != 0 })
-	tag, id := externalName(a), a.Status.AtProvider.JobID
+	eventually(t, 20*time.Second, func() (bool, string) { return len(f.sbatch(t, "sbatch_submitted", "")) == 1, "no submission" })
+	id := f.sbatch(t, "sbatch_submitted", "")[0].JobID // expected job ID from the fake, not the provider
+	a := waitAlloc(t, key, 10*time.Second, "job observed", func(a *v1alpha1.Allocation) bool { return a.Status.AtProvider.JobID == id })
+	tag := externalName(a)
 	f.ctl(t, "start", fmt.Sprint(id))
 	waitAlloc(t, key, 10*time.Second, "running", func(a *v1alpha1.Allocation) bool { return a.Status.AtProvider.Phase == v1alpha1.PhaseRunning })
 	f.ctl(t, "end", fmt.Sprint(id), "COMPLETED")
@@ -50,12 +52,7 @@ func TestS1EndedJobNotResubmitted(t *testing.T) {
 
 	time.Sleep(8 * time.Second) // eight poll intervals past the purge
 	a := getAlloc(t, key)
-	if n := len(f.sbatch(t, "sbatch_start", tag)); n != 1 {
-		t.Errorf("sbatch calls for %s: got %d, want 1", tag, n)
-	}
-	if n := len(f.sbatch(t, "sbatch_submitted", tag)); n != 1 {
-		t.Errorf("jobs submitted for %s: got %d, want 1", tag, n)
-	}
+	assertSubmissions(t, f, "", 1)
 	if got := a.Status.AtProvider; got.JobID != id || got.Phase != v1alpha1.PhaseSucceeded || got.Source != "sacct" {
 		t.Errorf("status after purge: got job %d phase %q source %q, want job %d phase Succeeded source sacct", got.JobID, got.Phase, got.Source, id)
 	}
@@ -65,7 +62,7 @@ func TestS1EndedJobNotResubmitted(t *testing.T) {
 	if sq < 3 || sa < 3 {
 		t.Errorf("observe calls after purge: squeue %d, sacct %d, want >= 3 each", sq, sa)
 	}
-	t.Logf("after purge: %d squeue and %d sacct calls, %d sbatch", sq, sa, len(f.sbatch(t, "sbatch_start", tag)))
+	t.Logf("after purge: %d squeue and %d sacct calls, %d sbatch (tag %s)", sq, sa, len(f.sbatch(t, "sbatch_start", "")), tag)
 }
 
 // Control for scenario 1: an Observe that reads only squeue resubmits the
@@ -75,10 +72,24 @@ func TestS1ControlSqueueOnlyResubmits(t *testing.T) {
 	ns := newNamespace(t)
 	f := newFakeSlurm(t)
 	startProvider(t, ns, f, provCfg{name: "r1", args: []string{"--observe=squeue-only", "--guard-succeeded=false", "--guard-inflight=false"}})
-	_, tag, _, _ := runToPurge(t, ns, f)
+	runToPurge(t, ns, f)
 	eventually(t, 15*time.Second, func() (bool, string) {
-		n := len(f.sbatch(t, "sbatch_submitted", tag))
+		n := len(f.sbatch(t, "sbatch_submitted", ""))
 		return n >= 2, fmt.Sprintf("%d submissions", n)
 	})
-	t.Logf("squeue-only Observe resubmitted: %d submissions for %s", len(f.sbatch(t, "sbatch_submitted", tag)), tag)
+	t.Logf("squeue-only Observe without guards resubmitted: %d submissions", len(f.sbatch(t, "sbatch_submitted", "")))
+}
+
+// One-rule control for scenario 1: squeue-only Observe, guards on. The
+// succeeded guard alone prevents the resubmission, but the Allocation
+// reports Lost instead of the job's real end state: sacct is what tells.
+func TestS1SqueueOnlyWithGuardsReportsLost(t *testing.T) {
+	ns := newNamespace(t)
+	f := newFakeSlurm(t)
+	startProvider(t, ns, f, provCfg{name: "r1", args: []string{"--observe=squeue-only"}})
+	key, _, id, _ := runToPurge(t, ns, f)
+	a := waitAlloc(t, key, 10*time.Second, "reported Lost", func(a *v1alpha1.Allocation) bool { return a.Status.AtProvider.Phase == v1alpha1.PhaseLost })
+	time.Sleep(5 * time.Second)
+	assertSubmissions(t, f, "", 1)
+	t.Logf("job %d (COMPLETED in the fake) reported as %s; one submission", id, a.Status.AtProvider.Phase)
 }

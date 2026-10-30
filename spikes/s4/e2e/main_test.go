@@ -101,19 +101,17 @@ func runMain(m *testing.M) int {
 	return m.Run()
 }
 
-func assetsDir() string {
-	if d := os.Getenv("KUBEBUILDER_ASSETS"); d != "" {
-		return d
-	}
-	return "/tmp/hpc-burst-tools/spikes/s4/envtest-bin/k8s/1.35.0-linux-amd64"
-}
+func assetsDir() string { return os.Getenv("KUBEBUILDER_ASSETS") }
 
 // setup builds the provider and the fake Slurm into a fresh work directory
-// outside /home.
+// under S4_WORK_ROOT (default: the system temp directory).
 func setup() (*harness, error) {
+	if assetsDir() == "" {
+		return nil, fmt.Errorf("KUBEBUILDER_ASSETS is unset; run: export KUBEBUILDER_ASSETS=$(setup-envtest use 1.35.0 -p path)")
+	}
 	root := os.Getenv("S4_WORK_ROOT")
 	if root == "" {
-		root = "/tmp/hpc-burst-tools/spikes/s4/work"
+		root = filepath.Join(os.TempDir(), "s4-e2e")
 	}
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, err

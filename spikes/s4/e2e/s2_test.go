@@ -28,6 +28,11 @@ func killAfterSbatch(t *testing.T, ns string, f *fakeSlurm, args []string) (clie
 	key := createAllocation(t, ns, "a1")
 	m := waitMarker(t, mpath, 20*time.Second)
 	r1.kill(t)
+	// The expected job ID comes from the fake's log, not from the provider.
+	subs := f.sbatch(t, "sbatch_submitted", "")
+	if len(subs) != 1 || subs[0].JobID != m.JobID {
+		t.Fatalf("precondition: want one submission matching the marker's job %d, got %+v", m.JobID, subs)
+	}
 	assertKilledBeforePersist(t, key, m.JobID)
 	return key, m
 }
@@ -61,13 +66,12 @@ func TestS2KillAfterSbatchReturned(t *testing.T) {
 	ns := newNamespace(t)
 	f := newFakeSlurm(t)
 	key, m := killAfterSbatch(t, ns, f, nil)
-	tag := externalName(getAlloc(t, key))
 	startProvider(t, ns, f, provCfg{name: "r2"})
 	a := waitAlloc(t, key, 15*time.Second, "job found after restart", func(a *v1alpha1.Allocation) bool {
 		return a.Status.AtProvider.JobID == m.JobID
 	})
 	time.Sleep(5 * time.Second)
-	assertSubmissions(t, f, tag, 1)
+	assertSubmissions(t, f, "", 1)
 	a = getAlloc(t, key)
 	if !hasAnno(a, meta.AnnotationKeyExternalCreateSucceeded) {
 		t.Errorf("create-succeeded not recorded after recovery: %v", a.GetAnnotations())
@@ -91,7 +95,7 @@ func TestS2KillAfterSbatchJobEndsWhileDown(t *testing.T) {
 		return o.JobID == m.JobID && o.Phase == v1alpha1.PhaseSucceeded && o.Source == "sacct"
 	})
 	time.Sleep(5 * time.Second)
-	assertSubmissions(t, f, tag, 1)
+	assertSubmissions(t, f, "", 1)
 }
 
 // Scenario 2 (design), lost reply: sbatch registered the job but the
@@ -104,15 +108,17 @@ func TestS2KillWhileSbatchBlocked(t *testing.T) {
 	key := createAllocation(t, ns, "a1")
 	m := waitMarker(t, bpath, 20*time.Second)
 	r1.kill(t)
+	if subs := f.sbatch(t, "sbatch_submitted", ""); len(subs) != 1 || subs[0].JobID != m.JobID {
+		t.Fatalf("precondition: want one submission matching the blocked sbatch's job %d, got %+v", m.JobID, subs)
+	}
 	if err := syscall.Kill(m.PID, 0); !errors.Is(err, syscall.ESRCH) {
 		t.Fatalf("precondition: blocked sbatch pid %d still alive (%v); the reply was not lost", m.PID, err)
 	}
 	assertKilledBeforePersist(t, key, m.JobID)
-	tag := externalName(getAlloc(t, key))
 	startProvider(t, ns, f, provCfg{name: "r2"})
 	waitAlloc(t, key, 15*time.Second, "job found after restart", func(a *v1alpha1.Allocation) bool { return a.Status.AtProvider.JobID == m.JobID })
 	time.Sleep(5 * time.Second)
-	assertSubmissions(t, f, tag, 1)
+	assertSubmissions(t, f, "", 1)
 }
 
 // Scenario 2 (design), killed after create-pending was written but before
@@ -127,22 +133,21 @@ func TestS2KillBeforeSbatch(t *testing.T) {
 	waitMarker(t, mpath, 20*time.Second)
 	r1.kill(t)
 	a := getAlloc(t, key)
-	tag := externalName(a)
 	pending := meta.GetExternalCreatePending(a)
-	if pending.IsZero() || len(f.sbatch(t, "sbatch_start", tag)) != 0 {
+	if pending.IsZero() || len(f.sbatch(t, "sbatch_start", "")) != 0 {
 		t.Fatalf("precondition: want create-pending set and no sbatch; pending %v", pending)
 	}
 	startProvider(t, ns, f, provCfg{name: "r2"})
 	eventually(t, inflightWindow+15*time.Second, func() (bool, string) {
-		return len(f.sbatch(t, "sbatch_submitted", tag)) == 1, "no submission yet"
+		return len(f.sbatch(t, "sbatch_submitted", "")) == 1, "no submission yet"
 	})
-	first := f.sbatch(t, "sbatch_start", tag)[0].TS
+	first := f.sbatch(t, "sbatch_start", "")[0].TS
 	if wait := first.Sub(pending); wait < inflightWindow-time.Second {
 		t.Errorf("submitted %s after create-pending; the in-flight guard should hold for %s", wait, inflightWindow)
 	}
 	waitAlloc(t, key, 10*time.Second, "job observed", func(a *v1alpha1.Allocation) bool { return a.Status.AtProvider.JobID != 0 })
 	time.Sleep(5 * time.Second)
-	assertSubmissions(t, f, tag, 1)
+	assertSubmissions(t, f, "", 1)
 	t.Logf("submitted %s after the dead reconciler's create-pending", first.Sub(pending).Round(time.Millisecond))
 }
 
