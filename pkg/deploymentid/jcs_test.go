@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"strings"
 	"testing"
 	"testing/quick"
+	"unicode"
 )
 
 func mustJCS(t *testing.T, v jvalue) []byte {
@@ -153,6 +155,45 @@ func TestJCSStringRoundTrip(t *testing.T) {
 	for _, s := range []string{"", "\x00\x1f\x7f", "\xe2\x80\xa8<>&/\\\"", "\xf0\x9f\x98\x80\xef\xac\xb3"} {
 		if !check(s) {
 			t.Errorf("round trip failed for %q", s)
+		}
+	}
+}
+
+// HBEP-3 states the string rules of the scheme: non-ASCII characters are
+// written as literal UTF-8, and only the quote, the backslash and U+0000 to
+// U+001F are escapes (RFC 8785 section 3.2.2.2: \b \t \n \f \r, else \u00xx in
+// lower case). The test checks that the HBEP still says so, then checks every
+// Unicode scalar value against that sentence, not against the serialiser.
+func TestJCSStringRulesOfHBEP3(t *testing.T) {
+	text := readHBEP3(t)
+	for _, phrase := range []string{
+		"Non-ASCII characters are written as literal UTF-8",
+		"only `\"`, `\\` and U+0000–U+001F are escapes",
+	} {
+		if !strings.Contains(text, phrase) {
+			t.Fatalf("HBEP-3 no longer says %q; re-check the serialiser against its text", phrase)
+		}
+	}
+	short := map[rune]string{'\b': `\b`, '\t': `\t`, '\n': `\n`, '\f': `\f`, '\r': `\r`}
+	for r := rune(0); r <= unicode.MaxRune; r++ {
+		if r >= 0xD800 && r <= 0xDFFF {
+			continue // not a scalar value; a Go string cannot hold one
+		}
+		var want string
+		switch s, isShort := short[r]; {
+		case r == '"':
+			want = `\"`
+		case r == '\\':
+			want = `\\`
+		case isShort:
+			want = s
+		case r < 0x20:
+			want = fmt.Sprintf(`\u%04x`, r)
+		default:
+			want = string(r) // literal UTF-8: DEL, '/', U+2028 and every non-ASCII character
+		}
+		if got := mustJCS(t, jstring(string(r))); string(got) != `"`+want+`"` {
+			t.Fatalf("U+%04X: got %q, want %q", r, got, `"`+want+`"`)
 		}
 	}
 }

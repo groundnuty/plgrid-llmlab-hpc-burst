@@ -8,11 +8,14 @@
 //     Accelerator class and the checkpoint's per-file hash list.
 //   - ComputeManaged builds the object of a managed catalog entry.
 //   - ResolveChatTemplate and ChatTemplateSHA256 give the spec's
-//     chat_template_sha256.
+//     chat_template_sha256. The template is the first of the spec's own,
+//     chat_template.jinja, the legacy chat_template.json and the
+//     tokenizer_config.json one; with none, the hash is that of zero bytes.
 //   - The flags and environment variables that are inputs are decided by a
 //     per-engine classification table held as data (table.go). A name the table
-//     does not list is an input; a key, a short option, or a setting the
-//     framework passes itself is refused with an error.
+//     does not list is an input; a credential, a short option, a setting the
+//     framework passes itself, "config" and (in alpha) "lora-modules" are
+//     refused with an error.
 //
 // # What a caller must do first
 //
@@ -43,8 +46,12 @@
 //     are ASCII, so every key of the object is ASCII and JCS key order is
 //     bytewise order;
 //   - flag spellings that vLLM resolves to another flag (flagname.go): a
-//     dotted sub-key, a prefix of a refused flag, "no-" and a listed boolean,
-//     and the short options such as tp, pp and dp.
+//     dotted sub-key, any proper prefix of a name in the table, "no-" and a
+//     listed name, and the short options such as tp, pp and dp;
+//   - values that name a checkpoint the ID does not pin (references.go, alpha):
+//     a tokenizer other than the checkpoint's without a tokenizer-revision
+//     that is a full commit id, and a speculative-config that names a draft
+//     model.
 //
 // # Versioning
 //

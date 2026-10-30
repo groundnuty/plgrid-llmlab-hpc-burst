@@ -172,3 +172,89 @@ func TestLaterSourcesAreNotReadWhenAnEarlierOneExists(t *testing.T) {
 		}
 	}
 }
+
+// HBEP-3's lookup chain: the serving spec, chat_template.jinja, the legacy
+// chat_template.json, the chat_template of tokenizer_config.json, then empty
+// content. Each source beats every later one.
+func TestChatTemplateChainPrecedence(t *testing.T) {
+	jsonFile := []byte(`{"chat_template": "from chat_template.json"}`)
+	cfg := []byte(`{"chat_template": "from tokenizer_config"}`)
+	cases := []struct {
+		name string
+		src  TemplateSources
+		want string
+	}{
+		{"spec beats all", TemplateSources{Spec: strp("spec"), Jinja: strp("jinja"), ChatTemplateJSON: jsonFile, TokenizerConfig: cfg}, "spec"},
+		{"jinja beats the json file and the config", TemplateSources{Jinja: strp("jinja"), ChatTemplateJSON: jsonFile, TokenizerConfig: cfg}, "jinja"},
+		{"an empty jinja is still jinja", TemplateSources{Jinja: strp(""), ChatTemplateJSON: jsonFile, TokenizerConfig: cfg}, ""},
+		{"the json file beats the config", TemplateSources{ChatTemplateJSON: jsonFile, TokenizerConfig: cfg}, "from chat_template.json"},
+		{"the json file alone", TemplateSources{ChatTemplateJSON: jsonFile}, "from chat_template.json"},
+		{"an empty template in the json file is still the file's", TemplateSources{ChatTemplateJSON: []byte(`{"chat_template": ""}`), TokenizerConfig: cfg}, ""},
+		{"the config when there is no json file", TemplateSources{TokenizerConfig: cfg}, "from tokenizer_config"},
+		{"the json file in list form takes default", TemplateSources{ChatTemplateJSON: []byte(`{"chat_template": [{"name": "rag", "template": "r"}, {"name": "default", "template": "d"}]}`), TokenizerConfig: cfg}, "d"},
+		{"the json file with a surrogate pair", TemplateSources{ChatTemplateJSON: []byte(`{"chat_template": "\ud83d\ude00"}`)}, "\U0001F600"},
+		{"empty content when the chain gives nothing", TemplateSources{}, ""},
+	}
+	for _, c := range cases {
+		if got, err := ResolveChatTemplate(c.src); err != nil || got != c.want {
+			t.Errorf("%s: got %q, %v; want %q", c.name, got, err, c.want)
+		}
+	}
+}
+
+// An empty chain is no error, and its hash is the SHA-256 of zero bytes
+// (HBEP-3): a caller must not fail only because no source gave a template.
+func TestEmptyChainIsNotAnErrorAndHashesZeroBytes(t *testing.T) {
+	text, err := ResolveChatTemplate(TemplateSources{})
+	if err != nil || text != "" {
+		t.Fatalf("got %q, %v; want empty and no error", text, err)
+	}
+	h, err := ChatTemplateSHA256(text)
+	if err != nil || h != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" {
+		t.Errorf("got %s, %v; want the SHA-256 of zero bytes (coreutils: printf '' | sha256sum)", h, err)
+	}
+	// And a tokenizer_config.json that holds no template at all is the same.
+	if text, err := ResolveChatTemplate(TemplateSources{TokenizerConfig: []byte(`{"model_max_length": 8}`)}); err != nil || text != "" {
+		t.Errorf("a config without chat_template: got %q, %v", text, err)
+	}
+}
+
+// chat_template.json exists to hold the template, and transformers reads
+// json["chat_template"] without a default, so a file without it is an error,
+// as the same faults are in tokenizer_config.json, and the message names the file.
+func TestChatTemplateJSONErrors(t *testing.T) {
+	bad := map[string][]byte{
+		"not JSON":                  []byte(`not json`),
+		"top-level null":            []byte(`null`),
+		"an array":                  []byte(`[]`),
+		"no chat_template member":   []byte(`{}`),
+		"another member only":       []byte(`{"template": "x"}`),
+		"a null chat_template":      []byte(`{"chat_template": null}`),
+		"chat_template in a case":   []byte(`{"Chat_Template": "x"}`),
+		"a number":                  []byte(`{"chat_template": 3}`),
+		"not UTF-8":                 []byte("{\"chat_template\": \"\xff\"}"),
+		"a lone high surrogate":     []byte(`{"chat_template": "\ud800"}`),
+		"a lone low surrogate":      []byte(`{"chat_template": "x\udc00"}`),
+		"list without default":      []byte(`{"chat_template": [{"name": "rag", "template": "r"}]}`),
+		"list with two defaults":    []byte(`{"chat_template": [{"name": "default", "template": "a"}, {"name": "default", "template": "b"}]}`),
+		"list entry without a name": []byte(`{"chat_template": [{"template": "a"}]}`),
+	}
+	for name, data := range bad {
+		got, err := ResolveChatTemplate(TemplateSources{ChatTemplateJSON: data, TokenizerConfig: []byte(`{"chat_template": "fallback"}`)})
+		if !errors.Is(err, ErrInvalid) || got != "" {
+			t.Errorf("%s: got %q, %v; want ErrInvalid (and no fall-through to tokenizer_config.json)", name, got, err)
+			continue
+		}
+		if !strings.Contains(err.Error(), "chat_template.json") {
+			t.Errorf("%s: the error does not name the file: %v", name, err)
+		}
+	}
+	// A later source is not read when an earlier one exists.
+	if got, err := ResolveChatTemplate(TemplateSources{Jinja: strp("j"), ChatTemplateJSON: []byte(`not json`)}); err != nil || got != "j" {
+		t.Errorf("got %q, %v; want the jinja file, the json file never read", got, err)
+	}
+	// And the errors of tokenizer_config.json still name that file.
+	if _, err := ResolveChatTemplate(TemplateSources{TokenizerConfig: []byte(`{"chat_template": "\ud800"}`)}); err == nil || !strings.Contains(err.Error(), "tokenizer_config.json") {
+		t.Errorf("got %v, want an error naming tokenizer_config.json", err)
+	}
+}

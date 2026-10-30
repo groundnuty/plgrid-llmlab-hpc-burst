@@ -10,10 +10,11 @@ Each directory under `vectors/` is one vector. The expected values come from out
 | `sha256.txt` | their SHA-256, in `sha256sum -c` format | `sha256sum canonical.json` |
 | `tokenizer_config.json` (vector 06) | a checkpoint file the template is taken from | written by hand |
 
-`canonical.json` is the authoritative fixture and nothing in this repository writes it. HBEP-3 asks for canonical bytes written by hand and hashed with `sha256sum`:
-- vector 01 is the byte string HBEP-3 prints, written by hand; a Go test extracts it from HBEP-3's text and compares;
-- vector 05 was rewritten by hand for ASCII keys (its `env` and `flags` members; the rest is unchanged);
-- vectors 02, 03, 04, 06 and 07 were first emitted by the `rfc8785` package from their hand-written `expected-object.json` (commit 6e73334), and are frozen as they were committed. Their provenance is therefore the library's, and what vouches for them is that two independent JCS implementations, `sha256sum`, and the Go package each reproduce them.
+`canonical.json` is the authoritative fixture and nothing in this repository writes it. HBEP-3 (Test plan) asks for objects written by hand, canonical bytes from an independent RFC 8785 implementation checked in as the authoritative file, the same bytes from a second independent implementation, and `sha256sum` for the hash:
+- vectors 02, 03, 04, 06 and 07 were first emitted by the `rfc8785` package from their hand-written `expected-object.json` (commit 6e73334) and are frozen as committed;
+- vector 01 is the byte string HBEP-3 prints, written by hand, and a Go test extracts it from HBEP-3's text and compares;
+- vector 05 was rewritten for ASCII keys by editing its `env` and `flags` members of `canonical.json` by hand; `rfc8785` and `canonicalize` confirm the bytes;
+- vector 04's repeated flag was changed from `lora-modules`, which HBEP-3 now refuses, to `middleware`, the same way.
 
 The two scripts below are verifiers. They read the committed files and exit non-zero on a mismatch; neither writes anything. A change to a vector is made by editing `canonical.json` and `sha256.txt` and running them.
 
@@ -51,6 +52,7 @@ Python sees neither the flag table nor `input.json`, so a classification or mapp
    - no chat template, so the hash of the empty string.
 5. `05-unicode-order`: non-ASCII text in the values and paths, and ASCII keys. HBEP-3 makes every key ASCII, so a key can no longer tell UTF-16 order from bytewise order; `jcs_test.go` does that for the serialiser, with the RFC 8785 section 3.2.3 sample.
    - Flag keys `1st-flag`, `a-b`, `a0`, `ab`, `dtype`, `x` and variable keys `A1`, `AB`, `ASCII_ENV`, `_LEAD`: ASCII order that a case-folding or punctuation-skipping sort would not give (`a-b` before `a0` before `ab`; `_LEAD` after `ASCII_ENV`, since `_` is 0x5F).
+   - This is HBEP-3's vector for a value with non-ASCII characters: they are literal UTF-8 in `canonical.json`, never a `\u` escape, and `TestVector05Orders` checks that.
    - Values with every escape class: quote, backslash, `/`, `<>&`, U+2028, DEL, U+0001, `\b`, `\t`, `\n`, `\f`, `\r`, and non-ASCII text, a supplementary-plane character among it.
    - File paths with U+FB33 and U+1F600, a space, quote, backslash, newline, tab and U+2028. The `files` array is sorted bytewise by path, as HBEP-3 says, so U+FB33 comes before U+1F600; sorted by UTF-16 code units it would be the reverse. `TestVector05Orders` checks that the vector tells the two apart.
 6. `06-template-from-tokenizer-config`: the chat template comes from the `default` entry of a list-form `chat_template` in `tokenizer_config.json`, and contains a newline and a non-ASCII character. The hash is the SHA-256 of that text.
