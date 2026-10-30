@@ -368,7 +368,7 @@ func TestSpellingsKeepTheOrderOfValues(t *testing.T) {
 // character set, then the known-name rules. The character set is checked on
 // the normalised name, so an underscore never fails it by itself, and
 // whatever the normalisation leaves outside it still does.
-func TestUnderscoresAreNormalisedBeforeTheCharacterSet(t *testing.T) {
+func TestUnderscoresNormaliseBeforeTheCharacterSet(t *testing.T) {
 	for name, wantOK := range map[string]bool{
 		"some_new_flag": true, "a_b": true, "_x": false, "x_": true, "__": false, "a__b": true,
 		"A_b": false, "a_B": false, "a_\u00e9": false, "a_b.c": false, "a_ b": false,
