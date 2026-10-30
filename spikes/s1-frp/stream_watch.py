@@ -162,13 +162,56 @@ def read_head(rd):
         raise Fail("no_response", "%s: %s" % (exc.__class__.__name__, exc))
 
 
-def read_fixed_body(rd, headers):
-    n = int(headers.get("content-length", "0") or 0)
-    return rd.read(n) if n else b""
+def read_crlf_line(rd, what):
+    """One line that must end in a newline. EOF before the newline is a truncated reply."""
+    line = rd.readline(1024)
+    if not line.endswith(b"\n"):
+        raise Fail("no_response", "EOF in %s" % what)
+    return line
 
 
-def http_get_health(target, deadline, path, host_header, sock_rd=None):
-    """One GET on a fresh connection (or on sock_rd). Returns (total_s, request_s, sock, rd)."""
+def read_trailers(rd):
+    """After the zero chunk: trailer lines up to the blank line. EOF before the blank line is a cut."""
+    while True:
+        line = read_crlf_line(rd, "the trailer after the final chunk")
+        if line in (b"\r\n", b"\n"):
+            return
+
+
+def read_body(rd, headers):
+    """A complete HTTP/1.1 response body, Content-Length or chunked. Any premature EOF, short body
+    or framing error raises Fail('no_response' for a cut, 'http_error' for a malformed reply)."""
+    if "chunked" in headers.get("transfer-encoding", "").lower():
+        parts = []
+        while True:
+            size_line = read_crlf_line(rd, "a chunk size line")
+            try:
+                size = int(size_line.split(b";")[0].strip(), 16)
+            except ValueError:
+                raise Fail("http_error", "bad chunk size %r" % size_line[:20])
+            if size == 0:
+                read_trailers(rd)
+                return b"".join(parts)
+            data = rd.read(size)
+            if len(data) != size:
+                raise Fail("no_response", "EOF after %d of %d bytes of a chunk" % (len(data), size))
+            if rd.read(2) != b"\r\n":
+                raise Fail("no_response", "chunk not followed by CRLF (EOF or bad framing)")
+            parts.append(data)
+    length = headers.get("content-length")
+    if length is None or not length.isdigit():
+        raise Fail("http_error", "reply has neither a valid Content-Length nor chunked framing")
+    n = int(length)
+    body = rd.read(n) if n else b""
+    if len(body) != n:
+        raise Fail("no_response", "EOF after %d of %d body bytes" % (len(body), n))
+    return body
+
+
+def http_get_health(target, deadline, path, host_header, sock_rd=None, expect=None):
+    """One GET on a fresh connection (or on sock_rd). The reply must be complete: status 200, the whole
+    body as framed, and, when expect (bytes) is given, exactly that body. Returns (total_s, request_s,
+    sock, rd). Raises Fail."""
     t0 = time.monotonic()
     if sock_rd is None:
         sock, rd = target.open(deadline)
@@ -179,8 +222,12 @@ def http_get_health(target, deadline, path, host_header, sock_rd=None):
         sock.settimeout(remaining(deadline))
         send_get(sock, host_header, path)
         status, headers = read_head(rd)
+        if status != 200:
+            raise Fail("http_error", "status %s" % status)
         sock.settimeout(remaining(deadline))
-        body = read_fixed_body(rd, headers)
+        body = read_body(rd, headers)
+        if expect is not None and body != expect:
+            raise Fail("http_error", "unexpected body %r" % body[:60])
     except (OSError, socket.timeout) as exc:
         close_quiet(sock, rd)
         raise Fail("no_response", "%s: %s" % (exc.__class__.__name__, exc))
@@ -188,18 +235,16 @@ def http_get_health(target, deadline, path, host_header, sock_rd=None):
         close_quiet(sock, rd)
         raise
     t2 = time.monotonic()
-    if status != 200:
-        close_quiet(sock, rd)
-        raise Fail("http_error", "status %s" % status)
     return t2 - t0, t2 - t1, sock, rd
 
 
-def measure(target, n, path, host_header, timeout=5.0):
+def measure(target, n, path, host_header, timeout=5.0, expect=None):
     """n GETs on fresh connections, then n GETs on one kept-alive connection. Times in ms."""
     fresh, warm, errors = [], [], 0
     for _ in range(n):
         try:
-            total, _, sock, rd = http_get_health(target, time.monotonic() + timeout, path, host_header)
+            total, _, sock, rd = http_get_health(target, time.monotonic() + timeout, path, host_header,
+                                                 expect=expect)
             close_quiet(sock, rd)
             fresh.append(total * 1000.0)
         except Fail:
@@ -210,7 +255,8 @@ def measure(target, n, path, host_header, timeout=5.0):
     try:
         sock_rd = target.open(time.monotonic() + timeout)
         for _ in range(n):
-            _, req_s, sock, rd = http_get_health(target, time.monotonic() + timeout, path, host_header, sock_rd)
+            _, req_s, sock, rd = http_get_health(target, time.monotonic() + timeout, path, host_header, sock_rd,
+                                                 expect=expect)
             warm.append(req_s * 1000.0)
         close_quiet(*sock_rd)
     except Fail:
@@ -226,6 +272,7 @@ class State(object):
         self.lock = threading.Lock()
         self.stop = threading.Event()
         self.marks = []                 # epoch seconds, from SIGUSR1
+        self.mark_pre = {}              # mark epoch -> what the probe said at that moment (see precondition)
         self.streams = []               # one dict per stream attempt that opened
         self.gaps = []                  # (epoch, gap_s, seq, stream_id)
         self.offsets = []               # receive time minus the token's own UTC stamp
@@ -237,9 +284,31 @@ class State(object):
         self.probe_failures = []        # capped list of failing probes
         self.consec_fail = 0
         self.first_fail = None
+        self.last_ok_epoch = None
         self.down = False
         self.transitions = []
         self.current = None             # (sock, reader) of the stream being read
+
+    def precondition(self, epoch):
+        """What the /health probe says at 'epoch': 'up' only when the last probe was good and recent.
+        'down' (declared down), 'failing' (a probe failed, not yet declared), 'stale' (no good probe
+        lately) or 'never_up'. A fault injected from anything but 'up' is not a measurement."""
+        a = self.args
+        if self.last_ok_epoch is None:
+            return "never_up"
+        if self.down:
+            return "down"
+        if self.consec_fail > 0:
+            return "failing"
+        if epoch - self.last_ok_epoch > max(2 * a.health_interval + a.health_timeout, 5.0):
+            return "stale"
+        return "up"
+
+    def add_mark(self, epoch):
+        """Called from the SIGUSR1 handler, so it takes no lock: the state is written before the mark
+        becomes visible in self.marks."""
+        self.mark_pre[epoch] = self.precondition(epoch)
+        self.marks.append(epoch)
 
     def note_open_failure(self, cls):
         """A stream attempt that never delivered a token. Caller holds self.lock."""
@@ -253,11 +322,13 @@ class State(object):
             self.probes["total"] += 1
             if ok:
                 self.probes["ok"] += 1
+                self.last_ok_epoch = epoch
                 self.probe_ms.append(total_s * 1000.0)
                 self.probe_req_ms.append(req_s * 1000.0)
                 if self.down:
                     self.transitions.append({"state": "up", "utc": utc(epoch), "epoch": round(epoch, 3)})
                     self.down = False
+                    self.announce("probe: path UP again at %s" % utc(epoch))
                 self.consec_fail = 0
                 self.first_fail = None
                 return
@@ -273,6 +344,11 @@ class State(object):
                 self.transitions.append({"state": "down", "class": cls, "first_fail_utc": utc(self.first_fail),
                                          "first_fail_epoch": round(self.first_fail, 3),
                                          "declared_utc": utc(epoch), "declared_epoch": round(epoch, 3)})
+                self.announce("probe: path DOWN declared at %s (class %s)" % (utc(epoch), cls))
+
+    def announce(self, text):
+        """One line on stdout, for the operator who waits for 'path UP' before the next fault."""
+        print("stream_watch: " + text, flush=True)
 
 
 # --- stream thread (main) -------------------------------------------------------------------------
@@ -302,22 +378,25 @@ def run_stream(st, target, sid, seconds):
         expect, last = 1, None
         while True:
             size_line = rd.readline(1024)
-            if not size_line:
-                raise Fail("cut", "EOF before the final chunk")
+            if not size_line.endswith(b"\n"):
+                raise Fail("cut", "EOF before the final chunk" if not size_line else "EOF inside a chunk size line")
             try:
                 size = int(size_line.split(b";")[0].strip(), 16)
             except ValueError:
                 raise Fail("cut", "bad chunk size %r" % size_line[:20])
             if size == 0:
-                while True:                      # trailers, up to the blank line
+                while True:                      # trailers, up to the blank line; EOF here is a cut
                     tl = rd.readline(1024)
-                    if tl in (b"", b"\r\n", b"\n"):
+                    if not tl.endswith(b"\n"):
+                        raise Fail("cut", "EOF before the blank line that ends the stream")
+                    if tl in (b"\r\n", b"\n"):
                         break
                 break
             data = rd.read(size)
-            rd.read(2)
             if len(data) != size:
-                raise Fail("cut", "short chunk")
+                raise Fail("cut", "short chunk: %d of %d bytes" % (len(data), size))
+            if rd.read(2) != b"\r\n":
+                raise Fail("cut", "chunk not followed by CRLF (EOF or bad framing)")
             now_m, now_e = time.monotonic(), time.time()
             for line in data.decode("ascii", "replace").splitlines():
                 parts = line.split()
@@ -390,7 +469,8 @@ def health_loop(st, target, t_end_mono):
     while not st.stop.is_set() and time.monotonic() < t_end_mono:
         t0 = time.monotonic()
         try:
-            total, req, sock, rd = http_get_health(target, t0 + a.health_timeout, a.health_path, host_header)
+            total, req, sock, rd = http_get_health(target, t0 + a.health_timeout, a.health_path, host_header,
+                                                   expect=a.health_expect_bytes)
             close_quiet(sock, rd)
             st.record_probe(time.time(), True, "ok", total, req, "")
         except Fail as exc:
@@ -442,7 +522,15 @@ def analyse(st, started_epoch, ended_epoch, args):
     marks = []
     for i, m in enumerate(st.marks):
         hi = st.marks[i + 1] if i + 1 < len(st.marks) else float("inf")   # a mark's window ends at the next mark
-        entry = {"mark_utc": utc(m)}
+        pre = st.mark_pre.get(m, "unknown")
+        entry = {"mark_utc": utc(m), "precondition": pre, "valid": pre == "up"}
+        if pre != "up":
+            # A fault injected while the path was already down or failing is not a detection: the
+            # watcher would have nothing to see go down. Record it as invalid and report no times.
+            entry["invalid_reason"] = ("the /health probe said '%s' when the mark was taken, so any later "
+                                       "failure is not a new down transition; repeat the fault from 'up'" % pre)
+            marks.append(entry)
+            continue
         down = next((t for t in st.transitions if t["state"] == "down" and m <= t["declared_epoch"] < hi), None)
         fail = next((p for p in st.probe_failures if m <= p["epoch"] < hi), None)
         if fail:
@@ -516,12 +604,16 @@ def parse_args(argv):
     ap.add_argument("--health-timeout", type=float, default=3.0, help="one probe's total deadline (s)")
     ap.add_argument("--fail-threshold", type=int, default=2, help="consecutive failures that declare the path down")
     ap.add_argument("--health-path", default="/health")
+    ap.add_argument("--health-expect", default='{"status": "ok"}',
+                    help="the exact /health body; a different or truncated body is a failed probe "
+                         "(default: the fake engine's; pass an empty string for an engine that answers with none)")
     ap.add_argument("--direct-url", help="http://HOST:PORT of the engine, reachable from here (loopback in a job)")
     ap.add_argument("--direct-samples", type=int, default=30)
     ap.add_argument("--direct-only", action="store_true", help="only measure --direct-url, then exit")
     ap.add_argument("--stub-log", help="plugin_stub.py's JSON-lines log, for CloseProxy/Ping/Login after marks")
     ap.add_argument("--out", default="stream_watch_summary.json")
     args = ap.parse_args(argv)
+    args.health_expect_bytes = args.health_expect.encode("utf-8")
     if args.direct_only:
         if not args.direct_url:
             ap.error("--direct-only needs --direct-url")
@@ -562,6 +654,7 @@ def digest(summary):
                                                           json.dumps(summary["health"]["fail_classes"], sort_keys=True))]
     for m in summary["marks"]:
         lines.append("  mark " + json.dumps(m, sort_keys=True))
+    lines.append("  this digest is collection, not a verdict: run verdict.py on the summary for PASS or FAIL per criterion")
     if "added_latency_ms" in summary:
         lines.append("  added latency (tunnel minus direct, ms): " + json.dumps(summary["added_latency_ms"], sort_keys=True))
     return "\n".join(lines)
@@ -574,7 +667,7 @@ def wait_for_first_up(st, target):
     while not st.stop.is_set() and time.monotonic() - t0 < a.wait_up:
         try:
             _, _, sock, rd = http_get_health(target, time.monotonic() + a.health_timeout, a.health_path,
-                                             target.domain)
+                                             target.domain, expect=a.health_expect_bytes)
             close_quiet(sock, rd)
             return round(time.monotonic() - t0, 1)
         except Fail:
@@ -585,7 +678,8 @@ def wait_for_first_up(st, target):
 def main(argv):
     args = parse_args(argv)
     if args.direct_only:
-        res = measure(direct_target(args.direct_url), args.direct_samples, args.health_path, "engine")
+        res = measure(direct_target(args.direct_url), args.direct_samples, args.health_path, "engine",
+                      expect=args.health_expect_bytes)
         res.update({"tool": "stream_watch", "mode": "direct-only", "utc": utc(time.time())})
         write_json(args.out, res)
         print("direct baseline: " + json.dumps(res, sort_keys=True))
@@ -593,12 +687,20 @@ def main(argv):
 
     st = State(args)
     target = Target("tunnel", args.tcpmux_host, args.tcpmux_port, args.domain)
-    signal.signal(signal.SIGUSR1, lambda s, f: st.marks.append(time.time()))
+    signal.signal(signal.SIGUSR1, lambda s, f: st.add_mark(time.time()))
 
     def stop(signum, frame):
+        # The handler runs in the main thread, possibly inside a read on the buffered reader, so it
+        # must not close the reader (that raises "reentrant call"). It sets the flag and shuts the
+        # socket down: the blocked read returns EOF, run_stream marks the stream interrupted and
+        # closes both in its normal unwinding.
         st.stop.set()
-        if st.current is not None:
-            close_quiet(*st.current)       # breaks a blocked read; run_stream marks it interrupted
+        cur = st.current
+        if cur is not None:
+            try:
+                cur[0].shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
 
@@ -617,8 +719,10 @@ def main(argv):
         flush=True)
     pre = {}
     if args.direct_url:
-        pre["direct"] = measure(direct_target(args.direct_url), args.direct_samples, args.health_path, "engine")
-    pre["tunnel"] = measure(target, args.direct_samples, args.health_path, args.domain)
+        pre["direct"] = measure(direct_target(args.direct_url), args.direct_samples, args.health_path, "engine",
+                                expect=args.health_expect_bytes)
+    pre["tunnel"] = measure(target, args.direct_samples, args.health_path, args.domain,
+                            expect=args.health_expect_bytes)
 
     th = threading.Thread(target=health_loop, args=(st, target, t_end))
     th.daemon = True

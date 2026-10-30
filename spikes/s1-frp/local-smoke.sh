@@ -10,13 +10,13 @@
 #
 # Usage: local-smoke.sh [direct | ssh-forward | all]      (default: all, one after the other)
 #   direct       frpc dials frps on loopback.
-#   ssh-forward  frpc dials the local end of "ssh -N -L" to frps on 127.0.0.1:<S1_TEST_FORWARD_PORT>,
-#                the same path as job.sbatch.tmpl with TRANSPORT=ssh-forward. It runs ONLY if
-#                S1_TEST_KEY names a restricted key that is already authorised for this user on
-#                this machine, with permitopen for 127.0.0.1:<S1_TEST_FORWARD_PORT> (default 7000).
-#                If S1_TEST_KEY is unset the variant prints SKIPPED, tests nothing and exits 0.
-#                S1_TEST_USER (default: the current user) names the account the key logs in as.
-#                This script creates no key and never touches ~/.ssh or authorized_keys.
+#   ssh-forward  frpc dials the local end of "ssh -N -L" to frps on a loopback port, the same path as
+#                job.sbatch.tmpl with TRANSPORT=ssh-forward. The sshd is a THROWAWAY one that this script
+#                starts as the current user (not root) on a high loopback port, with its own host key, its own
+#                client key, its own AuthorizedKeysFile holding the README's restricted key line, in a mktemp -d
+#                directory (tests/throwaway-sshd.sh). It never reads or writes ~/.ssh or /etc/ssh, and stops
+#                that sshd by its PID. If no sshd can run here the variant prints SKIPPED, tests nothing and
+#                exits 0: not a pass.
 #
 # Needs the pinned binaries: bash fetch-frp.sh. Writes only under a mktemp -d directory.
 # Timeline (seconds after the watcher starts; the watcher runs 120 s). Stream 1 runs from about
@@ -38,10 +38,13 @@ case "$VARIANT" in
     exit "$rc" ;;
   *) echo "usage: local-smoke.sh [direct | ssh-forward | all]" >&2; exit 2 ;;
 esac
-if [ "$VARIANT" = ssh-forward ] && [ -z "${S1_TEST_KEY:-}" ]; then
-  echo "local-smoke: SKIPPED the ssh-forward variant: S1_TEST_KEY is not set. Nothing was tested; this is not a pass."
-  echo "local-smoke:   It needs a restricted key already authorised on this machine (see the header of this script)."
-  exit 0
+if [ "$VARIANT" = ssh-forward ]; then
+  # shellcheck source=tests/throwaway-sshd.sh
+  source "$HERE/tests/throwaway-sshd.sh"
+  if [ ! -x "$TSSHD_SSHD" ] || ! command -v ssh-keygen >/dev/null 2>&1 || { [ ! -d /run/sshd ] && [ ! -d /var/empty ]; }; then
+    echo "local-smoke: SKIPPED the ssh-forward variant: no sshd can run here as a plain user. Nothing was tested; this is not a pass."
+    exit 0
+  fi
 fi
 INSTANCE="smoke-instance"
 DURATION=120
@@ -57,6 +60,7 @@ BIN="$(ls -d "$HERE"/dl/linux_"$ARCH"/frp_*_linux_"$ARCH" 2>/dev/null | head -1 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/s1-smoke.XXXXXX")"
 chmod 700 "$WORK"
 FRPS_PID="" FRPC_PID="" STUB_PID="" STREAMER_PID="" WATCH_PID="" CTRL_PID="" SSH_PID=""
+SSHD_STARTED=0
 
 all_pids() { echo "$WATCH_PID $FRPC_PID $FRPS_PID $STUB_PID $STREAMER_PID $CTRL_PID $SSH_PID"; }
 
@@ -73,6 +77,7 @@ cleanup() {
     sleep 0.2
   done
   for pid in $(all_pids); do kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true; done
+  [ "$SSHD_STARTED" -eq 0 ] || tsshd_stop      # before the blanket wait below: the throwaway sshd is our child and would block it
   { wait; } 2>/dev/null || true
   if [ "$rc" -ne 0 ]; then echo "local-smoke: FAILED (rc=$rc); logs kept in $WORK" >&2; else rm -rf "$WORK"; fi
   exit "$rc"
@@ -91,15 +96,8 @@ for s in socks:
 print(" ".join(str(s.getsockname()[1]) for s in socks))')
 SERVER_PORT="$BIND_PORT"
 if [ "$VARIANT" = ssh-forward ]; then
-  # frps must listen on exactly the one port the test key may forward to; frpc dials the local end.
-  BIND_PORT="${S1_TEST_FORWARD_PORT:-7000}"
+  # frps listens on BIND_PORT, the one port the key may forward to; frpc dials the local end (LPORT).
   SERVER_PORT="$LPORT"
-  "$PYTHON" -c 'import socket, sys; s = socket.socket(); s.bind(("127.0.0.1", int(sys.argv[1])))' "$BIND_PORT" 2>/dev/null \
-    || { echo "local-smoke: 127.0.0.1:$BIND_PORT is in use; the ssh-forward variant needs it free (set S1_TEST_FORWARD_PORT to the port the key may forward to)" >&2; exit 2; }
-  [ -f "$S1_TEST_KEY" ] && [ -r "$S1_TEST_KEY" ] || { echo "local-smoke: S1_TEST_KEY is not a readable file" >&2; exit 2; }
-  case "$(stat -c %a "$S1_TEST_KEY")" in 600|400) ;; *) echo "local-smoke: S1_TEST_KEY must be mode 600 or 400" >&2; exit 2 ;; esac
-  HOSTKEY_PUB=/etc/ssh/ssh_host_ed25519_key.pub
-  [ -r "$HOSTKEY_PUB" ] || { echo "local-smoke: cannot read $HOSTKEY_PUB to pin this machine's host key" >&2; exit 2; }
 fi
 umask 077
 head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$WORK/token"
@@ -115,18 +113,24 @@ render "$HERE/frpc.toml.tmpl" SERVER_ADDR=127.0.0.1 SERVER_PORT="$SERVER_PORT" I
 step "frps verify: $("$BIN/frps" verify -c "$WORK/frps.toml" 2>&1 | tail -1)"
 step "frpc verify: $("$BIN/frpc" verify -c "$WORK/frpc.toml" 2>&1 | tail -1)"
 
-# --- ssh-forward variant: the forward first. One ssh, no reconnect loop (the job has the loop). The
-# options are those of build_ssh_args in job.sbatch.tmpl; keep the two in step. The host key is pinned
-# from this machine's public host key file (a file read, not a scan of the network).
+# --- ssh-forward variant: the throwaway sshd, then the forward. One ssh, no reconnect loop (the job has the
+# loop). The options are those of build_ssh_args in job.sbatch.tmpl; keep the two in step. The host key is
+# pinned from the throwaway sshd's own host key file. The key line is the README's, with its port 7000
+# swapped for BIND_PORT, so a README that drifts from what works is caught here too.
 if [ "$VARIANT" = ssh-forward ]; then
-  printf '127.0.0.1 %s\n' "$(cut -d' ' -f1,2 "$HOSTKEY_PUB")" > "$WORK/known_hosts"
-  ssh -F /dev/null -p 22 -N -T -i "$S1_TEST_KEY" \
+  tsshd_start || { echo "local-smoke: the throwaway sshd did not start" >&2; exit 2; }
+  SSHD_STARTED=1
+  KEY_OPTS="$(sed -n 's/^ *\(restrict,port-forwarding,[^ ]*\) ssh-ed25519 .*/\1/p' "$HERE/README.md" | head -n 1 | sed "s/127\.0\.0\.1:7000/127.0.0.1:$BIND_PORT/")"
+  [ -n "$KEY_OPTS" ] || { echo "local-smoke: no authorized_keys line in the README" >&2; exit 2; }
+  tsshd_authorize "$KEY_OPTS"
+  step "throwaway sshd on 127.0.0.1:$TSSHD_PORT (pid $TSSHD_PID), key line: ${KEY_OPTS//127.0.0.1:$BIND_PORT/127.0.0.1:<frps port>}"
+  ssh -F /dev/null -p "$TSSHD_PORT" -N -T -i "$TSSHD_KEY" \
     -o BatchMode=yes -o IdentitiesOnly=yes -o ExitOnForwardFailure=yes \
     -o ServerAliveInterval=10 -o ServerAliveCountMax=3 \
-    -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$WORK/known_hosts" -o GlobalKnownHostsFile=/dev/null \
+    -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$TSSHD_KNOWN_HOSTS" -o GlobalKnownHostsFile=/dev/null \
     -o ControlMaster=no -o ControlPath=none \
     -o ConnectTimeout=8 -o PreferredAuthentications=publickey \
-    -L "127.0.0.1:$LPORT:127.0.0.1:$BIND_PORT" "${S1_TEST_USER:-$(id -un)}@127.0.0.1" 2>"$WORK/ssh.err" </dev/null &
+    -L "127.0.0.1:$LPORT:127.0.0.1:$BIND_PORT" "$TSSHD_USER@127.0.0.1" 2>"$WORK/ssh.err" </dev/null &
   SSH_PID=$!
   for _ in $(seq 1 60); do
     kill -0 "$SSH_PID" 2>/dev/null || break
@@ -134,9 +138,9 @@ if [ "$VARIANT" = ssh-forward ]; then
     sleep 0.25
   done
   if ! kill -0 "$SSH_PID" 2>/dev/null || ! timeout 2 bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1"' _ "$LPORT" 2>/dev/null; then
-    echo "local-smoke: S1_TEST_KEY did not open the forward within 15 s. ssh said: $(tail -n 1 "$WORK/ssh.err")" >&2; exit 2
+    echo "local-smoke: the key line did not open the forward within 15 s. ssh said: $(tail -n 1 "$WORK/ssh.err")" >&2; exit 2
   fi
-  step "ssh forward is up (pid $SSH_PID): 127.0.0.1:$LPORT -> 127.0.0.1:$BIND_PORT through this machine's sshd"
+  step "ssh forward is up (pid $SSH_PID): 127.0.0.1:$LPORT -> 127.0.0.1:$BIND_PORT through the throwaway sshd"
 fi
 
 # --- start: engine, then frpc BEFORE frps (loginFailExit=false must keep it alive) -------------
@@ -261,6 +265,8 @@ check("no token gap above 2 s anywhere outside fault windows", g["over_threshold
 
 marks = summary["marks"]
 check("four marks were taken (calibration plus three faults)", len(marks) == 4, "%d" % len(marks))
+check("every fault was injected from an up path (marks valid; an invalid mark is not a detection)",
+      all(x.get("valid") for x in marks), "preconditions %s" % json.dumps([x.get("precondition") for x in marks]))
 stalls = [o for o in g["over_threshold"] if o["near_mark"] and 2.5 <= o["gap_s"] <= 5.0]
 check("calibration: the gap detector reports the deliberate 3 s stall", len(stalls) >= 1,
       "gaps over 2 s near a mark: %s" % json.dumps([o["gap_s"] for o in g["over_threshold"] if o["near_mark"]]))

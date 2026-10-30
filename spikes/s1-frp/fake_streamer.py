@@ -2,11 +2,14 @@
 """Fake streaming engine for spike S1. Stdlib only. Runs on Python 3.6 (the Helios host python).
 
     GET /stream?seconds=N   chunked reply, one line per second: "token <i> <utc>\\n", for N seconds
-    GET /health             {"status": "ok", ...}
+    GET /health             the fixed body {"status": "ok"} (stream_watch.py checks it exactly)
 
 It binds 127.0.0.1 only and never takes another address. --port 0 picks a free port; give
 --port-file to learn it. The reply to /stream is written chunk by chunk with the framing done
 by hand, flushed after every token, on a fixed one-second schedule (no drift).
+
+--request-log FILE appends one line per request ("<epoch> GET <path>"). The job uses it to see that
+the watcher has attached: a request that arrives through frpc after the job's own loopback baseline.
 """
 import argparse
 import datetime
@@ -21,6 +24,8 @@ from urllib.parse import parse_qs, urlparse
 
 MAX_SECONDS = 86400
 BIND = "127.0.0.1"
+HEALTH_BODY = b'{"status": "ok"}'
+REQUEST_LOG = None
 
 
 def utc_stamp():
@@ -51,10 +56,23 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _note_request(self):
+        if REQUEST_LOG:
+            try:
+                with open(REQUEST_LOG, "a") as fh:
+                    fh.write("%.3f GET %s\n" % (time.time(), self.path.split("?")[0]))
+            except OSError as exc:
+                log("cannot write --request-log: %s" % exc)
+
     def do_GET(self):
+        self._note_request()
         url = urlparse(self.path)
         if url.path == "/health":
-            self._json(200, {"status": "ok", "utc": utc_stamp(), "pid": os.getpid()})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(HEALTH_BODY)))
+            self.end_headers()
+            self.wfile.write(HEALTH_BODY)
         elif url.path == "/stream":
             self._stream(parse_qs(url.query))
         else:
@@ -105,7 +123,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--port", type=int, default=0, help="TCP port on 127.0.0.1 (0 = pick one)")
     ap.add_argument("--port-file", help="write the chosen port here once listening")
+    ap.add_argument("--request-log", help="append one line per request: epoch, method, path")
     args = ap.parse_args()
+    global REQUEST_LOG
+    REQUEST_LOG = args.request_log
     srv = Server((BIND, args.port), Handler)
     port = srv.server_address[1]
     if args.port_file:
