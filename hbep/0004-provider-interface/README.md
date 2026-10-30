@@ -77,12 +77,12 @@ Problems this addresses, in general terms:
 - **The framework's own polling trips login throttles.** Too many parallel logins have tripped a cluster's connection limit. Candidate: a connection budget per platform in its profile, shared by every provider on that platform, with one multiplexed connection per login node and credential, so two providers' credentials never share a connection. Spike S5 (PR #19) could not establish the login nodes' ssh limits, so the budget cannot yet be sized from them.
 - **Local time in scheduler output** gives wrong end times, worst across a daylight-saving change. Spike S5 (PR #19) measured it: Slurm's text output in a login session is in Europe/Warsaw local time, with no zone marker, on Helios and Athena, and in UTC on Sano. Proposed: plugins read epoch times (`SLURM_TIME_FORMAT='%s'`, or the JSON output), parse text times only with the time zone the profile records, and convert every time to UTC, with tests across the change.
 - **A finished job vanishes from the queue listing.** Helios and Athena purge a finished job from `squeue` about 10 s after it ends (MinJobAge), and Sano after 300 s (spike S5, PR #19). A plugin that polls only `squeue` loses the final state, and a controller that reads the job as missing may submit it again. Proposed: final state comes from accounting (`sacct`). A job missing from `squeue` is never read as completed or as never submitted; with no accounting record either, its state is unknown.
-- **The scheduler requeues a job.** Requeue is on by default on all three platforms (`JobRequeue=1`; spike S5, PR #19), so Slurm may run a job's script again under the same job ID. Proposed: submit with `--no-requeue`, and record each platform's default in its profile. Identity across executions is HBEP-3's open question 13.
+- **The scheduler requeues a job.** Requeue is on by default on all three platforms (`JobRequeue=1`; spike S5, PR #19), so Slurm may run a job's script again under the same job ID. Proposed: submit with `--no-requeue`, and record each platform's default in its profile. HBEP-3 decides identity across executions (open question 13, from spike S4): a requeue fails that Instance, and its replacement is a new Allocation.
 - **A job without GPUs on a GPU-only platform.** Athena is meant for GPU jobs only, and its documentation warns that workloads without GPUs can lead to account suspension (spike S5, PR #19). Proposed: a profile flag marks a platform as GPU-only, and the plugin refuses any submission without GPUs there.
 - **Cancelling in the wrong order starts a follow-on early.** The core cancels dependents before their parent.
 - **A partly applied operation is reported as failed.** An interrupted multi-provider cancel may already have cancelled some jobs. Results are reported per allocation, never as one status.
 - **A submission is accepted but runs as something else,** for example with another partition or time limit, or becomes unschedulable after an in-place change. Candidate: read every allocation back after submit and after any change.
-- **Plugins find their own jobs by scanning.** The newest matching job may belong to someone else. Candidate: tag every job with its Allocation's name and find jobs only by tag.
+- **Plugins find their own jobs by scanning.** The newest matching job may belong to someone else. Decided in HBEP-3, from spike S4 (PR #32): every job carries its Allocation's tag in `--job-name`, and jobs are found only by tag.
 - **A workaround outlives its bug, or masks another fault,** for example a raised time-out hiding a hang. Candidate: each register entry names the symptom it covers and the version range it applies to.
 - **Contingencies cost when idle.** Probing a shared managed gateway adds load to it. Candidate: each contingency's idle cost is stated in the profile, and probes are rate-limited.
 - **Flags too coarse for real providers** push provider-specific code into the core. A new flag is an amendment to this HBEP.
@@ -97,7 +97,7 @@ Problems this addresses, in general terms:
    - identity: organization, platform, partitions and node types, kind;
    - capability flags;
    - hardware: accelerator, CPU architecture, memory, interconnect;
-   - scheduling and submission rules: limits, the scheduler's time zone, and requeue behaviour: whether jobs requeue by default, and whether the framework submits with no-requeue (HBEP-3, HBEP-7);
+   - scheduling and submission rules: limits, the scheduler's time zone, and requeue behaviour: whether jobs requeue by default, and whether a site setting can force a requeue despite no-requeue, which the framework always asks for (HBEP-3, HBEP-7);
    - environment: container runtime, filesystems, host software;
    - reachability facts, including the known limitation on multi-node engine traffic (HBEP-6);
    - expected performance per node type, the reference for qualification. Its form is decided with HBEP-7's open question 12;
@@ -107,14 +107,14 @@ Problems this addresses, in general terms:
    - contingency parameters with thresholds;
    - references to known-issue entries.
 
-   Provider settings are decided (owner decision): account, grant, credentials reference, allowed partitions and labels. The format of both (files, or a custom resource per HBEP-11) is open. Decided by writing the LLMLab, Helios and Athena platform profiles as drafts. Spike S5 (PR #19) drafted Helios, Athena and Sano; the LLMLab draft is still to come.
+   Provider settings are decided (owner decision): account, grant, credentials reference, allowed partitions and labels. The format of both is decided by HBEP-11: the PlatformProfile and Provider kinds. Their schema stays open here; for alpha, HBEP-11 types only the profile fields the Slurm provider reads. Decided by writing the LLMLab, Helios and Athena platform profiles as drafts. Spike S5 (PR #19) drafted Helios, Athena and Sano; the LLMLab draft is still to come.
 4. **Plugin granularity.** One plugin per scheduler type with per-platform profiles, or one plugin per platform? Decided by drafting the Helios and Athena platform profiles as data first: whatever data cannot express becomes plugin code.
 5. **Plugin boundary.** In-process library or separate process, the language, and how plugins declare the core version they implement. Decided with HBEP-11.
 6. **Register format.** Candidate entry fields: identifier, symptom, component and affected versions, fixed-in version, platform scope and stage (HBEP-2 dimensions), fix owner, detection check, workaround configuration, regression test, upstream link. Decided in design.
 7. **Profile provenance and probes.** How a field records its source (documentation, measurement, assumption) and date; which fields are re-checked, how often and at what cost. Decided by a spike on one batch and one managed provider. A candidate form: the drafts from spike S5 (PR #19) give each fact a value, a method (measured, documented or unknown), a source and a date.
 8. **Public and private profiles.** Resolved in part (owner decision): accounts, grants and credentials references are provider settings, never platform-profile data, so they never ship in this repository. Still open: which platform profiles ship here (LLMLab, Helios, Athena), and how a private cluster's platform profile stays local. Owner discussion.
-9. **Engine-wide data.** Engine pins are per profile, but some known issues and the deployment-ID input rule (HBEP-3) hold for an engine version on every provider. Where does that data live? Decided with HBEP-3.
-10. **A managed allocation's hard end:** none, or key expiry? Shared with HBEP-3 and HBEP-7.
+9. **Engine-wide data.** Engine pins are per profile, but some known issues and the deployment-ID input rule (HBEP-3) hold for an engine version on every provider. Where does that data live? Decided with HBEP-3. For alpha, HBEP-3 keeps the deployment-ID input table in code, with its scheme `v1`.
+10. **A managed allocation's hard end.** Decided in HBEP-3 for alpha: none. Key expiry is a provider-settings warning raised here, not a lease end.
 11. **Overrides.** Which profile parameters a ModelDeployment may override, such as a time limit below the profile's maximum. Decided with HBEP-7.
 12. **The partition label.** A label holds one value, but provider settings list the allowed partitions. How is a provider that allows several partitions labelled: one label per partition, or one provider per partition? Owner discussion.
 13. **A REST job API.** Can a plain user reach one? Spike S5 (PR #19) found the slurmrestd binary on the Helios and Athena login nodes, none on Sano's, and no REST service that any center advertises. JWT is not enabled on any of the three, but slurmrestd can also run with local (Unix-socket) authentication, so availability is unverified. Until this is answered, ssh is the only transport known to work. Decided by asking each center.
@@ -148,7 +148,7 @@ Problems this addresses, in general terms:
 
 ### Security
 
-- Provider credentials (cluster keys, gateway keys) are never in platform profiles, on command lines or in logs. Provider settings hold only a reference to them. Where they live is decided with HBEP-9 and HBEP-11.
+- Provider credentials (cluster keys, gateway keys) are never in platform profiles, on command lines or in logs. Provider settings hold only a reference to them. For alpha, HBEP-11 keeps them in a mode-600 file on the control-plane host, or in a Secret in the team option.
 - A plugin acts with the user's credentials and can spend their grant, so irreversible actions go through approvals (HBEP-10).
 - Platform profiles hold no account names, grant names, host names or addresses. Accounts and grants are provider settings (open question 8).
 
@@ -188,7 +188,7 @@ The Slurm provider plugin grows from www-2027's per-cluster ssh over one shared 
 | Component | Origin (project, URL) | Licence | How used (dependency, copied code, optional) |
 |---|---|---|---|
 | ssh, multiplexed | [OpenSSH](https://www.openssh.com) client with ControlMaster, or another client | BSD-style for OpenSSH; per the client chosen otherwise | Dependency on ssh as the default transport, one connection per login node and credential (the client is a candidate); the only transport spike S5 (PR #19) found working |
-| crossplane-runtime | [crossplane/crossplane-runtime](https://github.com/crossplane/crossplane-runtime) | Apache-2.0 | Candidate, decided by spike S4: the managed reconciler under each provider plugin, with our own Slurm dialect layer. Not Crossplane core or compositions |
+| crossplane-runtime | [crossplane/crossplane-runtime](https://github.com/crossplane/crossplane-runtime) | Apache-2.0 | Dependency, from spike S4 (PR #32; HBEP-3, HBEP-11): the managed reconciler under each provider plugin, with our own Slurm dialect layer. Not Crossplane core or compositions |
 | FirecREST v2; slurmrestd through Slinky slurm-client | [eth-cscs/firecrest-v2](https://github.com/eth-cscs/firecrest-v2); [SlinkyProject/slurm-client](https://github.com/SlinkyProject/slurm-client) | BSD-3-Clause; Apache-2.0 | Optional transports, where a center offers them; none is verified on Helios, Athena or Sano (open question 13) |
 
 ### Designs and published work borrowed
@@ -222,7 +222,7 @@ The Slurm provider plugin grows from www-2027's per-cluster ssh over one shared 
 | A managed gateway cuts replies that send no byte for a fixed time. | L-6.1 | A managed-gateway profile field: the no-byte cut. |
 | A managed gateway stalls periodically. | L-6.2 | A managed-gateway profile field: the stall pattern. |
 | A managed gateway's shared capacity binds under load. | L-6.3 | The gateway's concurrency ceiling is profile data (readiness question 5). |
-| Gateway keys expire mid-run. | L-6.4 | Open question 10: key expiry as a managed allocation's hard end. |
+| Gateway keys expire mid-run. | L-6.4 | Open question 10: key expiry raises a provider-settings warning; it is not a lease end (HBEP-3). |
 | Models go inactive unannounced, and errors for different causes look alike. | L-6.5 | The managed provider reports model state and returns a defined error. |
 | A managed gateway rewrites requests. | L-6.6 | A capability flag: rewrites requests. |
 | Center-run endpoints hide their limits and revisions. | L-6.8 | A capability flag: exposes revisions and limits. |
@@ -243,6 +243,7 @@ The Slurm provider plugin grows from www-2027's per-cluster ssh over one shared 
 - 2026-10-28: proposed (provisional), tracking issue #4.
 - 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
 - 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation; spike S5 facts carried in (HBEP-4, HBEP-6, HBEP-7 only).
+- 2026-10-30: aligned with HBEP-3 and HBEP-11 becoming implementable: requeue, the job tag, the profile and provider kinds, a managed allocation's hard end, and where credentials live.
 
 ## Amendments
 

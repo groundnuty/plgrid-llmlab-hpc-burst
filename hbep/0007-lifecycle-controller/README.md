@@ -75,8 +75,8 @@ Problems:
 
 - **The node is lost.** Releasing before the replacement serves gives the slot to another user. Mitigation: the decided rule, checked by a test. A retention policy can also keep an Allocation after its Instance ends.
 - **Cancelling a loser starts its dependents.** Mitigation: cancel dependents first, or use no provider-side dependencies (Open question 3).
-- **A restart submits twice.** Every submission carries a tag in a field the provider stores, and the controller finds its allocations by that tag, never by scanning names. The tag supports recovery but does not enforce uniqueness: a provider can accept two submissions with one tag, and a lost submission reply leaves the outcome unknown until the controller lists by tag. The submission protocol stays open (Open question 11).
-- **The scheduler requeues a job.** Slurm can requeue a batch job and run its script again under the same job ID, and requeue is on by default on Helios, Athena and Sano (spike S5, PR #19). That can leave stale registrations, verification results or replacement work from the first execution behind. Each platform profile records its requeue behaviour (HBEP-4); identity across executions is HBEP-3's open question 13. Proposed: submit every Allocation with `--no-requeue`, and treat a requeue that still happens as a failure of its Instance.
+- **A restart submits twice.** Every submission carries a tag in a field the provider stores, and the controller finds its allocations by that tag, never by scanning names. The tag supports recovery but does not enforce uniqueness: a provider can accept two submissions with one tag, and a lost submission reply leaves the outcome unknown until the controller lists by tag. Spike S4 (PR #32) tested a protocol that HBEP-3 adopts for the Allocation: the tag is set before any submission, the job is submitted held, one job with the tag is adopted and extras are cancelled, and the adopted job is released once (Open question 11).
+- **The scheduler requeues a job.** Slurm can requeue a batch job and run its script again under the same job ID, and requeue is on by default on Helios, Athena and Sano (spike S5, PR #19). That can leave stale registrations, verification results or replacement work from the first execution behind. Each platform profile records its requeue behaviour (HBEP-4). HBEP-3 decides identity across executions (open question 13, from spike S4): submit every Allocation with `--no-requeue`, treat a requeue that still happens as a failure of its Instance, never release a requeued job again, and replace it with a new Allocation.
 - **An ended job is read as missing.** Helios and Athena drop a finished job from `squeue` about 10 s after it ends (spike S5, PR #19). A controller that reads a missing job as never submitted would submit it again. Mitigation: the provider plugin reports an ended lease as existing and terminal, from accounting (HBEP-4), and the controller never resubmits only because a job is missing from the queue.
 - **A job without GPUs on a GPU-only platform.** Athena is meant for GPU jobs only, and its documentation warns that workloads without GPUs can lead to account suspension (spike S5, PR #19). Mitigation: the controller sends no job without GPUs, such as a staging or relay job, to a platform whose profile marks it GPU-only. Still open: whether a GPU Allocation kept idle as warm capacity counts, which bears on the default retention policy (Open question 13).
 - **Overlap costs grant hours.** A replacement can start hours early, and both then run. Mitigation: an overlap policy (Open question 4).
@@ -140,7 +140,7 @@ Each question below has a proposed answer taken from operating LLM serving on Sl
      - the engine version available on the platform.
    - **Proposed:** repurpose only an Allocation whose current deployment has no remaining work, reservation or fallback role, and only when the time saved exceeds the cost (stop, start, verify, warm up). A pending Allocation that starts directly as the new model costs nothing extra.
    - **Why:** each conversion took about 3 min to serve plus verification. Ad-hoc conversions cost hours of checks and, once, silently retired a deployment a later run needed.
-   - **Still open:** several Instances per Allocation stays with HBEP-3's open question 8.
+   - **Still open:** none here. HBEP-3 decides its open question 8: several Instances per Allocation when its resources allow; alpha places one.
 8. **Approvals.**
    - **Proposed: needs approval:**
      - releasing or cancelling a started Allocation before its hard end, outside the spec;
@@ -173,9 +173,8 @@ Each question below has a proposed answer taken from operating LLM serving on Sl
       - collisions came when several agents allocated names, ports or copies in parallel, and a single submitter per cluster kept the queue consistent;
       - too many parallel logins tripped the clusters' and a VM's connection limits, so the bound belongs to the provider;
       - hand-run sequential operations were slow; work on different deployments never needed to wait for each other.
-    - **Still open:**
-      - the provider's tag mechanism (job name or comment) per platform;
-      - the worker count and the bounds per platform, from measurement.
+    - **From spike S4 (PR #32):** for Slurm the tag is in the job name (HBEP-3), because accounting keeps the job comment only where a site enables it. The `Lease` is an extra guard: S4 showed that the lookup by tag, not the `Lease`, prevents duplicates, and a deposed leader's submission can still land (HBEP-11).
+    - **Still open:** the worker count and the bounds per platform, from measurement.
 12. **Over-allocation and qualification.**
     - **Proposed:** qualify every Instance, also when k is 0. The checks:
       - health, engine version, model names and maximum length;
@@ -249,7 +248,7 @@ Against a simulated provider with queue delays, start failures, hard ends, depen
 - The controller is killed at each step of a handover: after restart there are no duplicate submissions and no orphan allocations.
 - The reply to a submission is lost: the controller resolves the unknown outcome, and exactly one allocation remains.
 - Two controllers reconcile one deployment at once: any duplicate submission is found by tag and reported, and no more allocations than desired remain.
-- The scheduler requeues a serving allocation under the same job ID: no registration or verification from the first execution is reused, no replacement is planned twice, and the outcome follows HBEP-3's open question 13.
+- The scheduler requeues a serving allocation under the same job ID: no registration or verification from the first execution is reused, no replacement is planned twice, the Instance fails, the job is never released again, and the replacement is a new Allocation (HBEP-3, open question 13).
 - A job ends and leaves the queue listing seconds later: the controller reads it as ended, from accounting, and submits nothing again for it.
 - No instance gets traffic before it is ready.
 - A stalled instance with requests in flight is restarted within the threshold. A process that ignores TERM is killed after the grace period.
@@ -304,7 +303,7 @@ The controller applies by policy what www-2027 operators did per job: holder bat
 | Component | Origin (project, URL) | Licence | How used (dependency, copied code, optional) |
 |---|---|---|---|
 | vLLM | [vllm-project/vllm](https://github.com/vllm-project/vllm) | Apache-2.0 | Dependency: the engine each Instance starts |
-| controller-runtime | [kubernetes-sigs/controller-runtime](https://github.com/kubernetes-sigs/controller-runtime) | Apache-2.0 | Candidate, no spike assigned: the controller's keyed work queues, leader election and reconcile loop (open question 11) |
+| controller-runtime | [kubernetes-sigs/controller-runtime](https://github.com/kubernetes-sigs/controller-runtime) | Apache-2.0 | Dependency (HBEP-11), used by spikes S3 and S4: the controller's keyed work queues, leader election and reconcile loop (open question 11) |
 | inference-perf | [kubernetes-sigs/inference-perf](https://github.com/kubernetes-sigs/inference-perf) | Apache-2.0 | Candidate, no spike assigned: the qualification benchmark (open question 12) |
 | llm-d-inference-sim | [llm-d/llm-d-inference-sim](https://github.com/llm-d/llm-d-inference-sim) | Apache-2.0 | Candidate test dependency, no spike assigned: a GPU-free engine double for the test plan |
 
@@ -365,6 +364,7 @@ The controller applies by policy what www-2027 operators did per job: holder bat
 - 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
 - 2026-10-28: open questions answered with proposals from past operation, for the owner to confirm.
 - 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation; spike S5 facts carried in (HBEP-4, HBEP-6, HBEP-7 only).
+- 2026-10-30: aligned with HBEP-3 and HBEP-11 becoming implementable: requeue, cardinality, the S4 submission protocol, and the `Lease` as an extra guard.
 
 ## Amendments
 

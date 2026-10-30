@@ -60,7 +60,7 @@ A past project served one set of models across several clusters and a managed ga
   - Engine: name, version, container image digest, and every local patch, hashed.
   - Settings that can change outputs: data type and quantisation, context length, attention backend, KV-cache data type, parallel layout, tool-call and reasoning parsers, default generation settings, speculative decoding.
   - Excluded: Instance and Allocation metadata (HBEP-3), such as job ID, node, port, URL and hard end; operational settings, such as router policy and session caps; and every key, including the Instance's own key.
-- **The identity record behind a deployment ID is immutable.** Changing any record field gives a new deployment ID, with its own record; no record is edited under an existing ID. Whether the new ID is a new ModelDeployment or a rollout inside the existing one is HBEP-3's open question 7, and HBEP-11's admission restriction depends on it. Operational settings outside the record change in place.
+- **The identity record behind a deployment ID is immutable.** Changing any record field gives a new deployment ID, with its own record; no record is edited under an existing ID. HBEP-3 decides that the new ID is a rollout inside the existing ModelDeployment (open question 7), so HBEP-11's admission refuses only an edit to an existing record. The record's inputs never change; each Instance's verification result is added beside them (HBEP-3). Operational settings outside the record change in place.
 - **Each Instance has its own key.** It is generated when the Instance starts and kept in its identity package: the identity data the Instance holds about itself. The front uses the key toward the Instance. The key is never an input to the deployment ID: rotating it must not change the ID, and a hash of a short secret can be guessed.
 - **The engine fingerprint is recorded beside the ID, never used as it.** It is not unique per Instance, differs per site and is sometimes missing.
 - **The URL is not identity.** Each handover brings a new Instance with a new URL; the deployment ID does not change.
@@ -74,14 +74,14 @@ A past project served one set of models across several clusters and a managed ga
 - **A record that misses a field** lets two different servings share one ID. The field list is reviewed against each engine's settings at each engine upgrade, with a test that changes each listed setting and expects a new ID.
 - **A record that holds a noisy field** (a path, a time stamp) gives each start a new ID and breaks handovers. Fields are normalised; paths and times are excluded.
 - **Verification that checks only liveness.** A test chat proves the engine answers, not what it serves. Verification compares resolved state with the record (see Open questions for which checks).
-- **The engine resolves a setting differently than asked,** for example by choosing an attention backend per GPU type. A record that stores the request would then hide the difference. See HBEP-3's open question 1.
+- **The engine resolves a setting differently than asked,** for example by choosing an attention backend per GPU type. A record that stores the request would then hide the difference. HBEP-3 decides for alpha (open question 1): scheme `v1` hashes the request together with the accelerator class (GPU model and CPU architecture), so per-GPU-type kernel choices give different IDs. Each Instance's resolved settings are recorded beside the ID, so any remaining difference within one class shows in the record.
 - **The Instance's router picks the worker,** and may not say which. The front still knows the Instance, because it picks the Instance itself (HBEP-3); only the worker may be unknown, which is HBEP-5's open question 7. Pooling workers across Instances would lose the Instance, so it is not part of this design (HBEP-3, open question 11).
 - **A managed provider changes what it serves without notice.** The framework can see that only if the engine fingerprint or a probe changes. Such a change raises an event (HBEP-8).
 - **Headers get dropped** by proxies or client libraries that keep only the body. The front's attribution log, keyed by request ID, holds the same facts.
 
 ### Open questions
 
-- Declared or resolved values, and whether one spec on two GPU types is one deployment, are HBEP-3's open question 1. Input from this HBEP: kernels differ per GPU type even with the same settings, so record the GPU type and refuse "auto" for identity-relevant settings. Verification works either way: it compares the Instance's reported resolved settings with the record.
+- Declared or resolved values: HBEP-3 decides its open question 1 for alpha. Scheme `v1` hashes the declared spec with the accelerator class, so one spec on two GPU types gives two deployment IDs, and each Instance's resolved settings are recorded beside the ID. Still open here: whether to refuse "auto" for identity-relevant settings. Verification works either way: it compares the Instance's reported resolved settings with the record.
 - Whether batch-shaping settings (maximum sequences, prefill budget) enter the record. They can change numerics slightly and are often tuned. A measurement on two settings of one deployment decides.
 - **Which checks verification runs at start.**
   - **File hashes, from spike S7 (issue #30, PR #33) (candidate):**
@@ -192,6 +192,7 @@ Verification grows from www-2027's endpoint check, run on each new endpoint (hea
 - 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
 - 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation.
 - 2026-10-30: spike S7 (PR #33) carried in: per-file SHA-256, rehash at every start.
+- 2026-10-30: aligned with HBEP-3 and HBEP-11 becoming implementable: a changed spec rolls out a new ID, and `v1` hashes declared settings and the accelerator class, with resolved settings recorded beside them.
 
 ## Amendments
 

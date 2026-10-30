@@ -2,7 +2,7 @@
 
 ## Summary
 
-This HBEP owns the framework's vocabulary. It defines the levels above our access to compute (Organization, Platform), the resources (Provider, ModelDeployment, Allocation, Instance), the three levels at which a client names a model, and the deployment ID: a hash, computed by the framework, of what is served. Every other HBEP uses these terms as defined here.
+This HBEP owns the framework's vocabulary. It defines the levels above our access to compute (Organization, Platform), the resources (Provider, PlatformProfile, ModelDeployment, Allocation, Instance), the three levels at which a client names a model, and the deployment ID: a hash, computed by the framework, of what is served. Every other HBEP uses these terms as defined here. HBEP-11 serves the resources as custom resources in the API group `hpcburst.groundnuty.github.io`, version `v1alpha1`.
 
 ## Motivation
 
@@ -43,6 +43,7 @@ In these stories, `helios-a`, `helios-b` and `athena-a` are names an operator ga
 - An agent's work on one model ends while its Allocations have hours left. It repurposes them to another model's deployment. No job is queued again, and no name still describes the old model.
 - A reviewer reads the deployment ID and instance on a response, and resolves the ID to the inputs that produced it.
 - An operator agent lists a deployment's instances and reads each one's job ID, node, URL and lease end as metadata.
+- A maintainer fixes the chat template of a serving deployment. The ModelDeployment rolls out a new deployment ID, and its Instances are replaced make-before-break at their next handovers. The old ID's record is unchanged.
 
 ### Notes, constraints and caveats
 
@@ -53,33 +54,35 @@ In these stories, `helios-a`, `helios-b` and `athena-a` are names an operator ga
 - The engine's fingerprint is recorded beside the deployment ID and never replaces it: it is not unique per instance, differs per site and is sometimes missing.
 - At each handover a new Instance, with its own job ID, node, URL and lease end, replaces the old one, and the deployment ID does not change. A handover replaces an Instance; it never mutates one.
 - Every term the other HBEPs share is defined under Vocabulary below, including handover, follow-on, worker, the instance phases, and the two kinds of lease.
+- The kinds keep the names below (owner decision, 30 Oct 2026). Crossplane also has a kind named `Provider`, in its own group, for an installed provider package. The two never collide, because ours live in `hpcburst.groundnuty.github.io`. Where the Slurm provider uses crossplane-runtime (spike S4, PR #32), read crossplane's `ProviderConfig` as our Provider.
 
 ### Risks and mitigations
 
-- **The ID hides a real difference.** An input left out of the hash, such as a kernel the engine picks per accelerator, a local patch or an environment variable, lets two behaviours share one ID. Mitigation depends on open question 1; candidate: hash resolved settings and refuse an instance whose reported settings differ.
-- **The ID splits too finely.** If a capacity or transport setting is hashed, every tuning change breaks continuity and splits load. Mitigation: a written rule for which settings are inputs (open question 3), with a test per setting.
-- **The checkpoint changes under its name.** A mutable reference such as a branch cannot be hashed meaningfully. The checkpoint revision is an input; candidate: resolve it to an immutable revision when the deployment is admitted.
+- **The ID hides a real difference.** An input left out of the hash, such as a kernel the engine picks per accelerator, a local patch or an environment variable, lets two behaviours share one ID. Scheme `v1` therefore hashes the accelerator class (GPU model and CPU architecture) with the declared spec. One spec on two accelerator classes has two IDs, since the engine resolves kernels per GPU type (L-8.2). Within one accelerator class, each Instance's resolved settings are recorded beside the ID (HBEP-9), so a remaining difference is visible (Operational readiness 3). A declared setting that the engine contradicts fails verification. A later spike may move resolved settings into scheme `v2` (open question 1).
+- **The ID splits too finely.** If a capacity or transport setting is hashed, every tuning change breaks continuity and splits load. Mitigation: a written rule for which settings are inputs (open question 3), with a test per setting. In scheme `v1` an engine flag that the rule does not list is an input: a split is visible, a hidden difference is not. A flag omitted and the same flag set to the engine's default also give two IDs, because only the API schema's defaults are made explicit.
+- **The checkpoint changes under its name.** A mutable reference such as a branch cannot be hashed meaningfully. The revision must be a full commit id, and the checkpoint's per-file SHA-256 list is an input (Deployment ID).
 - **Names drift from contents.** Names of what is served derive from it, and Allocation names never describe a model, so a repurposed Allocation keeps no stale name.
 - **Clients re-point after a handover.** URLs are instance metadata. Clients use names, which survive handovers within a provider (Naming levels).
 - **Plain `model` reaches nothing after a switch.** No provider is attached to a model name by default, LLMLab included. Until the operator attaches one, the name returns the inactive-model error (HBEP-5); it never falls back silently.
-- **A change to the hashing rules silently changes every ID.** Candidate: a scheme version as the first hashed input, changed only by amendment.
-- **Model names that contain `@` or `/` make names ambiguous** (open question 5).
+- **A change to the hashing rules silently changes every ID.** The scheme version is the first hashed input, changed only by amendment, and golden vectors catch an unintended change (Test plan).
+- **Two deployment IDs share a display form.** Names carry 12 hex characters of the hash. The controller refuses to issue an ID whose display form an existing identity record holds with a different full hash, and raises an event (Deployment ID).
+- **Model names that contain `@` or `/` make names ambiguous.** The grammar splits at the last `@` (open question 5). A model whose own name contains `@` is then reachable only in a qualified form; reading LLMLab's model list before beta shows whether any exists.
 
 ### Open questions
 
-1. **Declared or resolved settings.** Does the hash cover the spec as declared, or the settings resolved on the target system (attention backend, kernels)? Does the same spec on two accelerator classes get one ID? This decides whether moving a deployment to another system is a handover. Decided by a spike that serves one spec on two accelerator classes and compares resolved settings and outputs. Leaning: resolved settings.
-2. **Managed providers.** LLMLab does not expose its revisions or flags, and its gateway changes requests. What does the ID hash for a catalog entry, given that it must never equal a self-hosted ID for the same checkpoint? Candidate: platform, catalog name and any revision the platform reports, marked opaque. The platform, not the provider: provider names are arbitrary, and two providers on LLMLab serve the same entry. Decided with HBEP-4 and HBEP-9.
-3. **Which settings are inputs.** Candidate rule: settings that change the model, the tokens it sees or the arithmetic layout are inputs; placement, capacity and transport settings are not. Where the per-engine-version list lives is shared with HBEP-4. Decided by a spike over vLLM's options.
-4. **Hash and display form.** Candidate: SHA-256 over canonical JSON (sorted keys, defaults made explicit), a scheme version as the first input, and a fixed-length prefix in names. Decided in design, with the prefix length checked against the expected number of deployments.
-5. **Name grammar.** Can LLMLab model names contain `@` or `/`? If so, candidate rule: split at the last `@`; provider names and deployment IDs never contain `@` or `/`. Decided by reading LLMLab's `/v1/models`.
-6. **Which level is the provider.** Resolved (owner decision): three levels. An Organization runs Platforms. A Provider is our access to one Platform: an account or grant, its credentials and settings. Provider names are arbitrary; organization, platform, partition and account are labels on the Provider. Two grants on one platform are two providers. `model@<provider>` uses the provider's name, and label selectors stay in the API and in routing policy (Vocabulary, Naming levels).
-7. **Changing a hashed field.** Is that a new ModelDeployment, or a rollout inside one, as a Kubernetes Deployment rolls out a new ReplicaSet? Either way the change gives a new deployment ID, and the identity record behind the old ID is never edited (HBEP-9). HBEP-11's admission restriction depends on the answer. Shared with HBEP-7.
-8. **Cardinality.** Resolved in part (owner decision): an Allocation may be reassigned to another ModelDeployment (Repurposing), and an Instance lives in one Allocation. So an Allocation may host Instances one after another. Still open: may one Allocation host several Instances at once? Candidate: yes, when its resources allow. Shared with HBEP-7.
-9. **Missing terms.** Resolved in this draft: the shared terms are defined under Vocabulary. A term any HBEP still needs is added here by amendment.
-10. **A managed allocation's hard end.** Is it none, or the expiry of the key that reaches the catalog? Shared with HBEP-4 and HBEP-7.
-11. **Pooling workers across Instances.** One router over the workers of several Instances could balance load across them, but the front would then not know which Instance answered. It is not part of this design, because it breaks Instance attribution. It is reconsidered only by amendment.
-12. **A provider-independent pinned name.** `model@<provider>/<deployment-id>` stops resolving once the deployment has no ready Instance on that provider, for example after its last Instance there is replaced on another provider. Should there be a pinned form without a provider, such as `model@*/<deployment-id>`? It depends on open question 1, which decides whether the ID changes across accelerator classes, and on the grammar of open question 5.
-13. **Executions under one job ID.** Slurm can requeue a batch job and run its script again under the same job ID. Is the second execution the same Allocation and the same Instance? Leaning, from spike S5 (requeue is on by default on every platform): submit with `--no-requeue`, as HBEP-4 and HBEP-7 propose, and treat a requeue that still happens as a failure of that Instance. The alternative, each execution as a new Instance in the same Allocation (open question 8 allows it), stays open for platforms that force requeue. Shared with HBEP-4 and HBEP-7.
+1. **Declared or resolved settings.** Decided: for alpha, scheme `v1` hashes the declared serving spec, the accelerator class (GPU model and CPU architecture) and the checkpoint's per-file SHA-256 list (spike S7, PR #33). The accelerator class is known before start, from the Allocation's partition, and is what the engine's kernel choices mostly depend on (L-8.2). The engine's resolved settings are recorded beside the hash, in the verification result each Instance adds to the identity record (HBEP-9). An Instance whose reported settings contradict the declared ones fails verification. So in `v1` one spec on two accelerator classes has two IDs, and moving a deployment between them is a spec rollout (open question 7), not a handover. Hashing the full resolved settings is left to a spike that serves one spec on two accelerator classes and compares resolved settings and outputs. If that refines the rule, it becomes scheme `v2`, and `v1` IDs stay valid records (Compatibility and upgrades).
+2. **Managed providers.** Decided: for alpha, the ID of a catalog entry hashes the platform, the catalog name and any revision the platform reports, marked opaque. The platform, not the provider: provider names are arbitrary, and two providers on LLMLab serve the same entry. A catalog entry's canonical form has a different shape from a served deployment's (Deployment ID), so it never equals a self-hosted ID for the same checkpoint. HBEP-9's lean for the managed identity record agrees.
+3. **Which settings are inputs.** Decided: for alpha, the candidate rule. Settings that change the model, the tokens it sees or the arithmetic layout are inputs; placement, capacity and transport settings are not. Scheme `v1` holds the classification as a table per engine, kept in code with the scheme and covered by golden vectors. A setting the table does not list is an input. Changing the table is a new scheme version. Batch-shaping settings count as capacity in `v1`; HBEP-9's measurement may move them in a later scheme. Where engine-wide data lives beyond alpha stays HBEP-4's open question 9.
+4. **Hash and display form.** Decided: SHA-256 over canonical JSON (sorted keys, the API schema's defaults made explicit), with the scheme version as the first input (`v1`). Names use the first 12 hex characters, the form of S4's job tag. The full hash is kept in the identity record. Deployment ID gives the exact form and why 12 hex characters are enough.
+5. **Name grammar.** Decided: split at the last `@`. Provider names and deployment IDs never contain `@` or `/`. Provider names are validated as Kubernetes DNS-1123 labels, since they are object names. Reading LLMLab's `/v1/models`, to confirm no LLMLab name breaks the grammar, is a check before beta (Graduation criteria).
+6. **Which level is the provider.** Decided: three levels (owner decision). An Organization runs Platforms. A Provider is our access to one Platform: an account or grant, its credentials and settings. Provider names are arbitrary; organization, platform, partition and account are labels on the Provider. Two grants on one platform are two providers. `model@<provider>` uses the provider's name, and label selectors stay in the API and in routing policy (Vocabulary, Naming levels).
+7. **Changing a hashed field.** Decided: a rollout inside one ModelDeployment, as a Kubernetes Deployment rolls out a new ReplicaSet. The new deployment ID's Instances replace the old ID's make-before-break, at the next natural handover by default (HBEP-7, open question 9). The identity record behind the old ID is never edited (HBEP-9). So HBEP-11's admission allows the edit to the ModelDeployment, and refuses only an edit to an existing identity record.
+8. **Cardinality.** Decided: an Allocation may be reassigned to another ModelDeployment (Repurposing; owner decision), and an Instance lives in one Allocation. One Allocation may host several Instances at once when its resources allow. Alpha places one Instance per Allocation.
+9. **Missing terms.** Decided: the shared terms are defined under Vocabulary. A term any HBEP still needs is added here by amendment.
+10. **A managed allocation's hard end.** Decided: for alpha, none. Key expiry is a provider-settings warning (HBEP-4), not a lease end.
+11. **Pooling workers across Instances.** Decided: not part of this design. One router over the workers of several Instances could balance load across them, but the front would then not know which Instance answered, which breaks Instance attribution. It is reconsidered only by amendment.
+12. **A provider-independent pinned name.** Not needed for alpha: `model@<provider>/<deployment-id>` stops resolving once the deployment has no ready Instance on that provider, for example after its last Instance there is replaced on another provider. Should there be a pinned form without a provider, such as `model@*/<deployment-id>`? It stays open. It depends on open question 1, whose `v1` answer gives one ID across accelerator classes, and on the grammar of open question 5.
+13. **Executions under one job ID.** Decided: from spike S4 (PR #32), submit with `--no-requeue`, and treat a requeue that still happens as a failure of that Instance. Requeue is on by default on every platform measured (spike S5, PR #19), and a site setting can still force one, so the check stays. The Allocation's job is released from its hold exactly once, so a requeued job that returns to a user hold is never released again. The replacement is a new Allocation. The alternative, each execution as a new Instance in the same Allocation, is dropped.
 
 ## Design details
 
@@ -88,26 +91,28 @@ In these stories, `helios-a`, `helios-b` and `athena-a` are names an operator ga
 - **Organization:** a computing center or company that runs platforms, such as Cyfronet or a university computing center. The HBEPs also call it a center.
 - **Platform:** a computing system that an organization runs, such as Helios, Athena, LLMLab or a small cluster.
 - **Provider:** our access to one platform: an account or grant, its credentials and its settings.
-  - Its name is arbitrary, like a Kubernetes object name, so it never contains `@` or `/`.
+  - Its name is arbitrary, like a Kubernetes object name. It is a DNS-1123 label, so it never contains `@`, `/` or `.`.
   - Organization, platform, partition and account are labels on it. Queries and routing policy (HBEP-5) select providers by these labels.
   - Two grants on one platform are two providers.
   - Its kind follows its platform:
     - managed: a fixed catalog, no start or restart. LLMLab is a platform of the Cyfronet organization, and a provider on it is a provider like any other;
     - batch: Slurm clusters, with leases that start at an unknown time and end at a hard limit;
     - static: later; always-on machines.
-- **Platform profile:** what is true for everyone on a platform, as data: hardware, architecture, limits, time zone, filesystems, requeue behaviour, expected performance and known issues. "The profile" alone means this. HBEP-4 owns it.
-- **Provider settings:** what one provider adds to its platform profile: the account, the grant, a credentials reference, the allowed partitions and the labels. HBEP-4 owns them.
+- **Platform profile:** what is true for everyone on a platform, as data: hardware, architecture, limits, time zone, filesystems, requeue behaviour, expected performance and known issues. "The profile" alone means this. HBEP-4 owns it; the PlatformProfile kind serves it (HBEP-11).
+- **Provider settings:** what one provider adds to its platform profile: the account, the grant, a credentials reference, the allowed partitions and the labels. HBEP-4 owns them; they are the spec of the Provider kind (HBEP-11).
 - **ModelDeployment:** what to serve: model, serving spec, number of instances, where (which providers), until when.
 - **Allocation:** capacity with a lifetime, like a Kubernetes node. It is one lease on a provider (a Slurm job, or a managed provider's catalog entry), with its start estimate and hard end.
   - Instances are placed on Allocations, as pods are on nodes.
   - An Allocation can outlive its Instances. Its retention policy then keeps or releases it, and it can later host Instances of a different ModelDeployment (Repurposing).
   - A managed catalog entry serves only its own model, so it is never repurposed.
+  - On a batch provider its job carries a tag, set before any submission, and its job ID is observed state, written once (Allocation and job identity).
 - **Instance:** one copy of a deployment inside one Allocation, as a lifecycle resource: it exists from its creation to its end, through the Instance phases below. Clients reach it, through the front, only while it is `ready` or `draining`.
 - **Naming levels:**
   - `model`: the deployments of that model on the providers the operator attached to the name, load-balanced; model names follow LLMLab's;
   - `model@<provider>`;
   - `model@<provider>/<deployment-id>`.
-- **Deployment ID:** a hash computed by the framework over what is served: checkpoint revision, engine version, flags, chat template, attention backend and similar settings. Not the job ID, not the engine fingerprint, and never a key. A handover keeps it.
+- **Deployment ID:** a hash computed by the framework over what is served: checkpoint revision and files, engine version, flags, chat template, attention backend and similar settings. Not the job ID, not the engine fingerprint, and never a key. A handover keeps it. Names show its display form, the first 12 hex characters.
+- **Identity record** (HBEP-9): the inputs behind one deployment ID, which never change, and beside them the verification result each Instance of that ID adds.
 - **Front:** the LLMLab-compatible API endpoint (HBEP-5). Its client key is set by the operator (HBEP-5).
 - **Control plane:** Kubernetes API custom resources plus controllers (HBEP-11). Models run in provider jobs, not pods.
 - **Hedging:** submit early, on several providers if needed; keep the first allocation to start; cancel the pending losers. The winner milestone, first to start, is provisional: HBEP-7's open question 1 proposes changing it to the first Allocation whose Instance serves. Hedging acts on pending Allocations; over-allocation acts on started ones.
@@ -115,6 +120,7 @@ In these stories, `helios-a`, `helios-b` and `athena-a` are names an operator ga
 - **Qualification:** the gate an Instance passes before it is kept: an identity check (HBEP-9) plus a short benchmark against the expected performance in its platform profile. It catches broken nodes, not only slow ones (HBEP-7).
 - **Retention policy:** what happens to an Allocation that hosts no Instance. Either it is kept as warm capacity, ready to host an Instance, until a date, a grant's end or a deadline; or it is released when idle. A kept Allocation still ends at its hard end. HBEP-7's open question 13 proposes keep as the default.
 - **Repurposing:** moving an Allocation to another ModelDeployment when a model's work finishes. The old Instance drains; an Instance of the new deployment starts in the same Allocation; it is verified and warmed up. An operator asks for it, often an agent that needs throughput across several models. Conversions between models are this operation (HBEP-7). Whether it needs approval is HBEP-10's question.
+- **Rollout:** replacing a ModelDeployment's Instances of one deployment ID with Instances of the new ID that an edit to its serving spec gives, make-before-break (open question 7).
 - **Replacement before release:** While a deployment keeps its desired capacity, the framework never releases a serving Instance before its replacement serves. That covers handovers, and the replacement of a failing Instance, while desired instances are above zero. Shutdown at the deployment's end time, scale-down, deletion, approved early termination and repurposing lower a deployment's capacity: their Instances drain and end without a replacement, and each Allocation left with no Instance follows its retention policy. Repurposing takes an Allocation from a deployment that is ending or scaling down.
   - A lease end is not a release. An Instance whose replacement is late drains and ends with its lease, under the drain rule (Handover).
 - **Dial home:** an instance opens an outbound tunnel to the front, because compute nodes are not reachable from outside (HBEP-6).
@@ -150,12 +156,24 @@ In these stories, `helios-a`, `helios-b` and `athena-a` are names an operator ga
 
 ### Resource model
 
+The five kinds, in API group `hpcburst.groundnuty.github.io`, version `v1alpha1` (HBEP-11 gives their schemas):
+
+| Kind | Scope | What it is | Owned by |
+|---|---|---|---|
+| PlatformProfile | cluster | one platform's profile (HBEP-4) | none |
+| Provider | cluster | our access to one platform: provider settings, labels and a credentials reference | none |
+| ModelDeployment | namespaced | what to serve | none |
+| Allocation | namespaced | one lease on a provider | none; it names the ModelDeployment it is assigned to |
+| Instance | namespaced | one copy of a deployment in one Allocation | its ModelDeployment |
+
+- **Scope.** Provider and PlatformProfile are cluster-scoped. Provider names appear in client model names, so they must be unique across the front, which a namespaced name cannot guarantee. A platform's profile is shared by all its providers.
 - A Provider is our access to one platform. Several providers can share a platform, each with its own name, labels and settings, and all of them use that platform's profile (HBEP-4).
 - An operator declares a ModelDeployment. The control plane places its Instances on Allocations on the providers its "where" allows: Allocations it obtains, hedging and over-allocating when needed, or Allocations repurposed to it (HBEP-7).
+- **Ownership.** A ModelDeployment owns its Instances, as a ReplicaSet owns its pods. Each Instance is bound to one Allocation for life, as a pod to a node. No ModelDeployment owns an Allocation, because an Allocation can outlive its Instances and host another deployment's. An Allocation names the ModelDeployment it is assigned to, and a repurpose changes that assignment. A pending Allocation is cancelled when its deployment ends; a started one follows its retention policy (HBEP-7).
 - Each Instance runs inside one Allocation and is reachable through the front. The front picks the deployment and the Instance, and the Instance's own router picks a worker (HBEP-5). So the front always knows which Instance answered.
-- An Allocation can outlive its Instances. With no Instance, its retention policy keeps it as warm capacity or releases it, and an operator can repurpose it to another ModelDeployment. Whether it hosts several Instances at once is open question 8.
+- An Allocation can outlive its Instances. With no Instance, its retention policy keeps it as warm capacity or releases it, and an operator can repurpose it to another ModelDeployment. Alpha places one Instance per Allocation; the model allows several at once when its resources allow (open question 8).
 - At a handover a new Instance, in another Allocation, replaces the old one. The framework releases the old Instance only after the new one serves; if the new one is late, the old one drains on time and ends with its lease (drain rule, under Handover). The deployment ID stays; the new Instance has its own metadata.
-- A managed provider's catalog entry is an Allocation that the framework cannot start, restart or repurpose. Its hard end is open question 10.
+- A managed provider's catalog entry is an Allocation that the framework cannot start, restart or repurpose. In alpha it has no hard end; a key that is about to expire raises a provider-settings warning (open question 10, HBEP-4).
 
 ### Naming levels
 
@@ -170,50 +188,113 @@ No client-facing name contains a job ID, node, port, URL or label selector.
 - **Provider names** are the operator's arbitrary names. Selecting providers by label, such as every provider on one platform, happens in the API and in routing policy, never in a client model name.
 - **Attaching.** The operator attaches providers to a model name in routing policy, by name or by label selector (HBEP-5). A user switching from LLMLab who wants requests to keep reaching it attaches the LLMLab provider explicitly, as one setup step.
 - **Pinned names.** `model@<provider>/<deployment-id>` resolves while that deployment has a ready Instance on that provider. Handovers within the provider keep it resolving. A pinned form without a provider is open question 12.
+- **Grammar** (open question 5):
+  1. Split the name at its last `@`. A name with no `@` is a plain model name.
+  2. The part before the `@` is the model name. It may contain `/` and `@`.
+  3. The part after it is `<provider>` or `<provider>/<deployment-id>`, split at its first `/`.
+  4. `<provider>` must be the name of an existing Provider. `<deployment-id>` must be exactly 12 lowercase hex characters, the display form.
+  5. Anything else is an error, with HBEP-5's error form: an unknown provider, an empty part, a malformed ID, or a trailing `/`. An error never falls back to resolving the name as a plain model.
+
+  So `org/m@helios-a/0123456789ab` is model `org/m` on `helios-a`, pinned; `a@b@helios-a` is model `a@b` on `helios-a`; `m@helios-a/` is an error. A plain name that contains `@` is parsed as a qualified one, so such a model is reachable only as `model@<provider>`.
 
 ### Deployment ID
 
-- **Inputs:** what is served: checkpoint revision, engine version, flags, chat template, attention backend and similar settings.
-- **Not inputs:** the job ID, node, URL and lease end, which are instance metadata; the engine fingerprint, which is recorded beside the ID; keys, including each Instance's own key, so that rotating a key never changes the ID.
-- **Computed by the framework,** not reported by the engine.
+- **Computed by the framework,** not reported by the engine, in scheme `v1` for alpha.
+- **Inputs of a served deployment (scheme `v1`):**
+  - the declared serving spec: checkpoint repository and full commit id; engine name, version and image digest; the engine flags and environment settings that are inputs under open question 3's rule; the chat template's content;
+  - the accelerator class: GPU model and CPU architecture, as the platform profile names them (HBEP-4);
+  - the checkpoint's per-file list: every file of the pinned revision, as its path relative to the checkpoint root and its SHA-256, sorted bytewise by path (spike S7, PR #33).
+- **Inputs of a managed catalog entry:** the platform, the catalog name, any revision the platform reports, and a marker that everything else is opaque (open question 2). Its JSON object has keys that a served deployment's never has, so the two can never hash the same bytes.
+- **Not inputs:** the job ID, node, URL and lease end, which are instance metadata; the engine fingerprint, which is recorded beside the ID; the engine's resolved settings, recorded beside the ID per Instance; keys, including each Instance's own key and any token used to read a checkpoint, so that rotating a key never changes the ID.
+- **Canonical form and hash.** The inputs form one JSON object, serialised by the JSON Canonicalization Scheme (RFC 8785): sorted keys, and fixed forms for numbers and strings. The hash is SHA-256 over the bytes of the scheme version `v1`, a line feed, and that JSON.
+  - "Defaults made explicit" means the API schema's defaults. A field left out and the same field set to its schema default give one ID.
+  - The engine's own defaults are not filled in. The engine reports them as resolved settings.
+- **Display form.** Names, labels and S4's job tag use the first 12 lowercase hex characters of the hash. The full 64-character hash is kept in the identity record and in each Instance's spec. A Kubernetes label value holds at most 63 characters, so only the display form fits in a label.
+- **Why 12 hex characters are enough.** They carry 48 bits. By the birthday bound, the chance that any two of n IDs share a display form is about n²/2⁴⁹.
+  - For 10,000 IDs it is about 2 × 10⁻⁷. That is far more IDs than one control plane is expected to issue, since it holds tens to hundreds of objects (HBEP-11).
+  - A collision is never silent. Before it issues an ID, the controller looks up the display form among the identity records. If a record there has a different full hash, it refuses the new ID, sets a condition on the ModelDeployment and raises an event. Resolving it then takes a new scheme version.
+- **When it is computed.** The controller computes the ID when it first reconciles a ModelDeployment's serving spec, before any Instance exists.
+  - For a checkpoint on the Hugging Face Hub, the per-file list comes from the Hub's listing at the full commit id, read with pagination (HBEP-9). LFS files contribute their `lfs.sha256`. The controller downloads each other file and hashes it itself, because the Hub gives SHA-256 only for LFS files. Those are the small files: configuration, tokenizer and template.
+  - Staging on a provider then checks every staged file against the list, and every Instance start rehashes the files (HBEP-9). Both checks cover the files present, and each must match its entry. A listed file that was never staged, because the engine does not load it, is not a failure.
+  - A gated repository needs a Hub token, referenced like provider credentials (HBEP-11).
+  - Checkpoints from other sources are not in alpha.
+  - Until the ID exists, the ModelDeployment has no current ID, and no Instance is created. Allocations can still be requested, because they do not depend on what they will host.
 - **Kept across a follow-on** that replaces a job.
+- **Rollout** (open question 7). An edit to a ModelDeployment's serving spec gives a new current ID. The ModelDeployment's status lists every ID that still has Instances, as a Deployment lists its ReplicaSets. The controller replaces old-ID Instances make-before-break, at their next natural handover by default (HBEP-7). An Instance never changes its ID.
+- **Verification** (open question 1). At start, each Instance reports its resolved settings. A declared setting that the engine reports with another value fails verification. The reported settings, with the GPU type, form the verification result that the Instance adds to the identity record (HBEP-9).
 - **Every response an Instance produces names its deployment and Instance.** An error the front raises before it chooses an Instance names the front instead (HBEP-9 defines how).
-- The exact canonical form and hash are open (questions 1, 3 and 4).
+
+### Allocation and job identity
+
+From spike S4 (PR #32).
+- **Name.** The controller generates an Allocation's name from its Provider's name and a random suffix, `<provider>-<5 random characters>`. It never derives from the model or the ModelDeployment.
+  - A name is then at most 69 characters, and the job tag at most 85.
+  - Each platform profile's job-name rules must allow that length (HBEP-4).
+- **Tag.** The job tag is `hb-<name>-<h>`. Here `h` is the first 12 hex characters of the SHA-256 of the UTF-8 string `<namespace>/<name>/<uid>`, the Allocation's own namespace, name and UID.
+  - The provider sets the tag as the Allocation's external name before any submission.
+  - It passes the tag to Slurm as `--job-name`. Slurm accounting keeps the job name; it keeps the job comment only when the site enables that (S4).
+- **Job ID.** The job ID is observed state. It is written once, when the job is established, and never changed or removed.
+- **Submission.** The provider follows S4's submission protocol (hold, adopt, release), which is HBEP-7's mechanism:
+  - it looks the tag up before every submission;
+  - it submits the job held, with `--no-requeue`;
+  - it adopts one job with the tag and cancels any extra held one;
+  - it releases the adopted job from its hold exactly once.
+- **Requeue** (open question 13). A requeue fails that Instance. The Allocation is never released again, and the controller replaces it with a new Allocation.
 
 ### Test plan
 
-- Golden vectors: fixed spec inputs and their expected IDs, written once and checked into the repository. They are never regenerated by the code under test, since an expectation computed by the same canonicaliser proves nothing.
-- The same spec with fields in a different order gives the same ID.
-- Changing each input changes the ID; changing each non-input (job ID, node, URL, lease end, instance count, an Instance's key) does not.
+- **Golden vectors.** Fixed inputs and their expected values, written once and checked into the repository: `v1` deployment IDs for served deployments and catalog entries, and job tags for given namespace, name and UID strings. They are never regenerated by the code under test, since an expectation computed by the same canonicaliser or hash helper proves nothing.
+- The same spec with fields in a different order gives the same ID. A field left out and the same field set to its schema default give the same ID.
+- Changing each input changes the ID, including one file's SHA-256 in the per-file list, and an engine flag the `v1` table does not list. Changing each non-input (job ID, node, URL, lease end, instance count, an Instance's key, a Hub token) does not.
+- A catalog entry and a served deployment of the same checkpoint never get the same ID.
+- **Display-form collision.** The test injects an identity record whose display form matches a new ID but whose full hash differs. The controller then refuses the new ID with a condition and an event. The record is injected because a real collision cannot be produced.
+- **Rollout.** Editing a hashed field gives a new current ID. Old-ID Instances keep their ID until they are replaced, and the old ID's record is unchanged.
 - A simulated handover keeps the ID and replaces the Instance with a new one.
 - A simulated repurpose keeps the Allocation and its name; the new Instance carries the new deployment's ID.
 - Two providers on one platform: `model@<provider>` resolves to each separately, and a selector on the platform label lists both.
 - Plain `model` with no provider attached returns the inactive-model error. Once the operator attaches the LLMLab provider, LLMLab answers.
-- The name parser handles model names containing `/` and `@`, per open question 5.
-- If question 1 resolves to resolved settings: an instance that reports settings differing from its deployment's inputs is refused.
+- **The name parser.**
+  - It accepts `example-27b`, `example-27b@helios-a`, `example-27b@helios-a/0123456789ab`, `org/m@helios-a/0123456789ab` and `a@b@helios-a`, with the parts given under Grammar.
+  - It returns an error for `m@helios-a/`, `m@/0123456789ab`, an unknown provider, and an ID of the wrong length or with uppercase characters.
+  - No error falls back to a plain model.
+- Provider names with `.`, `@`, `/` or uppercase characters are refused.
+- An Instance that reports a resolved setting contradicting a declared one fails verification. One that reports a setting the spec does not declare passes, and the setting is recorded.
+- A requeued job, against S4's fake Slurm, fails its Instance. The job is not released again, and the replacement is a new Allocation.
 
 ### Compatibility and upgrades
 
 - `model` names follow LLMLab's, so clients written for LLMLab keep working once the operator attaches the providers that should serve each name, LLMLab's among them if it should keep answering. The other two levels are opt-in.
 - Clients treat deployment IDs as opaque strings. A downgrade leaves issued IDs readable.
-- A change to the hashing rules is an amendment with a new scheme version. IDs already issued stay valid as records.
+- A change to the hashing rules, the input table or the display form's length is an amendment with a new scheme version. IDs already issued stay valid as records.
+- The kinds start at `v1alpha1`. Their versioning and conversion are HBEP-11's.
 
 ### Security
 
 - Credentials, such as a token for a model repository or an Instance's own key, are never hash inputs and never appear in names: a hash of a short secret can be reversed by guessing.
 - Deployment IDs carry no private paths or account names. The account is a label on the Provider, not its name, because provider names appear in client model names.
+- Job tags carry the Allocation's name and a hash, never a model, account or path.
 - Who may resolve an ID back to its inputs is decided in HBEP-9.
 
 ### Graduation criteria
 
-TBD. Candidate: alpha when IDs are computed and named on responses for LLMLab and one batch provider; beta when handovers keep the ID on each of two batch providers; stable when the scheme is frozen with golden vectors.
+- **Alpha:**
+  - the five kinds are served at `v1alpha1` (HBEP-11);
+  - `v1` IDs match the golden vectors for a Hub checkpoint and for an LLMLab catalog entry;
+  - the name parser passes its tests;
+  - on one batch provider, an Allocation runs under its tag and hosts an Instance that carries its deployment ID, and a requeue there fails that Instance.
+- **Beta:**
+  - handovers keep the ID on each of two batch providers;
+  - a rollout replaces Instances make-before-break;
+  - LLMLab's `/v1/models` has been read, and no name there breaks the grammar (open question 5);
+  - every response names its deployment and Instance (with HBEP-9).
+- **Stable:** the scheme in use is frozen, with its golden vectors run in CI, and the kinds have reached a stable API version (HBEP-11).
 
 ## Operational readiness
 
 1. **Working:** every serving instance carries its deployment's ID, and every response an Instance produces names a deployment and Instance known to the inventory. Such a response without them, or naming an unknown ID, is the failure signal.
-2. **Restart:** IDs are recomputed from stored specs. A recomputed ID that differs from the stored one means the hashing rules drifted.
-3. **Silent failure:** two instances under one ID that serve differently, because an input was missed. Comparing the engine fingerprints and reported settings recorded within one ID on one provider shows it.
-4. **Provider limits:** framework names are not provider job names. Job-name rules (prefixes, length) belong to the platform profile (HBEP-4).
+2. **Restart:** IDs are recomputed from the inputs stored in identity records. A recomputed ID that differs from the stored one means the hashing rules drifted.
+3. **Silent failure:** two instances under one ID that serve differently, because an input was missed or because `v1` does not hash resolved settings. Comparing the engine fingerprints, resolved settings and GPU types recorded within one ID shows it.
+4. **Provider limits:** framework names are not provider job names. Job-name rules (prefixes, length) belong to the platform profile (HBEP-4), and the job tag's length is bounded to fit them (Allocation and job identity).
 5. **Capacity and exhaustion:** N/A; naming holds no capacity.
 6. **Idle cost:** none.
 7. **Rollback:** a hashing change rolls back with its scheme version; issued IDs stay valid records.
@@ -224,6 +305,7 @@ TBD. Candidate: alpha when IDs are computed and named on responses for LLMLab an
 - Deployment IDs are opaque to people, so tools must show the inputs beside them.
 - Three naming levels add parsing to the front.
 - Plain `model` reaches nothing until the operator attaches providers: one more setup step for a user switching from LLMLab.
+- In `v1`, one ModelDeployment that spans two accelerator classes has two deployment IDs, so `model@provider/<deployment-id>` pins one class. Within one class, a remaining difference in resolved settings shows only in the recorded settings.
 
 ## Alternatives
 
@@ -234,6 +316,9 @@ TBD. Candidate: alpha when IDs are computed and named on responses for LLMLab an
 - **Label selectors in client model names.** Rejected: clients keep plain names, and which providers serve a name is the operator's routing policy.
 - **An Allocation bound to one deployment for life.** Rejected: capacity left when one model's work ends would go back to the queue, and a new job would wait again.
 - **Kubernetes' `pod-template-hash`.** A Deployment names each ReplicaSet by a hash of its pod template, and a replaced pod keeps that hash. The deployment ID follows the same idea, over what is served instead of over a pod template.
+- **A changed spec as a new ModelDeployment.** Rejected for alpha (open question 7): every fix would need a new object and a hand-run move of traffic, while a rollout keeps one object and replaces Instances make-before-break.
+- **Resolved settings as inputs in `v1`.** Deferred to a later scheme (open question 1): the ID would then be known only after an Instance starts on each accelerator class.
+- **A longer display form.** More characters cost length in names and job tags, and 12 already makes a collision unlikely and detectable.
 
 ## Prior art and reuse
 
@@ -243,22 +328,23 @@ The resource model replaces state that www-2027 operators kept by hand: per-job 
 
 | Component | Origin (project, URL) | Licence | How used (dependency, copied code, optional) |
 |---|---|---|---|
-| Kubernetes custom resources, on k3s or kcp | [k3s](https://github.com/k3s-io/k3s); [kcp](https://github.com/kcp-dev/kcp) | k3s Apache-2.0; kcp Apache-2.0 | Candidate host, as HBEP-11 decides: k3s for the team option, and the single-user host by spike S3 |
-| crossplane-runtime | [crossplane/crossplane-runtime](https://github.com/crossplane/crossplane-runtime) | Apache-2.0 | Candidate, decided by spike S4: the Allocation as a managed resource whose external name is its deterministic job tag. Not Crossplane core or compositions |
-| model_signing | [sigstore/model-transparency](https://github.com/sigstore/model-transparency) | Apache-2.0 | Candidate, decided by spike S7: the checkpoint input to the deployment ID as a sorted per-file SHA-256 list, never the library's root digest |
+| Kubernetes custom resources, on the host HBEP-11 picks | [kubernetes/kubernetes](https://github.com/kubernetes/kubernetes); [k3s](https://github.com/k3s-io/k3s); [kcp](https://github.com/kcp-dev/kcp) | Apache-2.0 | Dependency: the API that serves the five kinds. HBEP-11 picks the single-user host, settled by spike S3 (PR #36); k3s is the team option |
+| crossplane-runtime | [crossplane/crossplane-runtime](https://github.com/crossplane/crossplane-runtime) | Apache-2.0 | Dependency, from spike S4 (PR #32): the Allocation is a managed resource whose external name is its job tag, and whose `providerConfigRef` names a Provider. Not Crossplane core or compositions |
+| model_signing | [sigstore/model-transparency](https://github.com/sigstore/model-transparency) | Apache-2.0 | Optional, from spike S7 (PR #33): its file mode gives the same per-file SHA-256 as our own hashing, so the ID does not depend on it, and never on its root digest |
 
 ### Designs and published work borrowed
 
 | Idea | Origin (project, paper or document) | Where it lands here |
 |---|---|---|
-| Name a replica set by a hash of its template; a replaced pod keeps the hash | Kubernetes Deployment's `pod-template-hash` | Deployment ID, hashed over what is served |
+| Name a replica set by a hash of its template; a replaced pod keeps the hash; a template change rolls out a new replica set | Kubernetes Deployment's `pod-template-hash` and rollouts | Deployment ID, hashed over what is served; open question 7 |
+| A canonical JSON serialisation for hashing | RFC 8785, JSON Canonicalization Scheme ([rfc-editor.org/rfc/rfc8785](https://www.rfc-editor.org/rfc/rfc8785), accessed 2026-10-30) | The `v1` canonical form |
 | Two address families, version-agnostic and per-version; per-cluster routes | KServe LLMInferenceService ([kserve/kserve](https://github.com/kserve/kserve)); ALCF FIRST ([argonne-lcf/FIRST](https://github.com/argonne-lcf/FIRST)) | Naming levels, kept inside the `model` field |
 | ModelDeployment field names | KServe LLMInferenceService | ModelDeployment fields |
 | v1beta2 condition vocabulary | Cluster API ([kubernetes-sigs/cluster-api](https://github.com/kubernetes-sigs/cluster-api)) | Allocation and Instance conditions |
 | A desired pool kept apart from one unit of capacity with conditions and a finalizer (NodePool and NodeClaim) | Karpenter ([kubernetes-sigs/karpenter](https://github.com/kubernetes-sigs/karpenter)) | The Allocation as a NodeClaim-like resource |
 | Launched, Registered and Initialized conditions plus a Ready summary | Karpenter ([NodeClaim docs](https://karpenter.sh/docs/concepts/nodeclaims/)) | Allocation conditions, beside the Instance phases |
-| Management policies without Update; deterministic external names | Crossplane ([crossplane/crossplane](https://github.com/crossplane/crossplane)) | The job tag as the Allocation's external name; a submitted job is never edited |
-| `--no-requeue` | SkyPilot's Slurm provisioner ([skypilot-org/skypilot](https://github.com/skypilot-org/skypilot)) | Open question 13: the no-requeue candidate |
+| Management policies without Update; deterministic external names; a ProviderConfig that managed resources reference | Crossplane ([crossplane/crossplane](https://github.com/crossplane/crossplane)) | The job tag as the Allocation's external name; a submitted job is never edited; `providerConfigRef` names our Provider |
+| `--no-requeue` | SkyPilot's Slurm provisioner ([skypilot-org/skypilot](https://github.com/skypilot-org/skypilot)) | Open question 13 |
 | A scale subresource for external autoscalers | Slinky NodeSets ([SlinkyProject/slurm-operator](https://github.com/SlinkyProject/slurm-operator)); KubeAI ([kubeai-project/kubeai](https://github.com/kubeai-project/kubeai)) | ModelDeployment's number of instances |
 
 ### Field lessons answered
@@ -266,10 +352,10 @@ The resource model replaces state that www-2027 operators kept by hand: per-job 
 | Lesson | Lesson ID (from the lessons catalogue, HBEP-15) | How this HBEP answers it |
 |---|---|---|
 | A follow-on on a new node changed the URL, so every client had to re-point. | L-1.22 | URLs are Instance metadata; names survive handovers within a provider. |
-| Job names stopped matching contents once jobs were reused for other models. | L-10.11 | Allocations are named without a model; what is served is named by the deployment ID. |
+| Job names stopped matching contents once jobs were reused for other models. | L-10.11 | Allocations and their job tags are named without a model; what is served is named by the deployment ID. |
 | Engine fingerprints differed per site and could not be reproduced offline. | L-8.1 | The fingerprint is recorded beside the deployment ID, never used as it. |
-| One checkpoint name hid real differences in kernels and local patches. | L-8.2 | Open question 1: hash resolved settings and refuse an Instance whose settings differ. |
-| Checkpoints were served without a pinned revision. | L-8.3 | The revision is a hashed input, resolved to an immutable revision at admission. |
+| One checkpoint name hid real differences in kernels and local patches. | L-8.2 | Scheme `v1` hashes the declared spec, the accelerator class and every checkpoint file; resolved settings are recorded beside the ID per Instance, and a contradicted declared setting fails verification. |
+| Checkpoints were served without a pinned revision. | L-8.3 | Only a full commit id is admitted, and the per-file SHA-256 list is a hashed input. |
 | Proving that only one configuration answered under a name was hard. | L-8.4 | Pinned names; every response names its deployment and Instance. |
 | The route URL became part of the identity. | L-8.5 | A URL is never a name or a deployment-ID input. |
 | Serving configuration was reconstructed afterwards from fingerprints. | L-8.7 | The framework computes the deployment ID from what is served. |
@@ -281,6 +367,7 @@ The resource model replaces state that www-2027 operators kept by hand: per-job 
 - 2026-10-28: proposed (provisional), tracking issue #3.
 - 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
 - 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation.
+- 2026-10-30: implementable. Owner decisions on the API group, kinds and version folded in; spikes S4 (PR #32), S5 (PR #19) and S7 (PR #33) carried in; every open question decided or marked for alpha.
 
 ## Amendments
 
