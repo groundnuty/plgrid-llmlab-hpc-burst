@@ -55,7 +55,7 @@ facts:
       method: measured
       source: "command -v slurmrestd; slurmrestd -V"
       date: 2026-10-30
-      note: "Lives in the site's Slurm release tree, not in /usr. Without JWT (see jwt_token) a plain user has no token to present to it. Whether a slurmrestd service runs and where is not known."
+      note: "Lives in the site's Slurm release tree, not in /usr. JWT is not enabled (see jwt_token), but slurmrestd can also run with local (unix-socket) auth. Whether a slurmrestd service runs, where, and whether a plain user can reach it is not known."
     slurmrestd_advertised:
       value: false
       method: documented
@@ -67,7 +67,7 @@ facts:
       method: measured
       source: "scontrol show config (MinJobAge)"
       date: 2026-10-30
-      note: "A finished job leaves squeue and scontrol show job after about 10 s; later state must come from sacct."
+      note: "MinJobAge is the minimum age before a completed job's record is purged from the controller, so a completed job can disappear from squeue within about 10 s. Later state must come from sacct."
     job_requeue:
       value: "1"
       method: measured
@@ -213,7 +213,7 @@ facts:
       priority_tier: 2
       priority_job_factor: 1000
       def_mem_per_cpu_mb: 8000
-      access: "AllowAccounts is a short list of non-grant (laboratory) accounts plus administrative ones. It is the cluster's default partition, so a plain user who names no partition is refused (see submission.sbatch_test_only)."
+      access: "AllowAccounts is a short list of non-grant (laboratory) accounts plus administrative ones. It is the cluster's default partition; a submission that names no partition was refused for the probing user's default account (see submission.sbatch_test_only)."
       method: measured
       source: "sinfo (partition name carries a * for default); scontrol show partition; scontrol show node -o"
       date: 2026-10-30
@@ -356,11 +356,11 @@ facts:
 
   submission:
     sbatch_test_only:
-      value: "refused: Invalid account or account/partition combination specified (needs an explicit account)"
+      value: "refused on the default partition gpu-a100 with the probing user's default account: Invalid account or account/partition combination specified"
       method: measured
       source: "sbatch --test-only --job-name=s5probe --time=00:05:00 --wrap=true"
       date: 2026-10-30
-      note: "Exit 1, 'allocation failure: Invalid account or account/partition combination specified'. No -A or -p was given, so the default partition gpu-a100 and the default account were tried; the partition's AllowAccounts excludes a plain user. No grant was chosen and no further test was run, per the spike rules. That a plain user also needs an explicit partition, plgrid-gpu-a100, is inferred from the default partition's AllowAccounts and the docs, not tested. Whether plgrid-gpu-a100 with a valid -A accepts a test-only job is not measured."
+      note: "Exit 1, 'allocation failure: Invalid account or account/partition combination specified'. No -A or -p was given, so the default partition gpu-a100 and the probing user's default account were tried. The likely cause is that the partition's AllowAccounts (laboratory accounts) does not include that account; this was not isolated. No grant was chosen and no further test was run, per the spike rules. That a plain user also needs an explicit partition, plgrid-gpu-a100, is inferred from the default partition's AllowAccounts and the docs, not tested. Whether plgrid-gpu-a100 with a valid -A accepts a test-only job is not measured."
     account_naming:
       value: "grantname-gpu-a100 (the suffix is mandatory; sbatch -A grantname alone fails)"
       method: documented
@@ -386,26 +386,38 @@ facts:
     apptainer_or_singularity_login_node:
       value: false
       method: measured
-      source: "command -v apptainer singularity; bash -lc 'module -t spider Apptainer / Singularity' (Lmod: Unable to find)"
+      source: "command -v apptainer singularity (non-login and login shell); bash -lc 'module -t spider Apptainer / Singularity' (Lmod: Unable to find); rpm -qa | grep -i -E 'apptainer|singularity|enroot|pyxis' (printed nothing)"
       date: 2026-10-30
-      note: "Neither binary is on PATH and neither is a module on the login node. The docs say the module tree on Athena is unsupported and that module spider should be run on a compute node for the full list (https://docs.hpc.cyfronet.pl/software/modules/), so this says nothing about compute nodes. The Athena docs pages searched do not mention containers or Apptainer at all."
+      note: "On the login node, neither binary is on PATH, neither is an Lmod module (checked in a login shell), and the rpm query printed no such package. The docs say the module tree on Athena is unsupported and that module spider should be run on a compute node for the full list (https://docs.hpc.cyfronet.pl/software/modules/), so this says nothing about compute nodes. The Athena docs pages searched do not mention containers or Apptainer at all."
     apptainer_version:
       value: "none installed on the login node"
       method: measured
       source: "apptainer --version (command not found)"
       date: 2026-10-30
+    other_runtimes_login_node:
+      value: "none found on PATH: enroot, podman, docker. Not searched for: charliecloud, udocker, sarus, shifter"
+      method: measured
+      source: "command -v enroot podman docker (non-login and login shell); bash -lc 'module -t spider enroot' (Lmod: Unable to find)"
+      date: 2026-10-30
+      note: "Login node only. Absence of these on the login node does not show that no runtime exists on the compute nodes."
     pyxis_enroot:
       value: false
       method: measured
       source: "command -v enroot; srun --help | grep -i container; ls /etc/slurm/plugstack.conf*; scontrol show config (PlugStackConfig)"
       date: 2026-10-30
-      note: "No enroot, no plugstack.conf and PlugStackConfig=(null), so no SPANK plugin is configured. srun --help shows only the stock --container and --container-id (OCI bundle) flags, no --container-image. Pyxis is absent."
-    slurm_oci_support:
-      value: "flags exist, plugin not configured"
+      note: "No enroot, no plugstack.conf and PlugStackConfig=(null), so no SPANK plugin is configured as seen from the login node. srun --help shows only the stock --container and --container-id (OCI bundle) flags, no --container-image. Pyxis is absent on the login node."
+    slurm_oci_login_node_view:
+      value: "srun lists --container and --container-id; JobContainerType=(null); the /etc/slurm file-name listing has no oci.conf"
       method: measured
       source: "srun --help | grep -i container; scontrol show config (JobContainerType); ls /etc/slurm"
       date: 2026-10-30
-      note: "JobContainerType=(null) and /etc/slurm has no oci.conf file name, so stock Slurm OCI container support is not set up (an inference from the missing config, not a job test)."
+      note: "This is what the login node shows. It does not establish whether Slurm's native OCI support is configured for execution on the compute nodes (oci.conf is read where the job runs, and the compute nodes were not inspected)."
+    slurm_oci_compute_nodes:
+      value: null
+      method: unknown
+      source: "needs a job; S5 runs none"
+      date: 2026-10-30
+      note: "Whether Slurm's native OCI container support, or any other container runtime, works on the compute nodes is not known."
     user_namespaces_login_node:
       value: false
       method: measured
@@ -486,15 +498,27 @@ facts:
       method: measured
       source: "date +'%Z %z'; echo TZ=$TZ; timedatectl | grep -i zone; scontrol show config | head -1 compared with date -u"
       date: 2026-10-30
-      note: "TZ is unset; timedatectl reports Europe/Warsaw. Slurm client output is in local time: scontrol printed 07:15:25 when date -u printed 06:15:25. Warsaw observes daylight saving, so expect +0200 (CEST) in summer; that part is inferred from the zone name, not measured. Compute-node zone is unknown."
+      note: "TZ is unset; timedatectl reports Europe/Warsaw. Slurm client output is in local time: scontrol printed 07:15:25 when date -u printed 06:15:25. Warsaw observes daylight saving, so expect +0200 (CEST) in summer; that part is inferred from the zone name, not measured. This is the zone of a login session's text output, not a property of the scheduler. Epoch fields (for example in JSON output) are unaffected by the session zone, so plugins should prefer epoch or JSON timestamps over parsing text. Compute-node zone is unknown."
 
   login_node_policy:
-    long_running_user_process_allowed:
-      value: false
+    computations_on_login_node:
+      value: "prohibited: any computation launched on the access host is killed without notice; the host is for preparing input files and submitting jobs"
       method: documented
       source: "https://docs.hpc.cyfronet.pl/environment/general-rules/"
       date: 2026-10-30
-      note: "The docs say any computation launched on the access host is killed without notice and the host is for preparing input files and submitting jobs. A per-user memory limit applies to all processes on the host and a process over it is killed (the limit is not stated). The docs do not mention a light poller or daemon; not tested, per the spike rules."
+      note: "A per-user memory limit applies to all processes on the host and a process over it is killed (the limit is not stated)."
+    long_running_process_allowed:
+      value: null
+      method: unknown
+      source: "https://docs.hpc.cyfronet.pl/environment/general-rules/ (read; the page does not address a lightweight long-running non-compute process such as a poller or a tunnel)"
+      date: 2026-10-30
+      note: "Not stated either way, and not tested, per the spike rules. The prohibition above covers computations; whether a lightweight poller counts is not documented."
+    ssh_connection_limits:
+      value: null
+      method: unknown
+      source: "not probed: S5 did not attempt to read /etc/ssh/sshd_config or sshd_config.d on Athena"
+      date: 2026-10-30
+      note: "No read was attempted, so nothing is known about MaxStartups, MaxSessions or login throttling here. HBEP-4 mentions throttling from parallel logins."
     gpu_only:
       value: "Athena is for GPU-enabled jobs only; extensive workloads that do not use GPUs lead to account suspension"
       method: documented
@@ -534,8 +558,8 @@ unknown:
     reason: "needs a job; S5 runs none. No prior observation; the docs are silent."
   - fact: "compute-node inbound from outside"
     reason: "the docs are silent and a test needs a job"
-  - fact: "Apptainer or Singularity on compute nodes (and version)"
-    reason: "not on the login node; the docs do not mention containers; a check needs a job"
+  - fact: "container runtimes on compute nodes (Apptainer, Singularity, enroot or others), their versions, and whether Slurm's native OCI support is configured there"
+    reason: "none of apptainer, singularity, enroot, podman or docker was found on the login node, and the docs do not mention containers; that says nothing about compute nodes, and a check needs a job"
   - fact: "user namespaces on compute nodes"
     reason: "needs a job; the login node has max_user_namespaces=0, which says nothing about compute nodes"
   - fact: "size, filesystem type and permissions of $SCRATCH_LOCAL and $MEMFS on a compute node, and the value of $TMPDIR there"
@@ -548,5 +572,9 @@ unknown:
     reason: "the default test failed on account/partition; the spike rules forbid choosing a grant"
   - fact: "the login node's per-user memory limit and any process-count or CPU-time limit"
     reason: "the docs state that a limit exists but not its value; probing it was out of scope"
+  - fact: "whether a lightweight long-running process (a poller) on the login node is allowed"
+    reason: "the docs prohibit computations on the login node but do not address a lightweight poller; S5 must not test it"
+  - fact: "ssh connection limits of the login node (MaxStartups, MaxSessions)"
+    reason: "not probed: S5 did not attempt to read sshd_config on Athena; HBEP-4 mentions throttling from parallel logins"
   - fact: "whether a slurmrestd service is running and where it is reachable"
-    reason: "the binary exists but JWT is off and the docs do not advertise a service"
+    reason: "the binary exists and the docs do not advertise a service; JWT is not enabled, but slurmrestd can also run with local (unix-socket) auth, so reachability for a plain user is unverified"

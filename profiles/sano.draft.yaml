@@ -212,7 +212,7 @@ facts:
       method: measured
       source: "date +'%Z %z' (UTC +0000); echo TZ (empty); timedatectl (Etc/UTC); first line of scontrol show config ('Configuration data as of ...') against date -u in the same second; sbatch --test-only start estimate for partition test against date -u"
       date: 2026-10-30
-      note: "Slurm client output is formatted in the session's zone, which is UTC here, so squeue, sacct and sbatch print UTC. Not tested with a TZ override or from a client in another zone."
+      note: "Slurm client output is formatted in the session's zone, which is UTC here, so squeue, sacct and sbatch print UTC. Not tested with a TZ override or from a client in another zone. This is the zone of a login session's text output, not a property of the scheduler. Epoch fields (for example in JSON output) are unaffected by the session zone, so plugins should prefer epoch or JSON timestamps over parsing text."
   login_node_policy:
     long_running_process_allowed:
       value: null

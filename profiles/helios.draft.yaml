@@ -40,8 +40,8 @@ facts:
       source: "command -v slurmrestd"
       date: 2026-10-30
       note: "exit 0. The binary is part of the Slurm client installation on the login node. This says nothing about a running service."
-    slurmrestd_service: {value: unknown, method: unknown, source: "docs.hpc.cyfronet.pl search index (249 pages) searched for slurmrestd, rest api, jwt, openapi", date: 2026-10-30, note: "no hit in the documentation pages. Not advertised there. That is not proof that no endpoint exists. With JWT unavailable, a REST client would need munge-based access, which is not documented either."}
-    min_job_age_s: {value: 10, method: measured, source: "scontrol show config: MinJobAge", date: 2026-10-30, note: "a finished job leaves squeue after 10 seconds. Poll sacct for final states."}
+    slurmrestd_service: {value: "not advertised; availability unknown", method: unknown, source: "docs.hpc.cyfronet.pl search index (249 pages) searched for slurmrestd, rest api, jwt, openapi", date: 2026-10-30, note: "no hit in the documentation pages. Not advertised there. That is not proof that no endpoint exists. JWT is not enabled, but slurmrestd can also run with local (unix-socket) auth, so whether a plain user can reach any REST endpoint is unverified."}
+    min_job_age_s: {value: 10, method: measured, source: "scontrol show config: MinJobAge", date: 2026-10-30, note: "MinJobAge is the minimum age before a completed job's record is purged from the controller, so a completed job can disappear from squeue within about 10 s. Poll sacct for final states."}
     job_requeue: {value: 1, method: measured, source: "scontrol show config: JobRequeue", date: 2026-10-30, note: "jobs are requeueable by default. Submit with --no-requeue to prevent it."}
     requeue_exit: {value: null, method: measured, source: "scontrol show config: RequeueExit", date: 2026-10-30, note: "scontrol prints (null)"}
     requeue_exit_hold: {value: null, method: measured, source: "scontrol show config: RequeueExitHold", date: 2026-10-30, note: "scontrol prints (null)"}
@@ -79,8 +79,8 @@ facts:
       method: measured
       date: 2026-10-30
       source: "sbatch --test-only --wrap=true --time=00:01:00 --job-name=s5probe --ntasks=1 --mem=1G --partition=<p> (no --account, no --qos); the GPU run added --gres=gpu:1"
-      note: "Run without --account and --qos, so Slurm used the probing user's default account. CPU partition plgrid: exit 0, a start estimate came back, no job was created. GPU partition plgrid-gpu-gh200: exit 1, 'allocation failure: Invalid account or account/partition combination specified'. So a GPU submission needs an explicit account with the -gpu-gh200 suffix (the account naming rule is documented at https://docs.hpc.cyfronet.pl/environment/batch-system/accounts-and-grants/). No account was tried after that failure. The result depends on the user's default account and grants."
-      value: {plgrid: {exit: 0, outcome: "start estimate returned"}, plgrid-gpu-gh200: {exit: 1, outcome: "needs an explicit account"}}
+      note: "Run without --account and --qos, so Slurm used the probing user's default account. CPU partition plgrid: exit 0, a start estimate came back, no job was created. GPU partition plgrid-gpu-gh200: exit 1, 'allocation failure: Invalid account or account/partition combination specified'. The documented account naming rule (a resource suffix such as -gpu-gh200, https://docs.hpc.cyfronet.pl/environment/batch-system/accounts-and-grants/) is a likely reason, but no account was tried after the failure, so the cause was not isolated. Both results depend on the probing user's default account and grants."
+      value: {plgrid: {exit: 0, outcome: "start estimate returned"}, plgrid-gpu-gh200: {exit: 1, outcome: "Invalid account or account/partition combination specified (with the probing user's default account)"}}
   partitions:
     # The six partitions below are the ones the documentation or the QOS list
     # points users at. Time limits, node counts and hardware are per partition.
@@ -247,14 +247,20 @@ facts:
       method: measured
       source: "scontrol show config header ('Configuration data as of ...') compared with date -u in the same call: local 07:19:32, UTC 06:19:32; date +'%Z %z'; timedatectl; /etc/localtime"
       date: 2026-10-30
-      note: "TZ is unset in the ssh session, so the zone comes from the system. CET is the winter offset; daylight saving ended on 2026-10-25 and the offset becomes +0200 (CEST) in summer. Slurm text output prints local time without a zone marker. The time zone of the epoch values in the JSON output was not checked."
+      note: "TZ is unset in the ssh session, so the zone comes from the system. CET is the winter offset; daylight saving ended on 2026-10-25 and the offset becomes +0200 (CEST) in summer. Slurm text output in this session prints local time without a zone marker. Epoch fields (for example in JSON output) are unaffected by the session zone, so plugins should prefer epoch or JSON timestamps over parsing text. This is the zone of a login session, not a property of the scheduler."
   login_node_policy:
-    long_running_process:
-      value: "not stated explicitly"
+    computations_on_login_node:
+      value: "prohibited: any computation launched on the access host is killed without notice; the host is only for preparing input files and submitting jobs"
       method: documented
       source: "https://docs.hpc.cyfronet.pl/environment/general-rules/"
       date: 2026-10-30
-      note: "The page says: 'Any computations launched on the access host will be killed without notice. The access host should only be used to prepare input files and submitting jobs to the scheduler.' It also says the access host sets a memory limit for all processes of one user, and that exceeding it kills the offending process. A lightweight long-running non-compute process (a poller, a tunnel) is not addressed either way. It was not tested."
+      note: "The page says: 'Any computations launched on the access host will be killed without notice. The access host should only be used to prepare input files and submitting jobs to the scheduler.' It also says the access host sets a memory limit for all processes of one user, and that exceeding it kills the offending process."
+    long_running_process_allowed:
+      value: null
+      method: unknown
+      source: "https://docs.hpc.cyfronet.pl/environment/general-rules/ (read; the page does not address a lightweight long-running non-compute process such as a poller or a tunnel)"
+      date: 2026-10-30
+      note: "Not stated either way, and not tested, per the spike rules. The prohibition above covers computations; whether a lightweight poller counts is not documented."
     per_user_limits:
       value: {memory_max_bytes: 5368709120, cpu_quota: "1 CPU (1 s per second)", tasks_max: 1233698, open_files: 32768, cpu_time_limit: "unlimited"}
       method: measured
@@ -269,7 +275,7 @@ facts:
       method: unknown
       source: "needs a job; S5 runs none"
       date: 2026-10-30
-      prior_observation: "In an earlier project, jobs on Helios compute nodes reached github.com and an external HTTPS API. This is not a fact for this profile."
+      prior_observation: "In an earlier project, jobs on Helios compute nodes reached an external code-hosting service and an external HTTPS API. This is not a fact for this profile."
       note: "the documentation does not say. Indirect hint, not a statement: the GPU/ML example batch script installs packages with pip from inside the job (https://docs.hpc.cyfronet.pl/supercomputers/helios/GPU/). No http(s)_proxy variables are set in the login-node ssh environment (measured with env)."
     compute_inbound_from_outside:
       value: unknown
@@ -302,7 +308,7 @@ unknown:
   - fact: "Apptainer version and setuid behaviour on compute nodes (el9; aarch64 on GH200)"
     reason: "needs a job; only the login-node install (1.5.4, EL8 x86_64) was measured"
   - fact: "slurmrestd service"
-    reason: "binary present in the client install; no endpoint advertised in the documentation; JWT is not available to plain users"
+    reason: "binary present in the client install; no endpoint advertised in the documentation; JWT is not enabled, but slurmrestd can also run with local (unix-socket) auth, so reachability for a plain user is unverified"
   - fact: "ssh connection limits of the login node (MaxStartups, MaxSessions)"
     reason: "sshd configuration not readable; HBEP-4 mentions throttling from parallel logins"
   - fact: "size of node-local disk behind -C localfs"
