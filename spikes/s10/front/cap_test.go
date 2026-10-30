@@ -285,3 +285,30 @@ func TestAdaptiveBoundSwitchesWithReadiness(t *testing.T) {
 		}
 	}
 }
+
+// Spike S10c, option 5: the bound and the cap follow readiness together.
+// Expected values are written down from the rule (tight bound and cap while
+// ready >= desired, loose bound and no cap below), not read from the code.
+func TestAdaptiveCapBoundFollowsReadiness(t *testing.T) {
+	a := AdaptiveCapBound{Tight: 125, Loose: 200, Cap: 48}
+	for _, c := range []struct{ ready, desired, wantPct, wantCap int }{
+		{4, 4, 125, 48}, // every desired Instance is ready: tight bound, cap
+		{3, 4, 200, 0},  // one short: loose bound, no cap
+		{1, 4, 200, 0},
+		{0, 4, 200, 0},
+		{5, 4, 125, 48}, // a replacement surge counts as complete
+	} {
+		if got := a.Percent(c.ready, c.desired); got != c.wantPct {
+			t.Errorf("ready %d of %d: bound %d, want %d", c.ready, c.desired, got, c.wantPct)
+		}
+		if got := a.CapAt(c.ready, c.desired); got != c.wantCap {
+			t.Errorf("ready %d of %d: cap %d, want %d", c.ready, c.desired, got, c.wantCap)
+		}
+	}
+	// the bound's half is option 4's rule
+	for ready := 0; ready <= 5; ready++ {
+		if a.Percent(ready, 4) != (AdaptiveBound{Tight: 125, Loose: 200}).Percent(ready, 4) {
+			t.Errorf("ready %d: the bound differs from AdaptiveBound's", ready)
+		}
+	}
+}

@@ -81,6 +81,10 @@ type Metrics struct {
 	// of placement). MaxFrontQ is the longest the queue got.
 	FrontHeld, MaxFrontQ int
 	FrontWaits           []float64
+	// SpillT and HeldT are the times (engine clock) of each spill and of each
+	// request held at the front, for the checks that ask whether the cap was
+	// at work in a stretch of time (spike S10c).
+	SpillT, HeldT []float64
 	// Time with some alive Instance above the engine limit, whole run and in
 	// the window, and the same summed over Instances (Instance-seconds).
 	AboveEngine, AboveEngineWin, AboveEngineInst float64
@@ -103,6 +107,9 @@ type Metrics struct {
 type Switch struct {
 	T        float64
 	From, To int // MeanLoadPercentage
+	// CapFrom and CapTo are the hard cap before and after (0 for none); both
+	// are the policy's constant cap for every policy but option 5's.
+	CapFrom, CapTo int
 }
 
 type latRec struct{ dispatch, lat float64 }
@@ -209,7 +216,7 @@ func (m *Metrics) placement(e *Engine, r *request, idx int) {
 	meanAfter := float64(total+1) / n
 	m.Placements++
 	m.PeakLoad = max(m.PeakLoad, e.inst[idx].inflight+1)
-	if p := e.pol.Cap; p > 0 && e.inst[idx].inflight >= p {
+	if p := e.rt.capNow; p > 0 && e.inst[idx].inflight >= p {
 		e.err = fmt.Errorf("hard cap %d: request placed on %s holding %d", p, e.inst[idx].name, e.inst[idx].inflight)
 		return
 	}
@@ -232,6 +239,7 @@ func (m *Metrics) placement(e *Engine, r *request, idx int) {
 	}
 	if e.rt.lastSpilled {
 		m.Spills++
+		m.SpillT = append(m.SpillT, e.now)
 		if m.inWindow(e.now) {
 			m.SpillsWin++
 		}
@@ -362,6 +370,7 @@ func (m *Metrics) completed(e *Engine, r *request) {
 // heldAtFront records a request that found every Instance at the cap.
 func (m *Metrics) heldAtFront(e *Engine) {
 	m.FrontHeld++
+	m.HeldT = append(m.HeldT, e.now)
 	m.MaxFrontQ = max(m.MaxFrontQ, len(e.frontQ))
 }
 
@@ -370,9 +379,25 @@ func (m *Metrics) leftFront(e *Engine, r *request, wait float64) {
 	m.FrontWaits = append(m.FrontWaits, wait)
 }
 
+// SpillsBetween counts the spills at times in [from, to).
+func (m *Metrics) SpillsBetween(from, to float64) int { return countBetween(m.SpillT, from, to) }
+
+// HeldBetween counts the requests that were held at the front at times in
+// [from, to).
+func (m *Metrics) HeldBetween(from, to float64) int { return countBetween(m.HeldT, from, to) }
+
+func countBetween(ts []float64, from, to float64) (n int) {
+	for _, t := range ts {
+		if t >= from && t < to {
+			n++
+		}
+	}
+	return n
+}
+
 // switched records an adaptive bound changing at the engine's clock.
-func (m *Metrics) switched(e *Engine, from, to int) {
-	m.Switches = append(m.Switches, Switch{T: e.now, From: from, To: to})
+func (m *Metrics) switched(e *Engine, ch controlChange) {
+	m.Switches = append(m.Switches, Switch{T: e.now, From: ch.from, To: ch.to, CapFrom: ch.capFrom, CapTo: ch.capTo})
 }
 
 // PeakBetween is the largest in-flight count any Instance reached when a

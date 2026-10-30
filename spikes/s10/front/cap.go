@@ -115,3 +115,27 @@ func (a AdaptiveBound) Percent(ready, desired int) int {
 	}
 	return a.Loose
 }
+
+// AdaptiveCapBound is spike S10c's option 5: the tight bound plus a hard cap
+// while every desired Instance is ready, the loose bound with no cap while
+// fewer are. It is option 4's readiness rule applied to the cap as well as to
+// the bound, so that the cap, which spills a full choice onto the next
+// Instance and holds requests at the front, works only where it can help: at
+// full membership. Below it, the spill target would be an Instance that
+// already carries the lost member's share.
+type AdaptiveCapBound struct{ Tight, Loose, Cap int }
+
+// Percent is the bound for the deployment's ready and desired counts: the
+// same rule as AdaptiveBound.
+func (a AdaptiveCapBound) Percent(ready, desired int) int {
+	return AdaptiveBound{Tight: a.Tight, Loose: a.Loose}.Percent(ready, desired)
+}
+
+// CapAt is the per-Instance cap in force: a.Cap while ready >= desired, and 0
+// (no cap) while fewer are ready.
+func (a AdaptiveCapBound) CapAt(ready, desired int) int {
+	if ready >= desired {
+		return a.Cap
+	}
+	return 0
+}
