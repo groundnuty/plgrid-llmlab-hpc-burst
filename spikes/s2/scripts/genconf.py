@@ -10,6 +10,7 @@ usage: genconf.py SRC_ROOT OUT_DIR ENVOY_VARIANT EPP_VARIANT ENVOY_PORT ADMIN_PO
   ENVOY_VARIANT: shipped | tuned | probe
   EPP_VARIANT:   guide | session
 """
+import os
 import pathlib
 import sys
 
@@ -51,7 +52,8 @@ if env_variant == "shipped":
 elif env_variant == "tuned":
     # Route total and stream idle raised above the longest stream (3 h; the route timeout is a total deadline).
     t = sub(t, route_to, "timeout: 10800s\n                            idle_timeout: 10800s\n")
-    t = sub(t, "message_timeout: 1000s", "message_timeout: 10800s")
+    # Envoy validates message_timeout inside [0 s, 1 h]; 3600 s is the largest it accepts.
+    t = sub(t, "message_timeout: 1000s", "message_timeout: 3600s")
 elif env_variant == "probe":
     # Deliberately tiny ext_proc timers, to show whether they bound a stream under FULL_DUPLEX_STREAMED.
     t = sub(t, "message_timeout: 1000s", "message_timeout: 5s")
@@ -63,9 +65,14 @@ else:
 # ---- EPP ----
 e = (guide / "epp/config.yaml").read_text()
 e = sub(e, "path: /etc/epp/endpoints.yaml", f"path: {endpoints}")
-# Scrape the workers every 500 ms instead of every 50 ms tick: 5 EPPs share one VM.
-e = sub(e, "  - name: metrics-source\n    type: metrics-data-source\n",
-        '  - name: metrics-source\n    type: metrics-data-source\n    parameters:\n      interval: "500ms"\n')
+# The shipped config scrapes the workers every 50 ms. Setting EPP_SCRAPE_INTERVAL (for example 500ms)
+# lowers the CPU cost on a shared host, but any value above the utilization detector's 200 ms
+# staleness threshold makes endpoints read stale between scrapes; the detector's filter then drops them
+# from the candidates and breaks session affinity. Left unset, the shipped value is used.
+interval = os.environ.get("EPP_SCRAPE_INTERVAL", "")
+if interval:
+    e = sub(e, "  - name: metrics-source\n    type: metrics-data-source\n",
+            f'  - name: metrics-source\n    type: metrics-data-source\n    parameters:\n      interval: "{interval}"\n')
 if epp_variant == "guide":
     pass
 elif epp_variant == "session":

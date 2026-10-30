@@ -37,6 +37,7 @@ type streamResult struct {
 	RespHeaders   map[string]string `json:"resp_headers,omitempty"`
 	Error         string            `json:"error,omitempty"`
 	ElapsedSec    float64           `json:"elapsed_sec"`
+	HeadersSec    float64           `json:"response_headers_sec"`
 	FirstTokenSec float64           `json:"first_token_sec"`
 	LastTokenSec  float64           `json:"last_token_sec"`
 	GapMinMs      float64           `json:"gap_min_ms"`
@@ -142,6 +143,7 @@ func doStream(url, model string, tokens, expect int, session, label, outdir stri
 	}
 	defer resp.Body.Close()
 	res.HTTPStatus = resp.StatusCode
+	res.HeadersSec = time.Since(start).Seconds()
 	for k, v := range resp.Header {
 		lk := strings.ToLower(k)
 		if strings.HasPrefix(lk, "x-") || lk == "server" || lk == "via" {

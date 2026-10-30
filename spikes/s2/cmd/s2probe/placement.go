@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"os"
 	"sort"
@@ -92,6 +93,8 @@ func runPlacement(args []string) int {
 	key := fs.String("key", "x-session-id", "session header name; empty sends none")
 	tokens := fs.Int("tokens", 2, "tokens per reply")
 	wantSticky := fs.Bool("expect-sticky", true, "PASS requires every session on a single worker")
+	wantSpread := fs.Bool("expect-spread", true, "PASS requires the sessions to use at least two workers (false documents a pile-up)")
+	fresh := fs.Bool("fresh-prompts", false, "send an unrelated prompt every turn, so only the session header can keep a session together")
 	fs.Parse(args)
 	metrics := strings.Split(*metricsCSV, ",")
 	if *url == "" || len(metrics) < 2 {
@@ -106,9 +109,15 @@ func runPlacement(args []string) int {
 		sys := fmt.Sprintf("You are assistant number %d. ", s) + strings.Repeat(fmt.Sprintf("Rule %d: be brief and precise. ", s), 40)
 		hist[s] = []map[string]string{{"role": "system", "content": sys}}
 	}
-	// Interleave: turn t of every session before turn t+1, so the last-used worker is never the answer.
+	// Interleave: turn t of every session before turn t+1, in a fixed-seed random order per turn, so
+	// neither the last-used worker nor a rotation that happens to match the session order is the answer.
+	rng := rand.New(rand.NewSource(1))
 	for t := 0; t < *turns; t++ {
-		for s := range traces {
+		for _, s := range rng.Perm(len(traces)) {
+			if *fresh && t > 0 {
+				sys := fmt.Sprintf("Unrelated prompt %d-%d-%d. ", s, t, time.Now().UnixNano()) + strings.Repeat(fmt.Sprintf("Fresh rule %d-%d: answer in one word. ", t, s*7+t), 40)
+				hist[s] = []map[string]string{{"role": "system", "content": sys}}
+			}
 			hist[s] = append(hist[s], map[string]string{"role": "user", "content": fmt.Sprintf("Turn %d question from session %d.", t, s)})
 			w, text, err := whichWorker(*url, *model, *tokens, *key, traces[s].ID, hist[s], metrics)
 			if err != nil {
@@ -143,8 +152,8 @@ func runPlacement(args []string) int {
 	sort.Ints(used)
 	spread := len(distinct) >= 2
 	fmt.Printf("sessions per worker (by first turn): %v ; distinct workers used: %v\n", perWorker, used)
-	ok := spread && (allSticky == *wantSticky)
-	fmt.Printf("RESULT placement key=%q all_sessions_sticky=%v spread_over_workers=%v expect_sticky=%v pass=%v\n", *key, allSticky, spread, *wantSticky, ok)
+	ok := spread == *wantSpread && allSticky == *wantSticky
+	fmt.Printf("RESULT placement key=%q fresh_prompts=%v all_sessions_sticky=%v spread_over_workers=%v expect_sticky=%v expect_spread=%v pass=%v\n", *key, *fresh, allSticky, spread, *wantSticky, *wantSpread, ok)
 	if ok {
 		return 0
 	}

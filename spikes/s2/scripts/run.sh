@@ -5,8 +5,10 @@
 #                     llm-d tuned, vllm-router default (1,800 s) and vllm-router tuned. ~2 h 5 min.
 #   run.sh controls   positive controls: vllm-router with a 60 s deadline must cut a 150 s stream;
 #                     llm-d with 5 s ext_proc timers streams 600 s anyway. ~11 min.
-#   run.sh placement  multi-turn sessions through each router: where do turns land. ~3 min each.
-#   run.sh removal    remove a worker from discovery under an in-flight 25 min stream. ~27 min each.
+#   run.sh placement [stack...]  multi-turn sessions through each router: where do turns land. ~3 min each.
+#   run.sh removal [stack...]  remove a worker from discovery under an in-flight 25 min stream. ~27 min each.
+#   run.sh epp-kill   fault injection: stop the EPP under an in-flight stream. ~3 min
+#   run.sh ttft       first byte after 1,100 s (past llm-d's 1,000 s message timeout), 30 tokens. ~19 min
 #   run.sh summary    table of every stream result found under $S2_HOME/results
 #
 # Exit status is non-zero if any scenario's expectation is not met. Results: $S2_HOME/results/<scenario>/.
@@ -79,21 +81,35 @@ scenario_controls() {
   "$SC" stop vllmr-short; "$SC" stop llmd-probe
 }
 
-scenario_placement() {
+scenario_placement() { # optional arguments select specs by stack name
   local out=$S2_HOME/results/placement; mkdir -p "$out"; capacity_gate
-  # name stack expect-sticky
-  for spec in "llmd-affinity:true" "vllmr-affinity:true" "llmd-guide:true"; do
-    local s=${spec%%:*} sticky=${spec##*:}
+  # stack:expect-sticky:session-header:fresh-prompts[:nospread]
+  #  header "-" sends none, so placement rests on the prompt prefix (llm-d) or the body hash (vllm-router);
+  #  fresh-prompts 1 sends an unrelated prompt each turn, so only the header can keep a session together.
+  local specs=("llmd-affinity:true:x-session-id:0" "llmd-affinity:true:x-session-id:1"
+               "vllmr-affinity:true:x-session-id:0" "vllmr-affinity:true:x-session-id:1"
+               "llmd-guide:true:x-session-id:0"     "llmd-guide:false:x-session-id:1" "llmd-guide:true:-:0"
+               "vllmr-affinity:true:-:0:nospread")
+  local spec s sticky key fr spr flag
+  for spec in "${specs[@]}"; do
+    IFS=: read -r s sticky key fr spr <<< "$spec"
+    if [[ $# -gt 0 ]]; then case " $* " in *" $s "*) ;; *) continue ;; esac; fi
+    [[ $key == - ]] && key=""
+    flag=(); [[ $fr == 1 ]] && flag+=(-fresh-prompts); [[ ${spr:-} == nospread ]] && flag+=(-expect-spread=false)
     fresh "$s" || { fail=1; continue; }
-    "$P" placement -url "$("$SC" url "$s")" -metrics "$("$SC" metrics "$s")" -sessions 9 -turns 5 -expect-sticky="$sticky" | tee "$out/$s.txt"
+    echo "== $s header=${key:-none} fresh_prompts=$fr"
+    "$P" placement -url "$("$SC" url "$s")" -metrics "$("$SC" metrics "$s")" -sessions 9 -turns 5 -key "$key" -expect-sticky="$sticky" "${flag[@]}" \
+      | tee "$out/$s.${key:-nohdr}.fresh$fr.txt"
     [[ ${PIPESTATUS[0]} -eq 0 ]] || fail=1
     "$SC" stop "$s"
   done
 }
 
-scenario_removal() {
+scenario_removal() { # optional arguments select stacks (llmd-removal, vllmr-removal)
   local out=$S2_HOME/results/removal; mkdir -p "$out"; capacity_gate
-  for s in llmd-affinity vllmr-affinity; do
+  local s
+  for s in llmd-removal vllmr-removal; do
+    if [[ $# -gt 0 ]]; then case " $* " in *" $s "*) ;; *) continue ;; esac; fi
     fresh "$s" || { fail=1; continue; }
     "$P" removal -url "$("$SC" url "$s")" -metrics "$("$SC" metrics "$s")" -stream-tokens "${REMOVAL_TOKENS:-1500}" \
       -remove-cmd "S2_HOME=$S2_HOME $SC remove $s \$X_INDEX" -outdir "$out" -label "$s" | tee "$out/$s.txt"
@@ -102,8 +118,42 @@ scenario_removal() {
   done
 }
 
+# Fault injection, not an acceptance criterion: what does a dead EPP do to a stream in flight, and to new requests?
+scenario_epp_kill() {
+  local out=$S2_HOME/results/epp-kill; mkdir -p "$out"; capacity_gate
+  fresh llmd-guide || return 1
+  local url; url=$("$SC" url llmd-guide)
+  "$P" stream -url "$url" -tokens 120 -session k1 -label inflight-during-epp-kill -outdir "$out" > "$out/inflight.out" 2>&1 &
+  local pid=$!
+  sleep 30; "$SC" kill-epp llmd-guide
+  "$P" stream -url "$url" -tokens 3 -session k2 -label new-while-epp-down -outdir "$out" > "$out/new-down.out" 2>&1
+  wait $pid
+  "$SC" start-epp llmd-guide; sleep 20
+  "$P" stream -url "$url" -tokens 3 -session k3 -label new-after-epp-restart -outdir "$out" > "$out/new-up.out" 2>&1
+  python3 -I "$HERE/summarize.py" "$out"
+  "$SC" stop llmd-guide
+}
+
+# A reply whose first byte takes longer than the shipped ext_proc message timeout (1,000 s): HBEP-5's
+# "a reply spends many minutes in prefill before its first byte".
+scenario_ttft() {
+  local out=$S2_HOME/results/ttft; mkdir -p "$out"; capacity_gate
+  export SIM_TTFT=${TTFT:-1100s}
+  local s
+  for s in llmd-ttft vllmr-ttft; do fresh "$s" || { fail=1; continue; }; done
+  "$P" stream -url "$("$SC" url llmd-ttft)" -tokens 30 -session t1 -label llmd-shipped-ttft -outdir "$out" > "$out/llmd.out" 2>&1 &
+  local a=$!
+  "$P" stream -url "$("$SC" url vllmr-ttft)" -tokens 30 -session t2 -label vllmr-default-ttft -outdir "$out" > "$out/vllmr.out" 2>&1 &
+  local b=$!
+  wait $a $b
+  python3 -I "$HERE/summarize.py" "$out"
+  expect llmd-shipped-ttft pass 0 0 ttft || fail=1
+  expect vllmr-default-ttft pass 0 0 ttft || fail=1
+  for s in llmd-ttft vllmr-ttft; do "$SC" stop "$s"; done
+}
+
 case ${1:-} in
-long) scenario_long ;; controls) scenario_controls ;; placement) scenario_placement ;; removal) scenario_removal ;;
+long) scenario_long ;; controls) scenario_controls ;; placement) scenario_placement "${@:2}" ;; removal) scenario_removal "${@:2}" ;; epp-kill) scenario_epp_kill ;; ttft) scenario_ttft ;;
 summary) python3 -I "$HERE/summarize.py" "$S2_HOME"/results/* ;;
 *) sed -n 2,12p "$0"; exit 64 ;;
 esac
