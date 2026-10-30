@@ -31,12 +31,75 @@ The Kubernetes libraries match crossplane-runtime v2.4.3, which HBEP-4's provide
 | `k8s.io/apiextensions-apiserver` | v0.35.0 |
 | `sigs.k8s.io/controller-runtime` | v0.23.1 |
 | `sigs.k8s.io/controller-tools` (`controller-gen`) | v0.20.0 |
+| `github.com/crossplane/crossplane-runtime/v2` | v2.4.3 (Apache-2.0) |
+| `sigs.k8s.io/yaml` | v1.6.0 (MIT, with BSD-3-Clause parts; direct, for `hack/mutate-cel`) |
+| `github.com/crossplane/crossplane/apis/v2` | v2.3.4 (Apache-2.0), the version crossplane-runtime v2.4.3 requires |
 | k3s (single-user and team host) | v1.36.5+k3s1 |
+| `kube-apiserver`, `kube-controller-manager` (the assembled test host of `internal/testenv`) | v1.36.2, sha256-pinned in `hack/test-binaries.sh` |
+| `etcd` (the assembled test host) | v3.6.8, sha256-pinned in `hack/test-binaries.sh` |
 
 Kubernetes' explicit ±1-minor skew rule is written for kubectl. client-go instead documents compatibility through the APIs a client and a cluster share ([client-go compatibility](https://github.com/kubernetes/client-go/blob/v0.35.3/README.md#compatibility-client-go---kubernetes-clusters)). A 0.35 client against a 1.36 server is a reasonable choice for shared stable APIs, and the tests against k3s 1.36 check the APIs we use. A change to any of these pins is its own PR.
+
+## Checks
+
+- `hack/check.sh` runs gofmt, vet, `go mod tidy -diff`, the generated-file check and the tests, then lists every skipped test. Run it under `nice` and the shared build lock.
+- `hack/mutate-cel.sh` neutralises each CEL admission rule in a copy of the CRDs and runs the test that covers it, which must fail. It takes about ten minutes, so it is not part of `hack/check.sh`; run it when a rule or its test changes. A rule with no entry in its table fails the script.
+- The flag-name tests read the known flag names from HBEP-3's v1 table, so the admission rules' lists of known names are checked against the specification. A flag added to the table fails `TestEngineFlagsRefuseEveryPrefixOfAKnownFlag` until the list in the `EngineFlag` markers (`api/v1alpha1/modeldeployment_types.go`) gains it.
+- The test host (`internal/testenv`) binds only loopback ports 29200 to 29219 and, in k3s mode, accepts only a kubeconfig whose server is loopback on 29200 to 29239. The control-plane binaries are always sha256-checked; `HPCBURST_TESTENV_UNPINNED=1` is the explicit override for a binary you built yourself.
+
+## Running the e2e suite on the launcher's k3s
+
+`hack/check.sh` runs the e2e suite on the assembled host of `internal/testenv`. The same suite also runs on the user-level k3s that `hpcburst up` starts, which is the host HBEP-11 specifies; `TestRunsOnK3s` then passes instead of skipping. Run it before merging a change to the CRDs:
+
+```
+hack/fetch-k3s.sh <bin-dir>      # once: the pinned k3s binaries
+go build -o <tmp>/hpcburst ./cmd/hpcburst
+<tmp>/hpcburst up --state-dir <state> --port-base 29220 --bin-dir <bin-dir> --manifests config/crd
+HPCBURST_TEST_HOST=k3s HPCBURST_KUBECONFIG=<state>/kubeconfig go test -count=1 ./api/v1alpha1/e2e/
+<tmp>/hpcburst down --state-dir <state>
+```
+
+The launcher's block is 29220 to 29239 and the suite refuses a kubeconfig that points elsewhere. The deletion-guard policy in `config/admission/` is not applied by `--manifests`: `TestCRDDeletionGuard` installs and removes it itself, so keep it out of the manifests directory.
+
+## API field names
+
+Every field of the CRDs is camelCase, as the Kubernetes API conventions ask (owner decision, PR #48): `holdRelease`, `lostGrace`, `imageDigest`, `gpuModel`, `timeZone`, `jobName.maxLength`. HBEP-3's hash object keeps its snake_case keys (`image_digest`, `gpu_model`, `cpu_arch`); `pkg/deploymentid` maps the API's fields onto them, and nothing in the API changes the hash. `TestEveryCRDFieldIsCamelCase` scans the committed manifests. HBEP text that writes a field in snake_case (`hold_release` in HBEP-11) means the camelCase field.
 
 ## Rules for every change
 
 - **Dependencies:** each one's licence must be on HBEP-15's allowlist (Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, ISC and the others it lists). Copied code goes under `third_party/forked/<project>/` with its upstream `LICENSE` and an `ORIGIN.md`.
 - **Tests:** they come with the change. Expected values come from specifications or an independent implementation, never from the code under test.
 - **Public content:** this repository is public. No host names, IP addresses other than loopback, job IDs, account or grant names, credentials or internal paths (HBEP-1).
+
+## The launcher
+
+`hpcburst` (`cmd/hpcburst`, code in `internal/launcher`) starts and supervises the single-user control-plane host of HBEP-11: the pinned k3s as the invoking user, with `server --rootless --disable-agent` and SQLite. It supports Linux only, because every health and stop decision is tied to `/proc`.
+
+```
+hpcburst up      --state-dir D --port-base 29220 [--version V] [--manifests DIR] [--front-mode direct|ssh --front-addr HOST[:PORT] [--front-key FILE]]
+hpcburst status  --state-dir D [--json] [--no-api]
+hpcburst upgrade --state-dir D --to V
+hpcburst restore --state-dir D --backup D/backups/<backup>
+hpcburst down    --state-dir D
+```
+
+- **State:** everything the launcher owns is in the state directory (default `$XDG_STATE_HOME/hpcburst`, else `~/.local/state/hpcburst`): k3s's data directory, home and log, the record of the processes it started (`state.json`, with PID and start time), and `kubeconfig` (mode 600, written only once the host is ready).
+- **Binaries:** `up` and `upgrade` look for `k3s-X.Y.Z/k3s` under `--bin-dir` (or `$HPCBURST_BIN_DIR`, else `~/.cache/hpcburst/k3s`), open it, and check the sha256 of what they opened against `internal/launcher/k3s-pins.txt`. k3s is then executed from that same descriptor (`/proc/self/fd/3`), so the bytes that run are the bytes that were checked. `hack/fetch-k3s.sh [DIR]` downloads and checks them. The pins file is the one place that says which versions are allowed. HBEP-11 puts these checksums in `build/dependencies.yaml` (HBEP-15); when HBEP-15's check lands, the pins move there, and this file and `hack/fetch-k3s.sh` read them from it rather than keeping a copy.
+- **Versions:** `store-version.json` in the state directory records the release that last wrote the store, and `down` keeps it. `up` without `--version` starts that release; `up` with another one is refused. A newer release goes through `upgrade` (the next minor, or a newer patch or k3s revision of the same minor), which backs the store up first. An older one only through `restore`, from a backup that `upgrade` took.
+- **Backups and restore:** `upgrade` stops the host, copies `data/server/db` and the server token to `backups/<time>-<release>/` (mode 0600, synced), records the new release, and only then starts it. `restore` needs the host stopped. It moves the current store and token aside to `data/server/replaced-<time>/`, copies the backup back, and records the backup's release. Changes made after the backup are lost from the store.
+- **Health:** `status` judges from the recorded processes, through a pidfd for each: PID, start time and boot ID must match. k3s must run a binary unpacked in its own data directory (k3s otherwise falls back silently to a system k3s's `/var/lib/rancher/k3s/data`). The process must hold exactly its loopback ports. Only then does it ask `/readyz`, the controller manager's `/healthz`, a small write to the store, and a garbage-collector probe (an owner and a dependent ConfigMap in namespace `hpcburst-launcher`; the dependent must be gone within a minute; `--no-gc-probe` skips it). Afterwards it checks the listeners and identities again. A listener that answers on a port but is not held by the recorded process never counts.
+- **Processes:** the launcher signals only through a pidfd it verified (taken at launch from clone, or with `pidfd_open`), and reads exits from the pidfd. A process whose identity cannot be checked is never signalled, and `down` then exits 1 and keeps the record.
+- **Audit:** the API server writes an audit log at the Metadata level to `logs/audit.log` in the state directory (no request or response bodies, so never a Secret's content), at most four files of 100 MB.
+- **Exit codes:** 0 success, 1 failure (for `status`: unhealthy), 2 usage error, 3 (`status` only) stopped.
+- **Front:** `up` records the front address and mode. When none is given it still starts, and warns that no jobs will be submitted until a front is configured: the lifecycle controller refuses to submit while no front is set (a later issue).
+
+### Testing the launcher
+
+`go test ./...` runs the unit tests. The tests that start a real k3s need the pinned binaries and skip, loudly, without them. To run everything:
+
+```
+hack/fetch-k3s.sh "$DIR" 1.35.9 1.36.5
+HPCBURST_BIN_DIR="$DIR" hack/test-launcher.sh
+```
+
+The script sets `HPCBURST_REQUIRE_INTEGRATION=1`, which turns every skip of a required test into a failure (in `-short` mode too), and it exits non-zero if any test was skipped. The tests use loopback ports 29220–29239 and state directories under `$TMPDIR` (about 0.6 GB at peak, removed after each test). Set `HPCBURST_TEST_ROOT_K3S=1` on a machine that runs a system k3s: the tests then fail if it is missing, and assert after each test that it still listens on 6443, 6444 and 10250. Before starting k3s the tests wait for a quiet machine; `HPCBURST_TEST_MIN_AVAIL_GIB` (default 8) sets how much available memory that needs. The store-full test mounts a size-limited FUSE volume as the invoking user, so it needs `/dev/fuse` and `fusermount3`.

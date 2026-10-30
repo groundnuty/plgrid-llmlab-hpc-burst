@@ -1,0 +1,739 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: modeldeployments.hpcburst.groundnuty.github.io
+spec:
+  group: hpcburst.groundnuty.github.io
+  names:
+    categories:
+    - hpcburst
+    kind: ModelDeployment
+    listKind: ModelDeploymentList
+    plural: modeldeployments
+    shortNames:
+    - md
+    singular: modeldeployment
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.model
+      name: Model
+      type: string
+    - jsonPath: .spec.instances
+      name: Desired
+      type: integer
+    - jsonPath: .status.readyInstances
+      name: Ready
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ModelDeployment is what to serve (HBEP-3). It owns its Instances, as a
+          ReplicaSet owns its pods; it owns no Allocation.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ModelDeploymentSpec is what to serve: model, serving spec, number of
+              instances, where, until when, and the default retention policy.
+            properties:
+              endTime:
+                description: |-
+                  EndTime is when the deployment ends: its Instances drain and end without
+                  replacement.
+                format: date-time
+                type: string
+              instances:
+                default: 1
+                description: |-
+                  Instances is the number of Instances wanted. It is the scale
+                  subresource's replica count.
+                format: int32
+                minimum: 0
+                type: integer
+              model:
+                description: Model is the model name clients send. Names follow LLMLab's.
+                maxLength: 256
+                minLength: 1
+                type: string
+              providers:
+                description: Providers says where the deployment may run.
+                properties:
+                  names:
+                    description: Names lists Providers by name.
+                    items:
+                      maxLength: 63
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                    maxItems: 64
+                    type: array
+                    x-kubernetes-list-type: set
+                  selector:
+                    description: |-
+                      Selector selects Providers by their labels, for example every provider
+                      on one platform.
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector
+                          requirements. The requirements are ANDed.
+                        items:
+                          description: |-
+                            A label selector requirement is a selector that contains values, a key, and an operator that
+                            relates the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector
+                                applies to.
+                              type: string
+                            operator:
+                              description: |-
+                                operator represents a key's relationship to a set of values.
+                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: |-
+                                values is an array of string values. If the operator is In or NotIn,
+                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                the values array must be empty. This array is replaced during a strategic
+                                merge patch.
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                        type: object
+                    type: object
+                    x-kubernetes-map-type: atomic
+                type: object
+                x-kubernetes-validations:
+                - message: name at least one provider, or give a label selector
+                  rule: (has(self.names) && size(self.names) > 0) || has(self.selector)
+              retentionPolicy:
+                description: |-
+                  RetentionPolicy is the default retention policy of the Allocations that
+                  host this deployment's Instances. When it is absent, the default is to
+                  keep until the deployment's end time (HBEP-7, open question 13).
+                properties:
+                  idleLimit:
+                    description: IdleLimit is how long an Allocation may be idle before
+                      it is released.
+                    maxLength: 63
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                    type: string
+                  mode:
+                    description: Mode is Keep or ReleaseWhenIdle. Unset means Keep.
+                    enum:
+                    - Keep
+                    - ReleaseWhenIdle
+                    type: string
+                  until:
+                    description: |-
+                      Until is the date a kept Allocation is kept until: a date, a grant's end
+                      or a deadline. When it is absent, the default is the deployment's end
+                      time (HBEP-7, open question 13). It goes with mode Keep.
+                    format: date-time
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: idleLimit is required with mode ReleaseWhenIdle and refused
+                    with mode Keep
+                  rule: '(has(self.mode) && self.mode == ''ReleaseWhenIdle'') ? has(self.idleLimit)
+                    : !has(self.idleLimit)'
+                - message: 'until is refused with mode ReleaseWhenIdle: an Allocation
+                    released when idle is not kept until a date'
+                  rule: '!(has(self.mode) && self.mode == ''ReleaseWhenIdle'') ||
+                    !has(self.until)'
+              source:
+                description: |-
+                  Source says what is served: a checkpoint on our engine, or a catalog
+                  entry of a managed platform. Exactly one.
+                properties:
+                  managed:
+                    description: Managed is a catalog entry of a managed platform.
+                    properties:
+                      catalogName:
+                        description: CatalogName is the name of the entry in the platform's
+                          catalog.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      platform:
+                        description: Platform is the managed platform that serves
+                          the entry.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      revision:
+                        description: |-
+                          Revision is the revision the platform reports for the entry. It is
+                          omitted when the platform reports none; an empty revision is not the
+                          same.
+                        maxLength: 256
+                        minLength: 1
+                        type: string
+                    required:
+                    - catalogName
+                    - platform
+                    type: object
+                  served:
+                    description: |-
+                      Served is a checkpoint served by an engine we run. It may change while
+                      the deployment serves.
+                    properties:
+                      chatTemplate:
+                        description: |-
+                          ChatTemplate is the text of one chat template, when the spec gives one.
+                          It is a pointer: an omitted template (the checkpoint's own applies,
+                          HBEP-3) and an explicitly empty one are different specs that can give
+                          different deployment IDs. A checkpoint's own list of named templates is
+                          not given here: the deployment-ID library refuses one that has no entry
+                          named default and tells the operator to name the template in the spec.
+                        maxLength: 262144
+                        type: string
+                      checkpoint:
+                        description: |-
+                          CheckpointSpec names the checkpoint to serve. Its per-file SHA-256 list is
+                          computed by the controller and kept in the identity record.
+                        properties:
+                          hubTokenRef:
+                            description: |-
+                              HubTokenRef refers to the token for a gated repository. It is referenced
+                              like provider credentials and is never a deployment-ID input.
+                            properties:
+                              file:
+                                description: File is the path of a mode-600 file on
+                                  the control-plane host.
+                                maxLength: 4096
+                                minLength: 1
+                                type: string
+                              secretRef:
+                                description: SecretRef names a key of a Secret (the
+                                  team option).
+                                properties:
+                                  key:
+                                    maxLength: 253
+                                    minLength: 1
+                                    type: string
+                                  name:
+                                    maxLength: 253
+                                    minLength: 1
+                                    type: string
+                                  namespace:
+                                    maxLength: 63
+                                    minLength: 1
+                                    type: string
+                                required:
+                                - key
+                                - name
+                                - namespace
+                                type: object
+                            type: object
+                            x-kubernetes-validations:
+                            - message: name exactly one of file and secretRef
+                              rule: has(self.file) != has(self.secretRef)
+                          repository:
+                            description: |-
+                              Repository is the checkpoint's repository, for example on the Hugging
+                              Face Hub.
+                            maxLength: 256
+                            minLength: 1
+                            type: string
+                          revision:
+                            description: |-
+                              Revision is the checkpoint's full commit ID: 40 lowercase hex
+                              characters. A branch, a tag or an abbreviated ID is refused, because a
+                              mutable reference cannot be hashed meaningfully (HBEP-3, HBEP-9).
+                            maxLength: 64
+                            type: string
+                            x-kubernetes-validations:
+                            - message: 'revision must be a full commit id: 40 lowercase
+                                hex characters; a branch name, a tag or an abbreviated
+                                id is refused'
+                              rule: self.matches('^[0-9a-f]{40}$')
+                        required:
+                        - repository
+                        - revision
+                        type: object
+                      engine:
+                        description: EngineSpec names the engine and its image.
+                        properties:
+                          imageDigest:
+                            description: |-
+                              ImageDigest is the engine image's digest: "sha256:" and 64 lowercase hex
+                              characters (HBEP-3, the v1 canonical object). The JSON key is camelCase
+                              like every field of the API; the hash object's key, image_digest, stays
+                              snake_case, and pkg/deploymentid maps this field onto it.
+                            maxLength: 71
+                            type: string
+                            x-kubernetes-validations:
+                            - message: imageDigest must be 'sha256:' followed by 64
+                                lowercase hex characters
+                              rule: self.matches('^sha256:[0-9a-f]{64}$')
+                          name:
+                            description: Name of the engine, for example "vllm".
+                            maxLength: 63
+                            minLength: 1
+                            type: string
+                          version:
+                            description: Version of the engine.
+                            maxLength: 63
+                            minLength: 1
+                            type: string
+                        required:
+                        - imageDigest
+                        - name
+                        - version
+                        type: object
+                      env:
+                        description: Env lists the engine's environment variables.
+                        items:
+                          description: |-
+                            EnvVar is one environment variable of the engine. Names are POSIX names in
+                            uppercase ASCII, so every key of the hashed object is ASCII.
+                          properties:
+                            name:
+                              maxLength: 128
+                              minLength: 1
+                              type: string
+                            value:
+                              maxLength: 8192
+                              type: string
+                          required:
+                          - name
+                          - value
+                          type: object
+                          x-kubernetes-validations:
+                          - message: 'an environment variable name matches ^[A-Z_][A-Z0-9_]*$:
+                              uppercase ASCII letters, digits and underscores, not
+                              starting with a digit'
+                            rule: self.name.matches('^[A-Z_][A-Z0-9_]*$')
+                          - message: 'a key is never written in a spec: a Hub token
+                              goes in checkpoint.hubTokenRef and the framework issues
+                              each Instance''s API key (HF_TOKEN, HUGGING_FACE_HUB_TOKEN,
+                              VLLM_API_KEY, S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY
+                              are refused)'
+                            rule: '!(self.name in [''HF_TOKEN'', ''HUGGING_FACE_HUB_TOKEN'',
+                              ''VLLM_API_KEY'', ''S3_ACCESS_KEY_ID'', ''S3_SECRET_ACCESS_KEY''])'
+                        maxItems: 64
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      flags:
+                        description: |-
+                          Flags are the engine flags, in order. A flag given more than once is
+                          listed more than once.
+                        items:
+                          description: |-
+                            EngineFlag is one engine flag. The spec lists flags as ordered pairs, so no
+                            command line is parsed (HBEP-3, Deployment ID). The name rules keep every key
+                            of the hashed object ASCII and refuse the other spellings that reach the same
+                            flag. A name is written with lowercase letters, digits, dashes and
+                            underscores; every refusal below compares it after replacing "_" with "-",
+                            because vLLM reads max_num_seqs and max-num-seqs as one flag
+                            (vllm/utils/argparse_utils.py, v0.32.0, lines 120 and 338-344), so api_key is
+                            refused as api-key is. HBEP-3 and the deployment-ID library normalise the
+                            same way.
+
+                              - vLLM's parsers never set allow_abbrev, so Python's argparse expands a
+                                unique prefix: "--api-ke SECRET" is "--api-key SECRET". Every proper
+                                prefix of a known long name is refused. The known names are the flags of
+                                HBEP-3's v1 table, with the refused, framework-passed and boolean ones;
+                                a flag outside that list is an input of unknown name, and its prefixes
+                                are not checked here (the deployment-ID library has the engine's full
+                                list). A name that is itself a known flag stays admitted even when it is
+                                the prefix of another (tokenizer, tokenizer-mode), because argparse takes
+                                an exact match first.
+                              - Short aliases (tp, pp, dp and the others vLLM v0.32.0 defines) and dotted
+                                sub-keys (X.k, which the parser folds into a JSON value) are refused.
+                              - vLLM's --config replaces itself with every key of a file, so a config
+                                flag could carry the flags refused here, and only its path would be
+                                hashed. It is refused. So is lora-modules in alpha: it names other
+                                checkpoints without a pinned revision.
+                              - vLLM generates --no-<name> for each boolean flag (argparse's
+                                BooleanOptionalAction, vllm/engine/arg_utils.py, v0.32.0, line 380), but
+                                HBEP-3 gives a boolean under its positive name with "true" or "false", so
+                                a no- prefix is refused and a boolean's value is checked.
+                              - A speculative-config that names a draft model is refused in alpha, and
+                                a tokenizer other than the checkpoint's needs a pinned tokenizer-revision
+                                (ServingSpec).
+
+                            The alias list is vLLM v0.32.0's. The lists of known names and booleans are
+                            the table's; a change to the table changes these markers (HBEP-3).
+                          properties:
+                            name:
+                              description: Name is the flag's long name without its
+                                leading dashes.
+                              maxLength: 128
+                              minLength: 1
+                              type: string
+                            value:
+                              description: |-
+                                Value is the flag's value as the user wrote it. A boolean flag is given
+                                under its positive name, with "true" or "false". A value that is JSON
+                                stays the string given.
+                              maxLength: 8192
+                              type: string
+                          required:
+                          - name
+                          - value
+                          type: object
+                          x-kubernetes-validations:
+                          - message: 'an engine flag name is a long name without leading
+                              dashes: write ''max-model-len'', not ''--max-model-len'',
+                              and never a short alias such as ''-tp'''
+                            rule: '!self.name.startsWith(''-'')'
+                          - message: 'an engine flag name matches ^[a-z0-9][a-z0-9_-]*$:
+                              lowercase ASCII letters, digits, hyphens and underscores,
+                              starting with a letter or digit, so no uppercase, no
+                              ''='' and no space'
+                            rule: self.name.matches('^[a-z0-9][a-z0-9_-]*$')
+                          - message: 'a dotted sub-key such as hf-overrides.rope is
+                              refused: give the JSON value under the long name, hf-overrides'
+                            rule: '!self.name.contains(''.'')'
+                          - message: 'a short flag alias such as tp, pp or dp is refused:
+                              write the long flag name, for example tensor-parallel-size'
+                            rule: '!(self.name.replace(''_'', ''-'') in [''ac'', ''asc'',
+                              ''cc'', ''dc'', ''dcp'', ''dp'', ''dpa'', ''dpb'', ''dpe'',
+                              ''dph'', ''dpl'', ''dpm'', ''dpn'', ''dpp'', ''dpr'',
+                              ''ep'', ''n'', ''pcp'', ''pp'', ''q'', ''r'', ''sc'',
+                              ''tp''])'
+                          - message: 'a boolean flag is given under its positive name
+                              with the value ''true'' or ''false'': write enable-prefix-caching
+                              with ''false'', not no-enable-prefix-caching'
+                            rule: '!self.name.replace(''_'', ''-'').startsWith(''no-'')'
+                          - message: 'a boolean flag takes exactly ''true'' or ''false'':
+                              write enable-prefix-caching with the value ''true''
+                              or ''false'', not ''1'', ''True'' or an empty value'
+                            rule: '!(self.name.replace(''_'', ''-'') in [''trust-remote-code'',
+                              ''enforce-eager'', ''enable-expert-parallel'', ''enable-auto-tool-choice'',
+                              ''enable-prefix-caching'', ''enable-chunked-prefill'',
+                              ''enable-log-requests'']) || self.value in [''true'',
+                              ''false'']'
+                          - message: 'a key is never written in a spec: the framework
+                              issues each Instance''s API key, and a Hub token goes
+                              in checkpoint.hubTokenRef (api-key and hf-token are
+                              refused, in either spelling, and so is any abbreviation
+                              of them, because vLLM expands a unique prefix)'
+                            rule: '![''api-key'', ''hf-token''].exists(k, k.startsWith(self.name.replace(''_'',
+                              ''-'')))'
+                          - message: 'the framework passes model, revision and chat-template
+                              itself: set checkpoint and chatTemplate instead (an
+                              abbreviation of these names is refused too, because
+                              vLLM expands a unique prefix)'
+                            rule: '![''model'', ''revision'', ''chat-template''].exists(k,
+                              k.startsWith(self.name.replace(''_'', ''-'')))'
+                          - message: 'config is refused: vLLM''s --config reads a
+                              file that can set any flag, so the flags hashed here
+                              would not be the flags that run; write each flag in
+                              flags (an abbreviation of config is refused too)'
+                            rule: '!''config''.startsWith(self.name.replace(''_'',
+                              ''-''))'
+                          - message: 'lora-modules is refused in alpha: it names other
+                              checkpoints without a pinned revision (a pinned form
+                              is for beta); an abbreviation of it is refused too'
+                            rule: '!''lora-modules''.startsWith(self.name.replace(''_'',
+                              ''-''))'
+                          - message: 'a speculative-config that names a draft model
+                              is refused in alpha: the draft model is another checkpoint
+                              without a pinned revision (a pinned form is for beta)'
+                            rule: self.name.replace('_', '-') != 'speculative-config'
+                              || !self.value.matches('["]model["][[:space:]]*:')
+                          - message: 'a proper prefix of a known flag name is refused:
+                              vLLM''s parser expands an abbreviation, so two spellings
+                              of one flag would give two deployment IDs; write the
+                              full long name'
+                            rule: self.name.replace('_', '-') in ['dtype', 'quantization',
+                              'kv-cache-dtype', 'max-model-len', 'tokenizer', 'tokenizer-mode',
+                              'tokenizer-revision', 'trust-remote-code', 'load-format',
+                              'hf-overrides', 'enforce-eager', 'compilation-config',
+                              'attention-backend', 'tensor-parallel-size', 'pipeline-parallel-size',
+                              'enable-expert-parallel', 'speculative-config', 'seed',
+                              'generation-config', 'override-generation-config', 'tool-call-parser',
+                              'enable-auto-tool-choice', 'reasoning-parser', 'chat-template-content-format',
+                              'default-chat-template-kwargs', 'model', 'revision',
+                              'chat-template', 'enable-prefix-caching', 'max-num-seqs',
+                              'max-num-batched-tokens', 'enable-chunked-prefill',
+                              'gpu-memory-utilization', 'kv-cache-memory-bytes', 'cpu-offload-gb',
+                              'host', 'port', 'uds', 'served-model-name', 'download-dir',
+                              'distributed-executor-backend', 'log-level', 'disable-log-stats',
+                              'enable-log-requests', 'api-key', 'hf-token', 'config',
+                              'lora-modules'] || !['dtype', 'quantization', 'kv-cache-dtype',
+                              'max-model-len', 'tokenizer', 'tokenizer-mode', 'tokenizer-revision',
+                              'trust-remote-code', 'load-format', 'hf-overrides',
+                              'enforce-eager', 'compilation-config', 'attention-backend',
+                              'tensor-parallel-size', 'pipeline-parallel-size', 'enable-expert-parallel',
+                              'speculative-config', 'seed', 'generation-config', 'override-generation-config',
+                              'tool-call-parser', 'enable-auto-tool-choice', 'reasoning-parser',
+                              'chat-template-content-format', 'default-chat-template-kwargs',
+                              'model', 'revision', 'chat-template', 'enable-prefix-caching',
+                              'max-num-seqs', 'max-num-batched-tokens', 'enable-chunked-prefill',
+                              'gpu-memory-utilization', 'kv-cache-memory-bytes', 'cpu-offload-gb',
+                              'host', 'port', 'uds', 'served-model-name', 'download-dir',
+                              'distributed-executor-backend', 'log-level', 'disable-log-stats',
+                              'enable-log-requests', 'api-key', 'hf-token', 'config',
+                              'lora-modules'].exists(k, k.startsWith(self.name.replace('_',
+                              '-')))
+                        maxItems: 128
+                        type: array
+                        x-kubernetes-list-type: atomic
+                    required:
+                    - checkpoint
+                    - engine
+                    type: object
+                    x-kubernetes-validations:
+                    - message: 'a tokenizer other than the checkpoint''s needs a tokenizer-revision
+                        flag that is a full commit id: 40 lowercase hex characters'
+                      rule: '!has(self.flags) || !self.flags.exists(f, f.name.replace(''_'',
+                        ''-'') == ''tokenizer'' && f.value != self.checkpoint.repository)
+                        || self.flags.exists(f, f.name.replace(''_'', ''-'') == ''tokenizer-revision''
+                        && f.value.matches(''^[0-9a-f]{40}$''))'
+                    - message: 'tokenizer-revision must be a full commit id: 40 lowercase
+                        hex characters; a branch name or a tag is mutable'
+                      rule: '!has(self.flags) || self.flags.all(f, f.name.replace(''_'',
+                        ''-'') != ''tokenizer-revision'' || f.value.matches(''^[0-9a-f]{40}$''))'
+                type: object
+                x-kubernetes-validations:
+                - message: source names exactly one of served and managed
+                  rule: has(self.served) != has(self.managed)
+            required:
+            - instances
+            - model
+            - providers
+            - source
+            type: object
+          status:
+            description: ModelDeploymentStatus is the observed state of a ModelDeployment.
+            properties:
+              activeIDs:
+                description: ActiveIDs lists every ID that still has Instances.
+                items:
+                  description: |-
+                    ActiveDeploymentID is a deployment ID that still has Instances, as a
+                    Deployment lists its ReplicaSets.
+                  properties:
+                    acceleratorClass:
+                      description: |-
+                        AcceleratorClass is the class of the ID's Instances; absent for a
+                        managed catalog entry.
+                      properties:
+                        cpuArch:
+                          description: CPUArch is the CPU architecture, for example
+                            "aarch64" or "x86_64".
+                          maxLength: 63
+                          minLength: 1
+                          type: string
+                        gpuModel:
+                          description: GPUModel is the GPU model. A partition without
+                            GPUs names "none".
+                          maxLength: 63
+                          minLength: 1
+                          type: string
+                      required:
+                      - cpuArch
+                      - gpuModel
+                      type: object
+                    id:
+                      description: ID is the full deployment ID, as an Instance carries
+                        it.
+                      maxLength: 64
+                      pattern: ^[0-9a-f]{64}$
+                      type: string
+                    instances:
+                      description: Instances is how many Instances of this ID exist.
+                      format: int32
+                      type: integer
+                  required:
+                  - id
+                  - instances
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              currentIDs:
+                description: |-
+                  CurrentIDs lists the current deployment ID of each accelerator class
+                  (HBEP-3, Current IDs, the file list and rollout).
+                items:
+                  description: ClassDeploymentID is the current deployment ID of one
+                    accelerator class.
+                  properties:
+                    acceleratorClass:
+                      description: |-
+                        AcceleratorClass is the class the ID is current for. A managed catalog
+                        entry has no accelerator class, and none is invented for it.
+                      properties:
+                        cpuArch:
+                          description: CPUArch is the CPU architecture, for example
+                            "aarch64" or "x86_64".
+                          maxLength: 63
+                          minLength: 1
+                          type: string
+                        gpuModel:
+                          description: GPUModel is the GPU model. A partition without
+                            GPUs names "none".
+                          maxLength: 63
+                          minLength: 1
+                          type: string
+                      required:
+                      - cpuArch
+                      - gpuModel
+                      type: object
+                    id:
+                      description: |-
+                        ID is the full deployment ID, as an Instance carries it, so that a
+                        controller never compares two forms of one ID.
+                      maxLength: 64
+                      pattern: ^[0-9a-f]{64}$
+                      type: string
+                  required:
+                  - id
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
+              desiredInstances:
+                description: |-
+                  DesiredInstances is the number of Instances the controller currently
+                  aims for.
+                format: int32
+                type: integer
+              instances:
+                description: |-
+                  Instances is the number of Instances that exist and have not ended. It
+                  is the scale subresource's status count.
+                format: int32
+                type: integer
+              lastReconcileTime:
+                description: LastReconcileTime is when the controller last reconciled
+                  the object.
+                format: date-time
+                type: string
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the metadata.generation the controller last
+                  reconciled.
+                format: int64
+                type: integer
+              readyInstances:
+                description: ReadyInstances is the number of Instances that take traffic.
+                format: int32
+                type: integer
+              retention:
+                description: |-
+                  Retention shows the retention mode the controller applies to the
+                  deployment's default policy; an unset mode in the spec, or no policy,
+                  reads as Keep.
+                properties:
+                  effectiveMode:
+                    description: |-
+                      EffectiveMode is the mode the controller applies: the spec's mode, or
+                      Keep when the spec sets none (RetentionPolicy.EffectiveMode).
+                    enum:
+                    - Keep
+                    - ReleaseWhenIdle
+                    type: string
+                type: object
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      scale:
+        specReplicasPath: .spec.instances
+        statusReplicasPath: .status.instances
+      status: {}
