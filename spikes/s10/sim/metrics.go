@@ -55,15 +55,25 @@ type Metrics struct {
 	firstKeys map[string]int
 	buckets   map[int]*[2]int64 // bucket -> {hit, prompt}
 
+	// PerInst holds window totals per Instance, and each one's peak load.
+	PerInst []InstStat
+
 	// Trace, when set before Run, records every completed request in Recs.
 	Trace bool
 	Recs  []Rec
 }
 
+// InstStat is one Instance's share of the window.
+type InstStat struct {
+	Requests     int
+	Prompt, Hit  int64
+	PeakInFlight int
+}
+
 // Rec is one completed request.
 type Rec struct {
 	Conv, Turn, Inst, Prompt, Hit int
-	Dispatch, End              float64
+	Dispatch, End                 float64
 }
 
 // RehomeCount counts, for one event, conversations whose first request
@@ -76,8 +86,8 @@ type RehomeCount struct {
 	ToJoined   int // moved onto a joining Instance
 }
 
-func newMetrics(pol Policy, _ int) *Metrics {
-	return &Metrics{pol: pol, WinEnd: math.Inf(1), Bucket: 60, lastEvent: -1,
+func newMetrics(pol Policy, n int) *Metrics {
+	return &Metrics{pol: pol, WinEnd: math.Inf(1), Bucket: 60, lastEvent: -1, PerInst: make([]InstStat, n),
 		firstKeys: map[string]int{}, buckets: map[int]*[2]int64{}}
 }
 
@@ -124,6 +134,10 @@ func (m *Metrics) placement(e *Engine, r *request, idx int) {
 	meanAfter := float64(total+1) / n
 	m.Placements++
 	m.PeakLoad = max(m.PeakLoad, e.inst[idx].inflight+1)
+	if m.inWindow(e.now) {
+		st := &m.PerInst[idx]
+		st.PeakInFlight = max(st.PeakInFlight, e.inst[idx].inflight+1)
+	}
 	if meanAfter >= 2 {
 		m.MaxPlaceRatio = max(m.MaxPlaceRatio, (pre+1)/meanAfter)
 	}
@@ -220,6 +234,10 @@ func (m *Metrics) completed(e *Engine, r *request) {
 		return
 	}
 	m.Requests++
+	st := &m.PerInst[r.inst]
+	st.Requests++
+	st.Prompt += int64(r.promptLen)
+	st.Hit += int64(r.hold.HitTokens)
 	m.PromptTokens += int64(r.promptLen)
 	m.HitTokens += int64(r.hold.HitTokens)
 	m.PrefillTokens += int64(r.promptLen - r.hold.HitTokens)

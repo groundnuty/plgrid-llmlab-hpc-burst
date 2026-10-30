@@ -20,16 +20,16 @@ func (r *runner) steady(dir string, kvs []int) {
 	}
 	res := r.run(jobs)
 	var md, csv strings.Builder
-	csv.WriteString("kv_tokens,seed,policy,key,hit_rate,later_turn_hit_rate,prefill_tokens,mean_latency_s,p95_latency_s,move_rate,distinct_keys,top_key_share,peak_inflight,max_place_ratio,bound_violations,paper_violations,max_place_excess,time_above_bound,active_convs,active_context_tokens,mean_inflight\n")
+	csv.WriteString(csvHeader)
 	for _, kv := range kvs {
 		groups := groupBy(res, func(x result) bool { return x.kv == kv })
 		fmt.Fprintf(&md, "\n### KV cache %d tokens per Instance\n\n", kv)
 		writeWorkingSet(&md, groups, kv)
-		md.WriteString("| policy / key | hit rate | later turns | prefill vs RR | mean / p95 latency (s) | moves | keys (top share) | peak in-flight | max load / mean | above bound (HBEP-5 rule) | +1 over ceil(c*mean) | time above c*mean |\n")
-		md.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|\n")
-		rrPrefill := mean(groups[0], func(m *sim.Metrics) float64 { return float64(m.PrefillTokens) })
+		md.WriteString("| policy / key | hit rate | later turns | throughput vs RR | prefill tokens / request | mean / p95 latency (s) | moves | keys (top share) | peak in-flight | max load / mean | above bound (HBEP-5 rule) | +1 over ceil(c*mean) | time above c*mean |\n")
+		md.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+		rrOut := mean(groups[0], func(m *sim.Metrics) float64 { return float64(m.OutputTokens) })
 		for _, g := range groups {
-			writeSteadyRow(&md, g, rrPrefill)
+			writeSteadyRow(&md, g, rrOut)
 			for _, x := range g {
 				writeSteadyCSV(&csv, x)
 			}
@@ -96,7 +96,7 @@ func writeWorkingSet(md *strings.Builder, groups [][]result, kv int) {
 		c, tok/1e6, tok/float64(4*kv), 4, kv)
 }
 
-func writeSteadyRow(md *strings.Builder, g []result, rrPrefill float64) {
+func writeSteadyRow(md *strings.Builder, g []result, rrOut float64) {
 	p := g[0].pol
 	hit := func(m *sim.Metrics) float64 { return m.HitRate() }
 	lo, hi := span(g, hit)
@@ -112,10 +112,11 @@ func writeSteadyRow(md *strings.Builder, g []result, rrPrefill float64) {
 		paper = fmt.Sprintf("%.0f", sumOf(g, func(m *sim.Metrics) float64 { return float64(m.PaperViol) }))
 		above = pct(mean(g, func(m *sim.Metrics) float64 { return m.TimeAboveBound() }))
 	}
-	fmt.Fprintf(md, "| %s | %s [%s, %s] | %s | %.2fx | %.1f / %.1f | %s | %s | %.0f | %.2f | %s | %s | %s |\n",
+	fmt.Fprintf(md, "| %s | %s [%s, %s] | %s | %.2fx | %.0f | %.1f / %.1f | %s | %s | %.0f | %.2f | %s | %s | %s |\n",
 		label(p), pct(mean(g, hit)), pct(lo), pct(hi),
 		pct(mean(g, func(m *sim.Metrics) float64 { return m.HitRate1() })),
-		mean(g, func(m *sim.Metrics) float64 { return float64(m.PrefillTokens) })/rrPrefill,
+		mean(g, func(m *sim.Metrics) float64 { return float64(m.OutputTokens) })/rrOut,
+		mean(g, func(m *sim.Metrics) float64 { return float64(m.PrefillTokens) / float64(m.Requests) }),
 		mean(g, func(m *sim.Metrics) float64 { return m.MeanLatency() }),
 		mean(g, func(m *sim.Metrics) float64 { return m.Latency(0.95) }),
 		pct(mean(g, func(m *sim.Metrics) float64 { return m.MoveRate() })),
@@ -125,13 +126,30 @@ func writeSteadyRow(md *strings.Builder, g []result, rrPrefill float64) {
 		bound, paper, above)
 }
 
+const csvHeader = "scenario,kv_tokens,seed,policy,key,requests,output_tokens,prompt_tokens,hit_tokens,prefill_tokens,later_prompt_tokens,later_hit_tokens,mean_latency_s,p95_latency_s,move_rate,distinct_keys,top_key_share,peak_inflight,max_place_ratio,bound_violations,paper_violations,max_place_excess,time_above_bound,max_kubeai_inflation,aborted,compactions,active_convs,active_context_tokens,mean_inflight,inst_requests,inst_hit_rate,inst_peak_inflight\n"
+
 func writeSteadyCSV(csv *strings.Builder, x result) {
 	m := x.m
 	d, top := m.Keys()
 	c, tok, inf := m.WorkingSet()
-	fmt.Fprintf(csv, "%d,%d,%s,%s,%.5f,%.5f,%d,%.3f,%.3f,%.5f,%d,%.4f,%d,%.3f,%d,%d,%.3f,%.5f,%.2f,%.0f,%.2f\n",
-		x.kv, x.seed, x.pol.Name(), x.pol.Key, m.HitRate(), m.HitRate1(), m.PrefillTokens, m.MeanLatency(), m.Latency(0.95),
-		m.MoveRate(), d, top, m.PeakLoad, m.MaxPlaceRatio, m.KubeRuleViol, m.PaperViol, m.MaxPlaceExcess, m.TimeAboveBound(), c, tok, inf)
+	var reqs, hits, peaks []string
+	for _, st := range m.PerInst {
+		reqs = append(reqs, fmt.Sprint(st.Requests))
+		hits = append(hits, fmt.Sprintf("%.3f", ratioF(st.Hit, st.Prompt)))
+		peaks = append(peaks, fmt.Sprint(st.PeakInFlight))
+	}
+	fmt.Fprintf(csv, "%s,%d,%d,%s,%s,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.5f,%d,%.4f,%d,%.3f,%d,%d,%.3f,%.5f,%d,%d,%d,%.2f,%.0f,%.2f,%s,%s,%s\n",
+		x.scen, x.kv, x.seed, x.pol.Name(), x.pol.Key, m.Requests, m.OutputTokens, m.PromptTokens, m.HitTokens, m.PrefillTokens,
+		m.PromptTokens1, m.HitTokens1, m.MeanLatency(), m.Latency(0.95), m.MoveRate(), d, top, m.PeakLoad, m.MaxPlaceRatio,
+		m.KubeRuleViol, m.PaperViol, m.MaxPlaceExcess, m.TimeAboveBound(), m.MaxKubeInflation, m.Aborted, m.Compactions,
+		c, tok, inf, strings.Join(reqs, ";"), strings.Join(hits, ";"), strings.Join(peaks, ";"))
+}
+
+func ratioF(a, b int64) float64 {
+	if b == 0 {
+		return 0
+	}
+	return float64(a) / float64(b)
 }
 
 // eventPolicies are the configurations compared around membership events.
@@ -179,6 +197,12 @@ func (r *runner) eventRunsAt(dir string, kv int) {
 			base[fmt.Sprintf("%s|%d", label(x.pol), x.seed)] = x.m
 		}
 	}
+	var csv strings.Builder
+	csv.WriteString(csvHeader)
+	for _, x := range res {
+		writeSteadyCSV(&csv, x)
+	}
+	writeFile(dir, fmt.Sprintf("events-%d.csv", kv), csv.String())
 	var md strings.Builder
 	fmt.Fprintf(&md, "## Membership events (KV cache %d tokens per Instance; event at %.0f s; mean over seeds)\n", kv, evTime)
 	for _, sc := range scenarios[1:] {
@@ -189,18 +213,22 @@ func (r *runner) eventRunsAt(dir string, kv int) {
 
 func writeEventTable(md *strings.Builder, scen string, groups [][]result, base map[string]*sim.Metrics) {
 	fmt.Fprintf(md, "\n### %s\n\n", scen)
-	md.WriteString("| policy / key | checked | re-homed: forced | collateral | to new | cut | hit before | hit 0-5 min after (baseline) | hit 5-15 min after (baseline) | above bound (HBEP-5 rule) | +1 over ceil | KubeAI mean inflation (max req.) |\n")
-	md.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+	md.WriteString("| policy / key | event | checked | re-homed: forced | collateral | to new | cut | hit before | hit 0-5 min after (baseline) | hit 5-15 min after (baseline) | above bound (HBEP-5 rule) | +1 over ceil | KubeAI mean inflation (max req.) |\n")
+	md.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
 	for _, g := range groups {
+		for k := range g[0].m.Rehomed {
+			writeEventRow(md, g, k, base)
+		}
+	}
+}
+
+// writeEventRow writes one policy's row for event k. The hit-rate and bound
+// columns cover the whole scenario; they repeat on each event's row.
+func writeEventRow(md *strings.Builder, g []result, k int, base map[string]*sim.Metrics) {
+	{
 		p := g[0].pol
 		rc := func(f func(sim.RehomeCount) int) float64 {
-			return mean(g, func(m *sim.Metrics) float64 {
-				s := 0
-				for _, c := range m.Rehomed {
-					s += f(c)
-				}
-				return float64(s)
-			})
+			return mean(g, func(m *sim.Metrics) float64 { return float64(f(m.Rehomed[k])) })
 		}
 		win := func(from, to float64) (ev, bs float64) {
 			ev = mean(g, func(m *sim.Metrics) float64 { return m.BucketHitRate(from, to) })
@@ -218,8 +246,9 @@ func writeEventTable(md *strings.Builder, scen string, groups [][]result, base m
 			bound = fmt.Sprintf("%.0f", sumOf(g, func(m *sim.Metrics) float64 { return float64(m.KubeRuleViol) }))
 			paper = fmt.Sprintf("%.0f", sumOf(g, func(m *sim.Metrics) float64 { return float64(m.PaperViol) }))
 		}
-		fmt.Fprintf(md, "| %s | %.0f | %.0f | %.0f | %.0f | %.0f | %s | %s (%s) | %s (%s) | %s | %s | %.0f |\n",
-			label(p), rc(func(c sim.RehomeCount) int { return c.Checked }),
+		ev := g[0].m.Rehomed[k].Event
+		fmt.Fprintf(md, "| %s | %s %s at %.0f s | %.0f | %.0f | %.0f | %.0f | %.0f | %s | %s (%s) | %s (%s) | %s | %s | %.0f |\n",
+			label(p), ev.Kind, fmt.Sprintf("instance-%d", ev.Instance), ev.Time, rc(func(c sim.RehomeCount) int { return c.Checked }),
 			rc(func(c sim.RehomeCount) int { return c.Forced }),
 			rc(func(c sim.RehomeCount) int { return c.Collateral }),
 			rc(func(c sim.RehomeCount) int { return c.ToJoined }),
