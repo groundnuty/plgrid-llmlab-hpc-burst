@@ -1,8 +1,20 @@
 diff --git a/pkg/communication/http.go b/pkg/communication/http.go
-index caabc2b..5def5d2 100644
+index caabc2b..2010a0b 100644
 --- a/pkg/communication/http.go
 +++ b/pkg/communication/http.go
-@@ -55,7 +55,7 @@ const (
+@@ -14,6 +14,11 @@ See the License for the specific language governing permissions and
+ limitations under the License.
+ */
+ 
++// Modified from upstream (https://github.com/llm-d/llm-d-inference-sim, tag v1.0.0) by the plgrid-llmlab-hpc-burst
++// project, spike S2, 2026-10-30: the listeners in this file bind 127.0.0.1 instead of all interfaces.
++// Nothing else is changed. See third_party/forked/llm-d-inference-sim/ORIGIN.md in
++// https://github.com/groundnuty/plgrid-llmlab-hpc-burst.
++
+ package communication
+ 
+ import (
+@@ -55,7 +60,7 @@ const (
  )
  
  func (c *Communication) newListener() (net.Listener, error) {

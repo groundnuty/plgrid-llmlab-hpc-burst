@@ -8,5 +8,6 @@
 - Change: `loopback-bind.patch` makes the EPP's gRPC servers (ext-proc and health, `internal/runnable/grpc.go`),
   its metrics server and one HTTP server (`cmd/epp/runner/runner.go`, two lines) bind `127.0.0.1:<port>`
   instead of all interfaces. Upstream has no listen-address option; its ports are `:<port>` and, with
-  `--secure-serving=false`, unauthenticated. Nothing else is changed.
+  `--secure-serving=false`, unauthenticated. The patch also adds a modification notice (a comment after the
+  licence block) to each of the two files, as Apache-2.0 section 4(b) and HBEP-15 require. Nothing else is changed.
 - Apply: `git apply loopback-bind.patch` in a checkout of the commit above; `spikes/s2/scripts/setup.sh` does this.
