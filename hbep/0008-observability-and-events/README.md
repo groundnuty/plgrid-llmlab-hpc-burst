@@ -74,6 +74,10 @@ A past project served models on several Slurm clusters behind its own fronts. It
 - **Events taken as the only truth.** A subscriber that misses an event acts on stale state. Events are edges; resource status (HBEP-11) is the level truth, and a resuming subscriber re-reads status.
 - **A metric some engines cannot give.** With few chunks, the front cannot derive time per token. Engine-side timing is used where reported; otherwise the value is unknown.
 - **Metering on the request path** adds latency, or loses records when the front crashes. A lost record must show as a gap in the usage record, never as silence.
+  - **Mitigation (candidate)**, from spike S8 (issue #25, PR #28): usage records go to the log with `sync_interval: always`. They are batched only above a few hundred records per second, since one node acknowledged about 1,200 publishes per second on the test disk under `always`. A wider batch widens what a front crash loses.
+  - **Not tested by S8:** power loss and a kernel crash, the only cases where `always` differs from the default.
+  - **Counter:** each usage record carries a monotonic counter that the front persists independently of the log, so a consumer can see a missing range.
+  - **Still open:** detecting a final batch lost in a front crash before it was published, since no later record reveals it. S8 did not test a front crash.
 - **Billing sources lag or undercount,** as a report of finished jobs only does. Where a center report and the scheduler's accounting differ, both are shown with the gap.
 - **Managed providers are opaque.** LLMLab's periodic stalls show only in front-side time to first token. Its "degraded" events come from front measurements and probes, against the platform profile's thresholds.
 - **Series multiply with handovers.** Each handover adds a series per metric, so retention and roll-up per deployment are needed (see Open questions).
@@ -89,7 +93,7 @@ A past project served models on several Slurm clusters behind its own fronts. It
 - Whether each client key can read its own usage through the front, as LLMLab users may expect. Discussion with HBEP-5.
 - The last level of liveness: an end-to-end probe of the front and control plane from outside both. Where it runs and who gets its alert.
 - Probes versus live traffic for time to first token. Live traffic mixes prompt lengths; probes cost capacity. A measurement on a test deployment decides.
-- Whether an observer that restarts emits the transitions it missed, or one `degraded` event with reason "gap". Lean: the "gap" event; status is the truth.
+- Whether an observer that restarts emits the transitions it missed, or one `degraded` event with reason "gap". Lean: the "gap" event; status is the truth. S8's gap marker covers events evicted from the log. An observer's missed transitions were never published, so it still needs its own "gap" event.
 
 ## Design details
 
@@ -145,10 +149,58 @@ TBD. Lean: alpha when every Goals metric and event exists for one batch provider
 - **Rebuilding usage from logs afterwards.** Possible, but slow, and only as complete as the logs.
 - **KV-cache utilisation as the load measure.** Simple, but it does not compare across attention implementations.
 
+## Prior art and reuse
+
+Events and accounting replace www-2027's exit-to-wake watchers, its append-only live archive, and its grant forecast from scheduler accounting, which counted the running jobs that the center's tool missed.
+
+### Community software reused
+
+| Component | Origin (project, URL) | Licence | How used (dependency, copied code, optional) |
+|---|---|---|---|
+| Prometheus | [prometheus/prometheus](https://github.com/prometheus/prometheus) | Apache-2.0 | Candidate, decided by spike S9: scrapes engines through the front, with targets from HTTP service discovery over the inventory |
+| NATS JetStream | [nats-io/nats-server](https://github.com/nats-io/nats-server) | Apache-2.0 | Candidate, supported by spike S8 (PR #28) except for power loss, which was not tested: an embedded durable log for events and usage records, with `sync_interval: always` |
+| CloudEvents 1.0.2 and sdk-go | [cloudevents/sdk-go](https://github.com/cloudevents/sdk-go); [spec](https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/spec.md) | sdk-go Apache-2.0; spec Apache-2.0 | Candidate, no spike assigned: the envelope for events and usage records |
+| OTel GenAI semantic conventions | [semantic-conventions-genai](https://github.com/open-telemetry/semantic-conventions-genai) | Apache-2.0 | Candidate, no spike assigned: names for front metrics, pinned to a commit; no code |
+| vLLM metric names | [vllm-project/vllm](https://github.com/vllm-project/vllm) | Apache-2.0 | Candidate, no spike assigned: engine metric names kept at the source and mapped by recording rules |
+| Kubernetes Events | the control plane's API host (HBEP-11): [k3s](https://github.com/k3s-io/k3s), or [kcp](https://github.com/kcp-dev/kcp) | k3s Apache-2.0; kcp Apache-2.0 | Candidate, no spike assigned: a mirror for people only, never the event stream |
+| llm-d-inference-sim | [llm-d/llm-d-inference-sim](https://github.com/llm-d/llm-d-inference-sim) | Apache-2.0 | Candidate test dependency, no spike assigned: an engine double for the metric tests |
+
+### Designs and published work borrowed
+
+| Idea | Origin (project, paper or document) | Where it lands here |
+|---|---|---|
+| Detect a gap when a cursor falls below the stream's first sequence | Synadia's JetStream check ([nats-unprocessed-critical](https://www.synadia.com/insights/checks/nats-unprocessed-critical)) | The "gap" event for observers that missed transitions (open questions) |
+
+### Field lessons answered
+
+| Lesson | Lesson ID (from the lessons catalogue, HBEP-15) | How this HBEP answers it |
+|---|---|---|
+| New instances served unannounced, and parked work left GPUs idle. | L-10.1 | Typed lifecycle events, including started and ready. |
+| Watchers died silently with the session that started them. | L-10.2 | Observers send heartbeats and run under the control plane. |
+| Untracked watchers woke nobody, and duplicates doubled alerts. | L-10.3 | Observers run under the control plane, never in an agent's session. |
+| Empty samples were shown as zero, and reads hit the wrong target. | L-10.5 | "Unknown" with a reason is a value, never zero. |
+| Checks that could not see their input reported OK. | L-10.6 | A check that cannot read its input reports unknown, never pass. |
+| Counters reset by a restart invalidated before/after comparisons. | L-10.7 | An engine restart starts a new series. |
+| A batched heartbeat read against a fixed tick gave false "down" alerts. | L-10.8 | The down interval spans several heartbeat periods. |
+| Monitors read their targets once at start. | L-10.9 | Observation follows the inventory as it changes. |
+| A job ended by its time limit stayed listed. | L-10.10 | The Instance leaves the inventory with an event citing the time limit. |
+| Other tools misread free-text state lines. | L-10.14 | Typed events; tools act on type and reason, never on the message. |
+| A deliberate restart was counted as a crash. | L-10.16 | A planned stop names an actor and an operation. |
+| KV-cache percentages meant different loads on different deployments. | L-5.6 | KV-cache use is recorded but not compared. |
+| A routing change was judged on the fingerprint alone. | L-4.5 | Per-session throughput, prefix-cache hit rate and time to first token, before and after. |
+| Tokens served and GPU-hours were rebuilt from logs afterwards. | L-13.6 | Per-request usage metering at the front. |
+| The center's tool counted only finished jobs. | L-13.1 | Accounting from the provider's billing source, with running and pending Allocations. |
+| Billing formulas differ per cluster. | L-13.2 | The formula is platform-profile data. |
+| A forecast counted pending jobs with an unknown start as starting now. | L-13.3 | A pending Allocation with an unknown start is unknown. |
+| Spend counted by a record's modification time inflated an estimate. | L-13.7 | Usage records carry the request's own time. |
+| A managed gateway's periodic stalls showed only in timings. | L-6.2 | "Degraded" events from front-side time to first token. |
+
 ## Implementation history
 
 - 2026-10-28: proposed (provisional), tracking issue #8.
 - 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
+- 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation.
+- 2026-10-30: spike S8 (PR #28) findings carried in.
 
 ## Amendments
 
