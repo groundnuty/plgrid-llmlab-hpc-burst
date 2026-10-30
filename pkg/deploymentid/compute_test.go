@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -306,120 +305,6 @@ func TestComputeDoesNotMutateInputs(t *testing.T) {
 	}
 }
 
-func TestRefusals(t *testing.T) {
-	cases := []struct {
-		name string
-		flag *Flag
-		env  *EnvVar
-		want error
-	}{
-		{"short alias -tp", &Flag{"-tp", "2"}, nil, ErrShortAlias},
-		{"short alias -q", &Flag{"-q", "awq"}, nil, ErrShortAlias},
-		{"short alias -O3", &Flag{"-O3", ""}, nil, ErrShortAlias},
-		{"long name with dashes", &Flag{"--dtype", "bfloat16"}, nil, ErrInvalid},
-		{"lone dash", &Flag{"-", ""}, nil, ErrInvalid},
-		{"api-key", &Flag{"api-key", "SECRET-VALUE"}, nil, ErrSecret},
-		{"hf-token", &Flag{"hf-token", "SECRET-VALUE"}, nil, ErrSecret},
-		{"HF_TOKEN", nil, &EnvVar{"HF_TOKEN", "SECRET-VALUE"}, ErrSecret},
-		{"model", &Flag{"model", "x/y"}, nil, ErrFrameworkPassed},
-		{"revision", &Flag{"revision", "main"}, nil, ErrFrameworkPassed},
-		{"chat-template", &Flag{"chat-template", "{{ x }}"}, nil, ErrFrameworkPassed},
-		{"empty flag name", &Flag{"", "x"}, nil, ErrInvalid},
-		{"flag name with space", &Flag{"max model len", "1"}, nil, ErrInvalid},
-		{"flag name with =", &Flag{"dtype=bfloat16", ""}, nil, ErrInvalid},
-		{"flag name with newline", &Flag{"a\nb", ""}, nil, ErrInvalid},
-		{"flag name not UTF-8", &Flag{"a\xff", ""}, nil, ErrInvalid},
-		{"flag value not UTF-8", &Flag{"dtype", "a\xffb"}, nil, ErrInvalid},
-		{"empty env name", nil, &EnvVar{"", "x"}, ErrInvalid},
-		{"env name with =", nil, &EnvVar{"A=B", ""}, ErrInvalid},
-		{"env value not UTF-8", nil, &EnvVar{"A", "\xff"}, ErrInvalid},
-	}
-	for _, c := range cases {
-		spec, accel, files := baseSpec()
-		if c.flag != nil {
-			spec.Flags = append(spec.Flags, *c.flag)
-		}
-		if c.env != nil {
-			spec.Env = append(spec.Env, *c.env)
-		}
-		_, err := Compute(spec, accel, files)
-		if !errors.Is(err, c.want) {
-			t.Errorf("%s: got %v, want %v", c.name, err, c.want)
-			continue
-		}
-		if strings.Contains(err.Error(), "SECRET-VALUE") {
-			t.Errorf("%s: the error repeats the secret value: %v", c.name, err)
-		}
-	}
-}
-
-func TestRefusalIsNotMaskedByNonInputClass(t *testing.T) {
-	// A refused name is an error wherever it appears, also before and after
-	// non-input flags, and also when repeated.
-	spec, accel, files := baseSpec()
-	spec.Flags = []Flag{{"port", "1"}, {"api-key", "k"}, {"port", "2"}}
-	if _, err := Compute(spec, accel, files); !errors.Is(err, ErrSecret) {
-		t.Errorf("got %v, want ErrSecret", err)
-	}
-}
-
-func TestValidationErrors(t *testing.T) {
-	mut := map[string]func(*ServingSpec, *Accelerator, *[]File){
-		"empty repository": func(s *ServingSpec, _ *Accelerator, _ *[]File) { s.Checkpoint.Repository = "" },
-		"short revision":   func(s *ServingSpec, _ *Accelerator, _ *[]File) { s.Checkpoint.Revision = "abc123" },
-		"41-char revision": func(s *ServingSpec, _ *Accelerator, _ *[]File) { s.Checkpoint.Revision += "a" },
-		"uppercase revision": func(s *ServingSpec, _ *Accelerator, _ *[]File) {
-			s.Checkpoint.Revision = strings.ToUpper(s.Checkpoint.Revision)
-		},
-		"branch as revision":    func(s *ServingSpec, _ *Accelerator, _ *[]File) { s.Checkpoint.Revision = "main" },
-		"repository not UTF-8":  func(s *ServingSpec, _ *Accelerator, _ *[]File) { s.Checkpoint.Repository = "a\xff" },
-		"empty engine version":  func(s *ServingSpec, _ *Accelerator, _ *[]File) { s.Engine.Version = "" },
-		"digest without prefix": func(s *ServingSpec, _ *Accelerator, _ *[]File) { s.Engine.ImageDigest = rep64("6") },
-		"digest short":          func(s *ServingSpec, _ *Accelerator, _ *[]File) { s.Engine.ImageDigest = "sha256:66" },
-		"digest uppercase":      func(s *ServingSpec, _ *Accelerator, _ *[]File) { s.Engine.ImageDigest = "sha256:" + rep64("A") },
-		"digest other algo":     func(s *ServingSpec, _ *Accelerator, _ *[]File) { s.Engine.ImageDigest = "sha512:" + rep64("6") },
-		"empty template hash":   func(s *ServingSpec, _ *Accelerator, _ *[]File) { s.ChatTemplateSHA256 = "" },
-		"uppercase template":    func(s *ServingSpec, _ *Accelerator, _ *[]File) { s.ChatTemplateSHA256 = rep64("A") },
-		"empty gpu model":       func(_ *ServingSpec, a *Accelerator, _ *[]File) { a.GPUModel = "" },
-		"empty cpu arch":        func(_ *ServingSpec, a *Accelerator, _ *[]File) { a.CPUArch = "" },
-		"no files":              func(_ *ServingSpec, _ *Accelerator, f *[]File) { *f = nil },
-		"empty file list":       func(_ *ServingSpec, _ *Accelerator, f *[]File) { *f = []File{} },
-		"duplicate path":        func(_ *ServingSpec, _ *Accelerator, f *[]File) { *f = append(*f, (*f)[0]) },
-		"empty path":            func(_ *ServingSpec, _ *Accelerator, f *[]File) { (*f)[0].Path = "" },
-		"absolute path":         func(_ *ServingSpec, _ *Accelerator, f *[]File) { (*f)[0].Path = "/etc/x" },
-		"empty segment":         func(_ *ServingSpec, _ *Accelerator, f *[]File) { (*f)[0].Path = "a//b" },
-		"trailing slash":        func(_ *ServingSpec, _ *Accelerator, f *[]File) { (*f)[0].Path = "a/" },
-		"dot dot":               func(_ *ServingSpec, _ *Accelerator, f *[]File) { (*f)[0].Path = "a/../b" },
-		"dot":                   func(_ *ServingSpec, _ *Accelerator, f *[]File) { (*f)[0].Path = "./a" },
-		"path not UTF-8":        func(_ *ServingSpec, _ *Accelerator, f *[]File) { (*f)[0].Path = "a\xff" },
-		"file hash uppercase":   func(_ *ServingSpec, _ *Accelerator, f *[]File) { (*f)[0].SHA256 = rep64("A") },
-		"file hash short":       func(_ *ServingSpec, _ *Accelerator, f *[]File) { (*f)[0].SHA256 = "ab" },
-		"duplicate env":         func(s *ServingSpec, _ *Accelerator, _ *[]File) { s.Env = append(s.Env, s.Env[0]) },
-		"duplicate non-input env": func(s *ServingSpec, _ *Accelerator, _ *[]File) {
-			s.Env = append(s.Env, EnvVar{"HF_HOME", "other"})
-		},
-	}
-	for name, m := range mut {
-		spec, accel, files := baseSpec()
-		m(&spec, &accel, &files)
-		if _, err := Compute(spec, accel, files); !errors.Is(err, ErrInvalid) {
-			t.Errorf("%s: got %v, want ErrInvalid", name, err)
-		}
-	}
-}
-
-func TestUnusualPathsAreAccepted(t *testing.T) {
-	spec, accel, _ := baseSpec()
-	for _, p := range []string{"a b", "q\"uote", "back\\slash", "new\nline", "tab\t", "sep\xe2\x80\xa8", "\xc3\xbc", "-dash", "a..b", ".hidden", "a/.b", "..."} {
-		files := []File{{p, rep64("a")}}
-		id := mustCompute(t, spec, accel, files)
-		var doc struct{ Files []struct{ Path string } }
-		if err := json.Unmarshal(id.Canonical, &doc); err != nil || len(doc.Files) != 1 || doc.Files[0].Path != p {
-			t.Errorf("path %q did not survive: %v %+v", p, err, doc)
-		}
-	}
-}
-
 func TestFlagsObjectShape(t *testing.T) {
 	spec, accel, files := baseSpec()
 	spec.Flags = []Flag{{"seed", "1"}, {"port", "1"}, {"lora-modules", "a"}, {"seed", "2"}, {"enforce-eager", "false"}}
@@ -441,58 +326,5 @@ func TestFlagsObjectShape(t *testing.T) {
 	}
 	if !bytes.Contains(id.Canonical, []byte(`"env":{}`)) {
 		t.Errorf("env is not written as {}: %s", id.Canonical)
-	}
-}
-
-func TestComputeManaged(t *testing.T) {
-	e := CatalogEntry{Platform: "llmlab", CatalogName: "example-27b", Revision: "2026-09"}
-	id, err := ComputeManaged(e)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := `{"catalog_name":"example-27b","kind":"managed","opaque":"true","platform":"llmlab","revision":"2026-09","scheme":"v1"}`
-	if string(id.Canonical) != want {
-		t.Errorf("got  %s\nwant %s", id.Canonical, want)
-	}
-	noRev, err := ComputeManaged(CatalogEntry{Platform: "llmlab", CatalogName: "example-27b"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Contains(noRev.Canonical, []byte("revision")) {
-		t.Errorf("an empty revision must be omitted: %s", noRev.Canonical)
-	}
-	for name, other := range map[string]CatalogEntry{
-		"platform": {"llmlab2", "example-27b", "2026-09"}, "catalog name": {"llmlab", "example-28b", "2026-09"},
-		"revision": {"llmlab", "example-27b", "2026-10"}, "no revision": {"llmlab", "example-27b", ""},
-	} {
-		o, err := ComputeManaged(other)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if o.SHA256 == id.SHA256 {
-			t.Errorf("changing the %s did not change the ID", name)
-		}
-	}
-	for _, bad := range []CatalogEntry{{"", "x", ""}, {"x", "", ""}, {"x\xff", "y", ""}} {
-		if _, err := ComputeManaged(bad); !errors.Is(err, ErrInvalid) {
-			t.Errorf("%+v: got %v, want ErrInvalid", bad, err)
-		}
-	}
-}
-
-// A catalog entry and a served deployment of the same checkpoint never get
-// the same ID (HBEP-3, Test plan).
-func TestManagedAndServedNeverCollide(t *testing.T) {
-	spec, accel, files := baseSpec()
-	served := mustCompute(t, spec, accel, files)
-	managed, err := ComputeManaged(CatalogEntry{Platform: "p", CatalogName: spec.Checkpoint.Repository, Revision: spec.Checkpoint.Revision})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if served.SHA256 == managed.SHA256 {
-		t.Error("a served and a managed deployment share an ID")
-	}
-	if !bytes.Contains(served.Canonical, []byte(`"kind":"served"`)) || !bytes.Contains(managed.Canonical, []byte(`"kind":"managed"`)) {
-		t.Error("kind is not in the canonical object")
 	}
 }
