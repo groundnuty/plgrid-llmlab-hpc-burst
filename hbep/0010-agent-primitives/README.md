@@ -173,7 +173,7 @@ The primitives replace www-2027 practices: a shared gate on a common host (slots
 
 | Component | Origin (project, URL) | Licence | How used (dependency, copied code, optional) |
 |---|---|---|---|
-| Kubernetes API (RBAC, server-side dry run, audit, `Lease`), on k3s or kcp | [k3s](https://github.com/k3s-io/k3s); [kcp](https://github.com/kcp-dev/kcp) | k3s Apache-2.0; kcp Apache-2.0 | Candidate host, as HBEP-11 decides: k3s for the team option, and the single-user host by spike S3 |
+| Kubernetes API (RBAC, server-side dry run, audit, `Lease`), on the host HBEP-11 picks | [kubernetes/kubernetes](https://github.com/kubernetes/kubernetes); [k3s](https://github.com/k3s-io/k3s) | Apache-2.0 | Dependency (HBEP-11): k3s for the team option; the single-user host by HBEP-11's rule, settled by spike S3 (PR #36) |
 | NATS JetStream | [nats-io/nats-server](https://github.com/nats-io/nats-server) | Apache-2.0 | Candidate, confirmed by spike S8 (PR #28): an embedded log; subscriptions are subscriber-kept cursors over stream sequences, with a thin layer of our own for gaps and order |
 
 ### Designs and published work borrowed
@@ -215,6 +215,7 @@ The primitives replace www-2027 practices: a shared gate on a common host (slots
 - 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
 - 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation.
 - 2026-10-30: spike S8 (PR #28) findings carried in.
+- 2026-10-30: aligned with HBEP-11 becoming implementable: the API host row.
 
 ## Amendments
 

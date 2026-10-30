@@ -2,7 +2,7 @@
 hbep: 11
 title: Kubernetes as the control plane
 # provisional | implementable | implemented | deferred | rejected | withdrawn | replaced
-status: provisional
+status: implementable
 # none | alpha | beta | stable: the maturity reached (an HBEP without stages stays none)
 stage: none
 authors:
@@ -11,7 +11,7 @@ approvers:
   - groundnuty
 tracking-issue: https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/11
 created: 2026-10-28
-last-updated: 2026-10-28
+last-updated: 2026-10-30
 replaces: []
 superseded-by: []
 see-also: [3, 4, 5, 7, 10]

@@ -47,7 +47,7 @@ Problems:
 
 ### User stories
 
-- A researcher declares `example-27b` with two instances on Helios or Athena until a given date. The controller submits early to both and keeps the first allocation to start. It cancels the pending loser, then verifies and warms the instance, and the front starts routing to it. Before that lease's drain starts, a replacement already serves.
+- A researcher declares `example-27b` with two instances on Helios or Athena until a given date. Helios' GH200 partition and Athena's A100 partition are two accelerator classes, so the deployment has two current IDs, one per class (HBEP-3). The controller submits early to both and keeps the first allocation to start. Its Instance takes the current ID of that Allocation's class. The controller cancels the pending loser, then verifies and warms the instance, and the front starts routing to it under `example-27b`. Before that lease's drain starts, a replacement already serves.
 - A researcher needs four instances of `example-27b`. The controller obtains six Allocations and qualifies each Instance with an identity check and a short benchmark. One node fails outright, and its Allocation is released. The controller keeps the best four; the one that passed but ranked fifth is kept as warm capacity, as its retention policy says.
 - An instance stalls with requests in flight. The controller records the restart as an event, then restarts the instance within minutes.
 - An agent's work on `example-8b` ends while its Allocations have hours left, and `example-27b` needs the same GPU type. The agent repurposes the Allocations. The controller drains each `example-8b` Instance, starts an `example-27b` Instance in the same Allocation, then verifies and warms it, and the front routes to it. No new job is queued.
@@ -62,7 +62,7 @@ Problems:
   - Retention policy: keep an Allocation until a date, a grant's end or a deadline; or release it when idle.
   - Repurposing: an operator may move an Allocation to another ModelDeployment when a model's work finishes. Conversions between models are this operation.
   - Replacement before release, as HBEP-3 scopes it: while a deployment keeps its desired capacity, never release a serving instance before its replacement serves. The cases are listed under Release in Design details.
-  - A handover replaces the Instance with a new one, with its own metadata. The deployment ID stays.
+  - A handover replaces the Instance with a new one, with its own metadata, in the same accelerator class. The deployment ID stays. A replacement placed in another class is a new Instance with that class's current ID (HBEP-3).
   - On batch providers, continuity comes through follow-ons.
   - Hedging across providers is our own controller, built on the Kubernetes API (HBEP-11).
 - **Prior art for over-allocation.** Farley et al. call the strategy placement gaming: launch extra instances up front and keep the strongest ("More for your money: exploiting performance heterogeneity in public clouds", ACM SoCC 2012). Ou et al. take a keep-good, discard-bad approach to EC2 instance heterogeneity ("Is the same instance type created equal? Exploiting heterogeneity of public clouds", IEEE Transactions on Cloud Computing, 2013).
@@ -75,13 +75,13 @@ Problems:
 
 - **The node is lost.** Releasing before the replacement serves gives the slot to another user. Mitigation: the decided rule, checked by a test. A retention policy can also keep an Allocation after its Instance ends.
 - **Cancelling a loser starts its dependents.** Mitigation: cancel dependents first, or use no provider-side dependencies (Open question 3).
-- **A restart submits twice.** Every submission carries a tag in a field the provider stores, and the controller finds its allocations by that tag, never by scanning names. The tag supports recovery but does not enforce uniqueness: a provider can accept two submissions with one tag, and a lost submission reply leaves the outcome unknown until the controller lists by tag. The submission protocol stays open (Open question 11).
-- **The scheduler requeues a job.** Slurm can requeue a batch job and run its script again under the same job ID, and requeue is on by default on Helios, Athena and Sano (spike S5, PR #19). That can leave stale registrations, verification results or replacement work from the first execution behind. Each platform profile records its requeue behaviour (HBEP-4); identity across executions is HBEP-3's open question 13. Proposed: submit every Allocation with `--no-requeue`, and treat a requeue that still happens as a failure of its Instance.
+- **A restart submits twice.** Every submission carries a tag in a field the provider stores, and the controller finds its allocations by that tag, never by scanning names. The tag supports recovery but does not enforce uniqueness: a provider can accept two submissions with one tag, and a lost submission reply leaves the outcome unknown until the controller lists by tag. Mitigation, from spike S4 (PR #32): in hold mode every job is submitted held, and only the recorded job's hold is ever lifted, so a duplicate stays held and is cancelled. In fallback mode only a job found by tag resolves an unknown outcome (Open question 11).
+- **The scheduler requeues a job.** Slurm can requeue a batch job and run its script again under the same job ID, and requeue is on by default on Helios, Athena and Sano (spike S5, PR #19). That can leave stale registrations, verification results or replacement work from the first execution behind. Each platform profile records its requeue behaviour (HBEP-4). HBEP-3 decides identity across executions (open question 13, from spike S4): submit every Allocation with `--no-requeue`, treat a requeue that still happens as a failure of its Instance, never lift a requeued job's hold again, and replace it with a new Allocation. The failed Allocation is deleted, and its finalizer cancels the held job.
 - **An ended job is read as missing.** Helios and Athena drop a finished job from `squeue` about 10 s after it ends (spike S5, PR #19). A controller that reads a missing job as never submitted would submit it again. Mitigation: the provider plugin reports an ended lease as existing and terminal, from accounting (HBEP-4), and the controller never resubmits only because a job is missing from the queue.
 - **A job without GPUs on a GPU-only platform.** Athena is meant for GPU jobs only, and its documentation warns that workloads without GPUs can lead to account suspension (spike S5, PR #19). Mitigation: the controller sends no job without GPUs, such as a staging or relay job, to a platform whose profile marks it GPU-only. Still open: whether a GPU Allocation kept idle as warm capacity counts, which bears on the default retention policy (Open question 13).
 - **Overlap costs grant hours.** A replacement can start hours early, and both then run. Mitigation: an overlap policy (Open question 4).
 - **Warm-up misleads.** A warm-up on short prompts leaves long-context shapes cold. Mitigation: warm-up shapes come from the deployment spec, and warm-up runs on the new instance before admission, never on live workers.
-- **Verification checks a proxy.** The engine's fingerprint differs per site and is sometimes missing. Mitigation: verification recomputes the deployment ID from the settings the instance reports (HBEP-9).
+- **Verification checks a proxy.** The engine's fingerprint differs per site and is sometimes missing. Mitigation: verification compares the settings the Instance reports with the declared ones, and rehashes the checkpoint files (HBEP-3, HBEP-9). It never recomputes the deployment ID from reported settings.
 - **Qualification ranks on noise.** A short benchmark can rank nodes by chance, for example while a shared filesystem is busy. Mitigation: each Instance is judged against the profile's expected performance, not only against the others; the benchmark's length is Open question 12.
 - **Warm capacity is forgotten.** Kept Allocations spend grant hours with nothing on them. Mitigation: every retention policy ends at a date, a grant's end, a deadline or an idle limit, and the inventory lists kept Allocations (HBEP-10).
 - **A repurpose inherits the old model's state.** Files staged for the old model, or another engine, are left in the Allocation. Mitigation: the new Instance passes the same verification as any other, against its own deployment's identity record (HBEP-9).
@@ -140,7 +140,7 @@ Each question below has a proposed answer taken from operating LLM serving on Sl
      - the engine version available on the platform.
    - **Proposed:** repurpose only an Allocation whose current deployment has no remaining work, reservation or fallback role, and only when the time saved exceeds the cost (stop, start, verify, warm up). A pending Allocation that starts directly as the new model costs nothing extra.
    - **Why:** each conversion took about 3 min to serve plus verification. Ad-hoc conversions cost hours of checks and, once, silently retired a deployment a later run needed.
-   - **Still open:** several Instances per Allocation stays with HBEP-3's open question 8.
+   - **Still open:** none here. HBEP-3 decides its open question 8: several Instances per Allocation when its resources allow; alpha places one.
 8. **Approvals.**
    - **Proposed: needs approval:**
      - releasing or cancelling a started Allocation before its hard end, outside the spec;
@@ -153,7 +153,7 @@ Each question below has a proposed answer taken from operating LLM serving on Sl
    - **Why:** irreversible releases needed the owner's own word, and one cancellation relayed second-hand by mistake was caught only because the owner was asked directly. Resource steps that follow agreed rules (restarts, joins, step-downs) ran without asking.
    - **Still open:** whether a repurpose under an agreed policy needs one (HBEP-10).
 9. **Spec change while serving.**
-   - **Proposed:** the new deployment ID rolls out make-before-break, like a handover, at the next natural handover by default. It rolls out at once only when it fixes a malfunction.
+   - **Proposed:** each class's new deployment ID rolls out make-before-break, like a handover, at the next natural handover by default. It rolls out at once only when it fixes a malfunction.
    - **Why:** a setting fix was applied at each stack's next restart and never as a restart of its own, so live work was not cut. Edits to files a live deployment's identity depends on held live work, so changes went into new files.
    - **Still open:** none.
 10. **Degraded mode.**
@@ -168,14 +168,28 @@ Each question below has a proposed answer taken from operating LLM serving on Sl
       - **Writes to the control plane use optimistic concurrency** (resource versions), so parallel workers and other controllers never overwrite each other.
       - **Providers are independent shards.** Each provider's controller runs on its own, so one slow or unreachable cluster never delays another.
       - **The parallelism toward each provider is bounded by its platform profile:** concurrent submissions, logins and API calls. All of them share one multiplexed connection.
-    - **Proposed:** before any resubmission, the controller lists submissions by tag. A duplicate found later is cancelled while still pending, with an event.
+    - **Proposed: the submission protocol of spike S4** (issue #24, PR #32), implemented there against a fake Slurm. In hold mode it keeps at most one job per Allocation running, whatever the timing, because only the recorded job's hold is ever lifted. HBEP-3 holds its resource-model facts; HBEP-11 holds where the record lives.
+      - **The record.** The tag is the Allocation's external name, set before any submission (HBEP-3). The submission record and the job ID are annotations on the Allocation, each written with a resourceVersion precondition: a compare-and-swap, where a conflict means re-read, never overwrite. Status mirrors them for display (HBEP-11).
+      - **Claim, then submit.** Before `sbatch`, the provider claims one attempt, numbered n, as InFlight, by compare-and-swap. A lost claim means no `sbatch`. In hold mode it then runs `sbatch --hold --no-requeue --parsable --job-name=<tag>`.
+      - **Outcomes.** Accepted: `sbatch` printed a job ID, which is written once as the job ID. Rejected: a definite refusal, or a command that never started; the next attempt waits for backoff. Unknown: a timeout, a signal, a transport error, unparseable output or a transient reason. Unknown is never Failed. It is resolved only by finding the tag.
+      - **The guard.** While an attempt is InFlight within the in-flight window, or Unknown, Observe reports the Allocation as existing, never missing, keeps a stable status message, re-checks on a short poll, and submits nothing.
+      - **Adoption.** Observe always looks the tag up first: in `squeue`, then in `sacct` with an explicit start time. With no job ID recorded and jobs carrying the tag, the provider adopts one, in this order: a live job that is not held, then a job that ran, then the lowest job ID. A live job that is not held comes first because only a recorded job's hold is ever lifted, so such a job proves a lost record. Jobs are sorted by job ID, never taken in output order. Adoption marks the attempt Done only when it is Unknown, or InFlight past the window; a claimant inside the window resolves its own attempt when its `sbatch` returns.
+      - **Settle.** After every establish, and on every Observe while not deleting, the provider cancels every held job with the tag except the recorded one. Then it lifts the recorded job's hold once, only if all of these hold: no `hold-lifted` marker, restart count 0, never started, and reason `JobHeldUser`. It writes the marker by compare-and-swap. An admin hold is reported as a condition and never retried.
+      - **Lost, and revisable.** A recorded job absent from both `squeue` and `sacct` for longer than the profile's `lost_grace` (default 2 min, above the measured gap between the two) is reported Lost, with a Warning event, and never resubmitted. If it reappears, as late accounting can make it, it returns to its real state, with an event.
+      - **Hold mode** (profile `hold_release: true`). Settle runs in the same reconcile as the submit, so the hold lasts milliseconds. On S4's fake it lasted 11 to 33 ms when the submitter lifted it, and 106 to 473 ms when a restarted controller adopted the job. A real cluster adds the `sbatch` latency and one `squeue` and one `scontrol` round trip over ssh. A held job gains no queue age, so queue age is lost only while no controller runs: 7.4 s across a `Lease` handover on the fake. Once the in-flight window has passed with no job carrying the tag in `squeue`, the attempt is dropped and the next one is n+1. A late registration lands held and is cancelled.
+      - **Fallback mode** (profile `hold_release: false`). `sbatch` runs without `--hold`, so the established job runs at once. The claim, the guard, compare-and-swap and adoption are unchanged. An InFlight claim older than the in-flight window with no job found becomes Unknown. Unknown needs positive resolution: the tag found in `squeue`, or in `sacct` with an explicit start. Elapsed time never permits a retry. Extra jobs that are not held go into a sticky duplicates list, with an event, and are cancelled on deletion.
+      - **The operator condition.** In fallback mode, an attempt still Unknown after the profile's Unknown bound raises a Warning event and a condition saying that an operator must decide. The operator checks the cluster and sets `abandon-attempt` to n (HBEP-11). That marks the attempt Abandoned and allows attempt n+1.
+      - **Deletion.** The finalizer stays while any job with the tag is live (held, pending, running or suspended), or an attempt is InFlight or Unknown. Deletion cancels every live job with the tag, not only the recorded one. A submission that returns during deletion records its job ID, never lifts its hold, and is cancelled. In hold mode, a registration that arrives after the window, once the finalizer is gone, leaves a held orphan: it never runs, and HBEP-11's orphan report lists it.
+      - **Alpha precondition.** `hold_release` is verified on the alpha platform; otherwise fallback mode runs. Spike S1 (issue #18) measured it true on Helios and Athena on 30 Oct 2026, with one trial per tested partition. Sano is not verified, so it runs fallback mode until checked (HBEP-11).
     - **Why:**
       - collisions came when several agents allocated names, ports or copies in parallel, and a single submitter per cluster kept the queue consistent;
       - too many parallel logins tripped the clusters' and a VM's connection limits, so the bound belongs to the provider;
       - hand-run sequential operations were slow; work on different deployments never needed to wait for each other.
+    - **From spike S4 (PR #32):** for Slurm the tag is in the job name (HBEP-3), because accounting keeps the job comment only where a site enables it. The `Lease` is an extra guard. It does not prevent duplicate jobs, since a deposed leader's submission can still land; in hold mode, holding every job and lifting only the recorded job's hold does (HBEP-11). The tag lookup finds jobs and resolves Unknown attempts.
     - **Still open:**
-      - the provider's tag mechanism (job name or comment) per platform;
-      - the worker count and the bounds per platform, from measurement.
+      - the worker count and the bounds per platform, from measurement;
+      - each platform's `inflight_window`, from the measured `sbatch` latency over ssh;
+      - a hold that a site's `job_submit` plugin drops at submission. It is a documented hazard, not detected: S4 tried an event for it and removed it, because a peer's legitimate lift of the hold raced with it and gave false alarms.
 12. **Over-allocation and qualification.**
     - **Proposed:** qualify every Instance, also when k is 0. The checks:
       - health, engine version, model names and maximum length;
@@ -207,7 +221,7 @@ Each question below has a proposed answer taken from operating LLM serving on Sl
 
 **Admission** (decided: both before traffic). A started instance is verified and warmed with real-shape requests before it is marked ready. Under over-allocation, qualification comes first, and only kept Instances are warmed. The front routes only to ready instances. Checks and shapes: TBD (Open question 5).
 
-**Handover** (decided core). For each serving instance, the controller plans its replacement backwards from the lease's hard end. The submission time is the earlier of two times: the predecessor's start (proposed default, Open question 2), and the predecessor's latest drain start minus verification, warm-up, start-up and the observed queue wait. The replacement is a new instance of the same deployment ID. The predecessor is released only after the replacement serves. Overlap: TBD (Open question 4).
+**Handover** (decided core). For each serving instance, the controller plans its replacement backwards from the lease's hard end. The submission time is the earlier of two times: the predecessor's start (proposed default, Open question 2), and the predecessor's latest drain start minus verification, warm-up, start-up and the observed queue wait. In the same accelerator class, the replacement is a new instance of the same deployment ID. In another class, it is a new Instance with that class's current ID, and a name pinned to the old ID does not reach it (HBEP-3). The predecessor is released only after the replacement serves. Overlap: TBD (Open question 4).
 
 Drain rule (the same text in HBEP-3, HBEP-5 and HBEP-7): The framework cannot move a lease end, so an Instance starts draining at the latest at its hard end minus the drain window, whether or not its replacement is ready. Make-before-break is the goal: the controller plans the replacement to be ready before that drain start, and the old Instance never drains before its replacement is ready unless that deadline forces it. If the replacement is late, the old Instance still drains on time, capacity drops, and an event is emitted (HBEP-8).
 
@@ -247,9 +261,12 @@ Against a simulated provider with queue delays, start failures, hard ends, depen
 - Scale-down, shutdown at the end time and deletion: instances drain and end, no replacement is submitted, and each Allocation follows its retention policy.
 - Retention: an Allocation kept until a date stays, with no Instance, until that date and is then released; one under release-when-idle is released after its idle limit; neither outlives its hard end.
 - The controller is killed at each step of a handover: after restart there are no duplicate submissions and no orphan allocations.
-- The reply to a submission is lost: the controller resolves the unknown outcome, and exactly one allocation remains.
-- Two controllers reconcile one deployment at once: any duplicate submission is found by tag and reported, and no more allocations than desired remain.
-- The scheduler requeues a serving allocation under the same job ID: no registration or verification from the first execution is reused, no replacement is planned twice, and the outcome follows HBEP-3's open question 13.
+- The reply to a submission is lost: the attempt is Unknown, never Failed, the controller resolves it by tag, and exactly one job with the tag has its hold lifted.
+- Two controllers reconcile one deployment at once: no Allocation has more than one job whose hold is lifted, held duplicates are cancelled, and no more allocations than desired remain.
+- In fallback mode, an Unknown attempt with no job found raises the operator condition after the Unknown bound, and no second job is submitted until an operator abandons the attempt.
+- A recorded job absent from the queue listing and accounting is not Lost before `lost_grace`, is Lost after it, and returns to its real state when it reappears.
+- The scheduler requeues a serving allocation under the same job ID: no registration or verification from the first execution is reused, no replacement is planned twice, the Instance fails, the job's hold is never lifted again, the Allocation is deleted and its job cancelled, and the replacement is a new Allocation (HBEP-3, open question 13).
+- A hedge across two accelerator classes: the winner's Instance carries its class's current ID.
 - A job ends and leaves the queue listing seconds later: the controller reads it as ended, from accounting, and submits nothing again for it.
 - No instance gets traffic before it is ready.
 - A stalled instance with requests in flight is restarted within the threshold. A process that ignores TERM is killed after the grace period.
@@ -304,7 +321,7 @@ The controller applies by policy what www-2027 operators did per job: holder bat
 | Component | Origin (project, URL) | Licence | How used (dependency, copied code, optional) |
 |---|---|---|---|
 | vLLM | [vllm-project/vllm](https://github.com/vllm-project/vllm) | Apache-2.0 | Dependency: the engine each Instance starts |
-| controller-runtime | [kubernetes-sigs/controller-runtime](https://github.com/kubernetes-sigs/controller-runtime) | Apache-2.0 | Candidate, no spike assigned: the controller's keyed work queues, leader election and reconcile loop (open question 11) |
+| controller-runtime | [kubernetes-sigs/controller-runtime](https://github.com/kubernetes-sigs/controller-runtime) | Apache-2.0 | Dependency (HBEP-11), used by spikes S3 and S4: the controller's keyed work queues, leader election and reconcile loop (open question 11) |
 | inference-perf | [kubernetes-sigs/inference-perf](https://github.com/kubernetes-sigs/inference-perf) | Apache-2.0 | Candidate, no spike assigned: the qualification benchmark (open question 12) |
 | llm-d-inference-sim | [llm-d/llm-d-inference-sim](https://github.com/llm-d/llm-d-inference-sim) | Apache-2.0 | Candidate test dependency, no spike assigned: a GPU-free engine double for the test plan |
 
@@ -365,6 +382,8 @@ The controller applies by policy what www-2027 operators did per job: holder bat
 - 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
 - 2026-10-28: open questions answered with proposals from past operation, for the owner to confirm.
 - 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation; spike S5 facts carried in (HBEP-4, HBEP-6, HBEP-7 only).
+- 2026-10-30: aligned with HBEP-3 and HBEP-11 becoming implementable: requeue, cardinality, the S4 submission protocol, and the `Lease` as an extra guard.
+- 2026-10-30: S4's implemented submission protocol written into open question 11; one current deployment ID per accelerator class carried into hedging and handover; verification compares settings and rehashes files, never recomputes the ID.
 
 ## Amendments
 
