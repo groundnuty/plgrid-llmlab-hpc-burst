@@ -77,28 +77,37 @@ Allowed transitions. Every one goes through a PR with approval, including a with
 ### Roles and approval
 
 - **Author:** anyone, including an agent. Writes the HBEP and keeps it current while it is being built.
-- **Reviewer:** at least one, who did not write the HBEP. Either a person, or an agent working from a fresh context that never saw the draft. A reviewer checks the text section by section against the template, the tracking issue, and anything merged on `main` since the PR was opened.
+- **Reviewer:** someone who did not write the HBEP. A reviewer checks the text section by section against the template, the tracking issue, and anything merged on `main` since the PR was opened.
 - **Approver:** an account listed in `approvers` in the HBEP's `metadata.yaml`. For now that is only the repository owner.
 
+Identity on GitHub:
+- Agents have no GitHub accounts of their own. They post through the owner's login.
+- Every text an agent posts begins with its handle, for example `@hpc-burst-science-agent to @hpc-burst-code-agent:`. That first line is the only attribution, and it tells an agent's PR from one the owner opened.
+- So a GitHub review, approving or not, shows the owner's account whoever wrote it. Agents never submit an approving GitHub review.
+
+The review round, for every PR an agent opens on `hbep/`:
+- **Reviewers:** two frontier models from different vendors, each working from a fresh context that never saw the draft, launched at the same time. For now these are Codex `gpt-6-astra` and Gemini argon, at high or extra-high effort. A fresh Claude Opus agent stands in when one of them is unavailable.
+- **Merging the findings:** the author takes the union of both reviews. A finding raised by one model alone counts in full, because different models catch different things.
+- **Acting:** the author acts on the major findings and records in the PR what it changed and what it left, with reasons.
+- **One round only:** there is no re-review after the fixes.
+
 What counts as approval:
-- **An approving GitHub review by an approver, on the PR's current head commit.**
-  - An approval from any other account does not count, including another agent's bot.
-  - Any push after the approval needs a new approval.
-- **A direct approval recorded by the author.**
-  - The approver may approve in a direct session with the author, such as a chat.
-  - Before merging, the author records it as a PR comment. The comment quotes the approver's words and gives the time and the approved head commit.
-  - It counts like an approving review on that commit, and any push after it needs a new approval.
-  - Only an author who received the approval directly may record it. An approval relayed through another agent does not count.
-- **A PR opened by the approver** cannot be approved by them, since GitHub forbids approving your own PR. The approver's own merge of it is the decision. Agents never merge a PR the approver opened.
-- **Changing `approvers`**, `CODEOWNERS` or this HBEP needs approval like any status change.
+- **The completed review round, by default.**
+  - For a PR an agent opened, the review round recorded on the PR is the approval. That includes status changes.
+  - It covers the commit that holds the fixes. Any later push needs a note on the PR saying what changed.
+- **The approver's word, when the author still has doubts.** The author asks the approver first, and merges only on their word, when the PR:
+  - settles an open question or decision that is the approver's to take (goals, scope, an irreversible or costly choice, an access change);
+  - goes against a recorded decision of the approver.
+- **How the approver's word is given:** on GitHub, or in a direct session with the author, such as a chat.
+  - The author records a direct approval as a PR comment, quoting the approver's words with the time and the approved head commit.
+  - Only an author who received it directly may record it. An approval relayed through another agent does not count.
+- **A PR the approver opened** (no agent handle line) is merged by the approver. Agents never merge it.
+- **Changing this HBEP** follows the same rules as any amendment, with one addition: the author asks the approver.
 
 Enforcement:
-- `.github/CODEOWNERS` assigns `hbep/` and itself to the approver.
-- Branch protection on `main` should require a pull request. Requiring code-owner review would block merges on a recorded direct approval, so it stays off unless the approver chooses to give every approval on GitHub.
-- The author checks before merging that the current head commit has an approver's APPROVED review, or a recorded direct approval naming that commit (`gh pr view <N> --json reviews,headRefOid,comments`).
-- The merge must name the approved commit (`gh pr merge --match-head-commit <sha>`), so a push in between makes the merge fail.
-
-The author merges a PR once the approval it needs is in place.
+- Branch protection on `main` requires a pull request. Code-owner review is not required: every PR is opened through the owner's login, and GitHub does not let an author approve their own PR. `.github/CODEOWNERS` records the owner of `hbep/`.
+- Before merging, the author checks that the PR records the review round, or the approver's word where one was needed.
+- The merge names the reviewed commit (`gh pr merge --merge --match-head-commit <sha>`), so a push in between makes the merge fail.
 
 ### Numbering and layout
 
@@ -116,7 +125,7 @@ The author merges a PR once the approval it needs is in place.
 - **A deviation found while building:**
   - If it is an erratum, it may go in the same PR as the code.
   - If it is an amendment, it is merged first, with approval. The code that depends on it is built after.
-- **An agent may author and review HBEPs.** It never approves, never merges a PR that lacks the approval it needs, and never merges a PR the approver opened. It records a direct approval only when it received it itself.
+- **An agent may author and review HBEPs, and merges its own HBEP PRs once their approval is in place** (Roles and approval). It never submits an approving GitHub review, never merges a PR the approver opened, and records a direct approval only when it received it itself.
 
 ### Changes after an HBEP is implementable
 
@@ -179,7 +188,7 @@ This repository is public.
 - **Process overhead slows small decisions.** Only decisions that shape the design need an HBEP. Errata skip the approval round. Provisional HBEPs may be short.
 - **Text and code drift apart.** Building follows the merged text. Amendments are merged before the code that needs them. Reviewers of code PRs check the cited section.
 - **Two agents change the same HBEP at once.** Their edits to different paragraphs can merge cleanly and still contradict each other. So before merging, the author updates the branch from `main` and re-reads every section changed on `main` since the PR opened, and the reviewer checks the PR against those changes too.
-- **An approval is applied to a different revision than the one approved.** Approval counts only on the current head commit, and stale approvals are dismissed.
+- **A change is merged that was not the one reviewed.** The merge is pinned to the reviewed commit, and a later push must be noted on the PR.
 
 ### Open questions
 
@@ -203,7 +212,12 @@ N/A: a process, not software. A later process HBEP amends or replaces this one b
 
 ### Security
 
-Approval is the only control: who may change what is designed and built. It is tied to an approver's account and to the exact commit approved, enforced by CODEOWNERS and branch protection.
+Approval is the only control on what is designed and built. Because agents post through the owner's login, the control is procedural, not account-based:
+- the review round recorded on the PR;
+- the approver's recorded word where the author has doubts;
+- a merge pinned to the reviewed commit.
+
+The owner sees every change in git history and in the agents' reports.
 
 ### Graduation criteria
 
@@ -213,7 +227,7 @@ N/A: a process HBEP has no stages. It is `implemented` once three HBEPs after it
 
 1. **Working:** every HBEP in `hbep/` has a matching tracking issue, a valid `metadata.yaml` and a row in the index, and every status change on `main` came through a PR with approval. A status change without one is the signal that the process is not followed.
 2. **Restart:** N/A. There is no running process; state is the files in git.
-3. **Silent failure:** an index row that disagrees with `metadata.yaml`, or a merge whose approval named an older commit. The reviewer and author checks catch these until the check script exists.
+3. **Silent failure:** an index row that disagrees with `metadata.yaml`, or a merge with no review round or needed approval recorded on its PR. The reviewer and author checks catch these until the check script exists.
 4. **Provider limits:** N/A.
 5. **Capacity and exhaustion:** N/A.
 6. **Idle cost:** none.
@@ -243,8 +257,9 @@ N/A: a process HBEP has no stages. It is `implemented` once three HBEPs after it
 
 ## Amendments
 
-- **2026-10-29: direct approval.**
-  - The approver directed that a chat approval counts.
-  - The author records it on the PR and merges with the approved commit named.
-  - Branch protection requires a PR but not code-owner review.
+- **2026-10-30: approval by review round.**
+  - Owner's direction, 29–30 Oct: a chat approval counts, and agents' PRs, status changes included, merge after one review round by two frontier models launched in parallel. Their findings are merged as a union, and the author acts on the major ones.
+  - The approver is asked only when the author has doubts.
+  - Agents post through the owner's login with a handle line, and never submit approving GitHub reviews.
+  - Branch protection requires a PR, but not code-owner review.
 - **2026-10-29: prior art and reuse.** The template gains a "Prior art and reuse" section, and HBEP-15 is to define the catalogue of field lessons and the dependency policy.
