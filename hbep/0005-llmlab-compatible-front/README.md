@@ -259,7 +259,8 @@ Every error the front raises has the body `{"error": {"message": <text>, "type":
 | Attached, with no routable target at that level | 503, `Retry-After: 30` | `model_inactive` | `no_ready_target` | the front |
 | Every candidate at its cap past `queueTimeout` | 503, `Retry-After: 10` | `capacity` | | the front, and the ModelDeployment |
 | No byte reached the target, after the one resend | 502 | `upstream_unreachable` | | the front, and the target it tried |
-| `maxRequestDuration` reached before the first byte | 504 | `request_timeout` | | the front, and the target |
+| `maxRequestDuration` reached before the first byte | 504 | `request_timeout` | `deadline` | the front, and the target |
+| `idleTimeout` reached before the first byte | 504 | `request_timeout` | `idle` | the front, and the target |
 | A stream fails after its headers were sent | one `data:` event with this body, then the end of the stream, never `[DONE]` | `stream_cut` | `upstream`, `deadline`, `idle` or `lease_end` | the target, as in the headers already sent |
 
 An unknown model and an unattached one look alike, as on LLMLab, where unknown and inactive models both fail (L-6.5); `detail` tells them apart.
