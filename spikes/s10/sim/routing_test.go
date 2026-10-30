@@ -3,7 +3,11 @@ package sim
 // Routing and membership behaviour, with expectations from HBEP-5 and from
 // the definition of consistent hashing with bounded loads.
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/third_party/forked/kubeai/loadbalancer"
+)
 
 // A loaded cluster: n conversations arriving together, long turns, so many
 // requests are in flight at once.
@@ -73,17 +77,45 @@ func TestOpeningKeySpreads(t *testing.T) {
 }
 
 // Consistent hashing: when one Instance drains, only the conversations
-// homed on it move. With pure affinity nothing else moves.
+// homed on it move. With pure affinity nothing else moves. All 64 loaded
+// conversations start before the drain at 3 s and run for about 30 s (8
+// turns of about 3.9 s), so exactly 64 are checked; 10 conversations that
+// start at 10 s had no Instance before the drain and must not be counted.
+// The forced count is taken from a separate ring of the same four
+// Instances: the conversations whose opening hashes to instance-2.
 func TestDrainMovesOnlyItsConversations(t *testing.T) {
 	convs := loadedConvs(64, false)
+	for i := 0; i < 10; i++ {
+		convs = append(convs, conv(1000+i, 10, 1600, 160, 4, 160, 160, 0.5))
+	}
 	ev := []Event{{Time: 3, Kind: Drain, Instance: 2}}
 	m := runSim(t, slowCluster(4), Policy{Kind: Affinity, Key: KeyOpening}, convs, ev)
 	rc := m.Rehomed[0]
+	if rc.Checked != 64 {
+		t.Errorf("checked %d conversations, want 64", rc.Checked)
+	}
 	if rc.Collateral != 0 {
 		t.Errorf("collateral moves %d, want 0", rc.Collateral)
 	}
-	if rc.Forced == 0 {
-		t.Errorf("no conversation left the drained Instance; the test proves nothing")
+	ring := loadbalancer.NewGroup(256)
+	ring.SetEndpoints([]string{"instance-0", "instance-1", "instance-2", "instance-3"})
+	want := 0
+	for i := 0; i < 64; i++ {
+		c := convs[i]
+		home, done, err := ring.PickPrefixHash(SegsKey(c.Sys, c.FirstUser), AffinityPercent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		done()
+		if home == "instance-2" {
+			want++
+		}
+	}
+	if want == 0 {
+		t.Fatal("no conversation is homed on instance-2; the test proves nothing")
+	}
+	if rc.Forced != want {
+		t.Errorf("forced re-homes %d, want %d (conversations homed on instance-2)", rc.Forced, want)
 	}
 	for _, r := range m.Recs {
 		if r.Inst == 2 && r.Dispatch > 3 {

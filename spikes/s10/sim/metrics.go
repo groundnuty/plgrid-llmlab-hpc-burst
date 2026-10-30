@@ -38,6 +38,7 @@ type Metrics struct {
 	KubeRuleViol      int
 	PaperViol         int
 	MaxPlaceExcess    float64 // max of load_after - c*(T+1)/n, in requests
+	MaxRuleExcess     float64 // max of load_before - c*(T+1)/n over rule violations
 	MaxPlaceRatio     float64 // max of load_after / mean_after, when mean_after >= 2
 	MaxKubeInflation  int64   // KubeAI's total in-flight minus the members' total
 	PeakLoad          int     // max in-flight on any member, over time
@@ -146,6 +147,7 @@ func (m *Metrics) placement(e *Engine, r *request, idx int) {
 		m.MaxPlaceExcess = max(m.MaxPlaceExcess, pre+1-bound)
 		if pre > bound+1e-9 {
 			m.KubeRuleViol++
+			m.MaxRuleExcess = max(m.MaxRuleExcess, pre-bound)
 		}
 		if pre+1 > math.Ceil(bound-1e-9) {
 			m.PaperViol++
@@ -195,7 +197,12 @@ func (m *Metrics) crossCheck(e *Engine, idx int) error {
 
 func (m *Metrics) rehome(r *request, idx int) {
 	cs := r.cs
-	if m.lastEvent < 0 || cs.evSeen >= m.lastEvent || cs.lastInst < 0 {
+	if m.lastEvent < 0 || cs.evSeen >= m.lastEvent {
+		return
+	}
+	if cs.lastInst < 0 {
+		// Started after the event: it had no Instance to be moved from.
+		cs.evSeen = m.lastEvent
 		return
 	}
 	cs.evSeen = m.lastEvent
