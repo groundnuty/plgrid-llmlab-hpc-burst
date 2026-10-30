@@ -159,10 +159,7 @@ func (m *Metrics) advance(e *Engine, t float64) {
 		if over > 0 {
 			m.AboveEngine += dt
 			m.AboveEngineInst += dt * float64(over)
-			m.aboveB[int(e.now/m.Bucket)] += dt
-			if m.inWindow(e.now) {
-				m.AboveEngineWin += dt
-			}
+			m.addAbove(e.now, t)
 		}
 	}
 	if dt <= 0 || len(e.rt.members) == 0 {
@@ -182,6 +179,23 @@ func (m *Metrics) advance(e *Engine, t float64) {
 	if float64(peak) > e.rt.bound()*float64(total)/float64(len(e.rt.members))+1e-9 {
 		m.timeAbove += dt
 	}
+}
+
+// addAbove charges the stretch [from, to) of time above the engine limit to
+// the buckets and the window it overlaps, each for the part inside it: the
+// stretch runs between two events and can cross a bucket boundary or an edge
+// of the window.
+func (m *Metrics) addAbove(from, to float64) {
+	for t := from; t < to; {
+		b := int(t / m.Bucket)
+		end := math.Min(to, float64(b+1)*m.Bucket)
+		if end <= t { // float rounding at a boundary: finish in this bucket
+			end = to
+		}
+		m.aboveB[b] += end - t
+		t = end
+	}
+	m.AboveEngineWin += math.Max(0, math.Min(to, m.WinEnd)-math.Max(from, m.WinStart))
 }
 
 func (m *Metrics) placement(e *Engine, r *request, idx int) {
