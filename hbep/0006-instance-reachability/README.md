@@ -64,6 +64,7 @@ Problems:
 - **A false instance registers and receives prompts.** Each allocation gets its own credential, and registration is bound to the provider's identity for the job. The instance takes traffic only after the controller's verification (HBEP-7, HBEP-9).
 - **The tunnel's ping succeeds while the engine is dead.** The liveness probe goes through the path to the engine.
 - **An engine API key is taken for isolation.** A vLLM API key covers only part of the engine's HTTP API (vLLM's security documentation), and traffic between an engine's ranks is unauthenticated by default. So engine HTTP listeners bind to loopback and are reached through the tunnel agent. A multi-node instance's rank traffic still crosses the cluster network unauthenticated. That is a known limitation, recorded in each platform profile (HBEP-4).
+- **Engine internals listen off loopback.** In spike S2 phase B each vLLM worker had its API port on the IPv4 loopback address and six more TCP listeners on the node's cluster address, although `--host` and `VLLM_HOST_IP` were both set to that loopback address (HBEP-5, Risks). The serving port needs the Instance's key. The other listeners are engine internals, which no key covers, so an Instance on a shared cluster network exposes them unless the provider's network isolates it.
 - **Relays trip login throttles.** One pooled connection per login node, with the login rate limit as a profile parameter.
 - **A center's login-node policy kills relays.** Cyfronet's documentation says computation on a login node is killed without notice, and caps each user's memory there. It does not say whether a lightweight relay counts (spike S5, PR #19; HBEP-4, open question 14). Relays are supervised. A relay death is an event (HBEP-8), and the instance stays unrouted until its path returns.
 - **Paths outlive their owner.** Owner references and garbage collection (HBEP-11) remove the front-side records. A relay outside the allocation carries the allocation's end time and exits at that time on its own.
@@ -196,6 +197,7 @@ Dial home replaces www-2027's central relays and forward watchdogs, which kept h
 - 2026-10-30: open question 8 decided for alpha by HBEP-11: the front is reached directly or through ssh on port 22.
 - 2026-10-30: the allocation agent (HBEP-7) starts the tunnel agent and owns the Allocation's control connection; HBEP-7's alpha credential noted under open question 7.
 - 2026-10-30: the agent endpoint listens on loopback, reached through the ssh forward or through the front's `/agent/v1/` pass-through (HBEP-7).
+- 2026-10-30: the risk of vLLM's internal listeners on the node's address, from spike S2 phase B, noted with HBEP-5.
 
 ## Amendments
 
