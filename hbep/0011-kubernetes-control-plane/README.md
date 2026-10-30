@@ -98,7 +98,7 @@ Deployment options:
 - The store for HBEP-10's durable event log, for usage records and for metrics: outside the API store, but which.
 - How provider credentials are held: Secrets with encryption at rest, or an external secret store.
 - Whether controllers run with several replicas and leader election, or as one replica restarted on failure.
-- Which evaluated projects become components. The state-of-the-art evaluation of existing projects (28 Oct 2026) is done; its picks are in Prior art and reuse below. The remaining choice, k3s or kcp as the API host, is decided by spike S3. The projects evaluated include:
+- Which evaluated projects become components. The state-of-the-art evaluation of existing projects (28 Oct 2026) is done; its picks are in Prior art and reuse below. k3s is the host for the team option; the single-user host, k3s or kcp, is decided by spike S3. The projects evaluated include:
   - interLink and other virtual-kubelet offloading, which aim to run pods on remote systems such as batch clusters;
   - Slinky and slurm-bridge, which aim to join Slurm and Kubernetes scheduling;
   - KubeAI, which aims to serve models on Kubernetes;
@@ -165,7 +165,7 @@ TBD. Lean: alpha with one deployment option and one batch provider; beta when th
 ## Alternatives
 
 - **Our own API and database.** Lighter for one user, with full control over event semantics. We would rebuild watches, RBAC, audit, garbage collection, admission and versioning, and agents would lose standard tooling.
-- **Virtual-kubelet pods on Slurm.** Models as pods on a virtual node that submits Slurm jobs, managed by standard workload controllers. Rejected for the compute layer: squeezing leases into pods hides the facts the scheduler needs. A pod has no start estimate or hard end the controllers can plan with, and one pod cannot be submitted to several providers and the losers cancelled. A rolling update with `maxSurge` does start a replacement before its predecessor ends, but it cannot plan that from a lease end it does not see. It may still suit auxiliary parts; see the later evaluation in Open questions.
+- **Virtual-kubelet pods on Slurm.** Models as pods on a virtual node that submits Slurm jobs, managed by standard workload controllers. Rejected for the compute layer: squeezing leases into pods hides the facts the scheduler needs. A pod has no start estimate or hard end the controllers can plan with, and one pod cannot be submitted to several providers and the losers cancelled. A rolling update with `maxSurge` does start a replacement before its predecessor ends, but it cannot plan that from a lease end it does not see. It may still suit auxiliary parts; see Prior art and reuse.
 
 ## Prior art and reuse
 
