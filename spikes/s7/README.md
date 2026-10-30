@@ -30,12 +30,12 @@ Set on 2026-10-30, before the hashing job was submitted:
 2. **Reference hashes.** `fetch_ref.py` fetches the Hub's listing for the exact revision on the agents VM (never on the cluster): size, git blob id (`oid`) and, for LFS files, `lfs.oid`, the SHA-256 of the content.
 3. **Hashing job.** `hash_job.sh` runs as one Helios CPU job (4 CPUs, one node, `--no-requeue`, one-hour limit; the job ran twice, for variance). `hash_tree.py` uses nothing newer than Python 3.6, the login node's Python. On the compute nodes the host Python is 3.9, so the job ran on 3.9; 3.6 was exercised only on the login node, on a 3-byte file:
    - 4 worker processes, each reading whole files with `readinto()` into one reused 8 MiB buffer and updating SHA-256 (and the git blob SHA-1 for files up to 64 MiB, which covers every non-LFS file);
-   - files are taken largest first; each file is evicted from the page cache with `posix_fadvise(DONTNEED)` after it is hashed, so the model_signing pass that follows is not served from the cache;
+   - files are taken largest first; eviction of each file from the page cache is requested with `posix_fadvise(DONTNEED)` after it is hashed, so that the model_signing pass that follows is less likely to be served from the cache (the kernel may ignore the advice, and the effect was not verified);
    - per file: wall time, process CPU time, and the difference in `/proc/self/io` `rchar` and `read_bytes` before and after (the read of `/proc/self/io` itself is subtracted from `rchar`);
    - symlinks (a cache snapshot is made of them) are followed, and results are keyed by the path inside the snapshot. The name of the blob a symlink points to is never used: in a Hugging Face cache it equals the Hub's hash, so using it would compare the Hub with itself.
 4. **model_signing.** `ms_manifest.py` builds a file-mode manifest with model-signing 1.1.1 on a `uv`-managed Python 3.11 kept in the job's scratch directory (no root; the cluster's `Python/3.11.5` module is built for the compute nodes' newer glibc and does not start on the login node; it was not tried on a compute node). It passes the explicit list of files and compares the digests with the plain pass.
-5. **Single-stream sweep, cheap-check probe, CPU ceiling.** One process reads one ~4 GB shard each with a 1, 8 and 64 MiB buffer (evicted afterwards), and a fourth shard twice in a row without eviction, the second time from the page cache; a stat-only pass over both checkpoints before and after hashing; a 4 KiB file changed in place four ways on Lustre; SHA-256 of zeroed memory with no I/O.
-6. **Compare.** `compare.py` checks every file's SHA-256 against `lfs.sha256` and, for non-LFS files, the git blob SHA-1 against the Hub's `oid`. `summarize_run.py` produces the tables below.
+5. **Single-stream sweep, cheap-check probe, CPU ceiling.** One process reads one ~4 GB shard each with a 1, 8 and 64 MiB buffer (eviction requested afterwards), and a fourth shard twice in a row with no eviction requested, the second time from the page cache; a stat-only pass over both checkpoints before and after hashing; a 4 KiB file changed in place four ways on Lustre; SHA-256 of zeroed memory with no I/O.
+6. **Compare.** `compare.py` checks every file's SHA-256 against `lfs.sha256` and, for non-LFS files, the git blob SHA-1 against the Hub's `oid`. `summarize_run.py` produces the tables below. A comparison passes only if the run is valid: its summary line exists and is complete, no file record shows a read error or a change during the read, nothing was skipped (a directory symlink is not followed, so its files are not hashed), neither the staged records nor the Hub listing is empty, and no path occurs twice. With `--manifest`, the model_signing manifest must also equal our hashes; `.gitattributes` is the one file allowed to be missing from it (see the findings below). Any failure is the exit status of both `compare.py` and `summarize_run.py`. What `summarize_run.py` publishes holds, for a failed read, the exception class name only and the path relative to the checkpoint, never the error message.
 
 Run the tests (no network, no cluster):
 
@@ -99,11 +99,11 @@ python3 summarize_run.py <out dir> ref [<publish dir>]
 
 Both runs gave the same result. The reference is the Hub's published hash, not a hash computed by any tool of ours. The comparison can fail: changing one hex digit of one LFS hash and one git oid in the DeepSeek listing gives exactly two mismatches (`config.json` and one shard), and the unit tests cover a changed file, a size mismatch, a missing file and an extra file.
 
-The Hub publishes `lfs.sha256` only for LFS files. The files that matter most for identity in HBEP-9, `config.json`, the tokenizer files and the chat template, are not LFS files; the Hub gives them a git blob SHA-1 (`sha1("blob <size>\0" + content)`), which `hash_tree.py` computes for every file up to 64 MiB. Without that comparison 26 of 74 DeepSeek files and 15 of 18 Gemma files would have no reference hash.
+The Hub publishes `lfs.sha256` only for LFS files. Some of the files that matter for identity in HBEP-9 are not LFS files: `config.json` and `tokenizer_config.json` in both checkpoints, the chat template in Gemma, `tokenizer.json` in DeepSeek (Gemma's `tokenizer.json` is an LFS file, so the reference is chosen per file). For a non-LFS file the Hub gives a git blob SHA-1 (`sha1("blob <size>\0" + content)`), which `hash_tree.py` computes for every file up to 64 MiB. Without that comparison 26 of 74 DeepSeek files and 15 of 18 Gemma files would have no reference hash.
 
 ### Time: well inside the budget in both runs
 
-Four processes, 8 MiB reads, each file evicted from the page cache after hashing. Budget: 300 s for up to 170 GB.
+Four processes, 8 MiB reads, eviction of each file from the page cache requested after hashing. Budget: 300 s for up to 170 GB.
 
 | Checkpoint | Run | Wall s | MB/s | CPU s | share of budget |
 |---|---|---|---|---|---|
@@ -113,7 +113,7 @@ Four processes, 8 MiB reads, each file evicted from the page cache after hashing
 | Gemma | 2 | 32.6 | 1022 | 41.6 | 11% |
 
 - The Gemma pass is bound by its 26.9 GB shard: that one file took 22.5 s (run 1) and 32.5 s (run 2) in a single process, while the other three processes sat idle (CPU busy 31 to 32%). Spreading a single file over several processes would shorten it, but that needs shard-mode hashing, whose digests are not the Hub's file hashes.
-- The DeepSeek pass keeps four CPUs 85 to 92% busy, so it is CPU-bound at the 4-CPU allocation: per-process speed 0.47 to 1.0 GB/s while the same CPU hashes 1.8 GB/s from memory. Part of the gap is the kernel copying from Lustre; part is the loaded node. Run 2 was 1.5 to 1.7 times slower than run 1 with the same code, the same files and the same CPU count; the cause is not known (neighbour load was 176 against 166).
+- The DeepSeek pass keeps four CPUs 85 to 92% busy, so it is CPU-bound at the 4-CPU allocation: per-process speed 0.47 to 1.0 GB/s while the same CPU hashes 1.8 GB/s from memory. The high CPU use shows substantial CPU-side cost but does not divide it; two hypotheses, neither tested: part of the gap is the kernel copying data out of the Lustre client, part is load from other jobs on the node. Run 2 was 1.5 to 1.7 times slower than run 1 with the same code, the same files and the same CPU count; the cause is not known (neighbour load was 176 against 166).
 - Single process, one ~4 GB shard (the model_signing default read is 1 MiB):
 
 | Read size | Run 1: s, MB/s | Run 2: s, MB/s |
@@ -121,7 +121,7 @@ Four processes, 8 MiB reads, each file evicted from the page cache after hashing
 | 1 MiB | 4.0, 1001 | 5.2, 776 |
 | 8 MiB | 4.1, 988 | 5.7, 701 |
 | 64 MiB | 4.6, 864 | 7.3, 548 |
-| 8 MiB, not evicted before (cold) | 3.1, 1304 | 4.1, 983 |
+| 8 MiB, no eviction requested (first read) | 3.1, 1304 | 4.1, 983 |
 | 8 MiB, repeated at once (page cache) | 2.6, 1552 | 3.0, 1332 |
 
   Each size used a different shard of about 4 GB, and the fourth shard, read the same way as the 8 MiB one, ran 30% faster in run 1, so differences under about 30% are inside the shard-to-shard spread. Reads of 1 and 8 MiB are within 10% of each other; 64 MiB was 12 to 22% slower than 8 MiB. There is no sign of a gain from larger reads. A single process would take about 170 to 240 s for 167 GB from these rates (extrapolated, not measured), so one CPU is inside the budget with little margin, and four are comfortable.
@@ -135,12 +135,12 @@ Four processes, 8 MiB reads, each file evicted from the page cache after hashing
 | Gemma | 2 | 23.8 | 1400 | 17 of 17 |
 
   Its manifest holds one SHA-256 per file, equal to the content hash, so for the LFS files it equals the Hub's `lfs.sha256`. It is as fast as the plain pass. It has 73 and 17 entries, one fewer than the files: it drops `.gitattributes`.
-- Listing the files and checking size, mtime, ctime and inode takes 2 ms for 74 files (both runs, before and after hashing); the values did not change between the two passes.
+- Checking size, mtime, ctime and inode of 74 files takes 2 ms (both runs, before and after hashing); the values did not change between the two passes. This is the stat calls only: the directory listing was outside the timed section and its cost was not measured in these runs (`hash_tree.py --stat-only` now records it separately as `list_s`).
 
 ### Bytes actually read
 
 - **`rchar`** (bytes returned by `read()`), with the measurement's own reads of `/proc/self/io` subtracted: equal to the file sizes to within 1 byte in the plain passes and the sweeps, and to within 0.01% in the model_signing passes (those include the library's own reads).
-- **`/proc/self/io` `read_bytes` is not a usable witness on Lustre.** It reported 0.77 GB for the 33.3 GB Gemma pass and 17.7 GB for the 166.9 GB DeepSeek pass (2% and 11% of the bytes; the same values in both runs), and 0 for a read served from the page cache. It counts only the part of the reads that went through the synchronous block path. A `read_bytes` far below the file size does not show that less was read, and a `read_bytes` equal to the file size would not have shown that nothing extra was read.
+- **`/proc/self/io` `read_bytes` is not a usable witness on Lustre.** It reported 0.77 GB for the 33.3 GB Gemma pass and 17.7 GB for the 166.9 GB DeepSeek pass (2% and 11% of the bytes; the same values in both runs), and 0 for a read served from the page cache. It attributes only part of the bytes to the measured processes (incomplete attribution); the cause on this installation is not established. A `read_bytes` far below the file size does not show that less was read, and a `read_bytes` equal to the file size would not have shown that nothing extra was read.
 - **Lustre read RPCs** are the better witness: `osc.*.rpc_stats` is readable by users (`osc.*.stats` is root-only) and counts RPC sizes in power-of-two buckets, node-wide. Over each pass the RPC byte count had an upper bound of 1.0002 times the checkpoint bytes in run 1 and 1.0018 to 1.0040 times in run 2, and a lower bound of 0.50 times (the bucket width). So there was no over-read of the kind in L-12.5, which read up to 190 times the file size: any such over-read would show as a multiple. The counters are node-wide and include other jobs' reads, so they bound our reads from above. The 4 GB sweep reads, including the 64 MiB ones, had an upper bound within 0.03% of the file size in run 1.
 
 ### What a cheap check at start can see
@@ -199,9 +199,9 @@ Details of the recommendation:
 ## What is still unknown
 
 - Timing on the Helios GH200 nodes (aarch64 CPUs, a different SHA-256 implementation, probably a different Lustre client path) and on Athena. The numbers above are for x86 CPU nodes. Athena was not used (GPU-only).
-- Whether a cold start of a checkpoint nobody has read for days is slower. The files were staged on 22 and 23 October and when they were last read is unknown; the client cache was evicted after each file, but the state of the Lustre servers' caches is unknown. Two runs on loaded nodes differ by a factor of 1.7.
+- Whether a cold start of a checkpoint nobody has read for days is slower. The files were staged on 22 and 23 October and when they were last read is unknown; eviction of each file from the client cache was requested after it was read, but the state of the Lustre servers' caches is unknown. Two runs on loaded nodes differ by a factor of 1.7.
 - Several Instances hashing the same or different checkpoints at once on one filesystem. Not tested.
 - Whether hashing overlaps with weight loading to cost less than the sum. Not tested.
 - Checkpoints larger than 167 GB, and a single file larger than 27 GB.
-- Whether the page-cache eviction worked as intended: the model_signing pass read the same `read_bytes` as the plain pass, which is consistent with it, not proof.
+- Whether the requested page-cache eviction took effect. The model_signing pass reports a `read_bytes` of 0.77 GB for Gemma, as the plain pass does, but 18.89 GB (run 1) and 18.56 GB (run 2) for DeepSeek against 17.73 GB for the plain pass. `read_bytes` is incomplete on this filesystem (see above), so neither the match nor the difference shows whether the eviction worked.
 - The same-second hole of the cheap check was seen in one of two probe runs; its frequency was not measured.

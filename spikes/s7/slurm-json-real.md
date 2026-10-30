@@ -20,7 +20,7 @@ Capturing the first two needs a live job. A one-CPU job that sleeps about 40 sec
 | Slurm | 24.11.5 (`squeue` and `sacct` report the same) |
 | JSON data parser | `data_parser/v0.0.42` |
 | Accounting storage | `accounting_storage/slurmdbd` |
-| `MinJobAge` | **10 sec**: the controller forgets a finished job 10 seconds after it ends, so `squeue` stops listing it very quickly |
+| `MinJobAge` | **10 sec**: a finished job is eligible for purging after at least 10 seconds, so `squeue` can stop listing it very quickly |
 | Scheduler | `sched/backfill`; `SelectType=select/cons_tres` |
 | Job accounting gather | `jobacct_gather/cgroup` |
 | Job completion plugin | none (`JobCompType = (null)`) |
@@ -39,7 +39,7 @@ A poller that asks `squeue --json -j <id>` for a finished job therefore gets an 
 
 Not measured. Evidence that bounds it:
 
-- Config says `squeue` forgets the job at about end + 10 s (`MinJobAge`; the purge runs periodically, so it can be later).
+- Config makes the job eligible for purging from end + 10 s (`MinJobAge` is a minimum; the purge runs periodically, so `squeue` can list it later).
 - The job (run 2 of S7) ended at 08:49:44 UTC. The first `sacct` query made after the poller saw the job gone was made no later than 08:50:37 UTC (the modification time of the saved output on the agents VM; the VM and cluster clocks were not compared, so treat the bound as approximate) and already returned `COMPLETED`.
 - So `sacct` showed the terminal state at most about 53 s after the job ended, and at most about 43 s after `squeue` could have forgotten it. The true gap may be zero. The same held for the first S7 run, with a coarser bound (the poller's interval was 90 s).
 
