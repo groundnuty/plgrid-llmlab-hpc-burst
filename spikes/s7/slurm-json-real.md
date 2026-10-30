@@ -285,3 +285,309 @@ Notes on the document:
  }
 }
 ```
+
+## Running-job squeue JSON and measured squeue→sacct gap (captured in S1 step 0)
+
+Captured on 2026-10-30 from the S1 step-0 probe jobs (direct mode, probe only, 2 CPUs, 1 GB, 10 min limit, `--no-requeue`), through the login node, by a poller on the agents VM. The job ID, user, account, group, cluster name, node names and paths are redacted. This section answers the two items the first part of this file marks "Not captured" and "Not measured". The Helios document is from a Helios CPU job (Slurm 24.11.5, `data_parser/v0.0.42`). The same poller also ran against one Helios GH200 job (same Slurm) and one Athena A100 job (Slurm 23.11.7); their timings are given as a comparison, their documents were not kept.
+
+### How it was measured
+
+- **Poller.** Every poll was one short ssh call to the login node under the per-host lock, made from the VM; the lock was never held across a sleep. A poll ran `squeue --json -j <id>` and then `sacct --json -j <id> -X -S now-1hours` (the `sacct` half only from the first RUNNING poll on). Polls started exactly every 2.0 s (start to start, measured); a call took up to 1.7 s, so there was never more than one call in flight. Each poll carries the VM's UTC time around the call and the cluster's own `date` read three times inside the call.
+- **Job end.** Taken from `sacct`'s `time.end` (integer epoch seconds, cluster clock). The VM and cluster clocks agree to better than 0.1 s (the cluster's `date` read at the end of each call matched the VM's end-of-call stamp to 0.01 s). Times below are the cluster clock relative to the job end; the resolution is the poll period, so every number carries about ±2 s.
+- **Left squeue** means the first poll whose `squeue` answer no longer lists the job. **sacct terminal** means the first poll whose `state.current` is a terminal state.
+- The job ran about 8 s (`PROBE_ONLY`, exit 3 by design, so Slurm shows FAILED), so RUNNING was seen by several polls. A longer job would not change the shapes below. The job end has whole-second resolution, so the true end can be up to 1 s later than the value used.
+
+### Helios CPU: the last polls around the job end
+
+| VM UTC (whole poll) | `squeue` call, cluster clock, s from job end | `squeue --json -j` said | `sacct` call, s from job end | `sacct --json -j -X` said |
+|---|---|---|---|---|
+| 09:07:30.020-31.053 | -2.9 to -2.0 | RUNNING | -2.0 to -2.0 | RUNNING |
+| 09:07:32.019-33.549 | -0.9 to +0.5 | RUNNING | +0.5 to +0.5 | RUNNING |
+| 09:07:34.020-35.242 | +1.1 to +2.2 | GONE | +2.2 to +2.2 | FAILED |
+
+`GONE` is a poll whose `squeue` answer lists no job (see the next section for its exact shape).
+
+**Measured gap, Helios CPU.** In the poll that ended at end+0.5 s, `squeue` and `sacct` both still said RUNNING. In the next poll (its `squeue` call from end+1.1 s to end+2.2 s, its `sacct` call right after) `squeue` no longer listed the job **and** `sacct` already said FAILED. So:
+
+- end to left-squeue: at most 2.2 s (the `squeue` call that did not list the job returned at end+2.2 s);
+- end to sacct terminal: at most 2.2 s;
+- squeue→sacct gap: **0 s within the 2 s resolution.** There was no poll in which `squeue` had forgotten the job and `sacct` could not yet answer a terminal state. A poller that asks `sacct` as soon as `squeue` stops listing the job got the terminal state on its first try, on all three platforms below.
+- `squeue` never showed a terminal or COMPLETING state for this job: it went RUNNING to not-listed within one 2 s poll.
+
+### Comparison: the same poller on the other two platforms
+
+| Platform (Slurm) | last `squeue` call that said RUNNING returned at (s from end) | first `squeue` terminal state, call returned at | first `sacct` terminal, call returned at | first `squeue` call not listing the job returned at |
+|---|---|---|---|---|
+| Helios CPU (24.11.5) | +0.5 s | none seen (went straight to not listed) | FAILED, by +2.2 s | GONE, by +2.2 s |
+| Helios GH200 (24.11.5) | +0.7 s | FAILED, by +2.7 s | FAILED, by +2.8 s | GONE, by +3.4 s |
+| Athena A100 (23.11.7) | -1.4 s | FAILED, by +0.6 s | FAILED, by +3.0 s | GONE, by +12.5 s |
+
+- **Helios** forgets a finished job almost at once (not listed by 2.2 s after the end on CPU and by 3.4 s on GH200; on GH200 `squeue` showed `["FAILED","COMPLETING"]` for one poll, and `sacct` already said FAILED in that same poll).
+- **Athena** keeps the finished job in `squeue` for about 12 s, in state FAILED with `state_reason` `NonZeroExitCode`, and `sacct` caught up one poll (2 s) after `squeue` first said FAILED (that poll: `squeue` FAILED, `sacct` still RUNNING). So on Athena `sacct` trailed `squeue`'s first terminal state by one poll, and `squeue` stopped listing the job about 10 s after `sacct` said terminal. The two sources never disagreed for longer than one poll.
+- At the very start, `sacct` can trail `squeue`: on Athena the first poll after RUNNING had `squeue` RUNNING and `sacct` PENDING.
+- **Not measured:** how long a Helios job stays in `squeue` when it runs longer, how `MinJobAge` applies, and the time at which the Helios not-listed answer turns from the empty list below into an error. S7's note of `MinJobAge` 10 s on Helios is not what these polls saw (not listed within 2.2 s of the end).
+
+### What `squeue --json -j <id>` returns once the job is not listed
+
+| Platform | Shortly after the job end | Minutes later (0.4 after the GH200 job end, 1.6 after the CPU job end) |
+|---|---|---|
+| Helios (24.11.5) | exit 0, JSON with `"jobs": []` (top-level keys `jobs`, `last_backfill`, `last_update`, `meta`, `errors`, `warnings`; `errors` and `warnings` empty) | exit 1, no JSON, stderr `slurm_load_jobs error: Invalid job id specified` (same as the first part of this file) |
+| Athena (23.11.7) | exit 1, no JSON, stderr `slurm_load_jobs error: Invalid job id specified` (first not-listed poll) | not queried |
+
+A poller must therefore treat BOTH an empty `jobs` list and the error exit as "the controller no longer has the job", then ask `sacct`. A fake Slurm that returns only the error will not exercise the empty-list path that a real Helios returned right after the end.
+
+### `squeue --json -j <id>` while the job is RUNNING (Helios CPU, one document)
+
+The raw document had 6 top-level keys and one job object with 128 keys. Top level, with only the shape of each value:
+
+```json
+{
+ "last_backfill": {
+  "set": "bool",
+  "infinite": "bool",
+  "number": "int"
+ },
+ "last_update": {
+  "set": "bool",
+  "infinite": "bool",
+  "number": "int"
+ },
+ "meta": "see meta block",
+ "errors": [],
+ "warnings": [],
+ "jobs": "list of 1 job object(s)"
+}
+```
+
+The `meta` block (the same layout as in the `sacct` document above; `command` echoes the `squeue` arguments only up to `-j`: the job ID is cut, as `-S`'s value is in the `sacct` echo):
+
+```json
+{
+ "plugin": {
+  "type": "",
+  "name": "",
+  "data_parser": "data_parser/v0.0.42",
+  "accounting_storage": "accounting_storage/slurmdbd"
+ },
+ "client": {
+  "source": "",
+  "user": "<redacted>",
+  "group": "<redacted>"
+ },
+ "command": [
+  "squeue",
+  "--json",
+  "-j"
+ ],
+ "slurm": {
+  "version": {
+   "major": "24",
+   "micro": "5",
+   "minor": "11"
+  },
+  "release": "24.11.5",
+  "cluster": "<redacted>"
+ }
+}
+```
+
+Notes on this document, for the S4 fake Slurm:
+
+- State is `job_state`, a **list** of strings (`["RUNNING"]`), with `state_reason` (`"None"` while running) and `state_description`. The `sacct` form is `state.current`; there is no `job_state` there.
+- `squeue` has `start_time`, `submit_time`, `eligible_time`, `accrue_time` and `end_time` as `{set, infinite, number}` triples (epoch seconds). **While RUNNING, `end_time` is the projected end (start plus the time limit), not an actual end;** the actual end appears only in `sacct`.
+- `time_limit` is a triple in minutes (here 10). `cpus`, `cpus_per_task`, `node_count`, `tasks`, `memory_per_node` (MB, here 1024, because `--mem=1G` was used) and `memory_per_cpu` (`set: false` in that case) are triples.
+- `exit_code` and `derived_exit_code` exist while running, with `status` `["SUCCESS"]` and return code 0. `restart_cnt` is 0; `requeue` is false (`--no-requeue`).
+- `tres_req_str` and `tres_alloc_str` are strings (`"cpu=2,mem=1G,node=1,billing=2"`); there is no per-GPU triple here (a CPU job).
+- The job object is flat and large (128 keys), unlike the `sacct` object (46 keys) with its nested `time` and `required` objects. The key names differ too: `squeue` has `cpus`, `node_count`, `current_working_directory`, `standard_output`; `sacct` has `required.CPUs`, `working_directory`, `stdout`.
+- `job_resources` holds the node allocation (a per-node list with cpu counts, memory, and core status); only its shape is kept below because it carries the node name.
+
+The job object's values. Fields that identify a person, account, node, path or job are `<redacted>`; everything else is the value as returned:
+
+```
+"account": "<redacted>"
+"accrue_time": {"set": true, "infinite": false, "number": 1793351243}
+"admin_comment": ""
+"allocating_node": "<redacted>"
+"array_job_id": {"set": true, "infinite": false, "number": 0}
+"array_task_id": {"set": false, "infinite": false, "number": 0}
+"array_max_tasks": {"set": true, "infinite": false, "number": 0}
+"array_task_string": ""
+"association_id": "<redacted>"
+"batch_features": ""
+"batch_flag": true
+"batch_host": "<redacted>"
+"flags": ["EXACT_TASK_COUNT_REQUESTED", "EXACT_CPU_COUNT_REQUESTED", "ACCRUE_COUNT_CLEARED", "JOB_WAS_RUNNING", "EXACT_MEMORY_REQUESTED", "USING_DEFAULT_QOS", "USING_DEFAULT_WCKEY", "BACKFILL_ATTEMPTED"]
+"burst_buffer": ""
+"burst_buffer_state": ""
+"cluster": "<redacted>"
+"cluster_features": ""
+"command": "<redacted>"
+"comment": ""
+"container": ""
+"container_id": ""
+"contiguous": false
+"core_spec": 0
+"thread_spec": 32766
+"cores_per_socket": {"set": false, "infinite": false, "number": 0}
+"billable_tres": {"set": true, "infinite": false, "number": 2.0}
+"cpus_per_task": {"set": true, "infinite": false, "number": 2}
+"cpu_frequency_minimum": {"set": false, "infinite": false, "number": 0}
+"cpu_frequency_maximum": {"set": false, "infinite": false, "number": 0}
+"cpu_frequency_governor": {"set": false, "infinite": false, "number": 0}
+"cpus_per_tres": ""
+"cron": ""
+"deadline": {"set": true, "infinite": false, "number": 0}
+"delay_boot": {"set": true, "infinite": false, "number": 0}
+"dependency": ""
+"derived_exit_code": {"status": ["SUCCESS"], "return_code": {"set": true, "infinite": false, "number": 0}, "signal": {"id": {"set": false, "infinite": false, "number": 0}, "name": ""}}
+"eligible_time": {"set": true, "infinite": false, "number": 1793351243}
+"end_time": {"set": true, "infinite": false, "number": 1793351845}
+"excluded_nodes": ""
+"exit_code": {"status": ["SUCCESS"], "return_code": {"set": true, "infinite": false, "number": 0}, "signal": {"id": {"set": false, "infinite": false, "number": 0}, "name": ""}}
+"extra": ""
+"failed_node": ""
+"features": ""
+"federation_origin": ""
+"federation_siblings_active": ""
+"federation_siblings_viable": ""
+"gres_detail": []
+"group_id": "<redacted>"
+"group_name": "<redacted>"
+"het_job_id": {"set": true, "infinite": false, "number": 0}
+"het_job_id_set": ""
+"het_job_offset": {"set": true, "infinite": false, "number": 0}
+"job_id": "<redacted>"
+"job_resources": "<structure only, see below>"
+"job_size_str": []
+"job_state": ["RUNNING"]
+"last_sched_evaluation": {"set": true, "infinite": false, "number": 1793351245}
+"licenses": ""
+"mail_type": []
+"mail_user": "<redacted>"
+"max_cpus": {"set": true, "infinite": false, "number": 0}
+"max_nodes": {"set": true, "infinite": false, "number": 0}
+"mcs_label": "<redacted>"
+"memory_per_tres": ""
+"name": "s1-frp"
+"network": ""
+"nodes": "<redacted>"
+"nice": 0
+"tasks_per_core": {"set": false, "infinite": true, "number": 0}
+"tasks_per_tres": {"set": true, "infinite": false, "number": 0}
+"tasks_per_node": {"set": true, "infinite": false, "number": 0}
+"tasks_per_socket": {"set": false, "infinite": true, "number": 0}
+"tasks_per_board": {"set": true, "infinite": false, "number": 0}
+"cpus": {"set": true, "infinite": false, "number": 2}
+"node_count": {"set": true, "infinite": false, "number": 1}
+"tasks": {"set": true, "infinite": false, "number": 1}
+"partition": "plgrid"
+"prefer": ""
+"memory_per_cpu": {"set": false, "infinite": false, "number": 0}
+"memory_per_node": {"set": true, "infinite": false, "number": 1024}
+"minimum_cpus_per_node": {"set": true, "infinite": false, "number": 2}
+"minimum_tmp_disk_per_node": {"set": true, "infinite": false, "number": 0}
+"power": {"flags": []}
+"preempt_time": {"set": true, "infinite": false, "number": 0}
+"preemptable_time": {"set": true, "infinite": false, "number": 0}
+"pre_sus_time": {"set": true, "infinite": false, "number": 0}
+"hold": false
+"priority": {"set": true, "infinite": false, "number": 6286}
+"priority_by_partition": []
+"profile": ["NOT_SET"]
+"qos": "normal"
+"reboot": false
+"required_nodes": ""
+"required_switches": 0
+"requeue": false
+"resize_time": {"set": true, "infinite": false, "number": 0}
+"restart_cnt": 0
+"resv_name": ""
+"scheduled_nodes": "<redacted>"
+"selinux_context": ""
+"shared": []
+"sockets_per_board": 0
+"sockets_per_node": {"set": false, "infinite": false, "number": 0}
+"start_time": {"set": true, "infinite": false, "number": 1793351245}
+"state_description": ""
+"state_reason": "None"
+"standard_error": "<redacted>"
+"standard_input": "<redacted>"
+"standard_output": "<redacted>"
+"submit_time": {"set": true, "infinite": false, "number": 1793351243}
+"suspend_time": {"set": true, "infinite": false, "number": 0}
+"system_comment": ""
+"time_limit": {"set": true, "infinite": false, "number": 10}
+"time_minimum": {"set": true, "infinite": false, "number": 0}
+"threads_per_core": {"set": false, "infinite": false, "number": 0}
+"tres_bind": ""
+"tres_freq": ""
+"tres_per_job": ""
+"tres_per_node": ""
+"tres_per_socket": ""
+"tres_per_task": "cpu=2"
+"tres_req_str": "cpu=2,mem=1G,node=1,billing=2"
+"tres_alloc_str": "cpu=2,mem=1G,node=1,billing=2"
+"user_id": "<redacted>"
+"user_name": "<redacted>"
+"maximum_switch_wait_time": 0
+"wckey": ""
+"current_working_directory": "<redacted>"
+```
+
+The shape of `job_resources` (strings stand for values, the node name among them):
+
+```json
+{
+ "select_type": [
+  "str"
+ ],
+ "nodes": {
+  "count": "int",
+  "select_type": [
+   "str"
+  ],
+  "list": "str",
+  "whole": "bool",
+  "allocation": [
+   {
+    "index": "int",
+    "name": "str",
+    "cpus": {
+     "count": "int",
+     "used": "int"
+    },
+    "memory": {
+     "used": "int",
+     "allocated": "int"
+    },
+    "sockets": [
+     {
+      "index": "int",
+      "cores": [
+       {
+        "index": "int",
+        "status": [
+         "str"
+        ]
+       }
+      ]
+     }
+    ]
+   }
+  ]
+ },
+ "cpus": "int",
+ "threads_per_core": {
+  "set": "bool",
+  "infinite": "bool",
+  "number": "int"
+ }
+}
+```
+
+### Evidence and limits
+
+- Three jobs, one platform each, about 8 s long. The comparison rows are one observation each, not a distribution.
+- The poll period (2.0 s) bounds every timing. A gap shorter than a poll would not show.
+- The job end is `sacct`'s `time.end`, which has whole-second resolution.
+- The poller, its raw per-poll outputs and the job IDs stay in the agents VM's private scratch; this section carries none of them.
