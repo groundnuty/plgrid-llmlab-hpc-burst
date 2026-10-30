@@ -69,7 +69,43 @@ type Metrics struct {
 	// Trace, when set before Run, records every completed request in Recs.
 	Trace bool
 	Recs  []Rec
+
+	// Spike S10b. The engine limit is Cluster.MaxRunning; "above" means more
+	// in flight (dispatched, queued at the Instance included) than that.
+	EngineLimit int
+	// Spills: placements the hard cap moved off a full CHWBL choice, and how
+	// many of those were above the bound c*(T+1)/n in effect.
+	Spills, SpillsWin, SpillRuleViol int
+	// Requests that waited at the front because every Instance was at the
+	// cap, and the waits of those placed (seconds, whole run, arrival order
+	// of placement). MaxFrontQ is the longest the queue got.
+	FrontHeld, MaxFrontQ int
+	FrontWaits           []float64
+	// Time with some alive Instance above the engine limit, whole run and in
+	// the window, and the same summed over Instances (Instance-seconds).
+	AboveEngine, AboveEngineWin, AboveEngineInst float64
+	// Switches of an adaptive bound.
+	Switches []Switch
+	// PctSpan: for each CHWBL bound used, the first and last placement time.
+	PctSpan map[int][2]float64
+
+	// Time-resolved series in Bucket-second buckets, for windows that start
+	// at an event: the largest in-flight count on any Instance (by placement
+	// time), time above the engine limit, and output tokens of requests
+	// completed (by completion time).
+	peakB    map[int]int
+	aboveB   map[int]float64
+	doneOutB map[int]int64
+	latT     []latRec
 }
+
+// Switch is one change of an adaptive bound.
+type Switch struct {
+	T        float64
+	From, To int // MeanLoadPercentage
+}
+
+type latRec struct{ dispatch, lat float64 }
 
 // InstStat is one Instance's share of the window.
 type InstStat struct {
@@ -96,7 +132,8 @@ type RehomeCount struct {
 
 func newMetrics(pol Policy, n int) *Metrics {
 	return &Metrics{pol: pol, WinEnd: math.Inf(1), Bucket: 60, lastEvent: -1, PerInst: make([]InstStat, n),
-		firstKeys: map[string]int{}, buckets: map[int]*[2]int64{}}
+		firstKeys: map[string]int{}, buckets: map[int]*[2]int64{}, PctSpan: map[int][2]float64{},
+		peakB: map[int]int{}, aboveB: map[int]float64{}, doneOutB: map[int]int64{}}
 }
 
 func (m *Metrics) inWindow(t float64) bool { return t >= m.WinStart && t < m.WinEnd }
@@ -112,6 +149,22 @@ func membersLoad(e *Engine) (total, peak int) {
 // advance accumulates time-weighted load until time t.
 func (m *Metrics) advance(e *Engine, t float64) {
 	dt := t - e.now
+	if dt > 0 && m.EngineLimit > 0 {
+		over := 0
+		for _, in := range e.inst {
+			if in.alive && in.inflight > m.EngineLimit {
+				over++
+			}
+		}
+		if over > 0 {
+			m.AboveEngine += dt
+			m.AboveEngineInst += dt * float64(over)
+			m.aboveB[int(e.now/m.Bucket)] += dt
+			if m.inWindow(e.now) {
+				m.AboveEngineWin += dt
+			}
+		}
+	}
 	if dt <= 0 || len(e.rt.members) == 0 {
 		return
 	}
@@ -126,7 +179,7 @@ func (m *Metrics) advance(e *Engine, t float64) {
 		return
 	}
 	m.timeOn += dt
-	if float64(peak) > m.pol.Bound()*float64(total)/float64(len(e.rt.members))+1e-9 {
+	if float64(peak) > e.rt.bound()*float64(total)/float64(len(e.rt.members))+1e-9 {
 		m.timeAbove += dt
 	}
 }
@@ -142,6 +195,20 @@ func (m *Metrics) placement(e *Engine, r *request, idx int) {
 	meanAfter := float64(total+1) / n
 	m.Placements++
 	m.PeakLoad = max(m.PeakLoad, e.inst[idx].inflight+1)
+	if p := e.pol.Cap; p > 0 && e.inst[idx].inflight >= p {
+		e.err = fmt.Errorf("hard cap %d: request placed on %s holding %d", p, e.inst[idx].name, e.inst[idx].inflight)
+		return
+	}
+	bk := int(e.now / m.Bucket)
+	m.peakB[bk] = max(m.peakB[bk], e.inst[idx].inflight+1)
+	if e.pol.Kind == CHWBL {
+		sp := m.PctSpan[e.rt.percent]
+		if _, seen := m.PctSpan[e.rt.percent]; !seen {
+			sp[0] = e.now
+		}
+		sp[1] = e.now
+		m.PctSpan[e.rt.percent] = sp
+	}
 	if m.inWindow(e.now) {
 		st := &m.PerInst[idx]
 		st.PeakInFlight = max(st.PeakInFlight, e.inst[idx].inflight+1)
@@ -149,12 +216,21 @@ func (m *Metrics) placement(e *Engine, r *request, idx int) {
 	if meanAfter >= 2 {
 		m.MaxPlaceRatio = max(m.MaxPlaceRatio, (pre+1)/meanAfter)
 	}
-	if c := m.pol.Bound(); !math.IsInf(c, 1) {
+	if e.rt.lastSpilled {
+		m.Spills++
+		if m.inWindow(e.now) {
+			m.SpillsWin++
+		}
+	}
+	if c := e.rt.bound(); !math.IsInf(c, 1) {
 		bound := c * meanAfter
 		m.MaxPlaceExcess = max(m.MaxPlaceExcess, pre+1-bound)
 		if pre > bound+1e-9 {
 			m.KubeRuleViol++
 			m.MaxRuleExcess = max(m.MaxRuleExcess, pre-bound)
+			if e.rt.lastSpilled {
+				m.SpillRuleViol++
+			}
 		}
 		if pre+1 > math.Ceil(bound-1e-9) {
 			m.PaperViol++
@@ -245,6 +321,7 @@ func (m *Metrics) completed(e *Engine, r *request) {
 	}
 	m.buckets[b][0] += int64(r.hold.HitTokens)
 	m.buckets[b][1] += int64(r.promptLen)
+	m.doneOutB[int(e.now/m.Bucket)] += int64(r.outLen)
 	if m.inWindow(e.now) {
 		m.DoneOutputTokens += int64(r.outLen)
 	}
@@ -265,9 +342,102 @@ func (m *Metrics) completed(e *Engine, r *request) {
 		m.HitTokens1 += int64(r.hold.HitTokens)
 	}
 	m.latencies = append(m.latencies, e.now-r.dispatchT)
+	m.latT = append(m.latT, latRec{r.dispatchT, e.now - r.dispatchT})
+}
+
+// heldAtFront records a request that found every Instance at the cap.
+func (m *Metrics) heldAtFront(e *Engine) {
+	m.FrontHeld++
+	m.MaxFrontQ = max(m.MaxFrontQ, len(e.frontQ))
+}
+
+// leftFront records a held request placed after waiting wait seconds.
+func (m *Metrics) leftFront(e *Engine, r *request, wait float64) {
+	m.FrontWaits = append(m.FrontWaits, wait)
+}
+
+// switched records an adaptive bound changing at the engine's clock.
+func (m *Metrics) switched(e *Engine, from, to int) {
+	m.Switches = append(m.Switches, Switch{T: e.now, From: from, To: to})
+}
+
+// PeakBetween is the largest in-flight count any Instance reached when a
+// request was placed in [from, to), over whole buckets starting in the range.
+func (m *Metrics) PeakBetween(from, to float64) (peak int) {
+	for b, v := range m.peakB {
+		if t := float64(b) * m.Bucket; t >= from && t < to {
+			peak = max(peak, v)
+		}
+	}
+	return peak
+}
+
+// AboveEngineBetween is the time some Instance held more than the engine
+// limit, over whole buckets starting in [from, to).
+func (m *Metrics) AboveEngineBetween(from, to float64) (secs float64) {
+	for b, v := range m.aboveB {
+		if t := float64(b) * m.Bucket; t >= from && t < to {
+			secs += v
+		}
+	}
+	return secs
+}
+
+// DoneOutputBetween is the output of requests completed in [from, to), over
+// whole buckets starting in the range.
+func (m *Metrics) DoneOutputBetween(from, to float64) (tokens int64) {
+	for b, v := range m.doneOutB {
+		if t := float64(b) * m.Bucket; t >= from && t < to {
+			tokens += v
+		}
+	}
+	return tokens
+}
+
+// LatencyBetween is the q-quantile of the latency of requests dispatched
+// (arrived) in [from, to) and completed, from arrival: a request held at the
+// front counts its wait. It is 0 when there are none.
+func (m *Metrics) LatencyBetween(from, to, q float64) float64 {
+	var ls []float64
+	for _, r := range m.latT {
+		if r.dispatch >= from && r.dispatch < to {
+			ls = append(ls, r.lat)
+		}
+	}
+	if len(ls) == 0 {
+		return 0
+	}
+	sort.Float64s(ls)
+	return ls[min(len(ls)-1, int(q*float64(len(ls))))]
+}
+
+// FrontWait returns the q-quantile of the waits at the front (0 if none).
+func (m *Metrics) FrontWait(q float64) float64 {
+	if len(m.FrontWaits) == 0 {
+		return 0
+	}
+	ws := append([]float64(nil), m.FrontWaits...)
+	sort.Float64s(ws)
+	return ws[min(len(ws)-1, int(q*float64(len(ws))))]
+}
+
+// FrontWaitStats returns the count, mean and maximum of the waits.
+func (m *Metrics) FrontWaitStats() (n int, mean, mx float64) {
+	for _, w := range m.FrontWaits {
+		mean += w
+		mx = max(mx, w)
+	}
+	n = len(m.FrontWaits)
+	if n > 0 {
+		mean /= float64(n)
+	}
+	return n, mean, mx
 }
 
 func (m *Metrics) finish(e *Engine) error {
+	if len(e.frontQ) != 0 {
+		return fmt.Errorf("%d requests still held at the front at the end", len(e.frontQ))
+	}
 	if g := e.rt.group; g != nil && g.TotalInFlight() != 0 {
 		return fmt.Errorf("kubeai in-flight leaked: %d at the end", g.TotalInFlight())
 	}
