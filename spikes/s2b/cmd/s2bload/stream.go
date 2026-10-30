@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -50,6 +49,7 @@ type chunk struct {
 		Delta struct {
 			Content string `json:"content"`
 		} `json:"delta"`
+		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *struct {
 		PromptTokens        int `json:"prompt_tokens"`
@@ -58,57 +58,85 @@ type chunk struct {
 			CachedTokens int `json:"cached_tokens"`
 		} `json:"prompt_tokens_details"`
 	} `json:"usage"`
-	Error any `json:"error"`
+	Error json.RawMessage `json:"error"`
 }
 
-// readStream reads an OpenAI-style SSE body. It requires a [DONE] event; a body that ends
-// without one is an error (a cut stream must not count as a measured request).
-func readStream(body io.Reader, start time.Time, now func() time.Time) (Result, error) {
+// readStream reads an OpenAI-style SSE body and returns a result only for a stream that is complete and
+// whose counts can be trusted. A request counts as a measured success only if all of these hold:
+//   - every event, [DONE] included, ended with its blank line (a cut stream is an error);
+//   - no event is an error event or carries an error payload, and every payload is valid JSON;
+//   - some content arrived, and a choice carried a non-empty finish_reason;
+//   - a usage record arrived with prompt_tokens and completion_tokens above zero, and, when wantTokens > 0,
+//     completion_tokens equal to it (the request set min_tokens = max_tokens, so any other count is a short or
+//     overlong reply). cached_tokens stays optional: without prompt_tokens_details it is -1.
+//
+// On a stream that ended with [DONE] but failed the count checks, the Result is returned with the error, so the
+// caller can record what was seen.
+func readStream(body io.Reader, start time.Time, now func() time.Time, wantTokens int) (Result, error) {
 	res := Result{CachedTokens: -1}
 	var content strings.Builder
-	br := bufio.NewReaderSize(body, 64*1024)
+	finish, usageSeen := "", false
+	sr := newSSEReader(body)
 	for {
-		line, err := br.ReadString('\n')
-		if len(line) > 0 {
-			line = strings.TrimRight(line, "\r\n")
-			if strings.HasPrefix(line, "data:") {
-				data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-				if data == "[DONE]" {
-					res.Latency = now().Sub(start)
-					res.Content = content.String()
-					return res, nil
-				}
-				var c chunk
-				if jerr := json.Unmarshal([]byte(data), &c); jerr != nil {
-					return res, fmt.Errorf("bad chunk: %v: %.200s", jerr, data)
-				}
-				if c.Error != nil {
-					return res, fmt.Errorf("error event: %.300s", data)
-				}
-				for _, ch := range c.Choices {
-					if ch.Delta.Content != "" {
-						if res.TTFT == 0 {
-							res.TTFT = now().Sub(start)
-						}
-						content.WriteString(ch.Delta.Content)
-					}
-				}
-				if c.Usage != nil {
-					res.PromptTokens = c.Usage.PromptTokens
-					res.CompletionTokens = c.Usage.CompletionTokens
-					if c.Usage.PromptTokensDetails != nil {
-						res.CachedTokens = c.Usage.PromptTokensDetails.CachedTokens
-					}
-				}
-			}
-		}
+		ev, err := sr.next(func() {})
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return res, errors.New("stream ended without [DONE]")
 			}
 			return res, err
 		}
+		if ev.Event == "error" {
+			return res, fmt.Errorf("error event: %.300s", ev.Data)
+		}
+		if strings.TrimSpace(ev.Data) == "[DONE]" {
+			res.Latency = now().Sub(start)
+			res.Content = content.String()
+			return res, checkComplete(res, finish, usageSeen, wantTokens)
+		}
+		var c chunk
+		if jerr := json.Unmarshal([]byte(ev.Data), &c); jerr != nil {
+			return res, fmt.Errorf("malformed event payload (%v): %.200s", jerr, ev.Data)
+		}
+		if e := strings.TrimSpace(string(c.Error)); e != "" && e != "null" {
+			return res, fmt.Errorf("error payload: %.300s", e)
+		}
+		for _, ch := range c.Choices {
+			if ch.Delta.Content != "" {
+				if res.TTFT == 0 {
+					res.TTFT = now().Sub(start)
+				}
+				content.WriteString(ch.Delta.Content)
+			}
+			if ch.FinishReason != nil && *ch.FinishReason != "" {
+				finish = *ch.FinishReason
+			}
+		}
+		if c.Usage != nil {
+			usageSeen = true
+			res.PromptTokens = c.Usage.PromptTokens
+			res.CompletionTokens = c.Usage.CompletionTokens
+			if c.Usage.PromptTokensDetails != nil {
+				res.CachedTokens = c.Usage.PromptTokensDetails.CachedTokens
+			}
+		}
 	}
+}
+
+// checkComplete applies the checks that need the whole stream; see readStream.
+func checkComplete(res Result, finish string, usageSeen bool, wantTokens int) error {
+	switch {
+	case res.Content == "":
+		return errors.New("no content before [DONE]")
+	case finish == "":
+		return errors.New("no finish_reason before [DONE]")
+	case !usageSeen:
+		return errors.New("no usage record before [DONE]")
+	case res.PromptTokens <= 0 || res.CompletionTokens <= 0:
+		return fmt.Errorf("invalid usage counts: prompt_tokens %d, completion_tokens %d", res.PromptTokens, res.CompletionTokens)
+	case wantTokens > 0 && res.CompletionTokens != wantTokens:
+		return fmt.Errorf("completion_tokens %d, want %d", res.CompletionTokens, wantTokens)
+	}
+	return nil
 }
 
 // chat sends one streamed chat completion and reads it to the end.
@@ -135,7 +163,7 @@ func chat(ctx context.Context, client *http.Client, url, header, session string,
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 500))
 		return Result{Status: resp.StatusCode}, fmt.Errorf("http %d: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
 	}
-	res, err := readStream(resp.Body, start, time.Now)
+	res, err := readStream(resp.Body, start, time.Now, req.MinTokens)
 	res.Status = resp.StatusCode
 	return res, err
 }
