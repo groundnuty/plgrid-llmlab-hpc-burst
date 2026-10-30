@@ -1,6 +1,6 @@
 hbep: 5
 title: LLMLab-compatible front
-status: provisional
+status: implementable
 stage: none
 authors:
   - www-2027-code-agent[bot]
@@ -8,7 +8,7 @@ approvers:
   - groundnuty
 tracking-issue: https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/5
 created: 2026-10-28
-last-updated: 2026-10-28
+last-updated: 2026-10-30
 replaces: []
 superseded-by: []
-see-also: [3, 4, 6, 7, 8, 9]
+see-also: [3, 4, 6, 7, 8, 9, 11, 15]

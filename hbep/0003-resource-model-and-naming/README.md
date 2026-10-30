@@ -134,7 +134,7 @@ In these stories, `helios-a`, `helios-b` and `athena-a` are names an operator ga
 - **Engine fingerprint:** the identifier an engine reports on its responses, such as vLLM's `system_fingerprint`. It is recorded, and is never the identity.
 - **Instance key:** each Instance's own key, generated when it starts and kept in its identity package, the identity data the Instance holds (HBEP-9). The front uses it toward the Instance. It is never a deployment-ID input.
 - **Worker:** one engine server process, which may span several GPUs, inside an Instance.
-  - An Instance is the endpoint the front reaches: its own router in front of one or more workers.
+  - An Instance is the endpoint the front reaches: its own router in front of one or more workers. An Instance with one worker may have none, as in alpha (HBEP-7); the front then reaches the worker (HBEP-5).
   - The front picks the deployment and the Instance; the Instance's router picks the worker (HBEP-5). So the front always knows which Instance answered.
   - Pooling workers across Instances is not part of this design (open question 11).
 - **Instance phases:**
@@ -469,3 +469,4 @@ The resource model replaces state that www-2027 operators kept by hand: per-job 
   - In alpha a managed catalog entry is kept in its Provider's status, not as an Allocation object (HBEP-4).
   - HBEP-9's render check comes after alpha (HBEP-7); alpha verifies by the file rehash and the settings comparison.
   - Each verification of an Instance, at start and after every restart that reverifies, writes its own immutable record, and the Instance's status names the latest (HBEP-7, HBEP-11). A restarted Instance can report other settings, so one record per Instance would have held a stale verdict.
+- **2026-10-30: an Instance with one worker may have no router.** Made with HBEP-5 becoming implementable. HBEP-7's alpha runs one worker per Instance and no router, and HBEP-5's front reaches that worker through the Instance's serving path. Routers in front of several workers come with beta (HBEP-5, open question 2; HBEP-7).
