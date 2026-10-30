@@ -47,6 +47,20 @@ Kubernetes' explicit ±1-minor skew rule is written for kubectl. client-go inste
 - The flag-name tests read the known flag names from HBEP-3's v1 table, so the admission rules' lists of known names are checked against the specification. A flag added to the table fails `TestEngineFlagsRefuseEveryPrefixOfAKnownFlag` until the list in the `EngineFlag` markers (`api/v1alpha1/modeldeployment_types.go`) gains it.
 - The test host (`internal/testenv`) binds only loopback ports 29200 to 29219 and, in k3s mode, accepts only a kubeconfig whose server is loopback on 29200 to 29239. The control-plane binaries are always sha256-checked; `HPCBURST_TESTENV_UNPINNED=1` is the explicit override for a binary you built yourself.
 
+## Running the e2e suite on the launcher's k3s
+
+`hack/check.sh` runs the e2e suite on the assembled host of `internal/testenv`. The same suite also runs on the user-level k3s that `hpcburst up` starts, which is the host HBEP-11 specifies; `TestRunsOnK3s` then passes instead of skipping. Run it before merging a change to the CRDs:
+
+```
+hack/fetch-k3s.sh <bin-dir>      # once: the pinned k3s binaries
+go build -o <tmp>/hpcburst ./cmd/hpcburst
+<tmp>/hpcburst up --state-dir <state> --port-base 29220 --bin-dir <bin-dir> --manifests config/crd
+HPCBURST_TEST_HOST=k3s HPCBURST_KUBECONFIG=<state>/kubeconfig go test -count=1 ./api/v1alpha1/e2e/
+<tmp>/hpcburst down --state-dir <state>
+```
+
+The launcher's block is 29220 to 29239 and the suite refuses a kubeconfig that points elsewhere. The deletion-guard policy in `config/admission/` is not applied by `--manifests`: `TestCRDDeletionGuard` installs and removes it itself, so keep it out of the manifests directory.
+
 ## API field names
 
 Every field of the CRDs is camelCase, as the Kubernetes API conventions ask (owner decision, PR #48): `holdRelease`, `lostGrace`, `imageDigest`, `gpuModel`, `timeZone`, `jobName.maxLength`. HBEP-3's hash object keeps its snake_case keys (`image_digest`, `gpu_model`, `cpu_arch`); `pkg/deploymentid` maps the API's fields onto them, and nothing in the API changes the hash. `TestEveryCRDFieldIsCamelCase` scans the committed manifests. HBEP text that writes a field in snake_case (`hold_release` in HBEP-11) means the camelCase field.
