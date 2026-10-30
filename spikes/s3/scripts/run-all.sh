@@ -7,7 +7,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 SCRATCH=${SCRATCH:?set SCRATCH to a writable directory with at least 6 GB free}
-command -v go >/dev/null || { echo "go (1.26 or newer) must be on PATH" >&2; exit 1; }
+command -v go >/dev/null || { echo "Go 1.27.x must be on PATH" >&2; exit 1; }
 export SCRATCH
 [ "${SKIP_FETCH:-0}" = 1 ] || scripts/fetch.sh   # SKIP_FETCH=1 when the binaries are already in $SCRATCH
 go vet ./...

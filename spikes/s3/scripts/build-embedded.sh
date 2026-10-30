@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Build the kcp-as-a-library binary (spikes/s3/embedded) against a checkout of kcp at the
+# Build the kcp-as-a-library binary (third_party/forked/kcp/s3-embedded) against a checkout of kcp at the
 # pinned tag. kcp's go.mod replaces k8s.io/* with its Kubernetes fork and a few kcp-dev
 # modules with in-repo staging directories; a consumer must repeat those replaces, so this
 # script generates the embedded module's go.mod from kcp's own. Everything stays in $SCRATCH.
 set -euo pipefail
 SCRATCH=${SCRATCH:?set SCRATCH to a writable directory with at least 6 GB free}
-command -v go >/dev/null || { echo "go (1.26 or newer) must be on PATH" >&2; exit 1; }
+command -v go >/dev/null || { echo "Go 1.27.x must be on PATH" >&2; exit 1; }
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 KCP_TAG=v0.33.3
 KCP_SRC=$SCRATCH/src/kcp-${KCP_TAG#v}
@@ -15,7 +15,7 @@ if [ ! -d "$KCP_SRC/.git" ]; then
 fi
 W=$SCRATCH/work/embedded-build
 rm -rf "$W" && mkdir -p "$W"
-cp "$HERE/embedded/main.go" "$W/main.go"
+cp "$HERE/../../third_party/forked/kcp/s3-embedded/main.go" "$W/main.go"
 sed -e "s#@S3_DIR@#$HERE#" -e "s#@KCP_SRC@#$KCP_SRC#" "$HERE/embedded/go.mod.tmpl" > "$W/go.mod"
 # Repeat kcp's replace blocks, pointing the staging modules at the checkout.
 awk '/^replace \(/{p=1; print; next} p&&/^\)/{p=0; print; next} p{print}' "$KCP_SRC/go.mod" \

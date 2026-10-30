@@ -13,10 +13,10 @@ HBEP-11 makes the Kubernetes API (custom resources plus controllers) the control
 | plain kube-apiserver + etcd, no controller manager (`envtest-bare`) | yes | fails the e2e suite on the three cascade tests, as designed: it is the negative control (nothing garbage-collects) |
 | kube-apiserver + etcd + kube-controller-manager limited to garbage collection and namespaces (`envtest-gc`) | yes | passes every line: 358 / 391 MiB, ready in 3.8 s, upgrade kept 103 of 103 objects |
 | kcp release binary, embedded etcd (`kcp`) | yes | passes every line: 519 / 466 MiB, ready in 13.0 s cold and 8.9 s warm, upgrade kept 103 of 103 objects |
-| k3s with SQLite | no | not measured: needs root (reason below) |
+| k3s with SQLite | no | not measured: needs root or system change (reason below) |
 | kcp embedded as a Go library | no | not measured: the build did not get past a dependency conflict and needs more disk than the shared VM has free (details below) |
 
-Both measured hosts that garbage-collect fit the small VM with wide margin: the host takes 0.36 to 0.52 GiB of the 4 GiB budget VM, and the 100 objects add nothing measurable. What separates them is not footprint but shape: three processes that we assemble and pin (lighter, faster, plain Kubernetes) against one downloaded process that runs without root (kcp, about 75 to 160 MiB more and 5 to 9 s slower to start). Section "What this means for the HBEPs" gives the spike's lean and what is still open.
+Both measured hosts that garbage-collect fit the small VM with wide margin: the host takes 0.35 to 0.51 GiB of the 4 GiB budget VM, and the 100 objects add nothing measurable. What separates them is not footprint but shape: three processes that we assemble and pin (lighter, faster, plain Kubernetes) against one downloaded process that runs without root (kcp, about 75 to 160 MiB more and 5 to 9 s slower to start). Section "What this means for the HBEPs" gives the spike's lean and what is still open.
 
 ## Options and what ran
 
@@ -27,6 +27,8 @@ Both measured hosts that garbage-collect fit the small VM with wide margin: the 
 | `kcp` | the kcp release binary with its embedded etcd, one process, the e2e suite running inside a child workspace | 0.32.5, 0.33.3 |
 | k3s | not measured | v1.36.5+k3s1 was tried (see below) |
 | kcp as a library | not measured | kcp v0.33.3 sources |
+
+**Deviation from the issue.** The issue asks that the same tests pass "on a plain kube-apiserver (envtest)". A plain kube-apiserver with etcd fails the owner-reference cascade tests by design, so `envtest-bare` is the negative control and `envtest-gc` is the passing baseline.
 
 Why two envtest baselines: setup-envtest ships etcd and kube-apiserver but no controller manager, so a bare envtest has no garbage collector. HBEP-11 says so as well ("Garbage collection runs in the Kubernetes controller manager, so that runs too"). `envtest-bare` is the negative control for the cascade test; `envtest-gc` is the real "control plane without nodes" baseline.
 
@@ -105,7 +107,7 @@ Final run of each option through `scripts/run-all.sh`, plus the kcp upgrade reru
 | e2e suite (11 tests; 2 harness-driven phase tests are skipped in a plain run) | 8 pass, 3 fail | 11 pass | 11 pass |
 | e2e after the upgrade | 8 pass, 3 fail | 11 pass | 11 pass |
 | post-upgrade test (scale one Fleet, cascade-delete another) | fail (no garbage collection) | pass | pass |
-| budget verdict | fails on the e2e line only | passes | passes |
+| budget verdict | fails the e2e line and the upgrade line, both only because the cascade tests fail without garbage collection | passes | passes |
 
 Notes on the numbers.
 - **The data directory size is the same everywhere** because every option runs etcd: two preallocated 64 MB write-ahead log files plus a database of about 17 MiB.
@@ -115,26 +117,26 @@ Notes on the numbers.
 - **kcp's garbage collection is fast:** the five dependents (two levels) were gone 120 ms after the delete.
 - **Local access only:** the harness checked the listening sockets of every host process; all were on 127.0.0.1.
 
-### k3s: not measured, needs root
+### k3s: not measured, needs root or system change
 
 Checked on this VM, as an ordinary user:
 - `/etc/subuid` and `/etc/subgid` have entries for the user, but `newuidmap`, `newgidmap`, `slirp4netns` and `rootlesskit` are not installed, and the kernel setting `apparmor_restrict_unprivileged_userns` is 1.
 - `k3s server --rootless` (v1.36.5+k3s1) exits at once with `failed to start the child: fork/exec /proc/self/exe: operation not permitted`. Fixing it needs a package install or a sysctl change, which are system changes, so it was not forced.
 - A plain user-level `k3s server --disable-agent` with its own data directory and loopback ports starts the supervisor and its SQLite store, but the API server never becomes ready. It loops on `open /etc/rancher/node/password: permission denied`. That path is fixed (I found no flag to move it) and is root-owned on this VM.
-- **Pitfall for anyone repeating this on a VM that already runs k3s:** `k3s server` reads the system configuration file by default. Point `K3S_CONFIG_FILE` at an empty file and `HOME` at a scratch directory first. My first attempt did not; it ran for about a minute, appeared to load that configuration (it logged `Managed etcd cluster initializing`), stopped on the permission error above without binding any of the existing server's ports, and was stopped by PID. The existing server's listeners were verified up afterwards.
+- **Pitfall for anyone repeating this on a VM that already runs k3s:** `k3s server` reads the system configuration file by default. Point `K3S_CONFIG_FILE` at an empty file and `HOME` at a scratch directory first. My first attempt did not; it ran for under a minute, appeared to load that configuration (it logged `Managed etcd cluster initializing`), stopped on the permission error above without binding any of the existing server's ports, and was stopped by PID. The existing server's listeners were verified up afterwards.
 
-So k3s is "not measured: needs root (or a writable /etc/rancher/node)". It remains HBEP-11's team option; its single-user footprint is unknown from this spike.
+So k3s is "not measured: needs root or system change" (root, or a writable /etc/rancher/node plus the user-namespace tools for rootless mode). It remains HBEP-11's team option; its single-user footprint is unknown from this spike.
 
 ### kcp as a Go library: not measured
 
-- `embedded/main.go` follows the start sequence of kcp's own `cmd/kcp/kcp.go` at v0.33.3 (same option types, embedded etcd, `server.NewServer`) and adds the in-process controller-runtime manager. `scripts/build-embedded.sh` builds it. It has never compiled to the end, so treat it as an untested scaffold.
+- `third_party/forked/kcp/s3-embedded/main.go` is adapted from kcp's own `cmd/kcp/kcp.go` at v0.33.3 (same option types, embedded etcd, `server.NewServer`) and adds the in-process controller-runtime manager. `scripts/build-embedded.sh` builds it. It has never compiled to the end, so treat it as an untested scaffold.
 - What was learned. A consumer's `go.mod` must repeat kcp's `replace` blocks: about 35 `k8s.io/*` modules redirected to kcp's own Kubernetes fork at a 1.37 alpha commit, and five `kcp-dev` modules pointing at staging directories inside the kcp repository. The script generates that from kcp's `go.mod`, and the dependency graph resolves. The first compile then failed in controller-runtime v0.25.2 (`undefined: events.AnnotatedEventRecorder`): the controller-runtime that matches Kubernetes 1.37 final does not build against kcp's fork snapshot. Embedding therefore pins the controllers' controller-runtime and client-go to whatever matches kcp's fork. A controller-runtime v0.24.x was the next thing to try and was not tried.
 - Why it stops here: the build and the downloaded fork modules drove the shared VM's root disk below 1 GB free. The build was stopped by PID and files I had created were removed. It was not retried; a retry needs about 3 GB of free disk for the Go build cache. My disk watchdog fired at 1.47 GB free and stopped the build script, but not the `go build` child (the child was orphaned and kept compiling), so the disk kept filling for a few minutes more until I stopped that PID by hand.
 - The expected value of the measurement is low: the server code is the same as the `kcp` binary measured above, and the controller already measures 38 MiB as a separate process, so embedding could save at most that much and one process.
 
 ## What this means for the HBEPs
 
-1. **Footprint is not the deciding factor for the single-user host.** Every measured host that garbage-collects uses 0.36 to 0.52 GiB and starts in 4 to 13 s on a loaded VM, inside a 600 MiB and 30 s budget, and 100 objects add nothing measurable. HBEP-11's concern "too heavy for one user" does not hold for either shape.
+1. **Footprint is not the deciding factor for the single-user host.** Every measured host that garbage-collects uses 0.35 to 0.51 GiB and starts in 4 to 13 s on a loaded VM, inside a 600 MiB and 30 s budget, and 100 objects add nothing measurable. HBEP-11's concern "too heavy for one user" does not hold for either shape.
 2. **A host needs the garbage collector, and that is a separate component.** A bare kube-apiserver plus etcd does not delete dependents. HBEP-11's "a control plane without nodes" must say the kube-controller-manager (garbage-collector and namespace controllers; 73 MiB) is part of it. kcp has it in-process.
 3. **Both shapes keep objects across a minor upgrade** (103 of 103, same UID and creation time) and pass the full suite afterwards. The kcp step was a kcp minor (0.32.5 to 0.33.3); both versions report the same Kubernetes base (v1.36.0), so a Kubernetes minor change inside kcp is not covered. Downgrade is not tested (HBEP-11 leaves it TBD).
 4. **The spike's lean for HBEP-11's open question, for the owner and the science agent to decide:**
@@ -155,7 +157,7 @@ So k3s is "not measured: needs root (or a writable /etc/rancher/node)". It remai
 
 ## How to run
 
-Go 1.27.x on PATH, a writable scratch directory with at least 6 GB free, and this directory as the working directory.
+Go 1.27.x on PATH (the spike ran on 1.27.3), a writable scratch directory with at least 6 GB free, and this directory as the working directory.
 
 ```
 SCRATCH=<dir> scripts/run-all.sh            # fetch pinned binaries, vet, unit tests, e2e binary, harness, then envtest-bare, envtest-gc and kcp
@@ -167,7 +169,7 @@ About 10 to 25 minutes per option on a quiet VM (`envtest-bare` takes longest: i
 
 ## Provenance of what is reused
 
-Everything third-party is used unmodified; nothing is forked, so there is no `third_party/` directory. New code: the test kit, the e2e suite, the harness and the scripts.
+Everything third-party is used unmodified, except one file that is adapted: `third_party/forked/kcp/s3-embedded/main.go` from kcp's `cmd/kcp/kcp.go` (kcp-dev/kcp, Apache-2.0, v0.33.3, commit 003eb8c7649b0f204ec1bd3844e10f633f90065b), with kcp's LICENSE and a NOTES file beside it. New code: the test kit, the e2e suite, the harness and the scripts.
 
 | component | project and URL | licence | version |
 |---|---|---|---|
@@ -184,6 +186,6 @@ Everything third-party is used unmodified; nothing is forked, so there is no `th
 - `kit/`: CRDs (`crds.yaml`), the controller, kcp workspace helper.
 - `e2e/`: the suite; `main_test.go` reads `S3_KUBECONFIG`.
 - `cmd/s3bench/`: the harness.
-- `embedded/`, `scripts/build-embedded.sh`: the untested embedded-kcp scaffold.
+- `embedded/go.mod.tmpl`, `scripts/build-embedded.sh`: the untested embedded-kcp scaffold; its `main.go` is adapted from kcp and lives in `third_party/forked/kcp/s3-embedded/`.
 - `scripts/`: `fetch.sh`, `run-all.sh`.
 - `results/`: one JSON per option and the test-framework lines of each e2e log.

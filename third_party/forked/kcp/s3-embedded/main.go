@@ -1,5 +1,24 @@
 //go:build s3embedded
 
+/*
+Copyright 2021 The kcp Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+// Adapted from github.com/kcp-dev/kcp cmd/kcp/kcp.go at v0.33.3 (commit
+// 003eb8c7649b0f204ec1bd3844e10f633f90065b). See NOTES.md in the parent directory.
+
 // Command s3-embedded runs kcp as a Go library, in one process together with the
 // spike's controllers (HBEP-11: "one bundled binary for a single user"). It follows the
 // start sequence of kcp's own cmd/kcp/kcp.go at the pinned release; the only additions are

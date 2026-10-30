@@ -3,7 +3,7 @@
 # unpack them. Nothing is written outside $SCRATCH. Read-only downloads of public releases.
 set -euo pipefail
 SCRATCH=${SCRATCH:?set SCRATCH to a writable directory with at least 6 GB free}
-command -v go >/dev/null || { echo "go (1.26 or newer) must be on PATH" >&2; exit 1; }
+command -v go >/dev/null || { echo "Go 1.27.x must be on PATH" >&2; exit 1; }
 mkdir -p "$SCRATCH"/{dl,bin}
 
 fetch() { # url sha256 dest
