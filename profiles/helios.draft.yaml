@@ -215,7 +215,7 @@ facts:
     pyxis: {value: false, method: measured, source: "srun --help | grep -i container; scontrol show config: PlugStackConfig", date: 2026-10-30, note: "srun lists only --container (path to an OCI bundle) and --container-id. No pyxis options such as --container-image. PlugStackConfig is (null) and no plugstack.conf exists, so no SPANK plugins are configured. JobContainerType is (null)."}
     other_runtimes: {value: "none found: podman, docker, charliecloud, udocker, sarus, shifter", method: measured, source: "command -v <each>", date: 2026-10-30}
     apptainer_module: {value: false, method: measured, source: "find over the 6 MODULEPATH entries (depth 3) for names matching apptainer, singularity or enroot", date: 2026-10-30, note: "no hit, so Apptainer comes from the host install on the login node, not from a module. The module trees are for the login node's architecture."}
-    documentation: {value: "no container page for Helios", method: unknown, source: "docs.hpc.cyfronet.pl search index (249 pages) searched for apptainer, singularity, docker, podman, enroot, pyxis, container", date: 2026-10-30, note: "the only hit is the AlphaFold page, which says run_alphafold.sh runs a containerized version"}
+    documentation: {value: "no container page for Helios", method: unknown, source: "docs.hpc.cyfronet.pl search index (249 pages) searched for apptainer, singularity, docker, podman, enroot, pyxis, container", date: 2026-10-30, note: "the only hit is one application's page, which says the application runs containerized"}
     user_namespaces_login_node:
       value: false
       method: measured
