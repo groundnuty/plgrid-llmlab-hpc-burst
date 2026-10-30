@@ -140,31 +140,36 @@ Measured in the same run:
 Gotchas:
 - controller-runtime v0.23.1 serves metrics on `:8080` by default (`metricsserver.DefaultBindAddress`), on all interfaces, so a second provider on the same host would collide on the port. The provider sets metrics, health and pprof to `"0"`.
 - controller-runtime registers `--kubeconfig` on the global flag set, so the provider uses its own.
-- envtest runs no controller manager. `TestEnvtestHasNoGarbageCollection` shows the effect: 10 s after deletion, an object owned by a deleted owner still exists and the deleted namespace is still `Terminating`. HBEP-11's "control plane without nodes" therefore needs `kube-controller-manager` (or a bundled binary that includes it) as soon as owner references matter. The spike needed only finalizers, which work without it.
+- envtest runs no controller manager. `TestEnvtestHasNoGarbageCollection` shows the effect: 10 s after deletion, an object owned by a deleted owner still exists and the deleted namespace is still `Terminating`. This confirms HBEP-11's note that a "control plane without nodes" must also run the Kubernetes controller manager (or a bundled binary that includes it) as soon as owner references matter. The spike needed only finalizers, which work without it.
 - kcp was not tried (optional in the brief).
 
 ## What this means for the HBEPs
 
+Checked against the HBEPs on main at c1adb88 (PR #22).
+
 - **HBEP-4 (provider interface):**
-  - The core needs "find by tag" as a first-class operation with two sources (live queue, then accounting) and an explicit window.
-  - Profile fields to add: MinJobAge, whether accounting stores the job comment, the data_parser version, and the requeue default.
-  - "Plugins find their own jobs by scanning" (Risks) is answered by the job-name tag. The tag must include the object UID.
+  - It confirms three proposals now on main: final state comes from accounting (`sacct`), a job missing from `squeue` is not read as never submitted, and the plugin submits with `--no-requeue`.
+  - It adds:
+    - "find by tag" as a core operation with two sources (live queue, then accounting) and an explicit `sacct` window, since the default window starts at midnight;
+    - the tag in `--job-name`, including the object UID. This answers "Plugins find their own jobs by scanning" (Risks).
+  - Profile fields beyond the requeue default main already proposes: MinJobAge, whether accounting stores the job comment, and the data_parser version.
 - **HBEP-7:**
   - Open question 11 (submission protocol):
-    - a Lease alone is not sufficient, and neither are crossplane's annotations alone;
+    - neither a Lease alone nor crossplane's annotations alone is sufficient;
     - the tested protocol is a deterministic tag in `--job-name`, Observe by tag before every create, never "missing" after a known submission, and an in-flight window longer than the reconcile timeout;
-    - the tag mechanism answer for Slurm is the job name, not the comment.
+    - for Slurm, the tag mechanism is the job name, not the comment.
   - The requeue risk: `--no-requeue` plus "requeued means Failed" works, but the verdict must be kept in status, because Slurm 23.11's sacct JSON has no restart count.
   - What to do with a requeued job (cancel it, or let the lifecycle controller decide) is open. The spike only reports it, and deleting the Allocation cancels it.
 - **HBEP-11:**
-  - The "control plane without nodes" option works for the reconciler. It needs the controller manager for garbage collection.
+  - The "control plane without nodes" option works for the reconciler.
+  - The garbage-collection test confirms HBEP-11's note that the controller manager must run too.
   - Kill-mid-handover safety (Test plan) holds for the submit step.
 
 ## Environment
 
 - Agents VM: 6 cores, 31 GB RAM, shared with other spikes. Tests ran with `nice -n 10`.
 - Go 1.27.3; crossplane-runtime v2.4.3; crossplane apis v2.3.4; controller-runtime v0.23.1; k8s client libraries v0.35.3; envtest Kubernetes 1.35.0.
-- Load during the measured run: 1-minute load 3.24 at the start and 4.52 at the end (5-minute 6.21 and 5.33), from other agents' work; 20 GB memory available. Timing-sensitive steps had margins of at least 2 s. No test failed for a timing reason in any run during the spike (each scenario ran two or three times); the early failures were harness bugs.
+- Load during the measured run: 1-minute load 3.24 at the start and 4.52 at the end (5-minute 6.21 and 5.33), from other agents' work; 20 GB memory available. Timing-sensitive steps had margins of at least 2 s. The final test code ran once or twice per test with no timing failure; the early failures were harness bugs. That is too few runs to rule out flakiness.
 
 ## Still unknown
 
