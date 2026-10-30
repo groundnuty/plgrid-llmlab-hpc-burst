@@ -71,6 +71,12 @@ A past project ran a fleet of agents against several Slurm clusters, sharing one
 - **The inventory includes what does not match.** Provider jobs that carry the framework's tag but have no owning resource, and resources whose provider job is gone, are listed as orphans.
 - **The inventory says how fresh each fact is.** Each provider fact carries when it was last observed, so a stale view looks stale.
 - **"Guaranteed delivery" (proposed meaning):** at least once, ordered per resource, durable across restarts, resumable from a cursor, each event with a unique ID for de-duplication. A subscriber that falls behind retention receives an explicit gap marker and must re-read status (HBEP-8, HBEP-11). Nothing is dropped silently.
+- **How, from spike S8 (issue #25, PR #28) (candidate, pending this HBEP's next status change):**
+  - The log is embedded NATS JetStream with `sync_interval: always`, CloudEvents 1.0.2, and one subject per resource.
+  - **Cursors are the subscriber's own.** Each subscriber keeps a cursor (stream sequence plus last event id) in the control plane and saves it after handling. A server-side durable consumer is not enough: S8 found that a message delivered, not acknowledged and then evicted vanishes from its state with no marker.
+  - **Gaps and rewritten history are derived, not read from JetStream.** A gap is the range of sequences evicted unread, found from the sequence jump or the stream's first sequence. A cursor whose event id no longer matches the log means rewritten history: the subscriber re-reads status.
+  - **Handlers de-duplicate by event id,** because a crash replays recently handled events.
+  - **Not yet tested:** power loss or a kernel crash. S8 could not test them without root; the fsync policy differs only there.
 - **Dry run is enforced by the server.** A dry-run request never reaches a provider, whatever the client sends.
 - **Actions under an agreed spec need no approval.** The lifecycle controller (HBEP-7) cancels hedge losers, releases an old Allocation once its replacement serves, releases what over-allocation does not keep or retain, releases an Allocation when its retention policy says, and ends a deployment at its "until when" without approval, because the ModelDeployment's spec and the retention policy already agreed to them. Approvals apply to actions outside the spec. Replacement before release (HBEP-3) holds regardless of approvals while the deployment keeps its desired capacity. It does not cover shutdown at the end time, scale-down, deletion, an approved early termination or a repurpose: their Instances drain and end without a replacement, because they lower a deployment's capacity rather than keep it. Each Allocation left with no Instance then follows its retention policy.
 - **Bulk actions select by label,** with a dry run that lists every match by name. There is no pattern matching on process or job names.
@@ -95,7 +101,7 @@ A past project ran a fleet of agents against several Slurm clusters, sharing one
 - What an owner lease's expiry does. Lean: the resource becomes "orphaned", stops taking new Allocations and emits an event; release then needs the usual approval. Another identity may take the owner lease over.
 - The unit of a reservation: sessions, concurrent requests or tokens per second, and whether a booking can trigger new Allocations. Lean: concurrent sessions on a deployment for a window; future capacity is a ModelDeployment with a start time.
 - How confirm binds to a plan: a hash of the plan, or the resource versions it read. Lean: the plan carries the resource versions; confirm sends the plan's ID back.
-- Push or pull delivery for subscriptions: long-lived watch with cursor, callback with acknowledgement, or both. Retention of the durable log. Depends on HBEP-11's choice of store.
+- Push or pull delivery for subscriptions. Leaning, from spike S8 (issue #25, PR #28): a long-lived ordered watch from the subscriber's stored cursor. A callback with acknowledgement needs a re-sequencer, and cannot mark ranges that were delivered, not acknowledged and then evicted. Still open: retention per event class, and competing consumers of one subscription, which need partitioning by resource.
 - How long idempotency keys are kept, and their scope (per identity or global). Lean: per identity, at least as long as the longest operation's retries.
 - Audit retention and who may read it. Lean: as long as the grant, readable by approvers.
 - Whether names are ever reused for different content. Lean: never; a name refers to one resource for life.
@@ -164,7 +170,7 @@ The primitives replace www-2027 practices: a shared gate on a common host (slots
 | Component | Origin (project, URL) | Licence | How used (dependency, copied code, optional) |
 |---|---|---|---|
 | Kubernetes API (RBAC, server-side dry run, audit, `Lease`), on k3s or kcp | [k3s](https://github.com/k3s-io/k3s); [kcp](https://github.com/kcp-dev/kcp) | k3s Apache-2.0; kcp Apache-2.0 | Candidate host, as HBEP-11 decides: k3s for the team option, and the single-user host by spike S3 |
-| NATS JetStream | [nats-io/nats-server](https://github.com/nats-io/nats-server) | Apache-2.0 | Candidate, decided by spike S8: subscriptions as durable cursors over stream sequences |
+| NATS JetStream | [nats-io/nats-server](https://github.com/nats-io/nats-server) | Apache-2.0 | Candidate, confirmed by spike S8 (PR #28): an embedded log; subscriptions are subscriber-kept cursors over stream sequences, with a thin layer of our own for gaps and order |
 
 ### Designs and published work borrowed
 
@@ -204,6 +210,7 @@ The primitives replace www-2027 practices: a shared gate on a common host (slots
 - 2026-10-28: proposed (provisional), tracking issue #10.
 - 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
 - 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation.
+- 2026-10-30: spike S8 (PR #28) findings carried in.
 
 ## Amendments
 
