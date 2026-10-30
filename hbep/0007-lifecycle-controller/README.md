@@ -235,11 +235,12 @@ Each question below had a proposed answer taken from operating LLM serving on Sl
 - **What it writes:**
   - Allocations: it creates and deletes them;
   - Instances: it creates and deletes them, writes their phase and conditions, and writes restart generations as annotations;
-  - identity and verification records (HBEP-11);
+  - identity records, and through its verification controller the verification records (HBEP-11);
   - ModelDeployment status;
   - Events.
 - **It never calls a provider.** The Provider's controller acts on each Allocation (HBEP-4; open question 11).
 - **It serves the agent endpoint** for the allocation agents (The allocation agent).
+- **Verification** (HBEP-9) runs as its own controller inside the same manager in alpha, as HBEP-11 places it (Controllers). It writes the verification records.
 
 ### What the controller reads
 

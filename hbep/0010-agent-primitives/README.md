@@ -100,7 +100,7 @@ A past project ran a fleet of agents against several Slurm clusters, sharing one
 
 - The interface agents use: the Kubernetes API directly (HBEP-11), a framework CLI, or also a tool server for language-model agents. Lean: the API first, a CLI over it, a tool server later.
 - Which actions outside a spec are irreversible. Lean: cancelling a running Allocation before its spec or retention policy says; cancelling a pending Allocation that holds queue age, other than a hedge loser; releasing the last ready Instance of a deployment before its end; deleting usage or audit records. HBEP-7 asks the same question about its own actions.
-- Whether a repurpose under an agreed policy needs approval. A repurpose drains a serving Instance and moves its Allocation to another ModelDeployment (HBEP-7, open question 8). The same question covers the controller placing Instances on warm capacity by itself (HBEP-7, open question 14).
+- Whether a repurpose under an agreed policy needs approval. Not in alpha: HBEP-7 moves no Allocation between ModelDeployments there, and takes no action that needs approval. A repurpose drains a serving Instance and moves its Allocation to another ModelDeployment (HBEP-7, open question 8). The same question covers the controller placing Instances on warm capacity by itself (HBEP-7, open question 14).
 - Who may approve. Lean: approvers listed per namespace or per ModelDeployment, people only by default. At a grant's end, an approver approves an early termination or a scale-down. That is not an override of replacement before release, which applies only while desired capacity is kept (HBEP-3). Discussion with HBEP-7.
 - What an owner lease's expiry does. Lean: the resource becomes "orphaned", stops taking new Allocations and emits an event; release then needs the usual approval. Another identity may take the owner lease over.
 - The unit of a reservation: sessions, concurrent requests or tokens per second, and whether a booking can trigger new Allocations. Lean: concurrent sessions on a deployment for a window; future capacity is a ModelDeployment with a start time.
@@ -216,6 +216,7 @@ The primitives replace www-2027 practices: a shared gate on a common host (slots
 - 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation.
 - 2026-10-30: spike S8 (PR #28) findings carried in.
 - 2026-10-30: aligned with HBEP-11 becoming implementable: the API host row.
+- 2026-10-30: HBEP-7's alpha takes no action that needs approval and repurposes nothing; noted under the repurpose question.
 
 ## Amendments
 

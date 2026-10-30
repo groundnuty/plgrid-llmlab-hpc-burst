@@ -120,7 +120,7 @@ Problems this addresses, in general terms:
 7. **Profile provenance and probes.** **Decided:** for alpha, each fact in the untyped block keeps the drafts' envelope (value, method, source, date), and each typed value is copied from such a fact or is a framework default. The Slurm provider re-checks the JSON version on every reply. Source: spike S5 (PR #19); science-agent decision, 30 Oct 2026. **Open (blocks beta):** which other fields are re-checked by probes, how often and at what cost; decided by a spike on one batch and one managed provider.
 8. **Public and private profiles.** **Decided:** accounts, grants and credentials references are provider settings, never platform-profile data, so they never ship in this repository. The Helios, Athena and Sano profiles ship here, since their drafts are already public (PR #19); the LLMLab profile ships with alpha. Login node names and gateway addresses are kept with the credentials, so no shipped profile holds one. Source: owner decision, 28 Oct 2026, for the provider settings; science-agent decision, 30 Oct 2026, for the rest. **Not needed for alpha:** how a private cluster's profile stays local. Alpha uses only the shipped profiles.
 9. **Engine-wide data.** **Decided:** for alpha, HBEP-3 keeps the deployment-ID input table in code, with its scheme `v1`. Source: HBEP-3. **Not needed for alpha:** where engine-wide known issues and pins live beyond alpha.
-10. **A managed allocation's hard end.** **Decided:** none for alpha (HBEP-3). A rejected key sets a condition on the Provider (Managed provider in alpha); it is not a lease end. Source: HBEP-3, open question 10.
+10. **A managed allocation's hard end.** **Decided:** none for alpha (HBEP-3). A key about to expire, or a rejected key, sets a condition on the Provider (Managed provider in alpha); it is not a lease end. Source: HBEP-3, open question 10.
 11. **Overrides.** **Decided:** for alpha, a ModelDeployment overrides one profile value, the lease length: an Allocation's time limit is the partition's `max_time`, or the ModelDeployment's `leaseLimit` when that is shorter (HBEP-7). A short lease is what makes a real handover testable in hours. Source: science-agent decision, 30 Oct 2026. **Not needed for alpha:** other overrides.
 12. **The partition label.** **Decided:** for alpha, a Provider allows exactly one partition, so its `partition` label holds one value. Source: science-agent decision, 30 Oct 2026. **Open (blocks beta):** how a provider that allows several partitions is labelled: one label per partition, or one provider per partition. On the Cyfronet systems an account is tied to one resource kind, so one provider per partition may be enough. Owner discussion.
 13. **A REST job API.** **Not needed for alpha:** the transport is decided as the command line over ssh. Spike S5 (PR #19) found the slurmrestd binary on the Helios and Athena login nodes, none on Sano's, and no REST service that any center advertises; JWT is not enabled on any of the three. Asking each center stays the way to answer it, for a later transport.
@@ -290,7 +290,7 @@ A partition enters the typed list only when `hold_release` has been verified on 
 
 - The account, the grant, a credentials reference, the allowed partitions and the labels (owner decision, 28 Oct 2026).
 - In alpha a Provider allows exactly one partition (open question 12).
-- The credentials reference names a mode-600 file owned by the controller's user (HBEP-11). For a Slurm provider it is an ssh client configuration naming the login node, the user and the key file, which must be mode 600 too. For a managed provider it holds the key and the gateway's base URL.
+- The credentials reference names a mode-600 file owned by the controller's user (HBEP-11). For a Slurm provider it is an ssh client configuration naming the login node, the user and the key file, which must be mode 600 too. For a managed provider it holds the key, the gateway's base URL, and the key's expiry date when one is known.
 - The grant is recorded in alpha but not read, since billing comes after alpha.
 - There is no QoS field, and Sano's partition `gpu` requires `--qos` (spike S5, PR #19). Sano is therefore outside alpha.
 
@@ -300,7 +300,7 @@ A partition enters the typed list only when `hold_release` has been verified on 
 - **The catalog lives in the Provider's status** in alpha: one entry per model the gateway has listed, with its name, any revision it reports, its managed deployment ID (HBEP-3, Deployment ID), and whether it is listed now. An entry that leaves the listing stays, marked unlisted.
   - HBEP-3 models each catalog entry as an Allocation. Alpha keeps the entries in the Provider's status instead, because nothing in alpha starts, releases or repurposes them. Catalog entries as Allocation objects, through Crossplane's Observe-only import, come after alpha.
 - **The lifecycle controller never acts on a managed provider.** The front routes to the listed models of attached providers (HBEP-5).
-- **A rejected key** (401 or 403) sets the Provider's condition `CredentialsRejected`. That is the key-expiry warning of open question 10.
+- **Keys.** A day before the expiry date in the credentials file, the Provider gets the condition `CredentialsExpiring`. A rejected key (401 or 403) sets `CredentialsRejected`. These are the key-expiry warnings of open question 10.
 - **Not needed for alpha:** the model state that the listing does not show, error mapping, revisions and limits, and the gateway-behaviour fields. HBEP-5 configures the front for the no-byte cut and the stalls.
 
 ### Known-issues register
@@ -436,7 +436,7 @@ The Slurm provider plugin grows from www-2027's per-cluster ssh over one shared 
 | A managed gateway cuts replies that send no byte for a fixed time. | L-6.1 | A managed-gateway profile field, after alpha; HBEP-5 handles it in the front. |
 | A managed gateway stalls periodically. | L-6.2 | A managed-gateway profile field: the stall pattern. |
 | A managed gateway's shared capacity binds under load. | L-6.3 | The gateway's concurrency ceiling is profile data (readiness question 5). |
-| Gateway keys expire mid-run. | L-6.4 | A rejected key sets a condition on the Provider; it is not a lease end (HBEP-3). |
+| Gateway keys expire mid-run. | L-6.4 | A key about to expire, or rejected, sets a condition on the Provider; it is not a lease end (HBEP-3). |
 | Models go inactive unannounced, and errors for different causes look alike. | L-6.5 | The managed provider reports model state and returns a defined error, after alpha; alpha tracks the listing. |
 | A managed gateway rewrites requests. | L-6.6 | A capability flag: rewrites requests. |
 | Center-run endpoints hide their limits and revisions. | L-6.8 | A capability flag: exposes revisions and limits. |

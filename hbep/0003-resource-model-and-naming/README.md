@@ -116,10 +116,10 @@ In these stories, `helios-a`, `helios-b` and `athena-a` are names an operator ga
 - **Identity record** (HBEP-9): the inputs behind one deployment ID, which never change. Beside it, each Instance of that ID writes its own verification record, which never changes either (HBEP-11).
 - **Front:** the LLMLab-compatible API endpoint (HBEP-5). Its client key is set by the operator (HBEP-5).
 - **Control plane:** Kubernetes API custom resources plus controllers (HBEP-11). Models run in provider jobs, not pods.
-- **Hedging:** submit early, on several providers if needed; keep the first allocation to start; cancel the pending losers. The winner milestone, first to start, is provisional: HBEP-7's open question 1 proposes changing it to the first Allocation whose Instance serves. Hedging acts on pending Allocations; over-allocation acts on started ones.
+- **Hedging:** submit early, on several providers if needed; keep the first Allocation whose Instance serves; cancel the pending losers (HBEP-7, open question 1; amended 2026-10-30). Hedging acts on pending Allocations; over-allocation acts on started ones.
 - **Over-allocation:** obtain N+k Allocations for N Instances, qualify each Instance, and keep the best N. The rest are released, or kept as warm capacity, per their retention policy (HBEP-7).
 - **Qualification:** the gate an Instance passes before it is kept: an identity check (HBEP-9) plus a short benchmark against the expected performance in its platform profile. It catches broken nodes, not only slow ones (HBEP-7).
-- **Retention policy:** what happens to an Allocation that hosts no Instance. Either it is kept as warm capacity, ready to host an Instance, until a date, a grant's end or a deadline; or it is released when idle. A kept Allocation still ends at its hard end. HBEP-7's open question 13 proposes keep as the default.
+- **Retention policy:** what happens to an Allocation that hosts no Instance. Either it is kept as warm capacity, ready to host an Instance, until a date, a grant's end or a deadline; or it is released when idle. A kept Allocation still ends at its hard end. Keep is the default (HBEP-7, open question 13; amended 2026-10-30).
 - **Repurposing:** moving an Allocation to another ModelDeployment when a model's work finishes. The old Instance drains; an Instance of the new deployment starts in the same Allocation; it is verified and warmed up. An operator asks for it, often an agent that needs throughput across several models. Conversions between models are this operation (HBEP-7). Whether it needs approval is HBEP-10's question.
 - **Rollout:** replacing a ModelDeployment's Instances of an old deployment ID with Instances of the new current ID of their accelerator class, which an edit to its serving spec gives, make-before-break (open question 7).
 - **Replacement before release:** While a deployment keeps its desired capacity, the framework never releases a serving Instance before its replacement serves. That covers handovers, and the replacement of a failing Instance, while desired instances are above zero. Shutdown at the deployment's end time, scale-down, deletion, approved early termination and repurposing lower a deployment's capacity: their Instances drain and end without a replacement, and each Allocation left with no Instance follows its retention policy. Repurposing takes an Allocation from a deployment that is ending or scaling down.
@@ -155,6 +155,7 @@ In these stories, `helios-a`, `helios-b` and `athena-a` are names an operator ga
 - **Path** and **tunnel agent** (HBEP-6):
   - a path is the network route from the front to an Instance;
   - the tunnel agent is the process inside the Allocation that opens and keeps the dial-home tunnel.
+- **Allocation agent** (HBEP-7; amended 2026-10-30): the process an Allocation's job runs. It registers the Allocation over the dial-home path, pulls what the Allocation should run from the control plane, and starts, restarts and stops the Instance's processes on the lifecycle controller's word. The tunnel agent is part of it. It is not the launcher, which starts the control plane (HBEP-11).
 
 ### Resource model
 
@@ -175,7 +176,7 @@ The five kinds, in API group `hpcburst.groundnuty.github.io`, version `v1alpha1`
 - Each Instance runs inside one Allocation and is reachable through the front. The front picks the deployment and the Instance, and the Instance's own router picks a worker (HBEP-5). So the front always knows which Instance answered.
 - An Allocation can outlive its Instances. With no Instance, its retention policy keeps it as warm capacity or releases it, and an operator can repurpose it to another ModelDeployment. Alpha places one Instance per Allocation; the model allows several at once when its resources allow (open question 8).
 - At a handover a new Instance, in another Allocation, replaces the old one. The framework releases the old Instance only after the new one serves; if the new one is late, the old one drains on time and ends with its lease (drain rule, under Handover). The deployment ID stays; the new Instance has its own metadata.
-- A managed provider's catalog entry is an Allocation that the framework cannot start, restart or repurpose. In alpha it has no hard end; a key that is about to expire raises a provider-settings warning (open question 10, HBEP-4).
+- A managed provider's catalog entry is an Allocation that the framework cannot start, restart or repurpose. In alpha it has no hard end; a key that is about to expire raises a provider-settings warning (open question 10, HBEP-4). In alpha the entries are kept in their Provider's status rather than as Allocation objects, since alpha never starts, releases or repurposes them (HBEP-4; amended 2026-10-30).
 
 ### Naming levels
 
@@ -218,7 +219,7 @@ The inputs form one JSON object. Every scalar value in it is a string. Booleans 
   - `engine`: `{name, version, image_digest}`, with the digest written as `sha256:` and 64 lowercase hex characters;
   - `flags`: an object from each input flag's long name, without its leading dashes, to its value. A flag given more than once maps to an array of its values, in the order given. A value that is JSON, such as `hf-overrides`, stays the string given. `{}` when no flag is an input;
   - `env`: an object from each input environment variable's name to its value, `{}` when none;
-  - `chat_template_sha256`: the SHA-256, in lowercase hex, of the chat template's UTF-8 text. That is the serving spec's template when it gives one; otherwise the checkpoint's `chat_template.jinja`; otherwise the `chat_template` string in its `tokenizer_config.json`, taking the entry named `default` from a list of named templates; otherwise the empty string. A template the engine resolves differently shows in HBEP-9's render check at start;
+  - `chat_template_sha256`: the SHA-256, in lowercase hex, of the chat template's UTF-8 text. That is the serving spec's template when it gives one; otherwise the checkpoint's `chat_template.jinja`; otherwise the `chat_template` string in its `tokenizer_config.json`, taking the entry named `default` from a list of named templates; otherwise the empty string. A template the engine resolves differently shows in HBEP-9's render check at start, which comes after alpha (HBEP-7; amended 2026-10-30);
   - `accelerator`: `{gpu_model, cpu_arch}`, as the PlatformProfile names them for the Allocation's partition. A partition without GPUs names `none`;
   - `files`: an array of `{path, sha256}`, one entry per file of the pinned revision, sorted bytewise by path. Paths are relative to the checkpoint root and use `/`.
 - **A managed catalog entry** adds `platform`, `catalog_name`, `revision` (omitted when the platform reports none) and `"opaque": "true"`. A served object never has these keys, so the two kinds never hash the same bytes.
@@ -439,4 +440,9 @@ The resource model replaces state that www-2027 operators kept by hand: per-job 
 
 ## Amendments
 
-None.
+- **2026-10-30: the hedge winner, the retention default, the allocation agent, and managed entries in alpha.** Made with HBEP-4 becoming implementable and HBEP-7's design.
+  - Hedging keeps the first Allocation whose Instance serves, not the first to start. The owner approved this proposal of HBEP-7's open question 1 on 29 Oct 2026 (PR #14). That question said an accepted answer amends this HBEP.
+  - Keep is the default retention policy, also approved on 29 Oct 2026 (PR #14, HBEP-7's open question 13).
+  - The vocabulary gains the allocation agent, the process each Allocation's job runs (HBEP-7). Open question 9 asks that new terms come here by amendment.
+  - In alpha a managed catalog entry is kept in its Provider's status, not as an Allocation object (HBEP-4).
+  - HBEP-9's render check comes after alpha (HBEP-7); alpha verifies by the file rehash and the settings comparison.

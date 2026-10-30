@@ -86,8 +86,8 @@ A past project served models on several Slurm clusters behind its own fronts. It
 
 - Metric names and units: vLLM's Prometheus names, OpenTelemetry's conventions for generative AI, or our own? A spike maps two engines' metrics onto the Goals list.
 - How engine metrics leave the job: scraped through the dial-home tunnel, or pushed by a process in the job. Depends on HBEP-6.
-- Where "degraded" and "failing" are defined: per metric in the platform profile, or per deployment. Discussion with HBEP-4.
-- How "ending soon" is timed: one lead time per platform profile, or derived from the handover's measured start-up time (HBEP-7). Lean: from the profile, repeated at fixed steps.
+- Where "degraded" and "failing" are defined: per metric in the platform profile, or per deployment. Discussion with HBEP-4. For alpha, HBEP-7's malfunction thresholds are platform-profile values with defaults (HBEP-4, the `health` group).
+- How "ending soon" is timed: one lead time per platform profile, or derived from the handover's measured start-up time (HBEP-7). Lean: from the profile, repeated at fixed steps. For alpha, HBEP-7 emits it once, an hour before a ready Instance's drain start when no replacement is ready.
 - Whether a usage count comes from the engine's usage report only, or also from the front's own count when the engine sends none, marked as such. Lean: both, marked.
 - Retention of metrics, usage and events. Lean: usage for the life of the grant; per-instance series rolled up per deployment after a period; events as long as the audit log (HBEP-10).
 - Whether each client key can read its own usage through the front, as LLMLab users may expect. Discussion with HBEP-5.
@@ -202,6 +202,7 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation.
 - 2026-10-30: spike S8 (PR #28) findings carried in.
 - 2026-10-30: aligned with HBEP-11 becoming implementable: the API host row.
+- 2026-10-30: alpha's thresholds for failing Instances and its "ending soon" timing noted from HBEP-7.
 
 ## Amendments
 

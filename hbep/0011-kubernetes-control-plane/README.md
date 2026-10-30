@@ -118,10 +118,10 @@ Deployment options:
 | Kind | Scope | Spec holds | Status holds |
 |---|---|---|---|
 | PlatformProfile | cluster | the platform's kind (managed, batch or static) and its profile data (HBEP-4) | when its facts were last checked |
-| Provider | cluster | a PlatformProfile reference; the provider settings (account, grant, allowed partitions; HBEP-4); a credentials reference | the age of its last successful status read; conditions |
-| ModelDeployment | namespaced | the model name, the serving spec (engine flags as ordered `{name, value}` pairs, HBEP-3), the number of instances, the allowed providers, the end time and the default retention policy | the current deployment ID of each accelerator class, every ID that still has Instances, ready and desired counts, conditions |
-| Allocation | namespaced | crossplane-runtime's managed-resource fields, with `providerConfigRef` naming a Provider; the submission parameters, never edited; the assigned ModelDeployment; the retention policy | a mirror of the job ID and the submission record, for display only (they live in annotations: Ownership, records and deletion); phase, start and hard end; duplicates; conditions (S4) |
-| Instance | namespaced | the full deployment ID, its identity record and its Allocation, all immutable | the phase (HBEP-3), the name of its verification record and its verdict, conditions |
+| Provider | cluster | a PlatformProfile reference; the provider settings (account, grant, allowed partitions; HBEP-4); a credentials reference | the age of its last successful status read; for a managed provider, its catalog (HBEP-4); conditions |
+| ModelDeployment | namespaced | the model name, the serving spec (engine flags as ordered `{name, value}` pairs, HBEP-3), the number of instances, the allowed providers, the end time, the default retention policy, and the lease limit and workload (HBEP-7) | the current deployment ID of each accelerator class, every ID that still has Instances, ready and desired counts, conditions |
+| Allocation | namespaced | crossplane-runtime's managed-resource fields, with `providerConfigRef` naming a Provider; the submission parameters, never edited (HBEP-4 lists them); the assigned ModelDeployment; the retention policy | a mirror of the job ID and the submission record, for display only (they live in annotations: Ownership, records and deletion); phase, start and hard end; duplicates; conditions (S4) |
+| Instance | namespaced | the full deployment ID, its identity record, its Allocation and its launch (HBEP-7), all immutable | the phase (HBEP-3), the name of its verification record and its verdict, conditions |
 
 - **PlatformProfile schema.** HBEP-4 owns it (its open question 3). For alpha, the fields that the Slurm provider and the deployment ID read are typed. The rest of the profile is kept as an untyped block until HBEP-4 fixes the schema.
   - Per partition: the GPU model and the CPU architecture. Together they are the accelerator class, a deployment-ID input (HBEP-3).
@@ -130,6 +130,7 @@ Deployment options:
   - `inflight_window` (duration): how long an unresolved submission attempt is waited on. It must exceed the worst remote `sbatch` time, because a local timeout does not stop a remote `sbatch`.
   - `unknown_bound` (duration, S4's default 10 min): in fallback mode, how long an Unknown attempt may stay unresolved before an operator is asked.
   - From spikes S4 and S5: the time zone, the requeue default, how long a finished job stays in the queue listing, job-name rules, whether accounting keeps the job comment, and the JSON output version.
+  - Read by the lifecycle controller and the file staging, typed by HBEP-4 (amended 2026-10-30): per partition, the longest time limit, the GPUs per node, and the CPUs and memory per GPU; the staging directory; the drain window; an optional idle cap; and the health and restart thresholds. HBEP-4's Platform profile schema gives their names, types and defaults.
 - **Alpha precondition: `hold_release` is verified on the alpha platform;** otherwise S4's fallback mode runs. Spike S1 (issue #18) measured it true on 30 Oct 2026 on Helios CPU, Helios GH200 and Athena A100, with one trial per partition: the hold was honoured as `JobHeldUser`, and the same user lifted it. So Helios and Athena run hold mode. Sano is not verified, so it runs fallback mode until checked.
 - **Labels** under the group's prefix:
   - on Providers: `organization`, `platform`, `partition` and `account` (HBEP-3);
@@ -368,4 +369,10 @@ The control plane replaces the files and scripts that held www-2027's state: per
 
 ## Amendments
 
-None.
+- **2026-10-30: fields for the Slurm provider and the lifecycle controller.** Made with HBEP-4 becoming implementable and HBEP-7's design. The kinds gain:
+  - on the PlatformProfile, the typed fields that the lifecycle controller and the file staging read (HBEP-4, Platform profile schema). The fields this HBEP listed for the Slurm provider and the deployment ID are unchanged;
+  - on the ModelDeployment, `leaseLimit` and `workload` (HBEP-7);
+  - on the Instance, its immutable `launch` (HBEP-7);
+  - on a managed Provider's status, its catalog (HBEP-4).
+
+  HBEP-4 also lists the Allocation's submission parameters. Verification runs as its own controller in the lifecycle controller's manager in alpha (HBEP-7), as Controllers allows.

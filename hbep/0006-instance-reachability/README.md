@@ -78,14 +78,14 @@ Problems:
 4. **Port forwards.** Are they a supported path, or only an operator's debugging tool? If supported, with which owner and teardown? Owner decision.
 5. **Multi-node instances.** Candidate: only the entry rank dials home. Pooling workers across Instances is not part of this design (HBEP-3, open question 11), so no traffic between Instances needs a path.
 6. **Heartbeats.** Interval and miss count, a trade of detection time against connections and log volume. Measurement.
-7. **Credential.** Its format, its lifetime against the lease length, and renewal over the tunnel. Decided with HBEP-9.
+7. **Credential.** Its format, its lifetime against the lease length, and renewal over the tunnel. Decided with HBEP-9. For alpha, HBEP-7 generates a random 256-bit token per Allocation, valid for the Allocation's life, placed on the platform in a mode-600 file (HBEP-4).
 8. **A front behind NAT,** as in a single-user setup: does it need a rendezvous relay? Decided for alpha by HBEP-11 (its open question 8): no relay. The alpha host is reached directly on the dial-home port, or through ssh on port 22 with a restricted key. A host reachable by neither is out of alpha. A relay for other setups stays open.
 9. **Center consent.** Ask Cyfronet, and each other center, whether outbound tunnels from compute nodes are acceptable use. Owner.
 10. **Compute-node reachability.** Partly answered by spike S1's step 0 (issue #18): outbound 443 works on Helios CPU, Helios GH200 and Athena, and compute-node Python is 3.9 on all three. Still unknown: Sano, inbound reachability, and whether a compute-node listener can be reached from the login node. Whether the tunnel agent must run without a container runtime is HBEP-4's open question 15.
 
 ## Design details
 
-**Dial home** (decided). An instance's launcher starts a tunnel agent inside the allocation. The agent opens an outbound connection to the front, presents the allocation's credential and registers the instance. The instance owns the tunnel: it starts with the instance and ends with it.
+**Dial home** (decided). The allocation agent that the Allocation's job runs (HBEP-7) starts the tunnel agent inside the allocation; the tunnel agent is part of it. The allocation agent's own connection to the control-plane host, which carries what the Allocation should run and its reports, belongs to the Allocation; the serving tunnel belongs to the Instance. The tunnel agent opens an outbound connection to the front, presents the allocation's credential and registers the instance. The instance owns the tunnel: it starts with the instance and ends with it.
 
 **Local listeners** (proposed; follows from the Goals). The engine's and router's HTTP listeners bind loopback or a Unix socket, on a port the operating system chooses, and report it to the agent; clients reach them through the agent. Rank traffic between the nodes of a multi-node instance is the engine's own and stays unauthenticated by default, a known limitation (Risks). Nothing is computed from job IDs or indices.
 
@@ -194,6 +194,7 @@ Dial home replaces www-2027's central relays and forward watchdogs, which kept h
 - 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation; spike S5 facts carried in (HBEP-4, HBEP-6, HBEP-7 only).
 - 2026-10-30: spike S1 step 0 (issue #18) carried in: outbound 443 from compute nodes.
 - 2026-10-30: open question 8 decided for alpha by HBEP-11: the front is reached directly or through ssh on port 22.
+- 2026-10-30: the allocation agent (HBEP-7) starts the tunnel agent and owns the Allocation's control connection; HBEP-7's alpha credential noted under open question 7.
 
 ## Amendments
 

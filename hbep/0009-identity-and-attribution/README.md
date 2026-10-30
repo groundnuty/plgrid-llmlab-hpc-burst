@@ -83,7 +83,7 @@ A past project served one set of models across several clusters and a managed ga
 
 - Declared or resolved values: HBEP-3 decides its open question 1 for alpha. Scheme `v1` hashes the declared spec with the accelerator class, so one spec on two GPU types gives two deployment IDs, and each Instance's resolved settings are recorded beside the ID. Still open here: whether to refuse "auto" for identity-relevant settings. Verification works either way: it compares the Instance's reported resolved settings with the record.
 - Whether batch-shaping settings (maximum sequences, prefill budget) enter the record. They can change numerics slightly and are often tuned. A measurement on two settings of one deployment decides.
-- **Which checks verification runs at start.**
+- **Which checks verification runs at start.** For alpha, HBEP-7 runs the file rehash and the settings comparison. The engine version, the image digest and the context length must be reported there, and the render check below comes after alpha.
   - **File hashes, from spike S7 (issue #30, PR #33) (candidate):**
     - The record holds one SHA-256 for every file of the pinned revision (HBEP-3), the configuration, tokenizer and template included.
     - **Rehash at every start,** of the files present, each against its entry. Measured on Helios x86 CPU nodes only: 167 GB took 46–77 s, inside a 5-minute budget set beforehand. Still due: Helios GH200, Athena A100 and Sano (CephFS).
@@ -194,6 +194,7 @@ Verification grows from www-2027's endpoint check, run on each new endpoint (hea
 - 2026-10-30: spike S7 (PR #33) carried in: per-file SHA-256, rehash at every start.
 - 2026-10-30: aligned with HBEP-3 and HBEP-11 becoming implementable: a changed spec rolls out a new ID, and `v1` hashes declared settings and the accelerator class, with resolved settings recorded beside them.
 - 2026-10-30: the record's fields point to HBEP-3's `v1` object (every file of the pinned revision; local patches only through the image digest); verification results are retained records of their own.
+- 2026-10-30: the alpha checks at start (file rehash and settings comparison) noted from HBEP-7.
 
 ## Amendments
 
