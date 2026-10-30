@@ -218,12 +218,24 @@ The inputs form one JSON object. Every scalar value in it is a string. Booleans 
   - `engine`: `{name, version, image_digest}`, with the digest written as `sha256:` and 64 lowercase hex characters;
   - `flags`: an object from each input flag's long name, without its leading dashes, to its value. A flag given more than once maps to an array of its values, in the order given. A value that is JSON, such as `hf-overrides`, stays the string given. `{}` when no flag is an input;
   - `env`: an object from each input environment variable's name to its value, `{}` when none;
-  - `chat_template_sha256`: the SHA-256, in lowercase hex, of the chat template's UTF-8 text. That is the serving spec's template when it gives one; otherwise the checkpoint's `chat_template.jinja`; otherwise the `chat_template` string in its `tokenizer_config.json`, taking the entry named `default` from a list of named templates; otherwise the empty string. A template the engine resolves differently shows in HBEP-9's render check at start;
+  - `chat_template_sha256`: the SHA-256, in lowercase hex, of the chat template's UTF-8 text. It hashes the result of this lookup chain, which is not necessarily the template the engine serves: the serving spec's template when it gives one; otherwise the checkpoint's `chat_template.jinja`; otherwise its legacy `chat_template.json`; otherwise the `chat_template` string in its `tokenizer_config.json`, taking the entry named `default` from a list of named templates; otherwise empty content, so the field is the SHA-256 of zero bytes (`e3b0c442…`) and never the literal "". A list of named templates with no `default` entry is refused: the operator names the template in the spec. The engine may still serve a template when the chain gives empty content: vLLM v0.32.0 also falls back to built-in templates by model type (`vllm/renderers/hf.py`). The ID stays sound, because `files` and the image digest cover both sources. HBEP-9's render check compares a rendered conversation with the engine's resolved template, and does not fail only because the chain gave empty content;
   - `accelerator`: `{gpu_model, cpu_arch}`, as the PlatformProfile names them for the Allocation's partition. A partition without GPUs names `none`;
   - `files`: an array of `{path, sha256}`, one entry per file of the pinned revision, sorted bytewise by path. Paths are relative to the checkpoint root and use `/`.
 - **A managed catalog entry** adds `platform`, `catalog_name`, `revision` (omitted when the platform reports none) and `"opaque": "true"`. A served object never has these keys, so the two kinds never hash the same bytes.
-- **How the serving spec gives flags.** The ModelDeployment lists engine flags as `{name, value}` pairs, in order, with `name` the long flag name without its leading dashes (HBEP-11). No command line is parsed, so a short alias such as `-tp` is refused. A boolean flag is given under its positive name, with `"true"` or `"false"`; the launcher passes `"false"` as vLLM's `--no-<name>`. The framework passes the checkpoint, its revision and the chat template itself, from the keys above, so the spec does not list `model`, `revision` or `chat-template`.
-- **Serialisation and hash.** The object is serialised by the JSON Canonicalization Scheme (RFC 8785, JCS): keys sorted, no whitespace, fixed escapes. Every key is ASCII and every scalar a string, so JCS gives the same bytes as sorted-key JSON without whitespace. The ID is the SHA-256 of those UTF-8 bytes, in lowercase hex. The name uses its first 12 characters; the identity record keeps all 64.
+- **How the serving spec gives flags.** The ModelDeployment lists engine flags as `{name, value}` pairs, in order, with `name` the long flag name without its leading dashes (HBEP-11). No command line is parsed, but the engine's parser accepts other spellings of a flag, so the spec allows only one. A name is checked in this order:
+  1. Underscores are normalised to dashes, if the engine's parser treats the two spellings as one flag (vLLM v0.32.0 does, in `vllm/utils/argparse_utils.py`; the library cites the line); otherwise a name with an underscore is refused.
+  2. The normalised name must match `[a-z0-9][a-z0-9-]*`.
+  3. It must be either the full long name of a flag the engine version defines, or an unknown name, which counts as an input.
+
+  These are refused:
+  - known short aliases (`tp`, `pp`, `dp` and any other the engine version defines);
+  - any proper prefix of a known long name, since vLLM's parser resolves abbreviations (argparse's `allow_abbrev`), so `api-k` would reach `--api-key`;
+  - dotted sub-keys (`X.k`), since the parser folds them into a JSON value; give the JSON value under the long name;
+  - `no-<name>` for any boolean flag the engine defines (vLLM v0.32.0 adds one for every boolean); booleans use their positive name with `"true"` or `"false"`.
+
+  So for the flags the engine version defines, two spellings of one setting never give two IDs, and a refused flag cannot pass under another spelling. Env names must match `[A-Z_][A-Z0-9_]*`.
+- **What admission checks** (HBEP-11). A flag name as written must match `[a-z0-9][a-z0-9_-]*`, and refusals compare names after replacing `_` with `-`, so `api_key` is refused as `api-key` is. Admission refuses the credential names, the aliases, `config`, `no-` forms and dotted sub-keys. The prefix rule needs the engine's flag list, so the library applies it; admission applies it to the refused names. A boolean flag is given under its positive name, with `"true"` or `"false"`; the launcher passes `"false"` as vLLM's `--no-<name>`. The framework passes the checkpoint, its revision and the chat template itself, from the keys above, so the spec does not list `model`, `revision` or `chat-template`.
+- **Serialisation and hash.** The object is serialised by the JSON Canonicalization Scheme (RFC 8785, JCS): keys sorted, no whitespace, and JCS's string rules. Non-ASCII characters are written as literal UTF-8, and only `"`, `\` and U+0000–U+001F are escapes (RFC 8785 §3.2.2.2). Every key is ASCII (the fixed keys, and flag and env names by the rules above), but values may hold any Unicode, so builders use a JCS implementation. Sorted-key JSON without whitespace equals JCS only if it writes non-ASCII as UTF-8, as Python's `json.dumps` does with `ensure_ascii=False`. The ID is the SHA-256 of those UTF-8 bytes, in lowercase hex. The name uses its first 12 characters; the identity record keeps all 64.
   - "Defaults made explicit" means the API schema's defaults. A field left out and the same field set to its schema default give one ID.
   - The engine's own defaults are not filled in. The engine reports them as resolved settings.
 - **Worked example: the first golden vector.** A served deployment of `example-org/example-1b` at a fixed commit, on vLLM 0.32.0, with two input flags and no input environment variable, on a GH200 (`aarch64`) partition, with two files. The template, image and file hashes are placeholders: one digit repeated 64 times. The canonical bytes were written by hand and hashed with `sha256sum`, outside any code of ours:
@@ -266,7 +278,13 @@ The inputs form one JSON object. Every scalar value in it is a string. Booleans 
   | `served-model-name` | not an input | transport: the front maps model names (HBEP-5) |
   | `download-dir`, `distributed-executor-backend`, `CUDA_VISIBLE_DEVICES`, `VLLM_CACHE_ROOT`, `HF_HOME` | not an input | placement: paths, devices and how workers start |
   | `log-level`, `disable-log-stats`, `enable-log-requests`, `VLLM_LOGGING_LEVEL` | not an input | logging: changes no output |
-  | `api-key`, `hf-token`, `HF_TOKEN` | never | keys (Not inputs). A key is never written in the spec; it is referenced (HBEP-11) |
+  | `api-key`, `hf-token`, `HF_TOKEN`, `VLLM_API_KEY`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | never | credentials (Not inputs). A credential is never written in the spec; it is referenced (HBEP-11). vLLM v0.32.0 reads the last three from the environment (`vllm/envs.py`) |
+  | `config` | refused | it reads further options from a file, whose content the ID would not see; give each option as its own flag |
+  | `lora-modules` | refused in alpha | it names other checkpoints without a pinned revision; a pinned form is for beta |
+
+  **References to other checkpoints inside input values** carry the same risk as an unpinned checkpoint (L-8.3). For alpha:
+  - a `tokenizer` other than the checkpoint's needs `tokenizer-revision` as a full commit id, or it is refused;
+  - a `speculative-config` that names a draft model is refused (a pinned form is for beta).
 
 - **Display form.** Names and labels use the first 12 lowercase hex characters of the hash. The full 64-character hash is kept in the identity record and in each Instance's spec. A Kubernetes label value holds at most 63 characters, so only the display form fits in a label.
 - **Why 12 hex characters are enough.** They carry 48 bits. By the birthday bound, the chance that any two of n IDs share a display form is about n²/2⁴⁹.
@@ -306,9 +324,9 @@ From spike S4 (PR #32).
 
 ### Test plan
 
-- **Golden vectors.** Fixed inputs and their expected values, written once and checked into the repository. They are never regenerated by the code under test, since an expectation computed by the same canonicaliser or hash helper proves nothing. Each is computed as the worked example is: canonical bytes written by hand, hashed by `sha256sum`.
+- **Golden vectors.** Fixed inputs and their expected values, written once and checked into the repository. They are never regenerated by the code under test, since an expectation computed by the same canonicaliser or hash helper proves nothing. Each object is written by hand. Its canonical bytes come from an independent RFC 8785 implementation and are checked into the repository as the authoritative file. A second, independent JCS implementation must produce the same bytes, and `sha256sum` hashes the file.
   - The first is the worked example under Deployment ID.
-  - Others cover a catalog entry, a repeated flag (an array), a boolean set to `"false"`, a JSON-valued flag, a non-empty `env`, and a template taken from `tokenizer_config.json`.
+  - Others cover a catalog entry, a repeated flag (an array), a boolean set to `"false"`, a JSON-valued flag, a non-empty `env`, a template taken from `tokenizer_config.json`, and a value with non-ASCII characters (literal UTF-8 under JCS).
   - Job tags for given namespace, name and UID strings, including a name longer than 40 characters.
 - The same spec with fields in a different order gives the same ID. A field left out and the same field set to its schema default give the same ID.
 - Changing each input changes the ID, including one file's SHA-256 in the per-file list, the accelerator class, and an engine flag the `v1` table does not list. Changing each non-input (job ID, node, URL, lease end, instance count, an Instance's key, a Hub token, and each flag the table marks as not an input) does not.
@@ -439,4 +457,6 @@ The resource model replaces state that www-2027 operators kept by hand: per-job 
 
 ## Amendments
 
-None.
+- **2026-10-30: flag spellings, credentials and file references in `v1`.** Found by the reviews of the deployment-ID library (PR #46), from vLLM v0.32.0's source: the `never` list gains vLLM's credential environment variables; `config` and, for alpha, `lora-modules` are refused; abbreviations, dotted sub-keys and `no-` forms are refused; Golden vectors are produced by independent JCS implementations.
+- **The scheme stays `v1`.** These two amendments change hashing rules, which a new scheme version would normally mark (Compatibility and upgrades). No `v1` ID had been issued when they were made, because the library (PR #46) was not merged and no deployment existed, so the scheme stays `v1` and the worked example's hash is unchanged.
+- **2026-10-30: names and templates in `v1`.** Decided while building the deployment-ID library (#39, PR #46): flag and env names have ASCII charsets, enforced; known short aliases are refused; underscores normalise to dashes only where the engine treats them as one flag; an absent template hashes as empty content; a template list without `default` is refused.
