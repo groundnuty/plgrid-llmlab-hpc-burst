@@ -87,7 +87,7 @@ Deployment options:
 - **The API server is down.** The front keeps serving from its last routing table, marked stale (HBEP-8). Running jobs keep running; Allocations are provider leases with hard ends, and nothing in them depends on the control plane being up.
 - **A controller is up but stuck.** Each status carries the generation it last reconciled and when. A stale value raises an event; a leader `Lease` shows which copy is acting.
 - **The control plane's view and the provider disagree,** for example a job that the controller never recorded. On start, controllers list provider jobs that carry the framework's tag and match them to Allocations. Unmatched jobs are reported as orphans and never cancelled without approval.
-- **Too heavy for one user.** Measured by S3 for the assembled host: 358 MiB idle and 391 MiB with 100 objects, ready in 3.5 to 4.2 s, against a budget of 600 MiB, 800 MiB and 30 s. S3 measured on a loaded 6-core VM, not on the 2 vCPU, 4 GiB budget VM, so start times there are checked at alpha (Graduation criteria).
+- **Too heavy for one user.** Measured by S3 for k3s, the single-user host: 363 MiB idle and 407 MiB with 100 objects, ready in 10.5 s cold and 6.0 s warm, against a budget of 600 MiB, 800 MiB and 30 s. S3 measured on a loaded 6-core VM, not on the 2 vCPU, 4 GiB budget VM, so start times there are checked at alpha (Graduation criteria).
 - **A host that serves the API but does not garbage-collect.** A bare API server with etcd is ready and answers, yet deletes no dependents (spikes S3 and S4). Every host runs the garbage collector, and a probe checks that it works (Operational readiness).
 - **Agents bypass the API** and act on providers directly, outside the inventory and the audit. Mitigation: only the controllers can read the provider credentials; agents act through the API.
 - **Kubernetes conventions mislead.** Users expect a deployment to own pods and to restart them. Kinds and docs say plainly that Instances live in provider jobs.
@@ -97,7 +97,7 @@ Deployment options:
 ### Open questions
 
 1. **The API group and the kinds' names.** Decided: by the owner, 30 Oct 2026. Group `hpcburst.groundnuty.github.io`, version `v1alpha1`, and the kinds Provider, PlatformProfile, ModelDeployment, Allocation and Instance, as HBEP-3 names them.
-2. **The single-user host.** Decided: for alpha, by a rule that spike S3's fixed PR (#36) settles (Design details, Single-user host). k3s as a plain user is preferred if it passes S3's suite and budget with no system change. Otherwise the assembled upstream stack is the alpha host. kcp is the fallback if one process with no root is a hard requirement and k3s fails. Nothing else in this HBEP or in HBEP-3 depends on which one it is.
+2. **The single-user host.** Decided (amended 2026-10-30, after S3's fix, PR #36): k3s as a plain user (`server --rootless --disable-agent`, SQLite). It passed S3's suite and budget with no system change. The assembled upstream stack stays the alternative, and kcp the fallback. Nothing else in this HBEP or in HBEP-3 depends on which one it is.
 3. **Where controllers run in the team option:** as pods on the cluster, or on a host that holds the provider credentials. Not needed for alpha: alpha is single-user, and its controllers run on the one host.
 4. **The store for HBEP-10's durable event log, for usage records and for metrics.** Not needed for alpha: status conditions are the level truth, and Kubernetes Events a best-effort mirror. The candidate for the event log is embedded NATS JetStream, outside the API store (spike S8, PR #28; HBEP-10). Usage records and metrics are HBEP-8's.
 5. **How provider credentials are held.** Decided: for alpha, they are referenced, not stored. A Provider names a mode-600 file on the host, or a Secret in the team option. HBEP-1's content rules apply. Encryption at rest for the team option's Secrets is decided with question 3.
@@ -188,15 +188,21 @@ For alpha, no webhook server runs.
 
 ### Single-user host
 
-Decided for alpha, by a rule that S3's fixed PR (#36) settles:
-- **Preferred: k3s with SQLite, run as a plain user.** It is chosen if S3's fix shows it passes the same e2e suite and budget with no system change. It is then the same software as the team option, in one process with the garbage collector built in.
-- **Otherwise, the alpha host: the assembled upstream stack.**
+Decided for alpha (amended 2026-10-30, after S3's fix, PR #36):
+- **The alpha host: k3s with SQLite, run as a plain user.**
+  - It runs as `k3s server --rootless --disable-agent`, with no root and no system change. It is the same software as the team option, in one process with the garbage collector built in.
+  - S3 measured it at 363 MiB idle and 407 MiB with 100 objects, ready in 10.5 s cold and 6.0 s warm. All 11 e2e tests passed, the cascades included. A Kubernetes minor upgrade (1.35.9 to 1.36.5) kept all 103 objects.
+  - Caveats:
+    - k3s labels `--rootless` experimental. It works here because `--disable-agent` skips the user-namespace setup.
+    - The components S3 disabled stay disabled: the scheduler, cloud controller manager, helm controller, kube-proxy, network policy controller and packaged add-ons (`spikes/s3/README.md`, k3s section). RSS with k3s's default components was not measured and would be higher.
+    - On a machine that already runs another k3s, the launcher isolates its config file, registry file (`--private-registry`), data directory and ports. HBEP-11's launcher issue, #41, does this.
+- **The alternative: the assembled upstream stack.** It is kept if k3s's rootless mode breaks in a later release.
   - Three processes: kube-apiserver, etcd, and kube-controller-manager limited to its garbage-collector and namespace controllers (`--controllers=garbage-collector-controller,namespace-controller`, as S3 ran it).
   - All three are version-pinned and started by our launcher, as a plain user.
-  - S3 measured it at 358 MiB idle and 391 MiB with 100 objects, ready in 3.5 to 4.2 s. A minor upgrade (1.35.0 to 1.36.2) kept all 103 objects with their UIDs.
-- **Fallback: kcp,** if one process with no root becomes a hard requirement and k3s fails. S3 measured its release binary at 466 to 519 MiB, ready in 9 to 13 s, and its upgrade kept every object. S3 did not check Leases, Events, webhooks, `ControllerRevision` or ValidatingAdmissionPolicy on kcp, and a kcp workspace serves fewer built-in APIs, so those are checked first if it is chosen.
+  - S3's final run measured it at 365 MiB idle and 386 MiB with 100 objects, ready in 3.9 s cold and 3.0 s warm. A minor upgrade (1.35.0 to 1.36.2) kept all 103 objects with their UIDs.
+- **Fallback: kcp,** if one process with no root becomes a hard requirement and k3s fails. S3's final run measured its release binary at 478 to 500 MiB, ready in 13.9 s cold and 8.8 s warm, and its upgrade kept every object. S3 did not check Leases, Events, webhooks, `ControllerRevision` or ValidatingAdmissionPolicy on kcp, and a kcp workspace serves fewer built-in APIs, so those are checked first if it is chosen.
 - **The garbage collector is required on any host.** S3 and S4 both showed that a bare API server with etcd, as envtest runs it, deletes no dependents.
-- **Nothing else depends on the choice.** Controllers, CRDs, admission policies and the front reach the Kubernetes API through a kubeconfig. Only the launcher knows which host runs.
+- **Little else depends on the choice.** Controllers, CRDs, admission policies and the front reach the Kubernetes API through a kubeconfig. Only the launcher knows which host runs, and only it handles the store-full case, which differs per host (Operational readiness 5).
 
 **The launcher** is our own. It:
 - verifies the pinned host binaries against their checksums, recorded in `build/dependencies.yaml` (HBEP-15), and starts them;
@@ -226,7 +232,7 @@ Not in alpha. Status conditions are the level truth, and Kubernetes Events are a
 
 ### Test plan
 
-Against the single-user host S3 picks, and, for beta, the team option:
+Against the single-user host (k3s as a plain user) and, for beta, the team option:
 - Kill the lifecycle controller mid-handover: on restart it continues, and no second job is submitted.
 - Delete a ModelDeployment: its Instances drain, no replacement is submitted, its pending Allocations are cancelled, and each started Allocation is released or kept as its retention policy says. A released Allocation's provider job is cancelled before its object disappears.
 - **Drain finalizer.** Delete a ModelDeployment with a ready Instance: the Instance stays until it is `ended`, and only then goes.
@@ -246,7 +252,7 @@ Against the single-user host S3 picks, and, for beta, the team option:
 - **Credentials.** A Provider whose credentials file is readable by others: refused with a condition, and no provider call is made.
 - **Front reachability.** The launcher refuses to start with no front address or dial-home mode. An Instance whose tunnel cannot reach the front fails at start, and its Provider carries a condition.
 - **Upgrade and downgrade.** Upgrade the host one minor version with objects present: every object is kept with its UID. Downgrade by restoring the backup with the earlier binaries: the objects from before the upgrade are back.
-- **Store full.** Fill the store to its quota: writes are refused, no controller submits a new job, and the launcher's health reports it.
+- **Store full.** Fill the store: on k3s, a size-limited filesystem holding its data directory; on the assembled stack, etcd's quota. Writes are refused, no controller submits a new job, and the launcher's health reports the write failures (or etcd's alarm).
 
 S3 exercised validation, watches, conflicts, cascades and finalizers. Leases, Events, RBAC, the audit log, the deletion guard and resumption after compaction are first tested here.
 
@@ -271,7 +277,7 @@ S3 exercised validation, watches, conflicts, cascades and finalizers. Leases, Ev
 ### Graduation criteria
 
 - **Alpha:**
-  - the single-user host that S3 picks serves the five kinds at `v1alpha1`;
+  - the single-user host (k3s as a plain user) serves the five kinds at `v1alpha1`;
   - the alpha host passes the front-reachability check (open question 8), and the alpha platform has `hold_release` verified, or runs fallback mode;
   - the Test plan passes on it with one batch provider;
   - the host starts within S3's budget on a 2 vCPU, 4 GiB VM.
@@ -285,8 +291,8 @@ S3 exercised validation, watches, conflicts, cascades and finalizers. Leases, Ev
 
 ## Operational readiness
 
-1. **Working:** the host's `/readyz` answers (for the assembled stack also the controller manager's `/healthz`). Each provider controller's `Lease` is current, and each resource's status shows a recent reconcile. End to end, the launcher deletes a probe owner and its dependent is gone within a minute, which shows the garbage collector works. A status older than its controller's resync period, or a probe dependent that stays, says it is not working.
-2. **Restart:** controllers re-list resources and provider jobs, and continue from observed state. Nothing is held only in memory. The host restarts from its data directory, ready in 3.5 s on the assembled stack (S3).
+1. **Working:** the host's `/readyz` answers, and so does the controller manager's `/healthz`, as S3 checked on k3s and on the assembled stack. Each provider controller's `Lease` is current, and each resource's status shows a recent reconcile. End to end, the launcher deletes a probe owner and its dependent is gone within a minute, which shows the garbage collector works. A status older than its controller's resync period, or a probe dependent that stays, says it is not working.
+2. **Restart:** controllers re-list resources and provider jobs, and continue from observed state. Nothing is held only in memory. The host restarts from its data directory, ready in 6.0 s warm on k3s (S3).
 3. **Silent failure:**
    - a controller that holds its `Lease` but reconciles nothing. Reconcile times in status show it.
    - a host that is ready but does not garbage-collect. The probe in item 1 shows it.
@@ -295,15 +301,15 @@ S3 exercised validation, watches, conflicts, cascades and finalizers. Leases, Ev
 5. **Capacity:** the API store holds tens to hundreds of objects, since bulk data stays out. In S3, 100 objects added no measurable memory.
    - **Storage full.** etcd raises its NOSPACE alarm at its backend quota, and then accepts only reads and deletes ([etcd maintenance guide](https://github.com/etcd-io/website/blob/main/content/en/docs/v3.6/op-guide/maintenance.md), accessed 2026-10-30). With SQLite, a full disk stops writes.
    - Either way, controllers submit nothing new, because no submission starts without a recorded attempt (S4). Running jobs keep running to their hard ends.
-   - The launcher's health reports the alarm. The host's disk is its own (Placement).
-6. **Idle cost:** one small host, or about 0.4 GiB of memory on the assembled stack (S3). No grant hours and no provider connections when nothing is deployed.
+   - The launcher's health reports the write failures on k3s, or the alarm on etcd. The host's disk is its own (Placement).
+6. **Idle cost:** one small host, or about 0.36 GiB of memory on k3s (S3). No grant hours and no provider connections when nothing is deployed.
 7. **Rollback:** stopping the control plane leaves provider jobs running until their hard ends, and the front serving from its last table. Removing the framework needs releasing every Allocation first, with approval, and then removing the CRD-deletion policy.
 
 ## Drawbacks
 
 - Kubernetes is a large dependency for a framework whose compute runs elsewhere.
 - Users unfamiliar with Kubernetes face its concepts even in the single-user option.
-- If S3 picks the assembled stack, we own its packaging: certificates, tokens, and flags that change across minor versions.
+- k3s's `--rootless` mode is experimental upstream; a later release could break the single-user host. The assembled stack stays as the alternative; if we ever fall back to it, we own its packaging: certificates, tokens, and flags that change across minor versions.
 
 ## Alternatives
 
@@ -329,8 +335,8 @@ The control plane replaces the files and scripts that held www-2027's state: per
 
 | Component | Origin (project, URL) | Licence | How used (dependency, copied code, optional) |
 |---|---|---|---|
-| kube-apiserver, etcd, kube-controller-manager | [kubernetes/kubernetes](https://github.com/kubernetes/kubernetes); [etcd-io/etcd](https://github.com/etcd-io/etcd) | Apache-2.0 | Dependency for the single-user host unless k3s passes S3's fix (open question 2): pinned binaries that the launcher starts. The controller manager runs only its garbage-collector and namespace controllers |
-| k3s | [k3s-io/k3s](https://github.com/k3s-io/k3s) | Apache-2.0 | Dependency: the team option, and the preferred single-user host if S3's fix shows it runs as a plain user |
+| kube-apiserver, etcd, kube-controller-manager | [kubernetes/kubernetes](https://github.com/kubernetes/kubernetes); [etcd-io/etcd](https://github.com/etcd-io/etcd) | Apache-2.0 | Alternative single-user host (k3s is the host, open question 2): pinned binaries the launcher would start. The controller manager runs only its garbage-collector and namespace controllers |
+| k3s | [k3s-io/k3s](https://github.com/k3s-io/k3s) | Apache-2.0 | Dependency: the team option, and the single-user host as a plain user (S3, PR #36) |
 | kcp | [kcp-dev/kcp](https://github.com/kcp-dev/kcp) | Apache-2.0 | Fallback single-user host (open question 2) |
 | controller-runtime | [kubernetes-sigs/controller-runtime](https://github.com/kubernetes-sigs/controller-runtime) | Apache-2.0 | Dependency: our controllers, their work queues and leader election; used by spikes S3 and S4 |
 | crossplane-runtime | [crossplane/crossplane-runtime](https://github.com/crossplane/crossplane-runtime) | Apache-2.0 | Dependency under the Slurm provider (HBEP-4; spike S4): the Allocation's managed-resource fields and reconciler |
@@ -343,7 +349,7 @@ The control plane replaces the files and scripts that held www-2027's state: per
 | An owner that owns its replicas; an immutable snapshot of a template as a `ControllerRevision` | Kubernetes ReplicaSet and StatefulSet history | A ModelDeployment owns its Instances; identity records |
 | A config object that managed resources reference for credentials and settings | Crossplane's `ProviderConfig` ([crossplane/crossplane](https://github.com/crossplane/crossplane)) | An Allocation's `providerConfigRef` names our Provider |
 | Admission rules in CEL, without a webhook server | Kubernetes ValidatingAdmissionPolicy ([documentation](https://kubernetes.io/docs/reference/access-authn-authz/validating-admission-policy/); [its source](https://github.com/kubernetes/website/blob/main/content/en/docs/reference/access-authn-authz/validating-admission-policy.md), accessed 2026-10-30) | The CRD-deletion guard |
-| An API server and etcd started as plain processes, without nodes | controller-runtime's envtest, and the harness of spike S3 | The single-user launcher, with the controller manager added |
+| An API server and etcd started as plain processes, without nodes | controller-runtime's envtest, and the harness of spike S3 | The alternative single-user host (the assembled stack), with the controller manager added; the alpha launcher runs k3s |
 
 ### Field lessons answered
 
@@ -368,4 +374,4 @@ The control plane replaces the files and scripts that held www-2027's state: per
 
 ## Amendments
 
-None.
+- **2026-10-30: single-user host settled.** Spike S3's fix (PR #36) showed that k3s runs as a plain user (`server --rootless --disable-agent`, SQLite) with no system change, and passes the suite and budget. By the rule this HBEP set, k3s is the single-user host. The assembled upstream stack stays as the alternative.
