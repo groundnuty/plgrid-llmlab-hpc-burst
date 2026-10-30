@@ -20,8 +20,8 @@
 # TestVerifyGeneratedCatchesDrift is not run: it fails on every mutant by design.
 #
 # It takes the same environment as hack/check.sh (HPCBURST_TOOLS_CACHE,
-# HPCBURST_TOOLS_BIN for the Kubernetes binaries) and runs about 25 control
-# planes one after the other, a few minutes in all. The test binary is compiled
+# HPCBURST_TOOLS_BIN for the Kubernetes binaries) and runs about 40 control
+# planes one after the other, about ten minutes in all. The test binary is compiled
 # once. HPCBURST_BUILD_LOCK, when set, names a lock file (the shared Go build
 # lock) that the two compiles take; the runs themselves do not need it. Run it
 # under nice. It uses the port block 29200-29219 like the e2e suite, so it must
@@ -40,25 +40,38 @@ table=$(cat <<'TABLE'
 allocations:$.spec#0|^TestAllocationNamesAProvider$
 allocations:$.spec#1|^TestAllocationNamesAProvider$
 allocations:$.spec#2|^TestAllocationProviderIsImmutable$
-allocations:$.spec.forProvider#0|^TestAllocationSubmissionParametersAreImmutable$
+allocations:$.spec.forProvider#0|^TestAllocationSubmissionParametersAreImmutable$|^TestAllocationKindOfLeaseIsImmutable$
+allocations:$.spec.forProvider#1|^TestAllocationIsABatchJobOrACatalogEntry$
+allocations:$.spec.managementPolicies#0|^TestAllocationManagementPolicies$
+allocations:$.spec.managementPolicies#1|^TestAllocationManagementPolicies$
 allocations:$.spec.retentionPolicy#0|^TestAllocationRetentionPolicyRule$
+allocations:$.spec.retentionPolicy#1|^TestAllocationRetentionUntilGoesWithKeep$
 instances:$.spec#0|^TestInstanceSpecIsImmutable$
 instances:$.spec#1|^TestInstanceIdentityReference$
 modeldeployments:$.spec.providers#0|^TestModelDeploymentProvidersAndInstances$
 modeldeployments:$.spec.retentionPolicy#0|^TestRetentionPolicy$
-modeldeployments:$.spec.serving.checkpoint.hubTokenRef#0|^TestCheckpointHubTokenReferenceNamesExactlyOneSource$
-modeldeployments:$.spec.serving.checkpoint.revision#0|^TestCheckpointRevisionIsAFullCommitID$
-modeldeployments:$.spec.serving.engine.image_digest#0|^TestEngineImageDigest$
-modeldeployments:$.spec.serving.env[]#0|^TestEngineEnvironment$
-modeldeployments:$.spec.serving.env[]#1|^TestEngineEnvironment$|^TestEngineEnvironmentCredentialsAreRefusedOnUpdate$
-modeldeployments:$.spec.serving.flags[]#0|^TestEngineFlagsUseLongNamesAndCarryNoKeys$
-modeldeployments:$.spec.serving.flags[]#1|^TestEngineFlagsUseLongNamesAndCarryNoKeys$
-modeldeployments:$.spec.serving.flags[]#2|^TestEngineFlagsUseLongNamesAndCarryNoKeys$
-modeldeployments:$.spec.serving.flags[]#3|^TestBooleanEngineFlagsTakeTrueOrFalse$
-modeldeployments:$.spec.serving.flags[]#4|^TestBooleanEngineFlagsTakeTrueOrFalse$
-modeldeployments:$.spec.serving.flags[]#5|^TestEngineFlagsRefuseAbbreviationsOfRefusedNames$
-modeldeployments:$.spec.serving.flags[]#6|^TestEngineFlagsRefuseAbbreviationsOfRefusedNames$
-modeldeployments:$.spec.serving.flags[]#7|^TestEngineFlagsRefuseAbbreviationsOfRefusedNames$
+modeldeployments:$.spec.retentionPolicy#1|^TestRetentionPolicy$
+modeldeployments:$.spec.source#0|^TestModelDeploymentSourceIsServedOrManaged$
+modeldeployments:$.spec.source.served#0|^TestTokenizerOtherThanTheCheckpointsIsPinned$
+modeldeployments:$.spec.source.served#1|^TestTokenizerOtherThanTheCheckpointsIsPinned$
+modeldeployments:$.spec.source.served.checkpoint.hubTokenRef#0|^TestCheckpointHubTokenReferenceNamesExactlyOneSource$
+modeldeployments:$.spec.source.served.checkpoint.revision#0|^TestCheckpointRevisionIsAFullCommitID$
+modeldeployments:$.spec.source.served.engine.image_digest#0|^TestEngineImageDigest$
+modeldeployments:$.spec.source.served.env[]#0|^TestEngineEnvironment$
+modeldeployments:$.spec.source.served.env[]#1|^TestEngineEnvironment$|^TestEngineEnvironmentCredentialsAreRefusedOnUpdate$
+modeldeployments:$.spec.source.served.flags[]#0|^TestEngineFlagsUseLongNamesAndCarryNoKeys$
+modeldeployments:$.spec.source.served.flags[]#1|^TestEngineFlagsUseLongNamesAndCarryNoKeys$
+modeldeployments:$.spec.source.served.flags[]#2|^TestEngineFlagsUseLongNamesAndCarryNoKeys$
+modeldeployments:$.spec.source.served.flags[]#3|^TestEngineFlagsUseLongNamesAndCarryNoKeys$
+modeldeployments:$.spec.source.served.flags[]#4|^TestBooleanEngineFlagsTakeTrueOrFalse$
+modeldeployments:$.spec.source.served.flags[]#5|^TestBooleanEngineFlagsTakeTrueOrFalse$
+modeldeployments:$.spec.source.served.flags[]#6|^TestEngineFlagsRefuseAbbreviationsOfRefusedNames$
+modeldeployments:$.spec.source.served.flags[]#7|^TestEngineFlagsRefuseAbbreviationsOfRefusedNames$
+modeldeployments:$.spec.source.served.flags[]#8|^TestEngineFlagsRefuseAbbreviationsOfRefusedNames$
+modeldeployments:$.spec.source.served.flags[]#9|^TestEngineFlagsRefuseAbbreviationsOfRefusedNames$
+modeldeployments:$.spec.source.served.flags[]#10|^TestEngineFlagsThatNameOtherCheckpointsAreRefused$
+modeldeployments:$.spec.source.served.flags[]#11|^TestEngineFlagsRefuseEveryPrefixOfAKnownFlag$
+platformprofiles:$.spec#0|^TestPlatformProfileTypedFields$
 providers:$#0|^TestProviderNamesAreDNS1123Labels$
 providers:$.spec.credentialsRef#0|^TestProviderCredentialsReferenceNamesExactlyOneSource$
 TABLE
@@ -79,6 +92,10 @@ mkdir -p "$tree/hack" "$tree/api/v1alpha1/e2e" "$tree/config"
 cp go.mod "$tree/"
 cp hack/test-binaries.sh "$tree/hack/"
 cp -R config/admission "$tree/config/"
+# One test reads HBEP-3's flag table, so the known flag names it checks the
+# rules against come from the specification.
+mkdir -p "$tree/hbep/0003-resource-model-and-naming"
+cp hbep/0003-resource-model-and-naming/README.md "$tree/hbep/0003-resource-model-and-naming/"
 
 # patterns_of "a|b|c" with ^ and $ anchors: the test names, one per line.
 test_names() { tr '|' '\n' <<<"$1" | sed -e 's/^\^//' -e 's/\$$//'; }
