@@ -20,12 +20,18 @@
 # Environment (required): S2B_HOME (stage/, hf_home/, results/). MODE=vllm needs VLLM_VENV.
 # MODE=sim replaces vLLM with llm-d-inference-sim (SIM_BIN) for a rehearsal without a GPU.
 # The job ends by itself after the last arm; that is its scancel.
+# Exit status: 0 only if every arm in PLAN ran and was measured. A skipped arm (budget, workers, router, llm-d
+# smoke test), a failed prefix-cache reset, a failed metrics scrape, or a client that failed or did not report
+# makes the final status 1. Each is listed in failures.txt next to the results, which stay in place.
 set -uo pipefail
 S2B_HOME=${S2B_HOME:?set S2B_HOME}
 MODE=${MODE:-vllm}
 STAGE=${STAGE:-$S2B_HOME/stage}
 NWORK=${NWORK:-4}
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-1.5B-Instruct}
+# The revision the results were taken with (vLLM 0.32.0 uses it for the tokenizer too: tokenizer_revision
+# defaults to revision). Passed to every worker, so another cached revision cannot be picked by name.
+MODEL_REV=${MODEL_REV:-989aa7980e4cf806f80c7fef2b1adb7bc71aa306}
 SERVED=s2b-model
 GPU_UTIL=${GPU_UTIL:-0.2}
 KV_BLOCKS_B=${KV_BLOCKS_B:-6000}
@@ -46,6 +52,8 @@ RUN=${MEMFS:-${TMPDIR:-/tmp}}/s2b-run
 OUT=$S2B_HOME/results/${RESULT_TAG:-run-$(date -u +%Y%m%dT%H%MZ)}
 mkdir -p "$RUN"/{logs,tmp,home,cache,arms} "$OUT/arms"
 log() { echo "[$(date -u +%T) +$(( $(date +%s) - T0 ))s] $*"; }
+FAILED=()   # one line per problem; any entry makes the final exit status 1
+fail() { FAILED+=("$1"); log "FAIL: $1"; }
 
 # ---- processes: recorded by PID, stopped by PID (with descendants), never by name ----
 declare -A PIDS=()
@@ -92,6 +100,7 @@ listeners() {
 # ---- environment record (no host names, no paths) ----
 {
   echo "mode=$MODE arch=$(uname -m) kernel=$(uname -r) pagesize=$(getconf PAGESIZE) nproc=$(nproc)"
+  echo "model=$MODEL_ID revision=$MODEL_REV"
   echo "slurm_cpus=${SLURM_CPUS_PER_TASK:-} slurm_mem_per_node=${SLURM_MEM_PER_NODE:-} gpus=${CUDA_VISIBLE_DEVICES:-}"
   command -v nvidia-smi > /dev/null && nvidia-smi --query-gpu=name,memory.total,driver_version,compute_cap --format=csv,noheader
 } > "$RUN/env.txt"
@@ -155,7 +164,7 @@ start_workers() { # start_workers <A|B>: one at a time, so each profiles its mem
   for i in $(seq 0 $((NWORK - 1))); do
     t=$(date +%s)
     if [[ $MODE == vllm ]]; then
-      S2B_WORKER=$i S2B_PLACEMENT_LOG=$RUN/placement-$r-w$i.tsv vllm serve "$MODEL_ID" --served-model-name "$SERVED" \
+      S2B_WORKER=$i S2B_PLACEMENT_LOG=$RUN/placement-$r-w$i.tsv vllm serve "$MODEL_ID" --revision "$MODEL_REV" --served-model-name "$SERVED" \
         --host 127.0.0.1 --port "$(wport $i)" --gpu-memory-utilization "$GPU_UTIL" --max-model-len "$MAX_LEN" \
         --enable-prefix-caching --enable-prompt-tokens-details --disable-uvicorn-access-log \
         --middleware s2b_placement.Placement "${kv[@]}" > "$RUN/logs/worker$i-$r.log" 2>&1 & PIDS[w$i]=$!
@@ -173,7 +182,13 @@ start_workers() { # start_workers <A|B>: one at a time, so each profiles its mem
   REGIME=$r
 }
 stop_workers() { local i; for i in $(seq 0 $((NWORK - 1))); do stop_named w$i; done; REGIME=""; }
-scrape() { local i; for i in $(seq 0 $((NWORK - 1))); do curl -sf "http://127.0.0.1:$(wport $i)/metrics" > "$1-w$i.prom"; done; }
+scrape() { # scrape <prefix>: every worker's /metrics into <prefix>-w<i>.prom; non-zero if any is missing or empty
+  local i rc=0
+  for i in $(seq 0 $((NWORK - 1))); do
+    curl -sf -m 10 "http://127.0.0.1:$(wport $i)/metrics" > "$1-w$i.prom" && [[ -s $1-w$i.prom ]] || rc=1
+  done
+  return $rc
+}
 sampler() { # 2 s samples of KV use, queues and cache counters, one line per worker
   local i
   while true; do
@@ -211,18 +226,32 @@ run_arm() { # run_arm <regime> <rep> <arm>
   local r=$1 rep=$2 arm=$3 name=$1$2-$3 d rc i
   d=$RUN/arms/$name; mkdir -p "$d"
   local used=$(( $(date +%s) - T0 ))
-  if (( used + ARM_EST_S > BUDGET_S )); then log "SKIP $name: ${used}s used of ${BUDGET_S}s"; echo "skipped: budget" > "$d/SKIPPED"; return; fi
+  if (( used + ARM_EST_S > BUDGET_S )); then
+    log "SKIP $name: ${used}s used of ${BUDGET_S}s"; echo "skipped: budget" > "$d/SKIPPED"; fail "$name skipped: budget"; return
+  fi
   if [[ $REGIME != "$r" ]]; then
     stop_workers
-    start_workers "$r" || { log "SKIP $name: workers failed for regime $r"; echo "skipped: workers" > "$d/SKIPPED"; stop_workers; return; }
+    start_workers "$r" || {
+      log "SKIP $name: workers failed for regime $r"; echo "skipped: workers" > "$d/SKIPPED"; fail "$name skipped: workers"; stop_workers; return
+    }
   fi
+  # An arm that starts on a cache that was not reset would measure the previous arm's blocks: it is not run.
+  local reset_ok=1 out
   for i in $(seq 0 $((NWORK - 1))); do
-    echo "w$i $(curl -s -m 30 -X POST "http://127.0.0.1:$(wport $i)/reset_prefix_cache" -w ' http=%{http_code}')" >> "$d/reset.txt"
+    out=$(curl -s -m 30 -X POST "http://127.0.0.1:$(wport $i)/reset_prefix_cache" -w ' http=%{http_code}')
+    echo "w$i $out" >> "$d/reset.txt"
+    [[ $out == *'"success":true'* && $out == *' http=200' ]] || reset_ok=0
   done
-  sleep 1; scrape "$d/before"
+  if [[ $reset_ok != 1 ]]; then
+    log "SKIP $name: a prefix-cache reset failed"; echo "skipped: reset failed" > "$d/SKIPPED"; fail "$name skipped: prefix-cache reset failed"; return
+  fi
+  sleep 1
+  if ! scrape "$d/before"; then
+    log "SKIP $name: the metrics scrape before the arm failed"; echo "skipped: scrape failed" > "$d/SKIPPED"; fail "$name skipped: scrape before the arm failed"; return
+  fi
   start_router "$arm" "$d"; rc=$?
   if [[ $rc != 0 ]]; then
-    log "SKIP $name: router failed to start (rc $rc)"; echo "skipped: router rc $rc" > "$d/SKIPPED"
+    log "SKIP $name: router failed to start (rc $rc)"; echo "skipped: router rc $rc" > "$d/SKIPPED"; fail "$name skipped: router rc $rc"
     stop_named router envoy epp; sync_out; return
   fi
   sampler > "$d/samples.tsv" 2>/dev/null & PIDS[sampler]=$!
@@ -233,17 +262,26 @@ run_arm() { # run_arm <regime> <rep> <arm>
   rc=$?
   local t2; t2=$(date +%s.%N)
   stop_named sampler
-  sleep 2; scrape "$d/after"
+  sleep 2; scrape "$d/after" || fail "$name: the metrics scrape after the arm failed"
   for n in router envoy epp; do [[ -n ${PIDS[$n]:-} ]] && ps -o pid=,rss=,cputime=,comm= -p "$(descendants "${PIDS[$n]}" | paste -sd,)" | sed "s/^/$n /"; done > "$d/ps.txt" 2>/dev/null
   stop_named router envoy epp
   printf '{"name":"%s","regime":"%s","rep":%s,"arm":"%s","kv_blocks_override":"%s","start_unix":%s,"end_unix":%s,"client_rc":%s,"nwork":%s,"load_args":"%s"}\n' \
     "$name" "$r" "$rep" "$arm" "$([[ $r == B ]] && echo "$KV_BLOCKS_B")" "$t1" "$t2" "$rc" "$NWORK" "$LOAD_ARGS" > "$d/meta.json"
   [[ -f $d/epp.log ]] && gzip -f "$d/epp.log"
   log "END $name rc=$rc: $(tail -1 "$d/client.out")"
+  # The client must exit 0 and report its RESULT line with no failed attempt and no aborted session.
+  local res; res=$(grep -E '^RESULT ' "$d/client.out" | tail -1)
+  if (( rc != 0 )); then fail "$name: client exit status $rc"
+  elif [[ $res != *' failed_attempts=0 '* || $res != *' aborted_sessions=0' ]]; then fail "$name: client reported failures or no result"; fi
   sync_out
 }
 
 for item in $PLAN; do IFS=: read -r r rep arm <<< "$item"; run_arm "$r" "$rep" "$arm"; done
 stop_workers
 cp "$RUN"/logs/worker*.log "$OUT/" 2>/dev/null
+if (( ${#FAILED[@]} > 0 )); then
+  printf '%s\n' "${FAILED[@]}" > "$RUN/failures.txt"; sync_out
+  log "FAILED with ${#FAILED[@]} problem(s), results kept in $OUT; see failures.txt"
+  exit 1
+fi
 log "all arms done; results in $OUT"
