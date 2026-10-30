@@ -112,7 +112,9 @@ func computeVector(t *testing.T, dir string, in vectorInput) ID {
 		if err != nil {
 			t.Fatal(err)
 		}
-		spec.ChatTemplateSHA256 = ChatTemplateSHA256(text)
+		if spec.ChatTemplateSHA256, err = ChatTemplateSHA256(text); err != nil {
+			t.Fatal(err)
+		}
 	}
 	var files []File
 	for _, f := range in.Files {
