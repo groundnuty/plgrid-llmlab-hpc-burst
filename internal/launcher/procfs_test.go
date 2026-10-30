@@ -122,59 +122,6 @@ func writeFakeThread(t *testing.T, root string, pid, tid int, state string) {
 	}
 }
 
-func writeFakeStat(t *testing.T, root string, pid int, state string, start uint64) {
-	t.Helper()
-	dir := filepath.Join(root, strconv.Itoa(pid))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	line := strconv.Itoa(pid) + " (k3s-server) " + state + " 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 " + strconv.FormatUint(start, 10) + " 1 1 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0"
-	if err := os.WriteFile(filepath.Join(dir, "stat"), []byte(line), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestIdentifyOnAFakeProcTree(t *testing.T) {
-	root := fakeProc(t, "boot-A")
-	writeFakeStat(t, root, 500, "S", 1000)
-	writeFakeStat(t, root, 501, "Z", 1000)
-	writeFakeStat(t, root, 502, "S", 2000) // same PID as a record below, other start time
-	// A leader that shows Z while another thread runs: a process in the middle of execve from a
-	// non-leader thread (k3s does this at start). Alive, not gone.
-	writeFakeStat(t, root, 503, "Z", 1000)
-	writeFakeThread(t, root, 503, 503, "Z")
-	writeFakeThread(t, root, 503, 777, "S")
-	// A leader that is Z with only dead threads: really dead.
-	writeFakeStat(t, root, 504, "Z", 1000)
-	writeFakeThread(t, root, 504, 504, "Z")
-	cases := []struct {
-		name string
-		rec  ProcRec
-		want Verdict
-	}{
-		{"alive and identical", ProcRec{PID: 500, StartTicks: 1000, BootID: "boot-A"}, Ours},
-		{"no such process", ProcRec{PID: 999, StartTicks: 1000, BootID: "boot-A"}, Gone},
-		{"zombie counts as gone", ProcRec{PID: 501, StartTicks: 1000, BootID: "boot-A"}, Gone},
-		{"zombie leader with every thread dead is gone", ProcRec{PID: 504, StartTicks: 1000, BootID: "boot-A"}, Gone},
-		{"zombie leader with a live thread is alive (execve in progress)", ProcRec{PID: 503, StartTicks: 1000, BootID: "boot-A"}, Ours},
-		{"pid reused: another start time", ProcRec{PID: 502, StartTicks: 1000, BootID: "boot-A"}, Foreign},
-		{"recorded before a reboot", ProcRec{PID: 500, StartTicks: 1000, BootID: "boot-B"}, Foreign},
-		{"pid 1 is never ours", ProcRec{PID: 1, StartTicks: 1, BootID: "boot-A"}, Foreign},
-		{"pid 0 is never ours", ProcRec{PID: 0, StartTicks: 1, BootID: "boot-A"}, Foreign},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got, detail := identify(c.rec)
-			if got != c.want {
-				t.Fatalf("identify = %v (%s), want %v", got, detail, c.want)
-			}
-			if got != Ours && detail == "" {
-				t.Error("a verdict other than ours must say why")
-			}
-		})
-	}
-}
-
 func TestDescendants(t *testing.T) {
 	root := fakeProc(t, "b")
 	mk := func(pid, ppid int) {

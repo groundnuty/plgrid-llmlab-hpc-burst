@@ -1,6 +1,7 @@
 package launcher
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,8 +115,11 @@ func TestResolveBinary(t *testing.T) {
 	if err != nil || b.Path != p || b.SHA256 != abc || b.Version.String() != "v1.36.5+k3s1" {
 		t.Fatalf("resolve = %+v, %v", b, err)
 	}
-	if _, err := resolveBinary(pins, "amd64", dir, "v1.36.5+k3s1"); err != nil {
+	b.Close()
+	if b, err := resolveBinary(pins, "amd64", dir, "v1.36.5+k3s1"); err != nil {
 		t.Errorf("full name: %v", err)
+	} else {
+		b.Close()
 	}
 	if _, err := resolveBinary(pins, "amd64", dir, "v1.36.5+k3s2"); err == nil {
 		t.Error("another +k3sN revision of a pinned version was accepted")
@@ -134,6 +138,43 @@ func TestResolveBinary(t *testing.T) {
 	}
 }
 
+// TestResolveBinaryRelativeAndPinned: a relative directory means the caller's working directory,
+// and the path comes back absolute. The descriptor is the one that was hashed: when the file at
+// the path is replaced afterwards, the descriptor still reads the verified bytes, which is what
+// the launcher executes (as /proc/self/fd/3).
+func TestResolveBinaryRelativeAndPinned(t *testing.T) {
+	const abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" // sha256("abc"), FIPS 180-2
+	pins := []Pin{{Version: mustVersion(t, "v1.36.5+k3s1"), Arch: "amd64", Asset: "k3s", SHA256: abc}}
+	work := t.TempDir()
+	p := filepath.Join(work, "rel", "k3s-1.36.5", "k3s")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("abc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(work)
+	b, err := resolveBinary(pins, "amd64", "rel", "1.36.5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	if b.Path != p {
+		t.Errorf("path %q, want the absolute %q", b.Path, p)
+	}
+	other := filepath.Join(work, "swap")
+	if err := os.WriteFile(other, []byte("evil"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(other, p); err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(io.NewSectionReader(b.file, 0, 3))
+	if err != nil || string(got) != "abc" {
+		t.Errorf("the descriptor reads %q, %v; want the verified bytes", got, err)
+	}
+}
+
 func TestCheckUpgradePath(t *testing.T) {
 	v := func(s string) Version { return mustVersion(t, s) }
 	cases := []struct {
@@ -145,6 +186,11 @@ func TestCheckUpgradePath(t *testing.T) {
 		{"v1.36.5+k3s1", "v1.35.9+k3s1", false}, // downgrade
 		{"v1.34.1+k3s1", "v1.36.5+k3s1", false}, // skips a minor
 		{"v1.35.9+k3s1", "v2.36.0+k3s1", false}, // major
+		{"v1.36.4+k3s1", "v1.36.5+k3s1", true},  // a newer patch of the same minor
+		{"v1.36.5+k3s1", "v1.36.5+k3s2", true},  // a newer k3s revision
+		{"v1.36.5+k3s2", "v1.36.5+k3s1", false}, // an older revision
+		{"v1.36.5+k3s1", "v1.36.4+k3s1", false}, // an older patch
+		{"v1.35.9+k3s1", "v1.36.0+k3s1", true},  // the next minor, any patch
 	}
 	for _, c := range cases {
 		if err := checkUpgradePath(v(c.from), v(c.to)); (err == nil) != c.ok {

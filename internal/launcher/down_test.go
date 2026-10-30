@@ -205,3 +205,14 @@ func shortDir(t *testing.T) string {
 	t.Cleanup(func() { os.RemoveAll(d) })
 	return d
 }
+
+// skipOrFail skips, loudly, unless HPCBURST_REQUIRE_INTEGRATION=1 (hack/test-launcher.sh sets it),
+// which turns the skip into a failure: a required test that did not run tested nothing.
+func skipOrFail(t *testing.T, why string) {
+	t.Helper()
+	msg := "SKIPPED, NOT TESTED: " + why
+	if os.Getenv("HPCBURST_REQUIRE_INTEGRATION") == "1" {
+		t.Fatal(msg)
+	}
+	t.Skip(msg)
+}

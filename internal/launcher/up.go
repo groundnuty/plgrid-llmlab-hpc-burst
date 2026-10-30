@@ -18,7 +18,7 @@ const DefaultReadyTimeout = 120 * time.Second
 type UpOptions struct {
 	StateDir     string
 	BinDir       string
-	Version      string // default DefaultVersion
+	Version      string // default: the release that last wrote the store, or DefaultVersion for a new one
 	PortBase     int    // default DefaultPortBase
 	Front        Front
 	Nice         int    // nice(1) value for k3s; 0 leaves it alone
@@ -60,10 +60,12 @@ func logTail(path string, n int) string {
 // started, so a failed start never leaves a process behind.
 func startAndWait(ctx context.Context, spec launchSpec, front Front, timeout time.Duration, log io.Writer) (*State, time.Duration, time.Duration, error) {
 	t0 := time.Now()
-	rec, err := launch(spec)
+	h, err := launch(spec)
 	if err != nil {
 		return nil, 0, 0, err
 	}
+	defer h.Close()
+	rec := h.rec
 	st := &State{
 		Version: spec.bin.Version.String(), Binary: spec.bin.Path, BinarySHA256: spec.bin.SHA256,
 		Nice: spec.nice, Ports: spec.ports, Procs: []ProcRec{rec}, StartedAt: t0, Front: front,
@@ -82,7 +84,7 @@ func startAndWait(ctx context.Context, spec launchSpec, front Front, timeout tim
 		_ = spec.l.clearRecord()
 		return nil, 0, 0, fmt.Errorf("%w%s", cause, logTail(spec.l.logFile(), 15))
 	}
-	readyzAt, readyAt, err := waitReady(ctx, spec.l, st, timeout)
+	readyzAt, readyAt, err := waitReady(ctx, spec.l, st, h, timeout)
 	if err != nil {
 		return fail(err)
 	}
@@ -113,7 +115,9 @@ func writeKubeconfig(l layout) error {
 }
 
 // Up starts the pinned k3s as the invoking user and returns once it is ready. It refuses to
-// start when the state directory already records a live host, or when one of its ports is taken.
+// start when the state directory already records a live host (or one whose identity cannot be
+// checked), when the store was written by another release than the one asked for, or when one of
+// its ports is taken.
 func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 	l, err := newLayout(o.StateDir)
 	if err != nil {
@@ -130,15 +134,13 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 	if err != nil {
 		return nil, err
 	}
-	if o.Version == "" {
-		o.Version = DefaultVersion
+	if o.Version != "" {
+		if _, err := ParseVersion(o.Version); err != nil {
+			return nil, err
+		}
 	}
 	if o.ReadyTimeout <= 0 {
 		o.ReadyTimeout = DefaultReadyTimeout
-	}
-	bin, err := ResolveBinary(o.BinDir, o.Version)
-	if err != nil {
-		return nil, err
 	}
 	unlock, err := l.lockState()
 	if err != nil {
@@ -152,12 +154,37 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 	}
 	if prior != nil {
 		for _, rec := range prior.Procs {
-			if v, _ := identify(rec); v == Ours {
+			switch v, d := identify(rec); v {
+			case Ours:
 				return nil, fmt.Errorf("a host is already running in %s (%s pid %d); run hpcburst down first", l.dir, rec.Name, rec.PID)
+			case Unknown:
+				return nil, fmt.Errorf("cannot tell whether the recorded %s still runs (%s); nothing was started, and the record in %s is kept", rec.Name, d, l.dir)
 			}
 		}
-		logf(o.Log, "the record in %s names processes that are gone; replacing it", l.dir)
+		logf(o.Log, "the record in %s names processes that have exited or whose PIDs other processes now use; replacing it", l.dir)
 		if err := l.clearRecord(); err != nil {
+			return nil, err
+		}
+	}
+	// The same version rule holds after a stale record as after a clean stop.
+	version, err := startVersion(l, o.Version)
+	if err != nil {
+		return nil, fmt.Errorf("refusing to start: %w", err)
+	}
+	bin, err := ResolveBinary(o.BinDir, version)
+	if err != nil {
+		return nil, err
+	}
+	defer bin.Close()
+	fresh, err := l.storeExists()
+	if err != nil {
+		return nil, err
+	}
+	fresh = !fresh
+	if fresh {
+		// Recorded before the start: if k3s creates the store and the start then fails, the store
+		// still has the record of the release that created it.
+		if err := l.saveStoreVersion(bin.Version.String(), "up"); err != nil {
 			return nil, err
 		}
 	}
@@ -170,6 +197,11 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 	st, readyzAt, readyAt, err := startAndWait(ctx, launchSpec{l: l, bin: bin, ports: ports, nice: o.Nice}, front, o.ReadyTimeout, o.Log)
 	if err != nil {
 		return nil, err
+	}
+	if fresh {
+		if err := l.saveStoreVersion(st.Version, "up"); err != nil {
+			return nil, err
+		}
 	}
 	rep := &UpReport{
 		Version: st.Version, StateDir: l.dir, Kubeconfig: l.kubeconfig(), Ports: ports, PID: st.Procs[0].PID,

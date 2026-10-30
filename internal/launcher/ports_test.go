@@ -1,6 +1,7 @@
 package launcher
 
 import (
+	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -40,7 +41,7 @@ func TestCheckPortsFree(t *testing.T) {
 		t.Helper()
 		l, err := net.Listen(network, addr)
 		if err != nil {
-			t.Skipf("cannot listen on %s: %v", addr, err)
+			skipOrFail(t, fmt.Sprintf("cannot listen on %s: %v", addr, err))
 		}
 		t.Cleanup(func() { l.Close() })
 		return portOf(t, l)

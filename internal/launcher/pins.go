@@ -116,16 +116,26 @@ func pinFor(pins []Pin, v Version, arch string) (Pin, error) {
 	return Pin{}, fmt.Errorf("k3s %s matches several pins; give the +k3sN suffix", v)
 }
 
-// Binary is a verified k3s executable.
+// Binary is a verified k3s executable. file is the open descriptor whose bytes were hashed; the
+// launcher executes that descriptor, not the path, so the bytes it runs are the bytes it checked.
 type Binary struct {
 	Version Version
-	Path    string
+	Path    string // absolute
 	SHA256  string
+	file    *os.File
+}
+
+// Close releases the descriptor of the verified binary.
+func (b Binary) Close() {
+	if b.file != nil {
+		_ = b.file.Close()
+	}
 }
 
 // ResolveBinary finds the pinned binary for the version under binDir (binDir/k3s-X.Y.Z/k3s,
-// which is where hack/fetch-k3s.sh puts it) and checks its sha256 against the pin. A missing
-// file, or one with another hash, is an error: nothing unpinned ever starts.
+// which is where hack/fetch-k3s.sh puts it), opens it, and checks the sha256 of what it opened
+// against the pin. A missing file, or one with another hash, is an error: nothing unpinned ever
+// starts. The caller closes the returned Binary.
 func ResolveBinary(binDir, version string) (Binary, error) {
 	pins, err := parsePins(pinsFile)
 	if err != nil {
@@ -143,39 +153,76 @@ func resolveBinary(pins []Pin, arch, binDir, version string) (Binary, error) {
 	if err != nil {
 		return Binary{}, err
 	}
-	path := filepath.Join(binDir, pin.Version.dirName(), "k3s")
-	got, err := fileSHA256(path)
+	// Absolute before anything else: a relative --bin-dir means the caller's directory, and the
+	// launcher later works from the state directory.
+	path, err := filepath.Abs(filepath.Join(binDir, pin.Version.dirName(), "k3s"))
+	if err != nil {
+		return Binary{}, err
+	}
+	f, err := os.Open(path)
 	if err != nil {
 		return Binary{}, fmt.Errorf("k3s %s: %w (fetch it with hack/fetch-k3s.sh)", pin.Version, err)
 	}
+	got, err := fdSHA256(f)
+	if err != nil {
+		f.Close()
+		return Binary{}, fmt.Errorf("k3s %s: %w", pin.Version, err)
+	}
 	if got != pin.SHA256 {
+		f.Close()
 		return Binary{}, fmt.Errorf("k3s %s at %s has sha256 %s, but the pin says %s; refusing to run it", pin.Version, path, got, pin.SHA256)
 	}
-	return Binary{Version: pin.Version, Path: path, SHA256: got}, nil
+	return Binary{Version: pin.Version, Path: path, SHA256: got, file: f}, nil
 }
 
-func fileSHA256(path string) (string, error) {
-	f, err := os.Open(path)
+// fdSHA256 hashes an open regular file from its start.
+func fdSHA256(f *os.File) (string, error) {
+	fi, err := f.Stat()
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	if !fi.Mode().IsRegular() {
+		return "", fmt.Errorf("%s is not a regular file", f.Name())
+	}
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	if _, err := io.Copy(h, io.NewSectionReader(f, 0, fi.Size())); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// checkUpgradePath allows exactly one minor step up, the rule of HBEP-11 ("one minor version at a time").
+// revNum is the number of a +k3sN suffix; 0 when there is none.
+func (v Version) revNum() int {
+	n, _ := strconv.Atoi(strings.TrimPrefix(v.Rev, "k3s"))
+	return n
+}
+
+// compareVersions orders two releases: negative, zero or positive as a is older than, the same
+// as, or newer than b.
+func compareVersions(a, b Version) int {
+	for _, d := range []int{a.Major - b.Major, a.Minor - b.Minor, a.Patch - b.Patch, a.revNum() - b.revNum()} {
+		if d != 0 {
+			return d
+		}
+	}
+	return 0
+}
+
+// checkUpgradePath allows one step up (HBEP-11: "one minor version at a time"): to the next
+// minor, or a newer patch or k3s revision of the same minor. A downgrade is never an upgrade: it
+// is only possible by restoring a backup taken before the upgrade (hpcburst restore).
 func checkUpgradePath(from, to Version) error {
 	switch {
 	case to.Major != from.Major:
 		return fmt.Errorf("upgrade %s to %s changes the major version; only one minor step up is supported", from, to)
 	case to.Minor == from.Minor+1:
 		return nil
-	case to.Minor <= from.Minor:
-		return fmt.Errorf("upgrade %s to %s does not go up by a minor version; downgrades and same-minor moves are not supported", from, to)
+	case to.Minor == from.Minor && compareVersions(to, from) > 0:
+		return nil
+	case to.Minor == from.Minor && compareVersions(to, from) == 0:
+		return fmt.Errorf("the host already runs %s", from)
+	case compareVersions(to, from) < 0:
+		return fmt.Errorf("%s is older than %s: a downgrade is not an upgrade; it is only possible by restoring a backup taken before the upgrade (hpcburst restore --backup DIR)", to, from)
 	}
 	return fmt.Errorf("upgrade %s to %s skips a minor version; upgrade one minor at a time", from, to)
 }

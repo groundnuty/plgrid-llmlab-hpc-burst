@@ -4,6 +4,7 @@ package launcher
 // set and the isolation that S3 proved on a machine that also runs a system k3s.
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,13 +18,36 @@ type launchSpec struct {
 	bin   Binary
 	ports Ports
 	nice  int
+	// extraArgs are appended to k3s's arguments. Only tests set them (to start a host whose
+	// garbage collector is off); no command-line flag reaches them.
+	extraArgs []string
 }
+
+// niceBin is nice(1), named by absolute path so the caller's PATH cannot choose it.
+const niceBin = "/usr/bin/nice"
+
+// binFD is the descriptor number the verified k3s binary gets in the child (ExtraFiles[0]). The
+// child executes /proc/self/fd/3, so it runs the very file whose bytes the launcher hashed,
+// whatever happens to the path in between.
+const binFD = 3
+
+// auditPolicy has the API server log every request at the Metadata level (HBEP-11): who did what
+// to which object, and never a request or response body, so a Secret's content is never logged.
+const auditPolicy = `# Written by hpcburst at every start (HBEP-11): metadata only, never a request or response body.
+apiVersion: audit.k8s.io/v1
+kind: Policy
+omitStages:
+  - RequestReceived
+rules:
+  - level: Metadata
+`
 
 // env is the whole environment of the k3s process: nothing is inherited. It is what
 // "env -i NAME=VALUE ..." gives, set directly on the child so the launcher's PID is k3s's PID.
 // HOME, XDG_RUNTIME_DIR and KUBECONFIG are inside the state directory, so k3s never reads or
 // writes the invoking user's files, and K3S_CONFIG_FILE is an empty file, so it never reads a
-// system config such as /etc/rancher/k3s/config.yaml.
+// system config such as /etc/rancher/k3s/config.yaml. TMPDIR keeps k3s's temporary files (its
+// TLS listener writes certificates to a temporary file first) inside the state directory too.
 func (s launchSpec) env() []string {
 	return []string{
 		"PATH=/usr/bin:/bin",
@@ -31,11 +55,12 @@ func (s launchSpec) env() []string {
 		"XDG_RUNTIME_DIR=" + s.l.runDir(),
 		"KUBECONFIG=" + s.l.home() + "/kubeconfig",
 		"K3S_CONFIG_FILE=" + s.l.emptyConfig(),
+		"TMPDIR=" + s.l.tmpDir(),
 	}
 }
 
 // envKeys are the variable names env() sets, for tests and for status output.
-var envKeys = []string{"PATH", "HOME", "XDG_RUNTIME_DIR", "KUBECONFIG", "K3S_CONFIG_FILE"}
+var envKeys = []string{"PATH", "HOME", "XDG_RUNTIME_DIR", "KUBECONFIG", "K3S_CONFIG_FILE", "TMPDIR"}
 
 // k3sArgs is the argument list after the binary. The components S3 disabled stay disabled:
 // the scheduler, cloud controller manager, helm controller, kube-proxy, network policy
@@ -43,7 +68,7 @@ var envKeys = []string{"PATH", "HOME", "XDG_RUNTIME_DIR", "KUBECONFIG", "K3S_CON
 // needs none of them (the garbage collector and namespace controllers live in the embedded
 // controller manager, which stays on).
 func (s launchSpec) k3sArgs() []string {
-	return []string{
+	a := []string{
 		"server", "--rootless", "--disable-agent",
 		"--data-dir", s.l.dataDir(),
 		"--write-kubeconfig", s.l.adminKubeconfig(), "--write-kubeconfig-mode", "0600",
@@ -57,22 +82,31 @@ func (s launchSpec) k3sArgs() []string {
 		"--disable-helm-controller",
 		"--disable=coredns", "--disable=servicelb", "--disable=traefik",
 		"--disable=local-storage", "--disable=metrics-server", "--disable=runtimes",
+		// The audit log (HBEP-11), bounded: at most four files of 100 MB.
+		"--kube-apiserver-arg=audit-policy-file=" + s.l.auditPolicy(),
+		"--kube-apiserver-arg=audit-log-path=" + s.l.auditLog(),
+		"--kube-apiserver-arg=audit-log-maxsize=100",
+		"--kube-apiserver-arg=audit-log-maxbackup=3",
 	}
+	return append(a, s.extraArgs...)
 }
+
+// execPath is what the child executes: the descriptor of the verified binary.
+func execPath() string { return fmt.Sprintf("/proc/self/fd/%d", binFD) }
 
 // argv is the full command. With a nice value it is wrapped in nice(1), which execs into k3s,
 // so the PID is still k3s's.
 func (s launchSpec) argv() []string {
-	a := append([]string{s.bin.Path}, s.k3sArgs()...)
+	a := append([]string{execPath()}, s.k3sArgs()...)
 	if s.nice != 0 {
-		a = append([]string{"nice", "-n", strconv.Itoa(s.nice)}, a...)
+		a = append([]string{niceBin, "-n", strconv.Itoa(s.nice)}, a...)
 	}
 	return a
 }
 
 // prepareIsolation creates the directories and the empty files k3s is pointed at.
 func prepareIsolation(l layout) error {
-	for _, d := range []string{l.dir, l.home(), l.runDir(), l.dataDir(), l.logDir()} {
+	for _, d := range []string{l.dir, l.home(), l.runDir(), l.dataDir(), l.logDir(), l.tmpDir()} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return err
 		}
@@ -83,43 +117,65 @@ func prepareIsolation(l layout) error {
 			return err
 		}
 	}
-	return nil
+	// Rewritten on every start, so an edited policy never outlives a restart.
+	return writeFileAtomic(l.auditPolicy(), []byte(auditPolicy), 0o600)
 }
 
 // launch starts k3s detached from the launcher (own session, no stdin, output to the log), and
-// returns its identity. It does not wait for readiness. The caller records the identity
-// before anything else, so that a crash from here on can still be cleaned up by down.
-func launch(s launchSpec) (ProcRec, error) {
+// returns a handle on it. It does not wait for readiness. The pidfd comes from clone itself, so it
+// exists before the child could be reaped, and the identity (start time, boot ID) is read while
+// it is held; only then may the child be reaped. The caller records the identity before anything
+// else, so that a crash from here on can still be cleaned up by down.
+func launch(s launchSpec) (*procHandle, error) {
+	if s.bin.file == nil {
+		return nil, errors.New("the k3s binary was not opened and verified")
+	}
+	if s.nice != 0 {
+		if _, err := os.Stat(niceBin); err != nil {
+			return nil, fmt.Errorf("--nice needs %s: %w", niceBin, err)
+		}
+	}
 	if err := prepareIsolation(s.l); err != nil {
-		return ProcRec{}, err
+		return nil, err
 	}
 	// A kubeconfig from an earlier run would make a not-yet-ready host look ready.
 	for _, f := range []string{s.l.adminKubeconfig(), s.l.kubeconfig()} {
 		if err := os.Remove(f); err != nil && !os.IsNotExist(err) {
-			return ProcRec{}, err
+			return nil, err
 		}
 	}
 	lf, err := os.OpenFile(s.l.logFile(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		return ProcRec{}, err
+		return nil, err
 	}
 	defer lf.Close()
 	argv := s.argv()
-	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Env = s.env()
-	cmd.Dir = s.l.dir
-	cmd.Stdout, cmd.Stderr = lf, lf
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd := &exec.Cmd{Path: argv[0], Args: argv, Env: s.env(), Dir: s.l.dir, Stdout: lf, Stderr: lf,
+		ExtraFiles: []*os.File{s.bin.file}}
+	if s.nice == 0 {
+		cmd.Args[0] = s.bin.Path // what ps shows; the file executed is still the descriptor
+	}
+	pidfd := -1
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, PidFD: &pidfd}
 	if err := cmd.Start(); err != nil {
-		return ProcRec{}, fmt.Errorf("start k3s: %w", err)
+		return nil, fmt.Errorf("start k3s: %w", err)
 	}
 	// Reap the child if it exits while this process lives (a library caller or a test); the
 	// command line launcher exits first and k3s is then reparented.
-	go func() { _ = cmd.Wait() }()
-	rec, err := newRec("k3s", cmd.Process.Pid)
-	if err != nil {
+	reap := func() { go func() { _ = cmd.Wait() }() }
+	if pidfd < 0 {
+		// Not reaped yet, so the PID is still the child's and this kill cannot reach another process.
 		_ = cmd.Process.Kill()
-		return ProcRec{}, err
+		reap()
+		return nil, errors.New("the kernel gave no pidfd for k3s, so its identity could not be pinned; it was stopped again")
 	}
-	return rec, nil
+	h := &procHandle{rec: ProcRec{Name: "k3s", PID: cmd.Process.Pid}, fd: pidfd}
+	if _, err := h.record(); err != nil {
+		_ = pidfds.signal(h.fd, syscall.SIGKILL)
+		h.Close()
+		reap()
+		return nil, fmt.Errorf("record the identity of k3s: %w", err)
+	}
+	reap()
+	return h, nil
 }

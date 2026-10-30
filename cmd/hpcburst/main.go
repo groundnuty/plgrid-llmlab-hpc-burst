@@ -4,7 +4,8 @@
 //
 //	hpcburst up      [flags]   start the host and wait until it is ready
 //	hpcburst status  [flags]   report its health from the processes the launcher started
-//	hpcburst upgrade --to V    move it one minor version up and verify every object is kept
+//	hpcburst upgrade --to V    move it one step up (next minor, or a newer patch) and verify every object is kept
+//	hpcburst restore --backup DIR  put a backup's store back (the host stopped): the only way down
 //	hpcburst down    [flags]   stop the recorded processes and confirm nothing listens
 //
 // Exit codes: 0 success, 1 failure (status: unhealthy), 2 usage error, 3 (status only) stopped.
@@ -30,7 +31,7 @@ const (
 	exitUsage     = 2
 	exitStopped   = 3
 	envBinDir     = "HPCBURST_BIN_DIR"
-	usageSummary  = "usage: hpcburst <up|status|upgrade|down> [flags]  (hpcburst <command> -h lists a command's flags)"
+	usageSummary  = "usage: hpcburst <up|status|upgrade|restore|down> [flags]  (hpcburst <command> -h lists a command's flags)"
 	stateDirUsage = "state directory (default $XDG_STATE_HOME/hpcburst, or ~/.local/state/hpcburst)"
 	binDirUsage   = "directory with the pinned k3s binaries, as hack/fetch-k3s.sh lays them out (default $" + envBinDir + ", or $XDG_CACHE_HOME/hpcburst/k3s, or ~/.cache/hpcburst/k3s)"
 )
@@ -57,6 +58,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return cmdUpgrade(ctx, args[1:], stdout, stderr)
 	case "down":
 		return cmdDown(ctx, args[1:], stdout, stderr)
+	case "restore":
+		return cmdRestore(args[1:], stdout, stderr)
 	case "-h", "-help", "--help", "help":
 		fmt.Fprintln(stdout, usageSummary)
 		return exitOK
@@ -121,7 +124,7 @@ func cmdUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	var asJSON bool
 	fs.StringVar(&sd, "state-dir", "", stateDirUsage)
 	fs.StringVar(&bd, "bin-dir", "", binDirUsage)
-	fs.StringVar(&o.Version, "version", launcher.DefaultVersion, "k3s release to start (must be pinned in the launcher)")
+	fs.StringVar(&o.Version, "version", "", "k3s release to start (must be pinned): default the release that last wrote the store, or "+launcher.DefaultVersion+" for a new one; another release than the store's is refused (use upgrade or restore)")
 	fs.IntVar(&o.PortBase, "port-base", launcher.DefaultPortBase, "first of a block of six loopback ports: base (apiserver), +1 (https), +2 (controller manager), +5 (reserved)")
 	fs.StringVar(&o.Front.Mode, "front-mode", "", "how compute nodes reach the front: direct, or ssh (port 22, restricted key)")
 	fs.StringVar(&o.Front.Addr, "front-addr", "", "the front's address, host:port (ssh: host or host:22)")
@@ -168,7 +171,8 @@ func cmdStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	var sd string
 	var asJSON bool
 	fs.StringVar(&sd, "state-dir", "", stateDirUsage)
-	fs.BoolVar(&o.NoAPI, "no-api", false, "check only the processes and the sockets they hold; do not ask the API (no /readyz, no write probe)")
+	fs.BoolVar(&o.NoAPI, "no-api", false, "check only the processes and the sockets they hold; do not ask the API (no /readyz, no write or garbage-collector probe)")
+	fs.BoolVar(&o.NoGCProbe, "no-gc-probe", false, "skip the garbage-collector probe (an owner and a dependent ConfigMap; the dependent must go within a minute)")
 	fs.BoolVar(&asJSON, "json", false, "print the report as JSON")
 	if code, done := parse(fs, args); done {
 		return code
@@ -209,13 +213,16 @@ func printStatus(w io.Writer, r *launcher.StatusReport) {
 	if len(r.Listeners) > 0 {
 		fmt.Fprintf(w, "listeners held by the process: %v\n", r.Listeners)
 	}
+	if r.Executable != "" {
+		fmt.Fprintf(w, "executable: %s\n", r.Executable)
+	}
 	if r.RSSMiB > 0 {
 		fmt.Fprintf(w, "RSS %.0f MiB\n", r.RSSMiB)
 	}
 	for _, c := range []struct {
 		name string
 		v    *bool
-	}{{"apiserver /readyz", r.Readyz}, {"controller manager /healthz", r.KCM}, {"write probe", r.Writes}} {
+	}{{"apiserver /readyz", r.Readyz}, {"controller manager /healthz", r.KCM}, {"write probe", r.Writes}, {"garbage-collector probe", r.GC}} {
 		if c.v != nil {
 			fmt.Fprintf(w, "%s: %v\n", c.name, *c.v)
 		}
@@ -286,7 +293,7 @@ func cmdUpgrade(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	var asJSON bool
 	fs.StringVar(&sd, "state-dir", "", stateDirUsage)
 	fs.StringVar(&bd, "bin-dir", "", binDirUsage)
-	fs.StringVar(&o.To, "to", "", "k3s release to upgrade to: exactly one minor above the running one, and pinned (required)")
+	fs.StringVar(&o.To, "to", "", "k3s release to upgrade to (required, pinned): the next minor, or a newer patch of the running minor")
 	fs.DurationVar(&o.Grace, "grace", launcher.DefaultGrace, "how long to wait after SIGTERM before SIGKILL")
 	fs.DurationVar(&o.ReadyTimeout, "ready-timeout", launcher.DefaultReadyTimeout, "how long to wait for readiness of the new host")
 	fs.BoolVar(&asJSON, "json", false, "print the result as JSON")
@@ -317,6 +324,41 @@ func cmdUpgrade(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	}
 	if err != nil {
 		return fail(stderr, err)
+	}
+	return exitOK
+}
+
+func cmdRestore(args []string, stdout, stderr io.Writer) int {
+	fs := flags("restore", stderr)
+	var o launcher.RestoreOptions
+	var sd string
+	var asJSON bool
+	fs.StringVar(&sd, "state-dir", "", stateDirUsage)
+	fs.StringVar(&o.Backup, "backup", "", "a backup directory under <state-dir>/backups, as upgrade made it (required)")
+	fs.BoolVar(&asJSON, "json", false, "print the result as JSON")
+	if code, done := parse(fs, args); done {
+		return code
+	}
+	if o.Backup == "" {
+		fmt.Fprintln(stderr, "hpcburst restore: --backup is required")
+		return exitUsage
+	}
+	var err error
+	if o.StateDir, err = stateDir(sd); err != nil {
+		return fail(stderr, err)
+	}
+	o.Log = stderr
+	rep, err := launcher.Restore(o)
+	if err != nil {
+		return fail(stderr, err)
+	}
+	if asJSON {
+		emitJSON(stdout, rep)
+		return exitOK
+	}
+	fmt.Fprintf(stdout, "restored the store of k3s %s from %s; hpcburst up starts that release\n", rep.Version, rep.Backup)
+	if rep.Replaced != "" {
+		fmt.Fprintf(stdout, "the replaced store is in %s\n", rep.Replaced)
 	}
 	return exitOK
 }

@@ -67,7 +67,9 @@ func (f Front) Normalize() (Front, error) {
 	return out, nil
 }
 
-// frontWarning is printed when the operator named no front.
-const frontWarning = "warning: no front recorded (--front-mode, --front-addr). Alpha needs a front that compute nodes reach, " +
-	"directly on the dial-home port or over ssh on port 22 with a restricted key (HBEP-11, open question 8). " +
-	"Record it with --front-mode direct|ssh and --front-addr; the live check comes later, with the front."
+// frontWarning is printed when the operator named no front. The host starts anyway (decision of
+// HBEP-11's owner, 30 Oct 2026): it is the lifecycle controller that refuses to submit jobs while
+// no front is configured.
+const frontWarning = "warning: no front recorded (--front-mode, --front-addr): no jobs will be submitted until a front is configured. " +
+	"Alpha needs a front that compute nodes reach, directly on the dial-home port or over ssh on port 22 with a restricted key " +
+	"(HBEP-11, open question 8). Record it with --front-mode direct|ssh and --front-addr."

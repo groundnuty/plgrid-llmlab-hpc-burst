@@ -26,7 +26,7 @@ func runFetch(t *testing.T, env []string, args ...string) (string, string, error
 
 func TestFetchScript(t *testing.T) {
 	if _, err := exec.LookPath("curl"); err != nil {
-		t.Skip("SKIPPED, NOT TESTED: curl is not installed")
+		skipOrFail(t, "curl is not installed")
 	}
 	site := t.TempDir()
 	rel := filepath.Join(site, "v1.36.5+k3s1")
@@ -37,7 +37,7 @@ func TestFetchScript(t *testing.T) {
 	out, _ := exec.Command("uname", "-m").Output()
 	a := arch[strings.TrimSpace(string(out))]
 	if a == "" {
-		t.Skip("SKIPPED, NOT TESTED: unsupported architecture " + string(out))
+		skipOrFail(t, "unsupported architecture "+string(out))
 	}
 	asset := "k3s"
 	if a == "arm64" {

@@ -36,6 +36,14 @@ func (l layout) adminKubeconfig() string { return filepath.Join(l.dir, "k3s-admi
 func (l layout) kubeconfig() string      { return filepath.Join(l.dir, "kubeconfig") }
 func (l layout) backupsDir() string      { return filepath.Join(l.dir, "backups") }
 func (l layout) sqliteDir() string       { return filepath.Join(l.dataDir(), "server", "db") }
+func (l layout) storeDB() string         { return filepath.Join(l.sqliteDir(), "state.db") }
+func (l layout) tokenFile() string       { return filepath.Join(l.dataDir(), "server", "token") }
+func (l layout) tmpDir() string          { return filepath.Join(l.dir, "tmp") }
+func (l layout) auditPolicy() string     { return filepath.Join(l.dir, "audit-policy.yaml") }
+func (l layout) auditLog() string        { return filepath.Join(l.logDir(), "audit.log") }
+
+// storeVersionFile records which k3s release last wrote the store. down never removes it.
+func (l layout) storeVersionFile() string { return filepath.Join(l.dir, "store-version.json") }
 
 // newLayout makes the state directory path absolute and rejects one that is too long for k3s's sockets.
 func newLayout(dir string) (layout, error) {
@@ -85,6 +93,13 @@ func (l layout) loadState() (*State, error) {
 	}
 	if len(s.Procs) == 0 {
 		return nil, fmt.Errorf("%s records no process", l.stateFile())
+	}
+	for _, p := range s.Procs {
+		// Without all three, no identity can be confirmed, and an unconfirmed process is never
+		// signalled; a record that lacks one is damaged, not a reason to skip a check.
+		if p.PID <= 1 || p.StartTicks == 0 || p.BootID == "" {
+			return nil, fmt.Errorf("%s is damaged: process %q has pid %d, start time %d and boot ID %q; stop whatever it names by hand, then remove it", l.stateFile(), p.Name, p.PID, p.StartTicks, p.BootID)
+		}
 	}
 	return &s, nil
 }

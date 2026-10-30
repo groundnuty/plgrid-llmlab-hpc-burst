@@ -79,28 +79,14 @@ func kcmHealthz(port int, timeout time.Duration) error {
 	return nil
 }
 
-// portOwned reports whether a LISTEN socket on port is held by the process tree of pid.
-func portOwned(pid, port int) (bool, error) {
-	owned, _, err := ownedListeners([]int{pid})
-	if err != nil {
-		return false, err
-	}
-	for _, s := range owned {
-		if s.Port == port {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
 // waitReady waits until the host the record names is ready: /readyz answers 200 on the
 // apiserver, and /healthz answers 200 on the embedded controller manager's port. It is tied to
-// the launched process at every step. The process must still be the recorded one at every
-// probe, and the probed port must be held by that process, before and after the answer. So a
-// 200 from some other server on the port (a system k3s, a leftover) counts for nothing.
-func waitReady(ctx context.Context, l layout, st *State, timeout time.Duration) (readyzAt, readyAt time.Duration, err error) {
+// the launched process at every step through h, the pidfd taken at launch. The process must still
+// be the recorded one at every probe, and the probed port must be held by that process, before
+// and after the answer. So a 200 from some other server on the port (a system k3s, a leftover)
+// counts for nothing. Before it returns ready, confirmHost checks the whole host once more.
+func waitReady(ctx context.Context, l layout, st *State, h *procHandle, timeout time.Duration) (readyzAt, readyAt time.Duration, err error) {
 	t0 := st.StartedAt
-	rec := st.Procs[0]
 	deadline := time.Now().Add(timeout)
 	stage := "apiserver /readyz"
 	var last error
@@ -110,7 +96,7 @@ func waitReady(ctx context.Context, l layout, st *State, timeout time.Duration) 
 		if ctx.Err() != nil {
 			return 0, 0, ctx.Err()
 		}
-		if v, d := identify(rec); v != Ours {
+		if v, d := h.verify(); v != Ours {
 			return 0, 0, fmt.Errorf("k3s is no longer running before it was ready (%s); see %s", d, l.logFile())
 		}
 		if !readyzDone {
@@ -124,31 +110,31 @@ func waitReady(ctx context.Context, l layout, st *State, timeout time.Duration) 
 				}
 			}
 			if cfg != nil {
-				if own, oerr := portOwned(rec.PID, st.Ports.HTTPS); oerr != nil {
+				if own, oerr := portOwned(h, st.Ports.HTTPS); oerr != nil {
 					last = oerr
 				} else if !own {
 					last = fmt.Errorf("port %d is not held by the launched k3s yet", st.Ports.HTTPS)
 				} else if rerr := readyz(cfg); rerr != nil {
 					last = rerr
-				} else if own2, _ := portOwned(rec.PID, st.Ports.HTTPS); !own2 {
+				} else if own2, _ := portOwned(h, st.Ports.HTTPS); !own2 {
 					last = fmt.Errorf("/readyz answered, but port %d is not held by the launched k3s", st.Ports.HTTPS)
 				} else {
 					readyzDone, readyzAt, stage, last = true, time.Since(t0), "controller manager /healthz", nil
 				}
 			}
 		} else {
-			if own, oerr := portOwned(rec.PID, st.Ports.KCM); oerr != nil {
+			if own, oerr := portOwned(h, st.Ports.KCM); oerr != nil {
 				last = oerr
 			} else if !own {
 				last = fmt.Errorf("port %d is not held by the launched k3s yet", st.Ports.KCM)
 			} else if herr := kcmHealthz(st.Ports.KCM, 1500*time.Millisecond); herr != nil {
 				last = herr
-			} else if own2, _ := portOwned(rec.PID, st.Ports.KCM); !own2 {
+			} else if own2, _ := portOwned(h, st.Ports.KCM); !own2 {
 				last = fmt.Errorf("/healthz answered, but port %d is not held by the launched k3s", st.Ports.KCM)
 			} else {
 				readyAt = time.Since(t0)
-				if probs := checkHostListeners(st); len(probs) > 0 {
-					return 0, 0, fmt.Errorf("k3s is ready but its listeners are wrong: %v", probs)
+				if err := confirmHost(l, st, h); err != nil {
+					return 0, 0, err
 				}
 				return readyzAt, readyAt, nil
 			}
@@ -158,15 +144,23 @@ func waitReady(ctx context.Context, l layout, st *State, timeout time.Duration) 
 	return 0, 0, fmt.Errorf("%s not ready after %s: %v; see %s", stage, timeout, last, l.logFile())
 }
 
-// checkHostListeners checks the recorded process tree holds exactly the expected ports, on loopback.
-func checkHostListeners(st *State) []string {
-	pids := make([]int, 0, len(st.Procs))
-	for _, p := range st.Procs {
-		pids = append(pids, p.PID)
-	}
-	owned, others, err := ownedListeners(pids)
+// confirmHost is the last check before a host counts as ready or healthy, made after the probes
+// have answered: the process tree holds exactly the expected loopback listeners, k3s runs a binary
+// it unpacked into its own data directory, and the process is still the recorded one after both
+// reads.
+func confirmHost(l layout, st *State, h *procHandle) error {
+	owned, others, err := treeListeners(h)
 	if err != nil {
-		return []string{err.Error()}
+		return fmt.Errorf("cannot list the listeners: %w", err)
 	}
-	return verifyListeners(st.Ports.Expected(), owned, others)
+	if probs := verifyListeners(st.Ports.Expected(), owned, others); len(probs) > 0 {
+		return fmt.Errorf("k3s answered, but its listeners are wrong: %v", probs)
+	}
+	if _, err := checkExe(l, h); err != nil {
+		return err
+	}
+	if v, d := h.verify(); v != Ours {
+		return fmt.Errorf("k3s changed while it was checked: %s", d)
+	}
+	return nil
 }

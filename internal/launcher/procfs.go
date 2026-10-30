@@ -1,9 +1,10 @@
 package launcher
 
 // Adapted from spikes/s3/cmd/s3bench/proc.go (this repository, spike S3, PR #36): the /proc
-// readers for descendants, VmRSS and listening sockets. The identity checks (start time, boot
-// ID, zombies) are new: S3's harness was the long-lived parent of what it started, and the
-// launcher is not, so it has to recognise its processes across invocations.
+// readers for descendants, VmRSS and listening sockets. The identity records (start time, boot
+// ID) are new: S3's harness was the long-lived parent of what it started, and the launcher is
+// not, so it has to recognise its processes across invocations. The decisions built on these
+// readers (alive or not, ours or not, which sockets are ours) are in handle.go.
 
 import (
 	"errors"
@@ -34,13 +35,17 @@ type ProcRec struct {
 type Verdict int
 
 const (
-	// Gone: no such process, or a zombie (dead, only waiting to be reaped).
+	// Gone: the process has exited. Only the kernel's process handle (a pidfd) or the absence of
+	// any process with the PID says so, never a /proc read that failed or came back empty.
 	Gone Verdict = iota
 	// Ours: a live process with the recorded PID, start time and boot ID.
 	Ours
-	// Foreign: a live process has the recorded PID, but it is not the recorded one (the PID was
-	// reused, or the machine rebooted since). It must never be signalled.
+	// Foreign: a live process has the recorded PID, but it is not the recorded one (another start
+	// time, or the record is from an earlier boot). It must never be signalled.
 	Foreign
+	// Unknown: the identity could not be established (no pidfd, an unreadable boot ID or /proc
+	// entry). It is never signalled, and its record is kept.
+	Unknown
 )
 
 func (v Verdict) String() string {
@@ -51,8 +56,10 @@ func (v Verdict) String() string {
 		return "ours"
 	case Foreign:
 		return "foreign"
+	case Unknown:
+		return "unknown"
 	}
-	return "unknown"
+	return "invalid"
 }
 
 // procStat holds the fields of /proc/<pid>/stat the launcher uses.
@@ -95,42 +102,26 @@ func readStat(pid int) (procStat, error) {
 }
 
 // currentBootID is the kernel's random ID of this boot. After a reboot a recorded start time
-// means nothing, so the ID is part of every record.
-func currentBootID() string {
+// means nothing, so the ID is part of every record, and a boot ID that cannot be read is an
+// error: without it no identity can be confirmed.
+func currentBootID() (string, error) {
 	b, err := os.ReadFile(procRoot + "/sys/kernel/random/boot_id")
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("cannot read the boot ID: %w", err)
 	}
-	return strings.TrimSpace(string(b))
-}
-
-// newRec records the process with the given PID as it is now.
-func newRec(name string, pid int) (ProcRec, error) {
-	st, err := readStat(pid)
-	if err != nil {
-		return ProcRec{}, fmt.Errorf("read the identity of pid %d: %w", pid, err)
+	id := strings.TrimSpace(string(b))
+	if id == "" {
+		return "", errors.New("the boot ID is empty")
 	}
-	if isDead(pid, st) {
-		return ProcRec{}, fmt.Errorf("pid %d has already exited", pid)
-	}
-	return ProcRec{Name: name, PID: pid, StartTicks: st.StartTicks, BootID: currentBootID()}, nil
+	return id, nil
 }
 
 func zombieState(b byte) bool { return b == 'Z' || b == 'X' || b == 'x' }
 
-// isDead reports whether the process is dead: all of its threads are. The state letter of
-// /proc/<pid>/stat is the state of the thread-group leader only, and it reads Z whenever the
-// leader is gone while the process lives on. That is not rare. When a multi-threaded program
-// calls execve from a thread other than the leader (k3s re-executes itself, after unpacking its
-// embedded binaries), the kernel makes the old leader a zombie until the calling thread has taken
-// over its PID. A launcher that took "Z" for "dead" would stop watching a live k3s and, on a
-// failed start, would leave it running. So Z counts as dead only when no other thread of the
-// process is alive.
-func isDead(pid int, st procStat) bool {
-	return zombieState(st.State) && !liveThreads(pid)
-}
-
-// liveThreads reports whether any thread of the process is in a state other than Z and X.
+// liveThreads reports whether a /proc scan finds a thread of the process in a state other than Z
+// and X. It is only a cross-check, never evidence of death: while a multi-threaded program calls
+// execve from a thread other than the leader (k3s re-executes itself this way), the leader
+// reads Z and the task directory can briefly list no thread at all, though the process lives.
 func liveThreads(pid int) bool {
 	tasks, err := os.ReadDir(procPath(pid, "task"))
 	if err != nil {
@@ -148,50 +139,32 @@ func liveThreads(pid int) bool {
 	return false
 }
 
-// identify decides whether rec is still alive and still the same process. It never signals.
-// A process whose identity cannot be read for a reason other than "no such process" is treated
-// as Foreign, the safe answer: Foreign is never signalled.
-func identify(rec ProcRec) (Verdict, string) {
-	if rec.PID <= 1 {
-		return Foreign, fmt.Sprintf("recorded pid %d is not a process the launcher could have started", rec.PID)
-	}
-	st, err := readStat(rec.PID)
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		return Gone, fmt.Sprintf("pid %d does not exist", rec.PID)
-	case err != nil:
-		return Foreign, fmt.Sprintf("pid %d: cannot read its identity: %v", rec.PID, err)
-	case isDead(rec.PID, st):
-		return Gone, fmt.Sprintf("pid %d has exited (state %c)", rec.PID, st.State)
-	}
-	if rec.BootID != "" && rec.BootID != currentBootID() {
-		return Foreign, fmt.Sprintf("pid %d: recorded before a reboot, so the process now using it is not the recorded one", rec.PID)
-	}
-	if st.StartTicks != rec.StartTicks {
-		return Foreign, fmt.Sprintf("pid %d now belongs to another process (start time %d, recorded %d)", rec.PID, st.StartTicks, rec.StartTicks)
-	}
-	return Ours, ""
-}
-
-// descendants returns the given PIDs plus every process below them.
-func descendants(roots []int) []int {
+// procTable reads the stat of every process once: a snapshot of parent links and start times.
+func procTable() map[int]procStat {
 	ents, _ := os.ReadDir(procRoot)
-	parent := map[int]int{}
+	out := map[int]procStat{}
 	for _, e := range ents {
 		if pid, err := strconv.Atoi(e.Name()); err == nil {
 			if st, err := readStat(pid); err == nil {
-				parent[pid] = st.PPID
+				out[pid] = st
 			}
 		}
 	}
+	return out
+}
+
+// descendants returns the given PIDs plus every process below them. It is a snapshot, used only
+// for measurements (RSS); decisions about processes go through verified handles (handle.go).
+func descendants(roots []int) []int {
+	table := procTable()
 	set := map[int]bool{}
 	for _, r := range roots {
 		set[r] = true
 	}
 	for changed := true; changed; {
 		changed = false
-		for pid, pp := range parent {
-			if !set[pid] && set[pp] {
+		for pid, st := range table {
+			if !set[pid] && set[st.PPID] {
 				set[pid] = true
 				changed = true
 			}
@@ -203,6 +176,22 @@ func descendants(roots []int) []int {
 	}
 	sort.Ints(out)
 	return out
+}
+
+// exePath reads the /proc/<pid>/exe link: the executable the process runs now.
+func exePath(pid int) (string, error) { return os.Readlink(procPath(pid, "exe")) }
+
+// fdSocketInodes returns the inodes of the sockets one process holds.
+func fdSocketInodes(pid int) map[string]bool {
+	inodes := map[string]bool{}
+	fds, _ := os.ReadDir(procPath(pid, "fd"))
+	for _, fd := range fds {
+		l, err := os.Readlink(procPath(pid, "fd/"+fd.Name()))
+		if err == nil && strings.HasPrefix(l, "socket:[") {
+			inodes[strings.TrimSuffix(strings.TrimPrefix(l, "socket:["), "]")] = true
+		}
+	}
+	return inodes
 }
 
 // errNoRSS means /proc/<pid>/status was readable but has no VmRSS line (a zombie or a kernel thread).
@@ -353,39 +342,6 @@ func listenSockets() ([]sock, error) {
 		out = append(out, rows...)
 	}
 	return out, nil
-}
-
-// socketInodes returns the inodes of the sockets the processes (and their descendants) hold.
-func socketInodes(roots []int) map[string]bool {
-	inodes := map[string]bool{}
-	for _, pid := range descendants(roots) {
-		fds, _ := os.ReadDir(procPath(pid, "fd"))
-		for _, fd := range fds {
-			l, err := os.Readlink(procPath(pid, "fd/"+fd.Name()))
-			if err == nil && strings.HasPrefix(l, "socket:[") {
-				inodes[strings.TrimSuffix(strings.TrimPrefix(l, "socket:["), "]")] = true
-			}
-		}
-	}
-	return inodes
-}
-
-// ownedListeners returns the LISTEN sockets held by the processes and their descendants, and
-// every other LISTEN socket on the machine.
-func ownedListeners(roots []int) (owned, others []sock, err error) {
-	all, err := listenSockets()
-	if err != nil {
-		return nil, nil, err
-	}
-	inodes := socketInodes(roots)
-	for _, s := range all {
-		if inodes[s.inode] {
-			owned = append(owned, s)
-		} else {
-			others = append(others, s)
-		}
-	}
-	return owned, others, nil
 }
 
 func sortedPorts(ss []sock) []Listener {

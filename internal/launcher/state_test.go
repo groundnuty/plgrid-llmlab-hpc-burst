@@ -9,7 +9,7 @@ import (
 )
 
 func TestStateRoundTripAndMode(t *testing.T) {
-	l, err := newLayout(filepath.Join(t.TempDir(), "s"))
+	l, err := newLayout(filepath.Join(shortDir(t), "s"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,12 +46,20 @@ func TestStateRoundTripAndMode(t *testing.T) {
 }
 
 func TestLoadStateRejectsDamage(t *testing.T) {
-	l, _ := newLayout(t.TempDir())
+	l, err := newLayout(shortDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for name, content := range map[string]string{
 		"not json":       "{{{",
 		"wrong schema":   `{"schema": 99, "processes": [{"pid": 5}]}`,
 		"no processes":   `{"schema": 1, "processes": []}`,
 		"truncated file": `{"schema": 1, "proces`,
+		// Without a boot ID, a start time or a real PID, no identity can be confirmed.
+		"no boot id":    `{"schema": 1, "processes": [{"name": "k3s", "pid": 4242, "start_ticks": 99}]}`,
+		"empty boot id": `{"schema": 1, "processes": [{"name": "k3s", "pid": 4242, "start_ticks": 99, "boot_id": ""}]}`,
+		"no start time": `{"schema": 1, "processes": [{"name": "k3s", "pid": 4242, "boot_id": "b"}]}`,
+		"pid 1":         `{"schema": 1, "processes": [{"name": "k3s", "pid": 1, "start_ticks": 99, "boot_id": "b"}]}`,
 	} {
 		if err := os.WriteFile(l.stateFile(), []byte(content), 0o600); err != nil {
 			t.Fatal(err)
@@ -63,7 +71,10 @@ func TestLoadStateRejectsDamage(t *testing.T) {
 }
 
 func TestLockIsExclusive(t *testing.T) {
-	l, _ := newLayout(t.TempDir())
+	l, err := newLayout(shortDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
 	unlock, err := l.lockState()
 	if err != nil {
 		t.Fatal(err)
