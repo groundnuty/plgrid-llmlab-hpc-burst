@@ -113,6 +113,8 @@ Deployment options:
 
 ### API
 
+- **Field names are camelCase,** per the Kubernetes API conventions (owner decision, 30 Oct 2026), for example `holdRelease`, `lostGrace`, `imageDigest` and `catalogName`. HBEP-3's canonical `v1` object keeps its own snake_case keys: it is a hash input, not a Kubernetes object, and the deployment-ID library maps the fields to it.
+
 - Group `hpcburst.groundnuty.github.io`, version `v1alpha1` (owner decision, 30 Oct 2026). Each kind has a status subresource. ModelDeployment also has a scale subresource.
 
 | Kind | Scope | Spec holds | Status holds |
@@ -125,13 +127,13 @@ Deployment options:
 
 - **PlatformProfile schema.** HBEP-4 owns it (its open question 3). For alpha, the fields that the Slurm provider and the deployment ID read are typed. The rest of the profile is kept as an untyped block until HBEP-4 fixes the schema.
   - Per partition: the GPU model and the CPU architecture. Together they are the accelerator class, a deployment-ID input (HBEP-3).
-  - `hold_release` (bool): whether a plain user's `sbatch --hold` is honoured and that user can lift it. It is verified per platform. False runs S4's fallback mode (HBEP-7, open question 11).
-  - `lost_grace` (duration, default 2 min): how long a recorded job may be absent from both the queue listing and accounting before it is reported Lost.
-  - `inflight_window` (duration): how long an unresolved submission attempt is waited on. It must exceed the worst remote `sbatch` time, because a local timeout does not stop a remote `sbatch`.
-  - `unknown_bound` (duration, S4's default 10 min): in fallback mode, how long an Unknown attempt may stay unresolved before an operator is asked.
+  - `holdRelease` (bool): whether a plain user's `sbatch --hold` is honoured and that user can lift it. It is verified per platform. False runs S4's fallback mode (HBEP-7, open question 11).
+  - `lostGrace` (duration, default 2 min): how long a recorded job may be absent from both the queue listing and accounting before it is reported Lost.
+  - `inflightWindow` (duration): how long an unresolved submission attempt is waited on. It must exceed the worst remote `sbatch` time, because a local timeout does not stop a remote `sbatch`.
+  - `unknownBound` (duration, S4's default 10 min): in fallback mode, how long an Unknown attempt may stay unresolved before an operator is asked.
   - From spikes S4 and S5: the time zone, the requeue default, how long a finished job stays in the queue listing, job-name rules, whether accounting keeps the job comment, and the JSON output version.
   - Read by the lifecycle controller and the file staging, typed by HBEP-4 (amended 2026-10-30): per partition, the longest time limit, the GPUs per node, and the CPUs and memory per GPU; the staging directory; the drain window; an optional idle cap; and the health and restart thresholds. HBEP-4's Platform profile schema gives their names, types and defaults.
-- **Alpha precondition: `hold_release` is verified on the alpha platform;** otherwise S4's fallback mode runs. Spike S1 (issue #18) measured it true on 30 Oct 2026 on Helios CPU, Helios GH200 and Athena A100, with one trial per partition: the hold was honoured as `JobHeldUser`, and the same user lifted it. So Helios and Athena run hold mode. Sano is not verified, so it runs fallback mode until checked.
+- **Alpha precondition: `holdRelease` is verified on the alpha platform;** otherwise S4's fallback mode runs. Spike S1 (issue #18) measured it true on 30 Oct 2026 on Helios CPU, Helios GH200 and Athena A100, with one trial per partition: the hold was honoured as `JobHeldUser`, and the same user lifted it. So Helios and Athena run hold mode. Sano is not verified, so it runs fallback mode until checked.
 - **Labels** under the group's prefix:
   - on Providers: `organization`, `platform`, `partition` and `account` (HBEP-3);
   - on Allocations and Instances: `provider` and `model-deployment`;
@@ -280,7 +282,7 @@ S3 exercised validation, watches, conflicts, cascades and finalizers. Leases, Ev
 
 - **Alpha:**
   - the single-user host (k3s as a plain user) serves the five kinds at `v1alpha1`;
-  - the alpha host passes the front-reachability check (open question 8), and the alpha platform has `hold_release` verified, or runs fallback mode;
+  - the alpha host passes the front-reachability check (open question 8), and the alpha platform has `holdRelease` verified, or runs fallback mode;
   - the Test plan passes on it with one batch provider;
   - the host starts within S3's budget on a 2 vCPU, 4 GiB VM.
 - **Beta:**
@@ -378,6 +380,7 @@ The control plane replaces the files and scripts that held www-2027's state: per
 
 ## Amendments
 
+- **2026-10-30: camelCase field names** (owner decision, while building the CRDs, PR #48). The HBEPs' snake_case field names for CRD and profile fields become camelCase; Slurm's JSON field names and HBEP-3's hash-object keys keep their own spelling.
 - **2026-10-30: decisions from building the CRDs and the launcher (PRs #48, #49).** The Allocation declares crossplane's managed-resource fields itself, with `managementPolicies` defaulting to the provider's registered set and immutable, and `providerConfigRef` immutable; the embedded default `["*"]` would have stalled every Allocation. ModelDeployment `spec.source` and Allocation spec are one-of served-or-managed and batch-or-managed. S5's facts are typed PlatformProfile fields. Retention has no schema default. The launcher warns, rather than refuses, without a front; the controller then submits nothing. A store-full write that reports an error may still have taken effect, so controllers re-read state after any write error (Operational readiness 3).
 - **2026-10-30: single-user host settled.** Spike S3's fix (PR #36) showed that k3s runs as a plain user (`server --rootless --disable-agent`, SQLite) with no system change, and passes the suite and budget. By the rule this HBEP set, k3s is the single-user host. The assembled upstream stack stays as the alternative.
 - **2026-10-30: fields for the Slurm provider and the lifecycle controller.** Made with HBEP-4 becoming implementable and HBEP-7's design. The kinds gain:
