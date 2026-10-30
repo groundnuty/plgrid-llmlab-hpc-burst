@@ -159,6 +159,9 @@ func TestDeletingAModelDeploymentLeavesTheRecords(t *testing.T) {
 
 // The Allocation's finalizer holds the object until the provider's jobs are
 // cancelled. The controllers do the cancelling; here the finalizer is removed by hand.
+// This is a smoke test of Kubernetes' own finalizer semantics: no schema change
+// of ours can make it fail, so it is not coverage of cancel-all, which belongs
+// to the provider's tests (HBEP-4).
 func TestAllocationFinalizerHoldsTheObject(t *testing.T) {
 	ns := newNamespace(t)
 	al := newAllocation(ns, "held")

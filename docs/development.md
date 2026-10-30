@@ -31,9 +31,19 @@ The Kubernetes libraries match crossplane-runtime v2.4.3, which HBEP-4's provide
 | `k8s.io/apiextensions-apiserver` | v0.35.0 |
 | `sigs.k8s.io/controller-runtime` | v0.23.1 |
 | `sigs.k8s.io/controller-tools` (`controller-gen`) | v0.20.0 |
+| `github.com/crossplane/crossplane-runtime/v2` | v2.4.3 (Apache-2.0) |
+| `github.com/crossplane/crossplane/apis/v2` | v2.3.4 (Apache-2.0), the version crossplane-runtime v2.4.3 requires |
 | k3s (single-user and team host) | v1.36.5+k3s1 |
+| `kube-apiserver`, `kube-controller-manager` (the assembled test host of `internal/testenv`) | v1.36.2, sha256-pinned in `hack/test-binaries.sh` |
+| `etcd` (the assembled test host) | v3.6.8, sha256-pinned in `hack/test-binaries.sh` |
 
 Kubernetes' explicit ±1-minor skew rule is written for kubectl. client-go instead documents compatibility through the APIs a client and a cluster share ([client-go compatibility](https://github.com/kubernetes/client-go/blob/v0.35.3/README.md#compatibility-client-go---kubernetes-clusters)). A 0.35 client against a 1.36 server is a reasonable choice for shared stable APIs, and the tests against k3s 1.36 check the APIs we use. A change to any of these pins is its own PR.
+
+## Checks
+
+- `hack/check.sh` runs gofmt, vet, `go mod tidy -diff`, the generated-file check and the tests, then lists every skipped test. Run it under `nice` and the shared build lock.
+- `hack/mutate-cel.sh` neutralises each CEL admission rule in a copy of the CRDs and runs the test that covers it, which must fail. It takes several minutes, so it is not part of `hack/check.sh`; run it when a rule or its test changes. A rule with no entry in its table fails the script.
+- The test host (`internal/testenv`) binds only loopback ports 29200 to 29219 and, in k3s mode, accepts only a kubeconfig whose server is loopback on 29200 to 29239. The control-plane binaries are always sha256-checked; `HPCBURST_TESTENV_UNPINNED=1` is the explicit override for a binary you built yourself.
 
 ## Rules for every change
 
