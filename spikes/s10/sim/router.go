@@ -99,6 +99,12 @@ type Policy struct {
 	// seconds. CHWBL only.
 	AdaptiveLoose int
 	ControlStep   float64
+	// CapFullOnly, with Cap and AdaptiveLoose set (spike S10c, option 5),
+	// makes the cap follow the bound's readiness rule: Cap applies while every
+	// desired Instance is ready, together with Percent, and no cap applies
+	// while fewer are, together with AdaptiveLoose. Without it Cap applies
+	// throughout, as in option 3.
+	CapFullOnly bool
 }
 
 // DefaultControlStep is the adaptive bound's control period in seconds when
@@ -122,6 +128,9 @@ func (p Policy) Name() string {
 		}
 		if p.Cap > 0 {
 			n += fmt.Sprintf("+cap%d", p.Cap)
+			if p.CapFullOnly {
+				n += "-full-only"
+			}
 		}
 		if p.ReleaseOnDrain {
 			n += "+release-on-drain"
@@ -160,6 +169,9 @@ type router struct {
 	percent int
 	// lastSpilled is whether the latest route spilled past a full Instance.
 	lastSpilled bool
+	// capNow is the hard cap in force: the policy's, or for CapFullOnly
+	// whatever the last control step chose (0 for none).
+	capNow int
 }
 
 // errAllAtCap is route's signal that every member holds the hard cap.
@@ -173,20 +185,34 @@ func (r *router) bound() float64 {
 	return math.Inf(1)
 }
 
-// control applies the adaptive rule to the current readiness and returns the
-// old and new bound when it changed.
-func (r *router) control(ready, desired int) (from, to int, changed bool) {
+// controlChange is what one control step did to the bound and the cap.
+type controlChange struct {
+	from, to       int // MeanLoadPercentage before and after
+	capFrom, capTo int // the hard cap before and after (0 for none)
+	changed        bool
+}
+
+// control applies the adaptive rule to the current readiness. changed is set
+// when the bound or the cap changed.
+func (r *router) control(ready, desired int) controlChange {
 	if r.pol.AdaptiveLoose <= 0 {
-		return r.percent, r.percent, false
+		return controlChange{from: r.percent, to: r.percent, capFrom: r.capNow, capTo: r.capNow}
 	}
-	to = front.AdaptiveBound{Tight: r.pol.Percent, Loose: r.pol.AdaptiveLoose}.Percent(ready, desired)
-	from = r.percent
-	r.percent = to
-	return from, to, from != to
+	ch := controlChange{from: r.percent, capFrom: r.capNow}
+	if r.pol.CapFullOnly && r.pol.Cap > 0 {
+		rule := front.AdaptiveCapBound{Tight: r.pol.Percent, Loose: r.pol.AdaptiveLoose, Cap: r.pol.Cap}
+		ch.to, ch.capTo = rule.Percent(ready, desired), rule.CapAt(ready, desired)
+	} else {
+		ch.to = front.AdaptiveBound{Tight: r.pol.Percent, Loose: r.pol.AdaptiveLoose}.Percent(ready, desired)
+		ch.capTo = r.capNow
+	}
+	r.percent, r.capNow = ch.to, ch.capTo
+	ch.changed = ch.from != ch.to || ch.capFrom != ch.capTo
+	return ch
 }
 
 func newRouter(pol Policy, names []string, initial []int) *router {
-	r := &router{pol: pol, names: names, members: append([]int(nil), initial...), percent: pol.Percent}
+	r := &router{pol: pol, names: names, members: append([]int(nil), initial...), percent: pol.Percent, capNow: pol.Cap}
 	if pol.Hashed() {
 		r.group = front.New(256)
 		r.group.SetEndpoints(r.memberNames())
@@ -231,8 +257,8 @@ func (r *router) route(cs *convState, reqID int, inflight []int) (int, func(), e
 	var addr string
 	var done func()
 	var err error
-	if r.pol.Cap > 0 && r.pol.Kind == CHWBL {
-		addr, done, r.lastSpilled, err = r.group.PickPrefixHashCapped(key, pct, r.pol.Cap)
+	if r.capNow > 0 && r.pol.Kind == CHWBL {
+		addr, done, r.lastSpilled, err = r.group.PickPrefixHashCapped(key, pct, r.capNow)
 		if errors.Is(err, front.ErrAllAtCap) {
 			return 0, nil, errAllAtCap
 		}

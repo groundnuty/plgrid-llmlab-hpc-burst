@@ -226,9 +226,13 @@ func (e *Engine) drainFront() {
 // AdaptiveLoose): ready Instances against the desired count, the cluster's
 // size at time 0.
 func (e *Engine) controlTick() {
-	from, to, changed := e.rt.control(len(e.rt.members), e.cl.Instances)
-	if changed {
-		e.M.switched(e, from, to)
+	ch := e.rt.control(len(e.rt.members), e.cl.Instances)
+	if ch.changed {
+		e.M.switched(e, ch)
+		if ch.capFrom > 0 && ch.capTo == 0 {
+			// The cap is off, so held requests have room now.
+			e.drainFront()
+		}
 	}
 	if e.q.Len() > 0 { // stop once nothing else is pending
 		e.push(e.now+e.pol.controlStep(), e.controlTick)
