@@ -9,6 +9,9 @@
 # compute_node were measured inside one short Slurm job on plgrid-gpu-a100 (S1's step-0
 # probe), not on the login node. slurm.hold_release was measured later the same day by one
 # hold/release probe job on plgrid-gpu-a100 (submitted held, released, cancelled at once; it never ran).
+# S1's probe 2 (later the same day) ran three short jobs on plgrid-gpu-a100 (two nodes) and measured
+# containers.apptainer_compute_nodes, containers.user_namespaces_compute_nodes and
+# storage.home_readable_from_compute_nodes. Keys are snake_case, as in the rest of this file.
 draft: s5
 platform: athena              # helios | athena | sano
 organization: cyfronet        # cyfronet | sano
@@ -405,6 +408,21 @@ facts:
       method: measured
       source: "apptainer --version (command not found)"
       date: 2026-10-30
+    apptainer_compute_nodes:
+      value:
+        plgrid-gpu-a100:
+          present: true
+          version: "1.4.5"
+          path: /usr/bin/apptainer
+          install: "setuid (apptainer-suid RPM; starter-suid mode 4755, owner root)"
+          exec_works: "partly: a directory (sandbox) image runs; a SIF (squashfs) image fails"
+          exec_sif_works: false
+          exec_sandbox_works: true
+          arch: x86_64
+      method: measured
+      source: "S1 probe 2, three jobs on plgrid-gpu-a100 (two different nodes): command -v apptainer singularity; apptainer --version; rpm -q apptainer apptainer-suid; apptainer buildcfg | grep -i suid; apptainer exec docker://busybox:1.36 true (exit 255 on every attempt: six on one node, two on the other); apptainer build --sandbox from the same image (exit 0) then apptainer exec on the directory: true (exit 0) and busybox uname -m inside the container (x86_64), on both nodes; apptainer --debug exec; unsquashfs -s on the login node"
+      date: 2026-10-30
+      note: "Apptainer exists on the compute nodes only: apptainer-1.4.5-2.el9.x86_64 and apptainer-suid, at /usr/bin/apptainer, plus /usr/bin/singularity. It is not an Lmod module (module avail apptainer lists nothing; module spider apptainer and singularity report 'Unable to find'), and the login node has neither. The anonymous Docker Hub pull and the conversion to a SIF succeed (a 2.2 MB gzip squashfs that unsquashfs reads on the login node), but running the SIF fails every time with 'image driver squashfuse_ll instance exited with error ... Something went wrong trying to read the squashfs image'. The debug log shows why that driver is used: in setuid mode the kernel squashfs mount is 'not allowed because ECL not activated' (and squashfs is not listed in /proc/filesystems on the node), so Apptainer falls back to the squashfuse_ll image driver, and that driver fails on both nodes. /dev/fuse is world read-write. The root cause of the squashfuse_ll failure was not found. A sandbox directory needs no squashfs mount and works: build it with apptainer build --sandbox <dir> docker://<image>, then apptainer exec <dir>. The container ran in setuid mode (identity uid_map; apptainer exec --userns refused). Three jobs, two nodes, one partition. Whether a SIF built on another machine (not converted on the node) behaves differently was not tested."
     other_runtimes_login_node:
       value: "none found on PATH: enroot, podman, docker. Not searched for: charliecloud, udocker, sarus, shifter"
       method: measured
@@ -436,10 +454,11 @@ facts:
       date: 2026-10-30
       note: "max_user_namespaces is 0. unshare -U and unshare -Ur both exit 1 with 'No space left on device', the error the kernel gives when the namespace limit is 0."
     user_namespaces_compute_nodes:
-      value: null
-      method: unknown
-      source: "needs a job"
+      value: {plgrid-gpu-a100: false}
+      method: measured
+      source: "S1 probe 2 job on plgrid-gpu-a100: unshare -U true; unshare -Ur true; apptainer exec --userns; cat /proc/sys/user/max_user_namespaces"
       date: 2026-10-30
+      note: "unshare -U and unshare -Ur both fail with 'No space left on device' (the kernel's report of a zero limit) and apptainer exec --userns fails with 'maximum number of user namespaces exceeded'. Reading /proc/sys/user/max_user_namespaces itself failed with 'Cannot allocate memory', so the limit's value was not read; the failures above are the evidence. Containers therefore depend on the setuid Apptainer install."
 
   storage:
     home_fstype:
@@ -452,6 +471,13 @@ facts:
       method: documented
       source: "https://docs.hpc.cyfronet.pl/environment/variables/"
       date: 2026-10-30
+    home_readable_from_compute_nodes:
+      value:
+        plgrid-gpu-a100: {readable: true, filesystem: nfs, mode: "700", owner_is_job_user: true, same_home_as_login_node: true, ssh_dir_exists: true, ssh_dir_readable: true}
+      method: measured
+      source: "S1 probe 2 job on plgrid-gpu-a100: test -r ~ && ls ~ >/dev/null (exit 0); stat -c %a ~; stat -f -c %T ~ and df -PT ~ (filesystem type only); ls -A ~ | wc -l on the node and on the login node (8 and 8); test -d ~/.ssh, test -r and -x ~/.ssh, ls ~/.ssh >/dev/null (exit codes only; contents not listed)"
+      date: 2026-10-30
+      note: "The job's user can read and list its own home on the compute node. The home is NFS, as on the login node, and its top-level entry count equals the login node's, so it is the same home and not a stub. ~/.ssh exists and can be entered and listed, which is what ssh dial-home mode needs. Read only: nothing was written to the home. Measured in the first of the three jobs on one node; the later two jobs did not repeat it."
     scratch_fstype:
       value: "lustre"
       method: measured
@@ -590,10 +616,10 @@ facts:
 unknown:
   - fact: "compute-node inbound from outside"
     reason: "the docs are silent and a test needs a job"
-  - fact: "container runtimes on compute nodes (Apptainer, Singularity, enroot or others), their versions, and whether Slurm's native OCI support is configured there"
-    reason: "none of apptainer, singularity, enroot, podman or docker was found on the login node, and the docs do not mention containers; that says nothing about compute nodes, and a check needs a job"
-  - fact: "user namespaces on compute nodes"
-    reason: "needs a job; the login node has max_user_namespaces=0, which says nothing about compute nodes"
+  - fact: "container runtimes on compute nodes other than Apptainer (enroot, podman, docker, charliecloud and others), and whether Slurm's native OCI support is configured there"
+    reason: "S1 probe 2 measured Apptainer only (containers.apptainer_compute_nodes); it did not look for other runtimes or for oci.conf on a compute node"
+  - fact: "why the squashfuse_ll image driver fails to read a SIF on the plgrid-gpu-a100 nodes, and whether a SIF built elsewhere runs"
+    reason: "the failure reproduced on two nodes but its cause was not found, and no SIF built off the cluster was tried (S1 probe 2 ran three jobs and stopped)"
   - fact: "size, filesystem type and permissions of $SCRATCH_LOCAL and $MEMFS on a compute node, and the value of $TMPDIR there"
     reason: "variables exist only inside a job"
   - fact: "GPU driver and CUDA version on compute nodes"

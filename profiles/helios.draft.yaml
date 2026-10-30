@@ -15,6 +15,9 @@ collected: 2026-10-30         # UTC date
 # probe (plgrid and plgrid-gpu-gh200). Everything else is still the login-node view, except
 # slurm.hold_release, which one hold/release probe job per partition hold/release probe jobs measured later the same day
 # (submitted held, released, cancelled at once; none ran).
+# S1's probe 2 (later the same day) ran one short job on plgrid-gpu-gh200 (QOS now) and measured
+# containers.apptainer_compute_nodes, containers.user_namespaces_compute_nodes and
+# storage.home_readable_from_compute_nodes. Keys are snake_case, as in the rest of this file.
 facts:
   slurm:
     version: {value: "24.11.5", method: measured, source: "sinfo --version", date: 2026-10-30, note: "scontrol show config SLURM_VERSION and the slurmd version of every reporting node agree"}
@@ -235,9 +238,34 @@ facts:
       source: "cat /proc/sys/user/max_user_namespaces; unshare -U true; unshare -Ur true"
       date: 2026-10-30
       note: "max_user_namespaces is 0. Both unshare calls fail with 'No space left on device', which is how the kernel reports a zero limit. /etc/subuid and /etc/subgid have no entry for the probing user; newuidmap and newgidmap exist. With the setuid Apptainer install a container may still run without user namespaces; that was not tested (S5 runs no container)."
-    user_namespaces_compute_nodes: {value: unknown, method: unknown, source: "needs a job", date: 2026-10-30}
+    apptainer_compute_nodes:
+      value:
+        plgrid-gpu-gh200:
+          present: true
+          version: "1.5.4"
+          path: /usr/bin/apptainer
+          install: "setuid (apptainer-suid RPM; starter-suid mode 4755, owner root)"
+          exec_works: true
+          arch: aarch64
+      method: measured
+      source: "S1 probe 2, one job on plgrid-gpu-gh200 (QOS now): command -v apptainer singularity; apptainer --version; rpm -q apptainer apptainer-suid; apptainer buildcfg | grep -i suid; apptainer exec docker://busybox:1.36 true (exit 0), then busybox --help (exit 0, applet list printed) and uname -m inside the container (aarch64)"
+      date: 2026-10-30
+      note: "The compute node runs el9 on aarch64: apptainer-1.5.4-1.el9.aarch64 and apptainer-suid, the same upstream version as the login node (1.5.4, EL8 x86_64). /usr/bin/singularity is also on PATH. Apptainer is not an Lmod module: module avail apptainer lists nothing and module spider apptainer and singularity both report 'Unable to find' (login shell). The anonymous Docker Hub pull worked (about 4 s for busybox, converted to a SIF in the cache under $SCRATCH; the matching aarch64 image was chosen). The container ran in setuid mode: the uid_map inside is the identity map and apptainer exec --userns is refused. Apptainer warns that $SCRATCH is mounted nodev and that xattrs are not supported on it; neither stopped the run. One job, one node. Only plgrid-gpu-gh200 was probed: Apptainer on the other Helios partitions is not measured."
+    user_namespaces_compute_nodes:
+      value: {plgrid-gpu-gh200: false}
+      method: measured
+      source: "S1 probe 2 job on plgrid-gpu-gh200: cat /proc/sys/user/max_user_namespaces; unshare -U true; unshare -Ur true; apptainer exec --userns"
+      date: 2026-10-30
+      note: "max_user_namespaces is 0, as on the login node. Both unshare calls fail with 'No space left on device' (the kernel's report of a zero limit) and apptainer exec --userns fails with 'maximum number of user namespaces exceeded'. Containers therefore depend on the setuid Apptainer install."
   storage:
     home: {value: {filesystem: nfs, quota_gib: 10, file_quota: 100000}, method: measured, source: "stat -f -c %T $HOME; hpc-fs", date: 2026-10-30, note: "quota values are the probing user's. Documented limit is 10 GB ($HOME, https://docs.hpc.cyfronet.pl/environment/variables/), which agrees."}
+    home_readable_from_compute_nodes:
+      value:
+        plgrid-gpu-gh200: {readable: true, filesystem: nfs, mode: "700", owner_is_job_user: true, same_home_as_login_node: true, ssh_dir_exists: true, ssh_dir_readable: true}
+      method: measured
+      source: "S1 probe 2 job on plgrid-gpu-gh200: test -r ~ && ls ~ >/dev/null (exit 0); stat -c %a ~; stat -f -c %T ~ and df -PT ~ (filesystem type only); ls -A ~ | wc -l on the node and on the login node (18 and 18); test -d ~/.ssh, test -r and -x ~/.ssh, ls ~/.ssh >/dev/null (exit codes only; contents not listed)"
+      date: 2026-10-30
+      note: "The job's user can read and list its own home on the compute node. The home is NFS (nfs4 in df), as on the login node, and its top-level entry count equals the login node's, so it is the same home and not a stub. ~/.ssh exists and can be entered and listed, which is what ssh dial-home mode needs. Read only: nothing was written to the home. One job, one node, one partition."
     scratch:
       value: {filesystem: lustre, quota_tib: 12, file_quota: 1000000}
       method: measured
@@ -337,10 +365,8 @@ facts:
 unknown:
   - fact: "compute-node inbound from outside"
     reason: "documentation silent; verifying it needs a job with a listener"
-  - fact: "user namespaces on compute nodes"
-    reason: "needs a job; max_user_namespaces is 0 on the login node and the compute-node value may differ"
-  - fact: "Apptainer version and setuid behaviour on compute nodes (el9; aarch64 on GH200)"
-    reason: "needs a job; only the login-node install (1.5.4, EL8 x86_64) was measured"
+  - fact: "Apptainer, user namespaces and home readability on the Helios partitions other than plgrid-gpu-gh200 (plgrid CPU x86_64, rtx, bigmem)"
+    reason: "S1 probe 2 ran one job on plgrid-gpu-gh200 only; the other partitions were not probed"
   - fact: "slurmrestd service"
     reason: "binary present in the client install; no endpoint advertised in the documentation; JWT is not enabled, but slurmrestd can also run with local (unix-socket) auth, so reachability for a plain user is unverified"
   - fact: "ssh connection limits of the login node (MaxStartups, MaxSessions)"
