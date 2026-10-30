@@ -35,7 +35,7 @@ Spikes are short experiments allowed from provisional HBEPs (HBEP-1). They settl
 | S4 | Can a Slurm provider built on crossplane-runtime run outside a cluster, and handle purged finished jobs and interrupted submits without duplicates? | 4 | #24 |
 | S5 | Login-node facts per platform: Slurm interfaces, requeue, time zone, containers, login-node policy | 4, 6, 7 | #17 (done, PR #19) |
 | S6 | Does an Agent Router edge pass bodies and long streams through unchanged and accept an LLMLab-format key? | 5 | not scheduled |
-| S7 | How long does a per-file checkpoint hash take on parallel filesystems, and does it match the Hub's hashes? | 9 | #30 |
-| S8 | Does embedded NATS JetStream lose no acknowledged record across a crash, a slow subscriber and redelivery? | 8, 10 | #25 (PR #28) |
+| S7 | How long does a per-file checkpoint hash take on parallel filesystems, and does it match the Hub's hashes? | 9 | #30 (done, PR #33) |
+| S8 | Does embedded NATS JetStream lose no acknowledged record across a crash, a slow subscriber and redelivery? | 8, 10 | #25 (done, PR #28) |
 | S9 | Do metrics scraped through the front and tunnel show a gone Instance as down, never as a stale zero? | 8 | not scheduled |
 | S10 | Which conversation key and load bound give a good prefix-cache hit rate without overloading an Instance? | 5 | #27 |
