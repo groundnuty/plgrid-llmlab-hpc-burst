@@ -46,9 +46,9 @@ Problems:
 ### Notes, constraints and caveats
 
 - **Compute nodes connect out on port 443,** measured by spike S1's step 0 (issue #18) on 30 Oct 2026.
-  - Short jobs on Helios CPU, Helios GH200 and Athena A100 all reached public HTTPS endpoints directly, with no proxy configured.
-  - A front that is publicly reachable on 443 can therefore take dial-home connections directly. That makes the HTTPS reverse tunnel the leading candidate for open question 1.
-  - The development VM behind a NAT accepted only port 22 from those nodes. There, the dial-home tunnel runs inside an ssh forward over port 22, with a restricted key.
+  - Short jobs on Helios CPU, Helios GH200 and Athena A100 all reached public HTTPS endpoints (two well-known public services) directly, with no proxy configured. No connection to an endpoint the framework runs has been made yet.
+  - So a front that is publicly reachable on 443 could take dial-home connections directly, which makes an HTTPS reverse tunnel a strong candidate for open question 1. A TLS-terminating front for it is not yet decided (HBEP-11).
+  - The development VM behind a NAT accepted only port 22 from those nodes. There, the dial-home tunnel will run inside an ssh forward over port 22, with a restricted key (not yet run from a compute node).
   - Sano was not measured.
   - Where dial home works stays a per-partition fact in the platform profile (HBEP-4): outbound allowed or not, through which protocols and ports, directly or through a proxy.
 - The front needs an address that compute nodes can reach. Where it runs is HBEP-11's decision.
@@ -72,7 +72,7 @@ Problems:
 
 ### Open questions
 
-1. **Tunnel protocol.** Candidates: an ssh reverse forward to an endpoint the framework runs; an HTTP/2 or WebSocket reverse tunnel over HTTPS; userspace WireGuard. Decided by spike S1 (issue #18). Egress is answered: direct 443 works on all three measured partitions. Throughput and time to first token under many concurrent long streams are measured by S1's one-hour runs.
+1. **Tunnel protocol.** Candidates: an ssh reverse forward to an endpoint the framework runs; an HTTP/2 or WebSocket reverse tunnel over HTTPS; userspace WireGuard. Partly informed by spike S1 (issue #18): outbound 443 to public endpoints works on all three measured partitions. S1's one-hour runs test one long stream through frp tcp inside an ssh forward, for cuts, reconnects and added latency. Still open, with no spike assigned yet: throughput and time to first token under many concurrent streams, and the HTTPS (wss) path.
 2. **Encryption.** Where TLS terminates. Should front and engine be encrypted end to end inside the tunnel? Decided with HBEP-9.
 3. **Relay fallback form.** An ssh forward from the front through the login node, or a process on the login node? Who supervises it? Is its owner the Allocation or the Instance? Spike on a cluster without outbound. A process on a login node waits on the centers' answer to HBEP-4's open question 14.
 4. **Port forwards.** Are they a supported path, or only an operator's debugging tool? If supported, with which owner and teardown? Owner decision.
