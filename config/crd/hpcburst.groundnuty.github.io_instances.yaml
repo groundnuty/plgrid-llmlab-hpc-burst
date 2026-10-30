@@ -165,7 +165,7 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
-              jobId:
+              jobID:
                 description: JobID is the provider job's ID.
                 type: string
               lastReconcileTime:

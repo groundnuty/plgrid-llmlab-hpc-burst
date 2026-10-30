@@ -10,7 +10,6 @@ spec:
   names:
     categories:
     - hpcburst
-    - managed
     kind: Allocation
     listKind: AllocationList
     plural: allocations
@@ -39,7 +38,9 @@ spec:
           Allocation is capacity with a lifetime, like a Kubernetes node: one lease on
           a provider, such as a Slurm job (HBEP-3). It outlives its Instances and can
           be repurposed. It is a crossplane-runtime managed resource whose external
-          name is its job tag.
+          name is its job tag. It is deliberately not in crossplane's "managed"
+          category, so that "kubectl delete managed --all" on a cluster that also runs
+          Crossplane cannot reach Allocations and cancel their jobs.
         properties:
           apiVersion:
             description: |-
@@ -210,6 +211,11 @@ spec:
                 label
               rule: has(self.providerConfigRef) && self.providerConfigRef.name.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
                 && size(self.providerConfigRef.name) <= 63
+            - message: 'an Allocation''s providerConfigRef is immutable: the job it
+                holds is on that provider; delete the Allocation and create a new
+                one'
+              rule: '!has(oldSelf.providerConfigRef) || (has(self.providerConfigRef)
+                && self.providerConfigRef == oldSelf.providerConfigRef)'
           status:
             description: AllocationStatus is the observed state of an Allocation.
             properties:
@@ -230,15 +236,25 @@ spec:
                       (HBEP-3, Vocabulary, Lease).
                     format: date-time
                     type: string
-                  jobId:
+                  jobID:
                     description: JobID is the established job ID, mirrored from its
                       annotation.
                     type: string
                   phase:
                     description: Phase of the job as the provider reports it.
                     type: string
+                  startEstimate:
+                    description: |-
+                      StartEstimate is when the platform's scheduler expects the job to start.
+                      It is absent while the platform gives no estimate: an unknown estimate
+                      is not "now" and not "never". It is not StartTime, which is the actual
+                      start, and it moves with every scheduler pass (HBEP-3, Vocabulary,
+                      Lease: a lease runs from a start estimate, which may be unknown).
+                    format: date-time
+                    type: string
                   startTime:
-                    description: StartTime is when the job started.
+                    description: StartTime is when the job actually started. It is
+                      absent until it has.
                     format: date-time
                     type: string
                   submission:

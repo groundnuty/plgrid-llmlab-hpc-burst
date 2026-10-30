@@ -64,8 +64,27 @@ func TestCheckpointRevisionIsAFullCommitID(t *testing.T) {
 	})
 }
 
+// The engine's digest is written under the canonical object's own key,
+// image_digest, as gpu_model and cpu_arch are (HBEP-3: code-font names stay
+// verbatim). The check reads the stored object, not the Go type.
+func TestEngineDigestKeyIsTheCanonicalOne(t *testing.T) {
+	ns := newNamespace(t)
+	md := newModelDeployment(ns, "digest-key")
+	must(t, c.Create(bg(), md), "create")
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("ModelDeployment"))
+	must(t, c.Get(bg(), objKey(md), u), "get unstructured")
+	engine, _, _ := unstructured.NestedMap(u.Object, "spec", "serving", "engine")
+	if engine["image_digest"] != digest {
+		t.Errorf("spec.serving.engine.image_digest = %v, want %s; keys %v", engine["image_digest"], digest, engine)
+	}
+	if _, wrong := engine["imageDigest"]; wrong {
+		t.Errorf("spec.serving.engine.imageDigest is written: %v", engine)
+	}
+}
+
 func TestEngineImageDigest(t *testing.T) {
-	const msg = "imageDigest must be 'sha256:'"
+	const msg = "image_digest must be 'sha256:'"
 	dig := func(d string) func(*v1alpha1.ModelDeployment) {
 		return func(md *v1alpha1.ModelDeployment) { md.Spec.Serving.Engine.ImageDigest = d }
 	}
@@ -76,6 +95,23 @@ func TestEngineImageDigest(t *testing.T) {
 		{"uppercase hex", dig("sha256:" + strings.Repeat("A", 64)), msg},
 		{"another algorithm", dig("sha512:" + strings.Repeat("2", 64)), msg},
 	}, []mdCase{{"a sha256 digest", dig("sha256:" + strings.Repeat("a", 64)), ""}})
+}
+
+// vLLM v0.32.0's short flag aliases, collected from the option strings of
+// vllm/engine/arg_utils.py and vllm/entrypoints/launchers/cli_args.py, not from
+// the admission rule: a rule that lost an entry must fail this list.
+var vllmShortAliases = []string{
+	"ac", "asc", "cc", "dc", "dcp", "dp", "dpa", "dpb", "dpe", "dph", "dpl", "dpm", "dpn", "dpp", "dpr",
+	"ep", "n", "pcp", "pp", "q", "r", "sc", "tp",
+}
+
+// vLLM v0.32.0's boolean flags (argparse's BooleanOptionalAction, which also
+// generates --no-<name>) among those in HBEP-3's v1 table: vllm/engine/arg_utils.py
+// line 380 builds the action for every bool field. disable-log-stats is not here:
+// it is a store_true flag, not a BooleanOptionalAction.
+var vllmBooleanFlags = []string{
+	"trust-remote-code", "enforce-eager", "enable-expert-parallel", "enable-auto-tool-choice",
+	"enable-prefix-caching", "enable-chunked-prefill", "enable-log-requests",
 }
 
 // Short flag aliases and secret flags are refused in specs (HBEP-3, HBEP-11),
@@ -92,9 +128,8 @@ func TestEngineFlagsUseLongNamesAndCarryNoKeys(t *testing.T) {
 		keys    = "a key is never written in a spec"
 		passed  = "the framework passes model, revision and chat-template itself"
 	)
-	refusedAliases := []string{"tp", "pp", "dp", "dcp", "pcp", "dpn", "ep", "q", "n", "r", "sc", "cc", "ac", "dc", "asc"}
 	var refused []mdCase
-	for _, a := range refusedAliases {
+	for _, a := range vllmShortAliases {
 		refused = append(refused, mdCase{"the short alias " + a, flag(a), alias})
 	}
 	refused = append(refused, []mdCase{
@@ -120,7 +155,8 @@ func TestEngineFlagsUseLongNamesAndCarryNoKeys(t *testing.T) {
 			v1alpha1.EngineFlag{Name: "pipeline-parallel-size", Value: "2"},
 			v1alpha1.EngineFlag{Name: "data-parallel-size", Value: "1"},
 			v1alpha1.EngineFlag{Name: "enable-auto-tool-choice", Value: "true"}), ""},
-		{"a boolean set to false", flag("enable-prefix-caching"), ""},
+		{"a boolean set to true", setFlags(v1alpha1.EngineFlag{Name: "enable-prefix-caching", Value: "true"}), ""},
+		{"a boolean set to false", setFlags(v1alpha1.EngineFlag{Name: "enable-prefix-caching", Value: "false"}), ""},
 		{"a flag whose name merely contains token or key", setFlags(
 			v1alpha1.EngineFlag{Name: "tokenizer-mode", Value: "auto"},
 			v1alpha1.EngineFlag{Name: "kv-cache-dtype", Value: "fp8"}), ""},
@@ -133,6 +169,100 @@ func TestEngineFlagsUseLongNamesAndCarryNoKeys(t *testing.T) {
 	})
 }
 
+// vLLM's parsers never set allow_abbrev, so argparse expands a unique prefix:
+// "--api-ke SECRET" is "--api-key SECRET" (review finding B3; checked against
+// FlexibleArgumentParser in vllm/utils/argparse_utils.py, v0.32.0). Every prefix of
+// a refused long name is refused with it, and config is refused outright
+// because --config can carry any flag.
+func TestEngineFlagsRefuseAbbreviationsOfRefusedNames(t *testing.T) {
+	flag := func(name string) func(*v1alpha1.ModelDeployment) {
+		return setFlags(v1alpha1.EngineFlag{Name: name, Value: "x"})
+	}
+	const (
+		keys   = "a key is never written in a spec"
+		passed = "the framework passes model, revision and chat-template itself"
+		config = "config is refused"
+	)
+	var refused []mdCase
+	for _, n := range []string{"api-ke", "api-k", "api-", "api", "ap", "hf-tok", "hf-t", "hf-", "hf", "h"} {
+		refused = append(refused, mdCase{"the abbreviation " + n + " of a key flag", flag(n), keys})
+	}
+	for _, n := range []string{"mode", "mod", "mo", "revisio", "revis", "rev", "chat-templat", "chat-temp", "chat-", "chat", "ch"} {
+		refused = append(refused, mdCase{"the abbreviation " + n + " of a flag the framework passes", flag(n), passed})
+	}
+	for _, n := range []string{"config", "confi", "conf", "con", "co"} {
+		refused = append(refused, mdCase{"config or its abbreviation " + n, flag(n), config})
+	}
+	runMDCases(t, refused, []mdCase{
+		// Neighbours that are not prefixes of a refused name stay admitted.
+		{"served-model-name", flag("served-model-name"), ""},
+		{"model-impl, which extends model but is not a prefix of it", flag("model-impl"), ""},
+		{"tokenizer-revision", flag("tokenizer-revision"), ""},
+		{"compilation-config", flag("compilation-config"), ""},
+		{"hf-overrides", flag("hf-overrides"), ""},
+		{"api-server-count", flag("api-server-count"), ""},
+		{"chat-template-content-format", flag("chat-template-content-format"), ""},
+		{"max-model-len", flag("max-model-len"), ""},
+		{"ordinary flags", setFlags(
+			v1alpha1.EngineFlag{Name: "dtype", Value: "bfloat16"},
+			v1alpha1.EngineFlag{Name: "seed", Value: "7"}), ""},
+	})
+	// A refused flag after ordinary ones, on create and on update.
+	ordinary := []v1alpha1.EngineFlag{{Name: "dtype", Value: "bfloat16"}, {Name: "seed", Value: "7"}}
+	runMDCases(t, []mdCase{
+		{"an abbreviated key flag after ordinary flags", setFlags(append(append([]v1alpha1.EngineFlag{}, ordinary...), v1alpha1.EngineFlag{Name: "api-ke", Value: "SECRET"})...), keys},
+		{"config after ordinary flags", setFlags(append(append([]v1alpha1.EngineFlag{}, ordinary...), v1alpha1.EngineFlag{Name: "config", Value: "/x.yaml"})...), config},
+	}, nil)
+	ns := newNamespace(t)
+	md := newModelDeployment(ns, "abbrev-update")
+	must(t, c.Create(bg(), md), "create")
+	got := &v1alpha1.ModelDeployment{}
+	must(t, c.Get(bg(), objKey(md), got), "get")
+	got.Spec.Serving.Flags = append(got.Spec.Serving.Flags, v1alpha1.EngineFlag{Name: "revisio", Value: "main"})
+	requireRefused(t, c.Update(bg(), got), passed)
+}
+
+// A boolean flag is given under its positive name with "true" or "false"
+// (HBEP-3); the launcher passes "false" as --no-<name>. A second spelling would
+// split one setting into two deployment IDs (review findings B5).
+func TestBooleanEngineFlagsTakeTrueOrFalse(t *testing.T) {
+	const (
+		negative = "a boolean flag is given under its positive name"
+		value    = "a boolean flag takes exactly 'true' or 'false'"
+	)
+	flag := func(name, v string) func(*v1alpha1.ModelDeployment) {
+		return setFlags(v1alpha1.EngineFlag{Name: name, Value: v})
+	}
+	var refused, accepted []mdCase
+	for _, b := range vllmBooleanFlags {
+		accepted = append(accepted,
+			mdCase{b + " is true", flag(b, "true"), ""},
+			mdCase{b + " is false", flag(b, "false"), ""})
+		for _, v := range []string{"1", "0", "True", "FALSE", "yes", "no", "on", " true", "true ", ""} {
+			refused = append(refused, mdCase{b + " set to " + `"` + v + `"`, flag(b, v), value})
+		}
+		for _, v := range []string{"true", "false"} {
+			refused = append(refused, mdCase{"no-" + b + " set to " + v, flag("no-"+b, v), negative})
+		}
+	}
+	refused = append(refused,
+		mdCase{"the negated spelling the review found", flag("no-enable-prefix-caching", "true"), negative},
+		mdCase{"a no- prefix on a flag that is not a boolean", flag("no-dtype", "x"), negative},
+		mdCase{"the value 1 on the boolean from the review", flag("enable-prefix-caching", "1"), value},
+	)
+	accepted = append(accepted,
+		// A flag that is not a boolean keeps whatever value it is given.
+		mdCase{"seed with the value 1", flag("seed", "1"), ""},
+		mdCase{"max-model-len with the value true, which is not a boolean flag's rule", flag("max-model-len", "true"), ""},
+		// disable-log-stats is a store_true flag, outside the boolean rule.
+		mdCase{"disable-log-stats with 1", flag("disable-log-stats", "1"), ""},
+		// A flag that contains "no" but does not start with "no-".
+		mdCase{"node-rank is not a negated boolean", flag("node-rank", "1"), ""},
+		mdCase{"nnodes is not a negated boolean", flag("nnodes", "2"), ""},
+	)
+	runMDCases(t, refused, accepted)
+}
+
 func TestEngineEnvironment(t *testing.T) {
 	env := func(vars ...v1alpha1.EnvVar) func(*v1alpha1.ModelDeployment) {
 		return func(md *v1alpha1.ModelDeployment) { md.Spec.Serving.Env = vars }
@@ -140,9 +270,29 @@ func TestEngineEnvironment(t *testing.T) {
 	one := func(name string) func(*v1alpha1.ModelDeployment) {
 		return env(v1alpha1.EnvVar{Name: name, Value: "1"})
 	}
-	const charset = "an environment variable name matches ^[A-Z_][A-Z0-9_]*$"
+	const (
+		charset = "an environment variable name matches ^[A-Z_][A-Z0-9_]*$"
+		key     = "a key is never written in a spec"
+	)
+	ordinary := []v1alpha1.EnvVar{{Name: "HF_HOME", Value: "/data/hf"}, {Name: "VLLM_LOGGING_LEVEL", Value: "INFO"}}
+	after := func(name string) func(*v1alpha1.ModelDeployment) {
+		return env(append(append([]v1alpha1.EnvVar{}, ordinary...), v1alpha1.EnvVar{Name: name, Value: "example-secret"})...)
+	}
 	runMDCases(t, []mdCase{
-		{"HF_TOKEN", one("HF_TOKEN"), "a key is never written in a spec"},
+		{"HF_TOKEN", one("HF_TOKEN"), key},
+		// vLLM reads VLLM_API_KEY as its API key (vllm/envs.py, v0.32.0, a variable
+		// it marks as a credential); huggingface_hub still reads
+		// HUGGING_FACE_HUB_TOKEN for backward compatibility; vLLM's S3 loading
+		// reads S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY.
+		{"VLLM_API_KEY", one("VLLM_API_KEY"), key},
+		{"HUGGING_FACE_HUB_TOKEN", one("HUGGING_FACE_HUB_TOKEN"), key},
+		{"S3_ACCESS_KEY_ID", one("S3_ACCESS_KEY_ID"), key},
+		{"S3_SECRET_ACCESS_KEY", one("S3_SECRET_ACCESS_KEY"), key},
+		{"VLLM_API_KEY after ordinary variables", after("VLLM_API_KEY"), key},
+		{"HF_TOKEN after ordinary variables", after("HF_TOKEN"), key},
+		{"HUGGING_FACE_HUB_TOKEN after ordinary variables", after("HUGGING_FACE_HUB_TOKEN"), key},
+		{"S3_ACCESS_KEY_ID after ordinary variables", after("S3_ACCESS_KEY_ID"), key},
+		{"S3_SECRET_ACCESS_KEY after ordinary variables", after("S3_SECRET_ACCESS_KEY"), key},
 		{"a lowercase name", one("hf_home"), charset},
 		{"a mixed-case name", one("Hf_Home"), charset},
 		{"a name with a dash", one("VLLM-USE"), charset},
@@ -157,7 +307,140 @@ func TestEngineEnvironment(t *testing.T) {
 		{"a name with digits", one("CUDA_VISIBLE_DEVICES_0"), ""},
 		{"two different variables", env(
 			v1alpha1.EnvVar{Name: "HF_HOME", Value: "/data/hf"}, v1alpha1.EnvVar{Name: "VLLM_LOGGING_LEVEL", Value: "INFO"}), ""},
+		// The refusal is by exact name: names that merely resemble a credential's pass.
+		{"names that resemble a credential", env(
+			v1alpha1.EnvVar{Name: "HF_TOKEN_PATH", Value: "/run/hf"}, v1alpha1.EnvVar{Name: "VLLM_API_KEY_FILE", Value: "/run/k"},
+			v1alpha1.EnvVar{Name: "S3_ENDPOINT_URL", Value: "http://s3.invalid"}), ""},
 	})
+}
+
+// A credential variable is refused on update too, whether it replaces the list
+// or joins ordinary entries, and an ordinary update is accepted.
+func TestEngineEnvironmentCredentialsAreRefusedOnUpdate(t *testing.T) {
+	const key = "a key is never written in a spec"
+	ns := newNamespace(t)
+	md := newModelDeployment(ns, "env-update")
+	md.Spec.Serving.Env = []v1alpha1.EnvVar{{Name: "HF_HOME", Value: "/data/hf"}}
+	must(t, c.Create(bg(), md), "create")
+	get := func() *v1alpha1.ModelDeployment {
+		got := &v1alpha1.ModelDeployment{}
+		must(t, c.Get(bg(), objKey(md), got), "get")
+		return got
+	}
+	for _, name := range []string{"HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "VLLM_API_KEY", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"} {
+		t.Run("refuse adding "+name, func(t *testing.T) {
+			got := get()
+			got.Spec.Serving.Env = append(got.Spec.Serving.Env, v1alpha1.EnvVar{Name: name, Value: "example-secret"})
+			requireRefused(t, c.Update(bg(), got), key)
+		})
+	}
+	t.Run("accept adding an ordinary variable", func(t *testing.T) {
+		got := get()
+		got.Spec.Serving.Env = append(got.Spec.Serving.Env, v1alpha1.EnvVar{Name: "VLLM_LOGGING_LEVEL", Value: "INFO"})
+		must(t, c.Update(bg(), got), "update")
+	})
+}
+
+// The credentials reference on a checkpoint names exactly one source, as it does on a
+// Provider. The rule is generated once per place the type is used, and each
+// place needs its own test: neutralising this copy failed nothing before.
+func TestCheckpointHubTokenReferenceNamesExactlyOneSource(t *testing.T) {
+	const want = "name exactly one of file and secretRef"
+	ref := func(r v1alpha1.CredentialsReference) func(*v1alpha1.ModelDeployment) {
+		return func(md *v1alpha1.ModelDeployment) { md.Spec.Serving.Checkpoint.HubTokenRef = &r }
+	}
+	secret := &v1alpha1.SecretKeyReference{Name: "hub", Namespace: "team", Key: "token"}
+	runMDCases(t, []mdCase{
+		{"neither a file nor a Secret", ref(v1alpha1.CredentialsReference{}), want},
+		{"both a file and a Secret", ref(v1alpha1.CredentialsReference{File: "/run/hub", SecretRef: secret}), want},
+	}, []mdCase{
+		{"a file", ref(v1alpha1.CredentialsReference{File: "/run/hub"}), ""},
+		{"a Secret", ref(v1alpha1.CredentialsReference{SecretRef: secret}), ""},
+		{"no token reference", func(*v1alpha1.ModelDeployment) {}, ""},
+	})
+}
+
+// An omitted chat template and an empty one are different: the checkpoint's own
+// template applies to the first and the second names an empty template
+// (HBEP-3). The pointer keeps the difference through the API server.
+func TestChatTemplatePresenceIsKept(t *testing.T) {
+	ns := newNamespace(t)
+	for _, tc := range []struct {
+		name string
+		set  *string
+	}{
+		{"omitted", nil},
+		{"empty", ptr.To("")},
+		{"text", ptr.To("{{ messages }}")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			md := newModelDeployment(ns, uniq("tpl"))
+			md.Spec.Serving.ChatTemplate = tc.set
+			must(t, c.Create(bg(), md), "create")
+			got := &v1alpha1.ModelDeployment{}
+			must(t, c.Get(bg(), objKey(md), got), "get")
+			switch {
+			case tc.set == nil && got.Spec.Serving.ChatTemplate != nil:
+				t.Errorf("an omitted template came back as %q", *got.Spec.Serving.ChatTemplate)
+			case tc.set != nil && got.Spec.Serving.ChatTemplate == nil:
+				t.Errorf("the template %q came back omitted", *tc.set)
+			case tc.set != nil && *got.Spec.Serving.ChatTemplate != *tc.set:
+				t.Errorf("the template %q came back as %q", *tc.set, *got.Spec.Serving.ChatTemplate)
+			}
+		})
+	}
+	// An edit between the three states is allowed and rolls out new IDs.
+	md := newModelDeployment(ns, uniq("tpl"))
+	must(t, c.Create(bg(), md), "create")
+	for _, set := range []*string{ptr.To(""), nil, ptr.To("x")} {
+		got := &v1alpha1.ModelDeployment{}
+		must(t, c.Get(bg(), objKey(md), got), "get")
+		got.Spec.Serving.ChatTemplate = set
+		must(t, c.Update(bg(), got), "edit the template")
+	}
+}
+
+// The current and the active IDs in a ModelDeployment's status hold the full ID,
+// the form an Instance carries, so a controller never compares two forms.
+func TestDeploymentStatusHoldsFullIDs(t *testing.T) {
+	const short = "0e1dd69efe8a"
+	class := v1alpha1.AcceleratorClass{GPUModel: "GH200", CPUArch: "aarch64"}
+	ns := newNamespace(t)
+	md := newModelDeployment(ns, "status-ids")
+	must(t, c.Create(bg(), md), "create")
+	get := func() *v1alpha1.ModelDeployment {
+		got := &v1alpha1.ModelDeployment{}
+		must(t, c.Get(bg(), objKey(md), got), "get")
+		return got
+	}
+	for what, set := range map[string]func(*v1alpha1.ModelDeployment, v1alpha1.FullDeploymentID){
+		"currentIDs": func(m *v1alpha1.ModelDeployment, id v1alpha1.FullDeploymentID) {
+			m.Status.CurrentIDs = []v1alpha1.ClassDeploymentID{{AcceleratorClass: class, ID: id}}
+		},
+		"activeIDs": func(m *v1alpha1.ModelDeployment, id v1alpha1.FullDeploymentID) {
+			m.Status.ActiveIDs = []v1alpha1.ActiveDeploymentID{{AcceleratorClass: class, ID: id, Instances: 1}}
+		},
+	} {
+		t.Run("refuse the 12-character form in "+what, func(t *testing.T) {
+			got := get()
+			set(got, short)
+			requireRefused(t, c.Status().Update(bg(), got), "id")
+		})
+		t.Run("refuse uppercase hex in "+what, func(t *testing.T) {
+			got := get()
+			set(got, v1alpha1.FullDeploymentID(strings.ToUpper(fullID)))
+			requireRefused(t, c.Status().Update(bg(), got), "id")
+		})
+		t.Run("accept the full ID in "+what, func(t *testing.T) {
+			got := get()
+			set(got, fullID)
+			must(t, c.Status().Update(bg(), got), "status update")
+		})
+	}
+	got := get()
+	if len(got.Status.CurrentIDs) != 1 || got.Status.CurrentIDs[0].ID != fullID || len(got.Status.ActiveIDs) != 1 || got.Status.ActiveIDs[0].ID != fullID {
+		t.Fatalf("status IDs = %+v / %+v", got.Status.CurrentIDs, got.Status.ActiveIDs)
+	}
 }
 
 func TestModelDeploymentProvidersAndInstances(t *testing.T) {
@@ -236,7 +519,7 @@ func TestServingSpecMayChange(t *testing.T) {
 		func(m *v1alpha1.ModelDeployment) {
 			m.Spec.Serving.Flags = append(m.Spec.Serving.Flags, v1alpha1.EngineFlag{Name: "seed", Value: "7"})
 		},
-		func(m *v1alpha1.ModelDeployment) { m.Spec.Serving.ChatTemplate = "{{ messages }}" },
+		func(m *v1alpha1.ModelDeployment) { m.Spec.Serving.ChatTemplate = ptr.To("{{ messages }}") },
 		func(m *v1alpha1.ModelDeployment) { m.Spec.Serving.Engine.Version = "0.33.0" },
 		func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 3 },
 	} {

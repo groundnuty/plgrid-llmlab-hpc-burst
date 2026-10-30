@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
@@ -89,13 +90,69 @@ func TestNewIdentityRecord(t *testing.T) {
 		t.Error("the record shares the caller's data slice")
 	}
 
-	long := strings.Repeat("m", 100)
-	rec, err = NewIdentityRecord("ns", long, goldenID, []byte(`{}`))
+	// A short name is kept whole, in the label and in the annotation.
+	rec, err = NewIdentityRecord("ns", "md", goldenID, []byte(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := rec.Labels[LabelModelDeployment]; len(got) != 63 || !strings.HasPrefix(got, strings.Repeat("m", 50)+"-") {
-		t.Errorf("long ModelDeployment name label = %q", got)
+	if got := rec.Annotations[AnnotationModelDeployment]; got != "md" {
+		t.Errorf("annotation for a short name = %q, want md", got)
+	}
+}
+
+// A ModelDeployment name can be up to 253 characters but a label value holds 63,
+// so the label is shortened. The record outlives its ModelDeployment, and the
+// annotation is then the only place the full name survives (review finding B7).
+func TestRecordsKeepALongModelDeploymentName(t *testing.T) {
+	uid := types.UID("11111111-2222-3333-4444-555555555555")
+	// Two names that share their first 63 characters: only the hash suffix of
+	// the label tells them apart, and only the annotation holds either in full.
+	common := strings.Repeat("abcdefghij", 7) // 70 characters
+	names := map[string]string{
+		"a 100-character name": strings.Repeat("abcdefghij", 10),
+		"a 253-character name": strings.Repeat("abcdefghij", 25) + "xyz",
+		"a name that shares its first 63 characters with the next": common + "-first",
+		"the name that shares its first 63 characters":             common + "-second",
+	}
+	labels := map[string]string{}
+	for what, full := range names {
+		for kind, build := range map[string]func() (*appsv1.ControllerRevision, error){
+			"identity": func() (*appsv1.ControllerRevision, error) {
+				return NewIdentityRecord("ns", full, goldenID, []byte(`{}`))
+			},
+			"verification": func() (*appsv1.ControllerRevision, error) {
+				return NewVerificationRecord("ns", full, goldenID, uid, []byte(`{}`))
+			},
+		} {
+			rec, err := build()
+			if err != nil {
+				t.Fatalf("%s, %s record: %v", what, kind, err)
+			}
+			label := rec.Labels[LabelModelDeployment]
+			if len(label) != 63 || label != LabelValue(full) {
+				t.Errorf("%s, %s record: label %q is not the shortened name", what, kind, label)
+			}
+			if errs := validation.IsValidLabelValue(label); len(errs) != 0 {
+				t.Errorf("%s, %s record: label %q is invalid: %v", what, kind, label, errs)
+			}
+			// What a controller reads from a record that outlived its ModelDeployment:
+			if got := rec.Annotations[AnnotationModelDeployment]; got != full {
+				t.Errorf("%s, %s record: annotation = %q, want the full name %q", what, kind, got, full)
+			}
+			if len(rec.OwnerReferences) != 0 {
+				t.Errorf("%s, %s record: owner references %v", what, kind, rec.OwnerReferences)
+			}
+			if kind == "identity" {
+				labels[what] = label
+			}
+		}
+	}
+	first, second := labels["a name that shares its first 63 characters with the next"], labels["the name that shares its first 63 characters"]
+	if first == second {
+		t.Errorf("two different long names got one label %q", first)
+	}
+	if first[:50] != second[:50] {
+		t.Errorf("the test names do not share their first 50 characters: %q %q", first, second)
 	}
 }
 

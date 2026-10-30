@@ -74,6 +74,13 @@ const (
 	AnnotationAbandonAttempt = Group + "/abandon-attempt"
 )
 
+// AnnotationModelDeployment is on identity and verification records. Its value
+// is the full name of the ModelDeployment the record belongs to. The record's
+// label carries the same name shortened to fit 63 characters (LabelValue), and
+// a record has no owner reference, so once the ModelDeployment is deleted this
+// annotation is the only place the full name survives (HBEP-11, API, Labels).
+const AnnotationModelDeployment = Group + "/model-deployment"
+
 // IdentityRecordPrefix starts the name of an identity record, a ControllerRevision
 // named id-<first 12 hex of the deployment ID> (HBEP-11).
 const IdentityRecordPrefix = "id-"

@@ -184,9 +184,11 @@ spec:
                   chatTemplate:
                     description: |-
                       ChatTemplate is the text of one chat template, when the spec gives one.
-                      A checkpoint's own list of named templates is not given here: the
-                      deployment-ID library refuses one that has no entry named default and
-                      tells the operator to name the template in the spec.
+                      It is a pointer: an omitted template (the checkpoint's own applies,
+                      HBEP-3) and an explicitly empty one are different specs that can give
+                      different deployment IDs. A checkpoint's own list of named templates is
+                      not given here: the deployment-ID library refuses one that has no entry
+                      named default and tells the operator to name the template in the spec.
                     maxLength: 262144
                     type: string
                   checkpoint:
@@ -256,14 +258,15 @@ spec:
                   engine:
                     description: EngineSpec names the engine and its image.
                     properties:
-                      imageDigest:
+                      image_digest:
                         description: |-
                           ImageDigest is the engine image's digest: "sha256:" and 64 lowercase hex
-                          characters (HBEP-3, the v1 canonical object).
+                          characters (HBEP-3, the v1 canonical object). The JSON key is the
+                          canonical object's own, image_digest, like gpu_model and cpu_arch.
                         maxLength: 71
                         type: string
                         x-kubernetes-validations:
-                        - message: imageDigest must be 'sha256:' followed by 64 lowercase
+                        - message: image_digest must be 'sha256:' followed by 64 lowercase
                             hex characters
                           rule: self.matches('^sha256:[0-9a-f]{64}$')
                       name:
@@ -277,7 +280,7 @@ spec:
                         minLength: 1
                         type: string
                     required:
-                    - imageDigest
+                    - image_digest
                     - name
                     - version
                     type: object
@@ -304,9 +307,12 @@ spec:
                           uppercase ASCII letters, digits and underscores, not starting
                           with a digit'
                         rule: self.name.matches('^[A-Z_][A-Z0-9_]*$')
-                      - message: 'a key is never written in a spec: use checkpoint.hubTokenRef
-                          (HF_TOKEN is refused)'
-                        rule: self.name != 'HF_TOKEN'
+                      - message: 'a key is never written in a spec: a Hub token goes
+                          in checkpoint.hubTokenRef and the framework issues each
+                          Instance''s API key (HF_TOKEN, HUGGING_FACE_HUB_TOKEN, VLLM_API_KEY,
+                          S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY are refused)'
+                        rule: '!(self.name in [''HF_TOKEN'', ''HUGGING_FACE_HUB_TOKEN'',
+                          ''VLLM_API_KEY'', ''S3_ACCESS_KEY_ID'', ''S3_SECRET_ACCESS_KEY''])'
                     maxItems: 64
                     type: array
                     x-kubernetes-list-map-keys:
@@ -320,9 +326,24 @@ spec:
                       description: |-
                         EngineFlag is one engine flag. The spec lists flags as ordered pairs, so no
                         command line is parsed (HBEP-3, Deployment ID). The name rules keep every key
-                        of the hashed object ASCII and give one spelling per flag: vLLM reads
-                        max_num_seqs and max-num-seqs as the same flag (vllm/utils/argparse_utils.py,
-                        v0.32.0, lines 120 and 338-344), so only the dashed spelling is admitted.
+                        of the hashed object ASCII and give one spelling per flag.
+
+                          - vLLM reads max_num_seqs and max-num-seqs as the same flag
+                            (vllm/utils/argparse_utils.py, v0.32.0, lines 120 and 338-344), so only
+                            the dashed spelling is admitted.
+                          - vLLM's parsers never set allow_abbrev, so Python's argparse expands a
+                            unique prefix: "--api-ke SECRET" is "--api-key SECRET". Every prefix of
+                            a refused long name is therefore refused with it (api-key, hf-token,
+                            model, revision, chat-template, config). A prefix of any other flag only
+                            splits one setting into two IDs, which is visible; checking names
+                            against the engine's real option list belongs to the launcher.
+                          - vLLM's --config replaces itself with every key of a file, so a config
+                            flag could carry the flags the rules above refuse, and only its path
+                            would be hashed. It is refused.
+                          - vLLM generates --no-<name> for each boolean flag (argparse's
+                            BooleanOptionalAction, vllm/engine/arg_utils.py, v0.32.0, line 380),
+                            but HBEP-3 gives a boolean under its positive name with "true" or
+                            "false", so a no- prefix is refused and a boolean's value is checked.
                       properties:
                         name:
                           description: Name is the flag's long name without its leading
@@ -356,12 +377,34 @@ spec:
                           ''dp'', ''dpa'', ''dpb'', ''dpe'', ''dph'', ''dpl'', ''dpm'',
                           ''dpn'', ''dpp'', ''dpr'', ''ep'', ''n'', ''pcp'', ''pp'',
                           ''q'', ''r'', ''sc'', ''tp''])'
-                      - message: 'a key is never written in a spec: use credentialsRef
-                          or checkpoint.hubTokenRef (api-key and hf-token are refused)'
-                        rule: '!(self.name in [''api-key'', ''hf-token''])'
+                      - message: 'a boolean flag is given under its positive name
+                          with the value ''true'' or ''false'': write enable-prefix-caching
+                          with ''false'', not no-enable-prefix-caching'
+                        rule: '!self.name.startsWith(''no-'')'
+                      - message: 'a boolean flag takes exactly ''true'' or ''false'':
+                          write enable-prefix-caching with the value ''true'' or ''false'',
+                          not ''1'', ''True'' or an empty value'
+                        rule: '!(self.name in [''trust-remote-code'', ''enforce-eager'',
+                          ''enable-expert-parallel'', ''enable-auto-tool-choice'',
+                          ''enable-prefix-caching'', ''enable-chunked-prefill'', ''enable-log-requests''])
+                          || self.value in [''true'', ''false'']'
+                      - message: 'a key is never written in a spec: the framework
+                          issues each Instance''s API key, and a Hub token goes in
+                          checkpoint.hubTokenRef (api-key and hf-token are refused,
+                          and so is any abbreviation of them, because vLLM expands
+                          a unique prefix)'
+                        rule: '![''api-key'', ''hf-token''].exists(k, k.startsWith(self.name))'
                       - message: 'the framework passes model, revision and chat-template
-                          itself: set checkpoint and chatTemplate instead'
-                        rule: '!(self.name in [''model'', ''revision'', ''chat-template''])'
+                          itself: set checkpoint and chatTemplate instead (an abbreviation
+                          of these names is refused too, because vLLM expands a unique
+                          prefix)'
+                        rule: '![''model'', ''revision'', ''chat-template''].exists(k,
+                          k.startsWith(self.name))'
+                      - message: 'config is refused: vLLM''s --config reads a file
+                          that can set any flag, so the flags hashed here would not
+                          be the flags that run; write each flag in flags (an abbreviation
+                          of config is refused too)'
+                        rule: '!''config''.startsWith(self.name)'
                     maxItems: 128
                     type: array
                     x-kubernetes-list-type: atomic
@@ -408,13 +451,10 @@ spec:
                       - gpu_model
                       type: object
                     id:
-                      description: |-
-                        DeploymentID is a deployment ID (HBEP-3): the SHA-256 of the canonical
-                        object, in lowercase hex. Names and labels carry its display form, the first
-                        12 characters, and records keep all 64. The API stores it as a validated
-                        string; the package that computes it is separate.
+                      description: ID is the full deployment ID, as an Instance carries
+                        it.
                       maxLength: 64
-                      pattern: ^([0-9a-f]{12}|[0-9a-f]{64})$
+                      pattern: ^[0-9a-f]{64}$
                       type: string
                     instances:
                       description: Instances is how many Instances of this ID exist.
@@ -518,12 +558,10 @@ spec:
                       type: object
                     id:
                       description: |-
-                        DeploymentID is a deployment ID (HBEP-3): the SHA-256 of the canonical
-                        object, in lowercase hex. Names and labels carry its display form, the first
-                        12 characters, and records keep all 64. The API stores it as a validated
-                        string; the package that computes it is separate.
+                        ID is the full deployment ID, as an Instance carries it, so that a
+                        controller never compares two forms of one ID.
                       maxLength: 64
-                      pattern: ^([0-9a-f]{12}|[0-9a-f]{64})$
+                      pattern: ^[0-9a-f]{64}$
                       type: string
                   required:
                   - acceleratorClass

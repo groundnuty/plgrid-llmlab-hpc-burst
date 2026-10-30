@@ -79,7 +79,7 @@ type InstanceStatus struct {
 	// JobID is the provider job's ID.
 	//
 	// +optional
-	JobID string `json:"jobId,omitempty"`
+	JobID string `json:"jobID,omitempty"`
 
 	// Node the Instance runs on.
 	//

@@ -44,24 +44,43 @@ type EngineSpec struct {
 	Version string `json:"version"`
 
 	// ImageDigest is the engine image's digest: "sha256:" and 64 lowercase hex
-	// characters (HBEP-3, the v1 canonical object).
+	// characters (HBEP-3, the v1 canonical object). The JSON key is the
+	// canonical object's own, image_digest, like gpu_model and cpu_arch.
 	//
 	// +kubebuilder:validation:MaxLength=71
-	// +kubebuilder:validation:XValidation:rule="self.matches('^sha256:[0-9a-f]{64}$')",message="imageDigest must be 'sha256:' followed by 64 lowercase hex characters"
-	ImageDigest string `json:"imageDigest"`
+	// +kubebuilder:validation:XValidation:rule="self.matches('^sha256:[0-9a-f]{64}$')",message="image_digest must be 'sha256:' followed by 64 lowercase hex characters"
+	ImageDigest string `json:"image_digest"`
 }
 
 // EngineFlag is one engine flag. The spec lists flags as ordered pairs, so no
 // command line is parsed (HBEP-3, Deployment ID). The name rules keep every key
-// of the hashed object ASCII and give one spelling per flag: vLLM reads
-// max_num_seqs and max-num-seqs as the same flag (vllm/utils/argparse_utils.py,
-// v0.32.0, lines 120 and 338-344), so only the dashed spelling is admitted.
+// of the hashed object ASCII and give one spelling per flag.
+//
+//   - vLLM reads max_num_seqs and max-num-seqs as the same flag
+//     (vllm/utils/argparse_utils.py, v0.32.0, lines 120 and 338-344), so only
+//     the dashed spelling is admitted.
+//   - vLLM's parsers never set allow_abbrev, so Python's argparse expands a
+//     unique prefix: "--api-ke SECRET" is "--api-key SECRET". Every prefix of
+//     a refused long name is therefore refused with it (api-key, hf-token,
+//     model, revision, chat-template, config). A prefix of any other flag only
+//     splits one setting into two IDs, which is visible; checking names
+//     against the engine's real option list belongs to the launcher.
+//   - vLLM's --config replaces itself with every key of a file, so a config
+//     flag could carry the flags the rules above refuse, and only its path
+//     would be hashed. It is refused.
+//   - vLLM generates --no-<name> for each boolean flag (argparse's
+//     BooleanOptionalAction, vllm/engine/arg_utils.py, v0.32.0, line 380),
+//     but HBEP-3 gives a boolean under its positive name with "true" or
+//     "false", so a no- prefix is refused and a boolean's value is checked.
 //
 // +kubebuilder:validation:XValidation:rule="!self.name.startsWith('-')",message="an engine flag name is a long name without leading dashes: write 'max-model-len', not '--max-model-len', and never a short alias such as '-tp'"
 // +kubebuilder:validation:XValidation:rule="self.name.matches('^[a-z0-9][a-z0-9-]*$')",message="an engine flag name matches ^[a-z0-9][a-z0-9-]*$: lowercase ASCII letters, digits and hyphens, so no underscores, no uppercase and no '='"
 // +kubebuilder:validation:XValidation:rule="!(self.name in ['ac', 'asc', 'cc', 'dc', 'dcp', 'dp', 'dpa', 'dpb', 'dpe', 'dph', 'dpl', 'dpm', 'dpn', 'dpp', 'dpr', 'ep', 'n', 'pcp', 'pp', 'q', 'r', 'sc', 'tp'])",message="a short flag alias such as tp, pp or dp is refused: write the long flag name, for example tensor-parallel-size"
-// +kubebuilder:validation:XValidation:rule="!(self.name in ['api-key', 'hf-token'])",message="a key is never written in a spec: use credentialsRef or checkpoint.hubTokenRef (api-key and hf-token are refused)"
-// +kubebuilder:validation:XValidation:rule="!(self.name in ['model', 'revision', 'chat-template'])",message="the framework passes model, revision and chat-template itself: set checkpoint and chatTemplate instead"
+// +kubebuilder:validation:XValidation:rule="!self.name.startsWith('no-')",message="a boolean flag is given under its positive name with the value 'true' or 'false': write enable-prefix-caching with 'false', not no-enable-prefix-caching"
+// +kubebuilder:validation:XValidation:rule="!(self.name in ['trust-remote-code', 'enforce-eager', 'enable-expert-parallel', 'enable-auto-tool-choice', 'enable-prefix-caching', 'enable-chunked-prefill', 'enable-log-requests']) || self.value in ['true', 'false']",message="a boolean flag takes exactly 'true' or 'false': write enable-prefix-caching with the value 'true' or 'false', not '1', 'True' or an empty value"
+// +kubebuilder:validation:XValidation:rule="!['api-key', 'hf-token'].exists(k, k.startsWith(self.name))",message="a key is never written in a spec: the framework issues each Instance's API key, and a Hub token goes in checkpoint.hubTokenRef (api-key and hf-token are refused, and so is any abbreviation of them, because vLLM expands a unique prefix)"
+// +kubebuilder:validation:XValidation:rule="!['model', 'revision', 'chat-template'].exists(k, k.startsWith(self.name))",message="the framework passes model, revision and chat-template itself: set checkpoint and chatTemplate instead (an abbreviation of these names is refused too, because vLLM expands a unique prefix)"
+// +kubebuilder:validation:XValidation:rule="!'config'.startsWith(self.name)",message="config is refused: vLLM's --config reads a file that can set any flag, so the flags hashed here would not be the flags that run; write each flag in flags (an abbreviation of config is refused too)"
 type EngineFlag struct {
 	// Name is the flag's long name without its leading dashes.
 	//
@@ -81,7 +100,7 @@ type EngineFlag struct {
 // uppercase ASCII, so every key of the hashed object is ASCII.
 //
 // +kubebuilder:validation:XValidation:rule="self.name.matches('^[A-Z_][A-Z0-9_]*$')",message="an environment variable name matches ^[A-Z_][A-Z0-9_]*$: uppercase ASCII letters, digits and underscores, not starting with a digit"
-// +kubebuilder:validation:XValidation:rule="self.name != 'HF_TOKEN'",message="a key is never written in a spec: use checkpoint.hubTokenRef (HF_TOKEN is refused)"
+// +kubebuilder:validation:XValidation:rule="!(self.name in ['HF_TOKEN', 'HUGGING_FACE_HUB_TOKEN', 'VLLM_API_KEY', 'S3_ACCESS_KEY_ID', 'S3_SECRET_ACCESS_KEY'])",message="a key is never written in a spec: a Hub token goes in checkpoint.hubTokenRef and the framework issues each Instance's API key (HF_TOKEN, HUGGING_FACE_HUB_TOKEN, VLLM_API_KEY, S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY are refused)"
 type EnvVar struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=128
@@ -116,13 +135,15 @@ type ServingSpec struct {
 	Env []EnvVar `json:"env,omitempty"`
 
 	// ChatTemplate is the text of one chat template, when the spec gives one.
-	// A checkpoint's own list of named templates is not given here: the
-	// deployment-ID library refuses one that has no entry named default and
-	// tells the operator to name the template in the spec.
+	// It is a pointer: an omitted template (the checkpoint's own applies,
+	// HBEP-3) and an explicitly empty one are different specs that can give
+	// different deployment IDs. A checkpoint's own list of named templates is
+	// not given here: the deployment-ID library refuses one that has no entry
+	// named default and tells the operator to name the template in the spec.
 	//
 	// +optional
 	// +kubebuilder:validation:MaxLength=262144
-	ChatTemplate string `json:"chatTemplate,omitempty"`
+	ChatTemplate *string `json:"chatTemplate,omitempty"`
 }
 
 // ProviderSelection says which providers a deployment may use: providers by
@@ -185,14 +206,19 @@ type ModelDeploymentSpec struct {
 // ClassDeploymentID is the current deployment ID of one accelerator class.
 type ClassDeploymentID struct {
 	AcceleratorClass AcceleratorClass `json:"acceleratorClass"`
-	ID               DeploymentID     `json:"id"`
+
+	// ID is the full deployment ID, as an Instance carries it, so that a
+	// controller never compares two forms of one ID.
+	ID FullDeploymentID `json:"id"`
 }
 
 // ActiveDeploymentID is a deployment ID that still has Instances, as a
 // Deployment lists its ReplicaSets.
 type ActiveDeploymentID struct {
 	AcceleratorClass AcceleratorClass `json:"acceleratorClass"`
-	ID               DeploymentID     `json:"id"`
+
+	// ID is the full deployment ID, as an Instance carries it.
+	ID FullDeploymentID `json:"id"`
 
 	// Instances is how many Instances of this ID exist.
 	Instances int32 `json:"instances"`

@@ -15,6 +15,17 @@ import (
 
 const gcTimeout = 90 * time.Second
 
+// A ModelDeployment name of 93 characters: too long for a label value, so the
+// records carry it shortened in their label and in full in an annotation. The
+// label value was computed outside our code: the first 50 characters, "-", and
+//
+//	$ printf '%s' <longName> | sha256sum | cut -c1-12
+//	c81e8619a4bb
+const (
+	longName      = "md-012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789"
+	longNameLabel = "md-01234567890123456789012345678901234567890123456-c81e8619a4bb"
+)
+
 // Deleting a ModelDeployment drains its Instances through their finalizer, and
 // leaves the identity and verification records in place (HBEP-11, Ownership,
 // records and deletion; Test plan). It needs a garbage collector, so it runs on
@@ -29,7 +40,7 @@ const gcTimeout = 90 * time.Second
 func TestDeletingAModelDeploymentLeavesTheRecords(t *testing.T) {
 	ns := newNamespace(t)
 
-	md := newModelDeployment(ns, "owner")
+	md := newModelDeployment(ns, longName)
 	must(t, c.Create(bg(), md), "create the ModelDeployment")
 
 	in := newInstance(ns, "inst-1")
@@ -111,6 +122,20 @@ func TestDeletingAModelDeploymentLeavesTheRecords(t *testing.T) {
 		v1alpha1.LabelRecord: v1alpha1.RecordVerification, v1alpha1.LabelInstanceUID: string(inUID)}), "list verification records")
 	if len(verList.Items) != 1 || verList.Items[0].UID != verificationUID {
 		t.Fatalf("verification records after the cascade: %d, want the one created (%s)", len(verList.Items), verificationUID)
+	}
+	// The deployment is gone. Its full name is recovered from a surviving record:
+	// the label holds it shortened, the annotation in full. Both records are
+	// found by the shortened label, and the owned control record, collected
+	// above, is not among them.
+	var byName appsv1.ControllerRevisionList
+	must(t, c.List(bg(), &byName, client.InNamespace(ns), client.MatchingLabels{v1alpha1.LabelModelDeployment: longNameLabel}), "list records by the shortened name")
+	if len(byName.Items) != 2 {
+		t.Fatalf("records labelled %s after the cascade: %d, want the identity and the verification record", longNameLabel, len(byName.Items))
+	}
+	for _, rec := range byName.Items {
+		if got := rec.Annotations[v1alpha1.AnnotationModelDeployment]; got != longName {
+			t.Errorf("record %s names its ModelDeployment %q, want the full name %q", rec.Name, got, longName)
+		}
 	}
 	for _, tc := range []struct {
 		rec  appsv1.ControllerRevision

@@ -45,6 +45,7 @@ type AllocationParameters struct {
 //
 // +kubebuilder:validation:XValidation:rule="has(self.providerConfigRef) && self.providerConfigRef.kind == 'Provider'",message="providerConfigRef must name a Provider: set kind to 'Provider' (crossplane's default, ClusterProviderConfig, is refused)"
 // +kubebuilder:validation:XValidation:rule="has(self.providerConfigRef) && self.providerConfigRef.name.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') && size(self.providerConfigRef.name) <= 63",message="providerConfigRef.name must be a Provider name, a DNS-1123 label"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.providerConfigRef) || (has(self.providerConfigRef) && self.providerConfigRef == oldSelf.providerConfigRef)",message="an Allocation's providerConfigRef is immutable: the job it holds is on that provider; delete the Allocation and create a new one"
 type AllocationSpec struct {
 	xpv2.ManagedResourceSpec `json:",inline"`
 
@@ -109,7 +110,7 @@ type AllocationObservation struct {
 	// JobID is the established job ID, mirrored from its annotation.
 	//
 	// +optional
-	JobID string `json:"jobId,omitempty"`
+	JobID string `json:"jobID,omitempty"`
 
 	// Submission mirrors the latest submission attempt.
 	//
@@ -121,7 +122,16 @@ type AllocationObservation struct {
 	// +optional
 	Phase string `json:"phase,omitempty"`
 
-	// StartTime is when the job started.
+	// StartEstimate is when the platform's scheduler expects the job to start.
+	// It is absent while the platform gives no estimate: an unknown estimate
+	// is not "now" and not "never". It is not StartTime, which is the actual
+	// start, and it moves with every scheduler pass (HBEP-3, Vocabulary,
+	// Lease: a lease runs from a start estimate, which may be unknown).
+	//
+	// +optional
+	StartEstimate *metav1.Time `json:"startEstimate,omitempty"`
+
+	// StartTime is when the job actually started. It is absent until it has.
 	//
 	// +optional
 	StartTime *metav1.Time `json:"startTime,omitempty"`
@@ -158,10 +168,12 @@ type AllocationStatus struct {
 // Allocation is capacity with a lifetime, like a Kubernetes node: one lease on
 // a provider, such as a Slurm job (HBEP-3). It outlives its Instances and can
 // be repurposed. It is a crossplane-runtime managed resource whose external
-// name is its job tag.
+// name is its job tag. It is deliberately not in crossplane's "managed"
+// category, so that "kubectl delete managed --all" on a cluster that also runs
+// Crossplane cannot reach Allocations and cancel their jobs.
 //
 // +kubebuilder:object:root=true
-// +kubebuilder:resource:scope=Namespaced,shortName=alloc,categories=hpcburst;managed
+// +kubebuilder:resource:scope=Namespaced,shortName=alloc,categories=hpcburst
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Provider",type=string,JSONPath=`.spec.providerConfigRef.name`
 // +kubebuilder:printcolumn:name="Deployment",type=string,JSONPath=`.spec.modelDeploymentRef.name`

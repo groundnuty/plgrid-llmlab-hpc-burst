@@ -223,7 +223,7 @@ func newProfile(name string) *v1alpha1.PlatformProfile {
 	return &v1alpha1.PlatformProfile{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec: v1alpha1.PlatformProfileSpec{
-			Kind: v1alpha1.PlatformBatch,
+			ProviderKind: v1alpha1.PlatformBatch,
 			Partitions: []v1alpha1.PartitionProfile{
 				{Name: "example-gpu", AcceleratorClass: v1alpha1.AcceleratorClass{GPUModel: "GH200", CPUArch: "aarch64"}},
 				{Name: "example-cpu", AcceleratorClass: v1alpha1.AcceleratorClass{GPUModel: "none", CPUArch: "x86_64"}},

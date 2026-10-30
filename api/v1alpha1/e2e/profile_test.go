@@ -3,6 +3,7 @@ package e2e
 import (
 	"testing"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/utils/ptr"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -14,7 +15,8 @@ func TestPlatformProfileTypedFields(t *testing.T) {
 		mutate func(*v1alpha1.PlatformProfile)
 		want   string
 	}{
-		{"unknown kind", func(p *v1alpha1.PlatformProfile) { p.Spec.Kind = "cloud" }, "Unsupported value"},
+		{"unknown provider kind", func(p *v1alpha1.PlatformProfile) { p.Spec.ProviderKind = "cloud" }, "Unsupported value"},
+		{"no provider kind", func(p *v1alpha1.PlatformProfile) { p.Spec.ProviderKind = "" }, "providerKind"},
 		{"lost_grace is not a duration", func(p *v1alpha1.PlatformProfile) { p.Spec.LostGrace = ptr.To(v1alpha1.Duration("soon")) }, "lost_grace"},
 		{"inflight_window is not a duration", func(p *v1alpha1.PlatformProfile) { p.Spec.InflightWindow = ptr.To(v1alpha1.Duration("5")) }, "inflight_window"},
 		{"unknown_bound is not a duration", func(p *v1alpha1.PlatformProfile) { p.Spec.UnknownBound = ptr.To(v1alpha1.Duration("10 minutes")) }, "unknown_bound"},
@@ -41,7 +43,7 @@ func TestPlatformProfileTypedFields(t *testing.T) {
 			p.Spec.UnknownBound = ptr.To(v1alpha1.Duration("15m"))
 		}},
 		{"a managed platform without partitions", func(p *v1alpha1.PlatformProfile) {
-			p.Spec.Kind, p.Spec.Partitions = v1alpha1.PlatformManaged, nil
+			p.Spec.ProviderKind, p.Spec.Partitions = v1alpha1.PlatformManaged, nil
 		}},
 	}
 	for _, tc := range accepted {
@@ -51,6 +53,24 @@ func TestPlatformProfileTypedFields(t *testing.T) {
 			must(t, c.Create(bg(), p), "create PlatformProfile")
 			cleanup(t, p)
 		})
+	}
+}
+
+// The kind of provider a platform offers is spec.providerKind, not spec.kind,
+// which reads like the object's own kind. The check reads the stored object.
+func TestPlatformProfileProviderKindKey(t *testing.T) {
+	p := newProfile(uniq("prof"))
+	must(t, c.Create(bg(), p), "create")
+	cleanup(t, p)
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("PlatformProfile"))
+	must(t, c.Get(bg(), objKey(p), u), "get unstructured")
+	spec, _, _ := unstructured.NestedMap(u.Object, "spec")
+	if spec["providerKind"] != string(v1alpha1.PlatformBatch) {
+		t.Errorf("spec.providerKind = %v; keys %v", spec["providerKind"], spec)
+	}
+	if _, wrong := spec["kind"]; wrong {
+		t.Errorf("spec.kind is written: %v", spec)
 	}
 }
 

@@ -3,8 +3,11 @@ package e2e
 import (
 	"strings"
 	"testing"
+	"time"
 
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/utils/ptr"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -64,7 +67,8 @@ func TestAllocationSubmissionParameters(t *testing.T) {
 }
 
 // An Allocation's submission parameters are immutable: a submitted job is never
-// edited. Everything else about it may change, a repurpose included.
+// edited. The provider it names is immutable too (TestAllocationProviderIsImmutable).
+// The rest may change, a repurpose included.
 func TestAllocationSubmissionParametersAreImmutable(t *testing.T) {
 	const msg = "an Allocation's submission parameters are immutable"
 	ns := newNamespace(t)
@@ -120,6 +124,64 @@ func TestAllocationSubmissionParametersAreImmutable(t *testing.T) {
 	must(t, c.Update(bg(), got), "write the object back unchanged")
 }
 
+// The provider that holds the job is part of the job's identity: moving a live
+// Allocation to another provider would leave the job running on the first while
+// the second's manager observes and cancels on the wrong platform (HBEP-3, an
+// Allocation is one lease on a provider; HBEP-11, one manager per provider).
+func TestAllocationProviderIsImmutable(t *testing.T) {
+	const msg = "an Allocation's providerConfigRef is immutable"
+	ns := newNamespace(t)
+	a := newAllocation(ns, "pinned") // names helios-a
+	a.Annotations = map[string]string{v1alpha1.AnnotationJobID: "12345"}
+	must(t, c.Create(bg(), a), "create")
+
+	get := func() *v1alpha1.Allocation {
+		got := &v1alpha1.Allocation{}
+		must(t, c.Get(bg(), objKey(a), got), "get")
+		return got
+	}
+	refused := map[string]func(*v1alpha1.Allocation){
+		"moving from helios-a to athena-a": func(a *v1alpha1.Allocation) { a.Spec.ProviderConfigReference.Name = "athena-a" },
+		"moving to a name that differs by one letter": func(a *v1alpha1.Allocation) {
+			a.Spec.ProviderConfigReference.Name = "helios-b"
+		},
+		"moving together with a valid repurpose": func(a *v1alpha1.Allocation) {
+			a.Spec.ProviderConfigReference.Name = "athena-a"
+			a.Spec.ModelDeploymentRef = &v1alpha1.ObjectReference{Name: "md-a"}
+		},
+	}
+	for what, edit := range refused {
+		t.Run("refuse "+what, func(t *testing.T) {
+			got := get()
+			edit(got)
+			requireRefused(t, c.Update(bg(), got), msg)
+		})
+	}
+	if got := get().Spec.ProviderConfigReference; got == nil || got.Name != "helios-a" || got.Kind != v1alpha1.ProviderConfigKind {
+		t.Fatalf("the refused moves changed the reference: %+v", got)
+	}
+
+	accepted := map[string]func(*v1alpha1.Allocation){
+		"the reference written back unchanged": func(*v1alpha1.Allocation) {},
+		"the same reference spelled out again": func(a *v1alpha1.Allocation) {
+			a.Spec.ProviderConfigReference = &xpv2.ProviderConfigReference{Kind: v1alpha1.ProviderConfigKind, Name: "helios-a"}
+		},
+		"a repurpose, the reference unchanged": func(a *v1alpha1.Allocation) {
+			a.Spec.ModelDeploymentRef = &v1alpha1.ObjectReference{Name: "md-b"}
+		},
+		"a retention change, the reference unchanged": func(a *v1alpha1.Allocation) {
+			a.Spec.RetentionPolicy = &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionKeep}
+		},
+	}
+	for what, edit := range accepted {
+		t.Run("accept "+what, func(t *testing.T) {
+			got := get()
+			edit(got)
+			must(t, c.Update(bg(), got), "update")
+		})
+	}
+}
+
 func TestAllocationRetentionPolicyRule(t *testing.T) {
 	ns := newNamespace(t)
 	a := newAllocation(ns, uniq("alloc"))
@@ -150,6 +212,76 @@ func TestAllocationStatusMirrorsTheRecord(t *testing.T) {
 	again := &v1alpha1.Allocation{}
 	must(t, c.Get(bg(), objKey(a), again), "get")
 	if again.Status.AtProvider.JobID != "424242" {
-		t.Fatalf("the main resource wrote the status: jobId = %s", again.Status.AtProvider.JobID)
+		t.Fatalf("the main resource wrote the status: jobID = %s", again.Status.AtProvider.JobID)
+	}
+
+	// On the wire the key is jobID, the Kubernetes spelling of an ID, as on an Instance.
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("Allocation"))
+	must(t, c.Get(bg(), objKey(a), u), "get unstructured")
+	obs, _, _ := unstructured.NestedMap(u.Object, "status", "atProvider")
+	if obs["jobID"] != "424242" {
+		t.Errorf("status.atProvider.jobID = %v; keys %v", obs["jobID"], obs)
+	}
+	if _, wrong := obs["jobId"]; wrong {
+		t.Errorf("status.atProvider.jobId is written: %v", obs)
+	}
+}
+
+// A lease runs from a start estimate, which may be unknown, to a hard end
+// (HBEP-3, Vocabulary). The estimate is its own field: it is not the actual
+// start, and "unknown" is the absence of the field.
+func TestAllocationStatusKeepsTheStartEstimate(t *testing.T) {
+	ns := newNamespace(t)
+	a := newAllocation(ns, uniq("alloc"))
+	must(t, c.Create(bg(), a), "create")
+	get := func() *v1alpha1.AllocationObservation {
+		got := &v1alpha1.Allocation{}
+		must(t, c.Get(bg(), objKey(a), got), "get")
+		return &got.Status.AtProvider
+	}
+	if obs := get(); obs.StartEstimate != nil || obs.StartTime != nil {
+		t.Fatalf("a new Allocation has an estimate or a start: %+v", obs)
+	}
+
+	// Unknown from the start, with the actual start unset: nothing is invented.
+	a.Status.AtProvider = v1alpha1.AllocationObservation{Phase: "Pending"}
+	must(t, c.Status().Update(bg(), a), "write a status without an estimate")
+	if obs := get(); obs.StartEstimate != nil || obs.StartTime != nil || obs.Phase != "Pending" {
+		t.Fatalf("an unknown estimate came back as %+v", obs)
+	}
+
+	// Known. Kubernetes keeps times to the second.
+	est := time.Date(2026, 11, 2, 9, 30, 0, 0, time.UTC)
+	a.Status.AtProvider.StartEstimate = &metav1.Time{Time: est}
+	must(t, c.Status().Update(bg(), a), "write a known estimate")
+	obs := get()
+	if obs.StartEstimate == nil || !obs.StartEstimate.Time.Equal(est) {
+		t.Fatalf("startEstimate = %v, want %v", obs.StartEstimate, est)
+	}
+	if obs.StartTime != nil {
+		t.Fatalf("writing the estimate set startTime: %v", obs.StartTime)
+	}
+
+	// The estimate moves, and the actual start is a different time and a different field.
+	moved, start := est.Add(3*time.Hour), est.Add(-time.Hour)
+	a.Status.AtProvider.StartEstimate = &metav1.Time{Time: moved}
+	a.Status.AtProvider.StartTime = &metav1.Time{Time: start}
+	must(t, c.Status().Update(bg(), a), "move the estimate and set the start")
+	obs = get()
+	if obs.StartEstimate == nil || !obs.StartEstimate.Time.Equal(moved) || obs.StartTime == nil || !obs.StartTime.Time.Equal(start) {
+		t.Fatalf("estimate %v, start %v; want %v and %v", obs.StartEstimate, obs.StartTime, moved, start)
+	}
+
+	// The estimate becomes unknown again (the scheduler went "unknown", HBEP-7):
+	// it is cleared, and the start stays.
+	a.Status.AtProvider.StartEstimate = nil
+	must(t, c.Status().Update(bg(), a), "make the estimate unknown")
+	obs = get()
+	if obs.StartEstimate != nil {
+		t.Fatalf("an unknown estimate kept its old value %v", obs.StartEstimate)
+	}
+	if obs.StartTime == nil || !obs.StartTime.Time.Equal(start) {
+		t.Fatalf("clearing the estimate changed startTime: %v", obs.StartTime)
 	}
 }

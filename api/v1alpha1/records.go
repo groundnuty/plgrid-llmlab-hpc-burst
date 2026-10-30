@@ -22,7 +22,8 @@ const maxLabelValue = 63
 // kept. A longer one becomes its first 50 characters, then "-", then the first
 // 12 hex characters of the SHA-256 of the full value (HBEP-11, API, Labels).
 // The full value stays where the object names it in full: an owner reference, a
-// spec field or an annotation.
+// spec field or an annotation (a record has the annotation
+// AnnotationModelDeployment).
 func LabelValue(s string) string {
 	if len(s) <= maxLabelValue {
 		return s
@@ -47,7 +48,8 @@ func VerificationRecordName(instance types.UID) string {
 
 // NewIdentityRecord returns the identity record of a deployment ID: a
 // ControllerRevision named id-<first 12 hex of the ID>, with the labels of
-// HBEP-11 and no owner reference, so garbage collection never removes it. Data
+// HBEP-11, the full ModelDeployment name in an annotation and no owner
+// reference, so garbage collection never removes it. Data
 // holds the canonical v1 object and the full hash; this package does not
 // interpret it. The caller creates the record only if it is absent: the same
 // inputs give the same bytes, so an existing record is reused, never rewritten.
@@ -63,8 +65,9 @@ func NewIdentityRecord(namespace, modelDeployment, deploymentID string, data []b
 }
 
 // NewVerificationRecord returns an Instance's verification record: a
-// ControllerRevision written once, pass or fail, with the labels of HBEP-11
-// and no owner reference to the ModelDeployment or to the Instance.
+// ControllerRevision written once, pass or fail, with the labels of HBEP-11,
+// the full ModelDeployment name in an annotation and no owner reference to the
+// ModelDeployment or to the Instance.
 func NewVerificationRecord(namespace, modelDeployment, deploymentID string, instance types.UID, data []byte) (*appsv1.ControllerRevision, error) {
 	if _, err := IdentityRecordName(deploymentID); err != nil {
 		return nil, err
@@ -90,8 +93,11 @@ func newRecord(name, namespace, kind, modelDeployment, deploymentID string, inst
 	if instance != "" {
 		labels[LabelInstanceUID] = string(instance)
 	}
+	// The label holds the shortened name; the annotation keeps the full one for
+	// a record that outlives its ModelDeployment.
+	annotations := map[string]string{AnnotationModelDeployment: modelDeployment}
 	return &appsv1.ControllerRevision{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: labels},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: labels, Annotations: annotations},
 		Data:       runtime.RawExtension{Raw: append([]byte(nil), data...)},
 		Revision:   1,
 	}, nil

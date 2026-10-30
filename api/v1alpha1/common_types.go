@@ -18,8 +18,10 @@ func (d Duration) AsDuration() (time.Duration, error) { return time.ParseDuratio
 
 // DeploymentID is a deployment ID (HBEP-3): the SHA-256 of the canonical
 // object, in lowercase hex. Names and labels carry its display form, the first
-// 12 characters, and records keep all 64. The API stores it as a validated
-// string; the package that computes it is separate.
+// 12 characters, and records keep all 64. The package that computes it is
+// separate. No API field takes either form here: fields hold FullDeploymentID,
+// so a controller never compares two forms of one ID. This type accepts both
+// forms, for code that reads a name or a label.
 //
 // +kubebuilder:validation:MaxLength=64
 // +kubebuilder:validation:Pattern=`^([0-9a-f]{12}|[0-9a-f]{64})$`

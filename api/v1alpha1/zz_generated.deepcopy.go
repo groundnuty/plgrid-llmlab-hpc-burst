@@ -108,6 +108,10 @@ func (in *AllocationObservation) DeepCopyInto(out *AllocationObservation) {
 		*out = new(SubmissionRecord)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.StartEstimate != nil {
+		in, out := &in.StartEstimate, &out.StartEstimate
+		*out = (*in).DeepCopy()
+	}
 	if in.StartTime != nil {
 		in, out := &in.StartTime, &out.StartTime
 		*out = (*in).DeepCopy()
@@ -876,6 +880,11 @@ func (in *ServingSpec) DeepCopyInto(out *ServingSpec) {
 		in, out := &in.Env, &out.Env
 		*out = make([]EnvVar, len(*in))
 		copy(*out, *in)
+	}
+	if in.ChatTemplate != nil {
+		in, out := &in.ChatTemplate, &out.ChatTemplate
+		*out = new(string)
+		**out = **in
 	}
 }
 

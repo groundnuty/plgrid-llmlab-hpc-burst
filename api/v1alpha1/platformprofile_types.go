@@ -36,8 +36,10 @@ type PartitionProfile struct {
 // deployment ID read are typed; the rest of the profile is an untyped block.
 // The typed fields carry the names HBEP-11 gives them.
 type PlatformProfileSpec struct {
-	// Kind is managed, batch or static.
-	Kind PlatformKind `json:"kind"`
+	// ProviderKind is managed, batch or static: the kind of provider the
+	// platform offers (HBEP-3, Vocabulary, Provider). It is not the object's
+	// own kind, which is PlatformProfile.
+	ProviderKind PlatformKind `json:"providerKind"`
 
 	// Partitions lists the accelerator class of each partition.
 	//
@@ -104,7 +106,7 @@ type PlatformProfileStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Cluster,categories=hpcburst
 // +kubebuilder:subresource:status
-// +kubebuilder:printcolumn:name="Kind",type=string,JSONPath=`.spec.kind`
+// +kubebuilder:printcolumn:name="ProviderKind",type=string,JSONPath=`.spec.providerKind`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 type PlatformProfile struct {
 	metav1.TypeMeta   `json:",inline"`

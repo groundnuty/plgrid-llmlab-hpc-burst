@@ -42,6 +42,13 @@ func TestKindsAreServedWithTheirScopes(t *testing.T) {
 	for _, r := range list.APIResources {
 		if !strings.Contains(r.Name, "/") {
 			got[r.Kind] = r.Namespaced
+			// Every kind is in the group's own category and no other. In
+			// particular an Allocation is not in crossplane's "managed" category:
+			// "kubectl delete managed --all" on a cluster that also runs
+			// Crossplane must not reach Allocations and cancel their jobs.
+			if len(r.Categories) != 1 || r.Categories[0] != "hpcburst" {
+				t.Errorf("kind %s is in categories %v, want exactly [hpcburst]", r.Kind, r.Categories)
+			}
 		}
 	}
 	for kind, namespaced := range want {
