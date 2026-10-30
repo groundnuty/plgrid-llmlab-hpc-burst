@@ -76,7 +76,9 @@ func committed(t *testing.T) []b.Cell {
 }
 
 // Check 1 of the follow-up: "at full membership in the tight regime, option
-// 5's cap binds: spills are above 0". THE CHECK FAILS AS WORDED. In the tight
+// 5's cap binds: spills are above 0". The HBEP-5 owner judged that the check
+// meets its intent where c = 1.25 alone breaks the limit (scarce and half
+// prefill, see TestCapBindsWhereC125ReachesTheLimit). In the tight
 // regime plain c = 1.25 never reaches the cap: S10b committed peaks of 43, 46
 // and 46 in flight for it, against a cap of 48. A request is spilled only when
 // its choice already holds 48, which needs a peak of 49, so option 5 makes
