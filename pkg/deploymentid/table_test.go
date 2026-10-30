@@ -13,7 +13,8 @@ type tableKey struct {
 }
 
 // hbepTable parses the rows of HBEP-3's "v1 table for vLLM". The `v1` column
-// is "input", "not an input", "not in `flags`" or "never"; a row names several
+// is "input", "not an input", "not in `flags`", "never", "refused" or "refused
+// in alpha"; a row names several
 // flags or variables in backticks. A name with an upper-case letter is an
 // environment variable, since every vLLM flag is lower-case.
 func hbepTable(t *testing.T) map[tableKey]class {
@@ -32,6 +33,7 @@ func hbepTable(t *testing.T) map[tableKey]class {
 	byLabel := map[string]class{
 		"input": classInput, "not an input": classNotInput,
 		"not in `flags`": classFrameworkPassed, "never": classNever,
+		"refused": classRefused, "refused in alpha": classRefused,
 	}
 	name := regexp.MustCompile("`([^`]+)`")
 	got := map[tableKey]class{}

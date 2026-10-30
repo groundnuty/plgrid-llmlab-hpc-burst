@@ -130,12 +130,17 @@ func (g *gen) files() []File {
 func rulesOf(c class, env bool) []string {
 	var names []string
 	for _, r := range vllmV0320 {
-		if r.class == c && r.env == env {
+		if r.class == c && r.env == env && !slices.Contains(valueChecked, r.name) {
 			names = append(names, r.name)
 		}
 	}
 	return names
 }
+
+// valueChecked are the table inputs whose values the library reads (HBEP-3,
+// references to other checkpoints): a random text is no valid value for them,
+// so the generators leave them out and references_test.go covers them.
+var valueChecked = []string{flagTokenizer, flagSpeculativeConfig}
 
 // names picks k distinct names: from the table's rules of class c, or, with
 // probability 1/2 each, an unknown name.

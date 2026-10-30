@@ -24,7 +24,7 @@ func baseSpec() (ServingSpec, Accelerator, []File) {
 		Checkpoint: Checkpoint{Repository: "example-org/example-7b", Revision: strings.Repeat("ab", 20)},
 		Engine:     Engine{Name: "vllm", Version: "0.32.0", ImageDigest: "sha256:" + rep64("6")},
 		Flags: []Flag{
-			{"dtype", "bfloat16"}, {"port", "8000"}, {"lora-modules", "a"}, {"lora-modules", "b"},
+			{"dtype", "bfloat16"}, {"port", "8000"}, {"middleware", "a"}, {"middleware", "b"},
 		},
 		Env:                []EnvVar{{"VLLM_USE_DEEP_GEMM", "1"}, {"HF_HOME", "/data/hf"}},
 		ChatTemplateSHA256: rep64("1"),
@@ -218,6 +218,19 @@ func TestVector05Orders(t *testing.T) {
 	if env[len(env)-1] != "_LEAD" {
 		t.Errorf("env keys %q: want _LEAD last (bytewise), as a case-insensitive sort would not", env)
 	}
+	// HBEP-3's test plan asks for a value with non-ASCII characters, written as
+	// literal UTF-8 under JCS: no \u escape of a non-ASCII character, and the
+	// characters themselves in the bytes.
+	for _, lit := range []string{"\u00e9\u65e5\u672c\u8a9e", "\U0001F600", "\u20ac"} {
+		if !bytes.Contains(b, []byte(lit)) {
+			t.Errorf("vector 05 has no literal %q", lit)
+		}
+	}
+	for _, esc := range []string{`\u00e9`, `\u65e5`, `\ud83d`, `\ud83D`, `\u20ac`, `\u2028`} {
+		if bytes.Contains(b, []byte(esc)) {
+			t.Errorf("vector 05 escapes a non-ASCII character as %s", esc)
+		}
+	}
 	var paths []string
 	for _, f := range doc.Files {
 		paths = append(paths, f.Path)
@@ -328,7 +341,7 @@ func TestComputeDoesNotMutateInputs(t *testing.T) {
 
 func TestFlagsObjectShape(t *testing.T) {
 	spec, accel, files := baseSpec()
-	spec.Flags = []Flag{{"seed", "1"}, {"port", "1"}, {"lora-modules", "a"}, {"seed", "2"}, {"enforce-eager", "false"}}
+	spec.Flags = []Flag{{"seed", "1"}, {"port", "1"}, {"middleware", "a"}, {"seed", "2"}, {"enforce-eager", "false"}}
 	spec.Env = nil
 	id := mustCompute(t, spec, accel, files)
 	var doc struct {
@@ -338,7 +351,7 @@ func TestFlagsObjectShape(t *testing.T) {
 	if err := json.Unmarshal(id.Canonical, &doc); err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]any{"seed": []any{"1", "2"}, "lora-modules": "a", "enforce-eager": "false"}
+	want := map[string]any{"seed": []any{"1", "2"}, "middleware": "a", "enforce-eager": "false"}
 	if !reflect.DeepEqual(doc.Flags, want) {
 		t.Errorf("flags %v, want %v (a repeated flag is an array, a single one a string, a non-input absent)", doc.Flags, want)
 	}

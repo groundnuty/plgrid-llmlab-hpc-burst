@@ -5,7 +5,7 @@
   "engine": {"name": "vllm", "version": "0.32.0", "image_digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666"},
   "flags": {
     "tool-call-parser": "hermes",
-    "lora-modules": ["style-a=org/lora-a", "style-b=org/lora-b", "style-a=org/lora-a"],
+    "middleware": ["example.mw.Audit", "example.mw.Trace", "example.mw.Audit"],
     "enforce-eager": "false",
     "hf-overrides": "{\"rope_scaling\":{\"rope_type\":\"yarn\",\"factor\":4.0,\"original_max_position_embeddings\":32768}}",
     "seed": "0",

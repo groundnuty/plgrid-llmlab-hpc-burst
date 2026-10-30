@@ -25,6 +25,18 @@ func TestRefusals(t *testing.T) {
 		{"model", &Flag{"model", "x/y"}, nil, ErrFrameworkPassed},
 		{"revision", &Flag{"revision", "main"}, nil, ErrFrameworkPassed},
 		{"chat-template", &Flag{"chat-template", "{{ x }}"}, nil, ErrFrameworkPassed},
+		// Credentials vLLM reads from the environment (vllm/envs.py@v0.32.0), and
+		// the flags HBEP-3 refuses: config reads options from a file the ID does
+		// not see, lora-modules names unpinned checkpoints (alpha).
+		{"VLLM_API_KEY", nil, &EnvVar{"VLLM_API_KEY", "SECRET-VALUE"}, ErrSecret},
+		{"S3_ACCESS_KEY_ID", nil, &EnvVar{"S3_ACCESS_KEY_ID", "SECRET-VALUE"}, ErrSecret},
+		{"S3_SECRET_ACCESS_KEY", nil, &EnvVar{"S3_SECRET_ACCESS_KEY", "SECRET-VALUE"}, ErrSecret},
+		{"config", &Flag{"config", "/data/vllm.yaml"}, nil, ErrRefused},
+		{"config.x", &Flag{"config.x", "1"}, nil, ErrRefused},
+		{"conf", &Flag{"conf", "/data/vllm.yaml"}, nil, ErrRefused},
+		{"lora-modules", &Flag{"lora-modules", "a=org/lora"}, nil, ErrRefused},
+		{"lora_modules", &Flag{"lora_modules", "a=org/lora"}, nil, ErrRefused},
+		{"lora-module", &Flag{"lora-module", "a=org/lora"}, nil, ErrRefused},
 		// Spellings vLLM resolves to a refused flag (vllm/utils/argparse_utils.py
 		// @v0.32.0): an underscore for a dash, a dotted sub-key, a unique
 		// prefix. Each is refused as the flag itself is, with no value in the

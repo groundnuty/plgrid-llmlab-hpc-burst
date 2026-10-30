@@ -109,13 +109,14 @@ type ID struct {
 // package doc lists the further inputs Compute refuses: another engine, an
 // empty or duplicated file list, unclean paths, a duplicate environment
 // variable, a revision that is not 40 or 64 lowercase hex characters, names
-// outside the ASCII sets, and the spellings of refused flags.
+// outside the ASCII sets, other spellings of a known flag, and values that
+// name an unpinned checkpoint.
 func Compute(spec ServingSpec, accel Accelerator, files []File) (ID, error) {
 	t, err := validateServing(spec, accel)
 	if err != nil {
 		return ID{}, err
 	}
-	flags, err := servedFlags(t, spec.Flags)
+	flags, err := servedFlags(t, spec.Checkpoint.Repository, spec.Flags)
 	if err != nil {
 		return ID{}, err
 	}
@@ -214,7 +215,7 @@ func validateServing(spec ServingSpec, accel Accelerator) (*table, error) {
 // servedFlags builds the "flags" object. Only input flags are written. A flag
 // given more than once maps to an array of its values in the order given; a
 // flag given once maps to its value.
-func servedFlags(t *table, flags []Flag) (jobject, error) {
+func servedFlags(t *table, repository string, flags []Flag) (jobject, error) {
 	var names []string
 	values := map[string][]string{}
 	for _, f := range flags {
@@ -233,6 +234,9 @@ func servedFlags(t *table, flags []Flag) (jobject, error) {
 			names = append(names, name)
 		}
 		values[name] = append(values[name], f.Value)
+	}
+	if err := checkReferences(repository, values); err != nil {
+		return nil, err
 	}
 	out := make(jobject, 0, len(names))
 	for _, n := range names {
@@ -282,6 +286,8 @@ func refuse(c class, what, name, reason string) error {
 		return fmt.Errorf("%w: %s %q is a key; reference it instead of writing it in the spec", ErrSecret, what, name)
 	case classFrameworkPassed:
 		return fmt.Errorf("%w: %s %q (%s); remove it from the spec", ErrFrameworkPassed, what, name, reason)
+	case classRefused:
+		return fmt.Errorf("%w: %s %q (%s)", ErrRefused, what, name, reason)
 	}
 	return nil
 }

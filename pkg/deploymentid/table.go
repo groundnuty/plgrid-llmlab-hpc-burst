@@ -16,9 +16,14 @@ const (
 	// checkpoint and the chat template, which are hashed elsewhere in the
 	// object. A serving spec that lists it is refused.
 	classFrameworkPassed
-	// classNever: a key. It is refused; a key is referenced, never written in
-	// the spec, so that rotating it never changes an ID.
+	// classNever: a credential. It is refused; a credential is referenced,
+	// never written in the spec, so that rotating it never changes an ID.
 	classNever
+	// classRefused: a flag the ID cannot account for. "config" reads further
+	// options from a file whose content the ID does not see; "lora-modules"
+	// names other checkpoints without a pinned revision (refused in alpha,
+	// HBEP-3). Give each option as its own flag.
+	classRefused
 )
 
 func (c class) String() string {
@@ -31,6 +36,8 @@ func (c class) String() string {
 		return "passed by the framework"
 	case classNever:
 		return "never"
+	case classRefused:
+		return "refused"
 	}
 	return fmt.Sprintf("class(%d)", int(c))
 }
@@ -107,6 +114,12 @@ var vllmV0320 = []rule{
 	{"api-key", classNever, false, "a key"},
 	{"hf-token", classNever, false, "a key"},
 	{"HF_TOKEN", classNever, true, "a key"},
+	{"VLLM_API_KEY", classNever, true, "a key"},
+	{"S3_ACCESS_KEY_ID", classNever, true, "a key"},
+	{"S3_SECRET_ACCESS_KEY", classNever, true, "a key"},
+
+	{"config", classRefused, false, "it reads further options from a file whose content the ID would not see; give each option as its own flag"},
+	{"lora-modules", classRefused, false, "it names other checkpoints without a pinned revision; refused in alpha"},
 }
 
 // vllmShortAliases are the short options of vLLM v0.32.0 that have a long

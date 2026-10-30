@@ -125,9 +125,14 @@ func TestEveryTableInputChangesID(t *testing.T) {
 		}
 		with := func(val string) string {
 			s, f := cloneInputs(spec, files)
-			if r.env {
+			switch {
+			case r.env:
 				s.Env = []EnvVar{{r.name, val}}
-			} else {
+			case r.name == flagSpeculativeConfig: // a JSON object without a draft model
+				s.Flags = []Flag{{r.name, `{"method":"ngram","tag":"` + val + `"}`}}
+			case r.name == flagTokenizer: // another repository, pinned
+				s.Flags = []Flag{{r.name, val}, {flagTokenizerRevision, strings.Repeat("c", 40)}}
+			default:
 				s.Flags = []Flag{{r.name, val}}
 			}
 			return mustCompute(t, s, accel, f).SHA256
@@ -204,8 +209,7 @@ func TestPropertyRefusedInputsAreRefused(t *testing.T) {
 	for i := 0; i < iterations; i++ {
 		spec, accel, files := g.spec()
 		for _, r := range vllmV0320 {
-			want := map[class]error{classNever: ErrSecret, classFrameworkPassed: ErrFrameworkPassed}[r.class]
-			if want != nil {
+			if want := wantErr(r.class); want != nil {
 				g.expectRefused(t, spec, accel, files, r.name, r.env, want)
 			}
 		}
@@ -217,7 +221,7 @@ func TestPropertyRefusedInputsAreRefused(t *testing.T) {
 		g.expectRefused(t, spec, accel, files, "-"+short, false, ErrShortAlias)
 		// A spelling of a refused flag that vLLM resolves to it.
 		for _, r := range vllmV0320 {
-			want := map[class]error{classNever: ErrSecret, classFrameworkPassed: ErrFrameworkPassed}[r.class]
+			want := wantErr(r.class)
 			if want == nil || r.env {
 				continue
 			}
@@ -227,7 +231,7 @@ func TestPropertyRefusedInputsAreRefused(t *testing.T) {
 			} else if g.r.Intn(2) == 0 {
 				spelled = r.name[:1+g.r.Intn(len(r.name)-1)]
 			}
-			if _, alias := vllmShortAliases[spelled]; alias {
+			if _, alias := vllmShortAliases[spelled]; alias || sharedWithAnotherRefused(spelled, r.name) {
 				continue
 			}
 			if _, listed := tables[engineVLLM].flags[spelled]; listed && spelled != r.name {

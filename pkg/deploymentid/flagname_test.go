@@ -50,6 +50,10 @@ func TestUnderscoreSpellingIsClassifiedLikeTheDashedOne(t *testing.T) {
 			if !errors.Is(err, ErrFrameworkPassed) {
 				t.Errorf("%s: got %q, %v; want ErrFrameworkPassed", spelled, got, err)
 			}
+		case classRefused:
+			if !errors.Is(err, ErrRefused) {
+				t.Errorf("%s: got %q, %v; want ErrRefused", spelled, got, err)
+			}
 		default:
 			if err != nil || got != r.name {
 				t.Errorf("%s: got %q, %v; want %q", spelled, got, err, r.name)
@@ -87,11 +91,11 @@ func TestUnderscoreSpellingGivesTheSameID(t *testing.T) {
 
 	// Both spellings of one repeated flag are one array, in the order given.
 	mixed, _, _ := baseSpec()
-	mixed.Flags = []Flag{{"lora_modules", "a"}, {"lora-modules", "b"}, {"lora_modules", "c"}}
+	mixed.Flags = []Flag{{"allowed_origins", "a"}, {"allowed-origins", "b"}, {"allowed_origins", "c"}}
 	plain, _, _ := baseSpec()
-	plain.Flags = []Flag{{"lora-modules", "a"}, {"lora-modules", "b"}, {"lora-modules", "c"}}
+	plain.Flags = []Flag{{"allowed-origins", "a"}, {"allowed-origins", "b"}, {"allowed-origins", "c"}}
 	if m, p := mustCompute(t, mixed, accel, files), mustCompute(t, plain, accel, files); !bytes.Equal(m.Canonical, p.Canonical) ||
-		!bytes.Contains(m.Canonical, []byte(`"lora-modules":["a","b","c"]`)) {
+		!bytes.Contains(m.Canonical, []byte(`"allowed-origins":["a","b","c"]`)) {
 		t.Errorf("mixed spellings of a repeated flag\n got  %s\n want %s", m.Canonical, p.Canonical)
 	}
 }
@@ -111,30 +115,34 @@ func TestEnvNamesAreNotRewritten(t *testing.T) {
 	}
 }
 
-// For each key or framework-passed flag of the table, every spelling vLLM's
-// parser resolves to it is refused with the flag's own error: an underscore
-// spelling, a dotted sub-key, and each proper prefix that is not itself a
-// listed name.
+// wantErr is the error a refused class gives, or nil.
+func wantErr(c class) error {
+	return map[class]error{classNever: ErrSecret, classFrameworkPassed: ErrFrameworkPassed, classRefused: ErrRefused}[c]
+}
+
+// For each credential, framework-passed or refused flag of the table, every
+// spelling vLLM's parser resolves to it is refused with the flag's own error:
+// an underscore spelling, a dotted sub-key, and each proper prefix that is not
+// itself a listed name and not a prefix of another refused flag.
 func TestEverySpellingOfARefusedFlagIsRefused(t *testing.T) {
 	const secret = "SECRET-VALUE"
 	checked := 0
 	for _, r := range vllmV0320 {
-		if r.env || (r.class != classNever && r.class != classFrameworkPassed) {
+		want := wantErr(r.class)
+		if r.env || want == nil {
 			continue
-		}
-		want := ErrSecret
-		if r.class == classFrameworkPassed {
-			want = ErrFrameworkPassed
 		}
 		spellings := []string{r.name, strings.ReplaceAll(r.name, "-", "_"), r.name + ".x", r.name + ".x.y",
 			strings.ReplaceAll(r.name, "-", "_") + ".x"}
 		for n := 1; n < len(r.name); n++ {
-			if _, alias := vllmShortAliases[r.name[:n]]; alias {
+			prefix := r.name[:n]
+			if _, alias := vllmShortAliases[prefix]; alias {
 				continue // "r" is both a prefix of revision and vLLM's -r
 			}
-			if prefix := r.name[:n]; vllmListed(prefix) == nil {
-				spellings = append(spellings, prefix, strings.ReplaceAll(prefix, "-", "_"), prefix+".x")
+			if vllmListed(prefix) != nil || sharedWithAnotherRefused(prefix, r.name) {
+				continue
 			}
+			spellings = append(spellings, prefix, strings.ReplaceAll(prefix, "-", "_"), prefix+".x")
 		}
 		for _, sp := range spellings {
 			spec, accel, files := baseSpec()
@@ -150,6 +158,68 @@ func TestEverySpellingOfARefusedFlagIsRefused(t *testing.T) {
 	}
 	if checked < 100 {
 		t.Errorf("only %d spellings were tried", checked)
+	}
+}
+
+// sharedWithAnotherRefused reports whether prefix is a proper prefix of a
+// refused flag of the table other than name.
+func sharedWithAnotherRefused(prefix, name string) bool {
+	for _, o := range vllmV0320 {
+		if !o.env && o.name != name && wantErr(o.class) != nil && len(prefix) < len(o.name) && strings.HasPrefix(o.name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// Every proper prefix of every flag the table lists is refused (HBEP-3: vLLM's
+// parser resolves abbreviations), unless it is itself a listed name or one of
+// vLLM's short options. A prefix of only flags that are inputs or not inputs is
+// ErrInvalid, so "max-num-s" does not reach --max-num-seqs under a name the
+// table does not know. A prefix of a refused flag gets that flag's error.
+func TestEveryProperPrefixOfAKnownFlagIsRefused(t *testing.T) {
+	checked, plain := 0, 0
+	for _, r := range vllmV0320 {
+		if r.env {
+			continue
+		}
+		for n := 1; n < len(r.name); n++ {
+			prefix := r.name[:n]
+			if vllmListed(prefix) != nil {
+				continue
+			}
+			if _, alias := vllmShortAliases[prefix]; alias {
+				continue
+			}
+			_, err := vllm.resolveFlag(prefix)
+			if err == nil {
+				t.Errorf("%q, a prefix of %s, was accepted", prefix, r.name)
+				continue
+			}
+			checked++
+			if sharedWithAnotherRefused(prefix, "") || wantErr(r.class) != nil {
+				continue // which refused flag it names is TestEverySpellingOfARefusedFlagIsRefused's concern
+			}
+			if !errors.Is(err, ErrInvalid) {
+				t.Errorf("%q, a prefix of %s: got %v, want ErrInvalid", prefix, r.name, err)
+			}
+			plain++
+		}
+	}
+	if checked < 300 || plain < 100 {
+		t.Errorf("only %d prefixes (%d of non-refused flags) were tried", checked, plain)
+	}
+	// Written out: abbreviations of flags that are not refused.
+	for _, name := range []string{"max-num-s", "max-num", "max-model-le", "enable-prefix", "gpu-memory", "tensor-parallel-siz", "d", "dty", "tool-call-pars"} {
+		if _, err := vllm.resolveFlag(name); !errors.Is(err, ErrInvalid) {
+			t.Errorf("%q: got %v, want ErrInvalid", name, err)
+		}
+	}
+	// A name that extends a listed name is not a prefix of one.
+	for _, name := range []string{"dtype-x", "max-model-length", "port-2", "seedling"} {
+		if got, err := vllm.resolveFlag(name); err != nil || got != name {
+			t.Errorf("%q: got %q, %v; want it accepted as an unlisted input", name, got, err)
+		}
 	}
 }
 
@@ -193,7 +263,7 @@ func TestNegatedBooleansAndShortOptionsAreRefused(t *testing.T) {
 // A flag the table does not list, and no rule touches, is an input under its
 // own name; an abbreviation of a flag that is not refused is such a flag too.
 func TestUnlistedNamesStayInputs(t *testing.T) {
-	for _, name := range []string{"some-future-flag", "max-num", "max-num-s", "lora-modules", "x", "0", "9lives", "a-"} {
+	for _, name := range []string{"some-future-flag", "middleware", "x", "0", "9lives", "a-"} {
 		got, err := vllm.resolveFlag(name)
 		if err != nil || got != name {
 			t.Errorf("resolveFlag(%q) = %q, %v; want the name itself", name, got, err)
@@ -211,9 +281,10 @@ func TestUnlistedNamesStayInputs(t *testing.T) {
 }
 
 // The prefix rule applies to a name that is not listed. A listed name that
-// happens to be a prefix of a refused one is accepted as what it is, and
-// when two refused flags share a prefix the answer is fixed: a key before a
-// framework-passed flag, then the name that sorts first.
+// happens to be a prefix of another is accepted as what it is. When several
+// flags share a prefix the answer is fixed: a credential, then a
+// framework-passed flag, then a refused one, then any other; among equals the
+// name that sorts first.
 func TestPrefixRuleOnASyntheticTable(t *testing.T) {
 	tab, err := newTable([]rule{
 		{"ab", classNotInput, false, "capacity"},
@@ -222,6 +293,10 @@ func TestPrefixRuleOnASyntheticTable(t *testing.T) {
 		{"xb", classNever, false, "a key"},
 		{"ya", classFrameworkPassed, false, "passed"},
 		{"yb", classFrameworkPassed, false, "passed"},
+		{"wa", classRefused, false, "refused"},
+		{"wb", classInput, false, "input"},
+		{"vq", classNotInput, false, "capacity"},
+		{"vr", classInput, false, "input"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -229,15 +304,23 @@ func TestPrefixRuleOnASyntheticTable(t *testing.T) {
 	if got, err := tab.resolveFlag("ab"); err != nil || got != "ab" {
 		t.Errorf("a listed prefix: got %q, %v; want it accepted", got, err)
 	}
-	if _, err := tab.resolveFlag("a"); !errors.Is(err, ErrSecret) {
-		t.Errorf("a: got %v, want ErrSecret (abbreviates abc)", err)
-	}
-	if _, err := tab.resolveFlag("x"); !errors.Is(err, ErrSecret) {
-		t.Errorf("x: got %v, want ErrSecret, the key before the framework-passed flag", err)
+	for name, want := range map[string]error{
+		"a": ErrSecret,          // abbreviates abc (a key) and ab
+		"x": ErrSecret,          // a key before a framework-passed flag
+		"y": ErrFrameworkPassed, // two framework-passed flags
+		"w": ErrRefused,         // a refused flag before an input
+		"v": ErrInvalid,         // only flags that are not refused
+	} {
+		if _, err := tab.resolveFlag(name); !errors.Is(err, want) {
+			t.Errorf("%s: got %v, want %v", name, err, want)
+		}
 	}
 	for i := 0; i < 50; i++ { // map order must not matter
-		if r, ok := tab.abbreviatedRefused("y"); !ok || r.name != "ya" {
+		if r, ok := tab.abbreviationOf("y"); !ok || r.name != "ya" {
 			t.Fatalf("y: got %+v, %v; want ya, the first by name", r, ok)
+		}
+		if r, ok := tab.abbreviationOf("v"); !ok || r.name != "vq" {
+			t.Fatalf("v: got %+v, %v; want vq, the first by name", r, ok)
 		}
 	}
 	if _, err := tab.resolveFlag("abcd"); err != nil {
@@ -278,5 +361,24 @@ func TestSpellingsKeepTheOrderOfValues(t *testing.T) {
 	spec.Flags = rev
 	if other := mustCompute(t, spec, accel, files); other.SHA256 == id.SHA256 {
 		t.Error("reversing the values of one flag, spelled two ways, kept the ID")
+	}
+}
+
+// HBEP-3 checks a name in this order: underscores to dashes, then the
+// character set, then the known-name rules. The character set is checked on
+// the normalised name, so an underscore never fails it by itself, and
+// whatever the normalisation leaves outside it still does.
+func TestUnderscoresAreNormalisedBeforeTheCharacterSet(t *testing.T) {
+	for name, wantOK := range map[string]bool{
+		"some_new_flag": true, "a_b": true, "_x": false, "x_": true, "__": false, "a__b": true,
+		"A_b": false, "a_B": false, "a_\u00e9": false, "a_b.c": false, "a_ b": false,
+	} {
+		got, err := vllm.resolveFlag(name)
+		if wantOK != (err == nil) {
+			t.Errorf("resolveFlag(%q) = %q, %v; want ok=%v", name, got, err, wantOK)
+		}
+		if err == nil && strings.Contains(got, "_") {
+			t.Errorf("resolveFlag(%q) = %q still has an underscore", name, got)
+		}
 	}
 }

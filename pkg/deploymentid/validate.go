@@ -17,12 +17,19 @@ var (
 	// one of vLLM's short options written without its dash, such as tp. The
 	// spec lists long names without leading dashes; no command line is parsed.
 	ErrShortAlias = errors.New("short flag alias")
-	// ErrSecret: a key (api-key, hf-token, HF_TOKEN). A key is referenced, never
-	// written in the spec, so that rotating it never changes an ID.
+	// ErrSecret: a credential (api-key, hf-token, HF_TOKEN, VLLM_API_KEY, the S3
+	// keys). It is referenced, never written in the spec, so that rotating it
+	// never changes an ID.
 	ErrSecret = errors.New("secret flag or variable")
 	// ErrFrameworkPassed: the spec lists model, revision or chat-template, which
 	// the framework passes itself from checkpoint and the template.
 	ErrFrameworkPassed = errors.New("setting passed by the framework")
+	// ErrRefused: a flag or value the ID cannot account for: "config" (it
+	// reads options from a file), "lora-modules", a tokenizer other than the
+	// checkpoint's without a pinned tokenizer-revision, a speculative-config
+	// that names a draft model (HBEP-3, alpha). Each names another checkpoint
+	// without a pinned revision, or hides options from the ID.
+	ErrRefused = errors.New("setting the ID cannot account for")
 	// ErrUnsupportedEngine: scheme v1 has no classification table for the engine.
 	ErrUnsupportedEngine = errors.New("engine has no scheme v1 table")
 )
