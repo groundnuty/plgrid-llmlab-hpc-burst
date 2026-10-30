@@ -1,0 +1,8 @@
+{
+  "scheme": "v1",
+  "kind": "managed",
+  "platform": "llmlab",
+  "catalog_name": "example-27b",
+  "revision": "2026-09",
+  "opaque": "true"
+}
