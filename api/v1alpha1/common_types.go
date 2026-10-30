@@ -53,19 +53,21 @@ const (
 
 // AcceleratorClass is a partition's GPU model and CPU architecture, as the
 // platform profile names them. It is an input of the deployment ID (HBEP-3).
-// The JSON keys are those of the canonical object's accelerator entry.
+// The JSON keys are camelCase, like every field of the API (Kubernetes API
+// conventions). The hash object's keys, gpu_model and cpu_arch (HBEP-3), stay
+// snake_case; pkg/deploymentid maps these fields onto them.
 type AcceleratorClass struct {
 	// GPUModel is the GPU model. A partition without GPUs names "none".
 	//
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
-	GPUModel string `json:"gpu_model"`
+	GPUModel string `json:"gpuModel"`
 
 	// CPUArch is the CPU architecture, for example "aarch64" or "x86_64".
 	//
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
-	CPUArch string `json:"cpu_arch"`
+	CPUArch string `json:"cpuArch"`
 }
 
 // ObjectReference names an object in the same namespace, or a cluster-scoped
@@ -162,6 +164,18 @@ func (r *RetentionPolicy) EffectiveMode() RetentionMode {
 		return RetentionKeep
 	}
 	return r.Mode
+}
+
+// RetentionStatus shows the retention the controller applies. The spec's mode
+// has no schema default (an unset mode means Keep), so the effective value is
+// shown here rather than written into the spec: a later change of the default
+// leaves no stale stored values.
+type RetentionStatus struct {
+	// EffectiveMode is the mode the controller applies: the spec's mode, or
+	// Keep when the spec sets none (RetentionPolicy.EffectiveMode).
+	//
+	// +optional
+	EffectiveMode RetentionMode `json:"effectiveMode,omitempty"`
 }
 
 // ReconcileStatus is what every status carries so that a stuck controller

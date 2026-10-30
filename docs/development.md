@@ -47,6 +47,10 @@ Kubernetes' explicit ±1-minor skew rule is written for kubectl. client-go inste
 - The flag-name tests read the known flag names from HBEP-3's v1 table, so the admission rules' lists of known names are checked against the specification. A flag added to the table fails `TestEngineFlagsRefuseEveryPrefixOfAKnownFlag` until the list in the `EngineFlag` markers (`api/v1alpha1/modeldeployment_types.go`) gains it.
 - The test host (`internal/testenv`) binds only loopback ports 29200 to 29219 and, in k3s mode, accepts only a kubeconfig whose server is loopback on 29200 to 29239. The control-plane binaries are always sha256-checked; `HPCBURST_TESTENV_UNPINNED=1` is the explicit override for a binary you built yourself.
 
+## API field names
+
+Every field of the CRDs is camelCase, as the Kubernetes API conventions ask (owner decision, PR #48): `holdRelease`, `lostGrace`, `imageDigest`, `gpuModel`, `timeZone`, `jobName.maxLength`. HBEP-3's hash object keeps its snake_case keys (`image_digest`, `gpu_model`, `cpu_arch`); `pkg/deploymentid` maps the API's fields onto them, and nothing in the API changes the hash. `TestEveryCRDFieldIsCamelCase` scans the committed manifests. HBEP text that writes a field in snake_case (`hold_release` in HBEP-11) means the camelCase field.
+
 ## Rules for every change
 
 - **Dependencies:** each one's licence must be on HBEP-15's allowlist (Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, ISC and the others it lists). Copied code goes under `third_party/forked/<project>/` with its upstream `LICENSE` and an `ORIGIN.md`.

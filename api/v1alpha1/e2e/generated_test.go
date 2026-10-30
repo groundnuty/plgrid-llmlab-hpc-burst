@@ -1,11 +1,16 @@
 package e2e
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 )
 
 // verifyGenerated runs hack/verify-generated.sh and returns its exit error and output.
@@ -76,5 +81,44 @@ func TestVerifyGeneratedCatchesDrift(t *testing.T) {
 	err, out = verifyGenerated(t, crdDir, badDC)
 	if err == nil || !strings.Contains(out, "edited by hand") {
 		t.Fatalf("verify-generated.sh did not catch an edited deepcopy file (err %v):\n%s", err, out)
+	}
+}
+
+var camelCase = regexp.MustCompile(`^[a-z][A-Za-z0-9]*$`)
+
+// Every field of every CRD is camelCase, as the Kubernetes API conventions ask
+// (owner decision, PR #48). HBEP-3's hash object keeps snake_case keys; the
+// deployment-ID library maps the API's fields onto them. The scan reads the
+// committed manifests, so it covers each field the schema declares. Free-form
+// blocks (x-kubernetes-preserve-unknown-fields) declare none.
+func TestEveryCRDFieldIsCamelCase(t *testing.T) {
+	files, err := filepath.Glob(filepath.Join(configDir("crd"), "*.yaml"))
+	must(t, err, "glob")
+	if len(files) != 5 {
+		t.Fatalf("want 5 CRD manifests, found %d", len(files))
+	}
+	var walk func(path string, s *apiextensionsv1.JSONSchemaProps, n *int)
+	walk = func(path string, s *apiextensionsv1.JSONSchemaProps, n *int) {
+		for name, p := range s.Properties {
+			*n++
+			if !camelCase.MatchString(name) {
+				t.Errorf("%s.%s is not camelCase", path, name)
+			}
+			walk(path+"."+name, &p, n)
+		}
+		if s.Items != nil && s.Items.Schema != nil {
+			walk(path+"[]", s.Items.Schema, n)
+		}
+	}
+	total := 0
+	for _, f := range files {
+		crd := &apiextensionsv1.CustomResourceDefinition{}
+		must(t, utilyaml.NewYAMLOrJSONDecoder(bytes.NewReader(readAll(t, f)), 4096).Decode(crd), "decode "+f)
+		for _, v := range crd.Spec.Versions {
+			walk(crd.Spec.Names.Kind, v.Schema.OpenAPIV3Schema, &total)
+		}
+	}
+	if total < 150 {
+		t.Fatalf("the scan saw only %d fields; it is not walking the schemas", total)
 	}
 }

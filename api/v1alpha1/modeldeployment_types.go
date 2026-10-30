@@ -44,12 +44,13 @@ type EngineSpec struct {
 	Version string `json:"version"`
 
 	// ImageDigest is the engine image's digest: "sha256:" and 64 lowercase hex
-	// characters (HBEP-3, the v1 canonical object). The JSON key is the
-	// canonical object's own, image_digest, like gpu_model and cpu_arch.
+	// characters (HBEP-3, the v1 canonical object). The JSON key is camelCase
+	// like every field of the API; the hash object's key, image_digest, stays
+	// snake_case, and pkg/deploymentid maps this field onto it.
 	//
 	// +kubebuilder:validation:MaxLength=71
-	// +kubebuilder:validation:XValidation:rule="self.matches('^sha256:[0-9a-f]{64}$')",message="image_digest must be 'sha256:' followed by 64 lowercase hex characters"
-	ImageDigest string `json:"image_digest"`
+	// +kubebuilder:validation:XValidation:rule="self.matches('^sha256:[0-9a-f]{64}$')",message="imageDigest must be 'sha256:' followed by 64 lowercase hex characters"
+	ImageDigest string `json:"imageDigest"`
 }
 
 // EngineFlag is one engine flag. The spec lists flags as ordered pairs, so no
@@ -342,6 +343,13 @@ type ModelDeploymentStatus struct {
 	//
 	// +optional
 	DesiredInstances int32 `json:"desiredInstances,omitempty"`
+
+	// Retention shows the retention mode the controller applies to the
+	// deployment's default policy; an unset mode in the spec, or no policy,
+	// reads as Keep.
+	//
+	// +optional
+	Retention *RetentionStatus `json:"retention,omitempty"`
 
 	// +optional
 	// +listType=map

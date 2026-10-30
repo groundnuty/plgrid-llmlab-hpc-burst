@@ -250,6 +250,12 @@ type AllocationStatus struct {
 	// +optional
 	LastReconcileTime *metav1.Time `json:"lastReconcileTime,omitempty"`
 
+	// Retention shows the retention mode the controller applies; an unset mode
+	// in the spec reads as Keep.
+	//
+	// +optional
+	Retention *RetentionStatus `json:"retention,omitempty"`
+
 	// AtProvider is the observed state of the job.
 	//
 	// +optional

@@ -67,10 +67,11 @@ func TestCheckpointRevisionIsAFullCommitID(t *testing.T) {
 	})
 }
 
-// The engine's digest is written under the canonical object's own key,
-// image_digest, as gpu_model and cpu_arch are (HBEP-3: code-font names stay
-// verbatim). The check reads the stored object, not the Go type.
-func TestEngineDigestKeyIsTheCanonicalOne(t *testing.T) {
+// Every field of the API is camelCase (Kubernetes API conventions), so the
+// engine's digest is imageDigest, not the hash object's image_digest; the
+// deployment-ID library maps one onto the other (HBEP-3). The check reads the
+// stored object, not the Go type.
+func TestEngineDigestKeyIsCamelCase(t *testing.T) {
 	ns := newNamespace(t)
 	md := newModelDeployment(ns, "digest-key")
 	must(t, c.Create(bg(), md), "create")
@@ -78,16 +79,16 @@ func TestEngineDigestKeyIsTheCanonicalOne(t *testing.T) {
 	u.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("ModelDeployment"))
 	must(t, c.Get(bg(), objKey(md), u), "get unstructured")
 	engine, _, _ := unstructured.NestedMap(u.Object, "spec", "source", "served", "engine")
-	if engine["image_digest"] != digest {
-		t.Errorf("spec.source.served.engine.image_digest = %v, want %s; keys %v", engine["image_digest"], digest, engine)
+	if engine["imageDigest"] != digest {
+		t.Errorf("spec.source.served.engine.imageDigest = %v, want %s; keys %v", engine["imageDigest"], digest, engine)
 	}
-	if _, wrong := engine["imageDigest"]; wrong {
-		t.Errorf("spec.source.served.engine.imageDigest is written: %v", engine)
+	if _, wrong := engine["image_digest"]; wrong {
+		t.Errorf("spec.source.served.engine.image_digest is written: %v", engine)
 	}
 }
 
 func TestEngineImageDigest(t *testing.T) {
-	const msg = "image_digest must be 'sha256:'"
+	const msg = "imageDigest must be 'sha256:'"
 	dig := func(d string) func(*v1alpha1.ModelDeployment) {
 		return func(md *v1alpha1.ModelDeployment) { md.Spec.Source.Served.Engine.ImageDigest = d }
 	}
@@ -661,7 +662,7 @@ func TestManagedDeploymentStatusNamesNoAcceleratorClass(t *testing.T) {
 	}
 	// A class that is given still has both of its fields.
 	got.Status.CurrentIDs[0].AcceleratorClass = &v1alpha1.AcceleratorClass{GPUModel: "GH200"}
-	requireRefused(t, c.Status().Update(bg(), got), "cpu_arch")
+	requireRefused(t, c.Status().Update(bg(), got), "cpuArch")
 }
 
 func TestModelDeploymentProvidersAndInstances(t *testing.T) {

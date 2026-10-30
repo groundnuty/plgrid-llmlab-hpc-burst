@@ -292,16 +292,17 @@ spec:
                       engine:
                         description: EngineSpec names the engine and its image.
                         properties:
-                          image_digest:
+                          imageDigest:
                             description: |-
                               ImageDigest is the engine image's digest: "sha256:" and 64 lowercase hex
-                              characters (HBEP-3, the v1 canonical object). The JSON key is the
-                              canonical object's own, image_digest, like gpu_model and cpu_arch.
+                              characters (HBEP-3, the v1 canonical object). The JSON key is camelCase
+                              like every field of the API; the hash object's key, image_digest, stays
+                              snake_case, and pkg/deploymentid maps this field onto it.
                             maxLength: 71
                             type: string
                             x-kubernetes-validations:
-                            - message: image_digest must be 'sha256:' followed by
-                                64 lowercase hex characters
+                            - message: imageDigest must be 'sha256:' followed by 64
+                                lowercase hex characters
                               rule: self.matches('^sha256:[0-9a-f]{64}$')
                           name:
                             description: Name of the engine, for example "vllm".
@@ -314,7 +315,7 @@ spec:
                             minLength: 1
                             type: string
                         required:
-                        - image_digest
+                        - imageDigest
                         - name
                         - version
                         type: object
@@ -551,21 +552,21 @@ spec:
                         AcceleratorClass is the class of the ID's Instances; absent for a
                         managed catalog entry.
                       properties:
-                        cpu_arch:
+                        cpuArch:
                           description: CPUArch is the CPU architecture, for example
                             "aarch64" or "x86_64".
                           maxLength: 63
                           minLength: 1
                           type: string
-                        gpu_model:
+                        gpuModel:
                           description: GPUModel is the GPU model. A partition without
                             GPUs names "none".
                           maxLength: 63
                           minLength: 1
                           type: string
                       required:
-                      - cpu_arch
-                      - gpu_model
+                      - cpuArch
+                      - gpuModel
                       type: object
                     id:
                       description: ID is the full deployment ID, as an Instance carries
@@ -655,21 +656,21 @@ spec:
                         AcceleratorClass is the class the ID is current for. A managed catalog
                         entry has no accelerator class, and none is invented for it.
                       properties:
-                        cpu_arch:
+                        cpuArch:
                           description: CPUArch is the CPU architecture, for example
                             "aarch64" or "x86_64".
                           maxLength: 63
                           minLength: 1
                           type: string
-                        gpu_model:
+                        gpuModel:
                           description: GPUModel is the GPU model. A partition without
                             GPUs names "none".
                           maxLength: 63
                           minLength: 1
                           type: string
                       required:
-                      - cpu_arch
-                      - gpu_model
+                      - cpuArch
+                      - gpuModel
                       type: object
                     id:
                       description: |-
@@ -710,6 +711,21 @@ spec:
                 description: ReadyInstances is the number of Instances that take traffic.
                 format: int32
                 type: integer
+              retention:
+                description: |-
+                  Retention shows the retention mode the controller applies to the
+                  deployment's default policy; an unset mode in the spec, or no policy,
+                  reads as Keep.
+                properties:
+                  effectiveMode:
+                    description: |-
+                      EffectiveMode is the mode the controller applies: the spec's mode, or
+                      Keep when the spec sets none (RetentionPolicy.EffectiveMode).
+                    enum:
+                    - Keep
+                    - ReleaseWhenIdle
+                    type: string
+                type: object
             type: object
         required:
         - spec

@@ -77,16 +77,16 @@ func TestObjectsOfEveryKindRoundTripWithDefaults(t *testing.T) {
 	got := &v1alpha1.PlatformProfile{}
 	must(t, c.Get(bg(), client.ObjectKeyFromObject(prof), got), "get PlatformProfile")
 	if got.Spec.HoldRelease {
-		t.Errorf("hold_release defaulted to true; an unverified platform must run fallback mode")
+		t.Errorf("holdRelease defaulted to true; an unverified platform must run fallback mode")
 	}
 	if got.Spec.LostGrace == nil || *got.Spec.LostGrace != "2m" {
-		t.Errorf("lost_grace default = %v, want 2m (HBEP-11)", got.Spec.LostGrace)
+		t.Errorf("lostGrace default = %v, want 2m (HBEP-11)", got.Spec.LostGrace)
 	}
 	if got.Spec.UnknownBound == nil || *got.Spec.UnknownBound != "10m" {
-		t.Errorf("unknown_bound default = %v, want 10m (HBEP-11)", got.Spec.UnknownBound)
+		t.Errorf("unknownBound default = %v, want 10m (HBEP-11)", got.Spec.UnknownBound)
 	}
 	if got.Spec.InflightWindow != nil {
-		t.Errorf("inflight_window has a default %v; HBEP-11 gives none", *got.Spec.InflightWindow)
+		t.Errorf("inflightWindow has a default %v; HBEP-11 gives none", *got.Spec.InflightWindow)
 	}
 	got.Status.LastChecked = &metav1.Time{Time: metav1.Now().Time}
 	must(t, c.Status().Update(bg(), got), "write PlatformProfile status")

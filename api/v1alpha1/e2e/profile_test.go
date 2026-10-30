@@ -17,22 +17,22 @@ func TestPlatformProfileTypedFields(t *testing.T) {
 	}{
 		{"unknown provider kind", func(p *v1alpha1.PlatformProfile) { p.Spec.ProviderKind = "cloud" }, "Unsupported value"},
 		{"no provider kind", func(p *v1alpha1.PlatformProfile) { p.Spec.ProviderKind = "" }, "providerKind"},
-		{"lost_grace is not a duration", func(p *v1alpha1.PlatformProfile) { p.Spec.LostGrace = ptr.To(v1alpha1.Duration("soon")) }, "lost_grace"},
-		{"inflight_window is not a duration", func(p *v1alpha1.PlatformProfile) { p.Spec.InflightWindow = ptr.To(v1alpha1.Duration("5")) }, "inflight_window"},
-		{"unknown_bound is not a duration", func(p *v1alpha1.PlatformProfile) { p.Spec.UnknownBound = ptr.To(v1alpha1.Duration("10 minutes")) }, "unknown_bound"},
-		{"partition without a GPU model", func(p *v1alpha1.PlatformProfile) { p.Spec.Partitions[0].GPUModel = "" }, "gpu_model"},
-		{"partition without a CPU architecture", func(p *v1alpha1.PlatformProfile) { p.Spec.Partitions[0].CPUArch = "" }, "cpu_arch"},
-		{"time_zone is not a zone name", func(p *v1alpha1.PlatformProfile) { p.Spec.TimeZone = "Warsaw time" }, "time_zone"},
-		{"time_zone is empty text of spaces", func(p *v1alpha1.PlatformProfile) { p.Spec.TimeZone = " " }, "time_zone"},
-		{"min_job_age is not a duration", func(p *v1alpha1.PlatformProfile) { p.Spec.MinJobAge = ptr.To(v1alpha1.Duration("ten seconds")) }, "min_job_age"},
-		{"job_name.max_length is zero", func(p *v1alpha1.PlatformProfile) {
+		{"lostGrace is not a duration", func(p *v1alpha1.PlatformProfile) { p.Spec.LostGrace = ptr.To(v1alpha1.Duration("soon")) }, "lostGrace"},
+		{"inflightWindow is not a duration", func(p *v1alpha1.PlatformProfile) { p.Spec.InflightWindow = ptr.To(v1alpha1.Duration("5")) }, "inflightWindow"},
+		{"unknownBound is not a duration", func(p *v1alpha1.PlatformProfile) { p.Spec.UnknownBound = ptr.To(v1alpha1.Duration("10 minutes")) }, "unknownBound"},
+		{"partition without a GPU model", func(p *v1alpha1.PlatformProfile) { p.Spec.Partitions[0].GPUModel = "" }, "gpuModel"},
+		{"partition without a CPU architecture", func(p *v1alpha1.PlatformProfile) { p.Spec.Partitions[0].CPUArch = "" }, "cpuArch"},
+		{"timeZone is not a zone name", func(p *v1alpha1.PlatformProfile) { p.Spec.TimeZone = "Warsaw time" }, "timeZone"},
+		{"timeZone is empty text of spaces", func(p *v1alpha1.PlatformProfile) { p.Spec.TimeZone = " " }, "timeZone"},
+		{"minJobAge is not a duration", func(p *v1alpha1.PlatformProfile) { p.Spec.MinJobAge = ptr.To(v1alpha1.Duration("ten seconds")) }, "minJobAge"},
+		{"jobName.maxLength is zero", func(p *v1alpha1.PlatformProfile) {
 			p.Spec.JobName = &v1alpha1.JobNameRules{MaxLength: ptr.To(int32(0))}
-		}, "max_length"},
-		{"job_name.max_length is below the tag's 56 characters", func(p *v1alpha1.PlatformProfile) {
+		}, "maxLength"},
+		{"jobName.maxLength is below the tag's 56 characters", func(p *v1alpha1.PlatformProfile) {
 			p.Spec.JobName = &v1alpha1.JobNameRules{MaxLength: ptr.To(int32(55))}
 		},
-			"job_name.max_length must allow the job tag's 56 characters"},
-		{"json_data_parser has a space", func(p *v1alpha1.PlatformProfile) { p.Spec.JSONDataParser = "data parser" }, "json_data_parser"},
+			"jobName.maxLength must allow the job tag's 56 characters"},
+		{"jsonDataParser has a space", func(p *v1alpha1.PlatformProfile) { p.Spec.JSONDataParser = "data parser" }, "jsonDataParser"},
 		{"two entries for one partition", func(p *v1alpha1.PlatformProfile) { p.Spec.Partitions[1].Name = p.Spec.Partitions[0].Name }, "Duplicate value"},
 	}
 	for _, tc := range refused {
@@ -140,12 +140,12 @@ func TestPlatformProfileProviderKindKey(t *testing.T) {
 // The untyped block keeps whatever the profile holds beyond the typed fields.
 func TestPlatformProfileKeepsTheUntypedBlock(t *testing.T) {
 	p := newProfile(uniq("prof"))
-	p.Spec.Profile = jsonOf(t, `{"time_zone":"Europe/Warsaw","requeue_default":true,"nested":{"a":[1,2,3]}}`)
+	p.Spec.Profile = jsonOf(t, `{"loginNodePolicy":"example","extraFact":true,"nested":{"a":[1,2,3]}}`)
 	must(t, c.Create(bg(), p), "create PlatformProfile with a profile block")
 	cleanup(t, p)
 	got := &v1alpha1.PlatformProfile{}
 	must(t, c.Get(bg(), objKey(p), got), "get")
-	if got.Spec.Profile == nil || string(got.Spec.Profile.Raw) != `{"nested":{"a":[1,2,3]},"requeue_default":true,"time_zone":"Europe/Warsaw"}` {
+	if got.Spec.Profile == nil || string(got.Spec.Profile.Raw) != `{"extraFact":true,"loginNodePolicy":"example","nested":{"a":[1,2,3]}}` {
 		t.Fatalf("the untyped profile block was pruned or changed: %v", got.Spec.Profile)
 	}
 }

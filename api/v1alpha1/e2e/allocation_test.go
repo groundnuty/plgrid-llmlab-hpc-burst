@@ -540,3 +540,62 @@ func TestAllocationStatusKeepsTheStartEstimate(t *testing.T) {
 		t.Fatalf("clearing the estimate changed startTime: %v", obs.StartTime)
 	}
 }
+
+// status.retention.effectiveMode shows the mode the controller applies: the
+// spec's mode has no schema default, so an unset mode is shown as Keep (owner
+// decision, PR #48). The value written is what RetentionPolicy.EffectiveMode
+// returns; the round trip proves the schema keeps it, in both kinds.
+func TestRetentionEffectiveModeIsKeptInStatus(t *testing.T) {
+	ns := newNamespace(t)
+	idle := ptr.To(v1alpha1.Duration("15m"))
+	for _, tc := range []struct {
+		name   string
+		policy *v1alpha1.RetentionPolicy
+		want   v1alpha1.RetentionMode
+	}{
+		{"no policy", nil, v1alpha1.RetentionKeep},
+		{"an unset mode", &v1alpha1.RetentionPolicy{}, v1alpha1.RetentionKeep},
+		{"Keep", &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionKeep}, v1alpha1.RetentionKeep},
+		{"ReleaseWhenIdle", &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionReleaseWhenIdle, IdleLimit: idle}, v1alpha1.RetentionReleaseWhenIdle},
+	} {
+		t.Run("an Allocation with "+tc.name, func(t *testing.T) {
+			a := newAllocation(ns, uniq("alloc"))
+			a.Spec.RetentionPolicy = tc.policy
+			must(t, c.Create(bg(), a), "create")
+			a.Status.Retention = &v1alpha1.RetentionStatus{EffectiveMode: a.Spec.RetentionPolicy.EffectiveMode()}
+			must(t, c.Status().Update(bg(), a), "write the effective mode")
+			got := &v1alpha1.Allocation{}
+			must(t, c.Get(bg(), objKey(a), got), "get")
+			if got.Status.Retention == nil || got.Status.Retention.EffectiveMode != tc.want {
+				t.Fatalf("status.retention = %+v, want effectiveMode %s", got.Status.Retention, tc.want)
+			}
+			// The spec still says what the user wrote: an unset mode is not rewritten.
+			if tc.policy != nil && got.Spec.RetentionPolicy.Mode != tc.policy.Mode {
+				t.Errorf("spec.retentionPolicy.mode changed from %q to %q", tc.policy.Mode, got.Spec.RetentionPolicy.Mode)
+			}
+		})
+		t.Run("a ModelDeployment with "+tc.name, func(t *testing.T) {
+			md := newModelDeployment(ns, uniq("md"))
+			md.Spec.RetentionPolicy = tc.policy
+			must(t, c.Create(bg(), md), "create")
+			md.Status.Retention = &v1alpha1.RetentionStatus{EffectiveMode: md.Spec.RetentionPolicy.EffectiveMode()}
+			must(t, c.Status().Update(bg(), md), "write the effective mode")
+			got := &v1alpha1.ModelDeployment{}
+			must(t, c.Get(bg(), objKey(md), got), "get")
+			if got.Status.Retention == nil || got.Status.Retention.EffectiveMode != tc.want {
+				t.Fatalf("status.retention = %+v, want effectiveMode %s", got.Status.Retention, tc.want)
+			}
+		})
+	}
+	// Refused: a mode that is not one of the two. Accepted: the field left out.
+	a := newAllocation(ns, uniq("alloc"))
+	must(t, c.Create(bg(), a), "create")
+	a.Status.Retention = &v1alpha1.RetentionStatus{EffectiveMode: "Forever"}
+	requireRefused(t, c.Status().Update(bg(), a), "Unsupported value")
+	a.Status.Retention = nil
+	must(t, c.Status().Update(bg(), a), "a status with no retention")
+	md := newModelDeployment(ns, uniq("md"))
+	must(t, c.Create(bg(), md), "create")
+	md.Status.Retention = &v1alpha1.RetentionStatus{EffectiveMode: "Forever"}
+	requireRefused(t, c.Status().Update(bg(), md), "Unsupported value")
+}

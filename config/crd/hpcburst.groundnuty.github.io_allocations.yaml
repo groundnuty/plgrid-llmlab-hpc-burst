@@ -391,6 +391,20 @@ spec:
                   either a ready state or a stall that needs a human.
                 format: int64
                 type: integer
+              retention:
+                description: |-
+                  Retention shows the retention mode the controller applies; an unset mode
+                  in the spec reads as Keep.
+                properties:
+                  effectiveMode:
+                    description: |-
+                      EffectiveMode is the mode the controller applies: the spec's mode, or
+                      Keep when the spec sets none (RetentionPolicy.EffectiveMode).
+                    enum:
+                    - Keep
+                    - ReleaseWhenIdle
+                    type: string
+                type: object
             type: object
         required:
         - spec

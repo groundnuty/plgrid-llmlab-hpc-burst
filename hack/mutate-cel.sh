@@ -56,7 +56,7 @@ modeldeployments:$.spec.source.served#0|^TestTokenizerOtherThanTheCheckpointsIsP
 modeldeployments:$.spec.source.served#1|^TestTokenizerOtherThanTheCheckpointsIsPinned$
 modeldeployments:$.spec.source.served.checkpoint.hubTokenRef#0|^TestCheckpointHubTokenReferenceNamesExactlyOneSource$
 modeldeployments:$.spec.source.served.checkpoint.revision#0|^TestCheckpointRevisionIsAFullCommitID$
-modeldeployments:$.spec.source.served.engine.image_digest#0|^TestEngineImageDigest$
+modeldeployments:$.spec.source.served.engine.imageDigest#0|^TestEngineImageDigest$
 modeldeployments:$.spec.source.served.env[]#0|^TestEngineEnvironment$
 modeldeployments:$.spec.source.served.env[]#1|^TestEngineEnvironment$|^TestEngineEnvironmentCredentialsAreRefusedOnUpdate$
 modeldeployments:$.spec.source.served.flags[]#0|^TestEngineFlagsUseLongNamesAndCarryNoKeys$
