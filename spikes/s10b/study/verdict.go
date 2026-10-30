@@ -96,8 +96,57 @@ func Pass(vs []OptionVerdict, cond func(OptionVerdict) bool) (qualifying []strin
 	return
 }
 
-// VerdictMarkdown renders the pass rule for one key.
+// Missing lists the runs a verdict on key needs and the cells lack: round
+// robin and every option, in every regime, on every one of RequiredSeeds. A
+// regime with no runs at all is one line. It is empty for a complete sweep.
+// Without them the rule would decide on zeros, for example a drain score of 0
+// for every option when the drain regime was not run.
+func Missing(cells []Cell, key string) []string {
+	have := map[string]bool{}
+	for _, c := range cells {
+		have[fmt.Sprintf("%s|%s|%s|%d", c.Regime, c.Key, c.Option, c.Seed)] = true
+	}
+	var out []string
+	for _, rg := range Regimes {
+		var lines []string
+		runs := 0
+		for _, o := range append([]Option{RoundRobin}, Options...) {
+			k := key
+			if o.ID == RoundRobin.ID {
+				k = "-" // round robin has no key
+			}
+			var seeds []string
+			for _, s := range RequiredSeeds {
+				if have[fmt.Sprintf("%s|%s|%s|%d", rg.Name, k, o.Name, s)] {
+					runs++
+				} else {
+					seeds = append(seeds, fmt.Sprint(s))
+				}
+			}
+			if len(seeds) > 0 {
+				lines = append(lines, fmt.Sprintf("%s / %s: seeds %s", rg.Name, o.Name, strings.Join(seeds, ", ")))
+			}
+		}
+		if runs == 0 {
+			lines = []string{fmt.Sprintf("regime %s: no runs", rg.Name)}
+		}
+		out = append(out, lines...)
+	}
+	return out
+}
+
+// VerdictMarkdown renders the pass rule for one key. A sweep that lacks runs
+// the rule needs (see Missing) gets no verdict, only the list of what is
+// missing.
 func VerdictMarkdown(cells []Cell, key string) string {
+	if missing := Missing(cells, key); len(missing) > 0 {
+		var b strings.Builder
+		fmt.Fprintf(&b, "Key %s: INCOMPLETE. No verdict: the pass rule needs round robin and all four options in all four regimes on seeds %s, and these runs are missing:\n\n", key, seedList(RequiredSeeds))
+		for _, m := range missing {
+			fmt.Fprintf(&b, "- %s\n", m)
+		}
+		return b.String()
+	}
 	vs := Evaluate(cells, key)
 	var b strings.Builder
 	fmt.Fprintf(&b, "Key %s, %d seeds.\n\n", key, len(Groups(cells)[0].Cells))
@@ -130,4 +179,12 @@ func VerdictMarkdown(cells []Cell, key string) string {
 	}
 	b.WriteString("\n")
 	return b.String()
+}
+
+func seedList(seeds []uint64) string {
+	var parts []string
+	for _, s := range seeds {
+		parts = append(parts, fmt.Sprint(s))
+	}
+	return strings.Join(parts, ", ")
 }

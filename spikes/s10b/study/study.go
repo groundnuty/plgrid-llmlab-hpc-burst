@@ -15,6 +15,10 @@ const (
 	EngineLimit = 48     // S10's MaxRunning: the engine's maximum concurrent sequences
 )
 
+// RequiredSeeds are the workload seeds the pass rule is fixed on (issue #45:
+// "in every seed"). A verdict needs every run of the study on each of them.
+var RequiredSeeds = []uint64{1, 2, 3}
+
 // Regime is one of the issue's four conditions.
 type Regime struct {
 	Name    string
