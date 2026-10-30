@@ -17,7 +17,7 @@ limitations under the License.
 */
 
 // Adapted from github.com/kcp-dev/kcp cmd/kcp/kcp.go at v0.33.3 (commit
-// 003eb8c7649b0f204ec1bd3844e10f633f90065b). See NOTES.md in the parent directory.
+// 003eb8c7649b0f204ec1bd3844e10f633f90065b). Changed from the original: see ORIGIN.md in the parent directory.
 
 // Command s3-embedded runs kcp as a Go library, in one process together with the
 // spike's controllers (HBEP-11: "one bundled binary for a single user"). It follows the
