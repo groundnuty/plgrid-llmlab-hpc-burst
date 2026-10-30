@@ -113,7 +113,7 @@ Problems this addresses, in general terms:
 
 1. **Core operations.** **Decided:** for a batch provider, the platform-profile reader, find by tag, observe one job, submit (held in hold mode), lift the hold, cancel, ensure a file, and remove an Allocation's files; for a managed provider, the profile reader and list the catalog (Design details, Core operations). Source: spike S4 (PR #32) for submit, find by tag, lift the hold, cancel and observe; science-agent decision, 30 Oct 2026, for the file operations, which the allocation agent of HBEP-7 needs. **Not needed for alpha:** describe, estimate, follow-on, usage, remaining quota, and launching or stopping an Instance as a provider operation (HBEP-7 starts Instances through the allocation agent).
 2. **Capability flags.** **Decided:** for alpha, the kind fixes the operation set (batch or managed), and the one flag is `hold_release`. Source: spike S4 (PR #32) and HBEP-11. **Not needed for alpha:** the other candidates: can restart; has a hard end; gives start estimates; supports follow-on dependencies; supports node pinning; a hard end that can move later (the controller re-reads it and never plans for it, HBEP-3); can change a running job's account; compute nodes can connect out; compute nodes are reachable in; reports model state; exposes revisions and limits; rewrites requests; requires streaming. Each is added by amendment when a plugin first needs it.
-3. **Profile schema.** **Decided:** for alpha, the typed fields in Design details (Platform profile schema), plus an untyped `facts` block that keeps the drafts' envelope. Provider settings are decided (owner decision): account, grant, credentials reference, allowed partitions and labels. The format of both is decided by HBEP-11: the PlatformProfile and Provider kinds. Source: HBEP-11's list of typed fields; spikes S4 (PR #32), S5 (PR #19) and S1 (issue #18) for the values; science-agent decision, 30 Oct 2026, for the fields the lifecycle controller reads. **Open (blocks beta):** the typed schema of the remaining field groups (hardware, environment, reachability, version pins, billing and exhaustion, managed-gateway behaviour, references to known issues) and the form of expected performance, decided with HBEP-7's open question 12. The LLMLab draft profile is still to come.
+3. **Profile schema.** **Decided:** for alpha, the typed fields in Design details (Platform profile schema), plus an untyped `profile` block that keeps the drafts' `facts` with their envelope. Provider settings are decided (owner decision): account, grant, credentials reference, allowed partitions and labels. The format of both is decided by HBEP-11: the PlatformProfile and Provider kinds. Source: HBEP-11's list of typed fields; spikes S4 (PR #32), S5 (PR #19) and S1 (issue #18) for the values; science-agent decision, 30 Oct 2026, for the fields the lifecycle controller reads. **Open (blocks beta):** the typed schema of the remaining field groups (hardware, environment, reachability, version pins, billing and exhaustion, managed-gateway behaviour, references to known issues) and the form of expected performance, decided with HBEP-7's open question 12. The LLMLab draft profile is still to come.
 4. **Plugin granularity.** **Decided:** one plugin per scheduler type, here Slurm, with one platform profile per platform. The three drafts express every alpha difference between Helios and Athena as data: the JSON version, the GPU model, the GRES form and the time zone. Source: spike S5 (PR #19) and S7's capture; science-agent decision, 30 Oct 2026.
 5. **Plugin boundary.** **Decided:** an in-process Go library inside each Provider's controller, a controller-runtime manager of its own (HBEP-11). There is one binary in alpha, so the core's version is the binary's. Source: spike S4 (PR #32), HBEP-11 (Controllers). **Not needed for alpha:** plugins in separate binaries that declare the core version they implement.
 6. **Register format.** **Not needed for alpha:** alpha reads no register. The known workarounds for alpha are plain configuration in HBEP-5's front and the ModelDeployment's engine flags. The candidate entry fields stay: identifier, symptom, component and affected versions, fixed-in version, platform scope and stage (HBEP-2 dimensions), fix owner, detection check, workaround configuration, regression test, upstream link. **Open (blocks beta):** the format, so that each entry's regression test can run in CI.
@@ -154,7 +154,7 @@ For a batch provider (Slurm):
   - the Provider allows exactly one partition, and the profile lists it;
   - `job_name.max_length` is at least 56, and no tag can match a name in `job_name.refused`;
   - `data_parser` is one the plugin knows;
-  - `inflight_window` exceeds the `sbatch` time-out (60 s);
+  - `inflight_window` is set and exceeds the `sbatch` time-out (60 s);
   - the credentials file, and for ssh the key file it names, are mode 600 and owned by the controller's user (HBEP-11).
 
   It fails with every invalid field named. Read-only.
@@ -232,7 +232,7 @@ For a managed provider:
 
 ### Submission
 
-- **The Allocation's submission parameters,** immutable (HBEP-11): `partition`, `timeLimit`, `gpus`, `cpusPerTask`, `memory`, `nodes` (1 in alpha) and `agentDigest`, the SHA-256 of the allocation agent's binary for the partition's `cpu_arch` (HBEP-7). The lifecycle controller sets them; the plugin adds the account, the tag and the fixed options.
+- **The Allocation's submission parameters,** immutable (HBEP-11): `partition`, `timeLimit`, `gpus`, `cpusPerTask`, `memory`, `nodes` (1 in alpha) and `agentDigest`, the SHA-256 of the allocation agent's binary for the partition's `cpu_arch` (HBEP-7). The lifecycle controller sets them; the plugin adds the account, the tag and the fixed options. S4's `account` and `wrap` are not parameters: the account comes from the Provider's settings, and the batch script is the fixed bootstrap.
 - **Refused before any call:**
   - a partition that the Provider does not allow or the profile does not list;
   - no GPU on a partition whose `gpu_model` is not `none`;
@@ -243,11 +243,15 @@ For a managed provider:
   - the Allocation's credential, at `alloc/<tag>/credential`, mode 600.
 
   The credential is the token the lifecycle controller generated for the Allocation (HBEP-7). It never appears in the batch script, on a command line or in a log (HBEP-6).
+
+  A third file, `alloc/<tag>/agent.json`, mode 600, tells the agent where the control-plane host is and which dial-home mode it uses, direct or ssh, from the launcher's configuration (HBEP-11). It names a private address, so it is never in the repository. The restricted key for the ssh mode is not staged: the operator creates it on the platform once (HBEP-7).
 - **The bootstrap** is the `--wrap` command. It checks the binary's SHA-256 against the digest, then runs it with the Allocation's directory as its only argument. Nothing else runs in the batch script.
 
 ### Platform profile schema
 
-The PlatformProfile's spec has its kind, the typed fields below, and an untyped `facts` block. `facts` keeps the drafts' groups and their envelope (value, method, source, date), and no alpha code reads it. Typed fields are refused when unknown; `facts` accepts anything.
+The PlatformProfile's spec has its kind, the typed fields below, and an untyped block, `profile`, which holds the drafts' `facts` groups with their envelope (value, method, source, date). No alpha code reads the untyped block. Typed fields are refused when unknown; the untyped block accepts anything.
+
+PlatformProfile fields are written in snake_case, as the drafts and the CRD write them. The fields of the other kinds are camelCase.
 
 **Typed fields that the Slurm provider and the deployment ID read.** This is HBEP-11's list.
 
@@ -255,9 +259,9 @@ The PlatformProfile's spec has its kind, the typed fields below, and an untyped 
 |---|---|---|---|
 | `kind` | `managed` or `batch` | selects the plugin | `kind` |
 | `partitions[].name`, `.gpu_model`, `.cpu_arch` | strings; `gpu_model` is `none` for a CPU partition | the accelerator class, a deployment-ID input (HBEP-3); the GPU rule at submission | `facts.partitions.<p>.arch` and `.gres`; for Athena also `facts.hardware.node_documented.accelerator`; for Helios GH200, whose GRES has no type, the center's documentation |
-| `hold_release` | bool, required for batch | hold mode or fallback mode (HBEP-7, open question 11) | `facts.slurm.hold_release`, on S1's branch: true on Helios `plgrid` and `plgrid-gpu-gh200`, and on Athena `plgrid-gpu-a100`. Sano: not measured, so false |
+| `hold_release` | bool, default false | hold mode or fallback mode (HBEP-7, open question 11); false, fallback mode, until verified | `facts.slurm.hold_release`, on S1's branch: true on Helios `plgrid` and `plgrid-gpu-gh200`, and on Athena `plgrid-gpu-a100`. Sano: not measured, so false |
 | `lost_grace` | duration, 2 min | time absent from both sources before Lost | none; above the measured gap between queue and accounting, about 2 s on Helios and Athena (S7's capture). The gap has no bound while accounting is down (S4), which Lost's revisability covers |
-| `inflight_window` | duration, 5 min | time an unresolved attempt is waited on; must exceed the `sbatch` time-out | none; the `sbatch` latency over ssh is measured before alpha (Graduation criteria) |
+| `inflight_window` | duration, required for batch, no default | time an unresolved attempt is waited on; must exceed the `sbatch` time-out | none. The alpha profiles set 5 min until the `sbatch` latency over ssh is measured, before alpha (Graduation criteria) |
 | `unknown_bound` | duration, 10 min | in fallback mode, time before an operator is asked | none; S4's default |
 | `time_zone` | IANA name | diagnostics only | `facts.time.slurm_time_zone` (Helios, Athena: Europe/Warsaw); `facts.time.scheduler_time_zone` (Sano: UTC) |
 | `job_requeue_default` | bool | recorded; the plugin always submits `--no-requeue` | `facts.slurm.job_requeue` (Helios, Athena: 1); `facts.slurm.requeue` (Sano) |
@@ -282,7 +286,7 @@ A partition enters the typed list only when `hold_release` has been verified on 
 | `health.probe_interval`, `.failure_threshold`, `.no_progress_timeout`, `.error_only_window`, `.kv_skew_timeout`, `.agent_timeout`, `.start_timeout` | 10 s, 3, 2 min, 1 min, 2 min, 2 min, 1 h | HBEP-7's malfunction signals, and the longest time from an Allocation's start to its Instance being ready | none; defaults, tuned in beta |
 | `restart.stop_grace`, `.attempts_per_rung`, `.window`, `.backoff` | 10 s, 2, 30 min, 30 s | HBEP-7's restart ladder | none; defaults, tuned in beta |
 
-**Draft fields that alpha reads.** Only through the typed fields above, whose values are copied from the draft paths named in their last column. Alpha code reads nothing in `facts`.
+**Draft fields that alpha reads.** Only through the typed fields above, whose values are copied from the draft paths named in their last column. Alpha code reads nothing in the untyped `profile` block.
 
 **A managed profile** has `kind: managed` and no batch fields. The gateway's address is not in it (Provider settings).
 
@@ -336,7 +340,7 @@ The register holds upstream bugs tied to versions. Each entry has one regression
 
 ### Compatibility and upgrades
 
-- The platform-profile schema, the provider-settings schema and the core interface are versioned with the kinds, at `v1alpha1` (HBEP-11). Unknown typed fields are refused; the `facts` block takes any field.
+- The platform-profile schema, the provider-settings schema and the core interface are versioned with the kinds, at `v1alpha1` (HBEP-11). Unknown typed fields are refused; the untyped `profile` block takes any field.
 - Version pins change by PR to the platform profile. A workaround switches off when the pin passes its fixed-in version, and its regression test stays.
 - A Slurm upgrade that changes the data_parser version stops interpretation and raises `DialectMismatch`. The fix is a profile change, plus a field table if the version is new.
 - A plugin upgrade keeps every annotation of the Allocation's record (HBEP-11), so a newer plugin adopts what an older one submitted.
