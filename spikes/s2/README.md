@@ -108,7 +108,8 @@ of llm-d's files is copied into this repository.
 Single VM, 6 cores, 31 GB, no swap, shared with other sessions. Python 3.15.0 for the vllm-router launcher;
 Go 1.27.3. Load average: spot checks of `uptime` between 08:48 and 09:17 on the run day read 3.3 to 5.1
 (1 minute); from 09:48 to 11:05 it was sampled every minute: 1.3 to 8.2, mean 3.6. Available memory never fell
-below 17 GB in the sampled period. The simulators and routers ran at `nice -n 10`.
+below 17 GB in the sampled period. The simulators and routers ran at `nice -n 10`. The SIGTERM-only run and the
+parser smoke streams (review fixes) ran between 11:37 and 11:42 on the run day, with a 1-minute load of 2.9 to 3.1 in spot checks of `uptime`.
 
 ## Deadlines on the path
 
