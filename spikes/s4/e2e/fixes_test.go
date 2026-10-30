@@ -7,6 +7,7 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -178,5 +179,72 @@ func TestSpecImmutable(t *testing.T) {
 	err := h.k8s.Update(context.Background(), a)
 	if err == nil || !strings.Contains(err.Error(), "immutable") {
 		t.Errorf("editing forProvider: got %v, want a refusal naming immutability", err)
+	}
+}
+
+// B3 in fallback mode: the late job is not held, so it would run; it must
+// still be cancelled before the finalizer goes.
+func TestB3FallbackDeleteWhileSubmissionInFlight(t *testing.T) {
+	b3Run(t, withArgs(gatedArgs, "--hold-release=false"))
+}
+
+// Fallback mode keeps the finalizer while an attempt is unresolved, past the
+// in-flight window, until positive resolution or an operator's abandon: a
+// late registration there would run unheld. The claimant is killed before
+// sbatch, so nothing ever registers; after the abandon the finalizer goes
+// with no submission at all.
+func TestFallbackDeleteWaitsForUnresolvedAttempt(t *testing.T) {
+	ns := newNamespace(t)
+	f := newFakeSlurm(t)
+	fallback := []string{"--hold-release=false"}
+	mpath := filepath.Join(f.dir, "before-sbatch.marker")
+	r1 := startProvider(t, ns, f, provCfg{name: "r1", args: fallback, env: []string{"S4_FAULT_BEFORE_SBATCH=" + mpath}})
+	key := createAllocation(t, ns, "a1")
+	waitMarker(t, mpath, 20*time.Second)
+	r1.kill(t)
+	claimed := meta.GetExternalCreatePending(getAlloc(t, key))
+	if err := h.k8s.Delete(context.Background(), getAlloc(t, key)); err != nil {
+		t.Fatal(err)
+	}
+	startProvider(t, ns, f, provCfg{name: "r2", args: fallback})
+	a := waitAlloc(t, key, unknownBound+15*time.Second, "operator condition during deletion", func(a *v1alpha1.Allocation) bool {
+		return a.GetCondition(controller.TypeSubmissionResolved).Reason == controller.ReasonNeedsOperator
+	})
+	if age := time.Since(claimed); age < inflightWindow+2*time.Second {
+		t.Fatalf("precondition: only %s since the claim; the window is %s", age, inflightWindow)
+	}
+	if allocGone(t, key) {
+		t.Fatalf("finalizer released while the attempt was unresolved")
+	}
+	annotate(t, key, controller.AnnoAbandon, fmt.Sprint(a.Status.AtProvider.Attempt))
+	eventually(t, 15*time.Second, func() (bool, string) { return allocGone(t, key), "Allocation still present after the abandon" })
+	if n := len(f.sbatch(t, "sbatch_start", "")); n != 0 {
+		t.Errorf("%d sbatch calls; want 0", n)
+	}
+}
+
+// A reply lost after slurmctld accepted the job ("Socket timed out", exit
+// 1) is Unknown, not Rejected: the job is found by tag and adopted, never
+// submitted again.
+func TestLostReplyIsUnknown(t *testing.T) {
+	for _, md := range modes {
+		t.Run(md.name, func(t *testing.T) {
+			ns := newNamespace(t)
+			f := newFakeSlurm(t)
+			f.env = append(f.env, "FAKE_SLURM_SBATCH_LOST_REPLY_ONCE="+filepath.Join(f.dir, "lost-reply.marker"))
+			r1 := startProvider(t, ns, f, provCfg{name: "r1", args: md.args})
+			key := createAllocation(t, ns, "a1")
+			a := waitAlloc(t, key, 20*time.Second, "job adopted", func(a *v1alpha1.Allocation) bool { return a.Status.AtProvider.JobID != 0 })
+			time.Sleep(4 * time.Second)
+			assertSubmissions(t, f, "", 1)
+			if !r1.logContains(t, "sbatch outcome unknown") || len(k8sEvents(t, ns, "SubmissionUnknown")) == 0 {
+				t.Errorf("the lost reply was not treated as Unknown")
+			}
+			if md.name == "hold" {
+				assertRunsOnce(t, f, externalName(a), 0)
+			} else if live := f.liveJobs(t, externalName(a)); len(live) != 1 {
+				t.Errorf("%d live jobs, want 1", len(live))
+			}
+		})
 	}
 }

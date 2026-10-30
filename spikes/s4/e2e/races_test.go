@@ -80,13 +80,15 @@ func b2Run(t *testing.T) bool {
 // B3: delete the Allocation while a reconciler's sbatch is in flight. The
 // finalizer must stay until the submission resolves, and the job that lands
 // afterwards must be cancelled before the object disappears (HBEP-11).
-func TestB3DeleteWhileSubmissionInFlight(t *testing.T) {
+func TestB3DeleteWhileSubmissionInFlight(t *testing.T) { b3Run(t, gatedArgs) }
+
+func b3Run(t *testing.T, args []string) {
 	ns := newNamespace(t)
 	f := newFakeSlurm(t)
 	g := newGate(f)
 	f.env = append(f.env, g.env())
 	for _, name := range []string{"r1", "r2"} {
-		startProvider(t, ns, f, provCfg{name: name, args: gatedArgs}).waitLog(t, "Starting workers", 20*time.Second)
+		startProvider(t, ns, f, provCfg{name: name, args: args}).waitLog(t, "Starting workers", 20*time.Second)
 	}
 	key := createAllocation(t, ns, "a1")
 	submitter := f.waitEvents(t, "sbatch_gate_wait", 1, 20*time.Second)[0].Caller

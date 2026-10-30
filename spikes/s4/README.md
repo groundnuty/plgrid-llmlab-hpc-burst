@@ -14,7 +14,7 @@ cd spikes/s4
 go test ./internal/... ./fakeslurm/... && go test -v -count=1 ./e2e/
 ```
 
-`run-tests.sh` also waits for a low load on a shared host (`S4_MAX_LOAD`, default 4.0), records peak memory, and lists any leftover process. Builds, logs and fake state go under `S4_WORK_ROOT` (default: the system temp directory). A full run took 7 min 43 s (30 Oct 2026).
+`run-tests.sh` also waits for a low load on a shared host (`S4_MAX_LOAD`, default 4.0), records peak memory, and lists any leftover process. Builds, logs and fake state go under `S4_WORK_ROOT` (default: the system temp directory). A full run took 7 min 43 s to 8 min 9 s (two runs, 30 Oct 2026).
 
 ## Question
 
@@ -29,7 +29,11 @@ Can a provider built on crossplane-runtime's managed reconciler run in-process, 
 
 **Against a fake Slurm, yes.** It needs a two-phase submission protocol, and three facts still need a real cluster (see "Still unknown").
 
-**Proven on the fake.** At most one job with an Allocation's tag is ever released, so at most one can run. That holds in every scenario and race the reviews raised, including:
+**Proven on the fake.** The guarantee depends on the platform profile's `hold_release`:
+- **Hold mode (the default).** At most one job with an Allocation's tag is ever released, so at most one can run, whatever the timing.
+- **Fallback mode (`hold_release: false`).** Nothing is resubmitted unless a job is found by tag or an operator abandons the attempt. After an abandon, a late registration of the abandoned attempt becomes a reported duplicate, which is cancelled on deletion.
+
+Both hold in every scenario and race the reviews raised, including:
 - an `sbatch` that fails ambiguously and registers its job later;
 - accounting that lags behind `squeue`;
 - two reconcilers racing a same-second failure and retry;
@@ -42,7 +46,7 @@ Can a provider built on crossplane-runtime's managed reconciler run in-process, 
 
 The protocol ([state machine](#the-submission-protocol)):
 1. **The external name is a deterministic job tag**, set by an Initializer before any `sbatch`: `hb-<name>-<12 hex of sha256(namespace/name/uid)>`, passed as `--job-name`. Observe, Create, Delete and status all use the persisted name. Submission is refused when the name is empty or not the canonical tag.
-2. **Two-phase submit:** claim an attempt (compare-and-swap on the object), `sbatch --hold --no-requeue`, record the job ID once (compare-and-swap; never overwritten), then cancel every other held job with the tag and `scontrol release` the recorded job, once. In the tests the hold lasted 11-33 ms when Create released at once, and under 0.5 s when a restarted reconciler adopted a held job. While no reconciler runs, a held job waits for one to return (7.4 s across a Lease handover); it gains no queue age meanwhile.
+2. **Two-phase submit:** claim an attempt (compare-and-swap on the object), `sbatch --hold --no-requeue`, record the job ID once (compare-and-swap; never overwritten), then cancel every other held job with the tag and `scontrol release` the recorded job, once. In the tests the hold lasted 11-33 ms when Create released at once, and under 0.5 s when a restarted reconciler adopted a held job. While no reconciler runs, a held job waits for one to return (6.7-7.4 s across a Lease handover); it gains no queue age meanwhile.
 3. **An ambiguous `sbatch`** (timeout, signal, transport error, unparseable output, transient reason) is **Unknown**, never Failed, and is resolved by looking the tag up. In hold mode a late registration lands held and is cancelled, so a retry after the in-flight window is safe. In fallback mode, for a platform whose profile has `hold_release: false`, only a job found by tag permits progress. After a bound, an event and a condition ask an operator.
 4. **Observe looks the tag up in `squeue --json`, then in `sacct --json -X -D` over an explicit window.** An ended job is existing and terminal. The established job is reported Lost only after it has been absent from both for longer than the profile's `lost_grace`, and it returns to its real state if it reappears.
 5. **Deletion cancels every live job with the tag** (held, pending or running), and keeps the finalizer while a submission is unresolved.
@@ -71,6 +75,9 @@ The protocol ([state machine](#the-submission-protocol)):
 | 4. Lease, leader killed mid-submit | `TestS4LeaderElection` | 1 | PASS |
 | Astra B2: same-second failure and retry, two reconcilers | `TestB2SameSecondFailureRetryRace` | 2 calls, 1 rejected, 1 accepted; tie asserted | PASS (tie at one second) |
 | Astra B3: delete while `sbatch` in flight | `TestB3DeleteWhileSubmissionInFlight` | finalizer kept; late job cancelled before the object goes; 0 live | PASS |
+| Same, fallback mode (the late job would run unheld) | `TestB3FallbackDeleteWhileSubmissionInFlight` | as above | PASS |
+| Fallback deletion with a dead claimant | `TestFallbackDeleteWaitsForUnresolvedAttempt` | finalizer kept past the window until the operator abandons; 0 sbatch | PASS |
+| A reply lost after slurmctld accepted the job ("Socket timed out") (hold, fallback) | `TestLostReplyIsUnknown` | Unknown, adopted by tag; 1 sbatch | PASS |
 | Astra B4: prepopulated non-canonical external name | `TestPrepopulatedExternalName` | refused, 0 sbatch; a restored job is observed and cancelled on delete | PASS |
 | Astra B5: duplicate; original completes and is purged; `squeue` in descending order | `TestDuplicateKeptAfterOriginalPurged` | established ID kept; duplicate reported | PASS |
 | Adoption with descending `squeue` order | `TestAdoptLowestWithReversedOrder` | lowest ID adopted; the other cancelled while held | PASS |
@@ -91,14 +98,15 @@ Unit tests (`internal/...`, `fakeslurm/...`) cover:
 - the poll hook;
 - every new fake behaviour.
 
-Measured run (30 Oct 2026, 10:08-10:16 UTC, one `run-tests.sh`, every test PASS, 463 s):
+Measured in two full runs of `run-tests.sh` (30 Oct 2026, 10:07-10:15 and 10:21-10:30 UTC, every test PASS both times, 463 s and 489 s; the second is at the final test set):
 - **Hold time** (sbatch registering the job to its release, from the fake's log):
   - 11-33 ms when Create released at once;
   - 106-473 ms when a reconciler adopted the job on its next Observe;
-  - 7.4 s and 14.1 s when no reconciler ran: a Lease handover, and a restart delayed past the window on purpose.
-- **No hot loop.** A reconciler waiting on the guard polled 0.96-1.10 `squeue` and as many `sacct` calls per second. The first design spun at about 6 per second each.
-- **Scenario 1:** the job left `squeue` 10.2 s after it ended. In the next 8 s the provider made 7 `squeue` and 7 `sacct` calls and no `sbatch`.
-- **Scenario 4 with the Lease:** the follower found and released the held job 7.2 s after the leader was killed (lease duration 6 s).
+  - 6.7-7.4 s across a Lease handover, and 13.6-14.1 s for a restart delayed past the window on purpose, because no reconciler was running.
+- **No hot loop.** A reconciler waiting on the guard polled 0.95-1.10 `squeue` and as many `sacct` calls per second. The first design spun at about 6 per second each.
+- **Scenario 1:** the job left `squeue` 10.2 s after it ended. In the next 8 s the provider made 7-8 `squeue` and as many `sacct` calls, and no `sbatch`.
+- **Scenario 4 with the Lease:** the follower found and released the held job 6.6-7.2 s after the leader was killed (lease duration 6 s).
+- **Lost:** 8.35-8.38 s after the job left both `squeue` and `sacct`, with `lost_grace` 8 s.
 
 ## The submission protocol
 
@@ -242,8 +250,8 @@ crossplane-runtime ran outside a cluster:
 - **Providers.** Each provider is a plain process: controller-runtime's manager with an explicit `--kubeconfig` and an envtest user in `system:masters`. It refuses to start without the kubeconfig, so it cannot fall back to another cluster.
 
 Measured in the same run:
-- envtest's `kube-apiserver` and `etcd` were up in 4.2 s.
-- Peak resident memory (sampled every 2 s): `kube-apiserver` 258 MiB, `etcd` 51 MiB, one `provider-slurm` 60 MiB.
+- envtest's `kube-apiserver` and `etcd` were up in 3.3-4.2 s.
+- Peak resident memory (sampled every 2 s): `kube-apiserver` 262 MiB, `etcd` 52 MiB, one `provider-slurm` 63 MiB.
 - Up to two providers ran at once.
 
 Gotchas:
@@ -274,7 +282,7 @@ Checked against the HBEPs on main at cf92f48 (merged into this branch).
   - **The requeue risk.** `--no-requeue` plus "requeued means Failed" works. Within the `sacct -D` window the earlier records show the requeue even on v0.0.40. Keeping the verdict in status is what survives an accounting purge of those records (`TestS3RequeueReportedFailed`). On Helios and Athena Slurm refuses the requeue, so this is defence in depth there. What to do with a requeued job remains open.
 - **HBEP-11:**
   - **The "control plane without nodes" option works** for the reconciler, and the controller manager must run too (above).
-  - **"A released Allocation's provider job is cancelled before its object disappears" holds,** including for a job that lands after the delete (`TestB3...`) and for duplicates (`TestReviewDeleteWithDuplicate`).
+  - **"A released Allocation's provider job is cancelled before its object disappears" holds,** including for a job that lands after the delete (`TestB3DeleteWhileSubmissionInFlight`, and its fallback variant) and for duplicates (`TestReviewDeleteWithDuplicate`).
   - **Kill-mid-handover safety holds for the submit step on the fake.**
 
 ## Known hazards
@@ -299,9 +307,9 @@ Checked against the HBEPs on main at cf92f48 (merged into this branch).
 
 - Agents VM: 6 cores, 31 GB RAM, shared with other spikes. Tests ran with `nice -n 10`.
 - Go 1.27.3 (`go.mod` minimum 1.26.0); crossplane-runtime v2.4.3; crossplane apis v2.3.4; controller-runtime v0.23.1; k8s client libraries v0.35.3; envtest Kubernetes 1.35.0.
-- Load during the measured run: 1-minute load 3.96 at the start and 4.89 at the end (other agents' work), with 19 GB of memory available.
+- Load during the measured runs: 1-minute load 3.96 and 3.38 at the start, 4.89 and 2.71 at the end (other agents' work), with 19 GB of memory available.
 - Every race test uses a barrier in the fake, not a sleep, to set its interleaving. The waits that remain are upper bounds on observation.
-- The full suite ran once end to end. Each new test also ran at least once more in focused runs, with no timing failure. That is too few runs to rule out flakiness.
+- The full suite ran twice end to end, and each new test ran at least once more in focused runs, with no timing failure; one harness race (a SIGKILLed sbatch not yet reaped) was fixed. That is too few runs to rule out flakiness.
 
 ## Provenance
 
