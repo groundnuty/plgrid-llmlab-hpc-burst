@@ -75,11 +75,11 @@ type outcome struct {
 // means it found 25 against at most 1.25 * 80 / 4 = 25 (or 25.3125), and an
 // 18 elsewhere passes either way.
 func (o outcome) heldBound() (bool, string) {
-	if o.overlapped {
-		return false, "the second selector passed its load check while the first was between its check and its reservation"
-	}
 	if o.picks[0] == o.home && o.picks[1] == o.home {
 		return false, fmt.Sprintf("both requests went to the home %s, the later at load 26 against the bound 25.3125", o.home)
+	}
+	if o.overlapped {
+		return false, "the second selector passed its load check while the first was between its check and its reservation"
 	}
 	if o.homeLoad != 26 || o.tot != 81 {
 		return false, fmt.Sprintf("home load %d and total %d, want 26 and 81", o.homeLoad, o.tot)
