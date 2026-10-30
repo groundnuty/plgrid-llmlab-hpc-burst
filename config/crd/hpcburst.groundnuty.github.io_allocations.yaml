@@ -1,0 +1,415 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: allocations.hpcburst.groundnuty.github.io
+spec:
+  group: hpcburst.groundnuty.github.io
+  names:
+    categories:
+    - hpcburst
+    kind: Allocation
+    listKind: AllocationList
+    plural: allocations
+    shortNames:
+    - alloc
+    singular: allocation
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.providerConfigRef.name
+      name: Provider
+      type: string
+    - jsonPath: .spec.modelDeploymentRef.name
+      name: Deployment
+      type: string
+    - jsonPath: .status.atProvider.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Allocation is capacity with a lifetime, like a Kubernetes node: one lease on
+          a provider, such as a Slurm job (HBEP-3). It outlives its Instances and can
+          be repurposed. It is a crossplane-runtime managed resource whose external
+          name is its job tag. It is deliberately not in crossplane's "managed"
+          category, so that "kubectl delete managed --all" on a cluster that also runs
+          Crossplane cannot reach Allocations and cancel their jobs.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              AllocationSpec is the desired state of an Allocation. It declares the three
+              fields of crossplane-runtime's managed-resource spec that it uses, with
+              crossplane's types and JSON names, instead of embedding the structure: the
+              embedded structure defaults providerConfigRef to ClusterProviderConfig and
+              managementPolicies to "*", which allows Update (HBEP-11, Ownership, records
+              and deletion). The wire format is the same.
+            properties:
+              forProvider:
+                description: ForProvider says what the Allocation is a lease on. It
+                  is immutable.
+                properties:
+                  batch:
+                    description: Batch holds the parameters of a job on a batch platform.
+                    properties:
+                      account:
+                        description: Account the job is charged to.
+                        maxLength: 253
+                        type: string
+                      partition:
+                        description: Partition the job is submitted to.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      timeLimit:
+                        description: TimeLimit in the platform's format, for example
+                          "01:00:00".
+                        maxLength: 63
+                        minLength: 1
+                        type: string
+                      wrap:
+                        description: Wrap is the command passed to the submission,
+                          as in sbatch --wrap.
+                        maxLength: 8192
+                        type: string
+                    required:
+                    - partition
+                    - timeLimit
+                    type: object
+                  managed:
+                    description: Managed holds the catalog entry of a managed platform.
+                    properties:
+                      catalogName:
+                        description: CatalogName is the name of the entry in the platform's
+                          catalog.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                    required:
+                    - catalogName
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - message: 'an Allocation''s submission parameters are immutable:
+                    a submitted job is never edited; delete the Allocation and create
+                    a new one'
+                  rule: self == oldSelf
+                - message: forProvider names exactly one of batch and managed
+                  rule: has(self.batch) != has(self.managed)
+              managementPolicies:
+                default:
+                - Observe
+                - Create
+                - Delete
+                - LateInitialize
+                description: |-
+                  ManagementPolicies are the actions the managed reconciler may take. An
+                  Allocation takes exactly Observe, Create, Delete and LateInitialize, in
+                  any order, and that is the default; the set is immutable. Update is not
+                  in it: a submitted job is never edited. Leaving Delete out would orphan
+                  the job, and an empty list would pause the reconciler, so a deletion
+                  would hang.
+
+                  The Go type is a slice of crossplane's ManagementAction, not its
+                  ManagementPolicies, because the schema markers cannot bound a named slice
+                  type; the JSON is the same, and the accessors convert.
+                items:
+                  description: |-
+                    A ManagementAction represents an action that the Crossplane controllers
+                    can take on an external resource.
+                  enum:
+                  - Observe
+                  - Create
+                  - Update
+                  - Delete
+                  - LateInitialize
+                  - '*'
+                  type: string
+                maxItems: 8
+                type: array
+                x-kubernetes-validations:
+                - message: 'managementPolicies must be exactly Observe, Create, Delete
+                    and LateInitialize: a submitted job is never updated, and the
+                    provider registers exactly this set; leave the field out to take
+                    it'
+                  rule: self.size() == 4 && self.exists(p, p == 'Observe') && self.exists(p,
+                    p == 'Create') && self.exists(p, p == 'Delete') && self.exists(p,
+                    p == 'LateInitialize')
+                - message: an Allocation's managementPolicies are immutable
+                  rule: self == oldSelf
+              modelDeploymentRef:
+                description: |-
+                  ModelDeploymentRef names the ModelDeployment, in the Allocation's
+                  namespace, that the Allocation is assigned to. A repurpose changes it.
+                  No ModelDeployment owns an Allocation.
+                properties:
+                  name:
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              providerConfigRef:
+                description: |-
+                  ProviderConfigReference names the Provider that holds the job. It is
+                  required, has no default, and is immutable.
+                properties:
+                  kind:
+                    description: Kind of the referenced object.
+                    type: string
+                  name:
+                    description: Name of the referenced object.
+                    type: string
+                required:
+                - kind
+                - name
+                type: object
+              retentionPolicy:
+                description: |-
+                  RetentionPolicy says what happens to the Allocation when it hosts no
+                  Instance.
+                properties:
+                  idleLimit:
+                    description: IdleLimit is how long an Allocation may be idle before
+                      it is released.
+                    maxLength: 63
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                    type: string
+                  mode:
+                    description: Mode is Keep or ReleaseWhenIdle. Unset means Keep.
+                    enum:
+                    - Keep
+                    - ReleaseWhenIdle
+                    type: string
+                  until:
+                    description: |-
+                      Until is the date a kept Allocation is kept until: a date, a grant's end
+                      or a deadline. When it is absent, the default is the deployment's end
+                      time (HBEP-7, open question 13). It goes with mode Keep.
+                    format: date-time
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: idleLimit is required with mode ReleaseWhenIdle and refused
+                    with mode Keep
+                  rule: '(has(self.mode) && self.mode == ''ReleaseWhenIdle'') ? has(self.idleLimit)
+                    : !has(self.idleLimit)'
+                - message: 'until is refused with mode ReleaseWhenIdle: an Allocation
+                    released when idle is not kept until a date'
+                  rule: '!(has(self.mode) && self.mode == ''ReleaseWhenIdle'') ||
+                    !has(self.until)'
+              writeConnectionSecretToRef:
+                description: |-
+                  WriteConnectionSecretToReference names a Secret for connection details.
+                  An Allocation has none; the field keeps crossplane's wire format.
+                properties:
+                  name:
+                    description: Name of the secret.
+                    type: string
+                required:
+                - name
+                type: object
+            required:
+            - forProvider
+            - providerConfigRef
+            type: object
+            x-kubernetes-validations:
+            - message: 'providerConfigRef must name a Provider: set kind to ''Provider''
+                (a crossplane ProviderConfig or ClusterProviderConfig is refused)'
+              rule: has(self.providerConfigRef) && self.providerConfigRef.kind ==
+                'Provider'
+            - message: providerConfigRef.name must be a Provider name, a DNS-1123
+                label
+              rule: has(self.providerConfigRef) && self.providerConfigRef.name.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+                && size(self.providerConfigRef.name) <= 63
+            - message: 'an Allocation''s providerConfigRef is immutable: the job it
+                holds is on that provider; delete the Allocation and create a new
+                one'
+              rule: '!has(oldSelf.providerConfigRef) || (has(self.providerConfigRef)
+                && self.providerConfigRef == oldSelf.providerConfigRef)'
+          status:
+            description: |-
+              AllocationStatus is the observed state of an Allocation. Conditions,
+              observedGeneration and lastHandledReconcileAt are crossplane-runtime's
+              managed-resource status, declared here with its types and JSON names.
+            properties:
+              atProvider:
+                description: AtProvider is the observed state of the job.
+                properties:
+                  duplicates:
+                    description: |-
+                      Duplicates lists the IDs of extra jobs that carry the tag and are not
+                      held, in fallback mode. The list is sticky.
+                    items:
+                      type: string
+                    type: array
+                    x-kubernetes-list-type: set
+                  hardEnd:
+                    description: |-
+                      HardEnd is the lease's hard end: the time limit as currently observed
+                      (HBEP-3, Vocabulary, Lease).
+                    format: date-time
+                    type: string
+                  jobID:
+                    description: JobID is the established job ID, mirrored from its
+                      annotation.
+                    type: string
+                  phase:
+                    description: Phase of the job as the provider reports it.
+                    type: string
+                  startEstimate:
+                    description: |-
+                      StartEstimate is when the platform's scheduler expects the job to start.
+                      It is absent while the platform gives no estimate: an unknown estimate
+                      is not "now" and not "never". It is not StartTime, which is the actual
+                      start, and it moves with every scheduler pass (HBEP-3, Vocabulary,
+                      Lease: a lease runs from a start estimate, which may be unknown).
+                    format: date-time
+                    type: string
+                  startTime:
+                    description: StartTime is when the job actually started. It is
+                      absent until it has.
+                    format: date-time
+                    type: string
+                  submission:
+                    description: Submission mirrors the latest submission attempt.
+                    properties:
+                      attempt:
+                        description: Attempt is the attempt's number.
+                        format: int32
+                        type: integer
+                      reason:
+                        description: Reason for the state.
+                        type: string
+                      state:
+                        description: State of the attempt, for example InFlight, Unknown,
+                          Done or Abandoned.
+                        type: string
+                      time:
+                        description: Time the record was written.
+                        format: date-time
+                        type: string
+                      token:
+                        description: Token identifies the attempt.
+                        type: string
+                      writer:
+                        description: Writer is the controller that wrote the record.
+                        type: string
+                    required:
+                    - attempt
+                    - state
+                    type: object
+                  tag:
+                    description: Tag is the job tag, the Allocation's external name
+                      (HBEP-3).
+                    type: string
+                type: object
+              conditions:
+                description: Conditions of the Allocation. Only one condition of each
+                  type exists.
+                items:
+                  description: A Condition that may apply to a resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        LastTransitionTime is the last time this condition transitioned from one
+                        status to another.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        A Message containing details about this condition's last transition from
+                        one status to another, if any.
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        ObservedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      type: integer
+                    reason:
+                      description: A Reason for this condition's last transition from
+                        one status to another.
+                      type: string
+                    status:
+                      description: Status of this condition; is it currently True,
+                        False, or Unknown?
+                      type: string
+                    type:
+                      description: |-
+                        Type of this condition. At most one of each condition type may apply to
+                        a resource at any point in time.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              lastHandledReconcileAt:
+                description: |-
+                  LastHandledReconcileAt is the most recent reconcile-requested-at token
+                  the controller handled.
+                type: string
+              lastReconcileTime:
+                description: LastReconcileTime is when the controller last reconciled
+                  the object.
+                format: date-time
+                type: string
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the latest metadata.generation that resulted in
+                  either a ready state or a stall that needs a human.
+                format: int64
+                type: integer
+              retention:
+                description: |-
+                  Retention shows the retention mode the controller applies; an unset mode
+                  in the spec reads as Keep.
+                properties:
+                  effectiveMode:
+                    description: |-
+                      EffectiveMode is the mode the controller applies: the spec's mode, or
+                      Keep when the spec sets none (RetentionPolicy.EffectiveMode).
+                    enum:
+                    - Keep
+                    - ReleaseWhenIdle
+                    type: string
+                type: object
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
