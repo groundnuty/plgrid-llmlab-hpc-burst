@@ -2,104 +2,132 @@
   "option": "envtest-gc",
   "version_old": "1.35.0",
   "version_new": "1.36.2",
-  "started_utc": "2026-10-30T09:05:30Z",
+  "phases": [
+    {
+      "phase": "main",
+      "started_utc": "2026-10-30T10:21:05Z",
+      "finished_utc": "2026-10-30T10:24:48Z",
+      "e2e_binary_sha256": "a5e38208a37957fec8d9e401e652c568afbd8e92604bc2c237e50437da6f1fcb",
+      "s3bench_binary_sha256": "5f1eaee9b2b3a3435c6407e4608435749d22fc314e47212d2d7ddc4de0ee23f9",
+      "host_binaries_sha256": {
+        "etcd 1.36.2": "b8956dc9f7479b1f15c46d03edae5dd9db508932840f91a9818e67717fcb1850",
+        "kube-apiserver 1.36.2": "6770be17296ef36b656ad84e52b043007fb9a47ba0445c224097323291b1b33b",
+        "kube-controller-manager 1.36.2": "6332e45474baf6362f50394d8f7c6002274db04d68fe51dbe2229ef5c0b21e3c"
+      }
+    },
+    {
+      "phase": "upgrade",
+      "started_utc": "2026-10-30T10:24:48Z",
+      "finished_utc": "2026-10-30T10:25:25Z",
+      "e2e_binary_sha256": "a5e38208a37957fec8d9e401e652c568afbd8e92604bc2c237e50437da6f1fcb",
+      "s3bench_binary_sha256": "5f1eaee9b2b3a3435c6407e4608435749d22fc314e47212d2d7ddc4de0ee23f9",
+      "host_binaries_sha256": {
+        "etcd 1.35.0": "e3d7d2950b4efbebb7c585a5876c2dc7db4a0c4b8ed95939121be853e0c55a27",
+        "etcd 1.36.2": "b8956dc9f7479b1f15c46d03edae5dd9db508932840f91a9818e67717fcb1850",
+        "kube-apiserver 1.35.0": "999e4874de50139f40929d6a9f4844efc66ad09647dc0e84031daca4711f12b6",
+        "kube-apiserver 1.36.2": "6770be17296ef36b656ad84e52b043007fb9a47ba0445c224097323291b1b33b",
+        "kube-controller-manager 1.35.0": "d175511887be863be36c5b7ef7e859d22f08bd0e80cebca628edd48f0171c3f7",
+        "kube-controller-manager 1.36.2": "6332e45474baf6362f50394d8f7c6002274db04d68fe51dbe2229ef5c0b21e3c"
+      }
+    }
+  ],
   "cold_starts": [
     {
-      "readyz_ms": 3433,
-      "ready_ms": 3737,
-      "usable_ms": 3867,
-      "load1_at_start": 3.05
+      "readyz_ms": 2951,
+      "ready_ms": 3236,
+      "usable_ms": 3427,
+      "load1_at_start": 3.75
     },
     {
-      "readyz_ms": 3506,
-      "ready_ms": 3805,
-      "usable_ms": 3928,
-      "load1_at_start": 1.93
+      "readyz_ms": 3752,
+      "ready_ms": 4111,
+      "usable_ms": 4243,
+      "load1_at_start": 3.77
     },
     {
-      "readyz_ms": 3556,
-      "ready_ms": 3815,
-      "usable_ms": 3938,
-      "load1_at_start": 1.77
+      "readyz_ms": 3594,
+      "ready_ms": 3917,
+      "usable_ms": 4048,
+      "load1_at_start": 3.79
     }
   ],
   "warm_starts": [
     {
-      "readyz_ms": 2992,
-      "ready_ms": 3674,
-      "usable_ms": 3762,
-      "load1_at_start": 1.91
+      "readyz_ms": 2633,
+      "ready_ms": 2917,
+      "usable_ms": 2982,
+      "load1_at_start": 3.64
     },
     {
-      "readyz_ms": 3074,
-      "ready_ms": 3497,
-      "usable_ms": 3556,
-      "load1_at_start": 1.92
+      "readyz_ms": 2617,
+      "ready_ms": 2981,
+      "usable_ms": 3035,
+      "load1_at_start": 3.44
     },
     {
-      "readyz_ms": 3209,
-      "ready_ms": 3426,
-      "usable_ms": 3489,
-      "load1_at_start": 2.01
+      "readyz_ms": 2498,
+      "ready_ms": 3026,
+      "usable_ms": 3118,
+      "load1_at_start": 3.41
     }
   ],
   "cold_median": {
-    "readyz_ms": 3506,
-    "ready_ms": 3805,
-    "usable_ms": 3928,
+    "readyz_ms": 3594,
+    "ready_ms": 3917,
+    "usable_ms": 4048,
     "load1_at_start": 0
   },
   "warm_median": {
-    "readyz_ms": 3074,
-    "ready_ms": 3497,
-    "usable_ms": 3556,
+    "readyz_ms": 2617,
+    "ready_ms": 2981,
+    "usable_ms": 3035,
     "load1_at_start": 0
   },
   "rss_idle": {
     "samples_mib": [
-      358.3,
-      358.5,
-      358.7
+      364.8,
+      365.1,
+      365.2
     ],
-    "median_mib": 358.5,
+    "median_mib": 365.1,
     "by_process_mib": {
-      "etcd": 43.7,
-      "kube-apiserver": 243.7,
-      "kube-controller": 71.1
+      "etcd": 44.8,
+      "kube-apiserver": 248.6,
+      "kube-controller": 71.6
     },
     "load1_at_samples": [
-      3.65,
-      3.43,
-      3.32
+      3.38,
+      3.35,
+      3.48
     ],
     "mem_available_gib_at_samples": [
-      20.2,
-      20.3,
-      20.3
+      19.9,
+      19.9,
+      19.8
     ]
   },
   "rss_loaded": {
     "samples_mib": [
-      386,
-      390.6,
-      405.9
+      385,
+      385.5,
+      404.4
     ],
-    "median_mib": 390.6,
+    "median_mib": 385.5,
     "by_process_mib": {
-      "etcd": 50.4,
-      "kube-apiserver": 267.1,
-      "kube-controller": 73.1
+      "etcd": 51.3,
+      "kube-apiserver": 260.5,
+      "kube-controller": 73.7
     },
-    "controller_mib": 38.3,
+    "controller_mib": 38.8,
     "load1_at_samples": [
-      2.07,
-      1.91,
-      1.75
+      5.48,
+      5.37,
+      5.1
     ],
     "mem_available_gib_at_samples": [
-      20.3,
-      20.3,
-      20.2
+      19.7,
+      19.7,
+      19.7
     ]
   },
   "listeners": [
@@ -108,7 +136,7 @@
     "127.0.0.1:29103",
     "127.0.0.1:29104"
   ],
-  "stop_ms": 1181,
+  "stop_ms": 1230,
   "data_dir_mib_after_load": 138.1,
   "e2e": {
     "passed": [
@@ -137,7 +165,7 @@
     "server_version_after": "v1.36.2",
     "objects_before": 103,
     "objects_identical_after": 103,
-    "stop_to_ready_ms": 4160,
+    "stop_to_ready_ms": 4995,
     "e2e_after": {
       "passed": [
         "TestCascadeBackground",
@@ -174,31 +202,31 @@
     {
       "line": "RSS idle",
       "limit": "\u003c= 600 MiB",
-      "actual": "358 MiB",
+      "actual": "365 MiB",
       "pass": true
     },
     {
       "line": "RSS with ~100 objects",
       "limit": "\u003c= 800 MiB",
-      "actual": "391 MiB",
+      "actual": "386 MiB",
       "pass": true
     },
     {
       "line": "cold start to ready",
       "limit": "\u003c= 30 s",
-      "actual": "3.8 s (median of 3)",
+      "actual": "3.9 s (median of 3)",
       "pass": true
     },
     {
       "line": "warm start to ready",
       "limit": "\u003c= 30 s",
-      "actual": "3.5 s (median of 3)",
+      "actual": "3.0 s (median of 3)",
       "pass": true
     },
     {
       "line": "minor upgrade",
       "limit": "all objects kept, e2e passes, stop to ready \u003c= 60 s",
-      "actual": "103/103 kept, e2e failed=0, post-upgrade failed=0, stop to ready 4.2 s ",
+      "actual": "103/103 kept, e2e failed=0, post-upgrade failed=0, stop to ready 5.0 s ",
       "pass": true
     },
     {
@@ -207,5 +235,6 @@
       "actual": "11 passed, 0 failed []",
       "pass": true
     }
-  ]
+  ],
+  "state_dir_mib_after_load": 138.1
 }
