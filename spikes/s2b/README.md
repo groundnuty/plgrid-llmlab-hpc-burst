@@ -6,14 +6,18 @@ round robin, on a multi-turn agent workload with `x-session-id`. Issue #29, phas
 
 ## Result in brief
 
-Both candidate routers beat round robin on the prefix-cache hit rate. That is #29's pass criterion, and it held in
-every arm and both regimes. vllm-router `consistent_hash` on `x-session-id` came within 0.003 of the workload's
-reuse bound and spread sessions over all four workers. llm-d matched it when the cache was ample. But its shipped
-scorers sent every session that shares a system prompt to the same worker: one worker carried 54% of the requests while
-another got none. With the cache capped, that worker's hit rate fell to 0.86.
+Both candidate routers beat round robin on the prefix-cache hit rate, measured with four workers sharing one GPU.
+That is #29's pass criterion, and it held in every arm and both regimes. vllm-router `consistent_hash` on
+`x-session-id` came within 0.003 of the estimated reuse bound and spread sessions over all four workers. llm-d
+matched it when the cache was ample. But its shipped scorers sent every session that shares a system prompt to the
+same worker: one worker carried 54% of the requests while another got none. With the cache capped, that worker's hit
+rate fell to 0.86.
 
 Hit rate from the workers' own counters, on 1,152 requests per arm. B is the capped cache, A the cache as profiled.
-B1 and B2 are two runs of the same arm. The reuse bound was 0.905 to 0.906 in every arm.
+B1 and B2 are two runs of the same arm with the same generator seed. They share the task structure and the think
+times, not identical request traces: the run label is part of `x-session-id`, so the hash assignment differs between
+them, and replies are sampled without a request seed (see Method). The reuse bound is an estimate, not a ceiling (see
+Measurements); it was 0.905 in every arm (0.9051 to 0.9053).
 
 | Router | Hit rate B1 / B2 | Hit rate A | TTFT p50 / p95, ms (B1) | Sessions per worker (B1) | Sticky sessions | Busiest worker's requests / mean (B1) |
 |---|---|---|---|---|---|---|
@@ -26,17 +30,19 @@ B1 and B2 are two runs of the same arm. The reuse bound was 0.905 to 0.906 in ev
 All 13 arms completed every request: 0 failed and 0 preempted. The full table, with the client's own cached-token
 hit rate (equal to the workers' to three decimals in every arm), is in `results/gh200-1gpu/summary.md`.
 
-- **Verdict against #29: pass.** Both candidates beat round robin on hit rate.
+- **Verdict against #29: pass.** Both candidates beat round robin on hit rate, with four workers sharing one GPU.
   - With the cache capped (B): +25 to +27 points for `consistent_hash`, +23 to +25 for llm-d.
   - With an ample cache (A): +20 points for both.
   - Round robin sends 74% of turns to a different worker from the previous turn's. With the cache capped, the copies it
     spreads over four workers evict each other.
-- **Which router.** The hit rate supports either; balance decides. On this workload `consistent_hash` is the better
-  choice: the same hit rate, every session sticky, and no idle worker. llm-d needs a change to its scorer weights,
-  or a 4-GPU run showing that its queue and KV scorers undo the pile-up once a worker is loaded.
+- **Which router.** The hit rate supports either; balance decides. On this workload `consistent_hash` is the
+  provisional choice: the same hit rate, every session sticky, and no idle worker. llm-d needs a change to its scorer
+  weights, or a 4-GPU run showing that its queue and KV scorers undo the pile-up once a worker is loaded. A run with
+  one GPU per worker must still validate hit rate, routing balance and latency before the choice is final.
 - **TTFT** fell with the hit rate: p50 58 ms and p95 83 to 86 ms for `consistent_hash`, against 78 to 82 ms and
-  137 to 184 ms for round robin. These numbers come from one shared GPU. That flatters llm-d, whose idle fourth
-  worker leaves three processes to share the GPU, and it understates what its pile-up would cost (see Deviation).
+  137 to 184 ms for round robin. These numbers come from one shared GPU, so they are not dedicated-GPU figures.
+  Which way the sharing biases them (for example, llm-d's idle fourth worker leaves three processes on the GPU) was
+  not measured (see Deviation).
 
 
 ## Question
@@ -64,11 +70,16 @@ workers sharing it, each with its own KV-cache budget.
 
 What this keeps and what it loses:
 
-- **The hit-rate comparison stays valid.** It is #29's pass criterion. Each worker is a separate vLLM server with its own
-  prefix cache, its own KV blocks and its own scheduler, so which requests hit which cache depends only on the router.
-- **TTFT and the cost of piling onto one worker are understated.** The four workers share one GPU's compute, so a
-  worker with twice the load does not get twice as slow, as it would on its own GPU. A 4-GPU run is needed to
-  measure TTFT under load and the cost of an unbalanced router.
+- **The hit-rate comparison is a measured result for four workers sharing one GPU.** It is #29's pass criterion. Each
+  worker is a separate vLLM server with its own prefix cache, its own KV blocks and its own scheduler, and the KV
+  budgets are equal within a regime, so no arm had a cache advantage over another. The workers' timing is still
+  coupled through the one GPU. The client waits for each reply before it advances a session, so shared compute can
+  change the interleaving of requests, batching, block lifetimes and eviction order, and it changes the load signals
+  that llm-d's scorers and `cache_aware` read. This phase did not test whether the same hit rates would hold with one
+  GPU per worker.
+- **TTFT and the cost of piling onto one worker are not dedicated-GPU measurements.** Whether the shared GPU makes
+  them look better or worse than they would be on their own GPUs was not measured. A 4-GPU run is needed to validate
+  hit rate, routing balance and latency.
 
 ## Method
 
@@ -76,11 +87,16 @@ What this keeps and what it loses:
 another (each profiles its memory alone), then for each arm starts one router stack, runs the client through it, and
 stops the stack. Every listener of the routers, the EPP and Envoy is on 127.0.0.1, and the job checks that from `/proc`
 after each start (an arm whose router listens elsewhere is skipped). The client runs inside the job, so nothing on the
-VM changed. The job ended by itself after the last arm.
+VM changed. The job ended by itself after the last arm. It now exits 1 when a required arm is skipped, a prefix-cache
+reset or a metrics scrape fails, or a client fails or reports no result; it lists each problem in `failures.txt` and
+keeps the partial results, and an arm whose caches were not reset is not run. The recorded run predates this and
+exited 0 whatever happened: none of its 13 arms was skipped, every reset answered `{"success":true}` with HTTP 200,
+and every client exited 0.
 
-**Workload** (`cmd/s2bload`, the same in every arm, seed 1). An agent workload with shared system prompts and growing
-per-session contexts, so neither of the proofs that #29 rules out applies (every request a different prefix; every
-request the same prefix):
+**Workload** (`cmd/s2bload`, the same generator and seed 1 in every arm). The arms share the generated task structure
+and the think times; they do not replay identical request traces (see "What differs between arms"). An agent workload with shared
+system prompts and growing per-session contexts, so neither of the proofs that #29 rules out applies (every request a
+different prefix; every request the same prefix):
 
 - 3 agent types with popularity 0.5 / 0.3 / 0.2. Each type has one 2,000-word system prompt that all its sessions share.
 - 96 sessions of 12 turns, 32 sessions in flight at once. A session starts with a unique 250-word task; each later turn
@@ -91,16 +107,36 @@ request the same prefix):
 - Arms do not share any cache. The run label is the first line of every system prompt, and every worker's prefix cache
   is reset (`POST /reset_prefix_cache`, `VLLM_SERVER_DEV_MODE=1`) before each arm. All 52 resets answered
   `{"success":true}`.
+- **What differs between arms.** The run label is also part of `x-session-id` (`<run>-s<NNN>`), so the same session
+  hashes to a different worker in a different arm: `consistent_hash` placed 27 / 23 / 14 / 32 sessions per worker in
+  B1 and 28 / 24 / 20 / 24 in B2. The label also changes the prompt token lengths a little, and the client samples
+  replies (temperature 0.7) without a request seed before it appends them to the history. B1 and B2 start from
+  separately reset prefix caches but share the worker processes, the job and the workload seed, and their spread also
+  includes the changed hash assignment. The routing-key namespace was not separated from the run label, because that
+  would change what the recorded runs did; a controlled repeat should separate them and replay fixed histories.
 
 **Measurements.**
 
 - **Hit rate** comes from the workers' own counters: the growth of `vllm:prefix_cache_hits_total` over that of
   `vllm:prefix_cache_queries_total` during the arm, summed over the four workers. The client's own sum of
   `usage.prompt_tokens_details.cached_tokens` over `prompt_tokens` is reported beside it as a cross-check.
-- **Reuse bound** is the share of prompt tokens a perfect router with an unbounded cache could serve from cache:
-  the previous turn's prompt plus its reply, and the shared system prompt for every session but the first of its type,
-  in whole 16-token blocks. It is about 0.9, so this workload is far from both trivial cases.
+- **Reuse bound** is an estimate of the share of prompt tokens a perfect router with an unbounded cache could serve
+  from cache, not a theoretical ceiling. It counts the previous turn's prompt plus its reply, less the reply's last
+  sampled token (whose KV is not computed yet), and the shared system prompt for every session but the first of its
+  type, in whole 16-token blocks. The system prompt's length is not computed from tokenised histories: it is the
+  largest cached-token count that a turn-0 request of that type reported in the same run, so it depends on the
+  router and cache under test. A true ceiling would need the tokenised histories and the materialised KV. The
+  estimate is about 0.9, so this workload is far from both trivial cases; the measured gain over round robin does
+  not depend on it.
 - **TTFT** is measured by the client, from sending the request to the first non-empty content delta, through the router.
+- **A measured request** is one whose stream is complete and whose counts can be trusted. The client reads events
+  with phase A's SSE framing (`cmd/s2bload/sse.go`, copied from `spikes/s2/cmd/s2probe/sse.go`), so a `[DONE]` or any
+  event without its terminating blank line is an error. It then requires some content, a non-empty `finish_reason`,
+  and a usage record with positive `prompt_tokens` and a `completion_tokens` equal to the 48 requested. The recorded
+  runs were taken with the first version of the client, which accepted a `[DONE]` line without its blank line and
+  did not require a finish reason or usage. This does not change the results: all 14,976 recorded requests have 48
+  completion tokens and no error, and the workers' counters give the same hit rates as the client's records (equal to
+  three decimals in every arm).
 - **Placement** comes from the workers, not the router. A 65-line ASGI middleware (`py/s2b_placement.py`, loaded with vLLM's
   `--middleware`) logs, for each request, the session and turn tagged at the end of the newest user message. That gives
   sessions per worker (by first turn), the share of sessions whose turns all landed on one worker ("sticky"), and the
@@ -142,7 +178,7 @@ The EPP scrapes each worker's `/metrics` every 50 ms, as shipped.
 | Node | Helios GH200 partition, aarch64, kernel with 64 KiB pages (`getconf PAGESIZE` 65536); job: 1 GPU, 72 CPUs, 120,000 MB, memfs, `--no-requeue`, QOS `now` |
 | GPU | 1 x NVIDIA GH200 (97,871 MiB visible), driver 615.71.09, compute capability 9.0 |
 | vLLM | 0.32.0 (`+cu129` aarch64 wheel from the vLLM GitHub release), torch 2.13.0+cu129, CUDA 12.9, Python 3.12, `module load ML-bundle/25.10` |
-| Model | `Qwen/Qwen2.5-1.5B-Instruct`, revision `989aa7980e4cf806f80c7fef2b1adb7bc71aa306`, bf16, Apache-2.0 |
+| Model | `Qwen/Qwen2.5-1.5B-Instruct`, revision `989aa7980e4cf806f80c7fef2b1adb7bc71aa306`, bf16, Apache-2.0. The recorded run named the model ID without `--revision`; `job.sh` now passes this revision (`MODEL_REV`) |
 | Workers | 4 x `vllm serve`, `--gpu-memory-utilization 0.2 --max-model-len 16384 --enable-prefix-caching --enable-prompt-tokens-details`; chunked prefill, `max_num_batched_tokens` 8192; KV 96,000 tokens (B) or 528,160 tokens (A) per worker |
 | vllm-router | 0.1.16, the PyPI aarch64 wheel in the same venv |
 | EPP | llm-d-router v1.0.0 (commit b9393d1) with phase A's loopback patch, cross-built `CGO_ENABLED=0 GOARCH=arm64` (Go 1.27.3) |
@@ -159,8 +195,11 @@ kernel. The Envoy release binary's load segments are 64 KiB-aligned (`readelf -l
    in all five llm-d arms: joining the placement logs with the client's agent types puts each type on exactly one worker.
    - The first turn of a new session matches its type's 2,000-word system prompt on the worker that already served
      that type. The prefix scorer (weight 3) then outweighs the queue, KV-use and no-hit-LRU scorers (2 each).
-   - At this load no worker ever queued (`num_requests_waiting` peaked at 0 to 2), and KV use stayed at or below 0.64,
-     so the load scorers had nothing to push back with.
+   - Sampled every 2 s, `num_requests_waiting` was 0 on every worker in every llm-d arm and KV use stayed at or below
+     0.45 (the largest sampled queue in any arm was 2, round robin, B1). A short queue between two samples is not
+     excluded: the EPP scrapes every 50 ms, and its KV scorer scores one minus the utilisation continuously, so it had a
+     signal below saturation. The placement is consistent with the prefix scorer's weight outweighing the load scorers
+     at this load; this run did not isolate the scorers to show it.
    - Agent products send one long system prompt for all their users, so this is the expected shape behind LLMLab.
    - With the cache capped, the loaded worker's hit rate was 0.858 to 0.866, against 0.905 on the others: its 52
      sessions did not fit its cache.
@@ -185,8 +224,10 @@ kernel. The Envoy release binary's load segments are 64 KiB-aligned (`readelf -l
 
 ## What this means for HBEP-5
 
-1. **Inner router (open question 2).** Phase B supports vllm-router `consistent_hash` on `x-session-id` as the default.
-   It gave the best hit rate under KV pressure, it is one process, and it installs from PyPI as an aarch64 wheel.
+1. **Inner router (open question 2).** Phase B supports vllm-router `consistent_hash` on `x-session-id` as a
+   provisional default for this workload. It gave the best hit rate under KV pressure, it is one process, and it
+   installs from PyPI as an aarch64 wheel. Phase B ran on one shared GPU: a dedicated-GPU run must validate hit rate,
+   routing balance and latency before the default is fixed.
    - Phase A's conditions still hold: set `--request-timeout-secs` above the longest stream, and re-add workers after
      a router restart (L-4.8).
    - The hash can skew with few sessions: 14 to 32 sessions per worker here, 7 of 9 on one worker in phase A.
@@ -204,15 +245,18 @@ kernel. The Envoy release binary's load segments are 64 KiB-aligned (`readelf -l
 
 ## Unknowns
 
-- **TTFT and the cost of an unbalanced router with one GPU per worker.** One GPU served all four workers here
-  (see Deviation). A 4-GPU run is needed to measure them.
-- **Whether llm-d's load scorers break up the pile-up under load.** Here the queue never exceeded 2 and nothing was
-  preempted. A heavier load, or the 4-GPU run, would show whether the hot worker sheds sessions, and at what hit-rate cost.
+- **Hit rate, routing balance and latency with one GPU per worker.** One GPU served all four workers here (see
+  Deviation). A 4-GPU run is needed to validate all three, and to measure the cost of an unbalanced router.
+- **Whether llm-d's load scorers break up the pile-up under load.** Here the sampled queue maxima were 0 to 2 and
+  nothing was preempted. A heavier load, or the 4-GPU run, would show whether the hot worker sheds sessions, and at
+  what hit-rate cost.
 - **Scale and length.** 96 sessions of 12 turns with prompts up to 10,760 tokens. www-2027's agents ran 50,000 to
   100,000-token contexts for hours. Session pauses over llm-d's 300 s binding TTL were not exercised (sessions lasted
   16 to 26 s).
 - **Run-to-run spread.** Only three B arms were repeated: round robin 0.635 and 0.654, `consistent_hash` 0.902 and
-  0.902, llm-d 0.880 and 0.884. The gaps between routers are about ten times that spread.
+  0.902, llm-d 0.880 and 0.884. The gaps between routers are about ten times that spread. The repeats are not
+  independent trials: they share the worker processes, the job and the seed, and they differ in hash assignment and
+  sampled replies (see Method).
 - **Untested settings.** `cache_aware` with `session_params.session_id`, or with its default thresholds;
   llm-d's precise prefix scorer (KV events).
 - **Keep-alive pairing (L-2.5)** was not exercised: under continuous load no connection idled for vLLM's 5 s, and no
@@ -239,7 +283,8 @@ New in this phase, all under `spikes/s2b/`:
 - `py/s2b_listeners.py`: listener lists from `/proc`;
 - `scripts/job.sh`: the job;
 - `scripts/analyze.py`: the analysis;
-- `scripts/collect.sh`: the results filter.
+- `scripts/collect.sh`: the results filter;
+- `scripts/pubcheck.py`: the publication check (private paths, account names, addresses), which `collect.sh` runs.
 
 ## Reproduce
 
@@ -247,10 +292,16 @@ New in this phase, all under `spikes/s2b/`:
 spikes/s2b/scripts/test.sh    # every test, then checks that summary.md reproduces from the committed results
 ```
 
-It runs the client's Go tests (workload structure, SSE reading, cached-token parsing), the middleware's (tag of the
-newest turn, body replayed unchanged), the `/proc` listener list's (IPv4, IPv6 wildcard, connected sockets ignored)
-and the analysis' (hit rate from counters, reuse bound, placement figures). Expected values in the analysis tests are
-worked out by hand from the fixtures. `scripts/analyze.py spikes/s2b/results/gh200-1gpu` prints the full table.
+It runs the client's Go tests (workload structure, SSE framing and the usage and completion checks, cached-token
+parsing), the middleware's (tag of the newest turn, body replayed unchanged), the `/proc` listener list's (IPv4, IPv6
+wildcard, connected sockets ignored), the analysis' (hit rate from counters, reuse bound, placement figures), the
+publication check's (paths, accounts, addresses, nested archives, `collect.sh` refusing a leak inside a file it
+gzips), and `job.sh`'s exit status (a stubbed run). Expected values in the analysis tests are worked out by hand from
+the fixtures. It ends with the publication check over every file git would commit under `spikes/s2b` and over the
+diff against `origin/main`. `scripts/analyze.py spikes/s2b/results/gh200-1gpu` prints the full table.
+
+Before every push, run `python3 -I -B spikes/s2b/scripts/pubcheck.py --ips --history origin/main` as well: it reads every
+blob of every commit being published, not only the tip.
 
 The job itself:
 
@@ -260,7 +311,14 @@ The job itself:
    - `genconf.py` from `spikes/s2/scripts/`;
    - `src/llm-d/guides/no-kubernetes-deployment/router/{envoy/envoy.yaml,epp/config.yaml}` from llm-d v1.0.0;
    - `job.sh`.
-2. Put the model in `$S2B_HOME/hf_home`.
+2. Put the model, at the documented revision, in `$S2B_HOME/hf_home`:
+
+```bash
+HF_HOME=$S2B_HOME/hf_home hf download Qwen/Qwen2.5-1.5B-Instruct --revision 989aa7980e4cf806f80c7fef2b1adb7bc71aa306
+```
+
+   `job.sh` serves that revision (`--revision "$MODEL_REV"`, offline), so another cached revision cannot be picked up
+   by name. vLLM 0.32.0 uses the model revision for the tokenizer as well.
 3. Submit:
 
 ```bash
