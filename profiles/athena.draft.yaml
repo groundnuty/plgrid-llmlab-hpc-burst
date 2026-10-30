@@ -446,7 +446,7 @@ facts:
       method: unknown
       source: "needs a job; S5 runs none"
       date: 2026-10-30
-      note: "Whether Slurm's native OCI container support, or any other container runtime, works on the compute nodes is not known."
+      note: "Whether Slurm's native OCI container support, or any container runtime other than Apptainer, works on the compute nodes is not known. Apptainer on the compute nodes was measured later: see apptainer_compute_nodes."
     user_namespaces_login_node:
       value: false
       method: measured
@@ -473,11 +473,11 @@ facts:
       date: 2026-10-30
     home_readable_from_compute_nodes:
       value:
-        plgrid-gpu-a100: {readable: true, filesystem: nfs, mode: "700", owner_is_job_user: true, same_home_as_login_node: true, ssh_dir_exists: true, ssh_dir_readable: true}
+        plgrid-gpu-a100: {readable: true, filesystem: nfs, mode: "700", owner_is_job_user: true, entry_count_matches_login_node: true, ssh_dir_exists: true, ssh_dir_enterable_and_listable: true, ssh_key_file_read_tested: false}
       method: measured
       source: "S1 probe 2 job on plgrid-gpu-a100: test -r ~ && ls ~ >/dev/null (exit 0); stat -c %a ~; stat -f -c %T ~ and df -PT ~ (filesystem type only); ls -A ~ | wc -l on the node and on the login node (8 and 8); test -d ~/.ssh, test -r and -x ~/.ssh, ls ~/.ssh >/dev/null (exit codes only; contents not listed)"
       date: 2026-10-30
-      note: "The job's user can read and list its own home on the compute node. The home is NFS, as on the login node, and its top-level entry count equals the login node's, so it is the same home and not a stub. ~/.ssh exists and can be entered and listed, which is what ssh dial-home mode needs. Read only: nothing was written to the home. Measured in the first of the three jobs on one node; the later two jobs did not repeat it."
+      note: "The job's user can read and list its own home on the compute node. The home is NFS, as on the login node, and its top-level entry count equals the login node's, which is consistent with the same home (a match of counts is not proof). ~/.ssh exists and the directory can be entered and listed. Whether a specific key file in it can be read was not tested, so this does not by itself show that ssh dial-home mode can use a key stored there. Read only: nothing was written to the home. Measured in the first of the three jobs on one node; the later two jobs did not repeat it."
     scratch_fstype:
       value: "lustre"
       method: measured

@@ -225,7 +225,7 @@ facts:
       method: measured
       source: "command -v apptainer; apptainer --version; rpm -q apptainer apptainer-suid"
       date: 2026-10-30
-      note: "On the login node only: /usr/bin binary, RPM build for EL8 x86_64, setuid helper package installed. The compute nodes run an el9 kernel (GH200 nodes are aarch64), so the version there may differ. Not measured."
+      note: "On the login node only: /usr/bin binary, RPM build for EL8 x86_64, setuid helper package installed. The compute nodes run an el9 kernel (GH200 nodes are aarch64), so the version there may differ. Measured later: see containers.apptainer_compute_nodes (1.5.4 on el9 aarch64 on plgrid-gpu-gh200)."
     singularity_command: {value: "alias of apptainer (same version string)", method: measured, source: "command -v singularity; singularity --version", date: 2026-10-30, note: "the singularity-ce and singularity RPMs are not installed"}
     enroot: {value: false, method: measured, source: "command -v enroot", date: 2026-10-30, note: "login node only"}
     pyxis: {value: false, method: measured, source: "srun --help | grep -i container; scontrol show config: PlugStackConfig", date: 2026-10-30, note: "srun lists only --container (path to an OCI bundle) and --container-id. No pyxis options such as --container-image. PlugStackConfig is (null) and no plugstack.conf exists, so no SPANK plugins are configured. JobContainerType is (null)."}
@@ -237,7 +237,7 @@ facts:
       method: measured
       source: "cat /proc/sys/user/max_user_namespaces; unshare -U true; unshare -Ur true"
       date: 2026-10-30
-      note: "max_user_namespaces is 0. Both unshare calls fail with 'No space left on device', which is how the kernel reports a zero limit. /etc/subuid and /etc/subgid have no entry for the probing user; newuidmap and newgidmap exist. With the setuid Apptainer install a container may still run without user namespaces; that was not tested (S5 runs no container)."
+      note: "max_user_namespaces is 0. Both unshare calls fail with 'No space left on device', which is how the kernel reports a zero limit. /etc/subuid and /etc/subgid have no entry for the probing user; newuidmap and newgidmap exist. With the setuid Apptainer install a container may still run without user namespaces; S5 did not test that. S1 probe 2 did on a GH200 compute node (same zero limit): see containers.apptainer_compute_nodes."
     apptainer_compute_nodes:
       value:
         plgrid-gpu-gh200:
@@ -261,11 +261,11 @@ facts:
     home: {value: {filesystem: nfs, quota_gib: 10, file_quota: 100000}, method: measured, source: "stat -f -c %T $HOME; hpc-fs", date: 2026-10-30, note: "quota values are the probing user's. Documented limit is 10 GB ($HOME, https://docs.hpc.cyfronet.pl/environment/variables/), which agrees."}
     home_readable_from_compute_nodes:
       value:
-        plgrid-gpu-gh200: {readable: true, filesystem: nfs, mode: "700", owner_is_job_user: true, same_home_as_login_node: true, ssh_dir_exists: true, ssh_dir_readable: true}
+        plgrid-gpu-gh200: {readable: true, filesystem: nfs, mode: "700", owner_is_job_user: true, entry_count_matches_login_node: true, ssh_dir_exists: true, ssh_dir_enterable_and_listable: true, ssh_key_file_read_tested: false}
       method: measured
       source: "S1 probe 2 job on plgrid-gpu-gh200: test -r ~ && ls ~ >/dev/null (exit 0); stat -c %a ~; stat -f -c %T ~ and df -PT ~ (filesystem type only); ls -A ~ | wc -l on the node and on the login node (18 and 18); test -d ~/.ssh, test -r and -x ~/.ssh, ls ~/.ssh >/dev/null (exit codes only; contents not listed)"
       date: 2026-10-30
-      note: "The job's user can read and list its own home on the compute node. The home is NFS (nfs4 in df), as on the login node, and its top-level entry count equals the login node's, so it is the same home and not a stub. ~/.ssh exists and can be entered and listed, which is what ssh dial-home mode needs. Read only: nothing was written to the home. One job, one node, one partition."
+      note: "The job's user can read and list its own home on the compute node. The home is NFS (nfs4 in df), as on the login node, and its top-level entry count equals the login node's, which is consistent with the same home (a match of counts is not proof). ~/.ssh exists and the directory can be entered and listed. Whether a specific key file in it can be read was not tested, so this does not by itself show that ssh dial-home mode can use a key stored there. Read only: nothing was written to the home. One job, one node, one partition."
     scratch:
       value: {filesystem: lustre, quota_tib: 12, file_quota: 1000000}
       method: measured
