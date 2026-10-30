@@ -175,7 +175,7 @@ kernel. The Envoy release binary's load segments are 64 KiB-aligned (`readelf -l
 4. **Both routers pass `x-session-id` on to the workers.** Every request seen by a worker's middleware carried the
    header, through vllm-router and through Envoy.
 5. **vLLM listens off loopback.** Each worker had its API port on 127.0.0.1 and six more TCP listeners on the node's
-   cluster address, although `--host 127.0.0.1` and `VLLM_HOST_IP=127.0.0.1` were set. These are internal
+   cluster address, although `--host 127.0.0.1` and `VLLM_HOST_IP=127.0.0.1` were set. They are presumably internal
    process-to-process ports; which component opens them was not traced. The routers, the EPP and Envoy listened
    on loopback only (`results/gh200-1gpu/arms/*/listeners.txt`, `listeners-smoke.txt`).
 6. **Cost of the router processes**, from `ps` at the end of each arm (CPU time includes start-up):
@@ -244,12 +244,13 @@ New in this phase, all under `spikes/s2b/`:
 ## Reproduce
 
 ```bash
-(cd spikes/s2b && go test ./...)                 # client: workload structure, SSE reading, cached-token parsing
-python3 -I spikes/s2b/py/test_s2b_placement.py   # middleware: tag of the newest turn, body replayed unchanged
-python3 -I spikes/s2b/py/test_s2b_listeners.py   # /proc listener list: v4, v6 wildcard, connected sockets ignored
-python3 -I spikes/s2b/scripts/test_analyze.py    # hit rate from counters, reuse bound, placement figures
-python3 -I spikes/s2b/scripts/analyze.py spikes/s2b/results/gh200-1gpu   # the table above, from the committed results
+spikes/s2b/scripts/test.sh    # every test, then checks that summary.md reproduces from the committed results
 ```
+
+It runs the client's Go tests (workload structure, SSE reading, cached-token parsing), the middleware's (tag of the
+newest turn, body replayed unchanged), the `/proc` listener list's (IPv4, IPv6 wildcard, connected sockets ignored)
+and the analysis' (hit rate from counters, reuse bound, placement figures). Expected values in the analysis tests are
+worked out by hand from the fixtures. `scripts/analyze.py spikes/s2b/results/gh200-1gpu` prints the full table.
 
 The job itself:
 
