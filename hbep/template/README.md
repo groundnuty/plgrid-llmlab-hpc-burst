@@ -86,7 +86,7 @@ What this HBEP reuses or borrows, and where it came from. Use "None" for an empt
 
 ### Field lessons answered
 
-Cite each lesson by its ID in the lessons catalogue (`docs/lessons/`, HBEP-15), and state it in one line in general terms (HBEP-1, Content rules). Write `pending` only for a lesson the catalogue does not hold yet, and add it to the catalogue in the same PR or the next one.
+Cite each lesson by its ID in the lessons catalogue (`docs/lessons/`, HBEP-15), and state it in one line in general terms (HBEP-1, Content rules). A lesson the catalogue lacks is added to it first, in the same PR or an earlier one.
 
 | Lesson | Lesson ID (from the lessons catalogue, HBEP-15) | How this HBEP answers it |
 |---|---|---|

@@ -158,8 +158,8 @@ Git history is the full record of every change.
 This repository is public.
 - An HBEP describes the framework in general terms.
 - It may name the www-2027 research project, where the framework's problems were met, and the infrastructure tools built there. Provenance needs that.
-- It contains none of that project's results or data, and no credentials, host names, IP addresses, job IDs, account or grant names, private datasets or internal paths.
-- A problem that motivated a design is described in general terms, and cited by its ID in the lessons catalogue (`docs/lessons/`, HBEP-15).
+- It names no other project or study, and contains no results or data of any study, and no credentials, host names, IP addresses, job IDs, account or grant names, private datasets or internal paths.
+- A field lesson that motivated a design is described in general terms, and cited by its ID in the lessons catalogue (`docs/lessons/`, HBEP-15).
 
 ### Notes, constraints and caveats
 
@@ -270,5 +270,5 @@ N/A: a process HBEP has no stages. It is `implemented` once three HBEPs after it
   - The round is recorded on the PR with the reviewed and fixed commits; later pushes may only update from `main` or answer findings.
   - Agents post through the owner's login with a handle line, and never submit approving GitHub reviews.
   - Branch protection requires a PR, but not code-owner review.
-- **2026-10-30: content rules.** The owner allowed naming the www-2027 project and its infrastructure tools (29 Oct 2026), so that provenance can be stated. Its results and data, credentials, addresses, job IDs, accounts and grants stay out.
+- **2026-10-30: content rules.** The owner allowed naming the www-2027 project and its infrastructure tools (29 Oct 2026), so that provenance can be stated. No other project or study is named, and no study's results or data, credentials, addresses, job IDs, accounts or grants appear.
 - **2026-10-29: prior art and reuse.** The template gains a "Prior art and reuse" section, and HBEP-15 is to define the catalogue of field lessons and the dependency policy. Existing HBEPs add the section no later than the PR that makes them implementable.
