@@ -159,3 +159,43 @@ func TestClosedLoopUsersRunOneConversationAtATime(t *testing.T) {
 		}
 	}
 }
+
+// The experiments draw conversations through users' streams (Stream), not
+// Generate. The same shape must hold there: 160 users x 15 conversations,
+// one distinct opening per conversation, and client, header and
+// short-session shares within 3 points of DefaultWorkload's parameters.
+func TestUserStreamShape(t *testing.T) {
+	w := DefaultWorkload(1)
+	openings := map[string]bool{}
+	byClient := make([]int, 4)
+	var n, header, short int
+	for u := 0; u < 160; u++ {
+		s := w.Stream(u)
+		for k := 0; k < 15; k++ {
+			c := s.Next(0)
+			n++
+			openings[SegsKey(c.Sys, c.FirstUser)] = true
+			byClient[c.Client]++
+			if c.Header {
+				header++
+			}
+			if len(c.Turns) <= 6 {
+				short++
+			}
+		}
+	}
+	if len(openings) != n {
+		t.Errorf("%d distinct openings for %d conversations", len(openings), n)
+	}
+	for i, want := range []float64{0.35, 0.25, 0.15, 0.25} {
+		if got := float64(byClient[i]) / float64(n); math.Abs(got-want) > 0.03 {
+			t.Errorf("client %d share %.3f, want %.2f", i, got, want)
+		}
+	}
+	if got := float64(header) / float64(n); math.Abs(got-0.35) > 0.03 {
+		t.Errorf("header share %.3f, want 0.35 (agent-a only)", got)
+	}
+	if got := float64(short) / float64(n); math.Abs(got-0.6) > 0.03 {
+		t.Errorf("short-session share %.3f, want 0.60", got)
+	}
+}

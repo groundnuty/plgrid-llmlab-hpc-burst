@@ -10,9 +10,15 @@ import (
 
 // steady compares every policy and key with no membership change.
 func (r *runner) steady(dir string, kvs []int) {
+	r.steadyAs(dir, kvs, policies(), "steady", "Steady state")
+}
+
+// steadyAs runs pols with no membership change at each KV size and writes
+// name.md and name.csv.
+func (r *runner) steadyAs(dir string, kvs []int, pols []sim.Policy, name, title string) {
 	var jobs []job
 	for _, kv := range kvs {
-		for _, p := range policies() {
+		for _, p := range pols {
 			for _, seed := range r.seeds {
 				jobs = append(jobs, job{kv: kv, seed: seed, pol: p, scen: "steady"})
 			}
@@ -25,18 +31,20 @@ func (r *runner) steady(dir string, kvs []int) {
 		groups := groupBy(res, func(x result) bool { return x.kv == kv })
 		fmt.Fprintf(&md, "\n### KV cache %d tokens per Instance\n\n", kv)
 		writeWorkingSet(&md, groups, kv)
-		md.WriteString("| policy / key | hit rate | later turns | throughput vs RR | prefill tokens / request | mean / p95 latency (s) | moves | keys (top share) | peak in-flight | max load / mean | above bound (HBEP-5 rule) | +1 over ceil(c*mean) | time above c*mean |\n")
-		md.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+		md.WriteString("| policy / key | hit rate | later turns | throughput vs RR (completed in window) | throughput vs RR (dispatched in window) | prefill tokens / request | mean / p95 latency (s) | moves | keys (top share) | peak in-flight (max) | max load / mean (max) | above bound, HBEP-5 rule (sum over seeds) | +1 over ceil(c*mean) (sum over seeds) | time above c*mean |\n")
+		md.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+		rrDone := mean(groups[0], func(m *sim.Metrics) float64 { return float64(m.DoneOutputTokens) })
 		rrOut := mean(groups[0], func(m *sim.Metrics) float64 { return float64(m.OutputTokens) })
 		for _, g := range groups {
-			writeSteadyRow(&md, g, rrOut)
+			writeSteadyRow(&md, g, rrDone, rrOut)
 			for _, x := range g {
 				writeSteadyCSV(&csv, x)
 			}
 		}
 	}
-	writeFile(dir, "steady.md", "## Steady state (window 1200-4800 s; mean over seeds, [min, max])\n"+md.String())
-	writeFile(dir, "steady.csv", csv.String())
+	writeFile(dir, name+".md", fmt.Sprintf("## %s (window %.0f-%.0f s; block %d tokens; prefill %.0f tokens/s)\n\nMeans over seeds, with [min, max] for the hit rate. Columns marked sum or max are sums or maxima over seeds. Round robin is the first row of each table.\n",
+		title, winStart, winEnd, r.block, r.prefill)+md.String())
+	writeFile(dir, name+".csv", csv.String())
 }
 
 // groupBy keeps results matching keep and groups them by policy, in the
@@ -96,7 +104,7 @@ func writeWorkingSet(md *strings.Builder, groups [][]result, kv int) {
 		c, tok/1e6, tok/float64(4*kv), 4, kv)
 }
 
-func writeSteadyRow(md *strings.Builder, g []result, rrOut float64) {
+func writeSteadyRow(md *strings.Builder, g []result, rrDone, rrOut float64) {
 	p := g[0].pol
 	hit := func(m *sim.Metrics) float64 { return m.HitRate() }
 	lo, hi := span(g, hit)
@@ -109,12 +117,15 @@ func writeSteadyRow(md *strings.Builder, g []result, rrOut float64) {
 	bound, paper, above := "-", "-", "-"
 	if p.Kind == sim.CHWBL {
 		bound = fmt.Sprintf("%.0f", sumOf(g, func(m *sim.Metrics) float64 { return float64(m.KubeRuleViol) }))
-		paper = fmt.Sprintf("%.0f", sumOf(g, func(m *sim.Metrics) float64 { return float64(m.PaperViol) }))
+		pv := sumOf(g, func(m *sim.Metrics) float64 { return float64(m.PaperViol) })
+		pl := sumOf(g, func(m *sim.Metrics) float64 { return float64(m.Placements) })
+		paper = fmt.Sprintf("%.0f (%.2f%% of placements)", pv, 100*pv/pl)
 		above = pct(mean(g, func(m *sim.Metrics) float64 { return m.TimeAboveBound() }))
 	}
-	fmt.Fprintf(md, "| %s | %s [%s, %s] | %s | %.2fx | %.0f | %.1f / %.1f | %s | %s | %.0f | %.2f | %s | %s | %s |\n",
+	fmt.Fprintf(md, "| %s | %s [%s, %s] | %s | %.2fx | %.2fx | %.0f | %.1f / %.1f | %s | %s | %.0f | %.2f | %s | %s | %s |\n",
 		label(p), pct(mean(g, hit)), pct(lo), pct(hi),
 		pct(mean(g, func(m *sim.Metrics) float64 { return m.HitRate1() })),
+		mean(g, func(m *sim.Metrics) float64 { return float64(m.DoneOutputTokens) })/rrDone,
 		mean(g, func(m *sim.Metrics) float64 { return float64(m.OutputTokens) })/rrOut,
 		mean(g, func(m *sim.Metrics) float64 { return float64(m.PrefillTokens) / float64(m.Requests) }),
 		mean(g, func(m *sim.Metrics) float64 { return m.MeanLatency() }),
@@ -126,7 +137,7 @@ func writeSteadyRow(md *strings.Builder, g []result, rrOut float64) {
 		bound, paper, above)
 }
 
-const csvHeader = "scenario,kv_tokens,seed,policy,key,requests,output_tokens,prompt_tokens,hit_tokens,prefill_tokens,later_prompt_tokens,later_hit_tokens,mean_latency_s,p95_latency_s,move_rate,distinct_keys,top_key_share,peak_inflight,max_place_ratio,bound_violations,paper_violations,max_place_excess,time_above_bound,max_kubeai_inflation,max_rule_excess,aborted,compactions,active_convs,active_context_tokens,mean_inflight,inst_requests,inst_hit_rate,inst_peak_inflight\n"
+const csvHeader = "scenario,kv_tokens,seed,policy,key,requests,output_tokens,prompt_tokens,hit_tokens,prefill_tokens,later_prompt_tokens,later_hit_tokens,mean_latency_s,p95_latency_s,move_rate,distinct_keys,top_key_share,peak_inflight,max_place_ratio,bound_violations,paper_violations,max_place_excess,time_above_bound,max_kubeai_inflation,max_rule_excess,aborted,compactions,active_convs,active_context_tokens,mean_inflight,inst_requests,inst_hit_rate,inst_peak_inflight,done_output_tokens,max_kubeai_mean_inflation,placements\n"
 
 func writeSteadyCSV(csv *strings.Builder, x result) {
 	m := x.m
@@ -138,11 +149,11 @@ func writeSteadyCSV(csv *strings.Builder, x result) {
 		hits = append(hits, fmt.Sprintf("%.3f", ratioF(st.Hit, st.Prompt)))
 		peaks = append(peaks, fmt.Sprint(st.PeakInFlight))
 	}
-	fmt.Fprintf(csv, "%s,%d,%d,%s,%s,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.5f,%d,%.4f,%d,%.3f,%d,%d,%.3f,%.5f,%d,%.2f,%d,%d,%.2f,%.0f,%.2f,%s,%s,%s\n",
+	fmt.Fprintf(csv, "%s,%d,%d,%s,%s,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.5f,%d,%.4f,%d,%.3f,%d,%d,%.3f,%.5f,%d,%.2f,%d,%d,%.2f,%.0f,%.2f,%s,%s,%s,%d,%.2f,%d\n",
 		x.scen, x.kv, x.seed, x.pol.Name(), x.pol.Key, m.Requests, m.OutputTokens, m.PromptTokens, m.HitTokens, m.PrefillTokens,
 		m.PromptTokens1, m.HitTokens1, m.MeanLatency(), m.Latency(0.95), m.MoveRate(), d, top, m.PeakLoad, m.MaxPlaceRatio,
 		m.KubeRuleViol, m.PaperViol, m.MaxPlaceExcess, m.TimeAboveBound(), m.MaxKubeInflation, m.MaxRuleExcess, m.Aborted, m.Compactions,
-		c, tok, inf, strings.Join(reqs, ";"), strings.Join(hits, ";"), strings.Join(peaks, ";"))
+		c, tok, inf, strings.Join(reqs, ";"), strings.Join(hits, ";"), strings.Join(peaks, ";"), m.DoneOutputTokens, m.MaxKubeMeanInflation, m.Placements)
 }
 
 func ratioF(a, b int64) float64 {
@@ -213,14 +224,19 @@ func (r *runner) eventRunsAt(dir string, kv int, name string, pols []sim.Policy,
 			base[fmt.Sprintf("%s|%d", label(x.pol), x.seed)] = x.m
 		}
 	}
-	var csv strings.Builder
+	var csv, evcsv strings.Builder
 	csv.WriteString(csvHeader)
+	evcsv.WriteString(eventCSVHeader)
 	for _, x := range res {
 		writeSteadyCSV(&csv, x)
+		if x.scen != "none" {
+			writeEventCSV(&evcsv, x, base[fmt.Sprintf("%s|%d", label(x.pol), x.seed)])
+		}
 	}
 	writeFile(dir, fmt.Sprintf("%s-%d.csv", name, kv), csv.String())
+	writeFile(dir, fmt.Sprintf("%s-%d-per-event.csv", name, kv), evcsv.String())
 	var md strings.Builder
-	fmt.Fprintf(&md, "## Membership events (KV cache %d tokens per Instance; event at %.0f s; mean over seeds)\n", kv, evTime)
+	fmt.Fprintf(&md, "## Membership events (KV cache %d tokens per Instance)\n\nOne row per event. Hit-rate windows start at that row's own event time: before = the 10 min before it, then 0-5 and 5-15 min after it, over requests dispatched in the window; the baseline is the same seed and policy with no event. Counts and hit rates are means over seeds; columns marked sum or max are sums or maxima over seeds. Raw per-seed values: %s-%d-per-event.csv.\n", kv, name, kv)
 	for _, sc := range scens[1:] {
 		writeEventTable(&md, sc.name, groupBy(res, func(x result) bool { return x.scen == sc.name }), base)
 	}
@@ -229,8 +245,8 @@ func (r *runner) eventRunsAt(dir string, kv int, name string, pols []sim.Policy,
 
 func writeEventTable(md *strings.Builder, scen string, groups [][]result, base map[string]*sim.Metrics) {
 	fmt.Fprintf(md, "\n### %s\n\n", scen)
-	md.WriteString("| policy / key | event | checked | re-homed: forced | collateral | to new | cut | hit before | hit 0-5 min after (baseline) | hit 5-15 min after (baseline) | above bound (HBEP-5 rule) | max over bound (req.) | +1 over ceil | KubeAI mean inflation (max req.) |\n")
-	md.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+	md.WriteString("| policy / key | event | checked | re-homed: forced | collateral | to new | cut (whole run) | hit 10 min before | hit 0-5 min after (baseline) | hit 5-15 min after (baseline) | above bound, HBEP-5 rule (whole run, sum over seeds) | max over bound (req., max) | +1 over ceil (whole run, sum over seeds) | KubeAI total minus members' total (req., max) | KubeAI mean minus members' mean (req., max; the excess / members) |\n")
+	md.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
 	for _, g := range groups {
 		for k := range g[0].m.Rehomed {
 			writeEventRow(md, g, k, base)
@@ -238,8 +254,9 @@ func writeEventTable(md *strings.Builder, scen string, groups [][]result, base m
 	}
 }
 
-// writeEventRow writes one policy's row for event k. The hit-rate and bound
-// columns cover the whole scenario; they repeat on each event's row.
+// writeEventRow writes one policy's row for event k. The hit-rate windows
+// start at event k's own time. The cut and bound columns cover the whole
+// run; they repeat on each event's row.
 func writeEventRow(md *strings.Builder, g []result, k int, base map[string]*sim.Metrics) {
 	{
 		p := g[0].pol
@@ -254,9 +271,10 @@ func writeEventRow(md *strings.Builder, g []result, k int, base map[string]*sim.
 			}
 			return ev, s / float64(len(g))
 		}
-		before, _ := win(evTime-600, evTime)
-		a1, b1 := win(evTime, evTime+300)
-		a2, b2 := win(evTime+300, evTime+900)
+		t0 := g[0].m.Rehomed[k].Event.Time
+		before, _ := win(t0-600, t0)
+		a1, b1 := win(t0, t0+300)
+		a2, b2 := win(t0+300, t0+900)
 		bound, paper, excess := "-", "-", "-"
 		if p.Kind == sim.CHWBL {
 			excess = fmt.Sprintf("%.1f", maxOf(g, func(m *sim.Metrics) float64 { return m.MaxRuleExcess }))
@@ -264,13 +282,42 @@ func writeEventRow(md *strings.Builder, g []result, k int, base map[string]*sim.
 			paper = fmt.Sprintf("%.0f", sumOf(g, func(m *sim.Metrics) float64 { return float64(m.PaperViol) }))
 		}
 		ev := g[0].m.Rehomed[k].Event
-		fmt.Fprintf(md, "| %s | %s %s at %.0f s | %.0f | %.0f | %.0f | %.0f | %.0f | %s | %s (%s) | %s (%s) | %s | %s | %s | %.0f |\n",
+		fmt.Fprintf(md, "| %s | %s %s at %.0f s | %.0f | %.0f | %.0f | %.0f | %.0f | %s | %s (%s) | %s (%s) | %s | %s | %s | %.0f | %.1f |\n",
 			label(p), ev.Kind, fmt.Sprintf("instance-%d", ev.Instance), ev.Time, rc(func(c sim.RehomeCount) int { return c.Checked }),
 			rc(func(c sim.RehomeCount) int { return c.Forced }),
 			rc(func(c sim.RehomeCount) int { return c.Collateral }),
 			rc(func(c sim.RehomeCount) int { return c.ToJoined }),
 			mean(g, func(m *sim.Metrics) float64 { return float64(m.Aborted) }),
 			pct(before), pct(a1), pct(b1), pct(a2), pct(b2), bound, excess, paper,
-			maxOf(g, func(m *sim.Metrics) float64 { return float64(m.MaxKubeInflation) }))
+			maxOf(g, func(m *sim.Metrics) float64 { return float64(m.MaxKubeInflation) }),
+			maxOf(g, func(m *sim.Metrics) float64 { return m.MaxKubeMeanInflation }))
+	}
+}
+
+// eventWindows are the hit-rate windows around an event at t: the 10 min
+// before it, and 0-5 and 5-15 min after it.
+func eventWindows(t float64) [3][2]float64 {
+	return [3][2]float64{{t - 600, t}, {t, t + 300}, {t + 300, t + 900}}
+}
+
+const eventCSVHeader = "scenario,kv_tokens,seed,policy,key,event_index,event_kind,event_instance,event_time_s,checked,forced,collateral,to_joined,aborted_whole_run," +
+	"hit_tokens_before,prompt_tokens_before,hit_tokens_0_5,prompt_tokens_0_5,hit_tokens_5_15,prompt_tokens_5_15," +
+	"base_hit_tokens_before,base_prompt_tokens_before,base_hit_tokens_0_5,base_prompt_tokens_0_5,base_hit_tokens_5_15,base_prompt_tokens_5_15\n"
+
+// writeEventCSV writes one row per event of a run: its re-homing counts and
+// the hit and prompt token sums of each window, for the run and for its
+// no-event baseline.
+func writeEventCSV(csv *strings.Builder, x result, base *sim.Metrics) {
+	for k, rc := range x.m.Rehomed {
+		ev := rc.Event
+		fmt.Fprintf(csv, "%s,%d,%d,%s,%s,%d,%s,instance-%d,%.0f,%d,%d,%d,%d,%d", x.scen, x.kv, x.seed, x.pol.Name(), x.pol.Key,
+			k, ev.Kind, ev.Instance, ev.Time, rc.Checked, rc.Forced, rc.Collateral, rc.ToJoined, x.m.Aborted)
+		for _, m := range []*sim.Metrics{x.m, base} {
+			for _, w := range eventWindows(ev.Time) {
+				h, p := m.BucketTokens(w[0], w[1])
+				fmt.Fprintf(csv, ",%d,%d", h, p)
+			}
+		}
+		csv.WriteString("\n")
 	}
 }

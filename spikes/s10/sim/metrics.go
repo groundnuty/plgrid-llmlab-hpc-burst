@@ -11,8 +11,9 @@ import (
 // placement cross-checks the two.
 type Metrics struct {
 	pol Policy
-	// Measurement window on request dispatch time, and the bucket width for
-	// the hit-rate time series.
+	// Measurement window, and the bucket width for the hit-rate time series.
+	// Every window total below is over requests dispatched in the window,
+	// except DoneOutputTokens, which is over requests completed in it.
 	WinStart, WinEnd, Bucket float64
 
 	// Window totals.
@@ -22,10 +23,13 @@ type Metrics struct {
 	PromptTokens1 int64 // turns after the first
 	HitTokens1    int64
 	PrefillTokens int64 // prompt tokens computed (misses), window only
-	OutputTokens  int64 // throughput: output tokens of requests completed in the window
-	Moves1        int   // turn>0 requests on a different Instance than the previous turn
-	Requests1     int
-	latencies     []float64
+	OutputTokens  int64 // output tokens of requests dispatched in the window, whenever they completed
+	// DoneOutputTokens is the throughput measure: output tokens of the
+	// requests that completed in the window, whenever they were dispatched.
+	DoneOutputTokens int64
+	Moves1           int // turn>0 requests on a different Instance than the previous turn
+	Requests1        int
+	latencies        []float64
 
 	// Whole run.
 	Compactions int
@@ -34,15 +38,18 @@ type Metrics struct {
 	// Bound at placement (CHWBL only). KubeRule: the chosen Instance's load
 	// before the request exceeded c*(T+1)/n, T and n over current members.
 	// Paper: its load after the request exceeded ceil(c*(T+1)/n).
-	Placements        int
-	KubeRuleViol      int
-	PaperViol         int
-	MaxPlaceExcess    float64 // max of load_after - c*(T+1)/n, in requests
-	MaxRuleExcess     float64 // max of load_before - c*(T+1)/n over rule violations
-	MaxPlaceRatio     float64 // max of load_after / mean_after, when mean_after >= 2
-	MaxKubeInflation  int64   // KubeAI's total in-flight minus the members' total
-	PeakLoad          int     // max in-flight on any member, over time
-	timeAbove, timeOn float64 // time with max load > c*mean, time with load > 0
+	Placements       int
+	KubeRuleViol     int
+	PaperViol        int
+	MaxPlaceExcess   float64 // max of load_after - c*(T+1)/n, in requests
+	MaxRuleExcess    float64 // max of load_before - c*(T+1)/n over rule violations
+	MaxPlaceRatio    float64 // max of load_after / mean_after, when mean_after >= 2
+	MaxKubeInflation int64   // max of KubeAI's total in-flight minus the members' total, in requests
+	// MaxKubeMeanInflation is the same excess divided by the number of
+	// members: how far KubeAI's mean is above the members' mean.
+	MaxKubeMeanInflation float64
+	PeakLoad             int     // max in-flight on any member, over time
+	timeAbove, timeOn    float64 // time with max load > c*mean, time with load > 0
 	// Time integrals over the window: active conversations, their context
 	// tokens, and in-flight requests on members.
 	winTime, convTime, tokTime, loadTime float64
@@ -192,6 +199,7 @@ func (m *Metrics) crossCheck(e *Engine, idx int) error {
 	}
 	total, _ := membersLoad(e)
 	m.MaxKubeInflation = max(m.MaxKubeInflation, all-int64(total))
+	m.MaxKubeMeanInflation = max(m.MaxKubeMeanInflation, float64(all-int64(total))/float64(len(e.rt.members)))
 	return nil
 }
 
@@ -237,6 +245,9 @@ func (m *Metrics) completed(e *Engine, r *request) {
 	}
 	m.buckets[b][0] += int64(r.hold.HitTokens)
 	m.buckets[b][1] += int64(r.promptLen)
+	if m.inWindow(e.now) {
+		m.DoneOutputTokens += int64(r.outLen)
+	}
 	if !m.inWindow(r.dispatchT) {
 		return
 	}
@@ -328,15 +339,20 @@ func (m *Metrics) Keys() (distinct int, topShare float64) {
 
 // BucketHitRate returns the hit rate of requests dispatched in [from, to).
 func (m *Metrics) BucketHitRate(from, to float64) float64 {
-	var h, p int64
+	return ratio(m.BucketTokens(from, to))
+}
+
+// BucketTokens returns the hit and prompt tokens of the requests dispatched
+// in [from, to), over whole buckets that start in that range.
+func (m *Metrics) BucketTokens(from, to float64) (hit, prompt int64) {
 	for b, v := range m.buckets {
 		t := float64(b) * m.Bucket
 		if t >= from && t < to {
-			h += v[0]
-			p += v[1]
+			hit += v[0]
+			prompt += v[1]
 		}
 	}
-	return ratio(h, p)
+	return hit, prompt
 }
 
 func ratio(a, b int64) float64 {

@@ -38,11 +38,13 @@ type result struct {
 }
 
 func main() {
-	mode := flag.String("mode", "all", "calibrate | steady | events | drainfix | all")
+	mode := flag.String("mode", "all", "calibrate | steady | events | drainfix | sensitivity | all")
 	seedsF := flag.String("seeds", "1,2,3", "workload seeds")
 	kvF := flag.String("kv", "750000,1500000,3000000", "KV cache tokens per Instance (steady sweep)")
 	evKV := flag.String("events-kv", "1500000,3000000", "KV cache tokens per Instance for the event runs")
 	block := flag.Int("block", 64, "cache block size in tokens")
+	prefill := flag.Float64("prefill", 25000, "uncached prompt tokens per second per Instance")
+	name := flag.String("name", "", "sensitivity mode: output file name, without extension")
 	out := flag.String("out", "results", "output directory")
 	par := flag.Int("parallel", 2, "simulations run at once")
 	flag.Parse()
@@ -56,7 +58,7 @@ func main() {
 	if err := os.MkdirAll(*out, 0o755); err != nil {
 		log.Fatal(err)
 	}
-	r := &runner{seeds: seedList, block: *block, par: *par}
+	r := &runner{seeds: seedList, block: *block, prefill: *prefill, par: *par}
 	switch *mode {
 	case "calibrate":
 		r.calibrate(kvs)
@@ -66,6 +68,12 @@ func main() {
 		r.eventRuns(*out, parseList(*evKV))
 	case "drainfix":
 		r.drainFix(*out, parseList(*evKV))
+	case "sensitivity":
+		if *name == "" {
+			log.Fatal("-mode sensitivity needs -name")
+		}
+		r.steadyAs(*out, kvs, sensitivityPolicies(), *name,
+			fmt.Sprintf("Sensitivity: block %d tokens, prefill %.0f tokens/s", *block, *prefill))
 	case "all":
 		r.steady(*out, kvs)
 		r.eventRuns(*out, parseList(*evKV))
@@ -88,9 +96,10 @@ func parseList(s string) []int {
 }
 
 type runner struct {
-	seeds []uint64
-	block int
-	par   int
+	seeds   []uint64
+	block   int
+	prefill float64
+	par     int
 }
 
 func (r *runner) run(jobs []job) []result {
@@ -105,6 +114,7 @@ func (r *runner) run(jobs []job) []result {
 			defer func() { <-sem }()
 			cl := sim.DefaultCluster(j.kv)
 			cl.BlockSize = r.block
+			cl.PrefillRate = r.prefill
 			wl := sim.DefaultWorkload(j.seed)
 			e := sim.NewEngine(cl, j.pol, wl, nil, j.events)
 			e.M.WinStart, e.M.WinEnd = winStart, winEnd
@@ -131,6 +141,20 @@ func policies() []sim.Policy {
 	return ps
 }
 
+// sensitivityPolicies are the configurations rerun when one engine
+// parameter changes: the baselines, and every bound on the two keys that
+// passed.
+func sensitivityPolicies() []sim.Policy {
+	ps := []sim.Policy{{Kind: sim.RoundRobin}, {Kind: sim.LeastLoad}}
+	for _, k := range []sim.KeyKind{sim.KeyOpening, sim.KeyHeaderOpening} {
+		ps = append(ps, sim.Policy{Kind: sim.Affinity, Key: k})
+		for _, pct := range []int{125, 150, 200} {
+			ps = append(ps, sim.Policy{Kind: sim.CHWBL, Key: k, Percent: pct})
+		}
+	}
+	return ps
+}
+
 func (r *runner) calibrate(kvs []int) {
 	var jobs []job
 	for _, kv := range kvs {
@@ -142,8 +166,8 @@ func (r *runner) calibrate(kvs []int) {
 	}
 	for _, x := range r.run(jobs) {
 		c, tok, inf := x.m.WorkingSet()
-		fmt.Printf("%s kv=%d seed=%d active=%.1f context=%.0f tokens (%.2fx cluster KV) inflight=%.1f peak=%d hit=%.3f mean/p95=%.1f/%.1fs requests=%d out=%d compactions=%d elapsed=%s\n",
-			label(x.pol), x.kv, x.seed, c, tok, tok/float64(4*x.kv), inf, x.m.PeakLoad, x.m.HitRate(), x.m.MeanLatency(), x.m.Latency(0.95), x.m.Requests, x.m.OutputTokens, x.m.Compactions, x.elapsed.Round(time.Millisecond))
+		fmt.Printf("%s kv=%d seed=%d active=%.1f context=%.0f tokens (%.2fx cluster KV) inflight=%.1f peak=%d hit=%.3f mean/p95=%.1f/%.1fs requests=%d out=%d done_out=%d compactions=%d elapsed=%s\n",
+			label(x.pol), x.kv, x.seed, c, tok, tok/float64(4*x.kv), inf, x.m.PeakLoad, x.m.HitRate(), x.m.MeanLatency(), x.m.Latency(0.95), x.m.Requests, x.m.OutputTokens, x.m.DoneOutputTokens, x.m.Compactions, x.elapsed.Round(time.Millisecond))
 	}
 }
 
