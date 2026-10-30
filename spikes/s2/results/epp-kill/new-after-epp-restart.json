@@ -1,0 +1,28 @@
+{
+  "label": "new-after-epp-restart",
+  "url": "http://127.0.0.1:19207/v1/chat/completions",
+  "session": "k3",
+  "started_utc": "2026-10-30T10:07:23Z",
+  "expect_tokens": 3,
+  "tokens": 3,
+  "finish_reason": "length",
+  "done_seen": true,
+  "http_status": 200,
+  "resp_headers": {
+    "server": "fasthttp",
+    "x-went-into-resp-headers": "true"
+  },
+  "elapsed_sec": 3.009447557,
+  "response_headers_sec": 1.007458105,
+  "first_token_sec": 1.00768246,
+  "last_token_sec": 3.008991018,
+  "gap_min_ms": 1000.430997,
+  "gap_mean_ms": 1000.6542790000001,
+  "gap_p50_ms": 1000.877561,
+  "gap_p99_ms": 1000.430997,
+  "gap_max_ms": 1000.877561,
+  "gap_max_at_token": 3,
+  "gaps_over_2s": 0,
+  "sse_comment_lines": 0,
+  "complete": true
+}

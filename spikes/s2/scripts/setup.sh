@@ -42,7 +42,7 @@ fi
 # vllm-router 0.1.16 from PyPI (a PyO3 wheel plus its Python launcher), in a venv.
 if [[ ! -x $S2_HOME/venv/bin/vllm-router ]]; then
   python3 -m venv "$S2_HOME/venv"
-  "$S2_HOME/venv/bin/python" -m pip install --quiet vllm-router==0.1.16 setproctitle aiohttp orjson uvicorn fastapi requests
+  "$S2_HOME/venv/bin/python" -m pip install --quiet vllm-router==0.1.16 setproctitle==1.3.8 aiohttp==3.14.5 orjson==3.13.0 uvicorn==0.54.0 fastapi==0.162.0 requests==2.34.2
 fi
 "$S2_HOME/venv/bin/python" -m pip list 2>/dev/null | grep -i '^vllm.router'
 

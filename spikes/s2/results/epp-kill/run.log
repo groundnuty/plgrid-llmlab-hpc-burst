@@ -1,0 +1,9 @@
+ok $S2_HOME/run/llmd-guide
+started llmd-guide: http://127.0.0.1:19207/v1/chat/completions
+EPP of llmd-guide stopped at 10:07:03
+EPP of llmd-guide started at 10:07:03
+label                        complete        tokens  elapsed_s cut_after_s max_gap_ms gaps>2s  error
+inflight-during-epp-kill     False        40/120            40          40       1007       0  read: unexpected EOF
+new-after-epp-restart        True          3/3               3           0       1001       0  
+new-while-epp-down           False         0/3               0           0          0       0  http 500: 
+stopped llmd-guide

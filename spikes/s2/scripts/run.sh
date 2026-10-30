@@ -6,7 +6,7 @@
 #   run.sh controls   positive controls: vllm-router with a 60 s deadline must cut a 150 s stream;
 #                     llm-d with 5 s ext_proc timers streams 600 s anyway. ~11 min.
 #   run.sh placement [stack...]  multi-turn sessions through each router: where do turns land. ~3 min each.
-#   run.sh removal [stack...]  remove a worker from discovery under an in-flight 25 min stream. ~27 min each.
+#   run.sh removal [stack...]  remove a worker from discovery under an in-flight 35 min stream. ~37 min each.
 #   run.sh epp-kill   fault injection: stop the EPP under an in-flight stream. ~3 min
 #   run.sh epp-stall  fault injection: freeze the EPP for 90 s under an in-flight stream. ~4 min
 #   run.sh restart    does a removal survive a router restart? (L-4.8) ~2 min
@@ -114,7 +114,7 @@ scenario_removal() { # optional arguments select stacks (llmd-removal, vllmr-rem
   for s in llmd-removal vllmr-removal; do
     if [[ $# -gt 0 ]]; then case " $* " in *" $s "*) ;; *) continue ;; esac; fi
     fresh "$s" || { fail=1; continue; }
-    "$P" removal -url "$("$SC" url "$s")" -metrics "$("$SC" metrics "$s")" -stream-tokens "${REMOVAL_TOKENS:-1500}" \
+    "$P" removal -url "$("$SC" url "$s")" -metrics "$("$SC" metrics "$s")" -stream-tokens "${REMOVAL_TOKENS:-2100}" \
       -remove-cmd "S2_HOME=$S2_HOME $SC remove $s \$X_INDEX" -outdir "$out" -label "$s" | tee "$out/$s.txt"
     [[ ${PIPESTATUS[0]} -eq 0 ]] || fail=1
     "$SC" stop "$s"
