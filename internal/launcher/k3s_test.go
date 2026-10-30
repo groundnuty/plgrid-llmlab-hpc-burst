@@ -9,7 +9,7 @@ import (
 
 func testSpec(t *testing.T, nice int) launchSpec {
 	t.Helper()
-	l, err := newLayout(filepath.Join(t.TempDir(), "st"))
+	l, err := newLayout(filepath.Join(shortDir(t), "st"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -11,7 +11,7 @@ import (
 // These tests need no k3s: every case is decided before anything is started.
 
 func TestUsageAndExitCodes(t *testing.T) {
-	empty := t.TempDir()
+	empty := shortTmp(t, false)
 	cases := []struct {
 		name string
 		args []string
@@ -40,7 +40,7 @@ func TestUsageAndExitCodes(t *testing.T) {
 // TestUpRejectsBadInputBeforeStarting: bad flags are refused at the boundary, with a message that
 // names what was wrong, before any binary is looked up or any process started.
 func TestUpRejectsBadInputBeforeStarting(t *testing.T) {
-	state := filepath.Join(t.TempDir(), "st")
+	state := filepath.Join(shortTmp(t, false), "st")
 	for name, c := range map[string]struct {
 		args []string
 		msg  string
@@ -68,7 +68,7 @@ func TestUpRejectsBadInputBeforeStarting(t *testing.T) {
 }
 
 func TestUpNeedsAPinnedBinary(t *testing.T) {
-	state := filepath.Join(t.TempDir(), "st")
+	state := filepath.Join(shortTmp(t, false), "st")
 	r := cli(t, "up", "--state-dir", state, "--bin-dir", t.TempDir())
 	if r.code != exitFail || !strings.Contains(r.err, "fetch-k3s.sh") {
 		t.Fatalf("exit %d, stderr %q", r.code, r.err)

@@ -265,7 +265,17 @@ func cmdDown(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintln(stdout, line)
 	}
-	fmt.Fprintf(stdout, "stopped; %d listening sockets released\n", rep.GoneListeners)
+	ours := 0
+	for _, p := range rep.Procs {
+		if p.Before == "ours" {
+			ours++
+		}
+	}
+	if ours == 0 {
+		fmt.Fprintln(stdout, "nothing of ours was running; the record is cleared")
+	} else {
+		fmt.Fprintf(stdout, "stopped; %d listening sockets released\n", rep.GoneListeners)
+	}
 	return exitOK
 }
 

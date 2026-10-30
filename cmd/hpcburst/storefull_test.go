@@ -62,17 +62,37 @@ func TestCapVolume(t *testing.T) {
 
 // TestStoreFull is HBEP-11's store-full case on k3s: the SQLite store sits on a size-limited file
 // system, the file system fills up, writes are refused, and `hpcburst status` reports the write
-// failures. The store directory (data/server/db) is a link to the size-limited volume; the rest of
-// the data directory, with k3s's unpacked binaries, is on the ordinary disk.
-func TestStoreFull(t *testing.T) {
+// failures. Here the store directory (data/server/db) is a link to a 32 MiB volume; the rest of the
+// data directory, with k3s's unpacked binaries, is on the ordinary disk.
+func TestStoreFull(t *testing.T) { storeFull(t, false) }
+
+// TestStoreFullWholeDataDir is the same case with the whole data directory on the volume, as the
+// HBEP words it: data/ itself is a link to a volume that holds k3s's unpacked binaries (about
+// 260 MiB) and the store, with 40 MiB to spare.
+func TestStoreFullWholeDataDir(t *testing.T) { storeFull(t, true) }
+
+func storeFull(t *testing.T, wholeDataDir bool) {
 	binDirOrSkip(t)
-	vol := newCapVolume(t, 32<<20) // registered first, so it is unmounted last
-	h := newHost(t)
-	if err := os.MkdirAll(filepath.Join(h.dir, "data", "server"), 0o700); err != nil {
-		t.Fatal(err)
+	limit := int64(32 << 20)
+	if wholeDataDir {
+		limit = 300 << 20
 	}
-	if err := os.Symlink(vol.mount, filepath.Join(h.dir, "data", "server", "db")); err != nil {
-		t.Fatal(err)
+	vol := newCapVolume(t, limit) // registered first, so it is unmounted last
+	h := newHost(t)
+	if wholeDataDir {
+		if err := os.MkdirAll(h.dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(vol.mount, filepath.Join(h.dir, "data")); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		if err := os.MkdirAll(filepath.Join(h.dir, "data", "server"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(vol.mount, filepath.Join(h.dir, "data", "server", "db")); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	if r := cli(t, h.upArgs(29220)...); r.code != exitOK {

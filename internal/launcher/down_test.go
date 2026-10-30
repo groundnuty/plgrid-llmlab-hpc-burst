@@ -196,6 +196,12 @@ func shortDir(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(d) > 60 { // a long $TMPDIR would defeat the purpose
+		os.RemoveAll(d)
+		if d, err = os.MkdirTemp("/tmp", "hb"); err != nil {
+			t.Fatal(err)
+		}
+	}
 	t.Cleanup(func() { os.RemoveAll(d) })
 	return d
 }

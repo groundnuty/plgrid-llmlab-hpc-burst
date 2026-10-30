@@ -287,10 +287,7 @@ func newHost(t *testing.T) *host {
 	bin := binDirOrSkip(t)
 	guardRootK3s(t)
 	gate(t)
-	d, err := os.MkdirTemp("", "hb")
-	if err != nil {
-		t.Fatal(err)
-	}
+	d := shortTmp(t, false)
 	h := &host{t: t, dir: filepath.Join(d, "st"), binDir: bin}
 	t.Cleanup(func() {
 		if _, err := os.Stat(h.dir); err == nil {
@@ -302,9 +299,29 @@ func newHost(t *testing.T) *host {
 		if pids := k3sProcessesUsing(h.dir); len(pids) > 0 {
 			t.Errorf("clean-up: processes still use %s: %v", h.dir, pids)
 		}
-		os.RemoveAll(d)
 	})
 	return h
+}
+
+// shortTmp makes a temporary directory with a short path (k3s's unix sockets limit how long a
+// state directory path may be, and t.TempDir names are long). With a long $TMPDIR it falls back
+// to /tmp. It is removed at the end of the test unless keep is true.
+func shortTmp(t testing.TB, keep bool) string {
+	t.Helper()
+	d, err := os.MkdirTemp("", "hb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d) > 60 {
+		os.RemoveAll(d)
+		if d, err = os.MkdirTemp("/tmp", "hb"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !keep {
+		t.Cleanup(func() { os.RemoveAll(d) })
+	}
+	return d
 }
 
 func (h *host) args(extra ...string) []string {

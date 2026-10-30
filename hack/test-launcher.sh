@@ -24,7 +24,10 @@ export HPCBURST_REQUIRE_INTEGRATION=1
 out=$(mktemp)
 trap 'rm -f "$out"' EXIT
 rc=0
-go test -count=1 -p 1 -v ./internal/launcher/... ./cmd/hpcburst/... "$@" 2>&1 | tee "$out" || rc=$?
+# -timeout 60m: go test's default of 10 minutes would kill the test binary in the middle of a run
+# (the tests wait for a quiet machine, and the k3s tests take minutes), skipping the clean-up that
+# stops the k3s it started. A caller's own -timeout comes later on the command line and wins.
+go test -count=1 -p 1 -timeout 60m -v ./internal/launcher/... ./cmd/hpcburst/... "$@" 2>&1 | tee "$out" || rc=$?
 echo
 echo "summary: $(grep -c -E '^\s*--- PASS' "$out") passed, $(grep -c -E '^\s*--- FAIL' "$out") failed, $(grep -c -E '^\s*--- SKIP' "$out") skipped"
 grep -E '^\s*--- SKIP' "$out" || true
