@@ -1,0 +1,12 @@
+# Pinned k3s release binaries (project: k3s-io/k3s, https://github.com/k3s-io/k3s, Apache-2.0).
+#
+# One source of truth: the launcher embeds this file and verifies the binary against it
+# before every start, and hack/fetch-k3s.sh reads it to download and check the same bytes.
+# The sums are the ones in each release's sha256sum-<arch>.txt, and the amd64 sums are the
+# ones spike S3 pinned. Add a line here, and nowhere else, to allow another version.
+#
+# version         arch   asset       sha256
+v1.35.9+k3s1      amd64  k3s         897acb21cca57d477a211102251a6591450ce767344a9faaa121a1007ca9fa9a
+v1.35.9+k3s1      arm64  k3s-arm64   6176dd12c512e177af998e6035920f6283c5fdbd5adfdff85c103a7fdf2a00b5
+v1.36.5+k3s1      amd64  k3s         d73847bcd3c5fccef0115b372e2f9a91f3032dc84bbf71518a4617565294d313
+v1.36.5+k3s1      arm64  k3s-arm64   135e34cb9e8a1cfae3cb55577789e93501efe7edc080a8b2630458a85b07721e
