@@ -585,7 +585,8 @@ The controller applies by policy what www-2027 operators did per job: holder bat
 - 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation; spike S5 facts carried in (HBEP-4, HBEP-6, HBEP-7 only).
 - 2026-10-30: aligned with HBEP-3 and HBEP-11 becoming implementable: requeue, cardinality, the S4 submission protocol, and the `Lease` as an extra guard.
 - 2026-10-30: S4's implemented submission protocol written into open question 11; one current deployment ID per accelerator class carried into hedging and handover; verification compares settings and rehashes files, never recomputes the ID.
-- 2026-10-30: design completed for implementable (the status change follows in its own PR, per HBEP-1). The owner's approval of the proposals (29 Oct 2026, PR #14) recorded as decisions; the alpha scope marked; the controllers, the reconcile loop, provisioning, the allocation agent, Instance start with HBEP-9's alpha checks, health and restarts, handover, release and retention written for alpha.
+- 2026-10-30: design completed for implementable. The owner's approval of the proposals (29 Oct 2026, PR #14) recorded as decisions; the alpha scope marked; the controllers, the reconcile loop, provisioning, the allocation agent, Instance start with HBEP-9's alpha checks, health and restarts, handover, release and retention written for alpha.
+- 2026-10-30: implementable. The owner's approval of the proposed answers (29 Oct 2026, PR #14) and spikes S1 (issue #18), S4 (PR #32), S5 (PR #19) and S7 (PR #33) carried in; every open question decided, not needed for alpha, or open for beta.
 
 ## Amendments
 
