@@ -207,6 +207,44 @@ spec:
                   reconciled.
                 format: int64
                 type: integer
+              queueWaits:
+                description: |-
+                  QueueWaits are the last MaxQueueWaits observed queue waits, oldest first
+                  (HBEP-4, Provider status). Each is one recorded job's wait from
+                  submission to start, from its accounting record's submit and start
+                  times, never from when the controller saw the change. Entries are keyed
+                  by job ID, so a repeated observe adds nothing; a new entry beyond the
+                  cap drops the oldest (AddQueueWait). The lifecycle controller plans
+                  replacements from them (HBEP-7, Handover), and they live here so a
+                  restarted controller plans from the same waits.
+                items:
+                  description: |-
+                    QueueWait is one recorded job's wait in the queue: from its submission to its
+                    start, both from the job's accounting record (HBEP-4, Provider status).
+                  properties:
+                    jobID:
+                      description: JobID is the job's ID.
+                      maxLength: 64
+                      minLength: 1
+                      type: string
+                    startTime:
+                      description: StartTime is when the job started.
+                      format: date-time
+                      type: string
+                    submitTime:
+                      description: SubmitTime is when the scheduler accepted the job.
+                      format: date-time
+                      type: string
+                  required:
+                  - jobID
+                  - startTime
+                  - submitTime
+                  type: object
+                maxItems: 20
+                type: array
+                x-kubernetes-list-map-keys:
+                - jobID
+                x-kubernetes-list-type: map
             type: object
         required:
         - spec

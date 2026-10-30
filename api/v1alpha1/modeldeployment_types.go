@@ -51,6 +51,17 @@ type EngineSpec struct {
 	// +kubebuilder:validation:MaxLength=71
 	// +kubebuilder:validation:XValidation:rule="self.matches('^sha256:[0-9a-f]{64}$')",message="imageDigest must be 'sha256:' followed by 64 lowercase hex characters"
 	ImageDigest string `json:"imageDigest"`
+
+	// Image is the engine image's repository, without a tag or digest, for
+	// example "docker.io/vllm/vllm-openai". The allocation agent pulls
+	// Image@ImageDigest (HBEP-7, The allocation agent: an Instance's launch
+	// holds the image reference and its digest). It is not a deployment-ID
+	// input: the digest names the bytes, and pkg/deploymentid hashes only it.
+	//
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:Pattern=`^[a-z0-9][a-z0-9._:/-]*[a-z0-9]$`
+	Image string `json:"image"`
 }
 
 // EngineFlag is one engine flag. The spec lists flags as ordered pairs, so no
@@ -245,7 +256,10 @@ type ProviderSelection struct {
 }
 
 // ModelDeploymentSpec is what to serve: model, serving spec, number of
-// instances, where, until when, and the default retention policy.
+// instances, where, until when, and the default retention policy. HBEP-7 adds
+// the lease limit and the workload.
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.source.served) || has(self.workload)",message="a served deployment needs a workload: its shapes drive warm-up and qualification (HBEP-7); contextTokens.typical, outputTokens.typical and targetSessions are required"
 type ModelDeploymentSpec struct {
 	// Model is the model name clients send. Names follow LLMLab's.
 	//
@@ -279,6 +293,88 @@ type ModelDeploymentSpec struct {
 	//
 	// +optional
 	RetentionPolicy *RetentionPolicy `json:"retentionPolicy,omitempty"`
+
+	// LeaseLimit is the longest time limit of the deployment's Allocations,
+	// when it is shorter than the partition's maxTime (HBEP-7, What the
+	// controller reads; HBEP-4, open question 11). A short lease makes a real
+	// handover testable in hours.
+	//
+	// +optional
+	LeaseLimit *Duration `json:"leaseLimit,omitempty"`
+
+	// Workload holds the shapes for warm-up and qualification (HBEP-7, What
+	// the controller reads). A served deployment needs one.
+	//
+	// +optional
+	Workload *Workload `json:"workload,omitempty"`
+}
+
+// Workload is a deployment's request shapes (HBEP-7, What the controller
+// reads). Every shape must fit: each context length with the typical output,
+// and the typical context with the longest output. A shape that does not fit
+// is an error, never shortened; the lifecycle controller checks the declared
+// shapes against a declared max-model-len before it provisions (Degraded,
+// reason SpecUnsupported).
+type Workload struct {
+	// ContextTokens are the context lengths, in tokens.
+	ContextTokens ContextTokens `json:"contextTokens"`
+
+	// OutputTokens are the output lengths, in tokens.
+	OutputTokens OutputTokens `json:"outputTokens"`
+
+	// TargetSessions is the number of concurrent sessions to serve. KV
+	// capacity is checked against it, warm-up runs it, and throughput is
+	// measured at it.
+	//
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100000
+	TargetSessions int32 `json:"targetSessions"`
+
+	// ToolCalls says whether tool calls are checked and warmed up. Absent, it
+	// is whether the serving spec enables automatic tool choice
+	// (enable-auto-tool-choice), which the controller resolves.
+	//
+	// +optional
+	ToolCalls *bool `json:"toolCalls,omitempty"`
+}
+
+// ContextTokens are a workload's context lengths.
+type ContextTokens struct {
+	// Short is the short context length.
+	//
+	// +optional
+	// +kubebuilder:default=512
+	// +kubebuilder:validation:Minimum=1
+	Short *int32 `json:"short,omitempty"`
+
+	// Typical is the typical context length.
+	//
+	// +kubebuilder:validation:Minimum=1
+	Typical int32 `json:"typical"`
+
+	// Longest is the longest context length. Absent, it is the resolved
+	// context limit (the max-model-len the engine reports) minus
+	// outputTokens.typical minus the chat template's overhead, so it is fixed
+	// at verification (HBEP-7).
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	Longest *int32 `json:"longest,omitempty"`
+}
+
+// OutputTokens are a workload's output lengths.
+type OutputTokens struct {
+	// Typical is the typical output length.
+	//
+	// +kubebuilder:validation:Minimum=1
+	Typical int32 `json:"typical"`
+
+	// Longest is the longest output length.
+	//
+	// +optional
+	// +kubebuilder:default=4096
+	// +kubebuilder:validation:Minimum=1
+	Longest *int32 `json:"longest,omitempty"`
 }
 
 // ClassDeploymentID is the current deployment ID of one accelerator class.
@@ -310,6 +406,26 @@ type ActiveDeploymentID struct {
 	Instances int32 `json:"instances"`
 }
 
+// ClassStartToReady is one accelerator class's last measured start-to-ready
+// time.
+type ClassStartToReady struct {
+	// AcceleratorClass is the class it was measured in.
+	AcceleratorClass `json:",inline"`
+
+	// Duration is the time from the Allocation's start to the Instance's
+	// first ready.
+	Duration Duration `json:"duration"`
+
+	// Instance is the name of the Instance it was measured on.
+	//
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	Instance string `json:"instance,omitempty"`
+
+	// MeasuredTime is when the Instance became ready.
+	MeasuredTime metav1.Time `json:"measuredTime"`
+}
+
 // ModelDeploymentStatus is the observed state of a ModelDeployment.
 type ModelDeploymentStatus struct {
 	ReconcileStatus `json:",inline"`
@@ -326,6 +442,19 @@ type ModelDeploymentStatus struct {
 	// +optional
 	// +listType=atomic
 	ActiveIDs []ActiveDeploymentID `json:"activeIDs,omitempty"`
+
+	// StartToReady lists each accelerator class's last measured start-to-ready
+	// time: from an Allocation's start to the first ready of the Instance
+	// created with it. The replacement plan reads it, and it lives here so a
+	// restarted controller plans the same times (HBEP-7, Handover; HBEP-11).
+	// A class with no entry uses 30 min.
+	//
+	// +optional
+	// +listType=map
+	// +listMapKey=gpuModel
+	// +listMapKey=cpuArch
+	// +kubebuilder:validation:MaxItems=64
+	StartToReady []ClassStartToReady `json:"startToReady,omitempty"`
 
 	// Instances is the number of Instances that exist and have not ended. It
 	// is the scale subresource's status count.

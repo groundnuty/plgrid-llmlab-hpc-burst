@@ -1,5 +1,7 @@
 package v1alpha1
 
+import "strconv"
+
 // The API group and version (HBEP-11, open question 1).
 const (
 	Group   = "hpcburst.groundnuty.github.io"
@@ -74,6 +76,53 @@ const (
 	AnnotationAbandonAttempt = Group + "/abandon-attempt"
 )
 
+// Annotation keys on an Instance, written by the lifecycle controller with a
+// resourceVersion precondition (HBEP-7, Controllers).
+const (
+	// AnnotationPredecessor is on a replacement Instance: the name of the
+	// Instance it replaces. Each primary has at most one live replacement
+	// (HBEP-7, Handover).
+	AnnotationPredecessor = Group + "/predecessor"
+
+	// AnnotationRestartPrefix starts the key of a restart generation
+	// (RestartGenerationAnnotation).
+	AnnotationRestartPrefix = Group + "/restart-"
+)
+
+// Parts of an Instance whose restart generations the lifecycle controller
+// raises (HBEP-7, Health and restarts). PartInstance is the whole Instance (the
+// rung that stops, rehashes, starts, verifies, qualifies and warms up); a
+// worker is one engine server process, named WorkerName(i). Alpha runs one
+// worker, worker-0, and no router (HBEP-7, Summary and open question 6). A
+// router, once Instances have one, is the part "router".
+const PartInstance = "instance"
+
+// WorkerName returns the name of the i-th worker of an Instance: worker-<i>.
+func WorkerName(i int) string { return "worker-" + strconv.Itoa(i) }
+
+// RestartGenerationAnnotation returns the annotation key that holds a part's
+// restart generation on an Instance, for example
+// hpcburst.groundnuty.github.io/restart-worker-0. The value is a decimal
+// integer, absent meaning 0. Before each restart the controller emits the
+// restart's event, then raises the generation by compare-and-swap; the agent
+// restarts the part when the generation it is sent rises (HBEP-7, Health and
+// restarts: recorded first).
+func RestartGenerationAnnotation(part string) string { return AnnotationRestartPrefix + part }
+
+// ControllerNamespace holds the controllers' leader Leases (HBEP-11,
+// Controllers). The launcher creates it.
+const ControllerNamespace = "hpcburst-system"
+
+// LeaseLifecycle is the name of the lifecycle controller's leader Lease
+// (HBEP-7, Controllers).
+const LeaseLifecycle = "lifecycle"
+
+// ProviderLeaseName returns the name of a Provider's leader Lease: one per
+// Provider, named after it (HBEP-11, Controllers). The "provider-" prefix
+// keeps a Provider named "lifecycle" from sharing the lifecycle controller's
+// Lease.
+func ProviderLeaseName(provider string) string { return "provider-" + provider }
+
 // AnnotationModelDeployment is on identity and verification records. Its value
 // is the full name of the ModelDeployment the record belongs to. The record's
 // label carries the same name shortened to fit 63 characters (LabelValue), and
@@ -85,6 +134,6 @@ const AnnotationModelDeployment = Group + "/model-deployment"
 // named id-<first 12 hex of the deployment ID> (HBEP-11).
 const IdentityRecordPrefix = "id-"
 
-// VerificationRecordPrefix starts the name of a verification record. HBEP-11
-// leaves the name open; it is ver-<Instance UID>.
+// VerificationRecordPrefix starts the name of a verification record,
+// ver-<instance UID>-<generation> (HBEP-7, Instance start).
 const VerificationRecordPrefix = "ver-"

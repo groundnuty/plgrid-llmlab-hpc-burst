@@ -8,6 +8,7 @@ import (
 
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
@@ -62,6 +63,15 @@ func TestAllocationSubmissionParameters(t *testing.T) {
 	}{
 		{"no partition", func(a *v1alpha1.Allocation) { a.Spec.ForProvider.Batch.Partition = "" }},
 		{"no time limit", func(a *v1alpha1.Allocation) { a.Spec.ForProvider.Batch.TimeLimit = "" }},
+		{"a time limit in Slurm's text form", func(a *v1alpha1.Allocation) { a.Spec.ForProvider.Batch.TimeLimit = "01:00:00" }},
+		{"negative GPUs", func(a *v1alpha1.Allocation) { a.Spec.ForProvider.Batch.GPUs = -1 }},
+		{"no CPUs", func(a *v1alpha1.Allocation) { a.Spec.ForProvider.Batch.CPUsPerTask = 0 }},
+		{"two nodes, while alpha Instances are single-node", func(a *v1alpha1.Allocation) { a.Spec.ForProvider.Batch.Nodes = 2 }},
+		{"no agent digest", func(a *v1alpha1.Allocation) { a.Spec.ForProvider.Batch.AgentDigest = "" }},
+		{"an agent digest with a sha256: prefix", func(a *v1alpha1.Allocation) {
+			a.Spec.ForProvider.Batch.AgentDigest = "sha256:" + agentDigest[:57]
+		}},
+		{"an agent digest in upper case", func(a *v1alpha1.Allocation) { a.Spec.ForProvider.Batch.AgentDigest = strings.Repeat("A", 64) }},
 	} {
 		t.Run("refuse "+tc.name, func(t *testing.T) {
 			a := newAllocation(ns, uniq("alloc"))
@@ -77,7 +87,7 @@ func TestAllocationSubmissionParameters(t *testing.T) {
 func TestAllocationIsABatchJobOrACatalogEntry(t *testing.T) {
 	const msg = "forProvider names exactly one of batch and managed"
 	ns := newNamespace(t)
-	batch := &v1alpha1.BatchParameters{Partition: "example-gpu", TimeLimit: "01:00:00"}
+	batch := validBatch()
 	entry := &v1alpha1.ManagedAllocation{CatalogName: "example-model-27b"}
 	for _, tc := range []struct {
 		name string
@@ -87,8 +97,8 @@ func TestAllocationIsABatchJobOrACatalogEntry(t *testing.T) {
 		{"neither a batch job nor a catalog entry", v1alpha1.AllocationParameters{}, msg},
 		{"both a batch job and a catalog entry", v1alpha1.AllocationParameters{Batch: batch, Managed: entry}, msg},
 		{"a catalog entry without a name", v1alpha1.AllocationParameters{Managed: &v1alpha1.ManagedAllocation{}}, "catalogName"},
-		{"a batch job without a partition", v1alpha1.AllocationParameters{Batch: &v1alpha1.BatchParameters{TimeLimit: "01:00:00"}}, "partition"},
-		{"a batch job without a time limit", v1alpha1.AllocationParameters{Batch: &v1alpha1.BatchParameters{Partition: "p"}}, "timeLimit"},
+		{"a batch job without a partition", v1alpha1.AllocationParameters{Batch: func() *v1alpha1.BatchParameters { b := validBatch(); b.Partition = ""; return b }()}, "partition"},
+		{"a batch job without a time limit", v1alpha1.AllocationParameters{Batch: func() *v1alpha1.BatchParameters { b := validBatch(); b.TimeLimit = ""; return b }()}, "timeLimit"},
 		{"a batch job", v1alpha1.AllocationParameters{Batch: batch}, ""},
 		{"a catalog entry, with no partition and no time limit", v1alpha1.AllocationParameters{Managed: entry}, ""},
 	} {
@@ -134,7 +144,7 @@ func TestAllocationKindOfLeaseIsImmutable(t *testing.T) {
 	})
 	t.Run("refuse turning it into a batch job", func(t *testing.T) {
 		got := get()
-		got.Spec.ForProvider = v1alpha1.AllocationParameters{Batch: &v1alpha1.BatchParameters{Partition: "p", TimeLimit: "01:00:00"}}
+		got.Spec.ForProvider = v1alpha1.AllocationParameters{Batch: validBatch()}
 		requireRefused(t, c.Update(bg(), got), msg)
 	})
 	t.Run("accept writing it back unchanged", func(t *testing.T) {
@@ -150,16 +160,15 @@ func TestAllocationSubmissionParametersAreImmutable(t *testing.T) {
 	const msg = "an Allocation's submission parameters are immutable"
 	ns := newNamespace(t)
 	a := newAllocation(ns, "immutable")
-	a.Spec.ForProvider.Batch.Account = "example-account"
-	a.Spec.ForProvider.Batch.Wrap = "sleep 60"
 	must(t, c.Create(bg(), a), "create")
 
 	refused := map[string]func(*v1alpha1.Allocation){
-		"the partition":        func(a *v1alpha1.Allocation) { a.Spec.ForProvider.Batch.Partition = "other" },
-		"the time limit":       func(a *v1alpha1.Allocation) { a.Spec.ForProvider.Batch.TimeLimit = "02:00:00" },
-		"the account":          func(a *v1alpha1.Allocation) { a.Spec.ForProvider.Batch.Account = "other-account" },
-		"the command":          func(a *v1alpha1.Allocation) { a.Spec.ForProvider.Batch.Wrap = "sleep 61" },
-		"removing the command": func(a *v1alpha1.Allocation) { a.Spec.ForProvider.Batch.Wrap = "" },
+		"the partition":    func(a *v1alpha1.Allocation) { a.Spec.ForProvider.Batch.Partition = "other" },
+		"the time limit":   func(a *v1alpha1.Allocation) { a.Spec.ForProvider.Batch.TimeLimit = "2h" },
+		"the GPU count":    func(a *v1alpha1.Allocation) { a.Spec.ForProvider.Batch.GPUs = 2 },
+		"the CPU count":    func(a *v1alpha1.Allocation) { a.Spec.ForProvider.Batch.CPUsPerTask = 32 },
+		"the memory":       func(a *v1alpha1.Allocation) { a.Spec.ForProvider.Batch.Memory = resource.MustParse("240Gi") },
+		"the agent digest": func(a *v1alpha1.Allocation) { a.Spec.ForProvider.Batch.AgentDigest = strings.Repeat("4", 64) },
 	}
 	for what, edit := range refused {
 		t.Run("refuse changing "+what, func(t *testing.T) {

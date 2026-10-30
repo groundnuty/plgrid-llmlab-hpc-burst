@@ -87,10 +87,116 @@ spec:
                 maxLength: 253
                 minLength: 1
                 type: string
+              launch:
+                description: |-
+                  Launch is what every start and restart of this Instance runs, rendered
+                  from the serving spec when the Instance is created (HBEP-7, What the
+                  controller reads). It is immutable with the rest of the spec, so a
+                  restart runs the original launch even after the ModelDeployment's
+                  serving spec has changed.
+                properties:
+                  chatTemplate:
+                    description: |-
+                      ChatTemplate is the serving spec's chat template, when it gives one. The
+                      agent writes it to ContainerChatTemplate for the engine.
+                    maxLength: 262144
+                    type: string
+                  checkpoint:
+                    description: |-
+                      Checkpoint is the checkpoint's repository and full commit id. The agent
+                      stages it under <stagingDir>/checkpoints/<repository>/<revision>/.
+                    properties:
+                      repository:
+                        maxLength: 256
+                        minLength: 1
+                        type: string
+                      revision:
+                        maxLength: 40
+                        minLength: 40
+                        pattern: ^[0-9a-f]{40}$
+                        type: string
+                    required:
+                    - repository
+                    - revision
+                    type: object
+                  command:
+                    description: |-
+                      Command is the engine's argument vector inside the image, program first,
+                      rendered from the serving spec's flags in order, with the framework's own
+                      flags (model, Unix socket, chat template, served model name).
+                    items:
+                      maxLength: 8192
+                      type: string
+                    maxItems: 256
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  env:
+                    description: Env is the engine's environment, from the serving
+                      spec's env.
+                    items:
+                      description: |-
+                        LaunchEnvVar is one variable of a launch's environment. It carries no CEL
+                        rule: the serving spec's EnvVar rules have already admitted it.
+                      properties:
+                        name:
+                          maxLength: 128
+                          minLength: 1
+                          type: string
+                        value:
+                          maxLength: 8192
+                          type: string
+                      required:
+                      - name
+                      - value
+                      type: object
+                    maxItems: 64
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                  gpus:
+                    description: |-
+                      GPUs is the number of GPUs the engine uses: tensor-parallel-size times
+                      pipeline-parallel-size (HBEP-4, GPU sizing).
+                    format: int32
+                    maximum: 1024
+                    minimum: 0
+                    type: integer
+                  image:
+                    description: |-
+                      Image is the engine image's repository, without a tag or digest, for
+                      example "docker.io/vllm/vllm-openai". The agent pulls Image@ImageDigest.
+                    maxLength: 512
+                    minLength: 1
+                    type: string
+                  imageDigest:
+                    description: |-
+                      ImageDigest is "sha256:" and 64 lowercase hex characters, the serving
+                      spec's engine.imageDigest.
+                    maxLength: 71
+                    pattern: ^sha256:[0-9a-f]{64}$
+                    type: string
+                  keyEnv:
+                    description: |-
+                      KeyEnv names the environment variable through which the engine receives
+                      the Instance's key, for example VLLM_API_KEY. The agent generates the
+                      key at Instance start and sets it (HBEP-7, Keys).
+                    maxLength: 128
+                    pattern: ^[A-Z_][A-Z0-9_]*$
+                    type: string
+                required:
+                - checkpoint
+                - command
+                - gpus
+                - image
+                - imageDigest
+                type: object
             required:
             - allocationRef
             - deploymentID
             - identityRecord
+            - launch
             type: object
             x-kubernetes-validations:
             - message: 'an Instance''s spec is immutable: replace the Instance instead
@@ -106,6 +212,32 @@ spec:
               and lease end are the Instance's metadata (HBEP-3): a handover replaces the
               Instance, so they never change within one.
             properties:
+              agent:
+                description: |-
+                  Agent is what the controller keeps of the agent's registration for this
+                  Instance (HBEP-7, The allocation agent).
+                properties:
+                  bootID:
+                    description: BootID identifies one execution of the agent, generated
+                      at its start.
+                    maxLength: 64
+                    minLength: 1
+                    type: string
+                  jobID:
+                    description: JobID is the job ID the agent registered with.
+                    maxLength: 64
+                    minLength: 1
+                    type: string
+                  registeredTime:
+                    description: RegisteredTime is when the controller accepted the
+                      registration.
+                    format: date-time
+                    type: string
+                required:
+                - bootID
+                - jobID
+                - registeredTime
+                type: object
               conditions:
                 items:
                   description: Condition contains details for one aspect of the current
@@ -165,6 +297,14 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              endReason:
+                description: |-
+                  EndReason says why the Instance ended, once it is ended or failing: one
+                  of the Reason* values in conditions.go, such as ReasonDrained or
+                  ReasonAllocationEndedEarly (HBEP-7: an Allocation's failure "ends its
+                  Instance with that reason").
+                maxLength: 128
+                type: string
               jobID:
                 description: JobID is the provider job's ID.
                 type: string
@@ -196,20 +336,65 @@ spec:
                 - draining
                 - ended
                 type: string
+              readyTime:
+                description: |-
+                  ReadyTime is when the Instance first became ready. Its Allocation's start
+                  to this time is the class's start-to-ready time (HBEP-7, Handover).
+                format: date-time
+                type: string
+              startInstructionTime:
+                description: |-
+                  StartInstructionTime is when the agent was first told to run this
+                  Instance: the first desired state that named it. The start timeout
+                  (health.startTimeout) counts from it, so the deadline survives a
+                  controller restart, and an Instance placed on an older warm Allocation
+                  gets the full timeout (HBEP-7, Instance start; HBEP-11, API).
+                format: date-time
+                type: string
+              throughput:
+                description: |-
+                  Throughput is the last warm-up round's time per output token and time to
+                  first token at the target sessions (HBEP-7, Instance start). In alpha it
+                  is recorded and gates nothing (HBEP-7, open question 12).
+                properties:
+                  targetSessions:
+                    description: TargetSessions is the number of concurrent sessions
+                      it was measured at.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  timePerOutputToken:
+                    description: TimePerOutputToken is the mean time per output token.
+                    maxLength: 63
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                    type: string
+                  timeToFirstToken:
+                    description: TimeToFirstToken is the mean time to the first token.
+                    maxLength: 63
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                    type: string
+                required:
+                - targetSessions
+                - timePerOutputToken
+                - timeToFirstToken
+                type: object
               url:
                 description: URL the front reaches the Instance at.
                 type: string
               verdict:
-                description: Verdict mirrors the verification record's verdict.
+                description: Verdict mirrors the latest verification record's verdict.
                 enum:
                 - pass
                 - fail
                 type: string
               verificationRecord:
                 description: |-
-                  VerificationRecord is the name of the Instance's verification record, a
-                  ControllerRevision written once, pass or fail, before the Instance can
-                  become ready.
+                  VerificationRecord is the name of the Instance's latest verification
+                  record, ver-<instance UID>-<generation> (VerificationRecordName). Each
+                  verification, at start and after every restart that reverifies, writes
+                  its own immutable ControllerRevision, pass or fail, before the Instance
+                  can become ready (HBEP-7, Instance start; HBEP-11). The generation
+                  counts the Instance's verifications from 1.
                 type: string
             type: object
         required:

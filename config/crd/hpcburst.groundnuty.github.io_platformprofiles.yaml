@@ -59,6 +59,91 @@ spec:
               that does not apply to its kind, is absent: an absent bool is unknown, not
               false.
             properties:
+              drainWindow:
+                default: 30m
+                description: |-
+                  DrainWindow is HBEP-5's drain window: an Instance drains from its hard
+                  end minus this. It is at least the front's maximum request duration.
+                maxLength: 63
+                pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                type: string
+              handoverMargin:
+                default: 30m
+                description: |-
+                  HandoverMargin is the margin in HBEP-7's submission plan: a replacement
+                  is submitted at the drain start minus (the p90 observed queue wait + the
+                  start-to-ready time + this margin), never before its predecessor's start.
+                maxLength: 63
+                pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                type: string
+              health:
+                default: {}
+                description: Health holds HBEP-7's malfunction thresholds and start
+                  deadlines.
+                properties:
+                  agentTimeout:
+                    default: 2m
+                    description: |-
+                      AgentTimeout is how long an agent may send no report before its
+                      Instance is AgentUnreachable.
+                    maxLength: 63
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                    type: string
+                  errorOnlyWindow:
+                    default: 1m
+                    description: ErrorOnlyWindow is how long every answer may be a
+                      server error.
+                    maxLength: 63
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                    type: string
+                  failureThreshold:
+                    default: 3
+                    description: FailureThreshold is how many failed probes in a row
+                      are a malfunction.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  kvSkewTimeout:
+                    default: 2m
+                    description: |-
+                      KVSkewTimeout is how long one worker may sit at a full KV cache with
+                      requests waiting while another idles. It needs several workers, so alpha
+                      does not use it.
+                    maxLength: 63
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                    type: string
+                  noProgressTimeout:
+                    default: 2m
+                    description: |-
+                      NoProgressTimeout is how long requests may run with the generated-token
+                      counter unchanged.
+                    maxLength: 63
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                    type: string
+                  probeInterval:
+                    default: 10s
+                    description: ProbeInterval is how often the agent probes the engine's
+                      health.
+                    maxLength: 63
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                    type: string
+                  registrationTimeout:
+                    default: 15m
+                    description: |-
+                      RegistrationTimeout is the longest time from the job's start to its
+                      agent's registration.
+                    maxLength: 63
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                    type: string
+                  startTimeout:
+                    default: 1h
+                    description: |-
+                      StartTimeout is the longest time from an Instance's own start
+                      instruction to ready.
+                    maxLength: 63
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                    type: string
+                type: object
               holdRelease:
                 default: false
                 description: |-
@@ -102,9 +187,11 @@ spec:
                 type: object
               jsonDataParser:
                 description: |-
-                  JSONDataParser is the version of the scheduler's JSON output, for
-                  example "data_parser/v0.0.42" for Slurm. A plugin parses only the
-                  versions it knows.
+                  JSONDataParser is the version of the scheduler's JSON output without its
+                  "data_parser/" prefix: "v0.0.40" or "v0.0.42" for Slurm. Every reply's
+                  meta.plugin.data_parser, with the prefix stripped, must equal it, or the
+                  reply is not interpreted and the Provider gets DialectMismatch (HBEP-4,
+                  The Slurm dialect). A plugin parses only the versions it knows.
                 maxLength: 64
                 minLength: 1
                 pattern: ^[A-Za-z0-9][A-Za-z0-9_./-]*$
@@ -114,6 +201,14 @@ spec:
                 description: |-
                   LostGrace is how long a recorded job may be absent from both the queue
                   listing and accounting before it is reported Lost.
+                maxLength: 63
+                pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                type: string
+              maxIdle:
+                description: |-
+                  MaxIdle releases an Allocation with no Instance after this long, even
+                  when its retention policy says keep (HBEP-7, Retention). Unset, there is
+                  no cap.
                 maxLength: 63
                 pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                 type: string
@@ -139,12 +234,41 @@ spec:
                       maxLength: 63
                       minLength: 1
                       type: string
+                    cpusPerGpu:
+                      description: CPUsPerGPU is the CPUs an Allocation requests per
+                        GPU.
+                      format: int32
+                      maximum: 4096
+                      minimum: 1
+                      type: integer
                     gpuModel:
                       description: GPUModel is the GPU model. A partition without
                         GPUs names "none".
                       maxLength: 63
                       minLength: 1
                       type: string
+                    gpusPerNode:
+                      description: GPUsPerNode is the most GPUs one Allocation may
+                        request here.
+                      format: int32
+                      maximum: 1024
+                      minimum: 0
+                      type: integer
+                    maxTime:
+                      description: |-
+                        MaxTime is the partition's longest time limit (HBEP-4, Platform profile
+                        schema, the fields the lifecycle controller reads).
+                      maxLength: 63
+                      pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                      type: string
+                    memPerGpu:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      description: MemPerGPU is the memory an Allocation requests
+                        per GPU.
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
                     name:
                       description: Name of the partition.
                       maxLength: 253
@@ -183,6 +307,49 @@ spec:
                   Slurm, JobRequeue). The framework submits with --no-requeue either way;
                   the fact records what a job without it would do (HBEP-4).
                 type: boolean
+              restart:
+                default: {}
+                description: Restart holds HBEP-7's restart ladder.
+                properties:
+                  attemptsPerRung:
+                    default: 2
+                    description: AttemptsPerRung is how many times each rung is tried
+                      within Window.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  backoff:
+                    default: 30s
+                    description: Backoff is the time between two attempts.
+                    maxLength: 63
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                    type: string
+                  stopGrace:
+                    default: 10s
+                    description: |-
+                      StopGrace is how long the agent waits after a polite stop before it
+                      kills a part.
+                    maxLength: 63
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                    type: string
+                  window:
+                    default: 30m
+                    description: Window is the time over which attempts are counted.
+                    maxLength: 63
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                    type: string
+                type: object
+              stagingDir:
+                description: |-
+                  StagingDir is where the agent binary, Allocation directories, images
+                  and checkpoints live: an absolute path, or one that starts with an
+                  environment variable set on login and compute nodes, such as $SCRATCH,
+                  which the provider resolves on the login node once per connection
+                  (HBEP-4, Transport).
+                maxLength: 1024
+                minLength: 1
+                pattern: ^(/|\$[A-Za-z_][A-Za-z0-9_]*)[A-Za-z0-9._:=,/-]*$
+                type: string
               timeZone:
                 description: |-
                   TimeZone is the IANA name of the time zone in which the scheduler prints

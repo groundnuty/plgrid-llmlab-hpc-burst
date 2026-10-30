@@ -75,27 +75,75 @@ spec:
                   batch:
                     description: Batch holds the parameters of a job on a batch platform.
                     properties:
-                      account:
-                        description: Account the job is charged to.
-                        maxLength: 253
+                      agentDigest:
+                        description: |-
+                          AgentDigest is the SHA-256, 64 lowercase hex characters, of the
+                          allocation agent's binary for the partition's cpuArch (HBEP-4,
+                          Submission; HBEP-7, The allocation agent). It names the staged binary,
+                          agent/<agentDigest>/hb-agent under the staging directory, so it is bare
+                          hex, without a "sha256:" prefix.
+                        maxLength: 64
+                        minLength: 64
+                        pattern: ^[0-9a-f]{64}$
                         type: string
+                      cpusPerTask:
+                        description: |-
+                          CPUsPerTask is gpus times the partition's cpusPerGpu (HBEP-7,
+                          Provisioning).
+                        format: int32
+                        maximum: 65536
+                        minimum: 1
+                        type: integer
+                      gpus:
+                        description: |-
+                          GPUs is the number of GPUs, requested untyped (--gres=gpu:<n>). In alpha
+                          it is tensor-parallel-size times pipeline-parallel-size (HBEP-4, GPU
+                          sizing). Zero only on a partition whose gpuModel is none; the provider
+                          refuses zero on a GPU partition, and more than gpusPerNode.
+                        format: int32
+                        maximum: 1024
+                        minimum: 0
+                        type: integer
+                      memory:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: |-
+                          Memory is gpus times the partition's memPerGpu (HBEP-7, Provisioning).
+                          The provider passes it to Slurm in whole MiB.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      nodes:
+                        default: 1
+                        description: |-
+                          Nodes is the number of nodes: 1 in alpha, whose Instances are
+                          single-node (HBEP-4, Submission).
+                        format: int32
+                        maximum: 1
+                        minimum: 1
+                        type: integer
                       partition:
-                        description: Partition the job is submitted to.
+                        description: |-
+                          Partition the job is submitted to: the Provider's one allowed partition
+                          (HBEP-4, open question 12).
                         maxLength: 253
                         minLength: 1
                         type: string
                       timeLimit:
-                        description: TimeLimit in the platform's format, for example
-                          "01:00:00".
+                        description: |-
+                          TimeLimit is the job's time limit: the partition's maxTime, or the
+                          ModelDeployment's leaseLimit when that is shorter (HBEP-4, open question
+                          11). It is a whole number of minutes, because Slurm counts limits in
+                          minutes and the read-back compares the limit it reports (HBEP-4, The
+                          Slurm dialect); the provider refuses any other value before a call.
                         maxLength: 63
-                        minLength: 1
-                        type: string
-                      wrap:
-                        description: Wrap is the command passed to the submission,
-                          as in sbatch --wrap.
-                        maxLength: 8192
+                        pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                         type: string
                     required:
+                    - agentDigest
+                    - cpusPerTask
+                    - gpus
+                    - memory
                     - partition
                     - timeLimit
                     type: object
@@ -260,6 +308,15 @@ spec:
               atProvider:
                 description: AtProvider is the observed state of the job.
                 properties:
+                  absentSince:
+                    description: |-
+                      AbsentSince is the time of the first successful read, of the queue
+                      listing and accounting both, that did not show the recorded job; it is
+                      cleared when the job shows again. Lost is judged from it, so the grace
+                      survives a restart of the Provider's controller (HBEP-4, Core
+                      operations).
+                    format: date-time
+                    type: string
                   duplicates:
                     description: |-
                       Duplicates lists the IDs of extra jobs that carry the tag and are not
@@ -268,26 +325,62 @@ spec:
                       type: string
                     type: array
                     x-kubernetes-list-type: set
+                  endTime:
+                    description: EndTime is when the job ended. It is absent until
+                      it has.
+                    format: date-time
+                    type: string
                   hardEnd:
                     description: |-
                       HardEnd is the lease's hard end: the time limit as currently observed
-                      (HBEP-3, Vocabulary, Lease).
+                      (HBEP-3, Vocabulary, Lease). It is re-read on every observe, so a
+                      center's extension shows without being planned for.
                     format: date-time
                     type: string
+                  held:
+                    description: Held is true while the recorded job is held.
+                    type: boolean
                   jobID:
                     description: JobID is the established job ID, mirrored from its
                       annotation.
                     type: string
                   phase:
                     description: Phase of the job as the provider reports it.
+                    enum:
+                    - Submitting
+                    - SubmissionUnknown
+                    - Held
+                    - Pending
+                    - Running
+                    - Ended
+                    - Failed
+                    - Lost
+                    - Refused
                     type: string
+                  reason:
+                    description: |-
+                      Reason says why the phase is what it is: ReasonRequeued for a requeue,
+                      otherwise the scheduler's state reason or the provider's explanation.
+                    maxLength: 1024
+                    type: string
+                  requeued:
+                    description: |-
+                      Requeued is true once a requeue of the recorded job has been seen. It is
+                      kept once set.
+                    type: boolean
+                  restartCount:
+                    description: RestartCount is the scheduler's restart count of
+                      the recorded job.
+                    format: int32
+                    type: integer
                   startEstimate:
                     description: |-
                       StartEstimate is when the platform's scheduler expects the job to start.
                       It is absent while the platform gives no estimate: an unknown estimate
                       is not "now" and not "never". It is not StartTime, which is the actual
                       start, and it moves with every scheduler pass (HBEP-3, Vocabulary,
-                      Lease: a lease runs from a start estimate, which may be unknown).
+                      Lease: a lease runs from a start estimate, which may be unknown). It is
+                      advisory and never planned on (HBEP-7, open question 2).
                     format: date-time
                     type: string
                   startTime:
@@ -299,15 +392,22 @@ spec:
                     description: Submission mirrors the latest submission attempt.
                     properties:
                       attempt:
-                        description: Attempt is the attempt's number.
+                        description: Attempt is the attempt's number, from 1.
                         format: int32
                         type: integer
                       reason:
-                        description: Reason for the state.
+                        description: |-
+                          Reason for the state: for Rejected, the scheduler's reason, which the
+                          lifecycle controller shows as SubmissionRejected (HBEP-7, Provisioning).
                         type: string
                       state:
-                        description: State of the attempt, for example InFlight, Unknown,
-                          Done or Abandoned.
+                        description: State of the attempt.
+                        enum:
+                        - InFlight
+                        - Rejected
+                        - Unknown
+                        - Done
+                        - Abandoned
                         type: string
                       time:
                         description: Time the record was written.
@@ -323,6 +423,11 @@ spec:
                     - attempt
                     - state
                     type: object
+                  submitTime:
+                    description: SubmitTime is when the scheduler accepted the recorded
+                      job.
+                    format: date-time
+                    type: string
                   tag:
                     description: Tag is the job tag, the Allocation's external name
                       (HBEP-3).

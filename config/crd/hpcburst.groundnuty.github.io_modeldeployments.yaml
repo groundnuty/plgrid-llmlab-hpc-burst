@@ -58,7 +58,8 @@ spec:
           spec:
             description: |-
               ModelDeploymentSpec is what to serve: model, serving spec, number of
-              instances, where, until when, and the default retention policy.
+              instances, where, until when, and the default retention policy. HBEP-7 adds
+              the lease limit and the workload.
             properties:
               endTime:
                 description: |-
@@ -74,6 +75,15 @@ spec:
                 format: int32
                 minimum: 0
                 type: integer
+              leaseLimit:
+                description: |-
+                  LeaseLimit is the longest time limit of the deployment's Allocations,
+                  when it is shorter than the partition's maxTime (HBEP-7, What the
+                  controller reads; HBEP-4, open question 11). A short lease makes a real
+                  handover testable in hours.
+                maxLength: 63
+                pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                type: string
               model:
                 description: Model is the model name clients send. Names follow LLMLab's.
                 maxLength: 256
@@ -292,6 +302,17 @@ spec:
                       engine:
                         description: EngineSpec names the engine and its image.
                         properties:
+                          image:
+                            description: |-
+                              Image is the engine image's repository, without a tag or digest, for
+                              example "docker.io/vllm/vllm-openai". The allocation agent pulls
+                              Image@ImageDigest (HBEP-7, The allocation agent: an Instance's launch
+                              holds the image reference and its digest). It is not a deployment-ID
+                              input: the digest names the bytes, and pkg/deploymentid hashes only it.
+                            maxLength: 512
+                            minLength: 1
+                            pattern: ^[a-z0-9][a-z0-9._:/-]*[a-z0-9]$
+                            type: string
                           imageDigest:
                             description: |-
                               ImageDigest is the engine image's digest: "sha256:" and 64 lowercase hex
@@ -315,6 +336,7 @@ spec:
                             minLength: 1
                             type: string
                         required:
+                        - image
                         - imageDigest
                         - name
                         - version
@@ -531,12 +553,85 @@ spec:
                 x-kubernetes-validations:
                 - message: source names exactly one of served and managed
                   rule: has(self.served) != has(self.managed)
+              workload:
+                description: |-
+                  Workload holds the shapes for warm-up and qualification (HBEP-7, What
+                  the controller reads). A served deployment needs one.
+                properties:
+                  contextTokens:
+                    description: ContextTokens are the context lengths, in tokens.
+                    properties:
+                      longest:
+                        description: |-
+                          Longest is the longest context length. Absent, it is the resolved
+                          context limit (the max-model-len the engine reports) minus
+                          outputTokens.typical minus the chat template's overhead, so it is fixed
+                          at verification (HBEP-7).
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      short:
+                        default: 512
+                        description: Short is the short context length.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      typical:
+                        description: Typical is the typical context length.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                    required:
+                    - typical
+                    type: object
+                  outputTokens:
+                    description: OutputTokens are the output lengths, in tokens.
+                    properties:
+                      longest:
+                        default: 4096
+                        description: Longest is the longest output length.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      typical:
+                        description: Typical is the typical output length.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                    required:
+                    - typical
+                    type: object
+                  targetSessions:
+                    description: |-
+                      TargetSessions is the number of concurrent sessions to serve. KV
+                      capacity is checked against it, warm-up runs it, and throughput is
+                      measured at it.
+                    format: int32
+                    maximum: 100000
+                    minimum: 1
+                    type: integer
+                  toolCalls:
+                    description: |-
+                      ToolCalls says whether tool calls are checked and warmed up. Absent, it
+                      is whether the serving spec enables automatic tool choice
+                      (enable-auto-tool-choice), which the controller resolves.
+                    type: boolean
+                required:
+                - contextTokens
+                - outputTokens
+                - targetSessions
+                type: object
             required:
             - instances
             - model
             - providers
             - source
             type: object
+            x-kubernetes-validations:
+            - message: 'a served deployment needs a workload: its shapes drive warm-up
+                and qualification (HBEP-7); contextTokens.typical, outputTokens.typical
+                and targetSessions are required'
+              rule: '!has(self.source.served) || has(self.workload)'
           status:
             description: ModelDeploymentStatus is the observed state of a ModelDeployment.
             properties:
@@ -726,6 +821,58 @@ spec:
                     - ReleaseWhenIdle
                     type: string
                 type: object
+              startToReady:
+                description: |-
+                  StartToReady lists each accelerator class's last measured start-to-ready
+                  time: from an Allocation's start to the first ready of the Instance
+                  created with it. The replacement plan reads it, and it lives here so a
+                  restarted controller plans the same times (HBEP-7, Handover; HBEP-11).
+                  A class with no entry uses 30 min.
+                items:
+                  description: |-
+                    ClassStartToReady is one accelerator class's last measured start-to-ready
+                    time.
+                  properties:
+                    cpuArch:
+                      description: CPUArch is the CPU architecture, for example "aarch64"
+                        or "x86_64".
+                      maxLength: 63
+                      minLength: 1
+                      type: string
+                    duration:
+                      description: |-
+                        Duration is the time from the Allocation's start to the Instance's
+                        first ready.
+                      maxLength: 63
+                      pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                      type: string
+                    gpuModel:
+                      description: GPUModel is the GPU model. A partition without
+                        GPUs names "none".
+                      maxLength: 63
+                      minLength: 1
+                      type: string
+                    instance:
+                      description: Instance is the name of the Instance it was measured
+                        on.
+                      maxLength: 253
+                      type: string
+                    measuredTime:
+                      description: MeasuredTime is when the Instance became ready.
+                      format: date-time
+                      type: string
+                  required:
+                  - cpuArch
+                  - duration
+                  - gpuModel
+                  - measuredTime
+                  type: object
+                maxItems: 64
+                type: array
+                x-kubernetes-list-map-keys:
+                - gpuModel
+                - cpuArch
+                x-kubernetes-list-type: map
             type: object
         required:
         - spec

@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -27,8 +28,123 @@ type PartitionProfile struct {
 	Name string `json:"name"`
 
 	// AcceleratorClass is the partition's GPU model and CPU architecture. They
-	// are a deployment-ID input (HBEP-3).
+	// are a deployment-ID input (HBEP-3). HBEP-4 fixes the strings: the GPU
+	// product name without vendor or memory size, upper case (GH200, A100),
+	// and the kernel's machine name (aarch64, x86_64).
 	AcceleratorClass `json:",inline"`
+
+	// MaxTime is the partition's longest time limit (HBEP-4, Platform profile
+	// schema, the fields the lifecycle controller reads).
+	//
+	// +optional
+	MaxTime *Duration `json:"maxTime,omitempty"`
+
+	// GPUsPerNode is the most GPUs one Allocation may request here.
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1024
+	GPUsPerNode *int32 `json:"gpusPerNode,omitempty"`
+
+	// CPUsPerGPU is the CPUs an Allocation requests per GPU.
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=4096
+	CPUsPerGPU *int32 `json:"cpusPerGpu,omitempty"`
+
+	// MemPerGPU is the memory an Allocation requests per GPU.
+	//
+	// +optional
+	MemPerGPU *resource.Quantity `json:"memPerGpu,omitempty"`
+}
+
+// HealthThresholds are HBEP-7's malfunction signals and start deadlines
+// (HBEP-4, Platform profile schema). Defaults are HBEP-4's, tuned in beta.
+type HealthThresholds struct {
+	// ProbeInterval is how often the agent probes the engine's health.
+	//
+	// +optional
+	// +kubebuilder:default="10s"
+	ProbeInterval *Duration `json:"probeInterval,omitempty"`
+
+	// FailureThreshold is how many failed probes in a row are a malfunction.
+	//
+	// +optional
+	// +kubebuilder:default=3
+	// +kubebuilder:validation:Minimum=1
+	FailureThreshold *int32 `json:"failureThreshold,omitempty"`
+
+	// NoProgressTimeout is how long requests may run with the generated-token
+	// counter unchanged.
+	//
+	// +optional
+	// +kubebuilder:default="2m"
+	NoProgressTimeout *Duration `json:"noProgressTimeout,omitempty"`
+
+	// ErrorOnlyWindow is how long every answer may be a server error.
+	//
+	// +optional
+	// +kubebuilder:default="1m"
+	ErrorOnlyWindow *Duration `json:"errorOnlyWindow,omitempty"`
+
+	// KVSkewTimeout is how long one worker may sit at a full KV cache with
+	// requests waiting while another idles. It needs several workers, so alpha
+	// does not use it.
+	//
+	// +optional
+	// +kubebuilder:default="2m"
+	KVSkewTimeout *Duration `json:"kvSkewTimeout,omitempty"`
+
+	// AgentTimeout is how long an agent may send no report before its
+	// Instance is AgentUnreachable.
+	//
+	// +optional
+	// +kubebuilder:default="2m"
+	AgentTimeout *Duration `json:"agentTimeout,omitempty"`
+
+	// RegistrationTimeout is the longest time from the job's start to its
+	// agent's registration.
+	//
+	// +optional
+	// +kubebuilder:default="15m"
+	RegistrationTimeout *Duration `json:"registrationTimeout,omitempty"`
+
+	// StartTimeout is the longest time from an Instance's own start
+	// instruction to ready.
+	//
+	// +optional
+	// +kubebuilder:default="1h"
+	StartTimeout *Duration `json:"startTimeout,omitempty"`
+}
+
+// RestartPolicy is HBEP-7's restart ladder (HBEP-4, Platform profile schema).
+type RestartPolicy struct {
+	// StopGrace is how long the agent waits after a polite stop before it
+	// kills a part.
+	//
+	// +optional
+	// +kubebuilder:default="10s"
+	StopGrace *Duration `json:"stopGrace,omitempty"`
+
+	// AttemptsPerRung is how many times each rung is tried within Window.
+	//
+	// +optional
+	// +kubebuilder:default=2
+	// +kubebuilder:validation:Minimum=1
+	AttemptsPerRung *int32 `json:"attemptsPerRung,omitempty"`
+
+	// Window is the time over which attempts are counted.
+	//
+	// +optional
+	// +kubebuilder:default="30m"
+	Window *Duration `json:"window,omitempty"`
+
+	// Backoff is the time between two attempts.
+	//
+	// +optional
+	// +kubebuilder:default="30s"
+	Backoff *Duration `json:"backoff,omitempty"`
 }
 
 // JobTagLength is the length of the job tag (HBEP-3, Allocation and job
@@ -150,15 +266,63 @@ type PlatformProfileSpec struct {
 	// +optional
 	JobCommentAccounted *bool `json:"jobCommentAccounted,omitempty"`
 
-	// JSONDataParser is the version of the scheduler's JSON output, for
-	// example "data_parser/v0.0.42" for Slurm. A plugin parses only the
-	// versions it knows.
+	// JSONDataParser is the version of the scheduler's JSON output without its
+	// "data_parser/" prefix: "v0.0.40" or "v0.0.42" for Slurm. Every reply's
+	// meta.plugin.data_parser, with the prefix stripped, must equal it, or the
+	// reply is not interpreted and the Provider gets DialectMismatch (HBEP-4,
+	// The Slurm dialect). A plugin parses only the versions it knows.
 	//
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9_./-]*$`
 	JSONDataParser string `json:"jsonDataParser,omitempty"`
+
+	// StagingDir is where the agent binary, Allocation directories, images
+	// and checkpoints live: an absolute path, or one that starts with an
+	// environment variable set on login and compute nodes, such as $SCRATCH,
+	// which the provider resolves on the login node once per connection
+	// (HBEP-4, Transport).
+	//
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=1024
+	// +kubebuilder:validation:Pattern=`^(/|\$[A-Za-z_][A-Za-z0-9_]*)[A-Za-z0-9._:=,/-]*$`
+	StagingDir string `json:"stagingDir,omitempty"`
+
+	// DrainWindow is HBEP-5's drain window: an Instance drains from its hard
+	// end minus this. It is at least the front's maximum request duration.
+	//
+	// +optional
+	// +kubebuilder:default="30m"
+	DrainWindow *Duration `json:"drainWindow,omitempty"`
+
+	// HandoverMargin is the margin in HBEP-7's submission plan: a replacement
+	// is submitted at the drain start minus (the p90 observed queue wait + the
+	// start-to-ready time + this margin), never before its predecessor's start.
+	//
+	// +optional
+	// +kubebuilder:default="30m"
+	HandoverMargin *Duration `json:"handoverMargin,omitempty"`
+
+	// MaxIdle releases an Allocation with no Instance after this long, even
+	// when its retention policy says keep (HBEP-7, Retention). Unset, there is
+	// no cap.
+	//
+	// +optional
+	MaxIdle *Duration `json:"maxIdle,omitempty"`
+
+	// Health holds HBEP-7's malfunction thresholds and start deadlines.
+	//
+	// +optional
+	// +kubebuilder:default={}
+	Health *HealthThresholds `json:"health,omitempty"`
+
+	// Restart holds HBEP-7's restart ladder.
+	//
+	// +optional
+	// +kubebuilder:default={}
+	Restart *RestartPolicy `json:"restart,omitempty"`
 
 	// Profile is the rest of the profile, untyped: the facts that are not typed
 	// above, with the provenance envelope of each (value, method, source and

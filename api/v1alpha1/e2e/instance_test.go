@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -23,6 +24,16 @@ func TestInstanceSpecIsImmutable(t *testing.T) {
 		},
 		"the identity record alone": func(i *v1alpha1.Instance) { i.Spec.IdentityRecord = "id-" + other[:12] },
 		"the Allocation":            func(i *v1alpha1.Instance) { i.Spec.AllocationRef.Name = "helios-a-zzzzz" },
+		// The launch is immutable with the rest of the spec, so a restart runs
+		// the original launch (HBEP-7, What the controller reads).
+		"the launch's command": func(i *v1alpha1.Instance) { i.Spec.Launch.Command = append(i.Spec.Launch.Command, "--seed=1") },
+		"the launch's image digest": func(i *v1alpha1.Instance) {
+			i.Spec.Launch.ImageDigest = "sha256:" + strings.Repeat("5", 64)
+		},
+		"the launch's environment": func(i *v1alpha1.Instance) {
+			i.Spec.Launch.Env = []v1alpha1.LaunchEnvVar{{Name: "VLLM_LOGGING_LEVEL", Value: "DEBUG"}}
+		},
+		"the launch's GPU count": func(i *v1alpha1.Instance) { i.Spec.Launch.GPUs = 2 },
 	}
 	for what, edit := range refused {
 		t.Run("refuse changing "+what, func(t *testing.T) {
@@ -43,7 +54,7 @@ func TestInstanceSpecIsImmutable(t *testing.T) {
 	must(t, c.Update(bg(), got), "update metadata only")
 	got.Finalizers = nil
 	must(t, c.Update(bg(), got), "remove the finalizer")
-	if got.Spec != in.Spec {
+	if !reflect.DeepEqual(got.Spec, in.Spec) {
 		t.Fatalf("spec changed: %+v -> %+v", in.Spec, got.Spec)
 	}
 }
@@ -65,6 +76,9 @@ func TestInstanceIdentityReference(t *testing.T) {
 		{"an identity record named with the full ID", func(i *v1alpha1.Instance) { i.Spec.IdentityRecord = "id-" + fullID },
 			"identityRecord must be 'id-' followed by the first 12 characters of deploymentID"},
 		{"no Allocation", func(i *v1alpha1.Instance) { i.Spec.AllocationRef.Name = "" }, "allocationRef"},
+		{"no launch command", func(i *v1alpha1.Instance) { i.Spec.Launch.Command = nil }, "launch.command"},
+		{"a launch image digest that is a tag", func(i *v1alpha1.Instance) { i.Spec.Launch.ImageDigest = "latest" }, "launch.imageDigest"},
+		{"a launch checkpoint at a branch", func(i *v1alpha1.Instance) { i.Spec.Launch.Checkpoint.Revision = "main" }, "launch.checkpoint.revision"},
 	} {
 		t.Run("refuse "+tc.name, func(t *testing.T) {
 			in := newInstance(ns, uniq("inst"))

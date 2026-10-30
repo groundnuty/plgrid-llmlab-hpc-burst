@@ -1,6 +1,8 @@
 package v1alpha1
 
 import (
+	"time"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -42,6 +44,47 @@ type ProviderSpec struct {
 	CredentialsRef *CredentialsReference `json:"credentialsRef,omitempty"`
 }
 
+// QueueWait is one recorded job's wait in the queue: from its submission to its
+// start, both from the job's accounting record (HBEP-4, Provider status).
+type QueueWait struct {
+	// JobID is the job's ID.
+	//
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	JobID string `json:"jobID"`
+
+	// SubmitTime is when the scheduler accepted the job.
+	SubmitTime metav1.Time `json:"submitTime"`
+
+	// StartTime is when the job started.
+	StartTime metav1.Time `json:"startTime"`
+}
+
+// Wait returns the queue wait: StartTime minus SubmitTime.
+func (w QueueWait) Wait() time.Duration { return w.StartTime.Sub(w.SubmitTime.Time) }
+
+// MaxQueueWaits is how many queue waits a Provider's status keeps (HBEP-4).
+const MaxQueueWaits = 20
+
+// AddQueueWait returns waits with w added at the end, unless a wait with w's
+// job ID is already there, in which case it returns waits unchanged. When the
+// result would hold more than MaxQueueWaits entries, the oldest are dropped.
+// It never changes the slice it is given.
+func AddQueueWait(waits []QueueWait, w QueueWait) []QueueWait {
+	for _, old := range waits {
+		if old.JobID == w.JobID {
+			return waits
+		}
+	}
+	out := make([]QueueWait, 0, len(waits)+1)
+	out = append(out, waits...)
+	out = append(out, w)
+	if len(out) > MaxQueueWaits {
+		out = out[len(out)-MaxQueueWaits:]
+	}
+	return out
+}
+
 // ProviderStatus is the observed state of a Provider.
 type ProviderStatus struct {
 	ReconcileStatus `json:",inline"`
@@ -51,6 +94,21 @@ type ProviderStatus struct {
 	//
 	// +optional
 	LastSuccessfulStatusRead *metav1.Time `json:"lastSuccessfulStatusRead,omitempty"`
+
+	// QueueWaits are the last MaxQueueWaits observed queue waits, oldest first
+	// (HBEP-4, Provider status). Each is one recorded job's wait from
+	// submission to start, from its accounting record's submit and start
+	// times, never from when the controller saw the change. Entries are keyed
+	// by job ID, so a repeated observe adds nothing; a new entry beyond the
+	// cap drops the oldest (AddQueueWait). The lifecycle controller plans
+	// replacements from them (HBEP-7, Handover), and they live here so a
+	// restarted controller plans from the same waits.
+	//
+	// +optional
+	// +listType=map
+	// +listMapKey=jobID
+	// +kubebuilder:validation:MaxItems=20
+	QueueWaits []QueueWait `json:"queueWaits,omitempty"`
 
 	// Conditions of the provider, for example a credentials file that others
 	// can read, or an unreachable platform.
