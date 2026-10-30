@@ -25,6 +25,50 @@ func TestRefusals(t *testing.T) {
 		{"model", &Flag{"model", "x/y"}, nil, ErrFrameworkPassed},
 		{"revision", &Flag{"revision", "main"}, nil, ErrFrameworkPassed},
 		{"chat-template", &Flag{"chat-template", "{{ x }}"}, nil, ErrFrameworkPassed},
+		// Spellings vLLM resolves to a refused flag (vllm/utils/argparse_utils.py
+		// @v0.32.0): an underscore for a dash, a dotted sub-key, a unique
+		// prefix. Each is refused as the flag itself is, with no value in the
+		// message (Opus's review rows).
+		{"api_key", &Flag{"api_key", "SECRET-VALUE"}, nil, ErrSecret},
+		{"api-k", &Flag{"api-k", "SECRET-VALUE"}, nil, ErrSecret},
+		{"api-key.x", &Flag{"api-key.x", "SECRET-VALUE"}, nil, ErrSecret},
+		{"api_key.x", &Flag{"api_key.x", "SECRET-VALUE"}, nil, ErrSecret},
+		{"hf_token", &Flag{"hf_token", "SECRET-VALUE"}, nil, ErrSecret},
+		{"hf-tok", &Flag{"hf-tok", "SECRET-VALUE"}, nil, ErrSecret},
+		{"hf-token.x", &Flag{"hf-token.x", "SECRET-VALUE"}, nil, ErrSecret},
+		{"revisio", &Flag{"revisio", "SECRET-VALUE"}, nil, ErrFrameworkPassed},
+		{"revision.x", &Flag{"revision.x", "SECRET-VALUE"}, nil, ErrFrameworkPassed},
+		{"model.x", &Flag{"model.x", "SECRET-VALUE"}, nil, ErrFrameworkPassed},
+		{"chat-template.x", &Flag{"chat-template.x", "SECRET-VALUE"}, nil, ErrFrameworkPassed},
+		{"chat_template", &Flag{"chat_template", "SECRET-VALUE"}, nil, ErrFrameworkPassed},
+		{"chat-templ", &Flag{"chat-templ", "SECRET-VALUE"}, nil, ErrFrameworkPassed},
+		// Single-letter prefixes are abbreviations too.
+		{"a", &Flag{"a", "SECRET-VALUE"}, nil, ErrSecret},
+		{"m", &Flag{"m", "SECRET-VALUE"}, nil, ErrFrameworkPassed},
+		// A dotted sub-key of any other flag: pass the JSON under the long name.
+		{"dotted sub-key", &Flag{"hf-overrides.rope_scaling", "{}"}, nil, ErrInvalid},
+		{"dotted unknown flag", &Flag{"some-flag.x", "1"}, nil, ErrInvalid},
+		{"dotted not-input flag", &Flag{"port.x", "1"}, nil, ErrInvalid},
+		{"dot only", &Flag{".", "1"}, nil, ErrInvalid},
+		{"leading dot", &Flag{".x", "1"}, nil, ErrInvalid},
+		// A negated boolean: the positive name with "false" (HBEP-3).
+		{"no-enable-prefix-caching", &Flag{"no-enable-prefix-caching", ""}, nil, ErrInvalid},
+		{"no-enable_prefix_caching", &Flag{"no-enable_prefix_caching", ""}, nil, ErrInvalid},
+		{"no-enforce-eager", &Flag{"no-enforce-eager", ""}, nil, ErrInvalid},
+		// vLLM's short options, spelled without their dash (owner decision 4).
+		{"tp", &Flag{"tp", "2"}, nil, ErrShortAlias},
+		{"pp", &Flag{"pp", "2"}, nil, ErrShortAlias},
+		{"dp", &Flag{"dp", "2"}, nil, ErrShortAlias},
+		{"q", &Flag{"q", "awq"}, nil, ErrShortAlias},
+		{"tp.x", &Flag{"tp.x", "2"}, nil, ErrShortAlias},
+		// Names are ASCII (owner decision 1): flags [a-z0-9][a-z0-9-]*.
+		{"flag with an accent", &Flag{"dtyp\u00e9", "x"}, nil, ErrInvalid},
+		{"flag that is an emoji", &Flag{"\U0001F600", "x"}, nil, ErrInvalid},
+		{"flag in capitals", &Flag{"DTYPE", "x"}, nil, ErrInvalid},
+		{"flag in capitals, a refused one", &Flag{"API-KEY", "SECRET-VALUE"}, nil, ErrInvalid},
+		{"flag with a plus", &Flag{"x+", "x"}, nil, ErrInvalid},
+		{"flag with a slash", &Flag{"a/b", "x"}, nil, ErrInvalid},
+		{"flag with an en dash", &Flag{"x\u2013y", "x"}, nil, ErrInvalid},
 		{"empty flag name", &Flag{"", "x"}, nil, ErrInvalid},
 		{"flag name with space", &Flag{"max model len", "1"}, nil, ErrInvalid},
 		{"flag name with =", &Flag{"dtype=bfloat16", ""}, nil, ErrInvalid},
@@ -32,6 +76,16 @@ func TestRefusals(t *testing.T) {
 		{"flag name not UTF-8", &Flag{"a\xff", ""}, nil, ErrInvalid},
 		{"flag value not UTF-8", &Flag{"dtype", "a\xffb"}, nil, ErrInvalid},
 		{"empty env name", nil, &EnvVar{"", "x"}, ErrInvalid},
+		// Environment names are [A-Z_][A-Z0-9_]*, exact, never rewritten.
+		{"env with an accent", nil, &EnvVar{"H\u00c9LLO", "x"}, ErrInvalid},
+		{"env that is an emoji", nil, &EnvVar{"\U0001F600_ENV", "x"}, ErrInvalid},
+		{"env in lower case", nil, &EnvVar{"my_var", "x"}, ErrInvalid},
+		{"env starting with a digit", nil, &EnvVar{"1VAR", "x"}, ErrInvalid},
+		{"env with a dash", nil, &EnvVar{"HF-TOKEN", "SECRET-VALUE"}, ErrInvalid},
+		{"env with a dot", nil, &EnvVar{"A.B", "x"}, ErrInvalid},
+		{"env with a space", nil, &EnvVar{"A B", "x"}, ErrInvalid},
+		{"env with a newline", nil, &EnvVar{"A\nB", "x"}, ErrInvalid},
+		{"env name not UTF-8", nil, &EnvVar{"A\xff", "x"}, ErrInvalid},
 		{"env name with =", nil, &EnvVar{"A=B", ""}, ErrInvalid},
 		{"env value not UTF-8", nil, &EnvVar{"A", "\xff"}, ErrInvalid},
 	}

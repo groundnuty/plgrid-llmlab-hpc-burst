@@ -9,8 +9,9 @@ import (
 // Generators for the property tests. They are hand-written and seeded with a
 // fixed value, so a failure reproduces. They deliberately produce what a
 // careless generator would not: unknown flags, repeated flags, empty values,
-// an empty env, non-ASCII and awkward paths, and keys that sort differently
-// under UTF-16 and bytewise order.
+// an empty env, and non-ASCII and awkward paths and values. Flag and variable
+// names are ASCII, as the scheme requires; the non-ASCII keys that tell UTF-16
+// order from bytewise order are tested on the serialiser alone (jcs_test.go).
 
 // textPieces are the building blocks of generated strings: ASCII, characters
 // JSON escapes, and non-ASCII from the BMP and from the supplementary planes
@@ -20,12 +21,13 @@ var textPieces = []string{
 	"\x00", "\x7f", "\xc3\xa9", "\xc3\xb6", "\xe6\x97\xa5", "\xef\xac\xb3", "\xf0\x9f\x98\x80", "\xe2\x80\xa8", "\xef\xbd\x9e",
 }
 
-// namePieces are the pieces allowed in a flag or variable name (no
-// whitespace, control characters or '=').
-var namePieces = []string{
-	"a", "b", "c", "Z", "0", "7", "-", "_", ".", "\"", "\\", "/", "<", "&",
-	"\xc3\xa9", "\xc3\xb6", "\xe6\x97\xa5", "\xef\xac\xb3", "\xf0\x9f\x98\x80", "\xef\xbd\x9e",
-}
+// flagNamePieces and envNamePieces are the pieces of a generated flag or
+// variable name. A flag name has no underscore, which resolveFlag would read
+// as a dash, so every generated name is its own resolved form.
+var (
+	flagNamePieces = []string{"a", "b", "c", "z", "0", "7", "-", "x1", "dtype", "no", "-no-"}
+	envNamePieces  = []string{"A", "B", "C", "Z", "0", "7", "_", "X1", "VLLM", "NO", "_NO_"}
+)
 
 type gen struct{ r *rand.Rand }
 
@@ -60,18 +62,31 @@ func (g *gen) hex(n int) string {
 }
 
 // unknownName returns a valid flag (or, with env, variable) name that the vLLM
-// table does not list.
+// table does not list and that no refusal rule touches: it is accepted as it
+// is, and an input. Single letters such as "a" and "c" are prefixes of refused
+// flags, so resolveFlag refuses them and they are not generated.
 func (g *gen) unknownName(env bool) string {
 	// A bound turns a table that lists every generated name into a failure
 	// rather than a hang.
 	for tries := 0; tries < 10000; tries++ {
 		var b strings.Builder
+		pieces := flagNamePieces
+		if env {
+			pieces = envNamePieces
+		}
 		for n := 1 + g.r.Intn(4); n > 0; n-- {
-			b.WriteString(g.pick(namePieces))
+			b.WriteString(g.pick(pieces))
 		}
 		name := b.String()
-		if c, _ := tables[engineVLLM].classify(name, env); c == classInput && checkName(name, env) == nil {
-			return name
+		tab := tables[engineVLLM]
+		if env {
+			if _, listed := tab.env[name]; !listed && checkName(name, true) == nil {
+				return name
+			}
+		} else if resolved, err := tab.resolveFlag(name); err == nil && resolved == name {
+			if _, listed := tab.flags[name]; !listed {
+				return name
+			}
 		}
 	}
 	panic("gen: no unlisted name found in 10000 tries")

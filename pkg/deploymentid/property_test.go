@@ -211,6 +211,65 @@ func TestPropertyRefusedInputsAreRefused(t *testing.T) {
 		}
 		alias := "-" + g.pick([]string{"t", "q", "O", "p", "tp", "dp", "x3"})
 		g.expectRefused(t, spec, accel, files, alias, false, ErrShortAlias)
+		// vLLM's short options, with and without their dash.
+		short := g.pick(sortedKeys(vllmShortAliases))
+		g.expectRefused(t, spec, accel, files, short, false, ErrShortAlias)
+		g.expectRefused(t, spec, accel, files, "-"+short, false, ErrShortAlias)
+		// A spelling of a refused flag that vLLM resolves to it.
+		for _, r := range vllmV0320 {
+			want := map[class]error{classNever: ErrSecret, classFrameworkPassed: ErrFrameworkPassed}[r.class]
+			if want == nil || r.env {
+				continue
+			}
+			spelled := strings.ReplaceAll(r.name, "-", "_")
+			if g.r.Intn(2) == 0 {
+				spelled += "." + g.pick([]string{"x", "k.v", "a_b"})
+			} else if g.r.Intn(2) == 0 {
+				spelled = r.name[:1+g.r.Intn(len(r.name)-1)]
+			}
+			if _, alias := vllmShortAliases[spelled]; alias {
+				continue
+			}
+			if _, listed := tables[engineVLLM].flags[spelled]; listed && spelled != r.name {
+				continue
+			}
+			g.expectRefused(t, spec, accel, files, spelled, false, want)
+		}
+	}
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+// Spelling flag names with underscores for dashes, as vLLM's parser reads
+// them, gives the same ID.
+func TestPropertyUnderscoreSpellingKeepsID(t *testing.T) {
+	g := newGen(7)
+	changed := 0
+	for i := 0; i < iterations; i++ {
+		spec, accel, files := g.spec()
+		want := mustCompute(t, spec, accel, files)
+		s2, f2 := cloneInputs(spec, files)
+		for j := range s2.Flags {
+			if g.r.Intn(2) == 0 {
+				if spelled := strings.ReplaceAll(s2.Flags[j].Name, "-", "_"); spelled != s2.Flags[j].Name {
+					s2.Flags[j].Name = spelled
+					changed++
+				}
+			}
+		}
+		if got := mustCompute(t, s2, accel, f2); !bytes.Equal(got.Canonical, want.Canonical) {
+			t.Fatalf("iteration %d: underscore spellings changed the ID\n flags %q\n again %q", i, spec.Flags, s2.Flags)
+		}
+	}
+	if changed < iterations {
+		t.Errorf("only %d names were respelled; the generator does not exercise the property", changed)
 	}
 }
 

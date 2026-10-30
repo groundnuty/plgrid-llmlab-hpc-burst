@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"unicode"
 	"unicode/utf8"
 )
 
@@ -14,7 +13,8 @@ import (
 var (
 	// ErrInvalid: an input is empty, malformed or ambiguous.
 	ErrInvalid = errors.New("invalid deployment ID input")
-	// ErrShortAlias: a flag name starts with a single dash, such as -tp. The
+	// ErrShortAlias: a flag name starts with a single dash, such as -tp, or is
+	// one of vLLM's short options written without its dash, such as tp. The
 	// spec lists long names without leading dashes; no command line is parsed.
 	ErrShortAlias = errors.New("short flag alias")
 	// ErrSecret: a key (api-key, hf-token, HF_TOKEN). A key is referenced, never
@@ -72,11 +72,13 @@ func requireCommit(field, s string) error {
 }
 
 // checkName validates the name of a flag or, with env true, of an environment
-// variable. It refuses an empty name, one with whitespace, a control
-// character or '=', which would come from a mis-split command line, and a
-// flag name with a leading dash. Beyond that a name may be any valid UTF-8, so
-// the key order of the canonical object is JCS's UTF-16 order, not a bytewise
-// one.
+// variable, before any spelling is resolved. A name is non-empty UTF-8. A flag
+// name has no leading dash: "-tp" is ErrShortAlias and "--dtype" ErrInvalid,
+// since the spec lists long names without dashes. An environment variable name
+// matches [A-Z_][A-Z0-9_]* and is never rewritten. A flag name's character set
+// is checked by resolveFlag, after underscores are read as dashes. Both sets
+// are ASCII, so every key of the canonical object is ASCII and JCS's UTF-16
+// key order is the bytewise order (HBEP-3).
 func checkName(name string, env bool) error {
 	kind := "flag name"
 	if env {
@@ -85,17 +87,18 @@ func checkName(name string, env bool) error {
 	if err := requireText(kind, name); err != nil {
 		return err
 	}
-	if !env && name[0] == '-' {
+	if env {
+		if !isEnvName(name) {
+			return invalidf("%s %q must match [A-Z_][A-Z0-9_]*", kind, name)
+		}
+		return nil
+	}
+	if name[0] == '-' {
 		if len(name) > 1 && name[1] != '-' {
 			return fmt.Errorf("%w: %q starts with a single dash; list the long name without leading dashes",
 				ErrShortAlias, name)
 		}
 		return invalidf("%s %q starts with dashes; list it without leading dashes", kind, name)
-	}
-	for _, r := range name {
-		if r == '=' || unicode.IsSpace(r) || unicode.IsControl(r) {
-			return invalidf("%s %q contains whitespace, a control character or '='", kind, name)
-		}
 	}
 	return nil
 }

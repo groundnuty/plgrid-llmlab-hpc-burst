@@ -35,7 +35,9 @@ type Engine struct {
 // Flag is one engine flag as the serving spec gives it: the long name without
 // its leading dashes, and its value. A flag given more than once is several
 // Flag entries; their order is meaningful. A boolean flag is given under its
-// positive name with "true" or "false".
+// positive name with "true" or "false". The name matches [a-z0-9][a-z0-9-]*;
+// an underscore is read as a dash, as vLLM's parser reads it, so max_num_seqs
+// and max-num-seqs are one flag and the ID writes the dashed name.
 type Flag struct {
 	Name  string
 	Value string
@@ -59,7 +61,8 @@ type ServingSpec struct {
 	Env        []EnvVar
 	// ChatTemplateSHA256 is the SHA-256 in lowercase hex of the chat
 	// template's UTF-8 text. ResolveChatTemplate and ChatTemplateSHA256 give
-	// it; the text is the empty string when there is no template.
+	// it. With no template at all the text is the empty string and this is its
+	// hash, e3b0c442...b855; it is never "".
 	ChatTemplateSHA256 string
 }
 
@@ -99,6 +102,14 @@ type ID struct {
 // checkpoint's per-file list in any order; Compute sorts it bytewise by path.
 // The order of spec.Flags matters only among entries of the same name, and the
 // order of spec.Env not at all.
+//
+// Compute is frozen at scheme v1 (a later scheme is a new function) and its
+// table covers vLLM v0.32.0. The caller applies the API schema's defaults
+// first and resolves the chat template into spec.ChatTemplateSHA256; the
+// package doc lists the further inputs Compute refuses: another engine, an
+// empty or duplicated file list, unclean paths, a duplicate environment
+// variable, a revision that is not 40 or 64 lowercase hex characters, names
+// outside the ASCII sets, and the spellings of refused flags.
 func Compute(spec ServingSpec, accel Accelerator, files []File) (ID, error) {
 	t, err := validateServing(spec, accel)
 	if err != nil {
@@ -141,7 +152,8 @@ func Compute(spec ServingSpec, accel Accelerator, files []File) (ID, error) {
 
 // ComputeManaged returns the scheme v1 ID of a managed catalog entry: the
 // platform, the catalog name, the revision when the platform reports one, and
-// the marker that everything else is opaque.
+// the marker that everything else is opaque. It is frozen at scheme v1, like
+// Compute. Platform and catalog name must be non-empty valid UTF-8.
 func ComputeManaged(e CatalogEntry) (ID, error) {
 	if err := requireText("platform", e.Platform); err != nil {
 		return ID{}, err
@@ -206,20 +218,21 @@ func servedFlags(t *table, flags []Flag) (jobject, error) {
 	var names []string
 	values := map[string][]string{}
 	for _, f := range flags {
-		if err := checkName(f.Name, false); err != nil {
+		name, err := t.resolveFlag(f.Name)
+		if err != nil {
 			return nil, err
 		}
-		c, reason := t.classify(f.Name, false)
-		if err := refuse(c, "flag", f.Name, reason); err != nil {
+		c, reason := t.classify(name, false)
+		if err := refuse(c, "flag", name, reason); err != nil {
 			return nil, err
 		}
 		if c != classInput {
 			continue
 		}
-		if _, seen := values[f.Name]; !seen {
-			names = append(names, f.Name)
+		if _, seen := values[name]; !seen {
+			names = append(names, name)
 		}
-		values[f.Name] = append(values[f.Name], f.Value)
+		values[name] = append(values[name], f.Value)
 	}
 	out := make(jobject, 0, len(names))
 	for _, n := range names {

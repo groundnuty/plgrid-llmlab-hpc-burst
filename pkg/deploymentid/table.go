@@ -109,16 +109,36 @@ var vllmV0320 = []rule{
 	{"HF_TOKEN", classNever, true, "a key"},
 }
 
+// vllmShortAliases are the short options of vLLM v0.32.0 that have a long
+// name, from their name to it. A serving spec lists long names only
+// (HBEP-3), so each is refused with ErrShortAlias, also written without its
+// dash. The list is read from vllm/engine/arg_utils.py@v0.32.0 (L967, L1140,
+// L1145-1146, L1177-1274, L1828-1856) and vllm/entrypoints/launchers/
+// cli_args.py@v0.32.0 (L443); it covers those two files, not every file that
+// adds options.
+var vllmShortAliases = map[string]string{
+	"q": "quantization", "pp": "pipeline-parallel-size", "n": "nnodes", "r": "node-rank",
+	"tp": "tensor-parallel-size", "dcp": "decode-context-parallel-size",
+	"pcp": "prefill-context-parallel-size", "dp": "data-parallel-size",
+	"dpn": "data-parallel-rank", "dpr": "data-parallel-start-rank", "dpl": "data-parallel-size-local",
+	"dpa": "data-parallel-address", "dpp": "data-parallel-rpc-port", "dpb": "data-parallel-backend",
+	"dph": "data-parallel-hybrid-lb", "dpe": "data-parallel-external-lb", "dpm": "data-parallel-multi-port-external-lb",
+	"ep": "enable-expert-parallel", "sc": "speculative-config", "dc": "diffusion-config",
+	"cc": "compilation-config", "ac": "attention-config", "asc": "api-server-count",
+}
+
 // table is a classification table indexed for lookup. Flags and environment
-// variables are separate namespaces.
+// variables are separate namespaces. aliases maps the short options of the
+// engine to their long names.
 type table struct {
-	flags map[string]rule
-	env   map[string]rule
+	flags   map[string]rule
+	env     map[string]rule
+	aliases map[string]string
 }
 
 // newTable indexes rules. It rejects a name listed twice in one namespace.
 func newTable(rules []rule) (*table, error) {
-	t := &table{flags: map[string]rule{}, env: map[string]rule{}}
+	t := &table{flags: map[string]rule{}, env: map[string]rule{}, aliases: map[string]string{}}
 	for _, r := range rules {
 		m := t.flags
 		if r.env {
@@ -152,5 +172,6 @@ var tables = func() map[string]*table {
 	if err != nil {
 		panic("deploymentid: " + err.Error()) // static data, covered by a test
 	}
+	t.aliases = vllmShortAliases
 	return map[string]*table{engineVLLM: t}
 }()

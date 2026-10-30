@@ -4,17 +4,18 @@
     "checkpoint": {"repository": "example-org/\u00fcn\u00ef-\ud83d\ude00", "revision": "fedcba9876543210fedcba9876543210fedcba98"},
     "engine": {"name": "vllm", "version": "0.32.0", "image_digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777"},
     "flags": [
-      {"name": "\ud83d\ude00", "value": "\u00e9\u65e5\u672c\u8a9e"},
+      {"name": "x", "value": "\ud83d\ude00"},
       {"name": "dtype", "value": "bfloat16"},
-      {"name": "\u20ac", "value": ""},
-      {"name": "\ufb33", "value": "tab\there \"quoted\" back\\slash /slash <tag> & \u2028 \u007f \u0001 \b \f \r \n end"},
-      {"name": "\u00f6", "value": "\ud83d\ude00"},
-      {"name": "1st-flag", "value": "x"}
+      {"name": "ab", "value": "\u00e9\u65e5\u672c\u8a9e"},
+      {"name": "a0", "value": "tab\there \"quoted\" back\\slash /slash <tag> & \u2028 \u007f \u0001 \b \f \r \n end"},
+      {"name": "1st-flag", "value": ""},
+      {"name": "a-b", "value": "\u20ac"}
     ],
     "env": [
       {"name": "ASCII_ENV", "value": "a"},
-      {"name": "\ud83d\ude00_ENV", "value": "b"},
-      {"name": "\uff5e_ENV", "value": "\u00fc"}
+      {"name": "_LEAD", "value": "b"},
+      {"name": "A1", "value": "\u00fc"},
+      {"name": "AB", "value": "c"}
     ],
     "chat_template_sha256": "8888888888888888888888888888888888888888888888888888888888888888"
   },

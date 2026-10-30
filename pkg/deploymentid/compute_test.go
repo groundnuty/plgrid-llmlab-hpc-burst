@@ -121,9 +121,10 @@ func computeVector(t *testing.T, dir string, in vectorInput) ID {
 	return mustCompute(t, spec, Accelerator(in.Accelerator), files)
 }
 
-// The golden vectors: inputs and the expected object written by hand, and the
-// canonical bytes and hash computed by gen_vectors.py with the rfc8785 package
-// and hashlib, outside this package (see testdata/README.md).
+// The golden vectors: inputs, the expected object and the committed canonical
+// bytes with their sha256sum line. Nothing here or in testdata writes them;
+// verify_vectors.py (rfc8785), crosscheck.mjs (canonicalize) and sha256sum
+// check them against other implementations (see testdata/README.md).
 func TestGoldenVectors(t *testing.T) {
 	dirs, err := filepath.Glob("testdata/vectors/*")
 	if err != nil || len(dirs) < 4 {
@@ -173,29 +174,47 @@ func TestFirstVectorIsHBEPExample(t *testing.T) {
 	}
 }
 
-// Keys in vector 05 that UTF-16 order sorts differently from UTF-8 byte
-// order, and file paths that bytewise order sorts differently from UTF-16
-// order: the vector fails a serialiser that gets either rule wrong.
-func TestVector05SeparatesTheTwoOrders(t *testing.T) {
+// Vector 05 keeps non-ASCII in values and file paths and has ASCII keys only
+// (HBEP-3: every key is ASCII). For ASCII strings UTF-16 order and bytewise
+// order are the same, so no key of this vector can tell the two apart; the
+// serialiser's own test (TestJCSRFC8785SortingSample, the RFC 8785 section
+// 3.2.3 sample with U+1F600 and U+FB33 keys) does. What the keys here catch is
+// a sort that is neither: by case, by locale, or by punctuation. The file paths
+// still separate the two orders: the files array is sorted bytewise, and U+FB33
+// and U+1F600 are in the opposite order in UTF-16.
+func TestVector05Orders(t *testing.T) {
 	b, err := os.ReadFile("testdata/vectors/05-unicode-order/canonical.json")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var doc struct {
-		Flags map[string]json.RawMessage `json:"flags"`
-		Env   map[string]json.RawMessage `json:"env"`
-		Files []struct{ Path string }    `json:"files"`
+		Files []struct{ Path string } `json:"files"`
 	}
 	if err := json.Unmarshal(b, &doc); err != nil {
 		t.Fatal(err)
 	}
-	for name, keys := range map[string][]string{"flags": objectKeys(t, b, "flags"), "env": objectKeys(t, b, "env")} {
-		if sort.StringsAreSorted(keys) {
-			t.Errorf("%s keys are in bytewise order; the vector would not catch a bytewise sort: %q", name, keys)
+	for _, name := range []string{"flags", "env"} {
+		keys := objectKeys(t, b, name)
+		for _, k := range keys {
+			for i := 0; i < len(k); i++ {
+				if k[i] >= 0x80 {
+					t.Errorf("%s key %q is not ASCII", name, k)
+				}
+			}
 		}
-		if !slices.IsSortedFunc(keys, compareUTF16) {
-			t.Errorf("%s keys are not in UTF-16 order: %q", name, keys)
+		if !sort.StringsAreSorted(keys) || !slices.IsSortedFunc(keys, compareUTF16) {
+			t.Errorf("%s keys are not in bytewise (= UTF-16) order: %q", name, keys)
 		}
+	}
+	// Punctuation, digits and case order the way ASCII does and not as a
+	// case-folding or locale sort would: "a-b" < "a0" < "ab", and "_LEAD" after
+	// "ASCII_ENV" because '_' is 0x5F, above every upper-case letter.
+	flags, env := objectKeys(t, b, "flags"), objectKeys(t, b, "env")
+	if !slices.Equal(flags[:4], []string{"1st-flag", "a-b", "a0", "ab"}) {
+		t.Errorf("flag keys %q lost the punctuation/digit ordering case", flags)
+	}
+	if env[len(env)-1] != "_LEAD" {
+		t.Errorf("env keys %q: want _LEAD last (bytewise), as a case-insensitive sort would not", env)
 	}
 	var paths []string
 	for _, f := range doc.Files {
