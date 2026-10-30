@@ -1,0 +1,13 @@
+diff --git a/pkg/communication/http.go b/pkg/communication/http.go
+index caabc2b..5def5d2 100644
+--- a/pkg/communication/http.go
++++ b/pkg/communication/http.go
+@@ -55,7 +55,7 @@ const (
+ )
+ 
+ func (c *Communication) newListener() (net.Listener, error) {
+-	listener, err := net.Listen("tcp4", fmt.Sprintf(":%d", c.runtime.Config().Port))
++	listener, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", c.runtime.Config().Port))
+ 	if err != nil {
+ 		return nil, err
+ 	}

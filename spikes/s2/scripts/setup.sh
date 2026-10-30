@@ -16,6 +16,17 @@ pin https://github.com/llm-d/llm-d.git               v1.0.0  378b42d18dabe0b9c4c
 pin https://github.com/llm-d/llm-d-inference-sim.git v1.0.0  7bda03f9fef85139617cb4f724dccafe1cf8cbbf llm-d-inference-sim
 pin https://github.com/vllm-project/router.git       v0.1.16 db02f358da401b60d4ae14eb286163763a0705cc vllm-router
 
+# Neither the simulator nor the EPP can be told which address to listen on; both bind every interface.
+# A one-line-per-listener patch (third_party/forked/*/loopback-bind.patch) makes them bind 127.0.0.1.
+REPO_ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
+apply_patch() { # apply_patch <dir under src> <patch file>; idempotent
+  local dir=$S2_HOME/src/$1
+  if git -C "$dir" apply --check "$2" 2>/dev/null; then git -C "$dir" apply "$2"
+  else git -C "$dir" apply --check --reverse "$2" || { echo "$1: loopback patch neither applies nor is applied" >&2; exit 1; }; fi
+}
+apply_patch llm-d-inference-sim "$REPO_ROOT/third_party/forked/llm-d-inference-sim/loopback-bind.patch"
+apply_patch llm-d-router "$REPO_ROOT/third_party/forked/llm-d-router/loopback-bind.patch"
+
 export CGO_ENABLED=0
 [[ -x $S2_HOME/bin/llm-d-inference-sim ]] || (cd "$S2_HOME/src/llm-d-inference-sim" && nice -n 10 go build -o "$S2_HOME/bin/llm-d-inference-sim" ./cmd/llm-d-inference-sim)
 [[ -x $S2_HOME/bin/epp ]] || (cd "$S2_HOME/src/llm-d-router" && nice -n 10 go build -o "$S2_HOME/bin/epp" ./cmd/epp)

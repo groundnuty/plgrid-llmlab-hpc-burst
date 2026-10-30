@@ -8,7 +8,10 @@
 #   run.sh placement [stack...]  multi-turn sessions through each router: where do turns land. ~3 min each.
 #   run.sh removal [stack...]  remove a worker from discovery under an in-flight 25 min stream. ~27 min each.
 #   run.sh epp-kill   fault injection: stop the EPP under an in-flight stream. ~3 min
+#   run.sh epp-stall  fault injection: freeze the EPP for 90 s under an in-flight stream. ~4 min
+#   run.sh restart    does a removal survive a router restart? (L-4.8) ~2 min
 #   run.sh ttft       first byte after 1,100 s (past llm-d's 1,000 s message timeout), 30 tokens. ~19 min
+#   run.sh all        every scenario above, the 2 h streams in the background. ~2 h 10 min
 #   run.sh summary    table of every stream result found under $S2_HOME/results
 #
 # Exit status is non-zero if any scenario's expectation is not met. Results: $S2_HOME/results/<scenario>/.
@@ -134,6 +137,43 @@ scenario_epp_kill() {
   "$SC" stop llmd-guide
 }
 
+# Fault injection: a frozen EPP. Envoy starts no ext_proc timer in FULL_DUPLEX_STREAMED mode, so nothing should notice.
+scenario_epp_stall() {
+  local out=$S2_HOME/results/epp-stall; mkdir -p "$out"; capacity_gate
+  fresh llmd-guide || return 1
+  "$P" stream -url "$("$SC" url llmd-guide)" -tokens 150 -session s1 -label stream-through-frozen-epp -outdir "$out" > "$out/stream.out" 2>&1 &
+  local pid=$!
+  sleep 20; "$SC" signal-epp llmd-guide STOP
+  sleep 90; "$SC" signal-epp llmd-guide CONT
+  wait $pid
+  python3 -I "$HERE/summarize.py" "$out"
+  "$SC" stop llmd-guide
+}
+
+# Does a removal survive a restart of the router? (lesson L-4.8: joined workers were lost on a restart)
+scenario_restart() {
+  local out=$S2_HOME/results/restart; mkdir -p "$out"; capacity_gate
+  local url metrics w0
+  # llm-d: the endpoints file is the state, so worker 0 must stay out after an EPP restart.
+  fresh llmd-guide || return 1
+  url=$("$SC" url llmd-guide); metrics=$("$SC" metrics llmd-guide)
+  "$SC" remove llmd-guide 0; sleep 5
+  "$P" placement -url "$url" -metrics "$metrics" -sessions 12 -turns 1 | tee "$out/llmd-before.txt" >/dev/null
+  "$SC" kill-epp llmd-guide; "$SC" start-epp llmd-guide; sleep 15
+  "$P" placement -url "$url" -metrics "$metrics" -sessions 12 -turns 1 | tee "$out/llmd-after.txt" >/dev/null
+  w0=$(sed -n 's/.*(by first turn): \[\([0-9]*\) .*/\1/p' "$out/llmd-after.txt")
+  echo "llm-d: sessions on removed worker 0 after the EPP restart: $w0 (expected 0)"; [[ $w0 == 0 ]] || fail=1
+  "$SC" stop llmd-guide
+  # vllm-router: the removal is in memory, so worker 0 should be back after a restart.
+  fresh vllmr-affinity || return 1
+  local lw="http://127.0.0.1:$(( $("$SC" url vllmr-affinity | sed 's|.*:\([0-9]*\)/v1.*|\1|') ))/list_workers"
+  "$SC" remove vllmr-affinity 0; echo "vllm-router workers after removal: $(curl -sf "$lw")"
+  "$SC" restart-router vllmr-affinity
+  echo "vllm-router workers after restart: $(curl -sf "$lw")" | tee "$out/vllmr-after.txt"
+  [[ $(curl -sf "$lw" | grep -o 'http://' | wc -l) -eq 3 ]] && echo "vllm-router: removed worker is back (expected)" || { echo "vllm-router: removal survived a restart (unexpected)"; fail=1; }
+  "$SC" stop vllmr-affinity
+}
+
 # A reply whose first byte takes longer than the shipped ext_proc message timeout (1,000 s): HBEP-5's
 # "a reply spends many minutes in prefill before its first byte".
 scenario_ttft() {
@@ -152,9 +192,18 @@ scenario_ttft() {
   for s in llmd-ttft vllmr-ttft; do "$SC" stop "$s"; done
 }
 
+# Everything: the 2 h streams run in the background while the other scenarios run in turn (about 2 h 10 min).
+scenario_all() {
+  "$0" long > "$S2_HOME/results/long.log" 2>&1 &
+  local lp=$!
+  scenario_controls; scenario_placement; scenario_removal; scenario_epp_kill; scenario_epp_stall; scenario_restart; scenario_ttft
+  wait $lp || fail=1
+  echo "long scenario log: $S2_HOME/results/long.log"; tail -12 "$S2_HOME/results/long.log"
+}
+
 case ${1:-} in
-long) scenario_long ;; controls) scenario_controls ;; placement) scenario_placement "${@:2}" ;; removal) scenario_removal "${@:2}" ;; epp-kill) scenario_epp_kill ;; ttft) scenario_ttft ;;
-summary) python3 -I "$HERE/summarize.py" "$S2_HOME"/results/* ;;
+long) scenario_long ;; controls) scenario_controls ;; placement) scenario_placement "${@:2}" ;; removal) scenario_removal "${@:2}" ;; epp-kill) scenario_epp_kill ;; epp-stall) scenario_epp_stall ;; ttft) scenario_ttft ;; restart) scenario_restart ;;
+all) scenario_all ;; summary) python3 -I "$HERE/summarize.py" "$S2_HOME"/results/* ;;
 *) sed -n 2,12p "$0"; exit 64 ;;
 esac
 exit $fail

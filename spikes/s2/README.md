@@ -53,7 +53,7 @@ RESULTS-BRIEF
 | llm-d guides (Envoy and EPP configs) | https://github.com/llm-d/llm-d, `guides/no-kubernetes-deployment` | Apache-2.0 | v1.0.0, commit 378b42d; read at run time, not copied into this repository |
 | Engine double | llm-d-inference-sim, https://github.com/llm-d/llm-d-inference-sim | Apache-2.0 | v1.0.0, commit 7bda03f, built from source (`CGO_ENABLED=0`) |
 | vllm-router | https://github.com/vllm-project/router | Apache-2.0 | 0.1.16 from PyPI (PyO3 wheel plus Python launcher), source commit db02f35 |
-| Python launcher dependencies | aiohttp, fastapi, uvicorn, orjson, requests, setproctitle (PyPI) | various permissive | latest at run time; only the CLI wrapper imports them |
+| Python launcher dependencies | aiohttp 3.14.5 (Apache-2.0 AND MIT), fastapi 0.162.0 (MIT), uvicorn 0.54.0 (BSD-3-Clause), orjson 3.13.0 (MPL-2.0 AND (Apache-2.0 OR MIT)), requests 2.34.2 (Apache-2.0), setproctitle 1.3.8 (BSD-3-Clause); PyPI | as listed | Only the vllm-router CLI wrapper imports them; Python 3.15.0 |
 
 Reuse: all four routers and engines are community software used unmodified. New in this spike: the
 test client, the stack scripts and the config generator, all under `spikes/s2/`. No third-party code
@@ -64,7 +64,7 @@ line it expects has changed.
 ## Environment
 
 Single VM, 6 cores, 31 GB, no swap, shared with other sessions: the 1-minute load during the 2 h run
-was between 2 and 6. Python 3.15.0 for the vllm-router launcher. ENVIRONMENT-NOTES
+was between 2 and 6. Python 3.15.0 for the vllm-router launcher; Go 1.27.3. ENVIRONMENT-NOTES
 
 ## Deadlines on the path
 
@@ -90,16 +90,26 @@ ARM64
 
 ```bash
 export S2_HOME=<an empty work directory, about 1 GB>
-spikes/s2/scripts/setup.sh                 # pin, fetch, build; needs git, curl, go, python3 with venv
-spikes/s2/scripts/run.sh controls          # ~11 min
-spikes/s2/scripts/run.sh placement         # ~25 min
-spikes/s2/scripts/run.sh removal           # ~27 min per router (pass a stack name to run one)
-spikes/s2/scripts/run.sh epp-kill          # ~3 min
-spikes/s2/scripts/run.sh long              # ~2 h 5 min: five 2 h streams in parallel
-spikes/s2/scripts/run.sh summary
+spikes/s2/scripts/setup.sh                 # pin, fetch, patch, build; needs git, curl, go, python3 with venv
+spikes/s2/scripts/run.sh all               # every scenario below; the 2 h streams run in the background (~2 h 10 min)
+spikes/s2/scripts/run.sh summary           # table of every stream result
+(cd spikes/s2 && go test ./...)            # the client's own verdict logic: cut vs complete, metrics parsing
 ```
 
-`run.sh` exits non-zero if an expectation is not met. Results land in `$S2_HOME/results/<scenario>/`:
+Or one scenario at a time (all but `long` and `all` are short):
+
+```bash
+run.sh controls    # ~11 min   vllm-router 60 s deadline cuts; llm-d with 5 s ext_proc timers streams 600 s
+run.sh placement   # ~25 min   eight placement cases
+run.sh removal     # ~27 min per router (pass llmd-removal or vllmr-removal to run one)
+run.sh epp-kill    # ~3 min    stop the EPP under an in-flight stream
+run.sh epp-stall   # ~4 min    freeze the EPP for 90 s under an in-flight stream
+run.sh restart     # ~2 min    does a removal survive a router restart
+run.sh ttft        # ~19 min   first token after 1,100 s
+run.sh long        # ~2 h 5 min   five 2 h streams in parallel
+```
+
+`run.sh` exits non-zero if an expectation is not met (`epp-kill` and `epp-stall` record behaviour and have no pass criterion). Results land in `$S2_HOME/results/<scenario>/`:
 one JSON verdict and one gaps CSV per stream, and the Envoy access log of each llm-d stack.
 `SIM_ITL` and `SIM_TTFT` change the simulators' pace; `LONG_TOKENS` and `REMOVAL_TOKENS` change the
 stream lengths (the expectations for the default-deadline cut assume the full length).

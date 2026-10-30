@@ -8,6 +8,8 @@
 #   stack.sh metrics <stack>         print the workers' /metrics URLs, comma-separated
 #   stack.sh kill-epp <stack>        SIGTERM the EPP of an llm-d stack (fault injection)
 #   stack.sh start-epp <stack>       start it again
+#   stack.sh restart-router <stack>  restart a vllm-router with its original arguments
+#   stack.sh signal-epp <stack> STOP|CONT   freeze or thaw the EPP (fault injection)
 #   stack.sh status [stack...]       show recorded PIDs and whether they are alive
 #
 # Stacks: name idx kind sims | envoy variant | epp variant | router options
@@ -66,11 +68,26 @@ start_epp() {
   # session-affinity-scorer is Alpha in llm-d-router v1.0.0 and the EPP refuses to start without this flag.
   local epp_extra=(); [[ "${EPPV[$stack]}" == session ]] && epp_extra+=(--allow-experimental-plugins)
   spawn epp "$RUN/epp.log" "$S2_HOME/bin/epp" --config-file="$RUN/epp-config.yaml" --pool-name=file-discovery --pool-namespace=default \
-    --grpc-port="$EPP_GRPC" --grpc-health-port="$EPP_HEALTH" --metrics-port="$EPP_METRICS" --secure-serving=false --health-checking=true --v="${EPP_V:-2}" "${epp_extra[@]}"
+    --grpc-port="$EPP_GRPC" --grpc-health-port="$EPP_HEALTH" --metrics-port="$EPP_METRICS" --secure-serving=false --health-checking=true --tracing=false --v="${EPP_V:-2}" "${epp_extra[@]}"
 }
+
+start_router() {
+  local urls=() extra=()
+  for n in $(seq 0 $((NSIM - 1))); do urls+=("http://127.0.0.1:$(sim_port $n)"); done
+  [[ "$stack" == vllmr-tuned || "$stack" == vllmr-affinity || "$stack" == vllmr-removal ]] && extra+=(--request-timeout-secs 10800)
+  [[ "$stack" == vllmr-short ]] && extra+=(--request-timeout-secs 60)
+  spawn router "$RUN/router.log" "$S2_HOME/venv/bin/python" "$S2_HOME/venv/bin/vllm-router" --host 127.0.0.1 --port "$ROUTER_PORT" \
+    --worker-urls "${urls[@]}" --policy consistent_hash --prometheus-host 127.0.0.1 --prometheus-port "$VR_PROM" "${extra[@]}"
+}
+
+port_free() { ! (exec 3<> "/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 
 cmd_start() {
   mkdir -p "$RUN"
+  # A listener left over from an earlier stack would answer the health checks of this one and receive its traffic.
+  local ports=("$ROUTER_PORT" "$ADMIN_PORT" "$EPP_GRPC" "$EPP_HEALTH" "$EPP_METRICS" "$VR_PROM") n p
+  for n in $(seq 0 $((NSIM - 1))); do ports+=("$(sim_port $n)"); done
+  for p in "${ports[@]}"; do port_free "$p" || { echo "port $p of stack $stack is already in use; refusing to start" >&2; return 1; }; done
   for n in $(seq 0 $((NSIM - 1))); do
     spawn "sim$n" "$RUN/sim$n.log" "$S2_HOME/bin/llm-d-inference-sim" --port "$(sim_port $n)" --model "$MODEL" \
       --max-model-len 16384 --max-num-seqs 64 --time-to-first-token "$SIM_TTFT" --inter-token-latency "$SIM_ITL"
@@ -89,12 +106,7 @@ cmd_start() {
     wait_http "http://127.0.0.1:$ADMIN_PORT/ready" 60
     ;;
   vllmr)
-    local urls=() extra=()
-    for n in $(seq 0 $((NSIM - 1))); do urls+=("http://127.0.0.1:$(sim_port $n)"); done
-    [[ "$stack" == vllmr-tuned || "$stack" == vllmr-affinity || "$stack" == vllmr-removal ]] && extra+=(--request-timeout-secs 10800)
-    [[ "$stack" == vllmr-short ]] && extra+=(--request-timeout-secs 60)
-    spawn router "$RUN/router.log" "$S2_HOME/venv/bin/python" "$S2_HOME/venv/bin/vllm-router" --host 127.0.0.1 --port "$ROUTER_PORT" \
-      --worker-urls "${urls[@]}" --policy consistent_hash --prometheus-host 127.0.0.1 --prometheus-port "$VR_PROM" "${extra[@]}"
+    start_router
     wait_http "http://127.0.0.1:$ROUTER_PORT/health" 60
     ;;
   esac
@@ -155,6 +167,8 @@ cmd_status() {
 
 case ${1:-} in
 kill-epp) stop_pid "$RUN/epp.pid"; echo "EPP of $stack stopped at $(date -u +%T)" ;;
+restart-router) stop_pid "$RUN/router.pid"; start_router; wait_http "http://127.0.0.1:$ROUTER_PORT/health" 60; echo "router of $stack restarted at $(date -u +%T)" ;;
+signal-epp) read -r pid st < "$RUN/epp.pid"; [[ $(awk '{print $22}' "/proc/$pid/stat") == "$st" ]] && kill -"${3:?STOP|CONT}" "$pid"; echo "EPP of $stack: SIG${3} at $(date -u +%T)" ;;
 start-epp) start_epp; echo "EPP of $stack started at $(date -u +%T)" ;;
 start) cmd_start ;; stop) cmd_stop ;; remove) cmd_remove "$@" ;; url) cmd_url ;; metrics) cmd_metrics ;;
 status) shift; cmd_status "$@" ;;
