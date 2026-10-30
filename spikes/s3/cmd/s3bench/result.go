@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"sort"
-	"time"
 )
 
 type timing struct {
@@ -41,13 +40,27 @@ type budgetLine struct {
 	Limit  string `json:"limit"`
 	Actual string `json:"actual"`
 	Pass   bool   `json:"pass"`
+	// Expected marks a failing line whose failure is the negative control's designed outcome.
+	Expected bool `json:"expected_failure,omitempty"`
+}
+
+// phaseRecord says when one phase (main or upgrade) ran and exactly which binaries it ran, so a
+// merged result never attributes one phase's numbers to another phase's start time or binaries.
+type phaseRecord struct {
+	Name        string            `json:"phase"`
+	StartedUTC  string            `json:"started_utc"`
+	FinishedUTC string            `json:"finished_utc,omitempty"`
+	E2ESHA256   string            `json:"e2e_binary_sha256"`
+	HarnessSHA  string            `json:"s3bench_binary_sha256"`
+	HostBinary  map[string]string `json:"host_binaries_sha256"`
 }
 
 type result struct {
 	Option     string         `json:"option"`
 	Old        string         `json:"version_old"`
 	New        string         `json:"version_new"`
-	Started    string         `json:"started_utc"`
+	Phases     []phaseRecord  `json:"phases"`
+	NegControl bool           `json:"negative_control,omitempty"`
 	Cold       []timing       `json:"cold_starts"`
 	Warm       []timing       `json:"warm_starts"`
 	ColdMedian timing         `json:"cold_median"`
@@ -60,12 +73,15 @@ type result struct {
 	E2E        *e2eResult     `json:"e2e,omitempty"`
 	Upgrade    *upgradeResult `json:"upgrade,omitempty"`
 	Budget     []budgetLine   `json:"budget"`
+	StateMiB   float64        `json:"state_dir_mib_after_load"`
 	Notes      []string       `json:"notes,omitempty"`
+	// Problems are unexpected outcomes. A run with any problem exits non-zero.
+	Problems []string `json:"problems,omitempty"`
 }
 
 func newResult(h host) *result {
 	o, n := h.versions()
-	return &result{Option: h.name(), Old: o, New: n, Started: time.Now().UTC().Format(time.RFC3339)}
+	return &result{Option: h.name(), Old: o, New: n, NegControl: h.negativeControl()}
 }
 
 func median(xs []int64) int64 {
@@ -85,34 +101,68 @@ func medianTiming(ts []timing) timing {
 	return timing{ReadyzMS: median(a), ReadyMS: median(b), UsableMS: median(c)}
 }
 
+// finish computes the medians, the budget lines and the problems. Problems are recomputed
+// from the stored outcomes each time, so a merged partial run is judged as a whole.
 func (r *result) finish() {
 	r.ColdMedian, r.WarmMedian = medianTiming(r.Cold), medianTiming(r.Warm)
 	r.Budget = nil
-	add := func(line, limit, actual string, pass bool) {
-		r.Budget = append(r.Budget, budgetLine{line, limit, actual, pass})
+	var probs []string
+	add := func(line, limit, actual string, pass, expected bool) {
+		r.Budget = append(r.Budget, budgetLine{line, limit, actual, pass, expected})
+		if !pass && !expected {
+			probs = append(probs, fmt.Sprintf("budget line %q failed: %s", line, actual))
+		}
 	}
+	suite := expectSuite(r.NegControl)
 	if r.Idle != nil {
-		add("RSS idle", "<= 600 MiB", fmt.Sprintf("%.0f MiB", r.Idle.MedianMiB), r.Idle.MedianMiB <= 600)
+		add("RSS idle", "<= 600 MiB", fmt.Sprintf("%.0f MiB", r.Idle.MedianMiB), r.Idle.MedianMiB <= 600, false)
 	}
 	if r.Loaded != nil {
-		add("RSS with ~100 objects", "<= 800 MiB", fmt.Sprintf("%.0f MiB", r.Loaded.MedianMiB), r.Loaded.MedianMiB <= 800)
+		add("RSS with ~100 objects", "<= 800 MiB", fmt.Sprintf("%.0f MiB", r.Loaded.MedianMiB), r.Loaded.MedianMiB <= 800, false)
 	}
 	if len(r.Cold) > 0 {
-		add("cold start to ready", "<= 30 s", fmt.Sprintf("%.1f s (median of %d)", float64(r.ColdMedian.ReadyMS)/1000, len(r.Cold)), r.ColdMedian.ReadyMS <= 30000)
+		add("cold start to ready", "<= 30 s", fmt.Sprintf("%.1f s (median of %d)", float64(r.ColdMedian.ReadyMS)/1000, len(r.Cold)), r.ColdMedian.ReadyMS <= 30000, false)
 	}
 	if len(r.Warm) > 0 {
-		add("warm start to ready", "<= 30 s", fmt.Sprintf("%.1f s (median of %d)", float64(r.WarmMedian.ReadyMS)/1000, len(r.Warm)), r.WarmMedian.ReadyMS <= 30000)
+		add("warm start to ready", "<= 30 s", fmt.Sprintf("%.1f s (median of %d)", float64(r.WarmMedian.ReadyMS)/1000, len(r.Warm)), r.WarmMedian.ReadyMS <= 30000, false)
 	}
 	if u := r.Upgrade; u != nil {
-		ok := u.Error == "" && u.ObjectsBefore > 0 && u.ObjectsKept == u.ObjectsBefore && len(u.E2EAfter.Failed) == 0 &&
-			u.E2EAfter.Exit == 0 && u.PostUpgrade.Exit == 0 && len(u.PostUpgrade.Failed) == 0 && u.StopToReadyMS <= 60000
+		upOK := u.Error == "" && u.ObjectsBefore > 0 && u.ObjectsKept == u.ObjectsBefore && u.StopToReadyMS <= 60000
+		testsPass := len(u.E2EAfter.Failed) == 0 && u.E2EAfter.Exit == 0 && u.PostUpgrade.Exit == 0 && len(u.PostUpgrade.Failed) == 0
+		var tp []string
+		if u.Error == "" {
+			tp = append(tp, suite.check("e2e after upgrade", u.E2EAfter)...)
+			tp = append(tp, expectPostUpgrade(r.NegControl).check("post-upgrade test", u.PostUpgrade)...)
+		} else {
+			probs = append(probs, "upgrade error: "+u.Error)
+		}
+		probs = append(probs, tp...)
+		pass := upOK && testsPass && len(tp) == 0
+		expected := !pass && upOK && len(tp) == 0 && r.NegControl
 		add("minor upgrade", "all objects kept, e2e passes, stop to ready <= 60 s",
 			fmt.Sprintf("%d/%d kept, e2e failed=%d, post-upgrade failed=%d, stop to ready %.1f s %s", u.ObjectsKept, u.ObjectsBefore,
-				len(u.E2EAfter.Failed), len(u.PostUpgrade.Failed), float64(u.StopToReadyMS)/1000, u.Error), ok)
+				len(u.E2EAfter.Failed), len(u.PostUpgrade.Failed), float64(u.StopToReadyMS)/1000, u.Error), pass, expected)
+		if !upOK && u.Error == "" {
+			probs = append(probs, fmt.Sprintf("upgrade kept %d of %d objects (differences %v)", u.ObjectsKept, u.ObjectsBefore, u.Diffs))
+		}
 	}
 	if r.E2E != nil {
-		add("e2e suite", "every test passes", fmt.Sprintf("%d passed, %d failed %v", len(r.E2E.Passed), len(r.E2E.Failed), r.E2E.Failed), len(r.E2E.Failed) == 0 && r.E2E.Exit == 0)
+		tp := suite.check("e2e suite", *r.E2E)
+		probs = append(probs, tp...)
+		pass := len(r.E2E.Failed) == 0 && r.E2E.Exit == 0 && len(tp) == 0
+		add("e2e suite", "every test passes", fmt.Sprintf("%d passed, %d failed %v", len(r.E2E.Passed), len(r.E2E.Failed), r.E2E.Failed),
+			pass, !pass && len(tp) == 0 && r.NegControl)
 	}
+	have := map[string]bool{}
+	for _, ph := range r.Phases {
+		have[ph.Name] = true
+	}
+	for _, want := range []string{"main", "upgrade"} {
+		if !have[want] {
+			probs = append(probs, "the result has no record of the "+want+" phase")
+		}
+	}
+	r.Problems = probs
 }
 
 func (r *result) print(w io.Writer) {
@@ -121,8 +171,11 @@ func (r *result) print(w io.Writer) {
 		v := "PASS"
 		if !b.Pass {
 			v = "FAIL"
+			if b.Expected {
+				v = "FAIL(expected)"
+			}
 		}
-		fmt.Fprintf(w, "  %-4s %-24s limit %-48s actual %s\n", v, b.Line, b.Limit, b.Actual)
+		fmt.Fprintf(w, "  %-14s %-24s limit %-48s actual %s\n", v, b.Line, b.Limit, b.Actual)
 	}
 	fmt.Fprintf(w, "  start medians: cold readyz %d ms ready %d ms usable %d ms; warm readyz %d ms ready %d ms usable %d ms\n",
 		r.ColdMedian.ReadyzMS, r.ColdMedian.ReadyMS, r.ColdMedian.UsableMS, r.WarmMedian.ReadyzMS, r.WarmMedian.ReadyMS, r.WarmMedian.UsableMS)
@@ -131,5 +184,8 @@ func (r *result) print(w io.Writer) {
 	}
 	for _, n := range r.Notes {
 		fmt.Fprintf(w, "  note: %s\n", n)
+	}
+	for _, p := range r.Problems {
+		fmt.Fprintf(w, "  PROBLEM: %s\n", p)
 	}
 }
