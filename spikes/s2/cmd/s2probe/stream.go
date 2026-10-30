@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -50,15 +51,6 @@ type streamResult struct {
 	Comments      int               `json:"sse_comment_lines"`
 	Complete      bool              `json:"complete"`
 	CutAfterSec   float64           `json:"cut_after_sec,omitempty"`
-}
-
-type chatChunk struct {
-	Choices []struct {
-		Delta struct {
-			Content string `json:"content"`
-		} `json:"delta"`
-		FinishReason *string `json:"finish_reason"`
-	} `json:"choices"`
 }
 
 // chatBody builds a streamed chat request whose output length is exactly n tokens:
@@ -161,24 +153,34 @@ func doStream(url, model string, tokens, expect int, session, label, outdir stri
 	var gaps []float64
 	last := start
 	nextProgress := start.Add(progress)
-	rd := bufio.NewReaderSize(resp.Body, 64<<10)
+	sr := newSSEReader(resp.Body)
 	for {
-		line, rerr := rd.ReadString('\n')
+		// An event counts only once its blank line has arrived; the gap clock stops there.
+		ev, rerr := sr.next(func() { res.Comments++ })
 		now := time.Now()
-		line = strings.TrimRight(line, "\r\n")
-		switch {
-		case strings.HasPrefix(line, ":"):
-			res.Comments++
-		case strings.HasPrefix(line, "data:"):
-			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-			if data == "[DONE]" {
-				res.DoneSeen = true
-				break
+		if rerr != nil {
+			switch {
+			case errors.Is(rerr, errUnfinishedEvent):
+				res.Error = rerr.Error()
+			case rerr != io.EOF:
+				res.Error = "read: " + rerr.Error()
+			case !res.DoneSeen:
+				res.Error = "clean EOF before [DONE]"
 			}
-			var ch chatChunk
-			if json.Unmarshal([]byte(data), &ch) != nil || len(ch.Choices) == 0 {
-				break
-			}
+			break
+		}
+		if res.DoneSeen {
+			res.Error = "event after [DONE]"
+			break
+		}
+		ch, done, perr := parseChunk(ev)
+		if perr != nil {
+			res.Error = perr.Error()
+			break
+		}
+		if done {
+			res.DoneSeen = true
+		} else if len(ch.Choices) > 0 {
 			c := ch.Choices[0]
 			if c.FinishReason != nil && *c.FinishReason != "" {
 				res.FinishReason = *c.FinishReason
@@ -199,14 +201,6 @@ func doStream(url, model string, tokens, expect int, session, label, outdir stri
 			fmt.Fprintf(os.Stderr, "%s %s elapsed=%.0fs tokens=%d\n", now.UTC().Format("15:04:05"), label, now.Sub(start).Seconds(), res.Tokens)
 			gw.Flush()
 			nextProgress = now.Add(progress)
-		}
-		if rerr != nil {
-			if rerr != io.EOF {
-				res.Error = "read: " + rerr.Error()
-			} else if !res.DoneSeen {
-				res.Error = "clean EOF before [DONE]"
-			}
-			break
 		}
 	}
 	res.ElapsedSec = time.Since(start).Seconds()
