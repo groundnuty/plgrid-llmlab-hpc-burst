@@ -13,9 +13,10 @@ HBEP-5 keeps each conversation on the Instance that holds its prefix cache, by c
 - **Hit rate.** It beats round robin in all three seeds wherever the KV cache can hold the active contexts:
   - tight cache: 85.9% against 43.4%, at 2.85× round robin's throughput;
   - ample cache: 95.2% against 51.1%.
-- **Bound.** No placement exceeded the bound in steady state or when an Instance left.
-- **Drain.** KubeAI's code exceeds the bound during every drain in the tight regime, by up to 6.5 requests at c = 1.25. Upstream `removeEndpoint` keeps the drained Instance's requests in the mean. Releasing them from the count at drain start, a front-side change, removes every violation.
-- **Scarce cache.** When the working set is about twice the cluster's KV cache, no key or bound beats round robin reliably.
+- **Bound.** No placement exceeded the bound in steady state or when an Instance left. In steady state this holds by construction (see "The bound, and how it is checked"), so the test that can fail is the drain.
+- **Drain.** KubeAI's code exceeds the bound during every drain in the tight regime, including make-before-break handovers, by up to 6.5 requests at c = 1.25. Upstream `removeEndpoint` keeps the drained Instance's requests in the mean. Releasing them from the count at drain start, a front-side change, removes every violation in the drains and handovers measured. The pass is conditional on that change.
+- **Scarce cache.** When the working set is about twice the cluster's KV cache, no key or bound beats round robin reliably. At 750 k tokens per Instance, c = 1.25 / opening lost to round robin on seeds 1 and 3.
+- **Which bound.** The pass uses HBEP-5's and KubeAI's reading of the bound: a target is skipped when its load before the request is above c × the mean. Under the strict capacity ⌈c × mean⌉ after the request, no configuration passes: KubeAI places one request over it on up to 1% of placements in the tight regime, and between placements some Instance sits above 1.25 × the mean for 25–43% of the time in the tight regime. Choosing the reading is a decision for HBEP-5.
 
 Keys that hash only the start of the request (KubeAI's default 100 characters, a fixed 2,048-token prefix, the system prompt alone) collapse 15–36% of conversations onto one key. They are the collapse case the issue warns about.
 
@@ -120,7 +121,7 @@ GOMAXPROCS=2 nice -n 10 ./s10sim -mode all -out results   # the full sweep: abou
 
 ## Tests
 
-`go test ./...` in `spikes/s10` runs every check below in about 10 s. `-short` skips the scaled pass test. Expected values are worked out by hand in each test's comment, or come from the issue and HBEP-5, never from a simulator run.
+`go test ./...` in `spikes/s10` runs every check below in about 30 s. `-short` skips the scaled pass test. Expected values are worked out by hand in each test's comment, or come from the issue and HBEP-5, never from a simulator run.
 
 | Issue requirement | Test |
 |---|---|
@@ -131,7 +132,7 @@ GOMAXPROCS=2 nice -n 10 ./s10sim -mode all -out results   # the full sweep: abou
 | Growing prefixes, seeded workload | `TestContextGrowsByAppending`, `TestGeneratorIsSeeded`, `TestUserStreamIsSeeded`, `TestClosedLoopUsersRunOneConversationAtATime` |
 | Collapse case | `TestKubeAIKeyCollapsesPreambleClients`, `TestSystemKeyCollapsesUnderAffinity`, `TestCHWBLSpillsCollapsedKeyWithinBound` |
 | Drain and leave | `TestDrainMovesOnlyItsConversations` (forced count from a separate ring), `TestLeaveResendsCutRequests` (every turn completes exactly once), `TestJoinMovesKeysOnlyToNewInstance`, `TestDrainInflatesKubeAIMeanUnlessReleased` |
-| Pass criterion | `TestPassCriterion`: a quarter-scale copy of the tight regime (40 users, 375 k tokens per Instance). CHWBL 1.25 on both keys must beat round robin's hit rate and place nothing above the bound, in each of seeds 1–3 |
+| Pass criterion | `TestPassCriterion`: a quarter-scale copy of the tight regime (40 users, 375 k tokens per Instance). In each of seeds 1–3, CHWBL 1.25 on both keys must beat round robin's hit rate. Its bound assertion holds by construction in steady state. `TestPassCriterionHoldsThroughDrains` is the one that can fail: in the same setup, a drain and a make-before-break handover must break the bound without the release (the control) and must not with it |
 | The fork | `third_party/forked/kubeai/loadbalancer/sim_api_test.go`: same key gives the same endpoint, spill at the bound worked by hand, release after removal |
 
 The tests were checked by breaking the cache on purpose:
@@ -143,7 +144,7 @@ The re-homing counter's test failed on the bug it was written for: conversations
 
 ## Results
 
-Full tables: `results/steady.md`, `results/events-*.md` and `results/drainfix-*.md`, with every raw per-run field in the matching `.csv`. Numbers below are means over seeds 1–3, with the per-seed range in brackets.
+Full tables: `results/steady.md`, `results/events-*.md` and `results/drainfix-*.md`, with every raw per-run field in the matching `.csv`. `steady.csv` was written before the `max_rule_excess` column was added, so it lacks that column; a re-run adds it, and the column is 0 in steady state. Numbers below are means over seeds 1–3, with the per-seed range in brackets.
 
 ### Steady state
 
@@ -245,8 +246,11 @@ A front-side change fixes this without touching the copied algorithm. At drain s
 | 1.5 M | 2.00 / opening | 35 → 0 | 78.4% → 78.0% |
 | 3 M | 1.25 / opening | 16 → 0 | 94.4% → 94.3% |
 | 3 M | 1.25 / header>opening | 13 → 0 | 94.6% → 94.6% |
+| 1.5 M | 1.25 / opening, handover | 58 → 0 | 91.0% → 91.0% |
+| 1.5 M | 1.25 / header>opening, handover | 61 → 0 | 90.1% → 90.1% |
+| 3 M | 1.25 / opening, handover | 37 → 0 | 93.8% → 93.8% |
 
-All twelve released configurations (both keys, three bounds, both sizes) had zero placements above the bound and zero inflation (`results/drainfix-*.md`).
+All 24 released runs, plain drain and handover across both keys, three bounds and both sizes, had zero placements above the bound and zero inflation (`results/drainfix-*.md`).
 
 ## What this means for the HBEPs
 
@@ -265,6 +269,12 @@ All twelve released configurations (both keys, three bounds, both sizes) had zer
 - **Requests above a cap wait at the Instance, not at the front** as HBEP-5 proposes. Other load measures, such as sessions or KV use (open question 3), were not compared.
 - **The front-side drain release** was tested only in the simulator. Its interaction with retries (open question 5) and with a front restart (open question 11) is open.
 - llm-d-inference-sim was not tried.
+
+## Deviations
+
+- The issue cites HBEP-15's convention for forked code. HBEP-15 is not on `main` (`hbep/` stops at HBEP-11), so the fork follows the spike rules instead: `third_party/forked/<project>/` with the original LICENSE and a NOTES file giving origin and changes.
+- The front-side drain release (`ReleaseOnDrain`) is the simulator's change, not KubeAI's. The copied algorithm is unchanged.
+- Least load is the simulator's own deterministic version, not KubeAI's map-order one.
 
 
 

@@ -193,7 +193,7 @@ func (r *runner) drainFix(dir string, kvs []int) {
 		}
 	}
 	for _, kv := range kvs {
-		r.eventRunsAt(dir, kv, "drainfix", ps, scenarios[:2])
+		r.eventRunsAt(dir, kv, "drainfix", ps, []scenario{scenarios[0], scenarios[1], scenarios[3]})
 	}
 }
 
