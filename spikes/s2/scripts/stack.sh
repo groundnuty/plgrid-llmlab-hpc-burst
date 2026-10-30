@@ -44,7 +44,7 @@ declare -A EPPV=([llmd-shipped]=guide [llmd-tuned]=guide [llmd-affinity]=session
 
 stack=${2:-}
 [[ -n "$stack" && -n "${IDX[$stack]:-}" ]] || { [[ "${1:-}" == status && -z "$stack" ]] || { echo "unknown stack '$stack'" >&2; exit 64; }; }
-i=${IDX[$stack]:-0}
+i=0; [[ -n $stack ]] && i=${IDX[$stack]:-0}
 RUN=$S2_HOME/run/$stack
 NSIM=3; [[ "$stack" == none ]] && NSIM=1
 sim_port() { if ((i < 10)); then echo $((18100 + i * 10 + $1)); else echo $((19800 + (i - 10) * 10 + $1)); fi; }
