@@ -173,8 +173,9 @@ jobs:
   launcher-k3s:
     name: launcher-k3s
     runs-on: ubuntu-24.04
-    # test-launcher.sh gives go test 60 minutes; the job must outlive that, so go test's own
-    # timeout fires first. The tests also wait up to 15 minutes for a quiet machine.
+    # The test step gives each of the script's two test binaries 30 minutes, run one after the
+    # other, so 60 minutes of tests plus checkout, the k3s download and compiling. The job must
+    # outlive that, so that go test's own timeout (which stops the k3s it started) fires first.
     timeout-minutes: 80
     steps:
       - name: Check out the repository
@@ -198,28 +199,89 @@ jobs:
 
       # k3s runs as the invoking user (server --rootless --disable-agent), which needs no user
       # namespace, so AppArmor's restriction on them does not matter to it. The size-limited
-      # volume of the store-full tests is a FUSE file system, which needs a writable /dev/fuse
-      # and a setuid fusermount3. The job cannot install either, because it never uses sudo.
+      # volume of the store-full tests is a FUSE file system that go-fuse mounts through the
+      # setuid helper fusermount3, or fusermount when there is no fusermount3. Rather than guess
+      # from file modes, the probe does what go-fuse does: it runs that helper to mount a tiny
+      # file system as this user, checks the mount, and unmounts it. The three tests are
+      # excluded only when that fails. The job cannot install anything, because it never uses sudo.
       - name: Probe what this runner offers
         id: probe
         run: |
-          fuse=yes
-          reason=""
-          if [ ! -w /dev/fuse ]; then
+          cat > "$RUNNER_TEMP/fuse-probe.py" <<'PY'
+          import array, os, shutil, socket, subprocess, sys, tempfile
+
+          mnt = None
+
+          def fail(msg):
+              print(msg)
+              if mnt:
+                  try:
+                      os.rmdir(mnt)  # the probe's own empty directory; a live mount cannot be removed
+                  except OSError:
+                      pass
+              sys.exit(1)
+
+          # go-fuse v2.12.1 (fuse/mount_linux.go): fusermount3, else fusermount; PATH, then /bin.
+          helper = None
+          for name in ("fusermount3", "fusermount"):
+              helper = shutil.which(name) or shutil.which(name, path="/bin")
+              if helper:
+                  break
+          if not helper:
+              fail("neither fusermount3 nor fusermount is installed")
+          if not os.access("/dev/fuse", os.W_OK):
+              fail("/dev/fuse is not writable")
+
+          mnt = os.path.realpath(tempfile.mkdtemp(prefix="fuse-probe-"))
+
+          def mounted():
+              with open("/proc/self/mountinfo") as f:
+                  return any(line.split()[4] == mnt for line in f)
+
+          local, remote = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+          local.settimeout(20)
+          env = {"_FUSE_COMMFD": str(remote.fileno()), "PATH": os.environ.get("PATH", "")}
+          try:
+              proc = subprocess.run([helper, mnt, "-o", "fsname=hpcburst-probe"], env=env,
+                                    pass_fds=(remote.fileno(),), capture_output=True, text=True, timeout=30)
+          except subprocess.TimeoutExpired:
+              fail("%s did not finish within 30 s" % helper)
+          if proc.returncode != 0:
+              fail("%s could not mount as this user: exit %d: %s" % (helper, proc.returncode, proc.stderr.strip()))
+          try:
+              _, anc, _, _ = local.recvmsg(1, socket.CMSG_LEN(array.array("i").itemsize))
+          except OSError as e:
+              fail("%s exited 0 but sent no descriptor: %s" % (helper, e))
+          fds = array.array("i")
+          for level, kind, data in anc:
+              if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+                  fds.frombytes(data[: len(data) - (len(data) % fds.itemsize)])
+          if not fds:
+              fail("%s exited 0 but sent no descriptor" % helper)
+          ok = mounted()
+          os.close(fds[0])  # closing the descriptor aborts the connection; nothing serves requests
+          un = subprocess.run([helper, "-u", mnt], capture_output=True, text=True, timeout=30)
+          if not ok:
+              fail("%s exited 0 but %s is not in /proc/self/mountinfo" % (helper, mnt))
+          if un.returncode != 0 or mounted():
+              fail("%s mounted, but unmounting failed: %s" % (helper, un.stderr.strip()))
+          os.rmdir(mnt)
+          print("mounted and unmounted a FUSE file system as this user with %s" % helper)
+          PY
+          if out=$(python3 -I "$RUNNER_TEMP/fuse-probe.py" 2>&1); then
+            fuse=yes
+          else
             fuse=no
-            reason="/dev/fuse is not writable"
-          elif ! fm=$(command -v fusermount3) || [ ! -u "$fm" ]; then
-            fuse=no
-            reason="fusermount3 is missing or not setuid"
           fi
+          reason=$(echo "$out" | tr '\n' ' ')
           echo "fuse=$fuse" >> "$GITHUB_OUTPUT"
           echo "reason=$reason" >> "$GITHUB_OUTPUT"
           {
             echo "### launcher-k3s: what this runner offers"
             echo '```'
+            echo "FUSE probe ($fuse): $reason"
             echo "kernel.apparmor_restrict_unprivileged_userns = $(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>&1)"
             echo "/dev/fuse: $(ls -l /dev/fuse 2>&1)"
-            echo "fusermount3: $(ls -l "$(command -v fusermount3 || echo /nonexistent)" 2>&1)"
             echo "memory available: $(awk '/MemAvailable/ {printf "%.1f GiB", $2/1048576}' /proc/meminfo)"
             echo "free disk in /tmp: $(df -h --output=avail /tmp | tail -1 | tr -d ' ')"
             echo '```'
@@ -230,15 +292,20 @@ jobs:
           FUSE: ${{ steps.probe.outputs.fuse }}
           FUSE_REASON: ${{ steps.probe.outputs.reason }}
         run: |
-          # test-launcher.sh turns a failed FUSE mount into a failure, so a runner without FUSE
-          # would fail the whole job. The three tests that need the volume are left out instead,
-          # and the summary says so. go test -skip leaves no "--- SKIP" line, so that line is
-          # the only record.
-          storefull='TestCapVolume, TestStoreFull, TestStoreFullWholeDataDir'
-          args=()
+          # test-launcher.sh gives each of its two test binaries 60 minutes, one after the other.
+          # The whole suite took about 7 minutes on a runner, so each gets 30 minutes here: the
+          # worst case is 60 minutes of tests plus a few minutes to compile, inside the job's 80,
+          # so go test's own timeout (which stops the k3s it started) fires before the job's.
+          args=(-timeout 30m)
+          # test-launcher.sh turns a failed FUSE mount into a failure, so a runner where the
+          # probe's mount failed would fail the whole job. The tests that need the volume are left
+          # out instead, and the summary says so. go test -skip leaves no "--- SKIP" line, so the
+          # warning and the "excluded" line below are the only record.
+          excluded=()
           if [ "$FUSE" != "yes" ]; then
-            args+=(-skip '^(TestCapVolume|TestStoreFull|TestStoreFullWholeDataDir)$')
-            msg="NOT RUN: $storefull need a size-limited FUSE volume, and this runner has none ($FUSE_REASON)"
+            excluded=(TestCapVolume TestStoreFull TestStoreFullWholeDataDir)
+            args+=(-skip "^($(IFS='|'; echo "${excluded[*]}"))\$")
+            msg="NOT RUN: ${excluded[*]} need a size-limited FUSE volume, and the mount probe failed on this runner ($FUSE_REASON)"
             echo "::warning title=store-full tests not run::$msg"
             {
               echo "### launcher-k3s"
@@ -252,6 +319,7 @@ jobs:
             echo "### launcher-k3s: results"
             echo '```'
             grep -E '^summary: ' "$log" || echo "no summary line: the run did not finish"
+            echo "excluded by -skip, not run: ${#excluded[@]}${excluded[*]:+ (${excluded[*]})}"
             grep -E '^\s*--- SKIP' "$log" | sed 's/^ *//' | head -50 || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
