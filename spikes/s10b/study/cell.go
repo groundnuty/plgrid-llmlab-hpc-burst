@@ -56,10 +56,22 @@ type Cell struct {
 	// Windows from the drain time (3,000 s), also taken in runs without a
 	// drain, where they are that option's no-event baseline.
 	Hit05, Hit515 float64 // hit rate over 0-5 and 5-15 min after
+	Hit1530       float64 // and over 15-30 min after (to the end of arrivals)
 	PostP95       float64 // p95 latency of requests arriving at 3,000 s or later
 	PostPeak      int     // peak in flight on any Instance from 3,000 s
 	PostAboveS    float64 // time above the engine limit from 3,000 s
 	PostDone      int64   // output of requests completed from 3,000 s
+
+	// Series is the measurement window in 300 s steps; its sums equal the
+	// run's HitTokens and PromptTokens (TestWindowSeriesSumsToTheRun).
+	Series []Window
+}
+
+// Window is the hit and prompt tokens of the requests dispatched in the
+// 300 s from T0.
+type Window struct {
+	T0          float64
+	Hit, Prompt int64
 }
 
 // NewCell computes the measures of one run.
@@ -106,6 +118,11 @@ func NewCell(r Run, m *sim.Metrics) Cell {
 	c.PctSpan = m.PctSpan
 	c.Hit05 = m.BucketHitRate(DrainT, DrainT+300)
 	c.Hit515 = m.BucketHitRate(DrainT+300, DrainT+900)
+	c.Hit1530 = m.BucketHitRate(DrainT+900, DrainT+1800)
+	for t := WinStart; t < WinEnd; t += 300 {
+		h, p := m.BucketTokens(t, t+300)
+		c.Series = append(c.Series, Window{t, h, p})
+	}
 	c.PostP95 = m.LatencyBetween(DrainT, WinEnd, 0.95)
 	c.PostPeak = m.PeakBetween(DrainT, WinEnd)
 	c.PostAboveS = m.AboveEngineBetween(DrainT, WinEnd)

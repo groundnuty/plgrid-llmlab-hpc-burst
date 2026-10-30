@@ -64,6 +64,7 @@ func main() {
 
 	write(*out, "cells.csv", study.CellsCSV(cells))
 	write(*out, "summary.csv", study.SummaryCSV(cells))
+	write(*out, "windows.csv", study.SeriesCSV(cells))
 	var verdict strings.Builder
 	for _, k := range keys {
 		fmt.Fprintf(&verdict, "## %s\n\n%s\n", k, study.VerdictMarkdown(cells, string(k)))

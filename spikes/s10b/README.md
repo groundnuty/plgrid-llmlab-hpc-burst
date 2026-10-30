@@ -8,13 +8,13 @@ S10 left HBEP-5 a trade-off: c = 2.0 holds up after a drain, when cache is scarc
 
 ## Answer
 
-**By the rule fixed before the runs, option 3 (c = 2.0 plus a hard cap of 48 in flight per Instance, spilling to the next Instance on the ring, queueing at the front when all are full) passes, and it passes by default: it is the only option that never exceeds the engine limit at full membership in all three regimes, and it has the largest loss after a drain. After an unreplaced drain its hit rate falls to 22.3% (0-5 min) and 17.5% (5-15 min), below round robin's 41.5% and 42.3%. Taken as a standalone default, the cap is unfit for the drain case HBEP-5 expects. No other option passes.**
+**By the rule fixed before the runs, option 3 (c = 2.0 plus a hard cap of 48 in flight per Instance, spilling to the next Instance on the ring, queueing at the front when all are full) passes, and it passes by default: it is the only option that never exceeds the engine limit at full membership in all three regimes, and it has the largest loss after a drain. After an unreplaced drain its hit rate falls to 22.3% (0-5 min), 17.5% (5-15 min) and 21.1% (15-30 min, to the end of arrivals), against round robin's 41.5%, 42.3% and 41.7%. Taken as a standalone default, the cap is unfit for the drain case HBEP-5 expects. No other option passes.**
 
 - **Condition 1, never above 48 in flight at full membership** (seeds 1-3; tight, scarce and half-prefill regimes):
   - Option 3 meets it: peak 48 and 0 s above the limit in every regime and seed. The cap binds: 9,856 / 1,865 / 13,265 spills over the three seeds in the three regimes.
   - Option 2 (c = 2.0, S10's default) fails everywhere: peaks of 75, 69 and 76, and 12,345 / 9,734 / 13,247 s above 48 summed over seeds (each run lasts a little over 4,800 s).
   - Options 1 (c = 1.25) and 4 (adaptive) are the same runs at full membership. They meet it in the tight regime (peak 46) and miss it by 1-2 requests in the other two: peaks of 49 (scarce, 6 s above 48 in all) and 50 (half prefill, 228 s). A bound relative to the mean cannot hold an absolute limit once the cluster is saturated: S10 measured a mean of 143 requests in flight over four Instances in the scarce regime, and 136-145 at half prefill.
-- **Loss, among the options that meet condition 1.** With one qualifier the ranking is trivial, so the tables give all four. Hit rate 0-5 / 5-15 min after the drain: c = 2.0 77.1% / 76.6%, adaptive 62.5% / 57.8%, c = 1.25 52.9% / 51.6%, option 3 22.3% / 17.5%. In the scarce regime all four are within 1.6 points (c = 2.0 31.7%, option 3 30.9%, c = 1.25 and adaptive 30.1%) and single seeds range over 21-38%.
+- **Loss, among the options that meet condition 1.** With one qualifier the ranking is trivial, so the tables give all four. Hit rate 0-5 / 5-15 / 15-30 min after the drain: c = 2.0 77.1% / 76.6% / 76.0%, adaptive 62.5% / 57.8% / 57.8%, c = 1.25 52.9% / 51.6% / 50.5%, option 3 22.3% / 17.5% / 21.1%. The drop is sustained, not a transient. In the scarce regime all four are within 1.6 points (c = 2.0 31.7%, option 3 30.9%, c = 1.25 and adaptive 30.1%) and single seeds range over 21-38%.
 - **If condition 1 is read on the tight regime alone,** options 1, 3 and 4 qualify and the rankings split: adaptive is best after the drain, option 3 is best in the scarce regime by 0.8 points, which is inside the seed spread. No weighting is invented, and none passes outright under that reading.
 - **The cost of the cap at full membership** is 7 points of hit rate in the tight regime (75.2% against 82.1% for c = 2.0, and 84.0% for c = 1.25), for a p95 of 61 s against 78 s. The hottest Instance still has a low hit rate (36.7%, against 18.4% for c = 2.0 and 77.3% for c = 1.25).
 - **Option 4 switches at the drain:** in all three seeds the bound went from 1.25 to 2.0 at 3,005.0 s, 5 s after the drain at 3,000 s and within one 10 s control step. It recovers only part of the way: 62.5% / 57.8% after the drain against 77.1% / 76.6% for c = 2.0, because it ran at 1.25 until the drain.
@@ -60,15 +60,15 @@ Key `header>opening`, means over seeds 1-3 unless a column says max or sum. Roun
 
 ### After an unreplaced drain (instance-1 drained at 3,000 s)
 
-Hit rates are over the windows after 3,000 s, with the same option's run without the drain in brackets. Throughput and p95 are from 3,000 s to the end of arrivals at 4,800 s. After the drain 3 Instances serve 160 users, so every option except the cap spends the whole 1,800 s above 48.
+Hit rates are over the windows after 3,000 s (the 15-30 min window ends with arrivals at 4,800 s), with the same option's run without the drain in brackets. Throughput and p95 are from 3,000 s to the end of arrivals at 4,800 s. After the drain 3 Instances serve 160 users, so every option except the cap spends the whole 1,800 s above 48.
 
-| option | hit 0-5 min after (no drain) | hit 5-15 min after (no drain) | throughput vs RR from 3,000 s | p95 latency from 3,000 s (s) | peak in flight after the drain | time above 48 after the drain (s, sum over seeds) | held at the front (sum) |
-|---|---|---|---|---|---|---|---|
-| round robin | 41.5% (43.2%) | 42.3% (43.3%) | 1.00x | 183.8 | 140 | 5400 | - |
-| 1. c = 1.25 | 52.9% (82.7%) | 51.6% (81.4%) | 1.62x | 79.3 | 65 | 5296 | 0 |
-| 2. c = 2.0 | 77.1% (81.4%) | 76.6% (81.5%) | 2.12x | 110.7 | 103 | 5401 | 0 |
-| 3. c = 2.0 + cap 48 | 22.3% (70.1%) | 17.5% (66.5%) | 1.06x | 83.1 | 48 | 0 | 11041 |
-| 4. adaptive 1.25 / 2.0 | 62.5% (82.7%) | 57.8% (81.4%) | 1.64x | 92.8 | 96 | 5335 | 0 |
+| option | hit 0-5 min after (no drain) | hit 5-15 min after (no drain) | hit 15-30 min after (no drain) | throughput vs RR from 3,000 s | p95 latency from 3,000 s (s) | peak in flight after the drain | time above 48 after the drain (s, sum over seeds) | held at the front (sum) |
+|---|---|---|---|---|---|---|---|---|
+| round robin | 41.5% (43.2%) | 42.3% (43.3%) | 41.7% (43.0%) | 1.00x | 183.8 | 140 | 5400 | - |
+| 1. c = 1.25 | 52.9% (82.7%) | 51.6% (81.4%) | 50.5% (84.8%) | 1.62x | 79.3 | 65 | 5296 | 0 |
+| 2. c = 2.0 | 77.1% (81.4%) | 76.6% (81.5%) | 76.0% (80.7%) | 2.12x | 110.7 | 103 | 5401 | 0 |
+| 3. c = 2.0 + cap 48 | 22.3% (70.1%) | 17.5% (66.5%) | 21.1% (67.8%) | 1.06x | 83.1 | 48 | 0 | 11041 |
+| 4. adaptive 1.25 / 2.0 | 62.5% (82.7%) | 57.8% (81.4%) | 57.8% (84.8%) | 1.64x | 92.8 | 96 | 5335 | 0 |
 
 **Option 3's front queue.** The queue stayed empty at full membership. After the drain, per seed:
 
@@ -78,7 +78,7 @@ Hit rates are over the windows after 3,000 s, with the same option's run without
 | 2 | 3,779 | 28,604 | 14 | 1.88 / 4.39 / 7.55 | 5,060 |
 | 3 | 3,532 | 30,012 | 14 | 2.21 / 4.78 / 7.63 | 4,099 |
 
-Waits run from arrival to placement and count in the latency figures. About 11-13% of requests wait, and spills are 11-18% of the run's placements. The same seeds spilled 2,746 / 3,615 / 3,495 times without the drain, so the drain adds 750 / 1,445 / 604 spills and 3,500-3,800 held requests, and the hit rate falls 48 points. The mechanism is not isolated here. The candidate is the held requests: a request placed from the queue lands where a slot has just freed, which copies its context onto another Instance in a cache that is already short (3 Instances hold 4.5 M tokens against a 6.2 M working set, S10).
+Waits run from arrival to placement and count in the latency figures. About 11-13% of requests wait, and spills are 11-18% of the run's placements. The same seeds spilled 2,746 / 3,615 / 3,495 times without the drain, so the drain adds 750 / 1,445 / 604 spills and 3,500-3,800 held requests, and the hit rate falls 48 points. Per 5-minute window on seed 1 (`results/windows.csv`), option 3 held 84-90% up to 3,000 s, then 27%, 18%, 17%, 15%, 16%, 16% for the six windows to 4,800 s, and recovered only once arrivals stopped. Its whole-window hit rate (65.3% over the seeds, 71.2% on seed 1) is higher than the post-drain figures because it processed far less prompt volume after the drain (27-36 M prompt tokens per window against 89-101 M before, and 46-61 M for c = 2.0 after). The mechanism is not isolated here. The candidate is the held requests: a request placed from the queue lands where a slot has just freed, which copies its context onto another Instance in a cache that is already short (3 Instances hold 4.5 M tokens against a 6.2 M working set, S10).
 
 ### The pass rule
 
@@ -157,7 +157,7 @@ From issue #45, with the readings fixed before any run (recorded in the working 
 ## Environment
 
 - The agents VM: 6 cores, 31 GB, no GPU. Go 1.27.3, `GOMAXPROCS=2`, `nice -n 10`, two simulations at a time.
-- The sweep of 108 runs started when the 1-minute load was 2.4 and took 5 min 5 s. The load, sampled every 30 s during it (13 samples), ranged from 2.4 to 5.2; the sweep's own two workers account for about two of that, and other builders on the VM for the rest. The rule is to start heavy steps at 4.0 or less, and the sweep started under it. The sweep was run twice (the second after a wording change in the verdict text); the two `cells.csv` files are byte-identical, as a deterministic simulator should give. The simulator's clock is simulated, so results do not depend on host load.
+- The sweep of 108 runs started when the 1-minute load was 2.7 and took 4 min 54 s. The load, sampled every 30 s during it (12 samples), ranged from 2.4 to 4.6; the sweep's own two workers account for about two of that, and other builders on the VM for the rest. The rule is to start heavy steps at 4.0 or less, and the sweep started under it; the load passed 4.0 during the run. An earlier run of the same sweep (before a wording change in the verdict text and the window series) reached a load of 5.5 and 5.2. All runs agree: every numeric column of `cells.csv` common to them is identical, as a deterministic simulator should give. The simulator's clock is simulated, so results do not depend on host load.
 
 ## How to run
 
@@ -187,6 +187,7 @@ GOMAXPROCS=2 nice -n 10 ./s10bsim -out results   # 108 runs, about 5 min on 2 co
 | Switch at the first tick after the drain | `TestAdaptiveBoundSwitchesAtTheFirstTickAfterTheDrain` |
 | The cap binds in the real tight regime; the adaptive bound switches at the real drain | `TestCapBindsInTheTightRegime`, `TestAdaptiveSwitchesAtTheDrain` |
 | S10's behaviour is unchanged | `TestMatchesS10CommittedResults` (round robin, c = 1.25 and c = 2.0, four regimes, seed 1, against S10's committed rows), `TestRegressionCheckCatchesADifference` (the check can fail) |
+| The 300 s windows behind the drain table sum to each run's totals | `TestWindowSeriesSumsToTheRun` |
 | The pass rule | `TestPassRule` (an option above the limit is excluded however good its hit rate; split rankings name no winner; none qualifying means none passes) |
 
 ## What this means for the HBEPs

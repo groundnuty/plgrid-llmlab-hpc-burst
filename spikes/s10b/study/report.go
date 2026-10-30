@@ -46,6 +46,7 @@ var cellCols = []col{
 	{"bounds_used_pct", func(c Cell) string { return c.BoundsUsed }},
 	{"hit_rate_0_5_after_3000s", func(c Cell) string { return fmt.Sprintf("%.5f", c.Hit05) }},
 	{"hit_rate_5_15_after_3000s", func(c Cell) string { return fmt.Sprintf("%.5f", c.Hit515) }},
+	{"hit_rate_15_30_after_3000s", func(c Cell) string { return fmt.Sprintf("%.5f", c.Hit1530) }},
 	{"p95_latency_from_3000s", func(c Cell) string { return fmt.Sprintf("%.3f", c.PostP95) }},
 	{"peak_inflight_from_3000s", func(c Cell) string { return fmt.Sprint(c.PostPeak) }},
 	{"above_engine_limit_from_3000s_s", func(c Cell) string { return fmt.Sprintf("%.1f", c.PostAboveS) }},
@@ -70,6 +71,19 @@ func CellsCSV(cells []Cell) string {
 			b.WriteString(c.get(cell))
 		}
 		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// SeriesCSV is one row per run and 300 s window of the measurement window:
+// the hit and prompt tokens of the requests dispatched in it.
+func SeriesCSV(cells []Cell) string {
+	var b strings.Builder
+	b.WriteString("regime,key,option,seed,window_start_s,hit_tokens,prompt_tokens,hit_rate\n")
+	for _, c := range cells {
+		for _, w := range c.Series {
+			fmt.Fprintf(&b, "%s,%s,%s,%d,%.0f,%d,%d,%.5f\n", c.Regime, c.Key, c.Option, c.Seed, w.T0, w.Hit, w.Prompt, ratio(w.Hit, w.Prompt))
+		}
 	}
 	return b.String()
 }
@@ -150,12 +164,12 @@ func pct(v float64) string { return fmt.Sprintf("%.1f%%", 100*v) }
 func SummaryCSV(cells []Cell) string {
 	gs := Groups(cells)
 	var b strings.Builder
-	b.WriteString("regime,key,option,seeds,hit_rate_mean,hit_rate_min,hit_rate_max,throughput_vs_rr,p95_latency_s_mean,peak_inflight_run_max,peak_inflight_window_max,above_engine_limit_run_s_sum,hot_peak_inflight_mean,hot_peak_inflight_max,hot_hit_rate_mean,min_instance_hit_rate_mean,placements_above_bound_sum,placements_sum,spills_sum,spills_above_bound_sum,front_held_sum,front_wait_max_s,bound_switches_sum,hit_rate_0_5_after_3000s_mean,hit_rate_5_15_after_3000s_mean,throughput_vs_rr_from_3000s,p95_latency_from_3000s_mean,peak_inflight_from_3000s_max,above_engine_limit_from_3000s_s_sum\n")
+	b.WriteString("regime,key,option,seeds,hit_rate_mean,hit_rate_min,hit_rate_max,throughput_vs_rr,p95_latency_s_mean,peak_inflight_run_max,peak_inflight_window_max,above_engine_limit_run_s_sum,hot_peak_inflight_mean,hot_peak_inflight_max,hot_hit_rate_mean,min_instance_hit_rate_mean,placements_above_bound_sum,placements_sum,spills_sum,spills_above_bound_sum,front_held_sum,front_wait_max_s,bound_switches_sum,hit_rate_0_5_after_3000s_mean,hit_rate_5_15_after_3000s_mean,hit_rate_15_30_after_3000s_mean,throughput_vs_rr_from_3000s,p95_latency_from_3000s_mean,peak_inflight_from_3000s_max,above_engine_limit_from_3000s_s_sum\n")
 	for _, g := range gs {
 		rr, _ := Baseline(gs, g.Regime)
 		thr := g.mean(func(c Cell) float64 { return float64(c.DoneOutput) }) / rr.mean(func(c Cell) float64 { return float64(c.DoneOutput) })
 		postThr := g.mean(func(c Cell) float64 { return float64(c.PostDone) }) / rr.mean(func(c Cell) float64 { return float64(c.PostDone) })
-		fmt.Fprintf(&b, "%s,%s,%s,%d,%.5f,%.5f,%.5f,%.3f,%.2f,%.0f,%.0f,%.1f,%.1f,%.0f,%.5f,%.5f,%.0f,%.0f,%.0f,%.0f,%.0f,%.3f,%.0f,%.5f,%.5f,%.3f,%.2f,%.0f,%.1f\n",
+		fmt.Fprintf(&b, "%s,%s,%s,%d,%.5f,%.5f,%.5f,%.3f,%.2f,%.0f,%.0f,%.1f,%.1f,%.0f,%.5f,%.5f,%.0f,%.0f,%.0f,%.0f,%.0f,%.3f,%.0f,%.5f,%.5f,%.5f,%.3f,%.2f,%.0f,%.1f\n",
 			g.Regime, g.Key, g.Option, len(g.Cells),
 			g.mean(func(c Cell) float64 { return c.HitRate }),
 			g.min(func(c Cell) float64 { return c.HitRate }), g.max(func(c Cell) float64 { return c.HitRate }),
@@ -177,6 +191,7 @@ func SummaryCSV(cells []Cell) string {
 			g.sum(func(c Cell) float64 { return float64(c.Switches) }),
 			g.mean(func(c Cell) float64 { return c.Hit05 }),
 			g.mean(func(c Cell) float64 { return c.Hit515 }),
+			g.mean(func(c Cell) float64 { return c.Hit1530 }),
 			postThr,
 			g.mean(func(c Cell) float64 { return c.PostP95 }),
 			g.max(func(c Cell) float64 { return float64(c.PostPeak) }),

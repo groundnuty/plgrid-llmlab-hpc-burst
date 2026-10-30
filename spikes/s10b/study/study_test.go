@@ -119,6 +119,23 @@ func TestAdaptiveSwitchesAtTheDrain(t *testing.T) {
 	}
 }
 
+// The 300 s windows partition the measurement window, so their tokens must
+// sum to each run's totals. The drain table's hit rates are read from these
+// windows, so a mismatch would mean they measure something else than the
+// run's hit rate.
+func TestWindowSeriesSumsToTheRun(t *testing.T) {
+	for _, c := range seed1(t) {
+		var h, p int64
+		for _, w := range c.Series {
+			h += w.Hit
+			p += w.Prompt
+		}
+		if len(c.Series) != 12 || h != c.HitTokens || p != c.PromptTokens {
+			t.Errorf("%s / %s: %d windows summing to %d hit and %d prompt tokens, the run has %d and %d", c.Regime, c.Option, len(c.Series), h, p, c.HitTokens, c.PromptTokens)
+		}
+	}
+}
+
 // Options 1 and 2 and round robin use none of what S10b added, so their
 // cells must equal the rows S10 committed before the additions.
 func TestMatchesS10CommittedResults(t *testing.T) {
