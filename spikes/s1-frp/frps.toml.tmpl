@@ -1,0 +1,51 @@
+# frps.toml.tmpl -- spike S1, server side. Rendered by render_tmpl.py; every double-underscore placeholder is
+# filled from the run-book (README.md). frp v0.71.1.
+
+bindAddr = "__BIND_ADDR__"
+# The one port the compute nodes dial. Everything else below listens on loopback.
+bindPort = __BIND_PORT__
+
+log.to = "__LOG_FILE__"
+log.level = "info"
+
+# Token from a file (mode 600), never written into this config or onto a command line.
+# auth.tokenSource and auth.token are mutually exclusive.
+auth.method = "token"
+auth.tokenSource.type = "file"
+auth.tokenSource.file.path = "__TOKEN_FILE__"
+
+# --- Routing: tcpmux, and NO vhost ---------------------------------------------------------
+# Each instance registers one tcpmux proxy whose custom domain is its name. The front (here:
+# stream_watch.py on the frps host) sends "CONNECT <instance>:80" to this loopback port, and
+# frps pipes the connection to that instance.
+tcpmuxHTTPConnectPort = __TCPMUX_PORT__
+proxyBindAddr = "__PROXY_BIND_ADDR__"
+# Why no vhost: vhostHTTPPort and vhostHTTPSPort stay UNSET (0 = disabled). frp's HTTP vhost
+# mode is an HTTP reverse proxy with a response-header timeout (vhostHTTPTimeout, default
+# 60 s), the known trap for long LLM responses. tcpmux pipes raw bytes instead. It reads the
+# CONNECT header under a 30 s deadline, then clears it before handing the connection over
+# (pkg/util/vhost/vhost.go, v0.71.1: SetDeadline(time.Time{})), so it adds no per-stream deadline.
+
+# --- Liveness (see README, "Heartbeat budget") ----------------------------------------------
+# With transport.tcpMux = true (default) frp turns the application heartbeat OFF unless set
+# explicitly (pkg/config/v1/server.go: heartbeatTimeout defaults to -1). The Ping plugin op
+# would then never fire. So set it, together with the yamux keepalive:
+#   - yamux keepalive pings every tcpMuxKeepaliveInterval s and gives up after yamux's fixed
+#     10 s ConnectionWriteTimeout, so a silent peer is dropped within about 10 + 10 = 20 s;
+#   - frpc sends a Ping every 10 s; frps drops the session after 25 s without one (two missed
+#     pings plus 5 s slack, checked once a second): the backstop, about 26 s;
+#   - tcpKeepalive keeps NAT and firewall state alive and replaces the 7200 s default.
+transport.tcpMux = true
+transport.tcpMuxKeepaliveInterval = 10
+transport.heartbeatTimeout = 25
+transport.tcpKeepalive = 30
+
+# --- Server plugin: our controller stub allows or refuses each call --------------------------
+# CloseProxy fires when a client's session ends (frps closes every proxy of a closed control),
+# so it is the "path down" signal. Ping is the liveness feed (it is what stays alive when only
+# the engine dies). One HTTP call per op; keep the ops list short (server_plugin.md).
+[[httpPlugins]]
+name = "s1-stub"
+addr = "__PLUGIN_ADDR__"
+path = "/handler"
+ops = ["Login", "NewProxy", "CloseProxy", "Ping"]

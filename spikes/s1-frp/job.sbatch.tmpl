@@ -1,0 +1,239 @@
+#!/bin/bash
+# job.sbatch.tmpl -- spike S1: one Slurm job that dials home with frpc.
+# Render with render_tmpl.py (README, "Run order"), then sbatch the result from a scratch
+# directory (the Slurm output file lands in the submit directory). The #SBATCH lines cannot
+# expand variables, so the values below are filled at render time. The line marked #@<platform>
+# is kept for those platforms only; the platform switch is PLATFORM:
+#   helios-cpu    Helios CPU partition, x86_64, no GPU
+#   helios-gh200  Helios GH200 partition, aarch64, exactly one GPU
+#   athena        Athena A100 partition, x86_64, exactly one GPU (Athena accepts GPU jobs only;
+#                 the GPU is requested and left idle, frp does not use it)
+#SBATCH --job-name=s1-frp
+#SBATCH --account=__ACCOUNT__
+#SBATCH --partition=__PARTITION__
+#SBATCH --time=__TIME__
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=2
+#SBATCH --mem=__MEM__
+#@helios-gh200,athena #SBATCH --gres=gpu:1
+#SBATCH --output=s1-frp-%j.out
+#
+# Modes (environment at submit time, sbatch exports it):
+#   PROBE_ONLY=1   run step 0 (reachability probe) and exit. Needs no token and no binaries.
+#   (default)      step 0, then start the fake engine and frpc and stay up until TERM or the
+#                  time limit.
+# Fault injection for the heartbeat tests, from a login node (signals the batch script only):
+#   scancel --batch --signal=USR1 <jobid>   SIGKILL frpc            (process dies, FIN/RST)
+#   scancel --batch --signal=USR2 <jobid>   SIGKILL fake_streamer   (engine dies, frpc stays up)
+#   scancel --batch --signal=HUP  <jobid>   SIGSTOP frpc for 60 s   (silent loss, no FIN), then CONT
+# No token is ever put on a command line: frpc reads it from the mode-600 file named below.
+
+set -u -o pipefail
+
+PLATFORM="__PLATFORM__"
+FRPS_ADDR="__FRPS_ADDR__"
+FRPS_PORT="__FRPS_PORT__"
+PROBE_TCP_PORTS="__PROBE_TCP_PORTS__"   # space-separated; the frps port, plus any other port to test
+PROBE_TLS_PORTS="__PROBE_TLS_PORTS__"   # space-separated ports that should answer a TLS handshake, or "none"
+TOKEN_FILE="__TOKEN_FILE__"             # mode 600, readable by the job's user only
+PROTOCOL="__PROTOCOL__"                 # frpc transport.protocol: tcp or wss
+INSTANCE_PREFIX="__INSTANCE_PREFIX__"
+KIT_DIR="__KIT_DIR__"                   # this kit, on a filesystem the compute node sees
+PROBE_ONLY="${PROBE_ONLY:-0}"
+FREEZE_SECONDS=60
+
+die() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) FATAL: $*" >&2; exit 1; }
+log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*"; }
+
+# --- platform and architecture: the frpc binary is chosen by uname -m at run time ---------------
+case "$PLATFORM" in
+  helios-cpu)   WANT_ARCH=x86_64 ;;
+  helios-gh200) WANT_ARCH=aarch64 ;;
+  athena)       WANT_ARCH=x86_64 ;;
+  *) die "PLATFORM must be helios-cpu, helios-gh200 or athena, got '$PLATFORM'" ;;
+esac
+HAVE_ARCH="$(uname -m)"
+[ "$HAVE_ARCH" = "$WANT_ARCH" ] || die "PLATFORM $PLATFORM expects $WANT_ARCH, this node is $HAVE_ARCH (wrong partition?). A result from the wrong architecture would be mislabelled."
+case "$HAVE_ARCH" in
+  x86_64)  FRP_ARCH=amd64 ;;
+  aarch64) FRP_ARCH=arm64 ;;
+  *) die "no frp build for $HAVE_ARCH" ;;
+esac
+
+# --- the job's own directory and log -----------------------------------------------------------
+RUN_ROOT="${SCRATCH:-${TMPDIR:-}}"
+[ -n "$RUN_ROOT" ] && [ -d "$RUN_ROOT" ] || die "neither \$SCRATCH nor \$TMPDIR is a directory"
+umask 077
+JOB_DIR="$RUN_ROOT/s1-frp/${SLURM_JOB_ID:-nojob}"
+mkdir -p "$JOB_DIR" || die "cannot create $JOB_DIR"
+exec >>"$JOB_DIR/job.log" 2>&1
+
+log "s1 job start: platform=$PLATFORM arch=$HAVE_ARCH node=$(hostname -s) job=${SLURM_JOB_ID:-nojob} partition=${SLURM_JOB_PARTITION:-?} probe_only=$PROBE_ONLY"
+log "job dir: $JOB_DIR"
+
+# --- python: the scripts need 3.6 or newer; record which one runs them -------------------------
+# PYTHON is one command word, or a wrapper such as an apptainer exec line (Helios only; Athena
+# has no Apptainer, so there the job uses the node's own python3, with no container).
+# The reachability probe needs only bash, so a missing python must not cost the probe result:
+# python is looked for before the probe only when a TLS port is to be tried, otherwise after it.
+PY_READY=0
+py_ok() { "${PYBIN[@]}" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 6) else 1)' >/dev/null 2>&1; }
+ensure_python() {   # sets PYBIN and PY_READY; returns 0 when an interpreter >= 3.6 is found
+  [ "$PY_READY" -eq 1 ] && return 0
+  read -r -a PYBIN <<< "__PYTHON__"
+  if ! py_ok; then
+    log "WARNING: '${PYBIN[*]}' is missing or older than 3.6; looking for another interpreter"
+    for cand in python3.15 python3.14 python3.13 python3.12 python3.11 python3.10 python3.9 python3.8 python3.7 python3.6; do
+      if command -v "$cand" >/dev/null 2>&1; then
+        PYBIN=("$cand")
+        py_ok && break
+      fi
+    done
+  fi
+  py_ok || { log "WARNING: no python >= 3.6 on this node (on Helios, set PYTHON to an apptainer exec line)"; return 1; }
+  log "python: $("${PYBIN[@]}" -c 'import sys; print(sys.version.replace("\n", " "))') (command: ${PYBIN[*]})"
+  PY_READY=1
+}
+
+# --- GPU platforms: one GPU is requested on purpose; record what was granted -----------------------
+case "$PLATFORM" in
+  helios-gh200|athena)
+    if [ -z "${SLURM_JOB_GPUS:-}${SLURM_GPUS_ON_NODE:-}${CUDA_VISIBLE_DEVICES:-}" ]; then
+      log "WARNING: no GPU shows in the job environment although one was requested; check the sbatch directives"
+    fi
+    log "gpu env: SLURM_JOB_GPUS=${SLURM_JOB_GPUS:-} SLURM_GPUS_ON_NODE=${SLURM_GPUS_ON_NODE:-} CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-}"
+    command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>&1 | sed 's/(UUID: [^)]*)//' || true
+    ;;
+esac
+
+# --- step 0: reachability probe. Can this compute node reach frps at all? ------------------------
+command -v timeout >/dev/null 2>&1 || die "timeout(1) is needed for the probe"
+PROBE_FILE="$JOB_DIR/probe.txt"
+: > "$PROBE_FILE"
+reached=0
+probe_tcp() {   # plain TCP connect, 5 s limit
+  local port="$1" out rc result
+  out="$(timeout 5 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$FRPS_ADDR" "$port" 2>&1)"; rc=$?
+  if [ "$rc" -eq 0 ]; then result=OK
+  elif [ "$rc" -eq 124 ]; then result="FAIL timeout (filtered or dropped)"
+  elif printf '%s' "$out" | grep -qi 'refused'; then result="FAIL refused (network open, nothing listening)"
+  else result="FAIL $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-80)"; fi
+  echo "tcp $port $result"
+  [ "$rc" -eq 0 ]
+}
+probe_tls() {   # TCP connect plus a TLS handshake, certificate not verified
+  local port="$1" out rc result
+  if [ "$PY_READY" -ne 1 ]; then echo "tls $port FAIL no usable python on this node"; return 1; fi
+  out="$(timeout 10 "${PYBIN[@]}" -c '
+import socket, ssl, sys
+ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+s = socket.create_connection((sys.argv[1], int(sys.argv[2])), 5)
+ctx.wrap_socket(s, server_hostname=sys.argv[1]).close()
+' "$FRPS_ADDR" "$port" 2>&1)"; rc=$?
+  if [ "$rc" -eq 0 ]; then result=OK
+  elif [ "$rc" -eq 124 ]; then result="FAIL timeout"
+  else result="FAIL $(printf '%s' "$out" | tail -1 | cut -c1-80)"; fi
+  echo "tls $port $result"
+  [ "$rc" -eq 0 ]
+}
+for port in $PROBE_TCP_PORTS; do
+  line="$(probe_tcp "$port")" && reached=$((reached + 1))
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) platform=$PLATFORM $line" | tee -a "$PROBE_FILE"
+done
+if [ "$PROBE_TLS_PORTS" != "none" ]; then
+  ensure_python || true
+  for port in $PROBE_TLS_PORTS; do
+    line="$(probe_tls "$port")" && reached=$((reached + 1))
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) platform=$PLATFORM $line" | tee -a "$PROBE_FILE"
+  done
+fi
+if [ "$reached" -eq 0 ]; then
+  log "RESULT: NOT REACHABLE. No probed protocol got through from this node. The spike stops here: opening a port or any other access change is the owner's decision."
+  exit 3
+fi
+log "RESULT: reachable on $reached probe(s); see $PROBE_FILE"
+if [ "$PROBE_ONLY" = "1" ]; then
+  ensure_python || true            # record the interpreter even in a probe-only job; never fatal here
+  log "PROBE_ONLY=1: done"
+  exit 0
+fi
+ensure_python || die "no python >= 3.6 on this node; set PYTHON to a wrapper (for example an apptainer exec line on Helios)"
+
+# --- preflight for the full run ---------------------------------------------------------------------
+[ -f "$TOKEN_FILE" ] || die "token file not found: $TOKEN_FILE"
+perm="$(stat -c %a "$TOKEN_FILE" 2>/dev/null || stat -f %Lp "$TOKEN_FILE" 2>/dev/null)"
+case "$perm" in 600|400) ;; *) die "token file must be mode 600 or 400, is '$perm'" ;; esac
+FRPC_SRC="$(ls -d "$KIT_DIR"/dl/linux_"$FRP_ARCH"/frp_*_linux_"$FRP_ARCH"/frpc 2>/dev/null)"
+[ -n "$FRPC_SRC" ] && [ "$(printf '%s\n' "$FRPC_SRC" | wc -l)" -eq 1 ] || die "expected exactly one frpc for $FRP_ARCH under $KIT_DIR/dl (run fetch-frp.sh)"
+mkdir -p "$JOB_DIR/bin"
+install -m 700 "$FRPC_SRC" "$JOB_DIR/bin/frpc" || die "cannot copy frpc"
+FRPC="$JOB_DIR/bin/frpc"
+log "frpc: $("$FRPC" --version 2>&1) for $FRP_ARCH (if this fails with 'permission denied', the filesystem is mounted noexec)"
+INSTANCE="${INSTANCE_PREFIX}-${SLURM_JOB_ID:-nojob}"
+log "instance name: $INSTANCE (stream_watch.py --domain takes this)"
+
+# --- the fake engine, then its loopback baseline ---------------------------------------------------
+"${PYBIN[@]}" "$KIT_DIR/fake_streamer.py" --port 0 --port-file "$JOB_DIR/streamer.port" >"$JOB_DIR/streamer.log" 2>&1 &
+STREAMER_PID=$!
+for _ in $(seq 1 50); do [ -s "$JOB_DIR/streamer.port" ] && break; sleep 0.2; done
+[ -s "$JOB_DIR/streamer.port" ] || die "fake_streamer did not start; see $JOB_DIR/streamer.log"
+LOCAL_PORT="$(cat "$JOB_DIR/streamer.port")"
+log "fake_streamer pid=$STREAMER_PID on 127.0.0.1:$LOCAL_PORT"
+# Loopback /health latency on this node: the "direct call" the tunnel's latency is compared with.
+"${PYBIN[@]}" "$KIT_DIR/stream_watch.py" --direct-only --direct-url "http://127.0.0.1:$LOCAL_PORT" \
+  --out "$JOB_DIR/direct-baseline.json" || log "WARNING: direct baseline failed"
+
+# --- frpc ----------------------------------------------------------------------------------------------
+"${PYBIN[@]}" "$KIT_DIR/render_tmpl.py" "$KIT_DIR/frpc.toml.tmpl" \
+  SERVER_ADDR="$FRPS_ADDR" SERVER_PORT="$FRPS_PORT" INSTANCE="$INSTANCE" LOG_FILE="$JOB_DIR/frpc.log" \
+  TOKEN_FILE="$TOKEN_FILE" PROTOCOL="$PROTOCOL" LOCAL_PORT="$LOCAL_PORT" > "$JOB_DIR/frpc.toml" || die "cannot render frpc.toml"
+"$FRPC" verify -c "$JOB_DIR/frpc.toml" || die "frpc.toml does not verify"
+"$FRPC" -c "$JOB_DIR/frpc.toml" >"$JOB_DIR/frpc.stdout" 2>&1 &
+FRPC_PID=$!
+log "frpc pid=$FRPC_PID protocol=$PROTOCOL"
+printf 'frpc=%s\nstreamer=%s\n' "$FRPC_PID" "$STREAMER_PID" > "$JOB_DIR/pids"
+for _ in $(seq 1 60); do grep -q 'login to server success' "$JOB_DIR/frpc.log" 2>/dev/null && break; sleep 1; done
+if grep -q 'login to server success' "$JOB_DIR/frpc.log" 2>/dev/null; then
+  log "frpc: login to server success"
+else
+  log "WARNING: frpc has not logged in after 60 s (loginFailExit=false, it keeps retrying); see $JOB_DIR/frpc.log"
+fi
+
+# --- run until TERM (scancel, or the time limit), with fault injection by signal ---------------------
+STOP=0
+THAW_PID=""
+trap 'STOP=1' TERM INT
+trap 'log "FAULT usr1: SIGKILL frpc"; kill -KILL "$FRPC_PID" 2>/dev/null' USR1
+trap 'log "FAULT usr2: SIGKILL fake_streamer"; kill -KILL "$STREAMER_PID" 2>/dev/null' USR2
+trap 'log "FAULT hup: SIGSTOP frpc for ${FREEZE_SECONDS}s"; kill -STOP "$FRPC_PID" 2>/dev/null; ( sleep "$FREEZE_SECONDS"; kill -CONT "$FRPC_PID" 2>/dev/null ) & THAW_PID=$!' HUP
+
+reported=""
+while [ "$STOP" -eq 0 ]; do
+  sleep 1 &
+  wait $! 2>/dev/null
+  for name in FRPC STREAMER; do                      # say once when a child is gone
+    var="${name}_PID"; pid="${!var}"
+    if ! kill -0 "$pid" 2>/dev/null; then
+      case "$reported" in *"$name"*) ;; *) log "$name (pid $pid) is no longer running"; reported="$reported $name" ;; esac
+    fi
+  done
+done
+
+log "TERM received: stopping frpc and fake_streamer"
+trap '' TERM INT USR1 USR2 HUP
+[ -n "$THAW_PID" ] && kill "$THAW_PID" 2>/dev/null
+for pid in "$FRPC_PID" "$STREAMER_PID"; do
+  kill -CONT "$pid" 2>/dev/null
+  kill -TERM "$pid" 2>/dev/null
+done
+for _ in $(seq 1 50); do
+  kill -0 "$FRPC_PID" 2>/dev/null || kill -0 "$STREAMER_PID" 2>/dev/null || break
+  sleep 0.2
+done
+for pid in "$FRPC_PID" "$STREAMER_PID"; do
+  kill -0 "$pid" 2>/dev/null && { log "pid $pid ignored TERM, sending KILL"; kill -KILL "$pid" 2>/dev/null; }
+done
+wait 2>/dev/null
+log "s1 job end"
+exit 0

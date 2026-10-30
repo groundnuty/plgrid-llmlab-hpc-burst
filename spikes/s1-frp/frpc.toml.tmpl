@@ -1,0 +1,51 @@
+# frpc.toml.tmpl -- spike S1, instance side (runs inside the Slurm job). Rendered by
+# render_tmpl.py. frp v0.71.1.
+
+serverAddr = "__SERVER_ADDR__"
+serverPort = __SERVER_PORT__
+
+# The instance name. It becomes the plugin's "user" and the tcpmux domain below.
+user = "__INSTANCE__"
+
+# TRAP: loginFailExit defaults to true, so a failed first login (frps not up yet, a slow
+# network, a rejected plugin call) ends frpc and the job sits idle. false = keep retrying.
+loginFailExit = false
+
+log.to = "__LOG_FILE__"
+log.level = "info"
+
+# Token from a mode-600 file, never on the command line or in this file.
+auth.method = "token"
+auth.tokenSource.type = "file"
+auth.tokenSource.file.path = "__TOKEN_FILE__"
+
+# tcp: the plain protocol (frp's default TLS inside it stays on). wss: websocket over TLS; frps
+# does not terminate TLS itself, so wss needs a TLS-terminating reverse proxy in front of
+# frps' bindPort. (quic and kcp are UDP: not used, compute nodes rarely get UDP out.)
+transport.protocol = "__PROTOCOL__"
+transport.dialServerTimeout = 10
+
+# One outbound TCP connection per instance: tcpMux (the default) carries the control channel
+# and all work connections as streams of one yamux session, so poolCount is 0.
+transport.tcpMux = true
+transport.poolCount = 0
+
+# --- Heartbeat and keepalive, chosen on purpose (README, "Heartbeat budget") ------------------
+# Same values as the frps side. tcpMux makes frp default the application heartbeat to OFF
+# (pkg/config/v1/client.go: heartbeatInterval and heartbeatTimeout default to -1), and with it
+# off the Ping plugin op never fires. We want Ping as the instance's liveness feed, so:
+transport.tcpMuxKeepaliveInterval = 10   # yamux ping each 10 s; a silent peer is dropped after +10 s
+transport.heartbeatInterval = 10         # application Ping every 10 s
+transport.heartbeatTimeout = 25          # frpc gives up on frps after 25 s without a Pong, then reconnects
+transport.dialServerKeepalive = 30       # TCP keepalive, replaces the 7200 s default
+
+# One proxy: the instance's engine, reached through frps' tcpmux port by instance name.
+# We do NOT add frp's healthCheck: it would unregister the proxy when the engine dies, which
+# hides "path up, engine down" (HBEP-6). The engine probe is done from the front.
+[[proxies]]
+name = "engine"
+type = "tcpmux"
+multiplexer = "httpconnect"
+customDomains = ["__INSTANCE__"]
+localIP = "127.0.0.1"
+localPort = __LOCAL_PORT__
