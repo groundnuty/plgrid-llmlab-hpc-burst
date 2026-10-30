@@ -51,6 +51,17 @@ func label(option string) string {
 	return option
 }
 
+// checkSeeds fails for a row that is not the mean or sum of exactly the
+// required seeds: its seeds column counts the cells it was built from, so a
+// repeated or extra seed shows here, and a row of another count must not sit
+// in a table beside rows of three.
+func (r SummaryRow) checkSeeds() error {
+	if n, err := strconv.Atoi(r["seeds"]); err != nil || n != len(b.RequiredSeeds) {
+		return fmt.Errorf("summary row %s / %s has %q seeds, want %d", r["regime"], r["option"], r["seeds"], len(b.RequiredSeeds))
+	}
+	return nil
+}
+
 func (r SummaryRow) f(col string) float64 {
 	v, err := strconv.ParseFloat(r[col], 64)
 	if err != nil {
@@ -91,6 +102,9 @@ func CombinedTables(rows []SummaryRow, key string) (string, error) {
 			if !ok {
 				return "", fmt.Errorf("no summary row for %s / %s", t.regime, o)
 			}
+			if err := r.checkSeeds(); err != nil {
+				return "", err
+			}
 			above, spills := fmt.Sprintf("%.0f", r.f("placements_above_bound_sum")), fmt.Sprintf("%.0f", r.f("spills_sum"))
 			if o == b.RoundRobin.Name {
 				above, spills = "-", "-"
@@ -109,6 +123,12 @@ func CombinedTables(rows []SummaryRow, key string) (string, error) {
 		base, ok2 := find(rows, b.Tight.Name, key, o)
 		if !ok || !ok2 {
 			return "", fmt.Errorf("no summary row for the drain regime / %s", o)
+		}
+		if err := d.checkSeeds(); err != nil {
+			return "", err
+		}
+		if err := base.checkSeeds(); err != nil {
+			return "", err
 		}
 		held := fmt.Sprintf("%.0f", d.f("front_held_sum"))
 		if o == b.RoundRobin.Name {

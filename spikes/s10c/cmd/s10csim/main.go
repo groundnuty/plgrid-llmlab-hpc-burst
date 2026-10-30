@@ -5,8 +5,10 @@
 // put option 5 beside S10b's committed rows for round robin and options 1-4.
 //
 // Exit status: 0 on success; 1 when the re-run of options 3 and 4 differs
-// from S10b's committed rows (the results are still written); 2 on bad usage,
-// a failed run or a file error.
+// from S10b's committed rows (the results are still written); 2 on bad usage
+// (a repeated seed included), a failed run or a file error. A set of seeds
+// other than the default ones is run, but verdict.md then says INCOMPLETE or
+// INVALID and gives no verdict; the exit status is still 0.
 package main
 
 import (
@@ -65,7 +67,7 @@ func parseArgs(args []string, stderr io.Writer) (config, error) {
 	for _, s := range b.RequiredSeeds {
 		def = append(def, fmt.Sprint(s))
 	}
-	seedsF := fs.String("seeds", strings.Join(def, ","), "workload seeds; the verdict needs all of the default ones")
+	seedsF := fs.String("seeds", strings.Join(def, ","), "workload seeds, each once; the verdict needs exactly the default ones and gives none for a missing, repeated or extra seed")
 	out := fs.String("out", "results", "output directory")
 	s10b := fs.String("s10b-results", "../s10b/results", "S10b's committed results: options 1-4 and round robin are read from here, not run")
 	par := fs.Int("parallel", 2, "simulations run at once")
@@ -74,11 +76,16 @@ func parseArgs(args []string, stderr io.Writer) (config, error) {
 		return config{}, err
 	}
 	cfg := config{out: *out, s10b: *s10b, par: *par, regressionSeed: *rseed, regressionOptionID: []int{3, 4}}
+	seen := map[uint64]bool{}
 	for _, f := range strings.Split(*seedsF, ",") {
 		v, err := strconv.ParseUint(strings.TrimSpace(f), 10, 64)
 		if err != nil {
 			return config{}, fmt.Errorf("bad seed %q: %w", f, err)
 		}
+		if seen[v] { // a seed run twice is weighted twice in every mean and sum
+			return config{}, fmt.Errorf("duplicate seed %d in -seeds", v)
+		}
+		seen[v] = true
 		cfg.seeds = append(cfg.seeds, v)
 	}
 	return cfg, nil
@@ -130,8 +137,7 @@ func execute(stdout io.Writer, cfg config) (problems int, err error) {
 	}
 	fmt.Fprintf(stdout, "done in %s\n", time.Since(t0).Round(time.Second))
 	n, found := study.CompareWithS10b(study.Cells(rres), string(committedText))
-	reg := fmt.Sprintf("%d re-run cells (options 3 and 4, seed %d, four regimes) compared byte for byte with S10b's committed rows in cells.csv; %d differences or missing rows\n%s",
-		n, cfg.regressionSeed, len(found), strings.Join(found, "\n"))
+	reg := regressionReport(n, cfg.regressionSeed, found)
 
 	// The control: option 5 with the cap kept after the drain, drain regime.
 	var ctlRuns []b.Run
@@ -163,7 +169,7 @@ func execute(stdout io.Writer, cfg config) (problems int, err error) {
 		{"extras.csv", study.ExtraCSV(res)},
 		{"rerun-options-3-4.csv", b.CellsCSV(study.Cells(rres))},
 		{"control-cap-kept.csv", b.CellsCSV(study.Cells(ctl))},
-		{"regression-vs-s10b.txt", reg + "\n"},
+		{"regression-vs-s10b.txt", reg},
 	} {
 		if err := write(stdout, cfg.out, f.name, f.body); err != nil {
 			return 0, err
@@ -180,8 +186,8 @@ func execute(stdout io.Writer, cfg config) (problems int, err error) {
 	all := append(append([]b.Cell(nil), s10bCells...), cells5Read...)
 	key := string(study.Key)
 	verdict := fmt.Sprintf("## %s\n\n%s", key, study.VerdictMarkdown(all, key))
-	if missing := study.Missing(all, key); len(missing) > 0 {
-		fmt.Fprintf(stdout, "incomplete set (%d groups missing runs), so verdict.md gives no verdict\n", len(missing))
+	if missing, invalid := study.Missing(all, key), study.Invalid(all, key); len(missing)+len(invalid) > 0 {
+		fmt.Fprintf(stdout, "no verdict: %d groups are missing runs and %d cells are repeated or not asked for; see verdict.md\n", len(missing), len(invalid))
 	}
 	rows, err := study.ParseSummary(string(summaryText))
 	if err != nil {
@@ -194,7 +200,7 @@ func execute(stdout io.Writer, cfg config) (problems int, err error) {
 	tables, err := study.CombinedTables(append(rows, rows5...), key)
 	if err != nil {
 		fmt.Fprintln(stdout, "combined tables not written:", err)
-		tables = "INCOMPLETE: " + err.Error() + "\n"
+		tables = "No combined tables: " + err.Error() + "\n"
 	}
 	for _, f := range []struct{ name, body string }{{"verdict.md", verdict}, {"combined-tables.md", tables}} {
 		if err := write(stdout, cfg.out, f.name, f.body); err != nil {
@@ -203,6 +209,16 @@ func execute(stdout io.Writer, cfg config) (problems int, err error) {
 	}
 	fmt.Fprintln(stdout, strings.SplitN(reg, "\n", 2)[0])
 	return len(found), nil
+}
+
+// regressionReport is regression-vs-s10b.txt: the summary line, then one
+// entry per difference or missing row, and exactly one newline at the end
+// (a file with none, or with a blank last line, is a file git diff --check
+// would flag).
+func regressionReport(compared int, seed uint64, found []string) string {
+	head := fmt.Sprintf("%d re-run cells (options 3 and 4, seed %d, four regimes) compared byte for byte with S10b's committed rows in cells.csv; %d differences or missing rows",
+		compared, seed, len(found))
+	return strings.Join(append([]string{head}, found...), "\n") + "\n"
 }
 
 // optionRows returns the summary header and the rows of one option.

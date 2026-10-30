@@ -177,3 +177,204 @@ func TestOptionNamesAreSafeInUnquotedCSV(t *testing.T) {
 		}
 	}
 }
+
+// The verdict is issued only for exactly one cell per required run. Review
+// finding B1 of PR #53: Missing checked presence in a set while Evaluate
+// averaged every row, so a repeated seed ("-seeds 1,2,3,2") weighted that
+// seed twice for option 5 against three seeds of every other option, and
+// turned the split into a win for option 5, while the report still said
+// "3 seeds". The fixtures below are the committed complete set (S10b's cells
+// and option 5's), changed by hand in one way each.
+
+// fullSet is every cell of a verdict on the issue's key: S10b's committed
+// cells and this study's committed cells for option 5.
+func fullSet(t *testing.T) []b.Cell {
+	t.Helper()
+	o5, err := ReadCells(ourResults + "/cells.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(append([]b.Cell(nil), committed(t)...), o5...)
+}
+
+// cellsOf returns copies of the cells that match pred, with Seed set to seed
+// when seed is not 0.
+func cellsOf(cells []b.Cell, pred func(b.Cell) bool, seed uint64) []b.Cell {
+	var out []b.Cell
+	for _, c := range cells {
+		if pred(c) {
+			if seed != 0 {
+				c.Seed = seed
+			}
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func without(cells []b.Cell, pred func(b.Cell) bool) []b.Cell {
+	var out []b.Cell
+	for _, c := range cells {
+		if !pred(c) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// The control for everything below: the unchanged set has no problem, gives
+// a verdict that is the committed verdict.md byte for byte (that file was
+// written before the validation existed), and carries cells of another key
+// (S10b's plain "opening" key), which the check must leave out.
+func TestACompleteSetGetsTheCommittedVerdict(t *testing.T) {
+	cells, key := fullSet(t), string(Key)
+	other := 0
+	for _, c := range cells {
+		if c.Key != key && c.Key != "-" {
+			other++
+		}
+	}
+	if other == 0 {
+		t.Fatal("the fixture has no cell of another key, so it does not show that they are left out")
+	}
+	if m, inv := Missing(cells, key), Invalid(cells, key); len(m) != 0 || len(inv) != 0 {
+		t.Fatalf("the complete set: missing %v, invalid %v", m, inv)
+	}
+	want, err := os.ReadFile(ourResults + "/verdict.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := "## " + key + "\n\n" + VerdictMarkdown(cells, key)
+	if got != string(want) {
+		t.Errorf("the verdict of the complete set differs from results/verdict.md:\n%s", got)
+	}
+	if !strings.Contains(got, "Key "+key+", 3 seeds.") || !strings.Contains(got, "Qualifying on") {
+		t.Errorf("no verdict for the complete set:\n%s", got)
+	}
+}
+
+func TestUnsoundSeedSetsGetNoVerdict(t *testing.T) {
+	key := string(Key)
+	isO5 := func(c b.Cell) bool { return c.Option == Option5.Name }
+	isO5Seed := func(seed uint64) func(b.Cell) bool {
+		return func(c b.Cell) bool { return isO5(c) && c.Seed == seed }
+	}
+	base := fullSet(t)
+	for _, tc := range []struct {
+		name string
+		set  []b.Cell
+		want string // the notice, and a line that names the problem
+		line string
+	}{
+		{"seed 2 run twice for option 5 only (-seeds 1,2,3,2)", append(append([]b.Cell(nil), base...), cellsOf(base, isO5Seed(2), 0)...),
+			"INVALID", "seed 2 has 2 cells, want 1"},
+		{"seed 2 twice for every cell of option 5 and S10b's own rows (all options)", append(append([]b.Cell(nil), base...), cellsOf(base, func(c b.Cell) bool { return c.Seed == 2 && (c.Key == key || c.Key == "-") }, 0)...),
+			"INVALID", "seed 2 has 2 cells, want 1"},
+		{"one round-robin cell twice", append(append([]b.Cell(nil), base...), cellsOf(base, func(c b.Cell) bool {
+			return c.Option == b.RoundRobin.Name && c.Regime == b.Scarce.Name && c.Seed == 1
+		}, 0)...), "INVALID", "round-robin: seed 1 has 2 cells"},
+		{"option 5 on a fourth seed in every regime", append(append([]b.Cell(nil), base...), cellsOf(base, isO5Seed(3), 4)...),
+			"INVALID", "seed 4 is not a run the verdict asks for"},
+		{"option 5 on seeds 1, 2 and 4 instead of 1, 2 and 3", append(without(base, isO5Seed(3)), cellsOf(base, isO5Seed(3), 4)...),
+			"INCOMPLETE", "seeds 3"},
+		{"a fourth seed for one option in one regime (the sets are unequal)", append(append([]b.Cell(nil), base...), cellsOf(base, func(c b.Cell) bool {
+			return c.Option == "c=2.0+cap48" && c.Regime == b.Scarce.Name && c.Key == key && c.Seed == 3
+		}, 4)...), "INVALID", "scarce / c=2.0+cap48 / key " + key + ": seed 4 is not a run"},
+		{"an extra seed for round robin", append(append([]b.Cell(nil), base...), cellsOf(base, func(c b.Cell) bool {
+			return c.Option == b.RoundRobin.Name && c.Regime == b.Tight.Name && c.Seed == 1
+		}, 9)...), "INVALID", "seed 9 is not a run"},
+		{"option 5 missing seed 3 in the scarce regime", without(base, func(c b.Cell) bool { return isO5(c) && c.Regime == b.Scarce.Name && c.Seed == 3 }),
+			"INCOMPLETE", "scarce / " + Option5.Name + ": seeds 3"},
+		{"a missing seed and a repeated one together", append(without(base, func(c b.Cell) bool { return isO5(c) && c.Regime == b.Scarce.Name && c.Seed == 3 }),
+			cellsOf(base, isO5Seed(2), 0)...), "INCOMPLETE", "seed 2 has 2 cells"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v := VerdictMarkdown(tc.set, key)
+			if !strings.Contains(v, tc.want) || !strings.Contains(v, tc.line) {
+				t.Errorf("want %q and a line with %q, got:\n%s", tc.want, tc.line, v)
+			}
+			for _, verdictText := range []string{"Qualifying on", "passes", "rankings split", "seeds."} {
+				if strings.Contains(v, verdictText) {
+					t.Errorf("a verdict was issued (%q in the text):\n%s", verdictText, v)
+				}
+			}
+		})
+	}
+}
+
+// The mutation behind B1 is the dangerous one: without the check, the rule
+// applied to S10b's cells and option 5's with seed 2 twice names option 5 the
+// winner, where the complete set names none. (Evaluate and Pass are the
+// rule; VerdictMarkdown is what refuses to run it.)
+func TestARepeatedSeedWouldHaveChangedTheOutcome(t *testing.T) {
+	key, cond := string(Key), func(v b.OptionVerdict) bool { return v.Cond1All }
+	base := fullSet(t)
+	if _, _, _, w := b.Pass(Evaluate(base, key), cond); w != "" {
+		t.Fatalf("the complete set names %q the winner, want none (the rankings split)", w)
+	}
+	dup := append(append([]b.Cell(nil), base...), cellsOf(base, func(c b.Cell) bool { return c.Option == Option5.Name && c.Seed == 2 }, 0)...)
+	if _, _, _, w := b.Pass(Evaluate(dup, key), cond); w != Option5.Name {
+		t.Errorf("with seed 2 twice for option 5 the rule names %q, want %q: the repeated seed would not have changed the outcome, so the other tests prove less", w, Option5.Name)
+	}
+	if v := VerdictMarkdown(dup, key); !strings.Contains(v, "INVALID") {
+		t.Errorf("no INVALID notice for the repeated seed:\n%s", v)
+	}
+}
+
+// The combined tables are built from summary rows, which carry the number of
+// seeds they were built from: a row of another count is refused, and the
+// complete set gives the committed tables.
+func TestTablesNeedExactlyTheRequiredSeeds(t *testing.T) {
+	sum, err := os.ReadFile(s10bResults + "/summary.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ours, err := os.ReadFile(ourResults + "/summary.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := func() []SummaryRow {
+		r1, err := ParseSummary(string(sum))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r2, err := ParseSummary(string(ours))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return append(r1, r2...)
+	}
+	good, err := CombinedTables(rows(), string(Key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.ReadFile(ourResults + "/combined-tables.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if good != string(want) {
+		t.Error("the tables of the complete set differ from results/combined-tables.md")
+	}
+	for _, tc := range []struct{ regime, option string }{
+		{b.Scarce.Name, Option5.Name},     // a full-membership table
+		{b.Drain.Name, "c=2.0+cap48"},     // the drain table, an S10b row
+		{b.Tight.Name, b.RoundRobin.Name}, // the baseline of the drain table
+		{b.HalfPrefill.Name, "c=1.25"},    // another full-membership row
+	} {
+		for _, n := range []string{"4", "2"} {
+			rs := rows()
+			hit := false
+			for _, r := range rs {
+				if r["regime"] == tc.regime && r["option"] == tc.option && (r["key"] == string(Key) || r["key"] == "-") {
+					r["seeds"], hit = n, true
+				}
+			}
+			if !hit {
+				t.Fatalf("no row for %s / %s", tc.regime, tc.option)
+			}
+			if _, err := CombinedTables(rs, string(Key)); err == nil {
+				t.Errorf("%s / %s with %s seeds: no error", tc.regime, tc.option, n)
+			}
+		}
+	}
+}

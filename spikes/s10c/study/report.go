@@ -72,52 +72,140 @@ func Evaluate(cells []b.Cell, key string) []b.OptionVerdict {
 	return out
 }
 
+// runID names one run: a cell's regime, key, option and seed.
+func runID(regime, key, option string, seed uint64) string {
+	return fmt.Sprintf("%s|%s|%s|%d", regime, key, option, seed)
+}
+
+// optionKey is an option and the key its cells carry.
+type optionKey struct {
+	Option b.Option
+	Key    string
+}
+
+// requiredOptions is round robin followed by the five options, each with the
+// key it is run under: round robin has none ("-"), the others the verdict's.
+func requiredOptions(key string) []optionKey {
+	var out []optionKey
+	for _, o := range append([]b.Option{b.RoundRobin}, AllOptions()...) {
+		k := key
+		if o.ID == b.RoundRobin.ID {
+			k = "-"
+		}
+		out = append(out, optionKey{o, k})
+	}
+	return out
+}
+
 // Missing lists the runs a verdict on key needs and the cells lack: round
 // robin and all five options in every regime on every one of
-// b.RequiredSeeds. It is empty for a complete set.
+// b.RequiredSeeds. It is empty when every run is there at least once; Invalid
+// is the other half of the check, for cells that are there more than once or
+// that no verdict asks for.
 func Missing(cells []b.Cell, key string) []string {
 	have := map[string]bool{}
 	for _, c := range cells {
-		have[fmt.Sprintf("%s|%s|%s|%d", c.Regime, c.Key, c.Option, c.Seed)] = true
+		have[runID(c.Regime, c.Key, c.Option, c.Seed)] = true
 	}
 	var out []string
 	for _, rg := range b.Regimes {
-		for _, o := range append([]b.Option{b.RoundRobin}, AllOptions()...) {
-			k := key
-			if o.ID == b.RoundRobin.ID {
-				k = "-"
-			}
+		for _, ro := range requiredOptions(key) {
 			var seeds []string
 			for _, s := range b.RequiredSeeds {
-				if !have[fmt.Sprintf("%s|%s|%s|%d", rg.Name, k, o.Name, s)] {
+				if !have[runID(rg.Name, ro.Key, ro.Option.Name, s)] {
 					seeds = append(seeds, fmt.Sprint(s))
 				}
 			}
 			if len(seeds) > 0 {
-				out = append(out, fmt.Sprintf("%s / %s: seeds %s", rg.Name, o.Name, strings.Join(seeds, ", ")))
+				out = append(out, fmt.Sprintf("%s / %s: seeds %s", rg.Name, ro.Option.Name, strings.Join(seeds, ", ")))
 			}
 		}
 	}
 	return out
 }
 
+// Invalid lists the cells a verdict on key cannot take because the set is
+// not one cell per run: a run that appears more than once (a repeated seed
+// counts it twice in a mean and in a sum), and a cell of round robin or of
+// the key whose regime, option or seed is not one the verdict asks for (an
+// extra seed, or a seed that only some options have). Cells of another key
+// are not part of this verdict and are left out. It is empty for a set with
+// exactly one cell per required run and nothing else under the key.
+func Invalid(cells []b.Cell, key string) []string {
+	required := map[string]bool{}
+	for _, rg := range b.Regimes {
+		for _, ro := range requiredOptions(key) {
+			for _, s := range b.RequiredSeeds {
+				required[runID(rg.Name, ro.Key, ro.Option.Name, s)] = true
+			}
+		}
+	}
+	count := map[string]int{}
+	var order []string
+	first := map[string]b.Cell{}
+	for _, c := range cells {
+		if c.Option != b.RoundRobin.Name && c.Key != key {
+			continue // another key's cells never enter a verdict on this one
+		}
+		id := runID(c.Regime, c.Key, c.Option, c.Seed)
+		if count[id] == 0 {
+			order = append(order, id)
+			first[id] = c
+		}
+		count[id]++
+	}
+	var out []string
+	for _, id := range order {
+		c := first[id]
+		switch {
+		case !required[id]:
+			out = append(out, fmt.Sprintf("%s / %s / key %s: seed %d is not a run the verdict asks for (seeds %s)", c.Regime, c.Option, c.Key, c.Seed, seedList()))
+		case count[id] > 1:
+			out = append(out, fmt.Sprintf("%s / %s: seed %d has %d cells, want 1", c.Regime, c.Option, c.Seed, count[id]))
+		}
+	}
+	return out
+}
+
+func seedList() string {
+	var s []string
+	for _, v := range b.RequiredSeeds {
+		s = append(s, fmt.Sprint(v))
+	}
+	return strings.Join(s, ", ")
+}
+
 func pct(v float64) string { return fmt.Sprintf("%.1f%%", 100*v) }
 
 // VerdictMarkdown renders the pass rule over the five options for one key,
-// in the layout of S10b's verdict.md. A set that lacks runs gets no verdict,
-// only the list of what is missing.
+// in the layout of S10b's verdict.md. A set that lacks runs, or that has a
+// run twice or a seed the verdict does not ask for, gets no verdict, only the
+// list of what is wrong: the rule's means and sums would otherwise weight a
+// seed twice, or compare options on different seeds.
 func VerdictMarkdown(cells []b.Cell, key string) string {
-	if missing := Missing(cells, key); len(missing) > 0 {
+	missing, invalid := Missing(cells, key), Invalid(cells, key)
+	if len(missing)+len(invalid) > 0 {
 		var sb strings.Builder
-		fmt.Fprintf(&sb, "Key %s: INCOMPLETE. No verdict; these runs are missing:\n\n", key)
-		for _, m := range missing {
-			fmt.Fprintf(&sb, "- %s\n", m)
+		if len(missing) > 0 {
+			fmt.Fprintf(&sb, "Key %s: INCOMPLETE. No verdict; these runs are missing:\n\n", key)
+			for _, m := range missing {
+				fmt.Fprintf(&sb, "- %s\n", m)
+			}
+		}
+		if len(invalid) > 0 {
+			if len(missing) > 0 {
+				sb.WriteString("\n")
+			}
+			fmt.Fprintf(&sb, "Key %s: INVALID. No verdict; the cells are not one per required run (seeds %s):\n\n", key, seedList())
+			for _, m := range invalid {
+				fmt.Fprintf(&sb, "- %s\n", m)
+			}
 		}
 		return sb.String()
 	}
 	vs := Evaluate(cells, key)
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "Key %s, %d seeds.\n\n", key, len(b.Groups(cells)[0].Cells))
+	fmt.Fprintf(&sb, "Key %s, %d seeds.\n\n", key, len(b.RequiredSeeds))
 	sb.WriteString("| option | peak in flight: tight / scarce / half prefill (max over seeds) | time above 48, summed over seeds (s): tight / scarce / half prefill | condition 1, tight | condition 1, all three | hit 0-5 min after drain (drop vs no drain) | hit 5-15 min after drain (drop) | scarce hit (vs RR) |\n|---|---|---|---|---|---|---|---|\n")
 	for _, v := range vs {
 		fmt.Fprintf(&sb, "| %s | %d / %d / %d | %.0f / %.0f / %.0f | %v | %v | %s (%.1f pts) | %s (%.1f pts) | %s (%+.1f pts) |\n",
