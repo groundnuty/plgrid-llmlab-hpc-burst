@@ -1,0 +1,2 @@
+8 re-run cells (options 3 and 4, seed 1, four regimes) compared byte for byte with S10b's committed rows in cells.csv; 0 differences or missing rows
+
