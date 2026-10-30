@@ -65,10 +65,26 @@ type ControlPlane struct {
 	guard func() error
 }
 
+// Options tune Start.
+type Options struct {
+	// BeforeControllerManager runs once the API server is ready and before the
+	// controller manager starts. A test installs its CRDs here, so that the
+	// garbage collector's first discovery already knows the custom resources.
+	// (A collector started earlier learns of new resources only on its next
+	// discovery pass, up to 30 seconds later.)
+	BeforeControllerManager func(ctx context.Context, cfg *rest.Config) error
+
+	// WithoutControllerManager starts a bare API server and etcd, as envtest
+	// does. It is a negative control only: a test that needs garbage
+	// collection must fail on it, which shows that the test checks the
+	// collector and not just the API server.
+	WithoutControllerManager bool
+}
+
 // Start launches the control plane in dir, waits until the API server is ready
 // and the controller manager answers, and returns it. On error everything
 // already started is stopped.
-func Start(ctx context.Context, dir string) (*ControlPlane, error) {
+func Start(ctx context.Context, dir string, opts Options) (*ControlPlane, error) {
 	bins, err := FindBinaries()
 	if err != nil {
 		return nil, err
@@ -87,14 +103,14 @@ func Start(ctx context.Context, dir string) (*ControlPlane, error) {
 		}
 	}
 	cp := &ControlPlane{Dir: dir, guard: GuardSystemPorts()}
-	if err := cp.start(ctx, bins, ports.etcdClient, ports.etcdPeer, ports.api, ports.kcm); err != nil {
+	if err := cp.start(ctx, bins, opts, ports.etcdClient, ports.etcdPeer, ports.api, ports.kcm); err != nil {
 		_ = cp.Stop()
 		return nil, err
 	}
 	return cp, nil
 }
 
-func (cp *ControlPlane) start(ctx context.Context, bins Binaries, etcdClient, etcdPeer, api, kcm int) error {
+func (cp *ControlPlane) start(ctx context.Context, bins Binaries, opts Options, etcdClient, etcdPeer, api, kcm int) error {
 	logs := filepath.Join(cp.Dir, "logs")
 	for _, d := range []string{logs, filepath.Join(cp.Dir, "etcd"), filepath.Join(cp.Dir, "certs")} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
@@ -147,6 +163,15 @@ func (cp *ControlPlane) start(ctx context.Context, bins Binaries, etcdClient, et
 		return err
 	}
 
+	if opts.BeforeControllerManager != nil {
+		if err := opts.BeforeControllerManager(ctx, cp.Config); err != nil {
+			return fmt.Errorf("before the controller manager: %w", err)
+		}
+	}
+
+	if opts.WithoutControllerManager {
+		return nil
+	}
 	kcmProc, err := startProc("kube-controller-manager", filepath.Join(logs, "kube-controller-manager.log"), bins.KubeControllerManager,
 		"--kubeconfig", cp.Kubeconfig,
 		"--controllers", "garbage-collector-controller,namespace-controller",

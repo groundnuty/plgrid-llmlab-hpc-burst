@@ -52,10 +52,14 @@ type EngineSpec struct {
 }
 
 // EngineFlag is one engine flag. The spec lists flags as ordered pairs, so no
-// command line is parsed (HBEP-3, Deployment ID).
+// command line is parsed (HBEP-3, Deployment ID). The name rules keep every key
+// of the hashed object ASCII and give one spelling per flag: vLLM reads
+// max_num_seqs and max-num-seqs as the same flag (vllm/utils/argparse_utils.py,
+// v0.32.0, lines 120 and 338-344), so only the dashed spelling is admitted.
 //
 // +kubebuilder:validation:XValidation:rule="!self.name.startsWith('-')",message="an engine flag name is a long name without leading dashes: write 'max-model-len', not '--max-model-len', and never a short alias such as '-tp'"
-// +kubebuilder:validation:XValidation:rule="self.name.matches('^[a-z0-9]+(-[a-z0-9]+)*$')",message="an engine flag name uses lowercase letters, digits and single hyphens"
+// +kubebuilder:validation:XValidation:rule="self.name.matches('^[a-z0-9][a-z0-9-]*$')",message="an engine flag name matches ^[a-z0-9][a-z0-9-]*$: lowercase ASCII letters, digits and hyphens, so no underscores, no uppercase and no '='"
+// +kubebuilder:validation:XValidation:rule="!(self.name in ['ac', 'asc', 'cc', 'dc', 'dcp', 'dp', 'dpa', 'dpb', 'dpe', 'dph', 'dpl', 'dpm', 'dpn', 'dpp', 'dpr', 'ep', 'n', 'pcp', 'pp', 'q', 'r', 'sc', 'tp'])",message="a short flag alias such as tp, pp or dp is refused: write the long flag name, for example tensor-parallel-size"
 // +kubebuilder:validation:XValidation:rule="!(self.name in ['api-key', 'hf-token'])",message="a key is never written in a spec: use credentialsRef or checkpoint.hubTokenRef (api-key and hf-token are refused)"
 // +kubebuilder:validation:XValidation:rule="!(self.name in ['model', 'revision', 'chat-template'])",message="the framework passes model, revision and chat-template itself: set checkpoint and chatTemplate instead"
 type EngineFlag struct {
@@ -73,13 +77,14 @@ type EngineFlag struct {
 	Value string `json:"value"`
 }
 
-// EnvVar is one environment variable of the engine.
+// EnvVar is one environment variable of the engine. Names are POSIX names in
+// uppercase ASCII, so every key of the hashed object is ASCII.
 //
+// +kubebuilder:validation:XValidation:rule="self.name.matches('^[A-Z_][A-Z0-9_]*$')",message="an environment variable name matches ^[A-Z_][A-Z0-9_]*$: uppercase ASCII letters, digits and underscores, not starting with a digit"
 // +kubebuilder:validation:XValidation:rule="self.name != 'HF_TOKEN'",message="a key is never written in a spec: use checkpoint.hubTokenRef (HF_TOKEN is refused)"
 type EnvVar struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=128
-	// +kubebuilder:validation:Pattern=`^[A-Za-z_][A-Za-z0-9_]*$`
 	Name string `json:"name"`
 
 	// +kubebuilder:validation:MaxLength=8192
@@ -110,7 +115,10 @@ type ServingSpec struct {
 	// +kubebuilder:validation:MaxItems=64
 	Env []EnvVar `json:"env,omitempty"`
 
-	// ChatTemplate is the chat template's text, when the spec gives one.
+	// ChatTemplate is the text of one chat template, when the spec gives one.
+	// A checkpoint's own list of named templates is not given here: the
+	// deployment-ID library refuses one that has no entry named default and
+	// tells the operator to name the template in the spec.
 	//
 	// +optional
 	// +kubebuilder:validation:MaxLength=262144
