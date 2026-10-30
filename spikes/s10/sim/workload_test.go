@@ -113,3 +113,49 @@ func TestContextGrowsByAppending(t *testing.T) {
 		t.Fatal("shared prefix should end at block 62")
 	}
 }
+
+// A user's stream depends only on the seed and the user.
+func TestUserStreamIsSeeded(t *testing.T) {
+	w := DefaultWorkload(5)
+	a, b, c := w.Stream(3), w.Stream(3), w.Stream(4)
+	for i := 0; i < 5; i++ {
+		x, y, z := a.Next(0), b.Next(0), c.Next(0)
+		if !reflect.DeepEqual(x, y) {
+			t.Fatalf("conversation %d differs between two streams of user 3", i)
+		}
+		if reflect.DeepEqual(x.Sys, z.Sys) && reflect.DeepEqual(x.FirstUser, z.FirstUser) {
+			t.Fatalf("users 3 and 4 produced the same conversation %d", i)
+		}
+	}
+}
+
+// Closed loop: a user's conversations never overlap, and the number of
+// conversations in progress never exceeds the number of users.
+func TestClosedLoopUsersRunOneConversationAtATime(t *testing.T) {
+	w := DefaultWorkload(7)
+	w.Users, w.Ramp, w.ArrivalEnd = 6, 10, 400
+	e := NewEngine(Cluster{Instances: 2, KVTokens: 2_000_000, BlockSize: 64, MaxRunning: 8, PrefillRate: 12000, TPOT: 0.03},
+		Policy{Kind: RoundRobin}, w, nil, nil)
+	e.M.Trace = true
+	if err := e.Run(); err != nil {
+		t.Fatal(err)
+	}
+	type span struct{ first, last float64 }
+	spans := map[int]*span{}
+	for _, r := range e.M.Recs {
+		s := spans[r.Conv]
+		if s == nil {
+			s = &span{first: r.Dispatch, last: r.End}
+			spans[r.Conv] = s
+		}
+		s.first, s.last = min(s.first, r.Dispatch), max(s.last, r.End)
+	}
+	if len(spans) <= 6 {
+		t.Fatalf("only %d conversations ran; users did not start new ones", len(spans))
+	}
+	for id, s := range spans {
+		if next := spans[id+1]; next != nil && next.first < s.last {
+			t.Errorf("user %d: conversation %d started at %.1f before conversation %d ended at %.1f", id/1_000_000, id+1, next.first, id, s.last)
+		}
+	}
+}

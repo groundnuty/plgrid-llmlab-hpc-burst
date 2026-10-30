@@ -18,7 +18,7 @@ type Cluster struct {
 
 // DefaultCluster is the S10 cluster. Its numbers are assumptions.
 func DefaultCluster(kvTokens int) Cluster {
-	return Cluster{Instances: 4, Spare: 1, KVTokens: kvTokens, BlockSize: 64, MaxRunning: 24, PrefillRate: 12000, TPOT: 0.03}
+	return Cluster{Instances: 4, Spare: 1, KVTokens: kvTokens, BlockSize: 64, MaxRunning: 48, PrefillRate: 25000, TPOT: 0.03}
 }
 
 // EventKind is a membership change.
@@ -39,6 +39,7 @@ type Event struct {
 
 type convState struct {
 	c         *Conversation
+	user      *UserStream // nil for an explicit conversation list
 	ctx       *Context
 	firstUser []Seg
 	turn      int
@@ -87,9 +88,13 @@ type Engine struct {
 	nextID int
 	M      *Metrics
 	err    error
+	// Conversations started and not finished, and their context tokens.
+	activeConvs, activeTokens int
 }
 
-// NewEngine prepares a run of convs under pol on cl, with membership events.
+// NewEngine prepares a run under pol on cl, with membership events. With
+// convs nil it runs the workload's closed loop of users; otherwise it runs
+// exactly convs, each starting at its arrival time.
 func NewEngine(cl Cluster, pol Policy, wl Workload, convs []Conversation, events []Event) *Engine {
 	e := &Engine{cl: cl, pol: pol, wl: wl, convs: convs, events: events}
 	names := make([]string, cl.Instances+cl.Spare)
@@ -111,7 +116,14 @@ func NewEngine(cl Cluster, pol Policy, wl Workload, convs []Conversation, events
 func (e *Engine) Run() error {
 	for i := range e.convs {
 		c := &e.convs[i]
-		e.push(c.Arrival, func() { e.start(c) })
+		e.push(c.Arrival, func() { e.start(c, nil) })
+	}
+	if e.convs == nil {
+		for u := 0; u < e.wl.Users; u++ {
+			s := e.wl.Stream(u)
+			at := e.wl.Ramp * float64(u) / float64(e.wl.Users)
+			e.push(at, func() { e.start(s.Next(at), s) })
+		}
 	}
 	for i, ev := range e.events {
 		e.push(ev.Time, func() { e.cluster(i, ev) })
@@ -133,14 +145,16 @@ func (e *Engine) push(t float64, fn func()) {
 	heap.Push(&e.q, &item{t: t, seq: e.nextID, fn: fn})
 }
 
-func (e *Engine) start(c *Conversation) {
-	cs := &convState{c: c, ctx: NewContext(e.cl.BlockSize), firstUser: c.FirstUser, lastInst: -1, evSeen: -1}
+func (e *Engine) start(c *Conversation, user *UserStream) {
+	cs := &convState{c: c, user: user, ctx: NewContext(e.cl.BlockSize), firstUser: c.FirstUser, lastInst: -1, evSeen: -1}
 	for _, s := range c.Sys {
 		cs.ctx.Append(s)
 	}
 	for _, s := range c.FirstUser {
 		cs.ctx.Append(s)
 	}
+	e.activeConvs++
+	e.activeTokens += cs.ctx.Len
 	e.dispatch(cs)
 }
 
@@ -149,6 +163,8 @@ func (e *Engine) start(c *Conversation) {
 func (e *Engine) next(cs *convState) {
 	cs.turn++
 	t := cs.c.Turns[cs.turn]
+	e.activeTokens -= cs.ctx.Len
+	defer func() { e.activeTokens += cs.ctx.Len }()
 	if cs.ctx.Len+t.Append.Len > e.wl.CompactAt {
 		sum := cs.c.Summaries[cs.turn]
 		cs.ctx = NewContext(e.cl.BlockSize)
@@ -242,6 +258,7 @@ func (e *Engine) decodeDone(r *request) {
 	in := e.inst[r.inst]
 	cs := r.cs
 	cs.ctx.Append(OutSeg(cs.c.ID, r.turn, r.outLen))
+	e.activeTokens += r.outLen
 	in.cache.Release(r.hold, cs.ctx.Blocks[:(r.promptLen+r.outLen)/e.cl.BlockSize])
 	in.running--
 	e.finish(in, r)
@@ -249,6 +266,15 @@ func (e *Engine) decodeDone(r *request) {
 	e.tryAdmit(in)
 	if cs.turn+1 < len(cs.c.Turns) {
 		e.push(e.now+cs.c.Turns[cs.turn].Think, func() { e.next(cs) })
+		return
+	}
+	e.activeConvs--
+	e.activeTokens -= cs.ctx.Len
+	if s := cs.user; s != nil {
+		at := e.now + cs.c.Turns[cs.turn].Think
+		if at < e.wl.ArrivalEnd {
+			e.push(at, func() { e.start(s.Next(at), s) })
+		}
 	}
 }
 

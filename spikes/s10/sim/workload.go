@@ -28,10 +28,16 @@ type ClientType struct {
 // Workload holds the generator's parameters. Lengths are in tokens and
 // times in seconds; "LN" fields are lognormal (median, sigma).
 type Workload struct {
-	Seed          uint64
-	Clients       []ClientType
-	ArrivalRate   float64 // conversations per second (Poisson)
-	ArrivalEnd    float64 // no new conversation starts after this time
+	Seed    uint64
+	Clients []ClientType
+	// Closed loop (the experiments): Users run conversations back to back,
+	// starting spread over [0, Ramp]; a user pauses one think time between
+	// conversations. No conversation starts after ArrivalEnd.
+	Users int
+	Ramp  float64
+	// Open loop (Generate): Poisson arrivals at ArrivalRate per second.
+	ArrivalRate   float64
+	ArrivalEnd    float64
 	ShortShare    float64 // share of short sessions
 	ShortTurns    [2]int  // uniform range
 	LongTurns     [2]int  // uniform range
@@ -58,7 +64,7 @@ func DefaultWorkload(seed uint64) Workload {
 			{Name: "agent-c", Share: 0.15, SysStatic: 2500, Projects: 1, ProjectTail: 0},
 			{Name: "script", Share: 0.25, UniqueMin: 300, UniqueMax: 3000},
 		},
-		ArrivalRate: 0.45, ArrivalEnd: 4800,
+		Users: 160, Ramp: 300, ArrivalRate: 0.45, ArrivalEnd: 4800,
 		ShortShare: 0.6, ShortTurns: [2]int{2, 6}, LongTurns: [2]int{15, 60},
 		TaskLN: [2]float64{300, 1.0}, TaskClip: [2]int{30, 4000},
 		OutLN: [2]float64{250, 0.8}, OutClip: [2]int{20, 2000},
@@ -194,6 +200,27 @@ func (w Workload) conversation(r *rand.Rand, id int, t float64) Conversation {
 		c.Summaries = append(c.Summaries, Seg{ID: SegID(7, cid, uint64(i)), Len: w.SummaryTokens})
 	}
 	return c
+}
+
+// UserStream yields one user's conversations in order. Its content depends
+// only on the seed and the user, not on when the conversations start.
+type UserStream struct {
+	w Workload
+	r *rand.Rand
+	u int
+	k int
+}
+
+// Stream returns user u's conversation stream.
+func (w Workload) Stream(u int) *UserStream {
+	return &UserStream{w: w, r: rand.New(rand.NewPCG(w.Seed, 0x05e7<<32|uint64(u))), u: u}
+}
+
+// Next returns the user's next conversation, starting at time t.
+func (s *UserStream) Next(t float64) *Conversation {
+	c := s.w.conversation(s.r, s.u*1_000_000+s.k, t)
+	s.k++
+	return &c
 }
 
 // OutSeg is the identity of a turn's reply.

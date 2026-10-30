@@ -22,6 +22,7 @@ type Metrics struct {
 	PromptTokens1 int64 // turns after the first
 	HitTokens1    int64
 	PrefillTokens int64 // prompt tokens computed (misses), window only
+	OutputTokens  int64 // throughput: output tokens of requests completed in the window
 	Moves1        int   // turn>0 requests on a different Instance than the previous turn
 	Requests1     int
 	latencies     []float64
@@ -41,6 +42,9 @@ type Metrics struct {
 	MaxKubeInflation  int64   // KubeAI's total in-flight minus the members' total
 	PeakLoad          int     // max in-flight on any member, over time
 	timeAbove, timeOn float64 // time with max load > c*mean, time with load > 0
+	// Time integrals over the window: active conversations, their context
+	// tokens, and in-flight requests on members.
+	winTime, convTime, tokTime, loadTime float64
 
 	// Re-homing after the latest membership event.
 	lastEvent  int
@@ -94,6 +98,12 @@ func (m *Metrics) advance(e *Engine, t float64) {
 		return
 	}
 	total, peak := membersLoad(e)
+	if m.inWindow(e.now) {
+		m.winTime += dt
+		m.convTime += dt * float64(e.activeConvs)
+		m.tokTime += dt * float64(e.activeTokens)
+		m.loadTime += dt * float64(total)
+	}
 	if total == 0 {
 		return
 	}
@@ -213,6 +223,7 @@ func (m *Metrics) completed(e *Engine, r *request) {
 	m.PromptTokens += int64(r.promptLen)
 	m.HitTokens += int64(r.hold.HitTokens)
 	m.PrefillTokens += int64(r.promptLen - r.hold.HitTokens)
+	m.OutputTokens += int64(r.outLen)
 	if r.turn > 0 {
 		m.PromptTokens1 += int64(r.promptLen)
 		m.HitTokens1 += int64(r.hold.HitTokens)
@@ -234,6 +245,15 @@ func (m *Metrics) finish(e *Engine) error {
 	}
 	sort.Float64s(m.latencies)
 	return nil
+}
+
+// WorkingSet returns time averages over the window: active conversations,
+// their total context tokens, and in-flight requests.
+func (m *Metrics) WorkingSet() (convs, tokens, inflight float64) {
+	if m.winTime == 0 {
+		return 0, 0, 0
+	}
+	return m.convTime / m.winTime, m.tokTime / m.winTime, m.loadTime / m.winTime
 }
 
 // HitRate is the share of prompt tokens served from cache in the window.
