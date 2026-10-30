@@ -2,11 +2,20 @@
 
 Kit for spike S1 (issue #18): does frp work as the dial-home tunnel from compute nodes, for long streaming responses? It carries no run results. **Nothing in it has been run on a cluster.**
 
+**Transport: option B (owner's choice, in a direct session with the science agent, 2026-10-30).** A pre-check showed that the agents VM, where frps runs, lets only TCP port 22 in from the Cyfronet side. So frpc does not dial frps directly. The job opens `ssh -N -L` to the VM over port 22 and frpc dials the local end of that forward:
+
+```
+compute node                                              agents VM
+frpc -> 127.0.0.1:LPORT --- ssh -N -L (TCP 22, restricted key) ---> sshd -> 127.0.0.1:FRPS_PORT (frps, loopback only)
+```
+
+`TRANSPORT=direct` is still in the job template, for the case that the owner opens a port later. It is not the default and nothing here asks for it.
+
 Pinned release: **frp v0.71.1** (Apache-2.0, https://github.com/fatedier/frp), the latest stable at 2026-10-30 (the brief for this kit set v0.71.1 as the minimum).
 
 ## The local smoke test is a config check, not evidence
 
-`local-smoke.sh` runs everything on this VM over 127.0.0.1 for 120 s. It shows that the configs load and that registration, streaming and fault detection work end to end. It does **not** show that a compute node can reach this VM, and 120 s says nothing about a stream that lasts an hour. Issue #18 rules out both readings. Its numbers (for example detection times on loopback) are not results of S1.
+`local-smoke.sh` runs everything on this VM over 127.0.0.1 for 120 s. It shows that the configs load and that registration, streaming and fault detection work end to end. It has two variants. `direct` always runs. `ssh-forward` puts a real `ssh -N -L` through this machine's sshd between frpc and frps, and runs only if `S1_TEST_KEY` names a restricted key that the owner has already authorised here (see the script header). With the variable unset it prints `SKIPPED ... this is not a pass` and exits 0. It does **not** show that a compute node can reach this VM, and 120 s says nothing about a stream that lasts an hour. Issue #18 rules out both readings. Its numbers (for example detection times on loopback) are not results of S1.
 
 ## Files
 
@@ -19,8 +28,8 @@ Pinned release: **frp v0.71.1** (Apache-2.0, https://github.com/fatedier/frp), t
 | `plugin_stub.py` | Answers frps plugin calls: allows all, logs one JSON line per call (UTC time, op, user, proxy, run id). Never logs the token or its derived key. |
 | `fake_streamer.py` | Fake engine on 127.0.0.1: `GET /stream?seconds=N` (a token per second, chunked), `GET /health`. Python 3.6 compatible. |
 | `stream_watch.py` | Runs on the frps host. Reaches the instance through tcpmux (HTTP CONNECT), records token gaps, cuts and reconnects, probes `/health`, takes marks for fault timing, writes a JSON summary. |
-| `job.sbatch.tmpl` | One job template for all three runs. Step 0 reachability probe, then fake engine plus frpc, until TERM. `PROBE_ONLY=1` stops after step 0. |
-| `local-smoke.sh` | The loopback config check above. |
+| `job.sbatch.tmpl` | One job template for all three runs. Step 0 probes (one JSON line each), then fake engine, the ssh forward in a reconnect loop and frpc, until TERM. `PROBE_ONLY=1` stops after step 0. `TRANSPORT=ssh-forward` (default) or `direct`. |
+| `local-smoke.sh` | The loopback config check above, variants `direct`, `ssh-forward`, `all`. |
 
 Frp pieces are reused as they are (`frps`, `frpc`, tcpmux, server plugins). The scripts here are new code on the Python standard library. The kit needs no pip packages.
 
@@ -28,10 +37,11 @@ Frp pieces are reused as they are (`frps`, `frpc`, tcpmux, server plugins). The 
 
 | Decision | Where it lands | Rule |
 |---|---|---|
-| **frps host: this VM.** Whether a compute node can reach a port on it is part of the spike. | `FRPS_ADDR` (address a compute node uses), `FRPS_PORT` (the one port the nodes dial) | The address stays out of every committed file. The operator reads it from a private settings file and passes it to `render_tmpl.py`. The kit never opens a port. |
+| **frps host: this VM**, reached by an ssh forward over port 22 (option B). | `VM_ADDR` (address a compute node uses), `FRPS_PORT` (frps' port on the VM's loopback, 7000; the only port the key may forward to), `VM_USER`, `SSH_KEY`, `SSH_KNOWN_HOSTS`, `LPORT` (the node-local end) | The address and the user stay out of every committed file. The operator reads them from a private settings file and passes them to `render_tmpl.py`. The kit never opens a port. |
+| **A dedicated, restricted ssh key** (owner's step) | `SSH_KEY`, plus one line in the VM's `authorized_keys` | See "Key and host-key handling". |
 | **Grant per platform** (the account a job bills) | `ACCOUNT` | Placeholder in the committed files. GPU partitions need an account with the matching suffix. |
 
-Settings file variables used below (names only; values stay private): `S1_SETTINGS`, `FRPS_BIND_ADDR`, `FRPS_PORT`, `FRPS_ADDR_FROM_CLUSTER`, `TCPMUX_PORT` and `PLUGIN_PORT` (loopback ports on this VM), `TOKEN_FILE_VM`, `TOKEN_FILE_CLUSTER`, `KIT_DIR_CLUSTER`, `MEM`, `ACCOUNT_HELIOS_CPU`, `ACCOUNT_HELIOS_GH200`, `ACCOUNT_ATHENA`.
+Settings file variables used below (names only; values stay private): `S1_SETTINGS`, `FRPS_PORT` (7000), `VM_ADDR`, `VM_USER`, `SSH_KEY_CLUSTER`, `KNOWN_HOSTS_CLUSTER`, `LPORT` (a free port on the node, 20000 to 60000), `TCPMUX_PORT` and `PLUGIN_PORT` (loopback ports on this VM), `TOKEN_FILE_VM`, `TOKEN_FILE_CLUSTER`, `KIT_DIR_CLUSTER`, `MEM`, `ACCOUNT_HELIOS_CPU`, `ACCOUNT_HELIOS_GH200`, `ACCOUNT_ATHENA`.
 
 ## The three runs
 
@@ -47,18 +57,36 @@ Settings file variables used below (names only; values stay private): `S1_SETTIN
 - **Athena has no Apptainer on its login node.** The job runs frpc (a static binary) and the Python scripts directly on the node, with no container.
 - **Python on the compute nodes.** The scripts need Python 3.6 or newer and are written to run on 3.6. The job logs the interpreter it uses (`python:` line in `job.log`). If the configured `PYTHON` is missing or older than 3.6 it tries `python3.15` down to `python3.6`, and a full run stops with a clear error if none fits. A missing Python does not cost the probe: the TCP probe needs only bash, so the interpreter is looked for after it (before it only when a TLS port is probed), and a probe-only job logs the interpreter too. On Helios only, `PYTHON` can be a wrapper such as `apptainer exec <image> python3` (the owner's Helios practice is an Ubuntu 24.04 image). The GH200 nodes' host Python version is unknown until the first job logs it.
 
+## Key and host-key handling (the owner's step, before step 0)
+
+The kit never creates a key, never edits `authorized_keys` and never touches `~/.ssh`. The owner does these steps; the job only reads the files named in its placeholders.
+
+1. **One dedicated key per cluster**, ed25519, no passphrase (jobs run unattended), generated on the cluster that uses it so the private half never travels. Helios (CPU and GH200 runs) is one cluster and shares a key; Athena has its own. Keep each key in a private mode-700 directory, the private file mode 600: `ssh-keygen -t ed25519 -N '' -C s1-spike -f "$SSH_KEY_CLUSTER"`. The comment `s1-spike` is how the key is found again at cleanup.
+2. **Authorise each public key on the VM** for the VM account `VM_USER`, one line each, in that account's `authorized_keys`:
+   ```
+   restrict,port-forwarding,permitopen="127.0.0.1:7000",command="/bin/false" ssh-ed25519 <public key> s1-spike
+   ```
+   `restrict` switches every extra off (shell, pty, agent and X11 forwarding, user rc files); `port-forwarding` switches forwarding back on; `permitopen` allows exactly one destination, frps' loopback port, so the number must equal `FRPS_PORT`; `command="/bin/false"` leaves no shell even if a client asks for one. No `from=` list is given because the compute-node source addresses are not known. The owner may add one if the Cyfronet ranges are known.
+3. **Pin the VM's host key.** Build `known_hosts` on the VM, from the VM's own public host key, not by scanning from the cluster (a scan trusts whatever answers):
+   ```
+   printf '%s %s\n' "$VM_ADDR" "$(cut -d' ' -f1,2 /etc/ssh/ssh_host_ed25519_key.pub)" > known_hosts
+   ssh-keygen -lf known_hosts        # compare with: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+   ```
+   Copy it to each cluster as `KNOWN_HOSTS_CLUSTER`. The first field must be exactly the `VM_ADDR` string the job uses. The job runs ssh with `StrictHostKeyChecking=yes`, only this file, and `-F /dev/null`, so no user or system ssh config can add a key, a proxy or a host alias. A mismatch ends the forward with `Host key verification failed` and is a stop, not something to click through.
+4. **The key is handled by path only.** The job checks that the file is mode 600 or 400, passes `-i <path>` to ssh, and never reads, prints or logs its contents. Do not paste it, commit it, or put it on a command line.
+
 ## Run order
 
-Work from a copy of this directory. Runtime files (token, configs, logs, pids) go in a private directory outside the repo.
+Work from a copy of this directory. Runtime files (token, configs, logs, pids) go in a private directory outside the repo. The order is: **A** on this VM, then **B** step 0 on each platform (three short jobs: `helios-cpu`, `helios-gh200`, `athena`), then **C** the three full runs, one at a time.
 
 **A. On this VM, once**
 
 1. `bash fetch-frp.sh` (both architectures; the output must end with `both architectures verified`).
 2. Create a throwaway token, mode 600, and copy it to each cluster, mode 600: `umask 077; head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$TOKEN_FILE_VM"`.
 3. Stage the kit with `dl/` on a filesystem the compute nodes see, for each cluster (compute nodes may have no internet): `rsync -a spikes/s1-frp/ <cluster>:"$KIT_DIR_CLUSTER"/`.
-4. `source "$S1_SETTINGS"`, then `RUN=$(mktemp -d)` and render and verify frps:
+4. `source "$S1_SETTINGS"`, then `RUN=$(mktemp -d)` and render and verify frps. It listens on this VM's **loopback** only, on `FRPS_PORT`, the one port the key may forward to:
    ```
-   python3 render_tmpl.py frps.toml.tmpl BIND_ADDR="$FRPS_BIND_ADDR" BIND_PORT="$FRPS_PORT" \
+   python3 render_tmpl.py frps.toml.tmpl BIND_ADDR=127.0.0.1 BIND_PORT="$FRPS_PORT" \
      TCPMUX_PORT="$TCPMUX_PORT" PROXY_BIND_ADDR=127.0.0.1 TOKEN_FILE="$TOKEN_FILE_VM" \
      PLUGIN_ADDR="127.0.0.1:$PLUGIN_PORT" LOG_FILE="$RUN/frps.log" > "$RUN/frps.toml"
    FRPS=$(echo dl/linux_amd64/frp_*/frps); "$FRPS" verify -c "$RUN/frps.toml"
@@ -69,20 +97,31 @@ Work from a copy of this directory. Runtime files (token, configs, logs, pids) g
    "$FRPS" -c "$RUN/frps.toml" > "$RUN/frps.out" 2>&1 & echo $! > "$RUN/frps.pid"
    ```
 
-**B. Step 0, reachability probe, for each run (before any frp step).** From inside a job on a compute node, try plain TCP to `FRPS_ADDR:FRPS_PORT` with a 5 s limit (`bash /dev/tcp`, since `nc` may be missing). If an HTTPS or wss port is in play, list it in `PROBE_TLS_PORTS` and the job also tries a TLS handshake there.
+**B. Step 0, the reachability probe, on each platform (before any frp step).** Each job runs on a real compute node, takes about a minute and writes one JSON line per probe to `$SCRATCH/s1-frp/<jobid>/probe.jsonl`:
+
+| `probe` | What it does | Expected | Why it is there |
+|---|---|---|---|
+| `env` | Records the node's architecture, kernel, host `python3` version, and the ssh and curl versions. | n/a | Python 3.6 compatibility and the arch check. |
+| `tcp_vm_22` | TCP connect to `VM_ADDR:22` (6 s limit), reads the banner's first 7 bytes. `ok` needs an `SSH-` banner, so a middlebox that accepts a connection and passes nothing on does not count. | ok, `SSH-2.0` | Option B rests on it. |
+| `tcp_vm_frps` | TCP connect to `VM_ADDR:FRPS_PORT` (7000). | fail (timed out from the login nodes) | Records whether option A (an open port) would have worked from a compute node. Informational. |
+| `https_github`, `https_pypi` | `curl` to `https://github.com/` and `https://pypi.org/simple/` on 443. "Reached" means curl got an HTTP status, any status. The pypi request asks for one byte (`--range 0-0`), because its index is about 48 MB. | an HTTP status | **HBEP-6 needs to know whether compute nodes reach the internet.** A production front may not sit behind this VM's NAT, and if nodes reach other hosts on 443 a front could be dialled there. `proxy_env` says whether a proxy variable is set (never its value), which would change what a 443 answer means. Informational. |
+| `forward_setup` | A real `ssh -N -L` with the job's key, then a TCP connect to the local end. The listener opens only after authentication, so a connect proves that the key and the pinned host key work from this node. `far_end` then says what happens past the local end: `held` (frps accepted it), `closed` (frps is not listening, or the key may not forward to that port), `data`. The ssh process is stopped by PID afterwards. | ok | This is the transport. The only probe that decides the exit code. |
+| `summary` | One line with the five results above and `transport_path_ok`. | n/a | Fills the results table. |
 
 1. Render the job. The values for `PLATFORM`, `PARTITION` and the account come from the table above:
    ```
    python3 render_tmpl.py job.sbatch.tmpl PLATFORM=helios-cpu ACCOUNT="$ACCOUNT_HELIOS_CPU" PARTITION=plgrid \
-     TIME=01:20:00 MEM="$MEM" FRPS_ADDR="$FRPS_ADDR_FROM_CLUSTER" FRPS_PORT="$FRPS_PORT" \
-     PROBE_TCP_PORTS="$FRPS_PORT" PROBE_TLS_PORTS=none TOKEN_FILE="$TOKEN_FILE_CLUSTER" PROTOCOL=tcp \
+     TIME=01:20:00 MEM="$MEM" VM_ADDR="$VM_ADDR" FRPS_PORT="$FRPS_PORT" VM_USER="$VM_USER" \
+     SSH_KEY="$SSH_KEY_CLUSTER" SSH_KNOWN_HOSTS="$KNOWN_HOSTS_CLUSTER" LPORT="$LPORT" \
+     PROBE_TLS_PORTS=none TOKEN_FILE="$TOKEN_FILE_CLUSTER" PROTOCOL=tcp \
      INSTANCE_PREFIX=s1-helios-cpu KIT_DIR="$KIT_DIR_CLUSTER" PYTHON=python3 > job-helios-cpu.sbatch
    ```
-2. Submit the probe from a scratch directory on the cluster. It needs no token and no binaries: `PROBE_ONLY=1 sbatch --time=00:10:00 job-helios-cpu.sbatch`. On Athena also pass `--partition=plgrid-now` (1 h limit, one job and one GPU per user).
-3. Read `$SCRATCH/s1-frp/<jobid>/probe.txt` and `job.log`. Each line says `OK`, `FAIL timeout (filtered or dropped)` or `FAIL refused (network open, nothing listening)`. Record which protocol got through.
-4. **If nothing got through, the job exits 3 and the spike records "not reachable" for that platform and stops.** Opening a firewall port, or any other access change, is the owner's decision. A refusal means the network is open and frps is not listening: check step A5.
+   `TRANSPORT` is not a placeholder: it is an environment variable read at submit time, default `ssh-forward`. For `TRANSPORT=direct` (only if the owner opens a port) the four ssh values are passed as `none` and the job dials `VM_ADDR:FRPS_PORT` itself.
+2. Submit the probe from a scratch directory on the cluster. It needs no token and no frp binary, only `ssh`, the key and the known_hosts file: `PROBE_ONLY=1 sbatch --time=00:10:00 job-helios-cpu.sbatch`. On Athena also pass `--partition=plgrid-now` (1 h limit, one job and one GPU per user).
+3. Read `$SCRATCH/s1-frp/<jobid>/probe.jsonl` and `job.log`. The probe lines hold no address, node name or user (the VM is `vm`, and ssh's messages are scrubbed). `job.log` does hold the node name, so keep it on the cluster and in a private copy. When `forward_setup` fails, its `stage` says where: `precondition` (key file, mode, known_hosts, or a listener already on `LPORT`), `ssh_exited` (ssh's last stderr line is in `detail`: `Permission denied (publickey)` is an unauthorised key or wrong user, `Host key verification failed` a known_hosts mismatch, `Connection timed out` port 22 not reachable), or `no_listener_in_15s`.
+4. **Exit codes.** 0: the transport path works (ssh-forward: the forward came up; direct: the frps port or a probed TLS port answered). 3: it does not, and the spike records "not reachable" for that platform and stops. 1: the job is misconfigured. Ports 7000 and 443 never decide the exit code. Opening a firewall port, or any other access change, is the owner's decision.
 
-**C. Full run for each platform that passed step 0** (one at a time)
+**C. Full run for each platform that passed step 0** (one at a time: Helios CPU, Helios GH200, Athena)
 
 1. Render the job as in B1 (a `TIME` of `01:20:00` is the stream, the fault tests, the start-up and a small margin; `01:10:00` is the floor for a run without fault tests) and submit it: `sbatch job-<run>.sbatch`. Note the job id. The instance name is `<INSTANCE_PREFIX>-<jobid>`; `job.log` repeats it.
 2. On this VM, immediately start the watcher. `--wait-up` makes its clock start at the first good probe, so queue time does not matter:
@@ -101,11 +140,18 @@ Work from a copy of this directory. Runtime files (token, configs, logs, pids) g
    | T+65 min | `USR2` | fake engine killed, frpc alive | probe fails as `no_response`, `Ping` lines keep coming, no `CloseProxy` |
    | T+68 min | `USR1` | frpc killed | `CloseProxy` within seconds, probe `path_down` |
 
-5. At T+71 min the watcher exits and writes the summary. `scancel <jobid>` stops the job cleanly (TERM, the trap stops frpc and the engine).
-6. Collect: the summary, `$RUN/stub.jsonl`, and from the cluster `$SCRATCH/s1-frp/<jobid>/{job.log,probe.txt,frpc.log,direct-baseline.json}`.
+5. At T+71 min the watcher exits and writes the summary. `scancel <jobid>` stops the job cleanly (TERM: the job stops frpc, the engine, then the ssh loop and its ssh, each by PID).
+6. Collect: the summary, `$RUN/stub.jsonl`, and from the cluster `$SCRATCH/s1-frp/<jobid>/{job.log,probe.jsonl,ssh-exits.jsonl,ssh.err,frpc.log,direct-baseline.json}`. `ssh-exits.jsonl` has one line per exit of the ssh forward (UTC time, exit code, seconds it lived, the reconnect delay): every line is a reconnect and part of the measurements.
 7. After the last run, stop frps and the stub by the recorded PIDs: `kill "$(cat $RUN/frps.pid)" "$(cat $RUN/stub.pid)"`.
 
-Before anything goes into the PR, strip addresses, host names, account names and job ids from the logs (the job and frpc logs contain them).
+**D. Cleanup, when the spike ends** (the owner's step, as creating the key was). Leave nothing running and nothing authorised:
+
+1. On the VM, remove every `authorized_keys` line that carries the comment `s1-spike`, and check that none is left: `grep -c ' s1-spike$' <authorized_keys file>` must print `0`.
+2. On each cluster, delete the private key (`SSH_KEY_CLUSTER`) and its `.pub`, the known_hosts file and the token file.
+3. On the VM, delete the token file and the run directory once the logs are collected.
+4. Say on issue #18 that the key has been removed.
+
+Before anything goes into the PR, strip addresses, host names, node names, user and account names and job ids from the logs. `probe.jsonl` is written without them, but check it; `job.log` and the frpc log contain them.
 
 ## Heartbeat budget (fixed before any run)
 
@@ -132,6 +178,8 @@ Budget:
 
 Notes for reading the numbers:
 
+- **Option B adds a second liveness layer.** frpc's TCP connection ends at a local ssh process, and ssh carries it to sshd, which opens frps' loopback port. The three injected faults (frpc frozen, engine killed, frpc killed) do not touch ssh, so the rows above hold unchanged. A real network loss between the node and the VM is a different case: frp's heartbeat (25 s), yamux (20 s) and ssh's own keepalive (10 s, three misses, so 30 s) all run, and frpc can reconnect through the forward only after the loop has restarted ssh, which adds the reconnect delay (2 s or more). A `ssh-forward: attempt N exited` line in `job.log` with no injected fault before it is a finding. frps sees every instance as coming from 127.0.0.1, because sshd opens the connection.
+
 - Marks are taken on this VM before the cluster command is sent, so every measured time includes the command's own latency. They overstate detection time, which is the safe side. All times come from this VM's clock (the watcher's marks and the stub's timestamps), so clock skew with the compute node does not enter. `clock_offset_plus_one_way_s` in the summary is an estimate, for information only.
 - Killing a process measures the FIN path. Only the freeze exercises the heartbeat budget, so the two are reported separately.
 - A frozen frpc shows as `no_response` at the probe, the same as a dead engine. The `Ping` and `CloseProxy` lines from the stub tell them apart: Pings continuing means the agent is alive.
@@ -145,7 +193,7 @@ For each platform that passes step 0:
 2. A stream behind frpc stays reachable through frps for at least 1 h. Evidence: `streams[0]` has `completed: true`, `requested_s` of 3660 and `duration_s` of at least 3600.
 3. No stream is cut over that hour. Evidence: `cuts` is empty before the first mark, `gaps.over_threshold_unfaulted` is 0, and no entry of `stream_open_failures` or `health.failures_sample` has a time before the first mark.
 4. Killing frpc, or the engine, marks the path down within the budget above. Evidence: `marks[]` and the stub lines.
-5. Recorded for the PR: outbound protocol, reconnects, added latency, centre-side blocking (table below).
+5. Recorded for the PR: outbound protocol (frp tcp inside an ssh forward), reconnects of frp and of the ssh forward, added latency, centre-side blocking, and the step-0 reach of the VM's ports 22 and 7000 and of 443 (table below).
 
 Verifications that prove nothing, so none of them goes into the results:
 
@@ -154,13 +202,22 @@ Verifications that prove nothing, so none of them goes into the results:
 - A process kill as the test of the heartbeat budget: it measures the FIN path. Use the freeze.
 - A `Ping` line as proof that the engine is up: it shows the agent is alive. The probe through the path shows the engine.
 
-## Results table (to fill in, one column per run)
+## Results tables (to fill in)
+
+**Step 0, one row per platform** (from `probe.jsonl`; the `summary` line holds the five results):
+
+| Platform | VM:22 (banner) | VM:7000 (expected to fail; timeout or refused) | 443 (github, pypi, `proxy_env`) | Forward setup (ok, ms, `far_end`, or `stage` and reason) | Node arch, kernel, host `python3` |
+|---|---|---|---|---|---|
+| Helios CPU | | | | | |
+| Helios GH200 | | | | | |
+| Athena | | | | | |
+
+**The runs, one column per run:**
 
 | | Helios CPU | Helios GH200 | Athena |
 |---|---|---|---|
-| Step 0: TCP to the frps port | | | |
-| Step 0: TLS port (if any) | | | |
-| Outbound protocol used (tcp or wss) | | | |
+| Outbound protocol used (frp tcp inside the ssh forward, or direct) | | | |
+| Reconnects of the ssh forward during the hour (lines in `ssh-exits.jsonl`) | | | |
 | frpc and frps version, frpc arch | | | |
 | Python on the node (from `job.log`) | | | |
 | Registered through the stub (`Login`, `NewProxy`) | | | |
@@ -183,6 +240,9 @@ Latency note: the watcher cannot reach a compute node directly, so `added_latenc
 - Python 3.6 itself. No 3.6 interpreter was available (no Docker; `uv` has no 3.6 build). What was done instead: `ast.parse(..., feature_version=(3, 6))` on every script (it rejects walrus and positional-only parameters, but does not look inside f-strings, so the scripts use no f-strings), plus a hand check of the stdlib calls: no `ThreadingHTTPServer`, `fromisoformat`, `time_ns`, `capture_output`, `nullcontext`, `dataclasses`, type annotations or `from __future__ import annotations`. The first job logs the real interpreter.
 - `wss`. frps accepts websocket only as plain `ws` on its bind port, so `wss` needs a TLS-terminating reverse proxy in front of it, which is an owner decision. The kit passes the protocol through; only `tcp` was exercised locally.
 - The arm64 frpc and Slurm itself (`scancel --batch --signal`, the GPU environment variable names) were not run. The job template ran locally as a plain script, on loopback, with the same signals sent by `kill`.
+- **The ssh forward succeeding, with a real key.** No restricted key existed when the kit was changed for option B, and the kit creates none. What ran locally as a plain script against this VM's own sshd (`VM_ADDR` loopback, port 22 a real sshd): step 0 with a nonexistent key path (stopped by the precondition check) and with a mode-600 file that is not a key (real ssh ran and failed with `Permission denied`, no hang), step 0 against a non-routable address (every probe and the ssh connect timed out, the job ended in about 20 s), and `TRANSPORT=direct`. The success path of `forward_setup`, the `far_end` states, the reconnect loop with its backoff, and the TERM clean-up (loop first, then its ssh, by PID) ran only with a test double in place of `ssh`: a script that opens the `-L` port after a delay, then holds, closes or dies. That checks the job's own logic. It does not show that the real `ssh` opens the listener after authentication as assumed, that `restrict,port-forwarding,permitopen` allows the forward and refuses others, or what ssh prints when `permitopen` refuses a port. The first real step-0 job is the test.
+- **`local-smoke.sh ssh-forward`** has not been run: it needs `S1_TEST_KEY`, which does not exist. Only its skip path and its argument check were run.
+- **Compute-node tooling.** The probes assume bash 4.4 or newer, GNU `date` (for `%N`), `timeout`, `curl` and `ssh` on the node. Missing `curl` is recorded as `ok: null` (unknown), a missing `ssh` as a failed `forward_setup`. Neither was seen on a real node.
 - A reading of one run on one machine is not a statistic: the budget numbers above are targets to confirm, not measurements.
 
 ## Provenance of what is reused
@@ -191,7 +251,9 @@ Latency note: the watcher cannot reach a compute node directly, so `added_latenc
 |---|---|---|
 | `frps`, `frpc`, tcpmux, server plugins, token auth, yamux multiplexing | frp v0.71.1, https://github.com/fatedier/frp | Apache-2.0 |
 | The keepalive timing used in the budget (10 s write timeout) | `fatedier/yamux` v0.2.0, a fork of `hashicorp/yamux`, built into frp | MPL-2.0 |
-| The stub, streamer, watcher, renderer, job template, smoke test | new, Python standard library and bash | this repo |
+| The ssh forward, its restrictions (`restrict`, `port-forwarding`, `permitopen`, `command`), host-key pinning (`StrictHostKeyChecking`, `UserKnownHostsFile`) and the keepalives | The OpenSSH project (the ssh client and sshd already on every node and on the VM) | BSD and ISC style |
+| The 443 reach probe | `curl`, as installed on the node | curl licence (MIT style) |
+| The stub, streamer, watcher, renderer, job template (probes and reconnect loop included), smoke test | new, Python standard library and bash | this repo |
 | The long-stream cut deadlines the watcher guards against (180 s, 900 s, 1,800 s) and the HTTP vhost 60 s trap | www-2027 lessons, as quoted in issue #18 | n/a |
 
 Claims about frp's defaults and behaviour come from the v0.71.1 sources: `doc/server_plugin.md`, `pkg/config/v1/{client,server}.go`, `server/control.go`, `server/service.go`, `pkg/util/vhost/vhost.go` and `pkg/util/tcpmux/httpconnect.go`.

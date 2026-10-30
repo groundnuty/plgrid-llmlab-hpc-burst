@@ -20,28 +20,45 @@
 #SBATCH --output=s1-frp-%j.out
 #
 # Modes (environment at submit time, sbatch exports it):
-#   PROBE_ONLY=1   run step 0 (reachability probe) and exit. Needs no token and no binaries.
-#   (default)      step 0, then start the fake engine and frpc and stay up until TERM or the
-#                  time limit.
+#   TRANSPORT      ssh-forward (default, option B) or direct.
+#                  ssh-forward: frpc dials 127.0.0.1:LPORT on this node; a reconnecting
+#                  "ssh -N -L 127.0.0.1:LPORT:127.0.0.1:FRPS_PORT user@VM" carries it to frps, which
+#                  listens on the VM's loopback only. The VM lets only port 22 in from the cluster side.
+#                  direct: frpc dials VM:FRPS_PORT itself (works only if that port is open to the node).
+#   PROBE_ONLY=1   run step 0 (reachability probe) and exit. Needs no token and no frp binaries;
+#                  in ssh-forward mode it needs ssh and the key.
+#   (default)      step 0, then start the fake engine, the ssh forward (ssh-forward mode) and frpc,
+#                  and stay up until TERM or the time limit.
+# Exit codes: 0 = the transport path works (ssh-forward: the forward came up; direct: the frps port
+#   or a probed TLS port answered); 3 = it does not, the spike records "not reachable" and stops;
+#   1 = the job is misconfigured or a step of the full run failed. Port 7000 and 443 are recorded
+#   for the report and never decide the exit code.
+# Step 0 writes one JSON line per probe to $JOB_DIR/probe.jsonl (no addresses, no node name, no user).
 # Fault injection for the heartbeat tests, from a login node (signals the batch script only):
 #   scancel --batch --signal=USR1 <jobid>   SIGKILL frpc            (process dies, FIN/RST)
 #   scancel --batch --signal=USR2 <jobid>   SIGKILL fake_streamer   (engine dies, frpc stays up)
 #   scancel --batch --signal=HUP  <jobid>   SIGSTOP frpc for 60 s   (silent loss, no FIN), then CONT
-# No token is ever put on a command line: frpc reads it from the mode-600 file named below.
+# No token and no key is ever put on a command line: frpc reads the token from the mode-600 file
+# named below, and ssh reads the key from its file (-i <path>; the contents are never read here).
 
 set -u -o pipefail
 
 PLATFORM="__PLATFORM__"
-FRPS_ADDR="__FRPS_ADDR__"
-FRPS_PORT="__FRPS_PORT__"
-PROBE_TCP_PORTS="__PROBE_TCP_PORTS__"   # space-separated; the frps port, plus any other port to test
-PROBE_TLS_PORTS="__PROBE_TLS_PORTS__"   # space-separated ports that should answer a TLS handshake, or "none"
+TRANSPORT="${TRANSPORT:-ssh-forward}"
+VM_ADDR="__VM_ADDR__"                   # the agents VM as a compute node reaches it; stays out of committed files
+FRPS_PORT="__FRPS_PORT__"               # frps' port on the VM (loopback only in ssh-forward mode); the key may forward to this port only
+VM_USER="__VM_USER__"                   # ssh-forward: the account the restricted key is authorised for; "none" in direct mode
+SSH_KEY="__SSH_KEY__"                   # ssh-forward: private key FILE, mode 600, never printed; "none" in direct mode
+SSH_KNOWN_HOSTS="__SSH_KNOWN_HOSTS__"   # ssh-forward: known_hosts FILE pinning the VM's host key; "none" in direct mode
+LPORT="__LPORT__"                       # ssh-forward: the node-local end of the forward; "none" in direct mode
+PROBE_TLS_PORTS="__PROBE_TLS_PORTS__"   # direct mode: space-separated ports on the VM that should answer a TLS handshake, or "none"
 TOKEN_FILE="__TOKEN_FILE__"             # mode 600, readable by the job's user only
-PROTOCOL="__PROTOCOL__"                 # frpc transport.protocol: tcp or wss
+PROTOCOL="__PROTOCOL__"                 # frpc transport.protocol: tcp or wss (ssh-forward needs tcp)
 INSTANCE_PREFIX="__INSTANCE_PREFIX__"
 KIT_DIR="__KIT_DIR__"                   # this kit, on a filesystem the compute node sees
 PROBE_ONLY="${PROBE_ONLY:-0}"
 FREEZE_SECONDS=60
+FRPC_PID="" STREAMER_PID="" FWD_LOOP_PID="" THAW_PID=""
 
 die() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) FATAL: $*" >&2; exit 1; }
 log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*"; }
@@ -61,6 +78,21 @@ case "$HAVE_ARCH" in
   *) die "no frp build for $HAVE_ARCH" ;;
 esac
 
+# --- transport: what must be filled for each mode -------------------------------------------------
+case "$TRANSPORT" in
+  ssh-forward)
+    for v in VM_USER SSH_KEY SSH_KNOWN_HOSTS LPORT; do
+      [ -n "${!v}" ] && [ "${!v}" != none ] || die "TRANSPORT=ssh-forward needs $v (got '${!v}')"
+    done
+    case "$LPORT" in *[!0-9]*) die "LPORT must be a port number, got '$LPORT'" ;; esac
+    case "$SSH_KEY$SSH_KNOWN_HOSTS" in *[[:space:]]*) die "SSH_KEY and SSH_KNOWN_HOSTS must be paths without whitespace" ;; esac
+    [ "$PROTOCOL" = tcp ] || die "TRANSPORT=ssh-forward carries frp's tcp protocol only (PROTOCOL=$PROTOCOL); wss would need a TLS proxy at the far end"
+    ;;
+  direct) ;;
+  *) die "TRANSPORT must be ssh-forward or direct, got '$TRANSPORT'" ;;
+esac
+case "$FRPS_PORT" in ''|*[!0-9]*) die "FRPS_PORT must be a port number, got '$FRPS_PORT'" ;; esac
+
 # --- the job's own directory and log -----------------------------------------------------------
 RUN_ROOT="${SCRATCH:-${TMPDIR:-}}"
 [ -n "$RUN_ROOT" ] && [ -d "$RUN_ROOT" ] || die "neither \$SCRATCH nor \$TMPDIR is a directory"
@@ -69,7 +101,7 @@ JOB_DIR="$RUN_ROOT/s1-frp/${SLURM_JOB_ID:-nojob}"
 mkdir -p "$JOB_DIR" || die "cannot create $JOB_DIR"
 exec >>"$JOB_DIR/job.log" 2>&1
 
-log "s1 job start: platform=$PLATFORM arch=$HAVE_ARCH node=$(hostname -s) job=${SLURM_JOB_ID:-nojob} partition=${SLURM_JOB_PARTITION:-?} probe_only=$PROBE_ONLY"
+log "s1 job start: platform=$PLATFORM transport=$TRANSPORT arch=$HAVE_ARCH node=$(hostname -s) job=${SLURM_JOB_ID:-nojob} partition=${SLURM_JOB_PARTITION:-?} probe_only=$PROBE_ONLY"
 log "job dir: $JOB_DIR"
 
 # --- python: the scripts need 3.6 or newer; record which one runs them -------------------------
@@ -107,52 +139,233 @@ case "$PLATFORM" in
     ;;
 esac
 
-# --- step 0: reachability probe. Can this compute node reach frps at all? ------------------------
-command -v timeout >/dev/null 2>&1 || die "timeout(1) is needed for the probe"
-PROBE_FILE="$JOB_DIR/probe.txt"
-: > "$PROBE_FILE"
-reached=0
-probe_tcp() {   # plain TCP connect, 5 s limit
-  local port="$1" out rc result
-  out="$(timeout 5 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$FRPS_ADDR" "$port" 2>&1)"; rc=$?
-  if [ "$rc" -eq 0 ]; then result=OK
-  elif [ "$rc" -eq 124 ]; then result="FAIL timeout (filtered or dropped)"
-  elif printf '%s' "$out" | grep -qi 'refused'; then result="FAIL refused (network open, nothing listening)"
-  else result="FAIL $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-80)"; fi
-  echo "tcp $port $result"
-  [ "$rc" -eq 0 ]
+# --- helpers shared by step 0 and the full run -----------------------------------------------------
+now_ms() { echo $(( $(date +%s%N) / 1000000 )); }       # GNU date; no EPOCHREALTIME (bash 4.4 on some nodes)
+NODE_NAME="$(hostname -s 2>/dev/null || echo node)"
+scrub() {   # drop the VM address, key and file paths, the user and the node name from text that is recorded
+  local s="$1" x
+  for x in "$VM_ADDR" "$SSH_KEY" "$SSH_KNOWN_HOSTS" "$VM_USER" "$NODE_NAME"; do
+    case "$x" in ''|none) ;; *) s="${s//"$x"/<redacted>}" ;; esac
+  done
+  printf '%s' "$s"
 }
-probe_tls() {   # TCP connect plus a TLS handshake, certificate not verified
-  local port="$1" out rc result
-  if [ "$PY_READY" -ne 1 ]; then echo "tls $port FAIL no usable python on this node"; return 1; fi
+jstr() {    # JSON string body: scrubbed, one line, printable ASCII only, at most 300 characters
+  scrub "$1" | LC_ALL=C tr '\n\r\t' '   ' | LC_ALL=C tr -cd ' -~' | cut -c1-300 | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+file_mode_ok() { case "$(stat -c %a "$1" 2>/dev/null)" in 600|400) return 0 ;; *) return 1 ;; esac; }
+local_end_up() { timeout 2 bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1"' _ "$LPORT" 2>/dev/null; }
+stop_pid() {   # TERM, wait up to 5 s, then KILL; by PID only
+  local p="$1" i
+  [ -n "$p" ] || return 0
+  kill -CONT "$p" 2>/dev/null
+  kill -TERM "$p" 2>/dev/null || return 0
+  for i in $(seq 1 25); do kill -0 "$p" 2>/dev/null || break; sleep 0.2; done
+  if kill -0 "$p" 2>/dev/null; then log "pid $p ignored TERM, sending KILL"; kill -KILL "$p" 2>/dev/null; fi
+  wait "$p" 2>/dev/null
+}
+
+# The ssh command, as an array. -F /dev/null ignores the user's and the system's ssh config, so
+# no IdentityFile, ProxyCommand or HostKeyAlias from there can change what is tested. The key is
+# named by path only (-i), the host key must match the pinned known_hosts file.
+build_ssh_args() {
+  SSH_ARGS=(-F /dev/null -p 22 -N -T -i "$SSH_KEY"
+    -o BatchMode=yes -o IdentitiesOnly=yes -o ExitOnForwardFailure=yes
+    -o ServerAliveInterval=10 -o ServerAliveCountMax=3
+    -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$SSH_KNOWN_HOSTS" -o GlobalKnownHostsFile=/dev/null
+    -o ControlMaster=no -o ControlPath=none
+    -o ConnectTimeout=8 -o PreferredAuthentications=publickey
+    -L "127.0.0.1:${LPORT}:127.0.0.1:${FRPS_PORT}"
+    "${VM_USER}@${VM_ADDR}")
+}
+
+# --- step 0: reachability probe. What can this compute node reach? ----------------------------------
+# One JSON line per probe in probe.jsonl. The lines carry no address, node name or user: the VM is
+# "vm". Everything is bounded by a timeout, so the whole step takes about a minute at the worst.
+command -v timeout >/dev/null 2>&1 || die "timeout(1) is needed for the probe"
+PROBE_JSONL="$JOB_DIR/probe.jsonl"
+: > "$PROBE_JSONL"
+emit() {   # probe-name, then the rest of the JSON object (starting with a comma)
+  local line
+  line="$(printf '{"ts":"%s","platform":"%s","transport":"%s","probe":"%s"%s}' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$PLATFORM" "$TRANSPORT" "$1" "$2")"
+  printf '%s\n' "$line" >> "$PROBE_JSONL"
+  echo "probe: $line"
+}
+record() {   # probe-name, ok (true|false|null), ms, detail, optional extra fields (starting with a comma)
+  emit "$1" "$(printf ',"ok":%s,"ms":%s,"detail":"%s"%s' "$2" "$3" "$(jstr "$4")" "${5:-}")"
+}
+tool_version() {   # first line of "<tool> <flag>", two words at most; "none" if the tool is missing
+  local v
+  command -v "$1" >/dev/null 2>&1 || { echo none; return 0; }
+  v="$("$@" 2>&1)"; v="${v%%$'\n'*}"
+  printf '%s' "$v" | cut -d' ' -f1,2 | cut -d, -f1
+}
+host_py="$(command -v python3 >/dev/null 2>&1 && python3 --version 2>&1 | sed 's/^Python //' || echo none)"
+emit env "$(printf ',"arch":"%s","kernel":"%s","host_python3":"%s","ssh":"%s","curl":"%s","bash":"%s"' \
+  "$HAVE_ARCH" "$(jstr "$(uname -r)")" "$(jstr "$host_py")" "$(jstr "$(tool_version ssh -V)")" \
+  "$(jstr "$(tool_version curl --version)")" "$BASH_VERSION")"
+
+PROBE_OK=false
+tcp_probe() {   # probe-name, host, port, want-banner (0|1); sets PROBE_OK; records one line
+  local pname="$1" host="$2" port="$3" banner="$4" out rc t0 ms detail b="" extra
+  extra=",\"target\":\"vm\",\"port\":$port"
+  t0="$(now_ms)"
+  out="$(timeout 6 bash -c '
+    exec 3<>"/dev/tcp/$1/$2" || exit 11
+    echo CONNECTED
+    if [ "$3" = 1 ]; then IFS= read -r -t 3 -N 7 b <&3; printf "BANNER:%s\n" "$b"; fi
+  ' _ "$host" "$port" "$banner" 2>&1 </dev/null)"; rc=$?
+  ms=$(( $(now_ms) - t0 ))
+  PROBE_OK=false
+  if [ "$rc" -eq 124 ]; then
+    detail="timeout after 6 s (filtered or dropped)"
+  elif [[ "$out" == *CONNECTED* ]]; then
+    if [ "$banner" = 1 ]; then
+      b="$(printf '%s\n' "$out" | sed -n 's/^BANNER://p' | LC_ALL=C tr -cd ' -~' | cut -c1-7)"
+      extra="$extra,\"banner\":\"$(jstr "$b")\""
+      case "$b" in
+        SSH-*) PROBE_OK=true; detail="connected, ssh banner $b" ;;
+        *)     detail="connected but no ssh banner within 3 s (a middlebox can accept a connection it does not pass on)" ;;
+      esac
+    else
+      PROBE_OK=true; detail="connected"
+    fi
+  elif [[ "$out" == *[Rr]efused* ]]; then
+    detail="refused (the network is open, nothing listens there)"
+  else
+    detail="failed: $out"
+  fi
+  record "$pname" "$PROBE_OK" "$ms" "$detail" "$extra"
+}
+
+https_probe() {   # probe-name, url, extra curl args...; sets PROBE_OK; "reached" = got an HTTP status
+  local pname="$1" url="$2" out rc code t0 ms detail proxy=false extra
+  shift 2
+  [ -n "${https_proxy:-}${HTTPS_PROXY:-}${all_proxy:-}${ALL_PROXY:-}" ] && proxy=true   # presence only, never the value
+  PROBE_OK=null
+  if ! command -v curl >/dev/null 2>&1; then
+    record "$pname" null 0 "curl not found, so 443 is unknown" ",\"port\":443,\"proxy_env\":$proxy"
+    return 0
+  fi
+  t0="$(now_ms)"
+  code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 8 --max-time 20 "$@" "$url" 2>"$JOB_DIR/curl.err" </dev/null)"; rc=$?
+  ms=$(( $(now_ms) - t0 ))
+  out="$(head -c 300 "$JOB_DIR/curl.err" 2>/dev/null)"
+  extra=",\"port\":443,\"http_code\":\"$(jstr "$code")\",\"curl_exit\":$rc,\"proxy_env\":$proxy"
+  if [ -n "$code" ] && [ "$code" != 000 ]; then PROBE_OK=true; detail="HTTP $code (curl exit $rc)"
+  else PROBE_OK=false; detail="no HTTP status, curl exit $rc: $out"; fi
+  record "$pname" "$PROBE_OK" "$ms" "$detail" "$extra"
+}
+
+tls_probe() {   # probe-name, host, port: TCP connect plus a TLS handshake, certificate not verified (direct mode, wss)
+  local pname="$1" host="$2" port="$3" out rc t0 ms detail
+  PROBE_OK=false
+  t0="$(now_ms)"
+  if [ "$PY_READY" -ne 1 ]; then
+    record "$pname" false 0 "no usable python on this node" ",\"target\":\"vm\",\"port\":$port"
+    return 0
+  fi
   out="$(timeout 10 "${PYBIN[@]}" -c '
 import socket, ssl, sys
 ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
 s = socket.create_connection((sys.argv[1], int(sys.argv[2])), 5)
 ctx.wrap_socket(s, server_hostname=sys.argv[1]).close()
-' "$FRPS_ADDR" "$port" 2>&1)"; rc=$?
-  if [ "$rc" -eq 0 ]; then result=OK
-  elif [ "$rc" -eq 124 ]; then result="FAIL timeout"
-  else result="FAIL $(printf '%s' "$out" | tail -1 | cut -c1-80)"; fi
-  echo "tls $port $result"
-  [ "$rc" -eq 0 ]
+' "$host" "$port" 2>&1 </dev/null)"; rc=$?
+  ms=$(( $(now_ms) - t0 ))
+  if [ "$rc" -eq 0 ]; then PROBE_OK=true; detail="TLS handshake completed"
+  elif [ "$rc" -eq 124 ]; then detail="timeout after 10 s"
+  else detail="failed: $(printf '%s' "$out" | tail -1)"; fi
+  record "$pname" "$PROBE_OK" "$ms" "$detail" ",\"target\":\"vm\",\"port\":$port"
 }
-for port in $PROBE_TCP_PORTS; do
-  line="$(probe_tcp "$port")" && reached=$((reached + 1))
-  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) platform=$PLATFORM $line" | tee -a "$PROBE_FILE"
-done
-if [ "$PROBE_TLS_PORTS" != "none" ]; then
-  ensure_python || true
-  for port in $PROBE_TLS_PORTS; do
-    line="$(probe_tls "$port")" && reached=$((reached + 1))
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) platform=$PLATFORM $line" | tee -a "$PROBE_FILE"
+
+far_end_state() {   # connect to the local end and wait 2 s: held (channel open, silent), closed (far end closed it), data
+  local out
+  out="$(timeout 5 bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1" || exit 11; IFS= read -r -t 2 -N 1 b <&3; echo "READ_RC=$?"' _ "$LPORT" 2>&1 </dev/null)"
+  case "$out" in
+    *READ_RC=0) echo data ;;
+    *READ_RC=1) echo closed ;;
+    *READ_RC=*) echo held ;;
+    *) echo unknown ;;
+  esac
+}
+
+FORWARD_OK=false
+forward_probe() {   # ssh-forward: a real "ssh -N -L" setup, then a TCP connect to its local end; sets FORWARD_OK
+  local err="$JOB_DIR/ssh-probe.err" spid="" i ms detail pre="" rc="" far="" last t0 stage
+  FORWARD_OK=false
+  t0="$(now_ms)"
+  if ! command -v ssh >/dev/null 2>&1; then pre="ssh is not installed on this node"
+  elif [ ! -f "$SSH_KEY" ] || [ ! -r "$SSH_KEY" ]; then pre="the key file is missing or unreadable"
+  elif ! file_mode_ok "$SSH_KEY"; then pre="the key file is not mode 600 or 400"
+  elif [ ! -s "$SSH_KNOWN_HOSTS" ]; then pre="the known_hosts file is missing or empty"
+  elif local_end_up; then pre="local port $LPORT already has a listener on this node, so a connect to it would prove nothing"
+  fi
+  if [ -n "$pre" ]; then
+    record forward_setup false 0 "not tried: $pre" ",\"stage\":\"precondition\",\"lport\":$LPORT"
+    return 1
+  fi
+  build_ssh_args
+  : > "$err"
+  # the outer timeout is a backstop: ssh cannot outlive this probe even if the script dies
+  timeout -k 2 40 ssh "${SSH_ARGS[@]}" 2>"$err" </dev/null &
+  spid=$!
+  stage=no_listener_in_15s
+  for i in $(seq 1 60); do
+    if ! kill -0 "$spid" 2>/dev/null; then wait "$spid" 2>/dev/null; rc=$?; stage=ssh_exited; break; fi
+    if local_end_up && kill -0 "$spid" 2>/dev/null; then stage=ok; break; fi   # the listener must be ssh's own
+    sleep 0.25
   done
+  ms=$(( $(now_ms) - t0 ))
+  last="$(tail -n 1 "$err" 2>/dev/null)"
+  if [ "$stage" = ok ]; then
+    far="$(far_end_state)"
+    FORWARD_OK=true
+    # The local end only proves that the key authenticated and ssh opened its listener. The far end
+    # shows whether frps is reachable through the key's one permitted port.
+    detail="local end accepted a connection (ssh authenticated); far end: $far"
+    [ "$far" = closed ] && detail="$detail (frps not listening there, or the port is not permitted); ssh said: $last"
+    record forward_setup true "$ms" "$detail" ",\"stage\":\"ok\",\"far_end\":\"$far\",\"lport\":$LPORT"
+  else
+    if [ "$stage" = ssh_exited ]; then detail="ssh exited with code $rc: $last"
+    else detail="no listener on the local end within 15 s; ssh said: $last"; fi
+    record forward_setup false "$ms" "$detail" ",\"stage\":\"$stage\",\"ssh_exit\":${rc:-null},\"lport\":$LPORT"
+  fi
+  stop_pid "$spid"
+  return 0
+}
+
+tcp_probe tcp_vm_22 "$VM_ADDR" 22 1;                 R_VM22=$PROBE_OK
+tcp_probe tcp_vm_frps "$VM_ADDR" "$FRPS_PORT" 0;     R_VMFRPS=$PROBE_OK
+https_probe https_github https://github.com/;        R_GITHUB=$PROBE_OK
+# pypi's simple index is about 48 MB: ask for one byte of it, the TLS and HTTP exchange is the same
+https_probe https_pypi https://pypi.org/simple/ --range 0-0; R_PYPI=$PROBE_OK
+R_FWD=null
+reached=0
+if [ "$TRANSPORT" = ssh-forward ]; then
+  forward_probe || true
+  R_FWD=$FORWARD_OK
+  [ "$FORWARD_OK" = true ] && reached=1
+else
+  [ "$R_VMFRPS" = true ] && reached=$((reached + 1))
+  if [ "$PROBE_TLS_PORTS" != "none" ]; then
+    ensure_python || true
+    for port in $PROBE_TLS_PORTS; do
+      tls_probe "tls_vm_$port" "$VM_ADDR" "$port"
+      [ "$PROBE_OK" = true ] && reached=$((reached + 1))
+    done
+  fi
 fi
+emit summary "$(printf ',"vm_22":%s,"vm_frps":%s,"https_github":%s,"https_pypi":%s,"forward_setup":%s,"transport_path_ok":%s' \
+  "$R_VM22" "$R_VMFRPS" "$R_GITHUB" "$R_PYPI" "$R_FWD" "$([ "$reached" -gt 0 ] && echo true || echo false)")"
 if [ "$reached" -eq 0 ]; then
-  log "RESULT: NOT REACHABLE. No probed protocol got through from this node. The spike stops here: opening a port or any other access change is the owner's decision."
+  if [ "$TRANSPORT" = ssh-forward ]; then
+    log "RESULT: NOT REACHABLE. The ssh forward over port 22 did not come up from this node (see forward_setup in $PROBE_JSONL). The spike stops here for this platform: any access change is the owner's decision."
+  else
+    log "RESULT: NOT REACHABLE. Neither the frps port nor a probed TLS port answered from this node. The spike stops here: opening a port or any other access change is the owner's decision."
+  fi
   exit 3
 fi
-log "RESULT: reachable on $reached probe(s); see $PROBE_FILE"
+log "RESULT: the transport path works from this node; see $PROBE_JSONL"
 if [ "$PROBE_ONLY" = "1" ]; then
   ensure_python || true            # record the interpreter even in a probe-only job; never fatal here
   log "PROBE_ONLY=1: done"
@@ -160,10 +373,36 @@ if [ "$PROBE_ONLY" = "1" ]; then
 fi
 ensure_python || die "no python >= 3.6 on this node; set PYTHON to a wrapper (for example an apptainer exec line on Helios)"
 
+# --- stopping what this job started: by PID only, each exactly once --------------------------------
+stop_forward() {
+  local spid
+  [ -n "$FWD_LOOP_PID" ] || return 0
+  stop_pid "$FWD_LOOP_PID"      # the loop first, so it cannot start another ssh; its TERM trap stops the current one
+  spid="$(cat "$JOB_DIR/ssh.pid" 2>/dev/null || true)"
+  if [ -n "$spid" ] && [ "$(ps -o comm= -p "$spid" 2>/dev/null)" = ssh ]; then
+    log "ssh pid $spid outlived its loop, stopping it"
+    stop_pid "$spid"
+  fi
+  FWD_LOOP_PID=""
+}
+SHUTDOWN_DONE=0
+shutdown_children() {
+  [ "$SHUTDOWN_DONE" -eq 0 ] || return 0
+  SHUTDOWN_DONE=1
+  trap '' TERM INT USR1 USR2 HUP
+  [ -n "$THAW_PID" ] && kill "$THAW_PID" 2>/dev/null
+  stop_pid "$FRPC_PID"          # first: frpc says goodbye through the tunnel while it is still up
+  stop_pid "$STREAMER_PID"
+  stop_forward
+  wait 2>/dev/null
+}
+trap shutdown_children EXIT
+STOP=0
+trap 'STOP=1' TERM INT       # a scancel during start-up ends the waits below and goes through shutdown_children
+
 # --- preflight for the full run ---------------------------------------------------------------------
 [ -f "$TOKEN_FILE" ] || die "token file not found: $TOKEN_FILE"
-perm="$(stat -c %a "$TOKEN_FILE" 2>/dev/null || stat -f %Lp "$TOKEN_FILE" 2>/dev/null)"
-case "$perm" in 600|400) ;; *) die "token file must be mode 600 or 400, is '$perm'" ;; esac
+file_mode_ok "$TOKEN_FILE" || die "token file must be mode 600 or 400"
 FRPC_SRC="$(ls -d "$KIT_DIR"/dl/linux_"$FRP_ARCH"/frp_*_linux_"$FRP_ARCH"/frpc 2>/dev/null)"
 [ -n "$FRPC_SRC" ] && [ "$(printf '%s\n' "$FRPC_SRC" | wc -l)" -eq 1 ] || die "expected exactly one frpc for $FRP_ARCH under $KIT_DIR/dl (run fetch-frp.sh)"
 mkdir -p "$JOB_DIR/bin"
@@ -184,16 +423,63 @@ log "fake_streamer pid=$STREAMER_PID on 127.0.0.1:$LOCAL_PORT"
 "${PYBIN[@]}" "$KIT_DIR/stream_watch.py" --direct-only --direct-url "http://127.0.0.1:$LOCAL_PORT" \
   --out "$JOB_DIR/direct-baseline.json" || log "WARNING: direct baseline failed"
 
+# --- the ssh forward (ssh-forward mode): a reconnect loop, no autossh -------------------------------
+# Each exit of ssh is a reconnect and is a measurement: one UTC-stamped line in job.log and one JSON
+# line in ssh-exits.jsonl. The backoff starts at 2 s, doubles to at most 30 s while ssh dies within
+# 20 s of starting, and resets to 2 s after a longer life. ssh.pid always holds the current ssh PID.
+start_forward_loop() {
+  build_ssh_args
+  : > "$JOB_DIR/ssh.err"; : > "$JOB_DIR/ssh-exits.jsonl"
+  (
+    CUR="" STOPF=0 n=0 backoff=2
+    trap 'STOPF=1; [ -n "$CUR" ] && kill "$CUR" 2>/dev/null' TERM INT
+    while [ "$STOPF" -eq 0 ]; do
+      n=$((n + 1)); t0=$(date +%s)
+      ssh "${SSH_ARGS[@]}" 2>"$JOB_DIR/ssh-cur.err" </dev/null &
+      CUR=$!
+      echo "$CUR" > "$JOB_DIR/ssh.pid"
+      [ "$STOPF" -eq 1 ] && kill "$CUR" 2>/dev/null     # TERM arrived between the fork and the assignment
+      log "ssh-forward: attempt $n started"
+      wait "$CUR"; rc=$?
+      [ "$STOPF" -eq 1 ] && { wait "$CUR" 2>/dev/null; break; }
+      up=$(( $(date +%s) - t0 ))
+      last="$(tail -n 1 "$JOB_DIR/ssh-cur.err" 2>/dev/null)"
+      cat "$JOB_DIR/ssh-cur.err" >> "$JOB_DIR/ssh.err" 2>/dev/null
+      delay=$backoff
+      if [ "$up" -ge 20 ]; then delay=2; backoff=2; else backoff=$(( backoff * 2 )); [ "$backoff" -gt 30 ] && backoff=30; fi
+      log "ssh-forward: attempt $n exited with code $rc after ${up}s, restarting in ${delay}s; ssh said: $(jstr "$last")"
+      printf '{"ts":"%s","attempt":%s,"rc":%s,"up_s":%s,"restart_in_s":%s,"ssh_said":"%s"}\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$n" "$rc" "$up" "$delay" "$(jstr "$last")" >> "$JOB_DIR/ssh-exits.jsonl"
+      sleep "$delay" & CUR=$!
+      wait "$CUR"
+      [ "$STOPF" -eq 1 ] && { wait "$CUR" 2>/dev/null; break; }
+      CUR=""
+    done
+    log "ssh-forward: loop stopped after $n attempt(s)"
+  ) &
+  FWD_LOOP_PID=$!
+  log "ssh-forward: loop pid=$FWD_LOOP_PID, local end 127.0.0.1:$LPORT, far end 127.0.0.1:$FRPS_PORT on the VM"
+  for _ in $(seq 1 100); do local_end_up && break; [ "$STOP" -eq 1 ] && break; sleep 0.2; done
+  if local_end_up; then log "ssh-forward: the local end is up"
+  else log "WARNING: the ssh forward is not up after 20 s; frpc keeps retrying (loginFailExit=false), the loop keeps reconnecting; see $JOB_DIR/ssh-exits.jsonl"; fi
+}
+if [ "$TRANSPORT" = ssh-forward ]; then
+  start_forward_loop
+  SERVER_ADDR=127.0.0.1; SERVER_PORT="$LPORT"
+else
+  SERVER_ADDR="$VM_ADDR"; SERVER_PORT="$FRPS_PORT"
+fi
+
 # --- frpc ----------------------------------------------------------------------------------------------
 "${PYBIN[@]}" "$KIT_DIR/render_tmpl.py" "$KIT_DIR/frpc.toml.tmpl" \
-  SERVER_ADDR="$FRPS_ADDR" SERVER_PORT="$FRPS_PORT" INSTANCE="$INSTANCE" LOG_FILE="$JOB_DIR/frpc.log" \
+  SERVER_ADDR="$SERVER_ADDR" SERVER_PORT="$SERVER_PORT" INSTANCE="$INSTANCE" LOG_FILE="$JOB_DIR/frpc.log" \
   TOKEN_FILE="$TOKEN_FILE" PROTOCOL="$PROTOCOL" LOCAL_PORT="$LOCAL_PORT" > "$JOB_DIR/frpc.toml" || die "cannot render frpc.toml"
 "$FRPC" verify -c "$JOB_DIR/frpc.toml" || die "frpc.toml does not verify"
 "$FRPC" -c "$JOB_DIR/frpc.toml" >"$JOB_DIR/frpc.stdout" 2>&1 &
 FRPC_PID=$!
-log "frpc pid=$FRPC_PID protocol=$PROTOCOL"
-printf 'frpc=%s\nstreamer=%s\n' "$FRPC_PID" "$STREAMER_PID" > "$JOB_DIR/pids"
-for _ in $(seq 1 60); do grep -q 'login to server success' "$JOB_DIR/frpc.log" 2>/dev/null && break; sleep 1; done
+log "frpc pid=$FRPC_PID protocol=$PROTOCOL dialing $SERVER_ADDR:$SERVER_PORT"
+printf 'frpc=%s\nstreamer=%s\nforward_loop=%s\n' "$FRPC_PID" "$STREAMER_PID" "$FWD_LOOP_PID" > "$JOB_DIR/pids"
+for _ in $(seq 1 60); do grep -q 'login to server success' "$JOB_DIR/frpc.log" 2>/dev/null && break; [ "$STOP" -eq 1 ] && break; sleep 1; done
 if grep -q 'login to server success' "$JOB_DIR/frpc.log" 2>/dev/null; then
   log "frpc: login to server success"
 else
@@ -201,9 +487,6 @@ else
 fi
 
 # --- run until TERM (scancel, or the time limit), with fault injection by signal ---------------------
-STOP=0
-THAW_PID=""
-trap 'STOP=1' TERM INT
 trap 'log "FAULT usr1: SIGKILL frpc"; kill -KILL "$FRPC_PID" 2>/dev/null' USR1
 trap 'log "FAULT usr2: SIGKILL fake_streamer"; kill -KILL "$STREAMER_PID" 2>/dev/null' USR2
 trap 'log "FAULT hup: SIGSTOP frpc for ${FREEZE_SECONDS}s"; kill -STOP "$FRPC_PID" 2>/dev/null; ( sleep "$FREEZE_SECONDS"; kill -CONT "$FRPC_PID" 2>/dev/null ) & THAW_PID=$!' HUP
@@ -212,28 +495,16 @@ reported=""
 while [ "$STOP" -eq 0 ]; do
   sleep 1 &
   wait $! 2>/dev/null
-  for name in FRPC STREAMER; do                      # say once when a child is gone
+  for name in FRPC STREAMER FWD_LOOP; do               # say once when a child is gone
     var="${name}_PID"; pid="${!var}"
+    [ -n "$pid" ] || continue
     if ! kill -0 "$pid" 2>/dev/null; then
       case "$reported" in *"$name"*) ;; *) log "$name (pid $pid) is no longer running"; reported="$reported $name" ;; esac
     fi
   done
 done
 
-log "TERM received: stopping frpc and fake_streamer"
-trap '' TERM INT USR1 USR2 HUP
-[ -n "$THAW_PID" ] && kill "$THAW_PID" 2>/dev/null
-for pid in "$FRPC_PID" "$STREAMER_PID"; do
-  kill -CONT "$pid" 2>/dev/null
-  kill -TERM "$pid" 2>/dev/null
-done
-for _ in $(seq 1 50); do
-  kill -0 "$FRPC_PID" 2>/dev/null || kill -0 "$STREAMER_PID" 2>/dev/null || break
-  sleep 0.2
-done
-for pid in "$FRPC_PID" "$STREAMER_PID"; do
-  kill -0 "$pid" 2>/dev/null && { log "pid $pid ignored TERM, sending KILL"; kill -KILL "$pid" 2>/dev/null; }
-done
-wait 2>/dev/null
+log "TERM received: stopping frpc, fake_streamer and the ssh forward"
+shutdown_children
 log "s1 job end"
 exit 0

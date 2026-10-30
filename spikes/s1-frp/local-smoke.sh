@@ -8,6 +8,16 @@
 # THIS IS NOT SPIKE EVIDENCE. Same-host traffic proves nothing about compute nodes reaching
 # out, and 120 s proves nothing about long streams. Issue #18 rules both out.
 #
+# Usage: local-smoke.sh [direct | ssh-forward | all]      (default: all, one after the other)
+#   direct       frpc dials frps on loopback.
+#   ssh-forward  frpc dials the local end of "ssh -N -L" to frps on 127.0.0.1:<S1_TEST_FORWARD_PORT>,
+#                the same path as job.sbatch.tmpl with TRANSPORT=ssh-forward. It runs ONLY if
+#                S1_TEST_KEY names a restricted key that is already authorised for this user on
+#                this machine, with permitopen for 127.0.0.1:<S1_TEST_FORWARD_PORT> (default 7000).
+#                If S1_TEST_KEY is unset the variant prints SKIPPED, tests nothing and exits 0.
+#                S1_TEST_USER (default: the current user) names the account the key logs in as.
+#                This script creates no key and never touches ~/.ssh or authorized_keys.
+#
 # Needs the pinned binaries: bash fetch-frp.sh. Writes only under a mktemp -d directory.
 # Timeline (seconds after the watcher starts; the watcher runs 120 s). Stream 1 runs from about
 # 1 to 41 and is left alone. Stream 2 starts at about 42 and holds a 3 s freeze of frpc at 45
@@ -17,6 +27,22 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON="${PYTHON:-python3}"
+VARIANT="${1:-all}"
+case "$VARIANT" in
+  direct|ssh-forward) ;;
+  all)   # each variant in its own process, so each has its own cleanup; the exit code is the first failure
+    rc=0
+    bash "${BASH_SOURCE[0]}" direct || rc=$?
+    rc2=0; bash "${BASH_SOURCE[0]}" ssh-forward || rc2=$?
+    [ "$rc" -ne 0 ] || rc=$rc2
+    exit "$rc" ;;
+  *) echo "usage: local-smoke.sh [direct | ssh-forward | all]" >&2; exit 2 ;;
+esac
+if [ "$VARIANT" = ssh-forward ] && [ -z "${S1_TEST_KEY:-}" ]; then
+  echo "local-smoke: SKIPPED the ssh-forward variant: S1_TEST_KEY is not set. Nothing was tested; this is not a pass."
+  echo "local-smoke:   It needs a restricted key already authorised on this machine (see the header of this script)."
+  exit 0
+fi
 INSTANCE="smoke-instance"
 DURATION=120
 
@@ -30,9 +56,9 @@ BIN="$(ls -d "$HERE"/dl/linux_"$ARCH"/frp_*_linux_"$ARCH" 2>/dev/null | head -1 
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/s1-smoke.XXXXXX")"
 chmod 700 "$WORK"
-FRPS_PID="" FRPC_PID="" STUB_PID="" STREAMER_PID="" WATCH_PID="" CTRL_PID=""
+FRPS_PID="" FRPC_PID="" STUB_PID="" STREAMER_PID="" WATCH_PID="" CTRL_PID="" SSH_PID=""
 
-all_pids() { echo "$WATCH_PID $FRPC_PID $FRPS_PID $STUB_PID $STREAMER_PID $CTRL_PID"; }
+all_pids() { echo "$WATCH_PID $FRPC_PID $FRPS_PID $STUB_PID $STREAMER_PID $CTRL_PID $SSH_PID"; }
 
 cleanup() {
   local rc=$? pid
@@ -57,12 +83,24 @@ step() { echo "[$(date -u +%H:%M:%S)] $*"; }
 reap() { { wait "$1"; } 2>/dev/null || true; }
 
 # --- free loopback ports, a throwaway token, rendered configs ---------------------------------
-read -r BIND_PORT TCPMUX_PORT PLUGIN_PORT STREAM_PORT < <("$PYTHON" -c '
+read -r BIND_PORT TCPMUX_PORT PLUGIN_PORT STREAM_PORT LPORT < <("$PYTHON" -c '
 import socket
-socks = [socket.socket() for _ in range(4)]
+socks = [socket.socket() for _ in range(5)]
 for s in socks:
     s.bind(("127.0.0.1", 0))
 print(" ".join(str(s.getsockname()[1]) for s in socks))')
+SERVER_PORT="$BIND_PORT"
+if [ "$VARIANT" = ssh-forward ]; then
+  # frps must listen on exactly the one port the test key may forward to; frpc dials the local end.
+  BIND_PORT="${S1_TEST_FORWARD_PORT:-7000}"
+  SERVER_PORT="$LPORT"
+  "$PYTHON" -c 'import socket, sys; s = socket.socket(); s.bind(("127.0.0.1", int(sys.argv[1])))' "$BIND_PORT" 2>/dev/null \
+    || { echo "local-smoke: 127.0.0.1:$BIND_PORT is in use; the ssh-forward variant needs it free (set S1_TEST_FORWARD_PORT to the port the key may forward to)" >&2; exit 2; }
+  [ -f "$S1_TEST_KEY" ] && [ -r "$S1_TEST_KEY" ] || { echo "local-smoke: S1_TEST_KEY is not a readable file" >&2; exit 2; }
+  case "$(stat -c %a "$S1_TEST_KEY")" in 600|400) ;; *) echo "local-smoke: S1_TEST_KEY must be mode 600 or 400" >&2; exit 2 ;; esac
+  HOSTKEY_PUB=/etc/ssh/ssh_host_ed25519_key.pub
+  [ -r "$HOSTKEY_PUB" ] || { echo "local-smoke: cannot read $HOSTKEY_PUB to pin this machine's host key" >&2; exit 2; }
+fi
 umask 077
 head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$WORK/token"
 chmod 600 "$WORK/token"
@@ -72,10 +110,34 @@ render() { "$PYTHON" "$HERE/render_tmpl.py" "$@"; }
 render "$HERE/frps.toml.tmpl" BIND_ADDR=127.0.0.1 BIND_PORT="$BIND_PORT" TCPMUX_PORT="$TCPMUX_PORT" \
   PROXY_BIND_ADDR=127.0.0.1 TOKEN_FILE="$WORK/token" PLUGIN_ADDR="127.0.0.1:$PLUGIN_PORT" \
   LOG_FILE="$WORK/frps.log" > "$WORK/frps.toml"
-render "$HERE/frpc.toml.tmpl" SERVER_ADDR=127.0.0.1 SERVER_PORT="$BIND_PORT" INSTANCE="$INSTANCE" \
+render "$HERE/frpc.toml.tmpl" SERVER_ADDR=127.0.0.1 SERVER_PORT="$SERVER_PORT" INSTANCE="$INSTANCE" \
   LOG_FILE="$WORK/frpc.log" TOKEN_FILE="$WORK/token" PROTOCOL=tcp LOCAL_PORT="$STREAM_PORT" > "$WORK/frpc.toml"
 step "frps verify: $("$BIN/frps" verify -c "$WORK/frps.toml" 2>&1 | tail -1)"
 step "frpc verify: $("$BIN/frpc" verify -c "$WORK/frpc.toml" 2>&1 | tail -1)"
+
+# --- ssh-forward variant: the forward first. One ssh, no reconnect loop (the job has the loop). The
+# options are those of build_ssh_args in job.sbatch.tmpl; keep the two in step. The host key is pinned
+# from this machine's public host key file (a file read, not a scan of the network).
+if [ "$VARIANT" = ssh-forward ]; then
+  printf '127.0.0.1 %s\n' "$(cut -d' ' -f1,2 "$HOSTKEY_PUB")" > "$WORK/known_hosts"
+  ssh -F /dev/null -p 22 -N -T -i "$S1_TEST_KEY" \
+    -o BatchMode=yes -o IdentitiesOnly=yes -o ExitOnForwardFailure=yes \
+    -o ServerAliveInterval=10 -o ServerAliveCountMax=3 \
+    -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$WORK/known_hosts" -o GlobalKnownHostsFile=/dev/null \
+    -o ControlMaster=no -o ControlPath=none \
+    -o ConnectTimeout=8 -o PreferredAuthentications=publickey \
+    -L "127.0.0.1:$LPORT:127.0.0.1:$BIND_PORT" "${S1_TEST_USER:-$(id -un)}@127.0.0.1" 2>"$WORK/ssh.err" </dev/null &
+  SSH_PID=$!
+  for _ in $(seq 1 60); do
+    kill -0 "$SSH_PID" 2>/dev/null || break
+    timeout 2 bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1"' _ "$LPORT" 2>/dev/null && break
+    sleep 0.25
+  done
+  if ! kill -0 "$SSH_PID" 2>/dev/null || ! timeout 2 bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1"' _ "$LPORT" 2>/dev/null; then
+    echo "local-smoke: S1_TEST_KEY did not open the forward within 15 s. ssh said: $(tail -n 1 "$WORK/ssh.err")" >&2; exit 2
+  fi
+  step "ssh forward is up (pid $SSH_PID): 127.0.0.1:$LPORT -> 127.0.0.1:$BIND_PORT through this machine's sshd"
+fi
 
 # --- start: engine, then frpc BEFORE frps (loginFailExit=false must keep it alive) -------------
 start_streamer() {
@@ -153,11 +215,16 @@ cat "$WORK/watch.out"
 
 # --- judge the run: a config check, with the numbers shown -----------------------------------------
 echo
-echo "=== local smoke result: CONFIG CHECK ONLY, same host, ${DURATION} s. Not spike evidence. ==="
+echo "=== local smoke result [$VARIANT]: CONFIG CHECK ONLY, same host, ${DURATION} s. Not spike evidence. ==="
+SSH_ALIVE=na
+if [ -n "$SSH_PID" ]; then
+  if kill -0 "$SSH_PID" 2>/dev/null; then SSH_ALIVE=1; else SSH_ALIVE=0; fi
+fi
 RC=0
-"$PYTHON" -I - "$WORK" "$INSTANCE" "$LOGINFAIL_OK" "$CONTROL_OK" <<'PY' || RC=$?
+"$PYTHON" -I - "$WORK" "$INSTANCE" "$LOGINFAIL_OK" "$CONTROL_OK" "$SSH_ALIVE" <<'PY' || RC=$?
 import json, sys
 work, instance, loginfail_ok, control_ok = sys.argv[1], sys.argv[2], sys.argv[3] == "1", sys.argv[4] == "1"
+ssh_alive = sys.argv[5]
 summary = json.load(open(work + "/summary.json"))
 stub = [json.loads(l) for l in open(work + "/stub.jsonl") if l.strip()]
 mine = [e for e in stub if e.get("user") == instance]
@@ -174,6 +241,8 @@ print("stub log, calls for %s by op: %s" % (instance, json.dumps(ops, sort_keys=
 newproxy = next((e for e in mine if e["op"] == "NewProxy"), {})
 check("frpc survived a failed first login (loginFailExit=false)", loginfail_ok, "started before frps")
 check("control: the same config with loginFailExit=true ends frpc by itself", control_ok, "so the line above is not vacuous")
+if ssh_alive != "na":
+    check("the ssh forward process stayed up for the whole run (no unprompted exit)", ssh_alive == "1", "faults hit frpc and the engine only")
 check("Login reached the stub", ops.get("Login", 0) >= 1, "%d Login" % ops.get("Login", 0))
 check("NewProxy reached the stub as a tcpmux/httpconnect proxy named by the instance",
       newproxy.get("proxy_type") == "tcpmux" and newproxy.get("multiplexer") == "httpconnect"
