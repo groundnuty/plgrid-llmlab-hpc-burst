@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"sort"
@@ -33,8 +36,8 @@ func TestUpStatusDown(t *testing.T) {
 		t.Fatalf("up exited %d", r.code)
 	}
 	parseJSON(t, r.out, &up)
-	if !strings.Contains(r.err, "warning: no front recorded") {
-		t.Errorf("up with no front must warn (HBEP-11 alpha reachability); stderr: %q", r.err)
+	if !strings.Contains(r.err, "warning: no front recorded") || !strings.Contains(r.err, "no jobs will be submitted until a front is configured") {
+		t.Errorf("up with no front must warn that no jobs will be submitted until a front is configured (HBEP-11 owner, 30 Oct 2026); stderr: %q", r.err)
 	}
 	t.Logf("NUMBERS cold start: /readyz after %d ms, controller manager after %d ms, RSS %.0f MiB", up.ReadyzMS, up.ReadyMS, up.RSSMiB)
 	if up.Version != "v1.36.5+k3s1" {
@@ -87,6 +90,7 @@ func TestUpStatusDown(t *testing.T) {
 	wantVars := map[string]string{
 		"HOME": h.dir + "/home", "XDG_RUNTIME_DIR": h.dir + "/run",
 		"KUBECONFIG": h.dir + "/home/kubeconfig", "K3S_CONFIG_FILE": h.dir + "/empty-config.yaml",
+		"TMPDIR": h.dir + "/tmp",
 	}
 	for k, v := range wantVars {
 		if vars[k] != v {
@@ -182,14 +186,16 @@ func TestUpStatusDown(t *testing.T) {
 
 	// ---- status ----
 	var rep struct {
-		Health    string   `json:"health"`
-		Reasons   []string `json:"reasons"`
-		Listeners []string `json:"listeners"`
-		RSSMiB    float64  `json:"rss_mib"`
-		Readyz    *bool    `json:"readyz_ok"`
-		KCM       *bool    `json:"controller_manager_ok"`
-		Writes    *bool    `json:"writes_ok"`
-		Processes []struct {
+		Health     string   `json:"health"`
+		Reasons    []string `json:"reasons"`
+		Listeners  []string `json:"listeners"`
+		RSSMiB     float64  `json:"rss_mib"`
+		Readyz     *bool    `json:"readyz_ok"`
+		KCM        *bool    `json:"controller_manager_ok"`
+		Writes     *bool    `json:"writes_ok"`
+		GC         *bool    `json:"gc_ok"`
+		Executable string   `json:"executable"`
+		Processes  []struct {
 			PID     int    `json:"pid"`
 			Verdict string `json:"verdict"`
 		} `json:"processes"`
@@ -209,6 +215,23 @@ func TestUpStatusDown(t *testing.T) {
 		t.Fatalf("status exit %d: %+v", r.code, rep)
 	}
 	t.Logf("NUMBERS status: RSS %.0f MiB, listeners %v", rep.RSSMiB, rep.Listeners)
+	if rep.GC == nil || !*rep.GC {
+		t.Errorf("status: the garbage-collector probe says %s, want true", ptrStr(rep.GC))
+	}
+	// k3s must run the binary it unpacked into this host's data directory, not another k3s's
+	// (the system one's /var/lib/rancher/k3s/data). Checked in status's report, and again against
+	// the kernel's own link for the process.
+	realDir, err := filepath.EvalSymlinks(h.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assetDir := filepath.Join(realDir, "data", "data") + string(filepath.Separator)
+	if !strings.HasPrefix(rep.Executable, assetDir) {
+		t.Errorf("status: executable %q is not under %s", rep.Executable, assetDir)
+	}
+	if exe, err := os.Readlink("/proc/" + itoa(pid) + "/exe"); err != nil || !strings.HasPrefix(exe, assetDir) {
+		t.Errorf("/proc/%d/exe is %q (%v), want a file under %s", pid, exe, err, assetDir)
+	}
 	if probeRV() == rvBefore {
 		t.Error("status reports a successful write probe, but the probe object did not change")
 	}
@@ -221,6 +244,55 @@ func TestUpStatusDown(t *testing.T) {
 	if r.code != exitFail || !strings.Contains(r.err, "already running") || st.Processes[0].PID != readState(t, h.dir).Processes[0].PID {
 		t.Errorf("second up: exit %d, stderr %q", r.code, r.err)
 	}
+
+	// ---- the audit log: our requests are in it, and no Secret content is ----
+	auditPath := filepath.Join(h.dir, "logs", "audit.log")
+	raw := make([]byte, 16)
+	if _, err := rand.Read(raw); err != nil {
+		t.Fatal(err)
+	}
+	secretValue := hex.EncodeToString(raw)
+	const auditSecret, auditCM = "audit-test-secret", "audit-test-configmap"
+	if _, err := c.cs.CoreV1().Secrets("default").Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: auditSecret},
+		Data: map[string][]byte{"password": []byte(secretValue)}}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.cs.CoreV1().ConfigMaps("default").Create(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: auditCM}, Data: map[string]string{"k": "v"}}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	// The log is buffered by the API server: wait for our two requests to show up, reading complete
+	// lines only (the last one may be half written while the server runs).
+	waitFor(t, 10*time.Second, "the create of our ConfigMap and Secret in the audit log", func() bool {
+		if _, err := os.Stat(auditPath); err != nil {
+			return false
+		}
+		_, evs := readAudit(t, auditPath, true)
+		return findAudit(evs, "create", "configmaps", auditCM) != nil && findAudit(evs, "create", "secrets", auditSecret) != nil
+	})
+	checkAudit := func(complete bool) {
+		t.Helper()
+		text, evs := readAudit(t, auditPath, complete)
+		if e := findAudit(evs, "create", "configmaps", auditCM); e == nil {
+			t.Errorf("no create event for ConfigMap %s among %d audit events", auditCM, len(evs))
+		}
+		if e := findAudit(evs, "create", "secrets", auditSecret); e == nil {
+			t.Errorf("no create event for Secret %s among %d audit events", auditSecret, len(evs))
+		} else if e.Level != "Metadata" {
+			t.Errorf("the Secret's create is logged at level %q, want Metadata", e.Level)
+		}
+		for _, form := range []string{secretValue, base64.StdEncoding.EncodeToString([]byte(secretValue))} {
+			if strings.Contains(text, form) {
+				t.Errorf("the audit log contains the Secret's content (%d chars of it, as %q...)", len(form), form[:4])
+			}
+		}
+		for i, e := range evs {
+			if e.hasBody {
+				t.Errorf("audit event %d (%s %s) carries a request or response body", i, e.Verb, e.ObjectRef.Resource)
+				break
+			}
+		}
+	}
+	checkAudit(true)
 
 	// ---- the identity guard, on the real process ----
 	// Record the start time wrongly, as if the PID had been reused. status must call the host
@@ -288,6 +360,8 @@ func TestUpStatusDown(t *testing.T) {
 	if r := cli(t, h.args("status")...); r.code != exitStopped {
 		t.Errorf("status after down: exit %d, %q", r.code, r.out)
 	}
+	// The server is gone, so the audit log is complete now: every line must parse, in full.
+	checkAudit(false)
 }
 
 func waitDone(pid int) bool {

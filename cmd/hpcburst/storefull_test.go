@@ -16,7 +16,6 @@ import (
 // something that was shown to behave like a full disk: writes up to the limit succeed, the next
 // ones fail with ENOSPC, statfs reports the limit, and freeing space makes writes work again.
 func TestCapVolume(t *testing.T) {
-	binDirOrSkip(t)
 	const limit = 2 << 20
 	v := newCapVolume(t, limit)
 	f, err := os.Create(filepath.Join(v.mount, "a"))
@@ -143,6 +142,10 @@ func storeFull(t *testing.T, wholeDataDir bool) {
 	t.Logf("created %d objects; the volume refused %d requests; volume used %d of %d KiB", created, vol.enospc.Load(), vol.used()>>10, vol.limit>>10)
 	if firstErr == nil || vol.enospc.Load() == 0 {
 		t.Fatalf("the fill never hit the limit (first error %v, refusals %d)", firstErr, vol.enospc.Load())
+	}
+	// The refusal must be the full disk, not a timeout or a connection error that would also end the fill.
+	if !strings.Contains(firstErr.Error(), "database or disk is full") {
+		t.Fatalf("the first refused write failed for another reason than a full store: %v", firstErr)
 	}
 	// Writes are refused, even a tiny one; reads are not.
 	if _, err := c.cs.CoreV1().ConfigMaps("fill").Create(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "one-more"}, Data: map[string]string{"d": "x"}}, metav1.CreateOptions{}); err == nil {

@@ -9,8 +9,8 @@ package main
 // listeners, /proc read with a separate parser, client-go for objects (UIDs from the create
 // responses), and the root-owned k3s's own listeners. Tests that start k3s need pinned binaries:
 // HPCBURST_BIN_DIR must point at a directory laid out by hack/fetch-k3s.sh. Without them the tests
-// skip, loudly, unless HPCBURST_REQUIRE_INTEGRATION=1, which turns the skip into a failure.
-// hack/test-launcher.sh sets that variable.
+// skip, loudly, unless HPCBURST_REQUIRE_INTEGRATION=1, which turns the skip into a failure (also
+// the skip that -short asks for). hack/test-launcher.sh sets that variable and fails on any skip.
 
 import (
 	"bytes"
@@ -59,11 +59,23 @@ func leakyEnv(extra ...string) []string {
 // cli runs `hpcburst args...` in a child process and returns its output and exit code.
 func cli(t *testing.T, args ...string) cliResult {
 	t.Helper()
-	cmd := exec.Command(os.Args[0], args...)
+	return cliIn(t, "", args...)
+}
+
+// cliIn is cli with the child's working directory set to dir (empty: this process's). The test
+// binary is named by an absolute path, which a relative os.Args[0] would not survive.
+func cliIn(t *testing.T, dir string, args ...string) cliResult {
+	t.Helper()
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(self, args...)
+	cmd.Dir = dir
 	cmd.Env = leakyEnv()
 	var so, se bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &so, &se
-	err := cmd.Run()
+	err = cmd.Run()
 	code := 0
 	if err != nil {
 		ee, ok := err.(*exec.ExitError)
@@ -72,15 +84,24 @@ func cli(t *testing.T, args ...string) cliResult {
 		}
 		code = ee.ExitCode()
 	}
-	t.Logf("$ hpcburst %s\nexit %d\n%s%s", strings.Join(args, " "), code, so.String(), se.String())
+	where := ""
+	if dir != "" {
+		where = "(in " + dir + ") "
+	}
+	t.Logf("%s$ hpcburst %s\nexit %d\n%s%s", where, strings.Join(args, " "), code, so.String(), se.String())
 	return cliResult{so.String(), se.String(), code}
 }
 
 // ---- gates ----
 
+func requireIntegration() bool { return os.Getenv("HPCBURST_REQUIRE_INTEGRATION") == "1" }
+
 func binDirOrSkip(t *testing.T) string {
 	t.Helper()
 	if testing.Short() {
+		if requireIntegration() {
+			t.Fatal("HPCBURST_REQUIRE_INTEGRATION=1, but -short asks to skip the tests that start k3s: a skip is not a pass")
+		}
 		t.Skip("short mode: the tests that start k3s are skipped")
 	}
 	dir := os.Getenv("HPCBURST_BIN_DIR")
@@ -96,7 +117,7 @@ func binDirOrSkip(t *testing.T) string {
 	}
 	if missing != "" {
 		msg := "SKIPPED, NOT TESTED: no pinned k3s binaries (" + missing + "); run hack/fetch-k3s.sh and set HPCBURST_BIN_DIR, or use hack/test-launcher.sh"
-		if os.Getenv("HPCBURST_REQUIRE_INTEGRATION") == "1" {
+		if requireIntegration() {
 			t.Fatal(msg)
 		}
 		t.Skip(msg)
@@ -107,10 +128,18 @@ func binDirOrSkip(t *testing.T) string {
 func fileOf(path string) string { b, _ := os.ReadFile(path); return string(b) }
 
 // gate waits for a quiet machine, as the shared-VM rules require before starting a server:
-// 1-minute load at most 4.0, at least 8 GiB of memory available, at least 3 GiB free on the
-// disk that holds the test directories.
+// 1-minute load at most 4.0, at least 8 GiB of memory available (HPCBURST_TEST_MIN_AVAIL_GIB
+// changes the 8), at least 3 GiB free on the disk that holds the test directories.
 func gate(t *testing.T) {
 	t.Helper()
+	minAvailGiB := 8.0
+	if v := os.Getenv("HPCBURST_TEST_MIN_AVAIL_GIB"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f < 0 {
+			t.Fatalf("HPCBURST_TEST_MIN_AVAIL_GIB=%q is not a number of GiB", v)
+		}
+		minAvailGiB = f
+	}
 	deadline := time.Now().Add(15 * time.Minute)
 	for {
 		load, _ := strconv.ParseFloat(strings.Fields(fileOf("/proc/loadavg"))[0], 64)
@@ -123,7 +152,7 @@ func gate(t *testing.T) {
 		var st syscall.Statfs_t
 		_ = syscall.Statfs(os.TempDir(), &st)
 		freeGiB := float64(st.Bavail) * float64(st.Bsize) / (1 << 30)
-		if load <= 4.0 && availKB/1048576 >= 8 && freeGiB >= 3 {
+		if load <= 4.0 && availKB/1048576 >= minAvailGiB && freeGiB >= 3 {
 			return
 		}
 		if time.Now().After(deadline) {
@@ -207,10 +236,10 @@ func listeningInRange(t testing.TB, lo, hi int) []string {
 var (
 	rootK3sStart  []int
 	forbiddenSys  = []string{"/etc/rancher", "/var/lib/rancher", "/run/k3s"}
-	rootK3sNeeded = []int{6443, 10250}
+	rootK3sNeeded = []int{6443, 6444, 10250}
 )
 
-// rootK3sPorts returns which of 6443 and 10250 listen now.
+// rootK3sPorts returns which of the root k3s's ports (rootK3sNeeded) listen now.
 func rootK3sPorts() []int {
 	out, err := exec.Command("ss", "-ltnH").Output()
 	if err != nil {
@@ -263,11 +292,11 @@ func guardRootK3s(t *testing.T) {
 		out, _ := exec.Command("ss", "-ltnH").Output()
 		var keep []string
 		for _, l := range strings.Split(string(out), "\n") {
-			if strings.Contains(l, ":6443 ") || strings.Contains(l, ":10250 ") {
+			if strings.Contains(l, ":6443 ") || strings.Contains(l, ":6444 ") || strings.Contains(l, ":10250 ") {
 				keep = append(keep, strings.Join(strings.Fields(l), " "))
 			}
 		}
-		t.Logf("root k3s check after the test: listens on %v (before: %v)\n$ ss -ltnH | grep -E ':(6443|10250) '\n%s", after, before, strings.Join(keep, "\n"))
+		t.Logf("root k3s check after the test: listens on %v (before: %v)\n$ ss -ltnH | grep -E ':(6443|6444|10250) '\n%s", after, before, strings.Join(keep, "\n"))
 	})
 }
 

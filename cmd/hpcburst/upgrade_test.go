@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -26,7 +28,9 @@ type created struct {
 }
 
 // TestUpgrade starts k3s 1.35.9 with manifests and a front recorded, loads objects, upgrades to
-// 1.36.5, and checks that every object is back with the same UID and creation time.
+// 1.36.5, and checks that every object is back with the same UID and creation time. Then it changes
+// the store, stops the host, restores the upgrade's backup, and checks that the objects are back as
+// they were before the upgrade and the later changes are gone.
 func TestUpgrade(t *testing.T) {
 	const base = 29220
 	h := newHost(t)
@@ -164,13 +168,145 @@ func TestUpgrade(t *testing.T) {
 	if v, err := c2.cs.Discovery().ServerVersion(); err != nil || !strings.HasPrefix(v.GitVersion, "v1.36.5") {
 		t.Fatalf("server version after: %v, %v", v, err)
 	}
+	kept := checkObjects(ctx, t, c2, objs)
+	t.Logf("kept %d of %d objects the test created, by UID and creation time (independent of the launcher's count)", kept, len(objs))
+	if kept != len(objs) {
+		t.Errorf("kept %d of %d", kept, len(objs))
+	}
+
+	// The backup holds the store and the server token as the old release left them, mode 600, and
+	// backup.json names that release.
+	for _, f := range []string{"db/state.db", "token"} {
+		fi, err := os.Stat(filepath.Join(up.Backup, f))
+		if err != nil || !fi.Mode().IsRegular() || fi.Size() == 0 || fi.Mode().Perm() != 0o600 {
+			t.Errorf("backup %s: %v, %v (want a non-empty regular file, mode 600)", f, fi, err)
+		}
+	}
+	var info struct {
+		Version string   `json:"version"`
+		TakenAt string   `json:"taken_at"`
+		Files   []string `json:"files"`
+	}
+	if b, err := os.ReadFile(filepath.Join(up.Backup, "backup.json")); err != nil {
+		t.Errorf("backup.json: %v", err)
+	} else {
+		parseJSON(t, string(b), &info)
+		if info.Version != "v1.35.9+k3s1" || info.TakenAt == "" {
+			t.Errorf("backup.json: %+v, want the release v1.35.9+k3s1 and a time", info)
+		}
+	}
+	if !strings.Contains(up.Backup, "v1.35.9+k3s1") {
+		t.Errorf("the backup name does not say what it holds: %s", up.Backup)
+	}
+	// And the upgraded host is healthy by status.
+	if r := cli(t, h.args("status")...); r.code != exitOK {
+		t.Errorf("status after the upgrade: exit %d: %s", r.code, r.out)
+	}
+
+	// ---- changes after the upgrade, then the way down: restore ----
+	// The store goes back to the backup, so what the test does now must be gone afterwards: the
+	// first checks below prove the changes landed, or "gone" would be true for nothing.
+	ctx2, cancel2 := testCtx()
+	defer cancel2()
+	cms := c2.cs.CoreV1().ConfigMaps("pop")
+	if _, err := cms.Create(ctx2, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "after-upgrade"}, Data: map[string]string{"i": "after"}}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cms.Delete(ctx2, "cm-000", metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	cm1, err := cms.Get(ctx2, "cm-001", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cm1.Data = map[string]string{"i": "changed after the upgrade"}
+	if _, err := cms.Update(ctx2, cm1, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cms.Get(ctx2, "after-upgrade", metav1.GetOptions{}); err != nil {
+		t.Fatalf("after-upgrade was not created: %v", err)
+	}
+	if _, err := cms.Get(ctx2, "cm-000", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("cm-000 was not deleted: %v", err)
+	}
+	if got, err := cms.Get(ctx2, "cm-001", metav1.GetOptions{}); err != nil || got.Data["i"] != "changed after the upgrade" {
+		t.Fatalf("cm-001 was not updated: %v, %v", got, err)
+	}
+
+	// restore needs the host stopped.
+	if r := cli(t, h.args("restore", "--backup", up.Backup)...); r.code != exitFail || !running(newPID) {
+		t.Errorf("restore on a running host: exit %d, k3s running: %v", r.code, running(newPID))
+	}
+	if r := cli(t, h.args("down")...); r.code != exitOK {
+		t.Fatalf("down exited %d", r.code)
+	}
+	assertNothingStarted(t, h)
+
+	var restored struct {
+		Version  string `json:"version"`
+		Backup   string `json:"backup"`
+		Replaced string `json:"replaced"`
+	}
+	r = cli(t, h.args("restore", "--backup", up.Backup, "--json")...)
+	if r.code != exitOK {
+		t.Fatalf("restore exited %d", r.code)
+	}
+	parseJSON(t, r.out, &restored)
+	if restored.Version != "v1.35.9+k3s1" || filepath.Clean(restored.Backup) != filepath.Clean(up.Backup) {
+		t.Errorf("restore reported %+v", restored)
+	}
+	// The store it replaced is moved aside, not deleted.
+	if restored.Replaced == "" || filepath.Dir(restored.Replaced) != filepath.Join(h.dir, "data", "server") {
+		t.Errorf("the replaced store is at %q, want a directory under %s", restored.Replaced, filepath.Join(h.dir, "data", "server"))
+	} else if fi, err := os.Stat(filepath.Join(restored.Replaced, "db", "state.db")); err != nil || fi.Size() == 0 {
+		t.Errorf("the replaced store was not kept: %v, %v", fi, err)
+	}
+	assertStoreVersion(t, filepath.Join(h.dir, "store-version.json"), "v1.35.9+k3s1")
+
+	// The store is now 1.35.9's: 1.36.5 is only reached through upgrade again.
+	r = cli(t, h.upArgs(base, "--version", "1.36.5")...)
+	if r.code != exitFail || !strings.Contains(r.err, "hpcburst upgrade") {
+		t.Errorf("up --version 1.36.5 after the restore: exit %d, stderr %q; want exit 1 naming hpcburst upgrade", r.code, r.err)
+	}
+	assertNothingStarted(t, h)
+
+	// A plain up starts the release the store was restored to.
+	if r := cli(t, h.upArgs(base)...); r.code != exitOK {
+		t.Fatalf("up after the restore exited %d", r.code)
+	}
+	assertRunning(t, h, "v1.35.9+k3s1")
+
+	// Judged from the test's own record: every object from before the upgrade is back with the
+	// UID and creation time its create response gave, so cm-000 is the original, not a new one.
+	c3 := h.clients()
+	kept = checkObjects(ctx2, t, c3, objs)
+	t.Logf("after the restore: %d of %d recorded objects are back with their UID and creation time", kept, len(objs))
+	if kept != len(objs) {
+		t.Errorf("after the restore only %d of %d recorded objects match", kept, len(objs))
+	}
+	cms = c3.cs.CoreV1().ConfigMaps("pop")
+	if got, err := cms.Get(ctx2, "cm-001", metav1.GetOptions{}); err != nil || got.Data["i"] != "1" {
+		t.Errorf("cm-001 after the restore: %v, %v; want its original data i=1", got, err)
+	}
+	if _, err := cms.Get(ctx2, "cm-000", metav1.GetOptions{}); err != nil {
+		t.Errorf("cm-000 is not back after the restore: %v", err)
+	}
+	if _, err := cms.Get(ctx2, "after-upgrade", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("after-upgrade survived the restore (%v): the store was not put back", err)
+	}
+}
+
+// checkObjects asks the API server for every recorded object and compares UID and creation time
+// with what the create response said. It reports each difference and returns how many matched.
+func checkObjects(ctx context.Context, t *testing.T, c clients, objs []created) int {
+	t.Helper()
 	kept := 0
 	for _, o := range objs {
 		var uid types.UID
 		var ts metav1.Time
 		switch o.what {
 		case "configmap":
-			got, err := c2.cs.CoreV1().ConfigMaps(o.ns).Get(ctx, o.name, metav1.GetOptions{})
+			got, err := c.cs.CoreV1().ConfigMaps(o.ns).Get(ctx, o.name, metav1.GetOptions{})
 			if err != nil {
 				t.Errorf("%s %s/%s: %v", o.what, o.ns, o.name, err)
 				continue
@@ -180,14 +316,14 @@ func TestUpgrade(t *testing.T) {
 				t.Errorf("configmap %s lost its data", o.name)
 			}
 		case "namespace":
-			got, err := c2.cs.CoreV1().Namespaces().Get(ctx, o.name, metav1.GetOptions{})
+			got, err := c.cs.CoreV1().Namespaces().Get(ctx, o.name, metav1.GetOptions{})
 			if err != nil {
 				t.Errorf("%s %s: %v", o.what, o.name, err)
 				continue
 			}
 			uid, ts = got.UID, got.CreationTimestamp
 		case "widget":
-			got, err := c2.dyn.Resource(widgetGVR).Namespace(o.ns).Get(ctx, o.name, metav1.GetOptions{})
+			got, err := c.dyn.Resource(widgetGVR).Namespace(o.ns).Get(ctx, o.name, metav1.GetOptions{})
 			if err != nil {
 				t.Errorf("%s %s/%s: %v", o.what, o.ns, o.name, err)
 				continue
@@ -197,7 +333,7 @@ func TestUpgrade(t *testing.T) {
 				t.Errorf("widget %s lost its spec", o.name)
 			}
 		case "crd":
-			got, err := c2.dyn.Resource(schema.GroupVersionResource{Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions"}).Get(ctx, o.name, metav1.GetOptions{})
+			got, err := c.dyn.Resource(schema.GroupVersionResource{Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions"}).Get(ctx, o.name, metav1.GetOptions{})
 			if err != nil {
 				t.Errorf("crd %s: %v", o.name, err)
 				continue
@@ -210,20 +346,5 @@ func TestUpgrade(t *testing.T) {
 		}
 		kept++
 	}
-	t.Logf("kept %d of %d objects the test created, by UID and creation time (independent of the launcher's count)", kept, len(objs))
-	if kept != len(objs) {
-		t.Errorf("kept %d of %d", kept, len(objs))
-	}
-
-	// The backup holds the SQLite store as it was before.
-	if fi, err := os.Stat(filepath.Join(up.Backup, "state.db")); err != nil || fi.Size() == 0 {
-		t.Errorf("backup: %v, %v", fi, err)
-	}
-	if !strings.Contains(up.Backup, "v1.35.9+k3s1") {
-		t.Errorf("the backup name does not say what it holds: %s", up.Backup)
-	}
-	// And the upgraded host is healthy by status.
-	if r := cli(t, h.args("status")...); r.code != exitOK {
-		t.Errorf("status after the upgrade: exit %d: %s", r.code, r.out)
-	}
+	return kept
 }

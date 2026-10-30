@@ -31,6 +31,9 @@ func TestUpRefusesWhenAPortIsTaken(t *testing.T) {
 		t.Run(hd.name, func(t *testing.T) {
 			l, err := net.Listen(hd.network, hd.addr)
 			if err != nil {
+				if requireIntegration() {
+					t.Fatalf("cannot hold %s, so the case is not tested: %v", hd.addr, err)
+				}
 				t.Skipf("cannot hold %s: %v", hd.addr, err)
 			}
 			defer l.Close()
