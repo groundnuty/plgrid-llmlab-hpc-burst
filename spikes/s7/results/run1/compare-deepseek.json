@@ -1,0 +1,392 @@
+{
+ "all_match": true,
+ "counts": {
+  "git-ok": 26,
+  "lfs-ok": 48
+ },
+ "files": [
+  {
+   "path": ".gitattributes",
+   "size": 1519,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "LICENSE",
+   "size": 1084,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "README.md",
+   "size": 7238,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "config.json",
+   "size": 1888,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "encoding/README.md",
+   "size": 9168,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "encoding/encoding_dsv4.py",
+   "size": 29001,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "encoding/test_encoding_dsv4.py",
+   "size": 3741,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "encoding/tests/test_input_1.json",
+   "size": 2748,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "encoding/tests/test_input_2.json",
+   "size": 526,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "encoding/tests/test_input_3.json",
+   "size": 4546,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "encoding/tests/test_input_4.json",
+   "size": 2730,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "encoding/tests/test_output_1.txt",
+   "size": 2390,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "encoding/tests/test_output_2.txt",
+   "size": 342,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "encoding/tests/test_output_3.txt",
+   "size": 3313,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "encoding/tests/test_output_4.txt",
+   "size": 2552,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "generation_config.json",
+   "size": 170,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "inference/README.md",
+   "size": 951,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "inference/config.json",
+   "size": 1162,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "inference/convert.py",
+   "size": 6639,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "inference/generate.py",
+   "size": 5804,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "inference/kernel.py",
+   "size": 22198,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "inference/model.py",
+   "size": 45118,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "inference/requirements.txt",
+   "size": 92,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "model-00001-of-00048.safetensors",
+   "size": 1059061856,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00002-of-00048.safetensors",
+   "size": 3566321192,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00003-of-00048.safetensors",
+   "size": 3566321192,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00004-of-00048.safetensors",
+   "size": 3596229272,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00005-of-00048.safetensors",
+   "size": 3568768976,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00006-of-00048.safetensors",
+   "size": 3590024776,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00007-of-00048.safetensors",
+   "size": 3568768976,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00008-of-00048.safetensors",
+   "size": 3590024776,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00009-of-00048.safetensors",
+   "size": 3568768976,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00010-of-00048.safetensors",
+   "size": 3590024776,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00011-of-00048.safetensors",
+   "size": 3568768976,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00012-of-00048.safetensors",
+   "size": 3590026352,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00013-of-00048.safetensors",
+   "size": 3568770544,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00014-of-00048.safetensors",
+   "size": 3590026352,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00015-of-00048.safetensors",
+   "size": 3568770544,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00016-of-00048.safetensors",
+   "size": 3590026352,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00017-of-00048.safetensors",
+   "size": 3568770544,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00018-of-00048.safetensors",
+   "size": 3590026352,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00019-of-00048.safetensors",
+   "size": 3568770544,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00020-of-00048.safetensors",
+   "size": 3590026352,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00021-of-00048.safetensors",
+   "size": 3568770544,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00022-of-00048.safetensors",
+   "size": 3590026352,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00023-of-00048.safetensors",
+   "size": 3568770544,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00024-of-00048.safetensors",
+   "size": 3590026352,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00025-of-00048.safetensors",
+   "size": 3568770544,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00026-of-00048.safetensors",
+   "size": 3590026352,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00027-of-00048.safetensors",
+   "size": 3568770544,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00028-of-00048.safetensors",
+   "size": 3590026352,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00029-of-00048.safetensors",
+   "size": 3568770544,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00030-of-00048.safetensors",
+   "size": 3590026352,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00031-of-00048.safetensors",
+   "size": 3568770544,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00032-of-00048.safetensors",
+   "size": 3590026352,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00033-of-00048.safetensors",
+   "size": 3568770544,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00034-of-00048.safetensors",
+   "size": 3590026352,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00035-of-00048.safetensors",
+   "size": 3568770544,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00036-of-00048.safetensors",
+   "size": 3590026352,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00037-of-00048.safetensors",
+   "size": 3568770544,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00038-of-00048.safetensors",
+   "size": 3590026352,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00039-of-00048.safetensors",
+   "size": 3568770544,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00040-of-00048.safetensors",
+   "size": 3590026352,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00041-of-00048.safetensors",
+   "size": 3568770544,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00042-of-00048.safetensors",
+   "size": 3590026352,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00043-of-00048.safetensors",
+   "size": 3568770544,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00044-of-00048.safetensors",
+   "size": 3590026352,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00045-of-00048.safetensors",
+   "size": 1059332516,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00046-of-00048.safetensors",
+   "size": 3610455184,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00047-of-00048.safetensors",
+   "size": 3560111960,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model-00048-of-00048.safetensors",
+   "size": 3692775244,
+   "verdict": "lfs-ok"
+  },
+  {
+   "path": "model.safetensors.index.json",
+   "size": 5602871,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "tokenizer.json",
+   "size": 6367146,
+   "verdict": "git-ok"
+  },
+  {
+   "path": "tokenizer_config.json",
+   "size": 801,
+   "verdict": "git-ok"
+  }
+ ],
+ "hub_files": 74,
+ "lfs_bytes_matched": 166886535336,
+ "model_signing_vs_own": {
+  "differ": [],
+  "equal": 73,
+  "not_in_manifest": [
+   ".gitattributes"
+  ],
+  "only_in_manifest": []
+ },
+ "repo": "deepseek-ai/DeepSeek-V4-Flash-0731",
+ "revision": "7872f01b1d1fe23eabc4c98b48bffcef5a386062",
+ "staged_files": 74
+}
