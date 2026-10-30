@@ -16,6 +16,14 @@ import (
 //     v0.0.42, and comment is an object.
 // Unverified against real output on our clusters (see the README).
 
+// Hold reasons (squeue state_reason): a user hold, which the owner may
+// release, and an admin hold, which only an operator may release
+// (job_mgr.c 24.11:13762-13766).
+const (
+	ReasonHeldUser  = "JobHeldUser"
+	ReasonHeldAdmin = "JobHeldAdmin"
+)
+
 // noVal is Slurm's {set, infinite, number} wrapper.
 type noVal struct {
 	Set      bool  `json:"set"`
@@ -53,6 +61,9 @@ type squeueResp struct {
 		Name       string    `json:"name"`
 		JobState   stateList `json:"job_state"`
 		RestartCnt int       `json:"restart_cnt"`
+		Hold       bool      `json:"hold"`
+		Priority   *noVal    `json:"priority"`
+		Reason     string    `json:"state_reason"`
 		SubmitTime *noVal    `json:"submit_time"`
 		StartTime  *noVal    `json:"start_time"`
 		EndTime    *noVal    `json:"end_time"`
@@ -76,9 +87,17 @@ func ParseSqueue(b []byte) ([]Job, error) {
 	for _, j := range r.Jobs {
 		job := Job{
 			ID: j.JobID, Name: j.Name, State: j.JobState, RestartCount: j.RestartCnt,
-			Source: "squeue", Records: 1,
+			Source: "squeue", Records: 1, Reason: j.Reason,
 			Submit: j.SubmitTime.time(), Start: j.StartTime.time(), End: j.EndTime.time(),
 		}
+		// JOB_INFO "hold" is true exactly when priority is 0 (data_parser
+		// HOLD dump, parsers.c v0.0.40:4050); the reason tells user from
+		// admin holds.
+		held0 := j.Priority != nil && j.Priority.Set && !j.Priority.Infinite && j.Priority.Number == 0
+		job.Held = j.Hold || held0 || j.Reason == ReasonHeldUser || j.Reason == ReasonHeldAdmin
+		// A requeued job is PENDING (or PENDING+COMPLETING) with restart_cnt
+		// raised; Slurm clears the REQUEUED flag (job_mgr.c
+		// _set_requeued_job_pending_completing), so either signal counts.
 		job.Requeued = job.RestartCount > 0 || job.HasState("REQUEUED")
 		out = append(out, job)
 	}

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
+	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/reconciler/managed"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
@@ -20,6 +21,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	crcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -45,7 +47,11 @@ type flags struct {
 	deterministic   bool
 	guardSucceeded  bool
 	guardInflight   bool
+	holdRelease     bool
 	inflightWindow  time.Duration
+	unknownBound    time.Duration
+	lostGrace       time.Duration
+	unresolvedPoll  time.Duration
 	poll            time.Duration
 	timeout         time.Duration
 	grace           time.Duration
@@ -65,9 +71,13 @@ func parseFlags() (flags, error) {
 	fl.StringVar(&f.kubeconfig, "kubeconfig", "", "kubeconfig of the API server (required; no in-cluster or default fallback)")
 	fl.StringVar(&f.mode, "observe", controller.ModeTag, "observe mode: tag (design), squeue-only or jobid (controls)")
 	fl.BoolVar(&f.deterministic, "deterministic-external-name", true, "crossplane-runtime WithDeterministicExternalName")
-	fl.BoolVar(&f.guardSucceeded, "guard-succeeded", true, "report a known submission that is not found as Lost, never as missing")
-	fl.BoolVar(&f.guardInflight, "guard-inflight", true, "treat not-found as an error while a recent create is incomplete")
-	fl.DurationVar(&f.inflightWindow, "inflight-window", 2*time.Minute, "in-flight window; must exceed --timeout")
+	fl.BoolVar(&f.guardSucceeded, "guard-succeeded", true, "never report an established job that is not found as missing (Lost after --lost-grace); off only in controls")
+	fl.BoolVar(&f.guardInflight, "guard-inflight", true, "an unresolved submission attempt blocks a new one; off only in controls")
+	fl.BoolVar(&f.holdRelease, "hold-release", true, "platform profile hold_release: submit with --hold and release only the established job; false = fallback, where an unknown outcome needs positive resolution")
+	fl.DurationVar(&f.inflightWindow, "inflight-window", 2*time.Minute, "how long an attempt may stay unresolved before hold mode retries it (fallback: before InFlight becomes Unknown); must exceed --timeout")
+	fl.DurationVar(&f.unknownBound, "unknown-bound", 10*time.Minute, "fallback mode: raise the operator condition and event after an attempt stays unresolved this long")
+	fl.DurationVar(&f.lostGrace, "lost-grace", 2*time.Minute, "platform profile lost_grace: report an established job Lost only after it is absent from squeue and sacct this long")
+	fl.DurationVar(&f.unresolvedPoll, "unresolved-poll", 5*time.Second, "poll interval while a submission is unresolved or the Allocation is being deleted")
 	fl.DurationVar(&f.poll, "poll", time.Minute, "poll interval")
 	fl.DurationVar(&f.timeout, "timeout", time.Minute, "reconcile timeout for external calls")
 	fl.DurationVar(&f.grace, "creation-grace", 30*time.Second, "crossplane-runtime creation grace period")
@@ -140,22 +150,35 @@ func run() error {
 		return fmt.Errorf("manager: %w", err)
 	}
 
+	recorder := event.NewAPIRecorder(mgr.GetEventRecorderFor("provider-slurm"))
+	copts := controller.Options{
+		Mode:              f.mode,
+		Identity:          f.identity,
+		HoldRelease:       f.holdRelease,
+		GuardSucceeded:    f.guardSucceeded,
+		GuardInflight:     f.guardInflight,
+		InflightWindow:    f.inflightWindow,
+		UnknownBound:      f.unknownBound,
+		LostGrace:         f.lostGrace,
+		UnresolvedPoll:    f.unresolvedPoll,
+		SacctMargin:       time.Hour,
+		FaultBeforeSbatch: os.Getenv("S4_FAULT_BEFORE_SBATCH"),
+		FaultAfterSbatch:  os.Getenv("S4_FAULT_AFTER_SBATCH"),
+		Log:               log,
+	}
 	conn := &controller.Connector{
-		Slurm: &slurm.Client{R: slurm.ExecRunner{}},
-		Opts: controller.Options{
-			Mode:              f.mode,
-			GuardSucceeded:    f.guardSucceeded,
-			GuardInflight:     f.guardInflight,
-			InflightWindow:    f.inflightWindow,
-			SacctMargin:       time.Hour,
-			FaultBeforeSbatch: os.Getenv("S4_FAULT_BEFORE_SBATCH"),
-			FaultAfterSbatch:  os.Getenv("S4_FAULT_AFTER_SBATCH"),
-			Log:               log,
-		},
+		Slurm:    &slurm.Client{R: slurm.ExecRunner{}},
+		Kube:     mgr.GetClient(),
+		Reader:   mgr.GetAPIReader(),
+		Recorder: recorder,
+		Opts:     copts,
 	}
 	ropts := []managed.ReconcilerOption{
 		managed.WithExternalConnector(conn),
 		managed.WithLogger(log),
+		managed.WithRecorder(recorder),
+		managed.WithCriticalAnnotationUpdater(controller.CriticalAnnotationUpdater{Kube: mgr.GetClient(), Reader: mgr.GetAPIReader()}),
+		managed.WithPollIntervalHook(controller.PollIntervalHook(copts)),
 		managed.WithPollInterval(f.poll),
 		managed.WithTimeout(f.timeout),
 		managed.WithCreationGracePeriod(f.grace),
@@ -176,7 +199,9 @@ func run() error {
 
 	err = ctrl.NewControllerManagedBy(mgr).
 		Named("allocation").
-		For(&v1alpha1.Allocation{}).
+		// Status-only writes do not re-trigger a reconcile, so a waiting
+		// Observe cannot spin on its own status updates.
+		For(&v1alpha1.Allocation{}, builder.WithPredicates(resource.DesiredStateChanged())).
 		WithOptions(crcontroller.Options{
 			MaxConcurrentReconciles: 2,
 			RateLimiter:             workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](50*time.Millisecond, f.maxBackoff),
@@ -185,7 +210,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("controller: %w", err)
 	}
-	log.Info("starting", "observe", f.mode, "deterministic", f.deterministic,
+	log.Info("starting", "observe", f.mode, "deterministic", f.deterministic, "holdRelease", f.holdRelease,
 		"guardSucceeded", f.guardSucceeded, "guardInflight", f.guardInflight, "leaderElect", f.leaderElect)
 	return mgr.Start(ctrl.SetupSignalHandler())
 }

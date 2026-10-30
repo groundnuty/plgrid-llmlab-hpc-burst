@@ -47,6 +47,7 @@ type Client struct {
 // SubmitRequest is one sbatch submission.
 type SubmitRequest struct {
 	Tag       string // goes into --job-name; the only lookup key
+	Hold      bool   // submit with --hold (two-phase submit; released by Release)
 	Partition string
 	Account   string
 	TimeLimit string
@@ -58,6 +59,9 @@ type SubmitRequest struct {
 // candidate; S5 found JobRequeue=1 on every platform).
 func SubmitArgs(r SubmitRequest) []string {
 	args := []string{"--parsable", "--job-name=" + r.Tag, "--no-requeue"}
+	if r.Hold {
+		args = append(args, "--hold")
+	}
 	if r.Partition != "" {
 		args = append(args, "--partition="+r.Partition)
 	}
@@ -77,22 +81,85 @@ func SubmitArgs(r SubmitRequest) []string {
 	return append(args, "--wrap="+wrap)
 }
 
-// Submit runs sbatch and returns the job ID.
-func (c *Client) Submit(ctx context.Context, r SubmitRequest) (int64, error) {
+// Outcome classifies an sbatch call. Only Accepted and Rejected are
+// definite; Unknown means a job may or may not exist and must be resolved by
+// looking the tag up, never by assuming either.
+type Outcome int
+
+const (
+	// Accepted: sbatch printed a job ID.
+	Accepted Outcome = iota
+	// Rejected: sbatch never started, or exited with a non-transient
+	// "Batch job submission failed:" reason. No job was created.
+	Rejected
+	// Unknown: a timeout, a signal, a transport error, unparseable output,
+	// or a transient failure reason. slurmctld may still have accepted it.
+	Unknown
+)
+
+func (o Outcome) String() string {
+	return [...]string{"Accepted", "Rejected", "Unknown"}[o]
+}
+
+// transientReasons are sbatch failure texts after which slurmctld may still
+// have registered the job (the reply was lost, or the client gave up).
+var transientReasons = []string{
+	"Socket timed out", "temporarily unavailable", "Unable to contact slurm controller",
+	"Communication connection failure", "Zero Bytes were transmitted", "Connection refused",
+	"Connection reset", "Transport endpoint", "Slurm backup controller in standby mode",
+}
+
+// Submit runs sbatch and classifies the result. The error explains any
+// outcome other than Accepted.
+func (c *Client) Submit(ctx context.Context, r SubmitRequest) (int64, Outcome, error) {
 	if r.Tag == "" {
-		return 0, errors.New("sbatch: refusing to submit without a tag")
+		return 0, Rejected, errors.New("sbatch: refusing to submit without a tag")
 	}
 	out, errb, err := c.R.Run(ctx, "sbatch", SubmitArgs(r)...)
+	stderr := strings.TrimSpace(string(errb))
 	if err != nil {
-		return 0, fmt.Errorf("sbatch: %w: %s", err, strings.TrimSpace(string(errb)))
+		return 0, classifyFailure(ctx, err, stderr), fmt.Errorf("sbatch: %w: %s", err, stderr)
 	}
 	// --parsable prints "<jobid>[;<cluster>]".
 	first := strings.TrimSpace(strings.SplitN(string(out), ";", 2)[0])
 	id, perr := strconv.ParseInt(first, 10, 64)
 	if perr != nil || id <= 0 {
-		return 0, fmt.Errorf("sbatch: cannot parse job id from %q", strings.TrimSpace(string(out)))
+		return 0, Unknown, fmt.Errorf("sbatch: exit 0 but cannot parse a job id from %q", strings.TrimSpace(string(out)))
 	}
-	return id, nil
+	return id, Accepted, nil
+}
+
+func classifyFailure(ctx context.Context, err error, stderr string) Outcome {
+	if ctx.Err() != nil {
+		return Unknown // timed out or cancelled: the command may have reached slurmctld
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return Rejected // the command never started (not found, cannot exec)
+	}
+	if !exitErr.Exited() {
+		return Unknown // killed by a signal
+	}
+	if !strings.Contains(stderr, "Batch job submission failed:") {
+		return Unknown // e.g. an ssh transport error (exit 255) or other noise
+	}
+	for _, t := range transientReasons {
+		if strings.Contains(stderr, t) {
+			return Unknown
+		}
+	}
+	return Rejected
+}
+
+// Release runs scontrol release. Slurm ignores a release of a job that is not
+// held (job_mgr.c 24.11:13822-13829), so a repeat is harmless; the caller
+// still releases only once.
+func (c *Client) Release(ctx context.Context, id int64) error {
+	_, errb, err := c.R.Run(ctx, "scontrol", "release", strconv.FormatInt(id, 10))
+	if err != nil {
+		return fmt.Errorf("scontrol release %d: %w: %s", id, err, strings.TrimSpace(string(errb)))
+	}
+	return nil
 }
 
 // Cancel runs scancel. A job that already ended or is unknown counts as
@@ -116,6 +183,8 @@ type Job struct {
 	State        []string // job_state (squeue) or state.current (sacct) of the latest record
 	RestartCount int
 	Requeued     bool // restart count > 0, a REQUEUED state flag, or an earlier REQUEUED record
+	Held         bool   // squeue: priority 0 (hold true) or a JobHeld* reason
+	Reason       string // squeue state_reason
 	Records      int  // sacct records for this job ID (with -D)
 	Source       string
 	Submit       time.Time
@@ -159,7 +228,11 @@ func (c *Client) squeue(ctx context.Context, keep func(Job) bool, args ...string
 	if err != nil {
 		return nil, err
 	}
-	return filter(jobs, keep), nil
+	// squeue --json does not document its order: sort by job ID so that
+	// "lowest ID" never depends on output order.
+	jobs = filter(jobs, keep)
+	sort.Slice(jobs, func(i, k int) bool { return jobs[i].ID < jobs[k].ID })
+	return jobs, nil
 }
 
 // SacctByTag lists accounting records whose name equals tag, starting

@@ -59,9 +59,18 @@ const (
 	PhaseRunning   = "Running"
 	PhaseSucceeded = "Succeeded"
 	PhaseFailed    = "Failed"
-	// PhaseLost: a submission was recorded as succeeded, but neither squeue
-	// nor sacct shows the job. Never a reason to resubmit.
+	// PhaseLost: the established job has been absent from both squeue and
+	// sacct for longer than lost_grace. Never a reason to resubmit; a job
+	// that reappears returns to its real phase.
 	PhaseLost = "Lost"
+	// PhaseSubmitting: a submission attempt is in flight.
+	PhaseSubmitting = "Submitting"
+	// PhaseUnknown: an sbatch outcome was ambiguous and no job with the tag
+	// has been found yet.
+	PhaseUnknown = "SubmissionUnknown"
+	// PhaseRefused: the provider refuses to submit (non-canonical external
+	// name); see the reason.
+	PhaseRefused = "Refused"
 )
 
 // AllocationObservation is the observed state of the Slurm job.
@@ -74,7 +83,11 @@ type AllocationObservation struct {
 	Source       string       `json:"source,omitempty"`
 	RestartCount int          `json:"restartCount,omitempty"`
 	Requeued     bool         `json:"requeued,omitempty"`
+	Held         bool         `json:"held,omitempty"`
 	Duplicates   []int64      `json:"duplicates,omitempty"`
+	Attempt      int          `json:"attempt,omitempty"`
+	AttemptState string       `json:"attemptState,omitempty"`
+	AbsentSince  *metav1.Time `json:"absentSince,omitempty"`
 	SubmitTime   *metav1.Time `json:"submitTime,omitempty"`
 	StartTime    *metav1.Time `json:"startTime,omitempty"`
 	EndTime      *metav1.Time `json:"endTime,omitempty"`
@@ -172,6 +185,7 @@ func (in *AllocationObservation) deepCopyInto(out *AllocationObservation) {
 	out.SubmitTime = in.SubmitTime.DeepCopy()
 	out.StartTime = in.StartTime.DeepCopy()
 	out.EndTime = in.EndTime.DeepCopy()
+	out.AbsentSince = in.AbsentSince.DeepCopy()
 }
 
 // DeepCopy returns a deep copy.

@@ -1,6 +1,7 @@
 // Package controller is the spike's Allocation controller: an ExternalClient
 // for crossplane-runtime's managed reconciler that maps one Allocation to one
-// Slurm job and never submits a job twice.
+// Slurm job. The submission protocol is two-phase: sbatch --hold, record the
+// job ID, then release exactly that job (see the README and record.go).
 package controller
 
 import (
@@ -13,10 +14,12 @@ import (
 	"time"
 
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
+	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/reconciler/managed"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -40,16 +43,29 @@ const (
 
 // Options configure the external client.
 type Options struct {
-	Mode string
-	// GuardSucceeded: once a submission is known (create-succeeded annotation
-	// or an observed job ID), "not found" is reported as Lost, never as
-	// missing, so it can never cause a second sbatch.
+	Mode     string
+	Identity string // this reconciler, recorded in the attempts it claims
+	// HoldRelease is the platform profile's hold_release flag: submit with
+	// --hold and release only the established job. When false (fallback),
+	// an Unknown attempt is never retried without positive resolution.
+	HoldRelease bool
+	// GuardSucceeded: an established job that is not found is never
+	// "missing" (Lost after LostGrace instead). Off only in controls.
 	GuardSucceeded bool
-	// GuardInflight: while a create-pending annotation is newer than any
-	// succeeded/failed one and younger than InflightWindow, "not found" is an
-	// error, not "missing": another reconciler's sbatch may still be running.
-	GuardInflight  bool
+	// GuardInflight: an unresolved attempt blocks a new one. Off only in
+	// controls.
+	GuardInflight bool
+	// InflightWindow: how long an attempt may stay unresolved before hold
+	// mode retries it (fallback mode: before InFlight becomes Unknown). Must
+	// exceed the sbatch timeout.
 	InflightWindow time.Duration
+	// UnknownBound: fallback mode raises the operator condition after it.
+	UnknownBound time.Duration
+	// LostGrace: an established job is Lost only after it has been absent
+	// from both squeue and sacct this long (profile lost_grace).
+	LostGrace time.Duration
+	// UnresolvedPoll is the poll interval while a submission is unresolved.
+	UnresolvedPoll time.Duration
 	// SacctMargin is added to the Allocation's age for sacct's -S window.
 	SacctMargin time.Duration
 	// Hooks for the kill tests; empty in normal runs.
@@ -57,6 +73,13 @@ type Options struct {
 	FaultAfterSbatch  string
 	Log               logging.Logger
 }
+
+// Condition type and reasons for an unresolved submission.
+const (
+	TypeSubmissionResolved xpv2.ConditionType   = "SubmissionResolved"
+	ReasonNeedsOperator    xpv2.ConditionReason = "NeedsOperator"
+	ReasonResolved         xpv2.ConditionReason = "Resolved"
+)
 
 // Tag returns the deterministic job tag of an Allocation. It includes the UID,
 // so a deleted and recreated Allocation with the same name never matches its
@@ -68,6 +91,20 @@ func Tag(a metav1.Object) string {
 		name = name[:40]
 	}
 	return "hb-" + name + "-" + hex.EncodeToString(sum[:6])
+}
+
+// canonical refuses a submission under an empty or non-canonical external
+// name: a job submitted under any other name is one Observe of a restored or
+// hand-edited object could not tell from someone else's.
+func canonical(a metav1.Object) error {
+	name := meta.GetExternalName(a)
+	if name == "" {
+		return errors.New("refusing to submit: the external name is empty")
+	}
+	if want := Tag(a); name != want {
+		return fmt.Errorf("refusing to submit: external name %q is not this Allocation's tag %q (set by hand, or kept across a UID change); check Slurm for jobs named %q, then remove the annotation to let the provider set the tag", name, want, name)
+	}
+	return nil
 }
 
 // TagInitializer sets the external name to the tag before the first Observe.
@@ -86,137 +123,256 @@ func (t TagInitializer) Initialize(ctx context.Context, mg resource.Managed) err
 
 // Connector builds one external client per reconcile.
 type Connector struct {
-	Slurm *slurm.Client
-	Opts  Options
+	Slurm    *slurm.Client
+	Kube     client.Client // writes (compare-and-swap on resourceVersion)
+	Reader   client.Reader // reads from the API server, never the cache
+	Recorder event.Recorder
+	Opts     Options
 }
 
 // Connect implements managed.ExternalConnecter.
 func (c *Connector) Connect(_ context.Context, _ resource.Managed) (managed.ExternalClient, error) {
-	return &external{slurm: c.Slurm, opts: c.Opts}, nil
+	rec := c.Recorder
+	if rec == nil {
+		rec = event.NewNopRecorder()
+	}
+	return &external{slurm: c.Slurm, kube: c.Kube, reader: c.Reader, rec: rec, opts: c.Opts}, nil
 }
 
 type external struct {
-	slurm *slurm.Client
-	opts  Options
-	found int64 // job ID found by this reconcile's Observe, for Delete
+	slurm    *slurm.Client
+	kube     client.Client
+	reader   client.Reader
+	rec      event.Recorder
+	opts     Options
+	toCancel []int64 // live jobs with the tag found by this reconcile's Observe, for Delete
 }
 
 var errNotAllocation = errors.New("managed resource is not an Allocation")
 
-// ErrCreateInFlight is returned by Observe while another create may be running.
-var ErrCreateInFlight = errors.New("a create for this Allocation started recently and has not completed; not treating the job as missing yet")
+var exists = managed.ExternalObservation{ResourceExists: true, ResourceUpToDate: true}
 
 func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.ExternalObservation, error) {
 	a, ok := mg.(*v1alpha1.Allocation)
 	if !ok {
 		return managed.ExternalObservation{}, errNotAllocation
 	}
-	jobs, err := e.lookup(ctx, a)
+	if e.opts.Mode == ModeJobID {
+		return e.observeClassic(ctx, a)
+	}
+	name := meta.GetExternalName(a)
+	if name == "" {
+		return managed.ExternalObservation{}, errors.New("no external name: the Initializer sets the tag before any submission")
+	}
+	rec, err := readRecord(a)
 	if err != nil {
 		return managed.ExternalObservation{}, err
 	}
-	if len(jobs) == 0 {
-		return e.notFound(a)
-	}
-	// The oldest job is the Allocation's; any other is a duplicate to report
-	// (HBEP-7: found by tag and reported).
-	job := jobs[0]
-	var dups []int64
-	for _, j := range jobs[1:] {
-		dups = append(dups, j.ID)
-	}
-	e.found = job.ID
-	e.record(a, job, dups)
+	o := &a.Status.AtProvider
+	o.Tag = name // the persisted name, never a recomputed one
 
-	obs := managed.ExternalObservation{ResourceExists: true, ResourceUpToDate: true}
-	// A job found while the create looks incomplete (the reconciler died after
-	// sbatch, or a peer is between sbatch and its annotation write): record
-	// the success now. Returning LateInitialized makes the reconciler persist
-	// the annotation with an Update.
-	if e.opts.Mode != ModeJobID && meta.ExternalCreateIncomplete(a) {
-		meta.SetExternalCreateSucceeded(a, time.Now())
-		obs.ResourceLateInitialized = true
+	if rec.attempt.unresolved() && a.GetAnnotations()[AnnoAbandon] == strconv.Itoa(rec.attempt.N) {
+		t := *rec.attempt
+		t.State, t.Reason = AttemptAbandoned, "abandoned by an operator ("+AnnoAbandon+")"
+		if err := e.write(ctx, a, map[string]string{AnnoSubmission: t.value()}); err != nil {
+			return managed.ExternalObservation{}, err
+		}
+		rec.attempt = &t
+		e.rec.Event(a, event.Normal("SubmissionAbandoned", fmt.Sprintf("attempt %d abandoned by an operator", t.N)))
 	}
-	if meta.WasDeleted(a) && ended(job) {
-		// Nothing left to cancel; let the finalizer go. Reporting a terminal
-		// job as existing here would loop Delete forever.
-		obs.ResourceExists = false
-	}
-	return obs, nil
-}
 
-func (e *external) lookup(ctx context.Context, a *v1alpha1.Allocation) ([]slurm.Job, error) {
-	switch e.opts.Mode {
-	case ModeJobID:
-		id, err := strconv.ParseInt(meta.GetExternalName(a), 10, 64)
-		if err != nil || id <= 0 {
-			return nil, nil // classic pattern: no job ID stored means "not created"
-		}
-		jobs, err := e.slurm.SqueueByID(ctx, id)
-		if err != nil || len(jobs) > 0 {
-			return jobs, err
-		}
-		return e.slurm.SacctByID(ctx, id)
-	case ModeSqueueOnly:
-		return e.slurm.SqueueByTag(ctx, meta.GetExternalName(a))
-	default:
-		tag := meta.GetExternalName(a)
-		jobs, err := e.slurm.SqueueByTag(ctx, tag)
-		if err != nil || len(jobs) > 0 {
-			return jobs, err
-		}
-		since := time.Since(a.GetCreationTimestamp().Time) + e.opts.SacctMargin
-		return e.slurm.SacctByTag(ctx, tag, since)
+	live, all, err := e.lookup(ctx, a, name, rec.jobID)
+	if err != nil {
+		return managed.ExternalObservation{}, err
 	}
-}
-
-// notFound decides what "no job anywhere" means.
-func (e *external) notFound(a *v1alpha1.Allocation) (managed.ExternalObservation, error) {
+	// Adopt whatever the attempt's state: a job found by tag is the answer.
+	if rec.jobID == 0 && len(all) > 0 {
+		pick := choose(all)
+		if err := e.establish(ctx, a, &rec, pick.ID, fmt.Sprintf("adopted job %d found by tag in %s", pick.ID, pick.Source)); err != nil {
+			return managed.ExternalObservation{}, err
+		}
+		e.opts.Log.Info("adopted job", "allocation", a.GetName(), "job", pick.ID, "source", pick.Source)
+	}
+	// With a job established, an attempt whose claimant cannot still be
+	// running sbatch (Unknown, or InFlight past the window) is resolved by
+	// that job; one within the window is left to its claimant.
+	if t := rec.attempt; rec.jobID != 0 && t.unresolved() && (t.State == AttemptUnknown || time.Since(t.At) >= e.opts.InflightWindow) {
+		u := *t
+		u.State, u.JobID, u.Reason = AttemptDone, rec.jobID, fmt.Sprintf("resolved by the established job %d", rec.jobID)
+		if err := e.write(ctx, a, map[string]string{AnnoSubmission: u.value()}); err != nil {
+			return managed.ExternalObservation{}, err
+		}
+		rec.attempt = &u
+	}
+	e.markResolved(a, rec)
+	if e.opts.HoldRelease && rec.jobID != 0 && !meta.WasDeleted(a) {
+		live = e.settle(ctx, a, &rec, live)
+	}
 	if meta.WasDeleted(a) {
-		return managed.ExternalObservation{ResourceExists: false}, nil
+		return e.observeDeletion(a, rec, live), nil
 	}
-	if e.opts.GuardSucceeded {
-		submitted := !meta.GetExternalCreateSucceeded(a).IsZero() || a.Status.AtProvider.JobID != 0
-		if submitted {
-			a.Status.AtProvider.Phase = v1alpha1.PhaseLost
-			a.Status.AtProvider.Reason = "a submission was recorded but neither squeue nor sacct shows the job; not resubmitting"
-			a.SetConditions(xpv2.Unavailable().WithMessage(a.Status.AtProvider.Reason))
-			return managed.ExternalObservation{ResourceExists: true, ResourceUpToDate: true}, nil
+	if rec.jobID != 0 {
+		return e.observeEstablished(a, rec, mergeJobs(live, all)), nil
+	}
+	return e.observeNothing(ctx, a, rec)
+}
+
+// lookup lists the tag in squeue and, when that cannot answer (nothing live,
+// or the established job has left the queue), in sacct over an explicit
+// window. Both lists are sorted by job ID; all merges them, squeue first.
+func (e *external) lookup(ctx context.Context, a *v1alpha1.Allocation, name string, established int64) (live, all []slurm.Job, err error) {
+	live, err = e.slurm.SqueueByTag(ctx, name)
+	if err != nil || e.opts.Mode == ModeSqueueOnly {
+		return live, live, err
+	}
+	if (established != 0 && findJob(live, established) != nil) || (established == 0 && len(live) > 0) {
+		return live, live, nil
+	}
+	since := time.Since(a.GetCreationTimestamp().Time) + e.opts.SacctMargin
+	acct, err := e.slurm.SacctByTag(ctx, name, since)
+	if err != nil {
+		return nil, nil, err
+	}
+	return live, mergeJobs(live, acct), nil
+}
+
+// choose picks the job to adopt when none is established. Only an
+// established job is ever released, so a job that is live and not held, or
+// one that ran, proves an earlier establishment whose record was lost; it
+// wins. Otherwise the lowest job ID wins. Input is sorted by job ID.
+func choose(jobs []slurm.Job) slurm.Job {
+	for _, j := range jobs {
+		if !ended(j) && !j.Held {
+			return j
 		}
 	}
-	if e.opts.GuardInflight && meta.ExternalCreateIncomplete(a) {
-		age := time.Since(meta.GetExternalCreatePending(a))
-		if age < e.opts.InflightWindow {
-			return managed.ExternalObservation{}, fmt.Errorf("%w (pending for %s, window %s)", ErrCreateInFlight, age.Round(time.Millisecond), e.opts.InflightWindow)
+	for _, j := range jobs {
+		if !j.Start.IsZero() {
+			return j
 		}
+	}
+	return jobs[0]
+}
+
+// establish records id as the Allocation's job (compare-and-swap). It
+// resolves the current attempt only when no live claimant may still be
+// running its sbatch (Unknown, or InFlight past the window); a claimant
+// within the window resolves its own attempt. A conflict is returned; the
+// reconcile is retried from a fresh read.
+func (e *external) establish(ctx context.Context, a *v1alpha1.Allocation, rec *record, id int64, why string) error {
+	set := map[string]string{AnnoJobID: strconv.FormatInt(id, 10)}
+	if t := rec.attempt; t.unresolved() && (t.State == AttemptUnknown || time.Since(t.At) >= e.opts.InflightWindow) {
+		t := *rec.attempt
+		t.State, t.JobID, t.Reason = AttemptDone, id, why
+		set[AnnoSubmission] = t.value()
+	}
+	if err := e.write(ctx, a, set); err != nil {
+		return err
+	}
+	r, err := readRecord(a)
+	*rec = r
+	e.rec.Event(a, event.Normal("JobEstablished", why))
+	return err
+}
+
+func (e *external) markResolved(a *v1alpha1.Allocation, rec record) {
+	o := &a.Status.AtProvider
+	if rec.attempt != nil {
+		o.Attempt, o.AttemptState = rec.attempt.N, rec.attempt.State
+	}
+	if !rec.attempt.unresolved() && a.GetCondition(TypeSubmissionResolved).Status == corev1.ConditionFalse {
+		a.SetConditions(xpv2.Condition{Type: TypeSubmissionResolved, Status: corev1.ConditionTrue, Reason: ReasonResolved,
+			LastTransitionTime: metav1.Now()})
+	}
+}
+
+// observeNothing decides what "no job established, none found" means.
+func (e *external) observeNothing(ctx context.Context, a *v1alpha1.Allocation, rec record) (managed.ExternalObservation, error) {
+	o := &a.Status.AtProvider
+	t := rec.attempt
+	if t.unresolved() && e.opts.GuardInflight {
+		age := time.Since(t.At)
+		if e.opts.HoldRelease && age >= e.opts.InflightWindow {
+			// Safe to retry: a late registration lands held and settle
+			// cancels it, because only the established job is released.
+			e.opts.Log.Info("unresolved attempt past the window; hold mode retries", "allocation", a.GetName(), "attempt", t.N)
+		} else {
+			if !e.opts.HoldRelease && t.State == AttemptInFlight && age >= e.opts.InflightWindow {
+				u := *t
+				u.State, u.Reason = AttemptUnknown, "claim older than the in-flight window with no job found; its claimant died or hangs"
+				if err := e.write(ctx, a, map[string]string{AnnoSubmission: u.value()}); err != nil {
+					return managed.ExternalObservation{}, err
+				}
+				t = &u
+				o.AttemptState = u.State
+			}
+			msg := fmt.Sprintf("in-flight guard: submission attempt %d by %s is unresolved (%s since %s); not submitting", t.N, t.By, t.State, t.At.UTC().Format(time.RFC3339))
+			e.opts.Log.Info(msg, "allocation", a.GetName())
+			o.Phase, o.Reason = v1alpha1.PhaseSubmitting, msg
+			if t.State == AttemptUnknown {
+				o.Phase = v1alpha1.PhaseUnknown
+			}
+			if !e.opts.HoldRelease && age >= e.opts.UnknownBound {
+				e.needOperator(a, t)
+			}
+			a.SetConditions(xpv2.Creating().WithMessage(msg))
+			return exists, nil
+		}
+	}
+	if err := canonical(a); err != nil {
+		o.Phase, o.Reason = v1alpha1.PhaseRefused, err.Error()
+		a.SetConditions(xpv2.Unavailable().WithMessage(err.Error()))
+		return exists, nil
 	}
 	return managed.ExternalObservation{ResourceExists: false}, nil
 }
 
-func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.ExternalCreation, error) {
-	a, ok := mg.(*v1alpha1.Allocation)
-	if !ok {
-		return managed.ExternalCreation{}, errNotAllocation
+func (e *external) needOperator(a *v1alpha1.Allocation, t *Attempt) {
+	msg := fmt.Sprintf("submission attempt %d (%s) has no job in squeue or sacct after %s; an operator must decide: check Slurm for jobs named %q, then set %s=%d to allow a new submission",
+		t.N, t.Reason, e.opts.UnknownBound, meta.GetExternalName(a), AnnoAbandon, t.N)
+	if c := a.GetCondition(TypeSubmissionResolved); c.Status != corev1.ConditionFalse {
+		e.rec.Event(a, event.Warning("SubmissionUnresolved", errors.New(msg)))
 	}
-	if e.opts.FaultBeforeSbatch != "" {
-		faultBlock(e.opts.FaultBeforeSbatch, 0)
+	a.SetConditions(xpv2.Condition{Type: TypeSubmissionResolved, Status: corev1.ConditionFalse, Reason: ReasonNeedsOperator,
+		Message: msg, LastTransitionTime: metav1.Now()})
+}
+
+// observeDeletion keeps the finalizer while any job with the tag is live, or
+// a submission is unresolved; Delete cancels every live job with the tag.
+func (e *external) observeDeletion(a *v1alpha1.Allocation, rec record, live []slurm.Job) managed.ExternalObservation {
+	o := &a.Status.AtProvider
+	e.toCancel = nil
+	for _, j := range live {
+		if !ended(j) {
+			e.toCancel = append(e.toCancel, j.ID)
+		}
 	}
-	p := a.Spec.ForProvider
-	id, err := e.slurm.Submit(ctx, slurm.SubmitRequest{
-		Tag: Tag(a), Partition: p.Partition, Account: p.Account, TimeLimit: p.TimeLimit, Wrap: p.Wrap,
-		Comment: a.GetNamespace() + "/" + a.GetName(),
-	})
-	if err != nil {
-		return managed.ExternalCreation{}, err
+	wait := false
+	if t := rec.attempt; t.unresolved() {
+		wait = !e.opts.HoldRelease || time.Since(t.At) < e.opts.InflightWindow
+		if !e.opts.HoldRelease && time.Since(t.At) >= e.opts.UnknownBound {
+			e.needOperator(a, t)
+		}
 	}
-	e.opts.Log.Info("sbatch returned", "allocation", a.GetName(), "job", id)
-	if e.opts.FaultAfterSbatch != "" {
-		faultBlock(e.opts.FaultAfterSbatch, id)
+	switch {
+	case len(e.toCancel) > 0:
+		o.Reason = fmt.Sprintf("deleting: cancelling every live job with the tag: %v", e.toCancel)
+	case wait:
+		o.Reason = fmt.Sprintf("deleting: waiting for submission attempt %d to resolve before releasing the finalizer", rec.attempt.N)
+	default:
+		return managed.ExternalObservation{ResourceExists: false}
 	}
-	if e.opts.Mode == ModeJobID {
-		meta.SetExternalName(a, strconv.FormatInt(id, 10))
+	return exists
+}
+
+func (e *external) Delete(ctx context.Context, mg resource.Managed) (managed.ExternalDelete, error) {
+	var errs []error
+	for _, id := range e.toCancel {
+		if err := e.slurm.Cancel(ctx, id); err != nil {
+			errs = append(errs, err)
+		}
 	}
-	return managed.ExternalCreation{}, nil
+	return managed.ExternalDelete{}, errors.Join(errs...)
 }
 
 // Update is never reached: Observe always reports up to date, and the
@@ -225,73 +381,4 @@ func (e *external) Update(_ context.Context, mg resource.Managed) (managed.Exter
 	return managed.ExternalUpdate{}, fmt.Errorf("allocation %s: submitted jobs are never edited; cancel and create a new Allocation", mg.GetName())
 }
 
-func (e *external) Delete(ctx context.Context, mg resource.Managed) (managed.ExternalDelete, error) {
-	if e.found == 0 {
-		return managed.ExternalDelete{}, errors.New("delete: no job found by this reconcile's Observe")
-	}
-	return managed.ExternalDelete{}, e.slurm.Cancel(ctx, e.found)
-}
-
 func (e *external) Disconnect(_ context.Context) error { return nil }
-
-// record writes the observation into status. Observe is the only writer of
-// the job ID: status changes made in Create do not survive the reconciler's
-// annotation update.
-func (e *external) record(a *v1alpha1.Allocation, j slurm.Job, dups []int64) {
-	o := &a.Status.AtProvider
-	prevRequeued := o.Requeued
-	o.Tag = Tag(a)
-	o.JobID = j.ID
-	o.State = j.State
-	o.Source = j.Source
-	o.RestartCount = j.RestartCount
-	o.Duplicates = dups
-	o.SubmitTime, o.StartTime, o.EndTime = mt(j.Submit), mt(j.Start), mt(j.End)
-	// The requeue verdict is sticky: after the purge from squeue, v0.0.40
-	// sacct has no restart_cnt, so the verdict must survive in status.
-	o.Requeued = prevRequeued || j.Requeued
-	o.Phase, o.Reason = phase(j, o.Requeued)
-	switch o.Phase {
-	case v1alpha1.PhaseRunning:
-		a.SetConditions(xpv2.Available())
-	case v1alpha1.PhasePending:
-		a.SetConditions(xpv2.Creating())
-	default:
-		a.SetConditions(xpv2.Unavailable().WithMessage(o.Reason))
-	}
-}
-
-func phase(j slurm.Job, requeued bool) (string, string) {
-	if requeued {
-		return v1alpha1.PhaseFailed, fmt.Sprintf("Requeued: Slurm requeued the job (restart count %d, %d accounting records) although it was submitted with --no-requeue", j.RestartCount, j.Records)
-	}
-	for _, s := range []string{"FAILED", "CANCELLED", "TIMEOUT", "NODE_FAIL", "PREEMPTED", "BOOT_FAIL", "DEADLINE", "OUT_OF_MEMORY"} {
-		if j.HasState(s) {
-			return v1alpha1.PhaseFailed, "Ended: " + s
-		}
-	}
-	switch {
-	case j.HasState("COMPLETED"):
-		return v1alpha1.PhaseSucceeded, "Ended: COMPLETED"
-	case j.HasState("RUNNING"), j.HasState("SUSPENDED"):
-		return v1alpha1.PhaseRunning, ""
-	case j.HasState("PENDING"):
-		return v1alpha1.PhasePending, ""
-	}
-	return v1alpha1.PhasePending, fmt.Sprintf("unrecognised state %v", j.State)
-}
-
-// ended reports whether Slurm has finished the job: no PENDING, RUNNING or
-// SUSPENDED state. A requeued job that is pending again has not ended, so
-// deleting its Allocation still cancels it.
-func ended(j slurm.Job) bool {
-	return !j.HasState("PENDING") && !j.HasState("RUNNING") && !j.HasState("SUSPENDED")
-}
-
-func mt(t time.Time) *metav1.Time {
-	if t.IsZero() {
-		return nil
-	}
-	m := metav1.NewTime(t)
-	return &m
-}

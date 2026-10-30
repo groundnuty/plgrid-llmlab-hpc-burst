@@ -21,6 +21,7 @@ spec:
         - {name: JOB, type: integer, jsonPath: .status.atProvider.jobId}
         - {name: PHASE, type: string, jsonPath: .status.atProvider.phase}
         - {name: SOURCE, type: string, jsonPath: .status.atProvider.source}
+        - {name: HELD, type: boolean, jsonPath: .status.atProvider.held}
       schema:
         openAPIV3Schema:
           type: object
@@ -45,6 +46,9 @@ spec:
                     name: {type: string}
                 forProvider:
                   type: object
+                  x-kubernetes-validations:
+                    - rule: "self == oldSelf"
+                      message: "forProvider is immutable: a submitted job is never edited; cancel and create a new Allocation"
                   properties:
                     partition: {type: string}
                     account: {type: string}
