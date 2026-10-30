@@ -15,6 +15,7 @@ Design decisions for this framework are made as HBEPs, modelled on Kubernetes En
 | [9](0009-identity-and-attribution/README.md) | Identity and attribution | provisional | none |
 | [10](0010-agent-primitives/README.md) | Agent primitives | provisional | none |
 | [11](0011-kubernetes-control-plane/README.md) | Kubernetes as the control plane | provisional | none |
+| [15](0015-dependencies-and-provenance/README.md) | Dependencies and provenance | provisional | none |
 
 ## Starting an HBEP
 
