@@ -68,6 +68,13 @@ func TestResolveChatTemplate(t *testing.T) {
 		{"config with an escaped backslash before a surrogate-like text", TemplateSources{TokenizerConfig: []byte(`{"chat_template": "\\ud800"}`)}, `\ud800`},
 		{"config with an escaped backslash before a pair", TemplateSources{TokenizerConfig: []byte(`{"chat_template": "\\\ud83d\ude00"}`)}, "\\\U0001F600"},
 		{"a lone surrogate outside chat_template is not looked at", TemplateSources{TokenizerConfig: []byte(`{"bos_token": "\ud800", "chat_template": "ok"}`)}, "ok"},
+		// Keys are matched exactly, as transformers reads t["template"]: another
+		// spelling of a key is not the template (Go's struct decoding would
+		// have picked "Template" over "template" here).
+		{"a second spelling of template is ignored", TemplateSources{TokenizerConfig: []byte(`{"chat_template": [{"name": "default", "template": "a", "Template": "b"}]}`)}, "a"},
+		{"a second spelling of template, other order", TemplateSources{TokenizerConfig: []byte(`{"chat_template": [{"name": "default", "Template": "b", "template": "a"}]}`)}, "a"},
+		{"a second spelling of name is ignored", TemplateSources{TokenizerConfig: []byte(`{"chat_template": [{"name": "other", "NAME": "default", "template": "a"}, {"name": "default", "template": "d"}]}`)}, "d"},
+		{"a second spelling of chat_template is ignored", TemplateSources{TokenizerConfig: []byte(`{"Chat_Template": "x", "chat_template": "y"}`)}, "y"},
 		{"config list takes the default after other entries", TemplateSources{TokenizerConfig: []byte(`{"chat_template": [{"name": "default", "template": "d"}, {"name": "rag", "template": "r"}]}`)}, "d"},
 		{"config without chat_template", TemplateSources{TokenizerConfig: []byte(`{"model_max_length": 1}`)}, ""},
 		{"config with null chat_template", TemplateSources{TokenizerConfig: []byte(`{"chat_template": null}`)}, ""},
@@ -106,10 +113,18 @@ func TestResolveChatTemplateErrors(t *testing.T) {
 		"spec not UTF-8":              {Spec: strp("\xff")},
 		"jinja not UTF-8":             {Jinja: strp("\xff")},
 		// A list without "default" is not the empty template (owner decision 3).
-		"list without default":            {TokenizerConfig: []byte(`{"chat_template": [{"name": "tool_use", "template": "tools"}]}`)},
-		"empty list":                      {TokenizerConfig: []byte(`{"chat_template": []}`)},
-		"list with two defaults":          {TokenizerConfig: []byte(`{"chat_template": [{"name": "default", "template": "a"}, {"name": "default", "template": "b"}]}`)},
-		"list with a nameless entry only": {TokenizerConfig: []byte(`{"chat_template": [{"template": "a"}]}`)},
+		"list without default":                    {TokenizerConfig: []byte(`{"chat_template": [{"name": "tool_use", "template": "tools"}]}`)},
+		"empty list":                              {TokenizerConfig: []byte(`{"chat_template": []}`)},
+		"list with two defaults":                  {TokenizerConfig: []byte(`{"chat_template": [{"name": "default", "template": "a"}, {"name": "default", "template": "b"}]}`)},
+		"entry with a differently cased name":     {TokenizerConfig: []byte(`{"chat_template": [{"Name": "default", "template": "a"}]}`)},
+		"entry with a differently cased template": {TokenizerConfig: []byte(`{"chat_template": [{"name": "default", "Template": "a"}]}`)},
+		"entry without a template":                {TokenizerConfig: []byte(`{"chat_template": [{"name": "default"}]}`)},
+		"other entry without a template":          {TokenizerConfig: []byte(`{"chat_template": [{"name": "default", "template": "a"}, {"name": "rag"}]}`)},
+		"entry with a numeric template":           {TokenizerConfig: []byte(`{"chat_template": [{"name": "default", "template": 3}]}`)},
+		"entry with a numeric name":               {TokenizerConfig: []byte(`{"chat_template": [{"name": 3, "template": "a"}]}`)},
+		"null entry":                              {TokenizerConfig: []byte(`{"chat_template": [null]}`)},
+		"chat_template only in another case":      {TokenizerConfig: []byte(`{"chat_template": 7, "Chat_Template": "x"}`)},
+		"list with a nameless entry only":         {TokenizerConfig: []byte(`{"chat_template": [{"template": "a"}]}`)},
 		// Astra's counterexample: encoding/json would return U+FFFD with no error.
 		"lone high surrogate":                  {TokenizerConfig: []byte(`{"chat_template":"\ud800"}`)},
 		"lone high surrogate in upper":         {TokenizerConfig: []byte(`{"chat_template":"\uDBFF"}`)},

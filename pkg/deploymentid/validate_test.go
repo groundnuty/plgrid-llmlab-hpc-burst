@@ -64,6 +64,11 @@ func TestRefusals(t *testing.T) {
 		// Names are ASCII (owner decision 1): flags [a-z0-9][a-z0-9-]*.
 		{"flag with an accent", &Flag{"dtyp\u00e9", "x"}, nil, ErrInvalid},
 		{"flag that is an emoji", &Flag{"\U0001F600", "x"}, nil, ErrInvalid},
+		// The keys vector 05 used before names became ASCII (owner decision 1).
+		{"flag U+20AC", &Flag{"\u20ac", "x"}, nil, ErrInvalid},
+		{"flag U+00F6", &Flag{"\u00f6", "x"}, nil, ErrInvalid},
+		{"flag U+FB33", &Flag{"\ufb33", "x"}, nil, ErrInvalid},
+		{"flag U+1F600", &Flag{"\U0001F600", "x"}, nil, ErrInvalid},
 		{"flag in capitals", &Flag{"DTYPE", "x"}, nil, ErrInvalid},
 		{"flag in capitals, a refused one", &Flag{"API-KEY", "SECRET-VALUE"}, nil, ErrInvalid},
 		{"flag with a plus", &Flag{"x+", "x"}, nil, ErrInvalid},
@@ -79,6 +84,7 @@ func TestRefusals(t *testing.T) {
 		// Environment names are [A-Z_][A-Z0-9_]*, exact, never rewritten.
 		{"env with an accent", nil, &EnvVar{"H\u00c9LLO", "x"}, ErrInvalid},
 		{"env that is an emoji", nil, &EnvVar{"\U0001F600_ENV", "x"}, ErrInvalid},
+		{"env U+FF5E", nil, &EnvVar{"\uff5e_ENV", "x"}, ErrInvalid},
 		{"env in lower case", nil, &EnvVar{"my_var", "x"}, ErrInvalid},
 		{"env starting with a digit", nil, &EnvVar{"1VAR", "x"}, ErrInvalid},
 		{"env with a dash", nil, &EnvVar{"HF-TOKEN", "SECRET-VALUE"}, ErrInvalid},

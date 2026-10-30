@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"unicode/utf8"
 )
 
@@ -50,9 +51,11 @@ type TemplateSources struct {
 //   - a tokenizer_config.json that is not a JSON object (top-level null
 //     included), or whose chat_template is neither a string nor a list of
 //     named templates;
-//   - a list-form chat_template without an entry named "default", or with two:
-//     the engine would fail to render or pick a template the ID never saw, so
-//     the serving spec has to name the template;
+//   - a list-form chat_template without an entry named "default", or with two,
+//     or with an entry that lacks a string "name" or "template" (keys are
+//     matched exactly, as transformers reads them): the engine would fail to
+//     render or pick a template the ID never saw, so the serving spec has to
+//     name the template;
 //   - an unpaired surrogate escape such as "\ud800" in the chat_template, which
 //     Go's JSON decoder would replace with U+FFFD, so the hash would not be of
 //     the text the checkpoint holds. Paired escapes and a literal U+FFFD are
@@ -98,30 +101,51 @@ func templateFromTokenizerConfig(data []byte) (string, error) {
 	if json.Unmarshal(raw, &single) == nil {
 		return single, nil
 	}
-	var named []struct {
-		Name     string `json:"name"`
-		Template string `json:"template"`
-	}
-	if err := json.Unmarshal(raw, &named); err != nil {
+	// Entries are read by their exact keys, as transformers reads them
+	// (t["name"], t["template"]). Decoding into a struct would match "Template"
+	// or "NAME" too, and a second spelling of a key could change the text.
+	var entries []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &entries); err != nil {
 		return "", invalidf("tokenizer_config.json chat_template is neither a string nor a list of {name, template}; "+
 			"give the template in the serving spec instead (%v)", err)
 	}
-	found := -1
-	for i, n := range named {
-		if n.Name != "default" {
+	found, template := false, ""
+	for i, e := range entries {
+		name, err := entryString(e, "name")
+		if err != nil {
+			return "", invalidf("tokenizer_config.json chat_template entry %d: %v", i, err)
+		}
+		text, err := entryString(e, "template")
+		if err != nil {
+			return "", invalidf("tokenizer_config.json chat_template entry %d: %v", i, err)
+		}
+		if name != "default" {
 			continue
 		}
-		if found >= 0 {
+		if found {
 			return "", invalidf("tokenizer_config.json chat_template has two templates named \"default\"; " +
 				"name the template in the serving spec instead")
 		}
-		found = i
+		found, template = true, text
 	}
-	if found < 0 {
+	if !found {
 		return "", invalidf("tokenizer_config.json chat_template is a list without a template named \"default\"; " +
 			"name the template in the serving spec instead")
 	}
-	return named[found].Template, nil
+	return template, nil
+}
+
+// entryString returns the string value of the exact key of a list entry.
+func entryString(entry map[string]json.RawMessage, key string) (string, error) {
+	raw, ok := entry[key]
+	if !ok {
+		return "", fmt.Errorf("has no %q key", key)
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return "", fmt.Errorf("%q is not a string", key)
+	}
+	return s, nil
 }
 
 // checkSurrogateEscapes scans JSON text that json.Unmarshal has already
