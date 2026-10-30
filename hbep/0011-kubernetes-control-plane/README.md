@@ -97,7 +97,7 @@ Deployment options:
 ### Open questions
 
 1. **The API group and the kinds' names.** Decided: by the owner, 30 Oct 2026. Group `hpcburst.groundnuty.github.io`, version `v1alpha1`, and the kinds Provider, PlatformProfile, ModelDeployment, Allocation and Instance, as HBEP-3 names them.
-2. **The single-user host.** Decided: for alpha, by a rule that spike S3's fixed PR (#36) settles (Design details, Single-user host). k3s as a plain user is preferred if it passes S3's suite and budget with no system change. Otherwise the assembled upstream stack is the alpha host. kcp is the fallback if one process with no root is a hard requirement and k3s fails. Nothing else in this HBEP or in HBEP-3 depends on which one it is.
+2. **The single-user host.** Decided (amended 2026-10-30, after S3's fix, PR #36): k3s as a plain user (`server --rootless --disable-agent`, SQLite). It passed S3's suite and budget with no system change. The assembled upstream stack stays the alternative, and kcp the fallback. Nothing else in this HBEP or in HBEP-3 depends on which one it is.
 3. **Where controllers run in the team option:** as pods on the cluster, or on a host that holds the provider credentials. Not needed for alpha: alpha is single-user, and its controllers run on the one host.
 4. **The store for HBEP-10's durable event log, for usage records and for metrics.** Not needed for alpha: status conditions are the level truth, and Kubernetes Events a best-effort mirror. The candidate for the event log is embedded NATS JetStream, outside the API store (spike S8, PR #28; HBEP-10). Usage records and metrics are HBEP-8's.
 5. **How provider credentials are held.** Decided: for alpha, they are referenced, not stored. A Provider names a mode-600 file on the host, or a Secret in the team option. HBEP-1's content rules apply. Encryption at rest for the team option's Secrets is decided with question 3.
@@ -188,9 +188,15 @@ For alpha, no webhook server runs.
 
 ### Single-user host
 
-Decided for alpha, by a rule that S3's fixed PR (#36) settles:
-- **Preferred: k3s with SQLite, run as a plain user.** It is chosen if S3's fix shows it passes the same e2e suite and budget with no system change. It is then the same software as the team option, in one process with the garbage collector built in.
-- **Otherwise, the alpha host: the assembled upstream stack.**
+Decided for alpha (amended 2026-10-30, after S3's fix, PR #36):
+- **The alpha host: k3s with SQLite, run as a plain user.**
+  - It runs as `k3s server --rootless --disable-agent`, with no root and no system change. It is the same software as the team option, in one process with the garbage collector built in.
+  - S3 measured it at 363 MiB idle and 407 MiB with 100 objects, ready in 10.5 s cold and 6.0 s warm. All 11 e2e tests passed, the cascades included. A Kubernetes minor upgrade (1.35.9 to 1.36.5) kept all 103 objects.
+  - Caveats:
+    - k3s labels `--rootless` experimental. It works here because `--disable-agent` skips the user-namespace setup.
+    - The scheduler, cloud controller and add-ons are disabled.
+    - On a machine that already runs another k3s, the launcher isolates its config file, data directory and ports. HBEP-11's launcher issue, #41, does this.
+- **The alternative: the assembled upstream stack.** It is kept if k3s's rootless mode breaks in a later release.
   - Three processes: kube-apiserver, etcd, and kube-controller-manager limited to its garbage-collector and namespace controllers (`--controllers=garbage-collector-controller,namespace-controller`, as S3 ran it).
   - All three are version-pinned and started by our launcher, as a plain user.
   - S3 measured it at 358 MiB idle and 391 MiB with 100 objects, ready in 3.5 to 4.2 s. A minor upgrade (1.35.0 to 1.36.2) kept all 103 objects with their UIDs.
@@ -330,7 +336,7 @@ The control plane replaces the files and scripts that held www-2027's state: per
 | Component | Origin (project, URL) | Licence | How used (dependency, copied code, optional) |
 |---|---|---|---|
 | kube-apiserver, etcd, kube-controller-manager | [kubernetes/kubernetes](https://github.com/kubernetes/kubernetes); [etcd-io/etcd](https://github.com/etcd-io/etcd) | Apache-2.0 | Dependency for the single-user host unless k3s passes S3's fix (open question 2): pinned binaries that the launcher starts. The controller manager runs only its garbage-collector and namespace controllers |
-| k3s | [k3s-io/k3s](https://github.com/k3s-io/k3s) | Apache-2.0 | Dependency: the team option, and the preferred single-user host if S3's fix shows it runs as a plain user |
+| k3s | [k3s-io/k3s](https://github.com/k3s-io/k3s) | Apache-2.0 | Dependency: the team option, and the single-user host as a plain user (S3, PR #36) |
 | kcp | [kcp-dev/kcp](https://github.com/kcp-dev/kcp) | Apache-2.0 | Fallback single-user host (open question 2) |
 | controller-runtime | [kubernetes-sigs/controller-runtime](https://github.com/kubernetes-sigs/controller-runtime) | Apache-2.0 | Dependency: our controllers, their work queues and leader election; used by spikes S3 and S4 |
 | crossplane-runtime | [crossplane/crossplane-runtime](https://github.com/crossplane/crossplane-runtime) | Apache-2.0 | Dependency under the Slurm provider (HBEP-4; spike S4): the Allocation's managed-resource fields and reconciler |
@@ -368,4 +374,4 @@ The control plane replaces the files and scripts that held www-2027's state: per
 
 ## Amendments
 
-None.
+- **2026-10-30: single-user host settled.** Spike S3's fix (PR #36) showed that k3s runs as a plain user (`server --rootless --disable-agent`, SQLite) with no system change, and passes the suite and budget. By the rule this HBEP set, k3s is the single-user host. The assembled upstream stack stays as the alternative.
