@@ -3,26 +3,26 @@
 === RUN   TestValidation
 --- PASS: TestValidation (0.03s)
 === RUN   TestReconcileAndScale
---- PASS: TestReconcileAndScale (2.98s)
+--- PASS: TestReconcileAndScale (1.46s)
 === RUN   TestRestartConvergence
---- PASS: TestRestartConvergence (5.85s)
+--- PASS: TestRestartConvergence (5.67s)
 === RUN   TestSelectors
---- PASS: TestSelectors (0.03s)
+--- PASS: TestSelectors (0.04s)
 === RUN   TestConflict
 --- PASS: TestConflict (0.02s)
 === RUN   TestWatch
---- PASS: TestWatch (0.03s)
+--- PASS: TestWatch (0.02s)
 === RUN   TestCascadeBackground
     gc_test.go:54: timed out after 1m30s waiting for garbage collection of Slot gc-s0 (last error: <nil>)
---- FAIL: TestCascadeBackground (90.06s)
+--- FAIL: TestCascadeBackground (90.07s)
 === RUN   TestCascadeForeground
     gc_test.go:72: timed out after 1m30s waiting for owner to disappear (last error: <nil>)
 --- FAIL: TestCascadeForeground (90.04s)
 === RUN   TestFinalizerHoldsDeletion
---- PASS: TestFinalizerHoldsDeletion (3.88s)
+--- PASS: TestFinalizerHoldsDeletion (3.92s)
 === RUN   TestFinalizerThroughCascade
     gc_test.go:115: timed out after 1m30s waiting for worker 0 to be garbage collected (last error: <nil>)
---- FAIL: TestFinalizerThroughCascade (91.84s)
+--- FAIL: TestFinalizerThroughCascade (92.25s)
 === RUN   TestPhaseLoad
     phase_test.go:28: only runs with S3_PHASE=load
 --- SKIP: TestPhaseLoad (0.00s)
