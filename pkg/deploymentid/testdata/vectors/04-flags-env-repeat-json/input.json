@@ -1,0 +1,39 @@
+{
+  "kind": "served",
+  "spec": {
+    "checkpoint": {"repository": "example-org/example-7b", "revision": "89abcdef0123456789abcdef0123456789abcdef"},
+    "engine": {"name": "vllm", "version": "0.32.0", "image_digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666"},
+    "flags": [
+      {"name": "port", "value": "8000"},
+      {"name": "tool-call-parser", "value": "hermes"},
+      {"name": "lora-modules", "value": "style-a=org/lora-a"},
+      {"name": "enforce-eager", "value": "false"},
+      {"name": "max-num-seqs", "value": "256"},
+      {"name": "hf-overrides", "value": "{\"rope_scaling\":{\"rope_type\":\"yarn\",\"factor\":4.0,\"original_max_position_embeddings\":32768}}"},
+      {"name": "gpu-memory-utilization", "value": "0.90"},
+      {"name": "lora-modules", "value": "style-b=org/lora-b"},
+      {"name": "host", "value": "127.0.0.1"},
+      {"name": "seed", "value": "0"},
+      {"name": "enable-prefix-caching", "value": "true"},
+      {"name": "empty-flag", "value": ""},
+      {"name": "served-model-name", "value": "example"},
+      {"name": "lora-modules", "value": "style-a=org/lora-a"}
+    ],
+    "env": [
+      {"name": "HF_HOME", "value": "/data/hf"},
+      {"name": "VLLM_USE_DEEP_GEMM", "value": "1"},
+      {"name": "CUDA_VISIBLE_DEVICES", "value": "0"},
+      {"name": "MY_CUSTOM_VAR", "value": "on"},
+      {"name": "EMPTY_VAR", "value": ""},
+      {"name": "VLLM_LOGGING_LEVEL", "value": "DEBUG"},
+      {"name": "VLLM_CACHE_ROOT", "value": "/data/cache"}
+    ],
+    "chat_template_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "accelerator": {"gpu_model": "A100", "cpu_arch": "x86_64"},
+  "files": [
+    {"path": "tokenizer.json", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+    {"path": "model-00001-of-00002.safetensors", "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+    {"path": "config.json", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+  ]
+}

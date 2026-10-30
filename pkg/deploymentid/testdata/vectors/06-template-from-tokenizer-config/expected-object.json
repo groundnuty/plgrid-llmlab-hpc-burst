@@ -1,0 +1,14 @@
+{
+  "scheme": "v1",
+  "kind": "served",
+  "checkpoint": {"repository": "example-org/example-reasoner-32b", "revision": "1111111111111111111111111111111111111111"},
+  "engine": {"name": "vllm", "version": "0.32.0", "image_digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999"},
+  "flags": {"tensor-parallel-size": "2", "reasoning-parser": "deepseek_r1", "chat-template-content-format": "string"},
+  "env": {"VLLM_USE_DEEP_GEMM": "0"},
+  "chat_template_sha256": "3b284e7ddcaa82b361dc9c290128f8a45202c5b80ea3a2a0e2db6a0780689b26",
+  "accelerator": {"gpu_model": "H100", "cpu_arch": "x86_64"},
+  "files": [
+    {"path": "model.safetensors.index.json", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+    {"path": "tokenizer_config.json", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+  ]
+}

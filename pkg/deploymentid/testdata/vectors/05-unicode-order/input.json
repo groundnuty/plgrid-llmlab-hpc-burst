@@ -1,0 +1,33 @@
+{
+  "kind": "served",
+  "spec": {
+    "checkpoint": {"repository": "example-org/\u00fcn\u00ef-\ud83d\ude00", "revision": "fedcba9876543210fedcba9876543210fedcba98"},
+    "engine": {"name": "vllm", "version": "0.32.0", "image_digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777"},
+    "flags": [
+      {"name": "\ud83d\ude00", "value": "\u00e9\u65e5\u672c\u8a9e"},
+      {"name": "dtype", "value": "bfloat16"},
+      {"name": "\u20ac", "value": ""},
+      {"name": "\ufb33", "value": "tab\there \"quoted\" back\\slash /slash <tag> & \u2028 \u007f \u0001 \b \f \r \n end"},
+      {"name": "\u00f6", "value": "\ud83d\ude00"},
+      {"name": "1st-flag", "value": "x"}
+    ],
+    "env": [
+      {"name": "ASCII_ENV", "value": "a"},
+      {"name": "\ud83d\ude00_ENV", "value": "b"},
+      {"name": "\uff5e_ENV", "value": "\u00fc"}
+    ],
+    "chat_template_sha256": "8888888888888888888888888888888888888888888888888888888888888888"
+  },
+  "accelerator": {"gpu_model": "GH200", "cpu_arch": "aarch64"},
+  "files": [
+    {"path": "\ud83d\ude00.json", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    {"path": "a b.txt", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+    {"path": "q\"uote.txt", "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+    {"path": "\ufb33.json", "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},
+    {"path": "tab\t.txt", "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},
+    {"path": "tokenizer/\u00fcn\u00ef.json", "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"},
+    {"path": "back\\slash.txt", "sha256": "1111111111111111111111111111111111111111111111111111111111111111"},
+    {"path": "sep\u2028.txt", "sha256": "2222222222222222222222222222222222222222222222222222222222222222"},
+    {"path": "new\nline.txt", "sha256": "3333333333333333333333333333333333333333333333333333333333333333"}
+  ]
+}
