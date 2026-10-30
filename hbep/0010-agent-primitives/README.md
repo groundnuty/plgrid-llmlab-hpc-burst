@@ -155,10 +155,55 @@ TBD. Lean: alpha when the inventory, owner leases, dry run and the audit log exi
 - **Rules in agents' instructions only.** The past project fixed most of the problems above by written rules. Rules are skipped under pressure and do not bind new agents; primitives in the server do.
 - **Provider access control alone.** A Slurm account says who may cancel a job, not why it runs, who approved its release, or what else belongs to the same purpose.
 
+## Prior art and reuse
+
+The primitives replace www-2027 practices: a shared gate on a common host (slots per class, load and memory floors, a hold file), scripts that ran dry by default and acted only with an explicit go flag, and restart notices and approvals sent by message.
+
+### Community software reused
+
+| Component | Origin (project, URL) | Licence | How used (dependency, copied code, optional) |
+|---|---|---|---|
+| Kubernetes API (RBAC, server-side dry run, audit, `Lease`), on k3s or kcp | [k3s](https://github.com/k3s-io/k3s); [kcp](https://github.com/kcp-dev/kcp) | k3s Apache-2.0; kcp Apache-2.0 | Candidate host, as HBEP-11 decides: k3s for the team option, and the single-user host by spike S3 |
+| NATS JetStream | [nats-io/nats-server](https://github.com/nats-io/nats-server) | Apache-2.0 | Candidate, decided by spike S8: subscriptions as durable cursors over stream sequences |
+
+### Designs and published work borrowed
+
+| Idea | Origin (project, paper or document) | Where it lands here |
+|---|---|---|
+| Pre-drain and pre-terminate hooks; `paused`, `skip-remediation` and `remediate-machine` annotations | Cluster API ([kubernetes-sigs/cluster-api](https://github.com/kubernetes-sigs/cluster-api)) | Approval gates and switches |
+| Management policies; Observe-only import | Crossplane ([crossplane/crossplane](https://github.com/crossplane/crossplane)) | Orphans imported without being managed |
+| Usages for deletion ordering and protection | Crossplane (beta, needs Crossplane core) | Our own kind, when Crossplane core is absent |
+| A lease with a holder identity and a duration; server-side dry run | Kubernetes `Lease`; Kubernetes API dry run | Owner leases; dry run and confirm |
+| Dry-run estimates of a submission | Slurm's `sbatch --test-only` | Dry-run plans |
+| Queue fields `guarantee` and `capability`; Open, Closing and Closed states | Volcano | Reservation vocabulary |
+
+### Field lessons answered
+
+| Lesson | Lesson ID (from the lessons catalogue, HBEP-15) | How this HBEP answers it |
+|---|---|---|
+| No inventory said who had started what. | L-10.17 | One inventory query across providers. |
+| Every agent ran as one Unix user. | L-11.1 | Identity is a credential, not a Unix user. |
+| Our own job took nodes our pinned follow-on needed. | L-1.3 | The inventory shows every holder and purpose; reservations book capacity. |
+| Kill by pattern killed other agents' work. | L-11.2 | Bulk actions select by label, never by pattern. |
+| Recorded process IDs pointed at the wrong process. | L-11.3 | Agents address resources by stable names, never by process ID. |
+| A dry check ran for real. | L-11.6 | The server enforces dry run. |
+| An interrupted command had already acted on two clusters. | L-11.7 | Per-target reports; every mutating call is an operation with an ID. |
+| A relayed directive was taken as the owner's decision. | L-14.3 | An approval counts only from the approver's own identity. |
+| Rules changed mid-run, so earlier rulings went stale. | L-14.5 | An approval names its plan, and confirm refuses a stale plan. |
+| Messages to a session were lost when it restarted. | L-14.1 | Subscriptions survive restarts and resume from a cursor. |
+| A request channel went unwatched for long stretches. | L-14.4 | Each subscription's backlog is visible to its owner and the inventory. |
+| Agents failed mid-operation, and successors could not tell what was done. | L-14.9 | Idempotency keys and operation IDs. |
+| Restart announcements were sent by hand. | L-14.7 | Subscribed events replace manual notices. |
+| Clients did not coordinate their load on a shared gateway. | L-5.8 | Reservations, which the front honours. |
+| Watchers died with the session that started them. | L-10.2 | Durable subscriptions resume from a cursor. |
+| Alert pipes delivered late or never. | L-10.4 | At-least-once delivery, durable, with explicit gap markers. |
+| Keyword sweeps missed processes, and a respawner revived killed ones. | L-15.2, L-15.1 | Deleting a ModelDeployment ends what it owns; no sweep is needed. |
+
 ## Implementation history
 
 - 2026-10-28: proposed (provisional), tracking issue #10.
 - 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
+- 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation.
 
 ## Amendments
 

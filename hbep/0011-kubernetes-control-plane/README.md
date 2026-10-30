@@ -31,7 +31,7 @@ Each needs one store of desired and observed state, with owners, watches, access
 - Running models in pods or on Kubernetes nodes.
 - The request path. The front serves requests and reads routing state from the control plane, but no request passes through the Kubernetes API server.
 - Kubernetes scheduling of GPU work.
-- Evaluating existing projects. That is a later step (see Open questions).
+- Evaluating existing projects in detail. The state-of-the-art evaluation of existing projects (28 Oct 2026) is done; its picks are in Prior art and reuse below.
 
 ## Proposal
 
@@ -98,7 +98,7 @@ Deployment options:
 - The store for HBEP-10's durable event log, for usage records and for metrics: outside the API store, but which.
 - How provider credentials are held: Secrets with encryption at rest, or an external secret store.
 - Whether controllers run with several replicas and leader election, or as one replica restarted on failure.
-- Later evaluation of existing projects, which may change this HBEP or become components. Not evaluated here:
+- Which evaluated projects become components. The state-of-the-art evaluation of existing projects (28 Oct 2026) is done; its picks are in Prior art and reuse below. The remaining choice, k3s or kcp as the API host, is decided by spike S3. The projects evaluated include:
   - interLink and other virtual-kubelet offloading, which aim to run pods on remote systems such as batch clusters;
   - Slinky and slurm-bridge, which aim to join Slurm and Kubernetes scheduling;
   - KubeAI, which aims to serve models on Kubernetes;
@@ -167,10 +167,41 @@ TBD. Lean: alpha with one deployment option and one batch provider; beta when th
 - **Our own API and database.** Lighter for one user, with full control over event semantics. We would rebuild watches, RBAC, audit, garbage collection, admission and versioning, and agents would lose standard tooling.
 - **Virtual-kubelet pods on Slurm.** Models as pods on a virtual node that submits Slurm jobs, managed by standard workload controllers. Rejected for the compute layer: squeezing leases into pods hides the facts the scheduler needs. A pod has no start estimate or hard end the controllers can plan with, and one pod cannot be submitted to several providers and the losers cancelled. A rolling update with `maxSurge` does start a replacement before its predecessor ends, but it cannot plan that from a lease end it does not see. It may still suit auxiliary parts; see the later evaluation in Open questions.
 
+## Prior art and reuse
+
+The control plane replaces the files and scripts that held www-2027's state: per-job endpoint, control and configuration files on each cluster, process-ID files, scheduled respawners, and a script that listed jobs across clusters.
+
+### Community software reused
+
+| Component | Origin (project, URL) | Licence | How used (dependency, copied code, optional) |
+|---|---|---|---|
+| k3s, or kcp | [k3s](https://github.com/k3s-io/k3s); [kcp](https://github.com/kcp-dev/kcp) | k3s Apache-2.0; kcp Apache-2.0 | Candidate: k3s for the team option, with no spike assigned; the single-user host between k3s and kcp is decided by spike S3 |
+| controller-runtime | [kubernetes-sigs/controller-runtime](https://github.com/kubernetes-sigs/controller-runtime) | Apache-2.0 | Candidate, no spike assigned: our controllers and webhooks |
+
+### Designs and published work borrowed
+
+| Idea | Origin (project, paper or document) | Where it lands here |
+|---|---|---|
+| None | | |
+
+### Field lessons answered
+
+| Lesson | Lesson ID (from the lessons catalogue, HBEP-15) | How this HBEP answers it |
+|---|---|---|
+| A job ended by its time limit left its endpoint file behind. | L-10.10 | Observed state is reconciled into status; owner references remove dependents. |
+| Nothing recorded who had started what. | L-10.17 | One store of desired and observed state, with labels and owners. |
+| Keyword sweeps missed processes at the end. | L-15.2 | Clean-up by ownership and garbage collection. |
+| A scheduled respawner revived killed processes. | L-15.1 | Controllers act only on desired state in one store. |
+| Monitors read their configuration once at start. | L-10.9 | Watches follow changes. |
+| Running scripts could not be changed safely. | L-3.7, L-3.13 | Versioned specs, validated at admission. |
+| Every agent ran as one Unix user. | L-11.1 | RBAC and audit per identity. |
+| A full disk on a shared host evicted another team's workloads. | L-12.1 | The control plane gets a host of its own. |
+
 ## Implementation history
 
 - 2026-10-28: proposed (provisional), tracking issue #11.
 - 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
+- 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation.
 
 ## Amendments
 

@@ -45,7 +45,7 @@ Problems:
 
 ### Notes, constraints and caveats
 
-- Helios compute nodes can make outbound connections, so dial home works there. Whether it works on Athena and on other clusters is a per-partition fact in the platform profile (HBEP-4): outbound allowed or not, through which protocols and ports, directly or through a proxy.
+- Whether compute nodes can connect out is not yet known on Helios, Athena or Sano. Spike S5 (PR #19) ran no job, so it could not measure this; spike S1 (issue #18) will (open question 10). An earlier project saw Helios jobs reach outside services, which makes Helios the first candidate for dial home. Where dial home works is a per-partition fact in the platform profile (HBEP-4): outbound allowed or not, through which protocols and ports, directly or through a proxy.
 - The front needs an address that compute nodes can reach. Where it runs is HBEP-11's decision.
 - A center may need to consent to tunnels from compute nodes. The fix owner is then the center.
 - Inside the instance, the engine and its router listen on loopback or a Unix socket, and the tunnel agent connects to them locally. On a shared node, other users' jobs can reach loopback too, so the local listener uses the Instance's own key, which the front sends (HBEP-9), or a socket protected by file permissions. That key is not the allocation's credential, which registers the Instance. A key covers only part of the engine's HTTP API (Risks).
@@ -60,7 +60,7 @@ Problems:
 - **The tunnel's ping succeeds while the engine is dead.** The liveness probe goes through the path to the engine.
 - **An engine API key is taken for isolation.** A vLLM API key covers only part of the engine's HTTP API (vLLM's security documentation), and traffic between an engine's ranks is unauthenticated by default. So engine HTTP listeners bind to loopback and are reached through the tunnel agent. A multi-node instance's rank traffic still crosses the cluster network unauthenticated. That is a known limitation, recorded in each platform profile (HBEP-4).
 - **Relays trip login throttles.** One pooled connection per login node, with the login rate limit as a profile parameter.
-- **A center's login-node policy kills relays.** Relays are supervised. A relay death is an event (HBEP-8), and the instance stays unrouted until its path returns.
+- **A center's login-node policy kills relays.** Cyfronet's documentation says computation on a login node is killed without notice, and caps each user's memory there. It does not say whether a lightweight relay counts (spike S5, PR #19; HBEP-4, open question 14). Relays are supervised. A relay death is an event (HBEP-8), and the instance stays unrouted until its path returns.
 - **Paths outlive their owner.** Owner references and garbage collection (HBEP-11) remove the front-side records. A relay outside the allocation carries the allocation's end time and exits at that time on its own.
 - **Teardown kills the wrong process.** Kill by recorded process ID plus start time, never by pattern. No respawners outside the controller.
 - **The front's address changes.** Tunnel agents reconnect to the front by DNS name, never by a stored address.
@@ -69,13 +69,14 @@ Problems:
 
 1. **Tunnel protocol.** Candidates: an ssh reverse forward to an endpoint the framework runs; an HTTP/2 or WebSocket reverse tunnel over HTTPS; userspace WireGuard. Decided by a spike on Helios: which egress works, throughput, and time to first token under many concurrent streams.
 2. **Encryption.** Where TLS terminates. Should front and engine be encrypted end to end inside the tunnel? Decided with HBEP-9.
-3. **Relay fallback form.** An ssh forward from the front through the login node, or a process on the login node? Who supervises it? Is its owner the Allocation or the Instance? Spike on a cluster without outbound.
+3. **Relay fallback form.** An ssh forward from the front through the login node, or a process on the login node? Who supervises it? Is its owner the Allocation or the Instance? Spike on a cluster without outbound. A process on a login node waits on the centers' answer to HBEP-4's open question 14.
 4. **Port forwards.** Are they a supported path, or only an operator's debugging tool? If supported, with which owner and teardown? Owner decision.
 5. **Multi-node instances.** Candidate: only the entry rank dials home. Pooling workers across Instances is not part of this design (HBEP-3, open question 11), so no traffic between Instances needs a path.
 6. **Heartbeats.** Interval and miss count, a trade of detection time against connections and log volume. Measurement.
 7. **Credential.** Its format, its lifetime against the lease length, and renewal over the tunnel. Decided with HBEP-9.
 8. **A front behind NAT,** as in a single-user setup: does it need a rendezvous relay? Decided with HBEP-11.
 9. **Center consent.** Ask Cyfronet, and each other center, whether outbound tunnels from compute nodes are acceptable use. Owner.
+10. **Compute-node reachability.** Spike S5 (PR #19) ran no job. So on all three platforms these are unknown: outbound access from compute nodes, inbound reachability, and whether a compute-node listener can be reached from the login node. Decided by spike S1 (issue #18), which also answers question 1. Whether the tunnel agent must run without a container runtime is HBEP-4's open question 15.
 
 ## Design details
 
@@ -142,10 +143,50 @@ TBD. Candidate for alpha: dial home on Helios passes the test plan.
 - **Instances listening on cluster interfaces.** Reachable only inside the cluster, and exposed to every user on it.
 - **A center-provided ingress.** Where a center offers one, it may be the best path. Whether any target center does is not known yet.
 
+## Prior art and reuse
+
+Dial home replaces www-2027's central relays and forward watchdogs, which kept hand-made ssh forwards alive, probed each path end to end, and kept a flapping path out of pools.
+
+### Community software reused
+
+| Component | Origin (project, URL) | Licence | How used (dependency, copied code, optional) |
+|---|---|---|---|
+| frp ≥ v0.71.1 | [fatedier/frp](https://github.com/fatedier/frp) | Apache-2.0 | Candidate, decided by spike S1: frps beside the front and frpc in each job, tcpmux routing by Instance name, and server plugins that let our controller admit each registration (open question 1). frps's ssh tunnel gateway is the relay candidate (open question 3) |
+| llm-d router endpoint picker + Envoy | [llm-d/llm-d-router](https://github.com/llm-d/llm-d-router); [Envoy](https://github.com/envoyproxy/envoy) | llm-d router Apache-2.0; Envoy Apache-2.0 | Candidate, decided by spike S2: the Instance router that the tunnel agent reaches locally (HBEP-5) |
+| wstunnel | [erebe/wstunnel](https://github.com/erebe/wstunnel) | BSD-3-Clause | Optional fallback tunnel |
+| Headscale + tsnet | [juanfont/headscale](https://github.com/juanfont/headscale); [tsnet](https://pkg.go.dev/tailscale.com/tsnet) | BSD-3-Clause (both) | Optional: a front behind NAT, without root (open question 8) |
+
+### Designs and published work borrowed
+
+| Idea | Origin (project, paper or document) | Where it lands here |
+|---|---|---|
+| An SSH relay behind a forced-command key, with measured overhead | GWDG SAIA ([gwdg/saia-hpc](https://github.com/gwdg/saia-hpc)) | Open question 3: relay fallback |
+| Dial home from jobs over outbound-only connections | OpenTela with libp2p ([eth-easl/opentela](https://github.com/eth-easl/opentela)); interLink's mesh ([interlink-hq/interLink](https://github.com/interlink-hq/interLink)) | Dial home, and its alternatives |
+
+### Field lessons answered
+
+| Lesson | Lesson ID (from the lessons catalogue, HBEP-15) | How this HBEP answers it |
+|---|---|---|
+| Compute-node listeners were reachable only through login nodes. | L-7.1 | Instances dial home; nobody opens a port. |
+| Hand-made tunnels and watchdogs multiplied, with clashing names and pid files. | L-7.2 | Each path has one owner and ends with it. |
+| Parallel logins tripped a login node's connection limit. | L-7.3 | One pooled connection per login node for relays. |
+| Pollers that each opened a new ssh connection filled a host's sshd. | L-7.4 | Pooled connections, never one per poll. |
+| Fixed and job-ID-derived ports collided. | L-2.4 | Listeners take ports from the operating system. |
+| Loopback relay ports clashed between jobs on a shared node. | L-7.7 | OS-chosen ports; local listeners need the Instance's key or a protected socket. |
+| Workers had to listen on all interfaces without a key to join a pool. | L-4.9 | Engine listeners bind to loopback; only the path carries outside traffic. |
+| A job that hit its time limit left its endpoint file behind. | L-10.10 | The front expires a path's record when its Instance ends. |
+| A multi-homed node changed address while the old one still answered. | L-10.12 | Nothing routes by node address; Instances register by identity. |
+| A follow-on on a new node changed the URL. | L-1.22 | The front reaches every Instance by its identity. |
+| Keyword sweeps missed many tunnels at the end. | L-15.2 | Every process outside an allocation is in the inventory and removed by record. |
+| A scheduled respawner revived killed relays. | L-15.1 | No respawners outside the controller. |
+| Kill by pattern hit the wrong processes. | L-11.2 | Kill by recorded process ID plus start time. |
+| Recorded process IDs pointed at the wrong process. | L-11.3 | The start time is checked together with the process ID. |
+
 ## Implementation history
 
 - 2026-10-28: proposed (provisional), tracking issue #6.
 - 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
+- 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation; spike S5 facts carried in (HBEP-4, HBEP-6, HBEP-7 only).
 
 ## Amendments
 
