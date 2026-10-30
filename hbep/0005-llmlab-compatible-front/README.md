@@ -41,7 +41,7 @@ Problems a front must not repeat:
 ### User stories
 
 - A researcher's agent calls LLMLab's `example-27b`. The researcher attaches the LLMLab provider to `example-27b`, one setup step, and changes the agent's base URL to the front. Requests go to LLMLab while their own deployment queues, then spread over both once it serves.
-- A researcher who needs one fixed configuration sends `example-27b@helios-a/<deployment-id>`, where `helios-a` is the name the operator gave its provider on Helios. Through a handover within that provider, every response still names that deployment ID; only the Instance changes.
+- A researcher who needs one fixed configuration sends `example-27b@helios-a/<deployment-id>`, where `helios-a` is the name the operator gave its provider on Helios. Through a handover within that provider and accelerator class, every response still names that deployment ID; only the Instance changes.
 - An agent attaches a provider to a model name, or adds a deployment as a routing target, with an admin key. A client key cannot.
 - A reply streams for over an hour, or spends many minutes in prefill before its first byte. It completes.
 - A user who sent plain `example-27b` reads the response headers to learn whether LLMLab or their own instance answered.

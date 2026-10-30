@@ -1,0 +1,233 @@
+{
+  "option": "k3s",
+  "version_old": "1.35.9",
+  "version_new": "1.36.5",
+  "phases": [
+    {
+      "phase": "main",
+      "started_utc": "2026-10-30T10:15:19Z",
+      "finished_utc": "2026-10-30T10:19:04Z",
+      "e2e_binary_sha256": "a5e38208a37957fec8d9e401e652c568afbd8e92604bc2c237e50437da6f1fcb",
+      "s3bench_binary_sha256": "5f1eaee9b2b3a3435c6407e4608435749d22fc314e47212d2d7ddc4de0ee23f9",
+      "host_binaries_sha256": {
+        "k3s 1.36.5": "d73847bcd3c5fccef0115b372e2f9a91f3032dc84bbf71518a4617565294d313"
+      }
+    },
+    {
+      "phase": "upgrade",
+      "started_utc": "2026-10-30T10:19:04Z",
+      "finished_utc": "2026-10-30T10:20:26Z",
+      "e2e_binary_sha256": "a5e38208a37957fec8d9e401e652c568afbd8e92604bc2c237e50437da6f1fcb",
+      "s3bench_binary_sha256": "5f1eaee9b2b3a3435c6407e4608435749d22fc314e47212d2d7ddc4de0ee23f9",
+      "host_binaries_sha256": {
+        "k3s 1.35.9": "897acb21cca57d477a211102251a6591450ce767344a9faaa121a1007ca9fa9a",
+        "k3s 1.36.5": "d73847bcd3c5fccef0115b372e2f9a91f3032dc84bbf71518a4617565294d313"
+      }
+    }
+  ],
+  "cold_starts": [
+    {
+      "readyz_ms": 9440,
+      "ready_ms": 10590,
+      "usable_ms": 10743,
+      "load1_at_start": 3.87
+    },
+    {
+      "readyz_ms": 9091,
+      "ready_ms": 10423,
+      "usable_ms": 10543,
+      "load1_at_start": 3.2
+    },
+    {
+      "readyz_ms": 9423,
+      "ready_ms": 10509,
+      "usable_ms": 10649,
+      "load1_at_start": 3.39
+    }
+  ],
+  "warm_starts": [
+    {
+      "readyz_ms": 4055,
+      "ready_ms": 6018,
+      "usable_ms": 6112,
+      "load1_at_start": 3.14
+    },
+    {
+      "readyz_ms": 3984,
+      "ready_ms": 5793,
+      "usable_ms": 5855,
+      "load1_at_start": 3.37
+    },
+    {
+      "readyz_ms": 4199,
+      "ready_ms": 6142,
+      "usable_ms": 6219,
+      "load1_at_start": 3.16
+    }
+  ],
+  "cold_median": {
+    "readyz_ms": 9423,
+    "ready_ms": 10509,
+    "usable_ms": 10649,
+    "load1_at_start": 0
+  },
+  "warm_median": {
+    "readyz_ms": 4055,
+    "ready_ms": 6018,
+    "usable_ms": 6112,
+    "load1_at_start": 0
+  },
+  "rss_idle": {
+    "samples_mib": [
+      363.2,
+      363.2,
+      363.3
+    ],
+    "median_mib": 363.2,
+    "by_process_mib": {
+      "k3s-server": 363.2
+    },
+    "load1_at_samples": [
+      3.71,
+      3.58,
+      3.61
+    ],
+    "mem_available_gib_at_samples": [
+      19.9,
+      19.8,
+      19.8
+    ]
+  },
+  "rss_loaded": {
+    "samples_mib": [
+      406.6,
+      405.8,
+      420.4
+    ],
+    "median_mib": 406.6,
+    "by_process_mib": {
+      "k3s-server": 406.6
+    },
+    "controller_mib": 38.8,
+    "load1_at_samples": [
+      3.88,
+      3.73,
+      3.59
+    ],
+    "mem_available_gib_at_samples": [
+      19.8,
+      19.8,
+      19.8
+    ]
+  },
+  "listeners": [
+    "127.0.0.1:29120",
+    "127.0.0.1:29121",
+    "::1:29121",
+    "127.0.0.1:29122"
+  ],
+  "stop_ms": 2265,
+  "data_dir_mib_after_load": 259,
+  "e2e": {
+    "passed": [
+      "TestCascadeBackground",
+      "TestCascadeForeground",
+      "TestConflict",
+      "TestDiscovery",
+      "TestFinalizerHoldsDeletion",
+      "TestFinalizerThroughCascade",
+      "TestReconcileAndScale",
+      "TestRestartConvergence",
+      "TestSelectors",
+      "TestValidation",
+      "TestWatch"
+    ],
+    "failed": null,
+    "skipped": [
+      "TestPhaseLoad",
+      "TestPhasePostUpgrade"
+    ],
+    "exit": 0,
+    "log": "$SCRATCH/logs/k3s-main-e2e.log"
+  },
+  "upgrade": {
+    "server_version_before": "v1.35.9+k3s1",
+    "server_version_after": "v1.36.5+k3s1",
+    "objects_before": 103,
+    "objects_identical_after": 103,
+    "stop_to_ready_ms": 12997,
+    "e2e_after": {
+      "passed": [
+        "TestCascadeBackground",
+        "TestCascadeForeground",
+        "TestConflict",
+        "TestDiscovery",
+        "TestFinalizerHoldsDeletion",
+        "TestFinalizerThroughCascade",
+        "TestReconcileAndScale",
+        "TestRestartConvergence",
+        "TestSelectors",
+        "TestValidation",
+        "TestWatch"
+      ],
+      "failed": null,
+      "skipped": [
+        "TestPhaseLoad",
+        "TestPhasePostUpgrade"
+      ],
+      "exit": 0,
+      "log": "$SCRATCH/logs/k3s-upgrade-e2e.log"
+    },
+    "post_upgrade_test": {
+      "passed": [
+        "TestPhasePostUpgrade"
+      ],
+      "failed": null,
+      "skipped": null,
+      "exit": 0,
+      "log": "$SCRATCH/logs/k3s-postupgrade-e2e.log"
+    }
+  },
+  "budget": [
+    {
+      "line": "RSS idle",
+      "limit": "\u003c= 600 MiB",
+      "actual": "363 MiB",
+      "pass": true
+    },
+    {
+      "line": "RSS with ~100 objects",
+      "limit": "\u003c= 800 MiB",
+      "actual": "407 MiB",
+      "pass": true
+    },
+    {
+      "line": "cold start to ready",
+      "limit": "\u003c= 30 s",
+      "actual": "10.5 s (median of 3)",
+      "pass": true
+    },
+    {
+      "line": "warm start to ready",
+      "limit": "\u003c= 30 s",
+      "actual": "6.0 s (median of 3)",
+      "pass": true
+    },
+    {
+      "line": "minor upgrade",
+      "limit": "all objects kept, e2e passes, stop to ready \u003c= 60 s",
+      "actual": "103/103 kept, e2e failed=0, post-upgrade failed=0, stop to ready 13.0 s ",
+      "pass": true
+    },
+    {
+      "line": "e2e suite",
+      "limit": "every test passes",
+      "actual": "11 passed, 0 failed []",
+      "pass": true
+    }
+  ],
+  "state_dir_mib_after_load": 5.8,
+  "notes": [
+    "system paths of the root-owned k3s, modification time before and after this run: /etc/rancher 2026-07-12T01:40:03Z / 2026-07-12T01:40:03Z; /var/lib/rancher 2026-07-12T01:40:07Z / 2026-07-12T01:40:07Z; /run/k3s 2026-07-28T08:28:36Z / 2026-07-28T08:28:36Z;"
+  ]
+}

@@ -74,6 +74,10 @@ A past project served models on several Slurm clusters behind its own fronts. It
 - **Events taken as the only truth.** A subscriber that misses an event acts on stale state. Events are edges; resource status (HBEP-11) is the level truth, and a resuming subscriber re-reads status.
 - **A metric some engines cannot give.** With few chunks, the front cannot derive time per token. Engine-side timing is used where reported; otherwise the value is unknown.
 - **Metering on the request path** adds latency, or loses records when the front crashes. A lost record must show as a gap in the usage record, never as silence.
+  - **Mitigation (candidate)**, from spike S8 (issue #25, PR #28): usage records go to the log with `sync_interval: always`. They are batched only above a few hundred records per second, since one node acknowledged about 1,200 publishes per second on the test disk under `always`. A wider batch widens what a front crash loses.
+  - **Not tested by S8:** power loss and a kernel crash, the only cases where `always` differs from the default.
+  - **Counter:** each usage record carries a monotonic counter that the front persists independently of the log, so a consumer can see a missing range.
+  - **Still open:** detecting a final batch lost in a front crash before it was published, since no later record reveals it. S8 did not test a front crash.
 - **Billing sources lag or undercount,** as a report of finished jobs only does. Where a center report and the scheduler's accounting differ, both are shown with the gap.
 - **Managed providers are opaque.** LLMLab's periodic stalls show only in front-side time to first token. Its "degraded" events come from front measurements and probes, against the platform profile's thresholds.
 - **Series multiply with handovers.** Each handover adds a series per metric, so retention and roll-up per deployment are needed (see Open questions).
@@ -89,7 +93,7 @@ A past project served models on several Slurm clusters behind its own fronts. It
 - Whether each client key can read its own usage through the front, as LLMLab users may expect. Discussion with HBEP-5.
 - The last level of liveness: an end-to-end probe of the front and control plane from outside both. Where it runs and who gets its alert.
 - Probes versus live traffic for time to first token. Live traffic mixes prompt lengths; probes cost capacity. A measurement on a test deployment decides.
-- Whether an observer that restarts emits the transitions it missed, or one `degraded` event with reason "gap". Lean: the "gap" event; status is the truth.
+- Whether an observer that restarts emits the transitions it missed, or one `degraded` event with reason "gap". Lean: the "gap" event; status is the truth. S8's gap marker covers events evicted from the log. An observer's missed transitions were never published, so it still needs its own "gap" event.
 
 ## Design details
 
@@ -154,11 +158,11 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 | Component | Origin (project, URL) | Licence | How used (dependency, copied code, optional) |
 |---|---|---|---|
 | Prometheus | [prometheus/prometheus](https://github.com/prometheus/prometheus) | Apache-2.0 | Candidate, decided by spike S9: scrapes engines through the front, with targets from HTTP service discovery over the inventory |
-| NATS JetStream | [nats-io/nats-server](https://github.com/nats-io/nats-server) | Apache-2.0 | Candidate, decided by spike S8: an embedded durable log for events and usage records |
+| NATS JetStream | [nats-io/nats-server](https://github.com/nats-io/nats-server) | Apache-2.0 | Candidate, supported by spike S8 (PR #28) except for power loss, which was not tested: an embedded durable log for events and usage records, with `sync_interval: always` |
 | CloudEvents 1.0.2 and sdk-go | [cloudevents/sdk-go](https://github.com/cloudevents/sdk-go); [spec](https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/spec.md) | sdk-go Apache-2.0; spec Apache-2.0 | Candidate, no spike assigned: the envelope for events and usage records |
 | OTel GenAI semantic conventions | [semantic-conventions-genai](https://github.com/open-telemetry/semantic-conventions-genai) | Apache-2.0 | Candidate, no spike assigned: names for front metrics, pinned to a commit; no code |
 | vLLM metric names | [vllm-project/vllm](https://github.com/vllm-project/vllm) | Apache-2.0 | Candidate, no spike assigned: engine metric names kept at the source and mapped by recording rules |
-| Kubernetes Events | the control plane's API host (HBEP-11): [k3s](https://github.com/k3s-io/k3s), or [kcp](https://github.com/kcp-dev/kcp) | k3s Apache-2.0; kcp Apache-2.0 | Candidate, no spike assigned: a mirror for people only, never the event stream |
+| Kubernetes Events | the control plane's API host (HBEP-11): [Kubernetes](https://github.com/kubernetes/kubernetes), on k3s or on the single-user host that HBEP-11's rule picks | Apache-2.0 | Candidate, no spike assigned: a mirror for people only, never the event stream |
 | llm-d-inference-sim | [llm-d/llm-d-inference-sim](https://github.com/llm-d/llm-d-inference-sim) | Apache-2.0 | Candidate test dependency, no spike assigned: an engine double for the metric tests |
 
 ### Designs and published work borrowed
@@ -196,6 +200,8 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - 2026-10-28: proposed (provisional), tracking issue #8.
 - 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
 - 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation.
+- 2026-10-30: spike S8 (PR #28) findings carried in.
+- 2026-10-30: aligned with HBEP-11 becoming implementable: the API host row.
 
 ## Amendments
 

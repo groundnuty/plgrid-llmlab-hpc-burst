@@ -68,7 +68,7 @@ All stages (0–7). Without one story, proposals optimise for different users an
 
 1. **Adjacent concerns.** A client harness's own semantics (claims, retries, replay checks), result checking, data-release hygiene and review capacity look outside the framework. Proposed out of scope; the owner decides on this HBEP's issue.
 2. **Client-side machines as a provider.** The Platform dimension lists them, while static providers come later. Are they a static provider, and when are they in scope? Owner discussion.
-3. **Single user or team first.** Is sharing one front and its deployments among several users in scope from the start? Decided with HBEP-9 and HBEP-11.
+3. **Single user or team first.** Is sharing one front and its deployments among several users in scope from the start? Decided with HBEP-9 and HBEP-11. HBEP-11 builds its alpha for one user on one host, and leaves this question open here.
 4. **The API key.** Resolved (owner decision): the operator sets the front's client key, and may set it to the user's LLMLab key, so the client changes only its base URL (HBEP-5).
 5. **A public problem catalogue.** Should the repository keep a neutral catalogue of problems, classified by the dimensions below, as input to test plans and the known-issues register (HBEP-4)? Owner decision.
 6. **The parked non-LLM idea.** What would bring a non-LLM service inside a GPU job back into scope? Owner decision, when a concrete case appears.
@@ -168,6 +168,7 @@ N/A: a scope HBEP has no stages of its own.
 - 2026-10-28: proposed (provisional), tracking issue #2.
 - 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
 - 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation.
+- 2026-10-30: open question 3 notes that HBEP-11's alpha is for one user.
 
 ## Amendments
 
