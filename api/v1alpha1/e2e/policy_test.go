@@ -61,11 +61,25 @@ func TestCRDDeletionGuard(t *testing.T) {
 	must(t, c.Create(bg(), other), "create the unrelated CRD")
 	cleanup(t, other)
 
-	// Before the policy exists, a dry-run delete of our CRD is accepted: the
-	// refusal below is the policy's doing, not something else's.
-	must(t, dryRunDelete(ours), "dry-run delete of a framework CRD before the policy exists")
+	// On a host whose launcher installs the policy (HBEP-11), it is already
+	// there. The test then neither creates nor removes it, and skips the two
+	// steps that need it absent.
+	hostInstalled := false
+	if err := c.Get(bg(), client.ObjectKey{Name: policyName}, &admissionregistrationv1.ValidatingAdmissionPolicy{}); err == nil {
+		hostInstalled = true
+	} else if !apierrors.IsNotFound(err) {
+		t.Fatalf("look for the policy: %v", err)
+	}
 
-	binding := installGuard(t)
+	var binding *admissionregistrationv1.ValidatingAdmissionPolicyBinding
+	if hostInstalled {
+		t.Log("the host installed the deletion guard; the before and after steps are skipped")
+	} else {
+		// Before the policy exists, a dry-run delete of our CRD is accepted: the
+		// refusal below is the policy's doing, not something else's.
+		must(t, dryRunDelete(ours), "dry-run delete of a framework CRD before the policy exists")
+		binding = installGuard(t)
+	}
 
 	// Policies take effect asynchronously: poll with dry-run deletes.
 	var refusal error
@@ -92,10 +106,12 @@ func TestCRDDeletionGuard(t *testing.T) {
 	must(t, c.Delete(bg(), other), "delete the unrelated CRD")
 
 	// Uninstall order: remove the binding first. Then deletion goes through (dry run).
-	must(t, c.Delete(bg(), binding), "remove the binding")
-	eventually(t, 60*time.Second, "deletion of a framework CRD to be allowed again", func() (bool, error) {
-		return dryRunDelete(ours) == nil, nil
-	})
+	if binding != nil {
+		must(t, c.Delete(bg(), binding), "remove the binding")
+		eventually(t, 60*time.Second, "deletion of a framework CRD to be allowed again", func() (bool, error) {
+			return dryRunDelete(ours) == nil, nil
+		})
+	}
 
 	// The suite's CRDs are all still there.
 	for _, name := range []string{ours} {
