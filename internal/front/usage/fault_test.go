@@ -316,6 +316,11 @@ func TestACounterBlockFailureIsCountedAndLogged(t *testing.T) {
 	if len(got) != 1 || got[0]["level"] != "ERROR" || got[0]["error"] == nil {
 		t.Errorf("log = %v, want one Error record that names the cause", got)
 	}
+	// HBEP-8: a failed reservation drops its record before it has a counter,
+	// and the failure counter is its only trace.
+	if st := s.Stats(); st.Lost != 1 || st.Records != 0 {
+		t.Errorf("Stats() = %+v after the failed block, want 1 record lost and none written", st)
+	}
 	if err := os.Remove(blocker); err != nil {
 		t.Fatal(err)
 	}
@@ -324,6 +329,9 @@ func TestACounterBlockFailureIsCountedAndLogged(t *testing.T) {
 	}
 	if s.Err() != nil || s.Failures() != 1 {
 		t.Errorf("Err() = %v and Failures() = %d after it, want nil and 1", s.Err(), s.Failures())
+	}
+	if st := s.Stats(); st.Lost != 1 || st.Records != 1 {
+		t.Errorf("Stats() = %+v after the recovery, want the lost record kept and 1 written", st)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
