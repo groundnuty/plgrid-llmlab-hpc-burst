@@ -110,7 +110,7 @@ func (p *pass) warmAllocation(pv *providerView, params v1alpha1.BatchParameters)
 		obs := a.Status.AtProvider
 		if a.Labels[v1alpha1.LabelProvider] != pv.name || !a.DeletionTimestamp.IsZero() ||
 			obs.Phase != v1alpha1.AllocationRunning || obs.HardEnd == nil || len(p.liveOn(a.Name)) > 0 ||
-			obs.HardEnd.Sub(p.now) <= need || !fits(a, params) {
+			obs.HardEnd.Sub(p.now) <= need || !fits(a, params) || p.releasePending(a) {
 			continue
 		}
 		if len(p.r.Backend.registrations(a.UID)) > 0 {
@@ -121,6 +121,18 @@ func (p *pass) warmAllocation(pv *providerView, params v1alpha1.BatchParameters)
 		}
 	}
 	return nil, deferUntil
+}
+
+// releasePending reports whether an Instance on the Allocation failed, so the
+// Allocation is to be released (a release that failed or was interrupted is
+// made on a later pass): it is never warm capacity.
+func (p *pass) releasePending(a *v1alpha1.Allocation) bool {
+	for _, in := range p.insts {
+		if in.Spec.AllocationRef.Name == a.Name && releaseRequired(in) {
+			return true
+		}
+	}
+	return false
 }
 
 // fits reports whether an Allocation's submission parameters hold an Instance
