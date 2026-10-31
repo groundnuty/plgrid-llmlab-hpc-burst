@@ -65,7 +65,7 @@ In these stories, `helios-a`, `helios-b` and `athena-a` are names an operator ga
 - **Clients re-point after a handover.** URLs are instance metadata. Clients use names, which survive handovers within a provider (Naming levels).
 - **Plain `model` reaches nothing after a switch.** No provider is attached to a model name by default, LLMLab included. Until the operator attaches one, the name returns the inactive-model error (HBEP-5); it never falls back silently.
 - **A change to the hashing rules silently changes every ID.** The scheme version is a field of the hashed object, changed only by amendment, and golden vectors catch an unintended change (Test plan).
-- **Two deployment IDs share a display form.** Names carry 12 hex characters of the hash. The controller refuses to issue an ID whose display form an existing identity record holds with a different full hash, and raises an event (Deployment ID).
+- **Two deployment IDs share a display form.** Names carry 12 hex characters of the hash. The controller refuses to issue an ID whose display form an existing identity record holds with a different full hash. It sets `Degraded` with reason `IdentityUnresolved` and raises an event (Deployment ID).
 - **Model names that contain `@` or `/` make names ambiguous.** The grammar splits at the last `@` (open question 5). A model whose own name contains `@` is then reachable only in a qualified form; reading LLMLab's model list before beta shows whether any exists.
 
 ### Open questions
@@ -209,6 +209,7 @@ No client-facing name contains a job ID, node, port, URL or label selector.
   - the checkpoint's per-file list: every file of the pinned revision, as its path relative to the checkpoint root and its SHA-256 (spike S7, PR #33).
 - **Inputs of a managed catalog entry:** the platform, the catalog name, any revision the platform reports, and a marker that everything else is opaque (open question 2).
 - **Not inputs:** the job ID, node, URL and lease end, which are instance metadata; the engine fingerprint, which is recorded beside the ID; the engine's resolved settings, recorded beside the ID per Instance; keys, including each Instance's own key and any token used to read a checkpoint, so that rotating a key never changes the ID.
+  - The image reference, `engine.image`, is not an input either. The launch always pulls `<image>@<digest>`, and admission requires `engine.imageDigest` beside it and refuses a tag in `engine.image`, so a tag never decides what runs. The digest is the input (science-agent decision, 31 Oct 2026; PR #71).
 
 #### The `v1` canonical object
 
@@ -290,7 +291,8 @@ The inputs form one JSON object. Every scalar value in it is a string. Booleans 
 - **Display form.** Names and labels use the first 12 lowercase hex characters of the hash. The full 64-character hash is kept in the identity record and in each Instance's spec. A Kubernetes label value holds at most 63 characters, so only the display form fits in a label.
 - **Why 12 hex characters are enough.** They carry 48 bits. By the birthday bound, the chance that any two of n IDs share a display form is about n²/2⁴⁹.
   - For 10,000 IDs it is about 2 × 10⁻⁷. That is far more IDs than one control plane is expected to issue, since it holds tens to hundreds of objects (HBEP-11).
-  - A collision is never silent. Before it issues an ID, the controller looks up the display form among the identity records. If a record there has a different full hash, it refuses the new ID, sets a condition on the ModelDeployment and raises an event. Resolving it then takes a new scheme version.
+  - A collision is never silent. Before it issues an ID, the controller looks up the display form among the identity records. If the record `id-<12 hex>` there holds a different full hash, it refuses the new ID. No Allocation is created in that class. The ModelDeployment gets `Degraded` with reason `IdentityUnresolved`, whose message names the colliding record, and an event is raised.
+  - A collision does not loop. The controller evaluates the class again only when the ModelDeployment's spec or the identity records change. The operator investigates the colliding record. A real collision takes a new scheme version to resolve.
 
 #### Current IDs, the file list and rollout
 
@@ -299,11 +301,12 @@ The inputs form one JSON object. Every scalar value in it is a string. Booleans 
   - A class added later, for example by a newly allowed provider, gets its ID then. That is not a rollout, since no other class's ID changes.
   - `model@<provider>/<deployment-id>` pins one class. The plain `model` name routes across all current IDs, and across an old ID while a rollout still serves it.
   - A handover keeps the ID within one class. A replacement placed in another class is a new Instance with that class's current ID (Vocabulary, Handover).
-- **The per-file list.** For a checkpoint on the Hugging Face Hub, it comes from the Hub's listing at the full commit id, read with pagination (HBEP-9). An LFS file contributes its `lfs.oid`, which is a SHA-256. The controller downloads each other file, checks it against its git blob id, and hashes it itself, because the Hub gives SHA-256 only for LFS files. Those are the small files: configuration, tokenizer and template.
+- **The per-file list.** For a checkpoint on the Hugging Face Hub, it comes from the Hub's listing at the full commit id, read under HBEP-9's listing rule: the request asks for `limit=1000`, and every `Link` with `rel="next"` is followed, because the Hub's page size depends on the query (HBEP-9, open questions). An LFS file contributes its `lfs.oid`, which is a SHA-256. The controller downloads each other file, checks it against its git blob id, and hashes it itself, because the Hub gives SHA-256 only for LFS files. Those are the small files: configuration, tokenizer and template.
+  - **When the ID cannot be computed.** A Hub answer of 401 or 404 for the checkpoint sets `Degraded` with reason `IdentityUnresolved`, and no Allocation is created in that class. The message names the cause. The operator fixes the Hub token or the revision. This is not `SpecUnsupported`, whose remedy is an edit to the spec. Hub transport errors, 429 and 5xx answers are not this reason: the controller backs off and retries them (science-agent decision, 31 Oct 2026; PR #71).
   - Staging on a provider then checks every staged file against the list, and every Instance start rehashes the files (HBEP-9). Both checks cover the files present, and each must match its entry. A listed file that was never staged, because the engine does not load it, is not a failure.
   - A gated repository needs a Hub token, referenced like provider credentials (HBEP-11).
   - Checkpoints from other sources are not in alpha.
-- **Before the ID exists.** Until a class has its current ID, no Instance is created in an Allocation of that class. Allocations can still be requested, because they do not depend on what they will host.
+- **Before the ID exists.** Until a class has its current ID, no Instance is created in an Allocation of that class. The model would let Allocations be requested meanwhile, since they do not depend on what they will host. Alpha creates none, because it creates each Allocation with its Instance (HBEP-7, Provisioning; Reconcile loop, step 2).
 - **Kept across a follow-on** that replaces a job in the same class.
 - **Rollout** (open question 7). An edit to a ModelDeployment's serving spec gives each class a new current ID. The ModelDeployment's status lists every ID that still has Instances, as a Deployment lists its ReplicaSets. The controller replaces only Instances whose ID differs from their class's current ID, make-before-break, at their next natural handover by default (HBEP-7). An Instance never changes its ID.
 - **Verification** (open question 1). At start, each Instance reports its resolved settings and rehashes its files (HBEP-9). A declared setting that the engine reports with another value fails verification, and so does a file whose hash differs from its entry. The ID is never recomputed from reported settings. The reported settings, the GPU type and the outcome form the verification result. Each verification, at start and after every restart that reverifies, is written as its own immutable record before the Instance can become ready, and the identity record is never changed (HBEP-11).
@@ -334,7 +337,8 @@ From spike S4 (PR #32).
 - A spec that lists a short alias such as `-tp`, or a key flag such as `api-key`, is refused.
 - **Classes.** A ModelDeployment whose allowed providers offer two accelerator classes gets two current IDs, listed by class in its status. Each Instance carries its Allocation's class's ID.
 - A catalog entry and a served deployment of the same checkpoint never get the same ID.
-- **Display-form collision.** The test injects an identity record whose display form matches a new ID but whose full hash differs. The controller then refuses the new ID with a condition and an event. The record is injected because a real collision cannot be produced.
+- **Display-form collision.** The test injects an identity record whose display form matches a new ID but whose full hash differs. The controller then refuses the new ID with `Degraded` reason `IdentityUnresolved`, a message naming the record, and one event. Further resyncs with nothing changed raise no second event and create no Allocation; an edit to the spec makes the controller evaluate the class again. The record is injected because a real collision cannot be produced.
+- **Hub answers.** A Hub double that answers 401, then one that answers 404, for the checkpoint gives `IdentityUnresolved` with each cause in the message. One that answers 503 is retried with backoff and does not set the reason.
 - **Rollout.** Editing a hashed field gives each class a new current ID. Old-ID Instances keep their ID until they are replaced, only Instances whose ID differs from their class's current ID are replaced, and the old ID's record is unchanged.
 - A simulated handover within one class keeps the ID and replaces the Instance with a new one. A replacement in another class carries that class's current ID, and no rollout starts.
 - A simulated repurpose keeps the Allocation and its name; the new Instance carries the new deployment's ID.
@@ -456,6 +460,7 @@ The resource model replaces state that www-2027 operators kept by hand: per-job 
 - 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation.
 - 2026-10-30: implementable. Owner decisions on the API group, kinds and version folded in; spikes S4 (PR #32), S5 (PR #19) and S7 (PR #33) carried in; every open question decided or marked for alpha.
 - 2026-10-30: amendment with HBEP-5 becoming implementable: an Instance with one worker may have no router.
+- 2026-10-31: amendment from the merged contracts (PR #71) and Hub listing (PR #68): the `Degraded` reason `IdentityUnresolved`, `engine.image` outside the ID, HBEP-9's listing rule, and no Allocation in alpha before a class has its ID.
 
 ## Amendments
 
@@ -471,3 +476,8 @@ The resource model replaces state that www-2027 operators kept by hand: per-job 
   - HBEP-9's render check comes after alpha (HBEP-7); alpha verifies by the file rehash and the settings comparison.
   - Each verification of an Instance, at start and after every restart that reverifies, writes its own immutable record, and the Instance's status names the latest (HBEP-7, HBEP-11). A restarted Instance can report other settings, so one record per Instance would have held a stale verdict.
 - **2026-10-30: an Instance with one worker may have no router.** Made with HBEP-5 becoming implementable. HBEP-7's alpha runs one worker per Instance and no router, and HBEP-5's front reaches that worker through the Instance's serving path. Routers in front of several workers come with beta (HBEP-5, open question 2; HBEP-7).
+- **2026-10-31: names from the merged contracts.** Science-agent decisions of 31 Oct 2026, made while the contracts (PR #71), the deployment ID and the Hub listing (PR #68) were built. The names are those on `main`.
+  - **`IdentityUnresolved`** is a reason on `Degraded`, distinct from `SpecUnsupported`. It is set when a class's ID cannot be computed: the Hub answers 401 or 404 for the checkpoint, or the display form collides with an existing `id-<12 hex>` record. Its message names the cause. The operator's action differs from `SpecUnsupported`'s edit of the spec: fix the token or the revision, or investigate the colliding record. Hub transport errors, 429 and 5xx answers are retried with backoff. A collision does not loop: the reason is set, an event raised, and the class is evaluated again only when the spec or the identity records change. Before, the collision paragraph named only "a condition".
+  - **`engine.image`** is the image reference, and not an ID input. The launch always pulls `<image>@<digest>`, and admission requires the digest and refuses a tag.
+  - **The per-file list** is read under HBEP-9's listing rule: `limit=1000`, and every `Link` with `rel="next"` followed. The Hub's page size depends on the query (PR #68, comment 6543291074).
+  - **Before the ID exists,** alpha creates no Allocation in the class, as HBEP-7's reconcile loop already said. Before, this HBEP said Allocations could still be requested.
