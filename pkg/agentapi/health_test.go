@@ -2,6 +2,7 @@ package agentapi
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -232,5 +233,93 @@ func TestPointerHelpers(t *testing.T) {
 	}
 	if f := Float64(0.25); *f != 0.25 {
 		t.Errorf("Float64(0.25) = %v", *f)
+	}
+}
+
+// The five fields HBEP-8 adds (Metrics, Engine gauges per Instance) keep the
+// three states apart through JSON: absent is unknown (nil), a key with 0 is a
+// known zero, and a key with a value is that value. The keys are the HBEP's;
+// the JSON is written by hand, as an agent would send it.
+func TestEngineCounterFieldsKeepNilZeroAndSetApart(t *testing.T) {
+	type counters struct {
+		preemptions, queried, hit, count *int64
+		sum                              *float64
+	}
+	of := func(h Health) counters {
+		return counters{h.Preemptions, h.PrefixCacheQueriedTokens, h.PrefixCacheHitTokens, h.TimePerOutputTokenCount, h.TimePerOutputTokenSecondsSum}
+	}
+	const head = `{"time":"2026-10-31T12:00:00Z","probeOK":true,"metricsReadAt":"2026-10-31T11:59:55Z"`
+
+	var unknown Health
+	if err := json.Unmarshal([]byte(head+`}`), &unknown); err != nil {
+		t.Fatal(err)
+	}
+	if c := of(unknown); c.preemptions != nil || c.queried != nil || c.hit != nil || c.count != nil || c.sum != nil {
+		t.Errorf("a sample without the keys decoded to %+v, want all nil (unknown)", c)
+	}
+
+	var zero Health
+	if err := json.Unmarshal([]byte(head+`,"preemptions":0,"prefixCacheQueriedTokens":0,"prefixCacheHitTokens":0,`+
+		`"timePerOutputTokenSecondsSum":0,"timePerOutputTokenCount":0}`), &zero); err != nil {
+		t.Fatal(err)
+	}
+	if c := of(zero); c.preemptions == nil || *c.preemptions != 0 || c.queried == nil || *c.queried != 0 || c.hit == nil || *c.hit != 0 ||
+		c.count == nil || *c.count != 0 || c.sum == nil || *c.sum != 0 {
+		t.Errorf("a sample with the keys at 0 decoded to %+v, want five pointers to zero", c)
+	}
+
+	var set Health
+	if err := json.Unmarshal([]byte(head+`,"preemptions":7,"prefixCacheQueriedTokens":3310655,"prefixCacheHitTokens":2647024,`+
+		`"timePerOutputTokenSecondsSum":12.5,"timePerOutputTokenCount":250}`), &set); err != nil {
+		t.Fatal(err)
+	}
+	if c := of(set); c.preemptions == nil || *c.preemptions != 7 || c.queried == nil || *c.queried != 3310655 || c.hit == nil || *c.hit != 2647024 ||
+		c.count == nil || *c.count != 250 || c.sum == nil || *c.sum != 12.5 {
+		t.Errorf("a sample with values decoded to %+v", c)
+	}
+
+	// A partial sample: the prefix-cache counters absent, the rest present. The
+	// absent ones stay unknown next to known values.
+	var partial Health
+	if err := json.Unmarshal([]byte(head+`,"preemptions":0,"timePerOutputTokenSecondsSum":0.25,"timePerOutputTokenCount":5}`), &partial); err != nil {
+		t.Fatal(err)
+	}
+	if c := of(partial); c.queried != nil || c.hit != nil || c.preemptions == nil || *c.preemptions != 0 || c.count == nil || *c.count != 5 || c.sum == nil || *c.sum != 0.25 {
+		t.Errorf("a partial sample decoded to %+v, want the prefix-cache counters nil and the rest set", c)
+	}
+}
+
+// Encoding and decoding again gives back the same states, and on the wire a nil
+// field has no key while a zero one has its key.
+func TestEngineCounterFieldsRoundTripAndKeepAZeroOnTheWire(t *testing.T) {
+	at := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	for name, h := range map[string]Health{
+		"none known": {Time: at, ProbeOK: true},
+		"all zero": {Time: at, ProbeOK: true, Preemptions: Int64(0), PrefixCacheQueriedTokens: Int64(0), PrefixCacheHitTokens: Int64(0),
+			TimePerOutputTokenSecondsSum: Float64(0), TimePerOutputTokenCount: Int64(0)},
+		"all set": {Time: at, ProbeOK: true, Preemptions: Int64(7), PrefixCacheQueriedTokens: Int64(3310655), PrefixCacheHitTokens: Int64(2647024),
+			TimePerOutputTokenSecondsSum: Float64(12.5), TimePerOutputTokenCount: Int64(250)},
+		"mixed": {Time: at, ProbeOK: true, Preemptions: Int64(0), TimePerOutputTokenSecondsSum: Float64(0.25)},
+	} {
+		b, err := json.Marshal(h)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		var back Health
+		if err := json.Unmarshal(b, &back); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !reflect.DeepEqual(back, h) {
+			t.Errorf("%s: %s decoded to %+v, want %+v", name, b, back, h)
+		}
+		for key, present := range map[string]bool{
+			`"preemptions"`: h.Preemptions != nil, `"prefixCacheQueriedTokens"`: h.PrefixCacheQueriedTokens != nil,
+			`"prefixCacheHitTokens"`: h.PrefixCacheHitTokens != nil, `"timePerOutputTokenSecondsSum"`: h.TimePerOutputTokenSecondsSum != nil,
+			`"timePerOutputTokenCount"`: h.TimePerOutputTokenCount != nil,
+		} {
+			if got := strings.Contains(string(b), key); got != present {
+				t.Errorf("%s: %s has key %s = %v, want %v", name, b, key, got, present)
+			}
+		}
 	}
 }

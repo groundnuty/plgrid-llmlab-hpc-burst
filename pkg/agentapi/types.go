@@ -382,14 +382,17 @@ type WorkerReport struct {
 //
 // The probe (ProbeOK, ConsecutiveProbeFailures) and the metrics are separate
 // reads. The metrics come from the engine's /metrics endpoint: RunningRequests,
-// WaitingRequests, GeneratedTokens, KVCacheUsage and ResponsesByStatus. A read
+// WaitingRequests, GeneratedTokens, KVCacheUsage, Preemptions,
+// PrefixCacheQueriedTokens, PrefixCacheHitTokens, TimePerOutputTokenSecondsSum,
+// TimePerOutputTokenCount and ResponsesByStatus. A read
 // of it can fail while the probe passes, so a sample says which values it
 // holds and when they were read, and never fills a value it does not have
 // (`@hpc-burst-science-agent`, 31 Oct 2026):
 //
-//   - An absent value is unknown. The four gauges are pointers, so a sample that
-//     left one out decodes to nil and never to zero, which would read as an idle
-//     engine, an empty KV cache or a stalled counter. A nil ResponsesByStatus is
+//   - An absent value is unknown. The gauges and counters are pointers, so a
+//     sample that left one out decodes to nil and never to zero, which would
+//     read as an idle engine, an empty KV cache, a stalled counter, no
+//     preemption or a prefix cache that never hits. A nil ResponsesByStatus is
 //     unknown too; an empty map is a read that found no responses. An agent that
 //     could not read /metrics leaves the values out, or repeats the last ones it
 //     read, and keeps MetricsReadAt at its last success (nil when it has none);
@@ -426,6 +429,29 @@ type Health struct {
 	// KVCacheUsage is the KV cache's use, from 0 to 1; nil is unknown, not
 	// zero.
 	KVCacheUsage *float64 `json:"kvCacheUsage,omitempty"`
+	// Preemptions is the engine's cumulative count of preempted requests
+	// (vllm:num_preemptions_total). It is a counter since the process started,
+	// like GeneratedTokens, so a restart starts it again at 0. nil is unknown,
+	// not zero: a pointer to 0 is an engine that has preempted nothing.
+	Preemptions *int64 `json:"preemptions,omitempty"`
+	// PrefixCacheQueriedTokens and PrefixCacheHitTokens are the engine's
+	// cumulative prefix-cache counters, in tokens (vllm:prefix_cache_queries_total
+	// and vllm:prefix_cache_hits_total); the hit rate is hits over queries. vLLM
+	// registers both whether or not prefix caching is on, and exports 0 when it
+	// is off, so a pointer to 0 is a real zero. nil is an engine that did not
+	// export the line, which is unknown, never 0.
+	PrefixCacheQueriedTokens *int64 `json:"prefixCacheQueriedTokens,omitempty"`
+	PrefixCacheHitTokens     *int64 `json:"prefixCacheHitTokens,omitempty"`
+	// TimePerOutputTokenSecondsSum and TimePerOutputTokenCount are the _sum and
+	// _count of the engine's per-request time-per-output-token histogram
+	// (vllm:request_time_per_output_token_seconds): the sum, in seconds, of the
+	// mean time per output token of every finished request, and the number of
+	// requests observed. Both are cumulative since the process started, and the
+	// controller reads the mean over a period as the difference of the sums over
+	// the difference of the counts. nil is unknown, not zero; the agent carries
+	// no buckets or quantiles.
+	TimePerOutputTokenSecondsSum *float64 `json:"timePerOutputTokenSecondsSum,omitempty"`
+	TimePerOutputTokenCount      *int64   `json:"timePerOutputTokenCount,omitempty"`
 	// ResponsesByStatus counts the engine's responses by the status label the
 	// engine reports, verbatim. vLLM groups statuses into classes (its
 	// prometheus-fastapi-instrumentator has should_group_status_codes on), so

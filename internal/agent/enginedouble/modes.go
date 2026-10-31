@@ -63,6 +63,14 @@ func applyMode(c *Config, name, val string, hasVal bool) error {
 		return flag(&c.ErrorsOnly)
 	case "stall":
 		return flag(&c.Stall)
+	case "no-prefix-cache-metrics":
+		return flag(&c.OmitPrefixCacheMetrics)
+	case "no-tpot":
+		return flag(&c.OmitTPOT)
+	case "no-tpot-sum":
+		return flag(&c.OmitTPOTSum)
+	case "no-tpot-count":
+		return flag(&c.OmitTPOTCount)
 	case "ignore-term":
 		return flag(&c.IgnoreTerm)
 	case "reasoning-forever":

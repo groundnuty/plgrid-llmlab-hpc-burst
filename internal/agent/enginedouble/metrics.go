@@ -13,7 +13,12 @@ import (
 // (spikes/s2b/results/gh200-1gpu/arms/A1-vr-hash/after-w0.prom): the metric
 // names, the label order (engine, finished_reason or reason, model_name) and
 // the number format of Python's prometheus_client. The capture holds only
-// those 16 lines, with no comment lines and no http_requests_total. The
+// those 16 lines, with no comment lines, no http_requests_total and no
+// histogram. The time-per-output-token histogram's lines are written in
+// prometheus_client's Histogram form (prometheus_client v0.18.0,
+// prometheus_client/metrics.py, lines 650-653: a _bucket line for each bound
+// and +Inf with the labels sorted, so le sits between engine and model_name,
+// then _count, then _sum), not read from a capture. The
 // # HELP and # TYPE lines are the double's own text, written so that a parser
 // meets comment lines as it would in a real scrape; they are not copied from
 // vLLM. http_requests_total is the default metric of
@@ -124,6 +129,7 @@ func (h *handler) metrics(w http.ResponseWriter) {
 	kv := float64(e.kvTokens) / float64(h.cfg.KVCacheTokens)
 	promptTokens, genTokens := e.promptTokens, e.genTokens
 	queries, hits := e.prefixQueries, e.prefixHits
+	tpot := e.tpot
 	success := map[string]int64{}
 	for k, v := range e.success {
 		success[k] = v
@@ -160,10 +166,12 @@ func (h *handler) metrics(w http.ResponseWriter) {
 	sample("vllm:num_requests_waiting_by_reason", fmt.Sprintf(`engine="0",model_name="%s",reason="deferred"`, model), 0)
 	metric("vllm:kv_cache_usage_perc", "gauge", "KV-cache usage. 1 means 100 percent usage.")
 	sample("vllm:kv_cache_usage_perc", base, kv)
-	metric("vllm:prefix_cache_queries_total", "counter", "Prefix cache queries, in terms of number of queried tokens.")
-	sample("vllm:prefix_cache_queries_total", base, float64(queries))
-	metric("vllm:prefix_cache_hits_total", "counter", "Prefix cache hits, in terms of number of cached tokens.")
-	sample("vllm:prefix_cache_hits_total", base, float64(hits))
+	if !h.cfg.OmitPrefixCacheMetrics {
+		metric("vllm:prefix_cache_queries_total", "counter", "Prefix cache queries, in terms of number of queried tokens.")
+		sample("vllm:prefix_cache_queries_total", base, float64(queries))
+		metric("vllm:prefix_cache_hits_total", "counter", "Prefix cache hits, in terms of number of cached tokens.")
+		sample("vllm:prefix_cache_hits_total", base, float64(hits))
+	}
 	metric("vllm:num_preemptions_total", "counter", "Cumulative number of preemption from the engine.")
 	sample("vllm:num_preemptions_total", base, 0)
 	metric("vllm:prompt_tokens_total", "counter", "Number of prefill tokens processed.")
@@ -173,6 +181,22 @@ func (h *handler) metrics(w http.ResponseWriter) {
 	metric("vllm:request_success_total", "counter", "Count of successfully processed requests.")
 	for _, reason := range []string{"stop", "length", "abort", "error", "repetition"} {
 		sample("vllm:request_success_total", fmt.Sprintf(`engine="0",finished_reason="%s",model_name="%s"`, reason, model), float64(success[reason]))
+	}
+	if !h.cfg.OmitTPOT {
+		const tpotName = "vllm:request_time_per_output_token_seconds"
+		metric(tpotName, "histogram", "Per-request mean time per output token, in seconds.")
+		var cumulative int64
+		for i, bound := range tpotBounds {
+			cumulative += tpot.buckets[i]
+			sample(tpotName+"_bucket", fmt.Sprintf(`engine="0",le="%s",model_name="%s"`, pyRepr(bound), model), float64(cumulative))
+		}
+		sample(tpotName+"_bucket", fmt.Sprintf(`engine="0",le="+Inf",model_name="%s"`, model), float64(tpot.count))
+		if !h.cfg.OmitTPOTCount {
+			sample(tpotName+"_count", base, float64(tpot.count))
+		}
+		if !h.cfg.OmitTPOTSum {
+			sample(tpotName+"_sum", base, tpot.sum)
+		}
 	}
 	if !h.cfg.ReportsNothing {
 		metric("vllm:cache_config_info", "gauge", "Information of the LLMEngine CacheConfig")

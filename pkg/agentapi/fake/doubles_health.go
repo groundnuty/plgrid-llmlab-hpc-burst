@@ -7,16 +7,22 @@ import (
 )
 
 // metricsSample is a sample whose probe passed and whose /metrics read finished
-// at now: MetricsReadAt is now, and every gauge is set, a zero explicitly. A
-// double built on it reads as an engine whose metrics are current and known;
-// the doubles that model an unreadable /metrics (HealthMetricsUnreadable,
-// HealthMetricsStale) do not use it.
+// at now: MetricsReadAt is now, and every gauge and counter is set, a zero
+// explicitly: the preemption counter, the two prefix-cache counters and the
+// sum and count of the time per output token (HBEP-8) are 0 here, as a real
+// vLLM exports them before any request. A double built on it reads as an
+// engine whose metrics are current and known; the doubles that model an
+// unreadable /metrics (HealthMetricsUnreadable, HealthMetricsStale) do not use
+// it.
 func metricsSample(now time.Time, running, waiting, tokens int64, kvCache float64) agentapi.Health {
 	read := now
 	return agentapi.Health{
 		Time: now, ProbeOK: true, MetricsReadAt: &read,
 		RunningRequests: agentapi.Int64(running), WaitingRequests: agentapi.Int64(waiting),
 		GeneratedTokens: agentapi.Int64(tokens), KVCacheUsage: agentapi.Float64(kvCache),
+		Preemptions:              agentapi.Int64(0),
+		PrefixCacheQueriedTokens: agentapi.Int64(0), PrefixCacheHitTokens: agentapi.Int64(0),
+		TimePerOutputTokenSecondsSum: agentapi.Float64(0), TimePerOutputTokenCount: agentapi.Int64(0),
 	}
 }
 
@@ -129,4 +135,36 @@ func HealthErrorsOnly() func(time.Time, Process) agentapi.Health {
 		h.ResponsesByStatus = map[string]int64{"5xx": 10 * samples.next(p)}
 		return h
 	}
+}
+
+// HealthEngineCounters returns an engine under moderate load whose preemption,
+// prefix-cache and time-per-output-token counters rise at every sample (HBEP-8,
+// Engine gauges per Instance). At the k-th sample of a process it has 4
+// requests running, none waiting, a KV cache half full, and cumulative
+// counters of k preemptions, 1,000k queried and 800k hit prefix-cache tokens,
+// and 10k requests observed with 0.5k seconds of time per output token between
+// them (a mean of 50 ms). The counters are kept per process: they start again
+// after a restart, as a real engine's do. Give each Agent its own engine.
+func HealthEngineCounters() func(time.Time, Process) agentapi.Health {
+	samples := perProcessCount{}
+	return func(now time.Time, p Process) agentapi.Health {
+		k := samples.next(p)
+		h := metricsSample(now, 4, 0, 1000*k, 0.5)
+		h.Preemptions = agentapi.Int64(k)
+		h.PrefixCacheQueriedTokens, h.PrefixCacheHitTokens = agentapi.Int64(1000*k), agentapi.Int64(800*k)
+		h.TimePerOutputTokenSecondsSum, h.TimePerOutputTokenCount = agentapi.Float64(0.5*float64(k)), agentapi.Int64(10*k)
+		return h
+	}
+}
+
+// HealthWithoutPrefixCache is an engine whose /metrics lacks the two
+// prefix-cache counter lines: PrefixCacheQueriedTokens and PrefixCacheHitTokens
+// are nil, unknown, and every other value is known, a zero explicitly. It is not
+// an engine with prefix caching off: a real vLLM v0.32.0 registers both counters
+// whether or not prefix caching is on, and exports them at 0, which is a known
+// zero (HBEP-8, Test plan).
+func HealthWithoutPrefixCache(now time.Time, _ Process) agentapi.Health {
+	h := metricsSample(now, 0, 0, 0, 0.1)
+	h.PrefixCacheQueriedTokens, h.PrefixCacheHitTokens = nil, nil
+	return h
 }
