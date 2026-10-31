@@ -176,6 +176,9 @@ func (p *Proxy) setTarget(x *exchange, t *target) {
 		x.rec.Emitter, x.rec.Provider, x.rec.ModelDeployment = emitterProvider, t.managed.Provider, t.managed.Deployment
 		x.rec.DeploymentID, x.rec.Instance, x.rec.InstanceUID = t.managed.ManagedID, "", ""
 		x.shortenDeadline(t.managed.MaxRequestDuration)
+		// A managed target has no lease: drop the timer an earlier attempt
+		// armed for an Instance, so its lease end cannot cut this request.
+		x.armLease(func() (time.Time, bool) { return time.Time{}, false })
 		return
 	}
 	x.attr = forTarget(x.id, t, emitterInstance)
