@@ -20,9 +20,12 @@ df -h "$TMPDIR" | tail -1 | awk '{print "TMPDIR size " $2 ", free " $4}'
 
 # Guard 2: the image is CUDA 13.0.2; the driver must support it.
 nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
-cuda=$(nvidia-smi | sed -n 's/.*CUDA Version: *\([0-9][0-9]*\)\.\([0-9]*\).*/\1.\2/p' | head -1)
-say "driver CUDA version: ${cuda:-unknown}"
-case "${cuda%%.*}" in ''|[0-9]|1[0-2]) say "ABORT: the driver's CUDA version is below 13.0"; exit 3 ;; esac
+# CUDA 13.0 needs driver 580 or later (NVIDIA's CUDA toolkit release notes).
+nvidia-smi | sed -n '1,4p'
+nvidia-smi -q 2>/dev/null | grep -i 'cuda' | head -3
+drv=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1 | cut -d. -f1)
+say "driver major version: ${drv:-unknown}"
+if [ -z "$drv" ] || [ "$drv" -lt 580 ]; then say "ABORT: the driver is older than CUDA 13.0 needs (580)"; exit 3; fi
 apptainer --version
 say "cpus $(nproc)"; free -g | sed -n 2p
 
