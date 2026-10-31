@@ -367,6 +367,7 @@ func TestHostLayout(t *testing.T) {
 		h.AgentCertFile():     "/home/example-user/.local/state/hpcburst/agent-endpoint/tls.crt",
 		h.AgentKeyFile():      "/home/example-user/.local/state/hpcburst/agent-endpoint/tls.key",
 		h.AgentEndpointAddr(): "127.0.0.1:29223",
+		h.DialHomeAddr():      "127.0.0.1:29227",
 	} {
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
@@ -374,6 +375,9 @@ func TestHostLayout(t *testing.T) {
 	}
 	if p := h.AgentEndpointPort(); p != 29223 {
 		t.Errorf("AgentEndpointPort = %d, want 29223 (base + 3)", p)
+	}
+	if p := h.DialHomePort(); p != 29227 {
+		t.Errorf("DialHomePort = %d, want 29227 (base + 7)", p)
 	}
 	if got := AllocationCredentialPath(h.CredentialsDir(), "uid-1"); got != "/home/example-user/.local/state/hpcburst/credentials/allocations/uid-1" {
 		t.Errorf("AllocationCredentialPath = %q", got)
@@ -385,5 +389,27 @@ func TestHostLayout(t *testing.T) {
 func TestMaxTargetSessionsAgreesWithTheAPI(t *testing.T) {
 	if MaxTargetSessions != v1alpha1.MaxTargetSessions {
 		t.Errorf("agentapi.MaxTargetSessions = %d, v1alpha1.MaxTargetSessions = %d", MaxTargetSessions, v1alpha1.MaxTargetSessions)
+	}
+}
+
+// Server errors are counted from both a class ("5xx", as vLLM groups its
+// statuses) and exact codes; client errors and successes are not.
+func TestServerErrorsCountsClassesAndCodes(t *testing.T) {
+	for _, c := range []struct {
+		in   map[string]int64
+		want int64
+	}{
+		{nil, 0},
+		{map[string]int64{"2xx": 1200, "4xx": 7}, 0},
+		{map[string]int64{"2xx": 1200, "5xx": 3}, 3},
+		{map[string]int64{"200": 1200, "500": 3, "503": 2, "404": 9}, 5},
+		{map[string]int64{}, 0},
+		{map[string]int64{"": 4, "unknown": 6, "3xx": 2}, 0},
+		{map[string]int64{"5xx": 3, "500": 1, "2xx": 10}, 4},
+		{map[string]int64{"5garbage": 2}, 2}, // the rule is "starts with 5", as documented
+	} {
+		if got := ServerErrors(c.in); got != c.want {
+			t.Errorf("ServerErrors(%v) = %d, want %d", c.in, got, c.want)
+		}
 	}
 }
