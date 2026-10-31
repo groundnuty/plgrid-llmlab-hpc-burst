@@ -51,6 +51,10 @@ type judge struct {
 	usage         *counts
 	contentEvents int64
 	sawContent    bool // set by the latest event
+	// failed: the stream ended with response.failed, an engine error after
+	// the stream started; errorCode is the event's error.code, if any.
+	failed    bool
+	errorCode string
 }
 
 // event judges one SSE event (its raw lines) and says whether to forward it.
@@ -104,15 +108,16 @@ func (j *judge) event(raw []byte) (forward, done bool) {
 	return true, false
 }
 
-// responsesEvent judges a Responses stream: complete at its terminal event,
-// which carries the final response with its usage and status. vLLM sends
-// response.completed last, with the status (HBEP-5, Contract); OpenAI's
-// contract, which LLMLab follows, also ends a capped or failed response with
-// response.incomplete or response.failed. Those are explicit ends, not cuts,
-// so they complete the stream too, and the record's finish is the final
-// response's status (HBEP-5, Usage records). HBEP-5 names only
-// response.completed; reading the other two as ends is the front's, an open
-// point for its author.
+// responsesEvent judges a Responses stream. It is complete at its terminal
+// event, which carries the final response with its usage and status, and
+// which passes through unchanged (@hpc-burst-science-agent, 31 Oct 2026):
+//   - response.completed, which vLLM sends last (HBEP-5, Contract);
+//   - response.incomplete, a capped reply as OpenAI's contract, and LLMLab,
+//     end it: a clean end, not a cut, not resent, no pause count;
+//   - response.failed, an engine error after the stream started: not a cut
+//     and not resent, since bytes went out, but the record marks it failed
+//     with the event's error.code, and it counts toward the Instance's pause
+//     like a 5xx.
 func (j *judge) responsesEvent(name string, data []byte) bool {
 	var ev struct {
 		Type     string `json:"type"`
@@ -120,7 +125,13 @@ func (j *judge) responsesEvent(name string, data []byte) bool {
 		Response struct {
 			Status string          `json:"status"`
 			Usage  json.RawMessage `json:"usage"`
+			Error  *struct {
+				Code string `json:"code"`
+			} `json:"error"`
 		} `json:"response"`
+		Error *struct {
+			Code string `json:"code"`
+		} `json:"error"`
 	}
 	_ = json.Unmarshal(data, &ev)
 	typ := ev.Type
@@ -133,6 +144,18 @@ func (j *judge) responsesEvent(name string, data []byte) bool {
 	}
 	if typ == "response.completed" || typ == "response.incomplete" || typ == "response.failed" {
 		j.complete, j.finish = true, ev.Response.Status
+		if typ == "response.failed" {
+			j.failed = true
+			if j.finish == "" {
+				j.finish = "failed"
+			}
+			switch {
+			case ev.Response.Error != nil && ev.Response.Error.Code != "":
+				j.errorCode = ev.Response.Error.Code
+			case ev.Error != nil:
+				j.errorCode = ev.Error.Code
+			}
+		}
 		if u := responsesUsage(ev.Response.Usage); u != nil {
 			j.usage = u
 		}

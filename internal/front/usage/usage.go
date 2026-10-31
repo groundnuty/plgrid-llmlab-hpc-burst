@@ -19,9 +19,10 @@ import (
 )
 
 // Record is one request's usage record. Its JSON member names are HBEP-5's.
-// Pointers are null when unknown. ContentEvents is an addition: on a stream
-// that did not ask for usage, the counts are null and the front's count of
-// content events is kept here (countsSource front_events).
+// Pointers are null when unknown. ContentEvents and ErrorCode are additions:
+// on a stream that did not ask for usage, the counts are null and the front's
+// count of content events is kept in ContentEvents (countsSource
+// front_events); ErrorCode holds a failed Responses stream's error.code.
 type Record struct {
 	Counter          uint64  `json:"counter"`
 	RequestID        string  `json:"requestID"`
@@ -48,6 +49,9 @@ type Record struct {
 	FirstTokenMs     *int64  `json:"firstTokenMs"`
 	DurationMs       int64   `json:"durationMs"`
 	ContentEvents    *int64  `json:"contentEvents,omitempty"`
+	// ErrorCode is the error.code of a stream that ended with an engine
+	// error after it started (response.failed), when the event has one.
+	ErrorCode *string `json:"errorCode,omitempty"`
 }
 
 // Time formats a time as a usage record does: UTC, millisecond RFC 3339.

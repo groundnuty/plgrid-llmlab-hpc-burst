@@ -35,6 +35,10 @@ type Behaviour struct {
 	KillAfter  int           // close the connection abruptly after this many tokens
 	Status     int           // answer this status with ErrorBody instead
 	ErrorBody  string
+	// ResponsesEnd is how a Responses stream ends: "" with
+	// response.completed, "incomplete" with response.incomplete (a capped
+	// reply), "failed" with response.failed and error.code server_error.
+	ResponsesEnd string
 	// CloseBeforeHeaders reads the request, then closes the connection with
 	// no response byte, as frps does with a request it accepted for a dead
 	// tunnel (HBEP-6).

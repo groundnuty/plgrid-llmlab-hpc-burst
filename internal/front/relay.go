@@ -70,7 +70,9 @@ func (p *Proxy) relay(w http.ResponseWriter, x *exchange, t *target, resp *http.
 		x.rec.Finish = strp("error")
 		p.copyRaw(w, x, body, sse)
 	case sse && kind.streams() && identity:
-		p.relayEvents(w, x, body, kind)
+		if j := p.relayEvents(w, x, body, kind); j.failed && t.inst != nil {
+			p.router.ReportConnect(t.key(), true)
+		}
 	case sse:
 		p.copyRaw(w, x, body, true)
 	default:
@@ -81,7 +83,7 @@ func (p *Proxy) relay(w http.ResponseWriter, x *exchange, t *target, resp *http.
 // relayEvents passes a stream through event by event, judging it by its
 // endpoint's completion rule. A stream that ends without its end, or is cut,
 // gets one error event and never [DONE] (HBEP-5, Errors; open question 10).
-func (p *Proxy) relayEvents(w http.ResponseWriter, x *exchange, body io.Reader, kind endpoint) {
+func (p *Proxy) relayEvents(w http.ResponseWriter, x *exchange, body io.Reader, kind endpoint) *judge {
 	rc := http.NewResponseController(w)
 	j := &judge{kind: kind}
 	br := bufio.NewReaderSize(body, 64<<10)
@@ -128,6 +130,7 @@ func (p *Proxy) relayEvents(w http.ResponseWriter, x *exchange, body io.Reader, 
 		}
 	}
 	p.endStream(w, x, j, readErr)
+	return j
 }
 
 // endStream records how a judged stream ended and sends the error event for a
@@ -142,6 +145,9 @@ func (p *Proxy) endStream(w http.ResponseWriter, x *exchange, j *judge, readErr 
 	}
 	if j.complete {
 		x.rec.Finish = strp(j.finish)
+		if j.errorCode != "" {
+			x.rec.ErrorCode = strp(j.errorCode)
+		}
 		return
 	}
 	cut := x.cutBy()

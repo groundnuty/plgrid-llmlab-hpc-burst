@@ -144,7 +144,11 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, x *exchange, n n
 		p.setTarget(x, t)
 		resp, err := p.send(x, r, t, body, rb, key)
 		if err == nil {
-			p.router.ReportConnect(t.key(), false)
+			// A 5xx from an Instance counts toward its pause; a 4xx is the
+			// client's error and does not (@hpc-burst-science-agent, 31 Oct
+			// 2026). A managed target's statuses pass through and pause
+			// nothing: only its connections count.
+			p.router.ReportConnect(t.key(), t.inst != nil && resp.StatusCode >= 500)
 			p.relay(w, x, t, resp, rb, r.URL.Path)
 			t.release()
 			return
