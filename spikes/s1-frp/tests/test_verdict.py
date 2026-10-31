@@ -30,7 +30,9 @@ GOOD = {
         {"mark_utc": "2026-10-30T13:08:00.000Z", "valid": True, "precondition": "up", "probe_declared_down_s": 4.5,
          "probe_class": "path_down", "stub_close_proxy_s": 1.5},
     ],
-    "stub": {"ops": {"Login": 2, "NewProxy": 2, "CloseProxy": 2, "Ping": 400}, "logins": 2, "reconnects": 1},
+    "stub": {"ops": {"Login": 2, "NewProxy": 2, "CloseProxy": 2, "Ping": 400}, "logins": 2, "reconnects": 1,
+             "ping_interval_unfaulted_s": {"n": 380, "p50": 10.0, "max": 12.4}},
+    "latency_baseline": {"tunnel": {"kept_alive_request_ms": {"n": 30, "p50": 60.0, "max": 180.0}}},
 }
 JOB_LOG = "2026-10-30T11:00:03Z frpc: login to server success\n"
 # A tunnel-up path rate written by hand: 30 s asked, 30.2 s timed at the VM, 2,000,000 B/s.
@@ -230,19 +232,74 @@ def rate(**edits):
     return m
 
 
-def c6(probe):
-    return [(ok, t) for cid, ok, t in verdict.evaluate(GOOD, JOB_LOG, probe, None) if cid == "C6"][0]
+def c6(probe, summary=GOOD):
+    return [(ok, t) for cid, ok, t in verdict.evaluate(summary, JOB_LOG, probe, None) if cid == "C6"][0]
+
+
+def with_pings(longest, rtt_ms=180.0):
+    s = copy.deepcopy(GOOD)
+    s["stub"]["ping_interval_unfaulted_s"]["max"] = longest
+    s["latency_baseline"]["tunnel"]["kept_alive_request_ms"]["max"] = rtt_ms
+    return s
 
 
 class PathRate(unittest.TestCase):
-    """C6 and the flags. The numbers come from the brief: the bound is 6 MiB / rate, and a rate under about
-    630 kB/s (6 MiB / yamux's fixed 10 s) is flagged; S1's heartbeat timeout is 25 s."""
+    """C6 and the flags. The numbers come from the brief and the science agent's correction of 31 Oct: 6 MiB / rate
+    is an observed head-of-line scale, not a bound; the heartbeat timeout budget is interval + worst observed
+    control delay + RTT + margin, against the 25 s timeout; a rate under about 630 kB/s (6 MiB / yamux's fixed 10 s)
+    is flagged. The kit's settings are a 10 s interval and a 25 s timeout (README, "Heartbeat budget")."""
 
-    def test_a_valid_tunnel_up_measurement_passes_and_reports_the_bound(self):
+    def test_a_valid_tunnel_up_measurement_passes_and_reports_the_scale_and_the_budget(self):
         ok, text = c6([RATE_TUN_UP])
         self.assertTrue(ok, text)
-        self.assertIn("3.1 s", text)                   # 6,291,456 / 2,000,000 = 3.15 s, by hand
-        self.assertIn("exceeds it", text)
+        self.assertIn("observed head-of-line scale 6 MiB / rate = 3.1 s", text)   # 6,291,456 / 2,000,000 = 3.15 s
+        self.assertNotIn("bound", text)
+        # by hand: 10 s interval + (12.4 - 10) s delay + 0.18 s RTT + 5 s margin = 17.58 s, under 25 s
+        self.assertIn("heartbeat interval 10 s + worst observed control delay 2.4 s", text)
+        self.assertIn("RTT 0.18 s", text)
+        self.assertIn("margin 5 s = 17.6 s, within S1's 25 s heartbeat timeout", text)
+
+    def test_a_budget_over_the_timeout_says_so_and_is_flagged(self):
+        summary = with_pings(21.0)                     # by hand: 10 + 11.0 + 0.18 + 5 = 26.18 s, over 25 s
+        ok, text = c6([RATE_TUN_UP], summary)
+        self.assertTrue(ok, text)                      # the measurement is valid; the budget is a risk, not a FAIL
+        self.assertIn("= 26.2 s, OVER S1's 25 s heartbeat timeout", text)
+        flags = verdict.flag_lines([RATE_TUN_UP], summary)
+        self.assertTrue(any("26.2 s, OVER" in f for f in flags), flags)
+        self.assertFalse(any("timeout budget" in f for f in verdict.flag_lines([RATE_TUN_UP], GOOD)))
+
+    def test_pings_on_time_add_no_delay(self):
+        ok, text = c6([RATE_TUN_UP], with_pings(9.8, rtt_ms=40.0))   # by hand: 10 + 0 + 0.04 + 5 = 15.04 s
+        self.assertIn("control delay 0.0 s", text)
+        self.assertIn("RTT 0.04 s", text)
+        self.assertIn("= 15.0 s, within", text)
+
+    def test_a_budget_without_the_runs_measurements_is_unknown_and_flagged(self):
+        summary = copy.deepcopy(GOOD)
+        del summary["stub"]["ping_interval_unfaulted_s"]
+        ok, text = c6([RATE_TUN_UP], summary)
+        self.assertIn("timeout budget unknown", text)
+        self.assertTrue(any("timeout budget unknown" in f for f in verdict.flag_lines([RATE_TUN_UP], summary)))
+
+    def test_the_interval_and_the_timeout_come_from_the_kits_templates(self):
+        self.assertEqual(verdict.kit_heartbeat_settings(), (10, 25))
+        d = tempfile.mkdtemp(prefix="s1-vd-kit-")
+        try:
+            with open(os.path.join(d, "frpc.toml.tmpl"), "w") as fh:
+                fh.write("transport.heartbeatInterval = 15\ntransport.heartbeatTimeout = 40\n")
+            with open(os.path.join(d, "frps.toml.tmpl"), "w") as fh:
+                fh.write("transport.heartbeatTimeout = 30   # the smaller timeout governs\n")
+            self.assertEqual(verdict.kit_heartbeat_settings(d), (15, 30))
+            _, text = verdict.timeout_budget(GOOD, verdict.kit_heartbeat_settings(d))
+            self.assertIn("heartbeat interval 15 s + worst observed control delay 0.0 s", text)   # 12.4 < 15
+            self.assertIn("= 20.2 s, within S1's 30 s", text)                                    # 15 + 0 + 0.18 + 5
+            os.unlink(os.path.join(d, "frps.toml.tmpl"))
+            with self.assertRaises(ValueError):
+                verdict.kit_heartbeat_settings(d)
+        finally:
+            for f in os.listdir(d):
+                os.unlink(os.path.join(d, f))
+            os.rmdir(d)
 
     def test_no_tunnel_up_line_is_unknown_and_fails(self):
         ok, text = c6([rate(forward="ctl"), rate(direction="down", timed_by="receiver-job")])
@@ -269,11 +326,11 @@ class PathRate(unittest.TestCase):
         out = self.flags(rate(bps=500000.0))
         self.assertTrue(any("12.6 s" in f for f in out), out)    # 6,291,456 / 500,000 = 12.58 s, by hand
 
-    def test_a_bound_at_or_over_25_s_is_flagged(self):
-        out = self.flags(rate(bps=200000.0))                      # 31.5 s, by hand
-        self.assertTrue(any("not below S1's heartbeat timeout of 25 s" in f for f in out), out)
-        out = self.flags(rate(bps=300000.0))                      # 21.0 s: under 25 s
-        self.assertFalse(any("heartbeat timeout of 25 s" in f for f in out), out)
+    def test_a_slow_rate_alone_is_not_read_as_a_timeout_breach(self):
+        # 6 MiB / 200,000 B/s = 31.5 s is a scale, not a bound: only the 630 kB/s risk flag fires
+        out = self.flags(rate(bps=200000.0))
+        self.assertTrue(any("under 6 MiB / 10 s" in f for f in out), out)
+        self.assertFalse(any("heartbeat timeout" in f for f in out), out)
 
     def test_a_capped_measurement_is_flagged_as_not_the_link_rate(self):
         out = self.flags(rate(max_bps=4000000, bps=3990000.0))

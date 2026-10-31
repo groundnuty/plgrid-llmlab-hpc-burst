@@ -624,8 +624,18 @@ def analyse(st, started_epoch, ended_epoch, args):
         logins = sum(1 for e in domain_events if e["op"] == "Login")
         summary["stub"] = {"events": len(domain_events), "logins": logins, "reconnects": max(0, logins - 1),
                            "ops": dict((op, sum(1 for e in domain_events if e["op"] == op))
-                                       for op in sorted(set(e["op"] for e in domain_events)))}
+                                       for op in sorted(set(e["op"] for e in domain_events))),
+                           "ping_interval_unfaulted_s": ping_intervals(domain_events, st.marks[0] if st.marks else ended_epoch)}
     return summary
+
+
+def ping_intervals(events, limit):
+    """Stats of the gaps between consecutive Ping calls before limit (the first mark): how late the instance's
+    heartbeats arrived at the plugin. The longest gap minus frpc's heartbeat interval is the worst observed delay
+    on the control path, which verdict.py puts into the heartbeat timeout budget."""
+    times = sorted(e["epoch"] for e in events if e.get("op") == "Ping" and isinstance(e.get("epoch"), (int, float))
+                   and e["epoch"] < limit)
+    return stats([b - a for a, b in zip(times, times[1:])], 3)
 
 
 # --- main -----------------------------------------------------------------------------------------

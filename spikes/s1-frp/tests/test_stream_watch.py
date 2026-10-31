@@ -562,6 +562,32 @@ class ThreeStreamsLive(unittest.TestCase):
 
 
 
+class PingIntervals(unittest.TestCase):
+    """The control-delay input of verdict.py's timeout budget: gaps between the instance's Ping calls at the plugin,
+    before the first mark only (the faults stop Pings on purpose), for the frp user only."""
+
+    def test_gaps_before_the_first_mark_for_the_instance_only(self):
+        d = tempfile.mkdtemp(prefix="s1-sw-ping-")
+        try:
+            log = os.path.join(d, "stub.jsonl")
+            rows = [(100.0, "inst"), (110.0, "inst"), (121.5, "inst"), (131.5, "inst"), (125.0, "other"),
+                    (170.0, "inst"), (200.0, "inst")]                      # the last two fall after the mark at 140
+            with open(log, "w") as fh:
+                for t, user in rows:
+                    fh.write(json.dumps({"epoch": t, "op": "Ping", "user": user}) + "\n")
+            args = sw.parse_args(["--tcpmux", "127.0.0.1:1", "--domain", "5e1f0000-0000-4000-8000-000000000001",
+                                  "--stub-log", log, "--stub-user", "inst"])
+            st = sw.State(args)
+            st.announce = lambda text: None
+            st.add_mark(140.0)
+            got = sw.analyse(st, 100.0, 300.0, args)["stub"]["ping_interval_unfaulted_s"]
+            self.assertEqual((got["n"], got["max"], got["min"]), (3, 11.5, 10.0))   # 10.0, 11.5, 10.0 by hand
+        finally:
+            for f in os.listdir(d):
+                os.unlink(os.path.join(d, f))
+            os.rmdir(d)
+
+
 class StubUserIsTheFrpUser(unittest.TestCase):
     """The tcpmux domain is the Instance UID, but plugin calls (Login, Ping) carry only the frp user. Matching the
     stub log on the domain would find nothing and every stub-based check would read as absent, so --stub-log

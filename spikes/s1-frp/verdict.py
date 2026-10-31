@@ -27,12 +27,17 @@ budget fixed before any run:
       through it is recorded (probe frpc_login) or step 0 proved both paths with an exchange
   C6  the path rate of the tunnel forward in the token direction (the probe line path_rate, forward tun,
       direction up) was measured: ok, at least 30 s asked, at least 29 s timed at the VM's receiver, bytes > 0.
-      It reports the heartbeat bound: HBEP-6's heartbeat timeout must exceed 6 MiB / rate (frp's yamux stream
-      window is 6 MiB, spike S1c), and whether S1's 25 s exceeds it.
+      Next to it: the observed head-of-line scale 6 MiB / rate (frp's yamux stream window is 6 MiB; S1c's review
+      established it as an observed scale, not a bound), and the heartbeat timeout budget: heartbeat interval +
+      worst observed control delay + RTT + margin, against S1's heartbeat timeout. The interval and the timeout
+      come from the kit's frpc.toml.tmpl and frps.toml.tmpl; the control delay (the longest Ping-to-Ping gap at
+      the plugin before the first mark, minus the interval) and the RTT (the longest kept-alive /health request
+      through the tunnel) from the run's own summary; the margin is HEARTBEAT_MARGIN_S.
 
 FLAG lines do not change OVERALL; they mark risks a reader must not miss: a measured rate under 6 MiB / 10 s
 (629,146 B/s; yamux's ping has a fixed 10 s write timeout, so a full window takes longer to drain than that),
-a bound at or above S1's 25 s heartbeat timeout, and a capped measurement (a cap is not the link rate).
+a timeout budget over the heartbeat timeout or one that cannot be computed, and a capped measurement (a cap is
+not the link rate).
 
 C4 reads the marks in the run-book's order. A mark taken while the probe was not 'up' is invalid and
 fails its criterion: it is never counted as a detection.
@@ -40,6 +45,8 @@ fails its criterion: it is never counted as a detection.
 import argparse
 import datetime
 import json
+import os
+import re
 import sys
 
 MIN_STREAM_S = 3600
@@ -49,7 +56,9 @@ DOWN_S = 10
 YAMUX_WINDOW_B = 6 * 1024 * 1024     # frp's yamux stream window (client/connector.go, server/service.go; spike S1c)
 YAMUX_PING_TIMEOUT_S = 10            # yamux ConnectionWriteTimeout, fixed in fatedier/yamux v0.2.0
 RISK_BPS = YAMUX_WINDOW_B / float(YAMUX_PING_TIMEOUT_S)   # 629,145.6 B/s
-S1_HEARTBEAT_TIMEOUT_S = 25          # frps.toml.tmpl and frpc.toml.tmpl transport.heartbeatTimeout
+HEARTBEAT_MARGIN_S = 5.0             # frps checks each session's heartbeat once a second (server/control.go); 5 s
+                                     # covers that check and scheduling slack, the slack the README's budget gave
+                                     # the 25 s timeout over two missed 10 s pings
 MIN_RATE_REQUESTED_S = 30
 MIN_RATE_TIMED_S = 29.0              # receiver-timed span; the first byte's latency may take up to 1 s of the 30
 
@@ -210,12 +219,54 @@ def rate_lines(probe_lines):
     return [p for p in probe_lines if p.get("probe") == "path_rate"]
 
 
-def heartbeat_bound_s(bps):
-    """Seconds a full 6 MiB yamux window takes to drain at bps: HBEP-6's heartbeat timeout must exceed it."""
+def hol_scale_s(bps):
+    """Seconds a full 6 MiB yamux window takes to drain at bps: the head-of-line scale observed in S1c, not a bound."""
     return YAMUX_WINDOW_B / float(bps)
 
 
-def c6_path_rate(probe_lines):
+def kit_heartbeat_settings(kit_dir=None):
+    """(heartbeat interval, heartbeat timeout) in seconds, read from the kit's frp templates next to this script.
+    The timeout is the smaller of frpc's and frps's. A missing file or setting is a ValueError, never a default."""
+    d = kit_dir or os.path.dirname(os.path.abspath(__file__))
+
+    def setting(fname, key):
+        try:
+            with open(os.path.join(d, fname)) as fh:
+                text = fh.read()
+        except OSError as exc:
+            raise ValueError("cannot read %s: %s" % (fname, exc))
+        m = re.search(r"^\s*%s\s*=\s*(\d+)" % re.escape(key), text, re.M)
+        if m is None:
+            raise ValueError("%s sets no %s" % (fname, key))
+        return int(m.group(1))
+    interval = setting("frpc.toml.tmpl", "transport.heartbeatInterval")
+    timeout = min(setting("frpc.toml.tmpl", "transport.heartbeatTimeout"), setting("frps.toml.tmpl", "transport.heartbeatTimeout"))
+    return interval, timeout
+
+
+def timeout_budget(summary, settings):
+    """(budget_s, text) with budget = interval + worst observed control delay + RTT + margin, or (None, text)
+    when the run's summary lacks a measurement. text compares it with the heartbeat timeout."""
+    interval, timeout = settings
+    pings = (summary.get("stub") or {}).get("ping_interval_unfaulted_s") or {}
+    longest = num(pings.get("max"))
+    rtt_ms = num((((summary.get("latency_baseline") or {}).get("tunnel") or {}).get("kept_alive_request_ms") or {}).get("max"))
+    missing = []
+    if longest is None:
+        missing.append("no Ping-to-Ping interval before the first mark in the summary")
+    if rtt_ms is None:
+        missing.append("no kept-alive RTT through the tunnel in the summary")
+    if missing:
+        return None, "timeout budget unknown: %s" % "; ".join(missing)
+    delay, rtt = max(0.0, longest - interval), rtt_ms / 1000.0
+    budget = interval + delay + rtt + HEARTBEAT_MARGIN_S
+    return budget, ("timeout budget: heartbeat interval %d s + worst observed control delay %.1f s (longest Ping-to-Ping "
+                    "%.1f s before the first mark) + RTT %.2f s (longest kept-alive /health through the tunnel) + margin "
+                    "%.0f s = %.1f s, %s S1's %d s heartbeat timeout") % (
+        interval, delay, longest, rtt, HEARTBEAT_MARGIN_S, budget, "within" if budget <= timeout else "OVER", timeout)
+
+
+def c6_path_rate(probe_lines, summary=None, settings=None):
     tun_up = [p for p in rate_lines(probe_lines) if p.get("forward") == "tun" and p.get("direction") == "up"]
     if not tun_up:
         return False, "no path_rate line for the tunnel forward, direction up: the path rate is unknown"
@@ -234,14 +285,13 @@ def c6_path_rate(probe_lines):
         problems.append("no bytes or no rate recorded")
     if problems:
         return False, "tunnel up: " + "; ".join(problems)
-    bound = heartbeat_bound_s(bps)
-    return True, ("tunnel up %.0f B/s (%d bytes in %.1f s, timed at the VM); heartbeat timeout must exceed 6 MiB / rate = %.1f s; "
-                  "S1's %d s %s it") % (bps, nbytes, dur, bound, S1_HEARTBEAT_TIMEOUT_S,
-                                        "exceeds" if S1_HEARTBEAT_TIMEOUT_S > bound else "does NOT exceed")
+    _, budget_text = timeout_budget(summary or {}, settings or kit_heartbeat_settings())
+    return True, ("tunnel up %.0f B/s (%d bytes in %.1f s, timed at the VM); observed head-of-line scale 6 MiB / rate = %.1f s; "
+                  "%s") % (bps, nbytes, dur, hol_scale_s(bps), budget_text)
 
 
-def flag_lines(probe_lines):
-    """Risks that do not change OVERALL but must be read."""
+def flag_lines(probe_lines, summary=None, settings=None):
+    """Risks that do not change OVERALL but must be read. The budget flags need the summary."""
     out = []
     for m in rate_lines(probe_lines):
         bps, label = num(m.get("bps")), "%s %s" % (m.get("forward"), m.get("direction"))
@@ -250,11 +300,12 @@ def flag_lines(probe_lines):
                 label, m.get("max_bps"), "%.0f" % bps if bps is not None else "no"))
         if m.get("ok") is True and bps is not None and bps < RISK_BPS:
             out.append("%s: %.0f B/s is under 6 MiB / 10 s = %.0f B/s: a full yamux window takes %.1f s to drain, longer than "
-                       "yamux's fixed 10 s ping timeout, so a large reply can drop the session" % (label, bps, RISK_BPS, heartbeat_bound_s(bps)))
-        if m.get("forward") == "tun" and m.get("direction") == "up" and m.get("ok") is True and bps:
-            if heartbeat_bound_s(bps) >= S1_HEARTBEAT_TIMEOUT_S:
-                out.append("tun up: the bound %.1f s is not below S1's heartbeat timeout of %d s: on this path the heartbeat can "
-                           "time out behind one large reply" % (heartbeat_bound_s(bps), S1_HEARTBEAT_TIMEOUT_S))
+                       "yamux's fixed 10 s ping timeout, so a large reply can drop the session" % (label, bps, RISK_BPS, hol_scale_s(bps)))
+    if summary is not None:
+        settings = settings or kit_heartbeat_settings()
+        budget, text = timeout_budget(summary, settings)
+        if budget is None or budget > settings[1]:
+            out.append(text)
     return out
 
 
@@ -273,7 +324,7 @@ def info_lines(summary, ssh_counters, probe_lines=()):
             m.get("forward"), m.get("direction"), m.get("via"), "ok" if m.get("ok") else "FAILED",
             "%.0f" % bps if bps is not None else None, m.get("bytes"), "%.1f" % dur if dur is not None else None,
             m.get("timed_by"), m.get("max_bps"),
-            ", heartbeat bound %.1f s" % heartbeat_bound_s(bps) if bps else ""))
+            ", head-of-line scale %.1f s" % hol_scale_s(bps) if bps else ""))
     gaps = (summary.get("gaps") or {}).get("stats_unfaulted_s") or {}
     out.append("token gaps outside fault windows: max %s s, p99 %s s" % (gaps.get("max"), gaps.get("p99")))
     for r in summary.get("per_stream") or []:
@@ -289,7 +340,7 @@ def evaluate(summary, job_log, probe_lines, ssh_counters):
     for cid, func in (("C1", lambda: c1_registered(summary, job_log)), ("C2", lambda: c2_stream(summary)),
                       ("C3", lambda: c3_no_cuts(summary)), ("C4a", lambda: c4a_freeze(summary)),
                       ("C4b", lambda: c4b_engine(summary)), ("C4c", lambda: c4c_frpc(summary)),
-                      ("C5", lambda: c5_transport(probe_lines, job_log)), ("C6", lambda: c6_path_rate(probe_lines))):
+                      ("C5", lambda: c5_transport(probe_lines, job_log)), ("C6", lambda: c6_path_rate(probe_lines, summary))):
         try:
             ok, text = func()
         except (KeyError, TypeError, ValueError) as exc:
@@ -341,7 +392,7 @@ def main(argv):
         print("%s %-3s %s" % ("PASS" if ok else "FAIL", cid, text))
     for line in info_lines(summary, counters, probe_lines):
         print("INFO     %s" % line)
-    for line in flag_lines(probe_lines):
+    for line in flag_lines(probe_lines, summary):
         print("FLAG     %s" % line)
     overall = all(ok for _, ok, _ in results)
     print("OVERALL: %s" % ("PASS" if overall else "FAIL"))
