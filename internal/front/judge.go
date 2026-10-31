@@ -79,7 +79,11 @@ func (j *judge) event(raw []byte) (forward, done bool) {
 			FinishReason *string `json:"finish_reason"`
 			Text         string  `json:"text"`
 			Delta        struct {
-				Content          *string         `json:"content"`
+				Content *string `json:"content"`
+				// vLLM v0.32.0 sends delta.reasoning; older engines send
+				// reasoning_content. Both are read (@hpc-burst-science-agent,
+				// 31 Oct 2026).
+				Reasoning        *string         `json:"reasoning"`
 				ReasoningContent *string         `json:"reasoning_content"`
 				ToolCalls        json.RawMessage `json:"tool_calls"`
 			} `json:"delta"`
@@ -94,7 +98,8 @@ func (j *judge) event(raw []byte) (forward, done bool) {
 			j.sawFinish, j.finish = true, *c.FinishReason
 		}
 		d := c.Delta
-		if c.Text != "" || (d.Content != nil && *d.Content != "") || (d.ReasoningContent != nil && *d.ReasoningContent != "") ||
+		if c.Text != "" || (d.Content != nil && *d.Content != "") || (d.Reasoning != nil && *d.Reasoning != "") ||
+			(d.ReasoningContent != nil && *d.ReasoningContent != "") ||
 			(len(d.ToolCalls) > 0 && string(d.ToolCalls) != "null") {
 			j.sawContent = true
 		}

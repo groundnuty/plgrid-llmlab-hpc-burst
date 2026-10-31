@@ -102,6 +102,10 @@ func isDialError(err error) bool {
 // time (L-2.5). It sets no response-header or total time-out: the front's
 // deadlines apply per request. Compression is off, so bodies pass unchanged.
 func upstreamTransport(dial func(ctx context.Context, network, addr string) (net.Conn, error), cfg Config, proxy bool) *http.Transport {
+	// connectTimeout bounds every dial here, the Instances' too. HBEP-5 gives
+	// it to LLMLab only and bounds the tunnel set-up toward an Instance by
+	// tunnelSetupTimeout (5 s); that belongs to the tunnel transport of
+	// #90, which replaces StaticTransports' plain dial.
 	connect := cfg.ConnectTimeout.D()
 	t := &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
