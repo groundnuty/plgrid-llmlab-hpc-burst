@@ -5,6 +5,7 @@
 #   tidy         go mod tidy -diff, in a job of its own that restores no module cache
 #   crd          hack/check.sh: generated-CRD drift, envtest with the pinned binaries, sha256 checks
 #   launcher-k3s hack/test-launcher.sh against the pinned k3s binaries, run as an ordinary user
+#   licence-modules, licences  the licence check of HBEP-15 (not required checks yet; see docs/development.md)
 #
 # The workflow reads no secret and pushes nothing. Every action is pinned by commit SHA.
 #
@@ -321,6 +322,91 @@ jobs:
             grep -E '^summary: ' "$log" || echo "no summary line: the run did not finish"
             echo "excluded by -skip, not run: ${#excluded[@]}${excluded[*]:+ (${excluded[*]})}"
             grep -E '^\s*--- SKIP' "$log" | sed 's/^ *//' | head -50 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+  # The licence check of HBEP-15 (spike S12): two jobs that are NOT required checks yet. Their
+  # names are new, and a matrix job's name carries its module, so it changes when a module is
+  # added. They become required only after they have been green on main (HBEP-15's protocol).
+  # Everything they run is in hack/ (licence-modules.sh, licence-check.sh, licence_gate.py, the
+  # allowlist and the known-zero list), never in spikes/. The check is strict: no exemption.
+  licence-modules:
+    name: licence-modules
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.find.outputs.matrix }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Python standard library only. They need no Go: the check script is run against a fake
+      # go-licenses, the real one runs in the licences job.
+      - name: Test the licence scripts
+        run: python3 -I -m unittest discover -s hack -p 'test_licence*.py' -v
+
+      # Every go.mod outside the top-level spikes/, found by a search of the whole tree, so a
+      # module added anywhere is checked without anyone editing this file. The script fails when
+      # it finds none.
+      - name: Find every go.mod outside spikes/
+        id: find
+        run: |
+          # An assignment, so that a failing search fails the step (a failing command inside echo would not).
+          matrix=$(hack/licence-modules.sh --json .)
+          echo "modules: $matrix"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  licences:
+    name: licences (${{ matrix.module }})
+    needs: licence-modules
+    runs-on: ubuntu-24.04
+    # With no cache restored, the root module runs go-licenses four times over the Kubernetes
+    # libraries (plain, with tests, and the negative control).
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      # Every module reports, even when another one failed.
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.licence-modules.outputs.matrix) }}
+    env:
+      GO_LICENSES_VERSION: v2.0.1
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Each module runs with the Go version its own go.mod names: third_party/forked/kubeai says
+      # a newer one than the root. GOTOOLCHAIN: local (above) stays, so a mismatch fails loudly.
+      - name: Set up the Go version this module names
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache: false
+
+      - name: Install go-licenses
+        run: go install "github.com/google/go-licenses/v2@${GO_LICENSES_VERSION}"
+
+      # Strict: every module's own packages need a LICENSE (the root's, or the copy's own), and at
+      # least one package must be checked, except a known zero (hack/known-zero-modules.txt, with
+      # its reason). The negative control applies to the root module's entry.
+      - name: Licence check
+        env:
+          MODULE: ${{ matrix.module }}
+        run: |
+          log="$RUNNER_TEMP/licence-check.log"
+          rc=0
+          hack/licence-check.sh --negative-control "$(go env GOPATH)/bin/go-licenses" . "$RUNNER_TEMP/licences" "$MODULE" 2>&1 | tee "$log" || rc=$?
+          {
+            echo "### licences ($MODULE)"
+            echo '```'
+            grep -E '^(##### module|report rows|known zero|NOTE|UNEXPECTED|negative control|NEGATIVE CONTROL|gate:|licence check)' "$log" | head -100
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"

@@ -131,6 +131,16 @@ Kubernetes' explicit ±1-minor skew rule is written for kubectl. client-go inste
 - The flag-name tests read the known flag names from HBEP-3's v1 table, so the admission rules' lists of known names are checked against the specification. A flag added to the table fails `TestEngineFlagsRefuseEveryPrefixOfAKnownFlag` until the list in the `EngineFlag` markers (`api/v1alpha1/modeldeployment_types.go`) gains it.
 - The test host (`internal/testenv`) binds only loopback ports 29200 to 29219 and, in k3s mode, accepts only a kubeconfig whose server is loopback on 29200 to 29239. The control-plane binaries are always sha256-checked; `HPCBURST_TESTENV_UNPINNED=1` is the explicit override for a binary you built yourself.
 
+### The licence check
+
+HBEP-15's licence check runs in two CI jobs, **not yet required checks**: they become required only after they have been green on main (HBEP-15's protocol), and a matrix job's name, `licences (<module>)`, changes when a module is added.
+
+- **`licence-modules`** runs the tests of the licence scripts (`hack/test_licence*.py`, Python standard library only, no Go; run them with `python3 -I -m unittest discover -s hack -p 'test_licence*.py' -v`), then `hack/licence-modules.sh --json .`. That lists every `go.mod` outside the top-level `spikes/`, found by a search of the whole tree, so a module added anywhere is checked without editing the workflow. Spikes are outside the check (HBEP-15).
+- **`licences (<module>)`** runs `hack/licence-check.sh` once per module, with the Go version that module's `go.mod` names (`third_party/forked/kubeai` names a newer one than the root) and go-licenses v2.0.1, against `hack/allowed-licenses.txt`, HBEP-15's list (a test compares the two). There is no exemption: a module's own packages need a `LICENSE`, the root's for the root module and the copy's own under `third_party/forked/`. The root module is also checked with `--include_tests`, and with a negative control that takes BSD-3-Clause off the list and must fail. A failing module does not stop the others.
+- **No empty run.** go-licenses exits 0 over a module with no buildable package having checked nothing, so a run that saw no package fails unless `hack/known-zero-modules.txt` lists the module with a reason. Today that is `third_party/forked/kcp`: its one Go file is behind the `s3embedded` build tag, and the copied-code check covers it. Add a line `<module dir>: <reason>` only when an empty run is expected, never to make a run pass.
+
+To run it on your machine, install `github.com/google/go-licenses/v2@v2.0.1` and call `hack/licence-check.sh --negative-control <go-licenses> . <output dir> [module dir ...]`. With no module dir it finds the modules itself. Use a Go toolchain at least as new as the newest `go.mod` it checks, or `third_party/forked/kubeai` fails.
+
 ## Running the e2e suite on the launcher's k3s
 
 `hack/check.sh` runs the e2e suite on the assembled host of `internal/testenv`. The same suite also runs on the user-level k3s that `hpcburst up` starts, which is the host HBEP-11 specifies; `TestRunsOnK3s` then passes instead of skipping. Run it before merging a change to the CRDs:
