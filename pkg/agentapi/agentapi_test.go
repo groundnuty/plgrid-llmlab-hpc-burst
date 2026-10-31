@@ -288,3 +288,71 @@ func TestImageFormatAndIdentityOnTheWire(t *testing.T) {
 		t.Errorf("header %q is not the canonical Hpcburst-Agent-Instance-Id", HeaderAgentInstanceID)
 	}
 }
+
+// Every tag v1alpha1.JobTag produces must pass agent.json validation (HBEP-3
+// fixes the tag's formula, so the validation follows it). The Allocation's name
+// is cut to 40 characters, which can end in "-" or ".".
+func TestJobTagsValidate(t *testing.T) {
+	a := func(n int) string { return strings.Repeat("a", n) }
+	// A 253-character DNS subdomain with dots and hyphens throughout.
+	long := strings.Repeat("ab-cd.ef", 32)[:253]
+	for _, c := range []struct {
+		name     string
+		alloc    string
+		cutEndIn string // how the name's first 40 characters end, to prove the case is what it claims
+	}{
+		{"a 39-character provider name and its 5 random characters: the cut ends at the hyphen", a(39) + "-x7k2p", "-"},
+		{"a name whose 40th character is a dot", a(39) + ".x7k2p", "."},
+		{"a name whose 40th character is a hyphen, as a long deployment name", "example-model-deployment-for-long-conte-x1", "-"},
+		{"a 40-character name", a(40), "a"},
+		{"a 1-character name", "a", "a"},
+		{"a 253-character name", long, ""},
+		{"a 38-character provider name and its suffix: the cut ends after one random character", a(38) + "-x7k2p", "x"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tag := v1alpha1.JobTag("default", c.alloc, "11111111-2222-3333-4444-555555555555")
+			cfg := validConfig()
+			cfg.Tag = tag
+			if err := cfg.Validate(); err != nil {
+				t.Errorf("tag %q (%d characters) was refused: %v", tag, len(tag), err)
+			}
+			if _, err := cfg.Encode(); err != nil {
+				t.Errorf("agent.json for tag %q was not encoded: %v", tag, err)
+			}
+			if len(tag) > 56 {
+				t.Errorf("tag %q is %d characters, JobTagLength is 56", tag, len(tag))
+			}
+			// The cut name, between "hb-" and "-<12 hex>", ends as the case says.
+			cut := tag[len("hb-") : len(tag)-len("-")-12]
+			if c.cutEndIn != "" && !strings.HasSuffix(cut, c.cutEndIn) {
+				t.Errorf("the cut name %q does not end in %q: the case does not test what it says", cut, c.cutEndIn)
+			}
+		})
+	}
+}
+
+func TestJobTagFormRefuses(t *testing.T) {
+	h := "1bda24d00504"
+	for name, tag := range map[string]string{
+		"uppercase":                "hb-Helios-" + h,
+		"no hash":                  "hb-helios-a",
+		"an 11-hex hash":           "hb-helios-a-" + h[:11],
+		"a 13-hex hash":            "hb-helios-a-" + h + "0",
+		"an uppercase hash":        "hb-helios-a-1BDA24D00504",
+		"a non-hex hash":           "hb-helios-a-1bda24d0050g",
+		"a 57-character tag":       "hb-" + strings.Repeat("a", 41) + "-" + h,
+		"a name starting with -":   "hb--helios-" + h,
+		"a name starting with .":   "hb-.helios-" + h,
+		"no hb prefix":             "xx-helios-" + h,
+		"an empty name":            "hb--" + h,
+		"a character outside a-z.": "hb-hel_ios-" + h,
+		"a slash":                  "hb-hel/ios-" + h,
+		"a trailing newline":       "hb-helios-" + h + "\n",
+	} {
+		cfg := validConfig()
+		cfg.Tag = tag
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("%s: tag %q was accepted", name, tag)
+		}
+	}
+}
