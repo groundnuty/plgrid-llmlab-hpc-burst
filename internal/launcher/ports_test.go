@@ -15,7 +15,7 @@ func TestPortsFromBase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := Ports{API: 29220, HTTPS: 29221, KCM: 29222, Agent: 29223, FrontHealth: 29224, LB: 29225, Controller: 29226}
+	want := Ports{API: 29220, HTTPS: 29221, KCM: 29222, Agent: 29223, FrontHealth: 29224, LB: 29225, Controller: 29226, DialHome: 29227}
 	if p != want {
 		t.Fatalf("got %+v, want %+v", p, want)
 	}
@@ -28,10 +28,11 @@ func TestPortsFromBase(t *testing.T) {
 	if got := p.Expected(); len(got) != 3 || got[0] != 29220 || got[1] != 29221 || got[2] != 29222 {
 		t.Errorf("expected ports %v", got)
 	}
-	// The launcher's block is base..base+6: the agent endpoint (base+3), the front's health port
-	// (base+4, issue #64) and the controller's health port (base+6) join the four that must be
-	// free before a start. base+7 is not reserved.
-	if got := p.All(); fmt.Sprint(got) != "[29220 29221 29222 29223 29224 29225 29226]" {
+	// The launcher's block is base..base+7: the agent endpoint (base+3), the front's health port
+	// (base+4, issue #64), the controller's health port (base+6) and the front's ssh-mode
+	// dial-home port (base+7, where the restricted keys forward) join the four that must be free
+	// before a start. base+8 is not reserved.
+	if got := p.All(); fmt.Sprint(got) != "[29220 29221 29222 29223 29224 29225 29226 29227]" {
 		t.Errorf("all ports %v", got)
 	}
 	if got := p.ControllerAddr(); got != "127.0.0.1:29226" {
@@ -40,14 +41,14 @@ func TestPortsFromBase(t *testing.T) {
 	if got := p.FrontHealthAddr(); got != "127.0.0.1:29224" {
 		t.Errorf("front health address %q", got)
 	}
-	for _, bad := range []int{0, 80, 1023, 65530, 65531, 70000, -1} {
+	for _, bad := range []int{0, 80, 1023, 65529, 65530, 65531, 70000, -1} {
 		if _, err := PortsFromBase(bad); err == nil {
 			t.Errorf("port base %d accepted", bad)
 		}
 	}
-	// The block ends at base+6, so the last base that fits is 65529.
-	if p, err := PortsFromBase(65529); err != nil || p.Controller != 65535 || p.Agent != 65532 {
-		t.Errorf("port base 65529: %+v, %v", p, err)
+	// The block ends at base+7, so the last base that fits is 65528.
+	if p, err := PortsFromBase(65528); err != nil || p.DialHome != 65535 || p.Controller != 65534 || p.Agent != 65531 {
+		t.Errorf("port base 65528: %+v, %v", p, err)
 	}
 }
 

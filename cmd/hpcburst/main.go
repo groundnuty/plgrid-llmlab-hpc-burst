@@ -130,7 +130,7 @@ func cmdUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&sd, "state-dir", "", stateDirUsage)
 	fs.StringVar(&bd, "bin-dir", "", binDirUsage)
 	fs.StringVar(&o.Version, "version", "", "k3s release to start (must be pinned): default the release that last wrote the store, or "+launcher.DefaultVersion+" for a new one; another release than the store's is refused (use upgrade or restore)")
-	fs.IntVar(&o.PortBase, "port-base", launcher.DefaultPortBase, "first of a block of seven loopback ports: base (apiserver), +1 (https), +2 (controller manager), +3 (the agent endpoint, reserved for the controller's server), +5 (reserved, never bound), +4 (the front's /healthz), +6 (the lifecycle controller's /healthz)")
+	fs.IntVar(&o.PortBase, "port-base", launcher.DefaultPortBase, "first of a block of eight loopback ports: base (apiserver), +1 (https), +2 (controller manager), +3 (the agent endpoint, reserved for the controller's server), +5 (reserved, never bound), +4 (the front's /healthz), +6 (the lifecycle controller's /healthz), +7 (the front's ssh-mode dial-home listener; the restricted VM keys forward to +3 and +7, so another base needs new keys)")
 	fs.StringVar(&o.Front.Mode, "front-mode", "", "how compute nodes reach the front: direct, or ssh (port 22, restricted key)")
 	fs.StringVar(&o.Front.Addr, "front-addr", "", "the front's address, host:port (ssh: host or host:22)")
 	fs.StringVar(&o.Front.KeyPath, "front-key", "", "ssh mode: path of the restricted key (recorded, never read)")

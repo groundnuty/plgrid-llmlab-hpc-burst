@@ -42,6 +42,7 @@ func TestMain(m *testing.M) {
 	rootK3sStart = rootK3sPorts()
 	code := m.Run()
 	removeFakeController()
+	removeFrontBinary()
 	os.Exit(code)
 }
 
