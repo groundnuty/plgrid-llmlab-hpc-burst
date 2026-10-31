@@ -7,9 +7,10 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE"
 S1_TEST_RESULTS="$(mktemp "${TMPDIR:-/tmp}/s1-results.XXXXXX")"; export S1_TEST_RESULTS
+S1_PORT_STATE="$(mktemp "${TMPDIR:-/tmp}/s1-ports.XXXXXX")"; export S1_PORT_STATE   # loopback ports 29400-29499, round-robin
 
 # the Python tests, one result line per test
-python3 -W ignore -m unittest -v test_stream_watch test_verdict test_engine_and_responder 2>&1 \
+python3 -W ignore -m unittest -v test_stream_watch test_verdict test_engine_and_responder test_path_rate 2>&1 \
   | python3 -c '
 import re, sys
 res = open(sys.argv[1], "a")
@@ -36,5 +37,5 @@ echo "=== results ($(wc -l < "$S1_TEST_RESULTS") tests, kit: ${S1_KIT_DIR:-$(cd 
 sort -k2 "$S1_TEST_RESULTS" | awk -F'\t' '{ printf "%-5s %s\n", $1, $2 }'
 fails="$(grep -c '^FAIL' "$S1_TEST_RESULTS")"
 echo "--- $(grep -c '^PASS' "$S1_TEST_RESULTS") passed, $fails failed"
-rm -f "$S1_TEST_RESULTS"
+rm -f "$S1_TEST_RESULTS" "$S1_PORT_STATE"
 [ "$fails" -eq 0 ]

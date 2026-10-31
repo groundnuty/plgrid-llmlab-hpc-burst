@@ -561,5 +561,22 @@ class ThreeStreamsLive(unittest.TestCase):
             os.rmdir(tmp)
 
 
+
+class StubUserIsTheFrpUser(unittest.TestCase):
+    """The tcpmux domain is the Instance UID, but plugin calls (Login, Ping) carry only the frp user. Matching the
+    stub log on the domain would find nothing and every stub-based check would read as absent, so --stub-log
+    without --stub-user is refused."""
+
+    def test_stub_log_without_stub_user_is_refused(self):
+        with self.assertRaises(SystemExit):
+            sw.parse_args(["--tcpmux", "127.0.0.1:29400", "--domain", "5e1f0000-0000-4000-8000-000000000001",
+                           "--stub-log", "/nonexistent/stub.jsonl"])
+
+    def test_stub_user_is_kept_apart_from_the_domain(self):
+        a = sw.parse_args(["--tcpmux", "127.0.0.1:29400", "--domain", "5e1f0000-0000-4000-8000-000000000001",
+                           "--stub-log", "/nonexistent/stub.jsonl", "--stub-user", "s1-helios-cpu"])
+        self.assertEqual((a.domain, a.stub_user), ("5e1f0000-0000-4000-8000-000000000001", "s1-helios-cpu"))
+
+
 if __name__ == "__main__":
     unittest.main()

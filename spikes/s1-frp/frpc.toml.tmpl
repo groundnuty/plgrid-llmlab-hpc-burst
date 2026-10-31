@@ -1,10 +1,13 @@
 # frpc.toml.tmpl -- spike S1, instance side (runs inside the Slurm job). Rendered by
 # render_tmpl.py. frp v0.71.1.
 
+# The dial-home listener: in ssh mode the node-local end of the tunnel forward (127.0.0.1:LPORT_TUN),
+# in direct mode the VM's DIALHOME_PORT. Either way the far end is the TLS terminator (Envoy) in front
+# of frps, which passes "GET /~!frp" websocket upgrades to frps on the VM's loopback.
 serverAddr = "__SERVER_ADDR__"
 serverPort = __SERVER_PORT__
 
-# The instance name. It becomes the plugin's "user" and the tcpmux domain below.
+# The instance name. It becomes the plugin's "user". The tcpmux route is the Instance UID (below).
 user = "__INSTANCE__"
 
 # TRAP: loginFailExit defaults to true, so a failed first login (frps not up yet, a slow
@@ -19,10 +22,13 @@ auth.method = "token"
 auth.tokenSource.type = "file"
 auth.tokenSource.file.path = "__TOKEN_FILE__"
 
-# tcp: the plain protocol (frp's default TLS inside it stays on). wss: websocket over TLS; frps
-# does not terminate TLS itself, so wss needs a TLS-terminating reverse proxy in front of
-# frps' bindPort. (quic and kcp are UDP: not used, compute nodes rarely get UDP out.)
-transport.protocol = "__PROTOCOL__"
+# wss: websocket over TLS to the dial-home listener (HBEP-6). frps does not terminate TLS itself
+# (spike S1c), so Envoy does, with a launcher-style certificate from a self-signed CA. frpc VERIFIES
+# it: the CA file and the server name are set, so a wrong CA or a wrong name never logs in.
+transport.protocol = "wss"
+transport.tls.enable = true
+transport.tls.trustedCaFile = "__CA_FILE__"
+transport.tls.serverName = "__TLS_SERVER_NAME__"
 transport.dialServerTimeout = 10
 
 # One outbound TCP connection per instance: tcpMux (the default) carries the control channel
@@ -39,13 +45,14 @@ transport.heartbeatInterval = 10         # application Ping every 10 s
 transport.heartbeatTimeout = 25          # frpc gives up on frps after 25 s without a Pong, then reconnects
 transport.dialServerKeepalive = 30       # TCP keepalive, replaces the 7200 s default
 
-# One proxy: the instance's engine, reached through frps' tcpmux port by instance name.
+# One proxy: the instance's engine, reached through frps' tcpmux port by the Instance UID
+# (the front sends "CONNECT <uid>:80").
 # We do NOT add frp's healthCheck: it would unregister the proxy when the engine dies, which
 # hides "path up, engine down" (HBEP-6). The engine probe is done from the front.
 [[proxies]]
 name = "engine"
 type = "tcpmux"
 multiplexer = "httpconnect"
-customDomains = ["__INSTANCE__"]
+customDomains = ["__INSTANCE_UID__"]
 localIP = "127.0.0.1"
 localPort = __LOCAL_PORT__

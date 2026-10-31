@@ -20,10 +20,13 @@ KIT = os.path.dirname(HERE)
 J = "job.sbatch.tmpl"
 # (id, review item, file, old, new, runner, test)
 M = [
-    ("M01", "B1", J, 'if [ "$FAR_STATE" = token ]; then FORWARD_STATE=true', 'if [ "$FAR_STATE" != unknown ]; then FORWARD_STATE=true',
-     "job", "b1_probe_fails_when_nothing_listens_on_the_far_port"),
-    ("M02", "B1", J, 'if [ "$FAR_STATE" = token ]; then FORWARD_STATE=true', 'if [ "$FAR_STATE" != unknown ]; then FORWARD_STATE=true',
-     "job", "b1_probe_fails_when_the_far_end_is_silent"),
+    # an ssh forward that merely listens (or a TLS exchange that failed) counted as a working path
+    ("M01", "B1", J, '    [ "$FAR_STATE" = token ] && PATH_STATE=true\n    detail="$(far_meaning "$FAR_STATE")"\n    [ "$PATH_STATE" = true ] || detail="NOT PASSED, $detail: $FAR_DETAIL; ssh said',
+     '    PATH_STATE=true\n    detail="$(far_meaning "$FAR_STATE")"\n    [ "$PATH_STATE" = true ] || detail="NOT PASSED, $detail: $FAR_DETAIL; ssh said',
+     "job", "b1_probe_fails_when_nothing_listens_behind_the_tunnel_forward"),
+    ("M02", "B1", J, '    [ "$FAR_STATE" = token ] && PATH_STATE=true\n    detail="$(far_meaning "$FAR_STATE")"\n    [ "$PATH_STATE" = true ] || detail="NOT PASSED, $detail: $FAR_DETAIL; ssh said',
+     '    PATH_STATE=true\n    detail="$(far_meaning "$FAR_STATE")"\n    [ "$PATH_STATE" = true ] || detail="NOT PASSED, $detail: $FAR_DETAIL; ssh said',
+     "job", "b1_probe_fails_when_the_certificate_does_not_verify"),
     ("M03", "B1", J, '    emit frpc_login \',"ok":false,"detail":"no login to server success from frpc in time"\'\n    EXIT_CODE=3; exit 3',
      '    emit frpc_login \',"ok":false,"detail":"no login to server success from frpc in time"\'\n    EXIT_CODE=3',
      "job", "b1_full_run_without_a_login_exits_3_and_cleans_up"),
@@ -69,7 +72,9 @@ M = [
      "py", "test_verdict.Criteria.test_c4c_frpc_kill_budget_is_5_s_for_closeproxy_and_10_s_for_the_probe"),
     ("M27", "B8", "README.md", 'permitlisten="127.0.0.1:1",', '', "key", "b8_remote_forward_is_refused"),
     ("M28", "B8", "README.md", 'permitlisten="127.0.0.1:1",', '', "key", "b8_the_readme_key_line_carries_the_restrictions"),
-    ("M29", "B1", "probe_responder.py", 'TOKEN = b"S1-PROBE-TOKEN-OK\\n"', 'TOKEN = b"S1-PROBE-TOKEN-NO\\n"', "job", "b1_responder_and_job_share_the_token"),
+    ("M29", "tls", "path_rate.py", "    context = ssl.create_default_context(cafile=args.ca)    # hostname check and verification stay ON\n",
+     "    context = ssl.create_default_context(cafile=args.ca)    # hostname check and verification stay ON\n    context.check_hostname = False\n    context.verify_mode = ssl.CERT_NONE\n",
+     "py", "test_path_rate.TlsTests.test_probe_fails_with_a_different_ca"),
     ("M30", "nit", "fake_streamer.py", "                    fh.write(\"%.3f GET %s\\n\" % (time.time(), self.path.split(\"?\")[0]))", "                    pass", "py",
      "test_engine_and_responder.Engine.test_every_request_is_appended_to_the_request_log"),
     ("M31", "streams", "verdict.py", "    for lane in range(1, n + 1):\n        problems = lane_problems", "    for lane in range(1, 2):\n        problems = lane_problems",
@@ -86,6 +91,21 @@ M = [
      "job", "run_root_override_puts_the_job_directory_there"),
     ("M37", "streams", "stream_watch.py", "        for cur in list(self.current.values()):\n", "        for cur in list(self.current.values())[:1]:\n",
      "py", "test_stream_watch.SignalHandlerSurvives.test_sigterm_with_three_streams_interrupts_every_one_of_them"),
+    # --- the alpha wiring (two forwards, verified wss, the path rate) ---
+    ("M38", "rate", "verdict.py", "RISK_BPS = YAMUX_WINDOW_B / float(YAMUX_PING_TIMEOUT_S)", "RISK_BPS = 100000.0",
+     "py", "test_verdict.PathRate.test_a_rate_under_629146_is_flagged_and_one_above_is_not"),
+    ("M39", "rate", "verdict.py", "MIN_RATE_REQUESTED_S = 30\n", "MIN_RATE_REQUESTED_S = 3\n",
+     "py", "test_verdict.PathRate.test_a_short_or_failed_or_sender_timed_measurement_fails"),
+    ("M40", "rate", J, '  [ "$PATHRATE_MAX_BPS" -gt 0 ] && cap=(--max-bps "$PATHRATE_MAX_BPS")\n', '',
+     "job", "path_rate_is_measured_through_each_forward_and_timed_at_the_receiver"),
+    ("M41", "wiring", J, "  start_forward_loop ctl\n  start_forward_loop tun\n", "  start_forward_loop ctl\n",
+     "job", "two_forwards_are_two_separate_ssh_connections"),
+    ("M42", "tls", "frpc.toml.tmpl", 'transport.tls.trustedCaFile = "__CA_FILE__"\n', '',
+     "job", "frpc_speaks_verified_wss_to_the_tunnel_with_the_uid_domain"),
+    ("M43", "keys", "README.md", 'permitopen="127.0.0.1:29223",permitopen="127.0.0.1:29227",', 'permitopen="127.0.0.1:29223",',
+     "key", "b8_forward_to_each_permitted_port_works"),
+    ("M44", "wiring", J, '      echo "$id:$cls" > "$JOB_DIR/transport.failed"; log', '      log',
+     "job", "a_failure_of_the_control_forward_alone_exits_4"),
 ]
 
 

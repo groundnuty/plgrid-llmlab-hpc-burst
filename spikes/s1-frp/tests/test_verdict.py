@@ -33,7 +33,11 @@ GOOD = {
     "stub": {"ops": {"Login": 2, "NewProxy": 2, "CloseProxy": 2, "Ping": 400}, "logins": 2, "reconnects": 1},
 }
 JOB_LOG = "2026-10-30T11:00:03Z frpc: login to server success\n"
-PROBE = [{"probe": "summary", "transport_path_ok": None}, {"probe": "frpc_login", "ok": True}]
+# A tunnel-up path rate written by hand: 30 s asked, 30.2 s timed at the VM, 2,000,000 B/s.
+RATE_TUN_UP = {"probe": "path_rate", "via": "ssh", "forward": "tun", "direction": "up", "ok": True, "requested_s": 30,
+               "max_bps": None, "bytes": 60400000, "duration_s": 30.2, "bps": 2000000.0, "timed_by": "receiver-vm",
+               "sender_s": 30.4, "detail": ""}
+PROBE = [{"probe": "summary", "transport_path_ok": None}, {"probe": "frpc_login", "ok": True}, RATE_TUN_UP]
 
 
 def verdicts(summary, job_log=JOB_LOG, probe=PROBE):
@@ -56,7 +60,7 @@ def changed(**edits):
 
 class Criteria(unittest.TestCase):
     def test_the_good_run_passes_every_criterion(self):
-        self.assertEqual(verdicts(GOOD), dict((k, True) for k in ("C1", "C2", "C3", "C4a", "C4b", "C4c", "C5")))
+        self.assertEqual(verdicts(GOOD), dict((k, True) for k in ("C1", "C2", "C3", "C4a", "C4b", "C4c", "C5", "C6")))
 
     def test_c1_needs_the_login_line_and_the_stub_calls(self):
         self.assertFalse(verdicts(GOOD, job_log="nothing\n")["C1"])
@@ -220,13 +224,74 @@ class PerStreamC2(unittest.TestCase):
         self.assertIn("stream 2", line)
 
 
+def rate(**edits):
+    m = dict(RATE_TUN_UP)
+    m.update(edits)
+    return m
+
+
+def c6(probe):
+    return [(ok, t) for cid, ok, t in verdict.evaluate(GOOD, JOB_LOG, probe, None) if cid == "C6"][0]
+
+
+class PathRate(unittest.TestCase):
+    """C6 and the flags. The numbers come from the brief: the bound is 6 MiB / rate, and a rate under about
+    630 kB/s (6 MiB / yamux's fixed 10 s) is flagged; S1's heartbeat timeout is 25 s."""
+
+    def test_a_valid_tunnel_up_measurement_passes_and_reports_the_bound(self):
+        ok, text = c6([RATE_TUN_UP])
+        self.assertTrue(ok, text)
+        self.assertIn("3.1 s", text)                   # 6,291,456 / 2,000,000 = 3.15 s, by hand
+        self.assertIn("exceeds it", text)
+
+    def test_no_tunnel_up_line_is_unknown_and_fails(self):
+        ok, text = c6([rate(forward="ctl"), rate(direction="down", timed_by="receiver-job")])
+        self.assertFalse(ok)
+        self.assertIn("unknown", text)
+
+    def test_a_short_or_failed_or_sender_timed_measurement_fails(self):
+        for bad in (rate(requested_s=10, duration_s=10.1), rate(duration_s=25.0), rate(ok=False, detail="refused"),
+                    rate(timed_by="receiver-job"), rate(bytes=0, bps=None)):
+            ok, text = c6([bad])
+            self.assertFalse(ok, (bad, text))
+
+    def flags(self, *lines):
+        return verdict.flag_lines(list(lines))
+
+    def test_a_rate_under_629146_is_flagged_and_one_above_is_not(self):
+        under = self.flags(rate(bps=629000.0))
+        self.assertTrue(any("under 6 MiB / 10 s" in f for f in under), under)
+        above = self.flags(rate(bps=630000.0))
+        self.assertFalse(any("under 6 MiB / 10 s" in f for f in above), above)
+
+    def test_a_slow_path_names_the_drain_time(self):
+        out = self.flags(rate(bps=500000.0))
+        self.assertTrue(any("12.6 s" in f for f in out), out)    # 6,291,456 / 500,000 = 12.58 s, by hand
+
+    def test_a_bound_at_or_over_25_s_is_flagged(self):
+        out = self.flags(rate(bps=200000.0))                      # 31.5 s, by hand
+        self.assertTrue(any("not below S1's heartbeat timeout of 25 s" in f for f in out), out)
+        out = self.flags(rate(bps=300000.0))                      # 21.0 s: under 25 s
+        self.assertFalse(any("heartbeat timeout of 25 s" in f for f in out), out)
+
+    def test_a_capped_measurement_is_flagged_as_not_the_link_rate(self):
+        out = self.flags(rate(max_bps=4000000, bps=3990000.0))
+        self.assertTrue(any("not the link rate" in f for f in out), out)
+
+    def test_every_measured_forward_and_direction_is_checked_for_the_risk(self):
+        out = self.flags(RATE_TUN_UP, rate(forward="ctl", bps=100000.0), rate(direction="down", bps=400000.0))
+        self.assertTrue(any(f.startswith("ctl up:") and "under" in f for f in out), out)
+        self.assertTrue(any(f.startswith("tun down:") and "under" in f for f in out), out)
+        self.assertFalse(any(f.startswith("tun up:") for f in out), out)
+
+
 class CommandLine(unittest.TestCase):
-    def run_main(self, summary, job_log):
+    def run_main(self, summary, job_log, probe=None):
         d = tempfile.mkdtemp(prefix="s1-vd-")
         try:
             paths = {}
             for name, text in (("summary.json", json.dumps(summary)), ("job.log", job_log),
-                               ("probe.jsonl", "\n".join(json.dumps(p) for p in PROBE) + "\n")):
+                               ("probe.jsonl", "\n".join(json.dumps(p) for p in (probe or PROBE)) + "\n")):
                 paths[name] = os.path.join(d, name)
                 with open(paths[name], "w") as fh:
                     fh.write(text)
@@ -253,6 +318,19 @@ class CommandLine(unittest.TestCase):
         self.assertIn("FAIL C4c", out)
         self.assertIn("PASS C4a", out)
         self.assertIn("OVERALL: FAIL", out)
+
+    def test_a_flag_is_printed_but_does_not_change_overall(self):
+        slow = [p for p in PROBE if p.get("probe") != "path_rate"] + [rate(bps=400000.0)]
+        rc, out = self.run_main(GOOD, JOB_LOG, slow)
+        self.assertIn("PASS C6", out)
+        self.assertIn("FLAG     tun up:", out)
+        self.assertIn("OVERALL: PASS", out)
+        self.assertEqual(rc, 0)
+
+    def test_a_missing_path_rate_fails_overall(self):
+        rc, out = self.run_main(GOOD, JOB_LOG, [p for p in PROBE if p.get("probe") != "path_rate"])
+        self.assertIn("FAIL C6", out)
+        self.assertEqual(rc, 1)
 
     def test_a_missing_input_fails_loudly(self):
         self.assertEqual(verdict.main(["--summary", "/nonexistent/s.json", "--job-log", "/nonexistent/j.log"]), 1)

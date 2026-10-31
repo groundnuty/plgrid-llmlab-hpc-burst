@@ -57,17 +57,24 @@ wait_for() {   # wait_for SECONDS COMMAND...: poll every 0.2 s until the command
 }
 file_has() { grep -q -- "$2" "$1" 2>/dev/null; }
 
-free_port() { python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'; }
+free_port() { tsshd_free_port; }     # a loopback port in 29400-29499 (throwaway-sshd.sh)
+if [ -z "${S1_PORT_STATE:-}" ]; then
+  S1_PORT_STATE="$(mktemp "${TMPDIR:-/tmp}/s1-ports.XXXXXX")"; export S1_PORT_STATE
+  trap 'rm -f "$S1_PORT_STATE"' EXIT
+fi
 
 host_platform() { case "$(uname -m)" in x86_64) echo helios-cpu ;; aarch64) echo helios-gh200 ;; *) echo unsupported ;; esac; }
 host_frp_arch() { case "$(uname -m)" in x86_64) echo amd64 ;; aarch64) echo arm64 ;; esac; }
 
+T_TLS_NAME=dial-home.hpcburst.invalid
+T_UID=5e1f0000-0000-4000-8000-000000000001
 # render_job OUT: renders $KIT/job.sbatch.tmpl from the T_* variables the test has set
 render_job() {
   python3 "$KIT/render_tmpl.py" "$KIT/job.sbatch.tmpl" PLATFORM="$(host_platform)" ACCOUNT=acct PARTITION=part \
-    TIME=00:30:00 MEM=1G VM_ADDR="${T_VM_ADDR:-127.0.0.1}" FRPS_PORT="${T_FRPS_PORT:-7000}" VM_USER="${T_VM_USER:-nobody}" \
-    SSH_KEY="${T_SSH_KEY:-/nonexistent}" SSH_KNOWN_HOSTS="${T_KNOWN_HOSTS:-/nonexistent}" LPORT="${T_LPORT:-1}" \
-    PROBE_TLS_PORTS=none TOKEN_FILE="${T_TOKEN:-/nonexistent}" PROTOCOL=tcp INSTANCE_PREFIX=s1t \
+    TIME=00:30:00 MEM=1G VM_ADDR="${T_VM_ADDR:-127.0.0.1}" AGENT_PORT="${T_AGENT_PORT:-29223}" DIALHOME_PORT="${T_DIALHOME_PORT:-29227}" \
+    VM_USER="${T_VM_USER:-nobody}" SSH_KEY="${T_SSH_KEY:-/nonexistent}" SSH_KNOWN_HOSTS="${T_KNOWN_HOSTS:-/nonexistent}" \
+    LPORT_CTL="${T_LPORT_CTL:-1}" LPORT_TUN="${T_LPORT_TUN:-2}" CA_FILE="${T_CA:-/nonexistent}" TLS_SERVER_NAME="$T_TLS_NAME" \
+    TOKEN_FILE="${T_TOKEN:-/nonexistent}" INSTANCE_PREFIX=s1t INSTANCE_UID="${T_UID_OVERRIDE:-$T_UID}" \
     KIT_DIR="${T_KIT:-$KIT}" PYTHON=python3 > "$1"
 }
 
@@ -76,7 +83,7 @@ make_fake_kit() {
   local dest="$1" f arch
   arch="$(host_frp_arch)"
   mkdir -p "$dest/dl/linux_$arch/frp_fake_linux_$arch"
-  for f in fake_streamer.py stream_watch.py render_tmpl.py frpc.toml.tmpl; do ln -s "$KIT/$f" "$dest/$f"; done
+  for f in fake_streamer.py stream_watch.py render_tmpl.py frpc.toml.tmpl path_rate.py; do ln -s "$KIT/$f" "$dest/$f"; done
   cat > "$dest/dl/linux_$arch/frp_fake_linux_$arch/frpc" <<'FRPC'
 #!/bin/bash
 # a stand-in for frpc: logs "login to server success" after FAKE_FRPC_DELAY seconds unless FAKE_FRPC_LOGIN=never

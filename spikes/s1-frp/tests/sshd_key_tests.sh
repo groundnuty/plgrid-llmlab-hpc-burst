@@ -2,8 +2,8 @@
 # sshd_key_tests.sh -- what the README's authorized_keys line really allows, on a throwaway sshd run as this user
 # (see throwaway-sshd.sh: own host key, own AuthorizedKeysFile, high loopback port, nothing under ~/.ssh).
 #   sshd_key_tests.sh [NAME...]
-# The key line is taken from the README itself, with its port 7000 swapped for a free test port, so a README
-# that drifts from what was tested is caught. The -R and streamlocal cases carry controls (the same attempt with
+# The key line is taken from the README itself, with its two ports (29223, the agent endpoint; 29227, the dial-home
+# listener) swapped for free test ports in 29400-29499, so a README that drifts from what was tested is caught. The -R and streamlocal cases carry controls (the same attempt with
 # no restriction succeeds), otherwise a refusal could be a broken test.
 set -u
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
@@ -30,16 +30,17 @@ except OSError:
     pass
 PY
 }
-key_env() {   # starts sshd (TSSHD_HARDEN as given), two token servers, a unix-socket server; authorises the README line (or $1)
+key_env() {   # starts sshd (TSSHD_HARDEN as given), three token servers, a unix-socket server; authorises the README line (or $1)
   tsshd_start || return 1
   sshopts
-  OK="$(free_port)"; OTHER="$(free_port)"; LP="$(free_port)"; RP="$(free_port)"
+  OK="$(free_port)"; OK2="$(free_port)"; OTHER="$(free_port)"; LP="$(free_port)"; RP="$(free_port)"
   SOCKDIR="$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/s1s.XXXXXX")"   # short path: unix socket paths are limited to ~108 bytes
   trap 'bg_cleanup; tsshd_stop; rm -rf "$SOCKDIR" "$W"' EXIT
   bg python3 "$KIT/probe_responder.py" --port "$OK" --max-seconds 120 2>/dev/null
+  bg python3 "$KIT/probe_responder.py" --port "$OK2" --max-seconds 120 2>/dev/null
   bg python3 "$KIT/probe_responder.py" --port "$OTHER" --max-seconds 120 2>/dev/null
   bg python3 "$TESTS_DIR/far_listener.py" unix "$SOCKDIR/sock"
-  local opts="${1-$(readme_key_options | sed "s/127\.0\.0\.1:7000/127.0.0.1:$OK/")}"
+  local opts="${1-$(readme_key_options | sed "s/127\.0\.0\.1:29223/127.0.0.1:$OK/; s/127\.0\.0\.1:29227/127.0.0.1:$OK2/")}"
   [ -n "$opts" ] || { echo "no key line found in the README"; return 1; }
   KEY_OPTS="$opts"
   tsshd_authorize "$opts"
@@ -58,13 +59,15 @@ via_L() {   # DEST: an ssh -N -L to DEST on the key; prints the token read throu
 test_b8_the_readme_key_line_carries_the_restrictions() {
   local o; o="$(readme_key_options)"
   expect "the line was found" test -n "$o" || return 1
-  for want in restrict port-forwarding 'permitopen="127.0.0.1:7000"' 'permitlisten="' 'command="/bin/false"'; do
+  for want in restrict port-forwarding 'permitopen="127.0.0.1:29223"' 'permitopen="127.0.0.1:29227"' 'permitlisten="127.0.0.1:1"' 'command="/bin/false"'; do
     case "$o" in *"$want"*) ;; *) echo "key line lacks $want: $o"; return 1 ;; esac
   done
+  expect "exactly two permitopen targets" test "$(printf '%s' "$o" | grep -o 'permitopen=' | wc -l)" = 2
 }
-test_b8_forward_to_the_permitted_port_works() {
+test_b8_forward_to_each_permitted_port_works() {   # the agent endpoint (control) and the dial-home listener (tunnel)
   key_env || return 1
-  expect "the token came through -L to the permitted port" test "$(via_L "127.0.0.1:$OK")" = S1-PROBE-TOKEN-OK
+  expect "the token came through -L to the first permitted port" test "$(via_L "127.0.0.1:$OK")" = S1-PROBE-TOKEN-OK || return 1
+  expect "the token came through -L to the second permitted port" test "$(via_L "127.0.0.1:$OK2")" = S1-PROBE-TOKEN-OK
 }
 test_b8_forward_to_another_port_is_refused() {
   key_env || return 1

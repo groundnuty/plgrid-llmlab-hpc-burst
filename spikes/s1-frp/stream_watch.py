@@ -24,7 +24,8 @@ Failure classes of one probe:
                    stub log mean the agent is alive and the engine is down.
   http_error       an HTTP status other than 200
 
-    stream_watch.py --tcpmux 127.0.0.1:PORT --domain NAME --duration 3900 [--streams 4] --out summary.json
+    stream_watch.py --tcpmux 127.0.0.1:PORT --domain UID --duration 3900 [--streams 4] \
+                    [--stub-log stub.jsonl --stub-user INSTANCE] --out summary.json
     kill -USR1 <pid>      # mark: run it right before you inject a fault
 """
 import argparse
@@ -553,7 +554,7 @@ def analyse(st, started_epoch, ended_epoch, args):
     per_stream = [lane_report(lane, st.streams, gaps, args.gap_threshold, near) for lane in range(1, args.streams + 1)]
     completed = [s for s in st.streams if s["completed"]]
     stub = read_stub_log(args.stub_log) if args.stub_log else None
-    domain_events = [e for e in (stub or []) if e.get("user") == args.domain]
+    domain_events = [e for e in (stub or []) if e.get("user") == args.stub_user]   # the instance's frp user, not its domain
 
     marks = []
     for i, m in enumerate(st.marks):
@@ -632,7 +633,7 @@ def analyse(st, started_epoch, ended_epoch, args):
 def parse_args(argv):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--tcpmux", help="frps tcpmux HOST:PORT (on the frps host this is the loopback port)")
-    ap.add_argument("--domain", help="instance name: the tcpmux custom domain")
+    ap.add_argument("--domain", help="the tcpmux custom domain: the Instance UID")
     ap.add_argument("--duration", type=int, default=3900, help="seconds to run, counted from the first good probe (default 3900)")
     ap.add_argument("--wait-up", type=int, default=0,
                     help="wait up to this many seconds for the first good /health probe before the run clock "
@@ -658,6 +659,8 @@ def parse_args(argv):
     ap.add_argument("--direct-samples", type=int, default=30)
     ap.add_argument("--direct-only", action="store_true", help="only measure --direct-url, then exit")
     ap.add_argument("--stub-log", help="plugin_stub.py's JSON-lines log, for CloseProxy/Ping/Login after marks")
+    ap.add_argument("--stub-user", help="the instance's frp user (frpc's user, INSTANCE_PREFIX): the stub log's calls are "
+                                        "matched on it, because Login and Ping carry no domain; required with --stub-log")
     ap.add_argument("--out", default="stream_watch_summary.json")
     args = ap.parse_args(argv)
     if args.streams < 1:
@@ -669,6 +672,8 @@ def parse_args(argv):
     else:
         if not args.tcpmux or not args.domain:
             ap.error("--tcpmux and --domain are required")
+        if args.stub_log and not args.stub_user:
+            ap.error("--stub-log needs --stub-user (the frp user; the domain is the Instance UID, which plugin calls do not carry)")
         host, _, port = args.tcpmux.rpartition(":")
         if not host or not port.isdigit():
             ap.error("--tcpmux wants HOST:PORT")

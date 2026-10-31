@@ -6,8 +6,8 @@ stream_watch.py exits 0 whenever it collected a summary, even if streams were cu
 unseen: collection succeeded, the experiment may not have. This script is the check. It prints one
 line per criterion and ends with OVERALL: PASS or OVERALL: FAIL (exit 0 or 1).
 
-    verdict.py --summary summary-run.json --job-log job.export.log \\
-               [--probe probe.jsonl] [--ssh-counters ssh-counters.json]
+    verdict.py --summary summary-run.json --job-log job.export.log --probe probe.jsonl \\
+               [--ssh-counters ssh-ctl-counters.json --ssh-counters ssh-tun-counters.json]
 
 The criteria are those of issue #18, as the README lists them; the numbers are the heartbeat
 budget fixed before any run:
@@ -24,7 +24,15 @@ budget fixed before any run:
       Pings continued
   C4c frpc killed (third mark): CloseProxy within 5 s, probe declared down within 10 s
   C5  the transport did not fail for good (no "RESULT: TRANSPORT FAILED" in the job log), and frpc's login
-      through it is recorded (probe frpc_login) or step 0 proved the path with an exchange
+      through it is recorded (probe frpc_login) or step 0 proved both paths with an exchange
+  C6  the path rate of the tunnel forward in the token direction (the probe line path_rate, forward tun,
+      direction up) was measured: ok, at least 30 s asked, at least 29 s timed at the VM's receiver, bytes > 0.
+      It reports the heartbeat bound: HBEP-6's heartbeat timeout must exceed 6 MiB / rate (frp's yamux stream
+      window is 6 MiB, spike S1c), and whether S1's 25 s exceeds it.
+
+FLAG lines do not change OVERALL; they mark risks a reader must not miss: a measured rate under 6 MiB / 10 s
+(629,146 B/s; yamux's ping has a fixed 10 s write timeout, so a full window takes longer to drain than that),
+a bound at or above S1's 25 s heartbeat timeout, and a capped measurement (a cap is not the link rate).
 
 C4 reads the marks in the run-book's order. A mark taken while the probe was not 'up' is invalid and
 fails its criterion: it is never counted as a detection.
@@ -38,6 +46,12 @@ MIN_STREAM_S = 3600
 FREEZE_CLOSE_S = 30
 KILL_CLOSE_S = 5
 DOWN_S = 10
+YAMUX_WINDOW_B = 6 * 1024 * 1024     # frp's yamux stream window (client/connector.go, server/service.go; spike S1c)
+YAMUX_PING_TIMEOUT_S = 10            # yamux ConnectionWriteTimeout, fixed in fatedier/yamux v0.2.0
+RISK_BPS = YAMUX_WINDOW_B / float(YAMUX_PING_TIMEOUT_S)   # 629,145.6 B/s
+S1_HEARTBEAT_TIMEOUT_S = 25          # frps.toml.tmpl and frpc.toml.tmpl transport.heartbeatTimeout
+MIN_RATE_REQUESTED_S = 30
+MIN_RATE_TIMED_S = 29.0              # receiver-timed span; the first byte's latency may take up to 1 s of the 30
 
 
 def parse_utc(text):
@@ -188,19 +202,78 @@ def c5_transport(probe_lines, job_log):
     if login is not None and login.get("ok") is True:
         return True, "frpc logged in through the transport (probe frpc_login ok)"
     if step0 is not None and step0.get("transport_path_ok") is True:
-        return True, "step 0 proved the transport path with an exchange"
+        return True, "step 0 proved both transport paths with a verified exchange"
     return False, "neither a frpc login nor a proven step 0 is recorded in probe.jsonl"
 
 
-def info_lines(summary, ssh_counters):
+def rate_lines(probe_lines):
+    return [p for p in probe_lines if p.get("probe") == "path_rate"]
+
+
+def heartbeat_bound_s(bps):
+    """Seconds a full 6 MiB yamux window takes to drain at bps: HBEP-6's heartbeat timeout must exceed it."""
+    return YAMUX_WINDOW_B / float(bps)
+
+
+def c6_path_rate(probe_lines):
+    tun_up = [p for p in rate_lines(probe_lines) if p.get("forward") == "tun" and p.get("direction") == "up"]
+    if not tun_up:
+        return False, "no path_rate line for the tunnel forward, direction up: the path rate is unknown"
+    m = tun_up[-1]
+    req, dur, bps, nbytes = num(m.get("requested_s")), num(m.get("duration_s")), num(m.get("bps")), num(m.get("bytes"))
+    problems = []
+    if m.get("ok") is not True:
+        problems.append("the measurement failed (%s)" % (m.get("detail") or "no detail"))
+    if req is None or req < MIN_RATE_REQUESTED_S:
+        problems.append("%s s asked, a sustained rate needs at least %d s" % (req, MIN_RATE_REQUESTED_S))
+    if dur is None or dur < MIN_RATE_TIMED_S:
+        problems.append("%s s timed at the receiver, need at least %.0f s" % ("%.1f" % dur if dur is not None else None, MIN_RATE_TIMED_S))
+    if m.get("timed_by") != "receiver-vm":
+        problems.append("timed by %s, not at the VM's receiver" % m.get("timed_by"))
+    if not nbytes or not bps:
+        problems.append("no bytes or no rate recorded")
+    if problems:
+        return False, "tunnel up: " + "; ".join(problems)
+    bound = heartbeat_bound_s(bps)
+    return True, ("tunnel up %.0f B/s (%d bytes in %.1f s, timed at the VM); heartbeat timeout must exceed 6 MiB / rate = %.1f s; "
+                  "S1's %d s %s it") % (bps, nbytes, dur, bound, S1_HEARTBEAT_TIMEOUT_S,
+                                        "exceeds" if S1_HEARTBEAT_TIMEOUT_S > bound else "does NOT exceed")
+
+
+def flag_lines(probe_lines):
+    """Risks that do not change OVERALL but must be read."""
+    out = []
+    for m in rate_lines(probe_lines):
+        bps, label = num(m.get("bps")), "%s %s" % (m.get("forward"), m.get("direction"))
+        if m.get("max_bps"):
+            out.append("%s: capped at %s B/s by PATHRATE_MAX_BPS, so %s B/s is not the link rate" % (
+                label, m.get("max_bps"), "%.0f" % bps if bps is not None else "no"))
+        if m.get("ok") is True and bps is not None and bps < RISK_BPS:
+            out.append("%s: %.0f B/s is under 6 MiB / 10 s = %.0f B/s: a full yamux window takes %.1f s to drain, longer than "
+                       "yamux's fixed 10 s ping timeout, so a large reply can drop the session" % (label, bps, RISK_BPS, heartbeat_bound_s(bps)))
+        if m.get("forward") == "tun" and m.get("direction") == "up" and m.get("ok") is True and bps:
+            if heartbeat_bound_s(bps) >= S1_HEARTBEAT_TIMEOUT_S:
+                out.append("tun up: the bound %.1f s is not below S1's heartbeat timeout of %d s: on this path the heartbeat can "
+                           "time out behind one large reply" % (heartbeat_bound_s(bps), S1_HEARTBEAT_TIMEOUT_S))
+    return out
+
+
+def info_lines(summary, ssh_counters, probe_lines=()):
     out = []
     stub = summary.get("stub") or {}
     out.append("frp Login calls %s, reconnects of frp %s (a freeze and a kill each cost one by design)" % (
         stub.get("logins"), stub.get("reconnects")))
-    if ssh_counters:
-        out.append("ssh forward: attempts %s, established %s, disconnects %s, recoveries %s" % (
-            ssh_counters.get("attempts"), ssh_counters.get("established"),
-            ssh_counters.get("disconnects"), ssh_counters.get("recoveries")))
+    for c in ssh_counters or []:
+        out.append("ssh forward %s: attempts %s, established %s, disconnects %s, recoveries %s" % (
+            c.get("forward", "?"), c.get("attempts"), c.get("established"), c.get("disconnects"), c.get("recoveries")))
+    for m in rate_lines(probe_lines):
+        bps = num(m.get("bps"))
+        dur = num(m.get("duration_s"))
+        out.append("path rate %s %s (%s): %s, %s B/s, %s bytes in %s s, timed by %s, cap %s%s" % (
+            m.get("forward"), m.get("direction"), m.get("via"), "ok" if m.get("ok") else "FAILED",
+            "%.0f" % bps if bps is not None else None, m.get("bytes"), "%.1f" % dur if dur is not None else None,
+            m.get("timed_by"), m.get("max_bps"),
+            ", heartbeat bound %.1f s" % heartbeat_bound_s(bps) if bps else ""))
     gaps = (summary.get("gaps") or {}).get("stats_unfaulted_s") or {}
     out.append("token gaps outside fault windows: max %s s, p99 %s s" % (gaps.get("max"), gaps.get("p99")))
     for r in summary.get("per_stream") or []:
@@ -216,7 +289,7 @@ def evaluate(summary, job_log, probe_lines, ssh_counters):
     for cid, func in (("C1", lambda: c1_registered(summary, job_log)), ("C2", lambda: c2_stream(summary)),
                       ("C3", lambda: c3_no_cuts(summary)), ("C4a", lambda: c4a_freeze(summary)),
                       ("C4b", lambda: c4b_engine(summary)), ("C4c", lambda: c4c_frpc(summary)),
-                      ("C5", lambda: c5_transport(probe_lines, job_log))):
+                      ("C5", lambda: c5_transport(probe_lines, job_log)), ("C6", lambda: c6_path_rate(probe_lines))):
         try:
             ok, text = func()
         except (KeyError, TypeError, ValueError) as exc:
@@ -247,13 +320,14 @@ def main(argv):
     ap.add_argument("--summary", required=True, help="stream_watch.py --out file")
     ap.add_argument("--job-log", required=True, help="job.export.log (or job.log)")
     ap.add_argument("--probe", help="probe.jsonl (step 0)")
-    ap.add_argument("--ssh-counters", help="ssh-counters.json")
+    ap.add_argument("--ssh-counters", action="append", default=[],
+                    help="ssh-ctl-counters.json or ssh-tun-counters.json (give each forward's file)")
     args = ap.parse_args(argv)
     try:
         summary = json.loads(read_text(args.summary))
         job_log = read_text(args.job_log)
         probe_lines = read_probe(args.probe) if args.probe else []
-        counters = json.loads(read_text(args.ssh_counters)) if args.ssh_counters else None
+        counters = [json.loads(read_text(f)) for f in args.ssh_counters]
     except (OSError, ValueError) as exc:
         sys.stderr.write("verdict: cannot read an input: %s\n" % exc)
         print("OVERALL: FAIL (an input is missing or unreadable)")
@@ -265,8 +339,10 @@ def main(argv):
     results = evaluate(summary, job_log, probe_lines, counters)
     for cid, ok, text in results:
         print("%s %-3s %s" % ("PASS" if ok else "FAIL", cid, text))
-    for line in info_lines(summary, counters):
+    for line in info_lines(summary, counters, probe_lines):
         print("INFO     %s" % line)
+    for line in flag_lines(probe_lines):
+        print("FLAG     %s" % line)
     overall = all(ok for _, ok, _ in results)
     print("OVERALL: %s" % ("PASS" if overall else "FAIL"))
     return 0 if overall else 1

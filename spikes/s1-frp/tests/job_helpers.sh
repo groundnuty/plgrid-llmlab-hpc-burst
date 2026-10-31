@@ -6,26 +6,46 @@ mk_dummy_files() {
   echo dummy > "$W/key"; chmod 600 "$W/key"
   echo "dummy known host" > "$W/known_hosts"
   echo tok > "$W/token"; chmod 600 "$W/token"
-  T_SSH_KEY="$W/key" T_KNOWN_HOSTS="$W/known_hosts" T_TOKEN="$W/token"
+  bash "$KIT/make-test-ca.sh" "$W/ca" "$T_TLS_NAME" >/dev/null || { echo "make-test-ca.sh failed"; return 1; }
+  T_SSH_KEY="$W/key" T_KNOWN_HOSTS="$W/known_hosts" T_TOKEN="$W/token" T_CA="$W/ca/ca.crt"
   # offline: curl is a double that reports HTTP 200, so step 0 never waits on the network
   printf '#!/bin/bash\ncase "$*" in *--version*) echo "curl fake";; *) printf 200;; esac\n' > "$W/bin/curl"; chmod +x "$W/bin/curl"
 }
-fake_env() {   # a full run with a double for ssh; the arguments are the lines of its plan
-  mk_dummy_files
+pick_ports() {   # the VM ports and the node-local ends, all in 29400-29499
+  T_AGENT_PORT="$(free_port)"; T_DIALHOME_PORT="$(free_port)"; T_LPORT_CTL="$(free_port)"; T_LPORT_TUN="$(free_port)"
+}
+serve_far() {   # PORT [CERT-DIR]: the VM side's stand-in on PORT (path_rate.py serve, TLS with the test CA's server cert)
+  local d="${2:-$W/ca}"
+  bg python3 "$KIT/path_rate.py" serve --listen "127.0.0.1:$1" --tls-cert "$d/server.crt" --tls-key "$d/server.key" --max-seconds 600
+  wait_for 5 timeout 1 bash -c "exec 3<>/dev/tcp/127.0.0.1/$1" 2>/dev/null
+}
+far_ends() {   # both stand-ins: the agent endpoint and the dial-home listener (in these tests no Envoy, no frps)
+  serve_far "$T_AGENT_PORT" && serve_far "$T_DIALHOME_PORT"
+}
+fake_env() {   # a full run with a double for ssh (fake_ssh.py); the arguments are the lines of its default plan
+  mk_dummy_files || return 1
   mkdir -p "$W/fakessh"
   printf '#!/bin/bash\nexec python3 %q "$@"\n' "$TESTS_DIR/fake_ssh.py" > "$W/bin/ssh"; chmod +x "$W/bin/ssh"
   printf '%s\n' "$@" > "$W/fakessh/plan"
   export FAKE_SSH_DIR="$W/fakessh"
   make_fake_kit "$W/kit"
-  T_KIT="$W/kit" T_LPORT="$(free_port)" T_FRPS_PORT=7000
+  T_KIT="$W/kit"; pick_ports
   render_job "$W/job.sbatch" || return 1
   bash -n "$W/job.sbatch" || return 1
 }
-sshd_env() {   # a real throwaway sshd; the key may forward to FP only (or to $PERMIT); the full-run kit has a fake frpc
-  mk_dummy_files
+plan_for() {   # ctl|tun LINE...: that forward's own plan (fake_ssh.py keys plans by the VM port)
+  local port; if [ "$1" = ctl ]; then port="$T_AGENT_PORT"; else port="$T_DIALHOME_PORT"; fi
+  shift; printf '%s\n' "$@" > "$W/fakessh/plan-$port"
+}
+key_line() {   # the restricted key line for the two permitted ports (PERMIT_CTL, PERMIT_TUN override them)
+  printf 'restrict,port-forwarding,permitopen="127.0.0.1:%s",permitopen="127.0.0.1:%s",permitlisten="127.0.0.1:1",command="/bin/false"' \
+    "${PERMIT_CTL:-$T_AGENT_PORT}" "${PERMIT_TUN:-$T_DIALHOME_PORT}"
+}
+sshd_env() {   # a real throwaway sshd; the key may forward to the two VM ports only; the full-run kit has a fake frpc
+  mk_dummy_files || return 1
   tsshd_start || return 1
-  FP="$(free_port)"; T_LPORT="$(free_port)"; T_FRPS_PORT="$FP"
-  tsshd_authorize "restrict,port-forwarding,permitopen=\"127.0.0.1:${PERMIT:-$FP}\",permitlisten=\"127.0.0.1:1\",command=\"/bin/false\""
+  pick_ports
+  tsshd_authorize "$(key_line)"
   T_SSH_KEY="$TSSHD_KEY" T_KNOWN_HOSTS="$TSSHD_KNOWN_HOSTS" T_VM_USER="$TSSHD_USER"
   make_fake_kit "$W/kit"; T_KIT="$W/kit"
   render_job "$W/job.sbatch" || return 1
@@ -33,7 +53,10 @@ sshd_env() {   # a real throwaway sshd; the key may forward to FP only (or to $P
 start_job() {   # JOBID [ENV=VALUE...]: the job in its own session; sets JOB_PID and JD
   local jid="$1"; shift
   JD="$W/scratch/s1-frp/$jid-r0"
-  bg_session env SCRATCH="$W/scratch" SLURM_JOB_ID="$jid" PATH="$W/bin:$PATH" "$@" bash "$W/job.sbatch" > "$W/job.out" 2>&1
+  # the path-rate step is short and capped here (1 s, up only, 2 MB/s: the shared VM) unless a test asks for more;
+  # a later ENV=VALUE wins
+  bg_session env SCRATCH="$W/scratch" SLURM_JOB_ID="$jid" PATH="$W/bin:$PATH" PATHRATE_S=1 PATHRATE_DIRECTIONS=up PATHRATE_MAX_BPS=2000000 "$@" \
+    bash "$W/job.sbatch" > "$W/job.out" 2>&1
   JOB_PID=$BG_LAST
 }
 job_rc() {   # SECONDS: waits for the job to exit; sets RC to its exit code, or 'running'

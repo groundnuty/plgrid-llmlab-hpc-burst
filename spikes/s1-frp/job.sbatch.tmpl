@@ -20,41 +20,54 @@
 #@helios-gh200,athena #SBATCH --gres=gpu:1
 #SBATCH --output=s1-frp-%j.out
 #
+# Wiring (HBEP-6, alpha). The job reaches two loopback services on the VM:
+#   control  the agent endpoint, 127.0.0.1:AGENT_PORT on the VM (HTTPS; here the stand-in path_rate.py serve)
+#   tunnel   the dial-home listener, 127.0.0.1:DIALHOME_PORT on the VM: Envoy terminates TLS and passes
+#            "GET /~!frp" websocket upgrades to frps on another loopback port. frpc speaks wss to it.
+# Both present one launcher-style certificate (a self-signed test CA); every client here verifies it with
+# CA_FILE and TLS_SERVER_NAME.
 # Modes and limits (environment at submit time, sbatch exports it):
-#   TRANSPORT      ssh-forward (default, option B) or direct.
-#                  ssh-forward: frpc dials 127.0.0.1:LPORT on this node; a reconnecting
-#                  "ssh -N -L 127.0.0.1:LPORT:127.0.0.1:FRPS_PORT user@VM" carries it to frps, which
-#                  listens on the VM's loopback only. The VM lets only port 22 in from the cluster side.
-#                  direct: frpc dials VM:FRPS_PORT itself (works only if that port is open to the node).
-#   PROBE_ONLY=1   run step 0 (reachability probe) and exit. Needs no token and no frp binaries;
-#                  in ssh-forward mode it needs ssh, the key, and the operator's probe_responder.py
-#                  on the VM's loopback at FRPS_PORT (a listener that only authenticates proves nothing).
-#   (default)      step 0, then the fake engine, the ssh forward (ssh-forward mode) and frpc, a gate on
-#                  frpc's own "login to server success", a gate on the watcher attaching, and then
-#                  stay up until TERM or the time limit.
+#   TRANSPORT      ssh (default) or direct.
+#                  ssh: two SEPARATE "ssh -N -L" connections over port 22, each in its own reconnect loop:
+#                    control: 127.0.0.1:LPORT_CTL -> the VM's 127.0.0.1:AGENT_PORT
+#                    tunnel:  127.0.0.1:LPORT_TUN -> the VM's 127.0.0.1:DIALHOME_PORT
+#                  The restricted key permits exactly these two forwards. frpc dials 127.0.0.1:LPORT_TUN.
+#                  direct: no ssh; the job dials VM_ADDR:AGENT_PORT and VM_ADDR:DIALHOME_PORT itself.
+#   PROBE_ONLY=1   run step 0 (reachability probe) and exit. Needs no token and no frp binary; it needs ssh
+#                  (ssh mode), the key, CA_FILE, python and the VM side running (README, run order A).
+#   (default)      step 0, the fake engine, the forwards (ssh mode), the path-rate measurement, frpc, a gate on
+#                  frpc's own "login to server success", a gate on the watcher attaching, and then stay up
+#                  until TERM or the time limit.
 #   RUN_ROOT            the directory that holds the job directories (default $SCRATCH/s1-frp, or $TMPDIR/s1-frp when
 #                       SCRATCH is unset). An override must be an absolute path without whitespace; it is created when
 #                       missing, so an operator can use a subdirectory of their own without changing SCRATCH.
 #   VM_SSH_PORT         the VM's ssh port (default 22; tests use a throwaway sshd on another port)
-#   OUTAGE_DEADLINE_S   (default 300) the forward may be down this long, counted from the last time it was
+#   OUTAGE_DEADLINE_S   (default 300) a forward may be down this long, counted from the last time it was
 #                       established or from the start; then the job stops with exit 4
-#   FWD_STARTUP_WAIT_S  (default 20) the forward must be up this soon after the loop starts, or exit 4
+#   FWD_STARTUP_WAIT_S  (default 20) both forwards must be up this soon after their loops start, or exit 4
+#   PATHRATE_S          (default 30) seconds of each bulk transfer of the path-rate measurement (verdict.py
+#                       counts only a measurement of at least 30 s)
+#   PATHRATE_DIRECTIONS (default "up down") up = this node sends to the VM (the token direction), down = the VM sends
+#   PATHRATE_MAX_BPS    (default 0 = no cap) cap each transfer at this many bytes per second (local tests only;
+#                       a capped number is not the link rate, and the probe line records the cap)
+#   ENGINE_PORT         (default 0 = any free port) the fake engine's loopback port
 #   FRPC_LOGIN_WAIT_S   (default 90) frpc must log "login to server success" this soon, or exit 3
 #   WATCHER_WAIT_S      (default 900, 15 min) after frpc's login, a request of stream_watch.py must reach
 #                       the fake engine this soon, or exit 5 (the watcher is started BEFORE the job is submitted)
 #   ENGINE_DOWN_S       (default 20) how long a USR2 fault keeps the engine down before it restarts on the same port
 #   FREEZE_SECONDS      (default 60) how long a HUP fault keeps frpc stopped
-# Exit codes: 0 = clean (TERM or the time limit; a PROBE_ONLY job whose transport path works);
+# Exit codes: 0 = clean (TERM or the time limit; a PROBE_ONLY job whose two paths work);
 #   1 = misconfigured, a restart of the allocation, or a step of the full run failed;
-#   3 = the path does not work (step 0, or frpc's login did not reach frps); the spike records "not reachable" and stops;
-#   4 = the ssh forward failed for good (authentication, host key, forwarding) or stayed down past the outage deadline;
-#   5 = no watcher attached in time. Port 7000 and 443 never decide the exit code by themselves.
+#   3 = a path does not work (step 0, or frpc's login did not reach frps); the spike records "not reachable" and stops;
+#   4 = a forward failed for good (authentication, host key, forwarding) or stayed down past the outage deadline;
+#   5 = no watcher attached in time. The informational TCP probes never decide the exit code by themselves.
 # Files in $JOB_DIR ($RUN_ROOT/<jobid>-r<restart count>):
-#   PRIVATE, never copy them out: job.log (node name, paths), ssh-raw.err and ssh-cur.err (raw ssh stderr),
-#     ssh-probe.err, .redact.sed, frpc.stdout, frpc.toml, streamer.log, curl.err, pids, ssh.pid
-#   COLLECT ONLY export/: redacted copies of job.log, probe.jsonl, ssh-exits.jsonl, ssh-counters.json,
-#     frpc.log, direct-baseline.json (IPv4 and IPv6 addresses, the VM account, the key and known_hosts
-#     paths, the node name and the job id are removed). It is written when the job exits.
+#   PRIVATE, never copy them out: job.log (node name, paths), ssh-<fwd>-raw.err and ssh-<fwd>-cur.err (raw ssh
+#     stderr), ssh-probe-<fwd>.err, .redact.sed, frpc.stdout, frpc.toml, streamer.log, curl.err, pids, ssh-<fwd>.pid
+#   COLLECT ONLY export/: redacted copies of job.log, probe.jsonl (step 0 and the path-rate lines),
+#     ssh-ctl-exits.jsonl, ssh-ctl-counters.json, ssh-tun-exits.jsonl, ssh-tun-counters.json, frpc.log,
+#     direct-baseline.json (IPv4 and IPv6 addresses, the VM account, the key, known_hosts and CA paths, the node
+#     name and the job id are removed). It is written when the job exits.
 # Step 0 writes one JSON line per probe to $JOB_DIR/probe.jsonl (no addresses, no node name, no user).
 # Fault injection for the heartbeat tests, from a login node (signals the batch script only):
 #   scancel --batch --signal=USR1 <jobid>   SIGKILL frpc            (process dies, FIN/RST)
@@ -66,17 +79,20 @@
 set -u -o pipefail
 
 PLATFORM="__PLATFORM__"
-TRANSPORT="${TRANSPORT:-ssh-forward}"
+TRANSPORT="${TRANSPORT:-ssh}"
 VM_ADDR="__VM_ADDR__"                   # the agents VM as a compute node reaches it; stays out of committed files
-FRPS_PORT="__FRPS_PORT__"               # frps' port on the VM (loopback only in ssh-forward mode); the key may forward to this port only
-VM_USER="__VM_USER__"                   # ssh-forward: the account the restricted key is authorised for; "none" in direct mode
-SSH_KEY="__SSH_KEY__"                   # ssh-forward: private key FILE, mode 600, never printed; "none" in direct mode
-SSH_KNOWN_HOSTS="__SSH_KNOWN_HOSTS__"   # ssh-forward: known_hosts FILE pinning the VM's host key; "none" in direct mode
-LPORT="__LPORT__"                       # ssh-forward: the node-local end of the forward; "none" in direct mode
-PROBE_TLS_PORTS="__PROBE_TLS_PORTS__"   # direct mode: space-separated ports on the VM that should answer a TLS handshake, or "none"
+AGENT_PORT="__AGENT_PORT__"             # the agent endpoint on the VM (loopback in ssh mode); launcher base+3, 29223
+DIALHOME_PORT="__DIALHOME_PORT__"       # the dial-home listener (Envoy, TLS) on the VM; launcher base+7, 29227
+VM_USER="__VM_USER__"                   # ssh: the account the restricted key is authorised for; "none" in direct mode
+SSH_KEY="__SSH_KEY__"                   # ssh: private key FILE, mode 600, never printed; "none" in direct mode
+SSH_KNOWN_HOSTS="__SSH_KNOWN_HOSTS__"   # ssh: known_hosts FILE pinning the VM's host key; "none" in direct mode
+LPORT_CTL="__LPORT_CTL__"               # ssh: the node-local end of the control forward; "none" in direct mode
+LPORT_TUN="__LPORT_TUN__"               # ssh: the node-local end of the tunnel forward; "none" in direct mode
+CA_FILE="__CA_FILE__"                   # the test CA's certificate (public): every TLS client here verifies against it
+TLS_SERVER_NAME="__TLS_SERVER_NAME__"   # the DNS name in the VM side's certificate (frpc's transport.tls.serverName)
 TOKEN_FILE="__TOKEN_FILE__"             # mode 600, readable by the job's user only
-PROTOCOL="__PROTOCOL__"                 # frpc transport.protocol: tcp or wss (ssh-forward needs tcp)
-INSTANCE_PREFIX="__INSTANCE_PREFIX__"
+INSTANCE_PREFIX="__INSTANCE_PREFIX__"   # frpc's user name (the plugin's "user")
+INSTANCE_UID="__INSTANCE_UID__"         # the tcpmux custom domain: the Instance UID (a fixed test UID in the kit)
 KIT_DIR="__KIT_DIR__"                   # this kit, on a filesystem the compute node sees
 PROBE_ONLY="${PROBE_ONLY:-0}"
 VM_SSH_PORT="${VM_SSH_PORT:-22}"
@@ -86,18 +102,23 @@ FRPC_LOGIN_WAIT_S="${FRPC_LOGIN_WAIT_S:-90}"
 WATCHER_WAIT_S="${WATCHER_WAIT_S:-900}"
 ENGINE_DOWN_S="${ENGINE_DOWN_S:-20}"
 FREEZE_SECONDS="${FREEZE_SECONDS:-60}"
-PROBE_TOKEN="S1-PROBE-TOKEN-OK"         # probe_responder.py sends this line (plus a newline) to every client
+PATHRATE_S="${PATHRATE_S:-30}"
+PATHRATE_DIRECTIONS="${PATHRATE_DIRECTIONS:-up down}"
+PATHRATE_MAX_BPS="${PATHRATE_MAX_BPS:-0}"
+ENGINE_PORT="${ENGINE_PORT:-0}"
 EXIT_CODE=0
 # One record per child: NAME_PID and NAME_ST (the start time from /proc/<pid>/stat). A PID is signalled
 # only while its start time still matches the record, so a reused PID is never hit.
-FRPC_PID="" FRPC_ST="" STREAMER_PID="" STREAMER_ST="" FWD_LOOP_PID="" FWD_LOOP_ST="" PSSH_PID="" PSSH_ST="" SSHF_PID="" SSHF_ST="" SLP_PID="" SLP_ST="" CUR_PID="" CUR_ST=""
+FRPC_PID="" FRPC_ST="" STREAMER_PID="" STREAMER_ST="" CTL_LOOP_PID="" CTL_LOOP_ST="" TUN_LOOP_PID="" TUN_LOOP_ST=""
+PSSH_PID="" PSSH_ST="" SSHF_PID="" SSHF_ST="" SLP_PID="" SLP_ST="" CUR_PID="" CUR_ST="" PRATE_PID="" PRATE_ST=""
 THAW_AT="" ENGINE_RESTART_AT="" ARMED=0
 JOB_DIR="" REDACT_SED=""
 
 die() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) FATAL: $*" >&2; exit 1; }
 log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*"; }
 
-for v in VM_SSH_PORT OUTAGE_DEADLINE_S FWD_STARTUP_WAIT_S FRPC_LOGIN_WAIT_S WATCHER_WAIT_S ENGINE_DOWN_S FREEZE_SECONDS; do
+for v in VM_SSH_PORT OUTAGE_DEADLINE_S FWD_STARTUP_WAIT_S FRPC_LOGIN_WAIT_S WATCHER_WAIT_S ENGINE_DOWN_S FREEZE_SECONDS \
+         PATHRATE_S PATHRATE_MAX_BPS ENGINE_PORT AGENT_PORT DIALHOME_PORT; do
   case "${!v}" in ''|*[!0-9]*) die "$v must be a whole number, got '${!v}'" ;; esac
 done
 
@@ -125,18 +146,35 @@ esac
 
 # --- transport: what must be filled for each mode -------------------------------------------------
 case "$TRANSPORT" in
-  ssh-forward)
-    for v in VM_USER SSH_KEY SSH_KNOWN_HOSTS LPORT; do
-      [ -n "${!v}" ] && [ "${!v}" != none ] || die "TRANSPORT=ssh-forward needs $v (got '${!v}')"
+  ssh)
+    for v in VM_USER SSH_KEY SSH_KNOWN_HOSTS LPORT_CTL LPORT_TUN; do
+      [ -n "${!v}" ] && [ "${!v}" != none ] || die "TRANSPORT=ssh needs $v (got '${!v}')"
     done
-    case "$LPORT" in *[!0-9]*) die "LPORT must be a port number, got '$LPORT'" ;; esac
+    for v in LPORT_CTL LPORT_TUN; do
+      case "${!v}" in *[!0-9]*) die "$v must be a port number, got '${!v}'" ;; esac
+    done
+    [ "$LPORT_CTL" != "$LPORT_TUN" ] || die "LPORT_CTL and LPORT_TUN must differ (two separate forwards), both are $LPORT_CTL"
     case "$SSH_KEY$SSH_KNOWN_HOSTS" in *[[:space:]]*) die "SSH_KEY and SSH_KNOWN_HOSTS must be paths without whitespace" ;; esac
-    [ "$PROTOCOL" = tcp ] || die "TRANSPORT=ssh-forward carries frp's tcp protocol only (PROTOCOL=$PROTOCOL); wss would need a TLS proxy at the far end"
     ;;
   direct) ;;
-  *) die "TRANSPORT must be ssh-forward or direct, got '$TRANSPORT'" ;;
+  *) die "TRANSPORT must be ssh or direct, got '$TRANSPORT'" ;;
 esac
-case "$FRPS_PORT" in ''|*[!0-9]*) die "FRPS_PORT must be a port number, got '$FRPS_PORT'" ;; esac
+[ "$AGENT_PORT" != "$DIALHOME_PORT" ] || die "AGENT_PORT and DIALHOME_PORT must differ, both are $AGENT_PORT"
+case "$TLS_SERVER_NAME" in ''|*[!a-zA-Z0-9.-]*) die "TLS_SERVER_NAME must be a DNS name, got '$TLS_SERVER_NAME'" ;; esac
+case "$INSTANCE_UID" in
+  [0-9a-f]*-*-*-*-*) case "$INSTANCE_UID" in *[!0-9a-f-]*) die "INSTANCE_UID must be a lowercase UUID, got '$INSTANCE_UID'" ;; esac ;;
+  *) die "INSTANCE_UID must be a lowercase UUID, got '$INSTANCE_UID'" ;;
+esac
+for d in $PATHRATE_DIRECTIONS; do
+  case "$d" in up|down) ;; *) die "PATHRATE_DIRECTIONS holds up and/or down, got '$PATHRATE_DIRECTIONS'" ;; esac
+done
+[ "$PATHRATE_S" -ge 1 ] || die "PATHRATE_S must be at least 1"
+# The endpoints the job dials: the local ends of the forwards (ssh) or the VM's ports (direct).
+if [ "$TRANSPORT" = ssh ]; then
+  CTL_HOST=127.0.0.1; CTL_PORT="$LPORT_CTL"; TUN_HOST=127.0.0.1; TUN_PORT="$LPORT_TUN"
+else
+  CTL_HOST="$VM_ADDR"; CTL_PORT="$AGENT_PORT"; TUN_HOST="$VM_ADDR"; TUN_PORT="$DIALHOME_PORT"
+fi
 
 # --- the job's own directory and log: fresh, never reused -----------------------------------------
 # RUN_ROOT is read from the submit-time environment like TRANSPORT. Unset, it is $SCRATCH/s1-frp (the base
@@ -161,8 +199,8 @@ log "job dir: $JOB_DIR"
 # --- python: the scripts need 3.6 or newer; record which one runs them -------------------------
 # PYTHON is one command word, or a wrapper such as an apptainer exec line (Helios only; Athena
 # has no Apptainer, so there the job uses the node's own python3, with no container).
-# The reachability probe needs only bash, so a missing python must not cost the probe result:
-# python is looked for before the probe only when a TLS port is to be tried, otherwise after it.
+# The TCP and 443 probes need only bash, so a missing python must not cost them: python is looked for
+# after them, before the two verified TLS exchanges that need it.
 PY_READY=0
 py_ok() { "${PYBIN[@]}" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 6) else 1)' >/dev/null 2>&1; }
 ensure_python() {   # sets PYBIN and PY_READY; returns 0 when an interpreter >= 3.6 is found
@@ -196,14 +234,14 @@ esac
 # --- redaction: everything that leaves this job passes through one sed script ---------------------
 # The raw logs (job.log, ssh stderr) stay in $JOB_DIR and are never copied out. What is collected is
 # export/, written at exit through the script built here: no IPv4 or IPv6 address (loopback IPv4 is
-# kept), no VM account or local account, no key, known_hosts or token path, no scratch or kit path,
+# kept), no VM account or local account, no key, known_hosts, CA or token path, no scratch or kit path,
 # no VM address, node name or job id.
 # >>> redact
 sed_lit() { printf '%s' "$1" | sed 's/[][\\.*^$|+?(){}]/\\&/g'; }
 build_redact() {
   local f="$REDACT_SED" pair name val repl
   : > "$f" || return 1
-  for pair in SSH_KEY:key-file SSH_KNOWN_HOSTS:known-hosts-file TOKEN_FILE:token-file JOB_DIR:job-dir KIT_DIR:kit-dir \
+  for pair in SSH_KEY:key-file SSH_KNOWN_HOSTS:known-hosts-file TOKEN_FILE:token-file CA_FILE:ca-file JOB_DIR:job-dir KIT_DIR:kit-dir \
               RUN_ROOT:run-root RUN_BASE:scratch SCRATCH:scratch VM_ADDR:vm VM_USER:vm-user LOCAL_USER:user HOME:home NODE_NAME:node JOB_ID:jobid; do
     name="${pair%%:*}"; repl="${pair#*:}"
     val="${!name:-}"
@@ -231,7 +269,7 @@ make_export() {   # redacted copies of the files that may be collected, in $JOB_
   local d="$JOB_DIR/export" f
   [ -d "$JOB_DIR" ] && [ -s "$REDACT_SED" ] || return 0
   mkdir -p "$d" || return 0
-  for f in job.log probe.jsonl ssh-exits.jsonl ssh-counters.json frpc.log direct-baseline.json; do
+  for f in job.log probe.jsonl ssh-ctl-exits.jsonl ssh-ctl-counters.json ssh-tun-exits.jsonl ssh-tun-counters.json frpc.log direct-baseline.json; do
     [ -f "$JOB_DIR/$f" ] || continue
     redact < "$JOB_DIR/$f" > "$d/$f" || log "WARNING: could not redact $f"
   done
@@ -243,10 +281,14 @@ jstr() {    # JSON string body: redacted, one line, printable ASCII only, at mos
   printf '%s' "$1" | redact | LC_ALL=C tr '\n\r\t' '   ' | LC_ALL=C tr -cd ' -~' | cut -c1-300 | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 file_mode_ok() { case "$(stat -c %a "$1" 2>/dev/null)" in 600|400) return 0 ;; *) return 1 ;; esac; }
-local_end_up() { timeout 2 bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1"' _ "$LPORT" 2>/dev/null; }
-lport_listening() {   # a LISTEN socket on 127.0.0.1:LPORT, read from /proc: no connection is made, so the far end is not touched
-  grep -qi "0100007F:$(printf '%04X' "$LPORT") 00000000:0000 0A" /proc/net/tcp 2>/dev/null
+local_end_up() { timeout 2 bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1"' _ "$1" 2>/dev/null; }   # PORT
+lport_listening() {   # PORT: a LISTEN socket on 127.0.0.1:PORT, read from /proc: no connection is made, so the far end is not touched
+  grep -qi "0100007F:$(printf '%04X' "$1") 00000000:0000 0A" /proc/net/tcp 2>/dev/null
 }
+fwd_lport() { if [ "$1" = ctl ]; then echo "$LPORT_CTL"; else echo "$LPORT_TUN"; fi; }        # ctl|tun -> the node-local end
+fwd_rport() { if [ "$1" = ctl ]; then echo "$AGENT_PORT"; else echo "$DIALHOME_PORT"; fi; }   # ctl|tun -> the port on the VM
+fwd_host() { if [ "$1" = ctl ]; then echo "$CTL_HOST"; else echo "$TUN_HOST"; fi; }          # ctl|tun -> what the job dials
+fwd_port() { if [ "$1" = ctl ]; then echo "$CTL_PORT"; else echo "$TUN_PORT"; fi; }
 
 # --- process identity: a PID is signalled only while its start time matches what was recorded -------
 # /proc/<pid>/stat field 22 is the start time in clock ticks since boot. A PID that has exited and
@@ -300,19 +342,21 @@ stop_rec() {   # NAME: CONT, TERM, wait up to 5 s, KILL, reap, clear the record;
   if same_proc "$pid" "$st"; then log "$name: pid $pid survived KILL; not waiting for it"; else wait "$pid" 2>/dev/null || true; fi
   rec_clear "$name"
 }
-stop_forward() {   # the loop first, so it cannot start another ssh (its TERM trap stops the current one); then a straggler ssh, by record
-  local spid="" sst=""
-  stop_rec FWD_LOOP
-  if [ -s "$JOB_DIR/ssh.pid" ] && read -r spid sst < "$JOB_DIR/ssh.pid" && [ -n "$spid" ]; then
+stop_forward() {   # ctl|tun: the loop first, so it cannot start another ssh (its TERM trap stops the current one); then a straggler ssh, by record
+  local spid="" sst="" id="$1" rec pf
+  if [ "$id" = ctl ]; then rec=CTL_LOOP; else rec=TUN_LOOP; fi
+  pf="$JOB_DIR/ssh-$id.pid"
+  stop_rec "$rec"
+  if [ -s "$pf" ] && read -r spid sst < "$pf" && [ -n "$spid" ]; then
     SSHF_PID="$spid"; SSHF_ST="$sst"
     if same_proc "$spid" "$sst" && [ "$(cat "/proc/$spid/comm" 2>/dev/null)" = ssh ]; then
-      log "ssh pid $spid outlived its loop, stopping it"
+      log "ssh ($id) pid $spid outlived its loop, stopping it"
       stop_rec SSHF
     else
       rec_clear SSHF
     fi
   fi
-  [ -f "$JOB_DIR/ssh.pid" ] && : > "$JOB_DIR/ssh.pid"
+  [ -f "$pf" ] && : > "$pf"
   return 0
 }
 nap() {   # sleep that a trapped signal can cut short: the sleeper is recorded so the trap can stop it, never orphaned
@@ -342,14 +386,14 @@ classify_ssh_stderr() {   # FILE: prints auth, hostkey, forwarding or transient
 # The ssh command, as an array. -F /dev/null ignores the user's and the system's ssh config, so
 # no IdentityFile, ProxyCommand or HostKeyAlias from there can change what is tested. The key is
 # named by path only (-i), the host key must match the pinned known_hosts file.
-build_ssh_args() {
+build_ssh_args() {   # LOCAL-PORT REMOTE-PORT: one connection, one -L
   SSH_ARGS=(-F /dev/null -p "$VM_SSH_PORT" -N -T -i "$SSH_KEY"
     -o BatchMode=yes -o IdentitiesOnly=yes -o ExitOnForwardFailure=yes
     -o ServerAliveInterval=10 -o ServerAliveCountMax=3
     -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$SSH_KNOWN_HOSTS" -o GlobalKnownHostsFile=/dev/null
     -o ControlMaster=no -o ControlPath=none
     -o ConnectTimeout=8 -o PreferredAuthentications=publickey
-    -L "127.0.0.1:${LPORT}:127.0.0.1:${FRPS_PORT}"
+    -L "127.0.0.1:${1}:127.0.0.1:${2}"
     "${VM_USER}@${VM_ADDR}")
 }
 
@@ -361,7 +405,9 @@ shutdown_children() {
   trap '' TERM INT USR1 USR2 HUP
   stop_rec FRPC                  # first: frpc says goodbye through the tunnel while it is still up
   stop_rec STREAMER
-  stop_forward
+  stop_rec PRATE
+  stop_forward ctl
+  stop_forward tun
   stop_rec PSSH
 }
 on_exit() { shutdown_children; make_export; }
@@ -447,165 +493,126 @@ https_probe() {   # probe-name, url, extra curl args...; sets PROBE_OK; "reached
   record "$pname" "$PROBE_OK" "$ms" "$detail" "$extra"
 }
 
-tls_probe() {   # probe-name, host, port: TCP connect plus a TLS handshake, certificate not verified (direct mode, wss)
-  local pname="$1" host="$2" port="$3" out rc t0 ms detail
-  PROBE_OK=false
-  t0="$(now_ms)"
-  if [ "$PY_READY" -ne 1 ]; then
-    record "$pname" false 0 "no usable python on this node" ",\"target\":\"vm\",\"port\":$port"
-    return 0
-  fi
-  out="$(timeout 10 "${PYBIN[@]}" -c '
-import socket, ssl, sys
-ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
-s = socket.create_connection((sys.argv[1], int(sys.argv[2])), 5)
-ctx.wrap_socket(s, server_hostname=sys.argv[1]).close()
-' "$host" "$port" 2>&1 </dev/null)"; rc=$?
-  ms=$(( $(now_ms) - t0 ))
-  if [ "$rc" -eq 0 ]; then PROBE_OK=true; detail="TLS handshake completed"
-  elif [ "$rc" -eq 124 ]; then detail="timeout after 10 s"
-  else detail="failed: $(printf '%s' "$out" | tail -1)"; fi
-  record "$pname" "$PROBE_OK" "$ms" "$detail" ",\"target\":\"vm\",\"port\":$port"
+FAR_STATE=unknown FAR_DETAIL=""
+far_end_exchange() {   # HOST PORT: one verified TLS GET /s1/probe (path_rate.py probe); sets FAR_STATE and FAR_DETAIL
+  local out
+  FAR_STATE=unknown FAR_DETAIL=""
+  if [ "$PY_READY" -ne 1 ]; then FAR_DETAIL="no usable python on this node, so the TLS exchange could not run"; return 0; fi
+  out="$(timeout 20 "${PYBIN[@]}" "$KIT_DIR/path_rate.py" probe --host "$1" --port "$2" --tls --ca "$CA_FILE" \
+    --server-name "$TLS_SERVER_NAME" --timeout 8 2>&1 </dev/null | tail -n 1)"
+  FAR_STATE="$(printf '%s' "$out" | sed -n 's/.*"far_end": *"\([a-z_]*\)".*/\1/p')"
+  FAR_DETAIL="$(printf '%s' "$out" | sed -n 's/.*"detail": *"\(.*\)".*/\1/p')"
+  [ -n "$FAR_STATE" ] || { FAR_STATE=unknown; FAR_DETAIL="path_rate.py probe gave no result: $out"; }
 }
-
-FAR_STATE=unknown
-far_end_exchange() {   # one connection to the local end, one line read (3 s); sets FAR_STATE: token, data, closed, held, unknown
-  local out rc line
-  out="$(timeout 6 bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1" || exit 11; IFS= read -r -t 3 -n 128 line <&3; printf "READ_RC=%s\nLINE=%s\n" "$?" "$line"' _ "$LPORT" 2>&1 </dev/null)"
-  rc="$(printf '%s\n' "$out" | sed -n 's/^READ_RC=//p' | head -n 1)"
-  line="$(printf '%s\n' "$out" | sed -n 's/^LINE=//p' | head -n 1)"
-  case "$rc" in
-    '') FAR_STATE=unknown ;;
-    0)  if [ "$line" = "$PROBE_TOKEN" ]; then FAR_STATE=token; else FAR_STATE=data; fi ;;
-    1)  if [ -n "$line" ]; then FAR_STATE=data; else FAR_STATE=closed; fi ;;       # EOF: the far end closed the connection
-    *)  if [ -n "$line" ]; then FAR_STATE=data; else FAR_STATE=held; fi ;;         # read timed out: accepted, silent
+far_meaning() {   # FAR_STATE -> a sentence for the probe line
+  case "$1" in
+    token)      echo "the probe token came back over verified TLS" ;;
+    tls_failed) echo "TLS failed: the far end's certificate does not verify against CA_FILE for TLS_SERVER_NAME, or it does not speak TLS" ;;
+    closed)     echo "the far end closed the connection: nothing listens on the VM's port, or the key may not forward to it" ;;
+    timeout)    echo "the far end accepted but did not answer in time: a listener is there, but it is not the VM side" ;;
+    refused)    echo "the connection was refused: nothing listens there" ;;
+    data|http_error) echo "something other than the VM side answered" ;;
+    *)          echo "the exchange could not run" ;;
   esac
 }
 
-# FORWARD_STATE after forward_probe: true (proven), null (listener up and the far end accepts, but nothing
-# was exchanged: a full run leaves the decision to frpc's login), false (not working).
-FORWARD_STATE=false
-forward_probe() {   # ssh-forward: a real "ssh -N -L" setup, then one exchange through its local end; sets FORWARD_STATE
-  local err="$JOB_DIR/ssh-probe.err" i ms detail pre="" rc="" last t0 stage proof
-  FORWARD_STATE=false
+# PATH_STATE after path_probe: true (the token came back over verified TLS) or false.
+PATH_STATE=false
+path_probe() {   # ctl|tun: ssh mode = a real "ssh -N -L" for this forward alone, then the exchange through its local end;
+                 # direct mode = the exchange with the VM's port itself. Records the probe line path_<fwd>.
+  local id="$1" err="$JOB_DIR/ssh-probe-$1.err" lp rp i ms detail pre="" rc="" last="" t0 stage
+  lp="$(fwd_lport "$id")"; rp="$(fwd_rport "$id")"
+  PATH_STATE=false
   t0="$(now_ms)"
+  if [ "$TRANSPORT" = direct ]; then
+    far_end_exchange "$VM_ADDR" "$rp"
+    ms=$(( $(now_ms) - t0 ))
+    [ "$FAR_STATE" = token ] && PATH_STATE=true
+    detail="$(far_meaning "$FAR_STATE")"; [ "$PATH_STATE" = true ] || detail="NOT PASSED, $detail: $FAR_DETAIL"
+    record "path_$id" "$PATH_STATE" "$ms" "$detail" ",\"via\":\"direct\",\"stage\":\"ok\",\"far_end\":\"$FAR_STATE\",\"vm_port\":$rp"
+    return 0
+  fi
   if ! command -v ssh >/dev/null 2>&1; then pre="ssh is not installed on this node"
   elif [ ! -f "$SSH_KEY" ] || [ ! -r "$SSH_KEY" ]; then pre="the key file is missing or unreadable"
   elif ! file_mode_ok "$SSH_KEY"; then pre="the key file is not mode 600 or 400"
   elif [ ! -s "$SSH_KNOWN_HOSTS" ]; then pre="the known_hosts file is missing or empty"
-  elif local_end_up; then pre="local port $LPORT already has a listener on this node, so a connect to it would prove nothing"
+  elif [ ! -s "$CA_FILE" ]; then pre="CA_FILE is missing or empty"
+  elif local_end_up "$lp"; then pre="local port $lp already has a listener on this node, so a connect to it would prove nothing"
   fi
   if [ -n "$pre" ]; then
-    record forward_setup false 0 "not tried: $pre" ",\"stage\":\"precondition\",\"lport\":$LPORT"
+    record "path_$id" false 0 "not tried: $pre" ",\"via\":\"ssh\",\"stage\":\"precondition\",\"lport\":$lp,\"vm_port\":$rp"
     return 1
   fi
-  build_ssh_args
+  build_ssh_args "$lp" "$rp"
   : > "$err"
   # the outer timeout is a backstop: ssh cannot outlive this probe even if the script dies
-  timeout -k 2 40 ssh "${SSH_ARGS[@]}" 2>"$err" </dev/null &
+  timeout -k 2 60 ssh "${SSH_ARGS[@]}" 2>"$err" </dev/null &
   rec_set PSSH $!
   stage=no_listener_in_15s
   for i in $(seq 1 60); do
     if ! rec_alive PSSH; then wait "$PSSH_PID" 2>/dev/null; rc=$?; stage=ssh_exited; break; fi
-    if lport_listening; then stage=listening; break; fi   # opens only after authentication; the process is still ours (checked above)
+    if lport_listening "$lp"; then stage=listening; break; fi   # opens only after authentication; the process is still ours (checked above)
     sleep 0.25
   done
   last="$(tail -n 1 "$err" 2>/dev/null)"
   if [ "$stage" = listening ]; then
-    far_end_exchange
+    far_end_exchange 127.0.0.1 "$lp"
     ms=$(( $(now_ms) - t0 ))
-    if [ "$PROBE_ONLY" = 1 ]; then
-      proof=token_exchange
-      if [ "$FAR_STATE" = token ]; then FORWARD_STATE=true; detail="the probe token came back through the forward"
-      else
-        case "$FAR_STATE" in
-          closed) detail="the far end closed the connection: nothing listens on the VM's port, or the key may not forward to it" ;;
-          held)   detail="the far end accepted the connection but sent nothing in 3 s: a listener is there, but it is not probe_responder.py" ;;
-          data)   detail="the far end sent bytes that are not the probe token" ;;
-          *)      detail="the local end could not be used" ;;
-        esac
-        detail="NOT PASSED, $detail; ssh said: $last"
-      fi
-    else
-      proof=listener_only
-      case "$FAR_STATE" in
-        held)   FORWARD_STATE=null; detail="authenticated, listener up, the far end accepts and waits (as frps does); whether frps answers a login is decided by frpc's login below" ;;
-        closed) detail="NOT PASSED, the far end closed the connection: frps is not listening on the VM's port, or the key may not forward to it; ssh said: $last" ;;
-        token|data) detail="NOT PASSED, something other than frps answered on the VM's port (is probe_responder.py still running?)" ;;
-        *)      detail="NOT PASSED, the local end could not be used" ;;
-      esac
-    fi
-    record forward_setup "$FORWARD_STATE" "$ms" "$detail" ",\"stage\":\"ok\",\"proof\":\"$proof\",\"far_end\":\"$FAR_STATE\",\"lport\":$LPORT"
+    [ "$FAR_STATE" = token ] && PATH_STATE=true
+    detail="$(far_meaning "$FAR_STATE")"
+    [ "$PATH_STATE" = true ] || detail="NOT PASSED, $detail: $FAR_DETAIL; ssh said: $last"
+    record "path_$id" "$PATH_STATE" "$ms" "$detail" ",\"via\":\"ssh\",\"stage\":\"ok\",\"far_end\":\"$FAR_STATE\",\"lport\":$lp,\"vm_port\":$rp"
   else
     ms=$(( $(now_ms) - t0 ))
     if [ "$stage" = ssh_exited ]; then detail="ssh exited with code $rc ($(classify_ssh_stderr "$err")): $last"
     else detail="no listener on the local end within 15 s; ssh said: $last"; fi
-    record forward_setup false "$ms" "$detail" ",\"stage\":\"$stage\",\"ssh_exit\":${rc:-null},\"lport\":$LPORT"
+    record "path_$id" false "$ms" "$detail" ",\"via\":\"ssh\",\"stage\":\"$stage\",\"ssh_exit\":${rc:-null},\"lport\":$lp,\"vm_port\":$rp"
   fi
   stop_rec PSSH
   return 0
 }
 
-tcp_probe tcp_vm_22 "$VM_ADDR" "$VM_SSH_PORT" 1;     R_VM22=$PROBE_OK
-tcp_probe tcp_vm_frps "$VM_ADDR" "$FRPS_PORT" 0;     R_VMFRPS=$PROBE_OK
-https_probe https_github https://github.com/;        R_GITHUB=$PROBE_OK
+tcp_probe tcp_vm_22 "$VM_ADDR" "$VM_SSH_PORT" 1;          R_VM22=$PROBE_OK
+tcp_probe tcp_vm_agent "$VM_ADDR" "$AGENT_PORT" 0;        R_VMAGENT=$PROBE_OK
+tcp_probe tcp_vm_dialhome "$VM_ADDR" "$DIALHOME_PORT" 0;  R_VMDIAL=$PROBE_OK
+https_probe https_github https://github.com/;             R_GITHUB=$PROBE_OK
 # pypi's simple index is about 48 MB: ask for one byte of it, the TLS and HTTP exchange is the same
 https_probe https_pypi https://pypi.org/simple/ --range 0-0; R_PYPI=$PROBE_OK
-R_FWD=null
+ensure_python || true            # the exchanges below need it (verified TLS); a missing python fails them, not the probes above
+path_probe ctl || true;  R_CTL=$PATH_STATE
+path_probe tun || true;  R_TUN=$PATH_STATE
 PATH_OK=false
-reached=0
-if [ "$TRANSPORT" = ssh-forward ]; then
-  forward_probe || true
-  R_FWD=$FORWARD_STATE
-  case "$FORWARD_STATE" in
-    true) reached=1; PATH_OK=true ;;
-    null) reached=1; PATH_OK=null ;;
-  esac
-else
-  [ "$R_VMFRPS" = true ] && reached=$((reached + 1))
-  if [ "$PROBE_TLS_PORTS" != "none" ]; then
-    ensure_python || true
-    for port in $PROBE_TLS_PORTS; do
-      tls_probe "tls_vm_$port" "$VM_ADDR" "$port"
-      [ "$PROBE_OK" = true ] && reached=$((reached + 1))
-    done
-  fi
-  [ "$reached" -gt 0 ] && PATH_OK=true
-fi
-emit summary "$(printf ',"vm_22":%s,"vm_frps":%s,"https_github":%s,"https_pypi":%s,"forward_setup":%s,"transport_path_ok":%s' \
-  "$R_VM22" "$R_VMFRPS" "$R_GITHUB" "$R_PYPI" "$R_FWD" "$PATH_OK")"
-if [ "$reached" -eq 0 ]; then
-  if [ "$TRANSPORT" = ssh-forward ]; then
-    log "RESULT: NOT REACHABLE. The ssh forward over port 22 did not carry an exchange to the VM from this node (see forward_setup in $PROBE_JSONL). The spike stops here for this platform: any access change is the owner's decision."
+[ "$R_CTL" = true ] && [ "$R_TUN" = true ] && PATH_OK=true
+emit summary "$(printf ',"vm_22":%s,"vm_agent":%s,"vm_dialhome":%s,"https_github":%s,"https_pypi":%s,"path_ctl":%s,"path_tun":%s,"transport_path_ok":%s' \
+  "$R_VM22" "$R_VMAGENT" "$R_VMDIAL" "$R_GITHUB" "$R_PYPI" "$R_CTL" "$R_TUN" "$PATH_OK")"
+if [ "$PATH_OK" != true ]; then
+  if [ "$TRANSPORT" = ssh ]; then
+    log "RESULT: NOT REACHABLE. The two ssh forwards over port 22 did not both carry a verified exchange to the VM side from this node (control $R_CTL, tunnel $R_TUN; see path_ctl and path_tun in $PROBE_JSONL). The spike stops here for this platform: any access change is the owner's decision."
   else
-    log "RESULT: NOT REACHABLE. Neither the frps port nor a probed TLS port answered from this node. The spike stops here: opening a port or any other access change is the owner's decision."
+    log "RESULT: NOT REACHABLE. The agent endpoint and the dial-home listener did not both answer a verified exchange from this node (control $R_CTL, tunnel $R_TUN). The spike stops here: opening a port or any other access change is the owner's decision."
   fi
   exit 3
 fi
-if [ "$PATH_OK" = true ]; then
-  log "RESULT: the transport path works from this node; see $PROBE_JSONL"
-else
-  log "RESULT: step 0 passed so far (forward up, far end accepting); the verdict on the path is frpc's login below"
-fi
+log "RESULT: both transport paths work from this node (verified TLS through control and tunnel); see $PROBE_JSONL"
 if [ "$PROBE_ONLY" = "1" ]; then
-  ensure_python || true            # record the interpreter even in a probe-only job; never fatal here
   log "PROBE_ONLY=1: done"
   exit 0
 fi
 ensure_python || die "no python >= 3.6 on this node; set PYTHON to a wrapper (for example an apptainer exec line on Helios)"
-trap 'STOP=1; signal_rec SLP TERM' TERM INT       # from here a scancel ends the waits below and goes through on_exit
+trap 'STOP=1; signal_rec SLP TERM; signal_rec PRATE TERM' TERM INT   # from here a scancel ends the waits below and goes through on_exit
 
 # --- preflight for the full run ---------------------------------------------------------------------
 [ -f "$TOKEN_FILE" ] || die "token file not found: $TOKEN_FILE"
 file_mode_ok "$TOKEN_FILE" || die "token file must be mode 600 or 400"
+[ -s "$CA_FILE" ] || die "CA_FILE not found or empty: $CA_FILE"
 FRPC_SRC="$(ls -d "$KIT_DIR"/dl/linux_"$FRP_ARCH"/frp_*_linux_"$FRP_ARCH"/frpc 2>/dev/null)"
 [ -n "$FRPC_SRC" ] && [ "$(printf '%s\n' "$FRPC_SRC" | wc -l)" -eq 1 ] || die "expected exactly one frpc for $FRP_ARCH under $KIT_DIR/dl (run fetch-frp.sh)"
 mkdir -p "$JOB_DIR/bin"
 install -m 700 "$FRPC_SRC" "$JOB_DIR/bin/frpc" || die "cannot copy frpc"
 FRPC="$JOB_DIR/bin/frpc"
 log "frpc: $("$FRPC" --version 2>&1) for $FRP_ARCH (if this fails with 'permission denied', the filesystem is mounted noexec)"
-INSTANCE="$INSTANCE_PREFIX"      # no job id: the watcher is started before the job is submitted, so the name must be known then
-log "instance name: $INSTANCE (stream_watch.py --domain takes this)"
+INSTANCE="$INSTANCE_PREFIX"      # no job id: the watcher is started before the job is submitted, so the names must be known then
+log "instance name: $INSTANCE, tcpmux domain (Instance UID): $INSTANCE_UID (stream_watch.py --domain takes the UID)"
 
 # Fault signals that arrive before the run is armed are logged and ignored (the default action would kill the script).
 on_usr1() { if [ "$ARMED" -eq 1 ]; then log "FAULT usr1: SIGKILL frpc"; signal_rec FRPC KILL || log "frpc is not running"; else log "USR1 before the run was armed: ignored"; fi; }
@@ -631,7 +638,7 @@ start_engine() {   # PORT: 0 picks a free one (written to streamer.port); a rest
     --request-log "$JOB_DIR/streamer.requests" >>"$JOB_DIR/streamer.log" 2>&1 &
   rec_set STREAMER $!
 }
-start_engine 0
+start_engine "$ENGINE_PORT"
 for _ in $(seq 1 50); do [ -s "$JOB_DIR/streamer.port" ] && break; sleep 0.2; done
 [ -s "$JOB_DIR/streamer.port" ] || die "fake_streamer did not start; see $JOB_DIR/streamer.log"
 LOCAL_PORT="$(cat "$JOB_DIR/streamer.port")"
@@ -652,23 +659,27 @@ restart_engine() {   # on the ORIGINAL port, so frpc's local port stays right; t
 req_count() { local n; n="$(wc -l < "$JOB_DIR/streamer.requests" 2>/dev/null || echo 0)"; echo "${n//[[:space:]]/}"; }
 BASE_REQS="$(req_count)"       # the job's own loopback requests are not the watcher
 
-# --- the ssh forward (ssh-forward mode): a reconnect loop, no autossh -------------------------------
-# Each attempt is a line in ssh-exits.jsonl with allowlisted fields only (time, attempt, exit code and
+# --- the two ssh forwards (ssh mode): one reconnect loop each, no autossh ----------------------------
+# The control forward and the tunnel forward are two separate ssh connections, as in alpha (HBEP-6), so a
+# bulk reply on the tunnel never queues behind or in front of the control channel inside one ssh session.
+# Each attempt is a line in ssh-<fwd>-exits.jsonl with allowlisted fields only (time, attempt, exit code and
 # class, whether the forward was established, seconds up, restart delay); raw stderr goes to the private
-# ssh-raw.err. Counts are kept apart in ssh-counters.json: attempts, established sessions, disconnects
-# (an established session that ended) and recoveries (a session established after a disconnect).
+# ssh-<fwd>-raw.err. Counts are kept apart in ssh-<fwd>-counters.json: attempts, established sessions,
+# disconnects (an established session that ended) and recoveries (a session established after a disconnect).
 # The backoff starts at 2 s, doubles to at most 30 s while ssh dies within 20 s of starting, and resets
 # to 2 s after a longer life. A permanent class (auth, hostkey, forwarding) or an outage past
-# OUTAGE_DEADLINE_S ends the loop and writes transport.failed, which the job turns into exit 4.
-# ssh.pid always holds "pid starttime" of the current ssh.
-write_counters() {   # attempts established disconnects recoveries: atomic replace
-  printf '{"attempts":%s,"established":%s,"disconnects":%s,"recoveries":%s,"outage_deadline_s":%s}\n' \
-    "$1" "$2" "$3" "$4" "$OUTAGE_DEADLINE_S" > "$JOB_DIR/ssh-counters.json.tmp" && mv "$JOB_DIR/ssh-counters.json.tmp" "$JOB_DIR/ssh-counters.json"
+# OUTAGE_DEADLINE_S ends that loop and writes transport.failed ("<fwd>:<class>"), which the job turns into
+# exit 4, whichever forward it was. ssh-<fwd>.pid always holds "pid starttime" of that loop's current ssh.
+write_counters() {   # fwd attempts established disconnects recoveries: atomic replace
+  printf '{"forward":"%s","attempts":%s,"established":%s,"disconnects":%s,"recoveries":%s,"outage_deadline_s":%s}\n' \
+    "$1" "$2" "$3" "$4" "$5" "$OUTAGE_DEADLINE_S" > "$JOB_DIR/ssh-$1-counters.json.tmp" && mv "$JOB_DIR/ssh-$1-counters.json.tmp" "$JOB_DIR/ssh-$1-counters.json"
 }
-start_forward_loop() {
-  build_ssh_args
-  : > "$JOB_DIR/ssh-raw.err"; : > "$JOB_DIR/ssh-exits.jsonl"; : > "$JOB_DIR/ssh.pid"
-  write_counters 0 0 0 0
+start_forward_loop() {   # ctl|tun: starts that forward's loop in the background and records it (CTL_LOOP or TUN_LOOP)
+  local id="$1" lp rp
+  lp="$(fwd_lport "$id")"; rp="$(fwd_rport "$id")"
+  build_ssh_args "$lp" "$rp"
+  : > "$JOB_DIR/ssh-$id-raw.err"; : > "$JOB_DIR/ssh-$id-exits.jsonl"; : > "$JOB_DIR/ssh-$id.pid"
+  write_counters "$id" 0 0 0 0
   (
     n=0 est=0 disc=0 reco=0 need_reco=0 backoff=2 STOPF=0
     down_since=$(date +%s)
@@ -676,75 +687,118 @@ start_forward_loop() {
     trap 'STOPF=1; signal_rec CUR TERM; signal_rec SLP TERM' TERM INT
     while [ "$STOPF" -eq 0 ]; do
       n=$((n + 1)); t0=$(date +%s); established=0
-      ssh "${SSH_ARGS[@]}" 2>"$JOB_DIR/ssh-cur.err" </dev/null &
+      ssh "${SSH_ARGS[@]}" 2>"$JOB_DIR/ssh-$id-cur.err" </dev/null &
       rec_set CUR $!
-      printf '%s %s\n' "$CUR_PID" "$CUR_ST" > "$JOB_DIR/ssh.pid"
+      printf '%s %s\n' "$CUR_PID" "$CUR_ST" > "$JOB_DIR/ssh-$id.pid"
       [ "$STOPF" -eq 1 ] && signal_rec CUR TERM         # TERM arrived between the fork and the record
-      log "ssh-forward: attempt $n started"
+      log "ssh-$id: attempt $n started"
       while [ "$STOPF" -eq 0 ] && rec_alive CUR; do
-        if [ "$established" -eq 0 ] && lport_listening; then
+        if [ "$established" -eq 0 ] && lport_listening "$lp"; then
           established=1; est=$((est + 1)); down_since=$(date +%s)
-          if [ "$need_reco" -eq 1 ]; then reco=$((reco + 1)); need_reco=0; log "ssh-forward: attempt $n established (recovery $reco)"
-          else log "ssh-forward: attempt $n established"; fi
-          write_counters "$n" "$est" "$disc" "$reco"
+          if [ "$need_reco" -eq 1 ]; then reco=$((reco + 1)); need_reco=0; log "ssh-$id: attempt $n established (recovery $reco)"
+          else log "ssh-$id: attempt $n established"; fi
+          write_counters "$id" "$n" "$est" "$disc" "$reco"
         fi
         nap 0.5
       done
       wait "$CUR_PID" 2>/dev/null; rc=$?
-      rec_clear CUR; : > "$JOB_DIR/ssh.pid"
+      rec_clear CUR; : > "$JOB_DIR/ssh-$id.pid"
       [ "$STOPF" -eq 1 ] && break
       now=$(date +%s); up=$(( now - t0 ))
-      cls="$(classify_ssh_stderr "$JOB_DIR/ssh-cur.err")"
-      cat "$JOB_DIR/ssh-cur.err" >> "$JOB_DIR/ssh-raw.err" 2>/dev/null
+      cls="$(classify_ssh_stderr "$JOB_DIR/ssh-$id-cur.err")"
+      cat "$JOB_DIR/ssh-$id-cur.err" >> "$JOB_DIR/ssh-$id-raw.err" 2>/dev/null
       if [ "$established" -eq 1 ]; then disc=$((disc + 1)); need_reco=1; down_since=$now; fi
       delay=$backoff
       if [ "$up" -ge 20 ]; then delay=2; backoff=2; else backoff=$(( backoff * 2 )); [ "$backoff" -gt 30 ] && backoff=30; fi
-      log "ssh-forward: attempt $n exited with code $rc (class $cls, established $established) after ${up}s, restarting in ${delay}s"
+      log "ssh-$id: attempt $n exited with code $rc (class $cls, established $established) after ${up}s, restarting in ${delay}s"
       printf '{"ts":"%s","attempt":%s,"rc":%s,"class":"%s","established":%s,"up_s":%s,"restart_in_s":%s}\n' \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$n" "$rc" "$cls" "$established" "$up" "$delay" >> "$JOB_DIR/ssh-exits.jsonl"
-      write_counters "$n" "$est" "$disc" "$reco"
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$n" "$rc" "$cls" "$established" "$up" "$delay" >> "$JOB_DIR/ssh-$id-exits.jsonl"
+      write_counters "$id" "$n" "$est" "$disc" "$reco"
       case "$cls" in auth|hostkey|forwarding)
-        echo "$cls" > "$JOB_DIR/transport.failed"; log "ssh-forward: PERMANENT failure ($cls): retrying cannot fix it, stopping"; break ;;
+        echo "$id:$cls" > "$JOB_DIR/transport.failed"; log "ssh-$id: PERMANENT failure ($cls): retrying cannot fix it, stopping"; break ;;
       esac
       if [ $(( now - down_since )) -ge "$OUTAGE_DEADLINE_S" ]; then
-        echo outage_deadline > "$JOB_DIR/transport.failed"; log "ssh-forward: no established forward for $(( now - down_since ))s (deadline ${OUTAGE_DEADLINE_S}s), stopping"; break
+        echo "$id:outage_deadline" > "$JOB_DIR/transport.failed"; log "ssh-$id: no established forward for $(( now - down_since ))s (deadline ${OUTAGE_DEADLINE_S}s), stopping"; break
       fi
       nap "$delay"
     done
-    log "ssh-forward: loop stopped after $n attempt(s)"
+    log "ssh-$id: loop stopped after $n attempt(s)"
   ) &
-  rec_set FWD_LOOP $!
-  log "ssh-forward: loop pid=$FWD_LOOP_PID, local end 127.0.0.1:$LPORT, far end 127.0.0.1:$FRPS_PORT on the VM"
+  if [ "$id" = ctl ]; then rec_set CTL_LOOP $!; else rec_set TUN_LOOP $!; fi
+  log "ssh-$id: loop pid=$!, local end 127.0.0.1:$lp, far end 127.0.0.1:$rp on the VM"
+}
+start_forwards() {   # both loops, then wait until both local ends listen (FWD_STARTUP_WAIT_S) or exit 4
   local i
+  start_forward_loop ctl
+  start_forward_loop tun
   for i in $(seq 1 $(( FWD_STARTUP_WAIT_S * 5 ))); do
-    lport_listening && break
+    lport_listening "$LPORT_CTL" && lport_listening "$LPORT_TUN" && break
     [ "$STOP" -eq 1 ] && return 0
     [ -s "$JOB_DIR/transport.failed" ] && break
     sleep 0.2
   done
-  if lport_listening; then log "ssh-forward: the local end is up"
+  if lport_listening "$LPORT_CTL" && lport_listening "$LPORT_TUN"; then log "ssh: both local ends are up (control $LPORT_CTL, tunnel $LPORT_TUN)"
   else
     [ -s "$JOB_DIR/transport.failed" ] || echo startup_timeout > "$JOB_DIR/transport.failed"
-    log "RESULT: TRANSPORT FAILED ($(cat "$JOB_DIR/transport.failed")): the ssh forward is not up after ${FWD_STARTUP_WAIT_S}s; see $JOB_DIR/ssh-exits.jsonl"
+    log "RESULT: TRANSPORT FAILED ($(cat "$JOB_DIR/transport.failed")): the two ssh forwards are not both up after ${FWD_STARTUP_WAIT_S}s; see $JOB_DIR/ssh-ctl-exits.jsonl and ssh-tun-exits.jsonl"
     EXIT_CODE=4; exit 4
   fi
 }
-if [ "$TRANSPORT" = ssh-forward ]; then
-  start_forward_loop
-  SERVER_ADDR=127.0.0.1; SERVER_PORT="$LPORT"
-else
-  SERVER_ADDR="$VM_ADDR"; SERVER_PORT="$FRPS_PORT"
+[ "$TRANSPORT" = ssh ] && start_forwards
+
+# --- the path rate: a bulk transfer through each forward, BEFORE frpc starts ----------------------------
+# The tunnel forward is the ssh connection that will carry frpc's yamux session; a bulk transfer on it while
+# frpc runs would hold frp's pings and tokens back, so it runs here, before frpc, one transfer at a time.
+# "up" = this node sends to the VM (the direction of the tokens), timed at the VM's receiver; "down" = the VM
+# sends, timed here. Each result is a path_rate line in probe.jsonl (which export/ carries to verdict.py).
+# verdict.py derives the heartbeat bound 6 MiB / rate from the tunnel's up rate (README, "Path rate").
+measure_path_rates() {
+  local id d out rest cap=() h p
+  [ "$PATHRATE_MAX_BPS" -gt 0 ] && cap=(--max-bps "$PATHRATE_MAX_BPS")
+  for id in tun ctl; do
+    h="$(fwd_host "$id")"; p="$(fwd_port "$id")"
+    for d in $PATHRATE_DIRECTIONS; do
+      [ "$STOP" -eq 0 ] || return 0
+      log "path rate: $id $d for ${PATHRATE_S}s${cap[*]:+ (capped: ${cap[*]})}"
+      timeout -k 5 $(( PATHRATE_S + 90 )) "${PYBIN[@]}" "$KIT_DIR/path_rate.py" measure --host "$h" --port "$p" --forward "$id" \
+        --direction "$d" --seconds "$PATHRATE_S" "${cap[@]}" --tls --ca "$CA_FILE" --server-name "$TLS_SERVER_NAME" \
+        --timeout 30 > "$JOB_DIR/path-rate.out" 2>>"$JOB_DIR/path-rate.err" </dev/null &
+      rec_set PRATE $!
+      wait "$PRATE_PID" 2>/dev/null
+      while rec_alive PRATE; do [ "$STOP" -eq 1 ] && break; wait "$PRATE_PID" 2>/dev/null; done   # a trapped signal ends wait early
+      stop_rec PRATE
+      [ "$STOP" -eq 0 ] || return 0
+      out="$(tail -n 1 "$JOB_DIR/path-rate.out" 2>/dev/null)"
+      case "$out" in
+        '{"forward": '*'}')
+          rest="${out#\{}"; rest="${rest%\}}"
+          emit path_rate ",\"via\":\"$TRANSPORT\",$rest" ;;
+        *)
+          emit path_rate "$(printf ',"via":"%s","forward":"%s","direction":"%s","ok":false,"requested_s":%s,"detail":"%s"' \
+            "$TRANSPORT" "$id" "$d" "$PATHRATE_S" "$(jstr "path_rate.py measure gave no result: $(tail -n 1 "$JOB_DIR/path-rate.err" 2>/dev/null)")")" ;;
+      esac
+    done
+  done
+}
+measure_path_rates
+[ "$STOP" -eq 0 ] || { log "stopped during the path-rate measurement"; exit "$EXIT_CODE"; }
+if [ -s "$JOB_DIR/transport.failed" ]; then
+  log "RESULT: TRANSPORT FAILED ($(cat "$JOB_DIR/transport.failed")) during the path-rate measurement"
+  EXIT_CODE=4; exit 4
 fi
+SERVER_ADDR="$TUN_HOST"; SERVER_PORT="$TUN_PORT"
 
 # --- frpc ----------------------------------------------------------------------------------------------
 "${PYBIN[@]}" "$KIT_DIR/render_tmpl.py" "$KIT_DIR/frpc.toml.tmpl" \
-  SERVER_ADDR="$SERVER_ADDR" SERVER_PORT="$SERVER_PORT" INSTANCE="$INSTANCE" LOG_FILE="$JOB_DIR/frpc.log" \
-  TOKEN_FILE="$TOKEN_FILE" PROTOCOL="$PROTOCOL" LOCAL_PORT="$LOCAL_PORT" > "$JOB_DIR/frpc.toml" || die "cannot render frpc.toml"
+  SERVER_ADDR="$SERVER_ADDR" SERVER_PORT="$SERVER_PORT" INSTANCE="$INSTANCE" INSTANCE_UID="$INSTANCE_UID" \
+  LOG_FILE="$JOB_DIR/frpc.log" TOKEN_FILE="$TOKEN_FILE" CA_FILE="$CA_FILE" TLS_SERVER_NAME="$TLS_SERVER_NAME" \
+  LOCAL_PORT="$LOCAL_PORT" > "$JOB_DIR/frpc.toml" || die "cannot render frpc.toml"
 "$FRPC" verify -c "$JOB_DIR/frpc.toml" || die "frpc.toml does not verify"
 "$FRPC" -c "$JOB_DIR/frpc.toml" >"$JOB_DIR/frpc.stdout" 2>&1 &
 rec_set FRPC $!
-log "frpc pid=$FRPC_PID protocol=$PROTOCOL dialing $SERVER_ADDR:$SERVER_PORT"
-printf 'frpc=%s %s\nstreamer=%s %s\nforward_loop=%s %s\n' "$FRPC_PID" "$FRPC_ST" "$STREAMER_PID" "$STREAMER_ST" "$FWD_LOOP_PID" "$FWD_LOOP_ST" > "$JOB_DIR/pids"
+log "frpc pid=$FRPC_PID protocol=wss (verified TLS, server name $TLS_SERVER_NAME) dialing $SERVER_ADDR:$SERVER_PORT"
+printf 'frpc=%s %s\nstreamer=%s %s\nctl_loop=%s %s\ntun_loop=%s %s\n' "$FRPC_PID" "$FRPC_ST" "$STREAMER_PID" "$STREAMER_ST" \
+  "$CTL_LOOP_PID" "$CTL_LOOP_ST" "$TUN_LOOP_PID" "$TUN_LOOP_ST" > "$JOB_DIR/pids"
 
 # Gate 1: frpc's own log line is the only proof that a Login reached frps and was accepted. A forward that
 # merely listens proves authentication and nothing about frps. No login in time ends the job.
@@ -762,7 +816,7 @@ if [ "$STOP" -eq 0 ]; then
     emit frpc_login ',"ok":true,"detail":"frpc logged in: a Login reached frps and was accepted"'
   elif [ -s "$JOB_DIR/transport.failed" ]; then
     log "RESULT: TRANSPORT FAILED ($(cat "$JOB_DIR/transport.failed")) before frpc logged in"
-    emit frpc_login ',"ok":false,"detail":"the ssh forward failed for good before frpc logged in"'
+    emit frpc_login ',"ok":false,"detail":"an ssh forward failed for good before frpc logged in"'
     EXIT_CODE=4; exit 4
   else
     log "RESULT: NOT REACHABLE. frpc did not log in within ${FRPC_LOGIN_WAIT_S}s (frpc alive: $(rec_alive FRPC && echo yes || echo no)); see $JOB_DIR/frpc.log. Cleaning up."
@@ -807,23 +861,23 @@ while [ "$STOP" -eq 0 ]; do
     ENGINE_RESTART_AT=""; restart_engine
   fi
   if [ -s "$JOB_DIR/transport.failed" ]; then
-    log "RESULT: TRANSPORT FAILED ($(cat "$JOB_DIR/transport.failed")): the ssh forward cannot be recovered. Cleaning up."
+    log "RESULT: TRANSPORT FAILED ($(cat "$JOB_DIR/transport.failed")): an ssh forward cannot be recovered. Cleaning up."
     EXIT_CODE=4; break
   fi
-  for name in FRPC STREAMER FWD_LOOP; do               # say once when a child is gone, reap it and clear its record
+  for name in FRPC STREAMER CTL_LOOP TUN_LOOP; do               # say once when a child is gone, reap it and clear its record
     var="${name}_PID"; pid="${!var}"
     [ -n "$pid" ] || continue
     if ! rec_alive "$name"; then
       log "$name (pid $pid) is no longer running"
-      if [ "$name" = FWD_LOOP ] && [ "$STOP" -eq 0 ] && [ ! -s "$JOB_DIR/transport.failed" ]; then
-        echo loop_died > "$JOB_DIR/transport.failed"
+      if [ "${name%_LOOP}" != "$name" ] && [ "$STOP" -eq 0 ] && [ ! -s "$JOB_DIR/transport.failed" ]; then
+        echo "${name%_LOOP}:loop_died" | tr 'A-Z' 'a-z' > "$JOB_DIR/transport.failed"
       fi
       stop_rec "$name"
     fi
   done
 done
 
-log "stopping frpc, fake_streamer and the ssh forward (exit code $EXIT_CODE)"
+log "stopping frpc, fake_streamer and the ssh forwards (exit code $EXIT_CODE)"
 shutdown_children
 log "s1 job end"
 exit "$EXIT_CODE"

@@ -18,8 +18,34 @@ TSSHD_DIR="" TSSHD_PORT="" TSSHD_PID="" TSSHD_PID_ST="" TSSHD_USER="" TSSHD_KEY=
 
 _tsshd_start_time() { local s; s="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1; s="${s##*) }"; set -- $s; echo "${20}"; }
 
+# Every listener the kit's local runs start binds a port in 29400-29499, the range this kit may use on the shared
+# VM. Ports are handed out round-robin from a small state file (locked), so ports given to one test are not handed
+# out again at once; a port that does not bind (another user, TIME_WAIT) is skipped. S1_PORT_STATE names the file;
+# the runner and the smoke test create one per run and delete it.
 tsshd_free_port() {
-  python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
+  python3 - "${S1_PORT_STATE:-${TMPDIR:-/tmp}/s1-ports.$(id -u)}" <<'PY_PORT'
+import fcntl, os, socket, sys
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+raw = os.read(fd, 16).decode().strip()
+start = int(raw) if raw.isdigit() else 0
+for k in range(100):
+    port = 29400 + (start + k) % 100
+    s = socket.socket()
+    try:
+        s.bind(("127.0.0.1", port))
+    except OSError:
+        continue
+    finally:
+        s.close()
+    os.lseek(fd, 0, 0)
+    os.ftruncate(fd, 0)
+    os.write(fd, str((start + k + 1) % 100).encode())
+    print(port)
+    sys.exit(0)
+sys.stderr.write("throwaway-sshd: no free loopback port in 29400-29499\n")
+sys.exit(1)
+PY_PORT
 }
 
 tsshd_start() {
