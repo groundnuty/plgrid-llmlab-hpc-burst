@@ -27,8 +27,10 @@ type Recorder interface {
 	Event(obj client.Object, warning bool, typ, code, message string)
 }
 
-// KubeRecorder emits Kubernetes Events through client-go's events recorder,
-// with reason "<type>/<code>" and the type as the action.
+// KubeRecorder emits Kubernetes Events through client-go's events recorder.
+// The event's reason is the reason code alone, a single CamelCase word, and
+// HBEP-8's type is the events.k8s.io action, so a reader selects on either
+// field without parsing the other out of a compound string.
 type KubeRecorder struct{ R events.EventRecorder }
 
 // Event implements Recorder.
@@ -37,7 +39,7 @@ func (k KubeRecorder) Event(obj client.Object, warning bool, typ, code, message 
 	if warning {
 		et = corev1.EventTypeWarning
 	}
-	k.R.Eventf(obj, nil, et, typ+"/"+code, typ, "%s", message)
+	k.R.Eventf(obj, nil, et, code, typ, "%s", message)
 }
 
 // RecordedEvent is one event a MemoryRecorder holds.

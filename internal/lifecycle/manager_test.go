@@ -49,9 +49,13 @@ import (
 
 const (
 	managerHealthAddr = "127.0.0.1:29301"
-	// managerPortBase is #61's envtest block, 29204-29207 (IMPL-COMMON.md,
-	// Envtest port blocks), used when HPCBURST_TESTENV_PORT_BASE is unset, so
-	// go test ./... runs it beside the other packages' control planes.
+	// managerPortBase is the first port of #61's envtest block, 29204-29207.
+	// One control plane takes four loopback ports (etcd client, etcd peer,
+	// kube-apiserver, kube-controller-manager) inside issue #40's range
+	// 29200-29219 (internal/testenv), and two control planes cannot share a
+	// block. go test runs packages in parallel, so each package that starts one
+	// gets a block of its own; this one is #61's. It is used when
+	// HPCBURST_TESTENV_PORT_BASE is unset.
 	managerPortBase = "29204"
 )
 
@@ -101,6 +105,41 @@ func eventually(t *testing.T, limit time.Duration, what string, cond func() (boo
 			t.Fatalf("%s: not within %s; last: %s", what, limit, last)
 		}
 		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// capturedEvent is one call of client-go's events recorder.
+type capturedEvent struct{ eventType, reason, action, note string }
+
+// captureRecorder is an events.EventRecorder that keeps what KubeRecorder
+// hands client-go.
+type captureRecorder struct{ got []capturedEvent }
+
+func (c *captureRecorder) Eventf(_ runtime.Object, _ runtime.Object, eventType, reason, action, note string, args ...any) {
+	c.got = append(c.got, capturedEvent{eventType, reason, action, fmt.Sprintf(note, args...)})
+}
+
+// TestKubeRecorderReasonIsTheCodeAlone: a Kubernetes Event's reason is the
+// single CamelCase reason code, and HBEP-8's type is the events.k8s.io action;
+// the "<type>/<Code>" form is gone (HBEP-7, Events and conditions). A warning
+// is a Warning event, anything else Normal. The expectations are literals.
+func TestKubeRecorderReasonIsTheCodeAlone(t *testing.T) {
+	c := &captureRecorder{}
+	k := KubeRecorder{R: c}
+	md := mdSpec("md")
+	k.Event(md, true, "degraded", "IdentityUnresolved", "class has no deployment ID")
+	k.Event(md, false, "ending-soon", "DrainStartsSoon", "less than an hour left")
+	want := []capturedEvent{
+		{corev1.EventTypeWarning, "IdentityUnresolved", "degraded", "class has no deployment ID"},
+		{corev1.EventTypeNormal, "DrainStartsSoon", "ending-soon", "less than an hour left"},
+	}
+	if len(c.got) != len(want) {
+		t.Fatalf("recorded %+v, want %+v", c.got, want)
+	}
+	for i := range want {
+		if c.got[i] != want[i] {
+			t.Errorf("event %d = %+v, want %+v", i, c.got[i], want[i])
+		}
 	}
 }
 
@@ -165,8 +204,9 @@ func TestManagerOnControlPlane(t *testing.T) {
 		t.Fatalf("create ModelDeployment: %v", err)
 	}
 	// A second deployment whose identity record name is taken by another ID:
-	// its degraded/IdentityUnresolved event must reach the API server as an
-	// events.k8s.io Event (a rejected Event would be dropped silently).
+	// its degraded event with reason IdentityUnresolved must reach the API
+	// server as an events.k8s.io Event, reason the code alone and action the
+	// HBEP-8 type (a rejected Event would be dropped silently).
 	collide := mdSpec("md-collide")
 	collide.Generation = 0
 	collide.Spec.Source.Served.Flags = append(collide.Spec.Source.Served.Flags, v1alpha1.EngineFlag{Name: "dtype", Value: "bfloat16"})
@@ -292,8 +332,9 @@ func TestManagerOnControlPlane(t *testing.T) {
 		}
 		var seen []string
 		for _, e := range evs.Items {
-			seen = append(seen, e.Reason+" on "+e.Regarding.Name)
-			if e.Reason == eventDegraded+"/"+v1alpha1.ReasonIdentityUnresolved && e.Regarding.Name == "md-collide" && e.Type == corev1.EventTypeWarning {
+			seen = append(seen, e.Reason+"/"+e.Action+" on "+e.Regarding.Name)
+			// Literals, not the code's constants: the wire form is the contract.
+			if e.Reason == "IdentityUnresolved" && e.Action == "degraded" && e.Regarding.Name == "md-collide" && e.Type == corev1.EventTypeWarning {
 				return true, ""
 			}
 		}
