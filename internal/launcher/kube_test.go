@@ -2,7 +2,15 @@ package launcher
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -10,6 +18,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"k8s.io/client-go/rest"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
 // writeAdmin overwrites the fake host's admin kubeconfig the way k3s writes it: in place, not
@@ -28,16 +39,64 @@ func useWaitReadyHook(t *testing.T, hook func(last error)) {
 	t.Cleanup(func() { waitReadyHook = nil })
 }
 
+// testClientCert returns a self-signed client certificate and its key as PEM, the form k3s writes
+// into the admin kubeconfig.
+func testClientCert(t *testing.T) (certPEM, keyPEM []byte) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "system:admin", Organization: []string{"system:masters"}},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+}
+
+// certKubeconfig is fakeKubeconfig with the user's credential a client certificate and key, as
+// k3s writes it, in place of the token.
+func certKubeconfig(t *testing.T, server string) *clientcmdapi.Config {
+	t.Helper()
+	cfg := fakeKubeconfig(server)
+	cfg.AuthInfos["default"].Token = ""
+	cfg.AuthInfos["default"].ClientCertificateData, cfg.AuthInfos["default"].ClientKeyData = testClientCert(t)
+	return cfg
+}
+
+// authenticates reports whether cfg can present a credential: a token, or a client certificate
+// and key that load as a pair.
+func authenticates(cfg *rest.Config) bool {
+	if cfg.BearerToken != "" {
+		return true
+	}
+	_, err := tls.X509KeyPair(cfg.CertData, cfg.KeyData)
+	return err == nil
+}
+
 // requireClientcmdOrder fails unless text has the field order that makes a cut kubeconfig
-// dangerous: a cluster's server before its name, and all of that before the contexts and the
-// current-context. That is the order of clientcmd.Write, which k3s uses, and a fixture that
-// put "name" first would hide the cut file that parses as an unnamed cluster.
+// dangerous: a cluster's server before its name, all of that before the contexts and the
+// current-context, and the users after them. That is the order of clientcmd.Write, which k3s
+// uses, and a fixture that put "name" first would hide the cut file that parses as an unnamed
+// cluster.
 func requireClientcmdOrder(t *testing.T, text string) {
 	t.Helper()
 	server, name := strings.Index(text, "server:"), strings.Index(text, "name:")
 	contexts, current := strings.Index(text, "contexts:"), strings.Index(text, "current-context:")
-	if server < 0 || name < 0 || contexts < 0 || current < 0 || server >= name || name >= contexts || contexts >= current {
-		t.Fatalf("the fixture is not in clientcmd's field order (server %d, name %d, contexts %d, current-context %d):\n%s", server, name, contexts, current, text)
+	users := strings.Index(text, "\nusers:")
+	if server < 0 || name < 0 || contexts < 0 || current < 0 || users < 0 || server >= name || name >= contexts || contexts >= current || current >= users {
+		t.Fatalf("the fixture is not in clientcmd's field order (server %d, name %d, contexts %d, current-context %d, users %d):\n%s", server, name, contexts, current, users, text)
 	}
 }
 
@@ -59,13 +118,16 @@ func TestWaitReadyWaitsForAWholeAdminKubeconfig(t *testing.T) {
 		return string(b)
 	}
 
-	// Each incomplete state must make the launcher wait. Four are refused by restConfig before any
-	// request: empty, cut before the contexts, cut before the current-context, and cut inside the
+	// Each incomplete state must make the launcher wait. Five are refused by restConfig before any
+	// request: empty, cut before the contexts, cut before the current-context, cut inside the
 	// server address (the case where clientcmd's field order matters: the file then holds a cluster
 	// with no name yet, which client-go uses although no context selects it, and the address reads
-	// as another server's). The fifth is a cut that parses and resolves, inside a base64 blob on a
-	// 4-character boundary: clientcmd accepts it and only the first use of the config fails, so the
-	// file must be read again after /readyz failed, not kept from the first parse.
+	// as another server's), and cut inside the users, where the user has no credential yet (the
+	// fake apiserver, like a real one, answers /readyz to a request with none, so a config
+	// without credentials would pass it). The last parses and resolves: the user's certificate and
+	// key are PEM blocks, but not a certificate and key. restConfig accepts it and only the first
+	// use of the config fails, so the file must be read again after /readyz failed, not kept from
+	// the first parse.
 	for _, tc := range []struct {
 		name    string
 		partial func(t *testing.T, h *fakeHost, valid string) string
@@ -81,12 +143,20 @@ func TestWaitReadyWaitsForAWholeAdminKubeconfig(t *testing.T) {
 			}
 			return cut
 		}},
-		{"parses, but its client certificate is not PEM", func(t *testing.T, h *fakeHost, _ string) string {
+		{"cut inside the users, before the user has a credential", func(t *testing.T, _ *fakeHost, v string) string {
+			requireClientcmdOrder(t, v)
+			cut := v[:strings.Index(v, "token:")]
+			if !strings.Contains(cut, "\nusers:") || !strings.Contains(cut, "name: default") || strings.Contains(cut, "token") {
+				t.Fatalf("the cut is not inside the user, before its credential:\n%s", cut)
+			}
+			return cut
+		}},
+		{"parses, but its certificate and key are not a pair", func(t *testing.T, h *fakeHost, _ string) string {
 			cfg := fakeKubeconfig("https://127.0.0.1:" + strconv.Itoa(h.st.Ports.HTTPS))
-			// "notpem" in base64: what a certificate or key blob cut on a 4-character boundary decodes to.
+			// PEM blocks around "notpem" in base64: they pass for PEM and fail when loaded as a pair.
 			cfg.AuthInfos["default"].Token = ""
-			cfg.AuthInfos["default"].ClientCertificateData = []byte("notpem")
-			cfg.AuthInfos["default"].ClientKeyData = []byte("notpem")
+			cfg.AuthInfos["default"].ClientCertificateData = []byte("-----BEGIN CERTIFICATE-----\nbm90cGVt\n-----END CERTIFICATE-----\n")
+			cfg.AuthInfos["default"].ClientKeyData = []byte("-----BEGIN EC PRIVATE KEY-----\nbm90cGVt\n-----END EC PRIVATE KEY-----\n")
 			return kubeconfigText(t, cfg)
 		}},
 	} {
@@ -170,49 +240,121 @@ func TestWaitReadyWaitsForAWholeAdminKubeconfig(t *testing.T) {
 // A file cut inside the first cluster's server address names an address that is not this
 // launcher's, and client-go builds a config from it all the same (the cluster has no name yet).
 // That is not a refusal to make: the address is not final until the file resolves, which is
-// when current-context is whole, and until then restConfig must give an ordinary error.
+// when current-context is whole, and until then restConfig must give an ordinary error. A file cut
+// inside the users resolves to a config with no credential, or a cut one; restConfig must give
+// no config at all for it, because /readyz answers a request that has none.
 func TestRestConfigNeverCallsACutKubeconfigAWrongServer(t *testing.T) {
 	ports := Ports{API: 29220, HTTPS: 29221, KCM: 29222, LB: 29225}
 	own := "https://127.0.0.1:" + strconv.Itoa(ports.HTTPS)
+	other := "https://127.0.0.1:6443"
+	fixtures := map[string]func(t *testing.T, server string) *clientcmdapi.Config{
+		"token":       func(_ *testing.T, server string) *clientcmdapi.Config { return fakeKubeconfig(server) },
+		"certificate": certKubeconfig,
+	}
 	for _, tc := range []struct {
 		name, server string
 		wantWrong    bool // for the whole file
 	}{
 		{"this launcher's server", own, false},
-		{"another server", "https://127.0.0.1:6443", true},
+		{"another server", other, true},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			full := kubeconfigText(t, fakeKubeconfig(tc.server))
-			requireClientcmdOrder(t, full)
-			// Resolved once the current-context is whole: the clusters are then final, since they
-			// come before it.
-			resolvedAt := strings.Index(full, "current-context: default") + len("current-context: default")
-			path := filepath.Join(t.TempDir(), "k3s-admin.yaml")
-			for n := 0; n < len(full); n++ {
-				if err := os.WriteFile(path, []byte(full[:n]), 0o600); err != nil {
+		for credName, mk := range fixtures {
+			t.Run(tc.name+", user with a "+credName, func(t *testing.T) {
+				full := kubeconfigText(t, mk(t, tc.server))
+				requireClientcmdOrder(t, full)
+				// Resolved once the current-context is whole: the clusters are then final, since
+				// they come before it. The users, last in the file, are cut further on.
+				resolvedAt := strings.Index(full, "current-context: default") + len("current-context: default")
+				path := filepath.Join(t.TempDir(), "k3s-admin.yaml")
+				cutUsers, rejectedInUsers := 0, 0
+				for n := 0; n < len(full); n++ {
+					if err := os.WriteFile(path, []byte(full[:n]), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					cfg, err := restConfig(path, ports, time.Second)
+					var wrong *wrongServerError
+					// Only a file that resolves can be refused for its address, and only when it names
+					// another server.
+					if errors.As(err, &wrong) && (n < resolvedAt || !tc.wantWrong) {
+						t.Fatalf("the first %d bytes were refused as a wrong server (%v); a cut file is not ready yet:\n%s", n, err, full[:n])
+					}
+					if n < resolvedAt && err == nil {
+						t.Fatalf("the first %d bytes were accepted, before the current-context is whole:\n%s", n, full[:n])
+					}
+					if err == nil && !authenticates(cfg) {
+						t.Fatalf("the first %d bytes gave a config that cannot authenticate:\n%s", n, full[:n])
+					}
+					if n >= resolvedAt {
+						cutUsers++
+						if err != nil {
+							rejectedInUsers++
+						}
+					}
+				}
+				// The cuts inside the users must include some that are refused, or the check
+				// above passed because nothing was cut there.
+				if cutUsers == 0 || rejectedInUsers == 0 {
+					t.Errorf("%d of %d cuts inside the users were refused; the sweep did not reach an unfinished user", rejectedInUsers, cutUsers)
+				}
+				if err := os.WriteFile(path, []byte(full), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				_, err := restConfig(path, ports, time.Second)
+				cfg, err := restConfig(path, ports, time.Second)
 				var wrong *wrongServerError
-				// Only a file that resolves can be refused for its address, and only when it names
-				// another server.
-				if errors.As(err, &wrong) && (n < resolvedAt || !tc.wantWrong) {
-					t.Fatalf("the first %d bytes were refused as a wrong server (%v); a cut file is not ready yet:\n%s", n, err, full[:n])
+				switch {
+				case tc.wantWrong && !errors.As(err, &wrong):
+					t.Errorf("the whole file naming %s: got %v; want a wrongServerError", tc.server, err)
+				case !tc.wantWrong && err != nil:
+					t.Errorf("the whole file naming this launcher's server: %v", err)
+				case !tc.wantWrong && !authenticates(cfg):
+					t.Error("the whole file gave a config that cannot authenticate")
 				}
-				if n < resolvedAt && err == nil {
-					t.Fatalf("the first %d bytes were accepted, before the current-context is whole:\n%s", n, full[:n])
-				}
-			}
-			if err := os.WriteFile(path, []byte(full), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			_, err := restConfig(path, ports, time.Second)
-			var wrong *wrongServerError
-			switch {
-			case tc.wantWrong && !errors.As(err, &wrong):
-				t.Errorf("the whole file naming %s: got %v; want a wrongServerError", tc.server, err)
-			case !tc.wantWrong && err != nil:
-				t.Errorf("the whole file naming this launcher's server: %v", err)
+			})
+		}
+	}
+}
+
+// TestResolvedNeedsAUserWithACredential: a kubeconfig resolves only when the current context's
+// user is in the file and carries a complete credential: a token, or a certificate and key that
+// both parse as PEM.
+func TestResolvedNeedsAUserWithACredential(t *testing.T) {
+	certPEM, keyPEM := testClientCert(t)
+	with := func(edit func(u *clientcmdapi.AuthInfo)) *clientcmdapi.Config {
+		cfg := fakeKubeconfig("https://127.0.0.1:1")
+		cfg.AuthInfos["default"].Token = ""
+		edit(cfg.AuthInfos["default"])
+		return cfg
+	}
+	for _, tc := range []struct {
+		name string
+		cfg  *clientcmdapi.Config
+		ok   bool
+	}{
+		{"a token", with(func(u *clientcmdapi.AuthInfo) { u.Token = "t" }), true},
+		{"a certificate and key", with(func(u *clientcmdapi.AuthInfo) { u.ClientCertificateData, u.ClientKeyData = certPEM, keyPEM }), true},
+		{"no credential", with(func(*clientcmdapi.AuthInfo) {}), false},
+		{"a certificate without its key", with(func(u *clientcmdapi.AuthInfo) { u.ClientCertificateData = certPEM }), false},
+		{"a key without its certificate", with(func(u *clientcmdapi.AuthInfo) { u.ClientKeyData = keyPEM }), false},
+		{"a certificate and key that are not PEM", with(func(u *clientcmdapi.AuthInfo) {
+			u.ClientCertificateData, u.ClientKeyData = []byte("notpem"), []byte("notpem")
+		}), false},
+		{"a certificate cut short", with(func(u *clientcmdapi.AuthInfo) {
+			u.ClientCertificateData, u.ClientKeyData = certPEM[:len(certPEM)/2], keyPEM
+		}), false},
+		{"a user the file lacks", func() *clientcmdapi.Config {
+			cfg := fakeKubeconfig("https://127.0.0.1:1")
+			delete(cfg.AuthInfos, "default")
+			return cfg
+		}(), false},
+		{"a context with no user", func() *clientcmdapi.Config {
+			cfg := fakeKubeconfig("https://127.0.0.1:1")
+			cfg.Contexts["default"].AuthInfo = ""
+			return cfg
+		}(), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := resolved(tc.cfg); (err == nil) != tc.ok {
+				t.Errorf("resolved = %v, want ok=%v", err, tc.ok)
 			}
 		})
 	}

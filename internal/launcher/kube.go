@@ -3,6 +3,7 @@ package launcher
 import (
 	"context"
 	"crypto/tls"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net"
@@ -25,13 +26,20 @@ type wrongServerError struct{ msg string }
 
 func (e *wrongServerError) Error() string { return e.msg }
 
-// resolved reports why a kubeconfig does not yet resolve to a cluster, or nil when it does: a
-// non-empty current-context names a context in the file, and that context names a cluster that
-// is in the file. k3s writes the file with clientcmd's serialisation, which puts a cluster's body
-// before its name and the contexts and current-context after all the clusters. So a file cut
+// resolved reports why a kubeconfig does not yet resolve to a cluster and a way to authenticate
+// to it, or nil when it does: a non-empty current-context names a context in the file, that
+// context names a cluster that is in the file, and a user that is in the file and carries a
+// complete credential (a token, or a client certificate and key that both parse as PEM).
+//
+// k3s writes the file with clientcmd's serialisation, which puts a cluster's body before its name,
+// the contexts and current-context after all the clusters, and the users last. So a file cut
 // inside its first cluster still parses, as a cluster with no name and a cut-short server address,
-// and client-go would use that cluster even though no context selects it. Only a file that
-// resolves completely can have its server address trusted, to use or to refuse.
+// and client-go would use that cluster even though no context selects it. A file cut inside the
+// users resolves to a config that cannot authenticate, and /readyz answers an anonymous request
+// (system:public-info-viewer), so the wait would go on with a config that fails on everything
+// else. Only a file that resolves completely can have its server address trusted, to use or to
+// refuse. The credentials are held as data, as k3s writes them; a kubeconfig that names files
+// instead is not one k3s wrote and counts as incomplete.
 func resolved(c *clientcmdapi.Config) error {
 	if c.CurrentContext == "" {
 		return errors.New("it has no current-context (yet)")
@@ -46,7 +54,23 @@ func resolved(c *clientcmdapi.Config) error {
 	if c.Clusters[cx.Cluster] == nil {
 		return fmt.Errorf("its context %q names the cluster %q, which the file lacks (yet)", c.CurrentContext, cx.Cluster)
 	}
+	if cx.AuthInfo == "" {
+		return fmt.Errorf("its context %q names no user (yet)", c.CurrentContext)
+	}
+	u := c.AuthInfos[cx.AuthInfo]
+	if u == nil {
+		return fmt.Errorf("its context %q names the user %q, which the file lacks (yet)", c.CurrentContext, cx.AuthInfo)
+	}
+	if u.Token == "" && !(isPEM(u.ClientCertificateData) && isPEM(u.ClientKeyData)) {
+		return fmt.Errorf("its user %q has no complete credential (yet): a token, or a client certificate and key as PEM", cx.AuthInfo)
+	}
 	return nil
+}
+
+// isPEM reports whether b holds a PEM block.
+func isPEM(b []byte) bool {
+	blk, _ := pem.Decode(b)
+	return blk != nil
 }
 
 // restConfig reads the launcher's kubeconfig and checks that it points at this host: loopback,
@@ -54,7 +78,7 @@ func resolved(c *clientcmdapi.Config) error {
 // k3s on 6443, say) must never be used to judge or change this host. The file is read once, so
 // the check that it is complete and the address it gives come from the same bytes. A file that
 // is not complete is an ordinary error, never a wrongServerError, because its address may be cut
-// short.
+// short, and so is one that cannot authenticate yet.
 func restConfig(path string, ports Ports, timeout time.Duration) (*rest.Config, error) {
 	raw, err := (&clientcmd.ClientConfigLoadingRules{ExplicitPath: path}).Load()
 	if err != nil {
