@@ -14,10 +14,11 @@ func (a *Agent) snapshot(now time.Time) agentapi.Report {
 	if in == nil {
 		return r
 	}
+	staging := in.staging(a.engine, now)
 	ir := &agentapi.InstanceReport{
 		UID:        in.uid,
 		Generation: in.generation,
-		Staging:    &agentapi.Staging{Phase: agentapi.StagingDone},
+		Staging:    &staging,
 	}
 	if !in.keyStored {
 		ir.Key = in.key

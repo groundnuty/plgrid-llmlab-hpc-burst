@@ -70,6 +70,12 @@ type instance struct {
 	keyStored  bool
 	workers    []*worker
 	checks     *agentapi.CheckResults
+
+	// stageStart is when the current staging began: the Step that first took
+	// the Instance up, or the Step that re-staged it after a failure. stageGen
+	// is the Instance generation that staging is for (staging.go).
+	stageStart time.Time
+	stageGen   int64
 }
 
 // worker is one fake engine process.

@@ -15,6 +15,25 @@ type Engine struct {
 	// StartDelay. The default is 0.
 	StartDelay time.Duration
 
+	// StagingDuration is how long staging takes. A new Instance is reported
+	// with Staging inProgress until the Agent's clock reaches the Step in which
+	// the Agent first took the Instance up (the first apply, after any earlier
+	// Instance's processes are gone) plus StagingDuration; it is then reported
+	// done, or failed when StagingError is set. No worker starts before staging
+	// is done. The default is 0: staging is done at once, in the first Step.
+	StagingDuration time.Duration
+
+	// StagingError, when not empty, makes staging fail once StagingDuration has
+	// passed: Staging.Phase is failed and Staging.Message is StagingError, cut
+	// to agentapi.MaxMessageBytes (agentapi.TruncateUTF8). After a failure no
+	// worker starts, however many Steps pass, until the desired Instance
+	// generation rises past the one the failed staging was for. That re-stages:
+	// staging is inProgress again for StagingDuration, then fails again, because
+	// the Engine's settings are the same. A staging that succeeded is not
+	// repeated when the generation rises (the agent rehashes the staged files
+	// and finds them whole).
+	StagingError string
+
 	// IgnoreTerm makes every worker ignore TERM. On a stop instruction (a
 	// raised restart generation, idle, stop, or a new Instance) such a worker
 	// is reported stopping until the Agent's clock reaches the time of the
