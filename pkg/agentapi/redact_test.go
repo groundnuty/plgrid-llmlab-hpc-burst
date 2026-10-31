@@ -30,7 +30,11 @@ func reportWithKey() Report {
 		Time: time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC),
 		Instance: &InstanceReport{
 			UID: "u1", Key: testKey, ServingEndpoint: "unix:///run/x.sock",
-			Workers: []WorkerReport{{Name: "worker-0", Phase: PartRunning}},
+			Workers: []WorkerReport{{Name: "worker-0", Phase: PartRunning, Health: &Health{
+				ProbeOK: true, GeneratedTokens: Int64(70), Preemptions: Int64(2),
+				PrefixCacheQueriedTokens: Int64(300), PrefixCacheHitTokens: Int64(200),
+				TimePerOutputTokenSecondsSum: Float64(1.5), TimePerOutputTokenCount: Int64(30),
+			}}},
 		},
 	}
 }
