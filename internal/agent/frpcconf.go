@@ -19,13 +19,6 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
-// dialHomeServerName is the fixed synthetic name in the launcher's
-// certificate that frpc checks the dial-home listener's certificate against,
-// in both modes (HBEP-6, frpc in the job; `@hpc-burst-science-agent`, 31 Oct
-// 2026). The contracts PR adds it as agentapi.DialHomeServerName, which
-// replaces this constant.
-const dialHomeServerName = "dial-home.hpcburst.invalid"
-
 // FrpcConfig is frpc's configuration for one Instance: HBEP-6's block (frpc
 // in the job), with S1's heartbeat settings (HBEP-6, Heartbeats).
 type FrpcConfig struct {

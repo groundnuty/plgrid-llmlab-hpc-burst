@@ -6,8 +6,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -174,8 +176,10 @@ func writeCert(t *testing.T, host agentapi.Host) string {
 // directory, and the fake tools.
 type job struct {
 	root, allocDir, stagingDir, bin, appLog, sshLog, engLog string
+	frpcLog                                                 string // the stub frpc's starts
 	extraEnv                                                []string
 	ssh                                                     bool // agent.json's mode is ssh
+	cfg                                                     agentapi.AgentConfig
 }
 
 func newJob(t *testing.T, root string, cfg agentapi.AgentConfig) job {
@@ -188,6 +192,7 @@ func newJob(t *testing.T, root string, cfg agentapi.AgentConfig) job {
 		appLog:     filepath.Join(root, "apptainer.jsonl"),
 		sshLog:     filepath.Join(root, "ssh.jsonl"),
 		engLog:     filepath.Join(root, "engine.jsonl"),
+		frpcLog:    filepath.Join(root, "frpc.log"),
 	}
 	for _, d := range []string{j.allocDir, j.stagingDir, j.bin, filepath.Join(root, "tmp")} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
@@ -207,6 +212,15 @@ func newJob(t *testing.T, root string, cfg agentapi.AgentConfig) job {
 		t.Fatal(err)
 	}
 	cfg.DialHomeDir = filepath.Join(root, "dial-home")
+	cfg.FrpcDigest = stageStubFrpc(t, cfg, j.frpcLog)
+	// The launcher's certificate, which the provider stages next to
+	// agent.json (agentapi.StagedDialHomeCertName); startEndpoint wrote it.
+	if crt, err := os.ReadFile(agentapi.Host{StateDir: filepath.Join(root, "state")}.AgentCertFile()); err == nil {
+		if err := os.WriteFile(filepath.Join(j.allocDir, agentapi.StagedDialHomeCertName), crt, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	j.cfg = cfg
 	b, err := cfg.Encode()
 	if err != nil {
 		t.Fatal(err)
@@ -218,6 +232,119 @@ func newJob(t *testing.T, root string, cfg agentapi.AgentConfig) job {
 		t.Fatal(err)
 	}
 	return j
+}
+
+// stageStubFrpc stages a stand-in frpc where the provider stages frpc
+// (agentapi.StagedFrpcPath) and returns its digest. It records its start,
+// its proxy variables and a copy of its configuration, and runs until it is
+// stopped; its shell's command line names the job's root, so killUnder finds
+// a leaked one.
+func stageStubFrpc(t *testing.T, cfg agentapi.AgentConfig, logPath string) string {
+	t.Helper()
+	script := "#!/bin/sh\n" +
+		"{ echo \"start $$ $*\"; env | grep -i '_proxy=' | sed 's/^/proxy /'; } >> " + logPath + "\n" +
+		"cp \"$2\" " + logPath + ".$$.toml\n" +
+		"while :; do sleep 1; done\n"
+	sum := sha256.Sum256([]byte(script))
+	digest := hex.EncodeToString(sum[:])
+	cfg.FrpcDigest = digest
+	p := cfg.FrpcPath()
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return digest
+}
+
+// frpcStarts returns the stub frpc's starts: its PID and the configuration
+// it was started with.
+func frpcStarts(t *testing.T, j job) (pids []int, configs []string, proxies []string) {
+	t.Helper()
+	for _, line := range strings.Split(readFile(j.frpcLog), "\n") {
+		if v, ok := strings.CutPrefix(line, "proxy "); ok {
+			proxies = append(proxies, v)
+			continue
+		}
+		f := strings.Fields(line)
+		if len(f) < 2 || f[0] != "start" {
+			continue
+		}
+		pid, err := strconv.Atoi(f[1])
+		if err != nil {
+			t.Fatalf("stub frpc log line %q", line)
+		}
+		pids = append(pids, pid)
+		configs = append(configs, readFile(j.frpcLog+"."+f[1]+".toml"))
+	}
+	return pids, configs, proxies
+}
+
+// assertFrpcWired checks that the agent ran frpc for the desired Instance:
+// the proxy is named by its UID and serves the agent's serving socket, frpc
+// dials connection 2's local port in ssh mode and the dial-home endpoint in
+// direct mode, no proxy variable reached it, and none outlives the agent.
+func assertFrpcWired(t *testing.T, j job, out string) {
+	t.Helper()
+	pids, configs, proxies := frpcStarts(t, j)
+	if len(pids) == 0 {
+		t.Fatalf("the agent started no frpc; its log:\n%s", out)
+	}
+	cfg := configs[0]
+	for _, want := range []string{`name = "` + eInst + `"`, `customDomains = ["` + eInst + `"]`, `transport.protocol = "wss"`, `loginFailExit = false`} {
+		if !strings.Contains(cfg, want) {
+			t.Errorf("frpc's configuration lacks %s:\n%s", want, cfg)
+		}
+	}
+	if m := regexp.MustCompile(`(?m)^unixPath = "(.*)/serve\.sock"$`).FindStringSubmatch(cfg); m == nil || !strings.HasPrefix(m[1], filepath.Join(j.root, "tmp")) {
+		t.Errorf("frpc's proxy does not serve the agent's serving socket:\n%s", cfg)
+	}
+	if !strings.Contains(cfg, `transport.tls.trustedCaFile = "`+filepath.Join(j.allocDir, agentapi.StagedDialHomeCertName)+`"`) {
+		t.Errorf("frpc does not trust the staged certificate:\n%s", cfg)
+	}
+	m := regexp.MustCompile(`(?m)^serverAddr = "(.*)"\nserverPort = ([0-9]+)$`).FindStringSubmatch(cfg)
+	if m == nil {
+		t.Fatalf("frpc's configuration has no server:\n%s", cfg)
+	}
+	want := j.cfg.Endpoint
+	if j.ssh {
+		want = "127.0.0.1:" + forwardPort(t, j, j.cfg.SSH.DialHomePort)
+	}
+	if got := m[1] + ":" + m[2]; got != want {
+		t.Errorf("frpc dials %s, want %s", got, want)
+	}
+	if len(proxies) != 0 {
+		t.Errorf("proxy variables reached frpc: %q", proxies)
+	}
+	for _, pid := range pids {
+		if processLives(pid) {
+			t.Errorf("frpc %d still runs after the agent exited", pid)
+		}
+	}
+}
+
+// processLives reports whether pid runs and is not a zombie.
+func processLives(pid int) bool {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return false
+	}
+	s := string(b)
+	f := strings.Fields(s[strings.LastIndexByte(s, ')')+1:])
+	return len(f) > 0 && f[0] != "Z"
+}
+
+// forwardPort returns the local port of the fake ssh's forward to remote,
+// from its log.
+func forwardPort(t *testing.T, j job, remote int) string {
+	t.Helper()
+	re := regexp.MustCompile(`"127\.0\.0\.1:([0-9]+):127\.0\.0\.1:` + strconv.Itoa(remote) + `"`)
+	m := re.FindStringSubmatch(readFile(j.sshLog))
+	if m == nil {
+		t.Fatalf("no ssh forward to %d in the fake ssh's log:\n%s", remote, readFile(j.sshLog))
+	}
+	return m[1]
 }
 
 // start runs the agent in its own process, as the job's bootstrap does.
@@ -239,6 +366,9 @@ func (j job) start(t *testing.T) (*exec.Cmd, *bytes.Buffer) {
 		"HB_FAKE_APPTAINER_LOG="+j.appLog,
 		"HB_FAKE_SSH_LOG="+j.sshLog,
 		"GORACE=atexit_sleep_ms=0", // a race-built fake must not sleep at its exit
+		// frp takes http_proxy as its proxy to frps (HBEP-6, frp facts): the
+		// agent drops these for frpc, and assertFrpcWired checks it.
+		"http_proxy=http://127.0.0.1:9", "https_proxy=http://127.0.0.1:9", "all_proxy=http://127.0.0.1:9",
 	)
 	cmd.Env = append(cmd.Env, j.extraEnv...)
 	var out bytes.Buffer
@@ -461,8 +591,9 @@ func exercise(t *testing.T, ep endpoint, j job) {
 		t.Errorf("last report's worker %+v, want stopped", w)
 	}
 	if j.ssh {
-		assertSSHReaped(t, out.String(), 1)
+		assertSSHReaped(t, out.String(), 2)
 	}
+	assertFrpcWired(t, j, out.String())
 	// Neither the credential nor the Instance's key reaches the agent's log.
 	for name, secret := range map[string]string{"the credential": testCredential, "the Instance key": r.Instance.Key} {
 		if secret == "" || strings.Contains(out.String(), secret) {
@@ -546,8 +677,39 @@ func TestAgentRefusesAnEndpointWithAnotherPin(t *testing.T) {
 	}
 	_ = syscall.Kill(cmd.Process.Pid, syscall.SIGTERM)
 	_ = cmd.Wait()
-	if !strings.Contains(out.String(), "pin") {
+	// The TLS refusal's own words (agentapi.VerifyPin): frpc's refusal of the
+	// staged certificate, whose pin is not agent.json's either, also names a
+	// pin, so "pin" alone would pass without the endpoint's check.
+	if !strings.Contains(out.String(), "agent endpoint certificate pin") {
 		t.Errorf("the agent's log does not say why: %s", out.String())
+	}
+}
+
+// Without the staged launcher certificate the agent refuses to start frpc
+// and says why, and still registers and runs its Instance, which then cannot
+// be reached and ends with TunnelNotConnected (HBEP-6, frpc in the job).
+func TestAgentRunsWithoutFrpcWhenTheCertificateIsMissing(t *testing.T) {
+	root := shortRoot(t)
+	ep := startEndpoint(t, root)
+	j := newJob(t, root, agentapi.AgentConfig{
+		ProtocolVersion: agentapi.ProtocolVersion, Tag: eTag, Mode: agentapi.DialHomeDirect,
+		Endpoint: ep.addr, CertSPKISHA256: ep.pin, FrpcDigest: strings.Repeat("d", 64),
+	})
+	if err := os.Remove(filepath.Join(j.allocDir, agentapi.StagedDialHomeCertName)); err != nil {
+		t.Fatal(err)
+	}
+	cmd, out := j.start(t)
+	ep.backend.SetDesired(eUID, runState(j.engLog, nil))
+	waitReport(t, ep.backend, "worker running", func(r agentapi.Report) bool {
+		return r.Instance != nil && len(r.Instance.Workers) == 1 && r.Instance.Workers[0].Phase == agentapi.PartRunning
+	})
+	_ = syscall.Kill(cmd.Process.Pid, syscall.SIGTERM)
+	_ = cmd.Wait()
+	if pids, _, _ := frpcStarts(t, j); len(pids) != 0 {
+		t.Fatalf("frpc started %d times without the dial-home certificate", len(pids))
+	}
+	if !strings.Contains(out.String(), "frpc refused") || !strings.Contains(out.String(), "dial-home certificate") {
+		t.Fatalf("the agent's log does not say why frpc did not start:\n%s", out.String())
 	}
 }
 
@@ -591,10 +753,12 @@ func TestAgentSSHForwardReconnects(t *testing.T) {
 		return r.Instance != nil && len(r.Instance.Workers) == 1 && r.Instance.Workers[0].Phase == agentapi.PartRunning
 	})
 	pid := first.Instance.Workers[0].PID
+	// Each forward has a reconnect loop of its own: count each one's starts
+	// (connection 1 to the agent endpoint, connection 2 to the dial-home port).
 	deadline := time.Now().Add(30 * time.Second)
-	for countLines(j.sshLog) < 2 {
+	for countForwards(j.sshLog, p) < 2 || countForwards(j.sshLog, p+1) < 2 {
 		if time.Now().After(deadline) {
-			t.Fatalf("ssh started %d times in 30 s; the forward was not restarted", countLines(j.sshLog))
+			t.Fatalf("in 30 s connection 1 started %d times and connection 2 %d times; a forward was not restarted", countForwards(j.sshLog, p), countForwards(j.sshLog, p+1))
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -624,7 +788,13 @@ func TestAgentSSHForwardReconnects(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("the agent did not exit on SIGTERM")
 	}
-	assertSSHReaped(t, out.String(), 2)
+	assertSSHReaped(t, out.String(), 4)
+}
+
+// countForwards counts the fake ssh's starts with a forward to remote.
+func countForwards(path string, remote int) int {
+	re := regexp.MustCompile(`"127\.0\.0\.1:[0-9]+:127\.0\.0\.1:` + strconv.Itoa(remote) + `"`)
+	return len(re.FindAllString(readFile(path), -1))
 }
 
 func readFile(path string) string {

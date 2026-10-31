@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/procgroup"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 // FrpcTarget is where frpc dials at one moment.
@@ -307,7 +308,7 @@ func (f *Frpc) start(uid string, target FrpcTarget, logger *slog.Logger) (*runni
 	cfg := FrpcConfig{
 		ServerAddr: target.Host, ServerPort: target.Port,
 		LogFile: f.LogPath(), Token: f.Credential, CAFile: f.CertFile,
-		ServerName: dialHomeServerName, UID: uid, Socket: f.Socket,
+		ServerName: agentapi.DialHomeServerName, UID: uid, Socket: f.Socket,
 	}
 	if !uidForm.MatchString(uid) {
 		return nil, fmt.Errorf("%w: %q is not a Kubernetes UID", errBadUID, uid)
