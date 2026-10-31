@@ -19,6 +19,18 @@ const AgentBinaryName = "hb-agent"
 // Allocation's agentDigest before running it.
 func StagedAgentPath(digest string) string { return path.Join("agent", digest, AgentBinaryName) }
 
+// FrpcBinaryName is frpc's file name wherever it is staged.
+const FrpcBinaryName = "frpc"
+
+// StagedFrpcPath is where the provider stages the frpc binary with this
+// SHA-256 (hex), relative to the profile's resolved stagingDir:
+// frpc/<digest>/frpc, next to the agent's binary (HBEP-4, Submission: Files
+// first). frpc is a pinned release binary for the partition's cpuArch, not part
+// of the agent's build, so it has its own digest (AgentConfig.FrpcDigest),
+// which the agent checks before it runs frpc. AgentConfig.FrpcPath joins it to
+// the staging directory.
+func StagedFrpcPath(digest string) string { return path.Join("frpc", digest, FrpcBinaryName) }
+
 // AllocationDir is the Allocation's directory, alloc/<tag>; the bootstrap runs
 // the agent with its absolute path as the only argument.
 func AllocationDir(tag string) string { return path.Join("alloc", tag) }
@@ -26,6 +38,21 @@ func AllocationDir(tag string) string { return path.Join("alloc", tag) }
 // StagedCredentialPath is the Allocation's credential, alloc/<tag>/credential,
 // mode 600.
 func StagedCredentialPath(tag string) string { return path.Join(AllocationDir(tag), "credential") }
+
+// StagedDialHomeCertName is the file name of the launcher's dial-home
+// certificate in the Allocation's directory. It is public, and frpc verifies
+// the front with it (HBEP-4, Submission: Files first; HBEP-6, frpc in the job).
+const StagedDialHomeCertName = "dial-home.crt"
+
+// StagedDialHomeCertPath is the Allocation's copy of the launcher's dial-home
+// certificate, alloc/<tag>/dial-home.crt. It is the same certificate as
+// Host.AgentCertFile's, the one whose pin agent.json carries
+// (AgentConfig.CertSPKISHA256): the agent checks that pin against this file
+// before it runs frpc, and refuses to run frpc without the file (HBEP-6,
+// frpc in the job).
+func StagedDialHomeCertPath(tag string) string {
+	return path.Join(AllocationDir(tag), StagedDialHomeCertName)
+}
 
 // StagedConfigPath is the Allocation's agent.json, mode 600.
 func StagedConfigPath(tag string) string { return path.Join(AllocationDir(tag), ConfigFileName) }

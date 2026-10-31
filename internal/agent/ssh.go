@@ -16,7 +16,8 @@ import (
 )
 
 // SSHForward keeps the agent's dial-home forward in ssh mode (HBEP-7,
-// Registration): ssh -N -L over port 22, in a reconnect loop, with the
+// Registration): ssh -N -L to the endpoint's port (22 by default), in a
+// reconnect loop, with the
 // restricted key and the pinned host key that the operator placed in the
 // dial-home directory once (agentapi.DialHomeKeyFile,
 // agentapi.DialHomeKnownHostsFile).

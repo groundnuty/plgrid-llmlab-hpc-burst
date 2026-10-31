@@ -309,12 +309,17 @@ func (e *external) files(a *v1alpha1.Allocation, tag string, paths slurm.Paths) 
 		return nil, err
 	}
 	f := e.s.o.Front
+	arch := e.v.Profile.Partition.CPUArch
+	frpc, ok := f.FrpcDigests[arch]
+	if !ok {
+		return nil, fmt.Errorf("no frpc digest is configured for cpuArch %s", arch)
+	}
 	cfg := agentapi.AgentConfig{
 		ProtocolVersion: agentapi.ProtocolVersion, Tag: tag, Mode: f.Mode, Endpoint: f.Endpoint,
-		CertSPKISHA256: f.CertPin, StagingDir: paths.Staging, DialHomeDir: paths.DialHomeDir(),
+		CertSPKISHA256: f.CertPin, FrpcDigest: frpc, StagingDir: paths.Staging, DialHomeDir: paths.DialHomeDir(),
 	}
 	if f.Mode == agentapi.DialHomeSSH {
-		cfg.SSH = &agentapi.SSHForward{User: f.SSHUser, AgentPort: f.AgentPort}
+		cfg.SSH = &agentapi.SSHForward{User: f.SSHUser, AgentPort: f.AgentPort, DialHomePort: f.DialHomePort}
 	}
 	js, err := cfg.Encode()
 	if err != nil {
