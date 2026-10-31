@@ -135,6 +135,13 @@ const (
 	ConditionWarmedUp         = "WarmedUp"
 	ConditionHealthy          = "Healthy"
 	ConditionAgentUnreachable = "AgentUnreachable"
+	// ConditionTunnelConnected: whether frps lists the Instance's proxy as
+	// online (HBEP-6, Path state and the inventory). The lifecycle controller
+	// writes it, only from frps's proxy list; the plugin's calls and the
+	// front's probe never set it. An Instance becomes ready only with it True
+	// (HBEP-7, Instance start). HBEP-6 proposed the name for the contracts, and
+	// issue #90 lists it there.
+	ConditionTunnelConnected = "TunnelConnected"
 )
 
 // Reasons of an Instance's Verified, Qualified and WarmedUp conditions, a
@@ -180,6 +187,21 @@ const (
 	ReasonReporting = "Reporting"
 )
 
+// Reasons of an Instance's TunnelConnected condition (HBEP-6, Path state and
+// the inventory). The condition is never left True on a list that could not be
+// read.
+const (
+	// ReasonProxyOnline: status True, frps lists the Instance's proxy as
+	// online.
+	ReasonProxyOnline = "ProxyOnline"
+	// ReasonProxyOffline: status False, frps lists the proxy as offline, or
+	// does not list it at all.
+	ReasonProxyOffline = "ProxyOffline"
+	// ReasonProxyListUnreadable: status Unknown, frps's list could not be
+	// read, for example with its web server stopped.
+	ReasonProxyListUnreadable = "ProxyListUnreadable"
+)
+
 // Reasons an Instance ends or fails, for InstanceStatus.EndReason and the
 // failing event (HBEP-7).
 const (
@@ -189,6 +211,15 @@ const (
 	// ReasonStartTimeout: the Instance did not reach ready within
 	// health.startTimeout of its start instruction.
 	ReasonStartTimeout = "StartTimeout"
+	// ReasonTunnelNotConnected: the Instance did not reach ready within
+	// health.startTimeout and, at that moment, its TunnelConnected condition
+	// was not True, whether False (ReasonProxyOffline) or Unknown
+	// (ReasonProxyListUnreadable). It replaces ReasonStartTimeout then; the
+	// release, the replacement and the RestartLoop counting are the same
+	// (HBEP-7, Instance start; HBEP-6, Test plan, Key restriction). It does not
+	// replace ReasonRegistrationTimeout or DialHomeUnreachable, which are about
+	// an agent that never registered.
+	ReasonTunnelNotConnected = "TunnelNotConnected"
 	// ReasonAllocationEndedEarly: the Allocation ended while its Instance was
 	// not ended, before the Instance's hard end.
 	ReasonAllocationEndedEarly = "AllocationEndedEarly"

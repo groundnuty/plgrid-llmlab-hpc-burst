@@ -142,14 +142,77 @@ func TestQualifyLoopAtLongContextFailsTheBehaviourCheckOnly(t *testing.T) {
 		for _, o := range q.Checks {
 			if o.Name == agentapi.CheckBehaviour {
 				eq(t, "behaviour passed", o.Passed, false)
+				eq(t, "behaviour reason", o.Reason, "Loop")
 				if o.Message == "" {
 					t.Error("the failed behaviour check says nothing")
 				}
 			} else {
 				eq(t, string(o.Name)+" passed", o.Passed, true)
+				eq(t, string(o.Name)+" reason", o.Reason, "")
 			}
 		}
 		eq(t, "KVCapacityTokens is the default's", q.KVCapacityTokens, int64(1<<20))
+	}
+}
+
+func TestQualifyReasoningBudgetExhaustedFailsTheBehaviourCheckWithItsReason(t *testing.T) {
+	q := qualifyOutcomes(t, fake.Engine{Qualify: fake.QualifyReasoningBudgetExhausted}, false)
+	for _, o := range q.Checks {
+		if o.Name == agentapi.CheckBehaviour {
+			eq(t, "behaviour passed", o.Passed, false)
+			eq(t, "behaviour reason", o.Reason, "ReasoningBudgetExhausted")
+			if o.Message == "" || o.Message == o.Reason {
+				t.Errorf("the message %q is not human text apart from the reason", o.Message)
+			}
+		} else {
+			eq(t, string(o.Name)+" passed", o.Passed, true)
+			eq(t, string(o.Name)+" reason", o.Reason, "")
+		}
+	}
+}
+
+// Only the behaviour check reports the length it ran at: by default the
+// request's longest context (4096 in these shapes), and the length the double
+// is given otherwise.
+func TestBehaviourCheckReportsTheContextItRanAt(t *testing.T) {
+	contexts := func(q agentapi.QualifyResult) map[agentapi.CheckName]int64 {
+		out := map[agentapi.CheckName]int64{}
+		for _, o := range q.Checks {
+			out[o.Name] = o.ContextTokens
+		}
+		return out
+	}
+	eq(t, "default", contexts(qualifyOutcomes(t, fake.Engine{}, false)),
+		map[agentapi.CheckName]int64{"health": 0, "chat": 0, "corruption": 0, "behaviour": 4096})
+	eq(t, "shortened", contexts(qualifyOutcomes(t, fake.Engine{Qualify: fake.QualifyBehaviourContext(3060)}, false)),
+		map[agentapi.CheckName]int64{"health": 0, "chat": 0, "corruption": 0, "behaviour": 3060})
+	eq(t, "still passing", passedByName(qualifyOutcomes(t, fake.Engine{Qualify: fake.QualifyBehaviourContext(3060)}, false)),
+		map[agentapi.CheckName]bool{"health": true, "chat": true, "corruption": true, "behaviour": true})
+}
+
+// Each corruption failure the Agent judges from the raw outputs carries its
+// own reason, and the positive control carries none.
+func TestTheAgentsCorruptionOutcomeCarriesTheFailuresReason(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		out  func(agentapi.DesiredInstance, agentapi.QualifyRequest) [][]int32
+		want string
+	}{
+		{"outputs differ at the 11th token", fake.GreedyDivergingAt(10), "OutputsDiverge"},
+		{"a single repeated token", fake.GreedySingleRepeatedToken, "RepeatedToken"},
+		{"empty outputs", fake.GreedyEmpty, "EmptyOutput"},
+		{"outputs differ only after the 32nd token (positive control)", fake.GreedyDivergingAt(32), ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			q := qualifyOutcomes(t, fake.Engine{GreedyOutputs: c.out}, false)
+			for _, o := range q.Checks {
+				if o.Name == agentapi.CheckCorruption {
+					eq(t, "reason", o.Reason, c.want)
+				} else {
+					eq(t, string(o.Name)+" reason", o.Reason, "")
+				}
+			}
+		})
 	}
 }
 
