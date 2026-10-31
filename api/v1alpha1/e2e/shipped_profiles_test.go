@@ -186,8 +186,11 @@ func TestShippedProfilesRefuseAMisspelledTypedKey(t *testing.T) {
 	if _, ok := spec["holdRelease"]; !ok {
 		t.Fatalf("helios.yaml has no spec.holdRelease; this test renames it")
 	}
+	// Control: the shipped manifest under another name is admitted.
+	_, err := strictCreate(t, edit(t, obj, uniq("ctl"), "metadata", "name"))
+	must(t, err, "create an unbroken copy of helios.yaml")
 	bad := edit(t, edit(t, obj, nil, "spec", "holdRelease"), true, "spec", "holdReleese")
-	_, err := strictCreate(t, edit(t, bad, uniq("bad"), "metadata", "name"))
+	_, err = strictCreate(t, edit(t, bad, uniq("bad"), "metadata", "name"))
 	if err == nil {
 		t.Fatalf("a manifest with the key holdReleese was admitted")
 	}
@@ -201,12 +204,16 @@ func TestShippedProfilesRefuseAMisspelledTypedKey(t *testing.T) {
 }
 
 var (
-	dateText = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
-	methods  = map[string]bool{"measured": true, "documented": true, "unknown": true}
+	dateText       = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+	partitionEntry = regexp.MustCompile(`^spec\.profile\.facts\.partitions\[\d+\]$`)
+	methods        = map[string]bool{"measured": true, "documented": true, "unknown": true}
 )
 
-// Every envelope in the untyped block, whether a fact or a partition entry, has
-// a known method, a source and a date written as text (HBEP-4, open question 7).
+// Every envelope in the untyped block has a known method, a source and a date
+// written as text (HBEP-4, open question 7). An envelope is found by its
+// structure, not by its provenance fields, so one that lost a field is seen: a
+// fact is a map with a value, and a partition entry is an item of
+// facts.partitions, whose provenance is grouped over the entry.
 func TestShippedProfilesKeepTheEnvelope(t *testing.T) {
 	for _, sp := range shippedProfiles {
 		t.Run(sp.name, func(t *testing.T) {
@@ -220,10 +227,10 @@ func TestShippedProfilesKeepTheEnvelope(t *testing.T) {
 			walk = func(path string, v any) {
 				switch x := v.(type) {
 				case map[string]any:
-					if m, ok := x["method"]; ok {
+					if _, isFact := x["value"]; isFact || partitionEntry.MatchString(path) {
 						seen++
-						if s, _ := m.(string); !methods[s] {
-							t.Errorf("%s: method %v is not measured, documented or unknown", path, m)
+						if s, _ := x["method"].(string); !methods[s] {
+							t.Errorf("%s: method %v is not measured, documented or unknown", path, x["method"])
 						}
 						if x["source"] == nil || x["source"] == "" {
 							t.Errorf("%s: no source", path)
