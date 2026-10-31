@@ -52,6 +52,8 @@ modeldeployments:$.spec#0|^TestServedDeploymentNeedsAWorkload$
 modeldeployments:$.spec.providers#0|^TestModelDeploymentProvidersAndInstances$
 modeldeployments:$.spec.retentionPolicy#0|^TestRetentionPolicy$
 modeldeployments:$.spec.retentionPolicy#1|^TestRetentionPolicy$
+modeldeployments:$.spec.routing.loadBound.loose#0|^TestRoutingLoadBoundIsAtLeastOne$
+modeldeployments:$.spec.routing.loadBound.tight#0|^TestRoutingLoadBoundIsAtLeastOne$
 modeldeployments:$.spec.source#0|^TestModelDeploymentSourceIsServedOrManaged$
 modeldeployments:$.spec.source.served#0|^TestTokenizerOtherThanTheCheckpointsIsPinned$
 modeldeployments:$.spec.source.served#1|^TestTokenizerOtherThanTheCheckpointsIsPinned$

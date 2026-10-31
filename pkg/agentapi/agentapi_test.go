@@ -243,3 +243,48 @@ func TestCheckCredential(t *testing.T) {
 		}
 	}
 }
+
+// The image format the agent is sent, its staging path, and the identity on
+// the wire: a random agent instance ID in a header, and the scheduler's restart
+// count in the registration (owner ruling: never the kernel's boot ID).
+func TestImageFormatAndIdentityOnTheWire(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("ab", 32)
+	hex := strings.Repeat("ab", 32)
+	for got, want := range map[string]string{
+		StagedImagePath(digest, ImageFormatSIF):     "images/" + hex + ".sif",
+		StagedImagePath(digest, ImageFormatSandbox): "images/" + hex + ".sandbox",
+		StagedImagePath(digest, ""):                 "images/" + hex + ".sif",
+	} {
+		if got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	}
+	if string(ImageFormatSIF) != string(v1alpha1.ImageFormatSIF) || string(ImageFormatSandbox) != string(v1alpha1.ImageFormatSandbox) {
+		t.Error("the wire's image formats differ from the API's")
+	}
+
+	var s AgentSettings
+	if err := json.Unmarshal([]byte(`{"probeInterval":"10s","stopGrace":"10s","imageFormat":"sandbox"}`), &s); err != nil {
+		t.Fatal(err)
+	}
+	if s.ImageFormat != ImageFormatSandbox || time.Duration(s.StopGrace) != 10*time.Second {
+		t.Errorf("settings = %+v", s)
+	}
+	// An older controller sends no format; the zero value means sif.
+	var older AgentSettings
+	if err := json.Unmarshal([]byte(`{"probeInterval":"10s","stopGrace":"10s"}`), &older); err != nil || older.ImageFormat != "" {
+		t.Errorf("settings without a format = %+v, %v", older, err)
+	}
+
+	b, err := json.Marshal(RegisterRequest{Node: "node-a", CPUArch: "aarch64", RestartCount: 1})
+	if err != nil || !strings.Contains(string(b), `"restartCount":1`) {
+		t.Errorf("register body = %s, %v", b, err)
+	}
+	b, err = json.Marshal(Launch{Image: "i", ImageDigest: digest, Command: []string{"vllm"}, MaxNumSeqs: 256})
+	if err != nil || !strings.Contains(string(b), `"maxNumSeqs":256`) {
+		t.Errorf("launch = %s, %v", b, err)
+	}
+	if HeaderAgentInstanceID != "Hpcburst-Agent-Instance-Id" || http.CanonicalHeaderKey(HeaderAgentInstanceID) != HeaderAgentInstanceID {
+		t.Errorf("header %q is not the canonical Hpcburst-Agent-Instance-Id", HeaderAgentInstanceID)
+	}
+}

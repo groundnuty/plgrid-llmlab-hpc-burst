@@ -109,7 +109,7 @@ func TestPlatformProfileLifecycleFields(t *testing.T) {
 	}
 	// HBEP-4's defaults, written out by hand.
 	defaults := map[string]*v1alpha1.Duration{
-		"drainWindow": got.Spec.DrainWindow, "handoverMargin": got.Spec.HandoverMargin,
+		"drainWindow": got.Spec.DrainWindow, "drainMargin": got.Spec.DrainMargin, "handoverMargin": got.Spec.HandoverMargin,
 		"health.probeInterval": got.Spec.Health.ProbeInterval, "health.noProgressTimeout": got.Spec.Health.NoProgressTimeout,
 		"health.errorOnlyWindow": got.Spec.Health.ErrorOnlyWindow, "health.kvSkewTimeout": got.Spec.Health.KVSkewTimeout,
 		"health.agentTimeout": got.Spec.Health.AgentTimeout, "health.registrationTimeout": got.Spec.Health.RegistrationTimeout,
@@ -117,7 +117,7 @@ func TestPlatformProfileLifecycleFields(t *testing.T) {
 		"restart.window": got.Spec.Restart.Window, "restart.backoff": got.Spec.Restart.Backoff,
 	}
 	want := map[string]v1alpha1.Duration{
-		"drainWindow": "30m", "handoverMargin": "30m", "health.probeInterval": "10s", "health.noProgressTimeout": "2m",
+		"drainWindow": "2h10m", "drainMargin": "10m", "handoverMargin": "30m", "health.probeInterval": "10s", "health.noProgressTimeout": "30m",
 		"health.errorOnlyWindow": "1m", "health.kvSkewTimeout": "2m", "health.agentTimeout": "2m",
 		"health.registrationTimeout": "15m", "health.startTimeout": "1h", "restart.stopGrace": "10s",
 		"restart.window": "30m", "restart.backoff": "30s",
