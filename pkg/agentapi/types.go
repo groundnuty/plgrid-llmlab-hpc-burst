@@ -145,9 +145,10 @@ type DesiredInstance struct {
 	// Checks, when set, asks the agent to verify, qualify or warm up now.
 	Checks *Checks `json:"checks,omitempty"`
 
-	// HubToken is the token for a gated checkpoint. It reaches the download
-	// only through the environment, and never a file outside the job, a
-	// command line or a log (HBEP-7, Keys).
+	// HubToken is the token for a gated checkpoint. The agent keeps it in
+	// memory for its in-process download; it never reaches a file outside the
+	// job, a command line or a log (HBEP-7, Keys, as the science agent ruled
+	// on 31 Oct 2026).
 	HubToken string `json:"hubToken,omitempty"`
 
 	// KeyStored says the controller has stored the Instance's key; until it
