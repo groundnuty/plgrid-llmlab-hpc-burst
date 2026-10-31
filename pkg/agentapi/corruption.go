@@ -21,27 +21,42 @@ const (
 // when one is shorter), and no output is empty or a single token repeated (two
 // or more tokens, all the same). Identical outputs are not required. The
 // message says why a failure failed, and is empty on a pass. It does not change
-// outputs.
+// outputs. JudgeCorruption gives the same verdict as a CheckOutcome with the
+// failure's Reason.
 func CorruptionVerdict(outputs [][]int32) (passed bool, message string) {
+	o := JudgeCorruption(outputs)
+	return o.Passed, o.Message
+}
+
+// JudgeCorruption judges the outputs as CorruptionVerdict does and returns the
+// corruption check's outcome: Name CheckCorruption, Passed, and for a failure
+// the Reason, one of ReasonWrongOutputCount, ReasonEmptyOutput,
+// ReasonRepeatedToken and ReasonOutputsDiverge, with the message
+// CorruptionVerdict gives. Both the real agent and the fake report it, so the
+// controller matches the same codes from either. It does not change outputs.
+func JudgeCorruption(outputs [][]int32) CheckOutcome {
+	fail := func(reason, format string, args ...any) CheckOutcome {
+		return CheckOutcome{Name: CheckCorruption, Reason: reason, Message: fmt.Sprintf(format, args...)}
+	}
 	if len(outputs) != CorruptionOutputs {
-		return false, fmt.Sprintf("got %d outputs, want %d", len(outputs), CorruptionOutputs)
+		return fail(ReasonWrongOutputCount, "got %d outputs, want %d", len(outputs), CorruptionOutputs)
 	}
 	for n, o := range outputs {
 		if len(o) == 0 {
-			return false, fmt.Sprintf("output %d is empty", n+1)
+			return fail(ReasonEmptyOutput, "output %d is empty", n+1)
 		}
 		if repeatsOneToken(o) {
-			return false, fmt.Sprintf("output %d is a single repeated token", n+1)
+			return fail(ReasonRepeatedToken, "output %d is a single repeated token", n+1)
 		}
 	}
 	for a := range outputs {
 		for b := a + 1; b < len(outputs); b++ {
 			if at := divergesWithin(outputs[a], outputs[b], CorruptionPrefix); at >= 0 {
-				return false, fmt.Sprintf("outputs %d and %d differ at token %d, within the first %d", a+1, b+1, at+1, CorruptionPrefix)
+				return fail(ReasonOutputsDiverge, "outputs %d and %d differ at token %d, within the first %d", a+1, b+1, at+1, CorruptionPrefix)
 			}
 		}
 	}
-	return true, ""
+	return CheckOutcome{Name: CheckCorruption, Passed: true}
 }
 
 // repeatsOneToken reports whether the output is two or more copies of one token.

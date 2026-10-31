@@ -84,6 +84,8 @@ modeldeployments:$.spec.source.served.flags[]#8|^TestEngineFlagsRefuseAbbreviati
 modeldeployments:$.spec.source.served.flags[]#9|^TestEngineFlagsRefuseAbbreviationsOfRefusedNames$
 modeldeployments:$.spec.source.served.flags[]#10|^TestEngineFlagsThatNameOtherCheckpointsAreRefused$
 modeldeployments:$.spec.source.served.flags[]#11|^TestEngineFlagsRefuseEveryPrefixOfAKnownFlag$
+modeldeployments:$.spec.source.served.flags[]#12|^TestMaxModelLenIsAPlainPositiveInteger$
+modeldeployments:$.spec.workload.contextTokens#0|^TestContextTokensTypicalIsAtMostLongest$
 platformprofiles:$.spec#0|^TestPlatformProfileTypedFields$
 platformprofiles:$.spec.drainMargin#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.drainWindow#0|^TestDurationsArePositiveAndFit$

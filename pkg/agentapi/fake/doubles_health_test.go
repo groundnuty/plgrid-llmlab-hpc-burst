@@ -32,17 +32,24 @@ func TestHealthStalledHasRequestsRunningAndATokenCounterThatNeverMoves(t *testin
 	eq(t, "samples", len(samples), 3)
 	for k, h := range samples {
 		eq(t, fmt.Sprintf("sample %d, apart from its time", k), withoutTime(h), agentapi.Health{
-			ProbeOK: true, RunningRequests: 8, WaitingRequests: 0, GeneratedTokens: 12345, KVCacheUsage: 0.5,
+			ProbeOK: true, RunningRequests: i64p(8), WaitingRequests: i64p(0), GeneratedTokens: i64p(12345), KVCacheUsage: f64p(0.5),
 		})
 	}
 	// The clock moved 5 minutes between samples; the counter did not.
 	eq(t, "time between samples", samples[1].Time.Sub(samples[0].Time), 5*time.Minute)
 }
 
+// withoutTime returns h without its Time and its MetricsReadAt, which a test
+// compares on its own (TestEveryHealthDoubleReadsItsMetricsAtTheSampleTime): a
+// strip that hid a missing MetricsReadAt would pass a double that left it out.
 func withoutTime(h agentapi.Health) agentapi.Health {
 	h.Time = time.Time{}
+	h.MetricsReadAt = nil
 	return h
 }
+
+func i64p(v int64) *int64     { return &v }
+func f64p(v float64) *float64 { return &v }
 
 func TestHealthSlowPrefillHasOneRequestRunningAndNoTokenWhateverTheClockSays(t *testing.T) {
 	for _, elapsed := range []time.Duration{1100 * time.Second, 30 * time.Minute} {
@@ -50,7 +57,7 @@ func TestHealthSlowPrefillHasOneRequestRunningAndNoTokenWhateverTheClockSays(t *
 		eq(t, fmt.Sprintf("%v: samples", elapsed), len(samples), 2)
 		for _, h := range samples {
 			eq(t, fmt.Sprintf("%v: sample", elapsed), withoutTime(h), agentapi.Health{
-				ProbeOK: true, RunningRequests: 1, WaitingRequests: 0, GeneratedTokens: 0, KVCacheUsage: 0.05,
+				ProbeOK: true, RunningRequests: i64p(1), WaitingRequests: i64p(0), GeneratedTokens: i64p(0), KVCacheUsage: f64p(0.05),
 			})
 		}
 		eq(t, fmt.Sprintf("%v: the clock moved between the samples", elapsed), samples[1].Time.Sub(samples[0].Time), elapsed/2)
@@ -64,8 +71,8 @@ func TestHealthPlainLoadHasALongQueueAndATokenCounterThatRisesWithEverySample(t 
 	eq(t, "samples", len(samples), 3)
 	for k, h := range samples {
 		eq(t, fmt.Sprintf("sample %d", k), withoutTime(h), agentapi.Health{
-			ProbeOK: true, RunningRequests: 256, WaitingRequests: 1000,
-			GeneratedTokens: int64(1000 * (k + 1)), KVCacheUsage: 1,
+			ProbeOK: true, RunningRequests: i64p(256), WaitingRequests: i64p(1000),
+			GeneratedTokens: i64p(int64(1000 * (k + 1))), KVCacheUsage: f64p(1),
 		})
 	}
 }
@@ -75,7 +82,7 @@ func TestHealthCountersAreKeptPerWorker(t *testing.T) {
 	r.set(run(instance(withWorkers(0, 0))))
 	r.steps(3)
 	for _, name := range []string{"worker-0", "worker-1"} {
-		eq(t, name+" tokens at its second sample", r.workerOf(name).Health.GeneratedTokens, int64(2000))
+		eq(t, name+" tokens at its second sample", *r.workerOf(name).Health.GeneratedTokens, int64(2000))
 	}
 }
 
@@ -84,7 +91,8 @@ func TestHealthFailingProbesFailsAndCountsTheFailuresInARow(t *testing.T) {
 	eq(t, "samples", len(samples), 3)
 	for k, h := range samples {
 		eq(t, fmt.Sprintf("sample %d", k), withoutTime(h), agentapi.Health{
-			ProbeOK: false, ConsecutiveProbeFailures: int32(k + 1), KVCacheUsage: 0.1,
+			ProbeOK: false, ConsecutiveProbeFailures: int32(k + 1),
+			RunningRequests: i64p(0), WaitingRequests: i64p(0), GeneratedTokens: i64p(0), KVCacheUsage: f64p(0.1),
 		})
 	}
 }
@@ -94,7 +102,8 @@ func TestHealthErrorsOnlyAnswersEveryRequestWithAServerError(t *testing.T) {
 	eq(t, "samples", len(samples), 3)
 	for k, h := range samples {
 		eq(t, fmt.Sprintf("sample %d", k), withoutTime(h), agentapi.Health{
-			ProbeOK: true, KVCacheUsage: 0.1, ResponsesByStatus: map[string]int64{"5xx": int64(10 * (k + 1))},
+			ProbeOK: true, RunningRequests: i64p(0), WaitingRequests: i64p(0), GeneratedTokens: i64p(0), KVCacheUsage: f64p(0.1),
+			ResponsesByStatus: map[string]int64{"5xx": int64(10 * (k + 1))},
 		})
 	}
 }
@@ -102,10 +111,12 @@ func TestHealthErrorsOnlyAnswersEveryRequestWithAServerError(t *testing.T) {
 func TestEachHealthDoubleDiffersFromTheHealthyDefaultOnTheSignalItTrips(t *testing.T) {
 	now := t0
 	def := fake.DefaultHealth(now, fake.Process{Worker: "worker-0", PID: 4000})
-	eq(t, "the default is healthy and idle", withoutTime(def), agentapi.Health{ProbeOK: true, KVCacheUsage: 0.1})
+	eq(t, "the default is healthy and idle", withoutTime(def), agentapi.Health{
+		ProbeOK: true, RunningRequests: i64p(0), WaitingRequests: i64p(0), GeneratedTokens: i64p(0), KVCacheUsage: f64p(0.1),
+	})
 
 	stalled := fake.HealthStalled(now, fake.Process{Worker: "worker-0", PID: 4000})
-	if stalled.RunningRequests == 0 || stalled.GeneratedTokens == 0 {
+	if *stalled.RunningRequests == 0 || *stalled.GeneratedTokens == 0 {
 		t.Errorf("a stall needs requests running and a counter that stays above zero: %+v", stalled)
 	}
 	failing := fake.HealthFailingProbes()(now, fake.Process{Worker: "worker-0", PID: 4000})
@@ -136,7 +147,7 @@ func TestHealthCountersStartAgainForARestartedWorkerProcess(t *testing.T) {
 		{
 			name:   "HealthPlainLoad",
 			engine: fake.HealthPlainLoad,
-			field:  func(h agentapi.Health) any { return h.GeneratedTokens },
+			field:  func(h agentapi.Health) any { return *h.GeneratedTokens },
 			before: int64(3000), first: int64(1000), second: int64(2000),
 		},
 		{
@@ -199,4 +210,84 @@ func TestEngineHealthIsToldWhichProcessItSamples(t *testing.T) {
 		{Worker: "worker-0", PID: 4000, Start: t0, Generation: 2},
 		{Worker: "worker-0", PID: 4001, Start: t0.Add(7 * time.Second), Generation: 5},
 	})
+}
+
+// Every Health double that models a readable /metrics sets MetricsReadAt to the
+// sample's own time and all four gauges, a zero explicitly. A double that left
+// them out would read as "unknown" and the controller's tests on it would
+// trip for the wrong reason (`@hpc-burst-science-agent`, 31 Oct 2026).
+func TestEveryHealthDoubleReadsItsMetricsAtTheSampleTime(t *testing.T) {
+	proc := fake.Process{Worker: "worker-0", PID: 4000}
+	for name, h := range map[string]func(time.Time, fake.Process) agentapi.Health{
+		"DefaultHealth":       fake.DefaultHealth,
+		"HealthStalled":       fake.HealthStalled,
+		"HealthSlowPrefill":   fake.HealthSlowPrefill,
+		"HealthPlainLoad":     fake.HealthPlainLoad(),
+		"HealthFailingProbes": fake.HealthFailingProbes(),
+		"HealthErrorsOnly":    fake.HealthErrorsOnly(),
+	} {
+		got := h(t0, proc)
+		if got.MetricsReadAt == nil || !got.MetricsReadAt.Equal(got.Time) || got.Time.IsZero() {
+			t.Errorf("%s: MetricsReadAt = %v, Time = %v; want a read at the sample's time", name, got.MetricsReadAt, got.Time)
+		}
+		if got.RunningRequests == nil || got.WaitingRequests == nil || got.GeneratedTokens == nil || got.KVCacheUsage == nil {
+			t.Errorf("%s: a gauge is nil (unknown): %+v", name, got)
+		}
+		if !got.MetricsFresh(t0, t0, t0, 10*time.Second) {
+			t.Errorf("%s: its metrics are not fresh", name)
+		}
+	}
+}
+
+func TestHealthMetricsUnreadableHasNoValueAndNoRead(t *testing.T) {
+	h := fake.HealthMetricsUnreadable(t0, fake.Process{Worker: "worker-0", PID: 4000})
+	eq(t, "sample", h, agentapi.Health{Time: t0, ProbeOK: true})
+	if h.MetricsFresh(t0, t0, t0, 10*time.Second) || h.MetricsFresh(t0, t0, t0, time.Hour) {
+		t.Error("an engine that was never read has fresh metrics")
+	}
+}
+
+func TestHealthMetricsStaleLooksStalledButIsReadLongAgo(t *testing.T) {
+	proc := fake.Process{Worker: "worker-0", PID: 4000}
+	for _, c := range []struct {
+		age   time.Duration
+		fresh bool
+	}{{5 * time.Second, true}, {20 * time.Second, true}, {21 * time.Second, false}, {10 * time.Minute, false}} {
+		h := fake.HealthMetricsStale(c.age)(t0, proc)
+		read := t0.Add(-c.age)
+		eq(t, fmt.Sprintf("age %v: the read", c.age), h.MetricsReadAt, &read)
+		// The values are HealthStalled's, which a controller that ignored the
+		// age would restart for a stall.
+		eq(t, fmt.Sprintf("age %v: apart from its read", c.age), withoutTime(h), withoutTime(fake.HealthStalled(t0, proc)))
+		if got := h.MetricsFresh(t0, t0, t0, 10*time.Second); got != c.fresh {
+			t.Errorf("age %v: MetricsFresh(10s) = %v, want %v", c.age, got, c.fresh)
+		}
+	}
+}
+
+// HealthCached sends the sample of its first call again and again while the
+// Agent's reports go on: the sample's Time and MetricsReadAt stay at the first
+// time, the report's time moves, and the metrics turn stale by the report's age
+// (MetricsFresh), which the sample alone cannot show.
+func TestHealthCachedKeepsItsFirstSampleWhileTheReportsMoveOn(t *testing.T) {
+	const interval = 10 * time.Second
+	samples := healthSamples(t, fake.HealthCached(), 6, 5*time.Second)
+	eq(t, "samples", len(samples), 5)
+	first := samples[0].Time
+	for k, h := range samples {
+		eq(t, fmt.Sprintf("sample %d is the first one", k), h, samples[0])
+		eq(t, fmt.Sprintf("sample %d reads at its own time", k), *h.MetricsReadAt, first)
+		reportTime := first.Add(time.Duration(k) * 5 * time.Second) // the report of sample k
+		// The report is received as it is made, so only its age after the sample counts.
+		want := time.Duration(k)*5*time.Second <= 2*interval
+		if got := h.MetricsFresh(reportTime, reportTime, reportTime, interval); got != want {
+			t.Errorf("sample %d in a report made %v after it: MetricsFresh = %v, want %v", k, reportTime.Sub(first), got, want)
+		}
+	}
+	// The last sample's report is 20 s after the sample, which is exactly two
+	// intervals: still fresh. One report later it is stale.
+	if !samples[4].MetricsFresh(first.Add(20*time.Second), first.Add(20*time.Second), first.Add(20*time.Second), interval) ||
+		samples[4].MetricsFresh(first.Add(25*time.Second), first.Add(25*time.Second), first.Add(25*time.Second), interval) {
+		t.Error("the boundary of two intervals between sample and report is not where it should be")
+	}
 }

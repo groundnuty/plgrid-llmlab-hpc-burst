@@ -523,6 +523,13 @@ spec:
                               - A speculative-config that names a draft model is refused in alpha, and
                                 a tokenizer other than the checkpoint's needs a pinned tokenizer-revision
                                 (ServingSpec).
+                              - max-model-len takes only a plain positive decimal integer (no sign, no
+                                leading zero, no suffix such as 32k, no exponent, not auto), because the
+                                controller compares it with the value the engine reports and works out
+                                the longest context from it (HBEP-3, HBEP-7;
+                                `@hpc-burst-science-agent`, 31 Oct 2026). A flag in flags is a typed
+                                name and value, not a free-form map, so the rule is on the flag and
+                                tests the name after "_" is replaced with "-".
 
                             The alias list is vLLM v0.32.0's. The lists of known names and booleans are
                             the table's; a change to the table changes these markers (HBEP-3).
@@ -640,6 +647,13 @@ spec:
                               'enable-log-requests', 'api-key', 'hf-token', 'config',
                               'lora-modules'].exists(k, k.startsWith(self.name.replace('_',
                               '-')))
+                          - message: 'max-model-len is a plain positive decimal integer
+                              such as 32768: values such as 32k, auto, -1, 0, +5 and
+                              1e4 are refused, because the controller compares the
+                              value the engine reports with it and sizes the longest
+                              context from it'
+                            rule: self.name.replace('_', '-') != 'max-model-len' ||
+                              self.value.matches('^[1-9][0-9]*$')
                         maxItems: 128
                         type: array
                         x-kubernetes-list-type: atomic
@@ -693,6 +707,11 @@ spec:
                     required:
                     - typical
                     type: object
+                    x-kubernetes-validations:
+                    - message: 'contextTokens.typical must not exceed contextTokens.longest:
+                        the behaviour check runs at the longest context and never
+                        below the typical one, so contradictory bounds are refused'
+                      rule: '!has(self.longest) || self.typical <= self.longest'
                   outputTokens:
                     description: OutputTokens are the output lengths, in tokens.
                     properties:
