@@ -351,3 +351,46 @@ func TestSuperviseReportsAChildThatCannotStart(t *testing.T) {
 		t.Errorf("entry %+v, last exit %+v", e, e.LastExit)
 	}
 }
+
+// TestSupervisedSetRunsTheFront: with a front configured, the set holds the controller and the
+// front, the front's command line being exactly cmd/hpcburst-front's contract. The expected vector
+// is written from that contract: the configuration file, the state directory, the port base, the
+// health address at base+4 (issue #64), and the recorded dial-home mode. No key is on it.
+func TestSupervisedSetRunsTheFront(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		front Front
+		extra []string
+	}{
+		{"no dial-home recorded", Front{}, nil},
+		{"direct", Front{Mode: "direct", Addr: "front.example.test:8443"}, []string{"--mode", "direct"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			st := &State{
+				Ports:       Ports{API: 29220, HTTPS: 29221, KCM: 29222, Agent: 29223, FrontHealth: 29224, LB: 29225, Controller: 29226},
+				Front:       c.front,
+				Controllers: &ControllerConfig{Binary: "/opt/hpcburst-controller"},
+				FrontRun:    &FrontRunConfig{Binary: "/opt/hpcburst-front", Config: "/etc/front.json"},
+			}
+			set, err := st.supervisedSet(layout{"/run/st"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(set) != 2 || set[0].Name != "controller" || set[1].Name != "front" {
+				t.Fatalf("supervised set %+v", set)
+			}
+			f := set[1]
+			if f.Path != "/opt/hpcburst-front" || f.Health != "127.0.0.1:29224" {
+				t.Errorf("front entry %+v", f)
+			}
+			want := append([]string{"--config", "/etc/front.json", "--state-dir", "/run/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29224"}, c.extra...)
+			if !slices.Equal(f.Args, want) {
+				t.Errorf("front argv\n got %q\nwant %q", f.Args, want)
+			}
+		})
+	}
+	st := &State{Ports: Ports{API: 29220, Controller: 29226}, Controllers: &ControllerConfig{Binary: "/c"}}
+	if set, err := st.supervisedSet(layout{"/run/st"}); err != nil || len(set) != 1 {
+		t.Errorf("without a front configured the set is the controller alone: %+v, %v", set, err)
+	}
+}

@@ -15,7 +15,7 @@ func TestPortsFromBase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := Ports{API: 29220, HTTPS: 29221, KCM: 29222, Agent: 29223, LB: 29225, Controller: 29226}
+	want := Ports{API: 29220, HTTPS: 29221, KCM: 29222, Agent: 29223, FrontHealth: 29224, LB: 29225, Controller: 29226}
 	if p != want {
 		t.Fatalf("got %+v, want %+v", p, want)
 	}
@@ -28,14 +28,17 @@ func TestPortsFromBase(t *testing.T) {
 	if got := p.Expected(); len(got) != 3 || got[0] != 29220 || got[1] != 29221 || got[2] != 29222 {
 		t.Errorf("expected ports %v", got)
 	}
-	// The launcher's block is base..base+6 less base+4: the agent endpoint (base+3) and the
-	// controller's health port (base+6) join the four that must be free before a start. base+4
-	// and base+7 are not reserved.
-	if got := p.All(); fmt.Sprint(got) != "[29220 29221 29222 29223 29225 29226]" {
+	// The launcher's block is base..base+6: the agent endpoint (base+3), the front's health port
+	// (base+4, issue #64) and the controller's health port (base+6) join the four that must be
+	// free before a start. base+7 is not reserved.
+	if got := p.All(); fmt.Sprint(got) != "[29220 29221 29222 29223 29224 29225 29226]" {
 		t.Errorf("all ports %v", got)
 	}
 	if got := p.ControllerAddr(); got != "127.0.0.1:29226" {
 		t.Errorf("controller address %q", got)
+	}
+	if got := p.FrontHealthAddr(); got != "127.0.0.1:29224" {
+		t.Errorf("front health address %q", got)
 	}
 	for _, bad := range []int{0, 80, 1023, 65530, 65531, 70000, -1} {
 		if _, err := PortsFromBase(bad); err == nil {
