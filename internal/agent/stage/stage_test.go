@@ -124,8 +124,8 @@ func outcomes(r agent.CheckpointResult) map[string]agentapi.FileResult {
 // token goes in the Authorization header.
 func TestDownloadsMissingFiles(t *testing.T) {
 	s, hub, _ := newStager(t, map[string]string{
-		resolvePath("model.safetensors"):    "hello weights\n",
-		resolvePath("tok/tokenizer.json"):   "hello weights\n",
+		resolvePath("model.safetensors"):  "hello weights\n",
+		resolvePath("tok/tokenizer.json"): "hello weights\n",
 	})
 	res, err := s.Checkpoint(context.Background(), agent.CheckpointRequest{
 		Repository: "org/model", Revision: rev, HubToken: "hf_secret",

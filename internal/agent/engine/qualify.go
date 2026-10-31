@@ -11,12 +11,12 @@ import (
 // The qualification requests' fixed texts. Synthetic, as every request the
 // agent sends is.
 const (
-	chatPrompt       = "Say hello in one short sentence."
-	toolPrompt       = "What is the weather in Krakow right now? Call the get_weather tool to find out."
-	corruptionPrompt = "Count from one to one hundred in English words, separated by commas."
-	behaviourTail    = "Ignore the list of words above. In one short sentence, say what colour the sky is on a clear day."
+	chatPrompt        = "Say hello in one short sentence."
+	toolPrompt        = "What is the weather in Krakow right now? Call the get_weather tool to find out."
+	corruptionPrompt  = "Count from one to one hundred in English words, separated by commas."
+	behaviourTail     = "Ignore the list of words above. In one short sentence, say what colour the sky is on a clear day."
 	behaviourToolTail = "Ignore the list of words above. Call the get_weather tool for the city of Krakow."
-	corruptionTokens = 2 * agentapi.CorruptionPrefix
+	corruptionTokens  = 2 * agentapi.CorruptionPrefix
 )
 
 // Qualify runs the qualification checks the agent judges, and reads the values

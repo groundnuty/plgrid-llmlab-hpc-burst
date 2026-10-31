@@ -301,8 +301,8 @@ func enginePIDs(t *testing.T, h *harness) []int {
 	var pids []int
 	for _, line := range readLines(t, h.engLog) {
 		var rec struct {
-			PIDs []int `json:"pids"`
-			PID  int   `json:"pid"`
+			PIDs []int    `json:"pids"`
+			PID  int      `json:"pid"`
 			Argv []string `json:"argv"`
 		}
 		if json.Unmarshal([]byte(line), &rec) != nil {
