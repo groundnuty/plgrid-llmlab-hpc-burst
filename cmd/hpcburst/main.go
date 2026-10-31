@@ -130,7 +130,7 @@ func cmdUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&sd, "state-dir", "", stateDirUsage)
 	fs.StringVar(&bd, "bin-dir", "", binDirUsage)
 	fs.StringVar(&o.Version, "version", "", "k3s release to start (must be pinned): default the release that last wrote the store, or "+launcher.DefaultVersion+" for a new one; another release than the store's is refused (use upgrade or restore)")
-	fs.IntVar(&o.PortBase, "port-base", launcher.DefaultPortBase, "first of a block of seven loopback ports: base (apiserver), +1 (https), +2 (controller manager), +3 (the agent endpoint, reserved for the controller's server), +5 (reserved, never bound), +6 (the lifecycle controller's /healthz); +4 is unused")
+	fs.IntVar(&o.PortBase, "port-base", launcher.DefaultPortBase, "first of a block of seven loopback ports: base (apiserver), +1 (https), +2 (controller manager), +3 (the agent endpoint, reserved for the controller's server), +5 (reserved, never bound), +4 (the front's /healthz), +6 (the lifecycle controller's /healthz)")
 	fs.StringVar(&o.Front.Mode, "front-mode", "", "how compute nodes reach the front: direct, or ssh (port 22, restricted key)")
 	fs.StringVar(&o.Front.Addr, "front-addr", "", "the front's address, host:port (ssh: host or host:22)")
 	fs.StringVar(&o.Front.KeyPath, "front-key", "", "ssh mode: path of the restricted key (recorded, never read)")
@@ -138,6 +138,8 @@ func cmdUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&o.ManifestsDir, "manifests", "", "directory of YAML manifests to apply once the host is ready, CRDs first")
 	fs.DurationVar(&o.ReadyTimeout, "ready-timeout", launcher.DefaultReadyTimeout, "how long to wait for readiness")
 	fs.StringVar(&o.ControllerBin, "controller-bin", "", "the controllers' binary (default "+launcher.ControllerBinName+" in the directory of this executable; when that is absent, up starts the host with a warning and no controller runs)")
+	fs.StringVar(&o.FrontConfig, "front-config", "", "the front's configuration file (HBEP-5); when given, the supervisor runs the front beside the controllers")
+	fs.StringVar(&o.FrontBin, "front-bin", "", "the front's binary (default "+launcher.FrontBinName+" in the directory of this executable)")
 	fs.BoolVar(&asJSON, "json", false, "print the result as JSON")
 	if code, done := parse(fs, args); done {
 		return code
@@ -167,6 +169,9 @@ func cmdUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	if rep.SupervisorPID != 0 {
 		fmt.Fprintf(stdout, "controllers: supervisor pid %d runs %s, health on %s\n", rep.SupervisorPID, rep.ControllerBin, rep.ControllerHealth)
+	}
+	if rep.FrontHealth != "" {
+		fmt.Fprintf(stdout, "front: supervised, health on %s\n", rep.FrontHealth)
 	}
 	if o.ManifestsDir != "" {
 		fmt.Fprintf(stdout, "applied %d manifests from %s\n", rep.Applied, o.ManifestsDir)

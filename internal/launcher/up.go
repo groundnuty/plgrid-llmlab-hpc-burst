@@ -29,6 +29,10 @@ type UpOptions struct {
 	// executable; if that is absent too, the host starts with a warning and no controller runs.
 	// A path that is given and missing is an error, raised before anything starts.
 	ControllerBin string
+	// FrontConfig is the front's configuration file; empty means no front runs. FrontBin is its
+	// binary, default FrontBinName beside the running executable (issue #64). The front runs under
+	// the controllers' supervisor, so it needs a controller binary too.
+	FrontConfig, FrontBin string
 
 	// supervisorArgv, set by tests only, replaces the supervisor's command line.
 	supervisorArgv []string
@@ -52,6 +56,8 @@ type UpReport struct {
 	SupervisorPID    int    `json:"supervisor_pid,omitempty"`
 	ControllerBin    string `json:"controller_bin,omitempty"`
 	ControllerHealth string `json:"controller_health,omitempty"`
+	// FrontHealth is the address of the front's /healthz when a front runs.
+	FrontHealth string `json:"front_health,omitempty"`
 }
 
 // logTail returns the last few lines of the k3s log, for error messages.
@@ -157,6 +163,13 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 	ctrlBin, err := resolveControllerBin(o.ControllerBin)
 	if err != nil {
 		return nil, err
+	}
+	frontRun, err := resolveFrontRun(o.FrontConfig, o.FrontBin)
+	if err != nil {
+		return nil, err
+	}
+	if frontRun != nil && ctrlBin == "" {
+		return nil, errors.New("a front was asked for (--front-config), but no controller binary was found: the front runs under the controllers' supervisor")
 	}
 	unlock, err := l.lockState()
 	if err != nil {
@@ -264,10 +277,14 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 			}
 		}
 		st.Controllers = &ControllerConfig{Binary: ctrlBin}
+		st.FrontRun = frontRun
 		if err := startSupervisor(ctx, l, st, argv, superviseStartTimeout, o.Log); err != nil {
 			return abort("controllers", err)
 		}
 		rep.SupervisorPID, rep.ControllerBin, rep.ControllerHealth = st.Procs[len(st.Procs)-1].PID, ctrlBin, ports.ControllerAddr()
+		if frontRun != nil {
+			rep.FrontHealth = ports.FrontHealthAddr()
+		}
 	}
 	if !front.Set() {
 		rep.Warnings = append(rep.Warnings, frontWarning)

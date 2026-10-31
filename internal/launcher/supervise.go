@@ -30,7 +30,8 @@ const (
 	DefaultTermGrace   = 10 * time.Second
 )
 
-// supervised is one process the supervisor keeps running. Issue #64 adds the front as one more.
+// supervised is one process the supervisor keeps running: the controller, and the front when up
+// was given one (issue #64, frontEntry).
 type supervised struct {
 	Name   string
 	Path   string
@@ -55,7 +56,15 @@ func (s *State) supervisedSet(l layout) ([]supervised, error) {
 	if s.Front.Set() {
 		args = append(args, "--front-mode", s.Front.Mode, "--front-addr", s.Front.Addr)
 	}
-	return []supervised{{Name: "controller", Path: s.Controllers.Binary, Args: args, Health: health}}, nil
+	set := []supervised{{Name: "controller", Path: s.Controllers.Binary, Args: args, Health: health}}
+	front, err := s.frontEntry(l)
+	if err != nil {
+		return nil, err
+	}
+	if front != nil {
+		set = append(set, *front)
+	}
+	return set, nil
 }
 
 // backoff is the pure restart-delay rule: the delay after an exit, given how long the child ran.
