@@ -18,6 +18,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -35,6 +36,37 @@ const (
 )
 
 var digest = "sha256:" + strings.Repeat("2", 64)
+
+// agentDigest is an allocation agent build's SHA-256, bare hex.
+var agentDigest = strings.Repeat("3", 64)
+
+// validBatch returns a batch job's submission parameters that admission accepts.
+func validBatch() *v1alpha1.BatchParameters {
+	return &v1alpha1.BatchParameters{
+		Partition: "example-gpu", TimeLimit: "1h", GPUs: 1, CPUsPerTask: 16,
+		Memory: resource.MustParse("120Gi"), AgentDigest: agentDigest,
+	}
+}
+
+// validWorkload returns a workload with only the required fields.
+func validWorkload() *v1alpha1.Workload {
+	return &v1alpha1.Workload{
+		ContextTokens:  v1alpha1.ContextTokens{Typical: 8192},
+		OutputTokens:   v1alpha1.OutputTokens{Typical: 1024},
+		TargetSessions: 8,
+	}
+}
+
+// validLaunch returns an Instance's launch that admission accepts.
+func validLaunch() v1alpha1.Launch {
+	return v1alpha1.Launch{
+		Image: "docker.io/vllm/vllm-openai", ImageDigest: digest,
+		Command:    []string{"vllm", "serve", "/hpcburst/model", "--uds", "/hpcburst/run/worker-0.sock", "--dtype=bfloat16", "--max-num-seqs=256"},
+		Checkpoint: v1alpha1.LaunchCheckpoint{Repository: "example-org/example-1b", Revision: commit40},
+		GPUs:       1,
+		MaxNumSeqs: 256,
+	}
+}
 
 // installCRDs applies every CRD manifest under config/crd through the client,
 // waits until each is established, and waits until its resource is served.
@@ -239,11 +271,12 @@ func newModelDeployment(ns, name string) *v1alpha1.ModelDeployment {
 			Model: "example-27b",
 			Source: v1alpha1.ModelSource{Served: &v1alpha1.ServingSpec{
 				Checkpoint: v1alpha1.CheckpointSpec{Repository: "example-org/example-1b", Revision: commit40},
-				Engine:     v1alpha1.EngineSpec{Name: "vllm", Version: "0.32.0", ImageDigest: digest},
+				Engine:     v1alpha1.EngineSpec{Name: "vllm", Version: "0.32.0", ImageDigest: digest, Image: "docker.io/vllm/vllm-openai"},
 				Flags:      []v1alpha1.EngineFlag{{Name: "dtype", Value: "bfloat16"}, {Name: "max-model-len", Value: "32768"}},
 			}},
 			Instances: 2,
 			Providers: v1alpha1.ProviderSelection{Names: []string{"helios-a"}},
+			Workload:  validWorkload(),
 		},
 	}
 }
@@ -251,7 +284,7 @@ func newModelDeployment(ns, name string) *v1alpha1.ModelDeployment {
 func newAllocation(ns, name string) *v1alpha1.Allocation {
 	a := &v1alpha1.Allocation{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
 	a.Spec.ProviderConfigReference = &xpv2.ProviderConfigReference{Kind: v1alpha1.ProviderConfigKind, Name: "helios-a"}
-	a.Spec.ForProvider = v1alpha1.AllocationParameters{Batch: &v1alpha1.BatchParameters{Partition: "example-gpu", TimeLimit: "01:00:00"}}
+	a.Spec.ForProvider = v1alpha1.AllocationParameters{Batch: validBatch()}
 	return a
 }
 
@@ -262,6 +295,7 @@ func newInstance(ns, name string) *v1alpha1.Instance {
 			DeploymentID:   fullID,
 			IdentityRecord: "id-" + fullID[:12],
 			AllocationRef:  v1alpha1.ObjectReference{Name: "helios-a-abcde"},
+			Launch:         validLaunch(),
 		},
 	}
 }

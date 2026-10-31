@@ -1,11 +1,13 @@
 package hubfiles
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1" // the git blob id is a SHA-1 by definition; it is compared with the listing's oid, not used for security
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"net/url"
@@ -27,15 +29,56 @@ func (c *Client) resolveURL(repo, rev, path string) string {
 	return u.String()
 }
 
-// hashBlob downloads one file that is not in LFS and returns its SHA-256 in
-// lowercase hex. The content is streamed through the SHA-256 and through a
-// SHA-1 that starts with the git blob header "blob <size>\0", with the size
-// the listing gives, so the SHA-1 is the file's git blob id. That id must
-// equal the listing's oid (ErrBlobMismatch), and the number of bytes read must
-// equal the listed size (ErrSizeMismatch). Nothing is written to disk.
-func (c *Client) hashBlob(ctx context.Context, repo, rev string, e Entry, tok token) (string, error) {
+// checkSize refuses a file the client may not download, before any request.
+func (c *Client) checkSize(e Entry) error {
 	if e.Size > c.maxFileBytes {
-		return "", fmt.Errorf("%w: %q is %d bytes, the limit is %d", ErrFileTooLarge, e.Path, e.Size, c.maxFileBytes)
+		return fmt.Errorf("%w: %q is %d bytes, the limit is %d", ErrFileTooLarge, e.Path, e.Size, c.maxFileBytes)
+	}
+	return nil
+}
+
+// hashBlob downloads one file that is not in LFS and returns its SHA-256 in
+// lowercase hex, after the checks of download. Nothing is written to disk and
+// the content is not kept.
+func (c *Client) hashBlob(ctx context.Context, repo, rev string, e Entry, tok token) (string, error) {
+	return c.download(ctx, repo, rev, e, tok, io.Discard)
+}
+
+// fetch downloads one file of the revision and returns its content, which has
+// passed every check of download. On any failure it returns no bytes. An empty
+// file gives an empty, non-nil slice, because the callers tell "absent" (nil)
+// from "present and empty".
+func (c *Client) fetch(ctx context.Context, repo, rev string, e Entry, tok token) ([]byte, error) {
+	var buf bytes.Buffer
+	if _, err := c.download(ctx, repo, rev, e, tok, &buf); err != nil {
+		return nil, err
+	}
+	if buf.Len() == 0 {
+		return []byte{}, nil
+	}
+	return buf.Bytes(), nil
+}
+
+// download streams one file of the revision to dst and returns the SHA-256 of
+// the content in lowercase hex. It is the one place that decides whether a
+// download can be trusted, for both hashBlob and fetch:
+//   - a file larger than the client's limit is refused before the request
+//     (ErrFileTooLarge), and no more than the listed size plus one byte is ever
+//     read, to tell "too long" from "exact";
+//   - the number of bytes must equal the listed size (ErrSizeMismatch);
+//   - a file that is not in LFS must have the git blob id of the listing,
+//     sha1("blob <size>\0" + content) (ErrBlobMismatch);
+//   - the content's SHA-256 must equal e.SHA256 (ErrBlobMismatch) when the
+//     entry has one: always for an LFS file, whose lfs.oid is that hash, and
+//     for another file whose hash was already computed (a caller that holds
+//     the entries Files returned). The blob id of an LFS file names its
+//     pointer, not its content, and is not checked.
+//
+// dst receives the bytes as they arrive, before the checks end, so a caller
+// that keeps them must drop them when download returns an error.
+func (c *Client) download(ctx context.Context, repo, rev string, e Entry, tok token, dst io.Writer) (string, error) {
+	if err := c.checkSize(e); err != nil {
+		return "", err
 	}
 	req, err := c.newRequest(ctx, c.resolveURL(repo, rev, e.Path), tok)
 	if err != nil {
@@ -59,19 +102,32 @@ func (c *Client) hashBlob(ctx context.Context, repo, rev string, e Entry, tok to
 		return "", fmt.Errorf("%w: %q: the listing says %d bytes, the Hub sends %d", ErrSizeMismatch, e.Path, e.Size, resp.ContentLength)
 	}
 
-	blob := sha1.New()
-	fmt.Fprintf(blob, "blob %d\x00", e.Size)
 	sum := sha256.New()
+	sinks := []io.Writer{sum, dst}
+	var blob hash.Hash
+	if !e.LFS {
+		// The SHA-1 starts with the git blob header, with the size the listing
+		// gives, so it ends as the file's git blob id.
+		blob = sha1.New()
+		fmt.Fprintf(blob, "blob %d\x00", e.Size)
+		sinks = append(sinks, blob)
+	}
 	// One byte more than the listed size, to tell "too long" from "exact".
-	n, err := io.Copy(io.MultiWriter(blob, sum), io.LimitReader(resp.Body, e.Size+1))
+	n, err := io.Copy(io.MultiWriter(sinks...), io.LimitReader(resp.Body, e.Size+1))
 	if err != nil {
 		return "", fmt.Errorf("hubfiles: reading %q: %w", e.Path, err)
 	}
 	if n != e.Size {
 		return "", fmt.Errorf("%w: %q: the listing says %d bytes, the download has %d", ErrSizeMismatch, e.Path, e.Size, n)
 	}
-	if got := hex.EncodeToString(blob.Sum(nil)); got != e.BlobID {
-		return "", fmt.Errorf("%w: %q: the listing's oid is %s, the content hashes to %s", ErrBlobMismatch, e.Path, e.BlobID, got)
+	if blob != nil {
+		if got := hex.EncodeToString(blob.Sum(nil)); got != e.BlobID {
+			return "", fmt.Errorf("%w: %q: the listing's oid is %s, the content hashes to %s", ErrBlobMismatch, e.Path, e.BlobID, got)
+		}
 	}
-	return hex.EncodeToString(sum.Sum(nil)), nil
+	got := hex.EncodeToString(sum.Sum(nil))
+	if (e.LFS || e.SHA256 != "") && got != e.SHA256 {
+		return "", fmt.Errorf("%w: %q: the expected SHA-256 is %q, the content hashes to %s", ErrBlobMismatch, e.Path, e.SHA256, got)
+	}
+	return got, nil
 }

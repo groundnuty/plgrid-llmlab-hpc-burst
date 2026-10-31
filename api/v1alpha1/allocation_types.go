@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -9,33 +10,70 @@ import (
 // our Provider takes the place of crossplane's ProviderConfig (HBEP-3).
 const ProviderConfigKind = "Provider"
 
-// BatchParameters are the submission parameters of a batch job. They are set
-// when the Allocation is created and never edited: a submitted job is not
-// changed (HBEP-11, Admission).
+// BatchParameters are the submission parameters of a batch job (HBEP-4,
+// Submission). The lifecycle controller sets them when it creates the
+// Allocation (HBEP-7, Provisioning), and they are never edited: a submitted job
+// is not changed (HBEP-11, Admission). The provider adds the account (from the
+// Provider's settings), the tag and the fixed options; the batch script is the
+// fixed bootstrap, so neither an account nor a command is a parameter.
 type BatchParameters struct {
-	// Partition the job is submitted to.
+	// Partition the job is submitted to: the Provider's one allowed partition
+	// (HBEP-4, open question 12).
 	//
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	Partition string `json:"partition"`
 
-	// Account the job is charged to.
+	// TimeLimit is the job's time limit: the partition's maxTime, or the
+	// ModelDeployment's leaseLimit when that is shorter (HBEP-4, open question
+	// 11). It is a whole number of minutes, because Slurm counts limits in
+	// minutes and the read-back compares the limit it reports (HBEP-4, The
+	// Slurm dialect); the provider refuses any other value before a call.
+	//
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="timeLimit must be a positive duration that fits Go's time.Duration (above 0s, at most 2562047h)"
+	TimeLimit Duration `json:"timeLimit"`
+
+	// GPUs is the number of GPUs, requested untyped (--gres=gpu:<n>). In alpha
+	// it is tensor-parallel-size times pipeline-parallel-size (HBEP-4, GPU
+	// sizing). Zero only on a partition whose gpuModel is none; the provider
+	// refuses zero on a GPU partition, and more than gpusPerNode.
+	//
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1024
+	GPUs int32 `json:"gpus"`
+
+	// CPUsPerTask is gpus times the partition's cpusPerGpu (HBEP-7,
+	// Provisioning).
+	//
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65536
+	CPUsPerTask int32 `json:"cpusPerTask"`
+
+	// Memory is gpus times the partition's memPerGpu (HBEP-7, Provisioning).
+	// The provider passes it to Slurm in whole MiB. It is never negative.
+	//
+	// +kubebuilder:validation:XValidation:rule="!string(self).startsWith('-')",message="memory must not be negative"
+	Memory resource.Quantity `json:"memory"`
+
+	// Nodes is the number of nodes: 1 in alpha, whose Instances are
+	// single-node (HBEP-4, Submission).
 	//
 	// +optional
-	// +kubebuilder:validation:MaxLength=253
-	Account string `json:"account,omitempty"`
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1
+	Nodes int32 `json:"nodes,omitempty"`
 
-	// TimeLimit in the platform's format, for example "01:00:00".
+	// AgentDigest is the SHA-256, 64 lowercase hex characters, of the
+	// allocation agent's binary for the partition's cpuArch (HBEP-4,
+	// Submission; HBEP-7, The allocation agent). It names the staged binary,
+	// agent/<agentDigest>/hb-agent under the staging directory, so it is bare
+	// hex, without a "sha256:" prefix.
 	//
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=63
-	TimeLimit string `json:"timeLimit"`
-
-	// Wrap is the command passed to the submission, as in sbatch --wrap.
-	//
-	// +optional
-	// +kubebuilder:validation:MaxLength=8192
-	Wrap string `json:"wrap,omitempty"`
+	// +kubebuilder:validation:MinLength=64
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{64}$`
+	AgentDigest string `json:"agentDigest"`
 }
 
 // ManagedAllocation names the catalog entry a managed provider serves (HBEP-3).
@@ -140,10 +178,37 @@ type AllocationSpec struct {
 	RetentionPolicy *RetentionPolicy `json:"retentionPolicy,omitempty"`
 }
 
-// SubmissionRecord mirrors the latest submission attempt, for display. The
-// record itself lives in an annotation (AnnotationSubmission).
+// SubmissionState is the state of one submission attempt (HBEP-7, open
+// question 11, from spike S4).
+//
+// +kubebuilder:validation:Enum=InFlight;Rejected;Unknown;Done;Abandoned
+type SubmissionState string
+
+// Submission states.
+const (
+	// SubmissionInFlight: the attempt is claimed and its sbatch may be running.
+	SubmissionInFlight SubmissionState = "InFlight"
+	// SubmissionRejected: a definite refusal, or a command that never started.
+	// The next attempt waits for backoff; Reason carries the scheduler's reason.
+	SubmissionRejected SubmissionState = "Rejected"
+	// SubmissionUnknown: the outcome is unknown (a time-out, a signal, a
+	// transport error, unparseable output or a transient reason). It is never
+	// Failed, and only finding the tag resolves it.
+	SubmissionUnknown SubmissionState = "Unknown"
+	// SubmissionDone: the attempt established the recorded job, or was
+	// resolved by it.
+	SubmissionDone SubmissionState = "Done"
+	// SubmissionAbandoned: an operator abandoned the attempt in fallback mode
+	// (AnnotationAbandonAttempt), which allows the next one.
+	SubmissionAbandoned SubmissionState = "Abandoned"
+)
+
+// SubmissionRecord is one submission attempt. The record itself is the value of
+// the annotation AnnotationSubmission, this type as JSON, written with a
+// resourceVersion precondition (HBEP-11, Ownership, records and deletion);
+// status.atProvider.submission mirrors it for display.
 type SubmissionRecord struct {
-	// Attempt is the attempt's number.
+	// Attempt is the attempt's number, from 1.
 	Attempt int32 `json:"attempt"`
 
 	// Token identifies the attempt.
@@ -151,8 +216,8 @@ type SubmissionRecord struct {
 	// +optional
 	Token string `json:"token,omitempty"`
 
-	// State of the attempt, for example InFlight, Unknown, Done or Abandoned.
-	State string `json:"state"`
+	// State of the attempt.
+	State SubmissionState `json:"state"`
 
 	// Writer is the controller that wrote the record.
 	//
@@ -164,15 +229,58 @@ type SubmissionRecord struct {
 	// +optional
 	Time *metav1.Time `json:"time,omitempty"`
 
-	// Reason for the state.
+	// Reason for the state: for Rejected, the scheduler's reason, which the
+	// lifecycle controller shows as SubmissionRejected (HBEP-7, Provisioning).
 	//
 	// +optional
 	Reason string `json:"reason,omitempty"`
 }
 
+// AllocationPhase is the phase of an Allocation's job as its Provider's
+// controller reports it (HBEP-4, Core operations, Phases). Held, Pending,
+// Running, Ended and Failed are the job's own phases; Lost, Submitting,
+// SubmissionUnknown and Refused are the reconciler's.
+//
+// +kubebuilder:validation:Enum=Submitting;SubmissionUnknown;Held;Pending;Running;Ended;Failed;Lost;Refused
+type AllocationPhase string
+
+// Allocation phases (HBEP-4, Core operations).
+const (
+	// AllocationSubmitting: an attempt is in flight, or the next one waits for
+	// backoff after a Rejected one.
+	AllocationSubmitting AllocationPhase = "Submitting"
+	// AllocationSubmissionUnknown: an attempt's outcome is unknown and no job
+	// with the tag has been found yet. The Allocation exists; it is never read
+	// as missing.
+	AllocationSubmissionUnknown AllocationPhase = "SubmissionUnknown"
+	// AllocationHeld: established with its hold not yet lifted, or an admin
+	// hold, which also sets ConditionAdminHold.
+	AllocationHeld AllocationPhase = "Held"
+	// AllocationPending: queued, not started.
+	AllocationPending AllocationPhase = "Pending"
+	// AllocationRunning: started; startTime and hardEnd are set.
+	AllocationRunning AllocationPhase = "Running"
+	// AllocationEnded: COMPLETED, TIMEOUT (the lease end) or CANCELLED.
+	AllocationEnded AllocationPhase = "Ended"
+	// AllocationFailed: FAILED, NODE_FAIL, OUT_OF_MEMORY, BOOT_FAIL, PREEMPTED or
+	// DEADLINE, or a requeue in any state (reason ReasonRequeued, kept once
+	// seen).
+	AllocationFailed AllocationPhase = "Failed"
+	// AllocationLost: absent from the queue listing and accounting for longer
+	// than the profile's lostGrace, counting only reads that succeeded. It
+	// returns to the real phase if the job reappears.
+	AllocationLost AllocationPhase = "Lost"
+	// AllocationRefused: an invalid profile, a non-canonical external name, or
+	// a rewritten job name (reason ReasonJobRenamed: the read-back found the
+	// recorded job under a name other than the tag, and the provider cancelled
+	// it). It is kept once set.
+	AllocationRefused AllocationPhase = "Refused"
+)
+
 // AllocationObservation is what the provider observed about the job. Annotations
 // hold the job ID and the submission record; this mirrors them for display
-// only (HBEP-11).
+// only (HBEP-11). The Provider's controller is its only writer
+// (docs/development.md, Writers). Every time is in UTC (HBEP-4).
 type AllocationObservation struct {
 	// Tag is the job tag, the Allocation's external name (HBEP-3).
 	//
@@ -192,13 +300,42 @@ type AllocationObservation struct {
 	// Phase of the job as the provider reports it.
 	//
 	// +optional
-	Phase string `json:"phase,omitempty"`
+	Phase AllocationPhase `json:"phase,omitempty"`
+
+	// Reason says why the phase is what it is: ReasonRequeued for a requeue,
+	// otherwise the scheduler's state reason or the provider's explanation.
+	//
+	// +optional
+	// +kubebuilder:validation:MaxLength=1024
+	Reason string `json:"reason,omitempty"`
+
+	// Held is true while the recorded job is held.
+	//
+	// +optional
+	Held bool `json:"held,omitempty"`
+
+	// Requeued is true once a requeue of the recorded job has been seen. It is
+	// kept once set.
+	//
+	// +optional
+	Requeued bool `json:"requeued,omitempty"`
+
+	// RestartCount is the scheduler's restart count of the recorded job.
+	//
+	// +optional
+	RestartCount int32 `json:"restartCount,omitempty"`
+
+	// SubmitTime is when the scheduler accepted the recorded job.
+	//
+	// +optional
+	SubmitTime *metav1.Time `json:"submitTime,omitempty"`
 
 	// StartEstimate is when the platform's scheduler expects the job to start.
 	// It is absent while the platform gives no estimate: an unknown estimate
 	// is not "now" and not "never". It is not StartTime, which is the actual
 	// start, and it moves with every scheduler pass (HBEP-3, Vocabulary,
-	// Lease: a lease runs from a start estimate, which may be unknown).
+	// Lease: a lease runs from a start estimate, which may be unknown). It is
+	// advisory and never planned on (HBEP-7, open question 2).
 	//
 	// +optional
 	StartEstimate *metav1.Time `json:"startEstimate,omitempty"`
@@ -209,10 +346,25 @@ type AllocationObservation struct {
 	StartTime *metav1.Time `json:"startTime,omitempty"`
 
 	// HardEnd is the lease's hard end: the time limit as currently observed
-	// (HBEP-3, Vocabulary, Lease).
+	// (HBEP-3, Vocabulary, Lease). It is re-read on every observe, so a
+	// center's extension shows without being planned for.
 	//
 	// +optional
 	HardEnd *metav1.Time `json:"hardEnd,omitempty"`
+
+	// EndTime is when the job ended. It is absent until it has.
+	//
+	// +optional
+	EndTime *metav1.Time `json:"endTime,omitempty"`
+
+	// AbsentSince is the time of the first successful read, of the queue
+	// listing and accounting both, that did not show the recorded job; it is
+	// cleared when the job shows again. Lost is judged from it, so the grace
+	// survives a restart of the Provider's controller (HBEP-4, Core
+	// operations).
+	//
+	// +optional
+	AbsentSince *metav1.Time `json:"absentSince,omitempty"`
 
 	// Duplicates lists the IDs of extra jobs that carry the tag and are not
 	// held, in fallback mode. The list is sticky.
@@ -220,6 +372,17 @@ type AllocationObservation struct {
 	// +optional
 	// +listType=set
 	Duplicates []string `json:"duplicates,omitempty"`
+
+	// QueueWaitRecorded is true once the Provider's controller has added the
+	// recorded job's queue wait to the Provider's status (HBEP-4, Provider
+	// status). It is set only after that write succeeded, so a failed write
+	// is retried at the next observe; and it keeps a re-observed job from
+	// adding its wait again after the entry has left the 20 the Provider
+	// keeps. The wait is the job record's StartTime minus its SubmitTime, from
+	// whichever source Observe read.
+	//
+	// +optional
+	QueueWaitRecorded bool `json:"queueWaitRecorded,omitempty"`
 }
 
 // AllocationStatus is the observed state of an Allocation. Conditions,
@@ -250,8 +413,10 @@ type AllocationStatus struct {
 	// +optional
 	LastReconcileTime *metav1.Time `json:"lastReconcileTime,omitempty"`
 
-	// Retention shows the retention mode the controller applies; an unset mode
-	// in the spec reads as Keep.
+	// Retention shows the retention mode that applies; an unset mode in the
+	// spec reads as Keep. The Provider's controller, the only writer of
+	// Allocation status, mirrors it from the spec (docs/development.md,
+	// Writers); the lifecycle controller applies the policy.
 	//
 	// +optional
 	Retention *RetentionStatus `json:"retention,omitempty"`

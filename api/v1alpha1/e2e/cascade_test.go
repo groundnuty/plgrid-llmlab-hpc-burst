@@ -58,7 +58,7 @@ func TestDeletingAModelDeploymentLeavesTheRecords(t *testing.T) {
 	identity, err := v1alpha1.NewIdentityRecord(ns, md.Name, fullID, identityData)
 	must(t, err, "build the identity record")
 	must(t, c.Create(bg(), identity), "create the identity record")
-	verification, err := v1alpha1.NewVerificationRecord(ns, md.Name, fullID, in.UID, verifyData)
+	verification, err := v1alpha1.NewVerificationRecord(ns, md.Name, fullID, in.UID, 1, verifyData)
 	must(t, err, "build the verification record")
 	must(t, c.Create(bg(), verification), "create the verification record")
 	for _, r := range []*appsv1.ControllerRevision{identity, verification} {

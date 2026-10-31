@@ -30,6 +30,31 @@
 //     oid, otherwise the call fails; its SHA-256 is what the Hub does not
 //     publish for such a file.
 //
+// Client.Content returns the bytes of one file of the revision, and
+// Client.TemplateSources the chat-template files of a checkpoint, for
+// deploymentid.ResolveChatTemplate (HBEP-3, Deployment ID, chat_template_sha256):
+//
+//   - Content reads the listing as Files does, finds the entry whose path is
+//     exactly the one asked for (none: ErrNoSuchFile) and downloads it from
+//     /<repo>/resolve/<revision>/<path>. Nothing is returned before the
+//     download is checked, with the same code that Files uses on the files it
+//     hashes. A file that is not in LFS must have the listed size and the
+//     listed git blob id. An LFS file must have the listed size and the listed
+//     lfs.oid as its SHA-256 (ErrBlobMismatch otherwise). A file above
+//     Config.MaxFileBytes is refused before any request, whether or not it is
+//     in LFS, and the read never takes more than the listed size plus one
+//     byte. An empty file gives an empty, non-nil slice.
+//   - TemplateSources takes the entries Files returned and does not list
+//     again: for each of chat_template.jinja, chat_template.json and
+//     tokenizer_config.json at the checkpoint root (exact paths, case
+//     included) that has an entry, it downloads the file and checks it
+//     against that entry's blob id, size, LFS flag and SHA-256, as Content
+//     does. Jinja is set as a string (content that is not valid UTF-8 is an
+//     error), the other two as raw bytes, and a file with no entry leaves its
+//     field nil. A file that is present but empty is not nil, since the
+//     resolver tells absent from empty. Spec is left nil for the caller. Any
+//     failure fails the whole call and returns nothing.
+//
 // The revision must be 40 lowercase hex characters. A branch, a tag or a
 // short id is refused before any request, because the list of a moving
 // reference means nothing (HBEP-3).
@@ -42,11 +67,12 @@
 // logged, not part of any error, and the type that holds it prints as
 // "[redacted]" under every fmt verb. The package does no logging of its own.
 //
-// Errors keep their kind: a response error is an *HTTPError (with the
-// Retry-After of a 429 or 503), a cancelled or stalled call wraps the context
-// error, and Retryable tells a failure worth another try (429, 5xx, network
-// and timeout errors) from a permanent one (a file that does not match its
-// blob id, an unusable listing, a bad revision or token file).
+// Errors keep their kind, for Files, Content and TemplateSources alike: a
+// response error is an *HTTPError (with the Retry-After of a 429 or 503), a
+// cancelled or stalled call wraps the context error, and Retryable tells a
+// failure worth another try (429, 5xx, network and timeout errors) from a
+// permanent one (a file that does not match its blob id, a path the revision
+// does not have, an unusable listing, a bad revision or token file).
 //
 // Only the standard library is used.
 package hubfiles

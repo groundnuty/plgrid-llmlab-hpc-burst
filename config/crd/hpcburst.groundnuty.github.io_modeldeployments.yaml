@@ -58,7 +58,8 @@ spec:
           spec:
             description: |-
               ModelDeploymentSpec is what to serve: model, serving spec, number of
-              instances, where, until when, and the default retention policy.
+              instances, where, until when, and the default retention policy. HBEP-7 adds
+              the lease limit and the workload.
             properties:
               endTime:
                 description: |-
@@ -74,6 +75,19 @@ spec:
                 format: int32
                 minimum: 0
                 type: integer
+              leaseLimit:
+                description: |-
+                  LeaseLimit is the longest time limit of the deployment's Allocations,
+                  when it is shorter than the partition's maxTime (HBEP-7, What the
+                  controller reads; HBEP-4, open question 11). A short lease makes a real
+                  handover testable in hours.
+                maxLength: 63
+                pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                type: string
+                x-kubernetes-validations:
+                - message: leaseLimit must be a positive duration that fits Go's time.Duration
+                    (above 0s, at most 2562047h)
+                  rule: duration(self) > duration('0s')
               model:
                 description: Model is the model name clients send. Names follow LLMLab's.
                 maxLength: 256
@@ -83,14 +97,25 @@ spec:
                 description: Providers says where the deployment may run.
                 properties:
                   names:
-                    description: Names lists Providers by name.
+                    description: |-
+                      Names lists Providers by name, each once. The order is meaningful:
+                      a new primary goes to the first listed Provider that is Ready and batch,
+                      and a replacement that cannot stay on its predecessor's Provider to the
+                      next one in order (HBEP-7, Where). Providers that only the selector
+                      matches come after the listed ones, in name order (a contracts
+                      decision). The list is atomic, not a set, so its order is part of the
+                      value and no merge reorders it; a CEL rule refuses a repeated name.
                     items:
                       maxLength: 63
                       pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                       type: string
                     maxItems: 64
                     type: array
-                    x-kubernetes-list-type: set
+                    x-kubernetes-list-type: atomic
+                    x-kubernetes-validations:
+                    - message: 'providers.names lists each Provider once: its order
+                        is the order the Providers are tried in (HBEP-7, Where)'
+                      rule: self.all(n, self.exists_one(m, m == n))
                   selector:
                     description: |-
                       Selector selects Providers by their labels, for example every provider
@@ -150,11 +175,18 @@ spec:
                   keep until the deployment's end time (HBEP-7, open question 13).
                 properties:
                   idleLimit:
-                    description: IdleLimit is how long an Allocation may be idle before
-                      it is released.
+                    description: |-
+                      IdleLimit is how long an Allocation may be idle before it is released.
+                      It counts from the Allocation's idle-since annotation
+                      (AnnotationIdleSince, IdleSince), which the lifecycle controller writes
+                      when the Allocation stops hosting an Instance.
                     maxLength: 63
                     pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                     type: string
+                    x-kubernetes-validations:
+                    - message: idleLimit must be a positive duration that fits Go's
+                        time.Duration (above 0s, at most 2562047h)
+                      rule: duration(self) > duration('0s')
                   mode:
                     description: Mode is Keep or ReleaseWhenIdle. Unset means Keep.
                     enum:
@@ -178,6 +210,81 @@ spec:
                     released when idle is not kept until a date'
                   rule: '!(has(self.mode) && self.mode == ''ReleaseWhenIdle'') ||
                     !has(self.until)'
+              routing:
+                default: {}
+                description: |-
+                  Routing holds the front's settings for this deployment (HBEP-5,
+                  Configuration; HBEP-11, API). Absent, it takes its defaults, so the
+                  stored object always carries both load bounds.
+                properties:
+                  instanceCap:
+                    description: |-
+                      InstanceCap is the most requests in flight on one Instance while the
+                      tight bound is in force. Absent, it is the Instance's
+                      launch.maxNumSeqs times its workers (HBEP-5, Load bound and cap).
+                    format: int32
+                    maximum: 1048576
+                    minimum: 1
+                    type: integer
+                  loadBound:
+                    default: {}
+                    description: |-
+                      LoadBound is the bounded-load factor c of the deployment's balancer
+                      group, by membership (HBEP-5, Load bound and cap).
+                    properties:
+                      loose:
+                        default: "2.0"
+                        description: Loose is c while fewer are ready; no cap is in
+                          force.
+                        maxLength: 16
+                        minLength: 1
+                        pattern: ^[0-9]+(\.[0-9]+)?$
+                        type: string
+                        x-kubernetes-validations:
+                        - message: 'a load bound is at least 1.0: a bound below the
+                            mean load cannot place every request (KubeAI''s meanLoadFactor
+                            has the same floor of 100 percent)'
+                          rule: double(self) >= 1.0
+                      tight:
+                        default: "1.25"
+                        description: |-
+                          Tight is c while at least spec.instances Instances are ready; the cap is
+                          then in force.
+                        maxLength: 16
+                        minLength: 1
+                        pattern: ^[0-9]+(\.[0-9]+)?$
+                        type: string
+                        x-kubernetes-validations:
+                        - message: 'a load bound is at least 1.0: a bound below the
+                            mean load cannot place every request (KubeAI''s meanLoadFactor
+                            has the same floor of 100 percent)'
+                          rule: double(self) >= 1.0
+                    type: object
+                    x-kubernetes-validations:
+                    - message: 'the tight load bound is at most the loose one: tight
+                        applies at full membership with the cap, loose below it without
+                        one'
+                      rule: '!has(self.tight) || !has(self.loose) || double(self.tight)
+                        <= double(self.loose)'
+                  maxRequestDuration:
+                    description: |-
+                      MaxRequestDuration is the deployment's own total deadline per request,
+                      for a deployment whose requests are short. It can only shorten the
+                      front's maxRequestDuration (2 h by default): the front applies the
+                      shorter of the two, and a longer value lengthens nothing. It also
+                      shortens the drain window of the deployment's Instances to this plus
+                      the profile's drainMargin, when that is shorter than drainWindow
+                      (HBEP-5, Draining; InstanceDrainWindow). Admission cannot see the
+                      front's value, so the bound is applied where the value is read, not
+                      here. Absent, the front's value applies.
+                    maxLength: 63
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                    type: string
+                    x-kubernetes-validations:
+                    - message: maxRequestDuration must be a positive duration that
+                        fits Go's time.Duration (above 0s, at most 2562047h)
+                      rule: duration(self) > duration('0s')
+                type: object
               source:
                 description: |-
                   Source says what is served: a checkpoint on our engine, or a catalog
@@ -292,6 +399,29 @@ spec:
                       engine:
                         description: EngineSpec names the engine and its image.
                         properties:
+                          image:
+                            description: |-
+                              Image is the engine image's repository, without a tag or digest, for
+                              example "docker.io/vllm/vllm-openai". The allocation agent pulls
+                              Image@ImageDigest (HBEP-7, The allocation agent: an Instance's launch
+                              holds the image reference and its digest). It is not a deployment-ID
+                              input: the digest names the bytes, and pkg/deploymentid hashes only it.
+                              The schema requires ImageDigest beside it, so every launch pulls
+                              Image@ImageDigest (HBEP owner, 31 Oct 2026).
+
+                              The repository names no tag: the text after its last "/" holds no ":"
+                              (a ":" before it is a registry port, as in registry.example:5000/vllm).
+                              A tag is refused rather than ignored, because the agent pulls by digest
+                              and a tag beside it would mislead a reader.
+                            maxLength: 512
+                            minLength: 1
+                            pattern: ^[a-z0-9][a-z0-9._:/-]*[a-z0-9]$
+                            type: string
+                            x-kubernetes-validations:
+                            - message: 'image is a repository without a tag: the agent
+                                pulls image@imageDigest, so write docker.io/vllm/vllm-openai,
+                                not docker.io/vllm/vllm-openai:latest'
+                              rule: '!self.substring(self.lastIndexOf(''/'') + 1).contains('':'')'
                           imageDigest:
                             description: |-
                               ImageDigest is the engine image's digest: "sha256:" and 64 lowercase hex
@@ -315,6 +445,7 @@ spec:
                             minLength: 1
                             type: string
                         required:
+                        - image
                         - imageDigest
                         - name
                         - version
@@ -531,12 +662,88 @@ spec:
                 x-kubernetes-validations:
                 - message: source names exactly one of served and managed
                   rule: has(self.served) != has(self.managed)
+              workload:
+                description: |-
+                  Workload holds the shapes for warm-up and qualification (HBEP-7, What
+                  the controller reads). A served deployment needs one.
+                properties:
+                  contextTokens:
+                    description: ContextTokens are the context lengths, in tokens.
+                    properties:
+                      longest:
+                        description: |-
+                          Longest is the longest context length. Absent, it is the resolved
+                          context limit (the max-model-len the engine reports) minus
+                          outputTokens.typical minus the chat template's overhead, so it is fixed
+                          at verification (HBEP-7).
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      short:
+                        default: 512
+                        description: Short is the short context length.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      typical:
+                        description: Typical is the typical context length.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                    required:
+                    - typical
+                    type: object
+                  outputTokens:
+                    description: OutputTokens are the output lengths, in tokens.
+                    properties:
+                      longest:
+                        default: 4096
+                        description: Longest is the longest output length.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      typical:
+                        description: Typical is the typical output length.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                    required:
+                    - typical
+                    type: object
+                  targetSessions:
+                    description: |-
+                      TargetSessions is the number of concurrent sessions to serve, per
+                      Instance. KV capacity is checked against it, warm-up runs it, and
+                      throughput is measured at it. It is at most MaxTargetSessions, which is
+                      agentapi.MaxTargetSessions: every warm-up round reports one timing per
+                      concurrent request, and the agent's report of all rounds must fit the
+                      protocol's body limit (agentapi.WarmUpBudgetBytes, agentapi.MaxBodyBytes).
+                    format: int32
+                    maximum: 1024
+                    minimum: 1
+                    type: integer
+                  toolCalls:
+                    description: |-
+                      ToolCalls says whether tool calls are checked and warmed up. Absent, it
+                      is whether the serving spec enables automatic tool choice
+                      (enable-auto-tool-choice), which the controller resolves.
+                    type: boolean
+                required:
+                - contextTokens
+                - outputTokens
+                - targetSessions
+                type: object
             required:
             - instances
             - model
             - providers
             - source
             type: object
+            x-kubernetes-validations:
+            - message: 'a served deployment needs a workload: its shapes drive warm-up
+                and qualification (HBEP-7); contextTokens.typical, outputTokens.typical
+                and targetSessions are required'
+              rule: '!has(self.source.served) || has(self.workload)'
           status:
             description: ModelDeploymentStatus is the observed state of a ModelDeployment.
             properties:
@@ -726,6 +933,58 @@ spec:
                     - ReleaseWhenIdle
                     type: string
                 type: object
+              startToReady:
+                description: |-
+                  StartToReady lists each accelerator class's last measured start-to-ready
+                  time: from an Allocation's start to the first ready of the Instance
+                  created with it. The replacement plan reads it, and it lives here so a
+                  restarted controller plans the same times (HBEP-7, Handover; HBEP-11).
+                  A class with no entry uses 30 min.
+                items:
+                  description: |-
+                    ClassStartToReady is one accelerator class's last measured start-to-ready
+                    time.
+                  properties:
+                    cpuArch:
+                      description: CPUArch is the CPU architecture, for example "aarch64"
+                        or "x86_64".
+                      maxLength: 63
+                      minLength: 1
+                      type: string
+                    duration:
+                      description: |-
+                        Duration is the time from the Allocation's start to the Instance's
+                        first ready.
+                      maxLength: 63
+                      pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                      type: string
+                    gpuModel:
+                      description: GPUModel is the GPU model. A partition without
+                        GPUs names "none".
+                      maxLength: 63
+                      minLength: 1
+                      type: string
+                    instance:
+                      description: Instance is the name of the Instance it was measured
+                        on.
+                      maxLength: 253
+                      type: string
+                    measuredTime:
+                      description: MeasuredTime is when the Instance became ready.
+                      format: date-time
+                      type: string
+                  required:
+                  - cpuArch
+                  - duration
+                  - gpuModel
+                  - measuredTime
+                  type: object
+                maxItems: 64
+                type: array
+                x-kubernetes-list-map-keys:
+                - gpuModel
+                - cpuArch
+                x-kubernetes-list-type: map
             type: object
         required:
         - spec

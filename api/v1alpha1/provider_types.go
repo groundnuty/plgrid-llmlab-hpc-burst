@@ -1,6 +1,8 @@
 package v1alpha1
 
 import (
+	"time"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -42,6 +44,47 @@ type ProviderSpec struct {
 	CredentialsRef *CredentialsReference `json:"credentialsRef,omitempty"`
 }
 
+// QueueWait is one recorded job's wait in the queue: from its submission to its
+// start, both from the job's accounting record (HBEP-4, Provider status).
+type QueueWait struct {
+	// JobID is the job's ID.
+	//
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	JobID string `json:"jobID"`
+
+	// SubmitTime is when the scheduler accepted the job.
+	SubmitTime metav1.Time `json:"submitTime"`
+
+	// StartTime is when the job started.
+	StartTime metav1.Time `json:"startTime"`
+}
+
+// Wait returns the queue wait: StartTime minus SubmitTime.
+func (w QueueWait) Wait() time.Duration { return w.StartTime.Sub(w.SubmitTime.Time) }
+
+// MaxQueueWaits is how many queue waits a Provider's status keeps (HBEP-4).
+const MaxQueueWaits = 20
+
+// AddQueueWait returns waits with w added at the end, unless a wait with w's
+// job ID is already there, in which case it returns waits unchanged. When the
+// result would hold more than MaxQueueWaits entries, the oldest are dropped.
+// It never changes the slice it is given.
+func AddQueueWait(waits []QueueWait, w QueueWait) []QueueWait {
+	for _, old := range waits {
+		if old.JobID == w.JobID {
+			return waits
+		}
+	}
+	out := make([]QueueWait, 0, len(waits)+1)
+	out = append(out, waits...)
+	out = append(out, w)
+	if len(out) > MaxQueueWaits {
+		out = out[len(out)-MaxQueueWaits:]
+	}
+	return out
+}
+
 // ProviderStatus is the observed state of a Provider.
 type ProviderStatus struct {
 	ReconcileStatus `json:",inline"`
@@ -52,8 +95,51 @@ type ProviderStatus struct {
 	// +optional
 	LastSuccessfulStatusRead *metav1.Time `json:"lastSuccessfulStatusRead,omitempty"`
 
+	// QueueWaits are the last MaxQueueWaits observed queue waits, oldest first
+	// (HBEP-4, Provider status). Each is one recorded job's wait from
+	// submission to start, from the scheduler's own submit and start times in
+	// the job record (provider.Job.SubmitTime and StartTime, as Observe read
+	// them from the queue listing or accounting), never from when the
+	// controller saw the change. HBEP-4 names the accounting record; taking
+	// the same two times from either source is a contracts decision. The
+	// Allocation's status.atProvider.queueWaitRecorded makes the write
+	// retryable and once-only per job. Entries are keyed
+	// by job ID, so a repeated observe adds nothing; a new entry beyond the
+	// cap drops the oldest (AddQueueWait). The lifecycle controller plans
+	// replacements from them (HBEP-7, Handover), and they live here so a
+	// restarted controller plans from the same waits.
+	//
+	// +optional
+	// +listType=map
+	// +listMapKey=jobID
+	// +kubebuilder:validation:MaxItems=20
+	QueueWaits []QueueWait `json:"queueWaits,omitempty"`
+
+	// Catalog is a managed Provider's catalog: one entry per model the
+	// gateway has listed (HBEP-4, Managed provider in alpha). An entry that
+	// leaves the listing stays, with listed false. The front routes to an
+	// entry while it is listed, and a managed-source ModelDeployment's Ready
+	// follows it (HBEP-5, Request path; HBEP-7, Reconcile loop, step 1).
+	// Empty on a batch Provider.
+	//
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=1024
+	Catalog []CatalogEntryStatus `json:"catalog,omitempty"`
+
+	// LastCatalogRead is when the managed Provider's controller last read the
+	// catalog successfully; it reads at most once a minute (HBEP-4).
+	//
+	// +optional
+	LastCatalogRead *metav1.Time `json:"lastCatalogRead,omitempty"`
+
 	// Conditions of the provider, for example a credentials file that others
-	// can read, or an unreachable platform.
+	// can read, or an unreachable platform. The Provider's controller writes
+	// them all, under FieldManagerProvider, except DialHomeUnreachable, which
+	// the lifecycle controller applies under FieldManagerLifecycle; neither
+	// removes the other's (docs/development.md, Single writer;
+	// DialHomeUnreachableApply).
 	//
 	// +optional
 	// +listType=map
@@ -91,3 +177,69 @@ type ProviderList struct {
 }
 
 func init() { SchemeBuilder.Register(&Provider{}, &ProviderList{}) }
+
+// CatalogEntryStatus is one model a managed gateway has listed (HBEP-4,
+// Managed provider in alpha).
+type CatalogEntryStatus struct {
+	// Name is the model's name in the catalog, the catalogName a
+	// managed-source ModelDeployment names.
+	//
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
+
+	// Revision is the revision the gateway reports for the entry, absent when
+	// it reports none.
+	//
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	Revision *string `json:"revision,omitempty"`
+
+	// ManagedID is the entry's managed deployment ID, over the platform, the
+	// catalog name and the revision (HBEP-3, Deployment ID; pkg/deploymentid).
+	// The pinned name model@<provider>/<deployment-id> resolves on its display
+	// form (HBEP-5).
+	ManagedID FullDeploymentID `json:"managedID"`
+
+	// Listed is whether the latest successful catalog read listed the entry.
+	Listed bool `json:"listed"`
+
+	// LastListedTime is when a catalog read last listed the entry.
+	//
+	// +optional
+	LastListedTime *metav1.Time `json:"lastListedTime,omitempty"`
+}
+
+// ProviderPollInterval is the longest a batch Provider's controller goes
+// without reading the platform: on a pass that observes no job it calls
+// provider.Batch.Poll, so the Ready condition always rests on a real read
+// (HBEP-4, Operational readiness 1).
+const ProviderPollInterval = time.Minute
+
+// ProviderReadyStaleness is the oldest a batch Provider's last successful
+// status read may be while the Provider counts as ready (HBEP-4, Operational
+// readiness 1): five poll intervals, so one or two failed reads do not flip
+// it. The Provider's controller sets Ready False with ReasonReadsFailing once
+// a pass fails its reads and the last success is older than this, or there
+// was none; a reader also checks the age itself (ProviderReady), because a
+// stopped controller sets nothing.
+const ProviderReadyStaleness = 5 * ProviderPollInterval
+
+// ProviderReady reports whether a batch Provider counts as ready at now: its
+// Ready condition is True and its lastSuccessfulStatusRead is at most
+// ProviderReadyStaleness old. The lifecycle controller skips a Provider for
+// which it is false (HBEP-7, Reconcile loop, step 1). A nil Provider is not
+// ready.
+func ProviderReady(p *Provider, now time.Time) bool {
+	if p == nil || p.Status.LastSuccessfulStatusRead == nil {
+		return false
+	}
+	ready := false
+	for _, c := range p.Status.Conditions {
+		if c.Type == ConditionProviderReady {
+			ready = c.Status == metav1.ConditionTrue
+		}
+	}
+	return ready && now.Sub(p.Status.LastSuccessfulStatusRead.Time) <= ProviderReadyStaleness
+}

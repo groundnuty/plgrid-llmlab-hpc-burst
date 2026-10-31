@@ -39,6 +39,17 @@ These are draft platform profiles for the three batch platforms. They come from 
 - **The container runtime may not be uniform.** It should be a per-platform profile fact. Apptainer is on the Helios and Sano login nodes. On Athena's login node none of apptainer, singularity, enroot, podman or docker was found (charliecloud, udocker, sarus and shifter were not searched for), and nothing was probed on any compute node, including the Helios GH200 (aarch64) nodes. Whether the instance launchers need a container-free path is a candidate pending S1 (issue #18), not a conclusion. frpc and a static engine environment are candidates for such a path.
 - **Pass an explicit account and partition.** The account probes used the probing user's default account (and, on Athena, the default partition), so they do not show what every user needs. The Cyfronet documentation says account names carry a resource suffix such as `-gpu-a100`. The provider plugin should always pass an explicit account and partition. That belongs in provider settings, not the profile.
 
+## The typed image format (after spike S1)
+
+The drafts' container facts come from the login nodes. Spike S1's probe 2 (issue #18) then ran Apptainer on compute nodes, and the PlatformProfile types the result per partition as `imageFormat` (`sif` or `sandbox`), the format the allocation agent builds and runs the engine image in:
+
+| Partition | `imageFormat` | Why |
+|---|---|---|
+| Helios `plgrid-gpu-gh200` | `sif` | a SIF image runs |
+| Athena `plgrid-gpu-a100` | `sandbox` | Apptainer cannot run a SIF image there; a sandbox directory image runs |
+
+It is not a deployment-ID input. A partition that states no format gets `sif` (`v1alpha1.ImageFormatOf`).
+
 ## Unknown, and why
 
 Each profile ends with an `unknown:` list. All three share these:

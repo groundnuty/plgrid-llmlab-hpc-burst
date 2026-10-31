@@ -51,6 +51,25 @@ type EngineSpec struct {
 	// +kubebuilder:validation:MaxLength=71
 	// +kubebuilder:validation:XValidation:rule="self.matches('^sha256:[0-9a-f]{64}$')",message="imageDigest must be 'sha256:' followed by 64 lowercase hex characters"
 	ImageDigest string `json:"imageDigest"`
+
+	// Image is the engine image's repository, without a tag or digest, for
+	// example "docker.io/vllm/vllm-openai". The allocation agent pulls
+	// Image@ImageDigest (HBEP-7, The allocation agent: an Instance's launch
+	// holds the image reference and its digest). It is not a deployment-ID
+	// input: the digest names the bytes, and pkg/deploymentid hashes only it.
+	// The schema requires ImageDigest beside it, so every launch pulls
+	// Image@ImageDigest (HBEP owner, 31 Oct 2026).
+	//
+	// The repository names no tag: the text after its last "/" holds no ":"
+	// (a ":" before it is a registry port, as in registry.example:5000/vllm).
+	// A tag is refused rather than ignored, because the agent pulls by digest
+	// and a tag beside it would mislead a reader.
+	//
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:Pattern=`^[a-z0-9][a-z0-9._:/-]*[a-z0-9]$`
+	// +kubebuilder:validation:XValidation:rule="!self.substring(self.lastIndexOf('/') + 1).contains(':')",message="image is a repository without a tag: the agent pulls image@imageDigest, so write docker.io/vllm/vllm-openai, not docker.io/vllm/vllm-openai:latest"
+	Image string `json:"image"`
 }
 
 // EngineFlag is one engine flag. The spec lists flags as ordered pairs, so no
@@ -228,10 +247,17 @@ type ModelSource struct {
 //
 // +kubebuilder:validation:XValidation:rule="(has(self.names) && size(self.names) > 0) || has(self.selector)",message="name at least one provider, or give a label selector"
 type ProviderSelection struct {
-	// Names lists Providers by name.
+	// Names lists Providers by name, each once. The order is meaningful:
+	// a new primary goes to the first listed Provider that is Ready and batch,
+	// and a replacement that cannot stay on its predecessor's Provider to the
+	// next one in order (HBEP-7, Where). Providers that only the selector
+	// matches come after the listed ones, in name order (a contracts
+	// decision). The list is atomic, not a set, so its order is part of the
+	// value and no merge reorders it; a CEL rule refuses a repeated name.
 	//
 	// +optional
-	// +listType=set
+	// +listType=atomic
+	// +kubebuilder:validation:XValidation:rule="self.all(n, self.exists_one(m, m == n))",message="providers.names lists each Provider once: its order is the order the Providers are tried in (HBEP-7, Where)"
 	// +kubebuilder:validation:MaxItems=64
 	// +kubebuilder:validation:items:MaxLength=63
 	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
@@ -245,7 +271,10 @@ type ProviderSelection struct {
 }
 
 // ModelDeploymentSpec is what to serve: model, serving spec, number of
-// instances, where, until when, and the default retention policy.
+// instances, where, until when, and the default retention policy. HBEP-7 adds
+// the lease limit and the workload.
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.source.served) || has(self.workload)",message="a served deployment needs a workload: its shapes drive warm-up and qualification (HBEP-7); contextTokens.typical, outputTokens.typical and targetSessions are required"
 type ModelDeploymentSpec struct {
 	// Model is the model name clients send. Names follow LLMLab's.
 	//
@@ -279,6 +308,174 @@ type ModelDeploymentSpec struct {
 	//
 	// +optional
 	RetentionPolicy *RetentionPolicy `json:"retentionPolicy,omitempty"`
+
+	// LeaseLimit is the longest time limit of the deployment's Allocations,
+	// when it is shorter than the partition's maxTime (HBEP-7, What the
+	// controller reads; HBEP-4, open question 11). A short lease makes a real
+	// handover testable in hours.
+	//
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="leaseLimit must be a positive duration that fits Go's time.Duration (above 0s, at most 2562047h)"
+	LeaseLimit *Duration `json:"leaseLimit,omitempty"`
+
+	// Workload holds the shapes for warm-up and qualification (HBEP-7, What
+	// the controller reads). A served deployment needs one.
+	//
+	// +optional
+	Workload *Workload `json:"workload,omitempty"`
+
+	// Routing holds the front's settings for this deployment (HBEP-5,
+	// Configuration; HBEP-11, API). Absent, it takes its defaults, so the
+	// stored object always carries both load bounds.
+	//
+	// +optional
+	// +kubebuilder:default={}
+	Routing *Routing `json:"routing,omitempty"`
+}
+
+// Routing is a deployment's settings for the front (HBEP-5, Configuration).
+// The front reads all of it. The lifecycle controller reads only
+// MaxRequestDuration, which shortens the drain window (InstanceDrainWindow).
+type Routing struct {
+	// LoadBound is the bounded-load factor c of the deployment's balancer
+	// group, by membership (HBEP-5, Load bound and cap).
+	//
+	// +optional
+	// +kubebuilder:default={}
+	LoadBound *LoadBound `json:"loadBound,omitempty"`
+
+	// InstanceCap is the most requests in flight on one Instance while the
+	// tight bound is in force. Absent, it is the Instance's
+	// launch.maxNumSeqs times its workers (HBEP-5, Load bound and cap).
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1048576
+	InstanceCap *int32 `json:"instanceCap,omitempty"`
+
+	// MaxRequestDuration is the deployment's own total deadline per request,
+	// for a deployment whose requests are short. It can only shorten the
+	// front's maxRequestDuration (2 h by default): the front applies the
+	// shorter of the two, and a longer value lengthens nothing. It also
+	// shortens the drain window of the deployment's Instances to this plus
+	// the profile's drainMargin, when that is shorter than drainWindow
+	// (HBEP-5, Draining; InstanceDrainWindow). Admission cannot see the
+	// front's value, so the bound is applied where the value is read, not
+	// here. Absent, the front's value applies.
+	//
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="maxRequestDuration must be a positive duration that fits Go's time.Duration (above 0s, at most 2562047h)"
+	MaxRequestDuration *Duration `json:"maxRequestDuration,omitempty"`
+}
+
+// LoadBound is the bounded-load factor c, by membership. The front counts as
+// ready the deployment's eligible Instances (HBEP-5, Load bound and cap).
+// The tight bound is at most the loose one (owner ruling, 31 Oct 2026); equal
+// values are allowed. Schema defaults fill an omitted side first, so a tight
+// bound above the default loose bound is refused too.
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.tight) || !has(self.loose) || double(self.tight) <= double(self.loose)",message="the tight load bound is at most the loose one: tight applies at full membership with the cap, loose below it without one"
+type LoadBound struct {
+	// Tight is c while at least spec.instances Instances are ready; the cap is
+	// then in force.
+	//
+	// +optional
+	// +kubebuilder:default="1.25"
+	Tight *LoadFactor `json:"tight,omitempty"`
+
+	// Loose is c while fewer are ready; no cap is in force.
+	//
+	// +optional
+	// +kubebuilder:default="2.0"
+	Loose *LoadFactor `json:"loose,omitempty"`
+}
+
+// LoadFactor is a bounded-load factor written as a decimal string, for example
+// "1.25", so that no float is stored (HBEP-5 writes the defaults as strings).
+// It is at least 1: a balancer bound below the mean load cannot place every
+// request. The forked KubeAI group's own setting has the same floor, a
+// meanLoadFactor of at least 100 percent
+// (third_party/forked/kubeai/api/k8s/v1/model_types.go).
+//
+// +kubebuilder:validation:MinLength=1
+// +kubebuilder:validation:MaxLength=16
+// +kubebuilder:validation:Pattern=`^[0-9]+(\.[0-9]+)?$`
+// +kubebuilder:validation:XValidation:rule="double(self) >= 1.0",message="a load bound is at least 1.0: a bound below the mean load cannot place every request (KubeAI's meanLoadFactor has the same floor of 100 percent)"
+type LoadFactor string
+
+// Workload is a deployment's request shapes (HBEP-7, What the controller
+// reads). Every shape must fit: each context length with the typical output,
+// and the typical context with the longest output. A shape that does not fit
+// is an error, never shortened; the lifecycle controller checks the declared
+// shapes against a declared max-model-len before it provisions (Degraded,
+// reason SpecUnsupported).
+type Workload struct {
+	// ContextTokens are the context lengths, in tokens.
+	ContextTokens ContextTokens `json:"contextTokens"`
+
+	// OutputTokens are the output lengths, in tokens.
+	OutputTokens OutputTokens `json:"outputTokens"`
+
+	// TargetSessions is the number of concurrent sessions to serve, per
+	// Instance. KV capacity is checked against it, warm-up runs it, and
+	// throughput is measured at it. It is at most MaxTargetSessions, which is
+	// agentapi.MaxTargetSessions: every warm-up round reports one timing per
+	// concurrent request, and the agent's report of all rounds must fit the
+	// protocol's body limit (agentapi.WarmUpBudgetBytes, agentapi.MaxBodyBytes).
+	//
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1024
+	TargetSessions int32 `json:"targetSessions"`
+
+	// ToolCalls says whether tool calls are checked and warmed up. Absent, it
+	// is whether the serving spec enables automatic tool choice
+	// (enable-auto-tool-choice), which the controller resolves.
+	//
+	// +optional
+	ToolCalls *bool `json:"toolCalls,omitempty"`
+}
+
+// MaxTargetSessions is the largest Workload.TargetSessions the schema admits,
+// equal to agentapi.MaxTargetSessions (a test checks they agree).
+const MaxTargetSessions = 1024
+
+// ContextTokens are a workload's context lengths.
+type ContextTokens struct {
+	// Short is the short context length.
+	//
+	// +optional
+	// +kubebuilder:default=512
+	// +kubebuilder:validation:Minimum=1
+	Short *int32 `json:"short,omitempty"`
+
+	// Typical is the typical context length.
+	//
+	// +kubebuilder:validation:Minimum=1
+	Typical int32 `json:"typical"`
+
+	// Longest is the longest context length. Absent, it is the resolved
+	// context limit (the max-model-len the engine reports) minus
+	// outputTokens.typical minus the chat template's overhead, so it is fixed
+	// at verification (HBEP-7).
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	Longest *int32 `json:"longest,omitempty"`
+}
+
+// OutputTokens are a workload's output lengths.
+type OutputTokens struct {
+	// Typical is the typical output length.
+	//
+	// +kubebuilder:validation:Minimum=1
+	Typical int32 `json:"typical"`
+
+	// Longest is the longest output length.
+	//
+	// +optional
+	// +kubebuilder:default=4096
+	// +kubebuilder:validation:Minimum=1
+	Longest *int32 `json:"longest,omitempty"`
 }
 
 // ClassDeploymentID is the current deployment ID of one accelerator class.
@@ -310,6 +507,26 @@ type ActiveDeploymentID struct {
 	Instances int32 `json:"instances"`
 }
 
+// ClassStartToReady is one accelerator class's last measured start-to-ready
+// time.
+type ClassStartToReady struct {
+	// AcceleratorClass is the class it was measured in.
+	AcceleratorClass `json:",inline"`
+
+	// Duration is the time from the Allocation's start to the Instance's
+	// first ready.
+	Duration Duration `json:"duration"`
+
+	// Instance is the name of the Instance it was measured on.
+	//
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	Instance string `json:"instance,omitempty"`
+
+	// MeasuredTime is when the Instance became ready.
+	MeasuredTime metav1.Time `json:"measuredTime"`
+}
+
 // ModelDeploymentStatus is the observed state of a ModelDeployment.
 type ModelDeploymentStatus struct {
 	ReconcileStatus `json:",inline"`
@@ -326,6 +543,19 @@ type ModelDeploymentStatus struct {
 	// +optional
 	// +listType=atomic
 	ActiveIDs []ActiveDeploymentID `json:"activeIDs,omitempty"`
+
+	// StartToReady lists each accelerator class's last measured start-to-ready
+	// time: from an Allocation's start to the first ready of the Instance
+	// created with it. The replacement plan reads it, and it lives here so a
+	// restarted controller plans the same times (HBEP-7, Handover; HBEP-11).
+	// A class with no entry uses 30 min.
+	//
+	// +optional
+	// +listType=map
+	// +listMapKey=gpuModel
+	// +listMapKey=cpuArch
+	// +kubebuilder:validation:MaxItems=64
+	StartToReady []ClassStartToReady `json:"startToReady,omitempty"`
 
 	// Instances is the number of Instances that exist and have not ended. It
 	// is the scale subresource's status count.

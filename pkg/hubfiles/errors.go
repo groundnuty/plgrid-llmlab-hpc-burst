@@ -25,16 +25,22 @@ var (
 	// ErrNotFound is matched by status 404: no such repository or revision, or
 	// one the caller may not know about.
 	ErrNotFound = errors.New("hubfiles: not found")
-	// ErrBlobMismatch is returned when a downloaded file's git blob id differs
-	// from the listing's oid.
+	// ErrBlobMismatch is returned when a downloaded file does not match its
+	// listing: its git blob id differs from the listing's oid, or, for an LFS
+	// file, its SHA-256 differs from lfs.oid.
 	ErrBlobMismatch = errors.New("hubfiles: file does not match its git blob id")
 	// ErrSizeMismatch is returned when a downloaded file's length differs from
 	// the size in the listing.
 	ErrSizeMismatch = errors.New("hubfiles: file size differs from the listing")
-	// ErrFileTooLarge is returned for a file that is not an LFS file but is
-	// larger than Config.MaxFileBytes. Such a file would be downloaded to be
-	// hashed; a large one is a sign the listing is not what we expect.
+	// ErrFileTooLarge is returned for a file that would have to be downloaded
+	// (a file that is not in LFS, which Files hashes, or any file Content or
+	// TemplateSources reads) but is larger than Config.MaxFileBytes. A large
+	// one is a sign the listing is not what we expect.
 	ErrFileTooLarge = errors.New("hubfiles: file too large to download for hashing")
+	// ErrNoSuchFile is returned by Content when the revision has no file at
+	// the path asked for (a directory is not a file), or the path cannot name
+	// one. It is not the Hub's 404: the revision was listed.
+	ErrNoSuchFile = errors.New("hubfiles: no such file in the revision")
 	// ErrTooManyPages is returned when the page chain is longer than
 	// Config.MaxPages or loops back to a page already read.
 	ErrTooManyPages = errors.New("hubfiles: page chain too long or circular")
@@ -145,18 +151,19 @@ func parseRetryAfter(v string, now time.Time) time.Duration {
 // permanent are the failures that another try cannot change.
 var permanent = []error{
 	ErrInvalidRevision, ErrInvalidRepository, ErrTokenFile,
-	ErrBlobMismatch, ErrSizeMismatch, ErrFileTooLarge,
+	ErrBlobMismatch, ErrSizeMismatch, ErrFileTooLarge, ErrNoSuchFile,
 	ErrInvalidListing, ErrTooManyPages, ErrCrossHostLink,
 }
 
-// Retryable reports whether err from Client.Files is worth another attempt
-// later: a 429 or any 5xx answer (see HTTPError.RetryAfter), a network error
-// (a reset or refused connection, a body cut short, a DNS failure) and a
-// timeout, including a deadline that ended the call. It is false for a
-// permanent failure: a 4xx other than 429, a file that does not match its
-// blob id or size, an unusable listing, revision, repository or token file,
-// a too-long or circular page chain, a link out of the snapshot, and a call
-// the caller cancelled.
+// Retryable reports whether err from Client.Files, Content or TemplateSources
+// is worth another attempt later: a 429 or any 5xx answer (see
+// HTTPError.RetryAfter), a network error (a reset or refused connection, a
+// body cut short, a DNS failure) and a timeout, including a deadline that
+// ended the call. It is false for a permanent failure: a 4xx other than 429, a
+// file that does not match its blob id or size, a path the revision does not
+// have, an unusable listing, revision, repository or token file, a too-long or
+// circular page chain, a link out of the snapshot, and a call the caller
+// cancelled.
 func Retryable(err error) bool {
 	if err == nil {
 		return false
