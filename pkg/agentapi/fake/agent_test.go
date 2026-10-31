@@ -368,7 +368,7 @@ func TestBackendErrorsKeepTheirCodeThroughStep(t *testing.T) {
 func TestEngineOverridesApply(t *testing.T) {
 	n := int64(0)
 	e := fake.Engine{
-		Health: func(now time.Time, worker string) agentapi.Health {
+		Health: func(now time.Time, p fake.Process) agentapi.Health {
 			n++
 			return agentapi.Health{ProbeOK: true, GeneratedTokens: n * 100} // no Time
 		},

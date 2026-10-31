@@ -49,7 +49,7 @@ func (a *Agent) workerReport(w *worker, now time.Time) agentapi.WorkerReport {
 		wr.ExitCode = &code
 	}
 	if w.phase == agentapi.PartRunning {
-		h := a.engine.health(now, w.name)
+		h := a.engine.health(now, Process{Worker: w.name, PID: w.pid, Start: w.start, Generation: w.generation})
 		wr.Health = &h
 	}
 	return wr

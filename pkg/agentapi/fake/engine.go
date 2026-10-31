@@ -63,9 +63,27 @@ type Engine struct {
 	// round's number to n.
 	WarmUpRound func(n int32, req agentapi.WarmUpRequest) agentapi.WarmUpRound
 
-	// Health samples a running worker. The Agent sets the sample's Time to now
-	// when the result has none.
-	Health func(now time.Time, worker string) agentapi.Health
+	// Health samples a running worker process. The Agent sets the sample's Time
+	// to now when the result has none. It is given the process, not the worker's
+	// name, because the counters of agentapi.Health are cumulative since the
+	// process started: a double whose counters rise must start them again for a
+	// new process (the doubles in this package key theirs by Process.PID).
+	Health func(now time.Time, p Process) agentapi.Health
+}
+
+// Process identifies one worker process the Agent started, as Engine.Health is
+// told which engine it samples. A restart is a new Process: another PID, start
+// time and, when a generation rose, another Generation.
+type Process struct {
+	// Worker is the worker's name, agentapi.WorkerName(i).
+	Worker string
+	// PID is the process's PID. The Agent never reuses one, across restarts and
+	// Requeue.
+	PID int
+	// Start is the Agent's time when the process was started.
+	Start time.Time
+	// Generation is the worker's restart generation the process was started for.
+	Generation int64
 }
 
 func (e Engine) verify(i agentapi.DesiredInstance, req agentapi.VerifyRequest) agentapi.VerifyResult {
@@ -89,10 +107,10 @@ func (e Engine) warmUpRound(n int32, req agentapi.WarmUpRequest) agentapi.WarmUp
 	return DefaultWarmUpRound(n, req)
 }
 
-func (e Engine) health(now time.Time, worker string) agentapi.Health {
-	h := DefaultHealth(now, worker)
+func (e Engine) health(now time.Time, p Process) agentapi.Health {
+	h := DefaultHealth(now, p)
 	if e.Health != nil {
-		h = e.Health(now, worker)
+		h = e.Health(now, p)
 	}
 	if h.Time.IsZero() {
 		h.Time = now
@@ -169,6 +187,6 @@ func DefaultWarmUpRound(n int32, req agentapi.WarmUpRequest) agentapi.WarmUpRoun
 
 // DefaultHealth is a healthy, idle engine: the probe passes, the gauges and
 // the token counter are zero and the KV cache is 10% used.
-func DefaultHealth(now time.Time, _ string) agentapi.Health {
+func DefaultHealth(now time.Time, _ Process) agentapi.Health {
 	return agentapi.Health{Time: now, ProbeOK: true, KVCacheUsage: 0.1}
 }
