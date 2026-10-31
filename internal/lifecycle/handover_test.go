@@ -390,6 +390,16 @@ func TestHandoverFailedReplacementPredecessorServesUntilItsDrainStart(t *testing
 	if n := len(rg.rec.Find("degraded", "CapacityDropped")); n != 1 {
 		t.Fatalf("CapacityDropped events at the drain start = %d, want 1", n)
 	}
+	// The capacity that dropped is the ModelDeployment's: the event regards it
+	// and names the predecessor as related (HBEP-8). ending-soon, an hour
+	// before, is a Normal event; only degraded and failing are Warnings.
+	if e := rg.rec.Find("degraded", "CapacityDropped")[0]; e.Kind != "*v1alpha1.ModelDeployment" || e.Name != hoMD ||
+		e.RelatedKind != "*v1alpha1.Instance" || e.RelatedName != p.Name || !e.Warning {
+		t.Fatalf("CapacityDropped %+v, want a Warning regarding ModelDeployment %s with Instance %s related", e, hoMD, p.Name)
+	}
+	if soon := rg.rec.Find("ending-soon", "NoReplacementReady"); len(soon) != 1 || soon[0].Warning || soon[0].Name != p.Name {
+		t.Fatalf("ending-soon events %+v, want one Normal event on %s", soon, p.Name)
+	}
 	hoStepTo(rg, hoT(10, 9, 50), time.Minute, func() {
 		if ph := hoPhase(rg, p.Name); ph != v1alpha1.InstanceDraining {
 			t.Fatalf("at %s the predecessor is %s, want draining while requests run", rg.clock.Now().Format(time.TimeOnly), ph)

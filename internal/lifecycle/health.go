@@ -190,7 +190,7 @@ func (p *pass) restart(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, signal
 		reason = v1alpha1.ReasonInstanceRestart
 	}
 	gen := restartGeneration(in, part) + 1
-	p.r.Recorder.Event(in, true, eventFailing, reason,
+	p.r.Recorder.Event(in, nil, eventFailing, reason,
 		fmt.Sprintf("signal %s (%s): the lifecycle controller restarts %s, generation %d; in-flight requests are cut", signal, msg, part, gen))
 	now := metav1.NewTime(p.now)
 	if err := p.setStatus(in, func(s *v1alpha1.InstanceStatus) {
@@ -280,7 +280,7 @@ func (p *pass) loopPaused(c v1alpha1.AcceleratorClass, st settings) (bool, time.
 	}
 	until := last.Add(pause)
 	if p.md != nil && p.mem.once(fmt.Sprintf("restart-loop/%s/%s/%s/%d", p.md.UID, c.GPUModel, c.CPUArch, streak[2].Unix())) {
-		p.r.Recorder.Event(p.md, true, eventDegraded, v1alpha1.ReasonRestartLoop,
+		p.r.Recorder.Event(p.md, nil, eventDegraded, v1alpha1.ReasonRestartLoop,
 			fmt.Sprintf("three Allocations in a row failed in class %s/%s within %s; provisioning there pauses", c.GPUModel, c.CPUArch, st.restartWindow))
 	}
 	return p.now.Before(until), until
@@ -302,7 +302,7 @@ func (p *pass) endingSoon(in *v1alpha1.Instance, pv *providerView) {
 		return
 	}
 	if p.mem.once("ending-soon/" + string(in.UID)) {
-		p.r.Recorder.Event(in, true, eventEndingSoon, "NoReplacementReady",
+		p.r.Recorder.Event(in, nil, eventEndingSoon, "NoReplacementReady",
 			fmt.Sprintf("drain start at %s is less than %s away and no replacement is ready", ds.UTC().Format(time.RFC3339), endingSoonLead))
 	}
 }

@@ -115,7 +115,7 @@ func (p *pass) allocationFailed(in *v1alpha1.Instance, alloc *v1alpha1.Allocatio
 // fail ends a failing Instance with a failing event and releases its
 // Allocation at once, since nothing on it serves (HBEP-7, Release).
 func (p *pass) fail(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, reason, msg string) error {
-	p.r.Recorder.Event(in, true, eventFailing, reason, msg)
+	p.r.Recorder.Event(in, nil, eventFailing, reason, msg)
 	return p.end(in, alloc, reason, msg, true)
 }
 
@@ -310,7 +310,7 @@ func (p *pass) pending(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) error 
 	}); err != nil {
 		return err
 	}
-	p.r.Recorder.Event(in, false, eventStarted, "AgentRegistered", fmt.Sprintf("the agent of Allocation %s registered on %s; the Instance starts", alloc.Name, reg.node))
+	p.r.Recorder.Event(in, nil, eventStarted, "AgentRegistered", fmt.Sprintf("the agent of Allocation %s registered on %s; the Instance starts", alloc.Name, reg.node))
 	if err := p.r.setDialHome(p.ctx, in.Labels[v1alpha1.LabelProvider], false, p.now, "an agent registered through the dial-home path", reg.at); err != nil {
 		return err
 	}
@@ -517,9 +517,9 @@ func (av agentView) noRequestReadAfter(t time.Time) bool {
 func (p *pass) handOver(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av agentView) error {
 	repl := p.replacementOf(in)
 	if repl != nil && repl.Status.Phase == v1alpha1.InstanceReady {
-		p.r.Recorder.Event(in, false, eventReplaced, "HandedOver", fmt.Sprintf("drain start reached; Instance %s serves in its place", repl.Name))
+		p.r.Recorder.Event(in, nil, eventReplaced, "HandedOver", fmt.Sprintf("drain start reached; Instance %s serves in its place", repl.Name))
 	} else {
-		p.r.Recorder.Event(in, true, eventDegraded, v1alpha1.ReasonCapacityDropped, "drain start reached with no replacement ready: capacity drops (HBEP-7, drain rule)")
+		p.r.Recorder.Event(p.mdObject(in), in, eventDegraded, v1alpha1.ReasonCapacityDropped, "drain start reached with no replacement ready: capacity drops (HBEP-7, drain rule)")
 	}
 	if err := p.startDrain(in); err != nil {
 		return err

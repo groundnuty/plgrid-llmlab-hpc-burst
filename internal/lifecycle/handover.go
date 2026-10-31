@@ -218,7 +218,7 @@ func (p *pass) replacements() error {
 		}
 		p.degrade(v1alpha1.ReasonReplacementLate, "the replacement of Instance %s has not started, and its drain start is at %s", in.Name, ds.UTC().Format(time.RFC3339))
 		if p.mem.once("late/" + string(in.UID)) {
-			p.r.Recorder.Event(p.md, true, eventDegraded, v1alpha1.ReasonReplacementLate,
+			p.r.Recorder.Event(p.md, nil, eventDegraded, v1alpha1.ReasonReplacementLate,
 				fmt.Sprintf("the replacement of Instance %s has not started by %s, its drain start minus the class's start-to-ready time", in.Name, late.UTC().Format(time.RFC3339)))
 		}
 	}
