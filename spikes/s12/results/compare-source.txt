@@ -1,14 +1,18 @@
-reference: go1.27.3, main module github.com/groundnuty/plgrid-llmlab-hpc-burst v0.0.0-20261031110311-294954347e93, 47 dependencies
+reference: go1.27.3, main module github.com/groundnuty/plgrid-llmlab-hpc-burst v0.0.0-20261031113320-da311e2012c2, 47 dependencies
 
 == bom-source (SPDX-2.3, 71 packages)
   main module named:        yes
   Go standard library named: yes
+  Go module entries: 71, accounted for: 47; other entries ignored: 0
   missing (0):
   wrong version (2):
-    github.com/groundnuty/plgrid-llmlab-hpc-burst: reference v0.0.0-20261031110311-294954347e93, SBOM 
+    github.com/groundnuty/plgrid-llmlab-hpc-burst: reference v0.0.0-20261031113320-da311e2012c2, SBOM 
     stdlib: reference go1.27.3, SBOM 1.26.0
+  listed twice at different versions (0):
+  version equality cannot be established (0):
   replaced modules reported under the replacement (0)
-  extra Go packages not in the reference (22):
+  originals of replaced modules also listed, tolerated (0)
+  extra Go module entries not in the reference (22):
     github.com/crossplane/crossplane-runtime/v2 v2.4.3
     github.com/crossplane/crossplane/apis/v2 v2.3.4
     github.com/evanphx/json-patch/v5 v5.9.11
@@ -37,12 +41,16 @@ reference: go1.27.3, main module github.com/groundnuty/plgrid-llmlab-hpc-burst v
 == syft-source (SPDX-2.3, 99 packages)
   main module named:        yes
   Go standard library named: NO
+  Go module entries: 98, accounted for: 47; other entries ignored: 1 [hpcburst-src, FILE]
   missing (1):
     stdlib go1.27.3
   wrong version (1):
-    github.com/groundnuty/plgrid-llmlab-hpc-burst: reference v0.0.0-20261031110311-294954347e93, SBOM UNKNOWN
+    github.com/groundnuty/plgrid-llmlab-hpc-burst: reference v0.0.0-20261031113320-da311e2012c2, SBOM UNKNOWN
+  listed twice at different versions (0):
+  version equality cannot be established (0):
   replaced modules reported under the replacement (0)
-  extra Go packages not in the reference (50):
+  originals of replaced modules also listed, tolerated (0)
+  extra Go module entries not in the reference (50):
     dario.cat/mergo v1.0.2
     github.com/Masterminds/semver/v3 v3.5.0
     github.com/beorn7/perks v1.0.1

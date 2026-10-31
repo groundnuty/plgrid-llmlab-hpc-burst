@@ -1,6 +1,6 @@
 hpcburst: go1.27.3
 	path	github.com/groundnuty/plgrid-llmlab-hpc-burst/cmd/hpcburst
-	mod	github.com/groundnuty/plgrid-llmlab-hpc-burst	v0.0.0-20261031110311-294954347e93	
+	mod	github.com/groundnuty/plgrid-llmlab-hpc-burst	v0.0.0-20261031113320-da311e2012c2	
 	dep	github.com/davecgh/go-spew	v1.1.2-0.20180830191138-d8f796af33cc	h1:U9qPSI2PIWSS1VwoXQT9A3Wy9MM3WgvqSxFWenqJduM=
 	dep	github.com/emicklei/go-restful/v3	v3.13.0	h1:C4Bl2xDndpU6nJ4bc1jXd+uTmYPVUwkD6bFY/oTyCes=
 	dep	github.com/fxamacker/cbor/v2	v2.9.0	h1:NpKPmjDBgUfBms6tr6JZkTHtfFGcMKsw3eGcmD/sapM=
@@ -57,6 +57,6 @@ hpcburst: go1.27.3
 	build	GOOS=linux
 	build	GOAMD64=v1
 	build	vcs=git
-	build	vcs.revision=294954347e93541458e3e1f41472d58820f964a4
-	build	vcs.time=2026-10-31T11:03:11Z
+	build	vcs.revision=da311e2012c2f44b0bd621d5957b0c194b0bb514
+	build	vcs.time=2026-10-31T11:33:20Z
 	build	vcs.modified=false
