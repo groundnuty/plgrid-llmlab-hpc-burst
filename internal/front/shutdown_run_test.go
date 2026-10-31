@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynfake "k8s.io/client-go/dynamic/fake"
+	kubefake "k8s.io/client-go/kubernetes/fake"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/enginetest"
@@ -97,10 +98,7 @@ func TestRunStopCutsAStreamAndWritesItsRecord(t *testing.T) {
 	if n := errorEvents(string(rest)); n != 1 || !strings.Contains(string(rest), `"detail":"shutdown"`) {
 		t.Errorf("the stream got %d error events, want one stream_cut with detail shutdown; its end: %q", n, string(rest)[max(0, len(rest)-300):])
 	}
-	b, err := os.ReadFile(filepath.Join(o.Config.UsageDir, usage.LogFile))
-	if err != nil {
-		t.Fatal(err)
-	}
+	b := readUsageFiles(t, o.Config.UsageDir)
 	found := false
 	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
 		var r usage.Record
@@ -117,10 +115,13 @@ func TestRunStopCutsAStreamAndWritesItsRecord(t *testing.T) {
 }
 
 // TestHealthAndEventOnAFailingUsageSink (@hpc-burst-science-agent, 31 Oct
-// 2026): the usage log is /dev/full, so every write fails with ENOSPC. The
-// front keeps serving; /healthz stays 200 and its body carries usageError
-// and the failure count; the request's ModelDeployment gets a
-// UsageWriteFailed event whose reason is that code alone.
+// 2026; HBEP-8, Usage failure): the usage log is /dev/full, so every write
+// fails with ENOSPC. The front keeps serving; /healthz stays 200 and its
+// usage member says failing, with the records lost, the time the failure
+// began and the cause, and usageError repeats the cause; /metrics counts the
+// records lost in hpcburst_usage_write_failures_total; and a UsageWriteFailed
+// event, whose reason is that code alone, regards the front's Lease
+// (@hpc-burst-science-agent, 31 Oct 2026: no fallback to a ModelDeployment).
 func TestHealthAndEventOnAFailingUsageSink(t *testing.T) {
 	h := newHarness(t, nil)
 	instanceKey := newKey(t)
@@ -138,14 +139,18 @@ func TestHealthAndEventOnAFailingUsageSink(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink("/dev/full", filepath.Join(dir, usage.LogFile)); err != nil {
-		t.Fatal(err)
+	// Today's file and tomorrow's, so that a run across UTC midnight fails too.
+	for _, day := range []time.Time{time.Now(), time.Now().Add(24 * time.Hour)} {
+		if err := os.Symlink("/dev/full", filepath.Join(dir, usage.DayFile(day))); err != nil {
+			t.Fatal(err)
+		}
 	}
 	rec := &MemoryRecorder{}
 	o := runOptions(t, "", h.host, "")
 	o.Config.ClientKeysFile = h.cfg.ClientKeysFile
 	o.Config.UsageDir = dir
 	o.Dynamic, o.Transports, o.Recorder = client, h.trans, rec
+	o.Kube = kubefake.NewSimpleClientset()
 	dial, err := listenFree()
 	if err != nil {
 		t.Fatal(err)
@@ -188,21 +193,43 @@ func TestHealthAndEventOnAFailingUsageSink(t *testing.T) {
 	}
 	errWaitFor(t, "a UsageWriteFailed event", func() bool { return len(rec.Find(eventFailing, reasonUsageWriteFailed)) > 0 })
 	ev := rec.Find(eventFailing, reasonUsageWriteFailed)[0]
-	if !ev.Warning || !strings.Contains(ev.Object, "ns/md") || !strings.Contains(ev.Message, "no space left") {
-		t.Errorf("event %+v: want a warning on ns/md naming the cause", ev)
+	if !ev.Warning || ev.Object != leaseDesc || !strings.Contains(ev.Message, "no space left") {
+		t.Errorf("event %+v: want a warning regarding %s naming the cause", ev, leaseDesc)
 	}
 	resp, err := http.Get("http://" + f.Health.String() + "/healthz")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var body struct {
-		UsageError    string `json:"usageError"`
-		UsageFailures uint64 `json:"usageFailures"`
+		UsageError string `json:"usageError"`
+		Usage      struct {
+			State       string `json:"state"`
+			LostRecords uint64 `json:"lostRecords"`
+			Since       string `json:"since"`
+			Error       string `json:"error"`
+		} `json:"usage"`
 	}
 	if err := json.Unmarshal([]byte(readAll(t, resp)), &body); err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != 200 || body.UsageFailures == 0 || !strings.Contains(body.UsageError, "no space left") {
-		t.Errorf("/healthz: status %d usageFailures %d usageError %q; want 200, a count and the cause", resp.StatusCode, body.UsageFailures, body.UsageError)
+	if resp.StatusCode != 200 || body.Usage.State != "failing" || body.Usage.LostRecords == 0 || !strings.Contains(body.Usage.Error, "no space left") || body.Usage.Since == "" {
+		t.Errorf("/healthz: status %d usage %+v; want 200, failing, a count, a time and the cause", resp.StatusCode, body.Usage)
+	}
+	if !strings.Contains(body.UsageError, "no space left") {
+		t.Errorf("/healthz usageError = %q, want the cause", body.UsageError)
+	}
+
+	// The counter, over the health listener: the records lost, and the
+	// records written still 0.
+	mr, err := http.Get("http://" + f.Health.String() + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ss := parseSamples(t, readAll(t, mr))
+	if v, ok := find(t, ss, "hpcburst_usage_write_failures_total"); !ok || v < 1 || v != float64(body.Usage.LostRecords) {
+		t.Errorf("hpcburst_usage_write_failures_total = %v (present %v), want the %d records /healthz counts", v, ok, body.Usage.LostRecords)
+	}
+	if v, ok := find(t, ss, "hpcburst_usage_records_total"); !ok || v != 0 {
+		t.Errorf("hpcburst_usage_records_total = %v (present %v), want 0: nothing reached the disk", v, ok)
 	}
 }
