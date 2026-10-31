@@ -636,13 +636,21 @@ func TestAFailedMetricsReadLeavesTheGaugesOut(t *testing.T) {
 		w := worker0(r)
 		return w != nil && w.Health != nil && w.Health.MetricsReadAt != nil && w.Health.RunningRequests != nil
 	})
+	// Through the real agent, the engine double's lines for the preemption
+	// counter and the prefix-cache counters come out as known values (0 or
+	// more), so the later nil is the failed read's doing, not a missing line.
+	if fh := worker0(first).Health; fh.Preemptions == nil || fh.PrefixCacheQueriedTokens == nil || fh.PrefixCacheHitTokens == nil {
+		t.Fatalf("the first sample lacks the engine counters: %+v", fh)
+	}
 	readAt := *worker0(first).Health.MetricsReadAt
 	r := h.waitReport("a later sample after the metrics failed", 20*time.Second, func(r agentapi.Report) bool {
 		w := worker0(r)
 		return w != nil && w.Health != nil && w.Health.Time.After(readAt.Add(300*time.Millisecond))
 	})
 	hl := worker0(r).Health
-	if hl.RunningRequests != nil || hl.WaitingRequests != nil || hl.GeneratedTokens != nil || hl.KVCacheUsage != nil || hl.ResponsesByStatus != nil {
+	if hl.RunningRequests != nil || hl.WaitingRequests != nil || hl.GeneratedTokens != nil || hl.KVCacheUsage != nil || hl.ResponsesByStatus != nil ||
+		hl.Preemptions != nil || hl.PrefixCacheQueriedTokens != nil || hl.PrefixCacheHitTokens != nil ||
+		hl.TimePerOutputTokenSecondsSum != nil || hl.TimePerOutputTokenCount != nil {
 		t.Fatalf("gauges reported after the metrics read failed: %+v", hl)
 	}
 	if hl.MetricsReadAt == nil || !hl.MetricsReadAt.Equal(readAt) {

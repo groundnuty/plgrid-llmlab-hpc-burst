@@ -44,6 +44,11 @@ func cloneHealth(h agentapi.Health) agentapi.Health {
 	h.WaitingRequests = clonePtr(h.WaitingRequests)
 	h.GeneratedTokens = clonePtr(h.GeneratedTokens)
 	h.KVCacheUsage = clonePtr(h.KVCacheUsage)
+	h.Preemptions = clonePtr(h.Preemptions)
+	h.PrefixCacheQueriedTokens = clonePtr(h.PrefixCacheQueriedTokens)
+	h.PrefixCacheHitTokens = clonePtr(h.PrefixCacheHitTokens)
+	h.TimePerOutputTokenSecondsSum = clonePtr(h.TimePerOutputTokenSecondsSum)
+	h.TimePerOutputTokenCount = clonePtr(h.TimePerOutputTokenCount)
 	h.ResponsesByStatus = cloneCounts(h.ResponsesByStatus)
 	return h
 }

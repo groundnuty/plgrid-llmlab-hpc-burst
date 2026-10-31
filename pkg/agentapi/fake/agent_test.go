@@ -130,10 +130,10 @@ func TestRunStartsWorkerThenRunsAfterTheStartDelay(t *testing.T) {
 		t.Fatal("a running worker reports no Health")
 	}
 	read := t0.Add(delay)
-	eq(t, "Health", *w.Health, agentapi.Health{
+	eq(t, "Health", *w.Health, withZeroCounters(agentapi.Health{
 		Time: t0.Add(delay), ProbeOK: true, MetricsReadAt: &read,
 		RunningRequests: i64p(0), WaitingRequests: i64p(0), GeneratedTokens: i64p(0), KVCacheUsage: f64p(0.1),
-	})
+	}))
 }
 
 func TestAWorkerIsReportedStartingInTheStepThatStartsItEvenWithoutADelay(t *testing.T) {
