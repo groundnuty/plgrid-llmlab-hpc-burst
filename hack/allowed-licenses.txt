@@ -1,0 +1,24 @@
+# HBEP-15's licence allowlist ("Licence allowlist", as listed there on 2026-10-30), the
+# machine-readable list that HBEP-15 names. It changes only by amendment of that HBEP;
+# hack/test_licence_check.py compares it with the HBEP's text.
+# One SPDX identifier per line. licence-check.sh joins them with commas for --allowed_licenses.
+Apache-2.0
+0BSD
+BSD-2-Clause
+BSD-2-Clause-FreeBSD
+BSD-3-Clause
+MIT
+MIT-0
+ISC
+OpenSSL
+OpenSSL-standalone
+PSF-2.0
+Python-2.0
+Python-2.0.1
+PostgreSQL
+SSLeay-standalone
+UPL-1.0
+X11
+Zlib
+# Also on the HBEP-15 list: "the Google patent licence for Go". It has no SPDX identifier (it is
+# the PATENTS file next to Go's BSD-3-Clause LICENSE), so it cannot be encoded here.

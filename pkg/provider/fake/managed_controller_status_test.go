@@ -27,7 +27,7 @@ func TestManagedRejectedKeySetsTheConditionAndLeavesTheCatalog(t *testing.T) {
 	e.gw.RejectKey(true)
 	e.gw.SetCatalog(entry("example-a"), entry("example-d")) // hidden behind the rejection
 	e.syncAt(at(12, 5, 0))
-	c := e.wantCondition(v1alpha1.ConditionCredentialsRejected, metav1.ConditionTrue, "KeyRejected")
+	c := e.wantCondition(v1alpha1.ConditionCredentialsRejected, metav1.ConditionTrue, v1alpha1.ReasonKeyRejected)
 	wantMT(t, "condition time", &c.LastTransitionTime, at(12, 5, 0))
 	if !strings.Contains(c.Message, provider.ErrKeyRejected.Error()) {
 		t.Fatalf("message = %q, want it to carry the gateway's refusal", c.Message)
@@ -39,16 +39,16 @@ func TestManagedRejectedKeySetsTheConditionAndLeavesTheCatalog(t *testing.T) {
 	prov := e.provider()
 	wantMT(t, "lastCatalogRead", prov.Status.LastCatalogRead, at(12, 0, 0)) // not advanced
 	wantMT(t, "lastReconcileTime", prov.Status.LastReconcileTime, at(12, 5, 0))
-	e.wantCondition(v1alpha1.ConditionProviderReady, metav1.ConditionTrue, "CatalogRead") // as it was
+	e.wantCondition(v1alpha1.ConditionProviderReady, metav1.ConditionTrue, v1alpha1.ReasonCatalogRead) // as it was
 
 	// The condition does not churn while the key stays rejected.
 	e.syncAt(at(12, 6, 0))
-	c = e.wantCondition(v1alpha1.ConditionCredentialsRejected, metav1.ConditionTrue, "KeyRejected")
+	c = e.wantCondition(v1alpha1.ConditionCredentialsRejected, metav1.ConditionTrue, v1alpha1.ReasonKeyRejected)
 	wantMT(t, "condition time", &c.LastTransitionTime, at(12, 5, 0))
 
 	e.gw.RejectKey(false)
 	e.syncAt(at(12, 7, 0))
-	c = e.wantCondition(v1alpha1.ConditionCredentialsRejected, metav1.ConditionFalse, "KeyAccepted")
+	c = e.wantCondition(v1alpha1.ConditionCredentialsRejected, metav1.ConditionFalse, v1alpha1.ReasonKeyAccepted)
 	wantMT(t, "condition time", &c.LastTransitionTime, at(12, 7, 0))
 	if got := e.names(); len(got) != 2 || got[1] != "example-d" {
 		t.Fatalf("catalog = %v, want example-d once a read succeeds", got)
@@ -61,7 +61,7 @@ func TestManagedRejectedKeyFromTheStartWritesNoCatalog(t *testing.T) {
 	e.gw.SetCatalog(entry("example-a"))
 	e.gw.RejectKey(true)
 	e.syncAt(at(12, 0, 0))
-	e.wantCondition(v1alpha1.ConditionCredentialsRejected, metav1.ConditionTrue, "KeyRejected")
+	e.wantCondition(v1alpha1.ConditionCredentialsRejected, metav1.ConditionTrue, v1alpha1.ReasonKeyRejected)
 	prov := e.provider()
 	if len(prov.Status.Catalog) != 0 || prov.Status.LastCatalogRead != nil {
 		t.Fatalf("status = catalog %v, lastCatalogRead %v, want none: nothing was ever read", prov.Status.Catalog, prov.Status.LastCatalogRead)
@@ -74,7 +74,7 @@ func TestManagedUnknownErrorChangesNothing(t *testing.T) {
 	e.gw.SetCatalog(entry("example-a"))
 	e.gw.SetKeyExpiry(time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)) // two days out
 	e.syncAt(at(12, 0, 0))
-	e.wantCondition(v1alpha1.ConditionCredentialsExpiring, metav1.ConditionFalse, "NotExpiring")
+	e.wantCondition(v1alpha1.ConditionCredentialsExpiring, metav1.ConditionFalse, v1alpha1.ReasonNotExpiring)
 	before := e.provider()
 
 	boom := errors.New("example transport failure")
@@ -92,8 +92,8 @@ func TestManagedUnknownErrorChangesNothing(t *testing.T) {
 
 	e.gw.FailReads(nil) // the next read that works sees the key rejected and the time
 	e.syncAt(time.Date(2026, 10, 31, 13, 1, 0, 0, time.UTC))
-	e.wantCondition(v1alpha1.ConditionCredentialsRejected, metav1.ConditionTrue, "KeyRejected")
-	e.wantCondition(v1alpha1.ConditionCredentialsExpiring, metav1.ConditionTrue, "ExpiresWithinADay")
+	e.wantCondition(v1alpha1.ConditionCredentialsRejected, metav1.ConditionTrue, v1alpha1.ReasonKeyRejected)
+	e.wantCondition(v1alpha1.ConditionCredentialsExpiring, metav1.ConditionTrue, v1alpha1.ReasonExpiresWithinADay)
 }
 
 func TestManagedKeyExpiry(t *testing.T) {
@@ -108,11 +108,11 @@ func TestManagedKeyExpiry(t *testing.T) {
 		status metav1.ConditionStatus
 		reason string
 	}{
-		{time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC), metav1.ConditionFalse, "NotExpiring"},
-		{time.Date(2026, 10, 31, 11, 59, 59, 0, time.UTC), metav1.ConditionFalse, "NotExpiring"},
-		{time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC), metav1.ConditionTrue, "ExpiresWithinADay"}, // a day before
-		{time.Date(2026, 11, 1, 11, 59, 59, 0, time.UTC), metav1.ConditionTrue, "ExpiresWithinADay"},
-		{time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC), metav1.ConditionTrue, "Expired"},
+		{time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC), metav1.ConditionFalse, v1alpha1.ReasonNotExpiring},
+		{time.Date(2026, 10, 31, 11, 59, 59, 0, time.UTC), metav1.ConditionFalse, v1alpha1.ReasonNotExpiring},
+		{time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC), metav1.ConditionTrue, v1alpha1.ReasonExpiresWithinADay}, // a day before
+		{time.Date(2026, 11, 1, 11, 59, 59, 0, time.UTC), metav1.ConditionTrue, v1alpha1.ReasonExpiresWithinADay},
+		{time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC), metav1.ConditionTrue, v1alpha1.ReasonExpired},
 	} {
 		e.syncAt(st.when)
 		e.wantCondition(v1alpha1.ConditionCredentialsExpiring, st.status, st.reason)
@@ -122,7 +122,7 @@ func TestManagedKeyExpiry(t *testing.T) {
 	e.gw.SetKeyExpiry(time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC))
 	e.gw.RejectKey(true)
 	e.syncAt(time.Date(2026, 11, 1, 13, 0, 0, 0, time.UTC))
-	e.wantCondition(v1alpha1.ConditionCredentialsExpiring, metav1.ConditionTrue, "ExpiresWithinADay")
+	e.wantCondition(v1alpha1.ConditionCredentialsExpiring, metav1.ConditionTrue, v1alpha1.ReasonExpiresWithinADay)
 }
 
 func TestManagedLimitsOfTheCatalogStatus(t *testing.T) {
