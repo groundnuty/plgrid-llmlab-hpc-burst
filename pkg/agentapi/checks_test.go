@@ -91,7 +91,7 @@ func TestCheckOutcomeReasonAndContextTokensOnTheWire(t *testing.T) {
 // The behaviour check's context length, worked out by hand from the ruling of
 // `@hpc-burst-science-agent`, 31 Oct 2026: with a reasoning parser the prompt is
 // max-model-len - overhead - typical output - 4,096, never above contextTokens.
-// longest and never below contextTokens.typical.
+// longest, and then no less than contextTokens.typical, which is the floor.
 func TestBehaviourContextTokens(t *testing.T) {
 	shapes := Shapes{ContextShort: 512, ContextTypical: 8192, ContextLongest: 30000, OutputTypical: 1024, OutputLongest: 4096}
 	for _, c := range []struct {
@@ -120,10 +120,12 @@ func TestBehaviourContextTokens(t *testing.T) {
 			t.Errorf("%s: BehaviourContextTokens(max-model-len %d, overhead %d, reasoning %v) = %d, want %d", c.name, c.maxModelLen, c.overhead, c.reasoning, got, c.want)
 		}
 	}
-	// A longest context below the typical one: the upper bound wins.
+	// A longest context below the typical one: the typical context is the floor,
+	// applied last (admission refuses such a spec, so this is the helper's
+	// answer to bounds it should never get).
 	odd := Shapes{ContextTypical: 8192, ContextLongest: 4096, OutputTypical: 1024}
-	if got := BehaviourContextTokens(odd, 32768, 12, true); got != 4096 {
-		t.Errorf("a longest below the typical: got %d, want 4096, the longest", got)
+	if got := BehaviourContextTokens(odd, 32768, 12, true); got != 8192 {
+		t.Errorf("a longest below the typical: got %d, want 8192, the typical", got)
 	}
 	if ReasoningHeadroomTokens != 4096 {
 		t.Errorf("ReasoningHeadroomTokens = %d, want 4096", ReasoningHeadroomTokens)

@@ -57,18 +57,20 @@ const ReasoningHeadroomTokens = 4096
 //
 //	maxModelLen - templateOverhead - s.OutputTypical - ReasoningHeadroomTokens
 //
-// so that the reasoning does not use up the whole output budget, but never to
-// less than s.ContextTypical and never to more than s.ContextLongest. Where the
-// two bounds contradict (a longest below the typical), the upper bound wins:
-// the check never runs longer than the workload's longest context. maxModelLen
-// is the max-model-len the engine reported (VerifyResult.Settings) and
-// templateOverhead is VerifyResult.TemplateOverhead.
+// so that the reasoning does not use up the whole output budget, never to more
+// than s.ContextLongest, and then, if that falls below s.ContextTypical, to
+// s.ContextTypical (`@hpc-burst-science-agent`, 31 Oct 2026). The typical
+// context is the floor and is applied last, so a window too small for the
+// headroom still runs the check at the typical context, and a longest below the
+// typical one (which admission refuses) gives the typical context too.
+// maxModelLen is the max-model-len the engine reported (VerifyResult.Settings)
+// and templateOverhead is VerifyResult.TemplateOverhead.
 func BehaviourContextTokens(s Shapes, maxModelLen int64, templateOverhead int32, reasoningParser bool) int64 {
 	longest := int64(s.ContextLongest)
 	if !reasoningParser {
 		return longest
 	}
 	n := maxModelLen - int64(templateOverhead) - int64(s.OutputTypical) - ReasoningHeadroomTokens
-	n = max(n, int64(s.ContextTypical))
-	return min(n, longest)
+	n = min(n, longest)
+	return max(n, int64(s.ContextTypical))
 }

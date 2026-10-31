@@ -447,7 +447,12 @@ type Workload struct {
 // equal to agentapi.MaxTargetSessions (a test checks they agree).
 const MaxTargetSessions = 1024
 
-// ContextTokens are a workload's context lengths.
+// ContextTokens are a workload's context lengths. When both are set, typical
+// is at most longest: the behaviour check runs at the longest context and never
+// below the typical one, so bounds that contradict each other would have it run
+// longer than the longest (`@hpc-burst-science-agent`, 31 Oct 2026).
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.longest) || self.typical <= self.longest",message="contextTokens.typical must not exceed contextTokens.longest: the behaviour check runs at the longest context and never below the typical one, so contradictory bounds are refused"
 type ContextTokens struct {
 	// Short is the short context length.
 	//

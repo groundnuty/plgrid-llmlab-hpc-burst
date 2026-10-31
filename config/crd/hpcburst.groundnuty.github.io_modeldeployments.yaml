@@ -707,6 +707,11 @@ spec:
                     required:
                     - typical
                     type: object
+                    x-kubernetes-validations:
+                    - message: 'contextTokens.typical must not exceed contextTokens.longest:
+                        the behaviour check runs at the longest context and never
+                        below the typical one, so contradictory bounds are refused'
+                      rule: '!has(self.longest) || self.typical <= self.longest'
                   outputTokens:
                     description: OutputTokens are the output lengths, in tokens.
                     properties:
