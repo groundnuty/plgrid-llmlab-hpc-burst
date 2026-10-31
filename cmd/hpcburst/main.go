@@ -8,6 +8,9 @@
 //	hpcburst restore --backup DIR  put a backup's store back (the host stopped): the only way down
 //	hpcburst down    [flags]   stop the recorded processes and confirm nothing listens
 //
+// up also starts the controllers' supervisor, a hidden "hpcburst supervise" process that keeps
+// hpcburst-controller running and restarts it when it exits.
+//
 // Exit codes: 0 success, 1 failure (status: unhealthy), 2 usage error, 3 (status only) stopped.
 package main
 
@@ -60,6 +63,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return cmdDown(ctx, args[1:], stdout, stderr)
 	case "restore":
 		return cmdRestore(args[1:], stdout, stderr)
+	case "supervise": // hidden: started by up
+		return cmdSupervise(ctx, args[1:], stdout, stderr)
 	case "-h", "-help", "--help", "help":
 		fmt.Fprintln(stdout, usageSummary)
 		return exitOK
@@ -125,13 +130,14 @@ func cmdUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&sd, "state-dir", "", stateDirUsage)
 	fs.StringVar(&bd, "bin-dir", "", binDirUsage)
 	fs.StringVar(&o.Version, "version", "", "k3s release to start (must be pinned): default the release that last wrote the store, or "+launcher.DefaultVersion+" for a new one; another release than the store's is refused (use upgrade or restore)")
-	fs.IntVar(&o.PortBase, "port-base", launcher.DefaultPortBase, "first of a block of six loopback ports: base (apiserver), +1 (https), +2 (controller manager), +5 (reserved)")
+	fs.IntVar(&o.PortBase, "port-base", launcher.DefaultPortBase, "first of a block of twelve loopback ports, base to base+11, shared with the controller, the front and frps: base (apiserver), +1 (https), +2 (controller manager), +3 (the agent endpoint, reserved for the controller's server), +5 (reserved, never bound), +6 (the lifecycle controller's /healthz) must be free before a start; +4 (the front's /healthz) and +7 (the front's ssh dial-home listener) are the front's and not checked; +8 to +11 are frps's")
 	fs.StringVar(&o.Front.Mode, "front-mode", "", "how compute nodes reach the front: direct, or ssh (restricted key)")
 	fs.StringVar(&o.Front.Addr, "front-addr", "", "the front's address, host:port (ssh: host or host:port; the port defaults to 22)")
 	fs.StringVar(&o.Front.KeyPath, "front-key", "", "ssh mode: path of the restricted key (recorded, never read)")
 	fs.IntVar(&o.Nice, "nice", 0, "run k3s under nice(1) with this value (0: leave the priority alone)")
 	fs.StringVar(&o.ManifestsDir, "manifests", "", "directory of YAML manifests to apply once the host is ready, CRDs first")
 	fs.DurationVar(&o.ReadyTimeout, "ready-timeout", launcher.DefaultReadyTimeout, "how long to wait for readiness")
+	fs.StringVar(&o.ControllerBin, "controller-bin", "", "the controllers' binary (default "+launcher.ControllerBinName+" in the directory of this executable; when that is absent, up starts the host with a warning and no controller runs)")
 	fs.BoolVar(&asJSON, "json", false, "print the result as JSON")
 	if code, done := parse(fs, args); done {
 		return code
@@ -158,6 +164,9 @@ func cmdUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "ports: apiserver %d, https %d, controller manager %d (loopback)\n", rep.Ports.API, rep.Ports.HTTPS, rep.Ports.KCM)
 	if rep.Front.Set() {
 		fmt.Fprintf(stdout, "front: %s %s\n", rep.Front.Mode, rep.Front.Addr)
+	}
+	if rep.SupervisorPID != 0 {
+		fmt.Fprintf(stdout, "controllers: supervisor pid %d runs %s, health on %s\n", rep.SupervisorPID, rep.ControllerBin, rep.ControllerHealth)
 	}
 	if o.ManifestsDir != "" {
 		fmt.Fprintf(stdout, "applied %d manifests from %s\n", rep.Applied, o.ManifestsDir)
@@ -227,6 +236,7 @@ func printStatus(w io.Writer, r *launcher.StatusReport) {
 			fmt.Fprintf(w, "%s: %v\n", c.name, *c.v)
 		}
 	}
+	printSupervision(w, r)
 	if r.Front != nil && r.Front.Set() {
 		fmt.Fprintf(w, "front: %s %s\n", r.Front.Mode, r.Front.Addr)
 	} else if r.Version != "" {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -44,22 +45,61 @@ type StopReport struct {
 	ForeignOnPorts []string   `json:"foreign_listeners_on_ports,omitempty"`
 }
 
-// stopRecorded stops the processes in the record, and only those. For each it takes a pidfd and
+// stopRecorded stops the processes in the record, and only those: the supervisor first, which
+// stops its children and is waited for, then the rest (k3s). So the controllers never lose their
+// API server while they shut down. Each group is stopped by stopGroup. A process whose identity
+// cannot be established does not keep the rest from being stopped; the stop fails at the end.
+func stopRecorded(ctx context.Context, st *State, grace time.Duration, log io.Writer) (*StopReport, error) {
+	var first, rest []ProcRec
+	for _, rec := range st.Procs {
+		if rec.Name == supervisorName {
+			first = append(first, rec)
+		} else {
+			rest = append(rest, rec)
+		}
+	}
+	out := &StopReport{Procs: make([]ProcStop, 0, len(st.Procs))}
+	var unknown []string
+	for _, group := range [][]ProcRec{first, rest} {
+		if len(group) == 0 {
+			continue
+		}
+		rep, unk, err := stopGroup(ctx, st, group, grace, log)
+		out.Procs = append(out.Procs, rep.Procs...)
+		out.GoneListeners += rep.GoneListeners
+		out.ForeignOnPorts = append(out.ForeignOnPorts, rep.ForeignOnPorts...)
+		unknown = append(unknown, unk...)
+		if err != nil {
+			return out, err
+		}
+	}
+	// Report in the order of the record, whatever the order of stopping.
+	at := map[int]int{}
+	for i, rec := range st.Procs {
+		at[rec.PID] = i
+	}
+	sort.SliceStable(out.Procs, func(i, j int) bool { return at[out.Procs[i].PID] < at[out.Procs[j].PID] })
+	if len(unknown) > 0 {
+		return out, fmt.Errorf("could not check the identity of %s, so nothing was sent to it and the record is kept", strings.Join(unknown, "; "))
+	}
+	return out, nil
+}
+
+// stopGroup stops recs, and only those. For each it takes a pidfd and
 // verifies PID, start time and boot ID while holding it, before any signal: a process that no
 // longer matches is reported and never signalled, and one whose identity cannot be established
-// (Unknown) is not signalled either, which makes the stop fail with the record kept. A verified
+// (Unknown) is not signalled either; it is returned in unknown. A verified
 // process gets SIGTERM through its pidfd, and SIGKILL (verified again) after the grace period. Its
 // descendants, adopted through their own verified pidfds while it was held, are held to the same
 // rule. Exits are read from the pidfds. Then it confirms that the sockets they held no longer
 // listen. A cancelled ctx cuts the grace period short, never the wait after SIGKILL.
-func stopRecorded(ctx context.Context, st *State, grace time.Duration, log io.Writer) (*StopReport, error) {
-	rep := &StopReport{Procs: make([]ProcStop, 0, len(st.Procs))}
+func stopGroup(ctx context.Context, st *State, recs []ProcRec, grace time.Duration, log io.Writer) (rep *StopReport, unknown []string, err error) {
+	rep = &StopReport{Procs: make([]ProcStop, 0, len(recs))}
 	var roots, all []*procHandle
 	defer func() { closeAll(all) }()
 	rootIdx := map[*procHandle]int{} // index into rep.Procs
 	inodes := map[string]bool{}
-	var unknown []string
-	for _, rec := range st.Procs {
+	for _, rec := range recs {
 		h, v, detail := openRec(rec)
 		rep.Procs = append(rep.Procs, ProcStop{Name: rec.Name, PID: rec.PID, Before: v.String(), Detail: detail})
 		switch v {
@@ -70,7 +110,7 @@ func stopRecorded(ctx context.Context, st *State, grace time.Duration, log io.Wr
 			rootIdx[h] = len(rep.Procs) - 1
 			owned, _, err := ownedListeners(tree)
 			if err != nil {
-				return rep, fmt.Errorf("cannot list the listeners of %s (pid %d), so could not confirm later that they are gone: %w", rec.Name, rec.PID, err)
+				return rep, unknown, fmt.Errorf("cannot list the listeners of %s (pid %d), so could not confirm later that they are gone: %w", rec.Name, rec.PID, err)
 			}
 			for _, s := range owned {
 				inodes[s.inode] = true
@@ -88,7 +128,7 @@ func stopRecorded(ctx context.Context, st *State, grace time.Duration, log io.Wr
 	for _, h := range roots {
 		starts[h] = time.Now()
 		if sent, err := signalHandle(h, syscall.SIGTERM); err != nil {
-			return rep, fmt.Errorf("SIGTERM to %s (pid %d): %w", h.rec.Name, h.rec.PID, err)
+			return rep, unknown, fmt.Errorf("SIGTERM to %s (pid %d): %w", h.rec.Name, h.rec.PID, err)
 		} else if sent {
 			rep.Procs[rootIdx[h]].Signals = "TERM"
 			logf(log, "sent SIGTERM to %s (pid %d)", h.rec.Name, h.rec.PID)
@@ -98,7 +138,7 @@ func stopRecorded(ctx context.Context, st *State, grace time.Duration, log io.Wr
 		for _, h := range all {
 			sent, err := signalHandle(h, syscall.SIGKILL)
 			if err != nil {
-				return rep, fmt.Errorf("SIGKILL to %s (pid %d): %w", h.rec.Name, h.rec.PID, err)
+				return rep, unknown, fmt.Errorf("SIGKILL to %s (pid %d): %w", h.rec.Name, h.rec.PID, err)
 			}
 			if sent {
 				if i, ok := rootIdx[h]; ok {
@@ -111,7 +151,7 @@ func stopRecorded(ctx context.Context, st *State, grace time.Duration, log io.Wr
 		if !waitExited(context.Background(), all, killWait) {
 			for _, h := range all {
 				if gone, err := h.exited(); err != nil || !gone {
-					return rep, fmt.Errorf("%s (pid %d) is still alive %s after SIGKILL", h.rec.Name, h.rec.PID, killWait)
+					return rep, unknown, fmt.Errorf("%s (pid %d) is still alive %s after SIGKILL", h.rec.Name, h.rec.PID, killWait)
 				}
 			}
 		}
@@ -130,7 +170,7 @@ func stopRecorded(ctx context.Context, st *State, grace time.Duration, log io.Wr
 	for deadline := time.Now().Add(socketReleaseWait); ; {
 		var err error
 		if socks, err = listenSockets(); err != nil {
-			return rep, fmt.Errorf("cannot confirm that the listeners are gone: %w", err)
+			return rep, unknown, fmt.Errorf("cannot confirm that the listeners are gone: %w", err)
 		}
 		var held *sock
 		for i, s := range socks {
@@ -142,7 +182,7 @@ func stopRecorded(ctx context.Context, st *State, grace time.Duration, log io.Wr
 			break
 		}
 		if time.Now().After(deadline) {
-			return rep, fmt.Errorf("the processes are gone, but a socket they held still listens on %s", held.Listener)
+			return rep, unknown, fmt.Errorf("the processes are gone, but a socket they held still listens on %s", held.Listener)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -155,10 +195,7 @@ func stopRecorded(ctx context.Context, st *State, grace time.Duration, log io.Wr
 	for _, f := range rep.ForeignOnPorts {
 		logf(log, "warning: %s listens on one of the recorded ports, but not as a launched process; left alone", f)
 	}
-	if len(unknown) > 0 {
-		return rep, fmt.Errorf("could not check the identity of %s, so nothing was sent to it and the record is kept", strings.Join(unknown, "; "))
-	}
-	return rep, nil
+	return rep, unknown, nil
 }
 
 // DownOptions are the inputs of Down.
@@ -207,10 +244,10 @@ func Down(ctx context.Context, o DownOptions) (*StopReport, error) {
 	return rep, nil
 }
 
-// clearRecord removes the record and the kubeconfigs, which point at a server that is gone. The
-// data directory stays.
+// clearRecord removes the record, the supervisor's record of its children and the kubeconfigs,
+// which point at a server that is gone. The data directory stays.
 func (l layout) clearRecord() error {
-	for _, f := range []string{l.stateFile(), l.kubeconfig(), l.adminKubeconfig()} {
+	for _, f := range []string{l.stateFile(), l.kubeconfig(), l.adminKubeconfig(), l.supervisorFile()} {
 		if err := os.Remove(f); err != nil && !os.IsNotExist(err) {
 			return err
 		}

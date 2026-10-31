@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 const stateSchema = 1
@@ -42,6 +44,19 @@ func (l layout) tmpDir() string          { return filepath.Join(l.dir, "tmp") }
 func (l layout) auditPolicy() string     { return filepath.Join(l.dir, "audit-policy.yaml") }
 func (l layout) auditLog() string        { return filepath.Join(l.logDir(), "audit.log") }
 
+// The controllers' files: the supervisor's own record and the logs of the supervisor and of each
+// supervised process. The credentials and agent-builds directories are the shared host layout's.
+func (l layout) controllerDir() string       { return filepath.Join(l.dir, "controller") }
+func (l layout) supervisorFile() string      { return filepath.Join(l.controllerDir(), "supervisor.json") }
+func (l layout) supervisorLog() string       { return filepath.Join(l.logDir(), "supervisor.log") }
+func (l layout) childLog(name string) string { return filepath.Join(l.logDir(), name+".log") }
+
+// host is the layout the launcher shares with the controller (agentapi.Host): the state directory
+// and the port base of the block recorded in ports.
+func (l layout) host(ports Ports) agentapi.Host {
+	return agentapi.Host{StateDir: l.dir, PortBase: ports.Base()}
+}
+
 // storeVersionFile records which k3s release last wrote the store. down never removes it.
 func (l layout) storeVersionFile() string { return filepath.Join(l.dir, "store-version.json") }
 
@@ -73,6 +88,15 @@ type State struct {
 	Procs        []ProcRec `json:"processes"`
 	StartedAt    time.Time `json:"started_at"`
 	Front        Front     `json:"front"`
+	// Controllers is what the supervisor runs. up records it before it starts the supervisor,
+	// which reads it back from here, and upgrade starts the supervisor again from it. Nil when no
+	// controller binary was found: no controllers run.
+	Controllers *ControllerConfig `json:"controllers,omitempty"`
+}
+
+// ControllerConfig is the launcher's choice of what to run beside k3s.
+type ControllerConfig struct {
+	Binary string `json:"binary"` // absolute path of hpcburst-controller
 }
 
 // loadState reads the record. A missing file is (nil, nil): nothing was started.
