@@ -1,6 +1,6 @@
 # Field lessons
 
-These lessons come from operating LLM serving on Slurm clusters for the www-2027 research project, in October 2026. The serving ran on Cyfronet's Helios and Athena and on Sano's cluster, next to PLGrid LLMLab, and was operated by people and software agents. The project's problem list was private; this catalogue restates it in general terms, without the evidence behind each item.
+These lessons come from operating LLM serving on Slurm clusters for the www-2027 research project, in October 2026. The serving ran on Cyfronet's Helios and Athena and on Sano's cluster, next to PLGrid LLMLab, and was operated by people and software agents. The project's problem list was private; this catalogue restates it in general terms, without the evidence behind each item. Section 17 holds lessons from building the framework itself, which join the same catalogue (HBEP-15).
 
 [HBEP-15](../../hbep/0015-dependencies-and-provenance/README.md) defines this catalogue and its rules.
 
@@ -12,7 +12,7 @@ These lessons come from operating LLM serving on Slurm clusters for the www-2027
   - A lesson found to be wrong stays, tagged `[withdrawn]`, with one line saying why.
   - Section 16 had no item numbers in the private list. Its lessons are numbered L-16.1 to L-16.5 in the order they appeared there.
 - **Citing.** An HBEP cites lessons by ID in the "Field lessons answered" table of its "Prior art and reuse" section.
-- **Status tags** give the state when the project ended:
+- **Status tags** give the state when the project ended, and for section 17 the state on `main` when the lesson was added:
   - `[fixed]`: no longer seen. Most fixes were a written rule or a one-off script, not reusable code. Those rules are what the framework should encode.
   - `[worked around]`: avoided, while the cause stayed.
   - `[open]`: unsolved.
@@ -397,3 +397,20 @@ These concern the clients and the research process rather than serving. HBEP-2 p
   Generated keep trees froze into deny lists, and neutralised copies renamed strings that tools parse.
 - **L-16.5 Review capacity.** [out of scope]
   Reviewer models' quotas limit review rounds, and only a reviewer's final verdict is acted on.
+
+## 17. Building the framework
+
+These come from building this framework, from 30 Oct 2026, not from www-2027's operation (HBEP-15: "Lessons from the framework's own operation join the same catalogue"). Their status tags give the state on `main` when each was added.
+
+- **L-17.1 A /proc liveness check misreads a live process as a zombie during `execve`.** [fixed]
+  While one thread of a process runs `execve`, its leader reads Z in /proc, though the process lives. k3s re-executes itself, and a check that counted Z as dead once left an orphan. The launcher decides liveness from a pidfd, which the kernel signals only after every thread has exited, not from a /proc scan, which can find no live thread at that moment.
+- **L-17.2 A write refused for a full store can still take effect.** [fixed by rule]
+  On SQLite, a create that returned "database or disk is full" left its object stored. Controllers re-read state after any write error, and never assume the write failed.
+- **L-17.3 A user-level k3s can silently run root's binaries.** [fixed]
+  On a machine whose system k3s runs the same release, a user-level k3s ran root's unpacked binaries from `/var/lib/rancher` instead of its own. The launcher reads `/proc/<pid>/exe` and refuses a host whose k3s runs from outside its own data directory.
+- **L-17.4 A library default that the text called inert was not.** [fixed]
+  crossplane's embedded `managementPolicies` default, `["*"]`, would have stalled every Allocation, because the provider registers fewer policies. The Allocation declares the fields itself, with the provider's set as an immutable default (PR #48).
+- **L-17.5 The Hub's tree listing page size depends on the query.** [fixed by rule]
+  A spike saw a listing cut at 50 entries. Later the Hub sent one page of 77 entries to a request with no `limit`, and 50 with a `Link` to one with `expand=true`. Send `limit=1000`, and always follow `Link`.
+- **L-17.6 An approval given before a code-review round finished was used to merge the post-fix head.** [out of scope; fixed by rule in the agents' process]
+  An objective check approved a head; the review round then added fix commits, and the PR merged at the fixed head on that approval. The objective check now comes after the reviews and their fixes, names the full head SHA, and any later commit voids it.
