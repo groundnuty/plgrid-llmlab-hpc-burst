@@ -309,3 +309,82 @@ func TestTrackerComparesOnlyAdvancedReads(t *testing.T) {
 		t.Fatalf("after an advanced read: %d samples, tokensSince %s; want 2 and +20s", len(tr.samples), tr.tokensSince.Format(time.TimeOnly))
 	}
 }
+
+// TestMetricsDrainAgesAtTheBoundary covers HBEP-7's Test plan, Stale gauges:
+// each of Health.MetricsFresh's three ages alone, at exactly two probe
+// intervals (20 s, fresh) and one second past (stale). The drain begins at
+// 09:50:20. Fresh, the primary ends Drained at 09:50:50, on a read placed at
+// 09:50:30; stale, it stays draining with no endTime and its Allocation gets
+// no idle-since. The third age, the report since its receipt, is set by an
+// agent that reports at 09:50:30 and a controller pass 20 s or 21 s later
+// with no report between.
+func TestMetricsDrainAgesAtTheBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name, age string
+		d         time.Duration
+		ends      bool
+	}{
+		{"read-at-sample-20s-fresh", "read", 20 * time.Second, true},
+		{"read-at-sample-21s-stale", "read", 21 * time.Second, false},
+		{"sample-at-report-20s-fresh", "sample", 20 * time.Second, true},
+		{"sample-at-report-21s-stale", "sample", 21 * time.Second, false},
+		{"report-since-receipt-20s-fresh", "receipt", 20 * time.Second, true},
+		{"report-since-receipt-21s-stale", "receipt", 21 * time.Second, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rg := newRig(t, withMaxTime(4*time.Hour))
+			from := hoT(9, 50, 20)
+			rg.engine = func(string) afake.Engine {
+				return afake.Engine{Health: func(now time.Time, p afake.Process) agentapi.Health {
+					h := afake.DefaultHealth(now, p)
+					if now.Before(from) {
+						return h
+					}
+					switch tc.age {
+					case "read": // the read is d older than the sample
+						read := now.Add(-tc.d)
+						h.MetricsReadAt = &read
+					case "sample": // the sample, read when taken, is d older than the Report
+						h.Time = now.Add(-tc.d)
+						read := h.Time
+						h.MetricsReadAt = &read
+					}
+					return h
+				}}
+			}
+			p := hoStart(rg, nil)
+			hoStepTo(rg, hoT(9, 50, 20), time.Minute, nil)
+			if _, ok := drainBegan(rg.instance(p.Name)); !ok {
+				t.Fatal("the primary did not begin draining at 09:50:20")
+			}
+			if tc.age == "receipt" {
+				rg.clock.Set(hoT(9, 50, 30))
+				if err := rg.prov.Sync(rg.ctx); err != nil {
+					t.Fatal(err)
+				}
+				rg.syncAgents() // the report arrives at 09:50:30
+				rg.clock.Set(hoT(9, 50, 30).Add(tc.d))
+				rg.reconcileAll() // judged d after its receipt, with no report between
+			} else {
+				hoStepTo(rg, hoT(9, 50, 50), 10*time.Second, nil)
+				if !tc.ends {
+					hoStepTo(rg, hoT(9, 52, 20), 10*time.Second, nil)
+				}
+			}
+			got := rg.instance(p.Name)
+			alloc, _ := rg.allocation(got.Spec.AllocationRef.Name)
+			if tc.ends {
+				if got.Status.Phase != v1alpha1.InstanceEnded || got.Status.EndReason != v1alpha1.ReasonDrained || got.Status.EndTime == nil || !got.Status.EndTime.Time.Equal(hoT(9, 50, 50)) {
+					t.Fatalf("phase %s/%s, endTime %v; want ended/Drained at 09:50:50", got.Status.Phase, got.Status.EndReason, got.Status.EndTime)
+				}
+				return
+			}
+			if got.Status.Phase != v1alpha1.InstanceDraining || got.Status.EndTime != nil {
+				t.Fatalf("phase %s, endTime %v at %s; stale gauges must not end the drain", got.Status.Phase, got.Status.EndTime, rg.clock.Now().Format(time.TimeOnly))
+			}
+			if v, ok := alloc.Annotations[v1alpha1.AnnotationIdleSince]; ok {
+				t.Fatalf("Allocation idle-since %q; stale gauges must not start the idle count", v)
+			}
+		})
+	}
+}
