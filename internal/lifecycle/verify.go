@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"time"
+	"sort"
 
 	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -13,6 +13,13 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
+)
+
+// signalVerifyRead and signalStaging are the restart signals of a verification
+// the agent could not complete and of a failed staging.
+const (
+	signalVerifyRead = "VerifyReadFailed"
+	signalStaging    = "StagingFailed"
 )
 
 // starting advances a starting or verifying Instance (HBEP-7, Instance start):
@@ -27,6 +34,12 @@ func (p *pass) starting(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av ag
 	ir := av.report
 	if ir == nil || av.unreachable {
 		return nil
+	}
+	// A failed staging is tried again only when the Instance generation rises
+	// (the agent's contract), so it takes the whole-Instance rung at once
+	// rather than waiting for health.startTimeout.
+	if st2 := ir.Staging; st2 != nil && st2.Phase == agentapi.StagingFailed && ir.Generation == restartGeneration(in, v1alpha1.PartInstance) {
+		return p.restart(in, alloc, signalStaging, v1alpha1.PartInstance, st, "staging failed: "+st2.Message)
 	}
 	if in.Status.Phase == v1alpha1.InstanceStarting && workerRunning(ir, in) {
 		if err := p.setStatus(in, func(s *v1alpha1.InstanceStatus) { s.Phase = v1alpha1.InstanceVerifying }); err != nil {
@@ -227,6 +240,12 @@ func (p *pass) verified(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, v *ag
 			return p.restart(in, alloc, signalRehash, v1alpha1.PartInstance, st)
 		}
 		return p.fail(in, alloc, v1alpha1.ReasonVerificationFailed, "the rehash failed again after restaging: "+data.Message)
+	case causeError:
+		// One failed engine read (a slow first request, a metrics read) is
+		// not a verdict on the engine: verify again after a worker restart,
+		// the ladder's first rung, which the restart limits bound (review of
+		// PR 88).
+		return p.restart(in, alloc, signalVerifyRead, "", st, data.Message)
 	case causeContradiction, causeShape:
 		p.r.Recorder.Event(p.mdObject(in), true, eventDegraded, v1alpha1.ReasonVerificationFailed,
 			fmt.Sprintf("Instance %s: %s; provisioning in its class stops until the serving spec changes", in.Name, data.Message))
@@ -367,10 +386,16 @@ func (r *Reconciler) earlierRehashFailure(ctx context.Context, in *v1alpha1.Inst
 }
 
 // classBlocked returns why provisioning in a class is stopped: a verification
-// of its current ID failed on a settings contradiction or a shape that does not
-// fit. The records outlive everything else, so the stop survives a restart,
-// and a new serving spec, with a new ID, lifts it.
-func (r *Reconciler) classBlocked(ctx context.Context, md *v1alpha1.ModelDeployment, id v1alpha1.FullDeploymentID) (string, error) {
+// of its current ID failed on a settings contradiction, or on a shape that
+// does not fit. The records outlive everything else, so the stop survives a
+// restart. A contradiction is keyed on the deployment ID alone: a new serving
+// spec, with a new ID, lifts it. A shape misfit is keyed on the ID and the
+// workload's shapes (science-agent ruling, 31 Oct 2026): the current shapes
+// are checked again against the context limit and template overhead the
+// record holds, so a workload edit that makes them fit lifts the stop, with
+// one event, and an edit to another misfit keeps it, with an event naming the
+// new shape.
+func (r *Reconciler) classBlocked(ctx context.Context, md *v1alpha1.ModelDeployment, id v1alpha1.FullDeploymentID, sh shapes) (string, error) {
 	var list appsv1.ControllerRevisionList
 	if err := r.Reader.List(ctx, &list, client.InNamespace(md.Namespace), client.MatchingLabels{
 		v1alpha1.LabelRecord:          v1alpha1.RecordVerification,
@@ -379,16 +404,43 @@ func (r *Reconciler) classBlocked(ctx context.Context, md *v1alpha1.ModelDeploym
 	}); err != nil {
 		return "", fmt.Errorf("list verification records: %w", err)
 	}
+	sort.Slice(list.Items, func(i, j int) bool { return list.Items[i].Name < list.Items[j].Name })
+	key := shapesKey(sh)
 	for i := range list.Items {
 		var d verificationData
-		if json.Unmarshal(list.Items[i].Data.Raw, &d) != nil || d.DeploymentID != string(id) {
+		name := list.Items[i].Name
+		if json.Unmarshal(list.Items[i].Data.Raw, &d) != nil || d.DeploymentID != string(id) || d.Verdict != v1alpha1.VerdictFail {
 			continue
 		}
-		if d.Verdict == v1alpha1.VerdictFail && (d.Cause == causeContradiction || d.Cause == causeShape) {
-			return fmt.Sprintf("verification record %s: %s", list.Items[i].Name, d.Message), nil
+		switch d.Cause {
+		case causeContradiction:
+			return fmt.Sprintf("verification record %s: %s", name, d.Message), nil
+		case causeShape:
+			if d.MaxModelLen < 1 {
+				return fmt.Sprintf("verification record %s: %s", name, d.Message), nil
+			}
+			if _, err := sh.resolved(d.MaxModelLen, d.Overhead); err != nil {
+				if r.memory().once("shape-stop/" + name + "/" + key) {
+					r.Recorder.Event(md, true, eventDegraded, v1alpha1.ReasonVerificationFailed,
+						fmt.Sprintf("the workload's shapes do not fit the context limit %d that verification record %s found: %v", d.MaxModelLen, name, err))
+				}
+				return fmt.Sprintf("verification record %s found max-model-len %d and a template overhead of %d, and the workload does not fit: %v", name, d.MaxModelLen, d.Overhead, err), nil
+			}
+			if r.memory().once("shape-lift/" + name + "/" + key) {
+				r.Recorder.Event(md, false, eventReady, "ShapesFit",
+					fmt.Sprintf("the workload now fits the context limit %d that verification record %s found; provisioning in the class resumes", d.MaxModelLen, name))
+			}
 		}
 	}
 	return "", nil
 }
 
-var _ = time.Second
+// shapesKey identifies a workload's shapes, defaults applied, for the shape
+// stop's events.
+func shapesKey(sh shapes) string {
+	longest := int32(-1)
+	if sh.longest != nil {
+		longest = *sh.longest
+	}
+	return fmt.Sprintf("%d-%d-%d-%d-%d", sh.short, sh.typical, longest, sh.outputTypical, sh.outputLongest)
+}

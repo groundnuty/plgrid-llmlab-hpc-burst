@@ -210,6 +210,15 @@ func (c *cachedSource) TemplateSources(ctx context.Context, cp v1alpha1.Checkpoi
 	return t, nil
 }
 
+// forgetFailures drops the kept failures of a checkpoint, so the next read asks
+// the inner source: the spec changed (HBEP-3).
+func (c *cachedSource) forgetFailures(cp v1alpha1.CheckpointSpec) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.fails, failKey("files", cp))
+	delete(c.fails, failKey("tmpl", cp))
+}
+
 // hubCause names the cause of a checkpoint read failure for the condition: the
 // Hub's status (401, 403, 404, 5xx...) when it answered, a blob id mismatch or
 // an invalid listing, else the error.
@@ -250,6 +259,9 @@ type classID struct {
 	// problem, when set, says why the class has no current ID: no Allocation is
 	// created for it (HBEP-7, Reconcile loop, step 2).
 	problem string
+	// collision and collisionRV name the identity record whose display form
+	// the ID collides with, and its resourceVersion.
+	collision, collisionRV string
 	// retryAt, when set, is when the checkpoint read is tried again.
 	retryAt time.Time
 	// transient marks a failure worth a retry with backoff (hubfiles.Retryable):
@@ -283,15 +295,55 @@ func (r *Reconciler) templateSHA(ctx context.Context, s *v1alpha1.ServingSpec, f
 // its identity record if absent (HBEP-3, Current IDs; HBEP-11). A record whose
 // stored hash differs from the ID is a display-form collision: the class gets
 // no ID, and an event fires.
-func (r *Reconciler) currentIDs(ctx context.Context, md *v1alpha1.ModelDeployment, cls []v1alpha1.AcceleratorClass) []classID {
+//
+// A collision is not evaluated again while the spec's generation and the
+// colliding record's resourceVersion stay the same (HBEP-3: a collision is
+// re-evaluated only when the spec or the identity records change; a token
+// change or a resync never re-raises it). A permanent Hub failure is read again
+// when the spec's generation changes, besides the token change and the resync
+// the CheckpointSource applies. An API error is returned, never shown as
+// IdentityUnresolved.
+func (r *Reconciler) currentIDs(ctx context.Context, md *v1alpha1.ModelDeployment, cls []v1alpha1.AcceleratorClass) ([]classID, error) {
+	if memo, ok := r.memory().collision(md.UID, md.Generation); ok {
+		var rec appsv1.ControllerRevision
+		err := r.Reader.Get(ctx, client.ObjectKey{Namespace: md.Namespace, Name: memo.record}, &rec)
+		switch {
+		case err == nil && rec.ResourceVersion == memo.rv:
+			return memo.result, nil
+		case err != nil && !apierrors.IsNotFound(err):
+			return nil, fmt.Errorf("read identity record %s: %w", memo.record, err)
+		}
+	}
+	if r.memory().specChanged(md.UID, md.Generation) {
+		if f, ok := r.Checkpoints.(interface {
+			forgetFailures(v1alpha1.CheckpointSpec)
+		}); ok {
+			f.forgetFailures(md.Spec.Source.Served.Checkpoint)
+		}
+	}
+	out, err := r.computeIDs(ctx, md, cls)
+	if err != nil {
+		return nil, err
+	}
+	r.memory().forgetCollision(md.UID)
+	for _, c := range out {
+		if c.collision != "" {
+			r.memory().rememberCollision(md.UID, collisionMemo{gen: md.Generation, record: c.collision, rv: c.collisionRV, result: out})
+		}
+	}
+	return out, nil
+}
+
+// computeIDs computes the classes' current IDs and their identity records.
+func (r *Reconciler) computeIDs(ctx context.Context, md *v1alpha1.ModelDeployment, cls []v1alpha1.AcceleratorClass) ([]classID, error) {
 	s := md.Spec.Source.Served
 	out := make([]classID, 0, len(cls))
-	fail := func(err error) []classID {
+	fail := func(err error) ([]classID, error) {
 		at, _ := retryAtOf(err)
 		for _, c := range cls {
 			out = append(out, classID{class: c, problem: "checkpoint " + s.Checkpoint.Repository + ": " + hubCause(err), retryAt: at, transient: retryableHub(err)})
 		}
-		return out
+		return out, nil
 	}
 	files, err := r.Checkpoints.Files(ctx, s.Checkpoint)
 	if err != nil {
@@ -320,46 +372,59 @@ func (r *Reconciler) currentIDs(ctx context.Context, md *v1alpha1.ModelDeploymen
 			out = append(out, cid)
 			continue
 		}
-		name, err := r.ensureIdentityRecord(ctx, md, id)
-		if err != nil {
-			cid.problem = err.Error()
+		name, _, err := r.ensureIdentityRecord(ctx, md, id)
+		var col *collisionError
+		switch {
+		case errors.As(err, &col):
+			cid.problem, cid.collision, cid.collisionRV = err.Error(), col.record, col.rv
 			out = append(out, cid)
 			continue
+		case err != nil:
+			return nil, err
 		}
 		cid.id, cid.record = v1alpha1.FullDeploymentID(id.SHA256), name
 		out = append(out, cid)
 	}
-	return out
+	return out, nil
 }
+
+// collisionError is a display-form collision with an identity record, whose
+// resourceVersion keys the re-evaluation.
+type collisionError struct {
+	record, rv, msg string
+}
+
+func (e *collisionError) Error() string { return e.msg }
+func (e *collisionError) Unwrap() error { return errCollision }
 
 // errCollision is a display-form collision of two deployment IDs (HBEP-3).
 var errCollision = errors.New("display-form collision")
 
 // ensureIdentityRecord creates the identity record of id if absent, and reads
 // an existing one, never rewriting it.
-func (r *Reconciler) ensureIdentityRecord(ctx context.Context, md *v1alpha1.ModelDeployment, id deploymentid.ID) (string, error) {
+func (r *Reconciler) ensureIdentityRecord(ctx context.Context, md *v1alpha1.ModelDeployment, id deploymentid.ID) (string, string, error) {
 	data, err := json.Marshal(identityData{Scheme: deploymentid.Scheme, SHA256: id.SHA256, Canonical: json.RawMessage(id.Canonical)})
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	rec, err := v1alpha1.NewIdentityRecord(md.Namespace, md.Name, id.SHA256, data)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	var got appsv1.ControllerRevision
 	err = r.Reader.Get(ctx, client.ObjectKeyFromObject(rec), &got)
 	switch {
 	case apierrors.IsNotFound(err):
 		if cerr := r.Client.Create(ctx, rec, client.FieldOwner(v1alpha1.FieldManagerLifecycle)); cerr != nil && !apierrors.IsAlreadyExists(cerr) {
-			return "", fmt.Errorf("create identity record %s: %w", rec.Name, cerr)
+			return "", "", fmt.Errorf("create identity record %s: %w", rec.Name, cerr)
 		} else if cerr == nil {
-			return rec.Name, nil
+			return rec.Name, rec.ResourceVersion, nil
 		}
 		if err := r.Reader.Get(ctx, client.ObjectKeyFromObject(rec), &got); err != nil {
-			return "", fmt.Errorf("read identity record %s: %w", rec.Name, err)
+			return "", "", fmt.Errorf("read identity record %s: %w", rec.Name, err)
 		}
 	case err != nil:
-		return "", fmt.Errorf("read identity record %s: %w", rec.Name, err)
+		return "", "", fmt.Errorf("read identity record %s: %w", rec.Name, err)
 	}
 	var stored identityData
 	if err := json.Unmarshal(got.Data.Raw, &stored); err != nil || stored.SHA256 != id.SHA256 {
@@ -370,9 +435,10 @@ func (r *Reconciler) ensureIdentityRecord(ctx context.Context, md *v1alpha1.Mode
 			r.Recorder.Event(md, true, eventDegraded, v1alpha1.ReasonIdentityUnresolved,
 				fmt.Sprintf("identity record %s holds another deployment ID than %s: a display-form collision; the ID is refused (HBEP-3)", rec.Name, id.SHA256))
 		}
-		return "", fmt.Errorf("%w with record %s: it holds another deployment ID than %s", errCollision, rec.Name, id.SHA256)
+		return "", "", &collisionError{record: rec.Name, rv: got.ResourceVersion,
+			msg: fmt.Sprintf("%v with record %s: it holds another deployment ID than %s", errCollision, rec.Name, id.SHA256)}
 	}
-	return rec.Name, nil
+	return rec.Name, got.ResourceVersion, nil
 }
 
 // recordFiles reads the per-file list from an identity record.

@@ -17,13 +17,13 @@ func asUnsupported(err error, u **unsupported) bool { return errors.As(err, u) }
 func (p *pass) primaries() []*v1alpha1.Instance {
 	counted := map[string]bool{}
 	for _, in := range p.insts {
-		if countable(in) {
+		if countable(in) && !p.stale[in.UID] {
 			counted[in.Name] = true
 		}
 	}
 	var out []*v1alpha1.Instance
 	for _, in := range p.insts {
-		if !countable(in) {
+		if !countable(in) || p.stale[in.UID] {
 			continue
 		}
 		if pred := in.Annotations[v1alpha1.AnnotationPredecessor]; pred != "" && counted[pred] {
@@ -52,7 +52,9 @@ func (p *pass) capacity() error {
 			return err
 		}
 		if !ok {
-			p.noProvider()
+			if !p.deferred {
+				p.noProvider()
+			}
 			break
 		}
 	}
@@ -66,6 +68,11 @@ func (p *pass) capacity() error {
 func (p *pass) noProvider() {
 	if !p.canProvision() {
 		return
+	}
+	for _, c := range p.ids {
+		if c.transient {
+			return // a transient Hub failure sets no reason: it is retried (HBEP-3)
+		}
 	}
 	if len(p.sizingRefused) > 0 && len(p.sizingRefused) == countUsable(p.providers) {
 		p.specErr = p.sizingRefused[0]

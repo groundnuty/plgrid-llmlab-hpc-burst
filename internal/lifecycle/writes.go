@@ -114,6 +114,5 @@ func (p *pass) deleteAllocation(a *v1alpha1.Allocation, why string) error {
 	}
 	now := metav1.NewTime(p.now)
 	a.DeletionTimestamp = &now
-	p.mem.releasedAlloc(uid, a.Name)
 	return nil
 }

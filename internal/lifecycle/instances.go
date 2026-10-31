@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -14,13 +15,17 @@ import (
 // instances advances every Instance (HBEP-7, Reconcile loop, steps 5 and 6):
 // failed Allocations end their Instances; each Instance moves through its
 // phases; health rules and the drain deadline apply.
+//
+// One Instance's failure does not stop the others: the pass goes on, and the
+// failures are returned joined, item by item (HBEP-7, Goals).
 func (p *pass) instances() error {
+	var errs []error
 	for _, in := range p.insts {
 		if err := p.instance(in); err != nil {
-			return err
+			errs = append(errs, fmt.Errorf("Instance %s: %w", in.Name, err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func (p *pass) instance(in *v1alpha1.Instance) error {
@@ -43,7 +48,7 @@ func (p *pass) instance(in *v1alpha1.Instance) error {
 	if done, err := p.allocationFailed(in, alloc); done || err != nil {
 		return err
 	}
-	if !in.DeletionTimestamp.IsZero() || p.shutdown {
+	if !in.DeletionTimestamp.IsZero() || p.shutdown || p.stale[in.UID] {
 		return p.shutdownInstance(in, alloc)
 	}
 	switch in.Status.Phase {

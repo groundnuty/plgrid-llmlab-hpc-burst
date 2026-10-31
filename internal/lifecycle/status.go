@@ -8,7 +8,6 @@ import (
 
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -40,6 +39,9 @@ func (p *pass) writeStatus() error {
 	active := map[v1alpha1.FullDeploymentID]*v1alpha1.ActiveDeploymentID{}
 	everReady := len(md.Status.StartToReady) > 0
 	for _, in := range p.insts {
+		if p.stale[in.UID] {
+			continue
+		}
 		if in.Status.ReadyTime != nil {
 			everReady = true
 		}
@@ -132,7 +134,7 @@ func (p *pass) measuredStartToReady() []v1alpha1.ClassStartToReady {
 	for _, in := range p.insts {
 		a := p.allocs[in.Spec.AllocationRef.Name]
 		pv := p.pvOf(in.Labels)
-		if in.Status.ReadyTime == nil || a == nil || a.Status.AtProvider.StartTime == nil || pv == nil || !pv.hasClass || !p.firstOnAllocation(in) {
+		if p.stale[in.UID] || in.Status.ReadyTime == nil || a == nil || a.Status.AtProvider.StartTime == nil || pv == nil || !pv.hasClass || !p.firstOnAllocation(in) {
 			continue
 		}
 		d := in.Status.ReadyTime.Sub(a.Status.AtProvider.StartTime.Time)
@@ -281,5 +283,3 @@ func (r *Reconciler) catalogReady(ctx context.Context, md *v1alpha1.ModelDeploym
 	}
 	return metav1.ConditionFalse, v1alpha1.ReasonCatalogEntryUnlisted, fmt.Sprintf("no allowed managed Provider on platform %s lists %s now", m.Platform, m.CatalogName), nil
 }
-
-var _ = labels.Everything

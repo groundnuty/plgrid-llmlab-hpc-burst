@@ -88,9 +88,10 @@ func (b *Backend) agentSettings(ctx context.Context, a *v1alpha1.Allocation) (ag
 	} else if !ok {
 		return out, nil
 	}
-	if s, err := resolveSettings(prof.Spec); err == nil {
-		out.ProbeInterval, out.StopGrace = agentapi.Duration(s.probeInterval), agentapi.Duration(s.stopGrace)
-	}
+	// resolveSettings fills what it refuses with defaults, so the agent
+	// always gets usable values.
+	s, _ := resolveSettings(prof.Spec)
+	out.ProbeInterval, out.StopGrace = agentapi.Duration(s.probeInterval), agentapi.Duration(s.stopGrace)
 	if a.Spec.ForProvider.Batch != nil {
 		for _, part := range prof.Spec.Partitions {
 			if part.Name == a.Spec.ForProvider.Batch.Partition {

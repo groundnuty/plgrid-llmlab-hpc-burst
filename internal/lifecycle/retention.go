@@ -2,11 +2,9 @@ package lifecycle
 
 import (
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
-	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 // retention applies each empty Allocation's retention policy (HBEP-7,
@@ -25,13 +23,6 @@ func (p *pass) retention() error {
 		present[name] = true
 	}
 	p.r.Backend.prune(p.key.Namespace, p.key.Name, present)
-	for _, uid := range p.mem.goneAllocs(present) {
-		// The Allocation is gone: its credential has nothing left to
-		// authenticate (docs/development.md, Runtime conventions).
-		if err := os.Remove(agentapi.AllocationCredentialPath(p.r.Config.CredentialsDir, string(uid))); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove a released Allocation's credential: %w", err)
-		}
-	}
 	for _, a := range p.allocs {
 		if !a.DeletionTimestamp.IsZero() {
 			continue
