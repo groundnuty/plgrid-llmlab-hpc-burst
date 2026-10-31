@@ -47,6 +47,9 @@ func (c *Controller) syncAllocation(ctx context.Context, p *pass, a *v1alpha1.Al
 		return err
 	}
 	if a.Annotations[v1alpha1.AnnotationJobID] == "" {
+		if s.prior.Phase == v1alpha1.AllocationRefused {
+			return c.writeStatus(ctx, s, nil) // a refused Allocation submits nothing
+		}
 		settled, err := c.establish(ctx, p, s)
 		if err != nil {
 			return err
@@ -89,6 +92,11 @@ func (c *Controller) syncMetadata(ctx context.Context, s *allocState) error {
 // own. Every write mirrors the spec's retention mode into
 // status.retention.effectiveMode (Keep when the spec sets none).
 func (c *Controller) writeStatus(ctx context.Context, s *allocState, err error) error {
+	// Refused is kept once set, whatever the pass found or did (HBEP-4, Phases):
+	// the phase and the reason written are the stored ones.
+	if s.prior.Phase == v1alpha1.AllocationRefused {
+		s.obs.Phase, s.obs.Reason = s.prior.Phase, s.prior.Reason
+	}
 	storedConds := append([]xpv2.Condition(nil), s.a.Status.Conditions...)
 	storedRetention := s.a.Status.Retention.DeepCopy()
 	s.a.SetConditions(s.conds...)
@@ -133,12 +141,6 @@ func (c *Controller) observe(ctx context.Context, p *pass, s *allocState) error 
 func (c *Controller) mirror(p *pass, s *allocState, id string, job provider.Job, found bool) {
 	obs := s.obs
 	obs.JobID, obs.Submission = id, s.rec
-	// Refused is kept once set, whatever the job does afterwards.
-	defer func() {
-		if s.prior.Phase == v1alpha1.AllocationRefused {
-			obs.Phase, obs.Reason = s.prior.Phase, s.prior.Reason
-		}
-	}()
 	if !found {
 		if obs.AbsentSince == nil {
 			obs.AbsentSince = mt(p.now)

@@ -135,14 +135,17 @@ import (
 //     (exactly that string), sets the condition Synced False with that reason
 //     and a message naming both names, and is cancelled while it is live (so one
 //     scancel in the call log, however many Syncs follow). Refused, once set, is
-//     kept: a later Sync never overwrites its phase or reason, and neither does
-//     a Refused set by hand; the rest of the observation still follows the job.
+//     kept on every path: a later Sync never overwrites its phase or reason,
+//     whether it observes a job or not, and neither does a Refused set by hand;
+//     the rest of the observation still follows the job.
 //     Otherwise a job whose partition, time limit or GPU count differs from
 //     spec.forProvider.batch sets the condition SubmittedAsOther True with
 //     reason ReasonReadBackMismatch and a message naming each differing field
 //     with both values (for example "timeLimit: requested 30m0s, got 20m0s");
 //     the condition is never cleared, the job is not cancelled, and the phase
-//     keeps mirroring the job.
+//     keeps mirroring the job. The comparison is with the request on every
+//     observe, so an administrator's extension (Batch.SetTimeLimit) raises the
+//     condition too, and a Refused Allocation with no job ID submits nothing.
 //   - Retention: every status written mirrors status.retention.effectiveMode
 //     from spec.retentionPolicy (RetentionPolicy.EffectiveMode: Keep when unset).
 //   - Not modelled: the AdminHold condition, the sticky duplicates list of

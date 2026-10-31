@@ -89,7 +89,7 @@ func (b *Batch) Reappear(id string) {
 	b.must(id).vanished = false
 }
 
-// FailReads makes FindByTag and Observe return err; nil clears it.
+// FailReads makes FindByTag, Observe and Poll return err; nil clears it.
 func (b *Batch) FailReads(err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

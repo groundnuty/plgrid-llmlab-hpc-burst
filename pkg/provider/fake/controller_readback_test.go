@@ -261,3 +261,25 @@ func TestRetentionIsMirroredOnEveryStatusWrite(t *testing.T) {
 	e.wantPhase("a1", v1alpha1.AllocationRunning)
 	e.wantRetention("a1", "Keep")
 }
+
+// Refused is kept on every path, not only when a job is observed.
+func TestARefusedAllocationWithNoJobSubmitsNothingAndStaysRefused(t *testing.T) {
+	for _, script := range []Script{{Outcome: provider.Rejected}, {}} { // a refusal and an acceptance
+		e := newEnv(t)
+		e.batch.Enqueue(script)
+		e.newAlloc("a1", testProvider)
+		e.setObservation("a1", func(o *v1alpha1.AllocationObservation) {
+			o.Phase, o.Reason = v1alpha1.AllocationRefused, "example: invalid profile"
+		})
+		e.sync()
+		e.syncAt(at(12, 5, 0))
+		o := e.wantPhase("a1", v1alpha1.AllocationRefused)
+		if o.Reason != "example: invalid profile" {
+			t.Fatalf("reason = %q, want it kept", o.Reason)
+		}
+		if n := e.batch.Count("sbatch"); n != 0 {
+			t.Fatalf("sbatch logged %d times, want 0: a refused Allocation submits nothing", n)
+		}
+		e.wantRetention("a1", "Keep") // its status is still written
+	}
+}

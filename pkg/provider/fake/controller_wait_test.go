@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -147,7 +148,13 @@ func TestARecordedQueueWaitIsNotAddedAgainAfterItsEntryWasEvicted(t *testing.T) 
 			t.Fatalf("Allocation %s: queueWaitRecorded is false although its wait was recorded", n)
 		}
 	}
-	want := waitIDs(e.provider())
+	var want []string
+	for id := 1000; id <= 1019; id++ { // jobs 998 and 999 are the two oldest, and went
+		want = append(want, strconv.Itoa(id))
+	}
+	if got := waitIDs(e.provider()); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("setup: queue wait job IDs = %v, want %v", got, want)
+	}
 
 	// The newer Allocations go, so that a00 and a01 alone are observed again.
 	for i := 2; i < 22; i++ {
