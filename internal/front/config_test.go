@@ -46,7 +46,9 @@ func TestConfigRefusesUnknownAndMissing(t *testing.T) {
 	missing := filepath.Join(dir, "m.json")
 	writeMode600(t, missing, `{}`)
 	_, err := LoadConfig(missing)
-	for _, want := range []string{"dialHomeListen", "clientKeysFile", "usageDir"} {
+	// dialHomeListen is not among them: its default depends on the mode
+	// (DialHomeAddr, tested in dialhome_test.go).
+	for _, want := range []string{"clientKeysFile", "usageDir"} {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("missing %s not named in %v", want, err)
 		}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -367,3 +368,9 @@ func (s *syncBuffer) String() string {
 	defer s.mu.Unlock()
 	return s.b.String()
 }
+
+// listenFree binds the first free port of the package's test block.
+func listenFree() (net.Listener, error) { return enginetest.Listen(testPortLo, testPortHi) }
+
+// discardLog is a logger that writes nowhere.
+func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }

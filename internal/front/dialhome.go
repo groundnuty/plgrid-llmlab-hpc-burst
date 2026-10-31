@@ -91,14 +91,16 @@ func certPin(path string) (string, error) {
 	return agentapi.PinOf(c), nil
 }
 
-// dialHomeTLS is the dial-home listener's TLS configuration: the agent
-// endpoint's certificate, so the agent's pin holds on both paths (HBEP-5,
-// Listeners; HBEP-7). It is required in direct mode; in ssh mode it is used
-// when the launcher created the certificate.
+// dialHomeTLS is the dial-home listener's TLS configuration: it terminates
+// TLS with the launcher's certificate for the agent endpoint
+// (Host.AgentCertFile), so the agent's pin holds on both paths (HBEP-5,
+// Listeners; @hpc-burst-science-agent, 31 Oct 2026). It is required in both
+// dial-home modes; with no mode recorded, no job dials home, and the listener
+// is plain when the certificate is absent.
 func dialHomeTLS(mode string, host agentapi.Host) (*tls.Config, error) {
 	cert, err := tls.LoadX509KeyPair(host.AgentCertFile(), host.AgentKeyFile())
 	if err != nil {
-		if mode == ModeDirect {
+		if mode == ModeDirect || mode == ModeSSH {
 			return nil, fmt.Errorf("the dial-home listener needs the agent endpoint's certificate and key: %w", err)
 		}
 		return nil, nil
