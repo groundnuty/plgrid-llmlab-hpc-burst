@@ -226,7 +226,8 @@ func (sh shapes) resolved(limit, overhead int32) (agentapi.Shapes, error) {
 // What the controller reads; The allocation agent, What it runs). The command
 // is vLLM's server on the checkpoint bound at ContainerModelDir, listening on
 // worker-0's Unix socket, serving the deployment's model name, then the spec's
-// flags in order, then --max-num-seqs when the spec gives none.
+// flags in order, each as one --name=value argument (a boolean flag is --name
+// or --no-name), then --max-num-seqs=<n>: the spec's value, else the default.
 func renderLaunch(md *v1alpha1.ModelDeployment, plan servedPlan) v1alpha1.Launch {
 	s := md.Spec.Source.Served
 	cmd := []string{"vllm", "serve", agentapi.ContainerModelDir,
@@ -248,7 +249,7 @@ func renderLaunch(md *v1alpha1.ModelDeployment, plan servedPlan) v1alpha1.Launch
 			}
 			continue
 		}
-		cmd = append(cmd, "--"+name, f.Value)
+		cmd = append(cmd, "--"+name+"="+f.Value) // one argument, so a value that starts with "-" is not read as a flag
 	}
 	cmd = append(cmd, "--max-num-seqs="+strconv.Itoa(int(plan.maxNumSeqs)))
 	var env []v1alpha1.LaunchEnvVar

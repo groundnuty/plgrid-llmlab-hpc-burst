@@ -338,8 +338,9 @@ func TestHealthRestartRunsOriginalLaunch(t *testing.T) {
 	ag.CrashWorker(healthWorker, 1)
 	startUntil(rg, "md", 10*time.Minute, "restarted and ready", func() bool { return len(ag.Starts()) == 2 && rg.readyCount("md") == 1 })
 	st := ag.Starts()
-	if !reflect.DeepEqual(st[0].Launch, st[1].Launch) || !provisionHas(st[1].Launch.Command, "--max-num-seqs", "256") || slices.Contains(st[1].Launch.Command, "128") {
-		t.Errorf("restart launch %v differs from the first %v, or carries 128", st[1].Launch.Command, st[0].Launch.Command)
+	want := specLaunchArgv("--max-model-len=32768", "--max-num-seqs=256")
+	if !reflect.DeepEqual(st[0].Launch, st[1].Launch) || !slices.Equal(st[1].Launch.Command, want) {
+		t.Errorf("restart launch %q differs from the first %q, or from the original argv %q (no 128)", st[1].Launch.Command, st[0].Launch.Command, want)
 	}
 	if !reflect.DeepEqual(st[1].Launch.Command, in.Spec.Launch.Command) {
 		t.Errorf("restart launch %v is not the Instance's spec.launch %v", st[1].Launch.Command, in.Spec.Launch.Command)
