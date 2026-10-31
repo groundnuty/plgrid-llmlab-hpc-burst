@@ -19,9 +19,9 @@ import (
 // alpha the target is worker-0's engine socket; once Instances have a router,
 // the target becomes the router's socket and nothing else here changes.
 //
-// HBEP-6's serving tunnel, which carries the front's requests to this
-// socket, is not chosen yet (HBEP-6, open question 1; HBEP-5, Reachability):
-// the tunnel attaches to this socket when it is.
+// HBEP-6's tunnel carries the front's requests to this socket: frpc's
+// tcpmux proxy for the Instance's UID serves it through frp's
+// unix_domain_socket plugin (Frpc, ServingSocket).
 //
 // The proxy streams: it flushes every write at once (FlushInterval -1) and
 // sets no response deadline, because the front allows long streams (spike S2
