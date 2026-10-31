@@ -26,12 +26,13 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
-// The front package's tests bind 127.0.0.1 ports in 29320-29335, the first
-// free ones (issue #64's block is 29320-29339; cmd/hpcburst-front's tests take
+// The front package's tests bind 127.0.0.1 ports in 29320-29331, the first
+// free ones (issue #64's block is 29320-29339; 29333 is the passthrough test's
+// agent endpoint, at port base 29330; cmd/hpcburst-front's tests take
 // 29336-29339).
 const (
 	testPortLo = 29320
-	testPortHi = 29335
+	testPortHi = 29331
 )
 
 // t0 is the tests' starting time on the fake clock.

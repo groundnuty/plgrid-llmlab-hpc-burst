@@ -61,6 +61,9 @@ func NewProxy(o ProxyOptions) *Proxy {
 // /agent/v1/ and everywhere else (HBEP-5, Listeners).
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !strings.HasPrefix(r.URL.Path, "/v1/") {
+		// /agent/v1/ belongs to the dial-home listener only. Still attributed:
+		// a response without the headers is a failure of the front.
+		attribution{requestID: newRequestID(), emitter: emitterFront}.set(w.Header())
 		http.NotFound(w, r)
 		return
 	}
