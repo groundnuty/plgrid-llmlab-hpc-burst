@@ -466,6 +466,11 @@ func TestConformance(t *testing.T) {
 	})
 	w.endedInAccounting(id2, 3*time.Minute)
 
+	// 5. A job name of the tag's full 56 characters comes back unchanged from
+	// squeue and from sacct (jobname_test.go). After the counts above, since it
+	// adds one sbatch and one scancel of its own.
+	w.jobNameRoundTrip()
+
 	if w.ssh.Starts() != 1 {
 		t.Errorf("%d ssh masters were started; want 1 for the whole run", w.ssh.Starts())
 	}
