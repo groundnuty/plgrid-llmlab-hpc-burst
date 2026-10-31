@@ -3,6 +3,10 @@
 // monotonic counter persisted apart from the log in blocks, so that records
 // lost in a crash show as a gap. A Write returns once its record is on disk. In alpha the records are also the
 // attribution log (HBEP-9). No record holds a prompt, a response or a key.
+//
+// The records go to one file per UTC day, usage-YYYY-MM-DD.jsonl, named by the
+// day of the write. Every file is kept: nothing here deletes or rewrites one,
+// except the repair of the newest file's partial last line at open.
 package usage
 
 import (
@@ -14,6 +18,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -61,11 +66,79 @@ func Time(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z0
 
 // Files in the usage directory.
 const (
-	LogFile     = "usage.jsonl"
-	CounterFile = "counter"
+	// LegacyLogFile is the one log the front wrote before rotation. It is the
+	// newest file while no daily file exists, and is never written again once
+	// one does (HBEP-8, Usage records, Rotation keeps every file).
+	LegacyLogFile = "usage.jsonl"
+	CounterFile   = "counter"
 	// BlockSize is how many counters the front reserves at a time.
 	BlockSize = 1000
+
+	dayLayout    = "2006-01-02"
+	dayFilePre   = "usage-"
+	dayFilePost  = ".jsonl"
+	dayFileWidth = len(dayFilePre) + len(dayLayout) + len(dayFilePost)
 )
+
+// DayFile returns the name of the file that holds the records written on the
+// UTC day of t: usage-YYYY-MM-DD.jsonl.
+func DayFile(t time.Time) string { return dayFileName(t.UTC().Format(dayLayout)) }
+
+func dayFileName(day string) string { return dayFilePre + day + dayFilePost }
+
+// dayOf returns the day in a daily file's name, and whether name is one: the
+// date must be a real one, so usage-2026-13-45.jsonl is not.
+func dayOf(name string) (string, bool) {
+	if len(name) != dayFileWidth || !strings.HasPrefix(name, dayFilePre) || !strings.HasSuffix(name, dayFilePost) {
+		return "", false
+	}
+	day := name[len(dayFilePre) : len(name)-len(dayFilePost)]
+	t, err := time.Parse(dayLayout, day)
+	if err != nil || t.Format(dayLayout) != day {
+		return "", false
+	}
+	return day, true
+}
+
+// Files returns the names of the usage files in dir, oldest first: the legacy
+// usage.jsonl, if there is one, and then the daily files in date order. A
+// reader that wants every record reads them in that order, and orders the
+// records by counter.
+func Files(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var legacy bool
+	var days []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if e.Name() == LegacyLogFile {
+			legacy = true
+		} else if _, ok := dayOf(e.Name()); ok {
+			days = append(days, e.Name())
+		}
+	}
+	sort.Strings(days) // the names sort as their dates
+	if legacy {
+		days = append([]string{LegacyLogFile}, days...)
+	}
+	return days, nil
+}
+
+// newest returns the newest usage file in dir: the last daily file, else the
+// legacy one, else "". Its day is "" for the legacy file.
+func newest(dir string) (name, day string, err error) {
+	files, err := Files(dir)
+	if err != nil || len(files) == 0 {
+		return "", "", err
+	}
+	name = files[len(files)-1]
+	day, _ = dayOf(name)
+	return name, day, nil
+}
 
 // logFile is the part of *os.File the sink uses. The tests put a file that
 // fails in its place.
@@ -82,15 +155,35 @@ type pending struct {
 	done chan error // receives the outcome of the batch the record is in
 }
 
-// Sink appends records to <dir>/usage.jsonl. Write assigns the counter and
+// Options are the inputs of OpenOptions.
+type Options struct {
+	// Logger gets one Error record for each batch of records that fails to
+	// be written or synced, naming the cause. Nil logs nothing.
+	Logger *slog.Logger
+	// Now is the clock that names a batch's file by its UTC day and times a
+	// failure. Nil is time.Now.
+	Now func() time.Time
+}
+
+// hooks are the seams the tests use to make the disk fail.
+type hooks struct {
+	// wrap is applied to every log file the sink opens.
+	wrap func(*os.File) logFile
+	// syncDir syncs a directory, after a new file was created in it.
+	syncDir func(dir string) error
+}
+
+// Sink appends records to the usage files in its directory: the file of the
+// UTC day of each write (see the package comment). Write assigns the counter and
 // queues the record; one goroutine writes what is queued in one write and
 // one fsync, so records are batched only when they arrive faster than the
 // disk syncs (HBEP-5, Sink in alpha). A Write returns when the batch its
 // record is in has been written and synced, or has failed.
 type Sink struct {
 	dir    string
-	log    logFile
 	logger *slog.Logger
+	now    func() time.Time
+	h      hooks
 
 	mu       sync.Mutex
 	next     uint64 // the next counter to use
@@ -101,31 +194,51 @@ type Sink struct {
 	done     chan struct{}
 	err      error  // the latest failure; nil once a batch succeeds
 	failures uint64 // the batches and counter blocks that failed
+	records  uint64 // the records written and synced
+	lost     uint64 // the records not written: those of a failed batch, or one that got no counter
+	since    time.Time
 
-	// Only the writer goroutine uses these two after Open.
-	size int64 // the log's size when it holds only whole lines
-	torn bool  // a failed write left a partial line that could not be cut off
+	// Only the writer goroutine uses these after Open.
+	log  logFile // the open log: the file of day, nil until the first write when the newest file is of an earlier day
+	day  string  // the UTC day of log
+	size int64   // the log's size when it holds only whole lines
+	torn bool    // a failed write left a partial line that could not be cut off
 }
 
 // Open opens the sink in dir, creating it (mode 0700). The first counter is
-// the persisted block end plus one, so a crash shows as a gap (HBEP-8). A log
-// that ends in the middle of a line, as a crash during a write leaves it, is
-// cut back to its last whole line, so that the next record starts a line of
-// its own; the record that was cut shows as a gap too. It logs nothing.
-func Open(dir string) (*Sink, error) { return OpenLog(dir, nil) }
+// the persisted block end plus one, so a crash shows as a gap (HBEP-8). The
+// newest usage file, whatever its day, is cut back to its last whole line if
+// it ends in the middle of one, as a crash during a write leaves it, so that
+// the next record starts a line of its own; the record that was cut shows as
+// a gap too. No other file is touched. It logs nothing.
+func Open(dir string) (*Sink, error) { return OpenOptions(dir, Options{}) }
 
 // OpenLog is Open with a logger, which gets one Error record for each batch of
 // records that fails to be written or synced, naming the cause. A nil logger
 // logs nothing.
 func OpenLog(dir string, logger *slog.Logger) (*Sink, error) {
-	return open(dir, logger, func(f *os.File) logFile { return f })
+	return OpenOptions(dir, Options{Logger: logger})
 }
 
-// open is OpenLog with the log file passed through wrap, which is how the
-// tests make the disk fail.
-func open(dir string, logger *slog.Logger, wrap func(*os.File) logFile) (*Sink, error) {
-	if logger == nil {
-		logger = slog.New(slog.DiscardHandler)
+// OpenOptions is Open with the options.
+func OpenOptions(dir string, o Options) (*Sink, error) {
+	return open(dir, o, hooks{})
+}
+
+// open is OpenOptions with the disk's seams, which is how the tests make it
+// fail.
+func open(dir string, o Options, h hooks) (*Sink, error) {
+	if o.Logger == nil {
+		o.Logger = slog.New(slog.DiscardHandler)
+	}
+	if o.Now == nil {
+		o.Now = time.Now
+	}
+	if h.wrap == nil {
+		h.wrap = func(f *os.File) logFile { return f }
+	}
+	if h.syncDir == nil {
+		h.syncDir = syncDir
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
@@ -134,19 +247,47 @@ func open(dir string, logger *slog.Logger, wrap func(*os.File) logFile) (*Sink, 
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(filepath.Join(dir, LogFile), os.O_RDWR|os.O_APPEND|os.O_CREATE, 0o600)
-	if err != nil {
+	s := &Sink{dir: dir, logger: o.Logger, now: o.Now, h: h, next: end + 1, blockEnd: end,
+		wake: make(chan struct{}, 1), done: make(chan struct{})}
+	s.since = s.now()
+	if err := s.repairNewest(); err != nil {
 		return nil, err
+	}
+	go s.run()
+	return s, nil
+}
+
+// repairNewest cuts a partial last line off the newest usage file, and only
+// that one. A daily file of today (or of a later day, should the clock have
+// gone back) stays open to be appended to; any other, and the legacy file,
+// is closed after the repair and never written again.
+func (s *Sink) repairNewest() error {
+	name, day, err := newest(s.dir)
+	if err != nil {
+		return err
+	}
+	if name == "" {
+		return nil
+	}
+	path := filepath.Join(s.dir, name)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
 	}
 	size, err := repairTail(f)
 	if err != nil {
 		f.Close()
-		return nil, fmt.Errorf("usage: repair the end of %s: %w", filepath.Join(dir, LogFile), err)
+		return fmt.Errorf("usage: repair the end of %s: %w", path, err)
 	}
-	s := &Sink{dir: dir, log: wrap(f), logger: logger, size: size, next: end + 1, blockEnd: end, wake: make(chan struct{}, 1), done: make(chan struct{})}
-	go s.run()
-	return s, nil
+	if day == "" || day < s.today() {
+		return f.Close()
+	}
+	s.log, s.day, s.size = s.h.wrap(f), day, size
+	return nil
 }
+
+// today is the UTC day of the sink's clock, as a file name holds it.
+func (s *Sink) today() string { return s.now().UTC().Format(dayLayout) }
 
 // Write assigns r its counter, queues it, and returns the counter once the
 // record is on disk: written and synced. It returns an error instead when the
@@ -172,8 +313,8 @@ func (s *Sink) enqueue(r Record) (pending, error) {
 		end := s.blockEnd + BlockSize
 		if err := writeCounter(filepath.Join(s.dir, CounterFile), end); err != nil {
 			err = fmt.Errorf("usage: persist the counter block: %w", err)
-			s.err = err
-			s.failures++
+			// The record gets no counter and no batch: one record lost.
+			s.failedLocked(err, 1)
 			s.mu.Unlock()
 			s.logger.Error("usage: the counter block could not be persisted", "error", err)
 			return pending{}, err
@@ -258,13 +399,18 @@ func lineEnd(f *os.File, size int64) (int64, error) {
 
 // flush writes and syncs batch, records the outcome, logs a failure, and wakes
 // the Writes waiting on it. The outcome is recorded first, so that a Write
-// that returns an error already finds it in Err and Failures.
+// that returns an error already finds it in Err and Stats.
 func (s *Sink) flush(batch []pending) {
 	err := s.commit(batch)
 	s.mu.Lock()
-	s.err = err
 	if err != nil {
-		s.failures++
+		s.failedLocked(err, uint64(len(batch)))
+	} else {
+		s.records += uint64(len(batch))
+		if s.err != nil {
+			s.since = s.now() // the disk has recovered
+		}
+		s.err = nil
 	}
 	s.mu.Unlock()
 	if err != nil {
@@ -276,10 +422,22 @@ func (s *Sink) flush(batch []pending) {
 	}
 }
 
+// failedLocked records a failure that lost n records. The caller holds s.mu.
+func (s *Sink) failedLocked(err error, n uint64) {
+	if s.err == nil {
+		s.since = s.now() // the failure starts
+	}
+	s.err = err
+	s.failures++
+	s.lost += n
+}
+
 // commit appends batch to the log and syncs it. A write that fails or falls
 // short can leave a partial line, which the next record would join; so the log
 // is cut back to its size before the batch, and the batch's counters show as a
-// gap. A sync that fails leaves whole lines, and they are kept.
+// gap. A sync that fails leaves whole lines, and they are kept. The log is the
+// file of the UTC day of this write: the first batch after midnight opens the
+// next day's file and leaves the closed one as it is.
 func (s *Sink) commit(batch []pending) error {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -293,6 +451,9 @@ func (s *Sink) commit(batch []pending) error {
 		if err := s.cutBack(); err != nil {
 			return err
 		}
+	}
+	if err := s.rotate(); err != nil {
+		return err
 	}
 	n, err := s.log.Write(buf.Bytes())
 	if err == nil && n != buf.Len() {
@@ -309,6 +470,39 @@ func (s *Sink) commit(batch []pending) error {
 	if err := s.log.Sync(); err != nil {
 		return fmt.Errorf("usage: sync the log: %w", err)
 	}
+	return nil
+}
+
+// rotate makes the log the file of the UTC day of this write, when it is not
+// already. It only moves forward: a clock that went back keeps the newer
+// file, so a closed file is never written again. A new file's directory is
+// synced, so the file survives a crash. When it fails, the old file stays the
+// log and the next batch tries again.
+func (s *Sink) rotate() error {
+	day := s.today()
+	if s.log != nil && day <= s.day {
+		return nil
+	}
+	path := filepath.Join(s.dir, dayFileName(day))
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND|os.O_CREATE, 0o600)
+	if err != nil {
+		return fmt.Errorf("usage: open %s: %w", path, err)
+	}
+	size, err := repairTail(f)
+	if err != nil {
+		f.Close()
+		return fmt.Errorf("usage: check the end of %s: %w", path, err)
+	}
+	if err := s.h.syncDir(s.dir); err != nil {
+		f.Close()
+		return fmt.Errorf("usage: sync the directory after opening %s: %w", path, err)
+	}
+	if old := s.log; old != nil {
+		if err := old.Close(); err != nil {
+			s.logger.Error("usage: closing the previous day's file failed", "day", s.day, "error", err)
+		}
+	}
+	s.log, s.day, s.size, s.torn = s.h.wrap(f), day, size, false
 	return nil
 }
 
@@ -335,6 +529,32 @@ func (s *Sink) Err() error {
 	return s.err
 }
 
+// Stats is the sink's state at one moment (HBEP-8, Usage records: Failures
+// are never silent).
+type Stats struct {
+	// Records is how many records have been written and synced since Open.
+	Records uint64
+	// Lost is how many records were not written: those of a batch that
+	// failed to be written or synced, and those that got no counter because
+	// their block could not be persisted.
+	Lost uint64
+	// Failures is how many batches and counter blocks failed.
+	Failures uint64
+	// Err is the latest failure, nil once a later batch has been written and
+	// synced.
+	Err error
+	// Since is when the sink entered its current state: Open, the first
+	// failure of a run of them, or the first batch that succeeded after one.
+	Since time.Time
+}
+
+// Stats returns the sink's counts and state.
+func (s *Sink) Stats() Stats {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return Stats{Records: s.records, Lost: s.lost, Failures: s.failures, Err: s.err, Since: s.since}
+}
+
 // Close writes what is queued and closes the log. It returns the error of the
 // latest batch, if that failed. After a run in which no batch failed it
 // persists the last counter used, so that the next run continues from it
@@ -354,8 +574,10 @@ func (s *Sink) Close() error {
 	if err == nil && s.Failures() == 0 {
 		err = s.persistLast()
 	}
-	if cerr := s.log.Close(); err == nil {
-		err = cerr
+	if s.log != nil {
+		if cerr := s.log.Close(); err == nil {
+			err = cerr
+		}
 	}
 	return err
 }
@@ -428,6 +650,12 @@ func writeCounter(path string, n uint64) error {
 		os.Remove(name)
 		return err
 	}
+	return syncDir(dir)
+}
+
+// syncDir syncs the directory dir, so that a file created in it survives a
+// crash.
+func syncDir(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {
 		return err

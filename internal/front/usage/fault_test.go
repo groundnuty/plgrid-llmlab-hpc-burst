@@ -135,7 +135,7 @@ func failedBatch(t *testing.T, dir string, failTruncate bool) outcome {
 	t.Helper()
 	f := &flaky{gate: make(chan struct{}), entered: make(chan struct{}), failTruncate: failTruncate}
 	logs := &lockedBuf{}
-	s, err := usage.OpenWith(dir, slog.New(slog.NewJSONHandler(logs, nil)), func(file *os.File) usage.LogHandle { f.LogHandle = file; return f })
+	s, err := usage.OpenWith(dir, usage.Options{Logger: slog.New(slog.NewJSONHandler(logs, nil)), Now: fixedClock}, func(file *os.File) usage.LogHandle { f.LogHandle = file; return f }, nil)
 	if err != nil {
 		t.Fatalf("OpenWith: %v", err)
 	}
@@ -251,7 +251,7 @@ func (failing) Write([]byte) (int, error) { return 0, errDisk }
 // TestNoLoggerIsFine: a sink opened without a logger (Open) reports a failure
 // to the Write and counts it, and does not log or panic.
 func TestNoLoggerIsFine(t *testing.T) {
-	s, err := usage.OpenWith(t.TempDir(), nil, func(file *os.File) usage.LogHandle { return failing{file} })
+	s, err := usage.OpenWith(t.TempDir(), usage.Options{Now: fixedClock}, func(file *os.File) usage.LogHandle { return failing{file} }, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,7 +298,7 @@ func TestAFailureIsNotSticky(t *testing.T) {
 func TestACounterBlockFailureIsCountedAndLogged(t *testing.T) {
 	dir := t.TempDir()
 	logs := &lockedBuf{}
-	s, err := usage.OpenLog(dir, slog.New(slog.NewJSONHandler(logs, nil)))
+	s, err := usage.OpenOptions(dir, usage.Options{Logger: slog.New(slog.NewJSONHandler(logs, nil)), Now: fixedClock})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -391,7 +391,7 @@ func (f *syncGate) unblock() { f.once.Do(func() { close(f.release) }) }
 func TestWriteReturnsOnlyAfterTheSync(t *testing.T) {
 	dir := t.TempDir()
 	f := &syncGate{entered: make(chan struct{}, 1), release: make(chan struct{})}
-	s, err := usage.OpenWith(dir, nil, func(file *os.File) usage.LogHandle { f.LogHandle = file; return f })
+	s, err := usage.OpenWith(dir, usage.Options{Now: fixedClock}, func(file *os.File) usage.LogHandle { f.LogHandle = file; return f }, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
