@@ -133,7 +133,7 @@ Problems this addresses, in general terms:
 
     **Decided: two dial-home conditions, with different writers** (science-agent decision, 31 Oct 2026):
     - `DialHomeKeyMissing`: the Provider's controller sets it at Create, when the key files are absent from `~/.hpcburst/dial-home/`, before any submission (Two controllers);
-    - `DialHomeUnreachable`: the lifecycle controller sets it when an Instance's registration through the tunnel fails, a home directory that compute nodes cannot read included. The controller sees only that no registration came, so the trigger is `health.registrationTimeout` passing while the job runs (`RegistrationTimeout`); the condition clears at the next successful registration of an agent on that Provider. It applies it to the Provider's status by server-side apply under its own field manager (Provider status; HBEP-7).
+    - `DialHomeUnreachable`: the lifecycle controller sets it when an Instance's registration over the dial-home path fails, a home directory that compute nodes cannot read included. The controller sees only that no registration came, so the trigger is `health.registrationTimeout` passing while the job runs (`RegistrationTimeout`); the condition clears at the next successful registration of an agent on that Provider. It applies it to the Provider's status by server-side apply under its own field manager (Provider status; HBEP-7).
 
     **Not needed for alpha:** Sano, inbound reachability, node-local disk sizes and GPU drivers.
 17. **A connection budget per platform.** **Not needed for alpha:** one multiplexed connection per login node and credential, and at most four commands at once on it, are code defaults. **Open (blocks beta):** a per-platform budget in the profile, sized from the login nodes' measured ssh limits, which S5 could not read. Source: spike S5 (PR #19); science-agent decision, 30 Oct 2026, for the defaults.
@@ -146,7 +146,7 @@ Problems this addresses, in general terms:
 - **For a Slurm Provider** that manager runs crossplane-runtime's managed reconciler over the Allocations whose `providerConfigRef` names the Provider. The management policies exclude Update, so a submitted job is never edited. Its external client maps onto the core operations as follows, and HBEP-7's open question 11 gives the full protocol:
   - **Connect:** the profile reader. A failure sets a condition on the Provider and makes no call.
   - **Observe:** find by tag; adopt a job when none is recorded; settle (cancel every held job with the tag except the recorded one, then lift the recorded job's hold once); read the recorded job back; report Lost after `lostGrace`; report a requeue as Failed.
-  - **Create:** in ssh dial-home mode, check that the dial-home key files exist (Submission), and otherwise set the Provider condition `DialHomeKeyMissing` and submit nothing; ensure the agent's binary and the Allocation's files; claim an attempt by compare-and-swap, submit, record the job ID by compare-and-swap, then settle in the same reconcile.
+  - **Create:** in ssh dial-home mode, check that the dial-home key files exist (Submission), and otherwise set the Provider condition `DialHomeKeyMissing` and submit nothing; ensure the agent's binary, frpc and the Allocation's files (Submission); claim an attempt by compare-and-swap, submit, record the job ID by compare-and-swap, then settle in the same reconcile.
   - **Delete:** cancel every live job with the tag. The finalizer stays while any job with the tag is live, or an attempt is unresolved. Then remove the Allocation's files.
   - **Update:** never.
   - crossplane-runtime's critical-annotation updater is replaced by one that re-applies only crossplane's own keys (spike S4; HBEP-11).
@@ -252,13 +252,15 @@ For a managed provider:
   - more GPUs than `gpusPerNode`;
   - a time limit above `maxTime`;
   - a memory request of 0, because Slurm reads `--mem=0` as the whole node (science-agent decision, 31 Oct 2026).
-- **Files first.** Before claiming an attempt, the plugin ensures two files under `stagingDir`:
+- **Files first.** Before claiming an attempt, the plugin ensures four files under `stagingDir`:
   - the agent's binary, at `agent/<digest>/hb-agent`, copied from the control-plane host's build of that digest;
-  - the Allocation's credential, at `alloc/<tag>/credential`, mode 600.
+  - frpc, the tunnel's client (HBEP-6), at `frpc/<digest>/frpc`, for the partition's `cpuArch`, copied from the control-plane host's copy, whose checksum `build/dependencies.yaml` pins (HBEP-15);
+  - the Allocation's credential, at `alloc/<tag>/credential`, mode 600;
+  - the launcher's dial-home certificate, at `alloc/<tag>/dial-home.crt`. It is public; frpc verifies the front with it (HBEP-6, HBEP-11).
 
   The credential is the token the lifecycle controller generated for the Allocation (HBEP-7). It never appears in the batch script, on a command line or in a log (HBEP-6).
 
-  A third file, `alloc/<tag>/agent.json`, mode 600, tells the agent where the control-plane host is, which dial-home mode it uses (direct or ssh) and the pin of the agent endpoint's certificate, from the launcher's configuration (HBEP-11), and the resolved staging and dial-home directories (Transport). It names a private address, so it is never in the repository.
+  A fifth file, `alloc/<tag>/agent.json`, mode 600, tells the agent where the control-plane host is, which dial-home mode it uses (direct or ssh) and the pin of the agent endpoint's certificate, from the launcher's configuration (HBEP-11), and the resolved staging and dial-home directories (Transport). It also carries frpc's digest, and in ssh mode the dial-home listener's loopback port next to the agent endpoint's (HBEP-6; field names are the code agent's). It names a private address, so it is never in the repository.
 - **The dial-home key** for the ssh mode is not staged. The operator generates the restricted key and places the pinned host key on the platform once, in `~/.hpcburst/dial-home/`, mode 600 (HBEP-7). They live outside `stagingDir`, on storage that is not purged, because Helios purges scratch files older than 30 days (spike S5, PR #19). The plugin names that directory by the resolved home directory, never by `~` (Transport). Create checks that both files exist there before any submission, and sets `DialHomeKeyMissing` when they do not (Two controllers). Whether a compute node can use them shows at the first registration: a failure there sets `DialHomeUnreachable`, the lifecycle controller's condition (open question 16).
 - **The bootstrap** is the `--wrap` command. It checks the binary's SHA-256 against the digest, then runs it with the Allocation's directory as its only argument. Nothing else runs in the batch script.
 
@@ -499,6 +501,7 @@ The Slurm provider plugin grows from www-2027's per-cluster ssh over one shared 
 - 2026-10-30: implementable. Design completed for alpha: the two controllers, the core operations as an interface, the ssh transport, the Slurm dialect (S4's protocol, S7's real JSON, S1's hold check), submission and its files, the typed profile fields with their draft sources, provider settings, and the read-only LLMLab catalog. Every open question is decided, not needed for alpha, or open for beta; question 17 added.
 - 2026-10-30: amendment with HBEP-5 becoming implementable: `drainWindow` defaults to 2 h 10 min (owner decision); `drainMargin` is added; open question 11 names the drain-window override; only a managed-source ModelDeployment attaches a managed Provider; `health.noProgressTimeout` defaults to 30 min.
 - 2026-10-31: amendment from the merged contracts (PR #71) and spike S1's probe 2 (issue #18): `partitions[].imageFormat`, which puts Athena in alpha; the two dial-home conditions and their writers; the field managers; the Provider's `Lease`; Provider status fields; the managed credentials file; the read-back on first observe; memory 0 refused; `PathUnresolved`.
+- 2026-10-31: amendment with HBEP-6 becoming implementable: the plugin stages frpc and the launcher's dial-home certificate, and `agent.json` carries frpc's digest and the dial-home listener's port.
 
 ## Amendments
 
@@ -518,3 +521,7 @@ The Slurm provider plugin grows from www-2027's per-cluster ssh over one shared 
   - **Read-back** compares the job's settings on the first observe only, and its name on every observe. An administrator's extension of the time limit is not flagged.
   - **A memory request of 0 is refused** before any call, because Slurm reads `--mem=0` as the whole node.
   - **`PathUnresolved`** is the Provider condition for a `HOME` or `stagingDir` variable that does not resolve. Before, the text named only "a condition".
+- **2026-10-31: staging the tunnel's files** (HBEP-6 becoming implementable; science-agent decision, 31 Oct 2026).
+  - **Files first** (Submission) gains frpc, at `frpc/<digest>/frpc` for the partition's `cpuArch`, from the control-plane host's copy pinned in `build/dependencies.yaml`, and the launcher's public dial-home certificate, at `alloc/<tag>/dial-home.crt`. frpc is a pinned release binary, not part of the agent's build, so the agent cannot carry it. Before, the plugin ensured the agent's binary and the credential only.
+  - **`agent.json`** also carries frpc's digest, which the agent checks before it runs frpc, and in ssh mode the dial-home listener's loopback port, the target of the second forward (HBEP-7). The field names are the code agent's.
+  - **Wording.** `DialHomeUnreachable` is set when an Instance's registration over the dial-home path fails; the text said "through the tunnel", which HBEP-6 now uses for frp's serving tunnel only. The trigger is unchanged.

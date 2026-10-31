@@ -105,7 +105,7 @@ Deployment options:
 7. **Which evaluated projects become components.** Decided: for the control plane, the Kubernetes API host (question 2), controller-runtime for our controllers, and crossplane-runtime under the Slurm provider (spike S4; HBEP-4). None of the other evaluated projects is a control-plane component; Alternatives says why.
 8. **The front's place and reachability.** HBEP-2 (open question 3), HBEP-5 (open question 11) and HBEP-6 (open question 8, and its TLS-terminating front) leave parts of these to this HBEP. Decided for alpha: alpha has one user and one front, on the alpha host. That host must have an address that compute nodes reach, in one of two ways:
    - directly, on the dial-home port;
-   - through ssh on port 22 with a restricted key, which carries the dial-home tunnel. This is HBEP-6's development path, option B of spike S1 (issue #18).
+   - through ssh on port 22 with a restricted key, over two forwards: one for the agent's control traffic and one for the dial-home tunnel (HBEP-6, Dial-home modes). This is HBEP-6's development path, option B of spike S1 (issue #18).
 
    A host reachable by neither is out of alpha. The launcher checks this (Single-user host). Whether several users share a front is HBEP-2's question, and is not decided here.
 
@@ -216,9 +216,10 @@ Decided for alpha (amended 2026-10-30, after S3's fix, PR #36):
 - verifies the pinned host binaries against their checksums, recorded in `build/dependencies.yaml` (HBEP-15), and starts them;
 - binds the API server to loopback, because nothing outside the host talks to it. Instances reach the front, never the API (HBEP-6);
 - issues one kubeconfig per identity: the user, each controller, and each agent identity (HBEP-10), with RBAC enabled;
-- creates the certificate of the lifecycle controller's agent endpoint, which listens on loopback; `agent.json` carries its pin, and in direct mode the front passes `/agent/v1/` through to it on the dial-home port (HBEP-7);
+- creates the certificate of the lifecycle controller's agent endpoint, which listens on loopback; `agent.json` carries its pin, and in direct mode the front passes `/agent/v1/` through to it on the dial-home port (HBEP-7). The certificate is self-signed and carries a fixed synthetic DNS name, proposed as `dial-home.hpcburst.invalid`, which frpc names as its `serverName` when it verifies the dial-home listener with this certificate as its trusted file (HBEP-6). It is public, and is staged with each Allocation (HBEP-4);
+- starts frps, the dial-home tunnel's server (HBEP-6), as it starts the host: it verifies the pinned binary's checksum from `build/dependencies.yaml`, writes its configuration file (mode 600, with the password of frps's loopback web server), records it by process ID plus start time, judges its health through a pidfd, its three loopback ports and its `/healthz`, and restarts it when it exits. frps binds loopback only, at offsets of the launcher's port block (HBEP-6, Components);
 - installs the CRDs and the admission policy, then starts the controllers and restarts any that exit;
-- checks the front's reachability (open question 8). It warns when no front address and dial-home mode (direct, or ssh on port 22) are configured, and checks that a configured address answers on that port. While none is configured, the lifecycle controller submits no Allocation, and each ModelDeployment carries `Degraded` with reason `FrontNotConfigured` (decided while building the launcher, PR #49; the name in PR #71). The first Instance on each Provider then confirms reachability from a compute node by registering through its dial-home tunnel. An Instance that cannot register fails at start, and the lifecycle controller sets the condition `DialHomeUnreachable` on its Provider (HBEP-4, open question 16);
+- checks the front's reachability (open question 8). It warns when no front address and dial-home mode (direct, or ssh on port 22) are configured, and checks that a configured address answers on that port. While none is configured, the lifecycle controller submits no Allocation, and each ModelDeployment carries `Degraded` with reason `FrontNotConfigured` (decided while building the launcher, PR #49; the name in PR #71). The first Instance on each Provider then confirms reachability from a compute node by registering over its dial-home path. An Instance that cannot register fails at start, and the lifecycle controller sets the condition `DialHomeUnreachable` on its Provider (HBEP-4, open question 16);
 - has the API server write its audit log at the Metadata level, with no request bodies, so a Secret's content is never logged;
 - backs up the store before every upgrade: an etcd snapshot, or a copy of the SQLite file;
 - upgrades the host one minor version at a time, as S3 tested.
@@ -259,7 +260,7 @@ Against the single-user host (k3s as a plain user) and, for beta, the team optio
 - Start the controllers beside a provider job with the framework's tag and no Allocation: it is reported as an orphan, not cancelled.
 - **Lease.** Start a second copy of a provider controller: it makes no provider call while the first holds the `Lease`. Kill the first mid-submit: the second takes over and finds the job by its tag. Whatever it then submits, at most one job with the tag has its hold lifted, and any other is cancelled (S4).
 - **Credentials.** A Provider whose credentials file is readable by others: refused with `CredentialsInvalid`, and no provider call is made.
-- **Front reachability.** With no front address or dial-home mode, the launcher warns and the lifecycle controller submits no Allocation, with `FrontNotConfigured`. An Instance whose tunnel cannot reach the front fails at start, and its Provider carries `DialHomeUnreachable`. A later write of Provider status by the Provider's controller keeps that condition.
+- **Front reachability.** With no front address or dial-home mode, the launcher warns and the lifecycle controller submits no Allocation, with `FrontNotConfigured`. An Instance whose agent cannot reach the front fails at start, and its Provider carries `DialHomeUnreachable`. A later write of Provider status by the Provider's controller keeps that condition.
 - **Leases and field managers.** Each Provider's `Lease` is `provider-<name>` and the lifecycle controller's is `lifecycle`, all in `hpcburst-system`; a Provider named `lifecycle` shares no `Lease`. Every field a controller writes shows `hpcburst-provider` or `hpcburst-lifecycle` in `managedFields`, and on a Provider `hpcburst-lifecycle` owns only the `DialHomeUnreachable` entry.
 - **Another k3s's binaries.** On a machine whose system k3s runs the same release, a user-level k3s that runs a binary outside its own data directory makes `hpcburst up` fail. A check of `/readyz` alone proves nothing here, since a k3s running the borrowed binaries answers it too.
 - **Upgrade and downgrade.** Upgrade the host one minor version with objects present: every object is kept with its UID. Downgrade by restoring the backup with the earlier binaries: the objects from before the upgrade are back.
@@ -317,7 +318,7 @@ S3 exercised validation, watches, conflicts, cascades and finalizers. Leases, Ev
    - Either way, controllers submit nothing new, because no submission starts without a recorded attempt (S4). Running jobs keep running to their hard ends.
    - The launcher's health reports the write failures on k3s, or the alarm on etcd. The host's disk is its own (Placement).
 6. **Idle cost:** one small host, or about 0.36 GiB of memory on k3s (S3). No grant hours and no provider connections when nothing is deployed.
-7. **Rollback:** stopping the control plane leaves provider jobs running until their hard ends, and the front serving from its last table. Removing the framework needs releasing every Allocation first, with approval, and then removing the CRD-deletion policy.
+7. **Rollback:** stopping the control plane leaves provider jobs running until their hard ends, and the front serving from its last table. Established tunnels stay up, since HBEP-6's frps plugin is consulted only at logins and proxy registrations; a tunnel that reconnects meanwhile waits for the lifecycle controller to return (HBEP-6, Risks). Removing the framework needs releasing every Allocation first, with approval, and then removing the CRD-deletion policy.
 
 ## Drawbacks
 
@@ -355,6 +356,7 @@ The control plane replaces the files and scripts that held www-2027's state: per
 | controller-runtime | [kubernetes-sigs/controller-runtime](https://github.com/kubernetes-sigs/controller-runtime) | Apache-2.0 | Dependency: our controllers, their work queues and leader election; used by spikes S3 and S4 |
 | crossplane-runtime | [crossplane/crossplane-runtime](https://github.com/crossplane/crossplane-runtime) | Apache-2.0 | Dependency under the Slurm provider (HBEP-4; spike S4): the Allocation's managed-resource fields and reconciler |
 | NATS JetStream | [nats-io/nats-server](https://github.com/nats-io/nats-server) | Apache-2.0 | Candidate, not in alpha: the durable event log (spike S8, HBEP-10) |
+| frps (frp v0.71.1) | [fatedier/frp](https://github.com/fatedier/frp) | Apache-2.0 | Dependency: the pinned release binary the launcher starts and supervises on loopback, the dial-home tunnel's server (HBEP-6) |
 
 ### Designs and published work borrowed
 
@@ -391,6 +393,7 @@ The control plane replaces the files and scripts that held www-2027's state: per
 - 2026-10-30: implementable. Owner decisions on the API group, kinds and version folded in; spikes S3 (PR #36, the host rule), S4 (PR #32), S5 (PR #19) and S8 (PR #28) carried in; every open question decided or marked for alpha.
 - 2026-10-30: amendment with HBEP-5 becoming implementable: the ModelDeployment's `routing`, the PlatformProfile's `drainMargin` and the Instance's `status.leaseEnd`.
 - 2026-10-31: amendment from the merged contracts (PR #71) and the launcher (PR #49): the API's new fields and the `idle-since` annotation, the field managers, the `Lease` names and namespace, the condition names, and the caveat that a user-level k3s can run root's binaries. Lessons L-17.1 to L-17.4 cited.
+- 2026-10-31: amendment with HBEP-6 becoming implementable: the launcher starts and supervises frps on loopback, its certificate carries a fixed synthetic DNS name for frpc, and ssh mode uses two forwards.
 
 ## Amendments
 
@@ -417,3 +420,9 @@ The control plane replaces the files and scripts that held www-2027's state: per
   - **Leases.** Each Provider's is `provider-<name>`, the lifecycle controller's is `lifecycle`, and both live in `hpcburst-system`, which the launcher creates.
   - **Conditions named.** The front check's ModelDeployment condition is `Degraded` with `FrontNotConfigured`; a failed registration sets `DialHomeUnreachable` on the Provider; a refused credentials file sets `CredentialsInvalid`; an identity-record collision sets `IdentityUnresolved` (HBEP-3). Before, the text named only "a condition", and said "admission stops" for a collision.
   - **A caveat for the single-user host.** On a machine whose system k3s runs the same release, a user-level k3s can silently run root's unpacked binaries from `/var/lib/rancher`. The launcher detects this through `/proc/<pid>/exe` and refuses to start the host.
+- **2026-10-31: frps and the dial-home certificate** (HBEP-6 becoming implementable; science-agent decisions of 31 Oct 2026).
+  - **The launcher starts frps** (Single-user host), as it starts the host: checksum from `build/dependencies.yaml`, a mode-600 configuration file, a record by process ID plus start time, health through a pidfd, its three loopback ports and `/healthz`, and a restart when it exits. This follows the launcher's existing pattern, so nothing in this HBEP contradicts it. Before, the launcher started only the host and the controllers.
+  - **The certificate** gains a fixed synthetic DNS name, proposed as `dial-home.hpcburst.invalid`, because frpc verifies the dial-home listener by `serverName` against a trusted file, unlike the agent's pin. Before, it had no stated name.
+  - **Ssh mode** uses two forwards, one for the agent's control traffic and one for the tunnel (open question 8). Before, one forward carried the tunnel.
+  - **Wording.** Registration goes over the dial-home path, the agent's own connection, never through frp's tunnel, so the text no longer says "registration through the tunnel". The trigger of `DialHomeUnreachable` is unchanged.
+  - **Rollback** (Operational readiness 7). Established tunnels survive a stopped control plane; a tunnel that reconnects meanwhile cannot log in until the lifecycle controller, which serves frps's plugin, returns (HBEP-6).

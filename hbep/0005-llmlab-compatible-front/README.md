@@ -143,7 +143,8 @@ Routes to LLMLab still pass through LLMLab's own cut and injection. The front ca
     - HBEP-4's default of 30 min was a placeholder "until this HBEP sets it"; it changes to 2 h 10 min. A deployment with short requests shortens its window through `routing.maxRequestDuration`: its Instances' window is that value plus `drainMargin`, when that is shorter than `drainWindow` (Draining).
 13. **Reachability.**
     - **Decided:** the front reads each Instance, with its UID and lease end, from the inventory (HBEP-11). `status.url` is not used in alpha, because the transport is keyed by the Instance's UID (Reachability). In alpha the front reaches an Instance through the dial-home path HBEP-11 requires, direct or through ssh on port 22. Its dial-home listener also passes `/agent/v1/` through to the lifecycle controller (HBEP-7, HBEP-11).
-    - **Not needed for alpha from this HBEP's side:** HBEP-6's tunnel protocol, encryption inside the tunnel, relays, port forwards and heartbeat timing. The front needs one seam: an HTTP transport per Instance UID, from that Instance's registration (Reachability). The Instance route runs end to end only once HBEP-6 picks its protocol for alpha.
+    - **Decided by HBEP-6** (implementable, 31 Oct 2026): the seam is an HTTP transport per Instance UID through frps's tcpmux port on loopback, and it counts as registered while the front's probe through it passes (Reachability). The front adds a deadline on the tunnel's set-up and one on a streamed reply's headers (Time-outs and keep-alive).
+    - **Not needed for alpha from this HBEP's side:** encryption inside the tunnel, relays, port forwards and heartbeat timing, which are HBEP-6's.
 
 ## Design details
 
@@ -162,9 +163,10 @@ As listed in Notes. Extensions are additive: response headers, extra fields in e
 ### Listeners
 
 - **The client listener** (`clientListen`) serves the contract. It never serves `/agent/v1/`, and answers 404 there.
-- **The dial-home listener** (`dialHomeListen`) is the dial-home port of HBEP-11's open question 8. It is required in both modes. In direct mode it is an address compute nodes reach. In ssh mode it is a loopback address, which the restricted key's forward targets (HBEP-7). It presents the certificate the launcher created for the lifecycle controller's agent endpoint, so the agent's pin holds on both paths (HBEP-7, HBEP-11).
-  - **`/agent/v1/` passthrough.** In direct mode the front passes every request under `/agent/v1/` through, unchanged, to the lifecycle controller's loopback endpoint, and streams the answer back, long polls included. The controller authenticates the agent by the Allocation's credential (HBEP-7); the front adds nothing. In ssh mode the agent reaches that endpoint through its forward, and the passthrough is unused.
-  - Every other path on the dial-home listener belongs to HBEP-6's tunnel.
+- **The dial-home listener** (`dialHomeListen`) is the dial-home port of HBEP-11's open question 8. In direct mode it is required, and is an address compute nodes reach. In ssh mode it defaults to the IPv4 loopback address at the launcher's port base + 7 (`agentapi.DialHomePortOffset`), which the restricted key's second forward targets (HBEP-6, HBEP-7). The agent endpoint is at base + 3, so the key's two `permitopen` entries are fixed for a given base, and a custom base needs new keys. It presents the certificate the launcher created for the lifecycle controller's agent endpoint, so the agent's pin holds on both paths, and frpc verifies the same certificate (HBEP-6, HBEP-7, HBEP-11).
+  - **`/agent/v1/` passthrough.** In direct mode the front passes every request under `/agent/v1/` through, unchanged, to the lifecycle controller's loopback endpoint, and streams the answer back, long polls included. The controller authenticates the agent by the Allocation's credential (HBEP-7); the front adds nothing. In ssh mode the agent reaches that endpoint through its first forward, and the passthrough is unused.
+  - **The tunnel.** A `GET /~!frp` websocket upgrade is passed, with its request line unchanged, to frps's bind port on loopback, and the connection is relayed both ways for its life (HBEP-6).
+  - Every other path on the dial-home listener gets 404.
 
 ### Request path
 
@@ -219,14 +221,14 @@ As listed in Notes. Extensions are additive: response headers, extra fields in e
 - **The capped pick** (S10b): KubeAI's pick at c; if the choice already holds its cap, its reservation is released and the request goes to the next eligible Instance on the ring that is below its cap. The spill is reserved through the group, so it counts in the bound's mean. When every eligible Instance is at its cap, nothing is reserved and the request waits in the ModelDeployment's FIFO at the front. A completion, a join, an Instance that is eligible again, or the cap going off places the oldest one. After `queueTimeout` it gets 503 `capacity`.
 - **When the cap returns** with an Instance above it, nothing is cut. That Instance gets no new request until it is below the cap (S10c).
 - **Filters.** For `model@<provider>`, pinned names and ineligible Instances, the walk skips Instances that do not match, and T and n stay those of the whole group. The walk uses the ring replica, checked against the fork's own picks as S10b's tests do.
-- **Pauses.** A target whose connections fail `pauseAfterFailures` times in a row (3) is not eligible for `pauseDuration` (30 s), then is again. An Instance keeps its count meanwhile. Nothing removes a target for good except the control plane (L-4.14).
+- **Pauses.** A target whose connections fail `pauseAfterFailures` times in a row (3) is not eligible for `pauseDuration` (30 s), then is again. Toward an Instance, a failed tunnel set-up, a missed streamed-headers deadline and a tunnel closed before the response headers count as failed connections (Time-outs and keep-alive). An Instance keeps its count meanwhile. Nothing removes a target for good except the control plane (L-4.14).
 
 ### Inside an Instance
 
 HBEP-7 runs the Instance's processes; this HBEP sets what the front needs from them.
 
 **Alpha: one worker, no router** (HBEP-7's alpha scope; open question 2).
-- The front sends each request through the Instance's serving path, which HBEP-6's transport reaches and the allocation agent forwards to the engine's Unix socket (HBEP-7).
+- The front sends each request through the Instance's serving path: HBEP-6's tunnel, whose frpc, started by the allocation agent, dials the engine's Unix socket (HBEP-6, HBEP-7).
 - The engine checks the Instance key, which the agent passes to it through the environment (HBEP-7). The socket sits in the job's private temporary directory, so other users' jobs on the node cannot reach it.
 - The request carries `x-session-id` (Conversation key). The single worker ignores it.
 - The worker's health is the Instance's health. A refused connection or an error from the path counts toward the Instance's pause (Load bound and cap); HBEP-7's probe and restart ladder handle the worker.
@@ -276,6 +278,8 @@ Every error the front raises has the body `{"error": {"message": <text>, "type":
 | No byte reached the target, after the one resend | 502 | `upstream_unreachable` | | the front, and the target it tried |
 | `maxRequestDuration` reached before the first byte | 504 | `request_timeout` | `deadline` | the front, and the target |
 | `idleTimeout` reached before the first byte | 504 | `request_timeout` | `idle` | the front, and the target |
+| A streamed request's response headers missed `streamHeadersTimeout`; not resent | 504 | `request_timeout` | `headers` | the front, and the target |
+| The tunnel closed after the request was written, before the response headers; not resent | 502 | `upstream_closed` | `tunnel` | the front, and the target |
 | A stream fails after its headers were sent | one `data:` event with this body, then the end of the stream, never `[DONE]` | `stream_cut` | `upstream`, `deadline`, `idle` or `lease_end` | the target, as in the headers already sent |
 
 An unknown model and an unattached one look alike, as on LLMLab, where unknown and inactive models both fail (L-6.5); `detail` tells them apart.
@@ -313,8 +317,13 @@ One record per request, written when the request ends (HBEP-8).
 | beta: router → worker | `--request-timeout-secs` = `maxRequestDuration` + 1 h (10,800 s) | none (S2 phase A) | the router keeps idle connections 50 s; the worker's `VLLM_HTTP_TIMEOUT_KEEP_ALIVE` is 120 s |
 | front → LLMLab | `maxRequestDuration` | `idleTimeout`; LLMLab's own cut is 180 s with no byte | `upstreamIdleTimeout` |
 
-- Connection set-up toward any upstream has `connectTimeout` (10 s).
-- Every cut is logged, and recorded in the usage record's `cutBy`, with the hop that made it: `front_deadline`, `front_idle`, `upstream`, `lease_end` or `client`.
+- Connection set-up toward LLMLab has `connectTimeout` (10 s).
+- **Toward an Instance** (HBEP-6, The front's half):
+  - the connection set-up is the dial to frps's tcpmux port plus the `CONNECT` exchange, bounded by `tunnelSetupTimeout` (5 s). A refused dial, frps's 404 or that timeout is a refused or timed-out connection under open question 5, so no byte was written and the request is resent once;
+  - frps answers the `CONNECT` before it reaches the Instance, so a dead tunnel can accept the request. frps then closes it itself, before any response byte: at its `userConnTimeout` (10 s) while it waits for a work connection, or when it drops the session (12–20 s at HBEP-6's heartbeat settings). The request was written, so it is not resent; the client gets 502 `upstream_closed` with detail `tunnel`, the usage record has `cutBy: tunnel`, and it counts toward the pause;
+  - on a live tunnel, for a streamed request, the response's status and headers must arrive within `streamHeadersTimeout` (30 s) of the request's last byte. vLLM sends them before prefill (HBEP-6), so the deadline never bounds a slow first token. The request was written, so it is not resent; the client gets 504 with detail `headers`;
+  - a non-streamed request has no deadline before its first byte beyond `idleTimeout`; on a dead tunnel frps closes it as above, and otherwise it relies on the probe (Reachability).
+- Every cut is logged, and recorded in the usage record's `cutBy`, with the hop that made it: `front_deadline`, `front_idle`, `front_headers`, `tunnel`, `upstream`, `lease_end` or `client`.
 
 ### Parameters
 
@@ -323,12 +332,16 @@ Front settings, in the front's configuration file, which the launcher passes (HB
 | Setting | Default | Meaning |
 |---|---|---|
 | `clientListen` | the IPv4 loopback address, port 8000 | the client listener |
-| `dialHomeListen` | required | the dial-home port (HBEP-11, open question 8): in direct mode an address compute nodes reach, in ssh mode a loopback address that the restricted key's forward targets (Listeners) |
+| `dialHomeListen` | direct mode: required; ssh mode: the IPv4 loopback address at the launcher's port base + 7 | the dial-home port (HBEP-11, open question 8): in direct mode an address compute nodes reach, in ssh mode the loopback port that the restricted key's second forward targets (Listeners) |
+| `frpsBindAddr`, `frpsMuxAddr` | the IPv4 loopback address at base + 9 and base + 10 | frps's bind port, where the tunnel's websocket goes, and its tcpmux port, which the transport dials (HBEP-6). Proposed names |
 | `clientKeysFile` | required | mode-600 file of client keys with their IDs |
 | `sessionHeaders` | `[x-session-id]` | the session headers honoured, in order |
 | `maxRequestDuration` | 2 h | the front's total deadline per request (open question 12) |
 | `idleTimeout` | 30 min | no byte from the upstream for this long cuts the request |
-| `connectTimeout` | 10 s | connection set-up to an upstream |
+| `connectTimeout` | 10 s | connection set-up to LLMLab |
+| `tunnelSetupTimeout` | 5 s | toward an Instance: the dial to frps plus the `CONNECT` exchange (Time-outs and keep-alive). Proposed name |
+| `streamHeadersTimeout` | 30 s | toward an Instance, a streamed request only: from its last byte to the response's headers. Proposed name |
+| `probeInterval`, `probeTimeout`, `probeFailures` | 10 s, 10 s, 2 | the end-to-end probe of each Instance through its tunnel (Reachability). Proposed names |
 | `upstreamIdleTimeout` | 4 s | idle upstream connections are dropped after this |
 | `clientKeepAlive` | 120 s | idle client connections are kept this long |
 | `queueTimeout` | 60 s | the longest wait at the front when every candidate is at its cap |
@@ -349,7 +362,8 @@ Elsewhere: `drainWindow` and `drainMargin` in the PlatformProfile (HBEP-4), 2 h 
 ### Reachability
 
 - **The inventory** gives the front each Instance's UID and lease end (HBEP-11). An Instance with no `status.leaseEnd` is not routable (Request path). `status.url` is not used in alpha, because the transport is keyed by the Instance's UID.
-- **The seam.** The front sends requests to an Instance through an HTTP transport that HBEP-6's dial-home tunnel provides, keyed by the Instance's UID from its registration. In alpha the tunnel arrives on the dial-home listener, directly or through ssh on port 22 (HBEP-11, open question 8). An Instance with no registered transport is not routable. How the transport carries bytes is HBEP-6's (open question 13).
+- **The seam.** The front sends requests to an Instance through an HTTP transport that HBEP-6's dial-home tunnel provides, keyed by the Instance's UID. The transport dials frps's tcpmux port on loopback (`frpsMuxAddr`) and sends `CONNECT <UID>:80`; a 200 makes the connection a plain HTTP connection to the engine (HBEP-6). In alpha the tunnel arrives on the dial-home listener, directly or through ssh on port 22 (HBEP-11, open question 8).
+- **Registered.** Every `probeInterval` the front probes each Instance in phase `verifying`, `ready` or `draining` through its transport, with `GET /health`, which vLLM serves without the key (HBEP-6). A probe passes on a 200 within `probeTimeout`. The transport counts as registered from the first passing probe, stops after `probeFailures` consecutive failures, and counts again at the next pass. An Instance whose transport was never registered is not routable. One whose transport stops counting is not eligible: a skip that keeps its place and its count (Load bound and cap), never a leave.
 
 ### Test plan
 
@@ -357,7 +371,7 @@ Against HBEP-4's managed fake, S4's fake Slurm and an engine double, then agains
 - **Contract.** An unmodified OpenAI client, configured as for LLMLab, runs chat, completions, Responses, embeddings, streaming, usage, tool calls, `/v1/models`, unknown and inactive models.
 - **Stream completion per endpoint.** A chat or completions stream that ends without a finish reason is recorded `truncated` and gets one error event, never `[DONE]`. A `/v1/responses` stream that ends with `response.completed` is complete and gets no error event; one that ends before it is truncated. A stream on a path outside the list is relayed as it came, with a null `finish`. A Responses follow-up that names `previous_response_id` and sends the session header reaches the Instance that stored the response.
 - **No change but `model`.** The front's outgoing body differs from the client's only in `model`'s value, byte for byte. Its `Content-Length` equals the rewritten body's length, for a rewrite that shortens the name and one that lengthens it, and the engine answers without waiting for bytes. Unknown request fields reach the engine with their values. Prompt token counts match a direct call to the same Instance, so no text was injected. In beta the check at the engine compares fields, not bytes, because the router re-serialises the body (Risks).
-- **Deadlines.** A 7,000-token stream at one token per second, about 117 min, completes through the front under the default 2 h `maxRequestDuration`. A first token after 1,100 s completes with the lifecycle controller active, and the controller does not restart the worker (HBEP-7's no-progress watchdog). A positive control: with `maxRequestDuration` at 60 s, the front cuts a 150 s stream at about 60 s and records `cutBy: front_deadline`, so the test can see a cut.
+- **Deadlines.** A 7,000-token stream at one token per second, about 117 min, completes through the front under the default 2 h `maxRequestDuration`. A first token after 1,100 s completes with the lifecycle controller active, and the controller does not restart the worker (HBEP-7's no-progress watchdog). A positive control: with `maxRequestDuration` at 60 s, the front cuts a 150 s stream at about 60 s and records `cutBy: front_deadline`, so the test can see a cut. Through a frozen tunnel (frpc stopped), frps closes a request within `userConnTimeout` or at session teardown, before any response byte; it gets 502 `upstream_closed` with detail `tunnel`, records `cutBy: tunnel`, and is not resent. On a live tunnel, an engine double that reads the request and never answers gives a streamed request 504 `request_timeout` with detail `headers` at `streamHeadersTimeout`, not resent. A `CONNECT` that frps answers with 404 is resent once to the next Instance (HBEP-6).
 - **Beta, the router.** The same 7,000-token stream completes through vllm-router at `--request-timeout-secs` 10,800, and the router's 1,800 s default is refused at launch. After a router restart, the agent re-registers its workers before the Instance is routable again. A request with `tools[].function.strict` reaches the engine with that field (open question 2). S2c's measurements are the router's acceptance (open question 2).
 - **Conversation key.** Golden vectors: fixed `messages` arrays with hand-written JCS bytes and their SHA-256 from `sha256sum`, outside our code, for one system message, two system or developer messages, no system message, content as an array of parts, and a user message after an assistant one. The same opening with different later turns gives the same key; a different first user message gives another.
 - **`x-session-id`.** Every request reaching an engine carries it, with the client's header value or the opening key. A request without the header and without `messages` carries an `r-` key.
@@ -373,7 +387,8 @@ Against HBEP-4's managed fake, S4's fake Slurm and an engine double, then agains
 - **Attribution.** The headers appear on successes, errors, streams and LLMLab-served replies. A stream whose headers are dropped is still attributed by its usage record.
 - **Usage.** Kill the front between records: the counter shows the gap. A stream without `include_usage` gets null counts and its event count, marked `front_events`.
 - **Keys.** With no ModelDeployment of a model name, plain `model` returns 503 `model_inactive`, although LLMLab serves that model. Once a managed ModelDeployment attaches the LLMLab provider, requests reach LLMLab. A client configured with its LLMLab key and only the front's base URL works when the operator set the front's client key to that key. A request to an Instance without that Instance's key is refused by its engine. A client key cannot write a ModelDeployment.
-- **Passthrough.** In direct mode an agent registers, long-polls and reports through the dial-home listener, which presents the pinned certificate. In ssh mode, with `dialHomeListen` on a loopback address, the tunnel arrives through the restricted key's forward. The client listener answers 404 under `/agent/v1/`.
+- **Passthrough.** In direct mode an agent registers, long-polls and reports through the dial-home listener, which presents the pinned certificate. In ssh mode, with `dialHomeListen` at its loopback default, the agent's control traffic arrives through the restricted key's first forward and frpc's websocket through the second. In both modes a `GET /~!frp` upgrade reaches frps and its tunnel registers, and any other path on the dial-home listener gets 404. The client listener answers 404 under `/agent/v1/`.
+- **The probe.** Kill the engine behind a live tunnel: after two failed probes the Instance gets no new request and keeps its in-flight count; one passing probe brings it back (HBEP-6).
 - **Keep-alive.** Idle the front's connection to an Instance past 5 s and send again: no request fails (L-2.5). In beta the same holds for the router-to-worker link.
 - **Fault injection.** Kill an Instance mid-stream: the client gets one error event and no `[DONE]`. Refuse an Instance's connections three times: it is paused, keeps its count, and is eligible again after 30 s. Saturate one Instance; flap one until the controller marks it ready again.
 
@@ -411,7 +426,7 @@ Against HBEP-4's managed fake, S4's fake Slurm and an engine double, then agains
 ## Operational readiness
 
 1. **Working:** the front's health endpoint, plus the age of its membership view and of each watch. End to end, a synthetic request per naming level returns the expected attribution headers, and its usage record appears. A failed synthetic request, a response without headers, or a stale watch says it is not working.
-2. **Restart:** it re-reads the ready set, lease ends, ModelDeployments, Providers and PlatformProfiles from the control plane, and rebuilds every ring from them. Balancer counts start at zero, which is consistent, since the restart cut every stream through it. The usage counter resumes at the persisted end. Instance transports come back as the tunnels reconnect (HBEP-6).
+2. **Restart:** it re-reads the ready set, lease ends, ModelDeployments, Providers and PlatformProfiles from the control plane, and rebuilds every ring from them. Balancer counts start at zero, which is consistent, since the restart cut every stream through it. The usage counter resumes at the persisted end. Instance transports come back as the tunnels reconnect through the restarted dial-home listener and each Instance's first probe passes (HBEP-6).
 3. **Silent failure:**
    - a cut stream that looks complete: judged by its endpoint's completion rule (Contract), never closed with `[DONE]`;
    - a request answered by a wider level than asked: seen in the headers;
@@ -501,8 +516,17 @@ The front grows from www-2027's hand-tuned per-stack routers: affinity and polic
 - 2026-10-30: the drain window is the profile's `drainWindow` (HBEP-4), read by both the front and the lifecycle controller (HBEP-7).
 - 2026-10-30: implementable. Spikes S10 (PR #34), S10b (PR #50), S10c (PR #53) and S2 phases A (PR #44) and B (PR #55) carried in, with the author's choice of the default load bound (`@hpc-burst-science-agent`, PR #53; corrected 2026-10-31). The request path, the conversation key, the balancer and its wrapper, one worker per alpha Instance (HBEP-7) and the provisional router for beta, draining, the LLMLab route, errors, attribution headers, usage records, time-outs and parameters written for alpha. Every open question decided, not needed for alpha, or open for beta.
 - 2026-10-31: amendment from the merged contracts (PR #71): the load bounds' floor and order, the cap from `launch.maxNumSeqs`, and `ProviderNotOnPlatform` for a managed source; the default load bound's attribution corrected.
+- 2026-10-31: amendment with HBEP-6 becoming implementable: the tunnel's seam, the probe that registers a transport, the set-up and streamed-headers deadlines, the dial-home listener's paths and its ssh-mode default.
 
 ## Amendments
+
+- **2026-10-31: the tunnel's seam, deadlines and probe** (HBEP-6 becoming implementable; science-agent decisions of 31 Oct 2026, and the code agent's port offset).
+  - **The seam** is frps's tcpmux port on loopback: `CONNECT <UID>:80`, then plain HTTP (Reachability; open question 13). Before, this HBEP left the transport to HBEP-6.
+  - **Registered** now means that the front's end-to-end probe passes: `GET /health` every 10 s, two failures to stop counting, one pass to count again. Losing it is a skip that keeps the count, as a lost transport was before.
+  - **Deadlines toward an Instance.** `tunnelSetupTimeout` (5 s) bounds the dial to frps and the `CONNECT`; its failures are resent under open question 5. `streamHeadersTimeout` (30 s) bounds a streamed reply's headers, which vLLM sends before prefill; a miss is not resent and gets 504 `request_timeout` with detail `headers`, and `cutBy` gains `front_headers`. Both count toward the pause. `connectTimeout` now applies to LLMLab only. Before, `connectTimeout` covered every upstream, and nothing bounded a dead tunnel that had accepted a request.
+  - **The dial-home listener.** In ssh mode `dialHomeListen` defaults to the IPv4 loopback address at the launcher's port base + 7, so the restricted key's two `permitopen` entries are fixed for a given base; in direct mode it stays required. It passes a `GET /~!frp` upgrade to frps and answers 404 on every other path but `/agent/v1/`. Before, it was required in both modes, and every other path was "HBEP-6's tunnel".
+  - **Parameters** gain `frpsBindAddr`, `frpsMuxAddr`, `tunnelSetupTimeout`, `streamHeadersTimeout`, `probeInterval`, `probeTimeout` and `probeFailures`, all proposed names.
+  - **A tunnel closed before the headers** (review round of PR #86). frps closes a request on a dead tunnel itself, after the write and before any response byte. Errors gains a row for it: 502 `upstream_closed` (a proposed code) with detail `tunnel`, not resent, counted toward the pause, with `cutBy: tunnel`. The streamed-headers deadline is tested on a live tunnel whose engine double withholds its headers.
 
 - **2026-10-31: the load bounds, and names from the merged contracts.** Science-agent decisions of 31 Oct 2026, built in the contracts (PR #71). The names are those on `main`.
   - **The load bounds** are decimal strings with a floor of 1.0. Admission refuses `tight` above `loose`; equal values are allowed (open question 3; Parameters). Before, this HBEP gave only their defaults.
