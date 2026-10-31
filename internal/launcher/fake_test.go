@@ -12,6 +12,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
 // fakePidfd stands in for the kernel's pidfds on a fake /proc tree. A PID absent from alive does
@@ -24,6 +27,7 @@ type fakePidfd struct {
 	next     int
 	sent     []string
 	onOpen   func(pid int)
+	onExited func() // runs before each exited check; a test uses it to slow a round down
 	onSignal func(pid int, sig syscall.Signal)
 }
 
@@ -53,6 +57,9 @@ func (f *fakePidfd) open(pid int) (int, error) {
 }
 
 func (f *fakePidfd) exited(fd int) (bool, error) {
+	if f.onExited != nil {
+		f.onExited()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	pid, ok := f.fds[fd]
@@ -207,8 +214,7 @@ func newFakeHost(t *testing.T) *fakeHost {
 		h.giveSocket(h.pid, p)
 	}
 	h.writeListenTable()
-	kc := "apiVersion: v1\nkind: Config\nclusters:\n- name: c\n  cluster:\n    server: https://127.0.0.1:" + strconv.Itoa(ports.HTTPS) +
-		"\n    insecure-skip-tls-verify: true\ncontexts:\n- name: c\n  context: {cluster: c, user: u}\ncurrent-context: c\nusers:\n- name: u\n  user: {token: t}\n"
+	kc := kubeconfigText(t, fakeKubeconfig("https://127.0.0.1:"+strconv.Itoa(ports.HTTPS)))
 	for _, f := range []string{l.kubeconfig(), l.adminKubeconfig()} {
 		if err := os.WriteFile(f, []byte(kc), 0o600); err != nil {
 			t.Fatal(err)
@@ -220,6 +226,36 @@ func newFakeHost(t *testing.T) *fakeHost {
 		t.Fatal(err)
 	}
 	return h
+}
+
+// fakeKubeconfig is the kubeconfig k3s writes, built the way k3s builds it (k3s v1.36.5,
+// pkg/clientaccess/kubeconfig.go): one cluster, one user and one context, all named "default",
+// and the context current. It differs only in the credentials (a token) and in skipping TLS
+// verification, because the fake servers use throwaway certificates.
+func fakeKubeconfig(server string) *clientcmdapi.Config {
+	cfg := clientcmdapi.NewConfig()
+	cluster := clientcmdapi.NewCluster()
+	cluster.Server = server
+	cluster.InsecureSkipTLSVerify = true
+	user := clientcmdapi.NewAuthInfo()
+	user.Token = "t"
+	cx := clientcmdapi.NewContext()
+	cx.Cluster, cx.AuthInfo = "default", "default"
+	cfg.Clusters["default"], cfg.AuthInfos["default"], cfg.Contexts["default"] = cluster, user, cx
+	cfg.CurrentContext = "default"
+	return cfg
+}
+
+// kubeconfigText serialises cfg with clientcmd.Write, as k3s does, so the fields come out in
+// clientcmd's order and not in an order a test would pick: a cluster's body before its name, and
+// the clusters before the contexts and the current-context.
+func kubeconfigText(t *testing.T, cfg *clientcmdapi.Config) string {
+	t.Helper()
+	b, err := clientcmd.Write(*cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }
 
 func (h *fakeHost) assetRoot() string {

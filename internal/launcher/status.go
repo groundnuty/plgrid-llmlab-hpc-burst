@@ -161,13 +161,13 @@ func Status(ctx context.Context, o StatusOptions) (*StatusReport, error) {
 		bad("%v", err)
 		return rep, nil
 	}
-	if err := readyz(cfg); err != nil {
+	if err := readyz(ctx, cfg); err != nil {
 		rep.Readyz = ptr(false)
 		bad("apiserver /readyz: %v", err)
 	} else {
 		rep.Readyz = ptr(true)
 	}
-	if err := kcmHealthz(st.Ports.KCM, 5*time.Second); err != nil {
+	if err := kcmHealthz(ctx, st.Ports.KCM, 5*time.Second); err != nil {
 		rep.KCM = ptr(false)
 		bad("controller manager /healthz: %v", err)
 	} else {

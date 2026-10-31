@@ -4,15 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
-	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/deploymentid"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
@@ -24,33 +24,53 @@ import (
 // v1alpha1.LabelPlatform names the platform the managed IDs are computed over.
 //
 // Sync is one catalog read. It has no rate limit: the real controller reads at
-// most once a minute, and a test decides how often to call Sync.
+// most once a minute, and a test decides how often to call Sync. The rules for
+// the catalog, readiness, expiry and events are @hpc-burst-science-agent's
+// ruling of 31 Oct 2026; they are the shared code of package provider
+// (MergeCatalog, SetManagedReadiness, ExpiringCondition), which the real
+// managed controller (#69) applies too, so the two cannot drift.
 //
-//   - A successful read puts one entry in status.catalog for every name ever
-//     listed, sorted by name. An entry in the latest listing has listed true
-//     and lastListedTime now; one that left the listing is kept with listed
-//     false, its revision, managed ID and lastListedTime as they were; one that
-//     comes back is listed again. The managed ID is deploymentid.ComputeManaged
-//     over the platform, the name and the revision the entry has now, as the
-//     full 64-character form. A revision that is absent or empty is absent.
-//     lastCatalogRead and lastReconcileTime are now, the Ready condition is
-//     True with reason CatalogRead, and CredentialsRejected is False.
+//   - A successful read puts the catalog that provider.MergeCatalog gives in
+//     status.catalog: one entry for every name listed, and the entries that
+//     left the listing kept with listed false, their revision, managed ID and
+//     lastListedTime as they were, so long as the 1024 entries of the status
+//     leave room. When they do not, the unlisted entries with the oldest
+//     lastListedTime are dropped first, and a listed entry is never dropped for
+//     room; if the listing alone is longer than 1024, the first 1024 names are
+//     kept. A listed entry the status cannot hold (an empty name, a name above
+//     253 characters, a revision above 256, a name listed twice with different
+//     revisions) is skipped, and the rest of the listing is recorded: the read
+//     still counts as successful. lastCatalogRead and lastReconcileTime are
+//     now, lastSuccessfulStatusRead is now, Ready is True with reason
+//     CatalogRead, and CredentialsRejected is False.
 //   - A key the gateway rejects (an error wrapping provider.ErrKeyRejected)
-//     sets CredentialsRejected True and leaves the catalog, lastCatalogRead and
-//     Ready as they were. lastReconcileTime is now.
-//   - Any other error is unknown: Sync writes nothing at all, and returns nil,
-//     as the batch Controller does for a failed read.
-//   - The key's expiry (Managed.SetKeyExpiry), when set, makes the condition
-//     CredentialsExpiring True with reason ExpiresWithinADay from a day before
-//     the expiry, and Expired from the expiry on; before that it is False with
-//     reason NotExpiring. It is evaluated on the passes that write. The real
-//     managed controller (#69) reads the key's expiry from the credentials file
-//     with provider.ReadManagedCredentials, where this stand-in takes it from
-//     Managed.SetKeyExpiry.
-//   - A Provider with no platform label is an error, before any read. A listing
-//     with an entry the status cannot hold (no name, a name above 253
-//     characters, a revision above 256, or more than 1024 entries ever) is an
-//     error that writes nothing.
+//     sets CredentialsRejected True, and leaves the catalog and lastCatalogRead
+//     as they were. It is a failed read for readiness, as is an unknown error.
+//   - Any other error is unknown. Sync writes lastReconcileTime and
+//     observedGeneration, applies the readiness rule and evaluates
+//     CredentialsExpiring, and leaves the catalog, lastCatalogRead and
+//     CredentialsRejected alone. It returns nil, as the batch Controller does
+//     for a failed read.
+//   - Readiness is the batch staleness rule (provider.SetManagedReadiness,
+//     docs/development.md, Provider readiness): a failed read leaves
+//     lastSuccessfulStatusRead alone, and Ready turns False with reason
+//     ReadsFailing only when there is no successful read yet or the last is
+//     more than v1alpha1.ProviderReadyStaleness (5 minutes) old; until then
+//     Ready keeps its value.
+//   - CredentialsExpiring is provider.ExpiringCondition of the key's expiry on
+//     every pass that writes, whether the read worked or not: with no expiry
+//     (a zero Managed.KeyExpiry) it is False with reason NotExpiring and the
+//     message "the credentials file names no expiry"; from a day before the
+//     expiry it is True with ExpiresWithinADay, and from the expiry on Expired.
+//     The real controller reads the expiry from the credentials file with
+//     provider.ReadManagedCredentials, where this stand-in takes it from
+//     Managed.SetKeyExpiry. A rotation to a key without one clears the state at
+//     the next pass.
+//   - Events go to Recorder when it is set (nil means none), after the status
+//     is written by a successful read: one Warning CatalogEntrySkipped for each
+//     skipped entry, naming it, and when the listing alone was longer than 1024
+//     a Warning CatalogTruncated on every such read. Neither is a condition.
+//   - A Provider with no platform label is an error, before any read.
 //   - Conditions the controller does not write, such as DialHomeUnreachable,
 //     are kept as found.
 type ManagedController struct {
@@ -58,15 +78,12 @@ type ManagedController struct {
 	Provider string
 	Managed  *Managed
 	Clock    *Clock
+	// Recorder receives the events of a successful read; nil records none.
+	Recorder events.EventRecorder
 }
 
-// Limits of status.catalog (api/v1alpha1, CatalogEntryStatus).
-const (
-	maxCatalogEntries  = 1024
-	maxCatalogNameLen  = 253
-	maxCatalogRevision = 256
-	expiryWarning      = 24 * time.Hour
-)
+// eventAction is the action of the events a catalog read raises.
+const eventAction = "ReadCatalog"
 
 // Sync reads the catalog once and writes the Provider's status.
 func (m *ManagedController) Sync(ctx context.Context) error {
@@ -81,40 +98,50 @@ func (m *ManagedController) Sync(ctx context.Context) error {
 	now := m.Clock.Now().UTC().Truncate(time.Second)
 	old := prov.DeepCopy()
 	entries, err := m.Managed.ListCatalog(ctx)
+	var merge provider.CatalogMerge
 	switch {
 	case err == nil:
-		catalog, merr := mergeCatalog(prov.Status.Catalog, entries, platform, now)
-		if merr != nil {
+		var merr error
+		if merge, merr = provider.MergeCatalog(prov.Status.Catalog, entries, platform, now); merr != nil {
 			return merr
 		}
-		prov.Status.Catalog, prov.Status.LastCatalogRead = catalog, mt(now)
-		setCondition(&prov, v1alpha1.ConditionProviderReady, metav1.ConditionTrue, v1alpha1.ReasonCatalogRead, "", now)
+		prov.Status.Catalog, prov.Status.LastCatalogRead = merge.Catalog, mt(now)
+		provider.SetManagedReadiness(&prov.Status, prov.Generation, true, now)
 		setCondition(&prov, v1alpha1.ConditionCredentialsRejected, metav1.ConditionFalse, v1alpha1.ReasonKeyAccepted, "", now)
 	case errors.Is(err, provider.ErrKeyRejected):
 		setCondition(&prov, v1alpha1.ConditionCredentialsRejected, metav1.ConditionTrue, v1alpha1.ReasonKeyRejected, err.Error(), now)
-	default:
-		return nil // an unknown error changes nothing
+		provider.SetManagedReadiness(&prov.Status, prov.Generation, false, now)
+	default: // an unknown error: the catalog, lastCatalogRead and CredentialsRejected stay
+		provider.SetManagedReadiness(&prov.Status, prov.Generation, false, now)
 	}
 	m.setExpiring(&prov, now)
 	prov.Status.ObservedGeneration, prov.Status.LastReconcileTime = prov.Generation, mt(now)
-	return writeProviderStatus(ctx, m.Client, old, &prov)
+	if err := writeProviderStatus(ctx, m.Client, old, &prov); err != nil {
+		return err
+	}
+	m.raise(&prov, merge)
+	return nil
 }
 
-// setExpiring sets CredentialsExpiring from the key's expiry; with none known
-// it leaves the condition alone.
+// setExpiring sets CredentialsExpiring from the key's expiry; a zero expiry
+// means none.
 func (m *ManagedController) setExpiring(prov *v1alpha1.Provider, now time.Time) {
 	exp := m.Managed.KeyExpiry()
-	if exp.IsZero() {
+	status, reason, msg := provider.ExpiringCondition(&exp, now)
+	setCondition(prov, v1alpha1.ConditionCredentialsExpiring, status, reason, msg, now)
+}
+
+// raise sends the events of one successful read: a Warning for each skipped
+// entry, and one for a truncated listing.
+func (m *ManagedController) raise(prov *v1alpha1.Provider, merge provider.CatalogMerge) {
+	if m.Recorder == nil {
 		return
 	}
-	msg := "the key expires at " + exp.Format(time.RFC3339)
-	switch {
-	case !now.Before(exp):
-		setCondition(prov, v1alpha1.ConditionCredentialsExpiring, metav1.ConditionTrue, v1alpha1.ReasonExpired, "the key expired at "+exp.Format(time.RFC3339), now)
-	case !now.Before(exp.Add(-expiryWarning)):
-		setCondition(prov, v1alpha1.ConditionCredentialsExpiring, metav1.ConditionTrue, v1alpha1.ReasonExpiresWithinADay, msg, now)
-	default:
-		setCondition(prov, v1alpha1.ConditionCredentialsExpiring, metav1.ConditionFalse, v1alpha1.ReasonNotExpiring, msg, now)
+	for _, s := range merge.Skipped {
+		m.Recorder.Eventf(prov, nil, corev1.EventTypeWarning, provider.EventCatalogEntrySkipped, eventAction, "%s", provider.SkippedNote(s))
+	}
+	if merge.Truncated > 0 {
+		m.Recorder.Eventf(prov, nil, corev1.EventTypeWarning, provider.EventCatalogTruncated, eventAction, "%s", provider.TruncatedNote(merge.Truncated))
 	}
 }
 
@@ -123,55 +150,4 @@ func setCondition(prov *v1alpha1.Provider, typ string, status metav1.ConditionSt
 		Type: typ, Status: status, Reason: reason, Message: message,
 		ObservedGeneration: prov.Generation, LastTransitionTime: *mt(now),
 	})
-}
-
-// mergeCatalog returns the catalog status after a successful read that listed
-// listed: the old entries, all marked unlisted, then the listed ones on top of
-// them, sorted by name. It never changes old.
-func mergeCatalog(old []v1alpha1.CatalogEntryStatus, listed []provider.CatalogEntry, platform string, now time.Time) ([]v1alpha1.CatalogEntryStatus, error) {
-	byName := make(map[string]v1alpha1.CatalogEntryStatus, len(old)+len(listed))
-	for _, e := range old {
-		e.Listed = false
-		byName[e.Name] = *e.DeepCopy()
-	}
-	for _, l := range listed {
-		entry, err := catalogEntry(l, platform, now)
-		if err != nil {
-			return nil, err
-		}
-		byName[l.Name] = entry
-	}
-	if len(byName) > maxCatalogEntries {
-		return nil, fmt.Errorf("the catalog would hold %d entries, above the %d status.catalog allows", len(byName), maxCatalogEntries)
-	}
-	out := make([]v1alpha1.CatalogEntryStatus, 0, len(byName))
-	for _, e := range byName {
-		out = append(out, e)
-	}
-	sort.Slice(out, func(i, k int) bool { return out[i].Name < out[k].Name })
-	return out, nil
-}
-
-// catalogEntry builds the status of one listed entry.
-func catalogEntry(l provider.CatalogEntry, platform string, now time.Time) (v1alpha1.CatalogEntryStatus, error) {
-	if len(l.Name) > maxCatalogNameLen {
-		return v1alpha1.CatalogEntryStatus{}, fmt.Errorf("catalog entry name has %d characters, above the %d status.catalog allows", len(l.Name), maxCatalogNameLen)
-	}
-	in := deploymentid.CatalogEntry{Platform: platform, CatalogName: l.Name}
-	var revision *string
-	if l.Revision != nil && *l.Revision != "" {
-		if len(*l.Revision) > maxCatalogRevision {
-			return v1alpha1.CatalogEntryStatus{}, fmt.Errorf("catalog entry %q: revision has %d characters, above the %d status.catalog allows", l.Name, len(*l.Revision), maxCatalogRevision)
-		}
-		r := *l.Revision
-		revision, in.Revision = &r, r
-	}
-	id, err := deploymentid.ComputeManaged(in)
-	if err != nil {
-		return v1alpha1.CatalogEntryStatus{}, fmt.Errorf("catalog entry %q: %w", l.Name, err)
-	}
-	return v1alpha1.CatalogEntryStatus{
-		Name: l.Name, Revision: revision, ManagedID: v1alpha1.FullDeploymentID(id.SHA256),
-		Listed: true, LastListedTime: mt(now),
-	}, nil
 }

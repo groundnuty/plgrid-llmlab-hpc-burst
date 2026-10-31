@@ -5,6 +5,7 @@ go 1.26.0
 require (
 	github.com/crossplane/crossplane-runtime/v2 v2.4.3
 	github.com/crossplane/crossplane/apis/v2 v2.3.4
+	github.com/go-logr/logr v1.4.4
 	github.com/hanwen/go-fuse/v2 v2.12.1
 	golang.org/x/sys v0.48.0
 	k8s.io/api v0.35.3
@@ -27,7 +28,6 @@ require (
 	github.com/fatih/color v1.18.0 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
-	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-openapi/jsonpointer v0.23.1 // indirect
 	github.com/go-openapi/jsonreference v0.21.6 // indirect
 	github.com/go-openapi/swag v0.26.0 // indirect
