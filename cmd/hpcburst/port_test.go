@@ -80,7 +80,7 @@ func TestUpRefusesWhenAPortIsTaken(t *testing.T) {
 	}
 
 	t.Run("control: the same command starts k3s once the ports are free", func(t *testing.T) {
-		// base+4 and base+7 are outside the block: a holder there must not stop the start.
+		// base+4 and base+7 are the front's (issue #64), not the launcher's: a holder there must not stop the start.
 		for _, p := range []int{base + 4, base + 7} {
 			l, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(p))
 			if err != nil {

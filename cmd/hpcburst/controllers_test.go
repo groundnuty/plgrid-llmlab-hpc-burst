@@ -6,6 +6,9 @@ package main
 // reports: a status that agreed with itself would prove nothing.
 
 import (
+	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -20,6 +23,8 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 var (
@@ -158,6 +163,34 @@ func verifiedKill(t *testing.T, p stateProc) {
 	}
 }
 
+// endpointPair is the agent endpoint's certificate and key as the files hold them, and the pin.
+type endpointPair struct {
+	cert, key []byte
+	pin       string
+}
+
+// readEndpointPair checks the layout of <state>/agent-endpoint (directory 0700, key 0600), loads
+// the pair as the agent API's server does (tls.LoadX509KeyPair) and returns it.
+func readEndpointPair(t *testing.T, dir string) endpointPair {
+	t.Helper()
+	host := agentapi.Host{StateDir: dir, PortBase: 29220}
+	if fi, err := os.Stat(filepath.Dir(host.AgentCertFile())); err != nil || !fi.IsDir() || fi.Mode().Perm() != 0o700 {
+		t.Errorf("agent-endpoint: %v, %v; want a directory with mode 0700", fi, err)
+	}
+	if fi, err := os.Stat(host.AgentKeyFile()); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("tls.key: %v, %v; want mode 0600", fi, err)
+	}
+	kp, err := tls.LoadX509KeyPair(host.AgentCertFile(), host.AgentKeyFile())
+	if err != nil {
+		t.Fatalf("the agent endpoint's pair does not load: %v", err)
+	}
+	leaf, err := x509.ParseCertificate(kp.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return endpointPair{cert: []byte(fileOf(host.AgentCertFile())), key: []byte(fileOf(host.AgentKeyFile())), pin: agentapi.PinOf(leaf)}
+}
+
 // TestControllerSupervision: up creates the namespace and starts the supervisor and the
 // controller with the exact command line of the contract; status reports them and checks the
 // controller's own health port; a killed controller is restarted and counted; a killed supervisor
@@ -208,6 +241,8 @@ func TestControllerSupervision(t *testing.T) {
 			t.Errorf("%s: %v, %v; want a directory with mode 0700", d, fi, err)
 		}
 	}
+	// up made the agent endpoint's certificate and key before it started the controller.
+	pair := readEndpointPair(t, h.dir)
 	if _, err := os.Stat(filepath.Join(h.dir, "controller", "credentials")); !os.IsNotExist(err) {
 		t.Errorf("the earlier controller/credentials was created (%v)", err)
 	}
@@ -299,6 +334,10 @@ func TestControllerSupervision(t *testing.T) {
 	if r := cli(t, h.upArgs(base, "--json", "--controller-bin", bin)...); r.code != exitOK {
 		t.Fatalf("second up exited %d", r.code)
 	}
+	// The pair survived the stop and the second start: the same files, so the same pin.
+	if again := readEndpointPair(t, h.dir); again.pin != pair.pin || !bytes.Equal(again.cert, pair.cert) || !bytes.Equal(again.key, pair.key) {
+		t.Errorf("the agent endpoint's pair changed across down and up: pin %s -> %s", pair.pin, again.pin)
+	}
 	procs = recordedProcs(t, h.dir)
 	rec, ok = readSupervisorRecord(t, h.dir)
 	if len(procs) != 2 || !ok || rec.Entries[0].Proc == nil {
@@ -326,5 +365,24 @@ func TestControllerSupervision(t *testing.T) {
 	}
 	if !waitDone(k3s.PID) || running(sup.PID) || running(child.PID) {
 		t.Errorf("after down: k3s running %v, supervisor %v, controller %v", running(k3s.PID), running(sup.PID), running(child.PID))
+	}
+
+	// ---- a key that others can read: up refuses before it starts anything ----
+	keyFile := filepath.Join(h.dir, "agent-endpoint", "tls.key")
+	if err := os.Chmod(keyFile, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r = cli(t, h.upArgs(base, "--json", "--controller-bin", bin)...)
+	if r.code != exitFail || !strings.Contains(r.err, keyFile) || !strings.Contains(r.err, "0644") {
+		t.Errorf("up with a world-readable key: exit %d, stderr %q; want exit %d naming %s", r.code, r.err, exitFail, keyFile)
+	}
+	if _, err := os.Stat(filepath.Join(h.dir, "state.json")); err == nil {
+		t.Error("up started k3s though the agent endpoint's key was refused")
+	}
+	if rows := listeningInRange(t, 29220, 29239); len(rows) != 0 {
+		t.Errorf("listeners remain after the refused up: %v", rows)
+	}
+	if got := fileOf(keyFile); got != string(pair.key) {
+		t.Error("the refused key file was modified")
 	}
 }

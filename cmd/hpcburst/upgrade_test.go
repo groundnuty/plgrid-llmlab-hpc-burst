@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -60,6 +61,7 @@ func TestUpgrade(t *testing.T) {
 	if len(oldProcs) != 2 || oldProcs[1].Name != "supervisor" || !ok || oldRec.Entries[0].Proc == nil {
 		t.Fatalf("before the upgrade: %+v, %+v", oldProcs, oldRec)
 	}
+	pairBefore := readEndpointPair(t, h.dir) // created by up, for the controllers
 	c := h.clients()
 	ctx, cancel := testCtx()
 	defer cancel()
@@ -185,6 +187,10 @@ func TestUpgrade(t *testing.T) {
 	}
 	if running(oldProcs[1].PID) || running(oldRec.Entries[0].Proc.PID) {
 		t.Errorf("the old supervisor (pid %d) or controller (pid %d) still runs", oldProcs[1].PID, oldRec.Entries[0].Proc.PID)
+	}
+	// The agent endpoint's pair is kept: the agents' pin must not change under a running platform.
+	if after := readEndpointPair(t, h.dir); after.pin != pairBefore.pin || !bytes.Equal(after.cert, pairBefore.cert) || !bytes.Equal(after.key, pairBefore.key) {
+		t.Errorf("the agent endpoint's pair changed across the upgrade: pin %s -> %s", pairBefore.pin, after.pin)
 	}
 	c2 := h.clients()
 	if v, err := c2.cs.Discovery().ServerVersion(); err != nil || !strings.HasPrefix(v.GitVersion, "v1.36.5") {

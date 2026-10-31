@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -59,11 +60,17 @@ func removeFakeController() {
 	}
 }
 
-// runSupervisorHelper is what the test binary does when superviseEnv is set.
+// runSupervisorHelper is what the test binary does when superviseEnv is set. It takes the handoff
+// pipe at descriptor HandoffFD through OpenHandoff, as "hpcburst supervise" does.
 func runSupervisorHelper(dir string) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
 	defer stop()
-	if err := Supervise(ctx, SuperviseOptions{StateDir: dir, Log: os.Stderr}); err != nil {
+	h, err := OpenHandoff(HandoffFD)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "supervise:", err)
+		os.Exit(1)
+	}
+	if err := Supervise(ctx, SuperviseOptions{StateDir: dir, Handoff: h, Log: os.Stderr}); err != nil {
 		fmt.Fprintln(os.Stderr, "supervise:", err)
 		os.Exit(1)
 	}
@@ -133,12 +140,30 @@ func (f *ctlFixture) steer(name, content string) {
 
 func (f *ctlFixture) unsteer(name string) { _ = os.Remove(filepath.Join(f.ctl, name)) }
 
-// supervise runs Supervise in this process until the returned stop is called (or the test ends).
-// stop returns what Supervise returned.
+// confirmedHandoff is a handoff the launcher has already confirmed: the byte is in the pipe.
+func confirmedHandoff(t *testing.T) io.ReadCloser {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte{handoffGo}); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	t.Cleanup(func() { r.Close() })
+	return r
+}
+
+// supervise runs Supervise in this process until the returned stop is called (or the test ends),
+// with a handoff that is already confirmed unless o names one. stop returns what Supervise returned.
 func (f *ctlFixture) supervise(o SuperviseOptions) (stop func() error) {
 	f.t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	o.StateDir = f.l.dir
+	if o.Handoff == nil {
+		o.Handoff = confirmedHandoff(f.t)
+	}
 	if o.Log == nil {
 		o.Log = testLog{f.t}
 	}

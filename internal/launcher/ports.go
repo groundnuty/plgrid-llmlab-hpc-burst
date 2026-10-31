@@ -44,7 +44,9 @@ const controllerPortOffset = 6
 // PortsFromBase lays the first four ports out as spike S3 did (base, base+1, base+2 and base+5)
 // and adds the controllers' two: the agent endpoint at agentapi.AgentEndpointPortOffset (base+3,
 // shared with the controller through agentapi.Host) and the controller's /healthz at base+6.
-// base+4 is unused.
+// The shared block (agentapi.Host) also holds base+4, the front's /healthz, and base+7, the
+// front's ssh dial-home listener (agentapi.DialHomePortOffset): both are issue #64's, and this
+// launcher neither checks nor binds them.
 func PortsFromBase(base int) (Ports, error) {
 	if base < 1024 || base+controllerPortOffset > 65535 {
 		return Ports{}, fmt.Errorf("port base %d is out of range: the block base..base+%d must lie in 1024..65535", base, controllerPortOffset)

@@ -91,6 +91,13 @@ func Upgrade(ctx context.Context, o UpgradeOptions) (*UpgradeReport, error) {
 	} else if sr.Health != Healthy {
 		return nil, fmt.Errorf("the host is %s (%v); fix it or stop it before upgrading", sr.Health, sr.Reasons)
 	}
+	// The controllers' certificate pair is kept, and checked before the old host is stopped: a pair
+	// that has since been broken is found while nothing has changed.
+	if st.Controllers != nil {
+		if err := ensureAgentEndpointPair(l.host(st.Ports), o.Log); err != nil {
+			return nil, err
+		}
+	}
 	cfg, err := restConfig(l.kubeconfig(), st.Ports, 60*time.Second)
 	if err != nil {
 		return nil, err

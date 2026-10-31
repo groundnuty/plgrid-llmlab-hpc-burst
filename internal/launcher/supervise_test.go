@@ -331,7 +331,7 @@ func TestSuperviseNeedsAControllerRecord(t *testing.T) {
 	if err := f.l.saveState(f.st); err != nil {
 		t.Fatal(err)
 	}
-	err := Supervise(t.Context(), SuperviseOptions{StateDir: f.l.dir})
+	err := Supervise(t.Context(), SuperviseOptions{StateDir: f.l.dir, Handoff: confirmedHandoff(t)})
 	if err == nil || !strings.Contains(err.Error(), "no controller binary") {
 		t.Fatalf("Supervise = %v", err)
 	}

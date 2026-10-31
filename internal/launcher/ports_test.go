@@ -28,9 +28,10 @@ func TestPortsFromBase(t *testing.T) {
 	if got := p.Expected(); len(got) != 3 || got[0] != 29220 || got[1] != 29221 || got[2] != 29222 {
 		t.Errorf("expected ports %v", got)
 	}
-	// The launcher's block is base..base+6 less base+4: the agent endpoint (base+3) and the
-	// controller's health port (base+6) join the four that must be free before a start. base+4
-	// and base+7 are not reserved.
+	// The ports that must be free before a start are base..base+6 less base+4: the agent
+	// endpoint (base+3) and the controller's health port (base+6) join the four of the launcher
+	// itself. base+4 (the front's /healthz) and base+7 (its ssh dial-home listener) are the
+	// front's and not checked.
 	if got := p.All(); fmt.Sprint(got) != "[29220 29221 29222 29223 29225 29226]" {
 		t.Errorf("all ports %v", got)
 	}
@@ -42,7 +43,7 @@ func TestPortsFromBase(t *testing.T) {
 			t.Errorf("port base %d accepted", bad)
 		}
 	}
-	// The block ends at base+6, so the last base that fits is 65529.
+	// The launcher's own ports end at base+6, so the last base it accepts is 65529.
 	if p, err := PortsFromBase(65529); err != nil || p.Controller != 65535 || p.Agent != 65532 {
 		t.Errorf("port base 65529: %+v, %v", p, err)
 	}

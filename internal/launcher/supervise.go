@@ -30,6 +30,77 @@ const (
 	DefaultTermGrace   = 10 * time.Second
 )
 
+// The start-up handoff. The supervisor outlives the launcher that starts it, so a supervisor whose
+// launcher died before it saved the supervisor's identity in state.json could neither be stopped by
+// down nor stop itself. The launcher therefore passes it the read end of a pipe, at descriptor
+// HandoffFD, and writes handoffGo only after state.json names the supervisor. The supervisor
+// starts no process until it has read that byte; if the pipe closes first (the launcher died), or
+// nothing arrives within the handoff timeout, it exits having started nothing.
+const (
+	// HandoffFD is the descriptor at which the supervisor receives the handoff pipe: the first of
+	// exec.Cmd.ExtraFiles.
+	HandoffFD = 3
+	// DefaultHandoffTimeout bounds the wait for the launcher's confirmation, which it sends as soon
+	// as one file write has returned.
+	DefaultHandoffTimeout = 30 * time.Second
+
+	handoffGo byte = 'g'
+)
+
+// OpenHandoff returns the supervisor's end of the handoff pipe, which the launcher passed at
+// descriptor fd. It refuses a descriptor that is not an open pipe, and marks it close-on-exec, so
+// no process the supervisor starts can inherit it.
+func OpenHandoff(fd int) (*os.File, error) {
+	if fd < HandoffFD {
+		return nil, fmt.Errorf("handoff descriptor %d: the launcher passes it at %d or above", fd, HandoffFD)
+	}
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil {
+		return nil, fmt.Errorf("handoff descriptor %d: %w", fd, err)
+	}
+	if st.Mode&syscall.S_IFMT != syscall.S_IFIFO {
+		return nil, fmt.Errorf("handoff descriptor %d is not a pipe", fd)
+	}
+	syscall.CloseOnExec(fd)
+	return os.NewFile(uintptr(fd), "handoff"), nil
+}
+
+// awaitHandoff blocks until the launcher confirms, and returns an error when it cannot be relied on
+// to have recorded the supervisor: the pipe closed without the byte, another byte, no byte within
+// timeout, or ctx done. The read runs in a goroutine, because the descriptor the launcher passes is
+// in blocking mode and cannot take a deadline; a read still blocked at a timeout ends with the
+// process, which Supervise's caller exits at once.
+func awaitHandoff(ctx context.Context, h io.Reader, timeout time.Duration) error {
+	type result struct {
+		b   byte
+		err error
+	}
+	got := make(chan result, 1)
+	go func() {
+		var buf [1]byte
+		_, err := io.ReadFull(h, buf[:])
+		got <- result{buf[0], err}
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case r := <-got:
+		switch {
+		case errors.Is(r.err, io.EOF):
+			return errors.New("the launcher ended without confirming that it had recorded the supervisor: no process was started")
+		case r.err != nil:
+			return fmt.Errorf("read the launcher's confirmation: %w", r.err)
+		case r.b != handoffGo:
+			return fmt.Errorf("the launcher sent %q, not its confirmation: no process was started", r.b)
+		}
+		return nil
+	case <-timer.C:
+		return fmt.Errorf("the launcher did not confirm that it had recorded the supervisor within %s: no process was started", timeout)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // supervised is one process the supervisor keeps running. Issue #64 adds the front as one more.
 type supervised struct {
 	Name   string
@@ -166,6 +237,12 @@ type SuperviseOptions struct {
 	StableAfter time.Duration
 	TermGrace   time.Duration
 	Log         io.Writer
+	// Handoff is the read end of the launcher's handoff pipe (OpenHandoff). Supervise starts
+	// nothing until it has read the launcher's confirmation, and closes Handoff afterwards. It is
+	// required: a supervisor with no launcher to confirm it would be one nothing could account for.
+	Handoff io.ReadCloser
+	// HandoffTimeout bounds that wait; the default is DefaultHandoffTimeout.
+	HandoffTimeout time.Duration
 	// onDelay, set by tests only, sees every restart delay as it is chosen.
 	onDelay func(name string, delay time.Duration)
 }
@@ -174,7 +251,7 @@ func (o *SuperviseOptions) defaults() {
 	for _, d := range []struct {
 		v *time.Duration
 		d time.Duration
-	}{{&o.BackoffMin, DefaultBackoffMin}, {&o.BackoffMax, DefaultBackoffMax}, {&o.StableAfter, DefaultStableAfter}, {&o.TermGrace, DefaultTermGrace}} {
+	}{{&o.BackoffMin, DefaultBackoffMin}, {&o.BackoffMax, DefaultBackoffMax}, {&o.StableAfter, DefaultStableAfter}, {&o.TermGrace, DefaultTermGrace}, {&o.HandoffTimeout, DefaultHandoffTimeout}} {
 		if *d.v <= 0 {
 			*d.v = d.d
 		}
@@ -201,6 +278,17 @@ func childEnv(env []string) []string {
 // period), waits for them, and returns nil. It is the body of "hpcburst supervise".
 func Supervise(ctx context.Context, o SuperviseOptions) error {
 	o.defaults()
+	if o.Handoff == nil {
+		return errors.New("no handoff from the launcher: only hpcburst up starts a supervisor")
+	}
+	// Nothing is read, written or started before the launcher confirms. The descriptor is closed
+	// at once, success or not, so no process started below can inherit it.
+	logf(o.Log, "supervisor pid %d waits for the launcher to record it", os.Getpid())
+	err := awaitHandoff(ctx, o.Handoff, o.HandoffTimeout)
+	_ = o.Handoff.Close()
+	if err != nil {
+		return err
+	}
 	l, err := newLayout(o.StateDir)
 	if err != nil {
 		return err
