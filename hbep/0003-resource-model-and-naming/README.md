@@ -83,7 +83,7 @@ In these stories, `helios-a`, `helios-b` and `athena-a` are names an operator ga
 10. **A managed allocation's hard end.** Decided: for alpha, none. Key expiry is a provider-settings warning (HBEP-4), not a lease end.
 11. **Pooling workers across Instances.** Decided: not part of this design. One router over the workers of several Instances could balance load across them, but the front would then not know which Instance answered, which breaks Instance attribution. It is reconsidered only by amendment.
 12. **A provider-independent pinned name.** Not needed for alpha: `model@<provider>/<deployment-id>` stops resolving once that ID has no ready Instance on that provider, for example after its last Instance there is replaced on another provider or in another accelerator class. Should there be a pinned form without a provider, such as `model@*/<deployment-id>`? It stays open. It depends on open question 1, whose `v1` answer gives one ID per accelerator class, and on the grammar of open question 5.
-13. **Executions under one job ID.** Decided: from spike S4 (PR #32), submit with `--no-requeue`, and treat a requeue that still happens as a failure of that Instance. Requeue is on by default on every platform measured (spike S5, PR #19), and a site setting can still force one, so the check stays. The hold on the Allocation's job is lifted exactly once, so a requeued job that returns to a user hold stays held. The controller deletes the failed Allocation, its finalizer cancels the held job, and the replacement is a new Allocation. The alternative, each execution as a new Instance in the same Allocation, is dropped.
+13. **Executions under one job ID.** Decided: from spike S4 (PR #32), submit with `--no-requeue`, and treat a requeue that still happens as a failure of that Instance. Requeue is on by default on every platform measured (spike S5, PR #19), and a site setting can still force one, so the check stays. The hold on the Allocation's job is lifted exactly once, except the known risk in HBEP-4, so a requeued job that returns to a user hold stays held. The controller deletes the failed Allocation, its finalizer cancels the held job, and the replacement is a new Allocation. The alternative, each execution as a new Instance in the same Allocation, is dropped.
 
 ## Design details
 
@@ -328,8 +328,8 @@ From spike S4 (PR #32).
   - The provider sets the tag as the Allocation's external name before any submission.
   - It passes the tag to Slurm as `--job-name`. Slurm accounting keeps the job name; it keeps the job comment only when the site enables that (S4).
 - **Job ID.** The job ID is observed state. It is written once, when the job is established, and never changed or removed. HBEP-11 says where it is kept.
-- **Hold.** On a platform whose profile has `holdRelease` true, the provider submits each job held, with `--no-requeue`, and lifts the hold exactly once, on the job whose ID it recorded. Elsewhere it runs S4's fallback mode, without a hold. HBEP-7 gives the full submission protocol (open question 11, from S4).
-- **Requeue** (open question 13). A requeue fails that Instance. The hold is never lifted again, so a requeued job that returns to a user hold stays held. The controller deletes the failed Allocation, whose finalizer cancels the held job (HBEP-11), and replaces it with a new Allocation.
+- **Hold.** On a platform whose profile has `holdRelease` true, the provider submits each job held, with `--no-requeue`, and lifts the hold exactly once, on the job whose ID it recorded, except the known risk in HBEP-4 (Risks: the hold lift's check-then-act window). Elsewhere it runs S4's fallback mode, without a hold. HBEP-7 gives the full submission protocol (open question 11, from S4).
+- **Requeue** (open question 13). A requeue fails that Instance. The hold is never lifted again, except the known risk in HBEP-4, so a requeued job that returns to a user hold stays held. The controller deletes the failed Allocation, whose finalizer cancels the held job (HBEP-11), and replaces it with a new Allocation.
 
 ### Test plan
 
@@ -466,7 +466,7 @@ The resource model replaces state that www-2027 operators kept by hand: per-job 
 - 2026-10-30: implementable. Owner decisions on the API group, kinds and version folded in; spikes S4 (PR #32), S5 (PR #19) and S7 (PR #33) carried in; every open question decided or marked for alpha.
 - 2026-10-30: amendment with HBEP-5 becoming implementable: an Instance with one worker may have no router.
 - 2026-10-31: amendment from the merged contracts (PR #71) and Hub listing (PR #68): the `Degraded` reason `IdentityUnresolved`, `engine.image` outside the ID, HBEP-9's listing rule, and no Allocation in alpha before a class has its ID.
-- 2026-10-31: amendment from the real LLMLab read (issue #69): open question 5's check before beta is done, and model and catalog names are field values only.
+- 2026-10-31: amendment from the real LLMLab read (issue #69): open question 5's check before beta is done, and model and catalog names are field values only; "the hold is lifted exactly once" qualified with HBEP-4's known risk.
 
 ## Amendments
 
@@ -491,3 +491,4 @@ The resource model replaces state that www-2027 operators kept by hand: per-job 
   - **Open question 5's check before beta is done.** Of LLMLab's 23 model names, none contains `@`, and all contain `/` (`org/model`). The grammar holds: it splits at the last `@`, and the model part may contain `/`. The beta criterion is marked done. Before, the check was pending.
   - **Model and catalog names are field values only** (Naming levels). They never become Kubernetes object names or label values; a hash is used if one is ever needed. Before, this HBEP said nothing of where such names may appear.
   - **LLMLab reports no revision,** so its catalog entries' canonical objects omit `revision` (Deployment ID; HBEP-4). The rule is unchanged.
+  - **"Lifted exactly once" is qualified** (open question 13; Allocation and job identity) with the known risk HBEP-4 records from PR #96's review: a leader that stalls after its last re-read can release a later hold of the same job, after an administrator requeued it with a hold. Before, the guarantee had no exception.
