@@ -56,56 +56,78 @@ need_free() {
 }
 
 # fetch URL DEST SHA: downloads into a temporary file of its own next to DEST, checks its
-# sha256, and only then renames it into place. Callers also hold the cache lock (below), so
-# two test packages that start at once on an empty cache never write the same file.
+# sha256, and only then renames it into place. It runs in a subshell whose EXIT trap removes the
+# temporary file on any failure. Callers hold the cache lock (below), so two test packages that
+# start at once on an empty cache never write the same file.
 fetch() {
-  local tmp got
   need_free "$(dirname "$2")"
   log "downloading $1"
-  tmp=$(mktemp "$2.XXXXXX")
-  if ! curl -fsSL --retry 3 -o "$tmp" "$1"; then
-    rm -f "$tmp"
-    log "download of $1 failed"
-    exit 1
-  fi
-  got=$(sha256sum "$tmp" | cut -d' ' -f1)
-  if [ "$got" != "$3" ]; then
-    rm -f "$tmp"
-    log "$1 has sha256 $got, expected $3"
-    exit 1
-  fi
-  chmod 0555 "$tmp"
-  mv "$tmp" "$2"
+  (
+    tmp=$(mktemp "$2.XXXXXX")
+    trap 'rm -f "$tmp"' EXIT
+    # 9>&-: the download never holds the cache lock, even if this script is killed under it.
+    if ! curl -fsSL --retry 3 --max-time 900 -o "$tmp" "$1" 9>&-; then
+      log "download of $1 failed"
+      exit 1
+    fi
+    got=$(sha256sum "$tmp" | cut -d' ' -f1)
+    if [ "$got" != "$3" ]; then
+      log "$1 has sha256 $got, expected $3"
+      exit 1
+    fi
+    chmod 0555 "$tmp"
+    mv "$tmp" "$2"
+    trap - EXIT
+  ) || exit 1
 }
 
 dl=https://dl.k8s.io/release/v$K8S_VERSION/bin/linux/amd64
 
-# One downloader at a time per cache: go test runs packages in parallel, and in CI the cache
-# starts empty, so several TestMains reach this point together. The lock is released when this
-# script exits; only curl, tar and sha256sum, which finish before it, inherit the descriptor.
-mkdir -p "$cache"
-exec 9>"$cache/.test-binaries.lock"
-flock 9
-
-verify "$assets/kube-apiserver" "$SHA_KUBE_APISERVER" || {
-  mkdir -p "$assets"; fetch "$dl/kube-apiserver" "$assets/kube-apiserver" "$SHA_KUBE_APISERVER"; verify "$assets/kube-apiserver" "$SHA_KUBE_APISERVER"; }
-
-verify "$kcm" "$SHA_KUBE_CONTROLLER_MANAGER" || {
-  mkdir -p "$(dirname "$kcm")"; fetch "$dl/kube-controller-manager" "$kcm" "$SHA_KUBE_CONTROLLER_MANAGER"; verify "$kcm" "$SHA_KUBE_CONTROLLER_MANAGER"; }
-
-verify "$assets/etcd" "$SHA_ETCD" || {
-  tmp=$(mktemp -d "$cache.etcd.XXXXXX")
-  trap 'rm -rf "$tmp"' EXIT
-  mkdir -p "$assets"
-  need_free "$tmp"
-  log "downloading etcd v$ETCD_VERSION"
-  curl -fsSL --retry 3 -o "$tmp/etcd.tgz" "https://github.com/etcd-io/etcd/releases/download/v$ETCD_VERSION/etcd-v$ETCD_VERSION-linux-amd64.tar.gz"
-  verify "$tmp/etcd.tgz" "$SHA_ETCD_TARBALL"
-  tar -xzf "$tmp/etcd.tgz" -C "$tmp" --strip-components=1 "etcd-v$ETCD_VERSION-linux-amd64/etcd"
-  verify "$tmp/etcd" "$SHA_ETCD"
-  mv "$tmp/etcd" "$assets/etcd"
-  chmod 0555 "$assets/etcd"
+# have_all: every binary is present with its pinned sha256 (a present file with another sha256
+# is fatal, in verify). When they are, nothing below runs, so binaries supplied through
+# HPCBURST_ENVTEST_ASSETS and HPCBURST_KUBE_CONTROLLER_MANAGER need no cache at all.
+have_all() {
+  verify "$assets/kube-apiserver" "$SHA_KUBE_APISERVER" &&
+    verify "$kcm" "$SHA_KUBE_CONTROLLER_MANAGER" &&
+    verify "$assets/etcd" "$SHA_ETCD"
 }
+
+if ! have_all; then
+  # One downloader at a time per cache: go test runs packages in parallel, and in CI the cache
+  # starts empty, so several TestMains reach this point together. Each one re-checks after it
+  # gets the lock, so a file another caller has just finished is not downloaded again. The lock
+  # is released when this script exits.
+  mkdir -p "$cache"
+  exec 9>"$cache/.test-binaries.lock"
+  flock 9
+
+  verify "$assets/kube-apiserver" "$SHA_KUBE_APISERVER" || {
+    mkdir -p "$assets"
+    fetch "$dl/kube-apiserver" "$assets/kube-apiserver" "$SHA_KUBE_APISERVER"
+    verify "$assets/kube-apiserver" "$SHA_KUBE_APISERVER"
+  }
+
+  verify "$kcm" "$SHA_KUBE_CONTROLLER_MANAGER" || {
+    mkdir -p "$(dirname "$kcm")"
+    fetch "$dl/kube-controller-manager" "$kcm" "$SHA_KUBE_CONTROLLER_MANAGER"
+    verify "$kcm" "$SHA_KUBE_CONTROLLER_MANAGER"
+  }
+
+  verify "$assets/etcd" "$SHA_ETCD" || {
+    # Staged beside its destination, so the final mv is a rename on one filesystem.
+    mkdir -p "$assets"
+    tmp=$(mktemp -d "$assets/.etcd.XXXXXX")
+    trap 'rm -rf "$tmp"' EXIT
+    need_free "$tmp"
+    log "downloading etcd v$ETCD_VERSION"
+    curl -fsSL --retry 3 --max-time 900 -o "$tmp/etcd.tgz" "https://github.com/etcd-io/etcd/releases/download/v$ETCD_VERSION/etcd-v$ETCD_VERSION-linux-amd64.tar.gz" 9>&-
+    verify "$tmp/etcd.tgz" "$SHA_ETCD_TARBALL"
+    tar -xzf "$tmp/etcd.tgz" -C "$tmp" --strip-components=1 "etcd-v$ETCD_VERSION-linux-amd64/etcd" 9>&-
+    verify "$tmp/etcd" "$SHA_ETCD"
+    chmod 0555 "$tmp/etcd"
+    mv "$tmp/etcd" "$assets/etcd"
+  }
+fi
 
 echo "HPCBURST_ENVTEST_ASSETS=$assets"
 echo "HPCBURST_KUBE_CONTROLLER_MANAGER=$kcm"
