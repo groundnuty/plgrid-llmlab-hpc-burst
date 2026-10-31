@@ -39,7 +39,7 @@ func TestStatusGoneAndForeignProcesses(t *testing.T) {
 
 	foreign := rec
 	foreign.StartTicks++
-	rep, err := Status(context.Background(), StatusOptions{StateDir: statusFixture(t, foreign, Ports{1, 2, 3, 4}).dir})
+	rep, err := Status(context.Background(), StatusOptions{StateDir: statusFixture(t, foreign, Ports{API: 1, HTTPS: 2, KCM: 3, LB: 4}).dir})
 	if err != nil || rep.Health != Unhealthy || rep.Processes[0].Verdict != "foreign" || !strings.Contains(strings.Join(rep.Reasons, ";"), "not running") {
 		t.Fatalf("foreign: %+v, %v", rep, err)
 	}
@@ -48,7 +48,7 @@ func TestStatusGoneAndForeignProcesses(t *testing.T) {
 	if !waitNotRunning(cmd.Process.Pid, 5*time.Second) {
 		t.Fatal("could not kill the fixture")
 	}
-	rep, err = Status(context.Background(), StatusOptions{StateDir: statusFixture(t, rec, Ports{1, 2, 3, 4}).dir})
+	rep, err = Status(context.Background(), StatusOptions{StateDir: statusFixture(t, rec, Ports{API: 1, HTTPS: 2, KCM: 3, LB: 4}).dir})
 	if err != nil || rep.Health != Unhealthy || rep.Processes[0].Verdict != "gone" {
 		t.Fatalf("gone: %+v, %v", rep, err)
 	}
