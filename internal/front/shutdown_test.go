@@ -6,11 +6,13 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/enginetest"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/usage"
 )
 
 // TestShutdownCutsStreamsAndKeepsTheirRecords (@hpc-burst-science-agent, 31
@@ -48,6 +50,18 @@ func TestShutdownCutsStreamsAndKeepsTheirRecords(t *testing.T) {
 		t.Fatalf("sink: %v", err)
 	}
 	wg.Wait()
+	// The next start continues the counters with no gap.
+	next, err := usage.Open(f.cfg.UsageDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := next.Write(usage.Record{RequestID: "after-restart"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := next.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	for i, b := range bodies {
 		if n := errorEvents(b); n != 1 || !strings.Contains(b, `"detail":"shutdown"`) || strings.Contains(b, "[DONE]") {
@@ -55,6 +69,12 @@ func TestShutdownCutsStreamsAndKeepsTheirRecords(t *testing.T) {
 		}
 	}
 	recs := f.records()
+	if len(recs) == len(reqs)+1 && recs[len(recs)-1].RequestID == "after-restart" {
+		if after != recs[len(recs)-2].Counter+1 {
+			t.Errorf("the record after a restart has counter %d, want %d: a clean stop left a gap", after, recs[len(recs)-2].Counter+1)
+		}
+		recs = recs[:len(recs)-1]
+	}
 	if len(recs) != len(reqs) {
 		t.Fatalf("%d usage records after the stop, want %d", len(recs), len(reqs))
 	}
@@ -69,29 +89,33 @@ func TestShutdownCutsStreamsAndKeepsTheirRecords(t *testing.T) {
 }
 
 // TestShutdownBeforeFirstByte: requests the stop meets before their first
-// byte, one waiting for the engine's headers and one queued for a full
-// Instance, get 503 shutting_down with Retry-After 5, and records with
-// cutBy front_shutdown.
+// byte, a non-streamed one and a streamed one waiting for their headers on
+// the two Instances (cap 1 each) and a third queued behind them, get 503
+// shutting_down, detail shutdown, with Retry-After 5, and records with cutBy
+// front_shutdown.
 func TestShutdownBeforeFirstByte(t *testing.T) {
 	one := int32(1)
-	f := newScFix(t, scOpts{md: func(md *v1alpha1.ModelDeployment) { md.Spec.Routing = &v1alpha1.Routing{InstanceCap: &one} }})
-	hold := make(chan struct{})
-	defer close(hold)
-	f.engines[0].Set(enginetest.Behaviour{Hold: hold})
-	held := scGo(f.harness, errChatBody(scModel, false, "held"))
-	errWaitFor(t, "the first request to reach the engine", func() bool { return f.engines[0].Open() == 1 })
+	f := newScFix(t, scOpts{instances: 2, md: func(md *v1alpha1.ModelDeployment) { md.Spec.Routing = &v1alpha1.Routing{InstanceCap: &one} }})
+	var arrived atomic.Int32
+	silent := rawEngine(t, func(w http.ResponseWriter, r *http.Request) { arrived.Add(1); <-r.Context().Done() })
+	f.retarget(f.uids[0], silent)
+	f.retarget(f.uids[1], silent)
+	whole := scGo(f.harness, errChatBody(scModel, false, "whole"))
+	errWaitFor(t, "the non-streamed request to reach an engine", func() bool { return arrived.Load() == 1 })
+	streamed := scGo(f.harness, errChatBody(scModel, true, "streamed"))
+	errWaitFor(t, "the streamed request to reach the other engine", func() bool { return arrived.Load() == 2 })
 	queued := scGo(f.harness, errChatBody(scModel, false, "queued"))
-	errWaitFor(t, "the second request to queue", func() bool { return f.router.Status().Waiting == 1 })
+	errWaitFor(t, "the third request to queue", func() bool { return f.router.Status().Waiting == 1 })
 
 	stopServing([]*http.Server{f.srv}, f.cancelBase, f.proxy, 200*time.Millisecond, discardLog())
-	for _, c := range []*scCall{held, queued} {
+	for i, c := range []*scCall{whole, streamed, queued} {
 		resp, body := c.wait(t)
-		checkErrorBody(t, body, codeShuttingDown, "")
+		checkErrorBody(t, body, codeShuttingDown, "shutdown")
 		if resp.StatusCode != 503 || resp.Header.Get("Retry-After") != "5" {
-			t.Errorf("status %d Retry-After %q, want 503 and 5: %s", resp.StatusCode, resp.Header.Get("Retry-After"), body)
+			t.Errorf("request %d: status %d Retry-After %q, want 503 and 5: %s", i, resp.StatusCode, resp.Header.Get("Retry-After"), body)
 		}
 		if rec := f.record(resp.Header.Get("hpcburst-request-id")); rec.CutBy == nil || *rec.CutBy != cutFrontShutdown {
-			t.Errorf("cutBy %v, want front_shutdown", rec.CutBy)
+			t.Errorf("request %d: cutBy %v, want front_shutdown", i, rec.CutBy)
 		}
 	}
 }

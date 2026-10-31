@@ -233,7 +233,7 @@ func detailOf(cutBy string) string {
 	case cutFrontHeaders:
 		return "headers"
 	case cutFrontShutdown:
-		return "shutdown" // a proposed detail: HBEP-5's Errors table has none yet
+		return "shutdown"
 	}
 	return "upstream"
 }

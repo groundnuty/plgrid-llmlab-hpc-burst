@@ -150,3 +150,63 @@ func rdKeysOne(t *testing.T, f *scFix) (string, string) {
 	}
 	return strings.TrimSpace(string(b)), ""
 }
+
+// TestRedactResponsesFailedAnd2xxAndGzip401 (HBEP-5, Test plan,
+// Redaction): the key echoed in a response.failed event, in a plain 2xx body
+// and in a gzipped 401 leaves no copy in the client's bytes, and the rest is
+// unchanged.
+func TestRedactResponsesFailedAnd2xxAndGzip401(t *testing.T) {
+	gzipped := func(s string) []byte {
+		var b bytes.Buffer
+		zw := gzip.NewWriter(&b)
+		_, _ = zw.Write([]byte(s))
+		_ = zw.Close()
+		return b.Bytes()
+	}
+	cases := []struct {
+		name, path, req string
+		status          int
+		body            func(key string) string
+		gzip            bool
+	}{
+		{"response.failed", "/v1/responses", prRespStream, 200, func(k string) string {
+			return respCreated + "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"r\",\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"bad key " + k + "\"}}}\n\n"
+		}, false},
+		{"2xx body", scChat, errChatBody(scModel, false, "hi"), 200, func(k string) string {
+			return `{"id":"c","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"` + k + `"},"finish_reason":"stop"}]}`
+		}, false},
+		{"gzipped 401", scChat, errChatBody(scModel, false, "hi"), 401, func(k string) string {
+			return `{"error":{"message":"refused Bearer ` + k + `","type":"auth","code":401}}`
+		}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newScFix(t, scOpts{})
+			key, _ := rdKeysOne(t, f)
+			plain := c.body(key)
+			f.retarget(f.uids[0], rawEngine(t, func(w http.ResponseWriter, r *http.Request) {
+				ct := "application/json"
+				if strings.HasPrefix(plain, "event:") {
+					ct = "text/event-stream"
+				}
+				w.Header().Set("Content-Type", ct)
+				if c.gzip {
+					w.Header().Set("Content-Encoding", "gzip")
+					w.WriteHeader(c.status)
+					_, _ = w.Write(gzipped(plain))
+					return
+				}
+				w.WriteHeader(c.status)
+				_, _ = io.WriteString(w, plain)
+			}))
+			resp := f.errPost(c.path, c.req)
+			got := readAll(t, resp)
+			if resp.StatusCode != c.status {
+				t.Fatalf("status %d, want %d: %s", resp.StatusCode, c.status, got)
+			}
+			if want := strings.ReplaceAll(plain, key, "[redacted]"); got != want {
+				t.Errorf("body\n got %q\nwant %q", got, want)
+			}
+		})
+	}
+}

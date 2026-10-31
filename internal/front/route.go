@@ -198,7 +198,7 @@ func (r *Router) waitServed(ctx context.Context, d *inventory.Deployment, g *bal
 			return nil, &routeError{status: statusClientClosed, code: "client_closed", message: "the client went away while the request waited"}
 		}
 		if cut == cutFrontShutdown {
-			return nil, &routeError{status: http.StatusServiceUnavailable, code: codeShuttingDown, retryAfter: "5", cutBy: cut, dep: d,
+			return nil, &routeError{status: http.StatusServiceUnavailable, code: codeShuttingDown, detail: detailOf(cut), retryAfter: "5", cutBy: cut, dep: d,
 				message: "the front is shutting down; send the request again"}
 		}
 		return nil, &routeError{status: http.StatusGatewayTimeout, code: codeRequestTimeout, detail: detailOf(cut), cutBy: cut, dep: d,

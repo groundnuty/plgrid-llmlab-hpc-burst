@@ -361,7 +361,7 @@ func (p *Proxy) cutBeforeFirstByte(w http.ResponseWriter, x *exchange, cut, msg 
 	x.rec.CutBy = strp(cut)
 	if cut == cutFrontShutdown {
 		w.Header().Set("Retry-After", "5")
-		p.fail(w, x, http.StatusServiceUnavailable, codeShuttingDown, "", "", "the front is shutting down; send the request again")
+		p.fail(w, x, http.StatusServiceUnavailable, codeShuttingDown, detailOf(cut), "", "the front is shutting down; send the request again")
 		return
 	}
 	p.fail(w, x, http.StatusGatewayTimeout, codeRequestTimeout, detailOf(cut), "", msg+detailOf(cut))
