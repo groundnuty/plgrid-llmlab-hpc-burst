@@ -57,6 +57,8 @@ type EngineSpec struct {
 	// Image@ImageDigest (HBEP-7, The allocation agent: an Instance's launch
 	// holds the image reference and its digest). It is not a deployment-ID
 	// input: the digest names the bytes, and pkg/deploymentid hashes only it.
+	// The schema requires ImageDigest beside it, so every launch pulls
+	// Image@ImageDigest (HBEP owner, 31 Oct 2026).
 	//
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=512
