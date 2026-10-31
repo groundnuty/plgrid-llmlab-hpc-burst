@@ -223,7 +223,10 @@ type Checks struct {
 	Qualify *QualifyRequest `json:"qualify,omitempty"`
 	// WarmUp asks for warm-up rounds. The agent runs round after round, at
 	// most MaxWarmUpRounds, reporting each, until a desired state without
-	// WarmUp for this generation tells it the controller has decided.
+	// WarmUp for this generation tells it the controller has decided; it then
+	// cancels any warm-up request still in flight and reports WarmUp.Done. The
+	// controller marks the Instance ready only after that report (doc.go,
+	// Warm-up gates ready).
 	WarmUp *WarmUpRequest `json:"warmUp,omitempty"`
 }
 

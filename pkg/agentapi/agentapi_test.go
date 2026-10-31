@@ -356,3 +356,26 @@ func TestJobTagFormRefuses(t *testing.T) {
 		}
 	}
 }
+
+// The host layout's paths and port, written out by hand from
+// docs/development.md (Runtime conventions, The host layout).
+func TestHostLayout(t *testing.T) {
+	h := Host{StateDir: "/home/example-user/.local/state/hpcburst", PortBase: 29220}
+	for got, want := range map[string]string{
+		h.CredentialsDir():    "/home/example-user/.local/state/hpcburst/credentials",
+		h.AgentBuildsDir():    "/home/example-user/.local/state/hpcburst/agent-builds",
+		h.AgentCertFile():     "/home/example-user/.local/state/hpcburst/agent-endpoint/tls.crt",
+		h.AgentKeyFile():      "/home/example-user/.local/state/hpcburst/agent-endpoint/tls.key",
+		h.AgentEndpointAddr(): "127.0.0.1:29223",
+	} {
+		if got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	}
+	if p := h.AgentEndpointPort(); p != 29223 {
+		t.Errorf("AgentEndpointPort = %d, want 29223 (base + 3)", p)
+	}
+	if got := AllocationCredentialPath(h.CredentialsDir(), "uid-1"); got != "/home/example-user/.local/state/hpcburst/credentials/allocations/uid-1" {
+		t.Errorf("AllocationCredentialPath = %q", got)
+	}
+}

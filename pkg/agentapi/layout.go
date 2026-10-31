@@ -103,6 +103,70 @@ func ContainerEngineSocket(worker string) string { return path.Join(ContainerRun
 
 // ---- on the control-plane host ----
 
+// Host is the control-plane host's runtime layout: the paths and the port that
+// several components share. The launcher (hpcburst up) owns the state
+// directory and the loopback port block, and passes both to the controller
+// binary and the front, which each fill a Host from them (docs/development.md,
+// Runtime conventions). agent.json follows from it: Mode and Endpoint are the
+// front the launcher recorded, SSH.User is the user who runs the controller,
+// SSH.AgentPort is AgentEndpointPort, and CertSPKISHA256 is PinOf the
+// certificate at AgentCertFile.
+type Host struct {
+	// StateDir is the launcher's state directory.
+	StateDir string
+	// PortBase is the start of the launcher's loopback port block.
+	PortBase int
+}
+
+// Names under the launcher's state directory, and the agent endpoint's place
+// in the port block. The launcher binds base, base+1, base+2 and reserves
+// base+5 (internal/launcher, PortsFromBase); base+3 is the agent endpoint's.
+const (
+	// CredentialsDirName is the controller's credentials directory, mode
+	// 0700 (KeyDirMode), which holds allocations/ and instances/.
+	CredentialsDirName = "credentials"
+	// AgentBuildsDirName holds the agent builds, AgentBuildName files.
+	AgentBuildsDirName = "agent-builds"
+	// AgentEndpointDirName holds the agent endpoint's certificate and key,
+	// which the launcher creates.
+	AgentEndpointDirName = "agent-endpoint"
+	// AgentCertFileName and AgentKeyFileName are the certificate (PEM) and
+	// its private key (PEM, mode 0600).
+	AgentCertFileName = "tls.crt"
+	AgentKeyFileName  = "tls.key"
+	// AgentEndpointPortOffset is the agent endpoint's port, relative to the
+	// launcher's port base.
+	AgentEndpointPortOffset = 3
+)
+
+// CredentialsDir is <state>/credentials, the dir of AllocationCredentialPath
+// and InstanceKeyPath.
+func (h Host) CredentialsDir() string { return filepath.Join(h.StateDir, CredentialsDirName) }
+
+// AgentBuildsDir is <state>/agent-builds.
+func (h Host) AgentBuildsDir() string { return filepath.Join(h.StateDir, AgentBuildsDirName) }
+
+// AgentCertFile is <state>/agent-endpoint/tls.crt. The agent API's server
+// presents it, and so does the front's dial-home listener in direct mode.
+func (h Host) AgentCertFile() string {
+	return filepath.Join(h.StateDir, AgentEndpointDirName, AgentCertFileName)
+}
+
+// AgentKeyFile is <state>/agent-endpoint/tls.key.
+func (h Host) AgentKeyFile() string {
+	return filepath.Join(h.StateDir, AgentEndpointDirName, AgentKeyFileName)
+}
+
+// AgentEndpointPort is the agent endpoint's loopback port: the port base plus
+// AgentEndpointPortOffset.
+func (h Host) AgentEndpointPort() int { return h.PortBase + AgentEndpointPortOffset }
+
+// AgentEndpointAddr is "127.0.0.1:<AgentEndpointPort>", where the agent API's
+// server listens and the front's direct-mode passthrough connects.
+func (h Host) AgentEndpointAddr() string {
+	return "127.0.0.1:" + strconv.Itoa(h.AgentEndpointPort())
+}
+
 // AllocationCredentialPath is where the lifecycle controller keeps an
 // Allocation's credential: <dir>/allocations/<Allocation UID>, mode 600, where
 // dir is the controller's credentials directory (HBEP-7, Provisioning). The

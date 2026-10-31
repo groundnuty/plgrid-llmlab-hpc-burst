@@ -125,7 +125,7 @@ type Backend interface {
 
 	// Desired returns what the caller's Allocation should run now, with its
 	// Version set (DesiredState.WithVersion). It is computed from API objects
-	// alone. A caller whose agent instance ID has no registration gets
+	// and the controller's key files alone. A caller whose agent instance ID has no registration gets
 	// CodeNotRegistered.
 	Desired(ctx context.Context, c Caller) (DesiredState, error)
 
