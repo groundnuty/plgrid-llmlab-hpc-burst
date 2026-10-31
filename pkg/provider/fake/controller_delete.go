@@ -13,16 +13,19 @@ import (
 )
 
 // syncDeleting cancels the Allocation's live jobs and, once none is live and no
-// attempt is unresolved, removes its files and its finalizer.
+// attempt is unresolved, removes its files and its finalizer. The recorded job
+// is read by its ID as well as by tag, as the real provider does: a job the
+// platform renamed is invisible to the tag lookup, and its cancel may have
+// failed or not happened yet when the Allocation was deleted. A failed read is
+// unknown, so the finalizer stays.
 func (c *Controller) syncDeleting(ctx context.Context, p *pass, s *allocState) error {
 	a := s.a
-	since := a.CreationTimestamp.Add(-listLookback)
 	rec, err := record(a)
 	if err != nil {
 		return err
 	}
 	s.rec = rec
-	jobs, err := c.findByTag(ctx, p, s.tag, since)
+	jobs, err := c.deletingJobs(ctx, p, s)
 	if err != nil {
 		return nil
 	}
@@ -45,7 +48,7 @@ func (c *Controller) syncDeleting(ctx context.Context, p *pass, s *allocState) e
 			}
 		}
 		// Confirm the cancels before letting go of the Allocation.
-		if jobs, err = c.findByTag(ctx, p, s.tag, since); err != nil {
+		if jobs, err = c.deletingJobs(ctx, p, s); err != nil {
 			return nil
 		}
 		if len(liveIDs(jobs)) > 0 {
@@ -63,6 +66,32 @@ func (c *Controller) syncDeleting(ctx context.Context, p *pass, s *allocState) e
 		return fmt.Errorf("remove finalizer: %w", err)
 	}
 	return nil
+}
+
+// deletingJobs returns the jobs with the tag and, when it does not carry the
+// tag, the recorded job read by its ID.
+func (c *Controller) deletingJobs(ctx context.Context, p *pass, s *allocState) ([]provider.Job, error) {
+	jobs, err := c.findByTag(ctx, p, s.tag, s.a.CreationTimestamp.Add(-listLookback))
+	if err != nil {
+		return nil, err
+	}
+	id := s.a.Annotations[v1alpha1.AnnotationJobID]
+	if id == "" {
+		return jobs, nil
+	}
+	for _, j := range jobs {
+		if j.ID == id {
+			return jobs, nil
+		}
+	}
+	job, found, err := c.observeJob(ctx, p, id)
+	if err != nil {
+		return nil, err
+	}
+	if found {
+		jobs = append(jobs, job)
+	}
+	return jobs, nil
 }
 
 // liveIDs returns the IDs of the jobs that can still be cancelled: held,

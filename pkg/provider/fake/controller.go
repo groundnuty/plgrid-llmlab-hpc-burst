@@ -93,7 +93,10 @@ import (
 //     stays: it is never removed. If it was never raised, none is written.
 //   - Deletion: every job with the tag that has no end time (held, pending,
 //     running, or requeued and so Failed by phase but still holding its
-//     allocation) is cancelled; then, with none live and no attempt
+//     allocation) is cancelled, and so is the recorded job when it has none,
+//     read by its ID even when its name is not the tag (a job the platform
+//     renamed, whose cancel failed or had not happened yet); a failed read of
+//     it keeps the finalizer, like any failed read; then, with none live and no attempt
 //     unresolved, the Allocation's files are removed and the finalizer goes. An
 //     attempt with no job found is unresolved, and keeps the finalizer, until
 //     the rules above release it: in hold mode InflightWindow has passed, in
@@ -149,6 +152,12 @@ import (
 //     (Batch.SetTimeLimit), is a later hard end, never a mismatch.
 //   - Retention: every status written mirrors status.retention.effectiveMode
 //     from spec.retentionPolicy (RetentionPolicy.EffectiveMode: Keep when unset).
+//   - Prerequisites (opt-in, the Prerequisites field): before it claims an
+//     attempt, the Controller waits for a front, the Allocation's credential
+//     (mode 600, read with agentapi.ReadKeyFile) and an agent build with the
+//     agentDigest, showing phase Submitting with a reason that starts with the
+//     Prerequisite* constant of what is missing, writing no record. Unset, none
+//     of them is checked.
 //   - Not modelled: the AdminHold condition, the sticky duplicates list of
 //     fallback mode, and the compare-and-swap conflicts.
 //   - Times are written in whole seconds: metav1.Time keeps no more.
@@ -177,6 +186,10 @@ type Controller struct {
 	// be before a pass with a failed read sets Ready False; zero means
 	// v1alpha1.ProviderReadyStaleness.
 	ReadyStaleness time.Duration
+	// Prerequisites, when set, makes a submission wait for a front, the
+	// Allocation's credential file and an agent build, as the real provider
+	// does; nil checks none of them.
+	Prerequisites *Prerequisites
 }
 
 const (

@@ -211,7 +211,8 @@ func TestReadKeyFileModes(t *testing.T) {
 		mode os.FileMode
 		ok   bool
 	}{
-		{0o600, true}, {0o400, true},
+		// The rule: no permission bit for the group or others, and the owner can read.
+		{0o600, true}, {0o400, true}, {0o700, true}, {0o500, true},
 		{0o640, false}, {0o604, false}, {0o644, false}, {0o660, false}, {0o606, false}, {0o666, false}, {0o602, false},
 		{0o200, false}, {0o000, false}, {0o300, false},
 	} {

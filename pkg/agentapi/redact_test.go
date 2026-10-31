@@ -194,6 +194,11 @@ func checkRedacted(t *testing.T, v reflect.Value, path string, checked *[]string
 			}
 			p, fv := path+"."+f.Name, v.Field(i)
 			if hasSecretWord(f.Name) && !notSecretByName[f.Name] {
+				// A pointer is judged by what it points to: Health's gauges
+				// are *int64, and GeneratedTokens is a count, not a secret.
+				for fv.Kind() == reflect.Pointer && !fv.IsNil() {
+					fv = fv.Elem()
+				}
 				switch fv.Kind() {
 				case reflect.String:
 					*checked = append(*checked, p)

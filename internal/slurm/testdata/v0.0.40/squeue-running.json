@@ -1,0 +1,33 @@
+{
+ "jobs": [
+  {
+   "job_id": 4242,
+   "name": "s1-frp",
+   "comment": "",
+   "job_state": ["RUNNING"],
+   "restart_cnt": 0,
+   "requeue": false,
+   "submit_time": {"set": true, "infinite": false, "number": 1793351243},
+   "start_time": {"set": true, "infinite": false, "number": 1793351245},
+   "end_time": {"set": false, "infinite": false, "number": 0},
+   "user_name": "example-user",
+   "partition": "plgrid",
+   "account": "example-account",
+   "state_reason": "None",
+   "hold": false,
+   "priority": {"set": true, "infinite": false, "number": 1000},
+   "time_limit": {"set": true, "infinite": false, "number": 10},
+   "tres_req_str": "cpu=2,mem=1G,node=1,billing=2",
+   "exit_code": {
+    "status": ["PENDING"],
+    "return_code": {"set": false, "infinite": false, "number": 0},
+    "signal": {"id": {"set": false, "infinite": false, "number": 0}, "name": ""}
+   }
+  }
+ ],
+ "last_backfill": {"set": true, "infinite": false, "number": 1793351240},
+ "last_update": {"set": true, "infinite": false, "number": 1793351246},
+ "meta": {"plugin": {"data_parser": "data_parser/v0.0.40", "accounting_storage": "accounting_storage/slurmdbd"}},
+ "errors": [],
+ "warnings": []
+}
