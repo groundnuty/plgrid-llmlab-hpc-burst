@@ -6,10 +6,11 @@ import (
 	"time"
 	"unicode/utf8"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
 // Clock is the controller's time source. fake.Clock of pkg/provider/fake
@@ -61,9 +62,9 @@ type KubeRecorder struct{ R events.EventRecorder }
 
 // Event implements Recorder.
 func (k KubeRecorder) Event(regarding, related client.Object, typ, code, message string) {
-	et := corev1.EventTypeNormal
+	et := provider.EventKindOrdinary
 	if warningType(typ) {
-		et = corev1.EventTypeWarning
+		et = provider.EventKindWarning
 	}
 	var rel runtime.Object
 	if related != nil {

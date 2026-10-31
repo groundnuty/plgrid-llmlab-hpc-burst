@@ -149,11 +149,11 @@ func TestKubeRecorderReasonIsTheCodeAlone(t *testing.T) {
 	k.Event(in, nil, "ready", "Ready", "routed")
 	k.Event(md, in, "degraded", "CapacityDropped", "drain start reached with no replacement ready")
 	want := []capturedEvent{
-		{corev1.EventTypeWarning, "IdentityUnresolved", "degraded", "class has no deployment ID", "md", ""},
-		{corev1.EventTypeNormal, "NoReplacementReady", "ending-soon", "less than an hour left", "md-abcde", ""},
-		{corev1.EventTypeWarning, "WorkerRestart", "failing", "no progress", "md-abcde", ""},
-		{corev1.EventTypeNormal, "Ready", "ready", "routed", "md-abcde", ""},
-		{corev1.EventTypeWarning, "CapacityDropped", "degraded", "drain start reached with no replacement ready", "md", "md-abcde"},
+		{"Warning", "IdentityUnresolved", "degraded", "class has no deployment ID", "md", ""},
+		{"Normal", "NoReplacementReady", "ending-soon", "less than an hour left", "md-abcde", ""},
+		{"Warning", "WorkerRestart", "failing", "no progress", "md-abcde", ""},
+		{"Normal", "Ready", "ready", "routed", "md-abcde", ""},
+		{"Warning", "CapacityDropped", "degraded", "drain start reached with no replacement ready", "md", "md-abcde"},
 	}
 	if len(c.got) != len(want) {
 		t.Fatalf("recorded %+v, want %+v", c.got, want)
@@ -377,7 +377,7 @@ func TestManagerOnControlPlane(t *testing.T) {
 		for _, e := range evs.Items {
 			seen = append(seen, e.Reason+"/"+e.Action+" on "+e.Regarding.Name)
 			// Literals, not the code's constants: the wire form is the contract.
-			if e.Reason == "IdentityUnresolved" && e.Action == "degraded" && e.Regarding.Name == "md-collide" && e.Type == corev1.EventTypeWarning {
+			if e.Reason == "IdentityUnresolved" && e.Action == "degraded" && e.Regarding.Name == "md-collide" && e.Type == "Warning" {
 				return true, ""
 			}
 		}
