@@ -37,7 +37,9 @@ const (
 	// HeaderTag, HeaderJobID and HeaderAgentInstanceID identify the agent on
 	// every call, beside "Authorization: Bearer <credential>". The agent
 	// instance ID is random per agent process (doc.go), never the kernel's
-	// boot ID.
+	// boot ID, and has the form CheckAgentInstanceID accepts (the agent draws
+	// it with NewAgentInstanceID): the server answers another form with
+	// CodeBadRequest before it calls the Backend.
 	HeaderTag             = "Hpcburst-Tag"
 	HeaderJobID           = "Hpcburst-Job-Id"
 	HeaderAgentInstanceID = "Hpcburst-Agent-Instance-Id"
@@ -75,7 +77,8 @@ type Caller struct {
 	// JobID is the job ID the agent presented, equal to the recorded one.
 	JobID string
 	// AgentInstanceID is the agent process's random ID, from
-	// HeaderAgentInstanceID.
+	// HeaderAgentInstanceID, which the server has checked with
+	// CheckAgentInstanceID.
 	AgentInstanceID string
 }
 

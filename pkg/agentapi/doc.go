@@ -36,7 +36,10 @@
 //
 // The agent instance ID identifies one agent process. It is never the kernel's
 // boot ID: a requeued job can land on the same node with no reboot, and must
-// still be told apart. The registration also carries the scheduler's restart
+// still be told apart. Its form is 32 lowercase hex characters
+// (NewAgentInstanceID draws one, CheckAgentInstanceID checks it), because the
+// controller copies it into a status field with a length bound; the server
+// refuses another form with CodeBadRequest before it calls the Backend. The registration also carries the scheduler's restart
 // count of the job (RegisterRequest.RestartCount, from SLURM_RESTART_COUNT when
 // Slurm sets it), so a requeue shows as a higher count too.
 //
