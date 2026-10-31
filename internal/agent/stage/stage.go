@@ -42,7 +42,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -78,7 +77,10 @@ type Config struct {
 	Readers int
 	// BaseEnv is Apptainer's environment.
 	BaseEnv []string
-	// Log receives Apptainer's output.
+	// StopGrace is how long a cancelled Apptainer run has between TERM and
+	// KILL to its process group; 5 s when 0.
+	StopGrace time.Duration
+	// Log receives Apptainer's output and the stager's own notices.
 	Log io.Writer
 }
 
@@ -118,6 +120,9 @@ func New(c Config) (*Stager, error) {
 	}
 	if c.TmpDir == "" {
 		c.TmpDir = os.TempDir()
+	}
+	if c.StopGrace <= 0 {
+		c.StopGrace = 5 * time.Second
 	}
 	if c.Log == nil {
 		c.Log = io.Discard
@@ -171,15 +176,9 @@ func (s *Stager) image(ctx context.Context, image, digest string, format agentap
 	} else {
 		args = []string{"pull", tmp, ref}
 	}
-	cmd := exec.CommandContext(ctx, s.c.Apptainer, args...)
-	cmd.Env = append(append([]string(nil), s.c.BaseEnv...),
-		"APPTAINER_CACHEDIR="+filepath.Join(dir, ".cache"),
-		"APPTAINER_TMPDIR="+s.c.TmpDir,
-	)
-	cmd.Stdout, cmd.Stderr = s.c.Log, s.c.Log
-	if err := cmd.Run(); err != nil {
+	if err := s.runApptainer(ctx, args); err != nil {
 		os.RemoveAll(tmp)
-		return "", fmt.Errorf("apptainer %s %s: %w", args[0], ref, err)
+		return "", fmt.Errorf("%w for %s", err, ref)
 	}
 	if err := os.Rename(tmp, final); err != nil {
 		// Another Allocation staged it first: keep its copy.
