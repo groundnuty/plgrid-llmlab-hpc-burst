@@ -69,7 +69,9 @@ addlic $spikes
 run V5 ""
 
 modpath=$(cd "$tree" && go list -m) || { echo "go list -m failed in the copy" >&2; exit 2; }
-want_own=$(cd "$tree" && go list ./... | wc -l)
+pkgs=$(cd "$tree" && go list -buildvcs=false ./...) || { echo "go list ./... failed in the copy" >&2; exit 2; }
+want_own=$(printf '%s\n' "$pkgs" | grep -c .)
+[ "$want_own" -gt 0 ] || { echo "go list ./... found no package in the copy" >&2; exit 2; }
 echo; echo "root report of V1 and V3 (module $modpath; $want_own packages by go list)"
 own_rows() { # report file -> the number of rows of the module's own packages, or "unreadable"
   [ -s "$1" ] || { echo unreadable; return; }
