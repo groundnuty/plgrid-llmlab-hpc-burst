@@ -130,12 +130,26 @@ const AccountingRefresh = v1alpha1.ProviderPollInterval
 // A change in a count, the job's end, and a stored block a minute old are
 // written at once. So is the block of a pass that made an accounting read for
 // the counts (read), found or not: its readTime then times the next one.
+//
+// A known final observation in prior (FinalKnown) is never replaced by a read
+// that lacks the elapsed time, such as accounting's record of the job before
+// it has all of the job's executions (review of PR 118, Astra B6 and B7).
 func MirrorAccounting(job Job, requestedGPUs int32, prior *v1alpha1.AllocationObservation, now time.Time, read bool) *v1alpha1.AllocationAccounting {
 	next := AccountingOf(job, requestedGPUs, prior.Accounting, now)
+	if FinalKnown(prior) && (next == nil || next.ElapsedSeconds == nil) {
+		return prior.Accounting.DeepCopy()
+	}
 	if !read && keepStored(prior, next, job.EndTime != nil) {
 		return prior.Accounting.DeepCopy()
 	}
 	return next
+}
+
+// FinalKnown reports whether the stored observation o holds a known final
+// observation of the recorded job: its end time and its elapsed time (review of
+// PR 118, Astra B6). No later absence or incomplete read replaces it.
+func FinalKnown(o *v1alpha1.AllocationObservation) bool {
+	return o.EndTime != nil && o.Accounting != nil && o.Accounting.ElapsedSeconds != nil
 }
 
 // keepStored reports whether storing next in place of prior's accounting

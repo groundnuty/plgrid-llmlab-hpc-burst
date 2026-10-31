@@ -61,6 +61,19 @@ func (e *external) allocatedRead(ctx context.Context, job provider.Job, prior *v
 	return job, true, nil
 }
 
+// accountingFinal reports whether accounting's record of an ended job is the
+// last read it needs (review of PR 118, Astra B7): the job has reached a
+// terminal state, and that alone is not complete accounting. It is final when
+// it gives the elapsed time over all the job's executions, or once lostGrace
+// has passed since the job's end, which bounds the reads of a record that stays
+// incomplete; until then, the job is read again on every poll.
+func (e *external) accountingFinal(job provider.Job, now time.Time) bool {
+	if job.Accounting != nil && job.Accounting.Elapsed != nil {
+		return true
+	}
+	return job.EndTime != nil && now.Sub(*job.EndTime) > e.lostGrace()
+}
+
 // mirrorAccounting writes status.atProvider.accounting from the read of the
 // recorded job (the caller has passed it through allocatedRead), at
 // provider.MirrorAccounting's cadence: a running job's block is rewritten when
@@ -72,21 +85,28 @@ func (e *external) mirrorAccounting(a *v1alpha1.Allocation, job provider.Job, pr
 }
 
 // keepAccounting is the finalizer's record step (HBEP-4, Two controllers,
-// Delete; HBEP-8, Provider accounting): once no job with the tag is live, and
-// before the Allocation's files and finalizer go, it writes acct-<Allocation
-// UID> from the reads the deleting pass already made. It makes no scheduler
-// call. It reports false while it waits for the final read of a job that started:
-// the recorded job shows in neither the queue listing nor accounting, so its
-// elapsed time cannot be known yet, and the wait is at most lostGrace, counted
-// from status.atProvider.absentSince (set here when the job was not already
-// absent), which survives a restart. After that the record is written with the
-// elapsed time and the end time unknown. A job that never started has no hours
-// to wait for and is written at once, and an Allocation that never had a job
-// writes no record.
+// Delete; HBEP-8, Provider accounting): once the deleting pass's reads have
+// succeeded and shown no live job with the tag, and before the Allocation's
+// files and finalizer go, it writes acct-<Allocation UID> from those reads. It
+// makes no scheduler call; a failed read never reaches it (the finalizer stays,
+// PR 76's Astra B3). In order:
+//   - a read of the recorded job that gives its final elapsed time, or shows it
+//     never started, is written at once;
+//   - else a known final observation in the stored status (provider.FinalKnown)
+//     is written at once: a later absence or incomplete read never erases it
+//     (review of PR 118, Astra B6);
+//   - else, for a recorded job that started, the step waits for the read that
+//     gives the final elapsed time, whether the job shows in neither the queue
+//     listing nor accounting or accounting's record of it is incomplete (Astra
+//     B7). The wait is at most lostGrace, counted from
+//     status.atProvider.absentSince, set here if unset; it survives a restart.
+//     During deletion absentSince times this wait only: no Lost is judged. After
+//     it the record is written with what is known, the missing fields unknown;
+//   - an Allocation that never had a job writes no record.
 //
-// The record is created if absent and never rewritten: an AlreadyExists is
-// success, and nothing here reads or updates it. A failed create keeps the
-// finalizer.
+// It reports false while it waits. The record is created if absent and never
+// rewritten: an AlreadyExists is success, and nothing here reads or updates
+// it. A failed create keeps the finalizer.
 func (e *external) keepAccounting(ctx context.Context, a *v1alpha1.Allocation, rec record, name string, jobs []provider.Job, now time.Time) (bool, error) {
 	if rec.jobID == "" && len(jobs) == 0 {
 		return true, nil
@@ -100,25 +120,45 @@ func (e *external) keepAccounting(ctx context.Context, a *v1alpha1.Allocation, r
 	}
 	p := a.Spec.ForProvider.Batch
 	data := v1alpha1.AccountingRecordData{Provider: e.s.o.Provider, Partition: p.Partition, Tag: name, JobIDs: jobIDs(jobs, rec.jobID)}
-	var acct *v1alpha1.AllocationAccounting
-	switch {
-	case recorded != nil:
-		acct = provider.AccountingOf(*recorded, p.GPUs, o.Accounting, now)
+	var read *v1alpha1.AllocationAccounting
+	if recorded != nil {
+		read = provider.AccountingOf(*recorded, p.GPUs, o.Accounting, now)
+	}
+	fromRead := func() {
 		data.StartTime, data.EndTime = mtp(recorded.StartTime), mtp(recorded.EndTime)
-	case rec.jobID != "" && o.StartTime != nil:
+		fillAccounting(&data, read)
+	}
+	switch {
+	case recorded != nil && (recorded.StartTime == nil || read.ElapsedSeconds != nil):
+		fromRead()
+	case provider.FinalKnown(o):
+		data.StartTime, data.EndTime = o.StartTime, o.EndTime
+		fillAccounting(&data, o.Accounting)
+	case rec.jobID == "" || (recorded == nil && o.StartTime == nil):
+		// No recorded job, or one never seen started: no hours to wait for.
+	default:
 		if o.AbsentSince == nil {
 			o.AbsentSince = mt(now)
 		}
 		if now.Sub(o.AbsentSince.Time) <= e.lostGrace() {
 			return false, nil
 		}
-		acct = provider.AccountingLost(&o.StartTime.Time, p.GPUs, o.Accounting, now)
-		data.StartTime = o.StartTime
+		if recorded != nil {
+			fromRead()
+		} else {
+			data.StartTime, data.EndTime = o.StartTime, o.EndTime
+			fillAccounting(&data, provider.AccountingLost(&o.StartTime.Time, p.GPUs, o.Accounting, now))
+		}
 	}
+	return true, e.createAccountingRecord(ctx, a, data)
+}
+
+// fillAccounting copies the counts and the elapsed time into the record; nil
+// leaves them unknown.
+func fillAccounting(data *v1alpha1.AccountingRecordData, acct *v1alpha1.AllocationAccounting) {
 	if acct != nil {
 		data.AllocatedCPUs, data.AllocatedGPUs, data.ElapsedSeconds = acct.AllocatedCPUs, acct.AllocatedGPUs, acct.ElapsedSeconds
 	}
-	return true, e.createAccountingRecord(ctx, a, data)
 }
 
 // createAccountingRecord creates the Allocation's accounting record if it does

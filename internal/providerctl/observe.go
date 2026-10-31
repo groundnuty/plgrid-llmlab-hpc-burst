@@ -48,7 +48,7 @@ func (e *external) observeRecorded(ctx context.Context, a *v1alpha1.Allocation, 
 		o.JobID, o.Submission = rec.jobID, rec.sub
 		return exists, e.readFailed(err)
 	}
-	if job.EndTime != nil && job.Source == provider.SourceAccounting {
+	if job.EndTime != nil && job.Source == provider.SourceAccounting && e.accountingFinal(job, now) {
 		e.s.finals.Store(rec.jobID, true)
 	}
 	if !found {
