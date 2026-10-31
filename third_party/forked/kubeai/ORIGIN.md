@@ -32,7 +32,8 @@ Path change: upstream's `internal/loadbalancer` is `loadbalancer/` here, so that
 
 ## What is added (not from KubeAI)
 
-- `go.mod`, `go.sum`: this directory is its own Go module.
+- `go.mod`, `go.sum`: this directory is its own Go module. Its `go` line is 1.26.0, the root module's minimum, so the root module can require it (issue #64, through a `replace` to this directory) without raising its own `go` line; OpenTelemetry v1.47.0 also needs only 1.26.0. Nothing in the copied code needs a newer language version.
+- **Used by the front.** `internal/front/balancer` (issue #64, HBEP-5) is product code that drives the group through the handle below, one group per ModelDeployment. It wraps it with the rules HBEP-5 requires (serialised pick, once-guarded release, release at a leave, eligibility filters on a ring replica, the adaptive cap and the FIFO), without changing a copied line.
 - `loadbalancer/sim_api.go`: an exported handle (`Group`) that calls upstream's `reconcileEndpoints`, `removeEndpoint` and `getBestAddr`. It re-implements no selection rule. `getBestAddr` gets an already-cancelled context, so with no endpoints it returns an error instead of blocking. It also holds a test seam, `SetSelectionHook`. It swaps the no-op instrument that upstream records between CHWBL's load check and the counter increment (`InferenceRequestsHashLookupFinal`) for one that calls a hook, so a test can hold a selector at that point. No upstream line changes.
 - `loadbalancer/sim_api_test.go`: hand-checked tests of the copied behaviour (same key, same endpoint; spill at the bound; release after removal).
 - `loadbalancer/concurrency_test.go`: hand-checked tests of three upstream properties a front must work around:

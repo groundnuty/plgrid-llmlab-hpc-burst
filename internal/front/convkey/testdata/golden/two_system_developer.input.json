@@ -1,0 +1,1 @@
+[{"content":"Rule one.","role":"system"},{"role":"developer","content":"Rule two."},{"role":"user","content":"Go"}]

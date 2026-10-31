@@ -3,9 +3,11 @@ module github.com/groundnuty/plgrid-llmlab-hpc-burst
 go 1.26.0
 
 require (
+	github.com/cespare/xxhash v1.1.0
 	github.com/crossplane/crossplane-runtime/v2 v2.4.3
 	github.com/crossplane/crossplane/apis/v2 v2.3.4
 	github.com/go-logr/logr v1.4.4
+	github.com/groundnuty/plgrid-llmlab-hpc-burst/third_party/forked/kubeai v0.0.0
 	github.com/hanwen/go-fuse/v2 v2.12.1
 	golang.org/x/sys v0.48.0
 	k8s.io/api v0.35.3
@@ -87,3 +89,6 @@ require (
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.2-0.20260122202528-d9cc6641c482 // indirect
 )
+
+// The front's balancer copies KubeAI's group, which sits under Go internal/ upstream (HBEP-5; third_party/forked/kubeai/ORIGIN.md).
+replace github.com/groundnuty/plgrid-llmlab-hpc-burst/third_party/forked/kubeai => ./third_party/forked/kubeai

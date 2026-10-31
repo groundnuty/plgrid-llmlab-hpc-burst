@@ -1,0 +1,27 @@
+copy of fedc924; modules under spikes/: spikes/s10 spikes/s10b spikes/s10c spikes/s2 spikes/s2b spikes/s3 spikes/s4 spikes/s8
+
+== V1: exit 1; failing modules: spikes/s10b spikes/s10c
+   root module, first gate line: gate: go-licenses exit=1, permitted=9, unexpected=0: ok
+   as expected (spikes/s10b spikes/s10c)
+
+== V2: exit 1; failing modules: spikes/s10b spikes/s10c
+   root module, first gate line: gate: go-licenses exit=0, permitted=0, unexpected=0: ok
+   as expected (spikes/s10b spikes/s10c)
+
+== V3: exit 1; failing modules: spikes/s10 spikes/s10b spikes/s10c spikes/s2 spikes/s2b spikes/s3 spikes/s4 spikes/s8
+   root module, first gate line: gate: go-licenses exit=0, permitted=0, unexpected=0: ok
+   as expected (spikes/s10 spikes/s10b spikes/s10c spikes/s2 spikes/s2b spikes/s3 spikes/s4 spikes/s8)
+
+== V4: exit 0; failing modules: none
+   root module, first gate line: gate: go-licenses exit=0, permitted=0, unexpected=0: ok
+   as expected (none)
+
+== V5: exit 0; failing modules: none
+   root module, first gate line: gate: go-licenses exit=0, permitted=0, unexpected=0: ok
+   as expected (none)
+
+root report of V1 and V3 (module github.com/groundnuty/plgrid-llmlab-hpc-burst; 9 packages by go list)
+   own-package rows: V1 9 (want 9), V3 1 (want 1)
+   dependency rows identical with and without the root LICENSE: yes (57)
+
+licence-root-test: all variants as expected

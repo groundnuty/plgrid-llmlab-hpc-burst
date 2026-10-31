@@ -1,0 +1,6 @@
+# Modules whose licence check legitimately sees zero packages (HBEP-15, "No empty run").
+# A run that checks no package exits 0 and checks nothing, so licence-check.sh fails a module that
+# saw zero packages unless it is listed here, with the reason. One entry per line:
+#   <module directory relative to the repo root>: <reason>
+# An entry without a reason is refused (exit 2). Do not add a module just to make a run pass.
+third_party/forked/kcp: its one Go file is behind the s3embedded build tag, so no package matches and no binary links it; the copied-code check covers it
