@@ -35,9 +35,9 @@
 // reference means nothing (HBEP-3).
 //
 // A gated or private repository needs a Hub token. The configuration names a
-// file that holds it, not the token: the file must not be readable by group
-// or others (mode 600), and it is read again for every call, so a rotated
-// token takes effect without a restart. The token goes only into the
+// file that holds it, not the token: the file's mode must be exactly 600 or
+// 400, and it is read again for every call, so a rotated token takes effect
+// without a restart. The token goes only into the
 // Authorization header of requests to the configured Hub host. It is not
 // logged, not part of any error, and the type that holds it prints as
 // "[redacted]" under every fmt verb. The package does no logging of its own.

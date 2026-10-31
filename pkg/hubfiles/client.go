@@ -34,7 +34,7 @@ type Config struct {
 	BaseURL string
 	// TokenFile names a file that holds the Hub token, for a gated or private
 	// repository. Empty means anonymous. The file must be a regular file with
-	// no access for group or others (mode 600), and is read on every call.
+	// access for the owner only, mode 0600 or 0400, and is read on every call.
 	TokenFile string
 	// HTTPClient is used for every request. Two copies of it are made, with
 	// their own redirect checks, which run after its CheckRedirect (if any)

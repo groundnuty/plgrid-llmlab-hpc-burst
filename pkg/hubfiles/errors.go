@@ -38,9 +38,10 @@ var (
 	// ErrTooManyPages is returned when the page chain is longer than
 	// Config.MaxPages or loops back to a page already read.
 	ErrTooManyPages = errors.New("hubfiles: page chain too long or circular")
-	// ErrCrossHostLink is returned when a Link header points to another scheme
-	// or host than the configured Hub. It is not followed, so the token never
-	// leaves the Hub's host.
+	// ErrCrossHostLink is returned when a Link header points to another
+	// origin (scheme, host or port) than the configured Hub, or when the
+	// listing is redirected to one. It is not followed, so the token never
+	// leaves the Hub's origin and the listing never comes from plain http.
 	ErrCrossHostLink = errors.New("hubfiles: next-page link points to another host")
 )
 

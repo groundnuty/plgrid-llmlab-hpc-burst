@@ -33,13 +33,15 @@ func writeToken(t *testing.T, content string, mode os.FileMode) string {
 }
 
 func TestTokenFileModes(t *testing.T) {
-	for _, mode := range []os.FileMode{0o600, 0o400, 0o700} {
+	for _, mode := range []os.FileMode{0o600, 0o400} {
 		tok, err := readToken(writeToken(t, testToken+"\n", mode))
 		if err != nil || tok.reveal() != testToken {
 			t.Errorf("mode %04o: token %q, err %v; want the token with its newline trimmed", mode, tok.reveal(), err)
 		}
 	}
-	for _, mode := range []os.FileMode{0o640, 0o644, 0o604, 0o660, 0o666, 0o620, 0o602, 0o750, 0o755} {
+	// 0700 and 0500 have no group or other access but are not 0600 or 0400: a
+	// token file is not meant to be executable.
+	for _, mode := range []os.FileMode{0o700, 0o500, 0o640, 0o644, 0o604, 0o660, 0o666, 0o620, 0o602, 0o750, 0o755} {
 		path := writeToken(t, testToken, mode)
 		_, err := readToken(path)
 		if !errors.Is(err, ErrTokenFile) {

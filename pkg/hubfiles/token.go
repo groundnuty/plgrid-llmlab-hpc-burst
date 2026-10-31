@@ -34,8 +34,9 @@ func (t token) reveal() string { return string(t) }
 
 // readToken reads the token from path. The mode is checked on the open file
 // (fstat), so a file swapped between a check and the read cannot slip past.
-// A file that group or others can access is refused, and so is anything that
-// is not a regular file. No error message holds file content.
+// A file whose mode is not 0600 or 0400 is refused (so is one that group or
+// others can access, or that is executable), and so is anything that is not a
+// regular file. No error message holds file content.
 func readToken(path string) (token, error) {
 	// O_NONBLOCK: opening a named pipe that has no writer would block until
 	// one appears, whatever the caller's context says. A regular file is not
@@ -52,8 +53,8 @@ func readToken(path string) (token, error) {
 	if !info.Mode().IsRegular() {
 		return "", fmt.Errorf("%w: %s is not a regular file", ErrTokenFile, path)
 	}
-	if perm := info.Mode().Perm(); perm&0o077 != 0 {
-		return "", fmt.Errorf("%w: %s has mode %04o; it must not be accessible by group or others (use mode 600)", ErrTokenFile, path, perm)
+	if perm := info.Mode().Perm(); perm != 0o600 && perm != 0o400 {
+		return "", fmt.Errorf("%w: %s has mode %04o; it must be 0600 or 0400 (owner only)", ErrTokenFile, path, perm)
 	}
 	data, err := io.ReadAll(io.LimitReader(f, maxTokenFileBytes+1))
 	if err != nil {
