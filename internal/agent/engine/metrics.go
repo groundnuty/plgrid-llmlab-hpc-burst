@@ -76,8 +76,10 @@ func (c *Client) Sample(ctx context.Context) (agentapi.Health, error) {
 	// The status label is taken verbatim (agentapi.Health.ResponsesByStatus).
 	// vLLM v0.32.0 groups it into classes: serve/instrumentator/metrics.py,
 	// lines 64-74, builds its Instrumentator without
-	// should_group_status_codes, whose default is True
-	// (prometheus-fastapi-instrumentator, instrumentation.py, line 39), so
+	// should_group_status_codes, whose default is True in the versions vLLM
+	// accepts (requirements/common.txt, line 23: >= 8.0.0;
+	// prometheus-fastapi-instrumentator v8.0.0 and v8.1.0,
+	// src/prometheus_fastapi_instrumentator/instrumentation.py, line 39), so
 	// the keys are "2xx", "4xx" and "5xx".
 	for _, s := range m[metricHTTP] {
 		st := s.labels["status"]
