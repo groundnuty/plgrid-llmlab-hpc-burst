@@ -16,11 +16,24 @@ import (
 )
 
 // observeDeleting decides whether a deleting Allocation still holds anything:
-// it exists while any job with the tag is live (held, pending, running or
-// suspended: no end time) or an attempt is unresolved (HBEP-7, open question
-// 11, Deletion). A submission that returns during deletion is recorded, never
-// lifted, and cancelled. Once nothing is left, the Allocation's files are
-// removed and the reconciler may drop the finalizer.
+// it exists while any job with the tag, or the recorded job, is live (held,
+// pending, running or suspended: no end time), or an attempt is unresolved
+// (HBEP-7, open question 11, Deletion). A submission that returns during
+// deletion is recorded, never lifted, and cancelled. Once nothing is left, the
+// Allocation's files are removed and the reconciler may drop the finalizer.
+//
+// The recorded job is read by its ID as well as by tag: a job the platform
+// stored under another name (refuseRenamed) is invisible to the tag lookup,
+// and its cancel may have failed or not happened yet when the Allocation was
+// deleted. A failed read of it is unknown, never absence, so the finalizer
+// stays (review of PR 76: Astra B3, Opus R2).
+//
+// An unresolved attempt keeps the finalizer whether or not a job is recorded:
+// an adopted job (an older attempt's late registration) says nothing about the
+// claimant of a newer attempt still inside its window, whose job could
+// register after the finalizer went (Astra B4). The recorded job resolves the
+// attempt here by the same rule as observeRecorded, so a fallback-mode
+// deletion needs no operator for an attempt the recorded job answers.
 func (e *external) observeDeleting(ctx context.Context, a *v1alpha1.Allocation, rec record, name string, now time.Time) (managed.ExternalObservation, error) {
 	e.p.SetBusy(name, true)
 	jobs, err := e.p.FindByTag(ctx, name, since(a))
@@ -29,6 +42,20 @@ func (e *external) observeDeleting(ctx context.Context, a *v1alpha1.Allocation, 
 	}
 	if rec.jobID == "" && needsResolution(rec) && len(jobs) > 0 {
 		if err := e.adopt(ctx, a, &rec, choose(jobs), now); err != nil {
+			return exists, err
+		}
+	}
+	if rec.jobID != "" && !hasJob(jobs, rec.jobID) {
+		job, found, err := e.p.Observe(ctx, rec.jobID)
+		if err != nil {
+			return exists, e.readFailed(err)
+		}
+		if found {
+			jobs = append(jobs, job)
+		}
+	}
+	if rec.jobID != "" {
+		if err := e.resolveByRecorded(ctx, a, &rec, now); err != nil {
 			return exists, err
 		}
 	}
@@ -41,7 +68,7 @@ func (e *external) observeDeleting(ctx context.Context, a *v1alpha1.Allocation, 
 	if len(e.toCancel) > 0 {
 		return exists, nil
 	}
-	if rec.jobID == "" && needsResolution(rec) && !e.attemptReleased(a, rec.sub, now) {
+	if needsResolution(rec) && !e.attemptReleased(a, rec.sub, now) {
 		if !e.hold() && now.Sub(attemptTime(a, rec.sub)) > e.unknownBound() {
 			e.needOperator(a, rec.sub)
 		}
@@ -52,6 +79,15 @@ func (e *external) observeDeleting(ctx context.Context, a *v1alpha1.Allocation, 
 	}
 	e.p.SetBusy(name, false)
 	return missing, nil
+}
+
+func hasJob(jobs []provider.Job, id string) bool {
+	for _, j := range jobs {
+		if j.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // attemptReleased reports whether a deleting Allocation may let go of its

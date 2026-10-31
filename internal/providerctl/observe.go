@@ -32,18 +32,9 @@ const (
 func (e *external) observeRecorded(ctx context.Context, a *v1alpha1.Allocation, rec *record, name string, now time.Time) (managed.ExternalObservation, error) {
 	o := &a.Status.AtProvider
 	prior := o.DeepCopy()
-	if s := rec.sub; unresolved(s) && (s.State == v1alpha1.SubmissionUnknown || now.Sub(attemptTime(a, s)) > e.inflightWindow()) {
-		done := *s
-		done.State, done.Writer, done.Time = v1alpha1.SubmissionDone, e.s.o.Identity, mt(now)
-		done.Reason = "resolved by the recorded job " + rec.jobID
-		if err := write(ctx, e.s.kube, a, map[string]string{v1alpha1.AnnotationSubmission: recordValue(done)}); err != nil {
-			return exists, err
-		}
-		if err := e.reread(a, rec); err != nil {
-			return exists, err
-		}
+	if err := e.resolveByRecorded(ctx, a, rec, now); err != nil {
+		return exists, err
 	}
-	e.markResolved(a, rec.sub, now)
 	o.JobID, o.Submission = rec.jobID, rec.sub
 	refused := prior.Phase == v1alpha1.AllocationRefused
 
@@ -115,6 +106,27 @@ func (e *external) observeRecorded(ctx context.Context, a *v1alpha1.Allocation, 
 	}
 	e.p.SetBusy(name, o.Phase == v1alpha1.AllocationHeld)
 	return exists, errors.Join(errs...)
+}
+
+// resolveByRecorded resolves an attempt that the recorded job answers: an
+// Unknown attempt, or an InFlight one past the in-flight window, becomes Done.
+// An InFlight attempt inside the window stays: its claimant resolves it when
+// its sbatch returns, and a job adopted meanwhile (an older attempt's late
+// registration) says nothing about it.
+func (e *external) resolveByRecorded(ctx context.Context, a *v1alpha1.Allocation, rec *record, now time.Time) error {
+	if s := rec.sub; unresolved(s) && (s.State == v1alpha1.SubmissionUnknown || now.Sub(attemptTime(a, s)) > e.inflightWindow()) {
+		done := *s
+		done.State, done.Writer, done.Time = v1alpha1.SubmissionDone, e.s.o.Identity, mt(now)
+		done.Reason = "resolved by the recorded job " + rec.jobID
+		if err := write(ctx, e.s.kube, a, map[string]string{v1alpha1.AnnotationSubmission: recordValue(done)}); err != nil {
+			return err
+		}
+		if err := e.reread(a, rec); err != nil {
+			return err
+		}
+	}
+	e.markResolved(a, rec.sub, now)
+	return nil
 }
 
 // recordQueueWait adds the job's queue wait, its own submit and start times,

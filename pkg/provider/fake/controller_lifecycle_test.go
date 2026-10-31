@@ -354,3 +354,33 @@ func TestSyncWritesNothingWhenNothingChanged(t *testing.T) {
 		t.Fatalf("resourceVersion %s -> %s: an unchanged Allocation was written", before, after)
 	}
 }
+
+// A job the platform stored under another name is invisible to the tag lookup.
+// When the Allocation is deleted before any observe refused and cancelled it,
+// deletion reads the recorded job by its ID and cancels it, and keeps the
+// finalizer while that read fails (review of PR 76: Opus R2, Astra B3).
+func TestDeleteCancelsARenamedRecordedJob(t *testing.T) {
+	e := newEnv(t)
+	e.batch.Enqueue(Script{Rename: "example-renamed"})
+	e.newAlloc("a1", testProvider)
+	// The observe after the submit fails, so nothing refuses the job yet.
+	e.batch.FailReads(errors.New("example transport failure"))
+	e.sync()
+	id := e.alloc("a1").Annotations[v1alpha1.AnnotationJobID]
+	if j, ok := e.batch.Job(id); id == "" || !ok || j.EndTime != nil || j.Name == v1alpha1.JobTag(testNS, "a1", "uid-a1") {
+		t.Fatalf("setup: recorded job %q = %+v, want a live job under another name", id, j)
+	}
+	e.del("a1")
+	e.sync() // reads still fail
+	if e.gone("a1") {
+		t.Fatal("the finalizer was removed while the recorded job could not be read")
+	}
+	e.batch.FailReads(nil)
+	e.sync()
+	if !e.gone("a1") {
+		t.Fatal("Allocation survived its deletion")
+	}
+	if j, _ := e.batch.Job(id); j.EndTime == nil || j.State[0] != "CANCELLED" {
+		t.Fatalf("renamed job %s = %v end %v, want it cancelled", id, j.State, j.EndTime)
+	}
+}

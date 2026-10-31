@@ -93,7 +93,10 @@ import (
 //     stays: it is never removed. If it was never raised, none is written.
 //   - Deletion: every job with the tag that has no end time (held, pending,
 //     running, or requeued and so Failed by phase but still holding its
-//     allocation) is cancelled; then, with none live and no attempt
+//     allocation) is cancelled, and so is the recorded job when it has none,
+//     read by its ID even when its name is not the tag (a job the platform
+//     renamed, whose cancel failed or had not happened yet); a failed read of
+//     it keeps the finalizer, like any failed read; then, with none live and no attempt
 //     unresolved, the Allocation's files are removed and the finalizer goes. An
 //     attempt with no job found is unresolved, and keeps the finalizer, until
 //     the rules above release it: in hold mode InflightWindow has passed, in
