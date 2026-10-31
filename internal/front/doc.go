@@ -6,7 +6,9 @@
 // provider, stops sending to an Instance at its lease end minus the drain
 // window, and names what answered on every response and in a usage record.
 // Its dial-home listener passes /agent/v1/ through to the lifecycle
-// controller in direct mode.
+// controller in direct mode, and frpc's /~!frp websocket to frps in both
+// modes; the front reaches each Instance through frps's tcpmux CONNECT,
+// registered while its probe passes (HBEP-6, The front's half).
 //
 // Layout:
 //   - inventory: the routing view, built from the control plane by watch;
@@ -25,6 +27,11 @@
 //     dynamic informers of the watch and the events recorder.
 //   - The Go standard library's httputil.ReverseProxy for the /agent/v1/
 //     passthrough.
+//   - frp v0.71.1 (fatedier/frp, Apache-2.0, https://github.com/fatedier/frp,
+//     commit d8cf180): no code is copied. The Tunnel speaks frps's tcpmux
+//     httpconnect CONNECT and the /~!frp passthrough feeds frps's websocket
+//     listener, as HBEP-6's frp facts read them; spike S1c (PR #78) measured
+//     the path. New: the Tunnel, the probe and the passthrough.
 //   - Spikes S10, S10b and S10c (this repository, PRs #34, #50, #53): the
 //     balancer wrapper's rules and their tests, rewritten as product code;
 //     S2 phase A (PR #44) for the deadlines and the keep-alive rule.
