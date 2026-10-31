@@ -412,7 +412,30 @@ func TestConformance(t *testing.T) {
 	}
 	job1 := a.Annotations[v1alpha1.AnnotationJobID]
 
-	// 2. A job whose record was lost: submitted held by the plugin, never
+	// 2. Cancel-all on delete, while the job runs: deleting the first
+	// Allocation cancels its job; the finalizer goes once nothing with the tag
+	// is live.
+	if err := w.c.Delete(ctx, w.get(name)); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Minute)
+	for w.get(name) != nil && time.Now().Before(deadline) {
+		w.reconcile(name)
+		time.Sleep(3 * time.Second)
+	}
+	if w.get(name) != nil {
+		t.Fatal("the deleted Allocation still holds its finalizer")
+	}
+	if n := count(w.callWords(), "scancel"); n < 1 {
+		t.Error("no scancel call")
+	}
+	// Then the job reads Ended, CANCELLED, from accounting after it left the
+	// queue.
+	if j := w.endedInAccounting(job1, 3*time.Minute); len(j.State) == 0 || j.State[0] != "CANCELLED" {
+		t.Errorf("the deleted Allocation's job ended as %v, want CANCELLED", j.State)
+	}
+
+	// 3. A job whose record was lost: submitted held by the plugin, never
 	// recorded, then found by tag, adopted and lifted once.
 	lostName := "conformance-lost-record-found-by-tag-observe-end"
 	b := w.newAlloc(lostName)
@@ -444,25 +467,6 @@ func TestConformance(t *testing.T) {
 		t.Errorf("%d scontrol release calls in total, want 2", n)
 	}
 
-	// 3. Cancel-all on delete: deleting the first Allocation cancels its job;
-	// the finalizer goes once nothing with the tag is live.
-	if err := w.c.Delete(ctx, w.get(name)); err != nil {
-		t.Fatal(err)
-	}
-	deadline := time.Now().Add(5 * time.Minute)
-	for w.get(name) != nil && time.Now().Before(deadline) {
-		w.reconcile(name)
-		time.Sleep(3 * time.Second)
-	}
-	if w.get(name) != nil {
-		t.Fatal("the deleted Allocation still holds its finalizer")
-	}
-	if n := count(w.callWords(), "scancel"); n < 1 {
-		t.Error("no scancel call")
-	}
-	// Then the job reads Ended from accounting after it left the queue.
-	w.endedInAccounting(job1, 3*time.Minute)
-
 	// 4. The second job runs to its own end and is observed Ended.
 	w.until(lostName, "the adopted job ends", 8*time.Minute, func(a *v1alpha1.Allocation) bool {
 		return a.Status.AtProvider.Phase == v1alpha1.AllocationEnded || a.Status.AtProvider.Phase == v1alpha1.AllocationFailed
@@ -478,7 +482,7 @@ func TestConformance(t *testing.T) {
 
 // endedInAccounting polls a job by ID until the per-ID queue read no longer
 // lists it and accounting reports it ended.
-func (w *world) endedInAccounting(id string, timeout time.Duration) {
+func (w *world) endedInAccounting(id string, timeout time.Duration) provider.Job {
 	w.t.Helper()
 	ctx := context.Background()
 	deadline := time.Now().Add(timeout)
@@ -490,7 +494,7 @@ func (w *world) endedInAccounting(id string, timeout time.Duration) {
 			if j.EndTime.Location() != time.UTC {
 				w.t.Error("the end time is not in UTC")
 			}
-			return
+			return j
 		}
 		if time.Now().After(deadline) {
 			w.t.Fatalf("a job of this run was not seen ended in accounting after leaving the queue within %s", timeout)

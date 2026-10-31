@@ -4,8 +4,11 @@
 // CRDs: the per-Provider supervisor, the leader Lease of each Provider, and
 // an Allocation reconciled end to end over the in-process fake Slurm.
 //
-// It binds loopback ports 29200-29219 through internal/testenv; run it under
-// the shared envtest lock on a machine where other agents test too.
+// It binds loopback ports through internal/testenv, on the block from 29212
+// unless HPCBURST_TESTENV_PORT_BASE says otherwise, so that go test ./... can
+// run it beside api/v1alpha1/e2e, which uses the default block from 29200.
+// Run it under the shared envtest lock on a machine where other agents test
+// too.
 package e2e
 
 import (
@@ -49,7 +52,17 @@ func scheme() *runtime.Scheme {
 
 func TestMain(m *testing.M) { os.Exit(run(m)) }
 
+// portBase is this package's testenv port block; api/v1alpha1/e2e takes the
+// default, 29200, and go test runs packages in parallel.
+const portBase = "29212"
+
 func run(m *testing.M) int {
+	if os.Getenv("HPCBURST_TESTENV_PORT_BASE") == "" {
+		if err := os.Setenv("HPCBURST_TESTENV_PORT_BASE", portBase); err != nil {
+			fmt.Fprintln(os.Stderr, "set the port base:", err)
+			return 1
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	guard := testenv.GuardSystemPorts()
