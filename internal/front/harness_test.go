@@ -92,6 +92,12 @@ func newHarnessOn(t *testing.T, real clock.Clock, edit func(*Config)) *harness {
 	keysPath := filepath.Join(dir, "client-keys.json")
 	writeMode600(t, keysPath, fmt.Sprintf(`{"keys":[{"id":"tester","key":%q}]}`, h.clientKey))
 	h.cfg = Config{DialHomeListen: "127.0.0.1:0", ClientKeysFile: keysPath, UsageDir: filepath.Join(dir, "usage")}.WithDefaults()
+	// An engine double on the fake clock jumps it at once after flushing its
+	// headers, before the front may have read them; a 30 s headers deadline
+	// would then fire in tests that are not about it. The tests that are set
+	// it (TestStreamHeadersDeadline); the default is checked by
+	// TestStreamHeadersTimeoutDefault.
+	h.cfg.StreamHeadersTimeout = Duration(24 * time.Hour)
 	if edit != nil {
 		edit(&h.cfg)
 	}

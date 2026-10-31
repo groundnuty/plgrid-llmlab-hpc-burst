@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -20,51 +22,50 @@ const redacted = "[redacted]"
 // ordinary bytes. Every key the front holds is far longer.
 const minSecret = 8
 
-// targetRefs lists where the credentials of every target in the current
-// view live: the managed Providers' credentials files and the served
-// Instances' UIDs.
-func (r *Router) targetRefs() (credFiles []string, uids []types.UID) {
+// credentialFiles lists every Provider's credentials file in the snapshot,
+// attached or not: a key the front has held stays redacted after a Provider
+// is detached.
+func (r *Router) credentialFiles() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.view == nil {
-		return nil, nil
-	}
 	seen := map[string]bool{}
-	for _, m := range r.view.Models {
-		for _, t := range m.Managed {
-			if !seen[t.CredentialsFile] {
-				seen[t.CredentialsFile] = true
-				credFiles = append(credFiles, t.CredentialsFile)
-			}
-		}
-		for _, d := range m.Served {
-			for _, i := range d.Members {
-				uids = append(uids, i.UID)
-			}
+	var out []string
+	for i := range r.snap.Providers {
+		if ref := r.snap.Providers[i].Spec.CredentialsRef; ref != nil && ref.File != "" && !seen[ref.File] {
+			seen[ref.File] = true
+			out = append(out, ref.File)
 		}
 	}
-	return credFiles, uids
+	return out
 }
 
-// secrets are every target credential the front holds: the managed keys
-// and every Instance key, not only the key of the request's target
+// secrets are every target credential the front holds: every Provider's
+// managed key and every Instance key on the host, not only the key of the
+// request's target
 // (@hpc-burst-science-agent, 31 Oct 2026). They are read only when an error
 // passes through. The longest go first, so one that contains another is
 // replaced whole.
 func (p *Proxy) secrets(extra ...string) []string {
-	files, uids := p.router.targetRefs()
 	out := append([]string(nil), extra...)
-	for _, f := range files {
+	for _, f := range p.router.credentialFiles() {
 		if c, err := provider.ReadManagedCredentials(f); err == nil {
 			out = append(out, c.Key)
 		}
 	}
-	for _, uid := range uids {
+	// Every Instance key on the host, a draining Instance's too, not only
+	// the members of the current view.
+	dir := filepath.Dir(agentapi.InstanceKeyPath(p.host.CredentialsDir(), "x"))
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		uid := types.UID(e.Name())
 		if k, ok := p.instKeys.Load(uid); ok { // an Instance's key never changes
 			out = append(out, k.(string))
 			continue
 		}
-		if k, err := agentapi.ReadKeyFile(agentapi.InstanceKeyPath(p.host.CredentialsDir(), string(uid))); err == nil {
+		if k, err := agentapi.ReadKeyFile(filepath.Join(dir, e.Name())); err == nil {
 			p.instKeys.Store(uid, k)
 			out = append(out, k)
 		}

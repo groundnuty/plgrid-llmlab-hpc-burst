@@ -17,7 +17,7 @@ func TestStreamHeadersDeadline(t *testing.T) {
 	for _, stream := range []bool{true, false} {
 		name := map[bool]string{true: "streamed", false: "not streamed (exempt)"}[stream]
 		t.Run(name, func(t *testing.T) {
-			f := newScFix(t, scOpts{})
+			f := newScFix(t, scOpts{cfg: func(c *Config) { c.StreamHeadersTimeout = Duration(DefaultStreamHeaders) }})
 			e := f.engines[0]
 			hold := make(chan struct{})
 			e.Set(enginetest.Behaviour{Hold: hold})
@@ -70,5 +70,13 @@ func isDone(c *scCall) bool {
 		return true
 	case <-time.After(200 * time.Millisecond):
 		return false
+	}
+}
+
+// TestStreamHeadersTimeoutDefault: HBEP-5's Parameters give
+// streamHeadersTimeout 30 s.
+func TestStreamHeadersTimeoutDefault(t *testing.T) {
+	if got := (Config{}).WithDefaults().StreamHeadersTimeout.D(); got != 30*time.Second {
+		t.Errorf("streamHeadersTimeout default %v, want 30s", got)
 	}
 }

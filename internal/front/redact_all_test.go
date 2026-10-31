@@ -11,6 +11,7 @@ import (
 	"testing/iotest"
 	"time"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -208,5 +209,36 @@ func TestRedactResponsesFailedAnd2xxAndGzip401(t *testing.T) {
 				t.Errorf("body\n got %q\nwant %q", got, want)
 			}
 		})
+	}
+}
+
+// TestRedactKeysOutsideTheView: the front holds keys beyond the current
+// view's members: an Instance that is not routable (draining, or not ready
+// yet) and a Provider no ModelDeployment attaches. An engine that echoes
+// them leaves no copy in the client's bytes.
+func TestRedactKeysOutsideTheView(t *testing.T) {
+	f := newScFix(t, scOpts{instances: 2, desired: 1, inst: func(i int, o *instanceOpts) {
+		if i == 1 {
+			o.phase = v1alpha1.InstanceDraining
+		}
+	}})
+	const detached = "llmlab-key-of-a-provider-nothing-attaches"
+	f.managedProvider("llmlab-z", "llmlab", "llmlab", "http://127.0.0.1:1/v1", detached)
+	f.apply()
+	b, err := os.ReadFile(agentapi.InstanceKeyPath(f.host.CredentialsDir(), string(f.uids[1])))
+	if err != nil {
+		t.Fatal(err)
+	}
+	draining := strings.TrimSpace(string(b))
+	plain := `{"error":{"message":"keys ` + draining + ` and ` + detached + `","code":400}}`
+	f.retarget(f.uids[0], rawEngine(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(400)
+		_, _ = io.WriteString(w, plain)
+	}))
+	resp := f.errPost(scChat, errChatBody(scModel, false, "hi"))
+	got := readAll(t, resp)
+	if want := strings.NewReplacer(draining, "[redacted]", detached, "[redacted]").Replace(plain); got != want {
+		t.Errorf("body\n got %s\nwant %s", got, want)
 	}
 }
