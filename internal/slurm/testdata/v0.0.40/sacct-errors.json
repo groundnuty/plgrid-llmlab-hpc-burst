@@ -1,0 +1,13 @@
+{
+ "jobs": [],
+ "meta": {"plugin": {"data_parser": "data_parser/v0.0.40", "accounting_storage": "accounting_storage/slurmdbd"}},
+ "errors": [
+  {
+   "description": "Unable to query jobs",
+   "error_number": 2002,
+   "error": "Unable to contact slurm controller (connect failure)",
+   "source": "slurmdb_jobs_get()"
+  }
+ ],
+ "warnings": []
+}
