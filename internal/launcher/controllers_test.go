@@ -127,6 +127,9 @@ func newCtlFixture(t *testing.T, front Front) *ctlFixture {
 		t.Fatal(err)
 	}
 	t.Setenv("FAKECTRL_DIR", f.ctl)
+	// Runs after the test's own clean-ups (it is registered first): whatever still has the state
+	// directory as its working directory is a supervisor or controller the test left behind.
+	t.Cleanup(func() { noLeftovers(t, l.dir) })
 	return f
 }
 

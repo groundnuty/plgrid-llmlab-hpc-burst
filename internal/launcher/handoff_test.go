@@ -92,14 +92,14 @@ func waitGone(rec ProcRec, d time.Duration) bool {
 	return !isProc(rec)
 }
 
-// killOnExit kills rec at the end of the test if it still runs, so that a failed assertion (or a
-// mutated launcher) never leaves a supervisor behind. The kernel then kills its controller too.
+// killOnExit kills rec, and everything below it or in its group or session, at the end of the
+// test if it still runs, so that a failed assertion (or a mutated launcher) never leaves a
+// supervisor behind.
 func killOnExit(t *testing.T, rec ProcRec) {
 	t.Helper()
 	t.Cleanup(func() {
 		if isProc(rec) {
-			_ = syscall.Kill(rec.PID, syscall.SIGKILL)
-			waitGone(rec, 5*time.Second)
+			killTree([]int{rec.PID}, "")
 		}
 	})
 }
