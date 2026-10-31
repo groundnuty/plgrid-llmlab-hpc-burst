@@ -426,3 +426,22 @@ func killChildren(t *testing.T, log string) {
 		}
 	}
 }
+
+// An engine that answers every request with a server error shows it in the
+// health sample's responses by status, as the engine labels them (vLLM's
+// grouped "5xx"), which agentapi.ServerErrors counts (Opus test nit).
+func TestServerErrorsShowInTheHealthSample(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	h.set(h.runState("errors-only", 1, 0, nil))
+	r := h.waitReport("worker-0 running", 20*time.Second, running)
+	sock := strings.TrimPrefix(r.Instance.ServingEndpoint, "unix:")
+	for range 3 {
+		if code := postChat(t, sock, r.Instance.Key); code != 500 {
+			t.Fatalf("the errors-only engine answered %d", code)
+		}
+	}
+	h.waitReport("server errors in the health sample", 10*time.Second, func(r agentapi.Report) bool {
+		w := worker0(r)
+		return w != nil && w.Health != nil && agentapi.ServerErrors(w.Health.ResponsesByStatus) >= 3
+	})
+}

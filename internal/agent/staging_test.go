@@ -189,3 +189,24 @@ func (h *harness) startHub(files map[string]string) (*http.Client, string) {
 		return d.DialContext(ctx, "unix", sock)
 	}}}, "http://hub.test"
 }
+
+// postChat sends one chat request through the serving socket and returns the
+// status.
+func postChat(t *testing.T, sock, key string) int {
+	t.Helper()
+	c := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "unix", sock)
+	}}}
+	body := `{"model":"` + hServed + `","messages":[{"role":"user","content":"hello"}],"max_tokens":4}`
+	req, _ := http.NewRequest(http.MethodPost, "http://instance/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	return resp.StatusCode
+}
