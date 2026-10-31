@@ -298,6 +298,8 @@ for f in ctl tun; do [ -f "$JD/export/ssh-$f-counters.json" ] && ARGS+=(--ssh-co
 # --- judge the run: a config check, with the numbers shown ----------------------------------------------------
 echo
 echo "=== local smoke result [$VARIANT]: CONFIG CHECK ONLY, same host, ${DURATION} s. Not spike evidence. ==="
+echo "verdict.py, for reference: C2 fails on length by design, and C4a-c read the marks in the run book's order (freeze,"
+echo "engine, kill), which the smoke does not follow (calibration, engine, freeze, kill); the smoke judges the faults below."
 cat "$WORK/verdict.out"
 echo
 RC=0

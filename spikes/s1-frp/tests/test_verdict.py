@@ -250,7 +250,8 @@ class PathRate(unittest.TestCase):
         self.assertIn("unknown", text)
 
     def test_a_short_or_failed_or_sender_timed_measurement_fails(self):
-        for bad in (rate(requested_s=10, duration_s=10.1), rate(duration_s=25.0), rate(ok=False, detail="refused"),
+        for bad in (rate(requested_s=10, duration_s=10.1), rate(requested_s=20, duration_s=30.5), rate(duration_s=25.0),
+                    rate(ok=False, detail="refused"),
                     rate(timed_by="receiver-job"), rate(bytes=0, bps=None)):
             ok, text = c6([bad])
             self.assertFalse(ok, (bad, text))

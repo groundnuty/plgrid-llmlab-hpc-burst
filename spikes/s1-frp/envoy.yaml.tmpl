@@ -1,0 +1,53 @@
+# Envoy front for spike S1's dial-home path, rendered by render_tmpl.py. It terminates TLS on
+# 127.0.0.1 and routes: the websocket upgrade on /~!frp to frps (plain, on another loopback port), and
+# the prefix /s1/ to a plain-HTTP loopback sink. The /s1/ route exists for the spike's path-rate
+# measurement only (path_rate.py serve); the product has no such route.
+# There is no admin listener. Both routes switch their timeouts off: Envoy's default route timeout of
+# 15 s runs from the end of the request and would cut a response still streaming after that (a download
+# measured for longer than 15 s). Measured: with the timeouts off a 35 s download ran to the end; with
+# the default it was cut at 15 s.
+static_resources:
+  listeners:
+  - name: front_tls
+    address: {socket_address: {address: 127.0.0.1, port_value: __LISTEN_PORT__}}
+    filter_chains:
+    - transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+          common_tls_context:
+            tls_certificates:
+            - certificate_chain: {filename: "__CERT_FILE__"}
+              private_key: {filename: "__KEY_FILE__"}
+      filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: front
+          stream_idle_timeout: 0s
+          upgrade_configs: [{upgrade_type: websocket}]
+          route_config:
+            virtual_hosts:
+            - name: all
+              domains: ["*"]
+              routes:
+              - match: {path: "/~!frp"}
+                route: {cluster: frps, timeout: 0s, idle_timeout: 0s}
+              - match: {prefix: "/s1/"}
+                route: {cluster: sink, timeout: 0s, idle_timeout: 0s}
+          http_filters:
+          - name: envoy.filters.http.router
+            typed_config: {"@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router}
+  clusters:
+  - name: frps
+    type: STATIC
+    connect_timeout: 5s
+    load_assignment:
+      cluster_name: frps
+      endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: 127.0.0.1, port_value: __FRPS_PORT__}}}}]}]
+  - name: sink
+    type: STATIC
+    connect_timeout: 5s
+    load_assignment:
+      cluster_name: sink
+      endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: 127.0.0.1, port_value: __SINK_PORT__}}}}]}]
