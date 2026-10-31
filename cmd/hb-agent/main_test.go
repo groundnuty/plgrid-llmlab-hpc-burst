@@ -36,10 +36,12 @@ import (
 const roleAgent = "hb-agent-under-test"
 
 func TestMain(m *testing.M) {
+	// The fakes first: the agent's children (apptainer, ssh) inherit its role
+	// variable but are told apart by their program name.
+	enginedouble.Dispatch()
 	if os.Getenv("HB_TEST_ROLE") == roleAgent {
 		os.Exit(run(os.Args[1:], os.Getenv, os.Stderr))
 	}
-	enginedouble.Dispatch()
 	os.Exit(m.Run())
 }
 
