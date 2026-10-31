@@ -7,13 +7,11 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
-	"strings"
-	"syscall"
 	"time"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/procgroup"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -49,48 +47,8 @@ type SSHForward struct {
 }
 
 // ProcessID identifies one process across PID reuse: its PID and its start
-// time, the 22nd field of /proc/<pid>/stat, in clock ticks since boot.
-type ProcessID struct {
-	PID       int
-	StartTime uint64
-}
-
-// procStartTime reads a process's start time from /proc/<pid>/stat.
-func procStartTime(pid int) (uint64, error) {
-	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
-	if err != nil {
-		return 0, err
-	}
-	// Fields after the command name, which is in parentheses and may hold
-	// spaces: state is field 3, start time field 22.
-	s := string(b)
-	i := strings.LastIndexByte(s, ')')
-	if i < 0 {
-		return 0, fmt.Errorf("/proc/%d/stat: no command name", pid)
-	}
-	f := strings.Fields(s[i+1:])
-	if len(f) < 20 {
-		return 0, fmt.Errorf("/proc/%d/stat: %d fields after the name", pid, len(f))
-	}
-	return strconv.ParseUint(f[19], 10, 64)
-}
-
-// Alive reports whether the process with this PID and start time still runs:
-// a process with the PID and another start time is another process, and a
-// zombie runs nothing.
-func (p ProcessID) Alive() bool {
-	st, err := procStartTime(p.PID)
-	if err != nil || st != p.StartTime {
-		return false
-	}
-	b, err := os.ReadFile("/proc/" + strconv.Itoa(p.PID) + "/stat")
-	if err != nil {
-		return false
-	}
-	s := string(b)
-	i := strings.LastIndexByte(s, ')')
-	return i >= 0 && i+2 < len(s) && s[i+2] != 'Z'
-}
+// time (procgroup.ID).
+type ProcessID = procgroup.ID
 
 // Args returns ssh's argument vector, without the program.
 func (s SSHForward) Args() ([]string, error) {
@@ -104,6 +62,12 @@ func (s SSHForward) Args() ([]string, error) {
 	dir := s.Config.DialHomeDir
 	return []string{
 		"-N",
+		// No user or system ssh configuration: a ControlMaster there would
+		// fork a master outside the forward's process group, and a
+		// ProxyJump or LocalForward would change the path.
+		"-F", "/dev/null",
+		"-o", "ControlMaster=no",
+		"-o", "ControlPath=none",
 		"-o", "BatchMode=yes",
 		"-o", "IdentitiesOnly=yes",
 		"-o", "StrictHostKeyChecking=yes",
@@ -164,46 +128,36 @@ func (s SSHForward) Run(ctx context.Context) error {
 	}
 }
 
-// once runs one ssh process until it exits or ctx ends. It is recorded by PID
-// and start time, and always reaped: on ctx's end it gets TERM to its process
-// group, then KILL after StopGrace, and once returns only after it has
-// exited. The process group is signalled only while the process is
-// unreaped, so its PID cannot have been reused.
+// once runs one ssh process until it exits or ctx ends, in a process group
+// the forward owns until every member is gone (package procgroup). It is
+// recorded by PID and start time. On ctx's end it gets TERM to its group, then
+// KILL after StopGrace; when it exits by itself, whatever is left of its group
+// is stopped the same way. once returns only after the whole group is gone and
+// the leader is reaped (HBEP-6, teardown).
 func (s SSHForward) once(ctx context.Context, args []string) error {
 	grace := s.StopGrace
 	if grace <= 0 {
 		grace = 5 * time.Second
 	}
-	cmd := exec.Command(s.SSH, args...)
-	cmd.Stdout = s.Log
-	cmd.Stderr = s.Log
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
+	g, err := procgroup.Start(procgroup.Spec{Path: s.SSH, Args: args, Stdout: s.Log, Stderr: s.Log}, time.Now())
+	if err != nil {
 		return err
 	}
-	id := ProcessID{PID: cmd.Process.Pid}
-	if st, err := procStartTime(id.PID); err == nil {
-		id.StartTime = st
-	}
+	id := g.ID()
 	if s.Logger != nil {
 		s.Logger.Info("ssh forward started", "pid", id.PID, "startTime", id.StartTime)
 	}
 	if s.OnStart != nil {
 		s.OnStart(id)
 	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
 	select {
-	case err := <-done:
-		return err
+	case <-g.Exited():
+		g.Stop(grace)
+		<-g.Done()
+		return fmt.Errorf("ssh exited with code %d", g.ExitCode())
 	case <-ctx.Done():
-		_ = syscall.Kill(-id.PID, syscall.SIGTERM)
-		select {
-		case <-done:
-		case <-time.After(grace):
-			_ = syscall.Kill(-id.PID, syscall.SIGKILL)
-			<-done
-		}
+		g.Stop(grace)
+		<-g.Done()
 		_ = os.Remove(s.Socket)
 		if s.Logger != nil {
 			s.Logger.Info("ssh forward stopped", "pid", id.PID, "startTime", id.StartTime)

@@ -9,7 +9,7 @@ import (
 )
 
 func warmUpChecks(gen int64, sessions int32) *agentapi.Checks {
-	return &agentapi.Checks{VerificationGeneration: gen, WarmUp: &agentapi.WarmUpRequest{Shapes: hShapes, TargetSessions: sessions}}
+	return &agentapi.Checks{VerificationGeneration: gen, Verify: &agentapi.VerifyRequest{Files: defaultFiles}, WarmUp: &agentapi.WarmUpRequest{Shapes: hShapes, TargetSessions: sessions}}
 }
 
 func warmRounds(n int) func(agentapi.Report) bool {

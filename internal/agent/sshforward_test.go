@@ -62,13 +62,22 @@ func TestSSHForwardStopsAndReapsItsChildren(t *testing.T) {
 		t.Fatal(err)
 	}
 	const grace = 400 * time.Millisecond
+	// An ssh that exits at once on TERM, leaving a child that ignores it: the
+	// leader's exit is not the group's (Astra B4).
+	quitter := filepath.Join(bin, "quitter-ssh")
+	qscript := "#!/bin/sh\n(trap '' TERM; exec sleep 300) &\necho $! > " + childPIDFile + "\ntrap 'exit 0' TERM\nwhile :; do sleep 1; done\n"
+	if err := os.WriteFile(quitter, []byte(qscript), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name    string
 		ssh     string
 		minTook time.Duration
+		child   bool
 	}{
-		{"honours TERM", filepath.Join(bin, "ssh"), 0},
-		{"ignores TERM", stubborn, grace},
+		{"honours TERM", filepath.Join(bin, "ssh"), 0, false},
+		{"ignores TERM", stubborn, grace, true},
+		{"exits on TERM, child stays", quitter, grace, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var mu sync.Mutex
@@ -121,7 +130,7 @@ func TestSSHForwardStopsAndReapsItsChildren(t *testing.T) {
 					t.Fatalf("recorded %+v is not a live process", id)
 				}
 			}
-			if tc.ssh == stubborn {
+			if tc.child {
 				startChildWatch(t, childPIDFile)
 			}
 			stopped := time.Now()
@@ -139,7 +148,7 @@ func TestSSHForwardStopsAndReapsItsChildren(t *testing.T) {
 					t.Fatalf("ssh %+v still runs after the forward stopped", id)
 				}
 			}
-			if tc.ssh == stubborn {
+			if tc.child {
 				// KILL has been sent to the group; give the kernel a moment to
 				// end the child, which is not this test's to reap.
 				child := recordedChild(t, childPIDFile)

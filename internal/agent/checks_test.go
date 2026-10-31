@@ -14,12 +14,17 @@ import (
 // longest context, 4096 - 64 - 9 = 4023, fits with the typical output.
 var hShapes = agentapi.Shapes{ContextShort: 16, ContextTypical: 64, ContextLongest: 4023, OutputTypical: 64, OutputLongest: 128}
 
+// verifyChecks asks for verification with the file list, the default one when
+// files is nil.
 func verifyChecks(gen int64, files []agentapi.FileDigest) *agentapi.Checks {
+	if files == nil {
+		files = defaultFiles
+	}
 	return &agentapi.Checks{VerificationGeneration: gen, Verify: &agentapi.VerifyRequest{Files: files}}
 }
 
 func qualifyChecks(gen int64, toolCalls bool) *agentapi.Checks {
-	return &agentapi.Checks{VerificationGeneration: gen, Qualify: &agentapi.QualifyRequest{Shapes: hShapes, ToolCalls: toolCalls}}
+	return &agentapi.Checks{VerificationGeneration: gen, Verify: &agentapi.VerifyRequest{Files: defaultFiles}, Qualify: &agentapi.QualifyRequest{Shapes: hShapes, ToolCalls: toolCalls}}
 }
 
 func checksOf(r agentapi.Report) *agentapi.CheckResults {
@@ -56,8 +61,10 @@ func TestVerificationReportsWhatTheEngineReports(t *testing.T) {
 	if v.EngineVersion != "0.32.0" {
 		t.Errorf("engine version %q, want 0.32.0", v.EngineVersion)
 	}
-	if v.ImageDigest != hDigest {
-		t.Errorf("image digest %q, want %q", v.ImageDigest, hDigest)
+	// The digest the fake Apptainer recorded pulling, not the launch's value
+	// the agent could copy back (Opus B5: that comparison was circular).
+	if pulled := pulledDigest(t, h); v.ImageDigest != pulled {
+		t.Errorf("image digest %q, want the pulled %q", v.ImageDigest, pulled)
 	}
 	if got := v.Settings["max-model-len"]; got != "4096" {
 		t.Errorf("max-model-len %q, want 4096 (the engine's /v1/models)", got)

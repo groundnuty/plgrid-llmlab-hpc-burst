@@ -198,6 +198,13 @@ func newJob(t *testing.T, root string, cfg agentapi.AgentConfig) job {
 	}
 	j.ssh = cfg.Mode == agentapi.DialHomeSSH
 	cfg.StagingDir = j.stagingDir
+	ckpt := filepath.Join(j.stagingDir, agentapi.StagedCheckpointDir("org/model", strings.Repeat("e", 40)))
+	if err := os.MkdirAll(ckpt, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ckpt, preStaged.Path), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	cfg.DialHomeDir = filepath.Join(root, "dial-home")
 	b, err := cfg.Encode()
 	if err != nil {
@@ -350,7 +357,23 @@ func assertSSHReaped(t *testing.T, out string, wantAtLeast int) {
 	}
 }
 
+// The identity record's one file, which newJob pre-stages, so the job needs
+// no Hub. printf '{}\n' | sha256sum
+var preStaged = agentapi.FileDigest{Path: "config.json", SHA256: "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"}
+
+// runState runs the test's Instance. Every start instruction carries the
+// file list (verification with Files), which the agent needs to start; checks
+// that ask for more add it themselves.
 func runState(engLog string, checks *agentapi.Checks) agentapi.DesiredState {
+	if checks == nil {
+		checks = &agentapi.Checks{VerificationGeneration: 1}
+	}
+	if checks.Verify == nil {
+		checks.Verify = &agentapi.VerifyRequest{}
+	}
+	if len(checks.Verify.Files) == 0 {
+		checks.Verify.Files = []agentapi.FileDigest{preStaged}
+	}
 	return agentapi.DesiredState{
 		Action: agentapi.ActionRun,
 		Instance: &agentapi.DesiredInstance{

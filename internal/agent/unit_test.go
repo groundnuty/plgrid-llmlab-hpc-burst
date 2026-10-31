@@ -213,6 +213,9 @@ func TestSSHForwardArgs(t *testing.T) {
 	}
 	want := []string{
 		"-N",
+		"-F", "/dev/null",
+		"-o", "ControlMaster=no",
+		"-o", "ControlPath=none",
 		"-o", "BatchMode=yes",
 		"-o", "IdentitiesOnly=yes",
 		"-o", "StrictHostKeyChecking=yes",
@@ -249,5 +252,30 @@ func TestCutFreeText(t *testing.T) {
 	}
 	if n := len(c.WarmUp.Rounds[0].Requests[0].Error); n != 64 {
 		t.Errorf("timing error is %d bytes, want 64", n)
+	}
+}
+
+// --cleanenv drops the job's CUDA_VISIBLE_DEVICES, so the agent forwards it as
+// APPTAINERENV_CUDA_VISIBLE_DEVICES, unless the launch sets it (Opus nit).
+func TestWorkerExecForwardsTheJobsGPUs(t *testing.T) {
+	w := WorkerExec{Launch: testLaunch(), Key: testKey, BaseEnv: []string{"PATH=/usr/bin", "CUDA_VISIBLE_DEVICES=2"}}
+	env, err := w.Env()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(env, "APPTAINERENV_CUDA_VISIBLE_DEVICES=2") {
+		t.Fatalf("env %q does not forward the job's GPUs", env)
+	}
+	l := testLaunch()
+	l.Env = append(l.Env, agentapi.EnvVar{Name: "CUDA_VISIBLE_DEVICES", Value: "0"})
+	env, err = (WorkerExec{Launch: l, Key: testKey, BaseEnv: []string{"CUDA_VISIBLE_DEVICES=2"}}).Env()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(env, "APPTAINERENV_CUDA_VISIBLE_DEVICES=2") || !slices.Contains(env, "APPTAINERENV_CUDA_VISIBLE_DEVICES=0") {
+		t.Fatalf("env %q: the launch's own value must win", env)
+	}
+	if env, _ := (WorkerExec{Launch: testLaunch(), Key: testKey, BaseEnv: []string{"PATH=/usr/bin"}}).Env(); slices.ContainsFunc(env, func(s string) bool { return strings.Contains(s, "CUDA_VISIBLE_DEVICES") }) {
+		t.Fatalf("env %q sets GPUs the job has not", env)
 	}
 }

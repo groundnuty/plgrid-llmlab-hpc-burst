@@ -90,8 +90,11 @@ type Agent struct {
 	desired     agentapi.DesiredState
 	stopping    bool
 	inst        *instance
-	fwd         *Forwarder
-	lastOffered []byte
+	// malformedLogged is the Version of the last malformed desired state
+	// logged, so one is logged once, not at every converge.
+	malformedLogged string
+	fwd             *Forwarder
+	lastOffered     []byte
 	// settings from the newest desired state with an Action the agent knows.
 	stopGrace     time.Duration
 	probeInterval time.Duration
@@ -267,21 +270,28 @@ func snapshotKey(r agentapi.Report) []byte {
 // ensureRegistered registers unless the endpoint already knows this agent
 // instance ID.
 func (a *Agent) ensureRegistered(ctx context.Context) error {
+	_, err := a.register(ctx)
+	return err
+}
+
+// register registers unless the endpoint already knows this agent instance
+// ID, and says whether this call registered.
+func (a *Agent) register(ctx context.Context) (bool, error) {
 	a.regMu.Lock()
 	defer a.regMu.Unlock()
 	if a.registered {
-		return nil
+		return false, nil
 	}
 	resp, err := a.o.API.Register(ctx, a.o.Registration)
 	if err != nil {
-		return fmt.Errorf("register: %w", err)
+		return false, fmt.Errorf("register: %w", err)
 	}
 	if resp.ProtocolVersion != agentapi.ProtocolVersion {
-		return fmt.Errorf("register: the endpoint speaks protocol %q, the agent %q", resp.ProtocolVersion, agentapi.ProtocolVersion)
+		return false, fmt.Errorf("register: the endpoint speaks protocol %q, the agent %q", resp.ProtocolVersion, agentapi.ProtocolVersion)
 	}
 	a.registered = true
 	a.log.Info("registered", "restartCount", a.o.Registration.RestartCount)
-	return nil
+	return true, nil
 }
 
 // forget marks the registration lost, after CodeNotRegistered: the next call
@@ -298,8 +308,10 @@ func (a *Agent) forget() {
 func (a *Agent) poll(ctx context.Context) {
 	since := ""
 	b := newBackoff(a.o.MinBackoff, a.o.MaxBackoff)
+	warnedNotRegistered := false
 	for ctx.Err() == nil {
-		if err := a.ensureRegistered(ctx); err != nil {
+		fresh, err := a.register(ctx)
+		if err != nil {
 			a.log.Warn("registration failed; retrying", "code", codeOf(err), "err", err)
 			b.wait(ctx)
 			continue
@@ -311,6 +323,16 @@ func (a *Agent) poll(ctx context.Context) {
 			}
 			if codeOf(err) == agentapi.CodeNotRegistered {
 				a.forget()
+				if fresh {
+					// Not registered right after registering: the endpoint
+					// will not keep this agent. Register again with backoff,
+					// not in a loop, and say so once (PR #87 review, Opus B6).
+					if !warnedNotRegistered {
+						warnedNotRegistered = true
+						a.log.Warn("the endpoint answered not registered right after a registration; retrying with backoff")
+					}
+					b.wait(ctx)
+				}
 				continue
 			}
 			a.log.Warn("desired state poll failed; retrying", "code", codeOf(err), "err", err)
@@ -318,6 +340,7 @@ func (a *Agent) poll(ctx context.Context) {
 			continue
 		}
 		b.reset()
+		warnedNotRegistered = false
 		since = d.Version
 		select {
 		case <-a.desiredCh: // drop a state the loop has not taken: the newest wins

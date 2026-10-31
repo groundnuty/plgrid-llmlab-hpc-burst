@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/procgroup"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -27,18 +29,33 @@ type instance struct {
 	// desired worker runs a process started for it.
 	generation int64
 
-	// Staging, for the Instance generation stageGen.
-	stageGen     int64
-	staging      agentapi.Staging
-	stageRunning bool
-	stageCancel  context.CancelFunc
-	staged       bool // staging for stageGen succeeded
-	imagePath    string
-	ckptDir      string
+	// Staging, for the Instance generation stageGen. firstGen is the
+	// generation the Instance was created at: a staging for a later one is a
+	// whole-Instance restart (rung 2), which repairs what fails its rehash.
+	firstGen int64
+	stageGen int64
+	// files is the identity record's file list, from the first desired state
+	// of the Instance generation filesGen whose Checks.Verify carried one.
+	// Staging for a generation waits for it (PR #87 review, Opus B3;
+	// `@hpc-burst-science-agent`, 31 Oct 2026).
+	files         []agentapi.FileDigest
+	filesGen      int64
+	haveFiles     bool
+	awaitWarned   int64 // the generation whose wait for files was logged, +1
+	imageVerified bool  // the staged image passed its integrity check
+	staging       agentapi.Staging
+	stageRunning  bool
+	stageCancel   context.CancelFunc
+	staged        bool // staging for stageGen succeeded
+	imagePath     string
+	ckptDir       string
 	// fileResults are the rehash results of the last staging, for the file
-	// list whose hash is filesKey.
-	fileResults []agentapi.FileResult
-	filesKey    [32]byte
+	// list whose hash is filesKey. They serve only the first verification
+	// after that staging (fileResultsFresh); a later one rehashes (PR #87
+	// review, Astra B2, Opus B1).
+	fileResults      []agentapi.FileResult
+	filesKey         [32]byte
+	fileResultsFresh bool
 
 	workers []*worker
 
@@ -46,13 +63,16 @@ type instance struct {
 	// running, if any.
 	checks *agentapi.CheckResults
 	unit   *checkUnit
+	// sectionKeys holds, for each section of checks, the processes it was
+	// taken against.
+	sectionKeys map[string]procKey
 }
 
 // worker is one engine process of the Instance.
 type worker struct {
 	name       string
 	phase      agentapi.PartPhase
-	proc       *Proc
+	proc       *procgroup.Group
 	exitCode   *int
 	generation int64 // the worker's restart generation the process was started for
 	instGen    int64 // the Instance's restart generation it was started for
@@ -61,13 +81,18 @@ type worker struct {
 	failures   int32
 	lastHealth agentapi.Health // last metrics read, carried when a read fails
 	stopProbe  context.CancelFunc
+	// cleaning: the leader exited without being told to, and the rest of its
+	// process group is being stopped.
+	cleaning bool
 }
 
 func (w *worker) alive() bool {
 	return w.phase == agentapi.PartStarting || w.phase == agentapi.PartRunning
 }
 
-func (w *worker) live() bool { return w.alive() || w.phase == agentapi.PartStopping }
+// live reports whether any process of the worker's group may still run: a
+// stopping worker, or an exited one whose group is being cleaned up.
+func (w *worker) live() bool { return w.alive() || w.phase == agentapi.PartStopping || w.cleaning }
 
 func (in *instance) anyLive() bool {
 	for _, w := range in.workers {
@@ -112,7 +137,10 @@ func (a *Agent) converge() {
 		return
 	}
 	if err := checkDesired(d); err != nil {
-		a.log.Warn("malformed desired state ignored", "version", d.Version, "err", err)
+		if a.malformedLogged != d.Version {
+			a.malformedLogged = d.Version
+			a.log.Warn("malformed desired state ignored", "version", d.Version, "err", err)
+		}
 		return
 	}
 	a.takeSettings(d.Settings)
@@ -198,7 +226,7 @@ func (a *Agent) applyRun(i agentapi.DesiredInstance) {
 			a.log.Error("cannot draw the Instance's key", "err", err)
 			return
 		}
-		a.inst = &instance{uid: i.UID, launch: i.Launch, key: key, generation: i.Generation, stageGen: i.Generation}
+		a.inst = &instance{uid: i.UID, launch: i.Launch, key: key, generation: i.Generation, firstGen: i.Generation, stageGen: i.Generation}
 		a.log.Info("new Instance", "instance", i.Name, "uid", i.UID, "generation", i.Generation)
 	}
 	in := a.inst
@@ -208,6 +236,11 @@ func (a *Agent) applyRun(i agentapi.DesiredInstance) {
 	}
 	in.keyStored = i.KeyStored
 	in.hubToken = i.HubToken
+	if c := i.Checks; c != nil && c.Verify != nil && len(c.Verify.Files) > 0 && (!in.haveFiles || in.filesGen != i.Generation) {
+		in.files = append([]agentapi.FileDigest(nil), c.Verify.Files...)
+		in.filesGen = i.Generation
+		in.haveFiles = true
+	}
 
 	// A raised Instance generation (rung 2): stop every part, then stage again,
 	// which rehashes the staged files and re-stages those that fail, then
@@ -228,8 +261,19 @@ func (a *Agent) applyRun(i agentapi.DesiredInstance) {
 		in.staging = agentapi.Staging{}
 	}
 	if !in.staged {
+		if !in.haveFiles || in.filesGen != in.stageGen {
+			// A first start and a rung-2 restage need the identity record's
+			// file list for this generation: without it the checkpoint cannot
+			// be staged or rehashed, so no worker starts.
+			in.staging = agentapi.Staging{Phase: agentapi.StagingInProgress, Message: msgFilesAwaited}
+			if in.awaitWarned != in.stageGen+1 {
+				in.awaitWarned = in.stageGen + 1
+				a.log.Warn("not starting: the desired state for this Instance generation carries no checks.verify.files", "uid", in.uid, "generation", in.stageGen)
+			}
+			return
+		}
 		if !in.stageRunning && in.staging.Phase != agentapi.StagingFailed {
-			a.startStaging(in, i)
+			a.startStaging(in)
 		}
 		a.runChecks(in, i)
 		return
@@ -298,26 +342,24 @@ func (in *instance) runsFor(i agentapi.DesiredInstance) bool {
 
 // ---- staging ----
 
-func (a *Agent) startStaging(in *instance, i agentapi.DesiredInstance) {
+// msgFilesAwaited is the staging message while a start waits for the
+// identity record's file list.
+const msgFilesAwaited = "file list awaited: the start instruction for this Instance generation must carry checks.verify.files"
+
+func (a *Agent) startStaging(in *instance) {
 	ctx, cancel := context.WithCancel(a.ctx)
 	in.stageCancel = cancel
 	in.stageRunning = true
 	in.staging = agentapi.Staging{Phase: agentapi.StagingInProgress}
 	gen := in.stageGen
-	restage := in.imagePath != "" // a later generation of an Instance staged before: rung 2
-	var files []agentapi.FileDigest
-	if i.Checks != nil && i.Checks.Verify != nil {
-		files = append(files, i.Checks.Verify.Files...)
-	}
-	if len(files) == 0 {
-		a.log.Info("the desired state lists no checkpoint files: staging the image only, the checkpoint is treated as pre-staged", "uid", in.uid)
-	}
+	restage := gen > in.firstGen // a whole-Instance restart: rung 2
+	files := append([]agentapi.FileDigest(nil), in.files...)
 	launch, token, format := in.launch, in.hubToken, a.imageFormat
+	loadFormat := LoadFormat(launch.Command)
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
 		imgRes, err := a.o.Stager.Image(ctx, launch.Image, launch.ImageDigest, format)
-		img := imgRes.Path
 		var ck CheckpointResult
 		if err == nil {
 			ck, err = a.o.Stager.Checkpoint(ctx, CheckpointRequest{
@@ -326,6 +368,7 @@ func (a *Agent) startStaging(in *instance, i agentapi.DesiredInstance) {
 				Files:      files,
 				HubToken:   token,
 				Restage:    restage,
+				LoadFormat: loadFormat,
 				Progress: func(done, total int64) {
 					a.post(func() {
 						if a.inst == in && in.stageGen == gen && in.stageRunning {
@@ -335,11 +378,11 @@ func (a *Agent) startStaging(in *instance, i agentapi.DesiredInstance) {
 				},
 			})
 		}
-		a.post(func() { a.stagingDone(in, gen, img, ck, files, err) })
+		a.post(func() { a.stagingDone(in, gen, imgRes, ck, files, err) })
 	}()
 }
 
-func (a *Agent) stagingDone(in *instance, gen int64, img string, ck CheckpointResult, files []agentapi.FileDigest, err error) {
+func (a *Agent) stagingDone(in *instance, gen int64, img ImageResult, ck CheckpointResult, files []agentapi.FileDigest, err error) {
 	if a.inst != in || in.stageGen != gen || !in.stageRunning {
 		return
 	}
@@ -356,12 +399,26 @@ func (a *Agent) stagingDone(in *instance, gen int64, img string, ck CheckpointRe
 	in.staging.Phase = agentapi.StagingDone
 	in.staging.Message = ""
 	in.staged = true
-	in.imagePath = img
+	in.imagePath = img.Path
+	in.imageVerified = img.Verified
 	in.ckptDir = ck.Dir
-	if len(files) > 0 {
-		in.fileResults = ck.Files
-		in.filesKey = filesKey(files)
+	in.fileResults = ck.Files
+	in.filesKey = filesKey(files)
+	in.fileResultsFresh = true
+}
+
+// LoadFormat returns the --load-format a launch's command passes, "" when it
+// passes none (vLLM's default, auto). The controller renders every flag as one
+// "--name=value" argument; the underscore spelling is read too.
+func LoadFormat(command []string) string {
+	for _, a := range command {
+		for _, p := range []string{"--load-format=", "--load_format="} {
+			if v, ok := strings.CutPrefix(a, p); ok {
+				return v
+			}
+		}
 	}
+	return ""
 }
 
 func (a *Agent) cancelStaging(in *instance) {

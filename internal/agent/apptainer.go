@@ -67,12 +67,25 @@ func (w WorkerExec) Env() ([]string, error) {
 		env = append(env, kv)
 	}
 	seen := map[string]bool{}
+	cudaVisible := ""
+	for _, kv := range w.BaseEnv {
+		if v, ok := strings.CutPrefix(kv, "CUDA_VISIBLE_DEVICES="); ok {
+			cudaVisible = v
+		}
+	}
 	for _, v := range w.Launch.Env {
 		if !validEnvName(v.Name) {
 			return nil, fmt.Errorf("launch variable %q is not a variable name", v.Name)
 		}
 		seen[v.Name] = true
 		env = append(env, apptainerEnvPrefixes[0]+v.Name+"="+v.Value)
+	}
+	// --cleanenv drops the job's CUDA_VISIBLE_DEVICES, which Slurm sets to
+	// the GPUs it gave the job: forward it, unless the launch sets it, so the
+	// engine sees exactly those GPUs (Apptainer's GPU documentation; L-3.4).
+	// It is not a deployment-ID input (HBEP-3's table).
+	if cudaVisible != "" && !seen["CUDA_VISIBLE_DEVICES"] {
+		env = append(env, apptainerEnvPrefixes[0]+"CUDA_VISIBLE_DEVICES="+cudaVisible)
 	}
 	if w.Launch.KeyEnv != "" {
 		if !validEnvName(w.Launch.KeyEnv) {

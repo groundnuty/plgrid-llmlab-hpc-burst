@@ -3,12 +3,12 @@ package agent
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/procgroup"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -17,9 +17,14 @@ import (
 // exited without being told to, which is the controller's to judge.
 const startFailedExitCode = 127
 
+// shutdownMargin is how long the agent's own exit waits, past the stop grace,
+// for the KILL of a worker's group to take effect.
+const shutdownMargin = 10 * time.Second
+
 // startWorker starts one engine worker with Apptainer from the Instance's
-// launch (HBEP-7, What it runs: the worker). The engine listens on its Unix
-// socket in the job's run directory, bound into the container at
+// launch (HBEP-7, What it runs: the worker), in a process group the agent owns
+// until every member is gone (package procgroup). The engine listens on its
+// Unix socket in the job's run directory, bound into the container at
 // agentapi.ContainerRunDir.
 func (a *Agent) startWorker(in *instance, dw agentapi.DesiredWorker, instGen int64) *worker {
 	w := &worker{
@@ -59,45 +64,55 @@ func (a *Agent) startWorker(in *instance, dw agentapi.DesiredWorker, instGen int
 		return fail(fmt.Errorf("engine log: %w", err))
 	}
 	fmt.Fprintf(logf, "---- %s start: instance %s, instance generation %d, worker generation %d\n", now.UTC().Format(time.RFC3339), in.uid, instGen, dw.Generation)
-	p, err := StartProc(ProcSpec{Path: a.o.Apptainer, Args: ex.Args(), Env: env, Dir: a.o.RunDir, Log: logf}, now)
+	g, err := procgroup.Start(procgroup.Spec{Path: a.o.Apptainer, Args: ex.Args(), Env: env, Dir: a.o.RunDir, Stdout: logf, Stderr: logf}, now)
 	if err != nil {
 		logf.Close()
 		return fail(err)
 	}
-	w.proc = p
-	a.log.Info("worker started", "worker", dw.Name, "pid", p.PID(), "generation", dw.Generation, "instanceGeneration", instGen)
-	a.watch(in, w, p, logf)
+	w.proc = g
+	a.log.Info("worker started", "worker", dw.Name, "pid", g.PID(), "startTime", g.ID().StartTime, "generation", dw.Generation, "instanceGeneration", instGen)
+	a.watch(in, w, g, logf)
 	return w
 }
 
 // watch follows one worker process: it probes the engine until it answers
 // (starting to running), samples its health every probe interval while it
-// runs, and reports its exit.
-func (a *Agent) watch(in *instance, w *worker, p *Proc, logf io.Closer) {
+// runs, and reports the leader's exit and, apart from it, the end of its whole
+// process group.
+func (a *Agent) watch(in *instance, w *worker, g *procgroup.Group, logf *os.File) {
 	ctx, cancel := context.WithCancel(a.ctx)
 	w.stopProbe = cancel
 	eng := a.o.Engines(w.socket, in.key)
-	a.wg.Add(2)
+	a.wg.Add(3)
 	go func() {
 		defer a.wg.Done()
 		select {
-		case <-p.Done():
+		case <-g.Exited():
 		case <-a.ctx.Done():
-			return // shutdown waits on the process itself
+			return // shutdown waits on the group itself
 		}
-		logf.Close()
 		cancel()
-		a.post(func() { a.exited(in, p) })
+		a.post(func() { a.leaderExited(in, g) })
 	}()
 	go func() {
 		defer a.wg.Done()
-		a.probeLoop(ctx, in, p, eng)
+		select {
+		case <-g.Done():
+		case <-a.ctx.Done():
+			return
+		}
+		logf.Close()
+		a.post(func() { a.groupDone(in, g) })
+	}()
+	go func() {
+		defer a.wg.Done()
+		a.probeLoop(ctx, in, g, eng)
 	}()
 }
 
 // probeLoop probes a starting engine every StartupProbeInterval until it
 // answers, then samples it every probe interval.
-func (a *Agent) probeLoop(ctx context.Context, in *instance, p *Proc, eng Engine) {
+func (a *Agent) probeLoop(ctx context.Context, in *instance, g *procgroup.Group, eng Engine) {
 	interval := a.o.StartupProbeInterval
 	ready := false
 	for {
@@ -126,20 +141,20 @@ func (a *Agent) probeLoop(ctx context.Context, in *instance, p *Proc, eng Engine
 			}
 			ready = true
 		}
-		a.post(func() { a.sampled(in, p, now, perr, h, serr) })
+		a.post(func() { a.sampled(in, g, now, perr, h, serr) })
 		interval = time.Duration(a.probeEvery.Load())
 	}
 }
 
 // sampled records a probe and a metrics read of a worker process.
-func (a *Agent) sampled(in *instance, p *Proc, now time.Time, perr error, h agentapi.Health, serr error) {
-	w := a.workerOf(in, p)
+func (a *Agent) sampled(in *instance, g *procgroup.Group, now time.Time, perr error, h agentapi.Health, serr error) {
+	w := a.workerOf(in, g)
 	if w == nil {
 		return
 	}
 	if w.phase == agentapi.PartStarting && perr == nil {
 		w.phase = agentapi.PartRunning
-		a.log.Info("worker is serving", "worker", w.name, "pid", p.PID())
+		a.log.Info("worker is serving", "worker", w.name, "pid", g.PID())
 		if w.name == agentapi.WorkerName(0) {
 			a.fwd.SetTarget(w.socket)
 		}
@@ -147,23 +162,7 @@ func (a *Agent) sampled(in *instance, p *Proc, now time.Time, perr error, h agen
 	if w.phase != agentapi.PartRunning {
 		return
 	}
-	if serr == nil {
-		w.lastHealth = h
-	} else {
-		// The counters are cumulative since the process started, so the last
-		// ones read stay true while a read fails; the gauges are carried too.
-		h = w.lastHealth
-		h.ResponsesByStatus = cloneCounts(w.lastHealth.ResponsesByStatus)
-	}
-	if perr == nil {
-		w.failures = 0
-	} else {
-		w.failures++
-	}
-	h.Time = now
-	h.ProbeOK = perr == nil
-	h.ConsecutiveProbeFailures = w.failures
-	w.health = &h
+	w.recordHealth(now, perr, h, serr)
 }
 
 func cloneCounts(m map[string]int64) map[string]int64 {
@@ -177,39 +176,37 @@ func cloneCounts(m map[string]int64) map[string]int64 {
 	return out
 }
 
-// workerOf returns the worker whose current process is p, or nil when p is
-// no longer any worker's (a stale event).
-func (a *Agent) workerOf(in *instance, p *Proc) *worker {
+// workerOf returns the worker whose current process group is g, or nil when g
+// is no longer any worker's (a stale event).
+func (a *Agent) workerOf(in *instance, g *procgroup.Group) *worker {
 	if a.inst != in {
 		return nil
 	}
 	for _, w := range in.workers {
-		if w.proc == p {
+		if w.proc == g {
 			return w
 		}
 	}
 	return nil
 }
 
-// exited records a worker process's exit: stopped when the agent stopped it,
-// exited when it exited without being told to, whatever its code; a clean exit
-// is a failure too (HBEP-7, Health and restarts; L-2.9). Whatever is left of
-// its process group is killed.
-func (a *Agent) exited(in *instance, p *Proc) {
-	p.Kill()
-	w := a.workerOf(in, p)
+// leaderExited records the exit of a worker's leader process. A worker the
+// agent was stopping stays stopping until its whole group is gone. One that
+// exited without being told to is exited, whatever its code, a clean exit too
+// (HBEP-7, Health and restarts; L-2.9), and what is left of its group is
+// stopped with the same grace as an intentional stop: TERM, then KILL. The
+// worker counts as live until the group is gone, so no restart starts beside
+// a leftover process.
+func (a *Agent) leaderExited(in *instance, g *procgroup.Group) {
+	w := a.workerOf(in, g)
 	if w == nil {
 		return
 	}
-	code := p.ExitCode()
+	code := g.ExitCode()
 	w.exitCode = &code
 	w.health = nil
-	if w.phase == agentapi.PartStopping {
-		w.phase = agentapi.PartStopped
-		a.log.Info("worker stopped", "worker", w.name, "pid", p.PID(), "exitCode", code)
-	} else {
-		w.phase = agentapi.PartExited
-		a.log.Warn("worker exited without being told to", "worker", w.name, "pid", p.PID(), "exitCode", code)
+	if w.stopProbe != nil {
+		w.stopProbe()
 	}
 	if w.name == agentapi.WorkerName(0) {
 		a.fwd.SetTarget("")
@@ -217,10 +214,34 @@ func (a *Agent) exited(in *instance, p *Proc) {
 	if in.unit != nil {
 		a.cancelUnit(in) // its process is gone; a result from it is never used
 	}
+	if w.phase == agentapi.PartStopping {
+		return
+	}
+	w.phase = agentapi.PartExited
+	w.cleaning = true
+	a.log.Warn("worker exited without being told to", "worker", w.name, "pid", g.PID(), "exitCode", code)
+	g.Stop(a.stopGrace)
+}
+
+// groupDone records that every process of a worker's group is gone.
+func (a *Agent) groupDone(in *instance, g *procgroup.Group) {
+	w := a.workerOf(in, g)
+	if w == nil {
+		return
+	}
+	w.cleaning = false
+	if w.phase == agentapi.PartStopping {
+		w.phase = agentapi.PartStopped
+		if w.exitCode == nil {
+			code := g.ExitCode()
+			w.exitCode = &code
+		}
+		a.log.Info("worker stopped", "worker", w.name, "pid", g.PID(), "exitCode", *w.exitCode)
+	}
 }
 
 // terminate stops a worker politely: TERM to its process group, then KILL to
-// the group once the stop grace has passed, if it still runs (HBEP-7,
+// the group once the stop grace has passed, if any member still runs (HBEP-7,
 // Restarts and stops). The deadline is fixed by the first instruction, with
 // the grace of the desired state that carried it.
 func (a *Agent) terminate(w *worker) {
@@ -232,26 +253,11 @@ func (a *Agent) terminate(w *worker) {
 	}
 	w.phase = agentapi.PartStopping
 	w.health = nil
-	p := w.proc
 	if w.stopProbe != nil {
 		w.stopProbe()
 	}
-	a.log.Info("stopping worker", "worker", w.name, "pid", p.PID(), "grace", a.stopGrace)
-	p.Term()
-	grace := a.stopGrace
-	a.wg.Add(1)
-	go func() {
-		defer a.wg.Done()
-		t := time.NewTimer(grace)
-		defer t.Stop()
-		select {
-		case <-p.Done():
-		case <-t.C:
-			a.log.Warn("worker ignored TERM; killing it", "worker", w.name, "pid", p.PID())
-			p.Kill()
-		case <-a.ctx.Done():
-		}
-	}()
+	a.log.Info("stopping worker", "worker", w.name, "pid", w.proc.PID(), "grace", a.stopGrace)
+	w.proc.Stop(a.stopGrace)
 }
 
 func (a *Agent) stopWorkers(in *instance) {
@@ -261,38 +267,35 @@ func (a *Agent) stopWorkers(in *instance) {
 }
 
 // shutdown stops every worker at the agent's own exit: TERM, then KILL after
-// the stop grace, waiting on the processes directly, as the loop's events no
+// the stop grace, waiting on the groups directly, as the loop's events no
 // longer flow.
 func (a *Agent) shutdown() {
 	in := a.inst
 	if in == nil {
 		return
 	}
-	var procs []*Proc
+	var groups []*procgroup.Group
 	for _, w := range in.workers {
 		if w.live() && w.proc != nil {
-			w.proc.Term()
-			procs = append(procs, w.proc)
+			w.proc.Stop(a.stopGrace)
+			groups = append(groups, w.proc)
 		}
 	}
-	deadline := time.NewTimer(a.stopGrace)
+	deadline := time.NewTimer(a.stopGrace + shutdownMargin)
 	defer deadline.Stop()
-	for _, p := range procs {
+	for _, g := range groups {
 		select {
-		case <-p.Done():
+		case <-g.Done():
 		case <-deadline.C:
-			for _, q := range procs {
-				q.Kill()
-			}
-			<-p.Done()
+			a.log.Error("a worker's process group outlived the stop grace and its KILL", "pid", g.PID())
 		}
 	}
 	for _, w := range in.workers {
 		if w.proc != nil && w.live() {
-			w.proc.Kill() // the rest of each group
 			code := w.proc.ExitCode()
 			w.exitCode = &code
 			w.phase = agentapi.PartStopped
+			w.cleaning = false
 		}
 	}
 }

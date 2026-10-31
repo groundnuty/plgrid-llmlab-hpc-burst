@@ -85,6 +85,7 @@ type harness struct {
 	logs       *syncBuffer
 	hubMu      sync.Mutex
 	hubHits    int
+	hubAuth    []string
 }
 
 type harnessOptions struct {
@@ -92,6 +93,13 @@ type harnessOptions struct {
 	jobID      string // presented job ID; hJobID when empty
 	restart    int32
 	hub        map[string]string // files the fake Hub serves, by URL path
+	// apptainer replaces the fake Apptainer with another program.
+	apptainer string
+	// engineWrap, stagerWrap and backendWrap wrap the real engine client,
+	// the real stager and the fake Backend.
+	engineWrap  func(agent.Engine) agent.Engine
+	stagerWrap  func(agent.Stager) agent.Stager
+	backendWrap func(agentapi.Backend) agentapi.Backend
 }
 
 // newHarness starts a real agent against a fake Backend behind a fake Gate,
@@ -121,7 +129,11 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 
 	h.backend = fake.NewBackend()
 	h.timed = &timedBackend{Backend: h.backend}
-	h.gate = fake.NewGate(h.timed)
+	var inner agentapi.Backend = h.timed
+	if o.backendWrap != nil {
+		inner = o.backendWrap(inner)
+	}
+	h.gate = fake.NewGate(inner)
 	h.gate.Add(hTag, fake.GateAllocation{Namespace: "ns", Name: "alloc", UID: hAllocUID, Credential: hCredential, JobID: hJobID})
 	cred, job := o.credential, o.jobID
 	if cred == "" {
@@ -141,8 +153,15 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 		longPoll:  300 * time.Millisecond,
 	}
 	apptainer := filepath.Join(bin, "apptainer")
+	if o.apptainer != "" {
+		apptainer = o.apptainer
+	}
 	baseEnv := append(os.Environ(), "HB_FAKE_APPTAINER_LOG="+h.appLog, noExitSleep)
-	hubClient, hubURL := h.startHub(o.hub)
+	files := map[string]string{"/org/model/resolve/" + strings.Repeat("c", 40) + "/" + defaultFile.Path: defaultContent}
+	for k, v := range o.hub {
+		files[k] = v
+	}
+	hubClient, hubURL := h.startHub(files)
 	st, err := stage.New(stage.Config{
 		StagingDir:  h.stagingDir,
 		Apptainer:   apptainer,
@@ -154,10 +173,18 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var stager agent.Stager = st
+	if o.stagerWrap != nil {
+		stager = o.stagerWrap(st)
+	}
+	engines := func(socket, key string) agent.Engine { return engine.New(socket, key) }
+	if o.engineWrap != nil {
+		engines = func(socket, key string) agent.Engine { return o.engineWrap(engine.New(socket, key)) }
+	}
 	h.agent, err = agent.New(agent.Options{
 		API:                  h.api,
-		Engines:              func(socket, key string) agent.Engine { return engine.New(socket, key) },
-		Stager:               st,
+		Engines:              engines,
+		Stager:               stager,
 		Apptainer:            apptainer,
 		RunDir:               h.runDir,
 		LogDir:               root,
@@ -219,8 +246,21 @@ func launch(modes string, engLog string) agentapi.Launch {
 	}
 }
 
-// runState is a desired state that runs the harness's Instance.
+// The identity record's default file list: one file the fake Hub serves.
+// printf '{}\n' | sha256sum
+var (
+	defaultContent = "{}\n"
+	defaultFile    = agentapi.FileDigest{Path: "config.json", SHA256: "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"}
+	defaultFiles   = []agentapi.FileDigest{defaultFile}
+)
+
+// runState is a desired state that runs the harness's Instance. Without
+// checks it asks for verification with the default file list, which every
+// start instruction must carry.
 func (h *harness) runState(modes string, instGen, workerGen int64, checks *agentapi.Checks) agentapi.DesiredState {
+	if checks == nil {
+		checks = verifyChecks(1, nil)
+	}
 	return agentapi.DesiredState{
 		Action: agentapi.ActionRun,
 		Instance: &agentapi.DesiredInstance{

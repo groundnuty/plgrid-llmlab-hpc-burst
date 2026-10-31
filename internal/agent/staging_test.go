@@ -178,6 +178,7 @@ func (h *harness) startHub(files map[string]string) (*http.Client, string) {
 		}
 		h.hubMu.Lock()
 		h.hubHits++
+		h.hubAuth = append(h.hubAuth, r.Header.Get("Authorization"))
 		h.hubMu.Unlock()
 		io.WriteString(w, content)
 	})}
