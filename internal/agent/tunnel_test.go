@@ -224,7 +224,7 @@ func TestFrpcRefusesAnotherServerName(t *testing.T) {
 // no connection.
 func TestFrpcIgnoresTheProxyVariables(t *testing.T) {
 	a := makeCert(t, launcherName)
-	trap := blockListener(t)
+	trap := kernelListener(t)
 	var trapped atomic.Int32
 	go func() {
 		for {
@@ -440,9 +440,10 @@ func TestTunnelSSHModeCarriesBothConnections(t *testing.T) {
 	if addr, port := configServer(t, r.frpc.ConfigPath()); addr != "127.0.0.1" || port != st.Port {
 		t.Fatalf("frpc dials %s:%d, want connection 2's 127.0.0.1:%d", addr, port, st.Port)
 	}
+	lo, hi := ephemeralRange(t)
 	for _, p := range []int{st.Port, cst.Port} {
-		if p < 32768 || p == r.ep.port() || p == r.term.port() {
-			t.Fatalf("a forward listens on %d, not on a port the kernel chose", p)
+		if p < lo || p > hi || p == r.ep.port() || p == r.term.port() || p == r.sshd.port() {
+			t.Fatalf("a forward listens on %d, not on a port the kernel chose (%d-%d)", p, lo, hi)
 		}
 	}
 	r.sshd.recordChildren()
@@ -642,4 +643,23 @@ func TestTunnelReconnectsEachForward(t *testing.T) {
 		t.Fatalf("connection 2's reconnect on the same port restarted frpc: alive %v, %d starts", frpc.Alive(), len(r.frpcs()))
 	}
 	r.sshd.recordChildren()
+}
+
+// ephemeralRange is the kernel's range for the ports it chooses.
+func ephemeralRange(t *testing.T) (int, int) {
+	t.Helper()
+	b, err := os.ReadFile("/proc/sys/net/ipv4/ip_local_port_range")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := strings.Fields(string(b))
+	if len(f) != 2 {
+		t.Fatalf("ip_local_port_range %q", b)
+	}
+	lo, err1 := strconv.Atoi(f[0])
+	hi, err2 := strconv.Atoi(f[1])
+	if err1 != nil || err2 != nil {
+		t.Fatalf("ip_local_port_range %q", b)
+	}
+	return lo, hi
 }

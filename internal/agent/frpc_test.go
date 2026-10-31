@@ -200,7 +200,7 @@ func TestFrpcRefusesWithoutTheCertificateOrItsPin(t *testing.T) {
 	bin, digest := stubFrpc(t, dir)
 	a, b := makeCert(t, "dial-home.hpcburst.invalid"), makeCert(t, "dial-home.hpcburst.invalid")
 	certA := writeFile(t, filepath.Join(dir, "dial-home.crt"), a.pem)
-	server, err := agent.DirectServer("127.0.0.1:29299")
+	server, err := agent.DirectServer("dial-home.example:443")
 	if err != nil {
 		t.Fatal(err)
 	}

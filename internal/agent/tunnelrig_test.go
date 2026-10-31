@@ -4,9 +4,10 @@ package agent_test
 // v0.71.1, a real OpenSSH sshd and ssh, and Go stand-ins for the front's
 // dial-home listener (a TLS terminator that passes GET /~!frp to frps, as
 // Envoy did in spike S1c) and for the agent endpoint. Everything is on
-// loopback. The fixed listeners take free ports in the #60 block,
-// 29280-29299, scanning from its top; the forwards' local ends are the
-// kernel's, as in production.
+// loopback. The rig's own listeners (the terminator, the agent endpoint,
+// sshd's) take ports the kernel chooses; frps, which needs its ports in its
+// configuration, takes free ones in 29280-29289, scanning down from 29289.
+// The forwards' local ends are the kernel's, as in production.
 
 import (
 	"bufio"
@@ -37,41 +38,38 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
+// frps's ports come from 29280-29289, the part of the #60 block that main's
+// fixed-port tests leave free (cmd/hb-agent and internal/agent/enginedouble
+// bind 29290-29299). internal/agentserver scans 29280-29289 upwards, so the
+// rig scans downwards.
 const (
 	blockFirst = 29280
-	blockLast  = 29299
+	blockLast  = 29289
 )
 
-// blockListener binds the highest free port of the block. Other packages of
-// #60 take its ports from the bottom (internal/agentserver 29280-29289,
-// internal/agent/enginedouble 29290-29299, upwards).
-func blockListener(t *testing.T) net.Listener {
+// kernelListener binds a port the kernel chooses on 127.0.0.1.
+func kernelListener(t *testing.T) net.Listener {
 	t.Helper()
-	for p := blockLast; p >= blockFirst; p-- {
-		if ln, err := net.Listen("tcp4", "127.0.0.1:"+strconv.Itoa(p)); err == nil {
-			return ln
-		}
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Fatal("no free port in 29280-29299")
-	return nil
+	return ln
 }
 
-// blockPorts returns n ports of the block that are free now, for a process
-// that binds them itself (frps).
-func blockPorts(t *testing.T, n int, skip map[int]bool) []int {
+// blockPorts returns n ports of 29280-29289 that are free now, for frps,
+// which binds them itself.
+func blockPorts(t *testing.T, n int) []int {
 	t.Helper()
 	var out []int
 	for p := blockLast; p >= blockFirst && len(out) < n; p-- {
-		if skip[p] {
-			continue
-		}
 		if ln, err := net.Listen("tcp4", "127.0.0.1:"+strconv.Itoa(p)); err == nil {
 			ln.Close()
 			out = append(out, p)
 		}
 	}
 	if len(out) < n {
-		t.Fatalf("only %d free ports in 29280-29299, want %d", len(out), n)
+		t.Fatalf("only %d free ports in 29280-29289, want %d", len(out), n)
 	}
 	return out
 }
@@ -203,7 +201,7 @@ type frpsProc struct {
 func startFrps(t *testing.T, bin, dir string, w *procWatch) *frpsProc {
 	t.Helper()
 	for attempt := 0; attempt < 3; attempt++ {
-		ports := blockPorts(t, 3, nil)
+		ports := blockPorts(t, 3)
 		f := &frpsProc{bindPort: ports[0], muxPort: ports[1], webPort: ports[2], password: "test-web-password", log: filepath.Join(dir, "frps.log")}
 		cfg := fmt.Sprintf(`bindAddr = "127.0.0.1"
 bindPort = %d
@@ -340,7 +338,7 @@ type terminator struct {
 
 func startTerminator(t *testing.T, cert tls.Certificate, frpsAddr string) *terminator {
 	t.Helper()
-	m := &terminator{ln: blockListener(t), frps: frpsAddr, conns: map[net.Conn]bool{}}
+	m := &terminator{ln: kernelListener(t), frps: frpsAddr, conns: map[net.Conn]bool{}}
 	cfg := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
 	m.wg.Add(1)
 	go func() {
@@ -430,7 +428,7 @@ type endpoint struct {
 
 func startEndpointStandIn(t *testing.T, cert tls.Certificate) *endpoint {
 	t.Helper()
-	e := &endpoint{ln: blockListener(t)}
+	e := &endpoint{ln: kernelListener(t)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+agentapi.PathRegister, func(w http.ResponseWriter, r *http.Request) {
 		e.registers.Add(1)
@@ -528,7 +526,7 @@ func startSSHServer(t *testing.T, bin, dir string, permit []int, w *procWatch) (
 	}
 	opts += `,permitlisten="127.0.0.1:1",command="/bin/false"`
 	writeFile(t, filepath.Join(sdir, "authorized_keys"), []byte(opts+" "+clientPub+"\n"))
-	s := &sshServer{t: t, ln: blockListener(t), sshd: bin, w: w}
+	s := &sshServer{t: t, ln: kernelListener(t), sshd: bin, w: w}
 	f := strings.Fields(hostPub)
 	writeFile(t, filepath.Join(dh, agentapi.DialHomeKnownHostsFile), []byte(fmt.Sprintf("[127.0.0.1]:%d %s %s\n", s.port(), f[0], f[1])))
 	s.config = writeFile(t, filepath.Join(sdir, "sshd_config"), []byte(strings.Join([]string{
