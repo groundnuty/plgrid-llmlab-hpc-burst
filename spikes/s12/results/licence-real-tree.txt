@@ -1,0 +1,57 @@
+$ spikes/s12/licence-modules.sh .
+.
+third_party/forked/kcp
+third_party/forked/kubeai
+(exit 0)
+
+$ spikes/s12/licence-check.sh --negative-control <go-licenses v2.0.1> . <out dir>
+
+##### module .: an own package without a LICENSE is a failure
+allowlist: Apache-2.0,0BSD,BSD-2-Clause,BSD-2-Clause-FreeBSD,BSD-3-Clause,MIT,MIT-0,ISC,OpenSSL,OpenSSL-standalone,PSF-2.0,Python-2.0,Python-2.0.1,PostgreSQL,SSLeay-standalone,UPL-1.0,X11,Zlib
+report rows: 58
+
+== check ./...
+gate: go-licenses exit=0, permitted=0, unexpected=0: ok
+
+== check ./... --include_tests (licences only tests reach)
+gate: go-licenses exit=0, permitted=0, unexpected=0: ok
+
+== negative control: BSD-3-Clause taken off the list (must fail)
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'github.com/google/uuid'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'github.com/munnerz/goautoneg'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'github.com/spf13/pflag'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'golang.org/x/net'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'golang.org/x/oauth2'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'golang.org/x/sys/unix'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'golang.org/x/term'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'golang.org/x/text'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'golang.org/x/time/rate'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'google.golang.org/protobuf'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'gopkg.in/evanphx/json-patch.v4'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'gopkg.in/inf.v0'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'k8s.io/apimachinery/third_party/forked/golang'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'k8s.io/kube-openapi/pkg/internal/third_party/go-json-experiment/json'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'k8s.io/utils/internal/third_party/forked/golang/net'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'sigs.k8s.io/json'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'sigs.k8s.io/yaml'.
+gate: go-licenses exit=1, permitted=0, unexpected=17: FAIL
+negative control: failed and named BSD-3-Clause packages, as it should
+
+##### module third_party/forked/kcp: an own package without a LICENSE is a failure
+allowlist: Apache-2.0,0BSD,BSD-2-Clause,BSD-2-Clause-FreeBSD,BSD-3-Clause,MIT,MIT-0,ISC,OpenSSL,OpenSSL-standalone,PSF-2.0,Python-2.0,Python-2.0.1,PostgreSQL,SSLeay-standalone,UPL-1.0,X11,Zlib
+report rows: 0
+known zero: third_party/forked/kcp has no package to check; reason: its one Go file is behind the s3embedded build tag, so no package matches and no binary links it; the copied-code check covers it
+
+== check ./...
+gate: go-licenses exit=0, permitted=0, unexpected=0: ok
+
+##### module third_party/forked/kubeai: an own package without a LICENSE is a failure
+allowlist: Apache-2.0,0BSD,BSD-2-Clause,BSD-2-Clause-FreeBSD,BSD-3-Clause,MIT,MIT-0,ISC,OpenSSL,OpenSSL-standalone,PSF-2.0,Python-2.0,Python-2.0.1,PostgreSQL,SSLeay-standalone,UPL-1.0,X11,Zlib
+report rows: 7
+
+== check ./...
+gate: go-licenses exit=0, permitted=0, unexpected=0: ok
+spikes/: outside the check (HBEP-15); CHECK_SPIKES=1 runs them as an experiment
+
+licence check: PASS
+(exit 0)
