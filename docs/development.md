@@ -30,9 +30,10 @@ Code under `spikes/` and `third_party/forked/*` is not part of this module.
 - **One controller binary** in alpha, `cmd/hpcburst-controller` (#61 owns its `main`). `hpcburst up` starts and supervises it, and restarts it when it exits (#61, in `internal/launcher`).
 - **Inside it, one controller-runtime manager per Provider** (HBEP-4, Two controllers; HBEP-11, Controllers).
   - Each runs crossplane-runtime's managed reconciler over the Allocations naming its Provider.
-  - Each has its own leader `Lease`, `v1alpha1.ProviderLeaseName(<provider>)`.
+  - Each has its own leader `Lease`, `v1alpha1.ProviderLeaseName(<provider>)`, which is `provider-<name>` (HBEP owner, 31 Oct 2026).
   - A supervisor starts a manager when a Provider appears and stops it when the Provider goes, so one Provider's failure does not stop the others (#59 owns it, and `main` calls it).
-- **The lifecycle controller** is one more manager in the same binary (#61), with the `Lease` `v1alpha1.LeaseLifecycle`. Every `Lease` lives in `v1alpha1.ControllerNamespace`, which the launcher creates.
+- **The lifecycle controller** is one more manager in the same binary (#61), with the `Lease` `v1alpha1.LeaseLifecycle`.
+- **Every `Lease` lives in `v1alpha1.ControllerNamespace`, `hpcburst-system`.** The launcher creates that namespace before it starts the controller binary; #61, which owns the supervision in `internal/launcher`, adds it.
 - **The agent API** runs inside the lifecycle controller's process:
   - #60's HTTP server handles TLS, the routes, authentication and the long poll;
   - it calls the lifecycle controller through `agentapi.Backend`, which #61 implements.
@@ -44,18 +45,20 @@ Code under `spikes/` and `third_party/forked/*` is not part of this module.
 |---|---|---|
 | `api/v1alpha1/`, `config/crd/`, `pkg/provider/`, `pkg/agentapi/` | contracts owner | shared types, interfaces and fakes |
 | `internal/slurm/` | #59 | `provider.Batch` and `provider.ProfileReader` for Slurm over ssh |
+| the managed Provider's controller (`provider.Managed` for LLMLab, the catalog loop) | not yet assigned | `fake.Managed` and `fake.ManagedController` stand in for it |
 | `internal/providerctl/` | #59 | the managed reconciler and the per-Provider manager supervisor |
 | `internal/agentserver/` | #60 | the agent API's HTTP server, calling `agentapi.Backend` |
 | `internal/agent/`, `cmd/hb-agent/` | #60 | the allocation agent |
 | `internal/lifecycle/` | #61 | the lifecycle manager, its verification controller and the `Backend` |
 | `cmd/hpcburst-controller/`, `internal/launcher/` | #61 | the controller binary, and supervising it from `hpcburst up` |
 
-The lifecycle controller never imports `internal/slurm` or `internal/providerctl`. It acts on providers only through Allocation objects, and reads Allocation and Provider status (HBEP-7, Controllers). Its tests drive `pkg/provider/fake.Controller` until the real provider lands. #59's reconciler tests use `fake.Batch` for the protocol and S4's fake Slurm for the dialect.
+The lifecycle controller never imports `internal/slurm` or `internal/providerctl`. It acts on providers only through Allocation objects, and reads Allocation and Provider status (HBEP-7, Controllers). Its tests drive `pkg/provider/fake.Controller` until the real provider lands, and `fake.ManagedController` for a managed Provider's catalog. #59's reconciler tests use `fake.Batch` for the protocol and S4's fake Slurm for the dialect.
 
 ### Single writer of the API
 
 - **Only the contracts owner edits `api/` and `config/crd/`.** A builder who needs a field, a condition type or a reason asks for it and gets a small PR. Builders never regenerate or hand-edit the CRDs.
-- **Each field of each object has one writer.** Every write carries a resourceVersion precondition: an Update, or a patch with an optimistic lock. A conflict means re-read, never overwrite (HBEP-7, open question 11).
+- **Each field of each object has one writer.** Every write carries a resourceVersion precondition: an Update, or a patch with an optimistic lock. A conflict means re-read, never overwrite (HBEP-7, open question 11). The one server-side apply is the lifecycle controller's `DialHomeUnreachable` (below).
+- **Field managers.** Every write names its controller's field manager, so `managedFields` shows who wrote what: `v1alpha1.FieldManagerLifecycle` (`hpcburst-lifecycle`) for the lifecycle controller and its `Backend`, and `v1alpha1.FieldManagerProvider` (`hpcburst-provider`) for every Provider's controller.
 
 | Object, part | Writer |
 |---|---|
@@ -63,8 +66,10 @@ The lifecycle controller never imports `internal/slurm` or `internal/providerctl
 | Allocation: annotations `external-name`, `submission`, `job-id`, `hold-lifted`; finalizer `cancel-all`; all of status, including `status.retention` (a mirror of the spec) | the Provider's controller (crossplane-runtime rewrites the whole status) |
 | Allocation: annotation `abandon-attempt` | an operator |
 | Instance: creation, deletion, spec, status, annotations (`restart-<part>`, `predecessor`), finalizer `drain` | lifecycle controller, including its `Backend` |
-| ModelDeployment status | lifecycle controller |
-| Provider status | the Provider's controller. One exception: the lifecycle controller writes only the condition `DialHomeUnreachable`, and the Provider's controller keeps a condition it does not own |
+| Instance: `status.leaseEnd` | lifecycle controller: on every observe it copies the Allocation's `status.atProvider.hardEnd`, so a later hard end moves it. The front reads it and never routes to an Instance without it (HBEP-5, HBEP-7) |
+| ModelDeployment status, including a managed source's `Ready` and `Progressing` and the reason `ProviderNotOnPlatform` | lifecycle controller. The front only filters: it routes a managed entry to no Provider off `spec.source.managed.platform` |
+| Provider status, the managed `catalog` and `lastCatalogRead` included | the Provider's controller, under `hpcburst-provider`. It keeps every condition it does not own |
+| Provider status: the condition `DialHomeUnreachable` | lifecycle controller, by server-side apply to the status subresource under `hpcburst-lifecycle`, with forced ownership, owning only that list entry (`v1alpha1.DialHomeUnreachableApply`). Neither writer removes the other's condition (HBEP owner, 31 Oct 2026) |
 | identity and verification records | lifecycle controller (its verification controller) |
 
 ### Runtime conventions
@@ -72,6 +77,10 @@ The lifecycle controller never imports `internal/slurm` or `internal/providerctl
 - **The controller's credentials directory** is mode 700 under the launcher's state directory.
   - `agentapi.AllocationCredentialPath(dir, <Allocation UID>)` holds each Allocation's credential: 64 lowercase hex characters, no newline, mode 600. The lifecycle controller writes it as soon as the create returns the UID. Until the file exists, the provider's Create waits and requeues: it neither submits nor marks the attempt Rejected. The provider reads the file to stage it (`alloc/<tag>/credential`), and the agent API reads it to authenticate.
   - `agentapi.InstanceKeyPath(dir, <Instance UID>)` holds each Instance's key, which the front reads.
+- **The agent's identity** is a random agent instance ID that the agent draws at its start (`agentapi.HeaderAgentInstanceID`), and the scheduler's restart count of the job in the registration (`RegisterRequest.RestartCount`, from `SLURM_RESTART_COUNT`). The kernel's boot ID is never used: a requeued job can land on the same node with no reboot. Registration is soft state: after a controller restart every agent registers again on its next poll, with the same ID, and no Instance fails and no generation rises.
+- **The launch** always passes `--max-num-seqs`: the serving spec's value, else `v1alpha1.DefaultMaxNumSeqs` (256). `launch.maxNumSeqs` records it, and the front's cap, when `routing.instanceCap` is unset, is that times the Instance's workers (HBEP-5, HBEP-7).
+- **The drain window** of an Instance is `v1alpha1.InstanceDrainWindow(profile, routing)`: `drainWindow`, or `routing.maxRequestDuration` plus `drainMargin` when that is shorter. The front and the lifecycle controller both call it, so both compute the same drain start (`v1alpha1.DrainStart`).
+- **The image format.** Each partition's `imageFormat` (`sif` or `sandbox`) says what Apptainer runs on its compute nodes: `sif` on Helios GH200, `sandbox` on Athena A100 (spike S1, probe 2). It is not a deployment-ID input. The lifecycle controller sends `v1alpha1.ImageFormatOf(partition)` (`sif` when unstated) in `DesiredState.Settings.ImageFormat`, and the agent keeps the image at `agentapi.StagedImagePath(digest, format)`.
 - **Agent builds** are a directory of `agentapi.AgentBuildName(<cpuArch>)` files. The lifecycle controller sets `agentDigest` to the SHA-256 of the build for the partition's `cpuArch`. The provider finds the file by that digest and stages it at `agentapi.StagedAgentPath(digest)`.
 - **`agent.json`** is `agentapi.AgentConfig`, written by the provider from the launcher's front settings, the agent endpoint's port and certificate pin, and the paths it resolved.
   - In ssh mode its user is the user who runs the controller.
