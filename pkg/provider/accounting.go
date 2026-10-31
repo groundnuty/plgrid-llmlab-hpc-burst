@@ -109,6 +109,55 @@ func copyCount(p *int32) *int32 {
 	return &v
 }
 
+// AccountingRefresh is how old a running job's stored accounting may get
+// before a read writes it again: the interval at which the Provider's
+// lastSuccessfulStatusRead is refreshed (science agent, 31 Oct 2026, on the
+// review of PR 118).
+const AccountingRefresh = v1alpha1.ProviderPollInterval
+
+// MirrorAccounting returns the status.atProvider.accounting to store after a
+// read of the recorded job at now, given prior, the stored observation
+// (science agent, 31 Oct 2026, on the review of PR 118: the status-write
+// cadence). It is AccountingOf's, except that prior's accounting is kept as it
+// is, readTime included, when storing the new one would be a write that
+// carries nothing:
+//   - nothing but readTime would change (PR 76: no identical status writes);
+//   - the job is still running, the allocated counts are unchanged, and prior
+//     was read less than AccountingRefresh ago. Its elapsed time is still
+//     elapsedSeconds at readTime; a reader that needs it now counts on from
+//     readTime.
+//
+// A change in a count, the job's end, and a stored block a minute old are
+// written at once.
+func MirrorAccounting(job Job, requestedGPUs int32, prior *v1alpha1.AllocationObservation, now time.Time) *v1alpha1.AllocationAccounting {
+	next := AccountingOf(job, requestedGPUs, prior.Accounting, now)
+	if keepStored(prior, next, job.EndTime != nil) {
+		return prior.Accounting.DeepCopy()
+	}
+	return next
+}
+
+// keepStored reports whether storing next in place of prior's accounting
+// would change nothing a reader needs (MirrorAccounting).
+func keepStored(prior *v1alpha1.AllocationObservation, next *v1alpha1.AllocationAccounting, ended bool) bool {
+	stored := prior.Accounting
+	if stored == nil || next == nil || !sameCount(stored.AllocatedCPUs, next.AllocatedCPUs) || !sameCount(stored.AllocatedGPUs, next.AllocatedGPUs) {
+		return false
+	}
+	if ended && prior.EndTime == nil {
+		return false // the end is written at once, with the time it was read
+	}
+	if sameSeconds(stored.ElapsedSeconds, next.ElapsedSeconds) {
+		return true
+	}
+	return !ended && stored.ElapsedSeconds != nil && next.ElapsedSeconds != nil &&
+		next.ReadTime.Sub(stored.ReadTime.Time) < AccountingRefresh
+}
+
+func sameCount(a, b *int32) bool { return (a == nil) == (b == nil) && (a == nil || *a == *b) }
+
+func sameSeconds(a, b *int64) bool { return (a == nil) == (b == nil) && (a == nil || *a == *b) }
+
 // AccountingLost returns the accounting of a job whose final read never came
 // (HBEP-8: "A Lost job is recorded with its elapsed time unknown"): the counts
 // from the stored accounting, and no elapsed time. It is nil when the job was

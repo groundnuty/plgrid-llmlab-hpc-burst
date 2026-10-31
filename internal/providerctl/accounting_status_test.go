@@ -96,20 +96,25 @@ func TestAccountingStatusFollowsTheJob(t *testing.T) {
 	e.run("alloc-a", 1)
 	wantAcctStatus(t, "12:01:40", e.accStatus("alloc-a"), 8, 1, 40, at(12, 1, 40))
 	id := e.get("alloc-a").Annotations[v1alpha1.AnnotationJobID]
-	for i, want := range []int64{80, 120, 160} {
+	// Polls every 40 s; the block is rewritten once it is a minute old (the
+	// status-write cadence), so 12:02:20 keeps 12:01:40's block.
+	for _, want := range []struct {
+		elapsed int64
+		read    time.Time
+	}{{40, at(12, 1, 40)}, {120, at(12, 3, 0)}, {120, at(12, 3, 0)}} {
 		clock.Advance(40 * time.Second)
 		e.run("alloc-a", 1)
-		wantAcctStatus(t, "poll", e.accStatus("alloc-a"), 8, 1, want, at(12, 1, 40+40*(i+1)))
+		wantAcctStatus(t, "poll at "+clock.Now().Format("15:04:05"), e.accStatus("alloc-a"), 8, 1, want.elapsed, want.read)
 	}
 	if got := jobReads(sl, id); got != 1 {
 		t.Errorf("%d accounting reads of the running job over 4 polls, want 1", got)
 	}
 	a := e.accStatus("alloc-a")
-	if s, ok := a.GPUSeconds(); !ok || s != 160 {
-		t.Errorf("GPU-seconds %d %v, want 160 (1 GPU, 160 s)", s, ok)
+	if s, ok := a.GPUSeconds(); !ok || s != 120 {
+		t.Errorf("GPU-seconds %d %v, want 120 (1 GPU, 120 s at 12:03:00)", s, ok)
 	}
-	if h, ok := a.CPUHours(); !ok || math.Abs(h-8*160.0/3600) > 1e-12 {
-		t.Errorf("CPU-hours %v %v, want 8 x 160 / 3600", h, ok)
+	if h, ok := a.CPUHours(); !ok || math.Abs(h-8*120.0/3600) > 1e-12 {
+		t.Errorf("CPU-hours %v %v, want 8 x 120 / 3600", h, ok)
 	}
 }
 
@@ -194,7 +199,9 @@ func TestAccountingReadIsRetriedAfterAFailure(t *testing.T) {
 		t.Fatalf("precondition: %d accounting reads reached the fake Slurm, want 0 (the first failed before it)", got)
 	}
 	e.poll("alloc-a", 4)
-	wantAcctStatus(t, "after the retry", e.accStatus("alloc-a"), 8, 1, 200, at(12, 4, 20))
+	// The retry at 12:02:20 gives the counts, written at once (80 s); 12:03:40
+	// is the next block a minute old (160 s); 12:04:20 keeps it.
+	wantAcctStatus(t, "after the retry", e.accStatus("alloc-a"), 8, 1, 160, at(12, 3, 40))
 	if got := jobReads(sl, id); got != 1 {
 		t.Errorf("%d accounting reads that reached the fake Slurm, want 1: the retry, then none", got)
 	}

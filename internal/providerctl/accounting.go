@@ -73,10 +73,12 @@ func (e *external) forgetAccountingReads(jobID string) {
 }
 
 // mirrorAccounting writes status.atProvider.accounting from the read of the
-// recorded job (the caller has passed it through allocatedRead). It is unset
-// while the job has not started.
-func (e *external) mirrorAccounting(a *v1alpha1.Allocation, job provider.Job, prior *v1alpha1.AllocationAccounting) {
-	a.Status.AtProvider.Accounting = provider.AccountingOf(job, a.Spec.ForProvider.Batch.GPUs, prior, e.now())
+// recorded job (the caller has passed it through allocatedRead), at
+// provider.MirrorAccounting's cadence: a running job's block is rewritten when
+// a count changes or once it is a minute old, never only because readTime
+// moved. It is unset while the job has not started.
+func (e *external) mirrorAccounting(a *v1alpha1.Allocation, job provider.Job, prior *v1alpha1.AllocationObservation) {
+	a.Status.AtProvider.Accounting = provider.MirrorAccounting(job, a.Spec.ForProvider.Batch.GPUs, prior, e.now())
 }
 
 // keepAccounting is the finalizer's record step (HBEP-4, Two controllers,
