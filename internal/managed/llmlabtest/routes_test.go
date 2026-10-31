@@ -140,6 +140,7 @@ func TestUnknownRoutesAndMethods(t *testing.T) {
 		{http.MethodGet, "/v2/models"},
 		{http.MethodPost, routeChat + "/extra"},
 		{http.MethodGet, "/v1/models/"},
+		{http.MethodPost, routeModels + "/" + modelA}, // no retrieve route: 404, not 405
 	} {
 		requireStatus(t, ask(t, s, c.method, c.path, keyOne, ""), http.StatusNotFound, c.method+" "+c.path)
 	}
@@ -151,7 +152,6 @@ func TestUnknownRoutesAndMethods(t *testing.T) {
 		{http.MethodGet, routeEmbeddings, http.MethodPost},
 		{http.MethodDelete, routeChat, http.MethodPost},
 		{http.MethodPost, routeModels, http.MethodGet},
-		{http.MethodPost, routeModels + "/" + modelA, http.MethodGet},
 	} {
 		a := ask(t, s, c.method, c.path, keyOne, "")
 		requireStatus(t, a, http.StatusMethodNotAllowed, c.method+" "+c.path)
