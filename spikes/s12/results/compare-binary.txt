@@ -1,0 +1,29 @@
+reference: go1.27.3, main module github.com/groundnuty/plgrid-llmlab-hpc-burst v0.0.0-20261031113320-da311e2012c2, 47 dependencies
+
+== bom (SPDX-2.3, 49 packages)
+  main module named:        yes
+  Go standard library named: yes
+  Go module entries: 49, accounted for: 49; other entries ignored: 0
+  missing (0):
+  wrong version (0):
+  listed twice at different versions (0):
+  version equality cannot be established (0):
+  replaced modules reported under the replacement (0)
+  originals of replaced modules also listed, tolerated (0)
+  extra Go module entries not in the reference (0):
+  purl disagrees with name/version (0)
+  RESULT: ok, all 49 reference entries present at the reference version
+
+== syft (SPDX-2.3, 50 packages)
+  main module named:        yes
+  Go standard library named: yes
+  Go module entries: 49, accounted for: 49; other entries ignored: 1 [hpcburst, FILE]
+  missing (0):
+  wrong version (0):
+  listed twice at different versions (0):
+  version equality cannot be established (0):
+  replaced modules reported under the replacement (0)
+  originals of replaced modules also listed, tolerated (0)
+  extra Go module entries not in the reference (0):
+  purl disagrees with name/version (0)
+  RESULT: ok, all 49 reference entries present at the reference version

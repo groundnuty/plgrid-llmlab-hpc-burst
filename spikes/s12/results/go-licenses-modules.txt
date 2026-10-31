@@ -1,0 +1,24 @@
+
+##### module third_party/forked/kcp: an own package without a LICENSE is a failure
+allowlist: Apache-2.0,0BSD,BSD-2-Clause,BSD-2-Clause-FreeBSD,BSD-3-Clause,MIT,MIT-0,ISC,OpenSSL,OpenSSL-standalone,PSF-2.0,Python-2.0,Python-2.0.1,PostgreSQL,SSLeay-standalone,UPL-1.0,X11,Zlib
+report rows: 0
+WARNING: go-licenses saw no package in third_party/forked/kcp, so nothing is checked there
+
+== check ./...
+gate: go-licenses exit=0, permitted=0, unexpected=0: ok
+
+##### module third_party/forked/kubeai: an own package without a LICENSE is a failure
+allowlist: Apache-2.0,0BSD,BSD-2-Clause,BSD-2-Clause-FreeBSD,BSD-3-Clause,MIT,MIT-0,ISC,OpenSSL,OpenSSL-standalone,PSF-2.0,Python-2.0,Python-2.0.1,PostgreSQL,SSLeay-standalone,UPL-1.0,X11,Zlib
+report rows: 7
+
+== check ./...
+gate: go-licenses exit=0, permitted=0, unexpected=0: ok
+spikes/s10: skipped (CHECK_SPIKES=1 runs it)
+spikes/s10b: skipped (CHECK_SPIKES=1 runs it)
+spikes/s10c: skipped (CHECK_SPIKES=1 runs it)
+spikes/s2: skipped (CHECK_SPIKES=1 runs it)
+spikes/s2b: skipped (CHECK_SPIKES=1 runs it)
+spikes/s3: skipped (CHECK_SPIKES=1 runs it)
+spikes/s4: skipped (CHECK_SPIKES=1 runs it)
+spikes/s8: skipped (CHECK_SPIKES=1 runs it)
+packages under spikes/ or third_party/ matched by ./... at the root: 0
