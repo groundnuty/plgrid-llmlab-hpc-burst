@@ -414,3 +414,5 @@ These come from building this framework, from 30 Oct 2026, not from www-2027's o
   A spike saw a listing cut at 50 entries. Later the Hub sent one page of 77 entries to a request with no `limit`, and 50 with a `Link` to one with `expand=true`. Send `limit=1000`, and always follow `Link`.
 - **L-17.6 An approval given before a code-review round finished was used to merge the post-fix head.** [out of scope; fixed by rule in the agents' process]
   An objective check approved a head; the review round then added fix commits, and the PR merged at the fixed head on that approval. The objective check now comes after the reviews and their fixes, names the full head SHA, and any later commit voids it.
+- **L-17.7 An ssh banner proves only that something answers.** [fixed by rule]
+  On 30 Oct, spike S1's step 0 read an ssh banner on the ssh port at the agents' VM's address as proof that the clusters could reach the VM. On 31 Oct the host key there turned out to be another machine's: a gateway's (issue #18). Check the host key against the target's own, not just the banner. S1's kit, on its spike branch, now does it in a preflight, before any forward.
