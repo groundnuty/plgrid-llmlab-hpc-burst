@@ -155,7 +155,7 @@ func TestCrashLeavesAGapInTheCounter(t *testing.T) {
 	if want := []uint64{1, 2, 3, 4, 5, 1001}; !reflect.DeepEqual(counters(recs), want) {
 		t.Errorf("counters in the log = %v, want %v: the gap 6 to 1000 must show", counters(recs), want)
 	}
-	if got := counterFile(t, dir); got != "2000" {
-		t.Errorf("counter file = %q, want 2000", got)
+	if got := counterFile(t, dir); got != "1001" {
+		t.Errorf("counter file = %q, want 1001: the second child closed cleanly, which persists its last counter", got)
 	}
 }

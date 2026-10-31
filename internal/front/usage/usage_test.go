@@ -150,10 +150,10 @@ func TestCountersAreReservedInBlocksOf1000(t *testing.T) {
 	}
 }
 
-// TestRestartStartsAtTheNextBlock: a second Open on the same directory (a
-// restart) starts at 1001, so the records the first run did not write show as
-// a gap.
-func TestRestartStartsAtTheNextBlock(t *testing.T) {
+// TestCleanRestartContinuesWithoutAGap: a Close persists the last counter
+// used, so the next run's first counter is the one after it. Only a crash
+// leaves a gap.
+func TestCleanRestartContinuesWithoutAGap(t *testing.T) {
 	dir := t.TempDir()
 	s := sink(t, dir)
 	for _, id := range []string{"a", "b", "c"} {
@@ -162,19 +162,66 @@ func TestRestartStartsAtTheNextBlock(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
+	if got := counterFile(t, dir); got != "3" {
+		t.Errorf("counter file after a clean Close = %q, want 3", got)
+	}
 	s2 := sink(t, dir)
-	if got := write(t, s2, rec("d")); got != 1001 {
-		t.Errorf("the first counter after a restart = %d, want 1001", got)
+	if got := write(t, s2, rec("d")); got != 4 {
+		t.Errorf("the first counter after a clean restart = %d, want 4", got)
 	}
 	if err := s2.Close(); err != nil {
 		t.Fatal(err)
 	}
-	recs := readLog(t, dir)
+	// A run that writes nothing leaves the counter where it was.
+	s3 := sink(t, dir)
+	if err := s3.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s4 := sink(t, dir)
+	if got := write(t, s4, rec("e")); got != 5 {
+		t.Errorf("the first counter after a run that wrote nothing = %d, want 5", got)
+	}
+	if err := s4.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if want, recs := []uint64{1, 2, 3, 4, 5}, readLog(t, dir); !reflect.DeepEqual(counters(recs), want) {
+		t.Errorf("counters in the log = %v, want %v: no gap", counters(recs), want)
+	}
+}
+
+// TestRestartAfterACrashStartsAtTheNextBlock: the files as a crash leaves
+// them (the directory copied while the sink is still open, with its records
+// on disk and its counter file at the block end) give a second run that starts
+// at 1001, so the records the first run did not write show as a gap. The real
+// SIGKILL of a child is in crash_test.go.
+func TestRestartAfterACrashStartsAtTheNextBlock(t *testing.T) {
+	dir := t.TempDir()
+	s := sink(t, dir)
+	t.Cleanup(func() { _ = s.Close() })
+	for _, id := range []string{"a", "b", "c"} {
+		write(t, s, rec(id))
+	}
+	eventually(t, func() bool { return logLines(dir) >= 3 }, "the three records to reach the log")
+	crashed := t.TempDir()
+	for _, name := range []string{logName, counterName} {
+		b, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(crashed, name), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s2 := sink(t, crashed)
+	if got := write(t, s2, rec("d")); got != 1001 {
+		t.Errorf("the first counter after a crash = %d, want 1001", got)
+	}
+	if err := s2.Close(); err != nil {
+		t.Fatal(err)
+	}
+	recs := readLog(t, crashed)
 	if want := []uint64{1, 2, 3, 1001}; !reflect.DeepEqual(counters(recs), want) {
 		t.Errorf("counters in the log = %v, want %v: the gap must show", counters(recs), want)
-	}
-	if got := counterFile(t, dir); got != "2000" {
-		t.Errorf("counter file = %q, want 2000", got)
 	}
 }
 

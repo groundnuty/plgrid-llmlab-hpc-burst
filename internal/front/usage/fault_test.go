@@ -242,3 +242,21 @@ func TestOpenCutsATornTail(t *testing.T) {
 		})
 	}
 }
+
+// TestCloseAfterAFailureKeepsTheBlockEnd: the batch X, Y, Z was lost, so the
+// run was not clean. Close leaves the counter file at the block end, as a
+// crash does, and the next run starts at 1001.
+func TestCloseAfterAFailureKeepsTheBlockEnd(t *testing.T) {
+	dir := t.TempDir()
+	failedBatch(t, dir, false)
+	if got := counterFile(t, dir); got != "1000" {
+		t.Errorf("counter file after a Close that reported an error = %q, want 1000", got)
+	}
+	s := sink(t, dir)
+	if got := write(t, s, rec("next")); got != 1001 {
+		t.Errorf("the first counter after it = %d, want 1001", got)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+}

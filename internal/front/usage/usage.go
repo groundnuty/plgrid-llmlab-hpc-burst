@@ -287,7 +287,10 @@ func (s *Sink) Err() error {
 	return s.err
 }
 
-// Close writes what is queued and closes the log.
+// Close writes what is queued and closes the log. After a clean run it
+// persists the last counter used, so that the next run continues from it
+// without a gap: only a crash leaves one. After a write or sync error it
+// leaves the block end, so that what the failure dropped still shows.
 func (s *Sink) Close() error {
 	s.mu.Lock()
 	if s.closed {
@@ -298,10 +301,30 @@ func (s *Sink) Close() error {
 	close(s.wake)
 	s.mu.Unlock()
 	<-s.done
-	if err := s.log.Close(); err != nil {
-		return err
+	err := s.Err()
+	if err == nil {
+		err = s.persistLast()
 	}
-	return s.Err()
+	if cerr := s.log.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
+// persistLast writes the last counter used as the counter file's value, unless
+// it is that already (it is the block end after a run that used a whole block,
+// and what Open read after one that wrote nothing).
+func (s *Sink) persistLast() error {
+	s.mu.Lock()
+	last, end := s.next-1, s.blockEnd
+	s.mu.Unlock()
+	if last == end {
+		return nil
+	}
+	if err := writeCounter(filepath.Join(s.dir, CounterFile), last); err != nil {
+		return fmt.Errorf("usage: persist the last counter: %w", err)
+	}
+	return nil
 }
 
 func readCounter(path string) (uint64, error) {
