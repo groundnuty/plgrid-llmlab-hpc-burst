@@ -1,0 +1,1 @@
+[{"role":"system","content":null},{"role":"user","content":[{"type":"text","text":"Zażółć \"gęślą\"\njaźń"},{"type":"image_url","image_url":{"url":"https://example.org/a.png","detail":"low"}},{"type":"x","weight":1.50,"big":1e21,"small":0.0000001,"flag":true}]}]

@@ -87,6 +87,39 @@ func TestRoutingLoadBoundIsAtLeastOne(t *testing.T) {
 	})
 }
 
+// A load bound has at most two decimal places (`@hpc-burst-science-agent`,
+// 31 Oct 2026). These are the rules
+// modeldeployments:$.spec.routing.loadBound.tight#1 and .loose#1, one per side:
+// each refused case below sets one side and leaves the other at its default, so
+// both rules are tested alone. A value with three places is refused even when
+// it ends in zeros.
+func TestRoutingLoadBoundHasAtMostTwoDecimals(t *testing.T) {
+	const msg = "a load bound has at most two decimal places"
+	lf := func(s string) *v1alpha1.LoadFactor { return ptr.To(v1alpha1.LoadFactor(s)) }
+	bound := func(tight, loose *v1alpha1.LoadFactor) func(*v1alpha1.ModelDeployment) {
+		return func(md *v1alpha1.ModelDeployment) {
+			md.Spec.Routing = &v1alpha1.Routing{LoadBound: &v1alpha1.LoadBound{Tight: tight, Loose: loose}}
+		}
+	}
+	var refused, accepted []mdCase
+	for _, v := range []string{"1.005", "1.999", "1.250", "2.000", "1.2500", "1.123456789"} {
+		refused = append(refused,
+			mdCase{"a tight bound of " + v, bound(lf(v), nil), msg})
+	}
+	for _, v := range []string{"2.005", "2.999", "2.250", "3.000", "2.0000", "2.123456789"} {
+		refused = append(refused,
+			mdCase{"a loose bound of " + v, bound(nil, lf(v)), msg})
+	}
+	for _, v := range []string{"1", "1.0", "1.5", "1.25", "1.05", "1.50", "1.99", "10.55"} {
+		accepted = append(accepted, mdCase{"a tight bound of " + v, bound(lf(v), lf("20")), ""})
+	}
+	for _, v := range []string{"2", "2.0", "2.5", "2.25", "2.05", "2.50", "2.99", "10.55"} {
+		accepted = append(accepted, mdCase{"a loose bound of " + v, bound(nil, lf(v)), ""})
+	}
+	accepted = append(accepted, mdCase{"both bounds at two places", bound(lf("1.25"), lf("2.75")), ""})
+	runMDCases(t, refused, accepted)
+}
+
 // The drain margin and the per-partition image format (HBEP-4, Platform
 // profile schema; `@hpc-burst-science-agent`, 31 Oct 2026): sif on Helios GH200 and sandbox on Athena
 // A100, measured by spike S1's probe 2. An absent format stays absent: the

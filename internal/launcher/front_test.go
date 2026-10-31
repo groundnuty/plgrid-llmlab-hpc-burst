@@ -21,6 +21,9 @@ func TestFrontNormalize(t *testing.T) {
 		{"direct", Front{Mode: "direct", Addr: "front.example.test:8443"}, Front{Mode: "direct", Addr: "front.example.test:8443"}},
 		{"ssh without a port means 22", Front{Mode: "ssh", Addr: "front.example.test", KeyPath: key}, Front{Mode: "ssh", Addr: "front.example.test:22", KeyPath: key}},
 		{"ssh with port 22", Front{Mode: "ssh", Addr: "127.0.0.1:22", KeyPath: key}, Front{Mode: "ssh", Addr: "127.0.0.1:22", KeyPath: key}},
+		// The owner routes a cluster through a port forward on the gateway at its own port.
+		{"ssh on another port", Front{Mode: "ssh", Addr: "gateway.example.test:2222", KeyPath: key}, Front{Mode: "ssh", Addr: "gateway.example.test:2222", KeyPath: key}},
+		{"ssh on the highest port", Front{Mode: "ssh", Addr: "gateway.example.test:65535", KeyPath: key}, Front{Mode: "ssh", Addr: "gateway.example.test:65535", KeyPath: key}},
 	}
 	for _, c := range ok {
 		t.Run(c.name, func(t *testing.T) {
@@ -40,7 +43,9 @@ func TestFrontNormalize(t *testing.T) {
 		{"mode without an address", Front{Mode: "direct"}, "--front-addr"},
 		{"direct without a port", Front{Mode: "direct", Addr: "front.example.test"}, "host:port"},
 		{"port out of range", Front{Mode: "direct", Addr: "x:99999"}, "not a port"},
-		{"ssh on another port", Front{Mode: "ssh", Addr: "x:2222", KeyPath: key}, "port 22"},
+		{"ssh with port 0", Front{Mode: "ssh", Addr: "x:0", KeyPath: key}, "not a port"},
+		{"ssh with port out of range", Front{Mode: "ssh", Addr: "x:99999", KeyPath: key}, "not a port"},
+		{"ssh with a port that is not a number", Front{Mode: "ssh", Addr: "x:ssh", KeyPath: key}, "not a port"},
 		{"ssh without a key", Front{Mode: "ssh", Addr: "x"}, "--front-key"},
 		{"ssh with a missing key", Front{Mode: "ssh", Addr: "x", KeyPath: filepath.Join(t.TempDir(), "nope")}, "front key"},
 		{"ssh with a directory as key", Front{Mode: "ssh", Addr: "x", KeyPath: t.TempDir()}, "regular file"},

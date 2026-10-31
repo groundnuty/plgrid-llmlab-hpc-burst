@@ -268,12 +268,12 @@ func TestCatalogLoopInItsManager(t *testing.T) {
 // Two managed Providers, each in its own manager with its own Lease, in one
 // process, as the controller binary runs them.
 func TestTwoManagedProvidersInOneProcess(t *testing.T) {
-	gw := llmlabtest.Start(t, llmlabtest.Options{PortLo: portLo, PortHi: portHi, Keys: []string{"example-key-a", "example-key-b"}})
+	gw := llmlabtest.Start(t, llmlabtest.Options{PortLo: portLo, PortHi: portHi, Keys: []string{"example-key-a-0001", "example-key-b-0002"}})
 	gw.SetModels(llmlabtest.Model{ID: "example-ü-\U0001F600-27b"})
-	gw.RejectKey("example-key-b", 403)
+	gw.RejectKey("example-key-b-0002", 403)
 	start := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
-	a := startManaged(t, "example-llmlab-a", "example-key-a", gw, testingclock.NewFakeClock(start))
-	b := startManaged(t, "example-llmlab-b", "example-key-b", gw, testingclock.NewFakeClock(start))
+	a := startManaged(t, "example-llmlab-a", "example-key-a-0001", gw, testingclock.NewFakeClock(start))
+	b := startManaged(t, "example-llmlab-b", "example-key-b-0002", gw, testingclock.NewFakeClock(start))
 
 	p := a.waitCatalog("provider a", func(m map[string]v1alpha1.CatalogEntryStatus) bool { return len(m) == 1 })
 	if got, want := string(p.Status.Catalog[0].ManagedID), vectorHash(t, "03-managed-no-revision-unicode"); got != want {

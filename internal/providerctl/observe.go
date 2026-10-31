@@ -264,7 +264,7 @@ func (e *external) absent(a *v1alpha1.Allocation, id string, now time.Time) {
 // request, on the first successful observe of the recorded job only (HBEP-4,
 // The Slurm dialect, Read-back): a later change, such as an administrator's
 // extension of the time limit, is a later hard end, never a mismatch. The
-// caller runs it until the read-back marker names the job (annotationReadBack).
+// caller runs it until the read-back marker names the job (v1alpha1.AnnotationReadBack).
 // A difference sets SubmittedAsOther True, reason ReasonReadBackMismatch, with
 // each differing field and both values; the condition is never cleared, and
 // the lifecycle controller replaces the Allocation. It reports whether the job
@@ -291,11 +291,11 @@ func (e *external) readBack(a *v1alpha1.Allocation, job provider.Job) bool {
 func (e *external) markReadBack(ctx context.Context, a *v1alpha1.Allocation, rec *record, id string) error {
 	var err error
 	for i := 0; i < 3; i++ {
-		if a.Annotations[annotationReadBack] == id {
+		if a.Annotations[v1alpha1.AnnotationReadBack] == id {
 			rec.readBack = id
 			return nil
 		}
-		if err = write(ctx, e.s.kube, a, map[string]string{annotationReadBack: id}); err == nil {
+		if err = write(ctx, e.s.kube, a, map[string]string{v1alpha1.AnnotationReadBack: id}); err == nil {
 			rec.readBack = id
 			return nil
 		}
