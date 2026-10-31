@@ -150,6 +150,25 @@ class Procs:
             raise RuntimeError("%s: PID %d no longer has its recorded start time" % (name, pid))
         os.kill(pid, sig)
 
+    def freeze(self, name, timeout=2.0):
+        """SIGSTOP the process and return once EVERY thread is stopped. Delivery to a multi-threaded
+        process is not instant: a Go process can keep running for milliseconds, long enough to pass a
+        FIN on (seen in the self-test before this wait existed)."""
+        self.signal(name, signal.SIGSTOP)
+        pid, end = self.pid(name), time.time() + timeout
+        while time.time() < end:
+            states = []
+            for t in os.listdir("/proc/%d/task" % pid):
+                try:
+                    with open("/proc/%d/task/%s/stat" % (pid, t)) as fh:
+                        states.append(fh.read().rsplit(")", 1)[1].split()[0])
+                except OSError:
+                    pass
+            if states and all(x in ("T", "t") for x in states):
+                return
+            time.sleep(0.001)
+        raise RuntimeError("%s: not every thread stopped within %.1f s" % (name, timeout))
+
     def stop(self, name, timeout=5.0):
         if name not in self.procs:
             return

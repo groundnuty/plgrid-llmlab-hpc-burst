@@ -86,7 +86,7 @@ def one(st, env, setting, scen, rep, rng, results):
         if scen == "kill":
             st.P.signal("frpc", signal.SIGKILL)
         elif scen in ("freeze", "crash"):
-            st.P.signal("tox", signal.SIGSTOP)
+            st.P.freeze("tox")
             frozen = True
             if scen == "crash":
                 time.sleep(0.5)

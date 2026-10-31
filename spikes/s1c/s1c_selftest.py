@@ -87,18 +87,22 @@ def eof_within(conn, secs):
 def t_fixtures(env, st):
     http_json("POST", TOX + "/proxies", {"name": "fixture", "listen": "127.0.0.1:%d" % PORTS["tox_fixture"],
                                          "upstream": "127.0.0.1:%d" % PORTS["fixture_srv"], "enabled": True})
-    srv, cli, conn = fixture_pair()
-    st.P.signal("tox", signal.SIGSTOP)
-    try:
-        cli.close()
-        silent = not eof_within(conn, 3)
-    finally:
-        st.P.signal("tox", signal.SIGCONT)
-    late = eof_within(conn, 3)
-    check("a frozen toxiproxy (SIGSTOP) is silent: a client close does not reach the server", silent and late,
-          "EOF while frozen: %s; EOF after SIGCONT: %s" % (not silent, late))
-    conn.close()
-    srv.close()
+    leaks = []
+    for i in range(10):   # repeated: the first version passed twice and then failed on a race
+        srv, cli, conn = fixture_pair()
+        st.P.freeze("tox")
+        try:
+            cli.close()
+            silent = not eof_within(conn, 1)
+        finally:
+            st.P.signal("tox", signal.SIGCONT)
+        late = eof_within(conn, 3)
+        if not (silent and late):
+            leaks.append((i, silent, late))
+        conn.close()
+        srv.close()
+    check("a frozen toxiproxy (SIGSTOP, all threads stopped) is silent: a client close does not reach the server",
+          not leaks, "10 tries; failures (try, silent while frozen, EOF after SIGCONT): %s" % (leaks or "none"))
     srv, cli, conn = fixture_pair()
     for stream in ("upstream", "downstream"):
         http_json("POST", TOX + "/proxies/fixture/toxics", {"name": "to_" + stream, "type": "timeout",
