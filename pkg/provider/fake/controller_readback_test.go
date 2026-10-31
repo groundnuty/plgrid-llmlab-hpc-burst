@@ -2,6 +2,7 @@ package fake
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -57,15 +58,13 @@ func TestARenamedJobIsRefusedAndCancelledOnce(t *testing.T) {
 	e := newEnv(t)
 	e.batch.Enqueue(Script{QueueWait: 5 * time.Minute, Rename: "example-shortened-name"})
 	e.newAlloc("a1", testProvider)
-	tag := v1alpha1.JobTag(testNS, "a1", "uid-a1")
-	wantMessage := `the scheduler stored job 998 under the name "example-shortened-name", not the tag "` + tag + `"; the job is cancelled`
 
 	e.sync() // 12:00:00
 	o := e.wantPhase("a1", v1alpha1.AllocationRefused)
 	if o.Reason != "JobRenamed" {
 		t.Fatalf("reason = %q, want JobRenamed", o.Reason)
 	}
-	e.wantCondition("a1", xpv2.TypeSynced, corev1.ConditionFalse, "JobRenamed", wantMessage)
+	e.wantNoSynced("a1")
 	if got := scancels(e.batch); len(got) != 1 || got[0] != "998" {
 		t.Fatalf("scancel calls after the first Sync = %v, want [998]", got)
 	}
@@ -78,7 +77,7 @@ func TestARenamedJobIsRefusedAndCancelledOnce(t *testing.T) {
 			t.Fatalf("at %s reason = %q, want JobRenamed kept", when.Format("15:04:05"), o.Reason)
 		}
 	}
-	e.wantCondition("a1", xpv2.TypeSynced, corev1.ConditionFalse, "JobRenamed", wantMessage)
+	e.wantNoSynced("a1")
 	if got := scancels(e.batch); len(got) != 1 {
 		t.Fatalf("scancel calls after several Syncs = %v, want exactly one", got)
 	}
@@ -177,10 +176,18 @@ func TestReadBackNamesEachDifferingFieldWithBothValues(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newEnv(t)
 			e.newAlloc("a1", testProvider)
-			e.sync() // job 998 is established as requested: partition example-gpu, 30m, 1 GPU
-			e.wantNoConditions("a1")
-			// The spec is edited after the fact (the real CRD forbids it; the
-			// fake client does not), which is a job that differs from the request.
+			// Job 998 is established as requested (partition example-gpu, 30m,
+			// 1 GPU), but the observe that follows fails, so the read-back,
+			// which runs on the first successful observe only, has not run.
+			e.batch.FailReads(errors.New("example: the queue listing timed out"))
+			_ = e.ctl.Sync(context.Background())
+			if e.alloc("a1").Annotations[v1alpha1.AnnotationJobID] != "998" {
+				t.Fatal("setup: job 998 was not recorded")
+			}
+			e.batch.FailReads(nil)
+			// The spec is edited before that first observe (the real CRD forbids
+			// it; the fake client does not), which is a job that differs from
+			// the request.
 			e.mutateSpec("a1", func(s *v1alpha1.AllocationSpec) { tc.edit(s.ForProvider.Batch) })
 			e.syncAt(at(12, 1, 0))
 			e.wantCondition("a1", v1alpha1.ConditionSubmittedAsOther, corev1.ConditionTrue, "ReadBackMismatch", prefix+tc.want)
@@ -281,5 +288,29 @@ func TestARefusedAllocationWithNoJobSubmitsNothingAndStaysRefused(t *testing.T) 
 			t.Fatalf("sbatch logged %d times, want 0: a refused Allocation submits nothing", n)
 		}
 		e.wantRetention("a1", "Keep") // its status is still written
+	}
+}
+
+// wantNoSynced fails when the Allocation carries a Synced condition: the real
+// provider's managed reconciler owns it, so the fake never writes one.
+func (e *env) wantNoSynced(name string) {
+	e.t.Helper()
+	for _, c := range e.alloc(name).Status.Conditions {
+		if c.Type == xpv2.TypeSynced {
+			e.t.Fatalf("Allocation %s carries a Synced condition %+v; the fake writes none", name, c)
+		}
+	}
+}
+
+// The settings are read back on the first observe only (HBEP-4): a job whose
+// spec is edited after it was observed as requested gets no SubmittedAsOther.
+func TestReadBackRunsOnTheFirstObserveOnly(t *testing.T) {
+	e := newEnv(t)
+	e.newAlloc("a1", testProvider)
+	e.sync() // job 998 established and observed as requested
+	e.mutateSpec("a1", func(s *v1alpha1.AllocationSpec) { s.ForProvider.Batch.GPUs = 2 })
+	e.syncAt(at(12, 1, 0))
+	if c := e.alloc("a1").GetCondition(v1alpha1.ConditionSubmittedAsOther); c.Status == corev1.ConditionTrue {
+		t.Fatalf("a later difference raised SubmittedAsOther: %+v", c)
 	}
 }

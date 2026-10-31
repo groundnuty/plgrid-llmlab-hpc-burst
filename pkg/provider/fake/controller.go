@@ -129,23 +129,24 @@ import (
 //     value. The False message names the time of the last success, so it is the
 //     same at every pass. Conditions this controller does not own, such as
 //     DialHomeUnreachable, are kept as they were found.
-//   - The read-back (HBEP-4, The Slurm dialect), on every observe of the
-//     recorded job while the Allocation is not deleting. A job whose name is not
-//     the tag puts the observation in phase Refused with reason ReasonJobRenamed
-//     (exactly that string), sets the condition Synced False with that reason
-//     and a message naming both names, and is cancelled while it is live (so one
-//     scancel in the call log, however many Syncs follow). Refused, once set, is
-//     kept on every path: a later Sync never overwrites its phase or reason,
-//     whether it observes a job or not, and neither does a Refused set by hand;
-//     the rest of the observation still follows the job.
-//     Otherwise a job whose partition, time limit or GPU count differs from
-//     spec.forProvider.batch sets the condition SubmittedAsOther True with
-//     reason ReasonReadBackMismatch and a message naming each differing field
-//     with both values (for example "timeLimit: requested 30m0s, got 20m0s");
-//     the condition is never cleared, the job is not cancelled, and the phase
-//     keeps mirroring the job. The comparison is with the request on every
-//     observe, so an administrator's extension (Batch.SetTimeLimit) raises the
-//     condition too, and a Refused Allocation with no job ID submits nothing.
+//   - The read-back (HBEP-4, The Slurm dialect: "on the first observe after a
+//     job is established"). A job whose name is not the tag puts the
+//     observation in phase Refused with reason ReasonJobRenamed (exactly that
+//     string) and is cancelled while it is live; the name is checked on every
+//     observe, so a cancel that failed is retried, yet one scancel shows in the
+//     call log however many Syncs follow. Refused, once set, is kept on every
+//     path: a later Sync never overwrites its phase or reason, whether it
+//     observes a job or not, and neither does a Refused set by hand; the rest of
+//     the observation still follows the job, and a Refused Allocation with no
+//     job ID submits nothing. The partition, time limit and GPU count are
+//     compared with spec.forProvider.batch on the first successful observe of
+//     the recorded job only (the stored observation does not yet name its job
+//     ID): a difference sets the condition SubmittedAsOther True with reason
+//     ReasonReadBackMismatch and a message naming each differing field with both
+//     values (for example "timeLimit: requested 30m0s, got 20m0s"); the
+//     condition is never cleared, the job is not cancelled, and the phase keeps
+//     mirroring the job. A later change, such as an administrator's extension
+//     (Batch.SetTimeLimit), is a later hard end, never a mismatch.
 //   - Retention: every status written mirrors status.retention.effectiveMode
 //     from spec.retentionPolicy (RetentionPolicy.EffectiveMode: Keep when unset).
 //   - Not modelled: the AdminHold condition, the sticky duplicates list of

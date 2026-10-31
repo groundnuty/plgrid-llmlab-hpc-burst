@@ -14,29 +14,38 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
-// readBack is HBEP-4's read-back (The Slurm dialect), run on every observe of
-// the recorded job while the Allocation is not deleting, not only the first.
+// readBack is HBEP-4's read-back (The Slurm dialect), run on an observe of the
+// recorded job while the Allocation is not deleting:
 //
 //   - A job whose name is not the tag was renamed by the platform and can never
-//     be found by tag again. The observation goes to phase Refused with reason
-//     ReasonJobRenamed, and the Synced condition becomes False with that reason
-//     and a message naming both names. While the job is live it is cancelled;
-//     it is not cancelled twice, because a cancelled job has an end time.
-//   - Otherwise, a job whose partition, time limit or GPU count differs from
-//     spec.forProvider.batch sets the condition SubmittedAsOther True, reason
-//     ReasonReadBackMismatch, with a message naming each differing field and
-//     both values. The condition is never cleared, and the phase keeps
-//     mirroring the job.
+//     be found by tag again, so deletion's cancel by tag would miss it. The
+//     observation goes to phase Refused with reason ReasonJobRenamed, and the
+//     job is cancelled while it is live. The name is checked on every observe,
+//     so a failed cancel is retried; a cancelled job has an end time, so it is
+//     not cancelled twice.
+//   - Otherwise, on the first observe after the job is established only (HBEP-4:
+//     "on the first observe after a job is established"; the stored
+//     observation does not yet name the job), a job whose partition, time limit
+//     or GPU count differs from spec.forProvider.batch sets the condition
+//     SubmittedAsOther True, reason ReasonReadBackMismatch, with a message
+//     naming each differing field and both values. The condition is never
+//     cleared, and the phase keeps mirroring the job. A later change, such as
+//     an administrator's extension of the time limit, is a later hard end that
+//     the observation carries, never a mismatch.
 //
-// Refused, once set, is kept (mirror); a Refused set by hand stays, with its
-// reason.
+// Refused, once set, is kept (writeStatus); a Refused set by hand stays, with
+// its reason. The real provider's managed reconciler owns the Synced
+// condition, so the read-back sets none.
 func (c *Controller) readBack(ctx context.Context, p *pass, s *allocState, job provider.Job) error {
 	bp := s.a.Spec.ForProvider.Batch
 	if bp == nil {
 		return nil
 	}
 	if job.Name != s.tag {
-		return c.refuseRenamed(ctx, p, s, job)
+		return c.refuseRenamed(ctx, s, job)
+	}
+	if s.prior.JobID == job.ID {
+		return nil // not the first observe of this job: its settings were read back then
 	}
 	diffs := readBackDiffs(bp, job)
 	if len(diffs) == 0 || s.a.GetCondition(v1alpha1.ConditionSubmittedAsOther).Status == corev1.ConditionTrue {
@@ -53,17 +62,10 @@ func (c *Controller) readBack(ctx context.Context, p *pass, s *allocState, job p
 }
 
 // refuseRenamed handles a job stored under a name other than the tag.
-func (c *Controller) refuseRenamed(ctx context.Context, p *pass, s *allocState, job provider.Job) error {
+func (c *Controller) refuseRenamed(ctx context.Context, s *allocState, job provider.Job) error {
 	if s.prior.Phase != v1alpha1.AllocationRefused {
 		s.obs.Phase, s.obs.Reason = v1alpha1.AllocationRefused, v1alpha1.ReasonJobRenamed
 	}
-	s.conds = append(s.conds, xpv2.Condition{
-		Type:               xpv2.TypeSynced,
-		Status:             corev1.ConditionFalse,
-		Reason:             v1alpha1.ReasonJobRenamed,
-		LastTransitionTime: metav1.NewTime(p.now),
-		Message:            fmt.Sprintf("the scheduler stored job %s under the name %q, not the tag %q; the job is cancelled", job.ID, job.Name, s.tag),
-	})
 	if !live(job) {
 		return nil
 	}
