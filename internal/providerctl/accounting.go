@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -31,54 +30,45 @@ func checkAccountingScheme(s *runtime.Scheme) error {
 	return nil
 }
 
-// allocatedRead is HBEP-4's one accounting read for a recorded job: made once,
-// after the job is first seen started, to learn the CPUs and GPUs the scheduler
-// allocated, which the queue listing does not carry. A job the listing shows
-// ended or running gets its record's Accounting set from it. It is made once
-// per execution of the job (a requeue starts another, whose allocation is its
-// own) by this controller, whether accounting showed the job or not: a read
-// that fails is retried on the next poll, and the final read, once the job has
-// left the listing, carries the numbers anyway. A restart makes it once more
-// for a job whose stored status shows no CPU count. It is not made for a job
-// accounting already gave (the listing did not show it), and not for one that
-// has not started.
-func (e *external) allocatedRead(ctx context.Context, job provider.Job, prior *v1alpha1.AllocationAccounting) (provider.Job, error) {
-	if job.StartTime == nil || job.Accounting != nil || (prior != nil && prior.AllocatedCPUs != nil) {
-		return job, nil
+// allocatedRead is HBEP-4's accounting read for a recorded job, after the job
+// is first seen started, to learn the CPUs and GPUs the scheduler allocated,
+// which the queue listing does not carry. A job the listing shows ended or
+// running gets its record's Accounting set from it. It is not made for a job
+// accounting already gave (the listing did not show it), nor for one that has
+// not started.
+//
+// Whether it is due is judged from the stored status alone, never from memory
+// (review of PR 118, Astra B5), so a status write that fails, or a restart,
+// costs one more read and never loses one: it is made while the stored
+// accounting has no CPU count, at most once per provider.AccountingRefresh
+// counted from the stored readTime, which every read moves (Astra nit 10: an
+// empty first read, accounting lagging the queue, is retried until the first
+// usable one, then never again). It reports whether it read.
+func (e *external) allocatedRead(ctx context.Context, job provider.Job, prior *v1alpha1.AllocationObservation, now time.Time) (provider.Job, bool, error) {
+	if job.StartTime == nil || job.Accounting != nil {
+		return job, false, nil
 	}
-	key := job.ID + "@" + strconv.FormatInt(job.StartTime.Unix(), 10)
-	if _, done := e.s.acctRead.Load(key); done {
-		return job, nil
+	if s := prior.Accounting; s != nil && (s.AllocatedCPUs != nil || now.Sub(s.ReadTime.Time) < provider.AccountingRefresh) {
+		return job, false, nil
 	}
 	read, found, err := e.p.ReadAccounting(ctx, job.ID)
 	if err != nil {
-		return job, fmt.Errorf("read accounting of job %s for the CPUs and GPUs allocated: %w", job.ID, err)
+		return job, true, fmt.Errorf("read accounting of job %s for the CPUs and GPUs allocated: %w", job.ID, err)
 	}
-	e.s.acctRead.Store(key, true)
 	if found {
 		job.Accounting = read.Accounting
 	}
-	return job, nil
-}
-
-// forgetAccountingReads drops the record of the job's accounting reads, once
-// its Allocation is gone.
-func (e *external) forgetAccountingReads(jobID string) {
-	e.s.acctRead.Range(func(k, _ any) bool {
-		if strings.HasPrefix(k.(string), jobID+"@") {
-			e.s.acctRead.Delete(k)
-		}
-		return true
-	})
+	return job, true, nil
 }
 
 // mirrorAccounting writes status.atProvider.accounting from the read of the
 // recorded job (the caller has passed it through allocatedRead), at
 // provider.MirrorAccounting's cadence: a running job's block is rewritten when
 // a count changes or once it is a minute old, never only because readTime
-// moved. It is unset while the job has not started.
-func (e *external) mirrorAccounting(a *v1alpha1.Allocation, job provider.Job, prior *v1alpha1.AllocationObservation) {
-	a.Status.AtProvider.Accounting = provider.MirrorAccounting(job, a.Spec.ForProvider.Batch.GPUs, prior, e.now())
+// moved. A pass that made allocatedRead stores its readTime, so the next one
+// is a minute later. It is unset while the job has not started.
+func (e *external) mirrorAccounting(a *v1alpha1.Allocation, job provider.Job, prior *v1alpha1.AllocationObservation, read bool) {
+	a.Status.AtProvider.Accounting = provider.MirrorAccounting(job, a.Spec.ForProvider.Batch.GPUs, prior, e.now(), read)
 }
 
 // keepAccounting is the finalizer's record step (HBEP-4, Two controllers,

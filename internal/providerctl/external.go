@@ -36,9 +36,6 @@ type shared struct {
 	// finals are the recorded jobs whose end this controller read from
 	// accounting: they are not read again (external.final).
 	finals sync.Map
-	// acctRead are the recorded jobs whose one accounting read for the
-	// allocated CPUs and GPUs succeeded (external.allocatedRead).
-	acctRead sync.Map
 }
 
 // connector implements managed.ExternalConnector.

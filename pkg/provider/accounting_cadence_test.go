@@ -40,12 +40,12 @@ func TestMirrorAccountingKeepsARunningBlockForAMinute(t *testing.T) {
 	prior := &v1alpha1.AllocationObservation{StartTime: &metav1.Time{Time: *ti(12, 0, 0)}, Accounting: stored(4, 1, 40, 12, 0, 40)}
 
 	// 59 s after readTime, same counts: kept as it is.
-	got := MirrorAccounting(running, 1, prior, *ti(12, 1, 39))
+	got := MirrorAccounting(running, 1, prior, *ti(12, 1, 39), false)
 	readTimeIs(t, "59 s on", got, 12, 0, 40)
 	elapsedIs(t, got, 40)
 
 	// 60 s after readTime: written, 100 s at 12:01:40.
-	got = MirrorAccounting(running, 1, prior, *ti(12, 1, 40))
+	got = MirrorAccounting(running, 1, prior, *ti(12, 1, 40), false)
 	readTimeIs(t, "60 s on", got, 12, 1, 40)
 	elapsedIs(t, got, 100)
 }
@@ -56,7 +56,7 @@ func TestMirrorAccountingWritesACountChangeAtOnce(t *testing.T) {
 	prior := &v1alpha1.AllocationObservation{StartTime: &metav1.Time{Time: *ti(12, 0, 0)}, Accounting: stored(-1, -1, 40, 12, 0, 40)}
 	j := Job{State: []string{"RUNNING"}, StartTime: ti(12, 0, 0), Source: SourceQueue,
 		Accounting: &JobAccounting{AllocatedCPUs: n32(4), AllocatedGPUs: n32(1), Executions: 1}}
-	got := MirrorAccounting(j, 1, prior, *ti(12, 0, 50))
+	got := MirrorAccounting(j, 1, prior, *ti(12, 0, 50), false)
 	readTimeIs(t, "counts known 10 s on", got, 12, 0, 50)
 	countIs(t, "allocatedCPUs", got.AllocatedCPUs, 4)
 	countIs(t, "allocatedGPUs", got.AllocatedGPUs, 1)
@@ -65,7 +65,7 @@ func TestMirrorAccountingWritesACountChangeAtOnce(t *testing.T) {
 	// Stored 4 CPUs and 1 GPU; 10 s later accounting gives 8 CPUs: written.
 	prior.Accounting = stored(4, 1, 40, 12, 0, 40)
 	j.Accounting = &JobAccounting{AllocatedCPUs: n32(8), AllocatedGPUs: n32(1), Executions: 1}
-	got = MirrorAccounting(j, 1, prior, *ti(12, 0, 50))
+	got = MirrorAccounting(j, 1, prior, *ti(12, 0, 50), false)
 	readTimeIs(t, "CPU count changed 10 s on", got, 12, 0, 50)
 	countIs(t, "allocatedCPUs", got.AllocatedCPUs, 8)
 }
@@ -73,13 +73,13 @@ func TestMirrorAccountingWritesACountChangeAtOnce(t *testing.T) {
 func TestMirrorAccountingWritesTheEndAtOnce(t *testing.T) {
 	prior := &v1alpha1.AllocationObservation{StartTime: &metav1.Time{Time: *ti(12, 0, 0)}, Accounting: stored(4, 1, 40, 12, 0, 40)}
 	ended := Job{State: []string{"COMPLETED"}, StartTime: ti(12, 0, 0), EndTime: ti(12, 0, 45), Source: SourceQueue}
-	got := MirrorAccounting(ended, 1, prior, *ti(12, 0, 50))
+	got := MirrorAccounting(ended, 1, prior, *ti(12, 0, 50), false)
 	readTimeIs(t, "ended 10 s on", got, 12, 0, 50)
 	elapsedIs(t, got, 45)
 
 	// Read again ten minutes later, nothing changed but the clock: kept.
 	prior = &v1alpha1.AllocationObservation{StartTime: prior.StartTime, EndTime: &metav1.Time{Time: *ti(12, 0, 45)}, Accounting: got}
-	got = MirrorAccounting(ended, 1, prior, *ti(12, 10, 50))
+	got = MirrorAccounting(ended, 1, prior, *ti(12, 10, 50), false)
 	readTimeIs(t, "ended, read again", got, 12, 0, 50)
 	elapsedIs(t, got, 45)
 }
@@ -88,7 +88,7 @@ func TestMirrorAccountingWritesTheEndAtOnce(t *testing.T) {
 func TestMirrorAccountingDoesNotAliasTheStoredBlock(t *testing.T) {
 	prior := &v1alpha1.AllocationObservation{StartTime: &metav1.Time{Time: *ti(12, 0, 0)}, Accounting: stored(4, 1, 40, 12, 0, 40)}
 	running := Job{State: []string{"RUNNING"}, StartTime: ti(12, 0, 0), Source: SourceQueue}
-	got := MirrorAccounting(running, 1, prior, *ti(12, 0, 50))
+	got := MirrorAccounting(running, 1, prior, *ti(12, 0, 50), false)
 	if got == prior.Accounting {
 		t.Fatal("the kept block is the stored one, not a copy")
 	}

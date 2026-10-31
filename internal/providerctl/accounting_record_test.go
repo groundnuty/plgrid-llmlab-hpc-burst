@@ -277,8 +277,11 @@ func TestNoAccountingRecordWithoutAJob(t *testing.T) {
 	}
 }
 
-// Deleting the Allocation also drops the in-memory record of the job's reads.
-func TestAccountingReadsAreForgottenWithTheAllocation(t *testing.T) {
+// The accounting read for the counts is judged from the stored status, not
+// from memory (review of PR 118, Astra B5): a restarted controller, which
+// remembers nothing, makes no read for a job whose stored status has the
+// counts, and the Allocation still goes.
+func TestAccountingReadIsJudgedFromTheStoredStatus(t *testing.T) {
 	clock := fake.NewClock(at(12, 0, 0))
 	sl := newSlurm(clock, fakeslurm.Config{})
 	e := newRealEnv(t, clock, sl, newFakeClient(t, "prov-a"), "prov-a", "user-a")
@@ -286,20 +289,23 @@ func TestAccountingReadsAreForgottenWithTheAllocation(t *testing.T) {
 	e.run("alloc-a", 2)
 	id := e.get("alloc-a").Annotations[v1alpha1.AnnotationJobID]
 	clock.Advance(60 * time.Second)
-	e.start("alloc-a")
+	e.start("alloc-a") // 12:01:00
 	e.poll("alloc-a", 1)
-	n := 0
-	e.ctl.shared.acctRead.Range(func(_, _ any) bool { n++; return true })
-	if n != 1 {
-		t.Fatalf("precondition: %d accounting reads remembered, want 1", n)
+	if got := jobReads(sl, id); got != 1 {
+		t.Fatalf("precondition: %d accounting reads, want 1", got)
 	}
+	ctl, err := New(e.c, e.c, e.c.Scheme(), e.opts) // a restarted controller, nothing in memory
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.ctl = ctl
+	e.poll("alloc-a", 3) // 12:02:20 to 12:03:40
+	if got := jobReads(sl, id); got != 1 {
+		t.Errorf("%d accounting reads after a restart, want still 1: the stored status has the counts", got)
+	}
+	wantAcctStatus(t, "after the restart", e.accStatus("alloc-a"), 8, 1, 120, at(12, 3, 0))
 	e.del("alloc-a")
 	deleteUntilGone(e, sl, "alloc-a", id)
-	n = 0
-	e.ctl.shared.acctRead.Range(func(_, _ any) bool { n++; return true })
-	if n != 0 {
-		t.Errorf("%d accounting reads still remembered after the Allocation went", n)
-	}
 }
 
 // removeCredential deletes the Allocation's credential file.

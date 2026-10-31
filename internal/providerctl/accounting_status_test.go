@@ -199,18 +199,18 @@ func TestAccountingReadIsRetriedAfterAFailure(t *testing.T) {
 		t.Fatalf("precondition: %d accounting reads reached the fake Slurm, want 0 (the first failed before it)", got)
 	}
 	e.poll("alloc-a", 4)
-	// The retry at 12:02:20 gives the counts, written at once (80 s); 12:03:40
-	// is the next block a minute old (160 s); 12:04:20 keeps it.
-	wantAcctStatus(t, "after the retry", e.accStatus("alloc-a"), 8, 1, 160, at(12, 3, 40))
+	// The retry is due a minute after the failed read's 12:01:40: at 12:03:00,
+	// which gives the counts (120 s); 12:04:20 is the next block a minute old.
+	wantAcctStatus(t, "after the retry", e.accStatus("alloc-a"), 8, 1, 200, at(12, 4, 20))
 	if got := jobReads(sl, id); got != 1 {
 		t.Errorf("%d accounting reads that reached the fake Slurm, want 1: the retry, then none", got)
 	}
 }
 
-// Accounting does not show the job (it has not got it yet): the read is made
-// once, not on every poll, the CPUs and GPUs stay unknown, and the final read
-// after the job ends gives them.
-func TestAccountingReadIsMadeOnceWhenAccountingDoesNotShowTheJob(t *testing.T) {
+// Accounting does not show the job (it has not got it yet): the read is
+// retried once a minute, not on every poll (Astra nit 10), the CPUs and GPUs
+// stay unknown, and the final read after the job ends gives them.
+func TestAccountingReadIsRetriedOnceAMinuteWhenAccountingDoesNotShowTheJob(t *testing.T) {
 	clock := fake.NewClock(at(12, 0, 0))
 	sl := newSlurm(clock, fakeslurm.Config{})
 	e := newRealEnv(t, clock, sl, newFakeClient(t, "prov-a"), "prov-a", "user-a")
@@ -225,8 +225,10 @@ func TestAccountingReadIsMadeOnceWhenAccountingDoesNotShowTheJob(t *testing.T) {
 	e.start("alloc-a") // 12:01:00
 	e.poll("alloc-a", 5)
 	wantAcctStatus(t, "hidden", e.accStatus("alloc-a"), -1, -1, 200, at(12, 4, 20))
-	if got := jobReads(sl, id); got != 1 {
-		t.Errorf("%d accounting reads over 5 polls while accounting does not show the job, want 1", got)
+	// Polls at 12:01:40 (read), 12:02:20, 12:03:00 (read), 12:03:40 and
+	// 12:04:20 (read).
+	if got := jobReads(sl, id); got != 3 {
+		t.Errorf("%d accounting reads over 5 polls 40 s apart while accounting does not show the job, want 3", got)
 	}
 	if a := e.accStatus("alloc-a"); a != nil {
 		if _, ok := a.GPUHours(); ok {

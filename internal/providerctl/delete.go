@@ -86,7 +86,6 @@ func (e *external) observeDeleting(ctx context.Context, a *v1alpha1.Allocation, 
 	}
 	e.p.SetBusy(name, false)
 	e.s.finals.Delete(rec.jobID)
-	e.forgetAccountingReads(rec.jobID)
 	return missing, nil
 }
 

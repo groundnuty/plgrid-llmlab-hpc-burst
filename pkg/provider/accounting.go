@@ -128,10 +128,11 @@ const AccountingRefresh = v1alpha1.ProviderPollInterval
 //     readTime.
 //
 // A change in a count, the job's end, and a stored block a minute old are
-// written at once.
-func MirrorAccounting(job Job, requestedGPUs int32, prior *v1alpha1.AllocationObservation, now time.Time) *v1alpha1.AllocationAccounting {
+// written at once. So is the block of a pass that made an accounting read for
+// the counts (read), found or not: its readTime then times the next one.
+func MirrorAccounting(job Job, requestedGPUs int32, prior *v1alpha1.AllocationObservation, now time.Time, read bool) *v1alpha1.AllocationAccounting {
 	next := AccountingOf(job, requestedGPUs, prior.Accounting, now)
-	if keepStored(prior, next, job.EndTime != nil) {
+	if !read && keepStored(prior, next, job.EndTime != nil) {
 		return prior.Accounting.DeepCopy()
 	}
 	return next
