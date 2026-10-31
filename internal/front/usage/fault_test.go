@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -180,5 +181,64 @@ func TestAFailedCutBackIsRetried(t *testing.T) {
 	recs := jsonLines(t, dir)
 	if want := []string{"P", "Q"}; !reflect.DeepEqual(ids(recs), want) {
 		t.Errorf("requests in the log = %v, want %v", ids(recs), want)
+	}
+}
+
+// TestOpenCutsATornTail: a crash in the middle of a write leaves a log that
+// ends in a partial line. Open cuts it back to the last whole line, so the
+// first record of the next run is a line of its own and the older records
+// survive. The log is written here by hand, as the crash would leave it; the
+// counter file holds the first block's end, as it does after a crash.
+func TestOpenCutsATornTail(t *testing.T) {
+	const (
+		line1 = `{"counter":1,"requestID":"a","path":"/v1/chat/completions","status":200}` + "\n"
+		line2 = `{"counter":2,"requestID":"b","path":"/v1/chat/completions","status":200}` + "\n"
+		line3 = `{"counter":3,"requestID":"c","path":"/v1/chat/completions","status":200}`
+	)
+	torn := line3[:40] // a real prefix of a record, with no newline
+	cases := []struct {
+		name    string
+		before  string
+		kept    string // the log must start with this after Open
+		records int    // the whole lines in kept
+	}{
+		{"a partial line after whole ones", line1 + line2 + torn, line1 + line2, 2},
+		{"only a partial line", torn, "", 0},
+		{"a partial line longer than a read", line1 + `{"requestID":"` + strings.Repeat("x", 10000), line1, 1},
+		{"a record cut just before its newline", line1 + line3, line1, 1},
+		{"whole lines are left alone", line1 + line2, line1 + line2, 2},
+		{"an empty log", "", "", 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, logName), []byte(c.before), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, counterName), []byte("1000\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			s := sink(t, dir)
+			if got := write(t, s, rec("new")); got != 1001 {
+				t.Errorf("counter = %d, want 1001", got)
+			}
+			if err := s.Close(); err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(filepath.Join(dir, logName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.HasPrefix(string(got), c.kept) {
+				t.Errorf("the log starts with %q, want it to start with %q", tail(got[:min(len(got), len(c.kept)+40)]), c.kept)
+			}
+			recs := jsonLines(t, dir)
+			if len(recs) != c.records+1 {
+				t.Fatalf("%d records in the log, want %d: the older ones and the new one", len(recs), c.records+1)
+			}
+			if last := recs[len(recs)-1]; last.RequestID != "new" || last.Counter != 1001 {
+				t.Errorf("last record = %q counter %d, want new, 1001", last.RequestID, last.Counter)
+			}
+		})
 	}
 }

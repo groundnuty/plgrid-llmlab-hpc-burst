@@ -98,7 +98,10 @@ type Sink struct {
 }
 
 // Open opens the sink in dir, creating it (mode 0700). The first counter is
-// the persisted block end plus one, so a crash shows as a gap (HBEP-8).
+// the persisted block end plus one, so a crash shows as a gap (HBEP-8). A log
+// that ends in the middle of a line, as a crash during a write leaves it, is
+// cut back to its last whole line, so that the next record starts a line of
+// its own; the record that was cut shows as a gap too.
 func Open(dir string) (*Sink, error) {
 	return open(dir, func(f *os.File) logFile { return f })
 }
@@ -113,16 +116,16 @@ func open(dir string, wrap func(*os.File) logFile) (*Sink, error) {
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(filepath.Join(dir, LogFile), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+	f, err := os.OpenFile(filepath.Join(dir, LogFile), os.O_RDWR|os.O_APPEND|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, err
 	}
-	st, err := f.Stat()
+	size, err := repairTail(f)
 	if err != nil {
 		f.Close()
-		return nil, err
+		return nil, fmt.Errorf("usage: repair the end of %s: %w", filepath.Join(dir, LogFile), err)
 	}
-	s := &Sink{dir: dir, log: wrap(f), size: st.Size(), next: end + 1, blockEnd: end, wake: make(chan struct{}, 1), done: make(chan struct{})}
+	s := &Sink{dir: dir, log: wrap(f), size: size, next: end + 1, blockEnd: end, wake: make(chan struct{}, 1), done: make(chan struct{})}
 	go s.run()
 	return s, nil
 }
@@ -181,6 +184,45 @@ func (s *Sink) run() {
 			return
 		}
 	}
+}
+
+// repairTail cuts a partial last line off the log and syncs, and returns the
+// log's size. A log that ends in a newline, or is empty, is left as it is.
+func repairTail(f *os.File) (int64, error) {
+	st, err := f.Stat()
+	if err != nil {
+		return 0, err
+	}
+	end, err := lineEnd(f, st.Size())
+	if err != nil {
+		return 0, err
+	}
+	if end == st.Size() {
+		return end, nil
+	}
+	if err := f.Truncate(end); err != nil {
+		return 0, err
+	}
+	return end, f.Sync()
+}
+
+// lineEnd returns the offset just after the last newline in the first size
+// bytes of f, or 0 when there is none. It reads backwards from size in chunks,
+// so a log of any size costs one read when it ends in a newline.
+func lineEnd(f *os.File, size int64) (int64, error) {
+	buf := make([]byte, 4096)
+	for hi := size; hi > 0; {
+		lo := max(hi-int64(len(buf)), 0)
+		chunk := buf[:hi-lo]
+		if _, err := f.ReadAt(chunk, lo); err != nil {
+			return 0, err
+		}
+		if i := bytes.LastIndexByte(chunk, '\n'); i >= 0 {
+			return lo + int64(i) + 1, nil
+		}
+		hi = lo
+	}
+	return 0, nil
 }
 
 // flush appends batch to the log and syncs it. A write that fails or falls
