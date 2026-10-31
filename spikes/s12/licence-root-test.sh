@@ -20,10 +20,8 @@
 #
 # The expected sets come from how go-licenses v2.0.1 searches (licenses/find.go: the upward search
 # for a licence file stops at the module directory of the package), written down before the runs.
-# After the variants it compares the root module's reports of V1 and V3: the dependency rows must be
-# identical, V1 must have one own row per package of the module ("go list ./..." counts them, not
-# go-licenses), and V3 exactly one (the own packages collapse under one LICENSE). A missing
-# report, a difference or a wrong count fails the script.
+# After the variants, licence-root-compare.sh compares the root module's reports of V1 and V3 (its
+# header says what it expects); a missing report, a difference or a wrong count fails the script.
 # --local-permit-own is LOCAL ONLY (see licence-check.sh). Exit status: 0 when every variant
 # matches its expectation, 1 otherwise.
 set -u -o pipefail
@@ -73,23 +71,6 @@ pkgs=$(cd "$tree" && go list -buildvcs=false ./...) || { echo "go list ./... fai
 want_own=$(printf '%s\n' "$pkgs" | grep -c .)
 [ "$want_own" -gt 0 ] || { echo "go list ./... found no package in the copy" >&2; exit 2; }
 echo; echo "root report of V1 and V3 (module $modpath; $want_own packages by go list)"
-own_rows() { # report file -> the number of rows of the module's own packages, or "unreadable"
-  [ -s "$1" ] || { echo unreadable; return; }
-  awk -F, -v m="$modpath" '$1==m || index($1, m "/")==1 {n++} END{print n+0}' "$1"
-}
-dep_rows() { grep -v -F "$modpath" "$1" | sort; }
-for v in V1 V3; do
-  [ -s "$W/out-$v/go-licenses-report.csv" ] || { echo "   UNEXPECTED: $v has no root report"; status=1; }
-done
-o1=$(own_rows "$W/out-V1/go-licenses-report.csv"); o3=$(own_rows "$W/out-V3/go-licenses-report.csv")
-echo "   own-package rows: V1 $o1 (want $want_own), V3 $o3 (want 1)"
-[ "$o1" = "$want_own" ] || { echo "   UNEXPECTED: V1 should have one row per package of the module"; status=1; }
-[ "$o3" = 1 ] || { echo "   UNEXPECTED: V3 should have exactly one own row"; status=1; }
-if [ -s "$W/out-V1/go-licenses-report.csv" ] && [ -s "$W/out-V3/go-licenses-report.csv" ] &&
-   diff <(dep_rows "$W/out-V1/go-licenses-report.csv") <(dep_rows "$W/out-V3/go-licenses-report.csv") >/dev/null; then
-  echo "   dependency rows identical with and without the root LICENSE: yes ($(dep_rows "$W/out-V1/go-licenses-report.csv" | grep -c .))"
-else
-  echo "   dependency rows identical with and without the root LICENSE: NO"; status=1
-fi
+"$here/licence-root-compare.sh" "$modpath" "$want_own" "$W/out-V1/go-licenses-report.csv" "$W/out-V3/go-licenses-report.csv" || status=1
 echo; echo "licence-root-test: $([ "$status" = 0 ] && echo 'all variants as expected' || echo FAIL)"
 exit "$status"
