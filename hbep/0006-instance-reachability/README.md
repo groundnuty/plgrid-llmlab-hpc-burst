@@ -67,7 +67,7 @@ Problems:
 - **The tunnel drops while the instance is healthy.** frpc and the ssh forwards reconnect on their own. Meanwhile the front holds the Instance as not eligible, not dead (HBEP-5), and the controller restarts nothing on that basis (HBEP-7).
 - **Requests hang in a dead tunnel before frps notices.** frps answers the front's `CONNECT` before it takes a work connection (frp facts), so a silent path still accepts requests. In S1c most such requests waited frps's `userConnTimeout` of 10 s, and one per run waited until the session was torn down (over 15 s at frp's defaults). frps itself bounds neither. The front enforces its own deadlines and probes the path end to end (The front's half).
 - **A lifecycle-controller outage cuts every tunnel** (a gap in frp, under review: see Design details, Admission). The plugin is subscribed to `Ping` so that the controller can record heartbeats. frps turns a failed plugin call into an error answer to frpc's ping, and frpc then closes its session. So while the plugin endpoint is down, every tunnel drops at its next ping, within 10 s, and cannot log in again until the plugin returns. The heartbeat metric depends on this subscription.
-- **A false instance registers and receives prompts.** frps admits a tunnel only through the plugin: the login must carry a live Allocation's credential, and a proxy may claim only the UID of an Instance placed on that Allocation (Admission). The Instance takes traffic only after the controller's verification (HBEP-7, HBEP-9). One limit remains: frps attaches a work connection to a session by its run ID alone (frp facts). frps draws run IDs at random and they appear only on the control-plane host, in frps's log and the plugin's calls.
+- **A false instance registers and receives prompts.** frps admits a tunnel only through the plugin: the login must carry a live Allocation's credential, and a proxy may claim only the UID of an Instance placed on that Allocation (Admission). The Instance takes traffic only after the controller's verification (HBEP-7, HBEP-9). One limit remains: frps attaches a work connection to a session by its run ID alone, and neither the plugin nor frps's empty token checks it (frp facts). frps draws run IDs at random. They appear in frps's log and the plugin's calls on the control-plane host, and frpc logs its own and prefixes every later line with it. Anyone who read that log could, in direct mode, attach a work connection through the public dial-home listener and receive requests, with the Instance's key in their headers. So frpc's log goes only to a file in the job's private temporary directory, never to the job's output files on shared storage (frpc in the job). A shared frps token with `auth.additionalScopes = ["NewWorkConns"]` would close this; it is not in alpha.
 - **The tunnel's ping succeeds while the engine is dead.** The front's probe goes through the path to the engine.
 - **An engine API key is taken for isolation.** A vLLM API key covers only part of the engine's HTTP API (vLLM's security documentation), and traffic between an engine's ranks is unauthenticated by default. So engine HTTP listeners bind to a Unix socket or loopback and are reached through frpc. A multi-node instance's rank traffic still crosses the cluster network unauthenticated. That is a known limitation, recorded in each platform profile (HBEP-4).
 - **Engine internals listen off loopback.** In spike S2 phase B each vLLM worker had its API port on the IPv4 loopback address and six more TCP listeners on the node's cluster address, although `--host` and `VLLM_HOST_IP` were both set to that loopback address (HBEP-5, Risks). The serving path needs the Instance's key. The other listeners are engine internals, which no key covers, so an Instance on a shared cluster network exposes them unless the provider's network isolates it.
@@ -160,6 +160,7 @@ The Provider's controller stages frpc for the partition's CPU architecture by di
 serverAddr = "<direct: the front's DNS name; ssh: 127.0.0.1>"
 serverPort = <direct: the dial-home port; ssh: connection 2's local port>
 loginFailExit = false
+log.to = "<the job's private temporary directory>/frpc.log"
 metadatas.token = "<the Allocation's credential>"
 transport.protocol = "wss"
 transport.tls.trustedCaFile = "<the staged launcher certificate>"
@@ -184,6 +185,7 @@ unixPath = "<the engine's socket>"
 - **The server name** is a fixed synthetic name in the launcher's certificate (HBEP-11). `dial-home.hpcburst.invalid` is a proposal for the code agent; the `.invalid` top-level domain never resolves. It is the same in both modes, because in ssh mode frpc dials loopback.
 - **`loginFailExit = false`.** frp's default makes frpc exit when its first login fails. With `false` it keeps retrying, like the ssh forwards. frpc is part of the agent's transport, not a part of the Instance: the agent restarts it with backoff if it exits, without asking the controller, as it keeps its ssh forwards (HBEP-7). A tunnel down is not a dead Instance.
 - **`user` is not set,** so frps sees the proxy name unchanged (frp facts).
+- **Logs.** frpc logs to a file in the job's private temporary directory (`log.to`), and its console output is discarded. frpc logs its run ID, which is enough to attach a work connection to its session (Risks), so the log never reaches the job's output files on shared storage.
 - **The proxy** reaches the engine through frp's `unix_domain_socket` client plugin. A `tcpmux` proxy hands each work connection to its plugin, so no TCP listener serves the Instance on the node (frp facts). In beta, a router that listens on loopback (HBEP-5) is reached through `localIP` and `localPort` instead.
 - **Heartbeats** are S1's set (Heartbeats). `poolCount = 0` is S1's tested value; frps still keeps one spare work connection (frp facts).
 
@@ -195,6 +197,7 @@ unixPath = "<the engine's socket>"
 - **Connection 1** forwards to the agent endpoint's loopback port (base+3), for the agent's control traffic.
 - **Connection 2** forwards to the dial-home listener's loopback port (base+7), for frpc's `wss`.
 - **Local ends.** Each forward listens on the node's IPv4 loopback address, on a port the agent asks the kernel for at start, never a fixed or derived port (L-2.4, L-7.7). The agent runs ssh with `ExitOnForwardFailure=yes`, so a port another job took in between fails at once and the loop retries with a new port. It also sets `ServerAliveInterval=10` and `ServerAliveCountMax=3`, and the pinned host key (HBEP-7).
+- **Dead nodes.** A node that crashes sends no FIN, so its forwards' sshd sessions on the control-plane host stay until sshd notices. The key's options cannot set that, so the control-plane host's sshd sets `ClientAliveInterval 10` and `ClientAliveCountMax 3`, an operator setting. Otherwise the sessions linger until TCP keepalive ends them, a known limit; they carry nothing once frps has dropped the proxy.
 - **The key's line** in `authorized_keys` on the control-plane host (owner decision, 31 Oct 2026), one key per cluster, used by S1's one-hour runs and by alpha:
 
   ```
@@ -302,7 +305,7 @@ Read at frp v0.71.1 (`fatedier/frp`, tag `v0.71.1`, commit `d8cf180`). Paths are
 | Pings and work connections are checked by frps's auth only with `additionalScopes` | `pkg/auth/token.go:71-91` |
 | `NewProxy` reaches the plugin before registration, which can still fail, for example on a duplicate name | `server/control.go:745-748`, `:871-874` |
 | `CloseProxy` is sent in a goroutine, and its errors are only logged | `server/control.go:667-681`; `pkg/plugin/server/manager.go:137-157` |
-| frpc keeps its run ID across reconnects | `client/service.go:344`, `:353` |
+| frpc keeps its run ID across reconnects, logs it, and prefixes every later log line with it | `client/service.go:344`, `:353-355` |
 | `NewProxy` and `Ping` are handled on the session's read loop; only handlers wrapped as async run apart | `server/control.go:727-734`; `pkg/msg/handler.go:104-108`, `:170-186` |
 | The plugin's HTTP client has no timeout | `pkg/plugin/server/http.go:43-51` |
 | A failed `Ping` call becomes an error `Pong`, and frpc closes its session on an error `Pong` | `server/control.go:771-794`; `client/control.go:189-200` |
@@ -337,7 +340,7 @@ Against the launcher's frps, the front, the agent and an engine double on one ho
 - **Heartbeats.** Freeze the path: frps drops the proxy within 12–20 s, and the condition turns False. A slow reader on the tunnel, as in S1c, drops no healthy tunnel.
 - **Reconnects.** Restart frps: every frpc logs in again without help, and the probes pass again. Restart the front: the same.
 - **The `Ping` gap.** Stop the plugin endpoint for 30 s: record whether tunnels drop, as frp's source says they do. This test documents the gap; it is not a pass criterion until the science agent's review.
-- **Teardown** (alpha graduation). End the allocation at its hard limit, and cancel one early: no proxy in frps's list, no ssh process in the job's process tree or on the control-plane host, and no record left. frps itself is stopped only by its recorded process ID and start time.
+- **Teardown** (alpha graduation). End the allocation at its hard limit, and cancel one early: no proxy in frps's list, no ssh process in the job's process tree or on the control-plane host, and no record left. Both cases end with a live node that sends a FIN, so also freeze the path with no FIN, through a relay on the path stopped with SIGSTOP as in S1c: frps drops the proxy within 12–20 s, and the forwards' sshd sessions end within sshd's client-alive window. frps itself is stopped only by its recorded process ID and start time.
 - **One-hour runs** (alpha graduation). S1's one-hour runs pass with this wiring on Helios and on Athena, in the mode each uses, with the path rate measured.
 
 ### Compatibility and upgrades
