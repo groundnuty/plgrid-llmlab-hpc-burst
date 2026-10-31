@@ -7,9 +7,10 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"strconv"
 	"strings"
 	"time"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 // Config is the front's configuration file (HBEP-5, Parameters). The launcher
@@ -160,30 +161,23 @@ func (c Config) Validate() error {
 	return nil
 }
 
-// DialHomePortOffset is the dial-home listener's port in ssh mode, relative
-// to the launcher's port base: base+7, 29227 at the default base. Each
-// platform's restricted key permits forwards to exactly base+3 (the agent
-// endpoint) and base+7 (@hpc-burst-science-agent, 31 Oct 2026). PR #79 adds
-// it as agentapi.DialHomePortOffset with Host.DialHomeAddr; this constant
-// gives way to those once #79 merges.
-const DialHomePortOffset = 7
-
 // DialHomeAddr is the dial-home listener's address (HBEP-5, Listeners). Set
 // in the configuration, it is used as given. Unset, it defaults in ssh mode
-// to the loopback address at the launcher's port base plus
-// DialHomePortOffset, where the restricted key's forward arrives; in direct
-// mode it is refused, because compute nodes must reach it and only the
-// operator knows that address. With no dial-home mode recorded, the ssh
-// default applies, since no job is submitted until a front is configured.
-func (c Config) DialHomeAddr(mode string, portBase int) (string, error) {
+// to host.DialHomeAddr(), 127.0.0.1 at the launcher's port base plus
+// agentapi.DialHomePortOffset, where the restricted key's forward arrives
+// (@hpc-burst-science-agent, 31 Oct 2026). In direct mode it is refused,
+// because compute nodes must reach it and only the operator knows that
+// address. With no dial-home mode recorded, the ssh default applies, since no
+// job is submitted until a front is configured.
+func (c Config) DialHomeAddr(mode string, host agentapi.Host) (string, error) {
 	if c.DialHomeListen != "" {
 		return c.DialHomeListen, nil
 	}
 	if mode == ModeDirect {
 		return "", errors.New("dialHomeListen is required in direct mode: compute nodes must reach it, so it has no default")
 	}
-	if portBase <= 0 {
+	if host.PortBase <= 0 {
 		return "", errors.New("dialHomeListen is unset and no launcher port base is known for its default")
 	}
-	return net.JoinHostPort("127.0.0.1", strconv.Itoa(portBase+DialHomePortOffset)), nil
+	return host.DialHomeAddr(), nil
 }

@@ -57,16 +57,17 @@ func writeAgentCert(t *testing.T, host agentapi.Host) *x509.Certificate {
 
 func TestDialHomeAddrDefaultsInSSHModeOnly(t *testing.T) {
 	c := Config{}
+	host := agentapi.Host{PortBase: 29220}
 	// The ruling: 127.0.0.1:<base+7>, 29227 at the launcher's default base 29220.
-	if got, err := c.DialHomeAddr(ModeSSH, 29220); err != nil || got != "127.0.0.1:29227" {
+	if got, err := c.DialHomeAddr(ModeSSH, host); err != nil || got != "127.0.0.1:29227" {
 		t.Errorf("ssh default = %q, %v; want 127.0.0.1:29227", got, err)
 	}
-	if _, err := c.DialHomeAddr(ModeDirect, 29220); err == nil || !strings.Contains(err.Error(), "dialHomeListen") {
+	if _, err := c.DialHomeAddr(ModeDirect, host); err == nil || !strings.Contains(err.Error(), "dialHomeListen") {
 		t.Errorf("direct mode with no dialHomeListen must be refused, got %v", err)
 	}
 	c.DialHomeListen = "0.0.0.0:7443"
 	for _, mode := range []string{ModeDirect, ModeSSH, ""} {
-		if got, _ := c.DialHomeAddr(mode, 29220); got != "0.0.0.0:7443" {
+		if got, _ := c.DialHomeAddr(mode, host); got != "0.0.0.0:7443" {
 			t.Errorf("mode %q: an explicit dialHomeListen is used as given, got %q", mode, got)
 		}
 	}

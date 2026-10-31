@@ -158,7 +158,7 @@ func listen(o Options, f *Front) ([]*http.Server, error) {
 	if err != nil {
 		return fail(err)
 	}
-	dialAddr, err := cfg.DialHomeAddr(o.Mode, o.Host.PortBase)
+	dialAddr, err := cfg.DialHomeAddr(o.Mode, o.Host)
 	if err != nil && o.DialHomeListener == nil {
 		return fail(err)
 	}
