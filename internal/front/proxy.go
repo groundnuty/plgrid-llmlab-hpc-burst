@@ -31,6 +31,7 @@ type Proxy struct {
 	router   *Router
 	keys     *ClientKeys
 	sink     *usage.Sink
+	metrics  *Metrics // nil: none
 	log      *slog.Logger
 	inst     *instanceTransports
 	managed  *http.Transport
@@ -47,6 +48,7 @@ type ProxyOptions struct {
 	Transports Transports
 	Keys       *ClientKeys
 	Sink       *usage.Sink
+	Metrics    *Metrics // nil: none
 	Log        *slog.Logger
 }
 
@@ -54,7 +56,7 @@ type ProxyOptions struct {
 func NewProxy(o ProxyOptions) *Proxy {
 	var d net.Dialer
 	return &Proxy{
-		cfg: o.Config, host: o.Host, clk: o.Clock, router: o.Router, keys: o.Keys, sink: o.Sink, log: o.Log,
+		cfg: o.Config, host: o.Host, clk: o.Clock, router: o.Router, keys: o.Keys, sink: o.Sink, metrics: o.Metrics, log: o.Log,
 		inst:    newInstanceTransports(o.Config, o.Transports),
 		managed: upstreamTransport(d.DialContext, o.Config, true),
 	}
@@ -411,6 +413,9 @@ func (p *Proxy) finish(x *exchange) {
 	end := p.clk.Now()
 	x.rec.EndTime = usage.Time(end)
 	x.rec.DurationMs = end.Sub(x.start).Milliseconds()
+	// Counted whether or not its record could be written: the client got
+	// its answer either way, and the sink counts the loss on its own.
+	p.metrics.observe(x.rec)
 	if _, err := p.sink.Write(x.rec); err != nil {
 		p.log.Error("usage record not written", "request", x.id, "error", err.Error())
 		p.router.usageFailed(x.rec.ModelDeployment, x.id, err)

@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -21,11 +22,13 @@ import (
 // Load bound and cap: recomputed at every join, leave and change of
 // eligibility).
 type Router struct {
-	cfg   Config
-	clk   clock.Clock
-	trans Transports
-	rec   Recorder
-	log   *slog.Logger
+	cfg     Config
+	clk     clock.Clock
+	trans   Transports
+	rec     Recorder
+	log     *slog.Logger
+	metrics *Metrics // nil: none
+	lease   *leaseRef
 
 	mu        sync.Mutex
 	snap      inventory.Snapshot
@@ -56,10 +59,10 @@ type pause struct {
 	until    time.Time
 }
 
-// NewRouter returns a router with an empty view.
-func NewRouter(cfg Config, clk clock.Clock, trans Transports, rec Recorder, log *slog.Logger) *Router {
+// NewRouter returns a router with an empty view. metrics may be nil.
+func NewRouter(cfg Config, clk clock.Clock, trans Transports, rec Recorder, log *slog.Logger, metrics *Metrics) *Router {
 	r := &Router{
-		cfg: cfg, clk: clk, trans: trans, rec: rec, log: log,
+		cfg: cfg, clk: clk, trans: trans, rec: rec, log: log, metrics: metrics, lease: &leaseRef{},
 		groups: map[string]*balancer.Group{}, rings: map[string]*balancer.Ring{}, pauses: map[string]*pause{},
 		reported: map[string]string{}, problems: map[string]bool{}, leaseEnds: map[types.UID]time.Time{},
 	}
@@ -231,6 +234,7 @@ func (r *Router) ReportConnect(key string, failed bool) {
 	now := r.clk.Now()
 	p.failures, p.until = 0, now.Add(r.cfg.PauseDuration.D())
 	r.log.Warn("target paused after failed connections", "target", key, "until", p.until.UTC().Format(time.RFC3339))
+	r.metrics.paused(r.targetLabelsLocked(key))
 	r.rebuildLocked()
 }
 
@@ -243,6 +247,30 @@ func (r *Router) failures(key string) int {
 		return p.failures
 	}
 	return 0
+}
+
+// targetLabelsLocked returns the provider and the ModelDeployment of a target
+// by its key, for a metric's labels; both are empty when the view no longer
+// holds it.
+func (r *Router) targetLabelsLocked(key string) (provider, deployment string) {
+	if r.view == nil {
+		return "", ""
+	}
+	for _, m := range r.view.Models {
+		for _, d := range m.Served {
+			for _, i := range d.Members {
+				if i.Key == key {
+					return i.Provider, d.Key
+				}
+			}
+		}
+		for _, t := range m.Managed {
+			if t.Key == key {
+				return t.Provider, t.Deployment
+			}
+		}
+	}
+	return "", ""
 }
 
 // Paused reports whether a target is paused now.
@@ -282,24 +310,31 @@ func (r *Router) LeaseEnd(uid types.UID) (time.Time, bool) {
 // failure lasts.
 const usageEventEvery = time.Hour
 
-// usageFailed raises a UsageWriteFailed event on the request's
-// ModelDeployment when a failure starts, then at most once an hour while it
-// lasts: a repeating event, since client-go rarely merges events whose
-// objects changed (@hpc-burst-science-agent, 31 Oct 2026). The sink's count
-// and its Error log keep every failure. A request that named no
-// ModelDeployment (refused before routing, or off /v1/) has no object to
-// attach the event to: it waits for one that does.
+// usageFailed raises a UsageWriteFailed event when a failure starts, then at
+// most once an hour while it lasts: a repeating event, since client-go rarely
+// merges events whose objects changed (@hpc-burst-science-agent, 31 Oct 2026).
+// The event regards the front's Lease once the front holds it (HBEP-8,
+// Events). Until then, and when the front has no API client at all, it regards
+// the ModelDeployment of the request that failed, if there is one; a request
+// that named none (refused before routing, or off /v1/) waits for one that
+// did. The sink's count and its Error log keep every failure.
 func (r *Router) usageFailed(dep, requestID string, err error) {
+	var subject runtime.Object
+	if r.lease.held() {
+		subject = r.lease.object()
+	}
 	r.mu.Lock()
-	md := r.mds[dep]
+	if subject == nil && r.mds[dep] != nil {
+		subject = r.mds[dep]
+	}
 	now := r.clk.Now()
-	emit := md != nil && (!r.usageFailing || !now.Before(r.usageEventAt.Add(usageEventEvery)))
+	emit := subject != nil && (!r.usageFailing || !now.Before(r.usageEventAt.Add(usageEventEvery)))
 	if emit {
 		r.usageFailing, r.usageEventAt = true, now
 	}
 	r.mu.Unlock()
 	if emit {
-		r.rec.Event(md, true, eventFailing, reasonUsageWriteFailed, "usage records are not being written (request "+requestID+"): "+err.Error())
+		r.rec.Event(subject, true, eventFailing, reasonUsageWriteFailed, "usage records are not being written (request "+requestID+"): "+err.Error())
 	}
 }
 

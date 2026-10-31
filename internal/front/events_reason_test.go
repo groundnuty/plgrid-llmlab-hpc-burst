@@ -3,8 +3,11 @@ package front
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	coordinationv1 "k8s.io/api/coordination/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -16,11 +19,12 @@ import (
 
 // capturingRecorder is an events.EventRecorder that keeps each call's
 // reason and action.
-type capturingRecorder struct{ reasons, actions []string }
+type capturingRecorder struct{ reasons, actions, notes []string }
 
-func (c *capturingRecorder) Eventf(_ runtime.Object, _ runtime.Object, _, reason, action, _ string, _ ...interface{}) {
+func (c *capturingRecorder) Eventf(_ runtime.Object, _ runtime.Object, _, reason, action, note string, args ...interface{}) {
 	c.reasons = append(c.reasons, reason)
 	c.actions = append(c.actions, action)
+	c.notes = append(c.notes, fmt.Sprintf(note, args...))
 }
 
 // TestKubeEventReasonIsTheCodeAlone (@hpc-burst-science-agent's HBEP-8
@@ -95,5 +99,34 @@ func TestUsageWriteFailedIsThrottled(t *testing.T) {
 	f.router.usageFailed(scDep, "r", boom)
 	if got := n(); got != 3 {
 		t.Fatalf("a new failure after a written record gave %d events in all, want 3", got)
+	}
+}
+
+// TestKubeEventNoteIsCutTo1024Bytes (HBEP-8, Events, Form; Test plan, Event
+// form): the API refuses a note over 1,024 bytes and the recorder does not
+// retry a refusal, so the front cuts it. The cut falls on a character
+// boundary: 2-byte characters fill 1,024 bytes exactly, 3-byte ones stop at
+// 1,023, and a note of exactly 1,024 bytes or less is sent whole.
+func TestKubeEventNoteIsCutTo1024Bytes(t *testing.T) {
+	c := &capturingRecorder{}
+	k := KubeRecorder{R: c}
+	md := &v1alpha1.ModelDeployment{}
+	exact := strings.Repeat("a", 1024)
+	cases := []struct{ name, note string }{
+		{"ascii over the limit", strings.Repeat("a", 5000)},
+		{"two-byte characters", strings.Repeat("\u00e9", 3000)},
+		{"three-byte characters", strings.Repeat("\u20ac", 3000)},
+		{"four-byte characters at the edge", "a" + strings.Repeat("\U0001F600", 1000)},
+		{"exactly 1024 bytes", exact},
+		{"short", "usage records are not being written"},
+	}
+	wantLen := []int{1024, 1024, 1023, 1021, 1024, len("usage records are not being written")}
+	for i, tc := range cases {
+		k.Event(md, true, eventFailing, reasonUsageWriteFailed, tc.note)
+		got := c.notes[i]
+		if len(got) != wantLen[i] || !utf8.ValidString(got) || !strings.HasPrefix(tc.note, got) {
+			t.Errorf("%s: note is %d bytes (valid UTF-8 %v, prefix of the original %v), want %d bytes, valid, a prefix",
+				tc.name, len(got), utf8.ValidString(got), strings.HasPrefix(tc.note, got), wantLen[i])
+		}
 	}
 }
