@@ -180,6 +180,9 @@ class CheckTest(unittest.TestCase):
         rc, out = c.run("--negative-control")
         self.assertEqual(rc, 0, out)
         self.assertIn("negative control: failed and named BSD-3-Clause packages, as it should", out)
+        # Its failure is shown as expected, so that a log reader does not take it for a real one.
+        self.assertIn("expected failure: Not allowed license 'BSD-3-Clause'", out)
+        self.assertNotIn("UNEXPECTED", out)
 
     def test_a_negative_control_that_does_not_fail_fails_the_run(self):
         c = self.case()

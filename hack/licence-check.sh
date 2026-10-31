@@ -95,6 +95,11 @@ gate_out=
 modcache=${GOMODCACHE:-$(go env GOMODCACHE 2>/dev/null || true)}
 show() { if [ -n "$modcache" ]; then sed "s#$modcache#<modcache>#g"; else cat; fi; }
 
+# The negative control is meant to fail. Its failure lines are shown as "expected", so that
+# nobody reading the log (or the job summary) takes them for real failures; gate_out keeps the
+# gate's own text, which the control is judged on.
+expect_fail=0
+
 gate_run() { # label allowlist dir go-licenses-check-args...  (sets grc: 0 when the gate accepts the run)
   local label=$1 list=$2 dir=$3; shift 3
   local out rc=0
@@ -102,7 +107,11 @@ gate_run() { # label allowlist dir go-licenses-check-args...  (sets grc: 0 when 
   out=$(cd "$dir" && "$GL" check "$@" --allowed_licenses="$list" 2>&1) || rc=$?
   grc=0
   gate_out=$(printf '%s\n' "$out" | python3 -I "$here/licence_gate.py" --rc "$rc") || grc=$?
-  printf '%s\n' "$gate_out" | cut -c1-200 | show
+  if [ "$expect_fail" = 1 ]; then
+    printf '%s\n' "$gate_out" | cut -c1-200 | sed -e 's/^UNEXPECTED:/expected failure:/' -e 's/: FAIL$/: FAIL (expected: negative control)/' | show
+  else
+    printf '%s\n' "$gate_out" | cut -c1-200 | show
+  fi
   return 0
 }
 
@@ -137,7 +146,9 @@ check_module() { # module dir relative to the root
     gate_run "check ./... --include_tests (licences only tests reach)" "$LIST" "$dir" ./... --include_tests
     [ "$grc" = 0 ] || status=1
     if [ "$neg" = 1 ]; then
+      expect_fail=1
       gate_run "negative control: BSD-3-Clause taken off the list (must fail)" "$LIST_NEG" "$dir" ./...
+      expect_fail=0
       if [ "$grc" != 0 ] && printf '%s\n' "$gate_out" | grep -q "Not allowed license 'BSD-3-Clause'"; then
         echo "negative control: failed and named BSD-3-Clause packages, as it should"
       else
