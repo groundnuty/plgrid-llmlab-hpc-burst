@@ -447,6 +447,8 @@ func TestFixturesHoldNothingPrivate(t *testing.T) {
 	for id := 4301; id <= 4322; id++ {
 		allowedIDs[id] = true
 	}
+	// The real Athena replies' replacement IDs (testdata/v0.0.40-athena-real).
+	allowedIDs[4501], allowedIDs[4502] = true, true
 	files, err := filepath.Glob("testdata/*/*.json")
 	if err != nil || len(files) == 0 {
 		t.Fatalf("no fixtures: %v", err)
