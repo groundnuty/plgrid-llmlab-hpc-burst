@@ -306,3 +306,17 @@ func TestAccountingReadsAreForgottenWithTheAllocation(t *testing.T) {
 func removeCredential(e *realEnv, a *v1alpha1.Allocation) error {
 	return os.Remove(agentapi.AllocationCredentialPath(e.credDir, string(a.UID)))
 }
+
+// A scheme that cannot write the accounting record would fail the finalizer on
+// every pass and make the Allocation undeletable: New refuses it at once.
+func TestNewRefusesASchemeWithoutControllerRevisions(t *testing.T) {
+	e := newEnv(t)
+	bare := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(bare); err != nil {
+		t.Fatal(err)
+	}
+	_, err := New(e.c, e.c, bare, e.opts)
+	if err == nil || !strings.Contains(err.Error(), "ControllerRevision") {
+		t.Errorf("New with a scheme lacking apps/v1 = %v, want an error naming ControllerRevision", err)
+	}
+}
