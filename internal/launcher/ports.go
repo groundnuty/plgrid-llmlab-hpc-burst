@@ -51,16 +51,16 @@ const controllerPortOffset = 6
 // allocation of the block's free port, 31 Oct 2026).
 const frontHealthPortOffset = 4
 
-// dialHomePortOffset is the front's ssh-mode dial-home listener, relative to the base. It is the
-// last port of the block. Each platform's restricted VM key permits forwards to exactly
-// 127.0.0.1:base+3 (the agent endpoint) and 127.0.0.1:base+7, so a launcher started with another
-// base needs new restricted keys (docs/development.md, The launcher, Ports). PR #79 adds this
-// offset as agentapi.DialHomePortOffset; this constant gives way to it once #79 merges.
+// dialHomePortOffset is the front's ssh-mode dial-home listener, relative to the base:
+// agentapi.DialHomePortOffset (7). It is the last port of the block. Each platform's restricted VM
+// key permits forwards to exactly 127.0.0.1:base+3 (the agent endpoint) and 127.0.0.1:base+7, so a
+// launcher started with another base needs new restricted keys (docs/development.md, The
+// launcher, Ports).
 //
 // TODO(#64): warn at up when the base differs from the one the configured restricted keys were
 // made for. Nothing records that base yet: the step that makes the keys does not exist, so there
 // is nothing to compare with.
-const dialHomePortOffset = 7
+const dialHomePortOffset = agentapi.DialHomePortOffset
 
 // PortsFromBase lays the first four ports out as spike S3 did (base, base+1, base+2 and base+5)
 // and adds the controllers' two: the agent endpoint at agentapi.AgentEndpointPortOffset (base+3,
@@ -73,7 +73,7 @@ func PortsFromBase(base int) (Ports, error) {
 	}
 	host := agentapi.Host{PortBase: base}
 	return Ports{API: base, HTTPS: base + 1, KCM: base + 2, LB: base + 5, Controller: base + controllerPortOffset, Agent: host.AgentEndpointPort(),
-		FrontHealth: base + frontHealthPortOffset, DialHome: base + dialHomePortOffset}, nil
+		FrontHealth: base + frontHealthPortOffset, DialHome: host.DialHomePort()}, nil
 }
 
 // Expected are the ports the running k3s must hold, and no others. The controllers' ports are
