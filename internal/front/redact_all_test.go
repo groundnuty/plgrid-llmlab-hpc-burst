@@ -242,3 +242,22 @@ func TestRedactKeysOutsideTheView(t *testing.T) {
 		t.Errorf("body\n got %s\nwant %s", got, want)
 	}
 }
+
+// TestRedactAShortCredential (@hpc-burst-science-agent, 31 Oct 2026): every
+// target credential is redacted, however short; nothing exempts one.
+func TestRedactAShortCredential(t *testing.T) {
+	f := newScFix(t, scOpts{})
+	const short = "k3y!"
+	f.managedProvider("llmlab-s", "llmlab", "llmlab", "http://127.0.0.1:1/v1", short)
+	f.apply()
+	plain := `{"error":{"message":"bad key ` + short + `","code":400}}`
+	f.retarget(f.uids[0], rawEngine(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(400)
+		_, _ = io.WriteString(w, plain)
+	}))
+	resp := f.errPost(scChat, errChatBody(scModel, false, "hi"))
+	if got, want := readAll(t, resp), strings.ReplaceAll(plain, short, "[redacted]"); got != want {
+		t.Errorf("body\n got %s\nwant %s", got, want)
+	}
+}

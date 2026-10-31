@@ -18,10 +18,6 @@ import (
 // redacted replaces a target credential in a passed-through error.
 const redacted = "[redacted]"
 
-// minSecret is the shortest credential redacted: a shorter one would match
-// ordinary bytes. Every key the front holds is far longer.
-const minSecret = 8
-
 // credentialFiles lists every Provider's credentials file in the snapshot,
 // attached or not: a key the front has held stays redacted after a Provider
 // is detached.
@@ -72,7 +68,7 @@ func (p *Proxy) secrets(extra ...string) []string {
 	}
 	keep := out[:0]
 	for _, s := range out {
-		if len(s) >= minSecret {
+		if s != "" { // every credential, however short (@hpc-burst-science-agent, 31 Oct 2026)
 			keep = append(keep, s)
 		}
 	}
