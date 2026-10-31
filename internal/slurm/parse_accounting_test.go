@@ -1,6 +1,7 @@
 package slurm
 
 import (
+	"encoding/json"
 	"math"
 	"testing"
 	"time"
@@ -225,6 +226,130 @@ func TestAccountingVariants(t *testing.T) {
 		}
 		tresOf(j)["allocated"] = keep
 	}), 4, -1, 90*time.Second, 1)
+}
+
+// allocatedOf returns the Accounting of Athena's real record with its
+// tres.allocated replaced by the entries in raw, a JSON list written inline.
+// A count that is null stays null and a count left out stays absent.
+func allocatedOf(t *testing.T, raw string) *provider.JobAccounting {
+	t.Helper()
+	var entries []any
+	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+		t.Fatalf("bad inline tres list %s: %v", raw, err)
+	}
+	doc := onlyJob(t, readTestdata(t, "v0.0.40-athena-real", "sacct-completed.json"), 4501, func(j map[string]any) {
+		j["tres"].(map[string]any)["allocated"] = entries
+	})
+	a := accountingJobs(t, doc, "v0.0.40")["4501"].Accounting
+	if a == nil {
+		t.Fatalf("%s: the job has no Accounting", raw)
+	}
+	return a
+}
+
+// A tres count that cannot be read is unknown, never a number: null or no
+// count, a negative sentinel and a count above MaxInt32 (2147483647). The
+// expected counts are written by hand; -1 stands for unknown (nil).
+func TestAccountingAllocatedTresValidation(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		tres   string
+		cpus   int32
+		gpus   int32
+		listed bool
+	}{
+		// A missing or null count is not 0.
+		{"untyped gpu with a null count", `[{"type":"cpu","count":4},{"type":"gres","name":"gpu","count":null}]`, 4, -1, true},
+		{"untyped gpu with no count key", `[{"type":"cpu","count":4},{"type":"gres","name":"gpu"}]`, 4, -1, true},
+		{"typed gpu with a null count", `[{"type":"cpu","count":4},{"type":"gres","name":"gpu:a100","count":null}]`, 4, -1, true},
+		{"cpu with a null count", `[{"type":"cpu","count":null},{"type":"gres","name":"gpu","count":1}]`, -1, 1, true},
+		{"cpu with no count key", `[{"type":"cpu"},{"type":"gres","name":"gpu","count":1}]`, -1, 1, true},
+		// The CPU count is the first cpu entry's, valid or not.
+		{"cpu with a negative count", `[{"type":"cpu","count":-2}]`, -1, -1, false},
+		{"cpu above MaxInt32", `[{"type":"cpu","count":2147483648}]`, -1, -1, false},
+		{"cpu at MaxInt32", `[{"type":"cpu","count":2147483647}]`, 2147483647, -1, false},
+		{"unreadable first cpu entry, readable second", `[{"type":"cpu","count":null},{"type":"cpu","count":4}]`, -1, -1, false},
+		// A negative typed count is a sentinel: not netted against the others.
+		{"typed -1 next to typed 2", `[{"type":"gres","name":"gpu:a100","count":-1},{"type":"gres","name":"gpu:h100","count":2}]`, -1, -1, true},
+		{"typed 3 next to typed -2", `[{"type":"gres","name":"gpu:a100","count":3},{"type":"gres","name":"gpu:h100","count":-2}]`, -1, -1, true},
+		{"typed 2 next to a typed null", `[{"type":"gres","name":"gpu:a100","count":2},{"type":"gres","name":"gpu:h100","count":null}]`, -1, -1, true},
+		// An unreadable untyped count never falls back to the typed entries.
+		{"untyped -1 next to typed 2", `[{"type":"gres","name":"gpu","count":-1},{"type":"gres","name":"gpu:a100","count":2}]`, -1, -1, true},
+		{"untyped null next to typed 2", `[{"type":"gres","name":"gpu","count":null},{"type":"gres","name":"gpu:a100","count":2}]`, -1, -1, true},
+		{"untyped above MaxInt32", `[{"type":"gres","name":"gpu","count":2147483648}]`, -1, -1, true},
+		{"two untyped entries that disagree", `[{"type":"gres","name":"gpu","count":1},{"type":"gres","name":"gpu","count":2}]`, -1, -1, true},
+		{"two untyped entries, the first unreadable", `[{"type":"gres","name":"gpu","count":null},{"type":"gres","name":"gpu","count":2}]`, -1, -1, true},
+		// The sum of typed counts is bounded.
+		{"typed sum above MaxInt32", `[{"type":"gres","name":"gpu:a100","count":2147483647},{"type":"gres","name":"gpu:h100","count":1}]`, -1, -1, true},
+		{"typed sum at MaxInt32", `[{"type":"gres","name":"gpu:a100","count":2147483646},{"type":"gres","name":"gpu:h100","count":1}]`, -1, 2147483647, true},
+		// Readable counts still read as before.
+		{"untyped 2", `[{"type":"cpu","count":8},{"type":"gres","name":"gpu","count":2}]`, 8, 2, true},
+		{"untyped 0 is a listed 0", `[{"type":"gres","name":"gpu","count":0}]`, -1, 0, true},
+		{"two untyped entries that agree", `[{"type":"gres","name":"gpu","count":2},{"type":"gres","name":"gpu","count":2}]`, -1, 2, true},
+		{"typed 1 and typed 2", `[{"type":"gres","name":"gpu:a100","count":1},{"type":"gres","name":"gpu:h100","count":2}]`, -1, 3, true},
+		{"untyped 2 wins over typed 4 in total", `[{"type":"gres","name":"gpu","count":2},{"type":"gres","name":"gpu:a100","count":3},{"type":"gres","name":"gpu:h100","count":1}]`, -1, 2, true},
+		{"readable untyped 2 beside an unreadable typed", `[{"type":"gres","name":"gpu","count":2},{"type":"gres","name":"gpu:a100","count":-1}]`, -1, 2, true},
+		// Entries of other types are not read: a sentinel there changes nothing.
+		{"energy -2 and a null mem beside cpu 4", `[{"type":"cpu","count":4},{"type":"mem"},{"type":"energy","count":-2},{"type":"node","count":null}]`, 4, -1, false},
+		{"energy -2 beside gpu 1", `[{"type":"energy","count":-2},{"type":"gres","name":"gpu","count":1}]`, -1, 1, true},
+		{"another gres is not a gpu", `[{"type":"gres","name":"shard","count":null},{"type":"gres","name":"gpumem","count":-1}]`, -1, -1, false},
+		{"a cpu entry named gpu is not a gpu", `[{"type":"cpu","name":"gpu","count":-1}]`, -1, -1, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			a := allocatedOf(t, c.tres)
+			switch {
+			case c.cpus < 0 && a.AllocatedCPUs != nil:
+				t.Errorf("AllocatedCPUs = %d, want unknown", *a.AllocatedCPUs)
+			case c.cpus >= 0 && (a.AllocatedCPUs == nil || *a.AllocatedCPUs != c.cpus):
+				t.Errorf("AllocatedCPUs = %v, want %d", a.AllocatedCPUs, c.cpus)
+			}
+			switch {
+			case c.gpus < 0 && a.AllocatedGPUs != nil:
+				t.Errorf("AllocatedGPUs = %d, want unknown", *a.AllocatedGPUs)
+			case c.gpus >= 0 && (a.AllocatedGPUs == nil || *a.AllocatedGPUs != c.gpus):
+				t.Errorf("AllocatedGPUs = %v, want %d", a.AllocatedGPUs, c.gpus)
+			}
+			if a.GPUsListed != c.listed {
+				t.Errorf("GPUsListed = %v, want %v", a.GPUsListed, c.listed)
+			}
+		})
+	}
+}
+
+// The real records: v0.0.42's energy entry has count -2, a negative sentinel on
+// a type that is not read, so the CPUs stay 4 and no GPU is listed. Athena's
+// real GPU job lists one gres gpu entry.
+func TestAccountingRealRecordsGPUsListed(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		j      provider.Job
+		cpus   int32
+		gpus   int32
+		listed bool
+	}{
+		{"v0.0.42 requeue, energy -2", accountingJobs(t, readTestdata(t, "v0.0.42", "sacct-requeue.json"), "v0.0.42")["4320"], 4, -1, false},
+		{"v0.0.42 Helios CPU job", realAcct(t, "v0.0.42", "", "sacct-completed.json", "4242"), 4, -1, false},
+		{"v0.0.40 Athena GPU job", realAcct(t, "v0.0.40", "v0.0.40-athena-real", "sacct-completed.json", "4501"), 4, 1, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			a := c.j.Accounting
+			if a == nil {
+				t.Fatal("no Accounting")
+			}
+			if a.AllocatedCPUs == nil || *a.AllocatedCPUs != c.cpus {
+				t.Errorf("AllocatedCPUs = %v, want %d", a.AllocatedCPUs, c.cpus)
+			}
+			switch {
+			case c.gpus < 0 && a.AllocatedGPUs != nil:
+				t.Errorf("AllocatedGPUs = %d, want unknown", *a.AllocatedGPUs)
+			case c.gpus >= 0 && (a.AllocatedGPUs == nil || *a.AllocatedGPUs != c.gpus):
+				t.Errorf("AllocatedGPUs = %v, want %d", a.AllocatedGPUs, c.gpus)
+			}
+			if a.GPUsListed != c.listed {
+				t.Errorf("GPUsListed = %v, want %v", a.GPUsListed, c.listed)
+			}
+		})
+	}
 }
 
 // Accounting is read for a job the listing does not show, and the job from the
