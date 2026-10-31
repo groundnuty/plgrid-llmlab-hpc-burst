@@ -297,9 +297,11 @@ type InstanceReport struct {
 	// forwarded straight to worker-0's EngineSocket in alpha (HBEP-7, What it
 	// runs). Its form is HBEP-6's; empty until the agent serves it.
 	ServingEndpoint string `json:"servingEndpoint,omitempty"`
-	// Key is the Instance's key, which the agent generated at Instance start,
-	// sent until DesiredInstance.KeyStored is true. The controller keeps it in
-	// a mode-600 file (InstanceKeyPath) and never in an object or a log.
+	// Key is the Instance's key, which the agent generated at Instance start
+	// (NewKey), sent until DesiredInstance.KeyStored is true. It has CheckKey's
+	// form: 64 lowercase hex characters. The controller checks it, keeps it in
+	// a mode-600 file (InstanceKeyPath, WriteKeyFile) and never in an object or
+	// a log; Report.Redacted blanks it for a log line.
 	Key string `json:"key,omitempty"`
 	// Checks are the results of the latest Checks, for its verification
 	// generation.

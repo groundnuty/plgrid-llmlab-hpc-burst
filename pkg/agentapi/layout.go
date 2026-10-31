@@ -1,10 +1,8 @@
 package agentapi
 
 import (
-	"fmt"
 	"path"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 )
@@ -111,13 +109,26 @@ func ContainerEngineSocket(worker string) string { return path.Join(ContainerRun
 // lifecycle controller writes it once the create has returned the UID; the
 // provider waits for it before it submits (docs/development.md), reads it to
 // stage it, and the agent API's server reads it to authenticate.
+//
+// The file holds a key's form (CheckKey) and nothing else. Every writer uses
+// WriteKeyFile, which the controller calls with a key from NewKey, and every
+// reader ReadKeyFile.
 func AllocationCredentialPath(dir, allocationUID string) string {
 	return filepath.Join(dir, "allocations", allocationUID)
 }
 
 // InstanceKeyPath is where the lifecycle controller keeps an Instance's key:
 // <dir>/instances/<Instance UID>, mode 600, which the front reads (HBEP-7,
-// Keys).
+// Keys). HBEP-7 fixes nothing more than that, so the contract's choice is that
+// an Instance's key has the Allocation credential's form (CheckKey), and the
+// file is written with WriteKeyFile and read with ReadKeyFile:
+//
+//   - the agent generates the key with NewKey at Instance start and sends it as
+//     InstanceReport.Key until DesiredInstance.KeyStored is true;
+//   - the lifecycle controller checks it with CheckKey, writes it with
+//     WriteKeyFile and only then sets KeyStored;
+//   - the front reads it with ReadKeyFile and sends it to the engine's serving
+//     path as "Authorization: Bearer <key>".
 func InstanceKeyPath(dir, instanceUID string) string {
 	return filepath.Join(dir, "instances", instanceUID)
 }
@@ -129,15 +140,7 @@ func InstanceKeyPath(dir, instanceUID string) string {
 // to stage by that digest.
 func AgentBuildName(cpuArch string) string { return AgentBinaryName + "-" + cpuArch }
 
-// credentialForm is a credential's form: 256 random bits as 64 lowercase hex
-// characters, with no newline (HBEP-7, Provisioning).
-var credentialForm = regexp.MustCompile(`^[0-9a-f]{64}$`)
-
-// CheckCredential returns an error unless b is a credential's exact form. The
-// error never contains b.
-func CheckCredential(b []byte) error {
-	if !credentialForm.Match(b) {
-		return fmt.Errorf("a credential is 64 lowercase hex characters with no newline; got %d bytes of another form", len(b))
-	}
-	return nil
-}
+// CheckCredential returns an error unless b is an Allocation credential's exact
+// form, which is a key's form (CheckKey): 256 random bits as 64 lowercase hex
+// characters, with no newline (HBEP-7, Provisioning). The error never contains b.
+func CheckCredential(b []byte) error { return CheckKey(b) }
