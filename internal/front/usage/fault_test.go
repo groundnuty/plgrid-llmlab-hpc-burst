@@ -270,7 +270,8 @@ func TestNoLoggerIsFine(t *testing.T) {
 // and returns nil; Err is nil again, and Close, which returns the latest
 // batch's error, returns nil.
 func TestAFailureIsNotSticky(t *testing.T) {
-	o := failedBatch(t, t.TempDir(), false)
+	dir := t.TempDir()
+	o := failedBatch(t, dir, false)
 	if o.qErr != nil {
 		t.Errorf("Write after the failure returned %v, want nil: the disk is fine again", o.qErr)
 	}
@@ -282,6 +283,53 @@ func TestAFailureIsNotSticky(t *testing.T) {
 	}
 	if o.closeErr != nil {
 		t.Errorf("Close returned %v, want nil: the latest batch succeeded", o.closeErr)
+	}
+	if recs := jsonLines(t, dir); !reflect.DeepEqual(ids(recs), []string{"P", "B", "Q"}) {
+		t.Errorf("requests in the log = %v, want [P B Q]: Q is in the log", ids(recs))
+	}
+}
+
+// TestACounterBlockFailureIsCountedAndLogged: a counter block that cannot be
+// persisted refuses the Write, as a failed batch does: Err reports it,
+// Failures counts it, and the logger gets an Error record. Nothing is queued,
+// no counter is used, and once the disk is fine again the next Write succeeds.
+// The block fails here because the counter file's name is a directory, so the
+// rename onto it fails (it fails for root too, which a mode bit does not).
+func TestACounterBlockFailureIsCountedAndLogged(t *testing.T) {
+	dir := t.TempDir()
+	logs := &lockedBuf{}
+	s, err := usage.OpenLog(dir, slog.New(slog.NewJSONHandler(logs, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocker := filepath.Join(dir, counterName)
+	if err := os.Mkdir(blocker, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := s.Write(rec("a")); err == nil || c != 0 {
+		t.Errorf("Write returned %d, %v, want 0 and an error", c, err)
+	}
+	if s.Err() == nil || s.Failures() != 1 {
+		t.Errorf("Err() = %v and Failures() = %d after the failed block, want an error and 1", s.Err(), s.Failures())
+	}
+	got := logs.records(t)
+	if len(got) != 1 || got[0]["level"] != "ERROR" || got[0]["error"] == nil {
+		t.Errorf("log = %v, want one Error record that names the cause", got)
+	}
+	if err := os.Remove(blocker); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := s.Write(rec("b")); err != nil || c != 1 {
+		t.Errorf("Write after the disk recovered returned %d, %v, want 1 and nil", c, err)
+	}
+	if s.Err() != nil || s.Failures() != 1 {
+		t.Errorf("Err() = %v and Failures() = %d after it, want nil and 1", s.Err(), s.Failures())
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if recs := jsonLines(t, dir); !reflect.DeepEqual(ids(recs), []string{"b"}) {
+		t.Errorf("requests in the log = %v, want [b]", ids(recs))
 	}
 }
 

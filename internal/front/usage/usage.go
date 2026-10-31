@@ -99,8 +99,8 @@ type Sink struct {
 	wake     chan struct{}
 	closed   bool
 	done     chan struct{}
-	err      error  // the error of the latest batch; nil once a batch succeeds
-	failures uint64 // the batches that failed
+	err      error  // the latest failure; nil once a batch succeeds
+	failures uint64 // the batches and counter blocks that failed
 
 	// Only the writer goroutine uses these two after Open.
 	size int64 // the log's size when it holds only whole lines
@@ -164,14 +164,19 @@ func (s *Sink) Write(r Record) (uint64, error) {
 
 func (s *Sink) enqueue(r Record) (pending, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return pending{}, errors.New("usage: the sink is closed")
 	}
 	if s.next > s.blockEnd {
 		end := s.blockEnd + BlockSize
 		if err := writeCounter(filepath.Join(s.dir, CounterFile), end); err != nil {
-			return pending{}, fmt.Errorf("usage: persist the counter block: %w", err)
+			err = fmt.Errorf("usage: persist the counter block: %w", err)
+			s.err = err
+			s.failures++
+			s.mu.Unlock()
+			s.logger.Error("usage: the counter block could not be persisted", "error", err)
+			return pending{}, err
 		}
 		s.blockEnd = end
 	}
@@ -183,6 +188,7 @@ func (s *Sink) enqueue(r Record) (pending, error) {
 	case s.wake <- struct{}{}:
 	default:
 	}
+	s.mu.Unlock()
 	return p, nil
 }
 
@@ -320,8 +326,9 @@ func (s *Sink) cutBack() error {
 	return nil
 }
 
-// Err returns the error of the latest batch of records: nil when it was
-// written and synced, also after an earlier batch failed.
+// Err returns the error of the latest batch of records, or of the latest
+// counter block that failed to be persisted: nil once a later batch has been
+// written and synced.
 func (s *Sink) Err() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -353,9 +360,10 @@ func (s *Sink) Close() error {
 	return err
 }
 
-// Failures returns how many batches of records have failed to be written or
-// synced since the sink was opened. A failed batch counts once, whatever the
-// number of records in it.
+// Failures returns how many times the sink has failed to put records on disk
+// since it was opened: batches that failed to be written or synced, and
+// counter blocks that failed to be persisted. A failed batch counts once,
+// whatever the number of records in it.
 func (s *Sink) Failures() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
