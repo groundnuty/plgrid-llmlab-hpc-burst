@@ -1,0 +1,326 @@
+# Continuous integration for the root Go module (issue #54).
+#
+# It runs the repository's own checks on every pull request and on every push to main:
+#   go           gofmt, go vet, go test
+#   tidy         go mod tidy -diff, in a job of its own that restores no module cache
+#   crd          hack/check.sh: generated-CRD drift, envtest with the pinned binaries, sha256 checks
+#   launcher-k3s hack/test-launcher.sh against the pinned k3s binaries, run as an ordinary user
+#
+# The workflow reads no secret and pushes nothing. Every action is pinned by commit SHA.
+#
+# crd and launcher-k3s call scripts from hack/. A missing script fails the job: a job that
+# skipped for lack of its script would turn a rename into a check that quietly stopped running.
+# The one skip that remains is explicit: launcher-k3s leaves out the store-full tests on a runner
+# without FUSE, and says so in the job summary and in a check annotation.
+
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels the run in progress for it. A push to main is never
+# cancelled: its group is its own commit, so every commit on main keeps its own result (a shared
+# group would let a newer waiting run replace an older waiting one).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # setup-go installs the version go.mod names. A go.mod that asks for something newer must fail
+  # the job, not make the go command download a toolchain on its own.
+  GOTOOLCHAIN: local
+
+defaults:
+  run:
+    # An explicit shell makes GitHub run bash with -e and -o pipefail; the default has no pipefail,
+    # so a failing command in front of "| tee" would pass.
+    shell: bash
+
+jobs:
+  go:
+    name: go
+    runs-on: ubuntu-24.04
+    # No build cache is restored, so the Kubernetes libraries compile from scratch.
+    timeout-minutes: 30
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Go version
+        run: go version
+
+      - name: gofmt
+        run: |
+          # Only the root module's own files. gofmt on a directory would descend into spikes/
+          # and third_party/forked/, which are separate modules.
+          # shellcheck disable=SC2016 # the $d is a Go template variable, not a shell one
+          files=$(go list -f '{{$d := .Dir}}{{range .GoFiles}}{{$d}}/{{.}}{{"\n"}}{{end}}{{range .CgoFiles}}{{$d}}/{{.}}{{"\n"}}{{end}}{{range .IgnoredGoFiles}}{{$d}}/{{.}}{{"\n"}}{{end}}{{range .TestGoFiles}}{{$d}}/{{.}}{{"\n"}}{{end}}{{range .XTestGoFiles}}{{$d}}/{{.}}{{"\n"}}{{end}}' ./...)
+          echo "checking $(echo "$files" | grep -c .) Go files"
+          # gofmt -l exits 0 even when it lists files, so fail on any output.
+          unformatted=$(echo "$files" | xargs -r gofmt -l)
+          if [ -n "$unformatted" ]; then
+            echo "::error title=gofmt::these files are not formatted; run gofmt -w on them"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: |
+          log="$RUNNER_TEMP/go-test.log"
+          rc=0
+          go test -count=1 -v ./... 2>&1 | tee "$log" || rc=$?
+          # A skipped test reports as success, so list every one in the job summary.
+          skips=$(grep -c -E '^\s*--- SKIP' "$log" || true)
+          {
+            echo "### go test"
+            echo "Skipped tests: $skips (each one is coverage that did not run)."
+            if [ "$skips" != "0" ]; then
+              echo '```'
+              grep -E '^\s*--- SKIP' "$log" | sed 's/^ *//' | head -100
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+  tidy:
+    name: tidy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # cache: false, so that no module cache is restored. A cache could make an untidy go.mod
+      # look tidy.
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Assert that the module cache is empty
+        run: |
+          modcache=$(go env GOMODCACHE)
+          if [ -n "$(find "$modcache" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+            echo "::error title=module cache::$modcache is not empty, so a cache was restored"
+            du -sh "$modcache"
+            find "$modcache" -mindepth 1 -maxdepth 3 | head -20
+            exit 1
+          fi
+          echo "module cache $modcache is empty: nothing was restored"
+
+      - name: go mod tidy -diff
+        run: |
+          if ! go mod tidy -diff; then
+            echo "::error title=go mod tidy::go.mod or go.sum is not tidy; run go mod tidy and commit the result"
+            exit 1
+          fi
+          echo "go.mod and go.sum are tidy"
+
+  crd:
+    name: crd and envtest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # cache: false here too, because hack/check.sh runs go mod tidy -diff itself.
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # check.sh runs gofmt, vet, tidy, the CRD drift check (hack/verify-generated.sh) and the
+      # tests. The tests fetch the pinned Kubernetes binaries through hack/test-binaries.sh,
+      # which checks their sha256. The go and tidy jobs repeat some of this on purpose: each
+      # failure then shows up under its own check.
+      - name: hack/check.sh
+        run: |
+          log="$RUNNER_TEMP/check.log"
+          rc=0
+          bash hack/check.sh 2>&1 | tee "$log" || rc=$?
+          # check.sh ends with the list of skipped tests; put it in the job summary.
+          {
+            echo "### crd and envtest"
+            echo '```'
+            sed -n '/^== skipped tests/,$p' "$log" | head -100
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+  launcher-k3s:
+    name: launcher-k3s
+    runs-on: ubuntu-24.04
+    # The test step gives each of the script's two test binaries 30 minutes, run one after the
+    # other, so 60 minutes of tests plus checkout, the k3s download and compiling. The job must
+    # outlive that, so that go test's own timeout (which stops the k3s it started) fires first.
+    timeout-minutes: 80
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Choose where the k3s binaries go
+        run: echo "HPCBURST_BIN_DIR=$RUNNER_TEMP/k3s-bin" >> "$GITHUB_ENV"
+
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # Downloads the two pinned k3s releases the tests start (1.35.9, then upgraded to 1.36.5) and
+      # checks their sha256 against internal/launcher/k3s-pins.txt.
+      - name: Fetch the pinned k3s binaries
+        run: bash hack/fetch-k3s.sh "$HPCBURST_BIN_DIR" 1.35.9 1.36.5
+
+      # k3s runs as the invoking user (server --rootless --disable-agent), which needs no user
+      # namespace, so AppArmor's restriction on them does not matter to it. The size-limited
+      # volume of the store-full tests is a FUSE file system that go-fuse mounts through the
+      # setuid helper fusermount3, or fusermount when there is no fusermount3. Rather than guess
+      # from file modes, the probe does what go-fuse does: it runs that helper to mount a tiny
+      # file system as this user, checks the mount, and unmounts it. The three tests are
+      # excluded only when that fails. The job cannot install anything, because it never uses sudo.
+      - name: Probe what this runner offers
+        id: probe
+        run: |
+          cat > "$RUNNER_TEMP/fuse-probe.py" <<'PY'
+          import array, os, shutil, socket, subprocess, sys, tempfile
+
+          mnt = None
+
+          def fail(msg):
+              print(msg)
+              if mnt:
+                  try:
+                      os.rmdir(mnt)  # the probe's own empty directory; a live mount cannot be removed
+                  except OSError:
+                      pass
+              sys.exit(1)
+
+          # go-fuse v2.12.1 (fuse/mount_linux.go): fusermount3, else fusermount; PATH, then /bin.
+          helper = None
+          for name in ("fusermount3", "fusermount"):
+              helper = shutil.which(name) or shutil.which(name, path="/bin")
+              if helper:
+                  break
+          if not helper:
+              fail("neither fusermount3 nor fusermount is installed")
+          if not os.access("/dev/fuse", os.W_OK):
+              fail("/dev/fuse is not writable")
+
+          mnt = os.path.realpath(tempfile.mkdtemp(prefix="fuse-probe-"))
+
+          def mounted():
+              with open("/proc/self/mountinfo") as f:
+                  return any(line.split()[4] == mnt for line in f)
+
+          local, remote = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+          local.settimeout(20)
+          env = {"_FUSE_COMMFD": str(remote.fileno()), "PATH": os.environ.get("PATH", "")}
+          try:
+              proc = subprocess.run([helper, mnt, "-o", "fsname=hpcburst-probe"], env=env,
+                                    pass_fds=(remote.fileno(),), capture_output=True, text=True, timeout=30)
+          except subprocess.TimeoutExpired:
+              fail("%s did not finish within 30 s" % helper)
+          if proc.returncode != 0:
+              fail("%s could not mount as this user: exit %d: %s" % (helper, proc.returncode, proc.stderr.strip()))
+          try:
+              _, anc, _, _ = local.recvmsg(1, socket.CMSG_LEN(array.array("i").itemsize))
+          except OSError as e:
+              fail("%s exited 0 but sent no descriptor: %s" % (helper, e))
+          fds = array.array("i")
+          for level, kind, data in anc:
+              if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+                  fds.frombytes(data[: len(data) - (len(data) % fds.itemsize)])
+          if not fds:
+              fail("%s exited 0 but sent no descriptor" % helper)
+          ok = mounted()
+          os.close(fds[0])  # closing the descriptor aborts the connection; nothing serves requests
+          un = subprocess.run([helper, "-u", mnt], capture_output=True, text=True, timeout=30)
+          if not ok:
+              fail("%s exited 0 but %s is not in /proc/self/mountinfo" % (helper, mnt))
+          if un.returncode != 0 or mounted():
+              fail("%s mounted, but unmounting failed: %s" % (helper, un.stderr.strip()))
+          os.rmdir(mnt)
+          print("mounted and unmounted a FUSE file system as this user with %s" % helper)
+          PY
+          if out=$(python3 -I "$RUNNER_TEMP/fuse-probe.py" 2>&1); then
+            fuse=yes
+          else
+            fuse=no
+          fi
+          reason=$(echo "$out" | tr '\n' ' ')
+          echo "fuse=$fuse" >> "$GITHUB_OUTPUT"
+          echo "reason=$reason" >> "$GITHUB_OUTPUT"
+          {
+            echo "### launcher-k3s: what this runner offers"
+            echo '```'
+            echo "FUSE probe ($fuse): $reason"
+            echo "kernel.apparmor_restrict_unprivileged_userns = $(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>&1)"
+            echo "/dev/fuse: $(ls -l /dev/fuse 2>&1)"
+            echo "memory available: $(awk '/MemAvailable/ {printf "%.1f GiB", $2/1048576}' /proc/meminfo)"
+            echo "free disk in /tmp: $(df -h --output=avail /tmp | tail -1 | tr -d ' ')"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: hack/test-launcher.sh
+        env:
+          FUSE: ${{ steps.probe.outputs.fuse }}
+          FUSE_REASON: ${{ steps.probe.outputs.reason }}
+        run: |
+          # test-launcher.sh gives each of its two test binaries 60 minutes, one after the other.
+          # The whole suite took about 7 minutes on a runner, so each gets 30 minutes here: the
+          # worst case is 60 minutes of tests plus a few minutes to compile, inside the job's 80,
+          # so go test's own timeout (which stops the k3s it started) fires before the job's.
+          args=(-timeout 30m)
+          # test-launcher.sh turns a failed FUSE mount into a failure, so a runner where the
+          # probe's mount failed would fail the whole job. The tests that need the volume are left
+          # out instead, and the summary says so. go test -skip leaves no "--- SKIP" line, so the
+          # warning and the "excluded" line below are the only record.
+          excluded=()
+          if [ "$FUSE" != "yes" ]; then
+            excluded=(TestCapVolume TestStoreFull TestStoreFullWholeDataDir)
+            args+=(-skip "^($(IFS='|'; echo "${excluded[*]}"))\$")
+            msg="NOT RUN: ${excluded[*]} need a size-limited FUSE volume, and the mount probe failed on this runner ($FUSE_REASON)"
+            echo "::warning title=store-full tests not run::$msg"
+            {
+              echo "### launcher-k3s"
+              echo "$msg"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          log="$RUNNER_TEMP/launcher-test.log"
+          rc=0
+          bash hack/test-launcher.sh "${args[@]}" 2>&1 | tee "$log" || rc=$?
+          {
+            echo "### launcher-k3s: results"
+            echo '```'
+            grep -E '^summary: ' "$log" || echo "no summary line: the run did not finish"
+            echo "excluded by -skip, not run: ${#excluded[@]}${excluded[*]:+ (${excluded[*]})}"
+            grep -E '^\s*--- SKIP' "$log" | sed 's/^ *//' | head -50 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
