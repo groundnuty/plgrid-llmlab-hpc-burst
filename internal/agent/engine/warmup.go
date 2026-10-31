@@ -96,10 +96,10 @@ func (c *Client) timed(ctx context.Context, w warmShape) agentapi.RequestTiming 
 		// The tool-call shape ends with its call, at no fixed length: no
 		// min_tokens, and the end-of-sequence token is not ignored.
 		tools, choice, tail = []tool{weatherTool}, "auto", warmUpToolTail
-		// Provisional, pending the science agent: with a reasoning parser the
-		// call comes after the reasoning, so the shape asks for the same extra
-		// reasoning budget as the tool-call smoke test. A fixed figure in
-		// alpha, and a known limit.
+		// With a reasoning parser the call comes after the reasoning, and this
+		// shape is judged (it needs a valid call), so it asks for the same
+		// extra reasoning budget as the tool-call smoke test (science-agent
+		// ruling, 31 Oct 2026). A fixed figure in alpha, and a known limit.
 		if c.reasoning {
 			maxTokens += reasoningTokens
 		}

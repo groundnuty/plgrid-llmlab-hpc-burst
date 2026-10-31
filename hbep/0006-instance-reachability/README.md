@@ -47,10 +47,10 @@ Problems:
 
 - **Compute nodes connect out on port 443.** Spike S1's step 0 and probe 2 (issue #18, 30 Oct 2026) measured it.
   - Short jobs on Helios CPU, Helios GH200 and Athena A100 all reached public HTTPS endpoints directly, with no proxy configured.
-  - The development VM behind a NAT accepted only port 22 from those nodes. There, the tunnel runs inside ssh over port 22, with a restricted key (ssh mode).
+  - The development VM sits behind a NAT, and from those nodes only port 22 answered at its address. That sshd turned out to be a gateway's, not the VM's: its host key differs (issue #18, 31 Oct 2026; L-17.7). The tunnel still runs inside ssh, with a restricted key (ssh mode). The route is a port forward on the gateway, so the clusters reach the VM's sshd at the gateway's address and port (owner decision, 31 Oct 2026, [issue #18, comment 6546958511](https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/18#issuecomment-6546958511)). So ssh mode runs over the configured ssh port, 22 by default.
   - Sano was not measured. It is not an alpha platform (HBEP-4).
   - Where dial home works stays a per-partition fact in the platform profile (HBEP-4).
-- **The front needs an address that compute nodes reach** (HBEP-11, open question 8): directly on the dial-home port (direct mode), or through ssh on port 22 with a restricted key (ssh mode). A host reachable by neither is out of alpha, and HBEP-11's launcher checks it.
+- **The front needs an address that compute nodes reach** (HBEP-11, open question 8): directly on the dial-home port (direct mode), or through ssh on the configured ssh port, 22 by default, with a restricted key (ssh mode). A host reachable by neither is out of alpha, and HBEP-11's launcher checks it.
 - **The center consents** to outbound tunnels from compute nodes (owner, 31 Oct 2026; open question 9).
 - **Inside the instance,** the engine listens on a Unix socket in the job's private temporary directory (HBEP-7). frpc reaches it through that socket, with the Instance's own key on the serving path (HBEP-9). That key is not the Allocation's credential, which admits the tunnel. A key covers only part of the engine's HTTP API (Risks).
 - **All tokens of every reply cross the path.** Its throughput and latency under many concurrent streams are part of serving capacity (Operational readiness 5).
@@ -83,11 +83,11 @@ Problems:
 1. **Tunnel protocol.** **Decided** (science-agent decision, 31 Oct 2026): frp v0.71.1 (`fatedier/frp`), as two pinned release binaries, frps and frpc, with frpc's `wss` transport to the front's dial-home listener and `tcpmux` routing (`httpconnect`) by the Instance's UID. Source: spike S1c (PR #78). With no impairment, at 1 to 256 streams of 20 tokens/s, frp added 1–4 ms to the median time to first token over tcpmux, wss and ssh. At 256 streams wss cost the front 7.9–8.7% of a core per 1,000 tokens/s against 6.6–6.9% for frp's plain tcp (at 64 streams, 15–16% against 8.8–11.5%), and about 5% more payload, and it is ordinary HTTPS. frps v0.71.1 cannot serve wss itself, so the front's TLS terminator passes the websocket on (S1c's self-test; frp facts).
 2. **Encryption.** **Decided for alpha** (science-agent decision, 31 Oct 2026, under the owner's "security is not the main concern"): TLS terminates at the front's dial-home listener, which frpc verifies against the launcher's certificate. In ssh mode that TLS runs inside ssh. Front to frps is loopback on the control-plane host. frpc reaches the engine through its Unix socket on the node, and the engine checks the Instance's key (HBEP-9). There is no end-to-end TLS from front to engine (Risks). Source: S1c's wss arm, where frpc verified the front's certificate and every request completed.
 3. **Relay fallback form.** **Not needed for alpha:** every alpha partition dials out on 443 with no proxy (S1's step 0: Helios CPU, Helios GH200 and Athena A100). A partition without outbound needs a relay first.
-4. **Port forwards.** **Not needed for alpha:** a port forward is never a routing path in alpha. Whether forwards ever become a supported path, with an owner and a teardown, stays the owner's decision after alpha.
+4. **Port forwards.** **Not needed for alpha:** an ssh port forward that an operator opens is never a routing path in alpha. A network forward on a gateway in front of the control-plane host, which ssh mode may cross, is not this (open question 8). Whether forwards ever become a supported path, with an owner and a teardown, stays the owner's decision after alpha.
 5. **Multi-node instances.** **Not needed for alpha:** alpha Instances are single-node (HBEP-7, Provisioning).
 6. **Heartbeats.** **Decided** (science-agent decision, 31 Oct 2026): S1's set, on both ends, as the tested starting point (Heartbeats). Source: S1c. frps noticed a silent path (a frozen path or a node crash) in 12–20 s, against 28–34 s at frp's defaults, and the set survived every head-of-line run. The tight set (2 s interval, 6 s timeout) noticed in 4–6 s but dropped a healthy tunnel. S1c ran on loopback, so the real path rate from compute node to front is unknown. It is measured in S1's one-hour runs, and is an alpha graduation criterion.
 7. **Credential.** **Decided for alpha** (science-agent decision, 31 Oct 2026): HBEP-7's per-Allocation random 256-bit token, valid for the Allocation's life. frpc sends it in its login metadata, and the frps server plugin checks it (Admission). Source: frp v0.71.1's plugin interface (frp facts). **Not needed for alpha:** renewal over the tunnel, since the token lives no longer than its Allocation's lease.
-8. **A front behind NAT,** as in a single-user setup. **Decided for alpha** by HBEP-11 (its open question 8): no rendezvous relay. The alpha host is reached directly on the dial-home port, or through ssh on port 22 with a restricted key. Source: S1's step 0, where the development VM behind a NAT accepted port 22 from the compute nodes and nothing else. **Not needed for alpha:** a relay for other setups.
+8. **A front behind NAT,** as in a single-user setup. **Decided for alpha** by HBEP-11 (its open question 8): no rendezvous relay. The alpha host is reached directly on the dial-home port, or through ssh on the configured ssh port, 22 by default, with a restricted key. Source: S1's step 0, where the development VM's address, behind a NAT, answered the compute nodes on port 22 and nothing else. That sshd was a gateway's, as its host key showed (L-17.7). The route is a port forward on the gateway to the VM's sshd, reached at the gateway's address and port (owner decision, 31 Oct 2026, issue #18). **Not needed for alpha:** a relay for other setups.
 9. **Center consent.** **Decided** (owner, 31 Oct 2026): "The outbound tunnels are acceptable use, yes."
 10. **Compute-node reachability.** **Decided for alpha's partitions** by S1's step 0 and probe 2 (issue #18): outbound 443 works on Helios CPU, Helios GH200 and Athena A100, and the home directory, which holds the ssh-mode key, is readable from their compute nodes (HBEP-4, open question 16). Inbound reachability is not needed, since Instances dial home. **Not needed for alpha:** Sano, which is not an alpha platform (HBEP-4).
 11. **Many tunnels on one front.** **Open (blocks beta):** S1c measured one frpc. frps's CPU and memory with hundreds of tunnels, and many tunnels sharing one link, need a measurement.
@@ -195,7 +195,7 @@ unixPath = "<the engine's socket>"
 
 **Direct mode.** frpc's `wss` connection goes to the front's dial-home listener, on the address compute nodes reach. The agent's control traffic uses its own HTTPS connection to `/agent/v1/` on the same listener, pinned as before (HBEP-7). frpc's connection carries only the token tunnel.
 
-**Ssh mode.** The job runs two `ssh -N -L` connections over port 22, with the same restricted key, each in its own reconnect loop.
+**Ssh mode.** The job runs two `ssh -N -L` connections over the configured ssh port, 22 by default, with the same restricted key, each in its own reconnect loop. The key's restriction is on the control-plane host's side, so it does not change with the port.
 - **Connection 1** forwards to the agent endpoint's loopback port (base+3), for the agent's control traffic.
 - **Connection 2** forwards to the dial-home listener's loopback port (base+7), for frpc's `wss`.
 - **Local ends.** Each forward listens on the node's IPv4 loopback address, on a port the agent asks the kernel for once, at its start, never a fixed or derived port (L-2.4, L-7.7). The agent keeps that port for the Allocation's life, and each reconnect binds it again. The agent runs ssh with `ExitOnForwardFailure=yes`, so a failed bind shows at once. It also sets `ServerAliveInterval=10` and `ServerAliveCountMax=3`, and the pinned host key (HBEP-7).
@@ -287,7 +287,7 @@ Engine and router listeners bind a Unix socket or loopback, never a cluster addr
 | Control connection (the agent's HTTPS) | the Allocation | the agent's reports (HBEP-7) | ends with the agent, at the latest with the job |
 | ssh forwards (ssh mode) | the Allocation | `ServerAliveInterval` and the traffic they carry | the agent's children; they end with the job, and their sshd sessions with them |
 | Login-node relay | none in alpha (open question 3) | | |
-| Port forward | never a routing path in alpha (open question 4) | | |
+| ssh port forward opened by an operator | never a routing path in alpha (open question 4) | | |
 
 ### frp facts this design rests on
 
@@ -399,7 +399,7 @@ Against the launcher's frps, the front, the agent and an engine double on one ho
    - frpc that does not verify the front's certificate: the agent refuses to start it without the certificate and its pin;
    - frps listening off loopback: the launcher's check of its ports;
    - a record left after its allocation ended: the inventory compared with frps's list and the provider's job list.
-4. **Provider limits:** outbound 443 per partition (S1's step 0); in ssh mode, port 22 to the control-plane host and its sshd; loopback shared with other users' jobs on a node; lease ends, which end the tunnel.
+4. **Provider limits:** outbound 443 per partition (S1's step 0); in ssh mode, the configured ssh port to the control-plane host's sshd, 22 by default; loopback shared with other users' jobs on a node; lease ends, which end the tunnel.
 5. **Capacity:** S1c's figures, from one tunnel at up to 256 streams on loopback.
    - **Front CPU:** 7.9–8.7% of a core per 1,000 tokens/s over wss (frps plus the TLS terminator), 6.6–6.9% over frp's plain tcp, and 7.5–7.8% for the ssh path (frps plus sshd). The cost per token was higher at 64 streams (8.8–16%).
    - **Per front core:** about 580–630 wss streams at 20 tokens/s (11,500–12,600 tokens/s), or 720–760 over tcp. This is extrapolated linearly from 36–39% of a core at 256 streams; the front near full CPU was not measured.
@@ -473,6 +473,7 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
 | The route URL was part of the identity. | L-8.5 | The transport is keyed by the Instance's UID, not by an address. |
 | Addresses changed with every session restart. | L-14.1 | frpc and the agent reach the front by DNS name. |
 | A balancer ejected backends for good. | L-4.14 | Two failed probes make an Instance ineligible; one pass brings it back. |
+| An ssh banner was read as proof that the clusters reached the VM; the host key was a gateway's. | L-17.7 | In ssh mode the forwards use a pinned host key (HBEP-7, The allocation agent), and S1's kit checks the target's own key, not a banner, before any forward. |
 | Checks that cannot see what they check passed while wrong. | L-10.6 | The probe goes through the tunnel to the engine; frpc never runs without its certificate; the condition is Unknown when frps's list cannot be read. |
 | Keyword sweeps missed many tunnels at the end. | L-15.2 | frps is in the launcher's record, and every tunnel is in frps's list. |
 | A scheduled respawner revived killed relays. | L-15.1 | No respawners outside the controller and the launcher. |
@@ -490,7 +491,12 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
 - 2026-10-30: the agent endpoint listens on loopback, reached through the ssh forward or through the front's `/agent/v1/` pass-through (HBEP-7).
 - 2026-10-30: the risk of vLLM's internal listeners on the node's address, from spike S2 phase B, noted with HBEP-5.
 - 2026-10-31: implementable. Spike S1c (PR #78) and frp v0.71.1's source carried in. frp over `wss` with `tcpmux` routing by UID, admission by an frps server plugin (`Login`, `NewProxy` and `CloseProxy`; `Ping` unsubscribed), path state from frps's list, the front's deadlines and probe, S1's heartbeats, two ssh forwards in ssh mode with the owner's key restriction, and the owner's word on center consent. Every open question decided, not needed for alpha, or open for beta. HBEP-4, HBEP-5, HBEP-7 and HBEP-11 amended with it.
+- 2026-10-31: L-17.7 cited in Field lessons answered. The note on the development VM corrected: the ssh banner from the compute nodes was a gateway's sshd, as its host key showed (issue #18).
+- 2026-10-31: amendment from the owner's decision on the dial-home route (issue #18): ssh mode runs over the configured ssh port, 22 by default; open questions 4 and 8 corrected.
 
 ## Amendments
 
-None.
+- **2026-10-31: the ssh port, and the route behind S1's step 0.** The owner's decision of 31 Oct 2026, recorded on [issue #18, comment 6546958511](https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/18#issuecomment-6546958511), with the review round of PR #96.
+  - **The ssh port is configurable, 22 by default** (Notes; Dial-home modes; Operational readiness 4). The compute nodes reach the development VM's sshd through a port forward on the gateway in front of it, at the gateway's address and port. The key's restriction is on the VM's side and is unchanged. Before, ssh mode named port 22.
+  - **Open question 8's source** is corrected. S1's step 0 saw port 22 answer at the VM's address, but that sshd was the gateway's (L-17.7), so it did not show that the VM accepted port 22. Before, the source said it did.
+  - **Open question 4** now names an ssh port forward that an operator opens, so that it does not read as the gateway's network forward. The decision is unchanged.

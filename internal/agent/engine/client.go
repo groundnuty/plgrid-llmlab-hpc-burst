@@ -80,9 +80,9 @@ type Option func(*Client)
 // The tool-call smoke test and the behaviour check then ask for their own
 // answer budget plus reasoningTokens, and the behaviour check shortens its
 // prompt to leave room for it. The warm-up's tool-call shape asks for the same
-// extra budget, a provisional choice pending the science agent. Its other
-// shapes need no option: they ask for a fixed output length that counts the
-// reasoning, with or without one.
+// extra budget: it is judged too, since it needs a valid call (science-agent
+// ruling, 31 Oct 2026). Its other shapes need no option and get no extra
+// budget: their declared output length already counts the reasoning.
 func WithReasoning(on bool) Option { return func(c *Client) { c.reasoning = on } }
 
 // New returns a Client of the engine listening on socket, which it reaches
