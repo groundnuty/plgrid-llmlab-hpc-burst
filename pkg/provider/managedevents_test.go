@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -135,8 +136,8 @@ func TestRepeatGateRecoveryThenNewTruncationFiresAtOnce(t *testing.T) {
 
 func TestRepeatGateSkippedEntriesAreConditionsOfTheirOwn(t *testing.T) {
 	var g RepeatGate
-	a := SkippedEntry{Name: "example-a", Why: "an empty name"}
-	b := SkippedEntry{Name: "example-b", Why: "a revision of 257 characters, above 256"}
+	a := SkippedEntry{Name: "example-a", Category: "EmptyName", Why: "an empty name"}
+	b := SkippedEntry{Name: "example-b", Category: "RevisionTooLong", Why: "a revision of 257 characters, above 256"}
 	notes := func(evs []ManagedEvent) []string {
 		var out []string
 		for _, ev := range evs {
@@ -162,7 +163,7 @@ func TestRepeatGateSkippedEntriesAreConditionsOfTheirOwn(t *testing.T) {
 		t.Fatalf("13:00: notes = %q, want only [%q]", got, noteA)
 	}
 	// The same entry for another reason is another condition.
-	a2 := SkippedEntry{Name: "example-a", Why: "listed twice with different revisions"}
+	a2 := SkippedEntry{Name: "example-a", Category: "AmbiguousRevision", Why: "listed twice with different revisions"}
 	got := notes(g.CatalogEvents(t0.Add(61*time.Minute), CatalogMerge{Skipped: []SkippedEntry{a, a2}}))
 	if want := []string{`catalog entry "example-a" skipped: listed twice with different revisions`}; !slices.Equal(got, want) {
 		t.Fatalf("13:01: notes = %q, want %q", got, want)
@@ -176,7 +177,7 @@ func TestRepeatGateSkippedEntriesAreConditionsOfTheirOwn(t *testing.T) {
 
 func TestRepeatGateTruncationAndSkipsDoNotShareARate(t *testing.T) {
 	var g RepeatGate
-	a := SkippedEntry{Name: "example-a", Why: "an empty name"}
+	a := SkippedEntry{Name: "example-a", Category: "EmptyName", Why: "an empty name"}
 	both := CatalogMerge{Skipped: []SkippedEntry{a}, Truncated: 6}
 	if got := reasons(g.CatalogEvents(t0, both)); !slices.Equal(got, []string{"CatalogEntrySkipped", "CatalogTruncated"}) {
 		t.Fatalf("12:00: %v, want a skip and a truncation", got)
@@ -197,5 +198,125 @@ func TestRepeatGateClockSteppedBackFiresOnce(t *testing.T) {
 	}
 	if len(g.CatalogEvents(back.Add(time.Minute), truncatedMerge)) != 0 {
 		t.Fatal("the read after it fired again")
+	}
+}
+
+// The key of a skipped entry is its name and the category of its failure, not
+// the words: a revision that gets one character longer is the same condition
+// (review of PR 116, Astra B1).
+func TestRepeatGateSkippedKeyIgnoresTheMeasuredValue(t *testing.T) {
+	var g RepeatGate
+	skip := func(n int) CatalogMerge {
+		return CatalogMerge{Skipped: []SkippedEntry{{Name: "example-r", Category: "RevisionTooLong",
+			Why: fmt.Sprintf("a revision of %d characters, above 256", n)}}}
+	}
+	wantFirst := `catalog entry "example-r" skipped: a revision of 257 characters, above 256`
+	evs := g.CatalogEvents(t0, skip(257))
+	if len(evs) != 1 || evs[0].Note != wantFirst {
+		t.Fatalf("12:00: events = %+v, want one with the note %q", evs, wantFirst)
+	}
+	// 257, 258, 257, 300 ... every minute of the hour: no event.
+	for m := 1; m < 60; m++ {
+		n := []int{258, 257, 300, 258}[m%4]
+		if evs := g.CatalogEvents(t0.Add(time.Duration(m)*time.Minute), skip(n)); len(evs) != 0 {
+			t.Fatalf("minute %d, a revision of %d characters: events = %+v, want none: the same entry and failure", m, n, evs)
+		}
+	}
+	// An hour on it fires once, with the words of that read.
+	evs = g.CatalogEvents(t0.Add(time.Hour), skip(300))
+	if want := `catalog entry "example-r" skipped: a revision of 300 characters, above 256`; len(evs) != 1 || evs[0].Note != want {
+		t.Fatalf("13:00: events = %+v, want one with the note %q", evs, want)
+	}
+	// Another failure of the same entry is another condition.
+	other := CatalogMerge{Skipped: []SkippedEntry{{Name: "example-r", Category: "AmbiguousRevision", Why: "listed twice with different revisions"}}}
+	if evs := g.CatalogEvents(t0.Add(61*time.Minute), other); len(evs) != 1 {
+		t.Fatalf("13:01, another category: events = %+v, want one", evs)
+	}
+}
+
+// names25 is 25 distinct names that differ within the first 64 characters, so
+// their notes differ too, each too long for the status.
+func names25() CatalogMerge {
+	var m CatalogMerge
+	for i := range 25 {
+		m.Skipped = append(m.Skipped, SkippedEntry{Name: fmt.Sprintf("n%02d-", i) + strings.Repeat("n", 253), Category: "NameTooLong",
+			Why: "a name of 257 characters, above 253"})
+	}
+	return m
+}
+
+const wantSummary15 = "15 more catalog entries skipped (at most 10 skipped entries are named in an hour)"
+
+// At most 10 skip events for individual entries an hour, then one summary an
+// hour with the count (@hpc-burst-science-agent, 31 Oct 2026).
+func TestRepeatGateCapsSkippedEntriesAtTenAnHourWithASummary(t *testing.T) {
+	var g RepeatGate
+	m := names25()
+	var individual, summaries []string
+	collect := func(evs []ManagedEvent) {
+		for _, ev := range evs {
+			if ev.Reason != "CatalogEntrySkipped" || ev.Action != "degraded" || ev.Type != "Warning" {
+				t.Fatalf("event %+v, want a Warning CatalogEntrySkipped of type degraded", ev)
+			}
+			if strings.HasPrefix(ev.Note, "15 more") {
+				summaries = append(summaries, ev.Note)
+			} else {
+				individual = append(individual, ev.Note)
+			}
+		}
+	}
+	for min := 0; min < 60; min++ { // 12:00 to 12:59, a read a minute
+		collect(g.CatalogEvents(t0.Add(time.Duration(min)*time.Minute), m))
+	}
+	if len(individual) != 10 || !slices.Equal(summaries, []string{wantSummary15}) {
+		t.Fatalf("in the first hour: %d individual events and summaries %q, want 10 and exactly [%q]", len(individual), summaries, wantSummary15)
+	}
+	// The first ten in listing order, each naming its own entry.
+	for i, n := range individual {
+		if want := fmt.Sprintf(`catalog entry "n%02d-`, i); !strings.HasPrefix(n, want) {
+			t.Fatalf("individual event %d = %q, want it to start with %q", i, n, want)
+		}
+	}
+	// The next hour is the same again: 10 and one summary.
+	individual, summaries = nil, nil
+	for min := 60; min < 120; min++ {
+		collect(g.CatalogEvents(t0.Add(time.Duration(min)*time.Minute), m))
+	}
+	if len(individual) != 10 || !slices.Equal(summaries, []string{wantSummary15}) {
+		t.Fatalf("in the second hour: %d individual events and summaries %q, want 10 and exactly [%q]", len(individual), summaries, wantSummary15)
+	}
+}
+
+// The limit counts every skip event of the last hour, entries that recovered
+// included, and the summary is once an hour whatever starts and stops.
+func TestRepeatGateSkipLimitHoldsAcrossRecoveries(t *testing.T) {
+	var g RepeatGate
+	if evs := g.CatalogEvents(t0, names25()); len(evs) != 11 {
+		t.Fatalf("12:00: %d events, want 10 and a summary", len(evs))
+	}
+	// All fixed at 12:10, then 25 new bad names at 12:20: the budget of the
+	// hour is spent, so no individual event, and the summary has fired.
+	if evs := g.CatalogEvents(t0.Add(10*time.Minute), CatalogMerge{}); len(evs) != 0 {
+		t.Fatalf("12:10: events = %+v, want none", evs)
+	}
+	if evs := g.CatalogEvents(t0.Add(20*time.Minute), names25()); len(evs) != 0 {
+		t.Fatalf("12:20: %d events (%+v), want none: 10 skip events and the summary already fired in the hour", len(evs), reasons(evs))
+	}
+	// At 13:00 the budget is free again, and the summary too.
+	evs := g.CatalogEvents(t0.Add(time.Hour), names25())
+	if len(evs) != 11 || evs[10].Note != wantSummary15 {
+		t.Fatalf("13:00: %d events, want 10 and the summary %q", len(evs), wantSummary15)
+	}
+	// Fewer than 10 skipped entries have no summary; one over has "1 more".
+	var h RepeatGate
+	m := names25()
+	m.Skipped = m.Skipped[:10]
+	if evs := h.CatalogEvents(t0, m); len(evs) != 10 {
+		t.Fatalf("10 skipped entries: %d events, want 10 and no summary", len(evs))
+	}
+	m.Skipped = names25().Skipped[:11]
+	evs = h.CatalogEvents(t0.Add(time.Minute), m)
+	if want := "1 more catalog entry skipped (at most 10 skipped entries are named in an hour)"; len(evs) != 1 || evs[0].Note != want {
+		t.Fatalf("an 11th entry: events = %+v, want one summary %q", evs, want)
 	}
 }

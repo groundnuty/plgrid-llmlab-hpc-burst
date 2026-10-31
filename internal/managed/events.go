@@ -24,7 +24,10 @@ import (
 //   - degraded: ExpiresWithinADay (CredentialsExpiring) the same way, and
 //     CatalogEntrySkipped and CatalogTruncated, which are no condition and
 //     repeat: they fire when they start, then at most once an hour while they
-//     last (provider.RepeatGate), never on every read;
+//     last (provider.RepeatGate), never on every read. A skipped entry is a
+//     condition per entry and kind of failure, not per message, so a revision
+//     that changes length stays one. At most 10 entries get an event an hour;
+//     one summary event, also CatalogEntrySkipped, counts the others;
 //   - ready: when a condition that had raised failing or degraded clears, with
 //     the reason the controller wrote as it cleared (FileRead, KeyAccepted,
 //     NotExpiring, CatalogRead). The first read of a healthy Provider raises

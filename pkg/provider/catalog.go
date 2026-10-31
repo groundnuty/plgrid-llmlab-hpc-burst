@@ -21,11 +21,39 @@ const (
 	MaxCatalogRevisionLen = 256
 )
 
+// SkipCategory is the kind of failure that makes the status unable to hold a
+// listed entry. It is stable: it does not change with the measured value (the
+// length of a name or revision), which only Why carries, so an event can be
+// keyed on the entry and its category (RepeatGate).
+type SkipCategory string
+
+const (
+	// SkipEmptyName: the entry has no name.
+	SkipEmptyName SkipCategory = "EmptyName"
+	// SkipInvalidName: the name is not valid UTF-8.
+	SkipInvalidName SkipCategory = "InvalidName"
+	// SkipNameTooLong: the name is above MaxCatalogNameLen characters.
+	SkipNameTooLong SkipCategory = "NameTooLong"
+	// SkipRevisionTooLong: the revision is above MaxCatalogRevisionLen
+	// characters.
+	SkipRevisionTooLong SkipCategory = "RevisionTooLong"
+	// SkipIDRefused: the deployment ID refuses the name or revision.
+	SkipIDRefused SkipCategory = "IDRefused"
+	// SkipAmbiguousRevision: the name was listed twice with different
+	// revisions.
+	SkipAmbiguousRevision SkipCategory = "AmbiguousRevision"
+)
+
 // SkippedEntry is a listed entry the status cannot hold.
 type SkippedEntry struct {
 	// Name is the entry's name as listed.
 	Name string
-	// Why says what is wrong with it, without its value.
+	// Category is the kind of failure, which is the same for as long as the
+	// entry is skipped for the same reason.
+	Category SkipCategory
+	// Why says what is wrong with it in words, with the measured values (a
+	// length, for one), so it can change while Category does not. It is for
+	// the event's note, never for an identity. It holds no value of the entry.
 	Why string
 }
 
@@ -82,16 +110,16 @@ func MergeCatalog(old []v1alpha1.CatalogEntryStatus, listed []CatalogEntry, plat
 		if ambiguous[l.Name] {
 			continue
 		}
-		e, why := holdable(l, platform, now)
+		e, cat, why := holdable(l, platform, now)
 		if why != "" {
-			out.Skipped = append(out.Skipped, SkippedEntry{Name: l.Name, Why: why})
+			out.Skipped = append(out.Skipped, SkippedEntry{Name: l.Name, Category: cat, Why: why})
 			continue
 		}
 		if prev, seen := listedNow[l.Name]; seen {
 			if !sameRevision(prev.Revision, e.Revision) {
 				delete(listedNow, l.Name)
 				ambiguous[l.Name] = true
-				out.Skipped = append(out.Skipped, SkippedEntry{Name: l.Name, Why: "listed twice with different revisions"})
+				out.Skipped = append(out.Skipped, SkippedEntry{Name: l.Name, Category: SkipAmbiguousRevision, Why: "listed twice with different revisions"})
 			}
 			continue
 		}
@@ -136,35 +164,35 @@ func MergeCatalog(old []v1alpha1.CatalogEntryStatus, listed []CatalogEntry, plat
 	return out, nil
 }
 
-// holdable returns the status of one listed entry, or why the status cannot
-// hold it.
-func holdable(l CatalogEntry, platform string, now time.Time) (v1alpha1.CatalogEntryStatus, string) {
+// holdable returns the status of one listed entry, or the category and the
+// words for why the status cannot hold it.
+func holdable(l CatalogEntry, platform string, now time.Time) (v1alpha1.CatalogEntryStatus, SkipCategory, string) {
 	switch n := utf8.RuneCountInString(l.Name); {
 	case l.Name == "":
-		return v1alpha1.CatalogEntryStatus{}, "an empty name"
+		return v1alpha1.CatalogEntryStatus{}, SkipEmptyName, "an empty name"
 	case !utf8.ValidString(l.Name):
-		return v1alpha1.CatalogEntryStatus{}, "a name that is not valid UTF-8"
+		return v1alpha1.CatalogEntryStatus{}, SkipInvalidName, "a name that is not valid UTF-8"
 	case n > MaxCatalogNameLen:
-		return v1alpha1.CatalogEntryStatus{}, fmt.Sprintf("a name of %d characters, above %d", n, MaxCatalogNameLen)
+		return v1alpha1.CatalogEntryStatus{}, SkipNameTooLong, fmt.Sprintf("a name of %d characters, above %d", n, MaxCatalogNameLen)
 	}
 	in := deploymentid.CatalogEntry{Platform: platform, CatalogName: l.Name}
 	var revision *string
 	if l.Revision != nil && *l.Revision != "" {
 		if n := utf8.RuneCountInString(*l.Revision); n > MaxCatalogRevisionLen {
-			return v1alpha1.CatalogEntryStatus{}, fmt.Sprintf("a revision of %d characters, above %d", n, MaxCatalogRevisionLen)
+			return v1alpha1.CatalogEntryStatus{}, SkipRevisionTooLong, fmt.Sprintf("a revision of %d characters, above %d", n, MaxCatalogRevisionLen)
 		}
 		r := *l.Revision
 		revision, in.Revision = &r, r
 	}
 	id, err := deploymentid.ComputeManaged(in)
 	if err != nil {
-		return v1alpha1.CatalogEntryStatus{}, "a name or revision the deployment ID refuses"
+		return v1alpha1.CatalogEntryStatus{}, SkipIDRefused, "a name or revision the deployment ID refuses"
 	}
 	t := metav1.NewTime(now)
 	return v1alpha1.CatalogEntryStatus{
 		Name: l.Name, Revision: revision, ManagedID: v1alpha1.FullDeploymentID(id.SHA256),
 		Listed: true, LastListedTime: &t,
-	}, ""
+	}, "", ""
 }
 
 func sameRevision(a, b *string) bool {

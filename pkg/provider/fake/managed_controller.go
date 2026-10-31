@@ -73,10 +73,13 @@ import (
 //     CatalogEntrySkipped naming it, and a listing alone longer than 1024
 //     raises CatalogTruncated; each fires when it starts, then at most once an
 //     hour of the Clock while it lasts, and a read that no longer shows it
-//     lets its return fire at once. A read that failed leaves that state
-//     alone. Neither is a condition, so the end of one raises no event. Unlike
-//     the real controller, the stand-in raises no events for its credentials
-//     and readiness conditions (failing and ready).
+//     lets its return fire at once. A skipped entry is one condition per name
+//     and kind of failure, whatever the numbers in the note do, and at most 10
+//     of them fire in an hour: one summary CatalogEntrySkipped event, "N more
+//     catalog entries skipped", counts the rest. A read that failed leaves
+//     that state alone. Neither is a condition, so the end of one raises no
+//     event. Unlike the real controller, the stand-in raises no events for its
+//     credentials and readiness conditions (failing and ready).
 //   - A Provider with no platform label is an error, before any read.
 //   - Conditions the controller does not write, such as DialHomeUnreachable,
 //     are kept as found.

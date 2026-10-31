@@ -29,6 +29,10 @@ const (
 	// MaxEventNote is the longest note, in bytes, the API accepts (HBEP-8,
 	// Events: Form). Every emitter cuts its note to it.
 	MaxEventNote = 1024
+	// MaxSkipEventsPerHour is the most CatalogEntrySkipped events one
+	// Provider's controller raises for individual entries in an hour; the rest
+	// are counted in one summary event (@hpc-burst-science-agent, 31 Oct 2026).
+	MaxSkipEventsPerHour = 10
 )
 
 // ManagedEvent is one event of a managed Provider's controller, ready for
@@ -75,62 +79,97 @@ func CutNote(s string) string {
 // most once an hour while it lasts. It keeps, in memory, when each condition
 // last fired, so a restart of the process starts every condition afresh. The
 // zero value is ready for use, and a RepeatGate must not be copied after use.
+//
+// One RepeatGate serves one Provider.
 type RepeatGate struct {
 	mu   sync.Mutex
 	last map[repeatKey]time.Time
+	// skipFired holds when each individual CatalogEntrySkipped event of the
+	// last hour fired: the budget of MaxSkipEventsPerHour.
+	skipFired []time.Time
+	// summaryAt is when the last summary event fired; zero if none has.
+	summaryAt time.Time
 }
 
 // repeatKey names one condition: a reason, and for CatalogEntrySkipped the
-// entry and why it is skipped.
+// entry and the category of its failure. It holds no measured value, so a
+// value that changes (a longer revision) is the same condition.
 type repeatKey struct {
-	reason string
-	entry  SkippedEntry
+	reason   string
+	name     string
+	category SkipCategory
 }
 
 // CatalogEvents returns the events a successful catalog read at now (m is its
 // merge) is due to raise, and records them as fired:
 //
 //   - one degraded CatalogEntrySkipped for each skipped entry, a condition of
-//     its own for each entry and reason, so an entry that starts to be skipped
-//     fires at once;
+//     its own for each entry and category of failure (not for the words, whose
+//     measured values can change), so an entry that starts to be skipped fires
+//     at once. At most MaxSkipEventsPerHour of them fire in any hour; when
+//     more are due, one summary event, also CatalogEntrySkipped, says how many
+//     more entries are skipped, and fires at most once an hour. An entry over
+//     the limit stays due, and fires when the budget frees;
 //   - one degraded CatalogTruncated while the listing alone does not fit.
 //
 // A condition fires when it was not reported by the previous call, or fired at
 // least EventRepeatInterval ago (also when now is before that time, a clock
 // stepped back). A condition the read no longer reports is forgotten, so its
-// return fires at once. Call it only for a read that succeeded: a failed read
-// cannot say whether the listing still truncates, and must leave the state
-// alone.
+// return fires at once, apart from the limit on skipped entries, which counts
+// every event of the last hour. Call it only for a read that succeeded: a
+// failed read cannot say whether the listing still truncates, and must leave
+// the state alone.
 func (g *RepeatGate) CatalogEvents(now time.Time, m CatalogMerge) []ManagedEvent {
-	type candidate struct {
-		key repeatKey
-		ev  ManagedEvent
-	}
-	var cands []candidate
-	for _, s := range m.Skipped {
-		cands = append(cands, candidate{repeatKey{reason: EventCatalogEntrySkipped, entry: s},
-			NewManagedEvent(EventActionDegraded, EventCatalogEntrySkipped, SkippedNote(s))})
-	}
-	if m.Truncated > 0 {
-		cands = append(cands, candidate{repeatKey{reason: EventCatalogTruncated},
-			NewManagedEvent(EventActionDegraded, EventCatalogTruncated, TruncatedNote(m.Truncated))})
-	}
-
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	next := make(map[repeatKey]time.Time, len(cands))
-	var out []ManagedEvent
-	for _, c := range cands {
-		if _, dup := next[c.key]; dup { // the same condition twice in one read: one event
-			continue
-		}
-		prev, held := g.last[c.key]
+	next := make(map[repeatKey]time.Time, len(m.Skipped)+1)
+	due := func(k repeatKey) bool {
+		prev, held := g.last[k]
 		if held && !prev.After(now) && now.Sub(prev) < EventRepeatInterval {
-			next[c.key] = prev
+			next[k] = prev
+			return false
+		}
+		return true
+	}
+
+	// The budget: the individual skip events of the last hour.
+	fired := make([]time.Time, 0, MaxSkipEventsPerHour)
+	for _, t := range g.skipFired {
+		if !t.After(now) && now.Sub(t) < EventRepeatInterval {
+			fired = append(fired, t)
+		}
+	}
+	var out []ManagedEvent
+	seen := make(map[repeatKey]bool, len(m.Skipped))
+	over := 0
+	for _, s := range m.Skipped {
+		k := repeatKey{reason: EventCatalogEntrySkipped, name: s.Name, category: s.Category}
+		if seen[k] { // the same condition twice in one read: one event
 			continue
 		}
-		next[c.key] = now
-		out = append(out, c.ev)
+		seen[k] = true
+		switch {
+		case !due(k):
+		case len(fired) >= MaxSkipEventsPerHour:
+			over++
+		default:
+			fired = append(fired, now)
+			next[k] = now
+			out = append(out, NewManagedEvent(EventActionDegraded, EventCatalogEntrySkipped, SkippedNote(s)))
+		}
+	}
+	g.skipFired = fired
+	if over > 0 && (g.summaryAt.IsZero() || g.summaryAt.After(now) || now.Sub(g.summaryAt) >= EventRepeatInterval) {
+		g.summaryAt = now
+		out = append(out, NewManagedEvent(EventActionDegraded, EventCatalogEntrySkipped, SkippedSummaryNote(over)))
+	}
+
+	if m.Truncated > 0 {
+		k := repeatKey{reason: EventCatalogTruncated}
+		if due(k) {
+			next[k] = now
+			out = append(out, NewManagedEvent(EventActionDegraded, EventCatalogTruncated, TruncatedNote(m.Truncated)))
+		}
 	}
 	g.last = next
 	return out

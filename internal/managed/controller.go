@@ -100,7 +100,8 @@ type Options struct {
 //     CatalogRead, and CredentialsRejected False with KeyAccepted. Each skipped
 //     entry raises a CatalogEntrySkipped event, and a listing above 1024
 //     raises CatalogTruncated, each when it starts and then at most once an
-//     hour while it lasts (provider.RepeatGate).
+//     hour while it lasts (provider.RepeatGate); more than 10 skipped entries
+//     in an hour get one summary event for the rest.
 //   - A 401 or 403 sets CredentialsRejected True with KeyRejected and leaves
 //     the catalog and lastCatalogRead as they were.
 //   - Any other failure is unknown: the catalog is left as it was.

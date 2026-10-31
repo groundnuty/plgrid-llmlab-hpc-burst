@@ -193,26 +193,28 @@ func TestTruncationOfThreeHoursGivesThreeEvents(t *testing.T) {
 		t.Fatalf("CatalogTruncated fired at %v, want [12:00 13:00 14:00]", firedAt)
 	}
 
-	// It fits at 15:00, and truncates again at 15:10: a new start fires at once.
+	// It fits at 14:50 and truncates again at 14:55, 55 minutes after the last
+	// event at 14:00: a new start fires at once, which a gate that never
+	// forgot the recovered condition would not do inside the hour.
 	e.gw.SetModels(manyModels(1024)...)
-	e.syncAt(at(15, 0, 0))
+	e.syncAt(at(14, 50, 0))
 	if evs := rec.take(); len(evs) != 0 {
-		t.Fatalf("15:00, the listing fits: events = %+v, want none", evs)
+		t.Fatalf("14:50, the listing fits: events = %+v, want none", evs)
 	}
 	e.gw.SetModels(manyModels(1030)...)
-	e.syncAt(at(15, 10, 0))
+	e.syncAt(at(14, 55, 0))
 	if evs := rec.take(); !slices.Equal(evs, []sentEvent{want}) {
-		t.Fatalf("15:10, a new truncation: events = %+v, want [%+v] at once", evs, want)
+		t.Fatalf("14:55, a new truncation: events = %+v, want [%+v] at once", evs, want)
 	}
-	for _, when := range []time.Time{at(15, 11, 0), at(15, 30, 0), at(16, 9, 0)} { // inside the hour from 15:10
+	for _, when := range []time.Time{at(14, 56, 0), at(15, 30, 0), at(15, 54, 0)} { // inside the hour from 14:55
 		e.syncAt(when)
 		if evs := rec.take(); len(evs) != 0 {
 			t.Fatalf("%s: events = %+v, want none", when.Format("15:04:05"), evs)
 		}
 	}
-	e.syncAt(at(16, 10, 0))
+	e.syncAt(at(15, 55, 0))
 	if evs := rec.take(); !slices.Equal(evs, []sentEvent{want}) {
-		t.Fatalf("16:10: events = %+v, want one, an hour after 15:10", evs)
+		t.Fatalf("15:55: events = %+v, want one, an hour after 14:55", evs)
 	}
 }
 
@@ -283,5 +285,75 @@ func TestRejectedKeyLeavesTheRepeatStateAlone(t *testing.T) {
 	e.syncAt(at(13, 0, 0))
 	if n := len(only(rec.take(), "CatalogTruncated")); n != 1 {
 		t.Fatalf("13:00: %d CatalogTruncated events, want 1, an hour after 12:00", n)
+	}
+}
+
+// The key of a skipped entry is its name and the kind of its failure, not the
+// measured value in the note: a revision that changes length within the hour
+// is the same condition (review of PR 116, Astra B1).
+func TestSkippedRevisionChangingLengthGivesOneEventAnHour(t *testing.T) {
+	rec := &captureRecorder{}
+	r := func(n int) llmlabtest.Model { return modelRev("example-r", strings.Repeat("r", n)) }
+	e := newEnv(t, withModels(model("example-ok"), r(257)), withRecorder(rec))
+	note := func(n int) sentEvent {
+		return sentEvent{"Warning", "CatalogEntrySkipped", "degraded",
+			fmt.Sprintf(`catalog entry "example-r" skipped: a revision of %d characters, above 256`, n)}
+	}
+	e.syncAt(at(12, 0, 0))
+	if evs := rec.take(); !slices.Equal(evs, []sentEvent{note(257)}) {
+		t.Fatalf("12:00: events = %+v, want [%+v]", evs, note(257))
+	}
+	for i, n := range []int{258, 257, 300, 258, 257} { // 12:10, 12:20 ... 12:50
+		e.gw.SetModels(model("example-ok"), r(n))
+		e.syncAt(at(12, 10*(i+1), 0))
+		if evs := rec.take(); len(evs) != 0 {
+			t.Fatalf("12:%02d, a revision of %d characters: events = %+v, want none", 10*(i+1), n, evs)
+		}
+	}
+	e.gw.SetModels(model("example-ok"), r(300))
+	e.syncAt(at(13, 0, 0))
+	if evs := rec.take(); !slices.Equal(evs, []sentEvent{note(300)}) {
+		t.Fatalf("13:00: events = %+v, want [%+v]", evs, note(300))
+	}
+}
+
+// wantSkipped25 is the hand-written event of the i-th of 25 names that are
+// each 257 characters long, above the 253 the status holds.
+func wantSkipped25(i int) sentEvent {
+	shown := fmt.Sprintf("n%02d-", i) + strings.Repeat("n", 60) // the first 64 characters
+	return sentEvent{"Warning", "CatalogEntrySkipped", "degraded",
+		`catalog entry "` + shown + `..." skipped: a name of 257 characters, above 253`}
+}
+
+var wantSummary = sentEvent{"Warning", "CatalogEntrySkipped", "degraded",
+	"15 more catalog entries skipped (at most 10 skipped entries are named in an hour)"}
+
+// At most 10 skip events for entries an hour, then one summary with the count
+// (@hpc-burst-science-agent, 31 Oct 2026): 25 bad names give 10 and 1.
+func TestSkippedEntriesAreCappedAtTenAnHourWithASummary(t *testing.T) {
+	rec := &captureRecorder{}
+	models := []llmlabtest.Model{model("example-ok")}
+	for i := range 25 {
+		models = append(models, model(fmt.Sprintf("n%02d-", i)+strings.Repeat("n", 253)))
+	}
+	e := newEnv(t, withModels(models...), withRecorder(rec))
+
+	var want []sentEvent
+	for i := range 10 {
+		want = append(want, wantSkipped25(i))
+	}
+	want = append(want, wantSummary)
+	var got []sentEvent
+	for _, min := range []int{0, 1, 2, 30, 58, 59} { // 12:00 to 12:59
+		e.syncAt(at(12, min, 0))
+		got = append(got, rec.take()...)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("in the first hour: events = %+v, want the 10 first entries and the summary %+v", got, want)
+	}
+	// An hour on, the same again.
+	e.syncAt(at(13, 0, 0))
+	if got := rec.take(); !slices.Equal(got, want) {
+		t.Fatalf("13:00: events = %+v, want %+v", got, want)
 	}
 }

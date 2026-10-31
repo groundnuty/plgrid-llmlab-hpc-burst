@@ -40,6 +40,16 @@ func SkippedNote(s SkippedEntry) string {
 	return fmt.Sprintf("catalog entry %q skipped: %s", name, s.Why)
 }
 
+// SkippedSummaryNote is the note of the one event that stands for the n
+// skipped entries beyond MaxSkipEventsPerHour, which have no event of their
+// own that hour.
+func SkippedSummaryNote(n int) string {
+	if n == 1 {
+		return fmt.Sprintf("1 more catalog entry skipped (at most %d skipped entries are named in an hour)", MaxSkipEventsPerHour)
+	}
+	return fmt.Sprintf("%d more catalog entries skipped (at most %d skipped entries are named in an hour)", n, MaxSkipEventsPerHour)
+}
+
 // TruncatedNote is the note of an EventCatalogTruncated event.
 func TruncatedNote(truncated int) string {
 	return fmt.Sprintf("the gateway listed %d entries more than status.catalog holds (%d); the first %d by name are kept",
