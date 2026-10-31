@@ -149,7 +149,11 @@ func scHoldThenAdvance(t *testing.T, f *scFix, d time.Duration) (*http.Response,
 // 60th move, and durationMs is 60,000 by that arithmetic alone.
 func TestDeadlinesPositiveControlOnTheFakeClock(t *testing.T) {
 	f := newScFix(t, scOpts{engineReal: true, cfg: func(c *Config) { c.MaxRequestDuration = Duration(60 * time.Second) }})
-	f.engines[0].Set(enginetest.Behaviour{Tokens: 150, PerToken: 3 * time.Millisecond})
+	// 50 ms between tokens on the wall clock: the test must read 60 tokens
+	// and move the fake clock before the engine sends the other 90 (4.5 s of
+	// slack), or the stream would end before the cut. A tighter pace raced on
+	// a loaded machine.
+	f.engines[0].Set(enginetest.Behaviour{Tokens: 150, PerToken: 50 * time.Millisecond})
 
 	resp := f.errPost(scChat, errChatBody(scModel, true, "hello there"))
 	if resp.StatusCode != 200 {

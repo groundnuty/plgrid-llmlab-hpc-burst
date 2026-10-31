@@ -18,6 +18,8 @@ Code under `spikes/` and `third_party/forked/*` is not part of this module.
 | `pkg/agentapi/` | the agent protocol, standard library only: wire types, HTTP framing, `agent.json`, the shared file layout, the certificate pin, and the `Backend` seam. `fake/`: a fake agent and a fake `Backend` | HBEP-7 |
 | `internal/launcher/` | starts and supervises the single-user control-plane host (user-level k3s); the only code that starts k3s | HBEP-11 |
 | `cmd/hpcburst/` | the `hpcburst` command (`up`, `down`, `status`, `upgrade`) | HBEP-11 |
+| `internal/front/` | the LLMLab-compatible front: configuration, client keys, the router, the request path, the stream judge, errors and attribution, the listeners. Subpackages: `inventory` (the routing view, by watch), `balancer` (KubeAI's CHWBL group, wrapped), `convkey`, `naming`, `usage`, `clock`, and `enginetest` (an engine double for tests) | HBEP-5 |
+| `cmd/hpcburst-front/` | the front's binary, which `hpcburst up` supervises | HBEP-5 |
 | `hack/` | scripts for generation, verification and pinned tools | |
 | `third_party/forked/<project>/` | copied code, each with its `LICENSE` and `ORIGIN.md` | HBEP-15 |
 | `spikes/<id>/` | spike code and results; each Go spike is its own module | |
@@ -53,6 +55,7 @@ Code under `spikes/` and `third_party/forked/*` is not part of this module.
 | `internal/agent/`, `cmd/hb-agent/` | #60 | the allocation agent |
 | `internal/lifecycle/` | #61 | the lifecycle manager, its verification controller and the `Backend` |
 | `cmd/hpcburst-controller/`, `internal/launcher/` | #61 | the controller binary, and supervising it from `hpcburst up` |
+| `internal/front/`, `cmd/hpcburst-front/` | #64 | the front. It reads ModelDeployments, Instances, Providers and PlatformProfiles by watch, the Instance keys with `agentapi.ReadKeyFile` and the managed credentials with `provider.ReadManagedCredentials`; the transports to Instances come from HBEP-6's tunnel (#90) |
 
 The lifecycle controller never imports `internal/slurm` or `internal/providerctl`. It acts on providers only through Allocation objects, and reads Allocation and Provider status (HBEP-7, Controllers). Its tests drive `pkg/provider/fake.Controller` until the real provider lands, and `fake.ManagedController` for a managed Provider's catalog. #59's reconciler tests use `fake.Batch` for the protocol and S4's fake Slurm for the dialect.
 
@@ -75,6 +78,7 @@ The lifecycle controller never imports `internal/slurm` or `internal/providerctl
 | Provider status: the condition `DialHomeUnreachable` | lifecycle controller, by server-side apply to the status subresource under `hpcburst-lifecycle`, with forced ownership, owning only that list entry (`v1alpha1.DialHomeUnreachableApply`). Neither writer removes the other's condition (`@hpc-burst-science-agent`, 31 Oct 2026) |
 | identity and verification records | lifecycle controller (its verification controller) |
 | PlatformProfile status (`lastChecked`) | nobody in alpha: no component checks a profile's facts yet |
+| Events of the front (`degraded/DrainWindowShort`, `degraded/CapacityDropped`, `degraded/CountsDrift`) | the front, through an events.k8s.io recorder; it writes no field of any object |
 
 ### Runtime conventions
 
