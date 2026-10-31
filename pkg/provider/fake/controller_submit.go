@@ -28,7 +28,7 @@ func (c *Controller) establish(ctx context.Context, p *pass, s *allocState) (set
 			return false, nil
 		}
 		if len(jobs) > 0 {
-			return true, c.adopt(ctx, p, s, jobs[0])
+			return true, c.adopt(ctx, p, s, pickAdopted(jobs))
 		}
 		resubmit, err := c.stall(ctx, p, s)
 		if err != nil || !resubmit {
@@ -98,6 +98,28 @@ func errText(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// pickAdopted chooses the job to adopt among those carrying the tag, in
+// HBEP-7's order (Adoption): a live job that is not held (no end time, no hold),
+// then a job that ran (it has a start time), then any. Within each class it is
+// the lowest job ID; jobs are sorted by ID, never taken in the order given. The
+// caller passes at least one job.
+func pickAdopted(jobs []provider.Job) provider.Job {
+	sorted := append([]provider.Job(nil), jobs...)
+	byID(sorted)
+	for _, class := range []func(provider.Job) bool{
+		func(j provider.Job) bool { return live(j) && !j.Held() },
+		func(j provider.Job) bool { return j.StartTime != nil },
+		func(provider.Job) bool { return true },
+	} {
+		for _, j := range sorted {
+			if class(j) {
+				return j
+			}
+		}
+	}
+	panic("fake: pickAdopted needs a job") // the last class takes any
 }
 
 // adopt records the found job as the Allocation's: the job ID, and the attempt

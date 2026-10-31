@@ -37,7 +37,12 @@ import (
 //     with the job's own phase (Held, Pending or Running), not Submitting.
 //   - A Submit's Unknown outcome is not resolved in the same pass: the next
 //     Sync finds the tag and adopts it. A job that is found is adopted whatever
-//     the attempt's age, and the attempt is recorded Done.
+//     the attempt's age, and the attempt is recorded Done. When several jobs
+//     carry the tag, the one adopted follows HBEP-7's Adoption order: a live job
+//     that is not held (no end time, no hold), then a job that ran (it has a
+//     start time), then any; within each class the lowest job ID, with jobs
+//     sorted by ID, never taken in the order given. The same choice names the
+//     job a deleting Allocation records before it cancels every live one.
 //   - A submission record found InFlight with no job ID (a crash between the
 //     claim and the answer) is looked up by tag like an Unknown one. Inside the
 //     window an InFlight attempt shows phase Submitting and an Unknown one
@@ -131,9 +136,8 @@ import (
 //     keeps mirroring the job.
 //   - Retention: every status written mirrors status.retention.effectiveMode
 //     from spec.retentionPolicy (RetentionPolicy.EffectiveMode: Keep when unset).
-//   - Not modelled: the AdminHold condition, the adoption order (the lowest job
-//     ID is adopted), the sticky duplicates list of fallback mode, and the
-//     compare-and-swap conflicts.
+//   - Not modelled: the AdminHold condition, the sticky duplicates list of
+//     fallback mode, and the compare-and-swap conflicts.
 //   - Times are written in whole seconds: metav1.Time keeps no more.
 type Controller struct {
 	Client   client.Client

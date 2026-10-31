@@ -30,10 +30,11 @@ func (c *Controller) syncDeleting(ctx context.Context, p *pass, s *allocState) e
 	if unresolved(rec) && noJobID && len(jobs) > 0 {
 		// The unknown attempt is resolved by the job it made; it is cancelled
 		// below and its hold is never lifted.
+		adopted := pickAdopted(jobs)
 		setRecord(a, c.newRecord(rec.Attempt, v1alpha1.SubmissionDone, "", p.now))
-		a.Annotations[v1alpha1.AnnotationJobID] = jobs[0].ID
+		a.Annotations[v1alpha1.AnnotationJobID] = adopted.ID
 		if err := update(ctx, c.Client, a); err != nil {
-			return fmt.Errorf("adopt job %s: %w", jobs[0].ID, err)
+			return fmt.Errorf("adopt job %s: %w", adopted.ID, err)
 		}
 		s.rec, _ = record(a)
 	}
