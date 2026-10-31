@@ -23,29 +23,37 @@ type output struct {
 	finish string
 }
 
-// generate decides an output from the request and the modes.
-//
-// Length: with ignore_eos, or min_tokens at or above max_tokens, exactly
-// max_tokens tokens and "length". Otherwise the model stops of its own accord
-// after max(NaturalLen, min_tokens) tokens ("stop"), unless max_tokens comes
-// first ("length"). The loop-above mode overrides this for a long prompt.
-func (c Config) generate(p genParams) output {
-	n, finish := p.maxTokens, "length"
+// length decides how many tokens the model says and why it stops: with
+// ignore_eos, or min_tokens at or above max_tokens, exactly max_tokens tokens
+// and "length"; otherwise the model stops of its own accord after
+// max(NaturalLen, min_tokens) tokens ("stop"), unless max_tokens comes first
+// ("length"). The loop-above mode overrides this for a long prompt.
+func (c Config) length(p genParams) (n int, finish string) {
+	n, finish = p.maxTokens, "length"
 	if !p.ignoreEOS && p.minTokens < p.maxTokens {
 		if natural := max(c.NaturalLen, p.minTokens); natural < p.maxTokens {
 			n, finish = natural, "stop"
 		}
 	}
-	looping := c.LoopAbove > 0 && len(p.promptIDs) > c.LoopAbove && !p.ignoreEOS
-	if looping {
+	if c.LoopAbove > 0 && len(p.promptIDs) > c.LoopAbove && !p.ignoreEOS {
 		n, finish = p.maxTokens, "length"
 	}
+	return n, finish
+}
 
-	seed := rand.Uint64()
+// seed is the walk's seed: the prompt's for a greedy request, else random.
+func (p genParams) seed() uint64 {
 	if p.greedy {
-		seed = promptSeed(p.promptIDs)
+		return promptSeed(p.promptIDs)
 	}
+	return rand.Uint64()
+}
+
+// tokens makes n tokens for the request, with the modes applied.
+func (c Config) tokens(p genParams, n int) []int {
+	seed := p.seed()
 	toks := walk(seed, n)
+	looping := c.LoopAbove > 0 && len(p.promptIDs) > c.LoopAbove && !p.ignoreEOS
 	switch {
 	case looping:
 		for i := 3; i < n; i++ {
@@ -58,7 +66,13 @@ func (c Config) generate(p genParams) output {
 	case p.greedy && c.GreedyDiverge && p.repeat > 0:
 		diverge(toks, seed, c.GreedyDivergeAt, p.repeat)
 	}
-	return output{tokens: toks, finish: finish}
+	return toks
+}
+
+// generate decides an output from the request and the modes.
+func (c Config) generate(p genParams) output {
+	n, finish := c.length(p)
+	return output{tokens: c.tokens(p, n), finish: finish}
 }
 
 // promptSeed is a function of the prompt's token ids alone, so identical

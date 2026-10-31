@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -19,23 +20,36 @@ type functionJSON struct {
 	Arguments string `json:"arguments"`
 }
 
+// toolCallJSON is a ToolCall of a non-streamed message.
 type toolCallJSON struct {
-	Index    *int         `json:"index,omitempty"` // streamed calls carry their index
 	ID       string       `json:"id"`
 	Type     string       `json:"type"`
 	Function functionJSON `json:"function"`
 }
 
-func (a answer) toolCalls(streamed bool) []toolCallJSON {
+// deltaToolCall is a DeltaToolCall of a streamed delta
+// (vllm/entrypoints/generate/base/protocol.py): everything but the index is
+// optional, and vLLM leaves an unset field out. The first delta of a call
+// carries its id, type and function name; later ones carry pieces of the
+// arguments.
+type deltaToolCall struct {
+	Index    int            `json:"index"`
+	ID       string         `json:"id,omitempty"`
+	Type     string         `json:"type,omitempty"`
+	Function *deltaFunction `json:"function,omitempty"`
+}
+
+type deltaFunction struct {
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
+}
+
+func (a answer) toolCalls() []toolCallJSON {
 	if a.tool == nil {
 		return nil
 	}
-	c := toolCallJSON{ID: "call_0", Type: "function", Function: functionJSON{a.tool.Name, a.tool.Arguments}}
-	if streamed {
-		zero := 0
-		c.Index = &zero
-	}
-	return []toolCallJSON{c}
+	// The pieces joined are the arguments, or the part of them the output limit let through.
+	return []toolCallJSON{{ID: "call_0", Type: "function", Function: functionJSON{a.tool.Name, strings.Join(a.words, "")}}}
 }
 
 // chatResponse is ChatCompletionResponse
@@ -59,9 +73,13 @@ type respChoice struct {
 	TokenIDs     []int32     `json:"token_ids,omitempty"` // only with return_token_ids
 }
 
+// respMessage is ChatMessage. Content is null for a tool call and for a reply
+// that spent its tokens reasoning; Reasoning is null without a reasoning model
+// (vLLM writes its None fields as null).
 type respMessage struct {
 	Role      string         `json:"role"`
 	Content   *string        `json:"content"`
+	Reasoning *string        `json:"reasoning"`
 	ToolCalls []toolCallJSON `json:"tool_calls,omitempty"`
 }
 
@@ -69,17 +87,21 @@ type respMessage struct {
 // generated and whether the answer was sent.
 func (h *handler) single(w http.ResponseWriter, r *http.Request, req chatRequest, a answer, s *slot, u usage) (int, bool) {
 	n := 0
-	if !h.generateTokens(r, s, len(a.words), func(int) bool { n++; return true }) {
+	if !h.generateTokens(r, s, a.tokens(), func(int) bool { n++; return true }) {
 		return n, false
 	}
-	msg := respMessage{Role: "assistant", ToolCalls: a.toolCalls(false)}
-	if a.tool == nil {
+	msg := respMessage{Role: "assistant", ToolCalls: a.toolCalls()}
+	if len(a.reasoning) > 0 {
+		reasoning := strings.Join(a.reasoning, " ")
+		msg.Reasoning = &reasoning
+	}
+	if a.tool == nil && len(a.words) > 0 {
 		c := a.content()
 		msg.Content = &c
 	}
 	choice := respChoice{Message: msg, FinishReason: a.finish}
 	if req.ReturnTokenIDs {
-		choice.TokenIDs = a.ids
+		choice.TokenIDs = a.allIDs()
 	}
 	writeJSON(w, http.StatusOK, chatResponse{
 		ID: newID(), Object: "chat.completion", Created: time.Now().Unix(), Model: h.cfg.ServedName,
@@ -107,9 +129,10 @@ type chunkChoice struct {
 }
 
 type delta struct {
-	Role      string         `json:"role,omitempty"`
-	Content   *string        `json:"content,omitempty"`
-	ToolCalls []toolCallJSON `json:"tool_calls,omitempty"`
+	Role      string          `json:"role,omitempty"`
+	Content   *string         `json:"content,omitempty"`
+	Reasoning *string         `json:"reasoning,omitempty"`
+	ToolCalls []deltaToolCall `json:"tool_calls,omitempty"`
 }
 
 // stream answers a request with server-sent events, as vLLM's
@@ -119,6 +142,11 @@ type delta struct {
 // stream_options.include_usage is set, then "data: [DONE]". Each event is
 // "data: <json>" and a blank line, flushed at once. token_ids ride on a chunk
 // only with return_token_ids, as in vLLM.
+//
+// A reasoning token is a delta with "reasoning" and no content; the answer's
+// tokens follow it. A tool call is streamed as vLLM's parsers do: a delta with
+// the call's index, id, type and function name, then one delta per piece of
+// the arguments, each with the index and "arguments" only.
 //
 // The first chunk is sent with the first token, after the wait before it, so
 // the time to the first byte is the time to the first token. In the stall mode
@@ -165,48 +193,52 @@ func (h *handler) stream(w http.ResponseWriter, r *http.Request, req chatRequest
 	role := newChunk(chunkChoice{Delta: delta{Role: "assistant", Content: new(string)}})
 
 	n := 0
-	if a.tool != nil {
-		if !h.generateTokens(r, s, len(a.words), func(int) bool { n++; return true }) || !send(role) {
-			return n, false
+	total, nr := a.tokens(), len(a.reasoning)
+	ok := h.generateTokens(r, s, total, func(g int) bool {
+		n++
+		if g == 0 && !send(role) {
+			return false
 		}
-		call := chunkChoice{Delta: delta{ToolCalls: a.toolCalls(true)}, FinishReason: &finish}
+		var c chunkChoice
+		var id int32
+		switch j := g - nr; {
+		case g < nr:
+			text := deltaText(g, a.reasoning[g])
+			c.Delta.Reasoning, id = &text, a.reasoningIDs[g]
+		case a.tool != nil:
+			if j == 0 {
+				name := deltaToolCall{Index: 0, ID: "call_0", Type: "function", Function: &deltaFunction{Name: a.tool.Name}}
+				if !send(newChunk(chunkChoice{Delta: delta{ToolCalls: []deltaToolCall{name}}})) {
+					return false
+				}
+			}
+			c.Delta.ToolCalls, id = []deltaToolCall{{Index: 0, Function: &deltaFunction{Arguments: a.words[j]}}}, a.ids[j]
+		default:
+			text := deltaText(j, a.words[j])
+			c.Delta.Content, id = &text, a.ids[j]
+		}
 		if req.ReturnTokenIDs {
-			call.TokenIDs = a.ids
+			c.TokenIDs = []int32{id}
 		}
-		if !send(lastChunk(newChunk(call))) {
-			return n, false
+		last := g == total-1
+		if last {
+			c.FinishReason = &finish
 		}
-	} else {
-		ok := h.generateTokens(r, s, len(a.words), func(i int) bool {
-			n++
-			if i == 0 && !send(role) {
-				return false
-			}
-			text := deltaText(i, a.words[i])
-			c := chunkChoice{Delta: delta{Content: &text}}
-			if req.ReturnTokenIDs {
-				c.TokenIDs = []int32{a.ids[i]}
-			}
-			last := i == len(a.words)-1
-			if last {
-				c.FinishReason = &finish
-			}
-			out := newChunk(c)
-			if last {
-				out = lastChunk(out)
-			}
-			if !send(out) {
-				return false
-			}
-			if i == 0 && h.cfg.Stall {
-				<-r.Context().Done() // hangs until the client goes away
-				return false
-			}
-			return true
-		})
-		if !ok {
-			return n, false
+		out := newChunk(c)
+		if last {
+			out = lastChunk(out)
 		}
+		if !send(out) {
+			return false
+		}
+		if g == 0 && h.cfg.Stall {
+			<-r.Context().Done() // hangs until the client goes away
+			return false
+		}
+		return true
+	})
+	if !ok {
+		return n, false
 	}
 	if includeUsage {
 		c := newChunk()

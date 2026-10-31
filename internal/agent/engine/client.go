@@ -15,7 +15,12 @@
 //   - POST /v1/chat/completions: ignore_eos, min_tokens and return_token_ids
 //     are vLLM's extensions (openai/chat_completion/protocol.py);
 //     system_fingerprint is the engine fingerprint, recorded and never
-//     compared (HBEP-3);
+//     compared (HBEP-3); with a reasoning parser the reply splits into
+//     message.reasoning and message.content, and a stream's deltas into
+//     delta.reasoning and delta.content (ChatMessage.reasoning,
+//     chat_completion/protocol.py:69-79; DeltaMessage.reasoning,
+//     generate/base/protocol.py:356-360), and usage.completion_tokens counts
+//     both;
 //   - GET /metrics: vllm:num_requests_running, vllm:num_requests_waiting,
 //     vllm:generation_tokens_total, vllm:kv_cache_usage_perc,
 //     vllm:cache_config_info (whose labels give the KV capacity and the cache
@@ -51,6 +56,11 @@ type Client struct {
 	key    string
 	hc     *http.Client
 
+	// reasoning is set when the launch declares a reasoning parser: the
+	// engine then splits a reply into reasoning and a final answer, and
+	// the checks that need an answer allow for the reasoning (WithReasoning).
+	reasoning bool
+
 	mu           sync.Mutex
 	model        string
 	overhead     int32
@@ -58,9 +68,22 @@ type Client struct {
 	wordsFor     map[promptKey]int // calibrated filler lengths
 }
 
+// Option configures a Client.
+type Option func(*Client)
+
+// WithReasoning tells the client that the launch declares a reasoning parser
+// (its command holds --reasoning-parser=<x>), so the engine answers with
+// reasoning before the final answer (HBEP-7, Instance start: checks).
+//
+// The tool-call smoke test and the behaviour check then ask for their own
+// answer budget plus reasoningTokens, and the behaviour check shortens its
+// prompt to leave room for it. The warm-up needs no option: its requests ask
+// for a fixed output length that counts the reasoning, with or without one.
+func WithReasoning(on bool) Option { return func(c *Client) { c.reasoning = on } }
+
 // New returns a Client of the engine listening on socket, which it reaches
 // with key, the Instance's key.
-func New(socket, key string) *Client {
+func New(socket, key string, opts ...Option) *Client {
 	tr := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var d net.Dialer
@@ -71,7 +94,11 @@ func New(socket, key string) *Client {
 		IdleConnTimeout:     90 * time.Second,
 		DisableCompression:  true,
 	}
-	return &Client{socket: socket, key: key, hc: &http.Client{Transport: tr}, wordsFor: map[promptKey]int{}}
+	c := &Client{socket: socket, key: key, hc: &http.Client{Transport: tr}, wordsFor: map[promptKey]int{}}
+	for _, o := range opts {
+		o(c)
+	}
+	return c
 }
 
 // httpError is a non-2xx answer.

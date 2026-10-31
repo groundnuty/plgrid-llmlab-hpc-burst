@@ -20,6 +20,8 @@ func TestParseModes(t *testing.T) {
 		{"greedy-diverge=0", func(c *Config) { c.GreedyDiverge = true }},
 		{"loop-above=2000", func(c *Config) { c.LoopAbove = 2000 }},
 		{"tool-malformed,no-tool-call", func(c *Config) { c.ToolMalformed, c.NoToolCall = true, true }},
+		{"reasoning-first=50", func(c *Config) { c.ReasoningFirst = 50 }},
+		{"reasoning-forever", func(c *Config) { c.ReasoningForever = true }},
 		{"reports-nothing,health-fail,errors-only,stall", func(c *Config) { c.ReportsNothing, c.HealthFail, c.ErrorsOnly, c.Stall = true, true, true, true }},
 		{"report-max-model-len=4096", func(c *Config) { c.ReportedMaxModelLen = 4096 }},
 		{"never-settle=25", func(c *Config) { c.NeverSettle = 25 }},
@@ -41,18 +43,21 @@ func TestParseModes(t *testing.T) {
 
 func TestParseModesRefusesWhatItDoesNotKnow(t *testing.T) {
 	for in, why := range map[string]string{
-		"kv-lw":             "unknown mode",
-		"kv-low=3":          "takes no value",
-		"slow-first":        "needs a duration",
-		"slow-first=fast":   "not a duration",
-		"slow-first=-1s":    "negative",
-		"greedy-diverge":    "needs a number",
-		"greedy-diverge=-1": "below 0",
-		"loop-above=0":      "below 1",
-		"never-settle=x":    "not a number",
-		"exit-after=1s:300": "not 0 to 255",
-		"exit-after":        "needs a duration",
-		"stall=yes":         "takes no value",
+		"kv-lw":               "unknown mode",
+		"kv-low=3":            "takes no value",
+		"slow-first":          "needs a duration",
+		"slow-first=fast":     "not a duration",
+		"slow-first=-1s":      "negative",
+		"greedy-diverge":      "needs a number",
+		"greedy-diverge=-1":   "below 0",
+		"loop-above=0":        "below 1",
+		"never-settle=x":      "not a number",
+		"exit-after=1s:300":   "not 0 to 255",
+		"exit-after":          "needs a duration",
+		"stall=yes":           "takes no value",
+		"reasoning-first":     "needs a number",
+		"reasoning-first=0":   "below 1",
+		"reasoning-forever=1": "takes no value",
 	} {
 		_, err := ParseModes(in)
 		if err == nil || !strings.Contains(err.Error(), why) || !strings.Contains(err.Error(), in) {

@@ -177,6 +177,7 @@ type chatResult struct {
 		Message struct {
 			Role      string  `json:"role"`
 			Content   *string `json:"content"`
+			Reasoning *string `json:"reasoning"`
 			ToolCalls []struct {
 				ID       string `json:"id"`
 				Type     string `json:"type"`

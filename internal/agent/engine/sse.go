@@ -1,6 +1,6 @@
 // Copied from spikes/s2/cmd/s2probe/sse.go (spike S2 phase A, PR #44), this
 // repository, Apache-2.0. Changed: the package name, and chatChunk carries the
-// fields the warm-up reads (tool-call deltas, token ids, usage).
+// fields the warm-up reads (reasoning, tool-call deltas, usage).
 
 package engine
 
@@ -77,10 +77,10 @@ type chatChunk struct {
 	Choices []struct {
 		Delta struct {
 			Content   string            `json:"content"`
+			Reasoning string            `json:"reasoning"`
 			ToolCalls []json.RawMessage `json:"tool_calls"`
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
-		TokenIDs     []int32 `json:"token_ids"`
 	} `json:"choices"`
 	Usage *usage          `json:"usage"`
 	Error json.RawMessage `json:"error"`

@@ -61,6 +61,12 @@ func applyMode(c *Config, name, val string, hasVal bool) error {
 		return flag(&c.Stall)
 	case "ignore-term":
 		return flag(&c.IgnoreTerm)
+	case "reasoning-forever":
+		return flag(&c.ReasoningForever)
+	case "reasoning-first":
+		n, err := intValue(val, hasVal, 1)
+		c.ReasoningFirst = n
+		return err
 	case "greedy-diverge":
 		n, err := intValue(val, hasVal, 0)
 		c.GreedyDiverge, c.GreedyDivergeAt = err == nil, n

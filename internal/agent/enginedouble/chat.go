@@ -45,13 +45,25 @@ type toolCall struct {
 	Name, Arguments string
 }
 
-// answer is what the double says to one request.
+// answer is what the double says to one request: the tokens of the reasoning,
+// if the model reasons, then the tokens of the answer. For a tool call the
+// answer's tokens are the pieces its arguments are streamed in.
 type answer struct {
-	words  []string
-	ids    []int32
-	finish string
-	tool   *toolCall
+	reasoning    []string
+	reasoningIDs []int32
+	words        []string
+	ids          []int32
+	finish       string
+	tool         *toolCall
 }
+
+// tokens is the count usage.completion_tokens reports: vLLM counts the
+// reasoning tokens too.
+func (a answer) tokens() int { return len(a.reasoning) + len(a.words) }
+
+// allIDs are the token ids of the whole completion, reasoning first, as
+// return_token_ids gives them.
+func (a answer) allIDs() []int32 { return append(append([]int32(nil), a.reasoningIDs...), a.ids...) }
 
 // toolCallFor decides whether the answer is a tool call: tools present, no
 // tool_choice "none", and the no-tool-call mode off. The function is the one
@@ -145,12 +157,12 @@ func (h *handler) chat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { s.release(finish) }()
-	wait := h.e.beforeFirstToken(shapeKey{len(promptIDs), max}, len(ans.words))
+	wait := h.e.beforeFirstToken(shapeKey{len(promptIDs), max}, ans.tokens())
 	if !sleep(ctx, wait) {
 		return
 	}
 
-	u := usage{len(promptIDs), len(ans.words), len(promptIDs) + len(ans.words)}
+	u := usage{len(promptIDs), ans.tokens(), len(promptIDs) + ans.tokens()}
 	var sent int
 	var completed bool
 	if req.Stream {
@@ -164,20 +176,79 @@ func (h *handler) chat(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// answerFor decides what the model says.
-func (h *handler) answerFor(req chatRequest, promptIDs []int32, max int) answer {
-	if tc := h.toolCallFor(req); tc != nil {
-		words, ids := tokenize(tc.Arguments)
-		return answer{words: words, ids: ids, finish: "tool_calls", tool: tc}
+// reasoningLen is how many of the max tokens the model spends reasoning: the
+// reasoning-first count, all of them for reasoning-forever.
+func (c Config) reasoningLen(max int) int {
+	switch {
+	case c.ReasoningForever:
+		return max
+	case c.ReasoningFirst > 0:
+		return min(c.ReasoningFirst, max)
+	}
+	return 0
+}
+
+// answerFor decides what the model says. The completion is one walk over the
+// vocabulary: its first tokens are the reasoning, when the model reasons, so
+// a greedy request gives the same token ids with or without the reasoning
+// modes up to where the answers part. A reply that spends all max tokens
+// reasoning has no answer and finishes with "length".
+func (h *handler) answerFor(req chatRequest, promptIDs []int32, limit int) answer {
+	r := h.cfg.reasoningLen(limit)
+	tc := h.toolCallFor(req)
+	if r >= limit {
+		tc = nil
 	}
 	greedy := req.Temperature == nil || *req.Temperature == 0
-	p := genParams{promptIDs: promptIDs, maxTokens: max, minTokens: req.MinTokens, ignoreEOS: req.IgnoreEOS, greedy: greedy}
-	if greedy {
-		p.repeat = h.e.repeatOf(repeatKey{promptSeed(promptIDs), max, req.MinTokens, req.IgnoreEOS})
+	p := genParams{promptIDs: promptIDs, maxTokens: limit - r, minTokens: max(0, req.MinTokens-r), ignoreEOS: req.IgnoreEOS, greedy: greedy}
+
+	if tc != nil {
+		pieces := argumentPieces(tc.Arguments)
+		_, ids := tokenize(tc.Arguments)
+		finish := "tool_calls"
+		if r+len(pieces) > limit { // the call is cut off by the output limit
+			pieces, ids, finish = pieces[:limit-r], ids[:limit-r], "length"
+		}
+		a := answer{words: pieces, ids: ids, finish: finish, tool: tc}
+		if r > 0 {
+			a.reasoning, a.reasoningIDs = outputWords(output{tokens: walk(p.seed(), r)})
+		}
+		return a
 	}
-	out := h.cfg.generate(p)
-	words, ids := outputWords(out)
-	return answer{words: words, ids: ids, finish: out.finish}
+
+	if greedy {
+		p.repeat = h.e.repeatOf(repeatKey{promptSeed(promptIDs), limit, req.MinTokens, req.IgnoreEOS})
+	}
+	n, finish := r, "length"
+	if limit > r {
+		an, f := h.cfg.length(p)
+		n, finish = r+an, f
+	}
+	words, ids := outputWords(output{tokens: h.cfg.tokens(p, n)})
+	return answer{reasoning: words[:r], reasoningIDs: ids[:r], words: words[r:], ids: ids[r:], finish: finish}
+}
+
+// argumentPieces splits tool-call arguments into one piece per token, each
+// holding its word with the white space before it (the rest at the end goes
+// to the last piece), so the pieces joined are the arguments exactly.
+func argumentPieces(args string) []string {
+	var pieces []string
+	start, inWord := 0, false
+	for i, r := range args {
+		space := r == ' ' || r == '\t' || r == '\n' || r == '\r'
+		switch {
+		case !space && !inWord:
+			inWord = true
+		case space && inWord:
+			pieces = append(pieces, args[start:i])
+			start, inWord = i, false
+		}
+	}
+	if len(pieces) == 0 || inWord {
+		return append(pieces, args[start:])
+	}
+	pieces[len(pieces)-1] += args[start:]
+	return pieces
 }
 
 // content is the answer's text: the tokens' words joined by a space.

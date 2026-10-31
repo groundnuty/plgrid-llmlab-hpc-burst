@@ -106,7 +106,7 @@ func (c *Client) timed(ctx context.Context, w warmShape) agentapi.RequestTiming 
 	}
 	rd := newSSEReader(resp.Body)
 	var first time.Duration
-	var chunks int32
+	var sawFirst bool
 	var completion int32 = -1
 	for {
 		ev, err := rd.next(func() {})
@@ -124,23 +124,27 @@ func (c *Client) timed(ctx context.Context, w warmShape) agentapi.RequestTiming 
 			completion = ch.Usage.CompletionTokens
 		}
 		for _, choice := range ch.Choices {
-			if choice.Delta.Content == "" && len(choice.Delta.ToolCalls) == 0 && len(choice.TokenIDs) == 0 {
+			// The first delta of any kind is the first token: with a
+			// reasoning parser the engine reasons before it answers.
+			d := choice.Delta
+			if d.Content == "" && d.Reasoning == "" && len(d.ToolCalls) == 0 {
 				continue
 			}
-			chunks++
-			if first == 0 {
-				first = time.Since(start)
+			if !sawFirst {
+				first, sawFirst = time.Since(start), true
 			}
 		}
 	}
 	t.Total = agentapi.Duration(time.Since(start))
-	if first == 0 {
+	if !sawFirst {
 		return fail(errors.New("the stream carried no token"))
 	}
 	t.TimeToFirstToken = agentapi.Duration(first)
-	t.OutputTokens = chunks
-	if completion >= 0 {
-		t.OutputTokens = completion
+	// The count of tokens is the engine's own, which includes the reasoning:
+	// a chunk can carry several tokens, so chunks are never counted.
+	if completion < 0 {
+		return fail(errors.New("the stream carried no usage (stream_options.include_usage)"))
 	}
+	t.OutputTokens = completion
 	return t
 }

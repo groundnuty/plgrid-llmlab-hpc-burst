@@ -27,6 +27,7 @@ type streamChunk struct {
 		Delta struct {
 			Role      *string         `json:"role"`
 			Content   *string         `json:"content"`
+			Reasoning *string         `json:"reasoning"`
 			ToolCalls json.RawMessage `json:"tool_calls"`
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
@@ -174,12 +175,64 @@ func TestStreamedAnswerRoundTrips(t *testing.T) {
 	}
 }
 
+// A streamed tool call in vLLM's delta form: the first delta carries the
+// call's index, id, type and function name, the later ones only the index and
+// a piece of the arguments, and the last chunk the finish reason.
 func TestStreamedToolCall(t *testing.T) {
-	res := serve(t, cfgFor()).stream(chatBody(2, map[string]any{"tools": weatherTools}))
-	chunks := res.chunks(t)
-	last := chunks[len(chunks)-1].Choices[0]
-	if last.FinishReason == nil || *last.FinishReason != "tool_calls" || !strings.Contains(string(last.Delta.ToolCalls), `"name":"get_weather"`) {
-		t.Errorf("last chunk = %+v (tool_calls %s)", last, last.Delta.ToolCalls)
+	res := serve(t, cfgFor()).stream(chatBody(2, map[string]any{
+		"tools": weatherTools, "max_tokens": 50, "stream_options": map[string]any{"include_usage": true},
+	}))
+	type call struct {
+		Index    *int   `json:"index"`
+		ID       string `json:"id"`
+		Type     string `json:"type"`
+		Function *struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"function"`
+	}
+	var calls []call
+	var finish *string
+	for _, ch := range res.chunks(t)[1:] { // after the role chunk
+		if len(ch.Choices) == 0 {
+			continue
+		}
+		c := ch.Choices[0]
+		if c.Delta.Content != nil || c.Delta.Reasoning != nil {
+			t.Errorf("a tool-call stream carries text: %+v", c.Delta)
+		}
+		var cs []call
+		if err := json.Unmarshal(c.Delta.ToolCalls, &cs); err != nil || len(cs) != 1 {
+			t.Fatalf("delta tool_calls %s: %v", c.Delta.ToolCalls, err)
+		}
+		calls = append(calls, cs[0])
+		if c.FinishReason != nil {
+			finish = c.FinishReason
+		}
+	}
+	if len(calls) != 3 { // the name, then two pieces of arguments
+		t.Fatalf("%d tool-call deltas, want 3: %+v", len(calls), calls)
+	}
+	if first := calls[0]; first.Index == nil || *first.Index != 0 || first.ID != "call_0" || first.Type != "function" ||
+		first.Function == nil || first.Function.Name != "get_weather" || first.Function.Arguments != "" {
+		t.Errorf("first delta = %+v, want index 0, id call_0, type function, name get_weather and no arguments", first)
+	}
+	var args strings.Builder
+	for i, c := range calls[1:] {
+		if c.Index == nil || *c.Index != 0 || c.ID != "" || c.Type != "" || c.Function == nil || c.Function.Name != "" {
+			t.Errorf("argument delta %d = %+v, want only the index and arguments", i, c)
+		}
+		args.WriteString(c.Function.Arguments)
+	}
+	if args.String() != `{"city": "Krakow"}` {
+		t.Errorf("the argument pieces join to %q, want {\"city\": \"Krakow\"}", args.String())
+	}
+	if finish == nil || *finish != "tool_calls" {
+		t.Errorf("finish_reason = %v, want tool_calls on the last chunk", finish)
+	}
+	usage := res.chunks(t)
+	if u := usage[len(usage)-1].Usage; u == nil || u.CompletionTokens != 2 {
+		t.Errorf("usage = %+v, want 2 completion tokens", u)
 	}
 }
 

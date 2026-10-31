@@ -32,13 +32,31 @@
 // if that comes first. The double does not simulate preemption or a prefill
 // phase: a request waits TokenDelay before each token.
 //
+// # Reasoning and tool calls
+//
+// A model that reasons (reasoning-first=<n>, reasoning-forever) says n
+// reasoning tokens before its answer, or reasons until max_tokens runs out
+// with no answer and the finish reason "length". The reasoning is
+// message.reasoning, and delta.reasoning in a stream, as vLLM v0.32.0 names
+// them (chat_completion/protocol.py:69-79, generate/base/protocol.py:356-360);
+// usage.completion_tokens counts the reasoning tokens. The completion is one
+// walk over the vocabulary whose first tokens are the reasoning, so a greedy
+// request's token ids start the same with or without the modes.
+//
+// A tool call is streamed in vLLM's delta form: a delta with the call's index,
+// id, type and function name, then one delta per token of the arguments with
+// the index and "arguments" only, the finish reason "tool_calls" on the last
+// chunk. A call that max_tokens cuts off carries part of its arguments and the
+// finish reason "length".
+//
 // # Modes
 //
 // ParseModes reads the comma-separated value of the environment variable
 // HB_ENGINE_DOUBLE, for example "kv-low,slow-first=200ms". The modes are kv-low,
 // greedy-diverge=<n>, greedy-repeat, loop-above=<tokens>, tool-malformed,
 // no-tool-call, reports-nothing, report-max-model-len=<n>, health-fail,
-// errors-only, slow-first=<dur>, never-settle=<pct>, stall and token-delay=<dur>;
+// errors-only, slow-first=<dur>, never-settle=<pct>, stall, token-delay=<dur>,
+// reasoning-first=<n> and reasoning-forever;
 // the startup modes, used by Main only, are start-delay=<dur>,
 // exit-after=<dur>[:code] and ignore-term.
 //
