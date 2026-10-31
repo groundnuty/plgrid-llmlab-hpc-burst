@@ -363,3 +363,48 @@ func TestQueueRecordHasNoAccounting(t *testing.T) {
 		}
 	}
 }
+
+// A requeued job's hours are unknown (science agent, 31 Oct 2026, on the
+// review of PR 118), on the real-shaped replies of both dialects: job 4320 ran
+// 55 s, was requeued, and ran 60 s.
+func TestRequeuedFixturesHaveUnknownHours(t *testing.T) {
+	now := time.Date(2026, 10, 31, 13, 0, 0, 0, time.UTC)
+	unknown := func(t *testing.T, what string, a *v1alpha1.AllocationAccounting) {
+		t.Helper()
+		if a == nil || a.AllocatedCPUs != nil || a.AllocatedGPUs != nil || a.ElapsedSeconds != nil {
+			t.Errorf("%s: accounting %+v, want the counts and elapsed time unknown", what, a)
+		}
+	}
+	for _, v := range []string{"v0.0.40", "v0.0.42"} {
+		t.Run(v, func(t *testing.T) {
+			doc := readTestdata(t, v, "sacct-requeue.json")
+			j := accountingJobs(t, doc, v)["4320"]
+			unknown(t, "both executions", provider.AccountingOf(j, 0, nil, now))
+
+			// Astra B3: a reply that holds only the final 60 s execution, with no
+			// sign of the requeue, while the status already records it.
+			last := editDoc(t, doc, func(top map[string]any) {
+				var keep []any
+				for _, r := range top["jobs"].([]any) {
+					rec := r.(map[string]any)
+					if rec["job_id"].(float64) == 4320 && rec["time"].(map[string]any)["elapsed"].(float64) == 55 {
+						continue
+					}
+					if _, has := rec["restart_cnt"]; has {
+						rec["restart_cnt"] = 0
+					}
+					keep = append(keep, rec)
+				}
+				top["jobs"] = keep
+			})
+			one := accountingJobs(t, last, v)["4320"]
+			if one.Requeued || one.Accounting == nil || one.Accounting.Executions != 1 {
+				t.Fatalf("precondition: the edited reply shows requeued %v, accounting %+v; want one execution and no requeue", one.Requeued, one.Accounting)
+			}
+			if a := provider.AccountingOf(one, 0, nil, now); a == nil || a.ElapsedSeconds == nil || *a.ElapsedSeconds != 60 {
+				t.Fatalf("precondition: the edited reply alone gives %+v, want 60 s", a)
+			}
+			unknown(t, "one execution, requeue in the status", provider.MirrorAccounting(one, 0, &v1alpha1.AllocationObservation{Requeued: true}, now, false))
+		})
+	}
+}

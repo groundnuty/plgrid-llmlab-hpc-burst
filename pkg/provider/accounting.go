@@ -50,9 +50,11 @@ type JobAccounting struct {
 //   - While the job runs, the elapsed time runs from the scheduler's start time
 //     to now. Once it has ended, it is the end time minus the start time when the
 //     final state came from the queue listing, and otherwise accounting's
-//     time.elapsed (job.Accounting.Elapsed), summed over the executions. A
-//     requeued job read from the queue listing has its earlier executions
-//     unknown, so its elapsed time is unknown.
+//     time.elapsed (job.Accounting.Elapsed), summed over the executions.
+//   - A requeued job (AccountingRequeued) has its counts, its elapsed time and
+//     so its hours unknown, whatever the read shows (science agent,
+//     31 Oct 2026, on the review of PR 118: Astra B1 to B4). Per-execution
+//     reconciliation is beta at the earliest.
 //   - ReadTime is now, in whole seconds, UTC, and the running elapsed time is
 //     counted to that same second.
 func AccountingOf(job Job, requestedGPUs int32, prior *v1alpha1.AllocationAccounting, now time.Time) *v1alpha1.AllocationAccounting {
@@ -60,6 +62,9 @@ func AccountingOf(job Job, requestedGPUs int32, prior *v1alpha1.AllocationAccoun
 		return nil
 	}
 	read := now.UTC().Truncate(time.Second)
+	if AccountingRequeued(job) {
+		return &v1alpha1.AllocationAccounting{ReadTime: metav1.NewTime(read)}
+	}
 	start := job.StartTime.UTC().Truncate(time.Second)
 	out := &v1alpha1.AllocationAccounting{ReadTime: metav1.NewTime(read)}
 	if a := job.Accounting; a != nil {
@@ -80,16 +85,14 @@ func AccountingOf(job Job, requestedGPUs int32, prior *v1alpha1.AllocationAccoun
 	var elapsed *time.Duration
 	switch {
 	case job.EndTime == nil:
-		if !job.Requeued {
-			d := max(read.Sub(start), 0)
-			elapsed = &d
-		}
+		d := max(read.Sub(start), 0)
+		elapsed = &d
 	case job.Source == SourceAccounting:
 		if job.Accounting != nil {
 			elapsed = job.Accounting.Elapsed
 		}
 	default:
-		if end := job.EndTime.UTC().Truncate(time.Second); !job.Requeued && !end.Before(start) {
+		if end := job.EndTime.UTC().Truncate(time.Second); !end.Before(start) {
 			d := end.Sub(start)
 			elapsed = &d
 		}
@@ -134,9 +137,13 @@ const AccountingRefresh = v1alpha1.ProviderPollInterval
 // A known final observation in prior (FinalKnown) is never replaced by a read
 // that lacks the elapsed time, such as accounting's record of the job before
 // it has all of the job's executions (review of PR 118, Astra B6 and B7).
+//
+// A requeue seen before (prior.Requeued) is kept: the job counts as requeued
+// even when a later reply shows one execution (Astra B3).
 func MirrorAccounting(job Job, requestedGPUs int32, prior *v1alpha1.AllocationObservation, now time.Time, read bool) *v1alpha1.AllocationAccounting {
+	job.Requeued = job.Requeued || prior.Requeued
 	next := AccountingOf(job, requestedGPUs, prior.Accounting, now)
-	if FinalKnown(prior) && (next == nil || next.ElapsedSeconds == nil) {
+	if !AccountingRequeued(job) && FinalKnown(prior) && (next == nil || next.ElapsedSeconds == nil) {
 		return prior.Accounting.DeepCopy()
 	}
 	if !read && keepStored(prior, next, job.EndTime != nil) {
@@ -149,7 +156,15 @@ func MirrorAccounting(job Job, requestedGPUs int32, prior *v1alpha1.AllocationOb
 // observation of the recorded job: its end time and its elapsed time (review of
 // PR 118, Astra B6). No later absence or incomplete read replaces it.
 func FinalKnown(o *v1alpha1.AllocationObservation) bool {
-	return o.EndTime != nil && o.Accounting != nil && o.Accounting.ElapsedSeconds != nil
+	return !o.Requeued && o.EndTime != nil && o.Accounting != nil && o.Accounting.ElapsedSeconds != nil
+}
+
+// AccountingRequeued reports whether the job counts as requeued for
+// accounting (science agent, 31 Oct 2026): a requeue seen (job.Requeued, which
+// callers also set from the stored status's sticky flag), a restart count
+// above 0, or more than one execution in accounting's reply.
+func AccountingRequeued(job Job) bool {
+	return job.Requeued || job.RestartCount > 0 || (job.Accounting != nil && job.Accounting.Executions > 1)
 }
 
 // keepStored reports whether storing next in place of prior's accounting
@@ -176,7 +191,8 @@ func sameSeconds(a, b *int64) bool { return (a == nil) == (b == nil) && (a == ni
 // AccountingLost returns the accounting of a job whose final read never came
 // (HBEP-8: "A Lost job is recorded with its elapsed time unknown"): the counts
 // from the stored accounting, and no elapsed time. It is nil when the job was
-// never seen started, since its hours are then unknown.
+// never seen started, since its hours are then unknown. A requeued job is not
+// passed here: its record has no counts at all (keepAccounting).
 func AccountingLost(startTime *time.Time, requestedGPUs int32, prior *v1alpha1.AllocationAccounting, now time.Time) *v1alpha1.AllocationAccounting {
 	if startTime == nil {
 		return nil

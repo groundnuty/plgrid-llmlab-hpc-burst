@@ -122,16 +122,20 @@ import (
 //     restarted Controller (a new value on the same client) keeps all of this,
 //     because it lives in the status.
 //   - Live accounting (HBEP-8, Provider accounting): on every observe that finds
-//     the recorded job, status.atProvider.accounting is provider.AccountingOf
-//     over the job, the requested GPU count and the stored accounting: nil while
+//     the recorded job, status.atProvider.accounting is provider.MirrorAccounting
+//     over the job, the requested GPU count and the stored status: nil while
 //     the job has not started, then the allocated counts, the elapsed seconds
 //     (running: from the start time to the pass time; ended: end minus start from
 //     the queue listing, or accounting's summed elapsed time) and readTime, the
 //     pass time. A job absent from both sources keeps the stored accounting, and
-//     a failed read keeps the whole stored status. The status of a started job
-//     is therefore written at every pass, since readTime moves.
-//   - The accounting read, once per execution of a job per Controller value (a
-//     requeued job that starts again is read again): when the observed
+//     a failed read keeps the whole stored status. A running job's block is
+//     rewritten when a count changes or once it is a minute old, never only
+//     because readTime moved; a known final is kept against a read that lacks
+//     the elapsed time; a requeued job (also once the stored status records a
+//     requeue) has its counts and elapsed time unknown (science agent,
+//     31 Oct 2026, on the review of PR 118).
+//   - The accounting read, once per execution of a job per Controller value,
+//     never for a requeued job: when the observed
 //     job has a start time and the stored accounting has no allocatedCPUs, the
 //     Controller calls Batch.ReadAccounting (op "sacct-job" in the call log) and
 //     takes the counts from it. A read that fails is retried at the next pass; a

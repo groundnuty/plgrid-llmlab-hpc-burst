@@ -45,7 +45,9 @@ func TestOneAccountingReadPerJob(t *testing.T) {
 	if n := e.batch.Count("sacct-job"); n != 1 {
 		t.Fatalf("sacct-job logged %d times after the job ended and a restart, want 1", n)
 	}
-	e.wantLive("a1", 8, 1, 1800, at(12, 37, 0))
+	// The ended job's block was written at 12:36:00; 12:37:00 changes nothing
+	// but the clock, so it is kept (the status-write cadence).
+	e.wantLive("a1", 8, 1, 1800, at(12, 36, 0))
 }
 
 // Reads that fail are never counted as the one read. While the listing fails the

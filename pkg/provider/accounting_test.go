@@ -125,16 +125,28 @@ func TestAccountingOfEndedFromAccounting(t *testing.T) {
 	countIs(t, "allocatedCPUs", got.AllocatedCPUs, 4)
 	countIs(t, "allocatedGPUs", got.AllocatedGPUs, 1)
 
-	// A requeued job: the sum of the two executions, 60 s and 70 s.
-	j.Requeued, j.Accounting.Elapsed, j.Accounting.Executions = true, dur(130), 2
-	elapsedIs(t, AccountingOf(j, 1, nil, *ti(12, 5, 0)), 130)
-
 	// A record that has no elapsed time, or whose executions are not all there:
 	// unknown, and the counts stay known.
 	j.Accounting.Elapsed = nil
 	got = AccountingOf(j, 1, nil, *ti(12, 5, 0))
 	elapsedIs(t, got, -1)
 	countIs(t, "allocatedCPUs", got.AllocatedCPUs, 4)
+
+	// A requeued job (science agent, 31 Oct 2026): its counts, elapsed time and
+	// hours are unknown, by each of the three signs, even with the two
+	// executions' 60 s and 70 s summed in the reply and a stored count.
+	stored := &v1alpha1.AllocationAccounting{AllocatedCPUs: n32(4), AllocatedGPUs: n32(1)}
+	for name, rq := range map[string]Job{
+		"requeue seen":    {Requeued: true, Accounting: &JobAccounting{AllocatedCPUs: n32(4), AllocatedGPUs: n32(1), Elapsed: dur(130), Executions: 1}},
+		"restart count 1": {RestartCount: 1, Accounting: &JobAccounting{AllocatedCPUs: n32(4), AllocatedGPUs: n32(1), Elapsed: dur(130), Executions: 1}},
+		"two executions":  {Accounting: &JobAccounting{AllocatedCPUs: n32(4), AllocatedGPUs: n32(1), Elapsed: dur(130), Executions: 2}},
+	} {
+		rq.State, rq.StartTime, rq.EndTime, rq.Source = []string{"COMPLETED"}, ti(12, 0, 0), ti(12, 2, 20), SourceAccounting
+		got := AccountingOf(rq, 1, stored, *ti(12, 5, 0))
+		if got == nil || got.AllocatedCPUs != nil || got.AllocatedGPUs != nil || got.ElapsedSeconds != nil || !got.ReadTime.Time.Equal(*ti(12, 5, 0)) {
+			t.Errorf("%s: accounting %+v, want every count and the elapsed time unknown, read at 12:05:00", name, got)
+		}
+	}
 
 	// Accounting read for a running job: the elapsed time runs to the read.
 	run := Job{State: []string{"RUNNING"}, StartTime: ti(12, 0, 0), Source: SourceAccounting, Accounting: &JobAccounting{Elapsed: dur(30), Executions: 1}}

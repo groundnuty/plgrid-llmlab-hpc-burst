@@ -271,41 +271,6 @@ func TestAccountingOfACPUJobHasZeroGPUs(t *testing.T) {
 	}
 }
 
-// A requeued job read from the listing has its earlier executions unknown, so
-// its elapsed time is; once it ends, accounting sums the two executions. The
-// first runs 12:01:00 to 12:02:00 (60 s), the second 12:03:00 to 12:03:45 (45 s).
-func TestAccountingOfARequeuedJob(t *testing.T) {
-	clock := fake.NewClock(at(12, 0, 0))
-	sl := newSlurm(clock, fakeslurm.Config{})
-	e := newRealEnv(t, clock, sl, newFakeClient(t, "prov-a"), "prov-a", "user-a")
-	e.newAlloc("alloc-a", 1)
-	e.run("alloc-a", 2)
-	id := e.get("alloc-a").Annotations[v1alpha1.AnnotationJobID]
-	n := jobNumber(t, id)
-	clock.Advance(60 * time.Second)
-	e.start("alloc-a") // 12:01:00
-	e.poll("alloc-a", 1)
-	clock.Set(at(12, 2, 0))
-	if err := sl.Requeue(n); err != nil {
-		t.Fatal(err)
-	}
-	e.poll("alloc-a", 1)
-	if a := e.accStatus("alloc-a"); a != nil {
-		t.Errorf("a requeued job that waits again has accounting %+v, want none: it has not started", a)
-	}
-	clock.Set(at(12, 3, 0))
-	if err := sl.Start(n); err != nil {
-		t.Fatal(err)
-	}
-	clock.Set(at(12, 3, 20))
-	e.run("alloc-a", 1)
-	wantAcctStatus(t, "second execution running", e.accStatus("alloc-a"), 8, 1, -1, at(12, 3, 20))
-	clock.Set(at(12, 3, 45))
-	endJob(t, sl, id, fakeslurm.Completed)
-	e.poll("alloc-a", 1)
-	wantAcctStatus(t, "both executions", e.accStatus("alloc-a"), 8, 1, 105, at(12, 4, 25))
-}
-
 // gpuEntryHidden is a Platform whose accounting lists no gres entry for the GPU
 // job, as if a platform changed that part of the shape.
 type gpuEntryHidden struct{ Platform }

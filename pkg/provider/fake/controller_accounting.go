@@ -14,8 +14,9 @@ import (
 // The allocated counts come from one read of accounting alone
 // (Batch.ReadAccounting), made when the job has a start time, the stored
 // accounting has no allocatedCPUs, and the job has not been read this way by
-// this Controller value; a requeued job that starts again is another execution,
-// read once more. A read that fails is retried at the next pass; one
+// this Controller value, and not for a requeued job, whose counts are unknown
+// (science agent, 31 Oct 2026). The block is provider.MirrorAccounting's, at
+// its status-write cadence. A read that fails is retried at the next pass; one
 // that succeeds but returns nothing counts as the one read. A restarted
 // Controller reads once more for a job whose stored accounting still lacks the
 // CPU count, and no more than that: the other passes make no extra Batch call,
@@ -26,7 +27,10 @@ import (
 // (Provider readiness), and not an error: the elapsed time is still shown.
 func (c *Controller) liveAccounting(ctx context.Context, p *pass, s *allocState, job provider.Job) {
 	prior := s.prior.Accounting
-	if job.StartTime != nil && (prior == nil || prior.AllocatedCPUs == nil) && !c.accountingWasRead(executionKey(job)) {
+	made := false
+	if job.StartTime != nil && (prior == nil || prior.AllocatedCPUs == nil) && !s.prior.Requeued && !provider.AccountingRequeued(job) &&
+		!c.accountingWasRead(executionKey(job)) {
+		made = true
 		read, found, err := c.readAccounting(ctx, p, job.ID)
 		if err == nil {
 			c.accountingRead[executionKey(job)] = struct{}{}
@@ -37,7 +41,7 @@ func (c *Controller) liveAccounting(ctx context.Context, p *pass, s *allocState,
 			}
 		}
 	}
-	s.obs.Accounting = provider.AccountingOf(job, requestedGPUs(s), prior, p.now)
+	s.obs.Accounting = provider.MirrorAccounting(job, requestedGPUs(s), s.prior, p.now, made)
 }
 
 // executionKey names one execution of a job: its ID and start time. The real

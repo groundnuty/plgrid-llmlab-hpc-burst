@@ -43,9 +43,11 @@ func checkAccountingScheme(s *runtime.Scheme) error {
 // accounting has no CPU count, at most once per provider.AccountingRefresh
 // counted from the stored readTime, which every read moves (Astra nit 10: an
 // empty first read, accounting lagging the queue, is retried until the first
-// usable one, then never again). It reports whether it read.
+// usable one, then never again). Nor is it made for a requeued job, whose
+// counts are unknown whatever it would show (science agent, 31 Oct 2026). It
+// reports whether it read.
 func (e *external) allocatedRead(ctx context.Context, job provider.Job, prior *v1alpha1.AllocationObservation, now time.Time) (provider.Job, bool, error) {
-	if job.StartTime == nil || job.Accounting != nil {
+	if job.StartTime == nil || job.Accounting != nil || prior.Requeued || provider.AccountingRequeued(job) {
 		return job, false, nil
 	}
 	if s := prior.Accounting; s != nil && (s.AllocatedCPUs != nil || now.Sub(s.ReadTime.Time) < provider.AccountingRefresh) {
@@ -90,6 +92,9 @@ func (e *external) mirrorAccounting(a *v1alpha1.Allocation, job provider.Job, pr
 // files and finalizer go, it writes acct-<Allocation UID> from those reads. It
 // makes no scheduler call; a failed read never reaches it (the finalizer stays,
 // PR 76's Astra B3). In order:
+//   - a requeued job (provider.AccountingRequeued, or the stored status's
+//     sticky flag) is written at once with its counts and elapsed time unknown
+//     (science agent, 31 Oct 2026, on the review of PR 118: Astra B1 to B4);
 //   - a read of the recorded job that gives its final elapsed time, or shows it
 //     never started, is written at once;
 //   - else a known final observation in the stored status (provider.FinalKnown)
@@ -121,14 +126,24 @@ func (e *external) keepAccounting(ctx context.Context, a *v1alpha1.Allocation, r
 	p := a.Spec.ForProvider.Batch
 	data := v1alpha1.AccountingRecordData{Provider: e.s.o.Provider, Partition: p.Partition, Tag: name, JobIDs: jobIDs(jobs, rec.jobID)}
 	var read *v1alpha1.AllocationAccounting
+	requeued := o.Requeued
 	if recorded != nil {
-		read = provider.AccountingOf(*recorded, p.GPUs, o.Accounting, now)
+		j := *recorded
+		j.Requeued = j.Requeued || o.Requeued
+		requeued = provider.AccountingRequeued(j)
+		read = provider.AccountingOf(j, p.GPUs, o.Accounting, now)
 	}
 	fromRead := func() {
 		data.StartTime, data.EndTime = mtp(recorded.StartTime), mtp(recorded.EndTime)
 		fillAccounting(&data, read)
 	}
 	switch {
+	case requeued:
+		// Its counts and elapsed time are unknown however long it waits.
+		data.StartTime, data.EndTime = o.StartTime, o.EndTime
+		if recorded != nil {
+			data.StartTime, data.EndTime = mtp(recorded.StartTime), mtp(recorded.EndTime)
+		}
 	case recorded != nil && (recorded.StartTime == nil || read.ElapsedSeconds != nil):
 		fromRead()
 	case provider.FinalKnown(o):

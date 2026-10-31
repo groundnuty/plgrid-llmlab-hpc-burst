@@ -295,16 +295,14 @@ func TestLiveAccountingOfARequeuedJob(t *testing.T) {
 	e.syncAt(at(12, 17, 0)) // running again since 12:15:00; the phase of a requeued job stays Failed
 	wantMT(t, "startTime", e.wantPhase("a1", v1alpha1.AllocationFailed).StartTime, at(12, 15, 0))
 	a := e.obs("a1").Accounting
-	if a == nil || a.ElapsedSeconds != nil {
-		t.Fatalf("a requeued running job has accounting %+v, want its elapsed time unknown", a)
+	// A requeued job's counts, elapsed time and hours are unknown (science
+	// agent, 31 Oct 2026), and no read is made for the second execution's
+	// counts, as the real controller does.
+	if a == nil || a.ElapsedSeconds != nil || a.AllocatedCPUs != nil || a.AllocatedGPUs != nil {
+		t.Fatalf("a requeued running job has accounting %+v, want the counts and elapsed time unknown", a)
 	}
 	wantMT(t, "readTime", &a.ReadTime, at(12, 17, 0))
-	// The second execution is read once more for its own allocation (the
-	// counts were dropped with the first execution's accounting while it
-	// waited), as the real controller does.
-	wantCount(t, "allocatedCPUs", a.AllocatedCPUs, 8)
-	wantCount(t, "allocatedGPUs", a.AllocatedGPUs, 1)
-	if n := e.batch.Count("sacct-job"); n != 2 {
-		t.Errorf("%d accounting reads, want 2: one per execution", n)
+	if n := e.batch.Count("sacct-job"); n != 1 {
+		t.Errorf("%d accounting reads, want 1: none for the requeued job's second execution", n)
 	}
 }
