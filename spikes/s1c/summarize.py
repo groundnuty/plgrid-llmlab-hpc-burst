@@ -37,12 +37,14 @@ FLAGGED = set()   # keys whose every attempt ended with the 1-minute load above 
 
 
 def ok(r):
-    return all(f(r.get(k)) is None or f(r.get(k)) <= LOAD_OK for k in ("load_start", "load_end"))
+    """A usable attempt: load <= 4.0 at its start and end, and (head-of-line rows) a valid injection."""
+    return (all(f(r.get(k)) is None or f(r.get(k)) <= LOAD_OK for k in ("load_start", "load_end"))
+            and r.get("valid", "yes") in ("yes", ""))
 
 
 def pick(rs, key):
-    """key(row) -> pass -> row: the last attempt measured at a load <= 4.0, else the last attempt
-    (and the key is flagged). Rows are in measurement order; a re-run supersedes earlier rows."""
+    """key(row) -> pass -> row: the last usable attempt (ok()), else the last attempt (and the key is
+    flagged). Rows are in measurement order; a re-run supersedes earlier rows."""
     tries = defaultdict(list)
     for r in rs:
         tries[(key(r), int(r["pass_"]))].append(r)
@@ -64,11 +66,13 @@ def matrix(rs):
         out.append("\n#### %s\n" % title)
         out.append("Values are pass 1 / pass 2. Added TTFT is against the direct arm in the same condition, "
                    "concurrency and pass. CPU is percent of one core; path = frpc + frps (+ Envoy for wss, + ssh "
-                   "and sshd for ssh). RSS is the peak during the cell, shown for the clean cells only: the processes "
+                   "and sshd for ssh), averaged over the whole load run. Front CPU per 1k tok/s is frps (+ Envoy for wss, + sshd "
+                   "for ssh) per 1,000 tokens/s, with CPU and tokens over the same interval (the whole run); total tok/s "
+                   "is the steady 24 s window. RSS is the peak during the cell, shown for the clean cells only: the processes "
                    "stay up across cells, and Go keeps the memory it grew to, so later cells show the earlier peak.\n")
         out.append("| arm | streams | TTFT p50 ms | added p50 ms | added p95 ms | gap p99 ms | tok/s per stream p50 (p5) "
-                   "| total tok/s | failed | path CPU % | frpc / frps RSS MB | wire B/token |")
-        out.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+                   "| total tok/s | failed | path CPU % | front CPU % per 1k tok/s | frpc / frps RSS MB | TCP payload B/token |")
+        out.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
         for arm in ARMS:
             for n in (1, 16, 64, 256):
                 cell = by.get((arm, cond, n))
@@ -88,12 +92,13 @@ def matrix(rs):
                 p1 = cell[passes[0]] if passes[0] in cell else list(cell.values())[0]
                 rate = both([g("rate_p50", p) for p in passes], "%.1f") + " (%s)" % both([g("rate_p5", p) for p in passes], "%.1f")
                 rss = "-" if arm == "direct" or cond != "clean" else "%s / %s" % (p1["rss_frpc"], p1["rss_frps"])
-                out.append("| %s | %d | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+                fk = [g("front_cpu_per_ktok", p) for p in passes]
+                out.append("| %s | %d | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
                     arm, n, both([g("ttft_p50", p) for p in passes]),
                     "-" if arm == "direct" else both(add50, "%+.0f"), "-" if arm == "direct" else both(add95, "%+.0f"),
                     both([g("gap_p99", p) for p in passes]), rate, both([g("tok_s", p) for p in passes]),
-                    both([g("failed", p) for p in passes]), "-" if arm == "direct" else both(cpu, "%.0f"), rss,
-                    p1["wire_B_tok"] or "-"))
+                    both([g("failed", p) for p in passes]), "-" if arm == "direct" else both(cpu, "%.0f"),
+                    "-" if arm == "direct" else both(fk, "%.1f"), rss, p1["tcp_payload_B_tok"] or "-"))
     extra = [(c, t) for c, t in (("raw", "direct, no toxiproxy"), ("bw-shared", "direct through the shared-bottleneck shaper at 512,000 B/s"))]
     out.append("\n#### Direct-arm controls\n")
     out.append("| condition | streams | TTFT p50 ms | gap p99 ms | tok/s per stream p50 | total tok/s | failed |")
@@ -111,18 +116,19 @@ def matrix(rs):
 
 def hol(rs):
     by = pick(rs, lambda r: (r["config"], r["variant"]))
-    out = ["Values are run 1 / run 2 (/ more runs where listed).\n",
-           "| path | variant | bulk B/s | bulk s | fast gap p99 before / during / after ms | fast lateness max during ms "
-           "| fast streams complete | frpc logins |", "|---|---|---:|---:|---:|---:|---:|---:|"]
+    out = ["Values are run 1 / run 2 (/ more runs where listed). The stall is the largest lateness of a fast-stream "
+           "token arriving from the bulk start to 5 s after the bulk ends.\n",
+           "| path | variant | bulk bytes read | bulk B/s | bulk s | fast gap p99 before the bulk, ms "
+           "| stall: fast lateness max, ms | fast streams complete | heartbeat timeouts frpc / frps |",
+           "|---|---|---:|---:|---:|---:|---:|---:|---:|"]
     for (cfg, var), cell in by.items():
         passes = sorted(cell)   # the runs of this row (some rows have extra runs)
         g = lambda k: [f(cell[p][k]) for p in passes]
-        gaps = " ; ".join("%s / %s / %s" % (cell[p]["before_gap_p99"], cell[p]["during_gap_p99"], cell[p]["after_gap_p99"])
-                          for p in passes if p in cell)
-        out.append("| %s | %s | %s | %s | %s | %s | %s | %s |" % (
-            cfg, var, both(g("bulk_Bps")), both(g("bulk_s"), "%.1f"), gaps, both(g("during_late_max")),
-            " / ".join("%s/%s" % (cell[p]["fast_complete"], cell[p]["fast_n"]) for p in passes if p in cell),
-            both(g("frpc_logins"))))
+        gaps = both(g("before_gap_p99"))
+        out.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+            cfg, var, both(g("bulk_read")), both(g("bulk_Bps")), both(g("bulk_s"), "%.1f"), gaps, both(g("stall_late_max")),
+            " / ".join("%s/%s" % (cell[p]["fast_complete"], cell[p]["fast_n"]) for p in passes),
+            " / ".join("%s-%s" % (cell[p]["frpc_hb_timeouts"], cell[p]["frps_hb_timeouts"] or "?") for p in passes)))
     return "\n".join(out)
 
 
@@ -136,15 +142,20 @@ def heartbeat(rs):
             return "-"
         return "%.1f / %.1f / %.1f" % (v[0], statistics.median(v), v[-1])
     out = ["| setting | scenario | reps | frps marks proxy gone, s (min / median / max) | first refused probe, s "
-           "| probes hung meanwhile (median wait, s) | frps cause (rep 1) | frpc noticed, s | routing back after heal, s |",
-           "|---|---|---:|---:|---:|---:|---|---:|---:|"]
+           "| probes hung meanwhile: median count, median wait s, longest wait s (cut at 15 s: runs) | API errors | censored "
+           "| frps cause (rep 1) | frpc noticed, s | routing back after heal, s |",
+           "|---|---|---:|---:|---:|---:|---:|---:|---|---:|---:|"]
     for (st, sc), lst in by.items():
         hung = [f(r["hung_med_s"]) for r in lst if f(r["hung_med_s"]) is not None]
-        out.append("| %s | %s | %d | %s | %s | %s | %s | %s | %s |" % (
+        mx = [f(r["hung_max_s"]) for r in lst if f(r["hung_max_s"]) is not None]
+        cut = sum(1 for r in lst if int(f(r.get("hung_timeouts")) or 0) > 0)
+        out.append("| %s | %s | %d | %s | %s | %s | %s | %s | %s | %s | %s |" % (
             st, sc, len(lst), mmm(r["api_gone_s"] for r in lst), mmm(r["first_refused_s"] for r in lst),
-            "%d (%.1f)" % (statistics.median([int(r["hung_n"]) for r in lst]), statistics.median(hung)) if hung else "0",
-            re.sub(r"\[[0-9a-f]{16}\] |\d{4}/\d\d/\d\d \d\d:\d\d:\d\d ", "", lst[0]["frps_cause"]).replace("|", "/")[:120], mmm(r["frpc_detect_s"] for r in lst),
-            mmm(r["heal_probe_ok_s"] for r in lst)))
+            "%d, %.1f, %.1f (%d)" % (statistics.median([int(r["hung_n"]) for r in lst]), statistics.median(hung), max(mx), cut)
+            if hung else "0",
+            sum(int(f(r.get("api_errors")) or 0) for r in lst), sum(1 for r in lst if r.get("valid")),
+            re.sub(r"\[[0-9a-f]{16}\] |\d{4}/\d\d/\d\d \d\d:\d\d:\d\d ", "", lst[0]["frps_cause"]).replace("|", "/")[:120],
+            mmm(r["frpc_detect_s"] for r in lst), mmm(r["heal_probe_ok_s"] for r in lst)))
     return "\n".join(out)
 
 

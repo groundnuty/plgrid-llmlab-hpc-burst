@@ -61,7 +61,18 @@ cp "$x/toxiproxy-server" "$BIN/"
 rm -rf "$x"
 
 if [ -n "${S1C_ENVOY:-}" ]; then verify "$S1C_ENVOY" "$ENVOY_SHA"; fi
-[ -n "${S1C_SIM:-}" ] && [ -x "$S1C_SIM" ] || echo "fetch: note: S1C_SIM is not set to an executable (spike S2's patched llm-d-inference-sim)" >&2
+# The engine double is spike S2's build: llm-d-inference-sim v1.0.0, commit 7bda03f, with S2's
+# loopback patch (so Go records the tree as modified). Go embeds the module and VCS revision in the
+# binary; check them and print its sha256 (a local build, so there is no published digest).
+if [ -n "${S1C_SIM:-}" ] && [ -x "$S1C_SIM" ]; then
+  echo "engine sha256 $(sha256sum "$S1C_SIM" | cut -d' ' -f1)"
+  go version -m "$S1C_SIM" | grep -q 'vcs.revision=7bda03f9fef85139617cb4f724dccafe1cf8cbbf' \
+    || { echo "fetch: S1C_SIM is not built from llm-d-inference-sim 7bda03f" >&2; exit 1; }
+  go version -m "$S1C_SIM" | grep -q 'vcs.modified=true' \
+    || echo "fetch: note: S1C_SIM has no local changes recorded; spike S2's loopback patch may be missing" >&2
+else
+  echo "fetch: note: S1C_SIM is not set to an executable (spike S2's patched llm-d-inference-sim)" >&2
+fi
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 (cd "$here" && CGO_ENABLED=0 nice -n 10 go build -trimpath -o "$BIN/s1cbench" ./cmd/s1cbench)

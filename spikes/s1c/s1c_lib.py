@@ -43,6 +43,25 @@ HB = {
 }
 
 
+def append_row(path, row):
+    """Append one row to a CSV. An existing file keeps its column order, and a row whose columns
+    differ from the file's header is refused (a silent misalignment would corrupt the results)."""
+    import csv
+    if os.path.exists(path):
+        with open(path, newline="") as fh:
+            header = next(csv.reader(fh))
+        if set(header) != set(row):
+            raise ValueError("%s: columns %s differ from the file's %s" % (path, sorted(row), sorted(header)))
+    else:
+        header = list(row)
+    new = not os.path.exists(path)
+    with open(path, "a", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=header)
+        if new:
+            w.writeheader()
+        w.writerow(row)
+
+
 def log(msg):
     sys.stderr.write("%s %s\n" % (time.strftime("%H:%M:%S"), msg))
     sys.stderr.flush()

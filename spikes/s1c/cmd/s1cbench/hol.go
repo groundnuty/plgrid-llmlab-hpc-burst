@@ -91,13 +91,7 @@ func runHOL(args []string) error {
 		s.BulkErr = berr.Error()
 	}
 	wg.Wait()
-	phases := [3][2]float64{
-		{s.BulkStartS - 5, s.BulkStartS},
-		{s.BulkStartS, s.BulkEndS},
-		{s.BulkEndS, s.BulkEndS + 5},
-	}
-	var gaps, late [3][]float64
-	bins := make([]float64, int(time.Since(t0)/(250*time.Millisecond))+1)
+	var times [][]float64
 	for _, r := range results {
 		if r.Complete() {
 			s.FastComplete++
@@ -105,42 +99,13 @@ func runHOL(args []string) error {
 			s.FastErrors = append(s.FastErrors, fmt.Sprintf("started %.1f s, %d tokens: %v",
 				r.Start.Sub(t0).Seconds(), len(r.Tokens), r.Err))
 		}
-		// Lateness of token k: its arrival minus the stream's own schedule, first token plus k times
-		// the stream's median gap (the engine's real pace, slightly above the nominal 50 ms), shifted
-		// so the earliest token of the stream has lateness 0. It is the queueing delay of that token.
-		pace := streamPace(r.Tokens, itl.Seconds())
-		base := 1e18
+		at := make([]float64, len(r.Tokens))
 		for k, tk := range r.Tokens {
-			if v := tk.Seconds() - float64(k)*pace; v < base {
-				base = v
-			}
+			at[k] = r.Start.Add(tk).Sub(t0).Seconds()
 		}
-		for k, tk := range r.Tokens {
-			at := r.Start.Add(tk).Sub(t0).Seconds()
-			l := (tk.Seconds() - float64(k)*pace - base) * 1000
-			if b := int(at / 0.25); b >= 0 && b < len(bins) && l > bins[b] {
-				bins[b] = l
-			}
-			if k == 0 {
-				continue
-			}
-			g := float64(tk-r.Tokens[k-1]) / 1e6
-			for p, ph := range phases {
-				if at >= ph[0] && at < ph[1] {
-					gaps[p] = append(gaps[p], g)
-					late[p] = append(late[p], l)
-				}
-			}
-		}
+		times = append(times, at)
 	}
-	ws := []*holWindow{&s.Before, &s.During, &s.After}
-	for p := range ws {
-		*ws[p] = holWindow{FromS: phases[p][0], ToS: phases[p][1], GapMs: summarize(gaps[p]), LatenessMs: summarize(late[p])}
-	}
-	for i := range bins {
-		bins[i] = ms(bins[i])
-	}
-	s.Series = bins
+	s.Before, s.During, s.After, s.Series = holPhases(times, itl.Seconds(), s.BulkStartS, s.BulkEndS, time.Since(t0).Seconds())
 	return writeJSON(*out, s)
 }
 
@@ -161,6 +126,9 @@ func bulkFetch(target, host string, want, readRate int64, max time.Duration) (in
 		return 0, start, time.Now(), err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, start, time.Now(), fmt.Errorf("bulk status %d", resp.StatusCode)
+	}
 	buf := make([]byte, 32*1024)
 	if readRate > 0 && readRate < int64(len(buf)) {
 		buf = buf[:readRate/4+1] // small reads, so a slow reader really reads slowly
@@ -197,15 +165,75 @@ func bulkFetch(target, host string, want, readRate int64, max time.Duration) (in
 	}
 }
 
-// streamPace is the median gap between a stream's tokens in seconds, or nominal for a stream with
-// fewer than two tokens.
-func streamPace(tokens []time.Duration, nominal float64) float64 {
-	if len(tokens) < 2 {
+// holPhases splits the fast streams' gaps and lateness into the 5 s before the bulk transfer, the
+// transfer itself and the 5 s after it. times holds each stream's token arrival times in seconds
+// since the run started.
+//
+//   - A gap belongs to the transfer when it overlaps it: it ends after the transfer starts and
+//     begins before the transfer ends. A stall that ends only after the transfer completed is
+//     therefore still counted as the transfer's.
+//   - A token's lateness is its arrival minus its stream's own schedule (first token plus k times
+//     the stream's median gap, shifted so the stream's earliest token has lateness 0), the queueing
+//     delay of that token. It is attributed by the token's SCHEDULED time, so a token due during
+//     the transfer but delivered after it counts as the transfer's.
+//
+// series is the largest lateness among the tokens arriving in each 250 ms of the run.
+func holPhases(times [][]float64, nominal, bulkStart, bulkEnd, runS float64) (before, during, after holWindow, series []float64) {
+	type span struct{ from, to float64 }
+	ph := [3]span{{bulkStart - 5, bulkStart}, {bulkStart, bulkEnd}, {bulkEnd, bulkEnd + 5}}
+	var gaps, late [3][]float64
+	series = make([]float64, int(runS/0.25)+1)
+	for _, at := range times {
+		pace := streamPace(at, nominal)
+		base := 1e18
+		for k, t := range at {
+			if v := t - float64(k)*pace; v < base {
+				base = v
+			}
+		}
+		for k, t := range at {
+			sched := base + float64(k)*pace
+			l := (t - sched) * 1000
+			if b := int(t / 0.25); b >= 0 && b < len(series) && l > series[b] {
+				series[b] = l
+			}
+			for p := range ph {
+				if sched >= ph[p].from && sched < ph[p].to {
+					late[p] = append(late[p], l)
+				}
+			}
+			if k == 0 {
+				continue
+			}
+			g, from := (t-at[k-1])*1000, at[k-1]
+			switch {
+			case t > bulkStart && from < bulkEnd:
+				gaps[1] = append(gaps[1], g)
+			case t <= bulkStart && from >= ph[0].from:
+				gaps[0] = append(gaps[0], g)
+			case from >= bulkEnd && t < ph[2].to:
+				gaps[2] = append(gaps[2], g)
+			}
+		}
+	}
+	w := func(p int) holWindow {
+		return holWindow{FromS: ph[p].from, ToS: ph[p].to, GapMs: summarize(gaps[p]), LatenessMs: summarize(late[p])}
+	}
+	for i := range series {
+		series[i] = ms(series[i])
+	}
+	return w(0), w(1), w(2), series
+}
+
+// streamPace is the median gap between a stream's token arrival times (seconds), or nominal for a
+// stream with fewer than two tokens.
+func streamPace(at []float64, nominal float64) float64 {
+	if len(at) < 2 {
 		return nominal
 	}
-	gaps := make([]float64, 0, len(tokens)-1)
-	for k := 1; k < len(tokens); k++ {
-		gaps = append(gaps, (tokens[k] - tokens[k-1]).Seconds())
+	gaps := make([]float64, 0, len(at)-1)
+	for k := 1; k < len(at); k++ {
+		gaps = append(gaps, at[k]-at[k-1])
 	}
 	return summarize(gaps).P50
 }

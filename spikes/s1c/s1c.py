@@ -17,8 +17,9 @@ import shutil
 import signal
 import sys
 
-from s1c_lib import HB, PORTS, Env, listeners, load_gate, log, tox_clear, tox_set
-from s1c_stack import (DIAL, TOX_OF_ARM, Meter, Stack, count_lines, note_load, run_bench, wire_bytes)
+from s1c_lib import HB, PORTS, Env, append_row, listeners, load_gate, log, tox_clear, tox_set
+from s1c_analysis import FRONT, PATH, hol_validity, per_ktok
+from s1c_stack import (DIAL, TOX_OF_ARM, Meter, Stack, count_lines, note_load, run_bench, tcp_payload_bytes)
 import s1c_heartbeat
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -28,15 +29,6 @@ NS = (1, 16, 64, 256)
 BW_KBPS = 512          # matrix cap: 512,000 B/s per toxiproxy connection (KB = 1000 B)
 HOL_RATE = 1_000_000   # head-of-line cap: 1,000,000 B/s shared by every connection of the shaper
 LOAD_OK, TRIES = 4.0, 3  # a measurement counts only if the 1-minute load was <= 4.0 at its start and end
-
-
-def append_row(path, row):
-    new = not os.path.exists(path)
-    with open(path, "a", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=list(row))
-        if new:
-            w.writeheader()
-        w.writerow(row)
 
 
 # --- capacity matrix ------------------------------------------------------------------------------
@@ -50,13 +42,13 @@ def matrix_cell(st, env, pas, arm, cond, n, args):
     if cond in ("clean", "lat20", "bw"):
         tox_set(TOX_OF_ARM[arm], cond, BW_KBPS)
     link_port = DIAL.get((arm, "tox"))
-    w0 = wire_bytes(link_port) if link_port else 0
+    w0 = tcp_payload_bytes(link_port) if link_port else 0
     m = Meter(st.roles())
     tag = "p%d_%s_%s_%d" % (pas, arm, cond, n)
     s = run_bench(env, ["load"] + target + ["-n", str(n), "-window", "%ds" % args.window, "-ramp", "3s",
                                             "-max-tokens", "60", "-label", tag], env.p("raw", tag + ".json"))
     res = m.done()
-    w1 = wire_bytes(link_port) if link_port else 0
+    w1 = tcp_payload_bytes(link_port) if link_port else 0
     if cond in ("clean", "lat20", "bw"):
         tox_clear(TOX_OF_ARM[arm])
     toks = s["all_tokens"]
@@ -66,12 +58,19 @@ def matrix_cell(st, env, pas, arm, cond, n, args):
                gap_p99=round(s["gap_ms"]["p99"], 1), gap_max=round(s["gap_ms"]["max"], 1),
                rate_p50=round(s["rate_tok_s_per_stream"]["p50"], 2), rate_p5=round(s["rate_tok_s_per_stream"]["p5"], 2),
                tok_s=round(s["tokens_per_s"], 1), body_B_tok=round(s["body_bytes_per_token"], 1),
-               wire_B_tok=round((w1 - w0) / toks, 1) if link_port and toks else "",
+               tcp_payload_B_tok=round((w1 - w0) / toks, 1) if link_port and toks else "",
                load_start=l0, load_end=note_load("cell %s done" % tag),
                errors=";".join("%s=%d" % kv for kv in s["errors"].items())[:300])
     for k in ("frpc", "frps", "envoy", "ssh", "sshd", "tox", "shaper", "sim"):
         row["cpu_" + k] = res.get("cpu_" + k, "")
         row["rss_" + k] = res.get("rss_" + k, "")
+    # CPU per token over ONE interval: the meter's (the whole load run, ramp and drain included)
+    # and every token that arrived in that run. tok_s above is the steady window only.
+    row["run_s"], row["run_tokens"], row["meter_s"] = round(s["wall_s"], 2), toks, res["meter_s"]
+    front = sum(res.get("cpu_" + k) or 0 for k in FRONT[arm])
+    path = sum(res.get("cpu_" + k) or 0 for k in PATH)
+    row["front_cpu_per_ktok"] = round(per_ktok(front, res["meter_s"], toks), 2) if FRONT[arm] and toks else ""
+    row["path_cpu_per_ktok"] = round(per_ktok(path, res["meter_s"], toks), 2) if FRONT[arm] and toks else ""
     append_row(os.path.join(RESULTS, "matrix.csv"), row)
     return row["load_end"]
 
@@ -185,7 +184,13 @@ def hol_run(st, env, pas, cfg, var):
     row["frpc_logins"] = rec["login to server success"]
     row["frpc_hb_timeouts"] = rec["heartbeat timeout"]
     row["cpu_frpc"], row["cpu_frps"] = res.get("cpu_frpc", ""), res.get("cpu_frps", "")
-    row["load_end"] = note_load("hol %s done" % tag)
+    lo, hi = int(s["bulk_start_s"] / 0.25), int((s["bulk_end_s"] + 5) / 0.25) + 1
+    row["stall_late_max"] = round(max([row["during_late_max"], row["after_late_max"]] + s["max_lateness_ms_per_250ms"][lo:hi]), 1)
+    row["stall_gap_max"] = round(max(row["during_gap_max"], row["after_gap_max"]), 1)
+    row["bulk_err"] = (s["bulk_err"] or "")[:100]
+    row["valid"] = hol_validity(s, nbytes, rrate, gave) or "yes"
+    row["frps_hb_timeouts"] = count_lines(env.p("raw", "%s.frps-frp.log" % tag), ("heartbeat timeout",))["heartbeat timeout"]
+    row["load_end"] = note_load("hol %s done (%s)" % (tag, row["valid"]))
     append_row(os.path.join(RESULTS, "hol.csv"), row)
     return row["load_end"]
 

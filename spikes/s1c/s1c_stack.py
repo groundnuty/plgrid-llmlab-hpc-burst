@@ -139,7 +139,7 @@ class Meter:
         self.stop_ev.set()
         self.th.join()
         dt = time.time() - self.t0
-        out = {}
+        out = {"meter_s": round(dt, 2)}
         for r, ps in self.roles.items():
             c1 = sum(cpu_ticks(p) or 0 for p in ps)
             out["cpu_" + r] = round(100.0 * (c1 - self.c0[r]) / CLK / dt, 1)
@@ -147,9 +147,10 @@ class Meter:
         return out
 
 
-def wire_bytes(port):
+def tcp_payload_bytes(port):
     """bytes_received by the link's listening side, summed over its established sockets (from the
-    kernel's tcp_info via ss): what frpc (or ssh) sent over the link."""
+    kernel's tcp_info via ss): the TCP payload frpc (or ssh) sent over the link. IP and link
+    headers, ACKs and retransmissions are not in it."""
     out = subprocess.run(["ss", "-tinH", "state", "established", "( sport = :%d )" % port],
                          capture_output=True, text=True).stdout
     total = 0

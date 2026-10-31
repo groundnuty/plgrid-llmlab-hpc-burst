@@ -15,8 +15,9 @@ import random
 import signal
 import time
 
-from s1c_lib import HB, PORTS, Env, http_json, load_gate, log, TOX
+from s1c_lib import HB, PORTS, Env, append_row, http_json, load_gate, log, TOX
 from s1c_stack import Stack, note_load
+from s1c_analysis import detection
 
 SCENARIOS = {
     "kill": "SIGKILL frpc; the path stays up, so the kernel's FIN reaches frps",
@@ -25,6 +26,7 @@ SCENARIOS = {
     "disable": "toxiproxy disables the proxy, which closes both sockets (evidence only, default setting)",
 }
 MAX_DETECT, MAX_HEAL = 90.0, 60.0
+PHASE_SPAN = {"default": 30.0, "s1": 10.0, "tight": 5.0}   # each setting's yamux keepalive interval
 
 
 def log_events(path, since):
@@ -67,7 +69,9 @@ def rel(t, t0):
 def one(st, env, setting, scen, rep, rng, results):
     load_gate()
     st.arm_up("tcpmux", via="tox", setting=setting, level="trace")
-    phase = round(rng.uniform(0, 10), 2)   # the keepalive timers' phase relative to the failure
+    # The failure's phase within the keepalive cycle: uniform over the whole cycle of this setting
+    # (the first runs drew 0-10 s, which covers only a third of the default 30 s cycle).
+    phase = round(rng.uniform(0, PHASE_SPAN[setting]), 2)
     time.sleep(phase)
     csvp = env.p("raw", "hb_%s_%s_%d.csv" % (setting, scen, rep))
     st.P.start("probe", [env.b("s1cbench"), "probe", "-target", "127.0.0.1:%d" % PORTS["mux"], "-mux", "inst",
@@ -115,44 +119,41 @@ def one(st, env, setting, scen, rep, rng, results):
     row = summarize(env, setting, scen, rep, phase, t0, t_heal, csvp)
     st.arm_down()
     row["load_end"] = note_load("heartbeat %s/%s/%d: frps gone after %s s" % (setting, scen, rep, row["api_gone_s"]))
-    path = os.path.join(results, "heartbeat.csv")
-    new = not os.path.exists(path)
-    with open(path, "a", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=list(row))
-        if new:
-            w.writeheader()
-        w.writerow(row)
+    append_row(os.path.join(results, "heartbeat.csv"), row)
 
 
 def summarize(env, setting, scen, rep, phase, t0, t_heal, csvp):
-    rows = read_probe(csvp)
-    api = [(a, o) for k, a, _, o, _ in rows if k == "api" and a >= t0]
-    probes = [(a, b, o) for k, a, b, o, _ in rows if k == "probe" and a >= t0]
-    api_gone = next((a for a, o in api if o != "online"), None)
-    refused = next((a for a, _, o in probes if o == "refused"), None)
-    hung = [b - a for a, b, o in probes if o in ("timeout", "closed") and (refused is None or a < refused)]
-    ok_after = [a for a, _, o in probes if o == "ok" and (t_heal is None or a < t_heal)]
+    d = detection(read_probe(csvp), t0, t_heal)
     ev = log_events(env.p("logs", "frps-frp.log"), t0)
     t_gone, _ = first(ev, lambda l: "[inst.engine] proxy closing" in l)
     keys = ("keepalive", "heartbeat", "EOF", "reset", "broken pipe", "i/o timeout", "use of closed", "session shutdown")
     cause = [l.split("] ", 2)[-1][:110] for t, l in ev
              if (t_gone is None or t <= t_gone + 0.05) and any(k in l for k in keys)][:2]
-    row = dict(setting=setting, scenario=scen, rep=rep, phase_s=phase,
-               api_gone_s=rel(api_gone, t0), log_gone_s=rel(t_gone, t0), first_refused_s=rel(refused, t0),
-               hung_n=len(hung), hung_med_s=round(sorted(hung)[len(hung) // 2], 2) if hung else "",
-               hung_max_s=round(max(hung), 2) if hung else "", ok_after_failure=len(ok_after),
-               frps_cause=" | ".join(cause))
     fev = log_events(env.p("logs", "frpc-frp.log"), t0)
     t_fd, fl = first(fev, lambda l: "[W]" in l or "[E]" in l or "keepalive failed" in l)
-    row["frpc_detect_s"] = rel(t_fd, t0) if scen == "freeze" else ""
-    row["frpc_cause"] = fl.split("] ", 2)[-1][:90] if scen == "freeze" else ""
-    if t_heal is not None:
-        online = next((a for k, a, _, o, _ in rows if k == "api" and a >= t_heal and o == "online"), None)
-        ok = next((a for k, a, _, o, _ in rows if k == "probe" and a >= t_heal and o == "ok"), None)
-        row["heal_online_s"], row["heal_probe_ok_s"] = rel(online, t_heal), rel(ok, t_heal)
-    else:
-        row["heal_online_s"] = row["heal_probe_ok_s"] = ""
-    return row
+    return dict(setting=setting, scenario=scen, rep=rep, phase_s=phase, **detection_fields(d, t0, t_heal, t_gone),
+                frps_cause=" | ".join(cause),
+                frpc_detect_s=rel(t_fd, t0) if scen == "freeze" else "",
+                frpc_cause=fl.split("] ", 2)[-1][:90] if scen == "freeze" else "")
+
+
+def detection_fields(d, t0, t_heal, t_gone):
+    """The CSV columns of one run, from detection() and the frps log's 'proxy closing' time. A run
+    without an explicit offline/absent observation is censored; one whose API, log and refusals
+    disagree by more than 0.5 s is flagged."""
+    times = [x for x in (d["api_gone"], t_gone, d["first_refused"]) if x is not None]
+    valid = ""
+    if d["api_gone"] is None:
+        valid = "censored: no offline/absent observation in the admin API"
+    elif max(times) - min(times) > 0.5:
+        valid = "inconsistent: API, log and first refusal differ by %.2f s" % (max(times) - min(times))
+    return dict(api_gone_s=rel(d["api_gone"], t0), api_errors=d["api_errors"], log_gone_s=rel(t_gone, t0),
+                first_refused_s=rel(d["first_refused"], t0), hung_n=d["hung_n"],
+                hung_med_s=round(d["hung_med"], 2) if d["hung_med"] is not None else "",
+                hung_max_s=round(d["hung_max"], 2) if d["hung_max"] is not None else "",
+                hung_timeouts=d["hung_timeouts"], ok_after_failure=d["ok_after"],
+                heal_online_s=rel(d["heal_online"], t_heal) if t_heal else "",
+                heal_probe_ok_s=rel(d["heal_probe_ok"], t_heal) if t_heal else "", valid=valid)
 
 
 def run(args, results):

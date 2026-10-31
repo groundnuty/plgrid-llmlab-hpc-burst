@@ -238,12 +238,61 @@ func TestSlowReaderReadsSlowly(t *testing.T) {
 
 func TestStreamPaceIsTheMedianGap(t *testing.T) {
 	// 10 tokens 51 ms apart, then one 2 s stall: the pace stays 51 ms.
-	var tk []time.Duration
+	var at []float64
 	for k := 0; k < 10; k++ {
-		tk = append(tk, time.Duration(k)*51*time.Millisecond)
+		at = append(at, float64(k)*0.051)
 	}
-	tk = append(tk, tk[9]+2*time.Second)
-	if p := streamPace(tk, 0.05); p < 0.0509 || p > 0.0511 {
+	at = append(at, at[9]+2)
+	if p := streamPace(at, 0.05); p < 0.0509 || p > 0.0511 {
 		t.Fatalf("pace %.4f s, want 0.051", p)
+	}
+}
+
+// A stall that starts during the bulk transfer and ends after it must count as the transfer's.
+// (The first version assigned a gap and a token to the phase in which the token ARRIVED, so this
+// stall landed in "after" and the transfer looked clean: ssh pass 2, results/hol.csv.)
+func TestHOLStallCrossingTheEndCountsAsDuring(t *testing.T) {
+	var at []float64
+	for k := 0; k < 60; k++ { // due every 50 ms from 0 s to 2.95 s
+		due := float64(k) * 0.05
+		if due >= 2.0 {
+			at = append(at, 3.5) // everything due from 2.0 s arrives in one burst at 3.5 s
+		} else {
+			at = append(at, due)
+		}
+	}
+	_, during, after, _ := holPhases([][]float64{at}, 0.05, 1.8, 3.2, 4)
+	if during.GapMs.Max < 1400 || during.LatenessMs.Max < 1400 {
+		t.Fatalf("stall of 1.5 s across the end: during gap max %.0f ms, lateness max %.0f ms, want >= 1400",
+			during.GapMs.Max, during.LatenessMs.Max)
+	}
+	if after.LatenessMs.N != 0 {
+		t.Fatalf("no token was due after the transfer, but %d lateness samples are in after", after.LatenessMs.N)
+	}
+}
+
+func TestHOLNoStallStaysSmall(t *testing.T) {
+	var at []float64
+	for k := 0; k < 100; k++ {
+		at = append(at, float64(k)*0.05)
+	}
+	b, d, a, _ := holPhases([][]float64{at}, 0.05, 1.0, 3.0, 5)
+	for _, w := range []holWindow{b, d, a} {
+		if w.GapMs.Max > 51 || w.LatenessMs.Max > 1 {
+			t.Fatalf("steady stream: window %+v", w)
+		}
+	}
+}
+
+func TestBulkFetchRejectsANonOKReply(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go http.Serve(ln, http.NotFoundHandler())
+	n, _, _, err := bulkFetch(ln.Addr().String(), "", 1000, 0, 2*time.Second)
+	if err == nil || n != 0 {
+		t.Fatalf("a 404 reply passed as a bulk transfer: %d bytes, err %v", n, err)
 	}
 }
