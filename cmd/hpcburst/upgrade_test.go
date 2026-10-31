@@ -45,7 +45,7 @@ func TestUpgrade(t *testing.T) {
 	ctlBin, _ := fakeController(t)
 	// The front runs under the same supervisor (issue #64), here as the fake in its front role: the
 	// upgrade must start it again with the controller.
-	frontBin, _ := fakeFront(t)
+	frontBin, frontDir := fakeFront(t)
 	frontCfg := filepath.Join(filepath.Dir(h.dir), "front.json")
 	if err := os.WriteFile(frontCfg, []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -210,6 +210,28 @@ func TestUpgrade(t *testing.T) {
 			resp.Body.Close()
 			return resp.StatusCode == http.StatusOK
 		})
+		// A failing usage sink makes status say the front is degraded, and nothing else: the
+		// first line stays healthy, status exits 0, no reason is added, and only the front's line
+		// says degraded (@hpc-burst-science-agent, 31 Oct 2026; HBEP-8, Usage records).
+		usageFile := filepath.Join(frontDir, "usage")
+		if err := os.WriteFile(usageFile, []byte("failing"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		sr := cli(t, h.args("status", "--no-gc-probe")...)
+		lines := strings.Split(sr.out, "\n")
+		var frontLine string
+		for _, l := range lines {
+			if strings.HasPrefix(l, "supervised front: ") {
+				frontLine = l
+			}
+		}
+		if sr.code != exitOK || lines[0] != "healthy" || strings.Contains(sr.out, "  - ") || strings.Count(sr.out, "degraded") != 1 ||
+			!strings.HasSuffix(frontLine, ", degraded: usage writes failing") {
+			t.Errorf("status with the front's usage failing (exit %d):\n%s", sr.code, sr.out)
+		}
+		if err := os.Remove(usageFile); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for i, e := range oldRec.Entries {
 		if running(e.Proc.PID) {

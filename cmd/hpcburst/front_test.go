@@ -64,9 +64,11 @@ func removeFrontBinary() {
 	}
 }
 
-// The front's client listener in this test: inside the launcher tests' block 29220-29239 and
-// outside the launcher's own base..base+7. Its dial-home listener takes the ssh default, base+7.
-const frontClientPort = 29230
+// The front's client listener in this test, in issue #64's block 29320-29339 at its one port no
+// other package's tests bind (internal/front takes 29320-29333, cmd/hpcburst-front 29336-29339).
+// The launcher tests' own blocks, 29220-29245, are the launcher's and frps's ports (base+10 is frps's
+// tcpmux port). Its dial-home listener takes the ssh default, base+7.
+const frontClientPort = 29334
 
 type frontEntryRecord struct {
 	Name     string     `json:"name"`
@@ -316,12 +318,14 @@ func TestFrontSupervision(t *testing.T) {
 	// ---- status reports the front ----
 	st, scode := statusOf(t, h)
 	var front *struct {
-		Name      string `json:"name"`
-		Running   bool   `json:"running"`
-		PID       int    `json:"pid"`
-		Restarts  int    `json:"restarts"`
-		HealthzOK *bool  `json:"healthz_ok"`
-		LastExit  *struct {
+		Name       string `json:"name"`
+		Running    bool   `json:"running"`
+		PID        int    `json:"pid"`
+		Restarts   int    `json:"restarts"`
+		HealthzOK  *bool  `json:"healthz_ok"`
+		UsageState string `json:"usage_state"`
+		Degraded   string `json:"degraded"`
+		LastExit   *struct {
 			Detail string `json:"detail"`
 		} `json:"last_exit"`
 	}
@@ -332,6 +336,15 @@ func TestFrontSupervision(t *testing.T) {
 	}
 	if scode != exitOK || front == nil || !front.Running || front.Restarts != 1 || front.HealthzOK == nil || !*front.HealthzOK {
 		t.Errorf("status exited %d and reports the front as %+v (reasons %v)", scode, front, st.Reasons)
+	}
+	// The usage state comes from the real front's /healthz body (HBEP-8: usage.state), so a
+	// launcher that read another member would find none here. Its sink writes, so it is ok.
+	if front != nil && (front.UsageState != "ok" || front.Degraded != "") {
+		t.Errorf("the front's usage state %q, degraded %q: want ok, not degraded", front.UsageState, front.Degraded)
+	}
+	if r := cli(t, h.args("status", "--no-gc-probe")...); r.code != exitOK || strings.Contains(r.out, "degraded") ||
+		!strings.Contains(r.out, "supervised front: running=true") {
+		t.Errorf("status text (exit %d):\n%s", r.code, r.out)
 	}
 	for _, f := range []string{filepath.Join(h.dir, "logs", "front.log"), usagePath} {
 		if strings.Contains(fileOf(f), clientKey) {

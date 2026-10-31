@@ -151,12 +151,14 @@ type controllerStatus struct {
 		PID     int  `json:"pid"`
 	} `json:"supervisor"`
 	Controllers []struct {
-		Name      string `json:"name"`
-		Running   bool   `json:"running"`
-		PID       int    `json:"pid"`
-		Restarts  int    `json:"restarts"`
-		HealthzOK *bool  `json:"healthz_ok"`
-		LastExit  *struct {
+		Name       string `json:"name"`
+		Running    bool   `json:"running"`
+		PID        int    `json:"pid"`
+		Restarts   int    `json:"restarts"`
+		HealthzOK  *bool  `json:"healthz_ok"`
+		UsageState string `json:"usage_state"`
+		Degraded   string `json:"degraded"`
+		LastExit   *struct {
 			Detail string `json:"detail"`
 		} `json:"last_exit"`
 	} `json:"controllers"`
