@@ -94,7 +94,7 @@ func TestHealthErrorsOnlyAnswersEveryRequestWithAServerError(t *testing.T) {
 	eq(t, "samples", len(samples), 3)
 	for k, h := range samples {
 		eq(t, fmt.Sprintf("sample %d", k), withoutTime(h), agentapi.Health{
-			ProbeOK: true, KVCacheUsage: 0.1, ResponsesByStatus: map[string]int64{"500": int64(10 * (k + 1))},
+			ProbeOK: true, KVCacheUsage: 0.1, ResponsesByStatus: map[string]int64{"5xx": int64(10 * (k + 1))},
 		})
 	}
 }
@@ -113,8 +113,8 @@ func TestEachHealthDoubleDiffersFromTheHealthyDefaultOnTheSignalItTrips(t *testi
 		t.Errorf("failing probes: %+v", failing)
 	}
 	errs := fake.HealthErrorsOnly()(now, fake.Process{Worker: "worker-0", PID: 4000})
-	if !errs.ProbeOK || errs.ResponsesByStatus["500"] == 0 || len(errs.ResponsesByStatus) != 1 {
-		t.Errorf("errors only: want a passing probe and 500s alone, got %+v", errs)
+	if !errs.ProbeOK || agentapi.ServerErrors(errs.ResponsesByStatus) == 0 || len(errs.ResponsesByStatus) != 1 {
+		t.Errorf("errors only: want a passing probe and server errors alone, got %+v", errs)
 	}
 }
 
@@ -143,7 +143,7 @@ func TestHealthCountersStartAgainForARestartedWorkerProcess(t *testing.T) {
 			name:   "HealthErrorsOnly",
 			engine: fake.HealthErrorsOnly,
 			field:  func(h agentapi.Health) any { return h.ResponsesByStatus },
-			before: map[string]int64{"500": 30}, first: map[string]int64{"500": 10}, second: map[string]int64{"500": 20},
+			before: map[string]int64{"5xx": 30}, first: map[string]int64{"5xx": 10}, second: map[string]int64{"5xx": 20},
 		},
 	}
 	for _, c := range cases {

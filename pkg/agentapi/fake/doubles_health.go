@@ -63,15 +63,16 @@ func HealthFailingProbes() func(time.Time, Process) agentapi.Health {
 }
 
 // HealthErrorsOnly returns an engine that answers every request with a server
-// error: its probe passes, and the responses by status are {"500": 10k} at the
-// k-th sample, with no success among them. The counter is kept per process: a
+// error: its probe passes, and the responses by status are {"5xx": 10k} at the
+// k-th sample, with no success among them. The key is a status class, as vLLM
+// reports it (agentapi.Health.ResponsesByStatus). The counter is kept per process: a
 // restarted worker starts again at k = 1. Give each Agent its own engine.
 func HealthErrorsOnly() func(time.Time, Process) agentapi.Health {
 	samples := perProcessCount{}
 	return func(now time.Time, p Process) agentapi.Health {
 		return agentapi.Health{
 			Time: now, ProbeOK: true, KVCacheUsage: 0.1,
-			ResponsesByStatus: map[string]int64{"500": 10 * samples.next(p)},
+			ResponsesByStatus: map[string]int64{"5xx": 10 * samples.next(p)},
 		}
 	}
 }
