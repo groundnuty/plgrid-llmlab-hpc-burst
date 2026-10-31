@@ -74,6 +74,10 @@ func TestParseManagedCredentialsRefuses(t *testing.T) {
 		{"a query", `{"key":"k1","baseURL":"https://g.example/v1?a=b"}`, "query"},
 		{"a fragment", `{"key":"k1","baseURL":"https://g.example/v1#x"}`, "fragment"},
 		{"a trailing slash", `{"key":"k1","baseURL":"https://g.example/v1/"}`, "ends with '/'"},
+		{"no version segment", `{"key":"k1","baseURL":"https://g.example"}`, "does not end with the API version segment /v1"},
+		{"another version segment", `{"key":"k1","baseURL":"https://g.example/v2"}`, "/v1"},
+		{"v1 only as the end of a longer segment", `{"key":"k1","baseURL":"https://g.example/apiv1"}`, "/v1"},
+		{"v1 in an escaped slash", `{"key":"k1","baseURL":"https://g.example/api%2Fv1"}`, "/v1"},
 		{"a date without a time", `{"key":"k1","baseURL":"https://g.example/v1","expiry":"2027-01-31"}`, "RFC 3339"},
 		{"two objects", `{"key":"k1","baseURL":"https://g.example/v1"}{}`, "data after"},
 		{"not JSON", `key=k1`, "want one JSON object"},
@@ -89,7 +93,7 @@ func TestParseManagedCredentialsRefuses(t *testing.T) {
 			}
 		})
 	}
-	for _, ok := range []string{"http://127.0.0.1:29340/v1", "http://localhost:29340/v1", "http://[::1]:29340/v1", "https://gateway.example", "https://gateway.example:8443/api/v1"} {
+	for _, ok := range []string{"http://127.0.0.1:29340/v1", "http://localhost:29340/v1", "http://[::1]:29340/v1", "https://gateway.example/v1", "https://gateway.example:8443/api/v1"} {
 		if _, err := ParseManagedCredentials([]byte(`{"key":"k1","baseURL":"` + ok + `"}`)); err != nil {
 			t.Errorf("baseURL %s refused: %v", ok, err)
 		}
@@ -170,5 +174,40 @@ func TestExpiringIsADayBeforeTheExpiry(t *testing.T) {
 	c.Expiry = nil
 	if c.Expiring(exp) {
 		t.Error("a key with no known expiry is never expiring")
+	}
+}
+
+// No refusal echoes a supplied value: a key put into baseURL's query, pasted
+// as baseURL, or pasted as a member name never reaches the error, which the
+// Provider's controller copies into a condition and an event (from the review
+// of PR #85).
+func TestParseManagedCredentialsEchoesNoSuppliedValue(t *testing.T) {
+	const canary = "sk-canary-7f3a9c0d1e2b"
+	for _, tc := range []struct{ name, body, want string }{
+		{"a key in baseURL's query", `{"key":"k1","baseURL":"https://g.example/v1?api_key=` + canary + `"}`, "query"},
+		{"a key in baseURL's fragment", `{"key":"k1","baseURL":"https://g.example/v1#` + canary + `"}`, "fragment"},
+		{"a key pasted as baseURL", `{"key":"k1","baseURL":"` + canary + `"}`, "want https"},
+		{"a key as baseURL's host over http", `{"key":"k1","baseURL":"http://` + canary + `/v1"}`, "want https"},
+		{"a key as baseURL's path", `{"key":"k1","baseURL":"https://g.example/` + canary + `"}`, "/v1"},
+		{"a key with a trailing slash", `{"key":"k1","baseURL":"https://g.example/` + canary + `/"}`, "ends with '/'"},
+		{"a key as baseURL with no host", `{"key":"k1","baseURL":"https:///` + canary + `"}`, "no host"},
+		{"a key as an opaque baseURL", `{"key":"k1","baseURL":"https:` + canary + `"}`, "baseURL"},
+		{"a key that does not parse as a URL", `{"key":"k1","baseURL":"https://g.example/%zz` + canary + `"}`, "not a URL"},
+		{"a key as a member name", `{"key":"k1","baseURL":"https://g.example/v1","` + canary + `":1}`, "unknown member (name not shown)"},
+		{"a key as a repeated member name", `{"` + canary + `":1,"` + canary + `":2}`, "(name not shown)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseManagedCredentials([]byte(tc.body))
+			if err == nil || !errors.Is(err, ErrCredentials) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want ErrCredentials mentioning %q", err, tc.want)
+			}
+			if strings.Contains(err.Error(), canary) || strings.Contains(err.Error(), "7f3a9c") {
+				t.Fatalf("the error %q holds the supplied value", err)
+			}
+		})
+	}
+	// A short, name-like member is still named, so a misspelling is plain.
+	if _, err := ParseManagedCredentials([]byte(`{"key":"k1","baseURL":"https://g.example/v1","expires":"x"}`)); err == nil || !strings.Contains(err.Error(), `unknown member "expires"`) {
+		t.Fatalf("err = %v, want it to name expires", err)
 	}
 }

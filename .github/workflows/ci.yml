@@ -5,14 +5,16 @@
 #   tidy         go mod tidy -diff, in a job of its own that restores no module cache
 #   crd          hack/check.sh: generated-CRD drift, envtest with the pinned binaries, sha256 checks
 #   launcher-k3s hack/test-launcher.sh against the pinned k3s binaries, run as an ordinary user
-#   licence-modules, licences  the licence check of HBEP-15 (not required checks yet; see docs/development.md)
+#   licence-modules, licences  the licence check of HBEP-15; disabled with if: false since 31 Oct 2026
+#                (the owner's decision; see docs/development.md)
 #
 # The workflow reads no secret and pushes nothing. Every action is pinned by commit SHA.
 #
 # crd and launcher-k3s call scripts from hack/. A missing script fails the job: a job that
 # skipped for lack of its script would turn a rename into a check that quietly stopped running.
-# The one skip that remains is explicit: launcher-k3s leaves out the store-full tests on a runner
-# without FUSE, and says so in the job summary and in a check annotation.
+# Two skips remain, both explicit: launcher-k3s leaves out the store-full tests on a runner
+# without FUSE, and says so in the job summary and in a check annotation; and the two licence jobs
+# are disabled with if: false.
 
 name: ci
 
@@ -333,6 +335,10 @@ jobs:
   # allowlist and the known-zero list), never in spikes/. The check is strict: no exemption.
   licence-modules:
     name: licence-modules
+    # Disabled: the owner dropped licence checking on 31 Oct 2026 ("I don't care about those
+    # licenses, so feel free to disable this job for now"). hack/ and its fixtures are kept;
+    # delete the if: line here and in licences to switch the check back on.
+    if: false
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -382,6 +388,8 @@ jobs:
   licences:
     name: licences (${{ matrix.module }})
     needs: licence-modules
+    # Disabled with licence-modules above (the owner's decision, 31 Oct 2026).
+    if: false
     runs-on: ubuntu-24.04
     # With no cache restored, the root module runs go-licenses four times over the Kubernetes
     # libraries (plain, with tests, and the negative control).
