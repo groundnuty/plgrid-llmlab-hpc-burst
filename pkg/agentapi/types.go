@@ -494,15 +494,35 @@ type WarmUpResult struct {
 	Done bool `json:"done"`
 }
 
-// WarmUpRound is one round's requests.
+// WarmUpRound is one round's requests. The controller reads them as
+// RequestTiming says: a request with an Error counts for nothing. Settling
+// compares, per Shape, the mean Total of the round's requests without an Error
+// with the round before; a Shape that is more than 10% slower than in the round
+// before, or that has no successful request in this round, means not settled.
+// The Instance's throughput is the mean time per output token
+// (RequestTiming.TimePerOutputToken) and the mean time to first token over the
+// requests of the last round's ShapeConcurrent that have them; it is not
+// recorded when none has.
 type WarmUpRound struct {
 	// Round counts from 1.
 	Round    int32           `json:"round"`
 	Requests []RequestTiming `json:"requests"`
 }
 
-// RequestTiming is one warm-up request's timing. The controller derives the
-// time per output token as (Total - TimeToFirstToken) / (OutputTokens - 1).
+// RequestTiming is one warm-up request's timing. What it counts for depends on
+// the request:
+//
+//   - a request with an Error counts for nothing, whatever else it holds;
+//   - TimeToFirstToken counts for a request with OutputTokens of 1 or more;
+//   - the time per output token, (Total - TimeToFirstToken) / (OutputTokens - 1),
+//     counts only for a request with OutputTokens of 2 or more
+//     (TimePerOutputToken); a one-token request has no token interval, and the
+//     formula would divide by zero;
+//   - Total counts for settling for every request without an Error (see
+//     WarmUpRound).
+//
+// The workload schema admits an output of one token, so a request with fewer
+// than two output tokens is normal, not a fault.
 type RequestTiming struct {
 	Shape            Shape    `json:"shape"`
 	TimeToFirstToken Duration `json:"timeToFirstToken"`
