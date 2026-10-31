@@ -392,8 +392,18 @@ func TestConformance(t *testing.T) {
 	if o.StartTime == nil || o.HardEnd == nil || o.HardEnd.Sub(o.StartTime.Time) != 5*time.Minute {
 		t.Errorf("start %v, hard end %v: want a hard end 5 min after the start", o.StartTime, o.HardEnd)
 	}
-	if o.HardEnd != nil && o.HardEnd.Location() != time.UTC {
-		t.Errorf("the hard end is not in UTC")
+	// The hard end is the reply's epoch value as a UTC instant; the status
+	// keeps the same instant (metav1.Time reads back in the local zone, so the
+	// instants are compared, not the zones).
+	if j, found, err := w.batch.Observe(ctx, a.Annotations[v1alpha1.AnnotationJobID]); err != nil || !found || j.HardEnd == nil {
+		t.Errorf("observe the running job: found %v, err %v", found, err)
+	} else {
+		if j.HardEnd.Location() != time.UTC || j.StartTime.Location() != time.UTC {
+			t.Error("the parsed times are not in UTC")
+		}
+		if o.HardEnd == nil || !o.HardEnd.Time.Equal(*j.HardEnd) {
+			t.Errorf("the status's hard end %v is not the parsed %v", o.HardEnd, j.HardEnd)
+		}
 	}
 	if o.SubmitTime == nil || o.SubmitTime.Before(&metav1.Time{Time: start.Add(-time.Minute)}) || o.SubmitTime.After(time.Now().Add(time.Minute)) {
 		t.Errorf("submit time %v is not within this run (clock skew or a wrong zone)", o.SubmitTime)
