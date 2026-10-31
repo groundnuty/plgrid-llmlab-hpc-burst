@@ -29,8 +29,9 @@ type Recorder interface {
 	Event(obj runtime.Object, warning bool, typ, code, message string)
 }
 
-// KubeRecorder emits events.k8s.io Events with reason "<type>/<code>" and the
-// type as the action, as the lifecycle controller does (#61).
+// KubeRecorder emits events.k8s.io Events whose reason is the CamelCase code
+// alone and whose action is HBEP-8's type (@hpc-burst-science-agent's HBEP-8
+// draft, 31 Oct 2026; it replaces the "<type>/<code>" reason).
 type KubeRecorder struct{ R events.EventRecorder }
 
 // Event implements Recorder.
@@ -39,7 +40,7 @@ func (k KubeRecorder) Event(obj runtime.Object, warning bool, typ, code, message
 	if warning {
 		et = corev1.EventTypeWarning
 	}
-	k.R.Eventf(obj, nil, et, typ+"/"+code, typ, "%s", message)
+	k.R.Eventf(obj, nil, et, code, typ, "%s", message)
 }
 
 // NewKubeRecorder starts an events broadcaster on the clientset and returns
