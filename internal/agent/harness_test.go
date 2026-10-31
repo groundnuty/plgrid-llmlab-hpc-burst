@@ -24,6 +24,11 @@ import (
 // which the real agent starts as processes (package enginedouble).
 func TestMain(m *testing.M) {
 	enginedouble.Dispatch()
+	// No process a test starts inherits a descriptor this binary got, such
+	// as a build lock's (an orphan would hold it).
+	if err := agent.CloseInheritedFDs(); err != nil {
+		panic(err)
+	}
 	os.Exit(m.Run())
 }
 

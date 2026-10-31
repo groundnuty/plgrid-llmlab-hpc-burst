@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/enginedouble"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agentserver"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
@@ -39,6 +40,11 @@ func TestMain(m *testing.M) {
 	// The fakes first: the agent's children (apptainer, ssh) inherit its role
 	// variable but are told apart by their program name.
 	enginedouble.Dispatch()
+	// No process a test starts inherits a descriptor this binary got, such
+	// as a build lock's (an orphan would hold it).
+	if err := agent.CloseInheritedFDs(); err != nil {
+		panic(err)
+	}
 	if os.Getenv("HB_TEST_ROLE") == roleAgent {
 		os.Exit(run(os.Args[1:], os.Getenv, os.Stderr))
 	}
@@ -168,6 +174,7 @@ func writeCert(t *testing.T, host agentapi.Host) string {
 type job struct {
 	root, allocDir, stagingDir, bin, appLog, sshLog, engLog string
 	extraEnv                                                []string
+	ssh                                                     bool // agent.json's mode is ssh
 }
 
 func newJob(t *testing.T, root string, cfg agentapi.AgentConfig) job {
@@ -189,6 +196,7 @@ func newJob(t *testing.T, root string, cfg agentapi.AgentConfig) job {
 	if err := enginedouble.Install(j.bin); err != nil {
 		t.Fatal(err)
 	}
+	j.ssh = cfg.Mode == agentapi.DialHomeSSH
 	cfg.StagingDir = j.stagingDir
 	cfg.DialHomeDir = filepath.Join(root, "dial-home")
 	b, err := cfg.Encode()
@@ -234,13 +242,112 @@ func (j job) start(t *testing.T) (*exec.Cmd, *bytes.Buffer) {
 	t.Cleanup(func() {
 		if cmd.ProcessState == nil {
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			_ = cmd.Wait()
+			done := make(chan struct{})
+			go func() { _ = cmd.Wait(); close(done) }()
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+			}
+		}
+		// Whatever the outcome, nothing the job started may outlive the test:
+		// ssh, Apptainer and the engine all name the job's root in their
+		// arguments. A failed or timed-out run is cleaned up here too.
+		if left := killUnder(j.root); len(left) > 0 && !t.Failed() {
+			t.Errorf("processes left behind after the test: %q", left)
 		}
 		if t.Failed() {
 			t.Logf("agent output:\n%s", out.String())
 		}
 	})
 	return cmd, &out
+}
+
+// killUnder kills every process, other than this one, whose command line
+// names root, waits until each is gone, and returns their command lines.
+func killUnder(root string) []string {
+	var left []string
+	entries, _ := os.ReadDir("/proc")
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil || pid == os.Getpid() {
+			continue
+		}
+		b, err := os.ReadFile("/proc/" + e.Name() + "/cmdline")
+		if err != nil || !strings.Contains(string(b), root) {
+			continue
+		}
+		st, err := procStart(pid)
+		if err != nil {
+			continue
+		}
+		id := agent.ProcessID{PID: pid, StartTime: st}
+		if !id.Alive() {
+			continue
+		}
+		left = append(left, strings.ReplaceAll(string(b), "\x00", " "))
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+		deadline := time.Now().Add(5 * time.Second)
+		for id.Alive() && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	return left
+}
+
+// procStart reads a process's start time, the 22nd field of /proc/<pid>/stat.
+func procStart(pid int) (uint64, error) {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0, err
+	}
+	s := string(b)
+	i := strings.LastIndexByte(s, ')')
+	f := strings.Fields(s[i+1:])
+	if i < 0 || len(f) < 20 {
+		return 0, fmt.Errorf("short stat")
+	}
+	return strconv.ParseUint(f[19], 10, 64)
+}
+
+// sshChildren returns the ssh processes the agent logged starting, by PID and
+// start time.
+func sshChildren(t *testing.T, out string) []agent.ProcessID {
+	t.Helper()
+	var ids []agent.ProcessID
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.Contains(line, `msg="ssh forward started"`) {
+			continue
+		}
+		var id agent.ProcessID
+		for _, f := range strings.Fields(line) {
+			if v, ok := strings.CutPrefix(f, "pid="); ok {
+				id.PID, _ = strconv.Atoi(v)
+			}
+			if v, ok := strings.CutPrefix(f, "startTime="); ok {
+				id.StartTime, _ = strconv.ParseUint(v, 10, 64)
+			}
+		}
+		if id.PID == 0 || id.StartTime == 0 {
+			t.Fatalf("an ssh start line without its PID and start time: %s", line)
+		}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// assertSSHReaped checks that no ssh process the agent started outlives it,
+// found by the recorded PID and start time, never by name.
+func assertSSHReaped(t *testing.T, out string, wantAtLeast int) {
+	t.Helper()
+	ids := sshChildren(t, out)
+	if len(ids) < wantAtLeast {
+		t.Fatalf("the agent logged %d ssh starts, want at least %d", len(ids), wantAtLeast)
+	}
+	for _, id := range ids {
+		if id.Alive() {
+			t.Errorf("ssh %+v, started by the agent, still runs after the agent exited", id)
+		}
+	}
 }
 
 func runState(engLog string, checks *agentapi.Checks) agentapi.DesiredState {
@@ -328,6 +435,9 @@ func exercise(t *testing.T, ep endpoint, j job) {
 	last, _ := ep.backend.LastReport(eUID)
 	if w := last.Instance.Workers[0]; w.Phase != agentapi.PartStopped {
 		t.Errorf("last report's worker %+v, want stopped", w)
+	}
+	if j.ssh {
+		assertSSHReaped(t, out.String(), 1)
 	}
 	// Neither the credential nor the Instance's key reaches the agent's log.
 	for name, secret := range map[string]string{"the credential": testCredential, "the Instance key": r.Instance.Key} {
@@ -450,7 +560,7 @@ func TestAgentSSHForwardReconnects(t *testing.T) {
 		CertSPKISHA256: ep.pin,
 	})
 	j.extraEnv = []string{"HB_FAKE_SSH_DIE_AFTER=3s"}
-	cmd, _ := j.start(t)
+	cmd, out := j.start(t)
 	ep.backend.SetDesired(eUID, runState(j.engLog, nil))
 	first := waitReport(t, ep.backend, "worker running", func(r agentapi.Report) bool {
 		return r.Instance != nil && len(r.Instance.Workers) == 1 && r.Instance.Workers[0].Phase == agentapi.PartRunning
@@ -480,8 +590,16 @@ func TestAgentSSHForwardReconnects(t *testing.T) {
 	if execs != 1 {
 		t.Fatalf("%d worker starts across the reconnects, want 1", execs)
 	}
+	// A job end: SIGTERM to the agent, which stops and reaps its ssh.
 	_ = syscall.Kill(cmd.Process.Pid, syscall.SIGTERM)
-	_ = cmd.Wait()
+	waitErr := make(chan error, 1)
+	go func() { waitErr <- cmd.Wait() }()
+	select {
+	case <-waitErr:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the agent did not exit on SIGTERM")
+	}
+	assertSSHReaped(t, out.String(), 2)
 }
 
 func readFile(path string) string {

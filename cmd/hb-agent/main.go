@@ -62,6 +62,9 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		return 2
 	}
 	log := slog.New(slog.NewTextHandler(stderr, nil))
+	if err := agent.CloseInheritedFDs(); err != nil {
+		log.Warn("cannot mark inherited file descriptors close-on-exec", "err", err)
+	}
 	job, err := agent.LoadJob(fs.Arg(0), getenv)
 	if err != nil {
 		log.Error("cannot start", "err", err)
@@ -116,10 +119,22 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			return 1
 		}
 		fwd := agent.SSHForward{SSH: sshBin, Socket: filepath.Join(runDir, "agent.sock"), Config: job.Config, Log: stderr, Logger: log}
+		// The forward outlives the agent's loop, which sends its last report
+		// through it. It is stopped before this function returns, on every
+		// path (a stop, a signal, an error): its ssh process gets TERM, then
+		// KILL, and is reaped (HBEP-6, teardown). os.Exit would otherwise leave
+		// ssh behind, an orphan holding the job's output open.
+		fwdCtx, cancelFwd := context.WithCancel(context.Background())
+		fwdDone := make(chan struct{})
 		go func() {
-			if err := fwd.Run(ctx); err != nil {
+			defer close(fwdDone)
+			if err := fwd.Run(fwdCtx); err != nil {
 				log.Error("ssh forward", "err", err)
 			}
+		}()
+		defer func() {
+			cancelFwd()
+			<-fwdDone
 		}()
 		co.Dial = fwd.Dial
 	}

@@ -73,6 +73,12 @@ func (c *Client) Sample(ctx context.Context) (agentapi.Health, error) {
 			h.KVCacheUsage = math.Max(h.KVCacheUsage, s.value)
 		}
 	}
+	// The status label is taken verbatim (agentapi.Health.ResponsesByStatus).
+	// vLLM v0.32.0 groups it into classes: serve/instrumentator/metrics.py,
+	// lines 64-74, builds its Instrumentator without
+	// should_group_status_codes, whose default is True
+	// (prometheus-fastapi-instrumentator, instrumentation.py, line 39), so
+	// the keys are "2xx", "4xx" and "5xx".
 	for _, s := range m[metricHTTP] {
 		st := s.labels["status"]
 		if st == "" {
@@ -112,7 +118,17 @@ func kvCapacity(cfg map[string]string) int64 {
 }
 
 // cacheSettings maps cache_config_info's labels to the engine flags they
-// resolve, by flag name (HBEP-3's table). Only these are reported from it.
+// resolve, by flag name (HBEP-3's table). Only these are reported from it,
+// and each value verbatim, as the engine gives it: the controller compares a
+// declared input such as kv-cache-dtype verbatim (`@hpc-burst-science-agent`,
+// 31 Oct 2026). In vLLM v0.32.0 the labels are CacheConfig's fields as text:
+// vllm/v1/metrics/loggers.py, lines 1114-1136 and 1355, sets
+// vllm:cache_config_info from CacheConfig.metrics_info(), which is
+// {key: str(value)} over the config's fields (vllm/config/cache.py, lines
+// 322-325). cache_dtype keeps the string it was given, since its validator
+// returns it unchanged (cache.py, lines 350-368), and is "auto" when the
+// launch omits --kv-cache-dtype (cache.py, line 122). So the engine, not the
+// agent, supplies that default, and the agent reports "auto" for it.
 var cacheSettings = map[string]string{
 	"cache_dtype":            "kv-cache-dtype",
 	"block_size":             "block-size",

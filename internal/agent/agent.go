@@ -163,6 +163,10 @@ func New(o Options) (*Agent, error) {
 // error. Losing the endpoint changes nothing the agent runs: it keeps its
 // parts and its last desired state, and retries (HBEP-7, Unreachable).
 func (a *Agent) Run(ctx context.Context) error {
+	// No process the agent starts inherits a descriptor it was started with.
+	if err := CloseInheritedFDs(); err != nil {
+		a.log.Warn("cannot mark inherited file descriptors close-on-exec", "err", err)
+	}
 	fwd, err := NewForwarder(a.o.RunDir + "/serve.sock")
 	if err != nil {
 		return fmt.Errorf("agent: serving socket: %w", err)

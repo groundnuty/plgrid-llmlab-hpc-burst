@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -40,6 +41,55 @@ type SSHForward struct {
 	// MinBackoff and MaxBackoff bound the wait between attempts (defaults 1 s
 	// and 30 s).
 	MinBackoff, MaxBackoff time.Duration
+	// StopGrace is how long a stopped ssh has after TERM before KILL
+	// (default 5 s).
+	StopGrace time.Duration
+	// OnStart, when set, is told each ssh process the loop starts.
+	OnStart func(ProcessID)
+}
+
+// ProcessID identifies one process across PID reuse: its PID and its start
+// time, the 22nd field of /proc/<pid>/stat, in clock ticks since boot.
+type ProcessID struct {
+	PID       int
+	StartTime uint64
+}
+
+// procStartTime reads a process's start time from /proc/<pid>/stat.
+func procStartTime(pid int) (uint64, error) {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return 0, err
+	}
+	// Fields after the command name, which is in parentheses and may hold
+	// spaces: state is field 3, start time field 22.
+	s := string(b)
+	i := strings.LastIndexByte(s, ')')
+	if i < 0 {
+		return 0, fmt.Errorf("/proc/%d/stat: no command name", pid)
+	}
+	f := strings.Fields(s[i+1:])
+	if len(f) < 20 {
+		return 0, fmt.Errorf("/proc/%d/stat: %d fields after the name", pid, len(f))
+	}
+	return strconv.ParseUint(f[19], 10, 64)
+}
+
+// Alive reports whether the process with this PID and start time still runs:
+// a process with the PID and another start time is another process, and a
+// zombie runs nothing.
+func (p ProcessID) Alive() bool {
+	st, err := procStartTime(p.PID)
+	if err != nil || st != p.StartTime {
+		return false
+	}
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(p.PID) + "/stat")
+	if err != nil {
+		return false
+	}
+	s := string(b)
+	i := strings.LastIndexByte(s, ')')
+	return i >= 0 && i+2 < len(s) && s[i+2] != 'Z'
 }
 
 // Args returns ssh's argument vector, without the program.
@@ -89,6 +139,11 @@ func (s SSHForward) Run(ctx context.Context) error {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	// No descriptor the agent inherited reaches ssh (HBEP-6, teardown: an
+	// orphan must hold nothing of its parent's).
+	if err := CloseInheritedFDs(); err != nil {
+		logger.Warn("cannot mark inherited file descriptors close-on-exec", "err", err)
+	}
 	backoff := minB
 	for {
 		started := time.Now()
@@ -109,7 +164,16 @@ func (s SSHForward) Run(ctx context.Context) error {
 	}
 }
 
+// once runs one ssh process until it exits or ctx ends. It is recorded by PID
+// and start time, and always reaped: on ctx's end it gets TERM to its process
+// group, then KILL after StopGrace, and once returns only after it has
+// exited. The process group is signalled only while the process is
+// unreaped, so its PID cannot have been reused.
 func (s SSHForward) once(ctx context.Context, args []string) error {
+	grace := s.StopGrace
+	if grace <= 0 {
+		grace = 5 * time.Second
+	}
 	cmd := exec.Command(s.SSH, args...)
 	cmd.Stdout = s.Log
 	cmd.Stderr = s.Log
@@ -117,20 +181,33 @@ func (s SSHForward) once(ctx context.Context, args []string) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	id := ProcessID{PID: cmd.Process.Pid}
+	if st, err := procStartTime(id.PID); err == nil {
+		id.StartTime = st
+	}
+	if s.Logger != nil {
+		s.Logger.Info("ssh forward started", "pid", id.PID, "startTime", id.StartTime)
+	}
+	if s.OnStart != nil {
+		s.OnStart(id)
+	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	select {
 	case err := <-done:
 		return err
 	case <-ctx.Done():
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+		_ = syscall.Kill(-id.PID, syscall.SIGTERM)
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		case <-time.After(grace):
+			_ = syscall.Kill(-id.PID, syscall.SIGKILL)
 			<-done
 		}
 		_ = os.Remove(s.Socket)
+		if s.Logger != nil {
+			s.Logger.Info("ssh forward stopped", "pid", id.PID, "startTime", id.StartTime)
+		}
 		return ctx.Err()
 	}
 }
