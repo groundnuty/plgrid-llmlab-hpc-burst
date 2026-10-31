@@ -65,13 +65,22 @@ const (
 	BlockSize = 1000
 )
 
+// logFile is the part of *os.File the sink uses. The tests put a file that
+// fails in its place.
+type logFile interface {
+	Write([]byte) (int, error)
+	Sync() error
+	Truncate(int64) error
+	Close() error
+}
+
 // Sink appends records to <dir>/usage.jsonl. Write assigns the counter and
 // queues the record; one goroutine writes what is queued in one write and
 // one fsync, so records are batched only when they arrive faster than the
 // disk syncs (HBEP-5, Sink in alpha).
 type Sink struct {
 	dir string
-	log *os.File
+	log logFile
 
 	mu       sync.Mutex
 	next     uint64 // the next counter to use
@@ -80,12 +89,18 @@ type Sink struct {
 	wake     chan struct{}
 	closed   bool
 	done     chan struct{}
-	err      error // the first write or sync error
+	err      error // the first write or sync error; it is never cleared
 }
 
 // Open opens the sink in dir, creating it (mode 0700). The first counter is
 // the persisted block end plus one, so a crash shows as a gap (HBEP-8).
 func Open(dir string) (*Sink, error) {
+	return open(dir, func(f *os.File) logFile { return f })
+}
+
+// open is Open with the log file passed through wrap, which is how the tests
+// make the disk fail.
+func open(dir string, wrap func(*os.File) logFile) (*Sink, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
@@ -97,13 +112,16 @@ func Open(dir string) (*Sink, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Sink{dir: dir, log: f, next: end + 1, blockEnd: end, wake: make(chan struct{}, 1), done: make(chan struct{})}
+	s := &Sink{dir: dir, log: wrap(f), next: end + 1, blockEnd: end, wake: make(chan struct{}, 1), done: make(chan struct{})}
 	go s.run()
 	return s, nil
 }
 
 // Write assigns r its counter and queues it. It returns the counter, or an
 // error when the counter block could not be persisted or the sink is closed.
+// Once a write or sync of the log has failed, it returns that error with the
+// counter: the failure stays reported, and the record is still queued, to be
+// written if the disk has recovered.
 func (s *Sink) Write(r Record) (uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -123,6 +141,9 @@ func (s *Sink) Write(r Record) (uint64, error) {
 	select {
 	case s.wake <- struct{}{}:
 	default:
+	}
+	if s.err != nil {
+		return r.Counter, fmt.Errorf("usage: the log failed earlier: %w", s.err)
 	}
 	return r.Counter, nil
 }
