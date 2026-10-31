@@ -72,7 +72,10 @@ func TestSetupInARealManager(t *testing.T) {
 		PlatformProfileRef: v1alpha1.ObjectReference{Name: pp.Name}, Account: "example-account",
 		AllowedPartitions: []string{"example-gpu"}, CredentialsRef: &v1alpha1.CredentialsReference{File: creds},
 	}}
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "setup-allocs"}}
+	// A generated name: envtest has no namespace controller, so a namespace is
+	// never removed, and a fixed name made a second run (go test -count=2) fail
+	// with AlreadyExists. Create sets ns.Name; the rest of the test reads it.
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "setup-allocs-"}}
 	for _, o := range []client.Object{pp, prov, ns} {
 		if err := c.Create(ctx, o); err != nil {
 			t.Fatal(err)
