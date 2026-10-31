@@ -103,7 +103,7 @@ func decodeManagedCredentials(b []byte) (ManagedCredentials, error) {
 		}
 		name, _ := tok.(string)
 		if seen[name] {
-			return c, credErr("member %q appears twice", name)
+			return c, credErr("member %s appears twice", memberName(name))
 		}
 		seen[name] = true
 		switch name {
@@ -114,10 +114,10 @@ func decodeManagedCredentials(b []byte) (ManagedCredentials, error) {
 		case "expiry":
 			err = dec.Decode(&c.Expiry)
 		default:
-			return c, credErr("unknown member %q: want key, baseURL and expiry", name)
+			return c, credErr("unknown member %s: want key, baseURL and expiry", memberName(name))
 		}
 		if err != nil {
-			return c, credErr("member %q: %s", name, jsonErrText(err))
+			return c, credErr("member %s: %s", memberName(name), jsonErrText(err))
 		}
 	}
 	if tok, err := dec.Token(); err != nil || tok != json.Delim('}') {
@@ -166,28 +166,45 @@ func (c ManagedCredentials) Validate() error {
 }
 
 func checkBaseURL(raw string) error {
+	// No message holds any part of raw: an operator may have pasted the key
+	// into baseURL, or put it in a query (from the review of PR #85).
 	u, err := url.Parse(raw)
 	if err != nil || raw == "" {
-		return credErr("baseURL %q is not a URL", raw)
+		return credErr("baseURL is not a URL")
 	}
 	host := u.Hostname()
 	switch {
 	case u.Scheme != "https" && !(u.Scheme == "http" && isLoopback(host)):
-		return credErr("baseURL %q: want https (http only on a loopback host)", raw)
+		return credErr("baseURL: want https (http only on a loopback host)")
 	case host == "":
-		return credErr("baseURL %q has no host", raw)
+		return credErr("baseURL has no host")
 	case u.User != nil:
 		return credErr("baseURL has user information; put the key in key")
 	case u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(raw, "#"):
-		return credErr("baseURL %q has a query or a fragment", raw)
+		return credErr("baseURL has a query or a fragment")
 	case strings.HasSuffix(u.Path, "/"):
-		return credErr("baseURL %q ends with '/'", raw)
+		return credErr("baseURL ends with '/'")
 	case u.Opaque != "":
-		return credErr("baseURL %q is not hierarchical", raw)
+		return credErr("baseURL is not hierarchical")
 	case !strings.HasSuffix(u.EscapedPath(), "/v1"):
-		return credErr("baseURL %q does not end with the API version segment /v1, as in https://gateway.example/v1", raw)
+		return credErr("baseURL does not end with the API version segment /v1, as in https://gateway.example/v1")
 	}
 	return nil
+}
+
+// memberName quotes a member name for a message when it looks like one: at
+// most 12 characters, a letter then letters, digits or '_'. Any other name,
+// which might be a key pasted in by mistake, is not shown.
+func memberName(name string) string {
+	ok := len(name) > 0 && len(name) <= 12
+	for i := 0; ok && i < len(name); i++ {
+		b := name[i]
+		ok = b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || i > 0 && (b >= '0' && b <= '9' || b == '_')
+	}
+	if ok {
+		return fmt.Sprintf("%q", name)
+	}
+	return "(name not shown)"
 }
 
 func isLoopback(host string) bool {

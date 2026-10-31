@@ -176,3 +176,38 @@ func TestExpiringIsADayBeforeTheExpiry(t *testing.T) {
 		t.Error("a key with no known expiry is never expiring")
 	}
 }
+
+// No refusal echoes a supplied value: a key put into baseURL's query, pasted
+// as baseURL, or pasted as a member name never reaches the error, which the
+// Provider's controller copies into a condition and an event (from the review
+// of PR #85).
+func TestParseManagedCredentialsEchoesNoSuppliedValue(t *testing.T) {
+	const canary = "sk-canary-7f3a9c0d1e2b"
+	for _, tc := range []struct{ name, body, want string }{
+		{"a key in baseURL's query", `{"key":"k1","baseURL":"https://g.example/v1?api_key=` + canary + `"}`, "query"},
+		{"a key in baseURL's fragment", `{"key":"k1","baseURL":"https://g.example/v1#` + canary + `"}`, "fragment"},
+		{"a key pasted as baseURL", `{"key":"k1","baseURL":"` + canary + `"}`, "want https"},
+		{"a key as baseURL's host over http", `{"key":"k1","baseURL":"http://` + canary + `/v1"}`, "want https"},
+		{"a key as baseURL's path", `{"key":"k1","baseURL":"https://g.example/` + canary + `"}`, "/v1"},
+		{"a key with a trailing slash", `{"key":"k1","baseURL":"https://g.example/` + canary + `/"}`, "ends with '/'"},
+		{"a key as baseURL with no host", `{"key":"k1","baseURL":"https:///` + canary + `"}`, "no host"},
+		{"a key as an opaque baseURL", `{"key":"k1","baseURL":"https:` + canary + `"}`, "baseURL"},
+		{"a key that does not parse as a URL", `{"key":"k1","baseURL":"https://g.example/%zz` + canary + `"}`, "not a URL"},
+		{"a key as a member name", `{"key":"k1","baseURL":"https://g.example/v1","` + canary + `":1}`, "unknown member (name not shown)"},
+		{"a key as a repeated member name", `{"` + canary + `":1,"` + canary + `":2}`, "(name not shown)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseManagedCredentials([]byte(tc.body))
+			if err == nil || !errors.Is(err, ErrCredentials) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want ErrCredentials mentioning %q", err, tc.want)
+			}
+			if strings.Contains(err.Error(), canary) || strings.Contains(err.Error(), "7f3a9c") {
+				t.Fatalf("the error %q holds the supplied value", err)
+			}
+		})
+	}
+	// A short, name-like member is still named, so a misspelling is plain.
+	if _, err := ParseManagedCredentials([]byte(`{"key":"k1","baseURL":"https://g.example/v1","expires":"x"}`)); err == nil || !strings.Contains(err.Error(), `unknown member "expires"`) {
+		t.Fatalf("err = %v, want it to name expires", err)
+	}
+}
