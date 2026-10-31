@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
@@ -67,9 +66,17 @@ import (
 //     Managed.SetKeyExpiry. A rotation to a key without one clears the state at
 //     the next pass.
 //   - Events go to Recorder when it is set (nil means none), after the status
-//     is written by a successful read: one Warning CatalogEntrySkipped for each
-//     skipped entry, naming it, and when the listing alone was longer than 1024
-//     a Warning CatalogTruncated on every such read. Neither is a condition.
+//     is written by a successful read, with the form and the rate rule of
+//     HBEP-8 (provider.NewManagedEvent, provider.RepeatGate): the reason is
+//     the code alone, the action is the type "degraded", the event type is
+//     Warning, and the note is cut to 1024 bytes. A skipped entry raises one
+//     CatalogEntrySkipped naming it, and a listing alone longer than 1024
+//     raises CatalogTruncated; each fires when it starts, then at most once an
+//     hour of the Clock while it lasts, and a read that no longer shows it
+//     lets its return fire at once. A read that failed leaves that state
+//     alone. Neither is a condition, so the end of one raises no event. Unlike
+//     the real controller, the stand-in raises no events for its credentials
+//     and readiness conditions (failing and ready).
 //   - A Provider with no platform label is an error, before any read.
 //   - Conditions the controller does not write, such as DialHomeUnreachable,
 //     are kept as found.
@@ -80,10 +87,9 @@ type ManagedController struct {
 	Clock    *Clock
 	// Recorder receives the events of a successful read; nil records none.
 	Recorder events.EventRecorder
-}
 
-// eventAction is the action of the events a catalog read raises.
-const eventAction = "ReadCatalog"
+	gate provider.RepeatGate // when each repeating event last fired
+}
 
 // Sync reads the catalog once and writes the Provider's status.
 func (m *ManagedController) Sync(ctx context.Context) error {
@@ -99,8 +105,10 @@ func (m *ManagedController) Sync(ctx context.Context) error {
 	old := prov.DeepCopy()
 	entries, err := m.Managed.ListCatalog(ctx)
 	var merge provider.CatalogMerge
+	readOK := false
 	switch {
 	case err == nil:
+		readOK = true
 		var merr error
 		if merge, merr = provider.MergeCatalog(prov.Status.Catalog, entries, platform, now); merr != nil {
 			return merr
@@ -119,7 +127,9 @@ func (m *ManagedController) Sync(ctx context.Context) error {
 	if err := writeProviderStatus(ctx, m.Client, old, &prov); err != nil {
 		return err
 	}
-	m.raise(&prov, merge)
+	if readOK {
+		m.raise(&prov, now, merge)
+	}
 	return nil
 }
 
@@ -131,17 +141,13 @@ func (m *ManagedController) setExpiring(prov *v1alpha1.Provider, now time.Time) 
 	setCondition(prov, v1alpha1.ConditionCredentialsExpiring, status, reason, msg, now)
 }
 
-// raise sends the events of one successful read: a Warning for each skipped
-// entry, and one for a truncated listing.
-func (m *ManagedController) raise(prov *v1alpha1.Provider, merge provider.CatalogMerge) {
+// raise sends the events of one successful read, at now, that are due.
+func (m *ManagedController) raise(prov *v1alpha1.Provider, now time.Time, merge provider.CatalogMerge) {
 	if m.Recorder == nil {
 		return
 	}
-	for _, s := range merge.Skipped {
-		m.Recorder.Eventf(prov, nil, corev1.EventTypeWarning, provider.EventCatalogEntrySkipped, eventAction, "%s", provider.SkippedNote(s))
-	}
-	if merge.Truncated > 0 {
-		m.Recorder.Eventf(prov, nil, corev1.EventTypeWarning, provider.EventCatalogTruncated, eventAction, "%s", provider.TruncatedNote(merge.Truncated))
+	for _, ev := range m.gate.CatalogEvents(now, merge) {
+		m.Recorder.Eventf(prov, nil, ev.Type, ev.Reason, ev.Action, "%s", ev.Note)
 	}
 }
 

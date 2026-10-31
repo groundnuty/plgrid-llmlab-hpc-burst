@@ -106,10 +106,15 @@ func TestManagedSkipsAnEntryTheStatusCannotHold(t *testing.T) {
 		if ev := drainEvents(rec); !slices.Equal(ev, want) {
 			t.Fatalf("events = %q, want %q", ev, want)
 		}
-		// The same listing raises the same events on the next read.
+		// The same listing raises no event on the next read, a minute on, and
+		// the same events an hour after the first.
 		e.syncAt(at(12, 1, 0))
+		if ev := drainEvents(rec); len(ev) != 0 {
+			t.Fatalf("events on the next read = %q, want none", ev)
+		}
+		e.syncAt(at(13, 0, 0))
 		if ev := drainEvents(rec); !slices.Equal(ev, want) {
-			t.Fatalf("events on the next read = %q, want %q", ev, want)
+			t.Fatalf("events an hour on = %q, want %q", ev, want)
 		}
 	})
 }
@@ -213,8 +218,14 @@ func TestManagedListingAbove1024KeepsTheFirst1024AndRaisesTruncated(t *testing.T
 		// Ready stays True, and the read counts.
 		e.wantReady(true, v1alpha1.ReasonCatalogRead, "")
 		wantMT(t, "lastCatalogRead", e.provider().Status.LastCatalogRead, at(when.h, when.m, when.s))
-		if ev := drainEvents(rec); !slices.Equal(ev, []string{want}) {
-			t.Fatalf("read %d: events = %q, want exactly [%q]", i+1, ev, want)
+		// The event fires on the first read only: the second, a minute on, is
+		// inside the hour (the rate rule is in managed_controller_events_test.go).
+		wantEvents := []string{want}
+		if i == 1 {
+			wantEvents = nil
+		}
+		if ev := drainEvents(rec); !slices.Equal(ev, wantEvents) {
+			t.Fatalf("read %d: events = %q, want exactly %q", i+1, ev, wantEvents)
 		}
 	}
 

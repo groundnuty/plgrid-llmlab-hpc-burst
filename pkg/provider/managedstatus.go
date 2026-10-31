@@ -16,19 +16,22 @@ import (
 // in one place so they cannot drift (HBEP-4, Managed provider in alpha;
 // @hpc-burst-science-agent's ruling of 31 Oct 2026).
 
-// Event reasons of a managed Provider's catalog read. Neither is a condition.
+// Event reasons of a managed Provider's catalog read, both of type degraded
+// (EventActionDegraded). Neither is a condition.
 const (
 	// EventCatalogEntrySkipped: a listed entry the status cannot hold was
 	// skipped (CatalogMerge.Skipped); the rest of the read was recorded.
 	EventCatalogEntrySkipped = "CatalogEntrySkipped"
 	// EventCatalogTruncated: the listing alone held more entries than
-	// status.catalog can (CatalogMerge.Truncated). Raised on every read until
-	// the listing fits; Ready stays True.
+	// status.catalog can (CatalogMerge.Truncated). Raised when the truncation
+	// starts, then at most once an hour while it lasts (RepeatGate); Ready
+	// stays True.
 	EventCatalogTruncated = "CatalogTruncated"
 )
 
-// SkippedNote is the note of an EventCatalogEntrySkipped event. A name above
-// 64 characters is shortened.
+// SkippedNote is the note of an EventCatalogEntrySkipped event, before
+// NewManagedEvent cuts it to MaxEventNote. A name above 64 characters is
+// shortened.
 func SkippedNote(s SkippedEntry) string {
 	name := s.Name
 	if utf8.RuneCountInString(name) > 64 {

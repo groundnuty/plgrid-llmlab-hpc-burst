@@ -45,8 +45,8 @@ type CatalogMerge struct {
 	Pruned []string
 	// Truncated is how many holdable listed entries did not fit: the listing
 	// alone held more than MaxCatalogEntries, and the first ones in name order
-	// were kept. The controller raises CatalogTruncated on every read while it
-	// is above 0.
+	// were kept. The controller raises CatalogTruncated while it is above 0:
+	// when it first is, then at most once an hour (RepeatGate.CatalogEvents).
 	Truncated int
 }
 
