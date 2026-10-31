@@ -64,9 +64,6 @@ type judge struct {
 	// the front sends its own stream_cut instead, so the client still sees
 	// exactly one error event.
 	badError bool
-	// errorEvent: the latest event is an error event (the engine's, or
-	// response.failed), whose bytes are redacted before they pass.
-	errorEvent bool
 }
 
 // errorEvent reports whether an event is an engine's error event, and
@@ -117,7 +114,6 @@ func codeString(raw json.RawMessage) string {
 
 // sawError records an engine error event and says whether to forward it.
 func (j *judge) sawError(parses bool, code string) bool {
-	j.errorEvent = true
 	if !parses {
 		j.badError = true
 		return false
@@ -134,7 +130,7 @@ func (j *judge) sawError(parses bool, code string) bool {
 // finish reason, which is withheld so the front never sends [DONE] for a
 // stream it did not see finish.
 func (j *judge) event(raw []byte) (forward, done bool) {
-	j.sawContent, j.errorEvent = false, false
+	j.sawContent = false
 	name, data := parseEvent(raw)
 	if j.kind == endpointResponses {
 		if isErr, parses, code := errorEvent(name, data); isErr {
@@ -228,7 +224,7 @@ func (j *judge) responsesEvent(name string, data []byte) bool {
 	if typ == "response.completed" || typ == "response.incomplete" || typ == "response.failed" {
 		j.complete, j.finish = true, ev.Response.Status
 		if typ == "response.failed" {
-			j.failed, j.errorEvent = true, true
+			j.failed = true
 			if j.finish == "" {
 				j.finish = "failed"
 			}

@@ -2,6 +2,7 @@ package front
 
 import (
 	"bytes"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -59,7 +60,12 @@ func (p *Proxy) secrets(extra ...string) []string {
 		}
 	}
 	for _, uid := range uids {
+		if k, ok := p.instKeys.Load(uid); ok { // an Instance's key never changes
+			out = append(out, k.(string))
+			continue
+		}
 		if k, err := agentapi.ReadKeyFile(agentapi.InstanceKeyPath(p.host.CredentialsDir(), string(uid))); err == nil {
+			p.instKeys.Store(uid, k)
 			out = append(out, k)
 		}
 	}
@@ -82,6 +88,72 @@ func redact(b []byte, secrets []string) []byte {
 		}
 	}
 	return b
+}
+
+// redactReader redacts a target's body byte by byte as it streams, with no
+// parsing (@hpc-burst-science-agent, 31 Oct 2026). A read's tail that could
+// begin a secret is held until the next read completes or refutes it, so a
+// key split between two reads is still caught; a tail that cannot, which is
+// every SSE event's end in practice, passes at once, so streams are not
+// delayed.
+type redactReader struct {
+	r       io.Reader
+	secrets []string
+	buf     []byte // read, not yet returned: out first, then held
+	out     int    // bytes of buf ready to return
+	err     error
+	chunk   []byte
+}
+
+func newRedactReader(r io.Reader, secrets []string) io.Reader {
+	if len(secrets) == 0 {
+		return r
+	}
+	return &redactReader{r: r, secrets: secrets}
+}
+
+func (z *redactReader) Read(p []byte) (int, error) {
+	for z.out == 0 {
+		if z.err != nil {
+			if len(z.buf) > 0 { // the end: what is held cannot become a secret
+				z.buf = redact(z.buf, z.secrets)
+				z.out = len(z.buf)
+				break
+			}
+			return 0, z.err
+		}
+		if z.chunk == nil {
+			z.chunk = make([]byte, 32<<10)
+		}
+		n, err := z.r.Read(z.chunk)
+		z.err = err
+		if n == 0 && err == nil {
+			continue
+		}
+		z.buf = redact(append(z.buf, z.chunk[:n]...), z.secrets)
+		z.out = len(z.buf) - z.held()
+	}
+	n := copy(p, z.buf[:z.out])
+	z.buf, z.out = z.buf[n:], z.out-n
+	return n, nil
+}
+
+// held is the length of buf's longest tail that is a proper prefix of a
+// secret: the bytes that must wait for the next read.
+func (z *redactReader) held() int {
+	if z.err != nil {
+		return 0
+	}
+	most := 0
+	for _, s := range z.secrets {
+		for k := min(len(s)-1, len(z.buf)); k > most; k-- {
+			if bytes.HasSuffix(z.buf, []byte(s[:k])) {
+				most = k
+				break
+			}
+		}
+	}
+	return most
 }
 
 // redactHeader replaces every copy of each secret in the header values.

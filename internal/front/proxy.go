@@ -25,16 +25,17 @@ const MaxBodyBytes = 64 << 20
 
 // Proxy serves the LLMLab-compatible contract on the client listener.
 type Proxy struct {
-	cfg     Config
-	host    agentapi.Host
-	clk     clock.Clock
-	router  *Router
-	keys    *ClientKeys
-	sink    *usage.Sink
-	log     *slog.Logger
-	inst    *instanceTransports
-	managed *http.Transport
-	running sync.WaitGroup // the handlers in flight, for a stop
+	cfg      Config
+	host     agentapi.Host
+	clk      clock.Clock
+	router   *Router
+	keys     *ClientKeys
+	sink     *usage.Sink
+	log      *slog.Logger
+	inst     *instanceTransports
+	managed  *http.Transport
+	running  sync.WaitGroup // the handlers in flight, for a stop
+	instKeys sync.Map       // Instance UID -> its key, for redaction
 }
 
 // ProxyOptions are the inputs of NewProxy.
@@ -262,6 +263,9 @@ func (p *Proxy) send(x *exchange, r *http.Request, t *target, body []byte, rb re
 	stripHop(h)
 	h.Del("Authorization")
 	h.Del("Content-Length")
+	// The front redacts what it relays, so it takes bodies uncompressed
+	// (@hpc-burst-science-agent, 31 Oct 2026).
+	h.Set("Accept-Encoding", "identity")
 	if _, ok := h["User-Agent"]; !ok {
 		h["User-Agent"] = []string{""} // Go adds none then: headers pass as sent
 	}

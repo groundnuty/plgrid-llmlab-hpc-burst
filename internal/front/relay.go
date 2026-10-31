@@ -3,12 +3,14 @@ package front
 import (
 	"bufio"
 	"bytes"
+	"compress/flate"
+	"compress/gzip"
+	"compress/zlib"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
-	"sync"
 )
 
 // maxEventBytes bounds one SSE line; maxWholeParse bounds how much of a
@@ -51,30 +53,38 @@ func (i *idleReader) Read(p []byte) (int, error) {
 }
 
 // relay returns the target's response: its status and headers plus the
-// attribution headers, then its body (HBEP-5, Request path step 8).
+// attribution headers, then its body (HBEP-5, Request path step 8). Every
+// header and body byte from the target passes with every target credential
+// redacted, on every path and status; the front frames the body itself, so
+// the target's Content-Length is dropped (@hpc-burst-science-agent, 31 Oct
+// 2026). A compressed body is decoded first (gzip, deflate); another
+// encoding cannot be redacted and is answered 502 upstream_unreachable,
+// detail encoding.
 func (p *Proxy) relay(w http.ResponseWriter, x *exchange, t *target, resp *http.Response, rb requestBody, path string) {
 	defer resp.Body.Close()
+	raw, err := decodeBody(resp)
+	if err != nil {
+		x.attr = forTarget(x.id, t, emitterFront)
+		x.rec.Emitter = emitterFront
+		p.log.Warn("the target's response cannot be read", "request", x.id, "target", t.key(), "error", err.Error())
+		p.fail(w, x, http.StatusBadGateway, codeUpstreamUnreachable, "encoding", "", err.Error())
+		return
+	}
+	secrets := p.secrets(p.targetKey(t))
 	h := w.Header()
 	for k, vs := range resp.Header {
 		h[k] = append([]string(nil), vs...)
 	}
 	stripHop(h)
+	h.Del("Content-Length")
+	h.Del("Content-Encoding")
+	redactHeader(h, secrets)
 	x.attr.set(h)
 	x.rec.Status = resp.StatusCode
 	kind := endpointOf(path)
 	sse := strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")
-	identity := resp.Header.Get("Content-Encoding") == "" || strings.EqualFold(resp.Header.Get("Content-Encoding"), "identity")
 	x.rec.Stream = sse
-	body := &idleReader{r: resp.Body, touch: x.touch}
-	if resp.StatusCode >= 400 {
-		x.rec.Finish = strp("error")
-		p.relayError(w, x, t, resp.StatusCode, body, sse)
-		return
-	}
-	if sse && kind.streams() && identity {
-		// The front may withhold or redact events, so it frames the stream.
-		h.Del("Content-Length")
-	}
+	body := newRedactReader(&idleReader{r: raw, touch: x.touch}, secrets)
 	w.WriteHeader(resp.StatusCode)
 	if sse {
 		// The status and the attribution reach the client at once, not
@@ -82,13 +92,46 @@ func (p *Proxy) relay(w http.ResponseWriter, x *exchange, t *target, resp *http.
 		_ = http.NewResponseController(w).Flush()
 	}
 	switch {
-	case sse && kind.streams() && identity:
+	case resp.StatusCode >= 400:
+		x.rec.Finish = strp("error")
+		p.copyRaw(w, x, body, sse)
+	case sse && kind.streams():
 		j := p.relayEvents(w, x, body, kind)
 		x.failed = j.failed || j.engineError || j.badError
 	case sse:
 		p.copyRaw(w, x, body, true)
 	default:
-		p.relayWhole(w, x, body, kind, identity)
+		p.relayWhole(w, x, body, kind, true)
+	}
+}
+
+// decodeBody returns the response's body decoded from its Content-Encoding.
+// The front asks for identity, so a target that compresses anyway is rare.
+func decodeBody(resp *http.Response) (io.Reader, error) {
+	switch enc := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding"))); enc {
+	case "", "identity":
+		return resp.Body, nil
+	case "gzip", "x-gzip":
+		zr, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("the target's gzip body cannot be read: %w", err)
+		}
+		return zr, nil
+	case "deflate":
+		// HTTP's deflate is zlib (RFC 9110 section 8.4.1.2); some servers
+		// send raw deflate, told apart by the zlib header.
+		br := bufio.NewReader(resp.Body)
+		hdr, err := br.Peek(2)
+		if err == nil && hdr[0]&0x0f == 8 && (uint16(hdr[0])<<8|uint16(hdr[1]))%31 == 0 {
+			zr, err := zlib.NewReader(br)
+			if err != nil {
+				return nil, fmt.Errorf("the target's deflate body cannot be read: %w", err)
+			}
+			return zr, nil
+		}
+		return flate.NewReader(br), nil
+	default:
+		return nil, fmt.Errorf("the target answered with Content-Encoding %q, which the front cannot read to redact", enc)
 	}
 }
 
@@ -101,18 +144,13 @@ func (p *Proxy) relayEvents(w http.ResponseWriter, x *exchange, body io.Reader, 
 	br := bufio.NewReaderSize(body, 64<<10)
 	var ev bytes.Buffer
 	var readErr error
-	secrets := sync.OnceValue(func() []string { return p.secrets() })
 	handle := func() bool {
 		forward, done := j.event(ev.Bytes())
 		if j.sawContent && x.rec.FirstTokenMs == nil {
 			x.rec.FirstTokenMs = i64p(x.clk.Now().Sub(x.start).Milliseconds())
 		}
 		if forward {
-			out := ev.Bytes()
-			if j.errorEvent {
-				out = redact(out, secrets())
-			}
-			if _, err := w.Write(out); err != nil {
+			if _, err := w.Write(ev.Bytes()); err != nil {
 				x.cancel(errors.New("client gone"))
 				return true
 			}
@@ -152,38 +190,6 @@ func (p *Proxy) relayEvents(w http.ResponseWriter, x *exchange, body io.Reader, 
 	}
 	p.endStream(w, x, j, readErr)
 	return j
-}
-
-// relayError passes a target's error through with every target credential
-// the front holds replaced, in the headers and the body, and frames the body
-// with its new Content-Length (@hpc-burst-science-agent, 31 Oct 2026; PR #95
-// review, Astra B12). A body above maxWholeParse passes its first
-// maxWholeParse bytes redacted and the rest as it comes. A streamed error
-// body is read whole the same way: an error is short.
-func (p *Proxy) relayError(w http.ResponseWriter, x *exchange, t *target, status int, body io.Reader, sse bool) {
-	head, err := io.ReadAll(io.LimitReader(body, maxWholeParse))
-	if err != nil {
-		p.cutWhole(x, err)
-	}
-	secrets := p.secrets(p.targetKey(t))
-	h := w.Header()
-	redactHeader(h, secrets)
-	x.attr.set(h) // the attribution is the front's own, never redacted
-	head = redact(head, secrets)
-	full := len(head) < maxWholeParse
-	if full {
-		h.Set("Content-Length", strconv.Itoa(len(head)))
-	} else {
-		h.Del("Content-Length")
-	}
-	w.WriteHeader(status)
-	if _, err := w.Write(head); err != nil {
-		x.cancel(errors.New("client gone"))
-		p.cutWhole(x, err)
-	}
-	if !full {
-		p.copyRaw(w, x, body, sse)
-	}
 }
 
 // endStream records how a judged stream ended and sends the error event for a
