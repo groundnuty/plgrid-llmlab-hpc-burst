@@ -395,7 +395,8 @@ type Health struct {
 	// ResponsesByStatus counts the engine's responses by the status label the
 	// engine reports, verbatim. vLLM groups statuses into classes (its
 	// prometheus-fastapi-instrumentator has should_group_status_codes on), so
-	// the keys are "2xx", "4xx" and "5xx", for example {"2xx": 1200, "5xx": 3};
+	// the keys are classes such as "2xx", "3xx", "4xx" and "5xx", for example
+	// {"2xx": 1200, "5xx": 3};
 	// an engine that reports exact codes gives {"200": 1200, "500": 3}. The
 	// agent cannot turn classes into codes. Read server errors with
 	// ServerErrors, which counts both forms.

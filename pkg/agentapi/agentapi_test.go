@@ -399,6 +399,10 @@ func TestServerErrorsCountsClassesAndCodes(t *testing.T) {
 		{map[string]int64{"2xx": 1200, "4xx": 7}, 0},
 		{map[string]int64{"2xx": 1200, "5xx": 3}, 3},
 		{map[string]int64{"200": 1200, "500": 3, "503": 2, "404": 9}, 5},
+		{map[string]int64{}, 0},
+		{map[string]int64{"": 4, "unknown": 6, "3xx": 2}, 0},
+		{map[string]int64{"5xx": 3, "500": 1, "2xx": 10}, 4},
+		{map[string]int64{"5garbage": 2}, 2}, // the rule is "starts with 5", as documented
 	} {
 		if got := ServerErrors(c.in); got != c.want {
 			t.Errorf("ServerErrors(%v) = %d, want %d", c.in, got, c.want)
