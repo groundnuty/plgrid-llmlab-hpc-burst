@@ -106,7 +106,8 @@ func TestSetupInARealManager(t *testing.T) {
 					return slurm.NewBatch(session, v.Profile, v.Settings, slurm.Options{PollInterval: time.Second, BusyInterval: 500 * time.Millisecond}), io.NopCloser(nil), nil
 				},
 				CredentialsDir: credDir, AgentBuildsDir: builds,
-				Front:        &providerctl.FrontSettings{Mode: agentapi.DialHomeDirect, Endpoint: "front.example.org:29443", CertPin: strings.Repeat("c", 64)},
+				Front: &providerctl.FrontSettings{Mode: agentapi.DialHomeDirect, Endpoint: "front.example.org:29443", CertPin: strings.Repeat("c", 64),
+					FrpcDigests: map[string]string{"x86_64": strings.Repeat("d", 64)}},
 				PollInterval: time.Second, BusyInterval: 500 * time.Millisecond, CreationGracePeriod: -1,
 			})
 		},

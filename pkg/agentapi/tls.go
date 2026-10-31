@@ -10,6 +10,14 @@ import (
 	"fmt"
 )
 
+// DialHomeServerName is the fixed synthetic DNS name of the launcher's dial-home
+// certificate. It is both the certificate's subject alternative name and the
+// value of frpc's transport.tls.serverName, in both dial-home modes (in ssh
+// mode frpc dials loopback, so the name is never resolved). The .invalid top-level
+// domain never resolves (HBEP-6, frpc in the job; HBEP-11, the launcher's
+// certificate; `@hpc-burst-science-agent`, 31 Oct 2026).
+const DialHomeServerName = "dial-home.hpcburst.invalid"
+
 // PinOf returns a certificate's pin: the SHA-256 of its DER-encoded
 // SubjectPublicKeyInfo, as 64 lowercase hex characters. The pin follows the
 // key, so a certificate re-issued for the same key keeps it.

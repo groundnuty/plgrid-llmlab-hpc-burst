@@ -251,13 +251,18 @@ func writeOwnOrRecorded(ctx context.Context, e *external, a *v1alpha1.Allocation
 
 // prerequisites returns why the Allocation cannot be submitted yet, from the
 // control-plane host alone (no platform call), or "" when it can: a front must
-// be configured (HBEP-11), the Allocation's credential must exist
+// be configured (HBEP-11) with a frpc digest for the partition's CPU
+// architecture (agent.json names it; a configuration check, so it comes before
+// any remote call or status write), the Allocation's credential must exist
 // (docs/development.md: until it does, the provider waits; it neither submits
 // nor marks the attempt Rejected), and an agent build with the Allocation's
 // digest must exist for the partition's CPU architecture.
 func (e *external) prerequisites(a *v1alpha1.Allocation) string {
 	if e.s.o.Front == nil {
 		return "no front is configured, so no job is submitted (HBEP-11)"
+	}
+	if _, err := e.frpcDigest(); err != nil {
+		return err.Error()
 	}
 	if _, err := e.credential(a); err != nil {
 		return "waiting for the Allocation's credential: " + err.Error()
@@ -309,12 +314,16 @@ func (e *external) files(a *v1alpha1.Allocation, tag string, paths slurm.Paths) 
 		return nil, err
 	}
 	f := e.s.o.Front
+	frpc, err := e.frpcDigest()
+	if err != nil {
+		return nil, err
+	}
 	cfg := agentapi.AgentConfig{
 		ProtocolVersion: agentapi.ProtocolVersion, Tag: tag, Mode: f.Mode, Endpoint: f.Endpoint,
-		CertSPKISHA256: f.CertPin, StagingDir: paths.Staging, DialHomeDir: paths.DialHomeDir(),
+		CertSPKISHA256: f.CertPin, FrpcDigest: frpc, StagingDir: paths.Staging, DialHomeDir: paths.DialHomeDir(),
 	}
 	if f.Mode == agentapi.DialHomeSSH {
-		cfg.SSH = &agentapi.SSHForward{User: f.SSHUser, AgentPort: f.AgentPort}
+		cfg.SSH = &agentapi.SSHForward{User: f.SSHUser, AgentPort: f.AgentPort, DialHomePort: f.DialHomePort}
 	}
 	js, err := cfg.Encode()
 	if err != nil {
@@ -325,6 +334,19 @@ func (e *external) files(a *v1alpha1.Allocation, tag string, paths slurm.Paths) 
 		file(agentapi.StagedCredentialPath(tag), 0o600, cred),
 		file(agentapi.StagedConfigPath(tag), 0o600, js),
 	}, nil
+}
+
+// frpcDigest is the frpc digest that agent.json names: the Front settings' one
+// for the partition's CPU architecture (HBEP-4, Submission: Files first). It
+// reads configuration only. prerequisites calls it, so a missing digest stops a
+// Create before any call to the platform.
+func (e *external) frpcDigest() (string, error) {
+	arch := e.v.Profile.Partition.CPUArch
+	d, ok := e.s.o.Front.FrpcDigests[arch]
+	if !ok {
+		return "", fmt.Errorf("no frpc digest is configured for cpuArch %s", arch)
+	}
+	return d, nil
 }
 
 func file(path string, mode os.FileMode, content []byte) provider.File {
