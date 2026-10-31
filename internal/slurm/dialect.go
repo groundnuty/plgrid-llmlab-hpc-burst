@@ -194,11 +194,23 @@ func slurmMessage(stderr string) string {
 	return "no error text"
 }
 
-var absPath = regexp.MustCompile(`/[^\s:'"]*`)
+// What redactPaths removes from Slurm's own error text: an absolute path (a
+// "/" at the start of a word, so "account/partition" and "send/recv" stay),
+// Slurm's "host:<name>[:<port>]", an IPv4 address, and a dotted host name
+// whose last label is letters (so "v0.0.42" and "23.11" stay).
+var (
+	absPath   = regexp.MustCompile(`(^|[\s'"(=:])/[^\s:'"]*`)
+	hostPort  = regexp.MustCompile(`\bhost:[^\s:]+(:[0-9]+)?`)
+	ipv4      = regexp.MustCompile(`\b[0-9]{1,3}(\.[0-9]{1,3}){3}\b`)
+	dottedFQN = regexp.MustCompile(`\b[A-Za-z][A-Za-z0-9-]*(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b`)
+)
 
-// redactPaths removes every absolute path and caps the length.
+// redactPaths removes every absolute path and host name and caps the length.
 func redactPaths(s string) string {
-	s = absPath.ReplaceAllString(s, "<path>")
+	s = absPath.ReplaceAllString(s, "${1}<path>")
+	s = hostPort.ReplaceAllString(s, "host:<host>")
+	s = ipv4.ReplaceAllString(s, "<address>")
+	s = dottedFQN.ReplaceAllString(s, "<host>")
 	if len(s) > 300 {
 		s = s[:300] + "..."
 	}

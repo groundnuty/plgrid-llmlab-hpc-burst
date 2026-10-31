@@ -150,7 +150,10 @@ type replyMeta struct {
 
 // queueRecord is one job object of squeue --json.
 type queueRecord struct {
-	JobID       int64     `json:"job_id"`
+	// RawID is job_id as read; JobID is set from it once parseQueue has
+	// checked that it is there and positive.
+	RawID       *int64    `json:"job_id"`
+	JobID       int64     `json:"-"`
 	Name        string    `json:"name"`
 	JobState    stateList `json:"job_state"`
 	StateReason string    `json:"state_reason"`
@@ -180,7 +183,8 @@ type tresEntry struct {
 // accountingRecord is one record of sacct --json; with -D a job has one record
 // per execution.
 type accountingRecord struct {
-	JobID     int64  `json:"job_id"`
+	RawID     *int64 `json:"job_id"`
+	JobID     int64  `json:"-"`
 	Name      string `json:"name"`
 	Partition string `json:"partition"`
 	State     struct {
@@ -238,7 +242,14 @@ func parseQueue(b []byte, want string) ([]queueRecord, string, error) {
 	if err != nil {
 		return nil, v, err
 	}
-	return *r.Jobs, v, nil
+	recs := *r.Jobs
+	for i := range recs {
+		if recs[i].RawID == nil || *recs[i].RawID <= 0 {
+			return nil, v, fmt.Errorf("squeue --json: record %d has no positive job_id", i)
+		}
+		recs[i].JobID = *recs[i].RawID
+	}
+	return recs, v, nil
 }
 
 // parseAccounting reads sacct --json.
@@ -251,7 +262,14 @@ func parseAccounting(b []byte, want string) ([]accountingRecord, string, error) 
 	if err != nil {
 		return nil, v, err
 	}
-	return *r.Jobs, v, nil
+	recs := *r.Jobs
+	for i := range recs {
+		if recs[i].RawID == nil || *recs[i].RawID <= 0 {
+			return nil, v, fmt.Errorf("sacct --json: record %d has no positive job_id", i)
+		}
+		recs[i].JobID = *recs[i].RawID
+	}
+	return recs, v, nil
 }
 
 // heldBy reports the hold signals of HBEP-4 (The Slurm dialect, Held): hold
