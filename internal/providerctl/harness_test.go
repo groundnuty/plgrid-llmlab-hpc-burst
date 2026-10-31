@@ -247,7 +247,7 @@ func newEnv(t *testing.T, mods ...envOption) *env {
 		NewPlatform: func(slurm.Validated) (Platform, io.Closer, error) { return e.platform, io.NopCloser(nil), nil },
 		Clock:       clock, CredentialsDir: e.credDir, AgentBuildsDir: e.buildDir,
 		Front: &FrontSettings{Mode: agentapi.DialHomeDirect, Endpoint: "front.example.org:29443",
-			CertPin: strings.Repeat("c", 64)},
+			CertPin: strings.Repeat("c", 64), FrpcDigests: map[string]string{testArch: strings.Repeat("d", 64)}},
 		Recorder: e.rec, CreationGracePeriod: -1, Identity: "test-controller",
 	}
 	for _, m := range mods {
