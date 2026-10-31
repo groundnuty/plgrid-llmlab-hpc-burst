@@ -78,7 +78,8 @@ func TestRejectedOutcomeWaitsForTheBackoffThenRetries(t *testing.T) {
 
 // ptHarnessFront is the front newEnv configures.
 func ptHarnessFront() *FrontSettings {
-	return &FrontSettings{Mode: agentapi.DialHomeDirect, Endpoint: "front.example.org:29443", CertPin: strings.Repeat("c", 64)}
+	return &FrontSettings{Mode: agentapi.DialHomeDirect, Endpoint: "front.example.org:29443", CertPin: strings.Repeat("c", 64),
+		FrpcDigests: map[string]string{testArch: strings.Repeat("d", 64)}}
 }
 
 // The prerequisites (create.go: prerequisites; docs/development.md): no
@@ -211,7 +212,8 @@ func TestUnresolvedPathMakesNoFileCallAndNoSbatch(t *testing.T) {
 func TestMissingDialHomeKeyKeepsTheSubmissionBack(t *testing.T) {
 	sshFront := func(e *env) {
 		e.opts.Front = &FrontSettings{Mode: agentapi.DialHomeSSH, Endpoint: "control.example.org:22",
-			CertPin: strings.Repeat("c", 64), SSHUser: "example-user", AgentPort: 29444}
+			CertPin: strings.Repeat("c", 64), SSHUser: "example-user", AgentPort: 29444, DialHomePort: 29448,
+			FrpcDigests: map[string]string{testArch: strings.Repeat("d", 64)}}
 	}
 	for _, m := range ptModes {
 		t.Run(m.name, func(t *testing.T) {

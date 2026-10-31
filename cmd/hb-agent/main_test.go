@@ -488,7 +488,7 @@ func TestAgentEndToEndDirect(t *testing.T) {
 	ep := startEndpoint(t, root)
 	j := newJob(t, root, agentapi.AgentConfig{
 		ProtocolVersion: agentapi.ProtocolVersion, Tag: eTag, Mode: agentapi.DialHomeDirect,
-		Endpoint: ep.addr, CertSPKISHA256: ep.pin,
+		Endpoint: ep.addr, CertSPKISHA256: ep.pin, FrpcDigest: strings.Repeat("d", 64),
 	})
 	exercise(t, ep, j)
 }
@@ -513,8 +513,8 @@ func TestAgentEndToEndSSH(t *testing.T) {
 	}
 	j := newJob(t, root, agentapi.AgentConfig{
 		ProtocolVersion: agentapi.ProtocolVersion, Tag: eTag, Mode: agentapi.DialHomeSSH,
-		Endpoint: "127.0.0.1:22", SSH: &agentapi.SSHForward{User: "hb", AgentPort: p},
-		CertSPKISHA256: ep.pin,
+		Endpoint: "127.0.0.1:22", SSH: &agentapi.SSHForward{User: "hb", AgentPort: p, DialHomePort: p + 1},
+		CertSPKISHA256: ep.pin, FrpcDigest: strings.Repeat("d", 64),
 	})
 	exercise(t, ep, j)
 	lines, err := os.ReadFile(j.sshLog)
@@ -533,7 +533,7 @@ func TestAgentRefusesAnEndpointWithAnotherPin(t *testing.T) {
 	ep := startEndpoint(t, root)
 	j := newJob(t, root, agentapi.AgentConfig{
 		ProtocolVersion: agentapi.ProtocolVersion, Tag: eTag, Mode: agentapi.DialHomeDirect,
-		Endpoint: ep.addr, CertSPKISHA256: strings.Repeat("0", 64),
+		Endpoint: ep.addr, CertSPKISHA256: strings.Repeat("0", 64), FrpcDigest: strings.Repeat("d", 64),
 	})
 	cmd, out := j.start(t)
 	ep.backend.SetDesired(eUID, runState(j.engLog, nil))
@@ -581,8 +581,8 @@ func TestAgentSSHForwardReconnects(t *testing.T) {
 	}
 	j := newJob(t, root, agentapi.AgentConfig{
 		ProtocolVersion: agentapi.ProtocolVersion, Tag: eTag, Mode: agentapi.DialHomeSSH,
-		Endpoint: "127.0.0.1:22", SSH: &agentapi.SSHForward{User: "hb", AgentPort: p},
-		CertSPKISHA256: ep.pin,
+		Endpoint: "127.0.0.1:22", SSH: &agentapi.SSHForward{User: "hb", AgentPort: p, DialHomePort: p + 1},
+		CertSPKISHA256: ep.pin, FrpcDigest: strings.Repeat("d", 64),
 	})
 	j.extraEnv = []string{"HB_FAKE_SSH_DIE_AFTER=3s"}
 	cmd, out := j.start(t)

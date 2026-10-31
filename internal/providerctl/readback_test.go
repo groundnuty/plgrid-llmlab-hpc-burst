@@ -108,7 +108,7 @@ func TestReadBackMarkerStopsLaterComparisons(t *testing.T) {
 	e.run("alloc-a", 2)
 	a := e.get("alloc-a")
 	id := a.Annotations[v1alpha1.AnnotationJobID]
-	if got := a.Annotations[annotationReadBack]; id == "" || got != id {
+	if got := a.Annotations[v1alpha1.AnnotationReadBack]; id == "" || got != id {
 		t.Fatalf("read-back marker %q, want the job ID %q after a matching first observe", got, id)
 	}
 	n, _ := strconv.Atoi(id)

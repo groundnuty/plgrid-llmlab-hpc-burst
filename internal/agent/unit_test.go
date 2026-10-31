@@ -110,6 +110,7 @@ func directConfig() agentapi.AgentConfig {
 		Mode:            agentapi.DialHomeDirect,
 		Endpoint:        "127.0.0.1:29290",
 		CertSPKISHA256:  strings.Repeat("a", 64),
+		FrpcDigest:      strings.Repeat("d", 64),
 		StagingDir:      "/scratch/staging",
 		DialHomeDir:     "/home/u/.hpcburst/dial-home",
 	}
@@ -209,7 +210,7 @@ func TestSSHForwardArgs(t *testing.T) {
 	c := directConfig()
 	c.Mode = agentapi.DialHomeSSH
 	c.Endpoint = "cp.example:2222"
-	c.SSH = &agentapi.SSHForward{User: "hb", AgentPort: 29223}
+	c.SSH = &agentapi.SSHForward{User: "hb", AgentPort: 29223, DialHomePort: 29227}
 	for _, tc := range []struct {
 		remote, local int
 		forward       string

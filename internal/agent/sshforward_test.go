@@ -33,8 +33,8 @@ func sshConfig(t *testing.T, root string) agentapi.AgentConfig {
 	}
 	return agentapi.AgentConfig{
 		ProtocolVersion: agentapi.ProtocolVersion, Tag: hTag, Mode: agentapi.DialHomeSSH,
-		Endpoint: "127.0.0.1:22", SSH: &agentapi.SSHForward{User: "hb", AgentPort: 29299},
-		CertSPKISHA256: strings.Repeat("a", 64), StagingDir: filepath.Join(root, "staging"), DialHomeDir: dh,
+		Endpoint: "127.0.0.1:22", SSH: &agentapi.SSHForward{User: "hb", AgentPort: 29299, DialHomePort: 29303},
+		CertSPKISHA256: strings.Repeat("a", 64), FrpcDigest: strings.Repeat("d", 64), StagingDir: filepath.Join(root, "staging"), DialHomeDir: dh,
 	}
 }
 
