@@ -68,4 +68,3 @@ func TestSmokeHandover(t *testing.T) {
 		t.Logf("event %s/%s %s: %s", e.Type, e.Code, e.Name, e.Message)
 	}
 }
-

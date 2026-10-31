@@ -90,7 +90,7 @@ type switchBackend struct {
 	b  agentapi.Backend
 }
 
-func (s *switchBackend) get() agentapi.Backend { s.mu.Lock(); defer s.mu.Unlock(); return s.b }
+func (s *switchBackend) get() agentapi.Backend  { s.mu.Lock(); defer s.mu.Unlock(); return s.b }
 func (s *switchBackend) set(b agentapi.Backend) { s.mu.Lock(); defer s.mu.Unlock(); s.b = b }
 
 func (s *switchBackend) Register(ctx context.Context, c agentapi.Caller, r agentapi.RegisterRequest) (agentapi.RegisterResponse, error) {
@@ -157,8 +157,8 @@ func withProfile(f func(*v1alpha1.PlatformProfileSpec)) rigOption {
 }
 
 func withMaxTime(d time.Duration) rigOption { return func(c *rigConfig) { c.maxTime = d } }
-func withoutFront() rigOption              { return func(c *rigConfig) { c.front = false } }
-func withFallbackMode() rigOption          { return func(c *rigConfig) { c.holdRelease = false } }
+func withoutFront() rigOption               { return func(c *rigConfig) { c.front = false } }
+func withFallbackMode() rigOption           { return func(c *rigConfig) { c.holdRelease = false } }
 func withInterceptors(f interceptor.Funcs) rigOption {
 	return func(c *rigConfig) { c.interceptors = &f }
 }
@@ -269,8 +269,8 @@ func mdSpec(name string) *v1alpha1.ModelDeployment {
 			Instances: 1,
 			Providers: v1alpha1.ProviderSelection{Names: []string{rigProvider}},
 			Workload: &v1alpha1.Workload{
-				ContextTokens: v1alpha1.ContextTokens{Typical: 4096},
-				OutputTokens:  v1alpha1.OutputTokens{Typical: 512},
+				ContextTokens:  v1alpha1.ContextTokens{Typical: 4096},
+				OutputTokens:   v1alpha1.OutputTokens{Typical: 512},
 				TargetSessions: 4,
 			},
 		},
