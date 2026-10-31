@@ -1,0 +1,82 @@
+
+##### module spikes/s10: an own package without a LICENSE is permitted
+allowlist: Apache-2.0,0BSD,BSD-2-Clause,BSD-2-Clause-FreeBSD,BSD-3-Clause,MIT,MIT-0,ISC,OpenSSL,OpenSSL-standalone,PSF-2.0,Python-2.0,Python-2.0.1,PostgreSQL,SSLeay-standalone,UPL-1.0,X11,Zlib
+report rows: 10
+
+== check ./...
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s10/cmd/s10sim
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s10/front
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s10/sim
+gate: go-licenses exit=1, permitted=3, unexpected=0: ok
+
+##### module spikes/s10b: an own package without a LICENSE is permitted
+allowlist: Apache-2.0,0BSD,BSD-2-Clause,BSD-2-Clause-FreeBSD,BSD-3-Clause,MIT,MIT-0,ISC,OpenSSL,OpenSSL-standalone,PSF-2.0,Python-2.0,Python-2.0.1,PostgreSQL,SSLeay-standalone,UPL-1.0,X11,Zlib
+report rows: 11
+
+== check ./...
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s10b/cmd/s10bsim
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s10b/study
+UNEXPECTED: Did not find license for library 'github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s10/front'.
+UNEXPECTED: Did not find license for library 'github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s10/sim'.
+gate: go-licenses exit=1, permitted=2, unexpected=2: FAIL
+
+##### module spikes/s10c: an own package without a LICENSE is permitted
+allowlist: Apache-2.0,0BSD,BSD-2-Clause,BSD-2-Clause-FreeBSD,BSD-3-Clause,MIT,MIT-0,ISC,OpenSSL,OpenSSL-standalone,PSF-2.0,Python-2.0,Python-2.0.1,PostgreSQL,SSLeay-standalone,UPL-1.0,X11,Zlib
+report rows: 12
+
+== check ./...
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s10c/cmd/s10csim
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s10c/study
+UNEXPECTED: Did not find license for library 'github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s10/front'.
+UNEXPECTED: Did not find license for library 'github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s10/sim'.
+UNEXPECTED: Did not find license for library 'github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s10b/study'.
+gate: go-licenses exit=1, permitted=2, unexpected=3: FAIL
+
+##### module spikes/s2: an own package without a LICENSE is permitted
+allowlist: Apache-2.0,0BSD,BSD-2-Clause,BSD-2-Clause-FreeBSD,BSD-3-Clause,MIT,MIT-0,ISC,OpenSSL,OpenSSL-standalone,PSF-2.0,Python-2.0,Python-2.0.1,PostgreSQL,SSLeay-standalone,UPL-1.0,X11,Zlib
+report rows: 1
+
+== check ./...
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s2/cmd/s2probe
+gate: go-licenses exit=1, permitted=1, unexpected=0: ok
+
+##### module spikes/s2b: an own package without a LICENSE is permitted
+allowlist: Apache-2.0,0BSD,BSD-2-Clause,BSD-2-Clause-FreeBSD,BSD-3-Clause,MIT,MIT-0,ISC,OpenSSL,OpenSSL-standalone,PSF-2.0,Python-2.0,Python-2.0.1,PostgreSQL,SSLeay-standalone,UPL-1.0,X11,Zlib
+report rows: 1
+
+== check ./...
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s2b/cmd/s2bload
+gate: go-licenses exit=1, permitted=1, unexpected=0: ok
+
+##### module spikes/s3: an own package without a LICENSE is permitted
+allowlist: Apache-2.0,0BSD,BSD-2-Clause,BSD-2-Clause-FreeBSD,BSD-3-Clause,MIT,MIT-0,ISC,OpenSSL,OpenSSL-standalone,PSF-2.0,Python-2.0,Python-2.0.1,PostgreSQL,SSLeay-standalone,UPL-1.0,X11,Zlib
+report rows: 71
+
+== check ./...
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s3/cmd/s3bench
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s3/kit
+gate: go-licenses exit=1, permitted=2, unexpected=0: ok
+
+##### module spikes/s4: an own package without a LICENSE is permitted
+allowlist: Apache-2.0,0BSD,BSD-2-Clause,BSD-2-Clause-FreeBSD,BSD-3-Clause,MIT,MIT-0,ISC,OpenSSL,OpenSSL-standalone,PSF-2.0,Python-2.0,Python-2.0.1,PostgreSQL,SSLeay-standalone,UPL-1.0,X11,Zlib
+report rows: 91
+
+== check ./...
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s4/apis/v1alpha1
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s4/cmd/fakeslurm
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s4/cmd/provider-slurm
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s4/fakeslurm
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s4/internal/controller
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s4/internal/slurm
+gate: go-licenses exit=1, permitted=6, unexpected=0: ok
+
+##### module spikes/s8: an own package without a LICENSE is permitted
+allowlist: Apache-2.0,0BSD,BSD-2-Clause,BSD-2-Clause-FreeBSD,BSD-3-Clause,MIT,MIT-0,ISC,OpenSSL,OpenSSL-standalone,PSF-2.0,Python-2.0,Python-2.0.1,PostgreSQL,SSLeay-standalone,UPL-1.0,X11,Zlib
+report rows: 25
+
+== check ./...
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s8/cmd/s8bench
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s8/evlayer
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s8/harness
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/spikes/s8/jsnode
+gate: go-licenses exit=1, permitted=4, unexpected=0: ok

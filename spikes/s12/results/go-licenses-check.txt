@@ -1,0 +1,55 @@
+
+##### module .: an own package without a LICENSE is permitted
+allowlist: Apache-2.0,0BSD,BSD-2-Clause,BSD-2-Clause-FreeBSD,BSD-3-Clause,MIT,MIT-0,ISC,OpenSSL,OpenSSL-standalone,PSF-2.0,Python-2.0,Python-2.0.1,PostgreSQL,SSLeay-standalone,UPL-1.0,X11,Zlib
+report rows: 65
+
+== check ./...
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1/e2e
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/cmd/hpcburst
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/hack/mutate-cel
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/launcher
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/deploymentid
+gate: go-licenses exit=1, permitted=8, unexpected=0: ok
+
+== check ./... --include_tests (licences only tests reach)
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1/e2e
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/cmd/hpcburst
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/hack/mutate-cel
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/launcher
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/deploymentid
+gate: go-licenses exit=1, permitted=8, unexpected=0: ok
+
+== negative control: BSD-3-Clause taken off the list (must fail)
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1/e2e
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/cmd/hpcburst
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/hack/mutate-cel
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/launcher
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv
+permitted (a package of this module, which has no LICENSE): github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/deploymentid
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'github.com/google/uuid'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'github.com/munnerz/goautoneg'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'github.com/spf13/pflag'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'golang.org/x/net'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'golang.org/x/oauth2'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'golang.org/x/sys/unix'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'golang.org/x/term'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'golang.org/x/text'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'golang.org/x/time/rate'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'google.golang.org/protobuf'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'gopkg.in/evanphx/json-patch.v4'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'gopkg.in/inf.v0'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'k8s.io/apimachinery/third_party/forked/golang'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'k8s.io/kube-openapi/pkg/internal/third_party/go-json-experiment/json'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'k8s.io/utils/internal/third_party/forked/golang/net'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'sigs.k8s.io/json'.
+UNEXPECTED: Not allowed license 'BSD-3-Clause' found for library 'sigs.k8s.io/yaml'.
+gate: go-licenses exit=1, permitted=8, unexpected=17: FAIL
+negative control: failed and named BSD-3-Clause packages, as it should

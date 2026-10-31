@@ -1,0 +1,44 @@
+-- control: MIT only: exit 0
+-- control: report lists example.test/goodlib as MIT
+-- off-list licence (BSD-4-Clause): exit 1
+     Not allowed license 'BSD-4-Clause' found for library 'example.test/offlist'.
+-- unknown licence: exit 1
+     Did not find license for library 'example.test/mystery'.
+
+== licence-check.sh on fixture repositories
+-- control: no root LICENSE (permitted), clean dependency, clean nested module: exit 0
+     licence check: PASS
+     permitted (a package of this module, which has no LICENSE): example.test/proj
+-- same repository with --no-own-exemption: exit 1
+     UNEXPECTED: Did not find license for library 'example.test/proj'.
+     licence check: FAIL
+-- off-list dependency at a sibling path sharing the root's prefix (proj-extra): exit 1
+     UNEXPECTED: Not allowed license 'BSD-4-Clause' found for library 'example.test/proj-extra'.
+     licence check: FAIL
+     permitted (a package of this module, which has no LICENSE): example.test/proj
+-- unknown-licence dependency at a sibling path sharing the prefix (proj-unknown): exit 1
+     UNEXPECTED: Did not find license for library 'example.test/proj-unknown'.
+     licence check: FAIL
+     permitted (a package of this module, which has no LICENSE): example.test/proj
+-- off-list dependency in a separate module beneath the root's path (proj/sub): exit 1
+     UNEXPECTED: Not allowed license 'BSD-4-Clause' found for library 'example.test/proj/sub'.
+     licence check: FAIL
+     permitted (a package of this module, which has no LICENSE): example.test/proj
+-- unknown-licence dependency in a separate module beneath the root's path (proj/unk): exit 1
+     UNEXPECTED: Did not find license for library 'example.test/proj/unk'.
+     licence check: FAIL
+     permitted (a package of this module, which has no LICENSE): example.test/proj
+-- off-list dependency of a nested module (the root itself is fine): exit 1
+     UNEXPECTED: Not allowed license 'BSD-4-Clause' found for library 'example.test/lic-off'.
+     licence check: FAIL
+     permitted (a package of this module, which has no LICENSE): example.test/proj
+-- off-list dependency imported only by a test of the root module: exit 1
+     UNEXPECTED: Not allowed license 'BSD-4-Clause' found for library 'example.test/lic-off'.
+     licence check: FAIL
+     permitted (a package of this module, which has no LICENSE): example.test/proj
+-- for comparison, go-licenses' own --ignore example.test/proj, a path prefix, on the same fixtures (exit 0 = the dependency is hidden):
+     r-sibling: exit 0
+     r-siblingunk: exit 0
+     r-beneath: exit 0
+     r-beneathunk: exit 0
+ALL FIXTURE CHECKS BEHAVED AS EXPECTED
