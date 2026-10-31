@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -25,6 +26,14 @@ type UpOptions struct {
 	ManifestsDir string // applied after readiness, CRDs first
 	ReadyTimeout time.Duration
 	Log          io.Writer // progress and warnings
+	// ControllerBin is the controllers' binary. Empty means ControllerBinName beside the running
+	// executable; if that is absent too, the host starts with a warning and no controller runs.
+	// A path that is given and missing is an error, raised before anything starts.
+	ControllerBin  string
+	AgentBuildsDir string // passed to the controller as --agent-builds-dir when set
+
+	// supervisorArgv, set by tests only, replaces the supervisor's command line.
+	supervisorArgv []string
 }
 
 // UpReport is the outcome of a start.
@@ -40,6 +49,11 @@ type UpReport struct {
 	Applied    int      `json:"manifests_applied"`
 	Front      Front    `json:"front"`
 	Warnings   []string `json:"warnings,omitempty"`
+	// SupervisorPID and ControllerBin are set when controllers run; ControllerHealth is the
+	// address of the lifecycle controller's /healthz.
+	SupervisorPID    int    `json:"supervisor_pid,omitempty"`
+	ControllerBin    string `json:"controller_bin,omitempty"`
+	ControllerHealth string `json:"controller_health,omitempty"`
 }
 
 // logTail returns the last few lines of the k3s log, for error messages.
@@ -142,6 +156,15 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 	if o.ReadyTimeout <= 0 {
 		o.ReadyTimeout = DefaultReadyTimeout
 	}
+	ctrlBin, err := resolveControllerBin(o.ControllerBin)
+	if err != nil {
+		return nil, err
+	}
+	if o.AgentBuildsDir != "" {
+		if o.AgentBuildsDir, err = filepath.Abs(o.AgentBuildsDir); err != nil {
+			return nil, err
+		}
+	}
 	unlock, err := l.lockState()
 	if err != nil {
 		return nil, err
@@ -210,20 +233,48 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 	if rss, err := rssMiB([]int{rep.PID}); err == nil {
 		rep.RSSMiB = rss
 	}
+	// Either fully up or not up: a failure from here on stops what was started, so a retry
+	// starts from a known state.
+	abort := func(what string, cause error) (*UpReport, error) {
+		_, serr := stopRecorded(context.Background(), st, 15*time.Second, o.Log)
+		if serr != nil {
+			return nil, fmt.Errorf("%s: %w (and stopping the host failed: %v; run hpcburst down)", what, cause, serr)
+		}
+		_ = l.clearRecord()
+		return nil, fmt.Errorf("%s: %w (the host was stopped again)", what, cause)
+	}
 	if o.ManifestsDir != "" {
 		cfg, err := restConfig(l.kubeconfig(), ports, 30*time.Second)
 		if err == nil {
 			rep.Applied, err = ApplyManifests(ctx, cfg, o.ManifestsDir, o.Log)
 		}
 		if err != nil {
-			// Either fully up or not up: stop the host, so a retry starts from a known state.
-			_, serr := stopRecorded(context.Background(), st, 10*time.Second, o.Log)
-			if serr != nil {
-				return nil, fmt.Errorf("manifests: %w (and stopping the host failed: %v; run hpcburst down)", err, serr)
-			}
-			_ = l.clearRecord()
-			return nil, fmt.Errorf("manifests: %w (the host was stopped again)", err)
+			return abort("manifests", err)
 		}
+	}
+	if ctrlBin == "" {
+		rep.Warnings = append(rep.Warnings, noControllerWarning)
+		logf(o.Log, "%s", noControllerWarning)
+	} else {
+		// In this order: the namespace the controllers' Leases live in, then the controllers.
+		cfg, err := restConfig(l.kubeconfig(), ports, 30*time.Second)
+		if err == nil {
+			err = ensureControllerNamespace(ctx, cfg)
+		}
+		if err != nil {
+			return abort("controllers", err)
+		}
+		argv := o.supervisorArgv
+		if argv == nil {
+			if argv, err = supervisorArgv(l); err != nil {
+				return abort("controllers", err)
+			}
+		}
+		st.Controllers = &ControllerConfig{Binary: ctrlBin, AgentBuildsDir: o.AgentBuildsDir}
+		if err := startSupervisor(ctx, l, st, argv, superviseStartTimeout, o.Log); err != nil {
+			return abort("controllers", err)
+		}
+		rep.SupervisorPID, rep.ControllerBin, rep.ControllerHealth = st.Procs[len(st.Procs)-1].PID, ctrlBin, ports.ControllerAddr()
 	}
 	if !front.Set() {
 		rep.Warnings = append(rep.Warnings, frontWarning)

@@ -20,7 +20,7 @@ func TestStateRoundTripAndMode(t *testing.T) {
 		t.Fatalf("no record: got %v, %v", st, err)
 	}
 	in := &State{Version: "v1.36.5+k3s1", Binary: "/x/k3s", BinarySHA256: "ab", Nice: 10,
-		Ports: Ports{1, 2, 3, 4}, Procs: []ProcRec{{Name: "k3s", PID: 4242, StartTicks: 99, BootID: "b"}},
+		Ports: Ports{API: 1, HTTPS: 2, KCM: 3, LB: 4}, Procs: []ProcRec{{Name: "k3s", PID: 4242, StartTicks: 99, BootID: "b"}},
 		StartedAt: time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC), Front: Front{Mode: "direct", Addr: "h:1"}}
 	if err := l.saveState(in); err != nil {
 		t.Fatal(err)

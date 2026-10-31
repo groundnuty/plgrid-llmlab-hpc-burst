@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"strconv"
 	"syscall"
 )
 
@@ -20,24 +21,38 @@ type Ports struct {
 	HTTPS int `json:"https"` // --https-listen-port: the supervisor and the external-facing apiserver
 	KCM   int `json:"kcm"`   // the embedded controller manager's secure port
 	LB    int `json:"lb"`    // --lb-server-port: reserved and never bound (no agent), so it cannot hit the default
+	// Controller is the lifecycle controller's /healthz (HBEP-11). Agent is the agent API of the
+	// lifecycle controller (issue #60): reserved, not bound yet. A state file from before the
+	// controllers existed has neither.
+	Controller int `json:"controller,omitempty"`
+	Agent      int `json:"agent,omitempty"`
 }
 
 // DefaultPortBase is the default start of the block. It is far from every k3s default.
 const DefaultPortBase = 29220
 
-// PortsFromBase lays the four ports out as spike S3 did: base, base+1, base+2 and base+5.
+// PortsFromBase lays the first four ports out as spike S3 did (base, base+1, base+2 and base+5)
+// and adds the controllers' two: base+6 and base+7.
 func PortsFromBase(base int) (Ports, error) {
-	if base < 1024 || base+5 > 65535 {
-		return Ports{}, fmt.Errorf("port base %d is out of range: the block base..base+5 must lie in 1024..65535", base)
+	if base < 1024 || base+7 > 65535 {
+		return Ports{}, fmt.Errorf("port base %d is out of range: the block base..base+7 must lie in 1024..65535", base)
 	}
-	return Ports{API: base, HTTPS: base + 1, KCM: base + 2, LB: base + 5}, nil
+	return Ports{API: base, HTTPS: base + 1, KCM: base + 2, LB: base + 5, Controller: base + 6, Agent: base + 7}, nil
 }
 
-// Expected are the ports the running host must hold, and no others.
+// Expected are the ports the running k3s must hold, and no others. The controllers' ports are
+// not among them: status checks those per supervised process.
 func (p Ports) Expected() []int { return []int{p.API, p.HTTPS, p.KCM} }
 
-// All are the ports that must be free before a start: the expected ones and the reserved one.
-func (p Ports) All() []int { return []int{p.API, p.HTTPS, p.KCM, p.LB} }
+// All are the ports that must be free before a start: the expected ones and the reserved ones.
+func (p Ports) All() []int {
+	return []int{p.API, p.HTTPS, p.KCM, p.LB, p.Controller, p.Agent}
+}
+
+// ControllerAddr is where the lifecycle controller serves /healthz.
+func (p Ports) ControllerAddr() string {
+	return net.JoinHostPort("127.0.0.1", strconv.Itoa(p.Controller))
+}
 
 // checkPortsFree fails, naming the port, when any of the ports is already taken: listening on
 // any address in the kernel's tables, or not bindable on 127.0.0.1.

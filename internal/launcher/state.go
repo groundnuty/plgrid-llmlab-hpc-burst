@@ -42,6 +42,14 @@ func (l layout) tmpDir() string          { return filepath.Join(l.dir, "tmp") }
 func (l layout) auditPolicy() string     { return filepath.Join(l.dir, "audit-policy.yaml") }
 func (l layout) auditLog() string        { return filepath.Join(l.logDir(), "audit.log") }
 
+// The controllers' files: the supervisor's own record, the credentials directory the controllers
+// read (mode 0700), and the logs of the supervisor and of each supervised process.
+func (l layout) controllerDir() string       { return filepath.Join(l.dir, "controller") }
+func (l layout) credentialsDir() string      { return filepath.Join(l.controllerDir(), "credentials") }
+func (l layout) supervisorFile() string      { return filepath.Join(l.controllerDir(), "supervisor.json") }
+func (l layout) supervisorLog() string       { return filepath.Join(l.logDir(), "supervisor.log") }
+func (l layout) childLog(name string) string { return filepath.Join(l.logDir(), name+".log") }
+
 // storeVersionFile records which k3s release last wrote the store. down never removes it.
 func (l layout) storeVersionFile() string { return filepath.Join(l.dir, "store-version.json") }
 
@@ -73,6 +81,16 @@ type State struct {
 	Procs        []ProcRec `json:"processes"`
 	StartedAt    time.Time `json:"started_at"`
 	Front        Front     `json:"front"`
+	// Controllers is what the supervisor runs. up records it before it starts the supervisor,
+	// which reads it back from here, and upgrade starts the supervisor again from it. Nil when no
+	// controller binary was found: no controllers run.
+	Controllers *ControllerConfig `json:"controllers,omitempty"`
+}
+
+// ControllerConfig is the launcher's choice of what to run beside k3s.
+type ControllerConfig struct {
+	Binary         string `json:"binary"` // absolute path of hpcburst-controller
+	AgentBuildsDir string `json:"agent_builds_dir,omitempty"`
 }
 
 // loadState reads the record. A missing file is (nil, nil): nothing was started.

@@ -13,20 +13,29 @@ func TestPortsFromBase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := Ports{API: 29220, HTTPS: 29221, KCM: 29222, LB: 29225}
+	want := Ports{API: 29220, HTTPS: 29221, KCM: 29222, LB: 29225, Controller: 29226, Agent: 29227}
 	if p != want {
 		t.Fatalf("got %+v, want %+v", p, want)
 	}
 	if got := p.Expected(); len(got) != 3 || got[0] != 29220 || got[1] != 29221 || got[2] != 29222 {
 		t.Errorf("expected ports %v", got)
 	}
-	if got := p.All(); len(got) != 4 || got[3] != 29225 {
+	// The launcher's block is base..base+7 less base+3 and base+4: the controller's health port
+	// and the reserved agent API port join the four that must be free before a start.
+	if got := p.All(); fmt.Sprint(got) != "[29220 29221 29222 29225 29226 29227]" {
 		t.Errorf("all ports %v", got)
 	}
-	for _, bad := range []int{0, 80, 1023, 65531, 70000, -1} {
+	if got := p.ControllerAddr(); got != "127.0.0.1:29226" {
+		t.Errorf("controller address %q", got)
+	}
+	for _, bad := range []int{0, 80, 1023, 65529, 65531, 70000, -1} {
 		if _, err := PortsFromBase(bad); err == nil {
 			t.Errorf("port base %d accepted", bad)
 		}
+	}
+	// The block ends at base+7, so the last base that fits is 65528.
+	if p, err := PortsFromBase(65528); err != nil || p.Agent != 65535 {
+		t.Errorf("port base 65528: %+v, %v", p, err)
 	}
 }
 
