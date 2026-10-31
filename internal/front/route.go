@@ -42,6 +42,7 @@ type routeError struct {
 	message    string
 	retryAfter string
 	dep        *inventory.Deployment // the ModelDeployment named by a capacity error
+	cutBy      string                // the front's cut, for a request cut while it waited
 }
 
 func errUnknownProvider(p string) *routeError {
@@ -173,7 +174,16 @@ func (r *Router) waitServed(ctx context.Context, d *inventory.Deployment, g *bal
 		return &target{inst: inst, dep: d, res: res}, nil
 	}
 	if ctx.Err() != nil {
-		return nil, &routeError{status: statusClientClosed, code: "client_closed", message: "the client went away while the request waited"}
+		// The client went away, or the front cut the request while it
+		// waited: its own deadline (maxRequestDuration below queueTimeout)
+		// or its shutdown. A front cut is answered and attributed, never
+		// an empty response (PR #95 review: Astra B10).
+		cut := cutOf(ctx)
+		if cut == cutClient {
+			return nil, &routeError{status: statusClientClosed, code: "client_closed", message: "the client went away while the request waited"}
+		}
+		return nil, &routeError{status: http.StatusGatewayTimeout, code: codeRequestTimeout, detail: detailOf(cut), cutBy: cut, dep: d,
+			message: "the request was cut while it waited for an Instance of " + d.Key + ": " + detailOf(cut)}
 	}
 	return nil, &routeError{status: http.StatusServiceUnavailable, code: codeCapacity, retryAfter: "10", dep: d,
 		message: "every Instance of " + d.Key + " is at its cap"}

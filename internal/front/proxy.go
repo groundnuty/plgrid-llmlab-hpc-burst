@@ -333,6 +333,9 @@ func (p *Proxy) routeFail(w http.ResponseWriter, x *exchange, e *routeError) {
 		x.rec.Status, x.rec.Finish, x.rec.CutBy = e.status, strp("cut"), strp(cutClient)
 		return
 	}
+	if e.cutBy != "" {
+		x.rec.CutBy = strp(e.cutBy)
+	}
 	if e.retryAfter != "" {
 		w.Header().Set("Retry-After", e.retryAfter)
 	}

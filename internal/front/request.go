@@ -198,8 +198,12 @@ func (x *exchange) stopTimers() {
 }
 
 // cutBy maps the context's cause to the hop that cut the request, or "".
-func (x *exchange) cutBy() string {
-	switch cause := context.Cause(x.ctx); {
+func (x *exchange) cutBy() string { return cutOf(x.ctx) }
+
+// cutOf maps a request context's cause to the hop that cut it, or "". A
+// cause that is not one of the front's is the client's.
+func cutOf(ctx context.Context) string {
+	switch cause := context.Cause(ctx); {
 	case cause == nil:
 		return ""
 	case errors.Is(cause, errCutDeadline):
