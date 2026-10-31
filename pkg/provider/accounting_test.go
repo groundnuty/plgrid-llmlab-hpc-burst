@@ -167,6 +167,13 @@ func TestAccountingOfMissingGPUEntry(t *testing.T) {
 	q := Job{State: []string{"RUNNING"}, StartTime: ti(12, 0, 0), Source: SourceQueue}
 	got = AccountingOf(q, 0, nil, *ti(12, 1, 0))
 	countIs(t, "allocatedGPUs (no read)", got.AllocatedGPUs, -1)
+
+	// Astra B8: a GPU entry is listed but its count cannot be read (null,
+	// missing, a negative sentinel): unknown, even for a job that asked for
+	// none, never a known 0.
+	j.Accounting = &JobAccounting{AllocatedCPUs: n32(4), GPUsListed: true, Elapsed: dur(227), Executions: 1}
+	got = AccountingOf(j, 0, nil, *ti(13, 0, 0))
+	countIs(t, "allocatedGPUs (listed, unreadable)", got.AllocatedGPUs, -1)
 }
 
 // A job whose final read never came keeps the stored counts and has no elapsed

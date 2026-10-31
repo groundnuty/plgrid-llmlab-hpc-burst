@@ -21,6 +21,11 @@ type JobAccounting struct {
 	// record lists none. A job that asked for no GPU has none listed, which
 	// AccountingOf reads as 0 only when the allocation list itself was read.
 	AllocatedGPUs *int32
+	// GPUsListed is true when the latest execution's tres.allocated lists a
+	// gres entry named gpu or gpu:*, readable or not. An entry whose count is
+	// null, missing, negative or too large leaves AllocatedGPUs nil, and
+	// AccountingOf never reads that as 0 (review of PR 118, Astra B8).
+	GPUsListed bool
 	// Elapsed is time.elapsed summed over every execution the accounting read
 	// returned. nil when an execution has no elapsed time, or when the read did
 	// not return all of the job's executions (a restart count that the records
@@ -38,7 +43,8 @@ type JobAccounting struct {
 //   - Allocated counts come from job.Accounting; a count it lacks keeps its
 //     value in prior, the stored accounting, which an earlier read set. A job
 //     that asked for no GPU (requestedGPUs 0), whose allocation list was read
-//     (a cpu count is known) and lists no GPU, has 0 GPUs; a job that asked for
+//     (a cpu count is known) and lists no GPU entry at all, has 0 GPUs; one
+//     whose list has a GPU entry it cannot read has unknown GPUs; a job that asked for
 //     GPUs and whose list shows none has unknown GPUs, so a change in accounting's
 //     shape never reads as 0 GPU-hours.
 //   - While the job runs, the elapsed time runs from the scheduler's start time
@@ -67,7 +73,7 @@ func AccountingOf(job Job, requestedGPUs int32, prior *v1alpha1.AllocationAccoun
 			out.AllocatedGPUs = copyCount(prior.AllocatedGPUs)
 		}
 	}
-	if out.AllocatedGPUs == nil && out.AllocatedCPUs != nil && requestedGPUs == 0 {
+	if out.AllocatedGPUs == nil && out.AllocatedCPUs != nil && requestedGPUs == 0 && (job.Accounting == nil || !job.Accounting.GPUsListed) {
 		zero := int32(0)
 		out.AllocatedGPUs = &zero
 	}
