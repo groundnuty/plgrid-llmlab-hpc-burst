@@ -227,8 +227,8 @@ func TestManagedCatalogFollowsTheListing(t *testing.T) {
 	if prov.Status.ObservedGeneration != 1 {
 		t.Fatalf("observedGeneration = %d, want 1", prov.Status.ObservedGeneration)
 	}
-	e.wantCondition(v1alpha1.ConditionProviderReady, metav1.ConditionTrue, "CatalogRead")
-	e.wantCondition(v1alpha1.ConditionCredentialsRejected, metav1.ConditionFalse, "KeyAccepted")
+	e.wantCondition(v1alpha1.ConditionProviderReady, metav1.ConditionTrue, v1alpha1.ReasonCatalogRead)
+	e.wantCondition(v1alpha1.ConditionCredentialsRejected, metav1.ConditionFalse, v1alpha1.ReasonKeyAccepted)
 	aID := e.entry("example-a").ManagedID
 
 	// example-a leaves the listing, and example-c appears: a is kept, unlisted.
@@ -259,7 +259,7 @@ func TestManagedCatalogFollowsTheListing(t *testing.T) {
 	wantEntry(t, e.entry("example-a"), false, "r2", at(12, 2, 0))
 	wantEntry(t, e.entry("example-c"), false, "", at(12, 2, 0)) // listed at 12:02:00 too
 	wantMT(t, "lastCatalogRead", e.provider().Status.LastCatalogRead, at(12, 3, 0))
-	e.wantCondition(v1alpha1.ConditionProviderReady, metav1.ConditionTrue, "CatalogRead")
+	e.wantCondition(v1alpha1.ConditionProviderReady, metav1.ConditionTrue, v1alpha1.ReasonCatalogRead)
 	if n := e.gw.Count("list-catalog"); n != 4 {
 		t.Fatalf("list-catalog logged %d times, want 4: one per Sync", n)
 	}
