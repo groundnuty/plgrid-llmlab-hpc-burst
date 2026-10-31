@@ -497,3 +497,22 @@ func TestReasoningThatExhaustsTheBudgetFailsWithItsOwnReason(t *testing.T) {
 		t.Fatalf("behaviour %+v, want a failure whose reason is ReasoningBudgetExhausted", c)
 	}
 }
+
+// An engine whose probe starts failing is reported with the failures counted
+// in a row, and stays running: restarting it is the controller's call (Opus
+// test nit; HBEP-7, Health and restarts).
+func TestFailingProbesAreCountedAndNothingRestarts(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	h.set(h.runState("health-fail-after=800ms", 1, 0, nil))
+	pid := worker0(h.waitReport("worker-0 running", 20*time.Second, running)).PID
+	r := h.waitReport("three failed probes in a row", 20*time.Second, func(r agentapi.Report) bool {
+		w := worker0(r)
+		return w != nil && w.Health != nil && !w.Health.ProbeOK && w.Health.ConsecutiveProbeFailures >= 3
+	})
+	if w := worker0(r); w.Phase != agentapi.PartRunning || w.PID != pid {
+		t.Fatalf("the worker changed on failing probes: %+v", w)
+	}
+	if n := len(h.execs()); n != 1 {
+		t.Fatalf("%d starts: the agent restarted on failing probes", n)
+	}
+}

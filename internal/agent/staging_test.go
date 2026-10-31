@@ -89,9 +89,14 @@ func TestWholeInstanceRestartReStagesAFileThatFailedItsRehash(t *testing.T) {
 	if err != nil || string(b) != good {
 		t.Fatalf("config.json now holds %q (%v), want the Hub's copy", b, err)
 	}
-	aside, _ := filepath.Glob(filepath.Join(dir, "config.json.*"))
-	if len(aside) != 1 {
-		t.Fatalf("moved-aside copies %q, want one", aside)
+	// The bad copy was moved aside for the repair and removed once the
+	// replacement was in place: no full-size copy is left on shared scratch
+	// (PR #87 review, Opus disk-use nit).
+	if aside, _ := filepath.Glob(filepath.Join(dir, "config.json.*")); len(aside) != 0 {
+		t.Fatalf("moved-aside copies left behind: %q", aside)
+	}
+	if n := h.hubRequests(); n != 1 {
+		t.Fatalf("%d downloads for the repair, want 1", n)
 	}
 	if w := worker0(r); w.Generation != 0 || r.Instance.Generation != 2 {
 		t.Fatalf("instance generation %d, worker %+v", r.Instance.Generation, w)
