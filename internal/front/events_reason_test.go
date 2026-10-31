@@ -54,14 +54,14 @@ func TestKubeRecorderRecordsAnEventAboutALease(t *testing.T) {
 	}
 	defer stop()
 	lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "front", UID: "lease-uid-1"}}
-	rec.Event(lease, true, eventDegraded, reasonUsageWriteFailed, "a message")
+	rec.Event(lease, true, eventFailing, reasonUsageWriteFailed, "a message")
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		l, err := cs.EventsV1().Events("ns").List(context.Background(), metav1.ListOptions{})
 		if err == nil && len(l.Items) > 0 {
 			ev := l.Items[0]
-			if ev.Regarding.Kind != "Lease" || ev.Reason != reasonUsageWriteFailed || ev.Action != eventDegraded {
-				t.Errorf("event regarding %s/%s reason %q action %q, want a Lease, %s and %s", ev.Regarding.Kind, ev.Regarding.Name, ev.Reason, ev.Action, reasonUsageWriteFailed, eventDegraded)
+			if ev.Regarding.Kind != "Lease" || ev.Reason != reasonUsageWriteFailed || ev.Action != eventFailing {
+				t.Errorf("event regarding %s/%s reason %q action %q, want a Lease, %s and %s", ev.Regarding.Kind, ev.Regarding.Name, ev.Reason, ev.Action, reasonUsageWriteFailed, eventFailing)
 			}
 			return
 		}
@@ -76,7 +76,7 @@ func TestKubeRecorderRecordsAnEventAboutALease(t *testing.T) {
 func TestUsageWriteFailedIsThrottled(t *testing.T) {
 	f := newScFix(t, scOpts{})
 	boom := errors.New("write usage.jsonl: no space left on device")
-	n := func() int { return len(f.rec.Find(eventDegraded, reasonUsageWriteFailed)) }
+	n := func() int { return len(f.rec.Find(eventFailing, reasonUsageWriteFailed)) }
 	for i := 0; i < 5; i++ {
 		f.router.usageFailed(scDep, "r", boom)
 		f.clk.Advance(10 * time.Minute)

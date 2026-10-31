@@ -186,8 +186,8 @@ func TestHealthAndEventOnAFailingUsageSink(t *testing.T) {
 	if status != 200 {
 		t.Fatalf("the front did not serve with a failing sink: status %d", status)
 	}
-	errWaitFor(t, "a UsageWriteFailed event", func() bool { return len(rec.Find(eventDegraded, reasonUsageWriteFailed)) > 0 })
-	ev := rec.Find(eventDegraded, reasonUsageWriteFailed)[0]
+	errWaitFor(t, "a UsageWriteFailed event", func() bool { return len(rec.Find(eventFailing, reasonUsageWriteFailed)) > 0 })
+	ev := rec.Find(eventFailing, reasonUsageWriteFailed)[0]
 	if !ev.Warning || !strings.Contains(ev.Object, "ns/md") || !strings.Contains(ev.Message, "no space left") {
 		t.Errorf("event %+v: want a warning on ns/md naming the cause", ev)
 	}

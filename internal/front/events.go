@@ -19,6 +19,7 @@ import (
 // 3) but no reason, so this name awaits the contracts owner.
 const (
 	eventDegraded       = "degraded"
+	eventFailing        = "failing" // HBEP-8's type of UsageWriteFailed
 	reasonCountsDrift   = "CountsDrift"
 	reasonCapacityDrop  = v1alpha1.ReasonCapacityDropped
 	reasonDrainWinShort = v1alpha1.ReasonDrainWindowShort

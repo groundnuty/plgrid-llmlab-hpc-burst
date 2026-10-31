@@ -299,7 +299,7 @@ func (r *Router) usageFailed(dep, requestID string, err error) {
 	}
 	r.mu.Unlock()
 	if emit {
-		r.rec.Event(md, true, eventDegraded, reasonUsageWriteFailed, "usage records are not being written (request "+requestID+"): "+err.Error())
+		r.rec.Event(md, true, eventFailing, reasonUsageWriteFailed, "usage records are not being written (request "+requestID+"): "+err.Error())
 	}
 }
 
