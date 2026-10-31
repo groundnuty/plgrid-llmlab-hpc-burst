@@ -2,12 +2,15 @@ package managed
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"syscall"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
@@ -41,15 +44,19 @@ var _ provider.Managed = (*Client)(nil)
 // gateway whose member of that name means something else must not stop the
 // catalog. Unknown members are ignored. A 401 or 403 is an
 // error that wraps provider.ErrKeyRejected; every other outcome is an unknown
-// error. No error ever holds the key or any byte of the response body, which
-// a gateway may fill with the request's own headers.
+// error. No error ever holds the key or any byte the gateway sent, its body,
+// headers and Location included, which a gateway may fill with the request's
+// own headers: a request that got no answer gives a fixed category
+// (transportError).
 type Client struct {
 	creds provider.ManagedCredentials
 	http  *http.Client
 }
 
 // NewClient returns a Client for creds, which must be valid. transport nil
-// takes a copy of http.DefaultTransport with ConnectTimeout.
+// takes newTransport's: a copy of http.DefaultTransport with ConnectTimeout
+// that never replays a request. A transport a caller passes must not replay
+// either.
 func NewClient(creds provider.ManagedCredentials, transport http.RoundTripper) (*Client, error) {
 	if err := creds.Validate(); err != nil {
 		return nil, err
@@ -65,12 +72,48 @@ func NewClient(creds provider.ManagedCredentials, transport http.RoundTripper) (
 }
 
 // newTransport is a copy of http.DefaultTransport whose connection set-up
-// takes at most ConnectTimeout.
+// takes at most ConnectTimeout, and that never sends a request twice. Go's
+// transport replays a GET by itself when a reused connection fails before an
+// answer, although the gateway may have received it, so one pass could read
+// twice (review of PR #85, Astra B4). Every read therefore opens its own
+// HTTP/1.1 connection: with no reuse there is no replay, and HTTP/2, which
+// has replays of its own, is off. One connection a minute costs nothing.
 func newTransport() *http.Transport {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.DialContext = (&net.Dialer{Timeout: ConnectTimeout, KeepAlive: 30 * time.Second}).DialContext
 	t.TLSHandshakeTimeout = ConnectTimeout
+	t.DisableKeepAlives = true
+	t.ForceAttemptHTTP2 = false
+	t.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
 	return t
+}
+
+// transportError is the error of a request that got no answer, as a fixed
+// category. It never wraps net/http's error, whose text can quote what the
+// gateway sent: a malformed Location or header line, which a gateway may fill
+// with the request's own key (review of PR #85, Astra B1). A context's end
+// is kept, so a caller can tell it.
+func transportError(ctx context.Context, err error) error {
+	var dns *net.DNSError
+	var cert *tls.CertificateVerificationError
+	var unknownAuth x509.UnknownAuthorityError
+	var hostname x509.HostnameError
+	var netErr net.Error
+	switch {
+	case ctx.Err() != nil:
+		return fmt.Errorf("catalog read: %w", ctx.Err())
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return errors.New("catalog read: connection refused")
+	case errors.As(err, &dns):
+		return errors.New("catalog read: the gateway's host did not resolve")
+	case errors.As(err, &cert), errors.As(err, &unknownAuth), errors.As(err, &hostname):
+		return errors.New("catalog read: the gateway's certificate was refused")
+	case errors.As(err, &netErr) && netErr.Timeout():
+		return errors.New("catalog read: timed out")
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, syscall.ECONNRESET):
+		return errors.New("catalog read: the connection closed before an answer")
+	}
+	return errors.New("catalog read: transport error (not shown, as it may quote the gateway's reply)")
 }
 
 // listing is the part of an OpenAI model list the Client reads.
@@ -91,7 +134,7 @@ func (c *Client) ListCatalog(ctx context.Context) ([]provider.CatalogEntry, erro
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("catalog read: %w", err)
+		return nil, transportError(ctx, err)
 	}
 	defer func() {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, MaxCatalogBytes))
@@ -105,7 +148,7 @@ func (c *Client) ListCatalog(ctx context.Context) ([]provider.CatalogEntry, erro
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxCatalogBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("catalog read: read the body: %w", err)
+		return nil, transportError(ctx, err)
 	}
 	if len(body) > MaxCatalogBytes {
 		return nil, fmt.Errorf("catalog read: the listing is above %d bytes", MaxCatalogBytes)

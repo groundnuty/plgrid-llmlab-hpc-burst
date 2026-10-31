@@ -18,6 +18,8 @@ import (
 	"github.com/go-logr/logr/funcr"
 	"k8s.io/client-go/tools/events"
 	clocktesting "k8s.io/utils/clock/testing"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 )
 
 // The key never leaks: it is in a mode-600 file, it goes out only as the
@@ -139,15 +141,34 @@ func TestKeyReachesNoErrorLogEventOrObject(t *testing.T) {
 	pass(at(12, 3, 0)) // a 504 with the key in its body: an unknown error, logged
 	undo()
 
+	// A gateway whose Location header carries the key in a form Go cannot
+	// parse: net/http's own error would quote it (review of PR #85, Astra B1).
+	bad := startRawStub(t, "HTTP/1.1 302 Found\r\nLocation: /"+secretKey+"%zz\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+	writeCreds(t, a.path, secretKey, bad.baseURL(), "")
+	pass(at(12, 4, 0)) // an unknown error, logged
+	if bad.count() != 1 {
+		t.Fatalf("control: the malformed-Location stub got %d requests, want 1", bad.count())
+	}
+	writeCreds(t, a.path, secretKey, a.gw.BaseURL(), "")
+
 	a.gw.SetModels(model(strings.Repeat("n", 254)))
-	pass(at(12, 4, 0)) // a listing the status cannot hold: Sync returns an error
+	pass(at(12, 5, 0)) // an entry the status cannot hold: skipped, with an event
+	a.setProfileKind(v1alpha1.PlatformBatch)
+	pass(at(12, 6, 0)) // a Provider that is not managed: Sync returns an error
+	a.setProfileKind(v1alpha1.PlatformManaged)
 
 	// Credentials files that hold the key and are refused: their errors and
 	// the events they raise must not repeat it.
 	writeFile(t, a.path, fmt.Sprintf(`{"key":%q,"baseURL":%q,"extra":true}`, secretKey, a.gw.BaseURL()))
-	pass(at(12, 5, 0))
+	pass(at(12, 7, 0))
 	writeFile(t, a.path, fmt.Sprintf(`{"key":"%s\u00e9","baseURL":%q}`, secretKey, a.gw.BaseURL()))
-	pass(at(12, 6, 0))
+	pass(at(12, 8, 0))
+	// The key in baseURL's query, and pasted as baseURL (review of PR #85,
+	// Astra B2, Opus nit 4).
+	writeFile(t, a.path, fmt.Sprintf(`{"key":%q,"baseURL":%q}`, secretKey, a.gw.BaseURL()+"?api_key="+secretKey))
+	pass(at(12, 9, 0))
+	writeFile(t, a.path, fmt.Sprintf(`{"key":%q,"baseURL":%q}`, secretKey, secretKey))
+	pass(at(12, 10, 0))
 
 	// Passes by Start.
 	fc := clocktesting.NewFakeClock(at(12, 0, 0))
@@ -171,7 +192,7 @@ func TestKeyReachesNoErrorLogEventOrObject(t *testing.T) {
 	undo = failReads(b.gw)
 	next("Start, a 504 with the key in its body")
 	undo()
-	b.gw.SetModels(model("")) // an entry with no name: the pass fails, and Start logs it
+	b.setProfileKind(v1alpha1.PlatformBatch) // not managed: the pass fails, and Start logs it
 	next("Start, a pass that fails")
 	cancel()
 	select {
@@ -191,7 +212,7 @@ func TestKeyReachesNoErrorLogEventOrObject(t *testing.T) {
 		}
 	}
 	joined := strings.Join(seenEvents, "\n")
-	for _, want := range []string{"KeyRejected", "FileRefused"} {
+	for _, want := range []string{"KeyRejected", "FileRefused", "CatalogEntrySkipped"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("no event with %q was emitted, so the event check saw nothing of that kind: %q", want, seenEvents)
 		}
@@ -252,7 +273,7 @@ func TestNonTestFilesImportNoOsExec(t *testing.T) {
 			sawNetHTTP = sawNetHTTP || path == "net/http"
 		}
 	}
-	for _, f := range []string{"controller.go", "client.go", "catalog.go"} {
+	for _, f := range []string{"controller.go", "client.go"} {
 		if !parsed[f] {
 			t.Fatalf("%s was not parsed (parsed %v): the check looked at nothing", f, parsed)
 		}

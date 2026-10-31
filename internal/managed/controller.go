@@ -27,14 +27,6 @@ import (
 // readiness 6).
 const CatalogInterval = time.Minute
 
-// Limits of status.catalog (api/v1alpha1, CatalogEntryStatus and
-// ProviderStatus.Catalog).
-const (
-	maxCatalogEntries  = 1024
-	maxCatalogNameLen  = 253
-	maxCatalogRevision = 256
-)
-
 // Clock is the controller's time source. A clock that also has
 // After(time.Duration) <-chan time.Time, such as k8s.io/utils/clock's, paces
 // Start; otherwise Start waits in real time.
@@ -59,12 +51,14 @@ type Options struct {
 	Provider string
 	// Clock is the time source; nil is the real clock.
 	Clock Clock
-	// Transport carries the catalog reads; nil is a copy of
-	// http.DefaultTransport with ConnectTimeout, shared by every pass.
+	// Transport carries the catalog reads; nil is newTransport's, which
+	// never replays a request. A transport passed here must not replay one
+	// either, or one pass could read twice.
 	Transport http.RoundTripper
 	// Recorder, when set, gets an event on the Provider when
 	// CredentialsRejected, CredentialsExpiring or CredentialsInvalid turns
-	// True.
+	// True or Ready turns False, and the events of each successful read
+	// (CatalogEntrySkipped, CatalogTruncated).
 	Recorder events.EventRecorder
 	// Log is the controller's logger; the zero Logger discards.
 	Log logr.Logger
@@ -76,42 +70,53 @@ type Options struct {
 //
 // It is a manager.Runnable that needs leader election, so it runs only in the
 // manager that holds the Provider's Lease (docs/development.md, Process
-// layout): the per-Provider manager supervisor, or the controller binary's
-// main, builds one with New and adds it with SetupWithManager.
+// layout). The per-Provider manager supervisor, or the controller binary's
+// main, adds it with Setup.
 //
-// Each pass (Sync) behaves as pkg/provider/fake.ManagedController's Sync,
-// which the lifecycle controller's tests use, with the catalog read over HTTP
-// and the key's expiry from the credentials file:
+// Each pass (Sync) applies the same rules as pkg/provider/fake.
+// ManagedController, which the lifecycle controller's tests use: the bounded
+// catalog merge (provider.MergeCatalog), the readiness staleness rule
+// (provider.SetManagedReadiness) and CredentialsExpiring
+// (provider.ExpiringCondition), all three per @hpc-burst-science-agent's
+// ruling of 31 Oct 2026. It reads the catalog over HTTP and the key's expiry
+// from the credentials file:
 //
-//   - It reads at most once per CatalogInterval. A pass sooner than that after
-//     the last read, in this process or (by the stored lastReconcileTime and
-//     lastCatalogRead) in an earlier one, reads nothing and says how long to
-//     wait.
+//   - The Provider's PlatformProfile must exist and be managed, and the
+//     Provider must carry the platform label; otherwise the pass is an error
+//     that reads and writes nothing.
 //   - It reads the Provider's spec.credentialsRef.file with
 //     provider.ReadManagedCredentials at every pass, so the key is never kept
 //     between passes and reaches no log, event, status or command line. A
 //     file it refuses, or a Provider that names none, sets CredentialsInvalid
 //     True and reads no catalog; a file it accepts sets it False.
-//   - A successful read puts one entry in status.catalog for every name ever
-//     listed, sorted by name: listed true and lastListedTime now for the ones
-//     the read listed, the others kept with listed false. The managed ID is
-//     pkg/deploymentid's over the Provider's platform label, the name and the
-//     revision (absent when empty). lastCatalogRead is now, Ready is True with
-//     CatalogRead, and CredentialsRejected False with KeyAccepted.
+//   - It reads at most once per CatalogInterval, across restarts too: before
+//     each read it stores lastReconcileTime, and a pass sooner than a minute
+//     after the last read, by this process's clock or by the stored
+//     lastReconcileTime and lastCatalogRead, reads nothing.
+//   - A successful read merges the listing into status.catalog
+//     (provider.MergeCatalog): listed entries with their managed IDs, unlisted
+//     ones kept until room is needed, entries the status cannot hold skipped.
+//     lastCatalogRead and lastSuccessfulStatusRead are now, Ready is True with
+//     CatalogRead, and CredentialsRejected False with KeyAccepted. Each skipped
+//     entry raises a CatalogEntrySkipped event, and a listing above 1024
+//     raises CatalogTruncated, on every read.
 //   - A 401 or 403 sets CredentialsRejected True with KeyRejected and leaves
-//     the catalog, lastCatalogRead and Ready as they were.
-//   - Any other failure is unknown: the pass writes nothing.
-//   - CredentialsExpiring follows the file's expiry on every pass that writes:
-//     True with ExpiresWithinADay from a day before it (provider.
-//     ManagedCredentials.Expiring), Expired from it on, else False with
-//     NotExpiring; with no expiry known it is left as it is.
-//   - A Provider without the platform label, or a listing the status cannot
-//     hold (an empty name, a name above 253 characters, a revision above 256,
-//     more than 1024 names ever), is an error that writes nothing.
+//     the catalog and lastCatalogRead as they were.
+//   - Any other failure is unknown: the catalog is left as it was.
+//   - Every pass that is not a successful read leaves lastSuccessfulStatusRead
+//     alone, and turns Ready False with ReadsFailing once the last successful
+//     read is more than v1alpha1.ProviderReadyStaleness old.
+//   - CredentialsExpiring follows the file on every pass that read it: True
+//     from a day before the expiry, Expired from it on, else False with
+//     NotExpiring, also when the file names no expiry.
 //   - Every write is a status Update under v1alpha1.FieldManagerProvider with
 //     the read's resourceVersion; on a conflict it re-reads the Provider and
 //     applies the same read again, so a condition another writer owns, such
 //     as DialHomeUnreachable, is kept.
+//
+// Where it differs from the stand-in, which has no clock gate, no file and no
+// HTTP: the reservation write before each read, the profile check, the
+// CredentialsInvalid condition, the conflict retry, and the events.
 type Controller struct {
 	client    client.Client
 	reader    client.Reader
@@ -149,8 +154,6 @@ func New(opts Options) (*Controller, error) {
 		c.clock = realClock{}
 	}
 	if c.transport == nil {
-		// One transport for every pass, so a pass reuses the last one's
-		// connection; each pass still reads the key afresh.
 		c.transport = newTransport()
 	}
 	return c, nil
@@ -215,12 +218,15 @@ type outcome struct {
 	credsErr error     // the file was refused, or none is named
 	noFile   bool      // credsErr is because no file is named
 	creds    provider.ManagedCredentials
+	read     bool                    // a GET was made
 	entries  []provider.CatalogEntry // a successful read
 	rejected error                   // a read that wraps provider.ErrKeyRejected
+	failed   bool                    // a read whose outcome is unknown
 }
 
 // Sync runs one pass, unless the last read was less than CatalogInterval
-// ago. It returns how long to wait before the next pass.
+// ago. It returns how long to wait before the next pass, at most
+// CatalogInterval.
 func (c *Controller) Sync(ctx context.Context) (time.Duration, error) {
 	log := c.log.WithValues("provider", c.provider)
 	var prov v1alpha1.Provider
@@ -229,10 +235,15 @@ func (c *Controller) Sync(ctx context.Context) (time.Duration, error) {
 	}
 	exact := c.clock.Now()
 	if next := c.nextRead(&prov); exact.Before(next) {
-		return next.Sub(exact), nil
+		// Capped, so a stored time in the future (a clock stepped back) is
+		// looked at again a minute on, not slept out (review of PR #85, nit 10).
+		return min(next.Sub(exact), CatalogInterval), nil
 	}
 	if prov.Labels[v1alpha1.LabelPlatform] == "" {
 		return CatalogInterval, fmt.Errorf("no %s label on Provider %s: the managed IDs need the platform", v1alpha1.LabelPlatform, c.provider)
+	}
+	if err := c.checkProfile(ctx, &prov); err != nil {
+		return CatalogInterval, err
 	}
 	out := outcome{now: exact.UTC().Truncate(time.Second)}
 	switch ref := prov.Spec.CredentialsRef; {
@@ -241,24 +252,31 @@ func (c *Controller) Sync(ctx context.Context) (time.Duration, error) {
 	default:
 		out.creds, out.credsErr = provider.ReadManagedCredentials(ref.File)
 	}
+	var mc *Client
 	if out.credsErr == nil {
-		mc, err := NewClient(out.creds, c.transport)
-		if err != nil {
-			out.credsErr = err
-		} else {
-			c.mu.Lock()
-			c.lastAttempt = exact
-			c.mu.Unlock()
-			entries, err := mc.ListCatalog(ctx)
-			switch {
-			case err == nil:
-				out.entries = entries
-			case errors.Is(err, provider.ErrKeyRejected):
-				out.rejected = err
-			default:
-				log.Info("catalog read failed; the status is left as it was", "error", err.Error())
-				return CatalogInterval, nil
-			}
+		mc, out.credsErr = NewClient(out.creds, c.transport)
+	}
+	if out.credsErr == nil {
+		// The read is reserved before it is made: lastReconcileTime is stored
+		// first, so no restart, failed read or lost write lets a later process
+		// read again within the minute (review of PR #85, Astra B3, Opus B1).
+		// A reservation that cannot be stored makes no read.
+		c.mu.Lock()
+		c.lastAttempt = exact
+		c.mu.Unlock()
+		if err := c.reserve(ctx, &prov, out.now); err != nil {
+			return CatalogInterval, err
+		}
+		out.read = true
+		entries, err := mc.ListCatalog(ctx)
+		switch {
+		case err == nil:
+			out.entries = entries
+		case errors.Is(err, provider.ErrKeyRejected):
+			out.rejected = err
+		default:
+			out.failed = true
+			log.Info("catalog read failed; the catalog is left as it was", "error", err.Error())
 		}
 	}
 	if err := c.write(ctx, &prov, out); err != nil {
@@ -267,11 +285,26 @@ func (c *Controller) Sync(ctx context.Context) (time.Duration, error) {
 	return CatalogInterval, nil
 }
 
+// checkProfile refuses a Provider whose PlatformProfile is missing or not
+// managed, before any read: a batch Provider's credentials file is an ssh
+// configuration, never a managed one (review of PR #85, nit 9).
+func (c *Controller) checkProfile(ctx context.Context, prov *v1alpha1.Provider) error {
+	name := prov.Spec.PlatformProfileRef.Name
+	var pp v1alpha1.PlatformProfile
+	if err := c.reader.Get(ctx, client.ObjectKey{Name: name}, &pp); err != nil {
+		return fmt.Errorf("Provider %s: get PlatformProfile %s: %w", c.provider, name, err)
+	}
+	if pp.Spec.ProviderKind != v1alpha1.PlatformManaged {
+		return fmt.Errorf("Provider %s: PlatformProfile %s has providerKind %q, not %q: not a managed Provider", c.provider, name, pp.Spec.ProviderKind, v1alpha1.PlatformManaged)
+	}
+	return nil
+}
+
 // nextRead is the earliest time the next catalog read may start: a
 // CatalogInterval after the last read this process started, or, before this
 // process has read, after the stored lastCatalogRead and lastReconcileTime,
-// which an earlier process may have written. Stored times are whole seconds,
-// so a second is added to them.
+// which an earlier process wrote before its last read. Stored times are
+// whole seconds, so a second is added to them.
 func (c *Controller) nextRead(prov *v1alpha1.Provider) time.Time {
 	c.mu.Lock()
 	last := c.lastAttempt
@@ -290,9 +323,10 @@ func (c *Controller) nextRead(prov *v1alpha1.Provider) time.Time {
 	return last.Add(CatalogInterval)
 }
 
-// write applies out to the Provider's status and writes it when it changed.
-// On a conflict it re-reads the Provider and applies out again.
-func (c *Controller) write(ctx context.Context, prov *v1alpha1.Provider, out outcome) error {
+// reserve stores lastReconcileTime (and observedGeneration) as now, the
+// reservation of the read about to be made. prov is updated to what was
+// stored.
+func (c *Controller) reserve(ctx context.Context, prov *v1alpha1.Provider, now time.Time) error {
 	first := true
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		if !first {
@@ -301,8 +335,30 @@ func (c *Controller) write(ctx context.Context, prov *v1alpha1.Provider, out out
 			}
 		}
 		first = false
+		prov.Status.ObservedGeneration, prov.Status.LastReconcileTime = prov.Generation, ptrTime(now)
+		if err := c.client.Status().Update(ctx, prov, client.FieldOwner(v1alpha1.FieldManagerProvider)); err != nil {
+			return fmt.Errorf("reserve the catalog read: %w", err)
+		}
+		return nil
+	})
+}
+
+// write applies out to the Provider's status and writes it when it changed.
+// On a conflict it re-reads the Provider and applies out again. The events
+// of a successful read are raised once the write succeeded.
+func (c *Controller) write(ctx context.Context, prov *v1alpha1.Provider, out outcome) error {
+	first := true
+	var merge provider.CatalogMerge
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if !first {
+			if err := c.reader.Get(ctx, client.ObjectKey{Name: c.provider}, prov); err != nil {
+				return fmt.Errorf("get Provider %s: %w", c.provider, err)
+			}
+		}
+		first = false
 		old := prov.DeepCopy()
-		if err := apply(prov, out); err != nil {
+		var err error
+		if merge, err = apply(prov, out); err != nil {
 			return err
 		}
 		if apiequality.Semantic.DeepEqual(old.Status, prov.Status) {
@@ -311,17 +367,32 @@ func (c *Controller) write(ctx context.Context, prov *v1alpha1.Provider, out out
 		if err := c.client.Status().Update(ctx, prov, client.FieldOwner(v1alpha1.FieldManagerProvider)); err != nil {
 			return err
 		}
-		c.emit(old, prov)
+		c.emitTransitions(old, prov)
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	c.emitRead(prov, merge)
+	return nil
 }
 
-// apply sets the Provider's status from one pass. It changes nothing when it
-// returns an error.
-func apply(prov *v1alpha1.Provider, out outcome) error {
+// apply sets the Provider's status from one pass, and returns the merge of a
+// successful read. It changes nothing when it returns an error.
+//
+//   - A refused credentials file: CredentialsInvalid True; no read was made.
+//   - A successful read: provider.MergeCatalog's catalog, lastCatalogRead and
+//     lastSuccessfulStatusRead now, Ready True with CatalogRead, and
+//     CredentialsRejected False with KeyAccepted.
+//   - A rejected key: CredentialsRejected True with KeyRejected.
+//   - An unknown outcome: nothing of the catalog changes.
+//   - Every pass that is not a successful read applies the batch staleness
+//     rule to Ready (provider.SetManagedReadiness); every pass that read the
+//     file sets CredentialsExpiring from it (provider.ExpiringCondition).
+func apply(prov *v1alpha1.Provider, out outcome) (provider.CatalogMerge, error) {
 	platform := prov.Labels[v1alpha1.LabelPlatform]
 	if platform == "" {
-		return fmt.Errorf("no %s label on Provider %s: the managed IDs need the platform", v1alpha1.LabelPlatform, prov.Name)
+		return provider.CatalogMerge{}, fmt.Errorf("no %s label on Provider %s: the managed IDs need the platform", v1alpha1.LabelPlatform, prov.Name)
 	}
 	st := prov.Status.DeepCopy()
 	cond := func(typ string, status metav1.ConditionStatus, reason, message string) {
@@ -330,6 +401,8 @@ func apply(prov *v1alpha1.Provider, out outcome) error {
 			ObservedGeneration: prov.Generation, LastTransitionTime: metav1.NewTime(out.now),
 		})
 	}
+	var merge provider.CatalogMerge
+	readOK := false
 	if out.credsErr != nil {
 		reason := v1alpha1.ReasonFileRefused
 		if out.noFile {
@@ -341,49 +414,63 @@ func apply(prov *v1alpha1.Provider, out outcome) error {
 		switch {
 		case out.rejected != nil:
 			cond(v1alpha1.ConditionCredentialsRejected, metav1.ConditionTrue, v1alpha1.ReasonKeyRejected, out.rejected.Error())
-		default:
-			catalog, err := mergeCatalog(st.Catalog, out.entries, platform, out.now)
-			if err != nil {
-				return err
+		case !out.failed:
+			var err error
+			if merge, err = provider.MergeCatalog(st.Catalog, out.entries, platform, out.now); err != nil {
+				return provider.CatalogMerge{}, fmt.Errorf("Provider %s: %w", prov.Name, err)
 			}
-			st.Catalog, st.LastCatalogRead = catalog, ptrTime(out.now)
-			cond(v1alpha1.ConditionProviderReady, metav1.ConditionTrue, v1alpha1.ReasonCatalogRead, "")
+			st.Catalog, st.LastCatalogRead, readOK = merge.Catalog, ptrTime(out.now), true
 			cond(v1alpha1.ConditionCredentialsRejected, metav1.ConditionFalse, v1alpha1.ReasonKeyAccepted, "")
 		}
-		if exp := out.creds.Expiry; exp != nil {
-			at := exp.UTC().Format(time.RFC3339)
-			switch {
-			case !out.now.Before(*exp):
-				cond(v1alpha1.ConditionCredentialsExpiring, metav1.ConditionTrue, v1alpha1.ReasonExpired, "the key expired at "+at)
-			case out.creds.Expiring(out.now):
-				cond(v1alpha1.ConditionCredentialsExpiring, metav1.ConditionTrue, v1alpha1.ReasonExpiresWithinADay, "the key expires at "+at)
-			default:
-				cond(v1alpha1.ConditionCredentialsExpiring, metav1.ConditionFalse, v1alpha1.ReasonNotExpiring, "the key expires at "+at)
-			}
-		}
+		status, reason, message := provider.ExpiringCondition(out.creds.Expiry, out.now)
+		cond(v1alpha1.ConditionCredentialsExpiring, status, reason, message)
 	}
+	provider.SetManagedReadiness(st, prov.Generation, readOK, out.now)
 	st.ObservedGeneration, st.LastReconcileTime = prov.Generation, ptrTime(out.now)
 	prov.Status = *st
-	return nil
+	return merge, nil
 }
 
 func ptrTime(t time.Time) *metav1.Time { m := metav1.NewTime(t); return &m }
 
-// emit records an event for each credentials condition that turned True in
-// this write. The notes are the condition messages, which hold no key and no
-// response body.
-func (c *Controller) emit(old, prov *v1alpha1.Provider) {
+// emitTransitions records an event for each credentials condition that
+// turned True in this write, and for Ready turning False. The notes are the
+// condition messages, which hold no key and no byte the gateway sent.
+func (c *Controller) emitTransitions(old, prov *v1alpha1.Provider) {
 	if c.recorder == nil {
 		return
 	}
-	for _, typ := range []string{v1alpha1.ConditionCredentialsInvalid, v1alpha1.ConditionCredentialsRejected, v1alpha1.ConditionCredentialsExpiring} {
-		now := apimeta.FindStatusCondition(prov.Status.Conditions, typ)
-		if now == nil || now.Status != metav1.ConditionTrue {
+	for _, w := range []struct {
+		typ    string
+		status metav1.ConditionStatus
+	}{
+		{v1alpha1.ConditionCredentialsInvalid, metav1.ConditionTrue},
+		{v1alpha1.ConditionCredentialsRejected, metav1.ConditionTrue},
+		{v1alpha1.ConditionCredentialsExpiring, metav1.ConditionTrue},
+		{v1alpha1.ConditionProviderReady, metav1.ConditionFalse},
+	} {
+		now := apimeta.FindStatusCondition(prov.Status.Conditions, w.typ)
+		if now == nil || now.Status != w.status {
 			continue
 		}
-		if was := apimeta.FindStatusCondition(old.Status.Conditions, typ); was != nil && was.Status == metav1.ConditionTrue && was.Reason == now.Reason {
+		if was := apimeta.FindStatusCondition(old.Status.Conditions, w.typ); was != nil && was.Status == now.Status && was.Reason == now.Reason {
 			continue
 		}
-		c.recorder.Eventf(prov, nil, corev1.EventTypeWarning, now.Reason, "ReadCatalog", "%s: %s", typ, now.Message)
+		c.recorder.Eventf(prov, nil, corev1.EventTypeWarning, now.Reason, "ReadCatalog", "%s: %s", w.typ, now.Message)
+	}
+}
+
+// emitRead records the events of a successful read, on every read: one per
+// skipped entry, and CatalogTruncated while the listing does not fit
+// (@hpc-burst-science-agent's ruling of 31 Oct 2026).
+func (c *Controller) emitRead(prov *v1alpha1.Provider, merge provider.CatalogMerge) {
+	if c.recorder == nil {
+		return
+	}
+	for _, s := range merge.Skipped {
+		c.recorder.Eventf(prov, nil, corev1.EventTypeWarning, provider.EventCatalogEntrySkipped, "ReadCatalog", "%s", provider.SkippedNote(s))
+	}
+	if merge.Truncated > 0 {
+		c.recorder.Eventf(prov, nil, corev1.EventTypeWarning, provider.EventCatalogTruncated, "ReadCatalog", "%s", provider.TruncatedNote(merge.Truncated))
 	}
 }

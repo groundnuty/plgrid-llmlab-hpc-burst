@@ -17,7 +17,11 @@ import (
 func TestCredentialsExpiringFollowsTheFilesExpiry(t *testing.T) {
 	e := newEnv(t, withModels(model("example-a")))
 	e.syncAt(at(12, 0, 0))
-	e.wantNoCondition(v1alpha1.ConditionCredentialsExpiring) // the file names no expiry
+	// The file names no expiry: False, NotExpiring (science-agent ruling, 31
+	// Oct 2026).
+	if c := e.wantCondition(v1alpha1.ConditionCredentialsExpiring, metav1.ConditionFalse, "NotExpiring"); c.Message != "the credentials file names no expiry" {
+		t.Fatalf("message = %q, want the no-expiry message", c.Message)
+	}
 
 	for i, st := range []struct {
 		now     time.Time
@@ -46,13 +50,15 @@ func TestCredentialsExpiringFollowsTheFilesExpiry(t *testing.T) {
 		}
 	}
 
-	// With no expiry in the file the condition is left as it was found.
+	// A rotation to a file with no expiry clears Expired at the next read
+	// (science-agent ruling, 31 Oct 2026; review of PR #85, Opus nit 1).
 	writeCreds(t, e.path, testKey, e.gw.BaseURL(), "")
 	e.syncAt(at(12, 14, 0))
-	c := e.wantCondition(v1alpha1.ConditionCredentialsExpiring, metav1.ConditionTrue, "Expired")
-	if c.Message != "the key expired at 2026-10-31T12:11:59Z" {
-		t.Fatalf("message = %q, want the earlier one kept", c.Message)
+	c := e.wantCondition(v1alpha1.ConditionCredentialsExpiring, metav1.ConditionFalse, "NotExpiring")
+	if c.Message != "the credentials file names no expiry" {
+		t.Fatalf("message = %q, want the no-expiry message", c.Message)
 	}
+	wantMT(t, "the transition", &c.LastTransitionTime, at(12, 14, 0))
 
 	// A renewed key, far from its expiry.
 	writeCreds(t, e.path, testKey, e.gw.BaseURL(), "2027-01-31T00:00:00Z")

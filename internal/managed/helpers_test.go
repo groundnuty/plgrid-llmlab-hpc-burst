@@ -1,11 +1,13 @@
 package managed
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -81,15 +83,16 @@ func modelRev(id, revision string) llmlabtest.Model {
 
 // envConfig is what newEnv builds from.
 type envConfig struct {
-	models   []llmlabtest.Model
-	key      string
-	moreKeys []string
-	noLabel  bool
-	credsRef func(path string) *v1alpha1.CredentialsReference
-	builders []func(*clientfake.ClientBuilder) *clientfake.ClientBuilder
-	clock    Clock
-	recorder events.EventRecorder
-	log      logr.Logger
+	models    []llmlabtest.Model
+	key       string
+	moreKeys  []string
+	noLabel   bool
+	credsRef  func(path string) *v1alpha1.CredentialsReference
+	builders  []func(*clientfake.ClientBuilder) *clientfake.ClientBuilder
+	clock     Clock
+	recorder  events.EventRecorder
+	log       logr.Logger
+	transport http.RoundTripper
 }
 
 type envOption func(*envConfig)
@@ -100,6 +103,33 @@ func withExtraKeys(ks ...string) envOption        { return func(c *envConfig) { 
 func withNoLabel() envOption                      { return func(c *envConfig) { c.noLabel = true } }
 func withClock(clk Clock) envOption               { return func(c *envConfig) { c.clock = clk } }
 func withLog(l logr.Logger) envOption             { return func(c *envConfig) { c.log = l } }
+func withTransport(rt http.RoundTripper) envOption {
+	return func(c *envConfig) { c.transport = rt }
+}
+
+// countingTransport counts the requests that leave the controller, whatever
+// their address: a request to an address no double listens on is still
+// counted (review of PR #85, nit 5).
+type countingTransport struct {
+	base http.RoundTripper
+	mu   sync.Mutex
+	n    int
+}
+
+func newCountingTransport() *countingTransport { return &countingTransport{base: newTransport()} }
+
+func (c *countingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	c.mu.Lock()
+	c.n++
+	c.mu.Unlock()
+	return c.base.RoundTrip(r)
+}
+
+func (c *countingTransport) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.n
+}
 func withRecorder(r events.EventRecorder) envOption {
 	return func(c *envConfig) { c.recorder = r }
 }
@@ -162,7 +192,11 @@ func newEnv(t *testing.T, opts ...envOption) *env {
 			CredentialsRef:     cfg.credsRef(path),
 		},
 	}
-	builder := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(prov).WithStatusSubresource(&v1alpha1.Provider{})
+	profile := &v1alpha1.PlatformProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "example-profile"},
+		Spec:       v1alpha1.PlatformProfileSpec{ProviderKind: v1alpha1.PlatformManaged},
+	}
+	builder := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(prov, profile).WithStatusSubresource(&v1alpha1.Provider{})
 	for _, b := range cfg.builders {
 		builder = b(builder)
 	}
@@ -174,7 +208,7 @@ func newEnv(t *testing.T, opts ...envOption) *env {
 		e.clock = &manualClock{t: at(12, 0, 0)}
 		clk = e.clock
 	}
-	ctl, err := New(Options{Client: c, Provider: testProvider, Clock: clk, Recorder: cfg.recorder, Log: cfg.log})
+	ctl, err := New(Options{Client: c, Provider: testProvider, Clock: clk, Recorder: cfg.recorder, Log: cfg.log, Transport: cfg.transport})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,23 +392,108 @@ func failReads(gw *llmlabtest.Server) (undo func()) {
 	}
 }
 
-// closedPort returns a port of the test block with nothing listening on it:
-// the highest free one, taken and released at once, because the double and
-// other packages' doubles take theirs from the bottom of the block.
-func closedPort(t *testing.T) int {
+// closedPort is a port that refuses connections by construction: port 1 on
+// loopback is privileged, so no test of any package can listen on it (review
+// of PR #85, nit 14; a port of the shared block, taken and released, could be
+// bound again by a parallel package before the dial).
+func closedPort(*testing.T) int { return 1 }
+
+// rawStub is a gateway that answers with bytes a test writes by hand, for the
+// answers net/http's server never sends: a malformed Location or header, or a
+// connection dropped after the request arrived. respond is called for each
+// request with its number (from 1) and whether it came on a connection that
+// already carried one; it returns the bytes to send (none to send nothing)
+// and whether to keep the connection open.
+type rawStub struct {
+	ln      net.Listener
+	respond func(n int, reused bool) (string, bool)
+	mu      sync.Mutex
+	n       int
+}
+
+func startRawStubFunc(t *testing.T, respond func(n int, reused bool) (string, bool)) *rawStub {
 	t.Helper()
-	for p := portHi; p >= portLo; p-- {
-		ln, err := llmlabtest.Listen(p, p)
-		if err != nil {
-			continue
-		}
-		if err := ln.Close(); err != nil {
-			t.Fatal(err)
-		}
-		return p
+	ln, err := llmlabtest.Listen(portLo, portHi)
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Fatalf("no free port in %d-%d", portLo, portHi)
-	return 0
+	s := &rawStub{ln: ln, respond: respond}
+	go s.serve()
+	t.Cleanup(func() { _ = ln.Close() })
+	return s
+}
+
+// startRawStub answers every request with response and closes the
+// connection.
+func startRawStub(t *testing.T, response string) *rawStub {
+	return startRawStubFunc(t, func(int, bool) (string, bool) { return response, false })
+}
+
+func (s *rawStub) serve() {
+	for {
+		conn, err := s.ln.Accept()
+		if err != nil {
+			return
+		}
+		go s.conn(conn)
+	}
+}
+
+func (s *rawStub) conn(conn net.Conn) {
+	defer conn.Close()
+	br := bufio.NewReader(conn)
+	for reused := false; ; reused = true {
+		// A GET has no body: its request ends at the first empty line.
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil {
+				return
+			}
+			if line == "\r\n" || line == "\n" {
+				break
+			}
+		}
+		s.mu.Lock()
+		s.n++
+		n := s.n
+		s.mu.Unlock()
+		resp, keep := s.respond(n, reused)
+		if resp != "" {
+			if _, err := io.WriteString(conn, resp); err != nil {
+				return
+			}
+		}
+		if !keep {
+			return
+		}
+	}
+}
+
+// count is how many requests arrived.
+func (s *rawStub) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.n
+}
+
+func (s *rawStub) baseURL() string { return "http://" + s.ln.Addr().String() + "/v1" }
+
+// rawOK is a 200 with okListing that keeps the connection open.
+func rawOK() string {
+	return fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(okListing), okListing)
+}
+
+// setProfileKind changes the providerKind of the env's PlatformProfile.
+func (e *env) setProfileKind(kind v1alpha1.PlatformKind) {
+	e.t.Helper()
+	var pp v1alpha1.PlatformProfile
+	if err := e.c.Get(context.Background(), client.ObjectKey{Name: "example-profile"}, &pp); err != nil {
+		e.t.Fatal(err)
+	}
+	pp.Spec.ProviderKind = kind
+	if err := e.c.Update(context.Background(), &pp); err != nil {
+		e.t.Fatal(err)
+	}
 }
 
 // stub is a tiny gateway whose answer a test sets, for the answers the double

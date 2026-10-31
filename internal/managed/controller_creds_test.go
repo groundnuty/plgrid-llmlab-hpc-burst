@@ -82,7 +82,8 @@ func TestCredentialsFileProblems(t *testing.T) {
 			nil, fixRef, "NoCredentialsFile", "names no credentials file"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			e := newEnv(t, append([]envOption{withModels(model("example-a"))}, tc.opts...)...)
+			rt := newCountingTransport()
+			e := newEnv(t, append([]envOption{withModels(model("example-a")), withTransport(rt)}, tc.opts...)...)
 			if tc.breakIt != nil {
 				tc.breakIt(t, e)
 			}
@@ -92,7 +93,11 @@ func TestCredentialsFileProblems(t *testing.T) {
 			if !strings.Contains(c.Message, provider.ErrCredentials.Error()) || !strings.Contains(c.Message, tc.message) {
 				t.Fatalf("message = %q, want it to hold %q and %q", c.Message, provider.ErrCredentials.Error(), tc.message)
 			}
-			// Not a single request reached the gateway, of any path.
+			// Not a single request left the controller, to any address: a
+			// file naming another host would not reach the double at all.
+			if n := rt.count(); n != 0 {
+				t.Fatalf("%d requests left the controller, want 0", n)
+			}
 			if n := len(e.gw.Requests()); n != 0 {
 				t.Fatalf("the gateway logged %d requests, want 0", n)
 			}
@@ -101,8 +106,14 @@ func TestCredentialsFileProblems(t *testing.T) {
 				t.Fatalf("status = catalog %v, lastCatalogRead %v, want none: nothing was read", prov.Status.Catalog, prov.Status.LastCatalogRead)
 			}
 			wantMT(t, "lastReconcileTime", prov.Status.LastReconcileTime, at(12, 0, 0))
-			for _, typ := range []string{v1alpha1.ConditionProviderReady, v1alpha1.ConditionCredentialsRejected, v1alpha1.ConditionCredentialsExpiring} {
+			for _, typ := range []string{v1alpha1.ConditionCredentialsRejected, v1alpha1.ConditionCredentialsExpiring} {
 				e.wantNoCondition(typ)
+			}
+			// No catalog was ever read: Ready is False (the batch staleness
+			// rule, science-agent ruling of 31 Oct 2026).
+			r := e.wantCondition(v1alpha1.ConditionProviderReady, metav1.ConditionFalse, "ReadsFailing")
+			if r.Message != "reads are failing: no successful read yet" {
+				t.Fatalf("Ready's message = %q", r.Message)
 			}
 
 			// The pass before the stored floor (lastReconcileTime plus one
@@ -240,7 +251,12 @@ func TestRejectedKeyFromTheStartWritesNoCatalog(t *testing.T) {
 		t.Fatalf("status = catalog %v, lastCatalogRead %v, want none: nothing was ever read", prov.Status.Catalog, prov.Status.LastCatalogRead)
 	}
 	wantMT(t, "lastReconcileTime", prov.Status.LastReconcileTime, at(12, 0, 0))
-	e.wantNoCondition(v1alpha1.ConditionProviderReady)
+	if prov.Status.LastSuccessfulStatusRead != nil {
+		t.Fatalf("lastSuccessfulStatusRead = %v, want none: no read succeeded", prov.Status.LastSuccessfulStatusRead)
+	}
+	if r := e.wantCondition(v1alpha1.ConditionProviderReady, metav1.ConditionFalse, "ReadsFailing"); r.Message != "reads are failing: no successful read yet" {
+		t.Fatalf("Ready's message = %q", r.Message)
+	}
 }
 
 // A key the gateway lets expire answers 401, as a rejected one does.

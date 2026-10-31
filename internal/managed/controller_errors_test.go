@@ -13,10 +13,14 @@ import (
 )
 
 // Any failure that is not a 401 or 403 is unknown: the pass returns nil and
-// writes nothing at all. The tests below start from a Provider with a real
-// status and a file whose expiry would flip CredentialsExpiring on the pass
-// that follows, so "unchanged" is a statement about something that could have
-// changed. The failed attempt still counts against the minute.
+// leaves the catalog, lastCatalogRead, lastSuccessfulStatusRead and
+// CredentialsRejected as they were. It still writes what does not depend on
+// the gateway's answer (@hpc-burst-science-agent's ruling of 31 Oct 2026):
+// lastReconcileTime, which was reserved before the read, CredentialsExpiring
+// from the file, and Ready by the staleness rule. The tests below start from a
+// Provider with a real status, fail more than five minutes after its last
+// success, and use a file whose expiry flips CredentialsExpiring on the
+// failing pass. The failed attempt still counts against the minute.
 
 const unknownExpiry = "2026-11-02T12:00:00Z"
 
@@ -24,7 +28,7 @@ const unknownExpiry = "2026-11-02T12:00:00Z"
 var unknownErrorsAt = time.Date(2026, 11, 1, 13, 0, 0, 0, time.UTC)
 
 // wantUnknownErrorPass runs a pass at unknownErrorsAt and checks that it
-// returned nil and wrote nothing.
+// returned nil and left everything that depends on the gateway's answer.
 func wantUnknownErrorPass(t *testing.T, e *env, before *v1alpha1.Provider) {
 	t.Helper()
 	wait, err := e.trySyncAt(unknownErrorsAt)
@@ -35,8 +39,17 @@ func wantUnknownErrorPass(t *testing.T, e *env, before *v1alpha1.Provider) {
 		t.Fatalf("Sync waited %v, want 1m", wait)
 	}
 	after := e.provider()
-	if after.ResourceVersion != before.ResourceVersion || !apiequality.Semantic.DeepEqual(before.Status, after.Status) {
-		t.Fatalf("an unknown error changed the status:\n before %+v\n after  %+v", before.Status, after.Status)
+	if !apiequality.Semantic.DeepEqual(before.Status.Catalog, after.Status.Catalog) {
+		t.Fatalf("an unknown error changed the catalog:\n before %+v\n after  %+v", before.Status.Catalog, after.Status.Catalog)
+	}
+	wantMT(t, "lastCatalogRead", after.Status.LastCatalogRead, at(12, 0, 0))
+	wantMT(t, "lastSuccessfulStatusRead", after.Status.LastSuccessfulStatusRead, at(12, 0, 0))
+	wantMT(t, "lastReconcileTime", after.Status.LastReconcileTime, unknownErrorsAt)
+	e.wantCondition(v1alpha1.ConditionCredentialsRejected, metav1.ConditionFalse, "KeyAccepted")
+	e.wantCondition(v1alpha1.ConditionCredentialsExpiring, metav1.ConditionTrue, "ExpiresWithinADay")
+	r := e.wantCondition(v1alpha1.ConditionProviderReady, metav1.ConditionFalse, "ReadsFailing")
+	if r.Message != "reads are failing: the last successful read was at 2026-10-31T12:00:00Z" {
+		t.Fatalf("Ready's message = %q", r.Message)
 	}
 }
 
@@ -54,9 +67,10 @@ func wantRecovery(t *testing.T, e *env, reads func() int, n int) {
 	}
 	wantMT(t, "lastCatalogRead", e.provider().Status.LastCatalogRead, unknownErrorsAt.Add(time.Minute))
 	e.wantCondition(v1alpha1.ConditionCredentialsExpiring, metav1.ConditionTrue, "ExpiresWithinADay")
+	e.wantCondition(v1alpha1.ConditionProviderReady, metav1.ConditionTrue, "CatalogRead")
 }
 
-func TestUnknownErrorsWriteNothing(t *testing.T) {
+func TestUnknownErrorsLeaveTheCatalog(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		h    func(s *stub) http.HandlerFunc

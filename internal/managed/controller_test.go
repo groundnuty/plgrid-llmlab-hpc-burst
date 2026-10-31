@@ -15,6 +15,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -44,7 +45,10 @@ func TestCatalogFollowsTheListing(t *testing.T) {
 	e.wantCondition(v1alpha1.ConditionProviderReady, metav1.ConditionTrue, "CatalogRead")
 	e.wantCondition(v1alpha1.ConditionCredentialsRejected, metav1.ConditionFalse, "KeyAccepted")
 	e.wantCondition(v1alpha1.ConditionCredentialsInvalid, metav1.ConditionFalse, "FileRead")
-	e.wantNoCondition(v1alpha1.ConditionCredentialsExpiring) // the file has no expiry
+	// The file has no expiry: False, NotExpiring (science-agent ruling, 31
+	// Oct 2026).
+	e.wantCondition(v1alpha1.ConditionCredentialsExpiring, metav1.ConditionFalse, "NotExpiring")
+	wantMT(t, "lastSuccessfulStatusRead", prov.Status.LastSuccessfulStatusRead, at(12, 0, 0))
 	aID := e.entry("example-a").ManagedID
 
 	// A removal and an add: example-a leaves the listing and example-c
@@ -233,29 +237,48 @@ func TestProviderWithoutAPlatformLabelIsAnError(t *testing.T) {
 	})
 }
 
-func TestLimitsOfTheCatalogStatus(t *testing.T) {
+// The bounded catalog (@hpc-burst-science-agent's ruling of 31 Oct 2026): an
+// entry the status cannot hold is skipped with an event naming it, the rest
+// is recorded and the read counts; room is made by pruning unlisted entries,
+// oldest lastListedTime first; a listing above 1024 keeps the first 1024 by
+// name and raises CatalogTruncated on every read. Ready stays True.
+func TestBoundedCatalog(t *testing.T) {
+	drain := func(rec *events.FakeRecorder) []string {
+		var out []string
+		for {
+			select {
+			case ev := <-rec.Events:
+				out = append(out, ev)
+			default:
+				return out
+			}
+		}
+	}
 	for _, tc := range []struct {
 		name   string
 		models []llmlabtest.Model
+		note   string
 	}{
-		{"an entry with no name", []llmlabtest.Model{model("")}},
-		{"a name of 254 characters", []llmlabtest.Model{model(strings.Repeat("n", 254))}},
-		{"a name of 254 multi-byte characters", []llmlabtest.Model{model(strings.Repeat("\u00e9", 254))}},
-		{"a revision of 257 characters", []llmlabtest.Model{modelRev("example-a", strings.Repeat("r", 257))}},
+		{"an entry with no name", []llmlabtest.Model{model("")}, `catalog entry "" skipped: an empty name`},
+		{"a name of 254 characters", []llmlabtest.Model{model(strings.Repeat("n", 254))}, `skipped: a name of 254 characters, above 253`},
+		{"a name of 254 multi-byte characters", []llmlabtest.Model{model(strings.Repeat("\u00e9", 254))}, `skipped: a name of 254 characters, above 253`},
+		{"a revision of 257 characters", []llmlabtest.Model{modelRev("example-a", strings.Repeat("r", 257))}, `catalog entry "example-a" skipped: a revision of 257 characters, above 256`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			e := newEnv(t, withModels(model("example-ok")))
+			rec := eventsRecorder()
+			e := newEnv(t, withModels(model("example-ok")), withRecorder(rec))
 			e.syncAt(at(12, 0, 0))
-			before := e.provider()
 			e.gw.SetModels(append([]llmlabtest.Model{model("example-fine")}, tc.models...)...)
-			if _, err := e.trySyncAt(at(12, 1, 0)); err == nil {
-				t.Fatal("Sync = nil, want an error")
+			e.syncAt(at(12, 1, 0))
+			if got := e.names(); len(got) != 2 || got[0] != "example-fine" || got[1] != "example-ok" {
+				t.Fatalf("catalog = %v, want example-fine listed and example-ok kept", got)
 			}
-			if e.gets() != 2 {
-				t.Fatalf("the gateway logged %d reads, want 2: the failing pass read", e.gets())
-			}
-			if after := e.provider(); after.ResourceVersion != before.ResourceVersion {
-				t.Fatal("a listing the status cannot hold was partly written")
+			wantEntry(t, e.entry("example-fine"), true, "", at(12, 1, 0))
+			wantMT(t, "lastCatalogRead", e.provider().Status.LastCatalogRead, at(12, 1, 0))
+			e.wantCondition(v1alpha1.ConditionProviderReady, metav1.ConditionTrue, "CatalogRead")
+			evs := drain(rec)
+			if len(evs) != 1 || !strings.HasPrefix(evs[0], "Warning CatalogEntrySkipped ") || !strings.Contains(evs[0], tc.note) {
+				t.Fatalf("events = %q, want one CatalogEntrySkipped holding %q", evs, tc.note)
 			}
 		})
 	}
@@ -274,44 +297,84 @@ func TestLimitsOfTheCatalogStatus(t *testing.T) {
 		e.entry(wideName) // 253 characters count as 253, not as 506 bytes
 	})
 
-	t.Run("1024 names fit and the 1025th does not", func(t *testing.T) {
+	t.Run("a 1025th name prunes the unlisted entry listed longest ago", func(t *testing.T) {
 		var many []llmlabtest.Model
 		for i := range 1024 {
 			many = append(many, model(fmt.Sprintf("example-%04d", i)))
 		}
-		e := newEnv(t, withModels(many...))
-		e.syncAt(at(12, 0, 0))
+		e := newEnv(t, withModels(many[:512]...))
+		e.syncAt(at(12, 0, 0)) // example-0000 to 0511, listed at 12:00:00
+		e.gw.SetModels(many...)
+		e.syncAt(at(12, 1, 0)) // all 1024, listed at 12:01:00
+		e.gw.SetModels(append(many[1:], model("example-extra"))...)
+		e.syncAt(at(12, 2, 0)) // example-0000 leaves, a new name arrives: 1025 ever
 		if n := len(e.provider().Status.Catalog); n != 1024 {
 			t.Fatalf("%d entries, want 1024", n)
 		}
-		before := e.provider()
-		e.gw.SetModels(model("example-extra")) // 1025 names ever listed
-		_, err := e.trySyncAt(at(12, 1, 0))
-		if err == nil || !strings.Contains(err.Error(), "1024") {
-			t.Fatalf("Sync = %v, want an error naming the limit of 1024", err)
+		e.wantCondition(v1alpha1.ConditionProviderReady, metav1.ConditionTrue, "CatalogRead")
+		wantEntry(t, e.entry("example-extra"), true, "", at(12, 2, 0))
+		for _, n := range e.names() {
+			if n == "example-0000" {
+				t.Fatal("example-0000, the one unlisted entry, was kept although there was no room")
+			}
 		}
-		if e.provider().ResourceVersion != before.ResourceVersion {
-			t.Fatal("the over-long catalog was written")
+		// Now 1023 listed and room for one: example-0001 leaves and stays.
+		e.gw.SetModels(append(many[2:], model("example-extra"))...)
+		e.syncAt(at(12, 3, 0))
+		wantEntry(t, e.entry("example-0001"), false, "", at(12, 2, 0))
+	})
+
+	t.Run("a listing above 1024 keeps the first 1024 by name", func(t *testing.T) {
+		rec := eventsRecorder()
+		var many []llmlabtest.Model
+		for i := 1029; i >= 0; i-- { // 1030 names, listed in reverse order
+			many = append(many, model(fmt.Sprintf("example-%04d", i)))
+		}
+		e := newEnv(t, withModels(many...), withRecorder(rec))
+		for i, when := range []time.Time{at(12, 0, 0), at(12, 1, 0)} {
+			e.syncAt(when)
+			got := e.names()
+			if len(got) != 1024 || got[0] != "example-0000" || got[1023] != "example-1023" {
+				t.Fatalf("read %d: %d entries from %s to %s, want example-0000 to example-1023", i, len(got), got[0], got[len(got)-1])
+			}
+			e.wantCondition(v1alpha1.ConditionProviderReady, metav1.ConditionTrue, "CatalogRead")
+			evs := drain(rec)
+			if len(evs) != 1 || evs[0] != "Warning CatalogTruncated the gateway listed 6 entries more than status.catalog holds (1024); the first 1024 by name are kept" {
+				t.Fatalf("read %d: events = %q, want one CatalogTruncated", i, evs)
+			}
 		}
 	})
 }
+
+// eventsRecorder is a fake recorder with room for every event of a test.
+func eventsRecorder() *events.FakeRecorder { return events.NewFakeRecorder(4096) }
 
 // A conflict on the status update: another writer (the lifecycle controller's
 // DialHomeUnreachable apply) got in between the read and the write. The pass
 // re-reads the Provider and applies the same read again, keeping the other
 // writer's condition, and does not read the gateway a second time.
 func TestConflictOnTheStatusUpdateReusesTheListing(t *testing.T) {
-	var updates atomic.Int32
 	dialHome := metav1.Condition{
 		Type: v1alpha1.ConditionDialHomeUnreachable, Status: metav1.ConditionTrue,
 		Reason: "NoRegistration", Message: "example: the agent did not register",
 		LastTransitionTime: metav1.NewTime(at(11, 59, 0)), ObservedGeneration: 1,
 	}
+	// Update 1 is the reservation before the read, update 2 the first write
+	// of its result: the conflict hits either.
+	for _, conflictAt := range []int32{1, 2} {
+		t.Run(fmt.Sprintf("on status update %d", conflictAt), func(t *testing.T) {
+			testConflictReusesTheListing(t, conflictAt, dialHome)
+		})
+	}
+}
+
+func testConflictReusesTheListing(t *testing.T, conflictAt int32, dialHome metav1.Condition) {
+	var updates atomic.Int32
 	e := newEnv(t, withModels(model("example-a")), withBuilder(withManagedFields), withBuilder(
 		func(b *clientfake.ClientBuilder) *clientfake.ClientBuilder {
 			return b.WithInterceptorFuncs(interceptor.Funcs{
 				SubResourceUpdate: func(ctx context.Context, cl client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
-					if updates.Add(1) == 1 {
+					if updates.Add(1) == conflictAt {
 						applyDialHome(t, cl, testProvider, dialHome) // the other writer wins the race
 						return apierrors.NewConflict(schema.GroupResource{Group: "example.invalid", Resource: "providers"}, obj.GetName(), errors.New("example conflict"))
 					}
@@ -321,8 +384,8 @@ func TestConflictOnTheStatusUpdateReusesTheListing(t *testing.T) {
 		}))
 
 	e.syncAt(at(12, 0, 0))
-	if n := updates.Load(); n != 2 {
-		t.Fatalf("%d status updates, want 2: the conflict and the retry", n)
+	if n := updates.Load(); n != 3 {
+		t.Fatalf("%d status updates, want 3: the reservation, the result, and the retry of the one that conflicted", n)
 	}
 	if n := e.gets(); n != 1 {
 		t.Fatalf("the gateway logged %d reads, want exactly 1: the retry reuses the listing", n)

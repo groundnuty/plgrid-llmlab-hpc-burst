@@ -46,7 +46,7 @@ Code under `spikes/` and `third_party/forked/*` is not part of this module.
 |---|---|---|
 | `api/v1alpha1/`, `config/crd/`, `pkg/provider/`, `pkg/agentapi/` | contracts owner | shared types, interfaces and fakes |
 | `internal/slurm/` | #59 | `provider.Batch` and `provider.ProfileReader` for Slurm over ssh |
-| `internal/managed/` | #69 | the managed Provider's controller: `provider.Managed` for LLMLab (`Client`) and the catalog loop (`Controller`, a leader-elected `manager.Runnable`; the supervisor adds one per managed Provider with `managed.New` and `SetupWithManager`). It reads the credentials file with `provider.ReadManagedCredentials` at every pass. `fake.Managed` and `fake.ManagedController` stand in for it in other components' tests |
+| `internal/managed/` | #69 | the managed Provider's controller: `provider.Managed` for LLMLab (`Client`) and the catalog loop (`Controller`, a leader-elected `manager.Runnable`; the supervisor adds one per managed Provider with `managed.Setup`, its `Setup` hook, which reads through the manager's API reader). It reads the credentials file with `provider.ReadManagedCredentials` at every pass. `fake.Managed` and `fake.ManagedController` stand in for it in other components' tests |
 | `internal/managed/llmlabtest/` | #69 | the HTTP double of LLMLab, standard library only, that #69 and #64 test against: each field behaviour of lessons L-6.1 to L-6.8 switchable per test |
 | `internal/providerctl/` | #59 | the managed reconciler and the per-Provider manager supervisor |
 | `internal/agentserver/` | #60 | the agent API's HTTP server, calling `agentapi.Backend` |
