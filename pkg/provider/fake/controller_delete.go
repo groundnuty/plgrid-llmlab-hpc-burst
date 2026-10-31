@@ -14,27 +14,29 @@ import (
 
 // syncDeleting cancels the Allocation's live jobs and, once none is live and no
 // attempt is unresolved, removes its files and its finalizer.
-func (c *Controller) syncDeleting(ctx context.Context, p *pass, a *v1alpha1.Allocation, tag string) error {
+func (c *Controller) syncDeleting(ctx context.Context, p *pass, s *allocState) error {
+	a := s.a
 	since := a.CreationTimestamp.Add(-listLookback)
 	rec, err := record(a)
 	if err != nil {
 		return err
 	}
-	jobs, err := c.Batch.FindByTag(ctx, tag, since)
+	s.rec = rec
+	jobs, err := c.Batch.FindByTag(ctx, s.tag, since)
 	if err != nil {
 		p.readFailed = true
 		return nil
 	}
-	if rec != nil && len(jobs) > 0 && a.Annotations[v1alpha1.AnnotationJobID] == "" &&
-		(rec.State == v1alpha1.SubmissionUnknown || rec.State == v1alpha1.SubmissionInFlight) {
+	noJobID := a.Annotations[v1alpha1.AnnotationJobID] == ""
+	if unresolved(rec) && noJobID && len(jobs) > 0 {
 		// The unknown attempt is resolved by the job it made; it is cancelled
 		// below and its hold is never lifted.
 		setRecord(a, c.newRecord(rec.Attempt, v1alpha1.SubmissionDone, "", p.now))
 		a.Annotations[v1alpha1.AnnotationJobID] = jobs[0].ID
-		if err := c.Client.Update(ctx, a); err != nil {
+		if err := update(ctx, c.Client, a); err != nil {
 			return fmt.Errorf("adopt job %s: %w", jobs[0].ID, err)
 		}
-		rec, _ = record(a)
+		s.rec, _ = record(a)
 	}
 	if ids := liveIDs(jobs); len(ids) > 0 {
 		for _, r := range c.Batch.Cancel(ctx, ids) {
@@ -43,7 +45,7 @@ func (c *Controller) syncDeleting(ctx context.Context, p *pass, a *v1alpha1.Allo
 			}
 		}
 		// Confirm the cancels before letting go of the Allocation.
-		if jobs, err = c.Batch.FindByTag(ctx, tag, since); err != nil {
+		if jobs, err = c.Batch.FindByTag(ctx, s.tag, since); err != nil {
 			p.readFailed = true
 			return nil
 		}
@@ -51,15 +53,14 @@ func (c *Controller) syncDeleting(ctx context.Context, p *pass, a *v1alpha1.Allo
 			return nil
 		}
 	}
-	if rec != nil && a.Annotations[v1alpha1.AnnotationJobID] == "" &&
-		(rec.State == v1alpha1.SubmissionUnknown || rec.State == v1alpha1.SubmissionInFlight) {
+	if unresolved(s.rec) && a.Annotations[v1alpha1.AnnotationJobID] == "" && !c.attemptReleased(s, p.now) {
 		return nil // an unresolved attempt keeps the finalizer
 	}
-	if err := c.Batch.RemoveAllocationFiles(ctx, tag); err != nil {
+	if err := c.Batch.RemoveAllocationFiles(ctx, s.tag); err != nil {
 		return fmt.Errorf("remove files: %w", err)
 	}
 	controllerutil.RemoveFinalizer(a, v1alpha1.FinalizerCancelAll)
-	if err := c.Client.Update(ctx, a); err != nil && !apierrors.IsNotFound(err) {
+	if err := update(ctx, c.Client, a); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("remove finalizer: %w", err)
 	}
 	return nil

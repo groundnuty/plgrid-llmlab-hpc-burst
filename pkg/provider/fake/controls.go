@@ -1,6 +1,9 @@
 package fake
 
 import (
+	"fmt"
+	"time"
+
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
@@ -67,4 +70,36 @@ func (b *Batch) FailReads(err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.readErr = err
+}
+
+// FailNextLiftHold makes the next LiftHold call return err, once, and change
+// nothing: the job stays held. The call is logged with result LiftFailed. Calls
+// queue, one error per future LiftHold. A nil err is a test bug and panics.
+func (b *Batch) FailNextLiftHold(err error) {
+	if err == nil {
+		panic("fake: FailNextLiftHold needs an error")
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.liftErrs = append(b.liftErrs, err)
+}
+
+// SetTimeLimit is an administrator changing a held, pending or running job's
+// time limit, typically raising it. A running job's HardEnd is its start plus
+// the new limit at the next read, and its phase follows: a limit below the time
+// already run ends the job at once. The call log has op "set-time-limit" with
+// the job ID and the limit. A job that has ended cannot be revived, so it
+// panics, as does a limit that is not positive.
+func (b *Batch) SetTimeLimit(id string, limit time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	j := b.must(id)
+	if limit <= 0 {
+		panic(fmt.Sprintf("fake: time limit %s of job %s is not positive", limit, id))
+	}
+	if !live(b.record(j, b.clock.Now())) {
+		panic("fake: job " + id + " has ended: its time limit cannot change")
+	}
+	b.log("set-time-limit", id, limit.String())
+	j.limit = limit
 }

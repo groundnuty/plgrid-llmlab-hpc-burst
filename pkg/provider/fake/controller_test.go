@@ -36,7 +36,13 @@ type env struct {
 	ctl   *Controller
 }
 
-func newEnv(t *testing.T) *env {
+// withManagedFields makes the fake client record managedFields, so a test sees
+// which field manager wrote what.
+func withManagedFields(b *clientfake.ClientBuilder) *clientfake.ClientBuilder {
+	return b.WithReturnManagedFields()
+}
+
+func newEnv(t *testing.T, opts ...func(*clientfake.ClientBuilder) *clientfake.ClientBuilder) *env {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
@@ -47,11 +53,14 @@ func newEnv(t *testing.T) *env {
 		{Name: gpuPart, GPUModel: "example-gpu-model", GPUsPerNode: 4, MaxTime: time.Hour},
 	}})
 	prov := &v1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: testProvider, Generation: 1}}
-	c := clientfake.NewClientBuilder().
+	builder := clientfake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(prov).
-		WithStatusSubresource(&v1alpha1.Allocation{}, &v1alpha1.Provider{}).
-		Build()
+		WithStatusSubresource(&v1alpha1.Allocation{}, &v1alpha1.Provider{})
+	for _, opt := range opts {
+		builder = opt(builder)
+	}
+	c := builder.Build()
 	return &env{t: t, clock: clock, batch: batch, c: c,
 		ctl: &Controller{Client: c, Provider: testProvider, Batch: batch, Clock: clock}}
 }

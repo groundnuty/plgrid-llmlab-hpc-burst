@@ -5,14 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"time"
 
-	apiequality "k8s.io/apimachinery/pkg/api/equality"
-	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 )
@@ -30,6 +26,8 @@ import (
 // failure (Batch.FailReads) is not an error: that Allocation's status stays as
 // it was, and the Provider's lastSuccessfulStatusRead does not advance.
 //
+// Every write names the field manager v1alpha1.FieldManagerProvider.
+//
 // The semantics a test can rely on:
 //
 //   - After the Allocation has a job ID, or the pass has just established one
@@ -37,35 +35,72 @@ import (
 //     pass observes the job. A first Sync of a fresh Allocation therefore ends
 //     with the job's own phase (Held, Pending or Running), not Submitting.
 //   - A Submit's Unknown outcome is not resolved in the same pass: the next
-//     Sync finds the tag and adopts it. With no job found, the phase stays
-//     SubmissionUnknown and Submit is never called again, whatever the time.
+//     Sync finds the tag and adopts it. A job that is found is adopted whatever
+//     the attempt's age, and the attempt is recorded Done.
 //   - A submission record found InFlight with no job ID (a crash between the
-//     claim and the answer) is treated as Unknown.
+//     claim and the answer) is looked up by tag like an Unknown one. The age of
+//     an attempt is the time of its record, or, for a record with none, the
+//     Allocation's creation time. The windows below are passed when that age is
+//     strictly above them, so a Sync exactly one window after the attempt waits
+//     and one a second later acts.
 //   - A Rejected attempt (the scheduler's refusal, or a pre-call refusal) keeps
 //     phase Submitting until RejectBackoff has passed, then attempt n+1 runs.
-//   - HoldRelease: the hold is lifted once, right after an accepted Submit or an
-//     adoption of a held job (restart count 0, never started, user hold), and
-//     the job ID is written to the hold-lifted annotation.
+//   - Hold mode (HoldRelease true), the submission. The same pass that finds
+//     InflightWindow passed since the attempt, with no job carrying the tag,
+//     drops the attempt, whether it is Unknown or InFlight: it claims n+1 as
+//     InFlight, which replaces record n, and submits. There is no "dropped"
+//     state, because the API has none: Abandoned is an operator's decision. A
+//     late job of the old attempt lands held and is cancelled by settle. Inside
+//     the window an InFlight attempt shows phase Submitting and an Unknown one
+//     SubmissionUnknown, and nothing is submitted.
+//   - Hold mode, settle (HBEP-7, open question 11). On every observe of a
+//     recorded job while the Allocation is not deleting, in this order: every
+//     held job with the tag except the recorded one is cancelled, then the
+//     recorded job's hold is lifted once: only if the hold-lifted annotation
+//     does not name the job and the job is held by its user (reason
+//     JobHeldUser), has restart count 0 and has never started. The annotation
+//     is written after the lift, and the status then shows the job as it is
+//     after both steps. A lift that fails with an unknown error makes the pass
+//     fail for that Allocation, after writing the status; the job stays held,
+//     there is no annotation, and the next pass tries again. An admin-held job
+//     gets no lift call. A read that fails stops settle: nothing is cancelled
+//     and nothing is lifted.
+//   - Fallback mode (HoldRelease false), the submission. An InFlight claim
+//     older than InflightWindow with no job found becomes Unknown, keeping the
+//     attempt's time. Unknown is never retried by time. When UnknownBound has
+//     passed since the attempt, the Allocation gets the condition
+//     SubmissionResolved False with reason NeedsOperator. When the annotation
+//     abandon-attempt equals the attempt's number in decimal, the record
+//     becomes Abandoned and the next pass submits n+1; any other value is
+//     ignored. A job found by tag always wins over the annotation. Once an
+//     attempt is resolved, by the tag or by an abandon, a SubmissionResolved
+//     condition that had been raised becomes True with reason Resolved, and it
+//     stays: it is never removed. If it was never raised, none is written.
+//   - Deletion: every job with the tag that has no end time (held, pending,
+//     running, or requeued and so Failed by phase but still holding its
+//     allocation) is cancelled; then, with none live and no attempt
+//     unresolved, the Allocation's files are removed and the finalizer goes. An
+//     attempt with no job found is unresolved, and keeps the finalizer, until
+//     the rules above release it: in hold mode InflightWindow has passed, in
+//     fallback mode the abandon-attempt annotation names it. An Unknown attempt
+//     whose job is found is recorded Done, and the job cancelled. Status is not
+//     written for a deleting Allocation.
 //   - Queue waits: a job's wait is added to the Provider's status the first time
 //     the job is seen with a start time, that is when the persisted
 //     atProvider.startTime goes from nil to set. A re-observed job adds none,
-//     even after its entry fell out of the 20 kept.
-//   - Deletion: every job with the tag that has no end time (held, pending,
-//     running, or requeued and so Failed by phase but still holding its
-//     allocation) is cancelled; then, with none live and no attempt InFlight
-//     or Unknown, the Allocation's files are removed and the finalizer goes.
-//     An Unknown attempt with no job found keeps the finalizer for good (HBEP-7,
-//     open question 11; the fake has no abandon-attempt), so a test must not
-//     delete in that state. An Unknown attempt whose job is found is recorded
-//     Done, and the job cancelled. Status is not written for a deleting
-//     Allocation.
+//     even after its entry fell out of the 20 kept, and a restarted Controller
+//     (a new value on the same client) keeps the waits it finds in status.
+//   - A later hard end: atProvider.hardEnd is re-read on every observe, so a
+//     Batch.SetTimeLimit shows in it at the next Sync.
 //   - The Provider's status: queueWaits are updated on every pass.
 //     lastSuccessfulStatusRead and the Ready condition (True, reason Polled)
 //     are refreshed only on a pass in which no read failed, so a failing
-//     platform leaves them to age.
+//     platform leaves them to age. Conditions this controller does not own, such
+//     as DialHomeUnreachable, are kept as they were found.
 //   - Not modelled: the read-back (a renamed job is not refused, a job with
-//     another limit sets no SubmittedAsOther), duplicate-job settling, and every
-//     Allocation condition (AdminHold, SubmissionResolved).
+//     another limit sets no SubmittedAsOther), the AdminHold condition, the
+//     adoption order (the lowest job ID is adopted), the sticky duplicates list
+//     of fallback mode, and the compare-and-swap conflicts.
 //   - Times are written in whole seconds: metav1.Time keeps no more.
 type Controller struct {
 	Client   client.Client
@@ -81,13 +116,20 @@ type Controller struct {
 	// HoldRelease runs hold mode: jobs are submitted held and the hold is
 	// lifted at once.
 	HoldRelease bool
+	// InflightWindow is how long an attempt is waited on before a hold-mode
+	// controller drops it, or a fallback-mode one calls it Unknown; zero
+	// means 5 minutes.
+	InflightWindow time.Duration
+	// UnknownBound is how long after an attempt a fallback-mode controller
+	// waits before it asks an operator; zero means 10 minutes.
+	UnknownBound time.Duration
 }
 
 const (
-	writerName    = "fake"
 	accountName   = "fake-account"
 	listLookback  = time.Hour
 	absentMessage = "absent from the queue listing and accounting"
+	writerName    = "fake"
 )
 
 // pass is the state of one Sync.
@@ -109,6 +151,20 @@ func (c *Controller) rejectBackoff() time.Duration {
 		return time.Minute
 	}
 	return c.RejectBackoff
+}
+
+func (c *Controller) inflightWindow() time.Duration {
+	if c.InflightWindow == 0 {
+		return 5 * time.Minute
+	}
+	return c.InflightWindow
+}
+
+func (c *Controller) unknownBound() time.Duration {
+	if c.UnknownBound == 0 {
+		return 10 * time.Minute
+	}
+	return c.UnknownBound
 }
 
 // mt returns t as a metav1.Time in whole seconds, UTC.
@@ -148,41 +204,6 @@ func (c *Controller) Sync(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// syncProvider writes the Provider's status: the queue waits found in this
-// pass, and, when no read failed, the time of the last successful read and the
-// Ready condition.
-func (c *Controller) syncProvider(ctx context.Context, p *pass) error {
-	var prov v1alpha1.Provider
-	if err := c.Client.Get(ctx, client.ObjectKey{Name: c.Provider}, &prov); err != nil {
-		return fmt.Errorf("get Provider %s: %w", c.Provider, err)
-	}
-	old := prov.DeepCopy()
-	// A list is ordered by name; the oldest wait is the earliest start.
-	sort.SliceStable(p.waits, func(i, k int) bool { return p.waits[i].StartTime.Before(&p.waits[k].StartTime) })
-	for _, w := range p.waits {
-		prov.Status.QueueWaits = v1alpha1.AddQueueWait(prov.Status.QueueWaits, w)
-	}
-	prov.Status.ObservedGeneration = prov.Generation
-	prov.Status.LastReconcileTime = mt(p.now)
-	if !p.readFailed {
-		prov.Status.LastSuccessfulStatusRead = mt(p.now)
-		apimeta.SetStatusCondition(&prov.Status.Conditions, metav1.Condition{
-			Type:               v1alpha1.ConditionProviderReady,
-			Status:             metav1.ConditionTrue,
-			Reason:             "Polled",
-			ObservedGeneration: prov.Generation,
-			LastTransitionTime: *mt(p.now),
-		})
-	}
-	if apiequality.Semantic.DeepEqual(old.Status, prov.Status) {
-		return nil
-	}
-	if err := c.Client.Status().Update(ctx, &prov); err != nil {
-		return fmt.Errorf("update Provider %s status: %w", c.Provider, err)
-	}
-	return nil
-}
-
 // record reads the submission annotation; nil when absent.
 func record(a *v1alpha1.Allocation) (*v1alpha1.SubmissionRecord, error) {
 	raw, ok := a.Annotations[v1alpha1.AnnotationSubmission]
@@ -207,106 +228,4 @@ func setRecord(a *v1alpha1.Allocation, r v1alpha1.SubmissionRecord) {
 
 func (c *Controller) newRecord(attempt int32, state v1alpha1.SubmissionState, reason string, now time.Time) v1alpha1.SubmissionRecord {
 	return v1alpha1.SubmissionRecord{Attempt: attempt, State: state, Writer: writerName, Time: mt(now), Reason: reason}
-}
-
-// syncAllocation handles one Allocation, in the order: metadata, deletion, the
-// job's establishment, then the observation of the recorded job.
-func (c *Controller) syncAllocation(ctx context.Context, p *pass, a *v1alpha1.Allocation) error {
-	tag := v1alpha1.JobTag(a.Namespace, a.Name, a.UID)
-	prior := a.Status.AtProvider.DeepCopy() // before any Update overwrites the status
-
-	// Metadata: the finalizer and the external name, one Update.
-	changed := false
-	if a.DeletionTimestamp.IsZero() && controllerutil.AddFinalizer(a, v1alpha1.FinalizerCancelAll) {
-		changed = true
-	}
-	if a.Annotations[v1alpha1.AnnotationExternalName] != tag {
-		if a.Annotations == nil {
-			a.Annotations = map[string]string{}
-		}
-		a.Annotations[v1alpha1.AnnotationExternalName] = tag
-		changed = true
-	}
-	if changed {
-		if err := c.Client.Update(ctx, a); err != nil {
-			return fmt.Errorf("update metadata: %w", err)
-		}
-	}
-	if !a.DeletionTimestamp.IsZero() {
-		return c.syncDeleting(ctx, p, a, tag)
-	}
-
-	obs := prior.DeepCopy()
-	obs.Tag = tag
-	rec, err := record(a)
-	if err != nil {
-		return err
-	}
-	if a.Annotations[v1alpha1.AnnotationJobID] == "" {
-		settled, err := c.establish(ctx, p, a, rec, tag, obs)
-		if err != nil || !settled {
-			return c.writeStatus(ctx, a, prior, obs, err)
-		}
-		if rec, err = record(a); err != nil {
-			return err
-		}
-	}
-	err = c.observe(ctx, p, a, rec, prior, obs)
-	return c.writeStatus(ctx, a, prior, obs, err)
-}
-
-// writeStatus writes obs as the Allocation's atProvider, unless it is
-// unchanged, and returns err (the earlier failure of the same Allocation) or
-// the write's own.
-func (c *Controller) writeStatus(ctx context.Context, a *v1alpha1.Allocation, prior, obs *v1alpha1.AllocationObservation, err error) error {
-	if err != nil {
-		return err
-	}
-	if apiequality.Semantic.DeepEqual(prior, obs) {
-		return nil
-	}
-	a.Status.AtProvider = *obs // after the last Update, which restores the stored status
-	if err := c.Client.Status().Update(ctx, a); err != nil {
-		return fmt.Errorf("update status: %w", err)
-	}
-	return nil
-}
-
-// observe reads the recorded job and mirrors it into obs.
-func (c *Controller) observe(ctx context.Context, p *pass, a *v1alpha1.Allocation, rec *v1alpha1.SubmissionRecord, prior, obs *v1alpha1.AllocationObservation) error {
-	id := a.Annotations[v1alpha1.AnnotationJobID]
-	job, found, err := c.Batch.Observe(ctx, id)
-	if err != nil {
-		// A failed read is not absence: nothing changes, not even the clock of
-		// absentSince.
-		p.readFailed = true
-		*obs = *prior.DeepCopy()
-		return nil
-	}
-	obs.JobID, obs.Submission = id, rec
-	if !found {
-		if obs.AbsentSince == nil {
-			obs.AbsentSince = mt(p.now)
-		}
-		if p.now.Sub(obs.AbsentSince.Time) > c.lostGrace() {
-			obs.Phase, obs.Reason = v1alpha1.AllocationLost, absentMessage
-		}
-		return nil
-	}
-	obs.AbsentSince = nil
-	obs.Phase = job.Phase
-	obs.Held = job.Held()
-	obs.Requeued = obs.Requeued || job.Requeued // kept once seen
-	obs.Reason = job.Reason
-	if obs.Requeued {
-		obs.Reason = v1alpha1.ReasonRequeued
-	}
-	obs.RestartCount = job.RestartCount
-	obs.SubmitTime = mt(job.SubmitTime)
-	obs.StartEstimate, obs.StartTime = mtp(job.StartEstimate), mtp(job.StartTime)
-	obs.HardEnd, obs.EndTime = mtp(job.HardEnd), mtp(job.EndTime)
-	if job.StartTime != nil && prior.StartTime == nil {
-		p.waits = append(p.waits, v1alpha1.QueueWait{JobID: id, SubmitTime: *mt(job.SubmitTime), StartTime: *mt(*job.StartTime)})
-	}
-	return nil
 }

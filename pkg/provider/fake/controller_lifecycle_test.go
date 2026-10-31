@@ -256,8 +256,10 @@ func TestHoldReleaseAdminHoldStaysHeldAndIsNotRetried(t *testing.T) {
 	e.syncAt(at(12, 10, 0))
 	e.syncAt(at(12, 20, 0))
 	e.wantPhase("a1", v1alpha1.AllocationHeld)
-	if n := e.batch.Count("scontrol-release"); n != 1 {
-		t.Fatalf("scontrol-release logged %d times, want 1: an admin hold is never retried", n)
+	// HBEP-7, Settle: a hold is lifted only for reason JobHeldUser, so an
+	// admin-held job is never offered to scontrol at all.
+	if n := e.batch.Count("scontrol-release"); n != 0 {
+		t.Fatalf("scontrol-release logged %d times, want 0: an admin hold is never lifted or retried", n)
 	}
 }
 
