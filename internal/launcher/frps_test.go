@@ -308,3 +308,30 @@ func TestResolveFrpsChecksTheBytesItOpened(t *testing.T) {
 		t.Errorf("FrpDirName = %s", got)
 	}
 }
+
+// TestFrpPinsAgreeWithTheFetchScript: hack/fetch-frp.sh pins the same release as frp-pins.txt (it
+// downloads what the launcher will then verify), so the two must not drift. The script is read as
+// text; its values are not computed from the pin file.
+func TestFrpPinsAgreeWithTheFetchScript(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "hack", "fetch-frp.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	vars := map[string]string{}
+	for _, l := range strings.Split(string(b), "\n") {
+		if k, v, ok := strings.Cut(l, "="); ok && strings.HasPrefix(k, "FRP") && !strings.ContainsAny(k, " $") {
+			vars[k] = v
+		}
+	}
+	pins, err := parseFrpPins(frpPinsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin, err := frpPinFor(pins, DefaultFrpVersion, "amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vars["FRP_VERSION"] != pin.Version || vars["FRP_TARBALL_SHA"] != pin.TarballSHA256 || vars["FRPS_SHA"] != pin.FrpsSHA256 {
+		t.Errorf("hack/fetch-frp.sh pins %v, frp-pins.txt pins %+v", vars, pin)
+	}
+}
