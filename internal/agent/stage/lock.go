@@ -40,6 +40,8 @@ type hooks struct {
 	lockBusy func()
 	// afterRehash is called after Checkpoint's unlocked rehash.
 	afterRehash func()
+	// flock replaces syscall.Flock.
+	flock func(fd, how int) error
 }
 
 // tryLock takes the lock if it is free.
@@ -48,8 +50,12 @@ func (s *Stager) tryLock(path string) (*lock, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
+	flock := syscall.Flock
+	if s.hooks.flock != nil {
+		flock = s.hooks.flock
+	}
 	for {
-		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		err := flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		switch {
 		case err == nil:
 			return &lock{f}, true, nil

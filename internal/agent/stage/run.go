@@ -27,7 +27,7 @@ func (s *Stager) runApptainer(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(cache)
+	defer removeAll(cache)
 	g, err := procgroup.Start(procgroup.Spec{
 		Path: s.c.Apptainer,
 		Args: args,

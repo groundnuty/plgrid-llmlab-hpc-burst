@@ -16,25 +16,32 @@
 //
 // Each image and file goes to a temporary name in its final directory and is
 // renamed into place, so two Allocations staging at once never see a partial
-// file, and the second rename leaves one complete copy.
+// file.
+//
+// An image is trusted only against an integrity record written when it was
+// pulled or built, and pulled or built again when it fails the check
+// (image.go, tree.go). A checkpoint file that needs a download or a restage is
+// handled under an exclusive flock on the checkpoint directory, after a fresh
+// look at it, so concurrent agents neither download a file twice nor move a
+// good replacement aside on a stale result (lock.go, checkpoint.go). Staging's
+// Apptainer runs in a process group of its own that staging owns until every
+// member is gone (run.go).
 //
 // The rehash follows spike S7's recommendation (spikes/s7/README.md,
 // Recommendation): several parallel readers (4 by default), each reading
 // whole files through one reused 8 MiB buffer, never a read sized by a cap,
 // whose read-ahead over-read Lustre by up to 190 times (L-12.5).
 //
-// Which listed files are staged depends on the launch's --load-format (skip.go):
-// a listed file the engine does not load is not downloaded, and one that is
-// present is still rehashed.
+// Which listed files are staged depends on the launch's --load-format
+// (skip.go): a listed file the engine does not load is not downloaded, and one
+// that is present is still rehashed.
 //
-// The package imports only the standard library, package agentapi and the
-// agent's own package.
+// The package imports only the standard library, package agentapi, the
+// agent's own package and its procgroup package.
 package stage
 
 import (
-	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -42,7 +49,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -50,7 +56,6 @@ import (
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent"
-	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 // DefaultHubEndpoint is the Hugging Face Hub.
@@ -74,6 +79,9 @@ type Config struct {
 	Readers int
 	// BaseEnv is Apptainer's environment.
 	BaseEnv []string
+	// RetryBackoff is the wait before a failed download's second try, and twice
+	// that before its third; 2 s when 0.
+	RetryBackoff time.Duration
 	// StopGrace is how long a cancelled Apptainer run has between TERM and
 	// KILL to its process group; 5 s when 0.
 	StopGrace time.Duration
@@ -114,11 +122,18 @@ func New(c Config) (*Stager, error) {
 			IdleConnTimeout:       90 * time.Second,
 		}}
 	}
+	// A copy, so the caller's client is left as it is.
+	hc := *c.HTTPClient
+	hc.CheckRedirect = hubRedirectPolicy(u.Host, hc.CheckRedirect)
+	c.HTTPClient = &hc
 	if c.Readers <= 0 {
 		c.Readers = 4
 	}
 	if c.TmpDir == "" {
 		c.TmpDir = os.TempDir()
+	}
+	if c.RetryBackoff <= 0 {
+		c.RetryBackoff = 2 * time.Second
 	}
 	if c.StopGrace <= 0 {
 		c.StopGrace = 5 * time.Second
@@ -138,226 +153,6 @@ var (
 	revForm   = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	sumForm   = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
-
-// Checkpoint implements agent.Stager.
-func (s *Stager) Checkpoint(ctx context.Context, req agent.CheckpointRequest) (agent.CheckpointResult, error) {
-	var res agent.CheckpointResult
-	if !repoForm.MatchString(req.Repository) {
-		return res, fmt.Errorf("checkpoint repository %q is not <owner>/<name>", req.Repository)
-	}
-	if !revForm.MatchString(req.Revision) {
-		return res, fmt.Errorf("checkpoint revision %q is not a full commit id", req.Revision)
-	}
-	dir := filepath.Join(s.c.StagingDir, agentapi.StagedCheckpointDir(req.Repository, req.Revision))
-	res.Dir = dir
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return res, err
-	}
-	for _, f := range req.Files {
-		if err := checkFile(f); err != nil {
-			return res, err
-		}
-	}
-	skip := skippedFiles(req.Files, req.LoadFormat)
-
-	// Rehash every listed file present.
-	present := make([]bool, len(req.Files))
-	for i, f := range req.Files {
-		fi, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(f.Path)))
-		present[i] = err == nil && fi.Mode().IsRegular()
-	}
-	sums, err := s.rehash(ctx, dir, req.Files, present)
-	if err != nil {
-		return res, err
-	}
-	res.Files = make([]agentapi.FileResult, len(req.Files))
-	var fetch []int
-	for i, f := range req.Files {
-		r := agentapi.FileResult{Path: f.Path}
-		switch {
-		case present[i] && sums[i] == f.SHA256:
-			r.Outcome = agentapi.FileMatch
-		case present[i] && req.Restage && !skip[i]:
-			// Rung 2: move the bad copy aside and download it again.
-			p := filepath.Join(dir, filepath.FromSlash(f.Path))
-			if err := os.Rename(p, p+".mismatch-"+time.Now().UTC().Format("20060102T150405.000000000Z")); err != nil {
-				return res, fmt.Errorf("moving %s aside: %w", f.Path, err)
-			}
-			fetch = append(fetch, i)
-		case present[i]:
-			r.Outcome = agentapi.FileMismatch
-			r.SHA256 = sums[i]
-		case skip[i]:
-			r.Outcome = agentapi.FileAbsent
-		default:
-			fetch = append(fetch, i)
-		}
-		res.Files[i] = r
-	}
-
-	var done, total int64
-	if req.Progress != nil {
-		req.Progress = throttle(req.Progress, time.Second)
-	}
-	for _, i := range fetch {
-		f := req.Files[i]
-		if err := s.download(ctx, dir, req, f, &done, &total); err != nil {
-			return res, fmt.Errorf("staging %s: %w", f.Path, err)
-		}
-		res.Files[i].Outcome = agentapi.FileMatch
-	}
-	return res, nil
-}
-
-// checkFile refuses a listed path that could leave the checkpoint directory,
-// and a hash that is not SHA-256 hex.
-func checkFile(f agentapi.FileDigest) error {
-	p := f.Path
-	if p == "" || strings.HasPrefix(p, "/") || strings.Contains(p, "\\") || path.Clean(p) != p || p == "." ||
-		p == ".." || strings.HasPrefix(p, "../") || strings.Contains(p, "\x00") {
-		return fmt.Errorf("listed file %q is not a clean relative path", p)
-	}
-	if !sumForm.MatchString(f.SHA256) {
-		return fmt.Errorf("listed file %q: sha256 %q is not 64 lowercase hex characters", p, f.SHA256)
-	}
-	return nil
-}
-
-// rehash returns the SHA-256 of every present file.
-func (s *Stager) rehash(ctx context.Context, dir string, files []agentapi.FileDigest, present []bool) ([]string, error) {
-	paths := make([]string, len(files))
-	for i, f := range files {
-		if present[i] {
-			paths[i] = filepath.Join(dir, filepath.FromSlash(f.Path))
-		}
-	}
-	sums, errs := hashPaths(ctx, paths, s.c.Readers)
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return sums, errors.Join(errs...)
-}
-
-// download fetches one file from the Hub at the full commit id into a
-// temporary name beside its place, checks its SHA-256 against the record and
-// renames it into place. A token, when given, goes only into the
-// Authorization header; the Go client drops it on a redirect to another host,
-// as the Hub's redirect of an LFS file to its CDN is.
-func (s *Stager) download(ctx context.Context, dir string, req agent.CheckpointRequest, f agentapi.FileDigest, done, total *int64) error {
-	var last error
-	for attempt := 0; attempt < 3; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(time.Duration(attempt) * 2 * time.Second):
-			}
-		}
-		retry, err := s.downloadOnce(ctx, dir, req, f, done, total)
-		if err == nil {
-			return nil
-		}
-		last = err
-		if !retry {
-			return err
-		}
-	}
-	return last
-}
-
-func (s *Stager) downloadOnce(ctx context.Context, dir string, req agent.CheckpointRequest, f agentapi.FileDigest, done, total *int64) (retry bool, err error) {
-	segs := strings.Split(f.Path, "/")
-	for i, seg := range segs {
-		segs[i] = url.PathEscape(seg)
-	}
-	u := s.c.HubEndpoint + "/" + req.Repository + "/resolve/" + req.Revision + "/" + strings.Join(segs, "/")
-	hreq, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	if err != nil {
-		return false, err
-	}
-	if req.HubToken != "" {
-		hreq.Header.Set("Authorization", "Bearer "+req.HubToken)
-	}
-	resp, err := s.c.HTTPClient.Do(hreq)
-	if err != nil {
-		return ctx.Err() == nil, fmt.Errorf("GET %s: %w", u, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		retry := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
-		return retry, fmt.Errorf("GET %s: HTTP %d", u, resp.StatusCode)
-	}
-	if resp.ContentLength > 0 {
-		*total += resp.ContentLength
-		report(req, *done, *total)
-	}
-	p := filepath.Join(dir, filepath.FromSlash(f.Path))
-	if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
-		return false, err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(p), "."+filepath.Base(p)+".part-*")
-	if err != nil {
-		return false, err
-	}
-	ok := false
-	defer func() {
-		if !ok {
-			tmp.Close()
-			os.Remove(tmp.Name())
-		}
-	}()
-	h := sha256.New()
-	buf := make([]byte, 1<<20)
-	for {
-		n, rerr := resp.Body.Read(buf)
-		if n > 0 {
-			h.Write(buf[:n])
-			if _, werr := tmp.Write(buf[:n]); werr != nil {
-				return false, werr
-			}
-			*done += int64(n)
-			report(req, *done, *total)
-		}
-		if rerr == io.EOF {
-			break
-		}
-		if rerr != nil {
-			return ctx.Err() == nil, fmt.Errorf("GET %s: %w", u, rerr)
-		}
-	}
-	if got := hex.EncodeToString(h.Sum(nil)); got != f.SHA256 {
-		return false, fmt.Errorf("the download has SHA-256 %s, not the identity record's %s", got, f.SHA256)
-	}
-	if err := tmp.Sync(); err != nil {
-		return false, err
-	}
-	if err := tmp.Close(); err != nil {
-		return false, err
-	}
-	if err := os.Rename(tmp.Name(), p); err != nil {
-		return false, err
-	}
-	ok = true
-	return false, nil
-}
-
-func report(req agent.CheckpointRequest, done, total int64) {
-	if req.Progress != nil {
-		req.Progress(done, total)
-	}
-}
-
-// throttle passes on at most one progress report per interval, so a large
-// download does not flood the agent's loop; the first report always passes.
-func throttle(f func(done, total int64), every time.Duration) func(done, total int64) {
-	var last time.Time
-	return func(done, total int64) {
-		if now := time.Now(); last.IsZero() || now.Sub(last) >= every {
-			last = now
-			f(done, total)
-		}
-	}
-}
 
 func randomHex() string {
 	var b [8]byte

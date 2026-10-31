@@ -249,3 +249,21 @@ func compareTree(want map[string]treeEntry, got []treeEntry) error {
 	}
 	return nil
 }
+
+// removeAll removes a file or a tree. A sandbox can hold directories its owner
+// cannot write to, which os.RemoveAll cannot empty; their permissions are
+// restored and the removal is tried again, so a sandbox moved aside or left by
+// a failed build does not stay on the disk.
+func removeAll(p string) error {
+	err := os.RemoveAll(p)
+	if err == nil {
+		return nil
+	}
+	filepath.WalkDir(p, func(q string, d fs.DirEntry, _ error) error {
+		if d != nil && d.IsDir() {
+			os.Chmod(q, 0o700)
+		}
+		return nil
+	})
+	return os.RemoveAll(p)
+}

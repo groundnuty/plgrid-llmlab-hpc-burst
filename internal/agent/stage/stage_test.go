@@ -8,9 +8,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/enginedouble"
@@ -39,18 +41,36 @@ const (
 	digest       = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
 )
 
+// hubReq is one request the fake Hub saw.
+type hubReq struct{ Path, Host, Auth string }
+
 // fakeHub serves /<repo>/resolve/<rev>/<path> from a map, over a Unix socket.
 type fakeHub struct {
-	mu    sync.Mutex
-	files map[string]string
-	gets  []string
-	auth  []string
+	mu        sync.Mutex
+	files     map[string]string
+	reqs      []hubReq
+	intercept func(n int, w http.ResponseWriter, r *http.Request) bool
+}
+
+// setIntercept installs a function that sees every request first, with its
+// 1-based number, and returns true when it has answered it.
+func (h *fakeHub) setIntercept(f func(n int, w http.ResponseWriter, r *http.Request) bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.intercept = f
+}
+
+func (h *fakeHub) all() []hubReq {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]hubReq(nil), h.reqs...)
 }
 
 func (h *fakeHub) requests() (gets, auth []string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return append([]string(nil), h.gets...), append([]string(nil), h.auth...)
+	for _, r := range h.all() {
+		gets, auth = append(gets, r.Path), append(auth, r.Auth)
+	}
+	return gets, auth
 }
 
 func startHub(t *testing.T, root string, files map[string]string) (*fakeHub, *http.Client) {
@@ -63,10 +83,13 @@ func startHub(t *testing.T, root string, files map[string]string) (*fakeHub, *ht
 	}
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h.mu.Lock()
-		h.gets = append(h.gets, r.URL.Path)
-		h.auth = append(h.auth, r.Header.Get("Authorization"))
+		h.reqs = append(h.reqs, hubReq{Path: r.URL.Path, Host: r.Host, Auth: r.Header.Get("Authorization")})
+		n, ic := len(h.reqs), h.intercept
 		c, ok := h.files[r.URL.Path]
 		h.mu.Unlock()
+		if ic != nil && ic(n, w, r) {
+			return
+		}
 		if !ok {
 			http.NotFound(w, r)
 			return
@@ -97,12 +120,13 @@ func newStager(t *testing.T, files map[string]string) (*Stager, *fakeHub, string
 		t.Fatal(err)
 	}
 	s, err := New(Config{
-		StagingDir:  filepath.Join(root, "staging"),
-		Apptainer:   filepath.Join(bin, "apptainer"),
-		TmpDir:      root,
-		HubEndpoint: "http://hub.test",
-		HTTPClient:  client,
-		BaseEnv:     append(os.Environ(), "HB_FAKE_APPTAINER_LOG="+filepath.Join(root, "apptainer.jsonl")),
+		StagingDir:   filepath.Join(root, "staging"),
+		Apptainer:    filepath.Join(bin, "apptainer"),
+		TmpDir:       root,
+		HubEndpoint:  "http://hub.test",
+		HTTPClient:   client,
+		RetryBackoff: time.Millisecond,
+		BaseEnv:      append(os.Environ(), "HB_FAKE_APPTAINER_LOG="+filepath.Join(root, "apptainer.jsonl")),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -126,7 +150,10 @@ func outcomes(r agent.CheckpointResult) map[string]agentapi.FileResult {
 
 // A missing file is downloaded at the full commit id, checked, and renamed
 // into place; a nested path gets its directory; no temporary file stays; the
-// token goes in the Authorization header.
+// token goes in the Authorization header of every request to the Hub. The
+// requested paths, the result count and the downloaded contents are asserted
+// exactly, so a stager that returned no results and made no requests fails
+// (Astra nit 12).
 func TestDownloadsMissingFiles(t *testing.T) {
 	s, hub, _ := newStager(t, map[string]string{
 		resolvePath("model.safetensors"):  "hello weights\n",
@@ -139,24 +166,34 @@ func TestDownloadsMissingFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for p, f := range outcomes(res) {
-		if f.Outcome != agentapi.FileMatch {
-			t.Errorf("%s: %+v", p, f)
+	if len(res.Files) != 2 {
+		t.Fatalf("%d results, want 2: %+v", len(res.Files), res.Files)
+	}
+	for i, p := range []string{"model.safetensors", "tok/tokenizer.json"} {
+		if f := res.Files[i]; f.Path != p || f.Outcome != agentapi.FileMatch {
+			t.Errorf("result %d: %+v", i, f)
 		}
 		b, err := os.ReadFile(filepath.Join(ckptDir(s), p))
 		if err != nil || string(b) != "hello weights\n" {
 			t.Errorf("%s holds %q (%v)", p, b, err)
 		}
 	}
-	left, _ := filepath.Glob(filepath.Join(ckptDir(s), "*part*"))
+	var left []string
+	filepath.WalkDir(ckptDir(s), func(p string, d os.DirEntry, _ error) error {
+		if strings.Contains(d.Name(), ".part-") || strings.Contains(d.Name(), ".tmp-") {
+			left = append(left, p)
+		}
+		return nil
+	})
 	if len(left) != 0 {
 		t.Errorf("temporary files left: %q", left)
 	}
-	_, auth := hub.requests()
-	for _, a := range auth {
-		if a != "Bearer hf_secret" {
-			t.Errorf("Authorization %q", a)
-		}
+	want := []hubReq{
+		{Path: resolvePath("model.safetensors"), Host: "hub.test", Auth: "Bearer hf_secret"},
+		{Path: resolvePath("tok/tokenizer.json"), Host: "hub.test", Auth: "Bearer hf_secret"},
+	}
+	if got := hub.all(); !slices.Equal(got, want) {
+		t.Errorf("requests %+v, want %+v", got, want)
 	}
 	if res.Dir != ckptDir(s) {
 		t.Errorf("dir %q", res.Dir)
@@ -173,8 +210,11 @@ func TestRefusesADownloadThatDoesNotMatch(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), tamperedSum) {
 		t.Fatalf("err %v, want a mismatch naming the download's hash", err)
 	}
-	if entries, _ := os.ReadDir(ckptDir(s)); len(entries) != 0 {
-		t.Fatalf("files left after a refused download: %v", entries)
+	entries, _ := os.ReadDir(ckptDir(s))
+	for _, e := range entries {
+		if e.Name() != lockName { // the lock file stays
+			t.Errorf("file left after a refused download: %s", e.Name())
+		}
 	}
 }
 
@@ -212,12 +252,14 @@ func TestRehashAndRestage(t *testing.T) {
 	if f := outcomes(res)["config.json"]; f.Outcome != agentapi.FileMatch {
 		t.Errorf("after restage config.json: %+v", f)
 	}
-	aside, _ := filepath.Glob(filepath.Join(dir, "config.json.mismatch-*"))
-	if len(aside) != 1 {
-		t.Fatalf("moved aside: %q", aside)
+	if aside, _ := filepath.Glob(filepath.Join(dir, "*.mismatch-*")); len(aside) != 0 {
+		t.Errorf("the copy moved aside was left: %q", aside)
 	}
-	if b, _ := os.ReadFile(aside[0]); string(b) != "tampered\n" {
-		t.Errorf("the moved-aside copy holds %q", b)
+	if b, _ := os.ReadFile(filepath.Join(dir, "config.json")); string(b) != "hello weights\n" {
+		t.Errorf("config.json holds %q after the restage", b)
+	}
+	if gets, _ := hub.requests(); len(gets) != 1 {
+		t.Errorf("downloads %q, want one", gets)
 	}
 }
 

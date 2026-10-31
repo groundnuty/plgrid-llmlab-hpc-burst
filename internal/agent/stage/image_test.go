@@ -199,8 +199,8 @@ func TestSandboxThatFailsItsManifestIsBuiltAgain(t *testing.T) {
 	}
 }
 
-// A sandbox with nested directories, an executable, a symlink and a file the
-// staging user cannot read: it is staged and then passes its check, so the
+// A sandbox with nested directories, an executable, a symlink, read-only
+// directories and a file the staging user cannot read: it is staged and then passes its check, so the
 // manifest cannot make every real sandbox fail; retargeting the symlink, adding
 // an empty directory and removing a directory each fail it.
 func TestSandboxWithLinksDirectoriesAndAnUnreadableFile(t *testing.T) {
@@ -212,6 +212,7 @@ mkdir -p "$dest/usr/bin" "$dest/etc/ssl" "$dest/empty"
 printf 'binary' > "$dest/usr/bin/python" && chmod 755 "$dest/usr/bin/python"
 ln -s python "$dest/usr/bin/python3"
 printf 'secret' > "$dest/etc/shadow" && chmod 000 "$dest/etc/shadow"
+mkdir -p "$dest/ro/inner" && printf x > "$dest/ro/inner/f" && chmod 555 "$dest/ro/inner" "$dest/ro"
 echo build >> LOG
 `
 	for _, tc := range []struct {
@@ -231,6 +232,7 @@ echo build >> LOG
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, _, root := newStager(t, nil)
+			t.Cleanup(func() { removeAll(root) }) // it holds read-only directories
 			scriptApptainer(t, root, strings.ReplaceAll(build, "LOG", filepath.Join(root, "builds")))
 			builds := func() int {
 				b, _ := os.ReadFile(filepath.Join(root, "builds"))
@@ -245,6 +247,9 @@ echo build >> LOG
 			stageImage(t, s, agentapi.ImageFormatSandbox)
 			if builds() != 2 {
 				t.Fatalf("%d builds after the damage, want 2", builds())
+			}
+			if left := imageEntries(t, s); len(left) != 2 {
+				t.Errorf("images/ holds %v, want the sandbox and its manifest: the read-only copy moved aside stayed", left)
 			}
 		})
 	}

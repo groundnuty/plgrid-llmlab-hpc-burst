@@ -203,8 +203,8 @@ func (s *Stager) stageImage(ctx context.Context, image, digest string, format ag
 	}
 	base := ".tmp-" + hex + "-" + randomHex()
 	tmp, tmpRec := filepath.Join(dir, base+filepath.Ext(final)), filepath.Join(dir, base+".record")
-	defer os.RemoveAll(tmp)
-	defer os.RemoveAll(tmpRec)
+	defer removeAll(tmp)
+	defer removeAll(tmpRec)
 	ref := "docker://" + image + "@" + digest
 	args := []string{"pull", tmp, ref}
 	if format == agentapi.ImageFormatSandbox {
@@ -224,7 +224,7 @@ func (s *Stager) stageImage(ctx context.Context, image, digest string, format ag
 		return fail(err)
 	}
 	if aside != "" {
-		if err := os.RemoveAll(aside); err != nil {
+		if err := removeAll(aside); err != nil {
 			s.logf("removing %s: %v", aside, err)
 		}
 	}
@@ -272,7 +272,7 @@ func (s *Stager) removeStaleTemps(dir, hex, lockPath string) {
 	temps, _ := filepath.Glob(filepath.Join(dir, ".tmp-"+hex+"-*"))
 	for _, p := range temps {
 		if fi, err := os.Lstat(p); err == nil && time.Since(fi.ModTime()) > staleTempAge {
-			if err := os.RemoveAll(p); err != nil {
+			if err := removeAll(p); err != nil {
 				s.logf("removing %s: %v", p, err)
 			}
 		}
