@@ -157,6 +157,19 @@ func checkLoopback(addr string) error {
 	return nil
 }
 
+// httpServer returns the http.Server of Serve, whose requests run under the
+// context requests.
+func (s *Server) httpServer(requests context.Context) *http.Server {
+	return &http.Server{
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: readHeaderTimeout,
+		IdleTimeout:       idleTimeout,
+		WriteTimeout:      s.longPoll + writeTimeoutMargin,
+		ErrorLog:          slog.NewLogLogger(s.log.Handler(), slog.LevelWarn),
+		BaseContext:       func(net.Listener) context.Context { return requests },
+	}
+}
+
 // Serve serves TLS 1.3 on ln with the certificate and key of the Host, until
 // ctx ends. It takes ownership of ln and closes it. On ctx's end it cancels the
 // requests in flight, so long polls answer at once, waits briefly for them,
@@ -176,14 +189,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	}
 	requests, cancelRequests := context.WithCancel(context.Background())
 	defer cancelRequests()
-	srv := &http.Server{
-		Handler:           s.Handler(),
-		ReadHeaderTimeout: readHeaderTimeout,
-		IdleTimeout:       idleTimeout,
-		WriteTimeout:      s.longPoll + writeTimeoutMargin,
-		ErrorLog:          slog.NewLogLogger(s.log.Handler(), slog.LevelWarn),
-		BaseContext:       func(net.Listener) context.Context { return requests },
-	}
+	srv := s.httpServer(requests)
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(tls.NewListener(ln, tlsConfig)) }()
 
