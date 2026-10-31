@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -75,5 +76,137 @@ func TestEventNotes(t *testing.T) {
 	}
 	if n := TruncatedNote(6); n != "the gateway listed 6 entries more than status.catalog holds (1024); the first 1024 by name are kept" {
 		t.Fatalf("note = %q", n)
+	}
+}
+
+// restOf returns skipped entries whose names are the given lengths, distinct
+// and below the 64 characters a note shows whole.
+func restOf(lengths ...int) []SkippedEntry {
+	var out []SkippedEntry
+	for i, l := range lengths {
+		out = append(out, SkippedEntry{Name: fmt.Sprintf("%02d", i) + strings.Repeat("x", l-2), Category: "NameTooLong"})
+	}
+	return out
+}
+
+// refSummary states the rule differently from SkippedSummaryNote, to check it
+// against: try the most names first, and take the longest list whose note,
+// with the ellipsis when names are left out, fits in MaxEventNote bytes.
+func refSummary(rest []SkippedEntry) string {
+	head := fmt.Sprintf("%d more catalog entries skipped (at most 10 skipped entries are named in an hour): ", len(rest))
+	if len(rest) == 1 {
+		head = "1 more catalog entry skipped (at most 10 skipped entries are named in an hour): "
+	}
+	var quoted []string
+	for _, s := range rest {
+		quoted = append(quoted, `"`+s.Name+`"`) // restOf names have no character that %q escapes
+	}
+	for k := len(rest); k >= 0; k-- {
+		note := head + strings.Join(quoted[:k], ", ")
+		if k < len(rest) {
+			if k > 0 {
+				note += ", "
+			}
+			note += "\u2026"
+		}
+		if len(note) <= MaxEventNote {
+			return note
+		}
+	}
+	return head + "\u2026"
+}
+
+// The summary names as many of the remaining skipped entries as fit in 1,024
+// bytes, whole and in order, and ends with an ellipsis when it leaves some out
+// (@hpc-burst-science-agent, 31 Oct 2026, for #114).
+func TestSkippedSummaryNoteNamesAsManyAsFit(t *testing.T) {
+	// Fifteen names of 59, 59, ... 58 characters fill the note exactly: 83 bytes
+	// of head, 15*2 quotes, 14*2 separators and 883 characters make 1,024.
+	exact := restOf(59, 59, 59, 59, 59, 59, 59, 59, 59, 59, 59, 59, 59, 58, 58)
+	over := restOf(59, 59, 59, 59, 59, 59, 59, 59, 59, 59, 59, 59, 59, 58, 59) // one byte more
+	for _, tc := range []struct {
+		name     string
+		rest     []SkippedEntry
+		want     string // the whole note, when it is hand-written
+		wantLen  int    // otherwise its length
+		ellipsis bool
+	}{
+		{"one", restOf(5), `1 more catalog entry skipped (at most 10 skipped entries are named in an hour): "00xxx"`, 0, false},
+		{"two", restOf(4, 6), `2 more catalog entries skipped (at most 10 skipped entries are named in an hour): "00xx", "01xxxx"`, 0, false},
+		{"all fit, to the byte", exact, "", 1024, false},
+		{"one byte over", over, "", 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := SkippedSummaryNote(tc.rest)
+			if tc.want != "" && got != tc.want {
+				t.Errorf("note = %q, want %q", got, tc.want)
+			}
+			if tc.wantLen != 0 && len(got) != tc.wantLen {
+				t.Errorf("note has %d bytes, want %d", len(got), tc.wantLen)
+			}
+			if len(got) > MaxEventNote {
+				t.Errorf("note has %d bytes, above %d", len(got), MaxEventNote)
+			}
+			if has := strings.HasSuffix(got, "\u2026"); has != tc.ellipsis {
+				t.Errorf("ends with an ellipsis %v, want %v: %q", has, tc.ellipsis, got[max(0, len(got)-40):])
+			}
+			if want := refSummary(tc.rest); got != want {
+				t.Errorf("note differs from the longest list that fits:\n got %q\nwant %q", got, want)
+			}
+		})
+	}
+	// A name that is not the last must leave room for the ellipsis after it.
+	// Sixteen names: the first fourteen of 64 characters or fewer are shaped to
+	// end the note, with their quotes and separators, margin bytes short of the
+	// 1,024 (16 names make an 83-byte head, 14*2 quotes, 13*2 separators: 137
+	// bytes and the characters). With a margin under 5 bytes the ellipsis
+	// (", " and 3 bytes) cannot follow the 14th name, so 13 names are listed; at
+	// 5 it fits, and 14 are.
+	for margin := 0; margin <= 8; margin++ {
+		lengths := make([]int, 16)
+		for i := range lengths {
+			lengths[i] = 64
+		}
+		cut := 14*64 - (1024 - margin - 137) // characters to take off the first fourteen
+		for i := 0; cut > 0; i, cut = i+1, cut-1 {
+			lengths[i%14]--
+		}
+		got := SkippedSummaryNote(restOf(lengths...))
+		wantNames := 13
+		if margin >= 5 {
+			wantNames = 14
+		}
+		if n := strings.Count(got, `"`) / 2; n != wantNames || len(got) > MaxEventNote || !strings.HasSuffix(got, ", \u2026") {
+			t.Errorf("margin %d: %d names in a note of %d bytes ending %q, want %d names, at most %d bytes and an ellipsis",
+				margin, n, len(got), got[len(got)-12:], wantNames, MaxEventNote)
+		}
+		if want := refSummary(restOf(lengths...)); got != want {
+			t.Errorf("margin %d: note differs from the longest list that fits", margin)
+		}
+	}
+}
+
+// A long name is shortened in the summary as in its own event, and a name with
+// an escaped character is counted by the bytes it takes quoted.
+func TestSkippedSummaryNoteShortensAndCountsQuotedBytes(t *testing.T) {
+	rest := []SkippedEntry{{Name: strings.Repeat("n", 300)}, {Name: "a\"b"}}
+	want := `2 more catalog entries skipped (at most 10 skipped entries are named in an hour): "` +
+		strings.Repeat("n", 64) + `...", "a\"b"`
+	if got := SkippedSummaryNote(rest); got != want {
+		t.Fatalf("note = %q, want %q", got, want)
+	}
+	// Forty names whose characters each take 4 bytes quoted (\x01) cannot all
+	// fit: the note stays within 1,024 bytes and keeps whole names.
+	hard := strings.Repeat("\x01", 64)
+	var many []SkippedEntry
+	for i := range 40 {
+		many = append(many, SkippedEntry{Name: fmt.Sprintf("%02d", i) + hard})
+	}
+	got := SkippedSummaryNote(many)
+	if len(got) > MaxEventNote || !strings.HasSuffix(got, ", \u2026") {
+		t.Fatalf("note of %d bytes ends %q, want at most %d bytes and an ellipsis", len(got), got[len(got)-30:], MaxEventNote)
+	}
+	if !strings.Contains(got, `"00`) || strings.Count(got, `"`)%2 != 0 {
+		t.Fatalf("note %q: want the first name, and no name cut in the middle", got)
 	}
 }
