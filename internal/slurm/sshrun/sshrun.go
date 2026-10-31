@@ -121,8 +121,6 @@ type master struct {
 	started time.Time
 }
 
-
-
 func (m *master) alive() bool {
 	select {
 	case <-m.done:
