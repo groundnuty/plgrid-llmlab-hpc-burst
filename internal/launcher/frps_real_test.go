@@ -25,7 +25,7 @@ import (
 // renders, started and stopped by the launcher's own code. What they check is what frps does, as
 // ss(8), /proc and its HTTP interfaces show it, not what the rendering says.
 
-// TestFrpsRealHoldsExactlyItsThreeLoopbackPorts: the block at base+8 .. base+11 has four
+// TestFrpsRealHoldsExactlyItsThreeLoopbackPorts: the ports base+8 .. base+11 have four
 // listeners in all, every one on 127.0.0.1: the three that frps opens (bind, tcpmux, web) and the
 // plugin's, which the test's stub holds, because frps only dials it. Nothing is UDP and nothing
 // is on IPv6, so KCP, QUIC and the other listeners are off. Then the web API, the identity
@@ -54,8 +54,8 @@ func TestFrpsRealHoldsExactlyItsThreeLoopbackPorts(t *testing.T) {
 	}
 	wantBlock := []string{"tcp " + h.FrpsPluginAddr(), "tcp " + h.FrpsBindAddr(), "tcp " + h.FrpsTCPMuxAddr(), "tcp " + h.FrpsWebAddr()}
 	sort.Strings(wantBlock)
-	if got := toStrings(ssListeners(t, frpsPortLow, frpsPortHigh, false)); !reflect.DeepEqual(got, wantBlock) {
-		t.Errorf("listeners in ports %d-%d:\n got %v\nwant %v", frpsPortLow, frpsPortHigh, got, wantBlock)
+	if got := toStrings(ssListeners(t, h.FrpsPluginPort(), h.FrpsWebPort(), false)); !reflect.DeepEqual(got, wantBlock) {
+		t.Errorf("listeners in ports %d-%d:\n got %v\nwant %v", h.FrpsPluginPort(), h.FrpsWebPort(), got, wantBlock)
 	}
 
 	// frps's own sockets, wherever they are: the three, and no others.
@@ -134,7 +134,7 @@ func TestFrpsRealHoldsExactlyItsThreeLoopbackPorts(t *testing.T) {
 	if left := procsMentioning(r.state); len(left) != 0 {
 		t.Errorf("processes still mention the state directory: %v", left)
 	}
-	if got := toStrings(ssListeners(t, frpsPortLow, frpsPortHigh, false)); !reflect.DeepEqual(got, []string{"tcp " + h.FrpsPluginAddr()}) {
+	if got := toStrings(ssListeners(t, h.FrpsPluginPort(), h.FrpsWebPort(), false)); !reflect.DeepEqual(got, []string{"tcp " + h.FrpsPluginAddr()}) {
 		t.Errorf("after the stop the block holds %v, want only the test's stub", got)
 	}
 	if log, _ := os.ReadFile(FrpsLogFile(h)); !strings.Contains(string(log), "frps started successfully") {

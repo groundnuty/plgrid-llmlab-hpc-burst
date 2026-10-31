@@ -18,7 +18,9 @@ import (
 
 const testWebPassword = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
-func frpsTestHost() agentapi.Host { return agentapi.Host{StateDir: "/var/lib/hb-state", PortBase: 29340} }
+func frpsTestHost() agentapi.Host {
+	return agentapi.Host{StateDir: "/var/lib/hb-state", PortBase: 29340}
+}
 
 func TestRenderFrpsConfigHasEverythingTheHBEPFixes(t *testing.T) {
 	got, err := RenderFrpsConfig(frpsTestHost(), testWebPassword)

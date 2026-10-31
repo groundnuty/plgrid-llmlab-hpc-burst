@@ -28,8 +28,6 @@ import (
 const (
 	frpsRigBase  = 29340
 	frpsRigBase2 = 29344
-	frpsPortLow  = 29340
-	frpsPortHigh = 29359
 )
 
 // pluginCall is one request frps posted to the plugin.
