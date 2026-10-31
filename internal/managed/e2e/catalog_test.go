@@ -184,7 +184,7 @@ func TestCatalogLoopInItsManager(t *testing.T) {
 	if p.Status.LastCatalogRead == nil || !p.Status.LastCatalogRead.Time.Equal(clock.Now()) {
 		t.Fatalf("lastCatalogRead = %v, want %v", p.Status.LastCatalogRead, clock.Now())
 	}
-	if r := apimeta.FindStatusCondition(p.Status.Conditions, v1alpha1.ConditionProviderReady); r == nil || r.Status != metav1.ConditionTrue || r.Reason != managed.ReasonCatalogRead {
+	if r := apimeta.FindStatusCondition(p.Status.Conditions, v1alpha1.ConditionProviderReady); r == nil || r.Status != metav1.ConditionTrue || r.Reason != v1alpha1.ReasonCatalogRead {
 		t.Fatalf("Ready = %+v, want True CatalogRead", r)
 	}
 
@@ -266,7 +266,7 @@ func TestTwoManagedProvidersInOneProcess(t *testing.T) {
 	deadline := time.Now().Add(60 * time.Second)
 	for {
 		r := apimeta.FindStatusCondition(b.provider().Status.Conditions, v1alpha1.ConditionCredentialsRejected)
-		if r != nil && r.Status == metav1.ConditionTrue && r.Reason == managed.ReasonKeyRejected && strings.Contains(r.Message, "403") {
+		if r != nil && r.Status == metav1.ConditionTrue && r.Reason == v1alpha1.ReasonKeyRejected && strings.Contains(r.Message, "403") {
 			break
 		}
 		if time.Now().After(deadline) {

@@ -27,28 +27,6 @@ import (
 // readiness 6).
 const CatalogInterval = time.Minute
 
-// Reasons of the conditions the controller writes. Those of Ready,
-// CredentialsRejected and CredentialsExpiring are the ones the stand-in,
-// pkg/provider/fake.ManagedController, writes, so the lifecycle controller's
-// tests against it hold for this controller too.
-const (
-	ReasonCatalogRead       = "CatalogRead"
-	ReasonKeyAccepted       = "KeyAccepted"
-	ReasonKeyRejected       = "KeyRejected"
-	ReasonNotExpiring       = "NotExpiring"
-	ReasonExpiresWithinADay = "ExpiresWithinADay"
-	ReasonExpired           = "Expired"
-	// ReasonFileRead: CredentialsInvalid is False, the credentials file was
-	// read and accepted.
-	ReasonFileRead = "FileRead"
-	// ReasonFileRefused: CredentialsInvalid is True, provider.
-	// ReadManagedCredentials refused the file (mode, owner, form, or missing).
-	ReasonFileRefused = "FileRefused"
-	// ReasonNoCredentialsFile: CredentialsInvalid is True, the Provider names
-	// no credentials file (none, or a Secret, which alpha does not read).
-	ReasonNoCredentialsFile = "NoCredentialsFile"
-)
-
 // Limits of status.catalog (api/v1alpha1, CatalogEntryStatus and
 // ProviderStatus.Catalog).
 const (
@@ -337,34 +315,34 @@ func apply(prov *v1alpha1.Provider, out outcome) error {
 		})
 	}
 	if out.credsErr != nil {
-		reason := ReasonFileRefused
+		reason := v1alpha1.ReasonFileRefused
 		if out.noFile {
-			reason = ReasonNoCredentialsFile
+			reason = v1alpha1.ReasonNoCredentialsFile
 		}
 		cond(v1alpha1.ConditionCredentialsInvalid, metav1.ConditionTrue, reason, out.credsErr.Error())
 	} else {
-		cond(v1alpha1.ConditionCredentialsInvalid, metav1.ConditionFalse, ReasonFileRead, "")
+		cond(v1alpha1.ConditionCredentialsInvalid, metav1.ConditionFalse, v1alpha1.ReasonFileRead, "")
 		switch {
 		case out.rejected != nil:
-			cond(v1alpha1.ConditionCredentialsRejected, metav1.ConditionTrue, ReasonKeyRejected, out.rejected.Error())
+			cond(v1alpha1.ConditionCredentialsRejected, metav1.ConditionTrue, v1alpha1.ReasonKeyRejected, out.rejected.Error())
 		default:
 			catalog, err := mergeCatalog(st.Catalog, out.entries, platform, out.now)
 			if err != nil {
 				return err
 			}
 			st.Catalog, st.LastCatalogRead = catalog, ptrTime(out.now)
-			cond(v1alpha1.ConditionProviderReady, metav1.ConditionTrue, ReasonCatalogRead, "")
-			cond(v1alpha1.ConditionCredentialsRejected, metav1.ConditionFalse, ReasonKeyAccepted, "")
+			cond(v1alpha1.ConditionProviderReady, metav1.ConditionTrue, v1alpha1.ReasonCatalogRead, "")
+			cond(v1alpha1.ConditionCredentialsRejected, metav1.ConditionFalse, v1alpha1.ReasonKeyAccepted, "")
 		}
 		if exp := out.creds.Expiry; exp != nil {
 			at := exp.UTC().Format(time.RFC3339)
 			switch {
 			case !out.now.Before(*exp):
-				cond(v1alpha1.ConditionCredentialsExpiring, metav1.ConditionTrue, ReasonExpired, "the key expired at "+at)
+				cond(v1alpha1.ConditionCredentialsExpiring, metav1.ConditionTrue, v1alpha1.ReasonExpired, "the key expired at "+at)
 			case out.creds.Expiring(out.now):
-				cond(v1alpha1.ConditionCredentialsExpiring, metav1.ConditionTrue, ReasonExpiresWithinADay, "the key expires at "+at)
+				cond(v1alpha1.ConditionCredentialsExpiring, metav1.ConditionTrue, v1alpha1.ReasonExpiresWithinADay, "the key expires at "+at)
 			default:
-				cond(v1alpha1.ConditionCredentialsExpiring, metav1.ConditionFalse, ReasonNotExpiring, "the key expires at "+at)
+				cond(v1alpha1.ConditionCredentialsExpiring, metav1.ConditionFalse, v1alpha1.ReasonNotExpiring, "the key expires at "+at)
 			}
 		}
 	}
