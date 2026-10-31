@@ -284,3 +284,28 @@ func TestQualifyRecordsTheBehaviourContext(t *testing.T) {
 		t.Fatalf("Qualified message %q does not record the behaviour check's 12345 context tokens", msg)
 	}
 }
+
+// TestTrackerComparesOnlyAdvancedReads: a sample whose MetricsReadAt did not
+// advance repeats the last read's values (agentapi.Health), so the tracker
+// takes nothing from it: no answer sample, and no move of the no-progress
+// clock, even when it repeats an idle engine's zero running requests.
+func TestTrackerComparesOnlyAdvancedReads(t *testing.T) {
+	s := &agentState{health: map[string]*tracker{}}
+	w := agentapi.WorkerReport{Name: "worker-0", PID: 4000}
+	t0 := rigStart
+	sample := func(at, read time.Time) {
+		w.Health = &agentapi.Health{Time: at, ProbeOK: true, MetricsReadAt: &read,
+			RunningRequests: agentapi.Int64(0), GeneratedTokens: agentapi.Int64(5), ResponsesByStatus: map[string]int64{"2xx": 3}}
+		s.track("uid", w, at)
+	}
+	sample(t0, t0)
+	sample(t0.Add(10*time.Second), t0) // the read did not advance
+	tr := s.health[trackerKey("uid", w)]
+	if len(tr.samples) != 1 || !tr.tokensSince.Equal(t0) {
+		t.Fatalf("after a repeated read: %d samples, tokensSince %s; want 1 and %s", len(tr.samples), tr.tokensSince.Format(time.TimeOnly), t0.Format(time.TimeOnly))
+	}
+	sample(t0.Add(20*time.Second), t0.Add(20*time.Second)) // control: an advanced read counts
+	if len(tr.samples) != 2 || !tr.tokensSince.Equal(t0.Add(20*time.Second)) {
+		t.Fatalf("after an advanced read: %d samples, tokensSince %s; want 2 and +20s", len(tr.samples), tr.tokensSince.Format(time.TimeOnly))
+	}
+}
