@@ -246,7 +246,12 @@ func TestFrpcIgnoresTheProxyVariables(t *testing.T) {
 	if r.frpc.Env != nil {
 		t.Fatal("the rig must leave Env nil, so frpc starts from the agent's own environment")
 	}
-	eventually(t, 15*time.Second, "frps to list the Instance's proxy online", func() bool { return r.frps.online(t, hInstUID) })
+	eventually(t, 15*time.Second, "frpc to log in, or to dial the proxy", func() bool {
+		return trapped.Load() > 0 || r.frps.online(t, hInstUID)
+	})
+	if n := trapped.Load(); n != 0 {
+		t.Fatalf("frpc dialled the proxy from the agent's environment %d times", n)
+	}
 	if _, status, _, err := r.frps.request(hInstUID, "/health"); err != nil || status != 200 {
 		t.Fatalf("through the tunnel: %d, %v", status, err)
 	}
