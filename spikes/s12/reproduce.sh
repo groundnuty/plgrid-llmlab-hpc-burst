@@ -20,6 +20,9 @@ SYFT_VERSION=1.55.0
 SYFT_SHA256=bb65249542db5fedeeb4d3f9b018b75e7264dbfbbb10486f044581a92f90490d           # syft_1.55.0_linux_amd64.tar.gz
 SPDX_TOOLS_VERSION=0.8.5
 GO_LICENSES_VERSION=v2.0.1
+CHECK_JSONSCHEMA_VERSION=0.39.0
+SPDX_SCHEMA_URL=https://raw.githubusercontent.com/spdx/spdx-spec/v2.3/schemas/spdx-schema.json
+SPDX_SCHEMA_SHA256=239208b7ac287b3cf5d9a9af23f9d69863971102a5e1587a27a398b43490b89b
 # ------------------------------------------------------------------------------------------
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -79,6 +82,21 @@ d = json.load(open(sys.argv[1])); del d["documentNamespace"]; json.dump(d, open(
 PY
   if $PYSPDX -i "$W/broken.spdx.json" >/dev/null 2>&1; then echo "NEGATIVE CONTROL FAILED: a document without documentNamespace was accepted"; status=1
   else echo "negative control: a document without documentNamespace is rejected, as it should be"; fi
+  # Second validator: the official SPDX 2.3 JSON schema. It is looser than pyspdxtools: see the README.
+  fetch "$SPDX_SCHEMA_URL" "$W/spdx-schema-2.3.json" "$SPDX_SCHEMA_SHA256"
+  for t in bom syft; do
+    if uvx --from "check-jsonschema==$CHECK_JSONSCHEMA_VERSION" check-jsonschema --schemafile "$W/spdx-schema-2.3.json" "$R/$t-binary.spdx.json" >/dev/null 2>&1
+    then echo "$t-binary.spdx.json: valid against the SPDX 2.3 JSON schema"; else echo "$t-binary.spdx.json: INVALID against the SPDX 2.3 JSON schema"; status=1; fi
+  done
+  python3 -I - "$R/bom-binary.spdx.json" "$W/broken-version.spdx.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); del d["spdxVersion"]; json.dump(d, open(sys.argv[2], "w"))
+PY
+  if uvx --from "check-jsonschema==$CHECK_JSONSCHEMA_VERSION" check-jsonschema --schemafile "$W/spdx-schema-2.3.json" "$W/broken-version.spdx.json" >/dev/null 2>&1
+  then echo "NEGATIVE CONTROL FAILED: the schema accepted a document without spdxVersion"; status=1
+  else echo "negative control: the schema rejects a document without spdxVersion"; fi
+  if uvx --from "check-jsonschema==$CHECK_JSONSCHEMA_VERSION" check-jsonschema --schemafile "$W/spdx-schema-2.3.json" "$W/broken.spdx.json" >/dev/null 2>&1
+  then echo "note: the schema accepts the document without documentNamespace that pyspdxtools rejects"; fi
 } > "$R/validate.txt" 2>&1; cat "$R/validate.txt"
 
 step "5. Compare the Go modules of each SBOM with go version -m"
@@ -137,7 +155,8 @@ step "8. Separate modules: are third_party/forked/* and the spikes covered by ./
     n=$(cd "$root/$mod" && "$GL" report ./... --template "$W/report.tmpl" 2>/dev/null | sed '/^$/d' | wc -l)
     rc=0; out=$(cd "$root/$mod" && "$GL" check ./... --allowed_licenses="$LIST" 2>&1) || rc=$?
     echo "$mod: report rows=$n, check exit=$rc"
-    printf '%s\n' "$out" | clean | { grep -v '^$' || true; } | sed 's/^/    /' | head -8
+    # The packages of the module itself have no LICENSE above them; list anything else separately.
+    printf '%s\n' "$out" | clean | { grep -v -e '^$' -e "$own/" || true; } | sed 's/^/    NOT OUR OWN PACKAGE: /' | head -20
   done
 } > "$R/go-licenses-modules.txt" 2>&1; cat "$R/go-licenses-modules.txt"
 
