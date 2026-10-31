@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -155,5 +156,106 @@ func TestTheDefaultsAreAOneSecondIntervalAndTheProtocolsTimeout(t *testing.T) {
 	}
 	if x.srv.longPoll != agentapi.LongPollTimeout {
 		t.Errorf("LongPollTimeout default = %v, want %v", x.srv.longPoll, agentapi.LongPollTimeout)
+	}
+}
+
+// noVersion serves the fake Backend's desired state without its Version, as
+// a Backend that forgot WithVersion would.
+type noVersion struct{ agentapi.Backend }
+
+func (b noVersion) Desired(ctx context.Context, c agentapi.Caller) (agentapi.DesiredState, error) {
+	d, err := b.Backend.Desired(ctx, c)
+	d.Version = ""
+	return d, err
+}
+
+// A desired state without a Version is refused as the controller's error,
+// never sent: the agent would otherwise poll in a loop, each poll answered at
+// once (Opus nit).
+func TestADesiredStateWithoutAVersionIsRefused(t *testing.T) {
+	x := newRig(t, func(c *Config) { c.Backend = noVersion{c.Backend} })
+	x.register(x.good())
+	rec := x.do(http.MethodGet, since("abc"), x.good(), nil)
+	wantError(t, rec, agentapi.CodeInternal)
+	if !strings.Contains(x.logs.String(), "without a Version") {
+		t.Errorf("the cause is not logged: %s", x.logs.String())
+	}
+}
+
+// slowFor delays the Backend's Desired for one Allocation, as a slow
+// controller lookup would.
+type slowFor struct {
+	agentapi.Backend
+	uid   string
+	delay time.Duration
+}
+
+func (b slowFor) Desired(ctx context.Context, c agentapi.Caller) (agentapi.DesiredState, error) {
+	if c.AllocationUID == b.uid {
+		time.Sleep(b.delay)
+	}
+	return b.Backend.Desired(ctx, c)
+}
+
+// Agents are independent: while one agent's long poll waits, and its Backend
+// calls are slow, another agent's report is answered at once and its desired
+// state's change reaches it within a poll interval (Astra nit 13).
+func TestLongPollsOfManyAgentsAreIndependent(t *testing.T) {
+	const (
+		tagB      = "tag-b"
+		uidB      = "uid-b"
+		jobB      = "job-2"
+		instanceB = "22222222222222222222222222222222"
+	)
+	x := newRig(t, func(c *Config) {
+		c.PollInterval, c.LongPollTimeout = 20*time.Millisecond, 5*time.Second
+		c.Backend = slowFor{Backend: c.Backend, uid: uidA, delay: 300 * time.Millisecond}
+	})
+	credB, err := agentapi.NewKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := agentapi.WriteKeyFile(agentapi.AllocationCredentialPath(x.host.CredentialsDir(), uidB), credB); err != nil {
+		t.Fatal(err)
+	}
+	x.lookup.set(tagB, Allocation{Namespace: namespaceA, Name: "alloc-b", UID: uidB, JobID: jobB})
+	b := ident{credB, tagB, jobB, instanceB}
+	x.register(x.good())
+	x.register(b)
+	dA := agentapi.DesiredState{Action: agentapi.ActionIdle}.WithVersion()
+	dB := agentapi.DesiredState{Action: agentapi.ActionIdle}.WithVersion()
+	x.backend.SetDesired(uidA, dA)
+	x.backend.SetDesired(uidB, dB)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	waitA := x.poll(ctx, since(dA.Version))
+	pollB := make(chan *httptest.ResponseRecorder, 1)
+	go func() { pollB <- x.doCtx(ctx, http.MethodGet, since(dB.Version), b, nil) }()
+	time.Sleep(100 * time.Millisecond)
+
+	start := time.Now()
+	rec := x.do(http.MethodPost, agentapi.PathReport, b, reportBody(t, agentapi.Report{Time: time.Now()}))
+	if rec.Code != http.StatusNoContent || time.Since(start) > time.Second {
+		t.Fatalf("B's report: %d after %s, while A's poll waits", rec.Code, time.Since(start))
+	}
+	changed := agentapi.DesiredState{Action: agentapi.ActionStop}
+	start = time.Now()
+	x.backend.SetDesired(uidB, changed)
+	select {
+	case r := <-pollB:
+		if v := versionOf(t, r); v == dB.Version {
+			t.Fatalf("B's poll returned the old version")
+		}
+		if took := time.Since(start); took > time.Second {
+			t.Fatalf("B's change reached it after %s", took)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("B's poll did not return after its desired state changed")
+	}
+	select {
+	case <-waitA:
+		t.Fatal("A's poll returned though nothing changed for A")
+	default:
 	}
 }

@@ -106,7 +106,7 @@ func (s *Server) report(w http.ResponseWriter, r *http.Request, c agentapi.Calle
 func (s *Server) desired(w http.ResponseWriter, r *http.Request, c agentapi.Caller) result {
 	ctx := r.Context()
 	since := r.URL.Query().Get(agentapi.QuerySince)
-	d, err := s.backend.Desired(ctx, c)
+	d, err := s.desiredOf(ctx, c)
 	if err != nil {
 		return toResult(ctx, err)
 	}
@@ -124,7 +124,7 @@ func (s *Server) desired(w http.ResponseWriter, r *http.Request, c agentapi.Call
 		case <-timeout.C:
 			return writeJSON(w, http.StatusOK, d)
 		case <-tick.C:
-			if d, err = s.backend.Desired(ctx, c); err != nil {
+			if d, err = s.desiredOf(ctx, c); err != nil {
 				return toResult(ctx, err)
 			}
 			if d.Version != since {
@@ -132,6 +132,21 @@ func (s *Server) desired(w http.ResponseWriter, r *http.Request, c agentapi.Call
 			}
 		}
 	}
+}
+
+// errNoVersion is a Backend's desired state without a Version: a long poll
+// from it would return at once every time and leave the agent polling in a
+// loop (PR #87 review, Opus nit), so the server refuses it.
+var errNoVersion = errors.New("the Backend served a desired state without a Version (DesiredState.WithVersion)")
+
+// desiredOf asks the Backend for the caller's desired state and refuses one
+// without a Version.
+func (s *Server) desiredOf(ctx context.Context, c agentapi.Caller) (agentapi.DesiredState, error) {
+	d, err := s.backend.Desired(ctx, c)
+	if err == nil && d.Version == "" {
+		return d, errNoVersion
+	}
+	return d, err
 }
 
 // decodeBody reads the request body into v with agentapi.DecodeBody. A body
