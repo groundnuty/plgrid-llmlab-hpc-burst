@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -93,6 +94,41 @@ func TestReviewWarmReuseChecksFit(t *testing.T) {
 	}
 }
 
+// TestReviewFitsChecksEachConjunct (Astra 4): an Allocation holds an Instance
+// only in the Instance's class (the partition and the GPU count) and with room
+// for its CPUs and memory (HBEP-7, question 14; the review: "class and resource
+// envelope"). Each refusal differs from the exact fit in one field, so
+// dropping any one check lets a case through. Without the fix the warm
+// Allocation is reused whatever it holds.
+func TestReviewFitsChecksEachConjunct(t *testing.T) {
+	need := v1alpha1.BatchParameters{Partition: "gpu-part", GPUs: 2, CPUsPerTask: 32, Memory: resource.MustParse("240Gi")}
+	held := func(f func(*v1alpha1.BatchParameters)) *v1alpha1.Allocation {
+		b := need.DeepCopy()
+		if f != nil {
+			f(b)
+		}
+		return &v1alpha1.Allocation{Spec: v1alpha1.AllocationSpec{ForProvider: v1alpha1.AllocationParameters{Batch: b}}}
+	}
+	for _, tc := range []struct {
+		name string
+		a    *v1alpha1.Allocation
+		want bool
+	}{
+		{"an exact fit", held(nil), true},
+		{"a different partition", held(func(b *v1alpha1.BatchParameters) { b.Partition = "other-part" }), false},
+		{"fewer GPUs", held(func(b *v1alpha1.BatchParameters) { b.GPUs = 1 }), false},
+		{"fewer CPUs", held(func(b *v1alpha1.BatchParameters) { b.CPUsPerTask = 16 }), false},
+		{"less memory", held(func(b *v1alpha1.BatchParameters) { b.Memory = resource.MustParse("120Gi") }), false},
+		{"a managed Allocation", &v1alpha1.Allocation{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := fits(tc.a, need); got != tc.want {
+				t.Fatalf("fits = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestReviewLadderBound (Astra 5): status.restarts keeps 16 restarts, so
 // attemptsPerRung above 8 cannot climb; such a profile is refused
 // (ProviderUnavailable naming the field) and nothing is provisioned. At the
@@ -109,6 +145,18 @@ func TestReviewLadderBound(t *testing.T) {
 		c := rg.condition(hoMD, v1alpha1.ConditionDegraded)
 		if c.Reason != v1alpha1.ReasonProviderUnavailable || !strings.Contains(c.Message, "attemptsPerRung 9") || rg.submissions() != 0 {
 			t.Fatalf("Degraded %s %q, %d submissions; want ProviderUnavailable naming attemptsPerRung 9, and none", c.Reason, c.Message, rg.submissions())
+		}
+	})
+	t.Run("0 is refused", func(t *testing.T) {
+		// A rung tried zero times cannot climb either: the lower bound is 1.
+		rg := newRig(t, withProfile(func(p *v1alpha1.PlatformProfileSpec) {
+			p.Restart = &v1alpha1.RestartPolicy{AttemptsPerRung: ptrTo(int32(0))}
+		}))
+		rg.create(mdSpec(hoMD))
+		rg.run(time.Minute, 10*time.Second)
+		c := rg.condition(hoMD, v1alpha1.ConditionDegraded)
+		if c.Reason != v1alpha1.ReasonProviderUnavailable || !strings.Contains(c.Message, "attemptsPerRung 0") || rg.submissions() != 0 {
+			t.Fatalf("Degraded %s %q, %d submissions; want ProviderUnavailable naming attemptsPerRung 0, and none", c.Reason, c.Message, rg.submissions())
 		}
 	})
 	t.Run("8 climbs across controller restarts", func(t *testing.T) {

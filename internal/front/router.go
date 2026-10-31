@@ -21,11 +21,13 @@ import (
 // Load bound and cap: recomputed at every join, leave and change of
 // eligibility).
 type Router struct {
-	cfg   Config
-	clk   clock.Clock
-	trans Transports
-	rec   Recorder
-	log   *slog.Logger
+	cfg     Config
+	clk     clock.Clock
+	trans   Transports
+	rec     Recorder
+	log     *slog.Logger
+	metrics *Metrics // nil: none
+	lease   *leaseRef
 
 	mu        sync.Mutex
 	snap      inventory.Snapshot
@@ -40,6 +42,18 @@ type Router struct {
 	leaseEnds map[types.UID]time.Time
 	mds       map[string]*v1alpha1.ModelDeployment // for events
 	profiles  map[string]*v1alpha1.PlatformProfile
+
+	// usageFailing: a usage write has failed and none has succeeded since.
+	// usageNote is the event's message, from the latest failure, and
+	// usageEventAt when the event last went out (zero: not yet in this run
+	// of failures).
+	usageFailing bool
+	usageNote    string
+	usageEventAt time.Time
+
+	// beforePick, when set, runs between reading the view and picking from
+	// the live groups: a seam for tests that force a join in between.
+	beforePick func()
 }
 
 type pause struct {
@@ -47,10 +61,10 @@ type pause struct {
 	until    time.Time
 }
 
-// NewRouter returns a router with an empty view.
-func NewRouter(cfg Config, clk clock.Clock, trans Transports, rec Recorder, log *slog.Logger) *Router {
+// NewRouter returns a router with an empty view. metrics may be nil.
+func NewRouter(cfg Config, clk clock.Clock, trans Transports, rec Recorder, log *slog.Logger, metrics *Metrics) *Router {
 	r := &Router{
-		cfg: cfg, clk: clk, trans: trans, rec: rec, log: log,
+		cfg: cfg, clk: clk, trans: trans, rec: rec, log: log, metrics: metrics, lease: &leaseRef{},
 		groups: map[string]*balancer.Group{}, rings: map[string]*balancer.Ring{}, pauses: map[string]*pause{},
 		reported: map[string]string{}, problems: map[string]bool{}, leaseEnds: map[types.UID]time.Time{},
 	}
@@ -102,7 +116,11 @@ func (r *Router) rebuildLocked() {
 			r.applyLocked(d, prev, now)
 			for _, i := range d.Members {
 				all = append(all, i.Key)
+				r.metrics.known(i.Provider, d.Key)
 			}
+		}
+		for _, t := range m.Managed {
+			r.metrics.known(t.Provider, t.Deployment)
 		}
 		r.rings[m.Name] = balancer.NewRing(all)
 	}
@@ -222,6 +240,7 @@ func (r *Router) ReportConnect(key string, failed bool) {
 	now := r.clk.Now()
 	p.failures, p.until = 0, now.Add(r.cfg.PauseDuration.D())
 	r.log.Warn("target paused after failed connections", "target", key, "until", p.until.UTC().Format(time.RFC3339))
+	r.metrics.paused(r.targetLabelsLocked(key))
 	r.rebuildLocked()
 }
 
@@ -234,6 +253,30 @@ func (r *Router) failures(key string) int {
 		return p.failures
 	}
 	return 0
+}
+
+// targetLabelsLocked returns the provider and the ModelDeployment of a target
+// by its key, for a metric's labels; both are empty when the view no longer
+// holds it.
+func (r *Router) targetLabelsLocked(key string) (provider, deployment string) {
+	if r.view == nil {
+		return "", ""
+	}
+	for _, m := range r.view.Models {
+		for _, d := range m.Served {
+			for _, i := range d.Members {
+				if i.Key == key {
+					return i.Provider, d.Key
+				}
+			}
+		}
+		for _, t := range m.Managed {
+			if t.Key == key {
+				return t.Provider, t.Deployment
+			}
+		}
+	}
+	return "", ""
 }
 
 // Paused reports whether a target is paused now.
@@ -267,6 +310,55 @@ func (r *Router) LeaseEnd(uid types.UID) (time.Time, bool) {
 	defer r.mu.Unlock()
 	t, ok := r.leaseEnds[uid]
 	return t, ok
+}
+
+// usageEventEvery is how often a UsageWriteFailed event repeats while the
+// failure lasts.
+const usageEventEvery = time.Hour
+
+// usageFailed notes a usage failure and raises its event when it can. The
+// event regards the front's Lease (HBEP-8, Events), so it waits until the
+// front holds the Lease: until then the failure is counted by the sink,
+// logged and shown in /healthz, and nothing else (@hpc-burst-science-agent,
+// 31 Oct 2026; no fallback to a ModelDeployment).
+func (r *Router) usageFailed(requestID string, err error) {
+	r.mu.Lock()
+	r.usageFailing = true
+	r.usageNote = "usage records are not being written (request " + requestID + "): " + err.Error()
+	r.mu.Unlock()
+	r.flushUsageEvent()
+}
+
+// flushUsageEvent raises the UsageWriteFailed event of a failure that lasts,
+// if the front holds its Lease and the event has not gone out in the last
+// hour: a repeating event, since client-go rarely merges events whose objects
+// changed (@hpc-burst-science-agent, 31 Oct 2026). The Lease keeper calls it
+// after every beat that holds the Lease, so a failure that began before the
+// Lease existed has its event as soon as the Lease does, and one that lasts
+// has it hourly with no new request.
+func (r *Router) flushUsageEvent() {
+	if !r.lease.held() {
+		return
+	}
+	r.mu.Lock()
+	now := r.clk.Now()
+	emit := r.usageFailing && (r.usageEventAt.IsZero() || !now.Before(r.usageEventAt.Add(usageEventEvery)))
+	note := r.usageNote
+	if emit {
+		r.usageEventAt = now
+	}
+	r.mu.Unlock()
+	if emit {
+		r.rec.Event(r.lease.object(), true, eventFailing, reasonUsageWriteFailed, note)
+	}
+}
+
+// usageWritten ends a usage failure: the next one raises its event at once.
+func (r *Router) usageWritten() {
+	r.mu.Lock()
+	r.usageFailing = false
+	r.usageEventAt = time.Time{}
+	r.mu.Unlock()
 }
 
 // drift runs under the group's lock, possibly inside rebuildLocked, so it

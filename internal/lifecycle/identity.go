@@ -430,9 +430,9 @@ func (r *Reconciler) ensureIdentityRecord(ctx context.Context, md *v1alpha1.Mode
 	if err := json.Unmarshal(got.Data.Raw, &stored); err != nil || stored.SHA256 != id.SHA256 {
 		// A collision never loops: the event fires once per spec generation
 		// and record version, and nothing is retried until one of them
-		// changes (HBEP owner, 31 Oct 2026).
+		// changes (`@hpc-burst-science-agent`, 31 Oct 2026).
 		if r.memory().once(fmt.Sprintf("collision/%s/%d/%s/%s", md.UID, md.Generation, rec.Name, got.ResourceVersion)) {
-			r.Recorder.Event(md, true, eventDegraded, v1alpha1.ReasonIdentityUnresolved,
+			r.Recorder.Event(md, nil, eventDegraded, v1alpha1.ReasonIdentityUnresolved,
 				fmt.Sprintf("identity record %s holds another deployment ID than %s: a display-form collision; the ID is refused (HBEP-3)", rec.Name, id.SHA256))
 		}
 		return "", "", &collisionError{record: rec.Name, rv: got.ResourceVersion,

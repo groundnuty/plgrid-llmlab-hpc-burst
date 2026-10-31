@@ -127,6 +127,9 @@ func newCtlFixture(t *testing.T, front Front) *ctlFixture {
 		t.Fatal(err)
 	}
 	t.Setenv("FAKECTRL_DIR", f.ctl)
+	// Runs after the test's own clean-ups (it is registered first): whatever still has the state
+	// directory as its working directory is a supervisor or controller the test left behind.
+	t.Cleanup(func() { noLeftovers(t, l.dir) })
 	return f
 }
 
@@ -285,7 +288,9 @@ func startTicksOf(t *testing.T, pid int) uint64 {
 
 // healthzCode asks addr for /healthz, as curl would.
 func healthzCode(addr string) (int, error) {
-	return getStatus(&http.Client{Timeout: time.Second}, "http://"+addr+"/healthz")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	return getStatus(ctx, &http.Client{Timeout: time.Second}, "http://"+addr+"/healthz")
 }
 
 // TestFakeControllerFlags: the fake accepts exactly the controller's command line and refuses the

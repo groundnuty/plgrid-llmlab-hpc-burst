@@ -30,7 +30,11 @@ func reportWithKey() Report {
 		Time: time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC),
 		Instance: &InstanceReport{
 			UID: "u1", Key: testKey, ServingEndpoint: "unix:///run/x.sock",
-			Workers: []WorkerReport{{Name: "worker-0", Phase: PartRunning}},
+			Workers: []WorkerReport{{Name: "worker-0", Phase: PartRunning, Health: &Health{
+				ProbeOK: true, GeneratedTokens: Int64(70), Preemptions: Int64(2),
+				PrefixCacheQueriedTokens: Int64(300), PrefixCacheHitTokens: Int64(200),
+				TimePerOutputTokenSecondsSum: Float64(1.5), TimePerOutputTokenCount: Int64(30),
+			}}},
 		},
 	}
 }
@@ -194,6 +198,11 @@ func checkRedacted(t *testing.T, v reflect.Value, path string, checked *[]string
 			}
 			p, fv := path+"."+f.Name, v.Field(i)
 			if hasSecretWord(f.Name) && !notSecretByName[f.Name] {
+				// A pointer is judged by what it points to: Health's gauges
+				// are *int64, and GeneratedTokens is a count, not a secret.
+				for fv.Kind() == reflect.Pointer && !fv.IsNil() {
+					fv = fv.Elem()
+				}
 				switch fv.Kind() {
 				case reflect.String:
 					*checked = append(*checked, p)

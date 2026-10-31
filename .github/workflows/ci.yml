@@ -8,6 +8,11 @@
 #   licence-modules, licences  the licence check of HBEP-15; disabled with if: false since 31 Oct 2026
 #                (the owner's decision; see docs/development.md)
 #
+# The go, crd and launcher-k3s jobs also fetch the pinned frp binaries (hack/fetch-frp.sh) and set
+# HPCBURST_REQUIRE_FRP=1, so the tests that start frps and frpc fail rather than skip without them.
+# The go and crd jobs also provide OpenSSH's sshd (HPCBURST_SSHD) for the ssh-mode tunnel tests,
+# which fail under HPCBURST_REQUIRE_FRP=1 without it; the runner's sshd service is never started.
+#
 # The workflow reads no secret and pushes nothing. Every action is pinned by commit SHA.
 #
 # crd and launcher-k3s call scripts from hack/. A missing script fails the job: a job that
@@ -64,6 +69,35 @@ jobs:
 
       - name: Go version
         run: go version
+
+      # The tunnel tests of HBEP-6 start frps and frpc. HPCBURST_REQUIRE_FRP=1 makes
+      # internal/testenv.FrpBinaries fail, instead of skip, when they are missing; the script
+      # checks the release's sha256 before it extracts anything.
+      - name: Fetch the pinned frp binaries
+        run: |
+          bash hack/fetch-frp.sh "$RUNNER_TEMP/frp"
+          {
+            echo "HPCBURST_FRP_DIR=$RUNNER_TEMP/frp"
+            echo "HPCBURST_REQUIRE_FRP=1"
+          } >> "$GITHUB_ENV"
+
+      # The ssh-mode tunnel tests (internal/agent) run OpenSSH's sshd as this user, in inetd
+      # mode, with no service and no root. With HPCBURST_REQUIRE_FRP=1 a missing sshd fails them.
+      # The package is installed only when sshd is missing, with policy-rc.d refusing to start
+      # its service. The system ssh units are then disabled every time, installed or not, so
+      # the runner keeps no listening sshd.
+      - name: Provide OpenSSH's sshd for the tunnel tests
+        run: |
+          if ! test -x /usr/sbin/sshd; then
+            printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
+            sudo chmod 755 /usr/sbin/policy-rc.d
+            sudo apt-get update -q
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server
+            sudo rm -f /usr/sbin/policy-rc.d
+          fi
+          sudo systemctl disable --now ssh.socket ssh.service 2> /dev/null || true
+          /usr/sbin/sshd -V 2>&1 | head -1
+          echo "HPCBURST_SSHD=/usr/sbin/sshd" >> "$GITHUB_ENV"
 
       - name: gofmt
         run: |
@@ -155,6 +189,35 @@ jobs:
           go-version-file: go.mod
           cache: false
 
+      # The tunnel tests of HBEP-6 start frps and frpc. HPCBURST_REQUIRE_FRP=1 makes
+      # internal/testenv.FrpBinaries fail, instead of skip, when they are missing; the script
+      # checks the release's sha256 before it extracts anything.
+      - name: Fetch the pinned frp binaries
+        run: |
+          bash hack/fetch-frp.sh "$RUNNER_TEMP/frp"
+          {
+            echo "HPCBURST_FRP_DIR=$RUNNER_TEMP/frp"
+            echo "HPCBURST_REQUIRE_FRP=1"
+          } >> "$GITHUB_ENV"
+
+      # The ssh-mode tunnel tests (internal/agent) run OpenSSH's sshd as this user, in inetd
+      # mode, with no service and no root. With HPCBURST_REQUIRE_FRP=1 a missing sshd fails them.
+      # The package is installed only when sshd is missing, with policy-rc.d refusing to start
+      # its service. The system ssh units are then disabled every time, installed or not, so
+      # the runner keeps no listening sshd.
+      - name: Provide OpenSSH's sshd for the tunnel tests
+        run: |
+          if ! test -x /usr/sbin/sshd; then
+            printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
+            sudo chmod 755 /usr/sbin/policy-rc.d
+            sudo apt-get update -q
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server
+            sudo rm -f /usr/sbin/policy-rc.d
+          fi
+          sudo systemctl disable --now ssh.socket ssh.service 2> /dev/null || true
+          /usr/sbin/sshd -V 2>&1 | head -1
+          echo "HPCBURST_SSHD=/usr/sbin/sshd" >> "$GITHUB_ENV"
+
       # check.sh runs gofmt, vet, tidy, the CRD drift check (hack/verify-generated.sh) and the
       # tests. The tests fetch the pinned Kubernetes binaries through hack/test-binaries.sh,
       # which checks their sha256. The go and tidy jobs repeat some of this on purpose: each
@@ -199,6 +262,17 @@ jobs:
       # checks their sha256 against internal/launcher/k3s-pins.txt.
       - name: Fetch the pinned k3s binaries
         run: bash hack/fetch-k3s.sh "$HPCBURST_BIN_DIR" 1.35.9 1.36.5
+
+      # The tunnel tests of HBEP-6 start frps and frpc. HPCBURST_REQUIRE_FRP=1 makes
+      # internal/testenv.FrpBinaries fail, instead of skip, when they are missing; the script
+      # checks the release's sha256 before it extracts anything.
+      - name: Fetch the pinned frp binaries
+        run: |
+          bash hack/fetch-frp.sh "$RUNNER_TEMP/frp"
+          {
+            echo "HPCBURST_FRP_DIR=$RUNNER_TEMP/frp"
+            echo "HPCBURST_REQUIRE_FRP=1"
+          } >> "$GITHUB_ENV"
 
       # k3s runs as the invoking user (server --rootless --disable-agent), which needs no user
       # namespace, so AppArmor's restriction on them does not matter to it. The size-limited

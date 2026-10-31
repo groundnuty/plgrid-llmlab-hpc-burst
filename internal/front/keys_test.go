@@ -242,10 +242,11 @@ func kyUsageFiles(t *testing.T, dir string) string {
 // recorded events. The client's own key, which the front read from the
 // request, is absent too.
 //
-// By design the error body itself passes through to the client unchanged
-// (HBEP-5, The LLMLab route: "Responses and errors pass through unchanged").
-// So the key a target echoes reaches the client that sent the request, and
-// the test asserts that, because it proves the echo was on.
+// The error body passes through to the client with every target credential
+// replaced by [redacted] and all its other bytes unchanged
+// (@hpc-burst-science-agent, 31 Oct 2026; PR #95 review, Astra B12). The
+// body LLMLab sends a direct request holds the key, which proves the echo
+// was on.
 func TestKeysNeverLeakIntoLogsUsageOrEvents(t *testing.T) {
 	// A profile whose drain window is below maxRequestDuration plus its
 	// margin makes the front emit an event (DrainWindowShort), so the events
@@ -276,8 +277,8 @@ func TestKeysNeverLeakIntoLogsUsageOrEvents(t *testing.T) {
 	if status != http.StatusServiceUnavailable {
 		t.Fatalf("LLMLab's error: status %d: %s", status, viaLLM)
 	}
-	if !strings.Contains(viaLLM, kyUpstream) {
-		t.Fatalf("the body LLMLab sent holds no key (EchoKey on); the leak scan would prove nothing: %s", viaLLM)
+	if strings.Contains(viaLLM, kyUpstream) {
+		t.Errorf("the upstream key reached the client in LLMLab's error: %s", viaLLM)
 	}
 	direct, err := http.NewRequest(http.MethodPost, llm.BaseURL()+"/chat/completions",
 		strings.NewReader(fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hello there"}]}`, kyModel)))
@@ -289,14 +290,18 @@ func TestKeysNeverLeakIntoLogsUsageOrEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := readAll(t, dresp); viaLLM != want {
-		t.Errorf("LLMLab's error body changed on the way to the client:\n got %s\nwant %s", viaLLM, want)
+	want := readAll(t, dresp)
+	if !strings.Contains(want, kyUpstream) {
+		t.Fatalf("the body LLMLab sends holds no key (EchoKey on); the leak checks would prove nothing: %s", want)
+	}
+	if want = strings.ReplaceAll(want, kyUpstream, "[redacted]"); viaLLM != want {
+		t.Errorf("LLMLab's error body changed on the way to the client beyond the redaction:\n got %s\nwant %s", viaLLM, want)
 	}
 
 	status, viaEngine, header := kyChat(t, h, "served-model")
 	ids = append(ids, header.Get("hpcburst-request-id"))
-	if status != http.StatusBadRequest || viaEngine != engineBody {
-		t.Fatalf("the engine's error: status %d body %q, want 400 and %q unchanged", status, viaEngine, engineBody)
+	if want := strings.ReplaceAll(engineBody, instanceKey, "[redacted]"); status != http.StatusBadRequest || viaEngine != want {
+		t.Fatalf("the engine's error: status %d body %q, want 400 and %q, the key redacted and nothing else changed", status, viaEngine, want)
 	}
 
 	for _, id := range ids {

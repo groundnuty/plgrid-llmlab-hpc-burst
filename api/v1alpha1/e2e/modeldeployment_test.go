@@ -292,7 +292,7 @@ func TestEngineFlagsRefuseAbbreviationsOfRefusedNames(t *testing.T) {
 		{"hf-overrides", flag("hf-overrides"), ""},
 		{"api-server-count", flag("api-server-count"), ""},
 		{"chat-template-content-format", flag("chat-template-content-format"), ""},
-		{"max-model-len", flag("max-model-len"), ""},
+		{"max-model-len", setFlags(v1alpha1.EngineFlag{Name: "max-model-len", Value: "32768"}), ""},
 		{"ordinary flags", setFlags(
 			v1alpha1.EngineFlag{Name: "dtype", Value: "bfloat16"},
 			v1alpha1.EngineFlag{Name: "seed", Value: "7"}), ""},
@@ -371,6 +371,10 @@ func TestEngineFlagsRefuseEveryPrefixOfAKnownFlag(t *testing.T) {
 		switch {
 		case isBool[k]:
 			value = "true"
+		case k == "max-model-len":
+			value = "32768" // a plain positive integer (TestMaxModelLenIsAPlainPositiveInteger)
+		case k == "tensor-parallel-size", k == "pipeline-parallel-size":
+			value = "2" // a plain positive integer (TestParallelSizesArePlainPositiveIntegers)
 		case k == "tokenizer":
 			value = "example-org/example-1b" // the checkpoint's own
 		case k == "tokenizer-revision":
@@ -418,7 +422,7 @@ func TestBooleanEngineFlagsTakeTrueOrFalse(t *testing.T) {
 	accepted = append(accepted,
 		// A flag that is not a boolean keeps whatever value it is given.
 		mdCase{"seed with the value 1", flag("seed", "1"), ""},
-		mdCase{"max-model-len with the value true, which is not a boolean flag's rule", flag("max-model-len", "true"), ""},
+		mdCase{"dtype with the value true, which is not a boolean flag's rule", flag("dtype", "true"), ""},
 		// disable-log-stats is a store_true flag, outside the boolean rule.
 		mdCase{"disable-log-stats with 1", flag("disable-log-stats", "1"), ""},
 		// A flag that contains "no" but does not start with "no-".
@@ -888,4 +892,74 @@ func TestScaleSubresource(t *testing.T) {
 	if read.Spec.Replicas != 5 || read.Status.Replicas != 4 {
 		t.Fatalf("scale = spec %d, status %d; want 5 and 4", read.Spec.Replicas, read.Status.Replicas)
 	}
+}
+
+// max-model-len takes only a plain positive decimal integer (HBEP-3, HBEP-7;
+// `@hpc-burst-science-agent`, 31 Oct 2026): the controller compares it with the
+// value the engine reports and sizes the longest context from it, and vLLM
+// itself reads 32k, auto and -1 as it pleases. Both spellings of the name are
+// checked, since "_" and "-" name one flag, and so is every other flag with
+// the same value, which stays free.
+func TestMaxModelLenIsAPlainPositiveInteger(t *testing.T) {
+	const plain = "max-model-len is a plain positive decimal integer"
+	flag := func(name, v string) func(*v1alpha1.ModelDeployment) {
+		return setFlags(v1alpha1.EngineFlag{Name: name, Value: v})
+	}
+	var refused, accepted []mdCase
+	for _, v := range []string{"32k", "32K", "auto", "-1", "0", "+5", "1e4", "", "08", "00", " 5", "5 ", "1.5", "4,096", "0x10", "1_000", "٣٢", "5\n", "true", "null"} {
+		refused = append(refused,
+			mdCase{`max-model-len set to "` + v + `"`, flag("max-model-len", v), plain},
+			mdCase{`max_model_len set to "` + v + `"`, flag("max_model_len", v), plain})
+	}
+	for _, v := range []string{"1", "5", "32768", "131072", "1048576", "10", "100", "9999999999"} {
+		accepted = append(accepted,
+			mdCase{"max-model-len " + v, flag("max-model-len", v), ""},
+			mdCase{"max_model_len " + v, flag("max_model_len", v), ""})
+	}
+	// The value rule belongs to this flag alone: another flag keeps whatever it
+	// is given, the positive control that the rule does not catch every flag.
+	accepted = append(accepted,
+		mdCase{"max-num-seqs is not max-model-len", flag("max-num-seqs", "32k"), ""},
+		mdCase{"served-model-name is free text", flag("served-model-name", "auto"), ""})
+	runMDCases(t, refused, accepted)
+}
+
+// tensor-parallel-size, pipeline-parallel-size and data-parallel-size take only
+// a plain positive decimal integer (HBEP-4, HBEP-7; `@hpc-burst-science-agent`,
+// 31 Oct 2026): the lifecycle controller multiplies the first two to size an
+// Instance's GPUs and reads the third to refuse a size above 1. Both spellings
+// of each name are checked. A data-parallel-size above 1 is admitted here: the
+// controller turns it into SpecUnsupported, not admission.
+func TestParallelSizesArePlainPositiveIntegers(t *testing.T) {
+	const plain = "tensor-parallel-size, pipeline-parallel-size and data-parallel-size are plain positive decimal integers"
+	flag := func(name, v string) func(*v1alpha1.ModelDeployment) {
+		return setFlags(v1alpha1.EngineFlag{Name: name, Value: v})
+	}
+	names := []string{"tensor-parallel-size", "pipeline-parallel-size", "data-parallel-size"}
+	var refused, accepted []mdCase
+	for _, n := range names {
+		for _, v := range []string{"0", "-1", "+2", "1.5", "1e2", " 2", "auto", "", "02", "00", "2 ", "2\n", "0x2", "1_0", "4,2", "\u0662", "true", "null"} {
+			refused = append(refused,
+				mdCase{n + ` set to "` + v + `"`, flag(n, v), plain},
+				mdCase{underscored(n) + ` set to "` + v + `"`, flag(underscored(n), v), plain})
+		}
+		for _, v := range []string{"1", "2", "8", "64", "10", "9999999999"} {
+			accepted = append(accepted,
+				mdCase{n + " " + v, flag(n, v), ""},
+				mdCase{underscored(n) + " " + v, flag(underscored(n), v), ""})
+		}
+	}
+	accepted = append(accepted,
+		// A size above 1 is for the controller to refuse (SpecUnsupported).
+		mdCase{"data-parallel-size 4 is the controller's to refuse", flag("data-parallel-size", "4"), ""},
+		mdCase{"all three sizes together", setFlags(
+			v1alpha1.EngineFlag{Name: "tensor-parallel-size", Value: "4"},
+			v1alpha1.EngineFlag{Name: "pipeline-parallel-size", Value: "2"},
+			v1alpha1.EngineFlag{Name: "data-parallel-size", Value: "1"}), ""},
+		// The value rule belongs to these flags alone: another flag keeps whatever
+		// it is given, the positive control that the rule does not catch every flag.
+		mdCase{"max-num-seqs is not a parallel size", flag("max-num-seqs", "auto"), ""},
+		mdCase{"max-num-seqs zero", flag("max-num-seqs", "0"), ""},
+		mdCase{"a parallel size of another kind is free", flag("decode-context-parallel-size", "auto"), ""})
+	runMDCases(t, refused, accepted)
 }

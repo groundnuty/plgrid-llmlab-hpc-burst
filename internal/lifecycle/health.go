@@ -9,7 +9,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
-	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 // ready applies the health rules to a ready Instance (HBEP-7, Health and
@@ -19,7 +18,7 @@ func (p *pass) ready(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av agent
 	if av.unreachable || av.report == nil {
 		return nil // a path that is down is not a dead Instance (HBEP-6)
 	}
-	signal, msg := p.healthSignal(in, alloc, av.report, st)
+	signal, msg := p.healthSignal(in, alloc, av, st)
 	if signal == "" {
 		now := metav1.NewTime(p.now)
 		return p.setStatus(in, func(s *v1alpha1.InstanceStatus) {
@@ -34,7 +33,8 @@ func (p *pass) ready(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av agent
 // errorOnlyWindow; requests running with the generated-token counter unchanged
 // for noProgressTimeout; a part that exited without being told to. Plain load
 // is never a signal (HBEP-7, Health and restarts).
-func (p *pass) healthSignal(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, ir *agentapi.InstanceReport, st settings) (string, string) {
+func (p *pass) healthSignal(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av agentView, st settings) (string, string) {
+	ir := av.report
 	if workerExited(ir, in) {
 		w := worker0(ir)
 		code := "unknown"
@@ -54,17 +54,23 @@ func (p *pass) healthSignal(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, i
 	if !h.ProbeOK && h.ConsecutiveProbeFailures >= st.failureThreshold {
 		return v1alpha1.ReasonProbeFailing, fmt.Sprintf("the health probe failed %d times in a row", h.ConsecutiveProbeFailures)
 	}
+	// The gauge-based signals need fresh metrics: stale gauges are unknown.
+	if !av.metricsFresh(w) {
+		return "", ""
+	}
 	t, ok := p.r.Backend.healthOf(alloc.UID, string(in.UID), *w)
 	if !ok {
 		return "", ""
 	}
-	if h.RunningRequests > 0 {
+	// No progress needs a known running count above zero and a known counter
+	// in both this sample and the tracker's baseline: nil is unknown.
+	if h.RunningRequests != nil && *h.RunningRequests > 0 && h.GeneratedTokens != nil && t.tokens != nil {
 		since := t.tokensSince
 		if p.mem.started.After(since) {
 			since = p.mem.started
 		}
 		if deadline := since.Add(st.noProgressTimeout); !p.now.Before(deadline) {
-			return v1alpha1.ReasonNoProgress, fmt.Sprintf("%d requests run and the generated-token counter has not moved for %s", h.RunningRequests, p.now.Sub(since))
+			return v1alpha1.ReasonNoProgress, fmt.Sprintf("%d requests run and the generated-token counter has not moved for %s", *h.RunningRequests, p.now.Sub(since))
 		} else {
 			p.at(deadline)
 		}
@@ -184,7 +190,7 @@ func (p *pass) restart(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, signal
 		reason = v1alpha1.ReasonInstanceRestart
 	}
 	gen := restartGeneration(in, part) + 1
-	p.r.Recorder.Event(in, true, eventFailing, reason,
+	p.r.Recorder.Event(in, nil, eventFailing, reason,
 		fmt.Sprintf("signal %s (%s): the lifecycle controller restarts %s, generation %d; in-flight requests are cut", signal, msg, part, gen))
 	now := metav1.NewTime(p.now)
 	if err := p.setStatus(in, func(s *v1alpha1.InstanceStatus) {
@@ -274,7 +280,7 @@ func (p *pass) loopPaused(c v1alpha1.AcceleratorClass, st settings) (bool, time.
 	}
 	until := last.Add(pause)
 	if p.md != nil && p.mem.once(fmt.Sprintf("restart-loop/%s/%s/%s/%d", p.md.UID, c.GPUModel, c.CPUArch, streak[2].Unix())) {
-		p.r.Recorder.Event(p.md, true, eventDegraded, v1alpha1.ReasonRestartLoop,
+		p.r.Recorder.Event(p.md, nil, eventDegraded, v1alpha1.ReasonRestartLoop,
 			fmt.Sprintf("three Allocations in a row failed in class %s/%s within %s; provisioning there pauses", c.GPUModel, c.CPUArch, st.restartWindow))
 	}
 	return p.now.Before(until), until
@@ -296,7 +302,7 @@ func (p *pass) endingSoon(in *v1alpha1.Instance, pv *providerView) {
 		return
 	}
 	if p.mem.once("ending-soon/" + string(in.UID)) {
-		p.r.Recorder.Event(in, true, eventEndingSoon, "NoReplacementReady",
+		p.r.Recorder.Event(in, nil, eventEndingSoon, "NoReplacementReady",
 			fmt.Sprintf("drain start at %s is less than %s away and no replacement is ready", ds.UTC().Format(time.RFC3339), endingSoonLead))
 	}
 }

@@ -27,6 +27,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	appsv1 "k8s.io/api/apps/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -38,7 +39,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -49,9 +52,13 @@ import (
 
 const (
 	managerHealthAddr = "127.0.0.1:29301"
-	// managerPortBase is #61's envtest block, 29204-29207 (IMPL-COMMON.md,
-	// Envtest port blocks), used when HPCBURST_TESTENV_PORT_BASE is unset, so
-	// go test ./... runs it beside the other packages' control planes.
+	// managerPortBase is the first port of #61's envtest block, 29204-29207.
+	// One control plane takes four loopback ports (etcd client, etcd peer,
+	// kube-apiserver, kube-controller-manager) inside issue #40's range
+	// 29200-29219 (internal/testenv), and two control planes cannot share a
+	// block. go test runs packages in parallel, so each package that starts one
+	// gets a block of its own; this one is #61's. It is used when
+	// HPCBURST_TESTENV_PORT_BASE is unset.
 	managerPortBase = "29204"
 )
 
@@ -101,6 +108,81 @@ func eventually(t *testing.T, limit time.Duration, what string, cond func() (boo
 			t.Fatalf("%s: not within %s; last: %s", what, limit, last)
 		}
 		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// capturedEvent is one call of client-go's events recorder.
+type capturedEvent struct{ eventType, reason, action, note, regarding, related string }
+
+// captureRecorder is an events.EventRecorder that keeps what KubeRecorder
+// hands client-go.
+type captureRecorder struct{ got []capturedEvent }
+
+func (c *captureRecorder) Eventf(regarding runtime.Object, related runtime.Object, eventType, reason, action, note string, args ...any) {
+	name := func(o runtime.Object) string {
+		if o == nil {
+			return ""
+		}
+		m, err := apimeta.Accessor(o)
+		if err != nil {
+			return "?"
+		}
+		return m.GetName()
+	}
+	c.got = append(c.got, capturedEvent{eventType, reason, action, fmt.Sprintf(note, args...), name(regarding), name(related)})
+}
+
+// TestKubeRecorderReasonIsTheCodeAlone: a Kubernetes Event's reason is the
+// single CamelCase reason code, and HBEP-8's type is the events.k8s.io action;
+// the "<type>/<Code>" form is gone (HBEP-7, Events and conditions). The type
+// alone decides the severity: degraded and failing are Warning, ending-soon
+// and the others Normal (HBEP-8). A related object is passed on. The
+// expectations are literals.
+func TestKubeRecorderReasonIsTheCodeAlone(t *testing.T) {
+	c := &captureRecorder{}
+	k := KubeRecorder{R: c}
+	md := mdSpec("md")
+	in := &v1alpha1.Instance{ObjectMeta: metav1.ObjectMeta{Name: "md-abcde", Namespace: md.Namespace}}
+	k.Event(md, nil, "degraded", "IdentityUnresolved", "class has no deployment ID")
+	k.Event(in, nil, "ending-soon", "NoReplacementReady", "less than an hour left")
+	k.Event(in, nil, "failing", "WorkerRestart", "no progress")
+	k.Event(in, nil, "ready", "Ready", "routed")
+	k.Event(md, in, "degraded", "CapacityDropped", "drain start reached with no replacement ready")
+	want := []capturedEvent{
+		{"Warning", "IdentityUnresolved", "degraded", "class has no deployment ID", "md", ""},
+		{"Normal", "NoReplacementReady", "ending-soon", "less than an hour left", "md-abcde", ""},
+		{"Warning", "WorkerRestart", "failing", "no progress", "md-abcde", ""},
+		{"Normal", "Ready", "ready", "routed", "md-abcde", ""},
+		{"Warning", "CapacityDropped", "degraded", "drain start reached with no replacement ready", "md", "md-abcde"},
+	}
+	if len(c.got) != len(want) {
+		t.Fatalf("recorded %+v, want %+v", c.got, want)
+	}
+	for i := range want {
+		if c.got[i] != want[i] {
+			t.Errorf("event %d = %+v, want %+v", i, c.got[i], want[i])
+		}
+	}
+}
+
+// TestEventNoteIsCutAtAUTF8Boundary: the events API refuses a note above 1,024
+// bytes, so a longer message is cut to at most 1,024 bytes, never inside a
+// character. The message is 1,023 ASCII bytes and then two-byte characters, so
+// a cut at byte 1,024 would split the first of them.
+func TestEventNoteIsCutAtAUTF8Boundary(t *testing.T) {
+	msg := strings.Repeat("a", 1023) + strings.Repeat("\u00e9", 100)
+	c := &captureRecorder{}
+	KubeRecorder{R: c}.Event(mdSpec("md"), nil, "failing", "WorkerRestart", msg)
+	got := c.got[0].note
+	if len(got) != 1023 || !utf8.ValidString(got) || !strings.HasPrefix(msg, got) {
+		t.Fatalf("note of %d bytes, valid UTF-8 %v; want the 1,023-byte prefix", len(got), utf8.ValidString(got))
+	}
+	if short := "short note"; eventNote(short) != short {
+		t.Fatalf("a short note was changed to %q", eventNote(short))
+	}
+	exact := strings.Repeat("b", 1024)
+	if eventNote(exact) != exact {
+		t.Fatal("a note of exactly 1,024 bytes was cut")
 	}
 }
 
@@ -165,8 +247,9 @@ func TestManagerOnControlPlane(t *testing.T) {
 		t.Fatalf("create ModelDeployment: %v", err)
 	}
 	// A second deployment whose identity record name is taken by another ID:
-	// its degraded/IdentityUnresolved event must reach the API server as an
-	// events.k8s.io Event (a rejected Event would be dropped silently).
+	// its degraded event with reason IdentityUnresolved must reach the API
+	// server as an events.k8s.io Event, reason the code alone and action the
+	// HBEP-8 type (a rejected Event would be dropped silently).
 	collide := mdSpec("md-collide")
 	collide.Generation = 0
 	collide.Spec.Source.Served.Flags = append(collide.Spec.Source.Served.Flags, v1alpha1.EngineFlag{Name: "dtype", Value: "bfloat16"})
@@ -292,12 +375,39 @@ func TestManagerOnControlPlane(t *testing.T) {
 		}
 		var seen []string
 		for _, e := range evs.Items {
-			seen = append(seen, e.Reason+" on "+e.Regarding.Name)
-			if e.Reason == eventDegraded+"/"+v1alpha1.ReasonIdentityUnresolved && e.Regarding.Name == "md-collide" && e.Type == corev1.EventTypeWarning {
+			seen = append(seen, e.Reason+"/"+e.Action+" on "+e.Regarding.Name)
+			// Literals, not the code's constants: the wire form is the contract.
+			if e.Reason == "IdentityUnresolved" && e.Action == "degraded" && e.Regarding.Name == "md-collide" && e.Type == "Warning" {
 				return true, ""
 			}
 		}
 		return false, fmt.Sprintf("events: %v", seen)
+	})
+	// A note above the events API's 1,024 bytes is cut at a UTF-8 boundary and
+	// admitted; uncut, the API server refuses it and the event is lost.
+	cs, err := kubernetes.NewForConfig(cp.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bc := events.NewBroadcaster(&events.EventSinkImpl{Interface: cs.EventsV1()})
+	bc.StartRecordingToSink(ctx.Done())
+	defer bc.Shutdown()
+	long := strings.Repeat("x", 1023) + strings.Repeat("\u00e9", 1000)
+	KubeRecorder{R: bc.NewRecorder(s, "hpcburst-lifecycle-test")}.Event(md, nil, "failing", "LongNote", long)
+	eventually(t, time.Minute, "the long note's event is admitted", func() (bool, string) {
+		var evs eventsv1.EventList
+		if err := cl.List(ctx, &evs, client.InNamespace(rigNS)); err != nil {
+			return false, err.Error()
+		}
+		for _, e := range evs.Items {
+			if e.Reason == "LongNote" {
+				if len(e.Note) == 1023 && utf8.ValidString(e.Note) && strings.HasPrefix(long, e.Note) {
+					return true, ""
+				}
+				return false, fmt.Sprintf("LongNote's note has %d bytes", len(e.Note))
+			}
+		}
+		return false, "no LongNote event"
 	})
 	for _, path := range []string{"/healthz", "/readyz"} {
 		resp, err := http.Get("http://" + managerHealthAddr + path)

@@ -50,6 +50,29 @@ func TestServedDeploymentNeedsAWorkload(t *testing.T) {
 	})
 }
 
+// The workload's typical context is at most its longest, when both are set: the
+// behaviour check runs at the longest context and never below the typical one,
+// so bounds that contradict each other are refused (`@hpc-burst-science-agent`,
+// 31 Oct 2026). This is the rule modeldeployments:$.spec.workload.contextTokens#0.
+func TestContextTokensTypicalIsAtMostLongest(t *testing.T) {
+	const msg = "contextTokens.typical must not exceed contextTokens.longest"
+	ctx := func(typical int32, longest *int32) func(*v1alpha1.ModelDeployment) {
+		return func(md *v1alpha1.ModelDeployment) {
+			md.Spec.Workload.ContextTokens.Typical = typical
+			md.Spec.Workload.ContextTokens.Longest = longest
+		}
+	}
+	runMDCases(t, []mdCase{
+		{"typical 8192 above longest 4096", ctx(8192, ptr.To(int32(4096))), msg},
+		{"typical one above longest", ctx(8193, ptr.To(int32(8192))), msg},
+	}, []mdCase{
+		{"typical equal to longest", ctx(8192, ptr.To(int32(8192))), ""},
+		{"typical one below longest", ctx(8191, ptr.To(int32(8192))), ""},
+		{"typical below longest", ctx(4096, ptr.To(int32(30000))), ""},
+		{"a typical context with no longest, which the controller resolves", ctx(8192, nil), ""},
+	})
+}
+
 // The workload's constant defaults are HBEP-7's: a short context of 512 tokens
 // and a longest output of 4,096. The longest context and tool calls have no
 // schema default: the controller resolves them.

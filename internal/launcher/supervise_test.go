@@ -201,6 +201,9 @@ func TestSuperviseStopsItsChildren(t *testing.T) {
 	f := newCtlFixture(t, Front{})
 	stop := f.supervise(SuperviseOptions{BackoffMin: 20 * time.Millisecond})
 	pid := f.awaitRunning().Proc.PID
+	// The fake exits 0 on SIGTERM only once its handler is in place, which is
+	// before it listens: a SIGTERM before /healthz answers ends it by the signal.
+	awaitHealthy(t, f.ports.ControllerAddr())
 	if err := stop(); err != nil {
 		t.Fatalf("Supervise returned %v", err)
 	}
@@ -224,6 +227,9 @@ func TestSuperviseKillsAChildThatIgnoresTerm(t *testing.T) {
 	var log syncBuffer
 	stop := f.supervise(SuperviseOptions{TermGrace: 300 * time.Millisecond, Log: &log})
 	pid := f.awaitRunning().Proc.PID
+	// The fake ignores SIGTERM before it listens: until /healthz answers, a
+	// SIGTERM can still end it, which a loaded machine once showed.
+	awaitHealthy(t, f.ports.ControllerAddr())
 	t0 := time.Now()
 	if err := stop(); err != nil {
 		t.Fatal(err)

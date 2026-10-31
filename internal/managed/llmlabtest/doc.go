@@ -61,7 +61,9 @@
 //
 // # Routes
 //
-//   - GET /v1/models and GET /v1/models/{id}: the listing and one entry.
+//   - GET /v1/models: the listing. GET /v1/models/{id} answers 404 with
+//     FastAPI's {"detail": "Not Found"} for every name, as LLMLab does,
+//     which has no retrieve route (#69).
 //   - POST /v1/chat/completions, /v1/completions, /v1/responses (stream or
 //     not) and /v1/embeddings. Output is the reply text (SetReply), one word
 //     per token and per stream chunk; prompt tokens are the

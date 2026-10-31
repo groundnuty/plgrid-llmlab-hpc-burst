@@ -19,6 +19,18 @@ const AgentBinaryName = "hb-agent"
 // Allocation's agentDigest before running it.
 func StagedAgentPath(digest string) string { return path.Join("agent", digest, AgentBinaryName) }
 
+// FrpcBinaryName is frpc's file name wherever it is staged.
+const FrpcBinaryName = "frpc"
+
+// StagedFrpcPath is where the provider stages the frpc binary with this
+// SHA-256 (hex), relative to the profile's resolved stagingDir:
+// frpc/<digest>/frpc, next to the agent's binary (HBEP-4, Submission: Files
+// first). frpc is a pinned release binary for the partition's cpuArch, not part
+// of the agent's build, so it has its own digest (AgentConfig.FrpcDigest),
+// which the agent checks before it runs frpc. AgentConfig.FrpcPath joins it to
+// the staging directory.
+func StagedFrpcPath(digest string) string { return path.Join("frpc", digest, FrpcBinaryName) }
+
 // AllocationDir is the Allocation's directory, alloc/<tag>; the bootstrap runs
 // the agent with its absolute path as the only argument.
 func AllocationDir(tag string) string { return path.Join("alloc", tag) }
@@ -26,6 +38,21 @@ func AllocationDir(tag string) string { return path.Join("alloc", tag) }
 // StagedCredentialPath is the Allocation's credential, alloc/<tag>/credential,
 // mode 600.
 func StagedCredentialPath(tag string) string { return path.Join(AllocationDir(tag), "credential") }
+
+// StagedDialHomeCertName is the file name of the launcher's dial-home
+// certificate in the Allocation's directory. It is public, and frpc verifies
+// the front with it (HBEP-4, Submission: Files first; HBEP-6, frpc in the job).
+const StagedDialHomeCertName = "dial-home.crt"
+
+// StagedDialHomeCertPath is the Allocation's copy of the launcher's dial-home
+// certificate, alloc/<tag>/dial-home.crt. It is the same certificate as
+// Host.AgentCertFile's, the one whose pin agent.json carries
+// (AgentConfig.CertSPKISHA256): the agent checks that pin against this file
+// before it runs frpc, and refuses to run frpc without the file (HBEP-6,
+// frpc in the job).
+func StagedDialHomeCertPath(tag string) string {
+	return path.Join(AllocationDir(tag), StagedDialHomeCertName)
+}
 
 // StagedConfigPath is the Allocation's agent.json, mode 600.
 func StagedConfigPath(tag string) string { return path.Join(AllocationDir(tag), ConfigFileName) }
@@ -118,9 +145,12 @@ type Host struct {
 	PortBase int
 }
 
-// Names under the launcher's state directory, and the agent endpoint's place
+// Names under the launcher's state directory, and the other components' places
 // in the port block. The launcher binds base, base+1, base+2 and reserves
-// base+5 (internal/launcher, PortsFromBase); base+3 is the agent endpoint's.
+// base+5 (internal/launcher, PortsFromBase); base+3 is the agent endpoint's,
+// base+7 the dial-home listener's, and base+8 to base+11 belong to the frp
+// server (HBEP-6): the lifecycle controller binds base+8, and frps, which the
+// launcher starts, binds base+9 to base+11.
 const (
 	// CredentialsDirName is the controller's credentials directory, mode
 	// 0700 (KeyDirMode), which holds allocations/ and instances/.
@@ -145,6 +175,38 @@ const (
 	// mode the dial-home listener's address stays required and explicit,
 	// because compute nodes must reach it, and this default does not apply.
 	DialHomePortOffset = 7
+	// FrpsPluginPortOffset is the port of frps's server plugin, plain HTTP on
+	// loopback, relative to the launcher's port base (HBEP-6, Loopback ports;
+	// `@hpc-burst-science-agent`, 31 Oct 2026). The lifecycle controller binds
+	// it, in its own process, and frps posts its Login, NewProxy and CloseProxy
+	// calls to it. It is not the agent endpoint's port, because the restricted
+	// key opens that one to every job.
+	FrpsPluginPortOffset = 8
+	// FrpsBindPortOffset is frps's bind port, where the front's dial-home
+	// listener passes frpc's websocket (GET /~!frp).
+	FrpsBindPortOffset = 9
+	// FrpsTCPMuxPortOffset is frps's tcpmux CONNECT port, where the front
+	// sends CONNECT <Instance UID>:80 to reach an Instance.
+	FrpsTCPMuxPortOffset = 10
+	// FrpsWebPortOffset is frps's web server, whose API lists the proxies
+	// (GET /api/proxy/tcpmux). The lifecycle controller reads it with
+	// FrpsWebUser and the password in Host.FrpsWebPasswordFile; the launcher's
+	// health check uses its unauthenticated /healthz.
+	FrpsWebPortOffset = 11
+
+	// FrpsDirName is the launcher's frps directory under the state directory,
+	// which holds the web password file.
+	FrpsDirName = "frps"
+	// FrpsWebPasswordFileName is the web password file's name in FrpsDirName.
+	FrpsWebPasswordFileName = "web-password"
+	// FrpsWebUser is the web server's user name (frps's webServer.user); the
+	// launcher writes it into frps's configuration and the lifecycle
+	// controller sends it as the basic-auth user.
+	FrpsWebUser = "hpcburst"
+	// FrpsPluginPath is the plugin endpoint's path (frps's httpPlugins path),
+	// which the launcher writes into frps's configuration and the lifecycle
+	// controller serves.
+	FrpsPluginPath = "/frp/v1/handler"
 )
 
 // CredentialsDir is <state>/credentials, the dir of AllocationCredentialPath
@@ -184,6 +246,54 @@ func (h Host) DialHomePort() int { return h.PortBase + DialHomePortOffset }
 func (h Host) DialHomeAddr() string {
 	return "127.0.0.1:" + strconv.Itoa(h.DialHomePort())
 }
+
+// FrpsPluginPort is the frps server plugin's loopback port: the port base plus
+// FrpsPluginPortOffset.
+func (h Host) FrpsPluginPort() int { return h.PortBase + FrpsPluginPortOffset }
+
+// FrpsPluginAddr is "127.0.0.1:<FrpsPluginPort>", where the lifecycle
+// controller serves the plugin and frps's httpPlugins addr points.
+func (h Host) FrpsPluginAddr() string { return loopback(h.FrpsPluginPort()) }
+
+// FrpsBindPort is frps's bind port: the port base plus FrpsBindPortOffset.
+func (h Host) FrpsBindPort() int { return h.PortBase + FrpsBindPortOffset }
+
+// FrpsBindAddr is "127.0.0.1:<FrpsBindPort>", the front's target for frpc's
+// websocket.
+func (h Host) FrpsBindAddr() string { return loopback(h.FrpsBindPort()) }
+
+// FrpsTCPMuxPort is frps's tcpmux CONNECT port: the port base plus
+// FrpsTCPMuxPortOffset.
+func (h Host) FrpsTCPMuxPort() int { return h.PortBase + FrpsTCPMuxPortOffset }
+
+// FrpsTCPMuxAddr is "127.0.0.1:<FrpsTCPMuxPort>", the transport address the
+// front dials for an Instance's UID.
+func (h Host) FrpsTCPMuxAddr() string { return loopback(h.FrpsTCPMuxPort()) }
+
+// FrpsWebPort is frps's web server port: the port base plus FrpsWebPortOffset.
+func (h Host) FrpsWebPort() int { return h.PortBase + FrpsWebPortOffset }
+
+// FrpsWebAddr is "127.0.0.1:<FrpsWebPort>", the IPv4 loopback address of frps's
+// web server (HBEP-6, Path state).
+func (h Host) FrpsWebAddr() string { return loopback(h.FrpsWebPort()) }
+
+// FrpsWebPasswordFile is <state>/frps/web-password, mode 600, which holds the
+// password of frps's web server (HBEP-6, frps on the control-plane host, which
+// proposes this path). The launcher writes it, with the password in frps's
+// configuration file; the lifecycle controller reads it to list the proxies.
+//
+// HBEP-6 fixes only "random, in a mode-600 file". The contract's choice is the
+// form of a key file (CheckKey: 64 lowercase hex characters, no newline), so the
+// launcher writes it with NewKey and WriteKeyFile and the controller reads it
+// with ReadKeyFile, which refuses another form, mode, owner or a symlink. A
+// trailing newline from a shell would otherwise make the controller's password
+// differ from frps's.
+func (h Host) FrpsWebPasswordFile() string {
+	return filepath.Join(h.StateDir, FrpsDirName, FrpsWebPasswordFileName)
+}
+
+// loopback is "127.0.0.1:<port>".
+func loopback(port int) string { return "127.0.0.1:" + strconv.Itoa(port) }
 
 // AllocationCredentialPath is where the lifecycle controller keeps an
 // Allocation's credential: <dir>/allocations/<Allocation UID>, mode 600, where

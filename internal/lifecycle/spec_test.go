@@ -373,22 +373,27 @@ func TestRenderLaunchMaxNumSeqs(t *testing.T) {
 	}
 }
 
+// specLaunchArgv is a launch command written out by hand: vLLM's server on the
+// bound checkpoint, on worker-0's Unix socket, serving the rig's model name,
+// then rest, the spec's flags as the controller renders them.
+func specLaunchArgv(rest ...string) []string {
+	return append([]string{
+		"vllm", "serve", "/hpcburst/model",
+		"--uds", "/hpcburst/run/worker-0.sock",
+		"--served-model-name", "example-model",
+	}, rest...)
+}
+
 // TestRenderLaunchCommand covers HBEP-7, The allocation agent, What it runs: the
 // engine listens on worker-0's Unix socket, serves the ModelDeployment's model
-// name, and the spec's flags follow in order.
+// name, and the spec's flags follow in order, each as one --name=value
+// argument (docs/development.md, The launch).
 func TestRenderLaunchCommand(t *testing.T) {
 	md := specMD(specFlag("max-model-len", "32768"), specFlag("tensor-parallel-size", "2"))
 	l := specLaunch(t, md)
-	want := []string{
-		"vllm", "serve", "/hpcburst/model",
-		"--uds", agentapi.ContainerEngineSocket("worker-0"),
-		"--served-model-name", "example-model",
-		"--max-model-len", "32768",
-		"--tensor-parallel-size", "2",
-		"--max-num-seqs=256",
-	}
+	want := specLaunchArgv("--max-model-len=32768", "--tensor-parallel-size=2", "--max-num-seqs=256")
 	if !slices.Equal(l.Command, want) {
-		t.Fatalf("command\n got %v\nwant %v", l.Command, want)
+		t.Fatalf("command\n got %q\nwant %q", l.Command, want)
 	}
 	if got := specValueOf(t, l.Command, "--uds"); !strings.HasSuffix(got, "/worker-0.sock") {
 		t.Errorf("--uds %q is not worker-0's socket", got)
@@ -410,6 +415,33 @@ func TestRenderLaunchCommand(t *testing.T) {
 	}
 }
 
+// TestRenderLaunchEveryFlagIsOneArgument: each spec flag is one --name=value
+// argument, in spec order, spelled with "-" (an underscore name is
+// normalised), so a value that starts with "-" or holds a space or a brace is
+// still part of its flag; a boolean is --name or --no-name; max-num-seqs is
+// last, once, as the spec gives it.
+func TestRenderLaunchEveryFlagIsOneArgument(t *testing.T) {
+	l := specLaunch(t, specMD(
+		specFlag("max_model_len", "32768"),
+		specFlag("seed", "-1"),
+		specFlag("enable_prefix_caching", "false"),
+		specFlag("trust-remote-code", "true"),
+		specFlag("speculative-config", `{"method": "ngram", "num_speculative_tokens": 3}`),
+		specFlag("max_num_seqs", "64"),
+	))
+	want := specLaunchArgv(
+		"--max-model-len=32768",
+		"--seed=-1",
+		"--no-enable-prefix-caching",
+		"--trust-remote-code",
+		`--speculative-config={"method": "ngram", "num_speculative_tokens": 3}`,
+		"--max-num-seqs=64",
+	)
+	if !slices.Equal(l.Command, want) {
+		t.Fatalf("command\n got %q\nwant %q", l.Command, want)
+	}
+}
+
 // TestRenderLaunchGPUsAreTPTimesPP: 2 * 2 = 4.
 func TestRenderLaunchGPUsAreTPTimesPP(t *testing.T) {
 	l := specLaunch(t, specMD(specFlag("tensor-parallel-size", "2"), specFlag("pipeline-parallel-size", "2")))
@@ -425,8 +457,8 @@ func TestRenderLaunchBooleanFlags(t *testing.T) {
 	for _, name := range []string{"enable-prefix-caching", "enable_prefix_caching"} {
 		t.Run("false as "+name, func(t *testing.T) {
 			l := specLaunch(t, specMD(specFlag(name, "false")))
-			if !slices.Contains(l.Command, "--no-enable-prefix-caching") {
-				t.Fatalf("no --no-enable-prefix-caching in %v", l.Command)
+			if want := specLaunchArgv("--no-enable-prefix-caching", "--max-num-seqs=256"); !slices.Equal(l.Command, want) {
+				t.Fatalf("command\n got %q\nwant %q", l.Command, want)
 			}
 			if slices.Contains(l.Command, "--enable-prefix-caching") || slices.Contains(l.Command, "false") {
 				t.Fatalf("positive flag or value left in %v", l.Command)
@@ -434,6 +466,9 @@ func TestRenderLaunchBooleanFlags(t *testing.T) {
 		})
 		t.Run("true as "+name, func(t *testing.T) {
 			l := specLaunch(t, specMD(specFlag(name, "true")))
+			if want := specLaunchArgv("--enable-prefix-caching", "--max-num-seqs=256"); !slices.Equal(l.Command, want) {
+				t.Fatalf("command\n got %q\nwant %q", l.Command, want)
+			}
 			idx := specIndexes(l.Command, "--enable-prefix-caching")
 			if len(idx) != 1 {
 				t.Fatalf("--enable-prefix-caching occurs %d times in %v", len(idx), l.Command)

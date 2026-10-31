@@ -30,7 +30,7 @@ func prov(name, profile, platform string) v1alpha1.Provider {
 
 func served(name, model string, instances int32) v1alpha1.ModelDeployment {
 	return v1alpha1.ModelDeployment{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: name, UID: types.UID("md-" + name)},
-		Spec: v1alpha1.ModelDeploymentSpec{Model: model, Instances: instances, Source: v1alpha1.ModelSource{Served: &v1alpha1.ServingSpec{}}}}
+		Spec: v1alpha1.ModelDeploymentSpec{Model: model, Instances: instances, Providers: v1alpha1.ProviderSelection{Names: []string{"helios-a"}}, Source: v1alpha1.ModelSource{Served: &v1alpha1.ServingSpec{}}}}
 }
 
 func instance(md *v1alpha1.ModelDeployment, name, provider string, phase v1alpha1.InstancePhase, leaseEnd *time.Time) v1alpha1.Instance {

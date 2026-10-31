@@ -104,6 +104,21 @@ type EngineSpec struct {
 //   - A speculative-config that names a draft model is refused in alpha, and
 //     a tokenizer other than the checkpoint's needs a pinned tokenizer-revision
 //     (ServingSpec).
+//   - max-model-len takes only a plain positive decimal integer (no sign, no
+//     leading zero, no suffix such as 32k, no exponent, not auto), because the
+//     controller compares it with the value the engine reports and works out
+//     the longest context from it (HBEP-3, HBEP-7;
+//     `@hpc-burst-science-agent`, 31 Oct 2026). A flag in flags is a typed
+//     name and value, not a free-form map, so the rule is on the flag and
+//     tests the name after "_" is replaced with "-".
+//   - tensor-parallel-size, pipeline-parallel-size and data-parallel-size take
+//     only a plain positive decimal integer, by the same pattern: the lifecycle
+//     controller multiplies the first two to size an Instance's GPUs and reads
+//     the third to refuse a data-parallel size above 1 (HBEP-4, HBEP-7;
+//     `@hpc-burst-science-agent`, 31 Oct 2026). Only the forms that are never
+//     valid are refused here (0, a negative value, a non-integer, auto, a sign,
+//     an exponent, whitespace). A data-parallel-size above 1 is admitted: the
+//     controller turns it into SpecUnsupported, so CEL does not.
 //
 // The alias list is vLLM v0.32.0's. The lists of known names and booleans are
 // the table's; a change to the table changes these markers (HBEP-3).
@@ -120,6 +135,8 @@ type EngineSpec struct {
 // +kubebuilder:validation:XValidation:rule="!'lora-modules'.startsWith(self.name.replace('_', '-'))",message="lora-modules is refused in alpha: it names other checkpoints without a pinned revision (a pinned form is for beta); an abbreviation of it is refused too"
 // +kubebuilder:validation:XValidation:rule="self.name.replace('_', '-') != 'speculative-config' || !self.value.matches('[\"]model[\"][[:space:]]*:')",message="a speculative-config that names a draft model is refused in alpha: the draft model is another checkpoint without a pinned revision (a pinned form is for beta)"
 // +kubebuilder:validation:XValidation:rule="self.name.replace('_', '-') in ['dtype', 'quantization', 'kv-cache-dtype', 'max-model-len', 'tokenizer', 'tokenizer-mode', 'tokenizer-revision', 'trust-remote-code', 'load-format', 'hf-overrides', 'enforce-eager', 'compilation-config', 'attention-backend', 'tensor-parallel-size', 'pipeline-parallel-size', 'enable-expert-parallel', 'speculative-config', 'seed', 'generation-config', 'override-generation-config', 'tool-call-parser', 'enable-auto-tool-choice', 'reasoning-parser', 'chat-template-content-format', 'default-chat-template-kwargs', 'model', 'revision', 'chat-template', 'enable-prefix-caching', 'max-num-seqs', 'max-num-batched-tokens', 'enable-chunked-prefill', 'gpu-memory-utilization', 'kv-cache-memory-bytes', 'cpu-offload-gb', 'host', 'port', 'uds', 'served-model-name', 'download-dir', 'distributed-executor-backend', 'log-level', 'disable-log-stats', 'enable-log-requests', 'api-key', 'hf-token', 'config', 'lora-modules'] || !['dtype', 'quantization', 'kv-cache-dtype', 'max-model-len', 'tokenizer', 'tokenizer-mode', 'tokenizer-revision', 'trust-remote-code', 'load-format', 'hf-overrides', 'enforce-eager', 'compilation-config', 'attention-backend', 'tensor-parallel-size', 'pipeline-parallel-size', 'enable-expert-parallel', 'speculative-config', 'seed', 'generation-config', 'override-generation-config', 'tool-call-parser', 'enable-auto-tool-choice', 'reasoning-parser', 'chat-template-content-format', 'default-chat-template-kwargs', 'model', 'revision', 'chat-template', 'enable-prefix-caching', 'max-num-seqs', 'max-num-batched-tokens', 'enable-chunked-prefill', 'gpu-memory-utilization', 'kv-cache-memory-bytes', 'cpu-offload-gb', 'host', 'port', 'uds', 'served-model-name', 'download-dir', 'distributed-executor-backend', 'log-level', 'disable-log-stats', 'enable-log-requests', 'api-key', 'hf-token', 'config', 'lora-modules'].exists(k, k.startsWith(self.name.replace('_', '-')))",message="a proper prefix of a known flag name is refused: vLLM's parser expands an abbreviation, so two spellings of one flag would give two deployment IDs; write the full long name"
+// +kubebuilder:validation:XValidation:rule="self.name.replace('_', '-') != 'max-model-len' || self.value.matches('^[1-9][0-9]*$')",message="max-model-len is a plain positive decimal integer such as 32768: values such as 32k, auto, -1, 0, +5 and 1e4 are refused, because the controller compares the value the engine reports with it and sizes the longest context from it"
+// +kubebuilder:validation:XValidation:rule="!(self.name.replace('_', '-') in ['tensor-parallel-size', 'pipeline-parallel-size', 'data-parallel-size']) || self.value.matches('^[1-9][0-9]*$')",message="tensor-parallel-size, pipeline-parallel-size and data-parallel-size are plain positive decimal integers such as 2: values such as 0, -1, +2, 1.5, 1e2, auto and ' 2' are refused, because the controller multiplies the first two to size the GPUs and reads the third to refuse a data-parallel size above 1"
 type EngineFlag struct {
 	// Name is the flag's long name without its leading dashes.
 	//
@@ -395,12 +412,15 @@ type LoadBound struct {
 // It is at least 1: a balancer bound below the mean load cannot place every
 // request. The forked KubeAI group's own setting has the same floor, a
 // meanLoadFactor of at least 100 percent
-// (third_party/forked/kubeai/api/k8s/v1/model_types.go).
+// (third_party/forked/kubeai/api/k8s/v1/model_types.go). It has at most two
+// decimal places (`@hpc-burst-science-agent`, 31 Oct 2026): "1.25" is
+// admitted and "1.005" is not.
 //
 // +kubebuilder:validation:MinLength=1
 // +kubebuilder:validation:MaxLength=16
 // +kubebuilder:validation:Pattern=`^[0-9]+(\.[0-9]+)?$`
 // +kubebuilder:validation:XValidation:rule="double(self) >= 1.0",message="a load bound is at least 1.0: a bound below the mean load cannot place every request (KubeAI's meanLoadFactor has the same floor of 100 percent)"
+// +kubebuilder:validation:XValidation:rule="self.matches('^[0-9]+([.][0-9]{1,2})?$')",message="a load bound has at most two decimal places: write 1.25, not 1.005"
 type LoadFactor string
 
 // Workload is a deployment's request shapes (HBEP-7, What the controller
@@ -439,7 +459,12 @@ type Workload struct {
 // equal to agentapi.MaxTargetSessions (a test checks they agree).
 const MaxTargetSessions = 1024
 
-// ContextTokens are a workload's context lengths.
+// ContextTokens are a workload's context lengths. When both are set, typical
+// is at most longest: the behaviour check runs at the longest context and never
+// below the typical one, so bounds that contradict each other would have it run
+// longer than the longest (`@hpc-burst-science-agent`, 31 Oct 2026).
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.longest) || self.typical <= self.longest",message="contextTokens.typical must not exceed contextTokens.longest: the behaviour check runs at the longest context and never below the typical one, so contradictory bounds are refused"
 type ContextTokens struct {
 	// Short is the short context length.
 	//

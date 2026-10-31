@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
-	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -55,10 +54,11 @@ type Options struct {
 	// never replays a request. A transport passed here must not replay one
 	// either, or one pass could read twice.
 	Transport http.RoundTripper
-	// Recorder, when set, gets an event on the Provider when
-	// CredentialsRejected, CredentialsExpiring or CredentialsInvalid turns
-	// True or Ready turns False, and the events of each successful read
-	// (CatalogEntrySkipped, CatalogTruncated).
+	// Recorder, when set, gets the typed events of HBEP-8 on the Provider:
+	// failing or degraded when CredentialsRejected, CredentialsExpiring or
+	// CredentialsInvalid turns True or Ready turns False, ready when one of
+	// them clears, and degraded CatalogEntrySkipped and CatalogTruncated from
+	// the successful reads (see events.go).
 	Recorder events.EventRecorder
 	// Log is the controller's logger; the zero Logger discards.
 	Log logr.Logger
@@ -99,7 +99,9 @@ type Options struct {
 //     lastCatalogRead and lastSuccessfulStatusRead are now, Ready is True with
 //     CatalogRead, and CredentialsRejected False with KeyAccepted. Each skipped
 //     entry raises a CatalogEntrySkipped event, and a listing above 1024
-//     raises CatalogTruncated, on every read.
+//     raises CatalogTruncated, each when it starts and then at most once an
+//     hour while it lasts (provider.RepeatGate); more than 10 skipped entries
+//     in an hour get one summary event for the rest.
 //   - A 401 or 403 sets CredentialsRejected True with KeyRejected and leaves
 //     the catalog and lastCatalogRead as they were.
 //   - Any other failure is unknown: the catalog is left as it was.
@@ -128,6 +130,10 @@ type Controller struct {
 
 	mu          sync.Mutex
 	lastAttempt time.Time
+
+	// gate holds when each repeating event last fired (events.go). It lives in
+	// memory: a restart, or a new leader, starts every condition afresh.
+	gate provider.RepeatGate
 }
 
 var (
@@ -223,6 +229,10 @@ type outcome struct {
 	rejected error                   // a read that wraps provider.ErrKeyRejected
 	failed   bool                    // a read whose outcome is unknown
 }
+
+// succeeded says the pass read the catalog: the file was accepted and the
+// gateway listed it. Only such a pass says whether a listing is truncated.
+func (o outcome) succeeded() bool { return o.credsErr == nil && o.rejected == nil && !o.failed }
 
 // Sync runs one pass, unless the last read was less than CatalogInterval
 // ago. It returns how long to wait before the next pass, at most
@@ -373,7 +383,9 @@ func (c *Controller) write(ctx context.Context, prov *v1alpha1.Provider, out out
 	if err != nil {
 		return err
 	}
-	c.emitRead(prov, merge)
+	if out.succeeded() {
+		c.emitRead(prov, out.now, merge)
+	}
 	return nil
 }
 
@@ -432,45 +444,3 @@ func apply(prov *v1alpha1.Provider, out outcome) (provider.CatalogMerge, error) 
 }
 
 func ptrTime(t time.Time) *metav1.Time { m := metav1.NewTime(t); return &m }
-
-// emitTransitions records an event for each credentials condition that
-// turned True in this write, and for Ready turning False. The notes are the
-// condition messages, which hold no key and no byte the gateway sent.
-func (c *Controller) emitTransitions(old, prov *v1alpha1.Provider) {
-	if c.recorder == nil {
-		return
-	}
-	for _, w := range []struct {
-		typ    string
-		status metav1.ConditionStatus
-	}{
-		{v1alpha1.ConditionCredentialsInvalid, metav1.ConditionTrue},
-		{v1alpha1.ConditionCredentialsRejected, metav1.ConditionTrue},
-		{v1alpha1.ConditionCredentialsExpiring, metav1.ConditionTrue},
-		{v1alpha1.ConditionProviderReady, metav1.ConditionFalse},
-	} {
-		now := apimeta.FindStatusCondition(prov.Status.Conditions, w.typ)
-		if now == nil || now.Status != w.status {
-			continue
-		}
-		if was := apimeta.FindStatusCondition(old.Status.Conditions, w.typ); was != nil && was.Status == now.Status && was.Reason == now.Reason {
-			continue
-		}
-		c.recorder.Eventf(prov, nil, corev1.EventTypeWarning, now.Reason, "ReadCatalog", "%s: %s", w.typ, now.Message)
-	}
-}
-
-// emitRead records the events of a successful read, on every read: one per
-// skipped entry, and CatalogTruncated while the listing does not fit
-// (@hpc-burst-science-agent's ruling of 31 Oct 2026).
-func (c *Controller) emitRead(prov *v1alpha1.Provider, merge provider.CatalogMerge) {
-	if c.recorder == nil {
-		return
-	}
-	for _, s := range merge.Skipped {
-		c.recorder.Eventf(prov, nil, corev1.EventTypeWarning, provider.EventCatalogEntrySkipped, "ReadCatalog", "%s", provider.SkippedNote(s))
-	}
-	if merge.Truncated > 0 {
-		c.recorder.Eventf(prov, nil, corev1.EventTypeWarning, provider.EventCatalogTruncated, "ReadCatalog", "%s", provider.TruncatedNote(merge.Truncated))
-	}
-}

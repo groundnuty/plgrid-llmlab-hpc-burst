@@ -292,7 +292,18 @@ func judgeQualify(q *agentapi.QualifyResult, sh shapes, model string) (bool, str
 		case i < 0:
 			return false, fmt.Sprintf("the %s check was not reported", name)
 		case !q.Checks[i].Passed:
+			// Decided by the reason code, never the message (agentapi's
+			// CheckOutcome.Reason). ReasoningBudgetExhausted is a failed
+			// check like any other, not a wrong answer: the Instance fails,
+			// the failure streak bounds repeats, and the class is not
+			// stopped (science-agent ruling, 31 Oct 2026).
 			msg := fmt.Sprintf("the %s check failed", name)
+			if r := q.Checks[i].Reason; r != "" {
+				msg += " (" + r + ")"
+			}
+			if n := q.Checks[i].ContextTokens; n > 0 {
+				msg += fmt.Sprintf(" at %d context tokens", n)
+			}
 			if q.Checks[i].Message != "" {
 				msg += ": " + q.Checks[i].Message
 			}
@@ -305,7 +316,13 @@ func judgeQualify(q *agentapi.QualifyResult, sh shapes, model string) (bool, str
 	if need := int64(sh.targetSessions) * int64(sh.typical); q.KVCapacityTokens < need {
 		return false, fmt.Sprintf("KV capacity %d tokens is below targetSessions %d times contextTokens.typical %d = %d", q.KVCapacityTokens, sh.targetSessions, sh.typical, need)
 	}
-	return true, "every check passed; no throughput reference exists in alpha, so throughput is recorded and gates nothing (HBEP-7, open question 12)"
+	// The behaviour check's context is recorded in the Qualified condition,
+	// the only place an Instance's status has for it in v1alpha1.
+	msg := "every check passed; no throughput reference exists in alpha, so throughput is recorded and gates nothing (HBEP-7, open question 12)"
+	if i := slices.IndexFunc(q.Checks, func(c agentapi.CheckOutcome) bool { return c.Name == agentapi.CheckBehaviour }); i >= 0 && q.Checks[i].ContextTokens > 0 {
+		msg += fmt.Sprintf("; the behaviour check ran at %d context tokens", q.Checks[i].ContextTokens)
+	}
+	return true, msg
 }
 
 // warmUpState is the controller's verdict on warm-up so far.

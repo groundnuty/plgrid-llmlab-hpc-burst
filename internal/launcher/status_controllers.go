@@ -1,6 +1,7 @@
 package launcher
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"time"
@@ -132,7 +133,9 @@ func checkEntry(sup *procHandle, supPID int, e EntryRecord) (EntryHealth, []stri
 
 // healthz asks a supervised process for GET /healthz on its loopback address.
 func healthz(addr string, timeout time.Duration) error {
-	code, err := getStatus(&http.Client{Timeout: timeout}, "http://"+addr+"/healthz")
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	code, err := getStatus(ctx, &http.Client{Timeout: timeout}, "http://"+addr+"/healthz")
 	if err != nil {
 		return err
 	}

@@ -247,7 +247,7 @@ func (p *pass) verified(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, v *ag
 		// PR 88).
 		return p.restart(in, alloc, signalVerifyRead, "", st, data.Message)
 	case causeContradiction, causeShape:
-		p.r.Recorder.Event(p.mdObject(in), true, eventDegraded, v1alpha1.ReasonVerificationFailed,
+		p.r.Recorder.Event(p.mdObject(in), nil, eventDegraded, v1alpha1.ReasonVerificationFailed,
 			fmt.Sprintf("Instance %s: %s; provisioning in its class stops until the serving spec changes", in.Name, data.Message))
 		// Stop the class in this pass too: the record stops it in every later
 		// one (classBlocked), and this pass must not provision there either.
@@ -316,7 +316,7 @@ func (p *pass) becomeReady(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) er
 		return err
 	}
 	if first {
-		p.r.Recorder.Event(in, false, eventReady, "Ready", "verified, qualified and warmed up; the front routes to it")
+		p.r.Recorder.Event(in, nil, eventReady, "Ready", "verified, qualified and warmed up; the front routes to it")
 	}
 	return nil
 }
@@ -421,13 +421,13 @@ func (r *Reconciler) classBlocked(ctx context.Context, md *v1alpha1.ModelDeploym
 			}
 			if _, err := sh.resolved(d.MaxModelLen, d.Overhead); err != nil {
 				if r.memory().once("shape-stop/" + name + "/" + key) {
-					r.Recorder.Event(md, true, eventDegraded, v1alpha1.ReasonVerificationFailed,
+					r.Recorder.Event(md, nil, eventDegraded, v1alpha1.ReasonVerificationFailed,
 						fmt.Sprintf("the workload's shapes do not fit the context limit %d that verification record %s found: %v", d.MaxModelLen, name, err))
 				}
 				return fmt.Sprintf("verification record %s found max-model-len %d and a template overhead of %d, and the workload does not fit: %v", name, d.MaxModelLen, d.Overhead, err), nil
 			}
 			if r.memory().once("shape-lift/" + name + "/" + key) {
-				r.Recorder.Event(md, false, eventReady, "ShapesFit",
+				r.Recorder.Event(md, nil, eventReady, "ShapesFit",
 					fmt.Sprintf("the workload now fits the context limit %d that verification record %s found; provisioning in the class resumes", d.MaxModelLen, name))
 			}
 		}

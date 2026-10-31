@@ -12,9 +12,10 @@ const reasonCatalogEntryListed = "CatalogEntryListed"
 // one is proposed to the contracts owner.
 const reasonAgentRegistered = "AgentRegistered"
 
-// HBEP-8's event types. A Kubernetes Event's reason is "<type>/<code>", so a
-// reader acts on the type and the reason code, never on the message (HBEP-7,
-// Events and conditions; HBEP-8).
+// HBEP-8's event types. A Kubernetes Event's reason is the CamelCase reason
+// code alone, and its type is the events.k8s.io action, so a reader acts on
+// the action and the reason, never on the note (HBEP-7, Events and conditions;
+// HBEP-8). degraded and failing are Warning events, the others Normal.
 const (
 	eventStarted    = "started"
 	eventReady      = "ready"

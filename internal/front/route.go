@@ -42,6 +42,7 @@ type routeError struct {
 	message    string
 	retryAfter string
 	dep        *inventory.Deployment // the ModelDeployment named by a capacity error
+	cutBy      string                // the front's cut, for a request cut while it waited
 }
 
 func errUnknownProvider(p string) *routeError {
@@ -90,6 +91,9 @@ func (r *Router) choose(ctx context.Context, n naming.Name, key, exclude string)
 		}
 	}
 	r.mu.Unlock()
+	if r.beforePick != nil {
+		r.beforePick()
+	}
 
 	tg, wait := r.chooseServed(m, ring, groups, n, key, exclude)
 	if tg != nil {
@@ -141,7 +145,19 @@ func (r *Router) chooseServed(m *inventory.Model, ring *balancer.Ring, groups ma
 		res, err := g.TryPick(key, match)
 		switch {
 		case err == nil:
-			return &target{inst: byInst[res.Member], dep: d, res: res}, nil
+			// The group is live and the view this request read is not: a
+			// member that joined since is looked up in the current view, and
+			// one that has already left is given back (PR #95 review: Astra
+			// B3).
+			inst := byInst[res.Member]
+			if inst == nil {
+				inst = r.instance(res.Member)
+			}
+			if inst == nil {
+				res.Release()
+				continue
+			}
+			return &target{inst: inst, dep: d, res: res}, nil
 		case errors.Is(err, balancer.ErrAllAtCap) && wait == nil:
 			wait = d
 		}
@@ -173,7 +189,20 @@ func (r *Router) waitServed(ctx context.Context, d *inventory.Deployment, g *bal
 		return &target{inst: inst, dep: d, res: res}, nil
 	}
 	if ctx.Err() != nil {
-		return nil, &routeError{status: statusClientClosed, code: "client_closed", message: "the client went away while the request waited"}
+		// The client went away, or the front cut the request while it
+		// waited: its own deadline (maxRequestDuration below queueTimeout)
+		// or its shutdown. A front cut is answered and attributed, never
+		// an empty response (PR #95 review: Astra B10).
+		cut := cutOf(ctx)
+		if cut == cutClient {
+			return nil, &routeError{status: statusClientClosed, code: "client_closed", message: "the client went away while the request waited"}
+		}
+		if cut == cutFrontShutdown {
+			return nil, &routeError{status: http.StatusServiceUnavailable, code: codeShuttingDown, detail: detailOf(cut), retryAfter: "5", cutBy: cut, dep: d,
+				message: "the front is shutting down; send the request again"}
+		}
+		return nil, &routeError{status: http.StatusGatewayTimeout, code: codeRequestTimeout, detail: detailOf(cut), cutBy: cut, dep: d,
+			message: "the request was cut while it waited for an Instance of " + d.Key + ": " + detailOf(cut)}
 	}
 	return nil, &routeError{status: http.StatusServiceUnavailable, code: codeCapacity, retryAfter: "10", dep: d,
 		message: "every Instance of " + d.Key + " is at its cap"}
@@ -183,6 +212,9 @@ func (r *Router) waitServed(ctx context.Context, d *inventory.Deployment, g *bal
 func (r *Router) instance(key string) *inventory.Instance {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.view == nil {
+		return nil
+	}
 	for _, m := range r.view.Models {
 		for _, d := range m.Served {
 			for _, i := range d.Members {

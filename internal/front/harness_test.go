@@ -2,6 +2,7 @@ package front
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -51,12 +52,18 @@ type harness struct {
 	router    *Router
 	proxy     *Proxy
 	sink      *usage.Sink
+	metrics   *Metrics
+	free      *freeSpace
 	rec       *MemoryRecorder
 	logs      *syncBuffer
 	url       string
 	clientKey string
 	snap      inventory.Snapshot
 	uid       int
+	// The client server and its base context, for a test that stops it.
+	srv        *http.Server
+	base       context.Context
+	cancelBase context.CancelCauseFunc
 }
 
 // newHarness starts a front on a fake clock at t0. edit, when set, changes
@@ -87,6 +94,12 @@ func newHarnessOn(t *testing.T, real clock.Clock, edit func(*Config)) *harness {
 	keysPath := filepath.Join(dir, "client-keys.json")
 	writeMode600(t, keysPath, fmt.Sprintf(`{"keys":[{"id":"tester","key":%q}]}`, h.clientKey))
 	h.cfg = Config{DialHomeListen: "127.0.0.1:0", ClientKeysFile: keysPath, UsageDir: filepath.Join(dir, "usage")}.WithDefaults()
+	// An engine double on the fake clock jumps it at once after flushing its
+	// headers, before the front may have read them; a 30 s headers deadline
+	// would then fire in tests that are not about it. The tests that are set
+	// it (TestStreamHeadersDeadline); the default is checked by
+	// TestStreamHeadersTimeoutDefault.
+	h.cfg.StreamHeadersTimeout = Duration(24 * time.Hour)
 	if edit != nil {
 		edit(&h.cfg)
 	}
@@ -94,17 +107,23 @@ func newHarnessOn(t *testing.T, real clock.Clock, edit func(*Config)) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if h.sink, err = usage.Open(h.cfg.UsageDir); err != nil {
+	// The sink names its files by the harness's clock: the fake one in
+	// the default harness, so a test that moves it past midnight rotates.
+	if h.sink, err = usage.OpenOptions(h.cfg.UsageDir, usage.Options{Now: clk.Now}); err != nil {
 		t.Fatal(err)
 	}
 	log := slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	h.router = NewRouter(h.cfg, clk, h.trans, h.rec, log)
-	h.proxy = NewProxy(ProxyOptions{Config: h.cfg, Host: h.host, Clock: clk, Router: h.router, Transports: h.trans, Keys: keys, Sink: h.sink, Log: log})
+	h.free = &freeSpace{n: 1 << 40}
+	h.metrics = NewMetrics(h.sink, h.cfg.UsageDir, h.free.get)
+	h.router = NewRouter(h.cfg, clk, h.trans, h.rec, log, h.metrics)
+	h.proxy = NewProxy(ProxyOptions{Config: h.cfg, Host: h.host, Clock: clk, Router: h.router, Transports: h.trans, Keys: keys, Sink: h.sink, Metrics: h.metrics, Log: log})
 	ln, err := enginetest.Listen(testPortLo, testPortHi)
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := clientServer(h.cfg, h.proxy)
+	h.base, h.cancelBase = context.WithCancelCause(context.Background())
+	srv := clientServer(h.cfg, h.proxy, h.base)
+	h.srv = srv
 	go func() { _ = srv.Serve(ln) }()
 	h.url = "http://" + ln.Addr().String()
 	t.Cleanup(func() {
@@ -306,6 +325,26 @@ func readAll(t *testing.T, resp *http.Response) string {
 	return string(b)
 }
 
+// readUsageFiles returns the text of every usage file in dir, oldest first:
+// the records written so far, whichever day's file each is in. A directory
+// with none gives nothing.
+func readUsageFiles(t *testing.T, dir string) []byte {
+	t.Helper()
+	files, err := usage.Files(dir)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	var all []byte
+	for _, name := range files {
+		b, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		all = append(all, b...)
+	}
+	return all
+}
+
 // records closes nothing and returns the usage records written so far, after
 // waiting for the sink to sync what is queued.
 func (h *harness) records() []usage.Record {
@@ -314,10 +353,7 @@ func (h *harness) records() []usage.Record {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		out = out[:0]
-		b, err := os.ReadFile(filepath.Join(h.cfg.UsageDir, usage.LogFile))
-		if err != nil && !os.IsNotExist(err) {
-			h.t.Fatal(err)
-		}
+		b := readUsageFiles(h.t, h.cfg.UsageDir)
 		dec := json.NewDecoder(bytes.NewReader(b))
 		for dec.More() {
 			var r usage.Record
@@ -374,3 +410,23 @@ func listenFree() (net.Listener, error) { return enginetest.Listen(testPortLo, t
 
 // discardLog is a logger that writes nowhere.
 func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+// freeSpace is the free-space reading behind hpcburst_usage_dir_free_bytes, a
+// double that a test moves or makes fail.
+type freeSpace struct {
+	mu  sync.Mutex
+	n   uint64
+	err error
+}
+
+func (f *freeSpace) get(string) (uint64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.n, f.err
+}
+
+func (f *freeSpace) set(n uint64, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.n, f.err = n, err
+}

@@ -20,6 +20,8 @@ var (
 	errCutDeadline = errors.New("maxRequestDuration reached")
 	errCutIdle     = errors.New("idleTimeout reached: no byte from the upstream")
 	errCutLeaseEnd = errors.New("the Instance's lease ended")
+	errCutHeaders  = errors.New("streamHeadersTimeout reached: no response headers")
+	errCutShutdown = errors.New("the front is shutting down")
 )
 
 // Values of cutBy.
@@ -30,6 +32,10 @@ const (
 	cutTunnel        = "tunnel"
 	cutLeaseEnd      = "lease_end"
 	cutClient        = "client"
+	cutFrontHeaders  = "front_headers"
+	// cutFrontShutdown: the front stopped with the request in flight
+	// (@hpc-burst-science-agent, 31 Oct 2026).
+	cutFrontShutdown = "front_shutdown"
 )
 
 // exchange is one request in flight: its timers, its attribution and its
@@ -50,6 +56,15 @@ type exchange struct {
 	idleFor  time.Duration
 	lease    clock.Timer
 	leaseGen int // the target the lease timer belongs to; a resend arms a new one
+
+	// failed: the target failed the request after its headers in a way its
+	// events said (response.failed, an engine error event); it counts
+	// toward the pause like an upstream cut.
+	failed bool
+
+	headers     clock.Timer // streamHeadersTimeout, armed at the request's last byte
+	headersGen  int         // the attempt the headers timer belongs to
+	headersDone bool        // the attempt's headers came, or it ended
 }
 
 func newExchange(r *http.Request, clk clock.Clock, maxReq time.Duration) *exchange {
@@ -132,11 +147,50 @@ func (x *exchange) armLease(current func() (time.Time, bool)) {
 	x.lease = x.clk.AfterFunc(end.Sub(x.clk.Now()), fire)
 }
 
+// startAttempt begins one attempt's wait for its headers and returns its
+// generation, so a late hook of an earlier attempt changes nothing.
+func (x *exchange) startAttempt() int {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	if x.headers != nil {
+		x.headers.Stop()
+		x.headers = nil
+	}
+	x.headersGen++
+	x.headersDone = false
+	return x.headersGen
+}
+
+// armHeaders starts streamHeadersTimeout at the request's last byte; the
+// response's headers, or the attempt's end, stop it (stopHeaders). It runs
+// on the transport's write goroutine, so it may come after stopHeaders.
+func (x *exchange) armHeaders(gen int, d time.Duration) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	if gen != x.headersGen || x.headersDone || x.headers != nil {
+		return
+	}
+	x.headers = x.clk.AfterFunc(d, func() { x.cancel(errCutHeaders) })
+}
+
+// stopHeaders ends the attempt's wait for its headers.
+func (x *exchange) stopHeaders(gen int) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	if gen != x.headersGen {
+		return
+	}
+	x.headersDone = true
+	if x.headers != nil {
+		x.headers.Stop()
+	}
+}
+
 // stopTimers ends the request's timers.
 func (x *exchange) stopTimers() {
 	x.mu.Lock()
 	defer x.mu.Unlock()
-	for _, t := range []clock.Timer{x.deadline, x.idle, x.lease} {
+	for _, t := range []clock.Timer{x.deadline, x.idle, x.lease, x.headers} {
 		if t != nil {
 			t.Stop()
 		}
@@ -144,8 +198,12 @@ func (x *exchange) stopTimers() {
 }
 
 // cutBy maps the context's cause to the hop that cut the request, or "".
-func (x *exchange) cutBy() string {
-	switch cause := context.Cause(x.ctx); {
+func (x *exchange) cutBy() string { return cutOf(x.ctx) }
+
+// cutOf maps a request context's cause to the hop that cut it, or "". A
+// cause that is not one of the front's is the client's.
+func cutOf(ctx context.Context) string {
+	switch cause := context.Cause(ctx); {
 	case cause == nil:
 		return ""
 	case errors.Is(cause, errCutDeadline):
@@ -154,6 +212,10 @@ func (x *exchange) cutBy() string {
 		return cutFrontIdle
 	case errors.Is(cause, errCutLeaseEnd):
 		return cutLeaseEnd
+	case errors.Is(cause, errCutHeaders):
+		return cutFrontHeaders
+	case errors.Is(cause, errCutShutdown):
+		return cutFrontShutdown
 	default:
 		return cutClient
 	}
@@ -168,6 +230,10 @@ func detailOf(cutBy string) string {
 		return "idle"
 	case cutLeaseEnd:
 		return "lease_end"
+	case cutFrontHeaders:
+		return "headers"
+	case cutFrontShutdown:
+		return "shutdown"
 	}
 	return "upstream"
 }

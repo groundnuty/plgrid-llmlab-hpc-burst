@@ -114,7 +114,8 @@ func TestHealthPlainLoadAndShortPrefillRestartNothing(t *testing.T) {
 				return afake.HealthSlowPrefill(now, w)
 			}
 			tokens += 10
-			return agentapi.Health{Time: now, ProbeOK: true, RunningRequests: 1, GeneratedTokens: tokens, KVCacheUsage: 0.05}
+			read := now
+			return agentapi.Health{Time: now, ProbeOK: true, MetricsReadAt: &read, RunningRequests: agentapi.Int64(1), GeneratedTokens: agentapi.Int64(tokens), KVCacheUsage: agentapi.Float64(0.05), ResponsesByStatus: map[string]int64{"2xx": tokens}}
 		}
 		return afake.Engine{Health: s.sample}
 	}
@@ -136,7 +137,7 @@ func TestHealthPlainLoadAndShortPrefillRestartNothing(t *testing.T) {
 			}
 			rep, _ := rg.agentOf(alloc).agent.LastReport()
 			h := rep.Instance.Workers[0].Health
-			if h == nil || h.RunningRequests == 0 {
+			if h == nil || h.RunningRequests == nil || *h.RunningRequests == 0 {
 				t.Errorf("the engine reported no requests in flight (%+v); the test would prove nothing", h)
 			}
 		})
@@ -338,8 +339,9 @@ func TestHealthRestartRunsOriginalLaunch(t *testing.T) {
 	ag.CrashWorker(healthWorker, 1)
 	startUntil(rg, "md", 10*time.Minute, "restarted and ready", func() bool { return len(ag.Starts()) == 2 && rg.readyCount("md") == 1 })
 	st := ag.Starts()
-	if !reflect.DeepEqual(st[0].Launch, st[1].Launch) || !provisionHas(st[1].Launch.Command, "--max-num-seqs", "256") || slices.Contains(st[1].Launch.Command, "128") {
-		t.Errorf("restart launch %v differs from the first %v, or carries 128", st[1].Launch.Command, st[0].Launch.Command)
+	want := specLaunchArgv("--max-model-len=32768", "--max-num-seqs=256")
+	if !reflect.DeepEqual(st[0].Launch, st[1].Launch) || !slices.Equal(st[1].Launch.Command, want) {
+		t.Errorf("restart launch %q differs from the first %q, or from the original argv %q (no 128)", st[1].Launch.Command, st[0].Launch.Command, want)
 	}
 	if !reflect.DeepEqual(st[1].Launch.Command, in.Spec.Launch.Command) {
 		t.Errorf("restart launch %v is not the Instance's spec.launch %v", st[1].Launch.Command, in.Spec.Launch.Command)

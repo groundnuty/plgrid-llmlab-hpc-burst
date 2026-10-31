@@ -1,14 +1,15 @@
 package front
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/clock"
@@ -24,15 +25,18 @@ const MaxBodyBytes = 64 << 20
 
 // Proxy serves the LLMLab-compatible contract on the client listener.
 type Proxy struct {
-	cfg     Config
-	host    agentapi.Host
-	clk     clock.Clock
-	router  *Router
-	keys    *ClientKeys
-	sink    *usage.Sink
-	log     *slog.Logger
-	inst    *instanceTransports
-	managed *http.Transport
+	cfg      Config
+	host     agentapi.Host
+	clk      clock.Clock
+	router   *Router
+	keys     *ClientKeys
+	sink     *usage.Sink
+	metrics  *Metrics // nil: none
+	log      *slog.Logger
+	inst     *instanceTransports
+	managed  *http.Transport
+	running  sync.WaitGroup // the handlers in flight, for a stop
+	instKeys sync.Map       // Instance UID -> its key, for redaction
 }
 
 // ProxyOptions are the inputs of NewProxy.
@@ -44,6 +48,7 @@ type ProxyOptions struct {
 	Transports Transports
 	Keys       *ClientKeys
 	Sink       *usage.Sink
+	Metrics    *Metrics // nil: none
 	Log        *slog.Logger
 }
 
@@ -51,7 +56,7 @@ type ProxyOptions struct {
 func NewProxy(o ProxyOptions) *Proxy {
 	var d net.Dialer
 	return &Proxy{
-		cfg: o.Config, host: o.Host, clk: o.Clock, router: o.Router, keys: o.Keys, sink: o.Sink, log: o.Log,
+		cfg: o.Config, host: o.Host, clk: o.Clock, router: o.Router, keys: o.Keys, sink: o.Sink, metrics: o.Metrics, log: o.Log,
 		inst:    newInstanceTransports(o.Config, o.Transports),
 		managed: upstreamTransport(d.DialContext, o.Config, true),
 	}
@@ -60,19 +65,42 @@ func NewProxy(o ProxyOptions) *Proxy {
 // ServeHTTP routes the client listener: the contract under /v1/, 404 under
 // /agent/v1/ and everywhere else (HBEP-5, Listeners).
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	p.running.Add(1)
+	defer p.running.Done()
 	if !strings.HasPrefix(r.URL.Path, "/v1/") {
-		// /agent/v1/ belongs to the dial-home listener only. Still attributed:
-		// a response without the headers is a failure of the front.
-		attribution{requestID: newRequestID(), emitter: emitterFront}.set(w.Header())
+		// /agent/v1/ belongs to the dial-home listener only. Still attributed,
+		// since a response without the headers is a failure of the front,
+		// and recorded, since HBEP-5 keeps one record per request.
+		x := newExchange(r, p.clk, p.cfg.MaxRequestDuration.D())
+		defer p.finish(x)
+		x.attr.set(w.Header())
+		x.rec.Status, x.rec.Finish = http.StatusNotFound, strp("error")
 		http.NotFound(w, r)
 		return
 	}
 	p.serveV1(w, r)
 }
 
+// waitHandlers waits at most d for the handlers in flight to return.
+func (p *Proxy) waitHandlers(d time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		p.running.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
+
 func (p *Proxy) serveV1(w http.ResponseWriter, r *http.Request) {
 	x := newExchange(r, p.clk, p.cfg.MaxRequestDuration.D())
 	defer p.finish(x)
+	cio := bindClientIO(w, x, p.cfg.writeGrace)
+	defer cio.stop()
 	id, ok := p.authenticate(r)
 	if !ok {
 		p.fail(w, x, http.StatusUnauthorized, codeInvalidAPIKey, "", "", "no client key, or a wrong one")
@@ -88,8 +116,16 @@ func (p *Proxy) serveV1(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, MaxBodyBytes))
+	cio.bodyRead()
 	if err != nil {
-		p.fail(w, x, http.StatusBadRequest, codeInvalidRequest, "", "", "the body could not be read: "+err.Error())
+		switch cut := x.cutBy(); cut {
+		case "":
+			p.fail(w, x, http.StatusBadRequest, codeInvalidRequest, "", "", "the body could not be read: "+err.Error())
+		case cutClient:
+			x.rec.Status, x.rec.Finish, x.rec.CutBy = statusClientClosed, strp("cut"), strp(cut)
+		default:
+			p.cutBeforeFirstByte(w, x, cut, "the request was cut while its body was read: ")
+		}
 		return
 	}
 	rb, err := parseBody(body)
@@ -123,8 +159,8 @@ func (p *Proxy) authenticate(r *http.Request) (string, bool) {
 // connection that never opened goes to the next target on the ring, or to
 // the same one on a fresh connection when there is no other (open question
 // 5). Go's transport resends on its own only a request on a reused
-// connection that wrote nothing (nothingWrittenError, with GetBody set), so
-// neither path can send a byte twice.
+// connection that wrote nothing, since withOneReplay's GetBody refuses once
+// a byte was written, so neither path can send a byte twice.
 func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, x *exchange, n naming.Name, key string, body []byte, rb requestBody) {
 	var tried *target
 	exclude := ""
@@ -141,14 +177,15 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, x *exchange, n n
 			p.routeFail(w, x, rerr)
 			return
 		}
+		// Released exactly once however the request ends, including the
+		// http.ErrAbortHandler panic of a cut body (HBEP-5, Request path
+		// step 9); Release is idempotent, so the explicit calls stay.
+		defer t.release()
 		p.setTarget(x, t)
 		resp, err := p.send(x, r, t, body, rb, key)
 		if err == nil {
-			// A 5xx from an Instance counts toward its pause; a 4xx is the
-			// client's error and does not (@hpc-burst-science-agent, 31 Oct
-			// 2026). A managed target's statuses pass through and pause
-			// nothing: only its connections count.
-			p.router.ReportConnect(t.key(), t.inst != nil && resp.StatusCode >= 500)
+			// Deferred, so a cut body's abort panic reports too.
+			defer p.reportOutcome(t, x)
 			p.relay(w, x, t, resp, rb, r.URL.Path)
 			t.release()
 			return
@@ -165,6 +202,41 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, x *exchange, n n
 	p.unreachable(w, x, tried)
 }
 
+// reportOutcome counts a relayed response toward the target's pause, by
+// the rule #96 states (@hpc-burst-science-agent, 31 Oct 2026):
+//   - a 5xx and every upstream-side cut after the headers count: an upstream
+//     or tunnel cut, a stream that ended without its end, an engine error
+//     event, response.failed;
+//   - a completed request resets the run, a capped reply included;
+//   - a 4xx neither counts nor resets, and neither does a client disconnect.
+//
+// Choices where #96 is silent: a cut the front made (deadline, idle,
+// lease_end, front_shutdown) neither counts nor resets, since the target did
+// nothing wrong that the front saw. A managed target's statuses pause
+// nothing: a response of any status resets its run, and only its
+// connections count (HBEP-5, The LLMLab route).
+func (p *Proxy) reportOutcome(t *target, x *exchange) {
+	if t.managed != nil {
+		p.router.ReportConnect(t.key(), false)
+		return
+	}
+	switch status := x.rec.Status; {
+	case status >= 500:
+		p.router.ReportConnect(t.key(), true)
+		return
+	case status >= 400:
+		return
+	}
+	if x.rec.CutBy != nil {
+		switch *x.rec.CutBy {
+		case cutUpstream, cutTunnel:
+			p.router.ReportConnect(t.key(), true)
+		}
+		return
+	}
+	p.router.ReportConnect(t.key(), x.failed)
+}
+
 // setTarget records the chosen target and applies its deadline and lease end.
 func (p *Proxy) setTarget(x *exchange, t *target) {
 	if t.managed != nil {
@@ -172,6 +244,9 @@ func (p *Proxy) setTarget(x *exchange, t *target) {
 		x.rec.Emitter, x.rec.Provider, x.rec.ModelDeployment = emitterProvider, t.managed.Provider, t.managed.Deployment
 		x.rec.DeploymentID, x.rec.Instance, x.rec.InstanceUID = t.managed.ManagedID, "", ""
 		x.shortenDeadline(t.managed.MaxRequestDuration)
+		// A managed target has no lease: drop the timer an earlier attempt
+		// armed for an Instance, so its lease end cannot cut this request.
+		x.armLease(func() (time.Time, bool) { return time.Time{}, false })
 		return
 	}
 	x.attr = forTarget(x.id, t, emitterInstance)
@@ -190,6 +265,9 @@ func (p *Proxy) send(x *exchange, r *http.Request, t *target, body []byte, rb re
 	stripHop(h)
 	h.Del("Authorization")
 	h.Del("Content-Length")
+	// The front redacts what it relays, so it takes bodies uncompressed
+	// (@hpc-burst-science-agent, 31 Oct 2026).
+	h.Set("Accept-Encoding", "identity")
 	if _, ok := h["User-Agent"]; !ok {
 		h["User-Agent"] = []string{""} // Go adds none then: headers pass as sent
 	}
@@ -223,13 +301,26 @@ func (p *Proxy) send(x *exchange, r *http.Request, t *target, body []byte, rb re
 	if r.URL.RawQuery != "" {
 		url += "?" + r.URL.RawQuery
 	}
-	req, err := http.NewRequestWithContext(x.ctx, http.MethodPost, url, bytes.NewReader(out))
+	ctx := x.ctx
+	gen := x.startAttempt()
+	if t.inst != nil && rb.stream {
+		// Toward an Instance a streamed reply's headers must come within
+		// streamHeadersTimeout of the request's last byte (HBEP-5, Time-outs
+		// and keep-alive); vLLM sends them before prefill. A non-streamed
+		// request has no such deadline.
+		d := p.cfg.StreamHeadersTimeout.D()
+		ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{WroteRequest: func(httptrace.WroteRequestInfo) { x.armHeaders(gen, d) }})
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
 		return nil, &dialError{err: err}
 	}
+	req = withOneReplay(req, out)
 	req.Header = h
 	x.armIdle(p.cfg.IdleTimeout.D())
-	return rt.RoundTrip(req)
+	resp, err := rt.RoundTrip(req)
+	x.stopHeaders(gen)
+	return resp, err
 }
 
 // failedBeforeHeaders answers a request that failed after it was written, or
@@ -240,9 +331,15 @@ func (p *Proxy) failedBeforeHeaders(w http.ResponseWriter, x *exchange, t *targe
 	switch cut := x.cutBy(); cut {
 	case cutClient:
 		x.rec.Status, x.rec.Finish, x.rec.CutBy = statusClientClosed, strp("cut"), strp(cut)
-	case cutFrontDeadline, cutFrontIdle, cutLeaseEnd:
+	case cutFrontHeaders:
+		// Written, so not resent; a missed streamed-headers deadline counts
+		// toward the pause (HBEP-5, Pauses).
+		p.router.ReportConnect(t.key(), true)
 		x.rec.CutBy = strp(cut)
-		p.fail(w, x, http.StatusGatewayTimeout, codeRequestTimeout, detailOf(cut), "", "the request was cut before its first byte: "+detailOf(cut))
+		p.log.Warn("no response headers within streamHeadersTimeout; the request is not sent again", "request", x.id, "target", t.key())
+		p.fail(w, x, http.StatusGatewayTimeout, codeRequestTimeout, detailOf(cut), "", "the target sent no response headers within streamHeadersTimeout; the request is not sent again")
+	case cutFrontDeadline, cutFrontIdle, cutLeaseEnd, cutFrontShutdown:
+		p.cutBeforeFirstByte(w, x, cut, "the request was cut before its first byte: ")
 	default:
 		// Written, then closed before any response header: never resent
 		// (open question 5). Toward an Instance that is the tunnel's row of
@@ -259,6 +356,19 @@ func (p *Proxy) failedBeforeHeaders(w http.ResponseWriter, x *exchange, t *targe
 	}
 }
 
+// cutBeforeFirstByte answers a request the front cut before any byte of its
+// response: 504 request_timeout with the cut's detail, or at a stop 503
+// shutting_down with Retry-After 5 (@hpc-burst-science-agent, 31 Oct 2026).
+func (p *Proxy) cutBeforeFirstByte(w http.ResponseWriter, x *exchange, cut, msg string) {
+	x.rec.CutBy = strp(cut)
+	if cut == cutFrontShutdown {
+		w.Header().Set("Retry-After", "5")
+		p.fail(w, x, http.StatusServiceUnavailable, codeShuttingDown, detailOf(cut), "", "the front is shutting down; send the request again")
+		return
+	}
+	p.fail(w, x, http.StatusGatewayTimeout, codeRequestTimeout, detailOf(cut), "", msg+detailOf(cut))
+}
+
 // unreachable is the 502 after the one resend; it names the target tried.
 func (p *Proxy) unreachable(w http.ResponseWriter, x *exchange, t *target) {
 	x.attr = forTarget(x.id, t, emitterFront)
@@ -273,6 +383,9 @@ func (p *Proxy) routeFail(w http.ResponseWriter, x *exchange, e *routeError) {
 	if e.status == statusClientClosed {
 		x.rec.Status, x.rec.Finish, x.rec.CutBy = e.status, strp("cut"), strp(cutClient)
 		return
+	}
+	if e.cutBy != "" {
+		x.rec.CutBy = strp(e.cutBy)
 	}
 	if e.retryAfter != "" {
 		w.Header().Set("Retry-After", e.retryAfter)
@@ -300,8 +413,14 @@ func (p *Proxy) finish(x *exchange) {
 	end := p.clk.Now()
 	x.rec.EndTime = usage.Time(end)
 	x.rec.DurationMs = end.Sub(x.start).Milliseconds()
+	// Counted whether or not its record could be written: the client got
+	// its answer either way, and the sink counts the loss on its own.
+	p.metrics.observe(x.rec)
 	if _, err := p.sink.Write(x.rec); err != nil {
 		p.log.Error("usage record not written", "request", x.id, "error", err.Error())
+		p.router.usageFailed(x.id, err)
+	} else {
+		p.router.usageWritten()
 	}
 	p.log.Info("request", "request", x.id, "path", x.rec.Path, "model", x.rec.RequestedModel, "status", x.rec.Status,
 		"emitter", x.rec.Emitter, "provider", x.rec.Provider, "instance", x.rec.Instance, "durationMs", x.rec.DurationMs)

@@ -4,10 +4,13 @@ import (
 	"fmt"
 	"sync"
 	"time"
+	"unicode/utf8"
 
-	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
 // Clock is the controller's time source. fake.Clock of pkg/provider/fake
@@ -21,23 +24,53 @@ type SystemClock struct{}
 func (SystemClock) Now() time.Time { return time.Now().UTC() }
 
 // Recorder emits HBEP-8's events. Events are best-effort; conditions are the
-// level truth (HBEP-7, Events and conditions). typ is one of HBEP-8's types
-// (eventFailing and the others), code its reason code.
+// level truth (HBEP-7, Events and conditions). regarding is the object the
+// event is about and related, when not nil, another object it names (the
+// Instance whose drain start dropped a ModelDeployment's capacity). typ is one
+// of HBEP-8's types (eventFailing and the others), and it alone decides the
+// severity (warningType); code is the reason code.
 type Recorder interface {
-	Event(obj client.Object, warning bool, typ, code, message string)
+	Event(regarding, related client.Object, typ, code, message string)
 }
 
-// KubeRecorder emits Kubernetes Events through client-go's events recorder,
-// with reason "<type>/<code>" and the type as the action.
+// maxNoteBytes is the longest note the events API admits: it refuses a longer
+// one (k8s.io/kubernetes, pkg/apis/events/validation/events.go, lines 35-38).
+const maxNoteBytes = 1024
+
+// warningType reports whether an event of HBEP-8's type typ is a Warning:
+// degraded and failing are, every other type is Normal.
+func warningType(typ string) bool { return typ == eventDegraded || typ == eventFailing }
+
+// eventNote cuts a message to at most maxNoteBytes, at a UTF-8 boundary, so
+// the API server admits the event.
+func eventNote(msg string) string {
+	if len(msg) <= maxNoteBytes {
+		return msg
+	}
+	cut := maxNoteBytes
+	for cut > 0 && !utf8.RuneStart(msg[cut]) {
+		cut--
+	}
+	return msg[:cut]
+}
+
+// KubeRecorder emits Kubernetes Events through client-go's events recorder.
+// The event's reason is the reason code alone, a single CamelCase word, and
+// HBEP-8's type is the events.k8s.io action, so a reader selects on either
+// field without parsing the other out of a compound string.
 type KubeRecorder struct{ R events.EventRecorder }
 
 // Event implements Recorder.
-func (k KubeRecorder) Event(obj client.Object, warning bool, typ, code, message string) {
-	et := corev1.EventTypeNormal
-	if warning {
-		et = corev1.EventTypeWarning
+func (k KubeRecorder) Event(regarding, related client.Object, typ, code, message string) {
+	et := provider.EventKindOrdinary
+	if warningType(typ) {
+		et = provider.EventKindWarning
 	}
-	k.R.Eventf(obj, nil, et, typ+"/"+code, typ, "%s", message)
+	var rel runtime.Object
+	if related != nil {
+		rel = related
+	}
+	k.R.Eventf(regarding, rel, et, code, typ, "%s", eventNote(message))
 }
 
 // RecordedEvent is one event a MemoryRecorder holds.
@@ -47,9 +80,12 @@ type RecordedEvent struct {
 	Namespace string
 	Name      string
 	Warning   bool
-	Type      string
-	Code      string
-	Message   string
+	// RelatedKind and RelatedName name the related object, empty for none.
+	RelatedKind string
+	RelatedName string
+	Type        string
+	Code        string
+	Message     string
 }
 
 // MemoryRecorder keeps every event in order, for tests and diagnostics. It is
@@ -60,14 +96,18 @@ type MemoryRecorder struct {
 }
 
 // Event implements Recorder.
-func (m *MemoryRecorder) Event(obj client.Object, warning bool, typ, code, message string) {
+// It applies KubeRecorder's severity and note rules.
+func (m *MemoryRecorder) Event(regarding, related client.Object, typ, code, message string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	kind := fmt.Sprintf("%T", obj)
-	m.events = append(m.events, RecordedEvent{
-		Seq: len(m.events) + 1, Kind: kind, Namespace: obj.GetNamespace(), Name: obj.GetName(),
-		Warning: warning, Type: typ, Code: code, Message: message,
-	})
+	e := RecordedEvent{
+		Seq: len(m.events) + 1, Kind: fmt.Sprintf("%T", regarding), Namespace: regarding.GetNamespace(), Name: regarding.GetName(),
+		Warning: warningType(typ), Type: typ, Code: code, Message: eventNote(message),
+	}
+	if related != nil {
+		e.RelatedKind, e.RelatedName = fmt.Sprintf("%T", related), related.GetName()
+	}
+	m.events = append(m.events, e)
 }
 
 // Events returns a copy of the events, oldest first.

@@ -1,11 +1,16 @@
 package front
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
+	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"sync"
+	"sync/atomic"
 
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -102,6 +107,10 @@ func isDialError(err error) bool {
 // time (L-2.5). It sets no response-header or total time-out: the front's
 // deadlines apply per request. Compression is off, so bodies pass unchanged.
 func upstreamTransport(dial func(ctx context.Context, network, addr string) (net.Conn, error), cfg Config, proxy bool) *http.Transport {
+	// connectTimeout bounds every dial here, the Instances' too. HBEP-5 gives
+	// it to LLMLab only and bounds the tunnel set-up toward an Instance by
+	// tunnelSetupTimeout (5 s); that belongs to the tunnel transport of
+	// #90, which replaces StaticTransports' plain dial.
 	connect := cfg.ConnectTimeout.D()
 	t := &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -111,7 +120,7 @@ func upstreamTransport(dial func(ctx context.Context, network, addr string) (net
 			if err != nil {
 				return nil, &dialError{err: err}
 			}
-			return c, nil
+			return &countingConn{Conn: c}, nil
 		},
 		IdleConnTimeout:     cfg.UpstreamIdleTimeout.D(),
 		MaxIdleConnsPerHost: 64,
@@ -172,4 +181,63 @@ func (it *instanceTransports) prune() {
 			delete(it.m, uid)
 		}
 	}
+}
+
+// countingConn counts the bytes written to a connection, so a request can
+// tell whether any byte of it reached the connection.
+type countingConn struct {
+	net.Conn
+	written atomic.Int64
+}
+
+func (c *countingConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	c.written.Add(int64(n))
+	return n, err
+}
+
+// countingOf finds the countingConn under a connection the transport hands
+// to httptrace: the conn itself, or the one under its TLS layer.
+func countingOf(c net.Conn) *countingConn {
+	if t, ok := c.(*tls.Conn); ok {
+		c = t.NetConn()
+	}
+	cc, _ := c.(*countingConn)
+	return cc
+}
+
+// errWritten refuses Go's own resend of a request that was written.
+var errWritten = errors.New("the connection failed after the request was written; it is not sent again")
+
+// withOneReplay sets the request's body and GetBody so Go's transport can
+// resend it only when no byte of it reached the connection: the one resend
+// HBEP-5 allows, a reused connection closed before the write (open question
+// 5). Go resends on its own a request whose GetBody is set when nothing was
+// written, but also, when the request carries Idempotency-Key or
+// X-Idempotency-Key, after it was written and the connection then failed
+// (Request.isReplayable). The client's headers pass unchanged, so GetBody
+// refuses once the attempt wrote a byte (PR #95 review: Astra B1, Opus B2).
+// The count comes from the connection, not from httptrace's WroteHeaders,
+// which fires while the headers are still in the transport's buffer, so it
+// would also refuse the resend of a request that wrote nothing.
+func withOneReplay(req *http.Request, body []byte) *http.Request {
+	var conn *countingConn
+	var base int64
+	// GotConn and GetBody both run on the RoundTrip goroutine, before the
+	// attempt's write and after its failure; only the count is shared.
+	trace := &httptrace.ClientTrace{GotConn: func(i httptrace.GotConnInfo) {
+		if conn = countingOf(i.Conn); conn != nil {
+			base = conn.written.Load()
+		}
+	}}
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+	req.Body = io.NopCloser(bytes.NewReader(body))
+	req.ContentLength = int64(len(body))
+	req.GetBody = func() (io.ReadCloser, error) {
+		if conn == nil || conn.written.Load() != base {
+			return nil, errWritten
+		}
+		return io.NopCloser(bytes.NewReader(body)), nil
+	}
+	return req
 }

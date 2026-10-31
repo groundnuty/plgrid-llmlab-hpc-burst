@@ -1,6 +1,7 @@
 package front
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -109,7 +110,7 @@ func TestClientKeysFile(t *testing.T) {
 // clientKeepAlive (HBEP-5, Time-outs and keep-alive).
 func TestClientServerHasNoDeadlineBelowTheFronts(t *testing.T) {
 	cfg := Config{}.WithDefaults()
-	s := clientServer(cfg, nil)
+	s := clientServer(cfg, nil, context.Background())
 	if s.ReadTimeout != 0 || s.WriteTimeout != 0 {
 		t.Errorf("ReadTimeout %s, WriteTimeout %s: want none", s.ReadTimeout, s.WriteTimeout)
 	}

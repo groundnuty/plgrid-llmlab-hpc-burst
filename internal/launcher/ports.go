@@ -52,7 +52,7 @@ const controllerPortOffset = 6
 const frontHealthPortOffset = 4
 
 // dialHomePortOffset is the front's ssh-mode dial-home listener, relative to the base:
-// agentapi.DialHomePortOffset (7). It is the last port of the block. Each platform's restricted VM
+// agentapi.DialHomePortOffset (7), the last port the launcher checks; base+8 to base+11 are frps's (HBEP-6). Each platform's restricted VM
 // key permits forwards to exactly 127.0.0.1:base+3 (the agent endpoint) and 127.0.0.1:base+7, so a
 // launcher started with another base needs new restricted keys (docs/development.md, The
 // launcher, Ports).
@@ -66,7 +66,8 @@ const dialHomePortOffset = agentapi.DialHomePortOffset
 // and adds the controllers' two: the agent endpoint at agentapi.AgentEndpointPortOffset (base+3,
 // shared with the controller through agentapi.Host) and the controller's /healthz at base+6.
 // base+4 is the front's /healthz (frontHealthPortOffset), and base+7 the front's ssh-mode
-// dial-home listener (dialHomePortOffset). The block is base..base+7.
+// dial-home listener (dialHomePortOffset). The launcher checks base..base+7; frps's ports above
+// them are not checked until the launcher starts frps.
 func PortsFromBase(base int) (Ports, error) {
 	if base < 1024 || base+dialHomePortOffset > 65535 {
 		return Ports{}, fmt.Errorf("port base %d is out of range: the block base..base+%d must lie in 1024..65535", base, dialHomePortOffset)

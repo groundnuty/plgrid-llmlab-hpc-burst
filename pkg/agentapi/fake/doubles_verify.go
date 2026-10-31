@@ -73,13 +73,44 @@ func QualifyKVCapacity(tokens int64) func(agentapi.DesiredInstance, agentapi.Qua
 }
 
 // QualifyLoopAtLongContext is an engine whose answer at the longest context
-// loops: the behaviour check fails, and the others pass.
+// loops: the behaviour check fails with the reason agentapi.ReasonLoop, and the
+// others pass.
 func QualifyLoopAtLongContext(i agentapi.DesiredInstance, req agentapi.QualifyRequest) agentapi.QualifyResult {
+	return failBehaviour(i, req, agentapi.ReasonLoop, "the answer at the longest context loops")
+}
+
+// QualifyReasoningBudgetExhausted is an engine with a reasoning parser whose
+// reasoning used up the behaviour check's output budget: the check fails with
+// the reason agentapi.ReasonReasoningBudgetExhausted, and the others pass.
+func QualifyReasoningBudgetExhausted(i agentapi.DesiredInstance, req agentapi.QualifyRequest) agentapi.QualifyResult {
+	return failBehaviour(i, req, agentapi.ReasonReasoningBudgetExhausted, "the reasoning used the whole output budget and left no answer")
+}
+
+// QualifyBehaviourContext returns a Qualify whose behaviour check ran at the
+// given prompt length, in tokens (CheckOutcome.ContextTokens), as an agent that
+// shortened the prompt for a reasoning parser reports it
+// (agentapi.BehaviourContextTokens). Every check passes.
+func QualifyBehaviourContext(tokens int64) func(agentapi.DesiredInstance, agentapi.QualifyRequest) agentapi.QualifyResult {
+	return func(i agentapi.DesiredInstance, req agentapi.QualifyRequest) agentapi.QualifyResult {
+		res := DefaultQualify(i, req)
+		for n, c := range res.Checks {
+			if c.Name == agentapi.CheckBehaviour {
+				res.Checks[n].ContextTokens = tokens
+			}
+		}
+		return res
+	}
+}
+
+// failBehaviour is DefaultQualify with the behaviour check failed, with this
+// reason and message.
+func failBehaviour(i agentapi.DesiredInstance, req agentapi.QualifyRequest, reason, message string) agentapi.QualifyResult {
 	res := DefaultQualify(i, req)
 	for n, c := range res.Checks {
 		if c.Name == agentapi.CheckBehaviour {
 			res.Checks[n].Passed = false
-			res.Checks[n].Message = "the answer at the longest context loops"
+			res.Checks[n].Reason = reason
+			res.Checks[n].Message = message
 		}
 	}
 	return res

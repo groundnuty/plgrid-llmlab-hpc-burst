@@ -3,7 +3,11 @@ package front
 import (
 	"bufio"
 	"bytes"
+	"compress/flate"
+	"compress/gzip"
+	"compress/zlib"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -49,34 +53,85 @@ func (i *idleReader) Read(p []byte) (int, error) {
 }
 
 // relay returns the target's response: its status and headers plus the
-// attribution headers, then its body (HBEP-5, Request path step 8).
+// attribution headers, then its body (HBEP-5, Request path step 8). Every
+// header and body byte from the target passes with every target credential
+// redacted, on every path and status; the front frames the body itself, so
+// the target's Content-Length is dropped (@hpc-burst-science-agent, 31 Oct
+// 2026). A compressed body is decoded first (gzip, deflate); another
+// encoding cannot be redacted and is answered 502 upstream_unreachable,
+// detail encoding.
 func (p *Proxy) relay(w http.ResponseWriter, x *exchange, t *target, resp *http.Response, rb requestBody, path string) {
 	defer resp.Body.Close()
+	raw, err := decodeBody(resp)
+	if err != nil {
+		x.attr = forTarget(x.id, t, emitterFront)
+		x.rec.Emitter = emitterFront
+		p.log.Warn("the target's response cannot be read", "request", x.id, "target", t.key(), "error", err.Error())
+		p.fail(w, x, http.StatusBadGateway, codeUpstreamUnreachable, "encoding", "", err.Error())
+		return
+	}
+	secrets := p.secrets(p.targetKey(t))
 	h := w.Header()
 	for k, vs := range resp.Header {
 		h[k] = append([]string(nil), vs...)
 	}
 	stripHop(h)
+	h.Del("Content-Length")
+	h.Del("Content-Encoding")
+	redactHeader(h, secrets)
 	x.attr.set(h)
 	x.rec.Status = resp.StatusCode
 	kind := endpointOf(path)
 	sse := strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")
-	identity := resp.Header.Get("Content-Encoding") == "" || strings.EqualFold(resp.Header.Get("Content-Encoding"), "identity")
 	x.rec.Stream = sse
+	body := newRedactReader(&idleReader{r: raw, touch: x.touch}, secrets)
 	w.WriteHeader(resp.StatusCode)
-	body := &idleReader{r: resp.Body, touch: x.touch}
+	if sse {
+		// The status and the attribution reach the client at once, not
+		// with the first event after a long prefill.
+		_ = http.NewResponseController(w).Flush()
+	}
 	switch {
 	case resp.StatusCode >= 400:
 		x.rec.Finish = strp("error")
 		p.copyRaw(w, x, body, sse)
-	case sse && kind.streams() && identity:
-		if j := p.relayEvents(w, x, body, kind); j.failed && t.inst != nil {
-			p.router.ReportConnect(t.key(), true)
-		}
+	case sse && kind.streams():
+		j := p.relayEvents(w, x, body, kind)
+		x.failed = j.failed || j.engineError || j.badError
 	case sse:
 		p.copyRaw(w, x, body, true)
 	default:
-		p.relayWhole(w, x, body, kind, identity)
+		p.relayWhole(w, x, body, kind, true)
+	}
+}
+
+// decodeBody returns the response's body decoded from its Content-Encoding.
+// The front asks for identity, so a target that compresses anyway is rare.
+func decodeBody(resp *http.Response) (io.Reader, error) {
+	switch enc := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding"))); enc {
+	case "", "identity":
+		return resp.Body, nil
+	case "gzip", "x-gzip":
+		zr, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("the target's gzip body cannot be read: %w", err)
+		}
+		return zr, nil
+	case "deflate":
+		// HTTP's deflate is zlib (RFC 9110 section 8.4.1.2); some servers
+		// send raw deflate, told apart by the zlib header.
+		br := bufio.NewReader(resp.Body)
+		hdr, err := br.Peek(2)
+		if err == nil && hdr[0]&0x0f == 8 && (uint16(hdr[0])<<8|uint16(hdr[1]))%31 == 0 {
+			zr, err := zlib.NewReader(br)
+			if err != nil {
+				return nil, fmt.Errorf("the target's deflate body cannot be read: %w", err)
+			}
+			return zr, nil
+		}
+		return flate.NewReader(br), nil
+	default:
+		return nil, fmt.Errorf("the target answered with Content-Encoding %q, which the front cannot read to redact", enc)
 	}
 }
 
@@ -122,7 +177,11 @@ func (p *Proxy) relayEvents(w http.ResponseWriter, x *exchange, body io.Reader, 
 		}
 		if err != nil {
 			readErr = err
-			if ev.Len() > 0 && len(bytes.TrimSpace(ev.Bytes())) > 0 {
+			// A cut inside a line drops that line: forwarded, it would run
+			// into the error event that follows. Complete lines still pass,
+			// ended as an event, since one may carry the finish reason.
+			ev.Truncate(bytes.LastIndexByte(ev.Bytes(), '\n') + 1)
+			if len(bytes.TrimSpace(ev.Bytes())) > 0 {
 				ev.WriteString("\n")
 				handle()
 			}
@@ -143,7 +202,7 @@ func (p *Proxy) endStream(w http.ResponseWriter, x *exchange, j *judge, readErr 
 		x.rec.CountsSource = strp("front_events")
 		x.rec.ContentEvents = i64p(j.contentEvents)
 	}
-	if j.complete {
+	if j.complete && !j.engineError && !j.badError {
 		x.rec.Finish = strp(j.finish)
 		if j.errorCode != "" {
 			x.rec.ErrorCode = strp(j.errorCode)
@@ -151,6 +210,25 @@ func (p *Proxy) endStream(w http.ResponseWriter, x *exchange, j *judge, readErr 
 		return
 	}
 	cut := x.cutBy()
+	if j.engineError || j.badError {
+		// The engine failed the stream and said so: truncated, cut by the
+		// upstream, with the event's code. Its own event was the client's
+		// one error event; one that was not JSON was withheld, and the
+		// front's stream_cut stands in for it (@hpc-burst-science-agent,
+		// 31 Oct 2026).
+		x.rec.Finish, x.rec.CutBy = strp("truncated"), strp(cutUpstream)
+		if cut != "" {
+			x.rec.Finish, x.rec.CutBy = strp("cut"), strp(cut)
+		}
+		if j.errorCode != "" {
+			x.rec.ErrorCode = strp(j.errorCode)
+		}
+		p.log.Warn("the engine failed the stream", "request", x.id, "errorCode", j.errorCode)
+		if j.badError && cut != cutClient {
+			p.writeStreamError(w, "upstream", "the engine failed the stream; its error event was not JSON")
+		}
+		return
+	}
 	switch {
 	case cut != "":
 	case readErr != nil && !errors.Is(readErr, io.EOF):

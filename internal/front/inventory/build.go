@@ -3,8 +3,10 @@ package inventory
 import (
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -50,7 +52,7 @@ func Build(s Snapshot, in Inputs) *View {
 		md := &s.Deployments[i]
 		switch {
 		case md.Spec.Source.Served != nil:
-			v.addServed(md, byOwner[md.UID], in)
+			v.addServed(md, byOwner[md.UID], providers, in)
 		case md.Spec.Source.Managed != nil:
 			v.addManaged(md, providers, in)
 		}
@@ -90,7 +92,7 @@ func instancesByOwner(insts []v1alpha1.Instance) map[types.UID][]*v1alpha1.Insta
 	return out
 }
 
-func (v *View) addServed(md *v1alpha1.ModelDeployment, insts []*v1alpha1.Instance, in Inputs) {
+func (v *View) addServed(md *v1alpha1.ModelDeployment, insts []*v1alpha1.Instance, providers map[string]*v1alpha1.Provider, in Inputs) {
 	d := &Deployment{
 		Key: md.Namespace + "/" + md.Name, Namespace: md.Namespace, Name: md.Name, UID: md.UID,
 		ServedName: md.Spec.Model, Desired: int(md.Spec.Instances),
@@ -106,8 +108,9 @@ func (v *View) addServed(md *v1alpha1.ModelDeployment, insts []*v1alpha1.Instanc
 			d.MaxRequestDuration = mrd
 		}
 	}
+	attached := v.attachedProviders(md, providers)
 	for _, inst := range insts {
-		if m := v.routable(md, d, inst, in); m != nil {
+		if m := v.routable(md, d, inst, attached, in); m != nil {
 			d.Members = append(d.Members, m)
 			v.Joined[inst.UID] = true
 		}
@@ -117,9 +120,29 @@ func (v *View) addServed(md *v1alpha1.ModelDeployment, insts []*v1alpha1.Instanc
 	mm.Served = append(mm.Served, d)
 }
 
+// attachedProviders is the set of Providers the deployment's current provider
+// selection allows (HBEP-5, Notes, Routing policy). An unreadable selector
+// attaches none and is logged once.
+func (v *View) attachedProviders(md *v1alpha1.ModelDeployment, providers map[string]*v1alpha1.Provider) map[string]bool {
+	out := map[string]bool{}
+	for _, name := range sortedNames(providers) {
+		ok, err := selected(md.Spec.Providers, providers[name])
+		if err != nil {
+			v.problemf("ModelDeployment %s: provider selector: %v; none of its Instances takes a new request", md.Namespace+"/"+md.Name, err)
+			return map[string]bool{}
+		}
+		out[name] = ok
+	}
+	return out
+}
+
 // routable returns the Instance's routing entry when it is routable at
-// in.Now (HBEP-5, Request path, Routable), or nil.
-func (v *View) routable(md *v1alpha1.ModelDeployment, d *Deployment, inst *v1alpha1.Instance, in Inputs) *Instance {
+// in.Now (HBEP-5, Request path, Routable), or nil. attached is the set of
+// Providers the deployment selects now. An Instance whose Provider is not in it
+// never joins; one that joined earlier stays a member, not eligible, like any
+// other skip, so its open requests keep their count until they end (a leave
+// would release them at once).
+func (v *View) routable(md *v1alpha1.ModelDeployment, d *Deployment, inst *v1alpha1.Instance, attached map[string]bool, in Inputs) *Instance {
 	key := inst.Namespace + "/" + inst.Name
 	phase := inst.Status.Phase
 	if inst.DeletionTimestamp != nil || phase == v1alpha1.InstanceDraining || phase == v1alpha1.InstanceEnded {
@@ -146,14 +169,15 @@ func (v *View) routable(md *v1alpha1.ModelDeployment, d *Deployment, inst *v1alp
 	}
 	transport := in.HasTransport(inst.UID)
 	ready := phase == v1alpha1.InstanceReady
-	if !in.Joined[inst.UID] && !(ready && transport) {
+	sel := attached[prov.Name]
+	if !in.Joined[inst.UID] && !(ready && transport && sel) {
 		return nil
 	}
 	return &Instance{
 		Key: key, Namespace: inst.Namespace, Name: inst.Name, UID: inst.UID, Deployment: d.Key,
 		Provider: prov.Name, DeploymentID: string(inst.Spec.DeploymentID), DisplayID: inst.Spec.DeploymentID.Display(),
 		Cap: instanceCap(md.Spec.Routing, inst), LeaseEnd: inst.Status.LeaseEnd.Time, DrainStart: drain,
-		Eligible: ready && transport && !conditionTrue(inst.Status.Conditions, v1alpha1.ConditionAgentUnreachable),
+		Eligible: ready && transport && sel && !conditionTrue(inst.Status.Conditions, v1alpha1.ConditionAgentUnreachable),
 	}
 }
 
@@ -188,14 +212,36 @@ func bounds(r *v1alpha1.Routing) (tight, loose int, err error) {
 	return tight, loose, nil
 }
 
+// loadFactorPattern is what the API accepts of a LoadFactor (v1alpha1's
+// kubebuilder pattern): digits with an optional fraction, at most 16 characters.
+var loadFactorPattern = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?$`)
+
 // Percent converts a load factor ("1.25") to KubeAI's MeanLoadPercentage
-// (125), rounding to a whole percent, since KubeAI's setting is an integer.
+// (125), exactly: the front never rounds the configured bound
+// (@hpc-burst-science-agent, 31 Oct 2026). KubeAI's setting, and the forked
+// group's pick, take a whole percent, so a factor with a nonzero third
+// decimal cannot be used as configured and is refused; a contracts PR limits
+// loadBound.tight and .loose to two decimals, so that cannot be admitted.
+// The digits are read as written, not through a float, since 1.15 x 100 is
+// 114.99999999999999 in float64.
 func Percent(f v1alpha1.LoadFactor) (int, error) {
-	x, err := strconv.ParseFloat(string(f), 64)
-	if err != nil || x < 1 || math.IsInf(x, 0) {
-		return 0, fmt.Errorf("load factor %q is not a decimal of at least 1", f)
+	bad := fmt.Errorf("load factor %q is not a decimal of at least 1", f)
+	if !loadFactorPattern.MatchString(string(f)) {
+		return 0, bad
 	}
-	return int(math.Round(x * 100)), nil
+	whole, frac, _ := strings.Cut(string(f), ".")
+	if len(frac) > 2 && strings.Trim(frac[2:], "0") != "" {
+		return 0, fmt.Errorf("load factor %q has more than two decimals, which the front cannot use exactly", f)
+	}
+	n, err := strconv.ParseInt(whole, 10, 64)
+	if err != nil || n > (math.MaxInt-99)/100 {
+		return 0, bad
+	}
+	cents, _ := strconv.Atoi((frac + "00")[:2])
+	if p := int(n)*100 + cents; p >= 100 {
+		return p, nil
+	}
+	return 0, bad
 }
 
 func conditionTrue(conds []metav1.Condition, t string) bool {

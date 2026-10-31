@@ -465,6 +465,10 @@ func TestStartSupervisorRefusesABrokenEndpointPair(t *testing.T) {
 	if _, err := os.Stat(f.l.supervisorLog()); !os.IsNotExist(err) {
 		t.Errorf("supervisor.log exists: a supervisor was created (%v)", err)
 	}
+	// Judged from /proc, not from the record: if the check had let the start through, the detached
+	// stand-in (a session of its own, init as its parent) would be running with the state directory
+	// as its working directory. It is killed here, with anything it started, and the test fails.
+	noLeftovers(t, f.l.dir)
 }
 
 // TestUpRefusesABrokenEndpointPairBeforeStartingAnything: Up checks the pair before it looks for

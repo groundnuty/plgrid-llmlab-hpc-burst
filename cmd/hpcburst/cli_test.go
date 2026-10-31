@@ -50,7 +50,7 @@ func TestUpRejectsBadInputBeforeStarting(t *testing.T) {
 	}{
 		"front address without a mode":                 {[]string{"--front-addr", "front.example.test:8443"}, "front mode"},
 		"ssh without a key":                            {[]string{"--front-mode", "ssh", "--front-addr", "front.example.test"}, "--front-key"},
-		"ssh on port 2222":                             {[]string{"--front-mode", "ssh", "--front-addr", "front.example.test:2222", "--front-key", "/dev/null"}, "port 22"},
+		"ssh on port 99999":                            {[]string{"--front-mode", "ssh", "--front-addr", "front.example.test:99999", "--front-key", "/dev/null"}, "not a port"},
 		"port base too low":                            {[]string{"--port-base", "80"}, "out of range"},
 		"port base leaves no room for the controllers": {[]string{"--port-base", "65530"}, "out of range"},
 		"controller binary missing":                    {[]string{"--controller-bin", "/nonexistent/hpcburst-controller"}, "controller binary"},

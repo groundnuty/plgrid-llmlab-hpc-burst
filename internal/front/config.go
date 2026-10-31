@@ -27,12 +27,20 @@ type Config struct {
 	UpstreamIdleTimeout Duration `json:"upstreamIdleTimeout,omitempty"`
 	ClientKeepAlive     Duration `json:"clientKeepAlive,omitempty"`
 	QueueTimeout        Duration `json:"queueTimeout,omitempty"`
-	PauseAfterFailures  int      `json:"pauseAfterFailures,omitempty"`
-	PauseDuration       Duration `json:"pauseDuration,omitempty"`
-	UsageDir            string   `json:"usageDir"`
+	// StreamHeadersTimeout bounds, toward an Instance and for a streamed
+	// request only, the wait from the request's last byte to the response's
+	// headers (HBEP-5, Parameters: streamHeadersTimeout, a proposed name).
+	StreamHeadersTimeout Duration `json:"streamHeadersTimeout,omitempty"`
+	PauseAfterFailures   int      `json:"pauseAfterFailures,omitempty"`
+	PauseDuration        Duration `json:"pauseDuration,omitempty"`
+	UsageDir             string   `json:"usageDir"`
 	// Namespaces are the namespaces whose ModelDeployments and Instances the
 	// front watches; empty means all (HBEP-5, Request path step 3).
 	Namespaces []string `json:"namespaces,omitempty"`
+
+	// writeGrace is how long the front may still write to a client after
+	// it cut the request, to send its error; not a setting (tests shorten it).
+	writeGrace time.Duration
 }
 
 // Duration is a time.Duration written as a Go duration string.
@@ -67,6 +75,8 @@ const (
 	DefaultUpstreamIdleTimeout = 4 * time.Second
 	DefaultClientKeepAlive     = 120 * time.Second
 	DefaultQueueTimeout        = 60 * time.Second
+	DefaultStreamHeaders       = 30 * time.Second
+	defaultWriteGrace          = 5 * time.Second
 	DefaultPauseAfterFailures  = 3
 	DefaultPauseDuration       = 30 * time.Second
 )
@@ -110,6 +120,10 @@ func (c Config) WithDefaults() Config {
 	setDur(&c.UpstreamIdleTimeout, DefaultUpstreamIdleTimeout)
 	setDur(&c.ClientKeepAlive, DefaultClientKeepAlive)
 	setDur(&c.QueueTimeout, DefaultQueueTimeout)
+	setDur(&c.StreamHeadersTimeout, DefaultStreamHeaders)
+	if c.writeGrace == 0 {
+		c.writeGrace = defaultWriteGrace
+	}
 	setDur(&c.PauseDuration, DefaultPauseDuration)
 	if c.PauseAfterFailures == 0 {
 		c.PauseAfterFailures = DefaultPauseAfterFailures
@@ -141,7 +155,7 @@ func (c Config) Validate() error {
 	for name, d := range map[string]Duration{
 		"maxRequestDuration": c.MaxRequestDuration, "idleTimeout": c.IdleTimeout, "connectTimeout": c.ConnectTimeout,
 		"upstreamIdleTimeout": c.UpstreamIdleTimeout, "clientKeepAlive": c.ClientKeepAlive,
-		"queueTimeout": c.QueueTimeout, "pauseDuration": c.PauseDuration,
+		"queueTimeout": c.QueueTimeout, "pauseDuration": c.PauseDuration, "streamHeadersTimeout": c.StreamHeadersTimeout,
 	} {
 		if d <= 0 {
 			probs = append(probs, name+" must be positive")

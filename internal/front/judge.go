@@ -55,6 +55,74 @@ type judge struct {
 	// the stream started; errorCode is the event's error.code, if any.
 	failed    bool
 	errorCode string
+	// engineError: the engine sent its own error event mid-stream (vLLM's
+	// chat stream, and its Responses `error` event). It passes through as
+	// the stream's one error event, and the engine's [DONE] after it is
+	// dropped (@hpc-burst-science-agent, 31 Oct 2026).
+	engineError bool
+	// badError: an error event whose data is not JSON. It is withheld and
+	// the front sends its own stream_cut instead, so the client still sees
+	// exactly one error event.
+	badError bool
+}
+
+// errorEvent reports whether an event is an engine's error event, and
+// whether its data parses. An event named "error", or data whose JSON
+// object has a non-null top-level error (or "object": "error", vLLM's older
+// shape, or "type": "error" on /v1/responses), is one; data that does not
+// parse is one only when it is named "error" or starts like one.
+func errorEvent(name string, data []byte) (isError, parses bool, code string) {
+	var v struct {
+		Object string          `json:"object"`
+		Type   string          `json:"type"`
+		Code   json.RawMessage `json:"code"`
+		Error  json.RawMessage `json:"error"`
+	}
+	trimmed := bytes.TrimSpace(data)
+	if json.Unmarshal(trimmed, &v) != nil {
+		return name == "error" || bytes.HasPrefix(trimmed, []byte(`{"error"`)), false, ""
+	}
+	hasErr := len(v.Error) > 0 && string(v.Error) != "null"
+	if !(name == "error" || hasErr || v.Object == "error" || v.Type == "error") {
+		return false, true, ""
+	}
+	code = codeString(v.Code)
+	if hasErr {
+		var e struct {
+			Code json.RawMessage `json:"code"`
+		}
+		if json.Unmarshal(v.Error, &e) == nil && codeString(e.Code) != "" {
+			code = codeString(e.Code)
+		}
+	}
+	return true, true, code
+}
+
+// codeString is an error code as text: a JSON string's value, or a number
+// (vLLM sends the HTTP status) as written.
+func codeString(raw json.RawMessage) string {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var n json.Number
+	if json.Unmarshal(raw, &n) == nil {
+		return n.String()
+	}
+	return ""
+}
+
+// sawError records an engine error event and says whether to forward it.
+func (j *judge) sawError(parses bool, code string) bool {
+	if !parses {
+		j.badError = true
+		return false
+	}
+	if !j.engineError && !j.badError {
+		j.engineError, j.errorCode = true, code
+		return true
+	}
+	return false // the client already has its one error event
 }
 
 // event judges one SSE event (its raw lines) and says whether to forward it.
@@ -65,10 +133,13 @@ func (j *judge) event(raw []byte) (forward, done bool) {
 	j.sawContent = false
 	name, data := parseEvent(raw)
 	if j.kind == endpointResponses {
+		if isErr, parses, code := errorEvent(name, data); isErr {
+			return j.sawError(parses, code), false
+		}
 		return true, j.responsesEvent(name, data)
 	}
 	if bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
-		if j.sawFinish {
+		if j.sawFinish && !j.engineError && !j.badError {
 			j.complete = true
 			return true, true
 		}
@@ -79,12 +150,19 @@ func (j *judge) event(raw []byte) (forward, done bool) {
 			FinishReason *string `json:"finish_reason"`
 			Text         string  `json:"text"`
 			Delta        struct {
-				Content          *string         `json:"content"`
+				Content *string `json:"content"`
+				// vLLM v0.32.0 sends delta.reasoning; older engines send
+				// reasoning_content. Both are read (@hpc-burst-science-agent,
+				// 31 Oct 2026).
+				Reasoning        *string         `json:"reasoning"`
 				ReasoningContent *string         `json:"reasoning_content"`
 				ToolCalls        json.RawMessage `json:"tool_calls"`
 			} `json:"delta"`
 		} `json:"choices"`
 		Usage json.RawMessage `json:"usage"`
+	}
+	if isErr, parses, code := errorEvent(name, data); isErr {
+		return j.sawError(parses, code), false
 	}
 	if json.Unmarshal(data, &ev) != nil {
 		return true, false
@@ -94,7 +172,8 @@ func (j *judge) event(raw []byte) (forward, done bool) {
 			j.sawFinish, j.finish = true, *c.FinishReason
 		}
 		d := c.Delta
-		if c.Text != "" || (d.Content != nil && *d.Content != "") || (d.ReasoningContent != nil && *d.ReasoningContent != "") ||
+		if c.Text != "" || (d.Content != nil && *d.Content != "") || (d.Reasoning != nil && *d.Reasoning != "") ||
+			(d.ReasoningContent != nil && *d.ReasoningContent != "") ||
 			(len(d.ToolCalls) > 0 && string(d.ToolCalls) != "null") {
 			j.sawContent = true
 		}

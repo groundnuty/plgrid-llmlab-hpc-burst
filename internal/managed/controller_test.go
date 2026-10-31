@@ -241,7 +241,8 @@ func TestProviderWithoutAPlatformLabelIsAnError(t *testing.T) {
 // entry the status cannot hold is skipped with an event naming it, the rest
 // is recorded and the read counts; room is made by pruning unlisted entries,
 // oldest lastListedTime first; a listing above 1024 keeps the first 1024 by
-// name and raises CatalogTruncated on every read. Ready stays True.
+// name and raises CatalogTruncated when it starts, then at most once an hour.
+// Ready stays True.
 func TestBoundedCatalog(t *testing.T) {
 	drain := func(rec *events.FakeRecorder) []string {
 		var out []string
@@ -338,9 +339,14 @@ func TestBoundedCatalog(t *testing.T) {
 				t.Fatalf("read %d: %d entries from %s to %s, want example-0000 to example-1023", i, len(got), got[0], got[len(got)-1])
 			}
 			e.wantCondition(v1alpha1.ConditionProviderReady, metav1.ConditionTrue, "CatalogRead")
+			// The event fires when the truncation starts, not again a minute on
+			// (the hourly rule is in controller_events_test.go).
 			evs := drain(rec)
-			if len(evs) != 1 || evs[0] != "Warning CatalogTruncated the gateway listed 6 entries more than status.catalog holds (1024); the first 1024 by name are kept" {
+			if i == 0 && (len(evs) != 1 || evs[0] != "Warning CatalogTruncated the gateway listed 6 entries more than status.catalog holds (1024); the first 1024 by name are kept") {
 				t.Fatalf("read %d: events = %q, want one CatalogTruncated", i, evs)
+			}
+			if i == 1 && len(evs) != 0 {
+				t.Fatalf("read %d: events = %q, want none inside the hour", i, evs)
 			}
 		}
 	})

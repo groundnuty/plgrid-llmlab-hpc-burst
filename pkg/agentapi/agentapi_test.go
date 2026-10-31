@@ -9,6 +9,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -16,14 +18,20 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 )
 
+// frpcDigest is a frpc digest written out by hand: 64 lowercase hex characters.
+const frpcDigest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+// validConfig is a complete ssh-mode agent.json, which runs frpc: the second
+// forward's dial-home port and frpc's digest are set.
 func validConfig() AgentConfig {
 	return AgentConfig{
 		ProtocolVersion: "v1",
 		Tag:             "hb-helios-a-x7k2p-1bda24d00504",
 		Mode:            DialHomeSSH,
 		Endpoint:        "control.example:22",
-		SSH:             &SSHForward{User: "example-user", AgentPort: 29225},
+		SSH:             &SSHForward{User: "example-user", AgentPort: 29225, DialHomePort: 29229},
 		CertSPKISHA256:  strings.Repeat("a", 64),
+		FrpcDigest:      frpcDigest,
 		StagingDir:      "/scratch/example-user",
 		DialHomeDir:     "/home/example-user/.hpcburst/dial-home",
 	}
@@ -43,6 +51,7 @@ func TestAgentConfigEncodeIsStableAndRoundTrips(t *testing.T) {
 	// through the decoder under test.
 	for _, key := range []string{`"protocolVersion": "v1"`, `"tag": "hb-helios-a-x7k2p-1bda24d00504"`, `"mode": "ssh"`,
 		`"endpoint": "control.example:22"`, `"user": "example-user"`, `"agentPort": 29225`,
+		`"dialHomePort": 29229`, `"frpcDigest": "` + frpcDigest + `"`,
 		`"certSPKISHA256": "` + strings.Repeat("a", 64) + `"`, `"stagingDir": "/scratch/example-user"`,
 		`"dialHomeDir": "/home/example-user/.hpcburst/dial-home"`} {
 		if !bytes.Contains(a, []byte(key)) {
@@ -74,11 +83,14 @@ func TestAgentConfigValidate(t *testing.T) {
 		"a tag that is not a job tag":     func(c *AgentConfig) { c.Tag = "my-job" },
 		"a 57-character tag":              func(c *AgentConfig) { c.Tag = "hb-" + strings.Repeat("a", 41) + "-1bda24d00504" },
 		"an endpoint without a port":      func(c *AgentConfig) { c.Endpoint = "control.example" },
-		"ssh mode on another port":        func(c *AgentConfig) { c.Endpoint = "control.example:2222" },
+		"an endpoint with port 0":         func(c *AgentConfig) { c.Endpoint = "control.example:0" },
+		"an endpoint with port 65536":     func(c *AgentConfig) { c.Endpoint = "control.example:65536" },
 		"ssh mode without ssh settings":   func(c *AgentConfig) { c.SSH = nil },
 		"ssh settings in direct mode":     func(c *AgentConfig) { c.Mode, c.Endpoint = DialHomeDirect, "front.example:8443" },
 		"an unknown mode":                 func(c *AgentConfig) { c.Mode = "tunnel" },
 		"no agent port":                   func(c *AgentConfig) { c.SSH.AgentPort = 0 },
+		"no dial-home port":               func(c *AgentConfig) { c.SSH.DialHomePort = 0 },
+		"no frpc digest":                  func(c *AgentConfig) { c.FrpcDigest = "" },
 		"a user with a space":             func(c *AgentConfig) { c.SSH.User = "a b" },
 		"a short pin":                     func(c *AgentConfig) { c.CertSPKISHA256 = "abc" },
 		"a staging dir with a variable":   func(c *AgentConfig) { c.StagingDir = "$SCRATCH/x" },
@@ -203,10 +215,14 @@ func TestDurationJSON(t *testing.T) {
 
 func TestLayout(t *testing.T) {
 	digest := strings.Repeat("3", 64)
+	// A frpc digest written out in full, not built from the code under test.
+	const frpc = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	for got, want := range map[string]string{
 		StagedAgentPath(digest):                      "agent/" + digest + "/hb-agent",
 		AllocationDir("hb-a-1bda24d00504"):           "alloc/hb-a-1bda24d00504",
+		StagedFrpcPath(frpc):                         "frpc/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/frpc",
 		StagedCredentialPath("hb-a-1bda24d00504"):    "alloc/hb-a-1bda24d00504/credential",
+		StagedDialHomeCertPath("hb-a-1bda24d00504"):  "alloc/hb-a-1bda24d00504/dial-home.crt",
 		StagedConfigPath("hb-a-1bda24d00504"):        "alloc/hb-a-1bda24d00504/agent.json",
 		StagedCheckpointDir("example-org/m", "abc"):  "checkpoints/example-org/m/abc",
 		AllocationCredentialPath("/state/cred", "u"): "/state/cred/allocations/u",
@@ -224,6 +240,20 @@ func TestLayout(t *testing.T) {
 		if WorkerName(i) != v1alpha1.WorkerName(i) {
 			t.Errorf("WorkerName(%d): %q here, %q in the API", i, WorkerName(i), v1alpha1.WorkerName(i))
 		}
+	}
+}
+
+// The three constants of HBEP-4 and HBEP-6 that several components must agree
+// on are written out here from the HBEPs.
+func TestDialHomeConstants(t *testing.T) {
+	if StagedDialHomeCertName != "dial-home.crt" {
+		t.Errorf("StagedDialHomeCertName = %q, HBEP-4 stages alloc/<tag>/dial-home.crt", StagedDialHomeCertName)
+	}
+	if DialHomeServerName != "dial-home.hpcburst.invalid" {
+		t.Errorf("DialHomeServerName = %q, HBEP-6 and HBEP-11 name dial-home.hpcburst.invalid", DialHomeServerName)
+	}
+	if FrpcBinaryName != "frpc" {
+		t.Errorf("FrpcBinaryName = %q", FrpcBinaryName)
 	}
 }
 
@@ -368,6 +398,14 @@ func TestHostLayout(t *testing.T) {
 		h.AgentKeyFile():      "/home/example-user/.local/state/hpcburst/agent-endpoint/tls.key",
 		h.AgentEndpointAddr(): "127.0.0.1:29223",
 		h.DialHomeAddr():      "127.0.0.1:29227",
+		// HBEP-6's port table: the plugin at base+8, frps's bind, tcpmux and
+		// web ports at base+9, +10 and +11.
+		h.FrpsPluginAddr(): "127.0.0.1:29228",
+		h.FrpsBindAddr():   "127.0.0.1:29229",
+		h.FrpsTCPMuxAddr(): "127.0.0.1:29230",
+		h.FrpsWebAddr():    "127.0.0.1:29231",
+		// <state>/frps/web-password (HBEP-6, frps on the control-plane host).
+		h.FrpsWebPasswordFile(): "/home/example-user/.local/state/hpcburst/frps/web-password",
 	} {
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
@@ -378,6 +416,24 @@ func TestHostLayout(t *testing.T) {
 	}
 	if p := h.DialHomePort(); p != 29227 {
 		t.Errorf("DialHomePort = %d, want 29227 (base + 7)", p)
+	}
+	for name, c := range map[string]struct{ got, want int }{
+		"FrpsPluginPort": {h.FrpsPluginPort(), 29228},
+		"FrpsBindPort":   {h.FrpsBindPort(), 29229},
+		"FrpsTCPMuxPort": {h.FrpsTCPMuxPort(), 29230},
+		"FrpsWebPort":    {h.FrpsWebPort(), 29231},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s = %d, want %d", name, c.got, c.want)
+		}
+	}
+	// A block at another base moves every port with it, and no two ports meet.
+	other := Host{StateDir: h.StateDir, PortBase: 40000}
+	if other.FrpsWebAddr() != "127.0.0.1:40011" || other.FrpsPluginAddr() != "127.0.0.1:40008" {
+		t.Errorf("at base 40000: web %q, plugin %q; want 127.0.0.1:40011 and 127.0.0.1:40008", other.FrpsWebAddr(), other.FrpsPluginAddr())
+	}
+	if FrpsWebUser != "hpcburst" || FrpsPluginPath != "/frp/v1/handler" {
+		t.Errorf("frps web user %q and plugin path %q; HBEP-6 writes hpcburst and /frp/v1/handler", FrpsWebUser, FrpsPluginPath)
 	}
 	if got := AllocationCredentialPath(h.CredentialsDir(), "uid-1"); got != "/home/example-user/.local/state/hpcburst/credentials/allocations/uid-1" {
 		t.Errorf("AllocationCredentialPath = %q", got)
@@ -411,5 +467,38 @@ func TestServerErrorsCountsClassesAndCodes(t *testing.T) {
 		if got := ServerErrors(c.in); got != c.want {
 			t.Errorf("ServerErrors(%v) = %d, want %d", c.in, got, c.want)
 		}
+	}
+}
+
+// The web password file has a key file's form: the launcher writes it with
+// WriteKeyFile (which makes the frps directory 700 and the file 600), the
+// controller reads it with ReadKeyFile, and a password with a trailing newline,
+// as a shell's echo would write it, is refused.
+func TestFrpsWebPasswordFileIsAKeyFile(t *testing.T) {
+	h := Host{StateDir: t.TempDir(), PortBase: 29220}
+	key, err := NewKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteKeyFile(h.FrpsWebPasswordFile(), key); err != nil {
+		t.Fatalf("WriteKeyFile: %v", err)
+	}
+	got, err := ReadKeyFile(h.FrpsWebPasswordFile())
+	if err != nil || got != key {
+		t.Fatalf("ReadKeyFile = %q, %v; want the key written", got, err)
+	}
+	fi, err := os.Stat(h.FrpsWebPasswordFile())
+	if err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("web password file mode = %v, %v; want 0600", fi.Mode().Perm(), err)
+	}
+	di, err := os.Stat(filepath.Dir(h.FrpsWebPasswordFile()))
+	if err != nil || di.Mode().Perm() != 0o700 {
+		t.Errorf("frps directory mode = %v, %v; want 0700", di.Mode().Perm(), err)
+	}
+	if err := os.WriteFile(h.FrpsWebPasswordFile(), []byte(key+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadKeyFile(h.FrpsWebPasswordFile()); err == nil {
+		t.Error("a password with a trailing newline was accepted")
 	}
 }

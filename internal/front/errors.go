@@ -21,6 +21,12 @@ const (
 	// table as HBEP-6 amends it: 502, detail "tunnel", cutBy tunnel, not
 	// resent, and it counts toward the pause).
 	codeUpstreamClosed = "upstream_closed"
+	// codeShuttingDown: the front stopped before the request's first byte
+	// (@hpc-burst-science-agent, 31 Oct 2026; #102 adds the row).
+	codeShuttingDown = "shutting_down"
+	// codeModelNotFound: GET /v1/models/{name} for a name with no
+	// ModelDeployment (@hpc-burst-science-agent, 31 Oct 2026).
+	codeModelNotFound = "model_not_found"
 )
 
 // statusClientClosed records a request whose client went away before an

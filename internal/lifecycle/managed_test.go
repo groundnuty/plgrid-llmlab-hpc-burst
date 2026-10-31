@@ -9,10 +9,12 @@ package lifecycle
 // no sbatch call, since a count of Allocations alone would not show a submission.
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -197,4 +199,36 @@ func TestManagedProviderIgnoredByServedDeployment(t *testing.T) {
 			t.Errorf("condition %s = %s/%s %q: nothing may be said of the managed Provider", c.Type, c.Status, c.Reason, c.Message)
 		}
 	}
+}
+
+// TestManagedSourceStaysReadyThroughFailingReads follows the managed
+// controller's rules from PR 85: an unknown read error keeps the catalog and
+// CredentialsRejected, and turns the Provider's Ready False with ReadsFailing
+// more than 5 min after the last success. A managed source's Ready follows the
+// catalog entry and CredentialsRejected only (HBEP-7, Reconcile loop, step 1),
+// so it stays True. The control at the end, a rejected key, turns it False.
+func TestManagedSourceStaysReadyThroughFailingReads(t *testing.T) {
+	m := newManagedRig(t, managedProvider)
+	m.create(managedMD(managedPlatform))
+	m.settle()
+	managedExpect(t, m.rig, v1alpha1.ConditionReady, metav1.ConditionTrue, "")
+	m.gw.FailReads(errors.New("the gateway answered 503"))
+	for range 42 { // 7 min of failed reads
+		m.settle()
+	}
+	var p v1alpha1.Provider
+	if err := m.c.Get(m.ctx, client.ObjectKey{Name: managedProvider}, &p); err != nil {
+		t.Fatal(err)
+	}
+	if c := apimeta.FindStatusCondition(p.Status.Conditions, v1alpha1.ConditionReady); c == nil || c.Status != metav1.ConditionFalse || c.Reason != v1alpha1.ReasonReadsFailing {
+		t.Fatalf("Provider Ready = %+v, want False/ReadsFailing after 7 min of failed reads; the test needs the fake's rule", c)
+	}
+	if len(p.Status.Catalog) != 1 || !p.Status.Catalog[0].Listed {
+		t.Fatalf("Provider catalog %+v, want the entry kept and listed", p.Status.Catalog)
+	}
+	managedExpect(t, m.rig, v1alpha1.ConditionReady, metav1.ConditionTrue, "")
+	m.gw.FailReads(nil)
+	m.gw.RejectKey(true)
+	m.settle()
+	managedExpect(t, m.rig, v1alpha1.ConditionReady, metav1.ConditionFalse, v1alpha1.ReasonCredentialsRejected)
 }

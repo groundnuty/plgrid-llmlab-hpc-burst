@@ -124,18 +124,27 @@ func TestMergeCatalogSkipsWhatTheStatusCannotHold(t *testing.T) {
 	}
 	find(t, m.Catalog, "example-ok")
 	find(t, m.Catalog, strings.Repeat("ü", 253))
-	want := map[string]string{
-		"":                       "empty",
-		strings.Repeat("n", 254): "254 characters",
-		"example-longrev":        "257 characters",
-		"example-\xff":           "UTF-8",
+	// The words say what is wrong with the measured value; the category is
+	// the stable kind of failure that an event is keyed on.
+	want := map[string]struct{ why, category string }{
+		"":                       {"empty", "EmptyName"},
+		strings.Repeat("n", 254): {"254 characters", "NameTooLong"},
+		"example-longrev":        {"257 characters", "RevisionTooLong"},
+		"example-\xff":           {"UTF-8", "InvalidName"},
 	}
 	if len(m.Skipped) != len(want) {
 		t.Fatalf("skipped = %+v, want %d entries", m.Skipped, len(want))
 	}
 	for _, s := range m.Skipped {
-		if w, ok := want[s.Name]; !ok || !strings.Contains(s.Why, w) {
-			t.Fatalf("skipped %q because %q, want a reason holding %q", s.Name, s.Why, w)
+		if w, ok := want[s.Name]; !ok || !strings.Contains(s.Why, w.why) || string(s.Category) != w.category {
+			t.Fatalf("skipped %q as %q because %q, want category %q and a reason holding %q", s.Name, s.Category, s.Why, w.category, w.why)
+		}
+	}
+	// A longer revision is the same category with other words.
+	for _, n := range []int{257, 300} {
+		m := mustMerge(t, nil, []CatalogEntry{ceRev("example-longrev", strings.Repeat("r", n))}, "llmlab", t0)
+		if len(m.Skipped) != 1 || m.Skipped[0].Category != "RevisionTooLong" || !strings.Contains(m.Skipped[0].Why, fmt.Sprintf("%d characters", n)) {
+			t.Fatalf("a revision of %d characters: skipped = %+v, want RevisionTooLong naming %d", n, m.Skipped, n)
 		}
 	}
 }
@@ -157,7 +166,7 @@ func TestMergeCatalogDuplicates(t *testing.T) {
 		if got := strings.Join(names(m.Catalog), ","); got != "example-b" {
 			t.Fatalf("catalog = %s, want example-b alone", got)
 		}
-		if len(m.Skipped) != 1 || m.Skipped[0].Name != "example-a" || !strings.Contains(m.Skipped[0].Why, "twice") {
+		if len(m.Skipped) != 1 || m.Skipped[0].Name != "example-a" || m.Skipped[0].Category != "AmbiguousRevision" || !strings.Contains(m.Skipped[0].Why, "twice") {
 			t.Fatalf("skipped = %+v, want example-a once", m.Skipped)
 		}
 	}

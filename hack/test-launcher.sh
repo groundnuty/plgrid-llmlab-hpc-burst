@@ -9,6 +9,11 @@
 # without it, makes the k3s tests fail instead of skipping (HPCBURST_REQUIRE_INTEGRATION=1), and
 # exits non-zero when any test in the run was skipped, even if go test passed.
 #
+# Also needed once the launcher's tests start frps (HBEP-6's tunnel):
+#   HPCBURST_FRP_DIR=DIR      a directory with frps and frpc (hack/fetch-frp.sh DIR). Tests that start frp skip
+#                             without it, and this script fails on any skip. CI also sets HPCBURST_REQUIRE_FRP=1,
+#                             which makes a missing frp binary fail the test instead of skipping it.
+#
 # Optional:
 #   HPCBURST_TEST_ROOT_K3S=1  state that a system k3s runs on this machine: the tests fail if it is
 #                             missing, and assert after each test that it still listens on 6443, 6444 and 10250.

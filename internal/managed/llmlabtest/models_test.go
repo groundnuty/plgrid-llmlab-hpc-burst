@@ -16,7 +16,6 @@ func TestInactiveModel(t *testing.T) {
 	requireListed(t, s, modelA, modelB)
 	requireStatus(t, postChat(t, s, modelA), http.StatusServiceUnavailable, "inactive model")
 	requireStatus(t, postChat(t, s, modelB), http.StatusOK, "another model, still active")
-	requireStatus(t, ask(t, s, http.MethodGet, routeModels+"/"+modelA, keyOne, ""), http.StatusOK, "entry of an inactive model")
 
 	s.SetActive(modelA, true)
 	requireStatus(t, postChat(t, s, modelA), http.StatusOK, "active again")
@@ -146,16 +145,6 @@ func TestRevision(t *testing.T) {
 		t.Errorf("listing revisions = %v, want %s: 2026-09 and %s absent", got, modelA, modelB)
 	}
 
-	var withRev, withoutRev map[string]any
-	decode(t, ask(t, s, http.MethodGet, routeModels+"/"+modelA, keyOne, "").Body, &withRev)
-	if withRev["revision"] != "2026-09" {
-		t.Errorf("entry revision = %v, want 2026-09", withRev["revision"])
-	}
-	decode(t, ask(t, s, http.MethodGet, routeModels+"/"+modelB, keyOne, "").Body, &withoutRev)
-	if _, ok := withoutRev["revision"]; ok {
-		t.Errorf("entry of a model with no revision has one: %v", withoutRev)
-	}
-
 	s.AddModel(Model{ID: modelA, Revision: "2026-10"})
 	if got := revisions(t); got[modelA] != "2026-10" {
 		t.Errorf("revision after AddModel = %v, want 2026-10", got[modelA])
@@ -166,39 +155,25 @@ func TestRevision(t *testing.T) {
 	}
 }
 
-// GET /v1/models/{id}: listed ids work, including ones with a slash or an at
-// sign; unlisted ones give 404.
-func TestModelEntry(t *testing.T) {
+// GET /v1/models/{id}: LLMLab has no retrieve route, so every name, listed
+// or not, with a slash, an at sign or an escaped slash, and an empty one,
+// answers 404 with FastAPI's body {"detail":"Not Found"} (#69).
+func TestModelEntryIsNotFound(t *testing.T) {
 	ids := []string{"plain-9b", "org/example-27b", "example@2026-09"}
 	models := make([]Model, len(ids))
 	for i, id := range ids {
 		models[i] = Model{ID: id}
 	}
 	s := startS(t, models...)
-
-	paths := map[string]string{
-		"plain-9b":        "plain-9b",
-		"org/example-27b": "org/example-27b",
-		"example@2026-09": "example@2026-09",
-		"escaped slash":   "org%2Fexample-27b",
-	}
-	for name, p := range paths {
+	for _, p := range []string{"plain-9b", "org/example-27b", "example@2026-09", "org%2Fexample-27b", "example-unknown", ""} {
 		a := ask(t, s, http.MethodGet, routeModels+"/"+p, keyOne, "")
-		requireStatus(t, a, http.StatusOK, "entry "+name)
-		var m struct{ ID, Object string }
-		decode(t, a.Body, &m)
-		want := strings.ReplaceAll(p, "%2F", "/")
-		if m.ID != want || m.Object != "model" {
-			t.Errorf("entry %s = %s, want id %q", name, a.Body, want)
+		requireStatus(t, a, http.StatusNotFound, "entry "+p)
+		var v map[string]any
+		decode(t, a.Body, &v)
+		if len(v) != 1 || v["detail"] != "Not Found" {
+			t.Errorf("entry %q: body %s, want {\"detail\":\"Not Found\"}", p, a.Body)
 		}
 	}
-
-	for _, p := range []string{"example-unknown", "org/example-unknown", "org"} {
-		requireStatus(t, ask(t, s, http.MethodGet, routeModels+"/"+p, keyOne, ""), http.StatusNotFound, "unlisted entry "+p)
-	}
-	s.RemoveModel("org/example-27b")
-	requireStatus(t, ask(t, s, http.MethodGet, routeModels+"/org/example-27b", keyOne, ""), http.StatusNotFound, "removed entry")
-	requireStatus(t, ask(t, s, http.MethodGet, routeModels+"/", keyOne, ""), http.StatusNotFound, "entry with an empty id")
 }
 
 // MaxTokensCap is a hidden cap (L-6.5): the output ends after the cap with

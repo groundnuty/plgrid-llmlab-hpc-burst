@@ -36,17 +36,6 @@ func provisionDegraded(rg *rig, md string) metav1.Condition {
 	return rg.condition(md, v1alpha1.ConditionDegraded)
 }
 
-// provisionHas reports whether the command carries a flag followed by its value.
-func provisionHas(cmd []string, flag, value string) bool {
-	for i := 0; i+1 < len(cmd); i++ {
-		if cmd[i] == flag && cmd[i+1] == value {
-			return true
-		}
-	}
-	// --max-num-seqs is one argument, --max-num-seqs=<n> (the Launch's CEL rule).
-	return slices.Contains(cmd, flag+"="+value)
-}
-
 // provisionSeqsArgs returns the arguments that pass max-num-seqs, in either
 // form or spelling.
 func provisionSeqsArgs(cmd []string) []string {
@@ -178,12 +167,11 @@ func TestProvisionLaunchCarriesDefaults(t *testing.T) {
 		return len(rg.instances("plain")) == 1 && len(rg.instances("explicit")) == 1 && len(rg.instances("small")) == 1
 	})
 	plain, explicit, small := rg.instances("plain")[0], rg.instances("explicit")[0], rg.instances("small")[0]
-	cmd := plain.Spec.Launch.Command
-	if !provisionHas(cmd, "--max-num-seqs", "256") {
-		t.Errorf("default launch has no --max-num-seqs 256: %v", cmd)
-	}
-	if !provisionHas(cmd, "--served-model-name", rigModel) {
-		t.Errorf("launch has no --served-model-name %s: %v", rigModel, cmd)
+	// The rig's deployments declare max-model-len 32768; the argv is written out
+	// whole: the default 256 is added, a declared 256 is not given twice, a
+	// declared 128 replaces it.
+	if want := specLaunchArgv("--max-model-len=32768", "--max-num-seqs=256"); !slices.Equal(plain.Spec.Launch.Command, want) {
+		t.Errorf("default launch\n got %q\nwant %q", plain.Spec.Launch.Command, want)
 	}
 	if plain.Spec.Launch.MaxNumSeqs != 256 {
 		t.Errorf("launch.maxNumSeqs = %d, want 256", plain.Spec.Launch.MaxNumSeqs)
@@ -192,12 +180,11 @@ func TestProvisionLaunchCarriesDefaults(t *testing.T) {
 		t.Errorf("default %s and declared-256 %s differ in deployment ID; max-num-seqs is capacity, not an ID input (HBEP-3)",
 			plain.Spec.DeploymentID, explicit.Spec.DeploymentID)
 	}
-	if got := provisionSeqsArgs(explicit.Spec.Launch.Command); !slices.Equal(got, []string{"--max-num-seqs=256"}) {
-		t.Errorf("declared max-num-seqs must appear exactly once: %v", explicit.Spec.Launch.Command)
+	if want := specLaunchArgv("--max-model-len=32768", "--max-num-seqs=256"); !slices.Equal(explicit.Spec.Launch.Command, want) {
+		t.Errorf("declared max-num-seqs must appear exactly once\n got %q\nwant %q", explicit.Spec.Launch.Command, want)
 	}
-	scmd := small.Spec.Launch.Command
-	if !provisionHas(scmd, "--max-num-seqs", "128") || slices.Contains(scmd, "256") || small.Spec.Launch.MaxNumSeqs != 128 {
-		t.Errorf("declared 128 must replace the default: %v (maxNumSeqs %d)", scmd, small.Spec.Launch.MaxNumSeqs)
+	if want := specLaunchArgv("--max-model-len=32768", "--max-num-seqs=128"); !slices.Equal(small.Spec.Launch.Command, want) || small.Spec.Launch.MaxNumSeqs != 128 {
+		t.Errorf("declared 128 must replace the default\n got %q (maxNumSeqs %d)\nwant %q", small.Spec.Launch.Command, small.Spec.Launch.MaxNumSeqs, want)
 	}
 }
 
