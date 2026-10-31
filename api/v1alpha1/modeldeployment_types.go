@@ -104,6 +104,13 @@ type EngineSpec struct {
 //   - A speculative-config that names a draft model is refused in alpha, and
 //     a tokenizer other than the checkpoint's needs a pinned tokenizer-revision
 //     (ServingSpec).
+//   - max-model-len takes only a plain positive decimal integer (no sign, no
+//     leading zero, no suffix such as 32k, no exponent, not auto), because the
+//     controller compares it with the value the engine reports and works out
+//     the longest context from it (HBEP-3, HBEP-7;
+//     `@hpc-burst-science-agent`, 31 Oct 2026). A flag in flags is a typed
+//     name and value, not a free-form map, so the rule is on the flag and
+//     tests the name after "_" is replaced with "-".
 //
 // The alias list is vLLM v0.32.0's. The lists of known names and booleans are
 // the table's; a change to the table changes these markers (HBEP-3).
@@ -120,6 +127,7 @@ type EngineSpec struct {
 // +kubebuilder:validation:XValidation:rule="!'lora-modules'.startsWith(self.name.replace('_', '-'))",message="lora-modules is refused in alpha: it names other checkpoints without a pinned revision (a pinned form is for beta); an abbreviation of it is refused too"
 // +kubebuilder:validation:XValidation:rule="self.name.replace('_', '-') != 'speculative-config' || !self.value.matches('[\"]model[\"][[:space:]]*:')",message="a speculative-config that names a draft model is refused in alpha: the draft model is another checkpoint without a pinned revision (a pinned form is for beta)"
 // +kubebuilder:validation:XValidation:rule="self.name.replace('_', '-') in ['dtype', 'quantization', 'kv-cache-dtype', 'max-model-len', 'tokenizer', 'tokenizer-mode', 'tokenizer-revision', 'trust-remote-code', 'load-format', 'hf-overrides', 'enforce-eager', 'compilation-config', 'attention-backend', 'tensor-parallel-size', 'pipeline-parallel-size', 'enable-expert-parallel', 'speculative-config', 'seed', 'generation-config', 'override-generation-config', 'tool-call-parser', 'enable-auto-tool-choice', 'reasoning-parser', 'chat-template-content-format', 'default-chat-template-kwargs', 'model', 'revision', 'chat-template', 'enable-prefix-caching', 'max-num-seqs', 'max-num-batched-tokens', 'enable-chunked-prefill', 'gpu-memory-utilization', 'kv-cache-memory-bytes', 'cpu-offload-gb', 'host', 'port', 'uds', 'served-model-name', 'download-dir', 'distributed-executor-backend', 'log-level', 'disable-log-stats', 'enable-log-requests', 'api-key', 'hf-token', 'config', 'lora-modules'] || !['dtype', 'quantization', 'kv-cache-dtype', 'max-model-len', 'tokenizer', 'tokenizer-mode', 'tokenizer-revision', 'trust-remote-code', 'load-format', 'hf-overrides', 'enforce-eager', 'compilation-config', 'attention-backend', 'tensor-parallel-size', 'pipeline-parallel-size', 'enable-expert-parallel', 'speculative-config', 'seed', 'generation-config', 'override-generation-config', 'tool-call-parser', 'enable-auto-tool-choice', 'reasoning-parser', 'chat-template-content-format', 'default-chat-template-kwargs', 'model', 'revision', 'chat-template', 'enable-prefix-caching', 'max-num-seqs', 'max-num-batched-tokens', 'enable-chunked-prefill', 'gpu-memory-utilization', 'kv-cache-memory-bytes', 'cpu-offload-gb', 'host', 'port', 'uds', 'served-model-name', 'download-dir', 'distributed-executor-backend', 'log-level', 'disable-log-stats', 'enable-log-requests', 'api-key', 'hf-token', 'config', 'lora-modules'].exists(k, k.startsWith(self.name.replace('_', '-')))",message="a proper prefix of a known flag name is refused: vLLM's parser expands an abbreviation, so two spellings of one flag would give two deployment IDs; write the full long name"
+// +kubebuilder:validation:XValidation:rule="self.name.replace('_', '-') != 'max-model-len' || self.value.matches('^[1-9][0-9]*$')",message="max-model-len is a plain positive decimal integer such as 32768: values such as 32k, auto, -1, 0, +5 and 1e4 are refused, because the controller compares the value the engine reports with it and sizes the longest context from it"
 type EngineFlag struct {
 	// Name is the flag's long name without its leading dashes.
 	//
