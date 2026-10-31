@@ -1,0 +1,19 @@
+# Pinned frps release binaries (project: fatedier/frp, https://github.com/fatedier/frp, Apache-2.0).
+#
+# One source of truth for frps: the launcher embeds this file and verifies the binary against it
+# before every start (frps.go). Add a line here, and nowhere else, to allow another version or
+# architecture.
+#
+# Two sums per line, with two different jobs:
+#   tarball_sha256  the release asset, from the release's own frp_sha256_checksums.txt
+#                   (https://github.com/fatedier/frp/releases/download/v0.71.1/frp_sha256_checksums.txt,
+#                   read on 31 Oct 2026). For linux_amd64 it equals the value spike S1 and
+#                   spikes/s1c/fetch.sh pinned. A script that downloads the tarball checks this one.
+#   frps_sha256     the frps executable inside that tarball, which is what the launcher runs. Computed
+#                   on 31 Oct 2026 by extracting the tarball, after its own sha256 matched the column
+#                   before, and running sha256sum on frp_0.71.1_linux_<arch>/frps. The release
+#                   publishes no sum for the extracted file, so this value is ours.
+#
+# version  arch   tarball                              tarball_sha256                                                    frps_sha256
+0.71.1    amd64  frp_0.71.1_linux_amd64.tar.gz        1d9875210972a5d1a62b2dc4c48df45ab0af05d3ca1b5e494a014428259df803  2322762939e66e66850bbc9103b6d73fec39e83bd8ad6c71ebeeb120d56d6ab3
+0.71.1    arm64  frp_0.71.1_linux_arm64.tar.gz        8edf590b0c396fa42f9c147121a76af83cfc2002b08f5aef0ea1008c43482019  45a45650cf6ad2568a90f646b1ad79ac483510c1d845ecc55c532ad271ff5366
