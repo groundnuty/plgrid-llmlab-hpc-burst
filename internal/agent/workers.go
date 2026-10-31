@@ -82,7 +82,7 @@ func (a *Agent) startWorker(in *instance, dw agentapi.DesiredWorker, instGen int
 func (a *Agent) watch(in *instance, w *worker, g *procgroup.Group, logf *os.File) {
 	ctx, cancel := context.WithCancel(a.ctx)
 	w.stopProbe = cancel
-	eng := a.o.Engines(w.socket, in.key)
+	eng := a.o.Engines(w.socket, in.key, in.launch)
 	a.wg.Add(3)
 	go func() {
 		defer a.wg.Done()

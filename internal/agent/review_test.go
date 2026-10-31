@@ -445,3 +445,55 @@ func TestServerErrorsShowInTheHealthSample(t *testing.T) {
 		return w != nil && w.Health != nil && agentapi.ServerErrors(w.Health.ResponsesByStatus) >= 3
 	})
 }
+
+// withReasoning declares a reasoning parser in the launch, with a context
+// limit of 16,384 tokens: a check's answer budget plus the 4,096 reasoning
+// tokens must fit beside its prompt, which the harness's 4,096 does not allow.
+func withReasoning(d agentapi.DesiredState) agentapi.DesiredState {
+	var cmd []string
+	for _, a := range d.Instance.Launch.Command {
+		if strings.HasPrefix(a, "--max-model-len=") {
+			a = "--max-model-len=16384"
+		}
+		cmd = append(cmd, a)
+	}
+	d.Instance.Launch.Command = append(cmd, "--reasoning-parser=deepseek_r1")
+	return d
+}
+
+// A reasoning model that reasons first passes every check, judged on its
+// final answer, and its warm-up timings count from the first reasoning token,
+// with the reasoning counted as output (Astra B11, Opus B2;
+// `@hpc-burst-science-agent`, 31 Oct 2026).
+func TestAReasoningEngineQualifiesAndWarmsUp(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	checks := qualifyChecks(1, true)
+	checks.WarmUp = &agentapi.WarmUpRequest{Shapes: hShapes, TargetSessions: 1}
+	h.set(withReasoning(h.runState("reasoning-first=50", 1, 0, checks)))
+	r := h.waitReport("qualification and a warm-up round", 60*time.Second, func(r agentapi.Report) bool {
+		c := checksOf(r)
+		return qualified(1)(r) && c.WarmUp != nil && len(c.WarmUp.Rounds) >= 1
+	})
+	for _, c := range r.Instance.Checks.Qualify.Checks {
+		if !c.Passed {
+			t.Errorf("check %s failed on a healthy reasoning engine: %s", c.Name, c.Message)
+		}
+	}
+	for _, q := range r.Instance.Checks.WarmUp.Rounds[0].Requests {
+		if q.Error != "" {
+			t.Errorf("%s warm-up request failed: %s", q.Shape, q.Error)
+		}
+	}
+}
+
+// A reasoning model that spends the whole budget reasoning and gives no final
+// answer fails the behaviour check with its own reason, not as a wrong answer.
+func TestReasoningThatExhaustsTheBudgetFailsWithItsOwnReason(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	h.set(withReasoning(h.runState("reasoning-forever", 1, 0, qualifyChecks(1, false))))
+	r := h.waitReport("qualification", 60*time.Second, qualified(1))
+	c, ok := outcome(*r.Instance.Checks.Qualify, agentapi.CheckBehaviour)
+	if !ok || c.Passed || !strings.HasPrefix(c.Message, "ReasoningBudgetExhausted") {
+		t.Fatalf("behaviour %+v, want a failure whose reason is ReasoningBudgetExhausted", c)
+	}
+}

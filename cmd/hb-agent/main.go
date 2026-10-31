@@ -152,8 +152,10 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		return 1
 	}
 	a, err := agent.New(agent.Options{
-		API:          agent.NewClient(co),
-		Engines:      func(socket, key string) agent.Engine { return engine.New(socket, key) },
+		API: agent.NewClient(co),
+		Engines: func(socket, key string, l agentapi.Launch) agent.Engine {
+			return engine.New(socket, key, engine.WithReasoning(agent.DeclaresReasoningParser(l.Command)))
+		},
 		Stager:       stager,
 		Apptainer:    apptainer,
 		RunDir:       runDir,

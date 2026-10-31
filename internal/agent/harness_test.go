@@ -177,9 +177,12 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 	if o.stagerWrap != nil {
 		stager = o.stagerWrap(st)
 	}
-	engines := func(socket, key string) agent.Engine { return engine.New(socket, key) }
-	if o.engineWrap != nil {
-		engines = func(socket, key string) agent.Engine { return o.engineWrap(engine.New(socket, key)) }
+	engines := func(socket, key string, l agentapi.Launch) agent.Engine {
+		e := agent.Engine(engine.New(socket, key, engine.WithReasoning(agent.DeclaresReasoningParser(l.Command))))
+		if o.engineWrap != nil {
+			e = o.engineWrap(e)
+		}
+		return e
 	}
 	h.agent, err = agent.New(agent.Options{
 		API:                  h.api,

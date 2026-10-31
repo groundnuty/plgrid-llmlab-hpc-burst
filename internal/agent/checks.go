@@ -150,7 +150,7 @@ func (a *Agent) engine0(in *instance) Engine {
 	if w == nil {
 		w = in.workers[0]
 	}
-	return a.o.Engines(w.socket, in.key)
+	return a.o.Engines(w.socket, in.key, in.launch)
 }
 
 func (a *Agent) newUnit(in *instance, kind string, round int32, key procKey) (*checkUnit, context.Context) {

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
@@ -46,8 +47,22 @@ type Engine interface {
 }
 
 // EngineFactory returns the Engine behind a worker's Unix socket, reached with
-// the Instance's key (the engine's API key, HBEP-7: Keys).
-type EngineFactory func(socketPath, key string) Engine
+// the Instance's key (the engine's API key, HBEP-7: Keys), for the Instance's
+// launch: a launch that declares a reasoning parser makes the engine answer
+// with reasoning first (DeclaresReasoningParser).
+type EngineFactory func(socketPath, key string, launch agentapi.Launch) Engine
+
+// DeclaresReasoningParser reports whether a launch's command passes
+// --reasoning-parser. The controller renders every flag as one "--name=value"
+// argument; the underscore spelling is read too.
+func DeclaresReasoningParser(command []string) bool {
+	for _, a := range command {
+		if strings.HasPrefix(a, "--reasoning-parser=") || strings.HasPrefix(a, "--reasoning_parser=") {
+			return true
+		}
+	}
+	return false
+}
 
 // CheckpointRequest is one staging of an Instance's checkpoint.
 type CheckpointRequest struct {
