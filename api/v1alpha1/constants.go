@@ -72,6 +72,14 @@ const (
 	// never lifted again.
 	AnnotationHoldLifted = Group + "/hold-lifted"
 
+	// AnnotationReadBack is the job ID whose settings matched the request in
+	// the read-back: the provider compares the job's partition, time limit and
+	// GPU count with the request on the first observe after the job is
+	// established, and only then (HBEP-4, Read-back). Its value is that job ID
+	// as a string. Only the provider writes it, and it has no default: an
+	// Allocation whose job has not been read back has none.
+	AnnotationReadBack = Group + "/read-back"
+
 	// AnnotationAbandonAttempt is an operator's decision on an unresolved
 	// attempt, in fallback mode.
 	AnnotationAbandonAttempt = Group + "/abandon-attempt"

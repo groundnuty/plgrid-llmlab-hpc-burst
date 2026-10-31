@@ -24,3 +24,14 @@ func TestTunnelConditionNames(t *testing.T) {
 		t.Error("TunnelNotConnected and StartTimeout must differ")
 	}
 }
+
+// The read-back annotation's key, written out by hand from HBEP-4 (Read-back)
+// and the other Allocation annotations' form (Group + "/name").
+func TestReadBackAnnotationKey(t *testing.T) {
+	if AnnotationReadBack != "hpcburst.groundnuty.github.io/read-back" {
+		t.Errorf("AnnotationReadBack = %q", AnnotationReadBack)
+	}
+	if AnnotationReadBack == AnnotationJobID || AnnotationReadBack == AnnotationHoldLifted {
+		t.Error("the read-back annotation shares a key with another")
+	}
+}
