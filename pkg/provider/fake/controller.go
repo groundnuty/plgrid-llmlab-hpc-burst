@@ -25,7 +25,9 @@ import (
 // Provider. It is level-triggered and idempotent, and one Allocation's failure
 // does not stop the others: the pass returns the failures joined. A read
 // failure (Batch.FailReads) is not an error: that Allocation's status stays as
-// it was, and the Provider's lastSuccessfulStatusRead does not advance.
+// it was, and the Provider's lastSuccessfulStatusRead does not advance. The
+// Provider's Ready condition follows the readiness rule of docs/development.md,
+// Provider readiness (see the bullet on the Provider's status below).
 //
 // Every write names the field manager v1alpha1.FieldManagerProvider.
 //
@@ -71,6 +73,13 @@ import (
 //     there is no annotation, and the next pass tries again. An admin-held job
 //     gets no lift call. A read that fails stops settle: nothing is cancelled
 //     and nothing is lifted.
+//   - A requeue (Batch.Requeue) returns the job to PENDING with its restart
+//     count up and its start cleared, so the Allocation shows phase Failed,
+//     reason Requeued, no startTime, and then the new start when the job runs
+//     again; a job that starts again adds no second queue wait. A requeue with
+//     a hold (Batch.RequeueHold) leaves the job held by its user, and its hold
+//     is never lifted again: the annotation names the job and the restart count
+//     is above 0, either of which stops the lift.
 //   - Fallback mode (HoldRelease false), the submission. An InFlight claim
 //     older than InflightWindow with no job found becomes Unknown, keeping the
 //     attempt's time. Unknown is never retried by time. When UnknownBound has
