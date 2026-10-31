@@ -109,11 +109,10 @@ func (c *Controller) observe(ctx context.Context, p *pass, s *allocState) error 
 	if c.HoldRelease {
 		settleErr = c.settle(ctx, p, s, id)
 	}
-	job, found, err := c.Batch.Observe(ctx, id)
+	job, found, err := c.observeJob(ctx, p, id)
 	if err != nil {
 		// A failed read is not absence: nothing changes, not even the clock of
 		// absentSince.
-		p.readFailed = true
 		*s.obs = *s.prior.DeepCopy()
 		return settleErr
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -42,9 +43,12 @@ func writeProviderStatus(ctx context.Context, cl client.Client, old, prov *v1alp
 }
 
 // syncProvider writes the Provider's status: the queue waits found in this
-// pass, and, when no read failed, the time of the last successful read and the
-// Ready condition.
+// pass, and the readiness fields (setReadiness). A pass that made no Batch read
+// polls the platform first, so Ready always rests on a real read.
 func (c *Controller) syncProvider(ctx context.Context, p *pass) error {
+	if !p.read && c.Batch.Poll(ctx) != nil {
+		p.readFailed = true
+	}
 	var prov v1alpha1.Provider
 	if err := c.Client.Get(ctx, client.ObjectKey{Name: c.Provider}, &prov); err != nil {
 		return fmt.Errorf("get Provider %s: %w", c.Provider, err)
@@ -57,15 +61,35 @@ func (c *Controller) syncProvider(ctx context.Context, p *pass) error {
 	}
 	prov.Status.ObservedGeneration = prov.Generation
 	prov.Status.LastReconcileTime = mt(p.now)
+	c.setReadiness(&prov, p)
+	return writeProviderStatus(ctx, c.Client, old, &prov)
+}
+
+// setReadiness is HBEP-4's Operational readiness 1, the rule of docs/
+// development.md, Provider readiness. A pass with no failed read sets
+// lastSuccessfulStatusRead to now and Ready True (reason Polled). A pass with a
+// failed read leaves lastSuccessfulStatusRead alone and sets Ready False
+// (reason ReadsFailing) only when there is no successful read, or the last is
+// older than the staleness bound; until then Ready keeps its value.
+func (c *Controller) setReadiness(prov *v1alpha1.Provider, p *pass) {
+	cond := metav1.Condition{Type: v1alpha1.ConditionProviderReady, ObservedGeneration: prov.Generation, LastTransitionTime: *mt(p.now)}
 	if !p.readFailed {
 		prov.Status.LastSuccessfulStatusRead = mt(p.now)
-		apimeta.SetStatusCondition(&prov.Status.Conditions, metav1.Condition{
-			Type:               v1alpha1.ConditionProviderReady,
-			Status:             metav1.ConditionTrue,
-			Reason:             "Polled",
-			ObservedGeneration: prov.Generation,
-			LastTransitionTime: *mt(p.now),
-		})
+		cond.Status, cond.Reason = metav1.ConditionTrue, v1alpha1.ReasonPolled
+		apimeta.SetStatusCondition(&prov.Status.Conditions, cond)
+		return
 	}
-	return writeProviderStatus(ctx, c.Client, old, &prov)
+	last := prov.Status.LastSuccessfulStatusRead
+	switch {
+	case last == nil:
+		cond.Message = "reads are failing: no successful read yet"
+	case p.now.Sub(last.Time) > c.readyStaleness():
+		// The message names the time of the last success, not its age, so it is
+		// the same at every pass and a failing Provider is not rewritten for it.
+		cond.Message = fmt.Sprintf("reads are failing: the last successful read was at %s", last.UTC().Format(time.RFC3339))
+	default:
+		return
+	}
+	cond.Status, cond.Reason = metav1.ConditionFalse, v1alpha1.ReasonReadsFailing
+	apimeta.SetStatusCondition(&prov.Status.Conditions, cond)
 }

@@ -23,9 +23,8 @@ func unresolved(rec *v1alpha1.SubmissionRecord) bool {
 func (c *Controller) establish(ctx context.Context, p *pass, s *allocState) (settled bool, err error) {
 	rec := s.rec
 	if unresolved(rec) {
-		jobs, err := c.Batch.FindByTag(ctx, s.tag, s.a.CreationTimestamp.Add(-listLookback))
+		jobs, err := c.findByTag(ctx, p, s.tag, s.a.CreationTimestamp.Add(-listLookback))
 		if err != nil {
-			p.readFailed = true
 			return false, nil
 		}
 		if len(jobs) > 0 {

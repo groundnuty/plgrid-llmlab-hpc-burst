@@ -11,6 +11,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
 // Controller is a stand-in for one Provider's controller, for the lifecycle
@@ -92,11 +93,19 @@ import (
 //     (a new value on the same client) keeps the waits it finds in status.
 //   - A later hard end: atProvider.hardEnd is re-read on every observe, so a
 //     Batch.SetTimeLimit shows in it at the next Sync.
-//   - The Provider's status: queueWaits are updated on every pass.
-//     lastSuccessfulStatusRead and the Ready condition (True, reason Polled)
-//     are refreshed only on a pass in which no read failed, so a failing
-//     platform leaves them to age. Conditions this controller does not own, such
-//     as DialHomeUnreachable, are kept as they were found.
+//   - The Provider's status, readiness (docs/development.md, Provider
+//     readiness): a pass that made no Batch read (it observed no job and looked
+//     up no tag) calls Batch.Poll once, so Ready rests on a real read. A pass
+//     that read does not poll, and a failed read is not answered with a poll
+//     that could hide it. On a pass with no failed read,
+//     lastSuccessfulStatusRead is the pass's time and Ready is True with reason
+//     Polled. On a pass with a failed read, lastSuccessfulStatusRead stays as it
+//     was, and Ready becomes False with reason ReadsFailing when there is no
+//     successful read yet or the last is older than ReadyStaleness (zero means
+//     v1alpha1.ProviderReadyStaleness), strictly; until then it keeps its
+//     value. The False message names the time of the last success, so it is the
+//     same at every pass. Conditions this controller does not own, such as
+//     DialHomeUnreachable, are kept as they were found.
 //   - Not modelled: the read-back (a renamed job is not refused, a job with
 //     another limit sets no SubmittedAsOther), the AdminHold condition, the
 //     adoption order (the lowest job ID is adopted), the sticky duplicates list
@@ -123,6 +132,10 @@ type Controller struct {
 	// UnknownBound is how long after an attempt a fallback-mode controller
 	// waits before it asks an operator; zero means 10 minutes.
 	UnknownBound time.Duration
+	// ReadyStaleness is how old the Provider's last successful status read may
+	// be before a pass with a failed read sets Ready False; zero means
+	// v1alpha1.ProviderReadyStaleness.
+	ReadyStaleness time.Duration
 }
 
 const (
@@ -134,9 +147,34 @@ const (
 
 // pass is the state of one Sync.
 type pass struct {
-	now        time.Time
+	now time.Time
+	// read is true once the pass has made a Batch read (FindByTag or Observe),
+	// whether it succeeded or not. A pass with none polls the platform instead.
+	read bool
+	// readFailed is true once any read of the pass failed.
 	readFailed bool
 	waits      []v1alpha1.QueueWait
+}
+
+// findByTag is Batch.FindByTag, noted in the pass: it counts as a read, and a
+// failure marks the pass's reads as failed.
+func (c *Controller) findByTag(ctx context.Context, p *pass, tag string, since time.Time) ([]provider.Job, error) {
+	p.read = true
+	jobs, err := c.Batch.FindByTag(ctx, tag, since)
+	if err != nil {
+		p.readFailed = true
+	}
+	return jobs, err
+}
+
+// observeJob is Batch.Observe, noted in the pass like findByTag.
+func (c *Controller) observeJob(ctx context.Context, p *pass, id string) (provider.Job, bool, error) {
+	p.read = true
+	job, found, err := c.Batch.Observe(ctx, id)
+	if err != nil {
+		p.readFailed = true
+	}
+	return job, found, err
 }
 
 func (c *Controller) lostGrace() time.Duration {
@@ -158,6 +196,13 @@ func (c *Controller) inflightWindow() time.Duration {
 		return 5 * time.Minute
 	}
 	return c.InflightWindow
+}
+
+func (c *Controller) readyStaleness() time.Duration {
+	if c.ReadyStaleness == 0 {
+		return v1alpha1.ProviderReadyStaleness
+	}
+	return c.ReadyStaleness
 }
 
 func (c *Controller) unknownBound() time.Duration {

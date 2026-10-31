@@ -22,9 +22,8 @@ func (c *Controller) syncDeleting(ctx context.Context, p *pass, s *allocState) e
 		return err
 	}
 	s.rec = rec
-	jobs, err := c.Batch.FindByTag(ctx, s.tag, since)
+	jobs, err := c.findByTag(ctx, p, s.tag, since)
 	if err != nil {
-		p.readFailed = true
 		return nil
 	}
 	noJobID := a.Annotations[v1alpha1.AnnotationJobID] == ""
@@ -45,8 +44,7 @@ func (c *Controller) syncDeleting(ctx context.Context, p *pass, s *allocState) e
 			}
 		}
 		// Confirm the cancels before letting go of the Allocation.
-		if jobs, err = c.Batch.FindByTag(ctx, s.tag, since); err != nil {
-			p.readFailed = true
+		if jobs, err = c.findByTag(ctx, p, s.tag, since); err != nil {
 			return nil
 		}
 		if len(liveIDs(jobs)) > 0 {
