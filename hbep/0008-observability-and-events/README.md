@@ -94,7 +94,7 @@ A past project served models on several Slurm clusters behind its own fronts. It
 
 ### Open questions
 
-The science agent decided the alpha design on 31 Oct 2026, for this HBEP to become implementable; "science agent, 31 Oct 2026" below refers to those decisions. Questions decided in another HBEP name it.
+"Science agent, 31 Oct 2026" marks a decision the science agent made that day for this HBEP to become implementable. "Proposed by this HBEP" marks the author's own choice, put to the review round. Questions decided in another HBEP name it.
 
 1. **Metric names and units.**
    - **Decided for alpha:** our own names, prefixed `hpcburst_`, with units in the name, following Prometheus's naming conventions. vLLM's names are mapped to them in the agent and the controller (Design details, Metrics). Source: science agent, 31 Oct 2026.
@@ -126,16 +126,16 @@ The science agent decided the alpha design on 31 Oct 2026, for this HBEP to beco
     - **Decided for alpha:** Kubernetes Events (`events.k8s.io/v1`), best-effort, with status as the truth. Source: science agent, 31 Oct 2026.
     - **Open (blocks beta):** JetStream for events and usage, with subscriptions and cursors, tied to HBEP-10, on S8's evidence.
 12. **How an unknown sample is shown in Prometheus.**
-    - **Decided for alpha:** an absent series plus an explicit gauge, `hpcburst_instance_metrics_unknown`, with the reason (Design details, Unknown samples). Source: science agent, 31 Oct 2026, choosing among the forms compared there.
+    - **Decided for alpha:** an absent series plus an explicit gauge, `hpcburst_instance_metrics_unknown`, with the reason (Design details, Unknown samples). Source: proposed by this HBEP, 31 Oct 2026, from the comparison there; the science agent asked for one form to be chosen with its reason.
 13. **Whether the front serves while usage cannot be written.**
-    - **Decided for alpha:** it keeps serving, and the failure is loud: counted, raised as a `failing` event and stated in its readiness. Source: science agent, 31 Oct 2026.
+    - **Decided for alpha:** it keeps serving, and the failure is loud: counted, raised as a `failing` event and stated in its readiness. Source: the science agent's lean, 31 Oct 2026, taken here.
 14. **Typed events for Allocations.**
-    - **Decided for alpha:** an Allocation's lifecycle shows in its Instance's events, whose reasons name the Allocation's outcome (`AllocationFailed`, `AllocationLost`, `AllocationRefused`, `Requeued`, `SubmittedAsOther`, `AllocationEndedEarly`; HBEP-7). The Provider controller's own events (HBEP-4) keep crossplane-runtime's recorder, which writes no `action`; readers treat them as type "other" (Compatibility). Source: science agent, 31 Oct 2026.
+    - **Decided for alpha:** an Allocation's lifecycle shows in its Instance's events, whose reasons name the Allocation's outcome (`AllocationFailed`, `AllocationLost`, `AllocationRefused`, `Requeued`, `SubmittedAsOther`, `AllocationEndedEarly`; HBEP-7). The Provider controller's own events (HBEP-4) keep crossplane-runtime's recorder, which writes no `action`; readers treat them as type "other" (Compatibility). Source: proposed by this HBEP, 31 Oct 2026.
     - **Open (blocks beta):** typed events on the Allocation itself, from the Provider controller.
 15. **The billing formula.**
     - **Open (blocks beta):** the platform profile's billing group (HBEP-4, open question 3). Alpha counts allocated time only.
 16. **A per-grant accounting ledger.**
-    - **Decided for alpha:** one accounting record per ended Allocation, kept after the Allocation is deleted (Design details, Provider accounting). Source: science agent, 31 Oct 2026.
+    - **Decided for alpha:** one accounting record per ended Allocation, kept after the Allocation is deleted (Design details, Provider accounting). Source: proposed by this HBEP, 31 Oct 2026, since an Allocation's status goes with it.
     - **Open (blocks beta):** totals per grant, and the comparison with a center's report.
 
 ## Design details
@@ -195,11 +195,12 @@ So a test checks for at least one event of a type and reason on a resource, neve
 | The Provider controller's queue read | `lastSuccessfulStatusRead` older than `ProviderReadyStaleness`, 5 min (`api/v1alpha1/provider_types.go`) | Provider `Ready` False, `ReadsFailing`; readers also check the age (`ProviderReady`) | `failing`, `HeartbeatMissed`, regarding the Provider | the lifecycle controller | the Provider's queue waits and phases: the controller skips it for new Allocations (HBEP-7, Reconcile loop, step 1) |
 | The agent's reports | no report for `health.agentTimeout` (HBEP-4) | Instance `AgentUnreachable` True, `ReportsMissing` | `failing`, `HeartbeatMissed`, regarding the Instance | the lifecycle controller | every engine gauge of the Instance (Unknown samples) |
 | The managed catalog read | `lastSuccessfulStatusRead` older than `ProviderReadyStaleness`, 5 min | managed Provider `Ready` False, `ReadsFailing` | `failing`, `HeartbeatMissed`, regarding the Provider | the lifecycle controller | the listing's freshness: `lastCatalogRead` shows its age. A ModelDeployment's `Ready` keeps following the last successful read (HBEP-4, Test plan) |
-| The front's end-to-end probe | this HBEP's rule: the probe's last result older than three probe intervals (HBEP-6, `probeInterval`) | none: the front's own state, in its `/healthz` | `failing`, `HeartbeatMissed`, regarding the front's `Lease` | the front | each Instance the probe fed counts as not probed, so it is not eligible (HBEP-6's "not registered") |
-| The front itself | its `Lease` `front` in `hpcburst-system`, renewed every 10 s with `leaseDurationSeconds` 30; stale once `renewTime` is older than that duration | the `Lease` | `failing`, `HeartbeatMissed`, regarding the `Lease` | the lifecycle controller | none: the launcher's supervisor restarts a front that exits |
+| The front's end-to-end probe | proposed by this HBEP: the probe's last result older than three probe intervals (HBEP-6, `probeInterval`) | none: the front's own state, in its `/healthz` | `failing`, `HeartbeatMissed`, regarding the front's `Lease` | the front | each Instance's probe state shows as unknown in `/healthz`. Routing keeps HBEP-6's rule, which changes eligibility only on failed probes |
+| The front itself | its `Lease` `front` in `hpcburst-system` (proposed by this HBEP), renewed every 10 s with `leaseDurationSeconds` 30; stale once `renewTime` is older than that duration | the `Lease` | `failing`, `HeartbeatMissed`, regarding the `Lease` | the lifecycle controller | none: the launcher's supervisor restarts a front that exits |
 | The lifecycle controller | its leader `Lease` `lifecycle`, stale once `renewTime` is older than its `leaseDurationSeconds` | the `Lease` | `failing`, `HeartbeatMissed`, regarding the `Lease` | the front | none; HBEP-11's reconcile times show a controller that renews but reconciles nothing |
 
 - **One event per episode.** `HeartbeatMissed` fires once when the heartbeat goes stale. Nothing more fires while it stays stale, and the condition clears when it comes back.
+- **Events about cluster-scoped objects land in `default`.** Providers and PlatformProfiles are cluster-scoped (`api/v1alpha1/provider_types.go` and `platformprofile_types.go`, `kubebuilder:resource:scope=Cluster`), so their events are written in the `default` namespace (What the recorder merges and drops). Each emitter's RBAC allows creating events there.
 - **A probe failure is not a prober failure.** `PathProbeFailing` (`degraded`) says a path is bad (HBEP-6). `HeartbeatMissed` (`failing`) says the prober stopped.
 - **The front's `Lease`** gives front-level events a namespaced resource to regard, and gives the front a heartbeat. It follows Kubernetes' node heartbeats, where each kubelet renews its own `Lease` (Prior art).
 
@@ -216,7 +217,7 @@ So a test checks for at least one event of a type and reason on a resource, neve
 
 **Exposition.** Both components serve Prometheus's text format on loopback, with no authentication and no credential in any label:
 - the front at `GET /metrics` on its `/healthz` listener (the launcher's port base + 4);
-- the lifecycle controller from controller-runtime's metrics server, bound on loopback at the port base + 12, a new offset of the launcher's block (`docs/development.md`, Runtime conventions). Its collectors register on controller-runtime's registry, so the controller's own work-queue metrics come with them.
+- the lifecycle controller from controller-runtime's metrics server, bound on loopback at the port base + 12, a new offset of the launcher's block, proposed by this HBEP (`docs/development.md`, Runtime conventions). Its collectors register on controller-runtime's registry, so the controller's own work-queue metrics come with them.
 
 The library is Prometheus client_golang, already in `go.mod` at v1.23.2 as an indirect dependency. Names follow Prometheus's conventions: one application prefix, base units in the name, `_total` on counters, and ratios from 0 to 1 named `_ratio` ([naming practices](https://prometheus.io/docs/practices/naming/); [source, lines 16–38 and 107–112](https://github.com/prometheus/docs/blob/bf977977d5f8d90923929577842d6d0c13bb5295/docs/practices/naming.md#L16-L38); accessed 2026-10-31).
 
@@ -282,7 +283,7 @@ No client key ID is a label: per-key usage is in the records.
 **The front keeps serving** while usage cannot be written (open question 13). `/healthz` keeps answering 200 for it, so a usage failure never makes anything restart the front. A failed write leaves the log at its last whole line, as PR #95 does.
 
 **Rotation keeps every file.**
-- Records go to `usage-<YYYY-MM-DD>.jsonl` in `usageDir`, named by the UTC day of the write. The first record after midnight UTC opens the next day's file. A closed file is never written again.
+- Records go to `usage-<YYYY-MM-DD>.jsonl` in `usageDir` (a name proposed by this HBEP), named by the UTC day of the write. The first record after midnight UTC opens the next day's file. A closed file is never written again.
 - Nothing in the framework deletes or rewrites a closed file; they are kept for the grant's life. The counter runs across files, so readers order records by it.
 - The repair at open, which cuts a partial last line, applies to the newest file only.
 
@@ -467,7 +468,7 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - 2026-10-30: alpha's thresholds for failing Instances and its "ending soon" timing noted from HBEP-7.
 - 2026-10-30: the front's alpha usage sink and counts noted from HBEP-5.
 - 2026-10-31: noted from HBEP-6 becoming implementable: in alpha the tunnel carries only what HBEP-5 routes to an Instance, its listed endpoints and its passthrough of every other JSON `POST` under `/v1/`, and engine metrics reach the controller in the agent's reports, not by a scrape through the tunnel (open question on how metrics leave the job). HBEP-6 proposes the event reasons `PathProbeFailing` (the front's probe, type `degraded`) and `TunnelOrphaned`; it records no tunnel heartbeat metric, since its frps plugin does not see pings.
-- 2026-10-31: implementable. The science agent's decisions of 31 Oct 2026 written for alpha: Kubernetes Events with the type in `action`; client-go's merging and dropping; the observers and their heartbeats, with `HeartbeatMissed` and `ObservationGap`; a 7-day event TTL; Prometheus exposition under `hpcburst_` names, with vLLM v0.32.0's names mapped; unknown samples as absent series with an explicit gauge; the usage sink's durability, failures and rotation; and allocated accounting with a kept record. Every open question decided, decided for alpha, not needed for alpha, or open for beta. Written against the code of PRs #88 and #95 and of `main`. HBEP-5, HBEP-7 and HBEP-11 amended with it.
+- 2026-10-31: implementable. The science agent's decisions of 31 Oct 2026 written for alpha: Kubernetes Events with the type in `action`; client-go's merging and dropping; the observers and their heartbeats, with `HeartbeatMissed` and `ObservationGap`; a 7-day event TTL; Prometheus exposition under `hpcburst_` names, with vLLM v0.32.0's names mapped; unknown samples as absent series with an explicit gauge; the usage sink's durability, failures and rotation; and allocated accounting. Proposed by this HBEP for the review round: the front's `Lease` and the probe's staleness rule, the names `ObservationGap` and `UsageWriteFailed`, the metrics port, the daily file name, untyped Allocation events in alpha, and the kept accounting record. Every open question decided, decided for alpha, not needed for alpha, or open for beta. Written against the code of PRs #88 and #95 and of `main`. HBEP-5, HBEP-7 and HBEP-11 amended with it.
 
 ## Amendments
 
