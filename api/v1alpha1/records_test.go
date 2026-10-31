@@ -320,22 +320,6 @@ func TestRestartGenerationAnnotationAndLeases(t *testing.T) {
 	}
 }
 
-// The Lease names are part of the contract: the lifecycle controller's leader
-// Lease is "lifecycle" (HBEP-7) and the front's heartbeat Lease is "front"
-// (HBEP-8, Observers). The values are the HBEPs', written out here, not read
-// back from the constants.
-func TestControllerLeaseNames(t *testing.T) {
-	if LeaseLifecycle != "lifecycle" {
-		t.Errorf("LeaseLifecycle = %q, want %q", LeaseLifecycle, "lifecycle")
-	}
-	if LeaseFront != "front" {
-		t.Errorf("LeaseFront = %q, want %q", LeaseFront, "front")
-	}
-	if ProviderLeaseName("front") == LeaseFront {
-		t.Error("a Provider named front shares the front's Lease")
-	}
-}
-
 func TestDuration(t *testing.T) {
 	d, err := Duration("1m30s").AsDuration()
 	if err != nil || d.Seconds() != 90 {
