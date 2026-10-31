@@ -57,46 +57,86 @@ func TestEncodeIsTheCanonicalForm(t *testing.T) {
 
 func TestParseManagedCredentialsRefuses(t *testing.T) {
 	for _, tc := range []struct{ name, content, want string }{
-		{"an unknown member (a misspelt expiry)", `{"key":"k1","baseURL":"https://g.example/v1","expires":"2027-01-31T00:00:00Z"}`, `unknown member "expires"`},
-		{"baseUrl spelt in another case", `{"key":"k1","baseUrl":"https://g.example/v1"}`, `unknown member "baseUrl"`},
-		{"key spelt in upper case", `{"KEY":"k1","baseURL":"https://g.example/v1"}`, `unknown member "KEY"`},
-		{"a repeated member", `{"key":"k1","baseURL":"https://g.example/v1","baseURL":"https://h.example/v1"}`, `"baseURL" appears twice`},
+		{"an unknown member (a misspelt expiry)", `{"key":"example-key-0001","baseURL":"https://g.example/v1","expires":"2027-01-31T00:00:00Z"}`, `unknown member "expires"`},
+		{"baseUrl spelt in another case", `{"key":"example-key-0001","baseUrl":"https://g.example/v1"}`, `unknown member "baseUrl"`},
+		{"key spelt in upper case", `{"KEY":"example-key-0001","baseURL":"https://g.example/v1"}`, `unknown member "KEY"`},
+		{"a repeated member", `{"key":"example-key-0001","baseURL":"https://g.example/v1","baseURL":"https://h.example/v1"}`, `"baseURL" appears twice`},
 		{"a key that is not a string", `{"key":1,"baseURL":"https://g.example/v1"}`, "wrong JSON type"},
 		{"an array", `[]`, "want one JSON object"},
 		{"no key", `{"baseURL":"https://g.example/v1"}`, "key is empty"},
-		{"a key with a space", `{"key":"k 1","baseURL":"https://g.example/v1"}`, "not printable ASCII"},
-		{"a key with a newline", `{"key":"k1\n","baseURL":"https://g.example/v1"}`, "not printable ASCII"},
+		{"a key with a space", `{"key":"example key 0001","baseURL":"https://g.example/v1"}`, "not printable ASCII"},
+		{"a key with a newline", `{"key":"example-key-0001\n","baseURL":"https://g.example/v1"}`, "not printable ASCII"},
 		{"a key above the limit", `{"key":"` + strings.Repeat("k", MaxManagedKeyBytes+1) + `","baseURL":"https://g.example/v1"}`, "above"},
-		{"no base URL", `{"key":"k1"}`, "not a URL"},
-		{"plain http to a remote host", `{"key":"k1","baseURL":"http://g.example/v1"}`, "want https"},
-		{"another scheme", `{"key":"k1","baseURL":"ftp://g.example/v1"}`, "want https"},
-		{"user information", `{"key":"k1","baseURL":"https://user:pw@g.example/v1"}`, "user information"},
-		{"a query", `{"key":"k1","baseURL":"https://g.example/v1?a=b"}`, "query"},
-		{"a fragment", `{"key":"k1","baseURL":"https://g.example/v1#x"}`, "fragment"},
-		{"a trailing slash", `{"key":"k1","baseURL":"https://g.example/v1/"}`, "ends with '/'"},
-		{"no version segment", `{"key":"k1","baseURL":"https://g.example"}`, "does not end with the API version segment /v1"},
-		{"another version segment", `{"key":"k1","baseURL":"https://g.example/v2"}`, "/v1"},
-		{"v1 only as the end of a longer segment", `{"key":"k1","baseURL":"https://g.example/apiv1"}`, "/v1"},
-		{"v1 in an escaped slash", `{"key":"k1","baseURL":"https://g.example/api%2Fv1"}`, "/v1"},
-		{"a date without a time", `{"key":"k1","baseURL":"https://g.example/v1","expiry":"2027-01-31"}`, "RFC 3339"},
-		{"two objects", `{"key":"k1","baseURL":"https://g.example/v1"}{}`, "data after"},
-		{"not JSON", `key=k1`, "want one JSON object"},
-		{"a truncated object", `{"key":"k1","baseURL":`, "invalid JSON"},
+		{"no base URL", `{"key":"example-key-0001"}`, "not a URL"},
+		{"plain http to a remote host", `{"key":"example-key-0001","baseURL":"http://g.example/v1"}`, "want https"},
+		{"another scheme", `{"key":"example-key-0001","baseURL":"ftp://g.example/v1"}`, "want https"},
+		{"user information", `{"key":"example-key-0001","baseURL":"https://user:pw@g.example/v1"}`, "user information"},
+		{"a query", `{"key":"example-key-0001","baseURL":"https://g.example/v1?a=b"}`, "query"},
+		{"a fragment", `{"key":"example-key-0001","baseURL":"https://g.example/v1#x"}`, "fragment"},
+		{"a trailing slash", `{"key":"example-key-0001","baseURL":"https://g.example/v1/"}`, "ends with '/'"},
+		{"no version segment", `{"key":"example-key-0001","baseURL":"https://g.example"}`, "does not end with the API version segment /v1"},
+		{"another version segment", `{"key":"example-key-0001","baseURL":"https://g.example/v2"}`, "/v1"},
+		{"v1 only as the end of a longer segment", `{"key":"example-key-0001","baseURL":"https://g.example/apiv1"}`, "/v1"},
+		{"v1 in an escaped slash", `{"key":"example-key-0001","baseURL":"https://g.example/api%2Fv1"}`, "/v1"},
+		{"a date without a time", `{"key":"example-key-0001","baseURL":"https://g.example/v1","expiry":"2027-01-31"}`, "RFC 3339"},
+		{"two objects", `{"key":"example-key-0001","baseURL":"https://g.example/v1"}{}`, "data after"},
+		{"not JSON", `key=example-key-0001`, "want one JSON object"},
+		{"a truncated object", `{"key":"example-key-0001","baseURL":`, "invalid JSON"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := ParseManagedCredentials([]byte(tc.content))
 			if err == nil || !errors.Is(err, ErrCredentials) || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err = %v, want ErrCredentials mentioning %q", err, tc.want)
 			}
-			if strings.Contains(err.Error(), "k1") || strings.Contains(err.Error(), "pw") {
+			if strings.Contains(err.Error(), "example-key-0001") || strings.Contains(err.Error(), "pw") {
 				t.Fatalf("the error %q holds a secret", err)
 			}
 		})
 	}
 	for _, ok := range []string{"http://127.0.0.1:29340/v1", "http://localhost:29340/v1", "http://[::1]:29340/v1", "https://gateway.example/v1", "https://gateway.example:8443/api/v1"} {
-		if _, err := ParseManagedCredentials([]byte(`{"key":"k1","baseURL":"` + ok + `"}`)); err != nil {
+		if _, err := ParseManagedCredentials([]byte(`{"key":"example-key-0001","baseURL":"` + ok + `"}`)); err != nil {
 			t.Errorf("baseURL %s refused: %v", ok, err)
 		}
+	}
+}
+
+// A key shorter than MinManagedKeyBytes is a placeholder or a truncated paste
+// (`@hpc-burst-science-agent`, 31 Oct 2026). The refusal wraps ErrCredentials,
+// which the managed controller reads as CredentialsInvalid, and it gives the
+// key's length only. Parse, Validate and Encode agree with Read, so the
+// operator's tool never writes a file the controller then refuses.
+func TestManagedKeyBelowSixteenBytesIsRefused(t *testing.T) {
+	const short, least = "canary-key-0123", "canary-key-01234" // 15 and 16 bytes
+	if len(short) != 15 || len(least) != 16 || MinManagedKeyBytes != 16 {
+		t.Fatalf("fixtures are %d and %d bytes, minimum %d; want 15, 16 and 16", len(short), len(least), MinManagedKeyBytes)
+	}
+	file := func(key string) string { return `{"key":"` + key + `","baseURL":"https://gateway.example/v1"}` }
+
+	_, err := ReadManagedCredentials(writeCreds(t, file(short), 0o600))
+	if !errors.Is(err, ErrCredentials) {
+		t.Fatalf("a 15-byte key: err = %v, want ErrCredentials", err)
+	}
+	if !strings.Contains(err.Error(), "15 bytes") || strings.Contains(err.Error(), short) {
+		t.Errorf("a 15-byte key: err = %q, want its length (15 bytes) and no part of the key", err)
+	}
+	c, err := ReadManagedCredentials(writeCreds(t, file(least), 0o600))
+	if err != nil || c.Key != least {
+		t.Fatalf("a 16-byte key: key %q, err %v, want it accepted", c.Key, err)
+	}
+
+	// The same limit through the other entry points.
+	if _, err := ParseManagedCredentials([]byte(file(short))); !errors.Is(err, ErrCredentials) {
+		t.Errorf("Parse of a 15-byte key: err = %v, want ErrCredentials", err)
+	}
+	if _, err := (ManagedCredentials{Key: short, BaseURL: "https://gateway.example/v1"}).Encode(); !errors.Is(err, ErrCredentials) {
+		t.Errorf("Encode of a 15-byte key: err = %v, want ErrCredentials", err)
+	}
+	if _, err := (ManagedCredentials{Key: least, BaseURL: "https://gateway.example/v1"}).Encode(); err != nil {
+		t.Errorf("Encode of a 16-byte key: %v", err)
+	}
+	// An empty key keeps its own message.
+	if _, err := ParseManagedCredentials([]byte(file(""))); err == nil || !strings.Contains(err.Error(), "key is empty") {
+		t.Errorf("an empty key: err = %v, want \"key is empty\"", err)
 	}
 }
 
@@ -184,16 +224,16 @@ func TestExpiringIsADayBeforeTheExpiry(t *testing.T) {
 func TestParseManagedCredentialsEchoesNoSuppliedValue(t *testing.T) {
 	const canary = "sk-canary-7f3a9c0d1e2b"
 	for _, tc := range []struct{ name, body, want string }{
-		{"a key in baseURL's query", `{"key":"k1","baseURL":"https://g.example/v1?api_key=` + canary + `"}`, "query"},
-		{"a key in baseURL's fragment", `{"key":"k1","baseURL":"https://g.example/v1#` + canary + `"}`, "fragment"},
-		{"a key pasted as baseURL", `{"key":"k1","baseURL":"` + canary + `"}`, "want https"},
-		{"a key as baseURL's host over http", `{"key":"k1","baseURL":"http://` + canary + `/v1"}`, "want https"},
-		{"a key as baseURL's path", `{"key":"k1","baseURL":"https://g.example/` + canary + `"}`, "/v1"},
-		{"a key with a trailing slash", `{"key":"k1","baseURL":"https://g.example/` + canary + `/"}`, "ends with '/'"},
-		{"a key as baseURL with no host", `{"key":"k1","baseURL":"https:///` + canary + `"}`, "no host"},
-		{"a key as an opaque baseURL", `{"key":"k1","baseURL":"https:` + canary + `"}`, "baseURL"},
-		{"a key that does not parse as a URL", `{"key":"k1","baseURL":"https://g.example/%zz` + canary + `"}`, "not a URL"},
-		{"a key as a member name", `{"key":"k1","baseURL":"https://g.example/v1","` + canary + `":1}`, "unknown member (name not shown)"},
+		{"a key in baseURL's query", `{"key":"example-key-0001","baseURL":"https://g.example/v1?api_key=` + canary + `"}`, "query"},
+		{"a key in baseURL's fragment", `{"key":"example-key-0001","baseURL":"https://g.example/v1#` + canary + `"}`, "fragment"},
+		{"a key pasted as baseURL", `{"key":"example-key-0001","baseURL":"` + canary + `"}`, "want https"},
+		{"a key as baseURL's host over http", `{"key":"example-key-0001","baseURL":"http://` + canary + `/v1"}`, "want https"},
+		{"a key as baseURL's path", `{"key":"example-key-0001","baseURL":"https://g.example/` + canary + `"}`, "/v1"},
+		{"a key with a trailing slash", `{"key":"example-key-0001","baseURL":"https://g.example/` + canary + `/"}`, "ends with '/'"},
+		{"a key as baseURL with no host", `{"key":"example-key-0001","baseURL":"https:///` + canary + `"}`, "no host"},
+		{"a key as an opaque baseURL", `{"key":"example-key-0001","baseURL":"https:` + canary + `"}`, "baseURL"},
+		{"a key that does not parse as a URL", `{"key":"example-key-0001","baseURL":"https://g.example/%zz` + canary + `"}`, "not a URL"},
+		{"a key as a member name", `{"key":"example-key-0001","baseURL":"https://g.example/v1","` + canary + `":1}`, "unknown member (name not shown)"},
 		{"a key as a repeated member name", `{"` + canary + `":1,"` + canary + `":2}`, "(name not shown)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -207,7 +247,7 @@ func TestParseManagedCredentialsEchoesNoSuppliedValue(t *testing.T) {
 		})
 	}
 	// A short, name-like member is still named, so a misspelling is plain.
-	if _, err := ParseManagedCredentials([]byte(`{"key":"k1","baseURL":"https://g.example/v1","expires":"x"}`)); err == nil || !strings.Contains(err.Error(), `unknown member "expires"`) {
+	if _, err := ParseManagedCredentials([]byte(`{"key":"example-key-0001","baseURL":"https://g.example/v1","expires":"x"}`)); err == nil || !strings.Contains(err.Error(), `unknown member "expires"`) {
 		t.Fatalf("err = %v, want it to name expires", err)
 	}
 }

@@ -1,0 +1,1 @@
+[{"role":"system","content":"S"},{"role":"assistant","content":"A greets first","tool_calls":[{"id":"c1","type":"function"}]},{"role":"user","content":"U"},{"role":"assistant","content":"later"}]

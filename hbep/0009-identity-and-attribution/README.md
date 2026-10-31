@@ -131,7 +131,7 @@ TBD. Decided so far: the deployment ID is a hash the framework computes over wha
 ### Security
 
 - Identity records are not secret, but must not leak local paths, user names or credentials; those are excluded by normalisation.
-- The attribution log holds request IDs, client key IDs, deployment and Instance IDs, never prompts or responses. Retention: TBD with HBEP-8.
+- The attribution log holds request IDs, client key IDs, deployment and Instance IDs, never prompts or responses. Retention: in alpha the attribution log is the usage files, kept for the grant's life (HBEP-8, Usage records).
 - An Instance proves its identity to the controller over its dial-home channel (HBEP-6). Who may claim to be an Instance of a deployment: TBD with HBEP-6.
 
 ### Graduation criteria
@@ -208,6 +208,7 @@ Verification grows from www-2027's endpoint check, run on each new endpoint (hea
 - 2026-10-31: the Hub listing rule written in full from the Hub listing (PR #68): `limit=1000`, every `Link` followed, an unparseable `Link` an error, one snapshot, redirects only on the Hub's origin. Lesson L-17.5 cited.
 - 2026-10-31: HBEP-6, now implementable, decides for alpha who may claim an Instance's tunnel: frps's server plugin admits a login only with a live Allocation's credential, and a proxy only for the UID of an Instance placed on that Allocation. The Instance still takes traffic only after the controller's verification.
 - 2026-10-31: HBEP-7's settings comparison is by value (booleans, numbers, then strings), with a declared `auto` recorded as resolved. That also keeps open question 1's "verification works either way" true for `auto`.
+- 2026-10-31: the attribution log's retention noted from HBEP-8 becoming implementable: in alpha, the usage files, kept for the grant's life.
 
 ## Amendments
 
