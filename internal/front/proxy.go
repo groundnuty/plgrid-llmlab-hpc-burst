@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/clock"
@@ -33,6 +34,7 @@ type Proxy struct {
 	log     *slog.Logger
 	inst    *instanceTransports
 	managed *http.Transport
+	running sync.WaitGroup // the handlers in flight, for a stop
 }
 
 // ProxyOptions are the inputs of NewProxy.
@@ -60,14 +62,35 @@ func NewProxy(o ProxyOptions) *Proxy {
 // ServeHTTP routes the client listener: the contract under /v1/, 404 under
 // /agent/v1/ and everywhere else (HBEP-5, Listeners).
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	p.running.Add(1)
+	defer p.running.Done()
 	if !strings.HasPrefix(r.URL.Path, "/v1/") {
-		// /agent/v1/ belongs to the dial-home listener only. Still attributed:
-		// a response without the headers is a failure of the front.
-		attribution{requestID: newRequestID(), emitter: emitterFront}.set(w.Header())
+		// /agent/v1/ belongs to the dial-home listener only. Still attributed,
+		// since a response without the headers is a failure of the front,
+		// and recorded, since HBEP-5 keeps one record per request.
+		x := newExchange(r, p.clk, p.cfg.MaxRequestDuration.D())
+		defer p.finish(x)
+		x.attr.set(w.Header())
+		x.rec.Status, x.rec.Finish = http.StatusNotFound, strp("error")
 		http.NotFound(w, r)
 		return
 	}
 	p.serveV1(w, r)
+}
+
+// waitHandlers waits at most d for the handlers in flight to return.
+func (p *Proxy) waitHandlers(d time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		p.running.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		return false
+	}
 }
 
 func (p *Proxy) serveV1(w http.ResponseWriter, r *http.Request) {
@@ -98,8 +121,7 @@ func (p *Proxy) serveV1(w http.ResponseWriter, r *http.Request) {
 		case cutClient:
 			x.rec.Status, x.rec.Finish, x.rec.CutBy = statusClientClosed, strp("cut"), strp(cut)
 		default:
-			x.rec.CutBy = strp(cut)
-			p.fail(w, x, http.StatusGatewayTimeout, codeRequestTimeout, detailOf(cut), "", "the request was cut while its body was read: "+detailOf(cut))
+			p.cutBeforeFirstByte(w, x, cut, "the request was cut while its body was read: ")
 		}
 		return
 	}
@@ -311,8 +333,7 @@ func (p *Proxy) failedBeforeHeaders(w http.ResponseWriter, x *exchange, t *targe
 		p.log.Warn("no response headers within streamHeadersTimeout; the request is not sent again", "request", x.id, "target", t.key())
 		p.fail(w, x, http.StatusGatewayTimeout, codeRequestTimeout, detailOf(cut), "", "the target sent no response headers within streamHeadersTimeout; the request is not sent again")
 	case cutFrontDeadline, cutFrontIdle, cutLeaseEnd, cutFrontShutdown:
-		x.rec.CutBy = strp(cut)
-		p.fail(w, x, http.StatusGatewayTimeout, codeRequestTimeout, detailOf(cut), "", "the request was cut before its first byte: "+detailOf(cut))
+		p.cutBeforeFirstByte(w, x, cut, "the request was cut before its first byte: ")
 	default:
 		// Written, then closed before any response header: never resent
 		// (open question 5). Toward an Instance that is the tunnel's row of
@@ -327,6 +348,19 @@ func (p *Proxy) failedBeforeHeaders(w http.ResponseWriter, x *exchange, t *targe
 		p.log.Warn("the connection closed after the request was written, before the response headers", "request", x.id, "target", t.key(), "error", err.Error())
 		p.fail(w, x, http.StatusBadGateway, codeUpstreamClosed, cut, "", "the connection to the target closed before it answered; the request is not sent again")
 	}
+}
+
+// cutBeforeFirstByte answers a request the front cut before any byte of its
+// response: 504 request_timeout with the cut's detail, or at a stop 503
+// shutting_down with Retry-After 5 (@hpc-burst-science-agent, 31 Oct 2026).
+func (p *Proxy) cutBeforeFirstByte(w http.ResponseWriter, x *exchange, cut, msg string) {
+	x.rec.CutBy = strp(cut)
+	if cut == cutFrontShutdown {
+		w.Header().Set("Retry-After", "5")
+		p.fail(w, x, http.StatusServiceUnavailable, codeShuttingDown, "", "", "the front is shutting down; send the request again")
+		return
+	}
+	p.fail(w, x, http.StatusGatewayTimeout, codeRequestTimeout, detailOf(cut), "", msg+detailOf(cut))
 }
 
 // unreachable is the 502 after the one resend; it names the target tried.

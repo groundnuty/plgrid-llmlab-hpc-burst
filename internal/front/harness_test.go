@@ -2,6 +2,7 @@ package front
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -57,6 +58,10 @@ type harness struct {
 	clientKey string
 	snap      inventory.Snapshot
 	uid       int
+	// The client server and its base context, for a test that stops it.
+	srv        *http.Server
+	base       context.Context
+	cancelBase context.CancelCauseFunc
 }
 
 // newHarness starts a front on a fake clock at t0. edit, when set, changes
@@ -104,7 +109,9 @@ func newHarnessOn(t *testing.T, real clock.Clock, edit func(*Config)) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := clientServer(h.cfg, h.proxy)
+	h.base, h.cancelBase = context.WithCancelCause(context.Background())
+	srv := clientServer(h.cfg, h.proxy, h.base)
+	h.srv = srv
 	go func() { _ = srv.Serve(ln) }()
 	h.url = "http://" + ln.Addr().String()
 	t.Cleanup(func() {

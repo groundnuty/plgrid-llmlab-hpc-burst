@@ -21,6 +21,9 @@ const (
 	// table as HBEP-6 amends it: 502, detail "tunnel", cutBy tunnel, not
 	// resent, and it counts toward the pause).
 	codeUpstreamClosed = "upstream_closed"
+	// codeShuttingDown: the front stopped before the request's first byte
+	// (@hpc-burst-science-agent, 31 Oct 2026; #102 adds the row).
+	codeShuttingDown = "shutting_down"
 )
 
 // statusClientClosed records a request whose client went away before an

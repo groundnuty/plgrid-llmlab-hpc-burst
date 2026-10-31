@@ -36,13 +36,20 @@ type Options struct {
 	HealthAddr                                       string
 	// Ready, when set, is called once the front serves.
 	Ready func(*Front)
+	// ShutdownGrace is how long a stop waits for requests in flight before
+	// it cuts them; 0 means DefaultShutdownGrace.
+	ShutdownGrace time.Duration
 }
+
+// DefaultShutdownGrace is how long a stop lets requests in flight finish.
+const DefaultShutdownGrace = 10 * time.Second
 
 // Front is a running front, for its health endpoint and for tests.
 type Front struct {
 	Router *Router
 	Watch  *inventory.Watch
 	Proxy  *Proxy
+	Sink   *usage.Sink
 	Client net.Addr
 	Dial   net.Addr
 	Health net.Addr
@@ -82,8 +89,12 @@ func Run(ctx context.Context, o Options) error {
 		return err
 	}
 	proxy := NewProxy(ProxyOptions{Config: cfg, Host: o.Host, Clock: o.Clock, Router: router, Transports: o.Transports, Keys: keys, Sink: sink, Log: o.Log})
-	f := &Front{Router: router, Watch: watch, Proxy: proxy}
-	servers, err := listen(o, f)
+	f := &Front{Router: router, Watch: watch, Proxy: proxy, Sink: sink}
+	// The client server's base context: cancelled at a stop, after the
+	// grace, so the requests still in flight are cut with front_shutdown.
+	base, cancelBase := context.WithCancelCause(context.Background())
+	defer cancelBase(nil)
+	servers, err := listen(o, f, base)
 	if err != nil {
 		return err
 	}
@@ -92,12 +103,36 @@ func Run(ctx context.Context, o Options) error {
 		o.Ready(f)
 	}
 	<-ctx.Done()
-	shut, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	for _, s := range servers {
-		_ = s.Shutdown(shut)
+	grace := o.ShutdownGrace
+	if grace <= 0 {
+		grace = DefaultShutdownGrace
 	}
-	return nil
+	stopServing(servers, cancelBase, proxy, grace, o.Log)
+	return nil // the deferred Close then flushes the usage sink
+}
+
+// stopServing stops the listeners and lets the requests in flight finish for
+// grace. Then it cuts the rest, cutBy front_shutdown: each stream gets one
+// error event and each request answers, and it waits for their handlers,
+// so every record is written before the usage sink closes and none is lost
+// without a gap (@hpc-burst-science-agent, 31 Oct 2026; PR #95 review, Opus
+// B5).
+func stopServing(servers []*http.Server, cancelBase context.CancelCauseFunc, p *Proxy, grace time.Duration, log *slog.Logger) {
+	shut, cancel := context.WithTimeout(context.Background(), grace)
+	defer cancel()
+	var wg sync.WaitGroup
+	for _, s := range servers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = s.Shutdown(shut)
+		}()
+	}
+	wg.Wait()
+	cancelBase(errCutShutdown)
+	if !p.waitHandlers(grace) {
+		log.Error("requests still run after the shutdown cut; their usage records may be lost", "waited", grace.String())
+	}
 }
 
 // startWatch starts the watch and the loop that feeds the router: after a
@@ -135,7 +170,7 @@ func startWatch(ctx context.Context, o Options, router *Router) (*inventory.Watc
 }
 
 // listen opens the three listeners and starts their servers.
-func listen(o Options, f *Front) ([]*http.Server, error) {
+func listen(o Options, f *Front, base context.Context) ([]*http.Server, error) {
 	cfg := o.Config
 	var servers []*http.Server
 	var opened []net.Listener
@@ -171,7 +206,7 @@ func listen(o Options, f *Front) ([]*http.Server, error) {
 		dl = tls.NewListener(dl, tlsCfg)
 	}
 	f.Client, f.Dial = cl.Addr(), dl.Addr()
-	servers = append(servers, serve(clientServer(cfg, f.Proxy), cl, o.Log), serve(&http.Server{Handler: dh, ReadHeaderTimeout: time.Minute}, dl, o.Log))
+	servers = append(servers, serve(clientServer(cfg, f.Proxy, base), cl, o.Log), serve(&http.Server{Handler: dh, ReadHeaderTimeout: time.Minute}, dl, o.Log))
 	if o.HealthListener != nil || o.HealthAddr != "" {
 		hl, err := listenerOr(o.HealthListener, o.HealthAddr)
 		if err != nil {
@@ -184,12 +219,14 @@ func listen(o Options, f *Front) ([]*http.Server, error) {
 }
 
 // clientServer is the client listener's server: no read, write or total
-// deadline, idle connections kept clientKeepAlive.
-func clientServer(cfg Config, h http.Handler) *http.Server {
+// deadline of its own (each request's cuts bound its I/O, clientIO), idle
+// connections kept clientKeepAlive. Its requests' contexts derive from base.
+func clientServer(cfg Config, h http.Handler, base context.Context) *http.Server {
 	return &http.Server{
 		Handler:           h,
 		ReadHeaderTimeout: time.Minute,
 		IdleTimeout:       cfg.ClientKeepAlive.D(),
+		BaseContext:       func(net.Listener) context.Context { return base },
 	}
 }
 
@@ -226,6 +263,14 @@ func healthHandler(f *Front) http.Handler {
 			"synced": f.Watch.Synced(), "viewAge": now.Sub(st.BuiltAt).Round(time.Second).String(),
 			"watchAges": ages, "deployments": st.Deployments, "managedTargets": st.Managed, "waiting": st.Waiting,
 			"instances": st.Instances, "leaseEnds": st.LeaseEnds,
+		}
+		// A sink that failed loses records: shown here and logged with each
+		// record it refuses. HBEP-5 does not say to refuse traffic for it,
+		// so the front keeps serving.
+		if f.Sink != nil {
+			if err := f.Sink.Err(); err != nil {
+				body["usageError"] = err.Error()
+			}
 		}
 		code := http.StatusOK
 		if !f.Watch.Synced() {
