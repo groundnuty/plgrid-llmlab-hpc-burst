@@ -255,6 +255,11 @@ func (a *Agent) register(ctx context.Context) error {
 
 func (a *Agent) report(ctx context.Context, now time.Time) error {
 	r := a.snapshot(now)
+	// Encode the report as the HTTP path does: one above the body limit is
+	// refused here, before any call, as the sender is told on the wire.
+	if _, err := agentapi.EncodeBody(r); err != nil {
+		return fmt.Errorf("fake agent: report: %w", err)
+	}
 	err := a.backend.Report(ctx, a.caller, cloneReport(r))
 	if isNotRegistered(err) {
 		a.registered = false
@@ -297,11 +302,18 @@ func knownAction(a agentapi.Action) bool {
 }
 
 // checkDesired rejects a desired state the Agent cannot act on: one that is
-// malformed, not one with an Action it does not know, which it ignores.
+// malformed, or that asks for a warm-up with a number of concurrent requests
+// outside 1..agentapi.MaxTargetSessions. It does not reject an Action the
+// Agent does not know, which the Agent ignores.
 func checkDesired(d agentapi.DesiredState) error {
 	if d.Action == agentapi.ActionRun {
 		if d.Instance == nil {
 			return errors.New("fake agent: desired state runs an Instance but carries none")
+		}
+		if c := d.Instance.Checks; c != nil && c.WarmUp != nil {
+			if n := c.WarmUp.TargetSessions; n < 1 || n > agentapi.MaxTargetSessions {
+				return fmt.Errorf("fake agent: warm-up targetSessions is %d, outside 1..%d (agentapi.MaxTargetSessions)", n, agentapi.MaxTargetSessions)
+			}
 		}
 	}
 	return nil

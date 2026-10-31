@@ -379,7 +379,7 @@ func TestEngineOverridesApply(t *testing.T) {
 	r.set(run(instance(withChecks(agentapi.Checks{
 		VerificationGeneration: 1,
 		Verify:                 &agentapi.VerifyRequest{},
-		WarmUp:                 &agentapi.WarmUpRequest{},
+		WarmUp:                 &agentapi.WarmUpRequest{TargetSessions: 1},
 	}))))
 	r.steps(2) // the worker starts; then it runs, is sampled and checked
 
