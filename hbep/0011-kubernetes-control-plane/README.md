@@ -318,7 +318,7 @@ S3 exercised validation, watches, conflicts, cascades and finalizers. Leases, Ev
    - Either way, controllers submit nothing new, because no submission starts without a recorded attempt (S4). Running jobs keep running to their hard ends.
    - The launcher's health reports the write failures on k3s, or the alarm on etcd. The host's disk is its own (Placement).
 6. **Idle cost:** one small host, or about 0.36 GiB of memory on k3s (S3). No grant hours and no provider connections when nothing is deployed.
-7. **Rollback:** stopping the control plane leaves provider jobs running until their hard ends, and the front serving from its last table. One exception: with HBEP-6's `Ping` subscription, the tunnels drop once the lifecycle controller stops, so the front then serves only managed providers (HBEP-6, Risks). Removing the framework needs releasing every Allocation first, with approval, and then removing the CRD-deletion policy.
+7. **Rollback:** stopping the control plane leaves provider jobs running until their hard ends, and the front serving from its last table. Established tunnels stay up, since HBEP-6's frps plugin is consulted only at logins and proxy registrations; a tunnel that reconnects meanwhile waits for the lifecycle controller to return (HBEP-6, Risks). Removing the framework needs releasing every Allocation first, with approval, and then removing the CRD-deletion policy.
 
 ## Drawbacks
 
@@ -425,4 +425,4 @@ The control plane replaces the files and scripts that held www-2027's state: per
   - **The certificate** gains a fixed synthetic DNS name, proposed as `dial-home.hpcburst.invalid`, because frpc verifies the dial-home listener by `serverName` against a trusted file, unlike the agent's pin. Before, it had no stated name.
   - **Ssh mode** uses two forwards, one for the agent's control traffic and one for the tunnel (open question 8). Before, one forward carried the tunnel.
   - **Wording.** Registration goes over the dial-home path, the agent's own connection, never through frp's tunnel, so the text no longer says "registration through the tunnel". The trigger of `DialHomeUnreachable` is unchanged.
-  - **An exception from the `Ping` gap** (HBEP-6, Risks). Stopping the control plane now also stops the frps plugin in the lifecycle controller's process, so every tunnel drops within 10 s and the front serves nothing from our Instances (Operational readiness 7), unless the science agent drops `Ping` from the plugin's operations.
+  - **Rollback** (Operational readiness 7). Established tunnels survive a stopped control plane; a tunnel that reconnects meanwhile cannot log in until the lifecycle controller, which serves frps's plugin, returns (HBEP-6).

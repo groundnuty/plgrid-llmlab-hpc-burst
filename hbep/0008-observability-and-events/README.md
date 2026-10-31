@@ -205,7 +205,7 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - 2026-10-30: aligned with HBEP-11 becoming implementable: the API host row.
 - 2026-10-30: alpha's thresholds for failing Instances and its "ending soon" timing noted from HBEP-7.
 - 2026-10-30: the front's alpha usage sink and counts noted from HBEP-5.
-- 2026-10-31: noted from HBEP-6 becoming implementable: in alpha the tunnel carries only HBEP-5's alpha endpoints, so engine metrics reach the controller in the agent's reports, not by a scrape through the tunnel (open question on how metrics leave the job). HBEP-6 proposes a tunnel heartbeat metric, `hpcburst_tunnel_last_ping_timestamp_seconds`, unknown rather than zero after a restart, and the event reasons `PathProbeFailing` (the front's probe, type `degraded`) and `TunnelOrphaned`.
+- 2026-10-31: noted from HBEP-6 becoming implementable: in alpha the tunnel carries only HBEP-5's alpha endpoints, so engine metrics reach the controller in the agent's reports, not by a scrape through the tunnel (open question on how metrics leave the job). HBEP-6 proposes the event reasons `PathProbeFailing` (the front's probe, type `degraded`) and `TunnelOrphaned`; it records no tunnel heartbeat metric, since its frps plugin does not see pings.
 
 ## Amendments
 

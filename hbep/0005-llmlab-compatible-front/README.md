@@ -331,7 +331,7 @@ Front settings, in the front's configuration file, which the launcher passes (HB
 |---|---|---|
 | `clientListen` | the IPv4 loopback address, port 8000 | the client listener |
 | `dialHomeListen` | direct mode: required; ssh mode: the IPv4 loopback address at the launcher's port base + 7 | the dial-home port (HBEP-11, open question 8): in direct mode an address compute nodes reach, in ssh mode the loopback port that the restricted key's second forward targets (Listeners) |
-| `frpsBindAddr`, `frpsMuxAddr` | the IPv4 loopback address at base + 6 and base + 8 | frps's bind port, where the tunnel's websocket goes, and its tcpmux port, which the transport dials (HBEP-6). Proposed names |
+| `frpsBindAddr`, `frpsMuxAddr` | the IPv4 loopback address at base + 9 and base + 10 | frps's bind port, where the tunnel's websocket goes, and its tcpmux port, which the transport dials (HBEP-6). Proposed names |
 | `clientKeysFile` | required | mode-600 file of client keys with their IDs |
 | `sessionHeaders` | `[x-session-id]` | the session headers honoured, in order |
 | `maxRequestDuration` | 2 h | the front's total deadline per request (open question 12) |
