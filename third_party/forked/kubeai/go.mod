@@ -1,6 +1,6 @@
 module github.com/groundnuty/plgrid-llmlab-hpc-burst/third_party/forked/kubeai
 
-go 1.27.3
+go 1.26.0
 
 require (
 	github.com/cespare/xxhash v1.1.0
