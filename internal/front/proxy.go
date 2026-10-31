@@ -73,6 +73,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (p *Proxy) serveV1(w http.ResponseWriter, r *http.Request) {
 	x := newExchange(r, p.clk, p.cfg.MaxRequestDuration.D())
 	defer p.finish(x)
+	cio := bindClientIO(w, x, p.cfg.writeGrace)
+	defer cio.stop()
 	id, ok := p.authenticate(r)
 	if !ok {
 		p.fail(w, x, http.StatusUnauthorized, codeInvalidAPIKey, "", "", "no client key, or a wrong one")
@@ -88,8 +90,17 @@ func (p *Proxy) serveV1(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, MaxBodyBytes))
+	cio.bodyRead()
 	if err != nil {
-		p.fail(w, x, http.StatusBadRequest, codeInvalidRequest, "", "", "the body could not be read: "+err.Error())
+		switch cut := x.cutBy(); cut {
+		case "":
+			p.fail(w, x, http.StatusBadRequest, codeInvalidRequest, "", "", "the body could not be read: "+err.Error())
+		case cutClient:
+			x.rec.Status, x.rec.Finish, x.rec.CutBy = statusClientClosed, strp("cut"), strp(cut)
+		default:
+			x.rec.CutBy = strp(cut)
+			p.fail(w, x, http.StatusGatewayTimeout, codeRequestTimeout, detailOf(cut), "", "the request was cut while its body was read: "+detailOf(cut))
+		}
 		return
 	}
 	rb, err := parseBody(body)

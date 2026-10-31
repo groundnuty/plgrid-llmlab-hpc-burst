@@ -37,6 +37,10 @@ type Config struct {
 	// Namespaces are the namespaces whose ModelDeployments and Instances the
 	// front watches; empty means all (HBEP-5, Request path step 3).
 	Namespaces []string `json:"namespaces,omitempty"`
+
+	// writeGrace is how long the front may still write to a client after
+	// it cut the request, to send its error; not a setting (tests shorten it).
+	writeGrace time.Duration
 }
 
 // Duration is a time.Duration written as a Go duration string.
@@ -72,6 +76,7 @@ const (
 	DefaultClientKeepAlive     = 120 * time.Second
 	DefaultQueueTimeout        = 60 * time.Second
 	DefaultStreamHeaders       = 30 * time.Second
+	defaultWriteGrace          = 5 * time.Second
 	DefaultPauseAfterFailures  = 3
 	DefaultPauseDuration       = 30 * time.Second
 )
@@ -116,6 +121,9 @@ func (c Config) WithDefaults() Config {
 	setDur(&c.ClientKeepAlive, DefaultClientKeepAlive)
 	setDur(&c.QueueTimeout, DefaultQueueTimeout)
 	setDur(&c.StreamHeadersTimeout, DefaultStreamHeaders)
+	if c.writeGrace == 0 {
+		c.writeGrace = defaultWriteGrace
+	}
 	setDur(&c.PauseDuration, DefaultPauseDuration)
 	if c.PauseAfterFailures == 0 {
 		c.PauseAfterFailures = DefaultPauseAfterFailures
