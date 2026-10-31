@@ -18,6 +18,9 @@ type UpgradeOptions struct {
 	Grace        time.Duration
 	ReadyTimeout time.Duration
 	Log          io.Writer
+
+	// supervisorArgv, set by tests only, replaces the supervisor's command line.
+	supervisorArgv []string
 }
 
 // UpgradeReport is the outcome of an upgrade.
@@ -88,6 +91,13 @@ func Upgrade(ctx context.Context, o UpgradeOptions) (*UpgradeReport, error) {
 	} else if sr.Health != Healthy {
 		return nil, fmt.Errorf("the host is %s (%v); fix it or stop it before upgrading", sr.Health, sr.Reasons)
 	}
+	// The controllers' certificate pair is kept, and checked before the old host is stopped: a pair
+	// that has since been broken is found while nothing has changed.
+	if st.Controllers != nil {
+		if err := ensureAgentEndpointPair(l.host(st.Ports), o.Log); err != nil {
+			return nil, err
+		}
+	}
 	cfg, err := restConfig(l.kubeconfig(), st.Ports, 60*time.Second)
 	if err != nil {
 		return nil, err
@@ -101,6 +111,13 @@ func Upgrade(ctx context.Context, o UpgradeOptions) (*UpgradeReport, error) {
 	nst, backup, stopDur, readyAt, err := replaceHost(ctx, l, st, bin, realHost{}, o.Grace, o.ReadyTimeout, o.Log)
 	if err != nil {
 		return nil, err
+	}
+	// replaceHost stopped the supervisor with the old host. The record keeps what it ran, so a
+	// status taken from here on says the controllers are missing until they are started again.
+	if nst.Controllers = st.Controllers; nst.Controllers != nil {
+		if err := l.saveState(nst); err != nil {
+			return nil, fmt.Errorf("the new host is running, but its record could not be written: %w", err)
+		}
 	}
 	rep := &UpgradeReport{From: st.Version, To: nst.Version, Backup: backup, StopMS: stopDur.Milliseconds(), ReadyMS: readyAt.Milliseconds()}
 	rep.StopToReady = stopDur.Milliseconds() + readyAt.Milliseconds()
@@ -119,6 +136,19 @@ func Upgrade(ctx context.Context, o UpgradeOptions) (*UpgradeReport, error) {
 	if !rep.Verification.OK() {
 		return rep, fmt.Errorf("the upgrade lost or changed objects: kept %d of %d, missing %v, changed %v (the new host is running; the backup is %s)",
 			rep.Verification.Kept, rep.Verification.Before, rep.Verification.Missing, rep.Verification.Changed, backup)
+	}
+	// The controllers start again only after the comparison: they write to the store, and the
+	// comparison is of what the upgrade itself kept.
+	if nst.Controllers != nil {
+		argv := o.supervisorArgv
+		if argv == nil {
+			if argv, err = supervisorArgv(l); err != nil {
+				return rep, err
+			}
+		}
+		if err := startSupervisor(ctx, l, nst, argv, superviseStartTimeout, o.Log); err != nil {
+			return rep, fmt.Errorf("the new host is running and kept every object, but the controllers did not start again (hpcburst down, then up): %w", err)
+		}
 	}
 	return rep, nil
 }
