@@ -81,6 +81,27 @@ func TestAllocationSubmissionParameters(t *testing.T) {
 	}
 }
 
+// The memory request is never negative; zero and any positive size are
+// accepted. This is the rule allocations:$.spec.forProvider.batch.memory#0.
+func TestAllocationMemoryIsNotNegative(t *testing.T) {
+	const msg = "memory must not be negative"
+	ns := newNamespace(t)
+	for _, q := range []string{"-1Gi", "-1", "-512Mi"} {
+		t.Run("refuse "+q, func(t *testing.T) {
+			a := newAllocation(ns, uniq("alloc"))
+			a.Spec.ForProvider.Batch.Memory = resource.MustParse(q)
+			requireRefused(t, c.Create(bg(), a), msg)
+		})
+	}
+	for _, q := range []string{"0", "16Gi", "1"} {
+		t.Run("accept "+q, func(t *testing.T) {
+			a := newAllocation(ns, uniq("alloc"))
+			a.Spec.ForProvider.Batch.Memory = resource.MustParse(q)
+			must(t, c.Create(bg(), a), "create with memory "+q)
+		})
+	}
+}
+
 // An Allocation is a lease on a batch job or on a managed catalog entry, never
 // both and never neither (review finding B9): a catalog entry has no partition
 // and no time limit, and none is invented for it.
