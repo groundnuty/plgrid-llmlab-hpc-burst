@@ -60,15 +60,15 @@ func TestParseBodyRefusals(t *testing.T) {
 		in   string
 		want error
 	}{
-		"duplicate top-level model":       {`{"model":"a","x":1,"model":"b"}`, errDuplicateModel},
-		"duplicate through an escape":     {`{"model":"a","model":"b"}`, errDuplicateModel},
-		"no model":                        {`{"messages":[]}`, errNoModel},
-		"model not a string":              {`{"model":42}`, errNoModel},
-		"model null":                      {`{"model":null}`, errNoModel},
-		"not an object":                   {`["model"]`, errNotObject},
-		"not JSON":                        {`model=m`, errNotObject},
-		"trailing data":                   {`{"model":"m"} {}`, errNotObject},
-		"truncated":                       {`{"model":"m",`, errNotObject},
+		"duplicate top-level model":        {`{"model":"a","x":1,"model":"b"}`, errDuplicateModel},
+		"duplicate through an escape":      {`{"model":"a","model":"b"}`, errDuplicateModel},
+		"no model":                         {`{"messages":[]}`, errNoModel},
+		"model not a string":               {`{"model":42}`, errNoModel},
+		"model null":                       {`{"model":null}`, errNoModel},
+		"not an object":                    {`["model"]`, errNotObject},
+		"not JSON":                         {`model=m`, errNotObject},
+		"trailing data":                    {`{"model":"m"} {}`, errNotObject},
+		"truncated":                        {`{"model":"m",`, errNotObject},
 		"nested model only does not count": {`{"metadata":{"model":"m"}}`, errNoModel},
 	} {
 		t.Run(name, func(t *testing.T) {
