@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 )
@@ -122,9 +123,25 @@ func (r chatResponse) reasoning() string {
 // ReasoningBudgetExhausted, however healthy it is.
 const reasoningTokens = 4096
 
-// reasoningExhaustedPrefix starts the message of a check whose reply spent
-// its whole output budget on reasoning and gave no final answer.
-const reasoningExhaustedPrefix = "ReasoningBudgetExhausted: "
+// reasonReasoningBudgetExhausted is the reason code of a check whose reply
+// spent its whole output budget on reasoning and gave no final answer.
+const reasonReasoningBudgetExhausted = "ReasoningBudgetExhausted"
+
+// reasonedError is a failure that has a reason code (a CamelCase word the
+// controller tells apart), besides its message. failedOutcome turns it into the
+// outcome's reason and message.
+type reasonedError struct{ reason, message string }
+
+func (e *reasonedError) Error() string { return e.reason + ": " + e.message }
+
+// reasonOf returns the reason code of err, "" when it has none.
+func reasonOf(err error) string {
+	var re *reasonedError
+	if errors.As(err, &re) {
+		return re.reason
+	}
+	return ""
+}
 
 // reasoningExhausted returns the ReasoningBudgetExhausted failure when the
 // reply holds reasoning but no final answer (no content and no tool call) and
@@ -136,7 +153,7 @@ func (r chatResponse) reasoningExhausted(maxTokens int32) error {
 	}
 	ch := r.Choices[0]
 	if r.reasoning() != "" && r.content() == "" && len(ch.Message.ToolCalls) == 0 && ch.FinishReason == "length" {
-		return fmt.Errorf("%sthe reply spent its %d output tokens on reasoning and gave no final answer", reasoningExhaustedPrefix, maxTokens)
+		return &reasonedError{reasonReasoningBudgetExhausted, fmt.Sprintf("the reply spent its %d output tokens on reasoning and gave no final answer", maxTokens)}
 	}
 	return nil
 }

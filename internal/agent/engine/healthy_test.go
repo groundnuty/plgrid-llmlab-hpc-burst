@@ -29,8 +29,12 @@ func TestHealthyEngineQualifiesAndWarmsUp(t *testing.T) {
 
 			res := c.Qualify(ctx, agentapi.QualifyRequest{Shapes: shapes, ToolCalls: true})
 			for _, name := range []agentapi.CheckName{agentapi.CheckHealth, agentapi.CheckChat, agentapi.CheckToolCall, agentapi.CheckCorruption, agentapi.CheckBehaviour} {
-				if o := outcomeOf(t, res, name); !o.Passed || o.Message != "" {
-					t.Errorf("%s: %+v, want passed with no message", name, o)
+				want := ""
+				if name == agentapi.CheckBehaviour && tc.opts != nil {
+					want = "ran at a context of 200 tokens" // a reasoning parser is declared: the context is named
+				}
+				if o := outcomeOf(t, res, name); !o.Passed || o.Message != want {
+					t.Errorf("%s: %+v, want passed with message %q", name, o, want)
 				}
 			}
 			if res.Fingerprint != "fp-enginedouble" || res.KVCapacityTokens != 1<<20 || len(res.ServedModelNames) != 1 || res.ServedModelNames[0] != "m" {

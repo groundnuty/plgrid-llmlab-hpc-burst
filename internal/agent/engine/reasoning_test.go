@@ -174,7 +174,7 @@ func TestReasoningTextIsNeverJudged(t *testing.T) {
 		})
 	}
 	c, _ := doubleWith(t, "", nil, reply, WithReasoning(true))
-	if err := c.toolCallCheck(context.Background()); err == nil || strings.HasPrefix(err.Error(), reasoningExhaustedPrefix) {
+	if err := c.toolCallCheck(context.Background()); err == nil || reasonOf(err) == reasonReasoningBudgetExhausted {
 		t.Errorf("toolCallCheck = %v, want a failure for the missing call that is not ReasoningBudgetExhausted (the reply stopped)", err)
 	}
 	if _, err := c.behaviourCheck(context.Background(), agentapi.QualifyRequest{Shapes: shapes}); err == nil || !strings.Contains(err.Error(), "empty") {
@@ -203,7 +203,7 @@ func TestReasoningBudgetIsAdded(t *testing.T) {
 	off, offRec := doubleWith(t, "reasoning-first=500", nil, nil)
 	res = off.Qualify(context.Background(), req)
 	for _, name := range []agentapi.CheckName{agentapi.CheckToolCall, agentapi.CheckBehaviour} {
-		if o := outcomeOf(t, res, name); o.Passed || !strings.HasPrefix(o.Message, reasoningExhaustedPrefix) {
+		if o := outcomeOf(t, res, name); o.Passed || !strings.HasPrefix(o.Message, "ReasoningBudgetExhausted: ") {
 			t.Errorf("reasoning off, %s: passed %v, %q; want a ReasoningBudgetExhausted failure", name, o.Passed, o.Message)
 		}
 	}
@@ -237,50 +237,117 @@ func TestReasoningBudgetExhausted(t *testing.T) {
 	}
 }
 
-// With a reasoning parser the behaviour check shortens its prompt to leave
-// room for the output and the reasoning budget, and says so on a pass. The
-// numbers are worked by hand: max_model_len 8192, template overhead 9, typical
-// output 64 and the 4,096 reasoning tokens leave 8192-9-64-4096 = 4023 tokens
-// of prompt beyond the overhead.
+// With a reasoning parser the behaviour check shortens its prompt to leave room
+// for the output and the reasoning budget, and says what context it ran at, on a
+// pass too. The numbers are worked by hand: max_model_len 8192, template
+// overhead 9, typical output 64 and the 4,096 reasoning tokens leave
+// 8192-9-64-4096 = 4023 tokens of prompt beyond the overhead.
 func TestBehaviourCheckShortensTheContextForReasoning(t *testing.T) {
 	tune := func(c *enginedouble.Config) { c.MaxModelLen = 8192 }
 	longest := agentapi.Shapes{ContextShort: 20, ContextTypical: 60, ContextLongest: 8000, OutputTypical: 64, OutputLongest: 100}
 	req := agentapi.QualifyRequest{Shapes: longest}
 
 	c, rec := doubleWith(t, "reasoning-first=50", tune, nil, WithReasoning(true))
-	note, err := c.behaviourCheck(context.Background(), req)
+	run, err := c.behaviourCheck(context.Background(), req)
 	if err != nil {
 		t.Fatalf("behaviour check: %v", err)
 	}
-	if !strings.Contains(note, "shortened from 8000 to 4023 tokens") {
-		t.Errorf("note %q, want it to say the prompt was shortened from 8000 to 4023 tokens", note)
+	if run.contextTokens != 4023 || !strings.Contains(run.note, "ran at a context of 4023 tokens") || !strings.Contains(run.note, "shortened from 8000") {
+		t.Errorf("ran at %d tokens, note %q; want 4023 and a note that says so and that 8000 was the longest", run.contextTokens, run.note)
 	}
 	if got := rec.maxTokensOf(false); len(got) == 0 || got[len(got)-1] != 64+4096 {
 		t.Errorf("max_tokens %v, want 4160 for the behaviour request", got)
 	}
 	// the outcome carries the note on a pass
 	res := c.Qualify(context.Background(), req)
-	if o := outcomeOf(t, res, agentapi.CheckBehaviour); !o.Passed || !strings.Contains(o.Message, "shortened from 8000 to 4023") {
-		t.Errorf("behaviour outcome %+v, want passed with the shortening in its message", o)
+	if o := outcomeOf(t, res, agentapi.CheckBehaviour); !o.Passed || !strings.Contains(o.Message, "ran at a context of 4023 tokens") {
+		t.Errorf("behaviour outcome %+v, want passed with the context in its message", o)
 	}
 
-	// without a reasoning parser the longest context is used as it is
+	// without a reasoning parser the longest context is used as it is, with no note
 	off, _ := doubleWith(t, "", tune, nil)
-	if note, err := off.behaviourCheck(context.Background(), req); err != nil || note != "" {
-		t.Errorf("reasoning off: note %q, error %v; want neither", note, err)
+	if run, err := off.behaviourCheck(context.Background(), req); err != nil || run.note != "" || run.contextTokens != 8000 {
+		t.Errorf("reasoning off: %+v, error %v; want 8000 tokens and no note", run, err)
+	}
+	// room for the longest context: no shortening, the context is still named
+	roomy, _ := doubleWith(t, "reasoning-first=50", nil, nil, WithReasoning(true))
+	if run, err := roomy.behaviourCheck(context.Background(), agentapi.QualifyRequest{Shapes: shapes}); err != nil || run.contextTokens != 200 || run.note != "ran at a context of 200 tokens" {
+		t.Errorf("roomy: %+v, error %v; want 200 tokens named", run, err)
 	}
 }
 
-// When the context cannot hold the reasoning budget, or the engine does not
-// report it, the behaviour check fails with a message that says why.
-func TestBehaviourCheckWithoutRoomForReasoning(t *testing.T) {
+// Below the typical context there is no room to fit: the check runs at the
+// typical context, says so, and does not fail for lack of room (science
+// agent's ruling of 31 Oct 2026). The engine here enforces 32768 tokens and
+// reports less, so the request itself fits and the verdict is the model's.
+// Worked by hand with typical output 64, ContextTypical 60, ContextLongest 200:
+//   - reported 4300: 4300-9-4160 = 131, between the two: the check runs at 131;
+//   - reported 4100: 4100-9-4160 < 0, below 60: it runs at 60, the typical context;
+//   - reported nothing: it cannot be fitted and runs at 60 too.
+func TestBehaviourCheckContextFloor(t *testing.T) {
 	req := agentapi.QualifyRequest{Shapes: shapes}
-	small, _ := doubleWith(t, "", func(c *enginedouble.Config) { c.MaxModelLen = 4000 }, nil, WithReasoning(true))
-	if _, err := small.behaviourCheck(context.Background(), req); err == nil || !strings.Contains(err.Error(), "no room for a prompt") {
-		t.Errorf("max_model_len 4000: error %v, want no room for a prompt", err)
+	reports := func(n int) func(*enginedouble.Config) {
+		return func(c *enginedouble.Config) { c.ReportedMaxModelLen = n }
 	}
-	blind, _ := doubleWith(t, "reports-nothing", nil, nil, WithReasoning(true))
-	if _, err := blind.behaviourCheck(context.Background(), req); err == nil || !strings.Contains(err.Error(), "max_model_len") {
-		t.Errorf("reports-nothing: error %v, want it to name max_model_len", err)
+	for _, tc := range []struct {
+		name   string
+		modes  string
+		tune   func(*enginedouble.Config)
+		tokens int32
+		note   string
+	}{
+		{"between the typical and the longest", "", reports(4300), 131, "shortened from 200"},
+		{"below the typical context", "", reports(4100), 60, "the typical context: max_model_len 4100 leaves 0 beside 4160 output tokens"},
+		{"no max_model_len reported", "reports-nothing", nil, 60, "/v1/models reports no max_model_len"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := doubleWith(t, tc.modes, tc.tune, nil, WithReasoning(true))
+			run, err := c.behaviourCheck(context.Background(), req)
+			if err != nil {
+				t.Fatalf("the check failed: %v", err)
+			}
+			if run.contextTokens != tc.tokens || !strings.Contains(run.note, fmt.Sprintf("ran at a context of %d tokens", tc.tokens)) || !strings.Contains(run.note, tc.note) {
+				t.Errorf("ran at %d tokens, note %q; want %d tokens and a note containing %q", run.contextTokens, run.note, tc.tokens, tc.note)
+			}
+			res := c.Qualify(context.Background(), req)
+			if o := outcomeOf(t, res, agentapi.CheckBehaviour); !o.Passed || !strings.Contains(o.Message, "ran at a context of") {
+				t.Errorf("behaviour outcome %+v, want passed, naming the context", o)
+			}
+		})
+	}
+}
+
+// When the engine truly has no room at the typical context, the request is
+// refused by the engine and the check fails with its error, not an error of its
+// own about room.
+func TestBehaviourCheckAtTheFloorFailsWithTheEnginesError(t *testing.T) {
+	c, _ := doubleWith(t, "", func(c *enginedouble.Config) { c.MaxModelLen = 4000 }, nil, WithReasoning(true))
+	run, err := c.behaviourCheck(context.Background(), agentapi.QualifyRequest{Shapes: shapes})
+	if err == nil || !strings.Contains(err.Error(), "HTTP 400") || strings.Contains(err.Error(), "no room") {
+		t.Errorf("error %v, want the engine's HTTP 400", err)
+	}
+	if run.contextTokens != 60 {
+		t.Errorf("ran at %d tokens, want the typical context, 60", run.contextTokens)
+	}
+}
+
+// failedOutcome is the one place that builds a failing outcome from a reason
+// code and a message; the code is the front of the message until the contract
+// has a field, and survives the cut to agentapi.MaxMessageBytes.
+func TestFailedOutcome(t *testing.T) {
+	o := failedOutcome(agentapi.CheckBehaviour, "ReasoningBudgetExhausted", "spent it all")
+	if o.Name != agentapi.CheckBehaviour || o.Passed || o.Message != "ReasoningBudgetExhausted: spent it all" {
+		t.Errorf("outcome %+v", o)
+	}
+	if o := failedOutcome(agentapi.CheckChat, "", "the chat answer is empty"); o.Passed || o.Message != "the chat answer is empty" {
+		t.Errorf("no reason: %+v", o)
+	}
+	long := failedOutcome(agentapi.CheckToolCall, "ReasoningBudgetExhausted", strings.Repeat("x", 1000))
+	if len(long.Message) != agentapi.MaxMessageBytes || !strings.HasPrefix(long.Message, "ReasoningBudgetExhausted: x") {
+		t.Errorf("a long message: %d bytes %q, want %d bytes keeping the code", len(long.Message), long.Message[:40], agentapi.MaxMessageBytes)
+	}
+	// a reasoned error carries its code through Qualify's single path
+	if reasonOf(&reasonedError{"R", "m"}) != "R" || reasonOf(fmt.Errorf("plain")) != "" || reasonOf(fmt.Errorf("wrapped: %w", &reasonedError{"R", "m"})) != "R" {
+		t.Error("reasonOf does not read the code of a reasoned error, wrapped or not")
 	}
 }
