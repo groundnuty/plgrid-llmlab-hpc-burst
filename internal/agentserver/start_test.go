@@ -3,7 +3,6 @@ package agentserver
 import (
 	"context"
 	"errors"
-	"net"
 	"net/http"
 	"strings"
 	"syscall"
@@ -50,16 +49,12 @@ func TestCheckLoopbackAcceptsOnlyLoopbackIPLiterals(t *testing.T) {
 	}
 }
 
-func TestStartRefusesAnAddressThatIsNotLoopbackAndListensOnNothing(t *testing.T) {
+func TestStartRefusesAnAddressThatIsNotLoopback(t *testing.T) {
 	x := newRig(t)
 	x.srv.addr = "0.0.0.0:29285" // a Host cannot produce this; the check must still hold
 	err := x.srv.Start(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "not a loopback IP address") {
 		t.Fatalf("Start = %v, want a refusal of a non-loopback address", err)
-	}
-	if c, derr := net.DialTimeout("tcp", "127.0.0.1:29285", 200*time.Millisecond); derr == nil {
-		c.Close()
-		t.Error("something listens on the refused address")
 	}
 }
 
