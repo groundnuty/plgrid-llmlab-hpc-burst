@@ -24,11 +24,24 @@ import (
 // conflict means re-read, never overwrite. Annotations rather than status,
 // because they survive a restore without status (S4).
 
+// annotationReadBack is the job ID whose settings the read-back compared and
+// found as requested (HBEP-4, The Slurm dialect, Read-back: "on the first
+// observe after a job is established"). It keys the read-back on the read-back
+// itself, not on the stored status's jobID, which a failed or empty first
+// observe also writes (review of PR 76: Opus R1, Astra B6). A mismatch writes
+// no marker: the condition SubmittedAsOther True stops later read-backs, and
+// if its status write is lost, the next observe compares again. It is an
+// annotation, like the rest of the record, so it survives a restore without
+// status and an administrator's later change is never read back. It is
+// defined here until the contracts name it in api/v1alpha1.
+const annotationReadBack = v1alpha1.Group + "/read-back"
+
 // record is the parsed record of one Allocation.
 type record struct {
-	sub    *v1alpha1.SubmissionRecord
-	jobID  string
-	lifted string
+	sub      *v1alpha1.SubmissionRecord
+	jobID    string
+	lifted   string
+	readBack string
 }
 
 func unresolved(r *v1alpha1.SubmissionRecord) bool {
@@ -52,6 +65,7 @@ func readRecord(a *v1alpha1.Allocation) (record, error) {
 	}
 	r.jobID = an[v1alpha1.AnnotationJobID]
 	r.lifted = an[v1alpha1.AnnotationHoldLifted]
+	r.readBack = an[annotationReadBack]
 	if r.jobID != "" && !isJobID(r.jobID) {
 		return r, fmt.Errorf("annotation %s is not a job ID", v1alpha1.AnnotationJobID)
 	}

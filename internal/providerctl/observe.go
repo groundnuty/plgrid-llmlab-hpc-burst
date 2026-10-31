@@ -61,8 +61,10 @@ func (e *external) observeRecorded(ctx context.Context, a *v1alpha1.Allocation, 
 			errs = append(errs, err)
 		}
 		refused = true
-	} else if prior.JobID != job.ID {
-		e.readBack(a, job)
+	} else if rec.readBack != job.ID && e.readBack(a, job) {
+		if err := e.markReadBack(ctx, a, rec, job.ID); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	if e.hold() && !refused {
 		lifted, err := e.settle(ctx, a, rec, name, job)
@@ -229,29 +231,60 @@ func (e *external) absent(a *v1alpha1.Allocation, id string, now time.Time) {
 }
 
 // readBack compares the job's partition, time limit and GPU count with the
-// request, on the first observe after it is established only (HBEP-4, The
-// Slurm dialect, Read-back): a later change, such as an administrator's
-// extension of the time limit, is a later hard end, never a mismatch. A
-// difference sets SubmittedAsOther True, reason ReasonReadBackMismatch, with
+// request, on the first successful observe of the recorded job only (HBEP-4,
+// The Slurm dialect, Read-back): a later change, such as an administrator's
+// extension of the time limit, is a later hard end, never a mismatch. The
+// caller runs it until the read-back marker names the job (annotationReadBack).
+// A difference sets SubmittedAsOther True, reason ReasonReadBackMismatch, with
 // each differing field and both values; the condition is never cleared, and
-// the lifecycle controller replaces the Allocation. The GPU count is compared
-// only from the queue listing, whose tres_req_str always carries it.
-func (e *external) readBack(a *v1alpha1.Allocation, job provider.Job) {
+// the lifecycle controller replaces the Allocation. It reports whether the job
+// matched, so the caller writes the marker; a raised condition is not a match
+// and is not compared again.
+func (e *external) readBack(a *v1alpha1.Allocation, job provider.Job) bool {
 	if a.GetCondition(v1alpha1.ConditionSubmittedAsOther).Status == corev1.ConditionTrue {
-		return
+		return false
 	}
 	diffs := readBackDiffs(a.Spec.ForProvider.Batch, job)
 	if len(diffs) == 0 {
-		return
+		return true
 	}
 	msg := "job " + job.ID + " was established with other settings than requested: " + strings.Join(diffs, "; ")
 	a.SetConditions(xpv2.Condition{Type: v1alpha1.ConditionSubmittedAsOther, Status: corev1.ConditionTrue,
 		Reason: v1alpha1.ReasonReadBackMismatch, Message: msg, LastTransitionTime: *mt(e.now())})
 	e.event(a, event.Warning("SubmittedAsOther", errors.New(msg)))
+	return false
+}
+
+// markReadBack writes the read-back marker for job id. A conflict re-reads the
+// Allocation from the API server and writes again, unless the marker is
+// already there.
+func (e *external) markReadBack(ctx context.Context, a *v1alpha1.Allocation, rec *record, id string) error {
+	var err error
+	for i := 0; i < 3; i++ {
+		if a.Annotations[annotationReadBack] == id {
+			rec.readBack = id
+			return nil
+		}
+		if err = write(ctx, e.s.kube, a, map[string]string{annotationReadBack: id}); err == nil {
+			rec.readBack = id
+			return nil
+		}
+		if !kerrors.IsConflict(err) {
+			break
+		}
+		if err = refresh(ctx, e.s.reader, a); err != nil {
+			break
+		}
+	}
+	return fmt.Errorf("record the read-back of job %s: %w", id, err)
 }
 
 // readBackDiffs lists the fields of job that differ from the request, each
-// with both values, in the order partition, time limit, GPUs.
+// with both values, in the order partition, time limit, GPUs. The queue
+// listing's tres_req_str always carries the GPU count, so a queue read is
+// always compared. Accounting carries it in its tres lists, and a record with
+// no gres entry reads as 0 GPUs (the synthetic v0.0.42 fixture has none), so
+// an accounting count is compared only when it is reported, that is non-zero.
 func readBackDiffs(p *v1alpha1.BatchParameters, job provider.Job) []string {
 	var diffs []string
 	if job.Partition != "" && job.Partition != p.Partition {
@@ -260,7 +293,7 @@ func readBackDiffs(p *v1alpha1.BatchParameters, job provider.Job) []string {
 	if want, err := p.TimeLimit.AsDuration(); err == nil && job.TimeLimit > 0 && job.TimeLimit != want {
 		diffs = append(diffs, fmt.Sprintf("timeLimit: requested %s, got %s", want, job.TimeLimit))
 	}
-	if job.Source == provider.SourceQueue && job.GPUs != p.GPUs {
+	if (job.Source == provider.SourceQueue || job.GPUs != 0) && job.GPUs != p.GPUs {
 		diffs = append(diffs, fmt.Sprintf("gpus: requested %d, got %d", p.GPUs, job.GPUs))
 	}
 	return diffs
