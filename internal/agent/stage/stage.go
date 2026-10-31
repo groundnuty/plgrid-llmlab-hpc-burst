@@ -143,7 +143,12 @@ var (
 
 // Image implements agent.Stager: it pulls or builds the image once, and
 // returns its path.
-func (s *Stager) Image(ctx context.Context, image, digest string, format agentapi.ImageFormat) (string, error) {
+func (s *Stager) Image(ctx context.Context, image, digest string, format agentapi.ImageFormat) (agent.ImageResult, error) {
+	p, err := s.image(ctx, image, digest, format)
+	return agent.ImageResult{Path: p}, err
+}
+
+func (s *Stager) image(ctx context.Context, image, digest string, format agentapi.ImageFormat) (string, error) {
 	if !digestForm.MatchString(digest) {
 		return "", fmt.Errorf("image digest %q is not sha256:<64 hex>", digest)
 	}

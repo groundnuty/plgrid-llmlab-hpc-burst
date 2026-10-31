@@ -63,6 +63,15 @@ type CheckpointRequest struct {
 	// rung 2): a present file whose rehash fails is moved aside and
 	// downloaded again. At the first start a mismatch is only reported.
 	Restage bool
+	// RehashOnly rehashes the present files and changes nothing: no file is
+	// downloaded or moved, and a missing one is absent. Verification after
+	// the worker started uses it, so nothing is staged under a running
+	// engine (PR #87 review, Opus B3).
+	RehashOnly bool
+	// LoadFormat is the launch's --load-format, "" when it names none
+	// (vLLM's default, auto). It decides which listed weight files the engine
+	// does not load and staging may skip (PR #87 review, Astra B5).
+	LoadFormat string
 	// Progress, when set, is called with the bytes done and the bytes to
 	// download.
 	Progress func(done, total int64)
@@ -79,14 +88,27 @@ type CheckpointResult struct {
 	Files []agentapi.FileResult
 }
 
+// ImageResult is a staged image.
+type ImageResult struct {
+	// Path is the image's absolute path.
+	Path string
+	// Verified says the image's content was checked at this staging against
+	// its integrity record: a SIF's SHA-256 sidecar, a sandbox's manifest,
+	// both written in the same step as the pinned pull or build. A fresh pull
+	// or build counts as checked. The agent reports the image digest only
+	// for a verified image (PR #87 review, Astra B1, Opus B5).
+	Verified bool
+}
+
 // Stager stages an Instance's image and checkpoint under the profile's staging
 // directory (HBEP-7, What it runs: Staging). Package internal/agent/stage
 // implements it.
 type Stager interface {
-	// Image makes sure the image digest is staged in the format, and returns
-	// its absolute path (agentapi.StagedImagePath under the staging
-	// directory).
-	Image(ctx context.Context, image, digest string, format agentapi.ImageFormat) (string, error)
+	// Image makes sure the image digest is staged in the format, checks a
+	// staged image against the integrity record written when it was pulled or
+	// built, pulls or builds it again when the check fails, and returns its
+	// absolute path (agentapi.StagedImagePath under the staging directory).
+	Image(ctx context.Context, image, digest string, format agentapi.ImageFormat) (ImageResult, error)
 	// Checkpoint stages the checkpoint's missing files and rehashes the
 	// present ones.
 	Checkpoint(ctx context.Context, req CheckpointRequest) (CheckpointResult, error)

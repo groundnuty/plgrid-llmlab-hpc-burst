@@ -316,7 +316,8 @@ func (a *Agent) startStaging(in *instance, i agentapi.DesiredInstance) {
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
-		img, err := a.o.Stager.Image(ctx, launch.Image, launch.ImageDigest, format)
+		imgRes, err := a.o.Stager.Image(ctx, launch.Image, launch.ImageDigest, format)
+		img := imgRes.Path
 		var ck CheckpointResult
 		if err == nil {
 			ck, err = a.o.Stager.Checkpoint(ctx, CheckpointRequest{

@@ -316,10 +316,11 @@ func TestImageFormats(t *testing.T) {
 	} {
 		t.Run(string(tc.format), func(t *testing.T) {
 			s, _, root := newStager(t, nil)
-			p, err := s.Image(context.Background(), "docker.io/vllm/vllm-openai", digest, tc.format)
+			res, err := s.Image(context.Background(), "docker.io/vllm/vllm-openai", digest, tc.format)
 			if err != nil {
 				t.Fatal(err)
 			}
+			p := res.Path
 			if want := filepath.Join(s.c.StagingDir, agentapi.StagedImagePath(digest, tc.format)); p != want {
 				t.Fatalf("path %q, want %q", p, want)
 			}
