@@ -1,0 +1,51 @@
+{
+ "errors": [],
+ "jobs": [
+  {
+   "end_time": {
+    "infinite": false,
+    "number": 0,
+    "set": true
+   },
+   "hold": true,
+   "job_id": 4501,
+   "job_state": [
+    "PENDING"
+   ],
+   "name": "hb-example-held-submit-allocation-000000000000",
+   "partition": "plgrid-gpu-a100",
+   "priority": {
+    "infinite": false,
+    "number": 0,
+    "set": true
+   },
+   "restart_cnt": 0,
+   "start_time": {
+    "infinite": false,
+    "number": 0,
+    "set": true
+   },
+   "state_reason": "JobHeldUser",
+   "submit_time": {
+    "infinite": false,
+    "number": 1793452354,
+    "set": true
+   },
+   "time_limit": {
+    "infinite": false,
+    "number": 5,
+    "set": true
+   },
+   "tres_req_str": "cpu=4,mem=32G,node=1,billing=1,gres/gpu=1"
+  }
+ ],
+ "meta": {
+  "plugin": {
+   "data_parser": "data_parser/v0.0.40"
+  },
+  "slurm": {
+   "release": "23.11.7"
+  }
+ },
+ "warnings": []
+}

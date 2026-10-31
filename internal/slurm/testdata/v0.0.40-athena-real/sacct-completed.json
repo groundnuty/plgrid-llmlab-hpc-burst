@@ -1,0 +1,104 @@
+{
+ "errors": [],
+ "jobs": [
+  {
+   "hold": false,
+   "job_id": 4501,
+   "name": "hb-example-held-submit-allocation-000000000000",
+   "partition": "plgrid-gpu-a100",
+   "priority": {
+    "infinite": false,
+    "number": 11310,
+    "set": true
+   },
+   "state": {
+    "current": [
+     "COMPLETED"
+    ],
+    "reason": "None"
+   },
+   "time": {
+    "elapsed": 90,
+    "eligible": 1793452355,
+    "end": 1793452704,
+    "limit": {
+     "infinite": false,
+     "number": 5,
+     "set": true
+    },
+    "start": 1793452614,
+    "submission": 1793452354
+   },
+   "tres": {
+    "allocated": [
+     {
+      "count": 4,
+      "name": "",
+      "type": "cpu"
+     },
+     {
+      "count": 32768,
+      "name": "",
+      "type": "mem"
+     },
+     {
+      "count": -2,
+      "name": "",
+      "type": "energy"
+     },
+     {
+      "count": 1,
+      "name": "",
+      "type": "node"
+     },
+     {
+      "count": 1,
+      "name": "",
+      "type": "billing"
+     },
+     {
+      "count": 1,
+      "name": "gpu",
+      "type": "gres"
+     }
+    ],
+    "requested": [
+     {
+      "count": 4,
+      "name": "",
+      "type": "cpu"
+     },
+     {
+      "count": 32768,
+      "name": "",
+      "type": "mem"
+     },
+     {
+      "count": 1,
+      "name": "",
+      "type": "node"
+     },
+     {
+      "count": 1,
+      "name": "",
+      "type": "billing"
+     },
+     {
+      "count": 1,
+      "name": "gpu",
+      "type": "gres"
+     }
+    ]
+   }
+  }
+ ],
+ "meta": {
+  "plugin": {
+   "data_parser": "data_parser/v0.0.40"
+  },
+  "slurm": {
+   "release": "23.11.7"
+  }
+ },
+ "warnings": []
+}

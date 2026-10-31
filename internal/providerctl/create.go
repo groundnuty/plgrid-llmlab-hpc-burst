@@ -1,0 +1,408 @@
+package providerctl
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
+	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
+	"github.com/crossplane/crossplane-runtime/v2/pkg/reconciler/managed"
+	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
+)
+
+// Create implements managed.ExternalClient (HBEP-4, Two controllers, Create):
+// in ssh dial-home mode it checks the dial-home key; it stages the agent's
+// binary and the Allocation's files; it claims attempt n+1 by compare-and-swap
+// (a lost claim submits nothing); it submits, held in hold mode; it records the
+// outcome, and an accepted job's ID by compare-and-swap; and in hold mode it
+// settles at once, so the hold lasts the time of one listing read. It returns
+// an error for anything that kept it from submitting and for a Rejected
+// outcome, so crossplane backs off; an Unknown outcome is no error, and the
+// tag resolves it.
+func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.ExternalCreation, error) {
+	a, ok := mg.(*v1alpha1.Allocation)
+	if !ok {
+		return managed.ExternalCreation{}, errNotAllocation
+	}
+	if e.refused != nil {
+		return managed.ExternalCreation{}, e.refused
+	}
+	name := meta.GetExternalName(a)
+	if tag := v1alpha1.JobTag(a.Namespace, a.Name, a.UID); name != tag {
+		return managed.ExternalCreation{}, fmt.Errorf("refusing to submit: the external name is not this Allocation's job tag %s", tag)
+	}
+	rec, err := readRecord(a)
+	if err != nil {
+		return managed.ExternalCreation{}, err
+	}
+	now := e.now()
+	switch s := rec.sub; {
+	case rec.jobID != "":
+		return managed.ExternalCreation{}, fmt.Errorf("job %s is already recorded for this Allocation; refusing to submit another", rec.jobID)
+	case needsResolution(rec) && !(e.hold() && now.Sub(attemptTime(a, s)) > e.inflightWindow()):
+		return managed.ExternalCreation{}, fmt.Errorf("submission attempt %d is unresolved; refusing to submit another", s.Attempt)
+	case s != nil && s.State == v1alpha1.SubmissionRejected && now.Sub(attemptTime(a, s)) < e.s.o.RejectBackoff:
+		return managed.ExternalCreation{}, fmt.Errorf("attempt %d was rejected; the next waits for backoff", s.Attempt)
+	}
+	if why := e.prerequisites(a); why != "" {
+		return managed.ExternalCreation{}, errors.New(why)
+	}
+	paths, err := e.p.Paths(ctx)
+	if err != nil {
+		return managed.ExternalCreation{}, err
+	}
+	if e.s.o.Front.Mode == agentapi.DialHomeSSH {
+		present, err := e.p.DialHomeKeysPresent(ctx)
+		if err != nil {
+			return managed.ExternalCreation{}, err
+		}
+		if !present {
+			return managed.ExternalCreation{}, fmt.Errorf("%s: the dial-home key files are missing in ~/%s on the platform; nothing is submitted", v1alpha1.ConditionDialHomeKeyMissing, agentapi.DialHomeDir)
+		}
+	}
+	files, err := e.files(a, name, paths)
+	if err != nil {
+		return managed.ExternalCreation{}, err
+	}
+	for _, f := range files {
+		if err := e.p.EnsureFile(ctx, f); err != nil {
+			return managed.ExternalCreation{}, fmt.Errorf("stage %s: %w", filepath.Base(f.Path), err)
+		}
+	}
+
+	n := int32(1)
+	if rec.sub != nil {
+		n = rec.sub.Attempt + 1
+	}
+	claim := v1alpha1.SubmissionRecord{Attempt: n, Token: newToken(), State: v1alpha1.SubmissionInFlight, Writer: e.s.o.Identity, Time: mt(now)}
+	if err := write(ctx, e.s.kube, a, map[string]string{v1alpha1.AnnotationSubmission: recordValue(claim)}); err != nil {
+		return managed.ExternalCreation{}, fmt.Errorf("could not claim submission attempt %d, nothing submitted: %w", n, err)
+	}
+	e.p.SetBusy(name, true)
+	id, outcome, serr := e.p.Submit(ctx, provider.SubmitRequest{
+		Tag: name, Hold: e.hold(), Account: e.v.Settings.Account, Params: *a.Spec.ForProvider.Batch,
+	})
+	// The outcome is written with a fresh context: the reconcile's may have
+	// run out with sbatch, and the record must not stay InFlight.
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	switch outcome {
+	case provider.Accepted:
+		return managed.ExternalCreation{}, e.accepted(wctx, a, claim, id)
+	case provider.Rejected:
+		r := claim
+		r.State, r.Time, r.Reason = v1alpha1.SubmissionRejected, mt(e.now()), truncate(errText(serr))
+		if _, err := writeOwn(wctx, e.s.kube, e.s.reader, a, claim.Token, func(record) map[string]string {
+			return map[string]string{v1alpha1.AnnotationSubmission: recordValue(r)}
+		}); err != nil {
+			e.s.o.Log.Info("cannot record the rejection", "attempt", n, "error", err)
+		}
+		e.event(a, event.Warning("SubmissionRejected", fmt.Errorf("attempt %d: %s", n, r.Reason)))
+		return managed.ExternalCreation{}, fmt.Errorf("attempt %d rejected: %s", n, r.Reason)
+	default:
+		u := claim
+		u.State, u.Reason = v1alpha1.SubmissionUnknown, truncate(errText(serr))
+		if _, err := writeOwn(wctx, e.s.kube, e.s.reader, a, claim.Token, func(record) map[string]string {
+			return map[string]string{v1alpha1.AnnotationSubmission: recordValue(u)}
+		}); err != nil {
+			e.s.o.Log.Info("cannot record the unknown outcome; the claim stays InFlight", "attempt", n, "error", err)
+		}
+		e.event(a, event.Warning("SubmissionUnknown", fmt.Errorf("attempt %d: %s; the tag will resolve it", n, u.Reason)))
+		return managed.ExternalCreation{}, nil
+	}
+}
+
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// accepted records the job this Create submitted, unless another job was
+// recorded first (a concurrent or older attempt), and then settles in hold
+// mode. An extra job is cancelled while held, or, in fallback mode, reported.
+func (e *external) accepted(ctx context.Context, a *v1alpha1.Allocation, claim v1alpha1.SubmissionRecord, id string) error {
+	var recorded string
+	wrote, err := writeOwnOrRecorded(ctx, e, a, claim, id, &recorded)
+	if err != nil {
+		return fmt.Errorf("job %s was submitted but not recorded; a later observe adopts it by tag: %w", id, err)
+	}
+	if recorded != id {
+		if e.hold() {
+			if err := e.cancel(ctx, []string{id}); err != nil {
+				e.s.o.Log.Info("cannot cancel the extra held job", "job", id, "error", err)
+			}
+			e.event(a, event.Normal("HeldDuplicateCancelled", fmt.Sprintf("job %s was cancelled while held: job %s was recorded first", id, recorded)))
+		} else {
+			e.event(a, event.Warning("DuplicateJob", fmt.Errorf("job %s carries the tag but job %s was recorded first", id, recorded)))
+		}
+		return nil
+	}
+	if wrote {
+		e.event(a, event.Normal("JobSubmitted", fmt.Sprintf("job %s submitted by attempt %d", id, claim.Attempt)))
+	}
+	if !e.hold() || !wrote || meta.WasDeleted(a) {
+		return nil
+	}
+	rec, err := readRecord(a)
+	if err != nil {
+		return err
+	}
+	job, found, err := e.p.Observe(ctx, id)
+	if err != nil || !found {
+		return nil // the next observe settles
+	}
+	// A renamed job is left held: the next observe refuses and cancels it.
+	// settle lifts the job it is given even when the tag's listing does not
+	// show it, so the name is checked here.
+	if job.Name != meta.GetExternalName(a) {
+		return nil
+	}
+	if _, err := e.settle(ctx, a, &rec, meta.GetExternalName(a), job); err != nil {
+		e.s.o.Log.Info("cannot settle after the submission; the next observe will", "job", id, "error", err)
+	}
+	return nil
+}
+
+// writeOwnOrRecorded records id as the job, and the attempt Done, unless a job
+// is already recorded: then it only resolves its own attempt, and recorded is
+// that other job. Conflicts re-read from the API server. Ported from spike
+// S4's establishOwn.
+func writeOwnOrRecorded(ctx context.Context, e *external, a *v1alpha1.Allocation, claim v1alpha1.SubmissionRecord, id string, recorded *string) (bool, error) {
+	for i := 0; i < 5; i++ {
+		rec, err := readRecord(a)
+		if err != nil {
+			return false, err
+		}
+		*recorded = rec.jobID
+		set := map[string]string{}
+		if rec.jobID == "" {
+			*recorded = id
+			set[v1alpha1.AnnotationJobID] = id
+		}
+		if rec.sub != nil && rec.sub.Token == claim.Token && rec.sub.State != v1alpha1.SubmissionDone {
+			d := claim
+			d.State, d.Time = v1alpha1.SubmissionDone, mt(e.now())
+			if *recorded != id {
+				d.Reason = fmt.Sprintf("job %s is an extra: job %s was recorded first", id, *recorded)
+			}
+			set[v1alpha1.AnnotationSubmission] = recordValue(d)
+		}
+		if len(set) == 0 {
+			return false, nil
+		}
+		err = write(ctx, e.s.kube, a, set)
+		if err == nil {
+			_, wrote := set[v1alpha1.AnnotationJobID]
+			return wrote, nil
+		}
+		if !kerrors.IsConflict(err) {
+			return false, err
+		}
+		if err := refresh(ctx, e.s.reader, a); err != nil {
+			return false, err
+		}
+	}
+	return false, errors.New("still conflicting after 5 re-reads")
+}
+
+// prerequisites returns why the Allocation cannot be submitted yet, from the
+// control-plane host alone (no platform call), or "" when it can: a front must
+// be configured (HBEP-11), the Allocation's credential must exist
+// (docs/development.md: until it does, the provider waits; it neither submits
+// nor marks the attempt Rejected), and an agent build with the Allocation's
+// digest must exist for the partition's CPU architecture.
+func (e *external) prerequisites(a *v1alpha1.Allocation) string {
+	if e.s.o.Front == nil {
+		return "no front is configured, so no job is submitted (HBEP-11)"
+	}
+	if _, err := e.credential(a); err != nil {
+		return "waiting for the Allocation's credential: " + err.Error()
+	}
+	if _, err := e.s.builds.find(e.s.o.AgentBuildsDir, e.v.Profile.Partition.CPUArch, a.Spec.ForProvider.Batch.AgentDigest); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+// credential reads the Allocation's credential, which the lifecycle controller
+// writes once the Allocation has its UID.
+func (e *external) credential(a *v1alpha1.Allocation) ([]byte, error) {
+	if e.s.o.CredentialsDir == "" {
+		return nil, errors.New("no credentials directory is configured")
+	}
+	b, err := readOwnFile(agentapi.AllocationCredentialPath(e.s.o.CredentialsDir, string(a.UID)), 1024)
+	if err != nil {
+		return nil, err
+	}
+	if err := agentapi.CheckCredential(b); err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+// files are the three files staged before a claim (HBEP-4, Submission): the
+// agent's binary, the Allocation's credential and agent.json.
+func (e *external) files(a *v1alpha1.Allocation, tag string, paths slurm.Paths) ([]provider.File, error) {
+	digest := a.Spec.ForProvider.Batch.AgentDigest
+	bin, err := e.s.builds.read(e.s.o.AgentBuildsDir, e.v.Profile.Partition.CPUArch, digest)
+	if err != nil {
+		return nil, err
+	}
+	cred, err := e.credential(a)
+	if err != nil {
+		return nil, err
+	}
+	f := e.s.o.Front
+	cfg := agentapi.AgentConfig{
+		ProtocolVersion: agentapi.ProtocolVersion, Tag: tag, Mode: f.Mode, Endpoint: f.Endpoint,
+		CertSPKISHA256: f.CertPin, StagingDir: paths.Staging, DialHomeDir: paths.DialHomeDir(),
+	}
+	if f.Mode == agentapi.DialHomeSSH {
+		cfg.SSH = &agentapi.SSHForward{User: f.SSHUser, AgentPort: f.AgentPort}
+	}
+	js, err := cfg.Encode()
+	if err != nil {
+		return nil, fmt.Errorf("agent.json: %w", err)
+	}
+	return []provider.File{
+		file(agentapi.StagedAgentPath(digest), 0o700, bin),
+		file(agentapi.StagedCredentialPath(tag), 0o600, cred),
+		file(agentapi.StagedConfigPath(tag), 0o600, js),
+	}, nil
+}
+
+func file(path string, mode os.FileMode, content []byte) provider.File {
+	sum := sha256.Sum256(content)
+	return provider.File{Path: path, SHA256: hex.EncodeToString(sum[:]), Mode: mode, Content: content}
+}
+
+// readOwnFile reads a file that must be this user's, with no permission bits
+// for group or others, and at most max bytes.
+func readOwnFile(path string, max int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, errors.New("the file does not exist yet")
+		}
+		return nil, errors.New("the file cannot be opened")
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, errors.New("the file cannot be read")
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !fi.Mode().IsRegular() || fi.Mode().Perm()&0o077 != 0 || !ok || int(st.Uid) != os.Geteuid() {
+		return nil, errors.New("the file must be this user's, mode 600")
+	}
+	if fi.Size() > max {
+		return nil, fmt.Errorf("the file is larger than %d bytes", max)
+	}
+	return io.ReadAll(io.LimitReader(f, max))
+}
+
+// buildCache finds an agent build by digest without hashing it on every
+// reconcile: a file's digest is kept while its size and modification time
+// stay the same.
+type buildCache struct {
+	mu   sync.Mutex
+	seen map[string]buildKey
+}
+
+type buildKey struct {
+	size   int64
+	mtime  time.Time
+	digest string
+}
+
+// maxAgentBuild bounds an agent build read into memory.
+const maxAgentBuild = 256 << 20
+
+func (c *buildCache) path(dir, arch string) (string, error) {
+	if dir == "" {
+		return "", errors.New("no agent-builds directory is configured")
+	}
+	if arch == "" || strings.ContainsAny(arch, "/\\") {
+		return "", errors.New("the partition names no usable cpuArch")
+	}
+	return filepath.Join(dir, agentapi.AgentBuildName(arch)), nil
+}
+
+// find checks that the build for arch has the digest.
+func (c *buildCache) find(dir, arch, digest string) (string, error) {
+	p, err := c.path(dir, arch)
+	if err != nil {
+		return "", err
+	}
+	fi, err := os.Stat(p)
+	if err != nil {
+		return "", fmt.Errorf("no agent build for cpuArch %s", arch)
+	}
+	c.mu.Lock()
+	k, ok := c.seen[p]
+	c.mu.Unlock()
+	if !ok || k.size != fi.Size() || !k.mtime.Equal(fi.ModTime()) {
+		b, err := c.read(dir, arch, "")
+		if err != nil {
+			return "", err
+		}
+		sum := sha256.Sum256(b)
+		k = buildKey{size: fi.Size(), mtime: fi.ModTime(), digest: hex.EncodeToString(sum[:])}
+		c.mu.Lock()
+		if c.seen == nil {
+			c.seen = map[string]buildKey{}
+		}
+		c.seen[p] = k
+		c.mu.Unlock()
+	}
+	if k.digest != digest {
+		return "", fmt.Errorf("the agent build for cpuArch %s has digest %s, not the Allocation's agentDigest %s", arch, k.digest, digest)
+	}
+	return p, nil
+}
+
+// read returns the build for arch; with a digest, only when its content has
+// that digest.
+func (c *buildCache) read(dir, arch, digest string) ([]byte, error) {
+	p, err := c.path(dir, arch)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, fmt.Errorf("no agent build for cpuArch %s", arch)
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, maxAgentBuild+1))
+	if err != nil {
+		return nil, fmt.Errorf("read the agent build for cpuArch %s: %w", arch, err)
+	}
+	if len(b) > maxAgentBuild {
+		return nil, fmt.Errorf("the agent build for cpuArch %s is larger than %d bytes", arch, maxAgentBuild)
+	}
+	if digest != "" {
+		sum := sha256.Sum256(b)
+		if hex.EncodeToString(sum[:]) != digest {
+			return nil, fmt.Errorf("the agent build for cpuArch %s does not have the Allocation's agentDigest", arch)
+		}
+	}
+	return b, nil
+}

@@ -1,0 +1,99 @@
+{
+ "jobs": [
+  {
+   "job_id": 4320,
+   "name": "hb-rq-0123456789ab",
+   "user": "example-user",
+   "partition": "plgrid",
+   "account": "example-account",
+   "comment": {"administrator": "", "job": "", "system": ""},
+   "state": {"current": ["COMPLETED"], "reason": "None"},
+   "time": {
+    "submission": 1793351300,
+    "start": 1793351310,
+    "end": 1793351370,
+    "elapsed": 60,
+    "eligible": 1793351300,
+    "limit": {"set": true, "infinite": false, "number": 10}
+   },
+   "exit_code": {
+    "status": ["SUCCESS"],
+    "return_code": {"set": true, "infinite": false, "number": 0},
+    "signal": {"id": {"set": false, "infinite": false, "number": 0}, "name": ""}
+   },
+   "flags": []
+  },
+  {
+   "job_id": 4321,
+   "name": "hb-rq-control-0123456789ab",
+   "user": "example-user",
+   "partition": "plgrid",
+   "account": "example-account",
+   "comment": {"administrator": "", "job": "", "system": ""},
+   "state": {"current": ["COMPLETED"], "reason": "None"},
+   "time": {
+    "submission": 1793351243,
+    "start": 1793351245,
+    "end": 1793351253,
+    "elapsed": 8,
+    "eligible": 1793351243,
+    "limit": {"set": true, "infinite": false, "number": 10}
+   },
+   "exit_code": {
+    "status": ["SUCCESS"],
+    "return_code": {"set": true, "infinite": false, "number": 0},
+    "signal": {"id": {"set": false, "infinite": false, "number": 0}, "name": ""}
+   },
+   "flags": []
+  },
+  {
+   "job_id": 4322,
+   "name": "hb-rq-lone-0123456789ab",
+   "user": "example-user",
+   "partition": "plgrid",
+   "account": "example-account",
+   "comment": {"administrator": "", "job": "", "system": ""},
+   "state": {"current": ["REQUEUED"], "reason": "None"},
+   "time": {
+    "submission": 1793351243,
+    "start": 1793351245,
+    "end": 1793351300,
+    "elapsed": 55,
+    "eligible": 1793351243,
+    "limit": {"set": true, "infinite": false, "number": 10}
+   },
+   "exit_code": {
+    "status": ["PENDING"],
+    "return_code": {"set": false, "infinite": false, "number": 0},
+    "signal": {"id": {"set": false, "infinite": false, "number": 0}, "name": ""}
+   },
+   "flags": []
+  },
+  {
+   "job_id": 4320,
+   "name": "hb-rq-0123456789ab",
+   "user": "example-user",
+   "partition": "plgrid",
+   "account": "example-account",
+   "comment": {"administrator": "", "job": "", "system": ""},
+   "state": {"current": ["PENDING", "REQUEUED"], "reason": "None"},
+   "time": {
+    "submission": 1793351243,
+    "start": 1793351245,
+    "end": 1793351300,
+    "elapsed": 55,
+    "eligible": 1793351243,
+    "limit": {"set": true, "infinite": false, "number": 10}
+   },
+   "exit_code": {
+    "status": ["PENDING"],
+    "return_code": {"set": false, "infinite": false, "number": 0},
+    "signal": {"id": {"set": false, "infinite": false, "number": 0}, "name": ""}
+   },
+   "flags": []
+  }
+ ],
+ "meta": {"plugin": {"data_parser": "data_parser/v0.0.40", "accounting_storage": "accounting_storage/slurmdbd"}},
+ "errors": [],
+ "warnings": []
+}

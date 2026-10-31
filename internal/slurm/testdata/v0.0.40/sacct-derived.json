@@ -1,0 +1,266 @@
+{
+ "jobs": [
+  {
+   "job_id": 4310,
+   "name": "hb-dst-0123456789ab",
+   "user": "example-user",
+   "partition": "plgrid",
+   "account": "example-account",
+   "comment": {"administrator": "", "job": "", "system": ""},
+   "state": {"current": ["COMPLETED"], "reason": "None"},
+   "time": {
+    "submission": 1792885800,
+    "start": 1792888200,
+    "end": 1792891800,
+    "elapsed": 3600,
+    "eligible": 1792885800,
+    "limit": {"set": true, "infinite": false, "number": 120}
+   },
+   "exit_code": {
+    "status": ["SUCCESS"],
+    "return_code": {"set": true, "infinite": false, "number": 0},
+    "signal": {"id": {"set": false, "infinite": false, "number": 0}, "name": ""}
+   },
+   "flags": []
+  },
+  {
+   "job_id": 4304,
+   "name": "hb-gpu-untyped-0123456789ab",
+   "user": "example-user",
+   "partition": "plgrid",
+   "account": "example-account",
+   "comment": {"administrator": "", "job": "", "system": ""},
+   "state": {"current": ["RUNNING"], "reason": "None"},
+   "time": {
+    "submission": 1793351243,
+    "start": 1793351245,
+    "end": 0,
+    "elapsed": 0,
+    "eligible": 1793351243,
+    "limit": {"set": true, "infinite": false, "number": 120}
+   },
+   "exit_code": {
+    "status": ["PENDING"],
+    "return_code": {"set": false, "infinite": false, "number": 0},
+    "signal": {"id": {"set": false, "infinite": false, "number": 0}, "name": ""}
+   },
+   "flags": [],
+   "tres": {
+    "requested": [
+     {"type": "cpu", "name": "", "id": 1, "count": 8},
+     {"type": "mem", "name": "", "id": 2, "count": 65536},
+     {"type": "node", "name": "", "id": 4, "count": 1},
+     {"type": "billing", "name": "", "id": 5, "count": 8},
+     {"type": "gres", "name": "gpu", "id": 1001, "count": 1}
+    ],
+    "allocated": [
+     {"type": "cpu", "name": "", "id": 1, "count": 8},
+     {"type": "mem", "name": "", "id": 2, "count": 65536},
+     {"type": "node", "name": "", "id": 4, "count": 1},
+     {"type": "billing", "name": "", "id": 5, "count": 8},
+     {"type": "gres", "name": "gpu", "id": 1001, "count": 1}
+    ]
+   }
+  },
+  {
+   "job_id": 4301,
+   "name": "hb-held-user-0123456789ab",
+   "user": "example-user",
+   "partition": "plgrid",
+   "account": "example-account",
+   "comment": {"administrator": "", "job": "", "system": ""},
+   "state": {"current": ["PENDING"], "reason": "JobHeldUser"},
+   "time": {
+    "submission": 1793351300,
+    "start": 0,
+    "end": 0,
+    "elapsed": 0,
+    "eligible": 1793351300,
+    "limit": {"set": true, "infinite": false, "number": 10}
+   },
+   "exit_code": {
+    "status": ["PENDING"],
+    "return_code": {"set": false, "infinite": false, "number": 0},
+    "signal": {"id": {"set": false, "infinite": false, "number": 0}, "name": ""}
+   },
+   "flags": []
+  },
+  {
+   "job_id": 4307,
+   "name": "hb-gpu-both-0123456789ab",
+   "user": "example-user",
+   "partition": "plgrid",
+   "account": "example-account",
+   "comment": {"administrator": "", "job": "", "system": ""},
+   "state": {"current": ["RUNNING"], "reason": "None"},
+   "time": {
+    "submission": 1793351243,
+    "start": 1793351245,
+    "end": 0,
+    "elapsed": 0,
+    "eligible": 1793351243,
+    "limit": {"set": true, "infinite": false, "number": 120}
+   },
+   "exit_code": {
+    "status": ["PENDING"],
+    "return_code": {"set": false, "infinite": false, "number": 0},
+    "signal": {"id": {"set": false, "infinite": false, "number": 0}, "name": ""}
+   },
+   "flags": [],
+   "tres": {
+    "requested": [
+     {"type": "cpu", "name": "", "id": 1, "count": 8},
+     {"type": "mem", "name": "", "id": 2, "count": 65536},
+     {"type": "node", "name": "", "id": 4, "count": 1},
+     {"type": "billing", "name": "", "id": 5, "count": 8},
+     {"type": "gres", "name": "gpu", "id": 1001, "count": 2},
+     {"type": "gres", "name": "gpu:a100", "id": 1002, "count": 2}
+    ],
+    "allocated": [
+     {"type": "cpu", "name": "", "id": 1, "count": 8},
+     {"type": "mem", "name": "", "id": 2, "count": 65536},
+     {"type": "node", "name": "", "id": 4, "count": 1},
+     {"type": "billing", "name": "", "id": 5, "count": 8},
+     {"type": "gres", "name": "gpu", "id": 1001, "count": 2},
+     {"type": "gres", "name": "gpu:a100", "id": 1002, "count": 2}
+    ]
+   }
+  },
+  {
+   "job_id": 4302,
+   "name": "hb-held-admin-0123456789ab",
+   "user": "example-user",
+   "partition": "plgrid",
+   "account": "example-account",
+   "comment": {"administrator": "", "job": "", "system": ""},
+   "state": {"current": ["PENDING"], "reason": "JobHeldAdmin"},
+   "time": {
+    "submission": 1793351300,
+    "start": 0,
+    "end": 0,
+    "elapsed": 0,
+    "eligible": 1793351300,
+    "limit": {"set": true, "infinite": false, "number": 10}
+   },
+   "exit_code": {
+    "status": ["PENDING"],
+    "return_code": {"set": false, "infinite": false, "number": 0},
+    "signal": {"id": {"set": false, "infinite": false, "number": 0}, "name": ""}
+   },
+   "flags": []
+  },
+  {
+   "job_id": 4306,
+   "name": "hb-gpu-allocated-only-0123456789ab",
+   "user": "example-user",
+   "partition": "plgrid",
+   "account": "example-account",
+   "comment": {"administrator": "", "job": "", "system": ""},
+   "state": {"current": ["RUNNING"], "reason": "None"},
+   "time": {
+    "submission": 1793351243,
+    "start": 1793351245,
+    "end": 0,
+    "elapsed": 0,
+    "eligible": 1793351243,
+    "limit": {"set": true, "infinite": false, "number": 120}
+   },
+   "exit_code": {
+    "status": ["PENDING"],
+    "return_code": {"set": false, "infinite": false, "number": 0},
+    "signal": {"id": {"set": false, "infinite": false, "number": 0}, "name": ""}
+   },
+   "flags": [],
+   "tres": {
+    "allocated": [
+     {"type": "cpu", "name": "", "id": 1, "count": 8},
+     {"type": "mem", "name": "", "id": 2, "count": 65536},
+     {"type": "node", "name": "", "id": 4, "count": 1},
+     {"type": "billing", "name": "", "id": 5, "count": 8},
+     {"type": "gres", "name": "gpu", "id": 1001, "count": 1}
+    ]
+   }
+  },
+  {
+   "job_id": 4308,
+   "name": "hb-failed-0123456789ab",
+   "user": "example-user",
+   "partition": "example-gpu-partition",
+   "account": "example-account",
+   "comment": {"administrator": "", "job": "", "system": ""},
+   "state": {"current": ["FAILED"], "reason": "NonZeroExitCode"},
+   "time": {
+    "submission": 1793351243,
+    "start": 1793351245,
+    "end": 1793351253,
+    "elapsed": 8,
+    "eligible": 1793351243,
+    "limit": {"set": true, "infinite": false, "number": 10}
+   },
+   "exit_code": {
+    "status": ["ERROR"],
+    "return_code": {"set": true, "infinite": false, "number": 1},
+    "signal": {"id": {"set": false, "infinite": false, "number": 0}, "name": ""}
+   },
+   "flags": [],
+   "tres": {
+    "requested": [
+     {"type": "cpu", "name": "", "id": 1, "count": 8},
+     {"type": "mem", "name": "", "id": 2, "count": 65536},
+     {"type": "node", "name": "", "id": 4, "count": 1},
+     {"type": "billing", "name": "", "id": 5, "count": 8},
+     {"type": "gres", "name": "gpu", "id": 1001, "count": 1}
+    ],
+    "allocated": [
+     {"type": "cpu", "name": "", "id": 1, "count": 8},
+     {"type": "mem", "name": "", "id": 2, "count": 65536},
+     {"type": "node", "name": "", "id": 4, "count": 1},
+     {"type": "billing", "name": "", "id": 5, "count": 8},
+     {"type": "gres", "name": "gpu", "id": 1001, "count": 1}
+    ]
+   }
+  },
+  {
+   "job_id": 4305,
+   "name": "hb-gpu-typed-0123456789ab",
+   "user": "example-user",
+   "partition": "plgrid",
+   "account": "example-account",
+   "comment": {"administrator": "", "job": "", "system": ""},
+   "state": {"current": ["RUNNING"], "reason": "None"},
+   "time": {
+    "submission": 1793351243,
+    "start": 1793351245,
+    "end": 0,
+    "elapsed": 0,
+    "eligible": 1793351243,
+    "limit": {"set": true, "infinite": false, "number": 120}
+   },
+   "exit_code": {
+    "status": ["PENDING"],
+    "return_code": {"set": false, "infinite": false, "number": 0},
+    "signal": {"id": {"set": false, "infinite": false, "number": 0}, "name": ""}
+   },
+   "flags": [],
+   "tres": {
+    "requested": [
+     {"type": "cpu", "name": "", "id": 1, "count": 8},
+     {"type": "mem", "name": "", "id": 2, "count": 65536},
+     {"type": "node", "name": "", "id": 4, "count": 1},
+     {"type": "billing", "name": "", "id": 5, "count": 8},
+     {"type": "gres", "name": "gpu:a100", "id": 1002, "count": 2}
+    ],
+    "allocated": [
+     {"type": "cpu", "name": "", "id": 1, "count": 8},
+     {"type": "mem", "name": "", "id": 2, "count": 65536},
+     {"type": "node", "name": "", "id": 4, "count": 1},
+     {"type": "billing", "name": "", "id": 5, "count": 8},
+     {"type": "gres", "name": "gpu:a100", "id": 1002, "count": 2}
+    ]
+   }
+  }
+ ],
+ "meta": {"plugin": {"data_parser": "data_parser/v0.0.40", "accounting_storage": "accounting_storage/slurmdbd"}},
+ "errors": [],
+ "warnings": []
+}

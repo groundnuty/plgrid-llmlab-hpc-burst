@@ -1,0 +1,6 @@
+{
+ "jobs": [],
+ "meta": {"plugin": {"data_parser": "data_parser/v0.0.40", "accounting_storage": "accounting_storage/slurmdbd"}},
+ "errors": [],
+ "warnings": []
+}
