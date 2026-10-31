@@ -47,7 +47,7 @@ Problems:
 
 - **Compute nodes connect out on port 443.** Spike S1's step 0 and probe 2 (issue #18, 30 Oct 2026) measured it.
   - Short jobs on Helios CPU, Helios GH200 and Athena A100 all reached public HTTPS endpoints directly, with no proxy configured.
-  - The development VM behind a NAT accepted only port 22 from those nodes. There, the tunnel runs inside ssh over port 22, with a restricted key (ssh mode).
+  - The development VM sits behind a NAT, and from those nodes only port 22 answered at its address. That sshd turned out to be a gateway's, not the VM's: its host key differs (issue #18, 31 Oct 2026; L-17.7). The tunnel still runs inside ssh over port 22, with a restricted key (ssh mode), through a port forward on the gateway to the VM's sshd (owner decision, 31 Oct 2026, recorded on issue #18). Reachability is proved by the target's host key, not by a banner.
   - Sano was not measured. It is not an alpha platform (HBEP-4).
   - Where dial home works stays a per-partition fact in the platform profile (HBEP-4).
 - **The front needs an address that compute nodes reach** (HBEP-11, open question 8): directly on the dial-home port (direct mode), or through ssh on port 22 with a restricted key (ssh mode). A host reachable by neither is out of alpha, and HBEP-11's launcher checks it.
@@ -473,6 +473,7 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
 | The route URL was part of the identity. | L-8.5 | The transport is keyed by the Instance's UID, not by an address. |
 | Addresses changed with every session restart. | L-14.1 | frpc and the agent reach the front by DNS name. |
 | A balancer ejected backends for good. | L-4.14 | Two failed probes make an Instance ineligible; one pass brings it back. |
+| An ssh banner was read as proof that the clusters reached the VM; the host key was a gateway's. | L-17.7 | In ssh mode the forwards use a pinned host key (HBEP-7, The allocation agent), and S1's kit checks the target's own key, not a banner, before any forward. |
 | Checks that cannot see what they check passed while wrong. | L-10.6 | The probe goes through the tunnel to the engine; frpc never runs without its certificate; the condition is Unknown when frps's list cannot be read. |
 | Keyword sweeps missed many tunnels at the end. | L-15.2 | frps is in the launcher's record, and every tunnel is in frps's list. |
 | A scheduled respawner revived killed relays. | L-15.1 | No respawners outside the controller and the launcher. |
@@ -490,6 +491,7 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
 - 2026-10-30: the agent endpoint listens on loopback, reached through the ssh forward or through the front's `/agent/v1/` pass-through (HBEP-7).
 - 2026-10-30: the risk of vLLM's internal listeners on the node's address, from spike S2 phase B, noted with HBEP-5.
 - 2026-10-31: implementable. Spike S1c (PR #78) and frp v0.71.1's source carried in. frp over `wss` with `tcpmux` routing by UID, admission by an frps server plugin (`Login`, `NewProxy` and `CloseProxy`; `Ping` unsubscribed), path state from frps's list, the front's deadlines and probe, S1's heartbeats, two ssh forwards in ssh mode with the owner's key restriction, and the owner's word on center consent. Every open question decided, not needed for alpha, or open for beta. HBEP-4, HBEP-5, HBEP-7 and HBEP-11 amended with it.
+- 2026-10-31: L-17.7 cited in Field lessons answered. The note on the development VM corrected: the port-22 banner from the compute nodes was a gateway's sshd, as its host key showed (issue #18); ssh mode is unchanged.
 
 ## Amendments
 
