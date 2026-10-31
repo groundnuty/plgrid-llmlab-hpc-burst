@@ -13,6 +13,29 @@ import (
 
 // Metric names, from vLLM 0.32.0 (the capture in spikes/s2b/results and
 // vllm/entrypoints/serve/instrumentator/metrics.py).
+//
+// The last four groups are HBEP-8's engine gauges (Metrics, Engine gauges per
+// Instance), defined in vllm/v1/metrics/loggers.py at v0.32.0. Every name there
+// is created without a suffix; prometheus_client adds the suffix the text
+// carries (prometheus_client v0.18.0, the oldest vLLM accepts
+// (requirements/common.txt, line 21), prometheus_client/metrics.py: a Counter
+// exposes its sample as "_total", line 314; a Histogram exposes "_bucket",
+// "_count" and "_sum", lines 650-653). The capture of a real vLLM 0.32.0 shows
+// the "_total" form for the three counters below.
+//   - vllm:num_preemptions: a Counter, name on line 739 (lines 738-745), raised
+//     by the number of requests preempted in each iteration (line 1259).
+//   - vllm:prefix_cache_queries and vllm:prefix_cache_hits: Counters in tokens,
+//     names on lines 662 and 673 (lines 661-679), created whether or not
+//     prefix caching is on and raised from the scheduler's stats at every
+//     iteration (lines 1167-1172), so an engine with prefix caching off still
+//     exports both, at 0.
+//   - vllm:request_time_per_output_token_seconds: a Histogram, name on line 951
+//     (lines 950-958), observed once per finished request with
+//     FinishedRequestStats.mean_time_per_output_token (lines 1324-1326), which
+//     is the decode time over the output tokens after the first and is 0 for a
+//     request of one token (vllm/v1/metrics/stats.py, lines 607-612). So its
+//     "_count" is the finished requests and its "_sum" the sum of their means.
+//     Only the "_sum" and "_count" are read: no bucket, no quantile.
 const (
 	metricRunning     = "vllm:num_requests_running"
 	metricWaiting     = "vllm:num_requests_waiting"
@@ -20,6 +43,12 @@ const (
 	metricKVUsage     = "vllm:kv_cache_usage_perc"
 	metricCacheConfig = "vllm:cache_config_info"
 	metricHTTP        = "http_requests_total"
+
+	metricPreemptions   = "vllm:num_preemptions_total"
+	metricPrefixQueries = "vllm:prefix_cache_queries_total"
+	metricPrefixHits    = "vllm:prefix_cache_hits_total"
+	metricTPOTSum       = "vllm:request_time_per_output_token_seconds_sum"
+	metricTPOTCount     = "vllm:request_time_per_output_token_seconds_count"
 )
 
 // sample is one line of the Prometheus text format.
@@ -39,10 +68,16 @@ func (c *Client) metrics(ctx context.Context) (metrics, error) {
 	return parseMetrics(string(b))
 }
 
-// sum adds the values of every series of the metric; found is false when the
-// scrape has none.
+// sum adds the values of every series of the metric (one per engine in a data-
+// parallel deployment); found is false when the scrape has none. A series whose
+// value is not a finite number (NaN, +Inf, -Inf) is unknown, so it is left out:
+// a NaN would turn the total into one and fail the report's JSON encoding, which
+// has no NaN.
 func (m metrics) sum(name string) (total float64, found bool) {
 	for _, s := range m[name] {
+		if math.IsNaN(s.value) || math.IsInf(s.value, 0) {
+			continue
+		}
 		total += s.value
 		found = true
 	}
@@ -50,9 +85,11 @@ func (m metrics) sum(name string) (total float64, found bool) {
 }
 
 // Sample reads the engine's metrics into a health sample: the running and
-// waiting requests, the generated-token counter, the KV cache's use and the
-// responses by status (HBEP-7, Reports: for health). The agent sets the time
-// and the probe's result.
+// waiting requests, the generated-token counter, the KV cache's use, the
+// preemption counter, the prefix-cache queried and hit tokens, the sum and count
+// of the time per output token and the responses by status (HBEP-7, Reports:
+// for health; HBEP-8, Engine gauges per Instance). The agent sets the time and
+// the probe's result.
 func (c *Client) Sample(ctx context.Context) (agentapi.Health, error) {
 	m, err := c.metrics(ctx)
 	if err != nil {
@@ -70,6 +107,18 @@ func (c *Client) Sample(ctx context.Context) (agentapi.Health, error) {
 	if v, ok := m.sum(metricGenerated); ok {
 		h.GeneratedTokens = agentapi.Int64(int64(v))
 	}
+	// The four counters HBEP-8 adds. Each is read from its own exact name, so a
+	// line the engine does not export leaves its field nil: an engine double,
+	// or a vLLM that omits the prefix-cache lines, is unknown, not 0. A real
+	// vLLM with prefix caching off exports both prefix-cache counters at 0,
+	// which is a pointer to 0 here.
+	h.Preemptions = m.counter(metricPreemptions)
+	h.PrefixCacheQueriedTokens = m.counter(metricPrefixQueries)
+	h.PrefixCacheHitTokens = m.counter(metricPrefixHits)
+	if v, ok := m.sum(metricTPOTSum); ok {
+		h.TimePerOutputTokenSecondsSum = agentapi.Float64(v)
+	}
+	h.TimePerOutputTokenCount = m.counter(metricTPOTCount)
 	if ss := m[metricKVUsage]; len(ss) > 0 {
 		kv := ss[0].value
 		for _, s := range ss[1:] {
@@ -96,6 +145,15 @@ func (c *Client) Sample(ctx context.Context) (agentapi.Health, error) {
 		h.ResponsesByStatus[st] += int64(s.value)
 	}
 	return h, nil
+}
+
+// counter is sum as a Health pointer: nil when the scrape has no such series.
+func (m metrics) counter(name string) *int64 {
+	v, ok := m.sum(name)
+	if !ok {
+		return nil
+	}
+	return agentapi.Int64(int64(v))
 }
 
 // cacheConfig returns the labels of vllm:cache_config_info, or nil when the

@@ -325,6 +325,9 @@ func richReport() agentapi.Report {
 			Health: &agentapi.Health{
 				ProbeOK: true, MetricsReadAt: &read, RunningRequests: i64p(4), WaitingRequests: i64p(1),
 				GeneratedTokens: i64p(70), KVCacheUsage: f64p(0.25), ResponsesByStatus: map[string]int64{"200": 5},
+				Preemptions:              i64p(2),
+				PrefixCacheQueriedTokens: i64p(300), PrefixCacheHitTokens: i64p(200),
+				TimePerOutputTokenSecondsSum: f64p(1.5), TimePerOutputTokenCount: i64p(30),
 			},
 		}},
 		Checks: &agentapi.CheckResults{
@@ -359,6 +362,11 @@ func scrambleReport(r *agentapi.Report) {
 	*w.Health.WaitingRequests = 99
 	*w.Health.GeneratedTokens = 99
 	*w.Health.KVCacheUsage = 0.99
+	*w.Health.Preemptions = 99
+	*w.Health.PrefixCacheQueriedTokens = 99
+	*w.Health.PrefixCacheHitTokens = 99
+	*w.Health.TimePerOutputTokenSecondsSum = 99
+	*w.Health.TimePerOutputTokenCount = 99
 	i.Checks.Verify.Files[0].Path = "x"
 	i.Checks.Verify.Settings["max-model-len"] = "x"
 	i.Checks.Qualify.Checks[0].Passed = false
