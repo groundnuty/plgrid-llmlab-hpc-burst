@@ -116,6 +116,10 @@ func TestFilesRefusesMalformedListingBodies(t *testing.T) {
 		"lfs.size is a string":                 listOf(good("lfs", `"lfs":{"oid":"`+sha256ABC+`","size":"3"}`)),
 		"size and lfs.size disagree":           listOf(good("lfs", `"lfs":{"oid":"`+sha256ABC+`","size":4}`)),
 		"size 0, lfs.size 3 (a zeroed size)":   listOf(good("size", `"size":0`)),
+		"size 0, lfs.size missing":             listOf(good("size", `"size":0`, "lfs", `"lfs":{"oid":"`+sha256ABC+`"}`)),
+		"size 0, lfs.size null":                listOf(good("size", `"size":0`, "lfs", `"lfs":{"oid":"`+sha256ABC+`","size":null}`)),
+		"size and lfs.size both negative":      listOf(good("size", `"size":-3`, "lfs", `"lfs":{"oid":"`+sha256ABC+`","size":-3}`)),
+		"size missing, lfs.size 0":             listOf(good("size", ``, "lfs", `"lfs":{"oid":"`+sha256ABC+`","size":0}`)),
 		"top-level size is the pointer's size": listOf(good("size", `"size":135`)),
 	} {
 		srv := newTreeServer(t, serveBody(body))

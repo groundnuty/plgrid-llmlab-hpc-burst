@@ -45,18 +45,17 @@ func parseListing(body []byte) ([]treeEntry, error) {
 	if !utf8.Valid(body) {
 		return nil, fmt.Errorf("%w: the page is not valid UTF-8", ErrInvalidListing)
 	}
-	if !json.Valid(body) { // also refuses data after the first document
-		return nil, fmt.Errorf("%w: the page is not exactly one JSON document", ErrInvalidListing)
-	}
 	if t := bytes.TrimLeft(body, " \t\r\n"); len(t) == 0 || t[0] != '[' {
 		return nil, fmt.Errorf("%w: the page is not a JSON array", ErrInvalidListing)
 	}
 	if err := checkSurrogateEscapes(body); err != nil {
 		return nil, err
 	}
+	// Unmarshal accepts exactly one complete document: a second array or any
+	// other data after the first is an error.
 	var elements []json.RawMessage
 	if err := json.Unmarshal(body, &elements); err != nil {
-		return nil, fmt.Errorf("%w: the page is not a JSON array: %v", ErrInvalidListing, err)
+		return nil, fmt.Errorf("%w: the page is not exactly one JSON array: %v", ErrInvalidListing, err)
 	}
 	out := make([]treeEntry, 0, len(elements))
 	for i, raw := range elements {
