@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -455,6 +456,13 @@ func TestStartSupervisorRefusesABrokenEndpointPair(t *testing.T) {
 	k := newKey(t)
 	writePair(t, f.l.host(f.ports), k, k, 0o644)
 	t.Setenv(superviseEnv, f.l.dir)
+	// If the check fails to stop the start, the detached stand-in must not outlive the test. (Not
+	// stopOnExit: the fixture's record of k3s is the test process itself.)
+	t.Cleanup(func() {
+		if len(f.st.Procs) > 1 && isProc(f.st.Procs[1]) {
+			_ = syscall.Kill(f.st.Procs[1].PID, syscall.SIGKILL)
+		}
+	})
 	err := startSupervisor(context.Background(), f.l, f.st, []string{"/bin/sleep", "300"}, 5*time.Second, nil)
 	if err == nil || !strings.Contains(err.Error(), "tls.key") || !strings.Contains(err.Error(), "0644") {
 		t.Fatalf("startSupervisor = %v, want an error naming tls.key and its mode", err)
