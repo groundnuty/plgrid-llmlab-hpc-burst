@@ -70,9 +70,8 @@ func (p *Proxy) relay(w http.ResponseWriter, x *exchange, t *target, resp *http.
 		x.rec.Finish = strp("error")
 		p.copyRaw(w, x, body, sse)
 	case sse && kind.streams() && identity:
-		if j := p.relayEvents(w, x, body, kind); j.failed && t.inst != nil {
-			p.router.ReportConnect(t.key(), true)
-		}
+		j := p.relayEvents(w, x, body, kind)
+		x.failed = j.failed || j.engineError || j.badError
 	case sse:
 		p.copyRaw(w, x, body, true)
 	default:
@@ -122,7 +121,11 @@ func (p *Proxy) relayEvents(w http.ResponseWriter, x *exchange, body io.Reader, 
 		}
 		if err != nil {
 			readErr = err
-			if ev.Len() > 0 && len(bytes.TrimSpace(ev.Bytes())) > 0 {
+			// A cut inside a line drops that line: forwarded, it would run
+			// into the error event that follows. Complete lines still pass,
+			// ended as an event, since one may carry the finish reason.
+			ev.Truncate(bytes.LastIndexByte(ev.Bytes(), '\n') + 1)
+			if len(bytes.TrimSpace(ev.Bytes())) > 0 {
 				ev.WriteString("\n")
 				handle()
 			}
@@ -143,7 +146,7 @@ func (p *Proxy) endStream(w http.ResponseWriter, x *exchange, j *judge, readErr 
 		x.rec.CountsSource = strp("front_events")
 		x.rec.ContentEvents = i64p(j.contentEvents)
 	}
-	if j.complete {
+	if j.complete && !j.engineError && !j.badError {
 		x.rec.Finish = strp(j.finish)
 		if j.errorCode != "" {
 			x.rec.ErrorCode = strp(j.errorCode)
@@ -151,6 +154,25 @@ func (p *Proxy) endStream(w http.ResponseWriter, x *exchange, j *judge, readErr 
 		return
 	}
 	cut := x.cutBy()
+	if j.engineError || j.badError {
+		// The engine failed the stream and said so: truncated, cut by the
+		// upstream, with the event's code. Its own event was the client's
+		// one error event; one that was not JSON was withheld, and the
+		// front's stream_cut stands in for it (@hpc-burst-science-agent,
+		// 31 Oct 2026).
+		x.rec.Finish, x.rec.CutBy = strp("truncated"), strp(cutUpstream)
+		if cut != "" {
+			x.rec.Finish, x.rec.CutBy = strp("cut"), strp(cut)
+		}
+		if j.errorCode != "" {
+			x.rec.ErrorCode = strp(j.errorCode)
+		}
+		p.log.Warn("the engine failed the stream", "request", x.id, "errorCode", j.errorCode)
+		if j.badError && cut != cutClient {
+			p.writeStreamError(w, "upstream", "the engine failed the stream; its error event was not JSON")
+		}
+		return
+	}
 	switch {
 	case cut != "":
 	case readErr != nil && !errors.Is(readErr, io.EOF):

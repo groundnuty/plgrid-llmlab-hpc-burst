@@ -50,6 +50,11 @@ type exchange struct {
 	idleFor  time.Duration
 	lease    clock.Timer
 	leaseGen int // the target the lease timer belongs to; a resend arms a new one
+
+	// failed: the target failed the request after its headers in a way its
+	// events said (response.failed, an engine error event); it counts
+	// toward the pause like an upstream cut.
+	failed bool
 }
 
 func newExchange(r *http.Request, clk clock.Clock, maxReq time.Duration) *exchange {

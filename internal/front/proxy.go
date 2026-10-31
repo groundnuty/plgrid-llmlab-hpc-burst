@@ -148,11 +148,8 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, x *exchange, n n
 		p.setTarget(x, t)
 		resp, err := p.send(x, r, t, body, rb, key)
 		if err == nil {
-			// A 5xx from an Instance counts toward its pause; a 4xx is the
-			// client's error and does not (@hpc-burst-science-agent, 31 Oct
-			// 2026). A managed target's statuses pass through and pause
-			// nothing: only its connections count.
-			p.router.ReportConnect(t.key(), t.inst != nil && resp.StatusCode >= 500)
+			// Deferred, so a cut body's abort panic reports too.
+			defer p.reportOutcome(t, x)
 			p.relay(w, x, t, resp, rb, r.URL.Path)
 			t.release()
 			return
@@ -167,6 +164,41 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, x *exchange, n n
 		tried, exclude = t, t.key()
 	}
 	p.unreachable(w, x, tried)
+}
+
+// reportOutcome counts a relayed response toward the target's pause, by
+// the rule #96 states (@hpc-burst-science-agent, 31 Oct 2026):
+//   - a 5xx and every upstream-side cut after the headers count: an upstream
+//     or tunnel cut, a stream that ended without its end, an engine error
+//     event, response.failed;
+//   - a completed request resets the run, a capped reply included;
+//   - a 4xx neither counts nor resets, and neither does a client disconnect.
+//
+// Choices where #96 is silent: a cut the front made (deadline, idle,
+// lease_end, front_shutdown) neither counts nor resets, since the target did
+// nothing wrong that the front saw. A managed target's statuses pause
+// nothing: a response of any status resets its run, and only its
+// connections count (HBEP-5, The LLMLab route).
+func (p *Proxy) reportOutcome(t *target, x *exchange) {
+	if t.managed != nil {
+		p.router.ReportConnect(t.key(), false)
+		return
+	}
+	switch status := x.rec.Status; {
+	case status >= 500:
+		p.router.ReportConnect(t.key(), true)
+		return
+	case status >= 400:
+		return
+	}
+	if x.rec.CutBy != nil {
+		switch *x.rec.CutBy {
+		case cutUpstream, cutTunnel:
+			p.router.ReportConnect(t.key(), true)
+		}
+		return
+	}
+	p.router.ReportConnect(t.key(), x.failed)
 }
 
 // setTarget records the chosen target and applies its deadline and lease end.
