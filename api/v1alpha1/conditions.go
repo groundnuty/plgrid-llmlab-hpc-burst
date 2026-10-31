@@ -89,14 +89,19 @@ const (
 	// means "fix the Hub token or the revision, or investigate the colliding
 	// identity record" (`@hpc-burst-science-agent`, 31 Oct 2026).
 	//
-	//   - The message names the cause: a Hub 401, a Hub 404, or a collision
-	//     with the record id-<12 hex> (an existing identity record of that
-	//     name holds another full ID).
-	//   - Hub transport errors and 5xx answers are not this reason: the
-	//     controller backs off and retries them (hubfiles.Retryable).
-	//   - A collision never loops: the controller sets the reason, raises the
-	//     event, and evaluates the class again only when the ModelDeployment's
-	//     spec or the identity records change.
+	//   - It is set for a permanent Hub failure (one that hubfiles.Retryable
+	//     reports as not retryable: 401, 403, 404, a blob or size mismatch, a
+	//     refused listing, a cross-host Link, too many pages, a file too large,
+	//     a bad token file) or for a collision with the record id-<12 hex> (an
+	//     existing identity record of that name holds another full ID). The
+	//     message names the cause.
+	//   - Transient Hub failures (transport errors, 429, 5xx) are not this
+	//     reason: the controller backs off and retries them, with no reason set.
+	//   - A permanent failure is not retried with backoff, and a collision
+	//     never loops: the controller sets the reason, raises the event, and
+	//     evaluates the class again when the ModelDeployment's spec, the Hub
+	//     token or the identity records change, and at the periodic resync
+	//     (`@hpc-burst-science-agent`, 31 Oct 2026).
 	ReasonIdentityUnresolved = "IdentityUnresolved"
 )
 
