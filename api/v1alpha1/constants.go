@@ -140,8 +140,7 @@ const LeaseLifecycle = "lifecycle"
 // Lease.
 func ProviderLeaseName(provider string) string { return "provider-" + provider }
 
-// AnnotationModelDeployment is on identity and verification records, and on an
-// accounting record of an Allocation that was assigned to a ModelDeployment. Its value
+// AnnotationModelDeployment is on identity and verification records. Its value
 // is the full name of the ModelDeployment the record belongs to. The record's
 // label carries the same name shortened to fit 63 characters (LabelValue), and
 // a record has no owner reference, so once the ModelDeployment is deleted this

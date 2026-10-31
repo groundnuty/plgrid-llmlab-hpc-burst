@@ -170,7 +170,7 @@ func TestAnExistingRecordIsNotRewritten(t *testing.T) {
 	e.sync()
 	e.syncAt(at(12, 5, 0))
 	e.syncAt(at(12, 10, 0))
-	old, err := v1alpha1.NewAccountingRecord(testNS, "uid-a1", "", v1alpha1.AccountingRecordData{
+	old, err := v1alpha1.NewAccountingRecord(testNS, "uid-a1", v1alpha1.AccountingRecordData{
 		Provider: testProvider, Partition: "example-old-partition", Tag: "example-old-tag", JobIDs: []string{"1"},
 		AllocatedCPUs: i32(2), AllocatedGPUs: i32(3), ElapsedSeconds: i64(99),
 	})
@@ -242,10 +242,10 @@ func TestAFailedRecordCreateKeepsTheFinalizer(t *testing.T) {
 	}
 }
 
-// The record names the ModelDeployment the Allocation was assigned to at
-// deletion, and lists every job with the tag, in numeric order (998, 999 and
-// 1000 are not in string order), while its numbers are the recorded job's.
-func TestRecordNamesTheModelDeploymentAndEveryJob(t *testing.T) {
+// The record lists every job with the tag, in numeric order (998, 999 and 1000
+// are not in string order), while its numbers are the recorded job's. An
+// Allocation assigned to a ModelDeployment gets no model-deployment label.
+func TestRecordListsEveryJobAndCarriesNoModelDeployment(t *testing.T) {
 	e := newEnv(t)
 	e.batch.Enqueue(Script{QueueWait: 5 * time.Minute})
 	e.newAlloc("a1", testProvider)
@@ -268,7 +268,7 @@ func TestRecordNamesTheModelDeploymentAndEveryJob(t *testing.T) {
 		t.Fatal("Allocation survived its deletion")
 	}
 	e.wantRecord("a1", recWant{cpus: i32(8), gpus: i32(1), secs: i64(60), start: tp(at(12, 5, 0)), end: tp(at(12, 6, 0)),
-		jobIDs: []string{"998", "999", "1000"}, md: "example-model"})
+		jobIDs: []string{"998", "999", "1000"}})
 }
 
 // An Allocation that never had a job has nothing to account: no record.

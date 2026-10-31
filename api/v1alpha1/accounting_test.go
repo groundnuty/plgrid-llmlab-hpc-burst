@@ -88,7 +88,7 @@ func accEnd() *metav1.Time {
 // the partition, the tag, the job IDs, allocatedCPUs, allocatedGPUs,
 // elapsedSeconds, the start and end times and basis allocated.
 func TestNewAccountingRecordGolden(t *testing.T) {
-	rec, err := NewAccountingRecord("ns-a", "0b8e3f7c-9d1a-4c52-8f60-2a4d6e8c1b57", "", AccountingRecordData{
+	rec, err := NewAccountingRecord("ns-a", "0b8e3f7c-9d1a-4c52-8f60-2a4d6e8c1b57", AccountingRecordData{
 		Provider: "prov-a", Partition: "plgrid-gpu-a100", Tag: "hb-x-0123456789ab", JobIDs: []string{"4501", "4502"},
 		AllocatedCPUs: i32(4), AllocatedGPUs: i32(1), ElapsedSeconds: i64(90), StartTime: accStart(), EndTime: accEnd(),
 	})
@@ -117,14 +117,14 @@ func TestNewAccountingRecordGolden(t *testing.T) {
 		}
 	}
 	if len(rec.Annotations) != 0 {
-		t.Errorf("annotations %v, want none without a ModelDeployment", rec.Annotations)
+		t.Errorf("annotations %v, want none", rec.Annotations)
 	}
 }
 
 // Every field that is not known is absent and named in unknown, in the fixed
 // order, and the caller cannot make the two disagree.
 func TestNewAccountingRecordUnknowns(t *testing.T) {
-	rec, err := NewAccountingRecord("ns-a", "uid-1", "", AccountingRecordData{Provider: "prov-a", Partition: "p", Tag: "t",
+	rec, err := NewAccountingRecord("ns-a", "uid-1", AccountingRecordData{Provider: "prov-a", Partition: "p", Tag: "t",
 		Unknown: []string{"a caller's list is replaced"}})
 	if err != nil {
 		t.Fatal(err)
@@ -134,7 +134,7 @@ func TestNewAccountingRecordUnknowns(t *testing.T) {
 	if string(rec.Data.Raw) != want {
 		t.Errorf("data\n got %s\nwant %s", rec.Data.Raw, want)
 	}
-	rec, err = NewAccountingRecord("ns-a", "uid-1", "", AccountingRecordData{Provider: "prov-a", Partition: "p", Tag: "t",
+	rec, err = NewAccountingRecord("ns-a", "uid-1", AccountingRecordData{Provider: "prov-a", Partition: "p", Tag: "t",
 		JobIDs: []string{"7"}, AllocatedCPUs: i32(2), AllocatedGPUs: i32(0), StartTime: accStart()})
 	if err != nil {
 		t.Fatal(err)
@@ -146,31 +146,15 @@ func TestNewAccountingRecordUnknowns(t *testing.T) {
 	}
 }
 
-// An Allocation assigned to a ModelDeployment at deletion adds the label, cut as
-// LabelValue cuts it, and the annotation with the full name.
-func TestNewAccountingRecordModelDeployment(t *testing.T) {
-	long := strings.Repeat("abcdefghij", 10)
-	rec, err := NewAccountingRecord("ns-a", "uid-1", long, AccountingRecordData{Provider: "prov-a", Partition: "p", Tag: "t"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := rec.Labels["hpcburst.groundnuty.github.io/model-deployment"]; got != "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghij-fcbb61d058e8" {
-		t.Errorf("model-deployment label %q", got)
-	}
-	if rec.Annotations["hpcburst.groundnuty.github.io/model-deployment"] != long {
-		t.Errorf("annotations %v: want the full name", rec.Annotations)
-	}
-}
-
 func TestNewAccountingRecordRefuses(t *testing.T) {
 	ok := AccountingRecordData{Provider: "prov-a", Partition: "p", Tag: "t"}
-	if _, err := NewAccountingRecord("ns-a", "", "", ok); err == nil {
+	if _, err := NewAccountingRecord("ns-a", "", ok); err == nil {
 		t.Error("an empty UID was accepted")
 	}
 	for _, p := range []string{"", "Prov_A", strings.Repeat("p", 64)} {
 		d := ok
 		d.Provider = p
-		if _, err := NewAccountingRecord("ns-a", "uid-1", "", d); err == nil {
+		if _, err := NewAccountingRecord("ns-a", "uid-1", d); err == nil {
 			t.Errorf("Provider %q was accepted", p)
 		}
 	}

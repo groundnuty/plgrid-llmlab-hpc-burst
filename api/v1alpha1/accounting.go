@@ -183,13 +183,13 @@ func (d AccountingRecordData) unknownFields() []string {
 // NewAccountingRecord returns the accounting record of an Allocation: a
 // ControllerRevision named acct-<Allocation UID> in the Allocation's namespace,
 // with no owner reference, so garbage collection never removes it. Its labels
-// are record=accounting and provider=<the Provider's name>; modelDeployment,
-// when the Allocation was assigned to one at deletion, adds the
-// model-deployment label (LabelValue) and the annotation
-// AnnotationModelDeployment with the full name. Data is d as JSON, with Basis
-// set and Unknown filled. The caller creates the record if it is absent and
-// never rewrites it; Revision is 1.
-func NewAccountingRecord(namespace string, uid types.UID, modelDeployment string, d AccountingRecordData) (*appsv1.ControllerRevision, error) {
+// are record=accounting and provider=<the Provider's name>. It has no
+// model-deployment label: an Allocation is repurposed between deployments, and
+// code that selects identity or verification records by that label must not
+// meet an accounting record. Data is d as JSON, with Basis set and Unknown
+// filled. The caller creates the record if it is absent and never rewrites it;
+// Revision is 1.
+func NewAccountingRecord(namespace string, uid types.UID, d AccountingRecordData) (*appsv1.ControllerRevision, error) {
 	name, err := AccountingRecordName(uid)
 	if err != nil {
 		return nil, err
@@ -210,13 +210,8 @@ func NewAccountingRecord(namespace string, uid types.UID, modelDeployment string
 		return nil, fmt.Errorf("accounting record data: %w", err)
 	}
 	labels := map[string]string{LabelRecord: RecordAccounting, LabelProvider: d.Provider}
-	var annotations map[string]string
-	if modelDeployment != "" {
-		labels[LabelModelDeployment] = LabelValue(modelDeployment)
-		annotations = map[string]string{AnnotationModelDeployment: modelDeployment}
-	}
 	return &appsv1.ControllerRevision{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: labels, Annotations: annotations},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: labels},
 		Data:       runtime.RawExtension{Raw: data},
 		Revision:   1,
 	}, nil

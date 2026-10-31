@@ -133,11 +133,7 @@ func (e *external) keepAccounting(ctx context.Context, a *v1alpha1.Allocation, r
 // not exist. It never updates, and never reads: a read through the manager's
 // client would start a cluster-wide informer for ControllerRevisions.
 func (e *external) createAccountingRecord(ctx context.Context, a *v1alpha1.Allocation, data v1alpha1.AccountingRecordData) error {
-	md := ""
-	if ref := a.Spec.ModelDeploymentRef; ref != nil {
-		md = ref.Name
-	}
-	rec, err := v1alpha1.NewAccountingRecord(a.Namespace, a.UID, md, data)
+	rec, err := v1alpha1.NewAccountingRecord(a.Namespace, a.UID, data)
 	if err != nil {
 		return fmt.Errorf("build the accounting record: %w", err)
 	}

@@ -67,7 +67,6 @@ type recWant struct {
 	start, end *time.Time
 	unknown    []string
 	jobIDs     []string
-	md         string // the ModelDeployment, "" when the Allocation has none
 }
 
 // acct returns the Allocation's accounting record: acct-<UID>, and the test's
@@ -104,11 +103,11 @@ func (e *env) wantRecord(name string, w recWant) {
 	if cr.Labels[v1alpha1.LabelRecord] != v1alpha1.RecordAccounting || cr.Labels[v1alpha1.LabelProvider] != testProvider {
 		e.t.Errorf("record labels = %v, want record=accounting and provider=%s", cr.Labels, testProvider)
 	}
-	if got := cr.Labels[v1alpha1.LabelModelDeployment]; got != w.md {
-		e.t.Errorf("record model-deployment label = %q, want %q", got, w.md)
+	if got, ok := cr.Labels[v1alpha1.LabelModelDeployment]; ok {
+		e.t.Errorf("record model-deployment label = %q, want none: code that selects identity records by it must not meet this one", got)
 	}
-	if got := cr.Annotations[v1alpha1.AnnotationModelDeployment]; got != w.md {
-		e.t.Errorf("record model-deployment annotation = %q, want %q", got, w.md)
+	if got, ok := cr.Annotations[v1alpha1.AnnotationModelDeployment]; ok {
+		e.t.Errorf("record model-deployment annotation = %q, want none", got)
 	}
 	var d v1alpha1.AccountingRecordData
 	if err := json.Unmarshal(cr.Data.Raw, &d); err != nil {

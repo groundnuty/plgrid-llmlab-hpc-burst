@@ -55,7 +55,7 @@ func (c *Controller) keepAccounting(ctx context.Context, p *pass, s *allocState,
 		}
 		fillFromStored(&data, s.prior)
 	}
-	rec, err := v1alpha1.NewAccountingRecord(s.a.Namespace, s.a.UID, modelDeploymentName(s), data)
+	rec, err := v1alpha1.NewAccountingRecord(s.a.Namespace, s.a.UID, data)
 	if err != nil {
 		return false, fmt.Errorf("accounting record: %w", err)
 	}
@@ -127,13 +127,4 @@ func jobIDsWith(jobs []provider.Job, recorded string) []string {
 		ids[i] = j.ID
 	}
 	return ids
-}
-
-// modelDeploymentName is the ModelDeployment the Allocation is assigned to, or
-// "" when it is assigned to none.
-func modelDeploymentName(s *allocState) string {
-	if ref := s.a.Spec.ModelDeploymentRef; ref != nil {
-		return ref.Name
-	}
-	return ""
 }
