@@ -3,7 +3,6 @@ package fake
 import (
 	"context"
 	"fmt"
-	"sort"
 	"time"
 
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -42,9 +41,10 @@ func writeProviderStatus(ctx context.Context, cl client.Client, old, prov *v1alp
 	return nil
 }
 
-// syncProvider writes the Provider's status: the queue waits found in this
-// pass, and the readiness fields (setReadiness). A pass that made no Batch read
-// polls the platform first, so Ready always rests on a real read.
+// syncProvider writes the Provider's status: the readiness fields
+// (setReadiness). A pass that made no Batch read polls the platform first, so
+// Ready always rests on a real read. The queue waits are not written here: each
+// is written as its job is observed (recordQueueWait).
 func (c *Controller) syncProvider(ctx context.Context, p *pass) error {
 	if !p.read && c.Batch.Poll(ctx) != nil {
 		p.readFailed = true
@@ -54,11 +54,6 @@ func (c *Controller) syncProvider(ctx context.Context, p *pass) error {
 		return fmt.Errorf("get Provider %s: %w", c.Provider, err)
 	}
 	old := prov.DeepCopy()
-	// A list is ordered by name; the oldest wait is the earliest start.
-	sort.SliceStable(p.waits, func(i, k int) bool { return p.waits[i].StartTime.Before(&p.waits[k].StartTime) })
-	for _, w := range p.waits {
-		prov.Status.QueueWaits = v1alpha1.AddQueueWait(prov.Status.QueueWaits, w)
-	}
 	prov.Status.ObservedGeneration = prov.Generation
 	prov.Status.LastReconcileTime = mt(p.now)
 	c.setReadiness(&prov, p)

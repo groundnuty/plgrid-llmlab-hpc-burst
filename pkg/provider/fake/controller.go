@@ -86,11 +86,20 @@ import (
 //     fallback mode the abandon-attempt annotation names it. An Unknown attempt
 //     whose job is found is recorded Done, and the job cancelled. Status is not
 //     written for a deleting Allocation.
-//   - Queue waits: a job's wait is added to the Provider's status the first time
-//     the job is seen with a start time, that is when the persisted
-//     atProvider.startTime goes from nil to set. A re-observed job adds none,
-//     even after its entry fell out of the 20 kept, and a restarted Controller
-//     (a new value on the same client) keeps the waits it finds in status.
+//   - Queue waits (docs/development.md, Queue waits): when the observed job has
+//     a start time and the stored atProvider.queueWaitRecorded is false, the
+//     wait (the job's submit and start times) is written to the Provider's
+//     status at once, within that observe, and only after that write succeeded
+//     is queueWaitRecorded set in the status written for the Allocation. If the
+//     Provider write fails, queueWaitRecorded stays false, the Allocation's
+//     status is still written, the Sync returns the error joined for that
+//     Allocation, and the next Sync tries again. If the Provider write
+//     succeeded and the Allocation's did not, the next Sync adds no second
+//     entry (a job ID is kept once) and sets the flag. A job whose flag is true
+//     adds none, even after its entry fell out of the 20 kept. The list is kept
+//     oldest start first, whatever the order the jobs were observed in. A
+//     restarted Controller (a new value on the same client) keeps all of this,
+//     because it lives in the status.
 //   - A later hard end: atProvider.hardEnd is re-read on every observe, so a
 //     Batch.SetTimeLimit shows in it at the next Sync.
 //   - The Provider's status, readiness (docs/development.md, Provider
@@ -153,7 +162,6 @@ type pass struct {
 	read bool
 	// readFailed is true once any read of the pass failed.
 	readFailed bool
-	waits      []v1alpha1.QueueWait
 }
 
 // findByTag is Batch.FindByTag, noted in the pass: it counts as a read, and a

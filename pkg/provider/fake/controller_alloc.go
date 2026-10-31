@@ -117,12 +117,12 @@ func (c *Controller) observe(ctx context.Context, p *pass, s *allocState) error 
 		return settleErr
 	}
 	c.mirror(p, s, id, job, found)
-	return settleErr
+	return errors.Join(settleErr, c.recordQueueWait(ctx, s, id, job, found))
 }
 
 // mirror writes what the read of the recorded job showed into the observation.
 func (c *Controller) mirror(p *pass, s *allocState, id string, job provider.Job, found bool) {
-	obs, prior := s.obs, s.prior
+	obs := s.obs
 	obs.JobID, obs.Submission = id, s.rec
 	if !found {
 		if obs.AbsentSince == nil {
@@ -145,7 +145,4 @@ func (c *Controller) mirror(p *pass, s *allocState, id string, job provider.Job,
 	obs.SubmitTime = mt(job.SubmitTime)
 	obs.StartEstimate, obs.StartTime = mtp(job.StartEstimate), mtp(job.StartTime)
 	obs.HardEnd, obs.EndTime = mtp(job.HardEnd), mtp(job.EndTime)
-	if job.StartTime != nil && prior.StartTime == nil {
-		p.waits = append(p.waits, v1alpha1.QueueWait{JobID: id, SubmitTime: *mt(job.SubmitTime), StartTime: *mt(*job.StartTime)})
-	}
 }
