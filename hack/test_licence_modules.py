@@ -93,6 +93,86 @@ class ModulesTest(unittest.TestCase):
             self.assertEqual(out, "")
             self.assertIn("unusual characters", err)
 
+    def test_a_directory_symlink_to_a_module_is_refused_and_named(self):
+        # find does not follow a directory symlink, so tools/cli -> ../spikes/cli would leave the
+        # module behind it out of the check, and out of the matrix, without a word (review of PR 77, B2).
+        with tempfile.TemporaryDirectory() as d:
+            mktree(d, [".", "spikes/cli"], ["tools"])
+            os.symlink("../spikes/cli", os.path.join(d, "tools", "cli"))
+            for flags in ((), ("--json",)):
+                rc, out, err = run(d, *flags)
+                self.assertEqual(rc, 1, (flags, out, err))
+                self.assertEqual(out, "")
+                self.assertIn("directory symlink", err)
+                self.assertIn("./tools/cli", err)
+
+    def test_every_directory_symlink_is_named_whatever_its_target(self):
+        with tempfile.TemporaryDirectory() as d:
+            mktree(d, [".", "real/m"], ["a", "b"])
+            os.symlink("../real", os.path.join(d, "a", "inside"))  # a target inside the checked tree
+            os.symlink("/tmp", os.path.join(d, "b", "outside"))    # a target outside the repository
+            rc, out, err = run(d)
+        self.assertEqual(rc, 1, err)
+        self.assertEqual(out, "")
+        self.assertIn("./a/inside", err)
+        self.assertIn("./b/outside", err)
+
+    def test_a_symlink_to_a_file_or_a_dangling_one_is_not_a_directory_symlink(self):
+        # Only a link that find would have to follow into a directory hides a module. A go.mod
+        # that is itself a symlink to a file is found as the module it marks.
+        with tempfile.TemporaryDirectory() as d:
+            mktree(d, [".", "real"], ["linked", "other"])
+            os.symlink("../real/go.mod", os.path.join(d, "linked", "go.mod"))
+            os.symlink("nowhere", os.path.join(d, "other", "dangling"))
+            rc, out, err = run(d)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out.split(), [".", "linked", "real"])
+
+    def test_a_symlink_inside_spikes_is_outside_the_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            mktree(d, [".", "spikes/s1"], ["third_party"])
+            os.symlink("s1", os.path.join(d, "spikes", "alias"))
+            rc, out, err = run(d)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out.split(), ["."])
+
+    def test_a_newline_in_a_directory_name_is_refused_not_split_into_two_paths(self):
+        # find -printf '%h\n' made "alpha<newline>beta" the two accepted paths alpha and beta; with
+        # real alpha and beta modules beside it the matrix then held those two and never the module
+        # that was actually there (review of PR 77, B3).
+        with tempfile.TemporaryDirectory() as d:
+            mktree(d, [".", "alpha", "beta", "alpha\nbeta"])
+            for flags in ((), ("--json",)):
+                rc, out, err = run(d, *flags)
+                self.assertEqual(rc, 1, (flags, out, err))
+                self.assertEqual(out, "")
+                self.assertIn("newline or another control character", err)
+                self.assertIn("alpha", err)
+
+    def test_other_control_characters_in_a_directory_name_are_refused(self):
+        for name in ("tab\there", "bell\ax", "cr\rx"):
+            with tempfile.TemporaryDirectory() as d:
+                mktree(d, [".", name])
+                rc, out, err = run(d)
+            self.assertEqual(rc, 1, (name, out, err))
+            self.assertEqual(out, "")
+            self.assertIn("newline or another control character", err)
+
+    def test_a_search_that_cannot_read_a_directory_fails(self):
+        # find exits non-zero over an unreadable directory; a module inside it would be missed.
+        # (Skipped for root, which reads everything.)
+        if os.geteuid() == 0:
+            self.skipTest("root reads every directory")
+        with tempfile.TemporaryDirectory() as d:
+            mktree(d, [".", "locked/m"])
+            os.chmod(os.path.join(d, "locked"), 0)
+            try:
+                rc, out, err = run(d)
+            finally:
+                os.chmod(os.path.join(d, "locked"), 0o755)
+        self.assertEqual(rc, 1, err)
+        self.assertEqual(out, "")
+
     def test_bad_usage(self):
         p = subprocess.run(["bash", SCRIPT], capture_output=True, text=True)
         self.assertEqual(p.returncode, 2)
