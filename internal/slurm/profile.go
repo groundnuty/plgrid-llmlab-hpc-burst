@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"syscall"
@@ -27,9 +28,10 @@ const (
 type ProfileReader struct {
 	// Reader reads Providers and PlatformProfiles.
 	Reader client.Reader
-	// UID is the controller's user, which must own the credentials files;
-	// -1 means os.Geteuid().
-	UID int
+	// UID is the controller's user, which must own the credentials files; nil
+	// means os.Geteuid(). It is a pointer because 0 is a user too (root): an
+	// integer left unset would silently demand files owned by root.
+	UID *int
 	// Home expands "~/" in the credentials file; "" means os.UserHomeDir().
 	Home string
 }
@@ -206,9 +208,9 @@ func (r *ProfileReader) readCredentials(prov v1alpha1.Provider, bad func(string,
 		bad("provider.spec.credentialsRef.file", "is empty")
 		return SSHConfig{}, nil
 	}
-	uid := r.UID
-	if uid < 0 {
-		uid = os.Geteuid()
+	uid := os.Geteuid()
+	if r.UID != nil {
+		uid = *r.UID
 	}
 	b, err := readPrivate(ref.File, uid, true)
 	if err != nil {
@@ -229,9 +231,13 @@ func (r *ProfileReader) readCredentials(prov v1alpha1.Provider, bad func(string,
 	return c, nil
 }
 
-// readPrivate checks that path is a regular file owned by uid with no
-// permission bits for group or others (mode 600 or 400), and reads it when
-// read is set. A private key is only checked, never read.
+// maxCredentialsSize bounds the credentials file that readPrivate reads.
+const maxCredentialsSize = 1 << 20
+
+// readPrivate checks that path is a regular file owned by uid with mode
+// exactly 600, as HBEP-4 (ReadProfile) says of the credentials file and the key
+// file it names, and reads it when read is set. A private key is only checked,
+// never read.
 func readPrivate(path string, uid int, read bool) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -249,25 +255,28 @@ func readPrivate(path string, uid int, read bool) ([]byte, error) {
 	switch {
 	case !fi.Mode().IsRegular():
 		return nil, fmt.Errorf("%w: it is not a regular file", provider.ErrCredentials)
-	case fi.Mode().Perm()&0o077 != 0:
-		return nil, fmt.Errorf("%w: it is readable or writable by group or others (mode %o; want 600)", provider.ErrCredentials, fi.Mode().Perm())
+	case fi.Mode().Perm() != 0o600:
+		return nil, fmt.Errorf("%w: its mode is %o; want 600", provider.ErrCredentials, fi.Mode().Perm())
 	case !ok || int(st.Uid) != uid:
 		return nil, fmt.Errorf("%w: it is not owned by the controller's user", provider.ErrCredentials)
 	}
 	if !read {
 		return nil, nil
 	}
-	b := make([]byte, 0, fi.Size())
-	buf := make([]byte, 4096)
-	for {
-		n, err := f.Read(buf)
-		b = append(b, buf[:n]...)
-		if err != nil {
-			break
-		}
-		if len(b) > 1<<20 {
-			return nil, fmt.Errorf("%w: it is larger than 1 MiB", provider.ErrCredentials)
-		}
+	return readBounded(f)
+}
+
+// readBounded reads r to its end. A read error other than the end is an error
+// that wraps provider.ErrCredentials and returns no bytes: partial content is
+// never parsed as if it were the whole file. The error does not carry the read
+// error's text, which may name a path.
+func readBounded(r io.Reader) ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(r, maxCredentialsSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("%w: it cannot be read", provider.ErrCredentials)
+	}
+	if len(b) > maxCredentialsSize {
+		return nil, fmt.Errorf("%w: it is larger than 1 MiB", provider.ErrCredentials)
 	}
 	return b, nil
 }

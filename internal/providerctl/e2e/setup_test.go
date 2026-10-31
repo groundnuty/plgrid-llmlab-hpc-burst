@@ -95,7 +95,7 @@ func TestSetupInARealManager(t *testing.T) {
 		Setup: func(mgr manager.Manager, p string) error {
 			return providerctl.Setup(mgr, providerctl.Options{
 				Provider: p,
-				Profiles: &slurm.ProfileReader{Reader: mgr.GetClient(), UID: -1, Home: dir},
+				Profiles: &slurm.ProfileReader{Reader: mgr.GetClient(), Home: dir},
 				NewPlatform: func(v slurm.Validated) (providerctl.Platform, io.Closer, error) {
 					return slurm.NewBatch(session, v.Profile, v.Settings, slurm.Options{PollInterval: time.Second, BusyInterval: 500 * time.Millisecond}), io.NopCloser(nil), nil
 				},

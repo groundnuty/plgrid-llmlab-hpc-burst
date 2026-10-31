@@ -664,6 +664,21 @@ func TestCheckRequestRefusals(t *testing.T) {
 	}
 }
 
+// CheckRequest is what Create calls before it stages a file: a request that
+// HBEP-4 refuses (Submission: alpha Allocations are single-node) is refused
+// with ErrInvalidRequest, and the example request passes. It takes no Runner,
+// so it can make no call.
+func TestCheckRequestExported(t *testing.T) {
+	req, profile, settings := exampleRequest()
+	if err := CheckRequest(req, profile, settings); err != nil {
+		t.Errorf("CheckRequest(example) = %v, want nil", err)
+	}
+	req.Params.Nodes = 2
+	if err := CheckRequest(req, profile, settings); !errors.Is(err, provider.ErrInvalidRequest) {
+		t.Errorf("CheckRequest(two nodes) = %v, want a refusal wrapping ErrInvalidRequest", err)
+	}
+}
+
 // countingRunner fails the test's expectation if the Batch runs any command.
 type countingRunner struct{ calls atomic.Int32 }
 

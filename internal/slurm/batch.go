@@ -71,6 +71,11 @@ type Health struct {
 	// DialHomeKeyMissing is the result of the latest dial-home key check:
 	// nil before one, else whether a key file was missing.
 	DialHomeKeyMissing *bool
+	// ReadFailures counts the required status reads that failed since the
+	// Batch was made: every failed queue listing and every failed accounting
+	// read. It rises when sacct fails while the listing still succeeds, a
+	// failure ListingFailed does not show.
+	ReadFailures uint64
 }
 
 // listing is one read of the queue listing.
@@ -127,10 +132,15 @@ func NewBatch(runner Runner, profile provider.Profile, settings provider.Setting
 }
 
 // Configure replaces the profile and settings, for example after the
-// PlatformProfile changed. The cached listing stays.
+// PlatformProfile changed. The cached listing stays. The cached login-node
+// paths stay only while the profile's stagingDir is the same: they were
+// resolved from it, and the connection's generation would not change.
 func (b *Batch) Configure(profile provider.Profile, settings provider.Settings) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if profile.Spec.StagingDir != b.profile.Spec.StagingDir {
+		b.paths = nil
+	}
 	b.profile, b.settings = profile, settings
 }
 
@@ -220,6 +230,7 @@ func (b *Batch) queue(ctx context.Context) (*listing, error) {
 	defer b.mu.Unlock()
 	if err != nil {
 		b.health.ListingFailed = true
+		b.health.ReadFailures++
 		return nil, err
 	}
 	b.cache = &listing{at: now, records: recs, parser: parser}
@@ -272,8 +283,20 @@ func (b *Batch) ListByTag(ctx context.Context, tag string) ([]provider.Job, erro
 	return b.queueJobs(l, func(r queueRecord) bool { return r.Name == tag })
 }
 
-// accounting runs one sacct line and merges its records.
+// accounting runs one sacct line and merges its records. A failed read is
+// counted in Health.ReadFailures: the listing can succeed while accounting
+// fails, and then ListingFailed stays false.
 func (b *Batch) accounting(ctx context.Context, line string) ([]provider.Job, error) {
+	jobs, err := b.readAccounting(ctx, line)
+	if err != nil {
+		b.mu.Lock()
+		b.health.ReadFailures++
+		b.mu.Unlock()
+	}
+	return jobs, err
+}
+
+func (b *Batch) readAccounting(ctx context.Context, line string) ([]provider.Job, error) {
 	profile, _ := b.config()
 	res, err := b.run(ctx, line, nil)
 	if err != nil {
@@ -387,6 +410,15 @@ func refuse(format string, a ...any) error {
 
 var digestForm = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
+// CheckRequest refuses a request that HBEP-4 refuses (Submission), with an
+// error that wraps provider.ErrInvalidRequest, and makes no call. Create calls
+// it before staging files, so a bad request is refused before any platform
+// call.
+func CheckRequest(req provider.SubmitRequest, profile provider.Profile, settings provider.Settings) error {
+	_, err := checkRequest(req, profile, settings)
+	return err
+}
+
 // checkRequest refuses, before any call, what HBEP-4 refuses (Submission).
 func checkRequest(req provider.SubmitRequest, profile provider.Profile, settings provider.Settings) (submission, error) {
 	s := submission{tag: req.Tag, account: req.Account, hold: req.Hold}
@@ -495,6 +527,16 @@ func (b *Batch) LiftHold(ctx context.Context, jobID string) error {
 	if res.ExitCode == 0 {
 		return nil
 	}
+	// No real `scontrol release` error reply has been captured, so none of
+	// these texts is checked against one. "Invalid job id specified" is real
+	// Slurm text, but S7 captured it from squeue. "Access/permission denied"
+	// and "already finished" are what fakeslurm and S4 emit ("Job has already
+	// finished"), from S4's reading of Slurm's source. "admin", "not held" and
+	// "Job is not pending" have no source: neither fake emits them. A text that
+	// matches nothing falls through to the last return, an unknown error: the
+	// reconciler then writes no hold-lifted marker and lifts again at the next
+	// observe. The loose "admin" match is the one most likely to misread an
+	// unrelated text.
 	stderr := string(res.Stderr)
 	switch {
 	case strings.Contains(stderr, "Invalid job id specified"):
@@ -591,6 +633,11 @@ func (b *Batch) Paths(ctx context.Context) (Paths, error) {
 	p, err := b.resolve(ctx, staging)
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if staging != b.profile.Spec.StagingDir {
+		// Configure changed the stagingDir while this call resolved the old
+		// one: its answer is good for this call only and is not cached.
+		return p, err
+	}
 	if err != nil {
 		if errors.Is(err, provider.ErrPathUnresolved) {
 			b.health.PathUnresolved = err

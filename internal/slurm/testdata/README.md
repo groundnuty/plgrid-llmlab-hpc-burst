@@ -1,11 +1,12 @@
 # Fixtures of internal/slurm
 
-Slurm JSON replies for the parser tests (`parse_test.go`). Two data_parser versions, one directory each:
+Slurm JSON replies for the parser tests (`parse_test.go`, `parse_real_test.go`). Three directories, two of them synthetic and one real:
 
-- `v0.0.42` (Slurm 24.11, Helios): built from S7's real captures, `spikes/s7/slurm-json-real.md`.
-- `v0.0.40` (Slurm 23.11, Athena and Sano): written from the shapes of S4's fake, `spikes/s4/fakeslurm/` (`squeue.go` `squeueJob`, `sacct.go` `sacctJob` and `accountingRecords`, `output.go` `meta` and `exitCodeFor`) and `spikes/s4/internal/slurm/parse_test.go`. **No real v0.0.40 capture exists**; HBEP-4 (Graduation criteria) checks it on Athena before alpha.
+- `v0.0.42` (Slurm 24.11, Helios): built from S7's real captures, `spikes/s7/slurm-json-real.md`. A synthetic file here is S7's text with placeholders and derived variants, not a reply as Slurm sent it.
+- `v0.0.40` (Slurm 23.11, Athena and Sano): **synthetic.** Written from the shapes of S4's fake, `spikes/s4/fakeslurm/` (`squeue.go` `squeueJob`, `sacct.go` `sacctJob` and `accountingRecords`, `output.go` `meta` and `exitCodeFor`) and `spikes/s4/internal/slurm/parse_test.go`. Not a capture.
+- `v0.0.40-athena-real` (Slurm 23.11.7, Athena): **real replies** of `squeue --json` and `sacct --json`, recorded by the conformance run of issue #59 and cut down by allowlist; see its own README. These are the only real v0.0.40 documents in the repository; nothing from Sano is captured.
 
-**Nothing here was produced by the parser, by `internal/slurm/fakeslurm`, or by any code of this repository.** The files come from S7's text and S4's source by a throwaway script that is not committed; the tests' expected values are written out by hand (instants checked with `date -u -d @<epoch>`). Agreement between a fixture and the code that reads it is therefore not circular.
+**Nothing in `v0.0.42` or `v0.0.40` was produced by the parser, by `internal/slurm/fakeslurm`, or by any code of this repository.** Those files come from S7's text and S4's source by a throwaway script that is not committed; the tests' expected values are written out by hand (instants checked with `date -u -d @<epoch>`). Agreement between a fixture and the code that reads it is therefore not circular. `v0.0.40-athena-real` is Athena's own output, cut down by allowlist (see its README), and `parse_real_test.go` reads it.
 
 ## Placeholders
 
@@ -100,7 +101,7 @@ Added, because S4's fake does not emit them:
 What is deliberately **absent**, as in S4's fake and HBEP-4:
 
 - sacct has no `restart_cnt`, `hold` or `priority`. A held pending job (4301, 4302) shows only through `state.reason`. The tests add `hold` and `priority` to such a record inline to try each signal.
-- A running squeue job has `end_time` unset (S4: `end` is filled only for an end state), so the parser's hard end is start + limit. Job 4309 sets `end_time`. Whether Slurm 23.11 projects `end_time` while a job runs is **not known**.
+- A running squeue job has `end_time` unset (S4: `end` is filled only for an end state), so the parser's hard end is start + limit. Job 4309 sets `end_time`. Slurm 23.11.7 on Athena does project `end_time` while a job runs (start + limit, `v0.0.40-athena-real/squeue-running.json`); this synthetic file keeps S4's unset value.
 - Job 4308's `["FAILED","COMPLETING"]` is S7's observation on Helios (24.11), used for v0.0.40 too; COMPLETING is a flag in both versions. S4's fake emits one-element state lists.
 - `sacct-requeue.json`: 4320's earlier record is `["PENDING","REQUEUED"]`, 4322 is S4's `parse_test.go` shape, one record `["REQUEUED"]`; the later execution of 4320 comes first.
 

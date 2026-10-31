@@ -221,7 +221,7 @@ func newWorld(t *testing.T) *world {
 
 	ctl, err := providerctl.New(w.c, w.c, scheme, providerctl.Options{
 		Provider: prov.Name,
-		Profiles: &slurm.ProfileReader{Reader: w.c, UID: -1},
+		Profiles: &slurm.ProfileReader{Reader: w.c},
 		NewPlatform: func(v slurm.Validated) (providerctl.Platform, io.Closer, error) {
 			t, err := sshrun.New(sshrun.Options{Name: v.Settings.Provider, Config: v.SSH, ControlDir: s.control, HostLock: s.lock, MaxConcurrent: 1})
 			if err != nil {

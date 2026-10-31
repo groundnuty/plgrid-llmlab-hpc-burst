@@ -3,10 +3,13 @@ package slurm
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -62,7 +65,7 @@ func newProfileRig(t *testing.T) *profileRig {
 	return r
 }
 
-func (r *profileRig) read() (Validated, error) {
+func (r *profileRig) client() client.Reader {
 	r.t.Helper()
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
@@ -72,8 +75,13 @@ func (r *profileRig) read() (Validated, error) {
 	if r.pp != nil {
 		objs = append(objs, r.pp)
 	}
-	c := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
-	return (&ProfileReader{Reader: c, UID: -1, Home: r.dir}).Read(context.Background(), "example-provider")
+	return clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+}
+
+// read reads the rig's Provider with a ProfileReader that leaves UID unset.
+func (r *profileRig) read() (Validated, error) {
+	r.t.Helper()
+	return (&ProfileReader{Reader: r.client(), Home: r.dir}).Read(context.Background(), "example-provider")
 }
 
 func TestReadProfileValid(t *testing.T) {
@@ -162,30 +170,99 @@ func TestReadProfileRefusals(t *testing.T) {
 }
 
 // The credentials file and the key it names must be the controller's, mode
-// 600; anything else is ErrCredentials, and no secret is read into an error.
+// exactly 600 (HBEP-4, Core operations, ReadProfile; HBEP-11); anything else
+// is ErrCredentials, and no secret is read into an error. Modes are set with
+// an explicit chmod, so the umask plays no part.
 func TestReadProfileCredentialModes(t *testing.T) {
+	files := map[string]func(r *profileRig) string{
+		"credentials": func(r *profileRig) string { return r.creds },
+		"key":         func(r *profileRig) string { return r.key },
+	}
+	for file, path := range files {
+		for _, mode := range []os.FileMode{0o400, 0o640, 0o604, 0o700} {
+			t.Run(fmt.Sprintf("%s mode %o", file, mode), func(t *testing.T) {
+				r := newProfileRig(t)
+				if err := os.Chmod(path(r), mode); err != nil {
+					t.Fatal(err)
+				}
+				_, err := r.read()
+				if !errors.Is(err, provider.ErrCredentials) {
+					t.Fatalf("got %v, want ErrCredentials", err)
+				}
+				if strings.Contains(err.Error(), "example private key") {
+					t.Error("the key's content reached the error")
+				}
+			})
+		}
+		t.Run(file+" mode 600", func(t *testing.T) {
+			r := newProfileRig(t)
+			if err := os.Chmod(path(r), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := r.read(); err != nil {
+				t.Errorf("mode 600 %s file: %v", file, err)
+			}
+		})
+	}
 	for name, mod := range map[string]func(r *profileRig){
-		"credentials readable by group": func(r *profileRig) { _ = os.Chmod(r.creds, 0o640) },
-		"key readable by others":        func(r *profileRig) { _ = os.Chmod(r.key, 0o604) },
-		"missing key":                   func(r *profileRig) { _ = os.Remove(r.key) },
-		"missing credentials":           func(r *profileRig) { _ = os.Remove(r.creds) },
+		"missing key":         func(r *profileRig) { _ = os.Remove(r.key) },
+		"missing credentials": func(r *profileRig) { _ = os.Remove(r.creds) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := newProfileRig(t)
 			mod(r)
-			_, err := r.read()
-			if !errors.Is(err, provider.ErrCredentials) {
+			if _, err := r.read(); !errors.Is(err, provider.ErrCredentials) {
 				t.Fatalf("got %v, want ErrCredentials", err)
-			}
-			if strings.Contains(err.Error(), "example private key") {
-				t.Error("the key's content reached the error")
 			}
 		})
 	}
+}
+
+// A ProfileReader that leaves UID unset means the controller's own user. The
+// zero value of an integer would mean root, and every Provider of a caller
+// that forgot the field would be CredentialsInvalid. The test names no UID, so
+// it compiles whatever the field's type.
+func TestZeroValueProfileReaderAcceptsFilesOfTheCurrentUser(t *testing.T) {
 	r := newProfileRig(t)
-	_ = os.Chmod(r.creds, 0o400)
-	if _, err := r.read(); err != nil {
-		t.Errorf("mode 400 credentials: %v", err)
+	if _, err := (&ProfileReader{Reader: r.client(), Home: r.dir}).Read(context.Background(), "example-provider"); err != nil {
+		t.Errorf("a zero-value ProfileReader refused files owned by the current user: %v", err)
+	}
+}
+
+// A UID that is set must still own the files: a user other than the owner is
+// refused.
+func TestProfileReaderUIDMustOwnTheFiles(t *testing.T) {
+	r := newProfileRig(t)
+	other := os.Geteuid() + 1
+	_, err := (&ProfileReader{Reader: r.client(), UID: &other, Home: r.dir}).Read(context.Background(), "example-provider")
+	if !errors.Is(err, provider.ErrCredentials) {
+		t.Errorf("got %v, want ErrCredentials for a UID that does not own the files", err)
+	}
+}
+
+// A read error that is not the end of the file means the content is partial:
+// no bytes come back, the error wraps ErrCredentials, and neither the partial
+// content nor the read error's text (which may name a path) reaches it.
+func TestReadBoundedReadError(t *testing.T) {
+	failing := io.MultiReader(strings.NewReader("partial credentials"), iotest.ErrReader(errors.New("read /example/path: input/output error")))
+	b, err := readBounded(failing)
+	if b != nil || !errors.Is(err, provider.ErrCredentials) {
+		t.Fatalf("readBounded = %q, %v; want no bytes and ErrCredentials", b, err)
+	}
+	for _, leak := range []string{"partial", "/example/path"} {
+		if strings.Contains(err.Error(), leak) {
+			t.Errorf("the error %q carries %q", err, leak)
+		}
+	}
+}
+
+// Content up to 1 MiB is read whole; one byte more is refused.
+func TestReadBoundedSize(t *testing.T) {
+	if b, err := readBounded(strings.NewReader(strings.Repeat("a", 1<<20))); err != nil || len(b) != 1<<20 {
+		t.Errorf("1 MiB: %d bytes, %v; want all of it and no error", len(b), err)
+	}
+	if _, err := readBounded(strings.NewReader(strings.Repeat("a", 1<<20+1))); !errors.Is(err, provider.ErrCredentials) {
+		t.Errorf("1 MiB and one byte: %v; want ErrCredentials", err)
 	}
 }
 
