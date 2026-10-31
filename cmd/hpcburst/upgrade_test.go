@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -41,9 +43,16 @@ func TestUpgrade(t *testing.T) {
 	}
 
 	ctlBin, _ := fakeController(t)
+	// The front runs under the same supervisor (issue #64), here as the fake in its front role: the
+	// upgrade must start it again with the controller.
+	frontBin, _ := fakeFront(t)
+	frontCfg := filepath.Join(filepath.Dir(h.dir), "front.json")
+	if err := os.WriteFile(frontCfg, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	r := cli(t, h.upArgs(base, "--version", "1.35.9", "--json",
 		"--front-mode", "ssh", "--front-addr", "front.example.test", "--front-key", keyFile,
-		"--manifests", "testdata/manifests", "--controller-bin", ctlBin)...)
+		"--manifests", "testdata/manifests", "--controller-bin", ctlBin, "--front-config", frontCfg, "--front-bin", frontBin)...)
 	if r.code != exitOK {
 		t.Fatalf("up exited %d", r.code)
 	}
@@ -57,10 +66,12 @@ func TestUpgrade(t *testing.T) {
 	oldPID := st.Processes[0].PID
 	// The controllers run beside the old host: remember them, to see them replaced.
 	oldProcs := recordedProcs(t, h.dir)
-	oldRec, ok := readSupervisorRecord(t, h.dir)
-	if len(oldProcs) != 2 || oldProcs[1].Name != "supervisor" || !ok || oldRec.Entries[0].Proc == nil {
+	oldRec, ok := readSupervisorRecordN(t, h.dir, 2)
+	if len(oldProcs) != 2 || oldProcs[1].Name != "supervisor" || !ok || oldRec.Entries[0].Proc == nil ||
+		oldRec.Entries[1].Name != "front" || oldRec.Entries[1].Proc == nil {
 		t.Fatalf("before the upgrade: %+v, %+v", oldProcs, oldRec)
 	}
+	frontHealthAddr := fmt.Sprintf("127.0.0.1:%d", base+4)
 	pairBefore := readEndpointPair(t, h.dir) // created by up, for the controllers
 	c := h.clients()
 	ctx, cancel := testCtx()
@@ -179,14 +190,34 @@ func TestUpgrade(t *testing.T) {
 	if len(newProcs) != 2 || newProcs[1].Name != "supervisor" || newProcs[1].PID == oldProcs[1].PID || !running(newProcs[1].PID) {
 		t.Errorf("after the upgrade the record is %+v: the supervisor was not started again", newProcs)
 	} else {
-		newRec, ok := readSupervisorRecord(t, h.dir)
-		if !ok || newRec.Entries[0].Proc == nil || newRec.Entries[0].Proc.PID == oldRec.Entries[0].Proc.PID ||
-			!running(newRec.Entries[0].Proc.PID) || ppidOfPID(t, newRec.Entries[0].Proc.PID) != newProcs[1].PID {
+		// Both the controller and the front run again, as new children of the new supervisor, and
+		// the front answers on its own health port.
+		newRec, ok := readSupervisorRecordN(t, h.dir, 2)
+		for i := 0; ok && i < 2; i++ {
+			e, old := newRec.Entries[i], oldRec.Entries[i]
+			if e.Name != old.Name || e.Proc == nil || e.Proc.PID == old.Proc.PID || !running(e.Proc.PID) || ppidOfPID(t, e.Proc.PID) != newProcs[1].PID {
+				ok = false
+			}
+		}
+		if !ok {
 			t.Errorf("after the upgrade supervisor.json is %+v (before: %+v)", newRec, oldRec)
 		}
+		waitFor(t, 30*time.Second, "the front's /healthz after the upgrade", func() bool {
+			resp, err := (&http.Client{Timeout: 3 * time.Second}).Get("http://" + frontHealthAddr + "/healthz")
+			if err != nil {
+				return false
+			}
+			resp.Body.Close()
+			return resp.StatusCode == http.StatusOK
+		})
 	}
-	if running(oldProcs[1].PID) || running(oldRec.Entries[0].Proc.PID) {
-		t.Errorf("the old supervisor (pid %d) or controller (pid %d) still runs", oldProcs[1].PID, oldRec.Entries[0].Proc.PID)
+	for i, e := range oldRec.Entries {
+		if running(e.Proc.PID) {
+			t.Errorf("the old %s (pid %d, entry %d) still runs", e.Name, e.Proc.PID, i)
+		}
+	}
+	if running(oldProcs[1].PID) {
+		t.Errorf("the old supervisor (pid %d) still runs", oldProcs[1].PID)
 	}
 	// The agent endpoint's pair is kept: the agents' pin must not change under a running platform.
 	if after := readEndpointPair(t, h.dir); after.pin != pairBefore.pin || !bytes.Equal(after.cert, pairBefore.cert) || !bytes.Equal(after.key, pairBefore.key) {

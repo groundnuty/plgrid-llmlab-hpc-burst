@@ -38,6 +38,18 @@ var (
 // records (it records beside its binary when $FAKECTRL_DIR is not set).
 func fakeController(t *testing.T) (bin, dir string) {
 	t.Helper()
+	return fakeBinary(t, "hpcburst-controller")
+}
+
+// fakeFront returns a copy of the same fake installed as hpcburst-front, the name under which it
+// takes the front's command line and reports a usage state (its usage file) in /healthz.
+func fakeFront(t *testing.T) (bin, dir string) {
+	t.Helper()
+	return fakeBinary(t, "hpcburst-front")
+}
+
+func fakeBinary(t *testing.T, name string) (bin, dir string) {
+	t.Helper()
 	fakeCtlOnce.Do(func() {
 		if fakeCtlDir, fakeCtlErr = os.MkdirTemp("", "hbfake"); fakeCtlErr != nil {
 			return
@@ -56,7 +68,7 @@ func fakeController(t *testing.T) (bin, dir string) {
 		t.Fatal(err)
 	}
 	dir = t.TempDir()
-	bin = filepath.Join(dir, "hpcburst-controller")
+	bin = filepath.Join(dir, name)
 	if err := os.WriteFile(bin, b, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -101,9 +113,15 @@ type supervisorRecord struct {
 }
 
 func readSupervisorRecord(t testing.TB, dir string) (supervisorRecord, bool) {
+	return readSupervisorRecordN(t, dir, 1)
+}
+
+// readSupervisorRecordN reads supervisor.json, which must hold exactly n entries, the controller's
+// first.
+func readSupervisorRecordN(t testing.TB, dir string, n int) (supervisorRecord, bool) {
 	var r supervisorRecord
 	b, err := os.ReadFile(filepath.Join(dir, "controller", "supervisor.json"))
-	if err != nil || json.Unmarshal(b, &r) != nil || len(r.Entries) != 1 {
+	if err != nil || json.Unmarshal(b, &r) != nil || len(r.Entries) != n || r.Entries[0].Name != "controller" {
 		return r, false
 	}
 	return r, true

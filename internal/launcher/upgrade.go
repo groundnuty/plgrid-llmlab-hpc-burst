@@ -112,9 +112,10 @@ func Upgrade(ctx context.Context, o UpgradeOptions) (*UpgradeReport, error) {
 	if err != nil {
 		return nil, err
 	}
-	// replaceHost stopped the supervisor with the old host. The record keeps what it ran, so a
-	// status taken from here on says the controllers are missing until they are started again.
-	if nst.Controllers = st.Controllers; nst.Controllers != nil {
+	// replaceHost stopped the supervisor with the old host. The record keeps what it ran, the
+	// controllers and the front (issue #64), so a status taken from here on says they are missing
+	// until they are started again, and the new supervisor runs the same set.
+	if nst.Controllers, nst.FrontRun = st.Controllers, st.FrontRun; nst.Controllers != nil {
 		if err := l.saveState(nst); err != nil {
 			return nil, fmt.Errorf("the new host is running, but its record could not be written: %w", err)
 		}
