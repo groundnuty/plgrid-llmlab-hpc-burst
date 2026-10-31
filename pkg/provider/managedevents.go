@@ -4,8 +4,6 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
-
-	corev1 "k8s.io/api/core/v1"
 )
 
 // The form of the events a managed Provider's controller raises, and the rate
@@ -13,6 +11,14 @@ import (
 // (internal/managed) and its stand-in (pkg/provider/fake.ManagedController)
 // cannot drift (HBEP-8, Events: Form and Repeating conditions;
 // @hpc-burst-science-agent, 31 Oct 2026).
+
+// The Kubernetes event types, spelled out rather than taken from
+// k8s.io/api/core/v1 so that one spelling serves every caller. Only these
+// two are admitted by the events API.
+const (
+	EventKindOrdinary = "Normal"
+	EventKindWarning  = "Warning"
+)
 
 // The types an event can have, which go in its action (HBEP-8, Events: Form).
 // A managed Provider's controller raises degraded, failing and ready.
@@ -53,9 +59,9 @@ type ManagedEvent struct {
 // reason code, its Kubernetes type set from the action and its note cut to
 // MaxEventNote bytes.
 func NewManagedEvent(action, reason, note string) ManagedEvent {
-	typ := corev1.EventTypeNormal
+	typ := EventKindOrdinary
 	if action == EventActionDegraded || action == EventActionFailing {
-		typ = corev1.EventTypeWarning
+		typ = EventKindWarning
 	}
 	return ManagedEvent{Type: typ, Reason: reason, Action: action, Note: CutNote(note)}
 }

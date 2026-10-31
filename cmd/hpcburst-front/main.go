@@ -87,6 +87,6 @@ func run(args []string) error {
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	return front.Run(ctx, front.Options{
 		Config: cfg, Host: agentapi.Host{StateDir: *stateDir, PortBase: *portBase}, Mode: *mode,
-		Clock: clock.Real{}, Dynamic: dyn, Recorder: rec, Log: log, HealthAddr: *health,
+		Clock: clock.Real{}, Dynamic: dyn, Kube: cs, Recorder: rec, Log: log, HealthAddr: *health,
 	})
 }

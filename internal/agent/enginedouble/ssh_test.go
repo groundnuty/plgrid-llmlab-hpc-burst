@@ -259,3 +259,47 @@ func TestSSHDiesAfterTheGivenTime(t *testing.T) {
 		t.Errorf("the socket remains after the death: %v", err)
 	}
 }
+
+// The agent's forwards listen on a loopback port (HBEP-6, Dial-home modes:
+// "-L 127.0.0.1:<local>:127.0.0.1:<remote>"); the fake forwards that form
+// too, and the port is free again after TERM.
+func TestSSHForwardsALoopbackPortToTCP(t *testing.T) {
+	dir := sshFiles(t)
+	_, port := echoServer(t)
+	free, err := net.Listen("tcp4", "127.0.0.1:0")
+	must(t, err)
+	local := free.Addr().(*net.TCPAddr).Port
+	must(t, free.Close())
+	args := sshArgsFor(dir, "127.0.0.1:"+itoaPort(local), port)
+	p := runSSH(t, nil, args)
+	addr := "127.0.0.1:" + itoaPort(local)
+	var c net.Conn
+	for deadline := time.Now().Add(5 * time.Second); ; {
+		if c, err = net.DialTimeout("tcp4", addr, time.Second); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the fake ssh does not listen on %s: %v", addr, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	_ = c.SetDeadline(time.Now().Add(3 * time.Second))
+	if _, err := c.Write([]byte("ping\n")); err != nil {
+		t.Fatal(err)
+	}
+	line, err := bufio.NewReader(c).ReadString('\n')
+	must(t, err)
+	c.Close()
+	if line != "pong:ping\n" {
+		t.Errorf("through the forward: %q, want pong:ping", line)
+	}
+	p.signalGroup(syscall.SIGTERM)
+	if code := p.exitCode(t, 2*time.Second); code != 0 {
+		t.Errorf("exit %d on TERM, want 0", code)
+	}
+	ln, err := net.Listen("tcp4", addr)
+	if err != nil {
+		t.Fatalf("the forward's port is still held after TERM: %v", err)
+	}
+	ln.Close()
+}
