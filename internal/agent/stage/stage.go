@@ -56,9 +56,6 @@ import (
 // DefaultHubEndpoint is the Hugging Face Hub.
 const DefaultHubEndpoint = "https://huggingface.co"
 
-// readBuffer is each rehash reader's buffer (spike S7: 8 MiB).
-const readBuffer = 8 << 20
-
 // Config configures a Stager.
 type Config struct {
 	// StagingDir is the profile's resolved, absolute staging directory.
@@ -86,7 +83,9 @@ type Config struct {
 
 // Stager implements agent.Stager.
 type Stager struct {
-	c Config
+	c       Config
+	hooks   hooks
+	noFlock sync.Once
 }
 
 var _ agent.Stager = (*Stager)(nil)
@@ -139,57 +138,6 @@ var (
 	revForm   = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	sumForm   = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
-
-// Image implements agent.Stager: it pulls or builds the image once, and
-// returns its path.
-func (s *Stager) Image(ctx context.Context, image, digest string, format agentapi.ImageFormat) (agent.ImageResult, error) {
-	p, err := s.image(ctx, image, digest, format)
-	return agent.ImageResult{Path: p}, err
-}
-
-func (s *Stager) image(ctx context.Context, image, digest string, format agentapi.ImageFormat) (string, error) {
-	if !digestForm.MatchString(digest) {
-		return "", fmt.Errorf("image digest %q is not sha256:<64 hex>", digest)
-	}
-	if !imageForm.MatchString(image) || strings.Contains(image, "@") || strings.Contains(image, "..") {
-		return "", fmt.Errorf("image %q is not a repository reference", image)
-	}
-	if format == "" {
-		format = agentapi.ImageFormatSIF
-	}
-	if format != agentapi.ImageFormatSIF && format != agentapi.ImageFormatSandbox {
-		return "", fmt.Errorf("image format %q is neither %q nor %q", format, agentapi.ImageFormatSIF, agentapi.ImageFormatSandbox)
-	}
-	final := filepath.Join(s.c.StagingDir, agentapi.StagedImagePath(digest, format))
-	if fi, err := os.Stat(final); err == nil && fi.IsDir() == (format == agentapi.ImageFormatSandbox) {
-		return final, nil
-	}
-	dir := filepath.Dir(final)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return "", err
-	}
-	tmp := filepath.Join(dir, ".tmp-"+randomHex()+filepath.Ext(final))
-	ref := "docker://" + image + "@" + digest
-	var args []string
-	if format == agentapi.ImageFormatSandbox {
-		args = []string{"build", "--sandbox", tmp, ref}
-	} else {
-		args = []string{"pull", tmp, ref}
-	}
-	if err := s.runApptainer(ctx, args); err != nil {
-		os.RemoveAll(tmp)
-		return "", fmt.Errorf("%w for %s", err, ref)
-	}
-	if err := os.Rename(tmp, final); err != nil {
-		// Another Allocation staged it first: keep its copy.
-		os.RemoveAll(tmp)
-		if _, serr := os.Stat(final); serr == nil {
-			return final, nil
-		}
-		return "", err
-	}
-	return final, nil
-}
 
 // Checkpoint implements agent.Stager.
 func (s *Stager) Checkpoint(ctx context.Context, req agent.CheckpointRequest) (agent.CheckpointResult, error) {
@@ -275,63 +223,19 @@ func checkFile(f agentapi.FileDigest) error {
 	return nil
 }
 
-// rehash returns the SHA-256 of every present file, with Readers files read
-// at once, each through its reader's one buffer.
+// rehash returns the SHA-256 of every present file.
 func (s *Stager) rehash(ctx context.Context, dir string, files []agentapi.FileDigest, present []bool) ([]string, error) {
-	sums := make([]string, len(files))
-	jobs := make(chan int)
-	errs := make([]error, len(files))
-	var wg sync.WaitGroup
-	for range s.c.Readers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			buf := make([]byte, readBuffer)
-			for i := range jobs {
-				sums[i], errs[i] = hashFile(ctx, filepath.Join(dir, filepath.FromSlash(files[i].Path)), buf)
-			}
-		}()
-	}
-	for i := range files {
+	paths := make([]string, len(files))
+	for i, f := range files {
 		if present[i] {
-			select {
-			case jobs <- i:
-			case <-ctx.Done():
-			}
+			paths[i] = filepath.Join(dir, filepath.FromSlash(f.Path))
 		}
 	}
-	close(jobs)
-	wg.Wait()
+	sums, errs := hashPaths(ctx, paths, s.c.Readers)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	return sums, errors.Join(errs...)
-}
-
-// hashFile reads the whole file through buf with plain reads, never with a
-// read sized to the file, and returns its SHA-256. io.Copy is not used: an
-// *os.File's WriteTo falls back to a 32 KiB buffer of its own.
-func hashFile(ctx context.Context, p string, buf []byte) (string, error) {
-	f, err := os.Open(p)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	for {
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-		n, err := f.Read(buf)
-		h.Write(buf[:n])
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return "", fmt.Errorf("reading %s: %w", p, err)
-		}
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // download fetches one file from the Hub at the full commit id into a

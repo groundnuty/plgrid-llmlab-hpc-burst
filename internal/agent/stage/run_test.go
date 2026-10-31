@@ -146,8 +146,8 @@ exit 3
 	if err == nil || !strings.Contains(err.Error(), "exit code 3") {
 		t.Fatalf("err %v, want the exit code", err)
 	}
-	if entries, _ := os.ReadDir(filepath.Join(s.c.StagingDir, "images")); len(entries) != 0 {
-		t.Fatalf("files left after a failed run: %v", entries)
+	for _, e := range imageEntries(t, s) {
+		t.Errorf("left after a failed run: %s", e)
 	}
 }
 

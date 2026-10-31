@@ -327,8 +327,14 @@ func TestImageFormats(t *testing.T) {
 			if fi, err := os.Stat(p); err != nil || fi.IsDir() != tc.dir {
 				t.Fatalf("staged image: %v", err)
 			}
-			if _, err := s.Image(context.Background(), "docker.io/vllm/vllm-openai", digest, tc.format); err != nil {
-				t.Fatal(err)
+			if !res.Verified {
+				t.Error("a fresh pull or build is not reported as verified")
+			}
+			// The positive control for the integrity check: an intact image
+			// passes it, is reported verified, and is not pulled again.
+			again, err := s.Image(context.Background(), "docker.io/vllm/vllm-openai", digest, tc.format)
+			if err != nil || !again.Verified || again.Path != p {
+				t.Fatalf("second call: %+v, %v", again, err)
 			}
 			b, _ := os.ReadFile(filepath.Join(root, "apptainer.jsonl"))
 			lines := strings.Split(strings.TrimSpace(string(b)), "\n")
