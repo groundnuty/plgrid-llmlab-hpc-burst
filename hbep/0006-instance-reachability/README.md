@@ -116,7 +116,7 @@ Problems:
 | base+3 | the agent endpoint (HBEP-7) | `agentapi.AgentEndpointPortOffset`, on `main` |
 | base+4 | the frps plugin endpoint, plain HTTP | proposed |
 | base+6 | frps's bind port | proposed |
-| base+7 | the dial-home listener's default in ssh mode (HBEP-5) | `agentapi.DialHomePortOffset`, proposed by the code agent |
+| base+7 | the dial-home listener's default in ssh mode (HBEP-5) | `agentapi.DialHomePortOffset`, on `main` |
 | base+8 | frps's tcpmux `CONNECT` port | proposed |
 | base+9 | frps's web server, for its API | proposed |
 
