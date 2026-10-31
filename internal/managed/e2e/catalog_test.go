@@ -9,6 +9,7 @@ import (
 	"time"
 
 	coordinationv1 "k8s.io/api/coordination/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	testingclock "k8s.io/utils/clock/testing"
@@ -74,6 +75,13 @@ func startManaged(t *testing.T, name, key string, gw *llmlabtest.Server, clock *
 			PlatformProfileRef: v1alpha1.ObjectReference{Name: "example-llmlab"},
 			CredentialsRef:     &v1alpha1.CredentialsReference{File: path},
 		},
+	}
+	profile := &v1alpha1.PlatformProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "example-llmlab"},
+		Spec:       v1alpha1.PlatformProfileSpec{ProviderKind: v1alpha1.PlatformManaged},
+	}
+	if err := c.Create(ctx, profile); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatal(err)
 	}
 	if err := c.Create(ctx, prov); err != nil {
 		t.Fatal(err)

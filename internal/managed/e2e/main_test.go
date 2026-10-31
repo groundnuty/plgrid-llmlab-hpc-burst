@@ -115,21 +115,24 @@ func fail(format string, args ...any) int {
 	return 1
 }
 
-// installProviderCRD applies the committed Provider CRD and waits until the
-// API serves it.
+// installProviderCRD applies the committed Provider and PlatformProfile CRDs
+// (the controller refuses a Provider whose profile is not managed) and waits
+// until the API serves both.
 func installProviderCRD(ctx context.Context, cl client.Client) error {
-	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "crd", "hpcburst.groundnuty.github.io_providers.yaml"))
-	if err != nil {
-		return err
-	}
-	crd := &apiextensionsv1.CustomResourceDefinition{}
-	if err := utilyaml.NewYAMLOrJSONDecoder(bytes.NewReader(raw), 4096).Decode(crd); err != nil {
-		return fmt.Errorf("decode the Provider CRD: %w", err)
-	}
-	if err := cl.Create(ctx, crd); err != nil && !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("create %s: %w", crd.Name, err)
+	for _, name := range []string{"hpcburst.groundnuty.github.io_providers.yaml", "hpcburst.groundnuty.github.io_platformprofiles.yaml"} {
+		raw, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "crd", name))
+		if err != nil {
+			return err
+		}
+		crd := &apiextensionsv1.CustomResourceDefinition{}
+		if err := utilyaml.NewYAMLOrJSONDecoder(bytes.NewReader(raw), 4096).Decode(crd); err != nil {
+			return fmt.Errorf("decode %s: %w", name, err)
+		}
+		if err := cl.Create(ctx, crd); err != nil && !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("create %s: %w", crd.Name, err)
+		}
 	}
 	return wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, 60*time.Second, true, func(ctx context.Context) (bool, error) {
-		return cl.List(ctx, &v1alpha1.ProviderList{}) == nil, nil
+		return cl.List(ctx, &v1alpha1.ProviderList{}) == nil && cl.List(ctx, &v1alpha1.PlatformProfileList{}) == nil, nil
 	})
 }
