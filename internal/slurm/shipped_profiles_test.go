@@ -1,13 +1,17 @@
 package slurm
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/yaml"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
 // The Slurm provider's own checks (HBEP-4, Core operations, ReadProfile) accept
@@ -53,6 +57,56 @@ func TestShippedProfilesPassReadProfile(t *testing.T) {
 					t.Errorf("the partition read is %q; want %q", v.Profile.Partition.Name, part)
 				}
 			})
+		}
+	}
+}
+
+// Helios plgrid is a CPU partition for conformance runs only and hosts no
+// Instance (`@hpc-burst-science-agent`, 31 Oct 2026). What keeps a served
+// deployment off it today is this provider check: the shipped profile gives the
+// partition gpusPerNode 0, so every request for a GPU is refused before any
+// call. The same request on plgrid-gpu-gh200 is accepted, which shows the
+// refusal comes from the partition's entry and not from the request.
+//
+// A request for no GPU is not refused here: the partition's gpuModel is none, and
+// the conformance runs submit CPU jobs. That case is outside this test.
+func TestShippedCPUPartitionRefusesGPUAllocations(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "profiles", "helios.yaml"))
+	if err != nil {
+		t.Fatalf("read the shipped profile: %v", err)
+	}
+	var pp v1alpha1.PlatformProfile
+	if err := yaml.UnmarshalStrict(raw, &pp); err != nil {
+		t.Fatal(err)
+	}
+	check := func(partition string, gpus, cpusPerTask int32, mem string) error {
+		var entry v1alpha1.PartitionProfile
+		for _, p := range pp.Spec.Partitions {
+			if p.Name == partition {
+				entry = p
+			}
+		}
+		if entry.Name == "" {
+			t.Fatalf("helios.yaml does not list %s", partition)
+		}
+		req := provider.SubmitRequest{
+			Tag: "hb-example-0123456789ab", Hold: true, Account: "example-account",
+			Params: v1alpha1.BatchParameters{
+				Partition: partition, TimeLimit: "1h", GPUs: gpus, CPUsPerTask: cpusPerTask,
+				Memory: resource.MustParse(mem), Nodes: 1, AgentDigest: strings.Repeat("a", 64),
+			},
+		}
+		return CheckRequest(req, provider.Profile{Name: pp.Name, Spec: pp.Spec, Partition: entry},
+			provider.Settings{Provider: "example", Account: "example-account", Partition: partition})
+	}
+
+	if err := check("plgrid-gpu-gh200", 1, 72, "122375Mi"); err != nil {
+		t.Fatalf("one GPU on plgrid-gpu-gh200 is refused, so the control proves nothing: %v", err)
+	}
+	for _, gpus := range []int32{1, 2, 4} {
+		err := check("plgrid", gpus, 4*gpus, "8Gi")
+		if !errors.Is(err, provider.ErrInvalidRequest) || !strings.Contains(err.Error(), "gpusPerNode 0") {
+			t.Errorf("%d GPUs on plgrid: got %v; want a refusal wrapping ErrInvalidRequest that names gpusPerNode 0", gpus, err)
 		}
 	}
 }

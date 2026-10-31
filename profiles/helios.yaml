@@ -27,11 +27,13 @@ spec:
       cpuArch: x86_64 # facts.partitions[name=plgrid].arch
       maxTime: 72h # facts.partitions[name=plgrid].max_time, "3-00:00:00"
       gpusPerNode: 0 # facts.partitions[name=plgrid].gres, "(none)"
+      # This is a CPU partition for conformance runs only. It hosts no Instance
+      # (`@hpc-burst-science-agent`, 31 Oct 2026). gpusPerNode 0 makes the Slurm provider refuse
+      # any request for a GPU here (internal/slurm CheckRequest; test TestShippedCPUPartitionRefusesGPUAllocations).
       # Absent here: cpusPerGpu and memPerGpu (the partition has no GPU), and imageFormat.
       # imageFormat is not measured on this partition: S1's probe 2 ran on plgrid-gpu-gh200 only
-      # (facts.containers.apptainer_compute_nodes holds that one partition). Absent means the
-      # agent is sent sif (v1alpha1.ImageFormatOf). Until Apptainer is measured on these nodes,
-      # the partition hosts no Instance (HBEP-4, open question 15).
+      # (facts.containers.apptainer_compute_nodes holds that one partition). Absent means sif
+      # (v1alpha1.ImageFormatOf), which matters only to an Instance, and none runs here.
     - name: plgrid-gpu-gh200 # spec.profile.facts.partitions[name=plgrid-gpu-gh200].name
       gpuModel: GH200 # HBEP-4 fixes the string. The GRES has no type, so the model is from the centre's documentation, cited in facts.partitions[name=plgrid-gpu-gh200].note ("4x GH200 96 GB")
       cpuArch: aarch64 # facts.partitions[name=plgrid-gpu-gh200].arch
@@ -54,10 +56,13 @@ spec:
   jsonDataParser: v0.0.42 # facts.slurm.squeue_json.note: meta.plugin.data_parser is data_parser/v0.0.42 (HBEP-4, The Slurm dialect), without the prefix
   stagingDir: $SCRATCH # facts.storage.scratch: a Lustre file system, reached through $SCRATCH (HBEP-4, Transport)
   # Not set, because no fact states it (HBEP-4, Platform profile schema: an unstated fact is absent, not false):
-  #   jobName (maxLength, pattern): no draft records a job-name maximum or a pattern. The 56-character
-  #     round trip is a graduation criterion of the alpha, measured on each alpha partition; the value
-  #     is set when it is (HBEP-4, Graduation criteria).
-  #   jobCommentAccounted: not in the drafts (HBEP-4, Platform profile schema).
+  #   jobName (maxLength, pattern): unset. No draft records a job-name maximum or a pattern, and the
+  #     56-character round trip is pending (HBEP-4, Risks and Graduation criteria). maxLength is set per
+  #     partition once a conformance run has submitted a 56-character name there and read it back,
+  #     and that run is its source. 56 is neither a fact nor a default here
+  #     (`@hpc-burst-science-agent`, 31 Oct 2026).
+  #   jobCommentAccounted: unset. HBEP-4 makes it optional and only recorded: the tag is in the job
+  #     name either way (`@hpc-burst-science-agent`, 31 Oct 2026).
   #   maxIdle: unset outside Athena (HBEP-4, Platform profile schema).
 
   drainWindow: 2h10m # framework default (HBEP-4, Platform profile schema, drainWindow; HBEP-5, Draining): the front's 2 h maxRequestDuration plus drainMargin

@@ -44,10 +44,13 @@ spec:
   stagingDir: $SCRATCH # facts.storage.scratch_fstype: a Lustre file system, reached through $SCRATCH (HBEP-4, Transport)
   maxIdle: 30m # HBEP-4, Platform profile schema, maxIdle: Athena 30 min (HBEP-7, Retention); motivated by facts.login_node_policy.gpu_only (GPU jobs only)
   # Not set, because no fact states it (HBEP-4, Platform profile schema: an unstated fact is absent, not false):
-  #   jobName (maxLength, pattern): no draft records a job-name maximum or a pattern. The 56-character
-  #     round trip is a graduation criterion of the alpha, measured on each alpha partition; the value
-  #     is set when it is (HBEP-4, Graduation criteria).
-  #   jobCommentAccounted: not in the drafts (HBEP-4, Platform profile schema).
+  #   jobName (maxLength, pattern): unset. No draft records a job-name maximum or a pattern, and the
+  #     56-character round trip is pending (HBEP-4, Risks and Graduation criteria). maxLength is set per
+  #     partition once a conformance run has submitted a 56-character name there and read it back,
+  #     and that run is its source. 56 is neither a fact nor a default here
+  #     (`@hpc-burst-science-agent`, 31 Oct 2026).
+  #   jobCommentAccounted: unset. HBEP-4 makes it optional and only recorded: the tag is in the job
+  #     name either way (`@hpc-burst-science-agent`, 31 Oct 2026).
 
   drainWindow: 2h10m # framework default (HBEP-4, Platform profile schema, drainWindow; HBEP-5, Draining): the front's 2 h maxRequestDuration plus drainMargin
   drainMargin: 10m # framework default (HBEP-4, Platform profile schema, drainMargin; HBEP-5, Draining)

@@ -41,16 +41,18 @@ Slurm's "MB" is 2^20 bytes (the provider sends `--mem=<MiB>M`), so memory values
 ## What is not set, and why
 
 A fact that nothing states is absent, not false (HBEP-4, Platform profile schema).
-- **`jobName`** (both): no draft records a job-name maximum or a pattern. The 56-character round trip is an alpha graduation criterion on each partition; the value is set when it is measured.
-- **`jobCommentAccounted`** (both): not in the drafts.
+- **`jobName`** (both): unset. No draft records a job-name maximum or a pattern, and the 56-character round trip is pending (HBEP-4, Risks and Graduation criteria). `maxLength` is set per partition once a conformance run has submitted a 56-character name there and read it back, and that run is its source. 56 is neither a fact nor a default (`@hpc-burst-science-agent`, 31 Oct 2026).
+- **`jobCommentAccounted`** (both): unset. HBEP-4 makes it optional and only recorded; the tag is in the job name either way.
 - **`maxIdle`** (Helios): unset outside Athena.
-- **`imageFormat`, `cpusPerGpu`, `memPerGpu`** on Helios `plgrid`: probe 2 ran on `plgrid-gpu-gh200` only, and the partition has no GPU. Absent `imageFormat` sends the agent `sif` (`v1alpha1.ImageFormatOf`), and until Apptainer is measured there the partition hosts no Instance (HBEP-4, open question 15).
+- **`imageFormat`, `cpusPerGpu`, `memPerGpu`** on Helios `plgrid`: the partition is a CPU partition for conformance runs only and hosts no Instance (`@hpc-burst-science-agent`, 31 Oct 2026). Probe 2 ran on `plgrid-gpu-gh200` only, and the partition has no GPU. Its `gpusPerNode` is 0, so the Slurm provider refuses any request for a GPU there (`internal/slurm`, `TestShippedCPUPartitionRefusesGPUAllocations`). Absent `imageFormat` means `sif` (`v1alpha1.ImageFormatOf`), which only an Instance would use.
 
 ## How the manifests are checked
 
 - `api/v1alpha1/e2e/shipped_profiles_test.go` applies each file, read from `profiles/`, to the real CRD with strict field validation, so a misspelled typed key is refused instead of pruned. It then shows that copies with one value broken are refused (`imageFormat: oci` among them), that the untyped block comes back unchanged, and that every envelope has a known method, a source and a text date.
 - `internal/slurm/shipped_profiles_test.go` runs the Slurm provider's own `ReadProfile` on each alpha partition.
-- Neither compares a typed value with the fact it was copied from: that would prove only the copy. The checks that matter are admission, the provider's own checks, and the conformance runs that read these profiles.
+- The same file shows that the provider refuses a GPU request on Helios `plgrid` and accepts it on `plgrid-gpu-gh200`.
+- None compares a typed value with the fact it was copied from: that would prove only the copy. The checks that matter are admission, the provider's own checks, and the conformance runs that read these profiles.
+- **Open:** the conformance harness builds its own inline profile and does not read `profiles/*.yaml` yet. It is wired with #93's Athena run, together with the 56-character name round trip on all three partitions.
 
 ## Content rules
 
