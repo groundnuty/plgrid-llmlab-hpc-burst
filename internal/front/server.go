@@ -14,6 +14,7 @@ import (
 
 	"k8s.io/client-go/dynamic"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/clock"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/inventory"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/usage"
@@ -28,7 +29,10 @@ type Options struct {
 	Clock      clock.Clock
 	Dynamic    dynamic.Interface
 	Recorder   Recorder
-	Transports Transports // nil: a StaticTransports with no entry
+	Transports Transports // nil: HBEP-6's Tunnel through frps, registered by the front's probe
+	// PathEvents receives the probe's results when the front builds its own
+	// Tunnel; nil drops them (NopPathEvents).
+	PathEvents PathEvents
 	Log        *slog.Logger
 	// The listeners. Nil ones are opened on the configured addresses; the
 	// health listener is opened only when HealthAddr is set.
@@ -50,6 +54,8 @@ type Front struct {
 	Watch  *inventory.Watch
 	Proxy  *Proxy
 	Sink   *usage.Sink
+	// Tunnel is HBEP-6's transport, when the front built its own.
+	Tunnel *Tunnel
 	Client net.Addr
 	Dial   net.Addr
 	Health net.Addr
@@ -67,8 +73,14 @@ func Run(ctx context.Context, o Options) error {
 	if o.Clock == nil {
 		o.Clock = clock.Real{}
 	}
+	frpsBind, frpsMux, err := cfg.FrpsAddrs(o.Host)
+	if err != nil {
+		return err
+	}
+	var tunnel *Tunnel
 	if o.Transports == nil {
-		o.Transports = NewStaticTransports()
+		tunnel = NewTunnel(frpsMux, cfg.TunnelSetupTimeout.D())
+		o.Transports = tunnel
 	}
 	keys, err := ReadClientKeys(cfg.ClientKeysFile)
 	if err != nil {
@@ -89,12 +101,16 @@ func Run(ctx context.Context, o Options) error {
 		return err
 	}
 	proxy := NewProxy(ProxyOptions{Config: cfg, Host: o.Host, Clock: o.Clock, Router: router, Transports: o.Transports, Keys: keys, Sink: sink, Log: o.Log})
-	f := &Front{Router: router, Watch: watch, Proxy: proxy, Sink: sink}
+	f := &Front{Router: router, Watch: watch, Proxy: proxy, Sink: sink, Tunnel: tunnel}
+	if tunnel != nil {
+		defer startProber(ctx, cfg, tunnel, o, watch)()
+	}
+	frp := newFrpPassthrough(frpsBind, cfg.TunnelSetupTimeout.D(), o.Log)
 	// The client server's base context: cancelled at a stop, after the
 	// grace, so the requests still in flight are cut with front_shutdown.
 	base, cancelBase := context.WithCancelCause(context.Background())
 	defer cancelBase(nil)
-	servers, err := listen(o, f, base)
+	servers, err := listen(o, f, frp, base)
 	if err != nil {
 		return err
 	}
@@ -108,6 +124,8 @@ func Run(ctx context.Context, o Options) error {
 		grace = DefaultShutdownGrace
 	}
 	stopServing(servers, cancelBase, proxy, grace, o.Log)
+	// The tunnels carried the requests that just ended.
+	frp.Close()
 	return nil // the deferred Close then flushes the usage sink
 }
 
@@ -169,8 +187,27 @@ func startWatch(ctx context.Context, o Options, router *Router) (*inventory.Watc
 	return watch, nil
 }
 
-// listen opens the three listeners and starts their servers.
-func listen(o Options, f *Front, base context.Context) ([]*http.Server, error) {
+// startProber runs the probe of HBEP-6 over the watched Instances until ctx
+// ends or the returned stop is called; stop returns once it has stopped.
+func startProber(ctx context.Context, cfg Config, tunnel *Tunnel, o Options, watch *inventory.Watch) (stop func()) {
+	source := func() []v1alpha1.Instance {
+		snap, _ := watch.Snapshot()
+		return snap.Instances
+	}
+	p := NewProber(cfg, tunnel, o.Clock, source, o.PathEvents, o.Log)
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		p.Run(ctx)
+	}()
+	return func() { cancel(); <-done }
+}
+
+// listen opens the three listeners and starts their servers. The dial-home
+// listener passes /agent/v1/ to the agent endpoint in direct mode and frpc's
+// websocket to frps in both modes (HBEP-6, Dial-home modes).
+func listen(o Options, f *Front, frp http.Handler, base context.Context) ([]*http.Server, error) {
 	cfg := o.Config
 	var servers []*http.Server
 	var opened []net.Listener
@@ -185,7 +222,7 @@ func listen(o Options, f *Front, base context.Context) ([]*http.Server, error) {
 		return fail(fmt.Errorf("clientListen: %w", err))
 	}
 	opened = append(opened, cl)
-	dh, err := NewDialHome(o.Mode, o.Host, nil)
+	dh, err := NewDialHome(o.Mode, o.Host, frp)
 	if err != nil {
 		return fail(err)
 	}

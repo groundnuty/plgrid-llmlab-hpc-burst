@@ -46,6 +46,9 @@ type Behaviour struct {
 	// Hold, when set, holds each request after its headers are read until
 	// the channel is closed or the request ends.
 	Hold chan struct{}
+	// Health is the status of GET /health; 0 means 200. vLLM answers 503
+	// there when its engine is dead (HBEP-6, The front's half).
+	Health int
 }
 
 // Request is one request as it arrived.
@@ -92,6 +95,7 @@ type Engine struct {
 
 	conns  []Conn
 	connAt map[net.Conn]int
+	health int // GET /health requests answered
 }
 
 // Start binds the first free port of the block and serves until the test
@@ -102,6 +106,14 @@ func Start(t testing.TB, o Options) *Engine {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return Serve(t, ln, o)
+}
+
+// Serve serves on ln, which may be a Unix socket, as the engine's socket in
+// the job is (HBEP-6, frpc in the job), until the test ends. o.PortLo and
+// o.PortHi are not used.
+func Serve(t testing.TB, ln net.Listener, o Options) *Engine {
+	t.Helper()
 	if o.Clock == nil {
 		o.Clock = clock.Real{}
 	}
@@ -180,7 +192,28 @@ func (e *Engine) Open() int {
 	return e.open
 }
 
+// HealthChecks is the number of GET /health requests answered so far; they
+// are not in Requests.
+func (e *Engine) HealthChecks() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.health
+}
+
 func (e *Engine) serve(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/health" {
+		// vLLM v0.32.0 guards only /v1, /v2, /inference and /cohere, so
+		// /health is answered without the key (HBEP-6, The front's half).
+		e.mu.Lock()
+		e.health++
+		status := e.b.Health
+		e.mu.Unlock()
+		if status == 0 {
+			status = http.StatusOK
+		}
+		w.WriteHeader(status)
+		return
+	}
 	body, _ := io.ReadAll(r.Body)
 	e.mu.Lock()
 	e.reqs = append(e.reqs, Request{Method: r.Method, Path: r.URL.Path, Header: r.Header.Clone(), Body: body, ContentLength: r.ContentLength})

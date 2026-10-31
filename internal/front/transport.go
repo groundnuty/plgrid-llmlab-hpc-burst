@@ -11,6 +11,7 @@ import (
 	"net/http/httptrace"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -32,9 +33,9 @@ type Transports interface {
 }
 
 // StaticTransports is a Transports whose entries are TCP addresses set by
-// hand. The tests use it for engine doubles on loopback; until HBEP-6's
-// tunnel exists for alpha, it is also the only implementation, so no
-// Instance is routable in production (HBEP-5, open question 13).
+// hand, registered at once with no probe and dialled with no set-up deadline
+// of their own. The tests use it for engine doubles on loopback; the front
+// itself uses HBEP-6's Tunnel.
 type StaticTransports struct {
 	mu   sync.Mutex
 	m    map[types.UID]string
@@ -95,27 +96,36 @@ func (e *dialError) Error() string { return "connect: " + e.err.Error() }
 func (e *dialError) Unwrap() error { return e.err }
 
 // isDialError reports whether err is a connection that never opened: refused,
-// unreachable, or past connectTimeout.
+// unreachable, past connectTimeout toward LLMLab, or, toward an Instance, a
+// tunnel set-up that frps refused or that passed tunnelSetupTimeout.
 func isDialError(err error) bool {
 	var d *dialError
 	return errors.As(err, &d)
 }
 
-// upstreamTransport builds the HTTP transport toward one upstream. Its idle
+// upstreamTransport builds the HTTP transport toward a managed provider,
+// whose connection set-up is bounded by connectTimeout (HBEP-5, Time-outs
+// and keep-alive: connectTimeout applies to LLMLab only).
+func upstreamTransport(dial func(ctx context.Context, network, addr string) (net.Conn, error), cfg Config, proxy bool) *http.Transport {
+	return newUpstream(dial, cfg.ConnectTimeout.D(), cfg, proxy)
+}
+
+// newUpstream builds the HTTP transport toward one upstream. Its idle
 // connections are dropped after upstreamIdleTimeout (4 s), below vLLM's 5 s
 // keep-alive, so the front, which reuses connections, holds them the shorter
 // time (L-2.5). It sets no response-header or total time-out: the front's
 // deadlines apply per request. Compression is off, so bodies pass unchanged.
-func upstreamTransport(dial func(ctx context.Context, network, addr string) (net.Conn, error), cfg Config, proxy bool) *http.Transport {
-	// connectTimeout bounds every dial here, the Instances' too. HBEP-5 gives
-	// it to LLMLab only and bounds the tunnel set-up toward an Instance by
-	// tunnelSetupTimeout (5 s); that belongs to the tunnel transport of
-	// #90, which replaces StaticTransports' plain dial.
-	connect := cfg.ConnectTimeout.D()
+// setup, when positive, bounds each dial; toward an Instance it is zero,
+// because the Instance's DialFunc bounds its own set-up (Tunnel.Dial:
+// tunnelSetupTimeout over the dial to frps and the CONNECT exchange).
+func newUpstream(dial func(ctx context.Context, network, addr string) (net.Conn, error), setup time.Duration, cfg Config, proxy bool) *http.Transport {
 	t := &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			ctx, cancel := context.WithTimeout(ctx, connect)
-			defer cancel()
+			if setup > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, setup)
+				defer cancel()
+			}
 			c, err := dial(ctx, network, addr)
 			if err != nil {
 				return nil, &dialError{err: err}
@@ -125,7 +135,7 @@ func upstreamTransport(dial func(ctx context.Context, network, addr string) (net
 		IdleConnTimeout:     cfg.UpstreamIdleTimeout.D(),
 		MaxIdleConnsPerHost: 64,
 		DisableCompression:  true,
-		TLSHandshakeTimeout: connect,
+		TLSHandshakeTimeout: setup,
 		ForceAttemptHTTP2:   false,
 	}
 	if proxy {
@@ -160,13 +170,13 @@ func (it *instanceTransports) get(uid types.UID) (*http.Transport, bool) {
 	if t, ok := it.m[uid]; ok {
 		return t, true
 	}
-	t := upstreamTransport(func(ctx context.Context, _, _ string) (net.Conn, error) {
+	t := newUpstream(func(ctx context.Context, _, _ string) (net.Conn, error) {
 		d, ok := it.src.Dialer(uid) // the current registration, after a reconnect
 		if !ok {
 			d = dial
 		}
 		return d(ctx)
-	}, it.cfg, false)
+	}, 0, it.cfg, false)
 	it.m[uid] = t
 	return t, true
 }
