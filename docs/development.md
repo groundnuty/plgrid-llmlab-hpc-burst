@@ -133,14 +133,16 @@ The Kubernetes libraries match crossplane-runtime v2.4.3, which HBEP-4's provide
 | k3s (single-user and team host) | v1.36.5+k3s1 |
 | `kube-apiserver`, `kube-controller-manager` (the assembled test host of `internal/testenv`) | v1.36.2, sha256-pinned in `hack/test-binaries.sh` |
 | `etcd` (the assembled test host) | v3.6.8, sha256-pinned in `hack/test-binaries.sh` |
+| `frps`, `frpc` (HBEP-6's tunnel; the tests start them) | [frp](https://github.com/fatedier/frp) v0.71.1 (Apache-2.0), linux_amd64, sha256-pinned in `hack/fetch-frp.sh` (the pin spike S1c used) |
 
 Kubernetes' explicit ±1-minor skew rule is written for kubectl. client-go instead documents compatibility through the APIs a client and a cluster share ([client-go compatibility](https://github.com/kubernetes/client-go/blob/v0.35.3/README.md#compatibility-client-go---kubernetes-clusters)). A 0.35 client against a 1.36 server is a reasonable choice for shared stable APIs, and the tests against k3s 1.36 check the APIs we use. A change to any of these pins is its own PR.
 
 ## Checks
 
-- `hack/check.sh` runs gofmt, vet, `go mod tidy -diff`, the generated-file check and the tests, then lists every skipped test. Run it under `nice` and the shared build lock.
+- `hack/check.sh` runs gofmt, vet, `go mod tidy -diff`, the generated-file check and the tests, then lists every skipped test. Run it under `nice` and the shared build lock. To run the frp tests in it instead of skipping them, install the binaries first: `hack/fetch-frp.sh "$FRP"` once, then `HPCBURST_FRP_DIR="$FRP" hack/check.sh` (add `HPCBURST_REQUIRE_FRP=1` to make a missing binary a failure, as CI does).
 - `hack/mutate-cel.sh` neutralises each CEL admission rule in a copy of the CRDs and runs the test that covers it, which must fail. It takes about ten minutes, so it is not part of `hack/check.sh`; run it when a rule or its test changes. A rule with no entry in its table fails the script.
 - The flag-name tests read the known flag names from HBEP-3's v1 table, so the admission rules' lists of known names are checked against the specification. A flag added to the table fails `TestEngineFlagsRefuseEveryPrefixOfAKnownFlag` until the list in the `EngineFlag` markers (`api/v1alpha1/modeldeployment_types.go`) gains it.
+- Tests that start frp read `HPCBURST_FRP_DIR=<dir>` (an absolute path: a test runs in its package directory, so a relative one fails the test) through `testenv.FrpBinaries(t)`; a plain `go test ./...` takes it the same way (`hack/fetch-frp.sh <dir>`, then `HPCBURST_FRP_DIR=<dir> go test ./...`). `hack/fetch-frp.sh <dir>` installs the pinned `frps` and `frpc` there (the tarball's sha256 is checked before anything is extracted). Without `HPCBURST_FRP_DIR` those tests skip with a message; `HPCBURST_REQUIRE_FRP=1` fails them instead, and CI sets both in the `go`, `crd and envtest` and `launcher-k3s` jobs. A binary that is there but not executable, not runnable or not 0.71.1 fails in either mode.
 - The test host (`internal/testenv`) binds only loopback ports 29200 to 29219 and, in k3s mode, accepts only a kubeconfig whose server is loopback on 29200 to 29239. The control-plane binaries are always sha256-checked; `HPCBURST_TESTENV_UNPINNED=1` is the explicit override for a binary you built yourself.
 
 ### The licence check
@@ -205,11 +207,12 @@ hpcburst down    --state-dir D
 
 ### Testing the launcher
 
-`go test ./...` runs the unit tests. The tests that start a real k3s need the pinned binaries and skip, loudly, without them. To run everything:
+`go test ./...` runs the unit tests. The tests that start a real k3s need the pinned binaries, and the tests that start frps or frpc (HBEP-6's tunnel) need the frp binaries. Both skip, loudly, without them. To run everything:
 
 ```
 hack/fetch-k3s.sh "$DIR" 1.35.9 1.36.5
-HPCBURST_BIN_DIR="$DIR" hack/test-launcher.sh
+hack/fetch-frp.sh "$FRP"
+HPCBURST_BIN_DIR="$DIR" HPCBURST_FRP_DIR="$FRP" hack/test-launcher.sh
 ```
 
-The script sets `HPCBURST_REQUIRE_INTEGRATION=1`, which turns every skip of a required test into a failure (in `-short` mode too), and it exits non-zero if any test was skipped. The tests use loopback ports 29220–29239 and state directories under `$TMPDIR` (about 0.6 GB at peak, removed after each test). Set `HPCBURST_TEST_ROOT_K3S=1` on a machine that runs a system k3s: the tests then fail if it is missing, and assert after each test that it still listens on 6443, 6444 and 10250. Before starting k3s the tests wait for a quiet machine; `HPCBURST_TEST_MIN_AVAIL_GIB` (default 8) sets how much available memory that needs. The store-full test mounts a size-limited FUSE volume as the invoking user, so it needs `/dev/fuse` and `fusermount3`.
+The script sets `HPCBURST_REQUIRE_INTEGRATION=1`, which turns every skip of a required test into a failure (in `-short` mode too), and it exits non-zero if any test was skipped, which includes a frp test run without `HPCBURST_FRP_DIR`. The tests use loopback ports 29220–29239 and state directories under `$TMPDIR` (about 0.6 GB at peak, removed after each test). Set `HPCBURST_TEST_ROOT_K3S=1` on a machine that runs a system k3s: the tests then fail if it is missing, and assert after each test that it still listens on 6443, 6444 and 10250. Before starting k3s the tests wait for a quiet machine; `HPCBURST_TEST_MIN_AVAIL_GIB` (default 8) sets how much available memory that needs. The store-full test mounts a size-limited FUSE volume as the invoking user, so it needs `/dev/fuse` and `fusermount3`.
