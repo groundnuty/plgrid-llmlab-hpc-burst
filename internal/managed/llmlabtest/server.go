@@ -77,7 +77,8 @@ type Stalls struct {
 type Latency struct {
 	// FirstByte is the time from a request's arrival to its first byte.
 	FirstByte time.Duration
-	// PerChunk is the gap between two stream chunks.
+	// PerChunk is the gap between two stream chunks. A reply that is not
+	// streamed ignores it: model a slow non-streamed reply with FirstByte.
 	PerChunk time.Duration
 }
 
@@ -95,7 +96,9 @@ type Options struct {
 	// PortLo and PortHi are the loopback port range, inclusive, that the
 	// Server binds the first free port of. Required.
 	PortLo, PortHi int
-	// Now is the Server's clock. Nil is time.Now.
+	// Now is the Server's clock. Nil is time.Now. The Server calls it from its
+	// handler goroutines, some of them while it holds its own lock, so it must
+	// be safe for concurrent use and must never call a method of the Server.
 	Now func() time.Time
 	// Keys are the keys accepted from the start.
 	Keys []string
@@ -162,6 +165,8 @@ type Server struct {
 	rewriting *Rewriting
 	reply     string
 	requests  []Request
+	arrived   map[[2]string]int // method and path to the requests that arrived
+	waiting   int               // requests blocked in a wait
 	seq       int
 }
 
@@ -193,6 +198,7 @@ func New(opts Options) (*Server, error) {
 		changed: make(chan struct{}),
 		keys:    map[string]keyState{},
 		models:  map[string]*modelState{},
+		arrived: map[[2]string]int{},
 		reply:   DefaultReply,
 	}
 	for _, k := range opts.Keys {
@@ -300,9 +306,9 @@ func (s *Server) mustKey(method, key string) keyState {
 // EchoKey makes every error body carry the request's Authorization header.
 func (s *Server) EchoKey(on bool) { s.change(func() { s.echoKey = on }) }
 
-// SetModels replaces the listing: these models are listed and active, in
-// this order, and every other model is unlisted. A model listed before keeps
-// its active and blocked state.
+// SetModels replaces the listing: these models are listed, in this order, and
+// every other model is unlisted. A model the Server has had before keeps its
+// active and blocked state; a new one is listed and active.
 func (s *Server) SetModels(models ...Model) {
 	s.change(func() {
 		for _, m := range s.models {
@@ -314,8 +320,9 @@ func (s *Server) SetModels(models ...Model) {
 	})
 }
 
-// AddModel lists m, at the end of the listing. A model that was listed before
-// returns with its active and blocked state.
+// AddModel lists m, at the end of the listing. A model the Server has had
+// before, one removed or unlisted since, returns with its active and blocked
+// state; a new one is active.
 func (s *Server) AddModel(m Model) { s.change(func() { s.addModelLocked(m) }) }
 
 func (s *Server) addModelLocked(m Model) {
@@ -427,7 +434,10 @@ func (s *Server) SetRewriting(r *Rewriting) {
 func (s *Server) SetReply(text string) { s.change(func() { s.reply = text }) }
 
 // Requests returns a copy of the request log, oldest first. A request is
-// logged when its answer ends.
+// logged only when its answer ends, so a request held by a stall, a latency or
+// the cut is not in it yet. A test that asserts a request never came ("the
+// gateway got nothing") must use Arrived, which counts a request the moment
+// it arrives; Requests and Count would pass for a request still held.
 func (s *Server) Requests() []Request {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -440,7 +450,9 @@ func (s *Server) Requests() []Request {
 	return out
 }
 
-// Count returns how many logged requests had this method and path.
+// Count returns how many logged requests had this method and path. Like
+// Requests, it sees a request only once its answer has ended; for an absence
+// assertion use Arrived.
 func (s *Server) Count(method, path string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -451,6 +463,35 @@ func (s *Server) Count(method, path string) int {
 		}
 	}
 	return n
+}
+
+// Arrived returns how many requests with this method and path have arrived,
+// answered or not: a request is counted at the very top of its handling,
+// before the Server reads it or holds it, and stays counted. An empty method
+// or path matches any. A test that asserts the Server got nothing must use
+// Arrived, because Requests and Count see a request only when its answer ends.
+func (s *Server) Arrived(method, path string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for k, c := range s.arrived {
+		if (method == "" || k[0] == method) && (path == "" || k[1] == path) {
+			n += c
+		}
+	}
+	return n
+}
+
+// Waiting returns how many requests are blocked in a wait now: held by a
+// stall, by the first-byte latency or by a stream's pacing. A request counts
+// from the moment it finds itself blocked, in the same step as that check, so
+// a test that polls Waiting until it reaches the number of requests it sent
+// knows each of them has met the stall, and may then end it. A request that
+// is held by nothing is never counted.
+func (s *Server) Waiting() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.waiting
 }
 
 // Listed returns the IDs the listing shows now, in its order.
@@ -477,6 +518,13 @@ func (s *Server) listedLocked() []Model {
 		out[i] = m.Model
 	}
 	return out
+}
+
+// arrive counts a request at its arrival.
+func (s *Server) arrive(method, path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.arrived[[2]string{method, path}]++
 }
 
 func (s *Server) log(r Request) {

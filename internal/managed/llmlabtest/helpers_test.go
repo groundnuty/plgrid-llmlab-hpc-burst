@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -29,9 +30,6 @@ const (
 	routeCompletions = "/v1/completions"
 	routeResponses   = "/v1/responses"
 	routeEmbeddings  = "/v1/embeddings"
-
-	// held is how long a test watches a request that must still be waiting.
-	held = 150 * time.Millisecond
 )
 
 // testClient has a time-out, so a bug in the double fails a test instead of
@@ -49,6 +47,10 @@ type answer struct {
 	Body   []byte
 	Err    error
 	Took   time.Duration
+	// HeadersAfter is how long the response headers took to arrive, and
+	// HeadersAt when (time.Now, the Server's default clock) they did.
+	HeadersAfter time.Duration
+	HeadersAt    time.Time
 }
 
 func bearer(key string) string {
@@ -70,12 +72,14 @@ func send(s *Server, method, path, auth, body string) answer {
 		req.Header.Set("Authorization", auth)
 	}
 	resp, err := testClient.Do(req)
+	headersAt := time.Now() // Do returns when the response headers have arrived
 	if err != nil {
 		return answer{Err: err, Took: time.Since(start)}
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(resp.Body)
-	return answer{Status: resp.StatusCode, Header: resp.Header, Body: b, Err: err, Took: time.Since(start)}
+	return answer{Status: resp.StatusCode, Header: resp.Header, Body: b, Err: err, Took: time.Since(start),
+		HeadersAfter: headersAt.Sub(start), HeadersAt: headersAt}
 }
 
 // askAuth is send for the test goroutine: an error fails the test.
@@ -138,6 +142,40 @@ func requirePending(t testing.TB, ch <-chan answer, d time.Duration, what string
 	case a := <-ch:
 		t.Fatalf("%s: answered (status %d, err %v) within %v, want it still waiting", what, a.Status, a.Err, d)
 	case <-time.After(d):
+	}
+}
+
+// pollUntil polls cond every few milliseconds for up to 5 s, and fails with
+// what when it never holds.
+func pollUntil(t testing.TB, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: still not so after 5s", what)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// requireWaiting polls until n requests are blocked in a wait of the Server:
+// the barrier a test needs before it releases a held request. A request that
+// has not arrived yet, or that has not met the stall, is not counted.
+func requireWaiting(t testing.TB, s *Server, n int, what string) {
+	t.Helper()
+	pollUntil(t, what+": Waiting() == "+strconv.Itoa(n), func() bool { return s.Waiting() == n })
+}
+
+// requireHeld waits until the one request behind ch is blocked in the Server,
+// then checks that it has not been answered. Nothing is slept: a request that
+// is blocked in a wait cannot have an answer.
+func requireHeld(t testing.TB, s *Server, ch <-chan answer, what string) {
+	t.Helper()
+	requireWaiting(t, s, 1, what)
+	select {
+	case a := <-ch:
+		t.Fatalf("%s: answered (status %d, err %v) while blocked in a wait", what, a.Status, a.Err)
+	default:
 	}
 }
 
