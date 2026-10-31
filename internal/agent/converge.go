@@ -70,17 +70,17 @@ type instance struct {
 
 // worker is one engine process of the Instance.
 type worker struct {
-	name       string
-	phase      agentapi.PartPhase
-	proc       *procgroup.Group
-	exitCode   *int
-	generation int64 // the worker's restart generation the process was started for
-	instGen    int64 // the Instance's restart generation it was started for
-	socket     string
-	health     *agentapi.Health
-	failures   int32
-	lastHealth agentapi.Health // last metrics read, carried when a read fails
-	stopProbe  context.CancelFunc
+	name          string
+	phase         agentapi.PartPhase
+	proc          *procgroup.Group
+	exitCode      *int
+	generation    int64 // the worker's restart generation the process was started for
+	instGen       int64 // the Instance's restart generation it was started for
+	socket        string
+	health        *agentapi.Health
+	failures      int32
+	metricsReadAt *time.Time // the last successful metrics read
+	stopProbe     context.CancelFunc
 	// cleaning: the leader exited without being told to, and the rest of its
 	// process group is being stopped.
 	cleaning bool

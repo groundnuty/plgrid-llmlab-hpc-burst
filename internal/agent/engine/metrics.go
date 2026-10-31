@@ -58,20 +58,24 @@ func (c *Client) Sample(ctx context.Context) (agentapi.Health, error) {
 	if err != nil {
 		return agentapi.Health{}, err
 	}
+	// A gauge the scrape does not hold stays nil, which means unknown, never
+	// zero (agentapi.Health).
 	var h agentapi.Health
 	if v, ok := m.sum(metricRunning); ok {
-		h.RunningRequests = int64(v)
+		h.RunningRequests = agentapi.Int64(int64(v))
 	}
 	if v, ok := m.sum(metricWaiting); ok {
-		h.WaitingRequests = int64(v)
+		h.WaitingRequests = agentapi.Int64(int64(v))
 	}
 	if v, ok := m.sum(metricGenerated); ok {
-		h.GeneratedTokens = int64(v)
+		h.GeneratedTokens = agentapi.Int64(int64(v))
 	}
 	if ss := m[metricKVUsage]; len(ss) > 0 {
-		for _, s := range ss {
-			h.KVCacheUsage = math.Max(h.KVCacheUsage, s.value)
+		kv := ss[0].value
+		for _, s := range ss[1:] {
+			kv = math.Max(kv, s.value)
 		}
+		h.KVCacheUsage = agentapi.Float64(kv)
 	}
 	// The status label is taken verbatim (agentapi.Health.ResponsesByStatus).
 	// vLLM v0.32.0 groups it into classes: serve/instrumentator/metrics.py,

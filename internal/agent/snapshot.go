@@ -41,8 +41,7 @@ func (a *Agent) snapshot() agentapi.Report {
 			wr.ExitCode = &c
 		}
 		if w.phase == agentapi.PartRunning && w.health != nil {
-			h := *w.health
-			h.ResponsesByStatus = cloneCounts(h.ResponsesByStatus)
+			h := cloneHealth(*w.health)
 			wr.Health = &h
 		}
 		ir.Workers = append(ir.Workers, wr)

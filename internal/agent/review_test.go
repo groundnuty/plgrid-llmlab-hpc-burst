@@ -493,8 +493,11 @@ func TestReasoningThatExhaustsTheBudgetFailsWithItsOwnReason(t *testing.T) {
 	h.set(withReasoning(h.runState("reasoning-forever", 1, 0, qualifyChecks(1, false))))
 	r := h.waitReport("qualification", 60*time.Second, qualified(1))
 	c, ok := outcome(*r.Instance.Checks.Qualify, agentapi.CheckBehaviour)
-	if !ok || c.Passed || !strings.HasPrefix(c.Message, "ReasoningBudgetExhausted") {
+	if !ok || c.Passed || c.Reason != agentapi.ReasonReasoningBudgetExhausted {
 		t.Fatalf("behaviour %+v, want a failure whose reason is ReasoningBudgetExhausted", c)
+	}
+	if c.ContextTokens <= 0 {
+		t.Fatalf("behaviour outcome without the context it ran at: %+v", c)
 	}
 }
 
@@ -514,5 +517,48 @@ func TestFailingProbesAreCountedAndNothingRestarts(t *testing.T) {
 	}
 	if n := len(h.execs()); n != 1 {
 		t.Fatalf("%d starts: the agent restarted on failing probes", n)
+	}
+}
+
+// failingMetrics reads the engine's metrics once, then fails every read.
+type failingMetrics struct {
+	agent.Engine
+	reads *atomic.Int64
+}
+
+func (e failingMetrics) Sample(ctx context.Context) (agentapi.Health, error) {
+	if e.reads.Add(1) > 1 {
+		return agentapi.Health{}, context.DeadlineExceeded
+	}
+	return e.Engine.Sample(ctx)
+}
+
+// When the metrics read fails, the sample leaves the gauges out (unknown,
+// never zero), keeps MetricsReadAt at the last read that succeeded, and still
+// carries a fresh probe result; the controller then takes no gauge-based
+// action (agentapi.Health.MetricsFresh; `@hpc-burst-science-agent`, 31 Oct
+// 2026; Opus nit, CE-E: stale gauges with a fresh time).
+func TestAFailedMetricsReadLeavesTheGaugesOut(t *testing.T) {
+	var reads atomic.Int64
+	h := newHarness(t, harnessOptions{engineWrap: func(e agent.Engine) agent.Engine { return failingMetrics{e, &reads} }})
+	h.set(h.runState("", 1, 0, nil))
+	first := h.waitReport("a sample with metrics", 20*time.Second, func(r agentapi.Report) bool {
+		w := worker0(r)
+		return w != nil && w.Health != nil && w.Health.MetricsReadAt != nil && w.Health.RunningRequests != nil
+	})
+	readAt := *worker0(first).Health.MetricsReadAt
+	r := h.waitReport("a later sample after the metrics failed", 20*time.Second, func(r agentapi.Report) bool {
+		w := worker0(r)
+		return w != nil && w.Health != nil && w.Health.Time.After(readAt.Add(300*time.Millisecond))
+	})
+	hl := worker0(r).Health
+	if hl.RunningRequests != nil || hl.WaitingRequests != nil || hl.GeneratedTokens != nil || hl.KVCacheUsage != nil || hl.ResponsesByStatus != nil {
+		t.Fatalf("gauges reported after the metrics read failed: %+v", hl)
+	}
+	if hl.MetricsReadAt == nil || !hl.MetricsReadAt.Equal(readAt) {
+		t.Fatalf("MetricsReadAt %v, want the last successful read %v", hl.MetricsReadAt, readAt)
+	}
+	if !hl.ProbeOK {
+		t.Fatal("the probe result is not fresh")
 	}
 }

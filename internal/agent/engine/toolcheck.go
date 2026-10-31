@@ -8,6 +8,8 @@ import (
 	"math"
 	"sort"
 	"strings"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 // validateToolCall judges one tool call of an answer against the tool that was
@@ -25,10 +27,10 @@ import (
 // minimal validator, not a JSON Schema implementation (standard library only).
 func validateToolCall(offered tool, callType, name, arguments string) error {
 	if callType != "function" {
-		return fmt.Errorf("the call's type is %q, not \"function\"", callType)
+		return reasoned(agentapi.ReasonWrongTool, "the call's type is %q, not \"function\"", callType)
 	}
 	if name != offered.Function.Name {
-		return fmt.Errorf("the answer calls %q, not %q", name, offered.Function.Name)
+		return reasoned(agentapi.ReasonWrongTool, "the answer calls %q, not %q", name, offered.Function.Name)
 	}
 	schema, err := parseSchema(offered.Function.Parameters)
 	if err != nil {
@@ -36,11 +38,11 @@ func validateToolCall(offered tool, callType, name, arguments string) error {
 	}
 	args, err := parseArguments(arguments)
 	if err != nil {
-		return err
+		return reasoned(agentapi.ReasonBadToolArguments, "%v", err)
 	}
 	for _, key := range schema.Required {
 		if _, ok := args[key]; !ok {
-			return fmt.Errorf("the arguments miss the required %q", key)
+			return reasoned(agentapi.ReasonBadToolArguments, "the arguments miss the required %q", key)
 		}
 	}
 	keys := make([]string, 0, len(schema.Properties))
@@ -54,7 +56,7 @@ func validateToolCall(offered tool, callType, name, arguments string) error {
 			continue
 		}
 		if want := schema.Properties[key].Type; !hasJSONType(v, want) {
-			return fmt.Errorf("the argument %q is %s, not %s", key, describeJSON(v), want)
+			return reasoned(agentapi.ReasonBadToolArguments, "the argument %q is %s, not %s", key, describeJSON(v), want)
 		}
 	}
 	return nil

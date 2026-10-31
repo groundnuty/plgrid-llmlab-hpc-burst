@@ -83,7 +83,7 @@ func (c *Client) timed(ctx context.Context, w warmShape) agentapi.RequestTiming 
 		if ctx.Err() != nil {
 			t.Error = "cancelled"
 		} else {
-			t.Error = agentapi.TruncateUTF8(err.Error(), agentapi.MaxTimingErrorBytes)
+			t.Error = agentapi.TruncateUTF8(errorText(err), agentapi.MaxTimingErrorBytes)
 		}
 		return t
 	}
@@ -186,7 +186,7 @@ func (c *Client) timed(ctx context.Context, w warmShape) agentapi.RequestTiming 
 	t.OutputTokens = completion
 	if w.tools {
 		if err := judgeStreamedCalls(calls.assembled(), finish); err != nil {
-			t.Error = agentapi.TruncateUTF8(err.Error(), agentapi.MaxTimingErrorBytes)
+			t.Error = agentapi.TruncateUTF8(errorText(err), agentapi.MaxTimingErrorBytes)
 		}
 		return t
 	}

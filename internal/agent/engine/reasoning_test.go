@@ -174,7 +174,7 @@ func TestReasoningTextIsNeverJudged(t *testing.T) {
 		})
 	}
 	c, _ := doubleWith(t, "", nil, reply, WithReasoning(true))
-	if err := c.toolCallCheck(context.Background()); err == nil || reasonOf(err) == reasonReasoningBudgetExhausted {
+	if err := c.toolCallCheck(context.Background()); err == nil || reasonOf(err) == agentapi.ReasonReasoningBudgetExhausted {
 		t.Errorf("toolCallCheck = %v, want a failure for the missing call that is not ReasoningBudgetExhausted (the reply stopped)", err)
 	}
 	if _, err := c.behaviourCheck(context.Background(), agentapi.QualifyRequest{Shapes: shapes}); err == nil || !strings.Contains(err.Error(), "empty") {
@@ -203,8 +203,8 @@ func TestReasoningBudgetIsAdded(t *testing.T) {
 	off, offRec := doubleWith(t, "reasoning-first=500", nil, nil)
 	res = off.Qualify(context.Background(), req)
 	for _, name := range []agentapi.CheckName{agentapi.CheckToolCall, agentapi.CheckBehaviour} {
-		if o := outcomeOf(t, res, name); o.Passed || !strings.HasPrefix(o.Message, "ReasoningBudgetExhausted: ") {
-			t.Errorf("reasoning off, %s: passed %v, %q; want a ReasoningBudgetExhausted failure", name, o.Passed, o.Message)
+		if o := outcomeOf(t, res, name); o.Passed || o.Reason != agentapi.ReasonReasoningBudgetExhausted {
+			t.Errorf("reasoning off, %s: passed %v, reason %q, %q; want a ReasoningBudgetExhausted failure", name, o.Passed, o.Reason, o.Message)
 		}
 	}
 	if got, want := fmt.Sprint(offRec.maxTokensOf(true)), fmt.Sprint([]int{128, int(shapes.OutputTypical)}); got != want {
@@ -214,8 +214,8 @@ func TestReasoningBudgetIsAdded(t *testing.T) {
 
 // A reply that spends the whole budget on reasoning fails the tool-call smoke
 // test and the behaviour check with its own reason; the chat check, which
-// accepts reasoning text, passes. The message starts with the reason so the
-// controller can tell it from a broken engine.
+// accepts reasoning text, passes. The outcome's reason code tells it from a
+// broken engine, and its message says the model ran out of reasoning budget.
 func TestReasoningBudgetExhausted(t *testing.T) {
 	for _, toolCalls := range []bool{true, false} {
 		t.Run(fmt.Sprintf("toolCalls=%v", toolCalls), func(t *testing.T) {
@@ -229,8 +229,8 @@ func TestReasoningBudgetExhausted(t *testing.T) {
 				failing = append(failing, agentapi.CheckToolCall)
 			}
 			for _, name := range failing {
-				if o := outcomeOf(t, res, name); o.Passed || !strings.HasPrefix(o.Message, "ReasoningBudgetExhausted: ") {
-					t.Errorf("%s: passed %v, message %q; want a failure starting ReasoningBudgetExhausted: ", name, o.Passed, o.Message)
+				if o := outcomeOf(t, res, name); o.Passed || o.Reason != agentapi.ReasonReasoningBudgetExhausted || !strings.Contains(o.Message, "ran out of reasoning budget") {
+					t.Errorf("%s: passed %v, reason %q, message %q; want a ReasoningBudgetExhausted failure saying it ran out of reasoning budget", name, o.Passed, o.Reason, o.Message)
 				}
 			}
 		})
@@ -293,11 +293,11 @@ func TestBehaviourCheckContextFloor(t *testing.T) {
 		name   string
 		modes  string
 		tune   func(*enginedouble.Config)
-		tokens int32
+		tokens int64
 		note   string
 	}{
 		{"between the typical and the longest", "", reports(4300), 131, "shortened from 200"},
-		{"below the typical context", "", reports(4100), 60, "the typical context: max_model_len 4100 leaves 0 beside 4160 output tokens"},
+		{"below the typical context", "", reports(4100), 60, "the typical context: max_model_len 4100"},
 		{"no max_model_len reported", "reports-nothing", nil, 60, "/v1/models reports no max_model_len"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -310,8 +310,8 @@ func TestBehaviourCheckContextFloor(t *testing.T) {
 				t.Errorf("ran at %d tokens, note %q; want %d tokens and a note containing %q", run.contextTokens, run.note, tc.tokens, tc.note)
 			}
 			res := c.Qualify(context.Background(), req)
-			if o := outcomeOf(t, res, agentapi.CheckBehaviour); !o.Passed || !strings.Contains(o.Message, "ran at a context of") {
-				t.Errorf("behaviour outcome %+v, want passed, naming the context", o)
+			if o := outcomeOf(t, res, agentapi.CheckBehaviour); !o.Passed || !strings.Contains(o.Message, "ran at a context of") || o.ContextTokens != tc.tokens {
+				t.Errorf("behaviour outcome %+v, want passed, naming the context, with ContextTokens %d", o, tc.tokens)
 			}
 		})
 	}
@@ -331,20 +331,17 @@ func TestBehaviourCheckAtTheFloorFailsWithTheEnginesError(t *testing.T) {
 	}
 }
 
-// failedOutcome is the one place that builds a failing outcome from a reason
-// code and a message; the code is the front of the message until the contract
-// has a field, and survives the cut to agentapi.MaxMessageBytes.
+// failedOutcome is the one place that builds a failing outcome: the reason
+// code in its own field, and the message, human text cut to
+// agentapi.MaxMessageBytes, with no code in front.
 func TestFailedOutcome(t *testing.T) {
-	o := failedOutcome(agentapi.CheckBehaviour, "ReasoningBudgetExhausted", "spent it all")
-	if o.Name != agentapi.CheckBehaviour || o.Passed || o.Message != "ReasoningBudgetExhausted: spent it all" {
+	o := failedOutcome(agentapi.CheckBehaviour, agentapi.ReasonReasoningBudgetExhausted, "spent it all")
+	if o.Name != agentapi.CheckBehaviour || o.Passed || o.Reason != "ReasoningBudgetExhausted" || o.Message != "spent it all" {
 		t.Errorf("outcome %+v", o)
 	}
-	if o := failedOutcome(agentapi.CheckChat, "", "the chat answer is empty"); o.Passed || o.Message != "the chat answer is empty" {
-		t.Errorf("no reason: %+v", o)
-	}
-	long := failedOutcome(agentapi.CheckToolCall, "ReasoningBudgetExhausted", strings.Repeat("x", 1000))
-	if len(long.Message) != agentapi.MaxMessageBytes || !strings.HasPrefix(long.Message, "ReasoningBudgetExhausted: x") {
-		t.Errorf("a long message: %d bytes %q, want %d bytes keeping the code", len(long.Message), long.Message[:40], agentapi.MaxMessageBytes)
+	long := failedOutcome(agentapi.CheckToolCall, agentapi.ReasonNoToolCall, strings.Repeat("x", 1000))
+	if len(long.Message) != agentapi.MaxMessageBytes || long.Reason != "NoToolCall" {
+		t.Errorf("a long message: %d bytes, reason %q; want %d bytes and the code kept", len(long.Message), long.Reason, agentapi.MaxMessageBytes)
 	}
 	// a reasoned error carries its code through Qualify's single path
 	if reasonOf(&reasonedError{"R", "m"}) != "R" || reasonOf(fmt.Errorf("plain")) != "" || reasonOf(fmt.Errorf("wrapped: %w", &reasonedError{"R", "m"})) != "R" {

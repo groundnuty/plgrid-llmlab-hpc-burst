@@ -35,15 +35,21 @@ func (c *Client) Qualify(ctx context.Context, req agentapi.QualifyRequest) agent
 			res.Checks = append(res.Checks, passedOutcome(name, note))
 			return
 		}
-		message := err.Error()
+		message, reason := err.Error(), reasonOf(err)
 		var re *reasonedError
 		if errors.As(err, &re) {
 			message = re.message
 		}
+		if reason == "" {
+			// A failure the checks do not name is the request's: a
+			// connection error, a timeout, an error status or a failed
+			// tokenize.
+			reason = agentapi.ReasonRequestFailed
+		}
 		if note != "" {
 			message += "; " + note
 		}
-		res.Checks = append(res.Checks, failedOutcome(name, reasonOf(err), message))
+		res.Checks = append(res.Checks, failedOutcome(name, reason, message))
 	}
 	add(agentapi.CheckHealth, "", c.Probe(ctx))
 	if cards, err := c.models(ctx); err == nil {
@@ -63,6 +69,7 @@ func (c *Client) Qualify(ctx context.Context, req agentapi.QualifyRequest) agent
 	add(agentapi.CheckCorruption, "", c.corruptionCheck(ctx))
 	run, err := c.behaviourCheck(ctx, req)
 	add(agentapi.CheckBehaviour, run.note, err)
+	res.Checks[len(res.Checks)-1].ContextTokens = run.contextTokens
 	return res
 }
 
@@ -72,17 +79,11 @@ func passedOutcome(name agentapi.CheckName, note string) agentapi.CheckOutcome {
 	return agentapi.CheckOutcome{Name: name, Passed: true, Message: agentapi.TruncateUTF8(note, agentapi.MaxMessageBytes)}
 }
 
-// failedOutcome is the one place that builds the outcome of a failed check,
-// from a reason code (a CamelCase word, "" when the failure has none) and a
-// message. agentapi.CheckOutcome will carry the code as a Reason field once the
-// contracts PR lands; until then the code is the front of the message, so that
-// "ReasoningBudgetExhausted: ..." survives the cut to MaxMessageBytes. Moving to
-// the field changes this function only.
+// failedOutcome is the one place that builds the outcome of a failed check:
+// its reason code, one of agentapi's Reason* constants, which the controller
+// matches on, and its message, human text cut to MaxMessageBytes.
 func failedOutcome(name agentapi.CheckName, reason, message string) agentapi.CheckOutcome {
-	if reason != "" {
-		message = reason + ": " + message
-	}
-	return agentapi.CheckOutcome{Name: name, Message: agentapi.TruncateUTF8(message, agentapi.MaxMessageBytes)}
+	return agentapi.CheckOutcome{Name: name, Reason: reason, Message: agentapi.TruncateUTF8(message, agentapi.MaxMessageBytes)}
 }
 
 // chatCheck sends one chat request; it passes when the engine answers with
@@ -93,7 +94,7 @@ func (c *Client) chatCheck(ctx context.Context) (string, error) {
 		return "", err
 	}
 	if r.content() == "" && r.reasoning() == "" {
-		return r.SystemFingerprint, fmt.Errorf("the chat answer is empty")
+		return r.SystemFingerprint, reasoned(agentapi.ReasonEmptyAnswer, "the chat answer is empty")
 	}
 	return r.SystemFingerprint, nil
 }
@@ -130,7 +131,7 @@ func (c *Client) toolCallCheck(ctx context.Context) error {
 // must be a JSON object that conforms to the tool's schema (validateToolCall).
 func wellFormedToolCall(r chatResponse) error {
 	if len(r.Choices) == 0 || len(r.Choices[0].Message.ToolCalls) == 0 {
-		return fmt.Errorf("the answer calls no tool")
+		return reasoned(agentapi.ReasonNoToolCall, "the answer calls no tool")
 	}
 	for _, tc := range r.Choices[0].Message.ToolCalls {
 		if err := validateToolCall(weatherTool, tc.Type, tc.Function.Name, tc.Function.Arguments); err != nil {
@@ -141,7 +142,7 @@ func wellFormedToolCall(r chatResponse) error {
 }
 
 // corruptionCheck sends one greedy request three times in a row and judges
-// the token outputs by agentapi.CorruptionVerdict: they share their first 32
+// the token outputs by agentapi.JudgeCorruption: they share their first 32
 // tokens and none is empty or a single repeated token (HBEP-7, Instance start).
 // The outputs never leave the job.
 func (c *Client) corruptionCheck(ctx context.Context) error {
@@ -158,15 +159,15 @@ func (c *Client) corruptionCheck(ctx context.Context) error {
 			return err
 		}
 		if len(r.Choices) == 0 {
-			return fmt.Errorf("the answer has no choice")
+			return reasoned(agentapi.ReasonBadResponse, "the answer has no choice")
 		}
 		if r.Choices[0].TokenIDs == nil {
-			return fmt.Errorf("the engine returned no token ids (return_token_ids)")
+			return reasoned(agentapi.ReasonBadResponse, "the engine returned no token ids (return_token_ids)")
 		}
 		outs = append(outs, r.Choices[0].TokenIDs)
 	}
-	if ok, msg := agentapi.CorruptionVerdict(outs); !ok {
-		return fmt.Errorf("%s", msg)
+	if o := agentapi.JudgeCorruption(outs); !o.Passed {
+		return reasoned(o.Reason, "%s", o.Message)
 	}
 	return nil
 }
@@ -174,10 +175,10 @@ func (c *Client) corruptionCheck(ctx context.Context) error {
 // behaviourRun is what the behaviour check reports besides its verdict.
 type behaviourRun struct {
 	// contextTokens is the context the prompt ran at, in the unit of
-	// Shapes.ContextLongest: tokens beyond the chat template's overhead. It
-	// moves into a contract field (ContextTokens) once the contracts PR lands;
-	// until then it is in the note.
-	contextTokens int32
+	// Shapes.ContextLongest: tokens beyond the chat template's overhead
+	// (agentapi.BehaviourContextTokens), reported as
+	// CheckOutcome.ContextTokens.
+	contextTokens int64
 	// note says what context the check ran at, when a reasoning parser is
 	// declared; it is the passing outcome's message.
 	note string
@@ -204,17 +205,18 @@ func (c *Client) behaviourCheck(ctx context.Context, req agentapi.QualifyRequest
 	if req.ToolCalls {
 		tail, tools, choice = behaviourToolTail, []tool{weatherTool}, "auto"
 	}
-	budget, tokens := req.Shapes.OutputTypical, req.Shapes.ContextLongest
+	budget := req.Shapes.OutputTypical
+	run.contextTokens = int64(req.Shapes.ContextLongest)
 	if c.reasoning {
 		budget += reasoningTokens
-		room, err := c.contextRoom(ctx, budget)
+		maxLen, overhead, err := c.contextLimit(ctx)
 		if err != nil {
 			return run, err
 		}
-		tokens, run.note = reasoningContext(req.Shapes, room, budget)
+		run.contextTokens = agentapi.BehaviourContextTokens(req.Shapes, maxLen, overhead, true)
+		run.note = reasoningNote(req.Shapes, run.contextTokens, maxLen)
 	}
-	run.contextTokens = tokens
-	content, err := c.prompt(ctx, tokens, tail, tools, true)
+	content, err := c.prompt(ctx, int32(run.contextTokens), tail, tools, true)
 	if err != nil {
 		return run, err
 	}
@@ -229,68 +231,51 @@ func (c *Client) behaviourCheck(ctx context.Context, req agentapi.QualifyRequest
 		return run, err
 	}
 	if len(r.Choices) == 0 {
-		return run, fmt.Errorf("the answer has no choice")
+		return run, reasoned(agentapi.ReasonBadResponse, "the answer has no choice")
 	}
 	if err := r.reasoningExhausted(budget); err != nil {
 		return run, err
 	}
 	ch := r.Choices[0]
 	if ch.FinishReason == "length" && IsLoop(ch.TokenIDs) {
-		return run, fmt.Errorf("the behaviour answer loops: it ran to the output limit repeating itself")
+		return run, reasoned(agentapi.ReasonLoop, "the behaviour answer loops: it ran to the output limit repeating itself")
 	}
 	if req.ToolCalls {
 		return run, wellFormedToolCall(r)
 	}
 	if r.content() == "" {
-		return run, fmt.Errorf("the behaviour answer is empty")
+		return run, reasoned(agentapi.ReasonEmptyAnswer, "the behaviour answer is empty")
 	}
 	return run, nil
 }
 
-// reasoningContext decides the context the behaviour check runs at with a
-// reasoning parser, and the note that names it. budget is the output budget
-// asked for, the typical output plus reasoningTokens.
-func reasoningContext(s agentapi.Shapes, room contextRoom, budget int32) (tokens int32, note string) {
-	tokens = s.ContextLongest
+// reasoningNote names the context the behaviour check ran at with a
+// reasoning parser, and why it is not the longest.
+func reasoningNote(s agentapi.Shapes, tokens, maxModelLen int64) string {
 	switch {
-	case !room.known:
-		tokens = min(s.ContextLongest, s.ContextTypical)
-		return tokens, fmt.Sprintf("ran at a context of %d tokens, the typical context: /v1/models reports no max_model_len", tokens)
-	case room.fit >= int64(s.ContextLongest):
-		return tokens, fmt.Sprintf("ran at a context of %d tokens", tokens)
-	case room.fit < int64(s.ContextTypical):
-		tokens = min(s.ContextLongest, s.ContextTypical)
-		return tokens, fmt.Sprintf("ran at a context of %d tokens, the typical context: max_model_len %d leaves %d beside %d output tokens (%d answer, %d reasoning); longest is %d",
-			tokens, room.maxModelLen, max(room.fit, 0), budget, s.OutputTypical, reasoningTokens, s.ContextLongest)
+	case maxModelLen <= 0:
+		return fmt.Sprintf("ran at a context of %d tokens, the typical context: /v1/models reports no max_model_len", tokens)
+	case tokens == int64(s.ContextLongest):
+		return fmt.Sprintf("ran at a context of %d tokens", tokens)
+	case tokens == int64(s.ContextTypical):
+		return fmt.Sprintf("ran at a context of %d tokens, the typical context: max_model_len %d leaves no more beside %d answer and %d reasoning tokens", tokens, maxModelLen, s.OutputTypical, reasoningTokens)
 	}
-	tokens = int32(room.fit)
-	return tokens, fmt.Sprintf("ran at a context of %d tokens (shortened from %d to leave room for %d output tokens: %d answer, %d reasoning)",
-		tokens, s.ContextLongest, budget, s.OutputTypical, reasoningTokens)
+	return fmt.Sprintf("ran at a context of %d tokens, shortened from %d to leave room for %d answer and %d reasoning tokens", tokens, s.ContextLongest, s.OutputTypical, reasoningTokens)
 }
 
-// contextRoom is how much prompt the model's context leaves beside an output.
-type contextRoom struct {
-	maxModelLen int64
-	// fit is the most prompt tokens, beyond the chat template's overhead, that
-	// fit with the output; zero or negative when none do.
-	fit int64
-	// known is false when /v1/models reports no max_model_len.
-	known bool
-}
-
-// contextRoom reads max_model_len and the template's overhead and works out the
-// room beside an output of budget tokens.
-func (c *Client) contextRoom(ctx context.Context, budget int32) (contextRoom, error) {
+// contextLimit reads the max_model_len the engine reports (0 when it reports
+// none) and the chat template's overhead.
+func (c *Client) contextLimit(ctx context.Context) (int64, int32, error) {
 	cards, err := c.models(ctx)
 	if err != nil {
-		return contextRoom{}, err
-	}
-	if len(cards) == 0 || cards[0].MaxModelLen <= 0 {
-		return contextRoom{}, nil
+		return 0, 0, err
 	}
 	overhead, err := c.templateOverhead(ctx)
 	if err != nil {
-		return contextRoom{}, err
+		return 0, 0, err
 	}
-	return contextRoom{maxModelLen: cards[0].MaxModelLen, fit: cards[0].MaxModelLen - int64(overhead) - int64(budget), known: true}, nil
+	if len(cards) == 0 {
+		return 0, overhead, nil
+	}
+	return cards[0].MaxModelLen, overhead, nil
 }

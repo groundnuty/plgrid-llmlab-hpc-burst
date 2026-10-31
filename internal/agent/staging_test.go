@@ -154,7 +154,8 @@ func TestServingPathIsForwardedToTheEngine(t *testing.T) {
 	// The engine's metrics show the request in the next health sample.
 	h.waitReport("a health sample with the request", 10*time.Second, func(r agentapi.Report) bool {
 		w := worker0(r)
-		return w != nil && w.Health != nil && w.Health.ProbeOK && w.Health.GeneratedTokens >= 8 && w.Health.ResponsesByStatus["2xx"] >= 1
+		return w != nil && w.Health != nil && w.Health.ProbeOK && w.Health.GeneratedTokens != nil && *w.Health.GeneratedTokens >= 8 &&
+			w.Health.ResponsesByStatus["2xx"] >= 1 && w.Health.MetricsReadAt != nil
 	})
 }
 
