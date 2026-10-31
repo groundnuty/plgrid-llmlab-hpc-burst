@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/types"
+
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/enginetest"
 )
 
@@ -58,6 +60,19 @@ func hijackConn(t *testing.T, w http.ResponseWriter) (net.Conn, *bufio.ReadWrite
 		panic(http.ErrAbortHandler)
 	}
 	return c, rw
+}
+
+// retarget points an Instance's transport at addr and drops the front's
+// pooled connections to the old address, which the cached per-UID transport
+// would otherwise reuse.
+func (h *harness) retarget(uid types.UID, addr string) {
+	h.trans.Set(uid, addr)
+	h.proxy.inst.mu.Lock()
+	defer h.proxy.inst.mu.Unlock()
+	if tr, ok := h.proxy.inst.m[uid]; ok {
+		tr.CloseIdleConnections()
+		delete(h.proxy.inst.m, uid)
+	}
 }
 
 // tryPost is errPost that returns the transport error instead of failing.

@@ -1,7 +1,6 @@
 package front
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -123,8 +122,8 @@ func (p *Proxy) authenticate(r *http.Request) (string, bool) {
 // connection that never opened goes to the next target on the ring, or to
 // the same one on a fresh connection when there is no other (open question
 // 5). Go's transport resends on its own only a request on a reused
-// connection that wrote nothing (nothingWrittenError, with GetBody set), so
-// neither path can send a byte twice.
+// connection that wrote nothing, since withOneReplay's GetBody refuses once
+// a byte was written, so neither path can send a byte twice.
 func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, x *exchange, n naming.Name, key string, body []byte, rb requestBody) {
 	var tried *target
 	exclude := ""
@@ -262,10 +261,11 @@ func (p *Proxy) send(x *exchange, r *http.Request, t *target, body []byte, rb re
 	if r.URL.RawQuery != "" {
 		url += "?" + r.URL.RawQuery
 	}
-	req, err := http.NewRequestWithContext(x.ctx, http.MethodPost, url, bytes.NewReader(out))
+	req, err := http.NewRequestWithContext(x.ctx, http.MethodPost, url, nil)
 	if err != nil {
 		return nil, &dialError{err: err}
 	}
+	req = withOneReplay(req, out)
 	req.Header = h
 	x.armIdle(p.cfg.IdleTimeout.D())
 	return rt.RoundTrip(req)
