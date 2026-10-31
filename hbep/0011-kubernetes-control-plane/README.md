@@ -223,7 +223,7 @@ Decided for alpha (amended 2026-10-30, after S3's fix, PR #36):
 - checks the front's reachability (open question 8). It warns when no front address and dial-home mode (direct, or ssh on the configured ssh port, 22 by default) are configured, and checks that a configured address answers on that port. While none is configured, the lifecycle controller submits no Allocation, and each ModelDeployment carries `Degraded` with reason `FrontNotConfigured` (decided while building the launcher, PR #49; the name in PR #71). The first Instance on each Provider then confirms reachability from a compute node by registering over its dial-home path. An Instance that cannot register fails at start, and the lifecycle controller sets the condition `DialHomeUnreachable` on its Provider (HBEP-4, open question 16);
 - has the API server write its audit log at the Metadata level, with no request bodies, so a Secret's content is never logged;
 - gives the lifecycle controller's `/metrics` the loopback port at its port base + 12 (HBEP-8, Metrics);
-- has `hpcburst status` read the front's `/healthz`, and report the front unhealthy while its usage sink says `failing` (HBEP-8, Usage records);
+- has `hpcburst status` read the front's `/healthz`, and report the front as "degraded: usage writes failing" while its usage sink says `failing`, not as a readiness failure (HBEP-8, Usage records);
 - has the API server keep events 7 days: it passes `--kube-apiserver-arg=event-ttl=168h`, where the default is 1 h. k3s passes the flag through, and kine, its SQLite datastore, deletes each event once the TTL has elapsed. kine starts each event's clock again when the host restarts, so an event lives at least 7 days (HBEP-8, Retention, with the sources);
 - backs up the store before every upgrade: an etcd snapshot, or a copy of the SQLite file;
 - upgrades the host one minor version at a time, as S3 tested.
@@ -401,6 +401,7 @@ The control plane replaces the files and scripts that held www-2027's state: per
 - 2026-10-31: amendment with HBEP-6 becoming implementable: the launcher starts and supervises frps on loopback, its certificate carries a fixed synthetic DNS name for frpc, and ssh mode uses two forwards.
 - 2026-10-31: amendment from the owner's decision on the dial-home route (issue #18): ssh mode over the configured ssh port, 22 by default; the `hold-lifted` guarantee qualified with HBEP-4's known risk.
 - 2026-10-31: amendment with HBEP-8 becoming implementable: the launcher keeps events 7 days (`event-ttl=168h`), with its test and the store's growth; a stale heartbeat's event has an emitter (HBEP-8, Observers); the `front` `Lease`, the `acct-` accounting records, the metrics port at base + 12, and `hpcburst status` reading the front's `/healthz`.
+- 2026-10-31: `hpcburst status` reports a usage failure as degraded, not unhealthy (HBEP-8's amendment of the same day).
 
 ## Amendments
 
@@ -441,3 +442,4 @@ The control plane replaces the files and scripts that held www-2027's state: per
   - **Store growth:** an estimated 10 MB or less of events over 7 days at alpha scale: about 600 events a day of at most about 2 kB each. Merging seldom applies, since an event's object reference carries its `resourceVersion`, so the estimate counts each emission, with a persisting condition's event repeated at most once an hour (HBEP-8, Retention).
   - **A stuck controller** (Risks). "A stale value raises an event" now names who raises it: a component that does not depend on the stale one, as HBEP-8's observer table assigns. Before, it named no emitter.
   - **Also from HBEP-8** (review round of PR #105). The front renews a heartbeat `Lease`, `front`, in `hpcburst-system`. Accounting records, `acct-<Allocation UID>`, are a third kind of record that outlives deletion. The launcher gives the lifecycle controller's `/metrics` the port base + 12, and `hpcburst status` reads the front's `/healthz`, its usage state included. Before, the `Lease`s were only the leaders', records were identity and verification only, and the launcher's port block and status named none of these.
+- **2026-10-31: the front's usage state in `hpcburst status`** (science-agent ruling for #112). A failing usage sink is reported as "degraded: usage writes failing"; before, "unhealthy". The front keeps serving by design.
