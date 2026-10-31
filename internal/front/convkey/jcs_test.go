@@ -49,11 +49,11 @@ func TestStringsKeysAndLiterals(t *testing.T) {
 	cases := map[string]string{
 		// RFC 8785 section 3.2.2.2: only the quote, the backslash and
 		// U+0000..U+001F are escaped; '/' and U+2028 are written as is.
-		`"a\/b é\u001f\t"`:              "\"a/b é\\u001f\\t\"",
+		`"a\/b\u2028\u00e9\u001f\t"`:    "\"a/b\u2028\u00e9\\u001f\\t\"",
 		`{"b":1,"a":[true,false,null]}`: `{"a":[true,false,null],"b":1}`,
 		// Keys sort as UTF-16 code units: U+1F600 (surrogates D83D DE00)
 		// sorts before U+FFFD.
-		`{"�":1,"😀":2}`: `{"😀":2,"` + "�" + `":1}`,
+		`{"\ufffd":1,"\ud83d\ude00":2}`: "{\"\U0001F600\":2,\"\ufffd\":1}",
 	}
 	for in, want := range cases {
 		got, err := canonical([]byte(in))
