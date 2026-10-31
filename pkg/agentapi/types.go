@@ -265,9 +265,13 @@ type QualifyRequest struct {
 // TargetSessions concurrent requests of the typical shape. Synthetic prompts
 // only.
 type WarmUpRequest struct {
-	Shapes         Shapes `json:"shapes"`
-	ToolCalls      bool   `json:"toolCalls,omitempty"`
-	TargetSessions int32  `json:"targetSessions"`
+	Shapes    Shapes `json:"shapes"`
+	ToolCalls bool   `json:"toolCalls,omitempty"`
+	// TargetSessions is the number of concurrent requests in a round, at most
+	// MaxTargetSessions (the CRD's maximum for Workload.TargetSessions). The
+	// bound keeps the report that holds every round of every request inside
+	// WarmUpBudgetBytes.
+	TargetSessions int32 `json:"targetSessions"`
 }
 
 // ---- reports ----
@@ -324,7 +328,8 @@ type Staging struct {
 	Phase      StagingPhase `json:"phase"`
 	BytesDone  int64        `json:"bytesDone,omitempty"`
 	BytesTotal int64        `json:"bytesTotal,omitempty"`
-	Message    string       `json:"message,omitempty"`
+	// Message is free text, cut to MaxMessageBytes (TruncateUTF8).
+	Message string `json:"message,omitempty"`
 }
 
 // PartPhase is the state of one process the agent runs.
@@ -438,7 +443,8 @@ type VerifyResult struct {
 	// prompt) rendered through the engine's template. The controller fixes
 	// the longest context with it (HBEP-7, What the controller reads).
 	TemplateOverhead int32 `json:"templateOverhead,omitempty"`
-	// Error says why verification could not run, when it could not.
+	// Error says why verification could not run, when it could not. It is
+	// free text, cut to MaxMessageBytes (TruncateUTF8).
 	Error string `json:"error,omitempty"`
 }
 
@@ -456,9 +462,10 @@ const (
 
 // CheckOutcome is one check's outcome.
 type CheckOutcome struct {
-	Name    CheckName `json:"name"`
-	Passed  bool      `json:"passed"`
-	Message string    `json:"message,omitempty"`
+	Name   CheckName `json:"name"`
+	Passed bool      `json:"passed"`
+	// Message is free text, cut to MaxMessageBytes (TruncateUTF8).
+	Message string `json:"message,omitempty"`
 }
 
 // QualifyResult is what qualification read and judged (HBEP-7, Instance
@@ -530,6 +537,8 @@ type RequestTiming struct {
 	TimeToFirstToken Duration `json:"timeToFirstToken"`
 	Total            Duration `json:"total"`
 	OutputTokens     int32    `json:"outputTokens"`
-	// Error says why the request failed, when it did.
+	// Error says why the request failed, when it did. It is free text, cut to
+	// MaxTimingErrorBytes (TruncateUTF8), because a round can hold more than a
+	// thousand timings.
 	Error string `json:"error,omitempty"`
 }
