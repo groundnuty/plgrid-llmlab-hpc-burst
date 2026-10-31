@@ -27,6 +27,7 @@ const (
 	cutFrontDeadline = "front_deadline"
 	cutFrontIdle     = "front_idle"
 	cutUpstream      = "upstream"
+	cutTunnel        = "tunnel"
 	cutLeaseEnd      = "lease_end"
 	cutClient        = "client"
 )

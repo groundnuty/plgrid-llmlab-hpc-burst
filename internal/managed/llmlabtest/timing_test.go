@@ -117,7 +117,7 @@ func TestNoByteCutOnTheManualClock(t *testing.T) {
 		s.SetNoByteCut(180 * time.Second)
 		s.SetLatency(Latency{FirstByte: firstByte})
 		ch := askAsync(s, http.MethodPost, routeChat, keyOne, chatReq(modelA))
-		requirePending(t, ch, held, "chat before the clock moves")
+		requireHeld(t, s, ch, "chat before the clock moves")
 		return clock, s, ch
 	}
 
@@ -157,7 +157,7 @@ func TestManualStall(t *testing.T) {
 
 			s.Stall(true)
 			ch := askAsync(s, rt.method, rt.path, keyOne, rt.body)
-			requirePending(t, ch, held, rt.name+" in a stall")
+			requireHeld(t, s, ch, rt.name+" in a stall")
 			releasedAt := time.Now()
 			s.Stall(false)
 			requireStatus(t, requireAnswer(t, ch, 5*time.Second, rt.name+" after the stall"), http.StatusOK, "after the stall")
@@ -192,7 +192,7 @@ func TestStallAgainstTheCut(t *testing.T) {
 		s.Stall(true)
 		s.SetNoByteCut(2 * time.Second)
 		ch := askAsync(s, http.MethodPost, routeChat, keyOne, chatReq(modelA))
-		requirePending(t, ch, held, "chat in a stall")
+		requireHeld(t, s, ch, "chat in a stall")
 		s.Stall(false)
 		requireStatus(t, requireAnswer(t, ch, 5*time.Second, "chat after the stall"), http.StatusOK, "stall ended before the cut")
 	})
@@ -303,7 +303,7 @@ func TestPeriodicStallReleasedByTheClock(t *testing.T) {
 			s.SetStalls(Stalls{Period: period, Duration: window, Start: t0})
 
 			ch := askAsync(s, rt.method, rt.path, keyOne, rt.body)
-			requirePending(t, ch, held, rt.name+" in the window, clock unmoved")
+			requireHeld(t, s, ch, rt.name+" in the window, clock unmoved")
 			clock.Advance(4 * time.Minute) // still inside
 			requirePending(t, ch, 100*time.Millisecond, rt.name+" 1 min before the window ends")
 			clock.Advance(time.Minute) // Start+5min: outside
@@ -318,9 +318,74 @@ func TestPeriodicStallReleasedByTheClock(t *testing.T) {
 			// The next period stalls again.
 			clock.Set(t0.Add(period))
 			ch = askAsync(s, rt.method, rt.path, keyOne, rt.body)
-			requirePending(t, ch, held, rt.name+" in the next window")
+			requireHeld(t, s, ch, rt.name+" in the next window")
 			clock.Set(t0.Add(period + window))
 			requireStatus(t, requireAnswer(t, ch, 5*time.Second, rt.name+" after the next window"), http.StatusOK, "after the next window")
 		})
 	}
+}
+
+// /v1/completions has no opening event, so nothing but the status line can go
+// out before the first chunk. The Server flushes it at once, and logs the first
+// byte when it left (Opus B2, Astra B5).
+func TestCompletionsStreamHeadersAndCut(t *testing.T) {
+	const body = `{"model":"example-9b","prompt":"one two","stream":true}`
+
+	t.Run("headers at once, and FirstByte is when they left", func(t *testing.T) {
+		s := startS(t)
+		s.SetReply("a b")
+		s.SetLatency(Latency{PerChunk: 300 * time.Millisecond}) // three gaps: two chunks and the finish
+		a := ask(t, s, http.MethodPost, routeCompletions, keyOne, body)
+		requireStatus(t, a, http.StatusOK, "completions stream, gap 300ms, no cut")
+		if a.HeadersAfter >= 150*time.Millisecond {
+			t.Errorf("headers after %v, want them at once, well before the first 300ms gap ends", a.HeadersAfter)
+		}
+		if st := parseSSE(t, a.Body); !st.Done || len(st.contents()) != 2 || a.Took < 600*time.Millisecond {
+			t.Errorf("stream: done %v, %d pieces, %v long; want [DONE], 2 pieces and over 600ms: the gaps were not applied", st.Done, len(st.contents()), a.Took)
+		}
+		r := waitLogged(t, s, 1)[0]
+		if lag := r.FirstByte.Sub(r.Time); lag < 0 || lag >= 100*time.Millisecond {
+			t.Errorf("logged FirstByte %v after the arrival, want it right after it", lag)
+		}
+		// The client saw the headers when the log says the first byte left: a
+		// FirstByte stamped before a byte that waited for the first chunk would
+		// be about 300ms early.
+		if gap := a.HeadersAt.Sub(r.FirstByte); gap < -50*time.Millisecond || gap >= 150*time.Millisecond {
+			t.Errorf("the client saw the headers %v after the logged FirstByte, want them together", gap)
+		}
+	})
+
+	t.Run("a cut after the headers is a mid-stream cut", func(t *testing.T) {
+		s := startS(t)
+		s.SetNoByteCut(200 * time.Millisecond)
+		s.SetLatency(Latency{PerChunk: 600 * time.Millisecond})
+		a := ask(t, s, http.MethodPost, routeCompletions, keyOne, body)
+		requireStatus(t, a, http.StatusOK, "completions stream, gap 600ms, cut 200ms") // the headers had gone out
+		if a.HeadersAfter >= 100*time.Millisecond {
+			t.Errorf("headers after %v, want them at once, not at the cut near 200ms", a.HeadersAfter)
+		}
+		if a.Took < 150*time.Millisecond || a.Took >= 500*time.Millisecond {
+			t.Errorf("stream ended after %v, want it cut near 200ms", a.Took)
+		}
+		if st := parseSSE(t, a.Body); st.Done || len(st.contents()) != 0 || len(st.finishes()) != 0 {
+			t.Errorf("cut stream: done %v contents %v finishes %v, want none of them", st.Done, st.contents(), st.finishes())
+		}
+		if r := waitLogged(t, s, 1)[0]; !r.Truncated || r.Status != http.StatusOK || r.FirstByte.IsZero() {
+			t.Errorf("logged Truncated %v Status %d FirstByte %v, want true, 200 and a first byte", r.Truncated, r.Status, r.FirstByte)
+		}
+	})
+
+	t.Run("a first byte past the cut is a 504 before any byte", func(t *testing.T) {
+		s := startS(t)
+		s.SetNoByteCut(200 * time.Millisecond)
+		s.SetLatency(Latency{FirstByte: 600 * time.Millisecond}) // a guard: the wait before the stream already did this
+		a := ask(t, s, http.MethodPost, routeCompletions, keyOne, body)
+		requireStatus(t, a, http.StatusGatewayTimeout, "completions stream, first byte 600ms, cut 200ms")
+		if a.Took < 150*time.Millisecond || a.Took >= 500*time.Millisecond {
+			t.Errorf("504 after %v, want it near the 200ms cut", a.Took)
+		}
+		if r := waitLogged(t, s, 1)[0]; r.Status != http.StatusGatewayTimeout || r.Truncated {
+			t.Errorf("logged Status %d Truncated %v, want 504 and false", r.Status, r.Truncated)
+		}
+	})
 }

@@ -46,7 +46,8 @@ Code under `spikes/` and `third_party/forked/*` is not part of this module.
 |---|---|---|
 | `api/v1alpha1/`, `config/crd/`, `pkg/provider/`, `pkg/agentapi/` | contracts owner | shared types, interfaces and fakes |
 | `internal/slurm/` | #59 | `provider.Batch` and `provider.ProfileReader` for Slurm over ssh |
-| `internal/managed/` | #69 | the managed Provider's controller: `provider.Managed` for LLMLab, the catalog loop, and the LLMLab double. It reads the credentials file with `provider.ReadManagedCredentials`. Until it lands, `fake.Managed` and `fake.ManagedController` stand in for it |
+| `internal/managed/` | #69 | the managed Provider's controller: `provider.Managed` for LLMLab (`Client`) and the catalog loop (`Controller`, a leader-elected `manager.Runnable`; the supervisor adds one per managed Provider with `managed.Setup`, its `Setup` hook, which reads through the manager's API reader). It reads the credentials file with `provider.ReadManagedCredentials` at every pass. `fake.Managed` and `fake.ManagedController` stand in for it in other components' tests |
+| `internal/managed/llmlabtest/` | #69 | the HTTP double of LLMLab, standard library only, that #69 and #64 test against: each field behaviour of lessons L-6.1 to L-6.8 switchable per test |
 | `internal/providerctl/` | #59 | the managed reconciler and the per-Provider manager supervisor |
 | `internal/agentserver/` | #60 | the agent API's HTTP server, calling `agentapi.Backend` |
 | `internal/agent/`, `cmd/hb-agent/` | #60 | the allocation agent |
@@ -135,7 +136,9 @@ Kubernetes' explicit ±1-minor skew rule is written for kubectl. client-go inste
 
 ### The licence check
 
-HBEP-15's licence check runs in two CI jobs, **not yet required checks**: they become required only after they have been green on main (HBEP-15's protocol), and a matrix job's name, `licences (<module>)`, changes when a module is added.
+**Disabled since 31 Oct 2026.** The owner dropped licence checking ("I don't care about those licenses, so feel free to disable this job for now"), so both jobs below carry `if: false`. The scripts and fixtures in `hack/` are kept, and deleting the two `if: false` lines switches the check back on. Provenance is still recorded: every reuse names its origin and URL.
+
+When enabled, HBEP-15's licence check runs in two CI jobs, **not yet required checks**: they become required only after they have been green on main (HBEP-15's protocol), and a matrix job's name, `licences (<module>)`, changes when a module is added.
 
 - **`licence-modules`** runs the tests of the licence scripts (`hack/test_licence*.py`, Python standard library only, no Go; run them with `python3 -I -m unittest discover -s hack -p 'test_licence*.py' -v`), then `hack/test-licence-fixtures.sh` with the pinned go-licenses (see below), then `hack/licence-modules.sh --json .`. That lists every `go.mod` outside the top-level `spikes/`, found by a search of the whole tree, so a module added anywhere is checked without editing the workflow. Spikes are outside the check (HBEP-15). The search refuses, and names, a directory symlink anywhere outside `spikes/` (find does not follow one, so a module behind it would be left out), and a module directory whose name has a newline, another control character or a character outside `A-Z a-z 0-9 . _ - /`.
 - **`licences (<module>)`** runs `hack/licence-check.sh` once per module, with the Go version that module's `go.mod` names (`third_party/forked/kubeai` names a newer one than the root) and go-licenses v2.0.1, against `hack/allowed-licenses.txt`, HBEP-15's list (a test compares the two). There is no exemption: a module's own packages need a `LICENSE`, the root's for the root module and the copy's own under `third_party/forked/`. The root module is also checked with `--include_tests`, and with a negative control that takes BSD-3-Clause off the list and must fail. A failing module does not stop the others.

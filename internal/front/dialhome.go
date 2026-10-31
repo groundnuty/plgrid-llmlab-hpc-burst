@@ -52,7 +52,10 @@ func NewDialHome(mode string, host agentapi.Host, tunnel http.Handler) (*DialHom
 			pr.SetURL(target)
 			pr.Out.Host = pr.In.Host
 		},
-		Transport:     &http.Transport{TLSClientConfig: agentapi.ClientTLSConfig(pin), ForceAttemptHTTP2: false},
+		// No compression of its own: Go's transport would otherwise add
+		// Accept-Encoding to a request that has none and unpack the answer,
+		// and the passthrough adds nothing.
+		Transport:     &http.Transport{TLSClientConfig: agentapi.ClientTLSConfig(pin), ForceAttemptHTTP2: false, DisableCompression: true},
 		FlushInterval: -1,
 	}
 	return d, nil

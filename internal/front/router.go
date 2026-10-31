@@ -225,6 +225,17 @@ func (r *Router) ReportConnect(key string, failed bool) {
 	r.rebuildLocked()
 }
 
+// failures is the target's count of failed connections in a row since its
+// last success or pause.
+func (r *Router) failures(key string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if p := r.pauses[key]; p != nil {
+		return p.failures
+	}
+	return 0
+}
+
 // Paused reports whether a target is paused now.
 func (r *Router) Paused(key string) bool {
 	r.mu.Lock()

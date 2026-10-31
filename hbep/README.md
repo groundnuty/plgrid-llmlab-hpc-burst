@@ -9,7 +9,7 @@ Design decisions for this framework are made as HBEPs, modelled on Kubernetes En
 | [3](0003-resource-model-and-naming/README.md) | Resource model and naming | implementable | none |
 | [4](0004-provider-interface/README.md) | Provider interface and profiles | implementable | none |
 | [5](0005-llmlab-compatible-front/README.md) | LLMLab-compatible front | implementable | none |
-| [6](0006-instance-reachability/README.md) | Instance reachability | provisional | none |
+| [6](0006-instance-reachability/README.md) | Instance reachability | implementable | none |
 | [7](0007-lifecycle-controller/README.md) | Lifecycle controller | implementable | none |
 | [8](0008-observability-and-events/README.md) | Observability and events | provisional | none |
 | [9](0009-identity-and-attribution/README.md) | Identity and attribution | provisional | none |
@@ -30,6 +30,7 @@ Spikes are short experiments allowed from provisional HBEPs (HBEP-1). They settl
 | Spike | Question | HBEPs | Issue |
 |---|---|---|---|
 | S1 | Does a dial-home tunnel (frp) from Helios and Athena compute nodes carry long streams? | 6 | #18 |
+| S1c | What do many streams cost through an frp tunnel, does wss work through a TLS front, and how fast do heartbeats notice a dead tunnel? | 6 | #66 (PR #78) |
 | S2 | Which router inside an Instance (llm-d endpoint picker with Envoy, vllm-router, or none) keeps prefix-cache affinity and survives 2 h streams? | 5, 6 | #29 |
 | S3 | Which single-user control-plane host (k3s with SQLite, or kcp) fits a small VM in memory, start-up and upgrades? | 3, 10, 11 | #26 |
 | S4 | Can a Slurm provider built on crossplane-runtime run outside a cluster, and handle purged finished jobs and interrupted submits without duplicates? | 4 | #24 |

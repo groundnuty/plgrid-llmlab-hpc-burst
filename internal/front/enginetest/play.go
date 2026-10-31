@@ -122,10 +122,18 @@ func (p *play) responsesStream() {
 		return
 	}
 	n := int64(p.tokens())
-	p.event("response.completed", map[string]any{"type": "response.completed", "response": map[string]any{
-		"id": "resp-1", "status": "completed",
-		"usage": map[string]any{"input_tokens": p.prompt, "output_tokens": n, "input_tokens_details": map[string]any{"cached_tokens": 0}},
-	}})
+	usage := map[string]any{"input_tokens": p.prompt, "output_tokens": n, "input_tokens_details": map[string]any{"cached_tokens": 0}}
+	switch p.b.ResponsesEnd {
+	case "incomplete":
+		p.event("response.incomplete", map[string]any{"type": "response.incomplete", "response": map[string]any{
+			"id": "resp-1", "status": "incomplete", "incomplete_details": map[string]any{"reason": "max_output_tokens"}, "usage": usage}})
+	case "failed":
+		p.event("response.failed", map[string]any{"type": "response.failed", "response": map[string]any{
+			"id": "resp-1", "status": "failed", "error": map[string]any{"code": "server_error", "message": "the engine failed"}}})
+	default:
+		p.event("response.completed", map[string]any{"type": "response.completed", "response": map[string]any{
+			"id": "resp-1", "status": "completed", "usage": usage}})
+	}
 }
 
 // whole answers without streaming, after the whole reply is generated.

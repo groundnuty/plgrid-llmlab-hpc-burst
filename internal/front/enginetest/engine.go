@@ -35,6 +35,14 @@ type Behaviour struct {
 	KillAfter  int           // close the connection abruptly after this many tokens
 	Status     int           // answer this status with ErrorBody instead
 	ErrorBody  string
+	// ResponsesEnd is how a Responses stream ends: "" with
+	// response.completed, "incomplete" with response.incomplete (a capped
+	// reply), "failed" with response.failed and error.code server_error.
+	ResponsesEnd string
+	// CloseBeforeHeaders reads the request, then closes the connection with
+	// no response byte, as frps does with a request it accepted for a dead
+	// tunnel (HBEP-6).
+	CloseBeforeHeaders bool
 	// Hold, when set, holds each request after its headers are read until
 	// the channel is closed or the request ends.
 	Hold chan struct{}
@@ -55,6 +63,20 @@ type Options struct {
 	PortLo, PortHi int    // loopback port block to bind in
 	Key            string // the Instance key; requests without "Bearer <Key>" get 401
 	Clock          clock.Clock
+	// IdleTimeout is the server's idle time-out: a connection that holds no
+	// request for this long is closed by the engine, as vLLM closes at its
+	// keep-alive of 5 s (HBEP-5, Time-outs and keep-alive). Zero: never.
+	IdleTimeout time.Duration
+}
+
+// Conn is one connection the engine accepted, from its server's connection
+// states. The times are wall-clock times, whatever the engine's clock.
+type Conn struct {
+	Opened time.Time // the connection was accepted
+	Idle   time.Time // the latest time it went idle after a request; zero before
+	Closed time.Time // it was closed, by either side; zero while open
+	// Requests is how many requests began on it.
+	Requests int
 }
 
 // Engine is a running double.
@@ -67,6 +89,9 @@ type Engine struct {
 	b    Behaviour
 	reqs []Request
 	open int // requests being answered
+
+	conns  []Conn
+	connAt map[net.Conn]int
 }
 
 // Start binds the first free port of the block and serves until the test
@@ -80,8 +105,8 @@ func Start(t testing.TB, o Options) *Engine {
 	if o.Clock == nil {
 		o.Clock = clock.Real{}
 	}
-	e := &Engine{ln: ln, key: o.Key, clk: o.Clock}
-	e.srv = &http.Server{Handler: http.HandlerFunc(e.serve), ReadHeaderTimeout: 10 * time.Second}
+	e := &Engine{ln: ln, key: o.Key, clk: o.Clock, connAt: map[net.Conn]int{}}
+	e.srv = &http.Server{Handler: http.HandlerFunc(e.serve), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: o.IdleTimeout, ConnState: e.connState}
 	go func() { _ = e.srv.Serve(ln) }()
 	t.Cleanup(func() { _ = e.srv.Close() })
 	return e
@@ -117,6 +142,37 @@ func (e *Engine) Requests() []Request {
 	return append([]Request(nil), e.reqs...)
 }
 
+// Conns returns every connection accepted so far, oldest first.
+func (e *Engine) Conns() []Conn {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]Conn(nil), e.conns...)
+}
+
+func (e *Engine) connState(c net.Conn, st http.ConnState) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	now := time.Now()
+	if st == http.StateNew {
+		e.connAt[c] = len(e.conns)
+		e.conns = append(e.conns, Conn{Opened: now})
+		return
+	}
+	i, ok := e.connAt[c]
+	if !ok {
+		return
+	}
+	switch st {
+	case http.StateActive:
+		e.conns[i].Requests++
+	case http.StateIdle:
+		e.conns[i].Idle = now
+	case http.StateClosed, http.StateHijacked:
+		e.conns[i].Closed = now
+		delete(e.connAt, c)
+	}
+}
+
 // Open is the number of requests being answered now.
 func (e *Engine) Open() int {
 	e.mu.Lock()
@@ -139,6 +195,15 @@ func (e *Engine) serve(w http.ResponseWriter, r *http.Request) {
 	if e.key != "" && r.Header.Get("Authorization") != "Bearer "+e.key {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]any{"message": "invalid key", "type": "auth", "code": 401}})
 		return
+	}
+	if b.CloseBeforeHeaders {
+		if hj, ok := w.(http.Hijacker); ok {
+			if conn, _, err := hj.Hijack(); err == nil {
+				conn.Close()
+				return
+			}
+		}
+		panic(http.ErrAbortHandler)
 	}
 	if b.Hold != nil {
 		select {

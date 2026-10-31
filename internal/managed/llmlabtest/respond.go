@@ -262,16 +262,25 @@ func (p plan) embeddings() map[string]any {
 
 // stream answers with server-sent events: an opening event, one event per
 // output token, the finish, usage when asked, then [DONE] (chat and
-// completions) or response.completed (responses). Model.TruncateAfter and the
-// no-byte cut end it early, with no finish and no [DONE] (L-6.7, L-6.1).
+// completions) or the closing event of a Responses stream: response.completed,
+// or response.incomplete when the output was capped (finish "length").
+// Model.TruncateAfter and the no-byte cut end it early, with no finish and no
+// [DONE] (L-6.7, L-6.1).
+//
+// The status line goes out at once, flushed, even on /v1/completions, which
+// has no opening event: from then on the cut is a mid-stream cut, and the
+// logged FirstByte is the time those bytes left.
 func (x *exchange) stream(p plan) {
 	w := x.w
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	if flusher != nil {
+		flusher.Flush()
+	}
 	x.rec.Status = http.StatusOK
 	x.rec.FirstByte = x.s.now()
-	flusher, _ := w.(http.Flusher)
 	seq := 0
 	send := func(event string, v any) {
 		var b bytes.Buffer
@@ -332,7 +341,11 @@ func (x *exchange) stream(p plan) {
 		return
 	}
 	if p.path == pathResponses {
-		send("response.completed", map[string]any{"type": "response.completed", "sequence_number": seq, "response": p.response(created, true)})
+		closing := "response.completed"
+		if p.finish == "length" {
+			closing = "response.incomplete" // the response says status incomplete
+		}
+		send(closing, map[string]any{"type": closing, "sequence_number": seq, "response": p.response(created, true)})
 		return
 	}
 	send("", chunk(map[string]any{}, nil, p.finish))
