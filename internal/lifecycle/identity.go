@@ -34,16 +34,16 @@ type CheckpointSource interface {
 // cachedSource caches a CheckpointSource's successful answers by repository and
 // revision: a revision is a full commit id, so its files never change, and
 // each Files call downloads every non-LFS file. A failure is kept too, and the
-// inner source is not asked again before it may be (HBEP owner rulings, 31 Oct
+// inner source is not asked again before it may be, decided by
+// hubfiles.Retryable alone (HBEP-3 as revised after the #74 review, 31 Oct
 // 2026):
-//   - a transient failure (hubfiles.Retryable: a transport error, a 429 or a
-//     5xx), a small file whose blob id does not match the listing
-//     (hubfiles.ErrBlobMismatch) and a listing the strict decoder refuses
-//     (hubfiles.ErrInvalidListing) back off from 30 s, doubling to 10 min,
-//     never sooner than the Hub's Retry-After;
-//   - any other failure (a 401, 403 or 404, a bad token file) is permanent: it
-//     is not tried again until the spec names another checkpoint or token file
-//     (another key) or the token file's content changes.
+//   - a transient failure (a transport error, a 429 or a 5xx) backs off from
+//     30 s, doubling to 10 min, never sooner than the Hub's Retry-After;
+//   - a permanent one (a 401, 403 or 404, a blob or size mismatch, a refused
+//     listing, a cross-host Link, too many pages, a file too large, a bad
+//     token file) is not tried again until the spec names another checkpoint
+//     or token file (another key), the token file's content changes, or the
+//     periodic resync, permanentRecheck, comes.
 type cachedSource struct {
 	inner CheckpointSource
 	clock Clock
@@ -66,6 +66,10 @@ type sourceFailure struct {
 const (
 	sourceBackoffMin = 30 * time.Second
 	sourceBackoffMax = 10 * time.Minute
+	// permanentRecheck is the periodic resync of a permanent failure:
+	// controller-runtime's default SyncPeriod, the cadence at which a
+	// controller re-reads everything anyway.
+	permanentRecheck = 10 * time.Hour
 )
 
 // NewCachedSource wraps a CheckpointSource with a cache by (repository,
@@ -103,7 +107,7 @@ func tokenFingerprint(cp v1alpha1.CheckpointSpec) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// backoffError is a kept failure; retryAt is zero for a permanent one.
+// backoffError is a kept failure with the time it is tried again.
 type backoffError struct {
 	err     error
 	retryAt time.Time
@@ -112,8 +116,7 @@ type backoffError struct {
 func (e *backoffError) Error() string { return e.err.Error() }
 func (e *backoffError) Unwrap() error { return e.err }
 
-// retryAtOf returns when a failed checkpoint read is tried again, if err says;
-// a zero time means only a change of spec or token tries it again.
+// retryAtOf returns when a failed checkpoint read is tried again, if err says.
 func retryAtOf(err error) (time.Time, bool) {
 	var b *backoffError
 	if errors.As(err, &b) {
@@ -122,25 +125,17 @@ func retryAtOf(err error) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-// backsOff reports whether a failure is retried with backoff rather than kept
-// until the spec or the token changes.
-func backsOff(err error) bool {
-	return retryableHub(err) || errors.Is(err, hubfiles.ErrBlobMismatch) || errors.Is(err, hubfiles.ErrInvalidListing)
-}
-
-// kept returns the kept failure of key while it stands: a permanent one until
-// the token's fingerprint changes, a backed-off one until its retry time.
+// kept returns the kept failure of key while it stands: until its retry time,
+// and a permanent one also only while the token's fingerprint is the same.
 func (c *cachedSource) kept(key, token string) error {
 	f, ok := c.fails[key]
 	switch {
-	case !ok:
+	case !ok, !c.clock.Now().Before(f.retryAt):
 		return nil
-	case f.permanent && f.token == token:
-		return &backoffError{err: f.err}
-	case !f.permanent && c.clock.Now().Before(f.retryAt):
-		return &backoffError{err: f.err, retryAt: f.retryAt}
+	case f.permanent && f.token != token:
+		return nil
 	}
-	return nil
+	return &backoffError{err: f.err, retryAt: f.retryAt}
 }
 
 // fail keeps a failure of key and returns it with its retry time.
@@ -152,9 +147,9 @@ func (c *cachedSource) fail(key, token string, err error) error {
 	}
 	f.err, f.token = err, token
 	f.attempts++
-	if !backsOff(err) {
-		f.permanent, f.retryAt = true, time.Time{}
-		return &backoffError{err: err}
+	if !retryableHub(err) {
+		f.permanent, f.retryAt = true, c.clock.Now().Add(permanentRecheck)
+		return &backoffError{err: err, retryAt: f.retryAt}
 	}
 	f.permanent = false
 	delay := sourceBackoffMin << min(f.attempts-1, 10)
@@ -257,6 +252,9 @@ type classID struct {
 	problem string
 	// retryAt, when set, is when the checkpoint read is tried again.
 	retryAt time.Time
+	// transient marks a failure worth a retry with backoff (hubfiles.Retryable):
+	// it sets no reason, only a later pass (HBEP-3).
+	transient bool
 	// blocked, when set, says why provisioning in the class is stopped: a
 	// verification of its current ID failed on a settings contradiction or a
 	// shape that does not fit (HBEP-7, Instance start).
@@ -291,7 +289,7 @@ func (r *Reconciler) currentIDs(ctx context.Context, md *v1alpha1.ModelDeploymen
 	fail := func(err error) []classID {
 		at, _ := retryAtOf(err)
 		for _, c := range cls {
-			out = append(out, classID{class: c, problem: "checkpoint " + s.Checkpoint.Repository + ": " + hubCause(err), retryAt: at})
+			out = append(out, classID{class: c, problem: "checkpoint " + s.Checkpoint.Repository + ": " + hubCause(err), retryAt: at, transient: retryableHub(err)})
 		}
 		return out
 	}

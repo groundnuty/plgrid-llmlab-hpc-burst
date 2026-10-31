@@ -266,6 +266,9 @@ func (p *pass) prepareServed() error {
 			if !c.retryAt.IsZero() {
 				p.at(c.retryAt)
 			}
+			if c.transient {
+				continue // a transient Hub failure sets no reason; it is retried (HBEP-3)
+			}
 			p.degrade(v1alpha1.ReasonIdentityUnresolved, "class %s/%s has no current deployment ID: %s", c.class.GPUModel, c.class.CPUArch, c.problem)
 			continue
 		}

@@ -242,6 +242,16 @@ func TestStartRegistrationTimeout(t *testing.T) {
 	if rg.allocations("md")[0].Name == a0.Name || rg.submissions() != 2 {
 		t.Errorf("want one new Allocation and 2 submissions, got %q and %d", rg.allocations("md")[0].Name, rg.submissions())
 	}
+	// The path comes back: the next agent on the Provider registers, and the
+	// condition is cleared, False, by the same server-side apply.
+	if got := dialHome(); got != "True" {
+		t.Fatalf("Provider DialHomeUnreachable = %q before any agent registered, want True", got)
+	}
+	rg.noAgents = false
+	startUntil(rg, "md", 5*time.Minute, "DialHomeUnreachable cleared by the next registration", func() bool { return dialHome() == "False" })
+	if in := rg.instances("md"); in[len(in)-1].Status.Agent == nil {
+		t.Errorf("the condition was cleared with no registration accepted on the new Instance")
+	}
 }
 
 // TestStartWarmAllocationGetsFullStartTimeout covers "An Instance placed on a
