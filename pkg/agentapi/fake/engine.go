@@ -9,10 +9,19 @@ import (
 // Engine scripts what the engine behind a fake Agent does. Every func field
 // has a default when nil; the defaults are exported (DefaultVerify and the
 // others) so a test can take one and change a single field.
+//
+// The Agent asks Verify, Qualify, GreedyOutputs and WarmUpRound only while the
+// Instance's workers run: a section is asked once every desired worker runs a
+// process started for the desired generations, and not before (a check of a
+// worker that is staging, starting, stopping or exited is never asked). What
+// they return is reported as the real agent reports it: free text is cut to the
+// protocol's bounds (agentapi.MaxTimingErrorBytes, agentapi.MaxMessageBytes), and
+// a report above agentapi.MaxBodyBytes fails the Step.
 type Engine struct {
 	// StartDelay is how long a worker stays in phase starting. The worker
 	// becomes running once the Agent's clock reaches its StartTime plus
-	// StartDelay. The default is 0.
+	// StartDelay. The default is 0. Checks wait for the worker to run, so none
+	// is answered before then.
 	StartDelay time.Duration
 
 	// StagingDuration is how long staging takes. A new Instance is reported
@@ -39,8 +48,10 @@ type Engine struct {
 	// is reported stopping until the Agent's clock reaches the time of the
 	// instruction plus Settings.StopGrace of the desired state that carried
 	// it, and is then killed: stopped, with exit code -1. A restart's new
-	// process starts in the Step after the kill. Without IgnoreTerm a worker
-	// stops at once with exit code 0.
+	// process starts in the Step after the kill, and a new verification
+	// generation's checks are answered only once that process runs, never by the
+	// process that is stopping. Without IgnoreTerm a worker stops at once with
+	// exit code 0.
 	IgnoreTerm bool
 
 	// Verify answers a verification request. The Agent sets Done on the result.
@@ -60,7 +71,10 @@ type Engine struct {
 	GreedyOutputs func(agentapi.DesiredInstance, agentapi.QualifyRequest) [][]int32
 
 	// WarmUpRound answers warm-up round n, counted from 1. The Agent sets the
-	// round's number to n.
+	// round's number to n. The request's TargetSessions is within
+	// 1..agentapi.MaxTargetSessions (the Agent refuses a desired state that asks
+	// for another), and a round that makes the report exceed
+	// agentapi.MaxBodyBytes fails the Step.
 	WarmUpRound func(n int32, req agentapi.WarmUpRequest) agentapi.WarmUpRound
 
 	// Health samples a running worker process. The Agent sets the sample's Time

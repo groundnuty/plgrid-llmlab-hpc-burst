@@ -16,7 +16,34 @@
 // check only where the agent judges: the corruption check, which the Agent
 // judges from the raw token outputs of Engine.GreedyOutputs, and the behaviour
 // check. Engine.IgnoreTerm makes a worker ignore TERM until the stop grace
-// runs out.
+// runs out. The health doubles keep their counters per worker process
+// (Process.PID), so a restarted worker's counters start again.
+//
+// The Agent follows the protocol where a test could otherwise pass for the
+// wrong reason:
+//
+//   - Checks need the intended running process. Verification, qualification and
+//     each warm-up round are answered only while every desired worker is running
+//     a process started for the desired worker and Instance generations; a new
+//     verification generation gets no result from a process that is still
+//     stopping, starting or exited, and its results come in the Step the new
+//     process runs.
+//   - Staging takes Engine.StagingDuration from the Instance's first apply and
+//     can fail (Engine.StagingError). No worker starts before it is done, and a
+//     failed staging is tried again only when the Instance generation rises.
+//   - An Action the Agent does not know changes nothing, and the Agent keeps
+//     polling and reporting (agentapi's documentation, Versioning).
+//   - Every report is encoded with agentapi.EncodeBody, so one above
+//     agentapi.MaxBodyBytes fails the Step as the HTTP path would refuse it; the
+//     snapshot cuts RequestTiming.Error to agentapi.MaxTimingErrorBytes and
+//     VerifyResult.Error, CheckOutcome.Message and Staging.Message to
+//     agentapi.MaxMessageBytes (agentapi.TruncateUTF8); and a warm-up request
+//     with TargetSessions outside 1..agentapi.MaxTargetSessions fails the Step.
+//   - The Agent draws its key with agentapi.NewKey and its agent instance ID
+//     with agentapi.NewAgentInstanceID, and the Backend answers CodeBadRequest
+//     for a caller whose agent instance ID fails agentapi.CheckAgentInstanceID
+//     and for a Report whose Instance key is set and fails agentapi.CheckKey, as
+//     the real server and controller will.
 //
 // The package imports only the standard library and package agentapi, because
 // the agent is a static binary and this package must not drag the Kubernetes

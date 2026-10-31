@@ -22,6 +22,18 @@ const (
 // goroutine runs and nothing sleeps. A test calls Step, once per convergence
 // step, and the Agent takes its time from the function given to NewAgent.
 //
+// It follows the protocol's rules where a test could otherwise pass for the
+// wrong reason:
+//
+//   - checks run only against the intended running process (Engine);
+//   - staging takes Engine.StagingDuration, can fail (Engine.StagingError), and
+//     no worker starts before it is done;
+//   - an Action it does not know changes nothing, and it keeps reporting;
+//   - every report is encoded with agentapi.EncodeBody, so one above the body
+//     limit fails the Step, and its free text is cut to the protocol's bounds;
+//   - the key is drawn with agentapi.NewKey and the agent instance ID with
+//     agentapi.NewAgentInstanceID.
+//
 // An Agent is not safe for concurrent use: one goroutine drives it, and the
 // OnDesired hook runs on that goroutine.
 type Agent struct {
@@ -190,7 +202,11 @@ func (a *Agent) CrashWorker(name string, exitCode int) {
 // errors.Is see through it. A step that fails before the Agent has applied the
 // desired state changes nothing in the Agent; one that fails at the report
 // has applied it, and the next Step reports it again without restarting
-// anything.
+// anything. A report above agentapi.MaxBodyBytes fails at the report, with an
+// error that wraps the *agentapi.Error of agentapi.EncodeBody (CodeBadRequest);
+// nothing is sent. A desired state that asks for a warm-up with TargetSessions
+// outside 1..agentapi.MaxTargetSessions fails before it is applied, with an
+// error that names the bound.
 //
 // A desired state with an Action the Agent does not know (agentapi's
 // documentation, Versioning) is not an error: the Agent records it (Seen,
