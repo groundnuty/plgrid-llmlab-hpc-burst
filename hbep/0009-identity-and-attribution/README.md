@@ -207,7 +207,7 @@ Verification grows from www-2027's endpoint check, run on each new endpoint (hea
 - 2026-10-30: HBEP-5's alpha proposal for where attribution travels noted.
 - 2026-10-31: the Hub listing rule written in full from the Hub listing (PR #68): `limit=1000`, every `Link` followed, an unparseable `Link` an error, one snapshot, redirects only on the Hub's origin. Lesson L-17.5 cited.
 - 2026-10-31: HBEP-6, now implementable, decides for alpha who may claim an Instance's tunnel: frps's server plugin admits a login only with a live Allocation's credential, and a proxy only for the UID of an Instance placed on that Allocation. The Instance still takes traffic only after the controller's verification.
-- 2026-10-31: HBEP-7's settings comparison is verbatim, as strings, citing vLLM v0.32.0's reporting of `cache_config_info`.
+- 2026-10-31: HBEP-7's settings comparison is by value (booleans, numbers, then strings), with a declared `auto` recorded as resolved. That also keeps open question 1's "verification works either way" true for `auto`.
 
 ## Amendments
 
