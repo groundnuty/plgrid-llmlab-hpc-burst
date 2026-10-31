@@ -40,7 +40,9 @@ func TestMain(m *testing.M) {
 		return
 	}
 	rootK3sStart = rootK3sPorts()
-	os.Exit(m.Run())
+	code := m.Run()
+	removeFakeController()
+	os.Exit(code)
 }
 
 type cliResult struct {

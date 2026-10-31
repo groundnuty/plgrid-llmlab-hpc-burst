@@ -40,6 +40,10 @@ type StatusReport struct {
 	Writes     *bool        `json:"writes_ok,omitempty"`
 	GC         *bool        `json:"gc_ok,omitempty"` // the garbage-collector probe
 	Front      *Front       `json:"front,omitempty"`
+	// Supervisor and Controllers are set when the launcher runs controllers: the supervisor's
+	// identity check and each supervised process.
+	Supervisor  *SupervisorHealth `json:"supervisor,omitempty"`
+	Controllers []EntryHealth     `json:"controllers,omitempty"`
 }
 
 // StatusOptions are the inputs of Status.
@@ -93,16 +97,26 @@ func Status(ctx context.Context, o StatusOptions) (*StatusReport, error) {
 
 	var hs []*procHandle
 	defer func() { closeAll(hs) }()
-	for _, rec := range st.Procs {
+	var sup *procHandle // the supervisor, when it runs
+	k3sGone := false
+	for i, rec := range st.Procs {
 		h, v, detail := openRec(rec)
 		rep.Processes = append(rep.Processes, ProcHealth{Name: rec.Name, PID: rec.PID, Verdict: v.String(), Detail: detail})
 		if v != Ours {
-			bad("process %s (pid %d) is not running: %s", rec.Name, rec.PID, detail)
+			// The supervisor's reason is given by checkSupervision, after k3s has been judged: a
+			// dead supervisor must not make the checks of k3s's own state seem unnecessary.
+			if rec.Name != supervisorName {
+				bad("process %s (pid %d) is not running: %s", rec.Name, rec.PID, detail)
+			}
+			k3sGone = k3sGone || i == 0 // k3s is the first record; the supervisor follows it
 			continue
 		}
 		hs = append(hs, h)
+		if rec.Name == supervisorName {
+			sup = h
+		}
 	}
-	if rep.Health != Healthy {
+	if k3sGone {
 		return rep, nil // nothing else is worth asking: the recorded host is not there
 	}
 	// final checks that every recorded process is still the one checked at the start.
@@ -113,14 +127,12 @@ func Status(ctx context.Context, o StatusOptions) (*StatusReport, error) {
 			}
 		}
 	}
+	// The ports k3s must hold are judged on k3s's own process tree; the controllers' ports are
+	// checked per supervised process by checkSupervision.
 	listeners := func() (owned, others []sock, err error) {
-		var all []*procHandle
-		for _, h := range hs {
-			tree := openTree(h)
-			defer closeAll(tree[1:])
-			all = append(all, tree...)
-		}
-		return ownedListeners(all)
+		tree := openTree(hs[0])
+		defer closeAll(tree[1:])
+		return ownedListeners(tree)
 	}
 
 	if exe, err := checkExe(l, hs[0]); err != nil {
@@ -142,10 +154,12 @@ func Status(ctx context.Context, o StatusOptions) (*StatusReport, error) {
 	if rss, err := rssMiB([]int{hs[0].rec.PID}); err == nil {
 		rep.RSSMiB = rss
 	}
+	hostBad := rep.Health != Healthy // k3s's own state, before the controllers are judged
+	checkSupervision(l, st, sup, rep, bad)
 	if statusStageHook != nil {
 		statusStageHook("listeners")
 	}
-	if rep.Health != Healthy || o.NoAPI {
+	if hostBad || o.NoAPI {
 		final()
 		return rep, nil
 	}

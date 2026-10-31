@@ -37,7 +37,17 @@ func TestMain(m *testing.M) {
 		execLoopHelper()
 		return
 	}
-	os.Exit(m.Run())
+	if d := os.Getenv(abortLauncherEnv); d != "" { // before superviseEnv: its process sets both
+		runAbortedLauncherHelper(d)
+		return
+	}
+	if d := os.Getenv(superviseEnv); d != "" {
+		runSupervisorHelper(d)
+		return
+	}
+	code := m.Run()
+	removeFakeController()
+	os.Exit(code)
 }
 
 func appendReport(line string) {
