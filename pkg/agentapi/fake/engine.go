@@ -15,12 +15,30 @@ type Engine struct {
 	// StartDelay. The default is 0.
 	StartDelay time.Duration
 
+	// IgnoreTerm makes every worker ignore TERM. On a stop instruction (a
+	// raised restart generation, idle, stop, or a new Instance) such a worker
+	// is reported stopping until the Agent's clock reaches the time of the
+	// instruction plus Settings.StopGrace of the desired state that carried
+	// it, and is then killed: stopped, with exit code -1. A restart's new
+	// process starts in the Step after the kill. Without IgnoreTerm a worker
+	// stops at once with exit code 0.
+	IgnoreTerm bool
+
 	// Verify answers a verification request. The Agent sets Done on the result.
 	Verify func(agentapi.DesiredInstance, agentapi.VerifyRequest) agentapi.VerifyResult
 
 	// Qualify answers a qualification request. The Agent sets Done on the
 	// result.
 	Qualify func(agentapi.DesiredInstance, agentapi.QualifyRequest) agentapi.QualifyResult
+
+	// GreedyOutputs returns the token IDs of the outputs of the corruption
+	// check's greedy request, sent three times in a row. When it is set, the
+	// Agent judges them by the rule in agentapi's documentation (three
+	// outputs, sharing their first 32 tokens, none empty or a single repeated
+	// token) and the verdict replaces the corruption outcome that Qualify
+	// returned, or is added when it returned none. When it is nil, the
+	// corruption outcome is Qualify's own. DefaultGreedyOutputs passes.
+	GreedyOutputs func(agentapi.DesiredInstance, agentapi.QualifyRequest) [][]int32
 
 	// WarmUpRound answers warm-up round n, counted from 1. The Agent sets the
 	// round's number to n.

@@ -31,14 +31,19 @@ func cloneRegister(r agentapi.RegisterRequest) agentapi.RegisterRequest {
 
 func cloneDesired(d agentapi.DesiredState) agentapi.DesiredState {
 	d.Instance = clonePtr(d.Instance, func(i agentapi.DesiredInstance) agentapi.DesiredInstance {
-		i.Launch.Command = slices.Clone(i.Launch.Command)
-		i.Launch.Env = slices.Clone(i.Launch.Env)
-		i.Launch.ChatTemplate = clonePtr(i.Launch.ChatTemplate, same[string])
+		i.Launch = cloneLaunch(i.Launch)
 		i.Workers = slices.Clone(i.Workers)
 		i.Checks = clonePtr(i.Checks, cloneChecksRequest)
 		return i
 	})
 	return d
+}
+
+func cloneLaunch(l agentapi.Launch) agentapi.Launch {
+	l.Command = slices.Clone(l.Command)
+	l.Env = slices.Clone(l.Env)
+	l.ChatTemplate = clonePtr(l.ChatTemplate, same[string])
+	return l
 }
 
 func cloneChecksRequest(c agentapi.Checks) agentapi.Checks {

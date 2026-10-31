@@ -27,7 +27,7 @@ func (in *instance) applyChecks(e Engine, i agentapi.DesiredInstance) {
 		res.Verify = &v
 	}
 	if c.Qualify != nil && res.Qualify == nil {
-		q := e.qualify(i, *c.Qualify)
+		q := e.judgeCorruption(i, *c.Qualify, e.qualify(i, *c.Qualify))
 		q.Done = true
 		res.Qualify = &q
 	}

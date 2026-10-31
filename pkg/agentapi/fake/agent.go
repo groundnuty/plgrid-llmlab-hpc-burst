@@ -55,6 +55,11 @@ type Agent struct {
 
 	nextPID int // survives Requeue, so a second execution never reuses a PID
 	inst    *instance
+
+	// stopGrace and imageFormat come from the latest desired state applied.
+	stopGrace   time.Duration
+	imageFormat agentapi.ImageFormat
+	starts      []Start // survives Requeue
 }
 
 // instance is the state of the Instance the Agent runs or last ran.
@@ -74,8 +79,10 @@ type worker struct {
 	pid        int
 	start      time.Time
 	exitCode   *int
-	generation int64 // the restart generation this process was started for
+	generation int64 // the worker's restart generation this process was started for
+	instGen    int64 // the Instance's restart generation this process was started for
 	socket     string
+	killAt     time.Time // when a stopping worker is killed (stop.go)
 }
 
 // NewAgent returns an Agent that talks to b as c and takes the time from now
@@ -99,6 +106,8 @@ func NewAgent(b agentapi.Backend, c agentapi.Caller, now func() time.Time, e Eng
 		now:     now,
 		engine:  e,
 		nextPID: firstPID,
+
+		imageFormat: agentapi.ImageFormatSIF,
 	}
 }
 
@@ -111,7 +120,9 @@ func (a *Agent) Exited() bool { return a.exited }
 
 // Silence(true) makes every Step a no-op that makes no call, which is a
 // path outage: the agent runs on, and the controller hears nothing. Silence(false)
-// ends it. The workers' state does not change meanwhile.
+// ends it. The workers' state does not change meanwhile, except that the clock
+// keeps running: a kill that came due during the outage shows in the first
+// report after it.
 func (a *Agent) Silence(on bool) { a.silenced = on }
 
 // Seen returns the desired states the Agent has seen, in order, each the first
@@ -134,12 +145,14 @@ func (a *Agent) LastReport() (agentapi.Report, bool) {
 	return cloneReport(*a.lastReport), true
 }
 
-// Requeue makes the Agent a second execution of its job: a new agent instance ID and no
-// local state, so the next Step registers afresh and starts whatever it is told
-// to run from nothing, with a new key. Seen, LastReport, the PID counter and a
-// Silence in force carry over.
+// Requeue makes the Agent a second execution of its job: a new agent instance
+// ID, a restart count one higher in Registration (as SLURM_RESTART_COUNT is
+// after a requeue), and no local state, so the next Step registers afresh and
+// starts whatever it is told to run from nothing, with a new key. Seen,
+// LastReport, Starts, the PID counter and a Silence in force carry over.
 func (a *Agent) Requeue() {
 	a.caller.AgentInstanceID = randHex(16)
+	a.Registration.RestartCount++
 	a.registered = false
 	a.stopping = false
 	a.exited = false
@@ -174,8 +187,9 @@ func (a *Agent) CrashWorker(name string, exitCode int) {
 // has applied it, and the next Step reports it again without restarting
 // anything.
 //
-// After ActionStop, the Step that applied it sends its final report, and the
-// Agent has then exited.
+// After ActionStop, the Agent exits with the report it sends once every worker
+// is gone: the Step that applied it when the workers stopped at once, a later
+// Step when one ignores TERM until its kill (Engine.IgnoreTerm).
 func (a *Agent) Step(ctx context.Context) error {
 	if a.exited || a.silenced {
 		return nil
@@ -231,7 +245,7 @@ func (a *Agent) report(ctx context.Context, now time.Time) error {
 		return fmt.Errorf("fake agent: report: %w", err)
 	}
 	a.lastReport = &r
-	if a.stopping {
+	if a.stopping && (a.inst == nil || !a.inst.anyLive()) {
 		a.exited = true
 	}
 	return nil

@@ -32,11 +32,11 @@ func (c *clock) Advance(d time.Duration) { c.t = c.t.Add(d) }
 
 func caller(id string) agentapi.Caller {
 	return agentapi.Caller{
-		Namespace:     "ns-example",
-		Allocation:    "alloc-example",
-		AllocationUID: allocUID,
-		Tag:           "tag-example",
-		JobID:         "job-1",
+		Namespace:       "ns-example",
+		Allocation:      "alloc-example",
+		AllocationUID:   allocUID,
+		Tag:             "tag-example",
+		JobID:           "job-1",
 		AgentInstanceID: id,
 	}
 }
