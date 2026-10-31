@@ -32,6 +32,9 @@ type memory struct {
 	emptySince map[types.UID]time.Time
 	failures   map[v1alpha1.AcceleratorClass][]time.Time
 	emitted    map[string]bool
+	// released are Allocations this process deleted, by UID with their name,
+	// whose credential files go once the Allocation is gone.
+	released map[types.UID]string
 }
 
 type restartRec struct {
@@ -49,7 +52,29 @@ func newMemory(started time.Time) *memory {
 		emptySince: map[types.UID]time.Time{},
 		failures:   map[v1alpha1.AcceleratorClass][]time.Time{},
 		emitted:    map[string]bool{},
+		released:   map[types.UID]string{},
 	}
+}
+
+func (m *memory) releasedAlloc(uid types.UID, name string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.released[uid] = name
+}
+
+// goneAllocs returns the released Allocations whose names present does not
+// hold any more, and forgets them.
+func (m *memory) goneAllocs(present map[string]bool) []types.UID {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []types.UID
+	for uid, name := range m.released {
+		if !present[name] {
+			out = append(out, uid)
+			delete(m.released, uid)
+		}
+	}
+	return out
 }
 
 // history returns an Instance's restarts, seeding it from the restart

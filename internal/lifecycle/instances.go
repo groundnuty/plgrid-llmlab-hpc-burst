@@ -2,9 +2,9 @@ package lifecycle
 
 import (
 	"fmt"
+	"os"
 	"time"
 
-	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -148,6 +148,10 @@ func (p *pass) tombstone(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) erro
 	}
 	if err := p.r.Client.Delete(p.ctx, in); err != nil && !isNotFound(err) {
 		return fmt.Errorf("delete ended Instance %s: %w", in.Name, err)
+	}
+	// The front never routes to an ended Instance, so its key goes with it.
+	if err := os.Remove(agentapi.InstanceKeyPath(p.r.Config.CredentialsDir, string(in.UID))); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove the key of Instance %s: %w", in.Name, err)
 	}
 	return nil
 }
@@ -398,5 +402,3 @@ func isNotFound(err error) bool {
 	ok, nerr := errNotFoundIsNil(err)
 	return !ok && nerr == nil
 }
-
-var _ = xpv2.ConditionType("")
