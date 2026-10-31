@@ -39,9 +39,10 @@ func TestUpgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	ctlBin, _ := fakeController(t)
 	r := cli(t, h.upArgs(base, "--version", "1.35.9", "--json",
 		"--front-mode", "ssh", "--front-addr", "front.example.test", "--front-key", keyFile,
-		"--manifests", "testdata/manifests")...)
+		"--manifests", "testdata/manifests", "--controller-bin", ctlBin)...)
 	if r.code != exitOK {
 		t.Fatalf("up exited %d", r.code)
 	}
@@ -53,6 +54,12 @@ func TestUpgrade(t *testing.T) {
 		t.Errorf("recorded: %+v", st)
 	}
 	oldPID := st.Processes[0].PID
+	// The controllers run beside the old host: remember them, to see them replaced.
+	oldProcs := recordedProcs(t, h.dir)
+	oldRec, ok := readSupervisorRecord(t, h.dir)
+	if len(oldProcs) != 2 || oldProcs[1].Name != "supervisor" || !ok || oldRec.Entries[0].Proc == nil {
+		t.Fatalf("before the upgrade: %+v, %+v", oldProcs, oldRec)
+	}
 	c := h.clients()
 	ctx, cancel := testCtx()
 	defer cancel()
@@ -163,6 +170,21 @@ func TestUpgrade(t *testing.T) {
 	}
 	if got := listenersOf(t, newPID); len(got) != 4 {
 		t.Errorf("the new k3s holds %v", got)
+	}
+	// The upgrade stopped the supervisor with the old host and started it again with the new one:
+	// the old supervisor and controller are gone, and new ones run.
+	newProcs := recordedProcs(t, h.dir)
+	if len(newProcs) != 2 || newProcs[1].Name != "supervisor" || newProcs[1].PID == oldProcs[1].PID || !running(newProcs[1].PID) {
+		t.Errorf("after the upgrade the record is %+v: the supervisor was not started again", newProcs)
+	} else {
+		newRec, ok := readSupervisorRecord(t, h.dir)
+		if !ok || newRec.Entries[0].Proc == nil || newRec.Entries[0].Proc.PID == oldRec.Entries[0].Proc.PID ||
+			!running(newRec.Entries[0].Proc.PID) || ppidOfPID(t, newRec.Entries[0].Proc.PID) != newProcs[1].PID {
+			t.Errorf("after the upgrade supervisor.json is %+v (before: %+v)", newRec, oldRec)
+		}
+	}
+	if running(oldProcs[1].PID) || running(oldRec.Entries[0].Proc.PID) {
+		t.Errorf("the old supervisor (pid %d) or controller (pid %d) still runs", oldProcs[1].PID, oldRec.Entries[0].Proc.PID)
 	}
 	c2 := h.clients()
 	if v, err := c2.cs.Discovery().ServerVersion(); err != nil || !strings.HasPrefix(v.GitVersion, "v1.36.5") {

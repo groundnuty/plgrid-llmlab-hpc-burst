@@ -45,11 +45,14 @@ func TestUpRejectsBadInputBeforeStarting(t *testing.T) {
 		args []string
 		msg  string
 	}{
-		"front address without a mode": {[]string{"--front-addr", "front.example.test:8443"}, "front mode"},
-		"ssh without a key":            {[]string{"--front-mode", "ssh", "--front-addr", "front.example.test"}, "--front-key"},
-		"ssh on port 2222":             {[]string{"--front-mode", "ssh", "--front-addr", "front.example.test:2222", "--front-key", "/dev/null"}, "port 22"},
-		"port base too low":            {[]string{"--port-base", "80"}, "out of range"},
-		"state directory too long":     {[]string{"--state-dir", "/tmp/" + strings.Repeat("d", 90)}, "shorter"},
+		"front address without a mode":                 {[]string{"--front-addr", "front.example.test:8443"}, "front mode"},
+		"ssh without a key":                            {[]string{"--front-mode", "ssh", "--front-addr", "front.example.test"}, "--front-key"},
+		"ssh on port 2222":                             {[]string{"--front-mode", "ssh", "--front-addr", "front.example.test:2222", "--front-key", "/dev/null"}, "port 22"},
+		"port base too low":                            {[]string{"--port-base", "80"}, "out of range"},
+		"port base leaves no room for the controllers": {[]string{"--port-base", "65530"}, "out of range"},
+		"controller binary missing":                    {[]string{"--controller-bin", "/nonexistent/hpcburst-controller"}, "controller binary"},
+		"controller binary is a directory":             {[]string{"--controller-bin", "/tmp"}, "not a regular file"},
+		"state directory too long":                     {[]string{"--state-dir", "/tmp/" + strings.Repeat("d", 90)}, "shorter"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			args := append([]string{"up", "--state-dir", state, "--bin-dir", t.TempDir()}, c.args...)

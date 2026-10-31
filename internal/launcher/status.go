@@ -103,7 +103,11 @@ func Status(ctx context.Context, o StatusOptions) (*StatusReport, error) {
 		h, v, detail := openRec(rec)
 		rep.Processes = append(rep.Processes, ProcHealth{Name: rec.Name, PID: rec.PID, Verdict: v.String(), Detail: detail})
 		if v != Ours {
-			bad("process %s (pid %d) is not running: %s", rec.Name, rec.PID, detail)
+			// The supervisor's reason is given by checkSupervision, after k3s has been judged: a
+			// dead supervisor must not make the checks of k3s's own state seem unnecessary.
+			if rec.Name != supervisorName {
+				bad("process %s (pid %d) is not running: %s", rec.Name, rec.PID, detail)
+			}
 			k3sGone = k3sGone || i == 0 // k3s is the first record; the supervisor follows it
 			continue
 		}
@@ -150,11 +154,12 @@ func Status(ctx context.Context, o StatusOptions) (*StatusReport, error) {
 	if rss, err := rssMiB([]int{hs[0].rec.PID}); err == nil {
 		rep.RSSMiB = rss
 	}
+	hostBad := rep.Health != Healthy // k3s's own state, before the controllers are judged
 	checkSupervision(l, st, sup, rep, bad)
 	if statusStageHook != nil {
 		statusStageHook("listeners")
 	}
-	if rep.Health != Healthy || o.NoAPI {
+	if hostBad || o.NoAPI {
 		final()
 		return rep, nil
 	}

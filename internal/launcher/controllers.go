@@ -31,6 +31,11 @@ const noControllerWarning = "warning: no controller binary found (" + Controller
 // superviseStartTimeout bounds the wait for the supervisor's first child.
 const superviseStartTimeout = 30 * time.Second
 
+// superviseSettle is how long a child must stay up, once it runs, for the start to count: a child
+// that crashes at once (a bad flag, a missing file) is running for a few milliseconds, and the
+// record shows that. Without the wait, up could report success for a controller that never ran.
+const superviseSettle = 500 * time.Millisecond
+
 // resolveControllerBin finds the controller binary before anything is started. An explicit path
 // must be an executable regular file, and is made absolute; the default is ControllerBinName in
 // the directory of the running executable, and its absence is not an error: it returns "".
@@ -144,6 +149,7 @@ func startSupervisor(ctx context.Context, l layout, st *State, argv []string, ti
 	logf(log, "started the supervisor as pid %d; waiting for %s to start", h.rec.PID, ControllerBinName)
 	tail := func(cause error) error { return fmt.Errorf("%w%s", cause, logTail(l.supervisorLog(), 15)) }
 	deadline := time.Now().Add(timeout)
+	settled := false
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -156,7 +162,18 @@ func startSupervisor(ctx context.Context, l layout, st *State, argv []string, ti
 		if ready, err := childrenStarted(l, h.rec); err != nil {
 			return tail(err)
 		} else if ready {
-			return nil
+			if settled {
+				return nil
+			}
+			// Everything runs. Wait, then look again: the checks above then also catch a child
+			// that exited meanwhile.
+			settled = true
+			select {
+			case <-time.After(superviseSettle):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			continue
 		}
 		if time.Now().After(deadline) {
 			return tail(fmt.Errorf("the supervisor did not report its processes started within %s", timeout))

@@ -221,8 +221,10 @@ func Supervise(ctx context.Context, o SuperviseOptions) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(l.logDir(), 0o700); err != nil {
-		return err
+	for _, d := range []string{l.logDir(), l.controllerDir()} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			return err
+		}
 	}
 	rep := &reporter{l: l, log: o.Log, f: SupervisorFile{Schema: supervisorSchema, Supervisor: self}}
 	for _, sp := range specs {

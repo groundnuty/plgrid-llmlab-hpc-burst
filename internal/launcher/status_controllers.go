@@ -50,7 +50,12 @@ func checkSupervision(l layout, st *State, sup *procHandle, rep *StatusReport, b
 	}
 	rep.Supervisor = &SupervisorHealth{Running: sup != nil, PID: supRec.PID}
 	if sup == nil {
-		rep.Supervisor.Detail = "not running"
+		for _, p := range rep.Processes {
+			if p.Name == supervisorName {
+				rep.Supervisor.Detail = p.Detail
+				bad("process %s (pid %d) is not running: %s", p.Name, p.PID, p.Detail)
+			}
+		}
 	}
 	f, err := readSupervisorFile(l)
 	switch {

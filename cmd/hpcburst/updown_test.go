@@ -39,6 +39,9 @@ func TestUpStatusDown(t *testing.T) {
 	if !strings.Contains(r.err, "warning: no front recorded") || !strings.Contains(r.err, "no jobs will be submitted until a front is configured") {
 		t.Errorf("up with no front must warn that no jobs will be submitted until a front is configured (HBEP-11 owner, 30 Oct 2026); stderr: %q", r.err)
 	}
+	if !strings.Contains(r.err, "no controller binary found") || !strings.Contains(r.err, "no controllers run") {
+		t.Errorf("up with no controller binary beside the executable must warn that no controllers run; stderr: %q", r.err)
+	}
 	t.Logf("NUMBERS cold start: /readyz after %d ms, controller manager after %d ms, RSS %.0f MiB", up.ReadyzMS, up.ReadyMS, up.RSSMiB)
 	if up.Version != "v1.36.5+k3s1" {
 		t.Errorf("the default version is %s", up.Version)
