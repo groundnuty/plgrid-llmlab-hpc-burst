@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,11 +20,12 @@ import (
 
 var errDisk = errors.New("injected: no space left on device")
 
-// flaky is a log file whose second write puts all but the last 5 bytes of its
-// buffer on the disk and then fails, so it leaves a record cut short, as a
-// full disk does. Its first write waits for the gate, so that a test can queue
-// a batch behind it. With failTruncate set, its first truncate fails. Only the
-// sink's writer goroutine calls it after Open.
+// flaky is a log file for the failed-batch scenario. Its first write passes.
+// Its second write waits for the gate (the test queues a batch behind it). Its
+// third puts all but the last 5 bytes of its buffer on the disk and then
+// fails, so it leaves a record cut short, as a full disk does. Later writes
+// pass. With failTruncate set, its first truncate fails. Only the sink's
+// writer goroutine calls it after Open.
 type flaky struct {
 	usage.LogHandle
 	gate         chan struct{}
@@ -35,10 +37,10 @@ type flaky struct {
 func (f *flaky) Write(p []byte) (int, error) {
 	f.writes++
 	switch f.writes {
-	case 1:
+	case 2:
 		close(f.entered)
 		<-f.gate
-	case 2:
+	case 3:
 		n, _ := f.LogHandle.Write(p[:len(p)-5])
 		return n, errDisk
 	}
@@ -65,18 +67,37 @@ func eventually(t *testing.T, cond func() bool, what string) {
 	}
 }
 
-// outcome is what failedBatch saw.
-type outcome struct {
-	qCounter uint64
-	qErr     error // what Write(Q) returned
-	closeErr error
+// receive waits for a value on ch.
+func receive[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(20 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+		panic("unreachable")
+	}
 }
 
-// failedBatch runs one failed write on a sink over dir. Record P is written
-// and synced. Then X, Y and Z are queued behind a blocked write, so that they
-// are one batch, and that batch's write fails part way (and, with
-// failTruncate, so does the first truncate that follows). Then Q is written.
-// The sink is closed, so the log holds all there is to find.
+// outcome is what failedBatch saw.
+type outcome struct {
+	pErr, bErr   error   // what Write returned for P and for B, which were written
+	batchErrs    []error // ... for X, Y and Z, the batch that failed
+	errAfterFail error   // Err() once X, Y and Z had returned
+	failsAfter   uint64  // Failures() then
+	qCounter     uint64
+	qErr         error  // what Write returned for Q, after the failure
+	errAfterQ    error  // Err() once Q had returned
+	failsAfterQ  uint64 // Failures() then
+	closeErr     error
+}
+
+// failedBatch runs one failed batch on a sink over dir. Record P is written
+// and synced. Record B is written behind a blocked write; X, Y and Z, written
+// at the same time, queue behind it and are one batch; that batch's write
+// fails part way (and, with failTruncate, so does the first truncate that
+// follows). Then Q is written. The sink is closed, so the log holds all there
+// is to find. The counters are P 1, B 2, X, Y and Z 3 to 5, and Q 6.
 func failedBatch(t *testing.T, dir string, failTruncate bool) outcome {
 	t.Helper()
 	f := &flaky{gate: make(chan struct{}), entered: make(chan struct{}), failTruncate: failTruncate}
@@ -84,37 +105,26 @@ func failedBatch(t *testing.T, dir string, failTruncate bool) outcome {
 	if err != nil {
 		t.Fatalf("OpenWith: %v", err)
 	}
-	write(t, s, rec("P"))
-	select {
-	case <-f.entered:
-	case <-time.After(20 * time.Second):
-		t.Fatal("timed out waiting for the first write of the log")
-	}
-	for _, id := range []string{"X", "Y", "Z"} {
-		write(t, s, rec(id))
-	}
-	close(f.gate)
-	eventually(t, func() bool { return s.Err() != nil }, "the failed write to be recorded")
 	var o outcome
+	_, o.pErr = s.Write(rec("P"))
+	bDone := make(chan error, 1)
+	go func() { _, err := s.Write(rec("B")); bDone <- err }()
+	receive(t, f.entered, "the second write of the log")
+	batch := make(chan error, 3)
+	for _, id := range []string{"X", "Y", "Z"} {
+		go func() { _, err := s.Write(rec(id)); batch <- err }()
+	}
+	eventually(t, func() bool { return s.Queued() == 3 }, "X, Y and Z to queue behind the blocked write")
+	close(f.gate)
+	o.bErr = receive(t, bDone, "the write of B")
+	for range 3 {
+		o.batchErrs = append(o.batchErrs, receive(t, batch, "a write of the failed batch"))
+	}
+	o.errAfterFail, o.failsAfter = s.Err(), s.Failures()
 	o.qCounter, o.qErr = s.Write(rec("Q"))
+	o.errAfterQ, o.failsAfterQ = s.Err(), s.Failures()
 	o.closeErr = s.Close()
 	return o
-}
-
-// TestWriteReturnsAnEarlierWriteFailure: once a write of the log has failed,
-// Write returns that error instead of nil (with the counter, for the record is
-// still queued), and Close reports it too.
-func TestWriteReturnsAnEarlierWriteFailure(t *testing.T) {
-	o := failedBatch(t, t.TempDir(), false)
-	if !errors.Is(o.qErr, errDisk) {
-		t.Errorf("Write after the failure returned %v, want an error that wraps %v", o.qErr, errDisk)
-	}
-	if o.qCounter != 5 {
-		t.Errorf("Write after the failure returned counter %d, want 5: the record is still queued", o.qCounter)
-	}
-	if !errors.Is(o.closeErr, errDisk) {
-		t.Errorf("Close returned %v, want an error that wraps %v", o.closeErr, errDisk)
-	}
 }
 
 // jsonLines returns the log's records and fails the test unless the log is
@@ -156,31 +166,120 @@ func ids(recs []usage.Record) []string {
 	return out
 }
 
+// TestEachWriteOfAFailedBatchReturnsItsError: X, Y and Z are one batch whose
+// write failed, so each of their Writes returns the error; the Writes before
+// and after it, in batches of their own, return nil.
+func TestEachWriteOfAFailedBatchReturnsItsError(t *testing.T) {
+	o := failedBatch(t, t.TempDir(), false)
+	for i, err := range o.batchErrs {
+		if !errors.Is(err, errDisk) {
+			t.Errorf("Write %d of the failed batch returned %v, want an error that wraps %v", i, err, errDisk)
+		}
+	}
+	if o.pErr != nil || o.bErr != nil {
+		t.Errorf("the Writes of P and B returned %v and %v, want nil", o.pErr, o.bErr)
+	}
+	if !errors.Is(o.errAfterFail, errDisk) {
+		t.Errorf("Err() after the failure = %v, want an error that wraps %v", o.errAfterFail, errDisk)
+	}
+}
+
+// TestAFailureIsNotSticky: the Write after the failed batch writes its record
+// and returns nil; Err is nil again, and Close, which returns the latest
+// batch's error, returns nil.
+func TestAFailureIsNotSticky(t *testing.T) {
+	o := failedBatch(t, t.TempDir(), false)
+	if o.qErr != nil {
+		t.Errorf("Write after the failure returned %v, want nil: the disk is fine again", o.qErr)
+	}
+	if o.qCounter != 6 {
+		t.Errorf("Write after the failure returned counter %d, want 6", o.qCounter)
+	}
+	if o.errAfterQ != nil {
+		t.Errorf("Err() after a later success = %v, want nil", o.errAfterQ)
+	}
+	if o.closeErr != nil {
+		t.Errorf("Close returned %v, want nil: the latest batch succeeded", o.closeErr)
+	}
+}
+
 // TestAFailedWriteLeavesNoPartialLine: the write of the batch X, Y, Z puts
 // part of it on the disk and fails. The log is cut back to its size before the
 // batch, so Q, written after the failure, starts a line of its own. The
-// batch's counters 2 to 4 show as a gap.
+// batch's counters 3 to 5 show as a gap.
 func TestAFailedWriteLeavesNoPartialLine(t *testing.T) {
 	dir := t.TempDir()
 	failedBatch(t, dir, false)
 	recs := jsonLines(t, dir)
-	if want := []string{"P", "Q"}; !reflect.DeepEqual(ids(recs), want) {
+	if want := []string{"P", "B", "Q"}; !reflect.DeepEqual(ids(recs), want) {
 		t.Errorf("requests in the log = %v, want %v", ids(recs), want)
 	}
-	if want := []uint64{1, 5}; !reflect.DeepEqual(counters(recs), want) {
+	if want := []uint64{1, 2, 6}; !reflect.DeepEqual(counters(recs), want) {
 		t.Errorf("counters in the log = %v, want %v: the failed batch shows as a gap", counters(recs), want)
 	}
 }
 
 // TestAFailedCutBackIsRetried: the truncate that follows the failed write
-// fails too, so the partial line stays. The next flush cuts the log back
-// before it writes Q.
+// fails too, so the partial line stays and the batch's Writes return both
+// errors. The next flush cuts the log back before it writes Q.
 func TestAFailedCutBackIsRetried(t *testing.T) {
 	dir := t.TempDir()
-	failedBatch(t, dir, true)
+	o := failedBatch(t, dir, true)
+	for i, err := range o.batchErrs {
+		if !errors.Is(err, errDisk) {
+			t.Errorf("Write %d of the failed batch returned %v, want an error that wraps %v", i, err, errDisk)
+		}
+	}
+	if o.qErr != nil {
+		t.Errorf("Write after the failure returned %v, want nil", o.qErr)
+	}
 	recs := jsonLines(t, dir)
-	if want := []string{"P", "Q"}; !reflect.DeepEqual(ids(recs), want) {
+	if want := []string{"P", "B", "Q"}; !reflect.DeepEqual(ids(recs), want) {
 		t.Errorf("requests in the log = %v, want %v", ids(recs), want)
+	}
+}
+
+// syncGate is a log file whose Sync blocks until released.
+type syncGate struct {
+	usage.LogHandle
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (f *syncGate) Sync() error {
+	f.entered <- struct{}{}
+	<-f.release
+	return f.LogHandle.Sync()
+}
+
+func (f *syncGate) unblock() { f.once.Do(func() { close(f.release) }) }
+
+// TestWriteReturnsOnlyAfterTheSync: with the log's sync blocked, the record is
+// in the log but its Write has not returned; once the sync is released, Write
+// returns nil.
+func TestWriteReturnsOnlyAfterTheSync(t *testing.T) {
+	dir := t.TempDir()
+	f := &syncGate{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	s, err := usage.OpenWith(dir, func(file *os.File) usage.LogHandle { f.LogHandle = file; return f })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { f.unblock(); _ = s.Close() })
+	done := make(chan error, 1)
+	go func() { _, err := s.Write(rec("a")); done <- err }()
+	receive(t, f.entered, "the sync of the log")
+	if n := logLines(dir); n != 1 {
+		t.Errorf("%d lines in the log while the sync is blocked, want 1: the write comes before the sync", n)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("Write returned %v while the sync of its record was blocked", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	f.unblock()
+	if err := receive(t, done, "Write to return once the sync is released"); err != nil {
+		t.Errorf("Write returned %v after the sync, want nil", err)
 	}
 }
 
@@ -244,13 +343,14 @@ func TestOpenCutsATornTail(t *testing.T) {
 }
 
 // TestCloseAfterAFailureKeepsTheBlockEnd: the batch X, Y, Z was lost, so the
-// run was not clean. Close leaves the counter file at the block end, as a
-// crash does, and the next run starts at 1001.
+// run was not clean, though a later batch was written. Close leaves the
+// counter file at the block end, as a crash does, and the next run starts at
+// 1001.
 func TestCloseAfterAFailureKeepsTheBlockEnd(t *testing.T) {
 	dir := t.TempDir()
 	failedBatch(t, dir, false)
 	if got := counterFile(t, dir); got != "1000" {
-		t.Errorf("counter file after a Close that reported an error = %q, want 1000", got)
+		t.Errorf("counter file after a run that had a failed batch = %q, want 1000", got)
 	}
 	s := sink(t, dir)
 	if got := write(t, s, rec("next")); got != 1001 {

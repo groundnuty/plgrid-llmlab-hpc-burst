@@ -1,7 +1,7 @@
 // Package usage writes the front's usage records (HBEP-5, Usage records;
 // HBEP-8): one JSON line per request, synced to disk before the next, with a
 // monotonic counter persisted apart from the log in blocks, so that records
-// lost in a crash show as a gap. In alpha the records are also the
+// lost in a crash show as a gap. A Write returns once its record is on disk. In alpha the records are also the
 // attribution log (HBEP-9). No record holds a prompt, a response or a key.
 package usage
 
@@ -75,10 +75,17 @@ type logFile interface {
 	Close() error
 }
 
+// pending is a queued record and the channel its Write waits on.
+type pending struct {
+	rec  Record
+	done chan error // receives the outcome of the batch the record is in
+}
+
 // Sink appends records to <dir>/usage.jsonl. Write assigns the counter and
 // queues the record; one goroutine writes what is queued in one write and
 // one fsync, so records are batched only when they arrive faster than the
-// disk syncs (HBEP-5, Sink in alpha).
+// disk syncs (HBEP-5, Sink in alpha). A Write returns when the batch its
+// record is in has been written and synced, or has failed.
 type Sink struct {
 	dir string
 	log logFile
@@ -86,11 +93,12 @@ type Sink struct {
 	mu       sync.Mutex
 	next     uint64 // the next counter to use
 	blockEnd uint64 // the last counter persisted as reserved
-	queue    []Record
+	queue    []pending
 	wake     chan struct{}
 	closed   bool
 	done     chan struct{}
-	err      error // the first write or sync error; it is never cleared
+	err      error  // the error of the latest batch; nil once a batch succeeds
+	failures uint64 // the batches that failed
 
 	// Only the writer goroutine uses these two after Open.
 	size int64 // the log's size when it holds only whole lines
@@ -130,35 +138,42 @@ func open(dir string, wrap func(*os.File) logFile) (*Sink, error) {
 	return s, nil
 }
 
-// Write assigns r its counter and queues it. It returns the counter, or an
-// error when the counter block could not be persisted or the sink is closed.
-// Once a write or sync of the log has failed, it returns that error with the
-// counter: the failure stays reported, and the record is still queued, to be
-// written if the disk has recovered.
+// Write assigns r its counter, queues it, and returns the counter once the
+// record is on disk: written and synced. It returns an error instead when the
+// counter block could not be persisted, the sink is closed, or the batch the
+// record is in failed to be written or synced; a record whose sync failed may
+// still be in the log. A failure is not remembered: the next Write tries the
+// disk again, after the log is cut back to its last whole line.
 func (s *Sink) Write(r Record) (uint64, error) {
+	p, err := s.enqueue(r)
+	if err != nil {
+		return 0, err
+	}
+	return p.rec.Counter, <-p.done
+}
+
+func (s *Sink) enqueue(r Record) (pending, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return 0, errors.New("usage: the sink is closed")
+		return pending{}, errors.New("usage: the sink is closed")
 	}
 	if s.next > s.blockEnd {
 		end := s.blockEnd + BlockSize
 		if err := writeCounter(filepath.Join(s.dir, CounterFile), end); err != nil {
-			return 0, fmt.Errorf("usage: persist the counter block: %w", err)
+			return pending{}, fmt.Errorf("usage: persist the counter block: %w", err)
 		}
 		s.blockEnd = end
 	}
 	r.Counter = s.next
 	s.next++
-	s.queue = append(s.queue, r)
+	p := pending{rec: r, done: make(chan error, 1)}
+	s.queue = append(s.queue, p)
 	select {
 	case s.wake <- struct{}{}:
 	default:
 	}
-	if s.err != nil {
-		return r.Counter, fmt.Errorf("usage: the log failed earlier: %w", s.err)
-	}
-	return r.Counter, nil
+	return p, nil
 }
 
 func (s *Sink) run() {
@@ -225,72 +240,85 @@ func lineEnd(f *os.File, size int64) (int64, error) {
 	return 0, nil
 }
 
-// flush appends batch to the log and syncs it. A write that fails or falls
+// flush writes and syncs batch, records the outcome, and wakes the Writes
+// waiting on it. The outcome is recorded first, so that a Write that returns
+// an error already finds it in Err and Failures.
+func (s *Sink) flush(batch []pending) {
+	err := s.commit(batch)
+	s.mu.Lock()
+	s.err = err
+	if err != nil {
+		s.failures++
+	}
+	s.mu.Unlock()
+	for _, p := range batch {
+		p.done <- err
+	}
+}
+
+// commit appends batch to the log and syncs it. A write that fails or falls
 // short can leave a partial line, which the next record would join; so the log
 // is cut back to its size before the batch, and the batch's counters show as a
-// gap. A sync that fails leaves whole lines and they are kept.
-func (s *Sink) flush(batch []Record) {
+// gap. A sync that fails leaves whole lines, and they are kept.
+func (s *Sink) commit(batch []pending) error {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
-	for _, r := range batch {
-		if err := enc.Encode(r); err != nil {
-			s.fail(err)
-			return
+	for _, p := range batch {
+		if err := enc.Encode(p.rec); err != nil {
+			return fmt.Errorf("usage: encode a record: %w", err)
 		}
 	}
-	if s.torn && !s.cutBack() {
-		return // the partial line is still there; writing now would join it
+	if s.torn {
+		// The partial line is still there; writing now would join it.
+		if err := s.cutBack(); err != nil {
+			return err
+		}
 	}
 	n, err := s.log.Write(buf.Bytes())
 	if err == nil && n != buf.Len() {
 		err = io.ErrShortWrite
 	}
 	if err != nil {
-		s.fail(err)
-		s.cutBack()
-		return
+		err = fmt.Errorf("usage: write the log: %w", err)
+		if cerr := s.cutBack(); cerr != nil {
+			err = errors.Join(err, cerr)
+		}
+		return err
 	}
 	s.size += int64(n)
 	if err := s.log.Sync(); err != nil {
-		s.fail(err)
+		return fmt.Errorf("usage: sync the log: %w", err)
 	}
+	return nil
 }
 
-// cutBack truncates the log to s.size and syncs it. It reports whether the
-// log is back to whole lines; when the truncate fails, the next flush tries
-// again before it writes.
-func (s *Sink) cutBack() bool {
+// cutBack truncates the log to s.size and syncs it. When the truncate fails,
+// the next commit tries again before it writes.
+func (s *Sink) cutBack() error {
 	if err := s.log.Truncate(s.size); err != nil {
 		s.torn = true
-		s.fail(err)
-		return false
+		return fmt.Errorf("usage: cut the log back to its last whole line: %w", err)
 	}
 	s.torn = false
 	if err := s.log.Sync(); err != nil {
-		s.fail(err)
+		return fmt.Errorf("usage: sync the log after cutting it back: %w", err)
 	}
-	return true
+	return nil
 }
 
-func (s *Sink) fail(err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.err == nil {
-		s.err = err
-	}
-}
-
-// Err returns the first write or sync error.
+// Err returns the error of the latest batch of records: nil when it was
+// written and synced, also after an earlier batch failed.
 func (s *Sink) Err() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.err
 }
 
-// Close writes what is queued and closes the log. After a clean run it
+// Close writes what is queued and closes the log. It returns the error of the
+// latest batch, if that failed. After a run in which no batch failed it
 // persists the last counter used, so that the next run continues from it
-// without a gap: only a crash leaves one. After a write or sync error it
-// leaves the block end, so that what the failure dropped still shows.
+// without a gap: only a crash leaves one. After a failure, even one later
+// recovered from, it leaves the block end, as a crash does.
 func (s *Sink) Close() error {
 	s.mu.Lock()
 	if s.closed {
@@ -302,13 +330,22 @@ func (s *Sink) Close() error {
 	s.mu.Unlock()
 	<-s.done
 	err := s.Err()
-	if err == nil {
+	if err == nil && s.Failures() == 0 {
 		err = s.persistLast()
 	}
 	if cerr := s.log.Close(); err == nil {
 		err = cerr
 	}
 	return err
+}
+
+// Failures returns how many batches of records have failed to be written or
+// synced since the sink was opened. A failed batch counts once, whatever the
+// number of records in it.
+func (s *Sink) Failures() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.failures
 }
 
 // persistLast writes the last counter used as the counter file's value, unless
