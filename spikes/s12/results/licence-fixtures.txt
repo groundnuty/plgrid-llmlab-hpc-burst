@@ -1,0 +1,7 @@
+-- control: MIT only: exit 0
+-- control: report lists example.test/goodlib as MIT
+-- off-list licence (BSD-4-Clause): exit 1
+     Not allowed license 'BSD-4-Clause' found for library 'example.test/offlist'.
+-- unknown licence: exit 1
+     Did not find license for library 'example.test/mystery'.
+ALL FIXTURE CHECKS BEHAVED AS EXPECTED

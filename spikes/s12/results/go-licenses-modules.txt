@@ -1,0 +1,11 @@
+packages under spikes/ or third_party/ matched by ./... at the root: 0
+spikes/s10: report rows=10, check exit=1
+spikes/s10b: report rows=11, check exit=1
+spikes/s10c: report rows=12, check exit=1
+spikes/s2: report rows=1, check exit=1
+spikes/s2b: report rows=1, check exit=1
+spikes/s3: report rows=71, check exit=1
+spikes/s4: report rows=91, check exit=1
+spikes/s8: report rows=25, check exit=1
+third_party/forked/kcp: report rows=0, check exit=0
+third_party/forked/kubeai: report rows=7, check exit=0
