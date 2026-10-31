@@ -48,6 +48,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 // Client talks to one engine over its Unix socket.
@@ -102,6 +104,13 @@ func New(socket, key string, opts ...Option) *Client {
 	}
 	return c
 }
+
+// cut cuts a string the engine supplied to agentapi.MaxMessageBytes, at a
+// character boundary. The engine's strings go into a report, whose body above
+// agentapi's limit the server refuses and the agent would retry forever, with
+// every later snapshot carrying the same field (PR 87 review, Opus nit): the
+// fingerprint, the version, the served names and the settings' values.
+func cut(s string) string { return agentapi.TruncateUTF8(s, agentapi.MaxMessageBytes) }
 
 // httpError is a non-2xx answer.
 type httpError struct {

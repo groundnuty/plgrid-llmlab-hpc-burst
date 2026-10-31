@@ -32,13 +32,18 @@ type sshArgs struct {
 	noCommand   bool
 	options     map[string]string // lower-cased name -> value
 	identity    string
+	configFile  string // -F
 	port        string
 	forwards    []string
 	destination string
 }
 
 // parseSSHArgs accepts "-N", "-o K=V" (or "-oK=V"), "-i file", "-p port",
-// "-L spec" and the destination, and refuses any other option.
+// "-F file", "-L spec" and the destination, and refuses any other option.
+// -F and "-o ControlMaster=no -o ControlPath=none" are how the agent keeps the
+// user's and the system's ssh configuration, which can start a background
+// master or inject a ProxyJump, out of the forward (PR 87 review, Opus nit);
+// the fake accepts them. The log records them, so a test can assert them.
 func parseSSHArgs(args []string) (sshArgs, error) {
 	a := sshArgs{options: map[string]string{}}
 	need := func(i *int, flag string) (string, error) {
@@ -64,7 +69,7 @@ func parseSSHArgs(args []string) (sshArgs, error) {
 		case "-N":
 			a.noCommand = true
 		case "-T", "-n", "-q", "-v":
-		case "-o", "-i", "-p", "-L":
+		case "-o", "-i", "-p", "-F", "-L":
 			if val == "" {
 				if val, err = need(&i, flag); err != nil {
 					return a, err
@@ -79,6 +84,8 @@ func parseSSHArgs(args []string) (sshArgs, error) {
 				a.options[strings.ToLower(name)] = v
 			case "-i":
 				a.identity = val
+			case "-F":
+				a.configFile = val
 			case "-p":
 				a.port = val
 			case "-L":
@@ -113,6 +120,11 @@ func (a sshArgs) validate() error {
 	}
 	if _, err := os.Stat(a.identity); err != nil {
 		return fmt.Errorf("identity file %q: %v", a.identity, err)
+	}
+	if a.configFile != "" {
+		if _, err := os.Stat(a.configFile); err != nil {
+			return fmt.Errorf("configuration file %q: %v", a.configFile, err)
+		}
 	}
 	if len(a.forwards) != 1 {
 		return fmt.Errorf("want exactly one -L, got %d", len(a.forwards))

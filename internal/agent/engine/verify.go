@@ -25,7 +25,7 @@ func (c *Client) Verify(ctx context.Context) agentapi.VerifyResult {
 	if v, err := c.getVersion(ctx); err != nil {
 		fail("version", err)
 	} else {
-		res.EngineVersion = v
+		res.EngineVersion = cut(v)
 	}
 	if cards, err := c.models(ctx); err != nil {
 		fail("models", err)
@@ -37,14 +37,14 @@ func (c *Client) Verify(ctx context.Context) agentapi.VerifyResult {
 	} else if cfg := m.cacheConfig(); cfg != nil {
 		for label, flag := range cacheSettings {
 			if v, ok := cfg[label]; ok && v != "" && v != "None" {
-				settings[flag] = v
+				settings[flag] = cut(v)
 			}
 		}
 	}
 	if fp, err := c.fingerprint(ctx); err != nil {
 		fail("fingerprint", err)
 	} else {
-		res.Fingerprint = fp
+		res.Fingerprint = cut(fp)
 	}
 	if o, err := c.templateOverhead(ctx); err != nil {
 		fail("template overhead", err)

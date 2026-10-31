@@ -27,6 +27,9 @@ func sshArgsFor(dir, socket string, port int) []string {
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=3",
 		"-o", "ConnectTimeout=20",
+		"-F", "/dev/null",
+		"-o", "ControlMaster=no",
+		"-o", "ControlPath=none",
 		"-i", filepath.Join(dir, "key"),
 		"-p", "22",
 		"-L", socket + ":127.0.0.1:" + itoaPort(port),
@@ -107,6 +110,8 @@ func TestSSHRefusesWhatTheForwardMustCarry(t *testing.T) {
 		"no -L":                        append(append([]string(nil), good[:len(good)-3]...), "hpcburst@control.example"),
 		"an unknown option":            append([]string{"-X"}, good...),
 		"a malformed -L":               replace(good, socket+":127.0.0.1:29290", "justasocket"),
+		"a missing -F file":            replace(good, "/dev/null", filepath.Join(dir, "absent")),
+		"-F without its file":          append(append([]string(nil), good[:len(good)-1]...), "-F"),
 	}
 	for name, args := range cases {
 		if code := sshMainWithin(args, 2*time.Second); code != 255 {
@@ -118,6 +123,44 @@ func TestSSHRefusesWhatTheForwardMustCarry(t *testing.T) {
 	}
 	if lines := strings.Split(strings.TrimSpace(string(mustRead(t, filepath.Join(dir, "sshlog")))), "\n"); len(lines) != len(cases) {
 		t.Errorf("%d log lines, want one per attempt (%d), refused ones included", len(lines), len(cases))
+	}
+}
+
+// The options that keep the user's ssh configuration out of the forward are
+// accepted, and -F is optional until the agent passes it: the log carries the
+// arguments, so a test of the agent asserts them from there.
+func TestSSHAcceptsTheConfigurationIsolation(t *testing.T) {
+	dir := sshFiles(t)
+	socket := sockPath(t, dir, "fwd.sock")
+	good := sshArgsFor(dir, socket, 29290)
+	has := func(args []string, want ...string) bool {
+		for i := range args {
+			if i+len(want) <= len(args) && strings.Join(args[i:i+len(want)], "\x00") == strings.Join(want, "\x00") {
+				return true
+			}
+		}
+		return false
+	}
+	if !has(good, "-F", "/dev/null") || !has(good, "-o", "ControlMaster=no") || !has(good, "-o", "ControlPath=none") {
+		t.Fatalf("the reference arguments lack the isolation options: %q", good)
+	}
+	if code := sshMainWithin(good, time.Second); code != -1 {
+		t.Errorf("with -F /dev/null, ControlMaster=no and ControlPath=none: exit %d, want it to accept and forward (-1)", code)
+	}
+	// an agent that does not pass -F yet is accepted
+	var legacy []string
+	for i := 0; i < len(good); i++ {
+		if good[i] == "-F" {
+			i++ // and its file
+			continue
+		}
+		legacy = append(legacy, good[i])
+	}
+	if has(legacy, "-F") {
+		t.Fatal("the legacy arguments still carry -F")
+	}
+	if code := sshMainWithin(legacy, time.Second); code != -1 {
+		t.Errorf("without -F: exit %d, want it accepted (-1) until the agent passes it", code)
 	}
 }
 

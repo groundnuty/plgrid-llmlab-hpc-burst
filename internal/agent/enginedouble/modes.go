@@ -93,6 +93,10 @@ func applyMode(c *Config, name, val string, hasVal bool) error {
 		n, err := intValue(val, hasVal, 1)
 		c.NeverSettle = n
 		return err
+	case "health-fail-after":
+		d, err := durValue(val, hasVal)
+		c.HealthFailAfter, c.HealthFailAfterSet = d, err == nil
+		return err
 	case "slow-first":
 		d, err := durValue(val, hasVal)
 		c.SlowFirst = d

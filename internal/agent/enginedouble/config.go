@@ -48,22 +48,24 @@ type Config struct {
 	TokenDelay time.Duration
 
 	// The modes of HB_ENGINE_DOUBLE that change a request's answer.
-	GreedyDiverge    bool // the k-th repeat of a greedy request differs from the first from GreedyDivergeAt on
-	GreedyDivergeAt  int
-	GreedyRepeat     bool          // greedy output is one token repeated
-	LoopAbove        int           // a prompt above this many tokens (0: off) gets a 3-token cycle, unless ignore_eos
-	ToolMalformed    bool          // tool-call arguments are invalid JSON
-	ToolArgsNull     bool          // tool-call arguments are the JSON null
-	ToolArgsBadType  bool          // tool-call arguments are {"city": 42}: the wrong type for the weather tool
-	NoToolCall       bool          // answer with text even when tools are given
-	ReportsNothing   bool          // no /version, no max_model_len, no cache_config_info, no system_fingerprint
-	HealthFail       bool          // /health answers 503
-	ErrorsOnly       bool          // chat answers 500
-	SlowFirst        time.Duration // the first request of each shape waits this long before its first token
-	NeverSettle      int           // each request of a shape waits this percent of TokenDelay*tokens longer than the last
-	Stall            bool          // a streamed request stops after its first token and hangs
-	ReasoningFirst   int           // the reply reasons for this many tokens (0: off) before its answer
-	ReasoningForever bool          // the reply reasons until max_tokens runs out, with no answer
+	GreedyDiverge      bool // the k-th repeat of a greedy request differs from the first from GreedyDivergeAt on
+	GreedyDivergeAt    int
+	GreedyRepeat       bool          // greedy output is one token repeated
+	LoopAbove          int           // a prompt above this many tokens (0: off) gets a 3-token cycle, unless ignore_eos
+	ToolMalformed      bool          // tool-call arguments are invalid JSON
+	ToolArgsNull       bool          // tool-call arguments are the JSON null
+	ToolArgsBadType    bool          // tool-call arguments are {"city": 42}: the wrong type for the weather tool
+	NoToolCall         bool          // answer with text even when tools are given
+	ReportsNothing     bool          // no /version, no max_model_len, no cache_config_info, no system_fingerprint
+	HealthFail         bool          // /health answers 503
+	HealthFailAfter    time.Duration // /health answers 200 until this long after the handler was made, then 503, when HealthFailAfterSet
+	HealthFailAfterSet bool
+	ErrorsOnly         bool          // chat answers 500
+	SlowFirst          time.Duration // the first request of each shape waits this long before its first token
+	NeverSettle        int           // each request of a shape waits this percent of TokenDelay*tokens longer than the last
+	Stall              bool          // a streamed request stops after its first token and hangs
+	ReasoningFirst     int           // the reply reasons for this many tokens (0: off) before its answer
+	ReasoningForever   bool          // the reply reasons until max_tokens runs out, with no answer
 
 	// Startup modes, read by Main only.
 	StartDelay   time.Duration // create the socket only after this
@@ -127,7 +129,7 @@ func (c Config) Validate() error {
 		return fmt.Errorf("TemplateOverhead %d is below 2: one empty message alone is 2 tokens", c.TemplateOverhead)
 	case c.NaturalLen < 1:
 		return fmt.Errorf("NaturalLen %d is below 1", c.NaturalLen)
-	case c.TokenDelay < 0 || c.SlowFirst < 0 || c.StartDelay < 0:
+	case c.TokenDelay < 0 || c.SlowFirst < 0 || c.StartDelay < 0 || c.HealthFailAfter < 0:
 		return fmt.Errorf("a duration is negative")
 	case c.NeverSettle < 0 || c.LoopAbove < 0 || c.GreedyDivergeAt < 0 || c.ReasoningFirst < 0:
 		return fmt.Errorf("a mode value is negative")

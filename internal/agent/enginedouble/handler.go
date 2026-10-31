@@ -8,12 +8,14 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // handler is the double's HTTP surface.
 type handler struct {
-	e   *engine
-	cfg Config
+	e       *engine
+	cfg     Config
+	started time.Time // when the handler was made: the clock of health-fail-after
 }
 
 // Handler returns the vLLM v0.32.0 HTTP subset the agent reads. It panics on a
@@ -26,7 +28,7 @@ func newHandler(cfg Config, record func(LogEvent)) http.Handler {
 	if err := cfg.Validate(); err != nil {
 		panic("enginedouble: " + err.Error())
 	}
-	return &handler{e: newEngine(cfg, record), cfg: cfg}
+	return &handler{e: newEngine(cfg, record), cfg: cfg, started: time.Now()}
 }
 
 // guardedPrefixes are the paths that need the API key
@@ -114,9 +116,10 @@ func (h *handler) unauthorized(r *http.Request) bool {
 }
 
 // health is vllm/entrypoints/serve/instrumentator/health.py: 200 with an empty
-// body, or 503 when the engine is dead.
+// body, or 503 when the engine is dead. With health-fail-after=<dur> the engine
+// is healthy until that long after the handler was made, then dead for good.
 func (h *handler) health(w http.ResponseWriter) {
-	if h.cfg.HealthFail {
+	if h.cfg.HealthFail || (h.cfg.HealthFailAfterSet && time.Since(h.started) >= h.cfg.HealthFailAfter) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}

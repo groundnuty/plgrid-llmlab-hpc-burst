@@ -43,14 +43,14 @@ func (c *Client) Qualify(ctx context.Context, req agentapi.QualifyRequest) agent
 	add(agentapi.CheckHealth, "", c.Probe(ctx))
 	if cards, err := c.models(ctx); err == nil {
 		for _, m := range cards {
-			res.ServedModelNames = append(res.ServedModelNames, m.ID)
+			res.ServedModelNames = append(res.ServedModelNames, cut(m.ID))
 		}
 	}
 	if m, err := c.metrics(ctx); err == nil {
 		res.KVCapacityTokens = kvCapacity(m.cacheConfig())
 	}
 	fp, err := c.chatCheck(ctx)
-	res.Fingerprint = fp
+	res.Fingerprint = cut(fp)
 	add(agentapi.CheckChat, "", err)
 	if req.ToolCalls {
 		add(agentapi.CheckToolCall, "", c.toolCallCheck(ctx))

@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // longRequest asks for n tokens exactly (min_tokens = max_tokens, with
@@ -278,6 +279,34 @@ func TestReportMaxModelLenContradictsTheFlag(t *testing.T) {
 	// but the enforced limit is the real one: 59 + 5000 fits 8192 and not 4096
 	if r := s.post("/v1/chat/completions", chatBody(50, map[string]any{"max_tokens": 5000})); r.status != 200 {
 		t.Errorf("a request within MaxModelLen: HTTP %d: %s", r.status, r.body)
+	}
+}
+
+// health-fail-after=<dur>: /health answers 200 until the delay has passed since
+// the handler was made, then 503 for good. The bounds are loose, since a loaded
+// machine only adds time.
+func TestHealthFailAfter(t *testing.T) {
+	cfg := cfgFor()
+	cfg.HealthFailAfter, cfg.HealthFailAfterSet = 400*time.Millisecond, true
+	s := serve(t, cfg)
+	if r := s.get("/health"); r.status != 200 {
+		t.Fatalf("/health at the start: HTTP %d, want 200", r.status)
+	}
+	start := time.Now()
+	eventually(t, 5*time.Second, "/health turns 503", func() bool { return s.get("/health").status == 503 })
+	if waited := time.Since(start); waited < 150*time.Millisecond {
+		t.Errorf("/health turned 503 after only %v more, the delay is 400 ms from the start", waited)
+	}
+	for i := 0; i < 3; i++ {
+		if r := s.get("/health"); r.status != 503 || len(r.body) != 0 {
+			t.Errorf("/health after the delay: HTTP %d %q, want 503 and an empty body, for good", r.status, r.body)
+		}
+	}
+	// a zero delay is dead at once
+	zero := cfgFor()
+	zero.HealthFailAfterSet = true
+	if r := serve(t, zero).get("/health"); r.status != 503 {
+		t.Errorf("health-fail-after=0s: HTTP %d, want 503", r.status)
 	}
 }
 

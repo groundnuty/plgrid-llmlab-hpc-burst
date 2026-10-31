@@ -64,7 +64,7 @@
 // HB_ENGINE_DOUBLE, for example "kv-low,slow-first=200ms". The modes are kv-low,
 // greedy-diverge=<n>, greedy-repeat, early-stop=<n>, loop-above=<tokens>,
 // tool-malformed, tool-args-null, tool-args-badtype, no-tool-call,
-// reports-nothing, report-max-model-len=<n>, health-fail,
+// reports-nothing, report-max-model-len=<n>, health-fail, health-fail-after=<dur>,
 // errors-only, slow-first=<dur>, never-settle=<pct>, stall, token-delay=<dur>,
 // reasoning-first=<n> and reasoning-forever;
 // the startup modes, used by Main only, are start-delay=<dur>,
