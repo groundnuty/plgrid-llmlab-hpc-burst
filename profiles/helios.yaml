@@ -1,0 +1,445 @@
+# PlatformProfile for Helios (Cyfronet, Slurm), alpha (HBEP-4, open questions 3, 7 and 8).
+#
+# It covers the alpha partitions: plgrid (CPU) and plgrid-gpu-gh200. Sano is not here.
+#
+# Where each value comes from (HBEP-4, open question 7). Every typed value has a
+# comment that names one of three sources:
+#   - a fact in this file's untyped block (spec.profile), as a path from spec.profile.
+#     The same path, without "spec.profile.", leads to the fact in profiles/helios.draft.yaml
+#     (spike S5; spike S1 added the facts of the hold check and of the compute nodes). A
+#     partition is written partitions[name=<p>], since the draft lists partitions.
+#   - "derived": a division of such facts, with the numbers shown.
+#   - "framework default (HBEP-n, section)": no fact exists; the value is the design's.
+# Slurm's "MB" is 2^20 bytes (the Slurm provider sends --mem=<MiB>M), so memory is in Mi.
+#
+# Content rules (HBEP-4, open question 8): no host name, address, user name, account,
+# grant or job ID is in this file; accounts and grants are Provider settings.
+apiVersion: hpcburst.groundnuty.github.io/v1alpha1
+kind: PlatformProfile
+metadata:
+  name: helios
+spec:
+  providerKind: batch # spec.profile.kind
+
+  partitions:
+    - name: plgrid # spec.profile.facts.partitions[name=plgrid].name
+      gpuModel: none # HBEP-4 writes "none" for a CPU partition; facts.partitions[name=plgrid].gres is "(none)"
+      cpuArch: x86_64 # facts.partitions[name=plgrid].arch
+      maxTime: 72h # facts.partitions[name=plgrid].max_time, "3-00:00:00"
+      gpusPerNode: 0 # facts.partitions[name=plgrid].gres, "(none)"
+      # Absent here: cpusPerGpu and memPerGpu (the partition has no GPU), and imageFormat.
+      # imageFormat is not measured on this partition: S1's probe 2 ran on plgrid-gpu-gh200 only
+      # (facts.containers.apptainer_compute_nodes holds that one partition). Absent means the
+      # agent is sent sif (v1alpha1.ImageFormatOf). Until Apptainer is measured on these nodes,
+      # the partition hosts no Instance (HBEP-4, open question 15).
+    - name: plgrid-gpu-gh200 # spec.profile.facts.partitions[name=plgrid-gpu-gh200].name
+      gpuModel: GH200 # HBEP-4 fixes the string. The GRES has no type, so the model is from the centre's documentation, cited in facts.partitions[name=plgrid-gpu-gh200].note ("4x GH200 96 GB")
+      cpuArch: aarch64 # facts.partitions[name=plgrid-gpu-gh200].arch
+      maxTime: 48h # facts.partitions[name=plgrid-gpu-gh200].max_time, "2-00:00:00"
+      gpusPerNode: 4 # facts.partitions[name=plgrid-gpu-gh200].gres, "gpu:4 per node"
+      cpusPerGpu: 72 # derived: facts.partitions[name=plgrid-gpu-gh200].cpus_per_node, 288, divided by the 4 GPUs of the GRES
+      # Derived: facts.partitions[name=plgrid-gpu-gh200].max_mem_per_node_mb, 489500, divided by the 4 GPUs.
+      # The centre documents a billing share of 120 GB per GPU (facts.other.billing) without saying
+      # which GB; if it is decimal, a one-GPU request of this memory may be billed as more than one GPU.
+      memPerGpu: 122375Mi
+      imageFormat: sif # facts.containers.apptainer_compute_nodes.value.plgrid-gpu-gh200 (S1 probe 2: a SIF runs); also facts.partitions[name=plgrid-gpu-gh200].image_format
+
+  holdRelease: true # facts.slurm.hold_release.value: user_release_ok true on plgrid and plgrid-gpu-gh200 (S1's hold check)
+  lostGrace: 2m # framework default (HBEP-4, Platform profile schema, lostGrace): above the measured gap of about 2 s between queue and accounting (S7's capture)
+  inflightWindow: 5m # framework default (HBEP-4, Platform profile schema, inflightWindow): 5 min until the sbatch latency over ssh is measured (HBEP-4, Graduation criteria)
+  unknownBound: 10m # framework default (HBEP-4, Platform profile schema, unknownBound): S4's default
+  timeZone: Europe/Warsaw # facts.time.slurm_time_zone.value.iana
+  requeueDefault: true # facts.slurm.job_requeue, 1
+  minJobAge: 10s # facts.slurm.min_job_age_s, 10
+  jsonDataParser: v0.0.42 # facts.slurm.squeue_json.note: meta.plugin.data_parser is data_parser/v0.0.42 (HBEP-4, The Slurm dialect), without the prefix
+  stagingDir: $SCRATCH # facts.storage.scratch: a Lustre file system, reached through $SCRATCH (HBEP-4, Transport)
+  # Not set, because no fact states it (HBEP-4, Platform profile schema: an unstated fact is absent, not false):
+  #   jobName (maxLength, pattern): no draft records a job-name maximum or a pattern. The 56-character
+  #     round trip is a graduation criterion of the alpha, measured on each alpha partition; the value
+  #     is set when it is (HBEP-4, Graduation criteria).
+  #   jobCommentAccounted: not in the drafts (HBEP-4, Platform profile schema).
+  #   maxIdle: unset outside Athena (HBEP-4, Platform profile schema).
+
+  drainWindow: 2h10m # framework default (HBEP-4, Platform profile schema, drainWindow; HBEP-5, Draining): the front's 2 h maxRequestDuration plus drainMargin
+  drainMargin: 10m # framework default (HBEP-4, Platform profile schema, drainMargin; HBEP-5, Draining)
+  handoverMargin: 30m # framework default (HBEP-4, Platform profile schema, handoverMargin; HBEP-7, submission plan)
+
+  # framework default (HBEP-4, Platform profile schema, health; HBEP-7), tuned in beta
+  health:
+    probeInterval: 10s
+    failureThreshold: 3
+    noProgressTimeout: 30m # equal to HBEP-5's idleTimeout (HBEP-7, open question 6)
+    errorOnlyWindow: 1m
+    kvSkewTimeout: 2m
+    agentTimeout: 2m
+    registrationTimeout: 15m
+    startTimeout: 1h
+  # framework default (HBEP-4, Platform profile schema, restart; HBEP-7), tuned in beta
+  restart:
+    stopGrace: 10s
+    attemptsPerRung: 2
+    window: 30m
+    backoff: 30s
+
+  # The untyped block (HBEP-4, open question 3): the draft's root keys, facts and unknown, with the
+  # envelope of each fact (value, method, source, date) and the facts of spike S1 added.
+  # Nothing in alpha reads it.
+  profile:
+    draft: s5
+    platform: helios
+    organization: cyfronet
+    kind: batch
+    collected: "2026-10-30"         # UTC date
+    facts:
+      slurm:
+        version: {value: "24.11.5", method: measured, source: "sinfo --version", date: "2026-10-30", note: "scontrol show config SLURM_VERSION and the slurmd version of every reporting node agree"}
+        squeue_json:
+          value: true
+          method: measured
+          source: "squeue --me --json"
+          date: "2026-10-30"
+          note: "exit 0 and the output parses as JSON. Top-level keys: jobs, last_backfill, last_update, meta, errors, warnings. meta.plugin.data_parser is data_parser/v0.0.42, accounting_storage is accounting_storage/slurmdbd."
+        sacct_json:
+          value: true
+          method: measured
+          source: "sacct --json -S now-1hours -X -u <self>"
+          date: "2026-10-30"
+          note: "exit 0 and the output parses as JSON. Top-level keys: jobs, meta, errors, warnings. Same data_parser as squeue. The brief's command was run with -u <self> added, to stay on the probing user's own jobs."
+        jwt_token_command:
+          value: false
+          method: measured
+          source: "scontrol token lifespan=60 >/dev/null 2>&1; echo $?  (exit code only; the token was discarded)"
+          date: "2026-10-30"
+          note: "exit code 1: a plain user cannot mint a JWT"
+        auth_type: {value: "auth/munge", method: measured, source: "scontrol show config: AuthType", date: "2026-10-30"}
+        auth_alt_types: {value: null, method: measured, source: "scontrol show config: AuthAltTypes", date: "2026-10-30", note: "scontrol prints (null). The auth_jwt client plugin file is installed, but no alternative auth type is enabled."}
+        auth_alt_parameters: {value: null, method: measured, source: "scontrol show config: AuthAltParameters", date: "2026-10-30", note: "scontrol prints (null)"}
+        slurmrestd_binary:
+          value: true
+          method: measured
+          source: "command -v slurmrestd"
+          date: "2026-10-30"
+          note: "exit 0. The binary is part of the Slurm client installation on the login node. This says nothing about a running service."
+        slurmrestd_service: {value: "not advertised; availability unknown", method: unknown, source: "docs.hpc.cyfronet.pl search index (249 pages) searched for slurmrestd, rest api, jwt, openapi", date: "2026-10-30", note: "no hit in the documentation pages. Not advertised there. That is not proof that no endpoint exists. JWT is not enabled, but slurmrestd can also run with local (unix-socket) auth, so whether a plain user can reach any REST endpoint is unverified."}
+        min_job_age_s: {value: 10, method: measured, source: "scontrol show config: MinJobAge", date: "2026-10-30", note: "MinJobAge is the minimum age before a completed job's record is purged from the controller, so a completed job can disappear from squeue within about 10 s. Poll sacct for final states."}
+        job_requeue: {value: 1, method: measured, source: "scontrol show config: JobRequeue", date: "2026-10-30", note: "jobs are requeueable by default. Submit with --no-requeue to prevent it."}
+        requeue_exit: {value: null, method: measured, source: "scontrol show config: RequeueExit", date: "2026-10-30", note: "scontrol prints (null)"}
+        requeue_exit_hold: {value: null, method: measured, source: "scontrol show config: RequeueExitHold", date: "2026-10-30", note: "scontrol prints (null)"}
+        hold_release:
+          method: measured
+          date: "2026-10-30"
+          source: "issue #18 (S1's hold check), commit 35babef on branch spike/s1-frp-dial-home. Per partition, one job as a plain user with the grant account of that job kind: sbatch --hold --no-requeue --parsable --time=00:02:00 --cpus-per-task=1 --mem=1G --job-name=hb-holdcheck-<label> --partition=<p> --account=<account> [--gres=gpu:1] --wrap='sleep 30'; squeue -j <id> -h -o '%T|%r' at once; scontrol release <id>; squeue again after 2 s; scancel <id>; sacct -j <id> -X -n -P -o State -S now-1hours. The --gres=gpu:1 option was used on plgrid-gpu-gh200 only."
+          value:
+            plgrid: {hold_honoured: true, state_reason_after_submit: "PENDING|JobHeldUser", user_release_ok: true, release_exit: 0, state_reason_after_release: "PENDING|Priority", final_state: "CANCELLED"}
+            plgrid-gpu-gh200: {hold_honoured: true, state_reason_after_submit: "PENDING|JobHeldUser", user_release_ok: true, release_exit: 0, state_reason_after_release: "PENDING|Priority", final_state: "CANCELLED"}
+          note: "On both partitions a plain user's sbatch --hold was honoured (reason JobHeldUser, not JobHeldAdmin) and the same user released it with scontrol release (exit 0, no message). Two seconds later the job was PENDING with reason Priority, so the release took effect and the job queued normally; it was cancelled at once and never ran. One job per partition, one trial each. Not tested: other job shapes (arrays, --begin), how long a held job may stay held before the site purges it, and the other partitions."
+        limits:
+          max_job_count: {value: 500000, method: measured, source: "scontrol show config: MaxJobCount", date: "2026-10-30"}
+          max_array_size: {value: 10001, method: measured, source: "scontrol show config: MaxArraySize", date: "2026-10-30"}
+          kill_wait_s: {value: 180, method: measured, source: "scontrol show config: KillWait", date: "2026-10-30"}
+          over_time_limit_min: {value: 0, method: measured, source: "scontrol show config: OverTimeLimit", date: "2026-10-30"}
+          unkillable_step_timeout_s: {value: 1800, method: measured, source: "scontrol show config: UnkillableStepTimeout", date: "2026-10-30"}
+          max_step_count: {value: 40000, method: measured, source: "scontrol show config: MaxStepCount", date: "2026-10-30"}
+          max_tasks_per_node: {value: 512, method: measured, source: "scontrol show config: MaxTasksPerNode", date: "2026-10-30"}
+          enforce_part_limits: {value: "ANY", method: measured, source: "scontrol show config: EnforcePartLimits", date: "2026-10-30"}
+          scheduler_parameters: {value: "bf_continue,bf_max_job_test=10000,bf_window=4320,default_queue_depth=10000,bf_interval=60,bf_min_age_reserve=300,sched_min_interval=2,pack_serial_at_end", method: measured, source: "scontrol show config: SchedulerParameters", date: "2026-10-30"}
+          other_config: {value: "SchedulerType=sched/backfill; SelectType=select/cons_tres; SelectTypeParameters=CR_CPU_MEMORY; TaskPlugin=task/cgroup,task/affinity; ProctrackType=proctrack/cgroup; PrologFlags=Alloc,DeferBatch,NoHold; JobSubmitPlugins=lua; AccountingStorageEnforce=associations,limits,qos; GresTypes=gpu; MpiDefault=cray_shasta; TmpFS=/tmp; PreemptMode=OFF", method: measured, source: "scontrol show config", date: "2026-10-30"}
+        qos:
+          method: measured
+          source: "sacctmgr -nP show qos format=Name,MaxWall,Priority,UsageFactor,MaxJobsPU,MaxSubmitPU"
+          date: "2026-10-30"
+          note: "This lists every QOS on the cluster. Which of them a given user may use is not shown. The QOS of the six public partitions comes from scontrol show partition. Not listed here: grid-* (experiment-specific, priority 0, no limits), 8k3* (priority 0, no limits), ignore-part-qos. UsageFactor is 1.0 for every QOS."
+          value:
+            - {name: plgrid, max_wall: null, priority: 0, max_jobs_per_user: 1000, max_submit_per_user: 2000}
+            - {name: plgrid-now, max_wall: null, priority: 0, max_jobs_per_user: null, max_submit_per_user: 1}
+            - {name: now, max_wall: "12:00:00", priority: 20000, max_jobs_per_user: null, max_submit_per_user: 1}
+            - {name: llm, max_wall: "7-00:00:00", priority: 10000, max_jobs_per_user: null, max_submit_per_user: null}
+            - {name: week, max_wall: "7-00:00:00", priority: 0, max_jobs_per_user: null, max_submit_per_user: null}
+            - {name: 2weeks, max_wall: "14-00:00:00", priority: 0, max_jobs_per_user: null, max_submit_per_user: null}
+            - {name: 4weeks, max_wall: "28-00:00:00", priority: 0, max_jobs_per_user: null, max_submit_per_user: null}
+            - {name: normal, max_wall: null, priority: 0, max_jobs_per_user: null, max_submit_per_user: null}
+            - {name: vip, max_wall: null, priority: 20000, max_jobs_per_user: null, max_submit_per_user: null}
+            - {name: ip, max_wall: null, priority: 10000, max_jobs_per_user: null, max_submit_per_user: null}
+            - {name: lip, max_wall: null, priority: 5000, max_jobs_per_user: null, max_submit_per_user: null}
+            - {name: llip, max_wall: null, priority: 2500, max_jobs_per_user: null, max_submit_per_user: null}
+            - {name: plgrid-services, max_wall: null, priority: 0, max_jobs_per_user: 2, max_submit_per_user: null}
+        sbatch_test_only:
+          method: measured
+          date: "2026-10-30"
+          source: "sbatch --test-only --wrap=true --time=00:01:00 --job-name=s5probe --ntasks=1 --mem=1G --partition=<p> (no --account, no --qos); the GPU run added --gres=gpu:1"
+          note: "Run without --account and --qos, so Slurm used the probing user's default account. CPU partition plgrid: exit 0, a start estimate came back, no job was created. GPU partition plgrid-gpu-gh200: exit 1, 'allocation failure: Invalid account or account/partition combination specified'. The documented account naming rule (a resource suffix such as -gpu-gh200, https://docs.hpc.cyfronet.pl/environment/batch-system/accounts-and-grants/) is a likely reason, but no account was tried after the failure, so the cause was not isolated. Both results depend on the probing user's default account and grants."
+          value: {plgrid: {exit: 0, outcome: "start estimate returned"}, plgrid-gpu-gh200: {exit: 1, outcome: "Invalid account or account/partition combination specified (with the probing user's default account)"}}
+      partitions:
+        # The six partitions below are the ones the documentation or the QOS list
+        # points users at. Time limits, node counts and hardware are per partition.
+        - name: plgrid
+          default: true
+          max_time: "3-00:00:00"
+          default_time: "00:15:00"
+          nodes: 512
+          cpus_per_node: "192"
+          mem_per_node_mb: "386084 on 272 nodes, 773156 on 240 nodes"
+          max_mem_per_node_mb: 384000
+          def_mem_per_cpu_mb: 1536
+          gres: "(none)"
+          arch: "x86_64"
+          features: "memfs,localfs"
+          qos: plgrid
+          priority_job_factor: 1000
+          tres_billing_weights: "cpu=1,mem=0.0005M"
+          os_kernel: "el9 kernel (Rocky 9) on 472 of 512 nodes; EL8 kernel (4.18) on 35 nodes; 5 nodes did not report an architecture or kernel"
+          method: measured
+          source: "sinfo -h -o '%P|%l|%L|%D|%c|%m|%G|%f'; scontrol show partition; scontrol show node (aggregated)"
+          date: "2026-10-30"
+          note: "The documentation lists plgrid with 272 nodes and 72 h (https://docs.hpc.cyfronet.pl/supercomputers/helios/). Measured: the partition holds 512 nodes, the 272 standard nodes plus the 240 bigmem nodes, but MaxMemPerNode is 384000, so the bigmem nodes add no memory here. The 72 h limit matches."
+        - name: plgrid-now
+          default: false
+          max_time: "12:00:00"
+          default_time: "00:15:00"
+          nodes: 512
+          cpus_per_node: "192"
+          mem_per_node_mb: "386084 on 272 nodes, 773156 on 240 nodes"
+          max_mem_per_node_mb: 384000
+          def_mem_per_cpu_mb: 1536
+          gres: "(none)"
+          arch: "x86_64"
+          features: "memfs,localfs"
+          qos: plgrid-now
+          priority_job_factor: 15000
+          method: measured
+          source: "sinfo; scontrol show partition; sacctmgr show qos (plgrid-now allows 1 submitted job per user)"
+          date: "2026-10-30"
+          note: "Not in the Helios documentation page that was read. Short jobs, high priority factor, one submitted job per user at a time."
+        - name: plgrid-long
+          default: false
+          max_time: "7-00:00:00"
+          default_time: "00:15:00"
+          nodes: 272
+          cpus_per_node: "192"
+          mem_per_node_mb: "386084"
+          max_mem_per_node_mb: 384000
+          def_mem_per_cpu_mb: 1536
+          gres: "(none)"
+          arch: "x86_64"
+          features: "memfs,localfs"
+          qos: plgrid
+          priority_job_factor: 500
+          method: measured
+          source: "sinfo; scontrol show partition; scontrol show node (aggregated)"
+          date: "2026-10-30"
+          note: "The documentation says 166 h and 'requires a grant with a maximum job runtime of 168 h'. Measured MaxTime is 7-00:00:00, which is 168 h. Access is restricted by the partition's AllowAccounts list of grant accounts, which is how the 168 h grant requirement is enforced; the list is not recorded here."
+        - name: plgrid-bigmem
+          default: false
+          max_time: "3-00:00:00"
+          default_time: "00:15:00"
+          nodes: 240
+          cpus_per_node: "192"
+          mem_per_node_mb: "773156"
+          max_mem_per_node_mb: 768000
+          def_mem_per_cpu_mb: 3072
+          gres: "(none)"
+          arch: "x86_64"
+          features: "memfs,localfs"
+          qos: plgrid
+          priority_job_factor: 5000
+          tres_billing_weights: "cpu=1,mem=0.00025M"
+          os_kernel: "el9 kernel (Rocky 9) on 204 nodes; EL8 kernel (4.18) on 35 nodes; 1 node did not report"
+          method: measured
+          source: "sinfo; scontrol show partition; scontrol show node (aggregated)"
+          date: "2026-10-30"
+          note: "The documentation lists RAM available for job allocations as 773170 MB; measured RealMemory is 773156 MB and MaxMemPerNode 768000."
+        - name: plgrid-gpu-gh200
+          default: false
+          max_time: "2-00:00:00"
+          default_time: "00:15:00"
+          nodes: 110
+          cpus_per_node: "288 (4 sockets of 72 Grace cores, 1 thread per core)"
+          mem_per_node_mb: "489500"
+          max_mem_per_node_mb: 489500
+          def_mem_per_cpu_mb: 1536
+          gres: "gpu:4 per node (GRES name 'gpu', no GPU type in the name; sinfo prints gpu:4(S:0-3)); request with --gres=gpu:N"
+          arch: "aarch64"
+          features: "memfs,localfs"
+          qos: plgrid
+          priority_job_factor: 1000
+          tres_billing_weights: "cpu=0.01388,mem=0.00000816993M,GRES/gpu=1"
+          os_kernel: "Rocky 9 kernel, the 64 KiB-page variant (kernel string ends +64k), on all 109 nodes that reported; 1 node did not report"
+          image_format: sif
+          image_format_note: "Measured by spike S1 probe 2 (issue #18) on 2026-10-30: Apptainer 1.5.4 on the compute nodes runs a SIF image. The PlatformProfile field is partitions[].imageFormat."
+          method: measured
+          source: "sinfo; scontrol show partition; scontrol show node (aggregated)"
+          date: "2026-10-30"
+          note: "Matches the documentation (110 nodes, 48 h, aarch64, 4x GH200 96 GB; https://docs.hpc.cyfronet.pl/supercomputers/helios/). The documented RAM available for jobs is 489600 MB; measured 489500 MB. Slurm output does not name the GPU model; that comes from the documentation. Account suffix -gpu-gh200 (documented)."
+        - name: plgrid-gpu-rtx
+          default: false
+          max_time: "2-00:00:00"
+          default_time: "00:15:00"
+          nodes: 11
+          cpus_per_node: "128 (2 sockets of 64 cores)"
+          mem_per_node_mb: "1536000"
+          max_mem_per_node_mb: 1536000
+          def_mem_per_cpu_mb: 9000
+          gres: "gpu:8 per node (GRES name 'gpu', no type)"
+          arch: "x86_64"
+          features: "memfs,localfs"
+          qos: plgrid
+          priority_job_factor: 1000
+          tres_billing_weights: "cpu=0.0625,mem=0.000005083M,GRES/gpu=1"
+          os_kernel: "el9 kernel (Rocky 9) on 6 nodes; EL8 kernel (4.18) on 1 node; 4 nodes did not report"
+          method: measured
+          source: "sinfo; scontrol show partition; scontrol show node (aggregated)"
+          date: "2026-10-30"
+          note: "Not in the Helios documentation page that was read. The GPU model is not shown by any command run; the partition name suggests an RTX card, which is an inference."
+        # TmpDisk per partition: see facts.storage.node_local.
+        # CPU architecture per partition: aarch64 on plgrid-gpu-gh200, x86_64 on every
+        # other partition (nodes that did not report an architecture are down or unreachable).
+      containers:
+        apptainer:
+          value: "1.5.4"
+          method: measured
+          source: "command -v apptainer; apptainer --version; rpm -q apptainer apptainer-suid"
+          date: "2026-10-30"
+          note: "On the login node only: /usr/bin binary, RPM build for EL8 x86_64, setuid helper package installed. The compute nodes run an el9 kernel (GH200 nodes are aarch64), so the version there may differ. Measured later: see containers.apptainer_compute_nodes (1.5.4 on el9 aarch64 on plgrid-gpu-gh200)."
+        singularity_command: {value: "alias of apptainer (same version string)", method: measured, source: "command -v singularity; singularity --version", date: "2026-10-30", note: "the singularity-ce and singularity RPMs are not installed"}
+        enroot: {value: false, method: measured, source: "command -v enroot", date: "2026-10-30", note: "login node only"}
+        pyxis: {value: false, method: measured, source: "srun --help | grep -i container; scontrol show config: PlugStackConfig", date: "2026-10-30", note: "srun lists only --container (path to an OCI bundle) and --container-id. No pyxis options such as --container-image. PlugStackConfig is (null) and no plugstack.conf exists, so no SPANK plugins are configured. JobContainerType is (null)."}
+        other_runtimes: {value: "none found: podman, docker, charliecloud, udocker, sarus, shifter", method: measured, source: "command -v <each>", date: "2026-10-30"}
+        apptainer_module: {value: false, method: measured, source: "find over the 6 MODULEPATH entries (depth 3) for names matching apptainer, singularity or enroot", date: "2026-10-30", note: "no hit, so Apptainer comes from the host install on the login node, not from a module. The module trees are for the login node's architecture."}
+        documentation: {value: "no container page for Helios", method: unknown, source: "docs.hpc.cyfronet.pl search index (249 pages) searched for apptainer, singularity, docker, podman, enroot, pyxis, container", date: "2026-10-30", note: "the only hit is one application's page, which says the application runs containerized"}
+        user_namespaces_login_node:
+          value: false
+          method: measured
+          source: "cat /proc/sys/user/max_user_namespaces; unshare -U true; unshare -Ur true"
+          date: "2026-10-30"
+          note: "max_user_namespaces is 0. Both unshare calls fail with 'No space left on device', which is how the kernel reports a zero limit. /etc/subuid and /etc/subgid have no entry for the probing user; newuidmap and newgidmap exist. With the setuid Apptainer install a container may still run without user namespaces; S5 did not test that. S1 probe 2 did on a GH200 compute node (same zero limit): see containers.apptainer_compute_nodes."
+        apptainer_compute_nodes:
+          value:
+            plgrid-gpu-gh200:
+              present: true
+              version: "1.5.4"
+              path: /usr/bin/apptainer
+              install: "setuid (apptainer-suid RPM; starter-suid mode 4755, owner root)"
+              exec_works: true
+              arch: aarch64
+          method: measured
+          source: "issue #18, comment 6542078107 (S1 probe 2). S1 probe 2, one job on plgrid-gpu-gh200 (QOS now): command -v apptainer singularity; apptainer --version; rpm -q apptainer apptainer-suid; apptainer buildcfg | grep -i suid; apptainer exec docker://busybox:1.36 true (exit 0), then busybox --help (exit 0, applet list printed) and uname -m inside the container (aarch64)"
+          date: "2026-10-30"
+          note: "The compute node runs el9 on aarch64: apptainer-1.5.4-1.el9.aarch64 and apptainer-suid, the same upstream version as the login node (1.5.4, EL8 x86_64). /usr/bin/singularity is also on PATH. Apptainer is not an Lmod module: module avail apptainer lists nothing and module spider apptainer and singularity both report 'Unable to find' (login shell). The anonymous Docker Hub pull worked (about 4 s for busybox, converted to a SIF in the cache under $SCRATCH; the matching aarch64 image was chosen). The container ran in setuid mode: the uid_map inside is the identity map and apptainer exec --userns is refused. Apptainer warns that $SCRATCH is mounted nodev and that xattrs are not supported on it; neither stopped the run. One job, one node. Only plgrid-gpu-gh200 was probed: Apptainer on the other Helios partitions is not measured."
+        user_namespaces_compute_nodes:
+          value: {plgrid-gpu-gh200: false}
+          method: measured
+          source: "issue #18, comment 6542078107 (S1 probe 2). S1 probe 2 job on plgrid-gpu-gh200: cat /proc/sys/user/max_user_namespaces; unshare -U true; unshare -Ur true; apptainer exec --userns"
+          date: "2026-10-30"
+          note: "max_user_namespaces is 0, as on the login node. Both unshare calls fail with 'No space left on device' (the kernel's report of a zero limit) and apptainer exec --userns fails with 'maximum number of user namespaces exceeded'. Containers therefore depend on the setuid Apptainer install."
+      storage:
+        home: {value: {filesystem: nfs, quota_gib: 10, file_quota: 100000}, method: measured, source: "stat -f -c %T $HOME; hpc-fs", date: "2026-10-30", note: "quota values are the probing user's. Documented limit is 10 GB ($HOME, https://docs.hpc.cyfronet.pl/environment/variables/), which agrees."}
+        home_readable_from_compute_nodes:
+          value:
+            plgrid-gpu-gh200: {readable: true, filesystem: nfs, mode: "700", owner_is_job_user: true, entry_count_matches_login_node: true, ssh_dir_exists: true, ssh_dir_enterable_and_listable: true, ssh_key_file_read_tested: false}
+          method: measured
+          source: "issue #18, comment 6542078107 (S1 probe 2). S1 probe 2 job on plgrid-gpu-gh200: test -r ~ && ls ~ >/dev/null (exit 0); stat -c %a ~; stat -f -c %T ~ and df -PT ~ (filesystem type only); ls -A ~ | wc -l on the node and on the login node (18 and 18); test -d ~/.ssh, test -r and -x ~/.ssh, ls ~/.ssh >/dev/null (exit codes only; contents not listed)"
+          date: "2026-10-30"
+          note: "The job's user can read and list its own home on the compute node. The home is NFS (nfs4 in df), as on the login node, and its top-level entry count equals the login node's, which is consistent with the same home (a match of counts is not proof). ~/.ssh exists and the directory can be entered and listed. Whether a specific key file in it can be read was not tested, so this does not by itself show that ssh dial-home mode can use a key stored there. Read only: nothing was written to the home. One job, one node, one partition."
+        scratch:
+          value: {filesystem: lustre, quota_tib: 12, file_quota: 1000000}
+          method: measured
+          source: "stat -f -c %T $SCRATCH; hpc-fs"
+          date: "2026-10-30"
+          note: "quota values are the probing user's and may differ for others. The file-count quota is easy to hit with many small files."
+        scratch_purge: {value: "files older than 30 days and job directories older than 7 days are deleted automatically", method: documented, source: ["https://docs.hpc.cyfronet.pl/supercomputers/helios/", "https://docs.hpc.cyfronet.pl/environment/variables/"], date: "2026-10-30", note: "this affects model weights kept on $SCRATCH; the documentation points long-lived data to $PLG_GROUPS_STORAGE"}
+        group_storage: {value: {filesystem: lustre, quota: "per team; varies (values seen are those of the probing user's own teams)"}, method: measured, source: "stat -f -c %T $PLG_GROUPS_STORAGE; hpc-fs", date: "2026-10-30", note: "documented as long-term storage for the period of the grant (https://docs.hpc.cyfronet.pl/environment/variables/)"}
+        tmp_on_login_node: {value: {filesystem: xfs}, method: measured, source: "stat -f -c %T /tmp", date: "2026-10-30"}
+        tmp_rule: {value: "computations should not use /tmp; use $SCRATCH or $TMPDIR", method: documented, source: "https://docs.hpc.cyfronet.pl/environment/general-rules/", date: "2026-10-30"}
+        node_local:
+          tmpdisk_mb: {value: 0, method: measured, source: "sinfo -h -o '%P|%d' (every partition)", date: "2026-10-30", note: "Slurm does not account for local disk. The size of any node-local disk is not shown by Slurm."}
+          node_features: {value: [memfs, localfs], method: measured, source: "sinfo -h -o '%P|%f' (every node of every partition)", date: "2026-10-30"}
+          memfs: {value: "RAM disk for the job: request with -C memfs; path in $MEMFS; counts against --mem; single-node jobs only", method: documented, source: "https://docs.hpc.cyfronet.pl/environment/local-storage-features/", date: "2026-10-30"}
+          localfs: {value: "per-node scratch volume: request with -C localfs at submission; path in $SCRATCH_LOCAL; separate per node; lost when the job ends", method: documented, source: "https://docs.hpc.cyfronet.pl/environment/local-storage-features/", date: "2026-10-30", note: "the page says 'not available on Ares'. Size per node is not stated."}
+          job_variables_on_login_node: {value: "$TMPDIR, $MEMFS and $SCRATCH_LOCAL are unset", method: measured, source: "echo of each variable in the non-login ssh session", date: "2026-10-30", note: "they are set only inside jobs. Not measured in a job."}
+      time:
+        slurm_time_zone:
+          value: {iana: "Europe/Warsaw", abbreviation: "CET", utc_offset: "+0100", observed_on: "2026-10-30"}
+          method: measured
+          source: "scontrol show config header ('Configuration data as of ...') compared with date -u in the same call: local 07:19:32, UTC 06:19:32; date +'%Z %z'; timedatectl; /etc/localtime"
+          date: "2026-10-30"
+          note: "TZ is unset in the ssh session, so the zone comes from the system. CET is the winter offset; daylight saving ended on 2026-10-25 and the offset becomes +0200 (CEST) in summer. Slurm text output in this session prints local time without a zone marker. Epoch fields (for example in JSON output) are unaffected by the session zone, so plugins should prefer epoch or JSON timestamps over parsing text. This is the zone of a login session, not a property of the scheduler."
+      login_node_policy:
+        computations_on_login_node:
+          value: "prohibited: any computation launched on the access host is killed without notice; the host is only for preparing input files and submitting jobs"
+          method: documented
+          source: "https://docs.hpc.cyfronet.pl/environment/general-rules/"
+          date: "2026-10-30"
+          note: "The page says: 'Any computations launched on the access host will be killed without notice. The access host should only be used to prepare input files and submitting jobs to the scheduler.' It also says the access host sets a memory limit for all processes of one user, and that exceeding it kills the offending process."
+        long_running_process_allowed:
+          value: null
+          method: unknown
+          source: "https://docs.hpc.cyfronet.pl/environment/general-rules/ (read; the page does not address a lightweight long-running non-compute process such as a poller or a tunnel)"
+          date: "2026-10-30"
+          note: "Not stated either way, and not tested, per the spike rules. The prohibition above covers computations; whether a lightweight poller counts is not documented."
+        per_user_limits:
+          value: {memory_max_bytes: 5368709120, cpu_quota: "1 CPU (1 s per second)", tasks_max: 1233698, open_files: 32768, cpu_time_limit: "unlimited"}
+          method: measured
+          source: "systemctl show user-<uid>.slice -p MemoryMax -p MemoryHigh -p TasksMax -p CPUQuotaPerSecUSec; ulimit -a"
+          date: "2026-10-30"
+          note: "MemoryMax is 5 GiB for all processes of one user together, MemoryHigh is infinity. The documentation confirms a per-user memory limit without giving the number."
+        login_node_os: {value: "Red Hat Enterprise Linux 8.10, x86_64, 96 CPUs, about 188 GiB RAM, shared", method: measured, source: "uname -m; /etc/os-release; nproc; free -m", date: "2026-10-30", note: "the documentation also says RHEL 8 and x86_64. The compute nodes run Rocky Linux 9 (and the GH200 nodes are aarch64), so binaries built on the login node do not run on every compute node."}
+        ssh_connection_limits: {value: unknown, method: unknown, source: "attempted read of /etc/ssh/sshd_config and sshd_config.d/*.conf for MaxSessions, MaxStartups, MaxAuthTries, LoginGraceTime, ClientAlive*, AllowTcpForwarding; the files were not readable", date: "2026-10-30", note: "sshd_config and sshd_config.d are not readable by a plain user (no file printed at all), so the limits are not known. Login throttling noted in HBEP-4 cannot be sized from this."}
+      reachability:
+        compute_outbound_internet:
+          value:
+            plgrid: {https_443_github_com: "reached (HTTP 200)", https_443_pypi_org: "reached (HTTP 206, a one-byte range request)", proxy_env_set: false}
+            plgrid-gpu-gh200: {https_443_github_com: "reached (HTTP 200)", https_443_pypi_org: "reached (HTTP 206, a one-byte range request)", proxy_env_set: false}
+          method: measured
+          source: "issue #18, comment 6519285505 (S1 step 0). S1 step-0 probe job (issue #18), one job per partition, on one compute node of each: curl to https://github.com/ and to https://pypi.org/simple/ (range 0-0), 8 s connect limit; the job also checked whether https_proxy, HTTPS_PROXY, all_proxy or ALL_PROXY was set (presence only)"
+          date: "2026-10-30"
+          note: "Only these two public endpoints on port 443 were tried, and each partition was tried once on one node. This is not a statement about other ports, other hosts or a general internet policy. Documentation is silent; the GPU/ML example batch script on the Helios GPU page (cited under other.module_system) installs packages with pip from inside the job, which agrees with the measurement."
+        compute_inbound_from_outside:
+          value: unknown
+          method: unknown
+          source: "documentation search (249 pages) for inbound, firewall, proxy, tunnel, port forward found nothing about Helios compute nodes"
+          date: "2026-10-30"
+          prior_observation: "In an earlier project, a listener on a Helios compute node could be reached only from the login node. This is not a fact for this profile."
+      compute_node:
+        # Read on a compute node inside S1's step-0 probe job (issue #18), one node of each partition.
+        host_python3:
+          value: {plgrid: "3.9.25", plgrid-gpu-gh200: "3.9.25"}
+          method: measured
+          source: "issue #18, comment 6519285505 (S1 step 0). S1 step-0 probe job: python3 --version, run by the job's own non-interactive shell on the node"
+          date: "2026-10-30"
+          note: "The host interpreter on the node, with no module loaded and no container. S1's step-0 notes record the login node's python3 as 3.6.8, a different interpreter."
+        architecture:
+          value: {plgrid: x86_64, plgrid-gpu-gh200: aarch64}
+          method: measured
+          source: "issue #18, comment 6519285505 (S1 step 0). S1 step-0 probe job: uname -m on the node"
+          date: "2026-10-30"
+          note: "Agrees with the scheduler-reported arch of the partition entries above."
+      other:
+        partition_access: {value: "every plgrid* partition has an AllowAccounts list of grant accounts (list not recorded); this is how the grant requirements in the documentation are enforced", method: measured, source: "scontrol show partition: AllowAccounts", date: "2026-10-30"}
+        restricted_partitions:
+          value: [all, cpu, cpu-bigmem, gpu, gpn, rtx, 8k3, 8k3-r1, 8k3-r2, 8k3-r3, 8k3-gpu, 8k3-gpu-gh200, 8k3-gpu-rtx, grid-alice, grid-atlas, grid-cms, grid-dteam, grid-lhcb, grid-ops, grid-virgo]
+          method: measured
+          source: "sinfo; scontrol show partition"
+          date: "2026-10-30"
+          note: "Also visible to the probing user. Their AllowAccounts lists name admin, project or experiment accounts (the lists were truncated in the probe), and the 8k3* partitions require a reservation. Whether an ordinary grant can use any of them was not determined, so they are not profiled here."
+        os_upgrade: {value: "compute nodes upgraded to Rocky Linux 9 on 2026-10-27 (from a RHEL 8 / SLES 15 mix)", method: documented, source: "https://docs.hpc.cyfronet.pl/supercomputers/helios/update-to-Rocky9/", date: "2026-10-30", note: "measured three days later: 35 bigmem nodes and one RTX node still report an EL8 kernel (4.18), all other reporting nodes an el9 kernel. The system Python on the new image is 3.9. Cray programming environment modules are gone."}
+        module_system: {value: "modules are per architecture and hierarchical; GH200 nodes need modules built for aarch64; conda is discouraged on GH200, use python -m venv", method: documented, source: ["https://docs.hpc.cyfronet.pl/supercomputers/helios/", "https://docs.hpc.cyfronet.pl/supercomputers/helios/GPU/"], date: "2026-10-30"}
+        ml_bundle: {value: "module ML-bundle/25.10 must be loaded first in a GH200 job before activating a virtual environment; a custom pip wheel repository (pre-built ARM GPU wheels) is listed under $PIP_EXTRA_INDEX_URL once the module is loaded", method: documented, source: "https://docs.hpc.cyfronet.pl/supercomputers/helios/GPU/", date: "2026-10-30"}
+        accounts: {value: "the Slurm account is the grant name plus a resource suffix: -cpu, -cpu-bigmem, -gpu-gh200; sbatch -A without the suffix fails", method: documented, source: "https://docs.hpc.cyfronet.pl/environment/batch-system/accounts-and-grants/", date: "2026-10-30", note: "the measured sbatch --test-only failure on plgrid-gpu-gh200 is consistent with this"}
+        billing: {value: "GPU partitions bill per GPU-hour as max(GPUs, ceil(CPUs / CPUs-per-GPU), ceil(memory / memory-per-GPU)) times the duration; GH200 proportional share is 72 CPUs and 120 GB per GPU", method: documented, source: ["https://docs.hpc.cyfronet.pl/environment/batch-system/billing/", "https://docs.hpc.cyfronet.pl/supercomputers/helios/"], date: "2026-10-30", note: "the measured TRESBillingWeights of plgrid-gpu-gh200 (cpu=0.01388, GRES/gpu=1) agree with 1/72 per CPU"}
+        gh200_node_tres: {value: "CfgTRES per GH200 node: cpu=288, mem=489500M, billing=4, gres/gpu=4", method: measured, source: "scontrol show node <one plgrid-gpu-gh200 node> (name not recorded)", date: "2026-10-30"}
+        accounting_tres: {value: "cpu,mem,energy,node,billing,fs/disk,vmem,pages,gres/gpu,gres/gpumem,gres/gpuutil", method: measured, source: "scontrol show config: AccountingStorageTRES", date: "2026-10-30"}
+    unknown:
+      - fact: "compute-node inbound from outside"
+        reason: "documentation silent; verifying it needs a job with a listener"
+      - fact: "Apptainer, user namespaces and home readability on the Helios partitions other than plgrid-gpu-gh200 (plgrid CPU x86_64, rtx, bigmem)"
+        reason: "S1 probe 2 ran one job on plgrid-gpu-gh200 only; the other partitions were not probed"
+      - fact: "slurmrestd service"
+        reason: "binary present in the client install; no endpoint advertised in the documentation; JWT is not enabled, but slurmrestd can also run with local (unix-socket) auth, so reachability for a plain user is unverified"
+      - fact: "ssh connection limits of the login node (MaxStartups, MaxSessions)"
+        reason: "sshd configuration not readable; HBEP-4 mentions throttling from parallel logins"
+      - fact: "size of node-local disk behind -C localfs"
+        reason: "Slurm TmpDisk is 0 and the documentation gives no size; needs a job"
+      - fact: "whether a lightweight long-running process on the login node is allowed"
+        reason: "the documentation does not address it and S5 must not test it"
+      - fact: "GPU model of plgrid-gpu-rtx"
+        reason: "not printed by any command run; not in the Helios page that was read"
