@@ -11,7 +11,7 @@ Design decisions for this framework are made as HBEPs, modelled on Kubernetes En
 | [5](0005-llmlab-compatible-front/README.md) | LLMLab-compatible front | implementable | none |
 | [6](0006-instance-reachability/README.md) | Instance reachability | implementable | none |
 | [7](0007-lifecycle-controller/README.md) | Lifecycle controller | implementable | none |
-| [8](0008-observability-and-events/README.md) | Observability and events | provisional | none |
+| [8](0008-observability-and-events/README.md) | Observability and events | implementable | none |
 | [9](0009-identity-and-attribution/README.md) | Identity and attribution | provisional | none |
 | [10](0010-agent-primitives/README.md) | Agent primitives | provisional | none |
 | [11](0011-kubernetes-control-plane/README.md) | Kubernetes as the control plane | implementable | none |
@@ -38,5 +38,5 @@ Spikes are short experiments allowed from provisional HBEPs (HBEP-1). They settl
 | S6 | Does an Agent Router edge pass bodies and long streams through unchanged and accept an LLMLab-format key? | 5 | not scheduled |
 | S7 | How long does a per-file checkpoint hash take on parallel filesystems, and does it match the Hub's hashes? | 9 | #30 (done, PR #33) |
 | S8 | Does embedded NATS JetStream lose no acknowledged record across a crash, a slow subscriber and redelivery? | 8, 10 | #25 (done, PR #28) |
-| S9 | Do metrics scraped through the front and tunnel show a gone Instance as down, never as a stale zero? | 8 | not scheduled |
+| S9 | Do metrics scraped through the front and tunnel show a gone Instance as down, never as a stale zero? | 8 | not needed for alpha: no scrape through the tunnel (HBEP-8, open question 2) |
 | S10 | Which conversation key and load bound give a good prefix-cache hit rate without overloading an Instance? | 5 | #27 |
