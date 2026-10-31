@@ -8,8 +8,8 @@
 # from HPCBURST_FRP_DIR (internal/testenv, FrpBinaries). The tarball's sha256 is the one spike S1c
 # pinned (spikes/s1c/fetch.sh; source: the release's frp_sha256_checksums.txt and GitHub's digest
 # of the asset). Nothing is extracted before the tarball matches it. A download with another hash
-# is deleted and the script exits 1, leaving nothing in DIR (a DIR it had to create is removed
-# again). The two binaries are checked against their own pins too, which are the sha256 of
+# is deleted and the script exits 1, leaving no file in DIR (a DIR it had to create stays, empty:
+# a run never removes the directory itself, because another run may be using it). The two binaries are checked against their own pins too, which are the sha256 of
 # frps and frpc as extracted from that verified tarball: that is what makes a second run a no-op.
 #
 # Both files are staged inside DIR under a name of their own and renamed into place, so two runs
@@ -46,17 +46,11 @@ if sha_ok "$dest/frps" "$FRPS_SHA" && sha_ok "$dest/frpc" "$FRPC_SHA" && [ -x "$
   exit 0
 fi
 
-created=0
-[ -d "$dest" ] || created=1
 mkdir -p "$dest"
 stage=$(mktemp -d "$dest/.frp.XXXXXX")
-# The stage is this run's own directory. On any exit it goes, with the download inside it, and a
-# DIR this run created goes too when it is still empty (rmdir refuses otherwise).
-cleanup() {
-  rm -rf "$stage"
-  [ "$created" -eq 0 ] || rmdir "$dest" 2>/dev/null || true
-}
-trap cleanup EXIT
+# The stage is this run's own directory, and the only thing a run removes: on any exit it goes, with
+# the download inside it. DIR itself is never removed, since a concurrent run may have just made it.
+trap 'rm -rf "$stage"' EXIT
 
 tgz=$stage/$name.tar.gz
 if [ -n "${FRP_TARBALL:-}" ]; then
@@ -80,6 +74,8 @@ tar -xzf "$tgz" -C "$stage" --strip-components=1 "$name/frps" "$name/frpc"
 sha_ok "$stage/frps" "$FRPS_SHA" || die "frps from the verified tarball does not match its pin $FRPS_SHA"
 sha_ok "$stage/frpc" "$FRPC_SHA" || die "frpc from the verified tarball does not match its pin $FRPC_SHA"
 chmod 755 "$stage/frps" "$stage/frpc"
-mv -f "$stage/frps" "$dest/frps"
-mv -f "$stage/frpc" "$dest/frpc"
+# -T: DEST is the file's own path, never a directory to move into (an existing directory or a symlink
+# to one at that path is an error, not a place to hide the binary).
+mv -fT "$stage/frps" "$dest/frps"
+mv -fT "$stage/frpc" "$dest/frpc"
 echo "verified frp $FRP_VERSION ($dest/frps, $dest/frpc)"
