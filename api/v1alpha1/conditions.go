@@ -62,6 +62,7 @@ const (
 	// within restart.window; provisioning in that class pauses.
 	ReasonRestartLoop = "RestartLoop"
 	// ReasonVerificationFailed: verification stopped provisioning in a class.
+	// The lifecycle controller (#61) sets it; this states its contract.
 	// A settings contradiction stops it until the serving spec changes; a
 	// shape misfit stops it until the spec or the workload's resolved shapes
 	// change (science-agent ruling, 31 Oct 2026).
