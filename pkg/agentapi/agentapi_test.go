@@ -428,6 +428,9 @@ func TestHostLayout(t *testing.T) {
 			t.Errorf("%s = %d, want %d", name, c.got, c.want)
 		}
 	}
+	if a := h.ControllerMetricsAddr(); a != "127.0.0.1:29232" {
+		t.Errorf("ControllerMetricsAddr = %q, want 127.0.0.1:29232", a)
+	}
 	// A block at another base moves every port with it, and no two ports meet.
 	other := Host{StateDir: h.StateDir, PortBase: 40000}
 	if other.FrpsWebAddr() != "127.0.0.1:40011" || other.FrpsPluginAddr() != "127.0.0.1:40008" {
