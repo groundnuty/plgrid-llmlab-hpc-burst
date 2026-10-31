@@ -183,7 +183,7 @@ func TestToolShapePromptAsksForTheCall(t *testing.T) {
 }
 
 // With a reasoning parser the tool-call shape asks for its output plus the
-// reasoning budget (provisional): a model that reasons for 500 tokens before
+// reasoning budget (the shape is judged): a model that reasons for 500 tokens before
 // its call passes with the option and fails without it.
 func TestToolShapeReasoningBudget(t *testing.T) {
 	req := agentapi.WarmUpRequest{Shapes: shapes, ToolCalls: true, TargetSessions: 1}
