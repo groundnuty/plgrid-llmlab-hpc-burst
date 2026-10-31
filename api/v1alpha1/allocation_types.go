@@ -29,6 +29,8 @@ type BatchParameters struct {
 	// 11). It is a whole number of minutes, because Slurm counts limits in
 	// minutes and the read-back compares the limit it reports (HBEP-4, The
 	// Slurm dialect); the provider refuses any other value before a call.
+	//
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="timeLimit must be a positive duration that fits Go's time.Duration (above 0s, at most 2562047h)"
 	TimeLimit Duration `json:"timeLimit"`
 
 	// GPUs is the number of GPUs, requested untyped (--gres=gpu:<n>). In alpha
@@ -48,7 +50,9 @@ type BatchParameters struct {
 	CPUsPerTask int32 `json:"cpusPerTask"`
 
 	// Memory is gpus times the partition's memPerGpu (HBEP-7, Provisioning).
-	// The provider passes it to Slurm in whole MiB.
+	// The provider passes it to Slurm in whole MiB. It is never negative.
+	//
+	// +kubebuilder:validation:XValidation:rule="!string(self).startsWith('-')",message="memory must not be negative"
 	Memory resource.Quantity `json:"memory"`
 
 	// Nodes is the number of nodes: 1 in alpha, whose Instances are
@@ -267,7 +271,9 @@ const (
 	// returns to the real phase if the job reappears.
 	AllocationLost AllocationPhase = "Lost"
 	// AllocationRefused: an invalid profile, a non-canonical external name, or
-	// a rewritten job name.
+	// a rewritten job name (reason ReasonJobRenamed: the read-back found the
+	// recorded job under a name other than the tag, and the provider cancelled
+	// it). It is kept once set.
 	AllocationRefused AllocationPhase = "Refused"
 )
 
@@ -366,6 +372,17 @@ type AllocationObservation struct {
 	// +optional
 	// +listType=set
 	Duplicates []string `json:"duplicates,omitempty"`
+
+	// QueueWaitRecorded is true once the Provider's controller has added the
+	// recorded job's queue wait to the Provider's status (HBEP-4, Provider
+	// status). It is set only after that write succeeded, so a failed write
+	// is retried at the next observe; and it keeps a re-observed job from
+	// adding its wait again after the entry has left the 20 the Provider
+	// keeps. The wait is the job record's StartTime minus its SubmitTime, from
+	// whichever source Observe read.
+	//
+	// +optional
+	QueueWaitRecorded bool `json:"queueWaitRecorded,omitempty"`
 }
 
 // AllocationStatus is the observed state of an Allocation. Conditions,

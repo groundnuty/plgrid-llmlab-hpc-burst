@@ -52,7 +52,8 @@ const (
 )
 
 // Annotation keys on an Allocation (HBEP-11, The Allocation's record). The
-// provider writes each with a resourceVersion precondition. CRD validation
+// provider writes each with a resourceVersion precondition, except
+// AnnotationIdleSince, which the lifecycle controller writes the same way. CRD validation
 // cannot guard them: it reaches no metadata beyond the name.
 const (
 	// AnnotationExternalName is crossplane-runtime's external-name key. Its
@@ -74,6 +75,12 @@ const (
 	// AnnotationAbandonAttempt is an operator's decision on an unresolved
 	// attempt, in fallback mode.
 	AnnotationAbandonAttempt = Group + "/abandon-attempt"
+
+	// AnnotationIdleSince is when the Allocation became idle: it hosts no
+	// Instance. It is the anchor of retention's idleLimit and the profile's
+	// maxIdle (HBEP-7, Retention). Its one writer is the lifecycle
+	// controller, unlike the annotations above (IdleSince, SetIdleSince).
+	AnnotationIdleSince = Group + "/idle-since"
 )
 
 // Annotation keys on an Instance, written by the lifecycle controller with a

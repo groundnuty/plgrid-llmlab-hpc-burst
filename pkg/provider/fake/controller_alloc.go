@@ -23,10 +23,11 @@ type allocState struct {
 	obs *v1alpha1.AllocationObservation
 	// rec is the submission record, nil when there is none.
 	rec *v1alpha1.SubmissionRecord
-	// cond is the SubmissionResolved condition to set, nil to leave the stored
-	// one as it is. It is applied in writeStatus, after the last Update: an
-	// Update restores a.Status from the store and would drop it.
-	cond *xpv2.Condition
+	// conds are the conditions to set (SubmissionResolved, SubmittedAsOther,
+	// Synced); a stored condition of another type is left as it is. They are
+	// applied in writeStatus, after the last Update: an Update restores
+	// a.Status from the store and would drop them.
+	conds []xpv2.Condition
 }
 
 // syncAllocation handles one Allocation, in the order: metadata, deletion, the
@@ -46,6 +47,9 @@ func (c *Controller) syncAllocation(ctx context.Context, p *pass, a *v1alpha1.Al
 		return err
 	}
 	if a.Annotations[v1alpha1.AnnotationJobID] == "" {
+		if s.prior.Phase == v1alpha1.AllocationRefused {
+			return c.writeStatus(ctx, s, nil) // a refused Allocation submits nothing
+		}
 		settled, err := c.establish(ctx, p, s)
 		if err != nil {
 			return err
@@ -82,18 +86,27 @@ func (c *Controller) syncMetadata(ctx context.Context, s *allocState) error {
 	return nil
 }
 
-// writeStatus writes the status, unless neither the observation nor the
-// condition changed, and returns err (the earlier failure of the same
-// Allocation, which does not stop the write) joined with the write's own.
+// writeStatus writes the status, unless neither the observation, the
+// conditions nor the retention changed, and returns err (the earlier failure of
+// the same Allocation, which does not stop the write) joined with the write's
+// own. Every write mirrors the spec's retention mode into
+// status.retention.effectiveMode (Keep when the spec sets none).
 func (c *Controller) writeStatus(ctx context.Context, s *allocState, err error) error {
-	stored := append([]xpv2.Condition(nil), s.a.Status.Conditions...)
-	if s.cond != nil {
-		s.a.SetConditions(*s.cond)
+	// Refused is kept once set, whatever the pass found or did (HBEP-4, Phases):
+	// the phase and the reason written are the stored ones.
+	if s.prior.Phase == v1alpha1.AllocationRefused {
+		s.obs.Phase, s.obs.Reason = s.prior.Phase, s.prior.Reason
 	}
-	if apiequality.Semantic.DeepEqual(s.prior, s.obs) && apiequality.Semantic.DeepEqual(stored, s.a.Status.Conditions) {
+	storedConds := append([]xpv2.Condition(nil), s.a.Status.Conditions...)
+	storedRetention := s.a.Status.Retention.DeepCopy()
+	s.a.SetConditions(s.conds...)
+	retention := &v1alpha1.RetentionStatus{EffectiveMode: s.a.Spec.RetentionPolicy.EffectiveMode()}
+	if apiequality.Semantic.DeepEqual(s.prior, s.obs) && apiequality.Semantic.DeepEqual(storedConds, s.a.Status.Conditions) &&
+		apiequality.Semantic.DeepEqual(storedRetention, retention) {
 		return err
 	}
 	s.a.Status.AtProvider = *s.obs // after the last Update, which restores the stored status
+	s.a.Status.Retention = retention
 	if uerr := updateStatus(ctx, c.Client, s.a); uerr != nil {
 		return errors.Join(err, fmt.Errorf("update status: %w", uerr))
 	}
@@ -109,21 +122,24 @@ func (c *Controller) observe(ctx context.Context, p *pass, s *allocState) error 
 	if c.HoldRelease {
 		settleErr = c.settle(ctx, p, s, id)
 	}
-	job, found, err := c.Batch.Observe(ctx, id)
+	job, found, err := c.observeJob(ctx, p, id)
 	if err != nil {
 		// A failed read is not absence: nothing changes, not even the clock of
 		// absentSince.
-		p.readFailed = true
 		*s.obs = *s.prior.DeepCopy()
 		return settleErr
 	}
 	c.mirror(p, s, id, job, found)
-	return settleErr
+	errs := []error{settleErr, c.recordQueueWait(ctx, s, id, job, found)}
+	if found {
+		errs = append(errs, c.readBack(ctx, p, s, job))
+	}
+	return errors.Join(errs...)
 }
 
 // mirror writes what the read of the recorded job showed into the observation.
 func (c *Controller) mirror(p *pass, s *allocState, id string, job provider.Job, found bool) {
-	obs, prior := s.obs, s.prior
+	obs := s.obs
 	obs.JobID, obs.Submission = id, s.rec
 	if !found {
 		if obs.AbsentSince == nil {
@@ -146,7 +162,4 @@ func (c *Controller) mirror(p *pass, s *allocState, id string, job provider.Job,
 	obs.SubmitTime = mt(job.SubmitTime)
 	obs.StartEstimate, obs.StartTime = mtp(job.StartEstimate), mtp(job.StartTime)
 	obs.HardEnd, obs.EndTime = mtp(job.HardEnd), mtp(job.EndTime)
-	if job.StartTime != nil && prior.StartTime == nil {
-		p.waits = append(p.waits, v1alpha1.QueueWait{JobID: id, SubmitTime: *mt(job.SubmitTime), StartTime: *mt(*job.StartTime)})
-	}
 }

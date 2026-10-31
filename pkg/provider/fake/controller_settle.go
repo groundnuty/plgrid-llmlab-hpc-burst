@@ -16,9 +16,8 @@ import (
 // lifted, and counts as a failed read of the pass. A failed cancel or lift is
 // returned.
 func (c *Controller) settle(ctx context.Context, p *pass, s *allocState, id string) error {
-	jobs, err := c.Batch.FindByTag(ctx, s.tag, s.a.CreationTimestamp.Add(-listLookback))
+	jobs, err := c.findByTag(ctx, p, s.tag, s.a.CreationTimestamp.Add(-listLookback))
 	if err != nil {
-		p.readFailed = true
 		return nil
 	}
 	var recorded *provider.Job

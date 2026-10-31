@@ -92,6 +92,57 @@ func TestInstanceIdentityReference(t *testing.T) {
 	})
 }
 
+// The launch's command passes max-num-seqs only as one argument,
+// --max-num-seqs=<n>, with n equal to launch.maxNumSeqs, so the front's cap and
+// the engine's limit cannot disagree. This is the rule instances:$.spec.launch#0.
+func TestInstanceLaunchCommandAgreesWithMaxNumSeqs(t *testing.T) {
+	const msg = "command passes max-num-seqs only as --max-num-seqs=<launch.maxNumSeqs>"
+	ns := newNamespace(t)
+	// withCommand returns a mutation that replaces the launch's command (the
+	// first three arguments are the program, its subcommand and the model) and
+	// sets launch.maxNumSeqs.
+	withCommand := func(maxNumSeqs int32, args ...string) func(*v1alpha1.Instance) {
+		return func(i *v1alpha1.Instance) {
+			i.Spec.Launch.Command = append([]string{"vllm", "serve", "/hpcburst/model"}, args...)
+			i.Spec.Launch.MaxNumSeqs = maxNumSeqs
+		}
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*v1alpha1.Instance)
+	}{
+		{"a value other than launch.maxNumSeqs", withCommand(256, "--max-num-seqs=8")},
+		{"launch.maxNumSeqs other than the value", withCommand(128, "--max-num-seqs=256")},
+		{"the two-argument form", withCommand(256, "--max-num-seqs", "256")},
+		{"the underscore spelling", withCommand(256, "--max_num_seqs=256")},
+		{"the underscore spelling with another value", withCommand(256, "--max_num_seqs=8")},
+		{"a value that is not a number", withCommand(256, "--max-num-seqs=abc")},
+		{"an empty value", withCommand(256, "--max-num-seqs=")},
+		{"the flag with no value", withCommand(256, "--max-num-seqs")},
+		{"a correct argument and a wrong one", withCommand(256, "--max-num-seqs=256", "--max_num_seqs=8")},
+	} {
+		t.Run("refuse "+tc.name, func(t *testing.T) {
+			in := newInstance(ns, uniq("inst"))
+			tc.mutate(in)
+			requireRefused(t, c.Create(bg(), in), msg)
+		})
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*v1alpha1.Instance)
+	}{
+		{"the argument with launch.maxNumSeqs", withCommand(256, "--max-num-seqs=256")},
+		{"the argument among other flags", withCommand(64, "--dtype=bfloat16", "--max-num-seqs=64", "--seed=1")},
+		{"a command with no max-num-seqs argument", withCommand(256, "--dtype=bfloat16")},
+	} {
+		t.Run("accept "+tc.name, func(t *testing.T) {
+			in := newInstance(ns, uniq("inst"))
+			tc.mutate(in)
+			must(t, c.Create(bg(), in), "create")
+		})
+	}
+}
+
 func TestInstancePhasesAndStatus(t *testing.T) {
 	ns := newNamespace(t)
 	in := newInstance(ns, "phases")

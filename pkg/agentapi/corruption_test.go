@@ -1,4 +1,4 @@
-package fake
+package agentapi
 
 import (
 	"strings"
@@ -62,7 +62,7 @@ func TestCorruptionVerdict(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			pass, msg := corruptionVerdict(c.outs)
+			pass, msg := CorruptionVerdict(c.outs)
 			if pass != c.pass {
 				t.Fatalf("pass = %v (%q), want %v", pass, msg, c.pass)
 			}
@@ -86,10 +86,17 @@ func alternate(n int) []int32 {
 
 func TestCorruptionVerdictDoesNotChangeItsInput(t *testing.T) {
 	outs := [][]int32{seq(1, 40), seq(1, 40), seq(1, 40)}
-	corruptionVerdict(outs)
+	CorruptionVerdict(outs)
 	for n, o := range outs {
 		if len(o) != 40 || o[0] != 1 || o[39] != 40 {
 			t.Errorf("output %d changed: %v", n, o)
 		}
+	}
+}
+
+// The numbers are HBEP-7's: three greedy outputs, the first 32 tokens shared.
+func TestCorruptionConstants(t *testing.T) {
+	if CorruptionOutputs != 3 || CorruptionPrefix != 32 {
+		t.Errorf("CorruptionOutputs = %d, CorruptionPrefix = %d; want 3 and 32", CorruptionOutputs, CorruptionPrefix)
 	}
 }

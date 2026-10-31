@@ -1,10 +1,8 @@
 package agentapi
 
 import (
-	"fmt"
 	"path"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 )
@@ -105,19 +103,96 @@ func ContainerEngineSocket(worker string) string { return path.Join(ContainerRun
 
 // ---- on the control-plane host ----
 
+// Host is the control-plane host's runtime layout: the paths and the port that
+// several components share. The launcher (hpcburst up) owns the state
+// directory and the loopback port block, and passes both to the controller
+// binary and the front, which each fill a Host from them (docs/development.md,
+// Runtime conventions). agent.json follows from it: Mode and Endpoint are the
+// front the launcher recorded, SSH.User is the user who runs the controller,
+// SSH.AgentPort is AgentEndpointPort, and CertSPKISHA256 is PinOf the
+// certificate at AgentCertFile.
+type Host struct {
+	// StateDir is the launcher's state directory.
+	StateDir string
+	// PortBase is the start of the launcher's loopback port block.
+	PortBase int
+}
+
+// Names under the launcher's state directory, and the agent endpoint's place
+// in the port block. The launcher binds base, base+1, base+2 and reserves
+// base+5 (internal/launcher, PortsFromBase); base+3 is the agent endpoint's.
+const (
+	// CredentialsDirName is the controller's credentials directory, mode
+	// 0700 (KeyDirMode), which holds allocations/ and instances/.
+	CredentialsDirName = "credentials"
+	// AgentBuildsDirName holds the agent builds, AgentBuildName files.
+	AgentBuildsDirName = "agent-builds"
+	// AgentEndpointDirName holds the agent endpoint's certificate and key,
+	// which the launcher creates.
+	AgentEndpointDirName = "agent-endpoint"
+	// AgentCertFileName and AgentKeyFileName are the certificate (PEM) and
+	// its private key (PEM, mode 0600).
+	AgentCertFileName = "tls.crt"
+	AgentKeyFileName  = "tls.key"
+	// AgentEndpointPortOffset is the agent endpoint's port, relative to the
+	// launcher's port base.
+	AgentEndpointPortOffset = 3
+)
+
+// CredentialsDir is <state>/credentials, the dir of AllocationCredentialPath
+// and InstanceKeyPath.
+func (h Host) CredentialsDir() string { return filepath.Join(h.StateDir, CredentialsDirName) }
+
+// AgentBuildsDir is <state>/agent-builds.
+func (h Host) AgentBuildsDir() string { return filepath.Join(h.StateDir, AgentBuildsDirName) }
+
+// AgentCertFile is <state>/agent-endpoint/tls.crt. The agent API's server
+// presents it, and so does the front's dial-home listener in direct mode.
+func (h Host) AgentCertFile() string {
+	return filepath.Join(h.StateDir, AgentEndpointDirName, AgentCertFileName)
+}
+
+// AgentKeyFile is <state>/agent-endpoint/tls.key.
+func (h Host) AgentKeyFile() string {
+	return filepath.Join(h.StateDir, AgentEndpointDirName, AgentKeyFileName)
+}
+
+// AgentEndpointPort is the agent endpoint's loopback port: the port base plus
+// AgentEndpointPortOffset.
+func (h Host) AgentEndpointPort() int { return h.PortBase + AgentEndpointPortOffset }
+
+// AgentEndpointAddr is "127.0.0.1:<AgentEndpointPort>", where the agent API's
+// server listens and the front's direct-mode passthrough connects.
+func (h Host) AgentEndpointAddr() string {
+	return "127.0.0.1:" + strconv.Itoa(h.AgentEndpointPort())
+}
+
 // AllocationCredentialPath is where the lifecycle controller keeps an
 // Allocation's credential: <dir>/allocations/<Allocation UID>, mode 600, where
 // dir is the controller's credentials directory (HBEP-7, Provisioning). The
 // lifecycle controller writes it once the create has returned the UID; the
 // provider waits for it before it submits (docs/development.md), reads it to
 // stage it, and the agent API's server reads it to authenticate.
+//
+// The file holds a key's form (CheckKey) and nothing else. Every writer uses
+// WriteKeyFile, which the controller calls with a key from NewKey, and every
+// reader ReadKeyFile.
 func AllocationCredentialPath(dir, allocationUID string) string {
 	return filepath.Join(dir, "allocations", allocationUID)
 }
 
 // InstanceKeyPath is where the lifecycle controller keeps an Instance's key:
 // <dir>/instances/<Instance UID>, mode 600, which the front reads (HBEP-7,
-// Keys).
+// Keys). HBEP-7 fixes nothing more than that, so the contract's choice is that
+// an Instance's key has the Allocation credential's form (CheckKey), and the
+// file is written with WriteKeyFile and read with ReadKeyFile:
+//
+//   - the agent generates the key with NewKey at Instance start and sends it as
+//     InstanceReport.Key until DesiredInstance.KeyStored is true;
+//   - the lifecycle controller checks it with CheckKey, writes it with
+//     WriteKeyFile and only then sets KeyStored;
+//   - the front reads it with ReadKeyFile and sends it to the engine's serving
+//     path as "Authorization: Bearer <key>".
 func InstanceKeyPath(dir, instanceUID string) string {
 	return filepath.Join(dir, "instances", instanceUID)
 }
@@ -129,15 +204,7 @@ func InstanceKeyPath(dir, instanceUID string) string {
 // to stage by that digest.
 func AgentBuildName(cpuArch string) string { return AgentBinaryName + "-" + cpuArch }
 
-// credentialForm is a credential's form: 256 random bits as 64 lowercase hex
-// characters, with no newline (HBEP-7, Provisioning).
-var credentialForm = regexp.MustCompile(`^[0-9a-f]{64}$`)
-
-// CheckCredential returns an error unless b is a credential's exact form. The
-// error never contains b.
-func CheckCredential(b []byte) error {
-	if !credentialForm.Match(b) {
-		return fmt.Errorf("a credential is 64 lowercase hex characters with no newline; got %d bytes of another form", len(b))
-	}
-	return nil
-}
+// CheckCredential returns an error unless b is an Allocation credential's exact
+// form, which is a key's form (CheckKey): 256 random bits as 64 lowercase hex
+// characters, with no newline (HBEP-7, Provisioning). The error never contains b.
+func CheckCredential(b []byte) error { return CheckKey(b) }

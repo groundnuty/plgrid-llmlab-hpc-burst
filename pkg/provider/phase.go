@@ -19,7 +19,8 @@ const (
 // starts with JobHeld); requeued says a requeue was seen. The provider and
 // the fake both call it, so they agree on every phase.
 //
-//   - Failed: a requeue in any state, or FAILED, NODE_FAIL, OUT_OF_MEMORY,
+//   - Failed: a requeue in any state (requeued, or REQUEUED anywhere in state,
+//     base state included, as spike S4 accepts it), or FAILED, NODE_FAIL, OUT_OF_MEMORY,
 //     BOOT_FAIL, PREEMPTED or DEADLINE;
 //   - Ended: COMPLETED, TIMEOUT (the lease end) or CANCELLED;
 //   - Held: a held job that has not started;
@@ -35,7 +36,7 @@ func SlurmPhase(state []string, held, requeued bool) (v1alpha1.AllocationPhase, 
 	if len(state) == 0 {
 		return "", fmt.Errorf("job has no state")
 	}
-	for _, flag := range state[1:] {
+	for _, flag := range state {
 		if strings.EqualFold(flag, "REQUEUED") {
 			return v1alpha1.AllocationFailed, nil
 		}

@@ -53,8 +53,9 @@ type Config struct {
 	PageSize int
 	// MaxPages bounds the page chain. Default 1000.
 	MaxPages int
-	// MaxFileBytes bounds the size of a file that is downloaded to be hashed
-	// (a file that is not in LFS). Default 64 MiB.
+	// MaxFileBytes bounds the size of a file that is downloaded: one that is
+	// hashed by Files (a file that is not in LFS) and any file that Content
+	// or TemplateSources reads. Default 64 MiB.
 	MaxFileBytes int64
 	// Concurrency is the number of files downloaded at once. Default 4.
 	Concurrency int
@@ -182,18 +183,25 @@ func (c *Client) Files(ctx context.Context, repository, revision string) ([]Entr
 	if err := checkRevision(revision); err != nil {
 		return nil, err
 	}
-	var tok token
-	if c.tokenFile != "" {
-		var err error
-		if tok, err = readToken(c.tokenFile); err != nil {
-			return nil, err
-		}
+	tok, err := c.currentToken()
+	if err != nil {
+		return nil, err
 	}
 	entries, err := c.files(ctx, repository, revision, tok)
 	if err != nil {
 		return nil, scrub(err, tok)
 	}
 	return entries, nil
+}
+
+// currentToken reads the token file, if the client has one, afresh: a rotated
+// token takes effect on the next call. Without a token file it returns the
+// empty token, and requests are anonymous.
+func (c *Client) currentToken() (token, error) {
+	if c.tokenFile == "" {
+		return "", nil
+	}
+	return readToken(c.tokenFile)
 }
 
 func (c *Client) files(ctx context.Context, repo, rev string, tok token) ([]Entry, error) {

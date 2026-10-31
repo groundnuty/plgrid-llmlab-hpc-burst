@@ -215,6 +215,7 @@ func TestRetryable(t *testing.T) {
 		"blob mismatch":         {fmt.Errorf("x: %w", ErrBlobMismatch), false},
 		"size mismatch":         {fmt.Errorf("x: %w", ErrSizeMismatch), false},
 		"file too large":        {fmt.Errorf("x: %w", ErrFileTooLarge), false},
+		"no such file":          {fmt.Errorf("x: %w / %w", ErrNoSuchFile, &HTTPError{Status: 503}), false},
 		"invalid listing":       {fmt.Errorf("x: %w", ErrInvalidListing), false},
 		"invalid revision":      {fmt.Errorf("x: %w", ErrInvalidRevision), false},
 		"invalid repository":    {fmt.Errorf("x: %w", ErrInvalidRepository), false},

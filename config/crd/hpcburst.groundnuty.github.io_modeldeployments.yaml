@@ -84,6 +84,10 @@ spec:
                 maxLength: 63
                 pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                 type: string
+                x-kubernetes-validations:
+                - message: leaseLimit must be a positive duration that fits Go's time.Duration
+                    (above 0s, at most 2562047h)
+                  rule: duration(self) > duration('0s')
               model:
                 description: Model is the model name clients send. Names follow LLMLab's.
                 maxLength: 256
@@ -93,14 +97,25 @@ spec:
                 description: Providers says where the deployment may run.
                 properties:
                   names:
-                    description: Names lists Providers by name.
+                    description: |-
+                      Names lists Providers by name, each once. The order is meaningful:
+                      a new primary goes to the first listed Provider that is Ready and batch,
+                      and a replacement that cannot stay on its predecessor's Provider to the
+                      next one in order (HBEP-7, Where). Providers that only the selector
+                      matches come after the listed ones, in name order (a contracts
+                      decision). The list is atomic, not a set, so its order is part of the
+                      value and no merge reorders it; a CEL rule refuses a repeated name.
                     items:
                       maxLength: 63
                       pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                       type: string
                     maxItems: 64
                     type: array
-                    x-kubernetes-list-type: set
+                    x-kubernetes-list-type: atomic
+                    x-kubernetes-validations:
+                    - message: 'providers.names lists each Provider once: its order
+                        is the order the Providers are tried in (HBEP-7, Where)'
+                      rule: self.all(n, self.exists_one(m, m == n))
                   selector:
                     description: |-
                       Selector selects Providers by their labels, for example every provider
@@ -160,11 +175,18 @@ spec:
                   keep until the deployment's end time (HBEP-7, open question 13).
                 properties:
                   idleLimit:
-                    description: IdleLimit is how long an Allocation may be idle before
-                      it is released.
+                    description: |-
+                      IdleLimit is how long an Allocation may be idle before it is released.
+                      It counts from the Allocation's idle-since annotation
+                      (AnnotationIdleSince, IdleSince), which the lifecycle controller writes
+                      when the Allocation stops hosting an Instance.
                     maxLength: 63
                     pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                     type: string
+                    x-kubernetes-validations:
+                    - message: idleLimit must be a positive duration that fits Go's
+                        time.Duration (above 0s, at most 2562047h)
+                      rule: duration(self) > duration('0s')
                   mode:
                     description: Mode is Keep or ReleaseWhenIdle. Unset means Keep.
                     enum:
@@ -258,6 +280,10 @@ spec:
                     maxLength: 63
                     pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                     type: string
+                    x-kubernetes-validations:
+                    - message: maxRequestDuration must be a positive duration that
+                        fits Go's time.Duration (above 0s, at most 2562047h)
+                      rule: duration(self) > duration('0s')
                 type: object
               source:
                 description: |-
@@ -382,10 +408,20 @@ spec:
                               input: the digest names the bytes, and pkg/deploymentid hashes only it.
                               The schema requires ImageDigest beside it, so every launch pulls
                               Image@ImageDigest (HBEP owner, 31 Oct 2026).
+
+                              The repository names no tag: the text after its last "/" holds no ":"
+                              (a ":" before it is a registry port, as in registry.example:5000/vllm).
+                              A tag is refused rather than ignored, because the agent pulls by digest
+                              and a tag beside it would mislead a reader.
                             maxLength: 512
                             minLength: 1
                             pattern: ^[a-z0-9][a-z0-9._:/-]*[a-z0-9]$
                             type: string
+                            x-kubernetes-validations:
+                            - message: 'image is a repository without a tag: the agent
+                                pulls image@imageDigest, so write docker.io/vllm/vllm-openai,
+                                not docker.io/vllm/vllm-openai:latest'
+                              rule: '!self.substring(self.lastIndexOf(''/'') + 1).contains('':'')'
                           imageDigest:
                             description: |-
                               ImageDigest is the engine image's digest: "sha256:" and 64 lowercase hex
@@ -676,11 +712,14 @@ spec:
                     type: object
                   targetSessions:
                     description: |-
-                      TargetSessions is the number of concurrent sessions to serve. KV
-                      capacity is checked against it, warm-up runs it, and throughput is
-                      measured at it.
+                      TargetSessions is the number of concurrent sessions to serve, per
+                      Instance. KV capacity is checked against it, warm-up runs it, and
+                      throughput is measured at it. It is at most MaxTargetSessions, which is
+                      agentapi.MaxTargetSessions: every warm-up round reports one timing per
+                      concurrent request, and the agent's report of all rounds must fit the
+                      protocol's body limit (agentapi.WarmUpBudgetBytes, agentapi.MaxBodyBytes).
                     format: int32
-                    maximum: 100000
+                    maximum: 1024
                     minimum: 1
                     type: integer
                   toolCalls:

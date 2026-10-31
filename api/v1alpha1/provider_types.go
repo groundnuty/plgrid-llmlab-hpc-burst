@@ -97,8 +97,13 @@ type ProviderStatus struct {
 
 	// QueueWaits are the last MaxQueueWaits observed queue waits, oldest first
 	// (HBEP-4, Provider status). Each is one recorded job's wait from
-	// submission to start, from its accounting record's submit and start
-	// times, never from when the controller saw the change. Entries are keyed
+	// submission to start, from the scheduler's own submit and start times in
+	// the job record (provider.Job.SubmitTime and StartTime, as Observe read
+	// them from the queue listing or accounting), never from when the
+	// controller saw the change. HBEP-4 names the accounting record; taking
+	// the same two times from either source is a contracts decision. The
+	// Allocation's status.atProvider.queueWaitRecorded makes the write
+	// retryable and once-only per job. Entries are keyed
 	// by job ID, so a repeated observe adds nothing; a new entry beyond the
 	// cap drops the oldest (AddQueueWait). The lifecycle controller plans
 	// replacements from them (HBEP-7, Handover), and they live here so a
@@ -204,4 +209,37 @@ type CatalogEntryStatus struct {
 	//
 	// +optional
 	LastListedTime *metav1.Time `json:"lastListedTime,omitempty"`
+}
+
+// ProviderPollInterval is the longest a batch Provider's controller goes
+// without reading the platform: on a pass that observes no job it calls
+// provider.Batch.Poll, so the Ready condition always rests on a real read
+// (HBEP-4, Operational readiness 1).
+const ProviderPollInterval = time.Minute
+
+// ProviderReadyStaleness is the oldest a batch Provider's last successful
+// status read may be while the Provider counts as ready (HBEP-4, Operational
+// readiness 1): five poll intervals, so one or two failed reads do not flip
+// it. The Provider's controller sets Ready False with ReasonReadsFailing once
+// a pass fails its reads and the last success is older than this, or there
+// was none; a reader also checks the age itself (ProviderReady), because a
+// stopped controller sets nothing.
+const ProviderReadyStaleness = 5 * ProviderPollInterval
+
+// ProviderReady reports whether a batch Provider counts as ready at now: its
+// Ready condition is True and its lastSuccessfulStatusRead is at most
+// ProviderReadyStaleness old. The lifecycle controller skips a Provider for
+// which it is false (HBEP-7, Reconcile loop, step 1). A nil Provider is not
+// ready.
+func ProviderReady(p *Provider, now time.Time) bool {
+	if p == nil || p.Status.LastSuccessfulStatusRead == nil {
+		return false
+	}
+	ready := false
+	for _, c := range p.Status.Conditions {
+		if c.Type == ConditionProviderReady {
+			ready = c.Status == metav1.ConditionTrue
+		}
+	}
+	return ready && now.Sub(p.Status.LastSuccessfulStatusRead.Time) <= ProviderReadyStaleness
 }

@@ -7,7 +7,11 @@ import (
 )
 
 // Duration is a length of time written as a Go duration string, for example
-// "90s", "2m" or "1h30m". The API keeps the text the user wrote.
+// "90s", "2m" or "1h30m". The API keeps the text the user wrote. Every spec
+// field of this type carries a CEL rule that parses it (duration(self)), so a
+// value that overflows Go's time.Duration (above about 2562047h) is refused;
+// a field that needs a positive value also refuses 0s. Status fields carry no
+// rule: their controller writes them.
 //
 // +kubebuilder:validation:MaxLength=63
 // +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$`
@@ -152,8 +156,12 @@ type RetentionPolicy struct {
 	Until *metav1.Time `json:"until,omitempty"`
 
 	// IdleLimit is how long an Allocation may be idle before it is released.
+	// It counts from the Allocation's idle-since annotation
+	// (AnnotationIdleSince, IdleSince), which the lifecycle controller writes
+	// when the Allocation stops hosting an Instance.
 	//
 	// +optional
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="idleLimit must be a positive duration that fits Go's time.Duration (above 0s, at most 2562047h)"
 	IdleLimit *Duration `json:"idleLimit,omitempty"`
 }
 

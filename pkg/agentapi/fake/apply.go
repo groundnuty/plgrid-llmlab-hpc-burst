@@ -21,11 +21,21 @@ func (a *Agent) apply(d agentapi.DesiredState, now time.Time) {
 	a.reap(now)
 }
 
+// elapse lets time pass for the processes the Agent runs without any decision:
+// a starting worker whose start delay has passed runs, and a stopping worker
+// whose kill is due is killed. It is all a desired state with an Action the
+// Agent does not know leaves to do.
+func (a *Agent) elapse(now time.Time) {
+	a.promote(now)
+	a.reap(now)
+}
+
 // applyRun converges on the Instance: a new Instance replaces the old one once
 // the old one's processes are gone; for the same Instance, a raised Instance
 // generation restarts every worker and a raised worker generation restarts that
 // worker. A worker the Agent stopped or that exited does not start again until
-// a generation rises.
+// a generation rises. No worker starts before the Instance's staging is done
+// (staging.go).
 func (a *Agent) applyRun(i agentapi.DesiredInstance, now time.Time) {
 	if a.inst != nil && a.inst.uid != i.UID {
 		a.stopWorkers(now)
@@ -37,13 +47,17 @@ func (a *Agent) applyRun(i agentapi.DesiredInstance, now time.Time) {
 		a.inst = nil
 	}
 	if a.inst == nil {
-		a.inst = &instance{uid: i.UID, generation: i.Generation, key: randHex(32)}
+		a.inst = &instance{uid: i.UID, generation: i.Generation, key: newKey(), stageStart: now, stageGen: i.Generation}
 	}
 	in := a.inst
 	in.keyStored = i.KeyStored
+	in.restage(a.engine, i.Generation, now)
 	a.promote(now)
-	a.convergeWorkers(i, now)
-	in.applyChecks(a.engine, i)
+	// No worker starts, or restarts, before staging is done.
+	if in.staging(a.engine, now).Phase == agentapi.StagingDone {
+		a.convergeWorkers(i, now)
+	}
+	in.applyChecks(a.engine, i, in.runsFor(i))
 }
 
 // convergeWorkers starts, restarts and stops workers to match the desired

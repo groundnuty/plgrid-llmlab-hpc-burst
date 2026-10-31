@@ -2,8 +2,6 @@ package fake
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -23,6 +21,18 @@ const (
 // the protocol's level and nothing else: no process starts, no file is read, no
 // goroutine runs and nothing sleeps. A test calls Step, once per convergence
 // step, and the Agent takes its time from the function given to NewAgent.
+//
+// It follows the protocol's rules where a test could otherwise pass for the
+// wrong reason:
+//
+//   - checks run only against the intended running process (Engine);
+//   - staging takes Engine.StagingDuration, can fail (Engine.StagingError), and
+//     no worker starts before it is done;
+//   - an Action it does not know changes nothing, and it keeps reporting;
+//   - every report is encoded with agentapi.EncodeBody, so one above the body
+//     limit fails the Step, and its free text is cut to the protocol's bounds;
+//   - the key is drawn with agentapi.NewKey and the agent instance ID with
+//     agentapi.NewAgentInstanceID.
 //
 // An Agent is not safe for concurrent use: one goroutine drives it, and the
 // OnDesired hook runs on that goroutine.
@@ -70,6 +80,12 @@ type instance struct {
 	keyStored  bool
 	workers    []*worker
 	checks     *agentapi.CheckResults
+
+	// stageStart is when the current staging began: the Step that first took
+	// the Instance up, or the Step that re-staged it after a failure. stageGen
+	// is the Instance generation that staging is for (staging.go).
+	stageStart time.Time
+	stageGen   int64
 }
 
 // worker is one fake engine process.
@@ -86,14 +102,15 @@ type worker struct {
 }
 
 // NewAgent returns an Agent that talks to b as c and takes the time from now
-// (time.Now when nil). When c.AgentInstanceID is empty, the Agent draws a random one of
-// 32 hex characters.
+// (time.Now when nil). When c.AgentInstanceID is empty, the Agent draws one with
+// agentapi.NewAgentInstanceID, as the real agent does; a given one is kept as
+// the test set it, so a test can present a malformed one to see it refused.
 func NewAgent(b agentapi.Backend, c agentapi.Caller, now func() time.Time, e Engine) *Agent {
 	if now == nil {
 		now = time.Now
 	}
 	if c.AgentInstanceID == "" {
-		c.AgentInstanceID = randHex(16)
+		c.AgentInstanceID = newAgentInstanceID()
 	}
 	return &Agent{
 		Registration: agentapi.RegisterRequest{
@@ -151,7 +168,7 @@ func (a *Agent) LastReport() (agentapi.Report, bool) {
 // starts whatever it is told to run from nothing, with a new key. Seen,
 // LastReport, Starts, the PID counter and a Silence in force carry over.
 func (a *Agent) Requeue() {
-	a.caller.AgentInstanceID = randHex(16)
+	a.caller.AgentInstanceID = newAgentInstanceID()
 	a.Registration.RestartCount++
 	a.registered = false
 	a.stopping = false
@@ -185,7 +202,20 @@ func (a *Agent) CrashWorker(name string, exitCode int) {
 // errors.Is see through it. A step that fails before the Agent has applied the
 // desired state changes nothing in the Agent; one that fails at the report
 // has applied it, and the next Step reports it again without restarting
-// anything.
+// anything. A report above agentapi.MaxBodyBytes fails at the report, with an
+// error that wraps the *agentapi.Error of agentapi.EncodeBody (CodeBadRequest);
+// nothing is sent. A desired state that asks for a warm-up with TargetSessions
+// outside 1..agentapi.MaxTargetSessions fails before it is applied, with an
+// error that names the bound.
+//
+// A desired state with an Action the Agent does not know (agentapi's
+// documentation, Versioning) is not an error: the Agent records it (Seen,
+// OnDesired), changes nothing it runs or has been told (no part restarts or
+// stops, a pending stop stays pending, the settings in it are not taken, no
+// check advances), and reports as always. Only the passing of time shows: a
+// starting worker whose delay has passed runs, and a stopping worker whose kill
+// is due is killed. A desired state that runs an Instance but carries none is
+// malformed, and is an error.
 //
 // After ActionStop, the Agent exits with the report it sends once every worker
 // is gone: the Step that applied it when the workers stopped at once, a later
@@ -215,7 +245,14 @@ func (a *Agent) Step(ctx context.Context) error {
 		return err
 	}
 	a.observe(d)
-	a.apply(d, now)
+	if knownAction(d.Action) {
+		a.apply(d, now)
+	} else {
+		// An Action this agent does not know (doc.go, Versioning): it changes
+		// nothing, and the Agent goes on polling and reporting. Only the time
+		// that has passed shows in what it runs.
+		a.elapse(now)
+	}
 	return a.report(ctx, now)
 }
 
@@ -233,6 +270,11 @@ func (a *Agent) register(ctx context.Context) error {
 
 func (a *Agent) report(ctx context.Context, now time.Time) error {
 	r := a.snapshot(now)
+	// Encode the report as the HTTP path does: one above the body limit is
+	// refused here, before any call, as the sender is told on the wire.
+	if _, err := agentapi.EncodeBody(r); err != nil {
+		return fmt.Errorf("fake agent: report: %w", err)
+	}
 	err := a.backend.Report(ctx, a.caller, cloneReport(r))
 	if isNotRegistered(err) {
 		a.registered = false
@@ -264,19 +306,32 @@ func (a *Agent) observe(d agentapi.DesiredState) {
 	}
 }
 
-// checkDesired rejects a desired state the Agent cannot act on.
+// knownAction reports whether the Agent knows the Action (the protocol version
+// it speaks has it).
+func knownAction(a agentapi.Action) bool {
+	switch a {
+	case agentapi.ActionIdle, agentapi.ActionRun, agentapi.ActionStop:
+		return true
+	}
+	return false
+}
+
+// checkDesired rejects a desired state the Agent cannot act on: one that is
+// malformed, or that asks for a warm-up with a number of concurrent requests
+// outside 1..agentapi.MaxTargetSessions. It does not reject an Action the
+// Agent does not know, which the Agent ignores.
 func checkDesired(d agentapi.DesiredState) error {
-	switch d.Action {
-	case agentapi.ActionIdle, agentapi.ActionStop:
-		return nil
-	case agentapi.ActionRun:
+	if d.Action == agentapi.ActionRun {
 		if d.Instance == nil {
 			return errors.New("fake agent: desired state runs an Instance but carries none")
 		}
-		return nil
-	default:
-		return fmt.Errorf("fake agent: unknown action %q", d.Action)
+		if c := d.Instance.Checks; c != nil && c.WarmUp != nil {
+			if n := c.WarmUp.TargetSessions; n < 1 || n > agentapi.MaxTargetSessions {
+				return fmt.Errorf("fake agent: warm-up targetSessions is %d, outside 1..%d (agentapi.MaxTargetSessions)", n, agentapi.MaxTargetSessions)
+			}
+		}
 	}
+	return nil
 }
 
 func isNotRegistered(err error) bool {
@@ -284,10 +339,23 @@ func isNotRegistered(err error) bool {
 	return errors.As(err, &e) && e.Code == agentapi.CodeNotRegistered
 }
 
-func randHex(nBytes int) string {
-	b := make([]byte, nBytes)
-	if _, err := rand.Read(b); err != nil {
-		panic(fmt.Sprintf("fake: random bytes: %v", err))
+// newAgentInstanceID draws an agent instance ID of the pinned form
+// (agentapi.NewAgentInstanceID). crypto/rand cannot fail in the Go versions this
+// module needs (it ends the program instead), so an error is a bug here.
+func newAgentInstanceID() string {
+	id, err := agentapi.NewAgentInstanceID()
+	if err != nil {
+		panic(fmt.Sprintf("fake: %v", err))
 	}
-	return hex.EncodeToString(b)
+	return id
+}
+
+// newKey draws an Instance key of the pinned form (agentapi.NewKey), as the
+// real agent does at Instance start.
+func newKey() string {
+	k, err := agentapi.NewKey()
+	if err != nil {
+		panic(fmt.Sprintf("fake: %v", err))
+	}
+	return k
 }

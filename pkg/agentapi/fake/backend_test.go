@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -26,50 +27,50 @@ func wantCode(t *testing.T, what string, err error, code agentapi.Code) {
 
 func TestBackendAnswersNotRegisteredBeforeRegister(t *testing.T) {
 	b := fake.NewBackend()
-	_, err := b.Desired(bgndCtx, caller("agent-1"))
+	_, err := b.Desired(bgndCtx, caller(agent1))
 	wantCode(t, "Desired", err, agentapi.CodeNotRegistered)
-	err = b.Report(bgndCtx, caller("agent-1"), agentapi.Report{Time: t0})
+	err = b.Report(bgndCtx, caller(agent1), agentapi.Report{Time: t0})
 	wantCode(t, "Report", err, agentapi.CodeNotRegistered)
 	if got := len(b.Reports(allocUID)); got != 0 {
 		t.Errorf("a refused Report was recorded: %d reports", got)
 	}
 
 	// A agent instance ID that registered does not register another one.
-	if _, err := b.Register(bgndCtx, caller("agent-1"), agentapi.RegisterRequest{Node: "node-a"}); err != nil {
+	if _, err := b.Register(bgndCtx, caller(agent1), agentapi.RegisterRequest{Node: "node-a"}); err != nil {
 		t.Fatal(err)
 	}
-	_, err = b.Desired(bgndCtx, caller("agent-2"))
+	_, err = b.Desired(bgndCtx, caller(agent2))
 	wantCode(t, "Desired from another agent instance ID", err, agentapi.CodeNotRegistered)
 }
 
 func TestBackendRegisterRecordsTheCallerAndAnswersWithTheProtocolVersion(t *testing.T) {
 	b := fake.NewBackend()
 	req := agentapi.RegisterRequest{Node: "node-a", CPUArch: "x86_64", GPUs: []agentapi.GPU{{Index: 0, Name: "gpu-a"}}}
-	resp, err := b.Register(bgndCtx, caller("agent-1"), req)
+	resp, err := b.Register(bgndCtx, caller(agent1), req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	eq(t, "ProtocolVersion", resp.ProtocolVersion, "v1")
-	eq(t, "Registrations", b.Registrations(allocUID), []fake.Registration{{Caller: caller("agent-1"), Request: req}})
+	eq(t, "Registrations", b.Registrations(allocUID), []fake.Registration{{Caller: caller(agent1), Request: req}})
 
 	// Registering again with the same agent instance ID is accepted and changes nothing.
 	again := agentapi.RegisterRequest{Node: "node-b"}
-	if _, err := b.Register(bgndCtx, caller("agent-1"), again); err != nil {
+	if _, err := b.Register(bgndCtx, caller(agent1), again); err != nil {
 		t.Fatalf("second Register with the same agent instance ID: %v", err)
 	}
-	eq(t, "Registrations after a repeat", b.Registrations(allocUID), []fake.Registration{{Caller: caller("agent-1"), Request: req}})
+	eq(t, "Registrations after a repeat", b.Registrations(allocUID), []fake.Registration{{Caller: caller(agent1), Request: req}})
 
 	// Another agent instance ID of the Allocation is another registration, in order.
-	if _, err := b.Register(bgndCtx, caller("agent-2"), again); err != nil {
+	if _, err := b.Register(bgndCtx, caller(agent2), again); err != nil {
 		t.Fatal(err)
 	}
 	regs := b.Registrations(allocUID)
-	if len(regs) != 2 || regs[0].Caller.AgentInstanceID != "agent-1" || regs[1].Caller.AgentInstanceID != "agent-2" {
-		t.Errorf("Registrations = %+v, want agent-1 then agent-2", regs)
+	if len(regs) != 2 || regs[0].Caller.AgentInstanceID != agent1 || regs[1].Caller.AgentInstanceID != agent2 {
+		t.Errorf("Registrations = %+v, want agent1 then agent2", regs)
 	}
 
 	// Registrations are per Allocation.
-	other := caller("agent-1")
+	other := caller(agent1)
 	other.AllocationUID = "alloc-uid-2"
 	if got := b.Registrations(other.AllocationUID); len(got) != 0 {
 		t.Errorf("another Allocation has registrations: %+v", got)
@@ -80,18 +81,18 @@ func TestBackendRegisterRecordsTheCallerAndAnswersWithTheProtocolVersion(t *test
 
 func TestBackendForgetDropsEveryRegistration(t *testing.T) {
 	b := fake.NewBackend()
-	for _, boot := range []string{"agent-1", "agent-2"} {
+	for _, boot := range []string{agent1, agent2} {
 		if _, err := b.Register(bgndCtx, caller(boot), agentapi.RegisterRequest{}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := b.Report(bgndCtx, caller("agent-1"), agentapi.Report{Time: t0}); err != nil {
+	if err := b.Report(bgndCtx, caller(agent1), agentapi.Report{Time: t0}); err != nil {
 		t.Fatal(err)
 	}
 
 	b.Forget()
 
-	for _, boot := range []string{"agent-1", "agent-2"} {
+	for _, boot := range []string{agent1, agent2} {
 		_, err := b.Desired(bgndCtx, caller(boot))
 		wantCode(t, "Desired from "+boot, err, agentapi.CodeNotRegistered)
 		err = b.Report(bgndCtx, caller(boot), agentapi.Report{Time: t0})
@@ -105,33 +106,33 @@ func TestBackendForgetDropsEveryRegistration(t *testing.T) {
 	}
 
 	// The same agent instance ID registers again.
-	if _, err := b.Register(bgndCtx, caller("agent-1"), agentapi.RegisterRequest{}); err != nil {
+	if _, err := b.Register(bgndCtx, caller(agent1), agentapi.RegisterRequest{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := b.Desired(bgndCtx, caller("agent-1")); err != nil {
+	if _, err := b.Desired(bgndCtx, caller(agent1)); err != nil {
 		t.Errorf("Desired after registering again: %v", err)
 	}
 }
 
 func TestBackendFailNextFailsTheNextCallOfThatMethodOnce(t *testing.T) {
 	b := fake.NewBackend()
-	if _, err := b.Register(bgndCtx, caller("agent-1"), agentapi.RegisterRequest{}); err != nil {
+	if _, err := b.Register(bgndCtx, caller(agent1), agentapi.RegisterRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	boom := errors.New("boom")
 	b.FailNext(fake.MethodReport, boom)
 
 	// Other methods are not affected.
-	if _, err := b.Desired(bgndCtx, caller("agent-1")); err != nil {
+	if _, err := b.Desired(bgndCtx, caller(agent1)); err != nil {
 		t.Errorf("Desired failed after FailNext(Report): %v", err)
 	}
-	if err := b.Report(bgndCtx, caller("agent-1"), agentapi.Report{Time: t0}); !errors.Is(err, boom) {
+	if err := b.Report(bgndCtx, caller(agent1), agentapi.Report{Time: t0}); !errors.Is(err, boom) {
 		t.Fatalf("first Report: err = %v, want boom", err)
 	}
 	if got := len(b.Reports(allocUID)); got != 0 {
 		t.Errorf("the failed Report was recorded: %d reports", got)
 	}
-	if err := b.Report(bgndCtx, caller("agent-1"), agentapi.Report{Time: t0}); err != nil {
+	if err := b.Report(bgndCtx, caller(agent1), agentapi.Report{Time: t0}); err != nil {
 		t.Errorf("second Report: %v, want success", err)
 	}
 	if got := len(b.Reports(allocUID)); got != 1 {
@@ -143,9 +144,9 @@ func TestBackendFailNextFailsTheNextCallOfThatMethodOnce(t *testing.T) {
 	e1, e2 := errors.New("first"), errors.New("second")
 	b.FailNext(fake.MethodRegister, e1)
 	b.FailNext(fake.MethodRegister, e2)
-	_, err1 := b.Register(bgndCtx, caller("agent-2"), agentapi.RegisterRequest{})
-	_, err2 := b.Register(bgndCtx, caller("agent-2"), agentapi.RegisterRequest{})
-	_, err3 := b.Register(bgndCtx, caller("agent-2"), agentapi.RegisterRequest{})
+	_, err1 := b.Register(bgndCtx, caller(agent2), agentapi.RegisterRequest{})
+	_, err2 := b.Register(bgndCtx, caller(agent2), agentapi.RegisterRequest{})
+	_, err3 := b.Register(bgndCtx, caller(agent2), agentapi.RegisterRequest{})
 	if !errors.Is(err1, e1) || !errors.Is(err2, e2) || err3 != nil {
 		t.Errorf("three Registers gave %v, %v, %v; want first, second, nil", err1, err2, err3)
 	}
@@ -173,7 +174,7 @@ func TestBackendRefusesACallerWithoutAllocationOrAgentInstanceID(t *testing.T) {
 	b := fake.NewBackend()
 	_, err := b.Register(bgndCtx, caller(""), agentapi.RegisterRequest{})
 	wantCode(t, "Register without a agent instance ID", err, agentapi.CodeBadRequest)
-	noAlloc := caller("agent-1")
+	noAlloc := caller(agent1)
 	noAlloc.AllocationUID = ""
 	_, err = b.Desired(bgndCtx, noAlloc)
 	wantCode(t, "Desired without an Allocation UID", err, agentapi.CodeBadRequest)
@@ -181,10 +182,10 @@ func TestBackendRefusesACallerWithoutAllocationOrAgentInstanceID(t *testing.T) {
 
 func TestBackendServesIdleWithAVersionWhenNothingIsSet(t *testing.T) {
 	b := fake.NewBackend()
-	if _, err := b.Register(bgndCtx, caller("agent-1"), agentapi.RegisterRequest{}); err != nil {
+	if _, err := b.Register(bgndCtx, caller(agent1), agentapi.RegisterRequest{}); err != nil {
 		t.Fatal(err)
 	}
-	d, err := b.Desired(bgndCtx, caller("agent-1"))
+	d, err := b.Desired(bgndCtx, caller(agent1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +198,7 @@ func TestBackendServesIdleWithAVersionWhenNothingIsSet(t *testing.T) {
 
 func desiredOf(t *testing.T, b *fake.Backend) agentapi.DesiredState {
 	t.Helper()
-	d, err := b.Desired(bgndCtx, caller("agent-1"))
+	d, err := b.Desired(bgndCtx, caller(agent1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +207,7 @@ func desiredOf(t *testing.T, b *fake.Backend) agentapi.DesiredState {
 
 func TestBackendVersionsFollowTheState(t *testing.T) {
 	b := fake.NewBackend()
-	if _, err := b.Register(bgndCtx, caller("agent-1"), agentapi.RegisterRequest{}); err != nil {
+	if _, err := b.Register(bgndCtx, caller(agent1), agentapi.RegisterRequest{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -264,7 +265,7 @@ func TestBackendVersionsFollowTheState(t *testing.T) {
 func TestBackendKeepsDesiredStatePerAllocation(t *testing.T) {
 	b := fake.NewBackend()
 	b.SetDesired("alloc-uid-2", run(instance()))
-	if _, err := b.Register(bgndCtx, caller("agent-1"), agentapi.RegisterRequest{}); err != nil {
+	if _, err := b.Register(bgndCtx, caller(agent1), agentapi.RegisterRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	eq(t, "Action of an Allocation nothing was set for", desiredOf(t, b).Action, agentapi.ActionIdle)
@@ -297,7 +298,7 @@ func scrambleDesired(d *agentapi.DesiredState) {
 
 func TestBackendOwnsTheDesiredStateItStoresAndServes(t *testing.T) {
 	b := fake.NewBackend()
-	if _, err := b.Register(bgndCtx, caller("agent-1"), agentapi.RegisterRequest{}); err != nil {
+	if _, err := b.Register(bgndCtx, caller(agent1), agentapi.RegisterRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	set := richDesired()
@@ -359,11 +360,11 @@ func scrambleReport(r *agentapi.Report) {
 
 func TestBackendOwnsTheReportsItRecords(t *testing.T) {
 	b := fake.NewBackend()
-	if _, err := b.Register(bgndCtx, caller("agent-1"), agentapi.RegisterRequest{}); err != nil {
+	if _, err := b.Register(bgndCtx, caller(agent1), agentapi.RegisterRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	sent := richReport()
-	if err := b.Report(bgndCtx, caller("agent-1"), sent); err != nil {
+	if err := b.Report(bgndCtx, caller(agent1), sent); err != nil {
 		t.Fatal(err)
 	}
 	scrambleReport(&sent) // the agent changes its value after Report
@@ -382,11 +383,11 @@ func TestBackendReportsInOrderPerAllocation(t *testing.T) {
 	if _, ok := b.LastReport(allocUID); ok {
 		t.Error("LastReport on a fresh Backend reports one")
 	}
-	if _, err := b.Register(bgndCtx, caller("agent-1"), agentapi.RegisterRequest{}); err != nil {
+	if _, err := b.Register(bgndCtx, caller(agent1), agentapi.RegisterRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	for n := range 3 {
-		if err := b.Report(bgndCtx, caller("agent-1"), agentapi.Report{Time: t0.Add(time.Duration(n) * time.Second)}); err != nil {
+		if err := b.Report(bgndCtx, caller(agent1), agentapi.Report{Time: t0.Add(time.Duration(n) * time.Second)}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -412,7 +413,7 @@ func TestBackendIsSafeForConcurrentUse(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			c := caller("agent-" + string(rune('a'+g)))
+			c := caller(fmt.Sprintf("%032x", g+1))
 			for range 50 {
 				_, _ = b.Register(bgndCtx, c, agentapi.RegisterRequest{Node: "n"})
 				_, _ = b.Desired(bgndCtx, c)

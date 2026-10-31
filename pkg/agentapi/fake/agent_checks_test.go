@@ -32,7 +32,7 @@ func TestVerifyResultsCarryTheVerificationGenerationAndTheEngineValues(t *testin
 			{Path: "model-00001.safetensors", SHA256: "bb"},
 		}},
 	}))))
-	r.step()
+	r.steps(2) // the worker starts, then runs and is checked
 
 	c := checksOf(t, r)
 	eq(t, "VerificationGeneration", c.VerificationGeneration, int64(4))
@@ -97,7 +97,8 @@ func TestANewVerificationGenerationDropsTheOldResultsAndRunsAgain(t *testing.T) 
 
 	// The earlier reports kept what they said.
 	reports := r.reports()
-	eq(t, "the first report's Verify", reports[0].Instance.Checks.Verify.Fingerprint, "fp-run-1")
+	eq(t, "the first report, from the Step that started the worker, has no Verify", reports[0].Instance.Checks.Verify, (*agentapi.VerifyResult)(nil))
+	eq(t, "the second report's Verify", reports[1].Instance.Checks.Verify.Fingerprint, "fp-run-1")
 }
 
 func TestQualifyPassesTheChecksTheAgentJudges(t *testing.T) {
@@ -116,7 +117,7 @@ func TestQualifyPassesTheChecksTheAgentJudges(t *testing.T) {
 				VerificationGeneration: 1,
 				Qualify:                &agentapi.QualifyRequest{Shapes: shapes, ToolCalls: c.toolCalls},
 			}))))
-			r.step()
+			r.steps(2) // the worker starts, then runs and is checked
 
 			q := checksOf(t, r).Qualify
 			if q == nil {
@@ -145,24 +146,28 @@ func TestWarmUpRunsOneRoundPerStepAndStopsAtFiveWithDone(t *testing.T) {
 	r := newRig(t, fake.Engine{})
 	r.set(run(instance(warmUpChecks(agentapi.WarmUpRequest{Shapes: shapes, ToolCalls: true, TargetSessions: 3}))))
 
-	r.steps(7)
+	r.steps(8)
 	reports := r.reports()
-	for n, rep := range reports {
-		w := rep.Instance.Checks.WarmUp
-		wantRounds := min(n+1, agentapi.MaxWarmUpRounds)
+	// Report 0 is the Step that starts the worker: no round runs before it is
+	// running.
+	eq(t, "report 0: checks carry the generation", reports[0].Instance.Checks.VerificationGeneration, int64(1))
+	eq(t, "report 0: no warm-up result", reports[0].Instance.Checks.WarmUp, (*agentapi.WarmUpResult)(nil))
+	for n := 1; n < len(reports); n++ {
+		w := reports[n].Instance.Checks.WarmUp
+		wantRounds := min(n, agentapi.MaxWarmUpRounds)
 		if w == nil || len(w.Rounds) != wantRounds {
 			t.Fatalf("report %d: warm-up = %+v, want %d rounds", n, w, wantRounds)
 		}
 		for i, round := range w.Rounds {
 			eq(t, fmt.Sprintf("report %d round %d number", n, i), round.Round, int32(i+1))
 		}
-		eq(t, fmt.Sprintf("report %d Done", n), w.Done, n+1 >= 5)
+		eq(t, fmt.Sprintf("report %d Done", n), w.Done, n >= 5)
 	}
 
 	// Round 1, as HBEP-7 describes a round: one request each at short, typical
 	// and longest context with the typical output, one at the typical context
 	// with the longest output, one tool call, then the concurrent sessions.
-	got := reports[0].Instance.Checks.WarmUp.Rounds[0].Requests
+	got := reports[1].Instance.Checks.WarmUp.Rounds[0].Requests
 	type req struct {
 		shape agentapi.Shape
 		out   int32
@@ -184,7 +189,7 @@ func TestWarmUpRunsOneRoundPerStepAndStopsAtFiveWithDone(t *testing.T) {
 func TestWarmUpWithoutToolCallsSendsNoToolCallRequest(t *testing.T) {
 	r := newRig(t, fake.Engine{})
 	r.set(run(instance(warmUpChecks(agentapi.WarmUpRequest{Shapes: shapes, TargetSessions: 2}))))
-	r.step()
+	r.steps(2) // the worker starts, then runs and round 1 is run
 	var shapesSent []agentapi.Shape
 	for _, rq := range checksOf(t, r).WarmUp.Rounds[0].Requests {
 		shapesSent = append(shapesSent, rq.Shape)
@@ -203,7 +208,7 @@ func TestWarmUpStopsWhenTheDesiredStateNoLongerAsksForIt(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newRig(t, fake.Engine{})
 			r.set(run(instance(warmUpChecks(agentapi.WarmUpRequest{Shapes: shapes, TargetSessions: 1}))))
-			r.steps(2)
+			r.steps(3) // the worker starts; then rounds 1 and 2
 			w := checksOf(t, r).WarmUp
 			eq(t, "rounds before", len(w.Rounds), 2)
 			eq(t, "Done before", w.Done, false)

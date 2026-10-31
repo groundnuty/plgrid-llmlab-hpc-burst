@@ -223,7 +223,10 @@ type Checks struct {
 	Qualify *QualifyRequest `json:"qualify,omitempty"`
 	// WarmUp asks for warm-up rounds. The agent runs round after round, at
 	// most MaxWarmUpRounds, reporting each, until a desired state without
-	// WarmUp for this generation tells it the controller has decided.
+	// WarmUp for this generation tells it the controller has decided; it then
+	// cancels any warm-up request still in flight and reports WarmUp.Done. The
+	// controller marks the Instance ready only after that report (doc.go,
+	// Warm-up gates ready).
 	WarmUp *WarmUpRequest `json:"warmUp,omitempty"`
 }
 
@@ -265,9 +268,13 @@ type QualifyRequest struct {
 // TargetSessions concurrent requests of the typical shape. Synthetic prompts
 // only.
 type WarmUpRequest struct {
-	Shapes         Shapes `json:"shapes"`
-	ToolCalls      bool   `json:"toolCalls,omitempty"`
-	TargetSessions int32  `json:"targetSessions"`
+	Shapes    Shapes `json:"shapes"`
+	ToolCalls bool   `json:"toolCalls,omitempty"`
+	// TargetSessions is the number of concurrent requests in a round, at most
+	// MaxTargetSessions (the CRD's maximum for Workload.TargetSessions). The
+	// bound keeps the report that holds every round of every request inside
+	// WarmUpBudgetBytes.
+	TargetSessions int32 `json:"targetSessions"`
 }
 
 // ---- reports ----
@@ -297,9 +304,11 @@ type InstanceReport struct {
 	// forwarded straight to worker-0's EngineSocket in alpha (HBEP-7, What it
 	// runs). Its form is HBEP-6's; empty until the agent serves it.
 	ServingEndpoint string `json:"servingEndpoint,omitempty"`
-	// Key is the Instance's key, which the agent generated at Instance start,
-	// sent until DesiredInstance.KeyStored is true. The controller keeps it in
-	// a mode-600 file (InstanceKeyPath) and never in an object or a log.
+	// Key is the Instance's key, which the agent generated at Instance start
+	// (NewKey), sent until DesiredInstance.KeyStored is true. It has CheckKey's
+	// form: 64 lowercase hex characters. The controller checks it, keeps it in
+	// a mode-600 file (InstanceKeyPath, WriteKeyFile) and never in an object or
+	// a log; Report.Redacted blanks it for a log line.
 	Key string `json:"key,omitempty"`
 	// Checks are the results of the latest Checks, for its verification
 	// generation.
@@ -322,7 +331,8 @@ type Staging struct {
 	Phase      StagingPhase `json:"phase"`
 	BytesDone  int64        `json:"bytesDone,omitempty"`
 	BytesTotal int64        `json:"bytesTotal,omitempty"`
-	Message    string       `json:"message,omitempty"`
+	// Message is free text, cut to MaxMessageBytes (TruncateUTF8).
+	Message string `json:"message,omitempty"`
 }
 
 // PartPhase is the state of one process the agent runs.
@@ -436,7 +446,8 @@ type VerifyResult struct {
 	// prompt) rendered through the engine's template. The controller fixes
 	// the longest context with it (HBEP-7, What the controller reads).
 	TemplateOverhead int32 `json:"templateOverhead,omitempty"`
-	// Error says why verification could not run, when it could not.
+	// Error says why verification could not run, when it could not. It is
+	// free text, cut to MaxMessageBytes (TruncateUTF8).
 	Error string `json:"error,omitempty"`
 }
 
@@ -454,9 +465,10 @@ const (
 
 // CheckOutcome is one check's outcome.
 type CheckOutcome struct {
-	Name    CheckName `json:"name"`
-	Passed  bool      `json:"passed"`
-	Message string    `json:"message,omitempty"`
+	Name   CheckName `json:"name"`
+	Passed bool      `json:"passed"`
+	// Message is free text, cut to MaxMessageBytes (TruncateUTF8).
+	Message string `json:"message,omitempty"`
 }
 
 // QualifyResult is what qualification read and judged (HBEP-7, Instance
@@ -494,20 +506,42 @@ type WarmUpResult struct {
 	Done bool `json:"done"`
 }
 
-// WarmUpRound is one round's requests.
+// WarmUpRound is one round's requests. The controller reads them as
+// RequestTiming says: a request with an Error counts for nothing. Settling
+// compares, per Shape, the mean Total of the round's requests without an Error
+// with the round before; a Shape that is more than 10% slower than in the round
+// before, or that has no successful request in this round, means not settled.
+// The Instance's throughput is the mean time per output token
+// (RequestTiming.TimePerOutputToken) and the mean time to first token over the
+// requests of the last round's ShapeConcurrent that have them; it is not
+// recorded when none has.
 type WarmUpRound struct {
 	// Round counts from 1.
 	Round    int32           `json:"round"`
 	Requests []RequestTiming `json:"requests"`
 }
 
-// RequestTiming is one warm-up request's timing. The controller derives the
-// time per output token as (Total - TimeToFirstToken) / (OutputTokens - 1).
+// RequestTiming is one warm-up request's timing. What it counts for depends on
+// the request:
+//
+//   - a request with an Error counts for nothing, whatever else it holds;
+//   - TimeToFirstToken counts for a request with OutputTokens of 1 or more;
+//   - the time per output token, (Total - TimeToFirstToken) / (OutputTokens - 1),
+//     counts only for a request with OutputTokens of 2 or more
+//     (TimePerOutputToken); a one-token request has no token interval, and the
+//     formula would divide by zero;
+//   - Total counts for settling for every request without an Error (see
+//     WarmUpRound).
+//
+// The workload schema admits an output of one token, so a request with fewer
+// than two output tokens is normal, not a fault.
 type RequestTiming struct {
 	Shape            Shape    `json:"shape"`
 	TimeToFirstToken Duration `json:"timeToFirstToken"`
 	Total            Duration `json:"total"`
 	OutputTokens     int32    `json:"outputTokens"`
-	// Error says why the request failed, when it did.
+	// Error says why the request failed, when it did. It is free text, cut to
+	// MaxTimingErrorBytes (TruncateUTF8), because a round can hold more than a
+	// thousand timings.
 	Error string `json:"error,omitempty"`
 }

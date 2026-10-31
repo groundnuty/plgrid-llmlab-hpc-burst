@@ -6,8 +6,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
+	"unicode/utf8"
 )
 
 // The protocol's version and HTTP framing (HBEP-7, The allocation agent: the
@@ -37,14 +39,40 @@ const (
 	// HeaderTag, HeaderJobID and HeaderAgentInstanceID identify the agent on
 	// every call, beside "Authorization: Bearer <credential>". The agent
 	// instance ID is random per agent process (doc.go), never the kernel's
-	// boot ID.
+	// boot ID, and has the form CheckAgentInstanceID accepts (the agent draws
+	// it with NewAgentInstanceID): the server answers another form with
+	// CodeBadRequest before it calls the Backend.
 	HeaderTag             = "Hpcburst-Tag"
 	HeaderJobID           = "Hpcburst-Job-Id"
 	HeaderAgentInstanceID = "Hpcburst-Agent-Instance-Id"
 
 	// MaxBodyBytes is the largest request or response body either side
-	// accepts.
+	// accepts. Both sides apply it through EncodeBody and DecodeBody (see
+	// there), and the bounds below keep a report at the admission bounds under
+	// it: a Report is a full snapshot, so its size is what the bounds allow.
 	MaxBodyBytes = 4 << 20
+
+	// MaxTargetSessions is the most concurrent requests a warm-up round sends:
+	// the CRD's maximum for Workload.TargetSessions, so WarmUpRequest cannot
+	// ask for more. A round holds at most 4 + 1 + MaxTargetSessions timings (the
+	// four fixed shapes, the tool call, the concurrent requests).
+	MaxTargetSessions = 1024
+
+	// MaxTimingErrorBytes is the most bytes of RequestTiming.Error that a
+	// report carries: the agent cuts the text to it (TruncateUTF8). Every
+	// warm-up request of a round can carry one, so it is short.
+	MaxTimingErrorBytes = 64
+
+	// MaxMessageBytes is the most bytes of every other free-text field of a
+	// report: VerifyResult.Error, CheckOutcome.Message and Staging.Message. The
+	// agent cuts each to it (TruncateUTF8).
+	MaxMessageBytes = 256
+
+	// WarmUpBudgetBytes is the most the warm-up results of one report take, at
+	// the admission bounds: MaxWarmUpRounds rounds of 4 + 1 + MaxTargetSessions
+	// timings, each as long as JSON can make it. The rest of a report fits the
+	// remaining MiB of MaxBodyBytes.
+	WarmUpBudgetBytes = 3 << 20
 )
 
 // Timing of the protocol.
@@ -75,7 +103,8 @@ type Caller struct {
 	// JobID is the job ID the agent presented, equal to the recorded one.
 	JobID string
 	// AgentInstanceID is the agent process's random ID, from
-	// HeaderAgentInstanceID.
+	// HeaderAgentInstanceID, which the server has checked with
+	// CheckAgentInstanceID.
 	AgentInstanceID string
 }
 
@@ -96,7 +125,7 @@ type Backend interface {
 
 	// Desired returns what the caller's Allocation should run now, with its
 	// Version set (DesiredState.WithVersion). It is computed from API objects
-	// alone. A caller whose agent instance ID has no registration gets
+	// and the controller's key files alone. A caller whose agent instance ID has no registration gets
 	// CodeNotRegistered.
 	Desired(ctx context.Context, c Caller) (DesiredState, error)
 
@@ -176,4 +205,65 @@ func (d DesiredState) WithVersion() DesiredState {
 	sum := sha256.Sum256(b)
 	d.Version = hex.EncodeToString(sum[:])[:16]
 	return d
+}
+
+// EncodeBody returns v as a body: its JSON, which must not exceed
+// MaxBodyBytes. It refuses a larger result with an *Error of CodeBadRequest, so
+// a sender learns that its own body is too large rather than sending it to be
+// refused. The agent encodes every report with it, and the server every
+// response.
+func EncodeBody(v any) ([]byte, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf("encode body: %w", err)
+	}
+	if len(b) > MaxBodyBytes {
+		return nil, Errorf(CodeBadRequest, "body is %d bytes, above the %d-byte limit", len(b), MaxBodyBytes)
+	}
+	return b, nil
+}
+
+// DecodeBody reads one body from r into v. It reads at most MaxBodyBytes+1
+// bytes, so a body above MaxBodyBytes is refused after that many and never read
+// to its end, and unmarshals the rest with encoding/json. Unknown fields are
+// allowed, as everywhere in the protocol. Every failure, a body that is too
+// large, unreadable or not JSON for v, is an *Error of CodeBadRequest.
+//
+// The server (issue #60) decodes every request body with it. A server that
+// refuses a body it has not read to its end should close the connection after
+// it answers, or read and discard the rest, so the agent sees the answer and
+// not a reset connection.
+func DecodeBody(r io.Reader, v any) error {
+	b, err := io.ReadAll(io.LimitReader(r, MaxBodyBytes+1))
+	if err != nil {
+		return Errorf(CodeBadRequest, "reading the body: %v", err)
+	}
+	if len(b) > MaxBodyBytes {
+		return Errorf(CodeBadRequest, "body is above the %d-byte limit", MaxBodyBytes)
+	}
+	if err := json.Unmarshal(b, v); err != nil {
+		return Errorf(CodeBadRequest, "malformed body: %v", err)
+	}
+	return nil
+}
+
+// TruncateUTF8 returns s cut to at most n bytes at a rune boundary: it never
+// ends in the middle of a multi-byte character, so the result of a valid string
+// is valid. A string of n bytes or fewer is returned as it is, and a negative n
+// is 0. The agent cuts the free text of a report with it (MaxTimingErrorBytes,
+// MaxMessageBytes).
+func TruncateUTF8(s string, n int) string {
+	if n < 0 {
+		n = 0
+	}
+	if len(s) <= n {
+		return s
+	}
+	cut := n
+	// s[cut] continues a character that starts before it: back up to the start,
+	// at most the three bytes a character can have before its last.
+	for back := 0; back < utf8.UTFMax-1 && cut > 0 && !utf8.RuneStart(s[cut]); back++ {
+		cut--
+	}
+	return s[:cut]
 }

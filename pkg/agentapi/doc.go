@@ -26,8 +26,7 @@
 // checked. In direct mode the front presents the same certificate, so one pin
 // holds on both paths (HBEP-7; HBEP-11, Single-user host).
 //
-// Every request carries the agent's identity in headers, never in a body, so
-// bodies can be logged:
+// Every request carries the agent's identity in headers:
 //
 //	Authorization:              Bearer <the Allocation's credential>
 //	Hpcburst-Tag:               <the Allocation's job tag>
@@ -36,9 +35,28 @@
 //
 // The agent instance ID identifies one agent process. It is never the kernel's
 // boot ID: a requeued job can land on the same node with no reboot, and must
-// still be told apart. The registration also carries the scheduler's restart
-// count of the job (RegisterRequest.RestartCount, from SLURM_RESTART_COUNT when
-// Slurm sets it), so a requeue shows as a higher count too.
+// still be told apart. Its form is 32 lowercase hex characters
+// (NewAgentInstanceID draws one, CheckAgentInstanceID checks it), because the
+// controller copies it into a status field with a length bound; the server
+// refuses another form with CodeBadRequest before it calls the Backend. The
+// registration also carries the scheduler's restart count of the job
+// (RegisterRequest.RestartCount, from SLURM_RESTART_COUNT when Slurm sets it),
+// so a requeue shows as a higher count too.
+//
+// Secrets. The Authorization header carries the Allocation's credential, a
+// desired state can carry DesiredInstance.HubToken, and a report can carry
+// InstanceReport.Key. So neither side logs a body or the Authorization header,
+// at any level. A log line about a call names the path, the status, the error
+// code and the Caller's tag, job ID and agent instance ID. A component that
+// must log a desired state or a report logs its Redacted form
+// (DesiredState.Redacted, Report.Redacted), which replaces every secret with
+// RedactedValue (HBEP-11, Credentials: no credential reaches a log).
+//
+// Size. Both sides apply MaxBodyBytes: the agent encodes every report with
+// EncodeBody, and the server decodes every request body with DecodeBody. The
+// admission bounds (MaxTargetSessions) and the agent's cuts of free text
+// (MaxTimingErrorBytes, MaxMessageBytes, TruncateUTF8) keep every report at the
+// bounds below the limit (WarmUpBudgetBytes).
 //
 // The server authenticates every call, so it holds no session: it finds the
 // Allocation whose external name is the tag, reads the credential file named
@@ -64,7 +82,10 @@
 // Versioning. Within v1 a newer endpoint serves older agents. Neither side
 // refuses a field it does not know (no DisallowUnknownFields), and a new field
 // is optional with a zero value that means what the older protocol meant
-// (HBEP-7, Compatibility and upgrades).
+// (HBEP-7, Compatibility and upgrades). An agent that receives an Action it
+// does not know changes nothing: it keeps its parts as they are, and keeps
+// polling and reporting. The controller sends only the actions of the
+// protocol version the agent registered for.
 //
 // # Who decides
 //
@@ -79,8 +100,9 @@
 //   - the agent judges what needs the outputs, which never leave the job:
 //     the chat request, the tool-call smoke test, the corruption check (three
 //     greedy outputs share their first 32 tokens, none empty or a single
-//     repeated token) and the behaviour check (a well-formed answer at the
-//     longest context, no loop). It reports each as a CheckOutcome;
+//     repeated token; the rule is CorruptionVerdict, which the real agent and
+//     the fake both apply) and the behaviour check (a well-formed answer at
+//     the longest context, no loop). It reports each as a CheckOutcome;
 //   - the controller judges everything with a threshold or a declared value:
 //     the file rehash, the settings comparison, the engine version, the
 //     served model names, the maximum length, KV capacity against
@@ -101,11 +123,21 @@
 // Operational readiness 2: it "reads the agents' next reports").
 //
 // What must survive a restart is the controller's judgement, which it writes
-// to the API: the Instance's phase, conditions, end reason, start-instruction
-// and ready times, throughput and AgentRegistration; the verification records;
-// the restart generations (annotations); the ModelDeployment's start-to-ready
-// times. Backend.Desired must be computed from those objects alone, so a
-// restarted controller serves the same desired state, with the same Version.
+// to the API: the Instance's phase, conditions, end reason and end time,
+// start-instruction and ready times, throughput, AgentRegistration and restart
+// history (InstanceStatus.EndTime, InstanceStatus.Restarts); the verification
+// records; the restart generations (annotations); the Allocation's idle-since
+// annotation; the ModelDeployment's start-to-ready times. Backend.Desired must
+// be computed from those objects and the controller's key files alone
+// (KeyStored and HubToken come from files), so a restarted controller serves
+// the same desired state, with the same Version.
+//
+// Warm-up gates ready. The controller marks an Instance ready only after a
+// report whose WarmUp.Done is true for the current verification generation.
+// It judges settling from the rounds, then sends a desired state without
+// WarmUp; the agent then cancels any warm-up request still in flight and
+// reports Done. So no live request ever meets a warm-up round (HBEP-7: warm-up
+// runs before admission, never on live workers).
 //
 // Registration is soft state: it is kept in memory, keyed by Allocation UID and
 // agent instance ID, and copied to the Instance it starts
@@ -113,9 +145,9 @@
 // instance ID answers Desired and Report with CodeNotRegistered, and the agent
 // registers again at once, within one poll, with the same agent instance ID.
 // That re-registration is the same execution: it fails no Instance and raises
-// no generation. So after its own restart, the controller judges no
-// registration timeout until LongPollTimeout plus ReportInterval have passed
-// since it started.
+// no generation. So after its own restart, the controller judges neither a
+// registration timeout nor health.agentTimeout (AgentUnreachable) until
+// LongPollTimeout plus ReportInterval have passed since it started.
 //
 // A registration with the job ID the Instance was started under and another
 // agent instance ID, or a higher restart count, is a second execution of the

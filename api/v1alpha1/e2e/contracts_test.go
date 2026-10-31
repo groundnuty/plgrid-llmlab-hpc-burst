@@ -9,6 +9,7 @@ import (
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/utils/ptr"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -245,6 +246,216 @@ func TestInstanceContractStatus(t *testing.T) {
 	}
 	again.Status.Throughput.TimeToFirstToken = "fast"
 	requireRefused(t, c.Status().Update(bg(), again), "timeToFirstToken")
+}
+
+// The target sessions are at most 1024 (agentapi.MaxTargetSessions), so the
+// agent's warm-up report fits the protocol's body limit. This is a schema
+// bound, not a CEL rule.
+func TestWorkloadTargetSessionsHaveAnUpperBound(t *testing.T) {
+	sessions := func(n int32) func(*v1alpha1.ModelDeployment) {
+		return func(md *v1alpha1.ModelDeployment) { md.Spec.Workload.TargetSessions = n }
+	}
+	if v1alpha1.MaxTargetSessions != 1024 {
+		t.Fatalf("MaxTargetSessions = %d, want 1024", v1alpha1.MaxTargetSessions)
+	}
+	runMDCases(t, []mdCase{
+		{"1025 target sessions", sessions(1025), "targetSessions: Invalid value: 1025: spec.workload.targetSessions in body should be less than or equal to 1024"},
+		{"100000 target sessions, the former bound", sessions(100000), "should be less than or equal to 1024"},
+	}, []mdCase{
+		{"1024 target sessions", sessions(1024), ""},
+		{"1 target session", sessions(1), ""},
+	})
+}
+
+// The Instance's end time and its recent restarts are status fields the
+// lifecycle controller writes (HBEP-7, Health and restarts). They round-trip
+// through the status subresource under the keys the types name.
+func TestInstanceEndTimeAndRestartsRoundTrip(t *testing.T) {
+	ns := newNamespace(t)
+	in := newInstance(ns, "end-and-restarts")
+	must(t, c.Create(bg(), in), "create")
+	got := &v1alpha1.Instance{}
+	must(t, c.Get(bg(), objKey(in), got), "get")
+	t0 := metav1.NewTime(time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC))
+	got.Status.Phase = v1alpha1.InstanceEnded
+	got.Status.EndReason = v1alpha1.ReasonAllocationEndedEarly
+	got.Status.EndTime = ptr.To(metav1.NewTime(t0.Add(90 * time.Minute)))
+	got.Status.Restarts = []v1alpha1.InstanceRestart{
+		{Part: v1alpha1.PartInstance, Generation: 1, Time: t0, Signal: v1alpha1.ReasonProbeFailing},
+		{Part: v1alpha1.WorkerName(0), Generation: 2, Time: metav1.NewTime(t0.Add(time.Minute)), Signal: v1alpha1.ReasonNoProgress},
+		{Part: v1alpha1.WorkerName(12), Generation: 1, Time: metav1.NewTime(t0.Add(2 * time.Minute)), Signal: v1alpha1.ReasonPartExited},
+	}
+	must(t, c.Status().Update(bg(), got), "write the end time and the restarts")
+	again := &v1alpha1.Instance{}
+	must(t, c.Get(bg(), objKey(in), again), "get")
+	s := again.Status
+	if s.EndTime == nil || !s.EndTime.Equal(got.Status.EndTime) {
+		t.Errorf("endTime = %v, want %v", s.EndTime, got.Status.EndTime)
+	}
+	if len(s.Restarts) != 3 {
+		t.Fatalf("restarts = %+v, want the three written, oldest first", s.Restarts)
+	}
+	for i, want := range got.Status.Restarts {
+		r := s.Restarts[i]
+		if r.Part != want.Part || r.Generation != want.Generation || !r.Time.Equal(&want.Time) || r.Signal != want.Signal {
+			t.Errorf("restarts[%d] = %+v, want %+v", i, r, want)
+		}
+	}
+
+	// On the wire the keys are endTime and restarts, each entry with part,
+	// generation, time and signal.
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("Instance"))
+	must(t, c.Get(bg(), objKey(in), u), "get unstructured")
+	status, _, _ := unstructured.NestedMap(u.Object, "status")
+	if _, ok := status["endTime"]; !ok {
+		t.Errorf("status.endTime is not stored: %v", status)
+	}
+	restarts, _, _ := unstructured.NestedSlice(u.Object, "status", "restarts")
+	if len(restarts) != 3 {
+		t.Fatalf("status.restarts = %v", restarts)
+	}
+	first, _ := restarts[0].(map[string]any)
+	for _, key := range []string{"part", "generation", "time", "signal"} {
+		if _, ok := first[key]; !ok {
+			t.Errorf("status.restarts[0] has no %q: %v", key, first)
+		}
+	}
+
+	// Sixteen entries are the most kept.
+	sixteen := make([]v1alpha1.InstanceRestart, 16)
+	for i := range sixteen {
+		sixteen[i] = v1alpha1.InstanceRestart{Part: v1alpha1.PartInstance, Generation: int64(i + 1), Time: t0, Signal: v1alpha1.ReasonProbeFailing}
+	}
+	must(t, c.Get(bg(), objKey(in), got), "get")
+	got.Status.Restarts = sixteen
+	must(t, c.Status().Update(bg(), got), "write 16 restarts")
+}
+
+// Each bound of an Instance's restart entries refuses what it should, and only
+// that: every case changes one thing in a valid entry.
+func TestInstanceRestartEntriesAreBounded(t *testing.T) {
+	ns := newNamespace(t)
+	in := newInstance(ns, "restart-bounds")
+	must(t, c.Create(bg(), in), "create")
+	t0 := metav1.NewTime(time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC))
+	valid := func() v1alpha1.InstanceRestart {
+		return v1alpha1.InstanceRestart{Part: v1alpha1.PartInstance, Generation: 1, Time: t0, Signal: v1alpha1.ReasonProbeFailing}
+	}
+	entry := func(edit func(*v1alpha1.InstanceRestart)) []v1alpha1.InstanceRestart {
+		r := valid()
+		edit(&r)
+		return []v1alpha1.InstanceRestart{r}
+	}
+	seventeen := make([]v1alpha1.InstanceRestart, 17)
+	for i := range seventeen {
+		seventeen[i] = valid()
+	}
+	for _, tc := range []struct {
+		name     string
+		restarts []v1alpha1.InstanceRestart
+		want     string
+	}{
+		{"17 entries", seventeen, "must have at most 16 items"},
+		{"the part router", entry(func(r *v1alpha1.InstanceRestart) { r.Part = "router" }), "restarts[0].part"},
+		{"the part worker-x", entry(func(r *v1alpha1.InstanceRestart) { r.Part = "worker-x" }), "restarts[0].part"},
+		{"the part worker- with no number", entry(func(r *v1alpha1.InstanceRestart) { r.Part = "worker-" }), "restarts[0].part"},
+		{"no part", entry(func(r *v1alpha1.InstanceRestart) { r.Part = "" }), "restarts[0].part"},
+		{"generation 0", entry(func(r *v1alpha1.InstanceRestart) { r.Generation = 0 }), "should be greater than or equal to 1"},
+		{"a negative generation", entry(func(r *v1alpha1.InstanceRestart) { r.Generation = -1 }), "should be greater than or equal to 1"},
+		{"a signal with a space", entry(func(r *v1alpha1.InstanceRestart) { r.Signal = "probe failing" }), "restarts[0].signal"},
+		{"a signal in lower case", entry(func(r *v1alpha1.InstanceRestart) { r.Signal = "probeFailing" }), "restarts[0].signal"},
+		{"no signal", entry(func(r *v1alpha1.InstanceRestart) { r.Signal = "" }), "restarts[0].signal"},
+	} {
+		t.Run("refuse "+tc.name, func(t *testing.T) {
+			got := &v1alpha1.Instance{}
+			must(t, c.Get(bg(), objKey(in), got), "get")
+			got.Status.Restarts = tc.restarts
+			requireRefused(t, c.Status().Update(bg(), got), tc.want)
+		})
+	}
+}
+
+// The agent's instance ID is 32 lowercase hex characters, as the agent draws it
+// (agentapi.CheckAgentInstanceID).
+func TestAgentInstanceIDIsThirtyTwoLowercaseHex(t *testing.T) {
+	ns := newNamespace(t)
+	in := newInstance(ns, "agent-id")
+	must(t, c.Create(bg(), in), "create")
+	t0 := metav1.NewTime(time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC))
+	write := func(id string) error {
+		got := &v1alpha1.Instance{}
+		must(t, c.Get(bg(), objKey(in), got), "get")
+		got.Status.Agent = &v1alpha1.AgentRegistration{AgentInstanceID: id, JobID: "1001", RegisteredTime: t0}
+		return c.Status().Update(bg(), got)
+	}
+	for _, tc := range []struct{ name, id string }{
+		{"31 hex characters", strings.Repeat("a", 31)},
+		{"33 hex characters", strings.Repeat("a", 33)},
+		{"uppercase hex", strings.Repeat("A", 32)},
+		{"mixed case hex", strings.Repeat("aB", 16)},
+		{"32 characters that are not hex", strings.Repeat("g", 32)},
+		{"a UUID with dashes", "0123456789abcdef-0123456789abcdef"},
+	} {
+		t.Run("refuse "+tc.name, func(t *testing.T) {
+			requireRefused(t, write(tc.id), "agentInstanceID")
+		})
+	}
+	t.Run("accept 32 lowercase hex characters", func(t *testing.T) {
+		id := "0123456789abcdef0123456789abcdef"
+		must(t, write(id), "write")
+		got := &v1alpha1.Instance{}
+		must(t, c.Get(bg(), objKey(in), got), "get")
+		if got.Status.Agent == nil || got.Status.Agent.AgentInstanceID != id {
+			t.Errorf("status.agent = %+v, want agentInstanceID %s", got.Status.Agent, id)
+		}
+	})
+}
+
+// The Allocation records that its queue wait is in the Provider's status, so a
+// failed Provider write is retried and a wait is never added twice (HBEP-4,
+// Provider status). It round-trips through the status subresource; false is
+// absent.
+func TestAllocationQueueWaitRecordedRoundTrips(t *testing.T) {
+	ns := newNamespace(t)
+	a := newAllocation(ns, uniq("alloc"))
+	must(t, c.Create(bg(), a), "create")
+	got := &v1alpha1.Allocation{}
+	must(t, c.Get(bg(), objKey(a), got), "get")
+	if got.Status.AtProvider.QueueWaitRecorded {
+		t.Fatalf("a new Allocation has queueWaitRecorded set")
+	}
+	got.Status.AtProvider.JobID = "1001"
+	got.Status.AtProvider.QueueWaitRecorded = true
+	must(t, c.Status().Update(bg(), got), "write queueWaitRecorded")
+
+	again := &v1alpha1.Allocation{}
+	must(t, c.Get(bg(), objKey(a), again), "get")
+	if !again.Status.AtProvider.QueueWaitRecorded {
+		t.Errorf("queueWaitRecorded = false after a write of true: %+v", again.Status.AtProvider)
+	}
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("Allocation"))
+	must(t, c.Get(bg(), objKey(a), u), "get unstructured")
+	obs, _, _ := unstructured.NestedMap(u.Object, "status", "atProvider")
+	if obs["queueWaitRecorded"] != true {
+		t.Errorf("status.atProvider.queueWaitRecorded = %v; keys %v", obs["queueWaitRecorded"], obs)
+	}
+
+	// The main resource ignores it.
+	again.Status.AtProvider.QueueWaitRecorded = false
+	must(t, c.Update(bg(), again), "update with a changed status")
+	must(t, c.Get(bg(), objKey(a), got), "get")
+	if !got.Status.AtProvider.QueueWaitRecorded {
+		t.Errorf("the main resource wrote queueWaitRecorded")
+	}
+	// A status write that leaves it out clears it: false is absent.
+	got.Status.AtProvider.QueueWaitRecorded = false
+	must(t, c.Status().Update(bg(), got), "write false")
+	must(t, c.Get(bg(), objKey(a), again), "get")
+	if again.Status.AtProvider.QueueWaitRecorded {
+		t.Errorf("queueWaitRecorded stayed true after a write of false")
+	}
 }
 
 // A ModelDeployment keeps one start-to-ready time per accelerator class
