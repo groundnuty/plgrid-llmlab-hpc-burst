@@ -49,30 +49,47 @@ func TestLaterHardEndIsCopiedIntoStatus(t *testing.T) {
 	}
 }
 
-// applyDialHome plays the lifecycle controller: it sets DialHomeUnreachable
-// through the contract's own server-side apply object, under its field manager.
-func (e *env) applyDialHome(cond metav1.Condition) {
-	e.t.Helper()
-	u, err := v1alpha1.DialHomeUnreachableApply(testProvider, cond)
+// applyDialHome plays the lifecycle controller: it sets DialHomeUnreachable on
+// the named Provider through the contract's own server-side apply object, under
+// its field manager.
+func applyDialHome(t *testing.T, c client.Client, providerName string, cond metav1.Condition) {
+	t.Helper()
+	u, err := v1alpha1.DialHomeUnreachableApply(providerName, cond)
 	if err != nil {
-		e.t.Fatal(err)
+		t.Fatal(err)
+	}
+	var prov v1alpha1.Provider
+	if err := c.Get(context.Background(), client.ObjectKey{Name: providerName}, &prov); err != nil {
+		t.Fatal(err)
 	}
 	// The fake client, unlike the API server, wants a resourceVersion on an
 	// apply to the status subresource.
-	u.SetResourceVersion(e.provider().ResourceVersion)
-	if err := e.c.Status().Apply(context.Background(), client.ApplyConfigurationFromUnstructured(u),
+	u.SetResourceVersion(prov.ResourceVersion)
+	if err := c.Status().Apply(context.Background(), client.ApplyConfigurationFromUnstructured(u),
 		client.FieldOwner(v1alpha1.FieldManagerLifecycle), client.ForceOwnership); err != nil {
-		e.t.Fatalf("apply DialHomeUnreachable: %v", err)
+		t.Fatalf("apply DialHomeUnreachable: %v", err)
 	}
+}
+
+// findDialHome returns the Provider's DialHomeUnreachable condition, and fails
+// the test when it is gone.
+func findDialHome(t *testing.T, prov *v1alpha1.Provider) metav1.Condition {
+	t.Helper()
+	c := apimeta.FindStatusCondition(prov.Status.Conditions, v1alpha1.ConditionDialHomeUnreachable)
+	if c == nil {
+		t.Fatalf("the Provider's DialHomeUnreachable condition is gone: %+v", prov.Status.Conditions)
+	}
+	return *c
+}
+
+func (e *env) applyDialHome(cond metav1.Condition) {
+	e.t.Helper()
+	applyDialHome(e.t, e.c, testProvider, cond)
 }
 
 func (e *env) dialHome() metav1.Condition {
 	e.t.Helper()
-	c := apimeta.FindStatusCondition(e.provider().Status.Conditions, v1alpha1.ConditionDialHomeUnreachable)
-	if c == nil {
-		e.t.Fatalf("the Provider's DialHomeUnreachable condition is gone: %+v", e.provider().Status.Conditions)
-	}
-	return *c
+	return findDialHome(e.t, e.provider())
 }
 
 func TestProviderStatusKeepsAConditionTheFakeDoesNotOwn(t *testing.T) {
