@@ -2,7 +2,7 @@
 # Licence check of a repository with go-licenses and HBEP-15's allowlist. Used by
 # reproduce.sh, by licence-fixtures.sh, and (moved to hack/) by the proposed CI jobs.
 #
-# Usage: licence-check.sh [--no-own-exemption] [--negative-control] <go-licenses binary> \
+# Usage: licence-check.sh [--local-permit-own] [--negative-control] <go-licenses binary> \
 #                         <repo root> <output dir> [module dir ...]
 #
 # Checks the root module (".") and, unless module dirs are given, every go.mod under
@@ -11,19 +11,23 @@
 # The allowlist is allowed-licenses.txt next to this script, or $ALLOWED_LICENSES.
 #
 # Exit status: 0 when no module has an unexpected failure; 1 otherwise; 2 on bad usage.
-# An unexpected failure is anything go-licenses reports except the one permitted case below,
-# and also a go-licenses or go list run that itself fails. The root module is also checked
+# An unexpected failure is anything go-licenses reports (except the one case that
+# --local-permit-own permits, below), and also a go-licenses or go list run that itself fails. The root module is also checked
 # with --include_tests, so a licence reached only through a test import fails too.
 #
-# The permitted case. The repository has no root LICENSE yet (HBEP-15 open question 1), so
-# its own packages report "Did not find license". They are permitted for the root module and
-# for spikes/*; never for third_party/*, whose shipped copies carry their own LICENSE. The
-# permission is decided by licence_gate.py against the packages that "go list" assigns to
-# the module under check (Module.Main), so it cannot cover a dependency, a module nested
-# beneath the root's path, or a repository whose name merely starts with the same text.
+# Strict by default: a package of the module under check that has no LICENSE ("Did not find
+# license") is a failure, for every module. That is how the proposed CI job calls this script,
+# and it is the state once the repository has a root LICENSE (HBEP-15 open question 1, the
+# owner's decision). Without one, the root module's own packages cannot pass.
+#
+# --local-permit-own (LOCAL ONLY, never for CI): permit that one failure for the root module
+# and for spikes/*, never for third_party/*, whose shipped copies carry their own LICENSE. It
+# exists so reproduce.sh and licence-fixtures.sh can run on a repository that has no LICENSE
+# yet. The permission is decided by licence_gate.py against the packages that "go list"
+# assigns to the module under check (Module.Main), so it cannot cover a dependency, a module
+# nested beneath the root's path, or a repository whose name merely starts with the same text.
 # That is why this script does not use go-licenses' --ignore, which matches a path prefix.
-# Once a root LICENSE exists, delete the permission: pass --no-own-exemption (it applies
-# to every module). That decision is the repository owner's.
+# The copy that moves to hack/ has no such option.
 #
 # --negative-control also takes BSD-3-Clause off the allowlist for the root module; the run
 # must then fail and name BSD-3-Clause packages, else the check is not looking at the list.
@@ -32,12 +36,12 @@
 # runs), go-licenses-modules.txt (the other modules). Everything is also printed.
 set -u -o pipefail
 
-usage="usage: $0 [--no-own-exemption] [--negative-control] <go-licenses binary> <repo root> <output dir> [module dir ...]"
-permit_own=1
+usage="usage: $0 [--local-permit-own] [--negative-control] <go-licenses binary> <repo root> <output dir> [module dir ...]"
+permit_own=0
 neg=0
 while [ $# -gt 0 ]; do
   case $1 in
-    --no-own-exemption) permit_own=0; shift ;;
+    --local-permit-own) permit_own=1; shift ;;
     --negative-control) neg=1; shift ;;
     -*) echo "$usage" >&2; exit 2 ;;
     *) break ;;

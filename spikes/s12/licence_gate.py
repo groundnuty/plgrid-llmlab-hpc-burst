@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """Decide whether a "go-licenses check" run failed only for a reason we allow.
 
-The one allowed reason: a package of the module under check, the main module itself, has no
-LICENSE ("Did not find license for library '<package>'"). The repository has no root LICENSE
-yet (HBEP-15 open question 1), so its own packages cannot pass. go-licenses' own --ignore flag
-cannot express this exemption: it matches a path prefix (strings.HasPrefix on every package),
-so it also hides a dependency, or another repository, whose path merely starts with the same
-text. This gate instead checks each failing library against the exact list of packages that
-"go list" assigns to the main module (the package's Module.Main), so a dependency is never
-exempt, however its path looks.
+Strict by default: every "Did not find license" and "Not allowed license" line is a failure.
+
+LOCAL ONLY, never for CI: with --permit-own 1 the one reason it allows is that a package of the
+module under check, the main module itself, has no LICENSE ("Did not find license for library
+'<package>'"). The repository has no root LICENSE yet (HBEP-15 open question 1), so its own
+packages cannot pass; the spike's scripts use this to run on such a repository. go-licenses' own
+--ignore flag cannot express that exemption: it matches a path prefix (strings.HasPrefix on
+every package), so it also hides a dependency, or another repository, whose path merely starts
+with the same text. This gate instead checks each failing library against the exact list of
+packages that "go list" assigns to the main module (the package's Module.Main), so a dependency
+is never exempt, however its path looks. The copy that moves to hack/ has no such option.
 
 Usage:
   go-licenses check ./... --allowed_licenses=... 2>&1 | licence_gate.py \\
-      --rc <go-licenses exit status> --own-packages <file> [--permit-own 0|1]
+      --rc <go-licenses exit status> --own-packages <file> [--permit-own 0|1 (1 is local only)]
 
 --own-packages is the output of
   go list -deps -test -f '{{if .Module}}{{if .Module.Main}}{{.ImportPath}}{{end}}{{end}}' ./...
@@ -22,7 +25,7 @@ Exit status: 0 when every failure is permitted; 1 otherwise. It fails closed: a 
 go-licenses exit with a line the gate does not recognise, or with no recognised line at all
 (a build error, a Go version mismatch), is an unexpected failure. So is a "Did not find"
 or "Not allowed" line next to a zero exit. Permitted failures are printed as such.
-When the exemption goes away (a root LICENSE exists), run with --permit-own 0.
+The default, --permit-own 0, is what the CI job runs.
 """
 import argparse
 import re
@@ -66,8 +69,9 @@ def main(argv):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--rc", type=int, required=True, help="exit status of go-licenses check")
     ap.add_argument("--own-packages", required=True, help="file with the output of go list (see above)")
-    ap.add_argument("--permit-own", type=int, choices=(0, 1), default=1,
-                    help="1: an own package without a LICENSE is permitted (default); 0: it is a failure")
+    ap.add_argument("--permit-own", type=int, choices=(0, 1), default=0,
+                    help="1 (LOCAL ONLY, not for CI): an own package without a LICENSE is permitted; "
+                         "0 (default): it is a failure")
     args = ap.parse_args(argv)
     with open(args.own_packages) as f:
         own = own_packages(f.read())

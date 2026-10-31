@@ -13,8 +13,9 @@
 # Everything the script writes for reading goes to <work dir>/results. Exit status: 0 when both
 # SBOMs validate, match "go version -m" with no extra Go module entry, the validators' negative
 # controls fail as they should, licence-check.sh passes for the root and every nested module
-# (the repository's own packages may lack a LICENSE; nothing else may fail), and the licence
-# fixtures behave as expected; 1 otherwise. A failed check does not end the script: the
+# (run with --local-permit-own, which is LOCAL ONLY: the repository has no LICENSE, so its own
+# packages may lack one; nothing else may fail), and the licence fixtures behave as expected;
+# 1 otherwise. A failed check does not end the script: the
 # remaining steps run and the status is 1. A failed download, checksum or build ends it with 1.
 set -euo pipefail
 
@@ -121,13 +122,14 @@ grep -E '^==|extra Go packages|wrong version|missing' "$R/compare-source.txt"
 step "7. Licence check with go-licenses $GO_LICENSES_VERSION and HBEP-15's allowlist (root module, then each nested module)"
 GOBIN=$W/gobin go install "github.com/google/go-licenses/v2@$GO_LICENSES_VERSION"
 GL=$W/gobin/go-licenses
-# licence-check.sh exits 1 for any failure other than a missing LICENSE in the module's own
-# packages (see its header), for each module it covers: the root with and without tests, then
-# every go.mod under third_party/ (and spikes/ with CHECK_SPIKES=1). It writes
+# licence-check.sh exits 1 for any failure, for each module it covers: the root with and without
+# tests, then every go.mod under third_party/ (and spikes/ with CHECK_SPIKES=1). It is strict
+# by default. --local-permit-own is LOCAL ONLY (never in CI): it lets the repository's own
+# packages lack a LICENSE, because there is no root LICENSE yet (see its header). It writes
 # go-licenses-report.csv, go-licenses-check.txt and go-licenses-modules.txt to $R. The status is
 # set outside the pipeline, so the pipe to tee cannot lose it.
 rc=0
-"$here/licence-check.sh" --negative-control "$GL" "$root" "$R" > "$W/licence-check.out" 2>&1 || rc=$?
+"$here/licence-check.sh" --local-permit-own --negative-control "$GL" "$root" "$R" > "$W/licence-check.out" 2>&1 || rc=$?
 cat "$W/licence-check.out"
 [ "$rc" = 0 ] || { echo "licence-check.sh exited $rc"; status=1; }
 echo "packages under spikes/ or third_party/ matched by ./... at the root: $(cd "$root" && go list ./... | grep -c -E '/(spikes|third_party)/' || true)" | tee -a "$R/go-licenses-modules.txt"

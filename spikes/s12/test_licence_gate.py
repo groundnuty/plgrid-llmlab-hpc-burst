@@ -27,12 +27,14 @@ def na(pkg, lic="BSD-4-Clause"):
 
 
 def gate(output, rc, own=OWN, permit=1):
+    """permit=None leaves --permit-own off the command line, to test the default."""
     with tempfile.TemporaryDirectory() as d:
         f = os.path.join(d, "own.txt")
         with open(f, "w") as h:
             h.write(own)
+        flag = [] if permit is None else ["--permit-own", str(permit)]
         p = subprocess.run([sys.executable, "-I", os.path.join(HERE, "licence_gate.py"), "--rc", str(rc),
-                            "--own-packages", f, "--permit-own", str(permit)],
+                            "--own-packages", f] + flag,
                            input=output, capture_output=True, text=True)
     return p.returncode, p.stdout + p.stderr
 
@@ -56,6 +58,13 @@ class GateTest(unittest.TestCase):
         rc, out = gate(nf(ROOT) + "\n", 1, permit=0)
         self.assertEqual(rc, 1, out)
         self.assertIn("UNEXPECTED: " + nf(ROOT), out)
+
+    def test_the_default_is_strict(self):
+        # The CI job runs the gate without the local-only option: an own package with no LICENSE fails.
+        rc, out = gate(nf(ROOT) + "\n", 1, permit=None)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("UNEXPECTED: " + nf(ROOT), out)
+        self.assertIn("permitted=0, unexpected=1", out)
 
     def test_dependency_with_an_unknown_licence_sharing_the_prefix_fails(self):
         # A prefix match on example.test/proj would hide both of these.
