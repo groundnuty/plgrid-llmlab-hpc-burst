@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -90,6 +91,38 @@ type outcome struct {
 	errAfterQ    error  // Err() once Q had returned
 	failsAfterQ  uint64 // Failures() then
 	closeErr     error
+	logs         *lockedBuf // the sink's log, as JSON lines
+}
+
+// lockedBuf is a buffer the sink's writer goroutine and a test can both use.
+type lockedBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+// records decodes the JSON log lines written so far.
+func (l *lockedBuf) records(t *testing.T) []map[string]any {
+	t.Helper()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []map[string]any
+	for _, line := range bytes.Split(bytes.TrimSpace(l.b.Bytes()), []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal(line, &m); err != nil {
+			t.Fatalf("log line %q: %v", line, err)
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 // failedBatch runs one failed batch on a sink over dir. Record P is written
@@ -101,11 +134,13 @@ type outcome struct {
 func failedBatch(t *testing.T, dir string, failTruncate bool) outcome {
 	t.Helper()
 	f := &flaky{gate: make(chan struct{}), entered: make(chan struct{}), failTruncate: failTruncate}
-	s, err := usage.OpenWith(dir, func(file *os.File) usage.LogHandle { f.LogHandle = file; return f })
+	logs := &lockedBuf{}
+	s, err := usage.OpenWith(dir, slog.New(slog.NewJSONHandler(logs, nil)), func(file *os.File) usage.LogHandle { f.LogHandle = file; return f })
 	if err != nil {
 		t.Fatalf("OpenWith: %v", err)
 	}
 	var o outcome
+	o.logs = logs
 	_, o.pErr = s.Write(rec("P"))
 	bDone := make(chan error, 1)
 	go func() { _, err := s.Write(rec("B")); bDone <- err }()
@@ -181,6 +216,53 @@ func TestEachWriteOfAFailedBatchReturnsItsError(t *testing.T) {
 	}
 	if !errors.Is(o.errAfterFail, errDisk) {
 		t.Errorf("Err() after the failure = %v, want an error that wraps %v", o.errAfterFail, errDisk)
+	}
+}
+
+// TestAFailureIsCountedAndLogged: the failed batch counts once, and is not
+// counted again by a later success; the logger gets one Error record that names
+// the cause and the batch, and nothing else is logged.
+func TestAFailureIsCountedAndLogged(t *testing.T) {
+	o := failedBatch(t, t.TempDir(), false)
+	if o.failsAfter != 1 || o.failsAfterQ != 1 {
+		t.Errorf("Failures() = %d after the failed batch and %d after a later success, want 1 and 1", o.failsAfter, o.failsAfterQ)
+	}
+	logs := o.logs.records(t)
+	if len(logs) != 1 {
+		t.Fatalf("%d log records, want 1: %v", len(logs), logs)
+	}
+	l := logs[0]
+	if l["level"] != "ERROR" {
+		t.Errorf("level = %v, want ERROR", l["level"])
+	}
+	if cause, _ := l["error"].(string); !strings.Contains(cause, errDisk.Error()) {
+		t.Errorf("error = %v, want the cause %q", l["error"], errDisk)
+	}
+	if l["records"] != float64(3) || l["firstCounter"] != float64(3) || l["lastCounter"] != float64(5) {
+		t.Errorf("the record names records=%v firstCounter=%v lastCounter=%v, want 3, 3 and 5", l["records"], l["firstCounter"], l["lastCounter"])
+	}
+}
+
+// failing is a log file whose writes all fail.
+type failing struct{ usage.LogHandle }
+
+func (failing) Write([]byte) (int, error) { return 0, errDisk }
+
+// TestNoLoggerIsFine: a sink opened without a logger (Open) reports a failure
+// to the Write and counts it, and does not log or panic.
+func TestNoLoggerIsFine(t *testing.T) {
+	s, err := usage.OpenWith(t.TempDir(), nil, func(file *os.File) usage.LogHandle { return failing{file} })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write(rec("a")); !errors.Is(err, errDisk) {
+		t.Errorf("Write returned %v, want an error that wraps %v", err, errDisk)
+	}
+	if got := s.Failures(); got != 1 {
+		t.Errorf("Failures() = %d, want 1", got)
+	}
+	if err := s.Close(); !errors.Is(err, errDisk) {
+		t.Errorf("Close returned %v, want the latest batch's error", err)
 	}
 }
 
@@ -261,7 +343,7 @@ func (f *syncGate) unblock() { f.once.Do(func() { close(f.release) }) }
 func TestWriteReturnsOnlyAfterTheSync(t *testing.T) {
 	dir := t.TempDir()
 	f := &syncGate{entered: make(chan struct{}, 1), release: make(chan struct{})}
-	s, err := usage.OpenWith(dir, func(file *os.File) usage.LogHandle { f.LogHandle = file; return f })
+	s, err := usage.OpenWith(dir, nil, func(file *os.File) usage.LogHandle { f.LogHandle = file; return f })
 	if err != nil {
 		t.Fatal(err)
 	}

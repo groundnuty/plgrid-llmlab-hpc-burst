@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -87,8 +88,9 @@ type pending struct {
 // disk syncs (HBEP-5, Sink in alpha). A Write returns when the batch its
 // record is in has been written and synced, or has failed.
 type Sink struct {
-	dir string
-	log logFile
+	dir    string
+	log    logFile
+	logger *slog.Logger
 
 	mu       sync.Mutex
 	next     uint64 // the next counter to use
@@ -109,14 +111,22 @@ type Sink struct {
 // the persisted block end plus one, so a crash shows as a gap (HBEP-8). A log
 // that ends in the middle of a line, as a crash during a write leaves it, is
 // cut back to its last whole line, so that the next record starts a line of
-// its own; the record that was cut shows as a gap too.
-func Open(dir string) (*Sink, error) {
-	return open(dir, func(f *os.File) logFile { return f })
+// its own; the record that was cut shows as a gap too. It logs nothing.
+func Open(dir string) (*Sink, error) { return OpenLog(dir, nil) }
+
+// OpenLog is Open with a logger, which gets one Error record for each batch of
+// records that fails to be written or synced, naming the cause. A nil logger
+// logs nothing.
+func OpenLog(dir string, logger *slog.Logger) (*Sink, error) {
+	return open(dir, logger, func(f *os.File) logFile { return f })
 }
 
-// open is Open with the log file passed through wrap, which is how the tests
-// make the disk fail.
-func open(dir string, wrap func(*os.File) logFile) (*Sink, error) {
+// open is OpenLog with the log file passed through wrap, which is how the
+// tests make the disk fail.
+func open(dir string, logger *slog.Logger, wrap func(*os.File) logFile) (*Sink, error) {
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
@@ -133,7 +143,7 @@ func open(dir string, wrap func(*os.File) logFile) (*Sink, error) {
 		f.Close()
 		return nil, fmt.Errorf("usage: repair the end of %s: %w", filepath.Join(dir, LogFile), err)
 	}
-	s := &Sink{dir: dir, log: wrap(f), size: size, next: end + 1, blockEnd: end, wake: make(chan struct{}, 1), done: make(chan struct{})}
+	s := &Sink{dir: dir, log: wrap(f), logger: logger, size: size, next: end + 1, blockEnd: end, wake: make(chan struct{}, 1), done: make(chan struct{})}
 	go s.run()
 	return s, nil
 }
@@ -240,9 +250,9 @@ func lineEnd(f *os.File, size int64) (int64, error) {
 	return 0, nil
 }
 
-// flush writes and syncs batch, records the outcome, and wakes the Writes
-// waiting on it. The outcome is recorded first, so that a Write that returns
-// an error already finds it in Err and Failures.
+// flush writes and syncs batch, records the outcome, logs a failure, and wakes
+// the Writes waiting on it. The outcome is recorded first, so that a Write
+// that returns an error already finds it in Err and Failures.
 func (s *Sink) flush(batch []pending) {
 	err := s.commit(batch)
 	s.mu.Lock()
@@ -251,6 +261,10 @@ func (s *Sink) flush(batch []pending) {
 		s.failures++
 	}
 	s.mu.Unlock()
+	if err != nil {
+		s.logger.Error("usage: a batch of records was not written to the log", "error", err,
+			"records", len(batch), "firstCounter", batch[0].rec.Counter, "lastCounter", batch[len(batch)-1].rec.Counter)
+	}
 	for _, p := range batch {
 		p.done <- err
 	}
