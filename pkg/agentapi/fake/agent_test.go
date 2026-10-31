@@ -323,16 +323,12 @@ func TestOnDesiredIsCalledOncePerVersion(t *testing.T) {
 	eq(t, "Instance generation the hook saw last", got[2].Instance.Generation, int64(2))
 }
 
-func TestADesiredStateTheAgentCannotActOnChangesNothing(t *testing.T) {
+func TestAMalformedDesiredStateChangesNothing(t *testing.T) {
 	r := newRig(t, fake.Engine{})
 	r.step()
 	r.set(agentapi.DesiredState{Action: agentapi.ActionRun}) // run, no Instance
 	if err := r.a.Step(bgndCtx); err == nil {
 		t.Error("run without an Instance: no error")
-	}
-	r.set(agentapi.DesiredState{Action: "bogus"})
-	if err := r.a.Step(bgndCtx); err == nil {
-		t.Error("an unknown action: no error")
 	}
 	eq(t, "reports", len(r.reports()), 1)
 	eq(t, "len(Seen)", len(r.a.Seen()), 1)

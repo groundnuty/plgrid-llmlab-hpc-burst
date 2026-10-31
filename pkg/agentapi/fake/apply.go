@@ -21,6 +21,15 @@ func (a *Agent) apply(d agentapi.DesiredState, now time.Time) {
 	a.reap(now)
 }
 
+// elapse lets time pass for the processes the Agent runs without any decision:
+// a starting worker whose start delay has passed runs, and a stopping worker
+// whose kill is due is killed. It is all a desired state with an Action the
+// Agent does not know leaves to do.
+func (a *Agent) elapse(now time.Time) {
+	a.promote(now)
+	a.reap(now)
+}
+
 // applyRun converges on the Instance: a new Instance replaces the old one once
 // the old one's processes are gone; for the same Instance, a raised Instance
 // generation restarts every worker and a raised worker generation restarts that

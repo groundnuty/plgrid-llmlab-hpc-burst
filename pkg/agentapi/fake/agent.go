@@ -193,6 +193,15 @@ func (a *Agent) CrashWorker(name string, exitCode int) {
 // has applied it, and the next Step reports it again without restarting
 // anything.
 //
+// A desired state with an Action the Agent does not know (agentapi's
+// documentation, Versioning) is not an error: the Agent records it (Seen,
+// OnDesired), changes nothing it runs or has been told (no part restarts or
+// stops, a pending stop stays pending, the settings in it are not taken, no
+// check advances), and reports as always. Only the passing of time shows: a
+// starting worker whose delay has passed runs, and a stopping worker whose kill
+// is due is killed. A desired state that runs an Instance but carries none is
+// malformed, and is an error.
+//
 // After ActionStop, the Agent exits with the report it sends once every worker
 // is gone: the Step that applied it when the workers stopped at once, a later
 // Step when one ignores TERM until its kill (Engine.IgnoreTerm).
@@ -221,7 +230,14 @@ func (a *Agent) Step(ctx context.Context) error {
 		return err
 	}
 	a.observe(d)
-	a.apply(d, now)
+	if knownAction(d.Action) {
+		a.apply(d, now)
+	} else {
+		// An Action this agent does not know (doc.go, Versioning): it changes
+		// nothing, and the Agent goes on polling and reporting. Only the time
+		// that has passed shows in what it runs.
+		a.elapse(now)
+	}
 	return a.report(ctx, now)
 }
 
@@ -270,19 +286,25 @@ func (a *Agent) observe(d agentapi.DesiredState) {
 	}
 }
 
-// checkDesired rejects a desired state the Agent cannot act on.
+// knownAction reports whether the Agent knows the Action (the protocol version
+// it speaks has it).
+func knownAction(a agentapi.Action) bool {
+	switch a {
+	case agentapi.ActionIdle, agentapi.ActionRun, agentapi.ActionStop:
+		return true
+	}
+	return false
+}
+
+// checkDesired rejects a desired state the Agent cannot act on: one that is
+// malformed, not one with an Action it does not know, which it ignores.
 func checkDesired(d agentapi.DesiredState) error {
-	switch d.Action {
-	case agentapi.ActionIdle, agentapi.ActionStop:
-		return nil
-	case agentapi.ActionRun:
+	if d.Action == agentapi.ActionRun {
 		if d.Instance == nil {
 			return errors.New("fake agent: desired state runs an Instance but carries none")
 		}
-		return nil
-	default:
-		return fmt.Errorf("fake agent: unknown action %q", d.Action)
 	}
+	return nil
 }
 
 func isNotRegistered(err error) bool {
