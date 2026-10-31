@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -492,9 +493,10 @@ func TestAgentEndToEndDirect(t *testing.T) {
 	exercise(t, ep, j)
 }
 
-// ssh mode: the agent keeps its own forward, ssh -N -L from a Unix socket in
-// its run directory to the endpoint's loopback port, with the restricted key
-// and pinned host key from the dial-home directory, and talks through it.
+// ssh mode: the agent keeps its own forward, ssh -N -L from a kernel-chosen
+// port on the node's loopback address to the endpoint's loopback port, with
+// the restricted key and pinned host key from the dial-home directory, and
+// talks through it (HBEP-6, Dial-home modes).
 func TestAgentEndToEndSSH(t *testing.T) {
 	root := shortRoot(t)
 	ep := startEndpoint(t, root)
@@ -519,7 +521,7 @@ func TestAgentEndToEndSSH(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the fake ssh recorded nothing: %v", err)
 	}
-	if !strings.Contains(string(lines), fmt.Sprintf(":127.0.0.1:%d", p)) || !strings.Contains(string(lines), "BatchMode=yes") {
+	if !regexp.MustCompile(fmt.Sprintf(`"127\.0\.0\.1:[0-9]+:127\.0\.0\.1:%d"`, p)).Match(lines) || !strings.Contains(string(lines), "BatchMode=yes") {
 		t.Fatalf("ssh invocation %s", lines)
 	}
 }

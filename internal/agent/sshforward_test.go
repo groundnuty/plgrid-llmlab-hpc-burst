@@ -82,8 +82,8 @@ func TestSSHForwardStopsAndReapsItsChildren(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var mu sync.Mutex
 			var started []agent.ProcessID
-			fwd := agent.SSHForward{
-				SSH: tc.ssh, Socket: filepath.Join(root, "agent.sock"), Config: sshConfig(t, root),
+			fwd := &agent.SSHForward{
+				SSH: tc.ssh, RemotePort: 29299, Config: sshConfig(t, root),
 				Log: io.Discard, StopGrace: grace,
 				OnStart: func(id agent.ProcessID) { mu.Lock(); started = append(started, id); mu.Unlock() },
 			}
@@ -224,8 +224,8 @@ func TestSSHGetsNoInheritedDescriptor(t *testing.T) {
 	}
 	var mu sync.Mutex
 	var started []agent.ProcessID
-	fwd := agent.SSHForward{
-		SSH: stub, Socket: filepath.Join(root, "agent.sock"), Config: sshConfig(t, root),
+	fwd := &agent.SSHForward{
+		SSH: stub, RemotePort: 29299, Config: sshConfig(t, root),
 		Log: io.Discard, StopGrace: 200 * time.Millisecond,
 		OnStart: func(id agent.ProcessID) { mu.Lock(); started = append(started, id); mu.Unlock() },
 	}

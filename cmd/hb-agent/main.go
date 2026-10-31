@@ -30,7 +30,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent"
@@ -112,13 +111,17 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		JobID:           job.JobID,
 		AgentInstanceID: aid,
 	}
+	var control *agent.SSHForward
 	if job.Config.Mode == agentapi.DialHomeSSH {
 		sshBin, err := lookTool(getenv("HPCBURST_SSH"), "ssh")
 		if err != nil {
 			log.Error("no ssh for the ssh dial-home mode", "err", err)
 			return 1
 		}
-		fwd := agent.SSHForward{SSH: sshBin, Socket: filepath.Join(runDir, "agent.sock"), Config: job.Config, Log: stderr, Logger: log}
+		// Connection 1, the control connection to the agent endpoint (HBEP-6,
+		// Dial-home modes). Connection 2 and frpc wait for agent.json's
+		// dial-home port, frpc digest and certificate (the contracts PR).
+		control = &agent.SSHForward{SSH: sshBin, RemotePort: job.Config.SSH.AgentPort, Name: "control", Config: job.Config, Log: stderr, Logger: log}
 		// The forward outlives the agent's loop, which sends its last report
 		// through it. It is stopped before this function returns, on every
 		// path (a stop, a signal, an error): its ssh process gets TERM, then
@@ -128,7 +131,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		fwdDone := make(chan struct{})
 		go func() {
 			defer close(fwdDone)
-			if err := fwd.Run(fwdCtx); err != nil {
+			if err := control.Run(fwdCtx); err != nil {
 				log.Error("ssh forward", "err", err)
 			}
 		}()
@@ -136,7 +139,15 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			cancelFwd()
 			<-fwdDone
 		}()
-		co.Dial = fwd.Dial
+		co.Dial = control.Dial
+	}
+	client := agent.NewClient(co)
+	if control != nil {
+		// A forward that moved to a new port leaves the client's idle
+		// connections pointing at the old one.
+		watchCtx, cancelWatch := context.WithCancel(context.Background())
+		defer cancelWatch()
+		go agent.OnPortChange(watchCtx, control, func(int) { client.CloseIdle() })
 	}
 
 	stager, err := stage.New(stage.Config{
@@ -152,7 +163,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		return 1
 	}
 	a, err := agent.New(agent.Options{
-		API: agent.NewClient(co),
+		API: client,
 		Engines: func(socket, key string, l agentapi.Launch) agent.Engine {
 			return engine.New(socket, key, engine.WithReasoning(agent.DeclaresReasoningParser(l.Command)))
 		},

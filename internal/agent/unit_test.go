@@ -199,39 +199,56 @@ func TestCPUArchIsTheKernelsMachineName(t *testing.T) {
 	}
 }
 
-// The ssh forward has the options HBEP-7 asks for: the restricted key and the
-// pinned host key from the dial-home directory, batch mode, and a forward from
-// a local Unix socket to the agent endpoint's loopback port.
+// The ssh forward has the options HBEP-7 and HBEP-6 (Dial-home modes) ask
+// for: the restricted key and the pinned host key from the dial-home
+// directory, batch mode, ExitOnForwardFailure, ServerAliveInterval=10 with
+// ServerAliveCountMax=3, the ssh server's port from agent.json's endpoint
+// (any port, not only 22), and a forward from the node's IPv4 loopback
+// address to the remote loopback port.
 func TestSSHForwardArgs(t *testing.T) {
 	c := directConfig()
 	c.Mode = agentapi.DialHomeSSH
-	c.Endpoint = "cp.example:22"
+	c.Endpoint = "cp.example:2222"
 	c.SSH = &agentapi.SSHForward{User: "hb", AgentPort: 29223}
-	got, err := SSHForward{Socket: "/tmp/hb-1/agent.sock", Config: c}.Args()
-	if err != nil {
-		t.Fatal(err)
+	for _, tc := range []struct {
+		remote, local int
+		forward       string
+	}{
+		{29223, 41000, "127.0.0.1:41000:127.0.0.1:29223"}, // connection 1, to the agent endpoint
+		{29227, 41001, "127.0.0.1:41001:127.0.0.1:29227"}, // connection 2, to the dial-home listener
+	} {
+		f := &SSHForward{Config: c, RemotePort: tc.remote}
+		got, err := f.Args(tc.local)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{
+			"-N",
+			"-F", "/dev/null",
+			"-o", "ControlMaster=no",
+			"-o", "ControlPath=none",
+			"-o", "BatchMode=yes",
+			"-o", "IdentitiesOnly=yes",
+			"-o", "StrictHostKeyChecking=yes",
+			"-o", "UserKnownHostsFile=/home/u/.hpcburst/dial-home/known_hosts",
+			"-o", "ExitOnForwardFailure=yes",
+			"-o", "ServerAliveInterval=10",
+			"-o", "ServerAliveCountMax=3",
+			"-o", "ConnectTimeout=20",
+			"-i", "/home/u/.hpcburst/dial-home/key",
+			"-p", "2222",
+			"-L", tc.forward,
+			"hb@cp.example",
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("args:\n got %q\nwant %q", got, want)
+		}
 	}
-	want := []string{
-		"-N",
-		"-F", "/dev/null",
-		"-o", "ControlMaster=no",
-		"-o", "ControlPath=none",
-		"-o", "BatchMode=yes",
-		"-o", "IdentitiesOnly=yes",
-		"-o", "StrictHostKeyChecking=yes",
-		"-o", "UserKnownHostsFile=/home/u/.hpcburst/dial-home/known_hosts",
-		"-o", "ExitOnForwardFailure=yes",
-		"-o", "StreamLocalBindUnlink=yes",
-		"-o", "ServerAliveInterval=15",
-		"-o", "ServerAliveCountMax=3",
-		"-o", "ConnectTimeout=20",
-		"-i", "/home/u/.hpcburst/dial-home/key",
-		"-p", "22",
-		"-L", "/tmp/hb-1/agent.sock:127.0.0.1:29223",
-		"hb@cp.example",
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("args:\n got %q\nwant %q", got, want)
+	for _, bad := range []struct{ remote, local int }{{0, 41000}, {29223, 0}, {70000, 41000}} {
+		f := &SSHForward{Config: c, RemotePort: bad.remote}
+		if _, err := f.Args(bad.local); err == nil {
+			t.Errorf("Args accepted remote %d, local %d", bad.remote, bad.local)
+		}
 	}
 }
 
