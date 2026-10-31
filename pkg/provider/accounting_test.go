@@ -168,3 +168,19 @@ func TestAccountingOfMissingGPUEntry(t *testing.T) {
 	got = AccountingOf(q, 0, nil, *ti(12, 1, 0))
 	countIs(t, "allocatedGPUs (no read)", got.AllocatedGPUs, -1)
 }
+
+// A job whose final read never came keeps the stored counts and has no elapsed
+// time; one never seen started has no accounting at all.
+func TestAccountingLost(t *testing.T) {
+	prior := &v1alpha1.AllocationAccounting{AllocatedCPUs: n32(4), AllocatedGPUs: n32(1), ElapsedSeconds: func() *int64 { v := int64(60); return &v }()}
+	got := AccountingLost(ti(12, 0, 0), 1, prior, *ti(12, 9, 0))
+	elapsedIs(t, got, -1)
+	countIs(t, "allocatedCPUs", got.AllocatedCPUs, 4)
+	countIs(t, "allocatedGPUs", got.AllocatedGPUs, 1)
+	got = AccountingLost(ti(12, 0, 0), 1, nil, *ti(12, 9, 0))
+	elapsedIs(t, got, -1)
+	countIs(t, "allocatedCPUs", got.AllocatedCPUs, -1)
+	if AccountingLost(nil, 1, prior, *ti(12, 9, 0)) != nil {
+		t.Error("a job never seen started has accounting")
+	}
+}

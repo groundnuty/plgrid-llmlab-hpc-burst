@@ -64,6 +64,9 @@ func New(kube client.Client, reader client.Reader, scheme *runtime.Scheme, o Opt
 	if err := o.defaults(); err != nil {
 		return nil, err
 	}
+	if err := checkAccountingScheme(scheme); err != nil {
+		return nil, err
+	}
 	kube = client.WithFieldOwner(kube, v1alpha1.FieldManagerProvider)
 	s := &shared{o: o, kube: kube, reader: reader, builds: &buildCache{}}
 	s.h = &holder{o: &s.o}

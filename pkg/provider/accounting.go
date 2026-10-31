@@ -102,3 +102,14 @@ func copyCount(p *int32) *int32 {
 	v := *p
 	return &v
 }
+
+// AccountingLost returns the accounting of a job whose final read never came
+// (HBEP-8: "A Lost job is recorded with its elapsed time unknown"): the counts
+// from the stored accounting, and no elapsed time. It is nil when the job was
+// never seen started, since its hours are then unknown.
+func AccountingLost(startTime *time.Time, requestedGPUs int32, prior *v1alpha1.AllocationAccounting, now time.Time) *v1alpha1.AllocationAccounting {
+	if startTime == nil {
+		return nil
+	}
+	return AccountingOf(Job{StartTime: startTime, EndTime: startTime, Source: SourceAccounting}, requestedGPUs, prior, now)
+}

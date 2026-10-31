@@ -89,6 +89,11 @@ func (e *external) observeRecorded(ctx context.Context, a *v1alpha1.Allocation, 
 		return exists, err
 	}
 	e.mirror(a, prior, rec.jobID, job)
+	job, err = e.allocatedRead(ctx, job, prior.Accounting)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	e.mirrorAccounting(a, job, prior.Accounting)
 	if refused {
 		// Refused, once set, is kept on every path; the rest of the
 		// observation follows the job.

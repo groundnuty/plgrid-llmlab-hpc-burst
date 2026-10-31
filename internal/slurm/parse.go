@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,9 +23,9 @@ import (
 //     infinite, number} triples in epoch seconds;
 //   - accounting: job_id, name, partition, state.current (a list) and
 //     state.reason, time.submission, time.start and time.end in epoch
-//     seconds, time.limit, tres.requested and tres.allocated; restart_cnt
-//     only in v0.0.42, where v0.0.40 shows an earlier execution as a record
-//     with the REQUEUED state.
+//     seconds, time.elapsed in seconds (HBEP-8), time.limit, tres.requested
+//     and tres.allocated; restart_cnt only in v0.0.42, where v0.0.40 shows an
+//     earlier execution as a record with the REQUEUED state.
 //
 // The v0.0.42 shapes are S7's real Helios captures (spikes/s7/
 // slurm-json-real.md). The v0.0.40 shapes follow Slurm's source, as S4's fake
@@ -198,6 +199,7 @@ type accountingRecord struct {
 		Submission noVal `json:"submission"`
 		Start      noVal `json:"start"`
 		End        noVal `json:"end"`
+		Elapsed    noVal `json:"elapsed"`
 		Limit      noVal `json:"limit"`
 	} `json:"time"`
 	Tres struct {
@@ -437,9 +439,52 @@ func mergeAccounting(recs []accountingRecord, parser string) ([]provider.Job, er
 			errs = append(errs, err)
 			continue
 		}
+		j.Accounting = accountingOf(rs)
 		out = append(out, j)
 	}
 	return out, errors.Join(errs...)
+}
+
+// cpusOfTresList reads the CPU count from accounting's tres list: the entry of
+// type cpu. ok is false when the list has none.
+func cpusOfTresList(l []tresEntry) (int32, bool) {
+	for _, e := range l {
+		if e.Type == "cpu" && e.Count >= 0 && e.Count <= math.MaxInt32 {
+			return int32(e.Count), true
+		}
+	}
+	return 0, false
+}
+
+// accountingOf reads the allocated time of a job from its records, oldest
+// first, one per execution (HBEP-8, Provider accounting). The allocated counts
+// are the latest execution's; the elapsed time is time.elapsed summed over all
+// the executions. It is unknown when an execution has none, and when the records
+// are fewer than the executions the latest record's restart count says there
+// were (v0.0.42): an earlier execution that the read did not return would
+// otherwise be left out of the sum without a sign.
+func accountingOf(rs []accountingRecord) *provider.JobAccounting {
+	a := &provider.JobAccounting{Executions: len(rs)}
+	latest := rs[len(rs)-1]
+	if n, ok := cpusOfTresList(latest.Tres.Allocated); ok {
+		a.AllocatedCPUs = &n
+	}
+	if g, ok := gpusOfTresList(latest.Tres.Allocated); ok && g >= 0 {
+		a.AllocatedGPUs = &g
+	}
+	var total time.Duration
+	for _, r := range rs {
+		v, ok := r.Time.Elapsed.value()
+		if !ok || v < 0 {
+			return a
+		}
+		total += time.Duration(v) * time.Second
+	}
+	if latest.RestartCnt != nil && int(*latest.RestartCnt) >= len(rs) {
+		return a
+	}
+	a.Elapsed = &total
+	return a
 }
 
 // job turns the latest accounting record of a job into a job record.
