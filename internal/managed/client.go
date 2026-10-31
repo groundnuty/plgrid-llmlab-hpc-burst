@@ -53,16 +53,22 @@ func NewClient(creds provider.ManagedCredentials, transport http.RoundTripper) (
 		return nil, err
 	}
 	if transport == nil {
-		t := http.DefaultTransport.(*http.Transport).Clone()
-		t.DialContext = (&net.Dialer{Timeout: ConnectTimeout, KeepAlive: 30 * time.Second}).DialContext
-		t.TLSHandshakeTimeout = ConnectTimeout
-		transport = t
+		transport = newTransport()
 	}
 	return &Client{creds: creds, http: &http.Client{
 		Transport:     transport,
 		Timeout:       ReadTimeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}, nil
+}
+
+// newTransport is a copy of http.DefaultTransport whose connection set-up
+// takes at most ConnectTimeout.
+func newTransport() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.DialContext = (&net.Dialer{Timeout: ConnectTimeout, KeepAlive: 30 * time.Second}).DialContext
+	t.TLSHandshakeTimeout = ConnectTimeout
+	return t
 }
 
 // listing is the part of an OpenAI model list the Client reads.

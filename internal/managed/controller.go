@@ -81,7 +81,8 @@ type Options struct {
 	Provider string
 	// Clock is the time source; nil is the real clock.
 	Clock Clock
-	// Transport carries the catalog reads; nil is NewClient's default.
+	// Transport carries the catalog reads; nil is a copy of
+	// http.DefaultTransport with ConnectTimeout, shared by every pass.
 	Transport http.RoundTripper
 	// Recorder, when set, gets an event on the Provider when
 	// CredentialsRejected, CredentialsExpiring or CredentialsInvalid turns
@@ -168,6 +169,11 @@ func New(opts Options) (*Controller, error) {
 	}
 	if c.clock == nil {
 		c.clock = realClock{}
+	}
+	if c.transport == nil {
+		// One transport for every pass, so a pass reuses the last one's
+		// connection; each pass still reads the key afresh.
+		c.transport = newTransport()
 	}
 	return c, nil
 }
