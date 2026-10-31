@@ -253,7 +253,7 @@ func TestControllerSupervision(t *testing.T) {
 		s.Controllers[0].HealthzOK == nil || !*s.Controllers[0].HealthzOK || s.Controllers[0].Restarts != 0 {
 		t.Fatalf("status: %+v", s)
 	}
-	if r := cli(t, h.args("status", "--no-gc-probe")...); !strings.Contains(r.out, "controller controller: running=true pid "+itoa(child.PID)) {
+	if r := cli(t, h.args("status", "--no-gc-probe")...); !strings.Contains(r.out, "supervised controller: running=true pid "+itoa(child.PID)) {
 		t.Errorf("the text status does not show the controller: %s", r.out)
 	}
 

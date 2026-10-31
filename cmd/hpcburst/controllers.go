@@ -43,7 +43,7 @@ func printSupervision(w io.Writer, r *launcher.StatusReport) {
 	}
 	fmt.Fprintln(w, line)
 	for _, c := range r.Controllers {
-		line := fmt.Sprintf("controller %s: running=%v pid %d, %s, restarts %d", c.Name, c.Running, c.PID, c.State, c.Restarts)
+		line := fmt.Sprintf("supervised %s: running=%v pid %d, %s, restarts %d", c.Name, c.Running, c.PID, c.State, c.Restarts)
 		if c.HealthzOK != nil {
 			line += fmt.Sprintf(", GET /healthz on %s: %v", c.Health, *c.HealthzOK)
 		}

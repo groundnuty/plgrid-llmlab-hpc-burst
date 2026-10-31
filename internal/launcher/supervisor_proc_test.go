@@ -293,7 +293,7 @@ func TestResolveControllerBin(t *testing.T) {
 	// The default: this test binary's directory holds no hpcburst-controller.
 	if self, err := os.Executable(); err == nil {
 		if _, err := os.Stat(self[:strings.LastIndexByte(self, '/')+1] + ControllerBinName); err == nil {
-			t.Skip("an hpcburst-controller sits beside the test binary")
+			t.Fatal("an hpcburst-controller sits beside the test binary, so the default case cannot be tested (and a skip would hide that)")
 		}
 	}
 	if got, err := resolveControllerBin(""); err != nil || got != "" {
