@@ -129,7 +129,11 @@ func TestRunStartsWorkerThenRunsAfterTheStartDelay(t *testing.T) {
 	if w.Health == nil {
 		t.Fatal("a running worker reports no Health")
 	}
-	eq(t, "Health", *w.Health, agentapi.Health{Time: t0.Add(delay), ProbeOK: true, KVCacheUsage: 0.1})
+	read := t0.Add(delay)
+	eq(t, "Health", *w.Health, agentapi.Health{
+		Time: t0.Add(delay), ProbeOK: true, MetricsReadAt: &read,
+		RunningRequests: i64p(0), WaitingRequests: i64p(0), GeneratedTokens: i64p(0), KVCacheUsage: f64p(0.1),
+	})
 }
 
 func TestAWorkerIsReportedStartingInTheStepThatStartsItEvenWithoutADelay(t *testing.T) {
@@ -366,7 +370,7 @@ func TestEngineOverridesApply(t *testing.T) {
 	e := fake.Engine{
 		Health: func(now time.Time, p fake.Process) agentapi.Health {
 			n++
-			return agentapi.Health{ProbeOK: true, GeneratedTokens: n * 100} // no Time
+			return agentapi.Health{ProbeOK: true, GeneratedTokens: i64p(n * 100)} // no Time, and no MetricsReadAt
 		},
 		Verify: func(i agentapi.DesiredInstance, _ agentapi.VerifyRequest) agentapi.VerifyResult {
 			return agentapi.VerifyResult{Error: "engine would not start"} // Done is the agent's to set
@@ -387,7 +391,10 @@ func TestEngineOverridesApply(t *testing.T) {
 	if w.Health == nil {
 		t.Fatal("no Health")
 	}
-	eq(t, "GeneratedTokens from the engine", w.Health.GeneratedTokens, int64(100))
+	eq(t, "GeneratedTokens from the engine", *w.Health.GeneratedTokens, int64(100))
+	if w.Health.MetricsReadAt != nil {
+		t.Errorf("MetricsReadAt = %v; the Agent must not invent a metrics read the engine did not report", w.Health.MetricsReadAt)
+	}
 	if !w.Health.Time.Equal(t0) {
 		t.Errorf("Health.Time = %v, want the Step's time %v", w.Health.Time, t0)
 	}

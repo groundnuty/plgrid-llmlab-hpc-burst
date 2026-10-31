@@ -316,12 +316,16 @@ func TestBackendOwnsTheDesiredStateItStoresAndServes(t *testing.T) {
 
 func richReport() agentapi.Report {
 	start := t0.Add(time.Second)
+	read := t0.Add(2 * time.Second)
 	return agentapi.Report{Time: t0, Instance: &agentapi.InstanceReport{
 		UID:     "inst-uid-1",
 		Staging: &agentapi.Staging{Phase: agentapi.StagingDone},
 		Workers: []agentapi.WorkerReport{{
 			Name: "worker-0", Phase: agentapi.PartExited, StartTime: &start, ExitCode: intp(3),
-			Health: &agentapi.Health{ProbeOK: true, ResponsesByStatus: map[string]int64{"200": 5}},
+			Health: &agentapi.Health{
+				ProbeOK: true, MetricsReadAt: &read, RunningRequests: i64p(4), WaitingRequests: i64p(1),
+				GeneratedTokens: i64p(70), KVCacheUsage: f64p(0.25), ResponsesByStatus: map[string]int64{"200": 5},
+			},
 		}},
 		Checks: &agentapi.CheckResults{
 			VerificationGeneration: 1,
@@ -350,6 +354,11 @@ func scrambleReport(r *agentapi.Report) {
 	*w.ExitCode = 99
 	w.Health.ProbeOK = false
 	w.Health.ResponsesByStatus["200"] = 99
+	*w.Health.MetricsReadAt = t0
+	*w.Health.RunningRequests = 99
+	*w.Health.WaitingRequests = 99
+	*w.Health.GeneratedTokens = 99
+	*w.Health.KVCacheUsage = 0.99
 	i.Checks.Verify.Files[0].Path = "x"
 	i.Checks.Verify.Settings["max-model-len"] = "x"
 	i.Checks.Qualify.Checks[0].Passed = false

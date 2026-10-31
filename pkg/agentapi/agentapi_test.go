@@ -9,6 +9,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -368,6 +370,14 @@ func TestHostLayout(t *testing.T) {
 		h.AgentKeyFile():      "/home/example-user/.local/state/hpcburst/agent-endpoint/tls.key",
 		h.AgentEndpointAddr(): "127.0.0.1:29223",
 		h.DialHomeAddr():      "127.0.0.1:29227",
+		// HBEP-6's port table: the plugin at base+8, frps's bind, tcpmux and
+		// web ports at base+9, +10 and +11.
+		h.FrpsPluginAddr(): "127.0.0.1:29228",
+		h.FrpsBindAddr():   "127.0.0.1:29229",
+		h.FrpsTCPMuxAddr(): "127.0.0.1:29230",
+		h.FrpsWebAddr():    "127.0.0.1:29231",
+		// <state>/frps/web-password (HBEP-6, frps on the control-plane host).
+		h.FrpsWebPasswordFile(): "/home/example-user/.local/state/hpcburst/frps/web-password",
 	} {
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
@@ -378,6 +388,24 @@ func TestHostLayout(t *testing.T) {
 	}
 	if p := h.DialHomePort(); p != 29227 {
 		t.Errorf("DialHomePort = %d, want 29227 (base + 7)", p)
+	}
+	for name, c := range map[string]struct{ got, want int }{
+		"FrpsPluginPort": {h.FrpsPluginPort(), 29228},
+		"FrpsBindPort":   {h.FrpsBindPort(), 29229},
+		"FrpsTCPMuxPort": {h.FrpsTCPMuxPort(), 29230},
+		"FrpsWebPort":    {h.FrpsWebPort(), 29231},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s = %d, want %d", name, c.got, c.want)
+		}
+	}
+	// A block at another base moves every port with it, and no two ports meet.
+	other := Host{StateDir: h.StateDir, PortBase: 40000}
+	if other.FrpsWebAddr() != "127.0.0.1:40011" || other.FrpsPluginAddr() != "127.0.0.1:40008" {
+		t.Errorf("at base 40000: web %q, plugin %q; want 127.0.0.1:40011 and 127.0.0.1:40008", other.FrpsWebAddr(), other.FrpsPluginAddr())
+	}
+	if FrpsWebUser != "hpcburst" || FrpsPluginPath != "/frp/v1/handler" {
+		t.Errorf("frps web user %q and plugin path %q; HBEP-6 writes hpcburst and /frp/v1/handler", FrpsWebUser, FrpsPluginPath)
 	}
 	if got := AllocationCredentialPath(h.CredentialsDir(), "uid-1"); got != "/home/example-user/.local/state/hpcburst/credentials/allocations/uid-1" {
 		t.Errorf("AllocationCredentialPath = %q", got)
@@ -411,5 +439,38 @@ func TestServerErrorsCountsClassesAndCodes(t *testing.T) {
 		if got := ServerErrors(c.in); got != c.want {
 			t.Errorf("ServerErrors(%v) = %d, want %d", c.in, got, c.want)
 		}
+	}
+}
+
+// The web password file has a key file's form: the launcher writes it with
+// WriteKeyFile (which makes the frps directory 700 and the file 600), the
+// controller reads it with ReadKeyFile, and a password with a trailing newline,
+// as a shell's echo would write it, is refused.
+func TestFrpsWebPasswordFileIsAKeyFile(t *testing.T) {
+	h := Host{StateDir: t.TempDir(), PortBase: 29220}
+	key, err := NewKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteKeyFile(h.FrpsWebPasswordFile(), key); err != nil {
+		t.Fatalf("WriteKeyFile: %v", err)
+	}
+	got, err := ReadKeyFile(h.FrpsWebPasswordFile())
+	if err != nil || got != key {
+		t.Fatalf("ReadKeyFile = %q, %v; want the key written", got, err)
+	}
+	fi, err := os.Stat(h.FrpsWebPasswordFile())
+	if err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("web password file mode = %v, %v; want 0600", fi.Mode().Perm(), err)
+	}
+	di, err := os.Stat(filepath.Dir(h.FrpsWebPasswordFile()))
+	if err != nil || di.Mode().Perm() != 0o700 {
+		t.Errorf("frps directory mode = %v, %v; want 0700", di.Mode().Perm(), err)
+	}
+	if err := os.WriteFile(h.FrpsWebPasswordFile(), []byte(key+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadKeyFile(h.FrpsWebPasswordFile()); err == nil {
+		t.Error("a password with a trailing newline was accepted")
 	}
 }

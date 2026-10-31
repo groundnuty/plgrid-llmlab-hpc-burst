@@ -286,7 +286,10 @@ func (a *Agent) report(ctx context.Context, now time.Time) error {
 	if err != nil {
 		return fmt.Errorf("fake agent: report: %w", err)
 	}
-	a.lastReport = &r
+	// The retained snapshot is a copy: r holds the pointers an Engine callback
+	// returned (Health's gauges), which the callback may change later.
+	kept := cloneReport(r)
+	a.lastReport = &kept
 	if a.stopping && (a.inst == nil || !a.inst.anyLive()) {
 		a.exited = true
 	}
