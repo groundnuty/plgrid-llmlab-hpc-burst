@@ -44,6 +44,13 @@ func (p *play) wait(d time.Duration) {
 // connection when the behaviour says so.
 func (p *play) beforeToken(i int) {
 	if i == 0 {
+		if _, fake := p.e.clk.(*clock.Fake); fake && p.b.FirstToken > 0 {
+			// A stream's headers were just flushed. A fake clock jumps at
+			// once, so give the front a moment to read them first, as a real
+			// engine's prefill always does: otherwise a front timer that the
+			// headers stop (streamHeadersTimeout) can fire before they land.
+			time.Sleep(20 * time.Millisecond)
+		}
 		p.wait(p.b.FirstToken)
 	} else {
 		p.wait(p.b.PerToken)

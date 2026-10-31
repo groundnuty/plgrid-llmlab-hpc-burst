@@ -6,7 +6,9 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 )
 
 // maxEventBytes bounds one SSE line; maxWholeParse bounds how much of a
@@ -63,12 +65,23 @@ func (p *Proxy) relay(w http.ResponseWriter, x *exchange, t *target, resp *http.
 	sse := strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")
 	identity := resp.Header.Get("Content-Encoding") == "" || strings.EqualFold(resp.Header.Get("Content-Encoding"), "identity")
 	x.rec.Stream = sse
-	w.WriteHeader(resp.StatusCode)
 	body := &idleReader{r: resp.Body, touch: x.touch}
-	switch {
-	case resp.StatusCode >= 400:
+	if resp.StatusCode >= 400 {
 		x.rec.Finish = strp("error")
-		p.copyRaw(w, x, body, sse)
+		p.relayError(w, x, t, resp.StatusCode, body, sse)
+		return
+	}
+	if sse && kind.streams() && identity {
+		// The front may withhold or redact events, so it frames the stream.
+		h.Del("Content-Length")
+	}
+	w.WriteHeader(resp.StatusCode)
+	if sse {
+		// The status and the attribution reach the client at once, not
+		// with the first event after a long prefill.
+		_ = http.NewResponseController(w).Flush()
+	}
+	switch {
 	case sse && kind.streams() && identity:
 		j := p.relayEvents(w, x, body, kind)
 		x.failed = j.failed || j.engineError || j.badError
@@ -88,13 +101,18 @@ func (p *Proxy) relayEvents(w http.ResponseWriter, x *exchange, body io.Reader, 
 	br := bufio.NewReaderSize(body, 64<<10)
 	var ev bytes.Buffer
 	var readErr error
+	secrets := sync.OnceValue(func() []string { return p.secrets() })
 	handle := func() bool {
 		forward, done := j.event(ev.Bytes())
 		if j.sawContent && x.rec.FirstTokenMs == nil {
 			x.rec.FirstTokenMs = i64p(x.clk.Now().Sub(x.start).Milliseconds())
 		}
 		if forward {
-			if _, err := w.Write(ev.Bytes()); err != nil {
+			out := ev.Bytes()
+			if j.errorEvent {
+				out = redact(out, secrets())
+			}
+			if _, err := w.Write(out); err != nil {
 				x.cancel(errors.New("client gone"))
 				return true
 			}
@@ -134,6 +152,38 @@ func (p *Proxy) relayEvents(w http.ResponseWriter, x *exchange, body io.Reader, 
 	}
 	p.endStream(w, x, j, readErr)
 	return j
+}
+
+// relayError passes a target's error through with every target credential
+// the front holds replaced, in the headers and the body, and frames the body
+// with its new Content-Length (@hpc-burst-science-agent, 31 Oct 2026; PR #95
+// review, Astra B12). A body above maxWholeParse passes its first
+// maxWholeParse bytes redacted and the rest as it comes. A streamed error
+// body is read whole the same way: an error is short.
+func (p *Proxy) relayError(w http.ResponseWriter, x *exchange, t *target, status int, body io.Reader, sse bool) {
+	head, err := io.ReadAll(io.LimitReader(body, maxWholeParse))
+	if err != nil {
+		p.cutWhole(x, err)
+	}
+	secrets := p.secrets(p.targetKey(t))
+	h := w.Header()
+	redactHeader(h, secrets)
+	x.attr.set(h) // the attribution is the front's own, never redacted
+	head = redact(head, secrets)
+	full := len(head) < maxWholeParse
+	if full {
+		h.Set("Content-Length", strconv.Itoa(len(head)))
+	} else {
+		h.Del("Content-Length")
+	}
+	w.WriteHeader(status)
+	if _, err := w.Write(head); err != nil {
+		x.cancel(errors.New("client gone"))
+		p.cutWhole(x, err)
+	}
+	if !full {
+		p.copyRaw(w, x, body, sse)
+	}
 }
 
 // endStream records how a judged stream ended and sends the error event for a
