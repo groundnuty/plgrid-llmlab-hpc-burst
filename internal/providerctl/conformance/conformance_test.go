@@ -206,9 +206,11 @@ func newWorld(t *testing.T) *world {
 	w.c = clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(pp, prov).
 		WithStatusSubresource(&v1alpha1.Allocation{}, &v1alpha1.Provider{}).Build()
 
-	// The agent stand-in: a script that sleeps, then exits 0, run by the
-	// bootstrap after its digest check.
-	agent := []byte("#!/bin/sh\nsleep \"${HB_CONF_SLEEP:-90}\"\nexit 0\n")
+	// The agent stand-in, run by the bootstrap after its digest check, with the
+	// Allocation's directory as its argument: the first job outlives its 5 min
+	// limit, so it is still running when its Allocation is deleted; the
+	// second sleeps 90 s and ends by itself.
+	agent := []byte("#!/bin/sh\ncase \"$1\" in *held-submit*) sleep 600 ;; *) sleep 90 ;; esac\nexit 0\n")
 	sum := sha256.Sum256(agent)
 	w.digest = hex.EncodeToString(sum[:])
 	builds := t.TempDir()
