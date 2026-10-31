@@ -1,0 +1,29 @@
+setting,scenario,rep,phase_s,api_gone_s,api_errors,log_gone_s,first_refused_s,hung_n,hung_med_s,hung_max_s,hung_timeouts,ok_after_failure,heal_online_s,heal_probe_ok_s,valid,frps_cause,frpc_detect_s,frpc_cause,load_end
+default,kill,1,0.71,0.08,0,0.0,0.16,0,,,0,0,,,,accept new mux stream error: EOF,,,0.92
+default,kill,2,4.35,0.07,0,0.0,0.16,0,,,0,0,,,,accept new mux stream error: EOF,,,1.01
+default,kill,3,2.46,0.07,0,0.0,0.16,0,,,0,0,,,,accept new mux stream error: EOF,,,1.24
+default,freeze,1,4.46,32.48,0,32.42,32.56,162,10.0,15.0,1,0,0.1,0.06,,2026/10/31 11:57:26 [ERR] yamux: keepalive failed: i/o deadline reached | accept new mux stream error: keepalive timeout,32.43,[74e5ea194cea9c26] 2026/10/31 11:57:26 [ERR] yamux: keepalive failed: i/o deadline reached,1.03
+default,freeze,2,2.56,34.39,0,34.31,34.36,171,10.0,15.0,1,0,0.06,0.21,,2026/10/31 11:58:10 [ERR] yamux: keepalive failed: i/o deadline reached | accept new mux stream error: keepalive timeout,34.32,[b752da686333830d] 2026/10/31 11:58:10 [ERR] yamux: keepalive failed: i/o deadline reached,1.07
+default,freeze,3,8.61,28.35,0,28.26,28.36,141,10.0,15.0,1,0,0.08,0.08,,2026/10/31 11:58:55 [ERR] yamux: keepalive failed: i/o deadline reached | accept new mux stream error: keepalive timeout,28.28,[bd820ea189af13de] 2026/10/31 11:58:55 [ERR] yamux: keepalive failed: i/o deadline reached,0.89
+default,crash,1,5.6,31.27,0,31.27,31.36,156,10.0,15.0,1,0,,,,2026/10/31 11:59:39 [ERR] yamux: keepalive failed: i/o deadline reached | accept new mux stream error: keepalive timeout,,,0.69
+default,crash,2,7.44,29.45,0,29.44,29.56,147,10.0,15.0,1,0,,,,2026/10/31 12:00:22 [ERR] yamux: keepalive failed: i/o deadline reached | accept new mux stream error: keepalive timeout,,,0.53
+default,crash,3,9.27,27.65,0,27.61,27.75,138,10.0,15.0,1,0,,,,2026/10/31 12:01:04 [ERR] yamux: keepalive failed: i/o deadline reached | accept new mux stream error: keepalive timeout,,,1.17
+default,disable,1,4.95,0.07,0,0.0,0.16,0,,,0,0,0.08,0.15,,accept new mux stream error: EOF,,,1.14
+s1,kill,1,4.69,0.07,0,0.0,0.16,0,,,0,0,,,,accept new mux stream error: EOF,,,1.05
+s1,kill,2,1.28,0.07,0,0.0,0.16,0,,,0,0,,,,accept new mux stream error: EOF,,,0.97
+s1,kill,3,7.84,0.07,0,0.0,0.16,0,,,0,0,,,,accept new mux stream error: EOF,,,0.9
+s1,freeze,1,0.69,16.28,0,16.18,16.36,81,8.03,15.0,1,0,0.11,0.08,,2026/10/31 12:02:09 [ERR] yamux: keepalive failed: i/o deadline reached | accept new mux stream error: keepalive timeout,16.18,[40c078efda9f8694] 2026/10/31 12:02:09 [ERR] yamux: keepalive failed: i/o deadline reached,0.8
+s1,freeze,2,3.63,13.26,0,13.25,13.36,66,6.69,13.09,0,0,0.05,0.04,,2026/10/31 12:02:33 [ERR] yamux: keepalive failed: i/o deadline reached | accept new mux stream error: keepalive timeout,13.25,[bc88d4afe67ac1e5] 2026/10/31 12:02:33 [ERR] yamux: keepalive failed: i/o deadline reached,0.9
+s1,freeze,3,1.67,15.27,0,15.21,15.36,76,7.65,15.0,1,0,0.03,0.1,,2026/10/31 12:02:58 [ERR] yamux: keepalive failed: i/o deadline reached | accept new mux stream error: keepalive timeout,15.21,[f793cf92cc1db17d] 2026/10/31 12:02:58 [ERR] yamux: keepalive failed: i/o deadline reached,1.08
+s1,crash,1,7.28,19.7,0,19.6,19.76,98,9.85,15.0,1,0,,,,2026/10/31 12:03:32 [ERR] yamux: keepalive failed: i/o deadline reached | accept new mux stream error: keepalive timeout,,,1.67
+s1,crash,2,4.58,12.36,0,12.29,12.36,61,6.14,12.14,0,0,,,,2026/10/31 12:03:55 [ERR] yamux: keepalive failed: i/o deadline reached | accept new mux stream error: keepalive timeout,,,1.35
+s1,crash,3,5.05,11.85,0,11.83,11.96,59,5.87,11.67,0,0,,,,2026/10/31 12:04:17 [ERR] yamux: keepalive failed: i/o deadline reached | accept new mux stream error: keepalive timeout,,,1.09
+tight,kill,1,5.28,0.07,0,0.0,0.16,0,,,0,0,,,,accept new mux stream error: EOF,,,0.92
+tight,kill,2,8.43,0.08,0,0.0,0.16,0,,,0,0,,,,accept new mux stream error: EOF,,,0.78
+tight,kill,3,9.8,0.07,0,0.0,0.16,0,,,0,0,,,,accept new mux stream error: EOF,,,0.69
+tight,freeze,1,3.7,5.2,0,5.2,5.35,26,2.64,7.08,0,0,0.08,0.12,,[29d85f5d6544c19b] heartbeat timeout,5.2,[29d85f5d6544c19b] heartbeat timeout,0.72
+tight,freeze,2,8.8,4.19,0,4.1,4.16,20,2.14,5.95,0,0,0.1,0.05,,[75ffda1315a46783] heartbeat timeout,4.09,[75ffda1315a46783] heartbeat timeout,1.02
+tight,freeze,3,7.1,5.82,0,5.79,5.95,29,2.84,7.71,0,0,0.07,0.1,,[da748cb84cc42316] heartbeat timeout,5.79,[da748cb84cc42316] heartbeat timeout,1.36
+tight,crash,1,6.97,6.0,0,5.91,5.96,29,2.96,7.79,0,0,,,,[9cfcac191c5a976a] heartbeat timeout,,,1.27
+tight,crash,2,9.77,5.2,0,5.13,5.16,25,2.58,7.07,0,0,,,,[077a2774eb9d9d91] heartbeat timeout,,,1.02
+tight,crash,3,2.05,4.9,0,4.83,4.95,24,2.48,6.76,0,0,,,,[c810a69050795ef2] heartbeat timeout,,,1.03
