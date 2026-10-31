@@ -102,6 +102,7 @@ func TestUpNeedsAPinnedBinary(t *testing.T) {
 type stateFile struct {
 	Version   string `json:"version"`
 	Processes []struct {
+		Name       string `json:"name"`
 		PID        int    `json:"pid"`
 		StartTicks uint64 `json:"start_ticks"`
 	} `json:"processes"`
@@ -122,8 +123,13 @@ func readState(t testing.TB, dir string) stateFile {
 	if err := json.Unmarshal(b, &s); err != nil {
 		t.Fatal(err)
 	}
-	if len(s.Processes) != 1 {
-		t.Fatalf("state records %d processes", len(s.Processes))
+	// k3s first; a host started with a controller binary also records its
+	// supervisor, second.
+	switch {
+	case len(s.Processes) == 1:
+	case len(s.Processes) == 2 && s.Processes[1].Name == "supervisor":
+	default:
+		t.Fatalf("state records %d processes: %+v", len(s.Processes), s.Processes)
 	}
 	return s
 }
