@@ -32,10 +32,31 @@ def both(vals, fmt="%.0f"):
     return " / ".join(fmt % v if v is not None else "-" for v in vals) if vals else "-"
 
 
-def matrix(rs):
-    by = defaultdict(dict)   # (arm, cond, n) -> pass -> row
+LOAD_OK = 4.0
+FLAGGED = set()   # keys whose every attempt ended with the 1-minute load above LOAD_OK
+
+
+def ok(r):
+    return all(f(r.get(k)) is None or f(r.get(k)) <= LOAD_OK for k in ("load_start", "load_end"))
+
+
+def pick(rs, key):
+    """key(row) -> pass -> row: the last attempt measured at a load <= 4.0, else the last attempt
+    (and the key is flagged). Rows are in measurement order; a re-run supersedes earlier rows."""
+    tries = defaultdict(list)
     for r in rs:
-        by[(r["arm"], r["cond"], int(r["n"]))][int(r["pass_"])] = r
+        tries[(key(r), int(r["pass_"]))].append(r)
+    by = defaultdict(dict)
+    for (k, p), lst in tries.items():
+        good = [r for r in lst if ok(r)]
+        by[k][p] = (good or lst)[-1]
+        if not good:
+            FLAGGED.add((k, p))
+    return by
+
+
+def matrix(rs):
+    by = pick(rs, lambda r: (r["arm"], r["cond"], int(r["n"])))   # (arm, cond, n) -> pass -> row
     passes = sorted({int(r["pass_"]) for r in rs})
     out = []
     for cond, title in (("clean", "No impairment"), ("lat20", "20 ms added round trip (10 ms each way)"),
@@ -89,9 +110,7 @@ def matrix(rs):
 
 
 def hol(rs):
-    by = defaultdict(dict)
-    for r in rs:
-        by[(r["config"], r["variant"])][int(r["pass_"])] = r
+    by = pick(rs, lambda r: (r["config"], r["variant"]))
     passes = sorted({int(r["pass_"]) for r in rs})
     out = ["| path | variant | bulk B/s | bulk s | fast gap p99 before / during / after ms | fast lateness max during ms "
            "| fast streams complete | frpc logins |", "|---|---|---:|---:|---:|---:|---:|---:|"]
@@ -123,7 +142,7 @@ def heartbeat(rs):
         out.append("| %s | %s | %d | %s | %s | %s | %s | %s | %s |" % (
             st, sc, len(lst), mmm(r["api_gone_s"] for r in lst), mmm(r["first_refused_s"] for r in lst),
             "%d (%.1f)" % (statistics.median([int(r["hung_n"]) for r in lst]), statistics.median(hung)) if hung else "0",
-            re.sub(r"\d{4}/\d\d/\d\d \d\d:\d\d:\d\d ", "", lst[0]["frps_cause"]).replace("|", "/")[:120], mmm(r["frpc_detect_s"] for r in lst),
+            re.sub(r"\[[0-9a-f]{16}\] |\d{4}/\d\d/\d\d \d\d:\d\d:\d\d ", "", lst[0]["frps_cause"]).replace("|", "/")[:120], mmm(r["frpc_detect_s"] for r in lst),
             mmm(r["heal_probe_ok_s"] for r in lst)))
     return "\n".join(out)
 
@@ -133,6 +152,8 @@ def main():
     print("### Capacity matrix\n" + matrix(rows(os.path.join(d, "matrix.csv"))))
     print("\n### Head-of-line\n" + hol(rows(os.path.join(d, "hol.csv"))))
     print("\n### Heartbeats\n" + heartbeat(rows(os.path.join(d, "heartbeat.csv"))))
+    print("\nMeasured only above a 1-minute load of %.1f (every attempt): %s" % (
+        LOAD_OK, ", ".join("%s pass %d" % ("/".join(map(str, k)), p) for k, p in sorted(FLAGGED)) or "none"))
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ import shutil
 import signal
 import sys
 
-from s1c_lib import HB, PORTS, Env, listeners, load_gate, tox_clear, tox_set
+from s1c_lib import HB, PORTS, Env, listeners, load_gate, log, tox_clear, tox_set
 from s1c_stack import (DIAL, TOX_OF_ARM, Meter, Stack, count_lines, note_load, run_bench, wire_bytes)
 import s1c_heartbeat
 
@@ -27,6 +27,7 @@ ARMS = ("direct", "tcpmux", "wss", "ssh")
 NS = (1, 16, 64, 256)
 BW_KBPS = 512          # matrix cap: 512,000 B/s per toxiproxy connection (KB = 1000 B)
 HOL_RATE = 1_000_000   # head-of-line cap: 1,000,000 B/s shared by every connection of the shaper
+LOAD_OK, TRIES = 4.0, 3  # a measurement counts only if the 1-minute load was <= 4.0 at its start and end
 
 
 def append_row(path, row):
@@ -72,23 +73,48 @@ def matrix_cell(st, env, pas, arm, cond, n, args):
         row["cpu_" + k] = res.get("cpu_" + k, "")
         row["rss_" + k] = res.get("rss_" + k, "")
     append_row(os.path.join(RESULTS, "matrix.csv"), row)
+    return row["load_end"]
+
+
+def measured(fn, tag):
+    """Run one measurement up to TRIES times, until the 1-minute load at its end is also <= 4.0
+    (the gate already holds it <= 4.0 at the start). Every attempt is a row in the CSV, in order;
+    summarize.py uses the last attempt whose start and end loads were both <= 4.0."""
+    for attempt in range(1, TRIES + 1):
+        end = fn()
+        if end <= LOAD_OK:
+            return
+        log("%s: load %.2f at its end (> %.1f), attempt %d of %d" % (tag, end, LOAD_OK, attempt, TRIES))
+
+
+def matrix_plan(args):
+    """(arm, cond, n, pass) in run order: --cells arm:cond:n:pass..., or the full matrix of --arms."""
+    if args.cells:
+        cells = [tuple(c.split(":")) for c in args.cells]
+        cells = [(a, c, int(n), int(p)) for a, c, n, p in cells]
+    else:
+        cells = []
+        for arm in args.arms:
+            for cond in ["clean", "lat20", "bw"] + (["raw", "bw-shared"] if arm == "direct" else []):
+                cells += [(arm, cond, n, args.pass_) for n in args.ns]
+    order = {a: i for i, a in enumerate(ARMS)}
+    return sorted(cells, key=lambda c: (order[c[0]], ["clean", "lat20", "bw", "raw", "bw-shared"].index(c[1]), c[2], c[3]))
 
 
 def cmd_matrix(args):
     env = Env()
     st = Stack(env)
     os.makedirs(RESULTS, exist_ok=True)
+    plan = matrix_plan(args)
     try:
         load_gate()
         st.base_up()
-        for arm in args.arms:
+        for arm in [a for a in ARMS if any(c[0] == a for c in plan)]:
             st.arm_up(arm)
-            conds = ["clean", "lat20", "bw"] + (["raw", "bw-shared"] if arm == "direct" else [])
-            for cond in conds:
+            for (a, cond, n, pas) in [c for c in plan if c[0] == arm]:
                 if cond == "bw-shared":
                     st.shaper_up(BW_KBPS * 1000)
-                for n in args.ns:
-                    matrix_cell(st, env, args.pass_, arm, cond, n, args)
+                measured(lambda: matrix_cell(st, env, pas, arm, cond, n, args), "cell p%d_%s_%s_%d" % (pas, arm, cond, n))
                 if cond == "bw-shared":
                     st.P.stop("shaper")
             st.arm_down()
@@ -161,6 +187,7 @@ def hol_run(st, env, pas, cfg, var):
     row["cpu_frpc"], row["cpu_frps"] = res.get("cpu_frpc", ""), res.get("cpu_frps", "")
     row["load_end"] = note_load("hol %s done" % tag)
     append_row(os.path.join(RESULTS, "hol.csv"), row)
+    return row["load_end"]
 
 
 def cmd_hol(args):
@@ -172,7 +199,7 @@ def cmd_hol(args):
         st.base_up()
         for cfg in args.configs:
             for var in args.variants:
-                hol_run(st, env, args.pass_, cfg, var)
+                measured(lambda: hol_run(st, env, args.pass_, cfg, var), "hol %s/%s" % (cfg, var))
     finally:
         st.P.stop_all()
 
@@ -201,6 +228,7 @@ def main():
     m.add_argument("--arms", nargs="+", default=list(ARMS), choices=ARMS)
     m.add_argument("--ns", nargs="+", type=int, default=list(NS))
     m.add_argument("--window", type=int, default=24)
+    m.add_argument("--cells", nargs="+", help="only these cells, as arm:cond:n:pass (re-runs)")
     h = sub.add_parser("hol")
     h.add_argument("--pass", dest="pass_", type=int, default=1)
     h.add_argument("--configs", nargs="+", default=list(HOL_CONFIGS), choices=list(HOL_CONFIGS))
