@@ -17,7 +17,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 	afake "github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi/fake"
+	pfake "github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider/fake"
 )
 
 var errInjected = errors.New("injected failure")
@@ -127,6 +129,76 @@ func TestReviewDrainEndsOnlyOnAReportAfterTheDrainBegan(t *testing.T) {
 	}
 }
 
+// TestReviewNoRequestReadAfter (Opus 1): the drain ends only on a report that
+// the controller received no earlier than the cutoff, the drain start plus a
+// second. For a running worker the read-time check alone refuses an older
+// report, but a report whose workers are all starting, stopped or exited has no
+// read to date, so only the receipt time refuses it: it can predate requests
+// the front admitted until the drain began. Each refusal has its control, the
+// same report received at the cutoff, which counts. Without the receipt-time
+// check a starting worker's old report ends the drain.
+func TestReviewNoRequestReadAfter(t *testing.T) {
+	cutoff := hoT(10, 0, 0)
+	probe := defaultProbeInterval
+	// report builds a view whose one worker is in phase with the given gauge
+	// (nil: no Health). The report is received at at; a worker with Health read
+	// its metrics at the same moment, so the sample is fresh.
+	report := func(at time.Time, phase agentapi.PartPhase, running *int64) agentView {
+		w := agentapi.WorkerReport{Name: agentapi.WorkerName(0), Phase: phase}
+		if running != nil || phase == agentapi.PartRunning {
+			read := at
+			w.Health = &agentapi.Health{Time: at, ProbeOK: true, MetricsReadAt: &read, RunningRequests: running}
+		}
+		return agentView{
+			report: &agentapi.InstanceReport{Workers: []agentapi.WorkerReport{w}}, reportAt: at, reportTime: at,
+			now: at.Add(time.Second), probeInterval: probe,
+		}
+	}
+	zero, one := int64(0), int64(1)
+	before, after := cutoff.Add(-10*time.Second), cutoff.Add(5*time.Second)
+
+	for _, phase := range []agentapi.PartPhase{agentapi.PartStarting, agentapi.PartStopped, agentapi.PartExited} {
+		t.Run(string(phase)+" worker, received before the cutoff", func(t *testing.T) {
+			if report(before, phase, nil).noRequestReadAfter(cutoff) {
+				t.Fatalf("a report received before the cutoff, whose only worker is %s, ended the drain", phase)
+			}
+		})
+		t.Run(string(phase)+" worker, received at the cutoff", func(t *testing.T) {
+			if !report(cutoff, phase, nil).noRequestReadAfter(cutoff) {
+				t.Fatalf("a report received at the cutoff, whose only worker is %s, holds a request", phase)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name string
+		av   agentView
+		want bool
+	}{
+		{"running, zero known, read after the cutoff", report(after, agentapi.PartRunning, &zero), true},
+		{"running, zero known, read at the cutoff", report(cutoff, agentapi.PartRunning, &zero), true},
+		{"running, zero known, read before the cutoff", report(before, agentapi.PartRunning, &zero), false},
+		{"running, gauge unknown (nil), read after the cutoff", report(after, agentapi.PartRunning, nil), false},
+		{"running, one request, read after the cutoff", report(after, agentapi.PartRunning, &one), false},
+		{"stopping, zero known, read after the cutoff", report(after, agentapi.PartStopping, &zero), true},
+		{"stopping, one request, read after the cutoff", report(after, agentapi.PartStopping, &one), false},
+		{"no report", agentView{reportAt: after, now: after, probeInterval: probe}, false},
+		{"a report with no worker", agentView{report: &agentapi.InstanceReport{}, reportAt: after, reportTime: after, now: after, probeInterval: probe}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.av.noRequestReadAfter(cutoff); got != tc.want {
+				t.Fatalf("noRequestReadAfter = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	t.Run("running, zero known, fresh metrics but a stale receipt", func(t *testing.T) {
+		av := report(after, agentapi.PartRunning, &zero)
+		av.now = after.Add(10 * time.Minute) // the report arrived long ago and no newer came
+		if av.noRequestReadAfter(cutoff) {
+			t.Fatal("a zero gauge from a report received ten minutes ago counted as fresh")
+		}
+	})
+}
+
 // TestReviewScaleDownDrainsAReadyReplacement (Astra 2, Opus 2): with two
 // primaries and their ready replacements, scaling 2 -> 1 drains the surplus
 // primary and its replacement; neither is cut, and the replacement's started
@@ -171,6 +243,83 @@ func TestReviewScaleDownDrainsAReadyReplacement(t *testing.T) {
 	}
 	if n := rg.readyCount(hoMD); n < 1 {
 		t.Fatalf("%d ready after the scale-down, want at least the kept primary", n)
+	}
+}
+
+// TestReviewScaleDownReleasesOnlyAnAllocationThatNeverStarted (Astra 2, and the
+// Opus review fix): on scale-down a surplus Instance that is pending or still
+// starting ends at once, but its Allocation is released only if its job has
+// not started (HBEP-7, Release). Three Instances are wanted: one serves, one
+// is on a job that started and whose engine stays in phase starting, and one
+// waits in the queue. When instances drops from 3 to 1 the last two are
+// surplus. The queued one's Allocation is released and its job cancelled
+// (control); the started one's follows its retention policy (keep) and stays,
+// since its model is loading and a later scale-up can reuse it. Without the
+// rule the started Allocation is deleted with its job.
+func TestReviewScaleDownReleasesOnlyAnAllocationThatNeverStarted(t *testing.T) {
+	rg := newRig(t)
+	agents := 0
+	rg.engine = func(string) afake.Engine {
+		agents++
+		if agents == 1 {
+			return afake.Engine{} // the first job to start serves
+		}
+		return afake.Engine{StartDelay: 30 * time.Minute} // the next stays starting
+	}
+	rg.batch.Enqueue(pfake.Script{}, pfake.Script{QueueWait: 2 * time.Minute}, pfake.Script{QueueWait: 10 * time.Hour})
+	md := mdSpec(hoMD)
+	md.Spec.Instances = 3
+	rg.create(md)
+	var serving, starting, waiting *v1alpha1.Instance
+	rg.until(10*time.Minute, 10*time.Second, "one Instance ready, one starting on a started job, one waiting", func() bool {
+		serving, starting, waiting = nil, nil, nil
+		for _, in := range rg.liveInstances(hoMD) {
+			in := in
+			a, ok := rg.allocation(in.Spec.AllocationRef.Name)
+			switch {
+			case !ok:
+			case in.Status.Phase == v1alpha1.InstanceReady:
+				serving = &in
+			case a.Status.AtProvider.StartTime != nil && in.Status.Phase == v1alpha1.InstanceStarting:
+				starting = &in
+			case a.Status.AtProvider.StartTime == nil && in.Status.Phase == v1alpha1.InstancePending:
+				waiting = &in
+			}
+		}
+		return serving != nil && starting != nil && waiting != nil
+	})
+	// The scenario is the one the rule is about: a job that started and an
+	// Instance on it that does not serve, and a job still in the queue.
+	startedAlloc, _ := rg.allocation(starting.Spec.AllocationRef.Name)
+	if startedAlloc.Status.AtProvider.StartTime == nil || startedAlloc.Status.AtProvider.Phase != v1alpha1.AllocationRunning {
+		t.Fatalf("the starting Instance's Allocation has not started its job: %+v", startedAlloc.Status.AtProvider)
+	}
+	waitingAlloc, _ := rg.allocation(waiting.Spec.AllocationRef.Name)
+	if waitingAlloc.Status.AtProvider.StartTime != nil {
+		t.Fatalf("the waiting Instance's Allocation has started: %+v", waitingAlloc.Status.AtProvider)
+	}
+
+	rg.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 1 })
+	rg.until(2*time.Minute, 10*time.Second, "both surplus Instances ended", func() bool {
+		return hoPhase(rg, starting.Name) == v1alpha1.InstanceEnded && hoPhase(rg, waiting.Name) == v1alpha1.InstanceEnded
+	})
+	for _, in := range []*v1alpha1.Instance{starting, waiting} {
+		if got := rg.instance(in.Name); got.Status.EndReason != v1alpha1.ReasonDrained {
+			t.Fatalf("surplus Instance %s ended with %q, want %q", in.Name, got.Status.EndReason, v1alpha1.ReasonDrained)
+		}
+	}
+	rg.run(5*time.Minute, 10*time.Second)
+	if !allocReleased(rg, waiting.Spec.AllocationRef.Name) {
+		t.Error("the Allocation of the surplus Instance whose job never started was not released")
+	}
+	if n := allocCount(rg.batch, "scancel", allocJobID(waitingAlloc)); n < 1 {
+		t.Errorf("scancel calls for the queued job = %d, want at least 1", n)
+	}
+	if allocReleased(rg, starting.Spec.AllocationRef.Name) {
+		t.Error("the Allocation of the surplus starting Instance was released although its job had started; it must follow its retention policy (keep)")
+	}
+	if p := hoPhase(rg, serving.Name); p != v1alpha1.InstanceReady || allocReleased(rg, serving.Spec.AllocationRef.Name) {
+		t.Errorf("the serving Instance is %s (Allocation released %v), want ready and kept", p, allocReleased(rg, serving.Spec.AllocationRef.Name))
 	}
 }
 
@@ -273,11 +422,15 @@ func TestReviewFailedReleaseIsResumed(t *testing.T) {
 
 // TestReviewIdleAnchorSurvivesTheInstancesDisappearance (Astra 7): an Instance
 // deleted while it serves (as garbage collection deletes it) drains and ends
-// at 09:00:10; the idle anchor write fails once. The anchor is written before
+// at 09:00:10; the idle anchor write fails twice. The anchor is written before
 // the drain finalizer goes, so the Instance cannot vanish first; maxIdle (30
 // min) then counts from its end, not from the job's start (08:00:20), which
 // would release the Allocation at once. Without the fix it is released at the
-// first pass after the end.
+// first pass after the end. The write fails twice, not once: with the
+// finalizer removed first, one failure is spent on the write in end(), and the
+// retention step of the same pass, which still sees the ended Instance, writes
+// the anchor itself; the second failure takes that write too, and the next
+// pass finds no Instance to anchor from.
 func TestReviewIdleAnchorSurvivesTheInstancesDisappearance(t *testing.T) {
 	f := &faults{}
 	rg := newRig(t, withInterceptors(f.funcs()), withProfile(func(p *v1alpha1.PlatformProfileSpec) { p.MaxIdle = dur(30 * time.Minute) }))
@@ -288,12 +441,12 @@ func TestReviewIdleAnchorSurvivesTheInstancesDisappearance(t *testing.T) {
 	rg.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 0 }) // nothing replaces it
 	rg.clock.Set(hoT(9, 0, 0))
 	in := rg.instances(hoMD)[0]
-	failOnce := true
+	failLeft := 2
 	f.set(func(op string, obj client.Object) bool {
 		a, ok := obj.(*v1alpha1.Allocation)
-		if ok && op == "update" && failOnce {
+		if ok && op == "update" && failLeft > 0 {
 			if _, has := a.Annotations[v1alpha1.AnnotationIdleSince]; has {
-				failOnce = false
+				failLeft--
 				return true
 			}
 		}
@@ -305,8 +458,8 @@ func TestReviewIdleAnchorSurvivesTheInstancesDisappearance(t *testing.T) {
 	for i := 0; i < 6; i++ {
 		fixStep(rg, 10*time.Second)
 	}
-	if failOnce {
-		t.Fatal("the anchor write was never attempted; the test proves nothing")
+	if failLeft != 0 {
+		t.Fatalf("the anchor write failed %d times, want 2; the test proves nothing", 2-failLeft)
 	}
 	a, ok := rg.allocation(in.Spec.AllocationRef.Name)
 	if !ok || !a.DeletionTimestamp.IsZero() {
