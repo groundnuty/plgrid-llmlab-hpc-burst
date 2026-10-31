@@ -111,3 +111,19 @@ func TestRealAthenaAccounting(t *testing.T) {
 		t.Error("a v0.0.40 reply was read under a v0.0.42 profile")
 	}
 }
+
+// REQUEUED in any position of the state, the base included, is a requeue
+// (pkg/provider.SlurmPhase, as spike S4 accepts it): Failed, Requeued, and
+// the job still counts as live for cancelling.
+func TestRequeuedBaseState(t *testing.T) {
+	for _, state := range [][]string{{"REQUEUED"}, {"PENDING", "REQUEUED"}} {
+		q := queueRecord{JobID: 7, Name: "hb-x-000000000000", JobState: state}
+		j, err := q.job("v0.0.42")
+		if err != nil {
+			t.Fatalf("%v: %v", state, err)
+		}
+		if j.Phase != v1alpha1.AllocationFailed || !j.Requeued || j.EndTime != nil {
+			t.Errorf("%v: phase %s requeued %v end %v, want Failed, requeued, live", state, j.Phase, j.Requeued, j.EndTime)
+		}
+	}
+}

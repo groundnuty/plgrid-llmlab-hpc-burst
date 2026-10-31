@@ -31,7 +31,6 @@ type shared struct {
 	h      *holder
 	kube   client.Client // writes, under the provider's field manager
 	reader client.Reader // reads from the API server, not the cache
-	waits  *waitSink
 	builds *buildCache
 }
 
@@ -169,6 +168,11 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	now := e.now()
 	if meta.WasDeleted(a) {
 		return e.observeDeleting(ctx, a, rec, name, now)
+	}
+	// Refused is kept once set, and a Refused Allocation with no job submits
+	// nothing.
+	if o.Phase == v1alpha1.AllocationRefused && rec.jobID == "" {
+		return exists, nil
 	}
 	if rec.jobID == "" {
 		obs, done, err := e.establish(ctx, a, &rec, name, now)

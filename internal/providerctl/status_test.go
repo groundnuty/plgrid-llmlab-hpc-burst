@@ -8,6 +8,7 @@ package providerctl
 // pkg/provider/fake/controller.go. Counts come from the fake's call log.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider/fake"
@@ -126,48 +128,59 @@ func TestTwentyFirstQueueWaitDropsTheOldest(t *testing.T) {
 	}
 }
 
-// A failed accounting read of a started job's times is retried on the next
-// sync, and the wait is added once.
-func TestQueueWaitIsRetriedAfterAFailedAccountingRead(t *testing.T) {
-	e := newEnv(t)
+// A failed write of the wait to the Provider's status leaves
+// queueWaitRecorded false and is retried at the next observe; the wait is added
+// once (docs/development.md, Queue waits; fake.Controller's doc comment).
+func TestQueueWaitIsRetriedAfterAFailedProviderWrite(t *testing.T) {
+	fails := 1
+	e := newEnv(t, func(e *env) {
+		e.c = interceptor.NewClient(e.c.(client.WithWatch), interceptor.Funcs{
+			SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				if p, ok := obj.(*v1alpha1.Provider); ok && sub == "status" && len(p.Status.QueueWaits) > 0 && fails > 0 {
+					fails--
+					return errors.New("scripted: the Provider status write failed")
+				}
+				return c.SubResource(sub).Update(ctx, obj, opts...)
+			},
+		})
+	})
 	e.newAlloc("a")
 	e.run("a", 4)
-	e.platform.mu.Lock()
-	e.platform.failWaits = 1
-	e.platform.mu.Unlock()
-	if got := ptWaitIDs(ptSync(e)); len(got) != 0 {
-		t.Fatalf("waits %v after a failed accounting read, want none", got)
+	if fails != 0 {
+		t.Fatal("precondition: the scripted failure was not reached")
 	}
-	e.clock.Advance(time.Second)
-	if got := ptWaitIDs(ptSync(e)); len(got) != 1 || got[0] != ptFirstJob {
-		t.Fatalf("waits %v on the next sync, want [%s]", got, ptFirstJob)
+	if got := ptWaitIDs(ptProvider(e)); len(got) != 1 || got[0] != ptFirstJob {
+		t.Fatalf("waits %v after the retry, want [%s]", got, ptFirstJob)
+	}
+	if !e.get("a").Status.AtProvider.QueueWaitRecorded {
+		t.Error("queueWaitRecorded is false after the wait was written")
 	}
 	for i := 0; i < 3; i++ {
+		e.clock.Advance(time.Minute)
 		e.run("a", 1)
-		if got := ptWaitIDs(ptSync(e)); len(got) != 1 {
-			t.Errorf("waits %v after more syncs, want one: no duplicate", got)
-		}
 	}
-	if e.platform.waitReads < 2 {
-		t.Errorf("%d accounting reads of the wait, want the failed one and the retry", e.platform.waitReads)
+	if got := ptWaitIDs(ptProvider(e)); len(got) != 1 {
+		t.Errorf("waits %v after more observes, want one: no duplicate", got)
 	}
 }
 
-// A job observed started but whose wait the Provider status has not yet taken
-// (the wait is held in memory until the next sync) must still add its wait if
-// the controller restarts in between: HBEP-4 says each started job adds exactly
-// one wait to the Provider's status.
+// The wait is written within the observe that first sees the job started, so
+// a restart before any status sync loses nothing, and the restarted
+// controller adds nothing (queueWaitRecorded lives in the status).
 func TestQueueWaitSurvivesARestartBeforeTheSync(t *testing.T) {
 	e := newEnv(t)
 	e.newAlloc("a")
 	e.run("a", 4)
-	if a := e.get("a"); a.Status.AtProvider.StartTime == nil {
-		t.Fatal("precondition: the job has not started")
+	if a := e.get("a"); a.Status.AtProvider.StartTime == nil || !a.Status.AtProvider.QueueWaitRecorded {
+		t.Fatalf("precondition: start %v, queueWaitRecorded %v", a.Status.AtProvider.StartTime, a.Status.AtProvider.QueueWaitRecorded)
 	}
-	e.build() // the restart, before any status sync
+	if got := ptWaitIDs(ptProvider(e)); len(got) != 1 || got[0] != ptFirstJob {
+		t.Fatalf("waits %v before any status sync, want [%s]", got, ptFirstJob)
+	}
+	e.build() // the restart
 	e.run("a", 2)
 	if got := ptWaitIDs(ptSync(e)); len(got) != 1 || got[0] != ptFirstJob {
-		t.Errorf("waits %v after a restart between the observe and the first sync, want [%s]", got, ptFirstJob)
+		t.Errorf("waits %v after a restart, want [%s]", got, ptFirstJob)
 	}
 }
 
@@ -205,13 +218,14 @@ func TestProviderStatusKeepsAnotherWritersCondition(t *testing.T) {
 // Ready True with reason Polled after a successful poll, and the time of the
 // last successful read (HBEP-4, Provider status). After the poll starts to fail
 // the time stops advancing; Ready is left as it was until the last read is older
-// than three poll intervals (90 s: still True at exactly 90 s), then False,
-// ReadsFailing; when the poll recovers, True again.
+// than v1alpha1.ProviderReadyStaleness (5 min: still True at exactly 5 min),
+// then False, ReadsFailing (docs/development.md, Provider readiness); when the
+// poll recovers, True again.
 func TestProviderReadyFollowsThePollAndGoesStale(t *testing.T) {
 	e := newEnv(t)
 	p := ptSync(e)
 	c := apimeta.FindStatusCondition(p.Status.Conditions, v1alpha1.ConditionProviderReady)
-	if c == nil || c.Status != metav1.ConditionTrue || c.Reason != ReasonPolled {
+	if c == nil || c.Status != metav1.ConditionTrue || c.Reason != v1alpha1.ReasonPolled {
 		t.Fatalf("Ready = %+v after a successful poll, want True/Polled", c)
 	}
 	if r := p.Status.LastSuccessfulStatusRead; r == nil || !r.Time.Equal(at(12, 0, 0)) {
@@ -221,20 +235,20 @@ func TestProviderReadyFollowsThePollAndGoesStale(t *testing.T) {
 	e.platform.mu.Lock()
 	e.platform.pollErr = errors.New("scripted: squeue failed")
 	e.platform.mu.Unlock()
-	for _, d := range []time.Duration{30 * time.Second, 30 * time.Second, 30 * time.Second} {
+	for _, d := range []time.Duration{time.Minute, time.Minute, time.Minute, time.Minute, time.Minute} {
 		e.clock.Advance(d)
 		p = ptSync(e)
 		if r := p.Status.LastSuccessfulStatusRead; r == nil || !r.Time.Equal(at(12, 0, 0)) {
 			t.Fatalf("lastSuccessfulStatusRead %v after a failed poll, want it stuck at 12:00:00", r)
 		}
 		if c := apimeta.FindStatusCondition(p.Status.Conditions, v1alpha1.ConditionProviderReady); c.Status != metav1.ConditionTrue {
-			t.Fatalf("Ready = %s/%s at %s of failure, want True within three intervals", c.Status, c.Reason, e.clock.Now().Sub(at(12, 0, 0)))
+			t.Fatalf("Ready = %s/%s at %s of failure, want True within the staleness bound", c.Status, c.Reason, e.clock.Now().Sub(at(12, 0, 0)))
 		}
 	}
-	e.clock.Advance(time.Second) // 91 s since the last good read
+	e.clock.Advance(time.Second) // 5 min 1 s since the last good read
 	p = ptSync(e)
-	if c := apimeta.FindStatusCondition(p.Status.Conditions, v1alpha1.ConditionProviderReady); c.Status != metav1.ConditionFalse || c.Reason != ReasonReadsFailing {
-		t.Errorf("Ready = %s/%s after three poll intervals, want False/ReadsFailing", c.Status, c.Reason)
+	if c := apimeta.FindStatusCondition(p.Status.Conditions, v1alpha1.ConditionProviderReady); c.Status != metav1.ConditionFalse || c.Reason != v1alpha1.ReasonReadsFailing {
+		t.Errorf("Ready = %s/%s past the staleness bound, want False/ReadsFailing", c.Status, c.Reason)
 	}
 	if r := p.Status.LastSuccessfulStatusRead; r == nil || !r.Time.Equal(at(12, 0, 0)) {
 		t.Errorf("lastSuccessfulStatusRead %v, want 12:00:00", r)
@@ -244,7 +258,7 @@ func TestProviderReadyFollowsThePollAndGoesStale(t *testing.T) {
 	e.platform.pollErr = nil
 	e.platform.mu.Unlock()
 	p = ptSync(e)
-	if c := apimeta.FindStatusCondition(p.Status.Conditions, v1alpha1.ConditionProviderReady); c.Status != metav1.ConditionTrue || c.Reason != ReasonPolled {
+	if c := apimeta.FindStatusCondition(p.Status.Conditions, v1alpha1.ConditionProviderReady); c.Status != metav1.ConditionTrue || c.Reason != v1alpha1.ReasonPolled {
 		t.Errorf("Ready = %s/%s after the poll recovered, want True/Polled", c.Status, c.Reason)
 	}
 	if r := p.Status.LastSuccessfulStatusRead; r == nil || !r.Time.Equal(e.clock.Now()) {

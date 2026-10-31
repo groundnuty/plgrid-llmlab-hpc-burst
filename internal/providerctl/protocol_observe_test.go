@@ -308,8 +308,10 @@ func TestReadBackDifferentTimeLimitIsNotLifted(t *testing.T) {
 		e.run("a", 4)
 		a := e.get("a")
 		c := a.GetCondition(v1alpha1.ConditionSubmittedAsOther)
-		if c.Status != corev1.ConditionTrue || !strings.Contains(c.Message, "time limit") {
-			t.Errorf("SubmittedAsOther = %s %q, want True naming the time limit", c.Status, c.Message)
+		// api/v1alpha1: reason ReasonReadBackMismatch, a message naming each
+		// field with both values.
+		if c.Status != corev1.ConditionTrue || c.Reason != v1alpha1.ReasonReadBackMismatch || !strings.Contains(c.Message, "timeLimit: requested 30m0s, got 10m0s") {
+			t.Errorf("SubmittedAsOther = %s %s %q, want True, ReadBackMismatch, naming the time limit with both values", c.Status, c.Reason, c.Message)
 		}
 		if n := ptLiftAttempts(e); n != 0 {
 			t.Errorf("%d lift calls for a job established as other, want 0", n)
@@ -326,8 +328,9 @@ func TestReadBackDifferentTimeLimitIsNotLifted(t *testing.T) {
 		e.newAlloc("a")
 		e.run("a", 4)
 		a := e.get("a")
-		if s := ptCondStatus(a, v1alpha1.ConditionSubmittedAsOther); s != corev1.ConditionFalse {
-			t.Errorf("SubmittedAsOther = %s, want False", s)
+		// A matching read-back sets no condition (fake.Controller's doc comment).
+		if s := ptCondStatus(a, v1alpha1.ConditionSubmittedAsOther); s == corev1.ConditionTrue {
+			t.Errorf("SubmittedAsOther = %s, want none", s)
 		}
 		if n := e.lifts(); n != 1 {
 			t.Errorf("%d lifts, want 1", n)
@@ -362,7 +365,7 @@ func TestReadBackRenamedJobIsRefusedAndStaysRefused(t *testing.T) {
 			check := func(step string) {
 				t.Helper()
 				o := e.get("a").Status.AtProvider
-				if o.Phase != v1alpha1.AllocationRefused || !strings.Contains(o.Reason, "the job's name came back as") {
+				if o.Phase != v1alpha1.AllocationRefused || o.Reason != v1alpha1.ReasonJobRenamed {
 					t.Errorf("%s: phase %s reason %q, want Refused for the rewritten name", step, o.Phase, o.Reason)
 				}
 			}

@@ -34,7 +34,9 @@ import (
 )
 
 // Platform is what the controller calls: provider.Batch plus the reads that
-// HBEP-4 needs and the core interface does not carry. internal/slurm.Batch
+// HBEP-4 needs and the core interface does not carry (the login-node paths for
+// agent.json, the dial-home key check, a listing-only lookup for settle, and the
+// poll-rate hint). internal/slurm.Batch
 // implements it; tests wrap pkg/provider/fake.Batch. It stays internal to this
 // controller: nothing another component consumes passes through it (queue
 // waits reach the lifecycle controller through Provider.status.queueWaits).
@@ -44,11 +46,6 @@ type Platform interface {
 	// ListByTag returns the jobs with the tag in the queue listing only (held,
 	// pending, running): what settle needs, without an accounting read.
 	ListByTag(ctx context.Context, tag string) ([]provider.Job, error)
-
-	// QueueWait reads one job's accounting record: its submission and start
-	// times (HBEP-4, Provider status). ok is false while accounting shows no
-	// start yet.
-	QueueWait(ctx context.Context, jobID string) (submit, start time.Time, ok bool, err error)
 
 	// Paths resolves the login node's HOME and stagingDir, once per
 	// connection. An unresolved path wraps provider.ErrPathUnresolved.
@@ -60,9 +57,6 @@ type Platform interface {
 	// SetBusy marks a tag as having an unresolved attempt or a held job, so
 	// the queue listing is read at the short interval.
 	SetBusy(tag string, busy bool)
-
-	// Poll reads the queue listing when it is due.
-	Poll(ctx context.Context) error
 
 	// Health reports the platform's state for the Provider's status.
 	Health() slurm.Health

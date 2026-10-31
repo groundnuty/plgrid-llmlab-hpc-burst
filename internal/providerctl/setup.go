@@ -65,7 +65,7 @@ func New(kube client.Client, reader client.Reader, scheme *runtime.Scheme, o Opt
 		return nil, err
 	}
 	kube = client.WithFieldOwner(kube, v1alpha1.FieldManagerProvider)
-	s := &shared{o: o, kube: kube, reader: reader, waits: newWaitSink(), builds: &buildCache{}}
+	s := &shared{o: o, kube: kube, reader: reader, builds: &buildCache{}}
 	s.h = &holder{o: &s.o}
 	opts := []managed.ReconcilerOption{
 		managed.WithExternalConnector(&connector{s: s}),

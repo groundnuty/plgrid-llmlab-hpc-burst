@@ -169,7 +169,9 @@ func (e *external) accepted(ctx context.Context, a *v1alpha1.Allocation, claim v
 	if err != nil || !found {
 		return nil // the next observe settles
 	}
-	if refused, _ := e.readBack(ctx, a, meta.GetExternalName(a), job); refused {
+	// A renamed job, or one established as something else, is left held:
+	// the next observe refuses it or raises SubmittedAsOther, and it never runs.
+	if job.Name != meta.GetExternalName(a) || len(readBackDiffs(a.Spec.ForProvider.Batch, job)) > 0 {
 		return nil
 	}
 	if _, err := e.settle(ctx, a, &rec, meta.GetExternalName(a), job); err != nil {

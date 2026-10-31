@@ -380,25 +380,6 @@ func (b *Batch) QueueJob(ctx context.Context, jobID string) (provider.Job, bool,
 	return provider.Job{}, false, nil
 }
 
-// QueueWait reads one job's accounting record for its queue wait (HBEP-4,
-// Provider status): its submission and start times. ok is false while
-// accounting shows no start yet; the caller retries on the next poll.
-func (b *Batch) QueueWait(ctx context.Context, jobID string) (submit, start time.Time, ok bool, err error) {
-	if err := checkJobID(jobID); err != nil {
-		return time.Time{}, time.Time{}, false, err
-	}
-	acct, err := b.accounting(ctx, accountingJobLine(jobID))
-	if err != nil {
-		return time.Time{}, time.Time{}, false, err
-	}
-	for _, j := range acct {
-		if j.ID == jobID && j.StartTime != nil && !j.SubmitTime.IsZero() {
-			return j.SubmitTime, *j.StartTime, true, nil
-		}
-	}
-	return time.Time{}, time.Time{}, false, nil
-}
-
 // refuse is a request refused before any call.
 func refuse(format string, a ...any) error {
 	return fmt.Errorf("%w: %s", provider.ErrInvalidRequest, fmt.Sprintf(format, a...))
@@ -459,9 +440,11 @@ func checkRequest(req provider.SubmitRequest, profile provider.Profile, settings
 		return s, refuse("cpusPerTask %d is below 1", p.CPUsPerTask)
 	}
 	s.cpusPerTask = p.CPUsPerTask
+	// Memory 0 is refused although the CRD admits it: Slurm reads --mem=0 as
+	// the whole node's memory (science agent's ruling, 31 Oct 2026).
 	mem := p.Memory.Value()
 	if mem <= 0 {
-		return s, refuse("memory is not positive")
+		return s, refuse("memory is not positive; --mem=0 would take the whole node")
 	}
 	s.memMiB = (mem + (1<<20 - 1)) >> 20
 	if p.Nodes > 1 {

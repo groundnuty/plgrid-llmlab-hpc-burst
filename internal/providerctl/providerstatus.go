@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
-	"sync"
 	"time"
 
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -20,12 +18,9 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
-// Reasons of the Provider conditions this controller writes.
+// Reasons of the Provider conditions this controller writes besides Ready,
+// whose reasons are v1alpha1.ReasonPolled and v1alpha1.ReasonReadsFailing.
 const (
-	ReasonPolled          = "Polled"
-	ReasonReadsFailing    = "ReadsFailing"
-	ReasonNotPolledYet    = "NotPolledYet"
-	ReasonInvalidProfile  = "InvalidProfile"
 	reasonMatches         = "Matches"
 	reasonMismatch        = "Mismatch"
 	reasonResolved        = "Resolved"
@@ -34,64 +29,14 @@ const (
 	reasonMissing         = "Missing"
 	reasonCredentialsOK   = "Accepted"
 	reasonCredentialsBad  = "Refused"
-	staleIntervals        = 3
 	maxStatusWriteRetries = 3
 )
 
-// waitSink holds the job IDs whose queue wait is still to be written to the
-// Provider's status. An ID stays until a status write that carries its wait
-// succeeds, so a failed accounting read or a failed write is retried on the
-// next sync, and an ID written once is never added again (HBEP-4, Provider
-// status: a repeated observe adds nothing).
-type waitSink struct {
-	mu      sync.Mutex
-	pending map[string]bool
-	written map[string]bool
-}
-
-func newWaitSink() *waitSink {
-	return &waitSink{pending: map[string]bool{}, written: map[string]bool{}}
-}
-
-func (w *waitSink) add(id string) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if !w.written[id] {
-		w.pending[id] = true
-	}
-}
-
-func (w *waitSink) list() []string {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	out := make([]string, 0, len(w.pending))
-	for id := range w.pending {
-		out = append(out, id)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// known reports whether id was written by this process.
-func (w *waitSink) known(id string) bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.written[id] || w.pending[id]
-}
-
-func (w *waitSink) done(ids []string) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	for _, id := range ids {
-		delete(w.pending, id)
-		w.written[id] = true
-	}
-}
-
-// statusLoop is the single writer of the Provider's status (docs/development.md,
-// Single writer): the queue waits, the time of the last successful queue read,
-// Ready, DialectMismatch, PathUnresolved, CredentialsInvalid and
-// DialHomeKeyMissing. It keeps every condition it does not own, such as the
+// statusLoop writes the Provider's status (docs/development.md, Single writer):
+// the time of the last successful queue read, Ready, DialectMismatch,
+// PathUnresolved, CredentialsInvalid and DialHomeKeyMissing. The queue waits
+// are written by the observe that first sees a job started (recordQueueWait);
+// both write with a resourceVersion precondition and re-read on a conflict. It keeps every condition it does not own, such as the
 // lifecycle controller's DialHomeUnreachable. It also polls the queue listing
 // once per interval, so the listing is read even with no Allocation.
 type statusLoop struct {
@@ -119,28 +64,17 @@ func (l *statusLoop) Start(ctx context.Context) error {
 	}
 }
 
-// sync polls the platform, resolves pending queue waits, and writes the
-// Provider's status when it changed.
+// sync polls the platform and writes the Provider's status when it changed.
+// The poll is every PollInterval, within v1alpha1.ProviderPollInterval, so
+// Ready always rests on a real read (docs/development.md, Provider readiness).
 func (l *statusLoop) sync(ctx context.Context) error {
 	_, p, cfgErr := l.s.h.get(ctx)
-	if err := l.scanStarted(ctx); err != nil {
-		return err
-	}
-	var waits []v1alpha1.QueueWait
-	var waitIDs []string
-	if cfgErr == nil {
-		_ = p.Poll(ctx) // its outcome shows in Health
-		for _, id := range l.s.waits.list() {
-			submit, start, ok, err := p.QueueWait(ctx, id)
-			if err != nil || !ok {
-				continue // retried on the next sync
-			}
-			waits = append(waits, v1alpha1.QueueWait{JobID: id, SubmitTime: *mt(submit), StartTime: *mt(start)})
-			waitIDs = append(waitIDs, id)
-		}
-	}
+	var pollErr error
 	var health slurm.Health
-	if p != nil {
+	if cfgErr == nil {
+		pollErr = p.Poll(ctx)
+		health = p.Health()
+	} else if p, _ := l.s.h.current(); p != nil {
 		health = p.Health()
 	}
 	var err error
@@ -150,96 +84,60 @@ func (l *statusLoop) sync(ctx context.Context) error {
 			return fmt.Errorf("get Provider %s: %w", l.s.o.Provider, err)
 		}
 		old := prov.DeepCopy()
-		l.compute(&prov, health, cfgErr, waits)
+		l.compute(&prov, health, cfgErr, pollErr)
 		if apiequality.Semantic.DeepEqual(old.Status, prov.Status) {
-			l.s.waits.done(waitIDs)
 			return nil
 		}
 		err = l.s.kube.Status().Update(ctx, &prov)
-		if err == nil {
-			l.s.waits.done(waitIDs)
-			return nil
-		}
-		if !kerrors.IsConflict(err) {
-			return fmt.Errorf("update Provider %s status: %w", l.s.o.Provider, err)
+		if err == nil || !kerrors.IsConflict(err) {
+			break
 		}
 	}
-	return err
-}
-
-// scanStarted finds started jobs whose wait is in neither the Provider's status
-// nor this process's memory: a wait seen started by an observe whose process
-// stopped before the next sync. It reads the durable state only (each
-// Allocation's atProvider.startTime and the Provider's queueWaits), so a
-// restart loses no wait. A job is taken only while the list has room, or when
-// it started after the oldest kept wait, so a wait that fell out of the 20
-// kept is never added again (HBEP-4, Provider status).
-func (l *statusLoop) scanStarted(ctx context.Context) error {
-	var prov v1alpha1.Provider
-	if err := l.s.reader.Get(ctx, client.ObjectKey{Name: l.s.o.Provider}, &prov); err != nil {
-		return fmt.Errorf("get Provider %s: %w", l.s.o.Provider, err)
-	}
-	have := map[string]bool{}
-	var oldest *metav1.Time
-	for i, w := range prov.Status.QueueWaits {
-		have[w.JobID] = true
-		if oldest == nil || w.StartTime.Before(oldest) {
-			oldest = &prov.Status.QueueWaits[i].StartTime
-		}
-	}
-	full := len(prov.Status.QueueWaits) >= v1alpha1.MaxQueueWaits
-	var list v1alpha1.AllocationList
-	if err := l.s.kube.List(ctx, &list); err != nil {
-		return fmt.Errorf("list Allocations: %w", err)
-	}
-	for _, a := range list.Items {
-		ref, o := a.Spec.ProviderConfigReference, a.Status.AtProvider
-		if ref == nil || ref.Name != l.s.o.Provider || o.JobID == "" || o.StartTime == nil {
-			continue
-		}
-		if have[o.JobID] || l.s.waits.known(o.JobID) || (full && !o.StartTime.After(oldest.Time)) {
-			continue
-		}
-		l.s.waits.add(o.JobID)
+	if err != nil {
+		return fmt.Errorf("update Provider %s status: %w", l.s.o.Provider, err)
 	}
 	return nil
 }
 
-// compute sets the status fields this controller owns.
-func (l *statusLoop) compute(prov *v1alpha1.Provider, h slurm.Health, cfgErr error, waits []v1alpha1.QueueWait) {
-	now := *mt(l.s.o.Clock.Now())
+// compute sets the status fields this controller owns, keeping the queue
+// waits and every condition it does not own as they were read.
+func (l *statusLoop) compute(prov *v1alpha1.Provider, h slurm.Health, cfgErr, pollErr error) {
+	now := l.s.o.Clock.Now()
+	stamp := *mt(now)
 	st := &prov.Status
-	sort.SliceStable(waits, func(i, k int) bool { return waits[i].StartTime.Before(&waits[k].StartTime) })
-	for _, w := range waits {
-		st.QueueWaits = v1alpha1.AddQueueWait(st.QueueWaits, w)
-	}
 	st.ObservedGeneration = prov.Generation
-	st.LastReconcileTime = &now
+	st.LastReconcileTime = &stamp
 	if !h.LastListing.IsZero() {
 		st.LastSuccessfulStatusRead = mt(h.LastListing)
 	}
 	set := func(t string, status metav1.ConditionStatus, reason, msg string) {
 		apimeta.SetStatusCondition(&st.Conditions, metav1.Condition{
-			Type: t, Status: status, Reason: reason, Message: msg, ObservedGeneration: prov.Generation, LastTransitionTime: now,
+			Type: t, Status: status, Reason: reason, Message: msg, ObservedGeneration: prov.Generation, LastTransitionTime: stamp,
 		})
 	}
 
-	var invalid *provider.InvalidProfileError
+	// Ready (docs/development.md, Provider readiness): True with Polled after
+	// a pass whose reads succeeded; after a failed pass, False with
+	// ReadsFailing once the last success is older than ProviderReadyStaleness
+	// or there is none, else unchanged. The message names the time of the last
+	// success, not its age, so it is the same from one pass to the next.
+	failed := cfgErr != nil || pollErr != nil || h.ListingFailed || h.LastListing.IsZero()
 	switch {
-	case errors.As(cfgErr, &invalid):
-		set(v1alpha1.ConditionProviderReady, metav1.ConditionFalse, ReasonInvalidProfile, truncate(invalid.Error()))
-	case errors.Is(cfgErr, provider.ErrCredentials):
-		set(v1alpha1.ConditionProviderReady, metav1.ConditionFalse, reasonCredentialsBad, truncate(cfgErr.Error()))
-	case h.LastListing.IsZero():
-		set(v1alpha1.ConditionProviderReady, metav1.ConditionFalse, ReasonNotPolledYet, "no queue read has succeeded yet")
-	case l.s.o.Clock.Now().Sub(h.LastListing) > staleIntervals*l.s.o.PollInterval:
-		set(v1alpha1.ConditionProviderReady, metav1.ConditionFalse, ReasonReadsFailing,
-			fmt.Sprintf("the last successful queue read is older than %s", staleIntervals*l.s.o.PollInterval))
-	case h.ListingFailed:
-		// Within the bound a failed read leaves Ready as it was; the age of the
-		// last successful read keeps growing.
-	default:
-		set(v1alpha1.ConditionProviderReady, metav1.ConditionTrue, ReasonPolled, "")
+	case !failed:
+		set(v1alpha1.ConditionProviderReady, metav1.ConditionTrue, v1alpha1.ReasonPolled, "")
+	case h.LastListing.IsZero() || now.Sub(h.LastListing) > v1alpha1.ProviderReadyStaleness:
+		msg := "no queue read has succeeded yet"
+		if !h.LastListing.IsZero() {
+			msg = "the last successful queue read was at " + h.LastListing.UTC().Format(time.RFC3339)
+		}
+		var invalid *provider.InvalidProfileError
+		switch {
+		case errors.As(cfgErr, &invalid):
+			msg += "; no read is made: " + truncate(invalid.Error())
+		case errors.Is(cfgErr, provider.ErrCredentials):
+			msg += "; no read is made: the credentials are refused"
+		}
+		set(v1alpha1.ConditionProviderReady, metav1.ConditionFalse, v1alpha1.ReasonReadsFailing, msg)
 	}
 
 	if errors.Is(cfgErr, provider.ErrCredentials) {

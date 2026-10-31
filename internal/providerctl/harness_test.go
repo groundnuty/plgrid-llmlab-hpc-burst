@@ -11,7 +11,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -59,8 +58,6 @@ type fakePlatform struct {
 	pollErr     error
 	lastListing time.Time
 	keyChecks   int
-	waitReads   int
-	failWaits   int
 }
 
 var _ Platform = (*fakePlatform)(nil)
@@ -77,24 +74,6 @@ func (p *fakePlatform) ListByTag(ctx context.Context, tag string) ([]provider.Jo
 		}
 	}
 	return out, nil
-}
-
-func (p *fakePlatform) QueueWait(ctx context.Context, id string) (time.Time, time.Time, bool, error) {
-	p.mu.Lock()
-	p.waitReads++
-	fail := p.failWaits > 0
-	if fail {
-		p.failWaits--
-	}
-	p.mu.Unlock()
-	if fail {
-		return time.Time{}, time.Time{}, false, errors.New("scripted accounting failure")
-	}
-	j, found, err := p.Observe(ctx, id)
-	if err != nil || !found || j.StartTime == nil {
-		return time.Time{}, time.Time{}, false, err
-	}
-	return j.SubmitTime, *j.StartTime, true, nil
 }
 
 func (p *fakePlatform) Paths(context.Context) (slurm.Paths, error) {
@@ -120,19 +99,25 @@ func (p *fakePlatform) SetBusy(tag string, busy bool) {
 	}
 }
 
-func (p *fakePlatform) Poll(context.Context) error {
+// Poll is fake.Batch's (it logs "squeue-me" and fails with FailReads), plus a
+// scripted failure, and remembers the last successful poll for Health.
+func (p *fakePlatform) Poll(ctx context.Context) error {
+	err := p.Batch.Poll(ctx)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.pollErr == nil {
+	if err == nil {
+		err = p.pollErr
+	}
+	if err == nil {
 		p.lastListing = p.clock.Now()
 	}
-	return p.pollErr
+	return err
 }
 
 func (p *fakePlatform) Health() slurm.Health {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	h := slurm.Health{LastListing: p.lastListing, ListingFailed: p.pollErr != nil}
+	h := slurm.Health{LastListing: p.lastListing}
 	if p.pathErr != nil {
 		h.PathUnresolved = p.pathErr
 	}

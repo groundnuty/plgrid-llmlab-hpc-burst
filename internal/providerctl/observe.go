@@ -12,24 +12,23 @@ import (
 	"github.com/crossplane/crossplane-runtime/v2/pkg/reconciler/managed"
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	corev1 "k8s.io/api/core/v1"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
-// Reasons of the read-back's SubmittedAsOther condition and of the refusal of
-// a rewritten name (HBEP-4, The Slurm dialect, Read-back).
+// Reasons of the AdminHold condition.
 const (
-	reasonReadBackMatched xpv2.ConditionReason = "ReadBackMatched"
-	reasonReadBackDiffers xpv2.ConditionReason = "ReadBackDiffers"
-	reasonAdminHold       xpv2.ConditionReason = "JobHeldAdmin"
-	reasonNoAdminHold     xpv2.ConditionReason = "NotHeldByAdmin"
-	renamedPrefix                              = "the job's name came back as "
+	reasonAdminHold   xpv2.ConditionReason = "JobHeldAdmin"
+	reasonNoAdminHold xpv2.ConditionReason = "NotHeldByAdmin"
 )
 
 // observeRecorded observes the recorded job: it resolves the attempt the job
-// answers, reads the job back once, settles in hold mode, mirrors the job into
-// the status, and judges Lost from reads that succeeded.
+// answers, checks the job's name and, on the first observe, its settings
+// (the read-back), settles in hold mode, mirrors the job into the status,
+// records its queue wait once, and judges Lost from reads that succeeded.
 func (e *external) observeRecorded(ctx context.Context, a *v1alpha1.Allocation, rec *record, name string, now time.Time) (managed.ExternalObservation, error) {
 	o := &a.Status.AtProvider
 	prior := o.DeepCopy()
@@ -46,14 +45,10 @@ func (e *external) observeRecorded(ctx context.Context, a *v1alpha1.Allocation, 
 	}
 	e.markResolved(a, rec.sub, now)
 	o.JobID, o.Submission = rec.jobID, rec.sub
+	refused := prior.Phase == v1alpha1.AllocationRefused
 
-	// A job refused for a rewritten name stays refused; it is only kept
-	// cancelled.
-	if o.Phase == v1alpha1.AllocationRefused && strings.HasPrefix(o.Reason, renamedPrefix) {
-		return e.keepRefused(ctx, a, rec.jobID)
-	}
 	// An ended job's accounting record is final: no more reads.
-	if (o.Phase == v1alpha1.AllocationEnded || o.Phase == v1alpha1.AllocationFailed) && o.EndTime != nil {
+	if (o.Phase == v1alpha1.AllocationEnded || o.Phase == v1alpha1.AllocationFailed) && o.EndTime != nil && o.QueueWaitRecorded {
 		e.p.SetBusy(name, false)
 		return exists, nil
 	}
@@ -68,18 +63,26 @@ func (e *external) observeRecorded(ctx context.Context, a *v1alpha1.Allocation, 
 		e.absent(a, rec.jobID, now)
 		return exists, nil
 	}
-	if refused, err := e.readBack(ctx, a, name, job); refused || err != nil {
-		return exists, err
+	var errs []error
+	renamed := job.Name != name
+	if renamed {
+		if err := e.refuseRenamed(ctx, a, prior, job); err != nil {
+			errs = append(errs, err)
+		}
+		refused = true
+	} else if prior.JobID != job.ID {
+		e.readBack(a, job)
 	}
-	var settleErr error
-	if e.hold() {
+	if e.hold() && !refused {
 		lifted, err := e.settle(ctx, a, rec, name, job)
 		if err != nil && !errors.Is(err, errLiftFailed) {
 			*o = *prior
 			o.JobID, o.Submission = rec.jobID, rec.sub
 			return exists, err
 		}
-		settleErr = err
+		if err != nil {
+			errs = append(errs, err)
+		}
 		if lifted {
 			if j, ok, err := e.p.Observe(ctx, rec.jobID); err == nil && ok {
 				job = j
@@ -92,8 +95,64 @@ func (e *external) observeRecorded(ctx context.Context, a *v1alpha1.Allocation, 
 		return exists, err
 	}
 	e.mirror(a, prior, rec.jobID, job)
+	if refused {
+		// Refused, once set, is kept on every path; the rest of the
+		// observation follows the job.
+		o.Phase = v1alpha1.AllocationRefused
+		if renamed && prior.Phase != v1alpha1.AllocationRefused {
+			o.Reason = v1alpha1.ReasonJobRenamed
+		} else {
+			o.Reason = prior.Reason
+		}
+		setAvailability(a)
+	}
+	if job.StartTime != nil && !prior.QueueWaitRecorded {
+		if err := e.recordQueueWait(ctx, rec.jobID, job); err != nil {
+			errs = append(errs, err)
+		} else {
+			o.QueueWaitRecorded = true
+		}
+	}
 	e.p.SetBusy(name, o.Phase == v1alpha1.AllocationHeld)
-	return exists, settleErr
+	return exists, errors.Join(errs...)
+}
+
+// recordQueueWait adds the job's queue wait, its own submit and start times,
+// to the Provider's status (docs/development.md, Queue waits), at once, so the
+// caller sets queueWaitRecorded only after the write succeeded. A wait already
+// there (the Provider's write succeeded and the Allocation's did not) costs no
+// write. The list is kept oldest start first. Conflicts re-read; the status
+// loop's writes and this one never overwrite each other.
+func (e *external) recordQueueWait(ctx context.Context, id string, job provider.Job) error {
+	w := v1alpha1.QueueWait{JobID: id, SubmitTime: *mt(job.SubmitTime), StartTime: *mt(*job.StartTime)}
+	var err error
+	for i := 0; i < 3; i++ {
+		var prov v1alpha1.Provider
+		if err = e.s.reader.Get(ctx, client.ObjectKey{Name: e.s.o.Provider}, &prov); err != nil {
+			return fmt.Errorf("get Provider %s to record the queue wait of job %s: %w", e.s.o.Provider, id, err)
+		}
+		for _, old := range prov.Status.QueueWaits {
+			if old.JobID == id {
+				return nil
+			}
+		}
+		prov.Status.QueueWaits = addQueueWait(prov.Status.QueueWaits, w)
+		if err = e.s.kube.Status().Update(ctx, &prov); err == nil {
+			return nil
+		}
+		if !kerrors.IsConflict(err) {
+			break
+		}
+	}
+	return fmt.Errorf("record the queue wait of job %s: %w", id, err)
+}
+
+// addQueueWait is v1alpha1.AddQueueWait with the list kept oldest start
+// first, whatever order the jobs were observed in.
+func addQueueWait(waits []v1alpha1.QueueWait, w v1alpha1.QueueWait) []v1alpha1.QueueWait {
+	out := v1alpha1.AddQueueWait(waits, w)
+	sort.SliceStable(out, func(i, k int) bool { return out[i].StartTime.Before(&out[k].StartTime) })
+	return out
 }
 
 // mirror writes what the read of the recorded job showed into the status.
@@ -114,9 +173,6 @@ func (e *external) mirror(a *v1alpha1.Allocation, prior *v1alpha1.AllocationObse
 	o.SubmitTime = mt(job.SubmitTime)
 	o.StartEstimate, o.StartTime = mtp(job.StartEstimate), mtp(job.StartTime)
 	o.HardEnd, o.EndTime = mtp(job.HardEnd), mtp(job.EndTime)
-	if job.StartTime != nil && prior.StartTime == nil {
-		e.s.waits.add(id)
-	}
 	switch {
 	case job.Hold == provider.HoldAdmin:
 		a.SetConditions(xpv2.Condition{Type: v1alpha1.ConditionAdminHold, Status: corev1.ConditionTrue, Reason: reasonAdminHold,
@@ -160,59 +216,58 @@ func (e *external) absent(a *v1alpha1.Allocation, id string, now time.Time) {
 	setAvailability(a)
 }
 
-// readBack compares the job as established with the request, once, on the
-// first observe after it is established (HBEP-4, Read-back). A name that
-// differs refuses the Allocation and cancels the job; any other difference
-// sets SubmittedAsOther. The condition, True or False, marks the read-back as
-// done.
-func (e *external) readBack(ctx context.Context, a *v1alpha1.Allocation, name string, job provider.Job) (bool, error) {
-	if a.GetCondition(v1alpha1.ConditionSubmittedAsOther).Status != corev1.ConditionUnknown {
-		return false, nil
+// readBack compares the job's partition, time limit and GPU count with the
+// request, on the first observe after it is established only (HBEP-4, The
+// Slurm dialect, Read-back): a later change, such as an administrator's
+// extension of the time limit, is a later hard end, never a mismatch. A
+// difference sets SubmittedAsOther True, reason ReasonReadBackMismatch, with
+// each differing field and both values; the condition is never cleared, and
+// the lifecycle controller replaces the Allocation. The GPU count is compared
+// only from the queue listing, whose tres_req_str always carries it.
+func (e *external) readBack(a *v1alpha1.Allocation, job provider.Job) {
+	if a.GetCondition(v1alpha1.ConditionSubmittedAsOther).Status == corev1.ConditionTrue {
+		return
 	}
-	o := &a.Status.AtProvider
-	if job.Name != name {
-		o.Phase = v1alpha1.AllocationRefused
-		o.Reason = fmt.Sprintf("%s%q, not the tag; the site rewrote it, so the job could never be found by tag", renamedPrefix, job.Name)
-		o.SubmitTime = mt(job.SubmitTime)
-		a.SetConditions(xpv2.Unavailable().WithMessage(o.Reason))
-		e.event(a, event.Warning("JobNameRewritten", errors.New(o.Reason)))
-		if job.EndTime == nil {
-			return true, e.cancel(ctx, []string{job.ID})
-		}
-		return true, nil
+	diffs := readBackDiffs(a.Spec.ForProvider.Batch, job)
+	if len(diffs) == 0 {
+		return
 	}
-	p := a.Spec.ForProvider.Batch
-	var diffs []string
-	if job.Partition != "" && job.Partition != p.Partition {
-		diffs = append(diffs, fmt.Sprintf("partition %s, requested %s", job.Partition, p.Partition))
-	}
-	if want, err := p.TimeLimit.AsDuration(); err == nil && job.TimeLimit > 0 && job.TimeLimit != want {
-		diffs = append(diffs, fmt.Sprintf("time limit %s, requested %s", job.TimeLimit, want))
-	}
-	if job.Source == provider.SourceQueue && job.GPUs != p.GPUs {
-		diffs = append(diffs, fmt.Sprintf("%d GPUs, requested %d", job.GPUs, p.GPUs))
-	}
-	c := xpv2.Condition{Type: v1alpha1.ConditionSubmittedAsOther, Status: corev1.ConditionFalse, Reason: reasonReadBackMatched,
-		Message: "the job was established as requested", LastTransitionTime: *mt(e.now())}
-	if len(diffs) > 0 {
-		c.Status, c.Reason = corev1.ConditionTrue, reasonReadBackDiffers
-		c.Message = "the job was established with " + strings.Join(diffs, "; ")
-		e.event(a, event.Warning("SubmittedAsOther", errors.New(c.Message)))
-	}
-	a.SetConditions(c)
-	return false, nil
+	msg := "job " + job.ID + " was established with other settings than requested: " + strings.Join(diffs, "; ")
+	a.SetConditions(xpv2.Condition{Type: v1alpha1.ConditionSubmittedAsOther, Status: corev1.ConditionTrue,
+		Reason: v1alpha1.ReasonReadBackMismatch, Message: msg, LastTransitionTime: *mt(e.now())})
+	e.event(a, event.Warning("SubmittedAsOther", errors.New(msg)))
 }
 
-// keepRefused keeps a refused job cancelled.
-func (e *external) keepRefused(ctx context.Context, a *v1alpha1.Allocation, id string) (managed.ExternalObservation, error) {
-	job, found, err := e.p.Observe(ctx, id)
-	if err != nil {
-		return exists, e.readFailed(err)
+// readBackDiffs lists the fields of job that differ from the request, each
+// with both values, in the order partition, time limit, GPUs.
+func readBackDiffs(p *v1alpha1.BatchParameters, job provider.Job) []string {
+	var diffs []string
+	if job.Partition != "" && job.Partition != p.Partition {
+		diffs = append(diffs, fmt.Sprintf("partition: requested %q, got %q", p.Partition, job.Partition))
 	}
-	if found && job.EndTime == nil {
-		return exists, e.cancel(ctx, []string{id})
+	if want, err := p.TimeLimit.AsDuration(); err == nil && job.TimeLimit > 0 && job.TimeLimit != want {
+		diffs = append(diffs, fmt.Sprintf("timeLimit: requested %s, got %s", want, job.TimeLimit))
 	}
-	return exists, nil
+	if job.Source == provider.SourceQueue && job.GPUs != p.GPUs {
+		diffs = append(diffs, fmt.Sprintf("gpus: requested %d, got %d", p.GPUs, job.GPUs))
+	}
+	return diffs
+}
+
+// refuseRenamed handles a recorded job stored under a name other than the
+// tag: it can never be found by tag again, so deletion's cancel by tag would
+// miss it. The phase becomes Refused, reason ReasonJobRenamed, and the job is
+// cancelled while it is live. The name is checked on every observe, so a
+// failed cancel is retried; a cancelled job has an end time, so it is not
+// cancelled twice.
+func (e *external) refuseRenamed(ctx context.Context, a *v1alpha1.Allocation, prior *v1alpha1.AllocationObservation, job provider.Job) error {
+	if prior.Phase != v1alpha1.AllocationRefused {
+		e.event(a, event.Warning("JobNameRewritten", fmt.Errorf("job %s came back under the name %q, not the tag; it is cancelled", job.ID, job.Name)))
+	}
+	if job.EndTime != nil {
+		return nil
+	}
+	return e.cancel(ctx, []string{job.ID})
 }
 
 var errLiftFailed = errors.New("lifting the hold failed")
@@ -241,6 +296,8 @@ func (e *external) settle(ctx context.Context, a *v1alpha1.Allocation, rec *reco
 		}
 		e.event(a, event.Normal("HeldDuplicateCancelled", fmt.Sprintf("held job(s) %s with the tag were cancelled; job %s is the Allocation's", strings.Join(extras, ", "), rec.jobID)))
 	}
+	// A job established as something else (SubmittedAsOther) is not lifted:
+	// the lifecycle controller replaces the Allocation, and the job never runs.
 	if rec.lifted == recorded.ID || recorded.Hold != provider.HoldUser || recorded.RestartCount != 0 || recorded.StartTime != nil ||
 		a.GetCondition(v1alpha1.ConditionSubmittedAsOther).Status == corev1.ConditionTrue {
 		return false, nil
