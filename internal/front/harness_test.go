@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -62,8 +63,26 @@ type harness struct {
 // the configuration before it starts.
 func newHarness(t *testing.T, edit func(*Config)) *harness {
 	t.Helper()
+	return newHarnessOn(t, nil, edit)
+}
+
+// newHarnessReal starts a front on the wall clock; h.clk is nil then, and an
+// engine started with Clock: nil sleeps for real.
+func newHarnessReal(t *testing.T, edit func(*Config)) *harness {
+	t.Helper()
+	return newHarnessOn(t, clock.Real{}, edit)
+}
+
+func newHarnessOn(t *testing.T, real clock.Clock, edit func(*Config)) *harness {
+	t.Helper()
 	dir := t.TempDir()
-	h := &harness{t: t, clk: clock.NewFake(t0), dir: dir, host: agentapi.Host{StateDir: filepath.Join(dir, "state"), PortBase: 29220},
+	var clk clock.Clock = real
+	var fake *clock.Fake
+	if real == nil {
+		fake = clock.NewFake(t0)
+		clk = fake
+	}
+	h := &harness{t: t, clk: fake, dir: dir, host: agentapi.Host{StateDir: filepath.Join(dir, "state"), PortBase: 29220},
 		trans: NewStaticTransports(), rec: &MemoryRecorder{}, logs: &syncBuffer{}, clientKey: "client-key-for-tests-0001"}
 	keysPath := filepath.Join(dir, "client-keys.json")
 	writeMode600(t, keysPath, fmt.Sprintf(`{"keys":[{"id":"tester","key":%q}]}`, h.clientKey))
@@ -79,8 +98,8 @@ func newHarness(t *testing.T, edit func(*Config)) *harness {
 		t.Fatal(err)
 	}
 	log := slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	h.router = NewRouter(h.cfg, h.clk, h.trans, h.rec, log)
-	h.proxy = NewProxy(ProxyOptions{Config: h.cfg, Host: h.host, Clock: h.clk, Router: h.router, Transports: h.trans, Keys: keys, Sink: h.sink, Log: log})
+	h.router = NewRouter(h.cfg, clk, h.trans, h.rec, log)
+	h.proxy = NewProxy(ProxyOptions{Config: h.cfg, Host: h.host, Clock: clk, Router: h.router, Transports: h.trans, Keys: keys, Sink: h.sink, Log: log})
 	ln, err := enginetest.Listen(testPortLo, testPortHi)
 	if err != nil {
 		t.Fatal(err)
@@ -349,3 +368,9 @@ func (s *syncBuffer) String() string {
 	defer s.mu.Unlock()
 	return s.b.String()
 }
+
+// listenFree binds the first free port of the package's test block.
+func listenFree() (net.Listener, error) { return enginetest.Listen(testPortLo, testPortHi) }
+
+// discardLog is a logger that writes nowhere.
+func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }

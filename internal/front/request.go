@@ -48,6 +48,7 @@ type exchange struct {
 	idle     clock.Timer
 	idleFor  time.Duration
 	lease    clock.Timer
+	leaseGen int // the target the lease timer belongs to; a resend arms a new one
 }
 
 func newExchange(r *http.Request, clk clock.Clock, maxReq time.Duration) *exchange {
@@ -95,27 +96,38 @@ func (x *exchange) touch() {
 
 // armLease cuts the request at the Instance's lease end. When the timer
 // fires it reads the lease end again, since a later hard end, once observed,
-// moves it (HBEP-5, Draining, The end).
+// moves it (HBEP-5, Draining, The end). A resend to another Instance replaces
+// the timer: the old one is stopped, and if it fires anyway its generation no
+// longer matches.
 func (x *exchange) armLease(current func() (time.Time, bool)) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	if x.lease != nil {
+		x.lease.Stop()
+		x.lease = nil
+	}
+	x.leaseGen++
+	gen := x.leaseGen
+	end, ok := current()
+	if !ok {
+		return
+	}
 	var fire func()
 	fire = func() {
 		end, ok := current()
+		x.mu.Lock()
+		defer x.mu.Unlock()
+		if gen != x.leaseGen {
+			return
+		}
 		if ok {
 			if left := end.Sub(x.clk.Now()); left > 0 {
-				x.mu.Lock()
 				x.lease = x.clk.AfterFunc(left, fire)
-				x.mu.Unlock()
 				return
 			}
 		}
 		x.cancel(errCutLeaseEnd)
 	}
-	end, ok := current()
-	if !ok {
-		return
-	}
-	x.mu.Lock()
-	defer x.mu.Unlock()
 	x.lease = x.clk.AfterFunc(end.Sub(x.clk.Now()), fire)
 }
 
