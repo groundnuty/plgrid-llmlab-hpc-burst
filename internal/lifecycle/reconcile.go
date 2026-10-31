@@ -256,8 +256,8 @@ func (p *pass) prepareServed() error {
 		c := cid
 		p.ids[c.class] = &c
 		if c.problem != "" {
-			if c.retryable {
-				p.at(p.now.Add(maxRequeue))
+			if !c.retryAt.IsZero() {
+				p.at(c.retryAt)
 			}
 			p.degrade(reasonIdentityUnresolved, "class %s/%s has no current deployment ID: %s", c.class.GPUModel, c.class.CPUArch, c.problem)
 			continue

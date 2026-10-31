@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/deploymentid"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/hubfiles"
 )
 
 // CheckpointSource reads what a checkpoint gives the deployment ID (HBEP-3,
@@ -33,54 +35,150 @@ var ErrTemplateSourcesUnavailable = errors.New("the checkpoint's chat-template f
 
 // cachedSource caches a CheckpointSource's successful answers by repository and
 // revision: a revision is a full commit id, so its files never change, and
-// each Files call downloads every non-LFS file.
+// each Files call downloads every non-LFS file. A failure is kept too, and the
+// inner source is not asked again before its retry time: a transient failure
+// (hubfiles.Retryable: a transport error, a 429 or a 5xx) backs off from 30 s,
+// doubling to 10 min, and never sooner than the Hub's Retry-After; a permanent
+// one (a 401, a 404) is asked again after 10 min, so a fixed token or a
+// published revision is picked up without a restart.
 type cachedSource struct {
 	inner CheckpointSource
+	clock Clock
 	mu    sync.Mutex
 	files map[string][]deploymentid.File
 	tmpl  map[string]deploymentid.TemplateSources
+	fails map[string]*sourceFailure
 }
 
+// sourceFailure is a kept failure of one checkpoint read.
+type sourceFailure struct {
+	err      error
+	attempts int
+	retryAt  time.Time
+}
+
+const (
+	sourceBackoffMin = 30 * time.Second
+	sourceBackoffMax = 10 * time.Minute
+)
+
 // NewCachedSource wraps a CheckpointSource with a cache by (repository,
-// revision). Errors are not cached.
-func NewCachedSource(inner CheckpointSource) CheckpointSource {
-	return &cachedSource{inner: inner, files: map[string][]deploymentid.File{}, tmpl: map[string]deploymentid.TemplateSources{}}
+// revision) and a backoff on failures, timed by clock.
+func NewCachedSource(inner CheckpointSource, clock Clock) CheckpointSource {
+	if clock == nil {
+		clock = SystemClock{}
+	}
+	return &cachedSource{inner: inner, clock: clock, files: map[string][]deploymentid.File{},
+		tmpl: map[string]deploymentid.TemplateSources{}, fails: map[string]*sourceFailure{}}
 }
 
 func cacheKey(cp v1alpha1.CheckpointSpec) string { return cp.Repository + "@" + cp.Revision }
 
+// backoffError is a kept failure returned before its retry time.
+type backoffError struct {
+	err     error
+	retryAt time.Time
+}
+
+func (e *backoffError) Error() string { return e.err.Error() }
+func (e *backoffError) Unwrap() error { return e.err }
+
+// retryAtOf returns when a failed checkpoint read is tried again, if err says.
+func retryAtOf(err error) (time.Time, bool) {
+	var b *backoffError
+	if errors.As(err, &b) {
+		return b.retryAt, true
+	}
+	return time.Time{}, false
+}
+
+// kept returns the kept failure of key while its retry time has not come.
+func (c *cachedSource) kept(key string) error {
+	f, ok := c.fails[key]
+	if !ok || !c.clock.Now().Before(f.retryAt) {
+		return nil
+	}
+	return &backoffError{err: f.err, retryAt: f.retryAt}
+}
+
+// fail keeps a failure of key and returns it with its retry time.
+func (c *cachedSource) fail(key string, err error) error {
+	f, ok := c.fails[key]
+	if !ok {
+		f = &sourceFailure{}
+		c.fails[key] = f
+	}
+	f.err = err
+	f.attempts++
+	delay := sourceBackoffMax
+	if retryableHub(err) {
+		delay = sourceBackoffMin << min(f.attempts-1, 10)
+		if delay > sourceBackoffMax {
+			delay = sourceBackoffMax
+		}
+		var he *hubfiles.HTTPError
+		if errors.As(err, &he) && he.RetryAfter > delay {
+			delay = he.RetryAfter
+		}
+	}
+	f.retryAt = c.clock.Now().Add(delay)
+	return &backoffError{err: err, retryAt: f.retryAt}
+}
+
 func (c *cachedSource) Files(ctx context.Context, cp v1alpha1.CheckpointSpec) ([]deploymentid.File, error) {
+	key := cacheKey(cp)
 	c.mu.Lock()
-	f, ok := c.files[cacheKey(cp)]
+	f, ok := c.files[key]
+	kept := c.kept("files/" + key)
 	c.mu.Unlock()
 	if ok {
 		return append([]deploymentid.File(nil), f...), nil
 	}
-	f, err := c.inner.Files(ctx, cp)
-	if err != nil {
-		return nil, err
+	if kept != nil {
+		return nil, kept
 	}
+	f, err := c.inner.Files(ctx, cp)
 	c.mu.Lock()
-	c.files[cacheKey(cp)] = append([]deploymentid.File(nil), f...)
-	c.mu.Unlock()
+	defer c.mu.Unlock()
+	if err != nil {
+		return nil, c.fail("files/"+key, err)
+	}
+	delete(c.fails, "files/"+key)
+	c.files[key] = append([]deploymentid.File(nil), f...)
 	return f, nil
 }
 
 func (c *cachedSource) TemplateSources(ctx context.Context, cp v1alpha1.CheckpointSpec, files []deploymentid.File) (deploymentid.TemplateSources, error) {
+	key := cacheKey(cp)
 	c.mu.Lock()
-	t, ok := c.tmpl[cacheKey(cp)]
+	t, ok := c.tmpl[key]
+	kept := c.kept("tmpl/" + key)
 	c.mu.Unlock()
 	if ok {
 		return t, nil
 	}
-	t, err := c.inner.TemplateSources(ctx, cp, files)
-	if err != nil {
-		return deploymentid.TemplateSources{}, err
+	if kept != nil {
+		return deploymentid.TemplateSources{}, kept
 	}
+	t, err := c.inner.TemplateSources(ctx, cp, files)
 	c.mu.Lock()
-	c.tmpl[cacheKey(cp)] = t
-	c.mu.Unlock()
+	defer c.mu.Unlock()
+	if err != nil {
+		return deploymentid.TemplateSources{}, c.fail("tmpl/"+key, err)
+	}
+	delete(c.fails, "tmpl/"+key)
+	c.tmpl[key] = t
 	return t, nil
+}
+
+// hubCause names the cause of a checkpoint read failure for the condition: the
+// Hub's status (401, 404, 5xx...) when it answered, else the error.
+func hubCause(err error) string {
+	var he *hubfiles.HTTPError
+	if errors.As(err, &he) {
+		return fmt.Sprintf("Hub %d: %v", he.Status, err)
+	}
+	return err.Error()
 }
 
 // identityData is an identity record's data: the canonical v1 object and its
@@ -107,8 +205,8 @@ type classID struct {
 	// problem, when set, says why the class has no current ID: no Allocation is
 	// created for it (HBEP-7, Reconcile loop, step 2).
 	problem string
-	// retryable marks a problem worth an early retry (a Hub that is busy).
-	retryable bool
+	// retryAt, when set, is when the checkpoint read is tried again.
+	retryAt time.Time
 	// blocked, when set, says why provisioning in the class is stopped: a
 	// verification of its current ID failed on a settings contradiction or a
 	// shape that does not fit (HBEP-7, Instance start).
@@ -141,8 +239,9 @@ func (r *Reconciler) currentIDs(ctx context.Context, md *v1alpha1.ModelDeploymen
 	s := md.Spec.Source.Served
 	out := make([]classID, 0, len(cls))
 	fail := func(err error) []classID {
+		at, _ := retryAtOf(err)
 		for _, c := range cls {
-			out = append(out, classID{class: c, problem: "checkpoint " + s.Checkpoint.Repository + ": " + err.Error(), retryable: retryableHub(err)})
+			out = append(out, classID{class: c, problem: "checkpoint " + s.Checkpoint.Repository + ": " + hubCause(err), retryAt: at})
 		}
 		return out
 	}
@@ -216,9 +315,14 @@ func (r *Reconciler) ensureIdentityRecord(ctx context.Context, md *v1alpha1.Mode
 	}
 	var stored identityData
 	if err := json.Unmarshal(got.Data.Raw, &stored); err != nil || stored.SHA256 != id.SHA256 {
-		r.Recorder.Event(md, true, eventDegraded, reasonIdentityUnresolved,
-			fmt.Sprintf("identity record %s holds another deployment ID than %s: a display-form collision; the ID is refused (HBEP-3)", rec.Name, id.SHA256))
-		return "", fmt.Errorf("%w: identity record %s holds another deployment ID than %s", errCollision, rec.Name, id.SHA256)
+		// A collision never loops: the event fires once per spec generation
+		// and record version, and nothing is retried until one of them
+		// changes (HBEP owner, 31 Oct 2026).
+		if r.memory().once(fmt.Sprintf("collision/%s/%d/%s/%s", md.UID, md.Generation, rec.Name, got.ResourceVersion)) {
+			r.Recorder.Event(md, true, eventDegraded, reasonIdentityUnresolved,
+				fmt.Sprintf("identity record %s holds another deployment ID than %s: a display-form collision; the ID is refused (HBEP-3)", rec.Name, id.SHA256))
+		}
+		return "", fmt.Errorf("%w with record %s: it holds another deployment ID than %s", errCollision, rec.Name, id.SHA256)
 	}
 	return rec.Name, nil
 }
