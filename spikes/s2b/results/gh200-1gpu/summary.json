@@ -1,0 +1,808 @@
+[
+ {
+  "name": "A1-rr",
+  "regime": "A",
+  "rep": 1,
+  "arm": "rr",
+  "kv_blocks_override": "",
+  "start_unix": 1793366897.4175904,
+  "end_unix": 1793366984.79135,
+  "client_rc": 0,
+  "nwork": 4,
+  "load_args": "-sessions 96 -turns 12 -concurrency 32 -agents 0.5,0.3,0.2 -sys-words 2000 -task-words 250 -tool-min 200 -tool-max 800 -think-min 500ms -think-max 2500ms -reply-tokens 48 -seed 1",
+  "worker_hit_rate": 0.7019214557820806,
+  "worker_hit_rate_per_worker": [
+   0.702,
+   0.703,
+   0.695,
+   0.708
+  ],
+  "preemptions": 0,
+  "requests_ok": 1152,
+  "failed_attempts": 0,
+  "ttft_p50_ms": 78.386,
+  "ttft_p95_ms": 137.123,
+  "latency_p50_ms": 689.085,
+  "client_hit_rate": 0.7019214557820806,
+  "prompt_tokens": 6678582,
+  "reuse_bound": 0.9051478292847194,
+  "placement": {
+   "sessions_per_worker": [
+    24,
+    27,
+    20,
+    25
+   ],
+   "requests_per_worker": [
+    288,
+    288,
+    288,
+    288
+   ],
+   "request_imbalance_max_over_mean": 1.0,
+   "sticky_sessions": 0.0,
+   "mean_workers_per_session": 3.8854166666666665,
+   "same_worker_as_previous_turn": 0.26136363636363635,
+   "header_seen_by_worker": 1.0
+  },
+  "samples": {
+   "kv_usage_max": [
+    0.044,
+    0.053,
+    0.04,
+    0.044
+   ],
+   "waiting_max": [
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  "wall_s": 87.4
+ },
+ {
+  "name": "A1-vr-hash",
+  "regime": "A",
+  "rep": 1,
+  "arm": "vr-hash",
+  "kv_blocks_override": "",
+  "start_unix": 1793366989.7604525,
+  "end_unix": 1793367071.245769,
+  "client_rc": 0,
+  "nwork": 4,
+  "load_args": "-sessions 96 -turns 12 -concurrency 32 -agents 0.5,0.3,0.2 -sys-words 2000 -task-words 250 -tool-min 200 -tool-max 800 -think-min 500ms -think-max 2500ms -reply-tokens 48 -seed 1",
+  "worker_hit_rate": 0.9024175637498826,
+  "worker_hit_rate_per_worker": [
+   0.901,
+   0.903,
+   0.902,
+   0.904
+  ],
+  "preemptions": 0,
+  "requests_ok": 1152,
+  "failed_attempts": 0,
+  "ttft_p50_ms": 59.113,
+  "ttft_p95_ms": 85.547,
+  "latency_p50_ms": 557.771,
+  "client_hit_rate": 0.9024175637498826,
+  "prompt_tokens": 6687228,
+  "reuse_bound": 0.905307849530478,
+  "placement": {
+   "sessions_per_worker": [
+    23,
+    24,
+    23,
+    26
+   ],
+   "requests_per_worker": [
+    276,
+    288,
+    276,
+    312
+   ],
+   "request_imbalance_max_over_mean": 1.0833333333333333,
+   "sticky_sessions": 1.0,
+   "mean_workers_per_session": 1.0,
+   "same_worker_as_previous_turn": 1.0,
+   "header_seen_by_worker": 1.0
+  },
+  "samples": {
+   "kv_usage_max": [
+    0.06,
+    0.05,
+    0.057,
+    0.047
+   ],
+   "waiting_max": [
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  "wall_s": 81.5
+ },
+ {
+  "name": "A1-vr-cache",
+  "regime": "A",
+  "rep": 1,
+  "arm": "vr-cache",
+  "kv_blocks_override": "",
+  "start_unix": 1793367248.7522984,
+  "end_unix": 1793367335.0135887,
+  "client_rc": 0,
+  "nwork": 4,
+  "load_args": "-sessions 96 -turns 12 -concurrency 32 -agents 0.5,0.3,0.2 -sys-words 2000 -task-words 250 -tool-min 200 -tool-max 800 -think-min 500ms -think-max 2500ms -reply-tokens 48 -seed 1",
+  "worker_hit_rate": 0.7026374715540258,
+  "worker_hit_rate_per_worker": [
+   0.67,
+   0.73,
+   0.676,
+   0.722
+  ],
+  "preemptions": 0,
+  "requests_ok": 1152,
+  "failed_attempts": 0,
+  "ttft_p50_ms": 78.235,
+  "ttft_p95_ms": 137.022,
+  "latency_p50_ms": 678.683,
+  "client_hit_rate": 0.7026374715540258,
+  "prompt_tokens": 6687238,
+  "reuse_bound": 0.9053064957460764,
+  "placement": {
+   "sessions_per_worker": [
+    22,
+    33,
+    14,
+    27
+   ],
+   "requests_per_worker": [
+    264,
+    339,
+    244,
+    305
+   ],
+   "request_imbalance_max_over_mean": 1.1770833333333333,
+   "sticky_sessions": 0.0,
+   "mean_workers_per_session": 3.8645833333333335,
+   "same_worker_as_previous_turn": 0.2556818181818182,
+   "header_seen_by_worker": 1.0
+  },
+  "samples": {
+   "kv_usage_max": [
+    0.04,
+    0.043,
+    0.047,
+    0.05
+   ],
+   "waiting_max": [
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  "wall_s": 86.3
+ },
+ {
+  "name": "A1-llmd-sess",
+  "regime": "A",
+  "rep": 1,
+  "arm": "llmd-sess",
+  "kv_blocks_override": "",
+  "start_unix": 1793367080.366653,
+  "end_unix": 1793367157.1173346,
+  "client_rc": 0,
+  "nwork": 4,
+  "load_args": "-sessions 96 -turns 12 -concurrency 32 -agents 0.5,0.3,0.2 -sys-words 2000 -task-words 250 -tool-min 200 -tool-max 800 -think-min 500ms -think-max 2500ms -reply-tokens 48 -seed 1",
+  "worker_hit_rate": 0.9051010929336669,
+  "worker_hit_rate_per_worker": [
+   0.905,
+   0.905,
+   0.906,
+   null
+  ],
+  "preemptions": 0,
+  "requests_ok": 1152,
+  "failed_attempts": 0,
+  "ttft_p50_ms": 50.172,
+  "ttft_p95_ms": 73.173,
+  "latency_p50_ms": 412.841,
+  "client_hit_rate": 0.9051010929336669,
+  "prompt_tokens": 6704524,
+  "reuse_bound": 0.9051010929336669,
+  "placement": {
+   "sessions_per_worker": [
+    26,
+    52,
+    18,
+    0
+   ],
+   "requests_per_worker": [
+    312,
+    624,
+    216,
+    0
+   ],
+   "request_imbalance_max_over_mean": 2.1666666666666665,
+   "sticky_sessions": 1.0,
+   "mean_workers_per_session": 1.0,
+   "same_worker_as_previous_turn": 1.0,
+   "header_seen_by_worker": 1.0
+  },
+  "samples": {
+   "kv_usage_max": [
+    0.038,
+    0.076,
+    0.048,
+    0.0
+   ],
+   "waiting_max": [
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  "wall_s": 76.8
+ },
+ {
+  "name": "A1-llmd-prefix",
+  "regime": "A",
+  "rep": 1,
+  "arm": "llmd-prefix",
+  "kv_blocks_override": "",
+  "start_unix": 1793367165.2788146,
+  "end_unix": 1793367242.1323156,
+  "client_rc": 0,
+  "nwork": 4,
+  "load_args": "-sessions 96 -turns 12 -concurrency 32 -agents 0.5,0.3,0.2 -sys-words 2000 -task-words 250 -tool-min 200 -tool-max 800 -think-min 500ms -think-max 2500ms -reply-tokens 48 -seed 1",
+  "worker_hit_rate": 0.9052199829029296,
+  "worker_hit_rate_per_worker": [
+   0.906,
+   0.906,
+   0.905,
+   null
+  ],
+  "preemptions": 0,
+  "requests_ok": 1152,
+  "failed_attempts": 0,
+  "ttft_p50_ms": 50.124,
+  "ttft_p95_ms": 71.39,
+  "latency_p50_ms": 412.18,
+  "client_hit_rate": 0.9052199829029296,
+  "prompt_tokens": 6695884,
+  "reuse_bound": 0.9052199829029296,
+  "placement": {
+   "sessions_per_worker": [
+    26,
+    18,
+    52,
+    0
+   ],
+   "requests_per_worker": [
+    312,
+    216,
+    624,
+    0
+   ],
+   "request_imbalance_max_over_mean": 2.1666666666666665,
+   "sticky_sessions": 1.0,
+   "mean_workers_per_session": 1.0,
+   "same_worker_as_previous_turn": 1.0,
+   "header_seen_by_worker": 1.0
+  },
+  "samples": {
+   "kv_usage_max": [
+    0.052,
+    0.038,
+    0.094,
+    0.0
+   ],
+   "waiting_max": [
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  "wall_s": 76.9
+ },
+ {
+  "name": "B1-rr",
+  "regime": "B",
+  "rep": 1,
+  "arm": "rr",
+  "kv_blocks_override": "6000",
+  "start_unix": 1793366045.2099755,
+  "end_unix": 1793366135.2313519,
+  "client_rc": 0,
+  "nwork": 4,
+  "load_args": "-sessions 96 -turns 12 -concurrency 32 -agents 0.5,0.3,0.2 -sys-words 2000 -task-words 250 -tool-min 200 -tool-max 800 -think-min 500ms -think-max 2500ms -reply-tokens 48 -seed 1",
+  "worker_hit_rate": 0.6347298144699874,
+  "worker_hit_rate_per_worker": [
+   0.633,
+   0.646,
+   0.623,
+   0.637
+  ],
+  "preemptions": 0,
+  "requests_ok": 1152,
+  "failed_attempts": 0,
+  "ttft_p50_ms": 80.775,
+  "ttft_p95_ms": 183.639,
+  "latency_p50_ms": 704.904,
+  "client_hit_rate": 0.6347298144699874,
+  "prompt_tokens": 6678596,
+  "reuse_bound": 0.9051483275826236,
+  "placement": {
+   "sessions_per_worker": [
+    22,
+    25,
+    18,
+    31
+   ],
+   "requests_per_worker": [
+    288,
+    288,
+    288,
+    288
+   ],
+   "request_imbalance_max_over_mean": 1.0,
+   "sticky_sessions": 0.0,
+   "mean_workers_per_session": 3.9166666666666665,
+   "same_worker_as_previous_turn": 0.2556818181818182,
+   "header_seen_by_worker": 1.0
+  },
+  "samples": {
+   "kv_usage_max": [
+    0.637,
+    0.627,
+    0.282,
+    0.245
+   ],
+   "waiting_max": [
+    0,
+    2,
+    0,
+    0
+   ]
+  },
+  "wall_s": 90.0
+ },
+ {
+  "name": "B1-vr-hash",
+  "regime": "B",
+  "rep": 1,
+  "arm": "vr-hash",
+  "kv_blocks_override": "6000",
+  "start_unix": 1793366140.0842092,
+  "end_unix": 1793366221.6697698,
+  "client_rc": 0,
+  "nwork": 4,
+  "load_args": "-sessions 96 -turns 12 -concurrency 32 -agents 0.5,0.3,0.2 -sys-words 2000 -task-words 250 -tool-min 200 -tool-max 800 -think-min 500ms -think-max 2500ms -reply-tokens 48 -seed 1",
+  "worker_hit_rate": 0.9024145692133789,
+  "worker_hit_rate_per_worker": [
+   0.902,
+   0.901,
+   0.901,
+   0.904
+  ],
+  "preemptions": 0,
+  "requests_ok": 1152,
+  "failed_attempts": 0,
+  "ttft_p50_ms": 57.921,
+  "ttft_p95_ms": 83.368,
+  "latency_p50_ms": 532.851,
+  "client_hit_rate": 0.9024145692133789,
+  "prompt_tokens": 6687197,
+  "reuse_bound": 0.9053072610243126,
+  "placement": {
+   "sessions_per_worker": [
+    27,
+    23,
+    14,
+    32
+   ],
+   "requests_per_worker": [
+    324,
+    276,
+    168,
+    384
+   ],
+   "request_imbalance_max_over_mean": 1.3333333333333333,
+   "sticky_sessions": 1.0,
+   "mean_workers_per_session": 1.0,
+   "same_worker_as_previous_turn": 1.0,
+   "header_seen_by_worker": 1.0
+  },
+  "samples": {
+   "kv_usage_max": [
+    0.355,
+    0.279,
+    0.202,
+    0.219
+   ],
+   "waiting_max": [
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  "wall_s": 81.6
+ },
+ {
+  "name": "B1-vr-cache",
+  "regime": "B",
+  "rep": 1,
+  "arm": "vr-cache",
+  "kv_blocks_override": "6000",
+  "start_unix": 1793366397.9204516,
+  "end_unix": 1793366485.4175425,
+  "client_rc": 0,
+  "nwork": 4,
+  "load_args": "-sessions 96 -turns 12 -concurrency 32 -agents 0.5,0.3,0.2 -sys-words 2000 -task-words 250 -tool-min 200 -tool-max 800 -think-min 500ms -think-max 2500ms -reply-tokens 48 -seed 1",
+  "worker_hit_rate": 0.6419170588062885,
+  "worker_hit_rate_per_worker": [
+   0.65,
+   0.634,
+   0.655,
+   0.624
+  ],
+  "preemptions": 0,
+  "requests_ok": 1152,
+  "failed_attempts": 0,
+  "ttft_p50_ms": 80.847,
+  "ttft_p95_ms": 172.937,
+  "latency_p50_ms": 694.708,
+  "client_hit_rate": 0.6419170588062885,
+  "prompt_tokens": 6687244,
+  "reuse_bound": 0.9053056834773787,
+  "placement": {
+   "sessions_per_worker": [
+    22,
+    16,
+    40,
+    18
+   ],
+   "requests_per_worker": [
+    300,
+    272,
+    335,
+    245
+   ],
+   "request_imbalance_max_over_mean": 1.1631944444444444,
+   "sticky_sessions": 0.0,
+   "mean_workers_per_session": 3.9270833333333335,
+   "same_worker_as_previous_turn": 0.26136363636363635,
+   "header_seen_by_worker": 1.0
+  },
+  "samples": {
+   "kv_usage_max": [
+    0.348,
+    0.257,
+    0.327,
+    0.289
+   ],
+   "waiting_max": [
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  "wall_s": 87.5
+ },
+ {
+  "name": "B1-llmd-sess",
+  "regime": "B",
+  "rep": 1,
+  "arm": "llmd-sess",
+  "kv_blocks_override": "6000",
+  "start_unix": 1793366229.6475785,
+  "end_unix": 1793366307.227827,
+  "client_rc": 0,
+  "nwork": 4,
+  "load_args": "-sessions 96 -turns 12 -concurrency 32 -agents 0.5,0.3,0.2 -sys-words 2000 -task-words 250 -tool-min 200 -tool-max 800 -think-min 500ms -think-max 2500ms -reply-tokens 48 -seed 1",
+  "worker_hit_rate": 0.8797295553817092,
+  "worker_hit_rate_per_worker": [
+   null,
+   0.906,
+   0.905,
+   0.858
+  ],
+  "preemptions": 0,
+  "requests_ok": 1152,
+  "failed_attempts": 0,
+  "ttft_p50_ms": 51.974,
+  "ttft_p95_ms": 87.511,
+  "latency_p50_ms": 418.65,
+  "client_hit_rate": 0.8797295553817092,
+  "prompt_tokens": 6704515,
+  "reuse_bound": 0.9050951485677935,
+  "placement": {
+   "sessions_per_worker": [
+    0,
+    18,
+    26,
+    52
+   ],
+   "requests_per_worker": [
+    0,
+    216,
+    312,
+    624
+   ],
+   "request_imbalance_max_over_mean": 2.1666666666666665,
+   "sticky_sessions": 1.0,
+   "mean_workers_per_session": 1.0,
+   "same_worker_as_previous_turn": 1.0,
+   "header_seen_by_worker": 1.0
+  },
+  "samples": {
+   "kv_usage_max": [
+    0.0,
+    0.198,
+    0.273,
+    0.45
+   ],
+   "waiting_max": [
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  "wall_s": 77.6
+ },
+ {
+  "name": "B1-llmd-prefix",
+  "regime": "B",
+  "rep": 1,
+  "arm": "llmd-prefix",
+  "kv_blocks_override": "6000",
+  "start_unix": 1793366315.292657,
+  "end_unix": 1793366392.9992695,
+  "client_rc": 0,
+  "nwork": 4,
+  "load_args": "-sessions 96 -turns 12 -concurrency 32 -agents 0.5,0.3,0.2 -sys-words 2000 -task-words 250 -tool-min 200 -tool-max 800 -think-min 500ms -think-max 2500ms -reply-tokens 48 -seed 1",
+  "worker_hit_rate": 0.8819811678479138,
+  "worker_hit_rate_per_worker": [
+   0.906,
+   null,
+   0.862,
+   0.906
+  ],
+  "preemptions": 0,
+  "requests_ok": 1152,
+  "failed_attempts": 0,
+  "ttft_p50_ms": 49.968,
+  "ttft_p95_ms": 84.849,
+  "latency_p50_ms": 424.987,
+  "client_hit_rate": 0.8819811678479138,
+  "prompt_tokens": 6695889,
+  "reuse_bound": 0.9052193069508768,
+  "placement": {
+   "sessions_per_worker": [
+    18,
+    0,
+    52,
+    26
+   ],
+   "requests_per_worker": [
+    216,
+    0,
+    624,
+    312
+   ],
+   "request_imbalance_max_over_mean": 2.1666666666666665,
+   "sticky_sessions": 1.0,
+   "mean_workers_per_session": 1.0,
+   "same_worker_as_previous_turn": 1.0,
+   "header_seen_by_worker": 1.0
+  },
+  "samples": {
+   "kv_usage_max": [
+    0.15,
+    0.0,
+    0.337,
+    0.233
+   ],
+   "waiting_max": [
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  "wall_s": 77.7
+ },
+ {
+  "name": "B2-rr",
+  "regime": "B",
+  "rep": 2,
+  "arm": "rr",
+  "kv_blocks_override": "6000",
+  "start_unix": 1793366662.3861332,
+  "end_unix": 1793366750.3297193,
+  "client_rc": 0,
+  "nwork": 4,
+  "load_args": "-sessions 96 -turns 12 -concurrency 32 -agents 0.5,0.3,0.2 -sys-words 2000 -task-words 250 -tool-min 200 -tool-max 800 -think-min 500ms -think-max 2500ms -reply-tokens 48 -seed 1",
+  "worker_hit_rate": 0.6537955846661623,
+  "worker_hit_rate_per_worker": [
+   0.636,
+   0.653,
+   0.666,
+   0.661
+  ],
+  "preemptions": 0,
+  "requests_ok": 1152,
+  "failed_attempts": 0,
+  "ttft_p50_ms": 81.788,
+  "ttft_p95_ms": 166.145,
+  "latency_p50_ms": 706.973,
+  "client_hit_rate": 0.6537955846661623,
+  "prompt_tokens": 6678589,
+  "reuse_bound": 0.9051492762917437,
+  "placement": {
+   "sessions_per_worker": [
+    18,
+    28,
+    22,
+    28
+   ],
+   "requests_per_worker": [
+    288,
+    288,
+    288,
+    288
+   ],
+   "request_imbalance_max_over_mean": 1.0,
+   "sticky_sessions": 0.0,
+   "mean_workers_per_session": 3.84375,
+   "same_worker_as_previous_turn": 0.26609848484848486,
+   "header_seen_by_worker": 1.0
+  },
+  "samples": {
+   "kv_usage_max": [
+    0.351,
+    0.256,
+    0.341,
+    0.317
+   ],
+   "waiting_max": [
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  "wall_s": 87.9
+ },
+ {
+  "name": "B2-vr-hash",
+  "regime": "B",
+  "rep": 2,
+  "arm": "vr-hash",
+  "kv_blocks_override": "6000",
+  "start_unix": 1793366576.314255,
+  "end_unix": 1793366657.433704,
+  "client_rc": 0,
+  "nwork": 4,
+  "load_args": "-sessions 96 -turns 12 -concurrency 32 -agents 0.5,0.3,0.2 -sys-words 2000 -task-words 250 -tool-min 200 -tool-max 800 -think-min 500ms -think-max 2500ms -reply-tokens 48 -seed 1",
+  "worker_hit_rate": 0.9024102509425055,
+  "worker_hit_rate_per_worker": [
+   0.902,
+   0.904,
+   0.903,
+   0.901
+  ],
+  "preemptions": 0,
+  "requests_ok": 1152,
+  "failed_attempts": 0,
+  "ttft_p50_ms": 58.085,
+  "ttft_p95_ms": 83.912,
+  "latency_p50_ms": 536.902,
+  "client_hit_rate": 0.9024102509425055,
+  "prompt_tokens": 6687229,
+  "reuse_bound": 0.9053077141518557,
+  "placement": {
+   "sessions_per_worker": [
+    28,
+    24,
+    20,
+    24
+   ],
+   "requests_per_worker": [
+    336,
+    288,
+    240,
+    288
+   ],
+   "request_imbalance_max_over_mean": 1.1666666666666667,
+   "sticky_sessions": 1.0,
+   "mean_workers_per_session": 1.0,
+   "same_worker_as_previous_turn": 1.0,
+   "header_seen_by_worker": 1.0
+  },
+  "samples": {
+   "kv_usage_max": [
+    0.355,
+    0.345,
+    0.249,
+    0.297
+   ],
+   "waiting_max": [
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  "wall_s": 81.1
+ },
+ {
+  "name": "B2-llmd-sess",
+  "regime": "B",
+  "rep": 2,
+  "arm": "llmd-sess",
+  "kv_blocks_override": "6000",
+  "start_unix": 1793366493.535733,
+  "end_unix": 1793366571.1585834,
+  "client_rc": 0,
+  "nwork": 4,
+  "load_args": "-sessions 96 -turns 12 -concurrency 32 -agents 0.5,0.3,0.2 -sys-words 2000 -task-words 250 -tool-min 200 -tool-max 800 -think-min 500ms -think-max 2500ms -reply-tokens 48 -seed 1",
+  "worker_hit_rate": 0.8840707744171724,
+  "worker_hit_rate_per_worker": [
+   null,
+   0.905,
+   0.906,
+   0.866
+  ],
+  "preemptions": 0,
+  "requests_ok": 1152,
+  "failed_attempts": 0,
+  "ttft_p50_ms": 48.714,
+  "ttft_p95_ms": 81.002,
+  "latency_p50_ms": 425.213,
+  "client_hit_rate": 0.8840707744171724,
+  "prompt_tokens": 6704513,
+  "reuse_bound": 0.9051025779202755,
+  "placement": {
+   "sessions_per_worker": [
+    0,
+    26,
+    18,
+    52
+   ],
+   "requests_per_worker": [
+    0,
+    312,
+    216,
+    624
+   ],
+   "request_imbalance_max_over_mean": 2.1666666666666665,
+   "sticky_sessions": 1.0,
+   "mean_workers_per_session": 1.0,
+   "same_worker_as_previous_turn": 1.0,
+   "header_seen_by_worker": 1.0
+  },
+  "samples": {
+   "kv_usage_max": [
+    0.0,
+    0.32,
+    0.123,
+    0.423
+   ],
+   "waiting_max": [
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  "wall_s": 77.6
+ }
+]

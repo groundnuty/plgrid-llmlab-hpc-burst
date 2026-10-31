@@ -13,6 +13,7 @@ Code under `spikes/` and `third_party/forked/*` is not part of this module.
 | `api/v1alpha1/` | Go types for the custom resources, with kubebuilder and CEL markers | HBEP-3, HBEP-11 |
 | `config/crd/` | CRD manifests generated from `api/`, committed. #40 adds `hack/verify-generated.sh` to check they match a fresh generation. | HBEP-11 |
 | `pkg/deploymentid/` | deployment ID, scheme `v1`: canonical object, RFC 8785 bytes, SHA-256 | HBEP-3 |
+| `pkg/hubfiles/` | the checkpoint's per-file list from the Hugging Face Hub (paginated listing, `lfs.oid`, hashes of the small files, optional token file); its golden test runs with `HPCBURST_TEST_HUB=1` | HBEP-3 |
 | `pkg/provider/` | the provider core interface: operations, outcomes, error kinds, the capability flag, the Slurm phase table. `fake/`: an in-memory Slurm (`Batch`) and a stand-in for a Provider's controller (`Controller`) | HBEP-4 |
 | `pkg/agentapi/` | the agent protocol, standard library only: wire types, HTTP framing, `agent.json`, the shared file layout, the certificate pin, and the `Backend` seam. `fake/`: a fake agent and a fake `Backend` | HBEP-7 |
 | `internal/launcher/` | starts and supervises the single-user control-plane host (user-level k3s); the only code that starts k3s | HBEP-11 |

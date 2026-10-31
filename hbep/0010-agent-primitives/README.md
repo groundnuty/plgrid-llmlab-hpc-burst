@@ -138,7 +138,7 @@ TBD. Operation and audit records outlive the components that wrote them, so thei
 - Agent credentials live in files readable only by that agent's Unix user, or in the control plane's secret store; never on command lines or in logs. Agents that share a Unix user are mutually trusted; separate credentials give them attribution only.
 - Approvals and the audit log are writable only by the server, never directly by agents.
 - Purposes are free text that others read. They must not hold credentials, prompts or private data.
-- Admin operations on the front (adding and removing models) need keys (HBEP-5); this HBEP's approvals add a second gate for the irreversible ones.
+- Admin operations (attaching providers, adding and removing models) need keys: in alpha they are Kubernetes API writes to ModelDeployments, under RBAC (HBEP-5, HBEP-11). This HBEP's approvals add a second gate for the irreversible ones.
 
 ### Graduation criteria
 
@@ -217,6 +217,7 @@ The primitives replace www-2027 practices: a shared gate on a common host (slots
 - 2026-10-30: spike S8 (PR #28) findings carried in.
 - 2026-10-30: aligned with HBEP-11 becoming implementable: the API host row.
 - 2026-10-30: HBEP-7's alpha takes no action that needs approval and repurposes nothing; noted under the repurpose question.
+- 2026-10-30: admin operations are Kubernetes API writes in alpha, as HBEP-5 now says.
 
 ## Amendments
 

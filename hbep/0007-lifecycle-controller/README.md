@@ -73,7 +73,7 @@ Problems:
 - An Allocation outlives its Instances (HBEP-3). Ending an Instance and releasing its Allocation are separate steps: the Instance ends, and the Allocation then follows its retention policy.
 - The lifecycle controller acts on providers only through Allocation objects, which each Provider's controller reconciles with the core operations (HBEP-4). Submission rules, per-user job limits, time-limit effects on queueing and time zones are profile data. Timestamps reach the controller in UTC: Slurm prints local time (Europe/Warsaw) on Helios and Athena and UTC on Sano (spike S5, PR #19), and the provider plugin converts it (HBEP-4).
 - An allocation's account cannot change once it runs, so the account is fixed at submission. Each provider has one account (HBEP-3), so picking the account is picking the provider.
-- The drain window is the profile's `drainWindow` (HBEP-4), which HBEP-5 sets. The controller plans so that a replacement serves before the predecessor's drain starts; the drain rule under Handover says what happens when it does not.
+- The drain window is the profile's `drainWindow` (HBEP-4), which HBEP-5 sets, or shorter for a ModelDeployment that sets `routing.maxRequestDuration` (Handover). The controller plans so that a replacement serves before the predecessor's drain starts; the drain rule under Handover says what happens when it does not.
 - Nothing runs on a login node (HBEP-4, open question 14), and a job step launched from a login node dies with the `srun` that started it (L-3.5). So the Instance's processes are started inside the Allocation, by the allocation agent, which the Allocation's job runs (Design details).
 
 ### Risks and mitigations
@@ -141,6 +141,8 @@ Each question below had a proposed answer taken from operating LLM serving on Sl
    - **Decided:** the restart ladder: the Instance's router (seconds; it does not touch the workers) → a worker → the whole Instance inside its Allocation → a new Allocation. A forced kill follows a few seconds after a polite stop: one router held its connections for minutes after a stop signal. After a restart, the identity check runs again, and an event says that in-flight requests were cut. Source: owner, 29 Oct 2026 (PR #14), for both.
    - **Why:** waiting out failing servers cost hours, and restarts cleared them in seconds to minutes. Router-only restarts took about 20 s; full stack restarts took 2–4 min, up to 17.
    - In alpha the thresholds are profile values with defaults (HBEP-4). An alpha Instance has one worker and no router, so its ladder is the worker, the whole Instance, then a new Allocation (Design details).
+   - **Decided for alpha** (science-agent decision, 30 Oct 2026, from the review of PR #63): `health.noProgressTimeout` is 30 min, equal to the front's `idleTimeout` (HBEP-5). A request in prefill generates no token, and the front allows a first token after 1,100 s (S2 phase A). A shorter time-out would restart a healthy worker that the front still waits on.
+   - **Open (blocks beta):** a no-progress signal that tells a long prefill from a stall, such as prefill progress from the engine's metrics, so that a stall is caught in minutes again. Source: science-agent decision, 30 Oct 2026, from the review of PR #63.
    - **Not needed for alpha:** tuning the thresholds from fault injection, which is beta; the router rung and the KV-skew signal, which need several workers.
 7. **Repurposing fit.**
    - **Decided:** the fit check:
@@ -234,9 +236,9 @@ Each question below had a proposed answer taken from operating LLM serving on Sl
 - **Its work queue is keyed per ModelDeployment.** Several workers run at once (four by default), and one key is never processed by two at once. It watches ModelDeployments, Allocations, Instances, Providers and PlatformProfiles. Each event maps to a ModelDeployment's key: an Allocation through its `model-deployment` label, an Instance through its owner, a Provider or PlatformProfile to every deployment that allows it.
 - **What it writes:**
   - Allocations: it creates and deletes them;
-  - Instances: it creates and deletes them, writes their phase and conditions, and writes restart generations as annotations;
+  - Instances: it creates and deletes them, writes their phase, conditions and `status.leaseEnd`, and writes restart generations as annotations. On every observe (Reconcile loop, step 3) it copies the Allocation's hard end into the Instance's `status.leaseEnd`, from which the front enforces the drain deadline (HBEP-5). A later hard end, once observed, is copied too, and moves the drain start;
   - identity records, and through its verification controller the verification records (HBEP-11);
-  - ModelDeployment status, including each class's last measured start-to-ready time (Handover);
+  - ModelDeployment status, including each class's last measured start-to-ready time (Handover), and a managed source's status (Reconcile loop, step 1);
   - Events.
 - **It never calls a provider.** The Provider's controller acts on each Allocation (HBEP-4; open question 11).
 - **It serves the agent endpoint** for the allocation agents (The allocation agent).
@@ -244,7 +246,8 @@ Each question below had a proposed answer taken from operating LLM serving on Sl
 
 ### What the controller reads
 
-- **From the ModelDeployment** (HBEP-11): the model name, the serving spec, the number of instances, the allowed providers, the end time and the retention policy. In alpha the allowed providers are tried in the order their names are listed, then those that only the label selector matches, by name.
+- **From the ModelDeployment** (HBEP-11): the model name, the source (a serving spec, or a managed catalog entry), the number of instances, the allowed providers, the end time and the retention policy. In alpha the allowed providers are tried in the order their names are listed, then those that only the label selector matches, by name.
+- **From the ModelDeployment's `routing`** (HBEP-5): `routing.maxRequestDuration`, which shortens its Instances' drain window (Handover). The front reads the rest of `routing`.
 - **Fields this HBEP adds to the ModelDeployment's spec** (an amendment to HBEP-11's API):
   - `leaseLimit` (duration, optional): the longest time limit of its Allocations, when shorter than the partition's `maxTime`.
   - `workload`: the shapes for warm-up and qualification.
@@ -253,14 +256,17 @@ Each question below had a proposed answer taken from operating LLM serving on Sl
     - `contextTokens.longest` defaults to the resolved context limit (the `max-model-len` the engine reports) minus `outputTokens.typical`, the output paired with it, minus the template overhead. It is therefore fixed at verification. The overhead is measured by rendering an empty conversation (one user message with no content, plus the generation prompt) through the engine's chat template. vLLM counts input and output tokens against one limit (`max_total_tokens` in [`vllm/renderers/params.py` at v0.32.0](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/renderers/params.py), accessed 2026-10-30), so a prompt that fills the context leaves no room for the answer.
     - **Every shape must fit.** The shapes are each context length with the typical output, and the typical context with the longest output (Instance start). A shape that does not fit is an error, never shortened. When the serving spec declares `max-model-len`, the controller checks the declared shapes against it before it provisions, and a shape that does not fit sets `Degraded` with reason `SpecUnsupported`. At verification each rendered request, overhead included, is checked against the context limit the engine reports, and one that does not fit fails verification and stops provisioning in that class, like a settings contradiction.
     - `toolCalls` defaults to whether the serving spec enables automatic tool choice.
-- **From the PlatformProfile** (HBEP-4): per partition, the accelerator class, `maxTime`, `gpusPerNode`, `cpusPerGpu` and `memPerGpu`. For the platform: `drainWindow`, `handoverMargin`, `maxIdle`, and the `health` and `restart` groups.
-- **From the Provider's status** (HBEP-4): the last 20 observed queue waits, which plan replacements (Handover).
+- **From the PlatformProfile** (HBEP-4): per partition, the accelerator class, `maxTime`, `gpusPerNode`, `cpusPerGpu` and `memPerGpu`. For the platform: `drainWindow`, `drainMargin`, `handoverMargin`, `maxIdle`, and the `health` and `restart` groups.
+- **From the Provider's status** (HBEP-4): the last 20 observed queue waits, which plan replacements (Handover). For a managed Provider, its catalog and its `CredentialsRejected` condition, which a managed-source ModelDeployment's `Ready` follows (Reconcile loop, step 1).
 - **The Instance's spec** gains `launch` (an amendment to HBEP-11's API). It is the command line and environment rendered from the serving spec, the image reference and digest, the checkpoint repository, revision and identity record, and the GPU count. It is written when the Instance is created, and it is immutable like the rest of the spec. Every start and restart of that Instance runs exactly this.
+  - The command line always carries `--max-num-seqs`: the serving spec's value, else 256, a framework default. So the front's per-Instance cap is always known (HBEP-5). `max-num-seqs` is capacity, not a deployment-ID input (HBEP-3's table), so the default changes no ID.
 
 ### Reconcile loop
 
 One pass for one ModelDeployment. Every step is idempotent and re-reads what it acts on.
-1. **Read** the ModelDeployment, its allowed Providers in order, and their PlatformProfiles. A Provider that is missing, not `Ready` or managed is skipped, with a condition naming it.
+1. **Read** the ModelDeployment, its allowed Providers in order, and their PlatformProfiles.
+   - **A served ModelDeployment** ignores the managed Providers in its selection, even when their labels match, as the front does (HBEP-5). A batch Provider that is missing or not `Ready` is skipped, with a condition naming it.
+   - **A managed-source ModelDeployment** (`spec.source.managed`) is provisioned nothing: no Allocation and no Instance, whatever `spec.instances` says. The controller writes its status and stops here; the front routes to the catalog entry (HBEP-5). Its status says that it has no Instances by design: `desiredInstances` and `readyInstances` are 0, and `Progressing` is false with reason `ManagedSource`. `Ready` follows the catalog entry. It is true while an allowed managed Provider's status lists the entry's catalog name now and that Provider's `CredentialsRejected` is not true. Otherwise it is false, with reason `CatalogEntryUnlisted` or `CredentialsRejected`.
 2. **Current IDs.** For each accelerator class that the allowed partitions offer, compute the class's current ID from the serving spec (HBEP-3), and create its identity record if absent (HBEP-11). A display-form collision refuses the ID (HBEP-3). Status lists the IDs by class. No Allocation is created for a class without a current ID.
 3. **Observe** its Allocations (by the `model-deployment` label), its Instances (by owner), and each agent's latest report.
 4. **Shutdown.** At the end time, on deletion, or at zero desired instances, apply Release's shutdown case and stop here.
@@ -299,7 +305,7 @@ The process that an Allocation's job runs. It is a static binary, one build per 
   - The endpoint accepts it only when the credential is the Allocation's and the job ID is the one the provider recorded. That binds the registration to the provider's identity for the job (HBEP-6).
   - It reads the control-plane host's address, the dial-home mode, the pin of the agent endpoint's certificate, and the absolute staging and dial-home directories from `agent.json` in its directory (HBEP-4, Submission).
   - An agent that has not registered within `health.registrationTimeout` (15 min by default) of its job's start fails its Instance, with reason `RegistrationTimeout`, and the Allocation is released.
-  - In ssh mode the agent keeps the forward itself: `ssh -N -L` over port 22, in a reconnect loop, as spike S1's kit does. It uses a dedicated, restricted key that the operator generated on the platform once, so that its private half never travels, and a pinned host key. Both are read by path, mode 600, from `~/.hpcburst/dial-home/` on the cluster, whose absolute path `agent.json` carries. They live outside `stagingDir`, on storage that is not purged, because Helios purges scratch files older than 30 days (spike S5, PR #19). The Provider's controller checks that they exist before any submission, and sets `DialHomeKeyMissing` otherwise (HBEP-4). The key's line in `authorized_keys` on the control-plane host allows forwarding to the agent endpoint's and the front's loopback ports only. No ssh forward from a compute node has run yet (HBEP-6).
+  - In ssh mode the agent keeps the forward itself: `ssh -N -L` over port 22, in a reconnect loop, as spike S1's kit does. It uses a dedicated, restricted key that the operator generated on the platform once, so that its private half never travels, and a pinned host key. Both are read by path, mode 600, from `~/.hpcburst/dial-home/` on the cluster, whose absolute path `agent.json` carries. They live outside `stagingDir`, on storage that is not purged, because Helios purges scratch files older than 30 days (spike S5, PR #19). The Provider's controller checks that they exist before any submission, and sets `DialHomeKeyMissing` otherwise (HBEP-4). The key's line in `authorized_keys` on the control-plane host allows forwarding to the agent endpoint's and the front's loopback ports only. The front's port is its dial-home listener, which in ssh mode is on a loopback address (`dialHomeListen`, HBEP-5). No ssh forward from a compute node has run yet (HBEP-6).
 - **Desired state, pulled.** The agent long-polls for what its Allocation should run now: nothing, one Instance with its `launch` and the restart generation of each part, or stop. For that Instance it also says whether to verify, qualify or warm up now, with the identity record's file list and the workload's shapes. It converges on that state, as a kubelet converges on its pods, so a missed message is corrected by the next poll.
 - **Reports.** At least every 15 s, and at every change, the agent posts:
   - for each part: its phase, process ID and start time, exit code, and the restart generation it applied;
@@ -309,12 +315,12 @@ The process that an Allocation's job runs. It is a static binary, one build per 
   - for health: a local health probe every `health.probeInterval`, and from the engine's metrics, the running and waiting requests, the generated-token counter, the KV-cache use and the responses by HTTP status.
 - **What it runs.**
   - Staging. It pulls the image by digest into `<stagingDir>/images/`, and downloads missing checkpoint files from the Hub at the full commit id into `<stagingDir>/checkpoints/<repository>/<revision>/`. Each file goes to a temporary name, then is renamed into place, so two Allocations staging at once never see a partial file.
-  - The worker. It starts it with Apptainer from the image, with GPU support, the checkpoint bound read-only, and a clean environment plus the launch's variables. The engine listens on a Unix socket in the job's private temporary directory, so no port can clash on a shared node (L-7.7). The agent forwards the Instance's serving path to that socket (HBEP-6).
+  - The worker. It starts it with Apptainer from the image, with GPU support, the checkpoint bound read-only, and a clean environment plus the launch's variables. The engine listens on a Unix socket in the job's private temporary directory, so no port can clash on a shared node (L-7.7). It runs with `--served-model-name` set to the ModelDeployment's model name, which the front's name rewrite relies on (HBEP-5), and with the Instance's own key in `VLLM_API_KEY`, which the agent sets from the key file; the key is never written in the spec (HBEP-3). It runs with the `--max-num-seqs` of its `launch`, which is always set (What the controller reads). The agent forwards the Instance's serving path to that socket (HBEP-6).
   - Checks. When the desired state asks it to verify, qualify or warm up, the agent runs the checks and the warm-up rounds against the engine's local socket, with synthetic prompts, and reports each outcome. The controller judges the reports: it applies the thresholds and sets the verdicts (Instance start).
   - Restarts and stops. When a part's desired generation rises, it stops the part politely, kills it after `restart.stopGrace`, and starts it again from the same `launch`. It never restarts a part by itself: restarts are the controller's decisions, recorded first.
 - **Keys.** The agent generates the Instance's key at Instance start (HBEP-9), passes it to the engine through the environment, and sends it once over its channel. The controller keeps it in a mode-600 file named by the Instance's UID, which the front reads. A Hub token for a gated checkpoint comes over the same channel, and reaches the download only through the environment.
 - **After the Instance.** The agent stays when its Instance ends, and idles until it is told to stop or the job reaches its hard end. That is what lets a kept Allocation host a later Instance.
-- **Unreachable.** An agent that sends no report for `health.agentTimeout` makes its Instance's condition `AgentUnreachable`. The front stops routing to it, and the controller restarts nothing on that basis alone (HBEP-6: a path that is down is not a dead Instance). It returns when the reports resume. Its lease still ends on time, and the drain rule still applies.
+- **Unreachable.** An agent that sends no report for `health.agentTimeout` makes its Instance's condition `AgentUnreachable`. The front stops routing new requests to it but keeps counting the ones it has (HBEP-5). The controller restarts nothing on that basis alone (HBEP-6: a path that is down is not a dead Instance). It returns when the reports resume. Its lease still ends on time, and the drain rule still applies.
 - **The endpoint,** in the lifecycle controller, has three calls over HTTPS: `POST /agent/v1/register`, `GET /agent/v1/desired` (a long poll from the last generation seen) and `POST /agent/v1/report`. The version is in the path. HBEP-6 carries the requests.
   - It listens on loopback on the control-plane host. In ssh mode the agent reaches it through the forwarded loopback port. In direct mode the front passes `/agent/v1/` through, on the dial-home port, to that loopback endpoint.
   - The launcher creates the endpoint's certificate, and `agent.json` carries its pin (HBEP-11). In direct mode the front's dial-home listener presents the same certificate, so one pin holds on both paths.
@@ -354,7 +360,7 @@ The Instance phases are HBEP-3's.
 - **Malfunction signals,** from the agent's reports, with the profile's `health` thresholds:
   - the health probe fails `failureThreshold` times in a row;
   - only errors: over `errorOnlyWindow`, the engine answered requests and every answer was a server error;
-  - no token progress: requests running, and the generated-token counter unchanged for `noProgressTimeout`;
+  - no token progress: requests running, and the generated-token counter unchanged for `noProgressTimeout`. A request in prefill generates no token, so in alpha that time-out is 30 min, equal to the front's `idleTimeout`, and a prefill the front allows is never restarted (open question 6);
   - a part exits without being told to, whatever its exit code. A clean exit is a failure too (L-2.9);
   - one worker at a full KV cache with requests waiting while another idles, for `kvSkewTimeout`. This needs several workers, so it is not in alpha.
 
@@ -367,7 +373,7 @@ The Instance phases are HBEP-3's.
   The router rung comes first once Instances have routers (HBEP-5, open question 2).
 - **Attempts.** Each rung is tried `restart.attemptsPerRung` times within `restart.window`, `restart.backoff` apart, before the next rung.
 - **Recorded first.** Before each restart, the controller emits an event (type `failing`, the rung as reason, naming the signal and the controller as actor), then raises that part's restart generation on the Instance by compare-and-swap. The agent acts on the generation. The event says that in-flight requests were cut.
-- **Not routable while restarting.** A restarting Instance leaves `ready` for `verifying`, so the front stops routing to it, and returns after its checks.
+- **Not routable while restarting.** A restarting Instance leaves `ready` for `verifying`, so the front stops routing new requests to it, and returns after its checks. The front keeps it in its balancer group, and the cut requests leave its count as they fail (HBEP-5).
 - **Restart and provisioning loops.** When three Allocations in a row in one class fail before or at rung 3 within `restart.window` (a refused or failed job, a failed check, or a failed whole-Instance restart), the deployment is degraded. Provisioning in that class pauses with backoff, and an event fires.
 - **A requeue** fails the Instance, and its Allocation is deleted (HBEP-3, open question 13).
 
@@ -385,7 +391,7 @@ The Instance phases are HBEP-3's.
 
 Drain rule (the same text in HBEP-3, HBEP-5 and HBEP-7): The framework cannot move a lease end, so an Instance starts draining at the latest at its hard end minus the drain window, whether or not its replacement is ready. Make-before-break is the goal: the controller plans the replacement to be ready before that drain start, and the old Instance never drains before its replacement is ready unless that deadline forces it. If the replacement is late, the old Instance still drains on time, capacity drops, and an event is emitted (HBEP-8).
 
-- **Draining.** At its drain start, the hard end minus `drainWindow`, the Instance becomes `draining`; the front also enforces this deadline itself (HBEP-5). It becomes `ended` when the agent reports no running request, or at the hard end. The controller then tells the agent to stop the worker and removes the Instance's drain finalizer (HBEP-11). The Allocation follows its retention policy until its hard end.
+- **Draining.** At its drain start, the hard end minus the Instance's drain window, the Instance becomes `draining`. The window is the profile's `drainWindow`, or the ModelDeployment's `routing.maxRequestDuration` plus the profile's `drainMargin` when that is shorter, as the front computes it (HBEP-5, Draining). The front also enforces this deadline itself, from the hard end copied into `status.leaseEnd` (HBEP-5). It becomes `ended` when the agent reports no running request, or at the hard end. The controller then tells the agent to stop the worker and removes the Instance's drain finalizer (HBEP-11). The Allocation follows its retention policy until its hard end.
 - **A late replacement** leaves the deployment degraded (open question 10).
 
 ### Release
@@ -423,9 +429,9 @@ The Allocation keeps its name, and the new Instance has the new deployment's ID.
 
 - **Conditions are the level truth** (HBEP-11). Events are best-effort Kubernetes Events in alpha, whose reason carries HBEP-8's type and reason code.
 - **On a ModelDeployment:**
-  - `Ready`: ready Instances at least as many as desired;
+  - `Ready`: ready Instances at least as many as desired. For a managed source, the catalog entry is listed and its Provider's key is not rejected, with reason `CatalogEntryUnlisted` or `CredentialsRejected` when false (Reconcile loop, step 1);
   - `Degraded`, with a reason: `ReplacementLate`, `CapacityDropped`, `RestartLoop`, `VerificationFailed`, `SubmissionRejected`, `ProviderUnavailable` or `SpecUnsupported` (a `data-parallel-size` above 1, or a workload shape that does not fit the declared context limit);
-  - `Progressing`.
+  - `Progressing`; false with reason `ManagedSource` for a managed source, which has no Instances by design.
 - **On an Instance:** `Verified`, `Qualified`, `WarmedUp`, `Healthy` and `AgentUnreachable`. A qualification with no throughput reference records that in `Qualified`'s message.
 - **Events:**
   - `started`, `ready`, `degraded`, `failing` and `replaced`, as their HBEP-8 types;
@@ -459,7 +465,11 @@ Against the fake Slurm of spike S4, through the Slurm plugin (HBEP-4). The fake 
 - Verification: a changed checkpoint file fails the rehash, is re-staged once, then fails the Instance; an engine that reports another `max-model-len` fails at once and stops provisioning in that class; an engine that reports nothing fails, because the version, the image digest and the context length are required.
 - Qualification: an engine double with too little KV capacity, one whose three greedy outputs differ within their first 32 tokens, one that returns a single repeated token, and one that loops at the long context each fail, and their Allocations are released. One whose greedy outputs differ only after the 32nd token passes.
 - Warm-up: an engine double that is slow on the first request of each shape settles in two rounds; one whose latency never settles fails after five.
-- Health: a stalled Instance with requests in flight is restarted at the worker rung within the threshold. Repeated failures climb the ladder in order. A process that ignores TERM is killed after `stopGrace`. Plain load with long queues restarts nothing.
+- Health: a stalled Instance with requests in flight is restarted at the worker rung within the threshold. Repeated failures climb the ladder in order. A process that ignores TERM is killed after `stopGrace`. Plain load with long queues restarts nothing. An engine double in prefill for 1,100 s, with a request running and no token generated, is not restarted; one with no token for 30 min is (HBEP-5's slow-prefill test runs with this controller active).
+- Lease end: every observe copies the Allocation's hard end into the Instance's `status.leaseEnd`. A later hard end in the fake is copied, and moves the drain start.
+- Drain window: on a profile with `drainWindow` 2 h 10 min and `drainMargin` 10 min, an Instance of a ModelDeployment with `routing.maxRequestDuration` 30 min becomes `draining` 40 min before its hard end; one with 3 h drains 2 h 10 min before it. The times are worked out by hand.
+- Launch: a serving spec without `max-num-seqs` gives a `launch` with `--max-num-seqs` 256, and the same deployment ID as the spec that declares 256.
+- Managed source: a managed-source ModelDeployment gets no Allocation and no Instance, `desiredInstances` 0 and `Progressing` false with `ManagedSource`. Its `Ready` is true while the catalog entry is listed, and false with `CatalogEntryUnlisted` once it leaves the listing, or with `CredentialsRejected`. A served ModelDeployment whose selector matches a managed Provider's labels provisions on its batch Providers only, and sets no condition for the managed one.
 - A part that exits cleanly without being told to counts as failed.
 - Each restart's event is emitted before the agent sees the raised generation.
 - The agent: a registration with a wrong credential, or with the right credential and another job ID, is refused. A missed desired-state message is corrected by the next poll. An agent that stops reporting makes its Instance unreachable, and nothing is restarted. When the desired state asks it to verify, qualify or warm up, the real agent runs the checks against the engine double's socket and reports them, and the controller's verdicts follow the reports.
@@ -467,7 +477,7 @@ Against the fake Slurm of spike S4, through the Slurm plugin (HBEP-4). The fake 
 - An operation interrupted on one of several providers reports each provider's outcome.
 - A repurpose, once it is on: the old Instance drains, the new deployment's Instance starts in the same Allocation, and the front routes to it only after verification and warm-up. The Allocation keeps its name, and the deployment ID changes.
 
-On real providers: on each alpha platform, one deployment with a short `leaseLimit` completes one handover end to end through the front, with no request cut.
+On real providers: on each alpha platform, one deployment with a short `leaseLimit` and a short `routing.maxRequestDuration` (so its drain window fits the lease) completes one handover end to end through the front, with no request cut.
 
 ### Compatibility and upgrades
 
@@ -606,7 +616,13 @@ The controller applies by policy what www-2027 operators did per job: holder bat
 - 2026-10-30: S4's implemented submission protocol written into open question 11; one current deployment ID per accelerator class carried into hedging and handover; verification compares settings and rehashes files, never recomputes the ID.
 - 2026-10-30: design completed for implementable. The owner's approval of the proposals (29 Oct 2026, PR #14) recorded as decisions; the alpha scope marked; the controllers, the reconcile loop, provisioning, the allocation agent, Instance start with HBEP-9's alpha checks, health and restarts, handover, release and retention written for alpha.
 - 2026-10-30: implementable. The owner's approval of the proposed answers (29 Oct 2026, PR #14) and spikes S1 (issue #18), S4 (PR #32), S5 (PR #19) and S7 (PR #33) carried in; every open question decided, not needed for alpha, or open for beta.
+- 2026-10-30: amendment with HBEP-5 becoming implementable: a managed-source ModelDeployment is provisioned nothing and its status says so; a served one ignores managed Providers; the launch sets `--served-model-name`, `VLLM_API_KEY` and always `--max-num-seqs`; the controller reads `routing.maxRequestDuration` and `drainMargin` for the drain window and writes `status.leaseEnd`; a prefill-aware no-progress signal is open for beta; the real handover test shortens the drain window.
 
 ## Amendments
 
-None.
+- **2026-10-30: what the front needs from the lifecycle controller.** Made with HBEP-5 becoming implementable, and from the review of PR #63.
+  - **Managed sources** (Reconcile loop, step 1). A ModelDeployment with `spec.source.managed` is provisioned nothing. Its status says it has no Instances by design, and its `Ready` follows the catalog entry. A served ModelDeployment ignores managed Providers in its selection, even when labels match. Before, step 1 skipped a managed Provider with a condition naming it, and said nothing of a managed source.
+  - **The launch** sets `--served-model-name` to the model name, which the front's rewrite relies on, and puts the Instance's key in `VLLM_API_KEY`. It always passes `--max-num-seqs`: the serving spec's value, else 256, a framework default recorded in `launch`. So the front's per-Instance cap is always known. `max-num-seqs` is capacity, not a deployment-ID input (HBEP-3's table), so the default changes no ID.
+  - **The drain window.** The controller reads `routing.maxRequestDuration` from the ModelDeployment and `drainMargin` from the profile, and computes the window as the front does (HBEP-5, Draining). The real handover test shortens it through `routing.maxRequestDuration`.
+  - **`status.leaseEnd`.** On every observe, the controller copies the Allocation's hard end into the Instance's `status.leaseEnd`, which the front reads to enforce the drain deadline. The front does not route to an Instance without it (HBEP-5).
+  - **The no-progress watchdog.** HBEP-4's default for `health.noProgressTimeout` becomes 30 min, equal to the front's `idleTimeout`, so a healthy prefill is not restarted. A signal that tells prefill from a stall is open for beta (open question 6).

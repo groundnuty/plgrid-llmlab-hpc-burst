@@ -1,0 +1,2 @@
+      4 Chunked prefill is enabled with max_num_batched_tokens=8192.
+      4 GPU KV cache size: 528,160 tokens, Maximum concurrency for 16,384 tokens per request: 32.24x
