@@ -6,12 +6,19 @@
      Did not find license for library 'example.test/mystery'.
 
 == licence-check.sh on fixture repositories
--- control: no root LICENSE (permitted), clean dependency, clean nested module: exit 0
+-- control: no root LICENSE (permitted with --local-permit-own), clean dependency, clean nested module: exit 0
      licence check: PASS
      permitted (a package of this module, which has no LICENSE): example.test/proj
--- same repository with --no-own-exemption: exit 1
+-- same repository, strict (the default, as CI runs it): exit 1
      UNEXPECTED: Did not find license for library 'example.test/proj'.
      licence check: FAIL
+-- same repository with a LICENSE at the root, strict: exit 0
+     licence check: PASS
+-- LICENSE at the root, a separate module spikes/x without one, strict, CHECK_SPIKES=1: exit 1
+     UNEXPECTED: Did not find license for library 'example.test/proj/spikes/x'.
+     licence check: FAIL
+-- the same with a LICENSE in spikes/x itself, strict, CHECK_SPIKES=1: exit 0
+     licence check: PASS
 -- off-list dependency at a sibling path sharing the root's prefix (proj-extra): exit 1
      UNEXPECTED: Not allowed license 'BSD-4-Clause' found for library 'example.test/proj-extra'.
      licence check: FAIL
@@ -36,6 +43,21 @@
      UNEXPECTED: Not allowed license 'BSD-4-Clause' found for library 'example.test/lic-off'.
      licence check: FAIL
      permitted (a package of this module, which has no LICENSE): example.test/proj
+-- unreadable package LICENSE with a readable module LICENSE as fallback, strict (go-licenses exits 0): exit 1
+     UNEXPECTED: E<time> <pid> library.go:246] Failed to parse <work>/libs/unreadable/sub/LICENSE: open <work>/libs/unr
+     licence check: FAIL
+-- control: the same dependency without the unreadable file, strict: exit 0
+     licence check: PASS
+-- a module at internal/extra (not under third_party/) with an off-list dependency: exit 1
+     UNEXPECTED: Not allowed license 'BSD-4-Clause' found for library 'example.test/lic-off'.
+     licence check: FAIL
+-- a module that checks no package, not a known zero: exit 1
+     UNEXPECTED: go-licenses saw no package in tools/tagged, so a check over it would pass and check nothing (list it in known-zero-modules.txt, with the reason, only if that is expected)
+     licence check: FAIL
+-- the same module listed as a known zero, with a reason: exit 0
+     known zero: tools/tagged has no package to check; reason: its only file is behind a build tag (a fixture)
+     licence check: PASS
+-- a known-zero entry without a reason: exit 2
 -- for comparison, go-licenses' own --ignore example.test/proj, a path prefix, on the same fixtures (exit 0 = the dependency is hidden):
      r-sibling: exit 0
      r-siblingunk: exit 0

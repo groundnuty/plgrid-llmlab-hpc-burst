@@ -90,7 +90,13 @@ A past project served one set of models across several clusters and a managed ga
     - **No size-and-mtime shortcut where rehash fits the budget.** Lustre timestamps have one-second resolution, and an edit in the same second as the last write left both unchanged. Where a platform breaks the budget, S7's fallback applies: record size, mtime, ctime and inode at least two seconds after the last write, and rehash when any differs.
   - **At staging, compare each staged file with the record's list (HBEP-3).** The list's entries come from the Hub:
     - an LFS file's `lfs.oid`, which is a SHA-256. The controller downloads each other file, checks it against its git blob id, and hashes it with SHA-256, because the Hub gives SHA-256 only for LFS files;
-    - fetch the listing at a full commit id, with pagination, because the Hub's tree listing silently stops at 50 entries.
+    - fetch the listing at a full commit id, in pages, under the listing rule below.
+  - **The listing rule** (science-agent decision, 31 Oct 2026, built in `pkg/hubfiles`, PR #68):
+    - the request asks for `limit=1000`, the largest page the Hub accepts;
+    - every `Link` header with `rel="next"` is followed, parsed by RFC 8288's rules. A `Link` that does not parse is an error, never the end of the list;
+    - the next page must stay in the same snapshot: the same origin and path, so the same full commit id, and `recursive=true`;
+    - a redirect of the listing may only stay on the Hub's origin, because nothing checks the listing afterwards.
+    - **Why:** the Hub's page size depends on the query. Spike S7 saw a listing cut at 50 entries. On 31 Oct 2026 the Hub answered a request with no `limit` with all 77 entries of a checkpoint in one page, but with `expand=true` it defaulted to 50 entries plus a `Link` (PR #68, comment 6543291074). A client that ignores `Link` therefore stops short with no error (L-17.5).
   - **Measuring bytes read:** use `rchar` for the bytes returned to the process, together with the Lustre RPC counters for the bytes read from the filesystem. On the measured installation `read_bytes` undercounted Lustre reads (2–11% of the bytes), for a reason not established.
   - **Lean for the rest:** engine version and image digest; resolved settings as the engine reports them; a fixed conversation rendered through the template and tokenizer, compared token by token with an offline render. Output checks are not identity checks, since outputs vary.
 - Where attribution travels: response headers only, or also an extension field in the body for clients that log only bodies. Header names are hard to change, so the owner decides. Discussion with HBEP-5. Decided (owner decision, 30 Oct 2026): response headers named `hpcburst-*` (HBEP-5), with the front's usage records as the attribution log, and no body field.
@@ -106,6 +112,7 @@ TBD. Decided so far: the deployment ID is a hash the framework computes over wha
 
 - Change each record field in turn: each change gives a new deployment ID. Change a port, node or job ID: the ID stays.
 - Submit a spec with a branch name as revision: admission refuses it.
+- Read a listing from a Hub double that cuts each page below the requested limit and sends a `Link`: every page is read. A `Link` that does not parse, a next page on another path, and a redirect off the Hub's origin each fail the listing.
 - Start an Instance whose files differ from the pinned revision (one tokenizer file changed): verification fails, and it never joins a pool.
 - Start an Instance where the engine resolves a setting other than the declared one: verification fails.
 - Hand over an Instance: the deployment ID stays and the Instance ID changes, in responses and in the attribution log.
@@ -185,6 +192,7 @@ Verification grows from www-2027's endpoint check, run on each new endpoint (hea
 | A managed gateway's request changes made its deployment differ. | L-6.6 | The record flags a gateway's request changes. |
 | Center-run endpoints hid their revisions and limits. | L-6.8 | A managed entry's unknown fields are recorded as unknown. |
 | Live serve scripts could not be edited, because identity hashed them. | L-3.7 | Records are immutable; a change gives a new deployment ID. |
+| The Hub's tree listing page size depends on the query. | L-17.5 | The listing asks for `limit=1000` and follows every `Link`; a `Link` that does not parse is an error. |
 
 ## Implementation history
 
@@ -197,6 +205,7 @@ Verification grows from www-2027's endpoint check, run on each new endpoint (hea
 - 2026-10-30: the alpha checks at start (file rehash and settings comparison) noted from HBEP-7.
 - 2026-10-30: one verification record per verification, at start and after every restart that reverifies, as HBEP-7 and HBEP-11 now say.
 - 2026-10-30: HBEP-5's alpha proposal for where attribution travels noted.
+- 2026-10-31: the Hub listing rule written in full from the Hub listing (PR #68): `limit=1000`, every `Link` followed, an unparseable `Link` an error, one snapshot, redirects only on the Hub's origin. Lesson L-17.5 cited.
 
 ## Amendments
 
