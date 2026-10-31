@@ -259,7 +259,7 @@ func TestRunningWaitingAndKVAreLive(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			s.post("/v1/chat/completions", chatBody(41, map[string]any{"max_tokens": 30, "ignore_eos": true})) // 50 prompt tokens
+			s.post("/v1/chat/completions", chatBody(41, map[string]any{"max_tokens": 30, "min_tokens": 30})) // 50 prompt tokens
 		}()
 	}
 	defer wg.Wait()

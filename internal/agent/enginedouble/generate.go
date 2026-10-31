@@ -24,13 +24,23 @@ type output struct {
 }
 
 // length decides how many tokens the model says and why it stops: with
-// ignore_eos, or min_tokens at or above max_tokens, exactly max_tokens tokens
-// and "length"; otherwise the model stops of its own accord after
-// max(NaturalLen, min_tokens) tokens ("stop"), unless max_tokens comes first
-// ("length"). The loop-above mode overrides this for a long prompt.
+// min_tokens at or above max_tokens, exactly max_tokens tokens and "length";
+// otherwise the model stops of its own accord after max(NaturalLen,
+// min_tokens) tokens ("stop"), unless max_tokens comes first ("length").
+//
+// ignore_eos does not change the length: vLLM merges the server's default
+// stop-token ids into every request (to_sampling_params,
+// vllm/entrypoints/openai/chat_completion/protocol.py), so a request that only
+// ignores the end-of-sequence token can still stop early, and only min_tokens
+// guarantees a length (HBEP-7 review of PR 87, Astra B10). The early-stop mode
+// is this stop with a chosen length.
+//
+// The loop-above mode overrides this for a long prompt, unless ignore_eos: the
+// requests that send it, the warm-up and the corruption check, are not the
+// behaviour check.
 func (c Config) length(p genParams) (n int, finish string) {
 	n, finish = p.maxTokens, "length"
-	if !p.ignoreEOS && p.minTokens < p.maxTokens {
+	if p.minTokens < p.maxTokens {
 		if natural := max(c.NaturalLen, p.minTokens); natural < p.maxTokens {
 			n, finish = natural, "stop"
 		}

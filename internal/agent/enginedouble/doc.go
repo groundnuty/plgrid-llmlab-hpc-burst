@@ -26,11 +26,14 @@
 // or absent) gives the same output every time, as a walk over the vocabulary
 // whose odd step varies from token to token: no output repeats one token
 // next to itself, and no output is periodic. A sampled request seeds the walk
-// at random. With ignore_eos, or with min_tokens at or above max_tokens, an
-// output has exactly max_tokens tokens and finish reason "length". Otherwise
-// it stops naturally after max(NaturalLen, min_tokens) tokens, or at max_tokens
-// if that comes first. The double does not simulate preemption or a prefill
-// phase: a request waits TokenDelay before each token.
+// at random. With min_tokens at or above max_tokens, an output has exactly
+// max_tokens tokens and finish reason "length". Otherwise it stops naturally
+// after max(NaturalLen, min_tokens) tokens, or at max_tokens if that comes
+// first. ignore_eos does not change that: vLLM merges the server's default
+// stop-token ids into every request, so only min_tokens guarantees a length
+// (the early-stop mode sets NaturalLen). min_tokens above max_tokens is a 400,
+// as in vLLM (sampling_params.py:694-701). The double does not simulate
+// preemption or a prefill phase: a request waits TokenDelay before each token.
 //
 // # Reasoning and tool calls
 //
@@ -53,7 +56,7 @@
 //
 // ParseModes reads the comma-separated value of the environment variable
 // HB_ENGINE_DOUBLE, for example "kv-low,slow-first=200ms". The modes are kv-low,
-// greedy-diverge=<n>, greedy-repeat, loop-above=<tokens>, tool-malformed,
+// greedy-diverge=<n>, greedy-repeat, early-stop=<n>, loop-above=<tokens>, tool-malformed,
 // no-tool-call, reports-nothing, report-max-model-len=<n>, health-fail,
 // errors-only, slow-first=<dur>, never-settle=<pct>, stall, token-delay=<dur>,
 // reasoning-first=<n> and reasoning-forever;

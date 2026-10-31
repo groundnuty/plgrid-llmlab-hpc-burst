@@ -130,6 +130,7 @@ func (c *Client) corruptionCheck(ctx context.Context) error {
 		r, err := c.chat(ctx, chatRequest{
 			Messages:       []message{{Role: "user", Content: corruptionPrompt}},
 			MaxTokens:      corruptionTokens,
+			MinTokens:      corruptionTokens,
 			IgnoreEOS:      true,
 			ReturnTokenIDs: true,
 		})

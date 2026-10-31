@@ -41,7 +41,8 @@ type Config struct {
 	// generation prompt; default 9, at least 2.
 	TemplateOverhead int
 	// NaturalLen is how many tokens the model says before it stops of its
-	// own accord; default 24.
+	// own accord, with or without ignore_eos; default 24. The early-stop
+	// mode sets it.
 	NaturalLen int
 	// TokenDelay is the wait before each generated token; default 1 ms.
 	TokenDelay time.Duration

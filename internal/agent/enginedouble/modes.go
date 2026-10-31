@@ -71,6 +71,12 @@ func applyMode(c *Config, name, val string, hasVal bool) error {
 		n, err := intValue(val, hasVal, 0)
 		c.GreedyDiverge, c.GreedyDivergeAt = err == nil, n
 		return err
+	case "early-stop":
+		// The reply stops after n tokens with "stop", even under ignore_eos,
+		// unless min_tokens asks for more: the model's natural length.
+		n, err := intValue(val, hasVal, 1)
+		c.NaturalLen = n
+		return err
 	case "loop-above":
 		n, err := intValue(val, hasVal, 1)
 		c.LoopAbove = n

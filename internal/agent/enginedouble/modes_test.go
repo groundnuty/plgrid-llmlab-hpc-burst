@@ -20,6 +20,7 @@ func TestParseModes(t *testing.T) {
 		{"greedy-diverge=0", func(c *Config) { c.GreedyDiverge = true }},
 		{"loop-above=2000", func(c *Config) { c.LoopAbove = 2000 }},
 		{"tool-malformed,no-tool-call", func(c *Config) { c.ToolMalformed, c.NoToolCall = true, true }},
+		{"early-stop=10", func(c *Config) { c.NaturalLen = 10 }},
 		{"reasoning-first=50", func(c *Config) { c.ReasoningFirst = 50 }},
 		{"reasoning-forever", func(c *Config) { c.ReasoningForever = true }},
 		{"reports-nothing,health-fail,errors-only,stall", func(c *Config) { c.ReportsNothing, c.HealthFail, c.ErrorsOnly, c.Stall = true, true, true, true }},

@@ -141,6 +141,11 @@ func (h *handler) chat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "BadRequestError", err.Error())
 		return
 	}
+	if req.MinTokens < 0 || req.MinTokens > max {
+		// SamplingParams._verify_args, vllm/sampling_params.py:694-701.
+		writeError(w, http.StatusBadRequest, "BadRequestError", fmt.Sprintf("min_tokens must be less than or equal to max_tokens=%d, got %d.", max, req.MinTokens))
+		return
+	}
 	ans := h.answerFor(req, promptIDs, max)
 
 	rec := LogEvent{Event: "request", Path: r.URL.Path, PromptTokens: len(promptIDs), MaxTokens: max, Stream: req.Stream, Outcome: "cancelled"}

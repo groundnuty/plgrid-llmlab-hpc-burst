@@ -185,8 +185,10 @@ func TestOutputLength(t *testing.T) {
 		wantTokens int
 		wantFinish string
 	}{
-		{"ignore_eos gives exactly max_tokens", map[string]any{"max_tokens": 57, "ignore_eos": true}, 57, "length"},
+		{"ignore_eos alone does not fix the length", map[string]any{"max_tokens": 57, "ignore_eos": true}, 24, "stop"},
 		{"min_tokens at max_tokens gives exactly max_tokens", map[string]any{"max_tokens": 40, "min_tokens": 40}, 40, "length"},
+		{"min_tokens with ignore_eos, as the warm-up sends them", map[string]any{"max_tokens": 57, "min_tokens": 57, "ignore_eos": true}, 57, "length"},
+		{"min_tokens below max_tokens stops at the longer of it and the natural length", map[string]any{"max_tokens": 57, "min_tokens": 40, "ignore_eos": true}, 40, "stop"},
 		{"the model stops after 24 tokens", map[string]any{"max_tokens": 100}, 24, "stop"},
 		{"max_tokens below that is reached first", map[string]any{"max_tokens": 10}, 10, "length"},
 		{"min_tokens above the natural length", map[string]any{"max_tokens": 100, "min_tokens": 30}, 30, "stop"},
@@ -208,6 +210,53 @@ func TestOutputLength(t *testing.T) {
 	}
 	if res := s.chat(chatBody(5, map[string]any{"max_tokens": 3})); res.Choices[0].TokenIDs != nil {
 		t.Errorf("token_ids sent without return_token_ids: %v", res.Choices[0].TokenIDs)
+	}
+}
+
+// early-stop=<n>: the reply stops after n tokens with "stop", even under
+// ignore_eos, unless min_tokens asks for more.
+func TestEarlyStop(t *testing.T) {
+	cfg, err := ParseModes("early-stop=10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ServedName, cfg.TokenDelay = "m", 0
+	s := serve(t, cfg)
+	for _, tc := range []struct {
+		name       string
+		extra      map[string]any
+		wantTokens int
+		wantFinish string
+	}{
+		{"no flags", map[string]any{"max_tokens": 100}, 10, "stop"},
+		{"ignore_eos does not prevent it", map[string]any{"max_tokens": 100, "ignore_eos": true}, 10, "stop"},
+		{"min_tokens below it changes nothing", map[string]any{"max_tokens": 100, "min_tokens": 5, "ignore_eos": true}, 10, "stop"},
+		{"min_tokens above it asks for more", map[string]any{"max_tokens": 100, "min_tokens": 30, "ignore_eos": true}, 30, "stop"},
+		{"min_tokens at max_tokens gives the full length", map[string]any{"max_tokens": 100, "min_tokens": 100, "ignore_eos": true}, 100, "length"},
+		{"max_tokens below it is reached first", map[string]any{"max_tokens": 6, "ignore_eos": true}, 6, "length"},
+	} {
+		res := s.chat(chatBody(5, tc.extra))
+		if got := res.Usage.CompletionTokens; got != tc.wantTokens || res.Choices[0].FinishReason != tc.wantFinish {
+			t.Errorf("%s: %d tokens, finish %q; want %d, %q", tc.name, got, res.Choices[0].FinishReason, tc.wantTokens, tc.wantFinish)
+		}
+	}
+}
+
+// vLLM refuses min_tokens above max_tokens (SamplingParams._verify_args,
+// sampling_params.py:694-701), and so does the double.
+func TestMinTokensAboveMaxTokensIs400(t *testing.T) {
+	s := serve(t, cfgFor())
+	for name, extra := range map[string]map[string]any{
+		"min above max": {"max_tokens": 10, "min_tokens": 11},
+		"negative min":  {"max_tokens": 10, "min_tokens": -1},
+	} {
+		r := s.post("/v1/chat/completions", chatBody(3, extra))
+		if r.status != 400 || !strings.Contains(string(r.body), "min_tokens must be") {
+			t.Errorf("%s: HTTP %d %s, want 400 saying min_tokens must be less than or equal to max_tokens", name, r.status, r.body)
+		}
+	}
+	if r := s.post("/v1/chat/completions", chatBody(3, map[string]any{"max_tokens": 10, "min_tokens": 10})); r.status != 200 {
+		t.Errorf("min_tokens equal to max_tokens: HTTP %d, want 200", r.status)
 	}
 }
 

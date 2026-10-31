@@ -7,9 +7,10 @@ import (
 	"testing"
 )
 
-// longRequest asks for n tokens exactly, so no natural stop hides a difference.
+// longRequest asks for n tokens exactly (min_tokens = max_tokens, with
+// ignore_eos as the warm-up sends it), so no natural stop hides a difference.
 func longRequest(n int, extra map[string]any) map[string]any {
-	m := map[string]any{"max_tokens": n, "ignore_eos": true, "return_token_ids": true}
+	m := map[string]any{"max_tokens": n, "min_tokens": n, "ignore_eos": true, "return_token_ids": true}
 	for k, v := range extra {
 		m[k] = v
 	}
@@ -27,7 +28,7 @@ func TestGreedyOutputsAreIdentical(t *testing.T) {
 	if len(a) != 64 || !reflect.DeepEqual(a, b) || !reflect.DeepEqual(a, c) {
 		t.Errorf("identical greedy requests gave different outputs:\n%v\n%v\n%v", a, b, c)
 	}
-	other := s.tokens(chatBody(7, map[string]any{"max_tokens": 64, "ignore_eos": true, "return_token_ids": true}))
+	other := s.tokens(chatBody(7, map[string]any{"max_tokens": 64, "min_tokens": 64, "ignore_eos": true, "return_token_ids": true}))
 	if reflect.DeepEqual(a, other) {
 		t.Error("two different prompts gave the same output")
 	}
@@ -82,7 +83,7 @@ func TestOutputIsNotARepetition(t *testing.T) {
 
 // greedy-diverge=40: the repeats of an identical greedy request share the
 // first 40 tokens with the first and differ from index 40 on. The requests use
-// ignore_eos, since a 24-token natural stop would end before index 40.
+// min_tokens, since a 24-token natural stop would end before index 40.
 func TestGreedyDivergeAt40(t *testing.T) {
 	cfg := cfgFor()
 	modes, err := ParseModes("greedy-diverge=40")
@@ -114,8 +115,8 @@ func TestGreedyDivergeAt40(t *testing.T) {
 		}
 	}
 	// a different request is a different identity: its own first one is not a repeat
-	a1 := s.tokens(chatBody(9, map[string]any{"max_tokens": 60, "ignore_eos": true, "return_token_ids": true}))
-	a2 := s.tokens(chatBody(9, map[string]any{"max_tokens": 60, "ignore_eos": true, "return_token_ids": true}))
+	a1 := s.tokens(chatBody(9, map[string]any{"max_tokens": 60, "min_tokens": 60, "return_token_ids": true}))
+	a2 := s.tokens(chatBody(9, map[string]any{"max_tokens": 60, "min_tokens": 60, "return_token_ids": true}))
 	if !reflect.DeepEqual(a1[:40], a2[:40]) || a1[40] == a2[40] {
 		t.Error("the second request of another prompt did not diverge at 40")
 	}

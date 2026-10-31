@@ -26,11 +26,18 @@ type warmShape struct {
 // request at each of the three context lengths with the typical output, one
 // at the typical context with the longest output, one tool call when
 // req.ToolCalls, then req.TargetSessions concurrent requests of the typical
-// shape. Each request streams, ignores the end-of-sequence token so it
-// produces exactly its output length, and is timed to its first token and to
-// its end. A request that fails carries its error; one cancelled by ctx carries
+// shape. Each request streams and is timed to its first token and to its end.
+// A request that fails carries its error; one cancelled by ctx carries
 // "cancelled". Synthetic prompts only, each with its own first word, so no
 // request is served from another's prefix cache.
+//
+// A shape with a fixed output length asks for min_tokens = max_tokens (and
+// ignores the end-of-sequence token), because ignore_eos alone does not fix the
+// length: vLLM merges the server's default stop-token ids into every request
+// (chat_completion/protocol.py, to_sampling_params). The output is then
+// verified against usage.completion_tokens, which counts the reasoning tokens
+// too, and a request that stopped short carries the error. The tool-call shape
+// has no fixed length: it ends with its call.
 func (c *Client) WarmUpRound(ctx context.Context, n int32, req agentapi.WarmUpRequest) agentapi.WarmUpRound {
 	s := req.Shapes
 	seq := []warmShape{
@@ -74,8 +81,12 @@ func (c *Client) timed(ctx context.Context, w warmShape) agentapi.RequestTiming 
 	}
 	var tools []tool
 	choice := ""
+	var minTokens int32
+	ignoreEOS := false
 	if w.tools {
 		tools, choice = []tool{weatherTool}, "auto"
+	} else {
+		minTokens, ignoreEOS = w.output, true
 	}
 	// The longest shape sits at the context limit: count its own prompt.
 	content, err := c.prompt(ctx, w.context, warmUpTail, tools, w.shape == agentapi.ShapeLongest)
@@ -93,7 +104,8 @@ func (c *Client) timed(ctx context.Context, w warmShape) agentapi.RequestTiming 
 		MaxTokens:     w.output,
 		Stream:        true,
 		StreamOptions: &streamOptions{IncludeUsage: true},
-		IgnoreEOS:     true,
+		IgnoreEOS:     ignoreEOS,
+		MinTokens:     minTokens,
 		Tools:         tools,
 		ToolChoice:    choice,
 	})
@@ -146,5 +158,12 @@ func (c *Client) timed(ctx context.Context, w warmShape) agentapi.RequestTiming 
 		return fail(errors.New("the stream carried no usage (stream_options.include_usage)"))
 	}
 	t.OutputTokens = completion
+	if !w.tools && completion != w.output {
+		if completion < w.output {
+			t.Error = fmt.Sprintf("stopped early: %d of %d tokens", completion, w.output)
+		} else {
+			t.Error = fmt.Sprintf("overran: %d of %d tokens", completion, w.output)
+		}
+	}
 	return t
 }
