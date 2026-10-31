@@ -296,10 +296,11 @@ func (e *external) settle(ctx context.Context, a *v1alpha1.Allocation, rec *reco
 		}
 		e.event(a, event.Normal("HeldDuplicateCancelled", fmt.Sprintf("held job(s) %s with the tag were cancelled; job %s is the Allocation's", strings.Join(extras, ", "), rec.jobID)))
 	}
-	// A job established as something else (SubmittedAsOther) is not lifted:
-	// the lifecycle controller replaces the Allocation, and the job never runs.
-	if rec.lifted == recorded.ID || recorded.Hold != provider.HoldUser || recorded.RestartCount != 0 || recorded.StartTime != nil ||
-		a.GetCondition(v1alpha1.ConditionSubmittedAsOther).Status == corev1.ConditionTrue {
+	// HBEP-7's Settle gives the lift's conditions as a closed list; a job
+	// established as something else (SubmittedAsOther) is lifted like any
+	// other, as pkg/provider/fake.Controller does, and the lifecycle
+	// controller replaces the Allocation.
+	if rec.lifted == recorded.ID || recorded.Hold != provider.HoldUser || recorded.RestartCount != 0 || recorded.StartTime != nil {
 		return false, nil
 	}
 	err = e.p.LiftHold(ctx, recorded.ID)

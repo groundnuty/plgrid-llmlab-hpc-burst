@@ -296,11 +296,13 @@ func TestLostGraceAndReappearance(t *testing.T) {
 	}
 }
 
-// Read-back, a different time limit (HBEP-4, Read-back; HBEP-7 Settle: lift
-// only if the job passed the read-back): the job is established with 10 m, not
-// the requested 30 m. SubmittedAsOther is True with a Warning event, and the
-// hold is not lifted. The control, established as requested, gets its lift.
-func TestReadBackDifferentTimeLimitIsNotLifted(t *testing.T) {
+// Read-back, a different time limit (HBEP-4, Read-back): the job is
+// established with 10 m, not the requested 30 m. SubmittedAsOther is True,
+// reason ReadBackMismatch, with a Warning event. HBEP-7's Settle lists the
+// lift's conditions without the read-back, and fake.Controller lifts such a
+// job, so it is lifted once like any other; the lifecycle controller replaces
+// the Allocation.
+func TestReadBackDifferentTimeLimitSetsSubmittedAsOther(t *testing.T) {
 	t.Run("differs", func(t *testing.T) {
 		e := newEnv(t)
 		e.batch.Enqueue(fake.Script{AsTimeLimit: 10 * time.Minute})
@@ -313,11 +315,11 @@ func TestReadBackDifferentTimeLimitIsNotLifted(t *testing.T) {
 		if c.Status != corev1.ConditionTrue || c.Reason != v1alpha1.ReasonReadBackMismatch || !strings.Contains(c.Message, "timeLimit: requested 30m0s, got 10m0s") {
 			t.Errorf("SubmittedAsOther = %s %s %q, want True, ReadBackMismatch, naming the time limit with both values", c.Status, c.Reason, c.Message)
 		}
-		if n := ptLiftAttempts(e); n != 0 {
-			t.Errorf("%d lift calls for a job established as other, want 0", n)
+		if n := e.lifts(); n != 1 {
+			t.Errorf("%d lifts for a job established as other, want 1", n)
 		}
-		if p := a.Status.AtProvider.Phase; p != v1alpha1.AllocationHeld {
-			t.Errorf("phase %s, want Held", p)
+		if p := a.Status.AtProvider.Phase; p == v1alpha1.AllocationHeld {
+			t.Errorf("phase %s, want the job's own phase after its lift", p)
 		}
 		if !e.rec.has("SubmittedAsOther") {
 			t.Error("no SubmittedAsOther event")

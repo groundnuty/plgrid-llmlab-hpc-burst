@@ -169,9 +169,10 @@ func (e *external) accepted(ctx context.Context, a *v1alpha1.Allocation, claim v
 	if err != nil || !found {
 		return nil // the next observe settles
 	}
-	// A renamed job, or one established as something else, is left held:
-	// the next observe refuses it or raises SubmittedAsOther, and it never runs.
-	if job.Name != meta.GetExternalName(a) || len(readBackDiffs(a.Spec.ForProvider.Batch, job)) > 0 {
+	// A renamed job is left held: the next observe refuses and cancels it.
+	// settle lifts the job it is given even when the tag's listing does not
+	// show it, so the name is checked here.
+	if job.Name != meta.GetExternalName(a) {
 		return nil
 	}
 	if _, err := e.settle(ctx, a, &rec, meta.GetExternalName(a), job); err != nil {
