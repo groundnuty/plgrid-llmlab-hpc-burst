@@ -18,6 +18,8 @@ type play struct {
 	model  string
 	usage  bool
 	prompt int64
+	// yielded: the first pause on a fake clock has let the front catch up.
+	yielded bool
 }
 
 func (p *play) tokens() int {
@@ -34,6 +36,15 @@ func (p *play) wait(d time.Duration) {
 		return
 	}
 	if f, ok := p.e.clk.(*clock.Fake); ok {
+		if !p.yielded {
+			// A stream's headers were flushed just before the first pause. A
+			// fake clock jumps at once, so give the front a moment to read
+			// them first, as a real engine's prefill always does: otherwise a
+			// front timer the headers stop (streamHeadersTimeout) can fire
+			// before they land.
+			p.yielded = true
+			time.Sleep(20 * time.Millisecond)
+		}
 		f.Advance(d)
 		return
 	}
@@ -44,13 +55,6 @@ func (p *play) wait(d time.Duration) {
 // connection when the behaviour says so.
 func (p *play) beforeToken(i int) {
 	if i == 0 {
-		if _, fake := p.e.clk.(*clock.Fake); fake && p.b.FirstToken > 0 {
-			// A stream's headers were just flushed. A fake clock jumps at
-			// once, so give the front a moment to read them first, as a real
-			// engine's prefill always does: otherwise a front timer that the
-			// headers stop (streamHeadersTimeout) can fire before they land.
-			time.Sleep(20 * time.Millisecond)
-		}
 		p.wait(p.b.FirstToken)
 	} else {
 		p.wait(p.b.PerToken)

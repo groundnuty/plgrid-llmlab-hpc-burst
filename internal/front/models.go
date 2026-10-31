@@ -59,9 +59,11 @@ func (p *Proxy) serveModels(w http.ResponseWriter, r *http.Request, x *exchange)
 			}
 		}
 		if found == nil {
-			e := errNotAttached(id)
-			w.Header().Set("Retry-After", e.retryAfter)
-			p.fail(w, x, e.status, e.code, e.detail, "", e.message)
+			// An additive extension: LLMLab has no retrieve route. The name
+			// is the path's rest, decoded once, so a raw "/" and %2F name the
+			// same model; an unlisted name is 404 model_not_found, as in
+			// OpenAI's contract (@hpc-burst-science-agent, 31 Oct 2026).
+			p.fail(w, x, http.StatusNotFound, codeModelNotFound, "", "", "the model "+id+" is not listed")
 			return
 		}
 		body = found
