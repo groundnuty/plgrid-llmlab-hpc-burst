@@ -114,8 +114,38 @@ func newFrpRig(t *testing.T) *frpRig {
 // stop and cont freeze and resume frps with SIGSTOP and SIGCONT. A frozen frps
 // still completes TCP handshakes from its listen backlog, so a dial succeeds
 // and the CONNECT that follows waits for an answer.
-func (r *frpRig) stop() { r.signal(syscall.SIGSTOP) }
+func (r *frpRig) stop() {
+	r.t.Helper()
+	r.signal(syscall.SIGSTOP)
+	// The signal is delivered asynchronously: wait until every thread stopped.
+	for end := time.Now().Add(5 * time.Second); !allStopped(r.proc.Rec().PID); time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(end) {
+			r.t.Fatal("frps did not stop after SIGSTOP")
+		}
+	}
+}
+
 func (r *frpRig) cont() { r.signal(syscall.SIGCONT) }
+
+// allStopped reports whether every thread of the process is in state T.
+func allStopped(pid int) bool {
+	tasks, err := os.ReadDir(fmt.Sprintf("/proc/%d/task", pid))
+	if err != nil || len(tasks) == 0 {
+		return false
+	}
+	for _, task := range tasks {
+		b, err := os.ReadFile(fmt.Sprintf("/proc/%d/task/%s/stat", pid, task.Name()))
+		if err != nil {
+			return false
+		}
+		// The state follows the command name in parentheses, which may hold spaces.
+		i := strings.LastIndexByte(string(b), ')')
+		if i < 0 || i+2 >= len(b) || b[i+2] != 'T' {
+			return false
+		}
+	}
+	return true
+}
 
 func (r *frpRig) signal(sig syscall.Signal) {
 	select {

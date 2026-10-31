@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 func TestConfigDefaultsAreHBEP5s(t *testing.T) {
@@ -121,5 +123,43 @@ func TestClientServerHasNoDeadlineBelowTheFronts(t *testing.T) {
 	if tr.ResponseHeaderTimeout != 0 || tr.IdleConnTimeout != 4*time.Second || !tr.DisableCompression {
 		t.Errorf("upstream transport: ResponseHeaderTimeout %s, IdleConnTimeout %s, DisableCompression %v",
 			tr.ResponseHeaderTimeout, tr.IdleConnTimeout, tr.DisableCompression)
+	}
+}
+
+// TestConfigTunnelSettings: HBEP-5's defaults for the tunnel's set-up and
+// probe (Parameters), frps's addresses from the launcher's port base
+// (base + 9 and base + 10) unless set, and the refusals.
+func TestConfigTunnelSettings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "front.json")
+	writeMode600(t, path, `{"clientKeysFile":"/k","usageDir":"/u"}`)
+	c, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.TunnelSetupTimeout.D() != 5*time.Second || c.ProbeInterval.D() != 10*time.Second || c.ProbeTimeout.D() != 10*time.Second || c.ProbeFailures != 2 {
+		t.Errorf("tunnelSetupTimeout %s, probeInterval %s, probeTimeout %s, probeFailures %d; want 5 s, 10 s, 10 s, 2",
+			c.TunnelSetupTimeout.D(), c.ProbeInterval.D(), c.ProbeTimeout.D(), c.ProbeFailures)
+	}
+	if c.ConnectTimeout.D() != 10*time.Second {
+		t.Errorf("connectTimeout %s, want 10 s for LLMLab", c.ConnectTimeout.D())
+	}
+	host := agentapi.Host{PortBase: 29220}
+	if bind, mux, err := c.FrpsAddrs(host); err != nil || bind != "127.0.0.1:29229" || mux != "127.0.0.1:29230" {
+		t.Errorf("FrpsAddrs = %q, %q, %v; want 127.0.0.1:29229 and 127.0.0.1:29230", bind, mux, err)
+	}
+	if _, _, err := c.FrpsAddrs(agentapi.Host{}); err == nil {
+		t.Error("frps's addresses with no port base and none set: accepted")
+	}
+	c.FrpsBindAddr, c.FrpsMuxAddr = "127.0.0.1:7001", "127.0.0.1:7002"
+	if bind, mux, err := c.FrpsAddrs(agentapi.Host{}); err != nil || bind != c.FrpsBindAddr || mux != c.FrpsMuxAddr {
+		t.Errorf("set addresses: %q, %q, %v; want them as given", bind, mux, err)
+	}
+	bad := filepath.Join(t.TempDir(), "bad.json")
+	writeMode600(t, bad, `{"clientKeysFile":"/k","usageDir":"/u","tunnelSetupTimeout":"-1s","probeFailures":-1,"frpsMuxAddr":"nowhere"}`)
+	_, err = LoadConfig(bad)
+	for _, want := range []string{"tunnelSetupTimeout", "probeFailures", "frpsMuxAddr"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("a bad %s not named in %v", want, err)
+		}
 	}
 }

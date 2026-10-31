@@ -299,3 +299,65 @@ func TestTunnelSetupDeadlineCutsAHungConnect(t *testing.T) {
 		t.Errorf("after frps resumed: %d %s", status, body)
 	}
 }
+
+// TestTunnelFrozenPathClosesBeforeTheHeaders: with frpc frozen (SIGSTOP, no
+// FIN), frps still answers the CONNECT, since the UID is routed, and then
+// closes each request itself, within userConnTimeout (10 s) or at session
+// teardown, before any response byte (HBEP-6, The front's half). A streamed
+// and a non-streamed request each get 502 upstream_closed with detail tunnel
+// and cutBy tunnel, each counts toward the pause, and neither is resent.
+func TestTunnelFrozenPathClosesBeforeTheHeaders(t *testing.T) {
+	rig := newFrpRig(t)
+	f := newTunFront(t, rig)
+	dial, _ := rig.serveDialHome(ModeSSH)
+	f.tunDeployment(1)
+	key := newKey(t)
+	e, sock := rig.engine(key)
+	a := f.tunInstance("md-a", key)
+	p := rig.startFrpc(a, sock, dial)
+	rig.waitOnline(a, p)
+	f.apply()
+	f.waitRegistered(a)
+	p.pause()
+	defer p.resume()
+
+	bodies := map[string]string{
+		"non-streamed": tunChat,
+		"streamed":     `{"model":"example-27b","stream":true,"messages":[{"role":"user","content":"hello there"}]}`,
+	}
+	type result struct {
+		name, body, id string
+		status         int
+		took           time.Duration
+	}
+	results := make(chan result, len(bodies))
+	for name, body := range bodies {
+		go func() {
+			start := time.Now()
+			resp := f.post("/v1/chat/completions", body, "X-Session-Id", name)
+			results <- result{name: name, status: resp.StatusCode, body: readAll(t, resp), id: resp.Header.Get("hpcburst-request-id"), took: time.Since(start)}
+		}()
+	}
+	for range bodies {
+		r := <-results
+		if r.status != http.StatusBadGateway || !strings.Contains(r.body, `"upstream_closed"`) || !strings.Contains(r.body, `"tunnel"`) {
+			t.Errorf("%s through a frozen path: %d %s, want 502 upstream_closed, detail tunnel", r.name, r.status, r.body)
+		}
+		if r.took > 26*time.Second {
+			t.Errorf("%s was closed after %s, want within userConnTimeout or the session's teardown", r.name, r.took)
+		}
+		if rec := f.record(r.id); rec.CutBy == nil || *rec.CutBy != cutTunnel {
+			t.Errorf("%s: usage record cutBy %v, want tunnel", r.name, rec.CutBy)
+		}
+	}
+	if n := f.router.failures("ns/md-a"); n != 2 {
+		t.Errorf("failures = %d, want 2: each closed request counts toward the pause", n)
+	}
+	if n := strings.Count(f.logs.String(), "no connection to the target; nothing was sent"); n != 0 {
+		t.Errorf("a written request was treated as never sent %d times, and resent", n)
+	}
+	p.resume()
+	if n := len(e.Requests()); n != 0 {
+		t.Errorf("the engine saw %d requests through the frozen path", n)
+	}
+}
