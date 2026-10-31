@@ -245,7 +245,7 @@ For a managed provider:
 ### Submission
 
 - **The Allocation's submission parameters,** immutable (HBEP-11): `partition`, `timeLimit`, `gpus`, `cpusPerTask`, `memory`, `nodes` (1 in alpha) and `agentDigest`, the SHA-256 of the allocation agent's binary for the partition's `cpuArch` (HBEP-7). The lifecycle controller sets them; the plugin adds the account, the tag and the fixed options. S4's `account` and `wrap` are not parameters: the account comes from the Provider's settings, and the batch script is the fixed bootstrap.
-- **GPU sizing.** In alpha the lifecycle controller sets `gpus` to the tensor-parallel size times the pipeline-parallel size, and refuses a `data-parallel-size` above 1 with a ModelDeployment condition, because alpha runs one engine worker per Instance (HBEP-7). Beta sizes GPUs as DP × TP × PP.
+- **GPU sizing.** In alpha the lifecycle controller sets `gpus` to the tensor-parallel size times the pipeline-parallel size, and refuses a `data-parallel-size` above 1 with `Degraded` reason `SpecUnsupported` on the ModelDeployment, because alpha runs one engine worker per Instance (HBEP-7). Beta sizes GPUs as DP × TP × PP.
 - **Refused before any call:**
   - a partition that the Provider does not allow or the profile does not list;
   - no GPU on a partition whose `gpuModel` is not `none`;
@@ -298,7 +298,7 @@ A partition enters the typed list only when `holdRelease` has been verified on i
 | `drainWindow` | duration, 2 h 10 min | HBEP-5's drain window, read by the front and the controller; at least the front's `maxRequestDuration` (2 h) plus `drainMargin`, owner decision of 30 Oct 2026. A ModelDeployment may only shorten it (open question 11) | none (HBEP-5) |
 | `drainMargin` | duration, 10 min | the margin above a request's longest duration in the drain window. Read by the front and the controller, so both compute the same drain start: an Instance's window is `drainWindow`, or its ModelDeployment's `routing.maxRequestDuration` plus this margin when that is shorter (HBEP-5) | none (HBEP-5) |
 | `handoverMargin` | duration, 30 min | the margin in HBEP-7's submission plan: a replacement is submitted at drain start minus (p90 observed wait + start-to-ready time + this margin), never before its predecessor's start | none (HBEP-7) |
-| `maxIdle` | duration, optional | an Allocation with no Instance is released after this long, even when its retention policy says keep (HBEP-7) | `facts.login_node_policy.gpu_only` (Athena) motivates it. Athena: 30 min (HBEP-7); unset elsewhere |
+| `maxIdle` | duration, optional | an Allocation with no Instance is released after this long, counted from its `idle-since` annotation, even when its retention policy says keep (HBEP-7, Retention) | `facts.login_node_policy.gpu_only` (Athena) motivates it. Athena: 30 min (HBEP-7); unset elsewhere |
 | `health.probeInterval`, `.failureThreshold`, `.noProgressTimeout`, `.errorOnlyWindow`, `.kvSkewTimeout`, `.agentTimeout`, `.registrationTimeout`, `.startTimeout` | 10 s, 3, 30 min, 1 min, 2 min, 2 min, 15 min, 1 h | HBEP-7's malfunction signals; the longest time from the job's start to its agent's registration; the longest time from an Instance's own start instruction to `ready`. In alpha `noProgressTimeout` equals HBEP-5's `idleTimeout` (30 min), so a healthy prefill that the front allows is never restarted (HBEP-7, open question 6) | none; defaults, tuned in beta |
 | `restart.stopGrace`, `.attemptsPerRung`, `.window`, `.backoff` | 10 s, 2, 30 min, 30 s | HBEP-7's restart ladder | none; defaults, tuned in beta |
 
