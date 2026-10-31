@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -90,6 +91,10 @@ type Sink struct {
 	closed   bool
 	done     chan struct{}
 	err      error // the first write or sync error; it is never cleared
+
+	// Only the writer goroutine uses these two after Open.
+	size int64 // the log's size when it holds only whole lines
+	torn bool  // a failed write left a partial line that could not be cut off
 }
 
 // Open opens the sink in dir, creating it (mode 0700). The first counter is
@@ -112,7 +117,12 @@ func open(dir string, wrap func(*os.File) logFile) (*Sink, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Sink{dir: dir, log: wrap(f), next: end + 1, blockEnd: end, wake: make(chan struct{}, 1), done: make(chan struct{})}
+	st, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	s := &Sink{dir: dir, log: wrap(f), size: st.Size(), next: end + 1, blockEnd: end, wake: make(chan struct{}, 1), done: make(chan struct{})}
 	go s.run()
 	return s, nil
 }
@@ -173,6 +183,10 @@ func (s *Sink) run() {
 	}
 }
 
+// flush appends batch to the log and syncs it. A write that fails or falls
+// short can leave a partial line, which the next record would join; so the log
+// is cut back to its size before the batch, and the batch's counters show as a
+// gap. A sync that fails leaves whole lines and they are kept.
 func (s *Sink) flush(batch []Record) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -182,13 +196,38 @@ func (s *Sink) flush(batch []Record) {
 			return
 		}
 	}
-	if _, err := s.log.Write(buf.Bytes()); err != nil {
+	if s.torn && !s.cutBack() {
+		return // the partial line is still there; writing now would join it
+	}
+	n, err := s.log.Write(buf.Bytes())
+	if err == nil && n != buf.Len() {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
 		s.fail(err)
+		s.cutBack()
 		return
 	}
+	s.size += int64(n)
 	if err := s.log.Sync(); err != nil {
 		s.fail(err)
 	}
+}
+
+// cutBack truncates the log to s.size and syncs it. It reports whether the
+// log is back to whole lines; when the truncate fails, the next flush tries
+// again before it writes.
+func (s *Sink) cutBack() bool {
+	if err := s.log.Truncate(s.size); err != nil {
+		s.torn = true
+		s.fail(err)
+		return false
+	}
+	s.torn = false
+	if err := s.log.Sync(); err != nil {
+		s.fail(err)
+	}
+	return true
 }
 
 func (s *Sink) fail(err error) {

@@ -1,8 +1,12 @@
 package usage_test
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -109,5 +113,72 @@ func TestWriteReturnsAnEarlierWriteFailure(t *testing.T) {
 	}
 	if !errors.Is(o.closeErr, errDisk) {
 		t.Errorf("Close returned %v, want an error that wraps %v", o.closeErr, errDisk)
+	}
+}
+
+// jsonLines returns the log's records and fails the test unless the log is
+// valid JSON Lines: it ends in a newline and each line is one JSON object of
+// its own. A line that holds two objects, or a fragment and an object, is
+// invalid; readLog would accept the first.
+func jsonLines(t *testing.T, dir string) []usage.Record {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, logName))
+	if err != nil {
+		t.Fatalf("usage log: %v", err)
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	if b[len(b)-1] != '\n' {
+		t.Errorf("the log ends in the middle of a line: %q", tail(b))
+	}
+	var out []usage.Record
+	for i, line := range bytes.Split(bytes.TrimSuffix(b, []byte("\n")), []byte("\n")) {
+		var r usage.Record
+		if err := json.Unmarshal(line, &r); err != nil {
+			t.Errorf("log line %d is not a JSON object: %v: %q", i+1, err, tail(line))
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// tail is the last 80 bytes of b, for a message.
+func tail(b []byte) []byte { return b[max(len(b)-80, 0):] }
+
+func ids(recs []usage.Record) []string {
+	out := make([]string, len(recs))
+	for i, r := range recs {
+		out[i] = r.RequestID
+	}
+	return out
+}
+
+// TestAFailedWriteLeavesNoPartialLine: the write of the batch X, Y, Z puts
+// part of it on the disk and fails. The log is cut back to its size before the
+// batch, so Q, written after the failure, starts a line of its own. The
+// batch's counters 2 to 4 show as a gap.
+func TestAFailedWriteLeavesNoPartialLine(t *testing.T) {
+	dir := t.TempDir()
+	failedBatch(t, dir, false)
+	recs := jsonLines(t, dir)
+	if want := []string{"P", "Q"}; !reflect.DeepEqual(ids(recs), want) {
+		t.Errorf("requests in the log = %v, want %v", ids(recs), want)
+	}
+	if want := []uint64{1, 5}; !reflect.DeepEqual(counters(recs), want) {
+		t.Errorf("counters in the log = %v, want %v: the failed batch shows as a gap", counters(recs), want)
+	}
+}
+
+// TestAFailedCutBackIsRetried: the truncate that follows the failed write
+// fails too, so the partial line stays. The next flush cuts the log back
+// before it writes Q.
+func TestAFailedCutBackIsRetried(t *testing.T) {
+	dir := t.TempDir()
+	failedBatch(t, dir, true)
+	recs := jsonLines(t, dir)
+	if want := []string{"P", "Q"}; !reflect.DeepEqual(ids(recs), want) {
+		t.Errorf("requests in the log = %v, want %v", ids(recs), want)
 	}
 }
