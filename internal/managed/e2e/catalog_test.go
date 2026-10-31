@@ -55,7 +55,8 @@ type managedEnv struct {
 }
 
 // startManaged creates a managed Provider on platform llmlab whose
-// credentials name gw with key, and starts its manager with the controller.
+// credentials name gw with key, and starts its manager with the controller:
+// on clock, or, with clock nil, through managed.Setup, the supervisor's hook.
 func startManaged(t *testing.T, name, key string, gw *llmlabtest.Server, clock *testingclock.FakeClock) *managedEnv {
 	t.Helper()
 	ctx := context.Background()
@@ -92,15 +93,22 @@ func startManaged(t *testing.T, name, key string, gw *llmlabtest.Server, clock *
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctl, err := managed.New(managed.Options{
-		Client: mgr.GetClient(), Reader: mgr.GetAPIReader(), Provider: name, Clock: clock,
-		Recorder: mgr.GetEventRecorder(v1alpha1.FieldManagerProvider),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ctl.SetupWithManager(mgr); err != nil {
-		t.Fatal(err)
+	if clock == nil {
+		// The supervisor's hook, with the real clock.
+		if err := managed.Setup(mgr, name); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		ctl, err := managed.New(managed.Options{
+			Client: mgr.GetClient(), Reader: mgr.GetAPIReader(), Provider: name, Clock: clock,
+			Recorder: mgr.GetEventRecorder(v1alpha1.FieldManagerProvider),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ctl.SetupWithManager(mgr); err != nil {
+			t.Fatal(err)
+		}
 	}
 	mctx, cancel := context.WithCancel(context.Background())
 	e := &managedEnv{t: t, name: name, gw: gw, clock: clock, cancel: cancel, done: make(chan error, 1)}
@@ -282,5 +290,26 @@ func TestTwoManagedProvidersInOneProcess(t *testing.T) {
 		if err := c.Get(context.Background(), client.ObjectKey{Namespace: v1alpha1.ControllerNamespace, Name: v1alpha1.ProviderLeaseName(name)}, &lease); err != nil {
 			t.Fatalf("Lease of %s: %v", name, err)
 		}
+	}
+}
+
+// The type of internal/providerctl's Supervisor.Setup: the
+// assignment fails to compile if managed.Setup drifts from it.
+var _ func(manager.Manager, string) error = managed.Setup
+
+// managed.Setup has the signature of the per-Provider manager supervisor's
+// hook (internal/providerctl, Supervisor.Setup, #59) and starts the loop on
+// the real clock: the first pass reads at once.
+func TestSetupIsTheSupervisorsHook(t *testing.T) {
+	key := "example-key-e2e-hook"
+	gw := llmlabtest.Start(t, llmlabtest.Options{PortLo: portLo, PortHi: portHi, Keys: []string{key}})
+	gw.SetModels(llmlabtest.Model{ID: "example-27b", Revision: "2026-09"})
+	e := startManaged(t, "example-llmlab-hook", key, gw, nil)
+	p := e.waitCatalog("first read through Setup", func(m map[string]v1alpha1.CatalogEntryStatus) bool { return m["example-27b"].Listed })
+	if got, want := string(p.Status.Catalog[0].ManagedID), vectorHash(t, "02-managed-with-revision"); got != want {
+		t.Fatalf("managedID = %s, want golden vector 02's %s", got, want)
+	}
+	if n := gw.Count("GET", "/v1/models"); n != 1 {
+		t.Fatalf("the gateway saw %d catalog reads, want 1", n)
 	}
 }

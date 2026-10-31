@@ -161,6 +161,22 @@ func (c *Controller) SetupWithManager(mgr manager.Manager) error {
 	return mgr.Add(c)
 }
 
+// Setup is the per-Provider manager supervisor's hook for a managed Provider,
+// with the signature of internal/providerctl's Supervisor.Setup (#59): it
+// adds the Provider's controller to mgr, built from mgr's client, API reader,
+// event recorder and logger, with the real clock and transport.
+func Setup(mgr manager.Manager, provider string) error {
+	c, err := New(Options{
+		Client: mgr.GetClient(), Reader: mgr.GetAPIReader(), Provider: provider,
+		Recorder: mgr.GetEventRecorder(v1alpha1.FieldManagerProvider),
+		Log:      mgr.GetLogger().WithName("managed-catalog"),
+	})
+	if err != nil {
+		return err
+	}
+	return c.SetupWithManager(mgr)
+}
+
 // NeedLeaderElection implements manager.LeaderElectionRunnable: only the
 // holder of the Provider's Lease reads the catalog.
 func (c *Controller) NeedLeaderElection() bool { return true }
