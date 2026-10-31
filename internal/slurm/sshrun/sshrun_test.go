@@ -135,8 +135,9 @@ func TestOneMasterServesConcurrentCommands(t *testing.T) {
 	}
 }
 
-// The argument templates: -F /dev/null, no agent, no forwards, strict host
-// keys; the master runs -N; a client cannot fall back to its own connection.
+// The argument templates: -F a private file, no agent, no forwards, strict
+// host keys; the master runs -N; a client cannot fall back to its own
+// connection.
 func TestArgumentsAndEnvironment(t *testing.T) {
 	r := newRig(t)
 	t.Setenv("SSH_AUTH_SOCK", "/tmp/example-agent.sock")
@@ -149,10 +150,8 @@ func TestArgumentsAndEnvironment(t *testing.T) {
 	if len(masters) != 1 || len(clients) != 1 {
 		t.Fatalf("log: %d masters, %d clients", len(masters), len(clients))
 	}
-	common := []string{"-F /dev/null", "BatchMode=yes", "IdentitiesOnly=yes", "IdentityAgent=none",
+	common := []string{"-F " + r.ctl + "/", "BatchMode=yes", "IdentitiesOnly=yes", "IdentityAgent=none",
 		"ClearAllForwardings=yes", "ForwardAgent=no", "StrictHostKeyChecking=yes",
-		"HostName=login.example.org", "User=example-user", "Port=2222",
-		"IdentityFile=/nonexistent/example-key", "UserKnownHostsFile=/nonexistent/known_hosts",
 		"ControlPath=" + r.ctl + "/"}
 	for _, line := range append(masters, clients...) {
 		f := strings.Split(line, "\t")
@@ -162,13 +161,24 @@ func TestArgumentsAndEnvironment(t *testing.T) {
 				t.Errorf("%s invocation lacks %q", f[0], want)
 			}
 		}
-		for _, bad := range []string{" -L ", " -R ", " -D ", " -A ", "ControlPersist=yes", "ProxyJump"} {
+		for _, bad := range []string{" -L ", " -R ", " -D ", " -A ", "ControlPersist=yes", "ProxyJump", "-F /dev/null"} {
 			if strings.Contains(" "+args+" ", bad) {
 				t.Errorf("%s invocation has %q", f[0], bad)
 			}
 		}
 		if strings.Contains(env, "SSH_AUTH_SOCK") {
 			t.Errorf("%s invocation inherited SSH_AUTH_SOCK", f[0])
+		}
+	}
+	// Port and the known-hosts file reach ssh through the configuration file.
+	resolved, err := os.ReadFile(filepath.Join(r.dir, "resolved"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"HostName=login.example.org", "User=example-user", "Port=2222",
+		"IdentityFile=/nonexistent/example-key", "UserKnownHostsFile=/nonexistent/known_hosts"} {
+		if !strings.Contains(string(resolved), want) {
+			t.Errorf("the connection did not use %q; resolved:\n%s", want, resolved)
 		}
 	}
 	m := strings.Split(masters[0], "\t")[1]

@@ -10,12 +10,23 @@ package sshrun
 //     "drop" appears in the state directory (a dropped connection). The file
 //     "refuse" holds a count of master attempts to refuse (a login
 //     throttle), each refused one exiting 255 at once.
-//   - -O check: exit 0 when the ControlPath answers, 255 otherwise.
+//   - -O check: exit 0 when the ControlPath answers, 255 otherwise. While
+//     the file "check-hang" exists in the state directory it connects, logs
+//     "check-hang" and then waits (up to an hour) for the file to go away, as
+//     a client does that waits on a master that never answers.
 //   - client mode (ControlMaster=no): connects to the ControlPath; without a
 //     master it exits 255, as ProxyCommand=/bin/false makes real ssh do.
 //     With one it runs the remote line with /bin/sh -c in the state
 //     directory's "remote" environment: HOME and SCRATCH from the files
 //     "home" and "scratch", PATH from "bin" first.
+//
+// Like ssh, the fake takes the login node, user, key, port and known-hosts
+// file from -o options first and from the "Host hpcburst-login" block of the
+// -F file second, and it exits 255 without them (no host name to connect to)
+// or with an unreadable -F file. The values it resolved go to the file
+// "resolved" in the state directory, one Key=value per line, not to the log,
+// so a test reads the logged arguments for what ssh's command line exposed
+// and "resolved" for what the connection used.
 //
 // The log is one line per invocation: a mode, then the arguments, then the
 // environment's variable names, tab-separated.
@@ -37,11 +48,72 @@ import (
 const fakeEnv = "HPCBURST_FAKE_SSH"
 
 type fakeArgs struct {
-	opts    map[string]string
-	control string // -O
-	noCmd   bool   // -N
+	opts    map[string]string // from -o
+	conn    map[string]string // from the -F file's Host block
+	config  string            // -F
+	control string            // -O
+	noCmd   bool              // -N
 	command string
 	all     []string
+}
+
+// connKeys are the options the transport keeps in the configuration file.
+var connKeys = []string{"HostName", "User", "IdentityFile", "Port", "UserKnownHostsFile"}
+
+// get returns the value ssh would use: the command line's first, then the
+// configuration file's.
+func (a fakeArgs) get(k string) string {
+	if v, ok := a.opts[k]; ok {
+		return v
+	}
+	return a.conn[k]
+}
+
+// loadConfig reads the Host block for the alias from the -F file, the first
+// value of a keyword winning.
+func loadConfig(path string) (map[string]string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	conn := map[string]string{}
+	in := false
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		k, v, _ := strings.Cut(line, " ")
+		v = strings.Trim(strings.TrimSpace(v), `"`)
+		if strings.EqualFold(k, "Host") {
+			in = v == alias
+			continue
+		}
+		if _, dup := conn[k]; in && !dup {
+			conn[k] = v
+		}
+	}
+	return conn, nil
+}
+
+// resolve fills a.conn from the -F file and reports what ssh would fail on.
+func resolve(dir string, a *fakeArgs) string {
+	if a.config != "" {
+		conn, err := loadConfig(a.config)
+		if err != nil {
+			return "Can't open user config file: No such file or directory"
+		}
+		a.conn = conn
+	}
+	if a.get("HostName") == "" || a.get("User") == "" || a.get("IdentityFile") == "" {
+		return "ssh: Could not resolve hostname " + alias + ": Name or service not known"
+	}
+	var lines []string
+	for _, k := range connKeys {
+		lines = append(lines, k+"="+a.get(k))
+	}
+	_ = os.WriteFile(filepath.Join(dir, "resolved"), []byte(strings.Join(lines, "\n")+"\n"), 0o600)
+	return ""
 }
 
 func parseFake(args []string) fakeArgs {
@@ -50,6 +122,7 @@ func parseFake(args []string) fakeArgs {
 		switch args[i] {
 		case "-F":
 			i++
+			a.config = args[i]
 		case "-o":
 			i++
 			k, v, _ := strings.Cut(args[i], "=")
@@ -91,14 +164,20 @@ func fakeSSHMain(args []string) int {
 	dir := os.Getenv("FAKE_SSH_DIR")
 	a := parseFake(args)
 	sock := a.opts["ControlPath"]
+	if msg := resolve(dir, &a); msg != "" {
+		fakeLog(dir, "unresolved", a)
+		fmt.Fprintln(os.Stderr, msg)
+		return 255
+	}
 	switch {
 	case a.control == "check":
 		c, err := net.Dial("unix", sock)
 		if err != nil {
 			return 255
 		}
-		c.Close()
-		return 0
+		defer c.Close()
+		fakeLog(dir, "check", a)
+		return stallCheck(dir, a)
 	case a.control != "":
 		return 255
 	case a.opts["ControlMaster"] == "yes" && a.noCmd:
@@ -110,6 +189,24 @@ func fakeSSHMain(args []string) int {
 		fmt.Fprintln(os.Stderr, "fake ssh: unexpected invocation")
 		return 255
 	}
+}
+
+// stallCheck holds a connected -O check while "check-hang" exists, then
+// reports success. It models a master that accepted the connection and does
+// not answer. It polls instead of blocking on a read so that removing the file
+// (a test's cleanup) always frees it; the state directory going away does too.
+func stallCheck(dir string, a fakeArgs) int {
+	hang := filepath.Join(dir, "check-hang")
+	if _, err := os.Stat(hang); err != nil {
+		return 0
+	}
+	fakeLog(dir, "check-hang", a)
+	for deadline := time.Now().Add(time.Hour); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if _, err := os.Stat(hang); err != nil {
+			return 255
+		}
+	}
+	return 255
 }
 
 func takeRefusal(dir string) bool {
@@ -154,6 +251,7 @@ func fakeMaster(dir, sock string, a fakeArgs) int {
 		case <-stop:
 			l.Close()
 			os.Remove(sock)
+			fakeLog(dir, "master-stopped", a)
 			return 0
 		case <-time.After(20 * time.Millisecond):
 			if _, err := os.Stat(filepath.Join(dir, "drop")); err == nil {
