@@ -129,6 +129,7 @@ The Kubernetes libraries match crossplane-runtime v2.4.3, which HBEP-4's provide
 | k3s (single-user and team host) | v1.36.5+k3s1 |
 | `kube-apiserver`, `kube-controller-manager` (the assembled test host of `internal/testenv`) | v1.36.2, sha256-pinned in `hack/test-binaries.sh` |
 | `etcd` (the assembled test host) | v3.6.8, sha256-pinned in `hack/test-binaries.sh` |
+| `frps`, `frpc` (HBEP-6's tunnel; the tests start them) | [frp](https://github.com/fatedier/frp) v0.71.1 (Apache-2.0), linux_amd64, sha256-pinned in `hack/fetch-frp.sh` (the pin spike S1c used) |
 
 Kubernetes' explicit ±1-minor skew rule is written for kubectl. client-go instead documents compatibility through the APIs a client and a cluster share ([client-go compatibility](https://github.com/kubernetes/client-go/blob/v0.35.3/README.md#compatibility-client-go---kubernetes-clusters)). A 0.35 client against a 1.36 server is a reasonable choice for shared stable APIs, and the tests against k3s 1.36 check the APIs we use. A change to any of these pins is its own PR.
 
@@ -137,6 +138,7 @@ Kubernetes' explicit ±1-minor skew rule is written for kubectl. client-go inste
 - `hack/check.sh` runs gofmt, vet, `go mod tidy -diff`, the generated-file check and the tests, then lists every skipped test. Run it under `nice` and the shared build lock.
 - `hack/mutate-cel.sh` neutralises each CEL admission rule in a copy of the CRDs and runs the test that covers it, which must fail. It takes about ten minutes, so it is not part of `hack/check.sh`; run it when a rule or its test changes. A rule with no entry in its table fails the script.
 - The flag-name tests read the known flag names from HBEP-3's v1 table, so the admission rules' lists of known names are checked against the specification. A flag added to the table fails `TestEngineFlagsRefuseEveryPrefixOfAKnownFlag` until the list in the `EngineFlag` markers (`api/v1alpha1/modeldeployment_types.go`) gains it.
+- Tests that start frp read `HPCBURST_FRP_DIR` through `testenv.FrpBinaries(t)`. `hack/fetch-frp.sh DIR` installs the pinned `frps` and `frpc` there (the tarball's sha256 is checked before anything is extracted). Without `HPCBURST_FRP_DIR` those tests skip with a message; `HPCBURST_REQUIRE_FRP=1` fails them instead, and CI sets both in the `go`, `crd and envtest` and `launcher-k3s` jobs. A binary that is there but not executable, not runnable or not 0.71.1 fails in either mode.
 - The test host (`internal/testenv`) binds only loopback ports 29200 to 29219 and, in k3s mode, accepts only a kubeconfig whose server is loopback on 29200 to 29239. The control-plane binaries are always sha256-checked; `HPCBURST_TESTENV_UNPINNED=1` is the explicit override for a binary you built yourself.
 
 ### The licence check
