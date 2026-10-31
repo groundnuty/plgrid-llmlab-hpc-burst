@@ -61,8 +61,10 @@ const (
 	// ReasonRestartLoop: three Allocations in a row in one class failed
 	// within restart.window; provisioning in that class pauses.
 	ReasonRestartLoop = "RestartLoop"
-	// ReasonVerificationFailed: a settings contradiction stopped provisioning
-	// in a class until the serving spec changes.
+	// ReasonVerificationFailed: verification stopped provisioning in a class.
+	// A settings contradiction stops it until the serving spec changes; a
+	// shape misfit stops it until the spec or the workload's resolved shapes
+	// change (science-agent ruling, 31 Oct 2026).
 	ReasonVerificationFailed = "VerificationFailed"
 	// ReasonSubmissionRejected: the provider's last attempt was Rejected; the
 	// message carries the scheduler's reason.
