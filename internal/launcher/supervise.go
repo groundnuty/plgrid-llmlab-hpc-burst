@@ -39,8 +39,10 @@ type supervised struct {
 }
 
 // supervisedSet is what the supervisor runs, from the record the launcher wrote. The controller's
-// command line is the contract with cmd/hpcburst-controller, and these are exactly its flags; the
-// front flags go only to a launcher that recorded a front.
+// command line is the contract with cmd/hpcburst-controller, and these are exactly its flags: it
+// fills an agentapi.Host from --state-dir and --port-base, and takes the kubeconfig, the
+// credentials directory and the agent builds from there. The front flags go only to a launcher
+// that recorded a front.
 func (s *State) supervisedSet(l layout) ([]supervised, error) {
 	if s.Controllers == nil {
 		return nil, errors.New("the launcher record names no controller binary: nothing to supervise")
@@ -49,10 +51,7 @@ func (s *State) supervisedSet(l layout) ([]supervised, error) {
 		return nil, errors.New("the launcher record has no controller port")
 	}
 	health := s.Ports.ControllerAddr()
-	args := []string{"--kubeconfig", l.kubeconfig(), "--credentials-dir", l.credentialsDir(), "--health-addr", health}
-	if s.Controllers.AgentBuildsDir != "" {
-		args = append(args, "--agent-builds-dir", s.Controllers.AgentBuildsDir)
-	}
+	args := []string{"--state-dir", l.dir, "--port-base", strconv.Itoa(s.Ports.Base()), "--health-addr", health}
 	if s.Front.Set() {
 		args = append(args, "--front-mode", s.Front.Mode, "--front-addr", s.Front.Addr)
 	}
@@ -183,8 +182,8 @@ func (o *SuperviseOptions) defaults() {
 }
 
 // childEnv is the environment of a supervised process: the supervisor's, without the variables
-// that would point a Kubernetes client at some other API server. The controller is given its
-// kubeconfig explicitly, and the invoking user's own KUBECONFIG must never replace it.
+// that would point a Kubernetes client at some other API server. The controller reads the
+// kubeconfig in its --state-dir, and the invoking user's own KUBECONFIG must never replace it.
 func childEnv(env []string) []string {
 	var out []string
 	for _, kv := range env {

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"time"
 )
 
@@ -29,8 +28,7 @@ type UpOptions struct {
 	// ControllerBin is the controllers' binary. Empty means ControllerBinName beside the running
 	// executable; if that is absent too, the host starts with a warning and no controller runs.
 	// A path that is given and missing is an error, raised before anything starts.
-	ControllerBin  string
-	AgentBuildsDir string // passed to the controller as --agent-builds-dir when set
+	ControllerBin string
 
 	// supervisorArgv, set by tests only, replaces the supervisor's command line.
 	supervisorArgv []string
@@ -160,11 +158,6 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 	if err != nil {
 		return nil, err
 	}
-	if o.AgentBuildsDir != "" {
-		if o.AgentBuildsDir, err = filepath.Abs(o.AgentBuildsDir); err != nil {
-			return nil, err
-		}
-	}
 	unlock, err := l.lockState()
 	if err != nil {
 		return nil, err
@@ -270,7 +263,7 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 				return abort("controllers", err)
 			}
 		}
-		st.Controllers = &ControllerConfig{Binary: ctrlBin, AgentBuildsDir: o.AgentBuildsDir}
+		st.Controllers = &ControllerConfig{Binary: ctrlBin}
 		if err := startSupervisor(ctx, l, st, argv, superviseStartTimeout, o.Log); err != nil {
 			return abort("controllers", err)
 		}

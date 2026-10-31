@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strconv"
 	"syscall"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 // Ports are the loopback ports of one launcher. All of them derive from one base, so an
@@ -21,23 +23,34 @@ type Ports struct {
 	HTTPS int `json:"https"` // --https-listen-port: the supervisor and the external-facing apiserver
 	KCM   int `json:"kcm"`   // the embedded controller manager's secure port
 	LB    int `json:"lb"`    // --lb-server-port: reserved and never bound (no agent), so it cannot hit the default
-	// Controller is the lifecycle controller's /healthz (HBEP-11). Agent is the agent API of the
-	// lifecycle controller (issue #60): reserved, not bound yet. A state file from before the
-	// controllers existed has neither.
+	// Controller is the lifecycle controller's /healthz (HBEP-11). Agent is the agent endpoint,
+	// agentapi.Host.AgentEndpointPort (issue #60's server): reserved, never bound by the launcher.
+	// A state file from before the controllers existed has neither.
 	Controller int `json:"controller,omitempty"`
 	Agent      int `json:"agent,omitempty"`
 }
 
+// Base is the start of the block, the port the controllers' --port-base names. PortsFromBase puts
+// the apiserver there.
+func (p Ports) Base() int { return p.API }
+
 // DefaultPortBase is the default start of the block. It is far from every k3s default.
 const DefaultPortBase = 29220
 
+// controllerPortOffset is the lifecycle controller's /healthz, relative to the base. It is the last
+// port of the block.
+const controllerPortOffset = 6
+
 // PortsFromBase lays the first four ports out as spike S3 did (base, base+1, base+2 and base+5)
-// and adds the controllers' two: base+6 and base+7.
+// and adds the controllers' two: the agent endpoint at agentapi.AgentEndpointPortOffset (base+3,
+// shared with the controller through agentapi.Host) and the controller's /healthz at base+6.
+// base+4 is unused.
 func PortsFromBase(base int) (Ports, error) {
-	if base < 1024 || base+7 > 65535 {
-		return Ports{}, fmt.Errorf("port base %d is out of range: the block base..base+7 must lie in 1024..65535", base)
+	if base < 1024 || base+controllerPortOffset > 65535 {
+		return Ports{}, fmt.Errorf("port base %d is out of range: the block base..base+%d must lie in 1024..65535", base, controllerPortOffset)
 	}
-	return Ports{API: base, HTTPS: base + 1, KCM: base + 2, LB: base + 5, Controller: base + 6, Agent: base + 7}, nil
+	host := agentapi.Host{PortBase: base}
+	return Ports{API: base, HTTPS: base + 1, KCM: base + 2, LB: base + 5, Controller: base + controllerPortOffset, Agent: host.AgentEndpointPort()}, nil
 }
 
 // Expected are the ports the running k3s must hold, and no others. The controllers' ports are
@@ -45,8 +58,9 @@ func PortsFromBase(base int) (Ports, error) {
 func (p Ports) Expected() []int { return []int{p.API, p.HTTPS, p.KCM} }
 
 // All are the ports that must be free before a start: the expected ones and the reserved ones.
+// The agent endpoint's is among them, so an operator's listener on it makes up refuse.
 func (p Ports) All() []int {
-	return []int{p.API, p.HTTPS, p.KCM, p.LB, p.Controller, p.Agent}
+	return []int{p.API, p.HTTPS, p.KCM, p.Agent, p.LB, p.Controller}
 }
 
 // ControllerAddr is where the lifecycle controller serves /healthz.

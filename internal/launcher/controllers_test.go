@@ -76,6 +76,7 @@ type ctlFixture struct {
 	t     *testing.T
 	l     layout
 	ctl   string // $FAKECTRL_DIR
+	base  int    // the port base; the controller's /healthz is base+6
 	ports Ports
 	st    *State
 }
@@ -93,7 +94,7 @@ func freePort(t *testing.T) int {
 
 // newCtlFixture writes state.json for a host whose "k3s" is this test process (the supervisor
 // needs a valid record to read, nothing more) and a record of the controller to run.
-func newCtlFixture(t *testing.T, front Front, agentBuilds string) *ctlFixture {
+func newCtlFixture(t *testing.T, front Front) *ctlFixture {
 	t.Helper()
 	l, err := newLayout(filepath.Join(shortDir(t), "st"))
 	if err != nil {
@@ -103,9 +104,13 @@ func newCtlFixture(t *testing.T, front Front, agentBuilds string) *ctlFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &ctlFixture{t: t, l: l, ctl: t.TempDir(), ports: Ports{API: 1, HTTPS: 2, KCM: 3, LB: 4, Controller: freePort(t), Agent: 5}}
+	// The block is laid out as the spec has it (base, +1, +2, +3 the agent endpoint, +5, +6 the
+	// controller's /healthz), around a free port for the controller, so the fake can bind it.
+	base := freePort(t) - 6
+	f := &ctlFixture{t: t, l: l, ctl: t.TempDir(), base: base,
+		ports: Ports{API: base, HTTPS: base + 1, KCM: base + 2, Agent: base + 3, LB: base + 5, Controller: base + 6}}
 	f.st = &State{Version: "v1.36.5+k3s1", Ports: f.ports, Procs: []ProcRec{self}, StartedAt: time.Now(), Front: front,
-		Controllers: &ControllerConfig{Binary: fakeControllerBin(t), AgentBuildsDir: agentBuilds}}
+		Controllers: &ControllerConfig{Binary: fakeControllerBin(t)}}
 	for _, d := range []string{l.dir, l.logDir()} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			t.Fatal(err)
@@ -256,4 +261,115 @@ func startTicksOf(t *testing.T, pid int) uint64 {
 // healthzCode asks addr for /healthz, as curl would.
 func healthzCode(addr string) (int, error) {
 	return getStatus(&http.Client{Timeout: time.Second}, "http://"+addr+"/healthz")
+}
+
+// TestFakeControllerFlags: the fake accepts exactly the controller's command line and refuses the
+// earlier one, so a launcher that still passes --kubeconfig, --credentials-dir or
+// --agent-builds-dir fails its start in every test. "always-exit" 0 is read only after the flags
+// parse: exit 0 means the command line was accepted, exit 2 that it was refused.
+func TestFakeControllerFlags(t *testing.T) {
+	bin := fakeControllerBin(t)
+	cases := []struct {
+		name string
+		args []string
+		want int
+	}{
+		{"the contract", []string{"--state-dir", "/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29226"}, 0},
+		{"the contract with a front", []string{"--state-dir", "/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29226",
+			"--front-mode", "direct", "--front-addr", "front.example.test:8443"}, 0},
+		{"the earlier command line", []string{"--kubeconfig", "/st/kubeconfig", "--credentials-dir", "/st/controller/credentials", "--health-addr", "127.0.0.1:29226"}, 2},
+		{"the contract and --kubeconfig", []string{"--state-dir", "/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29226", "--kubeconfig", "/st/kubeconfig"}, 2},
+		{"the contract and --credentials-dir", []string{"--state-dir", "/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29226", "--credentials-dir", "/st/credentials"}, 2},
+		{"the contract and --agent-builds-dir", []string{"--state-dir", "/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29226", "--agent-builds-dir", "/b"}, 2},
+		{"no state directory", []string{"--port-base", "29220", "--health-addr", "127.0.0.1:29226"}, 2},
+		{"no port base", []string{"--state-dir", "/st", "--health-addr", "127.0.0.1:29226"}, 2},
+		{"a port base that is not a number", []string{"--state-dir", "/st", "--port-base", "base", "--health-addr", "127.0.0.1:29226"}, 2},
+		{"no health address", []string{"--state-dir", "/st", "--port-base", "29220"}, 2},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "always-exit"), []byte("0"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(bin, c.args...)
+			cmd.Env = append(os.Environ(), "FAKECTRL_DIR="+dir)
+			err := cmd.Run()
+			code := 0
+			if ee, ok := err.(*exec.ExitError); ok {
+				code = ee.ExitCode()
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if code != c.want {
+				t.Errorf("fake controller %q exited %d, want %d", c.args, code, c.want)
+			}
+		})
+	}
+}
+
+// TestPrepareControllerDirs: the credentials directory is <state>/credentials with mode 0700, even
+// when an older one is looser; the agent builds directory is <state>/agent-builds, created with
+// mode 0700 when absent and left alone (mode and contents) when it exists; the earlier
+// <state>/controller/credentials is not created. The expected paths are written out from the
+// shared host layout (docs/development.md, Runtime conventions).
+func TestPrepareControllerDirs(t *testing.T) {
+	mode := func(t *testing.T, path string) os.FileMode {
+		t.Helper()
+		fi, err := os.Stat(path)
+		if err != nil || !fi.IsDir() {
+			t.Fatalf("%s: %v, %v; want a directory", path, fi, err)
+		}
+		return fi.Mode().Perm()
+	}
+	ports := Ports{API: 29220, HTTPS: 29221, KCM: 29222, Agent: 29223, LB: 29225, Controller: 29226}
+	newState := func(t *testing.T) layout {
+		t.Helper()
+		l, err := newLayout(filepath.Join(shortDir(t), "st"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(l.dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return l
+	}
+	t.Run("fresh", func(t *testing.T) {
+		l := newState(t)
+		if err := prepareControllerDirs(l, ports); err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range []string{"controller", "credentials", "agent-builds"} {
+			if m := mode(t, filepath.Join(l.dir, d)); m != 0o700 {
+				t.Errorf("%s has mode %v, want 0700", d, m)
+			}
+		}
+		if _, err := os.Stat(filepath.Join(l.dir, "controller", "credentials")); !os.IsNotExist(err) {
+			t.Errorf("controller/credentials was created (%v)", err)
+		}
+	})
+	t.Run("existing directories", func(t *testing.T) {
+		l := newState(t)
+		for _, d := range []string{"credentials", "agent-builds"} {
+			if err := os.Mkdir(filepath.Join(l.dir, d), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		build := filepath.Join(l.dir, "agent-builds", "hb-agent-x86_64")
+		if err := os.WriteFile(build, []byte("build"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := prepareControllerDirs(l, ports); err != nil {
+			t.Fatal(err)
+		}
+		if m := mode(t, filepath.Join(l.dir, "credentials")); m != 0o700 {
+			t.Errorf("credentials has mode %v, want 0700: a looser one must be tightened", m)
+		}
+		if m := mode(t, filepath.Join(l.dir, "agent-builds")); m != 0o755 {
+			t.Errorf("agent-builds has mode %v, want the operator's 0755 left alone", m)
+		}
+		if b, err := os.ReadFile(build); err != nil || string(b) != "build" {
+			t.Errorf("the agent build was disturbed: %q, %v", b, err)
+		}
+	})
 }

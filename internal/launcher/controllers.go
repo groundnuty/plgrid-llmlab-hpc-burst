@@ -83,17 +83,30 @@ func ensureControllerNamespace(ctx context.Context, cfg *rest.Config) error {
 	return nil
 }
 
-// prepareControllerDirs creates the controllers' directory and the credentials directory with mode
-// 0700 (set explicitly, so a umask or an older directory cannot loosen it), and removes the
-// previous supervisor's record: a file left by an earlier run must never look like this start's.
-func prepareControllerDirs(l layout) error {
-	for _, d := range []string{l.controllerDir(), l.credentialsDir()} {
+// prepareControllerDirs creates the controllers' directory and the host layout's credentials
+// directory with mode 0700 (set explicitly, so a umask or an older directory cannot loosen it), and
+// the agent builds directory with mode 0700 when it is absent, so an operator can drop builds
+// there; an existing one keeps its mode and contents. It removes the previous supervisor's
+// record: a file left by an earlier run must never look like this start's.
+func prepareControllerDirs(l layout, ports Ports) error {
+	host := l.host(ports)
+	for _, d := range []string{l.controllerDir(), host.CredentialsDir()} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return err
 		}
 		if err := os.Chmod(d, 0o700); err != nil {
 			return err
 		}
+	}
+	if _, err := os.Stat(host.AgentBuildsDir()); errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(host.AgentBuildsDir(), 0o700); err != nil {
+			return err
+		}
+		if err := os.Chmod(host.AgentBuildsDir(), 0o700); err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
 	}
 	if err := os.Remove(l.supervisorFile()); err != nil && !os.IsNotExist(err) {
 		return err
@@ -123,7 +136,7 @@ func startSupervisor(ctx context.Context, l layout, st *State, argv []string, ti
 	if err := l.saveState(st); err != nil {
 		return err
 	}
-	if err := prepareControllerDirs(l); err != nil {
+	if err := prepareControllerDirs(l, st.Ports); err != nil {
 		return err
 	}
 	lf, err := os.OpenFile(l.supervisorLog(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)

@@ -22,6 +22,7 @@ func TestUsageAndExitCodes(t *testing.T) {
 		{"unknown command", []string{"frobnicate"}, exitUsage, "unknown command"},
 		{"upgrade without --to", []string{"upgrade", "--state-dir", empty}, exitUsage, "--to is required"},
 		{"unknown flag", []string{"up", "--nonsense"}, exitUsage, "nonsense"},
+		{"the removed --agent-builds-dir", []string{"up", "--state-dir", empty, "--agent-builds-dir", "/builds"}, exitUsage, "agent-builds-dir"},
 		{"stray argument", []string{"status", "--state-dir", empty, "extra"}, exitUsage, "unexpected argument"},
 		{"status of an empty directory is 'stopped'", []string{"status", "--state-dir", empty}, exitStopped, "stopped"},
 		{"down with nothing recorded succeeds", []string{"down", "--state-dir", empty}, exitOK, "nothing to stop"},

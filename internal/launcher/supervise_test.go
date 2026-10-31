@@ -64,7 +64,7 @@ func TestSuperviseDefaults(t *testing.T) {
 func TestSuperviseRestartsAnyExit(t *testing.T) {
 	for _, code := range []int{3, 0} {
 		t.Run(fmt.Sprintf("exit code %d", code), func(t *testing.T) {
-			f := newCtlFixture(t, Front{}, "")
+			f := newCtlFixture(t, Front{})
 			f.supervise(SuperviseOptions{BackoffMin: 20 * time.Millisecond, BackoffMax: 80 * time.Millisecond})
 			first := f.awaitRunning()
 			if first.Restarts != 0 || first.LastExit != nil {
@@ -154,7 +154,7 @@ func (f *ctlFixture) startTimes() []time.Time {
 // 20, 40 ms and then 40 ms again (the cap), and each restart really waited: the fake's own start
 // times are at least the chosen delay apart.
 func TestSuperviseBackoffGrowsAndIsCapped(t *testing.T) {
-	f := newCtlFixture(t, Front{}, "")
+	f := newCtlFixture(t, Front{})
 	f.steer("always-exit", "1")
 	var dl delayLog
 	f.supervise(SuperviseOptions{BackoffMin: 10 * time.Millisecond, BackoffMax: 40 * time.Millisecond, StableAfter: time.Hour, onDelay: dl.add})
@@ -176,7 +176,7 @@ func TestSuperviseBackoffGrowsAndIsCapped(t *testing.T) {
 // TestSuperviseBackoffResetsAfterAStableRun: after quick exits have raised the delay, a child
 // that ran for longer than the stable time is restarted after the minimum again.
 func TestSuperviseBackoffResetsAfterAStableRun(t *testing.T) {
-	f := newCtlFixture(t, Front{}, "")
+	f := newCtlFixture(t, Front{})
 	f.steer("always-exit", "1")
 	var dl delayLog
 	f.supervise(SuperviseOptions{BackoffMin: 10 * time.Millisecond, BackoffMax: time.Second, StableAfter: time.Second, onDelay: dl.add})
@@ -198,7 +198,7 @@ func TestSuperviseBackoffResetsAfterAStableRun(t *testing.T) {
 // TestSuperviseStopsItsChildren: on cancel, the child is stopped, the supervisor returns nil, its
 // record says stopped, and nothing is started again.
 func TestSuperviseStopsItsChildren(t *testing.T) {
-	f := newCtlFixture(t, Front{}, "")
+	f := newCtlFixture(t, Front{})
 	stop := f.supervise(SuperviseOptions{BackoffMin: 20 * time.Millisecond})
 	pid := f.awaitRunning().Proc.PID
 	if err := stop(); err != nil {
@@ -219,7 +219,7 @@ func TestSuperviseStopsItsChildren(t *testing.T) {
 
 // TestSuperviseKillsAChildThatIgnoresTerm: SIGKILL follows the grace period.
 func TestSuperviseKillsAChildThatIgnoresTerm(t *testing.T) {
-	f := newCtlFixture(t, Front{}, "")
+	f := newCtlFixture(t, Front{})
 	f.steer("ignore-term", "1")
 	var log syncBuffer
 	stop := f.supervise(SuperviseOptions{TermGrace: 300 * time.Millisecond, Log: &log})
@@ -242,34 +242,69 @@ func TestSuperviseKillsAChildThatIgnoresTerm(t *testing.T) {
 	}
 }
 
-// TestSuperviseCommandLine: the controller gets exactly the flags of its contract, from the
-// record; the front flags go only to a launcher that recorded a front, and the agent builds
-// directory only when one was given. The environment loses KUBECONFIG and the in-cluster
-// variables, and keeps the rest. The expected vectors are written out from the brief.
+// TestSupervisedSetCommandLine: the controller's command line from a record, with literal ports
+// and paths from the brief: --state-dir, --port-base and --health-addr (base+6) always, the front
+// flags only for a recorded front, and nothing of the earlier --kubeconfig, --credentials-dir or
+// --agent-builds-dir. The front's key path is never passed.
+func TestSupervisedSetCommandLine(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		front Front
+		want  []string
+	}{
+		{"no front", Front{}, []string{"--state-dir", "/run/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29226"}},
+		{"direct front", Front{Mode: "direct", Addr: "front.example.test:8443"},
+			[]string{"--state-dir", "/run/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29226",
+				"--front-mode", "direct", "--front-addr", "front.example.test:8443"}},
+		{"ssh front", Front{Mode: "ssh", Addr: "front.example.test:22", KeyPath: "/ignored"},
+			[]string{"--state-dir", "/run/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29226",
+				"--front-mode", "ssh", "--front-addr", "front.example.test:22"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			st := &State{
+				Ports:       Ports{API: 29220, HTTPS: 29221, KCM: 29222, Agent: 29223, LB: 29225, Controller: 29226},
+				Front:       c.front,
+				Controllers: &ControllerConfig{Binary: "/opt/hpcburst-controller"},
+			}
+			set, err := st.supervisedSet(layout{"/run/st"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(set) != 1 || set[0].Name != "controller" || set[0].Path != "/opt/hpcburst-controller" || set[0].Health != "127.0.0.1:29226" {
+				t.Fatalf("supervised set %+v", set)
+			}
+			if !slices.Equal(set[0].Args, c.want) {
+				t.Errorf("controller argv\n got %q\nwant %q", set[0].Args, c.want)
+			}
+		})
+	}
+}
+
+// TestSuperviseCommandLine: the supervisor starts the controller with exactly the flags of its
+// contract, from the record, and the fake refuses any other. The environment loses KUBECONFIG and
+// the in-cluster variables, and keeps the rest. The expected vectors are written out from the
+// brief: the state directory, the port base, and the health address at base+6.
 func TestSuperviseCommandLine(t *testing.T) {
 	t.Setenv("KUBECONFIG", "/etc/rancher/k3s/k3s.yaml")
 	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
 	t.Setenv("KUBERNETES_SERVICE_PORT", "443")
 	cases := []struct {
-		name   string
-		front  Front
-		builds string
-		extra  []string
+		name  string
+		front Front
+		extra []string
 	}{
-		{"nothing optional", Front{}, "", nil},
-		{"agent builds directory", Front{}, "/srv/agent-builds", []string{"--agent-builds-dir", "/srv/agent-builds"}},
-		{"front", Front{Mode: "direct", Addr: "front.example.test:8443"}, "", []string{"--front-mode", "direct", "--front-addr", "front.example.test:8443"}},
-		{"both", Front{Mode: "ssh", Addr: "front.example.test:22", KeyPath: "/ignored"}, "/srv/agent-builds",
-			[]string{"--agent-builds-dir", "/srv/agent-builds", "--front-mode", "ssh", "--front-addr", "front.example.test:22"}},
+		{"no front", Front{}, nil},
+		{"front", Front{Mode: "direct", Addr: "front.example.test:8443"}, []string{"--front-mode", "direct", "--front-addr", "front.example.test:8443"}},
+		{"ssh front", Front{Mode: "ssh", Addr: "front.example.test:22", KeyPath: "/ignored"}, []string{"--front-mode", "ssh", "--front-addr", "front.example.test:22"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			f := newCtlFixture(t, c.front, c.builds)
+			f := newCtlFixture(t, c.front)
 			f.supervise(SuperviseOptions{})
 			pid := f.awaitRunning().Proc.PID
 			want := append([]string{
-				"--kubeconfig", filepath.Join(f.l.dir, "kubeconfig"),
-				"--credentials-dir", filepath.Join(f.l.dir, "controller", "credentials"),
+				"--state-dir", f.l.dir,
+				"--port-base", strconv.Itoa(f.ports.Controller - 6),
 				"--health-addr", "127.0.0.1:" + strconv.Itoa(f.ports.Controller),
 			}, c.extra...)
 			if got := f.argvOf(pid); !slices.Equal(got, want) {
@@ -291,7 +326,7 @@ func TestSuperviseCommandLine(t *testing.T) {
 }
 
 func TestSuperviseNeedsAControllerRecord(t *testing.T) {
-	f := newCtlFixture(t, Front{}, "")
+	f := newCtlFixture(t, Front{})
 	f.st.Controllers = nil
 	if err := f.l.saveState(f.st); err != nil {
 		t.Fatal(err)
@@ -305,7 +340,7 @@ func TestSuperviseNeedsAControllerRecord(t *testing.T) {
 // TestSuperviseReportsAChildThatCannotStart: a missing binary is retried, not fatal to the
 // supervisor, and the record says why.
 func TestSuperviseReportsAChildThatCannotStart(t *testing.T) {
-	f := newCtlFixture(t, Front{}, "")
+	f := newCtlFixture(t, Front{})
 	f.st.Controllers.Binary = filepath.Join(f.ctl, "no-such-binary")
 	if err := f.l.saveState(f.st); err != nil {
 		t.Fatal(err)

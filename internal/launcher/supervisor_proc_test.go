@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -76,7 +77,7 @@ func ppidOf(t *testing.T, pid int) int {
 // the controller takes 400 ms to shut down, so the order shows: k3s is signalled only after the
 // supervisor, and its child, are gone.
 func TestStartSupervisorAndDown(t *testing.T) {
-	f := newCtlFixture(t, Front{}, "")
+	f := newCtlFixture(t, Front{})
 	k3s := startBystander(t, "sleep", "300")
 	k3sRec, err := newRec("k3s", k3s.Process.Pid)
 	if err != nil {
@@ -115,10 +116,14 @@ func TestStartSupervisorAndDown(t *testing.T) {
 		t.Errorf("supervisor.json names %+v, state.json %+v", f.record().Supervisor, sup)
 	}
 	awaitHealthy(t, f.ports.ControllerAddr())
-	for _, d := range []string{f.l.controllerDir(), f.l.credentialsDir()} {
+	for _, d := range []string{"controller", "credentials", "agent-builds"} {
+		d = filepath.Join(f.l.dir, d)
 		if fi, err := os.Stat(d); err != nil || !fi.IsDir() || fi.Mode().Perm() != 0o700 {
 			t.Errorf("%s: %v, %v; want a directory with mode 0700", d, fi, err)
 		}
+	}
+	if _, err := os.Stat(filepath.Join(f.l.dir, "controller", "credentials")); !os.IsNotExist(err) {
+		t.Errorf("the earlier controller/credentials was created (%v)", err)
 	}
 	if fi, err := os.Stat(f.l.supervisorLog()); err != nil || fi.Mode().Perm() != 0o600 {
 		t.Errorf("supervisor.log: %v, %v", fi, err)
@@ -155,7 +160,7 @@ func TestStartSupervisorAndDown(t *testing.T) {
 // cannot be established (no boot ID) makes down fail and keep the record, but k3s, which can be
 // checked, is still stopped.
 func TestDownKeepsTheRecordWhenTheSupervisorCannotBeChecked(t *testing.T) {
-	f := newCtlFixture(t, Front{}, "")
+	f := newCtlFixture(t, Front{})
 	k3s := startBystander(t, "sleep", "300")
 	k3sRec, _ := newRec("k3s", k3s.Process.Pid)
 	other := startBystander(t, "sleep", "300")
@@ -225,7 +230,7 @@ func TestStartSupervisorFailures(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			f := newCtlFixture(t, Front{}, "")
+			f := newCtlFixture(t, Front{})
 			t.Setenv(superviseEnv, f.l.dir)
 			// A stand-in for k3s that is not this test process: stopRecorded below signals it.
 			k3s := startBystander(t, "sleep", "300")
@@ -263,7 +268,7 @@ func TestStartSupervisorFailures(t *testing.T) {
 }
 
 func TestStartSupervisorNeedsControllers(t *testing.T) {
-	f := newCtlFixture(t, Front{}, "")
+	f := newCtlFixture(t, Front{})
 	f.st.Controllers = nil
 	if err := startSupervisor(context.Background(), f.l, f.st, []string{"/bin/true"}, time.Second, nil); err == nil {
 		t.Fatal("startSupervisor succeeded without controllers")

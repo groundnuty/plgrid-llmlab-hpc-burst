@@ -18,7 +18,7 @@ import (
 // fake controller is its child. Each case changes one thing, and the first is the control that
 // shows the others fail because of that thing.
 func TestCheckEntry(t *testing.T) {
-	f := newCtlFixture(t, Front{}, "")
+	f := newCtlFixture(t, Front{})
 	f.supervise(SuperviseOptions{BackoffMin: 50 * time.Millisecond, BackoffMax: 50 * time.Millisecond})
 	e := f.awaitRunning()
 	awaitHealthy(t, f.ports.ControllerAddr())
@@ -277,7 +277,7 @@ func TestStatusWithControllers(t *testing.T) {
 
 // TestSupervisorFileMode: supervisor.json is private, like state.json.
 func TestSupervisorFileMode(t *testing.T) {
-	f := newCtlFixture(t, Front{}, "")
+	f := newCtlFixture(t, Front{})
 	f.supervise(SuperviseOptions{})
 	f.awaitRunning()
 	fi, err := os.Stat(f.l.supervisorFile())

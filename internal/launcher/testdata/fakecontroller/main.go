@@ -1,6 +1,7 @@
 // Command fakecontroller stands in for hpcburst-controller in the launcher's tests. It accepts
-// exactly the flags of the controller's command line, so a launcher that passes another one fails
-// its start; records its argv and environment; serves GET /healthz on --health-addr; and exits on
+// exactly the flags of the controller's command line (--state-dir, --port-base and --health-addr,
+// all required, and optionally --front-mode and --front-addr), so a launcher that passes another
+// one, such as the earlier --kubeconfig, --credentials-dir or --agent-builds-dir, fails its start; records its argv and environment; serves GET /healthz on --health-addr; and exits on
 // SIGTERM. Its behaviour is steered through files in the directory $FAKECTRL_DIR (default: the
 // directory of this binary), so a test changes it while it runs:
 //
@@ -32,11 +33,13 @@ import (
 
 func main() {
 	fs := flag.NewFlagSet("fakecontroller", flag.ContinueOnError)
-	for _, name := range []string{"kubeconfig", "credentials-dir", "agent-builds-dir", "front-mode", "front-addr"} {
+	for _, name := range []string{"front-mode", "front-addr"} {
 		fs.String(name, "", "")
 	}
+	stateDir := fs.String("state-dir", "", "")
+	portBase := fs.Int("port-base", 0, "")
 	health := fs.String("health-addr", "", "")
-	if err := fs.Parse(os.Args[1:]); err != nil || fs.NArg() > 0 || *health == "" {
+	if err := fs.Parse(os.Args[1:]); err != nil || fs.NArg() > 0 || *stateDir == "" || *portBase <= 0 || *health == "" {
 		fmt.Fprintln(os.Stderr, "fakecontroller: bad command line:", os.Args[1:])
 		os.Exit(2)
 	}

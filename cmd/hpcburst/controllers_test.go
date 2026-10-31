@@ -166,10 +166,9 @@ func TestControllerSupervision(t *testing.T) {
 	const base = 29220
 	h := newHost(t)
 	bin, ctlDir := fakeController(t)
-	builds := t.TempDir()
 	c := h.clients // a method value: the clients exist once up has written the kubeconfig
 
-	r := cli(t, h.upArgs(base, "--json", "--controller-bin", bin, "--agent-builds-dir", builds,
+	r := cli(t, h.upArgs(base, "--json", "--controller-bin", bin,
 		"--front-mode", "direct", "--front-addr", "front.example.test:8443")...)
 	if r.code != exitOK {
 		t.Fatalf("up exited %d", r.code)
@@ -186,7 +185,7 @@ func TestControllerSupervision(t *testing.T) {
 		ControllerHealth string `json:"controller_health"`
 	}
 	parseJSON(t, r.out, &up)
-	if up.Ports.Controller != base+6 || up.Ports.Agent != base+7 || up.ControllerHealth != "127.0.0.1:"+itoa(base+6) {
+	if up.Ports.Controller != base+6 || up.Ports.Agent != base+3 || up.ControllerHealth != "127.0.0.1:"+itoa(base+6) {
 		t.Errorf("up reports %+v", up)
 	}
 
@@ -204,10 +203,13 @@ func TestControllerSupervision(t *testing.T) {
 		t.Fatalf("namespace hpcburst-system: %v", err)
 	}
 	t.Logf("namespace %s created %s", ns.Name, ns.CreationTimestamp)
-	for _, d := range []string{"controller", "controller/credentials"} {
+	for _, d := range []string{"controller", "credentials", "agent-builds"} {
 		if fi, err := os.Stat(filepath.Join(h.dir, d)); err != nil || !fi.IsDir() || fi.Mode().Perm() != 0o700 {
 			t.Errorf("%s: %v, %v; want a directory with mode 0700", d, fi, err)
 		}
+	}
+	if _, err := os.Stat(filepath.Join(h.dir, "controller", "credentials")); !os.IsNotExist(err) {
+		t.Errorf("the earlier controller/credentials was created (%v)", err)
 	}
 	if fi, err := os.Stat(filepath.Join(h.dir, "controller", "supervisor.json")); err != nil || fi.Mode().Perm() != 0o600 {
 		t.Errorf("supervisor.json: %v, %v", fi, err)
@@ -221,10 +223,9 @@ func TestControllerSupervision(t *testing.T) {
 		t.Fatalf("the controller (%+v) is not a running child of the supervisor (pid %d)", child, sup.PID)
 	}
 	wantArgv := []string{
-		"--kubeconfig", filepath.Join(h.dir, "kubeconfig"),
-		"--credentials-dir", filepath.Join(h.dir, "controller", "credentials"),
-		"--health-addr", "127.0.0.1:" + itoa(base+6),
-		"--agent-builds-dir", builds,
+		"--state-dir", h.dir,
+		"--port-base", "29220",
+		"--health-addr", "127.0.0.1:29226",
 		"--front-mode", "direct", "--front-addr", "front.example.test:8443",
 	}
 	var gotArgv []string
