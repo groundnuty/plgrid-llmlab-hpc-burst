@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -43,24 +45,36 @@ import (
 // deployment ID and the engine's counts. The other three records are checked
 // for the status and for emitter front, with no Provider.
 //
+// The unattached name (HBEP-5, Test plan, Keys: "plain model returns 503
+// model_inactive, although LLMLab serves that model") is taken from the
+// catalog read: a model LLMLab lists, other than the chat model, that no
+// ModelDeployment of this test carries. The test fails when there is none, so
+// the case cannot lapse unseen, and a model override cannot collide with it
+// and send a third chat.
+//
 // What the redaction check is worth. The test searches every response header
-// and body for the upstream key. The real gateway does not echo the key, so
-// this search cannot fire here: it is an absence check, and it would stay
-// green with the front's redaction removed. The evidence that the front
-// redacts is the positive-control tests, which make an upstream echo the key
-// and read the client's bytes: TestRedactErrorBodyAndHeaders,
-// TestRedactSSEErrorEvent and redact_all_test.go (PR #95). Here the check
-// guards against the front forwarding a credential of its own making.
+// and body for the upstream key, and stops at once, with a fixed message, when
+// it finds it. The real gateway does not echo the key, so this search cannot
+// fire here: it is an absence check, and it would stay green with the front's
+// redaction removed. The evidence that the front redacts is the
+// positive-control tests, which make an upstream echo the key and read the
+// client's bytes: TestRedactErrorBodyAndHeaders, TestRedactSSEErrorEvent and
+// redact_all_test.go (PR #95). Here the check guards against the front
+// forwarding a credential of its own making.
+//
+// What the output may hold. The output must stay safe if the front's
+// redaction fails, so no diagnostic prints a string that came from a response
+// or from the credentials file: only fixed texts, numbers, booleans, header
+// names from a fixed list, and values checked against a closed set (llEnum).
 const (
 	llCredsEnv = "HPCBURST_LLMLAB_CREDENTIALS"
 	llModelEnv = "HPCBURST_LLMLAB_MODEL"
 
 	// llDefaultModel is a small instruct model that LLMLab lists.
 	llDefaultModel = "Qwen/Qwen3-VL-8B-Instruct"
-	// llUnattachedModel is a model LLMLab lists and no ModelDeployment of this
-	// test carries: HBEP-5, Test plan, Keys, "plain model returns 503
-	// model_inactive, although LLMLab serves that model".
-	llUnattachedModel = "Qwen/Qwen3.6-27B"
+	// llPreferredUnattached is the unattached model taken when LLMLab lists it
+	// and it is not the chat model; otherwise the first other listed model.
+	llPreferredUnattached = "Qwen/Qwen3.6-27B"
 	// llUnlistedModel is a name no list shows.
 	llUnlistedModel = "Unlisted/Not-A-Model"
 
@@ -70,6 +84,49 @@ const (
 	llMDName    = "md-llm"
 	llTimeout   = 150 * time.Second
 )
+
+// llUnknownValue is what a diagnostic prints for a value outside its closed
+// set, whatever the value holds.
+const llUnknownValue = "(outside the known set)"
+
+// The closed sets of values a diagnostic may print.
+var (
+	llFinishes = []string{"stop", "length", "tool_calls", "content_filter", "function_call"}
+	llSources  = []string{"engine", "front_events"}
+	llEmitters = []string{"front", "provider", "instance"}
+)
+
+// llEnum returns v when it is in set, else llUnknownValue.
+func llEnum(v string, set []string) string {
+	for _, s := range set {
+		if v == s {
+			return v
+		}
+	}
+	return llUnknownValue
+}
+
+// llEnumPtr is llEnum for an optional string; nil prints as null.
+func llEnumPtr(p *string, set []string) string {
+	if p == nil {
+		return "null"
+	}
+	return llEnum(*p, set)
+}
+
+// llCredsKind names why the credentials file could not be read, from the
+// error's kind alone: ReadManagedCredentials puts the file's path in its text.
+func llCredsKind(err error) string {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "it does not exist"
+	case errors.Is(err, fs.ErrPermission):
+		return "permission denied"
+	case errors.Is(err, provider.ErrCredentials):
+		return "it is not a valid managed credentials file (its type, mode, owner, size or content)"
+	}
+	return "an unclassified read error"
+}
 
 // llReply is the part of a chat reply, whole or one stream chunk, that the
 // test reads.
@@ -89,7 +146,7 @@ type llReply struct {
 
 // llSeen is what the client received of one chat request.
 type llSeen struct {
-	finish             string // the first non-null finish_reason
+	finish             string // the first non-null finish_reason, as received
 	prompt, completion int64  // from the usage member
 	cached             *int64 // from prompt_tokens_details, when present
 	haveUsage          bool
@@ -100,7 +157,7 @@ func (s *llSeen) observe(t *testing.T, label string, payload []byte) {
 	t.Helper()
 	var r llReply
 	if err := json.Unmarshal(payload, &r); err != nil {
-		t.Errorf("%s: a reply is not JSON: %v", label, jsonKind(err))
+		t.Errorf("%s: a reply is not JSON (%s)", label, jsonKind(err))
 		return
 	}
 	if len(r.Error) != 0 && string(r.Error) != "null" {
@@ -121,7 +178,8 @@ func (s *llSeen) observe(t *testing.T, label string, payload []byte) {
 
 // jsonKind names a decoding error without the bytes it choked on.
 func jsonKind(err error) string {
-	if se, ok := err.(*json.SyntaxError); ok {
+	var se *json.SyntaxError
+	if errors.As(err, &se) {
 		return "syntax error at byte " + strconv.FormatInt(se.Offset, 10)
 	}
 	return "type error"
@@ -130,14 +188,36 @@ func jsonKind(err error) string {
 // llLive is a front whose one managed Provider reaches the real gateway.
 type llLive struct {
 	*harness
-	key       string
-	managedID string // the catalog entry's managed ID, full form
-	checked   int    // responses searched for the key
+	key        string
+	model      string // the chat model, which the one ModelDeployment carries
+	unattached string // a listed model no ModelDeployment carries
+	managedID  string // the catalog entry's managed ID, full form
+	checked    int    // responses searched for the key
+	leaked     bool   // the key was found: no later request is sent
+}
+
+// step runs one step of the test as a subtest, unless the key has been found.
+func (l *llLive) step(t *testing.T, name string, f func(t *testing.T)) {
+	t.Helper()
+	t.Run(name, func(t *testing.T) {
+		if l.leaked {
+			t.Skip("the upstream key was found in an earlier response; no further request is sent")
+		}
+		f(t)
+	})
+}
+
+// leak stops the step at once with a fixed message. It names neither the place
+// the key was found nor what surrounds it.
+func (l *llLive) leak(t *testing.T) {
+	t.Helper()
+	l.leaked = true
+	t.Fatal("the upstream key is in a response of the front (a header or the body); stopping")
 }
 
 // llCall sends one request through the front, reads the whole answer and
-// searches its headers and body for the upstream key. Failure messages never
-// carry a body.
+// searches its headers and body for the upstream key before anything else
+// looks at them.
 func (l *llLive) llCall(t *testing.T, method, path, body string) (*http.Response, []byte) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), llTimeout)
@@ -148,38 +228,83 @@ func (l *llLive) llCall(t *testing.T, method, path, body string) (*http.Response
 	}
 	req, err := http.NewRequestWithContext(ctx, method, l.url+path, rd)
 	if err != nil {
-		t.Fatalf("building the request: %v", err)
+		t.Fatal("building the request failed")
 	}
 	req.Header.Set("Authorization", "Bearer "+l.clientKey)
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	// The errors below come from the client's reading of the front's reply,
+	// whose text can quote that reply, so only their kind is printed.
 	resp, err := errClient.Do(req)
 	if err != nil {
-		t.Fatalf("%s %s: no answer from the front: %v", method, path, err)
+		t.Fatalf("no answer from the front (%s)", llTransportKind(ctx, err))
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		t.Fatalf("%s %s: reading the answer: %v", method, path, err)
+		t.Fatalf("reading the front's answer failed (%s)", llTransportKind(ctx, err))
 	}
 	l.checked++
-	if bytes.Contains(data, []byte(l.key)) {
-		t.Errorf("%s %s: the body holds the upstream key", method, path)
-	}
-	for name, vs := range resp.Header {
-		for _, v := range vs {
-			if strings.Contains(v, l.key) || strings.Contains(name, l.key) {
-				t.Errorf("%s %s: header %s holds the upstream key", method, path, name)
-			}
-		}
+	if llHoldsKey(l.key, resp.Header, data) {
+		l.leak(t)
 	}
 	return resp, data
 }
 
-// llFrontError asserts a front-raised error: the status, the error code and
-// detail, Retry-After, and the front as emitter. A mismatch prints the status
-// and the codes, never the body.
+// llHoldsKey reports whether the key is in a header's name or value, or in the
+// body.
+func llHoldsKey(key string, h http.Header, body []byte) bool {
+	found := bytes.Contains(body, []byte(key))
+	for name, vs := range h {
+		found = found || strings.Contains(name, key)
+		for _, v := range vs {
+			found = found || strings.Contains(v, key)
+		}
+	}
+	return found
+}
+
+// llTransportKind names a client error by its kind.
+func llTransportKind(ctx context.Context, err error) string {
+	switch {
+	case ctx.Err() != nil:
+		return "no answer within " + llTimeout.String()
+	case errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, io.EOF):
+		return "the connection closed early"
+	}
+	return "transport error, not shown"
+}
+
+// llAttribution asserts the attribution headers of a response from a target
+// (emitter provider, the Provider and the deployment ID's display form) or of
+// the front alone (providerName and deployID empty), and returns the request
+// ID. A mismatch names the header, from a fixed list, and never a value.
+func llAttribution(t *testing.T, resp *http.Response, emitter, providerName, deployID string) string {
+	t.Helper()
+	var bad []string
+	for _, c := range []struct{ name, want string }{
+		{"hpcburst-emitter", emitter}, {"hpcburst-provider", providerName}, {"hpcburst-deployment-id", deployID},
+		{"hpcburst-instance", ""}, {"hpcburst-instance-uid", ""},
+	} {
+		got := resp.Header.Values(c.name)
+		if (c.want == "" && len(got) != 0) || (c.want != "" && (len(got) != 1 || got[0] != c.want)) {
+			bad = append(bad, c.name)
+		}
+	}
+	if len(bad) > 0 {
+		t.Errorf("attribution headers that differ from the target's: %s", strings.Join(bad, ", "))
+	}
+	ids := resp.Header.Values("hpcburst-request-id")
+	if len(ids) != 1 || ids[0] == "" {
+		t.Fatal("hpcburst-request-id is not exactly one non-empty value")
+	}
+	return ids[0]
+}
+
+// llFrontError asserts a front-raised error: the status, the error type, code
+// and detail, Retry-After, and the front alone in the attribution. A mismatch
+// prints the status and which members differ, never their values.
 func llFrontError(t *testing.T, resp *http.Response, data []byte, status int, code, detail, retryAfter string) {
 	t.Helper()
 	var e struct {
@@ -197,37 +322,56 @@ func llFrontError(t *testing.T, resp *http.Response, data []byte, status int, co
 	if e.Error.Detail != nil {
 		got = *e.Error.Detail
 	}
-	if resp.StatusCode != status || e.Error.Code != code || got != detail || e.Error.Type != "hpcburst_error" {
-		t.Errorf("status %d type %q code %q detail %q, want %d hpcburst_error %q %q", resp.StatusCode, e.Error.Type, e.Error.Code, got, status, code, detail)
+	var bad []string
+	for _, c := range []struct {
+		name string
+		ok   bool
+	}{
+		{"status", resp.StatusCode == status}, {"type", e.Error.Type == "hpcburst_error"}, {"code", e.Error.Code == code},
+		{"detail", got == detail}, {"Retry-After", resp.Header.Get("Retry-After") == retryAfter},
+	} {
+		if !c.ok {
+			bad = append(bad, c.name)
+		}
 	}
-	if ra := resp.Header.Get("Retry-After"); ra != retryAfter {
-		t.Errorf("Retry-After = %q, want %q", ra, retryAfter)
+	if len(bad) > 0 {
+		t.Errorf("status %d: the error differs from HBEP-5's Errors table in: %s", resp.StatusCode, strings.Join(bad, ", "))
 	}
-	checkAttribution(t, resp, efFrontOnly)
+	llAttribution(t, resp, "front", "", "")
 }
 
 // llRouted asserts the attribution and the usage record of a chat request that
 // reached LLMLab through the managed Provider, against what the client
 // received. The expected counts are the client's own copy of the usage member,
 // parsed here; the record's come from the front's judge.
-func (l *llLive) llRouted(t *testing.T, label, model string, stream bool, resp *http.Response, seen llSeen) {
+func (l *llLive) llRouted(t *testing.T, label string, stream bool, resp *http.Response, seen llSeen) {
 	t.Helper()
-	id := checkAttribution(t, resp, wantAttr{emitter: "provider", provider: llProvider, deployID: l.managedID[:12]})
+	id := llAttribution(t, resp, "provider", llProvider, l.managedID[:12])
 	rec := l.record(id)
-	if rec.Emitter != "provider" || rec.Provider != llProvider || rec.ModelDeployment != "ns/"+llMDName ||
-		rec.DeploymentID != l.managedID || rec.Instance != "" || rec.InstanceUID != "" {
-		t.Errorf("%s: record names emitter %q provider %q deployment %q deploymentID %q instance %q, want the managed Provider and ID",
-			label, rec.Emitter, rec.Provider, rec.ModelDeployment, rec.DeploymentID, rec.Instance)
+	var bad []string
+	for _, c := range []struct {
+		name string
+		ok   bool
+	}{
+		{"emitter", rec.Emitter == "provider"}, {"provider", rec.Provider == llProvider}, {"modelDeployment", rec.ModelDeployment == "ns/"+llMDName},
+		{"deploymentID", rec.DeploymentID == l.managedID}, {"instance", rec.Instance == "" && rec.InstanceUID == ""},
+		{"status", rec.Status == 200}, {"stream", rec.Stream == stream}, {"requestedModel", rec.RequestedModel == l.model},
+		{"level", rec.Level == "model"}, {"clientKeyID", rec.ClientKeyID == "tester"}, {"path", rec.Path == "/v1/chat/completions"},
+		{"cutBy", rec.CutBy == nil},
+	} {
+		if !c.ok {
+			bad = append(bad, c.name)
+		}
 	}
-	if rec.Status != 200 || rec.Stream != stream || rec.RequestedModel != model || rec.Level != "model" || rec.ClientKeyID != "tester" || rec.Path != "/v1/chat/completions" {
-		t.Errorf("%s: record status %d stream %v level %q path %q, want 200 stream %v level model", label, rec.Status, rec.Stream, rec.Level, rec.Path, stream)
+	if len(bad) > 0 {
+		t.Errorf("%s: the record's %s differ from the managed target's", label, strings.Join(bad, ", "))
 	}
 	if !seen.haveUsage {
 		t.Errorf("%s: LLMLab sent no usage member, so the engine's counts cannot be compared", label)
 	} else {
 		if rec.CountsSource == nil || *rec.CountsSource != "engine" || !ptrIs(rec.PromptTokens, seen.prompt) || !ptrIs(rec.CompletionTokens, seen.completion) {
 			t.Errorf("%s: record counts source %s prompt %s completion %s, want engine %d %d (the client's usage member)",
-				label, strStr(rec.CountsSource), ptrStr(rec.PromptTokens), ptrStr(rec.CompletionTokens), seen.prompt, seen.completion)
+				label, llEnumPtr(rec.CountsSource, llSources), ptrStr(rec.PromptTokens), ptrStr(rec.CompletionTokens), seen.prompt, seen.completion)
 		}
 		if seen.cached != nil && !ptrIs(rec.CachedTokens, *seen.cached) {
 			t.Errorf("%s: record cached %s, want %d", label, ptrStr(rec.CachedTokens), *seen.cached)
@@ -240,13 +384,11 @@ func (l *llLive) llRouted(t *testing.T, label, model string, stream bool, resp *
 		t.Errorf("%s: the client received no finish reason", label)
 	}
 	if rec.Finish == nil || *rec.Finish != seen.finish {
-		t.Errorf("%s: record finish %s, want %q, the client's", label, strStr(rec.Finish), seen.finish)
-	}
-	if rec.CutBy != nil {
-		t.Errorf("%s: record cutBy %s, want null", label, *rec.CutBy)
+		t.Errorf("%s: record finish %s differs from the client's %s", label, llEnumPtr(rec.Finish, llFinishes), llEnum(seen.finish, llFinishes))
 	}
 	t.Logf("%s: status %d emitter %s stream %v finish %s prompt %s cached %s completion %s countsSource %s",
-		label, rec.Status, rec.Emitter, rec.Stream, strStr(rec.Finish), ptrStr(rec.PromptTokens), ptrStr(rec.CachedTokens), ptrStr(rec.CompletionTokens), strStr(rec.CountsSource))
+		label, rec.Status, llEnum(rec.Emitter, llEmitters), rec.Stream, llEnumPtr(rec.Finish, llFinishes), ptrStr(rec.PromptTokens),
+		ptrStr(rec.CachedTokens), ptrStr(rec.CompletionTokens), llEnumPtr(rec.CountsSource, llSources))
 }
 
 // llFrontRecord asserts the record of a request the front answered itself.
@@ -254,14 +396,14 @@ func (l *llLive) llFrontRecord(t *testing.T, label string, resp *http.Response, 
 	t.Helper()
 	rec := l.record(resp.Header.Get("Hpcburst-Request-Id"))
 	if rec.Status != status || rec.Emitter != "front" || rec.Provider != "" || rec.DeploymentID != "" {
-		t.Errorf("%s: record status %d emitter %q provider %q deploymentID %q, want %d, front and no target", label, rec.Status, rec.Emitter, rec.Provider, rec.DeploymentID, status)
+		t.Errorf("%s: the record's status, emitter, Provider or deployment ID differs from %d, front and no target", label, status)
 	}
-	t.Logf("%s: status %d emitter %s", label, rec.Status, rec.Emitter)
+	t.Logf("%s: status %d emitter %s", label, rec.Status, llEnum(rec.Emitter, llEmitters))
 }
 
 // llSetup reads the credentials, lists the real catalog once, and starts a
 // front on the wall clock whose managed Provider points at that file in place.
-func llSetup(t *testing.T) (*llLive, string) {
+func llSetup(t *testing.T) *llLive {
 	t.Helper()
 	path := os.Getenv(llCredsEnv)
 	if path == "" {
@@ -270,9 +412,11 @@ func llSetup(t *testing.T) (*llLive, string) {
 	if !filepath.IsAbs(path) {
 		t.Fatalf("%s must be an absolute path: a test runs in its package directory", llCredsEnv)
 	}
+	// ReadManagedCredentials puts the path in its errors, so only the kind of
+	// failure is reported.
 	creds, err := provider.ReadManagedCredentials(path)
 	if err != nil {
-		t.Fatalf("%s: %v", llCredsEnv, err)
+		t.Fatalf("the credentials file named by %s could not be read: %s", llCredsEnv, llCredsKind(err))
 	}
 	model := os.Getenv(llModelEnv)
 	if model == "" {
@@ -281,35 +425,39 @@ func llSetup(t *testing.T) (*llLive, string) {
 
 	// One read of the gateway's list, as the Provider's controller makes it:
 	// the catalog status (and its managed IDs) are the product's own code over
-	// what LLMLab really lists.
+	// what LLMLab really lists. The client's errors are fixed categories that
+	// hold no byte the gateway sent (internal/managed, Client).
 	client, err := managed.NewClient(creds, nil)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("the credentials file named by %s is not usable as managed credentials", llCredsEnv)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), llTimeout)
 	defer cancel()
 	listed, err := client.ListCatalog(ctx)
 	if err != nil {
-		t.Fatalf("reading LLMLab's model list: %v", err)
+		t.Fatalf("reading LLMLab's model list failed: %v", err)
 	}
 	merged, err := provider.MergeCatalog(nil, listed, llPlatform, time.Now())
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal("building the catalog status from LLMLab's list failed")
 	}
-	var managedID string
-	unattachedListed := false
+	var managedID, unattached string
 	for _, e := range merged.Catalog {
-		switch e.Name {
-		case model:
+		switch {
+		case !e.Listed:
+		case e.Name == model:
 			managedID = string(e.ManagedID)
-		case llUnattachedModel:
-			unattachedListed = true
+		case unattached == "" || e.Name == llPreferredUnattached:
+			unattached = e.Name
 		}
 	}
 	if managedID == "" {
-		t.Fatalf("LLMLab does not list the model %q (%d models listed); set %s to a listed chat model", model, len(listed), llModelEnv)
+		t.Fatalf("LLMLab does not list the chat model (%d models listed); set %s to a listed chat model", len(listed), llModelEnv)
 	}
-	t.Logf("the model list: status 200, %d models, %q listed, %q listed %v", len(listed), model, llUnattachedModel, unattachedListed)
+	if unattached == "" {
+		t.Fatalf("LLMLab lists no model other than the chat model (%d listed), so the check that a listed model without a ModelDeployment gets 503 model_inactive cannot run", len(listed))
+	}
+	t.Logf("the model list: status 200, %d models; the chat model and an unattached model are listed", len(listed))
 
 	h := newHarnessReal(t, nil)
 	h.profile("llmlab", v1alpha1.PlatformManaged, "", "")
@@ -320,28 +468,31 @@ func llSetup(t *testing.T) (*llLive, string) {
 		Status: v1alpha1.ProviderStatus{Catalog: merged.Catalog},
 	})
 	h.managedMD(llMDName, model, llPlatform, model, llProvider)
+	for i := range h.snap.Deployments {
+		if h.snap.Deployments[i].Spec.Model == unattached {
+			t.Fatal("a ModelDeployment carries the unattached model")
+		}
+	}
 	h.apply()
-	return &llLive{harness: h, key: creds.Key, managedID: managedID}, model
+	return &llLive{harness: h, key: creds.Key, model: model, unattached: unattached, managedID: managedID}
 }
 
 // TestLLMLabThroughTheFront is the smoke test described above.
 func TestLLMLabThroughTheFront(t *testing.T) {
-	l, model := llSetup(t)
+	l := llSetup(t)
 
-	t.Run("a chat completion", func(t *testing.T) {
-		resp, data := l.llCall(t, http.MethodPost, "/v1/chat/completions",
-			chatRequest(model, false, false))
+	l.step(t, "a chat completion", func(t *testing.T) {
+		resp, data := l.llCall(t, http.MethodPost, "/v1/chat/completions", chatRequest(l.model, false, false))
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("status %d, want 200", resp.StatusCode)
 		}
 		var seen llSeen
 		seen.observe(t, "chat", data)
-		l.llRouted(t, "chat", model, false, resp, seen)
+		l.llRouted(t, "chat", false, resp, seen)
 	})
 
-	t.Run("a streamed chat completion", func(t *testing.T) {
-		resp, data := l.llCall(t, http.MethodPost, "/v1/chat/completions",
-			chatRequest(model, true, true))
+	l.step(t, "a streamed chat completion", func(t *testing.T) {
+		resp, data := l.llCall(t, http.MethodPost, "/v1/chat/completions", chatRequest(l.model, true, true))
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("status %d, want 200", resp.StatusCode)
 		}
@@ -362,13 +513,13 @@ func TestLLMLabThroughTheFront(t *testing.T) {
 			}
 			seen.observe(t, "stream", []byte(p))
 		}
-		if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
-			t.Errorf("Content-Type = %q, want text/event-stream", ct)
+		if !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+			t.Errorf("the Content-Type is not text/event-stream")
 		}
-		l.llRouted(t, "stream", model, true, resp, seen)
+		l.llRouted(t, "stream", true, resp, seen)
 	})
 
-	t.Run("GET /v1/models", func(t *testing.T) {
+	l.step(t, "GET /v1/models", func(t *testing.T) {
 		resp, data := l.llCall(t, http.MethodGet, "/v1/models", "")
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("status %d, want 200", resp.StatusCode)
@@ -384,41 +535,41 @@ func TestLLMLabThroughTheFront(t *testing.T) {
 		if err := json.Unmarshal(data, &list); err != nil {
 			t.Fatalf("the list is not JSON (%s)", jsonKind(err))
 		}
-		if len(list.Data) != 1 || list.Data[0].ID != model || list.Data[0].Object != "model" || list.Data[0].Routable == nil || !*list.Data[0].Routable {
+		if len(list.Data) != 1 || list.Data[0].ID != l.model || list.Data[0].Object != "model" || list.Data[0].Routable == nil || !*list.Data[0].Routable {
 			t.Errorf("the list holds %d models, want exactly the one ModelDeployment's, routable true", len(list.Data))
 		}
-		checkAttribution(t, resp, efFrontOnly)
+		llAttribution(t, resp, "front", "", "")
 		l.llFrontRecord(t, "models", resp, 200)
 	})
 
-	t.Run("a model the front does not know", func(t *testing.T) {
-		resp, data := l.llCall(t, http.MethodPost, "/v1/chat/completions", chatRequest(llUnattachedModel, false, false))
+	l.step(t, "a listed model the front has no ModelDeployment for", func(t *testing.T) {
+		resp, data := l.llCall(t, http.MethodPost, "/v1/chat/completions", chatRequest(l.unattached, false, false))
 		llFrontError(t, resp, data, 503, "model_inactive", "not_attached", "30")
 		l.llFrontRecord(t, "unattached", resp, 503)
 	})
 
-	t.Run("a retrieve of an unlisted name", func(t *testing.T) {
+	l.step(t, "a retrieve of an unlisted name", func(t *testing.T) {
 		resp, data := l.llCall(t, http.MethodGet, "/v1/models/"+url.PathEscape(llUnlistedModel), "")
 		llFrontError(t, resp, data, 404, "model_not_found", "", "")
 		l.llFrontRecord(t, "retrieve", resp, 404)
 	})
 
-	t.Run("the usage files", func(t *testing.T) {
+	l.step(t, "the usage files", func(t *testing.T) {
 		recs := l.records()
 		if len(recs) != 5 {
 			t.Errorf("the usage file holds %d records, want 5, one per request", len(recs))
 		}
 		files, err := os.ReadDir(l.cfg.UsageDir)
 		if err != nil {
-			t.Fatal(err)
+			t.Fatal("listing the usage directory failed")
 		}
 		for _, f := range files {
 			b, err := os.ReadFile(filepath.Join(l.cfg.UsageDir, f.Name()))
 			if err != nil {
-				t.Fatal(err)
+				t.Fatal("reading a usage file failed")
 			}
 			if bytes.Contains(b, []byte(l.key)) {
-				t.Errorf("the usage file %s holds the upstream key", f.Name())
+				l.leak(t)
 			}
 		}
 		t.Logf("responses searched for the key: %d; usage records: %d", l.checked, len(recs))
@@ -444,4 +595,74 @@ func chatRequest(model string, stream, includeUsage bool) string {
 		panic(err)
 	}
 	return string(b)
+}
+
+// TestLLMLabLiveDiagnosticsAreSafe checks the live test's helpers without the
+// network, so CI runs them: the credentials failure names its kind and never
+// the path, the key search finds the key wherever it sits, and a value outside
+// a closed set never prints. The positive controls: the library's own error
+// does hold the path, and the search does fire.
+func TestLLMLabLiveDiagnosticsAreSafe(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name string, mode os.FileMode, content string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(content), mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(p, mode); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	for _, c := range []struct{ name, path, kind string }{
+		{"a missing file", filepath.Join(dir, "no-such-file.json"), "it does not exist"},
+		{"a file open to others", write("open.json", 0o644, `{"key":"k","baseURL":"https://x/v1"}`), "it is not a valid managed credentials file"},
+		{"a file with no JSON", write("bad.json", 0o600, "not json"), "it is not a valid managed credentials file"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := provider.ReadManagedCredentials(c.path)
+			if err == nil {
+				t.Fatal("the file was accepted")
+			}
+			if !strings.Contains(err.Error(), c.path) {
+				t.Fatal("the library's error no longer holds the path; the control for this test is gone")
+			}
+			got := llCredsKind(err)
+			if strings.Contains(got, dir) || !strings.HasPrefix(got, c.kind) {
+				t.Errorf("the kind %q must name %q and no path", got, c.kind)
+			}
+		})
+	}
+
+	const key = "llmlab-fake-key-for-helper-test-0001"
+	body := []byte(`{"ok":true}`)
+	for _, c := range []struct {
+		name string
+		h    http.Header
+		body []byte
+		want bool
+	}{
+		{"nowhere", http.Header{"X-A": {"v"}}, body, false},
+		{"in the body", http.Header{}, []byte(`{"m":"` + key + `"}`), true},
+		{"in a header value", http.Header{"X-A": {"Bearer " + key}}, body, true},
+		{"in a header name", http.Header{"X-" + key: {"v"}}, body, true},
+	} {
+		if got := llHoldsKey(key, c.h, c.body); got != c.want {
+			t.Errorf("key %s: llHoldsKey = %v, want %v", c.name, got, c.want)
+		}
+	}
+
+	hostile := "sk-" + key
+	if got := llEnum(hostile, llFinishes); got != llUnknownValue || strings.Contains(got, key) {
+		t.Errorf("a value outside the set printed as %q", got)
+	}
+	if got := llEnum("length", llFinishes); got != "length" {
+		t.Errorf("a known finish reason printed as %q", got)
+	}
+	if got := llEnumPtr(nil, llFinishes); got != "null" {
+		t.Errorf("a nil value printed as %q", got)
+	}
+	if got := llEnumPtr(&hostile, llSources); got != llUnknownValue {
+		t.Errorf("a value outside the set printed as %q", got)
+	}
 }
