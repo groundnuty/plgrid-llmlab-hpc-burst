@@ -82,6 +82,41 @@ const (
 	// no reason; this name is a contracts decision, which the HBEP owner
 	// confirmed on 31 Oct 2026, as a reason on Degraded.
 	ReasonFrontNotConfigured = "FrontNotConfigured"
+	// ReasonIdentityUnresolved: the deployment ID of a class cannot be
+	// computed, so no Allocation is created in it. It is its own reason,
+	// separate from ReasonSpecUnsupported, because it asks the operator for
+	// something else: SpecUnsupported means "edit the spec"; IdentityUnresolved
+	// means "fix the Hub token or the revision, or investigate the colliding
+	// identity record" (HBEP owner, 31 Oct 2026).
+	//
+	//   - The message names the cause: a Hub 401, a Hub 404, or a collision
+	//     with the record id-<12 hex> (an existing identity record of that
+	//     name holds another full ID).
+	//   - Hub transport errors and 5xx answers are not this reason: the
+	//     controller backs off and retries them (hubfiles.Retryable).
+	//   - A collision never loops: the controller sets the reason, raises the
+	//     event, and evaluates the class again only when the ModelDeployment's
+	//     spec or the identity records change.
+	ReasonIdentityUnresolved = "IdentityUnresolved"
+)
+
+// Reasons of a ModelDeployment's Ready, Progressing and Degraded conditions in
+// the ordinary case, a contracts decision (HBEP-7, Events and conditions,
+// names the conditions but not these reasons).
+const (
+	// ReasonEnoughReady: Ready is true, with at least as many ready Instances
+	// as desired.
+	ReasonEnoughReady = "EnoughReady"
+	// ReasonNotEnoughReady: Ready is false, with fewer ready Instances than
+	// desired and no more specific reason.
+	ReasonNotEnoughReady = "NotEnoughReady"
+	// ReasonProvisioning: Progressing is true while the controller creates,
+	// starts or replaces Allocations and Instances.
+	ReasonProvisioning = "Provisioning"
+	// ReasonStable: Progressing is false, with nothing to do.
+	ReasonStable = "Stable"
+	// ReasonAsDesired: Degraded is false.
+	ReasonAsDesired = "AsDesired"
 )
 
 // Instance condition types (metav1.Condition), written by the lifecycle
@@ -92,6 +127,49 @@ const (
 	ConditionWarmedUp         = "WarmedUp"
 	ConditionHealthy          = "Healthy"
 	ConditionAgentUnreachable = "AgentUnreachable"
+)
+
+// Reasons of an Instance's Verified, Qualified and WarmedUp conditions, a
+// contracts decision (HBEP-7, Instance start and Health and restarts).
+const (
+	// ReasonPending: the check has not run yet for the current verification
+	// generation (status Unknown).
+	ReasonPending = "Pending"
+	// ReasonPassed: the check passed (status True).
+	ReasonPassed = "Passed"
+	// ReasonFailed: the check failed (status False); the Instance ends with
+	// ReasonVerificationFailed or ReasonQualificationFailed.
+	ReasonFailed = "Failed"
+	// ReasonWorkerRestart and ReasonInstanceRestart: the check runs again
+	// after a restart of a worker or of the whole Instance (status Unknown);
+	// the restart raised the verification generation.
+	ReasonWorkerRestart   = "WorkerRestart"
+	ReasonInstanceRestart = "InstanceRestart"
+)
+
+// Reasons of an Instance's Healthy condition. The four malfunction signals are
+// also InstanceRestart.Signal (HBEP-7, Health and restarts).
+const (
+	// ReasonHealthy: no malfunction signal (status True).
+	ReasonHealthy = "Healthy"
+	// ReasonProbeFailing: health.failureThreshold failed probes in a row.
+	ReasonProbeFailing = "ProbeFailing"
+	// ReasonErrorsOnly: every answer a server error for health.errorOnlyWindow.
+	ReasonErrorsOnly = "ErrorsOnly"
+	// ReasonNoProgress: requests running and the generated-token counter
+	// unchanged for health.noProgressTimeout.
+	ReasonNoProgress = "NoProgress"
+	// ReasonPartExited: a part exited without being told to, whatever its
+	// exit code.
+	ReasonPartExited = "PartExited"
+)
+
+// Reasons of an Instance's AgentUnreachable condition.
+const (
+	// ReasonReportsMissing: status True, no report for health.agentTimeout.
+	ReasonReportsMissing = "ReportsMissing"
+	// ReasonReporting: status False, the agent reports.
+	ReasonReporting = "Reporting"
 )
 
 // Reasons an Instance ends or fails, for InstanceStatus.EndReason and the
@@ -115,6 +193,10 @@ const (
 	ReasonQualificationFailed = "QualificationFailed"
 	// ReasonDrained: the Instance drained and ended normally.
 	ReasonDrained = "Drained"
+	// ReasonVerificationFailed and ReasonRestartLoop, the Degraded reasons
+	// above, are end reasons too: an Instance whose verification failed, or
+	// whose restarts formed a loop, ends with that reason (HBEP-7, Instance
+	// start; Health and restarts).
 )
 
 // ReasonRequeued is the reason of an Allocation's Failed phase when the
@@ -127,8 +209,10 @@ const ReasonRequeued = "Requeued"
 // Writers).
 const (
 	// ConditionProviderReady: the age of the last successful queue read is
-	// within bounds (HBEP-4, Operational readiness 1). Its type string is
-	// ConditionReady's.
+	// within ProviderReadyStaleness (HBEP-4, Operational readiness 1). Its
+	// type string is ConditionReady's. True with ReasonPolled, False with
+	// ReasonReadsFailing. A reader judges it with ProviderReady, which also
+	// checks the age, so a Provider whose controller stopped stops counting.
 	ConditionProviderReady = ConditionReady
 	// ConditionDialectMismatch: a reply's data_parser differs from the
 	// profile's jsonDataParser (HBEP-4, The Slurm dialect).
@@ -193,4 +277,31 @@ const (
 const (
 	ReasonNeedsOperator xpv2.ConditionReason = "NeedsOperator"
 	ReasonResolved      xpv2.ConditionReason = "Resolved"
+)
+
+// Reasons of a Provider's Ready condition (ConditionProviderReady).
+const (
+	// ReasonPolled: Ready is True; the Provider's controller read the
+	// platform successfully within ProviderReadyStaleness.
+	ReasonPolled = "Polled"
+	// ReasonReadsFailing: Ready is False; no read has succeeded for longer
+	// than ProviderReadyStaleness, or none ever has. The message gives the
+	// age of the last success.
+	ReasonReadsFailing = "ReadsFailing"
+)
+
+// Reasons of the read-back (HBEP-4, The Slurm dialect, Read-back). The
+// Provider's controller compares the job the scheduler established with the
+// request on every observe.
+const (
+	// ReasonReadBackMismatch is the reason of ConditionSubmittedAsOther, set
+	// True when the job's partition, time limit or GPU count differs from the
+	// request. The message names each field with both values. Once set it is
+	// never cleared: the lifecycle controller replaces the Allocation.
+	ReasonReadBackMismatch xpv2.ConditionReason = "ReadBackMismatch"
+	// ReasonJobRenamed is the reason (status.atProvider.reason) of the phase
+	// Refused when the scheduler stored the job under a name other than the
+	// tag, as a platform that shortens job names does. The provider cancels
+	// the job, and the phase stays Refused.
+	ReasonJobRenamed = "JobRenamed"
 )

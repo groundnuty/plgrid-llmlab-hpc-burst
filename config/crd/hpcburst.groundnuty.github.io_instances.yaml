@@ -124,7 +124,8 @@ spec:
                       Command is the engine's argument vector inside the image, program first,
                       rendered from the serving spec's flags in order, with the framework's own
                       flags (model, Unix socket, chat template, served model name, and
-                      --max-num-seqs when the spec does not give it).
+                      --max-num-seqs when the spec does not give it). Every flag is rendered
+                      as one "--name=value" argument.
                     items:
                       maxLength: 8192
                       type: string
@@ -194,7 +195,8 @@ spec:
                       unset, is this times the Instance's workers (HBEP-5, Load bound and cap;
                       HBEP-7, What the controller reads). It is capacity, not a deployment-ID
                       input (HBEP-3's table), so the default changes no ID. The controller
-                      renders it with Command, and Command carries exactly this value.
+                      renders it with Command, and Command carries exactly this value, as
+                      the argument --max-num-seqs=<value> (the Launch's CEL rule).
                     format: int32
                     maximum: 1048576
                     minimum: 1
@@ -207,6 +209,13 @@ spec:
                 - imageDigest
                 - maxNumSeqs
                 type: object
+                x-kubernetes-validations:
+                - message: 'command passes max-num-seqs only as --max-num-seqs=<launch.maxNumSeqs>,
+                    one argument with the same value: launch.maxNumSeqs records what
+                    Command passes'
+                  rule: self.command.all(c, !(c.startsWith('--max-num-seqs') || c.startsWith('--max_num_seqs'))
+                    || (c.startsWith('--max-num-seqs=') && int(c.substring(15)) ==
+                    self.maxNumSeqs))
             required:
             - allocationRef
             - deploymentID
@@ -237,9 +246,11 @@ spec:
                   agentInstanceID:
                     description: |-
                       AgentInstanceID identifies one agent process: a random ID the agent
-                      draws at its start (agentapi.HeaderAgentInstanceID).
-                    maxLength: 64
-                    minLength: 1
+                      draws at its start, 32 lowercase hex characters
+                      (agentapi.HeaderAgentInstanceID, agentapi.CheckAgentInstanceID).
+                    maxLength: 32
+                    minLength: 32
+                    pattern: ^[0-9a-f]{32}$
                     type: string
                   jobID:
                     description: JobID is the job ID the agent registered with.
@@ -330,6 +341,19 @@ spec:
                   Instance with that reason").
                 maxLength: 128
                 type: string
+              endTime:
+                description: |-
+                  EndTime is when the Instance ended: when its phase became ended, written
+                  once, together with EndReason. It dates the failure streak behind
+                  RestartLoop (three Allocations in a row of one class failed within
+                  restart.window; HBEP-7, Health and restarts). When an Allocation's last
+                  Instance ends, the lifecycle controller copies the latest EndTime of
+                  its Instances into the Allocation's idle-since annotation
+                  (AnnotationIdleSince), the anchor of retention's idleLimit and the
+                  profile's maxIdle, because the Instance may be deleted before the
+                  Allocation is released.
+                format: date-time
+                type: string
               jobID:
                 description: JobID is the provider job's ID.
                 type: string
@@ -369,10 +393,61 @@ spec:
                 type: string
               readyTime:
                 description: |-
-                  ReadyTime is when the Instance first became ready. Its Allocation's start
-                  to this time is the class's start-to-ready time (HBEP-7, Handover).
+                  ReadyTime is when the Instance first became ready: after verification,
+                  qualification and a warm-up the agent reported done (WarmUp.Done) for
+                  the current verification generation. Its Allocation's start to this
+                  time is the class's start-to-ready time (HBEP-7, Handover).
                 format: date-time
                 type: string
+              restarts:
+                description: |-
+                  Restarts are the Instance's recent restarts, oldest first: the
+                  controller appends one before it raises the part's restart generation,
+                  and drops the entries older than restart.window. The attempts per rung
+                  and the restart history are counted from them, so the ladder survives a
+                  controller restart (HBEP-7, Health and restarts). At most 16 are kept,
+                  the newest; a profile whose attemptsPerRung times the rungs exceeds 16
+                  counts only those.
+                items:
+                  description: |-
+                    InstanceRestart is one restart of a part of an Instance, recorded before the
+                    controller raised the part's restart generation (HBEP-7, Health and
+                    restarts: recorded first).
+                  properties:
+                    generation:
+                      description: Generation is the part's restart generation the
+                        restart raised it to.
+                      format: int64
+                      minimum: 1
+                      type: integer
+                    part:
+                      description: 'Part is the part restarted: PartInstance, or a
+                        worker, WorkerName(i).'
+                      maxLength: 32
+                      minLength: 1
+                      pattern: ^(instance|worker-[0-9]+)$
+                      type: string
+                    signal:
+                      description: |-
+                        Signal is the malfunction signal that caused it: ReasonProbeFailing,
+                        ReasonErrorsOnly, ReasonNoProgress or ReasonPartExited.
+                      maxLength: 64
+                      minLength: 1
+                      pattern: ^[A-Z][A-Za-z0-9]*$
+                      type: string
+                    time:
+                      description: Time is when the controller decided the restart.
+                      format: date-time
+                      type: string
+                  required:
+                  - generation
+                  - part
+                  - signal
+                  - time
+                  type: object
+                maxItems: 16
+                type: array
+                x-kubernetes-list-type: atomic
               startInstructionTime:
                 description: |-
                   StartInstructionTime is when the agent was first told to run this

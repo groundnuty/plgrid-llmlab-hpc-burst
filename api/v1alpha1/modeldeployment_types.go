@@ -60,9 +60,15 @@ type EngineSpec struct {
 	// The schema requires ImageDigest beside it, so every launch pulls
 	// Image@ImageDigest (HBEP owner, 31 Oct 2026).
 	//
+	// The repository names no tag: the text after its last "/" holds no ":"
+	// (a ":" before it is a registry port, as in registry.example:5000/vllm).
+	// A tag is refused rather than ignored, because the agent pulls by digest
+	// and a tag beside it would mislead a reader.
+	//
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=512
 	// +kubebuilder:validation:Pattern=`^[a-z0-9][a-z0-9._:/-]*[a-z0-9]$`
+	// +kubebuilder:validation:XValidation:rule="!self.substring(self.lastIndexOf('/') + 1).contains(':')",message="image is a repository without a tag: the agent pulls image@imageDigest, so write docker.io/vllm/vllm-openai, not docker.io/vllm/vllm-openai:latest"
 	Image string `json:"image"`
 }
 
@@ -241,10 +247,17 @@ type ModelSource struct {
 //
 // +kubebuilder:validation:XValidation:rule="(has(self.names) && size(self.names) > 0) || has(self.selector)",message="name at least one provider, or give a label selector"
 type ProviderSelection struct {
-	// Names lists Providers by name.
+	// Names lists Providers by name, each once. The order is meaningful:
+	// a new primary goes to the first listed Provider that is Ready and batch,
+	// and a replacement that cannot stay on its predecessor's Provider to the
+	// next one in order (HBEP-7, Where). Providers that only the selector
+	// matches come after the listed ones, in name order (a contracts
+	// decision). The list is atomic, not a set, so its order is part of the
+	// value and no merge reorders it; a CEL rule refuses a repeated name.
 	//
 	// +optional
-	// +listType=set
+	// +listType=atomic
+	// +kubebuilder:validation:XValidation:rule="self.all(n, self.exists_one(m, m == n))",message="providers.names lists each Provider once: its order is the order the Providers are tried in (HBEP-7, Where)"
 	// +kubebuilder:validation:MaxItems=64
 	// +kubebuilder:validation:items:MaxLength=63
 	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
@@ -302,6 +315,7 @@ type ModelDeploymentSpec struct {
 	// handover testable in hours.
 	//
 	// +optional
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="leaseLimit must be a positive duration that fits Go's time.Duration (above 0s, at most 2562047h)"
 	LeaseLimit *Duration `json:"leaseLimit,omitempty"`
 
 	// Workload holds the shapes for warm-up and qualification (HBEP-7, What
@@ -350,6 +364,7 @@ type Routing struct {
 	// here. Absent, the front's value applies.
 	//
 	// +optional
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="maxRequestDuration must be a positive duration that fits Go's time.Duration (above 0s, at most 2562047h)"
 	MaxRequestDuration *Duration `json:"maxRequestDuration,omitempty"`
 }
 
@@ -401,12 +416,15 @@ type Workload struct {
 	// OutputTokens are the output lengths, in tokens.
 	OutputTokens OutputTokens `json:"outputTokens"`
 
-	// TargetSessions is the number of concurrent sessions to serve. KV
-	// capacity is checked against it, warm-up runs it, and throughput is
-	// measured at it.
+	// TargetSessions is the number of concurrent sessions to serve, per
+	// Instance. KV capacity is checked against it, warm-up runs it, and
+	// throughput is measured at it. It is at most MaxTargetSessions, which is
+	// agentapi.MaxTargetSessions: every warm-up round reports one timing per
+	// concurrent request, and the agent's report of all rounds must fit the
+	// protocol's body limit (agentapi.WarmUpBudgetBytes, agentapi.MaxBodyBytes).
 	//
 	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=100000
+	// +kubebuilder:validation:Maximum=1024
 	TargetSessions int32 `json:"targetSessions"`
 
 	// ToolCalls says whether tool calls are checked and warmed up. Absent, it
@@ -416,6 +434,10 @@ type Workload struct {
 	// +optional
 	ToolCalls *bool `json:"toolCalls,omitempty"`
 }
+
+// MaxTargetSessions is the largest Workload.TargetSessions the schema admits,
+// equal to agentapi.MaxTargetSessions (a test checks they agree).
+const MaxTargetSessions = 1024
 
 // ContextTokens are a workload's context lengths.
 type ContextTokens struct {

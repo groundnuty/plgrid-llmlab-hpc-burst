@@ -322,6 +322,15 @@ func (b *Batch) FindByTag(_ context.Context, tag string, since time.Time) ([]pro
 	return out, nil
 }
 
+// Poll implements provider.Batch: one read of the queue listing, logged as op
+// "squeue-me". FailReads makes it fail.
+func (b *Batch) Poll(_ context.Context) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.log("squeue-me")
+	return b.readErr
+}
+
 // Observe implements provider.Batch. It has no window: accounting finds a
 // purged job by its ID.
 func (b *Batch) Observe(_ context.Context, jobID string) (provider.Job, bool, error) {

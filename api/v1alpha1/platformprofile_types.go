@@ -37,6 +37,7 @@ type PartitionProfile struct {
 	// schema, the fields the lifecycle controller reads).
 	//
 	// +optional
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="maxTime must be a positive duration that fits Go's time.Duration (above 0s, at most 2562047h)"
 	MaxTime *Duration `json:"maxTime,omitempty"`
 
 	// GPUsPerNode is the most GPUs one Allocation may request here.
@@ -104,6 +105,7 @@ type HealthThresholds struct {
 	//
 	// +optional
 	// +kubebuilder:default="10s"
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="probeInterval must be a positive duration that fits Go's time.Duration (above 0s, at most 2562047h)"
 	ProbeInterval *Duration `json:"probeInterval,omitempty"`
 
 	// FailureThreshold is how many failed probes in a row are a malfunction.
@@ -121,12 +123,14 @@ type HealthThresholds struct {
 	//
 	// +optional
 	// +kubebuilder:default="30m"
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="noProgressTimeout must be a positive duration that fits Go's time.Duration (above 0s, at most 2562047h)"
 	NoProgressTimeout *Duration `json:"noProgressTimeout,omitempty"`
 
 	// ErrorOnlyWindow is how long every answer may be a server error.
 	//
 	// +optional
 	// +kubebuilder:default="1m"
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="errorOnlyWindow must be a positive duration that fits Go's time.Duration (above 0s, at most 2562047h)"
 	ErrorOnlyWindow *Duration `json:"errorOnlyWindow,omitempty"`
 
 	// KVSkewTimeout is how long one worker may sit at a full KV cache with
@@ -135,6 +139,7 @@ type HealthThresholds struct {
 	//
 	// +optional
 	// +kubebuilder:default="2m"
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="kvSkewTimeout must be a positive duration that fits Go's time.Duration (above 0s, at most 2562047h)"
 	KVSkewTimeout *Duration `json:"kvSkewTimeout,omitempty"`
 
 	// AgentTimeout is how long an agent may send no report before its
@@ -142,6 +147,7 @@ type HealthThresholds struct {
 	//
 	// +optional
 	// +kubebuilder:default="2m"
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="agentTimeout must be a positive duration that fits Go's time.Duration (above 0s, at most 2562047h)"
 	AgentTimeout *Duration `json:"agentTimeout,omitempty"`
 
 	// RegistrationTimeout is the longest time from the job's start to its
@@ -149,6 +155,7 @@ type HealthThresholds struct {
 	//
 	// +optional
 	// +kubebuilder:default="15m"
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="registrationTimeout must be a positive duration that fits Go's time.Duration (above 0s, at most 2562047h)"
 	RegistrationTimeout *Duration `json:"registrationTimeout,omitempty"`
 
 	// StartTimeout is the longest time from an Instance's own start
@@ -156,6 +163,7 @@ type HealthThresholds struct {
 	//
 	// +optional
 	// +kubebuilder:default="1h"
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="startTimeout must be a positive duration that fits Go's time.Duration (above 0s, at most 2562047h)"
 	StartTimeout *Duration `json:"startTimeout,omitempty"`
 }
 
@@ -166,6 +174,7 @@ type RestartPolicy struct {
 	//
 	// +optional
 	// +kubebuilder:default="10s"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('0s')",message="stopGrace must be a duration that fits Go's time.Duration (at most 2562047h)"
 	StopGrace *Duration `json:"stopGrace,omitempty"`
 
 	// AttemptsPerRung is how many times each rung is tried within Window.
@@ -179,12 +188,14 @@ type RestartPolicy struct {
 	//
 	// +optional
 	// +kubebuilder:default="30m"
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="window must be a positive duration that fits Go's time.Duration (above 0s, at most 2562047h)"
 	Window *Duration `json:"window,omitempty"`
 
 	// Backoff is the time between two attempts.
 	//
 	// +optional
 	// +kubebuilder:default="30s"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('0s')",message="backoff must be a duration that fits Go's time.Duration (at most 2562047h)"
 	Backoff *Duration `json:"backoff,omitempty"`
 }
 
@@ -222,7 +233,9 @@ type JobNameRules struct {
 // facts of spikes S4 and S5 are typed beside them (HBEP-11, API, PlatformProfile
 // schema). A fact the platform does not state, or one
 // that does not apply to its kind, is absent: an absent bool is unknown, not
-// false.
+// false. The schema defaults (drainWindow, drainMargin, handoverMargin, health,
+// restart) are written on every profile, a managed one included; HBEP-4 gives a
+// managed profile no batch fields, so nothing reads them there.
 //
 // +kubebuilder:validation:XValidation:rule="!has(self.jobName) || !has(self.jobName.maxLength) || self.jobName.maxLength >= 56",message="jobName.maxLength must allow the job tag's 56 characters (HBEP-3, Allocation and job identity)"
 type PlatformProfileSpec struct {
@@ -252,6 +265,7 @@ type PlatformProfileSpec struct {
 	//
 	// +optional
 	// +kubebuilder:default="2m"
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="lostGrace must be a positive duration that fits Go's time.Duration (above 0s, at most 2562047h)"
 	LostGrace *Duration `json:"lostGrace,omitempty"`
 
 	// InflightWindow is how long an unresolved submission attempt is waited
@@ -260,6 +274,7 @@ type PlatformProfileSpec struct {
 	// here; there is no default.
 	//
 	// +optional
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="inflightWindow must be a positive duration that fits Go's time.Duration (above 0s, at most 2562047h)"
 	InflightWindow *Duration `json:"inflightWindow,omitempty"`
 
 	// UnknownBound is how long, in fallback mode, an Unknown attempt may stay
@@ -267,6 +282,7 @@ type PlatformProfileSpec struct {
 	//
 	// +optional
 	// +kubebuilder:default="10m"
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="unknownBound must be a positive duration that fits Go's time.Duration (above 0s, at most 2562047h)"
 	UnknownBound *Duration `json:"unknownBound,omitempty"`
 
 	// TimeZone is the IANA name of the time zone in which the scheduler prints
@@ -293,6 +309,7 @@ type PlatformProfileSpec struct {
 	// accounting (HBEP-4).
 	//
 	// +optional
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('0s')",message="minJobAge must be a duration that fits Go's time.Duration (at most 2562047h)"
 	MinJobAge *Duration `json:"minJobAge,omitempty"`
 
 	// JobName holds the platform's job-name rules.
@@ -329,6 +346,7 @@ type PlatformProfileSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=1024
 	// +kubebuilder:validation:Pattern=`^(/|\$[A-Za-z_][A-Za-z0-9_]*)[A-Za-z0-9._:=,/-]*$`
+	// +kubebuilder:validation:XValidation:rule="!self.split('/').exists(s, s == '..')",message="stagingDir must not contain a '..' segment: agent.json refuses one (agentapi.AgentConfig)"
 	StagingDir string `json:"stagingDir,omitempty"`
 
 	// DrainWindow is HBEP-5's drain window: an Instance drains from its hard
@@ -341,6 +359,7 @@ type PlatformProfileSpec struct {
 	//
 	// +optional
 	// +kubebuilder:default="2h10m"
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="drainWindow must be a positive duration that fits Go's time.Duration (above 0s, at most 2562047h)"
 	DrainWindow *Duration `json:"drainWindow,omitempty"`
 
 	// DrainMargin is the margin above a request's longest duration in the
@@ -352,6 +371,7 @@ type PlatformProfileSpec struct {
 	//
 	// +optional
 	// +kubebuilder:default="10m"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('0s')",message="drainMargin must be a duration that fits Go's time.Duration (at most 2562047h)"
 	DrainMargin *Duration `json:"drainMargin,omitempty"`
 
 	// HandoverMargin is the margin in HBEP-7's submission plan: a replacement
@@ -360,13 +380,16 @@ type PlatformProfileSpec struct {
 	//
 	// +optional
 	// +kubebuilder:default="30m"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('0s')",message="handoverMargin must be a duration that fits Go's time.Duration (at most 2562047h)"
 	HandoverMargin *Duration `json:"handoverMargin,omitempty"`
 
 	// MaxIdle releases an Allocation with no Instance after this long, even
-	// when its retention policy says keep (HBEP-7, Retention). Unset, there is
-	// no cap.
+	// when its retention policy says keep (HBEP-7, Retention). It counts from
+	// the Allocation's idle-since annotation (AnnotationIdleSince). Unset,
+	// there is no cap.
 	//
 	// +optional
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="maxIdle must be a positive duration that fits Go's time.Duration (above 0s, at most 2562047h)"
 	MaxIdle *Duration `json:"maxIdle,omitempty"`
 
 	// Health holds HBEP-7's malfunction thresholds and start deadlines.
@@ -395,7 +418,9 @@ type PlatformProfileSpec struct {
 type PlatformProfileStatus struct {
 	ReconcileStatus `json:",inline"`
 
-	// LastChecked is when the profile's facts were last checked.
+	// LastChecked is when the profile's facts were last checked. No
+	// component writes it in alpha: nothing checks a profile's facts yet
+	// (docs/development.md, Writers).
 	//
 	// +optional
 	LastChecked *metav1.Time `json:"lastChecked,omitempty"`

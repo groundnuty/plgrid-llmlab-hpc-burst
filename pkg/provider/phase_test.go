@@ -33,6 +33,10 @@ func TestSlurmPhase(t *testing.T) {
 		{[]string{"PENDING"}, true, true, v1alpha1.AllocationFailed},
 		{[]string{"RUNNING"}, false, true, v1alpha1.AllocationFailed},
 		{[]string{"PENDING", "REQUEUED"}, true, false, v1alpha1.AllocationFailed},
+		// REQUEUED as the base state, or in any position, as spike S4 accepts it.
+		{[]string{"REQUEUED"}, false, false, v1alpha1.AllocationFailed},
+		{[]string{"requeued", "PENDING"}, false, false, v1alpha1.AllocationFailed},
+		{[]string{"RUNNING", "COMPLETING", "REQUEUED"}, false, false, v1alpha1.AllocationFailed},
 		{[]string{"COMPLETED"}, false, true, v1alpha1.AllocationFailed},
 	} {
 		got, err := SlurmPhase(tc.state, tc.held, tc.requeued)
