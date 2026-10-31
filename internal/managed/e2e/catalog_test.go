@@ -9,6 +9,8 @@ import (
 	"time"
 
 	coordinationv1 "k8s.io/api/coordination/v1"
+	corev1 "k8s.io/api/core/v1"
+	eventsv1 "k8s.io/api/events/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -265,6 +267,29 @@ func TestCatalogLoopInItsManager(t *testing.T) {
 	}
 }
 
+// waitEvent polls until the API server holds an event with reason about the
+// resource named name, for at most 60 s of real time. The recorder writes
+// asynchronously.
+func waitEvent(t *testing.T, name, reason string) eventsv1.Event {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		var list eventsv1.EventList
+		if err := c.List(context.Background(), &list); err != nil {
+			t.Fatal(err)
+		}
+		for _, ev := range list.Items {
+			if ev.Regarding.Name == name && ev.Reason == reason {
+				return ev
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no %s event about %s within 60 s", reason, name)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 // Two managed Providers, each in its own manager with its own Lease, in one
 // process, as the controller binary runs them.
 func TestTwoManagedProvidersInOneProcess(t *testing.T) {
@@ -292,6 +317,13 @@ func TestTwoManagedProvidersInOneProcess(t *testing.T) {
 	}
 	if len(b.provider().Status.Catalog) != 0 {
 		t.Fatalf("provider b has a catalog although its key is rejected: %+v", b.provider().Status.Catalog)
+	}
+	// The real API server stores the typed event (HBEP-8, Events: Form): it
+	// refuses one without an action or reason, or with a note over 1,024 bytes.
+	// The recorder writes asynchronously, so poll.
+	ev := waitEvent(t, b.name, v1alpha1.ReasonKeyRejected)
+	if ev.Action != "failing" || ev.Type != corev1.EventTypeWarning || len(ev.Note) == 0 || len(ev.Note) > 1024 {
+		t.Fatalf("event %+v, want a Warning KeyRejected of type failing with a note of 1 to 1024 bytes", ev)
 	}
 	for _, name := range []string{a.name, b.name} {
 		var lease coordinationv1.Lease
