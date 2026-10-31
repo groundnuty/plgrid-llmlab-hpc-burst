@@ -22,11 +22,17 @@
 # fails, unless the module is a known zero: listed in known-zero-modules.txt with the reason,
 # which is printed. A module on that list that does have packages is only noted.
 #
-# Exit status: 0 when no module has a failure; 1 otherwise; 2 on bad usage. A failure is anything
+# Exit status: 0 when no module has a failure; 1 otherwise; 2 on bad usage or when the check
+# cannot be set up (a temporary or output file it needs cannot be made). A failure is anything
 # go-licenses reports, an error diagnostic go-licenses logs even when it exits 0 (licence_gate.py
 # decides, on go-licenses' raw output), a go-licenses run that itself fails, and a run that
 # checked no package and is not a known zero. The root module is also checked with
 # --include_tests, so a licence reached only through a test import fails too.
+#
+# Fails closed on the filesystem: the script runs without "set -e", so every write it makes
+# (the temporary directory, the report template, a module's section, the files in <output dir>)
+# is checked, and a write that fails is a failure of the run, never a module that quietly was not
+# checked. "licence check: PASS" is printed only when every module ran and every write succeeded.
 #
 # --negative-control also takes BSD-3-Clause off the allowlist for the root module; the run
 # must then fail and name BSD-3-Clause packages, else the check is not looking at the list.
@@ -66,10 +72,14 @@ else
   while IFS= read -r m; do modules+=("$m"); done <<< "$found"
   echo "spikes/: outside the check (HBEP-15)"
 fi
+# No module to check would print PASS having checked nothing (a here-string that could not be made
+# leaves the list empty): refuse.
+[ ${#modules[@]} -gt 0 ] || { echo "licence check: no module to check" >&2; exit 2; }
 
 KNOWN_ZERO=$here/known-zero-modules.txt
 declare -A zero_reason=()
 if [ -f "$KNOWN_ZERO" ]; then
+  [ -r "$KNOWN_ZERO" ] || { echo "known-zero list is not readable: $KNOWN_ZERO" >&2; exit 2; }
   while IFS= read -r line; do
     case $line in ''|'#'*) continue ;; esac
     zm=${line%%:*}; zr=${line#*:}; zr=${zr# }
@@ -80,12 +90,15 @@ if [ -f "$KNOWN_ZERO" ]; then
   done < "$KNOWN_ZERO"
 fi
 
-tmpdir=$(mktemp -d)
+tmpdir=$(mktemp -d) || { echo "licence check: cannot create a temporary directory (TMPDIR=${TMPDIR:-unset})" >&2; exit 2; }
+[ -d "$tmpdir" ] && [ -w "$tmpdir" ] || { echo "licence check: the temporary directory is not writable: $tmpdir" >&2; exit 2; }
 trap 'rm -rf "$tmpdir"' EXIT
-cat > "$tmpdir/report.tmpl" <<'EOF'
-{{ range . }}{{ .Name }},{{ .Version }},{{ .LicenseURL }},{{ .LicenseName }}
-{{ end }}
-EOF
+# A template that was not written whole would make every report empty, which looks like a module
+# with nothing to check, so the template is read back.
+tmpl='{{ range . }}{{ .Name }},{{ .Version }},{{ .LicenseURL }},{{ .LicenseName }}
+{{ end }}'
+printf '%s\n' "$tmpl" > "$tmpdir/report.tmpl" && [ "$(cat "$tmpdir/report.tmpl")" = "$tmpl" ] ||
+  { echo "licence check: cannot write the report template in $tmpdir" >&2; exit 2; }
 status=0
 grc=0
 gate_out=
@@ -128,7 +141,9 @@ check_module() { # module dir relative to the root
   rows=$(printf '%s' "$rep" | grep -c . || true)
   echo "allowlist: $LIST"
   echo "report rows: $rows"
-  if [ "$m" = . ]; then printf '%s\n' "$rep" > "$OUT/go-licenses-report.csv"; fi
+  if [ "$m" = . ]; then
+    printf '%s\n' "$rep" > "$OUT/go-licenses-report.csv" || { echo "UNEXPECTED: cannot write $OUT/go-licenses-report.csv"; status=1; }
+  fi
   # A check over zero packages also exits 0, so a run that saw nothing fails unless it is a known zero.
   if [ "$rows" -eq 0 ]; then
     if [ -n "${zero_reason[$m]:-}" ]; then
@@ -159,12 +174,18 @@ check_module() { # module dir relative to the root
   return 0
 }
 
-: > "$OUT/go-licenses-check.txt"
-: > "$OUT/go-licenses-modules.txt"
+: > "$OUT/go-licenses-check.txt" && : > "$OUT/go-licenses-modules.txt" ||
+  { echo "licence check: cannot write the output files in $OUT" >&2; exit 2; }
+section=$tmpdir/section.txt
 for m in "${modules[@]}"; do
   if [ "$m" = . ]; then f=$OUT/go-licenses-check.txt; else f=$OUT/go-licenses-modules.txt; fi
-  check_module "$m" > "$tmpdir/section.txt" 2>&1
-  cat "$tmpdir/section.txt"; cat "$tmpdir/section.txt" >> "$f"
+  # check_module returns non-zero only when this redirection fails (its own failures set status
+  # and it returns 0); without the test the function would not run and status would stay 0.
+  if ! check_module "$m" > "$section" 2>&1; then
+    echo "UNEXPECTED: the check of module $m did not run (cannot write $section)"; status=1; continue
+  fi
+  cat "$section" || { echo "UNEXPECTED: cannot read back the check of module $m"; status=1; }
+  cat "$section" >> "$f" || { echo "UNEXPECTED: cannot write the check of module $m to $f"; status=1; }
 done
 echo; echo "licence check: $([ "$status" = 0 ] && echo PASS || echo FAIL)"
 exit "$status"

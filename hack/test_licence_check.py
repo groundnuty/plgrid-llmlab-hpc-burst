@@ -24,11 +24,19 @@ SCRIPTS = ("licence-check.sh", "licence-modules.sh", "licence_gate.py", "allowed
 
 # What go-licenses does, decided by files in the module directory it runs in:
 #   .report (rows of "report"), .report-rc, .check (output of "check"), .check-rc,
-#   .honours-list: "check" fails with a BSD-3-Clause line when BSD-3-Clause is off the allowlist.
+#   .honours-list: "check" fails with a BSD-3-Clause line when BSD-3-Clause is off the allowlist,
+#   .lock-section: "report" makes the temporary section file of licence-check.sh read-only, so that
+#   the redirection into it fails for the next module (the path comes from the --template argument).
 FAKE = r"""#!/usr/bin/env bash
 cmd=$1; shift
 case $cmd in
   report)
+    if [ -f .lock-section ]; then
+      while [ $# -gt 0 ]; do
+        [ "$1" = --template ] && chmod 444 "$(dirname "$2")/section.txt"
+        shift
+      done
+    fi
     [ -f .report ] && cat .report
     exit "$(cat .report-rc 2>/dev/null || echo 0)" ;;
   check)
@@ -73,8 +81,8 @@ class Case:
             with open(os.path.join(path, "." + key.replace("_", "-")), "w") as f:
                 f.write(value)
 
-    def run(self, *args, modules=()):
-        env = dict(os.environ, GOMODCACHE="/nonexistent-modcache")
+    def run(self, *args, modules=(), env=None):
+        env = dict(os.environ, GOMODCACHE="/nonexistent-modcache", **(env or {}))
         p = subprocess.run(["bash", os.path.join(self.hack, "licence-check.sh"), *args,
                             self.fake, self.repo, self.out, *modules],
                            capture_output=True, text=True, env=env)
@@ -209,6 +217,102 @@ class CheckTest(unittest.TestCase):
         p = subprocess.run(["bash", os.path.join(c.hack, "licence-check.sh"), c.fake, c.repo, c.out],
                            capture_output=True, text=True, env=env)
         self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+
+
+class FailClosedTest(unittest.TestCase):
+    """The script runs without "set -e", so an unchecked write that fails used to leave a module
+    unchecked and the run green: "licence check: PASS" with exit 0 (review of PR 77, B1). Each case
+    breaks one write; the run must exit non-zero and must not print PASS."""
+
+    def case(self):
+        c = Case()
+        self.addCleanup(c.close)
+        c.module(".", report=ROW)
+        return c
+
+    def assertFailsClosed(self, rc, out, want_rc=None):
+        self.assertNotEqual(rc, 0, out)
+        if want_rc is not None:
+            self.assertEqual(rc, want_rc, out)
+        self.assertNotIn("licence check: PASS", out)
+
+    def test_a_temporary_directory_that_cannot_be_made(self):
+        c = self.case()
+        rc, out = c.run(env={"TMPDIR": "/nonexistent-tmpdir-for-test"})
+        self.assertFailsClosed(rc, out, 2)
+        self.assertIn("cannot create a temporary directory", out)
+
+    def test_a_mktemp_that_reports_success_for_a_directory_that_is_not_there(self):
+        c = self.case()
+        shim = os.path.join(c.tmp.name, "shim")
+        os.makedirs(shim)
+        with open(os.path.join(shim, "mktemp"), "w") as f:
+            f.write("#!/bin/sh\necho /nonexistent-tmpdir-for-test/dir\n")
+        os.chmod(os.path.join(shim, "mktemp"), 0o755)
+        rc, out = c.run(env={"PATH": shim + ":" + os.environ["PATH"]})
+        self.assertFailsClosed(rc, out, 2)
+        self.assertIn("temporary directory is not writable", out)
+
+    def test_an_output_file_that_cannot_be_written(self):
+        # A directory where an output file belongs: the redirection fails whoever runs the test.
+        for name in ("go-licenses-check.txt", "go-licenses-modules.txt"):
+            c = self.case()
+            os.makedirs(os.path.join(c.out, name))
+            rc, out = c.run()
+            self.assertFailsClosed(rc, out, 2)
+            self.assertIn("cannot write the output files", out)
+
+    def test_the_root_report_that_cannot_be_written(self):
+        c = self.case()
+        os.makedirs(os.path.join(c.out, "go-licenses-report.csv"))
+        rc, out = c.run()
+        self.assertFailsClosed(rc, out, 1)
+        self.assertIn("UNEXPECTED: cannot write", out)
+
+    def test_a_section_file_that_cannot_be_written_is_not_a_skipped_module(self):
+        # Module a makes the section file read-only; module b's redirection into it then fails.
+        # The function that checks b never runs, and used to leave the status at zero.
+        if os.geteuid() == 0:
+            self.skipTest("root writes a read-only file")
+        c = Case()
+        self.addCleanup(c.close)
+        c.module("a", report=ROW, lock_section="")
+        c.module("b", report="")  # would fail as an empty run, if it ran
+        rc, out = c.run(modules=["a", "b"])
+        self.assertFailsClosed(rc, out, 1)
+        self.assertIn("UNEXPECTED: the check of module b did not run", out)
+
+    def test_a_tree_without_any_module_fails_with_no_pass(self):
+        # licence-modules.sh finds nothing and fails; a run over no module must not be a pass.
+        c = Case()
+        self.addCleanup(c.close)
+        rc, out = c.run()
+        self.assertFailsClosed(rc, out, 2)
+        self.assertIn("licence-modules.sh failed", out)
+
+    def test_a_directory_with_a_newline_in_its_name_fails_the_run_not_the_matrix(self):
+        # licence-modules.sh used to read "alpha<newline>beta" as the two paths alpha and beta, and
+        # the run checked those and never the module that was there (review of PR 77, B3).
+        c = Case()
+        self.addCleanup(c.close)
+        for d in ("alpha", "beta", "alpha\nbeta"):
+            c.module(d, report=ROW)
+        rc, out = c.run()
+        self.assertFailsClosed(rc, out, 2)
+        self.assertIn("newline or another control character", out)
+
+    def test_a_directory_symlink_to_a_spike_module_fails_the_run(self):
+        # tools/cli -> ../spikes/cli: the module behind the link was in neither the list nor the matrix (B2).
+        c = Case()
+        self.addCleanup(c.close)
+        c.module(".", report=ROW)
+        c.module("spikes/cli")
+        os.makedirs(os.path.join(c.repo, "tools"))
+        os.symlink("../spikes/cli", os.path.join(c.repo, "tools", "cli"))
+        rc, out = c.run()
+        self.assertFailsClosed(rc, out, 2)
+        self.assertIn("directory symlink", out)
+        self.assertIn("./tools/cli", out)
 
 
 class AllowlistTest(unittest.TestCase):
