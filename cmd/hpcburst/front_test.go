@@ -230,7 +230,7 @@ func TestFrontSupervision(t *testing.T) {
 	c := h.clients()
 	ctx := t.Context()
 	// drainWindow 1h is below the front's 2 h maxRequestDuration plus the 10 min margin, so the
-	// front must emit degraded/DrainWindowShort on this cluster-scoped profile (HBEP-5, Draining).
+	// front must emit DrainWindowShort (action degraded) on this cluster-scoped profile (HBEP-5, Draining).
 	shortWindow := v1alpha1.Duration("1h")
 	prof := &v1alpha1.PlatformProfile{ObjectMeta: metav1.ObjectMeta{Name: "example-platform"}, Spec: v1alpha1.PlatformProfileSpec{ProviderKind: v1alpha1.PlatformBatch,
 		DrainWindow: &shortWindow,
@@ -286,7 +286,8 @@ func TestFrontSupervision(t *testing.T) {
 			return false
 		}
 		for _, e := range evs.Items {
-			if e.Reason == "degraded/DrainWindowShort" && e.Regarding.Kind == "PlatformProfile" && e.Regarding.Name == "example-platform" &&
+			// HBEP-8 as amended: the reason is the CamelCase code alone, and its type is the action.
+			if e.Reason == "DrainWindowShort" && e.Action == "degraded" && e.Regarding.Kind == "PlatformProfile" && e.Regarding.Name == "example-platform" &&
 				e.ReportingController == "hpcburst-front" {
 				return true
 			}
