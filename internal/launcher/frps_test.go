@@ -18,10 +18,10 @@ import (
 
 const testWebPassword = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
-func testHost() agentapi.Host { return agentapi.Host{StateDir: "/var/lib/hb-state", PortBase: 29340} }
+func frpsTestHost() agentapi.Host { return agentapi.Host{StateDir: "/var/lib/hb-state", PortBase: 29340} }
 
 func TestRenderFrpsConfigHasEverythingTheHBEPFixes(t *testing.T) {
-	got, err := RenderFrpsConfig(testHost(), testWebPassword)
+	got, err := RenderFrpsConfig(frpsTestHost(), testWebPassword)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestRenderFrpsConfigHasEverythingTheHBEPFixes(t *testing.T) {
 }
 
 func TestRenderFrpsConfigRefusesWhatItCannotWriteSafely(t *testing.T) {
-	good := testHost()
+	good := frpsTestHost()
 	cases := []struct {
 		name string
 		host agentapi.Host
