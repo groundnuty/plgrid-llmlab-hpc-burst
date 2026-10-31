@@ -18,14 +18,20 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 )
 
+// frpcDigest is a frpc digest written out by hand: 64 lowercase hex characters.
+const frpcDigest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+// validConfig is a complete ssh-mode agent.json, which runs frpc: the second
+// forward's dial-home port and frpc's digest are set.
 func validConfig() AgentConfig {
 	return AgentConfig{
 		ProtocolVersion: "v1",
 		Tag:             "hb-helios-a-x7k2p-1bda24d00504",
 		Mode:            DialHomeSSH,
 		Endpoint:        "control.example:22",
-		SSH:             &SSHForward{User: "example-user", AgentPort: 29225},
+		SSH:             &SSHForward{User: "example-user", AgentPort: 29225, DialHomePort: 29229},
 		CertSPKISHA256:  strings.Repeat("a", 64),
+		FrpcDigest:      frpcDigest,
 		StagingDir:      "/scratch/example-user",
 		DialHomeDir:     "/home/example-user/.hpcburst/dial-home",
 	}
@@ -45,6 +51,7 @@ func TestAgentConfigEncodeIsStableAndRoundTrips(t *testing.T) {
 	// through the decoder under test.
 	for _, key := range []string{`"protocolVersion": "v1"`, `"tag": "hb-helios-a-x7k2p-1bda24d00504"`, `"mode": "ssh"`,
 		`"endpoint": "control.example:22"`, `"user": "example-user"`, `"agentPort": 29225`,
+		`"dialHomePort": 29229`, `"frpcDigest": "` + frpcDigest + `"`,
 		`"certSPKISHA256": "` + strings.Repeat("a", 64) + `"`, `"stagingDir": "/scratch/example-user"`,
 		`"dialHomeDir": "/home/example-user/.hpcburst/dial-home"`} {
 		if !bytes.Contains(a, []byte(key)) {
@@ -76,11 +83,14 @@ func TestAgentConfigValidate(t *testing.T) {
 		"a tag that is not a job tag":     func(c *AgentConfig) { c.Tag = "my-job" },
 		"a 57-character tag":              func(c *AgentConfig) { c.Tag = "hb-" + strings.Repeat("a", 41) + "-1bda24d00504" },
 		"an endpoint without a port":      func(c *AgentConfig) { c.Endpoint = "control.example" },
-		"ssh mode on another port":        func(c *AgentConfig) { c.Endpoint = "control.example:2222" },
+		"an endpoint with port 0":         func(c *AgentConfig) { c.Endpoint = "control.example:0" },
+		"an endpoint with port 65536":     func(c *AgentConfig) { c.Endpoint = "control.example:65536" },
 		"ssh mode without ssh settings":   func(c *AgentConfig) { c.SSH = nil },
 		"ssh settings in direct mode":     func(c *AgentConfig) { c.Mode, c.Endpoint = DialHomeDirect, "front.example:8443" },
 		"an unknown mode":                 func(c *AgentConfig) { c.Mode = "tunnel" },
 		"no agent port":                   func(c *AgentConfig) { c.SSH.AgentPort = 0 },
+		"no dial-home port":               func(c *AgentConfig) { c.SSH.DialHomePort = 0 },
+		"no frpc digest":                  func(c *AgentConfig) { c.FrpcDigest = "" },
 		"a user with a space":             func(c *AgentConfig) { c.SSH.User = "a b" },
 		"a short pin":                     func(c *AgentConfig) { c.CertSPKISHA256 = "abc" },
 		"a staging dir with a variable":   func(c *AgentConfig) { c.StagingDir = "$SCRATCH/x" },
@@ -205,10 +215,14 @@ func TestDurationJSON(t *testing.T) {
 
 func TestLayout(t *testing.T) {
 	digest := strings.Repeat("3", 64)
+	// A frpc digest written out in full, not built from the code under test.
+	const frpc = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	for got, want := range map[string]string{
 		StagedAgentPath(digest):                      "agent/" + digest + "/hb-agent",
 		AllocationDir("hb-a-1bda24d00504"):           "alloc/hb-a-1bda24d00504",
+		StagedFrpcPath(frpc):                         "frpc/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/frpc",
 		StagedCredentialPath("hb-a-1bda24d00504"):    "alloc/hb-a-1bda24d00504/credential",
+		StagedDialHomeCertPath("hb-a-1bda24d00504"):  "alloc/hb-a-1bda24d00504/dial-home.crt",
 		StagedConfigPath("hb-a-1bda24d00504"):        "alloc/hb-a-1bda24d00504/agent.json",
 		StagedCheckpointDir("example-org/m", "abc"):  "checkpoints/example-org/m/abc",
 		AllocationCredentialPath("/state/cred", "u"): "/state/cred/allocations/u",
@@ -226,6 +240,20 @@ func TestLayout(t *testing.T) {
 		if WorkerName(i) != v1alpha1.WorkerName(i) {
 			t.Errorf("WorkerName(%d): %q here, %q in the API", i, WorkerName(i), v1alpha1.WorkerName(i))
 		}
+	}
+}
+
+// The three constants of HBEP-4 and HBEP-6 that several components must agree
+// on are written out here from the HBEPs.
+func TestDialHomeConstants(t *testing.T) {
+	if StagedDialHomeCertName != "dial-home.crt" {
+		t.Errorf("StagedDialHomeCertName = %q, HBEP-4 stages alloc/<tag>/dial-home.crt", StagedDialHomeCertName)
+	}
+	if DialHomeServerName != "dial-home.hpcburst.invalid" {
+		t.Errorf("DialHomeServerName = %q, HBEP-6 and HBEP-11 name dial-home.hpcburst.invalid", DialHomeServerName)
+	}
+	if FrpcBinaryName != "frpc" {
+		t.Errorf("FrpcBinaryName = %q", FrpcBinaryName)
 	}
 }
 

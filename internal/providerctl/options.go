@@ -39,14 +39,22 @@ type FrontSettings struct {
 	// Mode is the dial-home mode.
 	Mode agentapi.DialHomeMode
 	// Endpoint is host:port: the front's dial-home listener in direct mode,
-	// the control-plane host's ssh server (port 22) in ssh mode.
+	// the control-plane host's ssh server in ssh mode (port 22 by default).
 	Endpoint string
 	// CertPin is the agent endpoint certificate's pin (agentapi.PinOf).
 	CertPin string
-	// SSHUser and AgentPort are the ssh mode's user on the control-plane host
-	// and the agent endpoint's loopback port.
-	SSHUser   string
-	AgentPort int
+	// SSHUser, AgentPort and DialHomePort are the ssh mode's user on the
+	// control-plane host, the agent endpoint's loopback port and the dial-home
+	// listener's loopback port (agentapi.Host.DialHomePort).
+	SSHUser      string
+	AgentPort    int
+	DialHomePort int
+	// FrpcDigests is the SHA-256 of the frpc binary for each cpuArch, as
+	// build/dependencies.yaml pins it (HBEP-4, Submission: Files first). The
+	// digest depends on the partition's cpuArch, so agent.json takes the one
+	// for the Allocation's partition. Staging frpc and the dial-home
+	// certificate is not done yet.
+	FrpcDigests map[string]string
 }
 
 // ProfileSource reads and validates a Provider's profile, settings and
