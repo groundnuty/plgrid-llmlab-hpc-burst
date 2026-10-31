@@ -16,10 +16,11 @@ const (
 	codeUpstreamUnreachable = "upstream_unreachable"
 	codeRequestTimeout      = "request_timeout"
 	codeStreamCut           = "stream_cut"
-	// codeUpstreamFailed is the front's: the connection broke after the
-	// request was written and before any response header. HBEP-5's table has
-	// no row for it; the request is not sent again (open question 5).
-	codeUpstreamFailed = "upstream_failed"
+	// codeUpstreamClosed: the connection to an Instance closed after the
+	// request was written and before the response headers (HBEP-5's Errors
+	// table as HBEP-6 amends it: 502, detail "tunnel", cutBy tunnel, not
+	// resent, and it counts toward the pause).
+	codeUpstreamClosed = "upstream_closed"
 )
 
 // statusClientClosed records a request whose client went away before an

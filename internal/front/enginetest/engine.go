@@ -35,6 +35,10 @@ type Behaviour struct {
 	KillAfter  int           // close the connection abruptly after this many tokens
 	Status     int           // answer this status with ErrorBody instead
 	ErrorBody  string
+	// CloseBeforeHeaders reads the request, then closes the connection with
+	// no response byte, as frps does with a request it accepted for a dead
+	// tunnel (HBEP-6).
+	CloseBeforeHeaders bool
 	// Hold, when set, holds each request after its headers are read until
 	// the channel is closed or the request ends.
 	Hold chan struct{}
@@ -187,6 +191,15 @@ func (e *Engine) serve(w http.ResponseWriter, r *http.Request) {
 	if e.key != "" && r.Header.Get("Authorization") != "Bearer "+e.key {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]any{"message": "invalid key", "type": "auth", "code": 401}})
 		return
+	}
+	if b.CloseBeforeHeaders {
+		if hj, ok := w.(http.Hijacker); ok {
+			if conn, _, err := hj.Hijack(); err == nil {
+				conn.Close()
+				return
+			}
+		}
+		panic(http.ErrAbortHandler)
 	}
 	if b.Hold != nil {
 		select {

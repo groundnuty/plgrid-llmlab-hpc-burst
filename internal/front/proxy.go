@@ -240,9 +240,18 @@ func (p *Proxy) failedBeforeHeaders(w http.ResponseWriter, x *exchange, t *targe
 		x.rec.CutBy = strp(cut)
 		p.fail(w, x, http.StatusGatewayTimeout, codeRequestTimeout, detailOf(cut), "", "the request was cut before its first byte: "+detailOf(cut))
 	default:
-		x.rec.CutBy = strp(cutUpstream)
-		p.log.Warn("the upstream failed after the request was written", "request", x.id, "target", t.key(), "error", err.Error())
-		p.fail(w, x, http.StatusBadGateway, codeUpstreamFailed, "", "", "the target failed before it answered; the request is not sent again")
+		// Written, then closed before any response header: never resent
+		// (open question 5). Toward an Instance that is the tunnel's row of
+		// the Errors table, and it counts toward the pause. A managed target
+		// has no tunnel: the same code, with detail upstream.
+		p.router.ReportConnect(t.key(), true)
+		cut := cutTunnel
+		if t.managed != nil {
+			cut = cutUpstream
+		}
+		x.rec.CutBy = strp(cut)
+		p.log.Warn("the connection closed after the request was written, before the response headers", "request", x.id, "target", t.key(), "error", err.Error())
+		p.fail(w, x, http.StatusBadGateway, codeUpstreamClosed, cut, "", "the connection to the target closed before it answered; the request is not sent again")
 	}
 }
 
