@@ -288,7 +288,9 @@ func startTicksOf(t *testing.T, pid int) uint64 {
 
 // healthzCode asks addr for /healthz, as curl would.
 func healthzCode(addr string) (int, error) {
-	return getStatus(&http.Client{Timeout: time.Second}, "http://"+addr+"/healthz")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	return getStatus(ctx, &http.Client{Timeout: time.Second}, "http://"+addr+"/healthz")
 }
 
 // TestFakeControllerFlags: the fake accepts exactly the controller's command line and refuses the
