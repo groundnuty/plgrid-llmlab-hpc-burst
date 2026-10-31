@@ -34,11 +34,13 @@ const (
 	// ContentType of every body.
 	ContentType = "application/json"
 
-	// HeaderTag, HeaderJobID and HeaderBootID identify the agent on every
-	// call, beside "Authorization: Bearer <credential>".
-	HeaderTag    = "Hpcburst-Tag"
-	HeaderJobID  = "Hpcburst-Job-Id"
-	HeaderBootID = "Hpcburst-Boot-Id"
+	// HeaderTag, HeaderJobID and HeaderAgentInstanceID identify the agent on
+	// every call, beside "Authorization: Bearer <credential>". The agent
+	// instance ID is random per agent process (doc.go), never the kernel's
+	// boot ID.
+	HeaderTag             = "Hpcburst-Tag"
+	HeaderJobID           = "Hpcburst-Job-Id"
+	HeaderAgentInstanceID = "Hpcburst-Agent-Instance-Id"
 
 	// MaxBodyBytes is the largest request or response body either side
 	// accepts.
@@ -72,8 +74,9 @@ type Caller struct {
 	Tag string
 	// JobID is the job ID the agent presented, equal to the recorded one.
 	JobID string
-	// BootID is the agent process's boot ID.
-	BootID string
+	// AgentInstanceID is the agent process's random ID, from
+	// HeaderAgentInstanceID.
+	AgentInstanceID string
 }
 
 // Backend is the lifecycle controller's side of the agent API: the server
@@ -84,18 +87,21 @@ type Caller struct {
 // passes. An error that is an *Error goes to the agent with its code; any
 // other error is CodeInternal.
 type Backend interface {
-	// Register records the caller's registration: it binds the boot ID to the
-	// Allocation, and the controller copies it to the Instance it starts.
-	// Registering again with the same boot ID is accepted and changes nothing.
+	// Register records the caller's registration: it binds the agent
+	// instance ID to the Allocation, and the controller copies it, with the
+	// restart count, to the Instance it starts. Registering again with the
+	// same agent instance ID, as after the controller's restart, is accepted
+	// and changes nothing.
 	Register(ctx context.Context, c Caller, r RegisterRequest) (RegisterResponse, error)
 
 	// Desired returns what the caller's Allocation should run now, with its
 	// Version set (DesiredState.WithVersion). It is computed from API objects
-	// alone. A caller whose boot ID has no registration gets CodeNotRegistered.
+	// alone. A caller whose agent instance ID has no registration gets
+	// CodeNotRegistered.
 	Desired(ctx context.Context, c Caller) (DesiredState, error)
 
-	// Report takes the caller's latest full snapshot. A caller whose boot ID
-	// has no registration gets CodeNotRegistered.
+	// Report takes the caller's latest full snapshot. A caller whose agent
+	// instance ID has no registration gets CodeNotRegistered.
 	Report(ctx context.Context, c Caller, r Report) error
 }
 
@@ -115,9 +121,9 @@ const (
 	// backoff; the controller fails the Instance after
 	// health.registrationTimeout.
 	CodeJobMismatch Code = "JobMismatch"
-	// CodeNotRegistered (409): Desired or Report from a boot ID the controller
-	// does not know, as after its own restart. The agent registers again at
-	// once and retries.
+	// CodeNotRegistered (409): Desired or Report from an agent instance ID the
+	// controller does not know, as after its own restart. The agent registers
+	// again at once, with the same agent instance ID, and retries.
 	CodeNotRegistered Code = "NotRegistered"
 	// CodeUnavailable (503): the controller is not ready (its caches are not
 	// synced, or it is not the leader). The agent retries with backoff.

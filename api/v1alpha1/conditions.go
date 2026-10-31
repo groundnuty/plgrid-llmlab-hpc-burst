@@ -14,12 +14,40 @@ import (
 // ModelDeployment condition types (metav1.Condition), written by the
 // lifecycle controller (HBEP-7, Events and conditions).
 const (
-	// ConditionReady: at least as many ready Instances as desired.
+	// ConditionReady: at least as many ready Instances as desired. For a
+	// managed source: the catalog entry is listed and its Provider's key is
+	// not rejected; false with ReasonCatalogEntryUnlisted,
+	// ReasonCredentialsRejected or ReasonProviderNotOnPlatform (HBEP-7,
+	// Reconcile loop, step 1).
 	ConditionReady = "Ready"
 	// ConditionDegraded, with one of the Reason* values below.
 	ConditionDegraded = "Degraded"
-	// ConditionProgressing: the controller is acting towards the spec.
+	// ConditionProgressing: the controller is acting towards the spec. False
+	// with ReasonManagedSource for a managed source, which has no Instances
+	// by design.
 	ConditionProgressing = "Progressing"
+)
+
+// Reasons of a managed-source ModelDeployment's conditions (HBEP-7, Reconcile
+// loop, step 1). The lifecycle controller provisions nothing for one: no
+// Allocation and no Instance, whatever spec.instances says; desiredInstances
+// and readyInstances are 0. The front routes to the catalog entry (HBEP-5).
+const (
+	// ReasonManagedSource: Progressing is false, because a managed source has
+	// no Instances by design.
+	ReasonManagedSource = "ManagedSource"
+	// ReasonCatalogEntryUnlisted: Ready is false, because no allowed managed
+	// Provider's status lists the entry's catalog name now.
+	ReasonCatalogEntryUnlisted = "CatalogEntryUnlisted"
+	// ReasonCredentialsRejected: Ready is false, because the Provider that
+	// lists the entry has CredentialsRejected true.
+	ReasonCredentialsRejected = "CredentialsRejected"
+	// ReasonProviderNotOnPlatform: Ready is false, because no allowed managed
+	// Provider carries spec.source.managed.platform as its platform label
+	// (LabelPlatform), and the front routes the entry to no Provider off that
+	// platform (issue #64, left over from the review of PR #63). HBEP-5 names
+	// no reason; this name is a contracts decision.
+	ReasonProviderNotOnPlatform = "ProviderNotOnPlatform"
 )
 
 // Reasons of a ModelDeployment's Degraded condition (HBEP-7, Events and
@@ -39,8 +67,10 @@ const (
 	// ReasonSubmissionRejected: the provider's last attempt was Rejected; the
 	// message carries the scheduler's reason.
 	ReasonSubmissionRejected = "SubmissionRejected"
-	// ReasonProviderUnavailable: an allowed Provider is missing, not Ready, or
-	// managed, and was skipped.
+	// ReasonProviderUnavailable: an allowed batch Provider is missing or not
+	// Ready, and was skipped. A served ModelDeployment ignores managed
+	// Providers in its selection, even when their labels match, and sets no
+	// condition for them (HBEP-7, Reconcile loop, step 1; HBEP-5).
 	ReasonProviderUnavailable = "ProviderUnavailable"
 	// ReasonSpecUnsupported: a data-parallel-size above 1, or a workload shape
 	// that does not fit the declared context limit. No Allocation is created.
@@ -120,9 +150,22 @@ const (
 	ConditionPathUnresolved = "PathUnresolved"
 	// ConditionDialHomeUnreachable: an Instance on this Provider could not
 	// register through its dial-home path (HBEP-11, Single-user host). The
-	// lifecycle controller, which sees registrations, writes it. A contracts
-	// decision for the name.
+	// lifecycle controller, which sees registrations, sets it by server-side
+	// apply under FieldManagerLifecycle and owns only this condition type
+	// (DialHomeUnreachableApply); the Provider's controller keeps it when it
+	// writes the rest of the status. The name is a contracts decision, which
+	// the HBEP owner confirmed.
 	ConditionDialHomeUnreachable = "DialHomeUnreachable"
+)
+
+// Event reasons that are not condition reasons (HBEP-8 keeps the event
+// vocabulary; these are the ones the implementable HBEPs name).
+const (
+	// ReasonDrainWindowShort is the reason of the front's degraded event for a
+	// PlatformProfile with a batch Provider whose drainWindow is below the
+	// front's maxRequestDuration plus the profile's drainMargin (HBEP-5,
+	// Draining, the check).
+	ReasonDrainWindowShort = "DrainWindowShort"
 )
 
 // Allocation condition types (crossplane's condition type, since Allocation

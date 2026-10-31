@@ -110,8 +110,31 @@ type ProviderStatus struct {
 	// +kubebuilder:validation:MaxItems=20
 	QueueWaits []QueueWait `json:"queueWaits,omitempty"`
 
+	// Catalog is a managed Provider's catalog: one entry per model the
+	// gateway has listed (HBEP-4, Managed provider in alpha). An entry that
+	// leaves the listing stays, with listed false. The front routes to an
+	// entry while it is listed, and a managed-source ModelDeployment's Ready
+	// follows it (HBEP-5, Request path; HBEP-7, Reconcile loop, step 1).
+	// Empty on a batch Provider.
+	//
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=1024
+	Catalog []CatalogEntryStatus `json:"catalog,omitempty"`
+
+	// LastCatalogRead is when the managed Provider's controller last read the
+	// catalog successfully; it reads at most once a minute (HBEP-4).
+	//
+	// +optional
+	LastCatalogRead *metav1.Time `json:"lastCatalogRead,omitempty"`
+
 	// Conditions of the provider, for example a credentials file that others
-	// can read, or an unreachable platform.
+	// can read, or an unreachable platform. The Provider's controller writes
+	// them all, under FieldManagerProvider, except DialHomeUnreachable, which
+	// the lifecycle controller applies under FieldManagerLifecycle; neither
+	// removes the other's (docs/development.md, Single writer;
+	// DialHomeUnreachableApply).
 	//
 	// +optional
 	// +listType=map
@@ -149,3 +172,36 @@ type ProviderList struct {
 }
 
 func init() { SchemeBuilder.Register(&Provider{}, &ProviderList{}) }
+
+// CatalogEntryStatus is one model a managed gateway has listed (HBEP-4,
+// Managed provider in alpha).
+type CatalogEntryStatus struct {
+	// Name is the model's name in the catalog, the catalogName a
+	// managed-source ModelDeployment names.
+	//
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
+
+	// Revision is the revision the gateway reports for the entry, absent when
+	// it reports none.
+	//
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	Revision *string `json:"revision,omitempty"`
+
+	// ManagedID is the entry's managed deployment ID, over the platform, the
+	// catalog name and the revision (HBEP-3, Deployment ID; pkg/deploymentid).
+	// The pinned name model@<provider>/<deployment-id> resolves on its display
+	// form (HBEP-5).
+	ManagedID FullDeploymentID `json:"managedID"`
+
+	// Listed is whether the latest successful catalog read listed the entry.
+	Listed bool `json:"listed"`
+
+	// LastListedTime is when a catalog read last listed the entry.
+	//
+	// +optional
+	LastListedTime *metav1.Time `json:"lastListedTime,omitempty"`
+}

@@ -307,7 +307,79 @@ type ModelDeploymentSpec struct {
 	//
 	// +optional
 	Workload *Workload `json:"workload,omitempty"`
+
+	// Routing holds the front's settings for this deployment (HBEP-5,
+	// Configuration; HBEP-11, API). Absent, it takes its defaults, so the
+	// stored object always carries both load bounds.
+	//
+	// +optional
+	// +kubebuilder:default={}
+	Routing *Routing `json:"routing,omitempty"`
 }
+
+// Routing is a deployment's settings for the front (HBEP-5, Configuration).
+// The front reads all of it. The lifecycle controller reads only
+// MaxRequestDuration, which shortens the drain window (InstanceDrainWindow).
+type Routing struct {
+	// LoadBound is the bounded-load factor c of the deployment's balancer
+	// group, by membership (HBEP-5, Load bound and cap).
+	//
+	// +optional
+	// +kubebuilder:default={}
+	LoadBound *LoadBound `json:"loadBound,omitempty"`
+
+	// InstanceCap is the most requests in flight on one Instance while the
+	// tight bound is in force. Absent, it is the Instance's
+	// launch.maxNumSeqs times its workers (HBEP-5, Load bound and cap).
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1048576
+	InstanceCap *int32 `json:"instanceCap,omitempty"`
+
+	// MaxRequestDuration is the deployment's own total deadline per request,
+	// for a deployment whose requests are short. It can only shorten the
+	// front's maxRequestDuration (2 h by default): the front applies the
+	// shorter of the two, and a longer value lengthens nothing. It also
+	// shortens the drain window of the deployment's Instances to this plus
+	// the profile's drainMargin, when that is shorter than drainWindow
+	// (HBEP-5, Draining; InstanceDrainWindow). Admission cannot see the
+	// front's value, so the bound is applied where the value is read, not
+	// here. Absent, the front's value applies.
+	//
+	// +optional
+	MaxRequestDuration *Duration `json:"maxRequestDuration,omitempty"`
+}
+
+// LoadBound is the bounded-load factor c, by membership. The front counts as
+// ready the deployment's eligible Instances (HBEP-5, Load bound and cap).
+type LoadBound struct {
+	// Tight is c while at least spec.instances Instances are ready; the cap is
+	// then in force.
+	//
+	// +optional
+	// +kubebuilder:default="1.25"
+	Tight *LoadFactor `json:"tight,omitempty"`
+
+	// Loose is c while fewer are ready; no cap is in force.
+	//
+	// +optional
+	// +kubebuilder:default="2.0"
+	Loose *LoadFactor `json:"loose,omitempty"`
+}
+
+// LoadFactor is a bounded-load factor written as a decimal string, for example
+// "1.25", so that no float is stored (HBEP-5 writes the defaults as strings).
+// It is at least 1: a balancer bound below the mean load cannot place every
+// request. The forked KubeAI group's own setting has the same floor, a
+// meanLoadFactor of at least 100 percent
+// (third_party/forked/kubeai/api/k8s/v1/model_types.go).
+//
+// +kubebuilder:validation:MinLength=1
+// +kubebuilder:validation:MaxLength=16
+// +kubebuilder:validation:Pattern=`^[0-9]+(\.[0-9]+)?$`
+// +kubebuilder:validation:XValidation:rule="double(self) >= 1.0",message="a load bound is at least 1.0: a bound below the mean load cannot place every request (KubeAI's meanLoadFactor has the same floor of 100 percent)"
+type LoadFactor string
 
 // Workload is a deployment's request shapes (HBEP-7, What the controller
 // reads). Every shape must fit: each context length with the typical output,

@@ -57,6 +57,44 @@ type PartitionProfile struct {
 	//
 	// +optional
 	MemPerGPU *resource.Quantity `json:"memPerGpu,omitempty"`
+
+	// ImageFormat is the container image format Apptainer runs on the
+	// partition's compute nodes: sif, a single image file, or sandbox, an
+	// unpacked directory. The allocation agent builds and runs the engine
+	// image in this format, which the lifecycle controller sends it in the
+	// desired state (agentapi.AgentSettings.ImageFormat). It is not a
+	// deployment-ID input: both formats run the same image digest. Spike S1's
+	// probe 2 measured it: on Helios plgrid-gpu-gh200 a SIF runs (sif); on
+	// Athena plgrid-gpu-a100 Apptainer cannot run a SIF on the compute nodes
+	// and a sandbox directory runs (sandbox). Absent, the platform has not
+	// stated it, and the agent is sent sif, Apptainer's own format
+	// (ImageFormatOf).
+	//
+	// +optional
+	ImageFormat ImageFormat `json:"imageFormat,omitempty"`
+}
+
+// ImageFormat is a container image format Apptainer runs (PartitionProfile).
+//
+// +kubebuilder:validation:Enum=sif;sandbox
+type ImageFormat string
+
+// Image formats.
+const (
+	// ImageFormatSIF is a single SIF file, Apptainer's own format.
+	ImageFormatSIF ImageFormat = "sif"
+	// ImageFormatSandbox is an unpacked directory image (apptainer build
+	// --sandbox).
+	ImageFormatSandbox ImageFormat = "sandbox"
+)
+
+// ImageFormatOf returns the format the agent is sent for a partition: its
+// imageFormat, or ImageFormatSIF when the profile states none.
+func ImageFormatOf(p PartitionProfile) ImageFormat {
+	if p.ImageFormat == "" {
+		return ImageFormatSIF
+	}
+	return p.ImageFormat
 }
 
 // HealthThresholds are HBEP-7's malfunction signals and start deadlines
@@ -76,10 +114,13 @@ type HealthThresholds struct {
 	FailureThreshold *int32 `json:"failureThreshold,omitempty"`
 
 	// NoProgressTimeout is how long requests may run with the generated-token
-	// counter unchanged.
+	// counter unchanged. A request in prefill generates no token, so in alpha
+	// it is 30 min, equal to the front's idleTimeout, and a slow prefill that
+	// the front allows is never restarted (HBEP-4, Platform profile schema;
+	// HBEP-7, open question 6; HBEP-5).
 	//
 	// +optional
-	// +kubebuilder:default="2m"
+	// +kubebuilder:default="30m"
 	NoProgressTimeout *Duration `json:"noProgressTimeout,omitempty"`
 
 	// ErrorOnlyWindow is how long every answer may be a server error.
@@ -291,11 +332,27 @@ type PlatformProfileSpec struct {
 	StagingDir string `json:"stagingDir,omitempty"`
 
 	// DrainWindow is HBEP-5's drain window: an Instance drains from its hard
-	// end minus this. It is at least the front's maximum request duration.
+	// end minus this. It is at least the front's maxRequestDuration (2 h)
+	// plus DrainMargin, so its default is 2 h 10 min (owner decision, 30 Oct
+	// 2026). A ModelDeployment may only shorten it, through
+	// routing.maxRequestDuration (InstanceDrainWindow; HBEP-4, open question
+	// 11). The front checks the bound and raises DrainWindowShort when a
+	// profile breaks it (HBEP-5, Draining).
 	//
 	// +optional
-	// +kubebuilder:default="30m"
+	// +kubebuilder:default="2h10m"
 	DrainWindow *Duration `json:"drainWindow,omitempty"`
+
+	// DrainMargin is the margin above a request's longest duration in the
+	// drain window. An Instance's window is DrainWindow, or its
+	// ModelDeployment's routing.maxRequestDuration plus this margin when that
+	// is shorter. The front and the lifecycle controller both read it, so
+	// both compute the same drain start (InstanceDrainWindow; HBEP-4; HBEP-5,
+	// Draining).
+	//
+	// +optional
+	// +kubebuilder:default="10m"
+	DrainMargin *Duration `json:"drainMargin,omitempty"`
 
 	// HandoverMargin is the margin in HBEP-7's submission plan: a replacement
 	// is submitted at the drain start minus (the p90 observed queue wait + the

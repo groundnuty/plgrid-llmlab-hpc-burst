@@ -128,10 +128,69 @@ spec:
           status:
             description: ProviderStatus is the observed state of a Provider.
             properties:
+              catalog:
+                description: |-
+                  Catalog is a managed Provider's catalog: one entry per model the
+                  gateway has listed (HBEP-4, Managed provider in alpha). An entry that
+                  leaves the listing stays, with listed false. The front routes to an
+                  entry while it is listed, and a managed-source ModelDeployment's Ready
+                  follows it (HBEP-5, Request path; HBEP-7, Reconcile loop, step 1).
+                  Empty on a batch Provider.
+                items:
+                  description: |-
+                    CatalogEntryStatus is one model a managed gateway has listed (HBEP-4,
+                    Managed provider in alpha).
+                  properties:
+                    lastListedTime:
+                      description: LastListedTime is when a catalog read last listed
+                        the entry.
+                      format: date-time
+                      type: string
+                    listed:
+                      description: Listed is whether the latest successful catalog
+                        read listed the entry.
+                      type: boolean
+                    managedID:
+                      description: |-
+                        ManagedID is the entry's managed deployment ID, over the platform, the
+                        catalog name and the revision (HBEP-3, Deployment ID; pkg/deploymentid).
+                        The pinned name model@<provider>/<deployment-id> resolves on its display
+                        form (HBEP-5).
+                      maxLength: 64
+                      pattern: ^[0-9a-f]{64}$
+                      type: string
+                    name:
+                      description: |-
+                        Name is the model's name in the catalog, the catalogName a
+                        managed-source ModelDeployment names.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                    revision:
+                      description: |-
+                        Revision is the revision the gateway reports for the entry, absent when
+                        it reports none.
+                      maxLength: 256
+                      minLength: 1
+                      type: string
+                  required:
+                  - listed
+                  - managedID
+                  - name
+                  type: object
+                maxItems: 1024
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               conditions:
                 description: |-
                   Conditions of the provider, for example a credentials file that others
-                  can read, or an unreachable platform.
+                  can read, or an unreachable platform. The Provider's controller writes
+                  them all, under FieldManagerProvider, except DialHomeUnreachable, which
+                  the lifecycle controller applies under FieldManagerLifecycle; neither
+                  removes the other's (docs/development.md, Single writer;
+                  DialHomeUnreachableApply).
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -190,6 +249,12 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              lastCatalogRead:
+                description: |-
+                  LastCatalogRead is when the managed Provider's controller last read the
+                  catalog successfully; it reads at most once a minute (HBEP-4).
+                format: date-time
+                type: string
               lastReconcileTime:
                 description: LastReconcileTime is when the controller last reconciled
                   the object.

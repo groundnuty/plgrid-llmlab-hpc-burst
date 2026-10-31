@@ -59,11 +59,28 @@ spec:
               that does not apply to its kind, is absent: an absent bool is unknown, not
               false.
             properties:
+              drainMargin:
+                default: 10m
+                description: |-
+                  DrainMargin is the margin above a request's longest duration in the
+                  drain window. An Instance's window is DrainWindow, or its
+                  ModelDeployment's routing.maxRequestDuration plus this margin when that
+                  is shorter. The front and the lifecycle controller both read it, so
+                  both compute the same drain start (InstanceDrainWindow; HBEP-4; HBEP-5,
+                  Draining).
+                maxLength: 63
+                pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                type: string
               drainWindow:
-                default: 30m
+                default: 2h10m
                 description: |-
                   DrainWindow is HBEP-5's drain window: an Instance drains from its hard
-                  end minus this. It is at least the front's maximum request duration.
+                  end minus this. It is at least the front's maxRequestDuration (2 h)
+                  plus DrainMargin, so its default is 2 h 10 min (owner decision, 30 Oct
+                  2026). A ModelDeployment may only shorten it, through
+                  routing.maxRequestDuration (InstanceDrainWindow; HBEP-4, open question
+                  11). The front checks the bound and raises DrainWindowShort when a
+                  profile breaks it (HBEP-5, Draining).
                 maxLength: 63
                 pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                 type: string
@@ -113,10 +130,13 @@ spec:
                     pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                     type: string
                   noProgressTimeout:
-                    default: 2m
+                    default: 30m
                     description: |-
                       NoProgressTimeout is how long requests may run with the generated-token
-                      counter unchanged.
+                      counter unchanged. A request in prefill generates no token, so in alpha
+                      it is 30 min, equal to the front's idleTimeout, and a slow prefill that
+                      the front allows is never restarted (HBEP-4, Platform profile schema;
+                      HBEP-7, open question 6; HBEP-5).
                     maxLength: 63
                     pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                     type: string
@@ -254,6 +274,23 @@ spec:
                       maximum: 1024
                       minimum: 0
                       type: integer
+                    imageFormat:
+                      description: |-
+                        ImageFormat is the container image format Apptainer runs on the
+                        partition's compute nodes: sif, a single image file, or sandbox, an
+                        unpacked directory. The allocation agent builds and runs the engine
+                        image in this format, which the lifecycle controller sends it in the
+                        desired state (agentapi.AgentSettings.ImageFormat). It is not a
+                        deployment-ID input: both formats run the same image digest. Spike S1's
+                        probe 2 measured it: on Helios plgrid-gpu-gh200 a SIF runs (sif); on
+                        Athena plgrid-gpu-a100 Apptainer cannot run a SIF on the compute nodes
+                        and a sandbox directory runs (sandbox). Absent, the platform has not
+                        stated it, and the agent is sent sif, Apptainer's own format
+                        (ImageFormatOf).
+                      enum:
+                      - sif
+                      - sandbox
+                      type: string
                     maxTime:
                       description: |-
                         MaxTime is the partition's longest time limit (HBEP-4, Platform profile

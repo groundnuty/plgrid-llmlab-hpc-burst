@@ -123,7 +123,8 @@ spec:
                     description: |-
                       Command is the engine's argument vector inside the image, program first,
                       rendered from the serving spec's flags in order, with the framework's own
-                      flags (model, Unix socket, chat template, served model name).
+                      flags (model, Unix socket, chat template, served model name, and
+                      --max-num-seqs when the spec does not give it).
                     items:
                       maxLength: 8192
                       type: string
@@ -185,12 +186,26 @@ spec:
                     maxLength: 128
                     pattern: ^[A-Z_][A-Z0-9_]*$
                     type: string
+                  maxNumSeqs:
+                    description: |-
+                      MaxNumSeqs is the --max-num-seqs that Command passes to each worker: the
+                      serving spec's max-num-seqs, else DefaultMaxNumSeqs. The launch always
+                      passes it, so the front's per-Instance cap, when routing.instanceCap is
+                      unset, is this times the Instance's workers (HBEP-5, Load bound and cap;
+                      HBEP-7, What the controller reads). It is capacity, not a deployment-ID
+                      input (HBEP-3's table), so the default changes no ID. The controller
+                      renders it with Command, and Command carries exactly this value.
+                    format: int32
+                    maximum: 1048576
+                    minimum: 1
+                    type: integer
                 required:
                 - checkpoint
                 - command
                 - gpus
                 - image
                 - imageDigest
+                - maxNumSeqs
                 type: object
             required:
             - allocationRef
@@ -208,18 +223,21 @@ spec:
                 + self.deploymentID.substring(0, 12)
           status:
             description: |-
-              InstanceStatus is the observed state of an Instance. The job ID, node, URL
-              and lease end are the Instance's metadata (HBEP-3): a handover replaces the
-              Instance, so they never change within one.
+              InstanceStatus is the observed state of an Instance. The lifecycle
+              controller writes all of it (docs/development.md, Single writer). The job ID
+              and node are the Instance's metadata (HBEP-3): a handover replaces the
+              Instance, so they never change within one. The lease end can: a later hard
+              end, once observed, is copied too.
             properties:
               agent:
                 description: |-
                   Agent is what the controller keeps of the agent's registration for this
                   Instance (HBEP-7, The allocation agent).
                 properties:
-                  bootID:
-                    description: BootID identifies one execution of the agent, generated
-                      at its start.
+                  agentInstanceID:
+                    description: |-
+                      AgentInstanceID identifies one agent process: a random ID the agent
+                      draws at its start (agentapi.HeaderAgentInstanceID).
                     maxLength: 64
                     minLength: 1
                     type: string
@@ -233,8 +251,15 @@ spec:
                       registration.
                     format: date-time
                     type: string
+                  restartCount:
+                    description: |-
+                      RestartCount is the scheduler's restart count of the job when the agent
+                      registered, from SLURM_RESTART_COUNT; 0 when the scheduler sets none.
+                    format: int32
+                    minimum: 0
+                    type: integer
                 required:
-                - bootID
+                - agentInstanceID
                 - jobID
                 - registeredTime
                 type: object
@@ -314,7 +339,13 @@ spec:
                 format: date-time
                 type: string
               leaseEnd:
-                description: LeaseEnd is the hard end of the Instance's lease.
+                description: |-
+                  LeaseEnd is the hard end of the Instance's lease. Its one writer is the
+                  lifecycle controller, which copies it from the Allocation's
+                  status.atProvider.hardEnd at every observe (HBEP-7, Controllers), so a
+                  later hard end, once observed, moves it and with it the drain start. The
+                  front computes the drain start from it (InstanceDrainWindow) and never
+                  routes to an Instance without it (HBEP-5, Request path).
                 format: date-time
                 type: string
               node:
@@ -379,7 +410,10 @@ spec:
                 - timeToFirstToken
                 type: object
               url:
-                description: URL the front reaches the Instance at.
+                description: |-
+                  URL the front reaches the Instance at. Unused in alpha: the front
+                  reaches an Instance through the transport keyed by its UID (HBEP-5,
+                  Reachability).
                 type: string
               verdict:
                 description: Verdict mirrors the latest verification record's verdict.

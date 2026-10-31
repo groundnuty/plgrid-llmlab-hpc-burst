@@ -188,6 +188,71 @@ spec:
                     released when idle is not kept until a date'
                   rule: '!(has(self.mode) && self.mode == ''ReleaseWhenIdle'') ||
                     !has(self.until)'
+              routing:
+                default: {}
+                description: |-
+                  Routing holds the front's settings for this deployment (HBEP-5,
+                  Configuration; HBEP-11, API). Absent, it takes its defaults, so the
+                  stored object always carries both load bounds.
+                properties:
+                  instanceCap:
+                    description: |-
+                      InstanceCap is the most requests in flight on one Instance while the
+                      tight bound is in force. Absent, it is the Instance's
+                      launch.maxNumSeqs times its workers (HBEP-5, Load bound and cap).
+                    format: int32
+                    maximum: 1048576
+                    minimum: 1
+                    type: integer
+                  loadBound:
+                    default: {}
+                    description: |-
+                      LoadBound is the bounded-load factor c of the deployment's balancer
+                      group, by membership (HBEP-5, Load bound and cap).
+                    properties:
+                      loose:
+                        default: "2.0"
+                        description: Loose is c while fewer are ready; no cap is in
+                          force.
+                        maxLength: 16
+                        minLength: 1
+                        pattern: ^[0-9]+(\.[0-9]+)?$
+                        type: string
+                        x-kubernetes-validations:
+                        - message: 'a load bound is at least 1.0: a bound below the
+                            mean load cannot place every request (KubeAI''s meanLoadFactor
+                            has the same floor of 100 percent)'
+                          rule: double(self) >= 1.0
+                      tight:
+                        default: "1.25"
+                        description: |-
+                          Tight is c while at least spec.instances Instances are ready; the cap is
+                          then in force.
+                        maxLength: 16
+                        minLength: 1
+                        pattern: ^[0-9]+(\.[0-9]+)?$
+                        type: string
+                        x-kubernetes-validations:
+                        - message: 'a load bound is at least 1.0: a bound below the
+                            mean load cannot place every request (KubeAI''s meanLoadFactor
+                            has the same floor of 100 percent)'
+                          rule: double(self) >= 1.0
+                    type: object
+                  maxRequestDuration:
+                    description: |-
+                      MaxRequestDuration is the deployment's own total deadline per request,
+                      for a deployment whose requests are short. It can only shorten the
+                      front's maxRequestDuration (2 h by default): the front applies the
+                      shorter of the two, and a longer value lengthens nothing. It also
+                      shortens the drain window of the deployment's Instances to this plus
+                      the profile's drainMargin, when that is shorter than drainWindow
+                      (HBEP-5, Draining; InstanceDrainWindow). Admission cannot see the
+                      front's value, so the bound is applied where the value is read, not
+                      here. Absent, the front's value applies.
+                    maxLength: 63
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                    type: string
+                type: object
               source:
                 description: |-
                   Source says what is served: a checkpoint on our engine, or a catalog

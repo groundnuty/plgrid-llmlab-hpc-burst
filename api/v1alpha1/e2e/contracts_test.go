@@ -232,7 +232,7 @@ func TestInstanceContractStatus(t *testing.T) {
 	got.Status.EndReason = v1alpha1.ReasonAllocationEndedEarly
 	got.Status.StartInstructionTime = &t0
 	got.Status.ReadyTime = ptr.To(metav1.NewTime(t0.Add(20 * time.Minute)))
-	got.Status.Agent = &v1alpha1.AgentRegistration{BootID: strings.Repeat("b", 32), JobID: "1001", RegisteredTime: t0}
+	got.Status.Agent = &v1alpha1.AgentRegistration{AgentInstanceID: strings.Repeat("b", 32), JobID: "1001", RegisteredTime: t0}
 	got.Status.Throughput = &v1alpha1.Throughput{TimePerOutputToken: "23ms", TimeToFirstToken: "410ms", TargetSessions: 8}
 	got.Status.VerificationRecord = "ver-" + string(got.UID) + "-2"
 	must(t, c.Status().Update(bg(), got), "write")

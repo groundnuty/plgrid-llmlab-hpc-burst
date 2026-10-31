@@ -60,7 +60,8 @@ type Launch struct {
 
 	// Command is the engine's argument vector inside the image, program first,
 	// rendered from the serving spec's flags in order, with the framework's own
-	// flags (model, Unix socket, chat template, served model name).
+	// flags (model, Unix socket, chat template, served model name, and
+	// --max-num-seqs when the spec does not give it).
 	//
 	// +listType=atomic
 	// +kubebuilder:validation:MinItems=1
@@ -102,7 +103,24 @@ type Launch struct {
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=1024
 	GPUs int32 `json:"gpus"`
+
+	// MaxNumSeqs is the --max-num-seqs that Command passes to each worker: the
+	// serving spec's max-num-seqs, else DefaultMaxNumSeqs. The launch always
+	// passes it, so the front's per-Instance cap, when routing.instanceCap is
+	// unset, is this times the Instance's workers (HBEP-5, Load bound and cap;
+	// HBEP-7, What the controller reads). It is capacity, not a deployment-ID
+	// input (HBEP-3's table), so the default changes no ID. The controller
+	// renders it with Command, and Command carries exactly this value.
+	//
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1048576
+	MaxNumSeqs int32 `json:"maxNumSeqs"`
 }
+
+// DefaultMaxNumSeqs is the framework's --max-num-seqs when the serving spec
+// gives none (HBEP-7, What the controller reads): vLLM's own default for an
+// online server, now written into every launch so the cap is always known.
+const DefaultMaxNumSeqs = 256
 
 // LaunchEnvVar is one variable of a launch's environment. It carries no CEL
 // rule: the serving spec's EnvVar rules have already admitted it.
@@ -154,9 +172,11 @@ const (
 	VerdictFail Verdict = "fail"
 )
 
-// InstanceStatus is the observed state of an Instance. The job ID, node, URL
-// and lease end are the Instance's metadata (HBEP-3): a handover replaces the
-// Instance, so they never change within one.
+// InstanceStatus is the observed state of an Instance. The lifecycle
+// controller writes all of it (docs/development.md, Single writer). The job ID
+// and node are the Instance's metadata (HBEP-3): a handover replaces the
+// Instance, so they never change within one. The lease end can: a later hard
+// end, once observed, is copied too.
 type InstanceStatus struct {
 	ReconcileStatus `json:",inline"`
 
@@ -199,12 +219,19 @@ type InstanceStatus struct {
 	// +optional
 	Node string `json:"node,omitempty"`
 
-	// URL the front reaches the Instance at.
+	// URL the front reaches the Instance at. Unused in alpha: the front
+	// reaches an Instance through the transport keyed by its UID (HBEP-5,
+	// Reachability).
 	//
 	// +optional
 	URL string `json:"url,omitempty"`
 
-	// LeaseEnd is the hard end of the Instance's lease.
+	// LeaseEnd is the hard end of the Instance's lease. Its one writer is the
+	// lifecycle controller, which copies it from the Allocation's
+	// status.atProvider.hardEnd at every observe (HBEP-7, Controllers), so a
+	// later hard end, once observed, moves it and with it the drain start. The
+	// front computes the drain start from it (InstanceDrainWindow) and never
+	// routes to an Instance without it (HBEP-5, Request path).
 	//
 	// +optional
 	LeaseEnd *metav1.Time `json:"leaseEnd,omitempty"`
@@ -247,15 +274,25 @@ type InstanceStatus struct {
 
 // AgentRegistration is the agent registration an Instance was started under.
 // The lifecycle controller writes it when the agent of the Instance's
-// Allocation registers. A registration from the same job with another boot ID
-// is a second execution of the job (a requeue): nothing from the first is
-// reused (HBEP-7, Test plan).
+// Allocation registers. A registration from the same job with another agent
+// instance ID, or a higher restart count, is a second execution of the job (a
+// requeue): nothing from the first is reused (HBEP-7, Test plan). The kernel's
+// boot ID is never used: a requeued job can land on the same node without a
+// reboot.
 type AgentRegistration struct {
-	// BootID identifies one execution of the agent, generated at its start.
+	// AgentInstanceID identifies one agent process: a random ID the agent
+	// draws at its start (agentapi.HeaderAgentInstanceID).
 	//
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=64
-	BootID string `json:"bootID"`
+	AgentInstanceID string `json:"agentInstanceID"`
+
+	// RestartCount is the scheduler's restart count of the job when the agent
+	// registered, from SLURM_RESTART_COUNT; 0 when the scheduler sets none.
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	RestartCount int32 `json:"restartCount,omitempty"`
 
 	// JobID is the job ID the agent registered with.
 	//

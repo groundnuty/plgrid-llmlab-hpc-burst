@@ -30,8 +30,12 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 // ---- registration ----
 
 // RegisterRequest is the body of PathRegister. The credential, tag, job ID and
-// boot ID travel in headers (doc.go).
+// agent instance ID travel in headers (doc.go).
 type RegisterRequest struct {
+	// RestartCount is the scheduler's restart count of the job, from
+	// SLURM_RESTART_COUNT; 0 when the scheduler sets none. A requeued job
+	// registers with a higher count (doc.go).
+	RestartCount int32 `json:"restartCount,omitempty"`
 	// AgentVersion is the agent build's version, for diagnostics.
 	AgentVersion string `json:"agentVersion,omitempty"`
 	// Node is the compute node's host name.
@@ -97,7 +101,24 @@ type AgentSettings struct {
 	// StopGrace is how long a polite stop lasts before a kill
 	// (restart.stopGrace).
 	StopGrace Duration `json:"stopGrace"`
+	// ImageFormat is the format the agent builds and runs the engine image
+	// in, from the partition's imageFormat in the platform profile
+	// (v1alpha1.ImageFormatOf): ImageFormatSIF or ImageFormatSandbox. Empty,
+	// from an older controller, means ImageFormatSIF.
+	ImageFormat ImageFormat `json:"imageFormat,omitempty"`
 }
+
+// ImageFormat is a container image format Apptainer runs, the strings of
+// v1alpha1.ImageFormat.
+type ImageFormat string
+
+// Image formats. On a partition whose compute nodes cannot run a SIF, such as
+// Athena's A100 partition (spike S1, probe 2), the agent builds a sandbox
+// directory instead.
+const (
+	ImageFormatSIF     ImageFormat = "sif"
+	ImageFormatSandbox ImageFormat = "sandbox"
+)
 
 // DesiredInstance is the one Instance an Allocation should run.
 type DesiredInstance struct {
@@ -169,6 +190,9 @@ type Launch struct {
 	ChatTemplate *string `json:"chatTemplate,omitempty"`
 	// GPUs is the number of GPUs the engine uses.
 	GPUs int32 `json:"gpus"`
+	// MaxNumSeqs is the --max-num-seqs that Command passes, recorded for
+	// reading; the agent runs Command as it is.
+	MaxNumSeqs int32 `json:"maxNumSeqs,omitempty"`
 }
 
 // EnvVar is one environment variable.

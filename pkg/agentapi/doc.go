@@ -29,10 +29,16 @@
 // Every request carries the agent's identity in headers, never in a body, so
 // bodies can be logged:
 //
-//	Authorization: Bearer <the Allocation's credential>
-//	Hpcburst-Tag:    <the Allocation's job tag>
-//	Hpcburst-Job-Id: <the job ID, from the scheduler's environment>
-//	Hpcburst-Boot-Id: <BootID: random per agent process>
+//	Authorization:              Bearer <the Allocation's credential>
+//	Hpcburst-Tag:               <the Allocation's job tag>
+//	Hpcburst-Job-Id:            <the job ID, from the scheduler's environment>
+//	Hpcburst-Agent-Instance-Id: <a random ID the agent draws at its start>
+//
+// The agent instance ID identifies one agent process. It is never the kernel's
+// boot ID: a requeued job can land on the same node with no reboot, and must
+// still be told apart. The registration also carries the scheduler's restart
+// count of the job (RegisterRequest.RestartCount, from SLURM_RESTART_COUNT when
+// Slurm sets it), so a requeue shows as a higher count too.
 //
 // The server authenticates every call, so it holds no session: it finds the
 // Allocation whose external name is the tag, reads the credential file named
@@ -101,16 +107,20 @@
 // times. Backend.Desired must be computed from those objects alone, so a
 // restarted controller serves the same desired state, with the same Version.
 //
-// Registration is kept in memory too, keyed by Allocation UID and boot ID, and
-// copied to the Instance it starts (InstanceStatus.Agent). A controller that
-// does not know a caller's boot ID answers Desired and Report with
-// CodeNotRegistered, and the agent registers again within one poll. So after
-// its own restart, the controller judges no registration timeout until
-// LongPollTimeout plus ReportInterval have passed since it started.
+// Registration is soft state: it is kept in memory, keyed by Allocation UID and
+// agent instance ID, and copied to the Instance it starts
+// (InstanceStatus.Agent). A controller that does not know a caller's agent
+// instance ID answers Desired and Report with CodeNotRegistered, and the agent
+// registers again at once, within one poll, with the same agent instance ID.
+// That re-registration is the same execution: it fails no Instance and raises
+// no generation. So after its own restart, the controller judges no
+// registration timeout until LongPollTimeout plus ReportInterval have passed
+// since it started.
 //
 // A registration with the job ID the Instance was started under and another
-// boot ID is a second execution of the job, a requeue: nothing from the first
-// execution is reused, and the Instance fails (HBEP-7, Test plan).
+// agent instance ID, or a higher restart count, is a second execution of the
+// job, a requeue: nothing from the first execution is reused, and the Instance
+// fails (HBEP-7, Test plan).
 //
 // # Generations
 //

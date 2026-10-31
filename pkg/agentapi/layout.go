@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 )
 
 // The file layout the provider, the agent and the controller share.
@@ -43,6 +44,20 @@ const (
 
 // ImagesDir is where the agent pulls images by digest.
 const ImagesDir = "images"
+
+// StagedImagePath is where the agent keeps an image in one format, relative to
+// stagingDir: images/<64 hex>.sif, a file, for ImageFormatSIF, and
+// images/<64 hex>.sandbox, a directory, for ImageFormatSandbox. digest is
+// "sha256:" and 64 hex characters (Launch.ImageDigest); the prefix is dropped,
+// because ":" is not safe in every path the agent passes to Apptainer. An empty
+// format is ImageFormatSIF.
+func StagedImagePath(digest string, format ImageFormat) string {
+	hex := strings.TrimPrefix(digest, "sha256:")
+	if format == ImageFormatSandbox {
+		return path.Join(ImagesDir, hex+".sandbox")
+	}
+	return path.Join(ImagesDir, hex+".sif")
+}
 
 // StagedCheckpointDir is where the agent stages a checkpoint:
 // checkpoints/<repository>/<revision>.

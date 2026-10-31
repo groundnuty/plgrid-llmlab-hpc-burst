@@ -1,0 +1,103 @@
+package fake
+
+import (
+	"maps"
+	"slices"
+	"time"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
+)
+
+// The real server decodes JSON, so the real Backend always owns what it is
+// given. These doubles call each other directly, so each side copies what it
+// stores and what it hands out: a later change by the caller never rewrites
+// history that a test is about to read.
+
+// clonePtr returns a pointer to a copy of *p made by f, or nil.
+func clonePtr[T any](p *T, f func(T) T) *T {
+	if p == nil {
+		return nil
+	}
+	v := f(*p)
+	return &v
+}
+
+func same[T any](v T) T { return v }
+
+func cloneRegister(r agentapi.RegisterRequest) agentapi.RegisterRequest {
+	r.GPUs = slices.Clone(r.GPUs)
+	return r
+}
+
+func cloneDesired(d agentapi.DesiredState) agentapi.DesiredState {
+	d.Instance = clonePtr(d.Instance, func(i agentapi.DesiredInstance) agentapi.DesiredInstance {
+		i.Launch.Command = slices.Clone(i.Launch.Command)
+		i.Launch.Env = slices.Clone(i.Launch.Env)
+		i.Launch.ChatTemplate = clonePtr(i.Launch.ChatTemplate, same[string])
+		i.Workers = slices.Clone(i.Workers)
+		i.Checks = clonePtr(i.Checks, cloneChecksRequest)
+		return i
+	})
+	return d
+}
+
+func cloneChecksRequest(c agentapi.Checks) agentapi.Checks {
+	c.Verify = clonePtr(c.Verify, func(v agentapi.VerifyRequest) agentapi.VerifyRequest {
+		v.Files = slices.Clone(v.Files)
+		return v
+	})
+	c.Qualify = clonePtr(c.Qualify, same[agentapi.QualifyRequest])
+	c.WarmUp = clonePtr(c.WarmUp, same[agentapi.WarmUpRequest])
+	return c
+}
+
+func cloneReport(r agentapi.Report) agentapi.Report {
+	r.Instance = clonePtr(r.Instance, func(i agentapi.InstanceReport) agentapi.InstanceReport {
+		i.Staging = clonePtr(i.Staging, same[agentapi.Staging])
+		if i.Workers != nil {
+			workers := make([]agentapi.WorkerReport, len(i.Workers))
+			for n, w := range i.Workers {
+				workers[n] = cloneWorkerReport(w)
+			}
+			i.Workers = workers
+		}
+		i.Checks = clonePtr(i.Checks, cloneCheckResults)
+		return i
+	})
+	return r
+}
+
+func cloneWorkerReport(w agentapi.WorkerReport) agentapi.WorkerReport {
+	w.StartTime = clonePtr(w.StartTime, same[time.Time])
+	w.ExitCode = clonePtr(w.ExitCode, same[int])
+	w.Health = clonePtr(w.Health, func(h agentapi.Health) agentapi.Health {
+		h.ResponsesByStatus = maps.Clone(h.ResponsesByStatus)
+		return h
+	})
+	return w
+}
+
+func cloneCheckResults(c agentapi.CheckResults) agentapi.CheckResults {
+	c.Verify = clonePtr(c.Verify, func(v agentapi.VerifyResult) agentapi.VerifyResult {
+		v.Files = slices.Clone(v.Files)
+		v.Settings = maps.Clone(v.Settings)
+		return v
+	})
+	c.Qualify = clonePtr(c.Qualify, func(q agentapi.QualifyResult) agentapi.QualifyResult {
+		q.Checks = slices.Clone(q.Checks)
+		q.ServedModelNames = slices.Clone(q.ServedModelNames)
+		return q
+	})
+	c.WarmUp = clonePtr(c.WarmUp, func(w agentapi.WarmUpResult) agentapi.WarmUpResult {
+		if w.Rounds != nil {
+			rounds := make([]agentapi.WarmUpRound, len(w.Rounds))
+			for n, r := range w.Rounds {
+				r.Requests = slices.Clone(r.Requests)
+				rounds[n] = r
+			}
+			w.Rounds = rounds
+		}
+		return w
+	})
+	return c
+}
