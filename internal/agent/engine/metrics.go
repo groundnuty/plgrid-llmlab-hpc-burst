@@ -68,20 +68,39 @@ func (c *Client) metrics(ctx context.Context) (metrics, error) {
 	return parseMetrics(string(b))
 }
 
+// finite reports whether v is a number a report can carry. A series whose value
+// is NaN, +Inf or -Inf is unknown and is left out of every reading below: JSON
+// has no NaN or infinity, so a float64 field holding one makes json.Marshal fail
+// for the whole report, and the agent could not report at all; math.Max with a
+// NaN is NaN; and an integer converted from one is meaningless.
+func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
+
 // sum adds the values of every series of the metric (one per engine in a data-
-// parallel deployment); found is false when the scrape has none. A series whose
-// value is not a finite number (NaN, +Inf, -Inf) is unknown, so it is left out:
-// a NaN would turn the total into one and fail the report's JSON encoding, which
-// has no NaN.
+// parallel deployment); found is false when the scrape has none that is finite.
 func (m metrics) sum(name string) (total float64, found bool) {
 	for _, s := range m[name] {
-		if math.IsNaN(s.value) || math.IsInf(s.value, 0) {
+		if !finite(s.value) {
 			continue
 		}
 		total += s.value
 		found = true
 	}
 	return total, found
+}
+
+// max is the largest finite value among the series of the metric; found is false
+// when the scrape has none.
+func (m metrics) max(name string) (top float64, found bool) {
+	for _, s := range m[name] {
+		if !finite(s.value) {
+			continue
+		}
+		if !found || s.value > top {
+			top = s.value
+		}
+		found = true
+	}
+	return top, found
 }
 
 // Sample reads the engine's metrics into a health sample: the running and
@@ -115,15 +134,16 @@ func (c *Client) Sample(ctx context.Context) (agentapi.Health, error) {
 	h.Preemptions = m.counter(metricPreemptions)
 	h.PrefixCacheQueriedTokens = m.counter(metricPrefixQueries)
 	h.PrefixCacheHitTokens = m.counter(metricPrefixHits)
-	if v, ok := m.sum(metricTPOTSum); ok {
+	// The sum of finite series can itself overflow to +Inf, which JSON cannot
+	// carry either.
+	if v, ok := m.sum(metricTPOTSum); ok && finite(v) {
 		h.TimePerOutputTokenSecondsSum = agentapi.Float64(v)
 	}
 	h.TimePerOutputTokenCount = m.counter(metricTPOTCount)
-	if ss := m[metricKVUsage]; len(ss) > 0 {
-		kv := ss[0].value
-		for _, s := range ss[1:] {
-			kv = math.Max(kv, s.value)
-		}
+	// The KV cache's use is the fullest engine's. A series that is not finite
+	// is unknown, not the maximum: KVCacheUsage is a float64, and a NaN in it
+	// would fail the whole report's JSON encoding.
+	if kv, ok := m.max(metricKVUsage); ok {
 		h.KVCacheUsage = agentapi.Float64(kv)
 	}
 	// The status label is taken verbatim (agentapi.Health.ResponsesByStatus).
@@ -136,7 +156,7 @@ func (c *Client) Sample(ctx context.Context) (agentapi.Health, error) {
 	// the keys are "2xx", "4xx" and "5xx".
 	for _, s := range m[metricHTTP] {
 		st := s.labels["status"]
-		if st == "" {
+		if st == "" || !finite(s.value) {
 			continue
 		}
 		if h.ResponsesByStatus == nil {

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -230,5 +231,79 @@ func TestSampleOfTheRealCapture(t *testing.T) {
 	want := counters{preemptions: i64(0), queried: i64(3310655), hit: i64(2647024)}
 	if got := countersOf(h); !sameCounters(got, want) {
 		t.Errorf("counters %v, want %v", got, want)
+	}
+}
+
+// Health's float64 fields are KVCacheUsage and TimePerOutputTokenSecondsSum
+// (checked against pkg/agentapi/types.go; every other number in Health is an
+// integer or a time). JSON has no NaN or infinity: a float64 field holding one
+// makes json.Marshal fail for the whole report, so the agent could not report
+// at all. A non-finite KV gauge is unknown (nil) and the report encodes with the
+// other readings intact. The fixture's own KV gauge is replaced by hand-written
+// lines; the encoding is the real one the agent's reports go through.
+func TestSampleTreatsANonFiniteKVGaugeAsUnknownAndTheReportEncodes(t *testing.T) {
+	for _, bad := range []string{"NaN", "+Inf", "-Inf"} {
+		t.Run(bad, func(t *testing.T) {
+			text := without(readFixture(t), "vllm:kv_cache_usage_perc") +
+				`vllm:kv_cache_usage_perc{engine="0",model_name="m"} ` + bad + "\n"
+			h := sampleOf(t, text)
+			if h.KVCacheUsage != nil {
+				t.Errorf("KVCacheUsage = %v, want nil (unknown)", *h.KVCacheUsage)
+			}
+			if got, want := countersOf(h), fixtureCounters(); !sameCounters(got, want) {
+				t.Errorf("counters %v, want %v", got, want)
+			}
+			if h.RunningRequests == nil || *h.RunningRequests != 2 {
+				t.Errorf("running %v, want 2: the other readings must survive", h.RunningRequests)
+			}
+			rep := agentapi.Report{Instance: &agentapi.InstanceReport{Workers: []agentapi.WorkerReport{{Name: "worker-0", Health: &h}}}}
+			b, err := json.Marshal(rep)
+			if err != nil {
+				t.Fatalf("the report does not encode: %v", err)
+			}
+			if strings.Contains(string(b), "kvCacheUsage") {
+				t.Errorf("the report carries kvCacheUsage for an unknown gauge: %s", b)
+			}
+		})
+	}
+}
+
+// With two engines, a non-finite series is left out and the other still counts:
+// the fullest finite engine's use, not NaN (math.Max would give NaN).
+func TestSampleKVGaugeIsTheFullestFiniteEngine(t *testing.T) {
+	h := sampleOf(t, `vllm:kv_cache_usage_perc{engine="0",model_name="m"} 0.25
+vllm:kv_cache_usage_perc{engine="1",model_name="m"} NaN
+vllm:kv_cache_usage_perc{engine="2",model_name="m"} 0.5
+`)
+	if h.KVCacheUsage == nil || *h.KVCacheUsage != 0.5 {
+		t.Errorf("KVCacheUsage = %v, want 0.5", h.KVCacheUsage)
+	}
+}
+
+// A response count that is not finite is left out, not converted to an integer.
+func TestSampleLeavesANonFiniteResponseCountOut(t *testing.T) {
+	h := sampleOf(t, `http_requests_total{handler="/v1/chat/completions",method="POST",status="2xx"} 9.0
+http_requests_total{handler="/v1/chat/completions",method="POST",status="5xx"} NaN
+`)
+	if len(h.ResponsesByStatus) != 1 || h.ResponsesByStatus["2xx"] != 9 {
+		t.Errorf("responses by status %v, want only 2xx 9", h.ResponsesByStatus)
+	}
+}
+
+// Two finite series can add up past the largest float64; the total is then
+// +Inf, which the report cannot encode, so the sum is unknown.
+func TestSampleTreatsAnOverflowingSumAsUnknown(t *testing.T) {
+	h := sampleOf(t, `vllm:request_time_per_output_token_seconds_sum{engine="0",model_name="m"} 1.7e308
+vllm:request_time_per_output_token_seconds_sum{engine="1",model_name="m"} 1.7e308
+vllm:request_time_per_output_token_seconds_count{engine="0",model_name="m"} 4.0
+`)
+	if h.TimePerOutputTokenSecondsSum != nil {
+		t.Errorf("sum = %v, want nil (unknown)", *h.TimePerOutputTokenSecondsSum)
+	}
+	if h.TimePerOutputTokenCount == nil || *h.TimePerOutputTokenCount != 4 {
+		t.Errorf("count = %v, want 4", h.TimePerOutputTokenCount)
+	}
+	if _, err := json.Marshal(h); err != nil {
+		t.Errorf("the sample does not encode: %v", err)
 	}
 }
