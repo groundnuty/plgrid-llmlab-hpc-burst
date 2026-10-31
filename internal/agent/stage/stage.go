@@ -23,15 +23,9 @@
 // whole files through one reused 8 MiB buffer, never a read sized by a cap,
 // whose read-ahead over-read Lustre by up to 190 times (L-12.5).
 //
-// Which listed files are staged. The identity record lists every file of the
-// revision (HBEP-3), but the engine does not load them all, and a listed file
-// that was never staged for that reason is not a failure (HBEP-7, Instance
-// start). vLLM's default loader loads safetensors weights when the checkpoint
-// has them and pytorch .bin weights only when it has none, and ignores
-// original/ (vllm/config/load.py at v0.32.0, load_format "auto" and
-// ignore_patterns ["original/**/*"]). So when the list has a .safetensors
-// file, the weight files of the other formats and everything under original/
-// are not downloaded; when present they are still rehashed.
+// Which listed files are staged depends on the launch's --load-format (skip.go):
+// a listed file the engine does not load is not downloaded, and one that is
+// present is still rehashed.
 //
 // The package imports only the standard library, package agentapi and the
 // agent's own package.
@@ -217,7 +211,7 @@ func (s *Stager) Checkpoint(ctx context.Context, req agent.CheckpointRequest) (a
 			return res, err
 		}
 	}
-	skip := skippedFiles(req.Files)
+	skip := skippedFiles(req.Files, req.LoadFormat)
 
 	// Rehash every listed file present.
 	present := make([]bool, len(req.Files))
@@ -280,35 +274,6 @@ func checkFile(f agentapi.FileDigest) error {
 		return fmt.Errorf("listed file %q: sha256 %q is not 64 lowercase hex characters", p, f.SHA256)
 	}
 	return nil
-}
-
-// otherWeights are the weight formats vLLM's default loader does not load
-// when the checkpoint has safetensors.
-var otherWeights = []string{".bin", ".pt", ".pth", ".ckpt", ".h5", ".msgpack", ".onnx"}
-
-// skippedFiles marks the listed files staging does not download: with any
-// .safetensors file listed, the other weight formats and original/.
-func skippedFiles(files []agentapi.FileDigest) []bool {
-	skip := make([]bool, len(files))
-	safetensors := false
-	for _, f := range files {
-		safetensors = safetensors || strings.HasSuffix(f.Path, ".safetensors")
-	}
-	if !safetensors {
-		return skip
-	}
-	for i, f := range files {
-		if strings.HasPrefix(f.Path, "original/") {
-			skip[i] = true
-			continue
-		}
-		for _, ext := range otherWeights {
-			if strings.HasSuffix(f.Path, ext) {
-				skip[i] = true
-			}
-		}
-	}
-	return skip
 }
 
 // rehash returns the SHA-256 of every present file, with Readers files read
