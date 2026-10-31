@@ -39,10 +39,13 @@ type warmShape struct {
 // A shape with a fixed output length asks for min_tokens = max_tokens (and
 // ignores the end-of-sequence token), because ignore_eos alone does not fix the
 // length: vLLM merges the server's default stop-token ids into every request
-// (chat_completion/protocol.py, to_sampling_params). The output is then
+// (chat_completion/protocol.py:730-740, to_sampling_params). The output is then
 // verified against usage.completion_tokens, which counts the reasoning tokens
 // too, and a request that stopped short carries the error. The tool-call shape
-// has no fixed length: it ends with its call.
+// has no fixed length: it ends with its call. It must not ignore the
+// end-of-sequence token either: a streamed auto tool call finishes with
+// "tool_calls" only when the engine stopped of its own accord, and with the
+// underlying reason ("length") otherwise (chat_completion/serving.py:766-777).
 func (c *Client) WarmUpRound(ctx context.Context, n int32, req agentapi.WarmUpRequest) agentapi.WarmUpRound {
 	s := req.Shapes
 	seq := []warmShape{

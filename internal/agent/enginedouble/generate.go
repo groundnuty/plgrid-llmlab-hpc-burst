@@ -30,7 +30,7 @@ type output struct {
 //
 // ignore_eos does not change the length: vLLM merges the server's default
 // stop-token ids into every request (to_sampling_params,
-// vllm/entrypoints/openai/chat_completion/protocol.py), so a request that only
+// vllm/entrypoints/openai/chat_completion/protocol.py:730-740), so a request that only
 // ignores the end-of-sequence token can still stop early, and only min_tokens
 // guarantees a length (HBEP-7 review of PR 87, Astra B10). The early-stop mode
 // is this stop with a chosen length.
