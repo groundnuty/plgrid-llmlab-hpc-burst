@@ -59,10 +59,12 @@ func NewProviderManager(cfg *rest.Config, scheme *runtime.Scheme, provider strin
 	return ctrl.NewManager(cfg, mo)
 }
 
-// Supervisor runs one manager per batch Provider (docs/development.md: "A
-// supervisor starts a manager when a Provider appears and stops it when the
-// Provider goes, so one Provider's failure does not stop the others"). The
-// controller binary's main (issue #61) calls Start.
+// Supervisor runs one manager per Provider of one kind, batch by default
+// (docs/development.md: "A supervisor starts a manager when a Provider appears
+// and stops it when the Provider goes, so one Provider's failure does not stop
+// the others"). The controller binary's main (issue #61) calls Start, once per
+// kind: a second Supervisor with Kind managed and #69's managed.Setup runs the
+// managed Providers.
 //
 // Each manager runs in its own goroutine with its own context. A manager that
 // cannot be built or set up, or that stops on its own, is started again with
@@ -70,6 +72,9 @@ func NewProviderManager(cfg *rest.Config, scheme *runtime.Scheme, provider strin
 // are untouched. A panic in the manager's Start is recovered as a failure;
 // panics in goroutines a manager starts itself are outside its reach.
 type Supervisor struct {
+	// Kind is the providerKind of the PlatformProfiles whose Providers this
+	// supervisor runs; "" means v1alpha1.PlatformBatch.
+	Kind v1alpha1.PlatformKind
 	// Client lists Providers and reads PlatformProfiles.
 	Client client.Reader
 	// NewManager builds the manager of one Provider, for example with
@@ -156,8 +161,8 @@ func (s *Supervisor) Start(ctx context.Context) error {
 	}
 }
 
-// desired returns the batch Providers: those whose PlatformProfile exists and
-// has providerKind batch.
+// desired returns the Providers of the supervisor's kind: those whose
+// PlatformProfile exists and has that providerKind.
 func (s *Supervisor) desired(ctx context.Context) (map[string]bool, error) {
 	var list v1alpha1.ProviderList
 	if err := s.Client.List(ctx, &list); err != nil {
@@ -176,14 +181,21 @@ func (s *Supervisor) desired(ctx context.Context) (map[string]bool, error) {
 		case err != nil:
 			return nil, fmt.Errorf("get PlatformProfile %s: %w", p.Spec.PlatformProfileRef.Name, err)
 		}
-		if pp.Spec.ProviderKind == v1alpha1.PlatformBatch {
+		if pp.Spec.ProviderKind == s.kind() {
 			want[p.Name] = true
 		}
 	}
 	return want, nil
 }
 
-// pass starts and stops managers to match the batch Providers.
+func (s *Supervisor) kind() v1alpha1.PlatformKind {
+	if s.Kind == "" {
+		return v1alpha1.PlatformBatch
+	}
+	return s.Kind
+}
+
+// pass starts and stops managers to match the Providers of the kind.
 func (s *Supervisor) pass(ctx context.Context) error {
 	want, err := s.desired(ctx)
 	if err != nil {
@@ -199,8 +211,7 @@ func (s *Supervisor) pass(ctx context.Context) error {
 	}
 	s.mu.Unlock()
 	for _, r := range stop {
-		r.cancel()
-		<-r.done
+		r.stop()
 	}
 	now := time.Now()
 	for name := range want {
@@ -288,9 +299,18 @@ func (s *Supervisor) stopAll() {
 	s.runs = map[string]*run{}
 	s.mu.Unlock()
 	for _, r := range runs {
-		if r.cancel != nil {
-			r.cancel()
-			<-r.done
-		}
+		r.stop()
 	}
+}
+
+// stop cancels a run's manager and waits for it. A run whose manager was never
+// built or set up (NewManager or Setup failed) has no cancel and no done, so
+// there is nothing to stop; one Provider's failed start never panics the
+// supervisor the others share.
+func (r *run) stop() {
+	if r.cancel == nil {
+		return
+	}
+	r.cancel()
+	<-r.done
 }
