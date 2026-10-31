@@ -71,7 +71,9 @@ type Deployment struct {
 	ServedName string // spec.model: the name its workers serve
 	Desired    int    // spec.instances
 	// TightPercent and LoosePercent are the bounds as KubeAI percents (125
-	// is c = 1.25), from spec.routing.loadBound.
+	// is c = 1.25), from spec.routing.loadBound. A factor with more than two
+	// decimals is rounded down to a whole percent (Percent), so the bound in
+	// force is never above the configured one.
 	TightPercent, LoosePercent int
 	// MaxRequestDuration is the deadline that applies to its requests: the
 	// shorter of the front's and spec.routing.maxRequestDuration.

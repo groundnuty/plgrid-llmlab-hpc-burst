@@ -3,8 +3,10 @@ package inventory
 import (
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -210,14 +212,33 @@ func bounds(r *v1alpha1.Routing) (tight, loose int, err error) {
 	return tight, loose, nil
 }
 
+// loadFactorPattern is what the API accepts of a LoadFactor (v1alpha1's
+// kubebuilder pattern): digits with an optional fraction, at most 16 characters.
+var loadFactorPattern = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?$`)
+
 // Percent converts a load factor ("1.25") to KubeAI's MeanLoadPercentage
-// (125), rounding to a whole percent, since KubeAI's setting is an integer.
+// (125). KubeAI's setting is an integer, and the forked group's pick takes
+// nothing finer, so a factor with more than two decimals is rounded DOWN to a
+// whole percent: "1.006" is 100, not 101. That narrows the configured bound
+// and never widens it; rounding to the nearest percent would admit a member
+// whose load exceeds c x (T + 1) / n (c = 1.006, loads 101 and 98: the bound
+// is 100.6, and 101 percent admits the 101). The digits are cut, not a float
+// floored, since 1.15 x 100 is 114.99999999999999 in float64.
 func Percent(f v1alpha1.LoadFactor) (int, error) {
-	x, err := strconv.ParseFloat(string(f), 64)
-	if err != nil || x < 1 || math.IsInf(x, 0) {
-		return 0, fmt.Errorf("load factor %q is not a decimal of at least 1", f)
+	bad := fmt.Errorf("load factor %q is not a decimal of at least 1", f)
+	if !loadFactorPattern.MatchString(string(f)) {
+		return 0, bad
 	}
-	return int(math.Round(x * 100)), nil
+	whole, frac, _ := strings.Cut(string(f), ".")
+	n, err := strconv.ParseInt(whole, 10, 64)
+	if err != nil || n > (math.MaxInt-99)/100 {
+		return 0, bad
+	}
+	cents, _ := strconv.Atoi((frac + "00")[:2])
+	if p := int(n)*100 + cents; p >= 100 {
+		return p, nil
+	}
+	return 0, bad
 }
 
 func conditionTrue(conds []metav1.Condition, t string) bool {
