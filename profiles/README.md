@@ -49,6 +49,17 @@ The three compute-node rows come from a probe in direct mode: a TCP connect and 
 - **The container runtime may not be uniform.** It should be a per-platform profile fact. Apptainer is on the Helios and Sano login nodes. On Athena's login node none of apptainer, singularity, enroot, podman or docker was found (charliecloud, udocker, sarus and shifter were not searched for), but Apptainer 1.4.5 (setuid install) is on the Athena `plgrid-gpu-a100` compute nodes, and Apptainer 1.5.4 (setuid install) is on the Helios `plgrid-gpu-gh200` (aarch64) compute nodes (S1 probe 2, one partition each). User namespaces are off on both, so containers depend on the setuid install. On Helios GH200 `apptainer exec docker://...` works. On Athena it does not for a SIF image, on either of two nodes; a sandbox directory image does run, so a launcher that uses Apptainer on Athena has to unpack to a directory (`apptainer build --sandbox`) or find the cause of the `squashfuse_ll` failure. The Helios CPU, RTX and bigmem partitions and Sano's compute nodes were not probed. Whether the instance launchers need a container-free path is still open: Athena is the case for one. frpc and a static engine environment are candidates for such a path.
 - **Pass an explicit account and partition.** The account probes used the probing user's default account (and, on Athena, the default partition), so they do not show what every user needs. The Cyfronet documentation says account names carry a resource suffix such as `-gpu-a100`. The provider plugin should always pass an explicit account and partition. That belongs in provider settings, not the profile.
 
+## The typed image format (after spike S1)
+
+The drafts' container facts come from the login nodes. Spike S1's probe 2 (issue #18) then ran Apptainer on compute nodes, and the PlatformProfile types the result per partition as `imageFormat` (`sif` or `sandbox`), the format the allocation agent builds and runs the engine image in:
+
+| Partition | `imageFormat` | Why |
+|---|---|---|
+| Helios `plgrid-gpu-gh200` | `sif` | a SIF image runs |
+| Athena `plgrid-gpu-a100` | `sandbox` | Apptainer cannot run a SIF image there; a sandbox directory image runs |
+
+It is not a deployment-ID input. A partition that states no format gets `sif` (`v1alpha1.ImageFormatOf`).
+
 ## Unknown, and why
 
 Each profile ends with an `unknown:` list. All three share these:

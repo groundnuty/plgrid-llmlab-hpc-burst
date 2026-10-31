@@ -1,0 +1,13 @@
+regime,seed,switches,first_switch_time_s,bound_before_pct,bound_after_pct,cap_before,cap_after,spills_before_switch,spills_from_switch,held_before_switch,held_from_switch
+tight,1,0,-1.0,0,0,0,0,0,0,0,0
+tight,2,0,-1.0,0,0,0,0,0,0,0,0
+tight,3,0,-1.0,0,0,0,0,0,0,0,0
+drain,1,1,3005.0,125,200,48,0,0,0,0,0
+drain,2,1,3005.0,125,200,48,0,0,0,0,0
+drain,3,1,3005.0,125,200,48,0,0,0,0,0
+scarce,1,0,-1.0,0,0,0,0,0,0,0,0
+scarce,2,0,-1.0,0,0,0,0,2,0,0,0
+scarce,3,0,-1.0,0,0,0,0,7,0,0,0
+half-prefill,1,0,-1.0,0,0,0,0,0,0,0,0
+half-prefill,2,0,-1.0,0,0,0,0,25,0,0,0
+half-prefill,3,0,-1.0,0,0,0,0,131,0,0,0

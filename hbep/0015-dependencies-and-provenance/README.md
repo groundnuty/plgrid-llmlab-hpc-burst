@@ -4,7 +4,7 @@
 
 This HBEP decides where the repository records the origin of each part of the framework, and how those records are checked. It follows Kubernetes practice, trimmed for a small team.
 - Go modules are recorded in `go.mod` and `go.sum`. Components outside Go (engines, routers, images, binaries) are recorded in `build/dependencies.yaml`.
-- Every dependency's licence must be on an allowlist taken from the CNCF Allowlist License Policy. Licence texts of what the framework ships are kept under `LICENSES/`.
+- Every licence of what the framework distributes must be on an allowlist taken from the CNCF Allowlist License Policy. Licence texts of what the framework ships are kept under `LICENSES/`.
 - Code copied from another project lives under `third_party/forked/<project>/`, with its original licence and a note of its origin and changes.
 - Every dependency change is reviewed by a named dependency reviewer against a written checklist.
 - Each release publishes an SPDX SBOM.
@@ -19,7 +19,7 @@ N/A for the user story: this is a repository policy and serves no single stage o
 Problems this addresses:
 - The framework is composed from community software (HBEP-2). Without a record, nobody can say which projects it ships, under which licences, or whether those licences allow shipping them together.
 - Code copied from another project loses its licence notice and origin unless both travel with it. One copy is already a candidate: a load-balancing algorithm that sits in a Go `internal/` package and cannot be imported.
-- The repository has no licence yet, so nothing can be checked against one.
+- The repository had no licence until 31 Oct 2026, so nothing could be checked against one. It is now Apache-2.0 (open question 1).
 - HBEP-1's template asks each HBEP to cite field lessons by ID from a catalogue this HBEP defines. Until the catalogue exists, HBEPs write `pending`.
 - The lessons that shaped the design were recorded privately, with host names, job IDs and study details. HBEPs need a public, neutral form they can cite (HBEP-1, Content rules).
 - Something referenced by a mutable name drifts under it. A checkpoint served without a pinned revision changed its tokenizer and template (L-8.3). Dependencies need the same pinning.
@@ -51,7 +51,7 @@ Problems this addresses:
 - A dependency update changes its licence to one off the allowlist. The licence check fails. The PR proceeds only with the approver's word, recorded as an exception.
 - A reviewer of HBEP-5 reads L-4.1 in its "Field lessons answered" table and finds the lesson in the catalogue.
 - An operator of the framework meets a new failure. The lesson is added as the next item of its section, in general terms.
-- A user downloads a release and reads its SBOM to see which components and licences it contains.
+- A user downloads a release, reads its SBOM to see which components it contains, and finds their licences in the release's `LICENSES/` tree and licence report.
 
 ### Notes, constraints and caveats
 
@@ -75,10 +75,10 @@ Problems this addresses:
 
 ### Open questions
 
-1. **The project's licence.** The repository has none (GitHub reports no licence, read 2026-10-30). The CNCF policy is written relative to Apache-2.0, and every component named in this HBEP is under Apache-2.0. Candidate: Apache-2.0. Owner decision, and hard to change once others contribute.
+1. **The project's licence.** Decided: Apache-2.0 (owner decision, 31 Oct 2026). `LICENSE` at the root holds the standard text, unchanged. Reasons: the CNCF policy is written relative to Apache-2.0, every component named in this HBEP is under it, and spike S12 (PR #70) found all 47 modules in the `hpcburst` binary under Apache-2.0, BSD-3-Clause, MIT or ISC. The project has no `NOTICE` of its own, as Kubernetes has none; a copied project's `NOTICE` travels with its copy (Copied code).
 2. **Who the dependency reviewers are.** Candidate: the role is filled by the code pipeline's fresh-context reviewers, with the checklist below; the approver decides exceptions. Whether `.github/CODEOWNERS` also lists the owner for `go.mod`, `go.sum`, `build/dependencies.yaml`, `third_party/` and `LICENSES/` needs the approver's word, as every CODEOWNERS change does (HBEP-1). Owner decision.
 3. **Components fetched at run time.** The launcher installs some components inside jobs on the cluster, so the framework never redistributes them. Do they need an allowlisted licence? CNCF's condition 2 covers components fetched at installation or build time. Candidate: yes, the same allowlist, because the framework chooses and installs them.
-4. **SBOM tool.** The format is SPDX 2.3. Candidates: kubernetes-sigs/bom (the tool behind Kubernetes' release SBOMs) or syft, which also emits SPDX. Decided by a spike on the first release artefacts: Go binaries plus job images.
+4. **SBOM tool.** Decided: syft, from spike S12 (PR #70). The format is SPDX 2.3. On the `hpcburst` binary, kubernetes-sigs/bom and syft were equal: both SBOMs validated, and each listed exactly the 47 modules plus the main module that `go version -m` reports, with none missing, extra or listed twice. They differ on job images, per each tool's documentation only, since S12 scanned no image: syft documents OCI layouts, OCI archives, docker archives and SIF files, which Helios runs; bom's documentation mentions registry images and docker archives only. The first release that publishes a job image scans one with syft before relying on it; if that fails, this question reopens. Neither SBOM carries licences, so the licence check stays a separate step.
 5. **The format of `build/dependencies.yaml`.** zeitgeist checks Kubernetes' file. Can its entries carry licence and upstream fields, or do those go in a parallel list? Decided when the first non-Go component is added.
 6. **Classifying lessons.** Tag each lesson with HBEP-2's dimensions (stage, platform, weight, fix owner)? Useful for test plans and the known-issues register. Decided once HBEP-2 resolves its open questions.
 7. **Naming the source project.** Resolved by HBEP-1's content-rules amendment of 2026-10-30: the research project and its tools may be named; no other project or study, and no study's results or data.
@@ -113,7 +113,10 @@ Problems this addresses:
   - (3) substantial use outside the project (a standard library, or created at least 12 months ago with at least 10 stars or forks): a checklist item for the reviewer, not a CI check.
 - **Exceptions:** anything else, an unknown licence included, needs the approver's word. It is recorded in `hack/license-exceptions.yaml` with the package, licence, reason, PR and date.
 - **The machine-readable list** is `hack/allowed-licenses.txt`. It changes only by amendment of this HBEP.
-- **The check:** `go-licenses check ./... --allowed_licenses=<the list>` for Go code; a lookup of each `build/dependencies.yaml` licence for the rest. Both fail on an unknown licence. The allowlist applies to what the framework itself distributes: its Go binaries, copied code and the entries of `build/dependencies.yaml`. A job image's transitive packages are recorded in its SBOM and not checked against the allowlist, because GPU vendor runtime wheels (licence undeclared, or proprietary) and MPL-2.0 packages are part of every engine image. Whether the framework publishes engine images, and so redistributes them, is open question 3. A licence that changes in an update is flagged in the PR, as Kubernetes asks.
+- **The check:** `go-licenses check ./... --allowed_licenses=<the list>` for Go code, and a lookup of each `build/dependencies.yaml` licence for the rest. Both fail on an unknown licence.
+  - **One run per module,** because `./...` does not reach a nested module. The modules are every `go.mod` outside `spikes/`, found by a search of the whole tree, not a fixed list: today the root, `third_party/forked/kubeai` and `third_party/forked/kcp`.
+  - **No empty run.** A run over a module with no buildable package exits 0 and checks nothing (spike S12), so each run asserts that it checked at least one package. A module may be listed as a known zero only with a recorded reason. Today that is `third_party/forked/kcp`: its one file is behind the `s3embedded` build tag, no binary links it, and the copied-code check still covers it.
+  - **Spike modules are outside the check, the allowlist and the dependency review.** The framework does not distribute them, and the root `LICENSE` covers them as repository content. A dependency that product code adopts from a spike enters through a `go.mod` outside `spikes/`, and is checked and reviewed then. Checking spikes would also need a copy of `LICENSE` in each spike module, because go-licenses v2.0.1 looks for a licence file only up to the package's own module directory (`licenses/library.go`, line 221, which calls `FindCandidates(pkg.pkgDir, pkg.moduleDir)`; `licenses/find.go`, "Find will not search out of the rootDir"). The allowlist applies to what the framework itself distributes: its Go binaries, copied code and the entries of `build/dependencies.yaml`. A job image's transitive packages are recorded in its SBOM and not checked against the allowlist, because GPU vendor runtime wheels (licence undeclared, or proprietary) and MPL-2.0 packages are part of every engine image. Whether the framework publishes engine images, and so redistributes them, is open question 3. A licence that changes in an update is flagged in the PR, as Kubernetes asks.
 
 ### LICENSES/
 
@@ -139,7 +142,7 @@ Problems this addresses:
 
 ### Dependency review
 
-- **Scope:** any PR that changes `go.mod`, `go.sum`, `build/dependencies.yaml`, `third_party/`, `LICENSES/`, the allowlist or the exceptions.
+- **Scope:** any PR that changes a `go.mod` or `go.sum` outside `spikes/`, `build/dependencies.yaml`, `third_party/`, `LICENSES/`, the allowlist or the exceptions.
 - **The reviewer** is a named dependency reviewer (open question 2). It records the checklist answers in a PR comment.
 - **The checklist,** from Kubernetes' guide to dependency changes:
   - Is the dependency maintained?
@@ -206,7 +209,7 @@ N/A: a repository policy has no stages. It is `implemented` once the licence, de
 
 ## Operational readiness
 
-1. **Working:** the checks pass on `main`. End to end: a release whose SBOM lists every module and component, each with a licence on the allowlist or in the exceptions. The failure signal is a dependency missing from `LICENSES/` or from the SBOM.
+1. **Working:** the checks pass on `main`. End to end: a release whose SBOM lists every module and component (identity), and whose licence report and `LICENSES/` give each of them a licence on the allowlist or in the exceptions (licence). The SBOM carries no licences (spike S12). The failure signal is a dependency missing from `LICENSES/`, from the licence report or from the SBOM.
 2. **Restart:** N/A; all state is files in git.
 3. **Silent failure:** a licence check that compares with the wrong list; a lesson check that counts entries but not IDs. The fixture tests and the ID diff show the difference.
 4. **Provider limits:** N/A.
@@ -240,8 +243,8 @@ All sources were read on 2026-10-30.
 | Component | Origin (project, URL) | Licence | How used (dependency, copied code, optional) |
 |---|---|---|---|
 | go-licenses | google/go-licenses, https://github.com/google/go-licenses | Apache-2.0 | CI tool: `check --allowed_licenses`, `report`, `save` |
-| bom | kubernetes-sigs/bom, https://github.com/kubernetes-sigs/bom | Apache-2.0 | CI tool, candidate for the SBOM (open question 4) |
-| syft | anchore/syft, https://github.com/anchore/syft | Apache-2.0 | CI tool, alternative for the SBOM (open question 4) |
+| bom | kubernetes-sigs/bom, https://github.com/kubernetes-sigs/bom | Apache-2.0 | compared in spike S12, not adopted (open question 4) |
+| syft | anchore/syft, https://github.com/anchore/syft | Apache-2.0 | CI tool: the release SBOM (open question 4, decided) |
 | zeitgeist | kubernetes-sigs/zeitgeist, https://github.com/kubernetes-sigs/zeitgeist | Apache-2.0 | CI tool, candidate check of `build/dependencies.yaml` (open question 5) |
 
 Licences are each repository's GitHub licence field.
@@ -274,6 +277,7 @@ Licences are each repository's GitHub licence field.
 ## Implementation history
 
 - 2026-10-30: proposed (provisional), tracking issue #15, together with the first lessons catalogue.
+- 2026-10-31: the project's licence decided (Apache-2.0, owner) and added at the root; the SBOM tool decided (syft, spike S12); the licence check runs once per module outside `spikes/`, with no empty run; spike modules are outside the check, the allowlist and the dependency review.
 
 ## Amendments
 

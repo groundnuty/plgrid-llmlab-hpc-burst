@@ -1,0 +1,13 @@
+# OLD run.sh (8190347, capacity gate bypassed for this demo only) against the same fakes
+# 1. llmd-tuned refuses to start:
+exit status 0
+start llmd-tuned failed
+# 2. llm-d as shipped is cut at 1000 s (every other arm as expected):
+exit status 0
+started llmd-shipped
+llmd-shipped                 False       100/7300         1000           0          0       0  read: unexpected EOF
+llmd-shipped                 False       100/7300         1000           0          0       0  read: unexpected EOF
+# 3. controls with vllmr-short unable to start:
+exit status 0
+OK   ctrl-vllmr-short: expected cut in [55,70] s; got complete=False tokens=100/150 elapsed=60s err='read: unexpected EOF'
+OK   probe-llmd-5s-timers: expected pass; got complete=True tokens=600/600 elapsed=600s err=''

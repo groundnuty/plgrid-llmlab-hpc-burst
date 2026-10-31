@@ -1,0 +1,10 @@
+Downloading beartype (1.5MiB)
+ Downloaded beartype
+Installed 12 packages in 23ms
+bom-binary.spdx.json: valid (exit 0)
+syft-binary.spdx.json: valid (exit 0)
+negative control: a document without documentNamespace is rejected, as it should be
+bom-binary.spdx.json: valid against the SPDX 2.3 JSON schema
+syft-binary.spdx.json: valid against the SPDX 2.3 JSON schema
+negative control: the schema rejects a document without spdxVersion
+note: the schema accepts the document without documentNamespace that pyspdxtools rejects

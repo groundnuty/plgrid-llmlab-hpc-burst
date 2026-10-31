@@ -1,0 +1,2 @@
+# A "go build" in this directory writes the client binary here; a Go binary embeds the build machine's paths.
+/s2bload

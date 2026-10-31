@@ -1,0 +1,14 @@
+# Sorts before the CRD on purpose: the launcher must apply CRDs first and wait for them to be
+# Established, or this object cannot be created.
+apiVersion: fixture.example.test/v1
+kind: Widget
+metadata:
+  name: first-widget
+  namespace: default
+spec:
+  size: 3
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fixture-ns

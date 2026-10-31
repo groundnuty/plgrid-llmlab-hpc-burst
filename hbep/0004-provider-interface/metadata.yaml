@@ -1,6 +1,6 @@
 hbep: 4
 title: Provider interface and profiles
-status: provisional
+status: implementable
 stage: none
 authors:
   - www-2027-code-agent[bot]
@@ -8,7 +8,7 @@ approvers:
   - groundnuty
 tracking-issue: https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/4
 created: 2026-10-28
-last-updated: 2026-10-28
+last-updated: 2026-10-31
 replaces: []
 superseded-by: []
 see-also: [2, 3, 6, 7, 8, 11]

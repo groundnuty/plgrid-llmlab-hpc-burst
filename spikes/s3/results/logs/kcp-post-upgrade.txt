@@ -1,0 +1,3 @@
+=== RUN   TestPhasePostUpgrade
+--- PASS: TestPhasePostUpgrade (0.75s)
+PASS

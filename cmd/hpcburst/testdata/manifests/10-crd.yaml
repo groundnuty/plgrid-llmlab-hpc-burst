@@ -1,0 +1,27 @@
+# A tiny CustomResourceDefinition for the launcher's tests. The group is a test group, not the
+# framework's. The framework's own CRDs (issue #40) are installed through the same --manifests hook.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: widgets.fixture.example.test
+spec:
+  group: fixture.example.test
+  scope: Namespaced
+  names:
+    plural: widgets
+    singular: widget
+    kind: Widget
+    listKind: WidgetList
+  versions:
+  - name: v1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            properties:
+              size:
+                type: integer

@@ -76,6 +76,7 @@ A past project served models on several Slurm clusters behind its own fronts. It
 - **Metering on the request path** adds latency, or loses records when the front crashes. A lost record must show as a gap in the usage record, never as silence.
   - **Mitigation (candidate)**, from spike S8 (issue #25, PR #28): usage records go to the log with `sync_interval: always`. They are batched only above a few hundred records per second, since one node acknowledged about 1,200 publishes per second on the test disk under `always`. A wider batch widens what a front crash loses.
   - **Not tested by S8:** power loss and a kernel crash, the only cases where `always` differs from the default.
+  - **Alpha** (HBEP-5): HBEP-11 has no durable log in alpha, so the front appends usage records to a local JSON Lines file. It syncs each record before the next, writing the records that wait behind a sync in one write, and keeps the counter below in blocks synced to a file of their own.
   - **Counter:** each usage record carries a monotonic counter that the front persists independently of the log, so a consumer can see a missing range.
   - **Still open:** detecting a final batch lost in a front crash before it was published, since no later record reveals it. S8 did not test a front crash.
 - **Billing sources lag or undercount,** as a report of finished jobs only does. Where a center report and the scheduler's accounting differ, both are shown with the gap.
@@ -86,9 +87,9 @@ A past project served models on several Slurm clusters behind its own fronts. It
 
 - Metric names and units: vLLM's Prometheus names, OpenTelemetry's conventions for generative AI, or our own? A spike maps two engines' metrics onto the Goals list.
 - How engine metrics leave the job: scraped through the dial-home tunnel, or pushed by a process in the job. Depends on HBEP-6.
-- Where "degraded" and "failing" are defined: per metric in the platform profile, or per deployment. Discussion with HBEP-4.
-- How "ending soon" is timed: one lead time per platform profile, or derived from the handover's measured start-up time (HBEP-7). Lean: from the profile, repeated at fixed steps.
-- Whether a usage count comes from the engine's usage report only, or also from the front's own count when the engine sends none, marked as such. Lean: both, marked.
+- Where "degraded" and "failing" are defined: per metric in the platform profile, or per deployment. Discussion with HBEP-4. For alpha, HBEP-7's malfunction thresholds are platform-profile values with defaults (HBEP-4, the `health` group).
+- How "ending soon" is timed: one lead time per platform profile, or derived from the handover's measured start-up time (HBEP-7). Lean: from the profile, repeated at fixed steps. For alpha, HBEP-7 emits it once, an hour before a ready Instance's drain start when no replacement is ready.
+- Whether a usage count comes from the engine's usage report only, or also from the front's own count when the engine sends none, marked as such. Lean: both, marked. For alpha, HBEP-5 records the engine's count when the response carries one; otherwise the counts are null and the front's count of streamed events is recorded, marked as such.
 - Retention of metrics, usage and events. Lean: usage for the life of the grant; per-instance series rolled up per deployment after a period; events as long as the audit log (HBEP-10).
 - Whether each client key can read its own usage through the front, as LLMLab users may expect. Discussion with HBEP-5.
 - The last level of liveness: an end-to-end probe of the front and control plane from outside both. Where it runs and who gets its alert.
@@ -162,7 +163,7 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 | CloudEvents 1.0.2 and sdk-go | [cloudevents/sdk-go](https://github.com/cloudevents/sdk-go); [spec](https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/spec.md) | sdk-go Apache-2.0; spec Apache-2.0 | Candidate, no spike assigned: the envelope for events and usage records |
 | OTel GenAI semantic conventions | [semantic-conventions-genai](https://github.com/open-telemetry/semantic-conventions-genai) | Apache-2.0 | Candidate, no spike assigned: names for front metrics, pinned to a commit; no code |
 | vLLM metric names | [vllm-project/vllm](https://github.com/vllm-project/vllm) | Apache-2.0 | Candidate, no spike assigned: engine metric names kept at the source and mapped by recording rules |
-| Kubernetes Events | the control plane's API host (HBEP-11): [k3s](https://github.com/k3s-io/k3s), or [kcp](https://github.com/kcp-dev/kcp) | k3s Apache-2.0; kcp Apache-2.0 | Candidate, no spike assigned: a mirror for people only, never the event stream |
+| Kubernetes Events | the control plane's API host (HBEP-11): [Kubernetes](https://github.com/kubernetes/kubernetes), on k3s or on the single-user host that HBEP-11's rule picks | Apache-2.0 | Candidate, no spike assigned: a mirror for people only, never the event stream |
 | llm-d-inference-sim | [llm-d/llm-d-inference-sim](https://github.com/llm-d/llm-d-inference-sim) | Apache-2.0 | Candidate test dependency, no spike assigned: an engine double for the metric tests |
 
 ### Designs and published work borrowed
@@ -201,6 +202,9 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - 2026-10-28: owner decisions folded in (naming hierarchy, providers behind model names, reassignable allocations, qualification, retention, keys).
 - 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation.
 - 2026-10-30: spike S8 (PR #28) findings carried in.
+- 2026-10-30: aligned with HBEP-11 becoming implementable: the API host row.
+- 2026-10-30: alpha's thresholds for failing Instances and its "ending soon" timing noted from HBEP-7.
+- 2026-10-30: the front's alpha usage sink and counts noted from HBEP-5.
 
 ## Amendments
 

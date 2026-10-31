@@ -188,6 +188,8 @@ facts:
       priority_job_factor: 1000
       def_mem_per_cpu_mb: 8000
       access: "AllowAccounts lists grant accounts that end in -gpu-a100 plus a few administrative accounts (names omitted). This is the general-user GPU partition."
+      image_format: sandbox
+      image_format_note: "Measured by spike S1 probe 2 (issue #18) on 2026-10-30: Apptainer 1.4.5 on the compute nodes cannot run a SIF image (the kernel squashfs mount is refused and the squashfuse fallback fails), while a sandbox directory image runs. The PlatformProfile field is partitions[].imageFormat."
       method: measured
       source: "sinfo -h -o '%P|%a|%l|%L|%D|%c|%m|%G|%f|%d|%z'; scontrol show partition; scontrol show node -o (Arch, aggregated)"
       date: 2026-10-30
