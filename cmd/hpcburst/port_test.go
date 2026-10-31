@@ -15,9 +15,12 @@ import (
 // holder alone. The last case is the control: with the ports free, the same command starts k3s,
 // so the refusals above were due to the held ports and nothing else.
 func TestUpRefusesWhenAPortIsTaken(t *testing.T) {
-	const base = 29230 // 29230 apiserver, 29231 https, 29232 controller manager, 29235 reserved
+	// 29230 apiserver, 29231 https, 29232 controller manager, 29233 the agent endpoint, 29235
+	// reserved, 29236 the lifecycle controller's /healthz; 29234 and 29237 are not reserved.
+	const base = 29230
 	h := newHost(t)
-	roles := map[string]int{"apiserver": base, "https": base + 1, "controller manager": base + 2, "reserved lb": base + 5}
+	roles := map[string]int{"apiserver": base, "https": base + 1, "controller manager": base + 2, "agent endpoint": base + 3,
+		"reserved lb": base + 5, "controller health": base + 6}
 	type holder struct{ name, network, addr string }
 	var holders []holder
 	for role, p := range roles {
@@ -77,6 +80,17 @@ func TestUpRefusesWhenAPortIsTaken(t *testing.T) {
 	}
 
 	t.Run("control: the same command starts k3s once the ports are free", func(t *testing.T) {
+		// base+4 and base+7 are outside the block: a holder there must not stop the start.
+		for _, p := range []int{base + 4, base + 7} {
+			l, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(p))
+			if err != nil {
+				if requireIntegration() {
+					t.Fatalf("cannot hold port %d, so the case is not tested: %v", p, err)
+				}
+				t.Skipf("cannot hold port %d: %v", p, err)
+			}
+			defer l.Close()
+		}
 		r := cli(t, h.upArgs(base, "--json")...)
 		if r.code != exitOK {
 			t.Fatalf("exit %d: %s", r.code, r.err)
