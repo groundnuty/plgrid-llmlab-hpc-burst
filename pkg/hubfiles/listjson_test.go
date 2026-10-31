@@ -211,3 +211,33 @@ func TestFilesEnforcesThePageSizeLimitWithOverflowDetection(t *testing.T) {
 		}
 	}
 }
+
+// TestFilesRefusesALaterPageThatIsNotAnArray: page 1 is fine and page 2 is
+// not. A null that decodes as zero entries would leave page 1's files as a
+// successful, shorter list.
+func TestFilesRefusesALaterPageThatIsNotAnArray(t *testing.T) {
+	for name, second := range map[string]string{
+		"null":                "null",
+		"empty body":          "",
+		"an object":           "{}",
+		"a string":            `"x"`,
+		"two documents":       "[] []",
+		"an array and a null": "[] null",
+	} {
+		srv := newTreeServer(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("cursor") != "" {
+				_, _ = w.Write([]byte(second))
+				return
+			}
+			w.Header().Set("Link", `<?cursor=2&recursive=true>; rel="next"`)
+			_, _ = w.Write([]byte(listOf(lfsJSON("a.safetensors"))))
+		})
+		entries, err := srv.client(t, Config{}).Files(context.Background(), testRepo, testRev)
+		if !errors.Is(err, ErrInvalidListing) || entries != nil {
+			t.Errorf("%s: Files = %v, %v; want ErrInvalidListing and no list", name, entries, err)
+		}
+		if srv.requests() != 2 {
+			t.Errorf("%s: %d requests, want 2", name, srv.requests())
+		}
+	}
+}
