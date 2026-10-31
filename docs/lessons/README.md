@@ -403,7 +403,7 @@ These concern the clients and the research process rather than serving. HBEP-2 p
 These come from building this framework, from 30 Oct 2026, not from www-2027's operation (HBEP-15: "Lessons from the framework's own operation join the same catalogue"). Their status tags give the state on `main` when each was added.
 
 - **L-17.1 A /proc liveness check misreads a live process as a zombie during `execve`.** [fixed]
-  While one thread of a process runs `execve`, its leader reads Z in /proc, though the process lives. k3s re-executes itself, and a check that counted Z as dead once left an orphan. The launcher counts a zombie leader as dead only when no thread of the process is alive.
+  While one thread of a process runs `execve`, its leader reads Z in /proc, though the process lives. k3s re-executes itself, and a check that counted Z as dead once left an orphan. The launcher decides liveness from a pidfd, which the kernel signals only after every thread has exited, not from a /proc scan, which can find no live thread at that moment.
 - **L-17.2 A write refused for a full store can still take effect.** [fixed by rule]
   On SQLite, a create that returned "database or disk is full" left its object stored. Controllers re-read state after any write error, and never assume the write failed.
 - **L-17.3 A user-level k3s can silently run root's binaries.** [fixed]
@@ -412,5 +412,5 @@ These come from building this framework, from 30 Oct 2026, not from www-2027's o
   crossplane's embedded `managementPolicies` default, `["*"]`, would have stalled every Allocation, because the provider registers fewer policies. The Allocation declares the fields itself, with the provider's set as an immutable default (PR #48).
 - **L-17.5 The Hub's tree listing page size depends on the query.** [fixed by rule]
   A spike saw a listing cut at 50 entries. Later the Hub sent one page of 77 entries to a request with no `limit`, and 50 with a `Link` to one with `expand=true`. Send `limit=1000`, and always follow `Link`.
-- **L-17.6 An approval given before a code-review round finished was used to merge the post-fix head.** [fixed by rule]
+- **L-17.6 An approval given before a code-review round finished was used to merge the post-fix head.** [out of scope; fixed by rule in the agents' process]
   An objective check approved a head; the review round then added fix commits, and the PR merged at the fixed head on that approval. The objective check now comes after the reviews and their fixes, names the full head SHA, and any later commit voids it.

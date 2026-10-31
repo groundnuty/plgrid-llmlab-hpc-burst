@@ -306,7 +306,7 @@ S3 exercised validation, watches, conflicts, cascades and finalizers. Leases, Ev
 2. **Restart:** controllers re-list resources and provider jobs, and continue from observed state. Nothing is held only in memory. The host restarts from its data directory, ready in 6.0 s warm on k3s (S3).
 3. **Silent failure:**
    - **A write that reports an error may still have taken effect.** In the launcher's store-full test (PR #49), a create that returned "database or disk is full" left its object stored. Controllers re-read state after any write error and never assume the write failed (L-17.2).
-   - **A /proc liveness check can misread a live process** as a zombie while one of its threads is in `execve` (k3s re-executes itself). The launcher counts a zombie leader as dead only when no thread of the process is alive (PR #49); any /proc-based check needs the same guard (L-17.1).
+   - **A /proc liveness check can misread a live process** as a zombie while one of its threads is in `execve` (k3s re-executes itself). The launcher decides liveness from a pidfd, which the kernel signals only once every thread has exited (PR #49). Any other liveness check should do the same; a scan of /proc threads is racy too (L-17.1).
    - **A user-level k3s that runs another k3s's binaries** looks healthy. The launcher checks `/proc/<pid>/exe` against its own data directory (Single-user host; L-17.3).
    - a controller that holds its `Lease` but reconciles nothing. Reconcile times in status show it.
    - a host that is ready but does not garbage-collect. The probe in item 1 shows it.
