@@ -11,7 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 )
 
 const testToken = "hf_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
@@ -274,12 +276,78 @@ func TestTokenPrintsRedactedUnderEveryVerb(t *testing.T) {
 	if got := fmt.Sprint(tok); got != "[redacted]" {
 		t.Errorf("Sprint = %q, want [redacted]", got)
 	}
-	c, err := New(Config{TokenFile: "/path/to/token"})
-	if err != nil {
+
+	// A client that has made an authenticated call: the token went through it,
+	// so formatting it can reveal the token if it were kept anywhere. Without
+	// the call it has never seen the token and the check proves nothing.
+	h := newFakeHub(t, allFiles())
+	h.token = testToken
+	c := h.client(t, Config{TokenFile: writeToken(t, testToken, 0o600)})
+	if _, err := c.Files(context.Background(), testRepo, testRev); err != nil {
+		t.Fatalf("authenticated Files: %v", err)
+	}
+	if got := h.authHeaders(); len(got) == 0 || got[0] != "Bearer "+testToken {
+		t.Fatalf("the call was not authenticated (%q); the formatting check below would be vacuous", got)
+	}
+	for _, format := range []string{"%v", "%+v", "%#v", "%s"} {
+		for _, v := range []any{c, *c, &c} {
+			if got := fmt.Sprintf(format, v); strings.Contains(got, testToken) {
+				t.Errorf("Sprintf(%q) of a used %T prints the token: %s", format, v, got)
+			}
+		}
+	}
+}
+
+// TestTokenFileThatIsAFIFOIsRefusedWithoutBlocking: opening a named pipe that
+// has no writer blocks until one appears, whatever the context says. The
+// token file is opened without blocking and refused as not a regular file.
+func TestTokenFileThatIsAFIFOIsRefusedWithoutBlocking(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub-token")
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+	t.Cleanup(func() { // frees a reader stuck in open, if the code under test blocked there
+		if f, err := os.OpenFile(path, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+			f.Close()
+		}
+	})
+	h := newFakeHub(t, allFiles())
+	c := h.client(t, Config{TokenFile: path})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	type result struct{ err error }
+	done := make(chan result, 1)
+	start := time.Now()
+	go func() {
+		_, err := c.Files(ctx, testRepo, testRev)
+		done <- result{err}
+	}()
+	select {
+	case r := <-done:
+		if !errors.Is(r.err, ErrTokenFile) || !strings.Contains(r.err.Error(), "not a regular file") {
+			t.Errorf("err = %v, want ErrTokenFile (not a regular file)", r.err)
+		}
+		if d := time.Since(start); d > time.Second {
+			t.Errorf("took %v to refuse a FIFO", d)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Files blocked on a FIFO at the token path, beyond its own context")
+	}
+	if got := h.authHeaders(); len(got) != 0 {
+		t.Errorf("%d requests were made after a refused token file", len(got))
+	}
+}
+
+func TestTokenFileBehindASymlinkToARegularFileStillWorks(t *testing.T) {
+	// O_NONBLOCK must not break the ordinary case, nor a symlink to it.
+	real := writeToken(t, testToken+"\n", 0o600)
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
 		t.Fatal(err)
 	}
-	if got := fmt.Sprintf("%+v", *c); strings.Contains(got, testToken) {
-		t.Errorf("client prints the token: %s", got)
+	if tok, err := readToken(link); err != nil || tok.reveal() != testToken {
+		t.Errorf("readToken(symlink) = %q, %v", tok.reveal(), err)
 	}
 }
 

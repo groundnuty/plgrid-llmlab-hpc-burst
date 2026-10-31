@@ -2,7 +2,6 @@ package hubfiles
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -37,13 +36,20 @@ type Config struct {
 	// repository. Empty means anonymous. The file must be a regular file with
 	// no access for group or others (mode 600), and is read on every call.
 	TokenFile string
-	// HTTPClient is used for every request (a copy of it: the Client adds a
-	// redirect check that keeps the token on the Hub's host). Default: a
-	// client with a five-minute timeout per request.
+	// HTTPClient is used for every request. Two copies of it are made, with
+	// their own redirect checks, which run after its CheckRedirect (if any)
+	// and cannot be undone by it: a listing request may be redirected only
+	// within the Hub's origin, never to http or another host; a download may
+	// go anywhere (its bytes are verified) but the token is dropped for every
+	// origin but the Hub's. Default: a client with a five-minute timeout per
+	// request.
 	HTTPClient *http.Client
-	// PageSize is sent as the listing's limit. Zero sends none and takes the
-	// Hub's default; a value is for tests and for a Hub that pages small.
-	// Allowed range 0 to 1000. The page chain is followed either way.
+	// PageSize is sent as the listing's limit. Zero sends 1000, the Hub's
+	// largest accepted value (spike S7 requires it: the Hub's own default
+	// page cut a listing at 50 entries); a smaller value is for tests and for
+	// a Hub that pages small. Allowed range 0 to 1000. The Link chain is
+	// followed whatever the page size, because the Hub may still cut a page
+	// below the limit.
 	PageSize int
 	// MaxPages bounds the page chain. Default 1000.
 	MaxPages int
@@ -58,9 +64,11 @@ type Config struct {
 type Client struct {
 	base         *url.URL
 	tokenFile    string
-	http         *http.Client
+	listHTTP     *http.Client // listing requests: same origin only
+	dlHTTP       *http.Client // downloads: any origin, token on the Hub's only
 	pageSize     int
 	maxPages     int
+	maxPageBytes int64
 	maxFileBytes int64
 	concurrency  int
 }
@@ -93,44 +101,17 @@ func New(cfg Config) (*Client, error) {
 	if maxFile <= 0 {
 		maxFile = defaultMaxFileBytes
 	}
-	c := &Client{
+	return &Client{
 		base:         base,
 		tokenFile:    cfg.TokenFile,
-		http:         cfg.HTTPClient,
-		pageSize:     cfg.PageSize,
+		listHTTP:     withRedirectPolicy(cfg.HTTPClient, listingRedirectPolicy(base)),
+		dlHTTP:       withRedirectPolicy(cfg.HTTPClient, downloadRedirectPolicy(base)),
+		pageSize:     orDefault(cfg.PageSize, maxPageSize),
 		maxPages:     orDefault(cfg.MaxPages, defaultMaxPages),
+		maxPageBytes: maxPageBytes,
 		maxFileBytes: maxFile,
 		concurrency:  orDefault(cfg.Concurrency, defaultConcurrency),
-	}
-	c.http = withHostBoundAuth(cfg.HTTPClient, base)
-	return c, nil
-}
-
-// withHostBoundAuth returns a copy of hc (or of a default client) that drops
-// the Authorization header from a redirect to any other scheme, host or port
-// than the Hub's. net/http already drops it for another domain, but it keeps
-// it for another port of the same host, and the token belongs to the Hub only.
-func withHostBoundAuth(hc *http.Client, base *url.URL) *http.Client {
-	var out http.Client
-	if hc != nil {
-		out = *hc
-	} else {
-		out.Timeout = defaultTimeout
-	}
-	prev := out.CheckRedirect
-	out.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if req.URL.Scheme != base.Scheme || !strings.EqualFold(req.URL.Host, base.Host) {
-			req.Header.Del("Authorization")
-		}
-		if prev != nil {
-			return prev(req, via)
-		}
-		if len(via) >= 10 {
-			return errors.New("hubfiles: stopped after 10 redirects")
-		}
-		return nil
-	}
-	return &out
+	}, nil
 }
 
 func orDefault(v, def int) int {
@@ -188,8 +169,12 @@ func Inputs(entries []Entry) []deploymentid.File {
 // Errors can be matched with errors.Is: ErrInvalidRevision,
 // ErrInvalidRepository, ErrTokenFile, ErrUnauthorized, ErrForbidden,
 // ErrNotFound, ErrBlobMismatch, ErrSizeMismatch, ErrFileTooLarge,
-// ErrInvalidListing, ErrTooManyPages, ErrCrossHostLink, and a context error.
-// A response error is an *HTTPError.
+// ErrInvalidListing, ErrTooManyPages, ErrCrossHostLink, and the context
+// errors, which are kept when a request or a body read is cut short (so
+// errors.Is(err, context.DeadlineExceeded) holds when the Hub stalls
+// mid-body). ErrInvalidListing is only for a listing that was read and found
+// wanting. A response error is an *HTTPError, with the Retry-After of a 429
+// or 503. Retryable tells a failure worth another try from a permanent one.
 func (c *Client) Files(ctx context.Context, repository, revision string) ([]Entry, error) {
 	if err := checkRepository(repository); err != nil {
 		return nil, err

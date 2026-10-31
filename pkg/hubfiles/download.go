@@ -44,7 +44,7 @@ func (c *Client) hashBlob(ctx context.Context, repo, rev string, e Entry, tok to
 	// Ask for the bytes as stored; net/http would otherwise decompress, and a
 	// stored .gz file must be hashed as it is.
 	req.Header.Set("Accept-Encoding", "identity")
-	resp, err := c.http.Do(req)
+	resp, err := c.dlHTTP.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("hubfiles: download of %q: %w", e.Path, err)
 	}

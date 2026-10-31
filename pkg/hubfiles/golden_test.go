@@ -99,8 +99,9 @@ func s7Hashes(t *testing.T, label string) map[string]string {
 // countingTransport counts the requests that reach the Hub.
 type countingTransport struct {
 	mu        sync.Mutex
-	listing   int // tree requests, first pages and follow-up pages
-	followUps int // tree requests that carry a cursor
+	listing   int    // tree requests, first pages and follow-up pages
+	followUps int    // tree requests that carry a cursor
+	firstQ    string // the query of the first tree request
 	downloads int
 	paths     []string // downloaded paths, decoded
 }
@@ -110,6 +111,9 @@ func (c *countingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	switch {
 	case strings.Contains(r.URL.Path, "/tree/"):
 		c.listing++
+		if c.listing == 1 {
+			c.firstQ = r.URL.RawQuery
+		}
 		if r.URL.Query().Get("cursor") != "" {
 			c.followUps++
 		}
@@ -132,8 +136,12 @@ func TestGoldenHub(t *testing.T) {
 		// DeepSeek has 74 files. Pages of 20 entries make the Hub paginate, so
 		// the Link chain is followed for real.
 		{"deepseek", 20},
+		// The production configuration, on the listing that has more than 50
+		// entries: 77 of them, where S7 saw the Hub's own default page cut the
+		// listing at 50. The default page size is limit=1000.
+		{"deepseek", 0},
 		// Gemma has 18 files. Pages of 5 paginate it too; the default page size
-		// is the second run below.
+		// is the last run.
 		{"gemma", 5},
 		{"gemma", 0},
 	} {
@@ -228,6 +236,12 @@ func goldenCheckpoint(t *testing.T, label string, pageSize int) {
 	for _, p := range counter.paths {
 		if e := byPath[p]; e.LFS {
 			t.Errorf("the LFS file %q was downloaded", p)
+		}
+	}
+	if pageSize == 0 {
+		// The default asks for the Hub's largest page, whatever the Hub then does.
+		if q := counter.firstQ; !strings.Contains(q, "limit=1000") || !strings.Contains(q, "recursive=true") {
+			t.Errorf("the first listing request had the query %q, want limit=1000 and recursive=true", q)
 		}
 	}
 	if pageSize > 0 {

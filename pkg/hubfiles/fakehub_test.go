@@ -82,8 +82,9 @@ func allFiles() []fakeFile {
 
 // fakeHub is an httptest stand-in for the Hub's tree and resolve endpoints. It
 // lists directories as the Hub does (so a client must drop them), in an order
-// that is not sorted, and cuts the listing into pages of pageSize entries when
-// pageSize is set.
+// that is not sorted, and cuts the listing into pages of at most pageSize
+// entries when pageSize is set, whatever limit the client asks for (the way a
+// Hub with a small maximum page behaves).
 type fakeHub struct {
 	t        *testing.T
 	srv      *httptest.Server
@@ -102,6 +103,9 @@ type fakeHub struct {
 	denyDownloads bool
 	// redirectTo, when set, makes every resolve request a 302 to that origin.
 	redirectTo string
+	// treeRedirectTo, when set, makes every tree request a 302 to that origin,
+	// with the same path and query.
+	treeRedirectTo string
 
 	mu       sync.Mutex
 	tree     []string   // RequestURI of each tree request
@@ -188,6 +192,10 @@ func (h *fakeHub) handle(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid credentials: " + got})
 		return
 	}
+	if h.treeRedirectTo != "" && !isDownload {
+		http.Redirect(w, r, h.treeRedirectTo+r.URL.RequestURI(), http.StatusFound)
+		return
+	}
 	if h.redirectTo != "" && isDownload {
 		rel := (&url.URL{Path: "/" + strings.TrimPrefix(r.URL.Path, "/"+h.repo+"/resolve/"+h.rev+"/")}).EscapedPath()
 		http.Redirect(w, r, h.redirectTo+rel, http.StatusFound)
@@ -207,9 +215,12 @@ func (h *fakeHub) serveTree(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	entries := h.entries(q.Get("recursive") == "true")
 	h.reorder(entries)
-	limit := h.pageSize
+	limit := 0
 	if v, err := strconv.Atoi(q.Get("limit")); err == nil && v > 0 {
 		limit = v
+	}
+	if h.pageSize > 0 && (limit == 0 || h.pageSize < limit) {
+		limit = h.pageSize
 	}
 	offset := 0
 	if c := q.Get("cursor"); c != "" {

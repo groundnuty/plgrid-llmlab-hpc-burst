@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"syscall"
 )
 
 // maxTokenFileBytes bounds the token file; a Hub token is under 100 bytes.
@@ -36,7 +37,10 @@ func (t token) reveal() string { return string(t) }
 // A file that group or others can access is refused, and so is anything that
 // is not a regular file. No error message holds file content.
 func readToken(path string) (token, error) {
-	f, err := os.Open(path)
+	// O_NONBLOCK: opening a named pipe that has no writer would block until
+	// one appears, whatever the caller's context says. A regular file is not
+	// affected; the check below refuses anything else.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrTokenFile, err)
 	}

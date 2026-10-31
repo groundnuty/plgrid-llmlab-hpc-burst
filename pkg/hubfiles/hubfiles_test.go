@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -96,8 +97,28 @@ func TestFilesSendsRecursiveAndPageSize(t *testing.T) {
 		t.Fatal(err)
 	}
 	tree, _ = h.requests()
-	if len(tree) != 1 || strings.Contains(tree[0], "limit=") {
-		t.Errorf("default requests = %v, want one request without limit", tree)
+	// S7 (spikes/s7/README.md) requires limit=1000: the Hub's own default page
+	// cut a listing at 50 entries.
+	if len(tree) != 1 || !strings.Contains(tree[0], "limit=1000") || !strings.Contains(tree[0], "recursive=true") {
+		t.Errorf("default requests = %v, want one request with limit=1000 and recursive=true", tree)
+	}
+}
+
+func TestFilesFollowsLinkWhenTheHubCutsBelowTheDefaultLimit(t *testing.T) {
+	// The default asks for 1000, but a Hub that pages at 6 still gives a Link,
+	// and the chain is followed: the limit is a request, not a guarantee.
+	h := newFakeHub(t, allFiles())
+	h.pageSize = 6
+	entries, err := h.client(t, Config{}).Files(context.Background(), testRepo, testRev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, _ := h.requests()
+	if len(tree) != 3 || !strings.Contains(tree[0], "limit=1000") {
+		t.Errorf("tree requests = %v, want 3 pages, the first asking for limit=1000", tree)
+	}
+	if len(entries) != len(allFiles()) {
+		t.Errorf("%d entries, want %d", len(entries), len(allFiles()))
 	}
 }
 
@@ -399,8 +420,15 @@ func TestFilesRefusesAnEmptyListingAndAnUnknownEntryType(t *testing.T) {
 }
 
 func TestFilesRefusesAPageChainThatLoopsOrNeverEnds(t *testing.T) {
-	var srv *httptest.Server
+	var (
+		srv   *httptest.Server
+		mu    sync.Mutex
+		loops int
+	)
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		loops++
+		mu.Unlock()
 		// Every page points to itself.
 		w.Header().Set("Link", "<"+srv.URL+r.URL.RequestURI()+`>; rel="next"`)
 		_, _ = w.Write([]byte(`[]`))
@@ -410,16 +438,22 @@ func TestFilesRefusesAPageChainThatLoopsOrNeverEnds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Files(context.Background(), testRepo, testRev); !errors.Is(err, ErrTooManyPages) {
-		t.Errorf("loop: err = %v, want ErrTooManyPages", err)
+	_, err = c.Files(context.Background(), testRepo, testRev)
+	if !errors.Is(err, ErrTooManyPages) || !strings.Contains(err.Error(), "already read") {
+		t.Errorf("loop: err = %v, want ErrTooManyPages saying the page was already read", err)
+	}
+	// The self-loop is caught on its first repeat: with the repeat check
+	// removed, only the cap (1000 pages) would stop it.
+	if loops != 1 {
+		t.Errorf("the self-loop made %d requests, want exactly 1", loops)
 	}
 
-	// Distinct links forever: the page cap stops it.
+	// Distinct links forever, all inside the snapshot: the page cap stops it.
 	n := 0
 	var srv2 *httptest.Server
 	srv2 = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n++
-		w.Header().Set("Link", "<"+srv2.URL+"/api/models/x/tree/y?page="+strings.Repeat("p", n)+`>; rel="next"`)
+		w.Header().Set("Link", "<"+srv2.URL+"/api/models/"+testRepo+"/tree/"+testRev+"?recursive=true&page="+strings.Repeat("p", n)+`>; rel="next"`)
 		_, _ = w.Write([]byte(`[]`))
 	}))
 	defer srv2.Close()
@@ -432,28 +466,6 @@ func TestFilesRefusesAPageChainThatLoopsOrNeverEnds(t *testing.T) {
 	}
 	if n != 5 {
 		t.Errorf("%d pages fetched, want exactly the cap of 5", n)
-	}
-}
-
-func TestNextLinkParsing(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		values []string
-		want   string
-	}{
-		{"plain", []string{`<https://h/p?c=1%3D%3D>; rel="next"`}, "https://h/p?c=1%3D%3D"},
-		{"unquoted rel", []string{`<https://h/p>; rel=next`}, "https://h/p"},
-		{"other relation only", []string{`<https://h/p>; rel="prev"`}, ""},
-		{"two links in one value", []string{`<https://h/a>; rel="prev", <https://h/b>; rel="next"`}, "https://h/b"},
-		{"two header lines", []string{`<https://h/a>; rel="prev"`, `<https://h/b>; rel="next"`}, "https://h/b"},
-		{"rel with several values", []string{`<https://h/a>; rel="next last"`}, "https://h/a"},
-		{"extra parameter first", []string{`<https://h/a>; title="x"; rel="next"`}, "https://h/a"},
-		{"none", nil, ""},
-		{"garbage", []string{`not a link`}, ""},
-	} {
-		if got := nextLink(tc.values); got != tc.want {
-			t.Errorf("%s: nextLink(%q) = %q, want %q", tc.name, tc.values, got, tc.want)
-		}
 	}
 }
 

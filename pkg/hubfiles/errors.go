@@ -1,11 +1,17 @@
 package hubfiles
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
+	"syscall"
+	"time"
 )
 
 var (
@@ -56,6 +62,10 @@ type HTTPError struct {
 	Code string
 	// TokenSent says whether the request carried a token.
 	TokenSent bool
+	// RetryAfter is the delay the Hub asked for in Retry-After, on a 429 or a
+	// 503 (delta-seconds or an HTTP date); zero when it asked for none. It is
+	// capped at 24 hours.
+	RetryAfter time.Duration
 }
 
 func (e *HTTPError) Error() string {
@@ -94,26 +104,137 @@ func statusError(resp *http.Response, tokenSent bool) *HTTPError {
 	if !errorCodePattern.MatchString(code) {
 		code = ""
 	}
-	return &HTTPError{
+	he := &HTTPError{
 		Method:    resp.Request.Method,
 		Path:      resp.Request.URL.Path,
 		Status:    resp.StatusCode,
 		Code:      code,
 		TokenSent: tokenSent,
 	}
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+		he.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+	}
+	return he
+}
+
+const maxRetryAfter = 24 * time.Hour
+
+// parseRetryAfter reads a Retry-After value (RFC 9110: whole seconds, or an
+// HTTP date) relative to now. A value that does not parse, or a date in the
+// past, gives zero; a very long wait is capped.
+func parseRetryAfter(v string, now time.Time) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if strings.Trim(v, "0123456789") == "" {
+		secs, err := strconv.ParseUint(v, 10, 63)
+		if err != nil || secs > uint64(maxRetryAfter/time.Second) { // too large to count is a long wait
+			return maxRetryAfter
+		}
+		return time.Duration(secs) * time.Second
+	}
+	t, err := http.ParseTime(v)
+	if err != nil {
+		return 0
+	}
+	return min(max(t.Sub(now), 0), maxRetryAfter)
+}
+
+// permanent are the failures that another try cannot change.
+var permanent = []error{
+	ErrInvalidRevision, ErrInvalidRepository, ErrTokenFile,
+	ErrBlobMismatch, ErrSizeMismatch, ErrFileTooLarge,
+	ErrInvalidListing, ErrTooManyPages, ErrCrossHostLink,
+}
+
+// Retryable reports whether err from Client.Files is worth another attempt
+// later: a 429 or any 5xx answer (see HTTPError.RetryAfter), a network error
+// (a reset or refused connection, a body cut short, a DNS failure) and a
+// timeout, including a deadline that ended the call. It is false for a
+// permanent failure: a 4xx other than 429, a file that does not match its
+// blob id or size, an unusable listing, revision, repository or token file,
+// a too-long or circular page chain, a link out of the snapshot, and a call
+// the caller cancelled.
+func Retryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	var s *scrubbedError
+	if errors.As(err, &s) {
+		return s.retryable
+	}
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	for _, p := range permanent {
+		if errors.Is(err, p) {
+			return false
+		}
+	}
+	var he *HTTPError
+	if errors.As(err, &he) {
+		return he.Status == http.StatusTooManyRequests || he.Status >= 500
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	return isNetworkError(err)
+}
+
+func isNetworkError(err error) bool {
+	var (
+		op  *net.OpError
+		dns *net.DNSError
+		ne  net.Error
+	)
+	switch {
+	case errors.As(err, &op), errors.As(err, &dns):
+		return true
+	case errors.As(err, &ne) && ne.Timeout():
+		return true
+	}
+	return errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE)
 }
 
 // scrubbedError is an error whose text had the token replaced. It does not
-// unwrap: the original error carries the token in its text, and a logger that
-// walks the chain would print it.
-type scrubbedError struct{ msg string }
+// unwrap, because the original's text carries the token and a logger that
+// walks the chain would print it. It keeps the original's classification
+// without its text: Is answers for the original (so errors.Is still finds
+// ErrUnauthorized, context.Canceled and the others), As hands out an
+// *HTTPError, which holds no secret, and retryable was computed from the
+// original.
+type scrubbedError struct {
+	msg       string
+	orig      error
+	retryable bool
+}
 
 func (e *scrubbedError) Error() string { return e.msg }
+
+// GoString keeps %#v from printing the struct, whose orig field holds the
+// text that was scrubbed.
+func (e *scrubbedError) GoString() string { return e.msg }
+
+func (e *scrubbedError) Is(target error) bool { return errors.Is(e.orig, target) }
+
+func (e *scrubbedError) As(target any) bool {
+	if t, ok := target.(**HTTPError); ok {
+		var he *HTTPError
+		if errors.As(e.orig, &he) {
+			*t = he
+			return true
+		}
+	}
+	return false
+}
 
 // scrub is the last line of defence for "the token is in no error message":
 // no error is built from a response body, a request header or the token, but
 // if a lower layer's text ever held the token, the error is replaced by one
-// with the token blanked out (and loses its chain, for the reason above).
+// with the token blanked out. It keeps the classification (see
+// scrubbedError) and loses the chain, for the reason given there.
 func scrub(err error, tok token) error {
 	if err == nil || tok == "" {
 		return err
@@ -122,5 +243,5 @@ func scrub(err error, tok token) error {
 	if !strings.Contains(msg, tok.reveal()) {
 		return err
 	}
-	return &scrubbedError{msg: strings.ReplaceAll(msg, tok.reveal(), redacted)}
+	return &scrubbedError{msg: strings.ReplaceAll(msg, tok.reveal(), redacted), orig: err, retryable: Retryable(err)}
 }
