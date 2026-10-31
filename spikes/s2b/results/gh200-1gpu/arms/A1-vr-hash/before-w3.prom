@@ -1,0 +1,16 @@
+vllm:num_requests_running{engine="0",model_name="s2b-model"} 0.0
+vllm:num_requests_waiting{engine="0",model_name="s2b-model"} 0.0
+vllm:num_requests_waiting_by_reason{engine="0",model_name="s2b-model",reason="capacity"} 0.0
+vllm:num_requests_waiting_by_reason{engine="0",model_name="s2b-model",reason="deferred"} 0.0
+vllm:kv_cache_usage_perc{engine="0",model_name="s2b-model"} 0.0
+vllm:prefix_cache_queries_total{engine="0",model_name="s2b-model"} 1.65063e+06
+vllm:prefix_cache_hits_total{engine="0",model_name="s2b-model"} 1.168912e+06
+vllm:num_preemptions_total{engine="0",model_name="s2b-model"} 0.0
+vllm:prompt_tokens_total{engine="0",model_name="s2b-model"} 1.65063e+06
+vllm:generation_tokens_total{engine="0",model_name="s2b-model"} 13824.0
+vllm:request_success_total{engine="0",finished_reason="stop",model_name="s2b-model"} 0.0
+vllm:request_success_total{engine="0",finished_reason="length",model_name="s2b-model"} 288.0
+vllm:request_success_total{engine="0",finished_reason="abort",model_name="s2b-model"} 0.0
+vllm:request_success_total{engine="0",finished_reason="error",model_name="s2b-model"} 0.0
+vllm:request_success_total{engine="0",finished_reason="repetition",model_name="s2b-model"} 0.0
+vllm:cache_config_info{_block_size_resolved="True",block_size="16",cache_dtype="auto",cache_hit_alignment_tokens="None",effective_attention_block_size="16",enable_mamba_shared_prefix_checkpoint="False",enable_prefix_caching="True",engine="0",gpu_memory_utilization="0.2",hash_block_size="None",is_attention_free="False",kv_cache_dtype_skip_layers="[]",kv_cache_layout="None",kv_cache_max_concurrency="32.236328125",kv_cache_memory_bytes="None",kv_cache_size_tokens="528160",kv_offloading_backend="native",kv_offloading_size="None",kv_sharing_fast_prefill="False",mamba_block_size="None",mamba_cache_dtype="auto",mamba_cache_mode="none",mamba_page_size_padded="None",mamba_ssm_cache_dtype="auto",num_cpu_blocks="None",num_gpu_blocks="33010",num_gpu_blocks_override="None",prefix_cache_retention_interval="0",prefix_caching_hash_algo="sha256",prefix_match_unit="None",replayssm_buffer_len="16",skip_page_size_padded="None",sliding_window="None",swa_bounded_replay="True",use_kda_recoverssm="False",use_replayssm="False",user_specified_block_size="False"} 1.0

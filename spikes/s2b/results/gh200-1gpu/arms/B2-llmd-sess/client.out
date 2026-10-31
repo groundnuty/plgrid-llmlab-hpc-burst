@@ -1,0 +1,1 @@
+RESULT run=B2-llmd-sess sessions=96 turns=12 concurrency=32 wall_s=77.6 failed_attempts=0 aborted_sessions=0
