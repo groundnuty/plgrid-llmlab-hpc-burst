@@ -3,10 +3,11 @@ package lifecycle
 // The manager on a real API server (internal/testenv's assembled host): the
 // Lease, the keyed work queue writing status, identity records as
 // ControllerRevisions, the health endpoints, and the server-side apply of
-// DialHomeUnreachable beside the Provider controller's own status writes. Run
-// it under the envtest lock:
+// DialHomeUnreachable beside the Provider controller's own status writes. On a
+// machine that runs several envtest suites at once, serialise them with a lock
+// of your own:
 //
-//	flock /tmp/hpc-burst-tools/locks/envtest.lock go test ./internal/lifecycle/ -run TestManagerOnControlPlane
+//	flock -o <lock file> go test ./internal/lifecycle/ -run TestManagerOnControlPlane
 //
 // It uses #61's envtest block, 29204-29207, unless HPCBURST_TESTENV_PORT_BASE
 // is set, so it does not collide with the other packages' blocks when go test
