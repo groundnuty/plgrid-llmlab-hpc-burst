@@ -135,6 +135,10 @@ func (p *pass) end(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, reason, ms
 	}); err != nil {
 		return err
 	}
+	// An ended Instance has no engine series (not applicable) and no
+	// heartbeat to judge.
+	p.r.inventory().drop(p.key, in.UID)
+	p.mem.clear(instanceHeartbeatKey(in))
 	// The release, or the idle anchor, is made durable before the finalizer
 	// goes: once it goes, the Instance may vanish (a garbage-collected one at
 	// once), and with it what says the Allocation must go or since when it is
@@ -447,7 +451,22 @@ func (p *pass) agent(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, st setti
 			cond(&s.Conditions, v1alpha1.ConditionAgentUnreachable, metav1.ConditionFalse, v1alpha1.ReasonReporting, "the agent reports", in.Generation, now)
 		}
 	})
-	return av, err
+	p.r.inventory().setAgent(p.key, in.UID, alloc.UID, in.Status.Agent.AgentInstanceID, av.unreachable, st.probeInterval)
+	if err != nil {
+		return av, err
+	}
+	// The agent's reports are an observer: AgentUnreachable True is its stale
+	// heartbeat. failing/HeartbeatMissed follows the condition's write, when
+	// it turns True and then at most once an hour while it stays True (HBEP-8,
+	// Observers and Repeating conditions; HBEP-7, Events and conditions).
+	key := instanceHeartbeatKey(in)
+	if !av.unreachable {
+		p.mem.clear(key)
+	} else if p.mem.repeat(key, p.now) {
+		p.r.Recorder.Event(in, nil, eventFailing, reasonHeartbeatMissed,
+			fmt.Sprintf("the agent has sent no report since %s, longer than health.agentTimeout (%s); the Instance's engine readings are unknown, and nothing restarts on that alone", last.UTC().Format(time.RFC3339), st.agentTimeout))
+	}
+	return av, nil
 }
 
 // drainStart returns the Instance's drain start: its lease end minus its drain

@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -23,12 +24,14 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
@@ -53,6 +56,14 @@ type Options struct {
 	FrontConfigured bool
 	// HealthAddr is where /healthz and /readyz listen; "0" or empty disables.
 	HealthAddr string
+	// MetricsAddr is where controller-runtime's metrics server serves
+	// /metrics, on loopback at the launcher's port base + 12 (HBEP-8,
+	// Metrics); "0" or empty disables it.
+	MetricsAddr string
+	// Registry is where the engine gauges' collector registers while the
+	// manager runs; nil means controller-runtime's registry, the one its
+	// metrics server serves.
+	Registry prometheus.Registerer
 	// LeaderElection takes the Lease v1alpha1.LeaseLifecycle in
 	// v1alpha1.ControllerNamespace, a guard against a stale second copy.
 	LeaderElection bool
@@ -62,6 +73,10 @@ type Options struct {
 	Checkpoints CheckpointSource
 	// Clock is the time source; nil means SystemClock.
 	Clock Clock
+
+	// newCache, when set, builds the manager's cache: a test holds the
+	// caches' sync with it.
+	newCache cache.NewCacheFunc
 }
 
 // Scheme returns the scheme the controller uses: the built-in kinds and the
@@ -77,10 +92,18 @@ func Scheme() (*runtime.Scheme, error) {
 	return s, nil
 }
 
+// leaderRenewDeadline is controller-runtime's default renew deadline
+// (v0.23.1, pkg/manager/manager.go, defaultRenewDeadline), which the lifecycle
+// Lease's lock sizes its client timeout by.
+const leaderRenewDeadline = 10 * time.Second
+
 // NewManager builds the lifecycle controller: one controller-runtime manager
 // whose work queue is keyed per ModelDeployment, and the agent Backend that the
-// agent API server calls (HBEP-7, Controllers). Metrics are not served: the
-// default listener binds every interface.
+// agent API server calls (HBEP-7, Controllers). With leader election it holds
+// the lifecycle Lease through a gapLock, and raises the start's ObservationGap
+// once it holds it (HBEP-8, Gaps after a restart). It judges the Providers'
+// and the front's heartbeats on the leader (observer), and serves the engine
+// gauges per Instance on /metrics when MetricsAddr is set (HBEP-8, Metrics).
 func NewManager(o Options) (manager.Manager, *Backend, error) {
 	if o.Config == nil {
 		return nil, nil, errors.New("lifecycle: no API config")
@@ -96,15 +119,30 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 	if health == "" {
 		health = "0"
 	}
-	mgr, err := ctrl.NewManager(o.Config, manager.Options{
+	metricsAddr := o.MetricsAddr
+	if metricsAddr == "" {
+		metricsAddr = "0"
+	}
+	mopts := manager.Options{
 		Scheme:                        scheme,
-		Metrics:                       metricsserver.Options{BindAddress: "0"},
+		Metrics:                       metricsserver.Options{BindAddress: metricsAddr},
 		HealthProbeBindAddress:        health,
 		LeaderElection:                o.LeaderElection,
 		LeaderElectionID:              v1alpha1.LeaseLifecycle,
 		LeaderElectionNamespace:       v1alpha1.ControllerNamespace,
 		LeaderElectionReleaseOnCancel: true,
-	})
+		NewCache:                      o.newCache,
+	}
+	// With leader election off there is no Lease to read or regard, so no
+	// ObservationGap (`@hpc-burst-science-agent`, 31 Oct 2026, for #111).
+	var lock *gapLock
+	if o.LeaderElection {
+		if lock, err = newGapLock(o.Config, leaderRenewDeadline); err != nil {
+			return nil, nil, fmt.Errorf("lifecycle: the lifecycle Lease's lock: %w", err)
+		}
+		mopts.LeaderElectionResourceLockInterface = lock
+	}
+	mgr, err := ctrl.NewManager(o.Config, mopts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("lifecycle: manager: %w", err)
 	}
@@ -141,6 +179,21 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 		Client: mgr.GetClient(), Reader: mgr.GetAPIReader(), Clock: clock, Backend: backend, Checkpoints: src,
 		Recorder: KubeRecorder{R: mgr.GetEventRecorder(v1alpha1.FieldManagerLifecycle)},
 		Config:   Config{CredentialsDir: o.CredentialsDir, FrontConfigured: o.FrontConfigured, AgentDigest: builds.digest},
+	}
+	if lock != nil {
+		if err := mgr.Add(&gapEmitter{lock: lock, reader: mgr.GetAPIReader(), rec: r.Recorder}); err != nil {
+			return nil, nil, err
+		}
+	}
+	if err := mgr.Add(&observer{r: r, every: observeEvery}); err != nil {
+		return nil, nil, err
+	}
+	reg := o.Registry
+	if reg == nil {
+		reg = ctrlmetrics.Registry
+	}
+	if err := mgr.Add(&collectorRegistration{reg: reg, c: &instanceCollector{inv: r.inventory(), backend: backend, clock: clock}}); err != nil {
+		return nil, nil, err
 	}
 	workers := o.Workers
 	if workers <= 0 {
@@ -271,7 +324,11 @@ func deploymentsOnProfile(ctx context.Context, c client.Client, profile string) 
 }
 
 // readiness tracks whether the controller serves agents: it leads, and its
-// caches are synced. It runs only on the leader.
+// caches are synced. It runs only on the leader, so /readyz fails until the
+// caches have synced and the Lease is held (`@hpc-burst-science-agent`, 31 Oct
+// 2026, for #111: leading counts). Alpha runs one controller; a standby
+// replica after alpha would need a readiness state of its own, since this one
+// would call it not ready.
 type readiness struct {
 	mgr manager.Manager
 	ok  atomic.Bool
@@ -343,3 +400,23 @@ func (b *agentBuilds) digest(cpuArch string) (string, error) {
 	b.sum[cpuArch] = buildSum{size: fi.Size(), modTime: fi.ModTime(), digest: d}
 	return d, nil
 }
+
+// collectorRegistration registers the engine gauges' collector while the
+// manager runs, on every replica (its inventory is empty but on the leader),
+// and unregisters it at the stop, so a manager started again in the same
+// process registers afresh.
+type collectorRegistration struct {
+	reg prometheus.Registerer
+	c   prometheus.Collector
+}
+
+func (m *collectorRegistration) Start(ctx context.Context) error {
+	if err := m.reg.Register(m.c); err != nil {
+		return fmt.Errorf("lifecycle: register the engine gauges: %w", err)
+	}
+	<-ctx.Done()
+	m.reg.Unregister(m.c)
+	return nil
+}
+
+func (m *collectorRegistration) NeedLeaderElection() bool { return false }
