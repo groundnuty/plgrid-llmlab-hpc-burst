@@ -150,12 +150,17 @@ var waitReadyHook func(last error)
 // counts for nothing. Before it returns ready, confirmHost checks the whole host once more.
 //
 // timeout is a deadline for the whole wait, probes included: a probe's own timeout is the shorter
-// of probeTimeout and the time left, its request ends with ctx, and the pause between rounds is
-// cut to the time left. A probe that starts just before the deadline therefore cannot answer
-// after it.
+// of probeTimeout and the time left when its round began, its request also ends at the deadline
+// and with ctx, and the pause between rounds is cut to the time left. A probe that starts just
+// before the deadline therefore cannot answer after it.
 func waitReady(ctx context.Context, l layout, st *State, h *procHandle, timeout time.Duration) (readyzAt, readyAt time.Duration, err error) {
 	t0 := st.StartedAt
 	deadline := time.Now().Add(timeout)
+	// The requests end at the deadline whatever else a round does before it sends them (scanning
+	// /proc for the port's owner, say). The loop below tests ctx, not dctx, so that running out of
+	// time still gives the "not ready after" error and not a context error.
+	dctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
 	stage := "apiserver /readyz"
 	var last error
 	readyzDone := false
@@ -195,7 +200,7 @@ func waitReady(ctx context.Context, l layout, st *State, h *procHandle, timeout 
 					last = oerr
 				} else if !own {
 					last = fmt.Errorf("port %d is not held by the launched k3s yet", st.Ports.HTTPS)
-				} else if rerr := readyz(ctx, cfg); rerr != nil {
+				} else if rerr := readyz(dctx, cfg); rerr != nil {
 					last = rerr
 				} else if own2, _ := portOwned(h, st.Ports.HTTPS); !own2 {
 					last = fmt.Errorf("/readyz answered, but port %d is not held by the launched k3s", st.Ports.HTTPS)
@@ -208,7 +213,7 @@ func waitReady(ctx context.Context, l layout, st *State, h *procHandle, timeout 
 				last = oerr
 			} else if !own {
 				last = fmt.Errorf("port %d is not held by the launched k3s yet", st.Ports.KCM)
-			} else if herr := kcmHealthz(ctx, st.Ports.KCM, ptimeout); herr != nil {
+			} else if herr := kcmHealthz(dctx, st.Ports.KCM, ptimeout); herr != nil {
 				last = herr
 			} else if own2, _ := portOwned(h, st.Ports.KCM); !own2 {
 				last = fmt.Errorf("/healthz answered, but port %d is not held by the launched k3s", st.Ports.KCM)

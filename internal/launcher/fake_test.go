@@ -27,6 +27,7 @@ type fakePidfd struct {
 	next     int
 	sent     []string
 	onOpen   func(pid int)
+	onExited func() // runs before each exited check; a test uses it to slow a round down
 	onSignal func(pid int, sig syscall.Signal)
 }
 
@@ -56,6 +57,9 @@ func (f *fakePidfd) open(pid int) (int, error) {
 }
 
 func (f *fakePidfd) exited(fd int) (bool, error) {
+	if f.onExited != nil {
+		f.onExited()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	pid, ok := f.fds[fd]

@@ -241,3 +241,42 @@ func TestWaitReadyDoesNotAnswerAfterItsDeadline(t *testing.T) {
 		t.Errorf("got %v; want a timeout in the controller manager stage", err)
 	}
 }
+
+// TestWaitReadyDeadlineHoldsWhenARoundIsSlowBeforeItsRequest: a round fixes its probe timeout when
+// it begins, but sends its request only after it has checked who holds the port, and a slow check
+// moves the request later, past where a timeout counted from the round's start would end. The
+// fake slows that check by 0.8 s in the controller manager's round, then answers 0.3 s after it
+// is asked: the answer comes after the 1 s deadline whenever the round began, and well within
+// the probe's own timeout (about 0.95 s from the request).
+func TestWaitReadyDeadlineHoldsWhenARoundIsSlowBeforeItsRequest(t *testing.T) {
+	h := newFakeHost(t)
+	var asked atomic.Bool
+	h.onKCM = func() {
+		asked.Store(true)
+		time.Sleep(300 * time.Millisecond)
+	}
+	// The hook runs after /readyz has answered, so the next round is the controller manager's. Its
+	// first exited check is the round's own verify, before the probe timeout is fixed; the second is
+	// the port check, after it.
+	slow := false
+	checks := 0
+	useWaitReadyHook(t, func(error) { slow = true })
+	h.f.onExited = func() {
+		if !slow {
+			return
+		}
+		if checks++; checks == 2 {
+			time.Sleep(800 * time.Millisecond)
+		}
+	}
+	_, _, err := waitReady(context.Background(), h.l, h.st, h.handle(), time.Second)
+	if !asked.Load() {
+		t.Fatal("the controller manager was never asked: the round this test is about did not run")
+	}
+	if err == nil {
+		t.Fatal("ready on an answer that came after the deadline")
+	}
+	if !strings.Contains(err.Error(), "controller manager /healthz not ready after 1s") {
+		t.Errorf("got %v; want a timeout in the controller manager stage", err)
+	}
+}
