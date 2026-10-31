@@ -407,7 +407,7 @@ spec:
                               holds the image reference and its digest). It is not a deployment-ID
                               input: the digest names the bytes, and pkg/deploymentid hashes only it.
                               The schema requires ImageDigest beside it, so every launch pulls
-                              Image@ImageDigest (HBEP owner, 31 Oct 2026).
+                              Image@ImageDigest (`@hpc-burst-science-agent`, 31 Oct 2026).
 
                               The repository names no tag: the text after its last "/" holds no ":"
                               (a ":" before it is a registry port, as in registry.example:5000/vllm).

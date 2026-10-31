@@ -58,7 +58,7 @@ type EngineSpec struct {
 	// holds the image reference and its digest). It is not a deployment-ID
 	// input: the digest names the bytes, and pkg/deploymentid hashes only it.
 	// The schema requires ImageDigest beside it, so every launch pulls
-	// Image@ImageDigest (HBEP owner, 31 Oct 2026).
+	// Image@ImageDigest (`@hpc-burst-science-agent`, 31 Oct 2026).
 	//
 	// The repository names no tag: the text after its last "/" holds no ":"
 	// (a ":" before it is a registry port, as in registry.example:5000/vllm).
@@ -370,7 +370,7 @@ type Routing struct {
 
 // LoadBound is the bounded-load factor c, by membership. The front counts as
 // ready the deployment's eligible Instances (HBEP-5, Load bound and cap).
-// The tight bound is at most the loose one (owner ruling, 31 Oct 2026); equal
+// The tight bound is at most the loose one (`@hpc-burst-science-agent`, 31 Oct 2026); equal
 // values are allowed. Schema defaults fill an omitted side first, so a tight
 // bound above the default loose bound is refused too.
 //
