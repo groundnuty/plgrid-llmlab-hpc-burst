@@ -78,7 +78,8 @@ func parse(args []string, stderr io.Writer) (flags, error) {
 		return flags{}, fmt.Errorf("unexpected arguments: %v", fs.Args())
 	case f.host.StateDir == "":
 		return flags{}, errors.New("--state-dir is required")
-	case f.host.PortBase < 1024 || f.host.PortBase > 65535-agentapi.AgentEndpointPortOffset:
+	// The block reaches base+7, the ssh dial-home listener (agentapi.Host).
+	case f.host.PortBase < 1024 || f.host.PortBase > 65535-agentapi.DialHomePortOffset:
 		return flags{}, fmt.Errorf("--port-base %d is out of range", f.host.PortBase)
 	case f.healthAddr == "":
 		return flags{}, errors.New("--health-addr is required")
