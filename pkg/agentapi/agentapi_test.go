@@ -379,3 +379,11 @@ func TestHostLayout(t *testing.T) {
 		t.Errorf("AllocationCredentialPath = %q", got)
 	}
 }
+
+// The schema's bound on targetSessions is the protocol's (v1alpha1 states it
+// in a kubebuilder marker, which cannot name a constant).
+func TestMaxTargetSessionsAgreesWithTheAPI(t *testing.T) {
+	if MaxTargetSessions != v1alpha1.MaxTargetSessions {
+		t.Errorf("agentapi.MaxTargetSessions = %d, v1alpha1.MaxTargetSessions = %d", MaxTargetSessions, v1alpha1.MaxTargetSessions)
+	}
+}
