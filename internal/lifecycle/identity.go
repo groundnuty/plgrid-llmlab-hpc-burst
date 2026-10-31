@@ -2,9 +2,12 @@ package lifecycle
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -31,11 +34,16 @@ type CheckpointSource interface {
 // cachedSource caches a CheckpointSource's successful answers by repository and
 // revision: a revision is a full commit id, so its files never change, and
 // each Files call downloads every non-LFS file. A failure is kept too, and the
-// inner source is not asked again before its retry time: a transient failure
-// (hubfiles.Retryable: a transport error, a 429 or a 5xx) backs off from 30 s,
-// doubling to 10 min, and never sooner than the Hub's Retry-After; a permanent
-// one (a 401, a 404) is asked again after 10 min, so a fixed token or a
-// published revision is picked up without a restart.
+// inner source is not asked again before it may be (HBEP owner rulings, 31 Oct
+// 2026):
+//   - a transient failure (hubfiles.Retryable: a transport error, a 429 or a
+//     5xx), a small file whose blob id does not match the listing
+//     (hubfiles.ErrBlobMismatch) and a listing the strict decoder refuses
+//     (hubfiles.ErrInvalidListing) back off from 30 s, doubling to 10 min,
+//     never sooner than the Hub's Retry-After;
+//   - any other failure (a 401, 403 or 404, a bad token file) is permanent: it
+//     is not tried again until the spec names another checkpoint or token file
+//     (another key) or the token file's content changes.
 type cachedSource struct {
 	inner CheckpointSource
 	clock Clock
@@ -49,7 +57,10 @@ type cachedSource struct {
 type sourceFailure struct {
 	err      error
 	attempts int
-	retryAt  time.Time
+	// permanent failures wait for another token; retryAt is unused for them.
+	permanent bool
+	token     string
+	retryAt   time.Time
 }
 
 const (
@@ -58,7 +69,7 @@ const (
 )
 
 // NewCachedSource wraps a CheckpointSource with a cache by (repository,
-// revision) and a backoff on failures, timed by clock.
+// revision) and the failure policy above, timed by clock.
 func NewCachedSource(inner CheckpointSource, clock Clock) CheckpointSource {
 	if clock == nil {
 		clock = SystemClock{}
@@ -69,7 +80,30 @@ func NewCachedSource(inner CheckpointSource, clock Clock) CheckpointSource {
 
 func cacheKey(cp v1alpha1.CheckpointSpec) string { return cp.Repository + "@" + cp.Revision }
 
-// backoffError is a kept failure returned before its retry time.
+// failKey keys a failure by the checkpoint and the token file it was read
+// with, so a spec that names another token file reads again.
+func failKey(kind string, cp v1alpha1.CheckpointSpec) string {
+	return kind + "/" + cacheKey(cp) + "#" + tokenFileOf(cp)
+}
+
+// tokenFingerprint identifies the token file's content, so a permanent failure
+// is read again once the operator replaces the token. The content is hashed in
+// memory only, never kept or logged; a file that cannot be read has its own
+// fingerprint.
+func tokenFingerprint(cp v1alpha1.CheckpointSpec) string {
+	path := tokenFileOf(cp)
+	if path == "" {
+		return "none"
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "unreadable"
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// backoffError is a kept failure; retryAt is zero for a permanent one.
 type backoffError struct {
 	err     error
 	retryAt time.Time
@@ -78,7 +112,8 @@ type backoffError struct {
 func (e *backoffError) Error() string { return e.err.Error() }
 func (e *backoffError) Unwrap() error { return e.err }
 
-// retryAtOf returns when a failed checkpoint read is tried again, if err says.
+// retryAtOf returns when a failed checkpoint read is tried again, if err says;
+// a zero time means only a change of spec or token tries it again.
 func retryAtOf(err error) (time.Time, bool) {
 	var b *backoffError
 	if errors.As(err, &b) {
@@ -87,44 +122,58 @@ func retryAtOf(err error) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-// kept returns the kept failure of key while its retry time has not come.
-func (c *cachedSource) kept(key string) error {
+// backsOff reports whether a failure is retried with backoff rather than kept
+// until the spec or the token changes.
+func backsOff(err error) bool {
+	return retryableHub(err) || errors.Is(err, hubfiles.ErrBlobMismatch) || errors.Is(err, hubfiles.ErrInvalidListing)
+}
+
+// kept returns the kept failure of key while it stands: a permanent one until
+// the token's fingerprint changes, a backed-off one until its retry time.
+func (c *cachedSource) kept(key, token string) error {
 	f, ok := c.fails[key]
-	if !ok || !c.clock.Now().Before(f.retryAt) {
+	switch {
+	case !ok:
 		return nil
+	case f.permanent && f.token == token:
+		return &backoffError{err: f.err}
+	case !f.permanent && c.clock.Now().Before(f.retryAt):
+		return &backoffError{err: f.err, retryAt: f.retryAt}
 	}
-	return &backoffError{err: f.err, retryAt: f.retryAt}
+	return nil
 }
 
 // fail keeps a failure of key and returns it with its retry time.
-func (c *cachedSource) fail(key string, err error) error {
+func (c *cachedSource) fail(key, token string, err error) error {
 	f, ok := c.fails[key]
 	if !ok {
 		f = &sourceFailure{}
 		c.fails[key] = f
 	}
-	f.err = err
+	f.err, f.token = err, token
 	f.attempts++
-	delay := sourceBackoffMax
-	if retryableHub(err) {
-		delay = sourceBackoffMin << min(f.attempts-1, 10)
-		if delay > sourceBackoffMax {
-			delay = sourceBackoffMax
-		}
-		var he *hubfiles.HTTPError
-		if errors.As(err, &he) && he.RetryAfter > delay {
-			delay = he.RetryAfter
-		}
+	if !backsOff(err) {
+		f.permanent, f.retryAt = true, time.Time{}
+		return &backoffError{err: err}
+	}
+	f.permanent = false
+	delay := sourceBackoffMin << min(f.attempts-1, 10)
+	if delay > sourceBackoffMax {
+		delay = sourceBackoffMax
+	}
+	var he *hubfiles.HTTPError
+	if errors.As(err, &he) && he.RetryAfter > delay {
+		delay = he.RetryAfter
 	}
 	f.retryAt = c.clock.Now().Add(delay)
 	return &backoffError{err: err, retryAt: f.retryAt}
 }
 
 func (c *cachedSource) Files(ctx context.Context, cp v1alpha1.CheckpointSpec) ([]deploymentid.File, error) {
-	key := cacheKey(cp)
+	key, fkey, token := cacheKey(cp), failKey("files", cp), tokenFingerprint(cp)
 	c.mu.Lock()
 	f, ok := c.files[key]
-	kept := c.kept("files/" + key)
+	kept := c.kept(fkey, token)
 	c.mu.Unlock()
 	if ok {
 		return append([]deploymentid.File(nil), f...), nil
@@ -136,18 +185,18 @@ func (c *cachedSource) Files(ctx context.Context, cp v1alpha1.CheckpointSpec) ([
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err != nil {
-		return nil, c.fail("files/"+key, err)
+		return nil, c.fail(fkey, token, err)
 	}
-	delete(c.fails, "files/"+key)
+	delete(c.fails, fkey)
 	c.files[key] = append([]deploymentid.File(nil), f...)
 	return f, nil
 }
 
 func (c *cachedSource) TemplateSources(ctx context.Context, cp v1alpha1.CheckpointSpec, files []deploymentid.File) (deploymentid.TemplateSources, error) {
-	key := cacheKey(cp)
+	key, fkey, token := cacheKey(cp), failKey("tmpl", cp), tokenFingerprint(cp)
 	c.mu.Lock()
 	t, ok := c.tmpl[key]
-	kept := c.kept("tmpl/" + key)
+	kept := c.kept(fkey, token)
 	c.mu.Unlock()
 	if ok {
 		return t, nil
@@ -159,19 +208,25 @@ func (c *cachedSource) TemplateSources(ctx context.Context, cp v1alpha1.Checkpoi
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err != nil {
-		return deploymentid.TemplateSources{}, c.fail("tmpl/"+key, err)
+		return deploymentid.TemplateSources{}, c.fail(fkey, token, err)
 	}
-	delete(c.fails, "tmpl/"+key)
+	delete(c.fails, fkey)
 	c.tmpl[key] = t
 	return t, nil
 }
 
 // hubCause names the cause of a checkpoint read failure for the condition: the
-// Hub's status (401, 404, 5xx...) when it answered, else the error.
+// Hub's status (401, 403, 404, 5xx...) when it answered, a blob id mismatch or
+// an invalid listing, else the error.
 func hubCause(err error) string {
 	var he *hubfiles.HTTPError
-	if errors.As(err, &he) {
+	switch {
+	case errors.As(err, &he):
 		return fmt.Sprintf("Hub %d: %v", he.Status, err)
+	case errors.Is(err, hubfiles.ErrBlobMismatch):
+		return "blob id mismatch: " + err.Error()
+	case errors.Is(err, hubfiles.ErrInvalidListing):
+		return "invalid listing: " + err.Error()
 	}
 	return err.Error()
 }
