@@ -58,7 +58,7 @@ Environment: 6-core VM, shared with other agents. The load was 1.3 to 4.1 during
 | Other references | purl | purl and CPE guesses (84 CPE entries) |
 | Licences | `licenseDeclared` only for the standard library (BSD-3-Clause) | NOASSERTION for every module, BSD-3-Clause for the standard library |
 
-The negative controls: `pyspdxtools` rejects a copy without `documentNamespace`, a copy without `spdxVersion`, a package with an invalid SPDX identifier, and a relationship to a missing element (exit 1 each time). **The official SPDX 2.3 JSON schema is the weaker validator:** it rejects the missing `spdxVersion` but accepts the missing `documentNamespace` and the invalid identifier. A pipeline that validates with the schema alone would pass broken documents. Use `pyspdxtools`.
+The negative controls: `pyspdxtools` rejects a copy without `documentNamespace` (in `results/validate.txt`), and, run by hand, a copy without `spdxVersion`, a package with an invalid SPDX identifier, and a relationship to a missing element (exit 1 each time). **The official SPDX 2.3 JSON schema is the weaker validator:** it rejects the missing `spdxVersion` (in `validate.txt`) but accepts the missing `documentNamespace` (in `validate.txt`) and, run by hand, the invalid identifier. A pipeline that validates with the schema alone would pass broken documents. Use `pyspdxtools`.
 
 ### Comparison with `go version -m`
 
@@ -148,9 +148,9 @@ Sources, read 2026-10-31: https://github.com/kubernetes-sigs/bom/blob/v0.8.0/REA
 - Against syft: bom is the tool behind Kubernetes' release SBOMs (HBEP-15 takes Kubernetes as the model) and writes smaller documents with download locations. Its main-module version is lost on a dirty tree. If the framework only publishes binaries, either is fine.
 - The SBOM tool does not give licences from a binary. Licence evidence comes from `go-licenses` and `LICENSES/`, as HBEP-15 designs. HBEP-15 Operational readiness 1 ("a release whose SBOM lists every module and component, each with a licence on the allowlist or in the exceptions") reads as if the SBOM carried the licence; it does not, in binary mode.
 
-### Proposed CI job
+### Proposed CI jobs
 
-Not applied: main is protected and renaming a job blocks every merge. This is a new job, so existing check names do not change. The action SHAs are the ones `ci.yml` already pins. In the real PR, `compare.py` and the allowlist move to `hack/` (HBEP-15 names `hack/allowed-licenses.txt`), and the `--ignore` line goes once the repository has a `LICENSE`.
+Not applied: main is protected and renaming a job blocks every merge. These are new jobs, so existing check names do not change. The action SHAs are the ones `ci.yml` already pins. In the real PR, `compare.py` and the allowlist move to `hack/` (HBEP-15 names `hack/allowed-licenses.txt`), and the `--ignore` line goes once the repository has a `LICENSE`.
 
 ```yaml
   sbom:
@@ -206,14 +206,55 @@ Not applied: main is protected and renaming a job blocks every merge. This is a 
           [ "$rows" -gt 0 ] || { echo "::error::go-licenses saw no package"; exit 1; }
           # Drop --ignore once the repository has a LICENSE (HBEP-15 open question 1).
           "$gl" check ./... --ignore github.com/groundnuty/plgrid-llmlab-hpc-burst --allowed_licenses="$list"
-          # Separate modules are not covered by ./...: one run per go.mod under third_party/.
-          # (third_party/forked/kcp matches no package today and checks nothing.)
-          for d in $(find third_party -name go.mod -printf '%h\n'); do
-            (cd "$d" && "$gl" check ./... --allowed_licenses="$list")
-          done
 ```
 
-Notes on the job. Attaching the SBOM to a release is a step of the release workflow, outside this job. The HBEP-15 fixture test (`licence-fixtures.sh`) belongs in the same PR as a separate step. The job was not run on GitHub Actions: the pieces were run on this VM by `reproduce.sh`, with Go 1.27.3 where CI will use the 1.26.0 that `go.mod` names, and a few details (`python3 -m venv` and `pip` on the runner) are untested.
+The separate modules need a second job, because each runs with the Go version its own `go.mod` names (`ci.yml` sets `GOTOOLCHAIN: local`, which is deliberate and stays). `third_party/forked/kubeai` says `go 1.27.3` and the root says `go 1.26.0`, so under the root's toolchain go-licenses fails there. That is loud, not silent: a copy of the module with `go 1.99` made both `check` and `report` exit 1 with "go.mod requires go >= 1.99 (running go 1.27.3; GOTOOLCHAIN=local)". The matrix lists the modules by hand, so a guard step fails when a `go.mod` appears that the matrix lacks. `kcp` is listed with `min_rows: 0` as a known zero: its only file has a build tag, so go-licenses checks nothing there.
+
+```yaml
+  licences-nested:
+    name: licences of separate modules
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - module: third_party/forked/kubeai
+            min_rows: 1
+          - module: third_party/forked/kcp
+            min_rows: 0   # known: matches no package today, so nothing is checked
+    env:
+      GO_LICENSES_VERSION: v2.0.1
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Every go.mod under third_party is in the matrix
+        run: |
+          expected="third_party/forked/kcp third_party/forked/kubeai"
+          found=$(find third_party -name go.mod -printf '%h\n' | sort | tr '\n' ' ' | sed 's/ $//')
+          [ "$found" = "$expected" ] || { echo "::error::go.mod files found: $found; the matrix covers: $expected"; exit 1; }
+      - name: Set up the Go version this module names
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache: false
+      - name: Licence check
+        env:
+          MODULE: ${{ matrix.module }}
+          MIN_ROWS: ${{ matrix.min_rows }}
+        run: |
+          go install "github.com/google/go-licenses/v2@${GO_LICENSES_VERSION}"
+          gl="$(go env GOPATH)/bin/go-licenses"
+          list=$(grep -v '^#' hack/allowed-licenses.txt | paste -sd, -)
+          cd "$MODULE"
+          rows=$("$gl" report ./... 2>/dev/null | wc -l)
+          [ "$rows" -ge "$MIN_ROWS" ] || { echo "::error::go-licenses saw $rows packages in $MODULE, expected at least $MIN_ROWS"; exit 1; }
+          "$gl" check ./... --allowed_licenses="$list"
+```
+
+Notes on the jobs. Attaching the SBOM to a release is a step of the release workflow, outside this job. The HBEP-15 fixture test (`licence-fixtures.sh`) belongs in the same PR as a separate step. The jobs were not run on GitHub Actions: the pieces were run on this VM by `reproduce.sh`, with Go 1.27.3 where the root job will use the 1.26.0 that `go.mod` names (go-licenses v2.0.1 itself says `go 1.23.0`, so installing it there should work), and a few details (`python3 -m venv` and `pip` on the runner) are untested.
 
 ## What this means for HBEP-15
 
@@ -223,7 +264,7 @@ Notes on the job. Attaching the SBOM to a release is a step of the release workf
 - Licence allowlist: add that "Google patent licence for Go" cannot be passed to go-licenses; it needs a note or an exception, not a list entry.
 - The check cannot pass for the repository's own packages until a `LICENSE` exists (open question 1). It is the one failure today.
 - Operational readiness 1 reads as if the SBOM carries licences. It does not in binary mode; the text should point at `LICENSES/` and the go-licenses report.
-- The licence check needs a per-`go.mod` loop, and a guard against a run that sees no package.
+- The licence check needs one run per `go.mod` under `third_party/`, each with the Go version that module names, and a guard against a run that sees no package.
 
 ## Unknowns
 
@@ -232,7 +273,7 @@ Notes on the job. Attaching the SBOM to a release is a step of the release workf
 - The sigstore signatures of the releases were not verified (no cosign on the VM); the sha256 values come from the same release page as the files.
 - Where go-licenses stops searching upward for a licence file, and so whether a root `LICENSE` will cover packages in the nested modules of `spikes/`.
 - Whether go-licenses accepts "A or B" licence expressions in one file: it reports every licence text it finds, and each must be on the list.
-- The CI job as a whole was not run on GitHub Actions, and not with Go 1.26.0, the version `go.mod` names. Nothing in the results should depend on the Go version, but only 1.27.3 was run.
+- The CI jobs were not run on GitHub Actions, and nothing was run with Go 1.26.0, the version the root `go.mod` names. Nothing in the results should depend on the Go version, but only 1.27.3 was run. The kubeai failure under an older toolchain was simulated with a `go` directive of 1.99, not seen on 1.26.0.
 - Reproducibility of the documents: each contains a creation time and a random namespace, so two runs differ byte for byte. The module lists are stable.
 
 ## Reused
