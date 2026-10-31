@@ -69,7 +69,7 @@ What it does not solve:
 - **Provider facts.** Start estimates, hard ends, queue state and billing come from provider plugins (HBEP-4). Kubernetes has no notion of a lease with an unknown start and a hard end.
 - **Hedging across providers.** Our own controller does it (HBEP-7).
 - **Reachability** of compute nodes (HBEP-6).
-- **Guaranteed event delivery.** Kubernetes Events are best-effort and expire, after one hour by default. A watch cannot resume from a resource version that has been compacted; the client must list again. So HBEP-10's subscriptions need their own durable log, and status conditions are the level truth.
+- **Guaranteed event delivery.** Kubernetes Events are best-effort and expire, after one hour by default; the alpha launcher keeps them 7 days (Single-user host). A watch cannot resume from a resource version that has been compacted; the client must list again. So HBEP-10's subscriptions need their own durable log, and status conditions are the level truth.
 - **Bulk data.** Metrics, usage records and logs (HBEP-8) do not belong in the API store, whose objects are limited to about 1.5 MiB.
 - **Approvals.** RBAC says who may act, not whether an action was approved. Approvals are our own resources (HBEP-10).
 - **Actions on providers.** The API server's audit sees calls to it, not a controller's submission or cancellation on Slurm. Controllers record those, tied to the resource that caused them.
@@ -85,7 +85,7 @@ Deployment options:
 
 - **Uninstalling the custom resource definitions deletes every resource of those kinds,** and their finalizers would cancel every provider job. For alpha, a ValidatingAdmissionPolicy refuses deleting the framework's CRDs. Uninstalling removes that policy first, as an explicit step. An approval for it comes with HBEP-10.
 - **The API server is down.** The front keeps serving from its last routing table, marked stale (HBEP-8). Running jobs keep running; Allocations are provider leases with hard ends, and nothing in them depends on the control plane being up.
-- **A controller is up but stuck.** Each status carries the generation it last reconciled and when. A stale value raises an event; a leader `Lease` shows which copy is acting.
+- **A controller is up but stuck.** Each status carries the generation it last reconciled and when. A stale heartbeat raises an event from a component that does not depend on it (HBEP-8, Observers); a leader `Lease` shows which copy is acting.
 - **The control plane's view and the provider disagree,** for example a job that the controller never recorded. On start, controllers list provider jobs that carry the framework's tag and match them to Allocations. Unmatched jobs are reported as orphans and never cancelled without approval.
 - **Too heavy for one user.** Measured by S3 for k3s, the single-user host: 363 MiB idle and 407 MiB with 100 objects, ready in 10.5 s cold and 6.0 s warm, against a budget of 600 MiB, 800 MiB and 30 s. S3 measured on a loaded 6-core VM, not on the 2 vCPU, 4 GiB budget VM, so start times there are checked at alpha (Graduation criteria).
 - **A host that serves the API but does not garbage-collect.** A bare API server with etcd is ready and answers, yet deletes no dependents (spikes S3 and S4). Every host runs the garbage collector, and a probe checks that it works (Operational readiness).
@@ -221,6 +221,7 @@ Decided for alpha (amended 2026-10-30, after S3's fix, PR #36):
 - installs the CRDs and the admission policy, then starts the controllers and restarts any that exit;
 - checks the front's reachability (open question 8). It warns when no front address and dial-home mode (direct, or ssh on the configured ssh port, 22 by default) are configured, and checks that a configured address answers on that port. While none is configured, the lifecycle controller submits no Allocation, and each ModelDeployment carries `Degraded` with reason `FrontNotConfigured` (decided while building the launcher, PR #49; the name in PR #71). The first Instance on each Provider then confirms reachability from a compute node by registering over its dial-home path. An Instance that cannot register fails at start, and the lifecycle controller sets the condition `DialHomeUnreachable` on its Provider (HBEP-4, open question 16);
 - has the API server write its audit log at the Metadata level, with no request bodies, so a Secret's content is never logged;
+- has the API server keep events 7 days: it passes `--kube-apiserver-arg=event-ttl=168h`, where the default is 1 h. k3s passes the flag through, and kine, its SQLite datastore, deletes each event once the TTL has elapsed. kine starts each event's clock again when the host restarts, so an event lives at least 7 days (HBEP-8, Retention, with the sources);
 - backs up the store before every upgrade: an etcd snapshot, or a copy of the SQLite file;
 - upgrades the host one minor version at a time, as S3 tested.
 
@@ -263,6 +264,7 @@ Against the single-user host (k3s as a plain user) and, for beta, the team optio
 - **Front reachability.** With no front address or dial-home mode, the launcher warns and the lifecycle controller submits no Allocation, with `FrontNotConfigured`. An Instance whose agent cannot reach the front fails at start, and its Provider carries `DialHomeUnreachable`. A later write of Provider status by the Provider's controller keeps that condition.
 - **Leases and field managers.** Each Provider's `Lease` is `provider-<name>` and the lifecycle controller's is `lifecycle`, all in `hpcburst-system`; a Provider named `lifecycle` shares no `Lease`. Every field a controller writes shows `hpcburst-provider` or `hpcburst-lifecycle` in `managedFields`, and on a Provider `hpcburst-lifecycle` owns only the `DialHomeUnreachable` entry.
 - **Another k3s's binaries.** On a machine whose system k3s runs the same release, a user-level k3s that runs a binary outside its own data directory makes `hpcburst up` fail. A check of `/readyz` alone proves nothing here, since a k3s running the borrowed binaries answers it too.
+- **Event TTL.** The launcher's k3s command carries `event-ttl=168h`. On a host started with a short test TTL, an event disappears once it has passed; after a host restart, an event created before it is still listed.
 - **Upgrade and downgrade.** Upgrade the host one minor version with objects present: every object is kept with its UID. Downgrade by restoring the backup with the earlier binaries: the objects from before the upgrade are back.
 - **Store full.** Fill the store: on k3s, a size-limited filesystem holding its data directory; on the assembled stack, etcd's quota. Writes are refused, no controller submits a new job, and the launcher's health reports the write failures (or etcd's alarm).
 
@@ -313,7 +315,7 @@ S3 exercised validation, watches, conflicts, cascades and finalizers. Leases, Ev
    - a host that is ready but does not garbage-collect. The probe in item 1 shows it.
    - a write that returns an error but took effect. etcd can return a no-space error for a write that still succeeded ([etcd maintenance guide](https://github.com/etcd-io/website/blob/main/content/en/docs/v3.6/op-guide/maintenance.md), accessed 2026-10-30). Controllers re-read after every failed write, and never assume that it did nothing.
 4. **Provider limits:** controllers poll providers at rates set in platform profiles (HBEP-4), within login throttles.
-5. **Capacity:** the API store holds tens to hundreds of objects, since bulk data stays out. In S3, 100 objects added no measurable memory.
+5. **Capacity:** the API store holds tens to hundreds of objects, since bulk data stays out. In S3, 100 objects added no measurable memory. Events kept 7 days add some 10 MB at alpha scale (HBEP-8, Retention).
    - **Storage full.** etcd raises its NOSPACE alarm at its backend quota, and then accepts only reads and deletes ([etcd maintenance guide](https://github.com/etcd-io/website/blob/main/content/en/docs/v3.6/op-guide/maintenance.md), accessed 2026-10-30). With SQLite, a full disk stops writes.
    - Either way, controllers submit nothing new, because no submission starts without a recorded attempt (S4). Running jobs keep running to their hard ends.
    - The launcher's health reports the write failures on k3s, or the alarm on etcd. The host's disk is its own (Placement).
@@ -395,6 +397,7 @@ The control plane replaces the files and scripts that held www-2027's state: per
 - 2026-10-31: amendment from the merged contracts (PR #71) and the launcher (PR #49): the API's new fields and the `idle-since` annotation, the field managers, the `Lease` names and namespace, the condition names, and the caveat that a user-level k3s can run root's binaries. Lessons L-17.1 to L-17.4 cited.
 - 2026-10-31: amendment with HBEP-6 becoming implementable: the launcher starts and supervises frps on loopback, its certificate carries a fixed synthetic DNS name for frpc, and ssh mode uses two forwards.
 - 2026-10-31: amendment from the owner's decision on the dial-home route (issue #18): ssh mode over the configured ssh port, 22 by default; the `hold-lifted` guarantee qualified with HBEP-4's known risk.
+- 2026-10-31: amendment with HBEP-8 becoming implementable: the launcher keeps events 7 days (`event-ttl=168h`), with its test and the store's growth; a stale heartbeat's event has an emitter (HBEP-8, Observers).
 
 ## Amendments
 
@@ -430,3 +433,7 @@ The control plane replaces the files and scripts that held www-2027's state: per
 - **2026-10-31: the ssh port, and the hold lift's known risk.** The owner's decision of 31 Oct 2026, recorded on [issue #18, comment 6546958511](https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/18#issuecomment-6546958511), with the review round of PR #96.
   - **The ssh port** (open question 8; Single-user host). The ssh dial-home path runs over the configured ssh port, 22 by default, because the development VM's sshd is reached through a port forward on its gateway, at the gateway's address and port (HBEP-6). The launcher checks that the configured address answers on that port. The key's restriction is unchanged. Before, this HBEP named port 22.
   - **`hold-lifted`** (the Allocation's record). "The hold is never lifted again" now carries one exception, HBEP-4's known risk: a leader that stalls after its last re-read can release a later hold of the same job, after an administrator requeued it with a hold.
+- **2026-10-31: event retention** (Single-user host; Risks; Test plan; Operational readiness 5). Made with HBEP-8 becoming implementable, from the science agent's decision of 31 Oct 2026; the code agent builds it after PR #88, which edits the launcher's command.
+  - **The launcher** passes `--kube-apiserver-arg=event-ttl=168h` to k3s, so the API server keeps events 7 days instead of its default 1 h. k3s passes the flag through and sets none of its own, and kine deletes each event once its TTL has elapsed; HBEP-8 (Retention) cites the sources. kine starts every event's clock again at a host restart, so an event lives at least 7 days. Before, events expired after the default hour.
+  - **Store growth:** some 10 MB of events over 7 days at alpha scale.
+  - **A stuck controller** (Risks). "A stale value raises an event" now names who raises it: a component that does not depend on the stale one, as HBEP-8's observer table assigns. Before, it named no emitter.
