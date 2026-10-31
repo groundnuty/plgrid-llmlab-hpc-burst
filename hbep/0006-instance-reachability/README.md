@@ -47,7 +47,7 @@ Problems:
 
 - **Compute nodes connect out on port 443.** Spike S1's step 0 and probe 2 (issue #18, 30 Oct 2026) measured it.
   - Short jobs on Helios CPU, Helios GH200 and Athena A100 all reached public HTTPS endpoints directly, with no proxy configured.
-  - The development VM sits behind a NAT, and from those nodes only port 22 answered at its address. That sshd turned out to be a gateway's, not the VM's: its host key differs (issue #18, 31 Oct 2026; L-17.7). The tunnel still runs inside ssh over port 22, with a restricted key (ssh mode), through a port forward on the gateway to the VM's sshd (owner decision, 31 Oct 2026, recorded on issue #18). Reachability is proved by the target's host key, not by a banner.
+  - The development VM sits behind a NAT, and from those nodes only port 22 answered at its address. That sshd turned out to be a gateway's, not the VM's: its host key differs (issue #18, 31 Oct 2026; L-17.7). The tunnel still runs inside ssh over port 22, with a restricted key (ssh mode), through a port forward on the gateway to the VM's sshd (owner decision, 31 Oct 2026, recorded on issue #18).
   - Sano was not measured. It is not an alpha platform (HBEP-4).
   - Where dial home works stays a per-partition fact in the platform profile (HBEP-4).
 - **The front needs an address that compute nodes reach** (HBEP-11, open question 8): directly on the dial-home port (direct mode), or through ssh on port 22 with a restricted key (ssh mode). A host reachable by neither is out of alpha, and HBEP-11's launcher checks it.
