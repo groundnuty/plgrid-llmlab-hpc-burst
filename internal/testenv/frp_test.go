@@ -224,7 +224,10 @@ func TestFrpBinariesPassesWithTheRightVersion(t *testing.T) {
 }
 
 // hack/fetch-frp.sh must refuse a tarball with the wrong hash before extracting anything, exit 1,
-// and leave nothing behind. FRP_TARBALL makes the test offline.
+// and leave no file behind (the directory itself stays: a run never removes it, since a concurrent
+// run may be using it). FRP_TARBALL makes the test offline. "Before extracting" is checked with a
+// tar on PATH that records every call; the corrupt tarball is a valid archive, so a script that
+// extracted first would call it.
 func TestFetchFrpRejectsACorruptTarball(t *testing.T) {
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
 		t.Skip("hack/fetch-frp.sh pins linux_amd64 only")
@@ -253,9 +256,40 @@ rm -rf "$d"
 		t.Fatal(err)
 	}
 
+	realTar, err := exec.LookPath("tar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapDir, tarLog := t.TempDir(), filepath.Join(t.TempDir(), "tar-calls")
+	wrapper := "#!/bin/sh\necho \"$@\" >> '" + tarLog + "'\nexec '" + realTar + "' \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(wrapDir, "tar"), []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env := append(os.Environ(), "FRP_TARBALL="+tgz, "PATH="+wrapDir+":"+os.Getenv("PATH"))
+	tarCalls := func() int {
+		b, err := os.ReadFile(tarLog)
+		if errors.Is(err, os.ErrNotExist) {
+			return 0
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Count(string(b), "\n")
+	}
+	// The control: a shell with the script's environment finds the wrapper first and it records the
+	// call. Without this, "tar was never called" would also hold if the wrapper were never reached.
+	ctl := exec.Command("bash", "-c", "tar --version")
+	ctl.Env = env
+	if out, err := ctl.CombinedOutput(); err != nil || tarCalls() != 1 {
+		t.Fatalf("the tar wrapper is not reached through PATH: err=%v, %d recorded calls\n%s", err, tarCalls(), out)
+	}
+	if err := os.Remove(tarLog); err != nil {
+		t.Fatal(err)
+	}
+
 	run := func(dest string) (string, int) {
 		cmd := exec.Command("bash", filepath.Join(root, "hack", "fetch-frp.sh"), dest)
-		cmd.Env = append(os.Environ(), "FRP_TARBALL="+tgz)
+		cmd.Env = env
 		out, err := cmd.CombinedOutput()
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
@@ -273,8 +307,9 @@ rm -rf "$d"
 		if code != 1 || !strings.Contains(out, "checksum mismatch") {
 			t.Fatalf("exit %d, want 1 with a checksum mismatch:\n%s", code, out)
 		}
-		if _, err := os.Stat(dest); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("%s was left behind (%v)", dest, err)
+		ents, err := os.ReadDir(dest)
+		if err != nil || len(ents) != 0 {
+			t.Errorf("%s holds %v (%v), want an empty directory", dest, ents, err)
 		}
 	})
 	t.Run("existing directory with a file in it", func(t *testing.T) {
@@ -291,6 +326,9 @@ rm -rf "$d"
 			t.Errorf("the directory holds %v (%v), want only the file that was there", ents, err)
 		}
 	})
+	if n := tarCalls(); n != 0 {
+		t.Errorf("tar was called %d time(s): the script extracted a tarball whose hash it had not verified", n)
+	}
 	after, err := os.ReadFile(tgz)
 	if err != nil || !bytes.Equal(before, after) {
 		t.Errorf("the caller's FRP_TARBALL was changed or removed (%v)", err)
