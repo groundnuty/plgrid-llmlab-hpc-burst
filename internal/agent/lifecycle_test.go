@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -362,4 +363,45 @@ func processLives(pid int) bool {
 		}
 	}
 	return false
+}
+
+// No secret reaches a log on the agent's side: not the Allocation's
+// credential, not the Instance's key, not the Hub token. The agent's own log,
+// the engine's output and the fake Apptainer's record are read whole; the
+// record carries the key variable only as its hash. The token is used, for a
+// download, so the test sees it pass through the agent.
+func TestNoSecretReachesTheAgentsLogs(t *testing.T) {
+	const hubToken = "hf_knownsecrettoken0123456789"
+	rev := launch("", "").Checkpoint.Revision
+	h := newHarness(t, harnessOptions{hub: map[string]string{"/org/model/resolve/" + rev + "/config.json": "{}\n"}})
+	d := h.runState("", 1, 0, verifyChecks(1, []agentapi.FileDigest{{Path: "config.json", SHA256: "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"}}))
+	d.Instance.HubToken = hubToken
+	h.set(d)
+	r := h.waitReport("verification done", 30*time.Second, verified(1))
+	if n := h.hubRequests(); n != 1 {
+		t.Fatalf("%d downloads, want 1: the token was not used", n)
+	}
+	key := r.Instance.Key
+	engineOut, err := os.ReadFile(filepath.Join(h.root, "engine-worker-0.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	appRecord, _ := os.ReadFile(h.appLog)
+	engRecord, _ := os.ReadFile(h.engLog)
+	logs := map[string]string{
+		"the agent's log":             h.logs.String(),
+		"the engine's output":         string(engineOut),
+		"the fake Apptainer's record": string(appRecord),
+		"the engine's record":         string(engRecord),
+	}
+	if h.logs.String() == "" {
+		t.Fatal("the agent's log is empty: the check would see nothing")
+	}
+	for where, text := range logs {
+		for name, secret := range map[string]string{"the credential": hCredential, "the Instance key": key, "the Hub token": hubToken} {
+			if strings.Contains(text, secret) {
+				t.Errorf("%s holds %s", where, name)
+			}
+		}
+	}
 }

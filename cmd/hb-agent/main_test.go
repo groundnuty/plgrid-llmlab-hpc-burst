@@ -167,6 +167,7 @@ func writeCert(t *testing.T, host agentapi.Host) string {
 // directory, and the fake tools.
 type job struct {
 	root, allocDir, stagingDir, bin, appLog, sshLog, engLog string
+	extraEnv                                                []string
 }
 
 func newJob(t *testing.T, root string, cfg agentapi.AgentConfig) job {
@@ -223,6 +224,7 @@ func (j job) start(t *testing.T) (*exec.Cmd, *bytes.Buffer) {
 		"HB_FAKE_SSH_LOG="+j.sshLog,
 		"GORACE=atexit_sleep_ms=0", // a race-built fake must not sleep at its exit
 	)
+	cmd.Env = append(cmd.Env, j.extraEnv...)
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -289,7 +291,7 @@ func waitReport(t *testing.T, b *fake.Backend, what string, ok func(agentapi.Rep
 // the real endpoint over TLS with the pinned certificate.
 func exercise(t *testing.T, ep endpoint, j job) {
 	t.Helper()
-	cmd, _ := j.start(t)
+	cmd, out := j.start(t)
 	ep.backend.SetDesired(eUID, runState(j.engLog, &agentapi.Checks{VerificationGeneration: 1, Verify: &agentapi.VerifyRequest{}}))
 	r := waitReport(t, ep.backend, "verification with the worker running", func(r agentapi.Report) bool {
 		in := r.Instance
@@ -326,6 +328,12 @@ func exercise(t *testing.T, ep endpoint, j job) {
 	last, _ := ep.backend.LastReport(eUID)
 	if w := last.Instance.Workers[0]; w.Phase != agentapi.PartStopped {
 		t.Errorf("last report's worker %+v, want stopped", w)
+	}
+	// Neither the credential nor the Instance's key reaches the agent's log.
+	for name, secret := range map[string]string{"the credential": testCredential, "the Instance key": r.Instance.Key} {
+		if secret == "" || strings.Contains(out.String(), secret) {
+			t.Errorf("%s is in the agent's output (or empty: %q)", name, secret)
+		}
 	}
 }
 
@@ -417,4 +425,74 @@ func TestUsage(t *testing.T) {
 	if code := run(nil, os.Getenv, io.Discard); code != 2 {
 		t.Fatalf("no argument: exit %d, want 2", code)
 	}
+}
+
+// The ssh forward is kept in a reconnect loop: the fake ssh drops it every
+// three seconds, the agent starts ssh again, and its reports keep arriving with the
+// same worker process.
+func TestAgentSSHForwardReconnects(t *testing.T) {
+	root := shortRoot(t)
+	ep := startEndpoint(t, root)
+	_, port, _ := net.SplitHostPort(ep.addr)
+	p, _ := strconv.Atoi(port)
+	dh := filepath.Join(root, "dial-home")
+	if err := os.MkdirAll(dh, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{agentapi.DialHomeKeyFile, agentapi.DialHomeKnownHostsFile} {
+		if err := os.WriteFile(filepath.Join(dh, f), []byte("test\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	j := newJob(t, root, agentapi.AgentConfig{
+		ProtocolVersion: agentapi.ProtocolVersion, Tag: eTag, Mode: agentapi.DialHomeSSH,
+		Endpoint: "127.0.0.1:22", SSH: &agentapi.SSHForward{User: "hb", AgentPort: p},
+		CertSPKISHA256: ep.pin,
+	})
+	j.extraEnv = []string{"HB_FAKE_SSH_DIE_AFTER=3s"}
+	cmd, _ := j.start(t)
+	ep.backend.SetDesired(eUID, runState(j.engLog, nil))
+	first := waitReport(t, ep.backend, "worker running", func(r agentapi.Report) bool {
+		return r.Instance != nil && len(r.Instance.Workers) == 1 && r.Instance.Workers[0].Phase == agentapi.PartRunning
+	})
+	pid := first.Instance.Workers[0].PID
+	deadline := time.Now().Add(30 * time.Second)
+	for countLines(j.sshLog) < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("ssh started %d times in 30 s; the forward was not restarted", countLines(j.sshLog))
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	before := len(ep.backend.Reports(eUID))
+	waitReport(t, ep.backend, "a report after the reconnects", func(agentapi.Report) bool {
+		return len(ep.backend.Reports(eUID)) > before
+	})
+	last, _ := ep.backend.LastReport(eUID)
+	if w := last.Instance.Workers[0]; w.PID != pid || w.Phase != agentapi.PartRunning {
+		t.Fatalf("after the reconnects the worker is %+v, want the same running process %d", w, pid)
+	}
+	execs := 0
+	for _, line := range strings.Split(readFile(j.appLog), "\n") {
+		if strings.Contains(line, `"argv":["exec"`) {
+			execs++
+		}
+	}
+	if execs != 1 {
+		t.Fatalf("%d worker starts across the reconnects, want 1", execs)
+	}
+	_ = syscall.Kill(cmd.Process.Pid, syscall.SIGTERM)
+	_ = cmd.Wait()
+}
+
+func readFile(path string) string {
+	b, _ := os.ReadFile(path)
+	return string(b)
+}
+
+func countLines(path string) int {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	return strings.Count(string(b), "\n")
 }
