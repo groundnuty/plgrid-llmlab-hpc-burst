@@ -274,7 +274,12 @@ func readTokenFile(path string) (string, error) {
 // condition (docs/development.md, Single writer). It writes True when an
 // Instance could not register, and False when an agent registers while the
 // condition is True; otherwise nothing.
-func (r *Reconciler) setDialHome(ctx context.Context, provider string, unreachable bool, now time.Time, msg string) error {
+//
+// registeredAt, for a clear, is when the registration that proves the path was
+// accepted; only one accepted at least a second after the condition turned
+// True clears it, so an older agent's registration does not undo a timeout
+// another Allocation just had.
+func (r *Reconciler) setDialHome(ctx context.Context, provider string, unreachable bool, now time.Time, msg string, registeredAt time.Time) error {
 	if provider == "" {
 		return nil
 	}
@@ -290,7 +295,7 @@ func (r *Reconciler) setDialHome(ctx context.Context, provider string, unreachab
 	}
 	status, reason := metav1.ConditionTrue, v1alpha1.ReasonRegistrationTimeout
 	if !unreachable {
-		if cur == nil || cur.Status != metav1.ConditionTrue {
+		if cur == nil || cur.Status != metav1.ConditionTrue || registeredAt.Before(cur.LastTransitionTime.Add(time.Second)) {
 			return nil
 		}
 		status, reason = metav1.ConditionFalse, reasonAgentRegistered

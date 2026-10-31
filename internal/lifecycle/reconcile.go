@@ -84,7 +84,6 @@ type pass struct {
 	degraded []degradedReason
 	// sizingRefused collects Providers that refused the spec's size.
 	sizingRefused []string
-	s2r           []v1alpha1.ClassStartToReady
 	next          time.Time
 }
 
@@ -146,6 +145,9 @@ func (p *pass) run() error {
 		}
 	}
 	if err := p.instances(); err != nil {
+		return err
+	}
+	if err := p.clearDialHome(); err != nil {
 		return err
 	}
 	if md != nil && md.Spec.Source.Served != nil && !p.shutdown {

@@ -118,24 +118,32 @@ func (p *pass) scaleDown(prim []*v1alpha1.Instance, surplus int) error {
 		return b.CreationTimestamp.Before(&a.CreationTimestamp) // newest first
 	})
 	for _, in := range victims[:surplus] {
+		// A surplus primary's replacement goes with it, never promoted
+		// (step 7); a serving one drains like any surplus Instance (Release:
+		// scale-down).
 		if repl := p.replacementOf(in); repl != nil {
-			if err := p.end(repl, p.allocs[repl.Spec.AllocationRef.Name], v1alpha1.ReasonDrained, "its predecessor was scaled down", true); err != nil {
+			if err := p.removeSurplus(repl, "its predecessor was scaled down"); err != nil {
 				return err
 			}
 		}
-		a := p.allocs[in.Spec.AllocationRef.Name]
-		if in.Status.Phase == v1alpha1.InstanceReady {
-			if err := p.startDrain(in, "scale-down"); err != nil {
-				return err
-			}
-			continue
-		}
-		pending := a == nil || a.Status.AtProvider.StartTime == nil
-		if err := p.end(in, a, v1alpha1.ReasonDrained, "scaled down", pending); err != nil {
+		if err := p.removeSurplus(in, "scaled down"); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// removeSurplus takes one Instance out at scale-down (HBEP-7, Release): a
+// ready one drains and ends, and its Allocation then follows its retention
+// policy; one not yet serving ends at once, and its Allocation is cancelled
+// only when its job has not started.
+func (p *pass) removeSurplus(in *v1alpha1.Instance, why string) error {
+	if in.Status.Phase == v1alpha1.InstanceReady {
+		return p.startDrain(in)
+	}
+	a := p.allocs[in.Spec.AllocationRef.Name]
+	notStarted := a == nil || a.Status.AtProvider.StartTime == nil
+	return p.end(in, a, v1alpha1.ReasonDrained, why, notStarted)
 }
 
 func leaseBefore(a, b *v1alpha1.Instance) bool {

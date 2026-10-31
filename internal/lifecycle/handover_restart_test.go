@@ -366,7 +366,8 @@ func TestHandoverControllerKilledAtEachStep(t *testing.T) {
 			// asserted here.
 		},
 	}, {
-		name: "after the primary is ended, before its finalizer goes", at: hoT(9, 50, 20), end: hoT(9, 52, 0), allocs: 2,
+		// It drains at 09:50:20 and ends on the agent's next report, 09:50:30.
+		name: "after the primary is ended, before its finalizer goes", at: hoT(9, 50, 30), end: hoT(9, 52, 0), allocs: 2,
 		after: func(p *v1alpha1.Instance) func(string, client.Object) bool {
 			return func(op string, obj client.Object) bool {
 				in, ok := obj.(*v1alpha1.Instance)

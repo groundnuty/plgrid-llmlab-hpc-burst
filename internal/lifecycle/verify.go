@@ -296,13 +296,8 @@ func (p *pass) becomeReady(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) er
 	}); err != nil {
 		return err
 	}
-	pv := p.pvOf(in.Labels)
-	p.r.Recorder.Event(in, false, eventReady, "Ready", "verified, qualified and warmed up; the front routes to it")
-	if first && pv != nil && pv.hasClass && p.firstOnAllocation(in) && alloc.Status.AtProvider.StartTime != nil {
-		d := p.now.Sub(alloc.Status.AtProvider.StartTime.Time)
-		p.s2r = append(p.s2r, v1alpha1.ClassStartToReady{
-			AcceleratorClass: pv.class, Duration: v1alpha1.Duration(d.String()), Instance: in.Name, MeasuredTime: now,
-		})
+	if first {
+		p.r.Recorder.Event(in, false, eventReady, "Ready", "verified, qualified and warmed up; the front routes to it")
 	}
 	return nil
 }

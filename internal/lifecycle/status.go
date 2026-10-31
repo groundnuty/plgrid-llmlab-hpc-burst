@@ -78,11 +78,14 @@ func (p *pass) writeStatus() error {
 		s.ActiveIDs = append(s.ActiveIDs, *a)
 	}
 	sort.Slice(s.ActiveIDs, func(i, j int) bool { return s.ActiveIDs[i].ID < s.ActiveIDs[j].ID })
-	for _, m := range p.s2r {
+	for _, m := range p.measuredStartToReady() {
 		replaced := false
 		for i := range s.StartToReady {
 			if s.StartToReady[i].AcceleratorClass == m.AcceleratorClass {
-				s.StartToReady[i], replaced = m, true
+				if m.MeasuredTime.After(s.StartToReady[i].MeasuredTime.Time) {
+					s.StartToReady[i] = m
+				}
+				replaced = true
 			}
 		}
 		if !replaced {
@@ -117,6 +120,38 @@ func (p *pass) updateMDStatus(next *v1alpha1.ModelDeployment) error {
 	}
 	*p.md = *next
 	return nil
+}
+
+// measuredStartToReady derives each class's newest start-to-ready
+// measurement from persisted fields: the first Instance created on an
+// Allocation, its ReadyTime, minus its Allocation's start (HBEP-7, Handover).
+// It is read again at every pass, so a measurement whose status write was lost
+// (a crash, a conflict) is written by a later pass while the Allocation lives.
+func (p *pass) measuredStartToReady() []v1alpha1.ClassStartToReady {
+	newest := map[v1alpha1.AcceleratorClass]v1alpha1.ClassStartToReady{}
+	for _, in := range p.insts {
+		a := p.allocs[in.Spec.AllocationRef.Name]
+		pv := p.pvOf(in.Labels)
+		if in.Status.ReadyTime == nil || a == nil || a.Status.AtProvider.StartTime == nil || pv == nil || !pv.hasClass || !p.firstOnAllocation(in) {
+			continue
+		}
+		d := in.Status.ReadyTime.Sub(a.Status.AtProvider.StartTime.Time)
+		if d < 0 {
+			continue
+		}
+		if cur, ok := newest[pv.class]; ok && !in.Status.ReadyTime.After(cur.MeasuredTime.Time) {
+			continue
+		}
+		newest[pv.class] = v1alpha1.ClassStartToReady{
+			AcceleratorClass: pv.class, Duration: v1alpha1.Duration(d.String()), Instance: in.Name, MeasuredTime: *in.Status.ReadyTime,
+		}
+	}
+	out := make([]v1alpha1.ClassStartToReady, 0, len(newest))
+	for _, m := range newest {
+		out = append(out, m)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].MeasuredTime.Before(&out[j].MeasuredTime) })
+	return out
 }
 
 // submissionRejected shows a Provider's Rejected attempt as SubmissionRejected,

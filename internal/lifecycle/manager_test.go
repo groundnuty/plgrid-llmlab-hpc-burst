@@ -314,7 +314,7 @@ func TestManagerOnControlPlane(t *testing.T) {
 	// controller's whole-status updates.
 	r := &Reconciler{Client: cl, Reader: cl, Clock: SystemClock{}}
 	now := time.Now().UTC().Truncate(time.Second)
-	if err := r.setDialHome(ctx, rigProvider, true, now, "an Instance could not register"); err != nil {
+	if err := r.setDialHome(ctx, rigProvider, true, now, "an Instance could not register", time.Time{}); err != nil {
 		t.Fatalf("apply DialHomeUnreachable: %v", err)
 	}
 	var got v1alpha1.Provider
@@ -339,7 +339,7 @@ func TestManagerOnControlPlane(t *testing.T) {
 	if err := cl.Status().Update(ctx, &got, client.FieldOwner(v1alpha1.FieldManagerProvider)); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.setDialHome(ctx, rigProvider, false, now.Add(time.Minute), "an agent registered"); err != nil {
+	if err := r.setDialHome(ctx, rigProvider, false, now.Add(time.Minute), "an agent registered", now.Add(time.Minute)); err != nil {
 		t.Fatalf("apply DialHomeUnreachable false: %v", err)
 	}
 	if err := cl.Get(ctx, client.ObjectKey{Name: rigProvider}, &got); err != nil {
