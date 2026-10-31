@@ -33,7 +33,10 @@
 // stop-token ids into every request, so only min_tokens guarantees a length
 // (the early-stop mode sets NaturalLen). min_tokens above max_tokens is a 400,
 // as in vLLM (sampling_params.py:694-701). The double does not simulate
-// preemption or a prefill phase: a request waits TokenDelay before each token.
+// preemption or a prefill phase: a request waits TokenDelay before each token, so
+// vllm:num_preemptions_total stays 0 and the time-per-output-token histogram
+// observes, for each finished request, TokenDelay if it generated more than one
+// token and 0 otherwise (the mean vLLM computes, exactly, not measured).
 //
 // # Reasoning and tool calls
 //
@@ -66,7 +69,10 @@
 // tool-malformed, tool-args-null, tool-args-badtype, no-tool-call,
 // reports-nothing, report-max-model-len=<n>, health-fail, health-fail-after=<dur>,
 // errors-only, slow-first=<dur>, never-settle=<pct>, stall, token-delay=<dur>,
-// reasoning-first=<n> and reasoning-forever;
+// reasoning-first=<n>, reasoning-forever, and four that leave lines out of
+// /metrics: no-prefix-cache-metrics (not the same as prefix caching off, which
+// a real vLLM reports as two counters at 0), no-tpot, no-tpot-sum and
+// no-tpot-count;
 // the startup modes, used by Main only, are start-delay=<dur>,
 // exit-after=<dur>[:code] and ignore-term.
 //

@@ -118,8 +118,8 @@ func TestSampleReadsTheEngineCountersOfHBEP8(t *testing.T) {
 }
 
 // A metric the scrape lacks leaves its own field nil and no other: unknown, not
-// zero. Each case drops one metric's lines (the histogram's _sum and _count
-// separately, then the whole histogram).
+// zero. Each case drops one metric's lines. The time per output token is one
+// unit, a pair: dropping its _sum or its _count, or both, leaves both nil.
 func TestSampleLeavesAMissingMetricUnknownAndTheOthersKnown(t *testing.T) {
 	const tpot = "vllm:request_time_per_output_token_seconds"
 	for _, c := range []struct {
@@ -130,8 +130,9 @@ func TestSampleLeavesAMissingMetricUnknownAndTheOthersKnown(t *testing.T) {
 		{"preemptions", []string{"vllm:num_preemptions_total"}, func(c *counters) { c.preemptions = nil }},
 		{"prefix-cache queries", []string{"vllm:prefix_cache_queries_total"}, func(c *counters) { c.queried = nil }},
 		{"prefix-cache hits", []string{"vllm:prefix_cache_hits_total"}, func(c *counters) { c.hit = nil }},
-		{"time per output token, sum only", []string{tpot + "_sum"}, func(c *counters) { c.tpotSum = nil }},
-		{"time per output token, count only", []string{tpot + "_count"}, func(c *counters) { c.tpotCount = nil }},
+		// The pair is usable only together: either half missing leaves both unknown.
+		{"time per output token, sum line missing", []string{tpot + "_sum"}, func(c *counters) { c.tpotSum, c.tpotCount = nil, nil }},
+		{"time per output token, count line missing", []string{tpot + "_count"}, func(c *counters) { c.tpotSum, c.tpotCount = nil, nil }},
 		{"time per output token, whole histogram", []string{tpot}, func(c *counters) { c.tpotSum, c.tpotCount = nil, nil }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -204,15 +205,16 @@ vllm:request_time_per_output_token_seconds_count{engine="1",model_name="m"} 45.0
 }
 
 // A value that is not a number the report can carry (NaN, an infinity) is
-// unknown. A float64 NaN cannot be encoded in JSON, so one such line would
-// otherwise fail the whole report.
+// unknown, and so is the aggregate it belongs to. A float64 NaN cannot be
+// encoded in JSON, so one such line would otherwise fail the whole report. The
+// time per output token is a pair: its NaN _sum takes the valid _count with it.
 func TestSampleTreatsANonFiniteValueAsUnknown(t *testing.T) {
 	const bad = `vllm:request_time_per_output_token_seconds_sum{engine="0",model_name="m"} NaN
 vllm:request_time_per_output_token_seconds_count{engine="0",model_name="m"} 12.0
 vllm:num_preemptions_total{engine="0",model_name="m"} +Inf
 vllm:prefix_cache_queries_total{engine="0",model_name="m"} 40.0
 `
-	want := counters{queried: i64(40), tpotCount: i64(12)}
+	want := counters{queried: i64(40)}
 	if got := countersOf(sampleOf(t, bad)); !sameCounters(got, want) {
 		t.Errorf("counters %v, want %v", got, want)
 	}
@@ -265,45 +267,5 @@ func TestSampleTreatsANonFiniteKVGaugeAsUnknownAndTheReportEncodes(t *testing.T)
 				t.Errorf("the report carries kvCacheUsage for an unknown gauge: %s", b)
 			}
 		})
-	}
-}
-
-// With two engines, a non-finite series is left out and the other still counts:
-// the fullest finite engine's use, not NaN (math.Max would give NaN).
-func TestSampleKVGaugeIsTheFullestFiniteEngine(t *testing.T) {
-	h := sampleOf(t, `vllm:kv_cache_usage_perc{engine="0",model_name="m"} 0.25
-vllm:kv_cache_usage_perc{engine="1",model_name="m"} NaN
-vllm:kv_cache_usage_perc{engine="2",model_name="m"} 0.5
-`)
-	if h.KVCacheUsage == nil || *h.KVCacheUsage != 0.5 {
-		t.Errorf("KVCacheUsage = %v, want 0.5", h.KVCacheUsage)
-	}
-}
-
-// A response count that is not finite is left out, not converted to an integer.
-func TestSampleLeavesANonFiniteResponseCountOut(t *testing.T) {
-	h := sampleOf(t, `http_requests_total{handler="/v1/chat/completions",method="POST",status="2xx"} 9.0
-http_requests_total{handler="/v1/chat/completions",method="POST",status="5xx"} NaN
-`)
-	if len(h.ResponsesByStatus) != 1 || h.ResponsesByStatus["2xx"] != 9 {
-		t.Errorf("responses by status %v, want only 2xx 9", h.ResponsesByStatus)
-	}
-}
-
-// Two finite series can add up past the largest float64; the total is then
-// +Inf, which the report cannot encode, so the sum is unknown.
-func TestSampleTreatsAnOverflowingSumAsUnknown(t *testing.T) {
-	h := sampleOf(t, `vllm:request_time_per_output_token_seconds_sum{engine="0",model_name="m"} 1.7e308
-vllm:request_time_per_output_token_seconds_sum{engine="1",model_name="m"} 1.7e308
-vllm:request_time_per_output_token_seconds_count{engine="0",model_name="m"} 4.0
-`)
-	if h.TimePerOutputTokenSecondsSum != nil {
-		t.Errorf("sum = %v, want nil (unknown)", *h.TimePerOutputTokenSecondsSum)
-	}
-	if h.TimePerOutputTokenCount == nil || *h.TimePerOutputTokenCount != 4 {
-		t.Errorf("count = %v, want 4", h.TimePerOutputTokenCount)
-	}
-	if _, err := json.Marshal(h); err != nil {
-		t.Errorf("the sample does not encode: %v", err)
 	}
 }

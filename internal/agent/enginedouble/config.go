@@ -67,6 +67,16 @@ type Config struct {
 	ReasoningFirst     int           // the reply reasons for this many tokens (0: off) before its answer
 	ReasoningForever   bool          // the reply reasons until max_tokens runs out, with no answer
 
+	// The modes that leave lines out of /metrics, as an engine that does not
+	// export them would (the agent reads each absent line as unknown, not 0).
+	// A real vLLM v0.32.0 with prefix caching off still exports the prefix-cache
+	// counters, at 0; PrefixCaching=false does that, and OmitPrefixCacheMetrics
+	// is the other thing.
+	OmitPrefixCacheMetrics bool // no vllm:prefix_cache_queries_total or vllm:prefix_cache_hits_total
+	OmitTPOT               bool // no vllm:request_time_per_output_token_seconds histogram at all
+	OmitTPOTSum            bool // the histogram lacks its _sum line (the _count and buckets stay)
+	OmitTPOTCount          bool // the histogram lacks its _count line (the _sum and buckets stay)
+
 	// Startup modes, read by Main only.
 	StartDelay   time.Duration // create the socket only after this
 	ExitAfter    time.Duration // exit by itself after this, when ExitAfterSet
