@@ -50,8 +50,12 @@ func TestWaitReadyWaitsForAWholeAdminKubeconfig(t *testing.T) {
 		return string(b)
 	}
 
-	// Each partial state is one that clientcmd refuses (empty, valid YAML with nothing in it, cut
-	// before the contexts, cut inside the server address), and each must make the launcher wait.
+	// Each partial state must make the launcher wait. Three are refused by clientcmd (empty, cut
+	// before the contexts, cut inside the server address: the contexts and current-context come
+	// after the clusters, so a cut file has none and never reaches the server check). The fourth
+	// is a cut that parses, inside a base64 blob on a 4-character boundary: clientcmd accepts it
+	// and only the first use of the config fails, so the file must be read again after /readyz
+	// failed, not kept from the first parse.
 	for _, tc := range []struct {
 		name    string
 		partial func(valid string, h *fakeHost) string
@@ -60,6 +64,14 @@ func TestWaitReadyWaitsForAWholeAdminKubeconfig(t *testing.T) {
 		{"cut before the contexts", func(v string, _ *fakeHost) string { return v[:strings.Index(v, "contexts:")] }},
 		{"cut inside the server address", func(v string, h *fakeHost) string {
 			return v[:strings.Index(v, "127.0.0.1:")+len("127.0.0.1:")+1]
+		}},
+		{"parses, but its client certificate is not PEM", func(v string, _ *fakeHost) string {
+			// "notpem" in base64: what a certificate or key blob cut on a 4-character boundary decodes to.
+			bad := strings.Replace(v, "user: {token: t}", "user: {client-certificate-data: bm90cGVt, client-key-data: bm90cGVt}", 1)
+			if bad == v {
+				t.Fatal("the fake host's kubeconfig has no token user to replace")
+			}
+			return bad
 		}},
 	} {
 		t.Run("fills in after a delay, "+tc.name, func(t *testing.T) {
@@ -105,21 +117,24 @@ func TestWaitReadyWaitsForAWholeAdminKubeconfig(t *testing.T) {
 		}
 	})
 
-	t.Run("a kubeconfig naming another server is waited out, never used", func(t *testing.T) {
+	t.Run("a whole kubeconfig naming another server fails at once", func(t *testing.T) {
 		h := newFakeHost(t)
 		other := strings.ReplaceAll(validOf(t, h), "127.0.0.1:"+strconv.Itoa(h.st.Ports.HTTPS), "127.0.0.1:6443")
+		if other == validOf(t, h) {
+			t.Fatal("the fake host's kubeconfig does not name its HTTPS port")
+		}
 		if err := os.WriteFile(h.l.adminKubeconfig(), []byte(other), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		const timeout = 400 * time.Millisecond
+		const timeout = 10 * time.Second
 		t0 := time.Now()
 		_, _, err := waitReady(context.Background(), h.l, h.st, h.handle(), timeout)
 		if err == nil || !strings.Contains(err.Error(), "127.0.0.1:6443") || !strings.Contains(err.Error(), "not at this launcher's") {
 			t.Fatalf("got %v; want a refusal naming the other server", err)
 		}
-		// Cut-short files are indistinguishable from this one, so it too is retried to the deadline.
-		if !strings.Contains(err.Error(), "not ready after") || time.Since(t0) < timeout {
-			t.Errorf("gave up after %s with %q; want the wait to run to the deadline", time.Since(t0), err)
+		// This file will not change, so waiting out the deadline would only delay the failure.
+		if d := time.Since(t0); d > timeout/2 {
+			t.Errorf("failed after %s; want it at once, not at the deadline %s", d, timeout)
 		}
 	})
 }

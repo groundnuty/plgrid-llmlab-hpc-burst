@@ -3,6 +3,7 @@ package launcher
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -14,6 +15,14 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
+
+// wrongServerError is restConfig's refusal of a kubeconfig that is whole and names another
+// server. A file cut short never gets this far (its contexts and current-context come after its
+// clusters, so it fails to parse first), and a whole file that names the wrong server will not
+// change, so waitReady fails on it at once instead of waiting.
+type wrongServerError struct{ msg string }
+
+func (e *wrongServerError) Error() string { return e.msg }
 
 // restConfig reads the launcher's kubeconfig and checks that it points at this host: loopback,
 // and the HTTPS port the launcher gave k3s. A kubeconfig that names anything else (the system
@@ -29,7 +38,7 @@ func restConfig(path string, ports Ports, timeout time.Duration) (*rest.Config, 
 	}
 	host, port, err := net.SplitHostPort(u.Host)
 	if err != nil || port != strconv.Itoa(ports.HTTPS) || (host != "127.0.0.1" && host != "localhost" && host != "::1") {
-		return nil, fmt.Errorf("%s points at %s, not at this launcher's 127.0.0.1:%d", path, cfg.Host, ports.HTTPS)
+		return nil, &wrongServerError{fmt.Sprintf("%s points at %s, not at this launcher's 127.0.0.1:%d", path, cfg.Host, ports.HTTPS)}
 	}
 	cfg.Timeout = timeout
 	cfg.QPS, cfg.Burst = 50, 100
@@ -90,7 +99,6 @@ func waitReady(ctx context.Context, l layout, st *State, h *procHandle, timeout 
 	deadline := time.Now().Add(timeout)
 	stage := "apiserver /readyz"
 	var last error
-	var cfg *rest.Config
 	readyzDone := false
 	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
@@ -100,18 +108,24 @@ func waitReady(ctx context.Context, l layout, st *State, h *procHandle, timeout 
 			return 0, 0, fmt.Errorf("k3s is no longer running before it was ready (%s); see %s", d, l.logFile())
 		}
 		if !readyzDone {
-			if cfg == nil {
-				if _, serr := os.Stat(l.adminKubeconfig()); serr == nil {
-					// k3s creates this file early in its start and fills it in afterwards, not
-					// atomically, so a read can find it empty or cut short (a slow filesystem makes
-					// that common). A file that does not parse or check out yet is not ready yet:
-					// remember why, and read it again. cfg is set only from a whole, checked file,
-					// so a kubeconfig that names another server is never used, only waited out.
-					if c, cerr := restConfig(l.adminKubeconfig(), st.Ports, 1500*time.Millisecond); cerr != nil {
-						last = cerr
-					} else {
-						cfg = c
-					}
+			// k3s creates the admin kubeconfig early in its start and fills it in afterwards,
+			// not atomically, so a read can find it empty or cut short (a slow filesystem makes
+			// that common). The file is read again at every probe until /readyz has answered,
+			// because even a cut that parses (inside a base64 blob, on a 4-character boundary)
+			// can give a config that only fails when it is used. A file that does not parse yet
+			// is not ready yet: remember why and try again. cfg comes only from a whole, checked
+			// read, so a kubeconfig that names another server is never used.
+			var cfg *rest.Config
+			if _, serr := os.Stat(l.adminKubeconfig()); serr == nil {
+				c, cerr := restConfig(l.adminKubeconfig(), st.Ports, 1500*time.Millisecond)
+				var wrong *wrongServerError
+				if errors.As(cerr, &wrong) {
+					return 0, 0, cerr
+				}
+				if cerr != nil {
+					last = cerr
+				} else {
+					cfg = c
 				}
 			}
 			if cfg != nil {
