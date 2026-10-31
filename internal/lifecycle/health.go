@@ -9,7 +9,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
-	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 // ready applies the health rules to a ready Instance (HBEP-7, Health and
@@ -19,7 +18,7 @@ func (p *pass) ready(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av agent
 	if av.unreachable || av.report == nil {
 		return nil // a path that is down is not a dead Instance (HBEP-6)
 	}
-	signal, msg := p.healthSignal(in, alloc, av.report, st)
+	signal, msg := p.healthSignal(in, alloc, av, st)
 	if signal == "" {
 		now := metav1.NewTime(p.now)
 		return p.setStatus(in, func(s *v1alpha1.InstanceStatus) {
@@ -34,7 +33,8 @@ func (p *pass) ready(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av agent
 // errorOnlyWindow; requests running with the generated-token counter unchanged
 // for noProgressTimeout; a part that exited without being told to. Plain load
 // is never a signal (HBEP-7, Health and restarts).
-func (p *pass) healthSignal(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, ir *agentapi.InstanceReport, st settings) (string, string) {
+func (p *pass) healthSignal(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av agentView, st settings) (string, string) {
+	ir := av.report
 	if workerExited(ir, in) {
 		w := worker0(ir)
 		code := "unknown"
@@ -54,17 +54,23 @@ func (p *pass) healthSignal(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, i
 	if !h.ProbeOK && h.ConsecutiveProbeFailures >= st.failureThreshold {
 		return v1alpha1.ReasonProbeFailing, fmt.Sprintf("the health probe failed %d times in a row", h.ConsecutiveProbeFailures)
 	}
+	// The gauge-based signals need fresh metrics: stale gauges are unknown.
+	if !av.metricsFresh(w) {
+		return "", ""
+	}
 	t, ok := p.r.Backend.healthOf(alloc.UID, string(in.UID), *w)
 	if !ok {
 		return "", ""
 	}
-	if h.RunningRequests > 0 {
+	// No progress needs a known running count above zero and a known counter
+	// in both this sample and the tracker's baseline: nil is unknown.
+	if h.RunningRequests != nil && *h.RunningRequests > 0 && h.GeneratedTokens != nil && t.tokens != nil {
 		since := t.tokensSince
 		if p.mem.started.After(since) {
 			since = p.mem.started
 		}
 		if deadline := since.Add(st.noProgressTimeout); !p.now.Before(deadline) {
-			return v1alpha1.ReasonNoProgress, fmt.Sprintf("%d requests run and the generated-token counter has not moved for %s", h.RunningRequests, p.now.Sub(since))
+			return v1alpha1.ReasonNoProgress, fmt.Sprintf("%d requests run and the generated-token counter has not moved for %s", *h.RunningRequests, p.now.Sub(since))
 		} else {
 			p.at(deadline)
 		}

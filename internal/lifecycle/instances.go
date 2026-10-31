@@ -330,9 +330,36 @@ func (p *pass) settingsOf(pv *providerView) settings {
 
 // agentView is what the controller knows of an Instance's agent in this pass.
 type agentView struct {
-	report      *agentapi.InstanceReport
+	report *agentapi.InstanceReport
+	// reportAt is when the controller received the Report (its clock), and
+	// reportTime the Report's own Time (the agent's clock).
 	reportAt    time.Time
+	reportTime  time.Time
 	unreachable bool
+	// now and probeInterval are what agentapi.Health.MetricsFresh judges by.
+	now           time.Time
+	probeInterval time.Duration
+}
+
+// metricsFresh reports whether a worker's gauges and counters are fresh enough
+// to act on (agentapi.Health.MetricsFresh). While they are not, every one of
+// them is unknown and no gauge-based decision is made: no drain end, no
+// no-progress, no only-errors.
+func (av agentView) metricsFresh(w *agentapi.WorkerReport) bool {
+	return av.report != nil && w != nil && w.Health != nil &&
+		w.Health.MetricsFresh(av.reportTime, av.reportAt, av.now, av.probeInterval)
+}
+
+// metricsReadAt places a worker's last /metrics read on the controller's
+// clock: the receipt time less the read's age at the Report, which is taken on
+// the agent's clock alone, so no clock skew enters. The caller checks
+// metricsFresh first.
+func (av agentView) metricsReadAt(w *agentapi.WorkerReport) time.Time {
+	age := av.reportTime.Sub(*w.Health.MetricsReadAt)
+	if age < 0 {
+		age = 0
+	}
+	return av.reportAt.Add(-age)
 }
 
 // running advances an Instance whose agent has registered: starting,
@@ -387,7 +414,7 @@ func (p *pass) running(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) error 
 // (HBEP-7, The allocation agent, Unreachable; HBEP-6).
 func (p *pass) agent(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, st settings) (agentView, error) {
 	rep, at, from := p.r.Backend.latest(alloc.UID)
-	var av agentView
+	av := agentView{now: p.now, probeInterval: st.probeInterval}
 	last := p.mem.started
 	if in.Status.StartInstructionTime != nil && in.Status.StartInstructionTime.After(last) {
 		last = in.Status.StartInstructionTime.Time
@@ -397,7 +424,7 @@ func (p *pass) agent(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, st setti
 			last = at
 		}
 		if rep.Instance != nil && rep.Instance.UID == string(in.UID) {
-			av.report, av.reportAt = rep.Instance, at
+			av.report, av.reportAt, av.reportTime = rep.Instance, at, rep.Time
 		}
 	}
 	deadline := last.Add(st.agentTimeout)
@@ -449,26 +476,38 @@ func (p *pass) draining(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av ag
 		}
 		p.at(in.Status.LeaseEnd.Time)
 	}
-	// Only a report that arrived at least a second after the drain began
-	// counts: an older one predates requests the front admitted until then.
+	// Only metrics read at least a second after the drain began count: an
+	// older read predates requests the front admitted until then.
 	began, ok := drainBegan(in)
 	if !ok {
 		began = p.mem.started // an Instance made draining before this record existed
 	}
-	if av.report != nil && !av.unreachable && !av.reportAt.Before(began.Add(time.Second)) && runningRequests(av.report) == 0 {
+	if !av.unreachable && av.noRequestReadAfter(began.Add(time.Second)) {
 		return p.end(in, alloc, v1alpha1.ReasonDrained, "drained: no request runs", false)
 	}
 	return nil
 }
 
-func runningRequests(r *agentapi.InstanceReport) int64 {
-	var n int64
-	for _, w := range r.Workers {
-		if w.Health != nil {
-			n += w.Health.RunningRequests
+// noRequestReadAfter reports whether the latest report shows no running
+// request, from metrics read no earlier than t. A worker that is starting, has
+// stopped or has exited holds no request. A running or stopping worker counts
+// only with fresh metrics, a known RunningRequests of zero and a read at or
+// after t: a nil gauge is unknown, never zero (agentapi.Health).
+func (av agentView) noRequestReadAfter(t time.Time) bool {
+	if av.report == nil || len(av.report.Workers) == 0 || av.reportAt.Before(t) {
+		return false
+	}
+	for i := range av.report.Workers {
+		w := &av.report.Workers[i]
+		if w.Phase != agentapi.PartRunning && w.Phase != agentapi.PartStopping {
+			continue
+		}
+		if !av.metricsFresh(w) || w.Health.RunningRequests == nil || *w.Health.RunningRequests != 0 ||
+			av.metricsReadAt(w).Before(t) {
+			return false
 		}
 	}
-	return n
+	return true
 }
 
 // handOver drains a ready primary at its drain start, whether or not its

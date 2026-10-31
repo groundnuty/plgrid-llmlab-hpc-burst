@@ -173,7 +173,8 @@ func TestTrackerCountsServerErrorClasses(t *testing.T) {
 		{"2xx": 10, "5xx": 3},
 		{"2xx": 10, "5xx": 9, "500": 1},
 	} {
-		w.Health = &agentapi.Health{Time: t0.Add(time.Duration(i) * time.Minute), ProbeOK: true, ResponsesByStatus: resp}
+		at := t0.Add(time.Duration(i) * time.Minute)
+		w.Health = &agentapi.Health{Time: at, ProbeOK: true, MetricsReadAt: &at, ResponsesByStatus: resp}
 		s.track("uid", w, t0.Add(time.Duration(i)*time.Minute))
 	}
 	tr := s.health[trackerKey("uid", w)]

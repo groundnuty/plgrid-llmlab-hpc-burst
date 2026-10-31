@@ -114,7 +114,8 @@ func TestHealthPlainLoadAndShortPrefillRestartNothing(t *testing.T) {
 				return afake.HealthSlowPrefill(now, w)
 			}
 			tokens += 10
-			return agentapi.Health{Time: now, ProbeOK: true, RunningRequests: 1, GeneratedTokens: tokens, KVCacheUsage: 0.05}
+			read := now
+			return agentapi.Health{Time: now, ProbeOK: true, MetricsReadAt: &read, RunningRequests: agentapi.Int64(1), GeneratedTokens: agentapi.Int64(tokens), KVCacheUsage: agentapi.Float64(0.05), ResponsesByStatus: map[string]int64{"2xx": tokens}}
 		}
 		return afake.Engine{Health: s.sample}
 	}
@@ -136,7 +137,7 @@ func TestHealthPlainLoadAndShortPrefillRestartNothing(t *testing.T) {
 			}
 			rep, _ := rg.agentOf(alloc).agent.LastReport()
 			h := rep.Instance.Workers[0].Health
-			if h == nil || h.RunningRequests == 0 {
+			if h == nil || h.RunningRequests == nil || *h.RunningRequests == 0 {
 				t.Errorf("the engine reported no requests in flight (%+v); the test would prove nothing", h)
 			}
 		})

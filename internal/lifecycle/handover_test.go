@@ -355,7 +355,7 @@ func TestHandoverFailedReplacementPredecessorServesUntilItsDrainStart(t *testing
 		return afake.Engine{Health: func(now time.Time, proc afake.Process) agentapi.Health {
 			h := afake.DefaultHealth(now, proc)
 			if !now.Before(busyFrom) && now.Before(busyTo) {
-				h.RunningRequests, h.GeneratedTokens = 4, now.Unix()
+				h.RunningRequests, h.GeneratedTokens = agentapi.Int64(4), agentapi.Int64(now.Unix())
 			}
 			return h
 		}}

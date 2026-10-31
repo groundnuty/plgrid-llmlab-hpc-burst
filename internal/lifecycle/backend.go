@@ -43,9 +43,14 @@ type agentState struct {
 // tracker follows one engine process's health over successive samples, for
 // the signals that need more than one sample (HBEP-7, Health and restarts).
 type tracker struct {
-	tokens      int64
+	// tokens is the last known generated-token count, nil while unknown, and
+	// tokensSince when it last moved (or the engine last ran no request).
+	tokens      *int64
 	tokensSince time.Time
-	samples     []healthSample
+	// lastRead is the MetricsReadAt of the last sample taken in.
+	lastRead *time.Time
+	// samples hold only reads with a known ResponsesByStatus.
+	samples []healthSample
 }
 
 type healthSample struct {
@@ -179,15 +184,34 @@ func trackerKey(instUID string, w agentapi.WorkerReport) string {
 
 // track adds a health sample to the process's tracker. The caller holds b.mu.
 func (s *agentState) track(instUID string, w agentapi.WorkerReport, now time.Time) {
+	h := w.Health
+	// Counters are compared only when the engine's metrics were read again:
+	// a sample whose MetricsReadAt did not advance repeats the last values
+	// (agentapi.Health).
+	if h.MetricsReadAt == nil {
+		return
+	}
 	k := trackerKey(instUID, w)
 	t, ok := s.health[k]
-	h := w.Health
+	if ok && t.lastRead != nil && !h.MetricsReadAt.After(*t.lastRead) {
+		return
+	}
 	if !ok {
-		t = &tracker{tokens: h.GeneratedTokens, tokensSince: now}
+		t = &tracker{tokensSince: now}
 		s.health[k] = t
 	}
-	if h.GeneratedTokens != t.tokens || h.RunningRequests == 0 {
-		t.tokens, t.tokensSince = h.GeneratedTokens, now
+	read := *h.MetricsReadAt
+	t.lastRead = &read
+	// An unknown counter is never compared; the first known one is the
+	// baseline, and an engine that runs no request is never stalled.
+	if g := h.GeneratedTokens; g != nil && (t.tokens == nil || *g != *t.tokens || (h.RunningRequests != nil && *h.RunningRequests == 0)) {
+		v := *g
+		t.tokens, t.tokensSince = &v, now
+	}
+	// A nil ResponsesByStatus is unknown: it is no sample of the answers, and
+	// never a count of zero.
+	if h.ResponsesByStatus == nil {
+		return
 	}
 	var total int64
 	for _, n := range h.ResponsesByStatus {
