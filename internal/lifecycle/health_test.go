@@ -345,3 +345,35 @@ func TestHealthRestartRunsOriginalLaunch(t *testing.T) {
 		t.Errorf("restart launch %v is not the Instance's spec.launch %v", st[1].Launch.Command, in.Spec.Launch.Command)
 	}
 }
+
+// TestHealthMissedDesiredStateCorrectedByNextPoll covers "A missed desired-state
+// message is corrected by the next poll": the controller raises the worker
+// generation while the agent is silent for one Step; the agent has not applied
+// it then, applies it at its next poll, and nothing else restarts.
+func TestHealthMissedDesiredStateCorrectedByNextPoll(t *testing.T) {
+	rg := newRig(t)
+	rg.create(mdSpec("md"))
+	_, alloc := startReady(rg)
+	ag := rg.agentOf(alloc).agent
+	ag.CrashWorker(agentapi.WorkerName(0), 1)
+	startStep(rg, "md", startTick) // the controller hears the exit and raises the generation
+	if n := len(rg.rec.Find("failing", "WorkerRestart")); n != 1 {
+		t.Fatalf("worker restarts = %d after the crash, want 1", n)
+	}
+	before, _ := ag.LastReport()
+	ag.Silence(true)
+	startStep(rg, "md", startTick) // the agent misses the raised generation
+	if after, _ := ag.LastReport(); !after.Time.Equal(before.Time) || len(ag.Starts()) != 1 {
+		t.Fatalf("the silent agent acted: last report %s -> %s, %d starts", before.Time, after.Time, len(ag.Starts()))
+	}
+	ag.Silence(false)
+	startStep(rg, "md", startTick)
+	st := ag.Starts()
+	if len(st) != 2 || st[1].Generation != 1 {
+		t.Fatalf("starts after the next poll = %+v, want a second process for worker generation 1", st)
+	}
+	startUntil(rg, "md", 5*time.Minute, "ready again", func() bool { return rg.readyCount("md") == 1 })
+	if n := len(rg.rec.Find("failing", "")); n != 1 {
+		t.Errorf("failing events = %d, want only the one restart", n)
+	}
+}

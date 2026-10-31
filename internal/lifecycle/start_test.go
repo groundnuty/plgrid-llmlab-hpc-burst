@@ -97,42 +97,6 @@ func startRounds(ra *rigAgent) int {
 	return len(rep.Instance.Checks.WarmUp.Rounds)
 }
 
-// TestStartNoInstanceReadyBeforeChecksPass covers "No instance gets traffic
-// before it is ready": at every Step of a start, with a slow first warm-up
-// round, and of a worker restart, an Instance is ready only with the three
-// conditions true and a passed latest record. Non-vacuity: the Steps include
-// ones with the Instance not ready (so the check could have caught an early
-// ready) and ones with it ready.
-func TestStartNoInstanceReadyBeforeChecksPass(t *testing.T) {
-	rg := newRig(t)
-	rg.engine = func(string) afake.Engine { return afake.Engine{WarmUpRound: afake.WarmUpSlowFirstRound} }
-	rg.create(mdSpec("md"))
-	var notReady, ready int
-	for i := 0; i < 120 && rg.readyCount("md") == 0; i++ {
-		startStep(rg, "md", startTick)
-		if ins := rg.instances("md"); len(ins) == 1 && ins[0].Status.Phase != v1alpha1.InstanceReady {
-			notReady++
-		}
-	}
-	in, alloc := startReady(rg)
-	rg.agentOf(alloc).agent.CrashWorker(agentapi.WorkerName(0), 1)
-	for i := 0; i < 60 && rg.instance(in.Name).Status.Phase == v1alpha1.InstanceReady; i++ {
-		startStep(rg, "md", startTick) // a restart leaves ready for verifying
-	}
-	for i := 0; i < 60; i++ {
-		if p := rg.instance(in.Name).Status.Phase; p == v1alpha1.InstanceVerifying || p == v1alpha1.InstanceStarting {
-			notReady++
-		}
-		ready += startStep(rg, "md", startTick)
-	}
-	if notReady < 4 || ready == 0 {
-		t.Fatalf("saw %d Steps not ready and %d ready; the check proved nothing", notReady, ready)
-	}
-	if got := len(rg.rec.Find("failing", "WorkerRestart")); got != 1 {
-		t.Fatalf("worker restarts = %d, want 1", got)
-	}
-}
-
 // TestStartWarmUpRounds covers the Test plan's Warm-up item: an engine slow on
 // the first request of each shape settles in two rounds (ready on the Step that
 // reports the second round, not after the first); one whose latency never
@@ -396,38 +360,6 @@ func startStatus(conds []metav1.Condition, typ string) string {
 		return string(c.Status)
 	}
 	return ""
-}
-
-// TestStartMissedDesiredStateCorrectedByNextPoll covers "A missed desired-state
-// message is corrected by the next poll": the controller raises the worker
-// generation while the agent is silent for one Step; the agent has not applied
-// it then, applies it at its next poll, and nothing else restarts.
-func TestStartMissedDesiredStateCorrectedByNextPoll(t *testing.T) {
-	rg := newRig(t)
-	rg.create(mdSpec("md"))
-	_, alloc := startReady(rg)
-	ag := rg.agentOf(alloc).agent
-	ag.CrashWorker(agentapi.WorkerName(0), 1)
-	startStep(rg, "md", startTick) // the controller hears the exit and raises the generation
-	if n := len(rg.rec.Find("failing", "WorkerRestart")); n != 1 {
-		t.Fatalf("worker restarts = %d after the crash, want 1", n)
-	}
-	before, _ := ag.LastReport()
-	ag.Silence(true)
-	startStep(rg, "md", startTick) // the agent misses the raised generation
-	if after, _ := ag.LastReport(); !after.Time.Equal(before.Time) || len(ag.Starts()) != 1 {
-		t.Fatalf("the silent agent acted: last report %s -> %s, %d starts", before.Time, after.Time, len(ag.Starts()))
-	}
-	ag.Silence(false)
-	startStep(rg, "md", startTick)
-	st := ag.Starts()
-	if len(st) != 2 || st[1].Generation != 1 {
-		t.Fatalf("starts after the next poll = %+v, want a second process for worker generation 1", st)
-	}
-	startUntil(rg, "md", 5*time.Minute, "ready again", func() bool { return rg.readyCount("md") == 1 })
-	if n := len(rg.rec.Find("failing", "")); n != 1 {
-		t.Errorf("failing events = %d, want only the one restart", n)
-	}
 }
 
 // TestStartAgentUnreachableRestartsNothing covers "An agent that stops reporting

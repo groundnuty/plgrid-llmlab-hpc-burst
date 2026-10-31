@@ -296,3 +296,39 @@ func TestVerifyQualificationChecks(t *testing.T) {
 		})
 	}
 }
+
+// TestVerifyNoInstanceReadyBeforeChecksPass covers "No instance gets traffic
+// before it is ready": at every Step of a start, with a slow first warm-up
+// round, and of a worker restart, an Instance is ready only with the three
+// conditions true and a passed latest record. Non-vacuity: the Steps include
+// ones with the Instance not ready (so the check could have caught an early
+// ready) and ones with it ready.
+func TestVerifyNoInstanceReadyBeforeChecksPass(t *testing.T) {
+	rg := newRig(t)
+	rg.engine = func(string) afake.Engine { return afake.Engine{WarmUpRound: afake.WarmUpSlowFirstRound} }
+	rg.create(mdSpec("md"))
+	var notReady, ready int
+	for i := 0; i < 120 && rg.readyCount("md") == 0; i++ {
+		startStep(rg, "md", startTick)
+		if ins := rg.instances("md"); len(ins) == 1 && ins[0].Status.Phase != v1alpha1.InstanceReady {
+			notReady++
+		}
+	}
+	in, alloc := startReady(rg)
+	rg.agentOf(alloc).agent.CrashWorker(agentapi.WorkerName(0), 1)
+	for i := 0; i < 60 && rg.instance(in.Name).Status.Phase == v1alpha1.InstanceReady; i++ {
+		startStep(rg, "md", startTick) // a restart leaves ready for verifying
+	}
+	for i := 0; i < 60; i++ {
+		if p := rg.instance(in.Name).Status.Phase; p == v1alpha1.InstanceVerifying || p == v1alpha1.InstanceStarting {
+			notReady++
+		}
+		ready += startStep(rg, "md", startTick)
+	}
+	if notReady < 4 || ready == 0 {
+		t.Fatalf("saw %d Steps not ready and %d ready; the check proved nothing", notReady, ready)
+	}
+	if got := len(rg.rec.Find("failing", "WorkerRestart")); got != 1 {
+		t.Fatalf("worker restarts = %d, want 1", got)
+	}
+}
