@@ -189,13 +189,13 @@ func (s *agentState) track(instUID string, w agentapi.WorkerReport, now time.Tim
 	if h.GeneratedTokens != t.tokens || h.RunningRequests == 0 {
 		t.tokens, t.tokensSince = h.GeneratedTokens, now
 	}
-	var total, errs int64
-	for code, n := range h.ResponsesByStatus {
+	var total int64
+	for _, n := range h.ResponsesByStatus {
 		total += n
-		if len(code) == 3 && code[0] == '5' {
-			errs += n
-		}
 	}
+	// vLLM v0.32.0 labels statuses by class ("5xx"): server errors are read
+	// only through agentapi.ServerErrors.
+	errs := agentapi.ServerErrors(h.ResponsesByStatus)
 	t.samples = append(t.samples, healthSample{at: now, responses: total, errors: errs})
 	if len(t.samples) > maxSamples {
 		t.samples = t.samples[len(t.samples)-maxSamples:]

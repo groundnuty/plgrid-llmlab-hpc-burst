@@ -148,7 +148,7 @@ func TestManagerOnControlPlane(t *testing.T) {
 	if err := cl.Create(ctx, prov); err != nil {
 		t.Fatal(err)
 	}
-	apimeta.SetStatusCondition(&prov.Status.Conditions, metav1.Condition{Type: v1alpha1.ConditionProviderReady, Status: metav1.ConditionTrue, Reason: "Polled", LastTransitionTime: metav1.Now()})
+	apimeta.SetStatusCondition(&prov.Status.Conditions, metav1.Condition{Type: v1alpha1.ConditionProviderReady, Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonPolled, LastTransitionTime: metav1.Now()})
 	if err := cl.Status().Update(ctx, prov, client.FieldOwner(v1alpha1.FieldManagerProvider)); err != nil {
 		t.Fatal(err)
 	}

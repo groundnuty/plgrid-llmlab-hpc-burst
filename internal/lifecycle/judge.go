@@ -196,6 +196,9 @@ func judgeVerify(d declared, v *agentapi.VerifyResult, rehash bool, sh shapes) v
 			out.Contradictions = append(out.Contradictions, fmt.Sprintf("%s %q, declared %q", n, got, d.flags[n]))
 		}
 	}
+	// A setting the engine reports that the spec does not declare is recorded
+	// as reported, and passes: the engine version, an ID input, covers the
+	// engine's defaults (science-agent ruling, 31 Oct 2026; HBEP-3, HBEP-7).
 	for n, val := range v.Settings {
 		if _, ok := d.flags[n]; !ok {
 			out.Undeclared[n] = val

@@ -288,12 +288,12 @@ func (r *Reconciler) setDialHome(ctx context.Context, provider string, unreachab
 			cur = &p.Status.Conditions[i]
 		}
 	}
-	status, reason := metav1.ConditionTrue, "RegistrationTimeout"
+	status, reason := metav1.ConditionTrue, v1alpha1.ReasonRegistrationTimeout
 	if !unreachable {
 		if cur == nil || cur.Status != metav1.ConditionTrue {
 			return nil
 		}
-		status, reason = metav1.ConditionFalse, "AgentRegistered"
+		status, reason = metav1.ConditionFalse, reasonAgentRegistered
 	}
 	c := metav1.Condition{Type: v1alpha1.ConditionDialHomeUnreachable, Status: status, Reason: reason, Message: msg, LastTransitionTime: metav1.NewTime(now)}
 	if cur != nil && cur.Status == status {
