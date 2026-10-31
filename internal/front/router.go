@@ -40,6 +40,10 @@ type Router struct {
 	leaseEnds map[types.UID]time.Time
 	mds       map[string]*v1alpha1.ModelDeployment // for events
 	profiles  map[string]*v1alpha1.PlatformProfile
+
+	// beforePick, when set, runs between reading the view and picking from
+	// the live groups: a seam for tests that force a join in between.
+	beforePick func()
 }
 
 type pause struct {
