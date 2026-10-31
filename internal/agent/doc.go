@@ -20,7 +20,12 @@
 //     checkpoint bound read-only, the engine on a Unix socket in the job's
 //     private run directory, and the Instance's key only in the environment
 //     (WorkerExec);
-//   - forwards the Instance's serving path to that worker (Forwarder);
+//   - forwards the Instance's serving path to that worker (Forwarder), and
+//     serves that path to the front through frpc, one tcpmux proxy named by
+//     the Instance's UID, over wss to the dial-home listener (Frpc; HBEP-6,
+//     frpc in the job). In ssh mode the agent keeps two forwards, each from
+//     a kernel-chosen loopback port: connection 1 for its control traffic,
+//     connection 2 for frpc (SSHForward; HBEP-6, Dial-home modes);
 //   - runs verification, qualification and warm-up against the engine's
 //     local socket when the desired state asks for them, and reports raw
 //     results for the controller to judge (Engine);
@@ -58,5 +63,15 @@
 //     image format).
 //   - The SSE framing of the engine client is copied from spike S2 phase A
 //     (spikes/s2/cmd/s2probe/sse.go), in package engine.
-//   - New here: the convergence loop, the check gating and the reporting.
+//   - The tunnel runs frp v0.71.1's frpc (https://github.com/fatedier/frp,
+//     a pinned release binary staged by digest), with HBEP-6's configuration
+//     and spike S1c's heartbeat settings (spikes/s1c). The tunnel tests run
+//     a user-level sshd with S1c's configuration (spikes/s1c/s1c_lib.py,
+//     make_ssh), which ran it as a daemon on a fixed port; running it in
+//     inetd mode behind a listener the test holds is new here, as is the Go
+//     TLS terminator in the place of S1c's Envoy. frpc is run from the
+//     descriptor it was hashed through, as the launcher runs frps and k3s
+//     (internal/launcher, /proc/self/fd/3).
+//   - New here: the convergence loop, the check gating, the reporting, frpc's
+//     supervision and the forwards' port handling.
 package agent
