@@ -79,8 +79,9 @@
 //   - the agent judges what needs the outputs, which never leave the job:
 //     the chat request, the tool-call smoke test, the corruption check (three
 //     greedy outputs share their first 32 tokens, none empty or a single
-//     repeated token) and the behaviour check (a well-formed answer at the
-//     longest context, no loop). It reports each as a CheckOutcome;
+//     repeated token; the rule is CorruptionVerdict, which the real agent and
+//     the fake both apply) and the behaviour check (a well-formed answer at
+//     the longest context, no loop). It reports each as a CheckOutcome;
 //   - the controller judges everything with a threshold or a declared value:
 //     the file rehash, the settings comparison, the engine version, the
 //     served model names, the maximum length, KV capacity against
