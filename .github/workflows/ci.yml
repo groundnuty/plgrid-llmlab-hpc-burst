@@ -84,7 +84,8 @@ jobs:
       # The ssh-mode tunnel tests (internal/agent) run OpenSSH's sshd as this user, in inetd
       # mode, with no service and no root. With HPCBURST_REQUIRE_FRP=1 a missing sshd fails them.
       # The package is installed only when sshd is missing, with policy-rc.d refusing to start
-      # its service, and the service is then disabled, so the runner keeps no listening sshd.
+      # its service. The system ssh units are then disabled every time, installed or not, so
+      # the runner keeps no listening sshd.
       - name: Provide OpenSSH's sshd for the tunnel tests
         run: |
           if ! test -x /usr/sbin/sshd; then
@@ -93,8 +94,8 @@ jobs:
             sudo apt-get update -q
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server
             sudo rm -f /usr/sbin/policy-rc.d
-            sudo systemctl disable --now ssh.socket ssh.service 2> /dev/null || true
           fi
+          sudo systemctl disable --now ssh.socket ssh.service 2> /dev/null || true
           /usr/sbin/sshd -V 2>&1 | head -1
           echo "HPCBURST_SSHD=/usr/sbin/sshd" >> "$GITHUB_ENV"
 
@@ -202,7 +203,8 @@ jobs:
       # The ssh-mode tunnel tests (internal/agent) run OpenSSH's sshd as this user, in inetd
       # mode, with no service and no root. With HPCBURST_REQUIRE_FRP=1 a missing sshd fails them.
       # The package is installed only when sshd is missing, with policy-rc.d refusing to start
-      # its service, and the service is then disabled, so the runner keeps no listening sshd.
+      # its service. The system ssh units are then disabled every time, installed or not, so
+      # the runner keeps no listening sshd.
       - name: Provide OpenSSH's sshd for the tunnel tests
         run: |
           if ! test -x /usr/sbin/sshd; then
@@ -211,8 +213,8 @@ jobs:
             sudo apt-get update -q
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server
             sudo rm -f /usr/sbin/policy-rc.d
-            sudo systemctl disable --now ssh.socket ssh.service 2> /dev/null || true
           fi
+          sudo systemctl disable --now ssh.socket ssh.service 2> /dev/null || true
           /usr/sbin/sshd -V 2>&1 | head -1
           echo "HPCBURST_SSHD=/usr/sbin/sshd" >> "$GITHUB_ENV"
 

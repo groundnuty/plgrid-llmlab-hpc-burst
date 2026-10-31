@@ -97,6 +97,20 @@ func (w *procWatch) recorder(name string) func(agent.ProcessID) {
 	return func(id agent.ProcessID) { w.add(name, id) }
 }
 
+// alive returns the recorded processes whose name starts with prefix and
+// that still run.
+func (w *procWatch) alive(prefix string) []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var out []string
+	for id, name := range w.ids {
+		if strings.HasPrefix(name, prefix) && id.Alive() {
+			out = append(out, fmt.Sprintf("%s %d", name, id.PID))
+		}
+	}
+	return out
+}
+
 // assertGone waits a little for every recorded process to be gone, kills
 // what is left and fails the test for it. It also fails for any frpc, frps,
 // ssh or sshd among this test process's descendants, recorded or not.
@@ -191,19 +205,21 @@ func descendants(pid int) []agent.ProcessID {
 type frpsProc struct {
 	bindPort, muxPort, webPort int
 	password                   string
+	bin, config                string
 	g                          *procgroup.Group
 	log                        string
+	w                          *procWatch
 }
 
-// startFrps starts frps with HBEP-6's loopback settings and S1's heartbeats,
-// with no plugin: the agent's tests need no admission. It retries with other
-// ports when another package took one of them first.
-func startFrps(t *testing.T, bin, dir string, w *procWatch) *frpsProc {
+// planFrps chooses frps's ports and writes its configuration, with HBEP-6's
+// loopback settings and S1's heartbeats and no plugin: the agent's tests need
+// no admission. Nothing starts yet.
+func planFrps(t *testing.T, bin, dir string, w *procWatch) *frpsProc {
 	t.Helper()
-	for attempt := 0; attempt < 3; attempt++ {
-		ports := blockPorts(t, 3)
-		f := &frpsProc{bindPort: ports[0], muxPort: ports[1], webPort: ports[2], password: "test-web-password", log: filepath.Join(dir, "frps.log")}
-		cfg := fmt.Sprintf(`bindAddr = "127.0.0.1"
+	ports := blockPorts(t, 3)
+	f := &frpsProc{bindPort: ports[0], muxPort: ports[1], webPort: ports[2], password: "test-web-password",
+		bin: bin, log: filepath.Join(dir, "frps.log"), w: w}
+	cfg := fmt.Sprintf(`bindAddr = "127.0.0.1"
 bindPort = %d
 proxyBindAddr = "127.0.0.1"
 tcpmuxHTTPConnectPort = %d
@@ -216,21 +232,48 @@ transport.tcpMuxKeepaliveInterval = 10
 transport.heartbeatTimeout = 25
 transport.tcpKeepalive = 30
 `, f.bindPort, f.muxPort, f.webPort, agentapi.FrpsWebUser, f.password, f.log)
-		path := writeFile(t, filepath.Join(dir, "frps.toml"), []byte(cfg))
-		g, err := procgroup.Start(procgroup.Spec{Path: bin, Args: []string{"-c", path}}, time.Now())
-		if err != nil {
-			t.Fatal(err)
-		}
-		f.g = g
-		w.add("frps", g.ID())
-		if f.waitHealthy(5 * time.Second) {
-			t.Cleanup(func() { f.stop() })
+	f.config = writeFile(t, filepath.Join(dir, "frps.toml"), []byte(cfg))
+	t.Cleanup(f.stop)
+	return f
+}
+
+// start starts frps and waits for its /healthz; false when it did not come
+// up, as when another package took one of its ports first.
+func (f *frpsProc) start(t *testing.T) bool {
+	t.Helper()
+	g, err := procgroup.Start(procgroup.Spec{Path: f.bin, Args: []string{"-c", f.config}}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.g = g
+	f.w.add("frps", g.ID())
+	if f.waitHealthy(5 * time.Second) {
+		return true
+	}
+	f.stop()
+	return false
+}
+
+// startFrps plans and starts frps, with other ports when another package took
+// one of them first.
+func startFrps(t *testing.T, bin, dir string, w *procWatch) *frpsProc {
+	t.Helper()
+	for attempt := 0; attempt < 3; attempt++ {
+		if f := planFrps(t, bin, dir, w); f.start(t) {
 			return f
 		}
-		f.stop()
 	}
 	t.Fatal("frps did not come up")
 	return nil
+}
+
+// restart stops frps and starts it again on the same ports.
+func (f *frpsProc) restart(t *testing.T) {
+	t.Helper()
+	f.stop()
+	if !f.start(t) {
+		t.Fatal("frps did not come up again")
+	}
 }
 
 func (f *frpsProc) waitHealthy(d time.Duration) bool {
@@ -254,6 +297,9 @@ func (f *frpsProc) waitHealthy(d time.Duration) bool {
 }
 
 func (f *frpsProc) stop() {
+	if f.g == nil {
+		return
+	}
 	f.g.Stop(2 * time.Second)
 	<-f.g.Done()
 }
@@ -327,6 +373,7 @@ func (f *frpsProc) request(uid, path string) (connect int, status int, body stri
 type terminator struct {
 	ln         net.Listener
 	frps       string
+	cert       atomic.Pointer[tls.Certificate]
 	handshakes atomic.Int32 // TLS handshakes attempted
 	failed     atomic.Int32 // of them, failed
 	frpConns   atomic.Int32 // GET /~!frp passed to frps
@@ -339,7 +386,10 @@ type terminator struct {
 func startTerminator(t *testing.T, cert tls.Certificate, frpsAddr string) *terminator {
 	t.Helper()
 	m := &terminator{ln: kernelListener(t), frps: frpsAddr, conns: map[net.Conn]bool{}}
-	cfg := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+	m.cert.Store(&cert)
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12, GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+		return m.cert.Load(), nil
+	}}
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
@@ -357,6 +407,19 @@ func startTerminator(t *testing.T, cert tls.Certificate, frpsAddr string) *termi
 }
 
 func (m *terminator) port() int { return portOf(m.ln) }
+
+// setCert makes the terminator present another certificate from its next
+// handshake.
+func (m *terminator) setCert(c tls.Certificate) { m.cert.Store(&c) }
+
+// cut closes every connection the terminator carries, as a dropped path does.
+func (m *terminator) cut() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for c := range m.conns {
+		c.Close()
+	}
+}
 
 func (m *terminator) track(c net.Conn, on bool) {
 	m.mu.Lock()

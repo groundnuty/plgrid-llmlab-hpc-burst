@@ -34,16 +34,38 @@ type testCert struct {
 
 func makeCert(t *testing.T, dnsNames ...string) testCert {
 	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
+	return makeCertWith(t, certOpts{names: dnsNames})
+}
+
+// certOpts vary makeCertWith's certificate: its names, its key (a new one
+// when nil) and its validity (an hour ago to a day ahead when zero).
+type certOpts struct {
+	names               []string
+	key                 *ecdsa.PrivateKey
+	notBefore, notAfter time.Time
+}
+
+func makeCertWith(t *testing.T, o certOpts) testCert {
+	t.Helper()
+	key := o.key
+	if key == nil {
+		var err error
+		if key, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if o.notBefore.IsZero() {
+		o.notBefore = time.Now().Add(-time.Hour)
+	}
+	if o.notAfter.IsZero() {
+		o.notAfter = time.Now().Add(24 * time.Hour)
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(time.Now().UnixNano()),
 		Subject:               pkix.Name{CommonName: "hpcburst launcher (test)"},
-		DNSNames:              dnsNames,
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(24 * time.Hour),
+		DNSNames:              o.names,
+		NotBefore:             o.notBefore,
+		NotAfter:              o.notAfter,
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
@@ -147,7 +169,19 @@ func TestCheckDialHomeCert(t *testing.T) {
 		t.Fatalf("the pinned certificate is refused: %v", err)
 	}
 	keyBlock := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: []byte{1, 2, 3}})
+	noName := makeCert(t, "other.hpcburst.invalid")
+	expired := makeCertWith(t, certOpts{names: []string{launcherName}, notBefore: time.Now().Add(-48 * time.Hour), notAfter: time.Now().Add(-time.Hour)})
+	early := makeCertWith(t, certOpts{names: []string{launcherName}, notBefore: time.Now().Add(time.Hour), notAfter: time.Now().Add(48 * time.Hour)})
+	withHeaders := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Headers: map[string]string{"Proc-Type": "4,ENCRYPTED"}, Bytes: a.tls.Certificate[0]})
 	for name, tc := range map[string]struct{ path, pin string }{
+		// frpc checks the front against agentapi.DialHomeServerName; a
+		// certificate without it would leave every frpc retrying forever.
+		"no dial-home name":   {writeFile(t, filepath.Join(dir, "noname.crt"), noName.pem), noName.pin},
+		"expired":             {writeFile(t, filepath.Join(dir, "expired.crt"), expired.pem), expired.pin},
+		"not yet valid":       {writeFile(t, filepath.Join(dir, "early.crt"), early.pem), early.pin},
+		"text before the PEM": {writeFile(t, filepath.Join(dir, "pre.crt"), append([]byte("Certificate:\n    Data: ...\n"), a.pem...)), a.pin},
+		// frpc's AppendCertsFromPEM skips a block with headers.
+		"PEM headers":             {writeFile(t, filepath.Join(dir, "hdr.crt"), withHeaders), a.pin},
 		"no file named":           {"", a.pin},
 		"a missing file":          {filepath.Join(dir, "absent.crt"), a.pin},
 		"no pin":                  {good, ""},
@@ -213,7 +247,6 @@ func TestFrpcRefusesWithoutTheCertificateOrItsPin(t *testing.T) {
 	}
 	for name, mut := range map[string]func(*agent.Frpc){
 		"no certificate":      func(f *agent.Frpc) { f.CertFile = "" },
-		"a missing file":      func(f *agent.Frpc) { f.CertFile = filepath.Join(dir, "absent.crt") },
 		"another pin":         func(f *agent.Frpc) { f.CertSPKISHA256 = b.pin },
 		"no pin":              func(f *agent.Frpc) { f.CertSPKISHA256 = "" },
 		"another frpc digest": func(f *agent.Frpc) { f.FrpcDigest = strings.Repeat("0", 64) },

@@ -298,3 +298,82 @@ func startChildWatch(t *testing.T, path string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// The forward stops counting as listening when its ssh exits, at once, not
+// once the rest of ssh's process group is gone, which can take the whole
+// stop grace: frpc must never start on a forward that has gone (Opus N4).
+// The fake ssh listens, then exits after a second, leaving a child that
+// ignores TERM in its group until the grace's KILL.
+func TestSSHForwardStopsListeningWhenSSHExits(t *testing.T) {
+	root, err := os.MkdirTemp("", "hbn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(root)
+	bin := filepath.Join(root, "bin")
+	os.MkdirAll(bin, 0o700)
+	if err := enginedouble.Install(bin); err != nil {
+		t.Fatal(err)
+	}
+	childPIDFile := filepath.Join(root, "child.pid")
+	wrapper := filepath.Join(bin, "lingering-ssh")
+	script := "#!/bin/sh\n(trap '' TERM; exec sleep 30) &\necho $! > " + childPIDFile + "\nexec " + filepath.Join(bin, "ssh") + " \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(enginedouble.EnvSSHDieAfter, "1s")
+	const grace = 3 * time.Second
+	var mu sync.Mutex
+	var started []agent.ProcessID
+	fwd := &agent.SSHForward{
+		SSH: wrapper, RemotePort: 29299, Config: sshConfig(t, root), Log: io.Discard,
+		MinBackoff: 20 * time.Second, StopGrace: grace,
+		OnStart: func(id agent.ProcessID) { mu.Lock(); started = append(started, id); mu.Unlock() },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = fwd.Run(ctx); close(done) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(15 * time.Second):
+		}
+		killRecordedChild(childPIDFile)
+	})
+	deadline := time.Now().Add(10 * time.Second)
+	var st agent.ForwardState
+	for {
+		st, _ = fwd.State()
+		if st.Listening {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the fake ssh's forward never listened")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	startChildWatch(t, childPIDFile)
+	child := recordedChild(t, childPIDFile)
+	// The fake ssh closes its listener as it exits.
+	for loopbackListens(st.Port) {
+		if time.Now().After(deadline) {
+			t.Fatal("the fake ssh did not exit")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	exitSeen := time.Now()
+	for {
+		st, _ = fwd.State()
+		if !st.Listening {
+			break
+		}
+		if time.Since(exitSeen) > grace/3 {
+			t.Fatalf("the forward still counts as listening %s after its ssh exited", time.Since(exitSeen))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !child.Alive() {
+		t.Fatal("ssh's lingering child is gone already: the test cannot tell the leader's exit from the group's")
+	}
+}

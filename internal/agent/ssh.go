@@ -274,17 +274,26 @@ func (s *SSHForward) once(ctx context.Context, args []string, port int) error {
 		defer close(watched)
 		s.watchListen(g, port, stopWatch)
 	}()
-	defer func() {
-		close(stopWatch)
-		<-watched
-		s.st.update(func(f *ForwardState) { f.Listening = false })
-	}()
+	// notListening ends the watch, then clears Listening: at the leader's
+	// exit at once, not once the rest of its group is gone, which can take
+	// the whole grace, so frpc never starts on a forward that has gone.
+	var once sync.Once
+	notListening := func() {
+		once.Do(func() {
+			close(stopWatch)
+			<-watched
+			s.st.update(func(f *ForwardState) { f.Listening = false })
+		})
+	}
+	defer notListening()
 	select {
 	case <-g.Exited():
+		notListening()
 		g.Stop(grace)
 		<-g.Done()
 		return fmt.Errorf("ssh exited with code %d", g.ExitCode())
 	case <-ctx.Done():
+		notListening()
 		g.Stop(grace)
 		<-g.Done()
 		s.logger().Info("ssh forward stopped", "forward", s.Name, "pid", id.PID, "startTime", id.StartTime)

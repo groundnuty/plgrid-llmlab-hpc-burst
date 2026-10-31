@@ -66,8 +66,12 @@
 //   - The tunnel runs frp v0.71.1's frpc (https://github.com/fatedier/frp,
 //     a pinned release binary staged by digest), with HBEP-6's configuration
 //     and spike S1c's heartbeat settings (spikes/s1c). The tunnel tests run
-//     a user-level sshd as S1c did (spikes/s1c/s1c_lib.py, make_ssh), in
-//     inetd mode, and a Go TLS terminator in the place of S1c's Envoy.
+//     a user-level sshd with S1c's configuration (spikes/s1c/s1c_lib.py,
+//     make_ssh), which ran it as a daemon on a fixed port; running it in
+//     inetd mode behind a listener the test holds is new here, as is the Go
+//     TLS terminator in the place of S1c's Envoy. frpc is run from the
+//     descriptor it was hashed through, as the launcher runs frps and k3s
+//     (internal/launcher, /proc/self/fd/3).
 //   - New here: the convergence loop, the check gating, the reporting, frpc's
 //     supervision and the forwards' port handling.
 package agent

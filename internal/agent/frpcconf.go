@@ -15,6 +15,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
@@ -141,47 +143,72 @@ func frpcEnv(env []string) []string {
 	return out
 }
 
-// CheckDialHomeCert checks the staged launcher certificate before frpc may
-// trust it: the file holds exactly one PEM certificate and nothing else, and
-// its public-key pin equals agent.json's pin (HBEP-6, Certificate checks;
-// HBEP-7). frpc trusts every certificate in its trustedCaFile, and the pin
-// covers one, so a second certificate is refused. frpc checks the server
-// name itself.
+// CheckDialHomeCert reads the staged launcher certificate and checks it
+// (VerifyDialHomeCert). A read error is returned as it is; a content error
+// wraps errRefused.
 func CheckDialHomeCert(path, pin string) error {
 	if path == "" {
-		return errors.New("no dial-home certificate: frpc would verify nothing without one")
-	}
-	if pin == "" {
-		return errors.New("no certificate pin (agent.json's certSPKISHA256) to check the dial-home certificate against")
+		return fmt.Errorf("%w: no dial-home certificate: frpc would verify nothing without one", errRefused)
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("the dial-home certificate: %w", err)
 	}
+	return VerifyDialHomeCert(b, pin, time.Now())
+}
+
+// VerifyDialHomeCert checks the launcher certificate's bytes before frpc may
+// trust them (HBEP-6, Certificate checks; HBEP-7): exactly one PEM
+// certificate, with nothing before, between or after it and no PEM headers;
+// its public-key pin equals agent.json's pin; it names
+// agentapi.DialHomeServerName, which frpc checks the front against; and it is
+// valid at now. frpc trusts every certificate in its trustedCaFile, and the
+// pin covers one, so a second one is refused. Every error wraps errRefused.
+func VerifyDialHomeCert(b []byte, pin string, now time.Time) error {
+	refuse := func(format string, args ...any) error {
+		return fmt.Errorf("%w: the dial-home certificate: %s", errRefused, fmt.Sprintf(format, args...))
+	}
+	if pin == "" {
+		return refuse("no pin (agent.json's certSPKISHA256) to check it against")
+	}
 	var certs []*x509.Certificate
-	for rest := b; ; {
-		var blk *pem.Block
-		blk, rest = pem.Decode(rest)
-		if blk == nil {
-			if len(bytes.TrimSpace(rest)) != 0 {
-				return fmt.Errorf("the dial-home certificate %s holds data that is not PEM", path)
-			}
-			break
+	rest := b
+	for len(bytes.TrimSpace(rest)) != 0 {
+		trimmed := bytes.TrimLeft(rest, " \t\r\n")
+		if !bytes.HasPrefix(trimmed, []byte("-----BEGIN ")) {
+			return refuse("it holds data that is not a PEM block")
 		}
+		blk, next := pem.Decode(trimmed)
+		if blk == nil {
+			return refuse("it holds a malformed PEM block")
+		}
+		rest = next
 		if blk.Type != "CERTIFICATE" {
-			return fmt.Errorf("the dial-home certificate %s holds a %q block; want one certificate only", path, blk.Type)
+			return refuse("it holds a %q block; want one certificate only", blk.Type)
+		}
+		if len(blk.Headers) != 0 {
+			// frpc's AppendCertsFromPEM skips a block with headers, which
+			// would leave it trusting nothing.
+			return refuse("its certificate block has PEM headers")
 		}
 		c, err := x509.ParseCertificate(blk.Bytes)
 		if err != nil {
-			return fmt.Errorf("the dial-home certificate %s: %w", path, err)
+			return refuse("%v", err)
 		}
 		certs = append(certs, c)
 	}
 	if len(certs) != 1 {
-		return fmt.Errorf("the dial-home certificate %s holds %d certificates; want exactly one, the pinned one", path, len(certs))
+		return refuse("it holds %d certificates; want exactly one, the pinned one", len(certs))
 	}
-	if got := agentapi.PinOf(certs[0]); subtle.ConstantTimeCompare([]byte(got), []byte(pin)) != 1 {
-		return fmt.Errorf("the dial-home certificate %s has pin %s, not agent.json's %s", path, got, pin)
+	c := certs[0]
+	if got := agentapi.PinOf(c); subtle.ConstantTimeCompare([]byte(got), []byte(pin)) != 1 {
+		return refuse("its pin %s is not agent.json's %s", got, pin)
+	}
+	if err := c.VerifyHostname(agentapi.DialHomeServerName); err != nil {
+		return refuse("it does not name %s, which frpc checks: %v", agentapi.DialHomeServerName, err)
+	}
+	if now.Before(c.NotBefore) || now.After(c.NotAfter) {
+		return refuse("it is valid from %s to %s, not now (%s)", c.NotBefore.UTC().Format(time.RFC3339), c.NotAfter.UTC().Format(time.RFC3339), now.UTC().Format(time.RFC3339))
 	}
 	return nil
 }
@@ -189,24 +216,87 @@ func CheckDialHomeCert(path, pin string) error {
 // digestForm is agent.json's frpcDigest: 64 lowercase hex characters.
 var digestForm = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-// CheckFrpcDigest checks that the file at path has the SHA-256 digest (64
-// lowercase hex characters, agent.json's frpcDigest) before the agent runs it
-// (HBEP-6, frpc in the job).
-func CheckFrpcDigest(path, digest string) error {
+// verifiedBinary is frpc opened once and hashed through that descriptor
+// (HBEP-6, frpc in the job). It is run as /proc/self/fd/3 with the
+// descriptor passed on, so what runs is the file that was hashed, even
+// after its path is replaced or purged. The file's size and change times
+// are kept: a write into the same file shows there, and it is hashed again
+// before the next start.
+type verifiedBinary struct {
+	f      *os.File
+	path   string
+	digest string
+	stat   fileStamp
+}
+
+// fileStamp is what an in-place write changes.
+type fileStamp struct {
+	size        int64
+	mtime, ctim syscall.Timespec
+}
+
+func stampOf(f *os.File) (fileStamp, error) {
+	var st syscall.Stat_t
+	if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
+		return fileStamp{}, err
+	}
+	return fileStamp{size: st.Size, mtime: st.Mtim, ctim: st.Ctim}, nil
+}
+
+// openVerifiedBinary opens the file at path and checks its SHA-256 against
+// digest through the same descriptor. A malformed digest and a mismatch wrap
+// errRefused; an I/O error does not, and can be retried.
+func openVerifiedBinary(path, digest string) (*verifiedBinary, error) {
 	if !digestForm.MatchString(digest) {
-		return fmt.Errorf("frpc digest %q: want 64 lowercase hex characters", digest)
+		return nil, fmt.Errorf("%w: frpc digest %q: want 64 lowercase hex characters", errRefused, digest)
 	}
 	f, err := os.Open(path)
 	if err != nil {
+		return nil, fmt.Errorf("frpc: %w", err)
+	}
+	v := &verifiedBinary{f: f, path: path, digest: digest}
+	if err := v.rehash(); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return v, nil
+}
+
+// rehash hashes the open file from its start and checks the digest.
+func (v *verifiedBinary) rehash() error {
+	st, err := stampOf(v.f)
+	if err != nil {
 		return fmt.Errorf("frpc: %w", err)
 	}
-	defer f.Close()
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	if _, err := io.Copy(h, io.NewSectionReader(v.f, 0, st.size)); err != nil {
 		return fmt.Errorf("frpc: %w", err)
 	}
-	if got := hex.EncodeToString(h.Sum(nil)); got != digest {
-		return fmt.Errorf("frpc %s has SHA-256 %s, not agent.json's %s", path, got, digest)
+	if got := hex.EncodeToString(h.Sum(nil)); got != v.digest {
+		return fmt.Errorf("%w: frpc %s has SHA-256 %s, not agent.json's %s", errRefused, v.path, got, v.digest)
 	}
+	v.stat = st
 	return nil
+}
+
+// recheck hashes the file again if it was written to since it was hashed.
+func (v *verifiedBinary) recheck() error {
+	st, err := stampOf(v.f)
+	if err != nil {
+		return fmt.Errorf("frpc: %w", err)
+	}
+	if st == v.stat {
+		return nil
+	}
+	return v.rehash()
+}
+
+// CheckFrpcDigest checks that the file at path has the SHA-256 digest (64
+// lowercase hex characters, agent.json's frpcDigest).
+func CheckFrpcDigest(path, digest string) error {
+	v, err := openVerifiedBinary(path, digest)
+	if err != nil {
+		return err
+	}
+	return v.f.Close()
 }

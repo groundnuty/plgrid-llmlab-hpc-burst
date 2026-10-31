@@ -143,10 +143,13 @@ func writeCert(t *testing.T, host agentapi.Host) string {
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject:      pkix.Name{CommonName: "agent-endpoint"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		// The launcher's certificate names the dial-home server name, which
+		// frpc checks the front against (HBEP-6, Certificate checks).
+		DNSNames:    []string{agentapi.DialHomeServerName},
+		NotBefore:   time.Now().Add(-time.Hour),
+		NotAfter:    time.Now().Add(time.Hour),
+		KeyUsage:    x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
@@ -244,6 +247,7 @@ func stageStubFrpc(t *testing.T, cfg agentapi.AgentConfig, logPath string) strin
 	script := "#!/bin/sh\n" +
 		"{ echo \"start $$ $*\"; env | grep -i '_proxy=' | sed 's/^/proxy /'; } >> " + logPath + "\n" +
 		"cp \"$2\" " + logPath + ".$$.toml\n" +
+		"cp \"$(sed -n 's/^transport.tls.trustedCaFile = \"\\(.*\\)\"$/\\1/p' \"$2\")\" " + logPath + ".$$.crt\n" +
 		"while :; do sleep 1; done\n"
 	sum := sha256.Sum256([]byte(script))
 	digest := hex.EncodeToString(sum[:])
@@ -300,8 +304,14 @@ func assertFrpcWired(t *testing.T, j job, out string) {
 	if m := regexp.MustCompile(`(?m)^unixPath = "(.*)/serve\.sock"$`).FindStringSubmatch(cfg); m == nil || !strings.HasPrefix(m[1], filepath.Join(j.root, "tmp")) {
 		t.Errorf("frpc's proxy does not serve the agent's serving socket:\n%s", cfg)
 	}
-	if !strings.Contains(cfg, `transport.tls.trustedCaFile = "`+filepath.Join(j.allocDir, agentapi.StagedDialHomeCertName)+`"`) {
-		t.Errorf("frpc does not trust the staged certificate:\n%s", cfg)
+	// frpc trusts the agent's checked copy of the staged certificate, in the
+	// job's private run directory, never the staged file itself.
+	if m := regexp.MustCompile(`(?m)^transport\.tls\.trustedCaFile = "(.*)/dial-home\.crt"$`).FindStringSubmatch(cfg); m == nil || !strings.HasPrefix(m[1], filepath.Join(j.root, "tmp")) {
+		t.Errorf("frpc does not trust a copy in the run directory:\n%s", cfg)
+	}
+	staged, _ := os.ReadFile(filepath.Join(j.allocDir, agentapi.StagedDialHomeCertName))
+	if trusted := readFile(fmt.Sprintf("%s.%d.crt", j.frpcLog, pids[0])); trusted == "" || trusted != string(staged) {
+		t.Errorf("the certificate frpc trusts is not the staged one the agent checked")
 	}
 	m := regexp.MustCompile(`(?m)^serverAddr = "(.*)"\nserverPort = ([0-9]+)$`).FindStringSubmatch(cfg)
 	if m == nil {
@@ -685,9 +695,10 @@ func TestAgentRefusesAnEndpointWithAnotherPin(t *testing.T) {
 	}
 }
 
-// Without the staged launcher certificate the agent refuses to start frpc
-// and says why, and still registers and runs its Instance, which then cannot
-// be reached and ends with TunnelNotConnected (HBEP-6, frpc in the job).
+// Without the staged launcher certificate the agent does not start frpc,
+// says why and keeps trying, and still registers and runs its Instance,
+// which cannot be reached meanwhile and ends with TunnelNotConnected if the
+// file never comes (HBEP-6, frpc in the job).
 func TestAgentRunsWithoutFrpcWhenTheCertificateIsMissing(t *testing.T) {
 	root := shortRoot(t)
 	ep := startEndpoint(t, root)
@@ -708,7 +719,9 @@ func TestAgentRunsWithoutFrpcWhenTheCertificateIsMissing(t *testing.T) {
 	if pids, _, _ := frpcStarts(t, j); len(pids) != 0 {
 		t.Fatalf("frpc started %d times without the dial-home certificate", len(pids))
 	}
-	if !strings.Contains(out.String(), "frpc refused") || !strings.Contains(out.String(), "dial-home certificate") {
+	// A missing file is retried, never taken as a mismatch: it can be a
+	// purge of shared storage, and the provider stages it again.
+	if !strings.Contains(out.String(), "frpc's files cannot be read yet") || !strings.Contains(out.String(), "dial-home certificate") {
 		t.Fatalf("the agent's log does not say why frpc did not start:\n%s", out.String())
 	}
 }
