@@ -6,9 +6,11 @@
 // file of that revision, sorted bytewise by path:
 //
 //   - The listing is GET /api/models/<repo>/tree/<revision>?recursive=true&limit=1000.
-//     Spike S7 saw the Hub cut a listing at 50 entries with no error when the
-//     request named no limit, so the request always names the largest limit
-//     the Hub accepts (Config.PageSize can ask for less). The Hub may still
+//     The Hub's page size depends on the query: on 31 Oct 2026 a request
+//     with no limit returned a 77-entry listing in one page, while one with
+//     expand=true returned 50 entries and a Link header (spike S7 saw a
+//     listing end at 50). So the request always names the largest limit the
+//     Hub accepts (Config.PageSize can ask for less). The Hub may still
 //     cut a page below the limit, so every Link header with rel="next" is
 //     followed, parsed with RFC 8288's quoting rules; a Link header that does
 //     not parse is an error, never the end of the list. The next page must

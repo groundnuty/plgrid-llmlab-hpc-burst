@@ -246,7 +246,7 @@ func TestCheckCredential(t *testing.T) {
 
 // The image format the agent is sent, its staging path, and the identity on
 // the wire: a random agent instance ID in a header, and the scheduler's restart
-// count in the registration (owner ruling: never the kernel's boot ID).
+// count in the registration (`@hpc-burst-science-agent`, 31 Oct 2026: never the kernel's boot ID).
 func TestImageFormatAndIdentityOnTheWire(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("ab", 32)
 	hex := strings.Repeat("ab", 32)

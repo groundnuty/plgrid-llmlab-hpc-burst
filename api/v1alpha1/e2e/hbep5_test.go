@@ -88,7 +88,7 @@ func TestRoutingLoadBoundIsAtLeastOne(t *testing.T) {
 }
 
 // The drain margin and the per-partition image format (HBEP-4, Platform
-// profile schema; owner ruling): sif on Helios GH200 and sandbox on Athena
+// profile schema; `@hpc-burst-science-agent`, 31 Oct 2026): sif on Helios GH200 and sandbox on Athena
 // A100, measured by spike S1's probe 2. An absent format stays absent: the
 // profile has not stated it.
 func TestPlatformProfileImageFormat(t *testing.T) {
@@ -139,7 +139,7 @@ func TestProviderCatalog(t *testing.T) {
 	requireRefused(t, c.Status().Update(bg(), dup), "catalog")
 }
 
-// Owner ruling: the lifecycle controller sets DialHomeUnreachable on a
+// `@hpc-burst-science-agent` (31 Oct 2026): the lifecycle controller sets DialHomeUnreachable on a
 // Provider by server-side apply, under its own field manager, and owns only
 // that condition; the Provider's controller writes the rest of the status and
 // neither removes the other's.
@@ -202,7 +202,7 @@ func TestDialHomeUnreachableByServerSideApply(t *testing.T) {
 }
 
 // The engine's image is pulled as <image>@<digest>, so a served spec without a
-// digest is refused (owner ruling). The schema requires imageDigest; a CEL
+// digest is refused (`@hpc-burst-science-agent`, 31 Oct 2026). The schema requires imageDigest; a CEL
 // rule repeating that would be redundant and no test could kill it.
 func TestEngineDigestIsRequired(t *testing.T) {
 	ns := newNamespace(t)

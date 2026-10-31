@@ -74,29 +74,37 @@ const (
 	ReasonProviderUnavailable = "ProviderUnavailable"
 	// ReasonSpecUnsupported: a data-parallel-size above 1, or a workload shape
 	// that does not fit the declared context limit. No Allocation is created.
-	// A reason on Degraded (HBEP owner, 31 Oct 2026).
+	// A reason on Degraded (`@hpc-burst-science-agent`, 31 Oct 2026).
 	ReasonSpecUnsupported = "SpecUnsupported"
 	// ReasonFrontNotConfigured: no front address and dial-home mode are
 	// configured, so no Allocation is submitted (HBEP-11, Single-user host:
-	// "each ModelDeployment carries a condition saying why"). HBEP-11 names
-	// no reason; this name is a contracts decision, which the HBEP owner
-	// confirmed on 31 Oct 2026, as a reason on Degraded.
+	// "each ModelDeployment carries a condition saying why"). The name began
+	// as a contracts decision, which `@hpc-burst-science-agent` confirmed on
+	// 31 Oct 2026 as a reason on Degraded; HBEP-11 now names it (Test plan).
 	ReasonFrontNotConfigured = "FrontNotConfigured"
 	// ReasonIdentityUnresolved: the deployment ID of a class cannot be
 	// computed, so no Allocation is created in it. It is its own reason,
 	// separate from ReasonSpecUnsupported, because it asks the operator for
 	// something else: SpecUnsupported means "edit the spec"; IdentityUnresolved
 	// means "fix the Hub token or the revision, or investigate the colliding
-	// identity record" (HBEP owner, 31 Oct 2026).
+	// identity record" (`@hpc-burst-science-agent`, 31 Oct 2026).
 	//
-	//   - The message names the cause: a Hub 401, a Hub 404, or a collision
-	//     with the record id-<12 hex> (an existing identity record of that
-	//     name holds another full ID).
-	//   - Hub transport errors and 5xx answers are not this reason: the
-	//     controller backs off and retries them (hubfiles.Retryable).
+	//   - It is set for a permanent Hub failure (one that hubfiles.Retryable
+	//     reports as not retryable: 401, 403, 404, a blob or size mismatch, a
+	//     refused listing, a cross-host Link, too many pages, a file too large,
+	//     a bad token file) or for a collision with the record id-<12 hex> (an
+	//     existing identity record of that name holds another full ID). The
+	//     message names the cause.
+	//   - Transient Hub failures (transport errors, 429, 5xx) are not this
+	//     reason: the controller backs off and retries them, with no reason set.
+	//   - A permanent Hub failure is not retried with backoff: the controller
+	//     sets the reason and evaluates the class again when the
+	//     ModelDeployment's spec or the Hub token changes, and at the periodic
+	//     resync (HBEP-3, Current IDs, the file list and rollout).
 	//   - A collision never loops: the controller sets the reason, raises the
 	//     event, and evaluates the class again only when the ModelDeployment's
-	//     spec or the identity records change.
+	//     spec or the identity records change; neither a token change nor the
+	//     periodic resync re-evaluates it (HBEP-3, Display form).
 	ReasonIdentityUnresolved = "IdentityUnresolved"
 )
 
@@ -227,14 +235,14 @@ const (
 	ConditionCredentialsRejected = "CredentialsRejected"
 	// ConditionCredentialsInvalid: the credentials file, or the key file it
 	// names, is readable by others or not owned by the controller's user, so
-	// no provider call is made (HBEP-11, Credentials). HBEP-11 names no
-	// condition; this name is a contracts decision, which the HBEP owner
-	// confirmed.
+	// no provider call is made (HBEP-11, Credentials). The name began as a
+	// contracts decision, which `@hpc-burst-science-agent` confirmed on 31
+	// Oct 2026; HBEP-11 now names it.
 	ConditionCredentialsInvalid = "CredentialsInvalid"
 	// ConditionPathUnresolved: HOME, or the variable that stagingDir starts
 	// with, is unset, empty or unsafe on the login node, so no call that needs
 	// the path is made (HBEP-4, Transport). A contracts decision for the name,
-	// which the HBEP owner confirmed.
+	// which `@hpc-burst-science-agent` confirmed (31 Oct 2026).
 	ConditionPathUnresolved = "PathUnresolved"
 	// ConditionDialHomeUnreachable: an Instance on this Provider could not
 	// register through its dial-home path (HBEP-11, Single-user host). The
@@ -242,8 +250,40 @@ const (
 	// apply under FieldManagerLifecycle and owns only this condition type
 	// (DialHomeUnreachableApply); the Provider's controller keeps it when it
 	// writes the rest of the status. The name is a contracts decision, which
-	// the HBEP owner confirmed.
+	// `@hpc-burst-science-agent` confirmed (31 Oct 2026).
 	ConditionDialHomeUnreachable = "DialHomeUnreachable"
+)
+
+// Reasons of a managed Provider's conditions (HBEP-4, Managed provider in
+// alpha; HBEP-11, Credentials), so the lifecycle controller and the front can
+// match them exactly. The managed Provider's controller (#69) writes all nine.
+// Its stand-in, pkg/provider/fake.ManagedController, writes the six of
+// ConditionProviderReady, ConditionCredentialsRejected and
+// ConditionCredentialsExpiring; it does not model ConditionCredentialsInvalid.
+const (
+	// ReasonCatalogRead: ConditionProviderReady is True for a managed
+	// Provider, because its catalog listing succeeded within the staleness
+	// bound.
+	ReasonCatalogRead = "CatalogRead"
+	// ReasonKeyAccepted and ReasonKeyRejected: ConditionCredentialsRejected is
+	// False because the gateway accepted the key, or True because it answered
+	// 401 or 403.
+	ReasonKeyAccepted = "KeyAccepted"
+	ReasonKeyRejected = "KeyRejected"
+	// ReasonNotExpiring, ReasonExpiresWithinADay and ReasonExpired: the
+	// reasons of ConditionCredentialsExpiring, from the credentials file's
+	// expiry. It is True within a day of the expiry and after it.
+	ReasonNotExpiring       = "NotExpiring"
+	ReasonExpiresWithinADay = "ExpiresWithinADay"
+	ReasonExpired           = "Expired"
+	// ReasonFileRead, ReasonFileRefused and ReasonNoCredentialsFile: the
+	// reasons of ConditionCredentialsInvalid for a managed Provider. It is
+	// False when the file was read, True when provider.ReadManagedCredentials
+	// refused the file, and True when spec.credentialsRef names no file (alpha
+	// reads no secretRef).
+	ReasonFileRead          = "FileRead"
+	ReasonFileRefused       = "FileRefused"
+	ReasonNoCredentialsFile = "NoCredentialsFile"
 )
 
 // Event reasons that are not condition reasons (HBEP-8 keeps the event
