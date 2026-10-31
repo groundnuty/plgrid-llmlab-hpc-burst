@@ -104,8 +104,15 @@ func (j *judge) event(raw []byte) (forward, done bool) {
 	return true, false
 }
 
-// responsesEvent judges a Responses stream: complete at response.completed,
-// which vLLM sends last; its response carries the usage and the status.
+// responsesEvent judges a Responses stream: complete at its terminal event,
+// which carries the final response with its usage and status. vLLM sends
+// response.completed last, with the status (HBEP-5, Contract); OpenAI's
+// contract, which LLMLab follows, also ends a capped or failed response with
+// response.incomplete or response.failed. Those are explicit ends, not cuts,
+// so they complete the stream too, and the record's finish is the final
+// response's status (HBEP-5, Usage records). HBEP-5 names only
+// response.completed; reading the other two as ends is the front's, an open
+// point for its author.
 func (j *judge) responsesEvent(name string, data []byte) bool {
 	var ev struct {
 		Type     string `json:"type"`
@@ -124,7 +131,7 @@ func (j *judge) responsesEvent(name string, data []byte) bool {
 		j.sawContent = true
 		j.contentEvents++
 	}
-	if typ == "response.completed" {
+	if typ == "response.completed" || typ == "response.incomplete" || typ == "response.failed" {
 		j.complete, j.finish = true, ev.Response.Status
 		if u := responsesUsage(ev.Response.Usage); u != nil {
 			j.usage = u
