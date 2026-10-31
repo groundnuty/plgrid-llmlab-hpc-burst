@@ -285,23 +285,28 @@ const (
 	// platform successfully within ProviderReadyStaleness.
 	ReasonPolled = "Polled"
 	// ReasonReadsFailing: Ready is False; no read has succeeded for longer
-	// than ProviderReadyStaleness, or none ever has. The message gives the
-	// age of the last success.
+	// than ProviderReadyStaleness, or none ever has. The message names the
+	// time of the last success, not its age, so it does not change from one
+	// pass to the next.
 	ReasonReadsFailing = "ReadsFailing"
 )
 
 // Reasons of the read-back (HBEP-4, The Slurm dialect, Read-back). The
 // Provider's controller compares the job the scheduler established with the
-// request on every observe.
+// request on the first observe after the job is established: a later change,
+// such as an administrator's extension of the time limit, is a later hard end
+// (status.atProvider.hardEnd), never a mismatch. The name is checked on every
+// observe, so a failed cancel of a renamed job is retried.
 const (
 	// ReasonReadBackMismatch is the reason of ConditionSubmittedAsOther, set
 	// True when the job's partition, time limit or GPU count differs from the
 	// request. The message names each field with both values. Once set it is
 	// never cleared: the lifecycle controller replaces the Allocation.
 	ReasonReadBackMismatch xpv2.ConditionReason = "ReadBackMismatch"
-	// ReasonJobRenamed is the reason (status.atProvider.reason) of the phase
-	// Refused when the scheduler stored the job under a name other than the
-	// tag, as a platform that shortens job names does. The provider cancels
-	// the job, and the phase stays Refused.
+	// ReasonJobRenamed is the reason (status.atProvider.reason, exactly this
+	// string) of the phase Refused when the scheduler stored the job under a
+	// name other than the tag, as a platform that shortens job names does. The
+	// provider cancels the job, and the phase stays Refused. No condition
+	// carries it: the managed reconciler owns Synced.
 	ReasonJobRenamed = "JobRenamed"
 )
