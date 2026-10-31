@@ -8,8 +8,8 @@ package lifecycle
 //
 //	flock /tmp/hpc-burst-tools/locks/envtest.lock go test ./internal/lifecycle/ -run TestManagerOnControlPlane
 //
-// It uses the port block from 29212 (inside internal/testenv's 29200-29219),
-// so it does not collide with the e2e package's default block when go test
+// It uses #61's envtest block, 29204-29207, unless HPCBURST_TESTENV_PORT_BASE
+// is set, so it does not collide with the other packages' blocks when go test
 // runs packages in parallel; the health probe binds 127.0.0.1:29301 (#61's
 // block).
 
@@ -43,7 +43,13 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/deploymentid"
 )
 
-const managerHealthAddr = "127.0.0.1:29301"
+const (
+	managerHealthAddr = "127.0.0.1:29301"
+	// managerPortBase is #61's envtest block, 29204-29207 (IMPL-COMMON.md,
+	// Envtest port blocks), used when HPCBURST_TESTENV_PORT_BASE is unset, so
+	// go test ./... runs it beside the other packages' control planes.
+	managerPortBase = "29204"
+)
 
 func installTestCRDs(ctx context.Context, cfg *rest.Config) error {
 	s, err := Scheme()
@@ -95,7 +101,9 @@ func eventually(t *testing.T, limit time.Duration, what string, cond func() (boo
 }
 
 func TestManagerOnControlPlane(t *testing.T) {
-	t.Setenv("HPCBURST_TESTENV_PORT_BASE", "29212")
+	if os.Getenv("HPCBURST_TESTENV_PORT_BASE") == "" {
+		t.Setenv("HPCBURST_TESTENV_PORT_BASE", managerPortBase)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 	cp, err := testenv.Start(ctx, t.TempDir(), testenv.Options{BeforeControllerManager: installTestCRDs})
