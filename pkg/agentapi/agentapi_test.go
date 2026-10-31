@@ -367,6 +367,7 @@ func TestHostLayout(t *testing.T) {
 		h.AgentCertFile():     "/home/example-user/.local/state/hpcburst/agent-endpoint/tls.crt",
 		h.AgentKeyFile():      "/home/example-user/.local/state/hpcburst/agent-endpoint/tls.key",
 		h.AgentEndpointAddr(): "127.0.0.1:29223",
+		h.DialHomeAddr():      "127.0.0.1:29227",
 	} {
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
@@ -374,6 +375,9 @@ func TestHostLayout(t *testing.T) {
 	}
 	if p := h.AgentEndpointPort(); p != 29223 {
 		t.Errorf("AgentEndpointPort = %d, want 29223 (base + 3)", p)
+	}
+	if p := h.DialHomePort(); p != 29227 {
+		t.Errorf("DialHomePort = %d, want 29227 (base + 7)", p)
 	}
 	if got := AllocationCredentialPath(h.CredentialsDir(), "uid-1"); got != "/home/example-user/.local/state/hpcburst/credentials/allocations/uid-1" {
 		t.Errorf("AllocationCredentialPath = %q", got)
