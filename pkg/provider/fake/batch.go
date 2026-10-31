@@ -1,7 +1,11 @@
 // Package fake has the in-memory fakes of the provider side (HBEP-4, Test
 // plan): Batch, a deterministic Slurm that implements provider.Batch, and
 // Controller, a stand-in for one Provider's controller that drives Allocation
-// and Provider status for the lifecycle controller's tests.
+// and Provider status for the lifecycle controller's tests; and, for the
+// managed kind, Managed, a scripted gateway that implements provider.Managed,
+// and ManagedController, the stand-in that writes a managed Provider's catalog
+// and conditions. The doc comment of Controller lists the semantics tests rely
+// on, and that of ManagedController the same for the catalog loop.
 //
 // Nothing here starts a goroutine or sleeps. A test owns a Clock and moves it;
 // every job state is computed from the clock at each call.
@@ -337,50 +341,6 @@ func (b *Batch) Observe(_ context.Context, jobID string) (provider.Job, bool, er
 		b.log("sacct", jobID)
 	}
 	return r, true, nil
-}
-
-// Results of a lift, the second argument of the "scontrol-release" call log
-// entry. Every call is logged, so a test counts the lifts that took effect from
-// the log: the entries whose result is LiftApplied.
-const (
-	LiftApplied   = "applied"
-	LiftNotHeld   = "not-held"
-	LiftAdminHold = "admin-hold"
-	LiftNotFound  = "not-found"
-	LiftFailed    = "failed"
-)
-
-// LiftHold implements provider.Batch. The call log has op "scontrol-release"
-// with the job ID and the result (LiftApplied and the others).
-func (b *Batch) LiftHold(_ context.Context, jobID string) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	result, err := b.lift(jobID)
-	b.log("scontrol-release", jobID, result)
-	return err
-}
-
-// lift does the work of LiftHold. The caller holds b.mu.
-func (b *Batch) lift(jobID string) (string, error) {
-	if len(b.liftErrs) > 0 {
-		err := b.liftErrs[0]
-		b.liftErrs = b.liftErrs[1:]
-		return LiftFailed, err
-	}
-	j, ok := b.jobs[jobID]
-	if !ok {
-		return LiftNotFound, fmt.Errorf("job %s: %w", jobID, provider.ErrNotFound)
-	}
-	now := b.clock.Now()
-	switch b.record(j, now).Hold {
-	case provider.HoldAdmin:
-		return LiftAdminHold, fmt.Errorf("job %s: %w", jobID, provider.ErrAdminHold)
-	case provider.HoldUser:
-		j.hold, j.eligible = provider.HoldNone, now
-		return LiftApplied, nil
-	default:
-		return LiftNotHeld, fmt.Errorf("job %s: %w", jobID, provider.ErrNotHeld)
-	}
 }
 
 // Cancel implements provider.Batch.

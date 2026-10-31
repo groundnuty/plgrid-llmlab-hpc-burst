@@ -38,11 +38,13 @@ import (
 //     Sync finds the tag and adopts it. A job that is found is adopted whatever
 //     the attempt's age, and the attempt is recorded Done.
 //   - A submission record found InFlight with no job ID (a crash between the
-//     claim and the answer) is looked up by tag like an Unknown one. The age of
-//     an attempt is the time of its record, or, for a record with none, the
-//     Allocation's creation time. The windows below are passed when that age is
-//     strictly above them, so a Sync exactly one window after the attempt waits
-//     and one a second later acts.
+//     claim and the answer) is looked up by tag like an Unknown one. Inside the
+//     window an InFlight attempt shows phase Submitting and an Unknown one
+//     SubmissionUnknown, and nothing is submitted. The age of an attempt is the
+//     time of its record, or, for a record with none, the Allocation's creation
+//     time. The windows below are passed when that age is strictly above them,
+//     so a Sync exactly one window after the attempt waits and one a second
+//     later acts.
 //   - A Rejected attempt (the scheduler's refusal, or a pre-call refusal) keeps
 //     phase Submitting until RejectBackoff has passed, then attempt n+1 runs.
 //   - Hold mode (HoldRelease true), the submission. The same pass that finds
@@ -50,9 +52,7 @@ import (
 //     drops the attempt, whether it is Unknown or InFlight: it claims n+1 as
 //     InFlight, which replaces record n, and submits. There is no "dropped"
 //     state, because the API has none: Abandoned is an operator's decision. A
-//     late job of the old attempt lands held and is cancelled by settle. Inside
-//     the window an InFlight attempt shows phase Submitting and an Unknown one
-//     SubmissionUnknown, and nothing is submitted.
+//     late job of the old attempt lands held and is cancelled by settle.
 //   - Hold mode, settle (HBEP-7, open question 11). On every observe of a
 //     recorded job while the Allocation is not deleting, in this order: every
 //     held job with the tag except the recorded one is cancelled, then the
