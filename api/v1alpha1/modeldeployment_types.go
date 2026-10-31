@@ -355,6 +355,11 @@ type Routing struct {
 
 // LoadBound is the bounded-load factor c, by membership. The front counts as
 // ready the deployment's eligible Instances (HBEP-5, Load bound and cap).
+// The tight bound is at most the loose one (owner ruling, 31 Oct 2026); equal
+// values are allowed. Schema defaults fill an omitted side first, so a tight
+// bound above the default loose bound is refused too.
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.tight) || !has(self.loose) || double(self.tight) <= double(self.loose)",message="the tight load bound is at most the loose one: tight applies at full membership with the cap, loose below it without one"
 type LoadBound struct {
 	// Tight is c while at least spec.instances Instances are ready; the cap is
 	// then in force.

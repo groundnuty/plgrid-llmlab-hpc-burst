@@ -238,6 +238,12 @@ spec:
                             has the same floor of 100 percent)'
                           rule: double(self) >= 1.0
                     type: object
+                    x-kubernetes-validations:
+                    - message: 'the tight load bound is at most the loose one: tight
+                        applies at full membership with the cap, loose below it without
+                        one'
+                      rule: '!has(self.tight) || !has(self.loose) || double(self.tight)
+                        <= double(self.loose)'
                   maxRequestDuration:
                     description: |-
                       MaxRequestDuration is the deployment's own total deadline per request,

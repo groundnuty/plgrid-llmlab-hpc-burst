@@ -56,6 +56,7 @@ func TestRoutingDefaults(t *testing.T) {
 // form and the cap's minimum are the schema's.
 func TestRoutingLoadBoundIsAtLeastOne(t *testing.T) {
 	const msg = "a load bound is at least 1.0"
+	const orderMsg = "the tight load bound is at most the loose one"
 	lf := func(s string) *v1alpha1.LoadFactor { return ptr.To(v1alpha1.LoadFactor(s)) }
 	bound := func(tight, loose *v1alpha1.LoadFactor) func(*v1alpha1.ModelDeployment) {
 		return func(md *v1alpha1.ModelDeployment) {
@@ -73,7 +74,11 @@ func TestRoutingLoadBoundIsAtLeastOne(t *testing.T) {
 		{"a negative bound", bound(nil, lf("-2")), "routing.loadBound.loose"},
 		{"a cap of 0", routing(v1alpha1.Routing{InstanceCap: ptr.To(int32(0))}), "routing.instanceCap"},
 		{"a deadline that is not a duration", routing(v1alpha1.Routing{MaxRequestDuration: ptr.To(v1alpha1.Duration("30 minutes"))}), "routing.maxRequestDuration"},
+		{"a tight bound above the loose one", bound(lf("2.5"), lf("2.0")), orderMsg},
+		{"a tight bound above the default loose bound", bound(lf("3"), nil), orderMsg},
+		{"a loose bound below the default tight bound", bound(nil, lf("1.1")), orderMsg},
 	}, []mdCase{
+		{"equal bounds", bound(lf("1.5"), lf("1.5")), ""},
 		{"a tight bound of exactly 1", bound(lf("1"), nil), ""},
 		{"bounds of 1.0 and 1.25", bound(lf("1.0"), lf("1.25")), ""},
 		{"HBEP-5's defaults written out", bound(lf("1.25"), lf("2.0")), ""},

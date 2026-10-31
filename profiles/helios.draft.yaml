@@ -176,6 +176,8 @@ facts:
       priority_job_factor: 1000
       tres_billing_weights: "cpu=0.01388,mem=0.00000816993M,GRES/gpu=1"
       os_kernel: "Rocky 9 kernel, the 64 KiB-page variant (kernel string ends +64k), on all 109 nodes that reported; 1 node did not report"
+      image_format: sif
+      image_format_note: "Measured by spike S1 probe 2 (issue #18) on 2026-10-30: Apptainer 1.5.4 on the compute nodes runs a SIF image. The PlatformProfile field is partitions[].imageFormat."
       method: measured
       source: "sinfo; scontrol show partition; scontrol show node (aggregated)"
       date: 2026-10-30
