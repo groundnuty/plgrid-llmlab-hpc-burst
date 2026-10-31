@@ -1,0 +1,30 @@
+{
+ "jobs": [
+  {
+   "job_id": 4242,
+   "name": "s7-hash-ckpt",
+   "user": "example-user",
+   "partition": "plgrid",
+   "account": "example-account",
+   "comment": {"administrator": "", "job": "", "system": ""},
+   "state": {"current": ["COMPLETED"], "reason": "None"},
+   "time": {
+    "submission": 1793349952,
+    "start": 1793349957,
+    "end": 1793350184,
+    "elapsed": 227,
+    "eligible": 1793349952,
+    "limit": {"set": true, "infinite": false, "number": 60}
+   },
+   "exit_code": {
+    "status": ["SUCCESS"],
+    "return_code": {"set": true, "infinite": false, "number": 0},
+    "signal": {"id": {"set": false, "infinite": false, "number": 0}, "name": ""}
+   },
+   "flags": []
+  }
+ ],
+ "meta": {"plugin": {"data_parser": "data_parser/v0.0.40", "accounting_storage": "accounting_storage/slurmdbd"}},
+ "errors": [],
+ "warnings": []
+}

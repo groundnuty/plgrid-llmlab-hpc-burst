@@ -1,0 +1,19 @@
+{
+ "meta": {
+  "plugin": {
+   "type": "",
+   "name": "",
+   "data_parser": "data_parser/v0.0.42",
+   "accounting_storage": "accounting_storage/slurmdbd"
+  },
+  "client": {"source": "", "user": "example-user", "group": "example-group"},
+  "command": ["sacct", "--json", "-j", "4242", "-X", "-S"],
+  "slurm": {
+   "version": {"major": "24", "micro": "5", "minor": "11"},
+   "release": "24.11.5",
+   "cluster": "example-cluster"
+  }
+ },
+ "errors": [],
+ "warnings": []
+}

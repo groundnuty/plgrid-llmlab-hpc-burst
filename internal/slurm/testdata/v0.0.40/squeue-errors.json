@@ -1,0 +1,15 @@
+{
+ "jobs": [],
+ "last_backfill": {"set": true, "infinite": false, "number": 1793351240},
+ "last_update": {"set": true, "infinite": false, "number": 1793351246},
+ "meta": {"plugin": {"data_parser": "data_parser/v0.0.40", "accounting_storage": "accounting_storage/slurmdbd"}},
+ "errors": [
+  {
+   "description": "Unable to query jobs",
+   "error_number": 2002,
+   "error": "Unable to contact slurm controller (connect failure)",
+   "source": "slurm_load_jobs()"
+  }
+ ],
+ "warnings": []
+}
