@@ -111,11 +111,12 @@ def matrix(rs):
 
 def hol(rs):
     by = pick(rs, lambda r: (r["config"], r["variant"]))
-    passes = sorted({int(r["pass_"]) for r in rs})
-    out = ["| path | variant | bulk B/s | bulk s | fast gap p99 before / during / after ms | fast lateness max during ms "
+    out = ["Values are run 1 / run 2 (/ more runs where listed).\n",
+           "| path | variant | bulk B/s | bulk s | fast gap p99 before / during / after ms | fast lateness max during ms "
            "| fast streams complete | frpc logins |", "|---|---|---:|---:|---:|---:|---:|---:|"]
     for (cfg, var), cell in by.items():
-        g = lambda k: [f(cell[p][k]) if p in cell else None for p in passes]
+        passes = sorted(cell)   # the runs of this row (some rows have extra runs)
+        g = lambda k: [f(cell[p][k]) for p in passes]
         gaps = " ; ".join("%s / %s / %s" % (cell[p]["before_gap_p99"], cell[p]["during_gap_p99"], cell[p]["after_gap_p99"])
                           for p in passes if p in cell)
         out.append("| %s | %s | %s | %s | %s | %s | %s | %s |" % (
