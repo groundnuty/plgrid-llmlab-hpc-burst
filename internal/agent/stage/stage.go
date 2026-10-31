@@ -32,9 +32,52 @@
 // whole files through one reused 8 MiB buffer, never a read sized by a cap,
 // whose read-ahead over-read Lustre by up to 190 times (L-12.5).
 //
-// Which listed files are staged depends on the launch's --load-format
-// (skip.go): a listed file the engine does not load is not downloaded, and one
-// that is present is still rehashed.
+// Which listed files are staged (skip.go). The identity record lists every
+// file of the revision (HBEP-3), but the engine does not load them all, and a
+// listed file that was never staged for that reason is not a failure (HBEP-7,
+// Instance start). A listed file the engine does not load is not downloaded; one
+// that is present is still rehashed. What the engine loads depends on the
+// launch's --load-format, so the rule is read from vLLM v0.32.0's default loader
+// and applied to that format only. The paths are in the vLLM repository at tag
+// v0.32.0, and "default_loader.py" is model_executor/model_loader/default_loader.py.
+//
+//   - Weights are found by a glob of the checkpoint directory's top level, one
+//     pattern after another; the first pattern with a hit wins and the files of
+//     the others are not loaded (default_loader.py lines 228-234). Nothing in a
+//     subdirectory is globbed, so a nested 2_Dense/model.safetensors does not
+//     make a top-level pytorch_model.bin unloaded, and original/ is never loaded
+//     from a local directory. The "original/**/*" ignore pattern
+//     (config/load.py line 102) applies only to a Hub download
+//     (default_loader.py lines 213-221), which a staged checkpoint is not.
+//     Only top-level files are therefore classified; original/ is skipped and
+//     no other subdirectory is.
+//   - auto (config/load.py line 30; also "", when the launch names no format):
+//     when a top-level consolidated*.safetensors file is listed, vLLM switches
+//     to its mistral format and globs only consolidated*.safetensors
+//     (default_loader.py lines 170-182 and 194-196), so the sharded safetensors
+//     files and the other weight formats are not loaded. Otherwise the patterns
+//     are *.safetensors, then *.bin, then *.pt (lines 185-186 and 207-208). The
+//     mistral probe matches by file name at any depth
+//     (transformers_utils/repo_utils.py lines 198-205); a consolidated file
+//     that is only nested makes vLLM choose mistral and find no weights, which
+//     fails whatever is staged, so only a top-level one counts here.
+//   - safetensors: only *.safetensors (default_loader.py lines 187-193).
+//   - pt: the code globs *.pt only (default_loader.py lines 198-199 and
+//     207-208), while the docstring says "the pytorch bin format"
+//     (config/load.py line 36). Both .bin and .pt are staged, which is safe
+//     whichever is right.
+//   - Any other format (gguf, mistral, bitsandbytes, sharded_state, tensorizer,
+//     runai_streamer, dummy, npcache, fastsafetensors ...): nothing is skipped.
+//   - A weight extension no pattern globs (.pth .ckpt .h5 .msgpack .onnx) is
+//     never loaded under auto, safetensors or pt.
+//   - Files that are not weights (config, tokenizer, templates) are never
+//     skipped. The format is lowercased first (config/load.py lines 136-138).
+//
+// What the listing cannot show: a model class may replace the patterns
+// (allow_patterns_overrides, default_loader.py lines 210-211 and 377), and the
+// safetensors index file may name a subset of the shards (default_loader.py
+// lines 250-254, model_loader/weight_utils.py lines 585-611). Staging more than
+// the engine loads is safe and staging less is not, so neither is mirrored.
 //
 // The package imports only the standard library, package agentapi, the
 // agent's own package and its procgroup package.
