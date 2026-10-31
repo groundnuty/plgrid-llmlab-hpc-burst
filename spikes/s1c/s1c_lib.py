@@ -319,12 +319,12 @@ def secret_file(path):
         return fh.read().strip()
 
 
-def render_frps(env, setting="s1", level="info", extra=None):
+def render_frps(env, setting="s1", level="info", extra=None, tcpmux=True):
     secret_file(env.p("run", "token"))
     pw = secret_file(env.p("run", "dash.pass"))
     body = toml_kv({
         "bindAddr": "127.0.0.1", "bindPort": PORTS["frps"], "proxyBindAddr": "127.0.0.1",
-        "tcpmuxHTTPConnectPort": PORTS["mux"],
+        "tcpmuxHTTPConnectPort": PORTS["mux"], "transport.tcpMux": tcpmux,   # must match frpc's
         "log.to": env.p("logs", "frps-frp.log"), "log.level": level, "log.disablePrintColor": True,
         "auth.method": "token", "auth.tokenSource.type": "file",
         "auth.tokenSource.file.path": env.p("run", "token"),

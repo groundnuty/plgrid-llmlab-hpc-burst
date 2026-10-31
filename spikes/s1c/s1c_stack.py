@@ -58,7 +58,7 @@ class Stack:
         for f in ("frps-frp.log", "frpc-frp.log"):
             if os.path.exists(e.p("logs", f)):
                 os.replace(e.p("logs", f), e.p("logs", f + ".prev"))
-        self.P.start("frps", [e.b("frps"), "-c", render_frps(e, setting, level)])
+        self.P.start("frps", [e.b("frps"), "-c", render_frps(e, setting, level, tcpmux=tcpmux)])
         wait_port(PORTS["mux"])
         wait_port(PORTS["dash"])
         port, proto = DIAL[(arm, via)], "tcp"

@@ -235,3 +235,15 @@ func TestSlowReaderReadsSlowly(t *testing.T) {
 		t.Fatalf("slow reader read %.0f B/s, want about %d", got, rate)
 	}
 }
+
+func TestStreamPaceIsTheMedianGap(t *testing.T) {
+	// 10 tokens 51 ms apart, then one 2 s stall: the pace stays 51 ms.
+	var tk []time.Duration
+	for k := 0; k < 10; k++ {
+		tk = append(tk, time.Duration(k)*51*time.Millisecond)
+	}
+	tk = append(tk, tk[9]+2*time.Second)
+	if p := streamPace(tk, 0.05); p < 0.0509 || p > 0.0511 {
+		t.Fatalf("pace %.4f s, want 0.051", p)
+	}
+}

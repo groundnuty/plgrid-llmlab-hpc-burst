@@ -104,17 +104,19 @@ func runHOL(args []string) error {
 		} else if r.Err != nil {
 			s.FastErrors = append(s.FastErrors, r.Err.Error())
 		}
-		// Lateness of token k: its arrival minus the stream's own best schedule (first token plus
-		// k inter-token latencies, shifted so the earliest token of the stream has lateness 0).
+		// Lateness of token k: its arrival minus the stream's own schedule, first token plus k times
+		// the stream's median gap (the engine's real pace, slightly above the nominal 50 ms), shifted
+		// so the earliest token of the stream has lateness 0. It is the queueing delay of that token.
+		pace := streamPace(r.Tokens, itl.Seconds())
 		base := 1e18
 		for k, tk := range r.Tokens {
-			if v := tk.Seconds() - float64(k)*itl.Seconds(); v < base {
+			if v := tk.Seconds() - float64(k)*pace; v < base {
 				base = v
 			}
 		}
 		for k, tk := range r.Tokens {
 			at := r.Start.Add(tk).Sub(t0).Seconds()
-			l := (tk.Seconds() - float64(k)*itl.Seconds() - base) * 1000
+			l := (tk.Seconds() - float64(k)*pace - base) * 1000
 			if b := int(at / 0.25); b >= 0 && b < len(bins) && l > bins[b] {
 				bins[b] = l
 			}
@@ -192,4 +194,17 @@ func bulkFetch(target, host string, want, readRate int64, max time.Duration) (in
 			return got, first, time.Now(), fmt.Errorf("gave up after %s (by design for a slow reader)", max)
 		}
 	}
+}
+
+// streamPace is the median gap between a stream's tokens in seconds, or nominal for a stream with
+// fewer than two tokens.
+func streamPace(tokens []time.Duration, nominal float64) float64 {
+	if len(tokens) < 2 {
+		return nominal
+	}
+	gaps := make([]float64, 0, len(tokens)-1)
+	for k := 1; k < len(tokens); k++ {
+		gaps = append(gaps, (tokens[k] - tokens[k-1]).Seconds())
+	}
+	return summarize(gaps).P50
 }

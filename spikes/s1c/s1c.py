@@ -21,7 +21,7 @@ from s1c_stack import (DIAL, TOX_OF_ARM, Meter, Stack, count_lines, note_load, r
 import s1c_heartbeat
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-RESULTS = os.path.join(HERE, "results")
+RESULTS = os.environ.get("S1C_RESULTS") or os.path.join(HERE, "results")
 ARMS = ("direct", "tcpmux", "wss", "ssh")
 NS = (1, 16, 64, 256)
 BW_KBPS = 512          # matrix cap: 512,000 B/s per toxiproxy connection (KB = 1000 B)
