@@ -1,0 +1,546 @@
+package lifecycle
+
+import (
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/deploymentid"
+)
+
+// The tests in this file need no rig. The declared structs and the agent's
+// reports are built by hand; every expected value is a literal.
+
+const judgeDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+
+// judgeDeclared is what the identity record declares: vLLM 0.32.0 on a digest,
+// max-model-len 32768, a JSON speculative config, and two checkpoint files.
+func judgeDeclared() declared {
+	return declared{
+		engineVersion: "0.32.0",
+		imageDigest:   judgeDigest,
+		flags: map[string]string{
+			"max-model-len":      "32768",
+			"speculative-config": `{"method":"ngram","num_speculative_tokens":3}`,
+		},
+		files: []deploymentid.File{
+			{Path: "config.json", SHA256: strings.Repeat("1", 64)},
+			{Path: "model.safetensors", SHA256: strings.Repeat("2", 64)},
+		},
+	}
+}
+
+// judgeResult is a verification report that matches judgeDeclared.
+func judgeResult() *agentapi.VerifyResult {
+	return &agentapi.VerifyResult{
+		Done: true,
+		Files: []agentapi.FileResult{
+			{Path: "config.json", Outcome: agentapi.FileMatch},
+			{Path: "model.safetensors", Outcome: agentapi.FileMatch},
+		},
+		EngineVersion: "0.32.0",
+		ImageDigest:   judgeDigest,
+		Settings: map[string]string{
+			"max-model-len":      "32768",
+			"speculative-config": `{"method":"ngram","num_speculative_tokens":3}`,
+		},
+		Fingerprint:      "fp-1",
+		TemplateOverhead: 12,
+	}
+}
+
+// judgeShapes are the workload shapes of the rig's deployments with the
+// defaults applied: short 512, typical 4096, typical output 512, longest
+// output 4096, 4 target sessions.
+func judgeShapes() shapes {
+	return shapes{short: 512, typical: 4096, outputTypical: 512, outputLongest: 4096, targetSessions: 4}
+}
+
+// TestJudgeVerifyPasses covers HBEP-7, Instance start, Verification: every file
+// present matches, the version, digest and max-model-len are reported and equal
+// the declared ones, and every shape fits the reported limit with the overhead.
+func TestJudgeVerifyPasses(t *testing.T) {
+	got := judgeVerify(judgeDeclared(), judgeResult(), true, judgeShapes())
+	if got.Verdict != v1alpha1.VerdictPass || got.Cause != "" {
+		t.Fatalf("verdict %q cause %q: %s", got.Verdict, got.Cause, got.Message)
+	}
+	if got.Rehash.Checked != 2 || len(got.Rehash.Mismatch) != 0 || len(got.Rehash.Absent) != 0 || got.Rehash.Skipped {
+		t.Errorf("rehash = %+v, want two files checked, none wrong", got.Rehash)
+	}
+	if got.MaxModelLen != 32768 || got.Overhead != 12 || got.Fingerprint != "fp-1" {
+		t.Errorf("maxModelLen/overhead/fingerprint = %d/%d/%q", got.MaxModelLen, got.Overhead, got.Fingerprint)
+	}
+	// The default longest context is 32768 - 512 - 12 = 32244.
+	if got.Shapes == nil || got.Shapes.ContextLongest != 32244 {
+		t.Errorf("shapes = %+v, want ContextLongest 32244", got.Shapes)
+	}
+	if len(got.NotReported) != 0 || len(got.Contradictions) != 0 || len(got.Undeclared) != 0 {
+		t.Errorf("notReported %v contradictions %v undeclared %v, want none", got.NotReported, got.Contradictions, got.Undeclared)
+	}
+}
+
+// TestJudgeVerifyFileMismatch: a changed checkpoint file fails the rehash
+// (HBEP-7, Test plan, "Verification").
+func TestJudgeVerifyFileMismatch(t *testing.T) {
+	r := judgeResult()
+	r.Files[1] = agentapi.FileResult{Path: "model.safetensors", Outcome: agentapi.FileMismatch, SHA256: strings.Repeat("f", 64)}
+	got := judgeVerify(judgeDeclared(), r, true, judgeShapes())
+	if got.Verdict != v1alpha1.VerdictFail || got.Cause != causeRehash {
+		t.Fatalf("verdict %q cause %q, want fail/%s", got.Verdict, got.Cause, causeRehash)
+	}
+	if !slices.Equal(got.Rehash.Mismatch, []string{"model.safetensors"}) || got.Rehash.Checked != 2 {
+		t.Errorf("rehash = %+v, want model.safetensors the only mismatch", got.Rehash)
+	}
+	if !strings.Contains(got.Message, "model.safetensors") {
+		t.Errorf("message %q does not name the file", got.Message)
+	}
+}
+
+// TestJudgeVerifyAbsentFileIsNotAFailure: "A listed file that was never staged,
+// because the engine does not load it, is not a failure (HBEP-3)".
+func TestJudgeVerifyAbsentFileIsNotAFailure(t *testing.T) {
+	r := judgeResult()
+	r.Files[1] = agentapi.FileResult{Path: "model.safetensors", Outcome: agentapi.FileAbsent}
+	got := judgeVerify(judgeDeclared(), r, true, judgeShapes())
+	if got.Verdict != v1alpha1.VerdictPass {
+		t.Fatalf("verdict %q cause %q: %s", got.Verdict, got.Cause, got.Message)
+	}
+	if !slices.Equal(got.Rehash.Absent, []string{"model.safetensors"}) || got.Rehash.Checked != 1 {
+		t.Errorf("rehash = %+v, want one file absent and one checked", got.Rehash)
+	}
+}
+
+// TestJudgeVerifyWorkerRestartSkipsTheRehash: a worker restart compares settings
+// only (HBEP-7, Health and restarts, rung 1: "the settings comparison and
+// warm-up run again"), so a file result the report carries is not read, even a
+// mismatch.
+func TestJudgeVerifyWorkerRestartSkipsTheRehash(t *testing.T) {
+	r := judgeResult()
+	r.Files[1].Outcome = agentapi.FileMismatch
+	got := judgeVerify(judgeDeclared(), r, false, judgeShapes())
+	if got.Verdict != v1alpha1.VerdictPass || !got.Rehash.Skipped {
+		t.Fatalf("verdict %q skipped %v: %s", got.Verdict, got.Rehash.Skipped, got.Message)
+	}
+}
+
+// TestJudgeVerifyContradictions: the engine version, the image digest and a
+// declared max-model-len must equal the declared ones (HBEP-7, Instance start,
+// Settings comparison). Each contradiction fails at once.
+func TestJudgeVerifyContradictions(t *testing.T) {
+	tests := []struct {
+		name   string
+		change func(*agentapi.VerifyResult)
+		names  string
+	}{
+		// Declared 32768, reported 16384.
+		{"another max-model-len", func(r *agentapi.VerifyResult) { r.Settings["max-model-len"] = "16384" }, "max-model-len"},
+		{"another image digest", func(r *agentapi.VerifyResult) {
+			r.ImageDigest = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+		}, "image digest"},
+		{"another engine version", func(r *agentapi.VerifyResult) { r.EngineVersion = "0.31.0" }, "engine version"},
+		// 3 speculative tokens declared, 4 reported: a real JSON difference.
+		{"another JSON value", func(r *agentapi.VerifyResult) {
+			r.Settings["speculative-config"] = `{"method":"ngram","num_speculative_tokens":4}`
+		}, "speculative-config"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := judgeResult()
+			tc.change(r)
+			got := judgeVerify(judgeDeclared(), r, true, judgeShapes())
+			if got.Verdict != v1alpha1.VerdictFail || got.Cause != causeContradiction {
+				t.Fatalf("verdict %q cause %q, want fail/%s", got.Verdict, got.Cause, causeContradiction)
+			}
+			if len(got.Contradictions) != 1 || !strings.Contains(got.Contradictions[0], tc.names) {
+				t.Errorf("contradictions = %v, want one naming %q", got.Contradictions, tc.names)
+			}
+		})
+	}
+}
+
+// TestJudgeVerifyRequiresWhatTheEngineMustReport: "an engine that reports
+// nothing fails, because the version, the image digest and the context length
+// are required" (HBEP-7, Test plan, "Verification"). The files all match, so
+// the rehash does not fail first.
+func TestJudgeVerifyRequiresWhatTheEngineMustReport(t *testing.T) {
+	t.Run("nothing", func(t *testing.T) {
+		r := judgeResult()
+		r.EngineVersion, r.ImageDigest, r.Settings = "", "", nil
+		got := judgeVerify(judgeDeclared(), r, true, judgeShapes())
+		if got.Verdict != v1alpha1.VerdictFail || got.Cause != causeMissingRequired {
+			t.Fatalf("verdict %q cause %q, want fail/%s", got.Verdict, got.Cause, causeMissingRequired)
+		}
+		for _, want := range []string{"engine version", "image digest", "max-model-len"} {
+			if !strings.Contains(got.Message, want) {
+				t.Errorf("message %q does not name %q", got.Message, want)
+			}
+		}
+	})
+	for _, tc := range []struct {
+		name   string
+		change func(*agentapi.VerifyResult)
+	}{
+		{"no version", func(r *agentapi.VerifyResult) { r.EngineVersion = "" }},
+		{"no digest", func(r *agentapi.VerifyResult) { r.ImageDigest = "" }},
+		{"no max-model-len", func(r *agentapi.VerifyResult) { delete(r.Settings, "max-model-len") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := judgeResult()
+			tc.change(r)
+			got := judgeVerify(judgeDeclared(), r, false, judgeShapes())
+			if got.Verdict != v1alpha1.VerdictFail || got.Cause != causeMissingRequired {
+				t.Fatalf("verdict %q cause %q, want fail/%s", got.Verdict, got.Cause, causeMissingRequired)
+			}
+		})
+	}
+}
+
+// TestJudgeVerifyDeclaredInputNotReported: "A declared input it does not report
+// is recorded as not reported", and the Instance still passes. "A setting it
+// reports that the spec does not declare is recorded."
+func TestJudgeVerifyDeclaredInputNotReported(t *testing.T) {
+	r := judgeResult()
+	delete(r.Settings, "speculative-config")
+	r.Settings["gpu-memory-utilization"] = "0.9"
+	got := judgeVerify(judgeDeclared(), r, true, judgeShapes())
+	if got.Verdict != v1alpha1.VerdictPass {
+		t.Fatalf("verdict %q cause %q: %s", got.Verdict, got.Cause, got.Message)
+	}
+	if !slices.Equal(got.NotReported, []string{"speculative-config"}) {
+		t.Errorf("notReported = %v, want [speculative-config]", got.NotReported)
+	}
+	if got.Undeclared["gpu-memory-utilization"] != "0.9" || len(got.Undeclared) != 1 {
+		t.Errorf("undeclared = %v, want gpu-memory-utilization 0.9 only", got.Undeclared)
+	}
+}
+
+// TestJudgeVerifyJSONFormatting: a JSON-valued setting reported with other
+// spacing and key order is the same setting.
+func TestJudgeVerifyJSONFormatting(t *testing.T) {
+	r := judgeResult()
+	r.Settings["speculative-config"] = `{ "num_speculative_tokens": 3,
+	  "method": "ngram" }`
+	got := judgeVerify(judgeDeclared(), r, true, judgeShapes())
+	if got.Verdict != v1alpha1.VerdictPass || len(got.Contradictions) != 0 {
+		t.Fatalf("verdict %q contradictions %v: %s", got.Verdict, got.Contradictions, got.Message)
+	}
+}
+
+// TestJudgeVerifyShapeThatDoesNotFit: "At verification each rendered request,
+// overhead included, is checked against the context limit the engine reports,
+// and one that does not fit fails verification" (HBEP-7, What the controller
+// reads). The spec declares no max-model-len, the engine reports 4096, and the
+// typical context 4096 + typical output 512 + overhead 12 = 4620 > 4096.
+func TestJudgeVerifyShapeThatDoesNotFit(t *testing.T) {
+	d := judgeDeclared()
+	delete(d.flags, "max-model-len")
+	r := judgeResult()
+	r.Settings["max-model-len"] = "4096"
+	got := judgeVerify(d, r, true, judgeShapes())
+	if got.Verdict != v1alpha1.VerdictFail || got.Cause != causeShape {
+		t.Fatalf("verdict %q cause %q, want fail/%s", got.Verdict, got.Cause, causeShape)
+	}
+}
+
+// judgeChecks returns the four checks the agent always judges, all passed.
+func judgeChecks() []agentapi.CheckOutcome {
+	return []agentapi.CheckOutcome{
+		{Name: agentapi.CheckHealth, Passed: true}, {Name: agentapi.CheckChat, Passed: true},
+		{Name: agentapi.CheckCorruption, Passed: true}, {Name: agentapi.CheckBehaviour, Passed: true},
+	}
+}
+
+func judgeQualifyResult(kv int64) *agentapi.QualifyResult {
+	return &agentapi.QualifyResult{Done: true, Checks: judgeChecks(), KVCapacityTokens: kv, ServedModelNames: []string{"example-model"}}
+}
+
+// TestJudgeQualifyKVCapacity covers HBEP-7, Instance start, Qualification: KV
+// capacity from start-up of at least targetSessions times contextTokens.typical
+// tokens. 4 * 4096 = 16384: 16383 fails, 16384 passes.
+func TestJudgeQualifyKVCapacity(t *testing.T) {
+	if ok, msg := judgeQualify(judgeQualifyResult(16384), judgeShapes(), "example-model"); !ok {
+		t.Fatalf("16384 tokens fails: %s", msg)
+	}
+	ok, msg := judgeQualify(judgeQualifyResult(16383), judgeShapes(), "example-model")
+	if ok {
+		t.Fatal("16383 tokens passes")
+	}
+	if !strings.Contains(msg, "KV capacity") || !strings.Contains(msg, "16384") {
+		t.Errorf("message %q does not say the KV capacity is short of 16384", msg)
+	}
+}
+
+// TestJudgeQualifyChecks: a failed corruption check fails (Test plan,
+// "Qualification"); the tool-call smoke test is required when workload.toolCalls
+// is set and not otherwise; the engine must serve the deployment's model name.
+func TestJudgeQualifyChecks(t *testing.T) {
+	t.Run("a failed corruption check", func(t *testing.T) {
+		q := judgeQualifyResult(16384)
+		q.Checks[2] = agentapi.CheckOutcome{Name: agentapi.CheckCorruption, Passed: false, Message: "three greedy outputs differ within 32 tokens"}
+		ok, msg := judgeQualify(q, judgeShapes(), "example-model")
+		if ok || !strings.Contains(msg, "corruption") || !strings.Contains(msg, "three greedy outputs") {
+			t.Fatalf("ok %v message %q, want a failure naming the corruption check and its message", ok, msg)
+		}
+	})
+	t.Run("a missing check", func(t *testing.T) {
+		q := judgeQualifyResult(16384)
+		q.Checks = q.Checks[:3]
+		if ok, msg := judgeQualify(q, judgeShapes(), "example-model"); ok || !strings.Contains(msg, "behaviour") {
+			t.Fatalf("ok %v message %q, want a failure naming the behaviour check", ok, msg)
+		}
+	})
+	t.Run("tool calls on, no tool-call check", func(t *testing.T) {
+		sh := judgeShapes()
+		sh.toolCalls = true
+		ok, msg := judgeQualify(judgeQualifyResult(16384), sh, "example-model")
+		if ok || !strings.Contains(msg, "toolCall") {
+			t.Fatalf("ok %v message %q, want a failure naming the toolCall check", ok, msg)
+		}
+	})
+	t.Run("tool calls on, check passed", func(t *testing.T) {
+		sh := judgeShapes()
+		sh.toolCalls = true
+		q := judgeQualifyResult(16384)
+		q.Checks = append(q.Checks, agentapi.CheckOutcome{Name: agentapi.CheckToolCall, Passed: true})
+		if ok, msg := judgeQualify(q, sh, "example-model"); !ok {
+			t.Fatalf("fails: %s", msg)
+		}
+	})
+	t.Run("tool calls off, a failed tool-call check is not read", func(t *testing.T) {
+		q := judgeQualifyResult(16384)
+		q.Checks = append(q.Checks, agentapi.CheckOutcome{Name: agentapi.CheckToolCall, Passed: false})
+		if ok, msg := judgeQualify(q, judgeShapes(), "example-model"); !ok {
+			t.Fatalf("fails: %s", msg)
+		}
+	})
+	t.Run("served names without the model", func(t *testing.T) {
+		q := judgeQualifyResult(16384)
+		q.ServedModelNames = []string{"other-model"}
+		ok, msg := judgeQualify(q, judgeShapes(), "example-model")
+		if ok || !strings.Contains(msg, "example-model") {
+			t.Fatalf("ok %v message %q, want a failure naming the model", ok, msg)
+		}
+	})
+	t.Run("the model among other names", func(t *testing.T) {
+		q := judgeQualifyResult(16384)
+		q.ServedModelNames = []string{"alias", "example-model"}
+		if ok, msg := judgeQualify(q, judgeShapes(), "example-model"); !ok {
+			t.Fatalf("fails: %s", msg)
+		}
+	})
+}
+
+// judgeReq builds one warm-up request's timing.
+func judgeReq(shape agentapi.Shape, ttft, total time.Duration, tokens int32) agentapi.RequestTiming {
+	return agentapi.RequestTiming{Shape: shape, TimeToFirstToken: agentapi.Duration(ttft), Total: agentapi.Duration(total), OutputTokens: tokens}
+}
+
+// judgeRound is a round whose short, typical, longest and long-output requests
+// take the given totals, and whose four concurrent requests take 2 s each.
+func judgeRound(n int32, short, typical, longest, longOutput time.Duration) agentapi.WarmUpRound {
+	r := agentapi.WarmUpRound{Round: n, Requests: []agentapi.RequestTiming{
+		judgeReq(agentapi.ShapeShort, 100*time.Millisecond, short, 64),
+		judgeReq(agentapi.ShapeTypical, 200*time.Millisecond, typical, 64),
+		judgeReq(agentapi.ShapeLongest, 300*time.Millisecond, longest, 64),
+		judgeReq(agentapi.ShapeLongOutput, 400*time.Millisecond, longOutput, 64),
+	}}
+	for range 4 {
+		r.Requests = append(r.Requests, judgeReq(agentapi.ShapeConcurrent, 100*time.Millisecond, 2*time.Second, 64))
+	}
+	return r
+}
+
+// judgeEven is a round with every sequential request at one total time.
+func judgeEven(n int32, total time.Duration) agentapi.WarmUpRound {
+	return judgeRound(n, total, total, total, total)
+}
+
+// TestJudgeWarmUpSettles covers HBEP-7, Instance start, Warm-up: "done when no
+// shape in a round is more than 10% slower than in the round before", and the
+// Test plan item "an engine double that is slow on the first request of each
+// shape settles in two rounds".
+func TestJudgeWarmUpSettles(t *testing.T) {
+	s := time.Second
+	tests := []struct {
+		name   string
+		rounds []agentapi.WarmUpRound
+		want   warmUpState
+		msg    string
+	}{
+		{"no round yet", nil, warmUpRunning, ""},
+		{"one round cannot be compared", []agentapi.WarmUpRound{judgeEven(1, 5*s)}, warmUpRunning, ""},
+		// Round 1 slow (5 s), round 2 at 2 s: 2 s is not slower than 5 s.
+		{"slow first round, then fast", []agentapi.WarmUpRound{judgeEven(1, 5*s), judgeEven(2, 2*s)}, warmUpSettled, "round 2"},
+		// 2.2 s is exactly 10% above 2 s: not more than 10%, so settled.
+		{"exactly 10% slower settles", []agentapi.WarmUpRound{judgeEven(1, 2*s), judgeEven(2, 2200*time.Millisecond)}, warmUpSettled, "round 2"},
+		// 2.22 s is 11% above 2 s: more than 10%, not settled.
+		{"11% slower does not settle", []agentapi.WarmUpRound{judgeEven(1, 2*s), judgeEven(2, 2220*time.Millisecond)}, warmUpRunning, ""},
+		// One shape alone, the long-output request, is 11% slower: no shape may be.
+		{"one shape 11% slower does not settle",
+			[]agentapi.WarmUpRound{judgeEven(1, 2*s), judgeRound(2, 2*s, 2*s, 2*s, 2220*time.Millisecond)}, warmUpRunning, ""},
+		// The same shape at 10% settles.
+		{"one shape 10% slower settles",
+			[]agentapi.WarmUpRound{judgeEven(1, 2*s), judgeRound(2, 2*s, 2*s, 2*s, 2200*time.Millisecond)}, warmUpSettled, "round 2"},
+		// Rounds out of order are read by round number.
+		{"read in round order", []agentapi.WarmUpRound{judgeEven(2, 2*s), judgeEven(1, 5*s)}, warmUpSettled, "round 2"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			state, msg, thr := judgeWarmUp(&agentapi.WarmUpResult{Rounds: tc.rounds}, 4)
+			if state != tc.want {
+				t.Fatalf("state = %d (%q), want %d", state, msg, tc.want)
+			}
+			if !strings.Contains(msg, tc.msg) {
+				t.Errorf("message %q does not contain %q", msg, tc.msg)
+			}
+			if (state == warmUpSettled) != (thr != nil) {
+				t.Errorf("settled %v but throughput %v", state == warmUpSettled, thr)
+			}
+		})
+	}
+}
+
+// TestJudgeWarmUpFailsAfterFiveRounds: "A warm-up that has not settled after
+// five rounds fails qualification" (HBEP-7, Instance start, Warm-up). Each round
+// is 25% slower than the one before: 2.0, 2.5, 3.125, 3.90625 and 4.8828125 s
+// (exact in nanoseconds: 2000000000, 2500000000, 3125000000, 3906250000,
+// 4882812500).
+func TestJudgeWarmUpFailsAfterFiveRounds(t *testing.T) {
+	totals := []time.Duration{2000000000, 2500000000, 3125000000, 3906250000, 4882812500}
+	var rounds []agentapi.WarmUpRound
+	for i, d := range totals {
+		rounds = append(rounds, judgeEven(int32(i+1), d))
+	}
+	for n := 1; n <= 4; n++ {
+		if state, msg, _ := judgeWarmUp(&agentapi.WarmUpResult{Rounds: rounds[:n]}, 4); state != warmUpRunning {
+			t.Fatalf("after %d rounds state = %d (%q), want running", n, state, msg)
+		}
+	}
+	state, msg, thr := judgeWarmUp(&agentapi.WarmUpResult{Rounds: rounds, Done: true}, 4)
+	if state != warmUpFailed || thr != nil {
+		t.Fatalf("after 5 rounds state = %d throughput %v (%q), want failed with none", state, thr, msg)
+	}
+	if !strings.Contains(msg, "5 rounds") {
+		t.Errorf("message %q does not say it was five rounds", msg)
+	}
+	// Five rounds not marked Done by the agent still fail.
+	if state, _, _ := judgeWarmUp(&agentapi.WarmUpResult{Rounds: rounds}, 4); state != warmUpFailed {
+		t.Errorf("five unsettled rounds without Done: state = %d, want failed", state)
+	}
+	// Settling in the fifth round is settling: 3.9 s is below 3.90625 s * 1.1.
+	late := append(slices.Clone(rounds[:4]), judgeEven(5, 3900*time.Millisecond))
+	if state, msg, _ := judgeWarmUp(&agentapi.WarmUpResult{Rounds: late, Done: true}, 4); state != warmUpSettled {
+		t.Errorf("settling in round 5: state = %d (%q), want settled", state, msg)
+	}
+}
+
+// TestJudgeWarmUpFailedRequest: a request with an error fails warm-up, even in
+// a round that would have settled.
+func TestJudgeWarmUpFailedRequest(t *testing.T) {
+	r2 := judgeEven(2, 2*time.Second)
+	r2.Requests[1].Error = "connection reset"
+	state, msg, thr := judgeWarmUp(&agentapi.WarmUpResult{Rounds: []agentapi.WarmUpRound{judgeEven(1, 5*time.Second), r2}}, 4)
+	if state != warmUpFailed || thr != nil {
+		t.Fatalf("state = %d throughput %v, want failed with none", state, thr)
+	}
+	if !strings.Contains(msg, "connection reset") || !strings.Contains(msg, "round 2") {
+		t.Errorf("message %q does not name the round and the error", msg)
+	}
+}
+
+// TestJudgeWarmUpThroughput covers HBEP-7, Warm-up: "The last round's time per
+// output token and time to first token are recorded as the Instance's
+// throughput at the target sessions." It is taken from the settled round's
+// concurrent requests (TPOT = mean of (total - ttft) / (outputTokens - 1) per
+// request, TTFT = mean).
+//
+// Settled round 2, four concurrent requests:
+//
+//	ttft 100 ms, total 1100 ms, 101 tokens: (1100-100)/100 = 10 ms
+//	ttft 200 ms, total 3200 ms,  51 tokens: (3200-200)/50  = 60 ms
+//	ttft 300 ms, total 1300 ms, 101 tokens: (1300-300)/100 = 10 ms
+//	ttft 400 ms, total 3400 ms,  51 tokens: (3400-400)/50  = 60 ms
+//
+// mean TTFT = (100+200+300+400)/4 = 250 ms; mean TPOT = (10+60+10+60)/4 = 35
+// ms. (Pooling the tokens instead would give 8000 ms / 300 = 26.67 ms.) Round
+// 1's concurrent requests and every non-concurrent request carry other values,
+// which would show if the wrong ones were read.
+func TestJudgeWarmUpThroughput(t *testing.T) {
+	ms := time.Millisecond
+	r1 := judgeEven(1, 5*time.Second)
+	for i := range r1.Requests {
+		if r1.Requests[i].Shape == agentapi.ShapeConcurrent {
+			r1.Requests[i] = judgeReq(agentapi.ShapeConcurrent, 900*ms, 9*time.Second, 11)
+		}
+	}
+	// Round 2: the four sequential shapes at 2 s, then the four concurrent
+	// requests above (mean total (1100+3200+1300+3400)/4 = 2250 ms, below
+	// round 1's 9 s, so the round settles).
+	r2 := agentapi.WarmUpRound{Round: 2, Requests: []agentapi.RequestTiming{
+		judgeReq(agentapi.ShapeShort, 9999*ms, 2*time.Second, 64),
+		judgeReq(agentapi.ShapeTypical, 9999*ms, 2*time.Second, 64),
+		judgeReq(agentapi.ShapeLongest, 9999*ms, 2*time.Second, 64),
+		judgeReq(agentapi.ShapeLongOutput, 9999*ms, 2*time.Second, 64),
+		judgeReq(agentapi.ShapeConcurrent, 100*ms, 1100*ms, 101),
+		judgeReq(agentapi.ShapeConcurrent, 200*ms, 3200*ms, 51),
+		judgeReq(agentapi.ShapeConcurrent, 300*ms, 1300*ms, 101),
+		judgeReq(agentapi.ShapeConcurrent, 400*ms, 3400*ms, 51),
+	}}
+	state, msg, thr := judgeWarmUp(&agentapi.WarmUpResult{Rounds: []agentapi.WarmUpRound{r1, r2}}, 4)
+	if state != warmUpSettled || thr == nil {
+		t.Fatalf("state = %d throughput %v (%q), want settled in round 2", state, thr, msg)
+	}
+	if thr.TimeToFirstToken != "250ms" || thr.TimePerOutputToken != "35ms" || thr.TargetSessions != 4 {
+		t.Fatalf("throughput = %+v, want TTFT 250ms, TPOT 35ms at 4 sessions", *thr)
+	}
+}
+
+// TestErrorsOnly covers HBEP-7, Health and restarts, "only errors: over
+// errorOnlyWindow, the engine answered requests and every answer was a server
+// error". The samples hold the engine's response counters; the window is 1 min
+// and now is 10:00:00.
+func TestErrorsOnly(t *testing.T) {
+	now := time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)
+	at := func(ago time.Duration, responses, errs int64) healthSample {
+		return healthSample{at: now.Add(-ago), responses: responses, errors: errs}
+	}
+	const window = time.Minute
+	tests := []struct {
+		name    string
+		samples []healthSample
+		want    bool
+	}{
+		// 70 s ago the counters were 100/10, now 110/20: 10 answers in the
+		// window, all 10 errors.
+		{"every answer an error", []healthSample{at(70*time.Second, 100, 10), at(0, 110, 20)}, true},
+		// Now 110/18: 10 answers, 8 errors; two 200s.
+		{"a 200 in the window", []healthSample{at(70*time.Second, 100, 10), at(0, 110, 18)}, false},
+		// A single 200 among 10 answers is enough: 9 errors of 10.
+		{"one 200 in the window", []healthSample{at(70*time.Second, 100, 10), at(0, 110, 19)}, false},
+		// The only earlier sample is 30 s old, younger than the window.
+		{"no sample old enough", []healthSample{at(30*time.Second, 100, 10), at(0, 110, 20)}, false},
+		// The earlier sample is exactly one window old: old enough.
+		{"a sample exactly one window old", []healthSample{at(window, 100, 10), at(0, 110, 20)}, true},
+		// 59 s old: not yet.
+		{"a sample 59 s old", []healthSample{at(59*time.Second, 100, 10), at(0, 110, 20)}, false},
+		// Nothing answered in the window: 0 answers, 0 errors.
+		{"no answers", []healthSample{at(70*time.Second, 100, 10), at(0, 100, 10)}, false},
+		{"one sample", []healthSample{at(0, 110, 20)}, false},
+		{"no samples", nil, false},
+		// The base is the newest sample at least a window old: 90 s ago
+		// (100/0). Over the window 10 answers, 10 errors -> true. The 5 min old
+		// sample (0/0) would give 110 answers, 10 errors and a false answer.
+		{"the newest old-enough sample is the base",
+			[]healthSample{at(5*time.Minute, 0, 0), at(90*time.Second, 100, 0), at(30*time.Second, 105, 5), at(0, 110, 10)}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := errorsOnly(tc.samples, now, window); got != tc.want {
+				t.Fatalf("errorsOnly = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
