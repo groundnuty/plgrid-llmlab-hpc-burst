@@ -1,6 +1,7 @@
 package llmlabtest
 
 import (
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/url"
@@ -201,7 +202,7 @@ func TestCloseDoesNotHang(t *testing.T) {
 		s := startS(t)
 		s.Stall(true)
 		ch := askAsync(s, http.MethodPost, routeChat, keyOne, chatReq(modelA))
-		requirePending(t, ch, held, "chat in a stall")
+		requireHeld(t, s, ch, "chat in a stall")
 		if n := len(s.Requests()); n != 0 {
 			t.Fatalf("%d requests logged while the only one is held", n)
 		}
@@ -226,7 +227,7 @@ func TestCloseDoesNotHang(t *testing.T) {
 		s := startS(t)
 		s.SetLatency(Latency{PerChunk: time.Hour})
 		ch := askAsync(s, http.MethodPost, routeChat, keyOne, streamReq(modelA))
-		requirePending(t, ch, held, "stream between chunks")
+		requireHeld(t, s, ch, "stream between chunks")
 
 		closeWithin2s(t, s)
 		select {
@@ -276,5 +277,121 @@ func TestListen(t *testing.T) {
 			l.Close()
 			t.Errorf("Listen(%d, %d) succeeded, want an error for the range", r[0], r[1])
 		}
+	}
+}
+
+// sseEvent is one server-sent event: its "event:" name and its data payload.
+type sseEvent struct {
+	Name string
+	Data []byte
+}
+
+func parseEvents(body []byte) []sseEvent {
+	var out []sseEvent
+	for _, block := range strings.Split(string(body), "\n\n") {
+		var e sseEvent
+		for _, line := range strings.Split(block, "\n") {
+			if name, ok := strings.CutPrefix(line, "event: "); ok {
+				e.Name = name
+			}
+			if data, ok := strings.CutPrefix(line, "data: "); ok {
+				e.Data = []byte(data)
+			}
+		}
+		if e.Data != nil {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// A Responses stream that was capped ends with response.incomplete, not
+// response.completed, so a client that waits for the completion marker does not
+// take a cut-off answer for a whole one (Astra B6; OpenAI's
+// ResponseIncompleteEvent).
+func TestResponsesStreamTerminalEvent(t *testing.T) {
+	const input = `"input":"one two","stream":true`
+	for _, tc := range []struct {
+		name    string
+		models  []Model
+		body    string
+		wantEnd string
+		text    string
+		deltas  int
+	}{
+		{"max_output_tokens below the reply", nil, `{"model":"example-9b",` + input + `,"max_output_tokens":2}`, "response.incomplete", "This is", 2},
+		{"hidden MaxTokensCap", []Model{{ID: modelA, MaxTokensCap: 2}}, `{"model":"example-9b",` + input + `}`, "response.incomplete", "This is", 2},
+		{"uncapped", nil, `{"model":"example-9b",` + input + `}`, "response.completed", DefaultReply, 5},
+		{"max_output_tokens equal to the reply", nil, `{"model":"example-9b",` + input + `,"max_output_tokens":5}`, "response.completed", DefaultReply, 5},
+		{"max_output_tokens above the reply", nil, `{"model":"example-9b",` + input + `,"max_output_tokens":100}`, "response.completed", DefaultReply, 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := startS(t, tc.models...)
+			a := ask(t, s, http.MethodPost, routeResponses, keyOne, tc.body)
+			requireStatus(t, a, http.StatusOK, "responses stream")
+			events := parseEvents(a.Body)
+			if len(events) < 2 {
+				t.Fatalf("%d events, want response.created, the deltas and a closing event:\n%s", len(events), a.Body)
+			}
+			wrong := "response.completed"
+			if tc.wantEnd == wrong {
+				wrong = "response.incomplete"
+			}
+			deltas := 0
+			for i, e := range events {
+				if e.Name == wrong {
+					t.Errorf("event %d is %s, want no such event in this stream", i, wrong)
+				}
+				if e.Name == "response.output_text.delta" {
+					deltas++
+				}
+				var seq struct {
+					Type     string `json:"type"`
+					Sequence *int   `json:"sequence_number"`
+				}
+				decode(t, e.Data, &seq)
+				if seq.Type != e.Name || seq.Sequence == nil || *seq.Sequence != i {
+					t.Errorf("event %d: name %q, data type %q, sequence_number %v; want the same name, and the sequence number %d", i, e.Name, seq.Type, seq.Sequence, i)
+				}
+			}
+			if deltas != tc.deltas {
+				t.Errorf("%d text deltas, want %d", deltas, tc.deltas)
+			}
+
+			last := events[len(events)-1]
+			if last.Name != tc.wantEnd {
+				t.Fatalf("the stream ends with %q, want %q", last.Name, tc.wantEnd)
+			}
+			var end struct {
+				Type     string `json:"type"`
+				Response struct {
+					Status            string `json:"status"`
+					IncompleteDetails *struct {
+						Reason string `json:"reason"`
+					} `json:"incomplete_details"`
+					Output []struct {
+						Content []struct{ Text string }
+					}
+					Usage struct {
+						OutputTokens int `json:"output_tokens"`
+					}
+				} `json:"response"`
+			}
+			if err := json.Unmarshal(last.Data, &end); err != nil {
+				t.Fatalf("the closing event is not JSON (%v): %s", err, last.Data)
+			}
+			wantStatus := map[string]string{"response.completed": "completed", "response.incomplete": "incomplete"}[tc.wantEnd]
+			r := end.Response
+			if end.Type != tc.wantEnd || r.Status != wantStatus || (r.IncompleteDetails != nil) != (wantStatus == "incomplete") {
+				t.Errorf("closing event type %q, response status %q, incomplete_details %+v; want %q, %q and details only when incomplete: %s",
+					end.Type, r.Status, r.IncompleteDetails, tc.wantEnd, wantStatus, last.Data)
+			}
+			if r.IncompleteDetails != nil && r.IncompleteDetails.Reason != "max_output_tokens" {
+				t.Errorf("incomplete_details.reason = %q, want max_output_tokens", r.IncompleteDetails.Reason)
+			}
+			if len(r.Output) != 1 || len(r.Output[0].Content) != 1 || r.Output[0].Content[0].Text != tc.text || r.Usage.OutputTokens != tc.deltas {
+				t.Errorf("closing response output %+v usage %+v, want the text %q and %d output tokens", r.Output, r.Usage, tc.text, tc.deltas)
+			}
+		})
 	}
 }

@@ -43,6 +43,7 @@ type exchange struct {
 }
 
 func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
+	s.arrive(r.Method, r.URL.Path) // first of all: a held request must be seen
 	arrival := s.now()
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
 	rec := &Request{Time: arrival, Method: r.Method, Path: r.URL.Path, Header: r.Header.Clone(), Body: body}
@@ -151,14 +152,32 @@ const (
 
 // wait blocks until ready holds (called with the lock held), the deadline
 // passes (the deadline wins a tie), the request's context ends or the Server
-// closes. A zero deadline never passes.
+// closes. A zero deadline never passes. While it is blocked, the request
+// counts in Waiting; it is counted in the same locked step that finds it
+// blocked, so a test that sees the count has seen a request that met the wait.
 func (s *Server) wait(ctx context.Context, deadline time.Time, ready func(now time.Time) bool) waitResult {
+	counted := false
+	defer func() {
+		if counted {
+			s.mu.Lock()
+			s.waiting--
+			s.mu.Unlock()
+		}
+	}()
 	for {
 		s.mu.Lock()
 		now := s.now()
 		cut := !deadline.IsZero() && !now.Before(deadline)
 		ok := !cut && ready(now)
 		changed := s.changed
+		if blocked := !cut && !ok; blocked != counted {
+			counted = blocked
+			if blocked {
+				s.waiting++
+			} else {
+				s.waiting--
+			}
+		}
 		s.mu.Unlock()
 		switch {
 		case cut:
@@ -208,8 +227,8 @@ func (x *exchange) writeJSON(status int, v any) {
 	x.w.Header().Set("Content-Type", "application/json")
 	x.w.WriteHeader(status)
 	x.rec.Status = status
-	x.rec.FirstByte = x.s.now()
 	_, _ = x.w.Write(b.Bytes())
+	x.rec.FirstByte = x.s.now() // after the write, so the stamp never precedes the byte
 }
 
 type listedModel struct {
