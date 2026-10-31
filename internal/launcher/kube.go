@@ -102,11 +102,16 @@ func waitReady(ctx context.Context, l layout, st *State, h *procHandle, timeout 
 		if !readyzDone {
 			if cfg == nil {
 				if _, serr := os.Stat(l.adminKubeconfig()); serr == nil {
-					c, cerr := restConfig(l.adminKubeconfig(), st.Ports, 1500*time.Millisecond)
-					if cerr != nil {
-						return 0, 0, cerr
+					// k3s creates this file early in its start and fills it in afterwards, not
+					// atomically, so a read can find it empty or cut short (a slow filesystem makes
+					// that common). A file that does not parse or check out yet is not ready yet:
+					// remember why, and read it again. cfg is set only from a whole, checked file,
+					// so a kubeconfig that names another server is never used, only waited out.
+					if c, cerr := restConfig(l.adminKubeconfig(), st.Ports, 1500*time.Millisecond); cerr != nil {
+						last = cerr
+					} else {
+						cfg = c
 					}
-					cfg = c
 				}
 			}
 			if cfg != nil {
