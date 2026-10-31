@@ -68,7 +68,7 @@ func TestCancelStopsEveryProcessOfApptainersGroup(t *testing.T) {
 			s.c.StopGrace = 300 * time.Millisecond
 			pidFile := filepath.Join(root, "child.pid")
 			scriptApptainer(t, root, fmt.Sprintf(`sh -c 'trap "" TERM; echo $$ > %[1]s.tmp && mv %[1]s.tmp %[1]s; exec sleep 31337' &
-sleep 31337
+exec sleep 31337
 `, pidFile))
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
