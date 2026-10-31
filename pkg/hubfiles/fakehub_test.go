@@ -61,6 +61,10 @@ type fakeFile struct {
 	size    int64  // the listed size; -1 means len(content)
 	lfsOID  string // non-empty makes it an LFS entry
 	missing bool   // listed, but the resolve endpoint answers 404
+	// lfsServed makes the resolve endpoint serve content for an LFS entry too
+	// (by default only a file that is not in LFS is served: Files never
+	// downloads an LFS file, so a test for one that does needs this).
+	lfsServed bool
 }
 
 func plainFile(f fixture) fakeFile {
@@ -69,6 +73,13 @@ func plainFile(f fixture) fakeFile {
 
 func lfsFile(path, sha string, size int64) fakeFile {
 	return fakeFile{path: path, oid: pointerOID, size: size, lfsOID: sha}
+}
+
+// lfsContentFile is an LFS entry whose bytes the fake serves. The listing
+// gives lfsOID, which a test sets to a literal SHA-256, and the size of
+// content.
+func lfsContentFile(path, content, lfsOID string) fakeFile {
+	return fakeFile{path: path, content: content, oid: pointerOID, size: -1, lfsOID: lfsOID, lfsServed: true}
 }
 
 // allFiles is every fixture plus two LFS shards.
@@ -269,7 +280,7 @@ func (h *fakeHub) serveFile(w http.ResponseWriter, r *http.Request, path string)
 	h.resolves = append(h.resolves, path)
 	h.mu.Unlock()
 	for _, f := range h.files {
-		if f.path == path && f.lfsOID == "" && !f.missing {
+		if f.path == path && (f.lfsOID == "" || f.lfsServed) && !f.missing {
 			_, _ = w.Write([]byte(f.content))
 			return
 		}
