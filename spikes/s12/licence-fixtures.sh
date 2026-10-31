@@ -10,6 +10,19 @@
 # and a control run over goodlib alone, which must pass (a failure there would mean the fixture
 # setup, not the licences, is what breaks).
 #
+# Part 2 runs licence-check.sh (the gate that reproduce.sh and the CI jobs use) on fixture
+# repositories and checks its exit status:
+#   control      a root module without a LICENSE, a clean dependency, a clean nested module   exit 0
+#   no exemption the same with --no-own-exemption                                              exit 1
+#   siblings     an off-list, and an unknown, dependency at example.test/proj-extra and
+#                example.test/proj-unknown: the root is example.test/proj, so a prefix match
+#                on the root's path would hide them                                           exit 1
+#   beneath      the same two at example.test/proj/sub and example.test/proj/unk, separate
+#                modules whose paths lie beneath the root's                                   exit 1
+#   nested       a nested module (third_party/forked/nested) with an off-list dependency      exit 1
+#   test-only    an off-list dependency imported only by a test of the root module           exit 1
+# Every "exit 1" case must also name the offending library, so it fails for the right reason.
+#
 # Usage: licence-fixtures.sh <path to go-licenses> [work dir]   (the work dir must not exist)
 set -euo pipefail
 GL=$(readlink -f "${1:?usage: $0 <go-licenses binary> [workdir]}")
@@ -113,4 +126,100 @@ printf '%s\n' "$rep" | grep -q '^example.test/goodlib,.*,MIT$' \
   || { echo "FAIL: control report does not list goodlib as MIT: $rep"; failures=$((failures+1)); }
 write_app goodlib offlist;    run "off-list licence (BSD-4-Clause)"  1 "Not allowed license 'BSD-4-Clause' found for library 'example.test/offlist'"
 write_app goodlib mystery;    run "unknown licence"                  1 "Did not find license for library 'example.test/mystery'"
+
+# ---- part 2: licence-check.sh on fixture repositories ---------------------------------------
+libs=$work/libs
+declare -A libdir
+newlib() { # dir module-path licence(goodlib|offlist|mystery: the directory whose LICENSE to copy)
+  libdir[$2]=$libs/$1
+  mkdir -p "$libs/$1"
+  printf 'module %s\n\ngo 1.26\n' "$2" > "$libs/$1/go.mod"
+  printf 'package lib\n\nfunc Name() string { return "%s" }\n' "$2" > "$libs/$1/lib.go"
+  cp "$work/$3/LICENSE" "$libs/$1/LICENSE"
+}
+newlib good       example.test/lic-good        goodlib
+newlib off        example.test/lic-off         offlist
+newlib sibling    example.test/proj-extra      offlist
+newlib siblingunk example.test/proj-unknown    mystery
+newlib beneath    example.test/proj/sub        offlist
+newlib beneathunk example.test/proj/unk        mystery
+
+gomod_with() { # module-path imports...
+  local mod=$1; shift
+  printf 'module %s\n\ngo 1.26\n\n' "$mod"
+  local m; for m in "$@"; do printf 'require %s v0.0.0\nreplace %s => %s\n' "$m" "$m" "${libdir[$m]}"; done
+}
+imports_of() { # pkg imports... -> a Go file body that uses each import
+  local pkg=$1 i=0 m; shift
+  printf 'package %s\n\nimport (\n' "$pkg"
+  for m in "$@"; do printf '\tl%d "%s"\n' "$i" "$m"; i=$((i+1)); done
+  printf ')\n\nfunc use() {\n'
+  i=0; for m in "$@"; do printf '\t_ = l%d.Name()\n' "$i"; i=$((i+1)); done
+  printf '}\n'
+}
+mkrepo() { # dir root-imports(space separated) [nested-imports(space separated)] [test-only-imports]
+  local d=$1 ri=$2 ni=${3:-} ti=${4:-}
+  mkdir -p "$d"
+  gomod_with example.test/proj $ri $ti > "$d/go.mod"
+  { imports_of main $ri; printf '\nfunc main() { use() }\n'; } > "$d/main.go"
+  if [ -n "$ti" ]; then
+    local i=0 m
+    { printf 'package main\n\nimport (\n\t"testing"\n'
+      for m in $ti; do printf '\tt%d "%s"\n' "$i" "$m"; i=$((i+1)); done
+      printf ')\n\nfunc TestUse(t *testing.T) {\n'
+      i=0; for m in $ti; do printf '\t_ = t%d.Name()\n' "$i"; i=$((i+1)); done
+      printf '}\n'; } > "$d/main_test.go"
+  fi
+  if [ -n "$ni" ]; then
+    local n=$d/third_party/forked/nested
+    mkdir -p "$n"
+    gomod_with example.test/proj/third_party/forked/nested $ni > "$n/go.mod"
+    imports_of nested $ni > "$n/nested.go"
+    cp "$work/goodlib/LICENSE" "$n/LICENSE"
+  fi
+}
+
+gate_case() { # label want(0|1) pattern repo [licence-check.sh options...]
+  local label=$1 want=$2 pat=$3 repo=$4 out rc=0; shift 4
+  out=$("$here/licence-check.sh" "$@" "$GL" "$repo" "$work/out-$(basename "$repo")" 2>&1) || rc=$?
+  echo "-- $label: exit $rc"
+  printf '%s\n' "$out" | grep -E '^(UNEXPECTED|licence check|WARNING)|^permitted' | sort -u | sed 's/^/     /'
+  if [ "$want" = 0 ] && [ "$rc" != 0 ]; then echo "FAIL: $label should pass"; failures=$((failures+1)); fi
+  if [ "$want" = 1 ]; then
+    [ "$rc" = 0 ] && { echo "FAIL: $label should fail"; failures=$((failures+1)); }
+  fi
+  printf '%s\n' "$out" | grep -q -F -- "$pat" || { echo "FAIL: $label output lacks '$pat'"; failures=$((failures+1)); }
+}
+BSD4="Not allowed license 'BSD-4-Clause' found for library"
+NOLIC="Did not find license for library"
+echo
+echo "== licence-check.sh on fixture repositories"
+mkrepo "$work/r-control" "example.test/lic-good" "example.test/lic-good"
+gate_case "control: no root LICENSE (permitted), clean dependency, clean nested module" 0 \
+  "permitted (a package of this module, which has no LICENSE): example.test/proj" "$work/r-control"
+gate_case "same repository with --no-own-exemption" 1 "UNEXPECTED: $NOLIC 'example.test/proj'" "$work/r-control" --no-own-exemption
+mkrepo "$work/r-sibling" "example.test/lic-good example.test/proj-extra"
+gate_case "off-list dependency at a sibling path sharing the root's prefix (proj-extra)" 1 \
+  "UNEXPECTED: $BSD4 'example.test/proj-extra'" "$work/r-sibling"
+mkrepo "$work/r-siblingunk" "example.test/lic-good example.test/proj-unknown"
+gate_case "unknown-licence dependency at a sibling path sharing the prefix (proj-unknown)" 1 \
+  "UNEXPECTED: $NOLIC 'example.test/proj-unknown'" "$work/r-siblingunk"
+mkrepo "$work/r-beneath" "example.test/lic-good example.test/proj/sub"
+gate_case "off-list dependency in a separate module beneath the root's path (proj/sub)" 1 \
+  "UNEXPECTED: $BSD4 'example.test/proj/sub'" "$work/r-beneath"
+mkrepo "$work/r-beneathunk" "example.test/lic-good example.test/proj/unk"
+gate_case "unknown-licence dependency in a separate module beneath the root's path (proj/unk)" 1 \
+  "UNEXPECTED: $NOLIC 'example.test/proj/unk'" "$work/r-beneathunk"
+mkrepo "$work/r-nested" "example.test/lic-good" "example.test/lic-good example.test/lic-off"
+gate_case "off-list dependency of a nested module (the root itself is fine)" 1 \
+  "UNEXPECTED: $BSD4 'example.test/lic-off'" "$work/r-nested"
+mkrepo "$work/r-testonly" "example.test/lic-good" "" "example.test/lic-off"
+gate_case "off-list dependency imported only by a test of the root module" 1 \
+  "UNEXPECTED: $BSD4 'example.test/lic-off'" "$work/r-testonly"
+echo "-- for comparison, go-licenses' own --ignore example.test/proj, a path prefix, on the same fixtures (exit 0 = the dependency is hidden):"
+for r in sibling siblingunk beneath beneathunk; do
+  rc=0; (cd "$work/r-$r" && "$GL" check ./... --ignore example.test/proj --allowed_licenses="$LIST" >/dev/null 2>&1) || rc=$?
+  echo "     r-$r: exit $rc"
+done
+
 [ "$failures" = 0 ] && echo "ALL FIXTURE CHECKS BEHAVED AS EXPECTED" || { echo "$failures fixture check(s) failed"; exit 1; }

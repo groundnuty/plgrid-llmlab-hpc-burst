@@ -4,9 +4,9 @@ Answers HBEP-15's open question 4 (which SBOM tool) and shows what its licence c
 
 ## Result in short
 
-- **Recommended tool: syft.** On the `hpcburst` binary, kubernetes-sigs/bom and syft are equal. Both write a valid SPDX 2.3 document that lists exactly the modules `go version -m` reports: none missing, none extra, every version equal. They differ on job images: syft documents OCI layouts, OCI archives, docker archives and Singularity/SIF files; bom documents registry images and docker archives only.
+- **Recommended tool: syft.** On the `hpcburst` binary, kubernetes-sigs/bom and syft are equal. Both write a valid SPDX 2.3 document that lists exactly the modules `go version -m` reports: none missing, none extra, none listed twice, every version equal. They differ on job images: syft documents OCI layouts, OCI archives, docker archives and Singularity/SIF files; bom documents registry images and docker archives only.
 - **Neither tool replaces `go-licenses`.** An SBOM made from a binary carries no licence for any module (only the Go standard library has one). The licence check is a separate step.
-- **The licence check passes on every dependency and fails on the repository's own packages.** All 47 modules in the binary use Apache-2.0, BSD-3-Clause, MIT or ISC, all on the allowlist. `go-licenses check ./...` still exits 1, because the repository has no `LICENSE` (HBEP-15 open question 1), so its 8 own packages are "unknown". Until a `LICENSE` lands, the CI step has to pass `--ignore` for the module itself.
+- **The licence check passes on every dependency and fails on the repository's own packages.** All 47 modules in the binary use Apache-2.0, BSD-3-Clause, MIT or ISC, all on the allowlist. `go-licenses check ./...` still exits 1, because the repository has no `LICENSE` (HBEP-15 open question 1), so its 8 own packages are "unknown". Until a `LICENSE` lands, the CI step has to exempt the module's own packages, and `--ignore <module path>` is the wrong way to do it: go-licenses matches it as a path prefix on every package, so it would also hide a dependency, or another repository, whose path starts with the same text (fixtures below; go-licenses v2.0.1, `licenses/library.go` line 134, `strings.HasPrefix(p.PkgPath, i)`). `licence-check.sh` exempts only a "Did not find license" failure of a package that `go list` assigns to the module under check, and fails on everything else.
 - **`./...` does not cover `third_party/forked/kubeai` or `third_party/forked/kcp`, nor the spikes.** Each is its own module and needs its own run. A run over a module with no buildable package exits 0 and checks nothing (kcp today), so CI must not trust an exit status alone.
 
 ## Method
@@ -15,14 +15,15 @@ Answers HBEP-15's open question 4 (which SBOM tool) and shows what its licence c
 2. Took the reference with `go version -m hpcburst`: 47 `dep` lines, the `mod` line, the toolchain version. Saved as `results/go-version-m.txt`. It comes from the toolchain, not from either tool.
 3. Generated an SPDX 2.3 JSON SBOM with each tool from pinned release binaries, sha256 checked against the release's checksum file.
 4. Validated each with two validators, each with a negative control (a copy with a required field removed must be rejected).
-5. `compare.py` compared each SBOM's Go modules (path and version, case-sensitive) with the reference. Its own tests (`test_compare.py`) use hand-written inputs and cover a missing module, a wrong version, a missing standard library, an extra module and a replaced module.
-6. Ran `go-licenses check` and `report` with HBEP-15's allowlist, with a negative control (a licence taken off the list must fail) and hand-written licence fixtures.
+5. `compare.py` compared each SBOM's Go modules (path and version, case-sensitive) with the reference, and accounted for every Go-module entry of the SBOM (rules under "Comparison"). Its tests (`test_compare.py`) use hand-written inputs, plus the committed SBOMs changed by hand, and cover a missing, wrong, omitted-replacement, wrongly versioned-replacement, extra, doubly listed and purl-less module, a missing standard library, and the version rules.
+6. Ran `licence-check.sh` (go-licenses `check` and `report` with HBEP-15's allowlist, and a gate that decides which failures are permitted) on the root module and each nested module, with a negative control (a licence taken off the list must fail) and hand-written licence fixtures. The gate has its own tests (`test_licence_gate.py`) and fixture repositories (`licence-fixtures.sh`).
 
 Everything is reproduced by one command, which exits 0 only when both SBOMs validate, match the reference, and the licence check passes for everything except the repository's own packages:
 
     spikes/s12/reproduce.sh <empty work dir>      # about 500 MB, one minute
     CHECK_SPIKES=1 spikes/s12/reproduce.sh <dir>  # also checks each spikes/* module
-    python3 -m unittest -v test_compare           # in spikes/s12; tests of compare.py
+    python3 -m unittest -v test_compare test_licence_gate   # in spikes/s12; tests of compare.py and of the licence gate
+    spikes/s12/licence-fixtures.sh <path to go-licenses> <work dir that does not exist>   # go-licenses on fixture modules and repositories
 
 Its output is committed under `results/`.
 
@@ -53,7 +54,7 @@ Environment: 6-core VM, shared with other agents. The load was 1.3 to 4.1 during
 | Packages | 49 (main module, standard library, 47 modules) | 50 (the same 49, plus a FILE entry for the binary) |
 | Names `github.com/groundnuty/plgrid-llmlab-hpc-burst` itself | yes, version from the build info | yes, version from the build info |
 | Names the Go standard library | yes, `stdlib` 1.27.3 | yes, `stdlib` go1.27.3 |
-| Module checksums | none | SHA256 of 48 packages, the `go.sum` hash decoded to hex |
+| Module checksums | none | SHA256 of 48 packages: 47 dependency hashes (the `go.sum` hash decoded to hex) and 1 for the binary's FILE package (a hash of the binary) |
 | Download locations | proxy.golang.org URL for each of the 47 modules | NOASSERTION |
 | Other references | purl | purl and CPE guesses (84 CPE entries) |
 | Licences | `licenseDeclared` only for the standard library (BSD-3-Clause) | NOASSERTION for every module, BSD-3-Clause for the standard library |
@@ -69,8 +70,16 @@ Reference: the standard library (go1.27.3), the main module, and 47 dependency m
 | Reference entries present at the reference version | 49 of 49 | 49 of 49 |
 | Modules missing | none | none |
 | Modules with a different version | none | none |
-| Extra Go packages the toolchain did not report | none | none |
-| Replaced modules | none in this binary (the `replace` case is covered by the unit test only) | same |
+| Modules listed twice at different versions | none | none |
+| Extra Go module entries the toolchain did not report (`--fail-on-extra`) | none | none |
+| Go-module entries accounted for | 49 of 49 | 49 of 49 (the FILE package for the binary is not a module and is ignored, and the output says so) |
+| Replaced modules | none in this binary (the `replace` case is covered by the unit tests only) | same |
+
+How `compare.py` decides (all of it in its docstring, each rule with a test):
+
+- Every Go-module entry of the SBOM is accounted for: matched, a tolerated original of a replaced module, listed twice at different versions (always a failure), at a wrong version, or extra. An entry is a Go module when it has a `pkg:golang` purl, or no purl and a module-shaped name or version, so an entry without a purl cannot hide. `reproduce.sh` runs it with `--fail-on-extra`.
+- A replacement `dep A v1 => B v2` means the binary contains B v2, so the SBOM must name B v2. An SBOM that names only A v1 fails. If it names A v1 as well, that exact entry is tolerated and reported; any other version of A or B fails. No tool writes machine-readable evidence tying the original to the replacement, so none is accepted.
+- Versions are exact strings. Exceptions: the standard library ignores a leading `go` (`go1.27.3` or `1.27.3`), and for that entry only; and a main module that the build stamped with no version (`(devel)`) must be unversioned or `(devel)` in the SBOM. An SBOM that gives it any version fails, because equality with nothing cannot be established.
 
 The comparison checks names and versions, not that the other fields of a package are right. Two things it does not exercise on real data: this binary has no module path with an upper-case letter (the purl spec lower-cases Go paths; the unit test covers the matching), and no module is replaced.
 
@@ -95,20 +104,36 @@ Allowlist: HBEP-15's list as of 2026-10-30, copied by hand into `allowed-license
 | Apache-2.0 and BSD-3-Clause (a vendored `third_party` folder inside the module) | 4 (`k8s.io/apimachinery`, `k8s.io/kube-openapi`, `k8s.io/utils`, `sigs.k8s.io/json`) |
 | Apache-2.0, BSD-3-Clause and MIT | 1 (`sigs.k8s.io/yaml`) |
 
-`results/go-licenses-check.txt`:
+**How the check is run.** `licence-check.sh <go-licenses> <repo> <out dir>` runs `go-licenses check ./...` on each module and passes the output through `licence_gate.py` with the list of packages that `go list -deps -test` assigns to the module itself (`Module.Main`). Exit status 0 only if every failure is permitted. Permitted: a "Did not find license" line for a package of the module under check, for the root module and `spikes/*` (never `third_party/*`, whose copies carry a `LICENSE`). Everything else is an unexpected failure: an off-list licence, a missing licence of any dependency, a go-licenses or `go list` run that fails, a non-zero exit with a message the gate does not know, a zero exit with a failure line. The gate does not match path prefixes, so no dependency can be exempt, however its path looks. `reproduce.sh` takes the status of this script, so any such failure makes it exit 1.
 
-| Run | Exit | Finding |
-|---|---|---|
-| `check ./...` with the allowlist | 1 | 8 packages, all of the repository's own module: "Did not find license". No `LICENSE` exists, so they are unknown. |
-| the same with `--ignore github.com/groundnuty/plgrid-llmlab-hpc-burst` | 0 | no module is outside the allowlist or unknown |
-| the same with `--include_tests` | 0 | modules that only tests import are allowed too |
-| negative control: BSD-3-Clause taken off the list | 1 | names the 17 BSD-3-Clause packages. The check does compare with the list it is given. |
+`results/go-licenses-check.txt` (root module):
 
-**Every module whose licence is outside the allowlist or unknown: none**, except the repository's own packages, which are unknown only because there is no `LICENSE`. `--ignore` skips a package's own licence but, per `check --help`, still checks its dependencies.
+| Run | go-licenses exit | Gate | Finding |
+|---|---|---|---|
+| `check ./...` with the allowlist | 1 | ok, 0 unexpected | 8 permitted failures, all packages of the repository's own module: "Did not find license". No `LICENSE` exists. |
+| the same with `--include_tests` | 1 | ok, 0 unexpected | the same 8 packages; modules that only tests import are allowed too. |
+| negative control: BSD-3-Clause taken off the list | 1 | FAIL, 17 unexpected | names the 17 BSD-3-Clause packages. The check does compare with the list it is given. |
+
+**Every module whose licence is outside the allowlist or unknown: none**, except the repository's own packages, which are unknown only because there is no `LICENSE`.
+
+**The exemption is temporary.** Once the repository has a root `LICENSE`, remove it by passing `--no-own-exemption` to `licence-check.sh` (or deleting the permission in `permit_for`); the 8 packages then pass on their own licence. Whether and when a root `LICENSE` lands is the owner's decision (HBEP-15 open question 1); this spike does not assume the answer.
 
 The default `check` (no `--allowed_licenses`) fails on the same 8 packages; it treats "unknown" and "forbidden" as disallowed (run by hand, not in `results/`).
 
 **Fixtures** (`licence-fixtures.sh`, `results/licence-fixtures.txt`): HBEP-15's test plan asks for a check that fails on an off-list licence and on an unknown one, with hand-written licence texts. A fixture module with a hand-written BSD-4-Clause text is rejected ("Not allowed license 'BSD-4-Clause'"); one with an invented text is rejected ("Did not find license"); a control with a hand-written MIT text passes and appears in `report` as MIT, so the control does look at the module.
+
+The second part runs `licence-check.sh` on fixture repositories whose root module is `example.test/proj`, and checks its exit status and the library it names:
+
+| Fixture | Exit | Why it matters |
+|---|---|---|
+| control: root without a `LICENSE`, clean dependency, clean nested module | 0 | the own-package failure is permitted, and the output says so |
+| the same with `--no-own-exemption` | 1 | the exemption is what let the control pass |
+| off-list dependency `example.test/proj-extra`; unknown-licence dependency `example.test/proj-unknown` | 1 each | their paths start with the root's path, as a repository with a similar name would |
+| off-list dependency `example.test/proj/sub`; unknown-licence dependency `example.test/proj/unk` | 1 each | separate modules whose paths lie beneath the root's path |
+| nested module `third_party/forked/nested` with an off-list dependency, root clean | 1 | one failing nested module fails the whole run |
+| off-list dependency imported only by a test of the root | 1 | found by the `--include_tests` run only: the plain run passes |
+
+For comparison, the same four prefix fixtures all exit 0 under go-licenses' own `--ignore example.test/proj` (printed at the end of `results/licence-fixtures.txt`): a prefix `--ignore` of the root's path hides each of them. The gate's own exemption covers only "Did not find license" lines, so a filter that exempted just those lines under a prefix would still pass the unknown-licence variants; those two fixtures are what tell the gate apart from such a filter.
 
 **go-licenses does check all licences found for a package:** `sigs.k8s.io/yaml` carries Apache-2.0, BSD-3-Clause and MIT texts, and the negative control flagged it for BSD-3-Clause. A package licensed "A or B" with both texts shipped would need both on the list. Not exercised here.
 
@@ -123,7 +148,7 @@ The default `check` (no `--allowed_licenses`) fails on the same 8 packages; it t
 | `third_party/forked/llm-d-inference-sim`, `llm-d-router` | no Go code (a `LICENSE`, `ORIGIN.md` and a patch), so go-licenses has nothing to read; HBEP-15's copy check covers them |
 | `spikes/s2`, `s2b`, `s3`, `s4`, `s8`, `s10`, `s10b`, `s10c` | each exits 1 for its own packages only (no `LICENSE`); no third-party module is off the list or unknown |
 
-So the shipped copies need their own runs, one per `go.mod` under `third_party/`. The spikes are not shipped; they need runs only if HBEP-15 wants them checked, and the CI step below skips them. A root `LICENSE` may not reach packages in nested modules (go-licenses looks for the licence file above a package, and where it stops was not tested).
+So the shipped copies need their own runs, one per `go.mod` under `third_party/`; `licence-check.sh` finds them, runs each under that module's own `go.mod`, and its status counts. The spikes are not shipped; they need runs only if HBEP-15 wants them checked, and the CI step below skips them. A root `LICENSE` may not reach packages in nested modules (go-licenses looks for the licence file above a package, and where it stops was not tested).
 
 ## Job images
 
@@ -150,7 +175,7 @@ Sources, read 2026-10-31: https://github.com/kubernetes-sigs/bom/blob/v0.8.0/REA
 
 ### Proposed CI jobs
 
-Not applied: main is protected and renaming a job blocks every merge. These are new jobs, so existing check names do not change. The action SHAs are the ones `ci.yml` already pins. In the real PR, `compare.py` and the allowlist move to `hack/` (HBEP-15 names `hack/allowed-licenses.txt`), and the `--ignore` line goes once the repository has a `LICENSE`.
+Not applied: main is protected and renaming a job blocks every merge. These are new jobs, so existing check names do not change. The action SHAs are the ones `ci.yml` already pins. In the real PR, `compare.py`, `licence-check.sh`, `licence_gate.py` and the allowlist move to `hack/` (HBEP-15 names `hack/allowed-licenses.txt`), and the exemption of the module's own packages goes once the repository has a `LICENSE`.
 
 ```yaml
   sbom:
@@ -199,13 +224,11 @@ Not applied: main is protected and renaming a job blocks every merge. These are 
       - name: Licence check
         run: |
           go install "github.com/google/go-licenses/v2@${GO_LICENSES_VERSION}"
-          gl="$(go env GOPATH)/bin/go-licenses"
-          list=$(grep -v '^#' hack/allowed-licenses.txt | paste -sd, -)
-          # A check over zero packages exits 0, so require rows at the root.
-          rows=$("$gl" report ./... 2>/dev/null | wc -l)
-          [ "$rows" -gt 0 ] || { echo "::error::go-licenses saw no package"; exit 1; }
-          # Drop --ignore once the repository has a LICENSE (HBEP-15 open question 1).
-          "$gl" check ./... --ignore github.com/groundnuty/plgrid-llmlab-hpc-burst --allowed_licenses="$list"
+          # Exits 1 for any failure except "Did not find license" for a package of this module
+          # (hack/licence-check.sh, header), and for a root report with no package at all.
+          # Add --no-own-exemption once the repository has a LICENSE (HBEP-15 open question 1;
+          # the owner decides). The step runs the root module, with and without tests.
+          hack/licence-check.sh "$(go env GOPATH)/bin/go-licenses" . "$RUNNER_TEMP/licences" .
 ```
 
 The separate modules need a second job, because each runs with the Go version its own `go.mod` names (`ci.yml` sets `GOTOOLCHAIN: local`, which is deliberate and stays). `third_party/forked/kubeai` says `go 1.27.3` and the root says `go 1.26.0`, so under the root's toolchain go-licenses fails there. That is loud, not silent: a copy of the module with `go 1.99` made both `check` and `report` exit 1 with "go.mod requires go >= 1.99 (running go 1.27.3; GOTOOLCHAIN=local)". The matrix lists the modules by hand, so a guard step fails when a `go.mod` appears that the matrix lacks. `kcp` is listed with `min_rows: 0` as a known zero: its only file has a build tag, so go-licenses checks nothing there.
@@ -247,11 +270,10 @@ The separate modules need a second job, because each runs with the Go version it
         run: |
           go install "github.com/google/go-licenses/v2@${GO_LICENSES_VERSION}"
           gl="$(go env GOPATH)/bin/go-licenses"
-          list=$(grep -v '^#' hack/allowed-licenses.txt | paste -sd, -)
-          cd "$MODULE"
-          rows=$("$gl" report ./... 2>/dev/null | wc -l)
+          rows=$(cd "$MODULE" && "$gl" report ./... 2>/dev/null | wc -l)
           [ "$rows" -ge "$MIN_ROWS" ] || { echo "::error::go-licenses saw $rows packages in $MODULE, expected at least $MIN_ROWS"; exit 1; }
-          "$gl" check ./... --allowed_licenses="$list"
+          # A module under third_party/ carries its own LICENSE: its own packages are not exempt.
+          hack/licence-check.sh "$gl" . "$RUNNER_TEMP/licences" "$MODULE"
 ```
 
 Notes on the jobs. Attaching the SBOM to a release is a step of the release workflow, outside this job. The HBEP-15 fixture test (`licence-fixtures.sh`) belongs in the same PR as a separate step. The jobs were not run on GitHub Actions: the pieces were run on this VM by `reproduce.sh`, with Go 1.27.3 where the root job will use the 1.26.0 that `go.mod` names (go-licenses v2.0.1 itself says `go 1.23.0`, so installing it there should work), and a few details (`python3 -m venv` and `pip` on the runner) are untested.
@@ -262,14 +284,15 @@ Notes on the jobs. Attaching the SBOM to a release is a step of the release work
 - Test plan, SBOM item: met by `compare.py` against `go version -m`, for the binary mode. Say "binary mode" in the HBEP, since a source SBOM lists unlinked modules.
 - Test plan, licence item: confirmed that go-licenses fails on an off-list and on an unknown licence (the fixtures).
 - Licence allowlist: add that "Google patent licence for Go" cannot be passed to go-licenses; it needs a note or an exception, not a list entry.
-- The check cannot pass for the repository's own packages until a `LICENSE` exists (open question 1). It is the one failure today.
+- The check cannot pass for the repository's own packages until a `LICENSE` exists (open question 1). It is the one failure today, and the CI step permits exactly that one case, per package and per module, until the owner decides on a `LICENSE`. A prefix `--ignore` would hide other repositories and nested modules that share the path text, so HBEP-15 should not name it.
 - Operational readiness 1 reads as if the SBOM carries licences. It does not in binary mode; the text should point at `LICENSES/` and the go-licenses report.
-- The licence check needs one run per `go.mod` under `third_party/`, each with the Go version that module names, and a guard against a run that sees no package.
+- The licence check needs one run per `go.mod` under `third_party/`, each with the Go version that module names, and a guard against a run that sees no package. Every run's status must reach the job's: a failing nested module must fail the job, not only be logged.
 
 ## Unknowns
 
 - Job images: no image was scanned. The table above rests on documentation, and the claim "bom does not read OCI layouts or SIF" rests on the absence of any mention in its README and help.
-- Only `linux/amd64` and one binary. The controller binary is not on main yet; a binary with a `replace` directive or an upper-case module path was not tested on real data (only the unit tests cover them).
+- Only `linux/amd64` and one binary. The controller binary is not on main yet; a binary with a `replace` directive or an upper-case module path was not tested on real data (only the unit tests cover them). So how bom and syft record a replaced module is unknown: `compare.py` requires the replacement's own path and version, which is what the Go toolchain says the binary contains, and would fail a tool that names only the original.
+- What a binary built without a stamped version (`(devel)`, e.g. `-buildvcs=false`) looks like in each tool's SBOM. `compare.py` accepts an empty or `(devel)` main-module version for it and nothing else; a tool that invents a version for it would fail, and that has not been seen.
 - The sigstore signatures of the releases were not verified (no cosign on the VM); the sha256 values come from the same release page as the files.
 - Where go-licenses stops searching upward for a licence file, and so whether a root `LICENSE` will cover packages in the nested modules of `spikes/`.
 - Whether go-licenses accepts "A or B" licence expressions in one file: it reports every licence text it finds, and each must be on the list.
@@ -289,5 +312,5 @@ Notes on the jobs. Attaching the SBOM to a release is a step of the release work
 
 ## Files
 
-- `reproduce.sh`: the whole run. `compare.py` and `test_compare.py`: the comparison and its tests. `licence-fixtures.sh`: the hand-written licence fixtures. `allowed-licenses.txt`: the allowlist as transcribed.
+- `reproduce.sh`: the whole run. `compare.py` and `test_compare.py`: the comparison and its tests. `licence-check.sh`, `licence_gate.py` and `test_licence_gate.py`: the licence check for a repository and its nested modules, the gate that decides which failures are permitted, and the gate's tests. `licence-fixtures.sh`: the hand-written licence fixtures and fixture repositories. `allowed-licenses.txt`: the allowlist as transcribed.
 - `results/`: both SBOMs, the reference, the comparison output (binary and source), the validator output, the go-licenses report and check output, the nested-module output, the fixture output.
