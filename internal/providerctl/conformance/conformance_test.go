@@ -411,6 +411,24 @@ func TestConformance(t *testing.T) {
 		t.Errorf("submit time %v is not within this run (clock skew or a wrong zone)", o.SubmitTime)
 	}
 	job1 := a.Annotations[v1alpha1.AnnotationJobID]
+	// The queue wait is in the Provider's status once, with the job's own
+	// submit and start times, and the Allocation says it is recorded.
+	var prov v1alpha1.Provider
+	if err := w.c.Get(ctx, client.ObjectKey{Name: "conformance"}, &prov); err != nil {
+		t.Fatal(err)
+	}
+	found := 0
+	for _, qw := range prov.Status.QueueWaits {
+		if qw.JobID == job1 {
+			found++
+			if o.SubmitTime == nil || o.StartTime == nil || !qw.SubmitTime.Equal(o.SubmitTime) || !qw.StartTime.Equal(o.StartTime) {
+				t.Errorf("the queue wait's times are not the job's")
+			}
+		}
+	}
+	if found != 1 || !o.QueueWaitRecorded {
+		t.Errorf("the job's queue wait is recorded %d times (queueWaitRecorded %v), want once", found, o.QueueWaitRecorded)
+	}
 
 	// 2. Cancel-all on delete, while the job runs: deleting the first
 	// Allocation cancels its job; the finalizer goes once nothing with the tag
