@@ -299,7 +299,7 @@ func (r *Reconciler) setDialHome(ctx context.Context, provider string, unreachab
 		if cur == nil || cur.Status != metav1.ConditionTrue || registeredAt.Before(cur.LastTransitionTime.Add(time.Second)) {
 			return nil
 		}
-		status, reason = metav1.ConditionFalse, reasonAgentRegistered
+		status, reason = metav1.ConditionFalse, v1alpha1.ReasonAgentRegistered
 	}
 	c := metav1.Condition{Type: v1alpha1.ConditionDialHomeUnreachable, Status: status, Reason: reason, Message: msg, LastTransitionTime: metav1.NewTime(now)}
 	if cur != nil && cur.Status == status {
