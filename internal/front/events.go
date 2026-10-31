@@ -5,12 +5,12 @@ import (
 	"sync"
 
 	coordinationv1 "k8s.io/api/coordination/v1"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/events"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
 // HBEP-8's event type the front emits, and its reason codes. CapacityDropped
@@ -41,9 +41,9 @@ type KubeRecorder struct{ R events.EventRecorder }
 
 // Event implements Recorder.
 func (k KubeRecorder) Event(obj runtime.Object, warning bool, typ, code, message string) {
-	et := corev1.EventTypeNormal
+	et := provider.EventKindOrdinary
 	if warning {
-		et = corev1.EventTypeWarning
+		et = provider.EventKindWarning
 	}
 	k.R.Eventf(obj, nil, et, code, typ, "%s", message)
 }
