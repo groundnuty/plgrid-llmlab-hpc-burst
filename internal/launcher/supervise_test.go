@@ -224,6 +224,9 @@ func TestSuperviseKillsAChildThatIgnoresTerm(t *testing.T) {
 	var log syncBuffer
 	stop := f.supervise(SuperviseOptions{TermGrace: 300 * time.Millisecond, Log: &log})
 	pid := f.awaitRunning().Proc.PID
+	// The fake ignores SIGTERM before it listens: until /healthz answers, a
+	// SIGTERM can still end it, which a loaded machine once showed.
+	awaitHealthy(t, f.ports.ControllerAddr())
 	t0 := time.Now()
 	if err := stop(); err != nil {
 		t.Fatal(err)
