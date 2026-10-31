@@ -378,20 +378,51 @@ type WorkerReport struct {
 // ProbeInterval, and the engine's metrics (HBEP-7, Reports). The counters are
 // cumulative since the process started, so the controller computes rates and
 // stalls from successive samples.
+//
+// The probe (ProbeOK, ConsecutiveProbeFailures) and the metrics are separate
+// reads. The metrics come from the engine's /metrics endpoint: RunningRequests,
+// WaitingRequests, GeneratedTokens, KVCacheUsage and ResponsesByStatus. A read
+// of it can fail while the probe passes, so a sample says which values it
+// holds and when they were read, and never fills a value it does not have
+// (`@hpc-burst-science-agent`, 31 Oct 2026):
+//
+//   - An absent value is unknown. The four gauges are pointers, so a sample that
+//     left one out decodes to nil and never to zero, which would read as an idle
+//     engine, an empty KV cache or a stalled counter. A nil ResponsesByStatus is
+//     unknown too; an empty map is a read that found no responses. An agent that
+//     could not read /metrics leaves the values out, or repeats the last ones it
+//     read, and keeps MetricsReadAt at its last success (nil when it has none);
+//     it never fills a value it did not read with zero.
+//   - MetricsReadAt is when the last successful /metrics read finished, by the
+//     agent's clock; the values in the sample are from that read.
+//   - The controller takes no gauge-based action while the metrics are stale,
+//     that is while MetricsReadAt is nil or older than MetricsStaleProbeIntervals
+//     probe intervals (Health.MetricsFresh): it treats every value above as
+//     unknown. The actions are the ones that read them, such as idle, KV
+//     pressure, the only-errors signal and the no-progress signal.
+//   - It compares the counters of two samples only when MetricsReadAt advanced
+//     between them. Otherwise a run of failed reads looks like a stall.
 type Health struct {
 	// Time is when the sample was taken.
 	Time time.Time `json:"time"`
 	// ProbeOK is the latest probe's result; ConsecutiveProbeFailures counts
-	// failed probes in a row up to it.
+	// failed probes in a row up to it. A failed /metrics read does not fail the
+	// probe.
 	ProbeOK                  bool  `json:"probeOK"`
 	ConsecutiveProbeFailures int32 `json:"consecutiveProbeFailures,omitempty"`
-	// RunningRequests and WaitingRequests are the engine's gauges.
-	RunningRequests int64 `json:"runningRequests"`
-	WaitingRequests int64 `json:"waitingRequests"`
-	// GeneratedTokens is the engine's generated-token counter.
-	GeneratedTokens int64 `json:"generatedTokens"`
-	// KVCacheUsage is the KV cache's use, from 0 to 1.
-	KVCacheUsage float64 `json:"kvCacheUsage"`
+	// MetricsReadAt is the time of the last successful /metrics read, the one
+	// the values below come from; nil when there has been none.
+	MetricsReadAt *time.Time `json:"metricsReadAt,omitempty"`
+	// RunningRequests and WaitingRequests are the engine's gauges; nil is
+	// unknown, not zero.
+	RunningRequests *int64 `json:"runningRequests,omitempty"`
+	WaitingRequests *int64 `json:"waitingRequests,omitempty"`
+	// GeneratedTokens is the engine's generated-token counter; nil is unknown,
+	// not zero.
+	GeneratedTokens *int64 `json:"generatedTokens,omitempty"`
+	// KVCacheUsage is the KV cache's use, from 0 to 1; nil is unknown, not
+	// zero.
+	KVCacheUsage *float64 `json:"kvCacheUsage,omitempty"`
 	// ResponsesByStatus counts the engine's responses by the status label the
 	// engine reports, verbatim. vLLM groups statuses into classes (its
 	// prometheus-fastapi-instrumentator has should_group_status_codes on), so
@@ -399,7 +430,7 @@ type Health struct {
 	// {"2xx": 1200, "5xx": 3};
 	// an engine that reports exact codes gives {"200": 1200, "500": 3}. The
 	// agent cannot turn classes into codes. Read server errors with
-	// ServerErrors, which counts both forms.
+	// ServerErrors, which counts both forms. nil is unknown.
 	ResponsesByStatus map[string]int64 `json:"responsesByStatus,omitempty"`
 }
 

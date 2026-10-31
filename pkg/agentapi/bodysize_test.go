@@ -123,8 +123,9 @@ func restOfReport(warm *WarmUpResult) Report {
 			Workers: []WorkerReport{{
 				Name: "worker-0", Phase: PartRunning, PID: 4242, StartTime: &start, ExitCode: &exit, Generation: 1,
 				EngineSocket: "/tmp/hb-run/worker-0.sock",
-				Health: &Health{Time: start, ProbeOK: true, RunningRequests: 12, WaitingRequests: 3, GeneratedTokens: 1 << 40,
-					KVCacheUsage: 0.5, ResponsesByStatus: map[string]int64{"200": 1200, "429": 3, "500": 2}},
+				Health: &Health{Time: start, ProbeOK: true, MetricsReadAt: &start, RunningRequests: Int64(12), WaitingRequests: Int64(3),
+					GeneratedTokens: Int64(1 << 40), KVCacheUsage: Float64(0.5),
+					ResponsesByStatus: map[string]int64{"200": 1200, "429": 3, "500": 2}},
 			}},
 			ServingEndpoint: "unix:///tmp/hb-run/serve.sock",
 			Key:             strings.Repeat("0123456789abcdef", 4),

@@ -6,20 +6,58 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
+// metricsSample is a sample whose probe passed and whose /metrics read finished
+// at now: MetricsReadAt is now, and every gauge is set, a zero explicitly. A
+// double built on it reads as an engine whose metrics are current and known;
+// the doubles that model an unreadable /metrics (HealthMetricsUnreadable,
+// HealthMetricsStale) do not use it.
+func metricsSample(now time.Time, running, waiting, tokens int64, kvCache float64) agentapi.Health {
+	read := now
+	return agentapi.Health{
+		Time: now, ProbeOK: true, MetricsReadAt: &read,
+		RunningRequests: agentapi.Int64(running), WaitingRequests: agentapi.Int64(waiting),
+		GeneratedTokens: agentapi.Int64(tokens), KVCacheUsage: agentapi.Float64(kvCache),
+	}
+}
+
 // HealthStalled is an engine that has stalled: eight requests running, none
-// waiting, and a generated-token counter that never changes. Its probe passes.
-// The controller restarts it once the counter has been unchanged for
+// waiting, and a generated-token counter that never changes. Its probe passes,
+// and its metrics are read at every sample (MetricsReadAt is the sample's
+// time). The controller restarts it once the counter has been unchanged for
 // noProgressTimeout, by the clock the test moves.
 func HealthStalled(now time.Time, _ Process) agentapi.Health {
-	return agentapi.Health{Time: now, ProbeOK: true, RunningRequests: 8, GeneratedTokens: 12345, KVCacheUsage: 0.5}
+	return metricsSample(now, 8, 0, 12345, 0.5)
 }
 
 // HealthSlowPrefill is an engine in a long prefill: one request running, none
 // waiting, and no token generated yet. The sample is the same at every
 // call; the test's clock decides how long the prefill has lasted, 1,100 s
-// (not restarted) or 30 min (restarted).
+// (not restarted) or 30 min (restarted). Its metrics are read at every sample.
 func HealthSlowPrefill(now time.Time, _ Process) agentapi.Health {
-	return agentapi.Health{Time: now, ProbeOK: true, RunningRequests: 1, KVCacheUsage: 0.05}
+	return metricsSample(now, 1, 0, 0, 0.05)
+}
+
+// HealthMetricsUnreadable is an engine whose probe passes but whose /metrics
+// cannot be read: no gauge, no counter, no responses by status, and no
+// MetricsReadAt, because there has been no successful read. Every value is
+// unknown, not zero, so the controller takes no gauge-based action on it.
+func HealthMetricsUnreadable(now time.Time, _ Process) agentapi.Health {
+	return agentapi.Health{Time: now, ProbeOK: true}
+}
+
+// HealthMetricsStale returns an engine that looks stalled, with the values of
+// HealthStalled, but whose last successful /metrics read was age before each
+// sample: MetricsReadAt is the sample's time minus age. With an age above twice
+// the agent's probe interval (agentapi.Health.MetricsFresh) the controller
+// treats the values as unknown, so it must not restart this engine for a stall
+// it cannot see; with a younger age the values count and it does.
+func HealthMetricsStale(age time.Duration) func(time.Time, Process) agentapi.Health {
+	return func(now time.Time, p Process) agentapi.Health {
+		h := HealthStalled(now, p)
+		read := now.Add(-age)
+		h.MetricsReadAt = &read
+		return h
+	}
 }
 
 // perProcessCount counts the samples taken of each worker process, for the
@@ -42,12 +80,7 @@ func (c perProcessCount) next(p Process) int64 {
 func HealthPlainLoad() func(time.Time, Process) agentapi.Health {
 	samples := perProcessCount{}
 	return func(now time.Time, p Process) agentapi.Health {
-		return agentapi.Health{
-			Time: now, ProbeOK: true,
-			RunningRequests: 256, WaitingRequests: 1000,
-			GeneratedTokens: 1000 * samples.next(p),
-			KVCacheUsage:    1,
-		}
+		return metricsSample(now, 256, 1000, 1000*samples.next(p), 1)
 	}
 }
 
@@ -58,7 +91,9 @@ func HealthPlainLoad() func(time.Time, Process) agentapi.Health {
 func HealthFailingProbes() func(time.Time, Process) agentapi.Health {
 	samples := perProcessCount{}
 	return func(now time.Time, p Process) agentapi.Health {
-		return agentapi.Health{Time: now, ConsecutiveProbeFailures: int32(samples.next(p)), KVCacheUsage: 0.1}
+		h := metricsSample(now, 0, 0, 0, 0.1)
+		h.ProbeOK, h.ConsecutiveProbeFailures = false, int32(samples.next(p))
+		return h
 	}
 }
 
@@ -70,9 +105,8 @@ func HealthFailingProbes() func(time.Time, Process) agentapi.Health {
 func HealthErrorsOnly() func(time.Time, Process) agentapi.Health {
 	samples := perProcessCount{}
 	return func(now time.Time, p Process) agentapi.Health {
-		return agentapi.Health{
-			Time: now, ProbeOK: true, KVCacheUsage: 0.1,
-			ResponsesByStatus: map[string]int64{"5xx": 10 * samples.next(p)},
-		}
+		h := metricsSample(now, 0, 0, 0, 0.1)
+		h.ResponsesByStatus = map[string]int64{"5xx": 10 * samples.next(p)}
+		return h
 	}
 }

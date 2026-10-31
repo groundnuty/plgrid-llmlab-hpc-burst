@@ -78,7 +78,10 @@ type Engine struct {
 	WarmUpRound func(n int32, req agentapi.WarmUpRequest) agentapi.WarmUpRound
 
 	// Health samples a running worker process. The Agent sets the sample's Time
-	// to now when the result has none. It is given the process, not the worker's
+	// to now when the result has none. It never sets MetricsReadAt or a gauge:
+	// a sample with no MetricsReadAt is an engine whose /metrics was never
+	// read, and its gauges are unknown, so a double that wants current metrics
+	// sets them (DefaultHealth and the Health doubles do). It is given the process, not the worker's
 	// name, because the counters of agentapi.Health are cumulative since the
 	// process started: a double whose counters rise must start them again for a
 	// new process (the doubles in this package key theirs by Process.PID).
@@ -199,8 +202,9 @@ func DefaultWarmUpRound(n int32, req agentapi.WarmUpRequest) agentapi.WarmUpRoun
 	return agentapi.WarmUpRound{Round: n, Requests: reqs}
 }
 
-// DefaultHealth is a healthy, idle engine: the probe passes, the gauges and
-// the token counter are zero and the KV cache is 10% used.
+// DefaultHealth is a healthy, idle engine: the probe passes, the metrics are
+// read at every sample (MetricsReadAt is the sample's time), the gauges and the
+// token counter are zero, set explicitly, and the KV cache is 10% used.
 func DefaultHealth(now time.Time, _ Process) agentapi.Health {
-	return agentapi.Health{Time: now, ProbeOK: true, KVCacheUsage: 0.1}
+	return metricsSample(now, 0, 0, 0, 0.1)
 }
