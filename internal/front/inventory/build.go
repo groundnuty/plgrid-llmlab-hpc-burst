@@ -217,19 +217,22 @@ func bounds(r *v1alpha1.Routing) (tight, loose int, err error) {
 var loadFactorPattern = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?$`)
 
 // Percent converts a load factor ("1.25") to KubeAI's MeanLoadPercentage
-// (125). KubeAI's setting is an integer, and the forked group's pick takes
-// nothing finer, so a factor with more than two decimals is rounded DOWN to a
-// whole percent: "1.006" is 100, not 101. That narrows the configured bound
-// and never widens it; rounding to the nearest percent would admit a member
-// whose load exceeds c x (T + 1) / n (c = 1.006, loads 101 and 98: the bound
-// is 100.6, and 101 percent admits the 101). The digits are cut, not a float
-// floored, since 1.15 x 100 is 114.99999999999999 in float64.
+// (125), exactly: the front never rounds the configured bound
+// (@hpc-burst-science-agent, 31 Oct 2026). KubeAI's setting, and the forked
+// group's pick, take a whole percent, so a factor with a nonzero third
+// decimal cannot be used as configured and is refused; a contracts PR limits
+// loadBound.tight and .loose to two decimals, so that cannot be admitted.
+// The digits are read as written, not through a float, since 1.15 x 100 is
+// 114.99999999999999 in float64.
 func Percent(f v1alpha1.LoadFactor) (int, error) {
 	bad := fmt.Errorf("load factor %q is not a decimal of at least 1", f)
 	if !loadFactorPattern.MatchString(string(f)) {
 		return 0, bad
 	}
 	whole, frac, _ := strings.Cut(string(f), ".")
+	if len(frac) > 2 && strings.Trim(frac[2:], "0") != "" {
+		return 0, fmt.Errorf("load factor %q has more than two decimals, which the front cannot use exactly", f)
+	}
 	n, err := strconv.ParseInt(whole, 10, 64)
 	if err != nil || n > (math.MaxInt-99)/100 {
 		return 0, bad

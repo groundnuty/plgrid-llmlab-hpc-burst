@@ -1,12 +1,13 @@
 package inventory
 
-// The load bound c is a decimal string ("1.006"), but KubeAI's setting, and
-// the forked group's pick, take a whole percent. Percent therefore cuts the
-// bound down to two decimals and never rounds it up: a member is admitted
-// while its load before the request is at most c x (T + 1) / n (HBEP-5, Load
-// bound and cap), and a rounded-up percent would admit one above that.
+// The load bound c is a decimal string, and KubeAI's setting, and the forked
+// group's pick, take a whole percent. The front uses the configured value
+// exactly and never rounds it (@hpc-burst-science-agent, 31 Oct 2026): a
+// factor with up to two decimals is its percent, and one it cannot use
+// exactly is refused, so nothing changes silently.
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -14,24 +15,32 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/balancer"
 )
 
-// The expected percents are the first two decimals of the string, worked by
-// hand. 1.15, 1.13 and 2.3 are the cases a float64 floor gets wrong: 1.15 x
-// 100 is 114.99999999999999 there.
-func TestPercentCutsTheDecimalsAndNeverRoundsUp(t *testing.T) {
+// The expected percents are the configured digits, worked by hand. 1.15,
+// 1.13 and 2.3 are the cases a float64 conversion gets wrong: 1.15 x 100 is
+// 114.99999999999999 there.
+func TestPercentUsesTheConfiguredValueExactly(t *testing.T) {
 	for _, c := range []struct {
 		in   string
 		want int
 	}{
 		{"1", 100}, {"1.0", 100}, {"1.00", 100}, {"01.5", 150},
 		{"1.25", 125}, {"2.0", 200}, {"3", 300}, {"1.1", 110},
-		{"1.15", 115}, {"1.13", 113}, {"2.3", 230},
-		{"1.01", 101}, {"1.006", 100}, {"1.005", 100}, {"1.019", 101},
-		{"1.999", 199}, {"1.2599", 125}, {"2.675", 267},
+		{"1.15", 115}, {"1.13", 113}, {"2.3", 230}, {"1.01", 101},
+		{"1.2500", 125}, {"1.010", 101}, // trailing zeros are the same value
 		{"9999999999999999", 999999999999999900}, // the API's 16-character maximum
 	} {
 		got, err := Percent(v1alpha1.LoadFactor(c.in))
 		if err != nil || got != c.want {
 			t.Errorf("Percent(%q) = %d, %v; want %d", c.in, got, err, c.want)
+		}
+	}
+}
+
+// A factor the front cannot use exactly is refused, not rounded.
+func TestPercentRefusesWhatItCannotUseExactly(t *testing.T) {
+	for _, in := range []string{"1.006", "1.005", "1.019", "1.999", "1.2599", "2.675"} {
+		if got, err := Percent(v1alpha1.LoadFactor(in)); err == nil {
+			t.Errorf("Percent(%q) = %d, nil; want an error, not a rounded percent", in, got)
 		}
 	}
 }
@@ -45,22 +54,21 @@ func TestPercentRefusesWhatTheAPIDoes(t *testing.T) {
 	}
 }
 
-// c = 1.006 over two members with loads 101 and 98 (T = 199, n = 2): the bound
-// is 1.006 x (199 + 1) / 2 = 100.6, so the member holding 101 is refused and
-// the request goes to the one holding 98. Rounded to the nearest percent the
-// bound would be 101, which admits the 101. With loads 100 and 99 the bound is
-// the same 100.6 and the member holding 100 is admitted: the floor to 100
-// percent does not refuse it either (100 <= 1.00 x 200 / 2).
-func TestAFractionalFactorNeverAdmitsAboveTheBound(t *testing.T) {
+// c = 1.01 over two members (T = 199, n = 2): the bound is 1.01 x (199 + 1)
+// / 2 = 101, the configured value unchanged. With loads 101 and 98 the
+// member holding 101 is admitted; with loads 102 and 97 the one holding 102
+// is refused and the request goes to the one holding 97. A bound rounded to
+// 100 or 102 would get one of the two wrong.
+func TestATwoDecimalFactorIsTheBoundExactly(t *testing.T) {
 	for _, c := range []struct {
 		loadA, loadB int
 		want         string
 	}{
-		{101, 98, "ns/ib"},
-		{100, 99, "ns/ia"},
+		{101, 98, "ns/ia"},
+		{102, 97, "ns/ib"},
 	} {
 		s := twoProviders()
-		tight, loose := v1alpha1.LoadFactor("1.006"), v1alpha1.LoadFactor("2.0")
+		tight, loose := v1alpha1.LoadFactor("1.01"), v1alpha1.LoadFactor("2.0")
 		s.Deployments[0].Spec.Routing = &v1alpha1.Routing{LoadBound: &v1alpha1.LoadBound{Tight: &tight, Loose: &loose}}
 		v := Build(s, Inputs{Now: now, HasTransport: all, MaxRequestDuration: 2 * time.Hour})
 		d := v.Models["m"].Served[0]
@@ -84,9 +92,28 @@ func TestAFractionalFactorNeverAdmitsAboveTheBound(t *testing.T) {
 			t.Fatal(err)
 		}
 		if r.Member != c.want {
-			t.Errorf("loads %d and %d at c = 1.006 (bound 100.6, tight percent %d): a key homed on %s landed on %s, want %s",
+			t.Errorf("loads %d and %d at c = 1.01 (bound 101, tight percent %d): a key homed on %s landed on %s, want %s",
 				c.loadA, c.loadB, d.TightPercent, a, r.Member, c.want)
 		}
+	}
+}
+
+// A deployment whose factor cannot be used exactly is not routed, and the
+// problem is logged: the bound never changes silently.
+func TestAnInexactFactorIsNotRouted(t *testing.T) {
+	s := twoProviders()
+	tight := v1alpha1.LoadFactor("1.006")
+	s.Deployments[0].Spec.Routing = &v1alpha1.Routing{LoadBound: &v1alpha1.LoadBound{Tight: &tight}}
+	v := Build(s, Inputs{Now: now, HasTransport: all, MaxRequestDuration: 2 * time.Hour})
+	if m := v.Models["m"]; m != nil && len(m.Served) > 0 {
+		t.Errorf("a deployment at c = 1.006 is routed with tight percent %d; want it refused", m.Served[0].TightPercent)
+	}
+	found := false
+	for _, p := range v.Problems {
+		found = found || strings.Contains(p, "1.006")
+	}
+	if !found {
+		t.Errorf("no problem names the factor 1.006: %v", v.Problems)
 	}
 }
 
