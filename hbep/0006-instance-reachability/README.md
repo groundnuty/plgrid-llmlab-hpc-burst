@@ -493,7 +493,7 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
 - 2026-10-31: implementable. Spike S1c (PR #78) and frp v0.71.1's source carried in. frp over `wss` with `tcpmux` routing by UID, admission by an frps server plugin (`Login`, `NewProxy` and `CloseProxy`; `Ping` unsubscribed), path state from frps's list, the front's deadlines and probe, S1's heartbeats, two ssh forwards in ssh mode with the owner's key restriction, and the owner's word on center consent. Every open question decided, not needed for alpha, or open for beta. HBEP-4, HBEP-5, HBEP-7 and HBEP-11 amended with it.
 - 2026-10-31: L-17.7 cited in Field lessons answered. The note on the development VM corrected: the ssh banner from the compute nodes was a gateway's sshd, as its host key showed (issue #18).
 - 2026-10-31: amendment from the owner's decision on the dial-home route (issue #18): ssh mode runs over the configured ssh port, 22 by default; open questions 4 and 8 corrected.
-- 2026-10-31: frpc's staging path stated as HBEP-4's, `frpc/<digest>/frpc` (wording; science-agent ruling for #101).
+- 2026-10-31: frpc's staging path stated as HBEP-4's, `frpc/<digest>/frpc` (wording only).
 
 ## Amendments
 
