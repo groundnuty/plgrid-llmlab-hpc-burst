@@ -115,10 +115,25 @@ import (
 //     value. The False message names the time of the last success, so it is the
 //     same at every pass. Conditions this controller does not own, such as
 //     DialHomeUnreachable, are kept as they were found.
-//   - Not modelled: the read-back (a renamed job is not refused, a job with
-//     another limit sets no SubmittedAsOther), the AdminHold condition, the
-//     adoption order (the lowest job ID is adopted), the sticky duplicates list
-//     of fallback mode, and the compare-and-swap conflicts.
+//   - The read-back (HBEP-4, The Slurm dialect), on every observe of the
+//     recorded job while the Allocation is not deleting. A job whose name is not
+//     the tag puts the observation in phase Refused with reason ReasonJobRenamed
+//     (exactly that string), sets the condition Synced False with that reason
+//     and a message naming both names, and is cancelled while it is live (so one
+//     scancel in the call log, however many Syncs follow). Refused, once set, is
+//     kept: a later Sync never overwrites its phase or reason, and neither does
+//     a Refused set by hand; the rest of the observation still follows the job.
+//     Otherwise a job whose partition, time limit or GPU count differs from
+//     spec.forProvider.batch sets the condition SubmittedAsOther True with
+//     reason ReasonReadBackMismatch and a message naming each differing field
+//     with both values (for example "timeLimit: requested 30m0s, got 20m0s");
+//     the condition is never cleared, the job is not cancelled, and the phase
+//     keeps mirroring the job.
+//   - Retention: every status written mirrors status.retention.effectiveMode
+//     from spec.retentionPolicy (RetentionPolicy.EffectiveMode: Keep when unset).
+//   - Not modelled: the AdminHold condition, the adoption order (the lowest job
+//     ID is adopted), the sticky duplicates list of fallback mode, and the
+//     compare-and-swap conflicts.
 //   - Times are written in whole seconds: metav1.Time keeps no more.
 type Controller struct {
 	Client   client.Client

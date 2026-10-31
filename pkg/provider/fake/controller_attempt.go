@@ -64,7 +64,7 @@ func (c *Controller) stall(ctx context.Context, p *pass, s *allocState) (resubmi
 		return false, nil
 	}
 	if age > c.unknownBound() {
-		s.cond = needsOperator(s.rec.Attempt, c.unknownBound(), p.now)
+		s.conds = append(s.conds, needsOperator(s.rec.Attempt, c.unknownBound(), p.now))
 	}
 	showAttempt(s)
 	return false, nil
@@ -102,8 +102,8 @@ func (c *Controller) attemptReleased(s *allocState, now time.Time) bool {
 // needsOperator is the SubmissionResolved condition of an attempt that is still
 // Unknown after the Unknown bound. Its message carries no time, so the
 // condition does not change from one pass to the next.
-func needsOperator(attempt int32, bound time.Duration, now time.Time) *xpv2.Condition {
-	return &xpv2.Condition{
+func needsOperator(attempt int32, bound time.Duration, now time.Time) xpv2.Condition {
+	return xpv2.Condition{
 		Type:               v1alpha1.ConditionSubmissionResolved,
 		Status:             corev1.ConditionFalse,
 		Reason:             v1alpha1.ReasonNeedsOperator,
@@ -120,11 +120,11 @@ func (s *allocState) markResolved(now time.Time, message string) {
 	if s.a.GetCondition(v1alpha1.ConditionSubmissionResolved).Status != corev1.ConditionFalse {
 		return
 	}
-	s.cond = &xpv2.Condition{
+	s.conds = append(s.conds, xpv2.Condition{
 		Type:               v1alpha1.ConditionSubmissionResolved,
 		Status:             corev1.ConditionTrue,
 		Reason:             v1alpha1.ReasonResolved,
 		LastTransitionTime: metav1.NewTime(now),
 		Message:            message,
-	}
+	})
 }

@@ -23,10 +23,11 @@ type allocState struct {
 	obs *v1alpha1.AllocationObservation
 	// rec is the submission record, nil when there is none.
 	rec *v1alpha1.SubmissionRecord
-	// cond is the SubmissionResolved condition to set, nil to leave the stored
-	// one as it is. It is applied in writeStatus, after the last Update: an
-	// Update restores a.Status from the store and would drop it.
-	cond *xpv2.Condition
+	// conds are the conditions to set (SubmissionResolved, SubmittedAsOther,
+	// Synced); a stored condition of another type is left as it is. They are
+	// applied in writeStatus, after the last Update: an Update restores
+	// a.Status from the store and would drop them.
+	conds []xpv2.Condition
 }
 
 // syncAllocation handles one Allocation, in the order: metadata, deletion, the
@@ -82,18 +83,22 @@ func (c *Controller) syncMetadata(ctx context.Context, s *allocState) error {
 	return nil
 }
 
-// writeStatus writes the status, unless neither the observation nor the
-// condition changed, and returns err (the earlier failure of the same
-// Allocation, which does not stop the write) joined with the write's own.
+// writeStatus writes the status, unless neither the observation, the
+// conditions nor the retention changed, and returns err (the earlier failure of
+// the same Allocation, which does not stop the write) joined with the write's
+// own. Every write mirrors the spec's retention mode into
+// status.retention.effectiveMode (Keep when the spec sets none).
 func (c *Controller) writeStatus(ctx context.Context, s *allocState, err error) error {
-	stored := append([]xpv2.Condition(nil), s.a.Status.Conditions...)
-	if s.cond != nil {
-		s.a.SetConditions(*s.cond)
-	}
-	if apiequality.Semantic.DeepEqual(s.prior, s.obs) && apiequality.Semantic.DeepEqual(stored, s.a.Status.Conditions) {
+	storedConds := append([]xpv2.Condition(nil), s.a.Status.Conditions...)
+	storedRetention := s.a.Status.Retention.DeepCopy()
+	s.a.SetConditions(s.conds...)
+	retention := &v1alpha1.RetentionStatus{EffectiveMode: s.a.Spec.RetentionPolicy.EffectiveMode()}
+	if apiequality.Semantic.DeepEqual(s.prior, s.obs) && apiequality.Semantic.DeepEqual(storedConds, s.a.Status.Conditions) &&
+		apiequality.Semantic.DeepEqual(storedRetention, retention) {
 		return err
 	}
 	s.a.Status.AtProvider = *s.obs // after the last Update, which restores the stored status
+	s.a.Status.Retention = retention
 	if uerr := updateStatus(ctx, c.Client, s.a); uerr != nil {
 		return errors.Join(err, fmt.Errorf("update status: %w", uerr))
 	}
@@ -117,13 +122,23 @@ func (c *Controller) observe(ctx context.Context, p *pass, s *allocState) error 
 		return settleErr
 	}
 	c.mirror(p, s, id, job, found)
-	return errors.Join(settleErr, c.recordQueueWait(ctx, s, id, job, found))
+	errs := []error{settleErr, c.recordQueueWait(ctx, s, id, job, found)}
+	if found {
+		errs = append(errs, c.readBack(ctx, p, s, job))
+	}
+	return errors.Join(errs...)
 }
 
 // mirror writes what the read of the recorded job showed into the observation.
 func (c *Controller) mirror(p *pass, s *allocState, id string, job provider.Job, found bool) {
 	obs := s.obs
 	obs.JobID, obs.Submission = id, s.rec
+	// Refused is kept once set, whatever the job does afterwards.
+	defer func() {
+		if s.prior.Phase == v1alpha1.AllocationRefused {
+			obs.Phase, obs.Reason = s.prior.Phase, s.prior.Reason
+		}
+	}()
 	if !found {
 		if obs.AbsentSince == nil {
 			obs.AbsentSince = mt(p.now)
