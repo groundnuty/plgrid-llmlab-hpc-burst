@@ -2,8 +2,6 @@ package fake
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -92,14 +90,15 @@ type worker struct {
 }
 
 // NewAgent returns an Agent that talks to b as c and takes the time from now
-// (time.Now when nil). When c.AgentInstanceID is empty, the Agent draws a random one of
-// 32 hex characters.
+// (time.Now when nil). When c.AgentInstanceID is empty, the Agent draws one with
+// agentapi.NewAgentInstanceID, as the real agent does; a given one is kept as
+// the test set it, so a test can present a malformed one to see it refused.
 func NewAgent(b agentapi.Backend, c agentapi.Caller, now func() time.Time, e Engine) *Agent {
 	if now == nil {
 		now = time.Now
 	}
 	if c.AgentInstanceID == "" {
-		c.AgentInstanceID = randHex(16)
+		c.AgentInstanceID = newAgentInstanceID()
 	}
 	return &Agent{
 		Registration: agentapi.RegisterRequest{
@@ -157,7 +156,7 @@ func (a *Agent) LastReport() (agentapi.Report, bool) {
 // starts whatever it is told to run from nothing, with a new key. Seen,
 // LastReport, Starts, the PID counter and a Silence in force carry over.
 func (a *Agent) Requeue() {
-	a.caller.AgentInstanceID = randHex(16)
+	a.caller.AgentInstanceID = newAgentInstanceID()
 	a.Registration.RestartCount++
 	a.registered = false
 	a.stopping = false
@@ -324,10 +323,23 @@ func isNotRegistered(err error) bool {
 	return errors.As(err, &e) && e.Code == agentapi.CodeNotRegistered
 }
 
-func randHex(nBytes int) string {
-	b := make([]byte, nBytes)
-	if _, err := rand.Read(b); err != nil {
-		panic(fmt.Sprintf("fake: random bytes: %v", err))
+// newAgentInstanceID draws an agent instance ID of the pinned form
+// (agentapi.NewAgentInstanceID). crypto/rand cannot fail in the Go versions this
+// module needs (it ends the program instead), so an error is a bug here.
+func newAgentInstanceID() string {
+	id, err := agentapi.NewAgentInstanceID()
+	if err != nil {
+		panic(fmt.Sprintf("fake: %v", err))
 	}
-	return hex.EncodeToString(b)
+	return id
+}
+
+// newKey draws an Instance key of the pinned form (agentapi.NewKey), as the
+// real agent does at Instance start.
+func newKey() string {
+	k, err := agentapi.NewKey()
+	if err != nil {
+		panic(fmt.Sprintf("fake: %v", err))
+	}
+	return k
 }

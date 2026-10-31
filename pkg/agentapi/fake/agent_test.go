@@ -62,14 +62,14 @@ func TestFirstStepRegistersPollsAndReportsIdle(t *testing.T) {
 
 func TestNewAgentKeepsAGivenAgentInstanceIDAndRegistrationOverride(t *testing.T) {
 	b := fake.NewBackend()
-	a := fake.NewAgent(b, caller("agent-example"), (&clock{t: t0}).Now, fake.Engine{})
-	eq(t, "AgentInstanceID", a.AgentInstanceID(), "agent-example")
+	a := fake.NewAgent(b, caller(agent1), (&clock{t: t0}).Now, fake.Engine{})
+	eq(t, "AgentInstanceID", a.AgentInstanceID(), agent1)
 	a.Registration = agentapi.RegisterRequest{Node: "node-other", CPUArch: "x86_64"}
 	if err := a.Step(bgndCtx); err != nil {
 		t.Fatal(err)
 	}
 	regs := b.Registrations(allocUID)
-	if len(regs) != 1 || regs[0].Caller.AgentInstanceID != "agent-example" {
+	if len(regs) != 1 || regs[0].Caller.AgentInstanceID != agent1 {
 		t.Fatalf("registrations = %+v", regs)
 	}
 	eq(t, "Request", regs[0].Request, agentapi.RegisterRequest{Node: "node-other", CPUArch: "x86_64"})

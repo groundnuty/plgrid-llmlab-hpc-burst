@@ -47,7 +47,7 @@ func (a *Agent) applyRun(i agentapi.DesiredInstance, now time.Time) {
 		a.inst = nil
 	}
 	if a.inst == nil {
-		a.inst = &instance{uid: i.UID, generation: i.Generation, key: randHex(32), stageStart: now, stageGen: i.Generation}
+		a.inst = &instance{uid: i.UID, generation: i.Generation, key: newKey(), stageStart: now, stageGen: i.Generation}
 	}
 	in := a.inst
 	in.keyStored = i.KeyStored
