@@ -387,8 +387,10 @@ func TestConformance(t *testing.T) {
 	if a.Annotations[v1alpha1.AnnotationHoldLifted] != a.Annotations[v1alpha1.AnnotationJobID] {
 		t.Error("the hold-lifted marker does not name the job")
 	}
-	if c := a.GetCondition(v1alpha1.ConditionSubmittedAsOther); c.Status != "False" {
-		t.Errorf("read-back: SubmittedAsOther is %s (%s): %s", c.Status, c.Reason, c.Message)
+	// A read-back that matches sets no condition (api/v1alpha1,
+	// ReasonReadBackMismatch); True would name the differing fields.
+	if c := a.GetCondition(v1alpha1.ConditionSubmittedAsOther); c.Status == "True" {
+		t.Errorf("read-back: SubmittedAsOther is True (%s): %s", c.Reason, c.Message)
 	}
 	o := a.Status.AtProvider
 	if o.StartTime == nil || o.HardEnd == nil || o.HardEnd.Sub(o.StartTime.Time) != 5*time.Minute {
