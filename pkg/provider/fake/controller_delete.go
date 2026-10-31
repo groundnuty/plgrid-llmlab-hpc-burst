@@ -58,6 +58,13 @@ func (c *Controller) syncDeleting(ctx context.Context, p *pass, s *allocState) e
 	if unresolved(s.rec) && a.Annotations[v1alpha1.AnnotationJobID] == "" && !c.attemptReleased(s, p.now) {
 		return nil // an unresolved attempt keeps the finalizer
 	}
+	// The accounting record is written before the files and the finalizer go,
+	// from the reads above; it may keep the finalizer for the final read.
+	if wait, err := c.keepAccounting(ctx, p, s, jobs); err != nil {
+		return err
+	} else if wait {
+		return nil
+	}
 	if err := c.Batch.RemoveAllocationFiles(ctx, s.tag); err != nil {
 		return fmt.Errorf("remove files: %w", err)
 	}

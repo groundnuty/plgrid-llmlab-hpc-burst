@@ -101,8 +101,12 @@ import (
 //     attempt with no job found is unresolved, and keeps the finalizer, until
 //     the rules above release it: in hold mode InflightWindow has passed, in
 //     fallback mode the abandon-attempt annotation names it. An Unknown attempt
-//     whose job is found is recorded Done, and the job cancelled. Status is not
-//     written for a deleting Allocation.
+//     whose job is found is recorded Done, and the job cancelled. The accounting
+//     record (below) is written after the last of these checks and before the
+//     files and the finalizer go. Status is not written for a deleting
+//     Allocation, with one exception: the pass that first finds the started
+//     recorded job in neither source sets status.atProvider.absentSince, and
+//     only that field, as the anchor of the accounting wait (below).
 //   - Queue waits (docs/development.md, Queue waits): when the observed job has
 //     a start time and the stored atProvider.queueWaitRecorded is false, the
 //     wait (the job's submit and start times) is written to the Provider's
@@ -117,6 +121,48 @@ import (
 //     oldest start first, whatever the order the jobs were observed in. A
 //     restarted Controller (a new value on the same client) keeps all of this,
 //     because it lives in the status.
+//   - Live accounting (HBEP-8, Provider accounting): on every observe that finds
+//     the recorded job, status.atProvider.accounting is provider.AccountingOf
+//     over the job, the requested GPU count and the stored accounting: nil while
+//     the job has not started, then the allocated counts, the elapsed seconds
+//     (running: from the start time to the pass time; ended: end minus start from
+//     the queue listing, or accounting's summed elapsed time) and readTime, the
+//     pass time. A job absent from both sources keeps the stored accounting, and
+//     a failed read keeps the whole stored status. The status of a started job
+//     is therefore written at every pass, since readTime moves.
+//   - The accounting read, once per execution of a job per Controller value (a
+//     requeued job that starts again is read again): when the observed
+//     job has a start time and the stored accounting has no allocatedCPUs, the
+//     Controller calls Batch.ReadAccounting (op "sacct-job" in the call log) and
+//     takes the counts from it. A read that fails is retried at the next pass; a
+//     read that succeeds but finds nothing counts as the one read. Any other
+//     pass makes no such call. The read counts as a Batch read of the pass, and
+//     a failed one as a failed read (the Provider's Ready rests on it). A new
+//     Controller value on the same client reads again only for a job whose
+//     stored accounting still lacks the CPU count.
+//   - The kept record (HBEP-8): when a deleting Allocation has no live job and
+//     no unresolved attempt, and before its files and finalizer go, the
+//     Controller creates the ControllerRevision acct-<Allocation UID> with
+//     v1alpha1.NewAccountingRecord: the Provider, the batch partition, the tag,
+//     the IDs of every job read with the tag in numeric order (and the recorded
+//     job's ID if no read showed it), the counts and elapsed seconds of
+//     AccountingOf over the jobs this deleting pass already read, and the
+//     recorded job's start and end times. It makes no Batch call of its own.
+//     The recorded job is the one the job-ID annotation names; with no job ID
+//     and no job carrying the tag, nothing is written. It is created only if
+//     absent: an AlreadyExists is success, and the record is never updated,
+//     read back or owned by the Allocation. A failed create keeps the finalizer
+//     and fails the pass for that Allocation. A job that never started has every
+//     hours field unknown and its end time if it has one, written at once.
+//   - The accounting wait: a recorded job that neither the tag lookup nor a read
+//     by ID shows (Batch.Vanish), with status.atProvider.startTime set, keeps the
+//     finalizer for at most LostGrace, counted from status.atProvider.absentSince
+//     (set by the first such pass, kept if a live Lost pass set it earlier, so a
+//     restarted Controller keeps the wait). While now minus absentSince is at most
+//     LostGrace the record is absent; one second later it is written with the
+//     elapsed and end times unknown and the counts and start time of the stored
+//     status. A job never seen started is written at once, with nothing known. A
+//     failed read is not absence: it keeps the finalizer and sets no anchor.
 //   - A later hard end: atProvider.hardEnd is re-read on every observe, so a
 //     Batch.SetTimeLimit shows in it at the next Sync.
 //   - The Provider's status, readiness (docs/development.md, Provider
@@ -167,7 +213,9 @@ type Controller struct {
 	Batch    *Batch
 	Clock    *Clock
 	// LostGrace is how long a recorded job may be absent from both sources
-	// before the phase is Lost; zero means 2 minutes.
+	// before the phase is Lost, and how long a deleting Allocation waits for the
+	// final read before it writes its accounting record with the elapsed time
+	// unknown; zero means 2 minutes.
 	LostGrace time.Duration
 	// RejectBackoff is how long after a Rejected attempt the next one waits;
 	// zero means 1 minute.
@@ -190,6 +238,11 @@ type Controller struct {
 	// Allocation's credential file and an agent build, as the real provider
 	// does; nil checks none of them.
 	Prerequisites *Prerequisites
+
+	// accountingRead holds the executions (job ID and start time) this Controller
+	// value has made its one accounting read of (liveAccounting). A new value starts empty; Sync does
+	// not run concurrently with itself.
+	accountingRead map[string]struct{}
 }
 
 const (
