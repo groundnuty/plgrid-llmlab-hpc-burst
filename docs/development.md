@@ -135,6 +135,8 @@ Kubernetes' explicit ±1-minor skew rule is written for kubectl. client-go inste
 
 ### The licence check
 
+**Disabled since 31 Oct 2026.** The owner dropped licence checking ("I don't care about those licenses, so feel free to disable this job for now"), so both jobs below carry `if: false`. The scripts and fixtures in `hack/` are kept, and deleting the two `if: false` lines switches the check back on. Provenance is still recorded: every reuse names its origin and URL.
+
 HBEP-15's licence check runs in two CI jobs, **not yet required checks**: they become required only after they have been green on main (HBEP-15's protocol), and a matrix job's name, `licences (<module>)`, changes when a module is added.
 
 - **`licence-modules`** runs the tests of the licence scripts (`hack/test_licence*.py`, Python standard library only, no Go; run them with `python3 -I -m unittest discover -s hack -p 'test_licence*.py' -v`), then `hack/test-licence-fixtures.sh` with the pinned go-licenses (see below), then `hack/licence-modules.sh --json .`. That lists every `go.mod` outside the top-level `spikes/`, found by a search of the whole tree, so a module added anywhere is checked without editing the workflow. Spikes are outside the check (HBEP-15). The search refuses, and names, a directory symlink anywhere outside `spikes/` (find does not follow one, so a module behind it would be left out), and a module directory whose name has a newline, another control character or a character outside `A-Z a-z 0-9 . _ - /`.

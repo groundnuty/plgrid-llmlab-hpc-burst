@@ -333,6 +333,10 @@ jobs:
   # allowlist and the known-zero list), never in spikes/. The check is strict: no exemption.
   licence-modules:
     name: licence-modules
+    # Disabled: the owner dropped licence checking on 31 Oct 2026 ("I don't care about those
+    # licenses, so feel free to disable this job for now"). hack/ and its fixtures are kept;
+    # delete the if: line here and in licences to switch the check back on.
+    if: false
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -382,6 +386,8 @@ jobs:
   licences:
     name: licences (${{ matrix.module }})
     needs: licence-modules
+    # Disabled with licence-modules above (the owner's decision, 31 Oct 2026).
+    if: false
     runs-on: ubuntu-24.04
     # With no cache restored, the root module runs go-licenses four times over the Kubernetes
     # libraries (plain, with tests, and the negative control).
