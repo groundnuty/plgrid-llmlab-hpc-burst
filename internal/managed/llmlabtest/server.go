@@ -235,11 +235,13 @@ func (s *Server) URL() string { return s.srv.URL }
 // managed credentials file names it: URL()+"/v1".
 func (s *Server) BaseURL() string { return s.srv.URL + "/v1" }
 
-// Close stops the Server. Waiting requests end at once, with no answer.
+// Close stops the Server. Waiting requests end at once, with no answer. The
+// connections go first: a waiting handler that woke before them would return
+// without writing, and net/http would then answer 200 with an empty body.
 func (s *Server) Close() {
 	s.closeOnce.Do(func() {
-		close(s.closed)
 		s.srv.CloseClientConnections()
+		close(s.closed)
 		s.srv.Close()
 	})
 }
@@ -260,26 +262,39 @@ func (s *Server) AddKey(key string) { s.change(func() { s.keys[key] = keyState{}
 func (s *Server) RemoveKey(key string) { s.change(func() { delete(s.keys, key) }) }
 
 // ExpireKeyAt makes key fail with 401 from t on, by the Server's clock
-// (L-6.4). The zero time clears the expiry.
+// (L-6.4). The zero time clears the expiry. It panics for a key the Server
+// does not have, one never added or one removed: a call on such a key would
+// make it valid again.
 func (s *Server) ExpireKeyAt(key string, t time.Time) {
 	s.change(func() {
-		st := s.keys[key]
+		st := s.mustKey("ExpireKeyAt", key)
 		st.expiry = t
 		s.keys[key] = st
 	})
 }
 
 // RejectKey answers every request with key with status, 401 or 403; 0
-// accepts the key again. It panics on any other status.
+// accepts the key again. It panics on any other status, and for a key the
+// Server does not have (see ExpireKeyAt).
 func (s *Server) RejectKey(key string, status int) {
 	if status != 0 && status != http.StatusUnauthorized && status != http.StatusForbidden {
 		panic(fmt.Sprintf("llmlabtest: RejectKey status %d: want 0, 401 or 403", status))
 	}
 	s.change(func() {
-		st := s.keys[key]
+		st := s.mustKey("RejectKey", key)
 		st.reject = status
 		s.keys[key] = st
 	})
+}
+
+// mustKey returns the state of a key the Server has. The panic does not name
+// the key, so a real key never reaches a test log. It runs under the lock.
+func (s *Server) mustKey(method, key string) keyState {
+	st, ok := s.keys[key]
+	if !ok {
+		panic("llmlabtest: " + method + ": the Server has no such key (never added, or removed)")
+	}
+	return st
 }
 
 // EchoKey makes every error body carry the request's Authorization header.
