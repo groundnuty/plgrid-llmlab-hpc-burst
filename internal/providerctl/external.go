@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
@@ -32,6 +33,9 @@ type shared struct {
 	kube   client.Client // writes, under the provider's field manager
 	reader client.Reader // reads from the API server, not the cache
 	builds *buildCache
+	// finals are the recorded jobs whose end this controller read from
+	// accounting: they are not read again (external.final).
+	finals sync.Map
 }
 
 // connector implements managed.ExternalConnector.

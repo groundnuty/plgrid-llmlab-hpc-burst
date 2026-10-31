@@ -78,6 +78,7 @@ func (e *external) observeDeleting(ctx context.Context, a *v1alpha1.Allocation, 
 		return exists, fmt.Errorf("remove the Allocation's files: %w", err)
 	}
 	e.p.SetBusy(name, false)
+	e.s.finals.Delete(rec.jobID)
 	return missing, nil
 }
 

@@ -7,6 +7,8 @@ package providerctl
 // a second New call over the same client. Counts come from the fake's call log.
 
 import (
+	"context"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +18,7 @@ import (
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider/fake"
 )
@@ -69,8 +72,8 @@ func TestTwoReconcilersOnOneAllocationSubmitOnce(t *testing.T) {
 			if m.hold {
 				wantLifts = 1
 			}
-			if n := e.lifts(); n != wantLifts {
-				t.Errorf("%d lifts, want %d", n, wantLifts)
+			if n, all := e.lifts(), ptLiftAttempts(e); n != wantLifts || all != wantLifts {
+				t.Errorf("%d lifts applied, %d release calls in all, want %d of each", n, all, wantLifts)
 			}
 		})
 	}
@@ -79,7 +82,9 @@ func TestTwoReconcilersOnOneAllocationSubmitOnce(t *testing.T) {
 // Whatever the interleaving (HBEP-7: "at most one job per Allocation running,
 // whatever the timing"): two reconcilers run at once, one of them delayed in
 // its sbatch, and the second races the release. The counts are checked from the
-// call log: 1 sbatch, and in hold mode at most 1 lift, then exactly 1.
+// call log: 1 sbatch, and in hold mode at most 1 scontrol release call of any
+// result, then exactly 1 (Astra B8: a second release that found the job no
+// longer held would not show in the applied lifts).
 func TestTwoReconcilersRacingNeverSubmitOrLiftTwice(t *testing.T) {
 	for _, m := range ptModes {
 		t.Run(m.name, func(t *testing.T) {
@@ -107,8 +112,8 @@ func TestTwoReconcilersRacingNeverSubmitOrLiftTwice(t *testing.T) {
 				if n := e.count("sbatch"); n != 1 {
 					t.Fatalf("run %d: %d sbatch calls, want 1", i, n)
 				}
-				if n := e.lifts(); n > 1 {
-					t.Fatalf("run %d: %d lifts in the race, want at most 1", i, n)
+				if n := ptLiftAttempts(e); n > 1 {
+					t.Fatalf("run %d: %d release calls in the race, want at most 1 (Astra B8: count every call, not only the applied ones)", i, n)
 				}
 				e.run("a", 4)
 				if n := e.count("sbatch"); n != 1 {
@@ -118,8 +123,8 @@ func TestTwoReconcilersRacingNeverSubmitOrLiftTwice(t *testing.T) {
 				if m.hold {
 					wantLifts = 1
 				}
-				if n := e.lifts(); n != wantLifts {
-					t.Fatalf("run %d: %d lifts after settling, want %d", i, n, wantLifts)
+				if n, all := e.lifts(), ptLiftAttempts(e); n != wantLifts || all != wantLifts {
+					t.Fatalf("run %d: %d lifts applied, %d release calls in all after settling, want %d of each", i, n, all, wantLifts)
 				}
 				if n := e.count("scancel"); n != 0 {
 					t.Fatalf("run %d: %d scancel calls, want 0: there was no extra job", i, n)
@@ -241,9 +246,76 @@ func TestSameSecondFailureAndRetryRace(t *testing.T) {
 			if m.hold {
 				wantLifts = 1
 			}
-			if n := e.lifts(); n != wantLifts {
-				t.Errorf("%d lifts, want %d", n, wantLifts)
+			if n, all := e.lifts(), ptLiftAttempts(e); n != wantLifts || all != wantLifts {
+				t.Errorf("%d lifts applied, %d release calls in all, want %d of each", n, all, wantLifts)
 			}
 		})
+	}
+}
+
+// liftGate wraps a Platform so that the first LiftHold blocks, before it
+// reaches the fake, until the test releases it. Later calls pass.
+type liftGate struct {
+	*fakePlatform
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (g *liftGate) LiftHold(ctx context.Context, id string) error {
+	first := false
+	g.once.Do(func() { first = true })
+	if first {
+		close(g.entered)
+		select {
+		case <-g.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return g.fakePlatform.LiftHold(ctx, id)
+}
+
+// Astra B8 with a deterministic barrier: two controllers on one Allocation, as
+// across a manager handover in one process. The first is inside its release of
+// the recorded job's hold when the second observes the job, still held, with
+// no hold-lifted marker. The second must not release too: it waits for the
+// first's lift and re-reads the marker and the job. One release call in all,
+// counted from the call log whatever its result.
+func TestTwoLiftersAcrossAHandoverReleaseOnce(t *testing.T) {
+	e := newEnv(t)
+	g := &liftGate{fakePlatform: e.platform, entered: make(chan struct{}), release: make(chan struct{})}
+	e.opts.NewPlatform = func(slurm.Validated) (Platform, io.Closer, error) { return g, io.NopCloser(nil), nil }
+	e.build()
+	second := ptControllerOver(e, g)
+	e.newAlloc("a")
+
+	first := ptReconcileAsync(e, e.ctl, "a") // Create, sbatch, record, settle: the lift blocks
+	select {
+	case <-g.entered:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the first reconciler's lift never reached the gate")
+	}
+	if ptJobID(e, "a") == "" {
+		t.Fatal("precondition: no job recorded while the first lift is held")
+	}
+	other := ptReconcileAsync(e, second, "a")
+	otherDone := false
+	select {
+	case <-other: // without a fence it releases on its own and returns
+		otherDone = true
+	case <-time.After(2 * time.Second): // with one it waits for the first
+	}
+	close(g.release)
+	ptWaitDone(t, first)
+	if !otherDone {
+		ptWaitDone(t, other)
+	}
+	e.run("a", 2)
+	if n, all := e.lifts(), ptLiftAttempts(e); n != 1 || all != 1 {
+		t.Errorf("%d lifts applied, %d release calls in all, want 1 of each", n, all)
+	}
+	if got := e.get("a").Annotations[v1alpha1.AnnotationHoldLifted]; got != ptJobID(e, "a") {
+		t.Errorf("hold-lifted %q, want the recorded job %s", got, ptJobID(e, "a"))
 	}
 }

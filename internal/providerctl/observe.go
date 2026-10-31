@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
@@ -38,17 +39,17 @@ func (e *external) observeRecorded(ctx context.Context, a *v1alpha1.Allocation, 
 	o.JobID, o.Submission = rec.jobID, rec.sub
 	refused := prior.Phase == v1alpha1.AllocationRefused
 
-	// An ended job's accounting record is final: no more reads.
-	if (o.Phase == v1alpha1.AllocationEnded || o.Phase == v1alpha1.AllocationFailed) && o.EndTime != nil && o.QueueWaitRecorded {
-		e.p.SetBusy(name, false)
-		return exists, nil
+	if e.final(rec.jobID, o) {
+		return e.observeFinal(ctx, a, rec, name)
 	}
-
 	job, found, err := e.p.Observe(ctx, rec.jobID)
 	if err != nil {
 		*o = *prior
 		o.JobID, o.Submission = rec.jobID, rec.sub
 		return exists, e.readFailed(err)
+	}
+	if job.EndTime != nil && job.Source == provider.SourceAccounting {
+		e.s.finals.Store(rec.jobID, true)
 	}
 	if !found {
 		e.absent(a, rec.jobID, now)
@@ -129,6 +130,35 @@ func (e *external) resolveByRecorded(ctx context.Context, a *v1alpha1.Allocation
 	}
 	e.markResolved(a, rec.sub, now)
 	return nil
+}
+
+// final reports whether the recorded job's end is final, so it is not read
+// again (review of PR 76: Opus N10, Astra B5). That needs an accounting record
+// with an end time, read by this controller (finals): a queue listing that
+// shows an ended job, as Athena's does until MinJobAge, is not final. The
+// stored status must show the end and, for a job that started, a recorded
+// queue wait; a job that ended without starting has none to record. After a
+// restart, finals is empty, so each ended Allocation costs one more accounting
+// read.
+func (e *external) final(id string, o *v1alpha1.AllocationObservation) bool {
+	if _, ok := e.s.finals.Load(id); !ok {
+		return false
+	}
+	return o.EndTime != nil && (o.StartTime == nil || o.QueueWaitRecorded)
+}
+
+// observeFinal observes an Allocation whose recorded job has ended for good:
+// the job is not read again, but the tag still is, from the cached queue
+// listing, so a late registration of an older attempt is still cancelled while
+// held (hold mode) and still reported when not held (Astra B5).
+func (e *external) observeFinal(ctx context.Context, a *v1alpha1.Allocation, rec *record, name string) (managed.ExternalObservation, error) {
+	e.p.SetBusy(name, false)
+	if e.hold() {
+		if err := e.cancelHeldExtras(ctx, a, rec, name); err != nil {
+			return exists, err
+		}
+	}
+	return exists, e.duplicates(ctx, a, name, rec.jobID)
 }
 
 // recordQueueWait adds the job's queue wait, its own submit and start times,
@@ -319,15 +349,22 @@ var errLiftFailed = errors.New("lifting the hold failed")
 
 // settle is HBEP-7's Settle, in hold mode, on every observe of the recorded
 // job while the Allocation is not deleting: it cancels every held job with the
-// tag except the recorded one, then lifts the recorded job's hold once, only if
-// the hold-lifted annotation does not name it, it is held by its user, has
-// restart count 0, has never started and passed the read-back. The annotation
-// is written after the lift. A failed read stops settle; a lift that fails
+// tag except the recorded one (cancelHeldExtras), then lifts the recorded
+// job's hold once (liftRecorded). A failed read stops settle; a lift that fails
 // with an unknown error wraps errLiftFailed and the next observe tries again.
 func (e *external) settle(ctx context.Context, a *v1alpha1.Allocation, rec *record, name string, recorded provider.Job) (bool, error) {
+	if err := e.cancelHeldExtras(ctx, a, rec, name); err != nil {
+		return false, err
+	}
+	return e.liftRecorded(ctx, a, rec, recorded)
+}
+
+// cancelHeldExtras cancels every held, live job with the tag except the
+// recorded one, from the queue listing (a held job is always listed).
+func (e *external) cancelHeldExtras(ctx context.Context, a *v1alpha1.Allocation, rec *record, name string) error {
 	listed, err := e.p.ListByTag(ctx, name)
 	if err != nil {
-		return false, e.readFailed(err)
+		return e.readFailed(err)
 	}
 	var extras []string
 	for _, j := range listed {
@@ -335,17 +372,56 @@ func (e *external) settle(ctx context.Context, a *v1alpha1.Allocation, rec *reco
 			extras = append(extras, j.ID)
 		}
 	}
-	if len(extras) > 0 {
-		if err := e.cancel(ctx, extras); err != nil {
-			return false, err
-		}
-		e.event(a, event.Normal("HeldDuplicateCancelled", fmt.Sprintf("held job(s) %s with the tag were cancelled; job %s is the Allocation's", strings.Join(extras, ", "), rec.jobID)))
+	if len(extras) == 0 {
+		return nil
 	}
-	// HBEP-7's Settle gives the lift's conditions as a closed list; a job
-	// established as something else (SubmittedAsOther) is lifted like any
-	// other, as pkg/provider/fake.Controller does, and the lifecycle
-	// controller replaces the Allocation.
-	if rec.lifted == recorded.ID || recorded.Hold != provider.HoldUser || recorded.RestartCount != 0 || recorded.StartTime != nil {
+	if err := e.cancel(ctx, extras); err != nil {
+		return err
+	}
+	e.event(a, event.Normal("HeldDuplicateCancelled", fmt.Sprintf("held job(s) %s with the tag were cancelled; job %s is the Allocation's", strings.Join(extras, ", "), rec.jobID)))
+	return nil
+}
+
+// liftRecorded lifts the recorded job's hold once (HBEP-7, Settle), only if the
+// hold-lifted annotation does not name it, it is held by its user (reason
+// JobHeldUser: HBEP-7's closed list), has restart count 0 and has never
+// started. A job established as something else (SubmittedAsOther) is lifted
+// like any other, as pkg/provider/fake.Controller does, and the lifecycle
+// controller replaces the Allocation. The annotation is written after the
+// lift, with a conflict retry (Opus N8).
+//
+// What can overlap (Astra B8). Within one manager, controller-runtime's
+// workqueue never runs two reconciles of one Allocation at once, and leader
+// election runs one manager per Provider at a time. Two lifters can still meet
+// across a handover: in one process, when the supervisor restarts a Provider's
+// manager while a reconcile of the old one is still inside its release; across
+// processes, when a leader stalls past its Lease and acts on after another has
+// taken over. In one process, liftLocks serialises the lift of a job, and the
+// lifter re-reads the marker from the API server and the job before it
+// releases, so a job gets one release. Across processes that re-read narrows
+// the window to one release still in flight on the platform; a second release
+// then meets the same first hold, already released, and the guards keep any
+// later hold from being lifted. Claiming the marker before the release would
+// fence that case too, but a crash between the claim and the release would
+// leave the job held for good, so HBEP-7's order stands: release, then marker.
+func (e *external) liftRecorded(ctx context.Context, a *v1alpha1.Allocation, rec *record, recorded provider.Job) (bool, error) {
+	if !liftable(rec, recorded) {
+		return false, nil
+	}
+	unlock := liftLocks.lock(e.s.o.Provider + "/" + recorded.ID)
+	defer unlock()
+	if err := refresh(ctx, e.s.reader, a); err != nil {
+		return false, fmt.Errorf("re-read the Allocation before lifting job %s: %w", recorded.ID, err)
+	}
+	if a.Annotations[v1alpha1.AnnotationHoldLifted] == recorded.ID {
+		rec.lifted = recorded.ID
+		return false, nil
+	}
+	job, found, err := e.p.Observe(ctx, recorded.ID)
+	if err != nil {
+		return false, e.readFailed(err)
+	}
+	if !found || !liftable(rec, job) {
 		return false, nil
 	}
 	err = e.p.LiftHold(ctx, recorded.ID)
@@ -355,16 +431,86 @@ func (e *external) settle(ctx context.Context, a *v1alpha1.Allocation, rec *reco
 	case err != nil:
 		return false, fmt.Errorf("%w for job %s: %v", errLiftFailed, recorded.ID, err)
 	}
-	if err := write(ctx, e.s.kube, a, map[string]string{v1alpha1.AnnotationHoldLifted: recorded.ID}); err != nil {
-		return true, fmt.Errorf("record the hold lift of job %s: %w", recorded.ID, err)
+	if err := e.markLifted(ctx, a, rec, recorded.ID); err != nil {
+		return true, err
 	}
-	rec.lifted = recorded.ID
 	e.event(a, event.Normal("HoldLifted", fmt.Sprintf("the hold of job %s was lifted", recorded.ID)))
 	return true, nil
 }
 
+// liftable is HBEP-7's closed list for the lift: no hold-lifted marker for the
+// job, a user hold with reason JobHeldUser (HoldOf also calls a priority-zero
+// hold with another JobHeld reason a user hold), restart count 0, never
+// started.
+func liftable(rec *record, j provider.Job) bool {
+	return rec.lifted != j.ID && j.Hold == provider.HoldUser && j.Reason == provider.ReasonHeldUser &&
+		j.RestartCount == 0 && j.StartTime == nil
+}
+
+// markLifted writes the hold-lifted marker after a lift. A conflict re-reads
+// the Allocation from the API server and writes again: until the marker is
+// stored, only the job's state (released, so no longer held) guards against a
+// second lift.
+func (e *external) markLifted(ctx context.Context, a *v1alpha1.Allocation, rec *record, id string) error {
+	var err error
+	for i := 0; i < 5; i++ {
+		if a.Annotations[v1alpha1.AnnotationHoldLifted] == id {
+			rec.lifted = id
+			return nil
+		}
+		if err = write(ctx, e.s.kube, a, map[string]string{v1alpha1.AnnotationHoldLifted: id}); err == nil {
+			rec.lifted = id
+			return nil
+		}
+		if !kerrors.IsConflict(err) {
+			break
+		}
+		if err = refresh(ctx, e.s.reader, a); err != nil {
+			break
+		}
+	}
+	return fmt.Errorf("record the hold lift of job %s: %w", id, err)
+}
+
+// liftLocks serialises the lift of one job within this process, across the
+// Provider's managers (liftRecorded).
+var liftLocks = &keyedMutex{m: map[string]*keyedEntry{}}
+
+type keyedMutex struct {
+	mu sync.Mutex
+	m  map[string]*keyedEntry
+}
+
+type keyedEntry struct {
+	mu    sync.Mutex
+	users int
+}
+
+// lock locks key and returns its unlock; an entry lives while it is used.
+func (k *keyedMutex) lock(key string) func() {
+	k.mu.Lock()
+	en := k.m[key]
+	if en == nil {
+		en = &keyedEntry{}
+		k.m[key] = en
+	}
+	en.users++
+	k.mu.Unlock()
+	en.mu.Lock()
+	return func() {
+		en.mu.Unlock()
+		k.mu.Lock()
+		if en.users--; en.users == 0 {
+			delete(k.m, key)
+		}
+		k.mu.Unlock()
+	}
+}
+
 // duplicates records extra jobs with the tag that are not held, in the sticky
-// duplicates list, with a Warning event when the list grows.
+// duplicates list, with a Warning event when the list grows. A job that ended
+// without starting is no duplicate: it never ran, and Athena's listing shows a
+// held extra that settle cancelled in that state, not held (Opus N9).
 func (e *external) duplicates(ctx context.Context, a *v1alpha1.Allocation, name, recorded string) error {
 	listed, err := e.p.ListByTag(ctx, name)
 	if err != nil {
@@ -377,7 +523,7 @@ func (e *external) duplicates(ctx context.Context, a *v1alpha1.Allocation, name,
 	}
 	var added []string
 	for _, j := range listed {
-		if j.ID != recorded && !j.Held() && !have[j.ID] {
+		if j.ID != recorded && !j.Held() && !have[j.ID] && (j.EndTime == nil || j.StartTime != nil) {
 			have[j.ID] = true
 			added = append(added, j.ID)
 		}
