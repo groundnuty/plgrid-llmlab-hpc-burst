@@ -74,20 +74,20 @@ const (
 	ReasonProviderUnavailable = "ProviderUnavailable"
 	// ReasonSpecUnsupported: a data-parallel-size above 1, or a workload shape
 	// that does not fit the declared context limit. No Allocation is created.
-	// A reason on Degraded (HBEP owner, 31 Oct 2026).
+	// A reason on Degraded (`@hpc-burst-science-agent`, 31 Oct 2026).
 	ReasonSpecUnsupported = "SpecUnsupported"
 	// ReasonFrontNotConfigured: no front address and dial-home mode are
 	// configured, so no Allocation is submitted (HBEP-11, Single-user host:
 	// "each ModelDeployment carries a condition saying why"). HBEP-11 names
-	// no reason; this name is a contracts decision, which the HBEP owner
-	// confirmed on 31 Oct 2026, as a reason on Degraded.
+	// no reason; this name is a contracts decision, which
+	// `@hpc-burst-science-agent` confirmed on 31 Oct 2026, as a reason on Degraded.
 	ReasonFrontNotConfigured = "FrontNotConfigured"
 	// ReasonIdentityUnresolved: the deployment ID of a class cannot be
 	// computed, so no Allocation is created in it. It is its own reason,
 	// separate from ReasonSpecUnsupported, because it asks the operator for
 	// something else: SpecUnsupported means "edit the spec"; IdentityUnresolved
 	// means "fix the Hub token or the revision, or investigate the colliding
-	// identity record" (HBEP owner, 31 Oct 2026).
+	// identity record" (`@hpc-burst-science-agent`, 31 Oct 2026).
 	//
 	//   - The message names the cause: a Hub 401, a Hub 404, or a collision
 	//     with the record id-<12 hex> (an existing identity record of that
@@ -228,13 +228,13 @@ const (
 	// ConditionCredentialsInvalid: the credentials file, or the key file it
 	// names, is readable by others or not owned by the controller's user, so
 	// no provider call is made (HBEP-11, Credentials). HBEP-11 names no
-	// condition; this name is a contracts decision, which the HBEP owner
-	// confirmed.
+	// condition; this name is a contracts decision, which
+	// `@hpc-burst-science-agent` confirmed (31 Oct 2026).
 	ConditionCredentialsInvalid = "CredentialsInvalid"
 	// ConditionPathUnresolved: HOME, or the variable that stagingDir starts
 	// with, is unset, empty or unsafe on the login node, so no call that needs
 	// the path is made (HBEP-4, Transport). A contracts decision for the name,
-	// which the HBEP owner confirmed.
+	// which `@hpc-burst-science-agent` confirmed (31 Oct 2026).
 	ConditionPathUnresolved = "PathUnresolved"
 	// ConditionDialHomeUnreachable: an Instance on this Provider could not
 	// register through its dial-home path (HBEP-11, Single-user host). The
@@ -242,7 +242,7 @@ const (
 	// apply under FieldManagerLifecycle and owns only this condition type
 	// (DialHomeUnreachableApply); the Provider's controller keeps it when it
 	// writes the rest of the status. The name is a contracts decision, which
-	// the HBEP owner confirmed.
+	// `@hpc-burst-science-agent` confirmed (31 Oct 2026).
 	ConditionDialHomeUnreachable = "DialHomeUnreachable"
 )
 

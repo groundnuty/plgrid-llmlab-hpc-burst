@@ -31,7 +31,7 @@ Code under `spikes/` and `third_party/forked/*` is not part of this module.
 - **One controller binary** in alpha, `cmd/hpcburst-controller` (#61 owns its `main`). `hpcburst up` starts and supervises it, and restarts it when it exits (#61, in `internal/launcher`).
 - **Inside it, one controller-runtime manager per Provider** (HBEP-4, Two controllers; HBEP-11, Controllers).
   - Each runs crossplane-runtime's managed reconciler over the Allocations naming its Provider.
-  - Each has its own leader `Lease`, `v1alpha1.ProviderLeaseName(<provider>)`, which is `provider-<name>` (HBEP owner, 31 Oct 2026).
+  - Each has its own leader `Lease`, `v1alpha1.ProviderLeaseName(<provider>)`, which is `provider-<name>` (`@hpc-burst-science-agent`, 31 Oct 2026).
   - A supervisor starts a manager when a Provider appears and stops it when the Provider goes, so one Provider's failure does not stop the others (#59 owns it, and `main` calls it).
 - **The lifecycle controller** is one more manager in the same binary (#61), with the `Lease` `v1alpha1.LeaseLifecycle`.
 - **Every `Lease` lives in `v1alpha1.ControllerNamespace`, `hpcburst-system`.** The launcher creates that namespace before it starts the controller binary; #61, which owns the supervision in `internal/launcher`, adds it.
@@ -71,7 +71,7 @@ The lifecycle controller never imports `internal/slurm` or `internal/providerctl
 | Instance: `status.leaseEnd` | lifecycle controller: on every observe it copies the Allocation's `status.atProvider.hardEnd`, so a later hard end moves it. The front reads it and never routes to an Instance without it (HBEP-5, HBEP-7) |
 | ModelDeployment status, including a managed source's `Ready` and `Progressing` and the reason `ProviderNotOnPlatform` | lifecycle controller. The front only filters: it routes a managed entry to no Provider off `spec.source.managed.platform` |
 | Provider status, the managed `catalog` and `lastCatalogRead` included | the Provider's controller, under `hpcburst-provider`. It keeps every condition it does not own |
-| Provider status: the condition `DialHomeUnreachable` | lifecycle controller, by server-side apply to the status subresource under `hpcburst-lifecycle`, with forced ownership, owning only that list entry (`v1alpha1.DialHomeUnreachableApply`). Neither writer removes the other's condition (HBEP owner, 31 Oct 2026) |
+| Provider status: the condition `DialHomeUnreachable` | lifecycle controller, by server-side apply to the status subresource under `hpcburst-lifecycle`, with forced ownership, owning only that list entry (`v1alpha1.DialHomeUnreachableApply`). Neither writer removes the other's condition (`@hpc-burst-science-agent`, 31 Oct 2026) |
 | identity and verification records | lifecycle controller (its verification controller) |
 | PlatformProfile status (`lastChecked`) | nobody in alpha: no component checks a profile's facts yet |
 
