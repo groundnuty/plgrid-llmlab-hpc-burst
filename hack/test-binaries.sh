@@ -55,21 +55,43 @@ need_free() {
   fi
 }
 
-fetch() { # fetch URL DEST
+# fetch URL DEST SHA: downloads into a temporary file of its own next to DEST, checks its
+# sha256, and only then renames it into place. Callers also hold the cache lock (below), so
+# two test packages that start at once on an empty cache never write the same file.
+fetch() {
+  local tmp got
   need_free "$(dirname "$2")"
   log "downloading $1"
-  curl -fsSL --retry 3 -o "$2.part" "$1"
-  mv "$2.part" "$2"
-  chmod 0555 "$2"
+  tmp=$(mktemp "$2.XXXXXX")
+  if ! curl -fsSL --retry 3 -o "$tmp" "$1"; then
+    rm -f "$tmp"
+    log "download of $1 failed"
+    exit 1
+  fi
+  got=$(sha256sum "$tmp" | cut -d' ' -f1)
+  if [ "$got" != "$3" ]; then
+    rm -f "$tmp"
+    log "$1 has sha256 $got, expected $3"
+    exit 1
+  fi
+  chmod 0555 "$tmp"
+  mv "$tmp" "$2"
 }
 
 dl=https://dl.k8s.io/release/v$K8S_VERSION/bin/linux/amd64
 
+# One downloader at a time per cache: go test runs packages in parallel, and in CI the cache
+# starts empty, so several TestMains reach this point together. The lock is released when this
+# script exits; only curl, tar and sha256sum, which finish before it, inherit the descriptor.
+mkdir -p "$cache"
+exec 9>"$cache/.test-binaries.lock"
+flock 9
+
 verify "$assets/kube-apiserver" "$SHA_KUBE_APISERVER" || {
-  mkdir -p "$assets"; fetch "$dl/kube-apiserver" "$assets/kube-apiserver"; verify "$assets/kube-apiserver" "$SHA_KUBE_APISERVER"; }
+  mkdir -p "$assets"; fetch "$dl/kube-apiserver" "$assets/kube-apiserver" "$SHA_KUBE_APISERVER"; verify "$assets/kube-apiserver" "$SHA_KUBE_APISERVER"; }
 
 verify "$kcm" "$SHA_KUBE_CONTROLLER_MANAGER" || {
-  mkdir -p "$(dirname "$kcm")"; fetch "$dl/kube-controller-manager" "$kcm"; verify "$kcm" "$SHA_KUBE_CONTROLLER_MANAGER"; }
+  mkdir -p "$(dirname "$kcm")"; fetch "$dl/kube-controller-manager" "$kcm" "$SHA_KUBE_CONTROLLER_MANAGER"; verify "$kcm" "$SHA_KUBE_CONTROLLER_MANAGER"; }
 
 verify "$assets/etcd" "$SHA_ETCD" || {
   tmp=$(mktemp -d "$cache.etcd.XXXXXX")
