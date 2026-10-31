@@ -2,10 +2,10 @@ package lifecycle
 
 // Scenario tests for HBEP-7's controller restarts during a handover (Test plan,
 // README lines 446 and 453). They share handover_test.go's timeline: the primary
-// is ready at 08:00:50 and has its drain start at 09:50:20; its first
-// replacement R1 is planned at 09:19:50 (waits [0 s], start-to-ready 30 s,
-// margin 30 min), starts at 09:20:00 and is ready at 09:20:30 or a little
-// later; R1's replacement R2 is planned at 10:39:30.
+// is ready at 08:01:10 and has its drain start at 09:50:20; its first
+// replacement R1 is planned at 09:19:30 (waits [0 s], start-to-ready 50 s,
+// margin 30 min), starts at 09:19:40 and is ready at 09:20:30 or a little
+// later; R1's replacement R2 is planned at 10:38:50.
 
 import (
 	"context"
@@ -166,34 +166,34 @@ func hoCheckHandover(t *testing.T, rg *rig, allocs int) {
 // the primary's start and the planned time, and plans the same time from the
 // waits and the start-to-ready time in status. 14 waits (12 of 5 min, 10, 40)
 // plus the primary's 0 s are 15, fewer than 20, so the largest, 40 min, is used:
-// 09:50:20 - (40 min + 30 s + 30 min) = 08:39:50. The run without a restart and
+// 09:50:20 - (40 min + 50 s + 30 min) = 08:39:30. The run without a restart and
 // the runs restarted at 08:00:30 (the primary still starting), 08:05:00, 08:30:00
-// and 08:39:40 (10 s before) all create the replacement at 08:39:50.
+// and 08:39:20 (10 s before) all create the replacement at 08:39:30.
 func TestHandoverRestartPlansTheSameTime(t *testing.T) {
 	waits := append(slices.Repeat(hoMinutes(5), 12), hoMinutes(10, 40)...)
-	want := hoT(8, 39, 50)
+	want := hoT(8, 39, 30)
 	run := func(t *testing.T, restarts ...time.Time) time.Time {
 		rg := newRig(t, withMaxTime(4*time.Hour))
 		hoSetWaits(rg, waits...)
 		rg.create(mdSpec(hoMD))
 		for _, at := range restarts {
-			// The first minute takes 10 s steps: the primary's start-to-ready is
-			// measured in steps.
-			if at.After(hoT(8, 1, 0)) {
-				hoStepTo(rg, hoT(8, 1, 0), 10*time.Second, nil)
+			// The first 70 s take 10 s steps: the primary's start-to-ready is
+			// measured in steps, and it is ready at 08:01:10.
+			if at.After(hoT(8, 1, 10)) {
+				hoStepTo(rg, hoT(8, 1, 10), 10*time.Second, nil)
 			}
 			coarse := 10 * time.Second
-			if at.After(hoT(8, 1, 0)) {
+			if at.After(hoT(8, 1, 10)) {
 				coarse = time.Minute
 			}
 			hoStepTo(rg, at, coarse, nil)
 			rg.restartController()
 		}
-		hoStepTo(rg, hoT(8, 1, 0), 10*time.Second, nil)
+		hoStepTo(rg, hoT(8, 1, 10), 10*time.Second, nil)
 		p := rg.instances(hoMD)[0]
 		hoStepTo(rg, want.Add(-10*time.Second), time.Minute, func() {
 			if n := len(rg.instances(hoMD)); n != 1 {
-				t.Fatalf("at %s: %d Instances, a replacement before 08:39:50", rg.clock.Now().Format(time.TimeOnly), n)
+				t.Fatalf("at %s: %d Instances, a replacement before 08:39:30", rg.clock.Now().Format(time.TimeOnly), n)
 			}
 		})
 		hoStepTo(rg, want, 10*time.Second, nil)
@@ -212,7 +212,7 @@ func TestHandoverRestartPlansTheSameTime(t *testing.T) {
 		t.Fatalf("without a restart the replacement is created at %s, want %s", base.Format(time.TimeOnly), want.Format(time.TimeOnly))
 	}
 	for _, restarts := range [][]time.Time{
-		{hoT(8, 0, 30)}, {hoT(8, 5, 0)}, {hoT(8, 30, 0)}, {hoT(8, 39, 40)}, {hoT(8, 5, 0), hoT(8, 30, 0), hoT(8, 39, 40)},
+		{hoT(8, 0, 30)}, {hoT(8, 5, 0)}, {hoT(8, 30, 0)}, {hoT(8, 39, 20)}, {hoT(8, 5, 0), hoT(8, 30, 0), hoT(8, 39, 20)},
 	} {
 		if got := run(t, restarts...); !got.Equal(base) {
 			t.Fatalf("restarts %v: the replacement is created at %s, without a restart at %s", restarts, got.Format(time.TimeOnly), base.Format(time.TimeOnly))
@@ -266,7 +266,7 @@ func TestHandoverControllerKilledAtEachStep(t *testing.T) {
 		}
 	}
 	cases := []hoKill{{
-		name: "after the replacement Instance, before its Allocation", at: hoT(9, 19, 50), end: hoT(9, 22, 0), allocs: 2,
+		name: "after the replacement Instance, before its Allocation", at: hoT(9, 19, 30), end: hoT(9, 22, 0), allocs: 2,
 		after: func(*v1alpha1.Instance) func(string, client.Object) bool {
 			return hoCreated(1, func(in *v1alpha1.Instance) bool { return in.Annotations[v1alpha1.AnnotationPredecessor] != "" })
 		},
@@ -281,12 +281,12 @@ func TestHandoverControllerKilledAtEachStep(t *testing.T) {
 		},
 		final: func(t *testing.T, rg *rig, p *v1alpha1.Instance) {
 			r := hoRepl(rg, p.Name)
-			if len(r) != 1 || r[0].Status.Phase != v1alpha1.InstanceReady || !r[0].CreationTimestamp.Time.Equal(hoT(9, 19, 50)) {
-				t.Fatalf("replacements %+v, want one created at 09:19:50 and ready", r)
+			if len(r) != 1 || r[0].Status.Phase != v1alpha1.InstanceReady || !r[0].CreationTimestamp.Time.Equal(hoT(9, 19, 30)) {
+				t.Fatalf("replacements %+v, want one created at 09:19:30 and ready", r)
 			}
 		},
 	}, {
-		name: "after the Allocation, before its credential file", at: hoT(9, 19, 50), end: hoT(9, 22, 0), allocs: 2,
+		name: "after the Allocation, before its credential file", at: hoT(9, 19, 30), end: hoT(9, 22, 0), allocs: 2,
 		after: func(*v1alpha1.Instance) func(string, client.Object) bool {
 			// The killer is armed after the primary's start, so the
 			// replacement's Allocation is the first created after arming.
@@ -317,11 +317,11 @@ func TestHandoverControllerKilledAtEachStep(t *testing.T) {
 			}
 		},
 	}, {
-		// The killer's coarse pre-steps land on the minute grid (08:02:00 ...
-		// 09:20:00, then 09:20:10), so R1, planned for 09:19:50, is created at
-		// 09:20:00; its job starts at the next provider pass, 09:20:10, and, as
-		// the primary's, its verification record is written 10 s later.
-		name: "after a verification record, before the status names it", at: hoT(9, 20, 20), end: hoT(9, 22, 0), allocs: 2,
+		// R1, planned for 09:50:20 - (0 + 50 s + 30 min) = 09:19:30, is created
+		// then; its job starts at the next provider pass, 09:19:40, and, as the
+		// primary's (hoStart checks it), its verification record is written 20 s
+		// after the start: 09:20:00.
+		name: "after a verification record, before the status names it", at: hoT(9, 20, 0), end: hoT(9, 22, 0), allocs: 2,
 		after: func(*v1alpha1.Instance) func(string, client.Object) bool {
 			// Armed after the primary's start: R1's record is the first after.
 			return hoCreated(1, func(r *appsv1.ControllerRevision) bool {
@@ -360,9 +360,9 @@ func TestHandoverControllerKilledAtEachStep(t *testing.T) {
 			if n := len(rg.rec.Find("replaced", "HandedOver")); n != 1 || len(rg.rec.Find("degraded", "CapacityDropped")) != 0 {
 				t.Fatalf("%d HandedOver events (want 1) and some CapacityDropped", n)
 			}
-			// R1's own replacement is planned as any other; its time is
-			// TestHandoverBothServeThenPrimaryDrainsAndSecondReplacementIsPlanned's
-			// subject, and this run's coarse steps shift it, so it is not
+			// R1's own replacement is planned as any other, at 10:38:50 (see
+			// TestHandoverBothServeThenPrimaryDrainsAndSecondReplacementIsPlanned,
+			// whose subject it is); the run ends at 09:52:00, so it is not
 			// asserted here.
 		},
 	}, {
@@ -391,7 +391,10 @@ func TestHandoverControllerKilledAtEachStep(t *testing.T) {
 			rg := newRig(t, withMaxTime(4*time.Hour), withInterceptors(k.funcs()))
 			p := hoStart(rg, nil)
 			k.arm(tc.after(p))
-			if k.stepTo(rg, tc.at.Add(-10*time.Second), time.Minute) || !k.stepTo(rg, tc.at.Add(time.Minute), 10*time.Second) {
+			// Minute steps to 10 s before R1's planned time, 09:19:30, then 10 s
+			// steps: R1 is created at that time, and every kill point below is
+			// on the 10 s grid.
+			if k.stepTo(rg, hoT(9, 19, 20), time.Minute) || k.stepTo(rg, tc.at.Add(-10*time.Second), 10*time.Second) || !k.stepTo(rg, tc.at.Add(time.Minute), 10*time.Second) {
 				t.Fatalf("the controller died too early or not at all (now %s)", rg.clock.Now().Format(time.TimeOnly))
 			}
 			if now := rg.clock.Now(); !now.Equal(tc.at) {

@@ -5,13 +5,23 @@ package lifecycle
 // as a literal; none is computed by the planner.
 //
 // The timeline every test shares. The rig's primary job starts at 08:00:20 with
-// no queue wait (the rig lifts the hold in the pass that submits), and its
-// Instance is ready 30 s later, at 08:00:50, so the class's start-to-ready time
-// is 30 s once measured (hoStart checks all of this). With a 4 h limit the hard
-// end is 12:00:20, the default drain window is 2h10m, so the primary's drain
-// start is 09:50:20. The default handover margin is 30 min. A replacement's
-// planned time is the drain start minus (the planning wait + start-to-ready +
-// margin), and not before the primary's start.
+// no queue wait (the rig lifts the hold in the pass that submits). The fake
+// agent starts the worker in the Step its job starts, the worker runs one Step
+// later, and the checks answer one Step after that, so the verification record
+// is written 20 s after the start, at 08:00:40. An Instance is ready only after
+// the agent reports its warm-up done, one Step after the controller judged the
+// rounds settled: 50 s after the start, at 08:01:10, so the class's
+// start-to-ready time is 50 s once measured (hoStart checks all of this). With a
+// 4 h limit the hard end is 12:00:20, the default drain window is 2h10m, so the
+// primary's drain start is 09:50:20. The default handover margin is 30 min. A
+// replacement's planned time is the drain start minus (the planning wait +
+// start-to-ready + margin), and not before the primary's start: with no wait,
+// 09:50:20 - (0 + 50 s + 30 min) = 09:19:30. Its job starts at the next provider
+// pass, 10 s after its creation, and it is ready 50 s after that.
+//
+// The clock moves in 10 s steps, and the creation time of a replacement is the
+// time of the step that creates it. So a test that asserts a creation time steps
+// to 10 s before the planned time in coarse steps, and then in 10 s steps.
 
 import (
 	"slices"
@@ -104,16 +114,16 @@ func hoStepNoWaits(rg *rig) {
 	rg.reconcileAll()
 }
 
-// hoStart creates the deployment and runs one minute of 10 s steps (to
-// 08:01:00) with step (nil: rg.Step). It checks the facts the expected times
-// rest on and returns the primary.
+// hoStart creates the deployment and runs 70 s of 10 s steps (to 08:01:10, when
+// the primary is ready) with step (nil: rg.Step). It checks the facts the
+// expected times rest on and returns the primary.
 func hoStart(rg *rig, step func()) *v1alpha1.Instance {
 	rg.t.Helper()
 	if step == nil {
 		step = rg.Step
 	}
 	rg.create(mdSpec(hoMD))
-	for range 6 {
+	for range 7 {
 		rg.clock.Advance(10 * time.Second)
 		step()
 	}
@@ -122,13 +132,16 @@ func hoStart(rg *rig, step func()) *v1alpha1.Instance {
 	switch {
 	case !ok || a.Status.AtProvider.StartTime == nil || !a.Status.AtProvider.StartTime.Time.Equal(hoT(8, 0, 20)):
 		rg.t.Fatalf("the primary's job should start at 08:00:20, got %+v", a)
-	case p.Status.ReadyTime == nil || !p.Status.ReadyTime.Time.Equal(hoT(8, 0, 50)):
-		rg.t.Fatalf("the primary should be ready at 08:00:50, got %v", p.Status.ReadyTime)
+	case p.Status.ReadyTime == nil || !p.Status.ReadyTime.Time.Equal(hoT(8, 1, 10)):
+		rg.t.Fatalf("the primary should be ready at 08:01:10, got %v", p.Status.ReadyTime)
 	case p.Status.LeaseEnd == nil || !p.Status.LeaseEnd.Time.Equal(hoT(12, 0, 20)):
 		rg.t.Fatalf("the primary's leaseEnd should be 12:00:20, got %v", p.Status.LeaseEnd)
 	}
-	if s := rg.md(hoMD).Status.StartToReady; len(s) != 1 || s[0].Duration != "30s" {
-		rg.t.Fatalf("start-to-ready should be 30s, got %+v", s)
+	if recs := hoVerificationRecords(rg, p.UID); len(recs) != 1 || !recs[0].CreationTimestamp.Time.Equal(hoT(8, 0, 40)) {
+		rg.t.Fatalf("the primary's verification record should be the one written at 08:00:40, got %+v", recs)
+	}
+	if s := rg.md(hoMD).Status.StartToReady; len(s) != 1 || s[0].Duration != "50s" {
+		rg.t.Fatalf("start-to-ready should be 50s, got %+v", s)
 	}
 	return &p
 }
@@ -177,12 +190,13 @@ func hoWantTime(t *testing.T, what string, got *metav1.Time, want time.Time) {
 //   - 14 waits preloaded (12 of 5 min, one of 10, one of 40) and the primary's
 //     own 0 s make 15, fewer than 20: the largest, 40 min, is used (nearest
 //     rank would be the 14th smallest, 10 min). Before the primary is ready
-//     the plan uses the 30 min default start-to-ready and falls at 08:10:20,
-//     which has not come yet; once 30 s is measured it is 09:50:20 - (40 min +
-//     30 s + 30 min) = 08:39:50.
+//     the plan uses the 30 min default start-to-ready and falls at 08:10:20
+//     (09:50:20 - (40 min + 30 min + 30 min)), which has not come yet; once
+//     50 s is measured (08:01:10) it is 09:50:20 - (40 min + 50 s + 30 min) =
+//     08:39:30.
 //   - 19 waits preloaded (1..19 min, scrambled) and the primary's 0 s make 20:
-//     the 18th smallest, 17 min: 09:50:20 - (17 min + 30 s + 30 min) = 09:02:50.
-//   - A 3 h wait: 09:50:20 - (3 h + 30 s + 30 min) = 06:19:50 is before the
+//     the 18th smallest, 17 min: 09:50:20 - (17 min + 50 s + 30 min) = 09:02:30.
+//   - A 3 h wait: 09:50:20 - (3 h + 50 s + 30 min) = 06:19:30 is before the
 //     primary started, so the replacement waits for the primary's start, 08:00:20.
 func TestHandoverReplacementCreatedAtItsPlannedTime(t *testing.T) {
 	cases := []struct {
@@ -193,11 +207,11 @@ func TestHandoverReplacementCreatedAtItsPlannedTime(t *testing.T) {
 		want   time.Time
 	}{
 		{"no wait observed", nil, true, 0, hoT(8, 0, 20)},
-		{"fewer than 20 waits: the largest", append(slices.Repeat(hoMinutes(5), 12), hoMinutes(10, 40)...), false, 15, hoT(8, 39, 50)},
-		{"20 waits: the 18th smallest", hoMinutes(7, 13, 2, 19, 11, 4, 16, 9, 1, 14, 6, 18, 3, 12, 17, 8, 15, 5, 10), false, 20, hoT(9, 2, 50)},
+		{"fewer than 20 waits: the largest", append(slices.Repeat(hoMinutes(5), 12), hoMinutes(10, 40)...), false, 15, hoT(8, 39, 30)},
+		{"20 waits: the 18th smallest", hoMinutes(7, 13, 2, 19, 11, 4, 16, 9, 1, 14, 6, 18, 3, 12, 17, 8, 15, 5, 10), false, 20, hoT(9, 2, 30)},
 		// 3 waits: the preloaded 3 h, the primary's 0 s and the replacement's
 		// own 0 s, since the replacement is created at 08:00:20 and its job
-		// starts at the next step, before hoStart returns at 08:01:00.
+		// starts at the next step, before hoStart returns at 08:01:10.
 		{"a plan before the primary's start is held to it", hoMinutes(180), false, 3, hoT(8, 0, 20)},
 	}
 	for _, tc := range cases {
@@ -240,24 +254,24 @@ func TestHandoverReplacementCreatedAtItsPlannedTime(t *testing.T) {
 // TestHandoverShortQueueReplacementReadyAboutTheMarginBeforeDrain covers: on a
 // short queue the replacement is ready about the margin before the drain
 // starts. The only wait is the primary's 0 s, so the replacement is created at
-// 09:50:20 - (0 + 30 s + 30 min) = 09:19:50, its job is submitted and starts at
-// the next step, 09:20:00, and it is ready 30 s later, 09:20:30: 29m50s before
+// 09:50:20 - (0 + 50 s + 30 min) = 09:19:30, its job is submitted and starts at
+// the next step, 09:19:40, and it is ready 50 s later, 09:20:30: 29m50s before
 // the drain start, about the 30 min margin.
 func TestHandoverShortQueueReplacementReadyAboutTheMarginBeforeDrain(t *testing.T) {
 	rg := newRig(t, withMaxTime(4*time.Hour))
 	p := hoStart(rg, nil)
-	hoStepTo(rg, hoT(9, 19, 40), time.Minute, nil)
+	hoStepTo(rg, hoT(9, 19, 20), time.Minute, nil)
 	hoStepTo(rg, hoT(9, 20, 40), 10*time.Second, nil)
 	r := hoRepl(rg, p.Name)
 	if len(r) != 1 {
 		t.Fatalf("want one replacement, got %d", len(r))
 	}
-	hoWantTime(t, "replacement creation", &r[0].CreationTimestamp, hoT(9, 19, 50))
+	hoWantTime(t, "replacement creation", &r[0].CreationTimestamp, hoT(9, 19, 30))
 	a, _ := rg.allocation(r[0].Spec.AllocationRef.Name)
 	if a == nil {
 		t.Fatal("the replacement has no Allocation")
 	}
-	hoWantTime(t, "replacement's job start", a.Status.AtProvider.StartTime, hoT(9, 20, 0))
+	hoWantTime(t, "replacement's job start", a.Status.AtProvider.StartTime, hoT(9, 19, 40))
 	hoWantTime(t, "replacement ready", r[0].Status.ReadyTime, hoT(9, 20, 30))
 	lead := hoT(9, 50, 20).Sub(r[0].Status.ReadyTime.Time)
 	if margin := 30 * time.Minute; lead > margin || lead < margin-time.Minute {
@@ -268,15 +282,15 @@ func TestHandoverShortQueueReplacementReadyAboutTheMarginBeforeDrain(t *testing.
 // TestHandoverBothServeThenPrimaryDrainsAndSecondReplacementIsPlanned covers:
 // both serve, then the primary drains at its drain start, not earlier, and its
 // replacement's own replacement is planned the same way. The first replacement
-// R1 is created 09:19:50, starts 09:20:00 (hard end 13:20:00, drain start
-// 11:10:00) and is ready 09:20:30. Both serve until 09:50:20, when the primary
+// R1 is created 09:19:30, starts 09:19:40 (hard end 13:19:40, drain start
+// 11:09:40) and is ready 09:20:30. Both serve until 09:50:20, when the primary
 // drains (no request runs, so it ends at once) and R1 becomes the primary. The
-// waits are the two jobs' 0 s, start-to-ready 30 s again, so R2 is planned at
-// 11:10:00 - (0 + 30 s + 30 min) = 10:39:30.
+// waits are the two jobs' 0 s, start-to-ready 50 s again (R1's, 09:19:40 to
+// 09:20:30), so R2 is planned at 11:09:40 - (0 + 50 s + 30 min) = 10:38:50.
 func TestHandoverBothServeThenPrimaryDrainsAndSecondReplacementIsPlanned(t *testing.T) {
 	rg := newRig(t, withMaxTime(4*time.Hour))
 	p := hoStart(rg, nil)
-	hoStepTo(rg, hoT(9, 19, 40), time.Minute, nil)
+	hoStepTo(rg, hoT(9, 19, 20), time.Minute, nil)
 	hoStepTo(rg, hoT(9, 20, 40), 10*time.Second, nil)
 	hoStepTo(rg, hoT(9, 50, 10), time.Minute, func() {
 		hoAtMostOneReplacement(rg)
@@ -298,19 +312,19 @@ func TestHandoverBothServeThenPrimaryDrainsAndSecondReplacementIsPlanned(t *test
 	if n := rg.readyCount(hoMD); n != 1 || len(hoRepl(rg, r1.Name)) != 0 {
 		t.Fatalf("ready %d, R1's replacements %d: want R1 serving and no R2 yet", n, len(hoRepl(rg, r1.Name)))
 	}
-	hoWantTime(t, "R1 leaseEnd", rg.instance(r1.Name).Status.LeaseEnd, hoT(13, 20, 0))
-	if s := rg.md(hoMD).Status.StartToReady; len(s) != 1 || s[0].Duration != "30s" {
-		t.Fatalf("start-to-ready should be 30s, got %+v", s)
+	hoWantTime(t, "R1 leaseEnd", rg.instance(r1.Name).Status.LeaseEnd, hoT(13, 19, 40))
+	if s := rg.md(hoMD).Status.StartToReady; len(s) != 1 || s[0].Duration != "50s" {
+		t.Fatalf("start-to-ready should be 50s, got %+v", s)
 	}
-	hoStepTo(rg, hoT(10, 39, 20), time.Minute, func() {
+	hoStepTo(rg, hoT(10, 38, 40), time.Minute, func() {
 		if n := len(hoRepl(rg, r1.Name)); n != 0 {
-			t.Fatalf("at %s: R2 exists before its planned time 10:39:30", rg.clock.Now().Format(time.TimeOnly))
+			t.Fatalf("at %s: R2 exists before its planned time 10:38:50", rg.clock.Now().Format(time.TimeOnly))
 		}
 	})
-	hoStepTo(rg, hoT(10, 39, 30), 10*time.Second, nil)
+	hoStepTo(rg, hoT(10, 38, 50), 10*time.Second, nil)
 	r2 := hoRepl(rg, r1.Name)
-	if len(r2) != 1 || !r2[0].CreationTimestamp.Time.Equal(hoT(10, 39, 30)) || r2[0].Spec.DeploymentID != r1.Spec.DeploymentID {
-		t.Fatalf("R1's replacements %+v, want one created at 10:39:30 with R1's ID", r2)
+	if len(r2) != 1 || !r2[0].CreationTimestamp.Time.Equal(hoT(10, 38, 50)) || r2[0].Spec.DeploymentID != r1.Spec.DeploymentID {
+		t.Fatalf("R1's replacements %+v, want one created at 10:38:50 with R1's ID", r2)
 	}
 	hoAtMostOneReplacement(rg)
 }
@@ -331,8 +345,8 @@ func TestHandoverFailedReplacementPredecessorServesUntilItsDrainStart(t *testing
 		if alloc != rg.instances(hoMD)[0].Spec.AllocationRef.Name {
 			return afake.Engine{Verify: afake.VerifyMaxModelLen("16384")}
 		}
-		return afake.Engine{Health: func(now time.Time, worker string) agentapi.Health {
-			h := afake.DefaultHealth(now, worker)
+		return afake.Engine{Health: func(now time.Time, proc afake.Process) agentapi.Health {
+			h := afake.DefaultHealth(now, proc)
 			if !now.Before(busyFrom) && now.Before(busyTo) {
 				h.RunningRequests, h.GeneratedTokens = 4, now.Unix()
 			}
@@ -340,8 +354,8 @@ func TestHandoverFailedReplacementPredecessorServesUntilItsDrainStart(t *testing
 		}}
 	}
 	p := hoStart(rg, nil)
-	hoStepTo(rg, hoT(9, 19, 40), time.Minute, nil)
-	hoStepTo(rg, hoT(9, 19, 50), 10*time.Second, nil)
+	hoStepTo(rg, hoT(9, 19, 20), time.Minute, nil)
+	hoStepTo(rg, hoT(9, 19, 30), 10*time.Second, nil)
 	r1 := hoRepl(rg, p.Name)[0]
 	hoStepTo(rg, hoT(9, 21, 0), 10*time.Second, nil)
 	recs := hoVerificationRecords(rg, r1.UID)
@@ -390,24 +404,29 @@ func TestHandoverFailedReplacementPredecessorServesUntilItsDrainStart(t *testing
 // TestHandoverLateReplacementDegradesThenTakesOver covers: the replacement's
 // Allocation has not started by the predecessor's drain start minus the class's
 // start-to-ready time, so ReplacementLate is set; the primary still drains at
-// its drain start and capacity drops. R1's job (the second submission) waits 3 h
-// in the queue: submitted 09:20:00, it starts 12:20:00 (hard end 16:20:00).
-// Lateness is 09:50:20 - 30 s = 09:49:50. The primary drains at 09:50:20.
-// Later R1 serves and becomes the primary; its waits are 0 s and 3 h, so its
-// replacement's plan, 14:10:00 - (3 h + 30 s + 30 min) = 10:39:30, is before
-// R1's start and R2 is created when R1's Allocation starts, 12:20:00.
+// its drain start and capacity drops. R1 is created at 09:50:20 - (0 + 50 s +
+// 30 min) = 09:19:30 and submitted at the next provider pass, 09:19:40; its job
+// (the second submission) waits 3 h in the queue, so it starts 12:19:40 (hard
+// end 16:19:40) and is not ready before the primary's drain start. Lateness is
+// 09:50:20 - 50 s = 09:49:30. The primary drains at 09:50:20. Later R1 serves
+// and becomes the primary; its waits are 0 s and 3 h, so its replacement's plan,
+// 14:09:40 - (3 h + 50 s + 30 min) = 10:38:50, is before R1's start and R2 is
+// created when R1's Allocation starts, 12:19:40.
 func TestHandoverLateReplacementDegradesThenTakesOver(t *testing.T) {
 	rg := newRig(t, withMaxTime(4*time.Hour))
 	rg.batch.Enqueue(pfake.Script{}, pfake.Script{QueueWait: 3 * time.Hour})
 	p := hoStart(rg, nil)
-	hoStepTo(rg, hoT(9, 49, 40), time.Minute, func() {
+	notLate := func() {
 		if c := rg.condition(hoMD, v1alpha1.ConditionDegraded); c.Status == metav1.ConditionTrue {
-			t.Fatalf("at %s Degraded = %s/%s before the lateness deadline 09:49:50", rg.clock.Now().Format(time.TimeOnly), c.Status, c.Reason)
+			t.Fatalf("at %s Degraded = %s/%s before the lateness deadline 09:49:30", rg.clock.Now().Format(time.TimeOnly), c.Status, c.Reason)
 		}
-	})
-	hoStepTo(rg, hoT(9, 49, 50), 10*time.Second, nil)
+	}
+	hoStepTo(rg, hoT(9, 19, 20), time.Minute, notLate)
+	hoStepTo(rg, hoT(9, 19, 40), 10*time.Second, notLate)
+	hoStepTo(rg, hoT(9, 49, 20), time.Minute, notLate)
+	hoStepTo(rg, hoT(9, 49, 30), 10*time.Second, nil)
 	if c := rg.condition(hoMD, v1alpha1.ConditionDegraded); c.Status != metav1.ConditionTrue || c.Reason != v1alpha1.ReasonReplacementLate {
-		t.Fatalf("at 09:49:50 Degraded = %s/%s, want True/ReplacementLate", c.Status, c.Reason)
+		t.Fatalf("at 09:49:30 Degraded = %s/%s, want True/ReplacementLate", c.Status, c.Reason)
 	}
 	hoStepTo(rg, hoT(9, 50, 10), 10*time.Second, nil)
 	if ph := hoPhase(rg, p.Name); ph != v1alpha1.InstanceReady {
@@ -422,8 +441,9 @@ func TestHandoverLateReplacementDegradesThenTakesOver(t *testing.T) {
 	}
 	r1 := hoRepl(rg, p.Name)[0]
 	// R1's job is eligible when the provider first syncs after R1's
-	// Allocation is created (hold mode lifts the hold in that pass) and starts
-	// 3 h later; read that start rather than assume the step grid.
+	// Allocation is created at 09:19:30 (hold mode lifts the hold in that
+	// pass, 09:19:40) and starts 3 h later, 12:19:40; the loop reads the start
+	// and checks it against that.
 	var r1Start time.Time
 	hoStepTo(rg, hoT(12, 30, 0), 10*time.Second, func() {
 		a, ok := rg.allocation(r1.Spec.AllocationRef.Name)
@@ -444,6 +464,9 @@ func TestHandoverLateReplacementDegradesThenTakesOver(t *testing.T) {
 	})
 	if r1Start.IsZero() {
 		t.Fatal("R1's job never started")
+	}
+	if want := hoT(12, 19, 40); !r1Start.Equal(want) {
+		t.Fatalf("R1's job started at %s, want %s (submitted 09:19:40 + 3 h)", r1Start.Format(time.TimeOnly), want.Format(time.TimeOnly))
 	}
 	if got := rg.instance(r1.Name); got.Status.Phase != v1alpha1.InstanceReady || got.Status.ReadyTime == nil || got.Status.ReadyTime.Sub(r1Start) > time.Minute {
 		t.Fatalf("R1 is %s (ready at %v), want ready within a minute of its start %s", got.Status.Phase, got.Status.ReadyTime, r1Start.Format(time.TimeOnly))
@@ -469,7 +492,7 @@ func TestHandoverLateReplacementDegradesThenTakesOver(t *testing.T) {
 // an administrator raises the primary's limit from 4 h to 6 h: the hard end
 // moves from 12:00:20 to 14:00:20 (start 08:00:20 + 6 h) and the drain start
 // from 09:50:20 to 11:50:20, 2 h later. The replacement is planned at
-// 11:50:20 - (0 + 30 s + 30 min) = 11:19:50, and the primary drains at 11:50:20.
+// 11:50:20 - (0 + 50 s + 30 min) = 11:19:30, and the primary drains at 11:50:20.
 func TestHandoverLeaseEndExtensionMovesDrainStart(t *testing.T) {
 	rg := newRig(t, withMaxTime(4*time.Hour))
 	p := hoStart(rg, nil)
@@ -479,14 +502,14 @@ func TestHandoverLeaseEndExtensionMovesDrainStart(t *testing.T) {
 	rg.batch.SetTimeLimit(alloc.Annotations[v1alpha1.AnnotationJobID], 6*time.Hour)
 	hoStepTo(rg, hoT(8, 10, 10), 10*time.Second, nil)
 	hoWantTime(t, "leaseEnd after the extension", rg.instance(p.Name).Status.LeaseEnd, hoT(14, 0, 20))
-	hoStepTo(rg, hoT(11, 19, 40), time.Minute, func() {
+	hoStepTo(rg, hoT(11, 19, 20), time.Minute, func() {
 		if n := len(rg.instances(hoMD)); n != 1 {
-			t.Fatalf("at %s: %d Instances, the replacement is planned for 11:19:50", rg.clock.Now().Format(time.TimeOnly), n)
+			t.Fatalf("at %s: %d Instances, the replacement is planned for 11:19:30", rg.clock.Now().Format(time.TimeOnly), n)
 		}
 	})
-	hoStepTo(rg, hoT(11, 19, 50), 10*time.Second, nil)
-	if r := hoRepl(rg, p.Name); len(r) != 1 || !r[0].CreationTimestamp.Time.Equal(hoT(11, 19, 50)) {
-		t.Fatalf("replacements %+v, want one created at 11:19:50", r)
+	hoStepTo(rg, hoT(11, 19, 30), 10*time.Second, nil)
+	if r := hoRepl(rg, p.Name); len(r) != 1 || !r[0].CreationTimestamp.Time.Equal(hoT(11, 19, 30)) {
+		t.Fatalf("replacements %+v, want one created at 11:19:30", r)
 	}
 	hoStepTo(rg, hoT(11, 50, 10), time.Minute, func() {
 		if ph := hoPhase(rg, p.Name); ph != v1alpha1.InstanceReady {
@@ -503,7 +526,7 @@ func TestHandoverLeaseEndExtensionMovesDrainStart(t *testing.T) {
 // change the replacement carries the primary's ID, and the deployment's
 // activeIDs lists that one ID with two Instances while both live. After
 // serving-spec input flag dtype=bfloat16 is added at 08:10:00, the replacement
-// (created 09:19:50) carries the new current ID while the primary keeps its
+// (created 09:19:30) carries the new current ID while the primary keeps its
 // own; activeIDs lists both IDs, one Instance each, from the replacement's
 // creation until the primary ends at 09:50:20, and then only the new one.
 func TestHandoverSameClassSameIDAndRollout(t *testing.T) {
@@ -521,7 +544,7 @@ func TestHandoverSameClassSameIDAndRollout(t *testing.T) {
 					md.Spec.Source.Served.Flags = append(md.Spec.Source.Served.Flags, v1alpha1.EngineFlag{Name: "dtype", Value: "bfloat16"})
 				})
 			}
-			hoStepTo(rg, hoT(9, 19, 40), time.Minute, nil)
+			hoStepTo(rg, hoT(9, 19, 20), time.Minute, nil)
 			hoStepTo(rg, hoT(9, 30, 0), 10*time.Second, nil)
 			r1 := hoRepl(rg, p.Name)[0]
 			active := rg.md(hoMD).Status.ActiveIDs

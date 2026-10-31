@@ -37,16 +37,17 @@ func TestSmokeOneInstanceBecomesReady(t *testing.T) {
 
 // TestSmokeHandover: a 4 h lease with the default drain window (2h10m). The
 // primary's job starts at 08:00:20 with no queue wait, which the Provider
-// records (one wait of 0 s); its Instance is ready at 08:00:50, so the class's
-// start-to-ready time is 30 s. The replacement is planned at the drain start
-// (12:00:20 - 2h10m = 09:50:20) minus (0 + 30 s + 30 min margin) = 09:19:50.
-// Both serve, and the primary drains at its drain start.
+// records (one wait of 0 s); its Instance is ready at 08:01:10, 50 s after its
+// job starts, so the class's start-to-ready time is 50 s. The replacement is
+// planned at the drain start (12:00:20 - 2h10m = 09:50:20) minus (0 + 50 s +
+// 30 min margin) = 09:19:30. Both serve, and the primary drains at its drain
+// start.
 func TestSmokeHandover(t *testing.T) {
 	rg := newRig(t, withMaxTime(4*time.Hour))
 	rg.create(mdSpec("md"))
 	rg.until(10*time.Minute, 10*time.Second, "one ready Instance", func() bool { return rg.readyCount("md") == 1 })
 	rg.until(2*time.Hour, 10*time.Second, "two Instances", func() bool { return len(rg.instances("md")) == 2 })
-	if want := time.Date(2026, 11, 2, 9, 19, 50, 0, time.UTC); !rg.instances("md")[1].CreationTimestamp.Time.Equal(want) {
+	if want := time.Date(2026, 11, 2, 9, 19, 30, 0, time.UTC); !rg.instances("md")[1].CreationTimestamp.Time.Equal(want) {
 		t.Fatalf("replacement created at %s, want %s", rg.instances("md")[1].CreationTimestamp.Time, want)
 	}
 	rg.until(10*time.Minute, 10*time.Second, "two ready Instances", func() bool { return rg.readyCount("md") == 2 })
