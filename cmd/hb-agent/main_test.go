@@ -221,6 +221,7 @@ func (j job) start(t *testing.T) (*exec.Cmd, *bytes.Buffer) {
 		"HPCBURST_NVIDIA_SMI="+filepath.Join(j.bin, "no-nvidia-smi"),
 		"HB_FAKE_APPTAINER_LOG="+j.appLog,
 		"HB_FAKE_SSH_LOG="+j.sshLog,
+		"GORACE=atexit_sleep_ms=0", // a race-built fake must not sleep at its exit
 	)
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out

@@ -136,7 +136,7 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 		longPoll:  300 * time.Millisecond,
 	}
 	apptainer := filepath.Join(bin, "apptainer")
-	baseEnv := append(os.Environ(), "HB_FAKE_APPTAINER_LOG="+h.appLog)
+	baseEnv := append(os.Environ(), "HB_FAKE_APPTAINER_LOG="+h.appLog, noExitSleep)
 	hubClient, hubURL := h.startHub(o.hub)
 	st, err := stage.New(stage.Config{
 		StagingDir:  h.stagingDir,
@@ -188,10 +188,15 @@ func (h *harness) stop() {
 	}
 }
 
+// noExitSleep stops a race-built fake from sleeping a second at its exit
+// (the race detector's atexit_sleep_ms), which under go test -race would make
+// a TERM-honouring engine and its fake Apptainer outlast a short stop grace.
+const noExitSleep = "GORACE=atexit_sleep_ms=0"
+
 // launch is the Instance's launch in the harness: the engine double, with its
 // modes, through the fake Apptainer.
 func launch(modes string, engLog string) agentapi.Launch {
-	env := []agentapi.EnvVar{{Name: "HB_ENGINE_DOUBLE_LOG", Value: engLog}}
+	env := []agentapi.EnvVar{{Name: "HB_ENGINE_DOUBLE_LOG", Value: engLog}, {Name: "GORACE", Value: strings.TrimPrefix(noExitSleep, "GORACE=")}}
 	if modes != "" {
 		env = append(env, agentapi.EnvVar{Name: "HB_ENGINE_DOUBLE", Value: modes})
 	}
