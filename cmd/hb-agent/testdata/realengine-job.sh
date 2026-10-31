@@ -10,6 +10,9 @@ say "job start"
 
 # Guard 1: the agent puts Apptainer's layer cache and build tree under TMPDIR.
 # On Lustre that would be tens of thousands of inodes on a scratch quota at 97%.
+# The job's own TMPDIR on Helios is on Lustre; the RAM disk of -C memfs is $MEMFS.
+say "job TMPDIR filesystem: $(stat -f -c %T "$TMPDIR" 2>/dev/null); MEMFS: ${MEMFS:+set, }$(stat -f -c %T "${MEMFS:-/nonexistent}" 2>/dev/null)"
+if [ -n "${MEMFS:-}" ]; then mkdir -p "$MEMFS/t" && export TMPDIR="$MEMFS/t"; fi
 fs=$(stat -f -c %T "$TMPDIR" 2>/dev/null)
 say "TMPDIR filesystem: $fs (path length ${#TMPDIR})"
 case "$fs" in tmpfs|ramfs) ;; *) say "ABORT: TMPDIR is not memory-backed"; exit 3 ;; esac
