@@ -61,7 +61,9 @@ modeldeployments:$.spec.retentionPolicy#1|^TestRetentionPolicy$
 modeldeployments:$.spec.retentionPolicy.idleLimit#0|^TestDurationsArePositiveAndFit$
 modeldeployments:$.spec.routing.loadBound#0|^TestRoutingLoadBoundIsAtLeastOne$
 modeldeployments:$.spec.routing.loadBound.loose#0|^TestRoutingLoadBoundIsAtLeastOne$
+modeldeployments:$.spec.routing.loadBound.loose#1|^TestRoutingLoadBoundHasAtMostTwoDecimals$
 modeldeployments:$.spec.routing.loadBound.tight#0|^TestRoutingLoadBoundIsAtLeastOne$
+modeldeployments:$.spec.routing.loadBound.tight#1|^TestRoutingLoadBoundHasAtMostTwoDecimals$
 modeldeployments:$.spec.routing.maxRequestDuration#0|^TestDurationsArePositiveAndFit$
 modeldeployments:$.spec.source#0|^TestModelDeploymentSourceIsServedOrManaged$
 modeldeployments:$.spec.source.served#0|^TestTokenizerOtherThanTheCheckpointsIsPinned$
@@ -85,6 +87,7 @@ modeldeployments:$.spec.source.served.flags[]#9|^TestEngineFlagsRefuseAbbreviati
 modeldeployments:$.spec.source.served.flags[]#10|^TestEngineFlagsThatNameOtherCheckpointsAreRefused$
 modeldeployments:$.spec.source.served.flags[]#11|^TestEngineFlagsRefuseEveryPrefixOfAKnownFlag$
 modeldeployments:$.spec.source.served.flags[]#12|^TestMaxModelLenIsAPlainPositiveInteger$
+modeldeployments:$.spec.source.served.flags[]#13|^TestParallelSizesArePlainPositiveIntegers$
 modeldeployments:$.spec.workload.contextTokens#0|^TestContextTokensTypicalIsAtMostLongest$
 platformprofiles:$.spec#0|^TestPlatformProfileTypedFields$
 platformprofiles:$.spec.drainMargin#0|^TestDurationsArePositiveAndFit$

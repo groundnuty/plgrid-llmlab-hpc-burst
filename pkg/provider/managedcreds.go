@@ -38,8 +38,8 @@ import (
 // canonical form.
 type ManagedCredentials struct {
 	// Key is the upstream key, sent as "Authorization: Bearer <Key>". It is
-	// printable ASCII without spaces, at most MaxManagedKeyBytes. It never
-	// reaches a log, an object or a command line.
+	// printable ASCII without spaces, at least MinManagedKeyBytes and at most
+	// MaxManagedKeyBytes. It never reaches a log, an object or a command line.
 	Key string `json:"key"`
 
 	// BaseURL is the gateway's OpenAI-compatible base URL, as an OpenAI client
@@ -64,6 +64,10 @@ const (
 	MaxManagedCredentialsBytes = 64 << 10
 	// MaxManagedKeyBytes is the longest key.
 	MaxManagedKeyBytes = 4096
+	// MinManagedKeyBytes is the shortest key. A shorter value is a placeholder
+	// or a truncated paste, not a gateway key (`@hpc-burst-science-agent`,
+	// 31 Oct 2026).
+	MinManagedKeyBytes = 16
 	// CredentialsExpiringWindow is how long before the expiry the Provider
 	// gets CredentialsExpiring (HBEP-4: "a day before the expiry date").
 	CredentialsExpiringWindow = 24 * time.Hour
@@ -154,6 +158,8 @@ func (c ManagedCredentials) Validate() error {
 	switch {
 	case c.Key == "":
 		return credErr("key is empty")
+	case len(c.Key) < MinManagedKeyBytes:
+		return credErr("key is %d bytes, below the least of %d", len(c.Key), MinManagedKeyBytes)
 	case len(c.Key) > MaxManagedKeyBytes:
 		return credErr("key is %d bytes, above %d", len(c.Key), MaxManagedKeyBytes)
 	}
