@@ -319,8 +319,8 @@ func enginePIDs(t *testing.T, h *harness) []int {
 	return pids
 }
 
-// waitGone waits until none of the PIDs is a live process (a zombie counts as
-// gone: it runs nothing).
+// waitGone waits until none of the PIDs is a live process (a zombie whose
+// every thread has exited counts as gone: it runs nothing).
 func waitGone(t *testing.T, pids []int, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -341,13 +341,25 @@ func waitGone(t *testing.T, pids []int, timeout time.Duration) {
 	}
 }
 
+// processLives reports whether any thread of the process still runs. A
+// leader that reads Z while another thread runs execve is alive (L-17.1), so
+// every task is read, not only the leader's state.
 func processLives(pid int) bool {
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	tasks, err := os.ReadDir(fmt.Sprintf("/proc/%d/task", pid))
 	if err != nil {
 		return false
 	}
-	// The state follows the command name in parentheses.
-	s := string(b)
-	i := strings.LastIndexByte(s, ')')
-	return i < 0 || i+2 >= len(s) || s[i+2] != 'Z'
+	for _, task := range tasks {
+		b, err := os.ReadFile(fmt.Sprintf("/proc/%d/task/%s/stat", pid, task.Name()))
+		if err != nil {
+			continue
+		}
+		// The state follows the command name in parentheses.
+		s := string(b)
+		i := strings.LastIndexByte(s, ')')
+		if i < 0 || i+2 >= len(s) || s[i+2] != 'Z' {
+			return true
+		}
+	}
+	return false
 }
