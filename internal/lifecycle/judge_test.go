@@ -221,8 +221,9 @@ func TestJudgeVerifyDeclaredInputNotReported(t *testing.T) {
 // spacing is another value, since the comparison is verbatim; the declared
 // text itself matches.
 func TestJudgeVerifyJSONFormatting(t *testing.T) {
-	// Verbatim (science-agent ruling, 31 Oct 2026): the same JSON object
-	// written with other white space is another value, so a contradiction.
+	// Neither a boolean nor a number, so verbatim (science-agent ruling, 31
+	// Oct 2026; PR #91): the same JSON object written with other white space
+	// is another value, so a contradiction.
 	r := judgeResult()
 	r.Settings["speculative-config"] = `{ "num_speculative_tokens": 3,
 	  "method": "ngram" }`

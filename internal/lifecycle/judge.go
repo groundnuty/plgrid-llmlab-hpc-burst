@@ -98,6 +98,7 @@ type verificationData struct {
 	Settings       map[string]string `json:"settings,omitempty"`
 	NotReported    []string          `json:"notReported,omitempty"`
 	Undeclared     map[string]string `json:"undeclared,omitempty"`
+	Resolved       map[string]string `json:"resolved,omitempty"` // each declared "auto": what the engine chose
 	Contradictions []string          `json:"contradictions,omitempty"`
 	Fingerprint    string            `json:"fingerprint,omitempty"`
 	Overhead       int32             `json:"templateOverhead,omitempty"`
@@ -191,7 +192,14 @@ func judgeVerify(d declared, v *agentapi.VerifyResult, rehash bool, sh shapes) v
 			out.NotReported = append(out.NotReported, n)
 			continue
 		}
-		if !sameSetting(got, d.flags[n]) {
+		if d.flags[n] == "auto" { // the engine chooses: record what it chose, compare nothing
+			if out.Resolved == nil {
+				out.Resolved = map[string]string{}
+			}
+			out.Resolved[n] = got
+			continue
+		}
+		if !sameSetting(n, got, d.flags[n]) {
 			out.Contradictions = append(out.Contradictions, fmt.Sprintf("%s %q, declared %q", n, got, d.flags[n]))
 		}
 	}
@@ -219,10 +227,54 @@ func judgeVerify(d declared, v *agentapi.VerifyResult, rehash bool, sh shapes) v
 	return out
 }
 
-// sameSetting compares a reported setting with its declared value verbatim
-// (science-agent ruling, 31 Oct 2026): "fp8" is not "fp8_e4m3", and a
-// JSON-valued flag the engine re-serializes differently is a contradiction too.
-func sameSetting(got, want string) bool { return got == want }
+// sameSetting compares a reported setting with its declared value under one
+// rule (HBEP-7, Instance start, Settings comparison; science-agent ruling,
+// 31 Oct 2026; PR #91). Identical text always matches. max-model-len is
+// compared as an integer. Otherwise, if both read as booleans (true or false,
+// in any case), they are compared as booleans; else, if both read as decimal
+// numbers, as numbers, so "4" is "4.0" (str() of a float); else they differ,
+// verbatim, so "fp8" is not "fp8_e4m3" and a JSON value the engine
+// re-serializes differently is a contradiction too. A declared "auto" is not
+// compared at all: judgeVerify records the resolved value.
+func sameSetting(name, got, want string) bool {
+	if got == want {
+		return true
+	}
+	if name == "max-model-len" {
+		g, gerr := strconv.ParseInt(got, 10, 64)
+		w, werr := strconv.ParseInt(want, 10, 64)
+		return gerr == nil && werr == nil && g == w
+	}
+	truth := func(s string) (val, ok bool) {
+		switch {
+		case strings.EqualFold(s, "true"):
+			return true, true
+		case strings.EqualFold(s, "false"):
+			return false, true
+		}
+		return false, false
+	}
+	if g, gok := truth(got); gok {
+		w, wok := truth(want)
+		return wok && g == w
+	}
+	// Decimal numbers only: ParseFloat also reads "inf", "nan" and hex floats.
+	decimal := func(s string) (float64, bool) {
+		if s == "" || strings.Trim(s, "0123456789+-.eE") != "" {
+			return 0, false
+		}
+		f, err := strconv.ParseFloat(s, 64)
+		return f, err == nil
+	}
+	gi, gierr := strconv.ParseInt(got, 10, 64) // exact above 2^53, where floats round
+	wi, wierr := strconv.ParseInt(want, 10, 64)
+	if gierr == nil && wierr == nil {
+		return gi == wi
+	}
+	g, gok := decimal(got)
+	w, wok := decimal(want)
+	return gok && wok && g == w
+}
 
 // judgeQualify judges qualification (HBEP-7, Instance start): every check the
 // agent judges passed (the tool-call smoke test when tool calls are on); the
