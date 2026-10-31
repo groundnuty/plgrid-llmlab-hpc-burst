@@ -103,12 +103,18 @@ Problems this addresses:
 - A Go module enters only through `go.mod` and `go.sum`, as in Kubernetes. Prefer tagged releases. A module pinned to a commit needs a trailing comment naming the release it corresponds to, and a tracking issue to move to a tag, as Kubernetes asks.
 - A component outside Go that the framework pins directly gets an entry in `build/dependencies.yaml` before anything pins it. Images are pinned by digest, packages by version in a lock file. The packages an image pulls in transitively are listed by the image's SBOM.
 - No `vendor/` directory for now (open question 8).
+- **frp's rows** come from HBEP-6. `build/dependencies.yaml` does not exist yet (k3s's checksums are still in the launcher's own pins file), so the PR that adds frp creates it, in the format open question 5 decides then, and fills in each binary's SHA-256 from the release:
+
+  | Name | Version | Upstream URL | SPDX licence | Where it is pinned | Adopted by |
+  |---|---|---|---|---|---|
+  | frps | v0.71.1, the release binary for the control-plane host's architecture | https://github.com/fatedier/frp | Apache-2.0 | the launcher's checksum check before it starts frps (HBEP-11) | HBEP-6 |
+  | frpc | v0.71.1, the `linux_amd64` and `linux_arm64` release binaries | https://github.com/fatedier/frp | Apache-2.0 | the Provider's controller's staging at `frpc/<digest>/frpc`, and the digest in `agent.json` that the agent checks (HBEP-4, HBEP-7) | HBEP-6 |
 
 ### Licence allowlist
 
 - **Allowed:** Apache-2.0, plus the licences of the CNCF allowlist, as listed on 2026-10-30: 0BSD, BSD-2-Clause, BSD-2-Clause-FreeBSD, BSD-3-Clause, MIT, MIT-0, ISC, OpenSSL, OpenSSL-standalone, PSF-2.0, Python-2.0, Python-2.0.1, PostgreSQL, SSLeay-standalone, UPL-1.0, X11, Zlib, and the Google patent licence for Go.
 - **The CNCF conditions, as adopted here:**
-  - (1) the licence is on the list: checked in CI;
+  - (1) the licence is on the list: checked in CI, though that check is disabled since 31 Oct 2026 by the owner's decision (`if: false` in `.github/workflows/ci.yml`, PR #83; the scripts stay in `hack/`; Implementation history);
   - (2) unmodified in a third-party folder, or fetched at installation or build time: Go modules and `build/dependencies.yaml` entries meet it; modified copies follow Copied code;
   - (3) substantial use outside the project (a standard library, or created at least 12 months ago with at least 10 stars or forks): a checklist item for the reviewer, not a CI check.
 - **Exceptions:** anything else, an unknown licence included, needs the approver's word. It is recorded in `hack/license-exceptions.yaml` with the package, licence, reason, PR and date.
@@ -278,6 +284,8 @@ Licences are each repository's GitHub licence field.
 
 - 2026-10-30: proposed (provisional), tracking issue #15, together with the first lessons catalogue.
 - 2026-10-31: the project's licence decided (Apache-2.0, owner) and added at the root; the SBOM tool decided (syft, spike S12); the licence check runs once per module outside `spikes/`, with no empty run; spike modules are outside the check, the allowlist and the dependency review.
+- 2026-10-31: frp's rows, frps and frpc v0.71.1, recorded from HBEP-6 becoming implementable; the PR that adds frp creates `build/dependencies.yaml`.
+- 2026-10-31: the CI licence check is disabled by the owner's decision; the scripts stay in `hack/`.
 
 ## Amendments
 

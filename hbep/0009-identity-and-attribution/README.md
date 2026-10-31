@@ -206,6 +206,7 @@ Verification grows from www-2027's endpoint check, run on each new endpoint (hea
 - 2026-10-30: one verification record per verification, at start and after every restart that reverifies, as HBEP-7 and HBEP-11 now say.
 - 2026-10-30: HBEP-5's alpha proposal for where attribution travels noted.
 - 2026-10-31: the Hub listing rule written in full from the Hub listing (PR #68): `limit=1000`, every `Link` followed, an unparseable `Link` an error, one snapshot, redirects only on the Hub's origin. Lesson L-17.5 cited.
+- 2026-10-31: HBEP-6, now implementable, decides for alpha who may claim an Instance's tunnel: frps's server plugin admits a login only with a live Allocation's credential, and a proxy only for the UID of an Instance placed on that Allocation. The Instance still takes traffic only after the controller's verification.
 
 ## Amendments
 
