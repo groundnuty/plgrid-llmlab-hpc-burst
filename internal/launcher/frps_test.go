@@ -171,14 +171,16 @@ func TestEnsureFrpsWebPassword(t *testing.T) {
 			t.Fatalf("second call: key equal=%v created=%v err=%v", second == first, created, err)
 		}
 	})
-	t.Run("refuses a file with a wrong mode and leaves it as it is", func(t *testing.T) {
+	t.Run("refuses any mode but 0600 and leaves the file as it is", func(t *testing.T) {
 		h := newHost(t)
 		if _, _, err := EnsureFrpsWebPassword(h); err != nil {
 			t.Fatal(err)
 		}
 		path := h.FrpsWebPasswordFile()
 		before, _ := os.ReadFile(path)
-		for _, mode := range []os.FileMode{0o644, 0o640, 0o660, 0o604, 0o607} {
+		// 0400, 0500 and 0700 are owner-only, which agentapi.ReadKeyFile accepts; the launcher
+		// wrote 0600 and requires exactly that.
+		for _, mode := range []os.FileMode{0o644, 0o640, 0o660, 0o604, 0o607, 0o400, 0o500, 0o700} {
 			if err := os.Chmod(path, mode); err != nil {
 				t.Fatal(err)
 			}

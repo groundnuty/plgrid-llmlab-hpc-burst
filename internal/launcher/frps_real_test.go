@@ -3,6 +3,8 @@ package launcher
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -307,25 +309,148 @@ func TestFrpsRealRefusesAConfigWithAnUnknownKey(t *testing.T) {
 	}
 	defer bin.Close()
 	p, err := StartFrps(FrpsSpec{Bin: bin, Config: bad, Log: FrpsLogFile(h), Dir: h.StateDir})
+	switch {
+	case err == nil:
+		defer p.Release()
+		select {
+		case <-p.Done():
+		case <-time.After(10 * time.Second):
+			_, _ = p.Stop(context.Background(), time.Second)
+			t.Fatal("frps started with a mistyped key")
+		}
+		if st := p.ExitStatus(); st != "exit status 1" {
+			t.Errorf("exit status = %q, want exit status 1", st)
+		}
+		for end := time.Now().Add(5 * time.Second); !gone(p.Rec().PID) && time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
+		}
+		if !gone(p.Rec().PID) {
+			t.Errorf("/proc/%d still exists after the exit", p.Rec().PID)
+		}
+		// The exited process is a stop that has nothing left to do.
+		if rep, err := StopFrps(context.Background(), p.Rec(), time.Second); err != nil || rep.Before != "gone" {
+			t.Errorf("StopFrps of an exited frps = %+v, %v", rep, err)
+		}
+	case errors.Is(err, errExited):
+		// The invalid file can make frps exit before StartFrps has read its identity: that is
+		// an error from the start, and it must have left nothing behind.
+		t.Logf("frps exited before its identity was recorded: %v", err)
+	default:
+		t.Fatalf("StartFrps: %v", err)
+	}
+	// Either way: frps said which key it refused, in the log, and no process is left.
+	for end := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		log, _ := os.ReadFile(FrpsLogFile(h))
+		if strings.Contains(string(log), `unknown field "bindAdr"`) {
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatalf("the log %s never named the refused key:\n%s", FrpsLogFile(h), log)
+		}
+	}
+	for end := time.Now().Add(5 * time.Second); len(procsMentioning(h.StateDir)) != 0; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(end) {
+			t.Fatalf("processes still mention the state directory: %v", procsMentioning(h.StateDir))
+		}
+	}
+}
+
+// TestStartFrpsSurvivesAnImmediateExit runs the early-exit race of the test above on purpose, with
+// a program that exits at once: StartFrps either reports that the process had exited before its
+// identity was recorded, or returns a process whose Done closes. Neither leaves a process behind.
+func TestStartFrpsSurvivesAnImmediateExit(t *testing.T) {
+	truePath, err := exec.LookPath("true")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer p.Release()
-	select {
-	case <-p.Done():
-	case <-time.After(10 * time.Second):
-		_, _ = p.Stop(context.Background(), time.Second)
-		t.Fatal("frps started with a mistyped key")
+	f, err := os.Open(truePath)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if st := p.ExitStatus(); st != "exit status 1" {
-		t.Errorf("exit status = %q, want exit status 1", st)
+	defer f.Close()
+	bin := FrpsBinary{Version: "test", Path: truePath, file: f}
+	dir := shortDir(t)
+	cfg := filepath.Join(dir, "marker-config.toml")
+	if err := os.WriteFile(cfg, nil, 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if !gone(p.Rec().PID) {
-		t.Errorf("/proc/%d still exists after the exit was reaped", p.Rec().PID)
+	var early, late int
+	for i := 0; i < 40; i++ {
+		p, err := StartFrps(FrpsSpec{Bin: bin, Config: cfg, Log: filepath.Join(dir, "out.log"), Dir: dir})
+		switch {
+		case errors.Is(err, errExited):
+			early++
+		case err != nil:
+			t.Fatalf("run %d: %v", i, err)
+		default:
+			late++
+			select {
+			case <-p.Done():
+			case <-time.After(5 * time.Second):
+				t.Fatalf("run %d: Done never closed", i)
+			}
+			if st := p.ExitStatus(); st != "exit status 0" {
+				t.Errorf("run %d: exit status %q", i, st)
+			}
+			p.Release()
+		}
 	}
-	// The exited process is a stop that has nothing left to do.
-	if rep, err := StopFrps(context.Background(), p.Rec(), time.Second); err != nil || rep.Before != "gone" {
-		t.Errorf("StopFrps of an exited frps = %+v, %v", rep, err)
+	t.Logf("exited before the identity was recorded %d times, after it %d times", early, late)
+	for end := time.Now().Add(5 * time.Second); len(procsMentioning(cfg)) != 0; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(end) {
+			t.Fatalf("processes left: %v", procsMentioning(cfg))
+		}
+	}
+}
+
+// TestFrpsRealRunsTheVerifiedDescriptorNotTheReplacedPath: the launcher hashes the file it opened
+// and runs that descriptor. After the verification the path is made to name another executable (a
+// new file, as an installer or an attacker would leave it); frps must still be the verified one,
+// with and without nice(1) in front. Executing the path instead would start the impostor, which
+// writes a marker and never answers.
+func TestFrpsRealRunsTheVerifiedDescriptorNotTheReplacedPath(t *testing.T) {
+	frps, _ := testenv.FrpBinaries(t)
+	for _, nice := range []int{0, 10} {
+		t.Run(fmt.Sprintf("nice=%d", nice), func(t *testing.T) {
+			dir := shortDir(t)
+			path := filepath.Join(dir, "frps")
+			copyFile(t, frps, path, 0o755)
+			marker := filepath.Join(dir, "impostor-ran")
+			replaced := false
+			r := newFrpsRigFrom(t, frpsRigBase, nice, path, func(bin FrpsBinary) {
+				impostor := []byte("#!/bin/sh\ntouch " + marker + "\nexec sleep 300\n")
+				tmp := path + ".new"
+				if err := os.WriteFile(tmp, impostor, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(tmp, path); err != nil {
+					t.Fatal(err)
+				}
+				replaced = true
+			})
+			if !replaced {
+				t.Fatal("the test never replaced the file")
+			}
+			if b, _ := os.ReadFile(path); !strings.HasPrefix(string(b), "#!/bin/sh") {
+				t.Fatalf("the path does not name the impostor: %.20q", b)
+			}
+			pid := r.proc.Rec().PID
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Errorf("the impostor ran (%v)", err)
+			}
+			// The process runs the old, unlinked inode: its image is the file that was hashed.
+			exe, err := os.Readlink("/proc/" + strconv.Itoa(pid) + "/exe")
+			if err != nil || exe != path+" (deleted)" {
+				t.Errorf("/proc/%d/exe = %q, %v, want %q", pid, exe, err, path+" (deleted)")
+			}
+			img, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/exe")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sum := sha256.Sum256(img); hex.EncodeToString(sum[:]) != r.bin.SHA256 {
+				t.Errorf("the image of pid %d has sha256 %x, not the verified %s", pid, sum, r.bin.SHA256)
+			}
+			r.stop()
+		})
 	}
 }
 

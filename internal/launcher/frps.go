@@ -112,7 +112,8 @@ func RenderFrpsConfig(h agentapi.Host, webPassword string) (string, error) {
 // EnsureFrpsWebPassword returns the web server's password from agentapi.Host.FrpsWebPasswordFile,
 // and creates the file with a new key (agentapi.NewKey, WriteKeyFile: mode 600, in a 700
 // directory) when there is none. An existing file is kept as it is. One that ReadKeyFile
-// refuses (a wrong mode or owner, a symbolic link, a wrong form) is an error, and nothing is
+// refuses (a wrong owner, a symbolic link, a wrong form), or whose mode is not exactly 0600
+// (ReadKeyFile also takes 0400, 0500 and 0700), is an error, and nothing is
 // written over it: the launcher does not guess whether a password someone else touched is
 // still secret. The state directory's lock serialises the launcher's commands, so two of them
 // never create the file at once.
@@ -121,6 +122,16 @@ func EnsureFrpsWebPassword(h agentapi.Host) (key string, created bool, err error
 	key, err = agentapi.ReadKeyFile(path)
 	switch {
 	case err == nil:
+		// ReadKeyFile accepts any owner-only mode (0400, 0500, 0700). The launcher wrote this
+		// file as 0600 (HBEP-6: mode 600), so another mode means someone changed it, and the
+		// launcher does not guess whether that was harmless: it refuses, as for a group bit.
+		fi, serr := os.Lstat(path)
+		if serr != nil {
+			return "", false, fmt.Errorf("frps web password file: %w", serr)
+		}
+		if perm := fi.Mode().Perm(); perm != agentapi.KeyFileMode {
+			return "", false, fmt.Errorf("frps web password file %s has mode %04o, and the launcher requires exactly %04o: check who changed it, then chmod 600 it or remove it", path, perm, agentapi.KeyFileMode)
+		}
 		return key, false, nil
 	case !errors.Is(err, fs.ErrNotExist):
 		return "", false, fmt.Errorf("frps web password file: %w", err)

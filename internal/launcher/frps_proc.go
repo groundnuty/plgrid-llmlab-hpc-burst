@@ -23,6 +23,11 @@ const FrpsProcName = "frps"
 // to reap it once it has.
 const frpsKillWait = 10 * time.Second
 
+// ErrFrpsReleased means that this FrpsProc's pidfd is closed, by Release or by an earlier Stop,
+// so nothing can be signalled through it: the kernel may have given its descriptor number to
+// another process. Nothing was signalled. StopFrps with Rec() finds frps again from its record.
+var ErrFrpsReleased = errors.New("this frps handle is released, so its pidfd is closed and nothing is signalled through it; use StopFrps with the record")
+
 // ErrFrpsForeign means that the recorded PID is alive but belongs to another process (its start
 // time or boot ID differs from the record: the PID was reused). Nothing was signalled.
 var ErrFrpsForeign = errors.New("the recorded pid belongs to another process, which was not signalled")
@@ -130,12 +135,17 @@ func (p *FrpsProc) ExitStatus() string {
 }
 
 // Release closes the pidfd without stopping frps: a caller that exits and leaves frps to be found
-// again from its record (StopFrps).
+// again from its record (StopFrps). A Stop after Release fails with ErrFrpsReleased.
 func (p *FrpsProc) Release() { p.h.Close() }
 
 // Stop ends frps through the pidfd it holds, with the rules of StopFrps, and waits until it is
 // reaped. It closes the handle.
 func (p *FrpsProc) Stop(ctx context.Context, grace time.Duration) (FrpsStop, error) {
+	if p.h.isClosed() {
+		return FrpsStop{PID: p.h.rec.PID, Before: "released"}, ErrFrpsReleased
+	}
+	// Closed whether the stop succeeds or not: a second Stop gets ErrFrpsReleased, not a
+	// descriptor number that may belong to someone else by then.
 	defer p.h.Close()
 	rep, err := frpsStopHeld(ctx, p.h, grace)
 	if err != nil {

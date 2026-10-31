@@ -121,6 +121,14 @@ type frpsRig struct {
 func newFrpsRig(t *testing.T, base, nice int) *frpsRig {
 	t.Helper()
 	frps, _ := testenv.FrpBinaries(t)
+	return newFrpsRigFrom(t, base, nice, frps, nil)
+}
+
+// newFrpsRigFrom is newFrpsRig for the frps executable at frpsPath. afterResolve, when not nil,
+// runs once the launcher has opened and hashed the file and before it starts frps: a test uses
+// it to change what the path names.
+func newFrpsRigFrom(t *testing.T, base, nice int, frpsPath string, afterResolve func(bin FrpsBinary)) *frpsRig {
+	t.Helper()
 	before := rootK3sListening(t)
 	if os.Getenv("HPCBURST_TEST_ROOT_K3S") == "1" && before != "6443,6444,10250" {
 		t.Fatalf("HPCBURST_TEST_ROOT_K3S=1, but the root k3s listens only on %q", before)
@@ -140,10 +148,13 @@ func newFrpsRig(t *testing.T, base, nice int) *frpsRig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.bin, err = ResolveFrpsFile(frps, DefaultFrpVersion); err != nil {
+	if r.bin, err = ResolveFrpsFile(frpsPath, DefaultFrpVersion); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(r.bin.Close)
+	if afterResolve != nil {
+		afterResolve(r.bin)
+	}
 	r.stub = startPluginStub(t, r.host)
 	r.proc, err = StartFrps(FrpsSpec{Bin: r.bin, Config: cfg, Log: FrpsLogFile(r.host), Dir: r.state, Nice: nice})
 	if err != nil {
@@ -331,4 +342,16 @@ func startFrpc(t *testing.T, frpc, cfg string) (kill func()) {
 	}
 	t.Cleanup(kill)
 	return kill
+}
+
+// copyFile copies src to dst with the given mode.
+func copyFile(t *testing.T, src, dst string, mode os.FileMode) {
+	t.Helper()
+	b, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, b, mode); err != nil {
+		t.Fatal(err)
+	}
 }
