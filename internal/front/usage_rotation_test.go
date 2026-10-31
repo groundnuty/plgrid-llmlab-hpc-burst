@@ -101,16 +101,20 @@ func TestRotationAcrossUTCMidnightThroughTheFront(t *testing.T) {
 	}
 }
 
-// TestRunNamesTheUsageFileByItsClock: Run gives the sink its clock, so on a
-// fake clock at 2026-10-31 12:00 UTC the first record is in
-// usage-2026-10-31.jsonl, not in a file named by the wall clock's day.
+// TestRunNamesTheUsageFileByItsClock: Run gives the sink its clock. The
+// injected clock stands on 5 March 2027, 10 seconds before UTC midnight, a
+// date that is not the wall clock's, so a Run that ignored the injected clock
+// would name the files by today's date and fail this test at any time. A
+// request before midnight is recorded in usage-2027-03-05.jsonl; once the
+// clock passes midnight, the next goes to usage-2027-03-06.jsonl.
 func TestRunNamesTheUsageFileByItsClock(t *testing.T) {
 	dir := t.TempDir()
 	keys := filepath.Join(dir, "keys.json")
 	writeMode600(t, keys, `{"keys":[{"id":"k","key":"client-key"}]}`)
+	clk := clock.NewFake(time.Date(2027, 3, 5, 23, 59, 50, 0, time.UTC))
 	o := Options{
 		Config:           Config{ClientKeysFile: keys, UsageDir: filepath.Join(dir, "usage")}.WithDefaults(),
-		Clock:            clock.NewFake(t0),
+		Clock:            clk,
 		Dynamic:          fakeWatchClient(),
 		Recorder:         &MemoryRecorder{},
 		Log:              discardLog(),
@@ -131,13 +135,27 @@ func TestRunNamesTheUsageFileByItsClock(t *testing.T) {
 		t.Fatal("the front did not start")
 	}
 	// A request with the wrong key is refused, and recorded.
-	req, _ := http.NewRequest(http.MethodPost, "http://"+f.Client.String()+scChat, strings.NewReader(errChatBody(scModel, false, "hi")))
-	req.Header.Set("Authorization", "Bearer not-the-key")
-	resp, err := errClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
+	refuse := func() {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodPost, "http://"+f.Client.String()+scChat, strings.NewReader(errChatBody(scModel, false, "hi")))
+		req.Header.Set("Authorization", "Bearer not-the-key")
+		resp, err := errClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		readAll(t, resp)
 	}
-	readAll(t, resp)
+	recorded := func(n int) {
+		t.Helper()
+		errWaitFor(t, "the records to be written", func() bool {
+			return bytes.Count(readUsageFiles(t, o.Config.UsageDir), []byte("\n")) >= n
+		})
+	}
+	refuse()
+	recorded(1)
+	clk.Advance(time.Minute) // 2027-03-06 00:00:50 UTC
+	refuse()
+	recorded(2)
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatalf("Run: %v", err)
@@ -146,10 +164,12 @@ func TestRunNamesTheUsageFileByItsClock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"usage-2026-10-31.jsonl"}; !reflect.DeepEqual(files, want) {
-		t.Errorf("files = %v, want %v", files, want)
+	if want := []string{"usage-2027-03-05.jsonl", "usage-2027-03-06.jsonl"}; !reflect.DeepEqual(files, want) {
+		t.Fatalf("files = %v, want %v", files, want)
 	}
-	if recs := recordsOf(t, o.Config.UsageDir, "usage-2026-10-31.jsonl"); len(recs) != 1 || recs[0].Status != 401 {
-		t.Errorf("records = %+v, want the one 401", recs)
+	for _, name := range files {
+		if recs := recordsOf(t, o.Config.UsageDir, name); len(recs) != 1 || recs[0].Status != 401 {
+			t.Errorf("%s holds %+v, want the one 401", name, recs)
+		}
 	}
 }

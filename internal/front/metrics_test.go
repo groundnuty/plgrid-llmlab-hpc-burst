@@ -237,11 +237,21 @@ func TestMetricCutsMoveWithCutBy(t *testing.T) {
 		cfg: func(c *Config) { c.MaxRequestDuration = Duration(5 * time.Second) },
 		md:  func(md *v1alpha1.ModelDeployment) { md.Spec.Routing = &v1alpha1.Routing{InstanceCap: &one} },
 	})
+	// Before any request every cut series is a real zero, for the target and
+	// for a request that had none (HBEP-8: a count of the front's own events
+	// starts at 0).
+	zeros := scrape(t, f.metrics)
+	for _, by := range []string{"front_deadline", "front_idle", "front_headers", "tunnel", "upstream", "lease_end", "client", "front_shutdown"} {
+		wantSample(t, zeros, 0, mCuts, "cut_by", by, "provider", "helios-a", "model_deployment", "ns/md")
+		wantSample(t, zeros, 0, mCuts, "cut_by", by, "provider", "", "model_deployment", "")
+	}
 	f.engines[0].Set(enginetest.Behaviour{Tokens: 3})
 	f.prSend(t, scChat, errChatBody(scModel, false, "whole"))
 	ss := scrape(t, f.metrics)
-	if got := describeSeries(ss, mCuts); got != "" {
-		t.Fatalf("a request that ended whole moved the cuts:\n%s", got)
+	for _, s := range ss {
+		if s.name == mCuts && s.value != 0 {
+			t.Fatalf("a request that ended whole moved a cut series: %+v", s)
+		}
 	}
 
 	// The engine kills the stream after two tokens.
@@ -293,13 +303,13 @@ func TestMetricCutsMoveWithCutBy(t *testing.T) {
 // and ModelDeployment; after pauseDuration (30 s) three more pause it again.
 func TestMetricPausesCountEachPause(t *testing.T) {
 	f := newScFix(t, scOpts{})
+	wantSample(t, scrape(t, f.metrics), 0, mPauses, "provider", "helios-a", "model_deployment", "ns/md")
 	f.engines[0].Set(enginetest.Behaviour{Status: 500, ErrorBody: `{"error":{"message":"boom","type":"server_error","code":500}}`})
 	for range 2 {
 		f.prSend(t, scChat, errChatBody(scModel, false, "hi"))
 	}
-	if _, ok := find(t, scrape(t, f.metrics), mPauses, "provider", "helios-a", "model_deployment", "ns/md"); ok {
-		t.Fatal("two failures paused the Instance; the rule is three in a row")
-	}
+	// A real zero until the first pause, and still 0 after two failures.
+	wantSample(t, scrape(t, f.metrics), 0, mPauses, "provider", "helios-a", "model_deployment", "ns/md")
 	f.prSend(t, scChat, errChatBody(scModel, false, "hi"))
 	wantSample(t, scrape(t, f.metrics), 1, mPauses, "provider", "helios-a", "model_deployment", "ns/md")
 
@@ -399,8 +409,8 @@ func TestMetricUsageWriteFailuresCountRecordsLost(t *testing.T) {
 	wantSample(t, ss, 2, "hpcburst_usage_write_failures_total")
 	wantSample(t, ss, 0, "hpcburst_usage_records_total")
 	u := usageHealthOf(f.sink.Stats())
-	if u.State != "failing" || u.Failures != 2 || u.Error == "" || u.Since != "2026-10-31T12:00:00.000Z" {
-		t.Errorf("usage health = %+v, want failing, 2 failures, an error and since 2026-10-31T12:00:00.000Z", u)
+	if u.State != "failing" || u.LostRecords != 2 || u.Error == "" || u.Since != "2026-10-31T12:00:00.000Z" {
+		t.Errorf("usage health = %+v, want failing, 2 lost records, an error and since 2026-10-31T12:00:00.000Z", u)
 	}
 
 	if err := os.Remove(blocker); err != nil {
@@ -412,9 +422,45 @@ func TestMetricUsageWriteFailuresCountRecordsLost(t *testing.T) {
 	wantSample(t, ss, 1, "hpcburst_usage_records_total")
 	wantSample(t, ss, 2, "hpcburst_usage_write_failures_total")
 	u = usageHealthOf(f.sink.Stats())
-	if u.State != "ok" || u.Failures != 2 || u.Error != "" || u.Since != "2026-10-31T12:01:00.000Z" {
-		t.Errorf("usage health after recovery = %+v, want ok, the 2 failures kept, no error and since 2026-10-31T12:01:00.000Z", u)
+	if u.State != "ok" || u.LostRecords != 2 || u.Error != "" || u.Since != "2026-10-31T12:01:00.000Z" {
+		t.Errorf("usage health after recovery = %+v, want ok, the 2 lost records kept, no error and since 2026-10-31T12:01:00.000Z", u)
 	}
+}
+
+// TestMetricEventCountersStartAtZeroWhenTargetsBecomeKnown (PR 117 review,
+// Astra B4; HBEP-8: counts of the front's own events start at 0): a front with
+// no request yet shows the cuts and pauses of each target as zeros, and a
+// target that appears later (an Instance of another provider, a managed
+// entry) gets its zeros as soon as the view holds it. The cuts of a request
+// without a target are zeros from the start.
+func TestMetricEventCountersStartAtZeroWhenTargetsBecomeKnown(t *testing.T) {
+	f := newScFix(t, scOpts{})
+	cutBys := []string{"front_deadline", "front_idle", "front_headers", "tunnel", "upstream", "lease_end", "client", "front_shutdown"}
+	ss := scrape(t, f.metrics)
+	for _, by := range cutBys {
+		wantSample(t, ss, 0, mCuts, "cut_by", by, "provider", "", "model_deployment", "")
+		wantSample(t, ss, 0, mCuts, "cut_by", by, "provider", "helios-a", "model_deployment", "ns/md")
+		wantNoSample(t, ss, mCuts, "cut_by", by, "provider", "helios-b", "model_deployment", "ns/md2")
+	}
+	wantSample(t, ss, 0, mPauses, "provider", "helios-a", "model_deployment", "ns/md")
+	wantNoSample(t, ss, mPauses, "provider", "helios-b", "model_deployment", "ns/md2")
+
+	key := newKey(t)
+	e := enginetest.Start(t, enginetest.Options{PortLo: testPortLo, PortHi: testPortHi, Key: key, Clock: f.clk})
+	f.batchProvider("helios-b", "helios-gh200")
+	f.servedMD("md2", "another-model", 1, "helios-b")
+	f.instance("md2", "md2-0", "helios-b", e, key, instanceOpts{})
+	f.profile("llmlab", v1alpha1.PlatformManaged, "", "")
+	f.managedProvider("llmlab-a", "llmlab", "llmlab", "http://127.0.0.1:1/v1", "key-for-the-test-0001", "catalog-entry")
+	f.managedMD("md-managed", "managed-model", "llmlab", "catalog-entry", "llmlab-a")
+	f.apply()
+	ss = scrape(t, f.metrics)
+	for _, by := range cutBys {
+		wantSample(t, ss, 0, mCuts, "cut_by", by, "provider", "helios-b", "model_deployment", "ns/md2")
+		wantSample(t, ss, 0, mCuts, "cut_by", by, "provider", "llmlab-a", "model_deployment", "ns/md-managed")
+	}
+	wantSample(t, ss, 0, mPauses, "provider", "helios-b", "model_deployment", "ns/md2")
+	wantSample(t, ss, 0, mPauses, "provider", "llmlab-a", "model_deployment", "ns/md-managed")
 }
 
 // TestMetricsNilIsHarmless: a front built without metrics (a test) counts
@@ -423,6 +469,7 @@ func TestMetricsNilIsHarmless(t *testing.T) {
 	var m *Metrics
 	m.observe(usage.Record{Status: 200, Path: "/v1/chat/completions"})
 	m.paused("p", "d")
+	m.known("p", "d")
 	rec := httptest.NewRecorder()
 	m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if rec.Code != 404 {

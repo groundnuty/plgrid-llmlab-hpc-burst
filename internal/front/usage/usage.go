@@ -199,7 +199,7 @@ type Sink struct {
 	since    time.Time
 
 	// Only the writer goroutine uses these after Open.
-	log  logFile // the open log: the file of day, nil until the first write when the newest file is of an earlier day
+	log  logFile // the open log: the file of day; nil until the first write when there is no daily file yet
 	day  string  // the UTC day of log
 	size int64   // the log's size when it holds only whole lines
 	torn bool    // a failed write left a partial line that could not be cut off
@@ -258,9 +258,11 @@ func open(dir string, o Options, h hooks) (*Sink, error) {
 }
 
 // repairNewest cuts a partial last line off the newest usage file, and only
-// that one. A daily file of today (or of a later day, should the clock have
-// gone back) stays open to be appended to; any other, and the legacy file,
-// is closed after the repair and never written again.
+// that one. A daily file stays open as the log, with its day, whatever the
+// day: the first write rotates away from it when the clock has reached a later
+// day, and a clock that is still on an earlier day (stepped back since the
+// start) appends to it, so no older, closed file is ever repaired or written.
+// The legacy file is closed after the repair: it is never written again.
 func (s *Sink) repairNewest() error {
 	name, day, err := newest(s.dir)
 	if err != nil {
@@ -279,7 +281,7 @@ func (s *Sink) repairNewest() error {
 		f.Close()
 		return fmt.Errorf("usage: repair the end of %s: %w", path, err)
 	}
-	if day == "" || day < s.today() {
+	if day == "" {
 		return f.Close()
 	}
 	s.log, s.day, s.size = s.h.wrap(f), day, size

@@ -6,7 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -44,9 +43,12 @@ type Router struct {
 	mds       map[string]*v1alpha1.ModelDeployment // for events
 	profiles  map[string]*v1alpha1.PlatformProfile
 
-	// usageFailing: the latest usage write failed, and its event went out
-	// at usageEventAt.
+	// usageFailing: a usage write has failed and none has succeeded since.
+	// usageNote is the event's message, from the latest failure, and
+	// usageEventAt when the event last went out (zero: not yet in this run
+	// of failures).
 	usageFailing bool
+	usageNote    string
 	usageEventAt time.Time
 
 	// beforePick, when set, runs between reading the view and picking from
@@ -114,7 +116,11 @@ func (r *Router) rebuildLocked() {
 			r.applyLocked(d, prev, now)
 			for _, i := range d.Members {
 				all = append(all, i.Key)
+				r.metrics.known(i.Provider, d.Key)
 			}
+		}
+		for _, t := range m.Managed {
+			r.metrics.known(t.Provider, t.Deployment)
 		}
 		r.rings[m.Name] = balancer.NewRing(all)
 	}
@@ -310,31 +316,40 @@ func (r *Router) LeaseEnd(uid types.UID) (time.Time, bool) {
 // failure lasts.
 const usageEventEvery = time.Hour
 
-// usageFailed raises a UsageWriteFailed event when a failure starts, then at
-// most once an hour while it lasts: a repeating event, since client-go rarely
-// merges events whose objects changed (@hpc-burst-science-agent, 31 Oct 2026).
-// The event regards the front's Lease once the front holds it (HBEP-8,
-// Events). Until then, and when the front has no API client at all, it regards
-// the ModelDeployment of the request that failed, if there is one; a request
-// that named none (refused before routing, or off /v1/) waits for one that
-// did. The sink's count and its Error log keep every failure.
-func (r *Router) usageFailed(dep, requestID string, err error) {
-	var subject runtime.Object
-	if r.lease.held() {
-		subject = r.lease.object()
+// usageFailed notes a usage failure and raises its event when it can. The
+// event regards the front's Lease (HBEP-8, Events), so it waits until the
+// front holds the Lease: until then the failure is counted by the sink,
+// logged and shown in /healthz, and nothing else (@hpc-burst-science-agent,
+// 31 Oct 2026; no fallback to a ModelDeployment).
+func (r *Router) usageFailed(requestID string, err error) {
+	r.mu.Lock()
+	r.usageFailing = true
+	r.usageNote = "usage records are not being written (request " + requestID + "): " + err.Error()
+	r.mu.Unlock()
+	r.flushUsageEvent()
+}
+
+// flushUsageEvent raises the UsageWriteFailed event of a failure that lasts,
+// if the front holds its Lease and the event has not gone out in the last
+// hour: a repeating event, since client-go rarely merges events whose objects
+// changed (@hpc-burst-science-agent, 31 Oct 2026). The Lease keeper calls it
+// after every beat that holds the Lease, so a failure that began before the
+// Lease existed has its event as soon as the Lease does, and one that lasts
+// has it hourly with no new request.
+func (r *Router) flushUsageEvent() {
+	if !r.lease.held() {
+		return
 	}
 	r.mu.Lock()
-	if subject == nil && r.mds[dep] != nil {
-		subject = r.mds[dep]
-	}
 	now := r.clk.Now()
-	emit := subject != nil && (!r.usageFailing || !now.Before(r.usageEventAt.Add(usageEventEvery)))
+	emit := r.usageFailing && (r.usageEventAt.IsZero() || !now.Before(r.usageEventAt.Add(usageEventEvery)))
+	note := r.usageNote
 	if emit {
-		r.usageFailing, r.usageEventAt = true, now
+		r.usageEventAt = now
 	}
 	r.mu.Unlock()
 	if emit {
-		r.rec.Event(subject, true, eventFailing, reasonUsageWriteFailed, "usage records are not being written (request "+requestID+"): "+err.Error())
+		r.rec.Event(r.lease.object(), true, eventFailing, reasonUsageWriteFailed, note)
 	}
 }
 
@@ -342,6 +357,7 @@ func (r *Router) usageFailed(dep, requestID string, err error) {
 func (r *Router) usageWritten() {
 	r.mu.Lock()
 	r.usageFailing = false
+	r.usageEventAt = time.Time{}
 	r.mu.Unlock()
 }
 

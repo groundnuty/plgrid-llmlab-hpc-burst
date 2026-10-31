@@ -26,7 +26,8 @@ import (
 // lifecycle controller judges it stale once its renewTime is older than the
 // duration. It gives the front's own events (UsageWriteFailed,
 // ObservationGap) a namespaced object to regard. api/v1alpha1 has no constant
-// for the name (the contracts owner adds one); this package defines it.
+// for the name yet: this package defines it, and the next contracts PR adds
+// v1alpha1.LeaseFront (@hpc-burst-science-agent, 31 Oct 2026).
 const (
 	leaseName            = "front"
 	leaseRenewEvery      = 10 * time.Second
@@ -88,8 +89,20 @@ type leaseKeeper struct {
 	log    *slog.Logger
 	holder string
 
-	cur      *coordinationv1.Lease // the Lease as last written
-	gapDone  bool                  // the start's ObservationGap has been decided
+	// onHeld, when set, runs after each beat that leaves the front holding
+	// the Lease: the event that waited for a Lease to regard goes out then.
+	onHeld func()
+
+	cur *coordinationv1.Lease // the Lease as last written
+	// observed, previous: the start's observation. The first read of the
+	// Lease in this run, before any write of ours, gives the previous
+	// renewTime (nil: no Lease, or none renewed). A write that commits and
+	// then reports an error is retried, and the retry reads this run's own
+	// heartbeat; the gap is judged from the observation kept here, never
+	// from what a later read finds.
+	observed bool
+	previous *metav1.MicroTime
+	gapDone  bool // the start's ObservationGap has been decided
 	lastErr  string
 	lastErrT time.Time
 }
@@ -130,21 +143,26 @@ func (k *leaseKeeper) beat(ctx context.Context) {
 		return
 	}
 	k.lastErr = ""
+	if k.onHeld != nil {
+		k.onHeld()
+	}
 }
 
-// take reads the Lease, keeping its previous renewTime, then creates it or
-// updates it with the resourceVersion it read (a conflict is an error, to be
-// read again at the next beat, never overwritten). Once the front holds it,
-// the first take of this run raises one ObservationGap naming that renewTime;
-// no previous Lease, or one with no renewTime, raises none.
+// take reads the Lease, then creates it or updates it with the resourceVersion
+// it read (a conflict is an error, to be read again at the next beat, never
+// overwritten). The first read of a run is the start's observation: the Lease's
+// previous renewTime, kept across retries (see leaseKeeper.previous). Once the
+// front holds the Lease, the first take of this run raises one ObservationGap
+// naming that renewTime; no previous Lease, or one with no renewTime, raises
+// none.
 func (k *leaseKeeper) take(ctx context.Context) error {
 	leases := k.api.CoordinationV1().Leases(v1alpha1.ControllerNamespace)
 	now := metav1.NewMicroTime(k.clk.Now())
 	prev, err := leases.Get(ctx, leaseName, metav1.GetOptions{})
 	var held *coordinationv1.Lease
-	var previous *metav1.MicroTime
 	switch {
 	case apierrors.IsNotFound(err):
+		k.observe(nil)
 		held, err = leases.Create(ctx, &coordinationv1.Lease{
 			ObjectMeta: metav1.ObjectMeta{Namespace: v1alpha1.ControllerNamespace, Name: leaseName},
 			Spec:       k.spec(now),
@@ -152,7 +170,7 @@ func (k *leaseKeeper) take(ctx context.Context) error {
 	case err != nil:
 		return fmt.Errorf("read the Lease: %w", err)
 	default:
-		previous = prev.Spec.RenewTime
+		k.observe(prev.Spec.RenewTime)
 		next := prev.DeepCopy()
 		next.Spec = k.spec(now)
 		held, err = leases.Update(ctx, next, metav1.UpdateOptions{FieldManager: fieldManagerFront})
@@ -164,11 +182,20 @@ func (k *leaseKeeper) take(ctx context.Context) error {
 	k.ref.set(true, held.UID)
 	if !k.gapDone {
 		k.gapDone = true
-		if previous != nil {
-			k.observationGap(previous.Time)
+		if k.previous != nil {
+			k.observationGap(k.previous.Time)
 		}
 	}
 	return nil
+}
+
+// observe keeps the start's observation: the first call of a run sets it, and
+// the later ones, which read what this run itself wrote, do not.
+func (k *leaseKeeper) observe(renewTime *metav1.MicroTime) {
+	if k.observed {
+		return
+	}
+	k.observed, k.previous = true, renewTime
 }
 
 // spec is the Lease's content for a take or a renewal at now.
@@ -197,6 +224,8 @@ func (k *leaseKeeper) renew(ctx context.Context) error {
 		return fmt.Errorf("renew the Lease: %w", err)
 	}
 	k.cur = got
+	// A renewal that follows a failure holds the Lease again.
+	k.ref.set(true, got.UID)
 	return nil
 }
 

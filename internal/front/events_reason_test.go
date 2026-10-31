@@ -76,27 +76,29 @@ func TestKubeRecorderRecordsAnEventAboutALease(t *testing.T) {
 
 // TestUsageWriteFailedIsThrottled (HBEP-8 review): the event goes out when a
 // failure starts, then at most once an hour while it lasts; a write that
-// succeeds ends the failure, so the next one raises an event at once.
+// succeeds ends the failure, so the next one raises an event at once. The
+// event regards the front's Lease, so the front holds it here.
 func TestUsageWriteFailedIsThrottled(t *testing.T) {
 	f := newScFix(t, scOpts{})
+	f.router.lease.set(true, "lease-uid")
 	boom := errors.New("write usage.jsonl: no space left on device")
 	n := func() int { return len(f.rec.Find(eventFailing, reasonUsageWriteFailed)) }
 	for i := 0; i < 5; i++ {
-		f.router.usageFailed(scDep, "r", boom)
+		f.router.usageFailed("r", boom)
 		f.clk.Advance(10 * time.Minute)
 	}
 	if got := n(); got != 1 {
 		t.Fatalf("five failures within an hour gave %d events, want 1", got)
 	}
 	f.clk.Advance(20 * time.Minute) // an hour since the event
-	f.router.usageFailed(scDep, "r", boom)
+	f.router.usageFailed("r", boom)
 	if got := n(); got != 2 {
 		t.Fatalf("a failure an hour on gave %d events in all, want 2", got)
 	}
 	// A request whose record is written ends the failure.
 	scChatOnce(t, f.harness, "s")
 	errWaitFor(t, "the request's record", func() bool { return len(f.records()) == 1 })
-	f.router.usageFailed(scDep, "r", boom)
+	f.router.usageFailed("r", boom)
 	if got := n(); got != 3 {
 		t.Fatalf("a new failure after a written record gave %d events in all, want 3", got)
 	}

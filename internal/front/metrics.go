@@ -65,6 +65,7 @@ func NewMetrics(sink *usage.Sink, dir string, free FreeBytesFunc) *Metrics {
 		}, []string{"provider", "model_deployment", "endpoint"}),
 	}
 	m.reg.MustRegister(m.requests, m.cuts, m.pauses, m.ttft)
+	m.known("", "") // the cuts of a request that never had a target
 	if sink != nil {
 		m.reg.MustRegister(&usageCollector{sink: sink, dir: dir, free: free})
 	}
@@ -98,6 +99,27 @@ func (m *Metrics) observe(r usage.Record) {
 	}
 	if r.FirstTokenMs != nil {
 		m.ttft.WithLabelValues(provider, dep, endpoint).Observe(float64(*r.FirstTokenMs) / 1000)
+	}
+}
+
+// cutReasons are HBEP-5's values of cutBy, the cut_by label's values.
+var cutReasons = []string{cutFrontDeadline, cutFrontIdle, cutFrontHeaders, cutTunnel, cutUpstream, cutLeaseEnd, cutClient, cutFrontShutdown}
+
+// known creates a target's counters of its own events at 0 (HBEP-8, Unknown
+// samples: a count of the front's own events starts at 0, so a healthy front
+// shows zeros, and the first event has a zero before it for rate and
+// increase): one cut series for each cut_by and one pause series. An empty
+// provider and deployment are the cuts of a request that had no target. It is
+// idempotent.
+func (m *Metrics) known(provider, deployment string) {
+	if m == nil {
+		return
+	}
+	for _, c := range cutReasons {
+		m.cuts.WithLabelValues(c, provider, deployment)
+	}
+	if provider != "" || deployment != "" {
+		m.pauses.WithLabelValues(provider, deployment)
 	}
 }
 

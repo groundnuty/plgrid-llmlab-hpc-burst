@@ -29,7 +29,8 @@ type Options struct {
 	Clock   clock.Clock
 	Dynamic dynamic.Interface
 	// Kube, when set, is the client for the front's heartbeat Lease. Nil: the
-	// front keeps no Lease (a test, or a run without a control plane).
+	// front keeps no Lease (a test, or a run without a control plane), and a
+	// usage failure raises no event, as it has no Lease to regard.
 	Kube       kubernetes.Interface
 	Recorder   Recorder
 	Transports Transports // nil: a StaticTransports with no entry
@@ -120,7 +121,9 @@ func Run(ctx context.Context, o Options) error {
 		keeper.Add(1)
 		go func() {
 			defer keeper.Done()
-			newLeaseKeeper(o.Kube, o.Clock, o.Recorder, router.lease, o.Log).run(ctx)
+			k := newLeaseKeeper(o.Kube, o.Clock, o.Recorder, router.lease, o.Log)
+			k.onHeld = router.flushUsageEvent
+			k.run(ctx)
 		}()
 		defer keeper.Wait()
 	}
@@ -278,9 +281,10 @@ type usageHealth struct {
 	// State is "ok" or "failing": failing from a batch or counter block that
 	// failed until a later batch is written and synced.
 	State string `json:"state"`
-	// Failures is the records not written since the front started: the same
-	// count as hpcburst_usage_write_failures_total.
-	Failures uint64 `json:"failures"`
+	// LostRecords is the records not written since the front started: the
+	// same count as hpcburst_usage_write_failures_total
+	// (@hpc-burst-science-agent, 31 Oct 2026: named lostRecords).
+	LostRecords uint64 `json:"lostRecords"`
 	// Since is when the sink entered its state, in UTC.
 	Since string `json:"since"`
 	// Error is the latest failure; absent while the state is ok.
@@ -288,7 +292,7 @@ type usageHealth struct {
 }
 
 func usageHealthOf(st usage.Stats) usageHealth {
-	h := usageHealth{State: "ok", Failures: st.Lost, Since: usage.Time(st.Since)}
+	h := usageHealth{State: "ok", LostRecords: st.Lost, Since: usage.Time(st.Since)}
 	if st.Err != nil {
 		h.State, h.Error = "failing", st.Err.Error()
 	}

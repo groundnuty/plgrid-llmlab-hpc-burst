@@ -269,31 +269,193 @@ func TestLeaseConflictOnRenewalIsTakenAgainWithNoGap(t *testing.T) {
 	}
 }
 
-// TestUsageWriteFailedRegardsTheLeaseOnceHeld: before the front holds its
-// Lease the event regards the failed request's ModelDeployment; once it
-// holds it, the event regards the Lease (HBEP-8, Events).
-func TestUsageWriteFailedRegardsTheLeaseOnceHeld(t *testing.T) {
-	h := newScFix(t, scOpts{})
-	boom := errors.New("write: no space left on device")
-	h.router.usageFailed(scDep, "r1", boom)
-	first := h.rec.Find(eventFailing, reasonUsageWriteFailed)
-	if len(first) != 1 || !strings.Contains(first[0].Object, "ns/md") {
-		t.Fatalf("before the Lease: %+v, want one event regarding ns/md", first)
-	}
+// leasesGVR is the resource the fake clientset's tracker stores Leases under.
+var leasesGVR = schema.GroupVersionResource{Group: "coordination.k8s.io", Version: "v1", Resource: "leases"}
 
+// commitThenFail makes the first matching write ("create" or "update" of a
+// Lease) reach the store and then return an error, as a write does whose
+// response is lost: the Lease is changed and the caller cannot know.
+func commitThenFail(verb string, armed *bool, mu *sync.Mutex) func(*kubefake.Clientset) {
+	return func(cs *kubefake.Clientset) {
+		cs.PrependReactor(verb, "leases", func(a clienttesting.Action) (bool, runtime.Object, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if !*armed {
+				return false, nil, nil
+			}
+			*armed = false
+			obj := a.(clienttesting.CreateAction).GetObject()
+			var err error
+			if verb == "create" {
+				err = cs.Tracker().Create(leasesGVR, obj, leaseNS)
+			} else {
+				err = cs.Tracker().Update(leasesGVR, obj, leaseNS)
+			}
+			if err != nil {
+				return true, nil, err
+			}
+			return true, nil, errors.New("connection reset by peer: the response was lost")
+		})
+	}
+}
+
+// TestObservationGapKeepsTheStartsObservationWhenATakeoverIsUncertain (PR 117
+// review, Astra B3): the Lease was last renewed at 11:00. The front's takeover
+// update at 12:00 commits, but its response is lost. The retry reads the
+// front's own 12:00 heartbeat; the gap still starts at 11:00, the observation
+// made before the first write, not at 12:00, which would hide the outage.
+func TestObservationGapKeepsTheStartsObservationWhenATakeoverIsUncertain(t *testing.T) {
+	var mu sync.Mutex
+	armed := true
+	renewed := metav1.NewMicroTime(time.Date(2026, 10, 31, 11, 0, 0, 0, time.UTC))
+	f := newLkFix(t, &coordinationv1.Lease{
+		ObjectMeta: metav1.ObjectMeta{Namespace: leaseNS, Name: leaseObj},
+		Spec:       coordinationv1.LeaseSpec{RenewTime: &renewed},
+	}, commitThenFail("update", &armed, &mu))
+	f.start()
+	f.waitRenewTime(t0) // the takeover committed
+	errWaitFor(t, "the lost response to be logged", func() bool { return strings.Contains(f.logs.String(), "response was lost") })
+	if g := gaps(f.rec); len(g) != 0 {
+		t.Fatalf("an uncertain takeover raised %d events before the retry: %+v", len(g), g)
+	}
+	f.beat() // the retry reads the front's own 12:00 heartbeat, and takes the Lease
+	f.waitRenewTime(t0.Add(10 * time.Second))
+	errWaitFor(t, "the ObservationGap event", func() bool { return len(gaps(f.rec)) > 0 })
+	g := gaps(f.rec)
+	if len(g) != 1 || !strings.Contains(g[0].Message, "2026-10-31T11:00:00.000Z") || strings.Contains(g[0].Message, "2026-10-31T12:00:00.000Z") {
+		t.Errorf("events %+v: want exactly one naming 2026-10-31T11:00:00.000Z, the observation before the first write", g)
+	}
+}
+
+// TestFirstStartRaisesNoGapWhenTheCreateIsUncertain (PR 117 review, Astra
+// B3): there was no Lease. The create commits, but its response is lost; the
+// retry finds the front's own Lease. That is still a first start: no gap.
+func TestFirstStartRaisesNoGapWhenTheCreateIsUncertain(t *testing.T) {
+	var mu sync.Mutex
+	armed := true
+	f := newLkFix(t, nil, commitThenFail("create", &armed, &mu))
+	f.start()
+	f.waitRenewTime(t0) // the create committed
+	errWaitFor(t, "the lost response to be logged", func() bool { return strings.Contains(f.logs.String(), "response was lost") })
+	f.beat() // the retry finds its own Lease and takes it
+	f.waitRenewTime(t0.Add(10 * time.Second))
+	errWaitFor(t, "the front to hold the Lease", f.ref.held)
+	f.beat()
+	f.waitRenewTime(t0.Add(20 * time.Second))
+	if g := gaps(f.rec); len(g) != 0 {
+		t.Errorf("an uncertain create raised %d ObservationGap events, want none: %+v", len(g), g)
+	}
+}
+
+// usageKeeper runs a keeper on its own fake clock over the harness's router,
+// as Run wires it: the router's Lease reference, and its event flush after each
+// beat that holds the Lease.
+func usageKeeper(t *testing.T, h *scFix, reactors ...func(*kubefake.Clientset)) (*clock.Fake, func()) {
+	t.Helper()
 	cs := kubefake.NewSimpleClientset()
+	for _, r := range reactors {
+		r(cs)
+	}
+	clk := clock.NewFake(t0)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	k := newLeaseKeeper(cs, h.clk, h.rec, h.router.lease, discardLog())
+	k := newLeaseKeeper(cs, clk, h.rec, h.router.lease, discardLog())
+	k.onHeld = h.router.flushUsageEvent
 	go func() { defer close(done); k.run(ctx) }()
-	defer func() { cancel(); <-done }()
-	errWaitFor(t, "the front to hold its Lease", h.router.lease.held)
+	t.Cleanup(func() { cancel(); <-done })
+	return clk, func() {
+		errWaitFor(t, "the keeper to wait for its next beat", func() bool { return clk.Pending() == 1 })
+		clk.Advance(10 * time.Second)
+	}
+}
 
-	h.clk.Advance(time.Hour) // the event repeats hourly
-	h.router.usageFailed(scDep, "r2", boom)
-	all := h.rec.Find(eventFailing, reasonUsageWriteFailed)
-	if len(all) != 2 || all[1].Object != leaseDesc || !all[1].Warning {
-		t.Fatalf("after the Lease: %+v, want a second event, a warning regarding %s", all, leaseDesc)
+func usageEvents(h *scFix) []RecordedEvent { return h.rec.Find(eventFailing, reasonUsageWriteFailed) }
+
+// TestUsageWriteFailedWaitsForTheLeaseAndFiresOnce (@hpc-burst-science-agent,
+// 31 Oct 2026): usage fails before the front holds its Lease. There is no
+// fallback to a ModelDeployment: the failure is only counted, logged and shown
+// in /healthz, and no event goes out. When the Lease is taken, exactly one
+// UsageWriteFailed event follows, regarding the Lease; more beats raise no
+// more; an hour on, with no new request, the failure that lasts raises its
+// next; a write that succeeds ends the failure, so the next one raises its
+// event at once.
+func TestUsageWriteFailedWaitsForTheLeaseAndFiresOnce(t *testing.T) {
+	h := newScFix(t, scOpts{})
+	boom := errors.New("write: no space left on device")
+	h.router.usageFailed("r1", boom)
+	h.router.usageFailed("r2", boom)
+	if ev := usageEvents(h); len(ev) != 0 {
+		t.Fatalf("before the Lease, %d UsageWriteFailed events: %+v; want none, and no ModelDeployment fallback", len(ev), ev)
+	}
+
+	_, beat := usageKeeper(t, h)
+	errWaitFor(t, "the one event once the Lease is held", func() bool { return len(usageEvents(h)) == 1 })
+	ev := usageEvents(h)[0]
+	if ev.Object != leaseDesc || !ev.Warning || !strings.Contains(ev.Message, "no space left") || !strings.Contains(ev.Message, "r2") {
+		t.Errorf("event %+v: want a warning regarding %s, naming the latest failure (request r2)", ev, leaseDesc)
+	}
+	beat()
+	beat()
+	if n := len(usageEvents(h)); n != 1 {
+		t.Fatalf("%d events after two more beats, want still 1: the hourly gate", n)
+	}
+
+	h.clk.Advance(time.Hour) // the harness's clock is the router's
+	beat()
+	errWaitFor(t, "the hourly repeat", func() bool { return len(usageEvents(h)) == 2 })
+
+	h.router.usageWritten()
+	h.router.usageFailed("r3", boom)
+	if n := len(usageEvents(h)); n != 3 {
+		t.Errorf("%d events after a new failure that follows a success, want 3: it raises its event at once", n)
+	}
+	for i, e := range usageEvents(h) {
+		if e.Object != leaseDesc {
+			t.Errorf("event %d regards %q, want %s", i, e.Object, leaseDesc)
+		}
+	}
+}
+
+// TestRenewalAfterATransientFailureHoldsTheLeaseAgain (PR 117 review, Astra
+// B1): a renewal fails with an error that leaves the front's copy of the
+// Lease intact, so the next beat renews it, not takes it. That success must
+// restore "held": a UsageWriteFailed raised while the renewals failed goes out
+// regarding the Lease as soon as one succeeds, even though no request has a
+// ModelDeployment to fall back on.
+func TestRenewalAfterATransientFailureHoldsTheLeaseAgain(t *testing.T) {
+	h := newScFix(t, scOpts{})
+	var mu sync.Mutex
+	failing := false
+	_, beat := usageKeeper(t, h, func(cs *kubefake.Clientset) {
+		cs.PrependReactor("update", "leases", func(clienttesting.Action) (bool, runtime.Object, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if failing {
+				return true, nil, errors.New("etcdserver: request timed out")
+			}
+			return false, nil, nil
+		})
+	})
+	errWaitFor(t, "the front to hold the Lease", h.router.lease.held)
+
+	mu.Lock()
+	failing = true
+	mu.Unlock()
+	beat() // the renewal fails; the front's copy of the Lease is intact
+	errWaitFor(t, "the front to see it does not hold the Lease", func() bool { return !h.router.lease.held() })
+	h.router.usageFailed("r1", errors.New("write: no space left on device"))
+	if n := len(usageEvents(h)); n != 0 {
+		t.Fatalf("%d events while the Lease is not held, want none", n)
+	}
+
+	mu.Lock()
+	failing = false
+	mu.Unlock()
+	beat() // renews, which holds the Lease again
+	errWaitFor(t, "the front to hold the Lease again", h.router.lease.held)
+	errWaitFor(t, "the event regarding the Lease", func() bool { return len(usageEvents(h)) == 1 })
+	if ev := usageEvents(h)[0]; ev.Object != leaseDesc {
+		t.Errorf("event regards %q, want %s", ev.Object, leaseDesc)
 	}
 }
 

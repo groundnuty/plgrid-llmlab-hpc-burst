@@ -313,18 +313,75 @@ func TestFilesIgnoresOtherNames(t *testing.T) {
 	}
 }
 
-// TestAClockThatGoesBackKeepsTheNewerFile: the sink rolls forward only, so a
-// clock that steps back a day does not write the closed file again.
+// TestAClockThatGoesBackKeepsTheNewerFile: the sink rolls forward only. It
+// rotates from 31 October to 1 November, then the clock steps back to 31
+// October: the closed 31 October file is not written again (its bytes are the
+// same), and the record goes to the active 1 November file, which then holds
+// exactly the two records written in it.
 func TestAClockThatGoesBackKeepsTheNewerFile(t *testing.T) {
 	dir := t.TempDir()
-	c := newClock(time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC))
+	c := newClock(time.Date(2026, 10, 31, 23, 0, 0, 0, time.UTC))
 	s := openAt(t, dir, c)
 	defer s.Close()
 	write(t, s, rec("a"))
-	c.set(time.Date(2026, 10, 31, 23, 0, 0, 0, time.UTC))
+	c.set(time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC))
 	write(t, s, rec("b"))
-	if got, want := listFiles(t, dir), []string{"usage-2026-11-01.jsonl"}; !reflect.DeepEqual(got, want) {
+	closed := readBytes(t, dir, "usage-2026-10-31.jsonl")
+
+	c.set(time.Date(2026, 10, 31, 23, 30, 0, 0, time.UTC))
+	write(t, s, rec("c"))
+	if got, want := listFiles(t, dir), []string{"usage-2026-10-31.jsonl", "usage-2026-11-01.jsonl"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("files = %v, want %v", got, want)
+	}
+	if after := readBytes(t, dir, "usage-2026-10-31.jsonl"); !bytes.Equal(after, closed) {
+		t.Errorf("the closed file changed when the clock stepped back:\nbefore %q\nafter  %q", closed, after)
+	}
+	if got, want := ids(fileRecords(t, dir, "usage-2026-11-01.jsonl")), []string{"b", "c"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("the active file holds %v, want %v: exactly the one new record after b", got, want)
+	}
+}
+
+// TestAClockSteppedBackBeforeTheFirstWriteTouchesNoClosedFile (PR 117 review,
+// Astra B2): the sink opens on 1 November over the files of 30 and 31
+// October, both ending in a partial line. Open repairs the newest (31
+// October) only. The clock then steps back to 30 October before the first
+// write. The 30 October file must stay exactly as it was, torn tail and all:
+// it is a closed file, never repaired or appended to. The record goes to the
+// newest file, the one still open, and the next day's record rotates away from
+// it and leaves it as it was.
+func TestAClockSteppedBackBeforeTheFirstWriteTouchesNoClosedFile(t *testing.T) {
+	dir := t.TempDir()
+	older := whole("1", "x") + partial("2")
+	newest := whole("3", "y") + partial("4")
+	plant(t, dir, "usage-2026-10-30.jsonl", older)
+	plant(t, dir, "usage-2026-10-31.jsonl", newest)
+	plant(t, dir, "counter", "1000\n")
+
+	c := newClock(time.Date(2026, 11, 1, 8, 0, 0, 0, time.UTC))
+	s := openAt(t, dir, c)
+	defer s.Close()
+	c.set(time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC))
+	write(t, s, rec("stepped-back"))
+
+	if got := string(readBytes(t, dir, "usage-2026-10-30.jsonl")); got != older {
+		t.Errorf("the 30 October file was repaired or written: %q, want it as it was: %q", got, older)
+	}
+	if got, want := listFiles(t, dir), []string{"usage-2026-10-30.jsonl", "usage-2026-10-31.jsonl"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("files = %v, want %v: no file for the day the clock stepped back to", got, want)
+	}
+	newestNow := readBytes(t, dir, "usage-2026-10-31.jsonl")
+	if got, want := ids(fileRecords(t, dir, "usage-2026-10-31.jsonl")), []string{"y", "stepped-back"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("the newest file holds %v, want its repaired record then the new one: %v", got, want)
+	}
+
+	// The clock reaches 1 November: the newest file is closed, untouched.
+	c.set(time.Date(2026, 11, 1, 9, 0, 0, 0, time.UTC))
+	write(t, s, rec("next-day"))
+	if after := readBytes(t, dir, "usage-2026-10-31.jsonl"); !bytes.Equal(after, newestNow) {
+		t.Errorf("the 31 October file changed after the rotation: %q, want %q", after, newestNow)
+	}
+	if got, want := ids(fileRecords(t, dir, "usage-2026-11-01.jsonl")), []string{"next-day"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("the 1 November file holds %v, want %v", got, want)
 	}
 }
 

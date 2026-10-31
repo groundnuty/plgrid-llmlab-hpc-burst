@@ -418,7 +418,7 @@ func (p *Proxy) finish(x *exchange) {
 	p.metrics.observe(x.rec)
 	if _, err := p.sink.Write(x.rec); err != nil {
 		p.log.Error("usage record not written", "request", x.id, "error", err.Error())
-		p.router.usageFailed(x.rec.ModelDeployment, x.id, err)
+		p.router.usageFailed(x.id, err)
 	} else {
 		p.router.usageWritten()
 	}
