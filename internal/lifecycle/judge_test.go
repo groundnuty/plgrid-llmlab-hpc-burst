@@ -218,14 +218,23 @@ func TestJudgeVerifyDeclaredInputNotReported(t *testing.T) {
 }
 
 // TestJudgeVerifyJSONFormatting: a JSON-valued setting reported with other
-// spacing and key order is the same setting.
+// spacing is another value, since the comparison is verbatim; the declared
+// text itself matches.
 func TestJudgeVerifyJSONFormatting(t *testing.T) {
+	// Verbatim (science-agent ruling, 31 Oct 2026): the same JSON object
+	// written with other white space is another value, so a contradiction.
 	r := judgeResult()
 	r.Settings["speculative-config"] = `{ "num_speculative_tokens": 3,
 	  "method": "ngram" }`
 	got := judgeVerify(judgeDeclared(), r, true, judgeShapes())
-	if got.Verdict != v1alpha1.VerdictPass || len(got.Contradictions) != 0 {
-		t.Fatalf("verdict %q contradictions %v: %s", got.Verdict, got.Contradictions, got.Message)
+	if got.Verdict != v1alpha1.VerdictFail || got.Cause != causeContradiction {
+		t.Fatalf("verdict %q cause %q: %s; want a contradiction, the comparison is verbatim", got.Verdict, got.Cause, got.Message)
+	}
+	// The value exactly as declared matches.
+	r = judgeResult()
+	got = judgeVerify(judgeDeclared(), r, true, judgeShapes())
+	if got.Verdict != v1alpha1.VerdictPass {
+		t.Fatalf("the declared value verbatim: verdict %q: %s", got.Verdict, got.Message)
 	}
 }
 

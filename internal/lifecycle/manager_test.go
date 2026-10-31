@@ -16,6 +16,8 @@ package lifecycle
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -40,6 +42,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/deploymentid"
 )
 
@@ -149,6 +152,9 @@ func TestManagerOnControlPlane(t *testing.T) {
 		t.Fatal(err)
 	}
 	apimeta.SetStatusCondition(&prov.Status.Conditions, metav1.Condition{Type: v1alpha1.ConditionProviderReady, Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonPolled, LastTransitionTime: metav1.Now()})
+	// Ready by v1alpha1.ProviderReady: a recent successful read as well.
+	readAt := metav1.NewTime(time.Now().UTC().Truncate(time.Second))
+	prov.Status.LastSuccessfulStatusRead = &readAt
 	if err := cl.Status().Update(ctx, prov, client.FieldOwner(v1alpha1.FieldManagerProvider)); err != nil {
 		t.Fatal(err)
 	}
@@ -188,8 +194,18 @@ func TestManagerOnControlPlane(t *testing.T) {
 	}
 
 	creds := t.TempDir()
+	builds := t.TempDir()
+	build := []byte("a stand-in for the aarch64 agent build")
+	if err := os.WriteFile(filepath.Join(builds, "hb-agent-"+rigArch), build, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	buildSum := sha256.Sum256(build)
+	// A configured front, an agent build and a Ready Provider: the controller
+	// creates an Instance and an Allocation, which pass the real CRDs' schema
+	// and CEL rules (the --max-num-seqs=<n> rule among them), unlike the rig's
+	// fake client. FrontNotConfigured is covered by the rig and by the k3s run.
 	mgr, backend, err := NewManager(Options{
-		Config: cp.Config, CredentialsDir: creds, FrontConfigured: false, HealthAddr: managerHealthAddr,
+		Config: cp.Config, CredentialsDir: creds, AgentBuildsDir: builds, FrontConfigured: true, HealthAddr: managerHealthAddr,
 		LeaderElection: true, Checkpoints: &stubSource{},
 	})
 	if err != nil {
@@ -216,14 +232,24 @@ func TestManagerOnControlPlane(t *testing.T) {
 	eventually(t, time.Minute, "the Backend serves agents", func() (bool, string) {
 		return backend.serving() == nil, "not serving"
 	})
-	eventually(t, time.Minute, "the ModelDeployment is Degraded with FrontNotConfigured and has its current ID", func() (bool, string) {
+	eventually(t, time.Minute, "an Instance and its Allocation pass admission", func() (bool, string) {
 		var got v1alpha1.ModelDeployment
 		if err := cl.Get(ctx, client.ObjectKeyFromObject(md), &got); err != nil {
 			return false, err.Error()
 		}
-		c := apimeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionDegraded)
-		if c == nil || c.Status != metav1.ConditionTrue || c.Reason != v1alpha1.ReasonFrontNotConfigured || len(got.Status.CurrentIDs) != 1 {
-			return false, fmt.Sprintf("conditions %+v, current IDs %+v", got.Status.Conditions, got.Status.CurrentIDs)
+		var insts v1alpha1.InstanceList
+		var allocs v1alpha1.AllocationList
+		if err := cl.List(ctx, &insts, client.InNamespace(rigNS), client.MatchingLabels{v1alpha1.LabelModelDeployment: "md"}); err != nil {
+			return false, err.Error()
+		}
+		if err := cl.List(ctx, &allocs, client.InNamespace(rigNS), client.MatchingLabels{v1alpha1.LabelModelDeployment: "md"}); err != nil {
+			return false, err.Error()
+		}
+		if len(insts.Items) != 1 || len(allocs.Items) != 1 || insts.Items[0].Status.Phase != v1alpha1.InstancePending {
+			return false, fmt.Sprintf("%d Instances (phase %v), %d Allocations; conditions %+v", len(insts.Items), phases(insts.Items), len(allocs.Items), got.Status.Conditions)
+		}
+		if len(got.Status.CurrentIDs) != 1 {
+			return false, fmt.Sprintf("current IDs %+v", got.Status.CurrentIDs)
 		}
 		name, _ := v1alpha1.IdentityRecordName(string(got.Status.CurrentIDs[0].ID))
 		var rec appsv1.ControllerRevision
@@ -232,6 +258,32 @@ func TestManagerOnControlPlane(t *testing.T) {
 		}
 		return true, ""
 	})
+	var insts v1alpha1.InstanceList
+	if err := cl.List(ctx, &insts, client.InNamespace(rigNS), client.MatchingLabels{v1alpha1.LabelModelDeployment: "md"}); err != nil {
+		t.Fatal(err)
+	}
+	in := insts.Items[0]
+	var seqs []string
+	for _, c := range in.Spec.Launch.Command {
+		if strings.HasPrefix(c, "--max-num-seqs") {
+			seqs = append(seqs, c)
+		}
+	}
+	if len(seqs) != 1 || seqs[0] != "--max-num-seqs=256" || in.Spec.Launch.MaxNumSeqs != 256 {
+		t.Fatalf("launch max-num-seqs arguments %v (maxNumSeqs %d), want exactly --max-num-seqs=256", seqs, in.Spec.Launch.MaxNumSeqs)
+	}
+	var alloc v1alpha1.Allocation
+	if err := cl.Get(ctx, client.ObjectKey{Namespace: rigNS, Name: in.Spec.AllocationRef.Name}, &alloc); err != nil {
+		t.Fatalf("the Instance's Allocation: %v", err)
+	}
+	b := alloc.Spec.ForProvider.Batch
+	if b == nil || b.TimeLimit != "48h0m0s" || b.GPUs != 1 || b.CPUsPerTask != 16 || b.Memory.String() != "120Gi" || b.Nodes != 1 ||
+		b.AgentDigest != hex.EncodeToString(buildSum[:]) || alloc.Spec.ProviderConfigReference.Name != rigProvider {
+		t.Fatalf("forProvider.batch %+v, providerConfigRef %+v", b, alloc.Spec.ProviderConfigReference)
+	}
+	if _, err := os.Stat(agentapi.AllocationCredentialPath(creds, string(alloc.UID))); err != nil {
+		t.Fatalf("the Allocation's credential file: %v", err)
+	}
 	eventually(t, time.Minute, "the collision's event reaches the API server", func() (bool, string) {
 		var evs eventsv1.EventList
 		if err := cl.List(ctx, &evs, client.InNamespace(rigNS)); err != nil {
@@ -246,10 +298,6 @@ func TestManagerOnControlPlane(t *testing.T) {
 		}
 		return false, fmt.Sprintf("events: %v", seen)
 	})
-	var allocs v1alpha1.AllocationList
-	if err := cl.List(ctx, &allocs, client.InNamespace(rigNS)); err != nil || len(allocs.Items) != 0 {
-		t.Fatalf("with no front configured, want no Allocation; got %d (%v)", len(allocs.Items), err)
-	}
 	for _, path := range []string{"/healthz", "/readyz"} {
 		resp, err := http.Get("http://" + managerHealthAddr + path)
 		if err != nil {
@@ -313,4 +361,12 @@ func TestManagerOnControlPlane(t *testing.T) {
 		}
 		return l.Spec.HolderIdentity == nil || *l.Spec.HolderIdentity == "", "still held"
 	})
+}
+
+func phases(items []v1alpha1.Instance) []v1alpha1.InstancePhase {
+	var out []v1alpha1.InstancePhase
+	for _, in := range items {
+		out = append(out, in.Status.Phase)
+	}
+	return out
 }

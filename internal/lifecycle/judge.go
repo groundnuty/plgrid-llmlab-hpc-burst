@@ -3,7 +3,6 @@ package lifecycle
 import (
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"slices"
 	"sort"
 	"strconv"
@@ -220,18 +219,10 @@ func judgeVerify(d declared, v *agentapi.VerifyResult, rehash bool, sh shapes) v
 	return out
 }
 
-// sameSetting compares a reported setting with its declared value: as text,
-// or as JSON when both are JSON documents, so formatting does not matter.
-func sameSetting(got, want string) bool {
-	if strings.TrimSpace(got) == strings.TrimSpace(want) {
-		return true
-	}
-	var a, b any
-	if json.Unmarshal([]byte(got), &a) == nil && json.Unmarshal([]byte(want), &b) == nil {
-		return reflect.DeepEqual(a, b)
-	}
-	return false
-}
+// sameSetting compares a reported setting with its declared value verbatim
+// (science-agent ruling, 31 Oct 2026): "fp8" is not "fp8_e4m3", and a
+// JSON-valued flag the engine re-serializes differently is a contradiction too.
+func sameSetting(got, want string) bool { return got == want }
 
 // judgeQualify judges qualification (HBEP-7, Instance start): every check the
 // agent judges passed (the tool-call smoke test when tool calls are on); the
