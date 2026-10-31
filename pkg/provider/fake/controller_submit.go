@@ -38,6 +38,10 @@ func (c *Controller) establish(ctx context.Context, p *pass, s *allocState) (set
 		s.obs.Phase, s.obs.Submission = v1alpha1.AllocationSubmitting, rec
 		return false, nil
 	}
+	if why := c.Prerequisites.missing(s.a); why != "" {
+		s.obs.Phase, s.obs.Reason = v1alpha1.AllocationSubmitting, why
+		return false, nil
+	}
 	return c.submit(ctx, p, s)
 }
 

@@ -152,6 +152,12 @@ import (
 //     (Batch.SetTimeLimit), is a later hard end, never a mismatch.
 //   - Retention: every status written mirrors status.retention.effectiveMode
 //     from spec.retentionPolicy (RetentionPolicy.EffectiveMode: Keep when unset).
+//   - Prerequisites (opt-in, the Prerequisites field): before it claims an
+//     attempt, the Controller waits for a front, the Allocation's credential
+//     (mode 600, read with agentapi.ReadKeyFile) and an agent build with the
+//     agentDigest, showing phase Submitting with a reason that starts with the
+//     Prerequisite* constant of what is missing, writing no record. Unset, none
+//     of them is checked.
 //   - Not modelled: the AdminHold condition, the sticky duplicates list of
 //     fallback mode, and the compare-and-swap conflicts.
 //   - Times are written in whole seconds: metav1.Time keeps no more.
@@ -180,6 +186,10 @@ type Controller struct {
 	// be before a pass with a failed read sets Ready False; zero means
 	// v1alpha1.ProviderReadyStaleness.
 	ReadyStaleness time.Duration
+	// Prerequisites, when set, makes a submission wait for a front, the
+	// Allocation's credential file and an agent build, as the real provider
+	// does; nil checks none of them.
+	Prerequisites *Prerequisites
 }
 
 const (
