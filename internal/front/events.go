@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync"
 
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -51,6 +52,11 @@ func (k KubeRecorder) Event(obj runtime.Object, warning bool, typ, code, message
 func NewKubeRecorder(cs kubernetes.Interface) (KubeRecorder, func(), error) {
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		return KubeRecorder{}, nil, err
+	}
+	// Events about a Lease need its kind: the recorder drops an event whose
+	// reference it cannot build (client-go tools/events event_recorder.go).
+	if err := coordinationv1.AddToScheme(scheme); err != nil {
 		return KubeRecorder{}, nil, err
 	}
 	b := events.NewBroadcaster(&events.EventSinkImpl{Interface: cs.EventsV1()})

@@ -41,6 +41,11 @@ type Router struct {
 	mds       map[string]*v1alpha1.ModelDeployment // for events
 	profiles  map[string]*v1alpha1.PlatformProfile
 
+	// usageFailing: the latest usage write failed, and its event went out
+	// at usageEventAt.
+	usageFailing bool
+	usageEventAt time.Time
+
 	// beforePick, when set, runs between reading the view and picking from
 	// the live groups: a seam for tests that force a join in between.
 	beforePick func()
@@ -273,16 +278,36 @@ func (r *Router) LeaseEnd(uid types.UID) (time.Time, bool) {
 	return t, ok
 }
 
+// usageEventEvery is how often a UsageWriteFailed event repeats while the
+// failure lasts.
+const usageEventEvery = time.Hour
+
 // usageFailed raises a UsageWriteFailed event on the request's
-// ModelDeployment. A request that named none (refused before routing, or
-// off /v1/) has no object to attach it to: it is logged only.
+// ModelDeployment when a failure starts, then at most once an hour while it
+// lasts: a repeating event, since client-go rarely merges events whose
+// objects changed (@hpc-burst-science-agent, 31 Oct 2026). The sink's count
+// and its Error log keep every failure. A request that named no
+// ModelDeployment (refused before routing, or off /v1/) has no object to
+// attach the event to: it waits for one that does.
 func (r *Router) usageFailed(dep, requestID string, err error) {
 	r.mu.Lock()
 	md := r.mds[dep]
-	r.mu.Unlock()
-	if md != nil {
-		r.rec.Event(md, true, eventDegraded, reasonUsageWriteFailed, "the usage record of request "+requestID+" was not written: "+err.Error())
+	now := r.clk.Now()
+	emit := md != nil && (!r.usageFailing || !now.Before(r.usageEventAt.Add(usageEventEvery)))
+	if emit {
+		r.usageFailing, r.usageEventAt = true, now
 	}
+	r.mu.Unlock()
+	if emit {
+		r.rec.Event(md, true, eventDegraded, reasonUsageWriteFailed, "usage records are not being written (request "+requestID+"): "+err.Error())
+	}
+}
+
+// usageWritten ends a usage failure: the next one raises its event at once.
+func (r *Router) usageWritten() {
+	r.mu.Lock()
+	r.usageFailing = false
+	r.mu.Unlock()
 }
 
 // drift runs under the group's lock, possibly inside rebuildLocked, so it
