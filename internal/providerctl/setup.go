@@ -67,7 +67,7 @@ func New(kube client.Client, reader client.Reader, scheme *runtime.Scheme, o Opt
 	kube = client.WithFieldOwner(kube, v1alpha1.FieldManagerProvider)
 	s := &shared{o: o, kube: kube, reader: reader, waits: newWaitSink(), builds: &buildCache{}}
 	s.h = &holder{o: &s.o}
-	r := managed.NewReconciler(clientManager{c: kube, scheme: scheme}, resource.ManagedKind(v1alpha1.GroupVersion.WithKind("Allocation")),
+	opts := []managed.ReconcilerOption{
 		managed.WithExternalConnector(&connector{s: s}),
 		managed.WithFinalizer(resource.NewAPIFinalizer(kube, v1alpha1.FinalizerCancelAll)),
 		managed.WithInitializers(tagInitializer{kube: kube}),
@@ -80,7 +80,11 @@ func New(kube client.Client, reader client.Reader, scheme *runtime.Scheme, o Opt
 		managed.WithTimeout(o.Timeout),
 		managed.WithLogger(o.Log),
 		managed.WithRecorder(o.Recorder),
-	)
+	}
+	if o.CreationGracePeriod != 0 {
+		opts = append(opts, managed.WithCreationGracePeriod(max(o.CreationGracePeriod, 0)))
+	}
+	r := managed.NewReconciler(clientManager{c: kube, scheme: scheme}, resource.ManagedKind(v1alpha1.GroupVersion.WithKind("Allocation")), opts...)
 	return &Controller{Reconciler: r, status: &statusLoop{s: s}, shared: s}, nil
 }
 

@@ -88,6 +88,12 @@ type Options struct {
 	RejectBackoff time.Duration
 	// Timeout bounds one reconcile's platform calls.
 	Timeout time.Duration
+	// CreationGracePeriod is crossplane-runtime's wait, after a Create that
+	// succeeded, before it trusts an Observe that reports the job missing.
+	// Zero keeps crossplane's default (30 s); a negative value means none.
+	// The claim record already keeps a fresh submission from reading as
+	// missing, so tests that move a manual clock turn it off.
+	CreationGracePeriod time.Duration
 	// MaxConcurrentReconciles bounds the workers.
 	MaxConcurrentReconciles int
 	// Identity is written into the submission records it claims.
