@@ -195,7 +195,10 @@ func TestHandoverReplacementCreatedAtItsPlannedTime(t *testing.T) {
 		{"no wait observed", nil, true, 0, hoT(8, 0, 20)},
 		{"fewer than 20 waits: the largest", append(slices.Repeat(hoMinutes(5), 12), hoMinutes(10, 40)...), false, 15, hoT(8, 39, 50)},
 		{"20 waits: the 18th smallest", hoMinutes(7, 13, 2, 19, 11, 4, 16, 9, 1, 14, 6, 18, 3, 12, 17, 8, 15, 5, 10), false, 20, hoT(9, 2, 50)},
-		{"a plan before the primary's start is held to it", hoMinutes(180), false, 2, hoT(8, 0, 20)},
+		// 3 waits: the preloaded 3 h, the primary's 0 s and the replacement's
+		// own 0 s, since the replacement is created at 08:00:20 and its job
+		// starts at the next step, before hoStart returns at 08:01:00.
+		{"a plan before the primary's start is held to it", hoMinutes(180), false, 3, hoT(8, 0, 20)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -418,17 +421,32 @@ func TestHandoverLateReplacementDegradesThenTakesOver(t *testing.T) {
 		t.Fatalf("Degraded reason %s and %d CapacityDropped events, want CapacityDropped and 1", c.Reason, n)
 	}
 	r1 := hoRepl(rg, p.Name)[0]
-	hoStepTo(rg, hoT(12, 19, 50), time.Minute, func() {
-		if n, s := rg.readyCount(hoMD), rg.submissions(); n != 0 || s != 2 {
-			t.Fatalf("at %s: %d ready, %d sbatch calls, want 0 and 2 while R1 queues", rg.clock.Now().Format(time.TimeOnly), n, s)
+	// R1's job is eligible when the provider first syncs after R1's
+	// Allocation is created (hold mode lifts the hold in that pass) and starts
+	// 3 h later; read that start rather than assume the step grid.
+	var r1Start time.Time
+	hoStepTo(rg, hoT(12, 30, 0), 10*time.Second, func() {
+		a, ok := rg.allocation(r1.Spec.AllocationRef.Name)
+		if r1Start.IsZero() && ok && a.Status.AtProvider.StartTime != nil {
+			r1Start = a.Status.AtProvider.StartTime.Time
+			if a.Status.AtProvider.SubmitTime == nil || a.Status.AtProvider.StartTime.Sub(a.Status.AtProvider.SubmitTime.Time) < 3*time.Hour {
+				t.Fatalf("R1's job started %s after its submission, want at least the scripted 3 h", a.Status.AtProvider.StartTime.Sub(a.Status.AtProvider.SubmitTime.Time))
+			}
 		}
-		if c := rg.condition(hoMD, v1alpha1.ConditionDegraded); c.Status != metav1.ConditionTrue {
-			t.Fatalf("at %s the deployment is not degraded while capacity is down", rg.clock.Now().Format(time.TimeOnly))
+		if r1Start.IsZero() {
+			if n, s := rg.readyCount(hoMD), rg.submissions(); n != 0 || s != 2 {
+				t.Fatalf("at %s: %d ready, %d sbatch calls, want 0 and 2 while R1 queues", rg.clock.Now().Format(time.TimeOnly), n, s)
+			}
+			if c := rg.condition(hoMD, v1alpha1.ConditionDegraded); c.Status != metav1.ConditionTrue {
+				t.Fatalf("at %s the deployment is not degraded while capacity is down", rg.clock.Now().Format(time.TimeOnly))
+			}
 		}
 	})
-	hoStepTo(rg, hoT(12, 21, 0), 10*time.Second, nil)
-	if got := rg.instance(r1.Name); got.Status.Phase != v1alpha1.InstanceReady {
-		t.Fatalf("R1 is %s at 12:21:00, want ready", got.Status.Phase)
+	if r1Start.IsZero() {
+		t.Fatal("R1's job never started")
+	}
+	if got := rg.instance(r1.Name); got.Status.Phase != v1alpha1.InstanceReady || got.Status.ReadyTime == nil || got.Status.ReadyTime.Sub(r1Start) > time.Minute {
+		t.Fatalf("R1 is %s (ready at %v), want ready within a minute of its start %s", got.Status.Phase, got.Status.ReadyTime, r1Start.Format(time.TimeOnly))
 	}
 	if c := rg.condition(hoMD, v1alpha1.ConditionDegraded); c.Status != metav1.ConditionFalse {
 		t.Fatalf("Degraded = %s/%s once R1 serves, want False", c.Status, c.Reason)
@@ -436,9 +454,12 @@ func TestHandoverLateReplacementDegradesThenTakesOver(t *testing.T) {
 	if n := len(rg.rec.Find("degraded", v1alpha1.ReasonReplacementLate)); n != 1 {
 		t.Fatalf("ReplacementLate events = %d, want one", n)
 	}
+	// R1's replacement: the Provider's largest wait is now R1's own (over 3 h),
+	// so the plan, R1's drain start minus (3 h + start-to-ready + 30 min),
+	// falls before R1's start and is held to it.
 	r2 := hoRepl(rg, r1.Name)
-	if len(r2) != 1 || !r2[0].CreationTimestamp.Time.Equal(hoT(12, 20, 0)) {
-		t.Fatalf("R1's replacements %+v, want one created at 12:20:00", r2)
+	if len(r2) != 1 || !r2[0].CreationTimestamp.Time.Equal(r1Start) {
+		t.Fatalf("R1's replacements %+v, want one created at R1's start %s", r2, r1Start.Format(time.TimeOnly))
 	}
 }
 

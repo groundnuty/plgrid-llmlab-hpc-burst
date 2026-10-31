@@ -399,12 +399,26 @@ func TestAllocationTwoControllersLeaveOnlyDesiredAllocations(t *testing.T) {
 	if !fired || rg.submissions() < 2 {
 		t.Fatalf("the race produced %d sbatch calls (fired=%v): no duplicate was created, so the test proves nothing", rg.submissions(), fired)
 	}
-	if live := allocLive(rg, "md"); len(live) != 1 {
-		var desc []string
-		for _, a := range live {
-			desc = append(desc, fmt.Sprintf("%s (job %s, %s)", a.Name, allocJobID(&a), a.Status.AtProvider.Phase))
+	// No more Allocations than desired host an Instance. A surplus that had
+	// started when it was seen is scaled down: its Instance drains and ends,
+	// and its Allocation, hosting nothing, follows its retention policy
+	// (HBEP-7, Release: scale-down; "In every case, an Allocation left with no
+	// Instance follows its retention policy"); under the default, keep until
+	// the end time, which this deployment does not set, it stays as warm
+	// capacity until its hard end. A surplus still pending is cancelled.
+	hosting := map[string]bool{}
+	for _, in := range rg.liveInstances("md") {
+		hosting[in.Spec.AllocationRef.Name] = true
+	}
+	var desc []string
+	for _, a := range allocLive(rg, "md") {
+		desc = append(desc, fmt.Sprintf("%s (job %s, %s, hosting %v)", a.Name, allocJobID(&a), a.Status.AtProvider.Phase, hosting[a.Name]))
+		if !hosting[a.Name] && a.Status.AtProvider.StartTime == nil {
+			t.Errorf("surplus Allocation %s never started and hosts nothing, yet it was not cancelled", a.Name)
 		}
-		t.Errorf("%d Allocations remain for 1 desired Instance after convergence: %s; %d live Instances", len(live), strings.Join(desc, ", "), len(rg.liveInstances("md")))
+	}
+	if len(hosting) != 1 {
+		t.Errorf("%d Allocations host a live Instance for 1 desired: %s", len(hosting), strings.Join(desc, ", "))
 	}
 	if n := rg.readyCount("md"); n != 1 || len(rg.liveInstances("md")) != 1 {
 		t.Errorf("%d ready and %d live Instances, want 1 and 1", n, len(rg.liveInstances("md")))

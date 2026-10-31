@@ -227,6 +227,12 @@ func (p *pass) verified(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, v *ag
 	case causeContradiction, causeShape:
 		p.r.Recorder.Event(p.mdObject(in), true, eventDegraded, v1alpha1.ReasonVerificationFailed,
 			fmt.Sprintf("Instance %s: %s; provisioning in its class stops until the serving spec changes", in.Name, data.Message))
+		// Stop the class in this pass too: the record stops it in every later
+		// one (classBlocked), and this pass must not provision there either.
+		if pv := p.pvOf(in.Labels); pv != nil && pv.hasClass && p.ids[pv.class] != nil && string(p.ids[pv.class].id) == string(in.Spec.DeploymentID) {
+			p.ids[pv.class].blocked = "verification record " + name + ": " + data.Message
+			p.degrade(v1alpha1.ReasonVerificationFailed, "provisioning in class %s/%s is stopped until the serving spec changes: %s", pv.class.GPUModel, pv.class.CPUArch, data.Message)
+		}
 	}
 	p.classFailed(in)
 	return p.fail(in, alloc, endVerificationFailed, data.Message)
