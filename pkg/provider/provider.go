@@ -105,7 +105,10 @@ type Batch interface {
 // Managed is a managed provider's core operation besides ReadProfile (HBEP-4,
 // Core operations). Alpha reads the catalog at most once a minute.
 type Managed interface {
-	// ListCatalog returns the models the gateway lists. Read-only.
+	// ListCatalog returns the models the gateway lists (GET /v1/models with
+	// the Provider's key). Read-only. A 401 or 403 is an error that wraps
+	// ErrKeyRejected; any other error is unknown, and leaves the stored
+	// catalog as it was.
 	ListCatalog(ctx context.Context) ([]CatalogEntry, error)
 }
 

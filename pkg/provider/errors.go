@@ -37,6 +37,11 @@ var (
 	// call is made, and the Provider gets v1alpha1.ConditionCredentialsInvalid
 	// (HBEP-11, Credentials).
 	ErrCredentials = errors.New("credentials file refused")
+	// ErrKeyRejected: a managed gateway answered the catalog read with 401
+	// or 403. The Provider gets v1alpha1.ConditionCredentialsRejected, and a
+	// managed-source ModelDeployment it serves is not Ready (HBEP-4, Managed
+	// provider in alpha; HBEP-7, Reconcile loop, step 1).
+	ErrKeyRejected = errors.New("gateway rejected the key")
 )
 
 // FieldError is one invalid field of a Provider or its PlatformProfile.
