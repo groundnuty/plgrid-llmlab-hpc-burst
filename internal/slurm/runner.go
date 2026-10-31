@@ -44,6 +44,13 @@ type Runner interface {
 	Generation() uint64
 }
 
+// Connector is a Runner that connects lazily. Connect brings the connection up
+// when it is down, so Generation then names the connection the next command
+// uses.
+type Connector interface {
+	Connect(ctx context.Context) error
+}
+
 // Transport error kinds. Their messages never carry a host name, a user or a
 // path: they reach conditions and events.
 var (

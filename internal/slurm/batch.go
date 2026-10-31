@@ -587,6 +587,14 @@ func (b *Batch) printenv(ctx context.Context, name string) (string, error) {
 // per connection (HBEP-4, Transport). An unset or unsafe value is an error
 // that wraps provider.ErrPathUnresolved, and Health says so.
 func (b *Batch) Paths(ctx context.Context) (Paths, error) {
+	// A runner that connects lazily is connected first, so a dropped and
+	// replaced connection shows in Generation before the cached paths are
+	// trusted.
+	if c, ok := b.runner.(Connector); ok {
+		if err := c.Connect(ctx); err != nil {
+			return Paths{}, err
+		}
+	}
 	gen := b.runner.Generation()
 	b.mu.Lock()
 	if b.paths != nil && b.pathsGen == gen && gen != 0 {
