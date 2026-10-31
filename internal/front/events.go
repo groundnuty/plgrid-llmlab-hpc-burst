@@ -3,6 +3,7 @@ package front
 import (
 	"fmt"
 	"sync"
+	"unicode/utf8"
 
 	coordinationv1 "k8s.io/api/coordination/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -28,6 +29,23 @@ const (
 	reasonUsageWriteFailed = "UsageWriteFailed"
 )
 
+// maxNoteBytes is the API's limit on an event's note (HBEP-8, Events, Form):
+// the API refuses a longer one, and the recorder does not retry a refusal.
+const maxNoteBytes = 1024
+
+// cutNote cuts a note to maxNoteBytes at a character boundary, so the result
+// is valid UTF-8.
+func cutNote(s string) string {
+	if len(s) <= maxNoteBytes {
+		return s
+	}
+	cut := maxNoteBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
 // Recorder emits HBEP-8's events. Events are best effort and never block a
 // request. Messages carry names, counts and times, never a key or a body.
 type Recorder interface {
@@ -45,7 +63,7 @@ func (k KubeRecorder) Event(obj runtime.Object, warning bool, typ, code, message
 	if warning {
 		et = provider.EventKindWarning
 	}
-	k.R.Eventf(obj, nil, et, code, typ, "%s", message)
+	k.R.Eventf(obj, nil, et, code, typ, "%s", cutNote(message))
 }
 
 // NewKubeRecorder starts an events broadcaster on the clientset and returns
@@ -63,7 +81,7 @@ func NewKubeRecorder(cs kubernetes.Interface) (KubeRecorder, func(), error) {
 	b := events.NewBroadcaster(&events.EventSinkImpl{Interface: cs.EventsV1()})
 	stop := make(chan struct{})
 	b.StartRecordingToSink(stop)
-	return KubeRecorder{R: b.NewRecorder(scheme, "hpcburst-front")}, func() { close(stop); b.Shutdown() }, nil
+	return KubeRecorder{R: b.NewRecorder(scheme, fieldManagerFront)}, func() { close(stop); b.Shutdown() }, nil
 }
 
 // RecordedEvent is one event a MemoryRecorder holds.

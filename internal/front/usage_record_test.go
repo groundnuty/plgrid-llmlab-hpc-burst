@@ -10,7 +10,6 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/enginetest"
-	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/usage"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/managed/llmlabtest"
 )
 
@@ -27,10 +26,7 @@ import (
 func rawRecord(t *testing.T, h *harness, id string) map[string]any {
 	t.Helper()
 	h.record(id) // wait until it is written
-	b, err := os.ReadFile(filepath.Join(h.cfg.UsageDir, usage.LogFile))
-	if err != nil {
-		t.Fatal(err)
-	}
+	b := readUsageFiles(t, h.cfg.UsageDir)
 	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
 		var m map[string]any
 		if err := json.Unmarshal([]byte(line), &m); err != nil {

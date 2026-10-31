@@ -135,7 +135,7 @@ func failedBatch(t *testing.T, dir string, failTruncate bool) outcome {
 	t.Helper()
 	f := &flaky{gate: make(chan struct{}), entered: make(chan struct{}), failTruncate: failTruncate}
 	logs := &lockedBuf{}
-	s, err := usage.OpenWith(dir, slog.New(slog.NewJSONHandler(logs, nil)), func(file *os.File) usage.LogHandle { f.LogHandle = file; return f })
+	s, err := usage.OpenWith(dir, usage.Options{Logger: slog.New(slog.NewJSONHandler(logs, nil)), Now: fixedClock}, func(file *os.File) usage.LogHandle { f.LogHandle = file; return f }, nil)
 	if err != nil {
 		t.Fatalf("OpenWith: %v", err)
 	}
@@ -251,7 +251,7 @@ func (failing) Write([]byte) (int, error) { return 0, errDisk }
 // TestNoLoggerIsFine: a sink opened without a logger (Open) reports a failure
 // to the Write and counts it, and does not log or panic.
 func TestNoLoggerIsFine(t *testing.T) {
-	s, err := usage.OpenWith(t.TempDir(), nil, func(file *os.File) usage.LogHandle { return failing{file} })
+	s, err := usage.OpenWith(t.TempDir(), usage.Options{Now: fixedClock}, func(file *os.File) usage.LogHandle { return failing{file} }, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,7 +298,7 @@ func TestAFailureIsNotSticky(t *testing.T) {
 func TestACounterBlockFailureIsCountedAndLogged(t *testing.T) {
 	dir := t.TempDir()
 	logs := &lockedBuf{}
-	s, err := usage.OpenLog(dir, slog.New(slog.NewJSONHandler(logs, nil)))
+	s, err := usage.OpenOptions(dir, usage.Options{Logger: slog.New(slog.NewJSONHandler(logs, nil)), Now: fixedClock})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,6 +316,11 @@ func TestACounterBlockFailureIsCountedAndLogged(t *testing.T) {
 	if len(got) != 1 || got[0]["level"] != "ERROR" || got[0]["error"] == nil {
 		t.Errorf("log = %v, want one Error record that names the cause", got)
 	}
+	// HBEP-8: a failed reservation drops its record before it has a counter,
+	// and the failure counter is its only trace.
+	if st := s.Stats(); st.Lost != 1 || st.Records != 0 {
+		t.Errorf("Stats() = %+v after the failed block, want 1 record lost and none written", st)
+	}
 	if err := os.Remove(blocker); err != nil {
 		t.Fatal(err)
 	}
@@ -324,6 +329,9 @@ func TestACounterBlockFailureIsCountedAndLogged(t *testing.T) {
 	}
 	if s.Err() != nil || s.Failures() != 1 {
 		t.Errorf("Err() = %v and Failures() = %d after it, want nil and 1", s.Err(), s.Failures())
+	}
+	if st := s.Stats(); st.Lost != 1 || st.Records != 1 {
+		t.Errorf("Stats() = %+v after the recovery, want the lost record kept and 1 written", st)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
@@ -391,7 +399,7 @@ func (f *syncGate) unblock() { f.once.Do(func() { close(f.release) }) }
 func TestWriteReturnsOnlyAfterTheSync(t *testing.T) {
 	dir := t.TempDir()
 	f := &syncGate{entered: make(chan struct{}, 1), release: make(chan struct{})}
-	s, err := usage.OpenWith(dir, nil, func(file *os.File) usage.LogHandle { f.LogHandle = file; return f })
+	s, err := usage.OpenWith(dir, usage.Options{Now: fixedClock}, func(file *os.File) usage.LogHandle { f.LogHandle = file; return f }, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
