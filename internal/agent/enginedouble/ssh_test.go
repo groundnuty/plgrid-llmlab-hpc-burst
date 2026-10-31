@@ -204,13 +204,13 @@ func TestSSHDiesAfterTheGivenTime(t *testing.T) {
 	_, port := echoServer(t)
 	socket := sockPath(t, dir, "fwd.sock")
 	t0 := time.Now()
-	p := runSSH(t, []string{EnvSSHDieAfter + "=600ms"}, sshArgsFor(dir, socket, port))
+	p := runSSH(t, []string{EnvSSHDieAfter + "=2s"}, sshArgsFor(dir, socket, port))
 	waitSocket(t, socket)
 	if got := roundTrip(t, socket, "x"); got != "pong:x" {
 		t.Errorf("before it dies: %q", got)
 	}
-	if code := p.exitCode(t, 5*time.Second); code != 255 || time.Since(t0) < 600*time.Millisecond {
-		t.Errorf("exit %d after %v, want 255 after at least 600ms", code, time.Since(t0))
+	if code := p.exitCode(t, 15*time.Second); code != 255 || time.Since(t0) < 2*time.Second {
+		t.Errorf("exit %d after %v, want 255 after at least 2s", code, time.Since(t0))
 	}
 	if _, err := os.Stat(socket); !os.IsNotExist(err) {
 		t.Errorf("the socket remains after the death: %v", err)

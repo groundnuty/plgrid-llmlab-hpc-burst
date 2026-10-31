@@ -40,6 +40,7 @@ type bind struct{ src, dst, opts string }
 // invocation is recorded as one JSON line (see ExecRecord).
 func ApptainerMain(args []string) int {
 	if len(args) == 0 {
+		recordApptainer(ExecRecord{Argv: args, PID: os.Getpid()})
 		return apptainerFatal("no command: pull, build or exec")
 	}
 	switch args[0] {
@@ -48,6 +49,7 @@ func ApptainerMain(args []string) int {
 	case "exec":
 		return apptainerExec(args)
 	}
+	recordApptainer(ExecRecord{Argv: args, PID: os.Getpid()})
 	return apptainerFatal("unknown command %q: the fake knows pull, build and exec", args[0])
 }
 
@@ -79,6 +81,7 @@ func recordApptainer(r ExecRecord) {
 // and "build [--force] --sandbox <dest> docker://...". Like Apptainer, it
 // refuses to overwrite an existing image without --force.
 func apptainerFetch(args []string) int {
+	recordApptainer(ExecRecord{Argv: args, PID: os.Getpid()}) // a refused call is recorded too
 	sandbox, force := false, false
 	var pos []string
 	for _, a := range args[1:] {
@@ -108,7 +111,6 @@ func apptainerFetch(args []string) int {
 	if m == nil {
 		return apptainerFatal("%s: %q is not docker://<image>@sha256:<64 hex>: images are pulled by digest", args[0], pos[1])
 	}
-	recordApptainer(ExecRecord{Argv: args, PID: os.Getpid()})
 	if _, err := os.Lstat(dest); err == nil {
 		if !force {
 			return apptainerFatal("image file already exists: %q - will not overwrite", dest)
@@ -132,6 +134,12 @@ func apptainerFetch(args []string) int {
 
 // apptainerExec is "exec [flags] [--bind src:dst[:opts]]... <image> <cmd> [args...]".
 func apptainerExec(args []string) int {
+	// A refused call is recorded with the fake's own PID and no environment;
+	// an accepted one is recorded once the child has started.
+	refuse := func(format string, a ...any) int {
+		recordApptainer(ExecRecord{Argv: args, PID: os.Getpid()})
+		return apptainerFatal(format, a...)
+	}
 	var (
 		binds    []bind
 		cleanEnv bool
@@ -145,7 +153,7 @@ func apptainerExec(args []string) int {
 		case execValueFlags[name]:
 			if !hasVal {
 				if i+1 >= len(args) {
-					return apptainerFatal("exec: %s needs a value", name)
+					return refuse("exec: %s needs a value", name)
 				}
 				i++
 				val = args[i]
@@ -153,24 +161,24 @@ func apptainerExec(args []string) int {
 			if name == "--bind" || name == "-B" {
 				bs, err := parseBinds(val)
 				if err != nil {
-					return apptainerFatal("exec: %v", err)
+					return refuse("exec: %v", err)
 				}
 				binds = append(binds, bs...)
 			}
 		default:
-			return apptainerFatal("exec: unknown flag %q", args[i])
+			return refuse("exec: unknown flag %q", args[i])
 		}
 	}
 	if i+1 >= len(args) {
-		return apptainerFatal("exec: want <image> <command> [args...]")
+		return refuse("exec: want <image> <command> [args...]")
 	}
 	image, cmdArgs := args[i], args[i+1:]
 	if err := checkImage(image); err != nil {
-		return apptainerFatal("%v", err)
+		return refuse("%v", err)
 	}
 	for _, b := range binds {
 		if _, err := os.Stat(b.src); err != nil {
-			return apptainerFatal("mount source %q does not exist", b.src)
+			return refuse("mount source %q does not exist", b.src)
 		}
 	}
 	env, hidden := childEnv(os.Environ(), cleanEnv)
@@ -183,14 +191,14 @@ func apptainerExec(args []string) int {
 	if cmdArgs[0] == "vllm" {
 		exe, err := os.Executable()
 		if err != nil {
-			return apptainerFatal("%v", err)
+			return refuse("%v", err)
 		}
 		cmd = exec.Command(exe, rewritten...)
 		env = setEnv(env, EnvRole, RoleEngine)
 	} else {
 		path, err := exec.LookPath(cmdArgs[0])
 		if err != nil {
-			return apptainerFatal("exec: %q: executable file not found in $PATH", cmdArgs[0])
+			return refuse("exec: %q: executable file not found in $PATH", cmdArgs[0])
 		}
 		cmd = exec.Command(path, rewritten...)
 	}
@@ -203,7 +211,7 @@ func apptainerExec(args []string) int {
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
 	defer signal.Stop(sigs)
 	if err := cmd.Start(); err != nil {
-		return apptainerFatal("exec: %v", err)
+		return refuse("exec: %v", err)
 	}
 	recordApptainer(ExecRecord{Argv: args, Env: redactedEnv(env, func(n string) bool { return hidden[n] && secretName(n) }), PID: cmd.Process.Pid})
 	done := make(chan error, 1)

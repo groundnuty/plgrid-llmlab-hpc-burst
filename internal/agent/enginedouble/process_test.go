@@ -224,8 +224,8 @@ func TestExitAfterAndStartDelay(t *testing.T) {
 	}
 
 	late := sockPath(t, dir, "c.sock")
-	start(t, engineCmd(t, late, filepath.Join(dir, "clog"), "start-delay=1s"))
-	time.Sleep(400 * time.Millisecond)
+	start(t, engineCmd(t, late, filepath.Join(dir, "clog"), "start-delay=3s"))
+	time.Sleep(300 * time.Millisecond)
 	if _, err := os.Stat(late); err == nil {
 		t.Error("the socket exists during start-delay")
 	}

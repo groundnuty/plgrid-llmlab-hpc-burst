@@ -13,11 +13,14 @@ import (
 // (spikes/s2b/results/gh200-1gpu/arms/A1-vr-hash/after-w0.prom): the metric
 // names, the label order (engine, finished_reason or reason, model_name) and
 // the number format of Python's prometheus_client. The capture holds only
-// those 16 lines, so the # HELP and # TYPE lines are those of a real scrape,
-// not of the capture, and so is http_requests_total, which is the default
-// metric of prometheus-fastapi-instrumentator that vLLM mounts
-// (vllm/entrypoints/serve/instrumentator/metrics.py): the status is grouped
-// as 1xx to 5xx, and the handlers in instrumentatorExcluded are not counted.
+// those 16 lines, with no comment lines and no http_requests_total. The
+// # HELP and # TYPE lines are the double's own text, written so that a parser
+// meets comment lines as it would in a real scrape; they are not copied from
+// vLLM. http_requests_total is the default metric of
+// prometheus-fastapi-instrumentator, which vLLM mounts
+// (vllm/entrypoints/serve/instrumentator/metrics.py): the status is grouped as
+// 1xx to 5xx, and the handlers in instrumentatorExcluded are not counted. Its
+// line form is the instrumentator's documented one, not read from a capture.
 
 // cacheConfigLabels are the labels of vllm:cache_config_info in the capture,
 // in its order. The ones in cacheConfigDerived are computed from the Config.

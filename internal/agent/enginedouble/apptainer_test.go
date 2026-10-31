@@ -280,3 +280,33 @@ func TestEngineThroughFakeApptainer(t *testing.T) {
 		t.Errorf("the socket remains after TERM: %v", err)
 	}
 }
+
+// A refused call is recorded like an accepted one, with the fake's own PID and
+// no environment, as the fake ssh records before it validates.
+func TestRefusedInvocationsAreRecorded(t *testing.T) {
+	dir := shortDir(t)
+	logPath := filepath.Join(dir, "alog")
+	t.Setenv(EnvApptainerLog, logPath)
+	attempts := [][]string{
+		{"pull", filepath.Join(dir, "a.sif"), "docker://registry.example/img:latest"},
+		{"exec", filepath.Join(dir, "none.sif"), "true"},
+		{"push", "x"},
+	}
+	for _, args := range attempts {
+		if code := ApptainerMain(args); code != 255 {
+			t.Fatalf("%v: exit %d, want 255", args, code)
+		}
+	}
+	recs := decodeLines(t, strings.Split(strings.TrimSpace(string(mustRead(t, logPath))), "\n"))
+	if len(recs) != len(attempts) {
+		t.Fatalf("%d records, want %d: %v", len(recs), len(attempts), recs)
+	}
+	for i, args := range attempts {
+		if got := toStrings(recs[i]["argv"]); strings.Join(got, "\x00") != strings.Join(args, "\x00") {
+			t.Errorf("record %d argv = %v, want %v", i, got, args)
+		}
+		if pid, _ := recs[i]["pid"].(float64); int(pid) != os.Getpid() || recs[i]["env"] != nil {
+			t.Errorf("record %d = %v, want the fake's own pid %d and no env", i, recs[i], os.Getpid())
+		}
+	}
+}

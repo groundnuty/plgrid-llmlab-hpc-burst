@@ -86,7 +86,9 @@ func (h *handler) toolCallFor(req chatRequest) *toolCall {
 }
 
 // maxTokensOf resolves max_tokens as vLLM does: max_completion_tokens when
-// set, else max_tokens, else what remains of the context after the prompt.
+// set, else max_tokens (chat_completion/serving.py), else what remains of the
+// context after the prompt. The error message is the double's own wording of
+// a context-length overflow: the v0.32.0 source of vLLM's text was not read.
 func (h *handler) maxTokensOf(req chatRequest, promptLen int) (int, error) {
 	max := h.cfg.MaxModelLen - promptLen
 	switch {

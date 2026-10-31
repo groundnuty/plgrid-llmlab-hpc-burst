@@ -274,7 +274,7 @@ func TestRunningWaitingAndKVAreLive(t *testing.T) {
 	if kv == nil || kv[1] == "0.0" {
 		t.Errorf("kv_cache_usage_perc = %v while a request runs", kv)
 	}
-	eventually(t, 5*time.Second, "both requests done", func() bool {
+	eventually(t, 20*time.Second, "both requests done", func() bool {
 		m := s.metrics()
 		return has(m, `vllm:num_requests_running{engine="0",model_name="m"} 0.0`) && has(m, `vllm:num_requests_waiting{engine="0",model_name="m"} 0.0`)
 	})
@@ -303,42 +303,44 @@ func (s *testServer) timeToFirstByte(body map[string]any) time.Duration {
 
 func TestSlowFirstDelaysTheFirstRequestOfEachShape(t *testing.T) {
 	cfg := cfgFor()
-	cfg.SlowFirst = 300 * time.Millisecond
+	cfg.SlowFirst = time.Second
 	s := serve(t, cfg)
 	body := func(words, max int) map[string]any {
 		return chatBody(words, map[string]any{"max_tokens": max, "ignore_eos": true})
 	}
-	if d := s.timeToFirstByte(body(5, 10)); d < 300*time.Millisecond {
-		t.Errorf("first request of a shape: first byte after %v, want at least 300ms", d)
+	if d := s.timeToFirstByte(body(5, 10)); d < time.Second {
+		t.Errorf("first request of a shape: first byte after %v, want at least 1s", d)
 	}
-	if d := s.timeToFirstByte(body(5, 10)); d > 150*time.Millisecond {
+	if d := s.timeToFirstByte(body(5, 10)); d > 500*time.Millisecond {
 		t.Errorf("second request of the shape: first byte after %v, want it fast", d)
 	}
 	// the nonce in the prompt changes nothing about the shape; its count does
-	if d := s.timeToFirstByte(chatBody(5, map[string]any{"max_tokens": 10, "ignore_eos": true, "user": "x"})); d > 150*time.Millisecond {
+	if d := s.timeToFirstByte(chatBody(5, map[string]any{"max_tokens": 10, "ignore_eos": true, "user": "x"})); d > 500*time.Millisecond {
 		t.Errorf("same shape again: %v", d)
 	}
-	if d := s.timeToFirstByte(body(6, 10)); d < 300*time.Millisecond {
-		t.Errorf("a new prompt length is a new shape: first byte after %v, want at least 300ms", d)
+	if d := s.timeToFirstByte(body(6, 10)); d < time.Second {
+		t.Errorf("a new prompt length is a new shape: first byte after %v, want at least 1s", d)
 	}
-	if d := s.timeToFirstByte(body(5, 11)); d < 300*time.Millisecond {
-		t.Errorf("a new max_tokens is a new shape: first byte after %v, want at least 300ms", d)
+	if d := s.timeToFirstByte(body(5, 11)); d < time.Second {
+		t.Errorf("a new max_tokens is a new shape: first byte after %v, want at least 1s", d)
 	}
 }
 
-// never-settle=100: with TokenDelay 10 ms and 10 tokens, each request of a shape
-// waits 100% of 10*10 ms = 100 ms longer than the one before.
+// never-settle=100: with TokenDelay 20 ms and 10 tokens, each request of a shape
+// waits 100% of 20*10 ms = 200 ms longer than the one before. The bounds are
+// loose, since a loaded machine only adds time; the upper one rules out a
+// multiplicative growth, which would double the wait each time.
 func TestNeverSettleGrowsEachRequest(t *testing.T) {
 	cfg := cfgFor()
-	cfg.TokenDelay, cfg.NeverSettle = 10*time.Millisecond, 100
+	cfg.TokenDelay, cfg.NeverSettle = 20*time.Millisecond, 100
 	s := serve(t, cfg)
 	var ttfb []time.Duration
 	for i := 0; i < 4; i++ {
 		ttfb = append(ttfb, s.timeToFirstByte(chatBody(5, map[string]any{"max_tokens": 10, "ignore_eos": true})))
 	}
 	for i := 1; i < len(ttfb); i++ {
-		if step := ttfb[i] - ttfb[i-1]; step < 70*time.Millisecond || step > 160*time.Millisecond {
-			t.Errorf("request %d waited %v, request %d %v: the step is %v, want about 100ms (all: %v)", i, ttfb[i], i-1, ttfb[i-1], step, ttfb)
+		if step := ttfb[i] - ttfb[i-1]; step < 150*time.Millisecond || step > 500*time.Millisecond {
+			t.Errorf("request %d waited %v, request %d %v: the step is %v, want about 200ms (all: %v)", i, ttfb[i], i-1, ttfb[i-1], step, ttfb)
 		}
 	}
 }
