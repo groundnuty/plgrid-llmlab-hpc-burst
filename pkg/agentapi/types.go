@@ -3,6 +3,7 @@ package agentapi
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -391,9 +392,28 @@ type Health struct {
 	GeneratedTokens int64 `json:"generatedTokens"`
 	// KVCacheUsage is the KV cache's use, from 0 to 1.
 	KVCacheUsage float64 `json:"kvCacheUsage"`
-	// ResponsesByStatus counts the engine's responses by HTTP status code,
-	// for example {"200": 1200, "500": 3}.
+	// ResponsesByStatus counts the engine's responses by the status label the
+	// engine reports, verbatim. vLLM groups statuses into classes (its
+	// prometheus-fastapi-instrumentator has should_group_status_codes on), so
+	// the keys are classes such as "2xx", "3xx", "4xx" and "5xx", for example
+	// {"2xx": 1200, "5xx": 3};
+	// an engine that reports exact codes gives {"200": 1200, "500": 3}. The
+	// agent cannot turn classes into codes. Read server errors with
+	// ServerErrors, which counts both forms.
 	ResponsesByStatus map[string]int64 `json:"responsesByStatus,omitempty"`
+}
+
+// ServerErrors is the number of server-error responses in a
+// ResponsesByStatus map: the sum of every key that starts with "5", whether it
+// is a class ("5xx") or an exact code ("500", "503").
+func ServerErrors(byStatus map[string]int64) int64 {
+	var n int64
+	for k, v := range byStatus {
+		if strings.HasPrefix(k, "5") {
+			n += v
+		}
+	}
+	return n
 }
 
 // CheckResults are the results of one verification generation's checks. A

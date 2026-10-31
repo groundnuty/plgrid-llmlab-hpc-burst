@@ -137,6 +137,14 @@ const (
 	// AgentEndpointPortOffset is the agent endpoint's port, relative to the
 	// launcher's port base.
 	AgentEndpointPortOffset = 3
+	// DialHomePortOffset is the front's dial-home listener's default port in
+	// ssh dial-home mode, relative to the launcher's port base
+	// (`@hpc-burst-science-agent`, 31 Oct 2026). Each platform's restricted
+	// VM key permits forwards to exactly this port and the agent endpoint's,
+	// so a launcher started with another port base needs new keys. In direct
+	// mode the dial-home listener's address stays required and explicit,
+	// because compute nodes must reach it, and this default does not apply.
+	DialHomePortOffset = 7
 )
 
 // CredentialsDir is <state>/credentials, the dir of AllocationCredentialPath
@@ -165,6 +173,16 @@ func (h Host) AgentEndpointPort() int { return h.PortBase + AgentEndpointPortOff
 // server listens and the front's direct-mode passthrough connects.
 func (h Host) AgentEndpointAddr() string {
 	return "127.0.0.1:" + strconv.Itoa(h.AgentEndpointPort())
+}
+
+// DialHomePort is the dial-home listener's default loopback port in ssh mode:
+// the port base plus DialHomePortOffset.
+func (h Host) DialHomePort() int { return h.PortBase + DialHomePortOffset }
+
+// DialHomeAddr is "127.0.0.1:<DialHomePort>", the front's default dial-home
+// listener in ssh mode, which a job's second ssh forward reaches.
+func (h Host) DialHomeAddr() string {
+	return "127.0.0.1:" + strconv.Itoa(h.DialHomePort())
 }
 
 // AllocationCredentialPath is where the lifecycle controller keeps an
