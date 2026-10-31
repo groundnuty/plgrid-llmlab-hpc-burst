@@ -518,8 +518,21 @@ const (
 type CheckOutcome struct {
 	Name   CheckName `json:"name"`
 	Passed bool      `json:"passed"`
+	// Reason is a CamelCase code for why the check failed, one of the Reason*
+	// constants of this package (checks.go), and empty on a pass. The
+	// controller matches on it and never on Message, which is for people
+	// (`@hpc-burst-science-agent`, 31 Oct 2026). A failure that no constant
+	// names has an empty Reason and a Message only.
+	Reason string `json:"reason,omitempty"`
 	// Message is free text, cut to MaxMessageBytes (TruncateUTF8).
 	Message string `json:"message,omitempty"`
+	// ContextTokens is the length of the prompt, in tokens, that the check
+	// actually ran at. Only the behaviour check sets it, and the controller
+	// records it as the context the check was judged at. It is the
+	// workload's contextTokens.longest, except when the engine declares a
+	// reasoning parser, where the agent shortens the prompt to leave room
+	// for the reasoning (BehaviourContextTokens). 0 for the other checks.
+	ContextTokens int64 `json:"contextTokens,omitempty"`
 }
 
 // QualifyResult is what qualification read and judged (HBEP-7, Instance

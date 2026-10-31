@@ -11,15 +11,14 @@ import (
 const corruptionOutputs = agentapi.CorruptionOutputs
 
 // judgeCorruption applies the Agent's own verdict on the corruption check
-// (agentapi.CorruptionVerdict, the rule the real agent applies) to a
-// qualification result, when the engine returns raw outputs (GreedyOutputs).
+// (agentapi.JudgeCorruption, the rule the real agent applies, with the failure's
+// Reason) to a qualification result, when the engine returns raw outputs (GreedyOutputs).
 // It returns a new result and leaves q's slices alone.
 func (e Engine) judgeCorruption(i agentapi.DesiredInstance, req agentapi.QualifyRequest, q agentapi.QualifyResult) agentapi.QualifyResult {
 	if e.GreedyOutputs == nil {
 		return q
 	}
-	passed, msg := agentapi.CorruptionVerdict(e.GreedyOutputs(i, req))
-	outcome := agentapi.CheckOutcome{Name: agentapi.CheckCorruption, Passed: passed, Message: msg}
+	outcome := agentapi.JudgeCorruption(e.GreedyOutputs(i, req))
 	q.Checks = slices.Clone(q.Checks)
 	for n, c := range q.Checks {
 		if c.Name == agentapi.CheckCorruption {

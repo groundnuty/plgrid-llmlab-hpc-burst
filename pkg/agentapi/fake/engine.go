@@ -155,6 +155,8 @@ func DefaultVerify(i agentapi.DesiredInstance, req agentapi.VerifyRequest) agent
 // DefaultQualify passes every check (the tool-call check only when the request
 // asks for it), with a KV capacity of 1<<20 tokens and one served model name.
 // The checks come in the order health, chat, toolCall, corruption, behaviour.
+// The behaviour check ran at the request's longest context
+// (CheckOutcome.ContextTokens), as an engine with no reasoning parser does.
 func DefaultQualify(_ agentapi.DesiredInstance, req agentapi.QualifyRequest) agentapi.QualifyResult {
 	names := []agentapi.CheckName{agentapi.CheckHealth, agentapi.CheckChat}
 	if req.ToolCalls {
@@ -163,7 +165,11 @@ func DefaultQualify(_ agentapi.DesiredInstance, req agentapi.QualifyRequest) age
 	names = append(names, agentapi.CheckCorruption, agentapi.CheckBehaviour)
 	checks := make([]agentapi.CheckOutcome, 0, len(names))
 	for _, n := range names {
-		checks = append(checks, agentapi.CheckOutcome{Name: n, Passed: true})
+		o := agentapi.CheckOutcome{Name: n, Passed: true}
+		if n == agentapi.CheckBehaviour {
+			o.ContextTokens = int64(req.Shapes.ContextLongest)
+		}
+		checks = append(checks, o)
 	}
 	return agentapi.QualifyResult{
 		Checks:           checks,

@@ -102,7 +102,11 @@
 //     greedy outputs share their first 32 tokens, none empty or a single
 //     repeated token; the rule is CorruptionVerdict, which the real agent and
 //     the fake both apply) and the behaviour check (a well-formed answer at
-//     the longest context, no loop). It reports each as a CheckOutcome;
+//     the longest context, no loop). It reports each as a CheckOutcome, with a
+//     Reason code for a failure (the Reason* constants of checks.go), which
+//     the controller matches on, never the message text; the behaviour check
+//     also reports the context length it ran at (ContextTokens), which
+//     BehaviourContextTokens shortens when a reasoning parser is declared;
 //   - the controller judges everything with a threshold or a declared value:
 //     the file rehash, the settings comparison, the engine version, the
 //     served model names, the maximum length, KV capacity against
