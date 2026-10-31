@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -99,6 +100,27 @@ func TestEngineImageDigest(t *testing.T) {
 		{"uppercase hex", dig("sha256:" + strings.Repeat("A", 64)), msg},
 		{"another algorithm", dig("sha512:" + strings.Repeat("2", 64)), msg},
 	}, []mdCase{{"a sha256 digest", dig("sha256:" + strings.Repeat("a", 64)), ""}})
+}
+
+// The engine image is a repository without a tag: the agent pulls
+// image@imageDigest, so a tag beside it would mislead a reader. A colon before
+// the last "/" is a registry port, not a tag. This is the rule
+// modeldeployments:$.spec.source.served.engine.image#0.
+func TestEngineImageIsARepositoryWithoutATag(t *testing.T) {
+	const msg = "image is a repository without a tag"
+	img := func(i string) func(*v1alpha1.ModelDeployment) {
+		return func(md *v1alpha1.ModelDeployment) { md.Spec.Source.Served.Engine.Image = i }
+	}
+	runMDCases(t, []mdCase{
+		{"a latest tag", img("docker.io/vllm/vllm-openai:latest"), msg},
+		{"a version tag on a bare name", img("vllm-openai:v1"), msg},
+		{"a tag after a registry port", img("registry.example:5000/vllm/vllm-openai:v1"), msg},
+	}, []mdCase{
+		{"a repository", img("docker.io/vllm/vllm-openai"), ""},
+		{"a registry port before the last slash", img("registry.example:5000/vllm/vllm-openai"), ""},
+		{"a registry port and one path segment", img("registry.example:5000/vllm"), ""},
+		{"a bare name", img("vllm-openai"), ""},
+	})
 }
 
 // vLLM v0.32.0's short flag aliases, collected from the option strings of
@@ -683,6 +705,38 @@ func TestModelDeploymentProvidersAndInstances(t *testing.T) {
 		{"an end time", func(md *v1alpha1.ModelDeployment) { md.Spec.EndTime = &metav1.Time{Time: metav1.Now().Add(3600e9)} }, ""},
 		{"a model name with a slash and an at sign", func(md *v1alpha1.ModelDeployment) { md.Spec.Model = "org/m@x" }, ""},
 	})
+}
+
+// The provider names are an ordered list of unique names: the order is the
+// order the Providers are tried in (HBEP-7, Where), so the list is atomic, not
+// a set, and it is read back as written. This is the rule
+// modeldeployments:$.spec.providers.names#0.
+func TestModelDeploymentProviderNamesAreOrderedAndUnique(t *testing.T) {
+	const msg = "providers.names lists each Provider once"
+	names := func(n ...string) func(*v1alpha1.ModelDeployment) {
+		return func(md *v1alpha1.ModelDeployment) { md.Spec.Providers.Names = n }
+	}
+	runMDCases(t, []mdCase{
+		{"a name listed twice in a row", names("a-prov", "a-prov"), msg},
+		{"a name listed twice with another between", names("a-prov", "b-prov", "a-prov"), msg},
+		{"a repeated name among three", names("a-prov", "b-prov", "b-prov"), msg},
+	}, []mdCase{
+		{"one name", names("a-prov"), ""},
+		{"two different names", names("a-prov", "b-prov"), ""},
+	})
+
+	// The order is kept: b-prov is listed first and stays first.
+	ns := newNamespace(t)
+	for _, want := range [][]string{{"b-prov", "a-prov"}, {"c-prov", "a-prov", "b-prov"}} {
+		md := newModelDeployment(ns, uniq("md"))
+		md.Spec.Providers.Names = want
+		must(t, c.Create(bg(), md), "create")
+		got := &v1alpha1.ModelDeployment{}
+		must(t, c.Get(bg(), objKey(md), got), "get")
+		if !reflect.DeepEqual(got.Spec.Providers.Names, want) {
+			t.Errorf("providers.names = %v, want %v in that order", got.Spec.Providers.Names, want)
+		}
+	}
 }
 
 func TestRetentionPolicy(t *testing.T) {

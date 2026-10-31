@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	corev1 "k8s.io/api/core/v1"
 	"testing"
 	"time"
 
@@ -36,6 +37,12 @@ func TestLaterHardEndIsCopiedIntoStatus(t *testing.T) {
 	o = e.wantPhase("a1", v1alpha1.AllocationRunning)
 	wantMT(t, "hardEnd", o.HardEnd, at(12, 50, 0))
 	wantMT(t, "startTime", o.StartTime, at(12, 5, 0)) // the start does not move
+
+	// An extension after the first observe is a later hard end, never a
+	// read-back mismatch (HBEP-4: the read-back is on the first observe).
+	if c := e.alloc("a1").GetCondition(v1alpha1.ConditionSubmittedAsOther); c.Status == corev1.ConditionTrue {
+		t.Fatalf("an administrator's extension raised SubmittedAsOther: %+v", c)
+	}
 
 	e.syncAt(at(12, 36, 0)) // past the old hard end, which no longer ends the job
 	o = e.wantPhase("a1", v1alpha1.AllocationRunning)

@@ -11,6 +11,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
 // Controller is a stand-in for one Provider's controller, for the lifecycle
@@ -24,7 +25,9 @@ import (
 // Provider. It is level-triggered and idempotent, and one Allocation's failure
 // does not stop the others: the pass returns the failures joined. A read
 // failure (Batch.FailReads) is not an error: that Allocation's status stays as
-// it was, and the Provider's lastSuccessfulStatusRead does not advance.
+// it was, and the Provider's lastSuccessfulStatusRead does not advance. The
+// Provider's Ready condition follows the readiness rule of docs/development.md,
+// Provider readiness (see the bullet on the Provider's status below).
 //
 // Every write names the field manager v1alpha1.FieldManagerProvider.
 //
@@ -36,7 +39,12 @@ import (
 //     with the job's own phase (Held, Pending or Running), not Submitting.
 //   - A Submit's Unknown outcome is not resolved in the same pass: the next
 //     Sync finds the tag and adopts it. A job that is found is adopted whatever
-//     the attempt's age, and the attempt is recorded Done.
+//     the attempt's age, and the attempt is recorded Done. When several jobs
+//     carry the tag, the one adopted follows HBEP-7's Adoption order: a live job
+//     that is not held (no end time, no hold), then a job that ran (it has a
+//     start time), then any; within each class the lowest job ID, with jobs
+//     sorted by ID, never taken in the order given. The same choice names the
+//     job a deleting Allocation records before it cancels every live one.
 //   - A submission record found InFlight with no job ID (a crash between the
 //     claim and the answer) is looked up by tag like an Unknown one. Inside the
 //     window an InFlight attempt shows phase Submitting and an Unknown one
@@ -65,6 +73,13 @@ import (
 //     there is no annotation, and the next pass tries again. An admin-held job
 //     gets no lift call. A read that fails stops settle: nothing is cancelled
 //     and nothing is lifted.
+//   - A requeue (Batch.Requeue) returns the job to PENDING with its restart
+//     count up and its start cleared, so the Allocation shows phase Failed,
+//     reason Requeued, no startTime, and then the new start when the job runs
+//     again; a job that starts again adds no second queue wait. A requeue with
+//     a hold (Batch.RequeueHold) leaves the job held by its user, and its hold
+//     is never lifted again: the annotation names the job and the restart count
+//     is above 0, either of which stops the lift.
 //   - Fallback mode (HoldRelease false), the submission. An InFlight claim
 //     older than InflightWindow with no job found becomes Unknown, keeping the
 //     attempt's time. Unknown is never retried by time. When UnknownBound has
@@ -85,22 +100,57 @@ import (
 //     fallback mode the abandon-attempt annotation names it. An Unknown attempt
 //     whose job is found is recorded Done, and the job cancelled. Status is not
 //     written for a deleting Allocation.
-//   - Queue waits: a job's wait is added to the Provider's status the first time
-//     the job is seen with a start time, that is when the persisted
-//     atProvider.startTime goes from nil to set. A re-observed job adds none,
-//     even after its entry fell out of the 20 kept, and a restarted Controller
-//     (a new value on the same client) keeps the waits it finds in status.
+//   - Queue waits (docs/development.md, Queue waits): when the observed job has
+//     a start time and the stored atProvider.queueWaitRecorded is false, the
+//     wait (the job's submit and start times) is written to the Provider's
+//     status at once, within that observe, and only after that write succeeded
+//     is queueWaitRecorded set in the status written for the Allocation. If the
+//     Provider write fails, queueWaitRecorded stays false, the Allocation's
+//     status is still written, the Sync returns the error joined for that
+//     Allocation, and the next Sync tries again. If the Provider write
+//     succeeded and the Allocation's did not, the next Sync adds no second
+//     entry (a job ID is kept once) and sets the flag. A job whose flag is true
+//     adds none, even after its entry fell out of the 20 kept. The list is kept
+//     oldest start first, whatever the order the jobs were observed in. A
+//     restarted Controller (a new value on the same client) keeps all of this,
+//     because it lives in the status.
 //   - A later hard end: atProvider.hardEnd is re-read on every observe, so a
 //     Batch.SetTimeLimit shows in it at the next Sync.
-//   - The Provider's status: queueWaits are updated on every pass.
-//     lastSuccessfulStatusRead and the Ready condition (True, reason Polled)
-//     are refreshed only on a pass in which no read failed, so a failing
-//     platform leaves them to age. Conditions this controller does not own, such
-//     as DialHomeUnreachable, are kept as they were found.
-//   - Not modelled: the read-back (a renamed job is not refused, a job with
-//     another limit sets no SubmittedAsOther), the AdminHold condition, the
-//     adoption order (the lowest job ID is adopted), the sticky duplicates list
-//     of fallback mode, and the compare-and-swap conflicts.
+//   - The Provider's status, readiness (docs/development.md, Provider
+//     readiness): a pass that made no Batch read (it observed no job and looked
+//     up no tag) calls Batch.Poll once, so Ready rests on a real read. A pass
+//     that read does not poll, and a failed read is not answered with a poll
+//     that could hide it. On a pass with no failed read,
+//     lastSuccessfulStatusRead is the pass's time and Ready is True with reason
+//     Polled. On a pass with a failed read, lastSuccessfulStatusRead stays as it
+//     was, and Ready becomes False with reason ReadsFailing when there is no
+//     successful read yet or the last is older than ReadyStaleness (zero means
+//     v1alpha1.ProviderReadyStaleness), strictly; until then it keeps its
+//     value. The False message names the time of the last success, so it is the
+//     same at every pass. Conditions this controller does not own, such as
+//     DialHomeUnreachable, are kept as they were found.
+//   - The read-back (HBEP-4, The Slurm dialect: "on the first observe after a
+//     job is established"). A job whose name is not the tag puts the
+//     observation in phase Refused with reason ReasonJobRenamed (exactly that
+//     string) and is cancelled while it is live; the name is checked on every
+//     observe, so a cancel that failed is retried, yet one scancel shows in the
+//     call log however many Syncs follow. Refused, once set, is kept on every
+//     path: a later Sync never overwrites its phase or reason, whether it
+//     observes a job or not, and neither does a Refused set by hand; the rest of
+//     the observation still follows the job, and a Refused Allocation with no
+//     job ID submits nothing. The partition, time limit and GPU count are
+//     compared with spec.forProvider.batch on the first successful observe of
+//     the recorded job only (the stored observation does not yet name its job
+//     ID): a difference sets the condition SubmittedAsOther True with reason
+//     ReasonReadBackMismatch and a message naming each differing field with both
+//     values (for example "timeLimit: requested 30m0s, got 20m0s"); the
+//     condition is never cleared, the job is not cancelled, and the phase keeps
+//     mirroring the job. A later change, such as an administrator's extension
+//     (Batch.SetTimeLimit), is a later hard end, never a mismatch.
+//   - Retention: every status written mirrors status.retention.effectiveMode
+//     from spec.retentionPolicy (RetentionPolicy.EffectiveMode: Keep when unset).
+//   - Not modelled: the AdminHold condition, the sticky duplicates list of
+//     fallback mode, and the compare-and-swap conflicts.
 //   - Times are written in whole seconds: metav1.Time keeps no more.
 type Controller struct {
 	Client   client.Client
@@ -123,6 +173,10 @@ type Controller struct {
 	// UnknownBound is how long after an attempt a fallback-mode controller
 	// waits before it asks an operator; zero means 10 minutes.
 	UnknownBound time.Duration
+	// ReadyStaleness is how old the Provider's last successful status read may
+	// be before a pass with a failed read sets Ready False; zero means
+	// v1alpha1.ProviderReadyStaleness.
+	ReadyStaleness time.Duration
 }
 
 const (
@@ -134,9 +188,33 @@ const (
 
 // pass is the state of one Sync.
 type pass struct {
-	now        time.Time
+	now time.Time
+	// read is true once the pass has made a Batch read (FindByTag or Observe),
+	// whether it succeeded or not. A pass with none polls the platform instead.
+	read bool
+	// readFailed is true once any read of the pass failed.
 	readFailed bool
-	waits      []v1alpha1.QueueWait
+}
+
+// findByTag is Batch.FindByTag, noted in the pass: it counts as a read, and a
+// failure marks the pass's reads as failed.
+func (c *Controller) findByTag(ctx context.Context, p *pass, tag string, since time.Time) ([]provider.Job, error) {
+	p.read = true
+	jobs, err := c.Batch.FindByTag(ctx, tag, since)
+	if err != nil {
+		p.readFailed = true
+	}
+	return jobs, err
+}
+
+// observeJob is Batch.Observe, noted in the pass like findByTag.
+func (c *Controller) observeJob(ctx context.Context, p *pass, id string) (provider.Job, bool, error) {
+	p.read = true
+	job, found, err := c.Batch.Observe(ctx, id)
+	if err != nil {
+		p.readFailed = true
+	}
+	return job, found, err
 }
 
 func (c *Controller) lostGrace() time.Duration {
@@ -158,6 +236,13 @@ func (c *Controller) inflightWindow() time.Duration {
 		return 5 * time.Minute
 	}
 	return c.InflightWindow
+}
+
+func (c *Controller) readyStaleness() time.Duration {
+	if c.ReadyStaleness == 0 {
+		return v1alpha1.ProviderReadyStaleness
+	}
+	return c.ReadyStaleness
 }
 
 func (c *Controller) unknownBound() time.Duration {

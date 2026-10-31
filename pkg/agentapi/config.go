@@ -98,7 +98,12 @@ var (
 	// safePath is HBEP-4's safe pattern for values placed in commands, for an
 	// absolute path.
 	safePath = regexp.MustCompile(`^/[A-Za-z0-9._:=,/-]*$`)
-	tagForm  = regexp.MustCompile(`^hb-[a-z0-9]([-a-z0-9.]*[a-z0-9])?-[0-9a-f]{12}$`)
+	// tagForm is v1alpha1.JobTag's output: hb-<n>-<12 hex>, where <n> is the
+	// Allocation's name cut to 40 characters. The cut can leave <n> ending in
+	// "-" or "." (a 39-character Provider name followed by its "-<5 random>"
+	// suffix ends at the hyphen), so <n> is required to start with a letter or
+	// digit and nothing more.
+	tagForm  = regexp.MustCompile(`^hb-[a-z0-9][-a-z0-9.]{0,39}-[0-9a-f]{12}$`)
 	pinForm  = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	userForm = regexp.MustCompile(`^[a-z_][a-z0-9_.-]*$`)
 )

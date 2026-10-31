@@ -42,13 +42,37 @@ func (b *Batch) CancelExternally(id string) {
 	}
 }
 
-// Requeue requeues the job: Requeued is true and RestartCount 1, so its phase
-// is Failed (HBEP-4, Phases).
-func (b *Batch) Requeue(id string) {
+// Requeue requeues the job as scontrol requeue does. The job returns to
+// PENDING: its restart count goes up by one, Requeued is true, its start is
+// cleared, it is eligible again from now, and it starts after its script's
+// QueueWait from now. The phase is Failed, as for any requeued job (HBEP-4,
+// Phases; provider.SlurmPhase). A job that is held stays held: a requeue does
+// not lift a hold. The call log has op "requeue" with the job ID. A job that
+// has ended cannot be requeued, so it panics.
+func (b *Batch) Requeue(id string) { b.requeue(id, "requeue", false) }
+
+// RequeueHold requeues the job like Requeue, and holds it by its user (reason
+// JobHeldUser) until the hold is lifted, as scontrol requeuehold does; the lift
+// makes it eligible again from then. A job held by an administrator stays held
+// by the administrator. The call log has op "requeuehold" with the job ID. A
+// job that has ended cannot be requeued, so it panics.
+func (b *Batch) RequeueHold(id string) { b.requeue(id, "requeuehold", true) }
+
+func (b *Batch) requeue(id, op string, hold bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	j := b.must(id)
-	j.requeued, j.restartCount = true, 1
+	now := b.clock.Now()
+	if !live(b.record(j, now)) {
+		panic("fake: job " + id + " has ended: it cannot be requeued")
+	}
+	b.log(op, id)
+	j.restartCount++
+	j.requeued = true
+	j.eligible = now
+	if hold && j.hold != provider.HoldAdmin {
+		j.hold = provider.HoldUser
+	}
 }
 
 // Vanish hides the job from the queue listing and from accounting.
@@ -65,7 +89,7 @@ func (b *Batch) Reappear(id string) {
 	b.must(id).vanished = false
 }
 
-// FailReads makes FindByTag and Observe return err; nil clears it.
+// FailReads makes FindByTag, Observe and Poll return err; nil clears it.
 func (b *Batch) FailReads(err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

@@ -82,6 +82,28 @@ func TestPlatformProfileTypedFields(t *testing.T) {
 	}
 }
 
+// stagingDir names no ".." segment, because the agent's configuration refuses
+// one (agentapi.AgentConfig). A ".." inside a longer segment is an ordinary
+// name. This is the rule platformprofiles:$.spec.stagingDir#0.
+func TestStagingDirRefusesDotDotSegments(t *testing.T) {
+	const msg = "stagingDir must not contain a '..' segment"
+	for _, dir := range []string{"/scratch/../etc", "$SCRATCH/..", "/scratch/a/../b", "/.."} {
+		t.Run("refuse "+dir, func(t *testing.T) {
+			p := newProfile(uniq("prof"))
+			p.Spec.StagingDir = dir
+			requireRefused(t, c.Create(bg(), p), msg)
+		})
+	}
+	for _, dir := range []string{"/scratch/a..b/x", "$SCRATCH/hpcburst", "/scratch/.../x", "/scratch/..a/b.."} {
+		t.Run("accept "+dir, func(t *testing.T) {
+			p := newProfile(uniq("prof"))
+			p.Spec.StagingDir = dir
+			must(t, c.Create(bg(), p), "create with stagingDir "+dir)
+			cleanup(t, p)
+		})
+	}
+}
+
 // The scheduling facts of spikes S4 and S5 are typed fields, and a fact that is
 // not stated is absent: an absent bool is unknown, not false, and it round-trips
 // as absent.

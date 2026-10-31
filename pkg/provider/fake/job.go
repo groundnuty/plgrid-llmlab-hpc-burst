@@ -21,7 +21,8 @@ type jobRec struct {
 
 	// hold is the job's current hold. eligible is when the job became
 	// eligible to start, valid while hold is HoldNone: the submit time for an
-	// unheld job, the lift time for a held one.
+	// unheld job, the lift time for a held one, and the requeue time (or the
+	// lift time after a requeue hold) for a requeued one.
 	hold     provider.HoldKind
 	eligible time.Time
 

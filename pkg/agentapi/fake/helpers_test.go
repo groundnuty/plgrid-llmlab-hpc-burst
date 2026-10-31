@@ -11,6 +11,13 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi/fake"
 )
 
+// Agent instance IDs have the pinned form: 32 lowercase hex characters
+// (agentapi.CheckAgentInstanceID), which the Backend enforces.
+const (
+	agent1 = "11111111111111111111111111111111"
+	agent2 = "22222222222222222222222222222222"
+)
+
 const (
 	allocUID  = "alloc-uid-1"
 	imageSHA  = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"

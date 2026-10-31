@@ -30,6 +30,13 @@ type Registration struct {
 // registered until Forget; a second agent instance ID registered under the same
 // Allocation (a requeue) is accepted too, because judging a requeue is the
 // controller's job and this double does not.
+//
+// It refuses what the real server and controller refuse, with CodeBadRequest:
+// a caller whose agent instance ID is not of the pinned form
+// (agentapi.CheckAgentInstanceID, which the server checks before it calls the
+// Backend) and a Report whose InstanceReport.Key is set and is not of the pinned
+// form (agentapi.CheckKey, which the controller checks before it stores the key).
+// A refused call records nothing. The messages never repeat the ID or the key.
 type Backend struct {
 	mu      sync.Mutex
 	desired map[string]agentapi.DesiredState
@@ -166,6 +173,11 @@ func (b *Backend) Report(_ context.Context, c agentapi.Caller, r agentapi.Report
 	if err := b.begin(MethodReport, c); err != nil {
 		return err
 	}
+	if r.Instance != nil && r.Instance.Key != "" {
+		if err := agentapi.CheckKey([]byte(r.Instance.Key)); err != nil {
+			return agentapi.Errorf(agentapi.CodeBadRequest, "%s: the instance key: %v", MethodReport, err)
+		}
+	}
 	if !b.registered(c) {
 		return notRegistered(c)
 	}
@@ -173,12 +185,16 @@ func (b *Backend) Report(_ context.Context, c agentapi.Caller, r agentapi.Report
 	return nil
 }
 
-// begin counts a call, rejects a caller that names no Allocation or agent instance ID,
-// and then returns the error a FailNext queued, if any. The caller holds b.mu.
+// begin counts a call, rejects a caller that names no Allocation or whose agent
+// instance ID is not of the pinned form, and then returns the error a FailNext
+// queued, if any. The caller holds b.mu.
 func (b *Backend) begin(method string, c agentapi.Caller) error {
 	b.calls[method]++
-	if c.AllocationUID == "" || c.AgentInstanceID == "" {
-		return agentapi.Errorf(agentapi.CodeBadRequest, "%s: the caller needs an Allocation UID and a agent instance ID", method)
+	if c.AllocationUID == "" {
+		return agentapi.Errorf(agentapi.CodeBadRequest, "%s: the caller needs an Allocation UID", method)
+	}
+	if err := agentapi.CheckAgentInstanceID(c.AgentInstanceID); err != nil {
+		return agentapi.Errorf(agentapi.CodeBadRequest, "%s: %v", method, err)
 	}
 	if q := b.fail[method]; len(q) > 0 {
 		b.fail[method] = q[1:]

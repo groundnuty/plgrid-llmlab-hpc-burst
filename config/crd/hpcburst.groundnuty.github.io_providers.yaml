@@ -276,8 +276,13 @@ spec:
                 description: |-
                   QueueWaits are the last MaxQueueWaits observed queue waits, oldest first
                   (HBEP-4, Provider status). Each is one recorded job's wait from
-                  submission to start, from its accounting record's submit and start
-                  times, never from when the controller saw the change. Entries are keyed
+                  submission to start, from the scheduler's own submit and start times in
+                  the job record (provider.Job.SubmitTime and StartTime, as Observe read
+                  them from the queue listing or accounting), never from when the
+                  controller saw the change. HBEP-4 names the accounting record; taking
+                  the same two times from either source is a contracts decision. The
+                  Allocation's status.atProvider.queueWaitRecorded makes the write
+                  retryable and once-only per job. Entries are keyed
                   by job ID, so a repeated observe adds nothing; a new entry beyond the
                   cap drops the oldest (AddQueueWait). The lifecycle controller plans
                   replacements from them (HBEP-7, Handover), and they live here so a

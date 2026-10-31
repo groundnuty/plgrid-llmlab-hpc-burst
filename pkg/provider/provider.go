@@ -63,6 +63,13 @@ type Batch interface {
 	// error means unknown, never "no job".
 	FindByTag(ctx context.Context, tag string, since time.Time) ([]Job, error)
 
+	// Poll reads the calling user's queue listing once and discards it; nil
+	// means the platform answered. The Provider's controller calls it on a
+	// pass that observes no job, at least every v1alpha1.ProviderPollInterval,
+	// so the Ready condition always rests on a real read (HBEP-4, Operational
+	// readiness 1). Read-only and idempotent. An error means unknown.
+	Poll(ctx context.Context) error
+
 	// Observe returns one job: from the queue listing, else from accounting.
 	// found is false only when both reads succeeded and neither shows the job.
 	// Read-only and idempotent. An error means unknown.
@@ -137,7 +144,8 @@ type Settings struct {
 	Partition string
 	// CredentialsFile is the path of the mode-600 credentials file on the
 	// control-plane host: for a Slurm provider an ssh client configuration
-	// naming the login node, the user and the key file.
+	// naming the login node, the user and the key file; for a managed
+	// provider a ManagedCredentials file, read with ReadManagedCredentials.
 	CredentialsFile string
 	// Labels are the Provider's labels (organization, platform, partition,
 	// account; HBEP-3).

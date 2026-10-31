@@ -57,7 +57,9 @@ spec:
               facts of spikes S4 and S5 are typed beside them (HBEP-11, API, PlatformProfile
               schema). A fact the platform does not state, or one
               that does not apply to its kind, is absent: an absent bool is unknown, not
-              false.
+              false. The schema defaults (drainWindow, drainMargin, handoverMargin, health,
+              restart) are written on every profile, a managed one included; HBEP-4 gives a
+              managed profile no batch fields, so nothing reads them there.
             properties:
               drainMargin:
                 default: 10m
@@ -71,6 +73,10 @@ spec:
                 maxLength: 63
                 pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                 type: string
+                x-kubernetes-validations:
+                - message: drainMargin must be a duration that fits Go's time.Duration
+                    (at most 2562047h)
+                  rule: duration(self) >= duration('0s')
               drainWindow:
                 default: 2h10m
                 description: |-
@@ -84,6 +90,10 @@ spec:
                 maxLength: 63
                 pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                 type: string
+                x-kubernetes-validations:
+                - message: drainWindow must be a positive duration that fits Go's
+                    time.Duration (above 0s, at most 2562047h)
+                  rule: duration(self) > duration('0s')
               handoverMargin:
                 default: 30m
                 description: |-
@@ -93,6 +103,10 @@ spec:
                 maxLength: 63
                 pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                 type: string
+                x-kubernetes-validations:
+                - message: handoverMargin must be a duration that fits Go's time.Duration
+                    (at most 2562047h)
+                  rule: duration(self) >= duration('0s')
               health:
                 default: {}
                 description: Health holds HBEP-7's malfunction thresholds and start
@@ -106,6 +120,10 @@ spec:
                     maxLength: 63
                     pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                     type: string
+                    x-kubernetes-validations:
+                    - message: agentTimeout must be a positive duration that fits
+                        Go's time.Duration (above 0s, at most 2562047h)
+                      rule: duration(self) > duration('0s')
                   errorOnlyWindow:
                     default: 1m
                     description: ErrorOnlyWindow is how long every answer may be a
@@ -113,6 +131,10 @@ spec:
                     maxLength: 63
                     pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                     type: string
+                    x-kubernetes-validations:
+                    - message: errorOnlyWindow must be a positive duration that fits
+                        Go's time.Duration (above 0s, at most 2562047h)
+                      rule: duration(self) > duration('0s')
                   failureThreshold:
                     default: 3
                     description: FailureThreshold is how many failed probes in a row
@@ -129,6 +151,10 @@ spec:
                     maxLength: 63
                     pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                     type: string
+                    x-kubernetes-validations:
+                    - message: kvSkewTimeout must be a positive duration that fits
+                        Go's time.Duration (above 0s, at most 2562047h)
+                      rule: duration(self) > duration('0s')
                   noProgressTimeout:
                     default: 30m
                     description: |-
@@ -140,6 +166,10 @@ spec:
                     maxLength: 63
                     pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                     type: string
+                    x-kubernetes-validations:
+                    - message: noProgressTimeout must be a positive duration that
+                        fits Go's time.Duration (above 0s, at most 2562047h)
+                      rule: duration(self) > duration('0s')
                   probeInterval:
                     default: 10s
                     description: ProbeInterval is how often the agent probes the engine's
@@ -147,6 +177,10 @@ spec:
                     maxLength: 63
                     pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                     type: string
+                    x-kubernetes-validations:
+                    - message: probeInterval must be a positive duration that fits
+                        Go's time.Duration (above 0s, at most 2562047h)
+                      rule: duration(self) > duration('0s')
                   registrationTimeout:
                     default: 15m
                     description: |-
@@ -155,6 +189,10 @@ spec:
                     maxLength: 63
                     pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                     type: string
+                    x-kubernetes-validations:
+                    - message: registrationTimeout must be a positive duration that
+                        fits Go's time.Duration (above 0s, at most 2562047h)
+                      rule: duration(self) > duration('0s')
                   startTimeout:
                     default: 1h
                     description: |-
@@ -163,6 +201,10 @@ spec:
                     maxLength: 63
                     pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                     type: string
+                    x-kubernetes-validations:
+                    - message: startTimeout must be a positive duration that fits
+                        Go's time.Duration (above 0s, at most 2562047h)
+                      rule: duration(self) > duration('0s')
                 type: object
               holdRelease:
                 default: false
@@ -180,6 +222,10 @@ spec:
                 maxLength: 63
                 pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                 type: string
+                x-kubernetes-validations:
+                - message: inflightWindow must be a positive duration that fits Go's
+                    time.Duration (above 0s, at most 2562047h)
+                  rule: duration(self) > duration('0s')
               jobCommentAccounted:
                 description: |-
                   JobCommentAccounted says whether accounting keeps the job comment. Where
@@ -224,14 +270,23 @@ spec:
                 maxLength: 63
                 pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                 type: string
+                x-kubernetes-validations:
+                - message: lostGrace must be a positive duration that fits Go's time.Duration
+                    (above 0s, at most 2562047h)
+                  rule: duration(self) > duration('0s')
               maxIdle:
                 description: |-
                   MaxIdle releases an Allocation with no Instance after this long, even
-                  when its retention policy says keep (HBEP-7, Retention). Unset, there is
-                  no cap.
+                  when its retention policy says keep (HBEP-7, Retention). It counts from
+                  the Allocation's idle-since annotation (AnnotationIdleSince). Unset,
+                  there is no cap.
                 maxLength: 63
                 pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                 type: string
+                x-kubernetes-validations:
+                - message: maxIdle must be a positive duration that fits Go's time.Duration
+                    (above 0s, at most 2562047h)
+                  rule: duration(self) > duration('0s')
               minJobAge:
                 description: |-
                   MinJobAge is how long a finished job stays in the queue listing before
@@ -241,6 +296,10 @@ spec:
                 maxLength: 63
                 pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                 type: string
+                x-kubernetes-validations:
+                - message: minJobAge must be a duration that fits Go's time.Duration
+                    (at most 2562047h)
+                  rule: duration(self) >= duration('0s')
               partitions:
                 description: Partitions lists the accelerator class of each partition.
                 items:
@@ -298,6 +357,10 @@ spec:
                       maxLength: 63
                       pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                       type: string
+                      x-kubernetes-validations:
+                      - message: maxTime must be a positive duration that fits Go's
+                          time.Duration (above 0s, at most 2562047h)
+                        rule: duration(self) > duration('0s')
                     memPerGpu:
                       anyOf:
                       - type: integer
@@ -361,6 +424,10 @@ spec:
                     maxLength: 63
                     pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                     type: string
+                    x-kubernetes-validations:
+                    - message: backoff must be a duration that fits Go's time.Duration
+                        (at most 2562047h)
+                      rule: duration(self) >= duration('0s')
                   stopGrace:
                     default: 10s
                     description: |-
@@ -369,12 +436,20 @@ spec:
                     maxLength: 63
                     pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                     type: string
+                    x-kubernetes-validations:
+                    - message: stopGrace must be a duration that fits Go's time.Duration
+                        (at most 2562047h)
+                      rule: duration(self) >= duration('0s')
                   window:
                     default: 30m
                     description: Window is the time over which attempts are counted.
                     maxLength: 63
                     pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                     type: string
+                    x-kubernetes-validations:
+                    - message: window must be a positive duration that fits Go's time.Duration
+                        (above 0s, at most 2562047h)
+                      rule: duration(self) > duration('0s')
                 type: object
               stagingDir:
                 description: |-
@@ -387,6 +462,10 @@ spec:
                 minLength: 1
                 pattern: ^(/|\$[A-Za-z_][A-Za-z0-9_]*)[A-Za-z0-9._:=,/-]*$
                 type: string
+                x-kubernetes-validations:
+                - message: 'stagingDir must not contain a ''..'' segment: agent.json
+                    refuses one (agentapi.AgentConfig)'
+                  rule: '!self.split(''/'').exists(s, s == ''..'')'
               timeZone:
                 description: |-
                   TimeZone is the IANA name of the time zone in which the scheduler prints
@@ -405,6 +484,10 @@ spec:
                 maxLength: 63
                 pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                 type: string
+                x-kubernetes-validations:
+                - message: unknownBound must be a positive duration that fits Go's
+                    time.Duration (above 0s, at most 2562047h)
+                  rule: duration(self) > duration('0s')
             required:
             - providerKind
             type: object
@@ -417,7 +500,10 @@ spec:
             description: PlatformProfileStatus is the observed state of a PlatformProfile.
             properties:
               lastChecked:
-                description: LastChecked is when the profile's facts were last checked.
+                description: |-
+                  LastChecked is when the profile's facts were last checked. No
+                  component writes it in alpha: nothing checks a profile's facts yet
+                  (docs/development.md, Writers).
                 format: date-time
                 type: string
               lastReconcileTime:

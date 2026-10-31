@@ -7,6 +7,15 @@
 // and conditions. The doc comment of Controller lists the semantics tests rely
 // on, and that of ManagedController the same for the catalog loop.
 //
+// Batch also implements Poll (op "squeue-me"), the read a pass that observes no
+// job makes so that Controller's Ready condition rests on a real read; and the
+// test controls Requeue and RequeueHold, which send a job back to PENDING (the
+// second held by its user). Controller models the readiness rule of
+// docs/development.md, Provider readiness, the queue wait recorded at once and
+// once per job (Allocation queueWaitRecorded), the read-back (a renamed job is
+// Refused and cancelled, another partition, limit or GPU count sets
+// SubmittedAsOther), the retention mirror and HBEP-7's adoption order.
+//
 // Nothing here starts a goroutine or sleeps. A test owns a Clock and moves it;
 // every job state is computed from the clock at each call.
 package fake
@@ -320,6 +329,15 @@ func (b *Batch) FindByTag(_ context.Context, tag string, since time.Time) ([]pro
 	}
 	byID(out)
 	return out, nil
+}
+
+// Poll implements provider.Batch: one read of the queue listing, logged as op
+// "squeue-me". FailReads makes it fail.
+func (b *Batch) Poll(_ context.Context) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.log("squeue-me")
+	return b.readErr
 }
 
 // Observe implements provider.Batch. It has no window: accounting finds a

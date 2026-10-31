@@ -43,7 +43,10 @@ import (
 //   - The key's expiry (Managed.SetKeyExpiry), when set, makes the condition
 //     CredentialsExpiring True with reason ExpiresWithinADay from a day before
 //     the expiry, and Expired from the expiry on; before that it is False with
-//     reason NotExpiring. It is evaluated on the passes that write.
+//     reason NotExpiring. It is evaluated on the passes that write. The real
+//     managed controller (#69) reads the key's expiry from the credentials file
+//     with provider.ReadManagedCredentials, where this stand-in takes it from
+//     Managed.SetKeyExpiry.
 //   - A Provider with no platform label is an error, before any read. A listing
 //     with an entry the status cannot hold (no name, a name above 253
 //     characters, a revision above 256, or more than 1024 entries ever) is an

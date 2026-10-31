@@ -41,8 +41,13 @@ type InstanceSpec struct {
 // (HBEP-7, The allocation agent). The in-container paths Command may name (the
 // checkpoint, the engine's Unix socket, the chat template) are fixed by
 // pkg/agentapi (ContainerModelDir, ContainerRunDir, ContainerChatTemplate).
-// No field has a CEL rule: the controller renders it, and the spec's
-// immutability rule covers it.
+// The controller renders it, and the spec's immutability rule covers it. One
+// CEL rule ties Command to MaxNumSeqs: every argument of Command that names
+// max-num-seqs (in either spelling) is "--max-num-seqs=<n>" with n equal to
+// MaxNumSeqs, so the front's cap and the engine's limit cannot disagree, and
+// the two-argument form "--max-num-seqs" "<n>" is refused.
+//
+// +kubebuilder:validation:XValidation:rule="self.command.all(c, !(c.startsWith('--max-num-seqs') || c.startsWith('--max_num_seqs')) || (c.startsWith('--max-num-seqs=') && int(c.substring(15)) == self.maxNumSeqs))",message="command passes max-num-seqs only as --max-num-seqs=<launch.maxNumSeqs>, one argument with the same value: launch.maxNumSeqs records what Command passes"
 type Launch struct {
 	// Image is the engine image's repository, without a tag or digest, for
 	// example "docker.io/vllm/vllm-openai". The agent pulls Image@ImageDigest.
@@ -61,7 +66,8 @@ type Launch struct {
 	// Command is the engine's argument vector inside the image, program first,
 	// rendered from the serving spec's flags in order, with the framework's own
 	// flags (model, Unix socket, chat template, served model name, and
-	// --max-num-seqs when the spec does not give it).
+	// --max-num-seqs when the spec does not give it). Every flag is rendered
+	// as one "--name=value" argument.
 	//
 	// +listType=atomic
 	// +kubebuilder:validation:MinItems=1
@@ -110,7 +116,8 @@ type Launch struct {
 	// unset, is this times the Instance's workers (HBEP-5, Load bound and cap;
 	// HBEP-7, What the controller reads). It is capacity, not a deployment-ID
 	// input (HBEP-3's table), so the default changes no ID. The controller
-	// renders it with Command, and Command carries exactly this value.
+	// renders it with Command, and Command carries exactly this value, as
+	// the argument --max-num-seqs=<value> (the Launch's CEL rule).
 	//
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=1048576
@@ -245,11 +252,39 @@ type InstanceStatus struct {
 	// +optional
 	StartInstructionTime *metav1.Time `json:"startInstructionTime,omitempty"`
 
-	// ReadyTime is when the Instance first became ready. Its Allocation's start
-	// to this time is the class's start-to-ready time (HBEP-7, Handover).
+	// ReadyTime is when the Instance first became ready: after verification,
+	// qualification and a warm-up the agent reported done (WarmUp.Done) for
+	// the current verification generation. Its Allocation's start to this
+	// time is the class's start-to-ready time (HBEP-7, Handover).
 	//
 	// +optional
 	ReadyTime *metav1.Time `json:"readyTime,omitempty"`
+
+	// EndTime is when the Instance ended: when its phase became ended, written
+	// once, together with EndReason. It dates the failure streak behind
+	// RestartLoop (three Allocations in a row of one class failed within
+	// restart.window; HBEP-7, Health and restarts). When an Allocation's last
+	// Instance ends, the lifecycle controller copies the latest EndTime of
+	// its Instances into the Allocation's idle-since annotation
+	// (AnnotationIdleSince), the anchor of retention's idleLimit and the
+	// profile's maxIdle, because the Instance may be deleted before the
+	// Allocation is released.
+	//
+	// +optional
+	EndTime *metav1.Time `json:"endTime,omitempty"`
+
+	// Restarts are the Instance's recent restarts, oldest first: the
+	// controller appends one before it raises the part's restart generation,
+	// and drops the entries older than restart.window. The attempts per rung
+	// and the restart history are counted from them, so the ladder survives a
+	// controller restart (HBEP-7, Health and restarts). At most 16 are kept,
+	// the newest; a profile whose attemptsPerRung times the rungs exceeds 16
+	// counts only those.
+	//
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=16
+	Restarts []InstanceRestart `json:"restarts,omitempty"`
 
 	// Agent is what the controller keeps of the agent's registration for this
 	// Instance (HBEP-7, The allocation agent).
@@ -281,10 +316,12 @@ type InstanceStatus struct {
 // reboot.
 type AgentRegistration struct {
 	// AgentInstanceID identifies one agent process: a random ID the agent
-	// draws at its start (agentapi.HeaderAgentInstanceID).
+	// draws at its start, 32 lowercase hex characters
+	// (agentapi.HeaderAgentInstanceID, agentapi.CheckAgentInstanceID).
 	//
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:MinLength=32
+	// +kubebuilder:validation:MaxLength=32
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{32}$`
 	AgentInstanceID string `json:"agentInstanceID"`
 
 	// RestartCount is the scheduler's restart count of the job when the agent
@@ -304,7 +341,38 @@ type AgentRegistration struct {
 	RegisteredTime metav1.Time `json:"registeredTime"`
 }
 
-// Throughput is an Instance's measured throughput at the target sessions.
+// InstanceRestart is one restart of a part of an Instance, recorded before the
+// controller raised the part's restart generation (HBEP-7, Health and
+// restarts: recorded first).
+type InstanceRestart struct {
+	// Part is the part restarted: PartInstance, or a worker, WorkerName(i).
+	//
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=32
+	// +kubebuilder:validation:Pattern=`^(instance|worker-[0-9]+)$`
+	Part string `json:"part"`
+
+	// Generation is the part's restart generation the restart raised it to.
+	//
+	// +kubebuilder:validation:Minimum=1
+	Generation int64 `json:"generation"`
+
+	// Time is when the controller decided the restart.
+	Time metav1.Time `json:"time"`
+
+	// Signal is the malfunction signal that caused it: ReasonProbeFailing,
+	// ReasonErrorsOnly, ReasonNoProgress or ReasonPartExited.
+	//
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern=`^[A-Z][A-Za-z0-9]*$`
+	Signal string `json:"signal"`
+}
+
+// Throughput is an Instance's measured throughput at the target sessions: the
+// means of the last warm-up round's concurrent requests that have each value
+// (agentapi.RequestTiming.TimePerOutputToken). It is absent when no such
+// request has one, as with a typical output of one token.
 type Throughput struct {
 	// TimePerOutputToken is the mean time per output token.
 	TimePerOutputToken Duration `json:"timePerOutputToken"`

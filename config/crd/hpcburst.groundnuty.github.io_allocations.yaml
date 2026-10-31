@@ -110,9 +110,12 @@ spec:
                         - type: string
                         description: |-
                           Memory is gpus times the partition's memPerGpu (HBEP-7, Provisioning).
-                          The provider passes it to Slurm in whole MiB.
+                          The provider passes it to Slurm in whole MiB. It is never negative.
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
+                        x-kubernetes-validations:
+                        - message: memory must not be negative
+                          rule: '!string(self).startsWith(''-'')'
                       nodes:
                         default: 1
                         description: |-
@@ -139,6 +142,10 @@ spec:
                         maxLength: 63
                         pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                         type: string
+                        x-kubernetes-validations:
+                        - message: timeLimit must be a positive duration that fits
+                            Go's time.Duration (above 0s, at most 2562047h)
+                          rule: duration(self) > duration('0s')
                     required:
                     - agentDigest
                     - cpusPerTask
@@ -242,11 +249,18 @@ spec:
                   Instance.
                 properties:
                   idleLimit:
-                    description: IdleLimit is how long an Allocation may be idle before
-                      it is released.
+                    description: |-
+                      IdleLimit is how long an Allocation may be idle before it is released.
+                      It counts from the Allocation's idle-since annotation
+                      (AnnotationIdleSince, IdleSince), which the lifecycle controller writes
+                      when the Allocation stops hosting an Instance.
                     maxLength: 63
                     pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                     type: string
+                    x-kubernetes-validations:
+                    - message: idleLimit must be a positive duration that fits Go's
+                        time.Duration (above 0s, at most 2562047h)
+                      rule: duration(self) > duration('0s')
                   mode:
                     description: Mode is Keep or ReleaseWhenIdle. Unset means Keep.
                     enum:
@@ -357,6 +371,16 @@ spec:
                     - Lost
                     - Refused
                     type: string
+                  queueWaitRecorded:
+                    description: |-
+                      QueueWaitRecorded is true once the Provider's controller has added the
+                      recorded job's queue wait to the Provider's status (HBEP-4, Provider
+                      status). It is set only after that write succeeded, so a failed write
+                      is retried at the next observe; and it keeps a re-observed job from
+                      adding its wait again after the entry has left the 20 the Provider
+                      keeps. The wait is the job record's StartTime minus its SubmitTime, from
+                      whichever source Observe read.
+                    type: boolean
                   reason:
                     description: |-
                       Reason says why the phase is what it is: ReasonRequeued for a requeue,

@@ -566,6 +566,7 @@ func TestTestControlsPanicOnUnknownJob(t *testing.T) {
 	for name, f := range map[string]func(){
 		"CancelExternally": func() { b.CancelExternally("1") },
 		"Requeue":          func() { b.Requeue("1") },
+		"RequeueHold":      func() { b.RequeueHold("1") },
 		"Vanish":           func() { b.Vanish("1") },
 		"Reappear":         func() { b.Reappear("1") },
 	} {

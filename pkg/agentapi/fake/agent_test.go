@@ -62,14 +62,14 @@ func TestFirstStepRegistersPollsAndReportsIdle(t *testing.T) {
 
 func TestNewAgentKeepsAGivenAgentInstanceIDAndRegistrationOverride(t *testing.T) {
 	b := fake.NewBackend()
-	a := fake.NewAgent(b, caller("agent-example"), (&clock{t: t0}).Now, fake.Engine{})
-	eq(t, "AgentInstanceID", a.AgentInstanceID(), "agent-example")
+	a := fake.NewAgent(b, caller(agent1), (&clock{t: t0}).Now, fake.Engine{})
+	eq(t, "AgentInstanceID", a.AgentInstanceID(), agent1)
 	a.Registration = agentapi.RegisterRequest{Node: "node-other", CPUArch: "x86_64"}
 	if err := a.Step(bgndCtx); err != nil {
 		t.Fatal(err)
 	}
 	regs := b.Registrations(allocUID)
-	if len(regs) != 1 || regs[0].Caller.AgentInstanceID != "agent-example" {
+	if len(regs) != 1 || regs[0].Caller.AgentInstanceID != agent1 {
 		t.Fatalf("registrations = %+v", regs)
 	}
 	eq(t, "Request", regs[0].Request, agentapi.RegisterRequest{Node: "node-other", CPUArch: "x86_64"})
@@ -323,16 +323,12 @@ func TestOnDesiredIsCalledOncePerVersion(t *testing.T) {
 	eq(t, "Instance generation the hook saw last", got[2].Instance.Generation, int64(2))
 }
 
-func TestADesiredStateTheAgentCannotActOnChangesNothing(t *testing.T) {
+func TestAMalformedDesiredStateChangesNothing(t *testing.T) {
 	r := newRig(t, fake.Engine{})
 	r.step()
 	r.set(agentapi.DesiredState{Action: agentapi.ActionRun}) // run, no Instance
 	if err := r.a.Step(bgndCtx); err == nil {
 		t.Error("run without an Instance: no error")
-	}
-	r.set(agentapi.DesiredState{Action: "bogus"})
-	if err := r.a.Step(bgndCtx); err == nil {
-		t.Error("an unknown action: no error")
 	}
 	eq(t, "reports", len(r.reports()), 1)
 	eq(t, "len(Seen)", len(r.a.Seen()), 1)
@@ -368,7 +364,7 @@ func TestBackendErrorsKeepTheirCodeThroughStep(t *testing.T) {
 func TestEngineOverridesApply(t *testing.T) {
 	n := int64(0)
 	e := fake.Engine{
-		Health: func(now time.Time, worker string) agentapi.Health {
+		Health: func(now time.Time, p fake.Process) agentapi.Health {
 			n++
 			return agentapi.Health{ProbeOK: true, GeneratedTokens: n * 100} // no Time
 		},
@@ -383,9 +379,9 @@ func TestEngineOverridesApply(t *testing.T) {
 	r.set(run(instance(withChecks(agentapi.Checks{
 		VerificationGeneration: 1,
 		Verify:                 &agentapi.VerifyRequest{},
-		WarmUp:                 &agentapi.WarmUpRequest{},
+		WarmUp:                 &agentapi.WarmUpRequest{TargetSessions: 1},
 	}))))
-	r.steps(2)
+	r.steps(2) // the worker starts; then it runs, is sampled and checked
 
 	w := r.workerOf("worker-0")
 	if w.Health == nil {
@@ -398,5 +394,6 @@ func TestEngineOverridesApply(t *testing.T) {
 	checks := r.lastInstance().Checks
 	eq(t, "Verify", checks.Verify, &agentapi.VerifyResult{Done: true, Error: "engine would not start"})
 	eq(t, "the agent numbers the warm-up rounds", checks.WarmUp.Rounds[0].Round, int32(1))
-	eq(t, "second round", checks.WarmUp.Rounds[1].Round, int32(2))
+	r.step()
+	eq(t, "second round", r.lastInstance().Checks.WarmUp.Rounds[1].Round, int32(2))
 }

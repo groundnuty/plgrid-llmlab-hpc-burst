@@ -9,19 +9,49 @@ import (
 // Engine scripts what the engine behind a fake Agent does. Every func field
 // has a default when nil; the defaults are exported (DefaultVerify and the
 // others) so a test can take one and change a single field.
+//
+// The Agent asks Verify, Qualify, GreedyOutputs and WarmUpRound only while the
+// Instance's workers run: a section is asked once every desired worker runs a
+// process started for the desired generations, and not before (a check of a
+// worker that is staging, starting, stopping or exited is never asked). What
+// they return is reported as the real agent reports it: free text is cut to the
+// protocol's bounds (agentapi.MaxTimingErrorBytes, agentapi.MaxMessageBytes), and
+// a report above agentapi.MaxBodyBytes fails the Step.
 type Engine struct {
 	// StartDelay is how long a worker stays in phase starting. The worker
 	// becomes running once the Agent's clock reaches its StartTime plus
-	// StartDelay. The default is 0.
+	// StartDelay. The default is 0. Checks wait for the worker to run, so none
+	// is answered before then.
 	StartDelay time.Duration
+
+	// StagingDuration is how long staging takes. A new Instance is reported
+	// with Staging inProgress until the Agent's clock reaches the Step in which
+	// the Agent first took the Instance up (the first apply, after any earlier
+	// Instance's processes are gone) plus StagingDuration; it is then reported
+	// done, or failed when StagingError is set. No worker starts before staging
+	// is done. The default is 0: staging is done at once, in the first Step.
+	StagingDuration time.Duration
+
+	// StagingError, when not empty, makes staging fail once StagingDuration has
+	// passed: Staging.Phase is failed and Staging.Message is StagingError, cut
+	// to agentapi.MaxMessageBytes (agentapi.TruncateUTF8). After a failure no
+	// worker starts, however many Steps pass, until the desired Instance
+	// generation rises past the one the failed staging was for. That re-stages:
+	// staging is inProgress again for StagingDuration, then fails again, because
+	// the Engine's settings are the same. A staging that succeeded is not
+	// repeated when the generation rises (the agent rehashes the staged files
+	// and finds them whole).
+	StagingError string
 
 	// IgnoreTerm makes every worker ignore TERM. On a stop instruction (a
 	// raised restart generation, idle, stop, or a new Instance) such a worker
 	// is reported stopping until the Agent's clock reaches the time of the
 	// instruction plus Settings.StopGrace of the desired state that carried
 	// it, and is then killed: stopped, with exit code -1. A restart's new
-	// process starts in the Step after the kill. Without IgnoreTerm a worker
-	// stops at once with exit code 0.
+	// process starts in the Step after the kill, and a new verification
+	// generation's checks are answered only once that process runs, never by the
+	// process that is stopping. Without IgnoreTerm a worker stops at once with
+	// exit code 0.
 	IgnoreTerm bool
 
 	// Verify answers a verification request. The Agent sets Done on the result.
@@ -41,12 +71,33 @@ type Engine struct {
 	GreedyOutputs func(agentapi.DesiredInstance, agentapi.QualifyRequest) [][]int32
 
 	// WarmUpRound answers warm-up round n, counted from 1. The Agent sets the
-	// round's number to n.
+	// round's number to n. The request's TargetSessions is within
+	// 1..agentapi.MaxTargetSessions (the Agent refuses a desired state that asks
+	// for another), and a round that makes the report exceed
+	// agentapi.MaxBodyBytes fails the Step.
 	WarmUpRound func(n int32, req agentapi.WarmUpRequest) agentapi.WarmUpRound
 
-	// Health samples a running worker. The Agent sets the sample's Time to now
-	// when the result has none.
-	Health func(now time.Time, worker string) agentapi.Health
+	// Health samples a running worker process. The Agent sets the sample's Time
+	// to now when the result has none. It is given the process, not the worker's
+	// name, because the counters of agentapi.Health are cumulative since the
+	// process started: a double whose counters rise must start them again for a
+	// new process (the doubles in this package key theirs by Process.PID).
+	Health func(now time.Time, p Process) agentapi.Health
+}
+
+// Process identifies one worker process the Agent started, as Engine.Health is
+// told which engine it samples. A restart is a new Process: another PID, start
+// time and, when a generation rose, another Generation.
+type Process struct {
+	// Worker is the worker's name, agentapi.WorkerName(i).
+	Worker string
+	// PID is the process's PID. The Agent never reuses one, across restarts and
+	// Requeue.
+	PID int
+	// Start is the Agent's time when the process was started.
+	Start time.Time
+	// Generation is the worker's restart generation the process was started for.
+	Generation int64
 }
 
 func (e Engine) verify(i agentapi.DesiredInstance, req agentapi.VerifyRequest) agentapi.VerifyResult {
@@ -70,10 +121,10 @@ func (e Engine) warmUpRound(n int32, req agentapi.WarmUpRequest) agentapi.WarmUp
 	return DefaultWarmUpRound(n, req)
 }
 
-func (e Engine) health(now time.Time, worker string) agentapi.Health {
-	h := DefaultHealth(now, worker)
+func (e Engine) health(now time.Time, p Process) agentapi.Health {
+	h := DefaultHealth(now, p)
 	if e.Health != nil {
-		h = e.Health(now, worker)
+		h = e.Health(now, p)
 	}
 	if h.Time.IsZero() {
 		h.Time = now
@@ -150,6 +201,6 @@ func DefaultWarmUpRound(n int32, req agentapi.WarmUpRequest) agentapi.WarmUpRoun
 
 // DefaultHealth is a healthy, idle engine: the probe passes, the gauges and
 // the token counter are zero and the KV cache is 10% used.
-func DefaultHealth(now time.Time, _ string) agentapi.Health {
+func DefaultHealth(now time.Time, _ Process) agentapi.Health {
 	return agentapi.Health{Time: now, ProbeOK: true, KVCacheUsage: 0.1}
 }

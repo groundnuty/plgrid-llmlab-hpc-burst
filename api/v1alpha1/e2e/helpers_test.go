@@ -61,7 +61,7 @@ func validWorkload() *v1alpha1.Workload {
 func validLaunch() v1alpha1.Launch {
 	return v1alpha1.Launch{
 		Image: "docker.io/vllm/vllm-openai", ImageDigest: digest,
-		Command:    []string{"vllm", "serve", "/hpcburst/model", "--uds", "/hpcburst/run/worker-0.sock", "--dtype=bfloat16", "--max-num-seqs", "256"},
+		Command:    []string{"vllm", "serve", "/hpcburst/model", "--uds", "/hpcburst/run/worker-0.sock", "--dtype=bfloat16", "--max-num-seqs=256"},
 		Checkpoint: v1alpha1.LaunchCheckpoint{Repository: "example-org/example-1b", Revision: commit40},
 		GPUs:       1,
 		MaxNumSeqs: 256,
