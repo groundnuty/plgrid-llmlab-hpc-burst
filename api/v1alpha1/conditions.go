@@ -78,9 +78,9 @@ const (
 	ReasonSpecUnsupported = "SpecUnsupported"
 	// ReasonFrontNotConfigured: no front address and dial-home mode are
 	// configured, so no Allocation is submitted (HBEP-11, Single-user host:
-	// "each ModelDeployment carries a condition saying why"). HBEP-11 names
-	// no reason; this name is a contracts decision, which
-	// `@hpc-burst-science-agent` confirmed on 31 Oct 2026, as a reason on Degraded.
+	// "each ModelDeployment carries a condition saying why"). The name began
+	// as a contracts decision, which `@hpc-burst-science-agent` confirmed on
+	// 31 Oct 2026 as a reason on Degraded; HBEP-11 now names it (Test plan).
 	ReasonFrontNotConfigured = "FrontNotConfigured"
 	// ReasonIdentityUnresolved: the deployment ID of a class cannot be
 	// computed, so no Allocation is created in it. It is its own reason,
@@ -97,11 +97,14 @@ const (
 	//     message names the cause.
 	//   - Transient Hub failures (transport errors, 429, 5xx) are not this
 	//     reason: the controller backs off and retries them, with no reason set.
-	//   - A permanent failure is not retried with backoff, and a collision
-	//     never loops: the controller sets the reason, raises the event, and
-	//     evaluates the class again when the ModelDeployment's spec, the Hub
-	//     token or the identity records change, and at the periodic resync
-	//     (`@hpc-burst-science-agent`, 31 Oct 2026).
+	//   - A permanent Hub failure is not retried with backoff: the controller
+	//     sets the reason and evaluates the class again when the
+	//     ModelDeployment's spec or the Hub token changes, and at the periodic
+	//     resync (HBEP-3, Current IDs, the file list and rollout).
+	//   - A collision never loops: the controller sets the reason, raises the
+	//     event, and evaluates the class again only when the ModelDeployment's
+	//     spec or the identity records change; neither a token change nor the
+	//     periodic resync re-evaluates it (HBEP-3, Display form).
 	ReasonIdentityUnresolved = "IdentityUnresolved"
 )
 
@@ -232,9 +235,9 @@ const (
 	ConditionCredentialsRejected = "CredentialsRejected"
 	// ConditionCredentialsInvalid: the credentials file, or the key file it
 	// names, is readable by others or not owned by the controller's user, so
-	// no provider call is made (HBEP-11, Credentials). HBEP-11 names no
-	// condition; this name is a contracts decision, which
-	// `@hpc-burst-science-agent` confirmed (31 Oct 2026).
+	// no provider call is made (HBEP-11, Credentials). The name began as a
+	// contracts decision, which `@hpc-burst-science-agent` confirmed on 31
+	// Oct 2026; HBEP-11 now names it.
 	ConditionCredentialsInvalid = "CredentialsInvalid"
 	// ConditionPathUnresolved: HOME, or the variable that stagingDir starts
 	// with, is unset, empty or unsafe on the login node, so no call that needs
@@ -252,9 +255,11 @@ const (
 )
 
 // Reasons of a managed Provider's conditions (HBEP-4, Managed provider in
-// alpha; HBEP-11, Credentials). The managed Provider's controller (#69) and
-// its stand-in, pkg/provider/fake.ManagedController, both write them, so the
-// lifecycle controller and the front can match them exactly.
+// alpha; HBEP-11, Credentials), so the lifecycle controller and the front can
+// match them exactly. The managed Provider's controller (#69) writes all nine.
+// Its stand-in, pkg/provider/fake.ManagedController, writes the six of
+// ConditionProviderReady, ConditionCredentialsRejected and
+// ConditionCredentialsExpiring; it does not model ConditionCredentialsInvalid.
 const (
 	// ReasonCatalogRead: ConditionProviderReady is True for a managed
 	// Provider, because its catalog listing succeeded within the staleness
