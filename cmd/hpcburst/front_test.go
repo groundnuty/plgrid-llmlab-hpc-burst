@@ -227,8 +227,12 @@ func TestFrontSupervision(t *testing.T) {
 	// ---- the watch sees objects created in the cluster, status included ----
 	c := h.clients()
 	ctx := t.Context()
+	// drainWindow 1h is below the front's 2 h maxRequestDuration plus the 10 min margin, so the
+	// front must emit degraded/DrainWindowShort on this cluster-scoped profile (HBEP-5, Draining).
+	shortWindow := v1alpha1.Duration("1h")
 	prof := &v1alpha1.PlatformProfile{ObjectMeta: metav1.ObjectMeta{Name: "example-platform"}, Spec: v1alpha1.PlatformProfileSpec{ProviderKind: v1alpha1.PlatformBatch,
-		Partitions: []v1alpha1.PartitionProfile{{Name: "example-gpu", AcceleratorClass: v1alpha1.AcceleratorClass{GPUModel: "GH200", CPUArch: "aarch64"}}}}}
+		DrainWindow: &shortWindow,
+		Partitions:  []v1alpha1.PartitionProfile{{Name: "example-gpu", AcceleratorClass: v1alpha1.AcceleratorClass{GPUModel: "GH200", CPUArch: "aarch64"}}}}}
 	prov := &v1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "helios-a", Labels: map[string]string{v1alpha1.LabelPlatform: "example-platform"}},
 		Spec: v1alpha1.ProviderSpec{PlatformProfileRef: v1alpha1.ObjectReference{Name: "example-platform"}}}
 	for _, o := range []struct {
@@ -272,6 +276,21 @@ func TestFrontSupervision(t *testing.T) {
 	if fh.Deployments["default/front-e2e"] != 0 {
 		t.Errorf("routable Instances %d without a transport", fh.Deployments["default/front-e2e"])
 	}
+	// The event reached the API server through the front's events.k8s.io recorder: a rejected
+	// Event would be dropped silently, so the check reads it back.
+	waitFor(t, 30*time.Second, "the front's DrainWindowShort event in the API server", func() bool {
+		evs, err := c.cs.EventsV1().Events("").List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return false
+		}
+		for _, e := range evs.Items {
+			if e.Reason == "degraded/DrainWindowShort" && e.Regarding.Kind == "PlatformProfile" && e.Regarding.Name == "example-platform" &&
+				e.ReportingController == "hpcburst-front" {
+				return true
+			}
+		}
+		return false
+	})
 	code, body := listModels(t, clientKey)
 	if code != http.StatusOK || !strings.Contains(body, `"id":"example-27b"`) || !strings.Contains(body, `"routable":false`) {
 		t.Fatalf("GET /v1/models = %d %s", code, body)
