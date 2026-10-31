@@ -338,12 +338,15 @@ func TestTheHubTokenReachesTheHub(t *testing.T) {
 // once the child has set its TERM disposition, which the child says through a
 // FIFO: the parent's exit is what makes the agent stop the group, and a TERM
 // that comes before the child's trap kills it as if it had none (CI run
-// 41236080709). Each exec records whether the previous child still ran when
-// it started, and the child's PID.
-func stubApptainer(t *testing.T, root string, childIgnoresTerm bool) (path, log string) {
+// 41236080709). Each exec logs whether the previous child still ran when it
+// started, the child's PID, and the time just before it exits ("exiting
+// <Unix ns>"); it also writes the child's PID and start time, taken while the
+// child surely runs, to the children file.
+func stubApptainer(t *testing.T, root string, childIgnoresTerm bool) (path, log, children string) {
 	t.Helper()
 	path = filepath.Join(root, "stub-apptainer")
 	log = filepath.Join(root, "stub.log")
+	children = filepath.Join(root, "children")
 	// In a subshell $$ is the parent's PID; /proc/self is the subshell's.
 	child := `(read -r me _ < /proc/self/stat; trap 'echo "graceful $me" >> LOG; exit 0' TERM; echo > READY; while :; do sleep 0.05; done) &`
 	if childIgnoresTerm {
@@ -358,8 +361,10 @@ exec)
   rm -f READY; mkfifo READY
   ` + child + `
   echo $! > PREV
+  echo "$! $(cut -d' ' -f22 /proc/$!/stat)" >> CHILDREN
   echo "child $!" >> LOG
   read -r ready < READY
+  echo "exiting $(date +%s%N)" >> LOG
   exit 0 ;;
 esac
 exit 2
@@ -367,10 +372,11 @@ exit 2
 	src = strings.ReplaceAll(src, "LOG", log)
 	src = strings.ReplaceAll(src, "PREV", filepath.Join(root, "prev.pid"))
 	src = strings.ReplaceAll(src, "READY", filepath.Join(root, "ready.fifo"))
+	src = strings.ReplaceAll(src, "CHILDREN", children)
 	if err := os.WriteFile(path, []byte(src), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	return path, log
+	return path, log, children
 }
 
 // A worker whose leader exits without being told to, leaving a child behind,
@@ -387,15 +393,43 @@ func TestALeftoverWorkerChildGetsItsGraceAndBlocksTheRestart(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer os.RemoveAll(root)
-			stub, log := stubApptainer(t, root, tc.ignores)
+			// Cleanups run last registered first: the harness stops the
+			// agent, then every child the stub recorded is killed, whatever
+			// the agent did, and only then does the directory go.
+			t.Cleanup(func() { os.RemoveAll(root) })
+			stub, log, children := stubApptainer(t, root, tc.ignores)
+			t.Cleanup(func() { killChildren(children) })
 			h := newHarness(t, harnessOptions{apptainer: stub})
-			h.set(h.runState("", 1, 0, nil))
+			run := h.runState("", 1, 0, nil)
+			grace := time.Duration(run.Settings.StopGrace)
+			// The leftover is watched from the moment the stub records it,
+			// apart from the agent's reports, which come only every 200 ms.
+			const watchFor = 30 * time.Second
+			watch, stopWatch := context.WithTimeout(context.Background(), watchFor)
+			t.Cleanup(stopWatch)
+			gone := make(chan time.Time, 1)
+			go func() { gone <- leftoverGoneAt(watch, children) }()
+			h.set(run)
 			h.waitReport("worker-0 exited", 20*time.Second, func(r agentapi.Report) bool {
 				w := worker0(r)
 				return w != nil && w.Phase == agentapi.PartExited
 			})
 			h.set(h.runState("", 1, 1, nil))
+			if tc.ignores {
+				// TERM went to the group after the parent's exit, so the
+				// child that ignores it runs on for the grace, to its KILL.
+				at := <-gone
+				if at.IsZero() {
+					t.Fatalf("the leftover child that ignores TERM still ran %s after the start: its group's KILL did not end it", watchFor)
+				}
+				ns, err := strconv.ParseInt(lineAfter(readFile(log), "exiting "), 10, 64)
+				if err != nil {
+					t.Fatalf("no exit time in the stub log: %v\n%s", err, readFile(log))
+				}
+				if lived := at.Sub(time.Unix(0, ns)); lived < grace*5/6 {
+					t.Fatalf("the leftover child that ignores TERM was gone %s after its parent exited, before most of the %s stop grace", lived, grace)
+				}
+			}
 			deadline := time.Now().Add(20 * time.Second)
 			for strings.Count(readFile(log), "child ") < 2 {
 				if time.Now().After(deadline) {
@@ -409,16 +443,10 @@ func TestALeftoverWorkerChildGetsItsGraceAndBlocksTheRestart(t *testing.T) {
 			}
 			// The leftover is the first exec's child: the restarted child's
 			// graceful exit must not count for it.
-			leftover := ""
-			for _, line := range strings.Split(text, "\n") {
-				if v, ok := strings.CutPrefix(line, "child "); ok && leftover == "" {
-					leftover = v
-				}
-			}
+			leftover := lineAfter(text, "child ")
 			if !tc.ignores && !strings.Contains(text, "\ngraceful "+leftover+"\n") {
 				t.Fatalf("the leftover child %s was killed without TERM first:\n%s", leftover, text)
 			}
-			killChildren(t, text)
 		})
 	}
 }
@@ -428,17 +456,63 @@ func readFile(p string) string {
 	return string(b)
 }
 
-// killChildren kills the stub's children that still run, by PID and start
-// time, at the end of a test.
-func killChildren(t *testing.T, log string) {
-	t.Helper()
-	for _, line := range strings.Split(log, "\n") {
-		if v, ok := strings.CutPrefix(line, "child "); ok {
-			if pid, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
-				if id, err := procgroup.IDOf(pid); err == nil && id.Alive() {
-					_ = syscall.Kill(pid, syscall.SIGKILL)
-				}
-			}
+// lineAfter returns the rest of the first line of text that starts with
+// prefix, or "" when none does.
+func lineAfter(text, prefix string) string {
+	for _, line := range strings.Split(text, "\n") {
+		if v, ok := strings.CutPrefix(line, prefix); ok {
+			return v
+		}
+	}
+	return ""
+}
+
+// recordedChildren reads the stub's children file: one "<PID> <start time>"
+// line per child, taken while the child ran.
+func recordedChildren(path string) []procgroup.ID {
+	var ids []procgroup.ID
+	for _, line := range strings.Split(readFile(path), "\n") {
+		f := strings.Fields(line)
+		if len(f) != 2 {
+			continue
+		}
+		pid, err := strconv.Atoi(f[0])
+		if err != nil {
+			continue
+		}
+		start, err := strconv.ParseUint(f[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		ids = append(ids, procgroup.ID{PID: pid, StartTime: start})
+	}
+	return ids
+}
+
+// leftoverGoneAt waits for the stub's first child to be recorded, then polls
+// it and returns when it was first seen gone, which is never before it ended;
+// the zero time if it still ran when ctx ended.
+func leftoverGoneAt(ctx context.Context, children string) time.Time {
+	var ids []procgroup.ID
+	for ids = recordedChildren(children); len(ids) == 0 || ids[0].Alive(); {
+		select {
+		case <-ctx.Done():
+			return time.Time{}
+		case <-time.After(5 * time.Millisecond):
+		}
+		if len(ids) == 0 {
+			ids = recordedChildren(children)
+		}
+	}
+	return time.Now()
+}
+
+// killChildren kills the stub's children that still run, by the PID and
+// start time the stub recorded, so that a reused PID is never signalled.
+func killChildren(children string) {
+	for _, id := range recordedChildren(children) {
+		if id.Alive() {
+			_ = syscall.Kill(id.PID, syscall.SIGKILL)
 		}
 	}
 }
