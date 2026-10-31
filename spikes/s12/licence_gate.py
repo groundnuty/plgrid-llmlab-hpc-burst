@@ -26,6 +26,13 @@ go-licenses exit with a line the gate does not recognise, or with no recognised 
 (a build error, a Go version mismatch), is an unexpected failure. So is a "Did not find"
 or "Not allowed" line next to a zero exit. Permitted failures are printed as such.
 The default, --permit-own 0, is what the CI job runs.
+
+Scanner errors fail the gate whatever the exit status. go-licenses v2.0.1 logs an error when it
+cannot read or classify a licence file ("Failed to parse <file>: ...", library.go) and carries
+on with the next candidate file, such as the module's own LICENSE, so a package whose own
+licence file is unreadable can still check clean, with exit 0. Such a pass is unproven, so a
+klog error or fatal line (the "E1031 hh:mm:ss.uuuuuu pid file.go:line] " header) or a line that
+starts "Failed to parse " is an unexpected failure with a zero exit as well as with a non-zero one.
 """
 import argparse
 import re
@@ -33,6 +40,10 @@ import sys
 
 NOT_FOUND = re.compile(r"^Did not find license for library '([^']+)'\.?$")
 NOT_ALLOWED = re.compile(r"^Not allowed license '[^']+' found for library '[^']+'\.?$")
+# klog's header: severity letter, MMDD, time, process id, file:line, "]". E is error, F is fatal.
+KLOG_ERROR = re.compile(r"^[EF]\d{4} \d\d:\d\d:\d\d\.\d+\s+\d+ \S+:\d+\] ")
+# The message of the library.go error, in case the log header is missing or has another shape.
+SCANNER_ERROR = re.compile(r"^Failed to parse ")
 
 
 def own_packages(text):
@@ -45,12 +56,22 @@ def is_noise(line):
     return "non-Go code" in line or line.endswith(".s")
 
 
+def is_scanner_error(line):
+    """A go-licenses error diagnostic (a klog error or fatal line, or "Failed to parse ...")."""
+    return bool(KLOG_ERROR.match(line) or SCANNER_ERROR.match(line))
+
+
 def classify(lines, own, permit_own, rc):
     """Return (permitted, unexpected): lists of strings."""
     permitted, unexpected = [], []
     for raw in lines:
         line = raw.strip()
-        if not line or is_noise(line):
+        if not line:
+            continue
+        if is_scanner_error(line):
+            unexpected.append(line)  # whatever the exit status: the scan itself reported an error
+            continue
+        if is_noise(line):
             continue
         m = NOT_FOUND.match(line)
         if m and permit_own and m.group(1) in own:

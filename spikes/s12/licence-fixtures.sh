@@ -190,7 +190,10 @@ gate_case() { # label want(0|1) pattern repo [licence-check.sh options...]
   local label=$1 want=$2 pat=$3 repo=$4 out rc=0; shift 4
   out=$("$here/licence-check.sh" "$@" "$GL" "$repo" "$work/out-$(basename "$repo")" 2>&1) || rc=$?
   echo "-- $label: exit $rc"
-  printf '%s\n' "$out" | grep -E '^(UNEXPECTED|licence check|WARNING)|^permitted' | sort -u | sed 's/^/     /'
+  last_out=$out
+  # The work dir and the klog time and process id differ from run to run: normalise them.
+  printf '%s\n' "$out" | grep -E '^(UNEXPECTED|licence check|WARNING|known zero|NOTE)|^permitted' |
+    sed -e "s#$work#<work>#g" -e 's/\bE[0-9]\{4\} [0-9:.]* *[0-9]* /E<time> <pid> /' | sort -u | cut -c1-240 | sed 's/^/     /'
   if [ "$want" = 0 ] && [ "$rc" != 0 ]; then echo "FAIL: $label should pass"; failures=$((failures+1)); fi
   if [ "$want" = 1 ]; then
     [ "$rc" = 0 ] && { echo "FAIL: $label should fail"; failures=$((failures+1)); }
@@ -247,6 +250,70 @@ gate_case "off-list dependency of a nested module (the root itself is fine)" 1 \
 mkrepo "$work/r-testonly" "example.test/lic-good" "" "example.test/lic-off"
 gate_case "off-list dependency imported only by a test of the root module" 1 \
   "UNEXPECTED: $BSD4 'example.test/lic-off'" "$work/r-testonly" $LOCAL
+# ---- B1: go-licenses logs an error for a licence file it cannot read, falls back to the module's
+# LICENSE, and exits 0. The gate must fail that run. The dangling symlink is readable by name
+# (the search finds it) and fails when opened, whoever runs the test.
+assert_last() { # label pattern: the output of the last gate_case contains the pattern
+  printf '%s\n' "$last_out" | grep -q -F -- "$2" || { echo "FAIL: $1: the output lacks '$2'"; failures=$((failures+1)); }
+}
+mksub() { # name with-dangling-licence(0|1): a module with a LICENSE at its root and a package sub/ beneath it
+  local n=$1 dangling=$2 d=$libs/$1
+  libdir[example.test/$n]=$d
+  mkdir -p "$d/sub"
+  printf 'module example.test/%s\n\ngo 1.26\n' "$n" > "$d/go.mod"
+  printf 'package sub\n\nfunc Name() string { return "%s" }\n' "$n" > "$d/sub/sub.go"
+  cp "$work/goodlib/LICENSE" "$d/LICENSE"
+  if [ "$dangling" = 1 ]; then ln -s does-not-exist "$d/sub/LICENSE"; fi
+}
+mkrepo_sub() { # dir dependency-module-path package-path: a root module importing one package of that module
+  mkdir -p "$1"
+  gomod_with example.test/proj "$2" > "$1/go.mod"
+  { imports_of main "$3"; printf '\nfunc main() { use() }\n'; } > "$1/main.go"
+}
+mksub unreadable 1
+mksub parentonly 0
+mkrepo_sub "$work/r-unreadable" example.test/unreadable example.test/unreadable/sub
+cp "$work/goodlib/LICENSE" "$work/r-unreadable/LICENSE"
+gate_case "unreadable package LICENSE with a readable module LICENSE as fallback, strict (go-licenses exits 0)" 1 \
+  "Failed to parse" "$work/r-unreadable"
+assert_last "unreadable licence" "gate: go-licenses exit=0, permitted=0, unexpected=1: FAIL"
+mkrepo_sub "$work/r-parentonly" example.test/parentonly example.test/parentonly/sub
+cp "$work/goodlib/LICENSE" "$work/r-parentonly/LICENSE"
+gate_case "control: the same dependency without the unreadable file, strict" 0 "licence check: PASS" "$work/r-parentonly"
+
+# ---- the module list comes from a search of the whole tree
+addnested() { # repo dir imports...: a module at <repo>/<dir>, with a LICENSE of its own
+  local repo=$1 dir=$2 n; n=$1/$2; shift 2
+  mkdir -p "$n"
+  gomod_with "example.test/proj/$dir" "$@" > "$n/go.mod"
+  imports_of extra "$@" > "$n/extra.go"
+  cp "$work/goodlib/LICENSE" "$n/LICENSE"
+}
+mkrepo "$work/r-tree" ""
+cp "$work/goodlib/LICENSE" "$work/r-tree/LICENSE"
+addnested "$work/r-tree" internal/extra example.test/lic-off
+gate_case "a module at internal/extra (not under third_party/) with an off-list dependency" 1 \
+  "UNEXPECTED: $BSD4 'example.test/lic-off'" "$work/r-tree"
+assert_last "tree search" "##### module internal/extra"
+
+# ---- no empty run: a module that go-licenses sees no package in
+mkrepo "$work/r-empty" "example.test/lic-good"
+cp "$work/goodlib/LICENSE" "$work/r-empty/LICENSE"
+mkdir -p "$work/r-empty/tools/tagged"
+printf 'module example.test/proj/tools/tagged\n\ngo 1.26\n' > "$work/r-empty/tools/tagged/go.mod"
+printf '//go:build never\n\npackage tagged\n' > "$work/r-empty/tools/tagged/tagged.go"
+cp "$work/goodlib/LICENSE" "$work/r-empty/tools/tagged/LICENSE"
+gate_case "a module that checks no package, not a known zero" 1 \
+  "UNEXPECTED: go-licenses saw no package in tools/tagged" "$work/r-empty"
+assert_last "empty run" "report rows: 0"
+printf '%s\n' '# test list' 'tools/tagged: its only file is behind a build tag (a fixture)' > "$work/known-zero.txt"
+KNOWN_ZERO_MODULES=$work/known-zero.txt gate_case "the same module listed as a known zero, with a reason" 0 \
+  "known zero: tools/tagged has no package to check; reason: its only file is behind a build tag (a fixture)" "$work/r-empty"
+printf '%s\n' 'tools/tagged:' > "$work/known-zero-noreason.txt"
+rc=0; out=$(KNOWN_ZERO_MODULES=$work/known-zero-noreason.txt "$here/licence-check.sh" "$GL" "$work/r-empty" "$work/out-noreason" 2>&1) || rc=$?
+echo "-- a known-zero entry without a reason: exit $rc"
+if [ "$rc" != 2 ] || ! printf '%s\n' "$out" | grep -q "needs '<module dir>: <reason>'"; then
+  echo "FAIL: an entry without a reason should be refused with exit 2"; failures=$((failures+1)); fi
 echo "-- for comparison, go-licenses' own --ignore example.test/proj, a path prefix, on the same fixtures (exit 0 = the dependency is hidden):"
 for r in sibling siblingunk beneath beneathunk; do
   rc=0; (cd "$work/r-$r" && "$GL" check ./... --ignore example.test/proj --allowed_licenses="$LIST" >/dev/null 2>&1) || rc=$?

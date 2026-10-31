@@ -26,6 +26,12 @@ def na(pkg, lic="BSD-4-Clause"):
     return "Not allowed license '%s' found for library '%s'." % (lic, pkg)
 
 
+# The error go-licenses v2.0.1 logs (library.go:246) when it cannot read or classify a licence file;
+# the shape is the one printed by a run on a fixture (licence-fixtures.sh, "unreadable licence").
+def parse_error(path="/tmp/x/dep/sub/LICENSE", reason="no such file or directory"):
+    return "E1031 13:15:01.131651 2332600 library.go:246] Failed to parse %s: open %s: %s" % (path, path, reason)
+
+
 def gate(output, rc, own=OWN, permit=1):
     """permit=None leaves --permit-own off the command line, to test the default."""
     with tempfile.TemporaryDirectory() as d:
@@ -97,6 +103,42 @@ class GateTest(unittest.TestCase):
     def test_failure_line_next_to_a_zero_exit_fails(self):
         rc, out = gate(na("example.test/dep") + "\n", 0)
         self.assertEqual(rc, 1, out)
+
+    def test_scanner_error_next_to_a_zero_exit_fails(self):
+        # B1 of the review: go-licenses logs the error, falls back to another candidate file (the
+        # module's own LICENSE) and exits 0, so the run looks clean. It must not pass.
+        rc, out = gate(parse_error() + "\n", 0)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("UNEXPECTED: " + parse_error(), out)
+        self.assertIn("permitted=0, unexpected=1", out)
+
+    def test_scanner_error_fails_in_every_mode(self):
+        for permit in (None, 0, 1):
+            rc, out = gate(parse_error() + "\n", 0, permit=permit)
+            self.assertEqual(rc, 1, (permit, out))
+
+    def test_scanner_error_among_permitted_failures_still_fails(self):
+        # The own package's missing LICENSE is permitted; the unreadable licence file is not.
+        rc, out = gate("\n".join([nf(ROOT), parse_error()]) + "\n", 1)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("permitted=1, unexpected=1", out)
+
+    def test_other_klog_errors_and_fatals_fail(self):
+        for line in ("E1031 13:15:01.131651 2332600 library.go:159] Package x/y does not have module info.",
+                     "F1031 13:15:01.131651 2332600 save.go:53] something fatal"):
+            rc, out = gate(line + "\n", 0)
+            self.assertEqual(rc, 1, (line, out))
+
+    def test_scanner_error_without_the_log_header_fails(self):
+        rc, out = gate("Failed to parse /tmp/x/LICENSE: open /tmp/x/LICENSE: permission denied\n", 0)
+        self.assertEqual(rc, 1, out)
+
+    def test_klog_warnings_and_info_do_not_fail_a_clean_run(self):
+        # Only error severity counts: the control must still pass.
+        lines = ["W1031 13:15:02.142673 2332683 library.go:169] module x does not have dir and it is not vendored",
+                 "I1031 13:15:02.142673 2332683 library.go:100] loading packages"]
+        rc, out = gate("\n".join(lines) + "\n", 0)
+        self.assertEqual(rc, 0, out)
 
     def test_assembly_warnings_are_ignored(self):
         noise = "warning: ignoring non-Go code:\n/some/mod/cache/x@v1/asm_linux_amd64.s\n"

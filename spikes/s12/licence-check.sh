@@ -5,28 +5,39 @@
 # Usage: licence-check.sh [--local-permit-own] [--negative-control] <go-licenses binary> \
 #                         <repo root> <output dir> [module dir ...]
 #
-# Checks the root module (".") and, unless module dirs are given, every go.mod under
-# third_party/ (and under spikes/ when CHECK_SPIKES=1). Each module runs with its own go.mod,
-# so the Go version it names must be the one installed (GOTOOLCHAIN=local is fine).
-# The allowlist is allowed-licenses.txt next to this script, or $ALLOWED_LICENSES.
+# Checks every module that licence-modules.sh finds: every go.mod outside spikes/, found by a
+# search of the whole tree (the root module "." is one of them). The spikes are outside the check
+# (HBEP-15); CHECK_SPIKES=1 adds them as an experiment of this spike (licence-root-test.sh), never
+# for CI. Each module runs with its own go.mod, so the Go version it names must be the one
+# installed (GOTOOLCHAIN=local is fine). The allowlist is allowed-licenses.txt next to this
+# script, or $ALLOWED_LICENSES.
+#
+# No empty run: a go-licenses run over a module with no buildable package exits 0 and checks
+# nothing. So each module's "go-licenses report" must show at least one package, else the run
+# fails, unless the module is a known zero: listed in known-zero-modules.txt next to this script
+# (or $KNOWN_ZERO_MODULES) with the reason, which is printed. A module on that list that does
+# have packages is only noted.
 #
 # Exit status: 0 when no module has an unexpected failure; 1 otherwise; 2 on bad usage.
 # An unexpected failure is anything go-licenses reports (except the one case that
-# --local-permit-own permits, below), and also a go-licenses or go list run that itself fails. The root module is also checked
-# with --include_tests, so a licence reached only through a test import fails too.
+# --local-permit-own permits, below), an error diagnostic go-licenses logs even when it exits 0
+# (licence_gate.py), a go-licenses or go list run that itself fails, and a run that checked no
+# package and is not a known zero. The root module is also checked with --include_tests, so a
+# licence reached only through a test import fails too.
 #
 # Strict by default: a package of the module under check that has no LICENSE ("Did not find
-# license") is a failure, for every module. That is how the proposed CI job calls this script,
-# and it is the state once the repository has a root LICENSE (HBEP-15 open question 1, the
-# owner's decision). Without one, the root module's own packages cannot pass.
+# license") is a failure, for every module. That is how the proposed CI job calls this script.
+# The repository has had an Apache-2.0 root LICENSE since 31 Oct 2026 (HBEP-15 open question
+# 1), which the root module's own packages find; a separate module needs a LICENSE of its own.
 #
 # --local-permit-own (LOCAL ONLY, never for CI): permit that one failure for the root module
 # and for spikes/*, never for third_party/*, whose shipped copies carry their own LICENSE. It
-# exists so reproduce.sh and licence-fixtures.sh can run on a repository that has no LICENSE
-# yet. The permission is decided by licence_gate.py against the packages that "go list"
-# assigns to the module under check (Module.Main), so it cannot cover a dependency, a module
-# nested beneath the root's path, or a repository whose name merely starts with the same text.
-# That is why this script does not use go-licenses' --ignore, which matches a path prefix.
+# exists so that fixture repositories and the spikes, which have no LICENSE of their own, can be
+# run in the scratch experiments (licence-fixtures.sh, licence-root-test.sh). The permission is
+# decided by licence_gate.py against the packages that "go list" assigns to the module under
+# check (Module.Main), so it cannot cover a dependency, a module nested beneath the root's
+# path, or a repository whose name merely starts with the same text. That is why this script
+# does not use go-licenses' --ignore, which matches a path prefix.
 # The copy that moves to hack/ has no such option.
 #
 # --negative-control also takes BSD-3-Clause off the allowlist for the root module; the run
@@ -60,15 +71,29 @@ LIST=$(grep -v '^#' "${ALLOWED_LICENSES:-$here/allowed-licenses.txt}" | paste -s
 modules=()
 skipped=()
 if [ $# -gt 0 ]; then
-  modules=("$@")
+  for m in "$@"; do m=${m#./}; m=${m%/}; modules+=("${m:-.}"); done
 else
-  modules=(.)
-  while IFS= read -r m; do
-    case $m in
-      spikes/*) [ "${CHECK_SPIKES:-0}" = 1 ] || { skipped+=("$m: skipped (CHECK_SPIKES=1 runs it)"); continue; } ;;
-    esac
-    modules+=("$m")
-  done < <(cd "$root" && find third_party spikes -name go.mod -printf '%h\n' 2>/dev/null | sort)
+  found=$("$here/licence-modules.sh" "$root") || { echo "licence-modules.sh failed" >&2; exit 2; }
+  while IFS= read -r m; do modules+=("$m"); done <<< "$found"
+  if [ "${CHECK_SPIKES:-0}" = 1 ]; then
+    # Experiment only: the spikes are outside the check (HBEP-15).
+    while IFS= read -r m; do modules+=("$m"); done < <(cd "$root" && find spikes -name go.mod -printf '%h\n' 2>/dev/null | sort)
+  else
+    skipped+=("spikes/: outside the check (HBEP-15); CHECK_SPIKES=1 runs them as an experiment")
+  fi
+fi
+
+KNOWN_ZERO=${KNOWN_ZERO_MODULES:-$here/known-zero-modules.txt}
+declare -A zero_reason=()
+if [ -f "$KNOWN_ZERO" ]; then
+  while IFS= read -r line; do
+    case $line in ''|'#'*) continue ;; esac
+    zm=${line%%:*}; zr=${line#*:}; zr=${zr# }
+    if [ "$zm" = "$line" ] || [ -z "$zm" ] || [ -z "${zr//[[:space:]]/}" ]; then
+      echo "known-zero list $KNOWN_ZERO: an entry needs '<module dir>: <reason>', got: $line" >&2; exit 2
+    fi
+    zero_reason[$zm]=$zr
+  done < "$KNOWN_ZERO"
 fi
 
 tmpdir=$(mktemp -d)
@@ -121,12 +146,17 @@ check_module() { # module dir relative to the root
   rows=$(printf '%s' "$rep" | grep -c . || true)
   echo "allowlist: $LIST"
   echo "report rows: $rows"
-  if [ "$m" = . ]; then
-    printf '%s\n' "$rep" > "$OUT/go-licenses-report.csv"
-    # A check over zero packages also exits 0, so a root run that saw nothing is a failure.
-    [ "$rows" -gt 0 ] || { echo "UNEXPECTED: go-licenses report is empty at the root: a check over zero packages would also pass"; status=1; }
-  elif [ "$rows" -eq 0 ]; then
-    echo "WARNING: go-licenses saw no package in $m, so nothing is checked there"
+  if [ "$m" = . ]; then printf '%s\n' "$rep" > "$OUT/go-licenses-report.csv"; fi
+  # A check over zero packages also exits 0, so a run that saw nothing fails unless it is a known zero.
+  if [ "$rows" -eq 0 ]; then
+    if [ -n "${zero_reason[$m]:-}" ]; then
+      echo "known zero: $m has no package to check; reason: ${zero_reason[$m]}"
+    else
+      echo "UNEXPECTED: go-licenses saw no package in $m, so a check over it would pass and check nothing (list it in known-zero-modules.txt, with the reason, only if that is expected)"
+      status=1
+    fi
+  elif [ -n "${zero_reason[$m]:-}" ]; then
+    echo "NOTE: $m is listed as a known zero, but go-licenses saw $rows packages; remove the entry"
   fi
   gate_run "check ./..." "$permit" "$dir" ./...
   [ "$grc" = 0 ] || status=1
