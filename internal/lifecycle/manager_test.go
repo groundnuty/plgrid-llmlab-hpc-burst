@@ -16,26 +16,31 @@ package lifecycle
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	eventsv1 "k8s.io/api/events/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/deploymentid"
 )
 
 const managerHealthAddr = "127.0.0.1:29301"
@@ -144,6 +149,35 @@ func TestManagerOnControlPlane(t *testing.T) {
 	if err := cl.Create(ctx, md); err != nil {
 		t.Fatalf("create ModelDeployment: %v", err)
 	}
+	// A second deployment whose identity record name is taken by another ID:
+	// its degraded/IdentityUnresolved event must reach the API server as an
+	// events.k8s.io Event (a rejected Event would be dropped silently).
+	collide := mdSpec("md-collide")
+	collide.Generation = 0
+	collide.Spec.Source.Served.Flags = append(collide.Spec.Source.Served.Flags, v1alpha1.EngineFlag{Name: "dtype", Value: "bfloat16"})
+	tmpl, err := deploymentid.ChatTemplateSHA256("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cid, err := deploymentid.Compute(deploymentid.ServingSpec{
+		Checkpoint:         deploymentid.Checkpoint{Repository: "example-org/example-model", Revision: rigRevision},
+		Engine:             deploymentid.Engine{Name: "vllm", Version: "0.32.0", ImageDigest: rigDigest},
+		Flags:              []deploymentid.Flag{{Name: "max-model-len", Value: "32768"}, {Name: "dtype", Value: "bfloat16"}},
+		ChatTemplateSHA256: tmpl,
+	}, deploymentid.Accelerator{GPUModel: rigGPU, CPUArch: rigArch}, rigFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(identityData{Scheme: "v1", SHA256: cid.SHA256[:12] + strings.Repeat("0", 52), Canonical: json.RawMessage(`{}`)})
+	if err := cl.Create(ctx, &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{Name: "id-" + cid.SHA256[:12], Namespace: rigNS},
+		Data:       runtime.RawExtension{Raw: data}, Revision: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.Create(ctx, collide); err != nil {
+		t.Fatalf("create ModelDeployment: %v", err)
+	}
 
 	creds := t.TempDir()
 	mgr, backend, err := NewManager(Options{
@@ -189,6 +223,20 @@ func TestManagerOnControlPlane(t *testing.T) {
 			return false, "identity record: " + err.Error()
 		}
 		return true, ""
+	})
+	eventually(t, time.Minute, "the collision's event reaches the API server", func() (bool, string) {
+		var evs eventsv1.EventList
+		if err := cl.List(ctx, &evs, client.InNamespace(rigNS)); err != nil {
+			return false, err.Error()
+		}
+		var seen []string
+		for _, e := range evs.Items {
+			seen = append(seen, e.Reason+" on "+e.Regarding.Name)
+			if e.Reason == eventDegraded+"/"+reasonIdentityUnresolved && e.Regarding.Name == "md-collide" && e.Type == corev1.EventTypeWarning {
+				return true, ""
+			}
+		}
+		return false, fmt.Sprintf("events: %v", seen)
 	})
 	var allocs v1alpha1.AllocationList
 	if err := cl.List(ctx, &allocs, client.InNamespace(rigNS)); err != nil || len(allocs.Items) != 0 {
