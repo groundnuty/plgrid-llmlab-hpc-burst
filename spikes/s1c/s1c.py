@@ -13,6 +13,7 @@ import argparse
 import csv
 import json
 import os
+import shutil
 import signal
 import sys
 
@@ -117,6 +118,7 @@ def hol_run(st, env, pas, cfg, var):
     arm, link, tcpmux, setting = HOL_CONFIGS[cfg]
     cap, nbytes, rrate, gave = HOL_VARIANTS[var]
     load_gate()
+    st.sim_restart()
     if link == "shaper":
         st.shaper_up(cap)
     st.arm_up(arm, via=link, tcpmux=tcpmux, setting=setting)
@@ -139,6 +141,9 @@ def hol_run(st, env, pas, cfg, var):
     rec = count_lines(env.p("logs", "frpc-frp.log"), needles)
     if link == "tox":
         tox_clear("frp")
+    for f in ("frps-frp.log", "frpc-frp.log"):   # keep each run's frp logs (info level, small)
+        if os.path.exists(env.p("logs", f)):
+            shutil.copyfile(env.p("logs", f), env.p("raw", "%s.%s" % (tag, f)))
     st.arm_down()
     if link == "shaper":
         st.P.stop("shaper")

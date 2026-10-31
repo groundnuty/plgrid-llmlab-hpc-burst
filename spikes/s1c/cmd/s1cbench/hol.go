@@ -102,7 +102,8 @@ func runHOL(args []string) error {
 		if r.Complete() {
 			s.FastComplete++
 		} else if r.Err != nil {
-			s.FastErrors = append(s.FastErrors, r.Err.Error())
+			s.FastErrors = append(s.FastErrors, fmt.Sprintf("started %.1f s, %d tokens: %v",
+				r.Start.Sub(t0).Seconds(), len(r.Tokens), r.Err))
 		}
 		// Lateness of token k: its arrival minus the stream's own schedule, first token plus k times
 		// the stream's median gap (the engine's real pace, slightly above the nominal 50 ms), shifted

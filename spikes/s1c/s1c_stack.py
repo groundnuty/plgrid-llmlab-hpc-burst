@@ -41,6 +41,14 @@ class Stack:
         self.user = make_ssh(e)
         assert_loopback_only()
 
+    def sim_restart(self):
+        """A fresh engine. llm-d-inference-sim v1.0.0 answers some requests with a fasthttp 404 after
+        streams were cut mid-reply (reproduced without frp), so a run that cuts streams must not
+        leave its engine to the next one."""
+        self.P.stop("sim")
+        self.P.start("sim", [self.env.sim, "--port", str(PORTS["sim"])] + SIM_ARGS)
+        wait_port(PORTS["sim"])
+
     def shaper_up(self, rate):
         maps = [(PORTS["sh_frp"], PORTS["frps"]), (PORTS["sh_tls"], PORTS["envoy"]), (PORTS["sh_bulk"], PORTS["bulk"]),
                 (PORTS["sh_sim"], PORTS["sim"]), (PORTS["sh_ssh"], PORTS["sshd"])]

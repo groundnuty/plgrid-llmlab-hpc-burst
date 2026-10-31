@@ -43,7 +43,8 @@ def matrix(rs):
         out.append("\n#### %s\n" % title)
         out.append("Values are pass 1 / pass 2. Added TTFT is against the direct arm in the same condition, "
                    "concurrency and pass. CPU is percent of one core; path = frpc + frps (+ Envoy for wss, + ssh "
-                   "and sshd for ssh).\n")
+                   "and sshd for ssh). RSS is the peak during the cell, shown for the clean cells only: the processes "
+                   "stay up across cells, and Go keeps the memory it grew to, so later cells show the earlier peak.\n")
         out.append("| arm | streams | TTFT p50 ms | added p50 ms | added p95 ms | gap p99 ms | tok/s per stream p50 (p5) "
                    "| total tok/s | failed | path CPU % | frpc / frps RSS MB | wire B/token |")
         out.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
@@ -65,7 +66,7 @@ def matrix(rs):
                     cpu.append(sum(f(cell[p].get("cpu_" + k)) or 0 for k in ("frpc", "frps", "envoy", "ssh", "sshd")))
                 p1 = cell[passes[0]] if passes[0] in cell else list(cell.values())[0]
                 rate = both([g("rate_p50", p) for p in passes], "%.1f") + " (%s)" % both([g("rate_p5", p) for p in passes], "%.1f")
-                rss = "-" if arm == "direct" else "%s / %s" % (p1["rss_frpc"], p1["rss_frps"])
+                rss = "-" if arm == "direct" or cond != "clean" else "%s / %s" % (p1["rss_frpc"], p1["rss_frps"])
                 out.append("| %s | %d | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
                     arm, n, both([g("ttft_p50", p) for p in passes]),
                     "-" if arm == "direct" else both(add50, "%+.0f"), "-" if arm == "direct" else both(add95, "%+.0f"),

@@ -158,8 +158,9 @@ func streamOnce(ctx context.Context, client *http.Client, model string, maxToken
 	cr := &countingReader{r: resp.Body}
 	defer func() { res.Bytes = cr.n }()
 	if resp.StatusCode != 200 {
+		head, _ := io.ReadAll(io.LimitReader(cr, 120))
 		_, _ = io.Copy(io.Discard, cr)
-		res.Err = fmt.Errorf("status %d", resp.StatusCode)
+		res.Err = fmt.Errorf("status %d: %q", resp.StatusCode, head)
 		return res
 	}
 	br := bufio.NewReaderSize(cr, 64*1024)
