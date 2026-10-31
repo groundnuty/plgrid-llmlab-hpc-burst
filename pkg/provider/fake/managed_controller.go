@@ -88,10 +88,10 @@ func (m *ManagedController) Sync(ctx context.Context) error {
 			return merr
 		}
 		prov.Status.Catalog, prov.Status.LastCatalogRead = catalog, mt(now)
-		setCondition(&prov, v1alpha1.ConditionProviderReady, metav1.ConditionTrue, "CatalogRead", "", now)
-		setCondition(&prov, v1alpha1.ConditionCredentialsRejected, metav1.ConditionFalse, "KeyAccepted", "", now)
+		setCondition(&prov, v1alpha1.ConditionProviderReady, metav1.ConditionTrue, v1alpha1.ReasonCatalogRead, "", now)
+		setCondition(&prov, v1alpha1.ConditionCredentialsRejected, metav1.ConditionFalse, v1alpha1.ReasonKeyAccepted, "", now)
 	case errors.Is(err, provider.ErrKeyRejected):
-		setCondition(&prov, v1alpha1.ConditionCredentialsRejected, metav1.ConditionTrue, "KeyRejected", err.Error(), now)
+		setCondition(&prov, v1alpha1.ConditionCredentialsRejected, metav1.ConditionTrue, v1alpha1.ReasonKeyRejected, err.Error(), now)
 	default:
 		return nil // an unknown error changes nothing
 	}
@@ -110,11 +110,11 @@ func (m *ManagedController) setExpiring(prov *v1alpha1.Provider, now time.Time) 
 	msg := "the key expires at " + exp.Format(time.RFC3339)
 	switch {
 	case !now.Before(exp):
-		setCondition(prov, v1alpha1.ConditionCredentialsExpiring, metav1.ConditionTrue, "Expired", "the key expired at "+exp.Format(time.RFC3339), now)
+		setCondition(prov, v1alpha1.ConditionCredentialsExpiring, metav1.ConditionTrue, v1alpha1.ReasonExpired, "the key expired at "+exp.Format(time.RFC3339), now)
 	case !now.Before(exp.Add(-expiryWarning)):
-		setCondition(prov, v1alpha1.ConditionCredentialsExpiring, metav1.ConditionTrue, "ExpiresWithinADay", msg, now)
+		setCondition(prov, v1alpha1.ConditionCredentialsExpiring, metav1.ConditionTrue, v1alpha1.ReasonExpiresWithinADay, msg, now)
 	default:
-		setCondition(prov, v1alpha1.ConditionCredentialsExpiring, metav1.ConditionFalse, "NotExpiring", msg, now)
+		setCondition(prov, v1alpha1.ConditionCredentialsExpiring, metav1.ConditionFalse, v1alpha1.ReasonNotExpiring, msg, now)
 	}
 }
 

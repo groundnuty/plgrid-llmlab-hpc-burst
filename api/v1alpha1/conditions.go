@@ -246,6 +246,36 @@ const (
 	ConditionDialHomeUnreachable = "DialHomeUnreachable"
 )
 
+// Reasons of a managed Provider's conditions (HBEP-4, Managed provider in
+// alpha; HBEP-11, Credentials). The managed Provider's controller (#69) and
+// its stand-in, pkg/provider/fake.ManagedController, both write them, so the
+// lifecycle controller and the front can match them exactly.
+const (
+	// ReasonCatalogRead: ConditionProviderReady is True for a managed
+	// Provider, because its catalog listing succeeded within the staleness
+	// bound.
+	ReasonCatalogRead = "CatalogRead"
+	// ReasonKeyAccepted and ReasonKeyRejected: ConditionCredentialsRejected is
+	// False because the gateway accepted the key, or True because it answered
+	// 401 or 403.
+	ReasonKeyAccepted = "KeyAccepted"
+	ReasonKeyRejected = "KeyRejected"
+	// ReasonNotExpiring, ReasonExpiresWithinADay and ReasonExpired: the
+	// reasons of ConditionCredentialsExpiring, from the credentials file's
+	// expiry. It is True within a day of the expiry and after it.
+	ReasonNotExpiring       = "NotExpiring"
+	ReasonExpiresWithinADay = "ExpiresWithinADay"
+	ReasonExpired           = "Expired"
+	// ReasonFileRead, ReasonFileRefused and ReasonNoCredentialsFile: the
+	// reasons of ConditionCredentialsInvalid for a managed Provider. It is
+	// False when the file was read, True when provider.ReadManagedCredentials
+	// refused the file, and True when spec.credentialsRef names no file (alpha
+	// reads no secretRef).
+	ReasonFileRead          = "FileRead"
+	ReasonFileRefused       = "FileRefused"
+	ReasonNoCredentialsFile = "NoCredentialsFile"
+)
+
 // Event reasons that are not condition reasons (HBEP-8 keeps the event
 // vocabulary; these are the ones the implementable HBEPs name).
 const (
