@@ -22,12 +22,13 @@ import (
 
 // The rig for the tests that run the real frps (and frpc) from the directory named by
 // HPCBURST_FRP_DIR (testenv.FrpBinaries: it skips without them, and fails when
-// HPCBURST_REQUIRE_FRP=1, which CI sets). This file's block of loopback ports is 29340-29359:
-// frpsRigBase is the first rig's base (plugin 29348, bind 29349, tcpmux 29350, web 29351) and
-// frpsRigBase2 the second's (29352-29355). Everything binds 127.0.0.1.
+// HPCBURST_REQUIRE_FRP=1, which CI sets). These tests bind only
+// 29252-29259 (IMPL-COMMON, 31 Oct 2026: 29244-29259; 29240-29243 belong to the launcher's own
+// block): frpsRigBase is the first rig's base (plugin 29252, bind 29253, tcpmux 29254, web 29255)
+// and frpsRigBase2 the second's (29256-29259). Everything binds 127.0.0.1.
 const (
-	frpsRigBase  = 29340
-	frpsRigBase2 = 29344
+	frpsRigBase  = 29244
+	frpsRigBase2 = 29248
 )
 
 // pluginCall is one request frps posted to the plugin.

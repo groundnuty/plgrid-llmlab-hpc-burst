@@ -12,14 +12,14 @@ import (
 )
 
 // The rendering tests below compare the text with HBEP-6's example, written out by hand for the
-// block at 29340 (plugin 29348, bind 29349, tcpmux 29350, web 29351). They are the cheap extra:
+// block at 29244 (plugin 29252, bind 29253, tcpmux 29254, web 29255). They are the cheap extra:
 // whether frps accepts the file, and does what it says, is shown by the tests that run the real
 // frps (frps_real_test.go).
 
 const testWebPassword = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 func frpsTestHost() agentapi.Host {
-	return agentapi.Host{StateDir: "/var/lib/hb-state", PortBase: 29340}
+	return agentapi.Host{StateDir: "/var/lib/hb-state", PortBase: 29244}
 }
 
 func TestRenderFrpsConfigHasEverythingTheHBEPFixes(t *testing.T) {
@@ -35,9 +35,9 @@ func TestRenderFrpsConfigHasEverythingTheHBEPFixes(t *testing.T) {
 	}
 	want := []string{
 		`bindAddr = "127.0.0.1"`,
-		`bindPort = 29349`,
+		`bindPort = 29253`,
 		`proxyBindAddr = "127.0.0.1"`,
-		`tcpmuxHTTPConnectPort = 29350`,
+		`tcpmuxHTTPConnectPort = 29254`,
 		`kcpBindPort = 0`,
 		`quicBindPort = 0`,
 		`vhostHTTPPort = 0`,
@@ -45,7 +45,7 @@ func TestRenderFrpsConfigHasEverythingTheHBEPFixes(t *testing.T) {
 		`sshTunnelGateway.bindPort = 0`,
 		`auth.method = "token"`,
 		`webServer.addr = "127.0.0.1"`,
-		`webServer.port = 29351`,
+		`webServer.port = 29255`,
 		`webServer.user = "hpcburst"`,
 		`webServer.password = "` + testWebPassword + `"`,
 		`log.to = "/var/lib/hb-state/logs/frps.log"`,
@@ -54,7 +54,7 @@ func TestRenderFrpsConfigHasEverythingTheHBEPFixes(t *testing.T) {
 		`transport.tcpKeepalive = 30`,
 		`[[httpPlugins]]`,
 		`name = "hpcburst"`,
-		`addr = "127.0.0.1:29348"`,
+		`addr = "127.0.0.1:29252"`,
 		`path = "/frp/v1/handler"`,
 		`ops = ["Login", "NewProxy", "CloseProxy"]`,
 	}
@@ -80,10 +80,10 @@ func TestRenderFrpsConfigRefusesWhatItCannotWriteSafely(t *testing.T) {
 		{"password with a newline", good, testWebPassword[:63] + "\n"},
 		{"password in capitals", good, strings.ToUpper(testWebPassword)},
 		{"empty password", good, ""},
-		{"relative state directory", agentapi.Host{StateDir: "state", PortBase: 29340}, testWebPassword},
-		{"double quote in the state directory", agentapi.Host{StateDir: `/x"y`, PortBase: 29340}, testWebPassword},
-		{"backslash in the state directory", agentapi.Host{StateDir: `/x\y`, PortBase: 29340}, testWebPassword},
-		{"newline in the state directory", agentapi.Host{StateDir: "/x\ny = 1", PortBase: 29340}, testWebPassword},
+		{"relative state directory", agentapi.Host{StateDir: "state", PortBase: 29244}, testWebPassword},
+		{"double quote in the state directory", agentapi.Host{StateDir: `/x"y`, PortBase: 29244}, testWebPassword},
+		{"backslash in the state directory", agentapi.Host{StateDir: `/x\y`, PortBase: 29244}, testWebPassword},
+		{"newline in the state directory", agentapi.Host{StateDir: "/x\ny = 1", PortBase: 29244}, testWebPassword},
 		{"block runs past 65535", agentapi.Host{StateDir: "/x", PortBase: 65530}, testWebPassword},
 		{"block below 1", agentapi.Host{StateDir: "/x", PortBase: -9}, testWebPassword},
 	}
@@ -99,7 +99,7 @@ func TestRenderFrpsConfigRefusesWhatItCannotWriteSafely(t *testing.T) {
 }
 
 func TestWriteFrpsConfigIsMode600AndReplacesAtomically(t *testing.T) {
-	h := agentapi.Host{StateDir: shortDir(t), PortBase: 29340}
+	h := agentapi.Host{StateDir: shortDir(t), PortBase: 29244}
 	path, err := WriteFrpsConfig(h, testWebPassword)
 	if err != nil {
 		t.Fatal(err)
@@ -136,7 +136,7 @@ func TestWriteFrpsConfigIsMode600AndReplacesAtomically(t *testing.T) {
 
 func TestEnsureFrpsWebPassword(t *testing.T) {
 	newHost := func(t *testing.T) agentapi.Host {
-		return agentapi.Host{StateDir: filepath.Join(shortDir(t), "st"), PortBase: 29340}
+		return agentapi.Host{StateDir: filepath.Join(shortDir(t), "st"), PortBase: 29244}
 	}
 	t.Run("creates a key in a mode 600 file in a mode 700 directory", func(t *testing.T) {
 		h := newHost(t)
