@@ -54,6 +54,7 @@ Code under `spikes/` and `third_party/forked/*` is not part of this module.
 | `internal/agentserver/` | #60 | the agent API's HTTP server, calling `agentapi.Backend` |
 | `internal/agent/`, `cmd/hb-agent/` | #60 | the allocation agent |
 | `internal/lifecycle/` | #61 | the lifecycle manager, its verification controller and the `Backend` |
+| `internal/frpsplugin/` | #90 | frps's HTTP server plugin (`Handler`: `Login`, `NewProxy`, `CloseProxy`, decided from an in-memory `Index` within 700 ms) and `Reader`, which turns frps's proxy list into each Instance's `TunnelConnected` condition. A library: #88's controller serves the handler on `Host.FrpsPluginAddr`, feeds the `MemIndex` and runs the reader. Its tests start the real frps and frpc on kernel-chosen ports |
 | `cmd/hpcburst-controller/`, `internal/launcher/` | #61 | the controller binary, and supervising it from `hpcburst up` |
 | `internal/front/`, `cmd/hpcburst-front/` | #64 | the front. It reads ModelDeployments, Instances, Providers and PlatformProfiles by watch, the Instance keys with `agentapi.ReadKeyFile` and the managed credentials with `provider.ReadManagedCredentials`; the transports to Instances come from HBEP-6's tunnel (#90) |
 
