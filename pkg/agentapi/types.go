@@ -397,9 +397,11 @@ type WorkerReport struct {
 //     agent's clock; the values in the sample are from that read.
 //   - The controller takes no gauge-based action while the metrics are stale,
 //     that is while MetricsReadAt is nil or older than MetricsStaleProbeIntervals
-//     probe intervals (Health.MetricsFresh): it treats every value above as
-//     unknown. The actions are the ones that read them, such as idle, KV
-//     pressure, the only-errors signal and the no-progress signal.
+//     probe intervals, judged by Health.MetricsFresh at the sample's creation,
+//     at its Report's creation and at the controller's own clock since the
+//     Report arrived: it treats every value above as unknown. The actions are
+//     the ones that read them, such as idle, KV pressure, the only-errors
+//     signal and the no-progress signal.
 //   - It compares the counters of two samples only when MetricsReadAt advanced
 //     between them. Otherwise a run of failed reads looks like a stall.
 type Health struct {
@@ -430,8 +432,11 @@ type Health struct {
 	// {"2xx": 1200, "5xx": 3};
 	// an engine that reports exact codes gives {"200": 1200, "500": 3}. The
 	// agent cannot turn classes into codes. Read server errors with
-	// ServerErrors, which counts both forms. nil is unknown.
-	ResponsesByStatus map[string]int64 `json:"responsesByStatus,omitempty"`
+	// ServerErrors, which counts both forms. nil is unknown, and encodes as
+	// null; an empty map is a read that found no responses, and encodes as {}.
+	// The tag has no omitempty, which would drop the empty map and turn a known
+	// empty count into an unknown one on the wire.
+	ResponsesByStatus map[string]int64 `json:"responsesByStatus"`
 }
 
 // ServerErrors is the number of server-error responses in a

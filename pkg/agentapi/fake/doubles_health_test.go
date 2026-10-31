@@ -233,7 +233,7 @@ func TestEveryHealthDoubleReadsItsMetricsAtTheSampleTime(t *testing.T) {
 		if got.RunningRequests == nil || got.WaitingRequests == nil || got.GeneratedTokens == nil || got.KVCacheUsage == nil {
 			t.Errorf("%s: a gauge is nil (unknown): %+v", name, got)
 		}
-		if !got.MetricsFresh(10 * time.Second) {
+		if !got.MetricsFresh(t0, t0, t0, 10*time.Second) {
 			t.Errorf("%s: its metrics are not fresh", name)
 		}
 	}
@@ -242,7 +242,7 @@ func TestEveryHealthDoubleReadsItsMetricsAtTheSampleTime(t *testing.T) {
 func TestHealthMetricsUnreadableHasNoValueAndNoRead(t *testing.T) {
 	h := fake.HealthMetricsUnreadable(t0, fake.Process{Worker: "worker-0", PID: 4000})
 	eq(t, "sample", h, agentapi.Health{Time: t0, ProbeOK: true})
-	if h.MetricsFresh(10*time.Second) || h.MetricsFresh(time.Hour) {
+	if h.MetricsFresh(t0, t0, t0, 10*time.Second) || h.MetricsFresh(t0, t0, t0, time.Hour) {
 		t.Error("an engine that was never read has fresh metrics")
 	}
 }
@@ -259,8 +259,35 @@ func TestHealthMetricsStaleLooksStalledButIsReadLongAgo(t *testing.T) {
 		// The values are HealthStalled's, which a controller that ignored the
 		// age would restart for a stall.
 		eq(t, fmt.Sprintf("age %v: apart from its read", c.age), withoutTime(h), withoutTime(fake.HealthStalled(t0, proc)))
-		if got := h.MetricsFresh(10 * time.Second); got != c.fresh {
+		if got := h.MetricsFresh(t0, t0, t0, 10*time.Second); got != c.fresh {
 			t.Errorf("age %v: MetricsFresh(10s) = %v, want %v", c.age, got, c.fresh)
 		}
+	}
+}
+
+// HealthCached sends the sample of its first call again and again while the
+// Agent's reports go on: the sample's Time and MetricsReadAt stay at the first
+// time, the report's time moves, and the metrics turn stale by the report's age
+// (MetricsFresh), which the sample alone cannot show.
+func TestHealthCachedKeepsItsFirstSampleWhileTheReportsMoveOn(t *testing.T) {
+	const interval = 10 * time.Second
+	samples := healthSamples(t, fake.HealthCached(), 6, 5*time.Second)
+	eq(t, "samples", len(samples), 5)
+	first := samples[0].Time
+	for k, h := range samples {
+		eq(t, fmt.Sprintf("sample %d is the first one", k), h, samples[0])
+		eq(t, fmt.Sprintf("sample %d reads at its own time", k), *h.MetricsReadAt, first)
+		reportTime := first.Add(time.Duration(k) * 5 * time.Second) // the report of sample k
+		// The report is received as it is made, so only its age after the sample counts.
+		want := time.Duration(k)*5*time.Second <= 2*interval
+		if got := h.MetricsFresh(reportTime, reportTime, reportTime, interval); got != want {
+			t.Errorf("sample %d in a report made %v after it: MetricsFresh = %v, want %v", k, reportTime.Sub(first), got, want)
+		}
+	}
+	// The last sample's report is 20 s after the sample, which is exactly two
+	// intervals: still fresh. One report later it is stale.
+	if !samples[4].MetricsFresh(first.Add(20*time.Second), first.Add(20*time.Second), first.Add(20*time.Second), interval) ||
+		samples[4].MetricsFresh(first.Add(25*time.Second), first.Add(25*time.Second), first.Add(25*time.Second), interval) {
+		t.Error("the boundary of two intervals between sample and report is not where it should be")
 	}
 }

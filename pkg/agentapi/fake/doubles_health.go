@@ -48,7 +48,8 @@ func HealthMetricsUnreadable(now time.Time, _ Process) agentapi.Health {
 // HealthMetricsStale returns an engine that looks stalled, with the values of
 // HealthStalled, but whose last successful /metrics read was age before each
 // sample: MetricsReadAt is the sample's time minus age. With an age above twice
-// the agent's probe interval (agentapi.Health.MetricsFresh) the controller
+// the agent's probe interval (agentapi.Health.MetricsFresh, with the Report made
+// and received at the sample's time) the controller
 // treats the values as unknown, so it must not restart this engine for a stall
 // it cannot see; with a younger age the values count and it does.
 func HealthMetricsStale(age time.Duration) func(time.Time, Process) agentapi.Health {
@@ -57,6 +58,25 @@ func HealthMetricsStale(age time.Duration) func(time.Time, Process) agentapi.Hea
 		read := now.Add(-age)
 		h.MetricsReadAt = &read
 		return h
+	}
+}
+
+// HealthCached returns an engine whose sample never changes after its first: the
+// Time and the MetricsReadAt stay at the first sample's time, with HealthStalled's
+// values, while the Agent's Reports go on, as an agent that re-sends a cached
+// sample in new Reports would. Read against the Report's own time
+// (agentapi.Health.MetricsFresh), its metrics are fresh in the first Reports and
+// stale once the Report is made more than twice the probe interval after the
+// sample, so the controller must not restart this engine for the stall it shows.
+// The first sample is kept per process: a restarted worker starts again. Give
+// each Agent its own engine.
+func HealthCached() func(time.Time, Process) agentapi.Health {
+	first := map[int]time.Time{}
+	return func(now time.Time, p Process) agentapi.Health {
+		if _, ok := first[p.PID]; !ok {
+			first[p.PID] = now
+		}
+		return HealthStalled(first[p.PID], p)
 	}
 }
 
