@@ -210,3 +210,35 @@ func (s *testServer) chat(body map[string]any) chatResult {
 	}
 	return out
 }
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func decodeLines(t *testing.T, lines []string) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, l := range lines {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(l), &m); err != nil {
+			t.Fatalf("log line %q: %v", l, err)
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+func toStrings(v any) []string {
+	var out []string
+	list, _ := v.([]any)
+	for _, x := range list {
+		s, _ := x.(string)
+		out = append(out, s)
+	}
+	return out
+}
