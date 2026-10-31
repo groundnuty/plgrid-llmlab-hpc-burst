@@ -332,17 +332,22 @@ func TestTheHubTokenReachesTheHub(t *testing.T) {
 	}
 }
 
-// stubApptainer writes an Apptainer whose exec starts a child and exits at
-// once, as a parent that leaves a child behind. The child either handles
-// TERM (it records it and exits) or ignores it. Each exec records whether the
-// previous child still ran when it started, and the child's PID.
+// stubApptainer writes an Apptainer whose exec starts a child and exits, as a
+// parent that leaves a child behind. The child either handles TERM (it
+// records "graceful <its PID>" and exits) or ignores it. The parent exits only
+// once the child has set its TERM disposition, which the child says through a
+// FIFO: the parent's exit is what makes the agent stop the group, and a TERM
+// that comes before the child's trap kills it as if it had none (CI run
+// 41236080709). Each exec records whether the previous child still ran when
+// it started, and the child's PID.
 func stubApptainer(t *testing.T, root string, childIgnoresTerm bool) (path, log string) {
 	t.Helper()
 	path = filepath.Join(root, "stub-apptainer")
 	log = filepath.Join(root, "stub.log")
-	child := `(trap 'echo graceful >> LOG; exit 0' TERM; while :; do sleep 0.05; done) &`
+	// In a subshell $$ is the parent's PID; /proc/self is the subshell's.
+	child := `(read -r me _ < /proc/self/stat; trap 'echo "graceful $me" >> LOG; exit 0' TERM; echo > READY; while :; do sleep 0.05; done) &`
 	if childIgnoresTerm {
-		child = `(trap '' TERM; exec sleep 300) &`
+		child = `(trap '' TERM; echo > READY; exec sleep 300) &`
 	}
 	src := `#!/bin/sh
 case "$1" in
@@ -350,15 +355,18 @@ pull) echo fake-sif > "$2"; exit 0 ;;
 build) mkdir -p "$3"; exit 0 ;;
 exec)
   if [ -f PREV ] && kill -0 "$(cat PREV)" 2>/dev/null; then echo overlap >> LOG; fi
+  rm -f READY; mkfifo READY
   ` + child + `
   echo $! > PREV
   echo "child $!" >> LOG
+  read -r ready < READY
   exit 0 ;;
 esac
 exit 2
 `
 	src = strings.ReplaceAll(src, "LOG", log)
 	src = strings.ReplaceAll(src, "PREV", filepath.Join(root, "prev.pid"))
+	src = strings.ReplaceAll(src, "READY", filepath.Join(root, "ready.fifo"))
 	if err := os.WriteFile(path, []byte(src), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -399,8 +407,16 @@ func TestALeftoverWorkerChildGetsItsGraceAndBlocksTheRestart(t *testing.T) {
 			if strings.Contains(text, "overlap") {
 				t.Fatalf("the restart started while the old group's child still ran:\n%s", text)
 			}
-			if !tc.ignores && !strings.Contains(text, "graceful") {
-				t.Fatalf("the leftover child was killed without TERM first:\n%s", text)
+			// The leftover is the first exec's child: the restarted child's
+			// graceful exit must not count for it.
+			leftover := ""
+			for _, line := range strings.Split(text, "\n") {
+				if v, ok := strings.CutPrefix(line, "child "); ok && leftover == "" {
+					leftover = v
+				}
+			}
+			if !tc.ignores && !strings.Contains(text, "\ngraceful "+leftover+"\n") {
+				t.Fatalf("the leftover child %s was killed without TERM first:\n%s", leftover, text)
 			}
 			killChildren(t, text)
 		})
