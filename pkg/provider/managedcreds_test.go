@@ -74,6 +74,10 @@ func TestParseManagedCredentialsRefuses(t *testing.T) {
 		{"a query", `{"key":"k1","baseURL":"https://g.example/v1?a=b"}`, "query"},
 		{"a fragment", `{"key":"k1","baseURL":"https://g.example/v1#x"}`, "fragment"},
 		{"a trailing slash", `{"key":"k1","baseURL":"https://g.example/v1/"}`, "ends with '/'"},
+		{"no version segment", `{"key":"k1","baseURL":"https://g.example"}`, "does not end with the API version segment /v1"},
+		{"another version segment", `{"key":"k1","baseURL":"https://g.example/v2"}`, "/v1"},
+		{"v1 only as the end of a longer segment", `{"key":"k1","baseURL":"https://g.example/apiv1"}`, "/v1"},
+		{"v1 in an escaped slash", `{"key":"k1","baseURL":"https://g.example/api%2Fv1"}`, "/v1"},
 		{"a date without a time", `{"key":"k1","baseURL":"https://g.example/v1","expiry":"2027-01-31"}`, "RFC 3339"},
 		{"two objects", `{"key":"k1","baseURL":"https://g.example/v1"}{}`, "data after"},
 		{"not JSON", `key=k1`, "want one JSON object"},
@@ -89,7 +93,7 @@ func TestParseManagedCredentialsRefuses(t *testing.T) {
 			}
 		})
 	}
-	for _, ok := range []string{"http://127.0.0.1:29340/v1", "http://localhost:29340/v1", "http://[::1]:29340/v1", "https://gateway.example", "https://gateway.example:8443/api/v1"} {
+	for _, ok := range []string{"http://127.0.0.1:29340/v1", "http://localhost:29340/v1", "http://[::1]:29340/v1", "https://gateway.example/v1", "https://gateway.example:8443/api/v1"} {
 		if _, err := ParseManagedCredentials([]byte(`{"key":"k1","baseURL":"` + ok + `"}`)); err != nil {
 			t.Errorf("baseURL %s refused: %v", ok, err)
 		}

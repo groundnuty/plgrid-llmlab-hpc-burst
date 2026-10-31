@@ -48,7 +48,8 @@ type ManagedCredentials struct {
 	// goes to BaseURL + "/<rest>" (URLFor); the catalog is BaseURL +
 	// "/models" (CatalogURL, HBEP-4's GET /v1/models). It is https, or http
 	// only on a loopback host (tests and local doubles); it has no user
-	// information, query or fragment, and no trailing "/".
+	// information, query or fragment, and no trailing "/". Its path ends with
+	// the segment "/v1" (from the review of the HBEPs, #74).
 	BaseURL string `json:"baseURL"`
 
 	// Expiry is when the key expires, an RFC 3339 time, absent when it is not
@@ -183,6 +184,8 @@ func checkBaseURL(raw string) error {
 		return credErr("baseURL %q ends with '/'", raw)
 	case u.Opaque != "":
 		return credErr("baseURL %q is not hierarchical", raw)
+	case !strings.HasSuffix(u.EscapedPath(), "/v1"):
+		return credErr("baseURL %q does not end with the API version segment /v1, as in https://gateway.example/v1", raw)
 	}
 	return nil
 }
