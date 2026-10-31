@@ -86,6 +86,9 @@ func (r *ProfileReader) Read(ctx context.Context, name string) (Validated, error
 	v := Validated{Settings: provider.Settings{
 		Provider: prov.Name, Account: prov.Spec.Account, Grant: prov.Spec.Grant, Labels: prov.Labels,
 	}}
+	if ref := prov.Spec.CredentialsRef; ref != nil {
+		v.Settings.CredentialsFile = ref.File
+	}
 	if len(prov.Spec.AllowedPartitions) != 1 {
 		bad("provider.spec.allowedPartitions", "must name exactly one partition in alpha (HBEP-4, open question 12); it names %d", len(prov.Spec.AllowedPartitions))
 	} else {
