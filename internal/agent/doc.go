@@ -40,10 +40,15 @@
 //
 // # Reuse and provenance
 //
-//   - The stop discipline (record processes by PID, stop the whole tree with
-//     TERM, then KILL what is left, never by name) is spike S2 phase B's job
-//     script (spikes/s2b/scripts/job.sh, stop_tree). A www-2027 lesson
-//     (L-3.3: a router hung in graceful shutdown) sets the forced kill.
+//   - The stop discipline: processes are known by PID and start time, never
+//     by name, and a stop is TERM, then KILL of what is left. Spike S2 phase
+//     B's job script did the same by walking the process tree by parent PID
+//     and killing each PID (spikes/s2b/scripts/job.sh, lines 60-66,
+//     stop_tree); the agent kills the process group instead (package
+//     procgroup), and owns it until every member is gone. A child that calls
+//     setsid escapes a group kill, as a reparented one escapes a tree walk. A
+//     www-2027 lesson (L-3.3: a router hung in graceful shutdown) sets the
+//     forced kill.
 //   - The Unix socket per engine in the job's own directory answers L-7.7
 //     (loopback ports clashed between jobs on shared nodes).
 //   - The rehash (2-4 parallel readers, one reused 8 MiB buffer each, no
