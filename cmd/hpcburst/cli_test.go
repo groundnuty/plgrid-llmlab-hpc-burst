@@ -24,6 +24,8 @@ func TestUsageAndExitCodes(t *testing.T) {
 		{"unknown flag", []string{"up", "--nonsense"}, exitUsage, "nonsense"},
 		{"the removed --agent-builds-dir", []string{"up", "--state-dir", empty, "--agent-builds-dir", "/builds"}, exitUsage, "agent-builds-dir"},
 		{"stray argument", []string{"status", "--state-dir", empty, "extra"}, exitUsage, "unexpected argument"},
+		{"supervise without a handoff", []string{"supervise", "--state-dir", empty}, exitUsage, "--handoff-fd is required"},
+		{"supervise with a handoff descriptor that is not open", []string{"supervise", "--state-dir", empty, "--handoff-fd", "9"}, exitFail, "handoff descriptor 9"},
 		{"status of an empty directory is 'stopped'", []string{"status", "--state-dir", empty}, exitStopped, "stopped"},
 		{"down with nothing recorded succeeds", []string{"down", "--state-dir", empty}, exitOK, "nothing to stop"},
 		{"help", []string{"help"}, exitOK, "usage"},

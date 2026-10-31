@@ -7,11 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	appsv1 "k8s.io/api/apps/v1"
+	"k8s.io/client-go/util/workqueue"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -155,8 +158,22 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 		Watches(&v1alpha1.PlatformProfile{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, o client.Object) []reconcile.Request {
 			return deploymentsOnProfile(ctx, c, o.GetName())
 		})).
+		// An identity record that changes re-evaluates a collision with it
+		// (HBEP-3): every deployment of its namespace is enqueued.
+		Watches(&appsv1.ControllerRevision{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, o client.Object) []reconcile.Request {
+			if o.GetLabels()[v1alpha1.LabelRecord] != v1alpha1.RecordIdentity {
+				return nil
+			}
+			return deploymentsInNamespace(ctx, c, o.GetNamespace())
+		})).
 		WatchesRawSource(source.Channel(events, &handler.TypedEnqueueRequestForObject[*v1alpha1.ModelDeployment]{})).
-		WithOptions(controller.Options{MaxConcurrentReconciles: workers}).
+		// A failing key retries with backoff capped at the requeue bound, not
+		// controller-runtime's 1000 s, so one Instance's failing write does not
+		// hold the deployment back for minutes.
+		WithOptions(controller.Options{
+			MaxConcurrentReconciles: workers,
+			RateLimiter:             workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](time.Second, maxRequeue),
+		}).
 		Complete(r)
 	if err != nil {
 		return nil, nil, fmt.Errorf("lifecycle: controller: %w", err)
@@ -221,6 +238,19 @@ func deploymentsAllowing(ctx context.Context, c client.Client, providers map[str
 	return out
 }
 
+// deploymentsInNamespace returns every ModelDeployment of a namespace.
+func deploymentsInNamespace(ctx context.Context, c client.Client, ns string) []reconcile.Request {
+	var mds v1alpha1.ModelDeploymentList
+	if err := c.List(ctx, &mds, client.InNamespace(ns)); err != nil {
+		return nil
+	}
+	out := make([]reconcile.Request, 0, len(mds.Items))
+	for _, md := range mds.Items {
+		out = append(out, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: md.Namespace, Name: md.Name}})
+	}
+	return out
+}
+
 // deploymentsOnProfile returns every ModelDeployment that allows a Provider of
 // the profile.
 func deploymentsOnProfile(ctx context.Context, c client.Client, profile string) []reconcile.Request {
@@ -272,19 +302,31 @@ func (r *readiness) check() error {
 type agentBuilds struct {
 	dir string
 	mu  sync.Mutex
-	sum map[string]string
+	sum map[string]buildSum
+}
+
+// buildSum is a build's digest with the size and modification time it was
+// read at, so a replaced build is read again without a restart.
+type buildSum struct {
+	size    int64
+	modTime time.Time
+	digest  string
 }
 
 func (b *agentBuilds) digest(cpuArch string) (string, error) {
 	if b.dir == "" {
-		return "", errors.New("no agent builds directory is configured (--agent-builds-dir)")
+		return "", errors.New("no agent builds directory is configured")
+	}
+	path := filepath.Join(b.dir, agentapi.AgentBuildName(cpuArch))
+	fi, err := os.Stat(path)
+	if err != nil {
+		return "", err
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if d, ok := b.sum[cpuArch]; ok {
-		return d, nil
+	if c, ok := b.sum[cpuArch]; ok && c.size == fi.Size() && c.modTime.Equal(fi.ModTime()) {
+		return c.digest, nil
 	}
-	path := filepath.Join(b.dir, agentapi.AgentBuildName(cpuArch))
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
@@ -295,9 +337,9 @@ func (b *agentBuilds) digest(cpuArch string) (string, error) {
 		return "", fmt.Errorf("read %s: %w", path, err)
 	}
 	if b.sum == nil {
-		b.sum = map[string]string{}
+		b.sum = map[string]buildSum{}
 	}
 	d := hex.EncodeToString(h.Sum(nil))
-	b.sum[cpuArch] = d
+	b.sum[cpuArch] = buildSum{size: fi.Size(), modTime: fi.ModTime(), digest: d}
 	return d, nil
 }

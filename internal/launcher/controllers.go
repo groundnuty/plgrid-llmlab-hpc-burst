@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -115,19 +116,28 @@ func prepareControllerDirs(l layout, ports Ports) error {
 }
 
 // supervisorArgv is the supervisor's command line: this executable's hidden "supervise"
-// subcommand. Tests give their own.
+// subcommand, told where the handoff pipe is. Tests give their own.
 func supervisorArgv(l layout) ([]string, error) {
 	self, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("find the hpcburst executable to start its supervisor: %w", err)
 	}
-	return []string{self, "supervise", "--state-dir", l.dir}, nil
+	return []string{self, "supervise", "--state-dir", l.dir, "--handoff-fd", strconv.Itoa(HandoffFD)}, nil
 }
+
+// afterSupervisorStart, set by tests only, runs between the supervisor's creation and the save of
+// its record in state.json: the window in which an interrupted up must leave nothing running.
+var afterSupervisorStart func(ProcRec)
 
 // startSupervisor starts the supervisor detached (own session, stdin /dev/null, output to
 // logs/supervisor.log), records it in state.json at once, and waits until it reports every child
-// started. st must carry Controllers. On failure the supervisor, if it was started, is recorded in
-// st, so the caller's stop reaches it.
+// started. st must carry Controllers. It first makes sure the agent endpoint's certificate and key
+// exist and are usable.
+//
+// The supervisor starts no child until this function has saved its record and confirmed that on a
+// pipe (the handoff, see supervise.go), so a launcher that dies in between leaves a supervisor that
+// exits at once, starting nothing. On failure after the save, the supervisor is recorded in st, so
+// the caller's stop reaches it.
 func startSupervisor(ctx context.Context, l layout, st *State, argv []string, timeout time.Duration, log io.Writer) error {
 	if st.Controllers == nil {
 		return errors.New("no controllers are configured")
@@ -139,19 +149,33 @@ func startSupervisor(ctx context.Context, l layout, st *State, argv []string, ti
 	if err := prepareControllerDirs(l, st.Ports); err != nil {
 		return err
 	}
+	if err := ensureAgentEndpointPair(l.host(st.Ports), log); err != nil {
+		return err
+	}
 	lf, err := os.OpenFile(l.supervisorLog(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
 	defer lf.Close()
-	cmd := &exec.Cmd{Path: argv[0], Args: argv, Env: os.Environ(), Dir: l.dir, Stdout: lf, Stderr: lf}
+	// The handoff pipe. Only its read end reaches the supervisor (as descriptor HandoffFD); the
+	// write end, close-on-exec, stays here, so it closes when this process dies, however it dies.
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	defer pw.Close()
+	cmd := &exec.Cmd{Path: argv[0], Args: argv, Env: os.Environ(), Dir: l.dir, Stdout: lf, Stderr: lf, ExtraFiles: []*os.File{pr}}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	h, err := startProc(supervisorName, cmd)
+	pr.Close() // the supervisor has its copy; holding ours would keep the pipe readable after this process dies
 	if err != nil {
 		return err
 	}
 	defer h.Close()
 	go func() { _ = cmd.Wait() }() // reaps it if it exits while this process lives; otherwise it is reparented
+	if afterSupervisorStart != nil {
+		afterSupervisorStart(h.rec)
+	}
 	st.Procs = append(st.Procs, h.rec)
 	// Recorded before waiting, as k3s is: an interrupted or crashed start is still cleaned up by down.
 	if err := l.saveState(st); err != nil {
@@ -159,8 +183,16 @@ func startSupervisor(ctx context.Context, l layout, st *State, argv []string, ti
 		st.Procs = st.Procs[:len(st.Procs)-1]
 		return err
 	}
-	logf(log, "started the supervisor as pid %d; waiting for %s to start", h.rec.PID, ControllerBinName)
 	tail := func(cause error) error { return fmt.Errorf("%w%s", cause, logTail(l.supervisorLog(), 15)) }
+	// The record is durable: let the supervisor start its children. EPIPE means it has closed its
+	// end, so it has given up or exited; the wait below reports that with its log, which says more.
+	if _, err := pw.Write([]byte{handoffGo}); err != nil && !errors.Is(err, syscall.EPIPE) {
+		return tail(fmt.Errorf("confirm the supervisor's record to it: %w", err))
+	}
+	if err := pw.Close(); err != nil {
+		return tail(fmt.Errorf("confirm the supervisor's record to it: %w", err))
+	}
+	logf(log, "started the supervisor as pid %d; waiting for %s to start", h.rec.PID, ControllerBinName)
 	deadline := time.Now().Add(timeout)
 	settled := false
 	for {

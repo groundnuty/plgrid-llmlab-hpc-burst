@@ -70,7 +70,9 @@ type settings struct {
 }
 
 // resolveSettings fills a profile's values with their defaults. A duration
-// that does not parse is an error naming the field.
+// that does not parse, or an unsupported attemptsPerRung, is an error naming
+// the field; the settings returned with it hold defaults (or the nearest
+// supported value) in its place, for the Instances already on the platform.
 func resolveSettings(p v1alpha1.PlatformProfileSpec) (settings, error) {
 	var s settings
 	var err error
@@ -115,8 +117,19 @@ func resolveSettings(p v1alpha1.PlatformProfileSpec) (settings, error) {
 	if r.AttemptsPerRung != nil {
 		s.attemptsPerRung = *r.AttemptsPerRung
 	}
-	if err != nil {
-		return settings{}, err
+	// status.restarts keeps at most 16 entries, so both rungs' attempts must
+	// fit in it, or the ladder could never climb (review of PR 88). A profile
+	// outside 1..8 is refused, and the ladder of an Instance already on it
+	// runs with the nearest supported value.
+	if s.attemptsPerRung < 1 || s.attemptsPerRung > maxAttemptsPerRung {
+		if err == nil {
+			err = fmt.Errorf("profile restart.attemptsPerRung %d is outside 1..%d: status.restarts keeps %d restarts, so both rungs must fit", s.attemptsPerRung, maxAttemptsPerRung, maxRestartsKept)
+		}
+		s.attemptsPerRung = min(max(s.attemptsPerRung, 1), maxAttemptsPerRung)
 	}
-	return s, nil
+	return s, err
 }
+
+// maxAttemptsPerRung is the most attempts per rung the bounded restart history
+// can count for both rungs of the alpha ladder.
+const maxAttemptsPerRung = maxRestartsKept / 2

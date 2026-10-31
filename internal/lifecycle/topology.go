@@ -119,11 +119,11 @@ func (r *Reconciler) loadProviders(ctx context.Context, md *v1alpha1.ModelDeploy
 			continue
 		}
 		s, err := resolveSettings(prof.Spec)
+		pv.settings = s
 		if err != nil {
 			pv.problem = fmt.Sprintf("Provider %s: %v", n, err)
 			continue
 		}
-		pv.settings = s
 		if len(p.Spec.AllowedPartitions) == 0 {
 			pv.problem = fmt.Sprintf("Provider %s allows no partition", n)
 			continue

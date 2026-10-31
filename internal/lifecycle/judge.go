@@ -3,7 +3,6 @@ package lifecycle
 import (
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"slices"
 	"sort"
 	"strconv"
@@ -99,6 +98,7 @@ type verificationData struct {
 	Settings       map[string]string `json:"settings,omitempty"`
 	NotReported    []string          `json:"notReported,omitempty"`
 	Undeclared     map[string]string `json:"undeclared,omitempty"`
+	Resolved       map[string]string `json:"resolved,omitempty"` // each declared "auto": what the engine chose
 	Contradictions []string          `json:"contradictions,omitempty"`
 	Fingerprint    string            `json:"fingerprint,omitempty"`
 	Overhead       int32             `json:"templateOverhead,omitempty"`
@@ -192,10 +192,20 @@ func judgeVerify(d declared, v *agentapi.VerifyResult, rehash bool, sh shapes) v
 			out.NotReported = append(out.NotReported, n)
 			continue
 		}
-		if !sameSetting(got, d.flags[n]) {
+		if d.flags[n] == "auto" { // the engine chooses: record what it chose, compare nothing
+			if out.Resolved == nil {
+				out.Resolved = map[string]string{}
+			}
+			out.Resolved[n] = got
+			continue
+		}
+		if !sameSetting(n, got, d.flags[n]) {
 			out.Contradictions = append(out.Contradictions, fmt.Sprintf("%s %q, declared %q", n, got, d.flags[n]))
 		}
 	}
+	// A setting the engine reports that the spec does not declare is recorded
+	// as reported, and passes: the engine version, an ID input, covers the
+	// engine's defaults (science-agent ruling, 31 Oct 2026; HBEP-3, HBEP-7).
 	for n, val := range v.Settings {
 		if _, ok := d.flags[n]; !ok {
 			out.Undeclared[n] = val
@@ -217,17 +227,53 @@ func judgeVerify(d declared, v *agentapi.VerifyResult, rehash bool, sh shapes) v
 	return out
 }
 
-// sameSetting compares a reported setting with its declared value: as text,
-// or as JSON when both are JSON documents, so formatting does not matter.
-func sameSetting(got, want string) bool {
-	if strings.TrimSpace(got) == strings.TrimSpace(want) {
+// sameSetting compares a reported setting with its declared value under one
+// rule (HBEP-7, Instance start, Settings comparison; science-agent ruling,
+// 31 Oct 2026; PR #91). Identical text always matches. max-model-len is
+// compared as an integer. Otherwise, if both read as booleans (true or false,
+// in any case), they are compared as booleans; else, if both read as decimal
+// numbers, as numbers, so "4" is "4.0" (str() of a float); else they differ,
+// verbatim, so "fp8" is not "fp8_e4m3" and a JSON value the engine
+// re-serializes differently is a contradiction too. A declared "auto" is not
+// compared at all: judgeVerify records the resolved value.
+func sameSetting(name, got, want string) bool {
+	if got == want {
 		return true
 	}
-	var a, b any
-	if json.Unmarshal([]byte(got), &a) == nil && json.Unmarshal([]byte(want), &b) == nil {
-		return reflect.DeepEqual(a, b)
+	if name == "max-model-len" {
+		g, gerr := strconv.ParseInt(got, 10, 64)
+		w, werr := strconv.ParseInt(want, 10, 64)
+		return gerr == nil && werr == nil && g == w
 	}
-	return false
+	truth := func(s string) (val, ok bool) {
+		switch {
+		case strings.EqualFold(s, "true"):
+			return true, true
+		case strings.EqualFold(s, "false"):
+			return false, true
+		}
+		return false, false
+	}
+	if g, gok := truth(got); gok {
+		w, wok := truth(want)
+		return wok && g == w
+	}
+	// Decimal numbers only: ParseFloat also reads "inf", "nan" and hex floats.
+	decimal := func(s string) (float64, bool) {
+		if s == "" || strings.Trim(s, "0123456789+-.eE") != "" {
+			return 0, false
+		}
+		f, err := strconv.ParseFloat(s, 64)
+		return f, err == nil
+	}
+	gi, gierr := strconv.ParseInt(got, 10, 64) // exact above 2^53, where floats round
+	wi, wierr := strconv.ParseInt(want, 10, 64)
+	if gierr == nil && wierr == nil {
+		return gi == wi
+	}
+	g, gok := decimal(got)
+	w, wok := decimal(want)
+	return gok && wok && g == w
 }
 
 // judgeQualify judges qualification (HBEP-7, Instance start): every check the

@@ -88,9 +88,10 @@ func (b *Backend) agentSettings(ctx context.Context, a *v1alpha1.Allocation) (ag
 	} else if !ok {
 		return out, nil
 	}
-	if s, err := resolveSettings(prof.Spec); err == nil {
-		out.ProbeInterval, out.StopGrace = agentapi.Duration(s.probeInterval), agentapi.Duration(s.stopGrace)
-	}
+	// resolveSettings fills what it refuses with defaults, so the agent
+	// always gets usable values.
+	s, _ := resolveSettings(prof.Spec)
+	out.ProbeInterval, out.StopGrace = agentapi.Duration(s.probeInterval), agentapi.Duration(s.stopGrace)
 	if a.Spec.ForProvider.Batch != nil {
 		for _, part := range prof.Spec.Partitions {
 			if part.Name == a.Spec.ForProvider.Batch.Partition {
@@ -274,7 +275,12 @@ func readTokenFile(path string) (string, error) {
 // condition (docs/development.md, Single writer). It writes True when an
 // Instance could not register, and False when an agent registers while the
 // condition is True; otherwise nothing.
-func (r *Reconciler) setDialHome(ctx context.Context, provider string, unreachable bool, now time.Time, msg string) error {
+//
+// registeredAt, for a clear, is when the registration that proves the path was
+// accepted; only one accepted at least a second after the condition turned
+// True clears it, so an older agent's registration does not undo a timeout
+// another Allocation just had.
+func (r *Reconciler) setDialHome(ctx context.Context, provider string, unreachable bool, now time.Time, msg string, registeredAt time.Time) error {
 	if provider == "" {
 		return nil
 	}
@@ -288,12 +294,12 @@ func (r *Reconciler) setDialHome(ctx context.Context, provider string, unreachab
 			cur = &p.Status.Conditions[i]
 		}
 	}
-	status, reason := metav1.ConditionTrue, "RegistrationTimeout"
+	status, reason := metav1.ConditionTrue, v1alpha1.ReasonRegistrationTimeout
 	if !unreachable {
-		if cur == nil || cur.Status != metav1.ConditionTrue {
+		if cur == nil || cur.Status != metav1.ConditionTrue || registeredAt.Before(cur.LastTransitionTime.Add(time.Second)) {
 			return nil
 		}
-		status, reason = metav1.ConditionFalse, "AgentRegistered"
+		status, reason = metav1.ConditionFalse, reasonAgentRegistered
 	}
 	c := metav1.Condition{Type: v1alpha1.ConditionDialHomeUnreachable, Status: status, Reason: reason, Message: msg, LastTransitionTime: metav1.NewTime(now)}
 	if cur != nil && cur.Status == status {

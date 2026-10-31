@@ -165,17 +165,15 @@ func (p *pass) restart(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, signal
 			return nil
 		}
 	}
-	part := force
-	if part == "" {
-		switch {
-		case workerTries < st.attemptsPerRung:
-			part = v1alpha1.WorkerName(0)
-		case instTries < st.attemptsPerRung:
-			part = v1alpha1.PartInstance
-		}
-	}
-	if part == v1alpha1.PartInstance && force != "" && instTries >= st.attemptsPerRung {
-		part = ""
+	// The ladder: the worker, then the whole Instance, each attemptsPerRung
+	// times. A forced rung (a failed rehash or staging takes the whole
+	// Instance) starts the ladder there; a rung that is spent climbs on.
+	part := ""
+	switch {
+	case force != v1alpha1.PartInstance && workerTries < st.attemptsPerRung:
+		part = v1alpha1.WorkerName(0)
+	case instTries < st.attemptsPerRung:
+		part = v1alpha1.PartInstance
 	}
 	if part == "" {
 		return p.fail(in, alloc, v1alpha1.ReasonRestartLoop,
@@ -236,7 +234,7 @@ func (p *pass) classStreak(c v1alpha1.AcceleratorClass) []time.Time {
 	var fails []time.Time
 	for _, in := range p.insts {
 		pv := p.pvOf(in.Labels)
-		if pv == nil || !pv.hasClass || pv.class != c {
+		if p.stale[in.UID] || pv == nil || !pv.hasClass || pv.class != c {
 			continue
 		}
 		if in.Status.ReadyTime != nil && in.Status.ReadyTime.After(lastReady) {

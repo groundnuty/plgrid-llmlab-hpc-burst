@@ -6,6 +6,12 @@ package lifecycle
 // one is proposed to the contracts owner.
 const reasonCatalogEntryListed = "CatalogEntryListed"
 
+// reasonAgentRegistered is the Provider's DialHomeUnreachable reason when it is
+// cleared, False: an agent on the Provider registered through the dial-home
+// path. conditions.go names only the True reason (RegistrationTimeout); this
+// one is proposed to the contracts owner.
+const reasonAgentRegistered = "AgentRegistered"
+
 // HBEP-8's event types. A Kubernetes Event's reason is "<type>/<code>", so a
 // reader acts on the type and the reason code, never on the message (HBEP-7,
 // Events and conditions; HBEP-8).

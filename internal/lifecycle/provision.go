@@ -69,7 +69,13 @@ func (p *pass) provision(pred *v1alpha1.Instance) (bool, error) {
 			}
 			continue
 		}
-		if warm := p.warmAllocation(pv); warm != nil {
+		warm, deferUntil := p.warmAllocation(pv, params)
+		if warm == nil && !deferUntil.IsZero() {
+			p.at(deferUntil)
+			p.deferred = true
+			return false, nil
+		}
+		if warm != nil {
 			if err := p.createInstance(pv, cid, pred, warm.Name); err != nil {
 				return false, err
 			}
@@ -91,19 +97,50 @@ func (p *pass) provision(pred *v1alpha1.Instance) (bool, error) {
 // warmAllocation returns a Running Allocation of this deployment on the
 // Provider that hosts no live Instance and has lease left above twice the
 // class's start-to-ready time plus the drain window (HBEP-7, open question 14).
-func (p *pass) warmAllocation(pv *providerView) *v1alpha1.Allocation {
+//
+// The Allocation must fit the launch: the same partition (so the same class)
+// and GPU count, and at least the CPUs and memory a new Allocation would
+// request (review of PR 88: a spec edit can change the GPUs an Instance needs).
+// One whose agent has not registered again yet, during the grace after the
+// controller's own restart, is waited for rather than passed over: deferUntil
+// says until when.
+func (p *pass) warmAllocation(pv *providerView, params v1alpha1.BatchParameters) (warm *v1alpha1.Allocation, deferUntil time.Time) {
 	need := 2*startToReady(p.md, pv.class) + drainWindowOf(pv, p.md)
 	for _, a := range p.allocs {
 		obs := a.Status.AtProvider
 		if a.Labels[v1alpha1.LabelProvider] != pv.name || !a.DeletionTimestamp.IsZero() ||
-			obs.Phase != v1alpha1.AllocationRunning || obs.HardEnd == nil || len(p.liveOn(a.Name)) > 0 {
+			obs.Phase != v1alpha1.AllocationRunning || obs.HardEnd == nil || len(p.liveOn(a.Name)) > 0 ||
+			obs.HardEnd.Sub(p.now) <= need || !fits(a, params) || p.releasePending(a) {
 			continue
 		}
-		if obs.HardEnd.Sub(p.now) > need && len(p.r.Backend.registrations(a.UID)) > 0 {
-			return a
+		if len(p.r.Backend.registrations(a.UID)) > 0 {
+			return a, time.Time{}
+		}
+		if grace := p.mem.started.Add(agentGrace); p.now.Before(grace) {
+			deferUntil = grace
 		}
 	}
-	return nil
+	return nil, deferUntil
+}
+
+// releasePending reports whether an Instance on the Allocation failed, so the
+// Allocation is to be released (a release that failed or was interrupted is
+// made on a later pass): it is never warm capacity.
+func (p *pass) releasePending(a *v1alpha1.Allocation) bool {
+	for _, in := range p.insts {
+		if in.Spec.AllocationRef.Name == a.Name && releaseRequired(in) {
+			return true
+		}
+	}
+	return false
+}
+
+// fits reports whether an Allocation's submission parameters hold an Instance
+// that needs params.
+func fits(a *v1alpha1.Allocation, params v1alpha1.BatchParameters) bool {
+	b := a.Spec.ForProvider.Batch
+	return b != nil && b.Partition == params.Partition && b.GPUs == params.GPUs &&
+		b.CPUsPerTask >= params.CPUsPerTask && b.Memory.Cmp(params.Memory) >= 0
 }
 
 func drainWindowOf(pv *providerView, md *v1alpha1.ModelDeployment) time.Duration {

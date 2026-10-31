@@ -144,6 +144,34 @@ func TestIdentityUnresolvedPermanentRetriesOnASpecChange(t *testing.T) {
 	}
 }
 
+// TestIdentityUnresolvedPermanentRetriesOnAnUnrelatedSpecEdit (Opus 4): a
+// permanent failure is read again on any spec change, keyed on the spec's
+// generation, not only when the checkpoint or token changes: the operator
+// had gated access granted and edits another field (a flag); generation 2
+// reads the Hub again at the next pass. Without the fix nothing is read for
+// up to 10 h.
+func TestIdentityUnresolvedPermanentRetriesOnAnUnrelatedSpecEdit(t *testing.T) {
+	rg := newRig(t)
+	src := &scriptedSource{clock: rg.clock, errs: []error{hubErr(403, 0)}}
+	rg.r.Checkpoints = NewCachedSource(src, rg.clock)
+	rg.create(mdSpec("md"))
+	rg.Step()
+	rg.run(30*time.Minute, time.Minute)
+	if n := len(src.callTimes()); n != 1 {
+		t.Fatalf("Hub asked %d times for an unchanged spec, want 1", n)
+	}
+	rg.mutateMD("md", func(md *v1alpha1.ModelDeployment) {
+		md.Spec.Source.Served.Flags = append(md.Spec.Source.Served.Flags, v1alpha1.EngineFlag{Name: "dtype", Value: "bfloat16"})
+	})
+	rg.run(10*time.Second, 10*time.Second)
+	if n := len(src.callTimes()); n != 2 {
+		t.Fatalf("Hub asked %d times after an edit that leaves the checkpoint and token alone (generation 2), want 2", n)
+	}
+	if ids := rg.md("md").Status.CurrentIDs; len(ids) != 1 {
+		t.Fatalf("after the read, want one current ID; got %v", ids)
+	}
+}
+
 // TestIdentityUnresolvedBlobMismatchAndInvalidListingArePermanent: a small file
 // whose blob id does not match the listing, and a listing the strict decoder
 // refuses, are permanent by hubfiles.Retryable: IdentityUnresolved names the
@@ -192,8 +220,10 @@ func TestIdentityTransientSetsNoReasonAndBacksOff(t *testing.T) {
 	rg.create(mdSpec("md"))
 	for end := rigStart.Add(2*time.Minute + 50*time.Second); ; {
 		rg.Step()
-		if c := rg.condition("md", v1alpha1.ConditionDegraded); c.Reason == v1alpha1.ReasonIdentityUnresolved {
-			t.Fatalf("at %s a transient Hub failure set Degraded %s (%s); it sets no reason", rg.clock.Now().Format(time.TimeOnly), c.Reason, c.Message)
+		// No reason at all (Opus 5): Degraded stays False/AsDesired, and in
+		// particular not ProviderUnavailable, since the Provider is fine.
+		if c := rg.condition("md", v1alpha1.ConditionDegraded); len(src.callTimes()) < 3 && (c.Status != "False" || c.Reason != v1alpha1.ReasonAsDesired) {
+			t.Fatalf("at %s a transient Hub failure set Degraded %s/%s (%s); it sets no reason", rg.clock.Now().Format(time.TimeOnly), c.Status, c.Reason, c.Message)
 		}
 		if !rg.clock.Now().Before(end) {
 			break
@@ -256,6 +286,15 @@ func TestIdentityUnresolvedCollisionNeverLoops(t *testing.T) {
 	wantDegraded(t, rg, v1alpha1.ReasonIdentityUnresolved, recName)
 	if n := len(rg.rec.Find(eventDegraded, v1alpha1.ReasonIdentityUnresolved)); n != 1 {
 		t.Fatalf("degraded/IdentityUnresolved events = %d over 30 passes, want exactly 1", n)
+	}
+	// Evaluated once (Astra 11): the collision is not computed again while the
+	// spec and the colliding record stay the same; the rig's source counts
+	// every evaluation's checkpoint read.
+	rg.source.mu.Lock()
+	evaluations := rg.source.calls
+	rg.source.mu.Unlock()
+	if evaluations != 1 {
+		t.Fatalf("the collision was evaluated %d times over 30 passes, want 1", evaluations)
 	}
 	if rg.submissions() != 0 || len(rg.allocations("md")) != 0 {
 		t.Fatal("a collided class must provision nothing")

@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -14,13 +15,17 @@ import (
 // instances advances every Instance (HBEP-7, Reconcile loop, steps 5 and 6):
 // failed Allocations end their Instances; each Instance moves through its
 // phases; health rules and the drain deadline apply.
+//
+// One Instance's failure does not stop the others: the pass goes on, and the
+// failures are returned joined, item by item (HBEP-7, Goals).
 func (p *pass) instances() error {
+	var errs []error
 	for _, in := range p.insts {
 		if err := p.instance(in); err != nil {
-			return err
+			errs = append(errs, fmt.Errorf("Instance %s: %w", in.Name, err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func (p *pass) instance(in *v1alpha1.Instance) error {
@@ -43,7 +48,7 @@ func (p *pass) instance(in *v1alpha1.Instance) error {
 	if done, err := p.allocationFailed(in, alloc); done || err != nil {
 		return err
 	}
-	if !in.DeletionTimestamp.IsZero() || p.shutdown {
+	if !in.DeletionTimestamp.IsZero() || p.shutdown || p.stale[in.UID] {
 		return p.shutdownInstance(in, alloc)
 	}
 	switch in.Status.Phase {
@@ -130,18 +135,60 @@ func (p *pass) end(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, reason, ms
 	}); err != nil {
 		return err
 	}
-	if err := p.removeDrainFinalizer(in); err != nil {
+	// The release, or the idle anchor, is made durable before the finalizer
+	// goes: once it goes, the Instance may vanish (a garbage-collected one at
+	// once), and with it what says the Allocation must go or since when it is
+	// idle (HBEP-7, Release; Retention, the idle anchor).
+	if release && alloc != nil {
+		if err := p.deleteAllocation(alloc, reason); err != nil {
+			return err
+		}
+	} else if err := p.anchorIfLast(alloc); err != nil {
 		return err
 	}
-	if release && alloc != nil {
-		return p.deleteAllocation(alloc, reason)
+	return p.removeDrainFinalizer(in)
+}
+
+// releaseRequired reports whether an ended Instance's Allocation must be
+// released: the Instance failed, so nothing on its Allocation serves (HBEP-7,
+// Release). It is read from the persisted end reason, so a release that failed
+// or was interrupted is made on a later pass.
+func releaseRequired(in *v1alpha1.Instance) bool {
+	return ended(in) && in.Status.EndReason != "" && in.Status.EndReason != v1alpha1.ReasonDrained
+}
+
+// anchorIfLast writes the Allocation's idle-since anchor when it hosts no live
+// Instance and carries none yet: the latest EndTime of its Instances
+// (v1alpha1.SetIdleSince).
+func (p *pass) anchorIfLast(alloc *v1alpha1.Allocation) error {
+	if alloc == nil || !alloc.DeletionTimestamp.IsZero() || len(p.liveOn(alloc.Name)) > 0 {
+		return nil
 	}
-	return nil
+	if _, ok, err := v1alpha1.IdleSince(alloc); err == nil && ok {
+		return nil
+	}
+	var latest time.Time
+	for _, o := range p.insts {
+		if o.Spec.AllocationRef.Name == alloc.Name && o.Status.EndTime != nil && o.Status.EndTime.After(latest) {
+			latest = o.Status.EndTime.Time
+		}
+	}
+	if latest.IsZero() {
+		return nil
+	}
+	return p.writeIdleSince(alloc, &latest)
 }
 
 // tombstone handles an ended Instance: it stays while its Allocation exists, as
 // the record of what ran there, and is deleted once the Allocation is gone.
 func (p *pass) tombstone(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) error {
+	if alloc != nil && alloc.DeletionTimestamp.IsZero() && releaseRequired(in) && len(p.liveOn(alloc.Name)) == 0 {
+		if err := p.deleteAllocation(alloc, "resuming the release of a failed Instance's Allocation"); err != nil {
+			return err
+		}
+	} else if err := p.anchorIfLast(alloc); err != nil {
+		return err
+	}
 	if err := p.removeDrainFinalizer(in); err != nil {
 		return err
 	}
@@ -172,7 +219,7 @@ func (p *pass) tombstone(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) erro
 func (p *pass) shutdownInstance(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) error {
 	switch in.Status.Phase {
 	case v1alpha1.InstanceReady:
-		return p.startDrain(in, "the deployment is shutting down")
+		return p.startDrain(in)
 	case v1alpha1.InstanceDraining:
 		return p.running(in, alloc)
 	}
@@ -181,16 +228,45 @@ func (p *pass) shutdownInstance(in *v1alpha1.Instance, alloc *v1alpha1.Allocatio
 }
 
 // startDrain makes a ready Instance draining (HBEP-7, Handover, Draining).
-func (p *pass) startDrain(in *v1alpha1.Instance, why string) error {
+func (p *pass) startDrain(in *v1alpha1.Instance) error {
 	if in.Status.Phase == v1alpha1.InstanceDraining {
 		return nil
+	}
+	if _, ok := drainBegan(in); !ok {
+		if err := p.setMeta(in, func(n *v1alpha1.Instance) {
+			if n.Annotations == nil {
+				n.Annotations = map[string]string{}
+			}
+			n.Annotations[annotationDrainStarted] = p.now.UTC().Format(time.RFC3339)
+		}); err != nil {
+			return err
+		}
 	}
 	if err := p.setStatus(in, func(s *v1alpha1.InstanceStatus) { s.Phase = v1alpha1.InstanceDraining }); err != nil {
 		return err
 	}
 	p.at(p.now.Add(time.Second))
-	_ = why
 	return nil
+}
+
+// annotationDrainStarted holds when the controller made an Instance draining,
+// in RFC 3339 UTC seconds. A draining Instance ends on a report that arrived
+// after it, never on one taken before the drain began, when a request the
+// front admitted since may still run (HBEP-7, Handover, Draining). It is a
+// lifecycle-owned annotation, proposed for api/v1alpha1/constants.go.
+const annotationDrainStarted = v1alpha1.Group + "/drain-started"
+
+// drainBegan reads annotationDrainStarted.
+func drainBegan(in *v1alpha1.Instance) (time.Time, bool) {
+	v, ok := in.Annotations[annotationDrainStarted]
+	if !ok {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, v)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
 }
 
 // pending moves a pending Instance to starting once its Allocation runs and its
@@ -215,7 +291,7 @@ func (p *pass) pending(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) error 
 		}
 		msg := fmt.Sprintf("no agent registered within %s of the job's start", st.registrationTimeout)
 		if err := p.r.setDialHome(p.ctx, in.Labels[v1alpha1.LabelProvider], true, p.now,
-			fmt.Sprintf("Instance %s/%s could not register through its dial-home path: %s", in.Namespace, in.Name, msg)); err != nil {
+			fmt.Sprintf("Instance %s/%s could not register through its dial-home path: %s", in.Namespace, in.Name, msg), time.Time{}); err != nil {
 			return err
 		}
 		return p.fail(in, alloc, v1alpha1.ReasonRegistrationTimeout, msg)
@@ -235,7 +311,7 @@ func (p *pass) pending(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) error 
 		return err
 	}
 	p.r.Recorder.Event(in, false, eventStarted, "AgentRegistered", fmt.Sprintf("the agent of Allocation %s registered on %s; the Instance starts", alloc.Name, reg.node))
-	if err := p.r.setDialHome(p.ctx, in.Labels[v1alpha1.LabelProvider], false, p.now, "an agent registered through the dial-home path"); err != nil {
+	if err := p.r.setDialHome(p.ctx, in.Labels[v1alpha1.LabelProvider], false, p.now, "an agent registered through the dial-home path", reg.at); err != nil {
 		return err
 	}
 	p.at(p.now.Add(st.startTimeout))
@@ -255,6 +331,7 @@ func (p *pass) settingsOf(pv *providerView) settings {
 // agentView is what the controller knows of an Instance's agent in this pass.
 type agentView struct {
 	report      *agentapi.InstanceReport
+	reportAt    time.Time
 	unreachable bool
 }
 
@@ -320,10 +397,16 @@ func (p *pass) agent(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, st setti
 			last = at
 		}
 		if rep.Instance != nil && rep.Instance.UID == string(in.UID) {
-			av.report = rep.Instance
+			av.report, av.reportAt = rep.Instance, at
 		}
 	}
 	deadline := last.Add(st.agentTimeout)
+	// After the controller's own restart every agent registers again within a
+	// long poll and a report interval; none is judged unreachable before that,
+	// however short health.agentTimeout is (HBEP-7, registration is soft state).
+	if grace := p.mem.started.Add(agentGrace); grace.After(deadline) {
+		deadline = grace
+	}
 	av.unreachable = !p.now.Before(deadline)
 	if !av.unreachable {
 		p.at(deadline)
@@ -366,7 +449,13 @@ func (p *pass) draining(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av ag
 		}
 		p.at(in.Status.LeaseEnd.Time)
 	}
-	if av.report != nil && !av.unreachable && runningRequests(av.report) == 0 {
+	// Only a report that arrived at least a second after the drain began
+	// counts: an older one predates requests the front admitted until then.
+	began, ok := drainBegan(in)
+	if !ok {
+		began = p.mem.started // an Instance made draining before this record existed
+	}
+	if av.report != nil && !av.unreachable && !av.reportAt.Before(began.Add(time.Second)) && runningRequests(av.report) == 0 {
 		return p.end(in, alloc, v1alpha1.ReasonDrained, "drained: no request runs", false)
 	}
 	return nil
@@ -393,7 +482,7 @@ func (p *pass) handOver(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av ag
 	} else {
 		p.r.Recorder.Event(in, true, eventDegraded, v1alpha1.ReasonCapacityDropped, "drain start reached with no replacement ready: capacity drops (HBEP-7, drain rule)")
 	}
-	if err := p.startDrain(in, "drain start"); err != nil {
+	if err := p.startDrain(in); err != nil {
 		return err
 	}
 	return p.draining(in, alloc, av)

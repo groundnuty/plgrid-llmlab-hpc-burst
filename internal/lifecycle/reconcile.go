@@ -80,11 +80,15 @@ type pass struct {
 
 	allocs map[string]*v1alpha1.Allocation
 	insts  []*v1alpha1.Instance
+	// stale marks Instances an earlier ModelDeployment of this name owned.
+	stale map[types.UID]bool
+	// deferred: a placement waits for a warm Allocation's agent to register
+	// again after the controller's restart; it is not a missing Provider.
+	deferred bool
 
 	degraded []degradedReason
 	// sizingRefused collects Providers that refused the spec's size.
 	sizingRefused []string
-	s2r           []v1alpha1.ClassStartToReady
 	next          time.Time
 }
 
@@ -118,6 +122,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err := p.run(); err != nil {
 		return ctrl.Result{}, err
 	}
+	if err := r.sweepSecrets(ctx); err != nil {
+		return ctrl.Result{}, err
+	}
+	if p.md == nil && len(p.insts) == 0 && len(p.allocs) == 0 {
+		return ctrl.Result{}, nil // a deleted deployment with nothing left: no more passes
+	}
 	wait := maxRequeue
 	if !p.next.IsZero() {
 		wait = min(maxRequeue, max(time.Second, p.next.Sub(p.now)))
@@ -144,28 +154,33 @@ func (p *pass) run() error {
 		if err := p.prepareServed(); err != nil {
 			return err
 		}
-	}
-	if err := p.instances(); err != nil {
+	} else if err := p.loadReferencedProviders(); err != nil {
 		return err
+	}
+	// An Instance's failure does not hold back the rest of the pass; it is
+	// returned at the end, so the key is retried with backoff.
+	instErr := p.instances()
+	if err := p.clearDialHome(); err != nil {
+		return errors.Join(instErr, err)
 	}
 	if md != nil && md.Spec.Source.Served != nil && !p.shutdown {
 		if err := p.capacity(); err != nil {
-			return err
+			return errors.Join(instErr, err)
 		}
 		if err := p.replacements(); err != nil {
-			return err
+			return errors.Join(instErr, err)
 		}
 	}
 	if err := p.retention(); err != nil {
-		return err
+		return errors.Join(instErr, err)
 	}
 	if md == nil {
-		return nil
+		return instErr
 	}
 	if md.Spec.Source.Managed != nil {
-		return p.writeManagedStatus()
+		return errors.Join(instErr, p.writeManagedStatus())
 	}
-	return p.writeStatus()
+	return errors.Join(instErr, p.writeStatus())
 }
 
 // observe lists the ModelDeployment's Allocations (by its model-deployment
@@ -188,10 +203,19 @@ func (p *pass) observe() error {
 	if err := p.r.Reader.List(p.ctx, &il, client.InNamespace(p.key.Namespace), sel); err != nil {
 		return fmt.Errorf("list Instances: %w", err)
 	}
+	p.stale = map[types.UID]bool{}
 	for i := range il.Items {
 		in := &il.Items[i]
-		if ownedBy(in, p.key.Name, p.md) {
+		owned, stale := ownedBy(in, p.key.Name, p.md)
+		if owned {
 			p.insts = append(p.insts, in)
+		}
+		if stale {
+			// An earlier ModelDeployment of the same name owned it: it is
+			// drained and ended for clean-up only, and never counts for this
+			// one (capacity, status, start-to-ready, failure streak).
+			p.insts = append(p.insts, in)
+			p.stale[in.UID] = true
 		}
 	}
 	sort.Slice(p.insts, func(i, j int) bool {
@@ -205,27 +229,57 @@ func (p *pass) observe() error {
 }
 
 // ownedBy reports whether the Instance belongs to the ModelDeployment: its
-// controller owner reference names it (and its UID, while it exists).
-func ownedBy(in *v1alpha1.Instance, name string, md *v1alpha1.ModelDeployment) bool {
+// controller owner reference names it, and its UID while it exists. stale is
+// true for one a deleted ModelDeployment of the same name owned, which a
+// recreated one must still drain and end (review of PR 88).
+func ownedBy(in *v1alpha1.Instance, name string, md *v1alpha1.ModelDeployment) (owned, stale bool) {
 	for _, o := range in.OwnerReferences {
 		if o.Controller != nil && *o.Controller && o.Kind == "ModelDeployment" && o.Name == name {
-			return md == nil || o.UID == md.UID
+			if md == nil || o.UID == md.UID {
+				return true, false
+			}
+			return false, true
 		}
 	}
-	return false
+	return false, false
+}
+
+// referencedProviders returns the Providers the deployment's Instances and
+// Allocations name.
+func (p *pass) referencedProviders() []string {
+	var out []string
+	for _, in := range p.insts {
+		out = append(out, in.Labels[v1alpha1.LabelProvider])
+	}
+	for _, a := range p.allocs {
+		out = append(out, a.Labels[v1alpha1.LabelProvider])
+	}
+	return out
+}
+
+// loadReferencedProviders reads, for a deleted or managed-source deployment,
+// the Providers and profiles its remaining objects name: their drain windows
+// and maxIdle still apply (review of PR 88). None of them takes anything new.
+func (p *pass) loadReferencedProviders() error {
+	extra := p.referencedProviders()
+	p.pvByName = map[string]*providerView{}
+	if len(extra) == 0 {
+		return nil
+	}
+	pvs, err := p.r.loadProviders(p.ctx, &v1alpha1.ModelDeployment{}, extra)
+	if err != nil {
+		return err
+	}
+	for _, pv := range pvs {
+		p.pvByName[pv.name] = pv
+	}
+	return nil
 }
 
 // prepareServed reads the Providers, checks the spec and computes the current
 // IDs (HBEP-7, Reconcile loop, steps 1 and 2).
 func (p *pass) prepareServed() error {
-	var extra []string
-	for _, in := range p.insts {
-		extra = append(extra, in.Labels[v1alpha1.LabelProvider])
-	}
-	for _, a := range p.allocs {
-		extra = append(extra, a.Labels[v1alpha1.LabelProvider])
-	}
-	pvs, err := p.r.loadProviders(p.ctx, p.md, extra)
+	pvs, err := p.r.loadProviders(p.ctx, p.md, p.referencedProviders())
 	if err != nil {
 		return err
 	}
@@ -259,7 +313,11 @@ func (p *pass) prepareServed() error {
 	if p.specErr != "" || len(p.classList) == 0 {
 		return nil
 	}
-	for _, cid := range p.r.currentIDs(p.ctx, p.md, p.classList) {
+	ids, err := p.r.currentIDs(p.ctx, p.md, p.classList)
+	if err != nil {
+		return err
+	}
+	for _, cid := range ids {
 		c := cid
 		p.ids[c.class] = &c
 		if c.problem != "" {
@@ -272,7 +330,7 @@ func (p *pass) prepareServed() error {
 			p.degrade(v1alpha1.ReasonIdentityUnresolved, "class %s/%s has no current deployment ID: %s", c.class.GPUModel, c.class.CPUArch, c.problem)
 			continue
 		}
-		blocked, err := p.r.classBlocked(p.ctx, p.md, c.id)
+		blocked, err := p.r.classBlocked(p.ctx, p.md, c.id, resolveShapes(p.md))
 		if err != nil {
 			return err
 		}

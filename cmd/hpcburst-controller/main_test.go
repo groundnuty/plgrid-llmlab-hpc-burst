@@ -23,6 +23,8 @@ func TestParse(t *testing.T) {
 		{"unknown front mode", append(append([]string{}, base...), "--front-mode", "x", "--front-addr", "a:1"), "want direct or ssh"},
 		{"no state directory", base[2:], "--state-dir is required"},
 		{"port base out of range", []string{"--state-dir", "/s", "--port-base", "80", "--health-addr", "127.0.0.1:29226"}, "out of range"},
+		// The block reaches base+7: 65530 would put the dial-home port past 65535.
+		{"port base too high for the block", []string{"--state-dir", "/s", "--port-base", "65530", "--health-addr", "127.0.0.1:29226"}, "out of range"},
 		{"an old flag", append(append([]string{}, base...), "--credentials-dir", "c"), "not defined"},
 		{"health on all interfaces", []string{"--state-dir", "/s", "--port-base", "29220", "--health-addr", ":29226"}, "loopback only"},
 		{"zero workers", append(append([]string{}, base...), "--workers", "0"), "at least 1"},

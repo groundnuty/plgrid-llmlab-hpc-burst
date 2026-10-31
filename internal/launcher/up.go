@@ -200,6 +200,13 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 	if err != nil {
 		return nil, fmt.Errorf("refusing to start: %w", err)
 	}
+	// With controllers, the agent endpoint's certificate and key are made or checked before anything
+	// starts, so a broken pair costs nothing; startSupervisor checks them again.
+	if ctrlBin != "" {
+		if err := ensureAgentEndpointPair(l.host(ports), o.Log); err != nil {
+			return nil, err
+		}
+	}
 	bin, err := ResolveBinary(o.BinDir, version)
 	if err != nil {
 		return nil, err

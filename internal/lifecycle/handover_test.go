@@ -302,9 +302,16 @@ func TestHandoverBothServeThenPrimaryDrainsAndSecondReplacementIsPlanned(t *test
 	if r1.Spec.DeploymentID != p.Spec.DeploymentID {
 		t.Fatalf("replacement ID %s, primary ID %s: same class, same ID", r1.Spec.DeploymentID, p.Spec.DeploymentID)
 	}
+	// At its drain start, 09:50:20, the primary drains; it ends on the first
+	// report taken after the drain began, the agent's at 09:50:30, which shows
+	// no request running (a report from before the drain never ends it).
 	hoStepTo(rg, hoT(9, 50, 20), 10*time.Second, nil)
+	if ph := hoPhase(rg, p.Name); ph != v1alpha1.InstanceDraining {
+		t.Fatalf("at 09:50:20 the primary is %s, want draining", ph)
+	}
+	hoStepTo(rg, hoT(9, 50, 30), 10*time.Second, nil)
 	if got := rg.instance(p.Name); got.Status.Phase != v1alpha1.InstanceEnded || got.Status.EndReason != v1alpha1.ReasonDrained {
-		t.Fatalf("at 09:50:20 the primary is %s/%s, want ended/Drained", got.Status.Phase, got.Status.EndReason)
+		t.Fatalf("at 09:50:30 the primary is %s/%s, want ended/Drained", got.Status.Phase, got.Status.EndReason)
 	}
 	if n, c := len(rg.rec.Find("replaced", "HandedOver")), len(rg.rec.Find("degraded", "CapacityDropped")); n != 1 || c != 0 {
 		t.Fatalf("HandedOver events %d (want 1), CapacityDropped events %d (want 0)", n, c)
@@ -432,9 +439,14 @@ func TestHandoverLateReplacementDegradesThenTakesOver(t *testing.T) {
 	if ph := hoPhase(rg, p.Name); ph != v1alpha1.InstanceReady {
 		t.Fatalf("at 09:50:10 the primary is %s, want ready", ph)
 	}
+	// Draining from 09:50:20, on time; ended on the first report after it.
 	hoStepTo(rg, hoT(9, 50, 20), 10*time.Second, nil)
+	if ph := hoPhase(rg, p.Name); ph != v1alpha1.InstanceDraining {
+		t.Fatalf("at 09:50:20 the primary is %s, want draining on time", ph)
+	}
+	hoStepTo(rg, hoT(9, 50, 30), 10*time.Second, nil)
 	if got := rg.instance(p.Name); got.Status.Phase != v1alpha1.InstanceEnded || got.Status.EndReason != v1alpha1.ReasonDrained {
-		t.Fatalf("at 09:50:20 the primary is %s/%s, want drained on time", got.Status.Phase, got.Status.EndReason)
+		t.Fatalf("at 09:50:30 the primary is %s/%s, want drained", got.Status.Phase, got.Status.EndReason)
 	}
 	if c, n := rg.condition(hoMD, v1alpha1.ConditionDegraded), len(rg.rec.Find("degraded", "CapacityDropped")); c.Reason != v1alpha1.ReasonCapacityDropped || n != 1 {
 		t.Fatalf("Degraded reason %s and %d CapacityDropped events, want CapacityDropped and 1", c.Reason, n)
@@ -517,8 +529,12 @@ func TestHandoverLeaseEndExtensionMovesDrainStart(t *testing.T) {
 		}
 	})
 	hoStepTo(rg, hoT(11, 50, 20), 10*time.Second, nil)
+	if ph := hoPhase(rg, p.Name); ph != v1alpha1.InstanceDraining {
+		t.Fatalf("at 11:50:20 the primary is %s, want draining at the moved drain start", ph)
+	}
+	hoStepTo(rg, hoT(11, 50, 30), 10*time.Second, nil)
 	if got := rg.instance(p.Name); got.Status.Phase != v1alpha1.InstanceEnded || got.Status.EndReason != v1alpha1.ReasonDrained {
-		t.Fatalf("at 11:50:20 the primary is %s/%s, want drained at the moved drain start", got.Status.Phase, got.Status.EndReason)
+		t.Fatalf("at 11:50:30 the primary is %s/%s, want drained on the first report after the drain began", got.Status.Phase, got.Status.EndReason)
 	}
 }
 

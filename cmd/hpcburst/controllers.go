@@ -14,12 +14,21 @@ func cmdSupervise(ctx context.Context, args []string, _, stderr io.Writer) int {
 	fs := flags("supervise", stderr)
 	var o launcher.SuperviseOptions
 	var sd string
+	var handoffFD int
 	fs.StringVar(&sd, "state-dir", "", stateDirUsage)
+	fs.IntVar(&handoffFD, "handoff-fd", 0, "descriptor of the pipe on which up confirms that it has recorded this process (required; only up starts a supervisor)")
 	if code, done := parse(fs, args); done {
 		return code
 	}
+	if handoffFD == 0 {
+		fmt.Fprintln(stderr, "supervise: --handoff-fd is required: only hpcburst up starts a supervisor")
+		return exitUsage
+	}
 	var err error
 	if o.StateDir, err = stateDir(sd); err != nil {
+		return fail(stderr, err)
+	}
+	if o.Handoff, err = launcher.OpenHandoff(handoffFD); err != nil {
 		return fail(stderr, err)
 	}
 	o.Log = stderr
