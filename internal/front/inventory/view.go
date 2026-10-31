@@ -93,8 +93,10 @@ type Instance struct {
 	LeaseEnd     time.Time
 	DrainStart   time.Time
 	// Eligible is the part of eligibility the control plane decides: phase
-	// ready, AgentUnreachable not true, and a registered transport. The
-	// router adds its pauses and the request's level.
+	// ready, AgentUnreachable not true, a registered transport, and a Provider
+	// that the deployment's spec.providers selects now. A member whose Provider
+	// was deselected stays a member, not eligible, so its open requests keep
+	// their count. The router adds its pauses and the request's level.
 	Eligible bool
 }
 

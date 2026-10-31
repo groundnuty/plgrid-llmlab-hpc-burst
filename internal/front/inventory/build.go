@@ -50,7 +50,7 @@ func Build(s Snapshot, in Inputs) *View {
 		md := &s.Deployments[i]
 		switch {
 		case md.Spec.Source.Served != nil:
-			v.addServed(md, byOwner[md.UID], in)
+			v.addServed(md, byOwner[md.UID], providers, in)
 		case md.Spec.Source.Managed != nil:
 			v.addManaged(md, providers, in)
 		}
@@ -90,7 +90,7 @@ func instancesByOwner(insts []v1alpha1.Instance) map[types.UID][]*v1alpha1.Insta
 	return out
 }
 
-func (v *View) addServed(md *v1alpha1.ModelDeployment, insts []*v1alpha1.Instance, in Inputs) {
+func (v *View) addServed(md *v1alpha1.ModelDeployment, insts []*v1alpha1.Instance, providers map[string]*v1alpha1.Provider, in Inputs) {
 	d := &Deployment{
 		Key: md.Namespace + "/" + md.Name, Namespace: md.Namespace, Name: md.Name, UID: md.UID,
 		ServedName: md.Spec.Model, Desired: int(md.Spec.Instances),
@@ -106,8 +106,9 @@ func (v *View) addServed(md *v1alpha1.ModelDeployment, insts []*v1alpha1.Instanc
 			d.MaxRequestDuration = mrd
 		}
 	}
+	attached := v.attachedProviders(md, providers)
 	for _, inst := range insts {
-		if m := v.routable(md, d, inst, in); m != nil {
+		if m := v.routable(md, d, inst, attached, in); m != nil {
 			d.Members = append(d.Members, m)
 			v.Joined[inst.UID] = true
 		}
@@ -117,9 +118,29 @@ func (v *View) addServed(md *v1alpha1.ModelDeployment, insts []*v1alpha1.Instanc
 	mm.Served = append(mm.Served, d)
 }
 
+// attachedProviders is the set of Providers the deployment's current provider
+// selection allows (HBEP-5, Notes, Routing policy). An unreadable selector
+// attaches none and is logged once.
+func (v *View) attachedProviders(md *v1alpha1.ModelDeployment, providers map[string]*v1alpha1.Provider) map[string]bool {
+	out := map[string]bool{}
+	for _, name := range sortedNames(providers) {
+		ok, err := selected(md.Spec.Providers, providers[name])
+		if err != nil {
+			v.problemf("ModelDeployment %s: provider selector: %v; none of its Instances takes a new request", md.Namespace+"/"+md.Name, err)
+			return map[string]bool{}
+		}
+		out[name] = ok
+	}
+	return out
+}
+
 // routable returns the Instance's routing entry when it is routable at
-// in.Now (HBEP-5, Request path, Routable), or nil.
-func (v *View) routable(md *v1alpha1.ModelDeployment, d *Deployment, inst *v1alpha1.Instance, in Inputs) *Instance {
+// in.Now (HBEP-5, Request path, Routable), or nil. attached is the set of
+// Providers the deployment selects now. An Instance whose Provider is not in it
+// never joins; one that joined earlier stays a member, not eligible, like any
+// other skip, so its open requests keep their count until they end (a leave
+// would release them at once).
+func (v *View) routable(md *v1alpha1.ModelDeployment, d *Deployment, inst *v1alpha1.Instance, attached map[string]bool, in Inputs) *Instance {
 	key := inst.Namespace + "/" + inst.Name
 	phase := inst.Status.Phase
 	if inst.DeletionTimestamp != nil || phase == v1alpha1.InstanceDraining || phase == v1alpha1.InstanceEnded {
@@ -146,14 +167,15 @@ func (v *View) routable(md *v1alpha1.ModelDeployment, d *Deployment, inst *v1alp
 	}
 	transport := in.HasTransport(inst.UID)
 	ready := phase == v1alpha1.InstanceReady
-	if !in.Joined[inst.UID] && !(ready && transport) {
+	sel := attached[prov.Name]
+	if !in.Joined[inst.UID] && !(ready && transport && sel) {
 		return nil
 	}
 	return &Instance{
 		Key: key, Namespace: inst.Namespace, Name: inst.Name, UID: inst.UID, Deployment: d.Key,
 		Provider: prov.Name, DeploymentID: string(inst.Spec.DeploymentID), DisplayID: inst.Spec.DeploymentID.Display(),
 		Cap: instanceCap(md.Spec.Routing, inst), LeaseEnd: inst.Status.LeaseEnd.Time, DrainStart: drain,
-		Eligible: ready && transport && !conditionTrue(inst.Status.Conditions, v1alpha1.ConditionAgentUnreachable),
+		Eligible: ready && transport && sel && !conditionTrue(inst.Status.Conditions, v1alpha1.ConditionAgentUnreachable),
 	}
 }
 
