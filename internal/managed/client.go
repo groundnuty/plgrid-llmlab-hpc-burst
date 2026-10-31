@@ -35,9 +35,11 @@ var _ provider.Managed = (*Client)(nil)
 // no redirect (a 3xx is an unknown error, so the key never goes to another
 // address), and reads at most MaxCatalogBytes within ReadTimeout. A 200 is
 // decoded as OpenAI's list, {"data": [{"id": ...}, ...]}, and an entry's
-// "revision" member, when it is a string, is its revision; OpenAI's model
-// object has no revision, so that member name is an assumption shared with
-// the double (llmlabtest). Unknown members are ignored. A 401 or 403 is an
+// "revision" member, when it is a string, is its revision; any other
+// "revision" is no revision. OpenAI's model object has no revision, so that
+// member name is an assumption shared with the double (llmlabtest), and a
+// gateway whose member of that name means something else must not stop the
+// catalog. Unknown members are ignored. A 401 or 403 is an
 // error that wraps provider.ErrKeyRejected; every other outcome is an unknown
 // error. No error ever holds the key or any byte of the response body, which
 // a gateway may fill with the request's own headers.
@@ -131,11 +133,8 @@ func parseListing(body []byte) ([]provider.CatalogEntry, error) {
 			return nil, fmt.Errorf("catalog read: listing entry %d has no string id", i)
 		}
 		e := provider.CatalogEntry{Name: *d.ID}
-		if len(d.Revision) > 0 && string(d.Revision) != "null" {
-			var r string
-			if json.Unmarshal(d.Revision, &r) != nil {
-				return nil, fmt.Errorf("catalog read: listing entry %d has a revision that is not a string", i)
-			}
+		var r string
+		if len(d.Revision) > 0 && string(d.Revision) != "null" && json.Unmarshal(d.Revision, &r) == nil {
 			e.Revision = &r
 		}
 		out = append(out, e)
