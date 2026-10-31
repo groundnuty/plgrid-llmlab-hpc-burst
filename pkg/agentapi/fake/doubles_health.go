@@ -23,7 +23,11 @@ func HealthSlowPrefill(now time.Time, _ string) agentapi.Health {
 }
 
 // perWorkerCount counts the samples taken of each worker, for the doubles whose
-// counters rise at every sample whatever the clock says.
+// counters rise at every sample whatever the clock says. A count is kept by
+// worker name, not by process: it goes on rising after the worker restarts,
+// where a real engine's counters start again from zero. Engine.Health is given
+// no PID, so a double cannot tell. After a restart, a test of a ladder with such
+// a double sees the new process over its threshold at its first sample.
 type perWorkerCount map[string]int64
 
 func (c perWorkerCount) next(worker string) int64 {

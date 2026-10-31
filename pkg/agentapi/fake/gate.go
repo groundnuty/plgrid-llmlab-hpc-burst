@@ -32,7 +32,7 @@ type Refusal struct {
 }
 
 // Gate stands in for the agent API server's authentication step (agentapi's
-// documentation, How reports reach the controller): it finds the Allocation by
+// documentation, Transport): it finds the Allocation by
 // the tag the agent presents, compares the credential in constant time, then
 // compares the job ID with the recorded one, and only then calls the inner
 // Backend, with the Caller filled from its table. A refused call never reaches
