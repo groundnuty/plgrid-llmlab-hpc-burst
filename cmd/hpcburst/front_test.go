@@ -9,7 +9,10 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"net/http"
 	"os"
@@ -28,6 +31,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/inventory"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 var (
@@ -60,12 +64,9 @@ func removeFrontBinary() {
 	}
 }
 
-// The front's listeners in this test: inside the launcher tests' block 29220-29239 and outside
-// the launcher's own base..base+7.
-const (
-	frontClientPort = 29230
-	frontDialPort   = 29231
-)
+// The front's client listener in this test: inside the launcher tests' block 29220-29239 and
+// outside the launcher's own base..base+7. Its dial-home listener takes the ssh default, base+7.
+const frontClientPort = 29230
 
 type frontEntryRecord struct {
 	Name     string     `json:"name"`
@@ -164,12 +165,18 @@ func TestFrontSupervision(t *testing.T) {
 	}
 	cfg := filepath.Join(work, "front.json")
 	usageDir := filepath.Join(work, "usage")
-	cfgBody := fmt.Sprintf(`{"clientListen":"127.0.0.1:%d","dialHomeListen":"127.0.0.1:%d","clientKeysFile":%q,"usageDir":%q}`, frontClientPort, frontDialPort, keys, usageDir)
+	// No dialHomeListen: in ssh mode it defaults to 127.0.0.1:<base+7> (agentapi.Host.DialHomeAddr).
+	cfgBody := fmt.Sprintf(`{"clientListen":"127.0.0.1:%d","clientKeysFile":%q,"usageDir":%q}`, frontClientPort, keys, usageDir)
 	if err := os.WriteFile(cfg, []byte(cfgBody), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	r := cli(t, h.upArgs(base, "--json", "--controller-bin", ctl, "--manifests", "../../config/crd", "--front-config", cfg, "--front-bin", fb)...)
+	sshKey := filepath.Join(work, "restricted-key")
+	if err := os.WriteFile(sshKey, []byte("not read by the launcher"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := cli(t, h.upArgs(base, "--json", "--controller-bin", ctl, "--manifests", "../../config/crd", "--front-config", cfg, "--front-bin", fb,
+		"--front-mode", "ssh", "--front-addr", "front.example.test", "--front-key", sshKey)...)
 	if r.code != exitOK {
 		t.Fatalf("up exited %d: %s", r.code, r.err)
 	}
@@ -195,7 +202,7 @@ func TestFrontSupervision(t *testing.T) {
 		t.Fatalf("the front (pid %d) is not a child of the supervisor (pid %d)", pid, sup.PID)
 	}
 	cmdline := strings.Split(strings.TrimRight(fileOf(fmt.Sprintf("/proc/%d/cmdline", pid)), "\x00"), "\x00")
-	wantArgv := []string{fb, "--config", cfg, "--state-dir", h.dir, "--port-base", "29220", "--health-addr", healthAddr}
+	wantArgv := []string{fb, "--config", cfg, "--state-dir", h.dir, "--port-base", "29220", "--health-addr", healthAddr, "--mode", "ssh"}
 	if !slices.Equal(cmdline, wantArgv) {
 		t.Errorf("front argv\n got %q\nwant %q", cmdline, wantArgv)
 	}
@@ -203,6 +210,19 @@ func TestFrontSupervision(t *testing.T) {
 		t.Error("the client key is on the front's command line")
 	}
 	waitFor(t, 60*time.Second, "the front's /healthz", func() bool { _, ok := getFrontHealth(healthAddr); return ok })
+
+	// ---- ssh mode: the dial-home listener is at base+7 and presents the launcher's certificate ----
+	dialAddr := fmt.Sprintf("127.0.0.1:%d", base+7)
+	wantListen := []string{"127.0.0.1:" + itoa(base+4), dialAddr, fmt.Sprintf("127.0.0.1:%d", frontClientPort)}
+	if got := listenersOf(t, pid); !slices.Equal(sortedStrings(got), sortedStrings(wantListen)) {
+		t.Errorf("the front listens on %v, want %v", got, wantListen)
+	}
+	pin := pinOfFile(t, filepath.Join(h.dir, "agent-endpoint", "tls.crt"))
+	conn, err := tls.Dial("tcp", dialAddr, agentapi.ClientTLSConfig(pin))
+	if err != nil {
+		t.Fatalf("the dial-home listener does not present the launcher's certificate: %v", err)
+	}
+	conn.Close()
 
 	// ---- the watch sees objects created in the cluster, status included ----
 	c := h.clients()
@@ -335,4 +355,28 @@ func frontTestInstance(mdName string, mdUID types.UID) *v1alpha1.Instance {
 			},
 		},
 	}
+}
+
+func sortedStrings(s []string) []string {
+	out := append([]string(nil), s...)
+	slices.Sort(out)
+	return out
+}
+
+// pinOfFile reads a PEM certificate and returns its pin, with parsing of its own.
+func pinOfFile(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode(b)
+	if block == nil {
+		t.Fatalf("%s holds no PEM block", path)
+	}
+	c, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return agentapi.PinOf(c)
 }
