@@ -141,6 +141,10 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, x *exchange, n n
 			p.routeFail(w, x, rerr)
 			return
 		}
+		// Released exactly once however the request ends, including the
+		// http.ErrAbortHandler panic of a cut body (HBEP-5, Request path
+		// step 9); Release is idempotent, so the explicit calls stay.
+		defer t.release()
 		p.setTarget(x, t)
 		resp, err := p.send(x, r, t, body, rb, key)
 		if err == nil {
