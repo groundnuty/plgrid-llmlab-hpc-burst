@@ -218,14 +218,21 @@ func ownedBy(in *v1alpha1.Instance, name string, md *v1alpha1.ModelDeployment) b
 // prepareServed reads the Providers, checks the spec and computes the current
 // IDs (HBEP-7, Reconcile loop, steps 1 and 2).
 func (p *pass) prepareServed() error {
-	pvs, err := p.r.loadProviders(p.ctx, p.md)
+	var extra []string
+	for _, in := range p.insts {
+		extra = append(extra, in.Labels[v1alpha1.LabelProvider])
+	}
+	for _, a := range p.allocs {
+		extra = append(extra, a.Labels[v1alpha1.LabelProvider])
+	}
+	pvs, err := p.r.loadProviders(p.ctx, p.md, extra)
 	if err != nil {
 		return err
 	}
 	p.pvByName = map[string]*providerView{}
 	for _, pv := range pvs {
 		p.pvByName[pv.name] = pv
-		if pv.managed {
+		if pv.managed || pv.extra {
 			continue // a served deployment ignores managed Providers (HBEP-7, step 1)
 		}
 		p.providers = append(p.providers, pv)

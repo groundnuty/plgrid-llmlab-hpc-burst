@@ -34,9 +34,13 @@ type providerView struct {
 	// architecture (Degraded, ProviderUnavailable).
 	problem     string
 	agentDigest string
+	// extra marks a Provider the deployment no longer allows but whose
+	// Instances or Allocations still exist: it is read for their drain window
+	// and retention, and takes nothing new.
+	extra bool
 }
 
-func (p *providerView) usable() bool { return p.problem == "" && p.hasClass && !p.managed }
+func (p *providerView) usable() bool { return p.problem == "" && p.hasClass && !p.managed && !p.extra }
 
 // selectedProviderNames returns the allowed Provider names in HBEP-7's order:
 // those listed by name, in order, then those only the selector matches, by
@@ -67,9 +71,9 @@ func selectedProviderNames(sel v1alpha1.ProviderSelection, all []v1alpha1.Provid
 }
 
 // loadProviders resolves the deployment's allowed Providers with their
-// profiles and partitions. A missing object is a problem of that Provider,
-// not an error of the pass.
-func (r *Reconciler) loadProviders(ctx context.Context, md *v1alpha1.ModelDeployment) ([]*providerView, error) {
+// profiles and partitions, then the extra ones its objects still name. A
+// missing object is a problem of that Provider, not an error of the pass.
+func (r *Reconciler) loadProviders(ctx context.Context, md *v1alpha1.ModelDeployment, extra []string) ([]*providerView, error) {
 	var all v1alpha1.ProviderList
 	if err := r.Client.List(ctx, &all); err != nil {
 		return nil, fmt.Errorf("list Providers: %w", err)
@@ -82,9 +86,15 @@ func (r *Reconciler) loadProviders(ctx context.Context, md *v1alpha1.ModelDeploy
 	for i := range all.Items {
 		byName[all.Items[i].Name] = &all.Items[i]
 	}
+	allowed := len(names)
+	for _, n := range extra {
+		if n != "" && !slices.Contains(names, n) {
+			names = append(names, n)
+		}
+	}
 	var out []*providerView
-	for _, n := range names {
-		pv := &providerView{name: n}
+	for i, n := range names {
+		pv := &providerView{name: n, extra: i >= allowed}
 		out = append(out, pv)
 		p, ok := byName[n]
 		if !ok {
