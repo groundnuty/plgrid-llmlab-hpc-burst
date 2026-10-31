@@ -7,7 +7,6 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -137,7 +136,7 @@ func (r *Reconciler) loadProviders(ctx context.Context, md *v1alpha1.ModelDeploy
 		}
 		pv.partition = prof.Spec.Partitions[idx]
 		pv.class, pv.hasClass = pv.partition.AcceleratorClass, true
-		if !providerReady(p) {
+		if !v1alpha1.ProviderReady(p, r.Clock.Now()) {
 			pv.problem = fmt.Sprintf("Provider %s is not Ready", n)
 			continue
 		}
@@ -149,10 +148,6 @@ func (r *Reconciler) loadProviders(ctx context.Context, md *v1alpha1.ModelDeploy
 		pv.agentDigest = digest
 	}
 	return out, nil
-}
-
-func providerReady(p *v1alpha1.Provider) bool {
-	return apimeta.IsStatusConditionTrue(p.Status.Conditions, v1alpha1.ConditionProviderReady)
 }
 
 // classes returns the accelerator classes the allowed batch partitions offer,

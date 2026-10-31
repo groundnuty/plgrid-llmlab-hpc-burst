@@ -74,7 +74,7 @@ func (p *pass) noProvider() {
 	}
 	for _, d := range p.degraded {
 		switch d.reason {
-		case v1alpha1.ReasonProviderUnavailable, v1alpha1.ReasonVerificationFailed, v1alpha1.ReasonRestartLoop, reasonIdentityUnresolved:
+		case v1alpha1.ReasonProviderUnavailable, v1alpha1.ReasonVerificationFailed, v1alpha1.ReasonRestartLoop, v1alpha1.ReasonIdentityUnresolved:
 			return // already explained
 		}
 	}
@@ -119,7 +119,7 @@ func (p *pass) scaleDown(prim []*v1alpha1.Instance, surplus int) error {
 	})
 	for _, in := range victims[:surplus] {
 		if repl := p.replacementOf(in); repl != nil {
-			if err := p.end(repl, p.allocs[repl.Spec.AllocationRef.Name], endScaledDown, "its predecessor was scaled down", true); err != nil {
+			if err := p.end(repl, p.allocs[repl.Spec.AllocationRef.Name], v1alpha1.ReasonDrained, "its predecessor was scaled down", true); err != nil {
 				return err
 			}
 		}
@@ -131,7 +131,7 @@ func (p *pass) scaleDown(prim []*v1alpha1.Instance, surplus int) error {
 			continue
 		}
 		pending := a == nil || a.Status.AtProvider.StartTime == nil
-		if err := p.end(in, a, endScaledDown, "scaled down", pending); err != nil {
+		if err := p.end(in, a, v1alpha1.ReasonDrained, "scaled down", pending); err != nil {
 			return err
 		}
 	}

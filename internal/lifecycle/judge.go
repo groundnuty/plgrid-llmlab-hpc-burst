@@ -80,6 +80,11 @@ const (
 	causeError           = "error"
 )
 
+// signalRehash is the restart signal of a failed rehash, which restages at
+// the whole-Instance rung (HBEP-7, Instance start); InstanceRestart.Signal
+// takes CamelCase.
+const signalRehash = "RehashMismatch"
+
 // verificationData is a verification record's data (HBEP-11: the resolved
 // settings, the GPU type, the fingerprint, the rehash outcome and the
 // verdict), with what the controller fixed at verification.

@@ -232,7 +232,7 @@ func TestManagerOnControlPlane(t *testing.T) {
 		var seen []string
 		for _, e := range evs.Items {
 			seen = append(seen, e.Reason+" on "+e.Regarding.Name)
-			if e.Reason == eventDegraded+"/"+reasonIdentityUnresolved && e.Regarding.Name == "md-collide" && e.Type == corev1.EventTypeWarning {
+			if e.Reason == eventDegraded+"/"+v1alpha1.ReasonIdentityUnresolved && e.Regarding.Name == "md-collide" && e.Type == corev1.EventTypeWarning {
 				return true, ""
 			}
 		}

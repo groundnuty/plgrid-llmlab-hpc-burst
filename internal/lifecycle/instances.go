@@ -92,7 +92,6 @@ func (p *pass) allocationFailed(in *v1alpha1.Instance, alloc *v1alpha1.Allocatio
 		if obs.Reason != "" {
 			msg += ": " + obs.Reason
 		}
-		p.classFailed(in)
 		return true, p.fail(in, alloc, reason, msg)
 	}
 	if obs.Phase != v1alpha1.AllocationEnded {
@@ -122,6 +121,9 @@ func (p *pass) end(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, reason, ms
 	now := metav1.NewTime(p.now)
 	if err := p.setStatus(in, func(s *v1alpha1.InstanceStatus) {
 		s.Phase, s.EndReason = v1alpha1.InstanceEnded, reason
+		if s.EndTime == nil {
+			s.EndTime = &now
+		}
 		if reason != v1alpha1.ReasonDrained {
 			cond(&s.Conditions, v1alpha1.ConditionHealthy, metav1.ConditionFalse, reason, msg, in.Generation, now)
 		}
@@ -146,6 +148,14 @@ func (p *pass) tombstone(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) erro
 	if alloc != nil || !in.DeletionTimestamp.IsZero() {
 		return nil
 	}
+	// A failed Instance stays for restart.window after its end: its EndTime
+	// dates the class's failure streak (HBEP-7, Restart and provisioning loops).
+	if failedEnd(in) && p.md != nil {
+		if keep := in.Status.EndTime.Add(p.settingsOf(p.pvOf(in.Labels)).restartWindow); p.now.Before(keep) {
+			p.at(keep)
+			return nil
+		}
+	}
 	if err := p.r.Client.Delete(p.ctx, in); err != nil && !isNotFound(err) {
 		return fmt.Errorf("delete ended Instance %s: %w", in.Name, err)
 	}
@@ -167,7 +177,7 @@ func (p *pass) shutdownInstance(in *v1alpha1.Instance, alloc *v1alpha1.Allocatio
 		return p.running(in, alloc)
 	}
 	release := alloc.Status.AtProvider.StartTime == nil
-	return p.end(in, alloc, endShutdown, "the deployment is shutting down", release)
+	return p.end(in, alloc, v1alpha1.ReasonDrained, "the deployment is shutting down", release)
 }
 
 // startDrain makes a ready Instance draining (HBEP-7, Handover, Draining).
@@ -204,7 +214,6 @@ func (p *pass) pending(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) error 
 			return nil
 		}
 		msg := fmt.Sprintf("no agent registered within %s of the job's start", st.registrationTimeout)
-		p.classFailed(in)
 		if err := p.r.setDialHome(p.ctx, in.Labels[v1alpha1.LabelProvider], true, p.now,
 			fmt.Sprintf("Instance %s/%s could not register through its dial-home path: %s", in.Namespace, in.Name, msg)); err != nil {
 			return err
@@ -219,9 +228,9 @@ func (p *pass) pending(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) error 
 		s.JobID, s.Node = alloc.Annotations[v1alpha1.AnnotationJobID], reg.node
 		s.StartInstructionTime = &now
 		for _, c := range []string{v1alpha1.ConditionVerified, v1alpha1.ConditionQualified, v1alpha1.ConditionWarmedUp} {
-			cond(&s.Conditions, c, metav1.ConditionFalse, reasonPending, "not yet checked", in.Generation, now)
+			cond(&s.Conditions, c, metav1.ConditionFalse, v1alpha1.ReasonPending, "not yet checked", in.Generation, now)
 		}
-		cond(&s.Conditions, v1alpha1.ConditionAgentUnreachable, metav1.ConditionFalse, reasonReporting, "the agent registered", in.Generation, now)
+		cond(&s.Conditions, v1alpha1.ConditionAgentUnreachable, metav1.ConditionFalse, v1alpha1.ReasonReporting, "the agent registered", in.Generation, now)
 	}); err != nil {
 		return err
 	}
@@ -257,11 +266,13 @@ func (p *pass) running(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) error 
 	if ag == nil {
 		return p.pending(in, alloc)
 	}
+	if err := p.finishRestarts(in); err != nil {
+		return err
+	}
 	for _, reg := range p.r.Backend.registrations(alloc.UID) {
 		if reg.agentInstanceID != ag.AgentInstanceID && (reg.jobID == ag.JobID || reg.restartCount > ag.RestartCount) {
 			// A second execution of the job: nothing from the first is reused
 			// (HBEP-7, Test plan; HBEP-3, open question 13).
-			p.classFailed(in)
 			return p.fail(in, alloc, v1alpha1.ReasonRequeued,
 				fmt.Sprintf("job %s registered again as agent %s with restart count %d: a requeue", reg.jobID, reg.agentInstanceID, reg.restartCount))
 		}
@@ -320,10 +331,10 @@ func (p *pass) agent(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, st setti
 	now := metav1.NewTime(p.now)
 	err := p.setStatus(in, func(s *v1alpha1.InstanceStatus) {
 		if av.unreachable {
-			cond(&s.Conditions, v1alpha1.ConditionAgentUnreachable, metav1.ConditionTrue, reasonReportsMissing,
+			cond(&s.Conditions, v1alpha1.ConditionAgentUnreachable, metav1.ConditionTrue, v1alpha1.ReasonReportsMissing,
 				fmt.Sprintf("no report since %s", last.UTC().Format(time.RFC3339)), in.Generation, now)
 		} else {
-			cond(&s.Conditions, v1alpha1.ConditionAgentUnreachable, metav1.ConditionFalse, reasonReporting, "the agent reports", in.Generation, now)
+			cond(&s.Conditions, v1alpha1.ConditionAgentUnreachable, metav1.ConditionFalse, v1alpha1.ReasonReporting, "the agent reports", in.Generation, now)
 		}
 	})
 	return av, err

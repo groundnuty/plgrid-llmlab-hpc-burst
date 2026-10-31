@@ -165,6 +165,9 @@ func (sh shapes) validate() error {
 			return refuse("workload %s is %d; it must be at least 1", v.name, v.n)
 		}
 	}
+	if sh.targetSessions > agentapi.MaxTargetSessions {
+		return refuse("workload targetSessions is %d; at most %d", sh.targetSessions, agentapi.MaxTargetSessions)
+	}
 	if sh.longest != nil && *sh.longest < 1 {
 		return refuse("workload contextTokens.longest is %d; it must be at least 1", *sh.longest)
 	}
@@ -234,6 +237,9 @@ func renderLaunch(md *v1alpha1.ModelDeployment, plan servedPlan) v1alpha1.Launch
 	}
 	for _, f := range s.Flags {
 		name := flagName(f.Name)
+		if name == "max-num-seqs" {
+			continue // passed once, below, as --max-num-seqs=<n> (the Launch's CEL rule)
+		}
 		if booleanFlags[name] {
 			if f.Value == "false" {
 				cmd = append(cmd, "--no-"+name)
@@ -244,9 +250,7 @@ func renderLaunch(md *v1alpha1.ModelDeployment, plan servedPlan) v1alpha1.Launch
 		}
 		cmd = append(cmd, "--"+name, f.Value)
 	}
-	if _, ok := flagValue(s, "max-num-seqs"); !ok {
-		cmd = append(cmd, "--max-num-seqs", strconv.Itoa(int(plan.maxNumSeqs)))
-	}
+	cmd = append(cmd, "--max-num-seqs="+strconv.Itoa(int(plan.maxNumSeqs)))
 	var env []v1alpha1.LaunchEnvVar
 	for _, e := range s.Env {
 		env = append(env, v1alpha1.LaunchEnvVar{Name: e.Name, Value: e.Value})

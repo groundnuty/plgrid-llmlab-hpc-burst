@@ -11,7 +11,7 @@ import (
 // The command line is the launcher's contract (internal/launcher supervises
 // this binary with exactly these flags).
 func TestParse(t *testing.T) {
-	base := []string{"--kubeconfig", "kc", "--credentials-dir", "creds", "--health-addr", "127.0.0.1:29226"}
+	base := []string{"--state-dir", "/state", "--port-base", "29220", "--health-addr", "127.0.0.1:29226"}
 	cases := []struct {
 		name    string
 		args    []string
@@ -21,8 +21,10 @@ func TestParse(t *testing.T) {
 		{"with a front", append(append([]string{}, base...), "--front-mode", "ssh", "--front-addr", "front.example:22"), ""},
 		{"front mode alone", append(append([]string{}, base...), "--front-mode", "direct"), "go together"},
 		{"unknown front mode", append(append([]string{}, base...), "--front-mode", "x", "--front-addr", "a:1"), "want direct or ssh"},
-		{"no kubeconfig", base[2:], "--kubeconfig is required"},
-		{"health on all interfaces", []string{"--kubeconfig", "kc", "--credentials-dir", "c", "--health-addr", ":29226"}, "loopback only"},
+		{"no state directory", base[2:], "--state-dir is required"},
+		{"port base out of range", []string{"--state-dir", "/s", "--port-base", "80", "--health-addr", "127.0.0.1:29226"}, "out of range"},
+		{"an old flag", append(append([]string{}, base...), "--credentials-dir", "c"), "not defined"},
+		{"health on all interfaces", []string{"--state-dir", "/s", "--port-base", "29220", "--health-addr", ":29226"}, "loopback only"},
 		{"zero workers", append(append([]string{}, base...), "--workers", "0"), "at least 1"},
 		{"stray argument", append(append([]string{}, base...), "extra"), "unexpected arguments"},
 	}
@@ -33,8 +35,11 @@ func TestParse(t *testing.T) {
 				if err != nil {
 					t.Fatalf("parse: %v", err)
 				}
-				if !f.leaderElect || f.workers != 4 {
-					t.Fatalf("defaults: leader-elect %v, workers %d; want true, 4", f.leaderElect, f.workers)
+				if !f.leaderElect || f.workers != 4 || f.kubeconfig != "/state/kubeconfig" {
+					t.Fatalf("defaults: leader-elect %v, workers %d, kubeconfig %q; want true, 4, /state/kubeconfig", f.leaderElect, f.workers, f.kubeconfig)
+				}
+				if got := f.host.CredentialsDir(); got != "/state/credentials" {
+					t.Fatalf("credentials directory %q, want /state/credentials (agentapi.Host)", got)
 				}
 				return
 			}

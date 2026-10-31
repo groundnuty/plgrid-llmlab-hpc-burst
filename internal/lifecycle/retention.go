@@ -37,10 +37,17 @@ func (p *pass) retention() error {
 			continue
 		}
 		if len(p.liveOn(a.Name)) > 0 {
-			p.mem.busy(a.UID)
+			if _, idle, _ := v1alpha1.IdleSince(a); idle {
+				if err := p.writeIdleSince(a, nil); err != nil {
+					return err
+				}
+			}
 			continue
 		}
-		release, why := p.releaseEmpty(a)
+		release, why, err := p.releaseEmpty(a)
+		if err != nil {
+			return err
+		}
 		if !release {
 			continue
 		}
@@ -52,24 +59,27 @@ func (p *pass) retention() error {
 }
 
 // releaseEmpty decides whether an empty Allocation goes now, and why.
-func (p *pass) releaseEmpty(a *v1alpha1.Allocation) (bool, string) {
+func (p *pass) releaseEmpty(a *v1alpha1.Allocation) (bool, string, error) {
 	obs := a.Status.AtProvider
 	switch obs.Phase {
 	case v1alpha1.AllocationEnded, v1alpha1.AllocationFailed, v1alpha1.AllocationLost, v1alpha1.AllocationRefused:
-		return true, fmt.Sprintf("its job is %s", obs.Phase)
+		return true, fmt.Sprintf("its job is %s", obs.Phase), nil
 	}
 	if obs.StartTime == nil {
 		// An Instance is created before its Allocation, so an unstarted
 		// Allocation with no live Instance waits for nothing.
-		return true, "a pending Allocation with no Instance is cancelled"
+		return true, "a pending Allocation with no Instance is cancelled", nil
 	}
 	if obs.HardEnd != nil && !p.now.Before(obs.HardEnd.Time) {
-		return true, "its hard end passed"
+		return true, "its hard end passed", nil
 	}
 	if obs.HardEnd != nil {
 		p.at(obs.HardEnd.Time)
 	}
-	idle := p.mem.idleSince(a.UID, p.now)
+	idle, err := p.idleAnchor(a)
+	if err != nil {
+		return false, "", err
+	}
 	pol := a.Spec.RetentionPolicy
 	var maxIdle *time.Duration
 	if pv := p.pvOf(a.Labels); pv != nil && pv.profile != nil {
@@ -77,7 +87,7 @@ func (p *pass) releaseEmpty(a *v1alpha1.Allocation) (bool, string) {
 	}
 	if maxIdle != nil {
 		if t := idle.Add(*maxIdle); !p.now.Before(t) {
-			return true, fmt.Sprintf("idle for the profile's maxIdle %s", *maxIdle)
+			return true, fmt.Sprintf("idle for the profile's maxIdle %s", *maxIdle), nil
 		} else {
 			p.at(t)
 		}
@@ -92,22 +102,71 @@ func (p *pass) releaseEmpty(a *v1alpha1.Allocation) (bool, string) {
 			}
 		}
 		if t := idle.Add(limit); !p.now.Before(t) {
-			return true, fmt.Sprintf("released when idle, after %s", limit)
+			return true, fmt.Sprintf("released when idle, after %s", limit), nil
 		} else {
 			p.at(t)
 		}
-		return false, ""
+		return false, "", nil
 	default:
 		until := p.keepUntil(pol)
 		if until == nil {
-			return false, ""
+			return false, "", nil
 		}
 		if !p.now.Before(*until) {
-			return true, fmt.Sprintf("kept until %s", until.UTC().Format(time.RFC3339))
+			return true, fmt.Sprintf("kept until %s", until.UTC().Format(time.RFC3339)), nil
 		}
 		p.at(*until)
-		return false, ""
+		return false, "", nil
 	}
+}
+
+// idleAnchor returns when the Allocation became idle, from its idle-since
+// annotation, which only the lifecycle controller writes (v1alpha1.IdleSince):
+// the latest EndTime of its Instances, or its job's start when no Instance was
+// ever placed on it. A missing annotation is written now, so the anchor
+// survives a controller restart and the deletion of the Instances.
+func (p *pass) idleAnchor(a *v1alpha1.Allocation) (time.Time, error) {
+	t, ok, err := v1alpha1.IdleSince(a)
+	if err == nil && ok {
+		return t, nil
+	}
+	anchor := time.Time{}
+	hosted := false
+	for _, in := range p.insts {
+		if in.Spec.AllocationRef.Name != a.Name {
+			continue
+		}
+		hosted = true
+		if in.Status.EndTime != nil && in.Status.EndTime.After(anchor) {
+			anchor = in.Status.EndTime.Time
+		}
+	}
+	switch {
+	case !hosted && a.Status.AtProvider.StartTime != nil:
+		anchor = a.Status.AtProvider.StartTime.Time
+	case anchor.IsZero():
+		anchor = p.now // the Instances are gone without an end time: count from now, never earlier
+	}
+	if err := p.writeIdleSince(a, &anchor); err != nil {
+		return time.Time{}, err
+	}
+	return anchor.UTC().Truncate(time.Second), nil
+}
+
+// writeIdleSince sets (t non-nil) or removes the Allocation's idle-since
+// annotation, with a resourceVersion precondition.
+func (p *pass) writeIdleSince(a *v1alpha1.Allocation, t *time.Time) error {
+	next := a.DeepCopy()
+	if t != nil {
+		v1alpha1.SetIdleSince(next, *t)
+	} else {
+		v1alpha1.ClearIdleSince(next)
+	}
+	if err := p.r.Client.Update(p.ctx, next, owner); err != nil {
+		return fmt.Errorf("update Allocation %s idle-since: %w", a.Name, err)
+	}
+	*a = *next
+	return nil
 }
 
 // keepUntil is the date a kept Allocation is kept until: the policy's date,

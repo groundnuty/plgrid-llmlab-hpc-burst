@@ -79,7 +79,13 @@ func verifVerifyRequests(ra *rigAgent) [][2]int {
 	var out [][2]int
 	for _, d := range ra.agent.Seen() {
 		if d.Instance != nil && d.Instance.Checks != nil && d.Instance.Checks.Verify != nil {
-			out = append(out, [2]int{int(d.Instance.Checks.VerificationGeneration), len(d.Instance.Checks.Verify.Files)})
+			r := [2]int{int(d.Instance.Checks.VerificationGeneration), len(d.Instance.Checks.Verify.Files)}
+			// A desired state that changes elsewhere (the key stored) re-sends
+			// the same request of the same generation: one request, not two.
+			if n := len(out); n > 0 && out[n-1] == r {
+				continue
+			}
+			out = append(out, r)
 		}
 	}
 	return out

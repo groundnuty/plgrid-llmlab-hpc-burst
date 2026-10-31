@@ -98,8 +98,9 @@ func startRounds(ra *rigAgent) int {
 }
 
 // TestStartWarmUpRounds covers the Test plan's Warm-up item: an engine slow on
-// the first request of each shape settles in two rounds (ready on the Step that
-// reports the second round, not after the first); one whose latency never
+// the first request of each shape settles in two rounds (judged on the Step that
+// reports the second round, ready on the next, which reports the warm-up done,
+// with no third round); one whose latency never
 // settles fails after five (QualificationFailed on the Step that reports round
 // 5, not at round 4).
 func TestStartWarmUpRounds(t *testing.T) {
@@ -127,6 +128,20 @@ func TestStartWarmUpRounds(t *testing.T) {
 					t.Fatalf("Instance %s is %s after %d warm-up rounds, want %d", name, in.Status.Phase, rounds, tc.rounds)
 				}
 				if rounds >= tc.rounds {
+					if tc.ready && !done && rounds == tc.rounds {
+						// Warm-up gates ready: on the Step that reports the
+						// settling round the controller has judged it (WarmedUp
+						// true) and stops asking for rounds; the Instance is ready
+						// on the next Step, which reports the warm-up done, with
+						// no further round run (InstanceStatus.ReadyTime).
+						if c := startStatus(in.Status.Conditions, v1alpha1.ConditionWarmedUp); c != "True" {
+							t.Fatalf("after the settling round %d WarmedUp is %q, want True", rounds, c)
+						}
+						startStep(rg, "md", startTick)
+						in = rg.instance(name)
+						done = in.Status.Phase == v1alpha1.InstanceReady || in.Status.Phase == v1alpha1.InstanceEnded
+						rounds = startRounds(rg.agents[alloc])
+					}
 					if !done || rounds != tc.rounds {
 						t.Fatalf("after %d rounds the Instance is %s with %d rounds reported", tc.rounds, in.Status.Phase, rounds)
 					}

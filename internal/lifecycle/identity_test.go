@@ -75,7 +75,7 @@ func TestIdentityUnresolvedHub401NamesTheCauseAndRetriesSlowly(t *testing.T) {
 	rg.r.Checkpoints = NewCachedSource(src, rg.clock)
 	rg.create(mdSpec("md"))
 	rg.Step() // 08:00:00: the first read fails
-	wantDegraded(t, rg, reasonIdentityUnresolved, "Hub 401")
+	wantDegraded(t, rg, v1alpha1.ReasonIdentityUnresolved, "Hub 401")
 	rg.run(9*time.Minute+50*time.Second, 10*time.Second) // up to 08:09:50
 	if n := len(src.callTimes()); n != 1 {
 		t.Fatalf("Hub asked %d times before the 10 min retry, want 1: %v", n, src.callTimes())
@@ -84,7 +84,7 @@ func TestIdentityUnresolvedHub401NamesTheCauseAndRetriesSlowly(t *testing.T) {
 	if calls := src.callTimes(); len(calls) != 2 || !calls[1].Equal(rigStart.Add(10*time.Minute)) {
 		t.Fatalf("second Hub call at %v, want 08:10:00", calls)
 	}
-	wantDegraded(t, rg, reasonIdentityUnresolved, "Hub 401")
+	wantDegraded(t, rg, v1alpha1.ReasonIdentityUnresolved, "Hub 401")
 	if n := len(rg.allocations("md")); n != 0 || rg.submissions() != 0 {
 		t.Fatalf("with no current ID, want no Allocation; got %d and %d submissions", n, rg.submissions())
 	}
@@ -99,7 +99,7 @@ func TestIdentityUnresolvedHub404NamesTheCause(t *testing.T) {
 	rg.r.Checkpoints = NewCachedSource(&scriptedSource{clock: rg.clock, errs: []error{hubErr(404, 0)}}, rg.clock)
 	rg.create(mdSpec("md"))
 	rg.Step()
-	wantDegraded(t, rg, reasonIdentityUnresolved, "Hub 404")
+	wantDegraded(t, rg, v1alpha1.ReasonIdentityUnresolved, "Hub 404")
 }
 
 // TestIdentityUnresolvedTransientBacksOffThenResolves: a 503 with
@@ -112,7 +112,7 @@ func TestIdentityUnresolvedTransientBacksOffThenResolves(t *testing.T) {
 	rg.r.Checkpoints = NewCachedSource(src, rg.clock)
 	rg.create(mdSpec("md"))
 	rg.Step() // 08:00:00
-	wantDegraded(t, rg, reasonIdentityUnresolved, "Hub 503")
+	wantDegraded(t, rg, v1alpha1.ReasonIdentityUnresolved, "Hub 503")
 	rg.run(4*time.Minute, 10*time.Second)
 	want := []time.Time{rigStart, rigStart.Add(2 * time.Minute), rigStart.Add(3 * time.Minute)}
 	got := src.callTimes()
@@ -166,8 +166,8 @@ func TestIdentityUnresolvedCollisionNeverLoops(t *testing.T) {
 	})
 	rg.create(md)
 	rg.run(5*time.Minute, 10*time.Second)
-	wantDegraded(t, rg, reasonIdentityUnresolved, recName)
-	if n := len(rg.rec.Find(eventDegraded, reasonIdentityUnresolved)); n != 1 {
+	wantDegraded(t, rg, v1alpha1.ReasonIdentityUnresolved, recName)
+	if n := len(rg.rec.Find(eventDegraded, v1alpha1.ReasonIdentityUnresolved)); n != 1 {
 		t.Fatalf("degraded/IdentityUnresolved events = %d over 30 passes, want exactly 1", n)
 	}
 	if rg.submissions() != 0 || len(rg.allocations("md")) != 0 {

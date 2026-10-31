@@ -2,7 +2,6 @@ package lifecycle
 
 import (
 	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"math/big"
 	"os"
@@ -71,7 +70,11 @@ func (p *pass) provision(pred *v1alpha1.Instance) (bool, error) {
 			continue
 		}
 		if warm := p.warmAllocation(pv); warm != nil {
-			return true, p.createInstance(pv, cid, pred, warm.Name)
+			if err := p.createInstance(pv, cid, pred, warm.Name); err != nil {
+				return false, err
+			}
+			// Placed: the Allocation is no longer idle (v1alpha1.ClearIdleSince).
+			return true, p.writeIdleSince(warm, nil)
 		}
 		name, err := randomName(pv.name)
 		if err != nil {
@@ -209,11 +212,11 @@ func (r *Reconciler) ensureCredential(a *v1alpha1.Allocation) error {
 	if _, err := os.Stat(path); err == nil {
 		return nil
 	}
-	var b [32]byte
-	if _, err := rand.Read(b[:]); err != nil {
+	key, err := agentapi.NewKey()
+	if err != nil {
 		return fmt.Errorf("credential of Allocation %s: %w", a.Name, err)
 	}
-	if err := writeSecretFile(path, []byte(hex.EncodeToString(b[:]))); err != nil {
+	if err := agentapi.WriteKeyFile(path, key); err != nil {
 		return fmt.Errorf("write the credential of Allocation %s: %w", a.Name, err)
 	}
 	return nil

@@ -10,11 +10,17 @@
 // (internal/agentserver, issue #60), which serves the lifecycle controller's
 // agentapi.Backend on loopback. Both plug in at extraRunnables.
 //
-// Usage:
+// Usage (hpcburst up passes the first three and the front it recorded):
 //
-//	hpcburst-controller --kubeconfig FILE --credentials-dir DIR --health-addr 127.0.0.1:PORT
-//	    [--agent-builds-dir DIR] [--front-mode direct|ssh --front-addr HOST:PORT]
-//	    [--leader-elect=true] [--workers 4]
+//	hpcburst-controller --state-dir DIR --port-base PORT --health-addr 127.0.0.1:PORT
+//	    [--front-mode direct|ssh --front-addr HOST:PORT]
+//	    [--kubeconfig FILE] [--leader-elect=true] [--workers 4]
+//
+// The state directory and the port base fill an agentapi.Host, which names
+// the shared paths and ports (docs/development.md, Runtime conventions): the
+// kubeconfig is <state>/kubeconfig unless --kubeconfig says otherwise, the
+// credentials directory is Host.CredentialsDir() and the agent builds are in
+// Host.AgentBuildsDir(); #60's server will bind Host.AgentEndpointAddr().
 //
 // It exits 0 after SIGTERM or SIGINT once the manager has stopped, 1 on a
 // failure, and 2 on a usage error.
@@ -43,24 +49,23 @@ import (
 
 // flags are the command line, parsed.
 type flags struct {
-	kubeconfig     string
-	credentialsDir string
-	healthAddr     string
-	agentBuildsDir string
-	frontMode      string
-	frontAddr      string
-	leaderElect    bool
-	workers        int
+	host        agentapi.Host
+	kubeconfig  string
+	healthAddr  string
+	frontMode   string
+	frontAddr   string
+	leaderElect bool
+	workers     int
 }
 
 func parse(args []string, stderr io.Writer) (flags, error) {
 	var f flags
 	fs := flag.NewFlagSet("hpcburst-controller", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	fs.StringVar(&f.kubeconfig, "kubeconfig", "", "the control plane's kubeconfig (required)")
-	fs.StringVar(&f.credentialsDir, "credentials-dir", "", "the controller's credentials directory, mode 700 (required)")
+	fs.StringVar(&f.host.StateDir, "state-dir", "", "the launcher's state directory (required)")
+	fs.IntVar(&f.host.PortBase, "port-base", 0, "the launcher's loopback port base (required)")
+	fs.StringVar(&f.kubeconfig, "kubeconfig", "", "the control plane's kubeconfig (default <state-dir>/kubeconfig)")
 	fs.StringVar(&f.healthAddr, "health-addr", "", "loopback host:port of /healthz and /readyz (required)")
-	fs.StringVar(&f.agentBuildsDir, "agent-builds-dir", "", "directory of the allocation agent's builds, hb-agent-<cpuArch>")
 	fs.StringVar(&f.frontMode, "front-mode", "", "the recorded dial-home mode: direct or ssh")
 	fs.StringVar(&f.frontAddr, "front-addr", "", "the recorded front address")
 	fs.BoolVar(&f.leaderElect, "leader-elect", true, "take the lifecycle Lease, a guard against a stale second copy")
@@ -71,10 +76,10 @@ func parse(args []string, stderr io.Writer) (flags, error) {
 	switch {
 	case fs.NArg() > 0:
 		return flags{}, fmt.Errorf("unexpected arguments: %v", fs.Args())
-	case f.kubeconfig == "":
-		return flags{}, errors.New("--kubeconfig is required")
-	case f.credentialsDir == "":
-		return flags{}, errors.New("--credentials-dir is required")
+	case f.host.StateDir == "":
+		return flags{}, errors.New("--state-dir is required")
+	case f.host.PortBase < 1024 || f.host.PortBase > 65535-agentapi.AgentEndpointPortOffset:
+		return flags{}, fmt.Errorf("--port-base %d is out of range", f.host.PortBase)
 	case f.healthAddr == "":
 		return flags{}, errors.New("--health-addr is required")
 	case (f.frontMode == "") != (f.frontAddr == ""):
@@ -83,6 +88,9 @@ func parse(args []string, stderr io.Writer) (flags, error) {
 		return flags{}, fmt.Errorf("--front-mode %q: want direct or ssh", f.frontMode)
 	case f.workers < 1:
 		return flags{}, errors.New("--workers must be at least 1")
+	}
+	if f.kubeconfig == "" {
+		f.kubeconfig = filepath.Join(f.host.StateDir, "kubeconfig")
 	}
 	host, _, err := net.SplitHostPort(f.healthAddr)
 	if err != nil {
@@ -116,12 +124,19 @@ func checkCredentialsDir(dir string) error {
 }
 
 // extraRunnables are the other components of the binary, added to the
-// manager beside the lifecycle controller: #59's provider supervisor and #60's
-// agent API server, once their packages land.
-var extraRunnables []func(mgr manager.Manager, backend agentapi.Backend) (manager.Runnable, error)
+// manager beside the lifecycle controller, once their packages land:
+//   - #60's agent API server (internal/agentserver), which authenticates each
+//     agent call and then calls the lifecycle controller's Backend; it runs
+//     without leader election:
+//     agentserver.New(agentserver.Config{Lookup: agentserver.NewClientLookup(mgr.GetClient()),
+//     CredentialsDir: host.CredentialsDir(), Backend: backend, Host: host});
+//   - #59's per-Provider manager supervisor (internal/providerctl).
+//
+// Until then the Backend is built but not served, so no agent can register.
+var extraRunnables []func(mgr manager.Manager, host agentapi.Host, backend agentapi.Backend) (manager.Runnable, error)
 
 func run(ctx context.Context, f flags) error {
-	if err := checkCredentialsDir(f.credentialsDir); err != nil {
+	if err := checkCredentialsDir(f.host.CredentialsDir()); err != nil {
 		return err
 	}
 	cfg, err := clientcmd.BuildConfigFromFlags("", f.kubeconfig)
@@ -129,14 +144,14 @@ func run(ctx context.Context, f flags) error {
 		return fmt.Errorf("kubeconfig: %w", err)
 	}
 	mgr, backend, err := lifecycle.NewManager(lifecycle.Options{
-		Config: cfg, CredentialsDir: f.credentialsDir, AgentBuildsDir: f.agentBuildsDir,
+		Config: cfg, CredentialsDir: f.host.CredentialsDir(), AgentBuildsDir: f.host.AgentBuildsDir(),
 		FrontConfigured: f.frontMode != "", HealthAddr: f.healthAddr, LeaderElection: f.leaderElect, Workers: f.workers,
 	})
 	if err != nil {
 		return err
 	}
 	for _, add := range extraRunnables {
-		r, err := add(mgr, backend)
+		r, err := add(mgr, f.host, backend)
 		if err != nil {
 			return err
 		}

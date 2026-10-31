@@ -28,11 +28,6 @@ type CheckpointSource interface {
 	TemplateSources(ctx context.Context, cp v1alpha1.CheckpointSpec, files []deploymentid.File) (deploymentid.TemplateSources, error)
 }
 
-// ErrTemplateSourcesUnavailable is returned by a CheckpointSource that cannot
-// read file contents. The controller then refuses a serving spec that names no
-// chat template, rather than hash a template it has not read.
-var ErrTemplateSourcesUnavailable = errors.New("the checkpoint's chat-template files cannot be read yet; give spec.source.served.chatTemplate")
-
 // cachedSource caches a CheckpointSource's successful answers by repository and
 // revision: a revision is a full commit id, so its files never change, and
 // each Files call downloads every non-LFS file. A failure is kept too, and the
@@ -319,7 +314,7 @@ func (r *Reconciler) ensureIdentityRecord(ctx context.Context, md *v1alpha1.Mode
 		// and record version, and nothing is retried until one of them
 		// changes (HBEP owner, 31 Oct 2026).
 		if r.memory().once(fmt.Sprintf("collision/%s/%d/%s/%s", md.UID, md.Generation, rec.Name, got.ResourceVersion)) {
-			r.Recorder.Event(md, true, eventDegraded, reasonIdentityUnresolved,
+			r.Recorder.Event(md, true, eventDegraded, v1alpha1.ReasonIdentityUnresolved,
 				fmt.Sprintf("identity record %s holds another deployment ID than %s: a display-form collision; the ID is refused (HBEP-3)", rec.Name, id.SHA256))
 		}
 		return "", fmt.Errorf("%w with record %s: it holds another deployment ID than %s", errCollision, rec.Name, id.SHA256)

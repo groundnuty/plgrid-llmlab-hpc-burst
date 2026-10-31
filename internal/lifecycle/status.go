@@ -19,7 +19,7 @@ import (
 // conditions).
 var degradedOrder = []string{
 	v1alpha1.ReasonSpecUnsupported, v1alpha1.ReasonFrontNotConfigured, v1alpha1.ReasonVerificationFailed,
-	reasonIdentityUnresolved, v1alpha1.ReasonRestartLoop, v1alpha1.ReasonSubmissionRejected,
+	v1alpha1.ReasonIdentityUnresolved, v1alpha1.ReasonRestartLoop, v1alpha1.ReasonSubmissionRejected,
 	v1alpha1.ReasonProviderUnavailable, v1alpha1.ReasonReplacementLate, v1alpha1.ReasonCapacityDropped,
 }
 
@@ -92,20 +92,20 @@ func (p *pass) writeStatus() error {
 	s.Retention = &v1alpha1.RetentionStatus{EffectiveMode: md.Spec.RetentionPolicy.EffectiveMode()}
 	gen := md.Generation
 	if ready >= desired {
-		cond(&s.Conditions, v1alpha1.ConditionReady, metav1.ConditionTrue, reasonEnoughReady, fmt.Sprintf("%d of %d desired Instances are ready", ready, desired), gen, now)
+		cond(&s.Conditions, v1alpha1.ConditionReady, metav1.ConditionTrue, v1alpha1.ReasonEnoughReady, fmt.Sprintf("%d of %d desired Instances are ready", ready, desired), gen, now)
 	} else {
-		cond(&s.Conditions, v1alpha1.ConditionReady, metav1.ConditionFalse, reasonNotEnoughReady, fmt.Sprintf("%d of %d desired Instances are ready", ready, desired), gen, now)
+		cond(&s.Conditions, v1alpha1.ConditionReady, metav1.ConditionFalse, v1alpha1.ReasonNotEnoughReady, fmt.Sprintf("%d of %d desired Instances are ready", ready, desired), gen, now)
 	}
 	if reason, msg := p.degradedSummary(); reason != "" {
 		cond(&s.Conditions, v1alpha1.ConditionDegraded, metav1.ConditionTrue, reason, msg, gen, now)
 	} else {
-		cond(&s.Conditions, v1alpha1.ConditionDegraded, metav1.ConditionFalse, reasonAsDesired, "no degradation", gen, now)
+		cond(&s.Conditions, v1alpha1.ConditionDegraded, metav1.ConditionFalse, v1alpha1.ReasonAsDesired, "no degradation", gen, now)
 	}
 	stable := ready == desired && live == desired
 	if stable {
-		cond(&s.Conditions, v1alpha1.ConditionProgressing, metav1.ConditionFalse, reasonStable, "the desired Instances serve", gen, now)
+		cond(&s.Conditions, v1alpha1.ConditionProgressing, metav1.ConditionFalse, v1alpha1.ReasonStable, "the desired Instances serve", gen, now)
 	} else {
-		cond(&s.Conditions, v1alpha1.ConditionProgressing, metav1.ConditionTrue, reasonProvisioning, fmt.Sprintf("%d Instances live, %d ready, %d desired", live, ready, desired), gen, now)
+		cond(&s.Conditions, v1alpha1.ConditionProgressing, metav1.ConditionTrue, v1alpha1.ReasonProvisioning, fmt.Sprintf("%d Instances live, %d ready, %d desired", live, ready, desired), gen, now)
 	}
 	s.ObservedGeneration, s.LastReconcileTime = gen, &now
 	return p.updateMDStatus(next)

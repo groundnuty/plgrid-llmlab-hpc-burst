@@ -266,7 +266,7 @@ func (p *pass) prepareServed() error {
 			if !c.retryAt.IsZero() {
 				p.at(c.retryAt)
 			}
-			p.degrade(reasonIdentityUnresolved, "class %s/%s has no current deployment ID: %s", c.class.GPUModel, c.class.CPUArch, c.problem)
+			p.degrade(v1alpha1.ReasonIdentityUnresolved, "class %s/%s has no current deployment ID: %s", c.class.GPUModel, c.class.CPUArch, c.problem)
 			continue
 		}
 		blocked, err := p.r.classBlocked(p.ctx, p.md, c.id)

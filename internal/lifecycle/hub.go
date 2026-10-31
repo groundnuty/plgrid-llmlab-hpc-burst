@@ -2,8 +2,6 @@ package lifecycle
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"sync"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -19,6 +17,9 @@ type HubSource struct {
 
 	mu      sync.Mutex
 	clients map[string]*hubfiles.Client
+	// entries are the listings Files read, by repository and revision, which
+	// TemplateSources checks the template files against.
+	entries map[string][]hubfiles.Entry
 }
 
 func (h *HubSource) client(tokenFile string) (*hubfiles.Client, error) {
@@ -55,23 +56,38 @@ func (h *HubSource) Files(ctx context.Context, cp v1alpha1.CheckpointSpec) ([]de
 	if err != nil {
 		return nil, err
 	}
+	h.mu.Lock()
+	if h.entries == nil {
+		h.entries = map[string][]hubfiles.Entry{}
+	}
+	h.entries[cacheKey(cp)] = entries
+	h.mu.Unlock()
 	return hubfiles.Inputs(entries), nil
 }
 
-// TemplateSources implements CheckpointSource. pkg/hubfiles cannot read a
-// file's content yet (requested of the contracts owner, 31 Oct 2026), so it
-// returns ErrTemplateSourcesUnavailable, and a serving spec without a chat
-// template is not given an ID.
-func (h *HubSource) TemplateSources(context.Context, v1alpha1.CheckpointSpec, []deploymentid.File) (deploymentid.TemplateSources, error) {
-	return deploymentid.TemplateSources{}, ErrTemplateSourcesUnavailable
+// TemplateSources implements CheckpointSource: the checkpoint's chat-template
+// files (HBEP-3's lookup chain), read by hubfiles.Client.TemplateSources and
+// checked against the listing Files read.
+func (h *HubSource) TemplateSources(ctx context.Context, cp v1alpha1.CheckpointSpec, _ []deploymentid.File) (deploymentid.TemplateSources, error) {
+	h.mu.Lock()
+	entries, ok := h.entries[cacheKey(cp)]
+	h.mu.Unlock()
+	if !ok {
+		if _, err := h.Files(ctx, cp); err != nil {
+			return deploymentid.TemplateSources{}, err
+		}
+		h.mu.Lock()
+		entries = h.entries[cacheKey(cp)]
+		h.mu.Unlock()
+	}
+	c, err := h.client(tokenFileOf(cp))
+	if err != nil {
+		return deploymentid.TemplateSources{}, err
+	}
+	return c.TemplateSources(ctx, cp.Repository, cp.Revision, entries)
 }
 
 // retryableHub reports whether a checkpoint read is worth an early retry.
 func retryableHub(err error) bool {
-	if errors.Is(err, ErrTemplateSourcesUnavailable) {
-		return false
-	}
 	return hubfiles.Retryable(err)
 }
-
-var _ = fmt.Sprintf

@@ -28,10 +28,10 @@ const healthWorker = "worker-0"
 // agent double's, not the controller's.
 type healthSampled struct {
 	first time.Time
-	h     func(time.Time, string) agentapi.Health
+	h     func(time.Time, afake.Process) agentapi.Health
 }
 
-func (s *healthSampled) sample(now time.Time, w string) agentapi.Health {
+func (s *healthSampled) sample(now time.Time, w afake.Process) agentapi.Health {
 	if s.first.IsZero() {
 		s.first = now
 	}
@@ -80,7 +80,7 @@ func healthRig(t *testing.T, mk func() afake.Engine, opts ...rigOption) (*rig, v
 func TestHealthNoTokenProgressRestartsWorker(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		h    func(time.Time, string) agentapi.Health
+		h    func(time.Time, afake.Process) agentapi.Health
 	}{{"stalled", afake.HealthStalled}, {"slow-prefill-never-ends", afake.HealthSlowPrefill}} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := &healthSampled{h: tc.h}
@@ -109,7 +109,7 @@ func TestHealthPlainLoadAndShortPrefillRestartNothing(t *testing.T) {
 	prefill := func() afake.Engine {
 		s := &healthSampled{}
 		var tokens int64
-		s.h = func(now time.Time, w string) agentapi.Health {
+		s.h = func(now time.Time, w afake.Process) agentapi.Health {
 			if now.Sub(s.first) < 1100*time.Second {
 				return afake.HealthSlowPrefill(now, w)
 			}
@@ -163,7 +163,7 @@ func TestHealthRepeatedFailuresClimbLadder(t *testing.T) {
 			}
 		}
 	}
-	want := []string{"WorkerRestart", "WorkerRestart", "InstanceRestart", "InstanceRestart", "RestartLadderExhausted"}
+	want := []string{"WorkerRestart", "WorkerRestart", "InstanceRestart", "InstanceRestart", v1alpha1.ReasonRestartLoop}
 	if got := healthFailing(rg, in.Name); !slices.Equal(got, want) {
 		t.Fatalf("failing events = %v, want %v", got, want)
 	}
@@ -173,9 +173,9 @@ func TestHealthRepeatedFailuresClimbLadder(t *testing.T) {
 		}
 	}
 	got := rg.instance(in.Name)
-	if got.Status.Phase != v1alpha1.InstanceEnded || got.Status.EndReason != "RestartLadderExhausted" ||
+	if got.Status.Phase != v1alpha1.InstanceEnded || got.Status.EndReason != v1alpha1.ReasonRestartLoop ||
 		got.Annotations[v1alpha1.RestartGenerationAnnotation(healthWorker)] != "2" || got.Annotations[v1alpha1.RestartGenerationAnnotation(v1alpha1.PartInstance)] != "2" {
-		t.Errorf("Instance %s (%s), annotations %v; want ended/RestartLadderExhausted with worker-0 2 and instance 2", got.Status.Phase, got.Status.EndReason, got.Annotations)
+		t.Errorf("Instance %s (%s), annotations %v; want ended/RestartLoop with worker-0 2 and instance 2", got.Status.Phase, got.Status.EndReason, got.Annotations)
 	}
 	startUntil(rg, "md", 3*time.Minute, "the failed Allocation released and a new one provisioned", func() bool {
 		_, alive := rg.allocation(alloc)

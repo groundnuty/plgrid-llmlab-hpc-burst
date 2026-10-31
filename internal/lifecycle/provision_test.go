@@ -7,6 +7,7 @@ package lifecycle
 import (
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,7 +43,20 @@ func provisionHas(cmd []string, flag, value string) bool {
 			return true
 		}
 	}
-	return false
+	// --max-num-seqs is one argument, --max-num-seqs=<n> (the Launch's CEL rule).
+	return slices.Contains(cmd, flag+"="+value)
+}
+
+// provisionSeqsArgs returns the arguments that pass max-num-seqs, in either
+// form or spelling.
+func provisionSeqsArgs(cmd []string) []string {
+	var out []string
+	for _, c := range cmd {
+		if strings.HasPrefix(c, "--max-num-seqs") || strings.HasPrefix(c, "--max_num_seqs") {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // TestProvisionSubmissionFollowsSpecAndProfile covers HBEP-7's Test plan item
@@ -178,7 +192,7 @@ func TestProvisionLaunchCarriesDefaults(t *testing.T) {
 		t.Errorf("default %s and declared-256 %s differ in deployment ID; max-num-seqs is capacity, not an ID input (HBEP-3)",
 			plain.Spec.DeploymentID, explicit.Spec.DeploymentID)
 	}
-	if n := slices.Index(explicit.Spec.Launch.Command, "--max-num-seqs"); n < 0 || slices.Index(explicit.Spec.Launch.Command[n+1:], "--max-num-seqs") >= 0 {
+	if got := provisionSeqsArgs(explicit.Spec.Launch.Command); !slices.Equal(got, []string{"--max-num-seqs=256"}) {
 		t.Errorf("declared max-num-seqs must appear exactly once: %v", explicit.Spec.Launch.Command)
 	}
 	scmd := small.Spec.Launch.Command

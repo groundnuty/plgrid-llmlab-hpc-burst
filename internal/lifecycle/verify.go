@@ -54,11 +54,10 @@ func (p *pass) starting(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av ag
 		}
 		pass, msg := judgeQualify(c.Qualify, sh, p.modelName(in))
 		if !pass {
-			p.classFailed(in)
 			return p.fail(in, alloc, v1alpha1.ReasonQualificationFailed, msg)
 		}
 		if err := p.setStatus(in, func(s *v1alpha1.InstanceStatus) {
-			cond(&s.Conditions, v1alpha1.ConditionQualified, metav1.ConditionTrue, reasonPassed, msg, in.Generation, now)
+			cond(&s.Conditions, v1alpha1.ConditionQualified, metav1.ConditionTrue, v1alpha1.ReasonPassed, msg, in.Generation, now)
 		}); err != nil {
 			return err
 		}
@@ -70,19 +69,25 @@ func (p *pass) starting(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av ag
 		state, msg, tp := judgeWarmUp(c.WarmUp, sh.targetSessions)
 		switch state {
 		case warmUpFailed:
-			p.classFailed(in)
 			return p.fail(in, alloc, v1alpha1.ReasonQualificationFailed, msg)
 		case warmUpRunning:
 			return nil
 		}
 		if err := p.setStatus(in, func(s *v1alpha1.InstanceStatus) {
-			cond(&s.Conditions, v1alpha1.ConditionWarmedUp, metav1.ConditionTrue, reasonPassed, msg, in.Generation, now)
+			cond(&s.Conditions, v1alpha1.ConditionWarmedUp, metav1.ConditionTrue, v1alpha1.ReasonPassed, msg, in.Generation, now)
 			if tp != nil {
 				s.Throughput = tp
 			}
 		}); err != nil {
 			return err
 		}
+	}
+	// Warm-up gates ready: the desired state stops asking for rounds once the
+	// controller has judged them, and the Instance is ready only when the
+	// agent reports the warm-up done for this verification generation (the
+	// contract of InstanceStatus.ReadyTime).
+	if c.WarmUp == nil || !c.WarmUp.Done {
+		return nil
 	}
 	return p.becomeReady(in, alloc)
 }
@@ -93,15 +98,15 @@ func (p *pass) starting(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av ag
 // restart.
 func (p *pass) startSignal(in *v1alpha1.Instance, av agentView, st settings) string {
 	if av.report != nil && !av.unreachable && workerExited(av.report, in) {
-		return reasonPartExited
+		return v1alpha1.ReasonPartExited
 	}
 	from := in.Status.StartInstructionTime
 	if from == nil {
 		return ""
 	}
 	start := from.Time
-	if h := p.mem.history(in); len(h) > 0 && h[len(h)-1].at.After(start) {
-		start = h[len(h)-1].at
+	if r := in.Status.Restarts; len(r) > 0 && r[len(r)-1].Time.After(start) {
+		start = r[len(r)-1].Time.Time
 	}
 	deadline := start.Add(st.startTimeout)
 	if p.now.Before(deadline) {
@@ -116,7 +121,6 @@ func (p *pass) startSignal(in *v1alpha1.Instance, av agentView, st settings) str
 // anything else climbs the restart ladder.
 func (p *pass) malfunction(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, signal string, st settings) error {
 	if signal == v1alpha1.ReasonStartTimeout && in.Status.ReadyTime == nil && verificationGeneration(in) == 1 {
-		p.classFailed(in)
 		return p.fail(in, alloc, v1alpha1.ReasonStartTimeout, fmt.Sprintf("not ready within %s of its start instruction", st.startTimeout))
 	}
 	return p.restart(in, alloc, signal, "", st)
@@ -201,9 +205,9 @@ func (p *pass) verified(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, v *ag
 	if err := p.setStatus(in, func(s *v1alpha1.InstanceStatus) {
 		s.VerificationRecord, s.Verdict = name, data.Verdict
 		if data.Verdict == v1alpha1.VerdictPass {
-			cond(&s.Conditions, v1alpha1.ConditionVerified, metav1.ConditionTrue, reasonPassed, "verification record "+name+" passed", in.Generation, now)
+			cond(&s.Conditions, v1alpha1.ConditionVerified, metav1.ConditionTrue, v1alpha1.ReasonPassed, "verification record "+name+" passed", in.Generation, now)
 		} else {
-			cond(&s.Conditions, v1alpha1.ConditionVerified, metav1.ConditionFalse, reasonFailed, data.Message, in.Generation, now)
+			cond(&s.Conditions, v1alpha1.ConditionVerified, metav1.ConditionFalse, v1alpha1.ReasonFailed, data.Message, in.Generation, now)
 		}
 	}); err != nil {
 		return err
@@ -220,10 +224,9 @@ func (p *pass) verified(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, v *ag
 		if !earlier {
 			// Move the staged copy aside and restage: the whole-Instance rung
 			// (HBEP-7, Instance start).
-			return p.restart(in, alloc, causeRehash, v1alpha1.PartInstance, st)
+			return p.restart(in, alloc, signalRehash, v1alpha1.PartInstance, st)
 		}
-		p.classFailed(in)
-		return p.fail(in, alloc, endVerificationFailed, "the rehash failed again after restaging: "+data.Message)
+		return p.fail(in, alloc, v1alpha1.ReasonVerificationFailed, "the rehash failed again after restaging: "+data.Message)
 	case causeContradiction, causeShape:
 		p.r.Recorder.Event(p.mdObject(in), true, eventDegraded, v1alpha1.ReasonVerificationFailed,
 			fmt.Sprintf("Instance %s: %s; provisioning in its class stops until the serving spec changes", in.Name, data.Message))
@@ -234,15 +237,14 @@ func (p *pass) verified(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, v *ag
 			p.degrade(v1alpha1.ReasonVerificationFailed, "provisioning in class %s/%s is stopped until the serving spec changes: %s", pv.class.GPUModel, pv.class.CPUArch, data.Message)
 		}
 	}
-	p.classFailed(in)
-	return p.fail(in, alloc, endVerificationFailed, data.Message)
+	return p.fail(in, alloc, v1alpha1.ReasonVerificationFailed, data.Message)
 }
 
 func restartKind(in *v1alpha1.Instance) string {
 	switch c := conditionReason(in, v1alpha1.ConditionVerified); c {
-	case reasonWorkerRestart:
+	case v1alpha1.ReasonWorkerRestart:
 		return "worker"
-	case reasonInstanceRestart:
+	case v1alpha1.ReasonInstanceRestart:
 		return "instance"
 	}
 	if verificationGeneration(in) > 1 {
@@ -290,14 +292,11 @@ func (p *pass) becomeReady(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) er
 		if s.ReadyTime == nil {
 			s.ReadyTime = &now
 		}
-		cond(&s.Conditions, v1alpha1.ConditionHealthy, metav1.ConditionTrue, reasonHealthy, "ready", in.Generation, now)
+		cond(&s.Conditions, v1alpha1.ConditionHealthy, metav1.ConditionTrue, v1alpha1.ReasonHealthy, "ready", in.Generation, now)
 	}); err != nil {
 		return err
 	}
 	pv := p.pvOf(in.Labels)
-	if pv != nil && pv.hasClass {
-		p.mem.classServed(pv.class)
-	}
 	p.r.Recorder.Event(in, false, eventReady, "Ready", "verified, qualified and warmed up; the front routes to it")
 	if first && pv != nil && pv.hasClass && p.firstOnAllocation(in) && alloc.Status.AtProvider.StartTime != nil {
 		d := p.now.Sub(alloc.Status.AtProvider.StartTime.Time)

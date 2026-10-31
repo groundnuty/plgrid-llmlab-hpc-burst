@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
-	"regexp"
 	"sync"
 	"time"
 
@@ -109,8 +107,11 @@ func (b *Backend) Register(ctx context.Context, c agentapi.Caller, r agentapi.Re
 	if err := b.serving(); err != nil {
 		return agentapi.RegisterResponse{}, err
 	}
-	if c.AllocationUID == "" || c.AgentInstanceID == "" {
-		return agentapi.RegisterResponse{}, agentapi.Errorf(agentapi.CodeBadRequest, "a registration needs the Allocation and an agent instance ID")
+	if c.AllocationUID == "" {
+		return agentapi.RegisterResponse{}, agentapi.Errorf(agentapi.CodeBadRequest, "a registration needs the Allocation")
+	}
+	if err := agentapi.CheckAgentInstanceID(c.AgentInstanceID); err != nil {
+		return agentapi.RegisterResponse{}, agentapi.Errorf(agentapi.CodeBadRequest, "agent instance ID: %v", err)
 	}
 	b.mu.Lock()
 	s := b.state(c)
@@ -201,13 +202,11 @@ func (s *agentState) track(instUID string, w agentapi.WorkerReport, now time.Tim
 	}
 }
 
-var keyForm = regexp.MustCompile(`^[A-Za-z0-9._~+/=-]{16,512}$`)
-
 // storeKey writes an Instance's key to its mode-600 file, once. The Instance
 // must run on the caller's Allocation.
 func (b *Backend) storeKey(ctx context.Context, c agentapi.Caller, instUID, key string) error {
-	if !keyForm.MatchString(key) {
-		return agentapi.Errorf(agentapi.CodeBadRequest, "the Instance key is not 16 to 512 URL-safe characters")
+	if err := agentapi.CheckKey([]byte(key)); err != nil {
+		return agentapi.Errorf(agentapi.CodeBadRequest, "the Instance key: %v", err)
 	}
 	inst, err := b.instanceByUID(ctx, c, instUID)
 	if err != nil {
@@ -220,7 +219,7 @@ func (b *Backend) storeKey(ctx context.Context, c agentapi.Caller, instUID, key 
 	if _, err := os.Stat(path); err == nil {
 		return nil
 	}
-	if err := writeSecretFile(path, []byte(key)); err != nil {
+	if err := agentapi.WriteKeyFile(path, key); err != nil {
 		return fmt.Errorf("store the key of Instance %s: %w", inst.Name, err)
 	}
 	return nil
@@ -333,47 +332,6 @@ func (b *Backend) healthOf(allocUID types.UID, instUID string, w agentapi.Worker
 	c := *t
 	c.samples = append([]healthSample(nil), t.samples...)
 	return c, true
-}
-
-// writeSecretFile writes content to path with mode 0600, through a temporary
-// file in the same directory and a rename, so a reader never sees a partial
-// file. The directory must exist.
-func writeSecretFile(path string, content []byte) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	f, err := os.CreateTemp(dir, ".tmp-")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	ok := false
-	defer func() {
-		if !ok {
-			_ = os.Remove(tmp)
-		}
-	}()
-	if err := f.Chmod(0o600); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if _, err := f.Write(content); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return err
-	}
-	ok = true
-	return nil
 }
 
 // errNotFoundIsNil turns a NotFound into (false, nil).

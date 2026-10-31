@@ -350,8 +350,8 @@ func specLaunch(t *testing.T, md *v1alpha1.ModelDeployment) v1alpha1.Launch {
 func TestRenderLaunchMaxNumSeqs(t *testing.T) {
 	t.Run("absent gives 256", func(t *testing.T) {
 		l := specLaunch(t, specMD(specFlag("max-model-len", "32768")))
-		if got := specValueOf(t, l.Command, "--max-num-seqs"); got != "256" {
-			t.Fatalf("--max-num-seqs %s, want 256", got)
+		if got := provisionSeqsArgs(l.Command); !slices.Equal(got, []string{"--max-num-seqs=256"}) {
+			t.Fatalf("max-num-seqs arguments %v, want exactly --max-num-seqs=256 (one argument, the Launch's CEL rule)", got)
 		}
 		if l.MaxNumSeqs != 256 {
 			t.Fatalf("MaxNumSeqs = %d, want 256", l.MaxNumSeqs)
@@ -360,11 +360,8 @@ func TestRenderLaunchMaxNumSeqs(t *testing.T) {
 	for _, name := range []string{"max-num-seqs", "max_num_seqs"} {
 		t.Run("declared 64 as "+name, func(t *testing.T) {
 			l := specLaunch(t, specMD(specFlag("max-model-len", "32768"), specFlag(name, "64")))
-			if n := len(specIndexes(l.Command, "--max-num-seqs")); n != 1 {
-				t.Fatalf("--max-num-seqs occurs %d times in %v, want once", n, l.Command)
-			}
-			if got := specValueOf(t, l.Command, "--max-num-seqs"); got != "64" {
-				t.Fatalf("--max-num-seqs %s, want 64", got)
+			if got := provisionSeqsArgs(l.Command); !slices.Equal(got, []string{"--max-num-seqs=64"}) {
+				t.Fatalf("max-num-seqs arguments %v, want exactly --max-num-seqs=64", got)
 			}
 			if slices.Contains(l.Command, "256") || slices.Contains(l.Command, "--max_num_seqs") {
 				t.Fatalf("default or raw spelling leaked into %v", l.Command)
@@ -388,7 +385,7 @@ func TestRenderLaunchCommand(t *testing.T) {
 		"--served-model-name", "example-model",
 		"--max-model-len", "32768",
 		"--tensor-parallel-size", "2",
-		"--max-num-seqs", "256",
+		"--max-num-seqs=256",
 	}
 	if !slices.Equal(l.Command, want) {
 		t.Fatalf("command\n got %v\nwant %v", l.Command, want)
