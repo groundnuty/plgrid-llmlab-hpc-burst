@@ -124,7 +124,17 @@ func sameName(reader, want, got string) error {
 // test log says only that the name came back unchanged.
 func (w *world) jobNameRoundTrip() {
 	w.t.Helper()
-	a := w.newAlloc("conformance-job-name-round-trip-of-56-chars") // 44 characters, cut to 40 in the tag
+	// The platform is made when the controller first connects (TestConformance
+	// has done that by now; the standalone test has not).
+	if w.batch == nil {
+		if err := w.ctl.SyncStatus(context.Background()); err != nil {
+			w.t.Fatal(err)
+		}
+		if w.batch == nil {
+			w.t.Fatal("the platform was not made")
+		}
+	}
+	a := w.newAlloc("conformance-job-name-round-trip-of-56-chars") // 43 characters, cut to 40 in the tag
 	tag := v1alpha1.JobTag(a.Namespace, a.Name, a.UID)
 	req := provider.SubmitRequest{Tag: tag, Hold: true, Account: w.s.account, Params: *a.Spec.ForProvider.Batch}
 	id, got, err := roundTripJobName(context.Background(), w.batch, req, 36, func() { time.Sleep(5 * time.Second) })
