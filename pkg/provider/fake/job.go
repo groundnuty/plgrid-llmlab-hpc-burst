@@ -16,6 +16,7 @@ type jobRec struct {
 	partition string
 	limit     time.Duration // the limit the job was established with
 	gpus      int32
+	cpus      int32 // the CPUs the job was established with (cpusPerTask)
 	submit    time.Time
 	script    Script
 
@@ -30,6 +31,10 @@ type jobRec struct {
 	restartCount int32
 	requeued     bool
 	vanished     bool
+
+	// priorRun is the time the job's earlier executions ran, added by each
+	// requeue (accounting sums the executions of a requeued job).
+	priorRun time.Duration
 }
 
 // timeline returns when the job starts and when it ends if nothing else
@@ -124,6 +129,9 @@ func (b *Batch) record(j *jobRec, now time.Time) provider.Job {
 		h := s.Add(j.limit)
 		out.StartTime, out.HardEnd = &s, &h
 	}
+	if out.Source == provider.SourceAccounting {
+		out.Accounting = b.accountingOf(j, out, now)
+	}
 	out.State = []string{state}
 	out.Reason = reason
 	out.Hold = provider.HoldOf(held, reason)
@@ -135,6 +143,33 @@ func (b *Batch) record(j *jobRec, now time.Time) provider.Job {
 	}
 	out.Phase = phase
 	return out
+}
+
+// accountingOf is what accounting reports about the job whose record is r at
+// now, in the shape of internal/slurm/fakeslurm's sacct: the cpu entry of
+// tres.allocated once the job has started, the gpu entry only for a job that
+// has GPUs, and time.elapsed summed over the executions. A job that never
+// started has no allocation and 0 elapsed.
+func (b *Batch) accountingOf(j *jobRec, r provider.Job, now time.Time) *provider.JobAccounting {
+	a := &provider.JobAccounting{Executions: int(j.restartCount) + 1}
+	run := j.priorRun
+	if r.StartTime != nil {
+		stop := now
+		if r.EndTime != nil {
+			stop = *r.EndTime
+		}
+		if d := stop.Sub(*r.StartTime); d > 0 {
+			run += d
+		}
+		cpus := j.cpus
+		a.AllocatedCPUs = &cpus
+		if j.gpus > 0 {
+			gpus := j.gpus
+			a.AllocatedGPUs = &gpus
+		}
+	}
+	a.Elapsed = &run
+	return a
 }
 
 // live reports whether the job can still be cancelled: held, pending or

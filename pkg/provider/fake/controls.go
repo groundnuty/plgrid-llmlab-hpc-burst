@@ -67,6 +67,9 @@ func (b *Batch) requeue(id, op string, hold bool) {
 		panic("fake: job " + id + " has ended: it cannot be requeued")
 	}
 	b.log(op, id)
+	if r := b.record(j, now); r.StartTime != nil {
+		j.priorRun += now.Sub(*r.StartTime)
+	}
 	j.restartCount++
 	j.requeued = true
 	j.eligible = now
