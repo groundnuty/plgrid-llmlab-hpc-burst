@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -191,11 +192,15 @@ func (e *realEnv) provStatus() v1alpha1.ProviderStatus {
 	return p.Status
 }
 
-// A spec change on an Allocation makes no Slurm call and leaves its state
-// unchanged (#59, from the review of #48): the management policies exclude
-// Update, and Observe reads the Provider's cached listing, so a reconcile
-// within the poll interval calls nothing. Counted from the fake Slurm's log.
-func TestSpecChangeMakesNoSlurmCall(t *testing.T) {
+// A spec change on a Running Allocation makes no Slurm call within the poll
+// interval and leaves its state unchanged (#59, from the review of #48): the
+// management policies exclude Update, and Observe reads the Provider's cached
+// listing. Counted from the fake Slurm's log. What the test covers is exactly
+// that state (review of PR 76: Opus N11): on an Allocation with no recorded
+// job (waiting out an attempt, a Rejected backoff or the prerequisites), every
+// reconcile, the one a spec change triggers included, looks the tag up and so
+// reads accounting; it never writes.
+func TestSpecChangeOnARunningAllocationMakesNoSlurmCallWithinThePollInterval(t *testing.T) {
 	clock := fake.NewClock(at(12, 0, 0))
 	sl := newSlurm(clock, fakeslurm.Config{})
 	e := newRealEnv(t, clock, sl, newFakeClient(t, "prov-a"), "prov-a", "user-a")
@@ -375,7 +380,9 @@ func TestStagingDirectoryResolution(t *testing.T) {
 
 // In ssh dial-home mode a missing key file sets DialHomeKeyMissing and no
 // sbatch runs; once the operator places both files, the submission goes on
-// (HBEP-4, Test plan, The dial-home key).
+// (HBEP-4, Test plan, The dial-home key). Create writes the condition itself
+// (HBEP-4, Two controllers), so no status-loop pass runs here (review of PR 76:
+// Opus N2).
 func TestDialHomeKeyMissing(t *testing.T) {
 	clock := fake.NewClock(at(12, 0, 0))
 	sl := newSlurm(clock, fakeslurm.Config{})
@@ -391,9 +398,6 @@ func TestDialHomeKeyMissing(t *testing.T) {
 	}
 	e.newAlloc("alloc-a", 1)
 	e.run("alloc-a", 3)
-	if err := e.ctl.SyncStatus(e.ctx); err != nil {
-		t.Fatal(err)
-	}
 	if n := sl.Count("sbatch"); n != 0 {
 		t.Errorf("%d sbatch calls with known_hosts missing, want 0", n)
 	}
@@ -408,9 +412,6 @@ func TestDialHomeKeyMissing(t *testing.T) {
 	e.run("alloc-a", 3)
 	if n := sl.Count("sbatch"); n != 1 {
 		t.Errorf("%d sbatch calls once both files exist, want 1", n)
-	}
-	if err := e.ctl.SyncStatus(e.ctx); err != nil {
-		t.Fatal(err)
 	}
 	if c := apimeta.FindStatusCondition(e.provStatus().Conditions, v1alpha1.ConditionDialHomeKeyMissing); c == nil || c.Status != metav1.ConditionFalse {
 		t.Errorf("DialHomeKeyMissing is %+v, want False", c)
@@ -535,15 +536,39 @@ func TestNoGPUOnAGPUPartitionIsRefusedBeforeAnyCall(t *testing.T) {
 	sl := newSlurm(clock, fakeslurm.Config{})
 	e := newRealEnv(t, clock, sl, newFakeClient(t, "prov-a"), "prov-a", "user-a")
 	e.newAlloc("alloc-a", 0)
-	e.run("alloc-a", 3)
-	if n := sl.Count("sbatch"); n != 0 {
-		t.Errorf("%d sbatch calls, want 0", n)
+	if calls, err := e.createDirect("alloc-a"); calls != 0 || err == nil {
+		t.Errorf("Create made %d calls and returned %v, want no call at all and a refusal", calls, err)
 	}
 	a := e.get("alloc-a")
 	rec, err := readRecord(a)
 	if err != nil || rec.sub == nil || rec.sub.State != v1alpha1.SubmissionRejected || !strings.Contains(rec.sub.Reason, "GPU partition") {
 		t.Errorf("record %+v (%v), want Rejected naming the GPU rule", rec.sub, err)
 	}
+	e.run("alloc-a", 3)
+	if n := sl.Count("sbatch"); n != 0 {
+		t.Errorf("%d sbatch calls, want 0", n)
+	}
+}
+
+// createDirect calls Create on the Allocation, as the reconciler does after an
+// Observe that reports the job missing, and returns how many commands it
+// ran on the fake Slurm: the Observe's own reads are not in the count. The tag
+// initializer's write is done first, as a reconcile does it.
+func (e *realEnv) createDirect(name string) (int, error) {
+	e.t.Helper()
+	a := e.get(name)
+	meta.SetExternalName(a, tagOf(a))
+	if err := e.c.Update(e.ctx, a); err != nil {
+		e.t.Fatal(err)
+	}
+	a = e.get(name)
+	ext, err := (&connector{s: e.ctl.shared}).Connect(e.ctx, a)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	mark := len(e.slurm.Calls())
+	_, err = ext.Create(e.ctx, a)
+	return len(e.slurm.Calls()) - mark, err
 }
 
 // A one-job-per-user partition refuses the second job: Rejected, then backoff,

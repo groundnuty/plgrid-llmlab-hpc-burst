@@ -126,6 +126,9 @@ func TestMemoryZeroIsRefusedBeforeAnyCall(t *testing.T) {
 	if err := e.c.Update(e.ctx, a); err != nil {
 		t.Fatal(err)
 	}
+	if calls, err := e.createDirect("alloc-a"); calls != 0 || err == nil {
+		t.Errorf("Create made %d calls for memory 0 and returned %v, want no call at all and a refusal", calls, err)
+	}
 	e.run("alloc-a", 3)
 	if n := sl.Count("sbatch"); n != 0 {
 		t.Errorf("%d sbatch calls for memory 0, want 0", n)

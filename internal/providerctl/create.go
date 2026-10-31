@@ -60,6 +60,10 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 	case s != nil && s.State == v1alpha1.SubmissionRejected && now.Sub(attemptTime(a, s)) < e.s.o.RejectBackoff:
 		return managed.ExternalCreation{}, fmt.Errorf("attempt %d was rejected; the next waits for backoff", s.Attempt)
 	}
+	req := provider.SubmitRequest{Tag: name, Hold: e.hold(), Account: e.v.Settings.Account, Params: *a.Spec.ForProvider.Batch}
+	if err := slurm.CheckRequest(req, e.v.Profile, e.v.Settings); err != nil {
+		return managed.ExternalCreation{}, e.refuse(ctx, a, rec, now, err)
+	}
 	if why := e.prerequisites(a); why != "" {
 		return managed.ExternalCreation{}, errors.New(why)
 	}
@@ -71,6 +75,9 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 		present, err := e.p.DialHomeKeysPresent(ctx)
 		if err != nil {
 			return managed.ExternalCreation{}, err
+		}
+		if err := e.s.writeDialHomeKeyMissing(ctx, !present); err != nil {
+			e.s.o.Log.Info("cannot write DialHomeKeyMissing; the status loop writes it at its next pass", "error", err)
 		}
 		if !present {
 			return managed.ExternalCreation{}, fmt.Errorf("%s: the dial-home key files are missing in ~/%s on the platform; nothing is submitted", v1alpha1.ConditionDialHomeKeyMissing, agentapi.DialHomeDir)
@@ -95,9 +102,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 		return managed.ExternalCreation{}, fmt.Errorf("could not claim submission attempt %d, nothing submitted: %w", n, err)
 	}
 	e.p.SetBusy(name, true)
-	id, outcome, serr := e.p.Submit(ctx, provider.SubmitRequest{
-		Tag: name, Hold: e.hold(), Account: e.v.Settings.Account, Params: *a.Spec.ForProvider.Batch,
-	})
+	id, outcome, serr := e.p.Submit(ctx, req)
 	// The outcome is written with a fresh context: the reconcile's may have
 	// run out with sbatch, and the record must not stay InFlight.
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
@@ -126,6 +131,27 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 		e.event(a, event.Warning("SubmissionUnknown", fmt.Errorf("attempt %d: %s; the tag will resolve it", n, u.Reason)))
 		return managed.ExternalCreation{}, nil
 	}
+}
+
+// refuse records a request that HBEP-4 refuses before any call (Submission:
+// memory 0, no GPU on a GPU partition, a time limit above maxTime, and the
+// rest) as attempt n+1 Rejected, with an API write only: no file is staged, no
+// command runs, and the next attempt waits for the backoff, as for any
+// Rejected attempt (review of PR 76: Opus N1). The write is a
+// compare-and-swap: a conflict means another reconciler moved the record, and
+// the next reconcile decides again.
+func (e *external) refuse(ctx context.Context, a *v1alpha1.Allocation, rec record, now time.Time, cause error) error {
+	n := int32(1)
+	if rec.sub != nil {
+		n = rec.sub.Attempt + 1
+	}
+	r := v1alpha1.SubmissionRecord{Attempt: n, Token: newToken(), State: v1alpha1.SubmissionRejected, Writer: e.s.o.Identity,
+		Time: mt(now), Reason: truncate(cause.Error())}
+	if err := write(ctx, e.s.kube, a, map[string]string{v1alpha1.AnnotationSubmission: recordValue(r)}); err != nil {
+		return fmt.Errorf("attempt %d is refused before any call, but the refusal was not recorded: %w", n, err)
+	}
+	e.event(a, event.Warning("SubmissionRejected", fmt.Errorf("attempt %d: %s", n, r.Reason)))
+	return fmt.Errorf("attempt %d rejected: %s", n, r.Reason)
 }
 
 func errText(err error) string {

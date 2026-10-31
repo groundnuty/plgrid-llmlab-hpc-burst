@@ -21,6 +21,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider/fake"
 )
 
@@ -338,5 +340,88 @@ func TestProviderControllerIsTheWriterOfAnnotationsAndStatus(t *testing.T) {
 	}
 	if !sawProvider {
 		t.Errorf("Provider managedFields %+v have no entry for %s", prov.ManagedFields, v1alpha1.FieldManagerProvider)
+	}
+}
+
+// Astra B7: an outage of accounting alone. The queue listing keeps
+// succeeding, every sacct fails, and the Allocation cannot establish its job;
+// the reads are failing, so lastSuccessfulStatusRead stops advancing and Ready
+// goes False past the staleness bound, as fake.Controller judges a pass with a
+// failed read. The control has no outage: Ready stays True and ProviderReady
+// holds at every pass.
+func TestProviderReadyFailsOnAnAccountingOnlyOutage(t *testing.T) {
+	for _, outage := range []bool{false, true} {
+		t.Run(map[bool]string{false: "control", true: "sacct fails"}[outage], func(t *testing.T) {
+			clock := fake.NewClock(at(12, 0, 0))
+			sl := newSlurm(clock, fakeslurm.Config{})
+			f := &lineFaults{}
+			e := newRealEnv(t, clock, sl, newFakeClient(t, "prov-a"), "prov-a", "user-a", withLineFaults(f))
+			if err := e.ctl.SyncStatus(e.ctx); err != nil {
+				t.Fatal(err)
+			}
+			if outage {
+				f.fail("sacct", -1, slurm.ErrTransport)
+			}
+			e.newAlloc("alloc-a", 1)
+			for i := 0; i < 12; i++ { // 6 min at the poll interval
+				clock.Advance(30 * time.Second)
+				e.run("alloc-a", 1)
+				if err := e.ctl.SyncStatus(e.ctx); err != nil {
+					t.Fatal(err)
+				}
+				var p v1alpha1.Provider
+				if err := e.c.Get(e.ctx, client.ObjectKey{Name: e.provider}, &p); err != nil {
+					t.Fatal(err)
+				}
+				if !outage && !v1alpha1.ProviderReady(&p, clock.Now()) {
+					t.Fatalf("ProviderReady false at %s with no outage; lastSuccessfulStatusRead %v", clock.Now().Sub(at(12, 0, 0)), p.Status.LastSuccessfulStatusRead)
+				}
+			}
+			st := e.provStatus()
+			c := apimeta.FindStatusCondition(st.Conditions, v1alpha1.ConditionProviderReady)
+			if !outage {
+				if c == nil || c.Status != metav1.ConditionTrue {
+					t.Errorf("Ready %+v with no outage, want True", c)
+				}
+				return
+			}
+			if f.failed() == 0 || sl.Count("squeue") == 0 {
+				t.Fatalf("precondition: %d sacct failed, %d squeue ran; want both", f.failed(), sl.Count("squeue"))
+			}
+			if c == nil || c.Status != metav1.ConditionFalse || c.Reason != v1alpha1.ReasonReadsFailing {
+				t.Errorf("Ready %+v after 6 min of failing accounting reads, want False/ReadsFailing", c)
+			}
+			if r := st.LastSuccessfulStatusRead; r == nil || !r.Time.Equal(at(12, 0, 0)) {
+				t.Errorf("lastSuccessfulStatusRead %v, want it stuck at 12:00:00, the last pass with no failed read", r)
+			}
+		})
+	}
+}
+
+// Opus N3: a pass that changes nothing writes nothing. lastSuccessfulStatusRead
+// is refreshed once it is statusRefresh old, well inside the staleness bound,
+// and a failing pass within the bound, which changes nothing, writes nothing.
+func TestProviderStatusSkipsIdenticalWrites(t *testing.T) {
+	e := newEnv(t)
+	rv := func() string { return ptProvider(e).ResourceVersion }
+	ptSync(e)
+	first := rv()
+	e.clock.Advance(30 * time.Second)
+	if p := ptSync(e); p.ResourceVersion != first || !v1alpha1.ProviderReady(p, e.clock.Now()) {
+		t.Errorf("resourceVersion %s -> %s on a pass that changed nothing (ProviderReady %v), want no write",
+			first, p.ResourceVersion, v1alpha1.ProviderReady(p, e.clock.Now()))
+	}
+	e.clock.Advance(30 * time.Second)
+	p := ptSync(e)
+	if p.ResourceVersion == first || p.Status.LastSuccessfulStatusRead == nil || !p.Status.LastSuccessfulStatusRead.Time.Equal(at(12, 1, 0)) {
+		t.Errorf("resourceVersion %s, lastSuccessfulStatusRead %v at 12:01:00, want it written once a minute old", p.ResourceVersion, p.Status.LastSuccessfulStatusRead)
+	}
+	e.platform.mu.Lock()
+	e.platform.pollErr = errors.New("scripted: squeue failed")
+	e.platform.mu.Unlock()
+	before := rv()
+	e.clock.Advance(30 * time.Second)
+	if p := ptSync(e); p.ResourceVersion != before {
+		t.Errorf("resourceVersion %s -> %s on a failing pass inside the staleness bound, want no write", before, p.ResourceVersion)
 	}
 }
