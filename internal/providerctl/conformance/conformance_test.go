@@ -233,7 +233,8 @@ func newWorld(t *testing.T) *world {
 			return w.batch, t, nil
 		},
 		CredentialsDir: w.credDir, AgentBuildsDir: builds,
-		Front:        &providerctl.FrontSettings{Mode: agentapi.DialHomeDirect, Endpoint: "127.0.0.1:29261", CertPin: strings.Repeat("0", 64)},
+		Front: &providerctl.FrontSettings{Mode: agentapi.DialHomeDirect, Endpoint: "127.0.0.1:29261", CertPin: strings.Repeat("0", 64),
+			FrpcDigests: map[string]string{s.cpuArch: strings.Repeat("d", 64)}},
 		PollInterval: 10 * time.Second, BusyInterval: 3 * time.Second, CreationGracePeriod: -1,
 	})
 	if err != nil {

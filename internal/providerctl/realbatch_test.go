@@ -102,7 +102,8 @@ func newRealEnv(t *testing.T, clock *fake.Clock, sl *fakeslurm.Platform, c clien
 			e.batch = slurm.NewBatch(e.session, v.Profile, v.Settings, slurm.Options{Clock: clock})
 			return e.batch, io.NopCloser(nil), nil
 		},
-		Front:               &FrontSettings{Mode: agentapi.DialHomeDirect, Endpoint: "front.example.org:29443", CertPin: strings.Repeat("c", 64)},
+		Front: &FrontSettings{Mode: agentapi.DialHomeDirect, Endpoint: "front.example.org:29443", CertPin: strings.Repeat("c", 64),
+			FrpcDigests: map[string]string{testArch: strings.Repeat("d", 64)}},
 		CreationGracePeriod: -1,
 	}
 	for _, m := range mods {
@@ -339,6 +340,10 @@ func TestStagingDirectoryResolution(t *testing.T) {
 	if cfg.StagingDir != "/scratch/user-a/stage" || cfg.DialHomeDir != "/home/user-a/.hpcburst/dial-home" || cfg.Tag != tag {
 		t.Errorf("agent.json %+v", cfg)
 	}
+	// The frpc digest of the partition's cpuArch (x86_64) from the Front settings.
+	if cfg.FrpcDigest != "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" {
+		t.Errorf("agent.json frpcDigest %q, want the x86_64 digest of the Front settings", cfg.FrpcDigest)
+	}
 	if js.Mode.Perm() != 0o600 {
 		t.Errorf("agent.json mode %o, want 600", js.Mode.Perm())
 	}
@@ -388,7 +393,7 @@ func TestDialHomeKeyMissing(t *testing.T) {
 	sl := newSlurm(clock, fakeslurm.Config{})
 	e := newRealEnv(t, clock, sl, newFakeClient(t, "prov-a"), "prov-a", "user-a", func(e *realEnv) {
 		e.opts.Front = &FrontSettings{Mode: agentapi.DialHomeSSH, Endpoint: "front.example.org:22", CertPin: strings.Repeat("c", 64),
-			SSHUser: "example-user", AgentPort: 29270}
+			SSHUser: "example-user", AgentPort: 29270, DialHomePort: 29274, FrpcDigests: map[string]string{testArch: strings.Repeat("d", 64)}}
 	})
 	if err := sl.MkdirAll("/home/user-a/.hpcburst/dial-home", 0o700); err != nil {
 		t.Fatal(err)
@@ -396,7 +401,7 @@ func TestDialHomeKeyMissing(t *testing.T) {
 	if err := sl.WriteFile("/home/user-a/.hpcburst/dial-home/key", []byte("example"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	e.newAlloc("alloc-a", 1)
+	a := e.newAlloc("alloc-a", 1)
 	e.run("alloc-a", 3)
 	if n := sl.Count("sbatch"); n != 0 {
 		t.Errorf("%d sbatch calls with known_hosts missing, want 0", n)
@@ -412,6 +417,16 @@ func TestDialHomeKeyMissing(t *testing.T) {
 	e.run("alloc-a", 3)
 	if n := sl.Count("sbatch"); n != 1 {
 		t.Errorf("%d sbatch calls once both files exist, want 1", n)
+	}
+	// In ssh mode agent.json carries the dial-home listener's port next to the
+	// agent endpoint's (HBEP-4, Submission), as the Front settings gave them.
+	js := sl.Files()["/scratch/user-a/stage/"+agentapi.StagedConfigPath(v1alpha1.JobTag(a.Namespace, a.Name, a.UID))]
+	cfg, err := agentapi.DecodeAgentConfig(js.Content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SSH == nil || cfg.SSH.AgentPort != 29270 || cfg.SSH.DialHomePort != 29274 {
+		t.Errorf("agent.json ssh settings %+v, want agent port 29270 and dial-home port 29274", cfg.SSH)
 	}
 	if c := apimeta.FindStatusCondition(e.provStatus().Conditions, v1alpha1.ConditionDialHomeKeyMissing); c == nil || c.Status != metav1.ConditionFalse {
 		t.Errorf("DialHomeKeyMissing is %+v, want False", c)
