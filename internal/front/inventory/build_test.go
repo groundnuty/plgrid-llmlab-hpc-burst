@@ -107,7 +107,10 @@ func TestSkipKeepsMembership(t *testing.T) {
 		t.Fatalf("first build: members %v", m)
 	}
 	for name, edit := range map[string]func(s *Snapshot) func(types.UID) bool{
-		"verifying": func(s *Snapshot) func(types.UID) bool { s.Instances[0].Status.Phase = v1alpha1.InstanceVerifying; return all },
+		"verifying": func(s *Snapshot) func(types.UID) bool {
+			s.Instances[0].Status.Phase = v1alpha1.InstanceVerifying
+			return all
+		},
 		"no transport": func(s *Snapshot) func(types.UID) bool {
 			return func(types.UID) bool { return false }
 		},

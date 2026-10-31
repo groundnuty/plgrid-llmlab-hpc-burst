@@ -221,6 +221,7 @@ func healthHandler(f *Front) http.Handler {
 		body := map[string]any{
 			"synced": f.Watch.Synced(), "viewAge": now.Sub(st.BuiltAt).Round(time.Second).String(),
 			"watchAges": ages, "deployments": st.Deployments, "managedTargets": st.Managed, "waiting": st.Waiting,
+			"instances": st.Instances, "leaseEnds": st.LeaseEnds,
 		}
 		code := http.StatusOK
 		if !f.Watch.Synced() {

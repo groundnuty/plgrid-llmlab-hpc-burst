@@ -296,13 +296,17 @@ type Status struct {
 	Deployments map[string]int `json:"deployments"` // routable Instances per served deployment
 	Managed     int            `json:"managedTargets"`
 	Waiting     int            `json:"waiting"`
+	// Instances counts the Instances the watch holds, and LeaseEnds those
+	// with status.leaseEnd, so a check can see the watch read the status.
+	Instances int `json:"instances"`
+	LeaseEnds int `json:"leaseEnds"`
 }
 
 // Status returns a summary of the view.
 func (r *Router) Status() Status {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	s := Status{BuiltAt: r.builtAt, Deployments: map[string]int{}}
+	s := Status{BuiltAt: r.builtAt, Deployments: map[string]int{}, Instances: len(r.snap.Instances), LeaseEnds: len(r.leaseEnds)}
 	if r.view == nil {
 		return s
 	}

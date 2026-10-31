@@ -30,12 +30,12 @@ func TestParseAcceptsHBEP3Examples(t *testing.T) {
 
 func TestParseRefusesGrammarErrors(t *testing.T) {
 	for _, in := range []string{
-		"",                     // empty name
-		"m@",                   // empty provider part
-		"@helios-a",            // empty model part
-		"m@helios-a/",          // trailing slash
-		"m@/0123456789ab",      // empty provider before the ID
-		"m@helios-a/0123",      // short ID
+		"",                          // empty name
+		"m@",                        // empty provider part
+		"@helios-a",                 // empty model part
+		"m@helios-a/",               // trailing slash
+		"m@/0123456789ab",           // empty provider before the ID
+		"m@helios-a/0123",           // short ID
 		"m@helios-a/0123456789abcd", // long ID
 		"m@helios-a/0123456789AB",   // upper case
 		"m@helios-a/0123456789ag",   // not hex

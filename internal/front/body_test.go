@@ -31,9 +31,9 @@ func TestRewriteChangesOnlyTheTopLevelModel(t *testing.T) {
 		},
 		{
 			"an escaped member name is the model member",
-			`{"model":"m@p","n":2}`,
+			`{"mod\u0065l":"m@p","n":2}`,
 			"m",
-			`{"model":"m","n":2}`,
+			`{"mod\u0065l":"m","n":2}`,
 		},
 		{
 			"characters JSON must escape, and none it must not",
@@ -60,15 +60,15 @@ func TestParseBodyRefusals(t *testing.T) {
 		in   string
 		want error
 	}{
-		"duplicate top-level model":       {`{"model":"a","x":1,"model":"b"}`, errDuplicateModel},
-		"duplicate through an escape":     {`{"model":"a","model":"b"}`, errDuplicateModel},
-		"no model":                        {`{"messages":[]}`, errNoModel},
-		"model not a string":              {`{"model":42}`, errNoModel},
-		"model null":                      {`{"model":null}`, errNoModel},
-		"not an object":                   {`["model"]`, errNotObject},
-		"not JSON":                        {`model=m`, errNotObject},
-		"trailing data":                   {`{"model":"m"} {}`, errNotObject},
-		"truncated":                       {`{"model":"m",`, errNotObject},
+		"duplicate top-level model":        {`{"model":"a","x":1,"model":"b"}`, errDuplicateModel},
+		"duplicate through an escape":      {`{"model":"a","mod\u0065l":"b"}`, errDuplicateModel},
+		"no model":                         {`{"messages":[]}`, errNoModel},
+		"model not a string":               {`{"model":42}`, errNoModel},
+		"model null":                       {`{"model":null}`, errNoModel},
+		"not an object":                    {`["model"]`, errNotObject},
+		"not JSON":                         {`model=m`, errNotObject},
+		"trailing data":                    {`{"model":"m"} {}`, errNotObject},
+		"truncated":                        {`{"model":"m",`, errNotObject},
 		"nested model only does not count": {`{"metadata":{"model":"m"}}`, errNoModel},
 	} {
 		t.Run(name, func(t *testing.T) {
