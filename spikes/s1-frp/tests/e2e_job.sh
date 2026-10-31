@@ -31,6 +31,7 @@ e2e_prepare() {   # the throwaway sshd authorising the README key line, ports, t
   expect "the README key line was found, with its two ports swapped" bash -c "case '$opts' in *permitopen=\\\"127.0.0.1:$T_AGENT_PORT\\\",permitopen=\\\"127.0.0.1:$T_DIALHOME_PORT\\\"*) ;; *) exit 1 ;; esac" || return 1
   tsshd_authorize "$opts"
   T_SSH_KEY="$TSSHD_KEY" T_KNOWN_HOSTS="$TSSHD_KNOWN_HOSTS" T_VM_USER="$TSSHD_USER" T_KIT="$KIT"
+  T_VM_SSH_PORT="$TSSHD_PORT" T_HOSTKEY_FP="$(fp_of "$TSSHD_DIR/host_key.pub")"   # the VM's own host key, as the run book takes it
   umask 077; head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$W/token"; chmod 600 "$W/token"; T_TOKEN="$W/token"
   render_job "$W/job.sbatch" || return 1
 }
@@ -55,6 +56,7 @@ test_e2e_the_real_forward_carries_probe_login_stream_and_three_faults() {
   # --- B: step 0 through both real forwards, with the VM side running
   start_job 2001 PROBE_ONLY=1 VM_SSH_PORT="$TSSHD_PORT"; job_rc 60
   expect "probe-only exit 0 (got $RC)" test "$RC" = 0 || return 1
+  expect "probe: the sshd presents the VM's own host key" test "$(probe_field "$JD/probe.jsonl" hostkey state)" = '"match"' || return 1
   expect "probe: verified token through the control forward" test "$(probe_field "$JD/probe.jsonl" path_ctl far_end)" = '"token"' || return 1
   expect "probe: verified token through the tunnel forward and Envoy" test "$(probe_field "$JD/probe.jsonl" path_tun far_end)" = '"token"' || return 1
 

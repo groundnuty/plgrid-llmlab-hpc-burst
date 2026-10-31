@@ -62,14 +62,14 @@ test_b1_probe_passes_in_direct_mode() {   # no ssh: the job dials VM_ADDR's two 
   mk_dummy_files || return 1
   make_fake_kit "$W/kit"; T_KIT="$W/kit"; pick_ports
   render_job "$W/job.sbatch" && far_ends || return 1
-  start_job 1007 PROBE_ONLY=1 TRANSPORT=direct VM_SSH_PORT="$(free_port)"; job_rc 40
+  start_job 1007 PROBE_ONLY=1 TRANSPORT=direct; job_rc 40
   expect "exit 0 (got $RC)" test "$RC" = 0 || return 1
   path_ok_both direct || return 1
   expect "no ssh was started" test ! -e "$JD/ssh-probe-ctl.err"
 }
 test_b1_full_run_without_a_login_exits_3_and_cleans_up() {   # the gate on frpc's own login line
   fake_env fwd && far_ends || return 1
-  start_job 1010 FAKE_FRPC_LOGIN=never FRPC_LOGIN_WAIT_S=4 VM_SSH_PORT="$(free_port)"
+  start_job 1010 FAKE_FRPC_LOGIN=never FRPC_LOGIN_WAIT_S=4
   job_rc 40; rc=$RC
   expect "exit 3 (got $rc)" test "$rc" = 3 || return 1
   expect "frpc_login ok false recorded" test "$(probe_field "$JD/probe.jsonl" frpc_login ok)" = false || return 1
@@ -77,7 +77,7 @@ test_b1_full_run_without_a_login_exits_3_and_cleans_up() {   # the gate on frpc'
 }
 test_b1_full_run_far_end_closed_exits_3() {   # step 0 of a full run: a forward whose far end closes is not the VM side
   fake_env closed && far_ends || return 1
-  start_job 1011 VM_SSH_PORT="$(free_port)"
+  start_job 1011
   job_rc 40; rc=$RC
   expect "exit 3 (got $rc)" test "$rc" = 3 || return 1
   expect "path_ctl not ok" test "$(probe_field "$JD/probe.jsonl" path_ctl ok)" = false
@@ -86,7 +86,7 @@ test_b1_full_run_far_end_closed_exits_3() {   # step 0 of a full run: a forward 
 # ---- B3: the engine restarts on its port; freeze and thaw ----------------------------------------------
 full_fake_up() {   # JOBID [ENV...] PLAN...: a fake full run up to the armed main loop
   local jid="$1"; shift
-  start_job "$jid" VM_SSH_PORT="$(free_port)" WATCHER_WAIT_S=60 "$@"
+  start_job "$jid" WATCHER_WAIT_S=60 "$@"
   wait_for 30 file_has "$JD/job.log" "frpc: login to server success" || { echo "no login in log"; tail -5 "$JD/job.log"; return 1; }
   attach_watcher || return 1
   wait_for 10 file_has "$JD/job.log" "watcher attached" || { echo "no attach"; return 1; }
@@ -178,7 +178,7 @@ test_b4_a_changed_host_key_stops_the_job_with_exit_4() {
 test_b4_a_forwarding_failure_stops_the_job_with_exit_4() {
   fake_env fwd && far_ends || return 1
   plan_for tun fwd "fwd_for:3:255:bind [127.0.0.1]:4000: Address already in use" "fail:255:Could not request local forwarding."
-  start_job 1032 VM_SSH_PORT="$(free_port)" WATCHER_WAIT_S=60
+  start_job 1032 WATCHER_WAIT_S=60
   job_rc 60; rc=$RC
   expect "exit 4 (got $rc)" test "$rc" = 4 || return 1
   expect "transport.failed says tun:forwarding" test "$(cat "$JD/transport.failed")" = tun:forwarding
@@ -186,7 +186,7 @@ test_b4_a_forwarding_failure_stops_the_job_with_exit_4() {
 test_b4_an_outage_past_the_deadline_stops_the_job_with_exit_4() {
   fake_env fwd && far_ends || return 1
   plan_for tun fwd "fwd_for:3:255:Connection reset by peer" "fail:255:ssh: connect to host h port 22: Connection timed out"
-  start_job 1033 VM_SSH_PORT="$(free_port)" WATCHER_WAIT_S=60 OUTAGE_DEADLINE_S=4
+  start_job 1033 WATCHER_WAIT_S=60 OUTAGE_DEADLINE_S=4
   job_rc 60; rc=$RC
   expect "exit 4 (got $rc)" test "$rc" = 4 || return 1
   expect "class tun:outage_deadline" test "$(cat "$JD/transport.failed")" = tun:outage_deadline || return 1
@@ -195,7 +195,7 @@ test_b4_an_outage_past_the_deadline_stops_the_job_with_exit_4() {
 test_b4_a_startup_failure_is_fatal_not_a_warning() {
   fake_env fwd && far_ends || return 1
   plan_for ctl fwd "fail:255:ssh: connect to host h port 22: Connection timed out"
-  start_job 1034 VM_SSH_PORT="$(free_port)" FWD_STARTUP_WAIT_S=3 OUTAGE_DEADLINE_S=60
+  start_job 1034 FWD_STARTUP_WAIT_S=3 OUTAGE_DEADLINE_S=60
   job_rc 60; rc=$RC
   expect "exit 4 (got $rc)" test "$rc" = 4 || return 1
   expect "class startup_timeout" test "$(cat "$JD/transport.failed")" = startup_timeout || return 1
@@ -205,7 +205,7 @@ test_b4_a_startup_failure_is_fatal_not_a_warning() {
 test_b4_attempts_established_disconnects_recoveries_are_counted_apart() {   # nit
   fake_env fwd && far_ends || return 1
   plan_for tun fwd "fwd_for:2:255:Connection reset by peer" "fail:255:Connection timed out" fwd
-  start_job 1035 VM_SSH_PORT="$(free_port)" WATCHER_WAIT_S=60 OUTAGE_DEADLINE_S=60
+  start_job 1035 WATCHER_WAIT_S=60 OUTAGE_DEADLINE_S=60
   wait_for 40 file_has "$JD/ssh-tun-counters.json" '"recoveries":1' || { echo "counters: $(cat "$JD/ssh-tun-counters.json")"; return 1; }
   kill -TERM "$JOB_PID"; job_rc 20 >/dev/null
   python3 - "$JD/ssh-tun-counters.json" "$JD/ssh-ctl-counters.json" <<'PY' || return 1
@@ -220,7 +220,7 @@ PY
 test_b4_exit_lines_hold_only_allowlisted_fields() {   # B5
   fake_env fwd && far_ends || return 1
   plan_for tun fwd "fwd_for:2:255:Connection reset by peer" fwd
-  FAKE_SSH_LEAK="Permission denied for user someone from an address" start_job 1036 VM_SSH_PORT="$(free_port)" WATCHER_WAIT_S=60 OUTAGE_DEADLINE_S=60
+  FAKE_SSH_LEAK="Permission denied for user someone from an address" start_job 1036 WATCHER_WAIT_S=60 OUTAGE_DEADLINE_S=60
   wait_for 30 test -s "$JD/ssh-tun-exits.jsonl" || return 1
   python3 - "$JD/ssh-tun-exits.jsonl" <<'PY'
 import json, sys
@@ -268,8 +268,9 @@ test_b5_exported_files_carry_none_of_the_identifying_strings() {   # review B5: 
   fake_env fwd && far_ends || return 1
   plan_for tun fwd "fwd_for:2:255:Connection reset by peer" fwd
   T_VM_USER="$vmu" T_VM_ADDR="$vmh"; render_job "$W/job.sbatch" || return 1
+  printf '[%s]:%s %s\n' "$vmh" "$T_VM_SSH_PORT" "$(cut -d' ' -f1,2 "$W/fakessh/hostkey.pub")" > "$W/known_hosts"   # the pin follows the address
   FAKE_SSH_LEAK="ssh: connect to host $vmh port 22 ($ip4 $ip6) as $vmu key $T_SSH_KEY known_hosts $T_KNOWN_HOSTS" \
-    start_job 1040 VM_SSH_PORT="$(free_port)" WATCHER_WAIT_S=60 OUTAGE_DEADLINE_S=60
+    start_job 1040 WATCHER_WAIT_S=60 OUTAGE_DEADLINE_S=60
   wait_for 30 file_has "$JD/ssh-tun-counters.json" '"established":2' || { echo "no second session"; return 1; }
   kill -TERM "$JOB_PID"; job_rc 20 >/dev/null
   expect "export/ exists" test -d "$JD/export" || return 1
@@ -297,10 +298,10 @@ test_b6_a_restarted_allocation_is_refused() {
 }
 test_b6_an_existing_run_directory_is_never_reused() {
   fake_env closed && far_ends || return 1
-  start_job 1051 VM_SSH_PORT="$(free_port)"; job_rc 40; rc1=$RC
+  start_job 1051; job_rc 40; rc1=$RC
   expect "first run ended (got $rc1)" test "$rc1" != running || return 1
   sum="$(cksum "$JD/job.log")"
-  start_job 1051 VM_SSH_PORT="$(free_port)"; job_rc 20; rc2=$RC
+  start_job 1051; job_rc 20; rc2=$RC
   expect "second run with the same job id exits 1 (got $rc2)" test "$rc2" = 1 || return 1
   expect "the first run's log is untouched" test "$(cksum "$JD/job.log")" = "$sum" || return 1
   expect "the refusal is stated" file_has "$W/job.out" "already exists"
@@ -386,7 +387,7 @@ test_b7_term_leaves_nothing_running_and_spares_other_processes() {
 # ---- B9: the watcher ----------------------------------------------------------------------------------------
 test_b9_a_job_without_a_watcher_exits_5_and_cleans_up() {   # review B9: a paid job with nobody attached
   fake_env fwd && far_ends || return 1
-  start_job 1070 VM_SSH_PORT="$(free_port)" WATCHER_WAIT_S=5
+  start_job 1070 WATCHER_WAIT_S=5
   job_rc 60; rc=$RC
   expect "exit 5 (got $rc)" test "$rc" = 5 || return 1
   expect "the log says why" file_has "$JD/job.log" "RESULT: NO WATCHER" || return 1
@@ -403,7 +404,7 @@ test_b9_a_watcher_request_lets_the_job_proceed() {
 }
 test_b9_the_jobs_own_baseline_does_not_count_as_a_watcher() {
   fake_env fwd && far_ends || return 1
-  start_job 1072 VM_SSH_PORT="$(free_port)" WATCHER_WAIT_S=6
+  start_job 1072 WATCHER_WAIT_S=6
   wait_for 30 file_has "$JD/job.log" "frpc: login to server success" || return 1
   expect "the baseline requests are in the engine's request log" test -s "$JD/streamer.requests" || return 1
   job_rc 60; rc=$RC
@@ -414,7 +415,7 @@ test_b9_the_jobs_own_baseline_does_not_count_as_a_watcher() {
 # Step 0 found operators could not put the job directory under their own subdirectory without overriding SCRATCH.
 test_run_root_unset_means_scratch_slash_s1_frp() {
   fake_env closed && far_ends || return 1
-  start_job 1090 VM_SSH_PORT="$(free_port)"; job_rc 40
+  start_job 1090; job_rc 40
   expect "the job ended (got $RC)" test "$RC" != running || return 1
   expect "the job directory is SCRATCH/s1-frp/<jobid>-r0" test -s "$W/scratch/s1-frp/1090-r0/job.log"
 }
@@ -422,7 +423,7 @@ test_run_root_override_puts_the_job_directory_there() {
   fake_env closed && far_ends || return 1
   # ssh's own message names the override and the bare SCRATCH (not under RUN_ROOT): both must be scrubbed from what leaves the job
   FAKE_SSH_LEAK="ssh: root $W/mine/sub/s1/x and scratch $W/scratch/y" \
-    start_job 1091 VM_SSH_PORT="$(free_port)" RUN_ROOT="$W/mine/sub/s1"; JD="$W/mine/sub/s1/1091-r0"
+    start_job 1091 RUN_ROOT="$W/mine/sub/s1"; JD="$W/mine/sub/s1/1091-r0"
   job_rc 40
   expect "the job ended (got $RC)" test "$RC" != running || return 1
   expect "the job directory is RUN_ROOT/<jobid>-r0, created with its parents" test -s "$JD/job.log" || return 1
@@ -438,10 +439,10 @@ test_run_root_override_puts_the_job_directory_there() {
 test_run_root_must_be_absolute_and_without_whitespace() {
   fake_env closed && far_ends || return 1
   cd "$W" || return 1          # a broken check must not create the relative directory inside the repository
-  start_job 1092 VM_SSH_PORT="$(free_port)" RUN_ROOT="relative/dir"; job_rc 20
+  start_job 1092 RUN_ROOT="relative/dir"; job_rc 20
   expect "a relative RUN_ROOT exits 1 (got $RC)" test "$RC" = 1 || return 1
   expect "the reason is stated" file_has "$W/job.out" "absolute" || return 1
-  start_job 1093 VM_SSH_PORT="$(free_port)" RUN_ROOT="$W/my dir"; job_rc 20
+  start_job 1093 RUN_ROOT="$W/my dir"; job_rc 20
   expect "a RUN_ROOT with a space exits 1 (got $RC)" test "$RC" = 1 || return 1
   expect "the reason is stated" file_has "$W/job.out" "whitespace" || return 1
   expect "nothing was created" bash -c "! ls '$W/my dir' '$W/relative' '$W/scratch/s1-frp' 2>/dev/null | grep -q ."
@@ -491,7 +492,7 @@ test_direct_mode_points_frpc_at_the_dial_home_port() {
   mk_dummy_files || return 1
   make_fake_kit "$W/kit"; T_KIT="$W/kit"; pick_ports
   render_job "$W/job.sbatch" && far_ends || return 1
-  start_job 1103 TRANSPORT=direct VM_SSH_PORT="$(free_port)" WATCHER_WAIT_S=60
+  start_job 1103 TRANSPORT=direct WATCHER_WAIT_S=60
   wait_for 40 file_has "$JD/job.log" "frpc: login to server success" || { tail -5 "$JD/job.log"; return 1; }
   expect "frpc dials the VM's dial-home port" grep -qxF "serverPort = $T_DIALHOME_PORT" "$JD/frpc.toml" || return 1
   expect "the path rate went straight to the VM" test "$(probe_field "$JD/probe.jsonl" path_rate via)" = '"direct"' || return 1
@@ -500,7 +501,7 @@ test_direct_mode_points_frpc_at_the_dial_home_port() {
 test_a_failure_of_the_control_forward_alone_exits_4() {   # either forward failing for good ends the job
   fake_env fwd && far_ends || return 1
   plan_for ctl fwd "fwd_for:3:255:bind [127.0.0.1]:4000: Address already in use" "fail:255:Could not request local forwarding."
-  start_job 1104 VM_SSH_PORT="$(free_port)" WATCHER_WAIT_S=60
+  start_job 1104 WATCHER_WAIT_S=60
   job_rc 60
   expect "exit 4 (got $RC)" test "$RC" = 4 || return 1
   expect "transport.failed says ctl:forwarding" test "$(cat "$JD/transport.failed")" = ctl:forwarding || return 1
@@ -509,16 +510,102 @@ test_a_failure_of_the_control_forward_alone_exits_4() {   # either forward faili
 test_bad_wiring_settings_are_refused() {
   mk_dummy_files || return 1
   make_fake_kit "$W/kit"; T_KIT="$W/kit"; pick_ports
+  T_HOSTKEY_FP="SHA256:$(printf 'A%.0s' $(seq 1 43))"            # well formed, so each case fails for its own reason
   T_LPORT_TUN="$T_LPORT_CTL" render_job "$W/job.sbatch" || return 1
-  start_job 1105 VM_SSH_PORT="$(free_port)"; job_rc 20
+  start_job 1105; job_rc 20
   expect "the same local port for both forwards exits 1 (got $RC)" test "$RC" = 1 || return 1
   expect "the reason is stated" file_has "$W/job.out" "must differ" || return 1
   T_UID_OVERRIDE="Not-A-UID" render_job "$W/job.sbatch" || return 1
-  start_job 1106 VM_SSH_PORT="$(free_port)"; job_rc 20
+  start_job 1106; job_rc 20
   expect "a UID that is not a lowercase UUID exits 1 (got $RC)" test "$RC" = 1 || return 1
+  expect "the reason is stated" file_has "$W/job.out" "lowercase UUID" || return 1
   render_job "$W/job.sbatch" || return 1
-  start_job 1107 VM_SSH_PORT="$(free_port)" PATHRATE_DIRECTIONS=sideways; job_rc 20
-  expect "an unknown path-rate direction exits 1 (got $RC)" test "$RC" = 1
+  start_job 1107 PATHRATE_DIRECTIONS=sideways; job_rc 20
+  expect "an unknown path-rate direction exits 1 (got $RC)" test "$RC" = 1 || return 1
+  expect "the reason is stated" file_has "$W/job.out" "PATHRATE_DIRECTIONS"
+}
+
+# ---- the VM's own host key (lesson L-17.7): a banner proves nothing, the key does ------------------------------
+# The expected fingerprint is taken from the sshd's own host key file, as on the VM; the network check must then
+# tell that key from another one. All ports here are in 29400-29499, so the [host]:port form of known_hosts is used.
+hostkey_line_has_no_secrets() {   # FP...: the RESULT line and the hostkey probe line name neither the address nor a key
+  local line f
+  line="$(grep 'HOST KEY CHECK FAILED' "$JD/job.log"; grep '"probe":"hostkey' "$JD/probe.jsonl")"
+  expect "a RESULT line and a probe line were written" test -n "$line" || return 1
+  case "$line" in *127.0.0.1*) echo "the address leaked: $line"; return 1 ;; esac
+  for f in "$@"; do case "$line" in *"$f"*) echo "a fingerprint leaked"; return 1 ;; esac; done
+  for f in "$@"; do if grep -rqF -- "$f" "$JD/export"; then echo "a fingerprint reached export/"; return 1; fi; done
+}
+no_forward_started() { expect "no forward was started" bash -c "! ls '$JD'/ssh-probe-*.err '$JD'/ssh-*-counters.json 2>/dev/null | grep -q ."; }
+test_hostkey_the_vms_own_key_passes() {
+  sshd_env && far_ends || return 1
+  probe_only_run 1200
+  expect "exit 0 (got $RC)" test "$RC" = 0 || return 1
+  expect "hostkey ok" test "$(probe_field "$JD/probe.jsonl" hostkey ok)" = true || return 1
+  expect "state match" test "$(probe_field "$JD/probe.jsonl" hostkey state)" = '"match"' || return 1
+  expect "the non-22 port is recorded" test "$(probe_field "$JD/probe.jsonl" hostkey vm_ssh_port)" = "$TSSHD_PORT"
+}
+test_hostkey_another_key_at_the_address_exits_6() {   # the 31 Oct case: something answers ssh, but it is not the VM
+  sshd_env && far_ends || return 1
+  ssh-keygen -q -t ed25519 -N '' -f "$W/vmkey" || return 1
+  local real="$T_HOSTKEY_FP"
+  T_HOSTKEY_FP="$(fp_of "$W/vmkey.pub")"                          # the VM's key; the sshd at the address has another
+  printf '[127.0.0.1]:%s %s\n' "$TSSHD_PORT" "$(cut -d' ' -f1,2 "$W/vmkey.pub")" > "$TSSHD_KNOWN_HOSTS"   # pinned consistently
+  render_job "$W/job.sbatch" || return 1
+  probe_only_run 1201
+  expect "exit 6, the mismatch code (got $RC)" test "$RC" = 6 || return 1
+  expect "state mismatch" test "$(probe_field "$JD/probe.jsonl" hostkey state)" = '"mismatch"' || return 1
+  expect "the log says which" file_has "$JD/job.log" "HOST KEY CHECK FAILED (mismatch)" || return 1
+  no_forward_started || return 1
+  hostkey_line_has_no_secrets "$T_HOSTKEY_FP" "$real"
+}
+test_hostkey_a_closed_port_exits_7() {
+  sshd_env && far_ends || return 1
+  T_VM_SSH_PORT="$(free_port)"; render_job "$W/job.sbatch" || return 1   # nothing listens there
+  start_job 1202 PROBE_ONLY=1; job_rc 60
+  expect "exit 7, the no-answer code (got $RC)" test "$RC" = 7 || return 1
+  expect "state no_answer" test "$(probe_field "$JD/probe.jsonl" hostkey state)" = '"no_answer"' || return 1
+  expect "the log says which" file_has "$JD/job.log" "HOST KEY CHECK FAILED (no_answer)" || return 1
+  no_forward_started || return 1
+  hostkey_line_has_no_secrets "$T_HOSTKEY_FP"
+}
+test_hostkey_a_pin_of_another_key_exits_6() {   # the sshd is the VM's, but known_hosts pins something else
+  sshd_env && far_ends || return 1
+  ssh-keygen -q -t ed25519 -N '' -f "$W/other" || return 1
+  printf '[127.0.0.1]:%s %s\n' "$TSSHD_PORT" "$(cut -d' ' -f1,2 "$W/other.pub")" > "$TSSHD_KNOWN_HOSTS"
+  probe_only_run 1203
+  expect "exit 6 (got $RC)" test "$RC" = 6 || return 1
+  expect "state pin_mismatch" test "$(probe_field "$JD/probe.jsonl" hostkey state)" = '"pin_mismatch"' || return 1
+  no_forward_started
+}
+test_hostkey_a_port_22_pin_does_not_cover_another_port() {   # the right key, written without [host]:port
+  sshd_env && far_ends || return 1
+  printf '127.0.0.1 %s\n' "$(cut -d' ' -f1,2 "$TSSHD_DIR/host_key.pub")" > "$TSSHD_KNOWN_HOSTS"
+  probe_only_run 1204
+  expect "exit 6 (got $RC)" test "$RC" = 6 || return 1
+  expect "state pin_missing" test "$(probe_field "$JD/probe.jsonl" hostkey state)" = '"pin_missing"' || return 1
+  no_forward_started
+}
+test_hostkey_known_hosts_names_follow_the_port() {
+  eval "$(sed -n '/^# >>> hostkey/,/^# <<< hostkey/p' "$KIT/job.sbatch.tmpl")"
+  type kh_host >/dev/null 2>&1 || { echo "no hostkey block in the template"; return 1; }
+  expect "port 22: the bare host" test "$(kh_host vm.example.invalid 22)" = vm.example.invalid || return 1
+  expect "another port: [host]:port" test "$(kh_host vm.example.invalid 2222)" = "[vm.example.invalid]:2222"
+}
+test_hostkey_the_preflight_before_the_forwards_checks_again() {   # step 0 passed, then the key changed: no forward starts
+  fake_env fwd && far_ends || return 1
+  start_job 1206 FAKE_KEYSCAN_OTHER_FROM=2; job_rc 60
+  expect "exit 6 (got $RC)" test "$RC" = 6 || return 1
+  expect "step 0's check passed" test "$(probe_field "$JD/probe.jsonl" hostkey state)" = '"match"' || return 1
+  expect "the preflight's check failed" test "$(probe_field "$JD/probe.jsonl" hostkey_preflight state)" = '"mismatch"' || return 1
+  expect "no forward loop and no frpc" bash -c "[ ! -e '$JD/ssh-tun-counters.json' ] && ! grep -q 'frpc pid=' '$JD/job.log'"
+}
+test_hostkey_ssh_mode_needs_the_fingerprint() {
+  fake_env fwd || return 1
+  T_HOSTKEY_FP=none render_job "$W/job.sbatch" || return 1
+  start_job 1207; job_rc 20
+  expect "exit 1 (got $RC)" test "$RC" = 1 || return 1
+  expect "the reason is stated" file_has "$W/job.out" "needs VM_HOSTKEY_FP"
 }
 
 # ---- the run-book -------------------------------------------------------------------------------------------

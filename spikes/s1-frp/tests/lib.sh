@@ -72,6 +72,7 @@ T_UID=5e1f0000-0000-4000-8000-000000000001
 render_job() {
   python3 "$KIT/render_tmpl.py" "$KIT/job.sbatch.tmpl" PLATFORM="$(host_platform)" ACCOUNT=acct PARTITION=part \
     TIME=00:30:00 MEM=1G VM_ADDR="${T_VM_ADDR:-127.0.0.1}" AGENT_PORT="${T_AGENT_PORT:-29223}" DIALHOME_PORT="${T_DIALHOME_PORT:-29227}" \
+    VM_SSH_PORT="${T_VM_SSH_PORT:-22}" VM_HOSTKEY_FP="${T_HOSTKEY_FP:-none}" \
     VM_USER="${T_VM_USER:-nobody}" SSH_KEY="${T_SSH_KEY:-/nonexistent}" SSH_KNOWN_HOSTS="${T_KNOWN_HOSTS:-/nonexistent}" \
     LPORT_CTL="${T_LPORT_CTL:-1}" LPORT_TUN="${T_LPORT_TUN:-2}" CA_FILE="${T_CA:-/nonexistent}" TLS_SERVER_NAME="$T_TLS_NAME" \
     TOKEN_FILE="${T_TOKEN:-/nonexistent}" INSTANCE_PREFIX=s1t INSTANCE_UID="${T_UID_OVERRIDE:-$T_UID}" \

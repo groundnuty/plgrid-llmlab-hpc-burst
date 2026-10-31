@@ -186,7 +186,7 @@ for pid in $NEG_PIDS; do kill -TERM "$pid" 2>/dev/null || true; reap "$pid"; don
 step "verified-wss controls after 8 s:$NEG"
 
 # --- ssh variant: the throwaway sshd authorising the README's key line, ports swapped for the smoke's -----------
-VM_USER=none SSH_KEY=none KNOWN_HOSTS=none LCTL=none LTUN=none SSH_PORT_ENV=""
+VM_USER=none SSH_KEY=none KNOWN_HOSTS=none LCTL=none LTUN=none SSH_PORT_ENV="" VM_SSH_PORT=22 HOSTKEY_FP=none
 if [ "$VARIANT" = ssh ]; then
   tsshd_start || { echo "local-smoke: the throwaway sshd did not start" >&2; exit 2; }
   SSHD_STARTED=1
@@ -196,12 +196,14 @@ if [ "$VARIANT" = ssh ]; then
     *) echo "local-smoke: the README's key line was not found, or its two ports are not 29223 and 29227: '$KEY_OPTS'" >&2; exit 2 ;; esac
   tsshd_authorize "$KEY_OPTS"
   step "throwaway sshd on 127.0.0.1:$TSSHD_PORT (pid $TSSHD_PID), key line from the README with its ports swapped"
-  VM_USER="$TSSHD_USER" SSH_KEY="$TSSHD_KEY" KNOWN_HOSTS="$TSSHD_KNOWN_HOSTS" LCTL="$LPORT_CTL" LTUN="$LPORT_TUN" SSH_PORT_ENV="VM_SSH_PORT=$TSSHD_PORT"
+  VM_USER="$TSSHD_USER" SSH_KEY="$TSSHD_KEY" KNOWN_HOSTS="$TSSHD_KNOWN_HOSTS" LCTL="$LPORT_CTL" LTUN="$LPORT_TUN" SSH_PORT_ENV=""
+  VM_SSH_PORT="$TSSHD_PORT" HOSTKEY_FP="$(ssh-keygen -lf "$TSSHD_DIR/host_key.pub" | awk '{print $2}')"   # from the sshd's own key file
 fi
 
 # --- the watcher first (as the run book says), then the job ------------------------------------------------------
 render "$HERE/job.sbatch.tmpl" PLATFORM="$PLATFORM" ACCOUNT=acct PARTITION=part TIME=00:30:00 MEM=1G VM_ADDR=127.0.0.1 \
-  AGENT_PORT="$AGENT_PORT" DIALHOME_PORT="$DIALHOME_PORT" VM_USER="$VM_USER" SSH_KEY="$SSH_KEY" SSH_KNOWN_HOSTS="$KNOWN_HOSTS" \
+  AGENT_PORT="$AGENT_PORT" DIALHOME_PORT="$DIALHOME_PORT" VM_SSH_PORT="$VM_SSH_PORT" VM_HOSTKEY_FP="$HOSTKEY_FP" \
+  VM_USER="$VM_USER" SSH_KEY="$SSH_KEY" SSH_KNOWN_HOSTS="$KNOWN_HOSTS" \
   LPORT_CTL="$LCTL" LPORT_TUN="$LTUN" CA_FILE="$CA" TLS_SERVER_NAME="$TLS_NAME" TOKEN_FILE="$WORK/token" \
   INSTANCE_PREFIX="$INSTANCE" INSTANCE_UID="$INSTANCE_UID" KIT_DIR="$HERE" PYTHON="$PYTHON" > "$WORK/job.sbatch"
 "$PYTHON" "$HERE/stream_watch.py" --tcpmux "127.0.0.1:$TCPMUX_PORT" --domain "$INSTANCE_UID" --wait-up 600 \
@@ -335,6 +337,10 @@ check("control: the right CA and name log in within 8 s", negs.get("pos") == "lo
 dom = open(work + "/domain-check").read().split()
 check("tcpmux routes the Instance UID and refuses another domain", dom[:1] == ["200"] and dom[1:2] != ["200"],
       "CONNECT <uid>: %s, CONNECT <other uid>: %s" % tuple((dom + ["?", "?"])[:2]))
+if variant == "ssh":
+    check("step 0: the sshd presents the VM's own ed25519 host key, and known_hosts pins it",
+          line("hostkey").get("state") == "match" and line("hostkey_preflight").get("state") == "match",
+          "step 0 %s, preflight %s" % (line("hostkey").get("state"), line("hostkey_preflight").get("state")))
 check("step 0: both paths passed a verified TLS exchange via %s" % variant,
       all(line(n).get("ok") is True and line(n).get("far_end") == "token" and line(n).get("via") == variant for n in ("path_ctl", "path_tun")),
       "path_ctl %s, path_tun %s" % (line("path_ctl").get("far_end"), line("path_tun").get("far_end")))

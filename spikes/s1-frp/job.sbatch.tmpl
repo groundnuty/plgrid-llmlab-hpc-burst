@@ -41,7 +41,8 @@
 #   RUN_ROOT            the directory that holds the job directories (default $SCRATCH/s1-frp, or $TMPDIR/s1-frp when
 #                       SCRATCH is unset). An override must be an absolute path without whitespace; it is created when
 #                       missing, so an operator can use a subdirectory of their own without changing SCRATCH.
-#   VM_SSH_PORT         the VM's ssh port (default 22; tests use a throwaway sshd on another port)
+#   VM_SSH_PORT         the port of the VM's sshd as compute nodes reach it: rendered from the settings (default 22;
+#                       it may be a port forwarded by a gateway); a submit-time value overrides it (tests)
 #   OUTAGE_DEADLINE_S   (default 300) a forward may be down this long, counted from the last time it was
 #                       established or from the start; then the job stops with exit 4
 #   FWD_STARTUP_WAIT_S  (default 20) both forwards must be up this soon after their loops start, or exit 4
@@ -57,6 +58,9 @@
 #   ENGINE_DOWN_S       (default 20) how long a USR2 fault keeps the engine down before it restarts on the same port
 #   FREEZE_SECONDS      (default 60) how long a HUP fault keeps frpc stopped
 # Exit codes: 0 = clean (TERM or the time limit; a PROBE_ONLY job whose two paths work);
+#   6 = ssh mode, host key mismatch: the sshd at VM_ADDR:VM_SSH_PORT presents another ed25519 host key than
+#       VM_HOSTKEY_FP (it is not the VM's sshd), or the pinned known_hosts does not hold VM_HOSTKEY_FP for it;
+#   7 = ssh mode, no answer: no ed25519 host key came back from VM_ADDR:VM_SSH_PORT;
 #   1 = misconfigured, a restart of the allocation, or a step of the full run failed;
 #   3 = a path does not work (step 0, or frpc's login did not reach frps); the spike records "not reachable" and stops;
 #   4 = a forward failed for good (authentication, host key, forwarding) or stayed down past the outage deadline;
@@ -83,6 +87,9 @@ TRANSPORT="${TRANSPORT:-ssh}"
 VM_ADDR="__VM_ADDR__"                   # the agents VM as a compute node reaches it; stays out of committed files
 AGENT_PORT="__AGENT_PORT__"             # the agent endpoint on the VM (loopback in ssh mode); launcher base+3, 29223
 DIALHOME_PORT="__DIALHOME_PORT__"       # the dial-home listener (Envoy, TLS) on the VM; launcher base+7, 29227
+VM_SSH_PORT="${VM_SSH_PORT:-__VM_SSH_PORT__}"   # the VM's sshd as compute nodes reach it (default 22); a submit-time value wins
+VM_HOSTKEY_FP="__VM_HOSTKEY_FP__"       # ssh: SHA256 fingerprint of the VM's OWN ed25519 host key, from /etc/ssh/ssh_host_ed25519_key.pub
+                                        # on the VM (never from a scan run on the cluster); "none" in direct mode
 VM_USER="__VM_USER__"                   # ssh: the account the restricted key is authorised for; "none" in direct mode
 SSH_KEY="__SSH_KEY__"                   # ssh: private key FILE, mode 600, never printed; "none" in direct mode
 SSH_KNOWN_HOSTS="__SSH_KNOWN_HOSTS__"   # ssh: known_hosts FILE pinning the VM's host key; "none" in direct mode
@@ -95,7 +102,6 @@ INSTANCE_PREFIX="__INSTANCE_PREFIX__"   # frpc's user name (the plugin's "user")
 INSTANCE_UID="__INSTANCE_UID__"         # the tcpmux custom domain: the Instance UID (a fixed test UID in the kit)
 KIT_DIR="__KIT_DIR__"                   # this kit, on a filesystem the compute node sees
 PROBE_ONLY="${PROBE_ONLY:-0}"
-VM_SSH_PORT="${VM_SSH_PORT:-22}"
 OUTAGE_DEADLINE_S="${OUTAGE_DEADLINE_S:-300}"
 FWD_STARTUP_WAIT_S="${FWD_STARTUP_WAIT_S:-20}"
 FRPC_LOGIN_WAIT_S="${FRPC_LOGIN_WAIT_S:-90}"
@@ -154,6 +160,10 @@ case "$TRANSPORT" in
       case "${!v}" in *[!0-9]*) die "$v must be a port number, got '${!v}'" ;; esac
     done
     [ "$LPORT_CTL" != "$LPORT_TUN" ] || die "LPORT_CTL and LPORT_TUN must differ (two separate forwards), both are $LPORT_CTL"
+    case "$VM_HOSTKEY_FP" in
+      SHA256:*) case "${VM_HOSTKEY_FP#SHA256:}" in ''|*[!A-Za-z0-9+/=]*) die "VM_HOSTKEY_FP must be an ssh-keygen -l SHA256 fingerprint" ;; esac ;;
+      *) die "TRANSPORT=ssh needs VM_HOSTKEY_FP, the SHA256 fingerprint of the VM's own ed25519 host key (ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub on the VM)" ;;
+    esac
     case "$SSH_KEY$SSH_KNOWN_HOSTS" in *[[:space:]]*) die "SSH_KEY and SSH_KNOWN_HOSTS must be paths without whitespace" ;; esac
     ;;
   direct) ;;
@@ -241,7 +251,7 @@ sed_lit() { printf '%s' "$1" | sed 's/[][\\.*^$|+?(){}]/\\&/g'; }
 build_redact() {
   local f="$REDACT_SED" pair name val repl
   : > "$f" || return 1
-  for pair in SSH_KEY:key-file SSH_KNOWN_HOSTS:known-hosts-file TOKEN_FILE:token-file CA_FILE:ca-file JOB_DIR:job-dir KIT_DIR:kit-dir \
+  for pair in SSH_KEY:key-file SSH_KNOWN_HOSTS:known-hosts-file TOKEN_FILE:token-file CA_FILE:ca-file VM_HOSTKEY_FP:hostkey-fp JOB_DIR:job-dir KIT_DIR:kit-dir \
               RUN_ROOT:run-root RUN_BASE:scratch SCRATCH:scratch VM_ADDR:vm VM_USER:vm-user LOCAL_USER:user HOME:home NODE_NAME:node JOB_ID:jobid; do
     name="${pair%%:*}"; repl="${pair#*:}"
     val="${!name:-}"
@@ -493,6 +503,61 @@ https_probe() {   # probe-name, url, extra curl args...; sets PROBE_OK; "reached
   record "$pname" "$PROBE_OK" "$ms" "$detail" "$extra"
 }
 
+# --- the VM's own host key: an SSH banner proves nothing (lesson L-17.7) -------------------------------
+# On 31 Oct the address the clusters dial answered on port 22 with another machine's host key (a gateway), and
+# step 0 had counted its SSH-2.0 banner as "the VM's sshd reached". So before any forward starts, the job checks
+# the ed25519 host key that VM_ADDR:VM_SSH_PORT presents against VM_HOSTKEY_FP, which comes from the VM's own
+# host key file, and checks that the pinned known_hosts holds the same key for the name ssh will look up
+# ([host]:port when the port is not 22). The messages name neither the address nor a key.
+# >>> hostkey
+kh_host() {   # HOST PORT: the name ssh looks up in known_hosts: HOST for port 22, [HOST]:PORT otherwise
+  if [ "$2" = 22 ]; then printf '%s\n' "$1"; else printf '[%s]:%s\n' "$1" "$2"; fi
+}
+ed25519_fps() { awk '!/^#/ && /ED25519/ { for (i = 1; i <= NF; i++) if ($i ~ /^SHA256:/) print $i }'; }   # stdin: ssh-keygen -l output
+HOSTKEY_STATE="" HOSTKEY_DETAIL=""
+hostkey_check() {   # sets HOSTKEY_STATE: match, mismatch, no_answer, pin_missing, pin_mismatch or tool_missing
+  local seen pinned
+  HOSTKEY_STATE="" HOSTKEY_DETAIL=""
+  if ! command -v ssh-keyscan >/dev/null 2>&1 || ! command -v ssh-keygen >/dev/null 2>&1; then
+    HOSTKEY_STATE=tool_missing; HOSTKEY_DETAIL="ssh-keyscan or ssh-keygen is not installed on this node"; return 0
+  fi
+  seen="$(timeout 20 ssh-keyscan -T 8 -t ed25519 -p "$VM_SSH_PORT" "$VM_ADDR" 2>/dev/null | ssh-keygen -lf - 2>/dev/null | ed25519_fps)"
+  pinned="$(ssh-keygen -F "$(kh_host "$VM_ADDR" "$VM_SSH_PORT")" -f "$SSH_KNOWN_HOSTS" -l 2>/dev/null | ed25519_fps)"
+  if [ -z "$seen" ]; then
+    HOSTKEY_STATE=no_answer
+    HOSTKEY_DETAIL="no ed25519 host key came back from the VM address on port $VM_SSH_PORT (nothing answers ssh there, or the network drops it)"
+  elif ! printf '%s\n' "$seen" | grep -qxF -- "$VM_HOSTKEY_FP"; then
+    HOSTKEY_STATE=mismatch
+    HOSTKEY_DETAIL="the sshd at the VM address on port $VM_SSH_PORT presents another ed25519 host key than VM_HOSTKEY_FP: it is not the VM's sshd (a gateway?), or VM_HOSTKEY_FP is wrong"
+  elif [ -z "$pinned" ]; then
+    HOSTKEY_STATE=pin_missing
+    HOSTKEY_DETAIL="SSH_KNOWN_HOSTS has no ed25519 entry for the name ssh looks up (the VM address, written [address]:$VM_SSH_PORT when the port is not 22)"
+  elif ! printf '%s\n' "$pinned" | grep -qxF -- "$VM_HOSTKEY_FP"; then
+    HOSTKEY_STATE=pin_mismatch
+    HOSTKEY_DETAIL="the key pinned in SSH_KNOWN_HOSTS is not VM_HOSTKEY_FP; rebuild known_hosts from the VM's own host key file"
+  else
+    HOSTKEY_STATE=match
+    HOSTKEY_DETAIL="the sshd presents the VM's own ed25519 host key, and known_hosts pins the same key"
+  fi
+}
+hostkey_gate() {   # PROBE-NAME: runs the check, records one line; on anything but a match, logs why and exits 6 or 7 (1 for a missing tool)
+  local t0 ms ok=false code
+  t0="$(now_ms)"
+  hostkey_check
+  ms=$(( $(now_ms) - t0 ))
+  [ "$HOSTKEY_STATE" = match ] && ok=true
+  record "$1" "$ok" "$ms" "$HOSTKEY_DETAIL" ",\"state\":\"$HOSTKEY_STATE\",\"vm_ssh_port\":$VM_SSH_PORT"
+  case "$HOSTKEY_STATE" in
+    match) return 0 ;;
+    no_answer) code=7 ;;
+    tool_missing) code=1 ;;
+    *) code=6 ;;
+  esac
+  log "RESULT: HOST KEY CHECK FAILED ($HOSTKEY_STATE): $HOSTKEY_DETAIL. No forward was started."
+  EXIT_CODE=$code; exit "$code"
+}
+# <<< hostkey
+
 FAR_STATE=unknown FAR_DETAIL=""
 far_end_exchange() {   # HOST PORT: one verified TLS GET /s1/probe (path_rate.py probe); sets FAR_STATE and FAR_DETAIL
   local out
@@ -579,6 +644,10 @@ https_probe https_github https://github.com/;             R_GITHUB=$PROBE_OK
 # pypi's simple index is about 48 MB: ask for one byte of it, the TLS and HTTP exchange is the same
 https_probe https_pypi https://pypi.org/simple/ --range 0-0; R_PYPI=$PROBE_OK
 ensure_python || true            # the exchanges below need it (verified TLS); a missing python fails them, not the probes above
+if [ "$TRANSPORT" = ssh ]; then
+  if [ ! -s "$SSH_KNOWN_HOSTS" ]; then die "the known_hosts file is missing or empty: SSH_KNOWN_HOSTS"; fi
+  hostkey_gate hostkey           # before any forward: the far end of port VM_SSH_PORT must be the VM's own sshd
+fi
 path_probe ctl || true;  R_CTL=$PATH_STATE
 path_probe tun || true;  R_TUN=$PATH_STATE
 PATH_OK=false
@@ -744,7 +813,10 @@ start_forwards() {   # both loops, then wait until both local ends listen (FWD_S
     EXIT_CODE=4; exit 4
   fi
 }
-[ "$TRANSPORT" = ssh ] && start_forwards
+if [ "$TRANSPORT" = ssh ]; then
+  hostkey_gate hostkey_preflight   # again, right before the forwards that the full run keeps up
+  start_forwards
+fi
 
 # --- the path rate: a bulk transfer through each forward, BEFORE frpc starts ----------------------------
 # The tunnel forward is the ssh connection that will carry frpc's yamux session; a bulk transfer on it while

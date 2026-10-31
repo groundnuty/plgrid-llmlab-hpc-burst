@@ -106,6 +106,15 @@ M = [
      "key", "b8_forward_to_each_permitted_port_works"),
     ("M44", "wiring", J, '      echo "$id:$cls" > "$JOB_DIR/transport.failed"; log', '      log',
      "job", "a_failure_of_the_control_forward_alone_exits_4"),
+    # --- the VM's own host key (lesson L-17.7) ---
+    ("M45", "hostkey", J, '  elif ! printf \'%s\\n\' "$seen" | grep -qxF -- "$VM_HOSTKEY_FP"; then', '  elif false; then',
+     "job", "hostkey_another_key_at_the_address_exits_6"),
+    ("M46", "hostkey", J, '  elif ! printf \'%s\\n\' "$pinned" | grep -qxF -- "$VM_HOSTKEY_FP"; then', '  elif false; then',
+     "job", "hostkey_a_pin_of_another_key_exits_6"),
+    ("M47", "hostkey", J, '  if [ -z "$seen" ]; then', '  if false; then',
+     "job", "hostkey_a_closed_port_exits_7"),
+    ("M48", "hostkey", J, '  hostkey_gate hostkey_preflight', '  : hostkey_gate hostkey_preflight',
+     "job", "hostkey_the_preflight_before_the_forwards_checks_again"),
 ]
 
 

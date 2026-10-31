@@ -11,9 +11,11 @@ mk_dummy_files() {
   # offline: curl is a double that reports HTTP 200, so step 0 never waits on the network
   printf '#!/bin/bash\ncase "$*" in *--version*) echo "curl fake";; *) printf 200;; esac\n' > "$W/bin/curl"; chmod +x "$W/bin/curl"
 }
-pick_ports() {   # the VM ports and the node-local ends, all in 29400-29499
+pick_ports() {   # the VM ports, the node-local ends and the VM's ssh port (nothing listens there unless sshd_env), all in 29400-29499
   T_AGENT_PORT="$(free_port)"; T_DIALHOME_PORT="$(free_port)"; T_LPORT_CTL="$(free_port)"; T_LPORT_TUN="$(free_port)"
+  T_VM_SSH_PORT="$(free_port)"
 }
+fp_of() { ssh-keygen -lf "$1" | awk '{print $2}'; }   # a public key file's SHA256 fingerprint
 serve_far() {   # PORT [CERT-DIR]: the VM side's stand-in on PORT (path_rate.py serve, TLS with the test CA's server cert)
   local d="${2:-$W/ca}"
   bg python3 "$KIT/path_rate.py" serve --listen "127.0.0.1:$1" --tls-cert "$d/server.crt" --tls-key "$d/server.key" --max-seconds 600
@@ -30,6 +32,11 @@ fake_env() {   # a full run with a double for ssh (fake_ssh.py); the arguments a
   export FAKE_SSH_DIR="$W/fakessh"
   make_fake_kit "$W/kit"
   T_KIT="$W/kit"; pick_ports
+  # the host-key preflight: a double for ssh-keyscan presents this key, and known_hosts pins it for [127.0.0.1]:port
+  ssh-keygen -q -t ed25519 -N '' -f "$W/fakessh/hostkey" && ssh-keygen -q -t ed25519 -N '' -f "$W/fakessh/otherhost" || return 1
+  printf '[127.0.0.1]:%s %s\n' "$T_VM_SSH_PORT" "$(cut -d' ' -f1,2 "$W/fakessh/hostkey.pub")" > "$W/known_hosts"
+  T_HOSTKEY_FP="$(fp_of "$W/fakessh/hostkey.pub")"
+  cp "$TESTS_DIR/fake_keyscan.sh" "$W/bin/ssh-keyscan"; chmod +x "$W/bin/ssh-keyscan"
   render_job "$W/job.sbatch" || return 1
   bash -n "$W/job.sbatch" || return 1
 }
@@ -47,6 +54,7 @@ sshd_env() {   # a real throwaway sshd; the key may forward to the two VM ports 
   pick_ports
   tsshd_authorize "$(key_line)"
   T_SSH_KEY="$TSSHD_KEY" T_KNOWN_HOSTS="$TSSHD_KNOWN_HOSTS" T_VM_USER="$TSSHD_USER"
+  T_VM_SSH_PORT="$TSSHD_PORT" T_HOSTKEY_FP="$(fp_of "$TSSHD_DIR/host_key.pub")"   # from the sshd's own host key file, as on the VM
   make_fake_kit "$W/kit"; T_KIT="$W/kit"
   render_job "$W/job.sbatch" || return 1
 }
