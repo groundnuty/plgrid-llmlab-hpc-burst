@@ -385,7 +385,7 @@ func TestEngineOverridesApply(t *testing.T) {
 		Verify:                 &agentapi.VerifyRequest{},
 		WarmUp:                 &agentapi.WarmUpRequest{},
 	}))))
-	r.steps(2)
+	r.steps(2) // the worker starts; then it runs, is sampled and checked
 
 	w := r.workerOf("worker-0")
 	if w.Health == nil {
@@ -398,5 +398,6 @@ func TestEngineOverridesApply(t *testing.T) {
 	checks := r.lastInstance().Checks
 	eq(t, "Verify", checks.Verify, &agentapi.VerifyResult{Done: true, Error: "engine would not start"})
 	eq(t, "the agent numbers the warm-up rounds", checks.WarmUp.Rounds[0].Round, int32(1))
-	eq(t, "second round", checks.WarmUp.Rounds[1].Round, int32(2))
+	r.step()
+	eq(t, "second round", r.lastInstance().Checks.WarmUp.Rounds[1].Round, int32(2))
 }

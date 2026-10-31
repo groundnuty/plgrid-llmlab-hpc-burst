@@ -48,7 +48,7 @@ func (a *Agent) applyRun(i agentapi.DesiredInstance, now time.Time) {
 	if in.staging(a.engine, now).Phase == agentapi.StagingDone {
 		a.convergeWorkers(i, now)
 	}
-	in.applyChecks(a.engine, i)
+	in.applyChecks(a.engine, i, in.runsFor(i))
 }
 
 // convergeWorkers starts, restarts and stops workers to match the desired

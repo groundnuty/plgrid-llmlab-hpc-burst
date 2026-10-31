@@ -26,7 +26,7 @@ func warmUpRounds(t *testing.T, round func(int32, agentapi.WarmUpRequest) agenta
 	t.Helper()
 	r := newRig(t, fake.Engine{WarmUpRound: round})
 	r.set(run(instance(warmUpChecks(agentapi.WarmUpRequest{Shapes: shapes, ToolCalls: true, TargetSessions: 3}))))
-	r.steps(steps)
+	r.steps(1 + steps) // the worker starts; then one round per Step
 	return *checksOf(t, r).WarmUp
 }
 

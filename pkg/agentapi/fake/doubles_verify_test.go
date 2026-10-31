@@ -17,7 +17,7 @@ func verifyRig(t *testing.T, v func(agentapi.DesiredInstance, agentapi.VerifyReq
 	t.Helper()
 	r := newRig(t, fake.Engine{Verify: v})
 	r.set(run(instance(withChecks(agentapi.Checks{VerificationGeneration: 1, Verify: &agentapi.VerifyRequest{Files: files}}))))
-	r.step()
+	r.steps(2) // the worker starts, then runs and is checked
 	return r
 }
 
@@ -51,7 +51,7 @@ func TestVerifyChangedFileMismatchesAgainAfterTheWholeInstanceRestartRestages(t 
 	// The controller restarts the Instance (generation 2) and verifies again,
 	// under verification generation 2: the file is still changed.
 	r.set(run(instance(withGeneration(2), withChecks(agentapi.Checks{VerificationGeneration: 2, Verify: &agentapi.VerifyRequest{Files: checkpointFiles}}))))
-	r.step()
+	r.steps(2) // the restarted worker starts, then runs and is checked
 	c := checksOf(t, r)
 	eq(t, "VerificationGeneration", c.VerificationGeneration, int64(2))
 	eq(t, "the same file mismatches again", c.Verify.Files[1], first)
@@ -112,7 +112,7 @@ func qualifyOutcomes(t *testing.T, e fake.Engine, toolCalls bool) agentapi.Quali
 		VerificationGeneration: 1,
 		Qualify:                &agentapi.QualifyRequest{Shapes: shapes, ToolCalls: toolCalls},
 	}))))
-	r.step()
+	r.steps(2) // the worker starts, then runs and is checked
 	q := checksOf(t, r).Qualify
 	if q == nil {
 		t.Fatal("no Qualify result")
