@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
 	"time"
 
@@ -261,14 +262,26 @@ func (p *Proxy) send(x *exchange, r *http.Request, t *target, body []byte, rb re
 	if r.URL.RawQuery != "" {
 		url += "?" + r.URL.RawQuery
 	}
-	req, err := http.NewRequestWithContext(x.ctx, http.MethodPost, url, nil)
+	ctx := x.ctx
+	gen := x.startAttempt()
+	if t.inst != nil && rb.stream {
+		// Toward an Instance a streamed reply's headers must come within
+		// streamHeadersTimeout of the request's last byte (HBEP-5, Time-outs
+		// and keep-alive); vLLM sends them before prefill. A non-streamed
+		// request has no such deadline.
+		d := p.cfg.StreamHeadersTimeout.D()
+		ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{WroteRequest: func(httptrace.WroteRequestInfo) { x.armHeaders(gen, d) }})
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
 		return nil, &dialError{err: err}
 	}
 	req = withOneReplay(req, out)
 	req.Header = h
 	x.armIdle(p.cfg.IdleTimeout.D())
-	return rt.RoundTrip(req)
+	resp, err := rt.RoundTrip(req)
+	x.stopHeaders(gen)
+	return resp, err
 }
 
 // failedBeforeHeaders answers a request that failed after it was written, or
@@ -279,7 +292,14 @@ func (p *Proxy) failedBeforeHeaders(w http.ResponseWriter, x *exchange, t *targe
 	switch cut := x.cutBy(); cut {
 	case cutClient:
 		x.rec.Status, x.rec.Finish, x.rec.CutBy = statusClientClosed, strp("cut"), strp(cut)
-	case cutFrontDeadline, cutFrontIdle, cutLeaseEnd:
+	case cutFrontHeaders:
+		// Written, so not resent; a missed streamed-headers deadline counts
+		// toward the pause (HBEP-5, Pauses).
+		p.router.ReportConnect(t.key(), true)
+		x.rec.CutBy = strp(cut)
+		p.log.Warn("no response headers within streamHeadersTimeout; the request is not sent again", "request", x.id, "target", t.key())
+		p.fail(w, x, http.StatusGatewayTimeout, codeRequestTimeout, detailOf(cut), "", "the target sent no response headers within streamHeadersTimeout; the request is not sent again")
+	case cutFrontDeadline, cutFrontIdle, cutLeaseEnd, cutFrontShutdown:
 		x.rec.CutBy = strp(cut)
 		p.fail(w, x, http.StatusGatewayTimeout, codeRequestTimeout, detailOf(cut), "", "the request was cut before its first byte: "+detailOf(cut))
 	default:
