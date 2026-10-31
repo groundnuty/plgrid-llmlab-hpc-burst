@@ -53,6 +53,8 @@ type Config struct {
 	GreedyRepeat     bool          // greedy output is one token repeated
 	LoopAbove        int           // a prompt above this many tokens (0: off) gets a 3-token cycle, unless ignore_eos
 	ToolMalformed    bool          // tool-call arguments are invalid JSON
+	ToolArgsNull     bool          // tool-call arguments are the JSON null
+	ToolArgsBadType  bool          // tool-call arguments are {"city": 42}: the wrong type for the weather tool
 	NoToolCall       bool          // answer with text even when tools are given
 	ReportsNothing   bool          // no /version, no max_model_len, no cache_config_info, no system_fingerprint
 	HealthFail       bool          // /health answers 503

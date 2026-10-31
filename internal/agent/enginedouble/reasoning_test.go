@@ -141,7 +141,7 @@ func TestReasoningFirstBeyondMaxTokens(t *testing.T) {
 // A tool call follows the reasoning, and the reasoning counts in usage.
 func TestReasoningThenToolCall(t *testing.T) {
 	s := serve(t, reasoningCfg(5))
-	body := func() map[string]any { return chatBody(3, map[string]any{"tools": weatherTools, "max_tokens": 50}) }
+	body := func() map[string]any { return toolBody(map[string]any{"max_tokens": 50}) }
 	res := s.chat(body())
 	c := res.Choices[0]
 	if c.FinishReason != "tool_calls" || len(c.Message.ToolCalls) != 1 || c.Message.Content != nil ||
@@ -153,7 +153,7 @@ func TestReasoningThenToolCall(t *testing.T) {
 		t.Errorf("%d completion tokens, want 7", res.Usage.CompletionTokens)
 	}
 
-	st := s.stream(chatBody(3, map[string]any{"tools": weatherTools, "max_tokens": 50})).chunks(t)
+	st := s.stream(toolBody(map[string]any{"max_tokens": 50})).chunks(t)
 	var kinds []string
 	for _, ch := range st[1:] {
 		d := ch.Choices[0].Delta
@@ -174,7 +174,7 @@ func TestReasoningThenToolCall(t *testing.T) {
 // A tool call cut off by max_tokens carries part of its arguments and the
 // finish reason "length", not "tool_calls".
 func TestToolCallCutOffByMaxTokens(t *testing.T) {
-	res := serve(t, cfgFor()).chat(chatBody(3, map[string]any{"tools": weatherTools, "max_tokens": 1}))
+	res := serve(t, cfgFor()).chat(toolBody(map[string]any{"max_tokens": 1}))
 	c := res.Choices[0]
 	if c.FinishReason != "length" || len(c.Message.ToolCalls) != 1 || c.Message.ToolCalls[0].Function.Arguments != `{"city":` || res.Usage.CompletionTokens != 1 {
 		t.Errorf("finish %q, calls %+v, %d tokens; want length, the first piece {\"city\":, 1", c.FinishReason, c.Message.ToolCalls, res.Usage.CompletionTokens)

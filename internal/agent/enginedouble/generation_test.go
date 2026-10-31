@@ -188,7 +188,7 @@ var weatherTools = []map[string]any{{
 
 func TestToolCall(t *testing.T) {
 	s := serve(t, cfgFor())
-	res := s.chat(chatBody(4, map[string]any{"tools": weatherTools, "max_tokens": 50}))
+	res := s.chat(toolBody(map[string]any{"max_tokens": 50}))
 	c := res.Choices[0]
 	if c.FinishReason != "tool_calls" || c.Message.Content != nil || len(c.Message.ToolCalls) != 1 {
 		t.Fatalf("finish %q, content %v, %d tool calls; want tool_calls, null, 1", c.FinishReason, c.Message.Content, len(c.Message.ToolCalls))
@@ -202,11 +202,11 @@ func TestToolCall(t *testing.T) {
 	}
 
 	// tool_choice none: text; naming a function: that function
-	none := s.chat(chatBody(4, map[string]any{"tools": weatherTools, "tool_choice": "none", "max_tokens": 50}))
+	none := s.chat(toolBody(map[string]any{"tool_choice": "none", "max_tokens": 50}))
 	if none.Choices[0].FinishReason != "stop" || none.Choices[0].Message.Content == nil || len(none.Choices[0].Message.ToolCalls) != 0 {
 		t.Errorf("tool_choice none gave %+v", none.Choices[0])
 	}
-	named := s.chat(chatBody(4, map[string]any{"tools": weatherTools, "tool_choice": map[string]any{"type": "function", "function": map[string]any{"name": "other_tool"}}}))
+	named := s.chat(toolBody(map[string]any{"tool_choice": map[string]any{"type": "function", "function": map[string]any{"name": "other_tool"}}}))
 	if got := named.Choices[0].Message.ToolCalls[0].Function.Name; got != "other_tool" {
 		t.Errorf("named tool_choice gave %q, want other_tool", got)
 	}
@@ -215,14 +215,14 @@ func TestToolCall(t *testing.T) {
 func TestToolMalformedAndNoToolCall(t *testing.T) {
 	cfg := cfgFor()
 	cfg.ToolMalformed = true
-	args := serve(t, cfg).chat(chatBody(4, map[string]any{"tools": weatherTools})).Choices[0].Message.ToolCalls[0].Function.Arguments
+	args := serve(t, cfg).chat(toolBody(nil)).Choices[0].Message.ToolCalls[0].Function.Arguments
 	if args != `{"city": ` || json.Valid([]byte(args)) {
 		t.Errorf("malformed arguments = %q, want {\"city\":  cut short, invalid JSON", args)
 	}
 
 	cfg = cfgFor()
 	cfg.NoToolCall = true
-	c := serve(t, cfg).chat(chatBody(4, map[string]any{"tools": weatherTools, "max_tokens": 50})).Choices[0]
+	c := serve(t, cfg).chat(toolBody(map[string]any{"max_tokens": 50})).Choices[0]
 	if len(c.Message.ToolCalls) != 0 || c.Message.Content == nil || c.FinishReason != "stop" {
 		t.Errorf("no-tool-call mode gave %+v", c)
 	}

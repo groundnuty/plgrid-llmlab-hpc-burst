@@ -179,8 +179,8 @@ func TestStreamedAnswerRoundTrips(t *testing.T) {
 // call's index, id, type and function name, the later ones only the index and
 // a piece of the arguments, and the last chunk the finish reason.
 func TestStreamedToolCall(t *testing.T) {
-	res := serve(t, cfgFor()).stream(chatBody(2, map[string]any{
-		"tools": weatherTools, "max_tokens": 50, "stream_options": map[string]any{"include_usage": true},
+	res := serve(t, cfgFor()).stream(toolBody(map[string]any{
+		"max_tokens": 50, "stream_options": map[string]any{"include_usage": true},
 	}))
 	type call struct {
 		Index    *int   `json:"index"`

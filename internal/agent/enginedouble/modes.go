@@ -49,6 +49,10 @@ func applyMode(c *Config, name, val string, hasVal bool) error {
 		return flag(&c.GreedyRepeat)
 	case "tool-malformed":
 		return flag(&c.ToolMalformed)
+	case "tool-args-null":
+		return flag(&c.ToolArgsNull)
+	case "tool-args-badtype":
+		return flag(&c.ToolArgsBadType)
 	case "no-tool-call":
 		return flag(&c.NoToolCall)
 	case "reports-nothing":

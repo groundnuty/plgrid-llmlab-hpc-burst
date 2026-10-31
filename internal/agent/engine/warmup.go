@@ -11,8 +11,13 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
-// warmUpTail ends every warm-up prompt.
-const warmUpTail = "Continue the list of words above."
+// warmUpTail ends every warm-up prompt; warmUpToolTail ends the tool-call
+// shape's, which asks for the call (an engine answers with a call only when
+// the prompt asks for one).
+const (
+	warmUpTail     = "Continue the list of words above."
+	warmUpToolTail = "Call the get_weather tool for the city of Krakow."
+)
 
 // warmShape is one request of a warm-up round.
 type warmShape struct {
@@ -80,16 +85,26 @@ func (c *Client) timed(ctx context.Context, w warmShape) agentapi.RequestTiming 
 		return t
 	}
 	var tools []tool
-	choice := ""
+	choice, tail := "", warmUpTail
 	var minTokens int32
 	ignoreEOS := false
+	maxTokens := w.output
 	if w.tools {
-		tools, choice = []tool{weatherTool}, "auto"
+		// The tool-call shape ends with its call, at no fixed length: no
+		// min_tokens, and the end-of-sequence token is not ignored.
+		tools, choice, tail = []tool{weatherTool}, "auto", warmUpToolTail
+		// Provisional, pending the science agent: with a reasoning parser the
+		// call comes after the reasoning, so the shape asks for the same extra
+		// reasoning budget as the tool-call smoke test. A fixed figure in
+		// alpha, and a known limit.
+		if c.reasoning {
+			maxTokens += reasoningTokens
+		}
 	} else {
 		minTokens, ignoreEOS = w.output, true
 	}
 	// The longest shape sits at the context limit: count its own prompt.
-	content, err := c.prompt(ctx, w.context, warmUpTail, tools, w.shape == agentapi.ShapeLongest)
+	content, err := c.prompt(ctx, w.context, tail, tools, w.shape == agentapi.ShapeLongest)
 	if err != nil {
 		return fail(err)
 	}
@@ -101,7 +116,7 @@ func (c *Client) timed(ctx context.Context, w warmShape) agentapi.RequestTiming 
 	resp, err := c.send(ctx, http.MethodPost, "/v1/chat/completions", chatRequest{
 		Model:         model,
 		Messages:      []message{{Role: "user", Content: content}},
-		MaxTokens:     w.output,
+		MaxTokens:     maxTokens,
 		Stream:        true,
 		StreamOptions: &streamOptions{IncludeUsage: true},
 		IgnoreEOS:     ignoreEOS,
@@ -120,6 +135,8 @@ func (c *Client) timed(ctx context.Context, w warmShape) agentapi.RequestTiming 
 	var first time.Duration
 	var sawFirst bool
 	var completion int32 = -1
+	var calls callAssembler
+	var finish string
 	for {
 		ev, err := rd.next(func() {})
 		if err != nil {
@@ -139,6 +156,12 @@ func (c *Client) timed(ctx context.Context, w warmShape) agentapi.RequestTiming 
 			// The first delta of any kind is the first token: with a
 			// reasoning parser the engine reasons before it answers.
 			d := choice.Delta
+			for _, tc := range d.ToolCalls {
+				calls.add(tc)
+			}
+			if choice.FinishReason != nil {
+				finish = *choice.FinishReason
+			}
 			if d.Content == "" && d.Reasoning == "" && len(d.ToolCalls) == 0 {
 				continue
 			}
@@ -158,7 +181,13 @@ func (c *Client) timed(ctx context.Context, w warmShape) agentapi.RequestTiming 
 		return fail(errors.New("the stream carried no usage (stream_options.include_usage)"))
 	}
 	t.OutputTokens = completion
-	if !w.tools && completion != w.output {
+	if w.tools {
+		if err := judgeStreamedCalls(calls.assembled(), finish); err != nil {
+			t.Error = agentapi.TruncateUTF8(err.Error(), agentapi.MaxTimingErrorBytes)
+		}
+		return t
+	}
+	if completion != w.output {
 		if completion < w.output {
 			t.Error = fmt.Sprintf("stopped early: %d of %d tokens", completion, w.output)
 		} else {
@@ -166,4 +195,22 @@ func (c *Client) timed(ctx context.Context, w warmShape) agentapi.RequestTiming 
 		}
 	}
 	return t
+}
+
+// judgeStreamedCalls judges the tool-call shape's assembled calls: at least
+// one, the stream finished with "tool_calls" (the call is complete, not cut
+// off), and every call valid (validateToolCall).
+func judgeStreamedCalls(calls []toolCall, finish string) error {
+	if len(calls) == 0 {
+		return errors.New("the answer calls no tool")
+	}
+	if finish != "tool_calls" {
+		return fmt.Errorf("the tool call is incomplete: finish_reason %q", finish)
+	}
+	for _, tc := range calls {
+		if err := validateToolCall(weatherTool, tc.Type, tc.Function.Name, tc.Function.Arguments); err != nil {
+			return err
+		}
+	}
+	return nil
 }

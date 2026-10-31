@@ -46,6 +46,12 @@
 // walk over the vocabulary whose first tokens are the reasoning, so a greedy
 // request's token ids start the same with or without the modes.
 //
+// The model calls a tool only when the last user message names it, or when
+// tool_choice forces a call ("required", or a named function): offered tools
+// and a prompt that does not mention them get text. The tool-malformed,
+// tool-args-null and tool-args-badtype modes make the call's arguments invalid
+// JSON, the JSON null, and {"city": 42}; no-tool-call answers with text.
+//
 // A tool call is streamed in vLLM's delta form: a delta with the call's index,
 // id, type and function name, then one delta per token of the arguments with
 // the index and "arguments" only, the finish reason "tool_calls" on the last
@@ -56,8 +62,9 @@
 //
 // ParseModes reads the comma-separated value of the environment variable
 // HB_ENGINE_DOUBLE, for example "kv-low,slow-first=200ms". The modes are kv-low,
-// greedy-diverge=<n>, greedy-repeat, early-stop=<n>, loop-above=<tokens>, tool-malformed,
-// no-tool-call, reports-nothing, report-max-model-len=<n>, health-fail,
+// greedy-diverge=<n>, greedy-repeat, early-stop=<n>, loop-above=<tokens>,
+// tool-malformed, tool-args-null, tool-args-badtype, no-tool-call,
+// reports-nothing, report-max-model-len=<n>, health-fail,
 // errors-only, slow-first=<dur>, never-settle=<pct>, stall, token-delay=<dur>,
 // reasoning-first=<n> and reasoning-forever;
 // the startup modes, used by Main only, are start-delay=<dur>,

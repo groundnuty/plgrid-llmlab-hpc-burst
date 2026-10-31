@@ -65,19 +65,27 @@ func (a answer) tokens() int { return len(a.reasoning) + len(a.words) }
 // return_token_ids gives them.
 func (a answer) allIDs() []int32 { return append(append([]int32(nil), a.reasoningIDs...), a.ids...) }
 
-// toolCallFor decides whether the answer is a tool call: tools present, no
-// tool_choice "none", and the no-tool-call mode off. The function is the one
-// tool_choice names, else the first tool's.
+// toolCallFor decides whether the answer is a tool call. With no tools, the
+// no-tool-call mode, or tool_choice "none", it is not. A tool_choice that names
+// a function forces a call of it, and "required" a call of the first tool;
+// with "auto" or no tool_choice the model calls a tool only when the last user
+// message names it, as a model asked in words to use a tool does, so a prompt
+// that does not ask for a call gets text, however many tools it is offered
+// (PR 87 review, Astra B9: a double that calls on any tools masked a warm-up
+// prompt that never asked for one).
 func (h *handler) toolCallFor(req chatRequest) *toolCall {
 	if len(req.Tools) == 0 || h.cfg.NoToolCall {
 		return nil
 	}
-	name := req.Tools[0].Function.Name
+	name := ""
 	if len(req.ToolChoice) > 0 {
 		var s string
 		if json.Unmarshal(req.ToolChoice, &s) == nil {
-			if s == "none" {
+			switch s {
+			case "none":
 				return nil
+			case "required":
+				name = req.Tools[0].Function.Name
 			}
 		} else {
 			var obj struct {
@@ -85,16 +93,43 @@ func (h *handler) toolCallFor(req chatRequest) *toolCall {
 					Name string `json:"name"`
 				} `json:"function"`
 			}
-			if json.Unmarshal(req.ToolChoice, &obj) == nil && obj.Function.Name != "" {
+			if json.Unmarshal(req.ToolChoice, &obj) == nil {
 				name = obj.Function.Name
 			}
 		}
 	}
+	if name == "" {
+		last := lastUserText(req.Messages)
+		for _, t := range req.Tools {
+			if t.Function.Name != "" && strings.Contains(last, t.Function.Name) {
+				name = t.Function.Name
+				break
+			}
+		}
+	}
+	if name == "" {
+		return nil
+	}
 	args := `{"city": "Krakow"}`
-	if h.cfg.ToolMalformed {
+	switch {
+	case h.cfg.ToolMalformed:
 		args = `{"city": `
+	case h.cfg.ToolArgsNull:
+		args = `null`
+	case h.cfg.ToolArgsBadType:
+		args = `{"city": 42}`
 	}
 	return &toolCall{Name: name, Arguments: args}
+}
+
+// lastUserText is the text of the last user message, "" when there is none.
+func lastUserText(msgs []message) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "user" {
+			return msgs[i].text()
+		}
+	}
+	return ""
 }
 
 // maxTokensOf resolves max_tokens as vLLM does: max_completion_tokens when

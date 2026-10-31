@@ -72,13 +72,61 @@ func (s *sseReader) next(onComment func()) (sseEvent, error) {
 	}
 }
 
+// toolCallDelta is vLLM's DeltaToolCall (generate/base/protocol.py): the call's
+// index, and pieces of it. The first delta of a call carries its type and its
+// function name, the later ones pieces of the arguments; a field not set is
+// absent.
+type toolCallDelta struct {
+	Index    int    `json:"index"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+// callAssembler puts the calls of a stream together from their deltas, as an
+// OpenAI client does: by index, the name and the arguments joined in order,
+// the type taken from the delta that carries it. A later delta that lacks a
+// field leaves it as it was.
+type callAssembler struct {
+	order []int
+	calls map[int]*toolCall
+}
+
+func (a *callAssembler) add(d toolCallDelta) {
+	if a.calls == nil {
+		a.calls = map[int]*toolCall{}
+	}
+	c := a.calls[d.Index]
+	if c == nil {
+		c = &toolCall{}
+		a.calls[d.Index] = c
+		a.order = append(a.order, d.Index)
+	}
+	if d.Type != "" {
+		c.Type = d.Type
+	}
+	c.Function.Name += d.Function.Name
+	c.Function.Arguments += d.Function.Arguments
+}
+
+// assembled returns the calls in the order their first deltas arrived.
+func (a *callAssembler) assembled() []toolCall {
+	out := make([]toolCall, 0, len(a.order))
+	for _, i := range a.order {
+		out = append(out, *a.calls[i])
+	}
+	return out
+}
+
 // chatChunk is the part of an OpenAI-style streamed chunk the warm-up reads.
 type chatChunk struct {
 	Choices []struct {
 		Delta struct {
-			Content   string            `json:"content"`
-			Reasoning string            `json:"reasoning"`
-			ToolCalls []json.RawMessage `json:"tool_calls"`
+			Content   string          `json:"content"`
+			Reasoning string          `json:"reasoning"`
+			ToolCalls []toolCallDelta `json:"tool_calls"`
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`

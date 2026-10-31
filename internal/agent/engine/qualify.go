@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
@@ -102,19 +101,16 @@ func (c *Client) toolCallCheck(ctx context.Context) error {
 	return wellFormedToolCall(r)
 }
 
-// wellFormedToolCall checks that the answer calls the weather tool with a JSON
-// object of arguments.
+// wellFormedToolCall checks that the answer calls the weather tool, and that
+// every call it makes is valid: the type, the name and the arguments, which
+// must be a JSON object that conforms to the tool's schema (validateToolCall).
 func wellFormedToolCall(r chatResponse) error {
 	if len(r.Choices) == 0 || len(r.Choices[0].Message.ToolCalls) == 0 {
 		return fmt.Errorf("the answer calls no tool")
 	}
 	for _, tc := range r.Choices[0].Message.ToolCalls {
-		if tc.Function.Name != weatherTool.Function.Name {
-			return fmt.Errorf("the answer calls %q, not %q", tc.Function.Name, weatherTool.Function.Name)
-		}
-		var args map[string]any
-		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-			return fmt.Errorf("the tool call's arguments are not a JSON object: %v", err)
+		if err := validateToolCall(weatherTool, tc.Type, tc.Function.Name, tc.Function.Arguments); err != nil {
+			return err
 		}
 	}
 	return nil
