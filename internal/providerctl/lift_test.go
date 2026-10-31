@@ -102,6 +102,12 @@ func releaseCalls(sl *fakeslurm.Platform, id string) int {
 // case changes nothing and must make exactly 1 call, so a 0 above is not an
 // artefact of the setup (a marker already set, a job not held, a release that
 // never reaches the node).
+//
+// The requeue case injects the snapshot a requeue leaves (restart count 1, held
+// by its user, no start time) with fakeslurm's RequeueHold, not a real
+// transition: Slurm rejects requeueing an ordinary pending job, so a real
+// sequence first releases and runs the job, or completes it, with requeue
+// enabled. The guards read only the snapshot, so the snapshot is what is tested.
 func TestLiftRereadsTheJobBeforeReleasing(t *testing.T) {
 	for _, tc := range []struct {
 		name         string

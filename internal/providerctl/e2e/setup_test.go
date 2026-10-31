@@ -72,9 +72,11 @@ func TestSetupInARealManager(t *testing.T) {
 		PlatformProfileRef: v1alpha1.ObjectReference{Name: pp.Name}, Account: "example-account",
 		AllowedPartitions: []string{"example-gpu"}, CredentialsRef: &v1alpha1.CredentialsReference{File: creds},
 	}}
-	// A generated name: envtest has no namespace controller, so a namespace is
-	// never removed, and a fixed name made a second run (go test -count=2) fail
-	// with AlreadyExists. Create sets ns.Name; the rest of the test reads it.
+	// A generated name: the control plane runs the namespace controller, but
+	// nothing deleted the namespace, so a fixed name made a second run
+	// (go test -count=2) fail with AlreadyExists. The cleanup below deletes it,
+	// and the namespace controller removes the Allocations in it. Create sets
+	// ns.Name; the rest of the test reads it.
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "setup-allocs-"}}
 	for _, o := range []client.Object{pp, prov, ns} {
 		if err := c.Create(ctx, o); err != nil {
@@ -84,6 +86,7 @@ func TestSetupInARealManager(t *testing.T) {
 	t.Cleanup(func() {
 		_ = c.Delete(context.Background(), prov)
 		_ = c.Delete(context.Background(), pp)
+		_ = c.Delete(context.Background(), ns)
 	})
 
 	sl := fakeslurm.New(slurm.RealClock, fakeslurm.Config{Partitions: []fakeslurm.Partition{{Name: "example-gpu", GPUOnly: true}}})
