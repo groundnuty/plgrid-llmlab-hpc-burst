@@ -72,6 +72,13 @@ func (w *waitSink) list() []string {
 	return out
 }
 
+// known reports whether id was written by this process.
+func (w *waitSink) known(id string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.written[id] || w.pending[id]
+}
+
 func (w *waitSink) done(ids []string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -116,6 +123,9 @@ func (l *statusLoop) Start(ctx context.Context) error {
 // Provider's status when it changed.
 func (l *statusLoop) sync(ctx context.Context) error {
 	_, p, cfgErr := l.s.h.get(ctx)
+	if err := l.scanStarted(ctx); err != nil {
+		return err
+	}
 	var waits []v1alpha1.QueueWait
 	var waitIDs []string
 	if cfgErr == nil {
@@ -155,6 +165,44 @@ func (l *statusLoop) sync(ctx context.Context) error {
 		}
 	}
 	return err
+}
+
+// scanStarted finds started jobs whose wait is in neither the Provider's status
+// nor this process's memory: a wait seen started by an observe whose process
+// stopped before the next sync. It reads the durable state only (each
+// Allocation's atProvider.startTime and the Provider's queueWaits), so a
+// restart loses no wait. A job is taken only while the list has room, or when
+// it started after the oldest kept wait, so a wait that fell out of the 20
+// kept is never added again (HBEP-4, Provider status).
+func (l *statusLoop) scanStarted(ctx context.Context) error {
+	var prov v1alpha1.Provider
+	if err := l.s.reader.Get(ctx, client.ObjectKey{Name: l.s.o.Provider}, &prov); err != nil {
+		return fmt.Errorf("get Provider %s: %w", l.s.o.Provider, err)
+	}
+	have := map[string]bool{}
+	var oldest *metav1.Time
+	for i, w := range prov.Status.QueueWaits {
+		have[w.JobID] = true
+		if oldest == nil || w.StartTime.Before(oldest) {
+			oldest = &prov.Status.QueueWaits[i].StartTime
+		}
+	}
+	full := len(prov.Status.QueueWaits) >= v1alpha1.MaxQueueWaits
+	var list v1alpha1.AllocationList
+	if err := l.s.kube.List(ctx, &list); err != nil {
+		return fmt.Errorf("list Allocations: %w", err)
+	}
+	for _, a := range list.Items {
+		ref, o := a.Spec.ProviderConfigReference, a.Status.AtProvider
+		if ref == nil || ref.Name != l.s.o.Provider || o.JobID == "" || o.StartTime == nil {
+			continue
+		}
+		if have[o.JobID] || l.s.waits.known(o.JobID) || (full && !o.StartTime.After(oldest.Time)) {
+			continue
+		}
+		l.s.waits.add(o.JobID)
+	}
+	return nil
 }
 
 // compute sets the status fields this controller owns.
