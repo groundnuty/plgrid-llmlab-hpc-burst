@@ -12,8 +12,13 @@
 #
 # Part 2 runs licence-check.sh (the gate that reproduce.sh and the CI jobs use) on fixture
 # repositories and checks its exit status:
-#   control      a root module without a LICENSE, a clean dependency, a clean nested module   exit 0
-#   no exemption the same with --no-own-exemption                                              exit 1
+#   control      a root module without a LICENSE, a clean dependency, a clean nested module,
+#                with --local-permit-own (local only)                                          exit 0
+#   strict       the same without that option (the default, and what CI runs)                  exit 1
+#   licensed     the same with a LICENSE at the root, strict                                   exit 0
+#   spike        a root with a LICENSE and a separate module spikes/x without one, strict,
+#                CHECK_SPIKES=1: the root's LICENSE does not reach it; with its own LICENSE
+#                it passes; a second spike importing the first needs the first's LICENSE too
 #   siblings     an off-list, and an unknown, dependency at example.test/proj-extra and
 #                example.test/proj-unknown: the root is example.test/proj, so a prefix match
 #                on the root's path would hide them                                           exit 1
@@ -21,6 +26,8 @@
 #                modules whose paths lie beneath the root's                                   exit 1
 #   nested       a nested module (third_party/forked/nested) with an off-list dependency      exit 1
 #   test-only    an off-list dependency imported only by a test of the root module           exit 1
+# The cases below that probe the dependency checks run with --local-permit-own, so that the root's
+# own missing LICENSE does not decide the result: they show a dependency is never exempt.
 # Every "exit 1" case must also name the offending library, so it fails for the right reason.
 #
 # Usage: licence-fixtures.sh <path to go-licenses> [work dir]   (the work dir must not exist)
@@ -183,7 +190,10 @@ gate_case() { # label want(0|1) pattern repo [licence-check.sh options...]
   local label=$1 want=$2 pat=$3 repo=$4 out rc=0; shift 4
   out=$("$here/licence-check.sh" "$@" "$GL" "$repo" "$work/out-$(basename "$repo")" 2>&1) || rc=$?
   echo "-- $label: exit $rc"
-  printf '%s\n' "$out" | grep -E '^(UNEXPECTED|licence check|WARNING)|^permitted' | sort -u | sed 's/^/     /'
+  last_out=$out
+  # The work dir and the klog time and process id differ from run to run: normalise them.
+  printf '%s\n' "$out" | grep -E '^(UNEXPECTED|licence check|WARNING|known zero|NOTE)|^permitted' |
+    sed -e "s#$work#<work>#g" -e 's/\bE[0-9]\{4\} [0-9:.]* *[0-9]* /E<time> <pid> /' | sort -u | cut -c1-240 | sed 's/^/     /'
   if [ "$want" = 0 ] && [ "$rc" != 0 ]; then echo "FAIL: $label should pass"; failures=$((failures+1)); fi
   if [ "$want" = 1 ]; then
     [ "$rc" = 0 ] && { echo "FAIL: $label should fail"; failures=$((failures+1)); }
@@ -195,27 +205,115 @@ NOLIC="Did not find license for library"
 echo
 echo "== licence-check.sh on fixture repositories"
 mkrepo "$work/r-control" "example.test/lic-good" "example.test/lic-good"
-gate_case "control: no root LICENSE (permitted), clean dependency, clean nested module" 0 \
-  "permitted (a package of this module, which has no LICENSE): example.test/proj" "$work/r-control"
-gate_case "same repository with --no-own-exemption" 1 "UNEXPECTED: $NOLIC 'example.test/proj'" "$work/r-control" --no-own-exemption
+LOCAL=--local-permit-own   # LOCAL ONLY: the CI job never passes it
+gate_case "control: no root LICENSE (permitted with $LOCAL), clean dependency, clean nested module" 0 \
+  "permitted (a package of this module, which has no LICENSE): example.test/proj" "$work/r-control" $LOCAL
+gate_case "same repository, strict (the default, as CI runs it)" 1 "UNEXPECTED: $NOLIC 'example.test/proj'" "$work/r-control"
+mkrepo "$work/r-licensed" "example.test/lic-good" "example.test/lic-good"
+cp "$work/goodlib/LICENSE" "$work/r-licensed/LICENSE"
+gate_case "same repository with a LICENSE at the root, strict" 0 "licence check: PASS" "$work/r-licensed"
+# A separate module under spikes/ is not reached by the root's LICENSE: go-licenses stops its
+# search for a licence file at the module's own directory (licenses/find.go, FindCandidates).
+mkspike() { # repo name has-own-licence(0|1) imports...
+  local repo=$1 name=$2 lic=$3 m d; shift 3
+  d=$repo/spikes/$name
+  mkdir -p "$d"
+  { printf 'module example.test/proj/spikes/%s\n\ngo 1.26\n\n' "$name"
+    for m in "$@"; do printf 'require %s v0.0.0\nreplace %s => %s\n' "$m" "$m" "${libdir[$m]}"; done; } > "$d/go.mod"
+  { imports_of "$name" "$@"; printf '\nfunc Name() string { use(); return "%s" }\n' "$name"; } > "$d/$name.go"
+  if [ "$lic" = 1 ]; then cp "$work/goodlib/LICENSE" "$d/LICENSE"; fi
+}
+mkrepo "$work/r-spike" "example.test/lic-good"
+cp "$work/goodlib/LICENSE" "$work/r-spike/LICENSE"
+mkspike "$work/r-spike" x 0 example.test/lic-good
+CHECK_SPIKES=1 gate_case "LICENSE at the root, a separate module spikes/x without one, strict, CHECK_SPIKES=1" 1 \
+  "UNEXPECTED: $NOLIC 'example.test/proj/spikes/x'" "$work/r-spike"
+mkrepo "$work/r-spike-lic" "example.test/lic-good"
+cp "$work/goodlib/LICENSE" "$work/r-spike-lic/LICENSE"
+mkspike "$work/r-spike-lic" x 1 example.test/lic-good
+CHECK_SPIKES=1 gate_case "the same with a LICENSE in spikes/x itself, strict, CHECK_SPIKES=1" 0 "licence check: PASS" "$work/r-spike-lic"
 mkrepo "$work/r-sibling" "example.test/lic-good example.test/proj-extra"
 gate_case "off-list dependency at a sibling path sharing the root's prefix (proj-extra)" 1 \
-  "UNEXPECTED: $BSD4 'example.test/proj-extra'" "$work/r-sibling"
+  "UNEXPECTED: $BSD4 'example.test/proj-extra'" "$work/r-sibling" $LOCAL
 mkrepo "$work/r-siblingunk" "example.test/lic-good example.test/proj-unknown"
 gate_case "unknown-licence dependency at a sibling path sharing the prefix (proj-unknown)" 1 \
-  "UNEXPECTED: $NOLIC 'example.test/proj-unknown'" "$work/r-siblingunk"
+  "UNEXPECTED: $NOLIC 'example.test/proj-unknown'" "$work/r-siblingunk" $LOCAL
 mkrepo "$work/r-beneath" "example.test/lic-good example.test/proj/sub"
 gate_case "off-list dependency in a separate module beneath the root's path (proj/sub)" 1 \
-  "UNEXPECTED: $BSD4 'example.test/proj/sub'" "$work/r-beneath"
+  "UNEXPECTED: $BSD4 'example.test/proj/sub'" "$work/r-beneath" $LOCAL
 mkrepo "$work/r-beneathunk" "example.test/lic-good example.test/proj/unk"
 gate_case "unknown-licence dependency in a separate module beneath the root's path (proj/unk)" 1 \
-  "UNEXPECTED: $NOLIC 'example.test/proj/unk'" "$work/r-beneathunk"
+  "UNEXPECTED: $NOLIC 'example.test/proj/unk'" "$work/r-beneathunk" $LOCAL
 mkrepo "$work/r-nested" "example.test/lic-good" "example.test/lic-good example.test/lic-off"
 gate_case "off-list dependency of a nested module (the root itself is fine)" 1 \
-  "UNEXPECTED: $BSD4 'example.test/lic-off'" "$work/r-nested"
+  "UNEXPECTED: $BSD4 'example.test/lic-off'" "$work/r-nested" $LOCAL
 mkrepo "$work/r-testonly" "example.test/lic-good" "" "example.test/lic-off"
 gate_case "off-list dependency imported only by a test of the root module" 1 \
-  "UNEXPECTED: $BSD4 'example.test/lic-off'" "$work/r-testonly"
+  "UNEXPECTED: $BSD4 'example.test/lic-off'" "$work/r-testonly" $LOCAL
+# ---- B1: go-licenses logs an error for a licence file it cannot read, falls back to the module's
+# LICENSE, and exits 0. The gate must fail that run. The dangling symlink is readable by name
+# (the search finds it) and fails when opened, whoever runs the test.
+assert_last() { # label pattern: the output of the last gate_case contains the pattern
+  printf '%s\n' "$last_out" | grep -q -F -- "$2" || { echo "FAIL: $1: the output lacks '$2'"; failures=$((failures+1)); }
+}
+mksub() { # name with-dangling-licence(0|1): a module with a LICENSE at its root and a package sub/ beneath it
+  local n=$1 dangling=$2 d=$libs/$1
+  libdir[example.test/$n]=$d
+  mkdir -p "$d/sub"
+  printf 'module example.test/%s\n\ngo 1.26\n' "$n" > "$d/go.mod"
+  printf 'package sub\n\nfunc Name() string { return "%s" }\n' "$n" > "$d/sub/sub.go"
+  cp "$work/goodlib/LICENSE" "$d/LICENSE"
+  if [ "$dangling" = 1 ]; then ln -s does-not-exist "$d/sub/LICENSE"; fi
+}
+mkrepo_sub() { # dir dependency-module-path package-path: a root module importing one package of that module
+  mkdir -p "$1"
+  gomod_with example.test/proj "$2" > "$1/go.mod"
+  { imports_of main "$3"; printf '\nfunc main() { use() }\n'; } > "$1/main.go"
+}
+mksub unreadable 1
+mksub parentonly 0
+mkrepo_sub "$work/r-unreadable" example.test/unreadable example.test/unreadable/sub
+cp "$work/goodlib/LICENSE" "$work/r-unreadable/LICENSE"
+gate_case "unreadable package LICENSE with a readable module LICENSE as fallback, strict (go-licenses exits 0)" 1 \
+  "Failed to parse" "$work/r-unreadable"
+assert_last "unreadable licence" "gate: go-licenses exit=0, permitted=0, unexpected=1: FAIL"
+mkrepo_sub "$work/r-parentonly" example.test/parentonly example.test/parentonly/sub
+cp "$work/goodlib/LICENSE" "$work/r-parentonly/LICENSE"
+gate_case "control: the same dependency without the unreadable file, strict" 0 "licence check: PASS" "$work/r-parentonly"
+
+# ---- the module list comes from a search of the whole tree
+addnested() { # repo dir imports...: a module at <repo>/<dir>, with a LICENSE of its own
+  local repo=$1 dir=$2 n; n=$1/$2; shift 2
+  mkdir -p "$n"
+  gomod_with "example.test/proj/$dir" "$@" > "$n/go.mod"
+  imports_of extra "$@" > "$n/extra.go"
+  cp "$work/goodlib/LICENSE" "$n/LICENSE"
+}
+mkrepo "$work/r-tree" ""
+cp "$work/goodlib/LICENSE" "$work/r-tree/LICENSE"
+addnested "$work/r-tree" internal/extra example.test/lic-off
+gate_case "a module at internal/extra (not under third_party/) with an off-list dependency" 1 \
+  "UNEXPECTED: $BSD4 'example.test/lic-off'" "$work/r-tree"
+assert_last "tree search" "##### module internal/extra"
+
+# ---- no empty run: a module that go-licenses sees no package in
+mkrepo "$work/r-empty" "example.test/lic-good"
+cp "$work/goodlib/LICENSE" "$work/r-empty/LICENSE"
+mkdir -p "$work/r-empty/tools/tagged"
+printf 'module example.test/proj/tools/tagged\n\ngo 1.26\n' > "$work/r-empty/tools/tagged/go.mod"
+printf '//go:build never\n\npackage tagged\n' > "$work/r-empty/tools/tagged/tagged.go"
+cp "$work/goodlib/LICENSE" "$work/r-empty/tools/tagged/LICENSE"
+gate_case "a module that checks no package, not a known zero" 1 \
+  "UNEXPECTED: go-licenses saw no package in tools/tagged" "$work/r-empty"
+assert_last "empty run" "report rows: 0"
+printf '%s\n' '# test list' 'tools/tagged: its only file is behind a build tag (a fixture)' > "$work/known-zero.txt"
+KNOWN_ZERO_MODULES=$work/known-zero.txt gate_case "the same module listed as a known zero, with a reason" 0 \
+  "known zero: tools/tagged has no package to check; reason: its only file is behind a build tag (a fixture)" "$work/r-empty"
+printf '%s\n' 'tools/tagged:' > "$work/known-zero-noreason.txt"
+rc=0; out=$(KNOWN_ZERO_MODULES=$work/known-zero-noreason.txt "$here/licence-check.sh" "$GL" "$work/r-empty" "$work/out-noreason" 2>&1) || rc=$?
+echo "-- a known-zero entry without a reason: exit $rc"
+if [ "$rc" != 2 ] || ! printf '%s\n' "$out" | grep -q "needs '<module dir>: <reason>'"; then
+  echo "FAIL: an entry without a reason should be refused with exit 2"; failures=$((failures+1)); fi
 echo "-- for comparison, go-licenses' own --ignore example.test/proj, a path prefix, on the same fixtures (exit 0 = the dependency is hidden):"
 for r in sibling siblingunk beneath beneathunk; do
   rc=0; (cd "$work/r-$r" && "$GL" check ./... --ignore example.test/proj --allowed_licenses="$LIST" >/dev/null 2>&1) || rc=$?
