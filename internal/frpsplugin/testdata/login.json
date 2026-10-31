@@ -1,0 +1,18 @@
+{
+  "version": "0.1.0",
+  "op": "Login",
+  "content": {
+    "version": "0.71.1",
+    "hostname": "example-host",
+    "os": "linux",
+    "arch": "amd64",
+    "privilege_key": "00000000000000000000000000000000",
+    "timestamp": 1700000000,
+    "metas": {
+      "token": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    },
+    "client_spec": {},
+    "pool_count": 1,
+    "client_address": "127.0.0.1:40000"
+  }
+}
