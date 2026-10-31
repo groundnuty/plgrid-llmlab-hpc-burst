@@ -428,3 +428,27 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
+
+  # One stable name for branch protection (issue #81): the matrix entries' names carry each
+  # module's path and change when a module moves. It runs with if: always(), so that a failed,
+  # cancelled or skipped licence-modules or licences entry makes it fail; without that it would be
+  # skipped, and GitHub counts a skipped required check as passing.
+  licences-all:
+    name: licences-all
+    needs: [licence-modules, licences]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Every licence job succeeded
+        env:
+          DISCOVERY: ${{ needs.licence-modules.result }}
+          MATRIX: ${{ needs.licences.result }}
+        run: |
+          echo "licence-modules: $DISCOVERY"
+          echo "licences (all entries): $MATRIX"
+          if [ "$DISCOVERY" != success ] || [ "$MATRIX" != success ]; then
+            echo "licences-all: a licence job did not succeed" >&2
+            exit 1
+          fi
