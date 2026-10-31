@@ -131,6 +131,9 @@ type capture struct {
 	p       *private
 	sbatchD []time.Duration
 	n       int
+	// submitted gets every job ID an sbatch printed, so cleanup can cancel
+	// each job this run submitted, recorded or not.
+	submitted func(id string)
 }
 
 func (c *capture) Run(ctx context.Context, cmd slurm.Command) (slurm.Result, error) {
@@ -140,6 +143,9 @@ func (c *capture) Run(ctx context.Context, cmd slurm.Command) (slurm.Result, err
 	word := strings.SplitN(cmd.Line, " ", 2)[0]
 	if word == "sbatch" {
 		c.sbatchD = append(c.sbatchD, d)
+		if id := strings.TrimSpace(strings.SplitN(string(res.Stdout), ";", 2)[0]); err == nil && res.ExitCode == 0 && id != "" {
+			c.submitted(id)
+		}
 	}
 	c.n++
 	c.p.log("call %d %s exit %d err %v %s", c.n, word, res.ExitCode, err, d)
@@ -220,7 +226,7 @@ func newWorld(t *testing.T) *world {
 				return nil, nil, err
 			}
 			w.ssh = t
-			w.cap = &capture{Runner: t, p: w.p}
+			w.cap = &capture{Runner: t, p: w.p, submitted: func(id string) { w.jobIDs[id] = true }}
 			w.batch = slurm.NewBatch(w.cap, v.Profile, v.Settings, slurm.Options{PollInterval: 10 * time.Second, BusyInterval: 3 * time.Second})
 			return w.batch, t, nil
 		},
