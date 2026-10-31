@@ -130,6 +130,13 @@ type Spec struct {
 	// as it is; any other writer is fed through a pipe, which a member that
 	// leaves the group can hold open (Wait then gives up after a while).
 	Stdout, Stderr io.Writer
+	// ExtraFiles are passed to the process as descriptors 3, 4, ... A
+	// verified binary is run as /proc/self/fd/3 with its descriptor here, so
+	// what runs is the file that was hashed, whatever happens to its path.
+	ExtraFiles []*os.File
+	// Argv0, when set, is the process's argv[0] (what ps shows) in place of
+	// Path.
+	Argv0 string
 }
 
 // Group is one started process and its process group.
@@ -152,6 +159,10 @@ type Group struct {
 // Start starts the process as the leader of a new process group.
 func Start(s Spec, now time.Time) (*Group, error) {
 	cmd := exec.Command(s.Path, s.Args...)
+	if s.Argv0 != "" {
+		cmd.Args[0] = s.Argv0
+	}
+	cmd.ExtraFiles = s.ExtraFiles
 	cmd.Env = s.Env
 	cmd.Dir = s.Dir
 	cmd.Stdout = s.Stdout
