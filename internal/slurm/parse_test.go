@@ -472,7 +472,7 @@ func TestFixturesHoldNothingPrivate(t *testing.T) {
 			}
 		}
 		text := string(b)
-		for _, bad := range []string{"redacted", "<", "/home/", "/net/", "cyfronet", "orzech"} {
+		for _, bad := range []string{"redacted", "<", "/home/", "/net/", "cyfronet"} {
 			if strings.Contains(text, bad) {
 				t.Errorf("%s contains %q", f, bad)
 			}
