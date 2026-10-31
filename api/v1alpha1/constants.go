@@ -38,7 +38,8 @@ const (
 	// deployment ID's display form: a label value holds at most 63 characters.
 	LabelDeploymentID = Group + "/deployment-id"
 
-	// On identity and verification records: RecordIdentity or RecordVerification.
+	// On identity, verification and accounting records: RecordIdentity,
+	// RecordVerification or RecordAccounting.
 	LabelRecord = Group + "/record"
 
 	// On verification records: the UID of the Instance they belong to.
@@ -49,6 +50,7 @@ const (
 const (
 	RecordIdentity     = "identity"
 	RecordVerification = "verification"
+	RecordAccounting   = "accounting"
 )
 
 // Annotation keys on an Allocation (HBEP-11, The Allocation's record). The
@@ -138,7 +140,8 @@ const LeaseLifecycle = "lifecycle"
 // Lease.
 func ProviderLeaseName(provider string) string { return "provider-" + provider }
 
-// AnnotationModelDeployment is on identity and verification records. Its value
+// AnnotationModelDeployment is on identity and verification records, and on an
+// accounting record of an Allocation that was assigned to a ModelDeployment. Its value
 // is the full name of the ModelDeployment the record belongs to. The record's
 // label carries the same name shortened to fit 63 characters (LabelValue), and
 // a record has no owner reference, so once the ModelDeployment is deleted this
@@ -152,3 +155,7 @@ const IdentityRecordPrefix = "id-"
 // VerificationRecordPrefix starts the name of a verification record,
 // ver-<instance UID>-<generation> (HBEP-7, Instance start).
 const VerificationRecordPrefix = "ver-"
+
+// AccountingRecordPrefix starts the name of an accounting record,
+// acct-<Allocation UID> (HBEP-8, Provider accounting).
+const AccountingRecordPrefix = "acct-"
