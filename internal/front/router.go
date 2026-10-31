@@ -273,6 +273,18 @@ func (r *Router) LeaseEnd(uid types.UID) (time.Time, bool) {
 	return t, ok
 }
 
+// usageFailed raises a UsageWriteFailed event on the request's
+// ModelDeployment. A request that named none (refused before routing, or
+// off /v1/) has no object to attach it to: it is logged only.
+func (r *Router) usageFailed(dep, requestID string, err error) {
+	r.mu.Lock()
+	md := r.mds[dep]
+	r.mu.Unlock()
+	if md != nil {
+		r.rec.Event(md, true, eventDegraded, reasonUsageWriteFailed, "the usage record of request "+requestID+" was not written: "+err.Error())
+	}
+}
+
 // drift runs under the group's lock, possibly inside rebuildLocked, so it
 // takes no router lock: the reference was captured when the group was made.
 func (r *Router) drift(md *v1alpha1.ModelDeployment, total, members, open int64) {

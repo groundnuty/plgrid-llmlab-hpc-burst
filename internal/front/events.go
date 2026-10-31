@@ -21,6 +21,9 @@ const (
 	reasonCountsDrift   = "CountsDrift"
 	reasonCapacityDrop  = v1alpha1.ReasonCapacityDropped
 	reasonDrainWinShort = v1alpha1.ReasonDrainWindowShort
+	// reasonUsageWriteFailed: a usage record could not be written and synced
+	// (@hpc-burst-science-agent, 31 Oct 2026; HBEP-8 will list it).
+	reasonUsageWriteFailed = "UsageWriteFailed"
 )
 
 // Recorder emits HBEP-8's events. Events are best effort and never block a

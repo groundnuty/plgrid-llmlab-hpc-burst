@@ -74,7 +74,7 @@ func Run(ctx context.Context, o Options) error {
 	if err != nil {
 		return err
 	}
-	sink, err := usage.Open(cfg.UsageDir)
+	sink, err := usage.OpenLog(cfg.UsageDir, o.Log) // each failed batch is logged at Error
 	if err != nil {
 		return fmt.Errorf("usage records: %w", err)
 	}
@@ -264,10 +264,12 @@ func healthHandler(f *Front) http.Handler {
 			"watchAges": ages, "deployments": st.Deployments, "managedTargets": st.Managed, "waiting": st.Waiting,
 			"instances": st.Instances, "leaseEnds": st.LeaseEnds,
 		}
-		// A sink that failed loses records: shown here and logged with each
-		// record it refuses. HBEP-5 does not say to refuse traffic for it,
-		// so the front keeps serving.
+		// A sink that fails loses records: the health body shows the latest
+		// failure and the count, the status stays 200, and each failure is
+		// logged and raises a UsageWriteFailed event (@hpc-burst-science-agent,
+		// 31 Oct 2026).
 		if f.Sink != nil {
+			body["usageFailures"] = f.Sink.Failures()
 			if err := f.Sink.Err(); err != nil {
 				body["usageError"] = err.Error()
 			}

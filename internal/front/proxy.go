@@ -413,6 +413,7 @@ func (p *Proxy) finish(x *exchange) {
 	x.rec.DurationMs = end.Sub(x.start).Milliseconds()
 	if _, err := p.sink.Write(x.rec); err != nil {
 		p.log.Error("usage record not written", "request", x.id, "error", err.Error())
+		p.router.usageFailed(x.rec.ModelDeployment, x.id, err)
 	}
 	p.log.Info("request", "request", x.id, "path", x.rec.Path, "model", x.rec.RequestedModel, "status", x.rec.Status,
 		"emitter", x.rec.Emitter, "provider", x.rec.Provider, "instance", x.rec.Instance, "durationMs", x.rec.DurationMs)

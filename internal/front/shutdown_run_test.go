@@ -115,3 +115,94 @@ func TestRunStopCutsAStreamAndWritesItsRecord(t *testing.T) {
 		t.Errorf("the stream's usage record is not in the log after Run returned:\n%s", b)
 	}
 }
+
+// TestHealthAndEventOnAFailingUsageSink (@hpc-burst-science-agent, 31 Oct
+// 2026): the usage log is /dev/full, so every write fails with ENOSPC. The
+// front keeps serving; /healthz stays 200 and its body carries usageError
+// and the failure count; the request's ModelDeployment gets a
+// UsageWriteFailed event whose reason is that code alone.
+func TestHealthAndEventOnAFailingUsageSink(t *testing.T) {
+	h := newHarness(t, nil)
+	instanceKey := newKey(t)
+	e := enginetest.Start(t, enginetest.Options{PortLo: testPortLo, PortHi: testPortHi, Key: instanceKey})
+	h.profile("helios-gh200", v1alpha1.PlatformBatch, "", "")
+	h.batchProvider("helios-a", "helios-gh200")
+	h.servedMD("md", scModel, 1, "helios-a")
+	h.instance("md", "md-0", "helios-a", e, instanceKey, instanceOpts{leaseEnd: time.Now().Add(48 * time.Hour)})
+	client := dynfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+		inventory.GVRModelDeployments: "ModelDeploymentList", inventory.GVRInstances: "InstanceList",
+		inventory.GVRProviders: "ProviderList", inventory.GVRPlatformProfiles: "PlatformProfileList",
+	}, kySeed(t, h)...)
+
+	dir := filepath.Join(h.dir, "usage-full")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/dev/full", filepath.Join(dir, usage.LogFile)); err != nil {
+		t.Fatal(err)
+	}
+	rec := &MemoryRecorder{}
+	o := runOptions(t, "", h.host, "")
+	o.Config.ClientKeysFile = h.cfg.ClientKeysFile
+	o.Config.UsageDir = dir
+	o.Dynamic, o.Transports, o.Recorder = client, h.trans, rec
+	dial, err := listenFree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	health, err := listenFree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.DialHomeListener, o.HealthListener = dial, health
+	ready := make(chan *Front, 1)
+	o.Ready = func(f *Front) { ready <- f }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, o) }()
+	defer func() { cancel(); <-done }()
+	var f *Front
+	select {
+	case f = <-ready:
+	case err := <-done:
+		t.Fatalf("Run returned early: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the front did not start")
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	status := 0
+	for time.Now().Before(deadline) && status != 200 {
+		req, _ := http.NewRequest(http.MethodPost, "http://"+f.Client.String()+scChat, strings.NewReader(errChatBody(scModel, false, "hi")))
+		req.Header.Set("Authorization", "Bearer "+h.clientKey)
+		if resp, err := errClient.Do(req); err == nil {
+			readAll(t, resp)
+			status = resp.StatusCode
+		}
+		if status != 200 {
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	if status != 200 {
+		t.Fatalf("the front did not serve with a failing sink: status %d", status)
+	}
+	errWaitFor(t, "a UsageWriteFailed event", func() bool { return len(rec.Find(eventDegraded, reasonUsageWriteFailed)) > 0 })
+	ev := rec.Find(eventDegraded, reasonUsageWriteFailed)[0]
+	if !ev.Warning || !strings.Contains(ev.Object, "ns/md") || !strings.Contains(ev.Message, "no space left") {
+		t.Errorf("event %+v: want a warning on ns/md naming the cause", ev)
+	}
+	resp, err := http.Get("http://" + f.Health.String() + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		UsageError    string `json:"usageError"`
+		UsageFailures uint64 `json:"usageFailures"`
+	}
+	if err := json.Unmarshal([]byte(readAll(t, resp)), &body); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 || body.UsageFailures == 0 || !strings.Contains(body.UsageError, "no space left") {
+		t.Errorf("/healthz: status %d usageFailures %d usageError %q; want 200, a count and the cause", resp.StatusCode, body.UsageFailures, body.UsageError)
+	}
+}
