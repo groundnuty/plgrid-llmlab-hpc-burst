@@ -329,7 +329,7 @@ Values are run 1 / run 2 (/ more runs where listed).
      - Latency: the same as frp's plain tcp transport (TTFT +1–2 ms).
      - Head-of-line behaviour: the same, since both run yamux over one connection.
      - Failure detection: the same frp timers.
-     - About 40% more CPU on the front per token for the TLS terminator (11–12% of a core at 5,000 tokens/s).
+     - About 15–30% more CPU on the front per token: at 5,000 tokens/s, frps plus Envoy used 36–39% of a core against 30–31% for frps alone over tcp. Envoy itself was 11–12%.
      - About 5% more bytes on the link.
    - **What wss buys.** It is ordinary HTTPS on 443. S1's step 0 found that compute nodes reach 443, and a front that serves the LLMLab API on 443 terminates TLS anyway.
    - **Front configuration.** frps v0.71.1 cannot terminate wss itself, so the front's TLS terminator (Envoy here) must pass the `/~!frp` websocket upgrade on to frps's bind port. frpc should verify the front's certificate (`transport.tls.trustedCaFile`, `transport.tls.serverName`).
@@ -343,7 +343,7 @@ Values are run 1 / run 2 (/ more runs where listed).
    - **The fixed yamux timeout.** The yamux ping timeout is fixed at 10 s, so on a path slower than about 630 kB/s a single 6 MiB reply can trip it at any setting.
    - **The undetected window.** Requests sent before frps notices hang for up to `userConnTimeout` (10 s). So HBEP-6's end-to-end probe through the path, and a short first-byte timeout at the front, should decide routing rather than frps's view alone.
 3. **Capacity per front (operational readiness, item 5).**
-   - **CPU.** frps needs 5–6% of a core per 1,000 tokens/s, or 7–8% with the TLS terminator. One front core therefore carries about 13,000–14,000 tokens/s over wss and 16,000–20,000 over plain tcp: roughly **650 streams at 20 tokens/s over wss**, or 800–1,000 over tcp.
+   - **CPU.** frps needs about 6% of a core per 1,000 tokens/s over tcp, and frps plus the TLS terminator 7–8% over wss. Extrapolated linearly from 256 streams on one tunnel, one front core carries about 13,000–14,000 tokens/s over wss and 16,000–17,000 over tcp: roughly **650 streams at 20 tokens/s over wss**, or 800–850 over tcp.
    - **Memory.** About 50 MB each for frps and Envoy at 256 streams.
    - **The link is the real limit.** Each token takes 290–335 bytes on the link (body 222), so a path carries about link bytes/s ÷ (300 × tokens/s per stream) streams before they slow. That is about 85 streams at 512 kB/s, 2,000 at 100 Mbit/s and 20,000 at 1 Gbit/s.
    - **Overload.** Past that point, every stream on the tunnel slows evenly and TTFT grows to seconds; nothing fails.
@@ -358,7 +358,7 @@ Values are run 1 / run 2 (/ more runs where listed).
 - **Loss.** TCP head-of-line blocking caused by packet loss was not measured. toxiproxy is a userspace proxy and cannot drop packets, and `tc`/netem needs root. All the blocking above comes from a bandwidth cap.
 - **Real bottlenecks.** On a real path the queue lives in the sender's socket buffer and the bottleneck router, whose size and discipline (FIFO or fair queueing) set how large the delay is. Here, loopback TCP never sees loss, so the socket buffers grow to their maximum (4 MiB send, 6 MiB receive), and the measured delays are close to the 6 MiB-window bound.
 - **Many tunnels per front.** One frpc was measured. frps's CPU and memory with hundreds of tunnels, and many tunnels sharing one link, were not.
-- **CPU on a shared host.** The figures come from a shared VM (1-minute load 1–4.5) with the client, engine and both tunnel ends on one host. The ratios between arms are more reliable than the absolute values.
+- **CPU on a shared host.** The figures come from a shared VM (1-minute load 0.66–3.95 for the cells counted, 3–3.3 even with the other builders paused) with the client, engine and both tunnel ends on one host. The ratios between arms are more reliable than the absolute values.
 - **The real front.** wss through HBEP-11's actual front on 443, and through HTTP proxies on a center's network, were not measured. Here Envoy terminated TLS on loopback.
 - **frpc reconnect.** After a real partition, frpc's reconnect timing (its backoff) was not measured; see the heal note above.
 - **The path for routing decisions.** The front may learn that a path is gone from the frps server plugin's `CloseProxy` call; that path's latency was not measured, only the admin API and the log.
