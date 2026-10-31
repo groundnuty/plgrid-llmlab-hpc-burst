@@ -7,11 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
@@ -243,19 +243,31 @@ func (e *external) prerequisites(a *v1alpha1.Allocation) string {
 }
 
 // credential reads the Allocation's credential, which the lifecycle controller
-// writes once the Allocation has its UID.
+// writes once the Allocation has its UID. It is read with agentapi.ReadKeyFile,
+// the reader the credential's consumers use (docs/development.md, Key files),
+// so a file the agent API would refuse, a symlink among them, is never staged
+// (review of PR 76: Astra B9, Opus N13). ReadKeyFile also takes modes 400 and
+// 700; HBEP-4 says mode 600, so that is checked first. The errors reach the
+// Allocation's status and events, so they name no path.
 func (e *external) credential(a *v1alpha1.Allocation) ([]byte, error) {
 	if e.s.o.CredentialsDir == "" {
 		return nil, errors.New("no credentials directory is configured")
 	}
-	b, err := readOwnFile(agentapi.AllocationCredentialPath(e.s.o.CredentialsDir, string(a.UID)), 1024)
+	path := agentapi.AllocationCredentialPath(e.s.o.CredentialsDir, string(a.UID))
+	fi, err := os.Lstat(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil, errors.New("the file does not exist yet")
+	case err != nil:
+		return nil, errors.New("the file cannot be read")
+	case fi.Mode().Type() != 0 || fi.Mode().Perm() != 0o600:
+		return nil, errors.New("the file must be a regular file of this user, mode 600, not a link")
+	}
+	key, err := agentapi.ReadKeyFile(path)
 	if err != nil {
-		return nil, err
+		return nil, errors.New(strings.ReplaceAll(err.Error(), path, "the credential file"))
 	}
-	if err := agentapi.CheckCredential(b); err != nil {
-		return nil, err
-	}
-	return b, nil
+	return []byte(key), nil
 }
 
 // files are the three files staged before a claim (HBEP-4, Submission): the
@@ -292,31 +304,6 @@ func (e *external) files(a *v1alpha1.Allocation, tag string, paths slurm.Paths) 
 func file(path string, mode os.FileMode, content []byte) provider.File {
 	sum := sha256.Sum256(content)
 	return provider.File{Path: path, SHA256: hex.EncodeToString(sum[:]), Mode: mode, Content: content}
-}
-
-// readOwnFile reads a file that must be this user's, with no permission bits
-// for group or others, and at most max bytes.
-func readOwnFile(path string, max int64) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, errors.New("the file does not exist yet")
-		}
-		return nil, errors.New("the file cannot be opened")
-	}
-	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil {
-		return nil, errors.New("the file cannot be read")
-	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !fi.Mode().IsRegular() || fi.Mode().Perm()&0o077 != 0 || !ok || int(st.Uid) != os.Geteuid() {
-		return nil, errors.New("the file must be this user's, mode 600")
-	}
-	if fi.Size() > max {
-		return nil, fmt.Errorf("the file is larger than %d bytes", max)
-	}
-	return io.ReadAll(io.LimitReader(f, max))
 }
 
 // buildCache finds an agent build by digest without hashing it on every
