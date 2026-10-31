@@ -1,0 +1,72 @@
+package hubfiles
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+)
+
+// maxTokenFileBytes bounds the token file; a Hub token is under 100 bytes.
+const maxTokenFileBytes = 4096
+
+// ErrTokenFile is wrapped by every error about the token file: missing, too
+// open, empty, or not shaped like a token.
+var ErrTokenFile = errors.New("hubfiles: unusable token file")
+
+// token is a Hub token. It prints as "[redacted]" under every fmt verb, so a
+// log line or an error that formats it by mistake leaks nothing. The one
+// place that needs the text calls reveal.
+type token string
+
+const redacted = "[redacted]"
+
+func (token) String() string   { return redacted }
+func (token) GoString() string { return redacted }
+
+// Format implements fmt.Formatter, which takes precedence over String for
+// every verb, including %v, %+v, %#v, %q and %x.
+func (token) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, redacted) }
+
+func (t token) reveal() string { return string(t) }
+
+// readToken reads the token from path. The mode is checked on the open file
+// (fstat), so a file swapped between a check and the read cannot slip past.
+// A file that group or others can access is refused, and so is anything that
+// is not a regular file. No error message holds file content.
+func readToken(path string) (token, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrTokenFile, err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrTokenFile, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("%w: %s is not a regular file", ErrTokenFile, path)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return "", fmt.Errorf("%w: %s has mode %04o; it must not be accessible by group or others (use mode 600)", ErrTokenFile, path, perm)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxTokenFileBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("%w: reading %s: %v", ErrTokenFile, path, err)
+	}
+	if len(data) > maxTokenFileBytes {
+		return "", fmt.Errorf("%w: %s is larger than %d bytes", ErrTokenFile, path, maxTokenFileBytes)
+	}
+	s := strings.TrimSpace(string(data))
+	if s == "" {
+		return "", fmt.Errorf("%w: %s is empty", ErrTokenFile, path)
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] <= 0x20 || s[i] >= 0x7f {
+			// Not echoed: the text may be a secret in the wrong shape.
+			return "", fmt.Errorf("%w: %s holds more than one line or characters a token cannot have", ErrTokenFile, path)
+		}
+	}
+	return token(s), nil
+}
