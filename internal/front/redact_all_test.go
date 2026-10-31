@@ -244,20 +244,28 @@ func TestRedactKeysOutsideTheView(t *testing.T) {
 }
 
 // TestRedactAShortCredential (@hpc-burst-science-agent, 31 Oct 2026): every
-// target credential is redacted, however short; nothing exempts one.
+// target credential is redacted, however short; nothing exempts one. The
+// credentials files refuse a managed key under 16 bytes, so the 4-byte one
+// goes to the redactor directly: the set the front builds keeps it, and the
+// body and header redactors replace it.
 func TestRedactAShortCredential(t *testing.T) {
-	f := newScFix(t, scOpts{})
 	const short = "k3y!"
-	f.managedProvider("llmlab-s", "llmlab", "llmlab", "http://127.0.0.1:1/v1", short)
-	f.apply()
-	plain := `{"error":{"message":"bad key ` + short + `","code":400}}`
-	f.retarget(f.uids[0], rawEngine(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(400)
-		_, _ = io.WriteString(w, plain)
-	}))
-	resp := f.errPost(scChat, errChatBody(scModel, false, "hi"))
-	if got, want := readAll(t, resp), strings.ReplaceAll(plain, short, "[redacted]"); got != want {
-		t.Errorf("body\n got %s\nwant %s", got, want)
+	f := newScFix(t, scOpts{})
+	kept := false
+	for _, s := range f.proxy.secrets(short) {
+		kept = kept || s == short
+	}
+	if !kept {
+		t.Fatalf("the secret set dropped the %d-byte credential", len(short))
+	}
+	in := "bad key " + short + "; again " + short + "."
+	got, err := io.ReadAll(newRedactReader(iotest.OneByteReader(strings.NewReader(in)), []string{short}))
+	if want := "bad key [redacted]; again [redacted]."; err != nil || string(got) != want {
+		t.Errorf("body %q (%v), want %q", got, err, want)
+	}
+	h := http.Header{"X-Echo": {"key=" + short}}
+	redactHeader(h, []string{short})
+	if v := h.Get("X-Echo"); v != "key=[redacted]" {
+		t.Errorf("header %q, want key=[redacted]", v)
 	}
 }
