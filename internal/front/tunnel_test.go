@@ -261,8 +261,12 @@ func TestTunnelSetupDeadlineCutsAHungConnect(t *testing.T) {
 	}
 	direct := make(chan dialed, 1)
 	go func() {
+		// Bounded, so a set-up with no deadline fails the test rather than
+		// hanging it past its cleanups (which resume and stop frps).
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
 		start := time.Now()
-		c, err := f.tun.Dial(context.Background(), a)
+		c, err := f.tun.Dial(ctx, a)
 		if c != nil {
 			c.Close()
 		}
@@ -270,7 +274,18 @@ func TestTunnelSetupDeadlineCutsAHungConnect(t *testing.T) {
 	}()
 
 	start := time.Now()
-	status, body, _ := f.chat("frozen")
+	req, err := http.NewRequest(http.MethodPost, f.url+"/v1/chat/completions", strings.NewReader(tunChat))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+f.clientKey)
+	var status int
+	var body string
+	if resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req); err != nil {
+		t.Errorf("the request through a hung CONNECT: %v", err)
+	} else {
+		status, body = resp.StatusCode, readAll(t, resp)
+	}
 	took := time.Since(start)
 	d := <-direct
 	if d.err == nil || !strings.Contains(d.err.Error(), "tunnelSetupTimeout") {
