@@ -89,6 +89,10 @@ func (b *syncBuffer) String() string {
 }
 
 func TestMain(m *testing.M) {
+	// A controller process of failover_test.go: the test binary run again.
+	if addr := os.Getenv(childEnvRunner); addr != "" {
+		os.Exit(controllerChild(os.Args[1:], addr))
+	}
 	ctrl.SetLogger(funcr.New(func(prefix, args string) { logs.line(prefix + " " + args) }, funcr.Options{}))
 	os.Exit(m.Run())
 }
