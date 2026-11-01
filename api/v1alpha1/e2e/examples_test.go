@@ -160,7 +160,9 @@ func TestExamplesAreAdmitted(t *testing.T) {
 		t.Run("profile "+name, func(t *testing.T) {
 			for _, obj := range readManifestFile(t, filepath.Join(profilesDir(), p.file)) {
 				if obj["kind"] == "PlatformProfile" {
-					must(t, dryRunStrict(obj), "admit profiles/"+p.file)
+					// Under another name, so a profile that an earlier test created, or that
+					// the host already holds, does not turn the dry run into AlreadyExists.
+					must(t, dryRunStrict(edit(t, obj, uniq("ex"), "metadata", "name")), "admit profiles/"+p.file)
 				}
 			}
 		})

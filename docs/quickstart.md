@@ -110,11 +110,13 @@ alias hbk='KUBECONFIG=~/.local/state/hpcburst/kubeconfig ~/.cache/hpcburst/k3s/k
 
 ## 5. Apply a Provider and a ModelDeployment
 
-The examples in [`examples/`](../examples) are what this step applies. CI admits each one against the real CRDs, so they stay valid as the contracts change. Copy a Provider and replace its placeholders (`<account>`, `<grant>`, `<user>`); its `credentialsRef.file` is a file from step 3.
+The examples in [`examples/`](../examples) are what this step applies. CI admits each one against the real CRDs, so they stay valid as the contracts change. A Provider holds placeholders, so you edit a copy of it and apply the copy: replace `<account>`, `<grant>` and `<user>`, and point `credentialsRef.file` at the file you wrote in step 3. Keep the Provider's name, because the ModelDeployments name it. The ModelDeployments hold none of your values and are applied as they are.
 
 ```
 hbk apply -f profiles/helios.yaml -f profiles/athena.yaml -f profiles/llmlab.yaml
-hbk apply -f examples/provider-helios-gh200.yaml
+cp examples/provider-helios-gh200.yaml ~/.config/hpcburst/provider-helios-gh200.yaml
+# edit ~/.config/hpcburst/provider-helios-gh200.yaml, then:
+hbk apply -f ~/.config/hpcburst/provider-helios-gh200.yaml
 hbk apply -f examples/modeldeployment-qwen25-instruct.yaml
 hbk get providers
 hbk get modeldeployments
@@ -172,7 +174,7 @@ bin/hpcburst down
 - **One user, one host.** The host is a single-user k3s on one machine ([HBEP-11](../hbep/0011-kubernetes-control-plane/README.md)); a team option is not part of alpha.
 - **One partition per Provider**, and a Provider names exactly one ([HBEP-4](../hbep/0004-provider-interface/README.md), open question 12). A second partition is a second Provider.
 - **Short-job partitions host no model.** Helios `plgrid` and Athena `plgrid-now` are in the profiles for conformance runs and short checks only ([`profiles/README.md`](../profiles/README.md)).
-- **Sano is not shipped**, and no profile for it exists yet.
+- **Sano is not shipped:** no PlatformProfile for it is in `profiles/`, only its draft.
 - **A managed Provider only lists.** It reads LLMLab's catalog once a minute and routes to it; it starts and stops nothing ([HBEP-4](../hbep/0004-provider-interface/README.md), Managed provider in alpha).
 - **Billing is recorded, not read.** The `grant` field is kept, but nothing in alpha charges against it.
 - **Real runs are still being measured.** The first runs on Helios and Athena are tracked in the repository's issues; expect queue waits and start-up times to move as the profiles are tuned.
