@@ -30,8 +30,13 @@ type Index interface {
 // Notifier hears the plugin's calls as triggers to re-read frps's proxy list (HBEP-6: about a second
 // after each NewProxy and CloseProxy). ProxyChanged must not block; the Handler calls it inside
 // its deadline and does not wait for it past that. op is "NewProxy" (accepted) or "CloseProxy".
+//
+// allocationUID is the UID of the Allocation whose credential admitted the proxy, on an accepted
+// NewProxy: the Handler has it from the same Index lookup that admitted the call, so a listener can
+// say which Allocation's tunnel a proxy came through (HBEP-8: TunnelOrphaned regards it). It is ""
+// on CloseProxy, which carries no token and is a trigger only.
 type Notifier interface {
-	ProxyChanged(op, proxyName string)
+	ProxyChanged(op, proxyName, allocationUID string)
 }
 
 // Feeder is how the controller fills an Index.
@@ -178,7 +183,7 @@ var _ Notifier = (*Trigger)(nil)
 func NewTrigger() *Trigger { return &Trigger{c: make(chan struct{}, 1)} }
 
 // ProxyChanged implements Notifier. It never blocks.
-func (t *Trigger) ProxyChanged(string, string) {
+func (t *Trigger) ProxyChanged(string, string, string) {
 	select {
 	case t.c <- struct{}{}:
 	default:

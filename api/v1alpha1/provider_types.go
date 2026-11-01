@@ -40,11 +40,10 @@ type ProviderSpec struct {
 	// QOS is the Slurm quality of service the provider's jobs are to be
 	// submitted under. Which QOS a user may name belongs to the user's
 	// association, like the account, so it is a provider setting, not a
-	// profile field. HBEP-4 has the Slurm provider add --qos=<qos> to sbatch,
-	// after checking it against the safe pattern of every value placed in a
-	// command, and fail reading the profile, with this field named, when the
-	// PlatformProfile's qos does not list it; both land with #151's provider
-	// change, and until then the field is stored only. Absent, no --qos is
+	// profile field. The Slurm provider adds --qos=<qos> to sbatch, after
+	// checking it against the safe pattern of every value placed in a
+	// command, and fails reading the profile, with this field named, when the
+	// PlatformProfile's qos does not list it (HBEP-4). Absent, no --qos is
 	// sent, the association's default QOS applies, and only the partition
 	// QOS's typed limits are planned for (HBEP-4, Provider settings, The
 	// Slurm dialect and QOS limits; `@hpc-burst-science-agent`, 1 Nov 2026).

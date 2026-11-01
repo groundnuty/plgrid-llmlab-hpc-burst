@@ -13,7 +13,8 @@ import (
 )
 
 // DefaultGrace is how long down waits after SIGTERM before it sends SIGKILL. It is longer than
-// SupervisorGraceWithFront, the least a supervisor that runs the front needs.
+// SupervisorGrace, the least the supervisor needs to let the controller, and the front when it
+// runs one, stop within their own kill graces.
 const DefaultGrace = 40 * time.Second
 
 // ErrGraceTooShort is returned by Down and Upgrade, before anything is stopped, when the grace is

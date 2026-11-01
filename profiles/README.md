@@ -1,15 +1,16 @@
 # Platform profiles
 
-`helios.yaml` and `athena.yaml` are the alpha `PlatformProfile` objects of Helios and Athena (HBEP-4, open questions 3, 7 and 8). A Provider names one in `spec.platformProfileRef`. Sano is not shipped here; it follows in fallback mode.
+`helios.yaml` and `athena.yaml` are the alpha `PlatformProfile` objects of Helios and Athena (HBEP-4, open questions 3, 7 and 8), and `llmlab.yaml` is the managed one of LLMLab. A Provider names one in `spec.platformProfileRef`. Sano is not shipped here; it follows in fallback mode.
 
 | File | Object name | Partitions in the typed list |
 |---|---|---|
 | `helios.yaml` | `helios` | `plgrid` (CPU), `plgrid-gpu-gh200` |
 | `athena.yaml` | `athena` | `plgrid-gpu-a100`, `plgrid-now` (conformance runs and short checks only) |
+| `llmlab.yaml` | `llmlab` | none: a managed profile has no batch fields (HBEP-4, "A managed profile"); the gateway's address and key are in the Provider's credentials file |
 
 Only a partition on which `holdRelease` was verified is in the typed list (HBEP-4, Platform profile schema). Every other partition is in the untyped block only.
 
-`plgrid-now` is the exception that the science agent ruled on issue #93 (comment 6557245889, 1 Nov 2026): it is listed so that the conformance harness can run on a partition where a job starts at once, and the run of 1 Nov 2026 on it passed (fact `slurm.plgrid_now_conformance`). Its time limit is 1 h and its QoS allows one GPU and one job per user, so it hosts no Instance, and the lifecycle controller must never plan one there. Its `gpusPerNode` is the node's 8, since the field is a node fact; the per-user cap of one GPU stays an untyped fact (`slurm.qos`) until the typed `maxGpusPerUser` of the HBEP-4/7 amendment (PR #151), and nothing reads it before then. What keeps it off today is that the entry gives no `cpusPerGpu` or `memPerGpu`, so `partitionSizing` refuses it (`TestShippedAthenaNowCannotBeSized`). Sourcing both values lifts that refusal (it holds while either is absent), so both stay absent until HBEP-7's `PartitionTooShort` check lands (`maxTime` must exceed `drainWindow` plus `handoverMargin` plus `health.startTimeout`).
+`plgrid-now` is the exception that the science agent ruled on issue #93 (comment 6557245889, 1 Nov 2026): it is listed so that the conformance harness can run on a partition where a job starts at once, and the run of 1 Nov 2026 on it passed (fact `slurm.plgrid_now_conformance`). Its time limit is 1 h and its QoS allows one GPU and one job per user, so it hosts no Instance, and the lifecycle controller must never plan one there. Its `gpusPerNode` is the node's 8, since the field is a node fact; the per-user cap of one GPU is typed in `qos` (`plgrid-now`, `maxGpusPerUser` 1), so the Slurm provider refuses a second GPU, and the most GPUs one Allocation may request is the smaller of the two (HBEP-4, QOS limits). What keeps it off today is that the entry gives no `cpusPerGpu` or `memPerGpu`, so `partitionSizing` refuses it (`TestShippedAthenaNowCannotBeSized`). Sourcing both values lifts that refusal (it holds while either is absent), so both stay absent until HBEP-7's `PartitionTooShort` check lands (`maxTime` must exceed `drainWindow` plus `handoverMargin` plus `health.startTimeout`).
 
 ## What a manifest holds
 
@@ -26,6 +27,8 @@ A comment next to each typed value names its source (HBEP-4, open question 7):
 - a path in `spec.profile`, written `facts.<group>.<fact>` (a partition is `partitions[name=<p>]`);
 - "derived", for a division of such facts, with the numbers;
 - "framework default (HBEP-n, section)", where no fact exists.
+
+The QOS limits are typed too (HBEP-4, QOS limits; `@hpc-burst-science-agent`, 1 Nov 2026). `qos` lists the QOSes that a Provider's `qos` or a partition's `qos` names, with the limits the plan reads, and `partitions[].qos` names a partition's own QOS, which Slurm applies before the job's. Helios lists `now` (12 h, one job, one GPU, 72 CPUs, 122400Mi), `plgrid` (2000 jobs) and `normal` (none), and its partitions `plgrid` and `plgrid-gpu-gh200` name `plgrid`; Athena lists `plgrid` (1000 jobs) and `plgrid-now` (one job, one GPU, 16 CPUs, 125Gi, no wall limit), and its partitions `plgrid-gpu-a100` and `plgrid-now` name them. Each value cites `facts.slurm.qos` and, for Helios, the measurement of 1 Nov 2026 (issue #94, comment 6557416899). None has `overPartQos`. A Provider that sets `qos: now` or `qos: plgrid-now` sends it as `--qos`.
 
 These values are framework defaults or derived, not measured facts:
 
@@ -51,8 +54,10 @@ A fact that nothing states is absent, not false (HBEP-4, Platform profile schema
 
 ## How the manifests are checked
 
-- `api/v1alpha1/e2e/shipped_profiles_test.go` applies each file, read from `profiles/`, to the real CRD with strict field validation, so a misspelled typed key is refused instead of pruned. It then shows that copies with one value broken are refused (`imageFormat: oci` among them), that the untyped block comes back unchanged, and that every envelope has a known method, a source and a text date.
+- `api/v1alpha1/e2e/shipped_profiles_test.go` applies each file, read from `profiles/`, to the real CRD with strict field validation, so a misspelled typed key is refused instead of pruned. It then shows that copies with one value broken are refused (`imageFormat: oci` among them), that the untyped block comes back unchanged, and that every envelope has a known method, a source and a text date. The managed `llmlab.yaml` has no envelope to keep, so it gets its own check (a managed kind, no partitions, no untyped block). The test's list of files is compared with this directory, so a profile added here cannot stay out of the checks, as `llmlab.yaml` once did.
+- `api/v1alpha1/e2e/examples_test.go` also admits each profile here by dry run (the managed `llmlab.yaml` among them), and checks that every Provider in `examples/` names a profile and, for a batch one, a partition that this directory lists.
 - `internal/slurm/shipped_profiles_test.go` runs the Slurm provider's own `ReadProfile` on each alpha partition.
+- The typed QOS limits come back from the API server as written (`TestShippedProfilesKeepTheirTypedQOS`), and the provider refuses a request above each of them, with a control that is accepted at the cap (`TestShippedProfilesTypeTheirQOS`). The expected numbers are written out from the HBEP, not read from the manifest.
 - The same file shows that the provider refuses a GPU request on Helios `plgrid` and accepts it on `plgrid-gpu-gh200`.
 - None compares a typed value with the fact it was copied from: that would prove only the copy. The checks that matter are admission, the provider's own checks, and the conformance runs that read these profiles.
 - **Open:** the conformance harness (`internal/providerctl/conformance`) reads these manifests whole (`TestShippedProfilesLoadForTheHarness` lists the partitions it can run on), and the 56-character name round trip has run on Helios `plgrid` (31 Oct 2026) and Athena `plgrid-now` (1 Nov 2026). `plgrid-gpu-gh200` and `plgrid-gpu-a100` have not run it; their `jobName` stands on the platform-level ruling (option (b)), with the read-back as the safety net.

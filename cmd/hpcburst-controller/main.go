@@ -11,7 +11,8 @@
 // server (internal/agentserver, #60), which serves the lifecycle controller's
 // agentapi.Backend on the agent endpoint. Its log names its port base, which
 // tells two copies on one host apart. frps's server
-// plugin (#90) plugs in at extraRunnables once it merges.
+// plugin and the writer of the Instances' TunnelConnected condition (#90,
+// tunnel.go) plug in at extraRunnables.
 //
 // Usage (hpcburst up passes the first three and the front it recorded):
 //
@@ -131,13 +132,14 @@ func checkCredentialsDir(dir string) error {
 	return nil
 }
 
-// extraRunnables are components still to come, added to the manager after
-// mount's (components.go). The next is frps's server plugin (#90,
-// internal/frpsplugin): a Runnable without leader election that serves its
-// Handler at agentapi.FrpsPluginPath on host.FrpsPluginAddr() (base+8), with an
-// Index fed from mgr's cache of Allocations and Instances and the credential
-// files under host.CredentialsDir().
-var extraRunnables []func(mgr manager.Manager, host agentapi.Host, backend agentapi.Backend) (manager.Runnable, error)
+// extraRunnables are components added to the manager after mount's
+// (components.go). Each returns the Runnable run adds, and may add others to mgr
+// itself. addTunnel (#90, tunnel.go) returns frps's server plugin, a Runnable
+// without leader election that serves the frpsplugin Handler on
+// host.FrpsPluginAddr() (base+8) with an Index fed from mgr's cache of
+// Allocations and Instances and the credential files, and adds the leader
+// component that writes each Instance's TunnelConnected condition.
+var extraRunnables = []func(mgr manager.Manager, host agentapi.Host, backend agentapi.Backend) (manager.Runnable, error){addTunnel}
 
 func run(ctx context.Context, f flags, d deps) error {
 	scheme, err := d.providerScheme()
