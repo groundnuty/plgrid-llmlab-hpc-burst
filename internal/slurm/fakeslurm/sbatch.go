@@ -21,6 +21,7 @@ var sbatchDefs = []optDef{
 	{name: "job-name", value: valRequired},
 	{name: "partition", value: valRequired},
 	{name: "account", value: valRequired},
+	{name: "qos", value: valRequired},
 	{name: "time", value: valRequired},
 	{name: "nodes", value: valRequired},
 	{name: "gres", value: valRequired},
@@ -35,7 +36,6 @@ var sbatchDefs = []optDef{
 // Definite refusals, each "Batch job submission failed: <reason>". None holds a
 // text that slurm.transientReasons reads as a lost reply.
 const (
-	reasonOneJob     = "Job violates accounting/QOS policy (job submit limit, user's size and/or time limits)"
 	reasonGPUOnly    = "Job violates partition policy: this partition accepts only jobs that request a GPU"
 	reasonPartition  = "Invalid partition name specified"
 	reasonGRES       = "Invalid generic resource (gres) specification"
@@ -44,7 +44,7 @@ const (
 
 type sbatchSpec struct {
 	name, partition, account, output, errPath, wrap string
-	constraint                                      string
+	constraint, qos                                 string
 	minutes, cpus, nodes, gpus                      int
 	memMiB                                          int64
 	hold, requeue, parsable                         bool
@@ -70,6 +70,7 @@ func parseSbatch(args []string) (sbatchSpec, error) {
 	s.output, _ = p.get("output")
 	s.errPath, _ = p.get("error")
 	s.constraint, _ = p.get("constraint")
+	s.qos, _ = p.get("qos")
 	var ok bool
 	if s.wrap, ok = p.get("wrap"); !ok {
 		return s, fmt.Errorf("This does not look like a batch script")
@@ -145,10 +146,23 @@ func (sh *shell) sbatch(args []string) int {
 		spec.partition = sh.p.defaultPartition()
 	}
 	step := sh.p.nextStep()
-	if reason := sh.p.policyRefusal(sh.s.user, spec); reason != "" {
-		return sh.submitFailed(reason)
+	sh.p.registerLate(sh.now) // a job whose reply was lost earlier registers now (qos.go)
+	if text := sh.p.policyRefusal(sh.s.user, spec); text != "" {
+		sh.stderr.WriteString(text)
+		return 1
+	}
+	if text := sh.p.qosRefusal(sh.s.user, spec); text != "" {
+		sh.stderr.WriteString(text)
+		return 1
 	}
 	switch {
+	case step.kind == stepPolicy:
+		sh.stderr.WriteString(policyRefusalLines(step.reason))
+		return 1
+	case step.kind == stepLostReplyLate:
+		sh.p.late = append(sh.p.late, lateJob{sess: sh.s, spec: spec})
+		sh.runErr = step.err
+		return 0
 	case step.kind == stepReject:
 		return sh.submitFailed(step.reason)
 	case step.kind == stepTransient && !step.registered:
@@ -197,7 +211,10 @@ func (p *Platform) partition(name string) (Partition, bool) {
 	return Partition{}, false
 }
 
-// policyRefusal is the reason a partition refuses the job, or "".
+// policyRefusal is the standard error of a partition's refusal of the job, or
+// "". A one-job-per-user partition refuses as the real QOS does, with the
+// reason line and then the accounting-policy line; the others print the one
+// line "Batch job submission failed: <reason>".
 func (p *Platform) policyRefusal(user string, s sbatchSpec) string {
 	if len(p.cfg.Partitions) == 0 {
 		return ""
@@ -205,13 +222,18 @@ func (p *Platform) policyRefusal(user string, s sbatchSpec) string {
 	pt, ok := p.partition(s.partition)
 	switch {
 	case !ok:
-		return reasonPartition
+		return failedLine(reasonPartition)
 	case pt.GPUOnly && s.gpus == 0:
-		return reasonGPUOnly
+		return failedLine(reasonGPUOnly)
 	case pt.OneJobPerUser && p.liveJobs(user, pt.Name) > 0:
-		return reasonOneJob
+		return policyRefusalLines(reasonSubmitPerUser)
 	}
 	return ""
+}
+
+// failedLine is sbatch's definite-failure line, as submitFailed prints it.
+func failedLine(reason string) string {
+	return "sbatch: error: Batch job submission failed: " + reason + "\n"
 }
 
 // liveJobs counts the user's pending and running jobs in a partition.
@@ -235,6 +257,7 @@ func (p *Platform) register(user string, s sbatchSpec, now time.Time, step Submi
 		execs:      []*execution{newExecution(now, "None")},
 	}
 	p.nextID++
+	j.qos = p.jobQOS(s)
 	if j.name == "" {
 		j.name = "wrap"
 	}
