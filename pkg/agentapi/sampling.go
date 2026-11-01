@@ -1,6 +1,10 @@
 package agentapi
 
-import "strconv"
+import (
+	"fmt"
+	"math"
+	"strconv"
+)
 
 // The sampling parameters of the checks (HBEP-7, The allocation agent, Checks,
 // "Sampling parameters of the checks"; science-agent rulings, 1 Nov 2026). The
@@ -156,4 +160,71 @@ func CheckSampling(genConfig map[string]string, doSample *bool, reasoning bool) 
 	}
 	s.TopK, s.MinP, s.Seeds = &topK, &minP, CheckSeeds()
 	return s
+}
+
+// SamplingRangeError is a sampling value that vLLM v0.32.0 refuses
+// (vllm/sampling_params.py, SamplingParams._verify_args, lines 631-687). On a
+// sampled model the value comes from generation_config.json, so every check
+// request would fail; verification fails instead, with VerificationFailed,
+// naming the key and the value, before any check request. There is no
+// fallback to greedy decoding and no clamping (`@hpc-burst-science-agent`, 1
+// Nov 2026, from PR #155's review).
+type SamplingRangeError struct {
+	// Key is vLLM's request field, for example "top_p".
+	Key string
+	// Value is the value that would be sent.
+	Value float64
+	// Range is the range vLLM accepts, as its own message writes it, for
+	// example "(0, 1]".
+	Range string
+}
+
+func (e *SamplingRangeError) Error() string {
+	return fmt.Sprintf("generation_config.json's %s is %s, outside the range vLLM accepts, %s", e.Key, strconv.FormatFloat(e.Value, 'g', -1, 64), e.Range)
+}
+
+// CheckSamplingRange returns a *SamplingRangeError for the first value of s
+// outside the range vLLM v0.32.0 accepts, in vLLM's own order, and nil when
+// every value is in range:
+//
+//   - presence_penalty and frequency_penalty in [-2, 2];
+//   - repetition_penalty finite and above 0;
+//   - temperature finite and in [0, 2];
+//   - top_p in (0, 1];
+//   - top_k at least -1 (0 and -1 disable it);
+//   - min_p in [0, 1].
+//
+// A value that is not a number (NaN) is out of every range. Greedy values are
+// always in range. The agent calls it before its first check request, and the
+// controller judges verification with it (VerificationFailed).
+func CheckSamplingRange(s Sampling) error {
+	in := func(v, lo, hi float64) bool { return v >= lo && v <= hi } // false for NaN
+	type check struct {
+		key  string
+		v    float64
+		ok   bool
+		rng  string
+		skip bool
+	}
+	topK, minP := 0.0, 0.0
+	if s.TopK != nil {
+		topK = float64(*s.TopK)
+	}
+	if s.MinP != nil {
+		minP = *s.MinP
+	}
+	for _, c := range []check{
+		{"presence_penalty", s.PresencePenalty, in(s.PresencePenalty, -2, 2), "[-2, 2]", false},
+		{"frequency_penalty", s.FrequencyPenalty, in(s.FrequencyPenalty, -2, 2), "[-2, 2]", false},
+		{"repetition_penalty", s.RepetitionPenalty, !math.IsInf(s.RepetitionPenalty, 0) && s.RepetitionPenalty > 0, "a finite number greater than 0", false},
+		{"temperature", s.Temperature, in(s.Temperature, 0, 2), "[0, 2]", false},
+		{"top_p", s.TopP, s.TopP > 0 && s.TopP <= 1, "(0, 1]", false},
+		{"top_k", topK, topK >= -1, "0 (disable), -1 (disable) or at least 1", s.TopK == nil},
+		{"min_p", minP, in(minP, 0, 1), "[0, 1]", s.MinP == nil},
+	} {
+		if !c.skip && !c.ok {
+			return &SamplingRangeError{Key: c.key, Value: c.v, Range: c.rng}
+		}
+	}
+	return nil
 }

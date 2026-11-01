@@ -1,7 +1,10 @@
 package agentapi
 
 import (
+	"errors"
+	"math"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -121,5 +124,85 @@ func TestCheckSeedsAreFixedAndDistinct(t *testing.T) {
 	*a.TopK = 99
 	if b.Seeds["chat"] != 1102 || *b.TopK != 20 {
 		t.Errorf("two results share memory: %+v", b)
+	}
+}
+
+// The ranges are vLLM v0.32.0's (vllm/sampling_params.py lines 631-687),
+// written out by hand: each bound is tested at the bound and just past it
+// (`@hpc-burst-science-agent`, 1 Nov 2026: refuse, no fallback, no clamping).
+func TestCheckSamplingRangeBoundaries(t *testing.T) {
+	base := func() Sampling {
+		return Sampling{Temperature: 0.6, TopP: 0.95, TopK: i64(20), MinP: f64(0), RepetitionPenalty: 1, Seeds: seeds}
+	}
+	const eps = 1e-9
+	for _, tc := range []struct {
+		name    string
+		mutate  func(*Sampling)
+		wantKey string // "" accepts
+	}{
+		{"the base", func(*Sampling) {}, ""},
+		{"presence_penalty -2", func(s *Sampling) { s.PresencePenalty = -2 }, ""},
+		{"presence_penalty just below -2", func(s *Sampling) { s.PresencePenalty = -2 - eps }, "presence_penalty"},
+		{"presence_penalty 2", func(s *Sampling) { s.PresencePenalty = 2 }, ""},
+		{"presence_penalty just above 2", func(s *Sampling) { s.PresencePenalty = 2 + eps }, "presence_penalty"},
+		{"frequency_penalty -2", func(s *Sampling) { s.FrequencyPenalty = -2 }, ""},
+		{"frequency_penalty just below -2", func(s *Sampling) { s.FrequencyPenalty = -2 - eps }, "frequency_penalty"},
+		{"frequency_penalty 2", func(s *Sampling) { s.FrequencyPenalty = 2 }, ""},
+		{"frequency_penalty just above 2", func(s *Sampling) { s.FrequencyPenalty = 2 + eps }, "frequency_penalty"},
+		{"repetition_penalty just above 0", func(s *Sampling) { s.RepetitionPenalty = eps }, ""},
+		{"repetition_penalty 0", func(s *Sampling) { s.RepetitionPenalty = 0 }, "repetition_penalty"},
+		{"repetition_penalty negative", func(s *Sampling) { s.RepetitionPenalty = -1 }, "repetition_penalty"},
+		{"repetition_penalty +Inf", func(s *Sampling) { s.RepetitionPenalty = math.Inf(1) }, "repetition_penalty"},
+		{"temperature 0", func(s *Sampling) { s.Temperature = 0 }, ""},
+		{"temperature just below 0", func(s *Sampling) { s.Temperature = -eps }, "temperature"},
+		{"temperature 2", func(s *Sampling) { s.Temperature = 2 }, ""},
+		{"temperature just above 2", func(s *Sampling) { s.Temperature = 2 + eps }, "temperature"},
+		{"temperature NaN", func(s *Sampling) { s.Temperature = math.NaN() }, "temperature"},
+		{"top_p 1", func(s *Sampling) { s.TopP = 1 }, ""},
+		{"top_p just above 1", func(s *Sampling) { s.TopP = 1 + eps }, "top_p"},
+		{"top_p just above 0", func(s *Sampling) { s.TopP = eps }, ""},
+		{"top_p 0", func(s *Sampling) { s.TopP = 0 }, "top_p"},
+		{"top_k -1", func(s *Sampling) { s.TopK = i64(-1) }, ""},
+		{"top_k 0", func(s *Sampling) { s.TopK = i64(0) }, ""},
+		{"top_k -2", func(s *Sampling) { s.TopK = i64(-2) }, "top_k"},
+		{"min_p 0", func(s *Sampling) { s.MinP = f64(0) }, ""},
+		{"min_p 1", func(s *Sampling) { s.MinP = f64(1) }, ""},
+		{"min_p just below 0", func(s *Sampling) { s.MinP = f64(-eps) }, "min_p"},
+		{"min_p just above 1", func(s *Sampling) { s.MinP = f64(1 + eps) }, "min_p"},
+		// vLLM's order: the first bad value is named.
+		{"two bad values: presence_penalty first", func(s *Sampling) { s.TopP, s.PresencePenalty = 0, 3 }, "presence_penalty"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := base()
+			tc.mutate(&s)
+			err := CheckSamplingRange(s)
+			var re *SamplingRangeError
+			switch {
+			case tc.wantKey == "" && err != nil:
+				t.Errorf("CheckSamplingRange = %v, want nil", err)
+			case tc.wantKey != "" && !errors.As(err, &re):
+				t.Errorf("CheckSamplingRange = %v, want a SamplingRangeError for %s", err, tc.wantKey)
+			case tc.wantKey != "" && (re.Key != tc.wantKey || !strings.Contains(err.Error(), tc.wantKey)):
+				t.Errorf("CheckSamplingRange = %v (key %q), want key %q named in the message", err, re.Key, tc.wantKey)
+			}
+		})
+	}
+}
+
+// Greedy values are always in range, and a file's out-of-range value reaches
+// the check through CheckSampling, with the key and the value in the message.
+func TestCheckSamplingRangeOnCheckSampling(t *testing.T) {
+	if err := CheckSamplingRange(greedy); err != nil {
+		t.Errorf("greedy values: %v", err)
+	}
+	s := CheckSampling(map[string]string{"temperature": "2.5", "top_p": "0.9"}, nil, true)
+	err := CheckSamplingRange(s)
+	if want := "generation_config.json's temperature is 2.5, outside the range vLLM accepts, [0, 2]"; err == nil || err.Error() != want {
+		t.Errorf("CheckSamplingRange = %v, want %q", err, want)
+	}
+	// The same file without a reasoning parser is checked greedily: nothing
+	// from it is sent, so nothing is out of range.
+	if err := CheckSamplingRange(CheckSampling(map[string]string{"temperature": "2.5"}, nil, false)); err != nil {
+		t.Errorf("a greedy check of the same file: %v", err)
 	}
 }
