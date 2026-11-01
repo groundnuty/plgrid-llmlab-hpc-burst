@@ -8,8 +8,9 @@
 #     The same path, without "spec.profile.", leads to the fact in profiles/helios.draft.yaml
 #     (spike S5; spike S1 added the facts of the hold check and of the compute nodes). A
 #     partition is written partitions[name=<p>], since the draft lists partitions. The facts
-#     added from issue #94 and its follow-ups (the hard limit of open files, QOS now, and the
-#     node-local storage measured in a GH200 job) are in this file only.
+#     added from issue #94 and its follow-ups (the hard limit of open files, QOS now, the
+#     node-local storage measured in a GH200 job, and the SIF build's peak in $MEMFS) are in
+#     this file only.
 #   - "derived": a division of such facts, with the numbers shown.
 #   - "framework default (HBEP-n, section)": no fact exists; the value is the design's.
 # Slurm's "MB" is 2^20 bytes (the Slurm provider sends --mem=<MiB>M), so memory is in Mi.
@@ -45,11 +46,14 @@ spec:
       # Derived: facts.partitions[name=plgrid-gpu-gh200].max_mem_per_node_mb, 489500, divided by the 4 GPUs.
       # The centre documents a billing share of 120 GB per GPU (facts.other.billing) without saying
       # which GB; if it is decimal, a one-GPU request of this memory may be billed as more than one GPU.
-      # It includes a RAM-disk budget of 24 GiB for tmpDir below, which counts against --mem: the SIF
-      # build's peak, about twice the image, plus the run directory's small files (HBEP-4, Platform
-      # profile schema; `@hpc-burst-science-agent`, 1 Nov 2026). The agent removes the build tree once
-      # the SIF is cached, before the engine loads its weights, and reports the build's peak TMPDIR
-      # use, which measures this budget (HBEP-7, The allocation agent).
+      # tmpDir below is a RAM disk whose contents count against --mem. A cold build of vLLM v0.32.0's
+      # SIF peaked there at 59473461248 bytes, 55.39 GiB, about 6.7 times the 8.8 GB SIF
+      # (facts.storage.node_local.sif_build_peak_in_memfs, measured from the agent's buildPeakTmpBytes;
+      # issue #94, comment 6557821833). That measurement replaces the earlier 24 GiB estimate, and memPerGpu
+      # stays as derived: the agent removes the build tree once the SIF is cached, before the engine
+      # loads its weights, so the build's peak and the engine do not hold memory at the same time
+      # (HBEP-4, Platform profile schema; HBEP-7, The allocation agent; `@hpc-burst-science-agent`,
+      # 1 Nov 2026).
       memPerGpu: 122375Mi
       imageFormat: sif # facts.containers.apptainer_compute_nodes.value.plgrid-gpu-gh200 (S1 probe 2: a SIF runs); also facts.partitions[name=plgrid-gpu-gh200].image_format
       # The job's temporary directory is the job's RAM disk (HBEP-4, Submission and Platform profile
@@ -406,6 +410,12 @@ spec:
             source: "sbatch --test-only and one GH200 job (QOS now, 1 GPU, -C memfs, --no-requeue), run by the code agent; job IDs and node names withheld"
             date: "2026-11-01"
             note: "About the node's RAM. Its contents count against --mem (memfs above, documented)."
+          sif_build_peak_in_memfs:
+            value: {bytes: 59473461248, gib: 55.39, sif_bytes: 8814432256, earlier_estimate_bytes: 25769803776}
+            method: measured
+            source: "issue #94, comment 6557821833 (the second real-engine run). hb-agent at main 6aa77b5 built docker.io/vllm/vllm-openai@sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34 (vLLM v0.32.0, the arm64 image) into a SIF from an empty image cache, in one GH200 job (QOS now, 1 GPU, -C memfs, --no-requeue) whose TMPDIR the bootstrap's line set to $MEMFS. The value is the staging report's buildPeakTmpBytes: the peak use of TMPDIR, sampled with statfs, while Apptainer's layer cache and build tree were both under it. Job IDs and node names withheld"
+            date: "2026-11-01"
+            note: "2.31 times the earlier 24 GiB estimate (earlier_estimate_bytes) and about 6.7 times the SIF, not about twice the image. It counts against --mem: Slurm's MaxRSS for that job's batch step was 72879.50M under --mem=120000M. $MEMFS held no file at the job's end: the build tree is removed once the SIF is cached. One cold build of one image."
           job_tmpdir_in_job:
             value: "the job's own TMPDIR is on Lustre (statfs: lustre, with a project quota)"
             method: measured
