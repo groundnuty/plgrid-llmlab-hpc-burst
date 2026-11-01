@@ -81,10 +81,11 @@ type Options struct {
 	// that the start's ObservationGap counts: a test waits on it to know the
 	// elector has read a Lease another copy holds.
 	onLeaseRead func()
-	// again marks a second manager in one process, a test's restart:
-	// controller-runtime refuses a second controller named lifecycle in a
-	// process unless its name check is skipped.
-	again bool
+	// skipNameCheck lets a test build more than one manager in a process (a
+	// restart, or a run with -count above 1): controller-runtime refuses a
+	// second controller named lifecycle in a process unless its name check is
+	// skipped. Production builds one manager and never sets it.
+	skipNameCheck bool
 }
 
 // Scheme returns the scheme the controller uses: the built-in kinds and the
@@ -238,7 +239,7 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 		WithOptions(controller.Options{
 			MaxConcurrentReconciles: workers,
 			RateLimiter:             workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](time.Second, maxRequeue),
-			SkipNameValidation:      &o.again,
+			SkipNameValidation:      &o.skipNameCheck,
 		}).
 		Complete(r)
 	if err != nil {

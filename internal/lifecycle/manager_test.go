@@ -297,7 +297,7 @@ func TestManagerOnControlPlane(t *testing.T) {
 	// fake client. FrontNotConfigured is covered by the rig and by the k3s run.
 	mgr, backend, err := NewManager(Options{
 		Config: cp.Config, CredentialsDir: creds, AgentBuildsDir: builds, FrontConfigured: true, HealthAddr: managerHealthAddr,
-		MetricsAddr: managerMetricsAddr, LeaderElection: true, Checkpoints: &stubSource{},
+		MetricsAddr: managerMetricsAddr, LeaderElection: true, Checkpoints: &stubSource{}, skipNameCheck: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -537,7 +537,7 @@ func restartAfterGap(t *testing.T, ctx context.Context, cl client.Client, cfg *r
 	readOnce := sync.OnceFunc(func() { close(leaseRead) })
 	mgr, _, err := NewManager(Options{
 		Config: cfg, CredentialsDir: creds, AgentBuildsDir: builds, FrontConfigured: true, HealthAddr: managerHealthAddr,
-		MetricsAddr: managerMetricsAddr, LeaderElection: true, Checkpoints: &stubSource{}, again: true, onLeaseRead: readOnce,
+		MetricsAddr: managerMetricsAddr, LeaderElection: true, Checkpoints: &stubSource{}, skipNameCheck: true, onLeaseRead: readOnce,
 		newCache: func(c *rest.Config, o cache.Options) (cache.Cache, error) {
 			inner, err := cache.New(c, o)
 			if err != nil {
