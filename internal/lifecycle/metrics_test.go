@@ -271,17 +271,40 @@ func TestQualifyReasoningBudgetExhaustedIsAnOrdinaryFailure(t *testing.T) {
 
 // TestQualifyRecordsTheBehaviourContext: the behaviour check's ContextTokens,
 // the prompt length it ran at, is recorded in the Qualified condition (the
-// only place v1alpha1 has for it).
+// only place v1alpha1 has for it), and the Instance's verification record holds
+// the context the controller expects the check to run at.
+//
+// The figure is worked out by hand from the rig's inputs, never by calling
+// agentapi.BehaviourContextTokens. mdSpec declares max-model-len 32768,
+// contextTokens.typical 4096, outputTokens.typical 512, no longest context and
+// no reasoning parser; the engine double reports max-model-len 32768 and, as
+// afake.DefaultVerify does, a template overhead of 12. With no declared longest
+// context, the longest is the limit less the typical output and the overhead,
+// 32768 - 512 - 12 = 32244 (HBEP-7, What the controller reads), as
+// TestJudgeVerifyRecordsTheBehaviourContext works it for the same shapes. With
+// no reasoning parser the check runs at that longest context: 32244.
 func TestQualifyRecordsTheBehaviourContext(t *testing.T) {
-	rg, in, _ := healthRig(t, func() afake.Engine { return afake.Engine{Qualify: afake.QualifyBehaviourContext(12345)} })
+	const want = 32244
+	rg, in, _ := healthRig(t, func() afake.Engine { return afake.Engine{Qualify: afake.QualifyBehaviourContext(want)} })
+	inst := rg.instance(in.Name)
 	var msg string
-	for _, c := range rg.instance(in.Name).Status.Conditions {
+	for _, c := range inst.Status.Conditions {
 		if c.Type == v1alpha1.ConditionQualified {
 			msg = c.Message
 		}
 	}
-	if !strings.Contains(msg, "12345 context tokens") {
-		t.Fatalf("Qualified message %q does not record the behaviour check's 12345 context tokens", msg)
+	if !strings.Contains(msg, "32244 context tokens") {
+		t.Errorf("Qualified message %q does not record the behaviour check's 32244 context tokens", msg)
+	}
+	if inst.Status.VerificationRecord == "" {
+		t.Fatalf("the Instance names no verification record")
+	}
+	rec, found, err := rg.r.readVerification(rg.ctx, rigNS, inst.Status.VerificationRecord)
+	if err != nil || !found {
+		t.Fatalf("verification record %s: found %v, err %v", inst.Status.VerificationRecord, found, err)
+	}
+	if rec.BehaviourContextTokens != want {
+		t.Errorf("the verification record holds behaviour context %d, want %d (32768 - 512 - 12)", rec.BehaviourContextTokens, want)
 	}
 }
 
