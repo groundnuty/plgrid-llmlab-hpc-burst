@@ -16,10 +16,13 @@ import (
 // can be the first token (TTFT), it counts as a content event, and it passes
 // to the client unchanged.
 
-// The events below are the shape of the real capture (S94, results/r3,
+// The events below are a reduced copy of the real capture (S94, results/r3,
 // before-stream-length.sse): a role chunk, a reasoning piece, the finish
-// chunk with a delta, the usage chunk, [DONE]. The expected values in the
-// tests come from this capture, not from the engine double.
+// chunk with a delta, the usage chunk, [DONE]. The capture has one more
+// reasoning piece, "\n" before "Okay", so it holds 3 content events where
+// this copy holds 2; the finish chunk and the usage are as captured. The
+// expected values in the tests are counted from these events, not taken
+// from the engine double.
 const (
 	s94Role      = `data: {"id":"chatcmpl-1","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":""},"logprobs":null,"finish_reason":null}],"prompt_token_ids":null,"prompt_text":null}` + "\n\n"
 	s94Reasoning = `data: {"id":"chatcmpl-1","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"reasoning":"Okay"},"logprobs":null,"finish_reason":null,"token_ids":null}]}` + "\n\n"
@@ -56,7 +59,7 @@ func TestJudgeCountsTheFinishChunksDelta(t *testing.T) {
 	}
 }
 
-// TestFinishDeltaOfARealEngineStream: the S94 capture through the front. The
+// TestFinishDeltaOfARealEngineStream: the reduced S94 capture through the front. The
 // client gets every byte unchanged; the record has the finish reason from
 // the finish chunk, and with no usage chunk counts the finish delta among the
 // content events.
@@ -128,21 +131,22 @@ func finishChoice(t *testing.T, body string) (finish string, delta map[string]an
 func TestFinishDeltaIsTheOnlyContentOfAOneChunkReply(t *testing.T) {
 	const completionsBody = `{"model":"` + efModel + `","stream":true,"prompt":"hi"}`
 	for _, c := range []struct {
-		name, path, body, field string
+		name, path, body, field, finish string
 	}{
-		{"chat content", "/v1/chat/completions", errChatBody(efModel, true, "hi"), "content"},
-		{"chat reasoning", "/v1/chat/completions", errChatBody(efModel, true, "hi"), "reasoning"},
-		{"chat reasoning_content", "/v1/chat/completions", errChatBody(efModel, true, "hi"), "reasoning_content"},
-		{"completions text", "/v1/completions", completionsBody, "text"},
+		{"chat content", "/v1/chat/completions", errChatBody(efModel, true, "hi"), "content", "length"},
+		{"chat content, stop", "/v1/chat/completions", errChatBody(efModel, true, "hi"), "content", "stop"},
+		{"chat reasoning", "/v1/chat/completions", errChatBody(efModel, true, "hi"), "reasoning", "length"},
+		{"chat reasoning_content", "/v1/chat/completions", errChatBody(efModel, true, "hi"), "reasoning_content", "length"},
+		{"completions text", "/v1/completions", completionsBody, "text", "length"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := newErrFix(t, nil, instanceOpts{}, "")
-			s.e.Set(enginetest.Behaviour{Tokens: 1, LastWithFinish: true, DeltaField: c.field, FirstToken: 2 * time.Second, FinishReason: "length"})
+			s.e.Set(enginetest.Behaviour{Tokens: 1, LastWithFinish: true, DeltaField: c.field, FirstToken: 2 * time.Second, FinishReason: c.finish})
 			resp := s.post(c.path, c.body)
 			body := readAll(t, resp)
 			finish, delta, text := finishChoice(t, body)
-			if finish != "length" {
-				t.Errorf("the client's finish reason = %q, want length", finish)
+			if finish != c.finish {
+				t.Errorf("the client's finish reason = %q, want %s", finish, c.finish)
 			}
 			got := text
 			if c.field != "text" {
@@ -161,8 +165,8 @@ func TestFinishDeltaIsTheOnlyContentOfAOneChunkReply(t *testing.T) {
 			if !ptrIs(rec.ContentEvents, 1) || rec.CountsSource == nil || *rec.CountsSource != "front_events" {
 				t.Errorf("contentEvents %s source %s, want 1 and front_events", ptrStr(rec.ContentEvents), strStr(rec.CountsSource))
 			}
-			if rec.Finish == nil || *rec.Finish != "length" {
-				t.Errorf("finish = %s, want length", strStr(rec.Finish))
+			if rec.Finish == nil || *rec.Finish != c.finish {
+				t.Errorf("finish = %s, want %s", strStr(rec.Finish), c.finish)
 			}
 		})
 	}
