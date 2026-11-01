@@ -194,8 +194,8 @@ func TestFrontSupervision(t *testing.T) {
 	if err := os.WriteFile(sshKey, []byte("not read by the launcher"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	r := cli(t, h.upArgs(base, "--json", "--controller-bin", ctl, "--manifests", "../../config/crd", "--front-config", cfg, "--front-bin", fb,
-		"--front-mode", "ssh", "--front-addr", "front.example.test", "--front-key", sshKey)...)
+	r := cli(t, h.upArgs(base, append(frpsArgs(t), "--json", "--controller-bin", ctl, "--manifests", "../../config/crd", "--front-config", cfg, "--front-bin", fb,
+		"--front-mode", "ssh", "--front-addr", "front.example.test", "--front-key", sshKey)...)...)
 	if r.code != exitOK {
 		t.Fatalf("up exited %d: %s", r.code, r.err)
 	}

@@ -94,7 +94,7 @@ func TestFrontStopFlushesARequestInFlight(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := cli(t, h.upArgs(base, "--json", "--controller-bin", ctl, "--manifests", "../../config/crd", "--front-config", cfg, "--front-bin", fb)...)
+	r := cli(t, h.upArgs(base, append(frpsArgs(t), "--json", "--controller-bin", ctl, "--manifests", "../../config/crd", "--front-config", cfg, "--front-bin", fb)...)...)
 	if r.code != exitOK {
 		t.Fatalf("up exited %d: %s", r.code, r.err)
 	}

@@ -142,6 +142,22 @@ func checkEntry(sup *procHandle, supPID int, e EntryRecord) (EntryHealth, []stri
 		add("pid %d does not hold its health port %d", e.Proc.PID, port)
 		return eh, problems
 	}
+	if len(e.Ports) > 0 {
+		// A process with a fixed set of ports (frps, HBEP-6) must hold exactly those, all on
+		// loopback: a missing one is a listener that failed, an extra or a non-loopback one is a
+		// listener that must not exist.
+		owned, _, err := treeListeners(h)
+		if err != nil {
+			add("cannot list the sockets of pid %d: %v", e.Proc.PID, err)
+			return eh, problems
+		}
+		if probs := verifyListeners(e.Ports, owned, nil); len(probs) > 0 {
+			for _, p := range probs {
+				add("pid %d: %s", e.Proc.PID, p)
+			}
+			return eh, problems
+		}
+	}
 	ok := true
 	body, err := healthz(e.Health, healthzTimeout)
 	if err != nil {

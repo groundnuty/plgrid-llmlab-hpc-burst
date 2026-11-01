@@ -95,6 +95,9 @@ type State struct {
 	// FrontRun is the front the supervisor runs beside the controllers (issue #64). Nil when up was
 	// given no --front-config.
 	FrontRun *FrontRunConfig `json:"front_run,omitempty"`
+	// Frps is the frps the supervisor runs (HBEP-6). Nil when no frps was found at up, or no
+	// controllers run.
+	Frps *FrpsRunConfig `json:"frps,omitempty"`
 }
 
 // ControllerConfig is the launcher's choice of what to run beside k3s.

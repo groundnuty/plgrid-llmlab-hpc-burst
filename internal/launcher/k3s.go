@@ -26,6 +26,7 @@ type launchSpec struct {
 	// record whose status says the supervisor is missing, not a healthy host that needs none.
 	controllers *ControllerConfig
 	frontRun    *FrontRunConfig
+	frps        *FrpsRunConfig
 }
 
 // niceBin is nice(1), named by absolute path so the caller's PATH cannot choose it.

@@ -115,6 +115,15 @@ type supervised struct {
 	// its health port and answers /healthz with 200. The front binds its listeners only after its
 	// first lists, so a port taken in between would otherwise fail it after a successful up.
 	WaitReady bool
+	// Ports, when set, are exactly the ports the process must listen on, all on loopback; status
+	// reports any other listener, or a missing one, as a problem. frps's three (HBEP-6).
+	Ports []int
+	// Env, when set, is the process's whole environment instead of the supervisor's (childEnv).
+	Env []string
+	// Open, when set, is called before each start. Its files are passed to the process from
+	// descriptor 3 on (exec.Cmd.ExtraFiles) and closed after the start: frps's verified binary,
+	// which Path names as /proc/self/fd/3, so the bytes run are the bytes checked (HBEP-15).
+	Open func() ([]*os.File, error)
 }
 
 // supervisedSet is what the supervisor runs, from the record the launcher wrote. The controller's
@@ -141,6 +150,9 @@ func (s *State) supervisedSet(l layout) ([]supervised, error) {
 	}
 	if front != nil {
 		set = append(set, *front)
+	}
+	if frps := s.frpsEntry(l); frps != nil {
+		set = append(set, *frps)
 	}
 	return set, nil
 }
@@ -189,6 +201,9 @@ type EntryRecord struct {
 	StartedAt *time.Time  `json:"started_at,omitempty"`
 	Restarts  int         `json:"restarts"` // starts after the first
 	LastExit  *ExitRecord `json:"last_exit,omitempty"`
+	// Ports are exactly the ports the process must listen on (supervised.Ports); none means only
+	// the health port is checked.
+	Ports []int `json:"ports,omitempty"`
 }
 
 // ExitRecord is how the previous child ended.
@@ -331,7 +346,7 @@ func Supervise(ctx context.Context, o SuperviseOptions) error {
 	}
 	rep := &reporter{l: l, log: o.Log, f: SupervisorFile{Schema: supervisorSchema, Supervisor: self}}
 	for _, sp := range specs {
-		rep.f.Entries = append(rep.f.Entries, EntryRecord{Name: sp.Name, Health: sp.Health, State: entryStarting})
+		rep.f.Entries = append(rep.f.Entries, EntryRecord{Name: sp.Name, Health: sp.Health, State: entryStarting, Ports: sp.Ports})
 	}
 	rep.mu.Lock()
 	rep.writeLocked()
@@ -369,7 +384,23 @@ func (r *runner) start() (*procHandle, *exec.Cmd, error) {
 		return nil, nil, err
 	}
 	defer lf.Close()
-	cmd := &exec.Cmd{Path: r.spec.Path, Args: append([]string{r.spec.Path}, r.spec.Args...), Env: r.env, Dir: r.l.dir, Stdout: lf, Stderr: lf}
+	env := r.env
+	if r.spec.Env != nil {
+		env = r.spec.Env
+	}
+	cmd := &exec.Cmd{Path: r.spec.Path, Args: append([]string{r.spec.Path}, r.spec.Args...), Env: env, Dir: r.l.dir, Stdout: lf, Stderr: lf}
+	if r.spec.Open != nil {
+		files, err := r.spec.Open()
+		if err != nil {
+			return nil, nil, err
+		}
+		defer func() {
+			for _, f := range files {
+				f.Close()
+			}
+		}()
+		cmd.ExtraFiles = files
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
 	h, err := startProc(r.spec.Name, cmd)
 	return h, cmd, err

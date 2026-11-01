@@ -33,6 +33,10 @@ type UpOptions struct {
 	// binary, default FrontBinName beside the running executable (issue #64). The front runs under
 	// the controllers' supervisor, so it needs a controller binary too.
 	FrontConfig, FrontBin string
+	// FrpsBin is frps (HBEP-6), checked against the pin; empty means FrpDirName/frps under BinDir,
+	// and a missing default starts no frps, with a warning. frps runs under the controllers'
+	// supervisor, so a given FrpsBin needs a controller binary too.
+	FrpsBin string
 
 	// supervisorArgv, set by tests only, replaces the supervisor's command line.
 	supervisorArgv []string
@@ -58,6 +62,8 @@ type UpReport struct {
 	ControllerHealth string `json:"controller_health,omitempty"`
 	// FrontHealth is the address of the front's /healthz when a front runs.
 	FrontHealth string `json:"front_health,omitempty"`
+	// FrpsPorts are frps's bind, tcpmux and web ports when frps runs.
+	FrpsPorts []int `json:"frps_ports,omitempty"`
 }
 
 // logTail returns the last few lines of the k3s log, for error messages.
@@ -87,7 +93,7 @@ func startAndWait(ctx context.Context, spec launchSpec, front Front, timeout tim
 	st := &State{
 		Version: spec.bin.Version.String(), Binary: spec.bin.Path, BinarySHA256: spec.bin.SHA256,
 		Nice: spec.nice, Ports: spec.ports, Procs: []ProcRec{rec}, StartedAt: t0, Front: front,
-		Controllers: spec.controllers, FrontRun: spec.frontRun,
+		Controllers: spec.controllers, FrontRun: spec.frontRun, Frps: spec.frps,
 	}
 	// Record before waiting: an interrupted or crashed start is then still cleaned up by down.
 	if err := spec.l.saveState(st); err != nil {
@@ -172,6 +178,14 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 	if frontRun != nil && ctrlBin == "" {
 		return nil, errors.New("a front was asked for (--front-config), but no controller binary was found: the front runs under the controllers' supervisor")
 	}
+	var frpsRun *FrpsRunConfig
+	if ctrlBin != "" {
+		if frpsRun, err = resolveFrpsRun(o.BinDir, o.FrpsBin, DefaultFrpVersion); err != nil {
+			return nil, err
+		}
+	} else if o.FrpsBin != "" {
+		return nil, errors.New("frps was asked for (--frps-bin), but no controller binary was found: frps runs under the controllers' supervisor")
+	}
 	unlock, err := l.lockState()
 	if err != nil {
 		return nil, err
@@ -233,7 +247,7 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 
 	spec := launchSpec{l: l, bin: bin, ports: ports, nice: o.Nice}
 	if ctrlBin != "" {
-		spec.controllers, spec.frontRun = &ControllerConfig{Binary: ctrlBin}, frontRun
+		spec.controllers, spec.frontRun, spec.frps = &ControllerConfig{Binary: ctrlBin}, frontRun, frpsRun
 	}
 	st, readyzAt, readyAt, err := startAndWait(ctx, spec, front, o.ReadyTimeout, o.Log)
 	if err != nil {
@@ -289,13 +303,27 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 			}
 		}
 		st.Controllers = &ControllerConfig{Binary: ctrlBin}
-		st.FrontRun = frontRun
+		st.FrontRun, st.Frps = frontRun, frpsRun
+		if frpsRun != nil {
+			// frps's web password and configuration, both mode 600 (HBEP-6), before the supervisor
+			// that starts frps; a password that exists is kept, so the controller's copy stays valid.
+			if _, err := writeFrpsFiles(l.host(ports)); err != nil {
+				return abort("frps", err)
+			}
+		} else {
+			rep.Warnings = append(rep.Warnings, noFrpsWarning)
+			logf(o.Log, "%s", noFrpsWarning)
+		}
 		if err := startSupervisor(ctx, l, st, argv, superviseStartTimeout, o.Log); err != nil {
 			return abort("controllers", err)
 		}
 		rep.SupervisorPID, rep.ControllerBin, rep.ControllerHealth = st.Procs[len(st.Procs)-1].PID, ctrlBin, ports.ControllerAddr()
 		if frontRun != nil {
 			rep.FrontHealth = ports.FrontHealthAddr()
+		}
+		if frpsRun != nil {
+			h := l.host(ports)
+			rep.FrpsPorts = []int{h.FrpsBindPort(), h.FrpsTCPMuxPort(), h.FrpsWebPort()}
 		}
 	}
 	if !front.Set() {

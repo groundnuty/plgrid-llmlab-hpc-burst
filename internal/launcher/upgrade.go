@@ -192,7 +192,7 @@ func replaceHost(ctx context.Context, l layout, st *State, bin Binary, ops hostO
 	}
 	// The replacement's first record carries the old host's supervision, so an upgrade interrupted
 	// while the new k3s starts leaves a record that still names the controllers and the front.
-	spec := launchSpec{l: l, bin: bin, ports: st.Ports, nice: st.Nice, controllers: st.Controllers, frontRun: st.FrontRun}
+	spec := launchSpec{l: l, bin: bin, ports: st.Ports, nice: st.Nice, controllers: st.Controllers, frontRun: st.FrontRun, frps: st.Frps}
 	nst, readyAt, err = ops.start(ctx, spec, st.Front, timeout, log)
 	if err != nil {
 		return nil, backup, stopDur, 0, fmt.Errorf("the new host did not come up (the host is stopped; the store in %s is recorded as written by %s; to go back to %s, run hpcburst restore --backup %s): %w",
