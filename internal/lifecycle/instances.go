@@ -310,7 +310,7 @@ func (p *pass) pending(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) error 
 	}); err != nil {
 		return err
 	}
-	p.r.Recorder.Event(in, nil, eventStarted, "AgentRegistered", fmt.Sprintf("the agent of Allocation %s registered on %s; the Instance starts", alloc.Name, reg.node))
+	p.r.Recorder.Event(in, nil, eventStarted, v1alpha1.ReasonAgentRegistered, fmt.Sprintf("the agent of Allocation %s registered on %s; the Instance starts", alloc.Name, reg.node))
 	if err := p.r.setDialHome(p.ctx, in.Labels[v1alpha1.LabelProvider], false, p.now, "an agent registered through the dial-home path", reg.at); err != nil {
 		return err
 	}
