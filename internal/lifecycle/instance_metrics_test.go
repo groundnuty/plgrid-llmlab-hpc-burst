@@ -423,3 +423,78 @@ func TestMetricsSeriesScope(t *testing.T) {
 		}
 	})
 }
+
+// TestMetricsRestartAtEachRungStartsNewSeries covers HBEP-8, Test plan,
+// "Restart an engine at each rung: a new series starts under the new
+// generation labels, and no counter series decreases". With attemptsPerRung 1,
+// two crashes climb the worker rung (worker_generation 1) and then the
+// whole-Instance rung (generation 1). The engine double's counters start again
+// at every new process, as a real engine's do. Scraped at every step, no label
+// set's counter ever goes down, each rung shows a label set of its own, and a
+// superseded label set is gone once the new process is reported.
+func TestMetricsRestartAtEachRungStartsNewSeries(t *testing.T) {
+	rg, in, alloc := healthRig(t, func() afake.Engine { return afake.Engine{Health: afake.HealthEngineCounters()} },
+		withProfile(func(p *v1alpha1.PlatformProfileSpec) {
+			p.Restart = &v1alpha1.RestartPolicy{AttemptsPerRung: ptrTo(int32(1))}
+		}))
+	uid := string(in.UID)
+	counters := []string{
+		"hpcburst_instance_generation_tokens_total",
+		"hpcburst_instance_preemptions_total",
+		"hpcburst_instance_prefix_cache_queried_tokens_total",
+		"hpcburst_instance_prefix_cache_hit_tokens_total",
+		"hpcburst_instance_time_per_output_token_seconds_sum",
+		"hpcburst_instance_time_per_output_token_seconds_count",
+	}
+	last := map[string]float64{}  // counter + its full label set -> last value
+	seenGens := map[string]bool{} // generation/worker_generation pairs seen
+	check := func() []string {
+		ex := scrape(t, rg)
+		var gens []string
+		for _, name := range counters {
+			for _, s := range ex.find(name, map[string]string{"instance_uid": uid}) {
+				g := s.labels["generation"] + "/" + s.labels["worker_generation"]
+				key := name + "{" + g + "}"
+				v, err := strconv.ParseFloat(s.value, 64)
+				if err != nil {
+					t.Fatalf("%s = %q: %v", key, s.value, err)
+				}
+				if old, ok := last[key]; ok && v < old {
+					t.Fatalf("%s went down from %v to %v", key, old, v)
+				}
+				last[key] = v
+				seenGens[g] = true
+				if !slices.Contains(gens, g) {
+					gens = append(gens, g)
+				}
+			}
+		}
+		return gens
+	}
+	ag := rg.agentOf(alloc).agent
+	for _, want := range []string{"0/1", "1/1"} { // the worker rung, then the whole Instance
+		ag.CrashWorker(healthWorker, 1)
+		for end := rg.clock.Now().Add(15 * time.Minute); ; startStep(rg, "md", startTick) {
+			gens := check()
+			if rg.readyCount("md") == 1 && slices.Equal(gens, []string{want}) {
+				break
+			}
+			if !rg.clock.Now().Before(end) {
+				t.Fatalf("label sets %v at %s, want only generation/worker_generation %s once ready again", gens, rg.clock.Now().Format(time.TimeOnly), want)
+			}
+		}
+		// The new process's counters rise from its own start.
+		for i := 0; i < 3; i++ {
+			startStep(rg, "md", startTick)
+			check()
+		}
+	}
+	for _, g := range []string{"0/0", "0/1", "1/1"} {
+		if !seenGens[g] {
+			t.Errorf("generation/worker_generation %s never exposed (seen %v)", g, seenGens)
+		}
+	}
+	if got := rg.instance(in.Name).Status.Restarts; len(got) != 2 {
+		t.Fatalf("%d restarts recorded, want 2 (worker, then whole Instance)", len(got))
+	}
+}
