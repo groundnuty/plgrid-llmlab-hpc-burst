@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -447,5 +448,56 @@ func TestAPlainRejectionKeepsItsEventOnEveryAttempt(t *testing.T) {
 	}
 	if n != 3 {
 		t.Errorf("%d SubmissionRejected events over 3 attempts, want 3", n)
+	}
+}
+
+// Create returns no error for a recorded limit refusal, so crossplane-runtime
+// marks the creation succeeded (the external-create-succeeded annotation, with
+// the pending one before it). That bookkeeping must neither leave the creation
+// incomplete, which would stop the reconciler, nor skip the next attempt: with
+// crossplane's default creation grace period of 30 s, which counts real time,
+// the reconciler waits that long after a succeeded Create before it trusts an
+// Observe that says the job is missing, and the Rejected backoff is a minute.
+// So the test keeps the default grace, shows the annotations, then ages the
+// succeeded one as 30 s of real time would, and the next attempt is made.
+func TestALimitRefusalLeavesNoCreationIncompleteAndTheNextAttemptIsMade(t *testing.T) {
+	clock := fake.NewClock(at(12, 0, 0))
+	sl := nowOnlySlurm(clock)
+	sl.Script(fakeslurm.RejectPolicy("QOSMaxSubmitJobPerUserLimit"))
+	e := newRealEnv(t, clock, sl, newFakeClient(t, "prov-a"), "prov-a", "user-a", withQOS("now", "", nowProfile()...),
+		func(e *realEnv) { e.opts.CreationGracePeriod = 0 }) // 0 keeps crossplane's default, 30 s
+	e.newAlloc("alloc-a", 1)
+	e.run("alloc-a", 1)
+
+	a := e.get("alloc-a")
+	if meta.ExternalCreateIncomplete(a) {
+		t.Fatal("the creation is incomplete after a recorded limit refusal: the reconciler would refuse to go on")
+	}
+	if meta.GetExternalCreateSucceeded(a).IsZero() {
+		t.Fatal("no external-create-succeeded annotation after Create returned no error")
+	}
+	if rec, _ := readRecord(a); rec.sub == nil || rec.sub.Code != v1alpha1.ReasonSubmitLimitReached || rec.sub.Attempt != 1 {
+		t.Fatalf("record %+v, want attempt 1 refused for the limit", rec.sub)
+	}
+
+	// Past the Rejected backoff, but the succeeded annotation is fresh in real
+	// time: crossplane waits out its grace period, and makes no attempt.
+	clock.Advance(2 * time.Minute)
+	e.run("alloc-a", 2)
+	if n := sl.Count("sbatch"); n != 1 {
+		t.Fatalf("%d sbatch calls inside crossplane's grace period, want 1", n)
+	}
+	// 30 s of real time later the grace period has passed: the next attempt is made.
+	a = e.get("alloc-a")
+	meta.AddAnnotations(a, map[string]string{meta.AnnotationKeyExternalCreateSucceeded: time.Now().Add(-time.Hour).Format(time.RFC3339)})
+	if err := e.c.Update(e.ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	e.run("alloc-a", 3)
+	if n := sl.Count("sbatch"); n != 2 {
+		t.Fatalf("%d sbatch calls after the grace period, want 2: a recorded limit refusal blocked the next attempt", n)
+	}
+	if rec, _ := readRecord(e.get("alloc-a")); rec.jobID == "" || rec.sub.Attempt != 2 {
+		t.Errorf("record %+v, job %q; want attempt 2 accepted", rec.sub, rec.jobID)
 	}
 }

@@ -58,6 +58,26 @@
 // progress at once, counted from entry to exit, including time blocked at a
 // gate.
 //
+// # QOS
+//
+// Config.QOS lists the cluster's QOSes with two per-user limits (qos.go). A
+// job runs under the QOS its --qos names, else Config.DefaultQOS, and counts
+// against that QOS and its partition's own QOS (Partition.QOS). For each limit
+// the first QOS in the order partition QOS, job QOS that sets it applies (no
+// OverPartQOS). The submit limit (MaxSubmitPerUser) counts the user's pending
+// and running jobs of any name, a held job included: a submission over it is
+// refused with the two lines Slurm prints, the reason line
+// "sbatch: error: QOSMaxSubmitJobPerUserLimit" first, then the accounting-policy
+// line, exit 1, nothing registered. A one-job-per-user Partition refuses the
+// same way. The GPU cap (MaxGPUsPerUser) lets a job that fits alone be accepted
+// and pend: Start refuses it while the user's running jobs under the QOS hold
+// the GPUs (canStart). The pending reason QOSMaxGRESPerUser is not shown in
+// squeue. RejectPolicy scripts any other reason name with both lines, Reject
+// prints the one line of a refusal with no reason line, LostReplyLate loses a
+// reply and registers its job, held, when the next sbatch arrives, and
+// OutsideJob adds a job of the user that is no call, as the owner's other
+// projects would submit through the same login.
+//
 // # Modelling choices the brief left open
 //
 //   - Only a running job's end hands its slot to a phantom job. Requeueing a
