@@ -173,29 +173,34 @@ func scHoldThenAdvance(t *testing.T, f *scFix, d time.Duration) (*http.Response,
 
 // TestDeadlinesPositiveControlOnTheFakeClock: with maxRequestDuration at 60 s,
 // a stream that would run 150 s (150 tokens, one per second) is cut at 60 s.
-// The engine runs on the wall clock and the test moves the fake clock one
-// second after each token it reads (scLockstep), 60 times and no more, so the
-// request lives exactly 60 s of fake time: the deadline timer falls due at the
-// 60th move, and durationMs is 60,000 by that arithmetic alone.
+// The engine runs on the wall clock and sends each token after the first only
+// on the test's go-ahead; the test moves the fake clock one second after each
+// token it reads and then lets the next one go (scLockstepGated), 60 times and
+// no more. The request lives exactly 60 s of fake time: the deadline timer
+// falls due at the 60th move, and durationMs is 60,000 by that arithmetic
+// alone. After the 60th token the engine waits at its gate, so the stream can
+// end only by the cut, and the client has read exactly 60 tokens.
+//
+// The engine used to pace itself, 50 ms a token on the wall clock, and the
+// test had to read 60 tokens before the engine sent the other 90: 4.5 s of
+// slack that a loaded machine could use up, ending the stream before the cut
+// (PR #137 review, Astra).
 func TestDeadlinesPositiveControlOnTheFakeClock(t *testing.T) {
 	f := newScFix(t, scOpts{engineReal: true, cfg: func(c *Config) { c.MaxRequestDuration = Duration(60 * time.Second) }})
-	// 50 ms between tokens on the wall clock: the test must read 60 tokens
-	// and move the fake clock before the engine sends the other 90 (4.5 s of
-	// slack), or the stream would end before the cut. A tighter pace raced on
-	// a loaded machine.
-	f.engines[0].Set(enginetest.Behaviour{Tokens: 150, PerToken: 50 * time.Millisecond})
+	gate := make(chan struct{})
+	f.engines[0].Set(enginetest.Behaviour{Tokens: 150, Gate: gate})
 
 	resp := f.errPost(scChat, errChatBody(scModel, true, "hello there"))
 	if resp.StatusCode != 200 {
 		t.Fatalf("status %d, want 200: the headers were sent before the cut", resp.StatusCode)
 	}
 	id := resp.Header.Get("hpcburst-request-id")
-	content, body := scLockstep(t, f.harness, resp, time.Second, 60*time.Second)
+	content, body := scLockstepGated(t, f.harness, resp, gate, time.Second, 60*time.Second)
 
 	before := checkStreamCut(t, body, "deadline") // the last event is stream_cut, detail deadline; no [DONE]
 	scOneCut(t, body)
-	if content < 60 || content >= 150 {
-		t.Errorf("the client got %d token events, want at least the 60 read before the cut and fewer than the 150 of the whole stream", content)
+	if content != 60 {
+		t.Errorf("the client got %d token events, want the 60 the engine was let send before the cut", content)
 	}
 	for _, e := range before {
 		if strings.Contains(e, `"finish_reason":"stop"`) {
