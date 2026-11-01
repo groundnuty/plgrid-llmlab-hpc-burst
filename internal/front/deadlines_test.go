@@ -190,7 +190,10 @@ func TestDeadlinesPositiveControlOnTheFakeClock(t *testing.T) {
 	gate := make(chan struct{})
 	f.engines[0].Set(enginetest.Behaviour{Tokens: 150, Gate: gate})
 
-	resp := f.errPost(scChat, errChatBody(scModel, true, "hello there"))
+	// The exchange is bounded by requestLimit: after the 60th token nothing
+	// but the cut can end the stream, so a front that never cut would fail
+	// the read below ("context deadline exceeded") instead of hanging it.
+	resp, _ := postBounded(t, f.harness, scChat, errChatBody(scModel, true, "hello there"))
 	if resp.StatusCode != 200 {
 		t.Fatalf("status %d, want 200: the headers were sent before the cut", resp.StatusCode)
 	}
@@ -223,8 +226,8 @@ func TestDeadlinesPositiveControlOnTheFakeClock(t *testing.T) {
 // detail deadline. A timer on the wall clock never fires early, so the stream
 // ends at 2 s or later, by the client's watch and by the record's
 // durationMs; a loaded machine only makes it later. The request's context
-// bounds the whole exchange at a minute, so a front that never cut would fail
-// the test instead of hanging it.
+// bounds the whole exchange (postBounded), so a front that never cut would
+// fail the test instead of hanging it.
 //
 // The engine used to pace 50 tokens 100 ms apart, and the test wanted the cut
 // between 1.9 s and 4.5 s after 10 to 25 tokens: windows a loaded machine
@@ -235,24 +238,13 @@ func TestDeadlinesPositiveControlInRealTime(t *testing.T) {
 	gate := make(chan struct{}) // never sent on: the engine holds every token after the first
 	f.engines[0].Set(enginetest.Behaviour{Tokens: 50, Gate: gate})
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, f.url+scChat, strings.NewReader(errChatBody(scModel, true, "hello there")))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Authorization", "Bearer "+f.clientKey)
-	req.Header.Set("Content-Type", "application/json")
 	start := time.Now()
-	resp, err := errClient.Do(req)
-	if err != nil {
-		t.Fatalf("the request: %v", err)
-	}
+	resp, ctx := postBounded(t, f.harness, scChat, errChatBody(scModel, true, "hello there"))
 	id := resp.Header.Get("hpcburst-request-id")
 	body := readAll(t, resp)
 	elapsed := time.Since(start)
 	if ctx.Err() != nil {
-		t.Fatalf("the stream was not cut within a minute; the body so far ends %q", scTail(body))
+		t.Fatalf("the stream was not cut within %s; the body so far ends %q", requestLimit, scTail(body))
 	}
 
 	checkStreamCut(t, body, "deadline")

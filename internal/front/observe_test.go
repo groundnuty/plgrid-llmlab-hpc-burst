@@ -1,6 +1,8 @@
 package front
 
 import (
+	"context"
+	"net/http"
 	"runtime/pprof"
 	"strings"
 	"testing"
@@ -41,6 +43,37 @@ func waitGoroutine(t *testing.T, what string, match func(stack string) bool) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// requestLimit bounds a whole exchange whose end the test holds back (an
+// engine at its gate, a timer the test moves): headers, first event and the
+// rest. It is far above the seconds such an exchange takes, so a cut that
+// never comes fails the test within it instead of hanging the package until
+// its time-out (PR #144 review, T1).
+const requestLimit = time.Minute
+
+// postBounded posts body to path with the client key, on a client that never
+// reuses a connection, under a context that ends after requestLimit. It
+// returns the response and that context: a read that fails once the context
+// has ended is the bound's failure.
+func postBounded(t *testing.T, h *harness, path, body string) (*http.Response, context.Context) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), requestLimit)
+	t.Cleanup(cancel)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.url+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+h.clientKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := errClient.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			t.Fatalf("no response headers within %s: %v", requestLimit, err)
+		}
+		t.Fatalf("the request: %v", err)
+	}
+	return resp, ctx
 }
 
 // blockedWritingToClient reports whether a goroutine stack is the front's
