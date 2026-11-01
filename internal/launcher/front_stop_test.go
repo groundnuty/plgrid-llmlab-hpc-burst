@@ -166,8 +166,9 @@ func TestDownRefusesAGraceTheFrontCannotStopWithin(t *testing.T) {
 
 // TestStartSupervisorWaitsForTheFront: the start waits until the front holds its health port and
 // answers /healthz, which the real front does only after its first lists. The fake front binds
-// only once the test opens its gate (bind-now), so the start cannot succeed before that; a port
-// taken in between makes the start fail, and with the port free it succeeds.
+// only once the test opens its gate (bind-now). Before the gate opens the start must be seen
+// waiting for the front's readiness (onNotReady), not returned; then a port taken in between makes
+// the start fail, and with the port free it succeeds.
 func TestStartSupervisorWaitsForTheFront(t *testing.T) {
 	self, err := os.Executable()
 	if err != nil {
@@ -187,6 +188,14 @@ func TestStartSupervisorWaitsForTheFront(t *testing.T) {
 			f.st.Procs = []ProcRec{k3sRec}
 			stopOnExit(t, f)
 			f.steer("bind-gate", "")
+			waitingForFront := make(chan string, 1)
+			onNotReady = func(why string) {
+				select {
+				case waitingForFront <- why:
+				default:
+				}
+			}
+			t.Cleanup(func() { onNotReady = nil })
 			res := make(chan error, 1)
 			go func() {
 				res <- startSupervisor(context.Background(), f.l, f.st, []string{self}, 20*time.Second, testLog{t})
@@ -212,11 +221,17 @@ func TestStartSupervisorWaitsForTheFront(t *testing.T) {
 				}
 				defer l.Close()
 			}
-			// The gate is still closed, so the front cannot be ready: the start must still wait.
+			// The gate is still closed, so the front cannot be ready: the start must be waiting for
+			// it, which the hook shows, and must not have returned.
 			select {
+			case why := <-waitingForFront:
+				if !strings.HasPrefix(why, frontEntryName+": ") {
+					t.Errorf("the start waits for %q, want the front", why)
+				}
 			case err := <-res:
 				t.Fatalf("the start returned while the front had not bound its health port: %v", err)
-			default:
+			case <-time.After(20 * time.Second):
+				t.Fatal("the start neither returned nor waited for the front")
 			}
 			f.steer("bind-now", "")
 			var got error

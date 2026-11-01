@@ -130,6 +130,10 @@ func supervisorArgv(l layout) ([]string, error) {
 // its record in state.json: the window in which an interrupted up must leave nothing running.
 var afterSupervisorStart func(ProcRec)
 
+// onNotReady, set by tests only, sees each look at which every process runs but one that must be
+// ready is not: the start is then waiting for readiness, and has not returned.
+var onNotReady func(why string)
+
 // startSupervisor starts the supervisor detached (own session, stdin /dev/null, output to
 // logs/supervisor.log), records it in state.json at once, and waits until it reports every child
 // started. st must carry Controllers. It first makes sure the agent endpoint's certificate and key
@@ -222,6 +226,8 @@ func startSupervisor(ctx context.Context, l layout, st *State, argv []string, ti
 					return tail(err)
 				} else if notReady == "" {
 					return nil
+				} else if onNotReady != nil {
+					onNotReady(notReady)
 				}
 			} else {
 				// Everything runs. Wait, then look again: the checks above then also catch a
