@@ -204,6 +204,7 @@ func (r *rig) checkDrained(pred, repl *v1alpha1.Instance, ds, streamEnd time.Tim
 	if err != nil {
 		r.t.Fatal(err)
 	}
+	defer reportOrphanedTunnels(r.t, r.c, "c")
 	waitFor(r.t, waitDeadline, "the primary's Allocation's record "+name, func() bool {
 		var l appsv1.ControllerRevisionList
 		if err := r.c.List(context.Background(), &l); err != nil {

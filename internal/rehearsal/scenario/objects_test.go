@@ -179,3 +179,24 @@ func eventsFor(t *testing.T, c client.Client, name string) []corev1.Event {
 	}
 	return out
 }
+
+// reportOrphanedTunnels logs every TunnelOrphaned event (an Instance that
+// ended while its frpc was still up, an agent teardown out of order) as a
+// FINDING: the issue's criteria do not cover it, so it fails nothing, and it
+// is never left out.
+func reportOrphanedTunnels(t *testing.T, c client.Client, step string) {
+	t.Helper()
+	var l corev1.EventList
+	if err := c.List(context.Background(), &l); err != nil {
+		t.Errorf("step (%s): list events: %v", step, err)
+		return
+	}
+	n := 0
+	for _, e := range l.Items {
+		if e.Reason == v1alpha1.EventReasonTunnelOrphaned {
+			n++
+			t.Logf("FINDING step (%s): %s event on %s %s: %.300s", step, e.Reason, e.InvolvedObject.Kind, e.InvolvedObject.Name, e.Message)
+		}
+	}
+	t.Logf("step (%s): %d TunnelOrphaned events", step, n)
+}

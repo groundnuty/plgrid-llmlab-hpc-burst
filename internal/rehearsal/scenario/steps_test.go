@@ -274,6 +274,7 @@ func (r *rig) stepScaleToZero() {
 			return s.Finished || s.PID == 0 && s.State != "PENDING" && s.State != "RUNNING"
 		})
 	}
+	reportOrphanedTunnels(r.t, r.c, "g")
 	online := r.frpsProxies()
 	for _, uid := range insts {
 		if online[uid] {
