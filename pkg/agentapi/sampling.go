@@ -178,20 +178,46 @@ func CheckSampling(genConfig map[string]string, doSample *bool, reasoning bool) 
 // The agent reports the one it finds in VerifyResult.GenerationConfigRefused,
 // since a value that is not a number never reaches VerifyResult.
 // GenerationConfig.
+//
+// A present file the agent cannot judge at all is refused as a whole, with an
+// empty Param: one larger than MaxGenerationConfigFileBytes, one it cannot
+// read, one that is not valid JSON (Python's json, which vLLM uses, accepts
+// NaN, Infinity and -Infinity, which Go's refuses, so such a file is among
+// them), and one that is valid JSON but not an object. It is never read as
+// absent, since vLLM would load the file and could refuse what the agent did
+// not see (PR #169 review, Astra B1 and Opus N3). The empty Param is only for
+// these; a refusal of one key always names it.
 type GenerationConfigError struct {
 	// Param is the file's key, which is vLLM's request field (its
-	// VLLMValidationError's parameter), for example "top_p".
+	// VLLMValidationError's parameter), for example "top_p". It is empty
+	// exactly when the refusal is of the file as a whole (the Value* constants
+	// below); Error() then names the file in words.
 	Param string `json:"param"`
 	// Value is the value's JSON text as the file holds it, for example "1.5"
 	// or "\"warm\"". The agent cuts it to MaxGenerationConfigValueBytes
-	// (TruncateUTF8) before reporting it.
+	// (TruncateUTF8) before reporting it. For a whole-file refusal it says in
+	// plain words what is wrong, never the file's content: one of
+	// FileTooLarge, FileUnreadable, FileNotJSON and FileNotObject.
 	Value string `json:"value"`
 	// Want says what vLLM accepts: "a number", "an integer", or the range as
-	// vLLM's own message writes it, for example "(0, 1]".
+	// vLLM's own message writes it, for example "(0, 1]". For a whole-file
+	// refusal it is FileWant.
 	Want string `json:"want"`
 }
 
+// The Value and Want of a refusal of the file as a whole (empty Param).
+const (
+	FileTooLarge   = "larger than 1 MiB" // above MaxGenerationConfigFileBytes
+	FileUnreadable = "unreadable"        // present, and it cannot be read
+	FileNotJSON    = "not valid JSON"    // includes NaN, Infinity and -Infinity
+	FileNotObject  = "not a JSON object" // valid JSON of another type, or null
+	FileWant       = "a JSON object of at most 1 MiB"
+)
+
 func (e *GenerationConfigError) Error() string {
+	if e.Param == "" {
+		return fmt.Sprintf("generation_config.json is %s (want %s)", e.Value, e.Want)
+	}
 	if e.Want == "a number" || e.Want == "an integer" {
 		return fmt.Sprintf("generation_config.json's %s is %s, not %s", e.Param, e.Value, e.Want)
 	}

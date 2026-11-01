@@ -266,3 +266,120 @@ func TestAResolvedGenSamplingKnowsItWasRefused(t *testing.T) {
 		t.Error("a missing genSampling reads as refused")
 	}
 }
+
+// paddedGenerationConfig returns a valid generation_config.json of exactly n
+// bytes: temperature 2.5, which vLLM refuses, then one long unrelated string.
+func paddedGenerationConfig(t *testing.T, n int) string {
+	t.Helper()
+	const head, tail = `{"temperature": 2.5, "pad": "`, `"}`
+	body := head + strings.Repeat("x", n-len(head)-len(tail)) + tail
+	if len(body) != n {
+		t.Fatalf("fixture is %d bytes, want %d", len(body), n)
+	}
+	return body
+}
+
+// A present generation_config.json that the agent cannot judge is refused as a
+// whole (an empty Param), never read as absent: vLLM would load it, and could
+// refuse what the agent did not see (PR #169 review, Astra B1 and Opus N3).
+// That covers a valid file above the 1 MiB limit, a file that is not valid
+// JSON, among them one with the NaN, Infinity and -Infinity that Python's json
+// accepts, and one that is valid JSON but not an object. A file of exactly
+// 1 MiB is read whole, so its temperature 2.5 is refused by key. The expected
+// refusals are written out by hand, whole, so a refusal of the wrong kind (a
+// truncated read that fails to parse is "not valid JSON", not "larger") fails.
+func TestReadGenerationConfigRefusesAFileItCannotJudge(t *testing.T) {
+	const mib = 1 << 20
+	wholeFile := func(value string) *agentapi.GenerationConfigError {
+		return &agentapi.GenerationConfigError{Param: "", Value: value, Want: "a JSON object of at most 1 MiB"}
+	}
+	for _, tc := range []struct {
+		name, body string
+		want       *agentapi.GenerationConfigError
+	}{
+		{"a valid file one byte over 1 MiB, with temperature 2.5", paddedGenerationConfig(t, mib+1), wholeFile("larger than 1 MiB")},
+		{"a valid file of exactly 1 MiB is read whole, and its temperature refused by key", paddedGenerationConfig(t, mib),
+			&agentapi.GenerationConfigError{Param: "temperature", Value: "2.5", Want: "[0, 2]"}},
+		{"a file of garbage above 1 MiB is too large, not invalid", strings.Repeat("z", mib+1), wholeFile("larger than 1 MiB")},
+		{"NaN", `{"temperature": NaN}`, wholeFile("not valid JSON")},
+		{"Infinity", `{"top_p": Infinity}`, wholeFile("not valid JSON")},
+		{"-Infinity", `{"repetition_penalty": -Infinity, "temperature": 0.6}`, wholeFile("not valid JSON")},
+		{"a truncated file", `{"temperature": 0.6`, wholeFile("not valid JSON")},
+		{"an empty file", ``, wholeFile("not valid JSON")},
+		{"a trailing comma", `{"temperature": 0.6,}`, wholeFile("not valid JSON")},
+		{"a list", `[1, 2]`, wholeFile("not a JSON object")},
+		{"a string", `"temperature"`, wholeFile("not a JSON object")},
+		{"a number", `12`, wholeFile("not a JSON object")},
+		{"a boolean", `true`, wholeFile("not a JSON object")},
+		{"null, which Go reads into a nil map without an error", `null`, wholeFile("not a JSON object")},
+		{"an empty object is a file that sets nothing", `{}`, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeGenerationConfig(t, dir, tc.body)
+			f := readGenerationConfig(dir)
+			if !reflect.DeepEqual(f.refused, tc.want) {
+				t.Errorf("refused %+v, want %+v", f.refused, tc.want)
+			}
+			if tc.want != nil && tc.want.Param == "" && (f.config != nil || f.doSample != nil) {
+				t.Errorf("a refused file gave config %v and do_sample %v", f.config, f.doSample)
+			}
+		})
+	}
+
+	// A present file the agent cannot read is refused too: a directory named
+	// like the file reads with an error whatever the user, unlike a mode that
+	// the superuser ignores. The reason stays in the agent's log.
+	t.Run("unreadable", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Mkdir(filepath.Join(dir, "generation_config.json"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		f := readGenerationConfig(dir)
+		want := &agentapi.GenerationConfigError{Param: "", Value: "unreadable", Want: "a JSON object of at most 1 MiB"}
+		if !reflect.DeepEqual(f.refused, want) {
+			t.Errorf("refused %+v, want %+v", f.refused, want)
+		}
+		if f.cause == "" || strings.Contains(f.cause, dir) {
+			t.Errorf("the log-only cause is %q, want a reason without the path", f.cause)
+		}
+	})
+
+	// A missing file, and no checkpoint directory, are absent: nothing is refused.
+	t.Run("absent", func(t *testing.T) {
+		for name, dir := range map[string]string{"a missing file": t.TempDir(), "no directory": ""} {
+			if f := readGenerationConfig(dir); f.refused != nil || f.config != nil || f.doSample != nil {
+				t.Errorf("%s: %+v, want an absent file", name, f)
+			}
+		}
+	})
+}
+
+// The empty Param belongs to the refusals of the file as a whole and to no
+// other (`@hpc-burst-science-agent`'s condition, 1 Nov 2026): over every file
+// the reader can refuse, Param is empty exactly when no key is to blame, and a
+// refusal of one key names it in its message.
+func TestOnlyAWholeFileRefusalHasAnEmptyParam(t *testing.T) {
+	for _, tc := range []struct {
+		body  string
+		whole bool
+	}{
+		{`{"temperature": NaN}`, true}, {`[]`, true}, {`null`, true}, {``, true}, {paddedGenerationConfig(t, 1<<20+1), true},
+		{`{"temperature": 2.5}`, false}, {`{"temperature": "warm"}`, false}, {`{"top_k": 2.5}`, false}, {`{"top_p": 0}`, false},
+		{`{"min_p": true}`, false}, {`{"presence_penalty": [1]}`, false}, {`{"frequency_penalty": 5}`, false}, {`{"repetition_penalty": 0}`, false},
+	} {
+		dir := t.TempDir()
+		writeGenerationConfig(t, dir, tc.body)
+		r := readGenerationConfig(dir).refused
+		switch {
+		case r == nil:
+			t.Errorf("%.40s: not refused", tc.body)
+		case (r.Param == "") != tc.whole:
+			t.Errorf("%.40s: param %q, whole-file %v", tc.body, r.Param, tc.whole)
+		case !tc.whole && !strings.Contains(r.Error(), r.Param):
+			t.Errorf("%.40s: message %q does not name %q", tc.body, r.Error(), r.Param)
+		case tc.whole && !strings.Contains(r.Error(), "generation_config.json"):
+			t.Errorf("%.40s: message %q does not name the file", tc.body, r.Error())
+		}
+	}
+}

@@ -3,7 +3,9 @@ package agent
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -59,10 +61,24 @@ type generationFile struct {
 	// it is reported. It is judged on the raw text, before config drops a value
 	// that is not a number: "warm" is refused, not read as absent.
 	refused *agentapi.GenerationConfigError
+	// cause is the operating system's reason when the file could not be read
+	// (permission denied, is a directory), for agent.log only: it is not
+	// reported, and it carries no path.
+	cause string
 }
 
 // readGenerationConfig reads the staged checkpoint's generation_config.json
-// once.
+// once, whole, within agentapi.MaxGenerationConfigFileBytes.
+//
+// A file that is present and cannot be judged is refused as a whole, never
+// read as absent (an empty Param; agentapi.GenerationConfigError): one larger
+// than the limit, one that cannot be read, one that is not valid JSON (Python's
+// json, which vLLM uses, accepts NaN, Infinity and -Infinity, which Go's
+// refuses), and one that is valid JSON but not an object (a list, a string,
+// null). vLLM would load such a file, and could refuse what the agent did not
+// see; reading it as "no values" would send the checks greedy while client
+// traffic fails (PR #169 review, Astra B1 and Opus N3). Only a missing file, or
+// no checkpoint directory, is absent.
 //
 // config holds the sampling parameters the file sets of those vLLM applies
 // (samplingParams), each as its JSON number text, and nothing else, so no other
@@ -73,7 +89,7 @@ type generationFile struct {
 // agentapi.MaxGenerationConfigValueBytes: a null, which vLLM skips, a value of
 // another type, and a longer number, which a cut would change, are left out of
 // it (a refused value is reported through refused). config is nil when the
-// file is absent, unreadable, not a JSON object or sets none of them.
+// file is absent, refused as a whole, or sets none of them.
 //
 // doSample is the file's do_sample when it is a JSON boolean, else nil: a
 // string, a number, a null or an absent key all leave it nil, which does not
@@ -84,18 +100,33 @@ func readGenerationConfig(dir string) generationFile {
 	if dir == "" {
 		return out
 	}
-	f, err := os.Open(filepath.Join(dir, generationConfigName))
-	if err != nil {
+	whole := func(value, cause string) generationFile {
+		out.refused = &agentapi.GenerationConfigError{Value: value, Want: agentapi.FileWant}
+		out.cause = cause
 		return out
+	}
+	f, err := os.Open(filepath.Join(dir, generationConfigName))
+	if errors.Is(err, fs.ErrNotExist) {
+		return out
+	}
+	if err != nil {
+		return whole(agentapi.FileUnreadable, osReason(err))
 	}
 	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, 1<<20))
+	// One byte past the limit tells a file of exactly the limit from a larger one.
+	b, err := io.ReadAll(io.LimitReader(f, agentapi.MaxGenerationConfigFileBytes+1))
 	if err != nil {
-		return out
+		return whole(agentapi.FileUnreadable, osReason(err))
+	}
+	if len(b) > agentapi.MaxGenerationConfigFileBytes {
+		return whole(agentapi.FileTooLarge, "")
+	}
+	if !json.Valid(b) {
+		return whole(agentapi.FileNotJSON, "")
 	}
 	var obj map[string]json.RawMessage
-	if json.Unmarshal(b, &obj) != nil {
-		return out
+	if json.Unmarshal(b, &obj) != nil || obj == nil { // a null unmarshals into a nil map without error
+		return whole(agentapi.FileNotObject, "")
 	}
 	cfg := map[string]string{}
 	text := map[string]string{} // the JSON text of each key vLLM judges
@@ -124,6 +155,16 @@ func readGenerationConfig(dir string) generationFile {
 		}
 	}
 	return out
+}
+
+// osReason is the operating system's reason in err, without the path that
+// os.PathError puts before it.
+func osReason(err error) string {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Err.Error()
+	}
+	return err.Error()
 }
 
 // doSampleOf returns raw as a boolean when it is a JSON true or false, else

@@ -223,3 +223,63 @@ func TestGenerationConfigRefusedRoundTrips(t *testing.T) {
 		t.Errorf("an absent refusal is on the wire: %s", b)
 	}
 }
+
+// A refusal of the file as a whole has an empty Param, and its message names
+// the file in words, so an empty key never prints as a blank one (PR #169
+// review, Astra B1 and Opus N3; `@hpc-burst-science-agent` accepted the empty
+// Param on two conditions, 1 Nov 2026). The messages are written out by hand.
+func TestAWholeFileRefusalNamesTheFile(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  string
+	}{
+		{FileTooLarge, "generation_config.json is larger than 1 MiB (want a JSON object of at most 1 MiB)"},
+		{FileUnreadable, "generation_config.json is unreadable (want a JSON object of at most 1 MiB)"},
+		{FileNotJSON, "generation_config.json is not valid JSON (want a JSON object of at most 1 MiB)"},
+		{FileNotObject, "generation_config.json is not a JSON object (want a JSON object of at most 1 MiB)"},
+	} {
+		e := &GenerationConfigError{Value: tc.value, Want: FileWant}
+		if got := e.Error(); got != tc.want {
+			t.Errorf("message %q, want %q", got, tc.want)
+		}
+	}
+	// The wire form keeps the empty param, and it reads back to the same message.
+	b, err := json.Marshal(VerifyResult{Done: true, GenerationConfigRefused: &GenerationConfigError{Value: "not valid JSON", Want: "a JSON object of at most 1 MiB"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"done":true,"generationConfigRefused":{"param":"","value":"not valid JSON","want":"a JSON object of at most 1 MiB"}}`; string(b) != want {
+		t.Errorf("wire form %s, want %s", b, want)
+	}
+	var back VerifyResult
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.GenerationConfigRefused == nil || back.GenerationConfigRefused.Error() != "generation_config.json is not valid JSON (want a JSON object of at most 1 MiB)" {
+		t.Errorf("read back %+v", back.GenerationConfigRefused)
+	}
+	// The limit and the words that name it agree, written out by hand.
+	if MaxGenerationConfigFileBytes != 1048576 || FileWant != "a JSON object of at most 1 MiB" || FileTooLarge != "larger than 1 MiB" {
+		t.Errorf("limit %d, want %q, too-large %q", MaxGenerationConfigFileBytes, FileWant, FileTooLarge)
+	}
+}
+
+// The other half of the empty-Param rule: every refusal of one key names the
+// key, in Param and in the message, for every value the check refuses.
+func TestEveryPerKeyRefusalNamesItsKey(t *testing.T) {
+	for _, key := range []string{"presence_penalty", "frequency_penalty", "repetition_penalty", "temperature", "top_p", "top_k", "min_p"} {
+		for _, text := range []string{`"warm"`, "1e400", "-1e400", "[1]", "{}", "2.5", "-3", "null1"} {
+			err := CheckGenerationConfig(map[string]string{key: text})
+			var ge *GenerationConfigError
+			if err == nil {
+				continue // an accepted value
+			}
+			if !errors.As(err, &ge) {
+				t.Fatalf("%s %s: %v is not a GenerationConfigError", key, text, err)
+			}
+			if ge.Param != key || !strings.Contains(err.Error(), key) {
+				t.Errorf("%s %s: param %q, message %q: a per-key refusal names its key", key, text, ge.Param, err.Error())
+			}
+		}
+	}
+}

@@ -309,43 +309,84 @@ func TestARefusedFileFailsVerificationAndSendsNoCheckRequest(t *testing.T) {
 			map[string]string{"temperature": "0.6"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			sum := sha256.Sum256([]byte(tc.file))
-			files := append(append([]agentapi.FileDigest(nil), defaultFiles...), agentapi.FileDigest{Path: "generation_config.json", SHA256: hex.EncodeToString(sum[:])})
-			h := newHarness(t, harnessOptions{hub: map[string]string{"/org/model/resolve/" + samplingRevision + "/generation_config.json": tc.file}})
-			checks := &agentapi.Checks{
-				VerificationGeneration: 1,
-				Verify:                 &agentapi.VerifyRequest{Files: files},
-				Qualify:                &agentapi.QualifyRequest{Shapes: hShapes, ToolCalls: true},
-				WarmUp:                 &agentapi.WarmUpRequest{Shapes: hShapes, ToolCalls: true, TargetSessions: 1},
-			}
-			d := h.runState("", 1, 0, checks)
-			if tc.reasoning {
-				d = withReasoning(d)
-			}
-			h.set(d)
-			r := h.waitReport("verification", 60*time.Second, verified(1))
-			v := r.Instance.Checks.Verify
-			if !reflect.DeepEqual(v.GenerationConfigRefused, &tc.want) {
-				t.Errorf("GenerationConfigRefused %+v, want %+v", v.GenerationConfigRefused, tc.want)
-			}
-			if v.Error != "" || v.Fingerprint != "" || v.EngineVersion != "" {
-				t.Errorf("verification read the engine despite the refusal: error %q, fingerprint %q, version %q", v.Error, v.Fingerprint, v.EngineVersion)
-			}
-			if !reflect.DeepEqual(v.GenerationConfig, tc.config) {
-				t.Errorf("GenerationConfig %v, want %v", v.GenerationConfig, tc.config)
-			}
-			// The agent is told to stop; once the engine has gone, its log is final.
-			h.set(agentapi.DesiredState{Action: agentapi.ActionIdle, Settings: d.Settings})
-			last := h.waitReport("worker stopped", 60*time.Second, func(r agentapi.Report) bool {
-				w := worker0(r)
-				return w != nil && w.Phase == agentapi.PartStopped
-			})
-			if c := checksOf(last); c != nil && (c.Qualify != nil || c.WarmUp != nil) {
-				t.Errorf("a refused generation produced qualification %+v or warm-up %+v", c.Qualify, c.WarmUp)
-			}
-			if events := h.chatEvents(); len(events) != 0 {
-				t.Errorf("%d chat requests reached the engine, want none: %+v", len(events), events)
-			}
+			assertRefusedFileSendsNothing(t, tc.reasoning, tc.file, tc.want, tc.config)
 		})
+	}
+}
+
+// A present generation_config.json that the agent cannot judge fails
+// verification as a whole, with no check request, exactly as a refused value
+// does, never read as absent and run greedy (PR #169 review, Astra B1 and Opus
+// N3): a valid file above 1 MiB whose first key is temperature 2.5, and a file
+// with the NaN, Infinity or -Infinity that Python's json accepts and Go's
+// refuses. The report carries an empty Param and plain words, and none of the
+// file's content. The expected refusals are written out by hand.
+func TestAFileTheAgentCannotJudgeFailsVerificationAndSendsNoCheckRequest(t *testing.T) {
+	big := `{"temperature": 2.5, "pad": "` + strings.Repeat("x", 1<<20) + `"}`
+	if len(big) <= 1<<20 {
+		t.Fatalf("the oversized fixture is %d bytes", len(big))
+	}
+	oversized := agentapi.GenerationConfigError{Param: "", Value: "larger than 1 MiB", Want: "a JSON object of at most 1 MiB"}
+	notJSON := agentapi.GenerationConfigError{Param: "", Value: "not valid JSON", Want: "a JSON object of at most 1 MiB"}
+	for _, tc := range []struct {
+		name      string
+		reasoning bool
+		file      string
+		want      agentapi.GenerationConfigError
+	}{
+		{"a valid file above 1 MiB with temperature 2.5, on a reasoning model", true, big, oversized},
+		{"the same without a parser", false, big, oversized},
+		{"temperature NaN", true, `{"temperature": NaN, "top_k": 20}`, notJSON},
+		{"top_p Infinity", true, `{"top_p": Infinity}`, notJSON},
+		{"repetition_penalty -Infinity, without a parser", false, `{"repetition_penalty": -Infinity}`, notJSON},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertRefusedFileSendsNothing(t, tc.reasoning, tc.file, tc.want, nil)
+		})
+	}
+}
+
+// assertRefusedFileSendsNothing stages a checkpoint that holds file as its
+// generation_config.json, asks for verification, qualification and warm-up,
+// and checks that the agent reports want as the refusal and the file's numbers
+// as config, reads nothing from the engine, and sends it no chat request at all.
+func assertRefusedFileSendsNothing(t *testing.T, reasoning bool, file string, want agentapi.GenerationConfigError, config map[string]string) {
+	t.Helper()
+	sum := sha256.Sum256([]byte(file))
+	files := append(append([]agentapi.FileDigest(nil), defaultFiles...), agentapi.FileDigest{Path: "generation_config.json", SHA256: hex.EncodeToString(sum[:])})
+	h := newHarness(t, harnessOptions{hub: map[string]string{"/org/model/resolve/" + samplingRevision + "/generation_config.json": file}})
+	checks := &agentapi.Checks{
+		VerificationGeneration: 1,
+		Verify:                 &agentapi.VerifyRequest{Files: files},
+		Qualify:                &agentapi.QualifyRequest{Shapes: hShapes, ToolCalls: true},
+		WarmUp:                 &agentapi.WarmUpRequest{Shapes: hShapes, ToolCalls: true, TargetSessions: 1},
+	}
+	d := h.runState("", 1, 0, checks)
+	if reasoning {
+		d = withReasoning(d)
+	}
+	h.set(d)
+	r := h.waitReport("verification", 60*time.Second, verified(1))
+	v := r.Instance.Checks.Verify
+	if !reflect.DeepEqual(v.GenerationConfigRefused, &want) {
+		t.Errorf("GenerationConfigRefused %+v, want %+v", v.GenerationConfigRefused, want)
+	}
+	if v.Error != "" || v.Fingerprint != "" || v.EngineVersion != "" {
+		t.Errorf("verification read the engine despite the refusal: error %q, fingerprint %q, version %q", v.Error, v.Fingerprint, v.EngineVersion)
+	}
+	if !reflect.DeepEqual(v.GenerationConfig, config) {
+		t.Errorf("GenerationConfig %v, want %v", v.GenerationConfig, config)
+	}
+	// The agent is told to stop; once the engine has gone, its log is final.
+	h.set(agentapi.DesiredState{Action: agentapi.ActionIdle, Settings: d.Settings})
+	last := h.waitReport("worker stopped", 60*time.Second, func(r agentapi.Report) bool {
+		w := worker0(r)
+		return w != nil && w.Phase == agentapi.PartStopped
+	})
+	if c := checksOf(last); c != nil && (c.Qualify != nil || c.WarmUp != nil) {
+		t.Errorf("a refused generation produced qualification %+v or warm-up %+v", c.Qualify, c.WarmUp)
+	}
+	if events := h.chatEvents(); len(events) != 0 {
+		t.Errorf("%d chat requests reached the engine, want none: %+v", len(events), events)
 	}
 }
