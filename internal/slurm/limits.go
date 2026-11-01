@@ -13,17 +13,16 @@ import (
 
 // checkGPUs refuses a GPU count above the most one Allocation may ask for:
 // the smaller of the partition's gpusPerNode, the node's hardware, and the QOS
-// limits' maxGpusPerUser (v1alpha1.MaxAllocationGPUs). The refusal names the
-// bound that is the smaller. A count above it is refused, never capped. A
-// partition with no gpusPerNode has no bound (a CPU partition).
+// limits' maxGpusPerUser, each when set (v1alpha1.MaxAllocationGPUs). The
+// refusal names the bound that is the smaller. A count above it is refused,
+// never capped. With neither set there is no bound (a CPU partition).
 func checkGPUs(gpus int32, part v1alpha1.PartitionProfile, limits v1alpha1.QOSLimits) error {
 	most, ok := v1alpha1.MaxAllocationGPUs(part, limits)
 	if !ok || gpus <= most {
 		return nil
 	}
-	if m := limits.MaxGPUsPerUser; m != nil && *m < *part.GPUsPerNode {
-		return refuse("gpus %d is above maxGpusPerUser %d of qos %q (gpusPerNode %d of partition %q is larger)",
-			gpus, *m, limits.From[v1alpha1.LimitMaxGPUsPerUser], *part.GPUsPerNode, part.Name)
+	if m := limits.MaxGPUsPerUser; m != nil && (part.GPUsPerNode == nil || *m < *part.GPUsPerNode) {
+		return refuse("gpus %d is above maxGpusPerUser %d of qos %q", gpus, *m, limits.From[v1alpha1.LimitMaxGPUsPerUser])
 	}
 	return refuse("gpus %d is above gpusPerNode %d of partition %q", gpus, *part.GPUsPerNode, part.Name)
 }
