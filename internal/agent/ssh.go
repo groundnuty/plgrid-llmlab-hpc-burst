@@ -227,15 +227,19 @@ func (s *SSHForward) attempt(ctx context.Context) error {
 func (s *SSHForward) localPort() (int, error) {
 	cur, _ := s.st.get()
 	if cur.Port != 0 {
-		err := forwardPorts.canBindAgain(cur.Port)
+		err := forwardPorts.canBindAgain(s, cur.Port)
 		if err == nil {
 			return cur.Port, nil
 		}
 		s.logger().Warn("the forward's local port is taken; moving to a new one", "forward", s.Name, "port", cur.Port, "err", err)
 	}
-	p, err := forwardPorts.take()
+	// The old port stays this forward's until the new one is taken.
+	p, err := forwardPorts.take(s)
 	if err != nil {
 		return 0, err
+	}
+	if cur.Port != 0 {
+		forwardPorts.giveUp(s, cur.Port)
 	}
 	s.st.update(func(f *ForwardState) {
 		if f.Port != 0 {
@@ -253,7 +257,7 @@ func (s *SSHForward) localPort() (int, error) {
 func (s *SSHForward) releasePort() {
 	cur, _ := s.st.get()
 	if cur.Port != 0 {
-		forwardPorts.release(cur.Port)
+		forwardPorts.giveUp(s, cur.Port)
 	}
 }
 

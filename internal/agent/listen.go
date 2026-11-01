@@ -15,14 +15,17 @@ import (
 // for once, kept for the Allocation's life and bound again at each reconnect.
 
 // forwardPorts are the loopback ports this agent has handed to its
-// forwards. The kernel can offer a port again as soon as the probe that got
-// it is closed, before the forward it went to has bound it with ssh: two
-// forwards that asked at the same moment once got the same port, and one had
-// to move at once (the timing sweep, 1 Nov 2026: tunnel and control both on
-// 42079, 1 ms apart). Ports are handed out under one lock, and a port the
-// kernel offers that another forward holds is kept bound while the kernel
-// is asked again, so it cannot be offered twice.
-var forwardPorts = loopbackPorts{taken: map[int]bool{}}
+// forwards, each with the forward it belongs to. The kernel can offer a port
+// again as soon as the probe that got it is closed, before the forward it
+// went to has bound it with ssh: two forwards that asked at the same moment
+// once got the same port, and one had to move at once (the timing sweep, 1
+// Nov 2026: tunnel and control both on 42079, 1 ms apart). Ports are handed
+// out under one lock, and a port the kernel offers that a forward holds is
+// kept bound while the kernel is asked again, so it cannot be offered twice.
+// A forward keeps its port until it has a replacement (PR #144 review): if it
+// gave the port up first and then got no new one, the kernel could hand the
+// port to another forward while State still named it as this one's.
+var forwardPorts = loopbackPorts{owner: map[int]*SSHForward{}}
 
 // probeLoopback binds 127.0.0.1:port; port 0 asks the kernel for a free one.
 // A test replaces it to make the kernel offer the same port twice.
@@ -35,16 +38,16 @@ const maxPortProbes = 64
 
 type loopbackPorts struct {
 	mu    sync.Mutex
-	taken map[int]bool // handed to a forward, and not given up
+	owner map[int]*SSHForward // each port handed out, and the forward that holds it
 }
 
-// take asks the kernel for a free port on 127.0.0.1 that no other forward of
-// this agent holds: it binds port 0, reads the port it got and releases it
-// for ssh to bind.
-func (l *loopbackPorts) take() (int, error) {
+// take asks the kernel for a free port on 127.0.0.1 that no forward of this
+// agent holds, and gives it to f: it binds port 0, reads the port it got and
+// releases it for ssh to bind.
+func (l *loopbackPorts) take(f *SSHForward) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	var held []net.Listener // ports other forwards hold, bound until take returns
+	var held []net.Listener // ports forwards hold, bound until take returns
 	defer func() {
 		for _, ln := range held {
 			_ = ln.Close()
@@ -56,46 +59,50 @@ func (l *loopbackPorts) take() (int, error) {
 			return 0, fmt.Errorf("ask the kernel for a loopback port: %w", err)
 		}
 		port := ln.Addr().(*net.TCPAddr).Port
-		if l.taken[port] {
+		if l.owner[port] != nil {
 			held = append(held, ln)
 			continue
 		}
 		if err := ln.Close(); err != nil {
 			return 0, fmt.Errorf("release loopback port %d: %w", port, err)
 		}
-		l.taken[port] = true
+		l.owner[port] = f
 		return port, nil
 	}
 	return 0, fmt.Errorf("the kernel offered %d loopback ports, all held by this agent's forwards", maxPortProbes)
 }
 
-// canBindAgain reports whether 127.0.0.1:port can be bound now, by binding it
-// and releasing it at once, and keeps the port marked as the forward's when
-// it can. An error means another process holds the port, and the forward
-// must move (HBEP-6, A port that cannot be bound again): the port is given
-// up. A port that is free now can still be taken before ssh binds it; ssh
-// then exits on ExitOnForwardFailure, and the next attempt finds the port
-// taken.
-func (l *loopbackPorts) canBindAgain(port int) error {
+// canBindAgain reports whether f's port can be bound now, by binding it and
+// releasing it at once. An error means another process holds the port, and
+// the forward must move (HBEP-6, A port that cannot be bound again); f keeps
+// the port until it has taken a replacement (giveUp). A port that is free
+// now can still be taken before ssh binds it; ssh then exits on
+// ExitOnForwardFailure, and the next attempt finds the port taken.
+func (l *loopbackPorts) canBindAgain(f *SSHForward, port int) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if o := l.owner[port]; o != nil && o != f {
+		return fmt.Errorf("loopback port %d is held by this agent's forward %q", port, o.Name)
+	}
 	ln, err := probeLoopback(port)
 	if err != nil {
-		delete(l.taken, port)
 		return err
 	}
 	if err := ln.Close(); err != nil {
 		return err
 	}
-	l.taken[port] = true
+	l.owner[port] = f
 	return nil
 }
 
-// release gives up a forward's port when the forward ends.
-func (l *loopbackPorts) release(port int) {
+// giveUp releases f's port: when f has moved to a replacement, whatever made
+// it move, and when f ends. A port that another forward holds is left alone.
+func (l *loopbackPorts) giveUp(f *SSHForward, port int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	delete(l.taken, port)
+	if l.owner[port] == f {
+		delete(l.owner, port)
+	}
 }
 
 // listensOn reports whether the process pid holds a socket listening on
