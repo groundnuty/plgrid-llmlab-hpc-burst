@@ -171,7 +171,8 @@ func TestShippedProfilesRefuseABrokenValue(t *testing.T) {
 		{"a maxWall that is not a duration", "helios.yaml", "twelve hours", []any{"spec", "qos", 0, "maxWall"}, []string{"maxWall"}},
 		{"a maxWall of zero", "helios.yaml", "0s", []any{"spec", "qos", 0, "maxWall"}, []string{"maxWall must be a positive duration"}},
 		{"a negative submit limit", "athena.yaml", int64(-1), []any{"spec", "qos", 0, "maxSubmitPerUser"}, []string{"maxSubmitPerUser"}},
-		{"a negative memory cap", "athena.yaml", "-125Gi", []any{"spec", "qos", 0, "maxMemPerUser"}, []string{"maxMemPerUser must not be negative"}},
+		{"a negative memory cap", "athena.yaml", "-125Gi", []any{"spec", "qos", 0, "maxMemPerUser"}, []string{"maxMemPerUser must be positive"}},
+		{"a memory cap of zero", "athena.yaml", "0", []any{"spec", "qos", 0, "maxMemPerUser"}, []string{"maxMemPerUser must be positive"}},
 		{"a QOS with no name", "helios.yaml", nil, []any{"spec", "qos", 2, "name"}, []string{"name", "Required value"}},
 	}
 	for _, tc := range cases {
