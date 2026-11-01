@@ -113,6 +113,7 @@ type supervisedFakeHost struct {
 	*fakeHost
 	supRec, childRec ProcRec
 	health           string
+	ports            []int   // the fixed ports the controller's entry names (EntryRecord.Ports); none by default
 	code             *int    // the status code /healthz answers
 	body             *string // the body it answers with
 }

@@ -207,9 +207,12 @@ func checkEntry(sup *procHandle, supPID int, e EntryRecord) (EntryHealth, []stri
 			eh.UsageState = UsageUnknown
 		}
 	}
-	if v, d := h.verify(); v != Ours {
-		add("pid %d changed while it was being checked: %s", e.Proc.PID, d)
-	} else if own, err := addrOwned(h, e.Health); (err != nil || !own) && !lost() {
+	// A process that exited (or was replaced) since the answer is not running, as at every other
+	// look; it is not reported as one that "changed while it ran" with Running still set.
+	if lost() {
+		return eh, problems
+	}
+	if own, err := addrOwned(h, e.Health); (err != nil || !own) && !lost() {
 		add("pid %d did not hold %s after the answer", e.Proc.PID, e.Health)
 	}
 	return eh, problems

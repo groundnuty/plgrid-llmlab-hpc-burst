@@ -42,6 +42,17 @@ func (s *supervisedFakeHost) exitsAtLook(k int) (looks func() int) {
 	return func() int { return n }
 }
 
+// noUDPSockets gives the fake /proc an empty UDP table. A process with a fixed set of ports is
+// checked against every reachable socket, UDP included (treeBound), and a missing table is an
+// error, not an empty one.
+func (s *supervisedFakeHost) noUDPSockets() {
+	s.t.Helper()
+	const header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n"
+	if err := os.WriteFile(filepath.Join(s.root, "net", "udp"), []byte(header), 0o644); err != nil {
+		s.t.Fatal(err)
+	}
+}
+
 // checkChild runs checkEntry on the supervisor's recorded child, as status does.
 func (s *supervisedFakeHost) checkChild() (EntryHealth, []string) {
 	s.t.Helper()
@@ -50,26 +61,43 @@ func (s *supervisedFakeHost) checkChild() (EntryHealth, []string) {
 		s.t.Fatalf("the fake supervisor is %v: %s", v, d)
 	}
 	defer sup.Close()
-	e := EntryRecord{Name: "controller", Health: s.health, State: entryRunning, Proc: &s.childRec}
+	e := EntryRecord{Name: "controller", Health: s.health, Ports: s.ports, State: entryRunning, Proc: &s.childRec}
 	return checkEntry(sup, s.supRec.PID, e)
 }
 
 // TestCheckEntryProcessExitsDuringTheCheck: the pidfd fires at each look in turn, and the answer
-// is "not running" every time. Before #154's fix, a pidfd that fired between openRec and the
-// second identity check gave "not a child of the supervisor ... its parent is pid 0", and one that
-// fired while the sockets were read gave "does not hold its health address", with Running true.
+// is "not running" every time, with Running false. Before #154's fix, a pidfd that fired between
+// openRec and the second identity check gave "not a child of the supervisor ... its parent is pid
+// 0", one that fired while the sockets were read gave "does not hold its health address" (or, with
+// fixed ports, "expected listener ... is missing"), and one that fired after the answer gave
+// "changed while it was being checked", all with Running true.
 func TestCheckEntryProcessExitsDuringTheCheck(t *testing.T) {
+	// holding is what a process whose pidfd lives at every look is reported as when it holds
+	// everything it should.
+	holding := func(t *testing.T, eh EntryHealth, problems []string) {
+		if len(problems) != 0 || !eh.Running || eh.HealthzOK == nil || !*eh.HealthzOK {
+			t.Fatalf("%+v, problems %v", eh, problems)
+		}
+	}
 	cases := []struct {
 		name  string
 		setup func(*supervisedFakeHost)
-		// alive is what a process whose pidfd lives at every look is reported as.
 		alive func(*testing.T, EntryHealth, []string)
 	}{
-		{"holding its health address", func(*supervisedFakeHost) {}, func(t *testing.T, eh EntryHealth, problems []string) {
-			if len(problems) != 0 || !eh.Running || eh.HealthzOK == nil || !*eh.HealthzOK {
-				t.Fatalf("%+v, problems %v", eh, problems)
+		{"holding its health address", func(*supervisedFakeHost) {}, holding},
+		{"holding its health address and its fixed port", func(s *supervisedFakeHost) {
+			// The shape of frps (HBEP-6): the entry names the exact ports the process must hold. Here
+			// it is the health port alone, which the fake child holds, so the control finds nothing
+			// wrong and the check reaches treeBound and verifyExactListeners. When the pidfd fires
+			// while treeBound reads the sockets, they read as none, and the missing listener must
+			// not be blamed on a process that is gone.
+			port, err := parsePort(s.health)
+			if err != nil {
+				s.t.Fatal(err)
 			}
-		}},
+			s.ports = []int{port}
+			s.noUDPSockets()
+		}, holding},
 		{"exiting: leader reads Z, descriptors closed", (*supervisedFakeHost).exiting, func(t *testing.T, eh EntryHealth, problems []string) {
 			// The pidfd says it lives, and /proc is no authority on death: it is reported by
 			// what it lacks. This is the answer the original subtest got while its wait read
@@ -101,16 +129,13 @@ func TestCheckEntryProcessExitsDuringTheCheck(t *testing.T) {
 						t.Fatalf("the check made %d look(s) and never reached look %d, so nothing was forced", looks(), k)
 					}
 					got := strings.Join(problems, "; ")
-					if !strings.Contains(got, "pid 4344 has exited") {
-						t.Errorf("a process whose pidfd fired is not reported as exited: %+v, problems %v", eh, problems)
+					if !strings.Contains(got, "pid 4344 is not running: pid 4344 has exited") || eh.Running {
+						t.Errorf("a process whose pidfd fired is not reported as not running, with Running false: %+v, problems %v", eh, problems)
 					}
-					for _, wrong := range []string{"does not hold", "not a child of the supervisor", "after the answer"} {
+					for _, wrong := range []string{"does not hold", "not a child of the supervisor", "after the answer", "changed while", "expected listener", "which it must not", "other processes listen"} {
 						if strings.Contains(got, wrong) {
 							t.Errorf("the exit is blamed on %q: %+v, problems %v", wrong, eh, problems)
 						}
-					}
-					if strings.Contains(got, "is not running") && eh.Running {
-						t.Errorf("reported not running, but Running is set: %+v, problems %v", eh, problems)
 					}
 				})
 			}
