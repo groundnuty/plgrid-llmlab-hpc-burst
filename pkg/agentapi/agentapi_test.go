@@ -77,7 +77,7 @@ func TestAgentConfigEncodeIsStableAndRoundTrips(t *testing.T) {
 // '-', a 33rd character, a space and an '@' are not.
 func TestAgentConfigSSHUser(t *testing.T) {
 	for user, ok := range map[string]bool{
-		"MichalOrzechowski":     true,
+		"ExampleUser":           true,
 		"example-user":          true,
 		"_svc.user-1":           true,
 		"A":                     true,

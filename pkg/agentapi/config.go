@@ -147,10 +147,10 @@ var (
 	// either case, digits, '.', '_' and '-', with no leading '-', and here
 	// also no leading digit and at most 32 characters, the limit of Linux's
 	// useradd. The ssh user is the one who runs the controller
-	// (user.Current), whose name may have capitals ("MichalOrzechowski" on
-	// the development VM); every such name is still safe in an ssh argument
-	// and a shell word (decision of `@hpc-burst-code-agent`, 1 Nov 2026,
-	// review of PR 132: B2).
+	// (user.Current), whose name may have capitals, as on the development
+	// VM; every such name is still safe in an ssh argument and a shell word
+	// (decision of `@hpc-burst-code-agent`, 1 Nov 2026, review of PR 132:
+	// B2).
 	userForm = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]{0,31}$`)
 )
 
