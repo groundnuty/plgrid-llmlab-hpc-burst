@@ -173,6 +173,7 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 		WithOptions(controller.Options{
 			MaxConcurrentReconciles: workers,
 			RateLimiter:             workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](time.Second, maxRequeue),
+			SkipNameValidation:      new(true), // a second manager in one process, as in a test's -count=N
 		}).
 		Complete(r)
 	if err != nil {
