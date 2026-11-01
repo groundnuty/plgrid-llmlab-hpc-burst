@@ -293,6 +293,52 @@ func scContentEvents(body string) int {
 	return n
 }
 
+// scGoAheadLimit bounds scGated's wait for the engine to take one go-ahead.
+// The engine reaches its gate as soon as it has written the token the client
+// just read, so the bound is generous.
+const scGoAheadLimit = 30 * time.Second
+
+// scGated reads a stream event by event and, after each of the first n token
+// events, sends the engine its go-ahead for the next token
+// (enginetest.Behaviour.Gate). The client has then read the token, so the
+// front has read it from the engine and reset its idle timer before the engine
+// paces the next one: an engine on the fake clock never moves the clock ahead
+// of the front's reads, whatever the speed of the machine. It returns the
+// whole body.
+func scGated(t *testing.T, resp *http.Response, gate chan<- struct{}, n int) string {
+	t.Helper()
+	defer resp.Body.Close()
+	br := bufio.NewReader(resp.Body)
+	var body strings.Builder
+	for sent := 0; ; {
+		ev, err := scReadEvent(br)
+		body.WriteString(ev)
+		if scIsContent(ev) && sent < n {
+			select {
+			case gate <- struct{}{}:
+				sent++
+			case <-time.After(scGoAheadLimit):
+				t.Fatalf("the engine did not take go-ahead %d of %d within %s; the body so far ends %q",
+					sent+1, n, scGoAheadLimit, scTail(body.String()))
+			}
+		}
+		if err != nil {
+			if err != io.EOF && err != io.ErrUnexpectedEOF {
+				t.Fatalf("reading the stream after %d go-aheads: %v", sent, err)
+			}
+			return body.String()
+		}
+	}
+}
+
+// scTail is the end of a body, for a failure message.
+func scTail(s string) string {
+	if len(s) > 300 {
+		return s[len(s)-300:]
+	}
+	return s
+}
+
 // scLockstep reads a stream event by event and, after each token event, moves
 // the fake clock by step, until the test has moved it by total. The engine of
 // such a test runs on the wall clock (scOpts.engineReal), so the test is the
