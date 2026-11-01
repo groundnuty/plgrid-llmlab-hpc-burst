@@ -114,6 +114,8 @@ type rigAgent struct {
 	agent *afake.Agent
 	// stopped: the job ended, so the agent no longer runs.
 	stopped bool
+	// batch is the fake Slurm the job runs on.
+	batch *pfake.Batch
 }
 
 type rig struct {
@@ -142,6 +144,9 @@ type rig struct {
 	onAgent func(*rigAgent)
 	// errs collects agent errors; a test asserts on them when it cares.
 	errs []error
+	// extra are the Providers a test added beside the rig's own
+	// (addProvider), each with its fake Slurm and Provider controller.
+	extra []*rigExtra
 	// noTunnels: syncAgents does not play the path-state writer
 	// (syncTunnels), so a test sets TunnelConnected itself, or leaves it
 	// absent.
@@ -156,6 +161,11 @@ type rigConfig struct {
 	holdRelease  bool
 	front        bool
 	interceptors *interceptor.Funcs
+	// partition edits the rig partition's profile entry; providerQOS is the
+	// rig Provider's spec.qos; batch edits the fake Slurm's configuration.
+	partition   func(*v1alpha1.PartitionProfile)
+	providerQOS string
+	batch       func(*pfake.Config)
 }
 
 func withProfile(f func(*v1alpha1.PlatformProfileSpec)) rigOption {
@@ -167,6 +177,14 @@ func withoutFront() rigOption               { return func(c *rigConfig) { c.fron
 func withFallbackMode() rigOption           { return func(c *rigConfig) { c.holdRelease = false } }
 func withInterceptors(f interceptor.Funcs) rigOption {
 	return func(c *rigConfig) { c.interceptors = &f }
+}
+
+func withPartition(f func(*v1alpha1.PartitionProfile)) rigOption {
+	return func(c *rigConfig) { c.partition = f }
+}
+func withProviderQOS(q string) rigOption { return func(c *rigConfig) { c.providerQOS = q } }
+func withBatchConfig(f func(*pfake.Config)) rigOption {
+	return func(c *rigConfig) { c.batch = f }
 }
 
 func ptrTo[T any](v T) *T { return &v }
@@ -227,17 +245,24 @@ func newRig(t *testing.T, opts ...rigOption) *rig {
 		MaxTime: dur(cfg.maxTime), GPUsPerNode: ptrTo(int32(4)), CPUsPerGPU: ptrTo(int32(16)),
 		MemPerGPU: ptrTo(resource.MustParse("120Gi")),
 	}}
+	if cfg.partition != nil {
+		cfg.partition(&prof.Spec.Partitions[0])
+	}
 	provider := &v1alpha1.Provider{
 		ObjectMeta: metav1.ObjectMeta{Name: rigProvider, UID: newUID(), Generation: 1,
 			Labels: map[string]string{v1alpha1.LabelPlatform: "helios"}},
-		Spec: v1alpha1.ProviderSpec{PlatformProfileRef: v1alpha1.ObjectReference{Name: rigProfile}, AllowedPartitions: []string{rigPartition}},
+		Spec: v1alpha1.ProviderSpec{PlatformProfileRef: v1alpha1.ObjectReference{Name: rigProfile}, AllowedPartitions: []string{rigPartition}, QOS: cfg.providerQOS},
 	}
 	c := clientfake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(prof, provider).
 		WithStatusSubresource(&v1alpha1.ModelDeployment{}, &v1alpha1.Instance{}, &v1alpha1.Allocation{}, &v1alpha1.Provider{}, &v1alpha1.PlatformProfile{}).
 		WithInterceptorFuncs(funcs).
 		Build()
-	batch := pfake.NewBatch(clock, pfake.Config{Partitions: []pfake.Partition{{Name: rigPartition, GPUModel: rigGPU, GPUsPerNode: 4, MaxTime: cfg.maxTime}}})
+	bcfg := pfake.Config{Partitions: []pfake.Partition{{Name: rigPartition, GPUModel: rigGPU, GPUsPerNode: 4, MaxTime: cfg.maxTime}}}
+	if cfg.batch != nil {
+		cfg.batch(&bcfg)
+	}
+	batch := pfake.NewBatch(clock, bcfg)
 	rg := &rig{
 		t: t, ctx: context.Background(), clock: clock, batch: batch, c: c,
 		prov:   &pfake.Controller{Client: c, Provider: rigProvider, Batch: batch, Clock: clock, HoldRelease: cfg.holdRelease},
@@ -397,6 +422,11 @@ func (rg *rig) Step() {
 	if err := rg.prov.Sync(rg.ctx); err != nil {
 		rg.t.Fatalf("provider sync: %v", err)
 	}
+	for _, x := range rg.extra {
+		if err := x.prov.Sync(rg.ctx); err != nil {
+			rg.t.Fatalf("provider %s sync: %v", x.name, err)
+		}
+	}
 	rg.syncAgents()
 	rg.reconcileAll()
 	// The leader's observer judges the Providers' and the front's heartbeats
@@ -454,13 +484,13 @@ func (rg *rig) syncAgents() {
 		rg.gate.Add(tag, afake.GateAllocation{Namespace: a.Namespace, Name: a.Name, UID: string(a.UID), Credential: string(cred), JobID: jobID})
 		ra, ok := rg.agents[a.Name]
 		if !ok && jobID != "" && !rg.noAgents {
-			job, found := rg.batch.Job(jobID)
+			job, found := rg.batchOf(a).Job(jobID)
 			if found && job.StartTime != nil && job.EndTime == nil {
 				var e afake.Engine
 				if rg.engine != nil {
 					e = rg.engine(a.Name)
 				}
-				ra = &rigAgent{alloc: a.Name, jobID: jobID,
+				ra = &rigAgent{alloc: a.Name, jobID: jobID, batch: rg.batchOf(a),
 					agent: afake.NewAgent(rg.gate.As(string(cred), tag, jobID), agentapi.Caller{}, rg.clock.Now, e)}
 				rg.agents[a.Name] = ra
 				if rg.onAgent != nil {
@@ -473,7 +503,7 @@ func (rg *rig) syncAgents() {
 		if ra.stopped {
 			continue
 		}
-		if job, ok := rg.batch.Job(ra.jobID); !ok || job.EndTime != nil {
+		if job, ok := ra.batch.Job(ra.jobID); !ok || job.EndTime != nil {
 			ra.stopped = true
 			continue
 		}

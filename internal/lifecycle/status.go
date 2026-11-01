@@ -15,10 +15,12 @@ import (
 
 // degradedOrder ranks the Degraded reasons: the condition carries the first
 // that applies, and its message lists every one (HBEP-7, Events and
-// conditions).
+// conditions, The ranking; science-agent decision, 1 Nov 2026, from PR #151's
+// review).
 var degradedOrder = []string{
-	v1alpha1.ReasonSpecUnsupported, v1alpha1.ReasonFrontNotConfigured, v1alpha1.ReasonVerificationFailed,
-	v1alpha1.ReasonIdentityUnresolved, v1alpha1.ReasonRestartLoop, v1alpha1.ReasonSubmissionRejected,
+	v1alpha1.ReasonSpecUnsupported, v1alpha1.ReasonPartitionTooShort, v1alpha1.ReasonFrontNotConfigured,
+	v1alpha1.ReasonVerificationFailed, v1alpha1.ReasonIdentityUnresolved, v1alpha1.ReasonRestartLoop,
+	v1alpha1.ReasonSubmissionRejected, v1alpha1.ReasonNoOverlapSlot, v1alpha1.ReasonSubmitLimitReached,
 	v1alpha1.ReasonProviderUnavailable, v1alpha1.ReasonReplacementLate, v1alpha1.ReasonCapacityDropped,
 }
 
@@ -64,6 +66,7 @@ func (p *pass) writeStatus() error {
 		a.Instances++
 	}
 	p.submissionRejected()
+	p.noOverlapGap(ready, desired)
 	if everReady && ready < desired {
 		p.degrade(v1alpha1.ReasonCapacityDropped, "%d of %d desired Instances are ready", ready, desired)
 	}
@@ -159,13 +162,36 @@ func (p *pass) measuredStartToReady() []v1alpha1.ClassStartToReady {
 // submissionRejected shows a Provider's Rejected attempt as SubmissionRejected,
 // with the scheduler's reason. The Provider's controller retries with backoff,
 // and the lifecycle controller does not switch providers in alpha (HBEP-7,
-// Provisioning).
+// Provisioning). A refusal for a full submit limit, which the record's Code
+// says (told by Slurm's reason name), is no failure: it shows as
+// SubmitLimitReached in place of SubmissionRejected, with Slurm's reason line
+// (HBEP-4, QOS limits). It names the Provider, the limit and Slurm's reason
+// line (HBEP-7, Events and conditions): the limit is the profile's
+// maxSubmitPerUser when it models one; otherwise, as for an association's
+// AssocMaxSubmitJobLimit, the reason name in the line is the only statement
+// of the limit. Neither ends an Instance, so neither counts toward RestartLoop
+// or a class pause (HBEP-7, Health and restarts).
 func (p *pass) submissionRejected() {
-	for _, a := range p.allocs {
+	names := make([]string, 0, len(p.allocs))
+	for n := range p.allocs {
+		names = append(names, n)
+	}
+	sort.Strings(names) // a map ranges in any order; the messages of one reason must not
+	for _, n := range names {
+		a := p.allocs[n]
 		sub := a.Status.AtProvider.Submission
-		if a.DeletionTimestamp.IsZero() && sub != nil && sub.State == v1alpha1.SubmissionRejected && a.Annotations[v1alpha1.AnnotationJobID] == "" {
-			p.degrade(v1alpha1.ReasonSubmissionRejected, "Allocation %s: attempt %d was rejected: %s", a.Name, sub.Attempt, sub.Reason)
+		if !a.DeletionTimestamp.IsZero() || sub == nil || sub.State != v1alpha1.SubmissionRejected || a.Annotations[v1alpha1.AnnotationJobID] != "" {
+			continue
 		}
+		if sub.Code == v1alpha1.ReasonSubmitLimitReached {
+			limit := ""
+			if pv := p.pvOf(a.Labels); pv != nil && pv.limits.MaxSubmitPerUser != nil {
+				limit = ", at its " + submitLimitText(pv)
+			}
+			p.degrade(v1alpha1.ReasonSubmitLimitReached, "Allocation %s on Provider %s%s: attempt %d was refused for a full submit limit and waits for the backoff: %s", a.Name, a.Labels[v1alpha1.LabelProvider], limit, sub.Attempt, sub.Reason)
+			continue
+		}
+		p.degrade(v1alpha1.ReasonSubmissionRejected, "Allocation %s: attempt %d was rejected: %s", a.Name, sub.Attempt, sub.Reason)
 	}
 }
 

@@ -23,7 +23,15 @@ func unresolved(rec *v1alpha1.SubmissionRecord) bool {
 func (c *Controller) establish(ctx context.Context, p *pass, s *allocState) (settled bool, err error) {
 	rec := s.rec
 	limitReason(s.obs, rec)
-	if unresolved(rec) {
+	rejected := rec != nil && rec.State == v1alpha1.SubmissionRejected
+	if unresolved(rec) || rejected {
+		// The tag is looked up before anything else is done about the attempt,
+		// as the real provider does (internal/providerctl's establish), after a
+		// refusal too: a job whose reply was lost and that registered late
+		// (Script.RegisteredLate) is the reason the next attempt was refused
+		// for a full submit limit, and it is found here, adopted, and not
+		// followed by an attempt n+2 (HBEP-4, Test plan, "A lost reply under a
+		// one-job limit").
 		jobs, err := c.findByTag(ctx, p, s.tag, s.a.CreationTimestamp.Add(-listLookback))
 		if err != nil {
 			return false, nil
@@ -31,13 +39,17 @@ func (c *Controller) establish(ctx context.Context, p *pass, s *allocState) (set
 		if len(jobs) > 0 {
 			return true, c.adopt(ctx, p, s, pickAdopted(jobs))
 		}
-		resubmit, err := c.stall(ctx, p, s)
-		if err != nil || !resubmit {
-			return false, err
+		if rejected {
+			if rec.Time != nil && p.now.Sub(rec.Time.Time) < c.rejectBackoff() {
+				s.obs.Phase, s.obs.Submission = v1alpha1.AllocationSubmitting, rec
+				return false, nil
+			}
+		} else {
+			resubmit, err := c.stall(ctx, p, s)
+			if err != nil || !resubmit {
+				return false, err
+			}
 		}
-	} else if rec != nil && rec.State == v1alpha1.SubmissionRejected && rec.Time != nil && p.now.Sub(rec.Time.Time) < c.rejectBackoff() {
-		s.obs.Phase, s.obs.Submission = v1alpha1.AllocationSubmitting, rec
-		return false, nil
 	}
 	if why := c.Prerequisites.missing(s.a); why != "" {
 		s.obs.Phase, s.obs.Reason = v1alpha1.AllocationSubmitting, why
@@ -151,15 +163,19 @@ func pickAdopted(jobs []provider.Job) provider.Job {
 	panic("fake: pickAdopted needs a job") // the last class takes any
 }
 
-// adopt records the found job as the Allocation's: the job ID, and the attempt
-// Done. In hold mode the observation that follows settles it (HBEP-7, Settle).
+// adopt records the found job as the Allocation's: the job ID, and an
+// unresolved attempt Done. A Rejected attempt's record stays as it is, as in the
+// real provider: the job is an earlier attempt's, and the refusal happened. In
+// hold mode the observation that follows settles it (HBEP-7, Settle).
 func (c *Controller) adopt(ctx context.Context, p *pass, s *allocState, job provider.Job) error {
-	done := c.newRecord(s.rec.Attempt, v1alpha1.SubmissionDone, "", p.now)
-	setRecord(s.a, done)
+	attempt := s.rec.Attempt
+	if unresolved(s.rec) {
+		setRecord(s.a, c.newRecord(attempt, v1alpha1.SubmissionDone, "", p.now))
+	}
 	s.a.Annotations[v1alpha1.AnnotationJobID] = job.ID
 	if err := update(ctx, c.Client, s.a); err != nil {
 		return fmt.Errorf("adopt job %s: %w", job.ID, err)
 	}
-	s.markResolved(p.now, fmt.Sprintf("attempt %d resolved by job %s", done.Attempt, job.ID))
+	s.markResolved(p.now, fmt.Sprintf("attempt %d resolved by job %s", attempt, job.ID))
 	return nil
 }
