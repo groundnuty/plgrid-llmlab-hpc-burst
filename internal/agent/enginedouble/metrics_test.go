@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"regexp"
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -326,21 +328,110 @@ func TestSlowFirstDelaysTheFirstRequestOfEachShape(t *testing.T) {
 	}
 }
 
-// never-settle=100: with TokenDelay 20 ms and 10 tokens, each request of a shape
-// waits 100% of 20*10 ms = 200 ms longer than the one before. The bounds are
-// loose, since a loaded machine only adds time; the upper one rules out a
-// multiplicative growth, which would double the wait each time.
+// never-settle=100: with TokenDelay 20 ms and 10 tokens, the n-th request of a shape (counting from 0)
+// waits n * 100% * 20 ms * 10 = n * 200 ms before its first token (engine.beforeFirstToken), so each waits
+// 200 ms longer than the one before. Two tests cover it, each with a check that a loaded machine cannot
+// move, and neither sets any other:
+//   - this one, over real HTTP: the double decided the growth, since each request's record holds exactly
+//     n * 200 ms of injected wait, the double's own number (LogEvent.InjectedNS), so a growth that doubles
+//     each time, or stops, is caught with no clock in it; and no first byte comes before the wait it
+//     records. A timer never fires early and the request is sent before the double starts the timer, so
+//     that holds on any machine with no tolerance, and load only adds time to it. It cannot show that the
+//     sleep happened, though: a scheduling delay can cover a skipped one, and a doubled one passes;
+//   - TestNeverSettleSleepsTheWaitBeforeTheFirstByte, below, on a fake clock: the first byte is written
+//     exactly n * 200 ms plus the token delay after the request starts, so a sleep that is skipped,
+//     doubled or off fails every time.
+//
+// There is deliberately no bound on the step between two consecutive first bytes, and none from above on
+// a first byte: a step is a difference of two waits that load lengthens by different amounts, so it can
+// shrink as well as grow (283 ms, then 427 ms: a step of 144 ms, issue #203).
 func TestNeverSettleGrowsEachRequest(t *testing.T) {
 	cfg := cfgFor()
 	cfg.TokenDelay, cfg.NeverSettle = 20*time.Millisecond, 100
-	s := serve(t, cfg)
+	const requests, share = 4, 200 * time.Millisecond // share: 100% of 20 ms * 10 tokens
+	var mu sync.Mutex
+	var recs []LogEvent
+	s := serveHandler(t, newHandler(cfg, func(ev LogEvent) {
+		if ev.Event == "request" {
+			mu.Lock()
+			recs = append(recs, ev)
+			mu.Unlock()
+		}
+	}))
 	var ttfb []time.Duration
-	for i := 0; i < 4; i++ {
+	for i := 0; i < requests; i++ {
 		ttfb = append(ttfb, s.timeToFirstByte(chatBody(5, map[string]any{"max_tokens": 10, "ignore_eos": true})))
 	}
-	for i := 1; i < len(ttfb); i++ {
-		if step := ttfb[i] - ttfb[i-1]; step < 150*time.Millisecond || step > 500*time.Millisecond {
-			t.Errorf("request %d waited %v, request %d %v: the step is %v, want about 200ms (all: %v)", i, ttfb[i], i-1, ttfb[i-1], step, ttfb)
+	// A request's record is written by a deferred call of its handler, before the handler returns, and the
+	// server ends the response after that: the client has read the end of each answer, so the four records
+	// are there already, in the order of the requests.
+	mu.Lock()
+	got := append([]LogEvent(nil), recs...)
+	mu.Unlock()
+	if len(got) != requests {
+		t.Fatalf("%d request records after %d answers were read to their end, want one each: %+v", len(got), requests, got)
+	}
+	for i, ev := range got {
+		want := time.Duration(i) * share
+		if ev.Nth != i || time.Duration(ev.InjectedNS) != want {
+			t.Errorf("request %d has place %d in its shape and the double made it wait %v, want place %d and exactly %v (records: %+v)", i, ev.Nth, time.Duration(ev.InjectedNS), i, want, got)
+		}
+		if ttfb[i] < time.Duration(ev.InjectedNS) {
+			t.Errorf("request %d had its first byte after %v, before the %v the double says it slept (all: %v)", i, ttfb[i], time.Duration(ev.InjectedNS), ttfb)
+		}
+		if ttfb[i] < time.Duration(i)*share {
+			t.Errorf("request %d had its first byte after %v, want at least %v (all: %v)", i, ttfb[i], time.Duration(i)*share, ttfb)
 		}
 	}
+}
+
+// firstByteWriter is a response writer in memory that notes when the body's first byte is written, by the
+// clock of the goroutine that writes it.
+type firstByteWriter struct {
+	header http.Header
+	first  time.Time
+}
+
+func (w *firstByteWriter) Header() http.Header { return w.header }
+func (w *firstByteWriter) WriteHeader(int)     {}
+func (w *firstByteWriter) Flush()              {}
+func (w *firstByteWriter) Write(b []byte) (int, error) {
+	if w.first.IsZero() && len(b) > 0 {
+		w.first = time.Now()
+	}
+	return len(b), nil
+}
+
+// The wait the double injects is slept, and slept once: inside a testing/synctest bubble, whose clock moves
+// only when every goroutine in it is blocked, a streamed request is served straight by the handler and the
+// time of the first byte is read from that clock. The handler waits n * 200 ms (never-settle, 100%, 20 ms
+// a token, 10 tokens), then the 20 ms of the first token, and writes: so the first byte comes exactly
+// n * 200 ms + 20 ms after the request starts, with no real time in it and so no load that can move it.
+// Over real HTTP an elapsed-time check cannot tell a skipped sleep from a scheduling delay of the same
+// length, nor a doubled sleep from a slow machine; here a skipped and a doubled sleep both miss
+// the exact time. The records are not read: they are the other test's.
+func TestNeverSettleSleepsTheWaitBeforeTheFirstByte(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cfg := cfgFor()
+		cfg.TokenDelay, cfg.NeverSettle = 20*time.Millisecond, 100
+		const share = 200 * time.Millisecond // 100% of 20 ms * 10 tokens
+		h := newHandler(cfg, nil)
+		for i := 0; i < 4; i++ {
+			body := chatBody(5, map[string]any{"max_tokens": 10, "ignore_eos": true, "stream": true})
+			b, err := json.Marshal(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(b))
+			w := &firstByteWriter{header: http.Header{}}
+			start := time.Now()
+			h.ServeHTTP(w, req)
+			if w.first.IsZero() {
+				t.Fatalf("request %d wrote no byte", i)
+			}
+			if got, want := w.first.Sub(start), time.Duration(i)*share+cfg.TokenDelay; got != want {
+				t.Errorf("request %d: the first byte came %v after the request began, want exactly %v (%d * %v of never-settle, then the %v of the first token)", i, got, want, i, share, cfg.TokenDelay)
+			}
+		}
+	})
 }
