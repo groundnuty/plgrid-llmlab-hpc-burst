@@ -123,13 +123,17 @@ func TestShippedCPUPartitionRefusesGPUAllocations(t *testing.T) {
 }
 
 // Athena plgrid-now is a short-job lane (issue #93, `@hpc-burst-science-agent`,
-// 1 Nov 2026): the partition's time limit is 1 h, and its QoS caps a user at one
-// GPU (cpu=16,gres/gpu=1,mem=125G, one running and one submitted job). The
-// expected values are those two measured limits, written out here. A request
-// the partition's limits forbid is refused before any call; the control is the
-// same request on plgrid-gpu-a100, whose profile allows 8 GPUs and 48 h, so
-// the refusal comes from the plgrid-now entry.
-func TestShippedAthenaNowRefusesWhatItsLimitsForbid(t *testing.T) {
+// 1 Nov 2026): the partition's time limit is 1 h, and its gpusPerNode is the
+// node's 8, since the field is a node fact. The QoS cap of one GPU per user is
+// an untyped fact until the typed maxGpusPerUser of the HBEP-4/7 amendment
+// (PR #151), so the profile does not refuse a second GPU yet; the absent
+// per-GPU sizing keeps Instances off the partition instead
+// (internal/lifecycle, TestShippedAthenaNowCannotBeSized). The expected values
+// are the measured time limit and the node's GPU count, written out here. A
+// request above the time limit is refused before any call; the control is the
+// same request on plgrid-gpu-a100, whose profile allows 48 h, so the refusal
+// comes from the plgrid-now entry.
+func TestShippedAthenaNowRefusesATimeLimitAboveItsMaxTime(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "profiles", "athena.yaml"))
 	if err != nil {
 		t.Fatalf("read the shipped profile: %v", err)
@@ -138,50 +142,41 @@ func TestShippedAthenaNowRefusesWhatItsLimitsForbid(t *testing.T) {
 	if err := yaml.UnmarshalStrict(raw, &pp); err != nil {
 		t.Fatal(err)
 	}
-	check := func(partition string, gpus int32, limit v1alpha1.Duration) error {
-		var entry v1alpha1.PartitionProfile
+	entryOf := func(partition string) v1alpha1.PartitionProfile {
 		for _, p := range pp.Spec.Partitions {
 			if p.Name == partition {
-				entry = p
+				return p
 			}
 		}
-		if entry.Name == "" {
-			t.Fatalf("athena.yaml does not list %s", partition)
-		}
+		t.Fatalf("athena.yaml does not list %s", partition)
+		return v1alpha1.PartitionProfile{}
+	}
+	if n := entryOf("plgrid-now").GPUsPerNode; n == nil || *n != 8 {
+		t.Errorf("plgrid-now gpusPerNode = %v; want the node's 8", n)
+	}
+	check := func(partition string, limit v1alpha1.Duration) error {
 		req := provider.SubmitRequest{
 			Tag: "hb-example-0123456789ab", Hold: true, Account: "example-account",
 			Params: v1alpha1.BatchParameters{
-				Partition: partition, TimeLimit: limit, GPUs: gpus, CPUsPerTask: 4,
+				Partition: partition, TimeLimit: limit, GPUs: 1, CPUsPerTask: 4,
 				Memory: resource.MustParse("32Gi"), Nodes: 1, AgentDigest: strings.Repeat("a", 64),
 			},
 		}
-		return CheckRequest(req, provider.Profile{Name: pp.Name, Spec: pp.Spec, Partition: entry},
+		return CheckRequest(req, provider.Profile{Name: pp.Name, Spec: pp.Spec, Partition: entryOf(partition)},
 			provider.Settings{Provider: "example", Account: "example-account", Partition: partition})
 	}
 	// The conformance run's shape and the longest the partition allows are accepted.
 	for _, limit := range []v1alpha1.Duration{"5m", "1h"} {
-		if err := check("plgrid-now", 1, limit); err != nil {
+		if err := check("plgrid-now", limit); err != nil {
 			t.Errorf("1 GPU for %s on plgrid-now is refused: %v", limit, err)
 		}
 	}
-	for _, tc := range []struct {
-		name  string
-		gpus  int32
-		limit v1alpha1.Duration
-		want  string
-	}{
-		{"two GPUs", 2, "5m", "gpusPerNode 1"},
-		{"a time limit above 1 h", 1, "61m", "maxTime 1h0m0s"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if err := check("plgrid-gpu-a100", tc.gpus, tc.limit); err != nil {
-				t.Fatalf("the same request on plgrid-gpu-a100 is refused, so the control proves nothing: %v", err)
-			}
-			err := check("plgrid-now", tc.gpus, tc.limit)
-			if !errors.Is(err, provider.ErrInvalidRequest) || !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("got %v; want a refusal wrapping ErrInvalidRequest that names %s", err, tc.want)
-			}
-		})
+	if err := check("plgrid-gpu-a100", "61m"); err != nil {
+		t.Fatalf("the same request on plgrid-gpu-a100 is refused, so the control proves nothing: %v", err)
+	}
+	err = check("plgrid-now", "61m")
+	if !errors.Is(err, provider.ErrInvalidRequest) || !strings.Contains(err.Error(), "maxTime 1h0m0s") {
+		t.Errorf("got %v; want a refusal wrapping ErrInvalidRequest that names maxTime 1h0m0s", err)
 	}
 }
 

@@ -20,7 +20,8 @@ import (
 // partition neither cpusPerGpu nor memPerGpu, so partitionSizing refuses to size a request
 // there. That is a consequence of two absent values, not a rule about time limits:
 // sourcing them (the QoS cap is cpu=16 and 125G) would lift it, and this test would then
-// fail until the science agent rules on a field.
+// fail. Both hold until HBEP-7's PartitionTooShort check lands (maxTime must exceed
+// drainWindow plus handoverMargin plus health.startTimeout).
 //
 // The control is the shipped plgrid-gpu-a100 entry with the same call: it is sized, so
 // the refusal comes from the plgrid-now entry and not from the test's setup. The expected
