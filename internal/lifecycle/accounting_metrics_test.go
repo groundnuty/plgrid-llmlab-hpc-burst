@@ -1,6 +1,9 @@
 package lifecycle
 
 import (
+	"context"
+	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -8,9 +11,11 @@ import (
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	afake "github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi/fake"
 )
 
 // accountedAllocation is an Allocation on a Provider with the accounting the
@@ -87,5 +92,51 @@ func TestMetricsAccountingGauges(t *testing.T) {
 		if ex.types[name] != "gauge" || !strings.Contains(ex.help[name], "allocated, not billed") {
 			t.Errorf("%s: TYPE %q, HELP %q; want a gauge whose help says allocated, not billed", name, ex.types[name], ex.help[name])
 		}
+	}
+}
+
+// failingLister is a reader whose list always fails, as a cache that cannot
+// serve one.
+type failingLister struct{ client.Reader }
+
+func (failingLister) List(context.Context, client.ObjectList, ...client.ListOption) error {
+	return errors.New("the cache cannot list Allocations")
+}
+
+// TestMetricsAccountingListFailureKeepsTheScrape: controller-runtime serves
+// /metrics with HTTPErrorOnError, so a collector that reports an invalid
+// metric makes the whole scrape answer 500, the engine gauges with it. A failed
+// list of the Allocations gives instead no accounting series, an unknown series
+// for each accounting gauge with reason list_failed, and the engine gauges
+// intact. scrapeCollectors serves the collectors as /metrics the same way and
+// fails the test on any status but 200.
+func TestMetricsAccountingListFailureKeepsTheScrape(t *testing.T) {
+	rg, in, _ := healthRig(t, func() afake.Engine { return afake.Engine{Health: knownHealth} })
+	uid := string(in.UID)
+	ex := scrapeCollectors(t,
+		&instanceCollector{inv: rg.r.inventory(), backend: rg.backend, clock: rg.clock},
+		&accountingCollector{allocs: failingLister{}})
+	const gpu, cpu = "hpcburst_allocation_allocated_gpu_seconds", "hpcburst_allocation_allocated_cpu_seconds"
+	for _, name := range []string{gpu, cpu} {
+		if got := ex.find(name, nil); len(got) != 0 {
+			t.Errorf("%s series %v after a failed list, want none (unknown, never 0)", name, got)
+		}
+	}
+	var metrics []string
+	for _, s := range ex.find("hpcburst_allocation_metrics_unknown", nil) {
+		if s.value != "1" || s.labels["reason"] != "list_failed" || len(s.labels) != 2 {
+			t.Errorf("unknown series %+v, want value 1 with exactly the labels metric and reason=list_failed", s)
+		}
+		metrics = append(metrics, s.labels["metric"])
+	}
+	slices.Sort(metrics)
+	if !slices.Equal(metrics, []string{cpu, gpu}) {
+		t.Errorf("unknown series for %v, want one for each of %s and %s", metrics, cpu, gpu)
+	}
+	if series := ex.engineSeries(uid); len(series) != 9 {
+		t.Errorf("%d engine samples beside the failed accounting list, want all 9 intact", len(series))
+	}
+	if n := len(ex.find("hpcburst_instance_info", map[string]string{"instance_uid": uid})); n != 1 {
+		t.Errorf("%d info series beside the failed accounting list, want 1", n)
 	}
 }
