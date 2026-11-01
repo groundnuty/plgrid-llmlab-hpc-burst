@@ -239,3 +239,42 @@ func samplingText(s *enginedouble.RequestSampling) string {
 	b, _ := json.Marshal(s)
 	return string(b)
 }
+
+// Verification alone, with nothing after it: its fingerprint request is a
+// check request like the others (HBEP-7, Checks: "every request of
+// verification, qualification and warm-up"), so on a reasoning model with
+// Qwen3-0.6B's file it carries the file's values and verification's seed, 1101.
+// The agent therefore reads the file before it sends the fingerprint request
+// (PR 1 review, N8). With no qualification or warm-up to resolve the sampling
+// first, a fingerprint request sent before the read would go out greedy.
+func TestTheFingerprintRequestIsSampledLikeTheOtherChecks(t *testing.T) {
+	file := `{"do_sample": true, "temperature": 0.6, "top_k": 20, "top_p": 0.95}`
+	sum := sha256.Sum256([]byte(file))
+	files := append(append([]agentapi.FileDigest(nil), defaultFiles...), agentapi.FileDigest{Path: "generation_config.json", SHA256: hex.EncodeToString(sum[:])})
+	h := newHarness(t, harnessOptions{hub: map[string]string{"/org/model/resolve/" + samplingRevision + "/generation_config.json": file}})
+	h.set(withReasoning(h.runState("", 1, 0, verifyChecks(1, files))))
+	r := h.waitReport("verification", 60*time.Second, verified(1))
+	if v := r.Instance.Checks.Verify; v.Error != "" || v.Fingerprint == "" {
+		t.Fatalf("verification: error %q, fingerprint %q", v.Error, v.Fingerprint)
+	}
+	// Wait on the double's log for the fingerprint request: the handler records
+	// it as it returns, which can follow the agent's report by a moment.
+	var events []enginedouble.LogEvent
+	deadline := time.Now().Add(20 * time.Second)
+	for len(events) == 0 {
+		if events = h.chatEvents(); len(events) == 0 {
+			if time.Now().After(deadline) {
+				t.Fatal("the engine double logged no chat request")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if len(events) != 1 || requestCheck(events[0].Tail) != "verify" {
+		t.Fatalf("%d chat requests %+v, want the one fingerprint request", len(events), events)
+	}
+	want := qwen3Want
+	want.Seed = ip(1101)
+	if got := events[0].Sampling; got == nil || !reflect.DeepEqual(*got, want) {
+		t.Errorf("the fingerprint request carried %s, want %s", samplingText(got), samplingText(&want))
+	}
+}
