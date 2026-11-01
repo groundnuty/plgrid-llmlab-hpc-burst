@@ -1,0 +1,12 @@
+# PlatformProfile for LLMLab, the managed platform of PLGrid (HBEP-4, "A managed profile" and
+# open question 8: the LLMLab profile ships with alpha).
+#
+# A managed profile has no batch fields: LLMLab runs the models, and the framework only lists its
+# catalog and routes requests to it. The gateway's address is not here; it is in the Provider's
+# credentials file (HBEP-4, Provider settings), so nothing private is in this file.
+apiVersion: hpcburst.groundnuty.github.io/v1alpha1
+kind: PlatformProfile
+metadata:
+  name: llmlab
+spec:
+  providerKind: managed

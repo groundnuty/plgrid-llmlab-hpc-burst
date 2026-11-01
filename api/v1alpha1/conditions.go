@@ -332,6 +332,15 @@ const ReasonAgentRegistered = "AgentRegistered"
 // resolved shapes now fit (HBEP-7, Verification).
 const EventReasonShapesFit = "ShapesFit"
 
+// EventReasonTunnelOrphaned is the degraded event the lifecycle controller
+// raises when frps lists an online proxy whose name is no current Instance's
+// UID: an orphan (HBEP-6, The inventory; HBEP-8, Reasons in alpha). It regards
+// the Allocation whose credential admitted the tunnel, else the lifecycle
+// Lease, and repeats at most once an hour while the orphan lasts (HBEP-8,
+// Repeating conditions). It is a Go constant only: no condition or CRD field
+// carries it (`@hpc-burst-science-agent`, 1 Nov 2026, for #167).
+const EventReasonTunnelOrphaned = "TunnelOrphaned"
+
 // Reasons of a managed Provider's conditions (HBEP-4, Managed provider in
 // alpha; HBEP-11, Credentials), so the lifecycle controller and the front can
 // match them exactly. The managed Provider's controller (#69) writes all nine.

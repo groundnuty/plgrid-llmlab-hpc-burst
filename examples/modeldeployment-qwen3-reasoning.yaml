@@ -1,0 +1,44 @@
+# A served ModelDeployment of a reasoning model on Athena's A100 partition (HBEP-3, HBEP-7).
+# reasoning-parser tells vLLM to split the model's reasoning from its answer; the Instance's
+# start-up checks then allow the reasoning headroom (HBEP-7, check requests on a reasoning
+# model). The flag names and values that admission accepts are in HBEP-3, engine flags.
+#
+# The revision is Qwen/Qwen3-0.6B as issue #94's real run used it.
+apiVersion: hpcburst.groundnuty.github.io/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: athena-qwen3-reasoning
+  namespace: default
+spec:
+  model: Qwen/Qwen3-0.6B
+  source:
+    served:
+      checkpoint:
+        repository: Qwen/Qwen3-0.6B
+        revision: c1899de289a04d12100db370d81485cdf75e47ca
+      engine:
+        name: vllm
+        version: 0.32.0
+        image: docker.io/vllm/vllm-openai
+        imageDigest: sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34
+      flags:
+        - name: max-model-len
+          value: "8192"
+        - name: reasoning-parser
+          value: qwen3
+  instances: 1
+  providers:
+    names:
+      - athena-a100
+  retentionPolicy:
+    mode: ReleaseWhenIdle
+    idleLimit: 30m
+  workload:
+    contextTokens:
+      short: 128
+      typical: 1024
+      longest: 4096
+    outputTokens:
+      typical: 128
+      longest: 512
+    targetSessions: 4

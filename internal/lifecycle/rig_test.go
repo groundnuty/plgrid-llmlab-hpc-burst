@@ -22,6 +22,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -146,6 +147,10 @@ type rig struct {
 	// extra are the Providers a test added beside the rig's own
 	// (addProvider), each with its fake Slurm and Provider controller.
 	extra []*rigExtra
+	// noTunnels: syncAgents does not play the path-state writer
+	// (syncTunnels), so a test sets TunnelConnected itself, or leaves it
+	// absent.
+	noTunnels bool
 }
 
 type rigOption func(*rigConfig)
@@ -431,6 +436,35 @@ func (rg *rig) Step() {
 	}
 }
 
+// syncTunnels plays #90's path-state writer, which sets TunnelConnected from
+// frps's proxy list (HBEP-6, Path state): the agent starts frpc when it runs
+// the Instance, so every Instance that has not ended, on an Allocation whose
+// agent runs, has its proxy online, True with reason ProxyOnline. It writes
+// only a change, as the writer does, and a write that fails (a test's injected
+// fault) is kept in rg.errs and tried again next round, as the writer retries.
+// A test that sets the condition itself sets rg.noTunnels.
+func (rg *rig) syncTunnels() {
+	rg.t.Helper()
+	var l v1alpha1.InstanceList
+	if err := rg.c.List(rg.ctx, &l); err != nil {
+		rg.t.Fatal(err)
+	}
+	for i := range l.Items {
+		in := &l.Items[i]
+		ra, ok := rg.agents[in.Spec.AllocationRef.Name]
+		if ended(in) || !ok || ra.stopped || isTrue(in.Status.Conditions, v1alpha1.ConditionTunnelConnected) {
+			continue
+		}
+		apimeta.SetStatusCondition(&in.Status.Conditions, metav1.Condition{
+			Type: v1alpha1.ConditionTunnelConnected, Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonProxyOnline,
+			Message: "frps lists the Instance's proxy as online", LastTransitionTime: metav1.NewTime(rg.clock.Now()),
+		})
+		if err := rg.c.Status().Update(rg.ctx, in); err != nil {
+			rg.errs = append(rg.errs, fmt.Errorf("path-state writer: set TunnelConnected on %s: %w", in.Name, err))
+		}
+	}
+}
+
 // syncAgents keeps the gate's table and the agents in line with the jobs: a
 // job that runs gets an agent; one that ended stops its agent.
 func (rg *rig) syncAgents() {
@@ -476,6 +510,11 @@ func (rg *rig) syncAgents() {
 		if err := ra.agent.Step(rg.ctx); err != nil {
 			rg.errs = append(rg.errs, fmt.Errorf("agent of %s: %w", ra.alloc, err))
 		}
+	}
+	// The tunnel follows the agent: frpc starts when the agent runs the
+	// Instance (HBEP-6), so every path that moves the agents moves it too.
+	if !rg.noTunnels {
+		rg.syncTunnels()
 	}
 }
 
