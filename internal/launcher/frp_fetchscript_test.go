@@ -41,8 +41,8 @@ func TestScriptsMapArchitecturesAsCPUArchOfDoes(t *testing.T) {
 	if len(got) == 0 {
 		t.Fatal("no architecture pair found in hack/cpu-arch.sh's CPU_ARCH_PAIRS")
 	}
-	if !maps.Equal(got, cpuArchOf) {
-		t.Errorf("hack/cpu-arch.sh maps %v, cpuArchOf maps %v", got, cpuArchOf)
+	if !maps.Equal(got, cpuArchOf()) {
+		t.Errorf("hack/cpu-arch.sh maps %v, cpuArchOf maps %v", got, cpuArchOf())
 	}
 	// Written out: frp's amd64 is the kernel's x86_64, arm64 is aarch64.
 	if got["amd64"] != "x86_64" || got["arm64"] != "aarch64" {

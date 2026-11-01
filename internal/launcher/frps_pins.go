@@ -65,10 +65,6 @@ func parseFrpPins(content string) ([]FrpPin, error) {
 // frpcDigest takes (agentapi.AgentConfig).
 var sha256Form = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-// cpuArchOf maps the release's architecture names to the kernel's machine names, which platform
-// profiles use for cpuArch (v1alpha1.AcceleratorClass) and agent.json's frpc digest is keyed by.
-var cpuArchOf = map[string]string{"amd64": "x86_64", "arm64": "aarch64"}
-
 // FrpcDigests returns the sha256 of the pinned frpc of a version for each architecture, keyed by
 // cpuArch (x86_64, aarch64): the digests agent.json names (HBEP-4, Submission: Files first). A
 // pinned architecture with no cpuArch name is an error, not a digest left out.
@@ -82,11 +78,12 @@ func FrpcDigests(version string) (map[string]string, error) {
 
 func frpcDigests(pins []FrpPin, version string) (map[string]string, error) {
 	out := map[string]string{}
+	names := cpuArchOf()
 	for _, p := range pins {
 		if p.Version != version {
 			continue
 		}
-		arch, ok := cpuArchOf[p.Arch]
+		arch, ok := names[p.Arch]
 		if !ok {
 			return nil, fmt.Errorf("frp-pins.txt pins frp %s for %s, which has no cpuArch name", p.Version, p.Arch)
 		}

@@ -32,7 +32,7 @@
 # prints `go version` next to each digest.
 #
 # GOARCH comes from hack/cpu-arch.sh, the one table of the architecture names (the launcher's
-# cpuArchOf is the Go one). A cpuArch it does not know stops the run before anything is built.
+# archTable is the Go one). A cpuArch it does not know stops the run before anything is built.
 #
 # DIR may be relative to the working directory; it is made absolute first, since the build runs in the
 # repository. Each binary is built inside DIR under a name of its own and renamed into place, so two
