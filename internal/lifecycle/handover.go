@@ -47,8 +47,20 @@ func (p *pass) capacity() error {
 	}
 	prim := p.primaries()
 	desired := int(p.md.Spec.Instances)
+	// A missing primary whose predecessor drained in no-overlap mode is that
+	// predecessor's successor, marked, on its Provider first (HBEP-7,
+	// Handover, No-overlap mode, the one-slot path).
+	preds := p.noOverlapPredecessors()
 	for i := len(prim); i < desired; i++ {
-		ok, err := p.provision(nil)
+		var ok bool
+		var err error
+		if len(preds) > 0 {
+			pred := preds[0]
+			preds = preds[1:]
+			ok, err = p.provisionWith(pred, placeOpts{successorOf: pred.Annotations[annotationNoOverlap]})
+		} else {
+			ok, err = p.provision(nil)
+		}
 		if err != nil {
 			return err
 		}
@@ -233,7 +245,11 @@ func (p *pass) replacements() error {
 			if p.now.Before(t) {
 				p.at(t)
 			} else {
-				placed, err := p.provision(in)
+				ov, err := p.overlap(in)
+				if err != nil {
+					return err
+				}
+				placed, err := p.placeReplacement(in, ov)
 				if err != nil {
 					return err
 				}
@@ -246,6 +262,13 @@ func (p *pass) replacements() error {
 		if p.now.Before(late) {
 			p.at(late)
 			continue
+		}
+		ov, err := p.overlap(in)
+		if err != nil {
+			return err
+		}
+		if ov.blocked {
+			continue // no-overlap mode: the gap is planned, so no ReplacementLate
 		}
 		started := false
 		if repl != nil {

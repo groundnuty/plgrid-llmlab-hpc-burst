@@ -66,6 +66,7 @@ func (p *pass) writeStatus() error {
 		a.Instances++
 	}
 	p.submissionRejected()
+	p.noOverlapGap(ready, desired)
 	if everReady && ready < desired {
 		p.degrade(v1alpha1.ReasonCapacityDropped, "%d of %d desired Instances are ready", ready, desired)
 	}

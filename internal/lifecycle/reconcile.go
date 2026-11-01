@@ -106,7 +106,9 @@ type pass struct {
 	// noSlot collects the Providers that had no free submit slot, by name,
 	// naming each one's count and limit (SubmitLimitReached).
 	noSlot map[string]string
-	next   time.Time
+	// overlaps memoizes the no-overlap decision per primary (nooverlap.go).
+	overlaps map[types.UID]overlapCheck
+	next     time.Time
 }
 
 // at asks for the next pass no later than t.

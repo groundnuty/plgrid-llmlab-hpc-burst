@@ -539,6 +539,9 @@ func (p *pass) handOver(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av ag
 		p.r.Recorder.Event(in, nil, eventReplaced, "HandedOver", fmt.Sprintf("drain start reached; Instance %s serves in its place", repl.Name))
 	} else {
 		p.r.Recorder.Event(p.mdObject(in), in, eventDegraded, v1alpha1.ReasonCapacityDropped, "drain start reached with no replacement ready: capacity drops (HBEP-7, drain rule)")
+		if err := p.markNoOverlap(in); err != nil {
+			return err
+		}
 	}
 	if err := p.startDrain(in); err != nil {
 		return err
