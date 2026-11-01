@@ -79,7 +79,14 @@ func (c *Controller) submit(ctx context.Context, p *pass, s *allocState) (bool, 
 		return true, nil
 	case provider.Rejected:
 		s.obs.Phase = v1alpha1.AllocationSubmitting
-		return false, c.writeRecord(ctx, s, c.newRecord(attempt, v1alpha1.SubmissionRejected, errText(serr), p.now))
+		r := c.newRecord(attempt, v1alpha1.SubmissionRejected, errText(serr), p.now)
+		// A refusal for a full submit limit carries its code in the same
+		// record (v1alpha1.SubmissionRecord.Code; HBEP-4, QOS limits).
+		var pr *provider.PolicyRefusal
+		if errors.As(serr, &pr) && pr.SubmitLimit() {
+			r.Code = v1alpha1.ReasonSubmitLimitReached
+		}
+		return false, c.writeRecord(ctx, s, r)
 	default:
 		s.obs.Phase = v1alpha1.AllocationSubmissionUnknown
 		return false, c.writeRecord(ctx, s, c.newRecord(attempt, v1alpha1.SubmissionUnknown, errText(serr), p.now))

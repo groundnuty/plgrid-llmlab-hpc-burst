@@ -236,10 +236,25 @@ type SubmissionRecord struct {
 	Time *metav1.Time `json:"time,omitempty"`
 
 	// Reason for the state: for Rejected, the scheduler's reason, which the
-	// lifecycle controller shows as SubmissionRejected (HBEP-7, Provisioning).
+	// lifecycle controller shows as SubmissionRejected, or as
+	// SubmitLimitReached when Code says so (HBEP-7, Provisioning). It is text
+	// for people; a controller matches on Code, never on it.
 	//
 	// +optional
 	Reason string `json:"reason,omitempty"`
+
+	// Code classifies a Rejected attempt: ReasonSubmitLimitReached when Slurm
+	// refused it for a full submit limit, told by its reason name
+	// (provider.PolicyRefusal.SubmitLimit; HBEP-4, QOS limits). The
+	// Allocation then stays Submitting and waits for the Rejected backoff, and
+	// nothing fails. Empty for any other refusal, a policy refusal for another
+	// limit included, and for every other state. The Provider's controller
+	// writes it with the state, in one record, so the lifecycle controller
+	// never sees a Rejected state without its code.
+	//
+	// +optional
+	// +kubebuilder:validation:Enum=SubmitLimitReached
+	Code string `json:"code,omitempty"`
 }
 
 // AllocationPhase is the phase of an Allocation's job as its Provider's

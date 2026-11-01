@@ -212,6 +212,20 @@ func TestAllocationPhasesAndSubmissionStates(t *testing.T) {
 	got.Status.AtProvider.Submission = &v1alpha1.SubmissionRecord{Attempt: 1, State: "Pending"}
 	requireRefused(t, c.Status().Update(bg(), got), "Unsupported value")
 
+	// A Rejected attempt's code is SubmitLimitReached or absent (HBEP-4, QOS
+	// limits), and it round-trips in the mirror.
+	must(t, c.Get(bg(), objKey(a), got), "get")
+	got.Status.AtProvider.Submission = &v1alpha1.SubmissionRecord{Attempt: 1, State: v1alpha1.SubmissionRejected, Code: "SubmissionRejected"}
+	requireRefused(t, c.Status().Update(bg(), got), "Unsupported value")
+	must(t, c.Get(bg(), objKey(a), got), "get")
+	got.Status.AtProvider.Submission = &v1alpha1.SubmissionRecord{Attempt: 1, State: v1alpha1.SubmissionRejected,
+		Code: v1alpha1.ReasonSubmitLimitReached, Reason: "sbatch: error: QOSMaxSubmitJobPerUserLimit"}
+	must(t, c.Status().Update(bg(), got), "a Rejected attempt with its code")
+	must(t, c.Get(bg(), objKey(a), got), "get")
+	if s := got.Status.AtProvider.Submission; s == nil || s.Code != v1alpha1.ReasonSubmitLimitReached {
+		t.Errorf("submission mirror read back as %+v, want code SubmitLimitReached", s)
+	}
+
 	for _, ph := range []v1alpha1.AllocationPhase{v1alpha1.AllocationSubmitting, v1alpha1.AllocationSubmissionUnknown,
 		v1alpha1.AllocationHeld, v1alpha1.AllocationPending, v1alpha1.AllocationRunning, v1alpha1.AllocationEnded,
 		v1alpha1.AllocationFailed, v1alpha1.AllocationLost, v1alpha1.AllocationRefused} {

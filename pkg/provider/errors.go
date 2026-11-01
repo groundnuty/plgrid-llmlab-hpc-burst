@@ -71,3 +71,52 @@ func (e *InvalidProfileError) Error() string {
 	}
 	return fmt.Sprintf("provider %s: invalid profile or settings: %s", e.Provider, strings.Join(parts, "; "))
 }
+
+// Slurm's reason names for a full submit limit (HBEP-4, QOS limits): a QOS's
+// MaxSubmitJobsPerUser, an association's MaxSubmitJobs and an account's. A
+// policy refusal with one of them is SubmitLimitReached; any other reason is an
+// ordinary Rejected attempt (`@hpc-burst-science-agent`, 1 Nov 2026, from PR
+// #151's review).
+const (
+	ReasonQOSMaxSubmitJobPerUserLimit = "QOSMaxSubmitJobPerUserLimit"
+	ReasonAssocMaxSubmitJobLimit      = "AssocMaxSubmitJobLimit"
+	ReasonMaxSubmitJobsPerAccount     = "MaxSubmitJobsPerAccount"
+)
+
+// IsSubmitLimitReason reports whether a Slurm reason name is a full submit
+// limit: exactly one of the three names above. Any other name, a stand-alone
+// breach such as QOSMaxWallDurationPerJobLimit included, is not.
+func IsSubmitLimitReason(name string) bool {
+	switch name {
+	case ReasonQOSMaxSubmitJobPerUserLimit, ReasonAssocMaxSubmitJobLimit, ReasonMaxSubmitJobsPerAccount:
+		return true
+	}
+	return false
+}
+
+// PolicyRefusal is a submission that Slurm refused for its accounting policy:
+// sbatch's standard error ended with the accounting-policy line ("Batch job
+// submission failed: Job violates accounting/QOS policy ..."), and the line
+// before it named the reason (HBEP-4, QOS limits, A limit refusal). Submit
+// returns it, possibly wrapped, with the outcome Rejected; callers find it
+// with errors.As and classify it by Reason, never by its text. A refusal with
+// no reason line is not a PolicyRefusal.
+type PolicyRefusal struct {
+	// Reason is Slurm's reason name, for example QOSMaxSubmitJobPerUserLimit.
+	Reason string
+	// Text is what Slurm printed, the reason line and the policy line, for
+	// messages: the Allocation's message carries it.
+	Text string
+}
+
+func (e *PolicyRefusal) Error() string {
+	if e.Text == "" {
+		return "sbatch: refused for the accounting policy: " + e.Reason
+	}
+	return e.Text
+}
+
+// SubmitLimit reports whether the refusal is for a full submit limit
+// (IsSubmitLimitReason): the Allocation then waits with reason
+// SubmitLimitReached, and nothing fails.
+func (e *PolicyRefusal) SubmitLimit() bool { return IsSubmitLimitReason(e.Reason) }

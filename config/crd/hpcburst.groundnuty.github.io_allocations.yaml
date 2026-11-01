@@ -469,10 +469,25 @@ spec:
                         description: Attempt is the attempt's number, from 1.
                         format: int32
                         type: integer
+                      code:
+                        description: |-
+                          Code classifies a Rejected attempt: ReasonSubmitLimitReached when Slurm
+                          refused it for a full submit limit, told by its reason name
+                          (provider.PolicyRefusal.SubmitLimit; HBEP-4, QOS limits). The
+                          Allocation then stays Submitting and waits for the Rejected backoff, and
+                          nothing fails. Empty for any other refusal, a policy refusal for another
+                          limit included, and for every other state. The Provider's controller
+                          writes it with the state, in one record, so the lifecycle controller
+                          never sees a Rejected state without its code.
+                        enum:
+                        - SubmitLimitReached
+                        type: string
                       reason:
                         description: |-
                           Reason for the state: for Rejected, the scheduler's reason, which the
-                          lifecycle controller shows as SubmissionRejected (HBEP-7, Provisioning).
+                          lifecycle controller shows as SubmissionRejected, or as
+                          SubmitLimitReached when Code says so (HBEP-7, Provisioning). It is text
+                          for people; a controller matches on Code, never on it.
                         type: string
                       state:
                         description: State of the attempt.

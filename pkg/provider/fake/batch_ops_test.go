@@ -620,3 +620,27 @@ func TestConcurrentUse(t *testing.T) {
 		t.Fatalf("%d distinct IDs and %d sbatch calls, want 20 and 20", len(got), b.Count("sbatch"))
 	}
 }
+
+// A scripted policy refusal returns a *provider.PolicyRefusal with the reason
+// name and Slurm's two lines, the reason line first (HBEP-4, QOS limits), and
+// registers nothing. A refusal for another limit has its own reason name.
+func TestScriptedPolicyRefusal(t *testing.T) {
+	b, _ := newTestBatch(t)
+	b.Enqueue(Script{Outcome: provider.Rejected, Policy: "QOSMaxSubmitJobPerUserLimit"}, Script{Outcome: provider.Rejected, Policy: "QOSMaxWallDurationPerJobLimit"})
+	const want = "sbatch: error: QOSMaxSubmitJobPerUserLimit\nsbatch: error: Batch job submission failed: Job violates accounting/QOS policy (job submit limit, user's size and/or time limits)"
+	id, outcome, err := b.Submit(context.Background(), gpuReq("hb-limit-000000000001", true))
+	var pr *provider.PolicyRefusal
+	if id != "" || outcome != provider.Rejected || !errors.As(err, &pr) {
+		t.Fatalf("Submit = (%q, %s, %v), want no ID, Rejected and a PolicyRefusal", id, outcome, err)
+	}
+	if pr.Reason != "QOSMaxSubmitJobPerUserLimit" || !pr.SubmitLimit() || err.Error() != want {
+		t.Errorf("refusal = %+v, text %q; want the submit-limit reason and Slurm's two lines", pr, err.Error())
+	}
+	_, outcome, err = b.Submit(context.Background(), gpuReq("hb-limit-000000000002", true))
+	if outcome != provider.Rejected || !errors.As(err, &pr) || pr.Reason != "QOSMaxWallDurationPerJobLimit" || pr.SubmitLimit() {
+		t.Errorf("second Submit = (%s, %v), want a PolicyRefusal for QOSMaxWallDurationPerJobLimit that is not a submit limit", outcome, err)
+	}
+	if jobs, err := b.FindByTag(context.Background(), "hb-limit-000000000001", at(0, 0, 0)); err != nil || len(jobs) != 0 {
+		t.Errorf("FindByTag after a refusal = %v, %v; want no job", jobs, err)
+	}
+}

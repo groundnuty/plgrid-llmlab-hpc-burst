@@ -623,3 +623,39 @@ func TestOneBadAllocationDoesNotStopTheOthers(t *testing.T) {
 		t.Fatal("the Provider's status was not written after one Allocation failed")
 	}
 }
+
+// A refusal for a full submit limit is recorded Rejected with the code
+// SubmitLimitReached in the same record, and waits for the backoff like any
+// Rejected attempt; a policy refusal for another limit, and a refusal with no
+// reason line, carry no code (HBEP-4, QOS limits).
+func TestSubmitLimitRefusalIsRecordedWithItsCode(t *testing.T) {
+	e := newEnv(t)
+	e.batch.Enqueue(
+		Script{Outcome: provider.Rejected, Policy: "QOSMaxSubmitJobPerUserLimit"},
+		Script{Outcome: provider.Rejected, Policy: "QOSMaxWallDurationPerJobLimit"},
+		Script{Outcome: provider.Rejected, Reason: "Batch job submission failed: Invalid account"},
+	)
+	e.newAlloc("a1", testProvider)
+	for i, tc := range []struct {
+		at       time.Time
+		wantCode string
+		wantText string
+	}{
+		{at(12, 0, 0), v1alpha1.ReasonSubmitLimitReached, "QOSMaxSubmitJobPerUserLimit"},
+		{at(12, 1, 0), "", "QOSMaxWallDurationPerJobLimit"},
+		{at(12, 2, 0), "", "Invalid account"},
+	} {
+		e.syncAt(tc.at)
+		o := e.wantPhase("a1", v1alpha1.AllocationSubmitting)
+		rec := submission(t, e.alloc("a1"))
+		if rec.Attempt != int32(i+1) || rec.State != v1alpha1.SubmissionRejected || rec.Code != tc.wantCode || !strings.Contains(rec.Reason, tc.wantText) {
+			t.Fatalf("attempt %d: record = %+v, want Rejected with code %q and a reason naming %s", i+1, rec, tc.wantCode, tc.wantText)
+		}
+		if o.Submission == nil || o.Submission.Code != tc.wantCode {
+			t.Fatalf("attempt %d: submission mirror = %+v, want code %q", i+1, o.Submission, tc.wantCode)
+		}
+	}
+	if n := e.batch.Count("sbatch"); n != 3 {
+		t.Fatalf("sbatch count = %d, want 3: each refusal waits for the backoff, then the next attempt runs", n)
+	}
+}
