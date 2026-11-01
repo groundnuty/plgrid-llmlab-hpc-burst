@@ -31,6 +31,7 @@ spec:
       cpusPerGpu: 16 # facts.hardware.node_documented.value.proportional_cpus_per_gpu
       memPerGpu: 128000Mi # facts.hardware.node_documented.value.proportional_ram_per_gpu_mb, 128000 (the node's 1024000 divided by its 8 GPUs)
       imageFormat: sandbox # facts.containers.apptainer_compute_nodes.value.plgrid-gpu-a100 (S1 probe 2: a SIF fails, a sandbox runs); also facts.partitions[name=plgrid-gpu-a100].image_format
+      qos: plgrid # facts.partitions[name=plgrid-gpu-a100].qos, "plgrid" (scontrol show partition, 30 Oct 2026): the QOS Slurm applies to every job on this partition; its limit is typed in qos below
 
     # plgrid-now: three things (`@hpc-burst-science-agent`, 1 Nov 2026, issue #93).
     #   - cpusPerGpu and memPerGpu are left absent on purpose, so that no Instance is planned here: the
@@ -57,9 +58,13 @@ spec:
 
   # The QOSes that a partition's qos or a Provider's qos names, with the limits the plan reads (HBEP-4,
   # QOS limits and Platform profile schema; `@hpc-burst-science-agent`, 1 Nov 2026). An absent limit is no
-  # limit as far as the plan knows. plgrid-now is the QOS of the partition of the same name; a Provider that
-  # sets no qos runs under the association's default, which the profile cannot know.
+  # limit as far as the plan knows. Each partition's QOS is typed: plgrid for plgrid-gpu-a100 and plgrid-now for
+  # the partition of that name. A Provider that sets no qos runs under the association's default, which the
+  # profile cannot know.
   qos:
+    - name: plgrid # facts.slurm.qos.value[name=plgrid] (sacctmgr, 30 Oct 2026): the QOS of plgrid-gpu-a100
+      # No wall limit and no per-user TRES limit (facts.slurm.qos.value[name=plgrid].max_wall and .max_tres_per_user are empty), so the partition's maxTime, 48h, is the limit.
+      maxSubmitPerUser: 1000 # facts.slurm.qos.value[name=plgrid].max_submit_per_user, 1000. Its max_jobs_per_user is empty, and its flag DenyOnLimit has no typed field
     - name: plgrid-now # facts.slurm.qos.value[name=plgrid-now] (sacctmgr, 30 Oct 2026)
       # maxWall is absent: the QOS has none (facts.slurm.qos.value[name=plgrid-now].max_wall is empty); the partition's maxTime, 1h, is the limit.
       maxSubmitPerUser: 1 # facts.slurm.qos.value[name=plgrid-now].max_submit_per_user, 1 (max_jobs_per_user is 1 as well)

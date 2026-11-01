@@ -30,6 +30,9 @@ spec:
       cpuArch: x86_64 # facts.partitions[name=plgrid].arch
       maxTime: 72h # facts.partitions[name=plgrid].max_time, "3-00:00:00"
       gpusPerNode: 0 # facts.partitions[name=plgrid].gres, "(none)"
+      # The partition's own QOS, as on plgrid-gpu-gh200 below: Slurm applies plgrid to every job here before the
+      # job's QOS, so a Provider's qos now has its submit limit of 1 overridden by plgrid's 2000 (HBEP-4, QOS limits).
+      qos: plgrid # facts.partitions[name=plgrid].qos, "plgrid" (scontrol show partition, 30 Oct 2026); its limits are typed in qos below
       # This is a CPU partition for conformance runs only. It hosts no Instance
       # (`@hpc-burst-science-agent`, 31 Oct 2026). gpusPerNode 0 makes the Slurm provider refuse
       # any request for a GPU here (internal/slurm CheckRequest; test TestShippedCPUPartitionRefusesGPUAllocations).
