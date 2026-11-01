@@ -271,7 +271,7 @@ Sources were read on 2026-10-30, except where another date is given.
 - 2026-10-31: the project's licence decided (Apache-2.0, owner) and added at the root; the SBOM tool decided (syft, spike S12); the licence check runs once per module outside `spikes/`, with no empty run; spike modules are outside the check, the allowlist and the dependency review.
 - 2026-10-31: frp's rows, frps and frpc v0.71.1, recorded from HBEP-6 becoming implementable; the PR that adds frp creates `build/dependencies.yaml`.
 - 2026-10-31: the CI licence check is disabled by the owner's decision; the scripts stay in `hack/`.
-- 2026-11-01: the licence policy is removed (Non-goals): the allowlist, `LICENSES/`, the licence check, the dependency reviewer, the release SBOM, and open questions 1 to 5. `build/dependencies.yaml` is dropped: the pins files the code reads are the record. Added: Pinned versions, with controller-runtime held at v0.23.1 for alpha (science-agent ruling, 1 Nov 2026), and Upgrading a pinned dependency.
+- 2026-11-01: implementable. The licence policy is removed (Non-goals): the allowlist, `LICENSES/`, the licence check, the dependency reviewer, the release SBOM, and open questions 1 to 5. `build/dependencies.yaml` is dropped: the pins files the code reads are the record. Added: Pinned versions, with controller-runtime held at v0.23.1 for alpha (science-agent ruling, 1 Nov 2026), and Upgrading a pinned dependency.
 
 ## Amendments
 
