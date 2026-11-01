@@ -13,6 +13,9 @@ package conformance
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -268,5 +271,48 @@ func TestGH200RowIsCheckedUnderQOSNow(t *testing.T) {
 				t.Errorf("error = %v, want one containing %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// The plugin refuses a request whose qos is not the Provider's, so a direct
+// submit of the live run that is written out as a literal, without the qos,
+// would be refused only when a run reaches it, with a slot in hand. Every
+// provider.SubmitRequest literal of this package's tests is therefore made by
+// heldRequest, except the one test that runs against a fake platform with a
+// Provider that sets no qos.
+func TestNoDirectSubmitIsBuiltWithoutTheQOS(t *testing.T) {
+	allowed := map[string]bool{"heldRequest": true, "TestRoundTripJobNameAgainstTheFakePlatform": true}
+	files, err := filepath.Glob("*_test.go")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no test files: %v", err)
+	}
+	literals := 0
+	for _, file := range files {
+		f, err := parser.ParseFile(token.NewFileSet(), file, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			ast.Inspect(fn, func(n ast.Node) bool {
+				lit, ok := n.(*ast.CompositeLit)
+				if !ok {
+					return true
+				}
+				if sel, ok := lit.Type.(*ast.SelectorExpr); ok && sel.Sel.Name == "SubmitRequest" {
+					literals++
+					if !allowed[fn.Name.Name] {
+						t.Errorf("%s: %s builds a provider.SubmitRequest literal; use heldRequest, which carries the Provider's qos", file, fn.Name.Name)
+					}
+				}
+				return true
+			})
+		}
+	}
+	if literals < 2 {
+		t.Errorf("found %d provider.SubmitRequest literals, want at least heldRequest's and the fake test's: the scan is not looking at the code", literals)
 	}
 }
