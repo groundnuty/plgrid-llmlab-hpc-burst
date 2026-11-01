@@ -26,12 +26,64 @@ import (
 // TestProbeTakesAFailingPathOutOfRoutingAndBack.
 
 // muxDouble answers CONNECT <UID>:80 with 200 for the UIDs it has and 404
-// otherwise, then answers GET /health with the UID's status.
+// otherwise, then answers GET /health with the UID's status. holdNext makes it
+// hold an exchange unanswered.
 type muxDouble struct {
 	ln     net.Listener
 	mu     sync.Mutex
 	health map[types.UID]int
 	hits   map[types.UID]int
+	holds  map[types.UID]*muxHold
+}
+
+// muxHold holds a UID's exchanges at one step until it is released.
+type muxHold struct {
+	step    string        // "connect" or "health"
+	held    chan struct{} // one value per exchange held
+	release chan struct{}
+	once    sync.Once
+}
+
+// holdNext holds the UID's exchanges at step until release is called: at
+// "connect" the double reads the CONNECT and answers nothing; at "health" it
+// answers the CONNECT, reads GET /health and answers nothing. held gets a
+// value as each exchange is held; released, each one answers as usual. The
+// test's cleanup releases it too, so no exchange outlives the test.
+func (m *muxDouble) holdNext(t *testing.T, uid types.UID, step string) (held <-chan struct{}, release func()) {
+	t.Helper()
+	h := &muxHold{step: step, held: make(chan struct{}, 64), release: make(chan struct{})}
+	m.mu.Lock()
+	m.holds[uid] = h
+	m.mu.Unlock()
+	release = func() {
+		h.once.Do(func() {
+			m.mu.Lock()
+			if m.holds[uid] == h {
+				delete(m.holds, uid)
+			}
+			m.mu.Unlock()
+			close(h.release)
+		})
+	}
+	t.Cleanup(release)
+	return h.held, release
+}
+
+// wait holds the exchange when a hold is set for the UID at this step.
+func (m *muxDouble) wait(c net.Conn, uid types.UID, step string) {
+	m.mu.Lock()
+	h := m.holds[uid]
+	m.mu.Unlock()
+	if h == nil || h.step != step {
+		return
+	}
+	_ = c.SetDeadline(time.Time{})
+	select {
+	case h.held <- struct{}{}:
+	default:
+	}
+	<-h.release
+	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
 }
 
 func startMuxDouble(t *testing.T) *muxDouble {
@@ -40,7 +92,7 @@ func startMuxDouble(t *testing.T) *muxDouble {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := &muxDouble{ln: ln, health: map[types.UID]int{}, hits: map[types.UID]int{}}
+	m := &muxDouble{ln: ln, health: map[types.UID]int{}, hits: map[types.UID]int{}, holds: map[types.UID]*muxHold{}}
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -75,8 +127,9 @@ func (m *muxDouble) serve(c net.Conn) {
 		return
 	}
 	uid := types.UID(strings.TrimSuffix(req.Host, ":80"))
+	m.wait(c, uid, "connect")
 	m.mu.Lock()
-	status, ok := m.health[uid]
+	_, ok := m.health[uid]
 	m.mu.Unlock()
 	if !ok {
 		_, _ = io.WriteString(c, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
@@ -86,8 +139,10 @@ func (m *muxDouble) serve(c net.Conn) {
 	if req, err = http.ReadRequest(br); err != nil || req.URL.Path != "/health" || req.Header.Get("Authorization") != "" {
 		return
 	}
+	m.wait(c, uid, "health")
 	m.mu.Lock()
 	m.hits[uid]++
+	status := m.health[uid]
 	m.mu.Unlock()
 	fmt.Fprintf(c, "HTTP/1.1 %d %s\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", status, http.StatusText(status))
 }
@@ -100,9 +155,12 @@ func probeInstance(uid types.UID, phase v1alpha1.InstancePhase, tunnel metav1.Co
 	return in
 }
 
-func newTestProber(t *testing.T, m *muxDouble, clk clock.Clock, insts *[]v1alpha1.Instance, mu *sync.Mutex) (*Prober, *Tunnel, *recordedPathEvents) {
+func newTestProber(t *testing.T, m *muxDouble, clk clock.Clock, insts *[]v1alpha1.Instance, mu *sync.Mutex, edit ...func(*Config)) (*Prober, *Tunnel, *recordedPathEvents) {
 	t.Helper()
 	cfg := Config{}.WithDefaults()
+	for _, e := range edit {
+		e(&cfg)
+	}
 	tun := NewTunnel(m.ln.Addr().String(), cfg.TunnelSetupTimeout.D())
 	ev := &recordedPathEvents{}
 	p := NewProber(cfg, tun, clk, func() []v1alpha1.Instance {
@@ -141,16 +199,29 @@ func TestProbeReportsPathProbeFailingOnlyForAReadyInstanceWithItsTunnelUp(t *tes
 		}
 		m.set(in.UID, http.StatusServiceUnavailable)
 	}
+	// probeFailures is 2: one failed probe keeps every registration, and the
+	// second takes them all.
 	p.Round(ctx)
-	p.Round(ctx)
+	for _, in := range insts {
+		if !tun.Registered(in.UID) {
+			t.Errorf("%s (%s) lost its registration after one failed probe, want two", in.Name, in.Status.Phase)
+		}
+	}
+	if f := ev.failings(); len(f) != 0 {
+		t.Errorf("PathProbeFailing reports %+v after one failed probe, want none", f)
+	}
 	p.Round(ctx)
 	for _, in := range insts {
 		if tun.Registered(in.UID) {
-			t.Errorf("%s still registered after three failed probes", in.Name)
+			t.Errorf("%s (%s) still registered after two failed probes", in.Name, in.Status.Phase)
 		}
 	}
-	if f := ev.failings(); len(f) != 1 || f[0].UID != insts[0].UID {
-		t.Errorf("PathProbeFailing reports %+v, want one, for the ready Instance with TunnelConnected True", f)
+	if f := ev.failings(); len(f) != 1 || f[0].UID != insts[0].UID || f[0].Failures != 2 {
+		t.Errorf("PathProbeFailing reports %+v after two failed probes, want one, for the ready Instance with TunnelConnected True", f)
+	}
+	p.Round(ctx)
+	if f := ev.failings(); len(f) != 1 {
+		t.Errorf("PathProbeFailing reports %+v after a third failed probe, want still the one", f)
 	}
 	cmu.Lock()
 	defer cmu.Unlock()
@@ -255,9 +326,59 @@ func TestProbeCutByTheFrontsStopIsNoVerdict(t *testing.T) {
 	if !tun.Registered(uid) || probed != 1 || len(ev.failings()) != 0 {
 		t.Errorf("after probes cut by a stop: registered %v, %d results, %d PathProbeFailing; want registered, 1, 0", tun.Registered(uid), probed, len(ev.failings()))
 	}
+	// The positive control: the same Instance does lose its registration to
+	// two real failures, so the verdicts above came from the cut.
 	p.Round(context.Background())
 	p.Round(context.Background())
-	if tun.Registered(uid) {
-		t.Error("two real failures after the stop's cut probes did not unregister: the cut probes counted")
+	if tun.Registered(uid) || len(ev.failings()) != 1 {
+		t.Errorf("after two real failures: registered %v, %d PathProbeFailing; want unregistered and 1", tun.Registered(uid), len(ev.failings()))
+	}
+}
+
+// TestProbeCutInFlightByTheStopIsNoVerdict: the front stops while a probe
+// waits, held at frps's answer to its CONNECT or at the engine's answer to
+// GET /health. Prober.Run returns at once, well before tunnelSetupTimeout or
+// probeTimeout (a minute each here, so only the cut can end the probe in
+// time), and the cut probe is no verdict: the registration stays and nothing
+// is reported.
+func TestProbeCutInFlightByTheStopIsNoVerdict(t *testing.T) {
+	for _, step := range []string{"connect", "health"} {
+		t.Run(step, func(t *testing.T) {
+			m := startMuxDouble(t)
+			var mu sync.Mutex
+			insts := []v1alpha1.Instance{probeInstance("00000000-0000-4000-8000-000000000041", v1alpha1.InstanceReady, metav1.ConditionTrue)}
+			uid := insts[0].UID
+			m.set(uid, http.StatusOK)
+			p, tun, ev := newTestProber(t, m, clock.NewFake(t0), &insts, &mu, func(c *Config) {
+				c.TunnelSetupTimeout, c.ProbeTimeout = Duration(time.Minute), Duration(time.Minute)
+			})
+			p.Round(context.Background())
+			if !tun.Registered(uid) {
+				t.Fatal("not registered after a passing probe")
+			}
+			held, _ := m.holdNext(t, uid, step)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan struct{})
+			go func() { p.Run(ctx); close(done) }()
+			select {
+			case <-held:
+			case <-time.After(30 * time.Second):
+				t.Fatalf("the probe never reached the held %s", step)
+			}
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(20 * time.Second):
+				t.Fatalf("Prober.Run still runs 20 s after the stop: the probe held at %s waited for its deadline", step)
+			}
+			ev.mu.Lock()
+			probed := len(ev.probed)
+			ev.mu.Unlock()
+			if !tun.Registered(uid) || probed != 1 || len(ev.failings()) != 0 {
+				t.Errorf("after a probe cut at %s: registered %v, %d results, %d PathProbeFailing; want registered, 1 (the first pass), 0",
+					step, tun.Registered(uid), probed, len(ev.failings()))
+			}
+		})
 	}
 }
