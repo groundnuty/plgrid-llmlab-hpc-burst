@@ -12,10 +12,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
@@ -269,5 +272,57 @@ func TestConfigureDuringPathsDoesNotRecacheTheOldDir(t *testing.T) {
 
 	if got := pathsOf(t, r.batch); got.Staging != fakeScratch+"/stage-b" {
 		t.Errorf("Paths = %+v, want staging %s/stage-b: the in-flight call re-cached the old directory", got, fakeScratch)
+	}
+}
+
+// A partition with a tmpDir and its tmpDirFeature submits with --constraint
+// and a batch script that sets TMPDIR from the job's own variable. When that
+// script stops (TestBootstrapStopsOnAnUnusableTmpDir runs it in /bin/sh: an
+// unset or unusable variable exits non-zero), Slurm ends the job FAILED, and
+// the Provider reads it as AllocationFailed (science-agent rulings, 1 Nov
+// 2026, issue #125 and the #127 review).
+func TestTmpDirJobThatEndsFailedIsAllocationFailed(t *testing.T) {
+	ctx := context.Background()
+	r := newFakeRig(t, "$SCRATCH/stage")
+	profile := exampleProfile("$SCRATCH/stage")
+	profile.Partition.TmpDir, profile.Partition.TmpDirFeature = "$SCRATCH_LOCAL", "localfs"
+	r.batch.Configure(profile, provider.Settings{Provider: "example", Account: "example-account", Partition: fakePart})
+	id, outcome, err := r.batch.Submit(ctx, provider.SubmitRequest{
+		Tag: "hb-example-0123456789ab", Account: "example-account",
+		Params: v1alpha1.BatchParameters{
+			Partition: fakePart, TimeLimit: "1h", GPUs: 1, CPUsPerTask: 8,
+			Memory: resource.MustParse("16Gi"), Nodes: 1, AgentDigest: strings.Repeat("a", 64),
+		},
+	})
+	if err != nil || outcome != provider.Accepted {
+		t.Fatalf("Submit = %q, %s, %v", id, outcome, err)
+	}
+	n, err := strconv.Atoi(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, ok := r.plat.Job(n)
+	if !ok {
+		t.Fatalf("the fake has no job %d", n)
+	}
+	if job.Constraint != "localfs" {
+		t.Errorf("--constraint %q, want localfs", job.Constraint)
+	}
+	if !strings.Contains(job.Wrap, "TMPDIR=${SCRATCH_LOCAL:?}") {
+		t.Errorf("the batch script does not set TMPDIR from SCRATCH_LOCAL: %s", job.Wrap)
+	}
+	if err := r.plat.Start(n); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.plat.End(n, fakeslurm.Failed); err != nil {
+		t.Fatal(err)
+	}
+	r.clock.Advance(time.Minute)
+	got, found, err := r.batch.Observe(ctx, id)
+	if err != nil || !found {
+		t.Fatalf("Observe = %+v, %v, %v", got, found, err)
+	}
+	if got.Phase != v1alpha1.AllocationFailed {
+		t.Errorf("phase %s (state %v), want %s", got.Phase, got.State, v1alpha1.AllocationFailed)
 	}
 }

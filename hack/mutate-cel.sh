@@ -104,7 +104,9 @@ platformprofiles:$.spec.inflightWindow#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.lostGrace#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.maxIdle#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.minJobAge#0|^TestDurationsArePositiveAndFit$
+platformprofiles:$.spec.partitions[]#0|^TestPartitionTmpDirFeatureNeedsTmpDir$
 platformprofiles:$.spec.partitions[].maxTime#0|^TestDurationsArePositiveAndFit$
+platformprofiles:$.spec.partitions[].tmpDir#0|^TestPartitionTmpDirRefusesDotDotSegments$
 platformprofiles:$.spec.restart.backoff#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.restart.stopGrace#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.restart.window#0|^TestDurationsArePositiveAndFit$

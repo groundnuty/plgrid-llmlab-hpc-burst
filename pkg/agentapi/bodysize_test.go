@@ -46,9 +46,11 @@ func worstWarmUp(rounds int) *WarmUpResult {
 // The bounds are the contract's numbers; a change is a decision, so the test
 // names them.
 func TestSizeBounds(t *testing.T) {
-	if MaxTargetSessions != 1024 || MaxTimingErrorBytes != 64 || MaxMessageBytes != 256 ||
+	if MaxTargetSessions != 1024 || MaxTimingErrorBytes != 64 || MaxMessageBytes != 256 || MaxLogTailBytes != 8192 ||
+		MaxGenerationConfigKeys != 32 || MaxGenerationConfigKeyBytes != 64 || MaxGenerationConfigValueBytes != 128 ||
 		WarmUpBudgetBytes != 3145728 || MaxBodyBytes != 4194304 || MaxWarmUpRounds != 5 {
-		t.Errorf("bounds changed: %d %d %d %d %d %d", MaxTargetSessions, MaxTimingErrorBytes, MaxMessageBytes,
+		t.Errorf("bounds changed: %d %d %d %d %d %d %d %d %d %d", MaxTargetSessions, MaxTimingErrorBytes, MaxMessageBytes, MaxLogTailBytes,
+			MaxGenerationConfigKeys, MaxGenerationConfigKeyBytes, MaxGenerationConfigValueBytes,
 			WarmUpBudgetBytes, MaxBodyBytes, MaxWarmUpRounds)
 	}
 }
@@ -115,6 +117,10 @@ func restOfReport(warm *WarmUpResult) Report {
 	}
 	start := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
 	exit := 0
+	genCfg := map[string]string{}
+	for i := range MaxGenerationConfigKeys {
+		genCfg[strings.Repeat("<", MaxGenerationConfigKeyBytes-2)+strconv.Itoa(10+i)] = strings.Repeat("<", MaxGenerationConfigValueBytes)
+	}
 	return Report{
 		Time: start,
 		Instance: &InstanceReport{
@@ -122,7 +128,7 @@ func restOfReport(warm *WarmUpResult) Report {
 			Staging: &Staging{Phase: StagingDone, BytesDone: 1 << 40, BytesTotal: 1 << 40, Message: msg},
 			Workers: []WorkerReport{{
 				Name: "worker-0", Phase: PartRunning, PID: 4242, StartTime: &start, ExitCode: &exit, Generation: 1,
-				EngineSocket: "/tmp/hb-run/worker-0.sock",
+				EngineSocket: "/tmp/hb-run/worker-0.sock", LogTail: strings.Repeat("<", MaxLogTailBytes),
 				Health: &Health{Time: start, ProbeOK: true, MetricsReadAt: &start, RunningRequests: Int64(12), WaitingRequests: Int64(3),
 					GeneratedTokens: Int64(1 << 40), KVCacheUsage: Float64(0.5),
 					Preemptions: Int64(1 << 40), PrefixCacheQueriedTokens: Int64(1 << 40), PrefixCacheHitTokens: Int64(1 << 40),
@@ -134,7 +140,7 @@ func restOfReport(warm *WarmUpResult) Report {
 			Checks: &CheckResults{
 				VerificationGeneration: 1,
 				Verify: &VerifyResult{Done: true, Files: files, EngineVersion: "0.99.0", ImageDigest: "sha256:" + strings.Repeat("ab", 32),
-					Settings: map[string]string{"max-model-len": "32768", "max-num-seqs": "256"}, Fingerprint: "fp_0123456789", TemplateOverhead: 12, Error: msg},
+					Settings: map[string]string{"max-model-len": "32768", "max-num-seqs": "256"}, Fingerprint: "fp_0123456789", TemplateOverhead: 12, Error: msg, GenerationConfig: genCfg},
 				Qualify: &QualifyResult{Done: true, Checks: []CheckOutcome{
 					{Name: CheckHealth, Passed: true, Reason: ReasonReasoningBudgetExhausted, Message: msg},
 					{Name: CheckChat, Passed: true, Reason: ReasonReasoningBudgetExhausted, Message: msg},

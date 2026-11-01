@@ -27,6 +27,9 @@ type WorkerExec struct {
 	// RunDir is the job's private run directory, bound at
 	// agentapi.ContainerRunDir; the engine's socket is in it.
 	RunDir string
+	// CacheDir is the Allocation's cache directory, bound read-write at
+	// agentapi.ContainerCacheDir; the engine's cache variables point there.
+	CacheDir string
 	// Launch is the Instance's launch; its Command runs as it is.
 	Launch agentapi.Launch
 	// Key is the Instance's key, passed in Launch.KeyEnv.
@@ -36,25 +39,49 @@ type WorkerExec struct {
 }
 
 // Args returns the apptainer argument vector, without the program: exec with
-// GPU support and a clean environment, the checkpoint bound read-only and the
-// run directory bound read-write, then the image and the launch's Command
-// (HBEP-7, What it runs: the worker). No secret is on it: the key reaches the
-// engine only through the environment (Env).
+// GPU support, a clean environment and no home directory, the checkpoint bound
+// read-only, the run directory and the Allocation's cache directory bound
+// read-write, then the image and the launch's Command (HBEP-7, What it runs:
+// the worker). No secret is on it: the key reaches the engine only through the
+// environment (Env).
+//
+// --no-home keeps Apptainer from binding the user's home directory, where
+// FlashInfer, the CUDA compute cache and other JIT caches wrote in #94's run
+// although the cache variables pointed elsewhere (science-agent ruling,
+// 1 Nov 2026, issue #125). A cache that ignores its variable then cannot write
+// and fails the start, which WorkerReport.LogTail shows.
 func (w WorkerExec) Args() []string {
 	args := []string{
 		"exec",
 		"--nv",
 		"--cleanenv",
+		"--no-home",
 		"--bind", w.CheckpointDir + ":" + agentapi.ContainerModelDir + ":ro",
 		"--bind", w.RunDir + ":" + agentapi.ContainerRunDir,
+		"--bind", w.CacheDir + ":" + agentapi.ContainerCacheDir,
 		w.Image,
 	}
 	return append(args, w.Launch.Command...)
 }
 
+// engineCacheVars are the cache variables the agent points into
+// agentapi.ContainerCacheDir, each at its own subdirectory (science-agent
+// rulings, 1 Nov 2026, issue #125). A launch that sets one of them keeps its
+// own value: the launch's variables are a deployment-ID input (HBEP-3), so the
+// spec, not the agent, has the last word on them.
+var engineCacheVars = []struct{ name, sub string }{
+	{"XDG_CACHE_HOME", "xdg"},
+	{"VLLM_CACHE_ROOT", "vllm"},
+	{"TORCHINDUCTOR_CACHE_DIR", "torchinductor"},
+	{"TRITON_CACHE_DIR", "triton"},
+	{"FLASHINFER_WORKSPACE_BASE", "flashinfer"},
+	{"CUDA_CACHE_PATH", "cuda"},
+}
+
 // Env returns the environment apptainer runs with: the agent's own, without
 // any variable Apptainer would carry into the container, plus
-// APPTAINERENV_<name> for each of the launch's variables and for the key
+// APPTAINERENV_<name> for each of the launch's variables, for each cache
+// variable the launch does not set (engineCacheVars) and for the key
 // variable. With --cleanenv the container sees only those (and Apptainer's
 // own defaults). It refuses a launch variable whose name could not be
 // carried, and a key variable that the launch's Env also sets.
@@ -86,6 +113,11 @@ func (w WorkerExec) Env() ([]string, error) {
 	// It is not a deployment-ID input (HBEP-3's table).
 	if cudaVisible != "" && !seen["CUDA_VISIBLE_DEVICES"] {
 		env = append(env, apptainerEnvPrefixes[0]+"CUDA_VISIBLE_DEVICES="+cudaVisible)
+	}
+	for _, c := range engineCacheVars {
+		if !seen[c.name] {
+			env = append(env, apptainerEnvPrefixes[0]+c.name+"="+agentapi.ContainerCacheDir+"/"+c.sub)
+		}
 	}
 	if w.Launch.KeyEnv != "" {
 		if !validEnvName(w.Launch.KeyEnv) {

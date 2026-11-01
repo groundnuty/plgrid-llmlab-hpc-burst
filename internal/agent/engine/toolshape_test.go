@@ -3,7 +3,10 @@ package engine
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"net/http"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
@@ -37,11 +40,33 @@ func toolDelta(index int, id, typ, name, args string) string {
 	return `{"tool_calls":[` + call + `}]}`
 }
 
-func toolTimed(t *testing.T, events ...sseEvent2) agentapi.RequestTiming {
+// toolTimed runs the tool-call shape against a hand-written stream and returns
+// its timing and the judgement of its assembled call (timedCall).
+func toolTimed(t *testing.T, events ...sseEvent2) (agentapi.RequestTiming, error) {
 	t.Helper()
 	c := New(serveOn(t, sseHandler(events)), "key")
-	return c.timed(context.Background(), warmShape{shape: agentapi.ShapeToolCall, context: 0, output: 64, tools: true})
+	return c.timedCall(context.Background(), warmShape{shape: agentapi.ShapeToolCall, context: 0, output: 64, tools: true})
 }
+
+// logBuffer is a slog handler's target that tests read back.
+type logBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *logBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *logBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+func (l *logBuffer) logger() *slog.Logger { return slog.New(slog.NewTextHandler(l, nil)) }
 
 func ev(payload string) sseEvent2 { return sseEvent2{payload: payload} }
 
@@ -96,14 +121,22 @@ func TestToolShapeAssemblesTheStreamedCall(t *testing.T) {
 		{"text and no call", []sseEvent2{role, ev(chunk(`{"content":"It is sunny."}`, `"stop"`)), ev(usageChunk(5)), ev("[DONE]")}, "calls no tool"},
 		{"a complete call that is cut by the limit", []sseEvent2{role,
 			ev(chunk(toolDelta(0, "call_1", "function", "get_weather", `{"city":"Krakow"}`), `"length"`)), ev(usageChunk(64)), ev("[DONE]")}, "incomplete"},
+		// #94's round 3: the reply spent the budget reasoning and the limit
+		// ended it before any call; it says so, rather than "calls no tool".
+		{"the budget spent reasoning", []sseEvent2{role, ev(chunk(`{"reasoning":"Let me think."}`, `null`)),
+			ev(chunk(`{"reasoning":","}`, `"length"`)), ev(usageChunk(4224)), ev("[DONE]")}, "whole budget of 4224 tokens with no tool call"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := toolTimed(t, tc.events...)
+			got, answer := toolTimed(t, tc.events...)
 			switch {
-			case tc.wantErr == "" && got.Error != "":
-				t.Errorf("timing %+v: want no error", got)
-			case tc.wantErr != "" && !strings.Contains(got.Error, tc.wantErr):
-				t.Errorf("timing %+v: want an error containing %q", got, tc.wantErr)
+			case tc.wantErr == "" && answer != nil:
+				t.Errorf("answer judged %v: want a valid call", answer)
+			case tc.wantErr != "" && (answer == nil || !strings.Contains(answer.Error(), tc.wantErr)):
+				t.Errorf("answer judged %v: want an error containing %q", answer, tc.wantErr)
+			}
+			// Warm-up does not judge the answer: the timing carries no error.
+			if got.Error != "" {
+				t.Errorf("timing %+v: the answer is judged by qualification, not reported as a warm-up error", got)
 			}
 			if got.TimeToFirstToken <= 0 || got.OutputTokens <= 0 {
 				t.Errorf("timing %+v: want the first-token time and the output tokens filled in, error or not", got)
@@ -112,12 +145,14 @@ func TestToolShapeAssemblesTheStreamedCall(t *testing.T) {
 	}
 }
 
-// Each failing tool-call double fails the tool-call shape, and the shapes that
-// need no call stay clean: the failure is the double's, not the harness's.
-// Written by hand: each double and the part of the message it must give.
-func TestToolShapeAgainstTheFailingDoubles(t *testing.T) {
+// Against each failing tool-call double the warm-up round reports no error at
+// all: warm-up does not judge the tool call's answer (science-agent ruling,
+// 1 Nov 2026, issue #125), and the agent's log says what the answer was. The
+// healthy double logs nothing. Written by hand: each double and the part of
+// the logged outcome it must give.
+func TestToolShapeAnswerIsLoggedNotReported(t *testing.T) {
 	for _, tc := range []struct {
-		modes, wantErr string
+		modes, wantLog string
 	}{
 		{"", ""},
 		{"no-tool-call", "calls no tool"},
@@ -126,23 +161,57 @@ func TestToolShapeAgainstTheFailingDoubles(t *testing.T) {
 		{"tool-args-badtype", "not string"},
 	} {
 		t.Run("modes="+tc.modes, func(t *testing.T) {
-			c := double(t, tc.modes, nil)
+			var log logBuffer
+			c, _ := doubleWith(t, tc.modes, nil, nil, WithLogger(log.logger()))
 			round := c.WarmUpRound(context.Background(), 1, agentapi.WarmUpRequest{Shapes: shapes, ToolCalls: true, TargetSessions: 1})
 			var sawTool bool
 			for _, q := range round.Requests {
-				if q.Shape != agentapi.ShapeToolCall {
-					if q.Error != "" {
-						t.Errorf("%s request failed: %q", q.Shape, q.Error)
-					}
-					continue
-				}
-				sawTool = true
-				if (tc.wantErr == "") != (q.Error == "") || !strings.Contains(q.Error, tc.wantErr) {
-					t.Errorf("tool-call request error %q, want one containing %q", q.Error, tc.wantErr)
+				sawTool = sawTool || q.Shape == agentapi.ShapeToolCall
+				if q.Error != "" {
+					t.Errorf("%s request error %q, want none", q.Shape, q.Error)
 				}
 			}
 			if !sawTool {
 				t.Error("no tool-call request in the round")
+			}
+			switch got := log.String(); {
+			case tc.wantLog == "" && got != "":
+				t.Errorf("log %q, want nothing for a valid call", got)
+			case tc.wantLog != "" && !strings.Contains(got, tc.wantLog):
+				t.Errorf("log %q does not name the outcome %q", got, tc.wantLog)
+			}
+		})
+	}
+}
+
+// A request that fails still fails the tool-call shape in warm-up, as it does
+// any shape: an HTTP error, a stream cut before its end, an error event
+// (science-agent ruling, 1 Nov 2026, issue #125). Controls in
+// TestToolShapeAssemblesTheStreamedCall: a text answer and a reply the limit
+// ended carry no error.
+func TestToolShapeRequestFailureIsAWarmUpError(t *testing.T) {
+	role := ev(chunk(`{"role":"assistant","content":""}`, `null`))
+	shape := warmShape{shape: agentapi.ShapeToolCall, context: 0, output: 64, tools: true}
+	for _, tc := range []struct {
+		name    string
+		handler http.Handler
+		wantErr string
+	}{
+		{"HTTP 500", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v1/chat/completions" {
+				http.Error(w, "boom", http.StatusInternalServerError)
+				return
+			}
+			sseHandler(nil).ServeHTTP(w, r)
+		}), "HTTP 500"},
+		{"a stream cut before its end", sseHandler([]sseEvent2{role, ev(chunk(toolDelta(0, "call_1", "function", "get_weather", `{"ci`), `null`))}), "stream"},
+		{"an error event", sseHandler([]sseEvent2{role, {payload: `{"error":{"message":"engine died"}}`}}), "error payload"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := New(serveOn(t, tc.handler), "key")
+			got := c.timed(context.Background(), shape)
+			if !strings.Contains(got.Error, tc.wantErr) {
+				t.Errorf("timing %+v: want an error containing %q", got, tc.wantErr)
 			}
 		})
 	}
@@ -183,8 +252,9 @@ func TestToolShapePromptAsksForTheCall(t *testing.T) {
 }
 
 // With a reasoning parser the tool-call shape asks for its output plus the
-// reasoning budget (the shape is judged): a model that reasons for 500 tokens before
-// its call passes with the option and fails without it.
+// reasoning budget: a model that reasons for 500 tokens before its call makes
+// its call with the option, and without it spends the 64 tokens reasoning,
+// which is logged, not reported (warm-up does not judge the answer).
 func TestToolShapeReasoningBudget(t *testing.T) {
 	req := agentapi.WarmUpRequest{Shapes: shapes, ToolCalls: true, TargetSessions: 1}
 	toolTiming := func(c *Client) agentapi.RequestTiming {
@@ -203,9 +273,13 @@ func TestToolShapeReasoningBudget(t *testing.T) {
 	if got := rec.maxTokensOf(true); len(got) != 1 || got[0] != int(shapes.OutputTypical)+4096 {
 		t.Errorf("max_tokens of the tool-call request = %v, want [%d]", got, shapes.OutputTypical+4096)
 	}
-	off, _ := doubleWith(t, "reasoning-first=500", nil, nil)
-	if q := toolTiming(off); q.Error == "" {
-		t.Errorf("reasoning off: %+v, want an error: the 64 tokens go to reasoning", q)
+	var log logBuffer
+	off, _ := doubleWith(t, "reasoning-first=500", nil, nil, WithLogger(log.logger()))
+	if q := toolTiming(off); q.Error != "" || q.OutputTokens != 64 {
+		t.Errorf("reasoning off: %+v, want no error and the 64 tokens spent", q)
+	}
+	if got := log.String(); !strings.Contains(got, "whole budget of 64 tokens with no tool call") {
+		t.Errorf("reasoning off: log %q, want the budget exhaustion named", got)
 	}
 }
 

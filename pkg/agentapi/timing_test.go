@@ -1,6 +1,8 @@
 package agentapi
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -30,5 +32,21 @@ func TestTimePerOutputToken(t *testing.T) {
 				t.Errorf("TimePerOutputToken() = %v, %v; want %v, %v", got, ok, c.want, c.ok)
 			}
 		})
+	}
+}
+
+// Staging.BuildPeakTmpBytes round-trips, and a staging with no build (a cache
+// hit) carries no buildPeakTmpBytes key at all (issue #125).
+func TestStagingBuildPeakRoundTrip(t *testing.T) {
+	b, err := json.Marshal(Staging{Phase: StagingDone, BuildPeakTmpBytes: 17_179_869_184})
+	if err != nil || !strings.Contains(string(b), `"buildPeakTmpBytes":17179869184`) {
+		t.Fatalf("%s %v", b, err)
+	}
+	var back Staging
+	if err := json.Unmarshal(b, &back); err != nil || back.BuildPeakTmpBytes != 17_179_869_184 {
+		t.Errorf("round trip %+v %v", back, err)
+	}
+	if b, _ := json.Marshal(Staging{Phase: StagingDone}); strings.Contains(string(b), "buildPeakTmpBytes") {
+		t.Errorf("a staging with no build carries the field: %s", b)
 	}
 }

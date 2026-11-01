@@ -7,7 +7,9 @@
 #   - a fact in this file's untyped block (spec.profile), as a path from spec.profile.
 #     The same path, without "spec.profile.", leads to the fact in profiles/helios.draft.yaml
 #     (spike S5; spike S1 added the facts of the hold check and of the compute nodes). A
-#     partition is written partitions[name=<p>], since the draft lists partitions.
+#     partition is written partitions[name=<p>], since the draft lists partitions. The facts
+#     added from issue #94 and its follow-ups (the hard limit of open files, QOS now, and the
+#     node-local storage measured in a GH200 job) are in this file only.
 #   - "derived": a division of such facts, with the numbers shown.
 #   - "framework default (HBEP-n, section)": no fact exists; the value is the design's.
 # Slurm's "MB" is 2^20 bytes (the Slurm provider sends --mem=<MiB>M), so memory is in Mi.
@@ -43,8 +45,22 @@ spec:
       # Derived: facts.partitions[name=plgrid-gpu-gh200].max_mem_per_node_mb, 489500, divided by the 4 GPUs.
       # The centre documents a billing share of 120 GB per GPU (facts.other.billing) without saying
       # which GB; if it is decimal, a one-GPU request of this memory may be billed as more than one GPU.
+      # It includes a RAM-disk budget of 24 GiB for tmpDir below, which counts against --mem: the SIF
+      # build's peak, about twice the image, plus the run directory's small files (HBEP-4, Platform
+      # profile schema; `@hpc-burst-science-agent`, 1 Nov 2026). The agent removes the build tree once
+      # the SIF is cached, before the engine loads its weights, and reports the build's peak TMPDIR
+      # use, which measures this budget (HBEP-7, The allocation agent).
       memPerGpu: 122375Mi
       imageFormat: sif # facts.containers.apptainer_compute_nodes.value.plgrid-gpu-gh200 (S1 probe 2: a SIF runs); also facts.partitions[name=plgrid-gpu-gh200].image_format
+      # The job's temporary directory is the job's RAM disk (HBEP-4, Submission and Platform profile
+      # schema; `@hpc-burst-science-agent`, 1 Nov 2026). The job's own TMPDIR on GH200 is on Lustre
+      # (facts.storage.node_local.job_tmpdir_in_job), where the agent's run directory and Apptainer's
+      # layer cache and build tree put tens of thousands of inodes during an image pull, on a scratch
+      # quota that is already near its inode limit (issue #94, finding 1; facts.storage.scratch holds
+      # the file quota). The node-local disk is refused at submission
+      # (facts.storage.node_local.localfs_refused), and /tmp is not to be used (facts.storage.tmp_rule).
+      tmpDir: $MEMFS # facts.storage.node_local.memfs ("path in $MEMFS"); memfs_in_job: a per-job tmpfs of about the node's RAM, counted against --mem
+      tmpDirFeature: memfs # facts.storage.node_local.memfs ("request with -C memfs"); memfs_in_job: a job with -C memfs was accepted and had $MEMFS
 
   holdRelease: true # facts.slurm.hold_release.value: user_release_ok true on plgrid and plgrid-gpu-gh200 (S1's hold check)
   lostGrace: 2m # framework default (HBEP-4, Platform profile schema, lostGrace): above the measured gap of about 2 s between queue and accounting (S7's capture)
@@ -181,6 +197,12 @@ spec:
           source: "sbatch --test-only --wrap=true --time=00:01:00 --job-name=s5probe --ntasks=1 --mem=1G --partition=<p> (no --account, no --qos); the GPU run added --gres=gpu:1"
           note: "Run without --account and --qos, so Slurm used the probing user's default account. CPU partition plgrid: exit 0, a start estimate came back, no job was created. GPU partition plgrid-gpu-gh200: exit 1, 'allocation failure: Invalid account or account/partition combination specified'. The documented account naming rule (a resource suffix such as -gpu-gh200, https://docs.hpc.cyfronet.pl/environment/batch-system/accounts-and-grants/) is a likely reason, but no account was tried after the failure, so the cause was not isolated. Both results depend on the probing user's default account and grants."
           value: {plgrid: {exit: 0, outcome: "start estimate returned"}, plgrid-gpu-gh200: {exit: 1, outcome: "Invalid account or account/partition combination specified (with the probing user's default account)"}}
+        qos_now_one_gpu:
+          method: measured
+          date: "2026-11-01"
+          source: "issue #94, comment 6550908687 (the real-engine run). sbatch --test-only for 1 GPU on partition plgrid-gpu-gh200, with --no-requeue, under the account of the largest active GH200 grant (not named here); the job was then submitted under QOS now"
+          note: "One estimate pair and one job, at one moment: the queue state of that run, not a rule. QOS now has a wall limit of 12 h and one submitted job per user (facts.slurm.qos), so this holds for short jobs. The estimate under QOS now was a range, and the job started at once. The date is that of the report comment; the run was no later."
+          value: {partition: plgrid-gpu-gh200, gpus: 1, start_estimate_normal_qos: "16 days", start_estimate_qos_now: "13 to 29 min", started_at_once_under_qos_now: true}
       partitions:
         # The six partitions below are the ones the documentation or the QOS list
         # points users at. Time limits, node counts and hardware are per partition.
@@ -366,7 +388,35 @@ spec:
           tmpdisk_mb: {value: 0, method: measured, source: "sinfo -h -o '%P|%d' (every partition)", date: "2026-10-30", note: "Slurm does not account for local disk. The size of any node-local disk is not shown by Slurm."}
           node_features: {value: [memfs, localfs], method: measured, source: "sinfo -h -o '%P|%f' (every node of every partition)", date: "2026-10-30"}
           memfs: {value: "RAM disk for the job: request with -C memfs; path in $MEMFS; counts against --mem; single-node jobs only", method: documented, source: "https://docs.hpc.cyfronet.pl/environment/local-storage-features/", date: "2026-10-30"}
-          localfs: {value: "per-node scratch volume: request with -C localfs at submission; path in $SCRATCH_LOCAL; separate per node; lost when the job ends", method: documented, source: "https://docs.hpc.cyfronet.pl/environment/local-storage-features/", date: "2026-10-30", note: "the page says 'not available on Ares'. Size per node is not stated."}
+          localfs: {value: "per-node scratch volume: request with -C localfs at submission; path in $SCRATCH_LOCAL; separate per node; lost when the job ends", method: documented, source: "https://docs.hpc.cyfronet.pl/environment/local-storage-features/", date: "2026-10-30", note: "the page says 'not available on Ares'. Size per node is not stated. The cluster now refuses -C localfs at submission (localfs_refused)."}
+          localfs_refused:
+            value: "-C localfs is refused at submission on plgrid-gpu-gh200 (QOS now and normal) and on plgrid: sbatch: error: The feature 'localfs' is not supported. Please remove the '-C localfs' option from your Slurm submission command."
+            method: measured
+            source: "sbatch --test-only and one GH200 job (QOS now, 1 GPU, -C memfs, --no-requeue), run by the code agent; job IDs and node names withheld"
+            date: "2026-11-01"
+            note: "sinfo lists memfs,localfs on every node all the same (node_features above; on plgrid-gpu-gh200, all 110 nodes). -C memfs is accepted, and so is no constraint."
+          scratch_local_in_job:
+            value: "$SCRATCH_LOCAL is unset in a job without localfs"
+            method: measured
+            source: "sbatch --test-only and one GH200 job (QOS now, 1 GPU, -C memfs, --no-requeue), run by the code agent; job IDs and node names withheld"
+            date: "2026-11-01"
+          memfs_in_job:
+            value: {kind: "per-job tmpfs; the path carries the job ID", size_bytes: 504658657280, inodes: 3916323}
+            method: measured
+            source: "sbatch --test-only and one GH200 job (QOS now, 1 GPU, -C memfs, --no-requeue), run by the code agent; job IDs and node names withheld"
+            date: "2026-11-01"
+            note: "About the node's RAM. Its contents count against --mem (memfs above, documented)."
+          job_tmpdir_in_job:
+            value: "the job's own TMPDIR is on Lustre (statfs: lustre, with a project quota)"
+            method: measured
+            source: "sbatch --test-only and one GH200 job (QOS now, 1 GPU, -C memfs, --no-requeue), run by the code agent; job IDs and node names withheld; also issue #94, comment 6550908687, finding 1"
+            date: "2026-11-01"
+          tmp_in_job:
+            value: {kind: tmpfs, size_bytes: 256660144128}
+            method: measured
+            source: "sbatch --test-only and one GH200 job (QOS now, 1 GPU, -C memfs, --no-requeue), run by the code agent; job IDs and node names withheld"
+            date: "2026-11-01"
+            note: "/tmp on a GH200 compute node. The centre's rule says not to use it (tmp_rule)."
           job_variables_on_login_node: {value: "$TMPDIR, $MEMFS and $SCRATCH_LOCAL are unset", method: measured, source: "echo of each variable in the non-login ssh session", date: "2026-10-30", note: "they are set only inside jobs. Not measured in a job."}
       time:
         slurm_time_zone:
@@ -425,6 +475,12 @@ spec:
           source: "issue #18, comment 6519285505 (S1 step 0). S1 step-0 probe job: uname -m on the node"
           date: "2026-10-30"
           note: "Agrees with the scheduler-reported arch of the partition entries above."
+        open_files_hard_limit:
+          value: {plgrid-gpu-gh200: 32768}
+          method: measured
+          source: "issue #94, comment 6550908687, finding 8. vLLM v0.32.0, started by the allocation agent in a job on plgrid-gpu-gh200, warned at start-up that the hard limit of 32,768 open files blocks its raise"
+          date: "2026-11-01"
+          note: "The value is the one in vLLM's warning, not a ulimit -Hn read in the job. The warning added that file-descriptor errors are possible under load. The date is that of the report comment; the run was no later. The login node's per-user open_files (facts.login_node_policy.per_user_limits, 32768) is another measurement, of another host."
       other:
         partition_access: {value: "every plgrid* partition has an AllowAccounts list of grant accounts (list not recorded); this is how the grant requirements in the documentation are enforced", method: measured, source: "scontrol show partition: AllowAccounts", date: "2026-10-30"}
         restricted_partitions:

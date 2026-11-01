@@ -79,8 +79,8 @@ func sbatchArgv(t *testing.T, line string) []string {
 
 // HBEP-4, Submission: sbatch --parsable --job-name=<tag> --no-requeue [--hold]
 // --partition=<p> --account=<a> --time=<limit> --nodes=1 --gres=gpu:<n>
-// --cpus-per-task=<c> --mem=<m> --output=<dir>/job.out --error=<dir>/job.err
-// --wrap=<bootstrap>.
+// --cpus-per-task=<c> --mem=<m> [--constraint=<feature>]
+// --output=<dir>/job.out --error=<dir>/job.err --wrap=<bootstrap>.
 func TestSubmitLineWordsAndOrder(t *testing.T) {
 	const dir = "/scratch/example-user/hpcburst/alloc/hb-example-0123456789ab"
 	words := func(parts ...string) []string { return parts }
@@ -108,6 +108,17 @@ func TestSubmitLineWordsAndOrder(t *testing.T) {
 		{"the Provider names no account", func(s *submission) { s.account = "" }, words(
 			"--parsable", "--job-name=hb-example-0123456789ab", "--no-requeue", "--hold", "--partition=example-gpu",
 			"--time=2880", "--nodes=1", "--gres=gpu:2", "--cpus-per-task=16", "--mem=98304M",
+			"--output="+dir+"/job.out", "--error="+dir+"/job.err")},
+		// The partition's tmpDirFeature becomes --constraint after --mem, as
+		// HBEP-4's Submission lists it (science-agent ruling, 1 Nov 2026, issue
+		// #125); every case above has none and no --constraint.
+		{"tmpDirFeature adds --constraint", func(s *submission) { s.tmpDir, s.tmpDirFeature = "$SCRATCH_LOCAL", "localfs" }, words(
+			"--parsable", "--job-name=hb-example-0123456789ab", "--no-requeue", "--hold", "--partition=example-gpu",
+			"--account=example-account", "--time=2880", "--nodes=1", "--gres=gpu:2", "--cpus-per-task=16", "--mem=98304M", "--constraint=localfs",
+			"--output="+dir+"/job.out", "--error="+dir+"/job.err")},
+		{"tmpDir alone adds no --constraint", func(s *submission) { s.tmpDir = "$SCRATCH_LOCAL" }, words(
+			"--parsable", "--job-name=hb-example-0123456789ab", "--no-requeue", "--hold", "--partition=example-gpu",
+			"--account=example-account", "--time=2880", "--nodes=1", "--gres=gpu:2", "--cpus-per-task=16", "--mem=98304M",
 			"--output="+dir+"/job.out", "--error="+dir+"/job.err")},
 		{"minutes and MiB are plain numbers", func(s *submission) { s.minutes, s.memMiB = 90, 1500 }, words(
 			"--parsable", "--job-name=hb-example-0123456789ab", "--no-requeue", "--hold", "--partition=example-gpu",
@@ -138,7 +149,7 @@ func TestSubmitLineWordsAndOrder(t *testing.T) {
 			if !reflect.DeepEqual(args[:len(c.pre)], c.pre) {
 				t.Errorf("words %q, want %q", args[:len(c.pre)], c.pre)
 			}
-			if got, want := args[len(c.pre)], "--wrap="+bootstrap(s.agentPath, s.agentDigest, s.allocDir); got != want {
+			if got, want := args[len(c.pre)], "--wrap="+bootstrapIn(s.agentPath, s.agentDigest, s.allocDir, s.tmpDir); got != want {
 				t.Errorf("--wrap word %q, want %q", got, want)
 			}
 		})
@@ -256,6 +267,186 @@ func TestBootstrapRefusesTheWrongBinary(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); err != nil {
 		t.Errorf("the control agent did not run: %v", err)
+	}
+}
+
+// With no tmpDir the bootstrap is the line it was before tmpDir existed, byte
+// for byte (written out here by hand), so a partition without one keeps the
+// scheduler's TMPDIR.
+func TestBootstrapWithoutTmpDirIsUnchanged(t *testing.T) {
+	const agent, alloc = "/s/agent/d/hb-agent", "/s/alloc/hb-x"
+	want := "[ $(sha256sum /s/agent/d/hb-agent | cut -c1-64) = " + testDigest + " ] && exec /s/agent/d/hb-agent /s/alloc/hb-x"
+	if got := bootstrapIn(agent, testDigest, alloc, ""); got != want {
+		t.Errorf("bootstrap without tmpDir:\n got %s\nwant %s", got, want)
+	}
+	if got := bootstrap(agent, testDigest, alloc); got != want {
+		t.Errorf("bootstrap:\n got %s\nwant %s", got, want)
+	}
+}
+
+// HBEP-4, Submission, The bootstrap: "When the partition sets tmpDir, it sets
+// TMPDIR from it first. It checks the binary's SHA-256 against the digest, then
+// runs it." The line is written out here by hand, so the order is pinned
+// without asking the code under test what it is: the TMPDIR assignment, the
+// check of the resolved value, the directory and the export come before the
+// digest check, which comes before the agent.
+func TestBootstrapSetsTMPDIRBeforeTheDigestCheck(t *testing.T) {
+	const agent, alloc = "/s/agent/d/hb-agent", "/s/alloc/hb-x"
+	got := bootstrapIn(agent, testDigest, alloc, "$HB_TEST_LOCAL/hb")
+	const head = "TMPDIR=${HB_TEST_LOCAL:?}/hb && case "
+	tail := ` && mkdir -p "$TMPDIR" && export TMPDIR && [ $(sha256sum /s/agent/d/hb-agent | cut -c1-64) = ` + testDigest +
+		" ] && exec /s/agent/d/hb-agent /s/alloc/hb-x"
+	if !strings.HasPrefix(got, head) {
+		t.Errorf("the bootstrap does not start by setting TMPDIR:\n got %s\nwant it to start %q", got, head)
+	}
+	if !strings.HasSuffix(got, tail) {
+		t.Errorf("the bootstrap does not end with the export, the digest check and the agent:\n got %s\nwant it to end %q", got, tail)
+	}
+	if n := strings.Count(got, "sha256sum"); n != 1 {
+		t.Errorf("the digest is checked %d times, want once: %s", n, got)
+	}
+}
+
+// With a tmpDir the digest check still stops a changed binary: the agent does
+// not run and the bootstrap exits non-zero. TMPDIR is set first (HBEP-4), so
+// the directory exists by the time the check fails.
+func TestBootstrapWithTmpDirStillRefusesAChangedBinary(t *testing.T) {
+	needTools(t, "sh", "sha256sum", "cut", "mkdir")
+	dir := t.TempDir()
+	agent, _, marker := tmpDirAgent(t, dir)
+	made := filepath.Join(dir, "local", "t")
+	cmd := exec.Command("/bin/sh", "-c", bootstrapIn(agent, strings.Repeat("0", 64), filepath.Join(dir, "alloc"), made))
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "TMPDIR=" + dir}
+	err := cmd.Run()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() == 0 {
+		t.Errorf("the bootstrap ended with %v; want a non-zero exit", err)
+	}
+	if _, serr := os.Stat(marker); !os.IsNotExist(serr) {
+		t.Errorf("the agent ran (marker: %v)", serr)
+	}
+	if st, serr := os.Stat(made); serr != nil || !st.IsDir() {
+		t.Errorf("tmpDir %s was not made before the digest check failed: %v", made, serr)
+	}
+}
+
+// tmpDirAgent stages a stand-in agent that records its TMPDIR, whether that
+// directory exists, and its argument, and returns its path, digest and record.
+func tmpDirAgent(t *testing.T, dir string) (agent, digest, marker string) {
+	t.Helper()
+	agent, marker = filepath.Join(dir, "hb-agent"), filepath.Join(dir, "ran")
+	body := "#!/bin/sh\n[ -d \"$TMPDIR\" ] && d=dir || d=nodir\nprintf '%s %s %s\\n' \"$TMPDIR\" \"$d\" \"$1\" > " + marker + "\n"
+	if err := os.WriteFile(agent, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return agent, sha256Hex([]byte(body)), marker
+}
+
+// The bootstrap with a partition's tmpDir, run for real in /bin/sh: it sets
+// TMPDIR from the job's own variable, creates the directory and exports it to
+// the agent; an absolute tmpDir is taken as it is (science-agent ruling, 1 Nov
+// 2026, issue #125). The job's own TMPDIR is set to another directory, so a
+// bootstrap that ignored tmpDir would show.
+func TestBootstrapSetsTMPDIRFromTmpDir(t *testing.T) {
+	needTools(t, "sh", "sha256sum", "cut", "mkdir")
+	dir := t.TempDir()
+	local, jobTmp := filepath.Join(dir, "local"), filepath.Join(dir, "job-tmp")
+	for _, d := range []string{local, jobTmp} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	abs := filepath.Join(dir, "abs", "t")
+	for _, c := range []struct{ name, tmpDir, want string }{
+		{"the variable", "$HB_TEST_LOCAL", local},
+		{"a path under the variable", "$HB_TEST_LOCAL/hb/run", filepath.Join(local, "hb", "run")},
+		{"an absolute path", abs, abs},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			agent, digest, marker := tmpDirAgent(t, t.TempDir())
+			alloc := filepath.Join(dir, "alloc")
+			cmd := exec.Command("/bin/sh", "-c", bootstrapIn(agent, digest, alloc, c.tmpDir))
+			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "TMPDIR=" + jobTmp, "HB_TEST_LOCAL=" + local}
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("the bootstrap failed: %v: %s", err, out)
+			}
+			got, err := os.ReadFile(marker)
+			if err != nil {
+				t.Fatalf("the agent did not run: %v", err)
+			}
+			if want := c.want + " dir " + alloc + "\n"; string(got) != want {
+				t.Errorf("the agent saw %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// A tmpDir whose variable is unset or empty in the job, or that resolves to a
+// path that is not absolute or holds an unsafe character or a ".." segment,
+// stops the job before the agent runs: it never falls back to the
+// scheduler's TMPDIR, which on Helios GH200 is the Lustre scratch the field
+// exists to avoid.
+func TestBootstrapStopsOnAnUnusableTmpDir(t *testing.T) {
+	needTools(t, "sh", "sha256sum", "cut", "mkdir")
+	for _, c := range []struct {
+		name, value string
+		set         bool
+		stderr      string
+	}{
+		{"unset", "", false, "HB_TEST_LOCAL"},
+		{"empty", "", true, "HB_TEST_LOCAL"},
+		{"relative", "scratch/local", true, "not an absolute path"},
+		{"a space", "/scratch/lo cal", true, "not an absolute path"},
+		{"a dot-dot segment", "/scratch/../etc", true, "not an absolute path"},
+		{"a glob character", "/scratch/*", true, "not an absolute path"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			agent, digest, marker := tmpDirAgent(t, dir)
+			cmd := exec.Command("/bin/sh", "-c", bootstrapIn(agent, digest, filepath.Join(dir, "alloc"), "$HB_TEST_LOCAL"))
+			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "TMPDIR=" + dir}
+			if c.set {
+				cmd.Env = append(cmd.Env, "HB_TEST_LOCAL="+c.value)
+			}
+			var stderr strings.Builder
+			cmd.Stderr = &stderr
+			err := cmd.Run()
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() == 0 {
+				t.Errorf("the bootstrap ended with %v; want a non-zero exit", err)
+			}
+			if _, serr := os.Stat(marker); !os.IsNotExist(serr) {
+				t.Errorf("the agent ran (marker: %v)", serr)
+			}
+			if !strings.Contains(stderr.String(), c.stderr) {
+				t.Errorf("stderr %q does not say %q", stderr.String(), c.stderr)
+			}
+		})
+	}
+}
+
+// The submission carries the partition's tmpDir and tmpDirFeature to the line;
+// a form the CRD refuses is refused here too, before any call, because the
+// bootstrap puts them into a shell line.
+func TestCheckRequestTmpDir(t *testing.T) {
+	req, profile, settings := exampleRequest()
+	profile.Partition.TmpDir, profile.Partition.TmpDirFeature = "$SCRATCH_LOCAL/hb", "localfs"
+	s, err := checkRequest(req, profile, settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.tmpDir != "$SCRATCH_LOCAL/hb" || s.tmpDirFeature != "localfs" {
+		t.Errorf("submission tmpDir %q, tmpDirFeature %q", s.tmpDir, s.tmpDirFeature)
+	}
+	for _, c := range []struct{ dir, feature string }{
+		{"relative", ""}, {"$X/a b", ""}, {"$X/..", ""}, {"$(id)", ""}, {"${X}", ""}, {"~/t", ""},
+		{"$X", "local&mem"}, {"$X", "a,b"}, {"$X", "-x"}, {"", "localfs"},
+	} {
+		req, profile, settings := exampleRequest()
+		profile.Partition.TmpDir, profile.Partition.TmpDirFeature = c.dir, c.feature
+		if _, err := checkRequest(req, profile, settings); !errors.Is(err, provider.ErrInvalidRequest) {
+			t.Errorf("tmpDir %q, tmpDirFeature %q: checkRequest = %v, want a refusal", c.dir, c.feature, err)
+		}
 	}
 }
 
