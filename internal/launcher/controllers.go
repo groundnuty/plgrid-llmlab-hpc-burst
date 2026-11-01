@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -193,8 +194,17 @@ func startSupervisor(ctx context.Context, l layout, st *State, argv []string, ti
 		return tail(fmt.Errorf("confirm the supervisor's record to it: %w", err))
 	}
 	logf(log, "started the supervisor as pid %d; waiting for %s to start", h.rec.PID, ControllerBinName)
+	waitReady := map[string]bool{}
+	if specs, err := st.supervisedSet(l); err == nil {
+		for _, sp := range specs {
+			if sp.WaitReady {
+				waitReady[sp.Name] = true
+			}
+		}
+	}
 	deadline := time.Now().Add(timeout)
 	settled := false
+	notReady := "" // why a process that must be ready is not, at the last look
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -208,23 +218,53 @@ func startSupervisor(ctx context.Context, l layout, st *State, argv []string, ti
 			return tail(err)
 		} else if ready {
 			if settled {
-				return nil
+				if notReady, err = entriesNotReady(l, h, waitReady); err != nil {
+					return tail(err)
+				} else if notReady == "" {
+					return nil
+				}
+			} else {
+				// Everything runs. Wait, then look again: the checks above then also catch a
+				// child that exited meanwhile.
+				settled = true
+				select {
+				case <-time.After(superviseSettle):
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+				continue
 			}
-			// Everything runs. Wait, then look again: the checks above then also catch a child
-			// that exited meanwhile.
-			settled = true
-			select {
-			case <-time.After(superviseSettle):
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-			continue
 		}
 		if time.Now().After(deadline) {
+			if notReady != "" {
+				return tail(fmt.Errorf("not ready within %s: %s", timeout, notReady))
+			}
 			return tail(fmt.Errorf("the supervisor did not report its processes started within %s", timeout))
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
+}
+
+// entriesNotReady checks each process named in want the way status does (checkEntry): the
+// recorded child of the supervisor sup, holding its health port and answering /healthz with 200.
+// It returns why the first one that is not is not, or "" when all are.
+func entriesNotReady(l layout, sup *procHandle, want map[string]bool) (string, error) {
+	if len(want) == 0 {
+		return "", nil
+	}
+	f, err := readSupervisorFile(l)
+	if err != nil {
+		return "", err
+	}
+	for _, e := range f.Entries {
+		if !want[e.Name] {
+			continue
+		}
+		if _, problems := checkEntry(sup, sup.rec.PID, e); len(problems) > 0 {
+			return e.Name + ": " + strings.Join(problems, "; "), nil
+		}
+	}
+	return "", nil
 }
 
 // childrenStarted reports whether supervisor.json, written by the supervisor recorded as sup, shows

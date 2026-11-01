@@ -108,6 +108,13 @@ type supervised struct {
 	Path   string
 	Args   []string // after argv[0]
 	Health string   // host:port that serves GET /healthz
+	// TermGrace is how long this process gets between SIGTERM and SIGKILL when the supervisor
+	// stops; 0 means SuperviseOptions.TermGrace. The front's is FrontTermGrace.
+	TermGrace time.Duration
+	// WaitReady makes the start (up, upgrade) wait, within its timeout, until this process holds
+	// its health port and answers /healthz with 200. The front binds its listeners only after its
+	// first lists, so a port taken in between would otherwise fail it after a successful up.
+	WaitReady bool
 }
 
 // supervisedSet is what the supervisor runs, from the record the launcher wrote. The controller's
@@ -441,15 +448,19 @@ func (r *runner) run(ctx context.Context) {
 // period, then a bounded wait for the exit.
 func (r *runner) terminate(h *procHandle, done <-chan struct{}) {
 	name := r.spec.Name
+	grace := r.spec.TermGrace
+	if grace <= 0 {
+		grace = r.o.TermGrace
+	}
 	if _, err := signalHandle(h, syscall.SIGTERM); err != nil {
 		logf(r.o.Log, "%s: SIGTERM to pid %d: %v", name, h.rec.PID, err)
 	}
 	select {
 	case <-done:
 		return
-	case <-time.After(r.o.TermGrace):
+	case <-time.After(grace):
 	}
-	logf(r.o.Log, "%s: pid %d is still running %s after SIGTERM: sending SIGKILL", name, h.rec.PID, r.o.TermGrace)
+	logf(r.o.Log, "%s: pid %d is still running %s after SIGTERM: sending SIGKILL", name, h.rec.PID, grace)
 	if _, err := signalHandle(h, syscall.SIGKILL); err != nil {
 		logf(r.o.Log, "%s: SIGKILL to pid %d: %v", name, h.rec.PID, err)
 	}

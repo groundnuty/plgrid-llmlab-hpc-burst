@@ -42,8 +42,15 @@ type EntryHealth struct {
 // usage writes failing" (@hpc-burst-science-agent, 31 Oct 2026); it is never reported as unhealthy.
 const DegradedUsage = "usage writes failing"
 
-// usageFailing is the usage member's state while records are lost (HBEP-8).
-const usageFailing = "failing"
+// The usage member's states (HBEP-8): ok, or failing while records are lost.
+const (
+	usageOK      = "ok"
+	usageFailing = "failing"
+)
+
+// UsageUnknown is EntryHealth.UsageState for a front whose /healthz did not state a known usage
+// state. Status prints "usage state unknown" for it; it is not a health problem either.
+const UsageUnknown = "unknown"
 
 // healthzTimeout bounds one GET /healthz of a supervised process.
 const healthzTimeout = 3 * time.Second
@@ -144,8 +151,13 @@ func checkEntry(sup *procHandle, supPID int, e EntryRecord) (EntryHealth, []stri
 	eh.HealthzOK = &ok
 	if ok {
 		// A failing usage sink is stated, never counted against health: the front keeps serving.
-		if eh.UsageState = usageStateOf(body); eh.UsageState == usageFailing {
+		switch eh.UsageState = usageStateOf(body); {
+		case eh.UsageState == usageFailing:
 			eh.Degraded = DegradedUsage
+		case e.Name == frontEntryName && eh.UsageState != usageOK:
+			// The front always states its sink; a body without that member, cut at the read limit,
+			// or with a state HBEP-8 does not name leaves it unknown, and status says so.
+			eh.UsageState = UsageUnknown
 		}
 	}
 	if v, d := h.verify(); v != Ours {

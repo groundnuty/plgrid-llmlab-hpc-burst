@@ -119,6 +119,9 @@ func emitJSON(w io.Writer, v any) {
 
 func fail(stderr io.Writer, err error) int {
 	fmt.Fprintf(stderr, "hpcburst: %v\n", err)
+	if errors.Is(err, launcher.ErrGraceTooShort) {
+		return exitUsage // a flag the host cannot honour: nothing was stopped
+	}
 	return exitFail
 }
 
@@ -130,7 +133,7 @@ func cmdUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&sd, "state-dir", "", stateDirUsage)
 	fs.StringVar(&bd, "bin-dir", "", binDirUsage)
 	fs.StringVar(&o.Version, "version", "", "k3s release to start (must be pinned): default the release that last wrote the store, or "+launcher.DefaultVersion+" for a new one; another release than the store's is refused (use upgrade or restore)")
-	fs.IntVar(&o.PortBase, "port-base", launcher.DefaultPortBase, "first of a block of twelve loopback ports, base to base+11, shared with the controller, the front and frps: base (apiserver), +1 (https), +2 (controller manager), +3 (the agent endpoint, reserved for the controller's server), +4 (the front's /healthz), +5 (reserved, never bound), +6 (the lifecycle controller's /healthz) and +7 (the front's ssh-mode dial-home listener) must be free before a start; +8 to +11 are frps's and not checked yet; the restricted VM keys forward to +3 and +7, so another base needs new keys")
+	fs.IntVar(&o.PortBase, "port-base", launcher.DefaultPortBase, "first of a block of 13 loopback ports, base to base+12, shared with the controller, the front and frps: base (apiserver), +1 (https), +2 (controller manager), +3 (the agent endpoint, reserved for the controller's server), +4 (the front's /healthz), +5 (reserved, never bound), +6 (the lifecycle controller's /healthz) and +7 (the front's ssh-mode dial-home listener) must be free before a start; +8 to +11 (frps's) and +12 (the lifecycle controller's /metrics) are not checked yet; the restricted VM keys forward to +3 and +7, so another base needs new keys")
 	fs.StringVar(&o.Front.Mode, "front-mode", "", "how compute nodes reach the front: direct, or ssh (restricted key)")
 	fs.StringVar(&o.Front.Addr, "front-addr", "", "the front's address, host:port (ssh: host or host:port; the port defaults to 22)")
 	fs.StringVar(&o.Front.KeyPath, "front-key", "", "ssh mode: path of the restricted key (recorded, never read)")
@@ -255,7 +258,7 @@ func cmdDown(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	var sd string
 	var asJSON bool
 	fs.StringVar(&sd, "state-dir", "", stateDirUsage)
-	fs.DurationVar(&o.Grace, "grace", launcher.DefaultGrace, "how long to wait after SIGTERM before SIGKILL")
+	fs.DurationVar(&o.Grace, "grace", launcher.DefaultGrace, "how long to wait after SIGTERM before SIGKILL; when the supervisor runs the front, at least "+launcher.SupervisorGraceWithFront.String()+" (the front needs up to "+launcher.FrontTermGrace.String()+" to flush its usage records), and a shorter grace is refused")
 	fs.BoolVar(&asJSON, "json", false, "print the result as JSON")
 	if code, done := parse(fs, args); done {
 		return code
@@ -309,7 +312,7 @@ func cmdUpgrade(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	fs.StringVar(&sd, "state-dir", "", stateDirUsage)
 	fs.StringVar(&bd, "bin-dir", "", binDirUsage)
 	fs.StringVar(&o.To, "to", "", "k3s release to upgrade to (required, pinned): the next minor, or a newer patch of the running minor")
-	fs.DurationVar(&o.Grace, "grace", launcher.DefaultGrace, "how long to wait after SIGTERM before SIGKILL")
+	fs.DurationVar(&o.Grace, "grace", launcher.DefaultGrace, "how long to wait after SIGTERM before SIGKILL; when the supervisor runs the front, at least "+launcher.SupervisorGraceWithFront.String()+" (the front needs up to "+launcher.FrontTermGrace.String()+" to flush its usage records), and a shorter grace is refused")
 	fs.DurationVar(&o.ReadyTimeout, "ready-timeout", launcher.DefaultReadyTimeout, "how long to wait for readiness of the new host")
 	fs.BoolVar(&asJSON, "json", false, "print the result as JSON")
 	if code, done := parse(fs, args); done {

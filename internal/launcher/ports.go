@@ -88,6 +88,12 @@ func (p Ports) All() []int {
 }
 
 // FrontHealthAddr is where the front serves /healthz.
+//
+// base+4 and base+7 are checked free before k3s starts but bound by the front only later, after
+// its first lists: the same window as base+3 and base+6, which the controller binds. The front's
+// client listener, and its dial-home listener in direct mode, come from its own configuration and
+// are not checked against the block. up waits for the front's /healthz (supervised.WaitReady), so a
+// port taken in that window fails up instead of leaving a front that cannot start.
 func (p Ports) FrontHealthAddr() string {
 	return net.JoinHostPort("127.0.0.1", strconv.Itoa(p.FrontHealth))
 }
