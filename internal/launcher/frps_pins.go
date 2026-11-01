@@ -3,17 +3,17 @@ package launcher
 import (
 	"bufio"
 	_ "embed"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 )
 
 // The frps pin, the way k3s is pinned (pins.go): one embedded file names the allowed release and
 // the sha256 of the executable, the launcher hashes the file it opened, and it runs that very
-// descriptor. HBEP-6 names build/dependencies.yaml (HBEP-15) as the source of frps's checksum; the
+// descriptor. The same file pins frpc's sha256, which the controller puts in agent.json. HBEP-6 names build/dependencies.yaml (HBEP-15) as the source of frps's checksum; the
 // file does not exist yet, so frp-pins.txt stands in for it, as k3s-pins.txt does for k3s.
 
 //go:embed frp-pins.txt
@@ -22,13 +22,14 @@ var frpPinsFile string
 // DefaultFrpVersion is the frp release whose frps the launcher starts (HBEP-6: frp v0.71.1).
 const DefaultFrpVersion = "0.71.1"
 
-// FrpPin is one allowed frps release binary.
+// FrpPin is one allowed frp release, per architecture.
 type FrpPin struct {
 	Version       string
-	Arch          string
+	Arch          string // the release's name for it: amd64, arm64
 	Tarball       string // the release asset's name
 	TarballSHA256 string // the asset's sum, from the release's checksums
 	FrpsSHA256    string // the sum of the frps executable inside it: what is checked before a start
+	FrpcSHA256    string // the sum of the frpc executable inside it: what agent.json names
 }
 
 func parseFrpPins(content string) ([]FrpPin, error) {
@@ -40,17 +41,54 @@ func parseFrpPins(content string) ([]FrpPin, error) {
 			continue
 		}
 		f := strings.Fields(l)
-		if len(f) != 5 {
-			return nil, fmt.Errorf("frp-pins.txt line %d: want 5 fields, got %d", n, len(f))
+		if len(f) != 6 {
+			return nil, fmt.Errorf("frp-pins.txt line %d: want 6 fields, got %d", n, len(f))
 		}
 		for _, sum := range f[3:] {
-			if _, err := hex.DecodeString(sum); err != nil || len(sum) != 64 {
-				return nil, fmt.Errorf("frp-pins.txt line %d: %q is not a sha256", n, sum)
+			if !sha256Form.MatchString(sum) {
+				return nil, fmt.Errorf("frp-pins.txt line %d: %q is not a sha256 of 64 lowercase hex characters", n, sum)
 			}
 		}
-		out = append(out, FrpPin{Version: f[0], Arch: f[1], Tarball: f[2], TarballSHA256: f[3], FrpsSHA256: f[4]})
+		out = append(out, FrpPin{Version: f[0], Arch: f[1], Tarball: f[2], TarballSHA256: f[3], FrpsSHA256: f[4], FrpcSHA256: f[5]})
 	}
 	return out, sc.Err()
+}
+
+// sha256Form is a sha256 as sha256sum prints it: 64 lowercase hex characters, the form agent.json's
+// frpcDigest takes (agentapi.AgentConfig).
+var sha256Form = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// cpuArchOf maps the release's architecture names to the kernel's machine names, which platform
+// profiles use for cpuArch (v1alpha1.AcceleratorClass) and agent.json's frpc digest is keyed by.
+var cpuArchOf = map[string]string{"amd64": "x86_64", "arm64": "aarch64"}
+
+// FrpcDigests returns the sha256 of the pinned frpc of a version for each architecture, keyed by
+// cpuArch (x86_64, aarch64): the digests agent.json names (HBEP-4, Submission: Files first). A
+// pinned architecture with no cpuArch name is an error, not a digest left out.
+func FrpcDigests(version string) (map[string]string, error) {
+	pins, err := parseFrpPins(frpPinsFile)
+	if err != nil {
+		return nil, err
+	}
+	return frpcDigests(pins, version)
+}
+
+func frpcDigests(pins []FrpPin, version string) (map[string]string, error) {
+	out := map[string]string{}
+	for _, p := range pins {
+		if p.Version != version {
+			continue
+		}
+		arch, ok := cpuArchOf[p.Arch]
+		if !ok {
+			return nil, fmt.Errorf("frp-pins.txt pins frp %s for %s, which has no cpuArch name", p.Version, p.Arch)
+		}
+		out[arch] = p.FrpcSHA256
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("frpc %s is not pinned for any architecture", version)
+	}
+	return out, nil
 }
 
 // frpPinFor finds the pin for a version on an architecture. A version that is not pinned is an

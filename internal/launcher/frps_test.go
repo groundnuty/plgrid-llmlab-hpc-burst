@@ -259,9 +259,64 @@ func TestFrpPinsFile(t *testing.T) {
 	if _, err := frpPinFor(pins, DefaultFrpVersion, "riscv64"); err == nil {
 		t.Error("an architecture with no pin was accepted")
 	}
-	for _, bad := range []string{"0.71.1 amd64 x.tgz abc def", "0.71.1 amd64 x.tgz", strings.Repeat("g", 64)} {
+	sum := strings.Repeat("a", 64)
+	for _, bad := range []string{
+		"0.71.1 amd64 x.tgz abc def ghi",
+		"0.71.1 amd64 x.tgz",
+		strings.Repeat("g", 64),
+		"0.71.1 amd64 x.tgz " + sum + " " + sum, // the five fields of a file without frpc
+		"0.71.1 amd64 x.tgz " + sum + " " + sum + " " + strings.Repeat("A", 64),       // upper case: not agent.json's form
+		"0.71.1 amd64 x.tgz " + sum + " " + sum + " " + sum + " " + sum,               // seven fields
+		"0.71.1 amd64 x.tgz " + sum + " " + sum + " " + strings.Repeat("a", 63) + "g", // not hex
+	} {
 		if _, err := parseFrpPins(bad); err == nil {
 			t.Errorf("parsed %q", bad)
+		}
+	}
+}
+
+// TestFrpcDigests: the frpc digests are keyed by cpuArch, the kernel's machine name that platform
+// profiles use (x86_64, aarch64), each from its own line's frpc column. The fixture's sums are
+// distinct, so a column or an architecture taken from the wrong place shows.
+func TestFrpcDigests(t *testing.T) {
+	a, b, c, d := strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64), strings.Repeat("d", 64)
+	pins, err := parseFrpPins("0.71.1 amd64 x.tgz " + a + " " + b + " " + c + "\n0.71.1 arm64 y.tgz " + b + " " + c + " " + d + "\n0.70.0 arm64 z.tgz " + a + " " + a + " " + a + "\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := frpcDigests(pins, "0.71.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got["x86_64"] != c || got["aarch64"] != d {
+		t.Errorf("frpcDigests = %v, want x86_64 %s and aarch64 %s", got, c, d)
+	}
+	if _, err := frpcDigests(pins, "9.9.9"); err == nil {
+		t.Error("a version with no pin gave digests")
+	}
+	riscv := append(pins, FrpPin{Version: "0.71.1", Arch: "riscv64", FrpcSHA256: a})
+	if got, err := frpcDigests(riscv, "0.71.1"); err == nil || !strings.Contains(err.Error(), "riscv64") {
+		t.Errorf("an architecture with no cpuArch name: %v, %v; want an error naming it, not a digest left out", got, err)
+	}
+
+	// The embedded file: both architectures of the default release, distinct from each other and
+	// from the frps sums of their lines (a column mix-up).
+	all, err := parseFrpPins(frpPinsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned, err := FrpcDigests(DefaultFrpVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pinned) != 2 || pinned["x86_64"] == "" || pinned["aarch64"] == "" || pinned["x86_64"] == pinned["aarch64"] {
+		t.Fatalf("FrpcDigests(%s) = %v, want two distinct digests, for x86_64 and aarch64", DefaultFrpVersion, pinned)
+	}
+	for _, p := range all {
+		for _, v := range pinned {
+			if v == p.FrpsSHA256 || v == p.TarballSHA256 {
+				t.Errorf("frpc digest %s is %s's frps or tarball sum", v, p.Arch)
+			}
 		}
 	}
 }
@@ -314,7 +369,8 @@ func TestResolveFrpsChecksTheBytesItOpened(t *testing.T) {
 }
 
 // TestFrpPinsAgreeWithTheFetchScript: hack/fetch-frp.sh pins the same release as frp-pins.txt (it
-// downloads what the launcher will then verify), so the two must not drift. The script is read as
+// downloads what the launcher will then verify, and the frpc that agent.json names), so the two
+// must not drift, in any of the three sums. The script is read as
 // text; its values are not computed from the pin file.
 func TestFrpPinsAgreeWithTheFetchScript(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join("..", "..", "hack", "fetch-frp.sh"))
@@ -335,7 +391,8 @@ func TestFrpPinsAgreeWithTheFetchScript(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if vars["FRP_VERSION"] != pin.Version || vars["FRP_TARBALL_SHA"] != pin.TarballSHA256 || vars["FRPS_SHA"] != pin.FrpsSHA256 {
+	if vars["FRP_VERSION"] != pin.Version || vars["FRP_TARBALL_SHA"] != pin.TarballSHA256 || vars["FRPS_SHA"] != pin.FrpsSHA256 ||
+		vars["FRPC_SHA"] != pin.FrpcSHA256 {
 		t.Errorf("hack/fetch-frp.sh pins %v, frp-pins.txt pins %+v", vars, pin)
 	}
 }
