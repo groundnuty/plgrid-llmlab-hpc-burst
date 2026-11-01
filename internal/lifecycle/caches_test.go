@@ -18,12 +18,14 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	appsv1 "k8s.io/api/apps/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/launcher"
@@ -83,7 +85,7 @@ func newCachesRig(t *testing.T) *cachesRig {
 // start runs one copy of the controller and returns its stop, which waits once for the manager to
 // return and is also run at the test's end. Each copy has a registry of its own: two managers in
 // one process cannot register the same collectors twice.
-func (g *cachesRig) start(t *testing.T, name string, cfg *rest.Config, o Options) (stop func()) {
+func (g *cachesRig) start(t *testing.T, name string, cfg *rest.Config, o Options) (stop func(), mgr manager.Manager) {
 	t.Helper()
 	o.Config, o.CredentialsDir, o.AgentBuildsDir = cfg, g.creds, g.builds
 	o.FrontConfigured, o.Checkpoints, o.Registry = true, &stubSource{}, prometheus.NewRegistry()
@@ -97,7 +99,7 @@ func (g *cachesRig) start(t *testing.T, name string, cfg *rest.Config, o Options
 	var once sync.Once
 	stop = func() { once.Do(func() { stopManager(t, name, cancel, done) }) }
 	t.Cleanup(stop)
-	return stop
+	return stop, mgr
 }
 
 // readyzCodes returns the status codes of a copy's two readiness checks.
@@ -148,14 +150,39 @@ func heldConfig(cfg *rest.Config, resource string, gate <-chan struct{}) (*rest.
 }
 
 // The six kinds whose informers "caches" waits for (HBEP-11): the resource name each is listed by.
-var cachesKinds = []struct{ name, resource string }{
-	{"ModelDeployment", "modeldeployments"},
-	{"Allocation", "allocations"},
-	{"Instance", "instances"},
-	{"Provider", "providers"},
-	{"PlatformProfile", "platformprofiles"},
-	{"ControllerRevision", "controllerrevisions"},
+var cachesKinds = []struct {
+	name, resource string
+	obj            client.Object
+}{
+	{"ModelDeployment", "modeldeployments", &v1alpha1.ModelDeployment{}},
+	{"Allocation", "allocations", &v1alpha1.Allocation{}},
+	{"Instance", "instances", &v1alpha1.Instance{}},
+	{"Provider", "providers", &v1alpha1.Provider{}},
+	{"PlatformProfile", "platformprofiles", &v1alpha1.PlatformProfile{}},
+	{"ControllerRevision", "controllerrevisions", &appsv1.ControllerRevision{}},
 }
+
+// othersSynced says whether the informers of every kind but held have synced, read from the same
+// shared cache the check reads (an informer asked for without waiting for its sync).
+func othersSynced(ctx context.Context, mgr manager.Manager, held string) (bool, string) {
+	for _, k := range cachesKinds {
+		if k.name == held {
+			continue
+		}
+		inf, err := mgr.GetCache().GetInformer(ctx, k.obj, cache.BlockUntilSynced(false))
+		if err != nil {
+			return false, k.name + ": " + err.Error()
+		}
+		if !inf.HasSynced() {
+			return false, k.name + " has not synced"
+		}
+	}
+	return true, ""
+}
+
+// cachesPollPeriod is client-go's pause between two looks at the informers' HasSynced
+// (tools/cache, syncedPollPeriod): the check can lag an informer's sync by this much.
+const cachesPollPeriod = 100 * time.Millisecond
 
 // TestCachesNeedsEveryWatchedInformer is HBEP-11's two-copies case, once for each of the six kinds.
 // A leader holds the Lease. A second copy, the standby, starts with the initial list of one kind
@@ -167,7 +194,7 @@ var cachesKinds = []struct{ name, resource string }{
 // the test looks at it (five reads each).
 func TestCachesNeedsEveryWatchedInformer(t *testing.T) {
 	g := newCachesRig(t)
-	stopLeader := g.start(t, "leader", g.cfg, Options{HealthAddr: cachesLeaderAddr, LeaderElection: true})
+	stopLeader, _ := g.start(t, "leader", g.cfg, Options{HealthAddr: cachesLeaderAddr, LeaderElection: true})
 	eventually(t, time.Minute, "the leader copy is ready", func() (bool, string) {
 		st, p := launcher.ReadReadiness(cachesLeaderAddr)
 		return st == launcher.ReadyzReady, fmt.Sprintf("state %q %v", st, p)
@@ -178,7 +205,7 @@ func TestCachesNeedsEveryWatchedInformer(t *testing.T) {
 			release := sync.OnceFunc(func() { close(gate) })
 			defer release()
 			cfg, arrived := heldConfig(g.cfg, k.resource, gate)
-			stop := g.start(t, "standby, "+k.name+" held", cfg, Options{HealthAddr: cachesStandbyAddr, LeaderElection: true})
+			stop, mgr := g.start(t, "standby, "+k.name+" held", cfg, Options{HealthAddr: cachesStandbyAddr, LeaderElection: true})
 			defer stop()
 			select {
 			case <-arrived:
@@ -188,12 +215,20 @@ func TestCachesNeedsEveryWatchedInformer(t *testing.T) {
 			eventually(t, time.Minute, "the standby's health server answers", func() (bool, string) {
 				return getStatus(t, "http://"+cachesStandbyAddr+"/healthz") == http.StatusOK, "no /healthz"
 			})
-			for i := 0; i < 5; i++ {
+			// The other five informers have synced: only the held one keeps the check failing. The
+			// check lags the informers by up to one poll period, so the hold is looked at for ten of
+			// them, and for at least five reads, after the others are seen synced. The hold lasts until
+			// the test lifts it, so a longer look can only find a fault, never make one.
+			eventually(t, time.Minute, "the other five informers have synced", func() (bool, string) {
+				return othersSynced(g.ctx, mgr, k.name)
+			})
+			seen := time.Now()
+			for i := 0; i < 5 || time.Since(seen) < 10*cachesPollPeriod; i++ {
 				caches, leading := readyzCodes(t, cachesStandbyAddr)
 				st, problems := launcher.ReadReadiness(cachesStandbyAddr)
 				if caches != http.StatusInternalServerError || leading != http.StatusInternalServerError ||
 					st != launcher.ReadyzStarting || len(problems) != 1 || !strings.Contains(problems[0], "starting: GET /readyz/caches") {
-					t.Fatalf("with the %s informer held: caches %d, leading %d, status %q %v; want 500, 500 and starting", k.name, caches, leading, st, problems)
+					t.Fatalf("with the %s informer held and the others synced: caches %d, leading %d, status %q %v; want 500, 500 and starting", k.name, caches, leading, st, problems)
 				}
 			}
 			release()
@@ -215,7 +250,7 @@ func TestCachesNeedsEveryWatchedInformer(t *testing.T) {
 		})
 	}
 	t.Run("the standby takes over when the leader goes", func(t *testing.T) {
-		stop := g.start(t, "standby", g.cfg, Options{HealthAddr: cachesStandbyAddr, LeaderElection: true})
+		stop, _ := g.start(t, "standby", g.cfg, Options{HealthAddr: cachesStandbyAddr, LeaderElection: true})
 		defer stop()
 		eventually(t, time.Minute, "the standby reads not leading", func() (bool, string) {
 			st, p := launcher.ReadReadiness(cachesStandbyAddr)
@@ -283,7 +318,7 @@ func TestCachesListIsWhatTheControllerWatches(t *testing.T) {
 		t.Fatal(err)
 	}
 	readinessOnly := &recordingCache{asked: map[string]bool{}}
-	stop := g.start(t, "readiness alone", g.cfg, Options{HealthAddr: cachesDriftAddr, LeaderElection: true, newCache: recordingNewCache(readinessOnly)})
+	stop, _ := g.start(t, "readiness alone", g.cfg, Options{HealthAddr: cachesDriftAddr, LeaderElection: true, newCache: recordingNewCache(readinessOnly)})
 	eventually(t, time.Minute, "the caches check passes with another holder on the Lease", func() (bool, string) {
 		caches, leading := readyzCodes(t, cachesDriftAddr)
 		return caches == http.StatusOK && leading == http.StatusInternalServerError, fmt.Sprintf("caches %d, leading %d", caches, leading)
@@ -295,7 +330,7 @@ func TestCachesListIsWhatTheControllerWatches(t *testing.T) {
 	}
 
 	withController := &recordingCache{asked: map[string]bool{}}
-	g.start(t, "controller running", g.cfg, Options{HealthAddr: cachesDriftAddr, LeaderElection: false, newCache: recordingNewCache(withController)})
+	_, _ = g.start(t, "controller running", g.cfg, Options{HealthAddr: cachesDriftAddr, LeaderElection: false, newCache: recordingNewCache(withController)})
 	md := mdSpec("md-drift")
 	md.Generation = 0
 	if err := g.cl.Create(g.ctx, md); err != nil {
