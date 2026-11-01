@@ -10,6 +10,9 @@ package scenario_test
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"strconv"
+	"testing"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -72,6 +75,22 @@ func (r *rig) replacementReady(p *v1alpha1.Instance) v1alpha1.Instance {
 		return false
 	})
 	return repl
+}
+
+// waitState is waitFor whose failure names the state cond saw last.
+func waitState(t *testing.T, d time.Duration, what string, cond func() (bool, string)) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for {
+		ok, state := cond()
+		if ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %s waiting for %s; last: %s", d, what, state)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 }
 
 func parseRecordTime(s string) time.Time {
@@ -167,11 +186,19 @@ func (r *rig) checkDrained(pred, repl *v1alpha1.Instance, ds, streamEnd time.Tim
 			repl.Name, repl.CreationTimestamp.Format(time.RFC3339), repl.Status.ReadyTime, alloc.Status.AtProvider.StartTime.Format(time.RFC3339), ds.Format(time.RFC3339))
 	}
 	r.t.Logf("step (c): replacement %s created %s after the primary's Allocation started", repl.Name, repl.CreationTimestamp.Sub(alloc.Status.AtProvider.StartTime.Time))
-	waitFor(r.t, waitDeadline, "the primary to end Drained and its Allocation to end", func() bool {
+	// A released Allocation is deleted (internal/lifecycle/retention.go), so
+	// it ends gone or Ended, and its job leaves the fake cluster's queue.
+	jobID, _ := strconv.Atoi(pred.Status.JobID)
+	waitState(r.t, waitDeadline, "the primary to end Drained, its Allocation to end and its job to finish", func() (bool, string) {
 		in, ok := r.instance(pred.Name)
 		var a v1alpha1.Allocation
+		gone := !r.get(&a, alloc.Name, namespace)
+		j, _ := r.cl.plat.Job(jobID)
+		state := fmt.Sprintf("Instance %s phase %s end %q; Allocation gone %v phase %s; job %d %s finished %v",
+			pred.Name, in.Status.Phase, in.Status.EndReason, gone, a.Status.AtProvider.Phase, jobID, j.State, j.Finished)
 		return ok && in.Status.Phase == v1alpha1.InstanceEnded && in.Status.EndReason == v1alpha1.ReasonDrained &&
-			r.get(&a, alloc.Name, namespace) && a.Status.AtProvider.Phase == v1alpha1.AllocationEnded
+			(gone || a.Status.AtProvider.Phase == v1alpha1.AllocationEnded) &&
+			(j.Finished || j.State != "PENDING" && j.State != "RUNNING"), state
 	})
 	name, err := v1alpha1.AccountingRecordName(alloc.UID)
 	if err != nil {
