@@ -118,3 +118,11 @@ func TestReadGenerationConfigBounds(t *testing.T) {
 		}
 	}
 }
+
+// With no staged checkpoint directory the agent has looked at nothing, and says nothing: empty, which is not
+// "absent" (issue #175).
+func TestGenerationConfigFileOfNoDirectoryIsEmpty(t *testing.T) {
+	if got := generationConfigFile(""); got != "" {
+		t.Errorf("generationConfigFile(\"\") = %q, want empty", got)
+	}
+}

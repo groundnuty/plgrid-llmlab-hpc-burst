@@ -6,6 +6,7 @@ package lifecycle
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -336,5 +337,46 @@ func TestVerifyNoInstanceReadyBeforeChecksPass(t *testing.T) {
 	}
 	if got := len(rg.rec.Find("failing", "WorkerRestart")); got != 1 {
 		t.Fatalf("worker restarts = %d, want 1", got)
+	}
+}
+
+// The record the controller writes through the API server says whether the checkpoint's generation_config.json is
+// there (issue #175): an agent that finds no file, one that finds a file with no keys and one that finds keys give
+// three records, read back from the ControllerRevision the API server stored, and the record of the absent file is
+// the only one that says so. The record is opaque JSON in a ControllerRevision, not a CRD field, so no CEL rule
+// applies to it.
+func TestVerificationRecordTellsAnAbsentGenerationConfigFromNoKeys(t *testing.T) {
+	for _, c := range []struct {
+		name, file string
+		keys       map[string]string
+		wantFile   string
+		wantKeys   string
+	}{
+		{"absent", agentapi.GenerationConfigAbsent, nil, `"generationConfigFile":"absent"`, ""},
+		{"present with no keys", agentapi.GenerationConfigPresent, nil, `"generationConfigFile":"present"`, ""},
+		{"present with keys", agentapi.GenerationConfigPresent, map[string]string{"temperature": "0.7"}, `"generationConfigFile":"present"`, `"generationConfig":{"temperature":"0.7"}`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rg, in := verifRig(t, func() afake.Engine {
+				return afake.Engine{Verify: func(i agentapi.DesiredInstance, r agentapi.VerifyRequest) agentapi.VerifyResult {
+					v := afake.DefaultVerify(i, r)
+					v.GenerationConfigFile, v.GenerationConfig = c.file, c.keys
+					return v
+				}}
+			})
+			verifRunUntil(rg, 10*time.Minute, "ready with the record", func() bool {
+				return rg.instance(in.Name).Status.VerificationRecord == verifRecordName(in, 1) && rg.readyCount("md") == 1
+			})
+			raw, verdict, ok := verifRecord(rg, verifRecordName(in, 1))
+			if !ok || verdict != "pass" {
+				t.Fatalf("record: exists %v verdict %q", ok, verdict)
+			}
+			if !strings.Contains(string(raw), c.wantFile) {
+				t.Errorf("the record %s lacks %s", raw, c.wantFile)
+			}
+			if has := strings.Contains(string(raw), `"generationConfig":`); has != (c.wantKeys != "") || (c.wantKeys != "" && !strings.Contains(string(raw), c.wantKeys)) {
+				t.Errorf("the record %s: keys present %v, want %q", raw, has, c.wantKeys)
+			}
+		})
 	}
 }

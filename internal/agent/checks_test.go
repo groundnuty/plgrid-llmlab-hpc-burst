@@ -3,6 +3,7 @@ package agent_test
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -259,5 +260,54 @@ func TestVerificationReportsTheGenerationConfig(t *testing.T) {
 	r := h.waitReport("verification done", 30*time.Second, verified(1))
 	if got := r.Instance.Checks.Verify.GenerationConfig; got["repetition_penalty"] != "1.1" || got["temperature"] != "0.7" || len(got) != 2 {
 		t.Errorf("generationConfig %v, want repetition_penalty 1.1 and temperature 0.7", got)
+	}
+}
+
+// The verification report says what the agent found at the staged checkpoint's generation_config.json, so a
+// record can tell a checkpoint with no such file from one whose file holds none of the keys (issue #175). The
+// agent reads a directory that the stager staged, with each case's file placed in it, and the report is the one
+// the Backend received: an absent file, a file with none of the keys (and one whose keys are all null), a file
+// with keys, and something at the path that is not a file.
+func TestVerificationSaysWhetherTheGenerationConfigFileIsThere(t *testing.T) {
+	file := func(body string) func(t *testing.T, dir string) {
+		return func(t *testing.T, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, "generation_config.json"), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, c := range []struct {
+		name  string
+		place func(t *testing.T, dir string) // makes the case in the staged checkpoint directory
+		file  string
+		keys  map[string]string
+	}{
+		{"no file", func(*testing.T, string) {}, agentapi.GenerationConfigAbsent, nil},
+		{"a file with none of the keys", file(`{"bos_token_id": 151643, "transformers_version": "4.37.0"}`), agentapi.GenerationConfigPresent, nil},
+		{"a file whose keys are all null", file(`{"temperature": null, "top_p": null}`), agentapi.GenerationConfigPresent, nil},
+		{"a file with keys", file(`{"repetition_penalty": 1.1, "temperature": 0.7, "hf_token": "hf_0123456789abcdef"}`), agentapi.GenerationConfigPresent,
+			map[string]string{"repetition_penalty": "1.1", "temperature": "0.7"}},
+		{"a directory at the path", func(t *testing.T, dir string) {
+			if err := os.Mkdir(filepath.Join(dir, "generation_config.json"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}, agentapi.GenerationConfigUnreadable, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t, harnessOptions{})
+			dir := filepath.Join(h.stagingDir, agentapi.StagedCheckpointDir("org/model", launch("", "").Checkpoint.Revision))
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			c.place(t, dir)
+			h.set(h.runState("", 1, 0, nil))
+			v := h.waitReport("verification done", 30*time.Second, verified(1)).Instance.Checks.Verify
+			if v.GenerationConfigFile != c.file {
+				t.Errorf("generationConfigFile %q, want %q", v.GenerationConfigFile, c.file)
+			}
+			if !reflect.DeepEqual(v.GenerationConfig, c.keys) {
+				t.Errorf("generationConfig %v, want %v", v.GenerationConfig, c.keys)
+			}
+		})
 	}
 }
