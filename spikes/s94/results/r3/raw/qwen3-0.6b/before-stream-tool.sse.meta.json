@@ -1,0 +1,43 @@
+{
+  "contentType": "text/event-stream; charset=utf-8",
+  "method": "POST",
+  "path": "/v1/chat/completions",
+  "request": {
+    "max_tokens": 4224,
+    "messages": [
+      {
+        "content": "What is the weather in Krakow? Use the tool.",
+        "role": "user"
+      }
+    ],
+    "model": "hb-test/qwen3-0.6b",
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    },
+    "temperature": 0,
+    "tool_choice": "auto",
+    "tools": [
+      {
+        "function": {
+          "description": "Get the current weather in a city.",
+          "name": "get_weather",
+          "parameters": {
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  },
+  "seconds": 0.186268426,
+  "status": 200
+}
