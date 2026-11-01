@@ -285,6 +285,48 @@ func TestCPUAndMemoryCaps(t *testing.T) {
 	accepted(t, req, profile, settings)
 }
 
+// A memory cap that is not a whole number of MiB: Kubernetes reads 100G as
+// 100,000,000,000 bytes, which is 95367.43 MiB, and 125G as 119209.29 MiB, not
+// Slurm's G of 2^30. The cap is rounded down to whole MiB and the request up
+// (the whole MiB that go to Slurm), so a job never exceeds the cap: 95367Mi
+// passes under 100G and 95368Mi is refused, and 119209Mi passes under 125G and
+// 119210Mi is refused. A request spelled in the same decimal unit is not whole
+// MiB and rounds up past the cap (100G is 95368 MiB), so a caller that sizes a
+// request from a cap must clamp it to whole MiB itself (PR 168's review, Opus
+// N10, and PR 171's B2); this pins the provider's side of that contract.
+func TestAMemoryCapThatIsNotWholeMiBRoundsDown(t *testing.T) {
+	withCap := func(capQty, request string) func(*provider.SubmitRequest, *v1alpha1.PlatformProfileSpec, *v1alpha1.PartitionProfile) {
+		return func(r *provider.SubmitRequest, spec *v1alpha1.PlatformProfileSpec, _ *v1alpha1.PartitionProfile) {
+			spec.QOS[0].MaxMemPerUser = qty(capQty)
+			r.Params.Memory = resource.MustParse(request)
+		}
+	}
+	for _, c := range []struct {
+		capQty, request string
+		ok              bool
+		memMiB          int64 // sent, when ok
+		capMiB          string
+	}{
+		{"100G", "95367Mi", true, 95367, ""},
+		{"100G", "95368Mi", false, 0, "95367"},
+		{"100G", "100G", false, 0, "95367"}, // 100,000,000,000 bytes round up to 95368 MiB
+		{"125G", "119209Mi", true, 119209, ""},
+		{"125G", "119210Mi", false, 0, "119209"},
+		{"125G", "125G", false, 0, "119209"}, // 119210 MiB
+	} {
+		t.Run(c.capQty+" cap, "+c.request+" asked", func(t *testing.T) {
+			req, profile, settings := qosFixture(withCap(c.capQty, c.request))
+			if c.ok {
+				if s := accepted(t, req, profile, settings); s.memMiB != c.memMiB {
+					t.Errorf("memMiB = %d, want %d", s.memMiB, c.memMiB)
+				}
+				return
+			}
+			refusedWith(t, req, profile, settings, "maxMemPerUser", "("+c.capMiB+" MiB)")
+		})
+	}
+}
+
 // The flag, the safe pattern and the sources of the limits.
 func TestQOSValueIsCheckedBeforeAnyCall(t *testing.T) {
 	// An unsafe qos that the profile lists: only the safe pattern can refuse
