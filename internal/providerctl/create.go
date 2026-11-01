@@ -157,8 +157,14 @@ func (e *external) rejected(ctx context.Context, a *v1alpha1.Allocation, claim v
 		e.event(a, event.Warning("SubmissionRejected", fmt.Errorf("attempt %d: %s", claim.Attempt, r.Reason)))
 		return fmt.Errorf("attempt %d rejected: %s", claim.Attempt, r.Reason)
 	}
+	// The event keeps today's reason, SubmissionRejected: SubmitLimitReached is
+	// a condition reason only, so HBEP-8's event reasons are unchanged (HBEP-7,
+	// Events and conditions; `@hpc-burst-science-agent`, 1 Nov 2026). A full slot
+	// can last hours, so the event is a repeating one: emitted when the refusal
+	// starts, then at most once an hour (limitEventDue). The note says it is a
+	// full submit limit.
 	if e.s.limitEventDue(a.UID, e.now()) {
-		e.event(a, event.Warning(v1alpha1.ReasonSubmitLimitReached, fmt.Errorf("attempt %d: %s; the next waits for backoff", claim.Attempt, r.Reason)))
+		e.event(a, event.Warning("SubmissionRejected", fmt.Errorf("attempt %d: submit limit reached: %s", claim.Attempt, r.Reason)))
 	}
 	if werr != nil {
 		return fmt.Errorf("attempt %d rejected: %s", claim.Attempt, r.Reason)

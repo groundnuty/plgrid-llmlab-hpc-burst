@@ -418,11 +418,14 @@ func TestASecondJobBesideARunningOneIsAcceptedAndPends(t *testing.T) {
 	}
 }
 
-// The SubmitLimitReached event is a repeating condition: emitted when the
-// refusal starts, then at most once an hour while it lasts, never on every
-// attempt (HBEP-8, Repeating conditions); an ordinary Rejected attempt keeps
-// its event on every attempt. The gate is in memory, so a restart emits once
-// more, which is "when it starts" for that process.
+// The event of a full submit limit keeps today's reason, SubmissionRejected
+// (SubmitLimitReached is a condition reason only, so HBEP-8's event reasons are
+// unchanged), and is a repeating one: emitted when the refusal starts, then at
+// most once an hour while it lasts, never on every attempt (HBEP-8, Repeating
+// conditions); its note says the submit limit was reached and carries the
+// reason line. The gate is in memory, so a restart emits once more, which is
+// "when it starts" for that process. An ordinary Rejected attempt keeps its
+// event on every attempt.
 func TestSubmitLimitEventIsEmittedWhenItStartsThenAtMostOnceAnHour(t *testing.T) {
 	count := func(r *recorder, reason string) int {
 		n := 0
@@ -439,31 +442,52 @@ func TestSubmitLimitEventIsEmittedWhenItStartsThenAtMostOnceAnHour(t *testing.T)
 	e := newRealEnv(t, clock, sl, newFakeClient(t, "prov-a"), "prov-a", "user-a", withQOS("now", "", nowProfile()...), withRecorder(rec))
 	sl.OutsideJob("user-a", "another-project-job", gpuPart, "now", 1)
 	e.newAlloc("alloc-a", 1)
-	// 70 attempts, one a backoff apart: 70 minutes.
-	for i := 0; i < 70; i++ {
+
+	// Several backoffs: the refusal repeats, and one event is emitted.
+	for i := 0; i < 5; i++ {
 		e.run("alloc-a", 2)
 		clock.Advance(61 * time.Second)
 	}
-	if n := sl.Count("sbatch"); n < 60 {
-		t.Fatalf("%d attempts, want about 70", n)
+	if n, m := sl.Count("sbatch"), count(rec, "SubmissionRejected"); n != 5 || m != 1 {
+		t.Fatalf("%d attempts and %d SubmissionRejected events over 5 backoffs, want 5 and 1", n, m)
+	}
+	var note string
+	rec.mu.Lock()
+	for _, ev := range rec.events {
+		if string(ev.Reason) == "SubmissionRejected" {
+			note = ev.Message
+		}
+	}
+	rec.mu.Unlock()
+	if note != "attempt 1: submit limit reached: sbatch: error: QOSMaxSubmitJobPerUserLimit" {
+		t.Errorf("the event's note is %q, want the submit limit and the reason line", note)
+	}
+
+	// 70 attempts, one a backoff apart: 70 minutes.
+	for i := 5; i < 70; i++ {
+		e.run("alloc-a", 2)
+		clock.Advance(61 * time.Second)
+	}
+	attempts := sl.Count("sbatch")
+	if attempts < 60 {
+		t.Fatalf("%d attempts, want about 70", attempts)
 	}
 	// Attempts at minutes 0..69: events at 0 and at the first attempt after an hour.
-	if n := count(rec, "SubmitLimitReached"); n != 2 {
-		t.Errorf("%d SubmitLimitReached events over %d attempts in 70 minutes, want 2 (at the start, and once after an hour)", n, sl.Count("sbatch"))
+	if n := count(rec, "SubmissionRejected"); n != 2 {
+		t.Errorf("%d SubmissionRejected events over %d attempts in 70 minutes, want 2 (at the start, and once after an hour)", n, attempts)
 	}
-	if n := count(rec, "SubmissionRejected"); n != 0 {
-		t.Errorf("%d SubmissionRejected events for a full slot, want 0", n)
+	if n := count(rec, "SubmitLimitReached"); n != 0 {
+		t.Errorf("%d events with the reason SubmitLimitReached, want 0: it is a condition reason only", n)
 	}
 	// crossplane-runtime's own events (reconciler.go:1473, reasonCreated, and
 	// :1388, reasonCannotCreate, in v2.4.3), which the gate above does not bound:
 	// a Create that returns no error emits a Normal CreatedExternalResource on
 	// every attempt, where an error would emit a Warning CannotCreateExternalResource.
-	attempts := sl.Count("sbatch")
 	if n, m := count(rec, "CreatedExternalResource"), count(rec, "CannotCreateExternalResource"); n != attempts || m != 0 {
 		t.Errorf("crossplane emitted %d CreatedExternalResource and %d CannotCreateExternalResource events over %d attempts; want one Created per attempt and no CannotCreate", n, m, attempts)
 	}
-	t.Logf("%d attempts in 70 minutes: %d SubmitLimitReached events (the gate), %d CreatedExternalResource events (crossplane's, one per attempt)",
-		attempts, count(rec, "SubmitLimitReached"), count(rec, "CreatedExternalResource"))
+	t.Logf("%d attempts in 70 minutes: %d SubmissionRejected events (the gate), %d CreatedExternalResource events (crossplane's, one per attempt)",
+		attempts, count(rec, "SubmissionRejected"), count(rec, "CreatedExternalResource"))
 }
 
 // Plain Rejected attempts keep their event on every attempt, as before.
