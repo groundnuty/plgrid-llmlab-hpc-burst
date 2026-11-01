@@ -5,12 +5,13 @@ import (
 	"fmt"
 	"runtime/pprof"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
 	coordinationv1 "k8s.io/api/coordination/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	coordinationv1client "k8s.io/client-go/kubernetes/typed/coordination/v1"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -33,47 +34,109 @@ import (
 // release's read, is a write in between. lateRenew plays it: when the release
 // record arrives at Update (no holder, a 1 s duration, as release writes it),
 // it first renews the Lease as its holder through another client, then
-// passes the release on, once.
+// passes the release on, once. It records that the renew was committed, and
+// what the release's own write returned then.
 type lateRenew struct {
 	resourcelock.Interface
-	coord   coordinationv1client.CoordinationV1Interface
-	ns      string
-	name    string
-	renewed atomic.Bool
+	coord coordinationv1client.CoordinationV1Interface
+	ns    string
+	name  string
+
+	mu         sync.Mutex
+	tried      bool  // a release reached Update
+	renewed    bool  // the injected renew was committed
+	releaseErr error // what the release's write returned right after it
 }
 
 func (l *lateRenew) Update(ctx context.Context, ler resourcelock.LeaderElectionRecord) error {
-	if ler.HolderIdentity == "" && ler.LeaseDurationSeconds == 1 && l.renewed.CompareAndSwap(false, true) {
-		lease, err := l.coord.Leases(l.ns).Get(ctx, l.name, metav1.GetOptions{})
-		if err != nil {
-			return fmt.Errorf("the late renew's read: %w", err)
-		}
-		now := metav1.NewMicroTime(time.Now())
-		lease.Spec.RenewTime = &now
-		if _, err := l.coord.Leases(l.ns).Update(ctx, lease, metav1.UpdateOptions{}); err != nil {
-			return fmt.Errorf("the late renew: %w", err)
-		}
+	if ler.HolderIdentity != "" || ler.LeaseDurationSeconds != 1 {
+		return l.Interface.Update(ctx, ler)
 	}
-	return l.Interface.Update(ctx, ler)
+	l.mu.Lock()
+	first := !l.tried
+	l.tried = true
+	l.mu.Unlock()
+	if !first {
+		return l.Interface.Update(ctx, ler)
+	}
+	lease, err := l.coord.Leases(l.ns).Get(ctx, l.name, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("the late renew's read: %w", err)
+	}
+	now := metav1.NewMicroTime(time.Now())
+	lease.Spec.RenewTime = &now
+	if _, err := l.coord.Leases(l.ns).Update(ctx, lease, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("the late renew: %w", err)
+	}
+	err = l.Interface.Update(ctx, ler)
+	l.mu.Lock()
+	l.renewed, l.releaseErr = true, err
+	l.mu.Unlock()
+	return err
 }
 
-// leaseHolder is the Lease's holderIdentity now, "" when it has none.
+// played fails the test unless the late renew was committed between a
+// release's read and its write, and that write then conflicted: the
+// interleaving the test is about took place.
+func (l *lateRenew) played(t *testing.T) {
+	t.Helper()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	switch {
+	case !l.tried:
+		t.Fatal("no release reached Update, so no renew was played between its read and its write")
+	case !l.renewed:
+		t.Fatal("the late renew was not committed")
+	case !apierrors.IsConflict(l.releaseErr):
+		t.Fatalf("after the late renew the release's write returned %v, want a conflict", l.releaseErr)
+	}
+}
+
+// leaseHolder is the Lease's holderIdentity, "" when it names none. A Lease
+// that cannot be read fails the test: it is never taken for a free one.
 func leaseHolder(t *testing.T, name string) string {
 	t.Helper()
+	holder, err := readHolder(name)
+	if err != nil {
+		t.Fatalf("reading the Lease %s: %v", name, err)
+	}
+	return holder
+}
+
+// readHolder reads the Lease's holderIdentity, "" when it names none. A Lease
+// that does not exist yet is an error like any other failed read.
+func readHolder(name string) (string, error) {
 	l := &coordinationv1.Lease{}
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: v1alpha1.ControllerNamespace, Name: name}, l); err != nil {
-		return ""
+		return "", err
 	}
 	if l.Spec.HolderIdentity == nil {
-		return ""
+		return "", nil
 	}
-	return *l.Spec.HolderIdentity
+	return *l.Spec.HolderIdentity, nil
+}
+
+// waitHolder waits, with a generous deadline, until the Lease can be read and
+// its holder satisfies want. A failed read is not a holder: the wait goes on,
+// and a time-out names the last error.
+func waitHolder(t *testing.T, name, what string, want func(holder string) bool) {
+	t.Helper()
+	var holder string
+	var err error
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(100 * time.Millisecond) {
+		if holder, err = readHolder(name); err == nil && want(holder) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after 30s waiting until %s: the Lease's holder is %q, the last read's error %v", what, holder, err)
+		}
+	}
 }
 
 // runReleaseRace starts a manager that leads through lock, waits until the
 // Lease names it as holder, stops the manager, and returns the Lease's holder
-// once the manager has returned, with whether the late renew was played.
-func runReleaseRace(t *testing.T, name string, lock resourcelock.Interface, played func() bool) string {
+// once the manager has returned; late must show the interleaving was played.
+func runReleaseRace(t *testing.T, name string, lock resourcelock.Interface, late *lateRenew) string {
 	t.Helper()
 	lease, renew, retry := 4*time.Second, 3*time.Second, 500*time.Millisecond
 	mgr, err := manager.New(cfg, manager.Options{
@@ -103,10 +166,11 @@ func runReleaseRace(t *testing.T, name string, lock resourcelock.Interface, play
 			<-done
 		}
 	}()
-	eventually(t, "the manager leads and holds the Lease", 30*time.Second, func() bool {
+	elected := mgr.Elected()
+	waitHolder(t, name, "the manager leads and holds the Lease", func(holder string) bool {
 		select {
-		case <-mgr.Elected():
-			return leaseHolder(t, name) == lock.Identity()
+		case <-elected:
+			return holder == lock.Identity()
 		default:
 			return false
 		}
@@ -121,9 +185,7 @@ func runReleaseRace(t *testing.T, name string, lock resourcelock.Interface, play
 	case <-time.After(30 * time.Second):
 		t.Fatal("the manager did not stop within 30 s")
 	}
-	if !played() {
-		t.Fatal("the release reached no Update, so no renew was played between its read and its write")
-	}
+	late.played(t)
 	return leaseHolder(t, name)
 }
 
@@ -161,7 +223,7 @@ func TestReleaseRetriedAfterALateRenew(t *testing.T) {
 	const name = "release-race-retried"
 	late := lateRenewLock(t, name)
 	lock := leaderlock.WithRetriedRelease(late, logr.Discard())
-	if holder := runReleaseRace(t, name, lock, late.renewed.Load); holder != "" {
+	if holder := runReleaseRace(t, name, lock, late); holder != "" {
 		t.Fatalf("after the late renew the Lease is still held by %q; the retried release should have freed it", holder)
 	}
 }
@@ -179,7 +241,7 @@ func TestReleaseRetriedAfterALateRenew(t *testing.T) {
 func TestReleaseLostToALateRenew(t *testing.T) {
 	const name = "release-race-plain"
 	lock := lateRenewLock(t, name)
-	if holder := runReleaseRace(t, name, lock, lock.renewed.Load); holder != lock.Identity() {
+	if holder := runReleaseRace(t, name, lock, lock); holder != lock.Identity() {
 		t.Fatalf("after the late renew the Lease's holder is %q; client-go's release was expected to be lost, leaving %q", holder, lock.Identity())
 	}
 }
@@ -192,9 +254,9 @@ func TestReleaseLostToALateRenew(t *testing.T) {
 // Start returns only after its stop procedure has waited for the elector
 // (controller-runtime v0.23.1, pkg/manager/internal.go:381-383, 468-472,
 // 545-554), so the Lease is read once Start has returned, with no wait: a
-// lost release shows as a holder there. Each round
-// takes the Lease the previous one released at once; a lost release would
-// make it wait for the Lease to expire, 4 s.
+// lost release shows as a holder there. Each round takes the Lease the
+// previous one released at once; after a lost release it would wait until
+// the Lease expired by its own clock, 4 s after its first read of it.
 func TestProviderManagerReleasesItsLeaseOnEveryStop(t *testing.T) {
 	const (
 		stopRounds = 200
@@ -212,10 +274,11 @@ func TestProviderManagerReleasesItsLeaseOnEveryStop(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
 		go func() { done <- mgr.Start(ctx) }()
-		eventually(t, fmt.Sprintf("round %d: the manager holds the Lease", round), 30*time.Second, func() bool {
+		elected := mgr.Elected()
+		waitHolder(t, name, fmt.Sprintf("round %d: the manager leads and holds the Lease", round), func(holder string) bool {
 			select {
-			case <-mgr.Elected():
-				return leaseHolder(t, name) != ""
+			case <-elected:
+				return holder != ""
 			default:
 				return false
 			}
