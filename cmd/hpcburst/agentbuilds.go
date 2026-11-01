@@ -83,5 +83,5 @@ func printBuildsError(w io.Writer, e *launcher.AgentBuildsError, stateDir string
 			fmt.Fprintf(w, "ERROR:   cpuArch %s (partitions %s): %s\nERROR:     fix: %s\n", p.CPUArch, strings.Join(p.Partitions, ", "), p.What, p.Fix)
 		}
 	}
-	fmt.Fprintf(w, "ERROR: the host was left running; fix the builds, then run: hpcburst status --state-dir %s\n", stateDir)
+	fmt.Fprintf(w, "ERROR: the host was left running; fix the builds, then run: hpcburst status --state-dir %s\n", launcher.ShellQuote(stateDir))
 }

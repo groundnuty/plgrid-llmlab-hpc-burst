@@ -2,6 +2,10 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -71,5 +75,46 @@ func TestBuildStateOfAnAgentBuild(t *testing.T) {
 	}
 	if got, want := buildState(wrong), "hb-agent-aarch64 WRONG (is an ELF file for EM_X86_64, not for EM_AARCH64 as aarch64 is, sha256 bb)"; got != want {
 		t.Errorf("%q, want %q", got, want)
+	}
+}
+
+// The command that closes up's error is printed to be pasted: with a state directory that holds spaces,
+// quotes and shell metacharacters it must still run hpcburst status with exactly that directory. It is run
+// through sh -c against a stub hpcburst that records its arguments, and nothing the path spells as a command
+// may run.
+func TestPrintBuildsErrorStatusCommandRunsWithAnyStateDirectory(t *testing.T) {
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "hpcburst"), []byte("#!/bin/sh\nprintf '%s\\0' \"$@\" > \"$STUB_OUT\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	work := t.TempDir()
+	for _, dir := range []string{"/state/plain", "/state with spaces", "/it's", `/say "hi"`, "/semi;colon", "/$(touch PWNED)", "/back`touch PWNED`tick", "/new\nline", "/glob*?"} {
+		var b bytes.Buffer
+		printBuildsError(&b, &launcher.AgentBuildsError{Builds: &launcher.AgentBuilds{Dir: dir + "/agent-builds", Checked: true}}, dir)
+		// The command ends the error, and a quoted path may span lines.
+		_, cmdline, _ := strings.Cut(b.String(), "then run: ")
+		cmdline = strings.TrimSuffix(cmdline, "\n")
+		if cmdline == "" {
+			t.Fatalf("%q: no command in the error:\n%s", dir, b.String())
+		}
+		out := filepath.Join(t.TempDir(), "args")
+		cmd := exec.Command("sh", "-c", cmdline)
+		cmd.Dir = work
+		cmd.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"), "STUB_OUT="+out)
+		if o, err := cmd.CombinedOutput(); err != nil {
+			t.Errorf("%q: %q failed: %v\n%s", dir, cmdline, err, o)
+			continue
+		}
+		raw, err := os.ReadFile(out)
+		if err != nil {
+			t.Errorf("%q: the stub hpcburst was not run by %q: %v", dir, cmdline, err)
+			continue
+		}
+		if got := strings.Split(strings.TrimSuffix(string(raw), "\x00"), "\x00"); !slices.Equal(got, []string{"status", "--state-dir", dir}) {
+			t.Errorf("%q: %q gave hpcburst %q", dir, cmdline, got)
+		}
+		if _, err := os.Stat(filepath.Join(work, "PWNED")); err == nil {
+			t.Fatalf("%q: the path was run as a command", dir)
+		}
 	}
 }

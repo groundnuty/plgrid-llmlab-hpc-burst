@@ -33,7 +33,7 @@
 # before extracting anything, extracts frpc, checks frpc's sha256 against the line's frpc column,
 # and renames it into place as DIR/frpc-<cpuArch>, mode 755. frp names its architectures amd64 and
 # arm64, the platform profiles x86_64 and aarch64, and cpu_arch (hack/cpu-arch.sh, the one table that
-# hack/build-agents.sh reads too; the launcher's cpuArchOf is the Go one, and a test compares the two); a line whose
+# hack/build-agents.sh reads too; the launcher's archTable is the Go one, and a test compares the two); a line whose
 # architecture it does not know stops the run before anything is fetched. An architecture is
 # fetched on its own: one whose tarball or frpc does not match is deleted and the run exits 1, and
 # one that has been placed already stays. A DIR that already holds a matching frpc-<cpuArch> is left

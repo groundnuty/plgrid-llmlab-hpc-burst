@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -97,21 +98,18 @@ func (e *AgentBuildsError) Error() string {
 	return b.String()
 }
 
-// elfMachineOf is the ELF machine type of a build for each cpuArch. It is the one fact the agent
-// build's file is judged by beyond being there; TestElfMachineOfCoversEveryCPUArch keeps its keys
-// the cpuArchs of cpuArchOf, so a cpuArch added there has to be given its machine here.
-var elfMachineOf = map[string]elf.Machine{"x86_64": elf.EM_X86_64, "aarch64": elf.EM_AARCH64}
-
-// CPUArchs lists the cpuArch values builds exist for, sorted: the values of cpuArchOf, the one map
-// of the architecture names (hack/cpu-arch.sh is the bash copy).
-func CPUArchs() []string {
-	out := make([]string, 0, len(cpuArchOf))
-	for _, v := range cpuArchOf {
-		out = append(out, v)
+// ShellQuote quotes s for a POSIX shell, so that the shell reads it back as one word with exactly the
+// bytes of s: a word of safe characters stays as it is, anything else goes in single quotes with each
+// single quote written '\”. The fix commands that up and status print carry the state directory, which
+// can hold spaces, quotes and metacharacters.
+func ShellQuote(s string) string {
+	if safeShellWord.MatchString(s) {
+		return s
 	}
-	sort.Strings(out)
-	return out
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
+
+var safeShellWord = regexp.MustCompile(`^[A-Za-z0-9_@%+=:,./-]+$`)
 
 // partitionArch is a partition and the cpuArch of its accelerator class.
 type partitionArch struct{ Profile, Partition, CPUArch string }
@@ -119,7 +117,11 @@ type partitionArch struct{ Profile, Partition, CPUArch string }
 var platformProfiles = v1alpha1.GroupVersion.WithResource("platformprofiles")
 
 // listPartitionArchs reads every PlatformProfile of the API server and returns how many there are
-// and the cpuArch of each partition. A server without the PlatformProfile CRD has no profiles.
+// and the cpuArch of each partition. A server without the PlatformProfile CRD has no profiles: that
+// is a 404 and nothing else. Anything that is not a list of PlatformProfiles of the right group and
+// version, whose items have the structure the check reads (a metadata name, a providerKind of
+// managed, batch or static, a batch profile's partitions, each with a name and a cpuArch), is an
+// error, never "no profiles": an HTTP 200 with a Status in the body, or a list of {}, must not pass.
 func listPartitionArchs(ctx context.Context, cfg *rest.Config) (int, []partitionArch, error) {
 	dyn, err := dynamic.NewForConfig(cfg)
 	if err != nil {
@@ -132,13 +134,37 @@ func listPartitionArchs(ctx context.Context, cfg *rest.Config) (int, []partition
 	if err != nil {
 		return 0, nil, err
 	}
+	apiVersion := v1alpha1.GroupVersion.String()
+	if list.GetAPIVersion() != apiVersion || list.GetKind() != "PlatformProfileList" {
+		return 0, nil, fmt.Errorf("the API server answered the list of PlatformProfiles with kind %q of %q, not a PlatformProfileList of %s",
+			list.GetKind(), list.GetAPIVersion(), apiVersion)
+	}
 	var refs []partitionArch
-	for _, item := range list.Items {
+	for i, item := range list.Items {
+		who := fmt.Sprintf("item %d (%q)", i, item.GetName())
+		if item.GetAPIVersion() != apiVersion || item.GetKind() != "PlatformProfile" {
+			return 0, nil, fmt.Errorf("%s of the list is a %q of %q, not a PlatformProfile of %s", who, item.GetKind(), item.GetAPIVersion(), apiVersion)
+		}
+		if item.GetName() == "" {
+			return 0, nil, fmt.Errorf("%s of the list has no metadata.name", who)
+		}
 		var p v1alpha1.PlatformProfile
 		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(item.Object, &p); err != nil {
 			return 0, nil, fmt.Errorf("PlatformProfile %s: %w", item.GetName(), err)
 		}
-		for _, part := range p.Spec.Partitions {
+		switch p.Spec.ProviderKind {
+		case v1alpha1.PlatformBatch:
+			if len(p.Spec.Partitions) == 0 {
+				return 0, nil, fmt.Errorf("PlatformProfile %s is a batch profile and lists no partitions", p.Name)
+			}
+		case v1alpha1.PlatformManaged, v1alpha1.PlatformStatic:
+		default:
+			return 0, nil, fmt.Errorf("PlatformProfile %s has spec.providerKind %q, not one of managed, batch or static", p.Name, p.Spec.ProviderKind)
+		}
+		for j, part := range p.Spec.Partitions {
+			if part.Name == "" || part.CPUArch == "" {
+				return 0, nil, fmt.Errorf("PlatformProfile %s: partition %d has name %q and cpuArch %q; both are required", p.Name, j, part.Name, part.CPUArch)
+			}
 			refs = append(refs, partitionArch{Profile: p.Name, Partition: part.Name, CPUArch: part.CPUArch})
 		}
 	}
@@ -198,20 +224,20 @@ func checkAgentBuilds(profiles int, refs []partitionArch, dir string, pins map[s
 			rep.Problems = append(rep.Problems, BuildProblem{CPUArch: arch, Partitions: parts, What: what, Fix: fix})
 		}
 		if !a.Agent.OK {
-			problem(a.Agent.problem(dir), "hack/build-agents.sh "+dir+" "+arch)
+			problem(a.Agent.problem(dir), "hack/build-agents.sh "+ShellQuote(dir)+" "+arch)
 		}
 		switch {
 		case pins[arch] == "":
 			problem("frp-pins.txt pins no frpc for it", "pin frp for the architecture in internal/launcher/frp-pins.txt")
 		case !a.Frpc.OK:
-			problem(a.Frpc.problem(dir), "hack/fetch-frp.sh --agent-builds "+dir)
+			problem(a.Frpc.problem(dir), "hack/fetch-frp.sh --agent-builds "+ShellQuote(dir))
 		}
 	}
 	sort.Strings(unknown)
 	for _, arch := range unknown {
 		what := fmt.Sprintf("%q is not a cpuArch with builds (%s); no hb-agent or frpc build exists for it", arch, strings.Join(known, ", "))
 		fix := "give the partition the kernel's machine name for its cpuArch, one of " + strings.Join(known, ", ")
-		if kernel, ok := cpuArchOf[arch]; ok {
+		if kernel, ok := cpuArchOf()[arch]; ok {
 			fix = fmt.Sprintf("give the partition cpuArch %s: %s is Go's and frp's name for it, and the profiles use the kernel's", kernel, arch)
 		}
 		rep.Problems = append(rep.Problems, BuildProblem{CPUArch: arch, Partitions: byArch[arch], What: what, Fix: fix})
@@ -258,7 +284,7 @@ func checkAgentFile(name, dir, cpuArch string) BuildFile {
 	if !f.Present || f.SHA256 == "" {
 		return f // missing, or not a readable file: already said
 	}
-	want, ok := elfMachineOf[cpuArch]
+	want, ok := elfMachineFor(cpuArch)
 	if !ok {
 		f.OK, f.Detail = false, "has no known ELF machine type for cpuArch "+cpuArch
 		return f
