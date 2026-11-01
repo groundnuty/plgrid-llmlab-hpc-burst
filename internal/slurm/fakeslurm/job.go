@@ -48,6 +48,9 @@ type execution struct {
 	// run is the execution's process in run mode; nil before it starts and
 	// outside run mode.
 	run *jobRun
+	// heldCompleting is Platform.HoldCompleting: the execution is COMPLETING
+	// by a test's say-so, with no process behind it.
+	heldCompleting bool
 }
 
 // job is one submitted job, guarded by Platform.mu.
@@ -106,7 +109,7 @@ const Completing = "COMPLETING"
 // it.
 func (j *job) completing() bool {
 	e := j.cur()
-	return IsTerminal(e.state) && e.run != nil && e.run.completing()
+	return IsTerminal(e.state) && (e.heldCompleting || (e.run != nil && e.run.completing()))
 }
 
 // live reports whether the job is pending or running.
