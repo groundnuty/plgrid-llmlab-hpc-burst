@@ -21,6 +21,8 @@ Code under `spikes/` and `third_party/forked/*` is not part of this module.
 | `internal/front/` | the LLMLab-compatible front: configuration, client keys, the router, the request path, the stream judge, errors and attribution, the listeners. Subpackages: `inventory` (the routing view, by watch), `balancer` (KubeAI's CHWBL group, wrapped), `convkey`, `naming`, `usage`, `clock`, and `enginetest` (an engine double for tests) | HBEP-5 |
 | `cmd/hpcburst-front/` | the front's binary, which `hpcburst up` supervises | HBEP-5 |
 | `hack/` | scripts for generation, verification and pinned tools | |
+| `examples/` | the manifests `docs/quickstart.md` applies; `api/v1alpha1/e2e/examples_test.go` admits each one against the real CRDs | HBEP-3, HBEP-4 |
+| `internal/quickstart/` | tests only: they keep `docs/quickstart.md` true (its file samples parse, its snippets work, its paths and flags exist) | |
 | `third_party/forked/<project>/` | copied code, each with its `LICENSE` and `ORIGIN.md` | HBEP-15 |
 | `spikes/<id>/` | spike code and results; each Go spike is its own module | |
 
