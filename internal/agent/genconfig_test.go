@@ -452,3 +452,29 @@ func TestTheRefusalIsLoggedWithoutTheValuesText(t *testing.T) {
 		t.Errorf("the log holds the staging path: %s", buf.String())
 	}
 }
+
+// A JSON null for a key is read as the key missing, as vLLM reads it
+// (get_diff_sampling_param keeps a key only when its value is not None): it is
+// neither refused, nor recorded, nor does it count as a sampling key that is
+// given (`@hpc-burst-science-agent`, 1 Nov 2026, N4). The file with the nulls
+// and the same file without those keys read the same, whole.
+func TestANullValueIsReadAsAMissingKey(t *testing.T) {
+	for _, tc := range []struct{ name, withNull, without string }{
+		{"a null temperature beside a valid top_p", `{"temperature": null, "top_p": 0.9}`, `{"top_p": 0.9}`},
+		{"a null on each of the seven keys", `{"temperature": null, "top_p": null, "top_k": null, "min_p": null, "repetition_penalty": null, "presence_penalty": null, "frequency_penalty": null, "do_sample": true}`, `{"do_sample": true}`},
+		{"a null max_new_tokens", `{"max_new_tokens": null, "temperature": 0.6}`, `{"temperature": 0.6}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, b := t.TempDir(), t.TempDir()
+			writeGenerationConfig(t, a, tc.withNull)
+			writeGenerationConfig(t, b, tc.without)
+			got, want := readGenerationConfig(a), readGenerationConfig(b)
+			if want.refused != nil {
+				t.Fatalf("the control file %s is refused: %+v", tc.without, want.refused)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("read %+v, want what the file without the keys reads, %+v", got, want)
+			}
+		})
+	}
+}

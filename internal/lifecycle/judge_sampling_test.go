@@ -265,3 +265,35 @@ func TestTheRefusalOrderAndTheWorkerRestart(t *testing.T) {
 		t.Errorf("a worker restart's verification: cause %q, refusal %+v, want %s", got.Cause, got.GenerationConfigRefused, causeContradiction)
 	}
 }
+
+// The controller reads a null for a key as the key missing too, as vLLM does:
+// the same verdict, the same sampling in the record, and no refusal, whether
+// the null rides in the numbers the agent recorded or not (CheckGenerationConfig
+// skips it; CheckSampling does not count it as given). The expected values are
+// written out by hand: a reasoning model whose file gives top_k 20 and top_p
+// 0.95 is sampled with the neutral temperature 1 (HBEP-7), and one whose only
+// key is a null temperature is checked greedily, as a model with no file.
+func TestTheControllerReadsANullAsAMissingKey(t *testing.T) {
+	d, base, sh := reasoningSpec()
+	withNull := *base
+	withNull.GenerationConfig = map[string]string{"temperature": "null", "top_k": "20", "top_p": "0.95"}
+	without := *base
+	without.GenerationConfig = map[string]string{"top_k": "20", "top_p": "0.95"}
+	got, want := judgeVerify(d, &withNull, true, sh), judgeVerify(d, &without, true, sh)
+	if got.Verdict != v1alpha1.VerdictPass || got.GenerationConfigRefused != nil {
+		t.Fatalf("a null temperature: verdict %q (%s), refusal %+v, want a pass", got.Verdict, got.Message, got.GenerationConfigRefused)
+	}
+	wantSampling := &agentapi.Sampling{
+		Temperature: 1, TopP: 0.95, TopK: in64(20), MinP: fl(0), RepetitionPenalty: 1, PresencePenalty: 0, FrequencyPenalty: 0,
+		Seeds: map[string]int64{"verify": 1101, "chat": 1102, "toolCall": 1103, "corruption": 1104, "behaviour": 1105, "warmUp": 1106},
+	}
+	if !reflect.DeepEqual(got.Sampling, wantSampling) || !reflect.DeepEqual(want.Sampling, wantSampling) {
+		t.Errorf("sampling with the null %+v and without the key %+v, want both %+v", got.Sampling, want.Sampling, wantSampling)
+	}
+
+	onlyNull := *base
+	onlyNull.GenerationConfig = map[string]string{"temperature": "null"}
+	if g := judgeVerify(d, &onlyNull, true, sh); g.Verdict != v1alpha1.VerdictPass || g.GenerationConfigRefused != nil || g.Sampling == nil || !reflect.DeepEqual(g.Sampling, greedyRecord) {
+		t.Errorf("a file whose only key is a null temperature: verdict %q (%s), sampling %+v, want a pass, greedy", g.Verdict, g.Message, g.Sampling)
+	}
+}

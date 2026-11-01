@@ -146,6 +146,19 @@ var samplingCases = []samplingCase{
 		config: map[string]string{"temperature": "0.6", "top_k": "20", "top_p": "0.95"}, doSample: bp(false),
 	},
 	{
+		// vLLM skips a null (get_diff_sampling_param keeps a key only when its value is not
+		// None), so a null temperature is a missing one: the neutral temperature 1 is sent.
+		name: "a null temperature is read as absent: the neutral 1 is sent, the rest as the file gives them", reasoning: true,
+		file: `{"temperature": null, "top_k": 20, "top_p": 0.95}`,
+		want: enginedouble.RequestSampling{Temperature: fp(1), TopP: fp(0.95), TopK: ip(20), MinP: fp(0), RepetitionPenalty: fp(1), PresencePenalty: fp(0), FrequencyPenalty: fp(0)}, seeded: true,
+		config: map[string]string{"top_k": "20", "top_p": "0.95"},
+	},
+	{
+		name: "a file whose only sampling key is a null temperature stays greedy", reasoning: true,
+		file: `{"temperature": null, "do_sample": true}`,
+		want: greedyWant, config: nil, doSample: bp(true),
+	},
+	{
 		name: "a reasoning model with no file stays greedy", reasoning: true,
 		file: "",
 		want: greedyWant,
