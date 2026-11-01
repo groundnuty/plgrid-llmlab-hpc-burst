@@ -9,7 +9,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -47,16 +50,36 @@ func frpsHealthz(addr string) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
+// aliveAs reports whether the process p records is still running: its PID runs, with the
+// recorded start time (a reused PID has another).
+func aliveAs(p stateProc) bool {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(p.PID) + "/stat")
+	if err != nil || !running(p.PID) {
+		return false
+	}
+	s := string(b)
+	f := strings.Fields(s[strings.LastIndex(s, ")")+1:])
+	v, err := strconv.ParseUint(f[19], 10, 64)
+	return err == nil && v == p.StartTicks
+}
+
 // TestFrpsSupervision: frps runs as a child of the supervisor, from the verified descriptor (its
-// command name is "3", the descriptor's number, so nothing may find it by name), holds exactly
-// base+9, base+10 and base+11 on loopback, and answers /healthz on base+11. Killed, it is started
-// again, with a new PID that holds the same ports and answers; status then reports it running,
-// with one restart.
+// command name is "3", the descriptor's number, so nothing may find it by name; argv[0] is the
+// recorded binary, for ps), holds exactly base+9, base+10 and base+11 on loopback, and answers
+// /healthz on base+11. Killed, it is started again, with a new PID that holds the same ports and
+// answers; status then reports it running, with one restart. After down, no process with the
+// identity of either frps (PID and start time) is left: frps's environment is PATH alone, so the
+// clean-up's search by environment would not see one.
 func TestFrpsSupervision(t *testing.T) {
 	const base = 29220
 	h := newHost(t)
 	ctl, _ := fakeController(t)
-	r := cli(t, h.upArgs(base, append(frpsArgs(t), "--json", "--controller-bin", ctl)...)...)
+	fa := frpsArgs(t)
+	frpsBin, err := filepath.Abs(fa[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := cli(t, h.upArgs(base, append(fa, "--json", "--controller-bin", ctl)...)...)
 	if r.code != exitOK {
 		t.Fatalf("up exited %d: %s", r.code, r.err)
 	}
@@ -79,6 +102,9 @@ func TestFrpsSupervision(t *testing.T) {
 		}
 		if comm := strings.TrimSpace(fileOf(fmt.Sprintf("/proc/%d/comm", pid))); comm != "3" {
 			t.Errorf("frps's command name is %q, want 3: it must run the verified descriptor /proc/self/fd/3", comm)
+		}
+		if argv0, _, _ := strings.Cut(fileOf(fmt.Sprintf("/proc/%d/cmdline", pid)), "\x00"); argv0 != frpsBin {
+			t.Errorf("frps's argv[0] is %q, want the recorded binary %s", argv0, frpsBin)
 		}
 		waitFor(t, 30*time.Second, "frps to hold its three ports", func() bool {
 			return slices.Equal(sortedStrings(listenersOf(t, pid)), wantListen)
@@ -125,5 +151,18 @@ func TestFrpsSupervision(t *testing.T) {
 	c := st.Controllers[got]
 	if code != exitOK || !c.Running || c.PID != fe.Proc.PID || c.Restarts != 1 || c.HealthzOK == nil || !*c.HealthzOK {
 		t.Errorf("status exited %d and reports frps as %+v (reasons %v)", code, c, st.Reasons)
+	}
+
+	// ---- down stops it ----
+	if !aliveAs(*fe.Proc) {
+		t.Fatalf("frps (pid %d) is not running before down: the check below would prove nothing", fe.Proc.PID)
+	}
+	if r := cli(t, h.args("down")...); r.code != exitOK {
+		t.Fatalf("down exited %d: %s", r.code, r.err)
+	}
+	for _, p := range []stateProc{old, *fe.Proc} {
+		if aliveAs(p) {
+			t.Errorf("frps (pid %d, start time %d) is still running after down", p.PID, p.StartTicks)
+		}
 	}
 }
