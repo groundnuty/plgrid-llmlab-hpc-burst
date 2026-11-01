@@ -147,9 +147,10 @@ func ppidOfPID(t *testing.T, pid int) int {
 
 // statusJSON runs status --json and decodes the parts the tests judge.
 type controllerStatus struct {
-	Health     string `json:"health"`
-	Reasons    []string
-	Supervisor *struct {
+	Health      string `json:"health"`
+	Reasons     []string
+	FrontAbsent bool `json:"front_absent"`
+	Supervisor  *struct {
 		Running bool `json:"running"`
 		PID     int  `json:"pid"`
 	} `json:"supervisor"`
@@ -159,6 +160,7 @@ type controllerStatus struct {
 		PID        int    `json:"pid"`
 		Restarts   int    `json:"restarts"`
 		HealthzOK  *bool  `json:"healthz_ok"`
+		ReadyzOK   *bool  `json:"readyz_ok"`
 		UsageState string `json:"usage_state"`
 		Degraded   string `json:"degraded"`
 		LastExit   *struct {
@@ -316,6 +318,44 @@ func TestControllerSupervision(t *testing.T) {
 	if r := cli(t, h.args("status", "--no-gc-probe")...); !strings.Contains(r.out, "supervised controller: running=true pid "+itoa(child.PID)) {
 		t.Errorf("the text status does not show the controller: %s", r.out)
 	}
+
+	// ---- the controller is judged by its /readyz, and a host with no front runs says so ----
+	// This host recorded a front address but runs no front process: the front is absent, and the
+	// host is healthy. (TestFrontSupervision is the control: a host that runs a front is not absent.)
+	if !s.FrontAbsent || s.Controllers[0].ReadyzOK == nil || !*s.Controllers[0].ReadyzOK {
+		t.Errorf("status: front absent %v, controller /readyz %v; want true and true", s.FrontAbsent, s.Controllers[0].ReadyzOK)
+	}
+	if r := cli(t, h.args("status", "--no-gc-probe")...); r.code != exitOK || !strings.Contains(r.out, "front: absent (no front runs here; the recorded address is direct front.example.test:8443)\n") ||
+		!strings.Contains(r.out, "GET /readyz: true") {
+		t.Errorf("status text (exit %d):\n%s", r.code, r.out)
+	}
+	// Alive but not ready: the fake keeps answering 200 on /healthz and answers 500 on /readyz, as
+	// the lifecycle controller does while it does not lead its Lease or its caches have not synced.
+	if err := os.WriteFile(filepath.Join(ctlDir, "not-ready"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 20*time.Second, "status to report the controller alive but not ready", func() bool {
+		s, code := statusOf(t, h)
+		return code == exitFail && s.Health == "unhealthy"
+	})
+	s, notReadyCode := statusOf(t, h)
+	if notReadyCode != exitFail || s.Health != "unhealthy" || !s.Controllers[0].Running || s.Controllers[0].PID != child.PID ||
+		s.Controllers[0].HealthzOK == nil || !*s.Controllers[0].HealthzOK || s.Controllers[0].ReadyzOK == nil || *s.Controllers[0].ReadyzOK ||
+		len(s.Reasons) != 1 || !strings.Contains(s.Reasons[0], "controller: not ready: GET /readyz on 127.0.0.1:29226 answered 500, failing check: serving") {
+		t.Errorf("status exited %d: %+v", notReadyCode, s)
+	}
+	if r := cli(t, h.args("status", "--no-gc-probe")...); r.code != exitFail || !strings.HasPrefix(r.out, "unhealthy\n  - controller: not ready: ") ||
+		!strings.Contains(r.out, "GET /healthz on 127.0.0.1:29226: true, GET /readyz: false (failing: serving)") {
+		t.Errorf("status text (exit %d):\n%s", r.code, r.out)
+	}
+	if err := os.Remove(filepath.Join(ctlDir, "not-ready")); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 20*time.Second, "status to report the controller ready again", func() bool {
+		s, code := statusOf(t, h)
+		return code == exitOK && s.Health == "healthy"
+	})
+	s, _ = statusOf(t, h)
 
 	// ---- a killed controller is restarted ----
 	verifiedKill(t, stateProc{Name: "controller", PID: child.PID, StartTicks: child.StartTicks})

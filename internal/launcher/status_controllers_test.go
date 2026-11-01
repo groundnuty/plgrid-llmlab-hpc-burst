@@ -1,18 +1,25 @@
 package launcher
 
 import (
+	"cmp"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
+
+	crhealthz "sigs.k8s.io/controller-runtime/pkg/healthz"
 )
 
 // TestCheckEntry runs checkEntry on real processes: this test process is the supervisor, and the
@@ -34,6 +41,43 @@ func TestCheckEntry(t *testing.T) {
 	t.Run("control: a healthy child of the supervisor", func(t *testing.T) {
 		eh, problems := checkEntry(sup, supPID, e)
 		if len(problems) != 0 || !eh.Running || eh.HealthzOK == nil || !*eh.HealthzOK || eh.PID != e.Proc.PID {
+			t.Fatalf("%+v, problems %v", eh, problems)
+		}
+		if eh.ReadyzOK == nil || !*eh.ReadyzOK || len(eh.ReadyzFailing) != 0 {
+			t.Fatalf("a controller that answers 200 on /readyz: %+v", eh)
+		}
+	})
+	// The fake answers /healthz and /readyz on their own: not-ready changes /readyz only, so the
+	// cases below fail because /readyz is asked, not because both endpoints changed together.
+	for _, c := range []struct{ name, steer string }{
+		{"as controller-runtime answers a failing check (500)", ""},
+		{"as the API server answers (503)", "503"},
+	} {
+		t.Run("alive but not ready, "+c.name, func(t *testing.T) {
+			f.steer("not-ready", c.steer)
+			defer f.unsteer("not-ready")
+			if code, err := healthzCode(f.ports.ControllerAddr()); err != nil || code != 200 {
+				t.Fatalf("setup: /healthz answers %d, %v; the controller must stay alive", code, err)
+			}
+			eh, problems := checkEntry(sup, supPID, e)
+			if !eh.Running || eh.HealthzOK == nil || !*eh.HealthzOK || eh.ReadyzOK == nil || *eh.ReadyzOK ||
+				!slices.Equal(eh.ReadyzFailing, []string{"serving"}) {
+				t.Fatalf("%+v, problems %v", eh, problems)
+			}
+			want := "not ready: GET /readyz on " + e.Health + " answered " + cmp.Or(c.steer, "500")
+			if len(problems) != 1 || !strings.Contains(problems[0], want) || !strings.Contains(problems[0], "failing check: serving") {
+				t.Fatalf("problems %q, want one with %q", problems, want)
+			}
+		})
+	}
+	t.Run("ready again once the controller says so", func(t *testing.T) {
+		f.steer("not-ready", "")
+		if _, problems := checkEntry(sup, supPID, e); len(problems) != 1 {
+			t.Fatalf("setup: problems %v", problems)
+		}
+		f.unsteer("not-ready")
+		eh, problems := checkEntry(sup, supPID, e)
+		if len(problems) != 0 || eh.ReadyzOK == nil || !*eh.ReadyzOK {
 			t.Fatalf("%+v, problems %v", eh, problems)
 		}
 	})
@@ -117,19 +161,47 @@ type supervisedFakeHost struct {
 	health           string
 	code             *int    // the status code /healthz answers
 	body             *string // the body it answers with
+	// /readyz is answered on its own by controller-runtime's own healthz.Handler with one check,
+	// serving, as internal/lifecycle registers it: it passes while ready is true. A non-zero
+	// readyzStatus answers that status instead, with the same body shape; readyzHits counts the
+	// requests, so a test can show that a process was or was not asked.
+	ready        *atomic.Bool
+	readyzStatus *atomic.Int32
+	readyzHits   *atomic.Int32
 }
 
 func newSupervisedFakeHost(t *testing.T) *supervisedFakeHost {
 	t.Helper()
 	h := newFakeHost(t)
 	code, body := http.StatusOK, ""
+	ready, status, hits := new(atomic.Bool), new(atomic.Int32), new(atomic.Int32)
+	ready.Store(true)
+	readyz := http.StripPrefix("/readyz", &crhealthz.Handler{Checks: map[string]crhealthz.Checker{
+		"ping": crhealthz.Ping,
+		"serving": func(*http.Request) error {
+			if !ready.Load() {
+				return errors.New("not leading, or caches not synced")
+			}
+			return nil
+		},
+	}})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/readyz" {
+			hits.Add(1)
+			if st := int(status.Load()); st != 0 {
+				w.WriteHeader(st)
+				_, _ = io.WriteString(w, "[+]ping ok\n[-]serving failed: reason withheld\nhealthz check failed\n")
+				return
+			}
+			readyz.ServeHTTP(w, r)
+			return
+		}
 		w.WriteHeader(code)
 		_, _ = io.WriteString(w, body)
 	}))
 	t.Cleanup(srv.Close)
 	u, _ := url.Parse(srv.URL)
-	s := &supervisedFakeHost{fakeHost: h, health: u.Host, code: &code, body: &body}
+	s := &supervisedFakeHost{fakeHost: h, health: u.Host, code: &code, body: &body, ready: ready, readyzStatus: status, readyzHits: hits}
 	port, _ := strconv.Atoi(u.Port())
 	const supPID, childPID = 4343, 4344
 	writeFakeProc(t, h.root, supPID, "S", 1, 2000)
@@ -184,6 +256,9 @@ func TestStatusWithControllers(t *testing.T) {
 			if rep.Supervisor == nil || !rep.Supervisor.Running || rep.Supervisor.PID != 4343 ||
 				len(c) != 1 || !c[0].Running || c[0].PID != 4344 || c[0].Restarts != 2 || c[0].HealthzOK == nil || !*c[0].HealthzOK {
 				t.Fatalf("supervisor %+v, controllers %+v", rep.Supervisor, c)
+			}
+			if c[0].ReadyzOK == nil || !*c[0].ReadyzOK || s.readyzHits.Load() == 0 {
+				t.Fatalf("noAPI=%v: the controller was not asked for /readyz, or it did not answer 200: %+v, %d requests", noAPI, c[0], s.readyzHits.Load())
 			}
 			if len(rep.Processes) != 2 || rep.Processes[1].Name != supervisorName || rep.Processes[1].Verdict != "ours" {
 				t.Errorf("processes %+v", rep.Processes)
@@ -355,6 +430,183 @@ func TestStatusFrontUsageDegraded(t *testing.T) {
 		rep := front(s, failing)
 		if rep.Health != Unhealthy || rep.Controllers[0].Degraded != "" {
 			t.Errorf("health %s, entries %+v", rep.Health, rep.Controllers)
+		}
+	})
+}
+
+// TestStatusControllerReadyz: status judges the lifecycle controller by its /readyz (HBEP-8,
+// Observers), which fails until the caches have synced and the controller leads its Lease, and
+// keeps /healthz as liveness. The fake host answers the two endpoints on their own, /readyz with
+// controller-runtime's own handler, so each case changes one of them.
+func TestStatusControllerReadyz(t *testing.T) {
+	reasons := func(r *StatusReport) string { return strings.Join(r.Reasons, "; ") }
+	notReady := func(t *testing.T, rep *StatusReport, answered string) {
+		t.Helper()
+		c := rep.Controllers[0]
+		if rep.Health != Unhealthy || !strings.Contains(reasons(rep), "controller: not ready: GET /readyz on") ||
+			!strings.Contains(reasons(rep), "answered "+answered) || !strings.Contains(reasons(rep), "failing check: serving (starting, or not leading its Lease") {
+			t.Fatalf("%s: %v", rep.Health, rep.Reasons)
+		}
+		if !c.Running || c.HealthzOK == nil || !*c.HealthzOK || c.ReadyzOK == nil || *c.ReadyzOK || !slices.Equal(c.ReadyzFailing, []string{"serving"}) {
+			t.Errorf("the controller is alive but not ready: %+v", c)
+		}
+	}
+	t.Run("control: alive and ready", func(t *testing.T) {
+		s := newSupervisedFakeHost(t)
+		rep := s.status(true)
+		if rep.Health != Healthy || len(rep.Reasons) != 0 || s.readyzHits.Load() == 0 {
+			t.Fatalf("%s: %v, %d /readyz requests", rep.Health, rep.Reasons, s.readyzHits.Load())
+		}
+	})
+	t.Run("alive but not ready: 200 on /healthz, 500 on /readyz from controller-runtime's handler", func(t *testing.T) {
+		s := newSupervisedFakeHost(t)
+		s.ready.Store(false)
+		notReady(t, s.status(true), "500")
+	})
+	t.Run("alive but not ready: 200 on /healthz, 503 on /readyz", func(t *testing.T) {
+		s := newSupervisedFakeHost(t)
+		s.readyzStatus.Store(http.StatusServiceUnavailable)
+		notReady(t, s.status(true), "503")
+	})
+	t.Run("not ready, and the API is asked too", func(t *testing.T) {
+		s := newSupervisedFakeHost(t)
+		s.ready.Store(false)
+		notReady(t, s.status(false), "500")
+	})
+	t.Run("ready again: the same host turns healthy", func(t *testing.T) {
+		s := newSupervisedFakeHost(t)
+		s.ready.Store(false)
+		if rep := s.status(true); rep.Health != Unhealthy {
+			t.Fatalf("setup: %s: %v", rep.Health, rep.Reasons)
+		}
+		s.ready.Store(true)
+		if rep := s.status(true); rep.Health != Healthy || len(rep.Reasons) != 0 {
+			t.Fatalf("%s: %v", rep.Health, rep.Reasons)
+		}
+	})
+	t.Run("not alive but answering ready: unhealthy by liveness, and /readyz is not asked", func(t *testing.T) {
+		s := newSupervisedFakeHost(t)
+		*s.code = http.StatusServiceUnavailable
+		rep := s.status(true)
+		if rep.Health != Unhealthy || !strings.Contains(reasons(rep), "GET /healthz") || strings.Contains(reasons(rep), "not ready") ||
+			rep.Controllers[0].ReadyzOK != nil || s.readyzHits.Load() != 0 {
+			t.Fatalf("%s: %v, entry %+v, %d /readyz requests", rep.Health, rep.Reasons, rep.Controllers[0], s.readyzHits.Load())
+		}
+	})
+	t.Run("a controller that does not serve /readyz is not ready", func(t *testing.T) {
+		s := newSupervisedFakeHost(t)
+		s.readyzStatus.Store(http.StatusNotFound)
+		rep := s.status(true)
+		if rep.Health != Unhealthy || !strings.Contains(reasons(rep), "not ready: GET /readyz on") || !strings.Contains(reasons(rep), "answered 404") {
+			t.Fatalf("%s: %v", rep.Health, rep.Reasons)
+		}
+	})
+	t.Run("only the controller is asked: a front on a not-ready host is judged by /healthz", func(t *testing.T) {
+		s := newSupervisedFakeHost(t)
+		s.ready.Store(false)
+		*s.body = `{"synced":true,"usage":{"state":"ok"}}`
+		s.writeSupervisorFile(s.supRec, EntryRecord{Name: "front", Health: s.health, State: entryRunning, Proc: &s.childRec})
+		rep := s.status(true)
+		if rep.Health != Healthy || len(rep.Reasons) != 0 || rep.Controllers[0].ReadyzOK != nil || s.readyzHits.Load() != 0 {
+			t.Fatalf("%s: %v, entry %+v, %d /readyz requests", rep.Health, rep.Reasons, rep.Controllers[0], s.readyzHits.Load())
+		}
+	})
+}
+
+// TestFailingChecks reads the failing checks' names from bodies that controller-runtime's own
+// healthz.Handler writes, never from a body this package wrote, and shows that the handler answers
+// a failing check with a status other than 200 (the code reads any such status as not ready).
+func TestFailingChecks(t *testing.T) {
+	fail := func(*http.Request) error { return errors.New("a reason that must not be needed") }
+	pass := func(*http.Request) error { return nil }
+	for _, c := range []struct {
+		name   string
+		checks map[string]crhealthz.Checker
+		want   []string
+	}{
+		{"all pass", map[string]crhealthz.Checker{"ping": crhealthz.Ping, "serving": pass}, nil},
+		{"serving fails", map[string]crhealthz.Checker{"ping": crhealthz.Ping, "serving": fail}, []string{"serving"}},
+		{"two fail", map[string]crhealthz.Checker{"ping": crhealthz.Ping, "leading": fail, "caches": fail}, []string{"caches", "leading"}},
+		{"a name with a dot and a dash", map[string]crhealthz.Checker{"a.b-c_D1": fail}, []string{"a.b-c_D1"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			http.StripPrefix("/readyz", &crhealthz.Handler{Checks: c.checks}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+			if (len(c.want) == 0) != (rec.Code == http.StatusOK) {
+				t.Fatalf("the handler answered %d for failing checks %v", rec.Code, c.want)
+			}
+			got := failingChecks(rec.Body.Bytes())
+			slices.Sort(got)
+			if !slices.Equal(got, c.want) {
+				t.Errorf("failingChecks(%q) = %v, want %v", rec.Body.String(), got, c.want)
+			}
+		})
+	}
+	t.Run("odd lines give no name", func(t *testing.T) {
+		long := strings.Repeat("x", 65)
+		for _, body := range []string{"", "ok", "[+]ping ok\n", "[-] failed\n", "[-]bad\x00name failed\n", "[-]" + long + " failed\n", "[-]sp\u00e9cial failed\n", "x[-]serving failed\n"} {
+			if got := failingChecks([]byte(body)); len(got) != 0 {
+				t.Errorf("failingChecks(%q) = %v, want none", body, got)
+			}
+		}
+	})
+	t.Run("the list is bounded", func(t *testing.T) {
+		var b strings.Builder
+		for i := 0; i < 3*maxFailingChecks; i++ {
+			fmt.Fprintf(&b, "[-]c%d failed: reason withheld\n", i)
+		}
+		if got := failingChecks([]byte(b.String())); len(got) != maxFailingChecks {
+			t.Errorf("%d names, want %d", len(got), maxFailingChecks)
+		}
+	})
+}
+
+// TestStatusFrontAbsent: a host with no front configured shows the front as absent and stays
+// healthy; a host whose configured front is down is not absent, it is unhealthy. A report that
+// said absent for both would hide a crashed front.
+func TestStatusFrontAbsent(t *testing.T) {
+	withFront := func(s *supervisedFakeHost) {
+		s.t.Helper()
+		s.st.FrontRun = &FrontRunConfig{Binary: "/opt/hpcburst-front", Config: "/etc/front.yaml"}
+		if err := s.l.saveState(s.st); err != nil {
+			s.t.Fatal(err)
+		}
+	}
+	frontEntry := func(s *supervisedFakeHost) {
+		*s.body = `{"synced":true,"usage":{"state":"ok"}}`
+		s.writeSupervisorFile(s.supRec, EntryRecord{Name: "front", Health: s.health, State: entryRunning, Proc: &s.childRec})
+	}
+	t.Run("no front configured: absent, and healthy", func(t *testing.T) {
+		for _, noAPI := range []bool{true, false} {
+			rep := newSupervisedFakeHost(t).status(noAPI)
+			if !rep.FrontAbsent || rep.Health != Healthy || len(rep.Reasons) != 0 {
+				t.Fatalf("noAPI=%v: absent %v, %s: %v", noAPI, rep.FrontAbsent, rep.Health, rep.Reasons)
+			}
+		}
+	})
+	t.Run("a front configured and running: not absent", func(t *testing.T) {
+		s := newSupervisedFakeHost(t)
+		withFront(s)
+		frontEntry(s)
+		rep := s.status(true)
+		if rep.FrontAbsent || rep.Health != Healthy {
+			t.Fatalf("absent %v, %s: %v", rep.FrontAbsent, rep.Health, rep.Reasons)
+		}
+	})
+	t.Run("a front configured and down: not absent, and unhealthy", func(t *testing.T) {
+		s := newSupervisedFakeHost(t)
+		withFront(s)
+		s.writeSupervisorFile(s.supRec, EntryRecord{Name: "front", Health: s.health, State: entryBackoff, Restarts: 1,
+			LastExit: &ExitRecord{Code: 1, Detail: "exit status 1", At: time.Now()}})
+		rep := s.status(true)
+		if rep.FrontAbsent || rep.Health != Unhealthy || !strings.Contains(strings.Join(rep.Reasons, "; "), "front: not running") {
+			t.Fatalf("absent %v, %s: %v", rep.FrontAbsent, rep.Health, rep.Reasons)
+		}
+	})
+	t.Run("a stopped host says nothing about a front", func(t *testing.T) {
+		rep, err := Status(context.Background(), StatusOptions{StateDir: filepath.Join(shortDir(t), "none")})
+		if err != nil || rep.Health != Stopped || rep.FrontAbsent {
+			t.Fatalf("%+v, %v", rep, err)
 		}
 	})
 }

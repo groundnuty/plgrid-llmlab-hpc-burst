@@ -255,9 +255,16 @@ func printStatus(w io.Writer, r *launcher.StatusReport) {
 		}
 	}
 	printSupervision(w, r)
-	if r.Front != nil && r.Front.Set() {
+	// One "front:" line. The address is where Instances dial home; the front itself is the process
+	// the supervisor runs. A host with no front process says so, with the address when one is recorded.
+	switch addr := r.Front != nil && r.Front.Set(); {
+	case r.FrontAbsent && addr:
+		fmt.Fprintf(w, "front: absent (no front runs here; the recorded address is %s %s)\n", r.Front.Mode, r.Front.Addr)
+	case r.FrontAbsent:
+		fmt.Fprintln(w, "front: absent")
+	case addr:
 		fmt.Fprintf(w, "front: %s %s\n", r.Front.Mode, r.Front.Addr)
-	} else if r.Version != "" {
+	case r.Version != "":
 		fmt.Fprintln(w, "front: not recorded")
 	}
 }

@@ -14,6 +14,9 @@
 //	ignore-term   SIGTERM is ignored
 //	slow-term     its content is milliseconds: SIGTERM is answered with exit 0 after that long
 //	unhealthy     /healthz answers 503
+//	not-ready     /readyz answers with the status in the file (500 when it is empty or not a
+//	              status) and the body controller-runtime writes for a failing check; without
+//	              the file the controller answers 200 on /readyz
 //	no-health     the process serves nothing
 //	listen-tcp    one host:port per line: the process also listens there (TCP), and serves
 //	              /healthz there too
@@ -115,6 +118,10 @@ func main() {
 			os.Exit(1)
 		}
 		go http.Serve(l, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/readyz" && !asFront {
+				serveReadyz(w, ctl)
+				return
+			}
 			if _, bad := ctl("unhealthy"); bad || r.URL.Path != "/healthz" {
 				w.WriteHeader(http.StatusServiceUnavailable)
 				return
@@ -149,6 +156,26 @@ func main() {
 			}
 		}
 	}
+}
+
+// serveReadyz answers GET /readyz as the lifecycle controller does: 200 and "ok" while ready; while
+// the not-ready file exists, the status in it and the body of controller-runtime's pkg/healthz for
+// one failing check named serving (the lifecycle controller's only readiness check), which
+// withholds the reason.
+func serveReadyz(w http.ResponseWriter, ctl func(string) (string, bool)) {
+	content, notReady := ctl("not-ready")
+	if !notReady {
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, "ok")
+		return
+	}
+	code, err := strconv.Atoi(content)
+	if err != nil || code < 400 || code > 599 {
+		code = http.StatusInternalServerError
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(code)
+	_, _ = fmt.Fprint(w, "[+]ping ok\n[-]serving failed: reason withheld\nhealthz check failed\n")
 }
 
 // recordedRunning reports whether the supervisor's record in stateDir names pid as a running

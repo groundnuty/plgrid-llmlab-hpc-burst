@@ -340,6 +340,7 @@ func TestFrontSupervision(t *testing.T) {
 		PID        int    `json:"pid"`
 		Restarts   int    `json:"restarts"`
 		HealthzOK  *bool  `json:"healthz_ok"`
+		ReadyzOK   *bool  `json:"readyz_ok"`
 		UsageState string `json:"usage_state"`
 		Degraded   string `json:"degraded"`
 		LastExit   *struct {
@@ -354,12 +355,17 @@ func TestFrontSupervision(t *testing.T) {
 	if scode != exitOK || front == nil || !front.Running || front.Restarts != 1 || front.HealthzOK == nil || !*front.HealthzOK {
 		t.Errorf("status exited %d and reports the front as %+v (reasons %v)", scode, front, st.Reasons)
 	}
+	// The control of TestControllerSupervision, whose host runs no front: this host runs one, so
+	// its front is not absent.
+	if st.FrontAbsent {
+		t.Errorf("status reports the front as absent although one runs")
+	}
 	// The usage state comes from the real front's /healthz body (HBEP-8: usage.state), so a
 	// launcher that read another member would find none here. Its sink writes, so it is ok.
 	if front != nil && (front.UsageState != "ok" || front.Degraded != "") {
 		t.Errorf("the front's usage state %q, degraded %q: want ok, not degraded", front.UsageState, front.Degraded)
 	}
-	if r := cli(t, h.args("status", "--no-gc-probe")...); r.code != exitOK || strings.Contains(r.out, "degraded") ||
+	if r := cli(t, h.args("status", "--no-gc-probe")...); r.code != exitOK || strings.Contains(r.out, "degraded") || strings.Contains(r.out, "front: absent") ||
 		!strings.Contains(r.out, "supervised front: running=true") {
 		t.Errorf("status text (exit %d):\n%s", r.code, r.out)
 	}
