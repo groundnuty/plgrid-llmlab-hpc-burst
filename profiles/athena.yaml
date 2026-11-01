@@ -64,7 +64,8 @@ spec:
   maxIdle: 30m # HBEP-4, Platform profile schema, maxIdle: Athena 30 min (HBEP-7, Retention); motivated by facts.login_node_policy.gpu_only (GPU jobs only)
   # jobName.maxLength is measured, not a default: the conformance run on Athena plgrid-now of 1 Nov 2026
   # (step 5, a 56-character job name submitted and read back unchanged from squeue and from sacct; issue #93, comment 6557645735) is
-  # its source. The schema holds job-name rules per profile, not per partition, so this value covers
+  # its source, recorded as the fact
+  # facts.slurm.plgrid_now_conformance.value.job_name_56_characters_unchanged_in_squeue_and_sacct. The schema holds job-name rules per profile, not per partition, so this value covers
   # plgrid-gpu-a100 too, which has not run the step. That is sound because Athena runs one Slurm
   # configuration for all its partitions, and the read-back is the safety net against a partition-specific rename:
   # a job whose name came back shortened is refused and cancelled (HBEP-4, Risks)
@@ -190,7 +191,7 @@ spec:
             plgrid-gpu-a100: {hold_honoured: true, state_reason_after_submit: "PENDING|JobHeldUser", user_release_ok: true, release_exit: 0, state_reason_after_release: "PENDING|Priority", final_state: "CANCELLED"}
           note: "A plain user's sbatch --hold was honoured (reason JobHeldUser, not JobHeldAdmin) and the same user released it with scontrol release (exit 0, no message). Two seconds later the job was PENDING with reason Priority, so the release took effect and the job queued normally; it was cancelled at once and never ran. One job, one trial. Not tested: other job shapes (arrays, --begin), how long a held job may stay held before the site purges it, and the other partitions."
         plgrid_now_conformance:
-          value: {hold_honoured_and_released_by_the_provider: true, running_hard_end_is_start_plus_limit_utc: true, cancel_on_delete_read_cancelled_from_accounting: true, job_name_56_characters_unchanged_in_squeue_and_sacct: true, sbatch_latency_over_ssh_ms: [87, 98, 88], sacct_tres_allocated_and_requested_gpu: "gres gpu count 1 (untyped), with cpu 4, mem 32768 and billing 1", data_parser: "v0.0.40"}
+          value: {hold_honoured_and_released_by_the_provider: true, running_hard_end_is_start_plus_limit_utc: true, cancel_on_delete_read_cancelled_from_accounting: true, job_name_56_characters_unchanged_in_squeue_and_sacct: true, sbatch_latency_over_ssh_ms: [87.5, 98.2, 87.9], sacct_tres_allocated_and_requested_gpu: "gres gpu count 1 (untyped), with cpu 4, mem 32768 and billing 1", data_parser: "v0.0.40"}
           method: measured
           source: "the conformance run of internal/providerctl/conformance on plgrid-now, 1 Nov 2026, 11:30Z to 11:33Z, TestConformance: 1 GPU, 4 CPUs, 32Gi, 5 min, --no-requeue; issue #93, comment 6557645735"
           date: "2026-11-01"
@@ -489,7 +490,7 @@ spec:
         plgrid_now_start:
           value: "a one-GPU test-only job on plgrid-now, 5 min limit, was estimated to start at once with 1 CPU, and with 4 CPUs and 32768M; with 16 CPUs and 128000M (the QoS cap) it was estimated to start 52 min later"
           method: measured
-          source: "sbatch --test-only --no-requeue --partition=plgrid-now --account=<account> --nodes=1 --gres=gpu:1 --time=<5 or 2 min> [--cpus-per-task=<c> --mem=<m>M] --wrap=true; four calls on 2026-11-01 between 11:22Z and 11:27Z (issue #93, comment 6557645735)"
+          source: "sbatch --test-only --no-requeue --partition=plgrid-now --account=<account> --nodes=1 --gres=gpu:1 --time=<5 or 2 min> [--cpus-per-task=<c> --mem=<m>M] --wrap=true; five calls on 2026-11-01 between 11:22Z and 11:31Z (issue #93, comment 6557645735)"
           date: "2026-11-01"
           note: "Slurm prints the estimate in local time (Europe/Warsaw, CET +0100 since 25 Oct), so an estimate equal to the probe instant converted to UTC means a start at once. A transient snapshot: 2 of the partition's 24 nodes were mixed, 2 allocated, 3 failed and 17 in a reservation, so a request that needs most of a node's CPUs and memory finds none free. The same calls showed the partition's limits again: MaxTime 01:00:00 (scontrol show partition) and, on the partition's QoS, MaxTRESPerUser cpu=16,gres/gpu=1,mem=125G, MaxJobsPerUser 1, MaxSubmitJobsPerUser 1, no MaxWall, DenyOnLimit (sacctmgr show qos), as in slurm.qos."
 

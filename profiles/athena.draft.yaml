@@ -366,7 +366,7 @@ facts:
     plgrid_now_start:
       value: "a one-GPU test-only job on plgrid-now, 5 min limit, was estimated to start at once with 1 CPU, and with 4 CPUs and 32768M; with 16 CPUs and 128000M (the QoS cap) it was estimated to start 52 min later"
       method: measured
-      source: "sbatch --test-only --no-requeue --partition=plgrid-now --account=<account> --nodes=1 --gres=gpu:1 --time=<5 or 2 min> [--cpus-per-task=<c> --mem=<m>M] --wrap=true; four calls on 2026-11-01 between 11:22Z and 11:27Z (issue #93, comment 6557645735)"
+      source: "sbatch --test-only --no-requeue --partition=plgrid-now --account=<account> --nodes=1 --gres=gpu:1 --time=<5 or 2 min> [--cpus-per-task=<c> --mem=<m>M] --wrap=true; five calls on 2026-11-01 between 11:22Z and 11:31Z (issue #93, comment 6557645735)"
       date: 2026-11-01
       note: "Slurm prints the estimate in local time (Europe/Warsaw, CET +0100 since 25 Oct), so an estimate equal to the probe instant converted to UTC means a start at once. A transient snapshot: 2 of the partition's 24 nodes were mixed, 2 allocated, 3 failed and 17 in a reservation, so a request that needs most of a node's CPUs and memory finds none free. The same calls showed the partition's limits again: MaxTime 01:00:00 (scontrol show partition) and, on the partition's QoS, MaxTRESPerUser cpu=16,gres/gpu=1,mem=125G, MaxJobsPerUser 1, MaxSubmitJobsPerUser 1, no MaxWall, DenyOnLimit (sacctmgr show qos), as in qos."
     account_naming:
