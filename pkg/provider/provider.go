@@ -247,6 +247,11 @@ type Job struct {
 	Source Source
 	// DataParser is the reply's data_parser version without its prefix.
 	DataParser string
+	// Accounting is what accounting reported about the job: set when the
+	// record came from accounting (Source is SourceAccounting) or from a read
+	// of accounting alone (Platform.ReadAccounting); nil for a record read from
+	// the queue listing (HBEP-8, Provider accounting).
+	Accounting *JobAccounting
 }
 
 // Held reports whether the job is held, by its user or an administrator.

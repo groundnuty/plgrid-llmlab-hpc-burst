@@ -277,6 +277,7 @@ func (b *Batch) register(req provider.SubmitRequest, sc Script) string {
 		partition: req.Params.Partition,
 		limit:     limit,
 		gpus:      req.Params.GPUs,
+		cpus:      req.Params.CPUsPerTask,
 		submit:    now,
 		script:    sc,
 		eligible:  now,
@@ -358,6 +359,31 @@ func (b *Batch) Observe(_ context.Context, jobID string) (provider.Job, bool, er
 	if r.Source == provider.SourceAccounting {
 		b.log("sacct", jobID)
 	}
+	return r, true, nil
+}
+
+// ReadAccounting reads one job from accounting alone, past the queue listing
+// (sacct -j <id>), as the Slurm plugin does once after a job is first seen
+// started (HBEP-4, Poll rate; HBEP-8, Provider accounting). The record is the
+// job's as of now with Source accounting and Accounting set, whether or not the
+// listing still shows the job. found is false when accounting does not have the
+// job (Vanish). FailReads makes it fail. It is logged as op "sacct-job" with the
+// job ID, so a test counts the reads. LagAccounting makes it find nothing while
+// the queue listing still shows the job.
+func (b *Batch) ReadAccounting(_ context.Context, jobID string) (provider.Job, bool, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.log("sacct-job", jobID)
+	if b.readErr != nil {
+		return provider.Job{}, false, b.readErr
+	}
+	j, ok := b.jobs[jobID]
+	if !ok || j.vanished || j.accountingLags {
+		return provider.Job{}, false, nil
+	}
+	r := b.record(j, b.clock.Now())
+	r.Source = provider.SourceAccounting
+	r.Accounting = b.accountingOf(j, r, b.clock.Now())
 	return r, true, nil
 }
 

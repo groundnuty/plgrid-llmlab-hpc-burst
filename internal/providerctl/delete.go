@@ -20,7 +20,9 @@ import (
 // pending, running or suspended: no end time), or an attempt is unresolved
 // (HBEP-7, open question 11, Deletion). A submission that returns during
 // deletion is recorded, never lifted, and cancelled. Once nothing is left, the
-// Allocation's files are removed and the reconciler may drop the finalizer.
+// accounting record is written (keepAccounting, which may wait for the final
+// read of a job that started, at most lostGrace), the Allocation's files are
+// removed and the reconciler may drop the finalizer.
 //
 // The recorded job is read by its ID as well as by tag: a job the platform
 // stored under another name (refuseRenamed) is invisible to the tag lookup,
@@ -72,6 +74,11 @@ func (e *external) observeDeleting(ctx context.Context, a *v1alpha1.Allocation, 
 		if !e.hold() && now.Sub(attemptTime(a, rec.sub)) > e.unknownBound() {
 			e.needOperator(a, rec.sub)
 		}
+		return exists, nil
+	}
+	if kept, err := e.keepAccounting(ctx, a, rec, name, jobs, now); err != nil {
+		return exists, err
+	} else if !kept {
 		return exists, nil
 	}
 	if err := e.p.RemoveAllocationFiles(ctx, name); err != nil {
