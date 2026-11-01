@@ -24,7 +24,7 @@ const capBlock = 4096
 
 type capVolume struct {
 	backing string
-	limit   int64
+	limit   atomic.Int64 // bytes; grow raises it, as freeing space on a full disk would
 	enospc  atomic.Int64 // how many requests were refused, so a test can show the volume really was full
 	server  *fuse.Server
 	mount   string
@@ -39,6 +39,9 @@ type capVolume struct {
 	frozen         atomic.Bool
 	frozenRefusals atomic.Int64
 }
+
+// grow adds bytes to the volume's limit, as freeing space on a full disk does.
+func (v *capVolume) grow(bytes int64) { v.limit.Add(bytes) }
 
 // freeze makes the volume refuse every write from now on; unfreeze lifts it.
 func (v *capVolume) freeze()   { v.frozen.Store(true) }
@@ -76,7 +79,7 @@ func (v *capVolume) admit(path string, newSize int64) syscall.Errno {
 	if growth <= 0 {
 		return 0
 	}
-	if v.used()+growth > v.limit {
+	if v.used()+growth > v.limit.Load() {
 		v.enospc.Add(1)
 		return syscall.ENOSPC
 	}
@@ -141,12 +144,12 @@ func (n *capNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttr
 
 func (n *capNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
 	used := n.vol.used()
-	free := n.vol.limit - used
+	free := n.vol.limit.Load() - used
 	if free < 0 {
 		free = 0
 	}
 	out.Bsize, out.Frsize, out.NameLen = capBlock, capBlock, 255
-	out.Blocks = uint64(n.vol.limit / capBlock)
+	out.Blocks = uint64(n.vol.limit.Load() / capBlock)
 	out.Bfree, out.Bavail = uint64(free/capBlock), uint64(free/capBlock)
 	out.Files, out.Ffree = 1<<16, 1<<16
 	return 0
@@ -162,7 +165,8 @@ func newCapVolume(t *testing.T, limit int64) *capVolume {
 	if err != nil {
 		t.Fatal(err)
 	}
-	v := &capVolume{backing: filepath.Join(dir, "backing"), mount: filepath.Join(dir, "mnt"), limit: limit}
+	v := &capVolume{backing: filepath.Join(dir, "backing"), mount: filepath.Join(dir, "mnt")}
+	v.limit.Store(limit)
 	for _, d := range []string{v.backing, v.mount} {
 		if err := os.Mkdir(d, 0o700); err != nil {
 			t.Fatal(err)
