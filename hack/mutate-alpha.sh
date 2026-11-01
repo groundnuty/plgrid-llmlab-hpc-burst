@@ -14,7 +14,7 @@ pkg=internal/alpha
 tmp=$(mktemp -d)
 restore() { for f in "$tmp"/*; do [ -e "$f" ] && cp "$f" "$pkg/$(basename "$f")"; done; rm -rf "$tmp"; }
 trap restore EXIT
-cp "$pkg"/verdict.go "$pkg"/observe.go "$pkg"/run.go "$pkg"/config.go "$pkg"/record.go "$tmp"/
+cp "$pkg"/verdict.go "$pkg"/observe.go "$pkg"/run.go "$pkg"/config.go "$pkg"/record.go "$pkg"/rows.go "$tmp"/
 
 # file @@ exact text (must occur once) @@ replacement
 mutants=(
@@ -54,6 +54,16 @@ mutants=(
   'config.go@@g != strconv.Itoa(row.GPUs)@@g == strconv.Itoa(row.GPUs)'
   'record.go@@fi.Mode().Perm()&0o077 != 0@@fi.Mode().Perm()&0o077 == 0'
   'record.go@@if !tagRE.MatchString(tag) {@@if tagRE.MatchString(tag) {'
+  'verdict.go@@if len(d.Providers) != 1 {@@if len(d.Providers) > 1 {'
+  'verdict.go@@} else if d.Providers[0].Cluster != row.Cluster {@@} else if d.Providers[0].Cluster == row.Cluster {'
+  'verdict.go@@case d.LeaseLimit <= Lead():@@case d.LeaseLimit < Lead():'
+  'verdict.go@@case d.LeaseLimit != row.Lease:@@case d.LeaseLimit < row.Lease:'
+  'verdict.go@@if d.MaxRequestDuration != MaxRequestDuration {@@if d.MaxRequestDuration > MaxRequestDuration {'
+  'verdict.go@@!d.ReleaseWhenIdle || d.IdleLimit <= 0 || d.IdleLimit > 10*time.Minute@@d.ReleaseWhenIdle || d.IdleLimit <= 0 || d.IdleLimit > 10*time.Minute'
+  'verdict.go@@d.IdleLimit <= 0 || d.IdleLimit > 10*time.Minute@@d.IdleLimit <= 0 || d.IdleLimit >= 10*time.Minute'
+  'verdict.go@@case j.TimeLimit != row.Lease:@@case j.TimeLimit == row.Lease:'
+  'rows.go@@func MinLease() time.Duration { return Lead() + time.Minute }@@func MinLease() time.Duration { return Lead() }'
+  'rows.go@@return MaxRequestDuration + DrainMargin + HandoverMargin + StartTimeout@@return MaxRequestDuration + DrainMargin + HandoverMargin'
 )
 
 killed=0 survived=0 broken=0

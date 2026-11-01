@@ -111,9 +111,9 @@ type dryRow struct {
 	passing []string
 }
 
-var handoverFaults = []string{"cut", "no-stream", "two-restarts", "no-restart", "no-handover", "late-successor", "wrong-partition", "untagged", "unattributed"}
-var noOverlapFaults = []string{"nocap", "nogap", "noslot", "cut", "no-stream", "late-submit", "untagged", "wrong-partition"}
-var tunnelFaults = []string{"short", "cut", "drops", "no-rate", "short-rate", "wrong-direction", "untagged", "wrong-partition"}
+var handoverFaults = []string{"cut", "no-stream", "two-restarts", "no-restart", "no-handover", "late-successor", "wrong-partition", "untagged", "unattributed", "adds-helios", "default-lease", "short-lease"}
+var noOverlapFaults = []string{"nocap", "nogap", "noslot", "cut", "no-stream", "late-submit", "untagged", "wrong-partition", "adds-athena", "default-lease", "short-lease", "no-release-when-idle"}
+var tunnelFaults = []string{"short", "cut", "drops", "no-rate", "short-rate", "wrong-direction", "untagged", "wrong-partition", "adds-other-cluster", "default-lease", "short-lease"}
 var accountingFaults = []string{"node-two", "node-none"}
 
 // accountingPassing: a cluster that does not confine devices lists the whole node to nvidia-smi, and one that

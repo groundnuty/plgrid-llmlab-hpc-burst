@@ -43,6 +43,8 @@
 #   LIVE_DIALHOME_KEY            ssh mode only: the restricted dial-home key file, mode 600
 #   LIVE_BIN_DIR                 absolute path of the directory with k3s-1.36.5/ and the pinned frp
 #   LIVE_ISSUE_174_LANDED        yes, once #174 is on main: alpha-helios-nooverlap refuses without it
+#   LIVE_OWNER_GO_HELIOS_NOW     today's UTC date (YYYY-MM-DD), once the owner has said yes to the run: the rows that hold
+#                                QOS now's GPU for hours (alpha-helios-nooverlap, tunnel-hour-helios) refuse without it
 # Cluster calls go through the ssh aliases helios and athena, one at a time per
 # host under <LIVE_LOCK_DIR>/<host>.lock. The aliases' ssh configuration is yours.
 #
@@ -109,10 +111,10 @@ cluster_table() {
 conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|80|-
 conformance-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|4|32Gi|00:05:00|80|-
 real-engine|helios|-|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|00:57:00|75|-C memfs
-alpha-athena-handover|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|01:00:00|150|-
-alpha-helios-nooverlap|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|01:00:00|200|-C memfs
-tunnel-hour-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|01:25:00|110|-C memfs
-tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|01:25:00|110|-
+alpha-athena-handover|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|01:46:00|150|-
+alpha-helios-nooverlap|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|01:46:00|200|-C memfs
+tunnel-hour-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|01:46:00|130|-C memfs
+tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|01:46:00|130|-
 gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|25|-
 gpu-accounting-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|00:05:00|25|-
 # END CLUSTER SHAPES
@@ -130,6 +132,19 @@ alpha-helios-nooverlap|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,c
 tunnel-hour-helios|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 tunnel-hour-athena|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 # END PLAN STACK
+TABLE
+}
+
+# The rows that hold QOS now's one GPU, the owner's shared slot, for hours need the owner's go at run time, on top
+# of --yes (the development rule on #145). The setting must hold today's UTC date, so a go given for an earlier
+# run does not stand for this one. name | setting | minutes the run holds the slot (the package's
+# Row.SlotHold, rounded up to ten minutes; hack/livechecks compares them).
+owner_go_table() {
+  cat <<'TABLE'
+# BEGIN OWNER GO
+alpha-helios-nooverlap|LIVE_OWNER_GO_HELIOS_NOW|160
+tunnel-hour-helios|LIVE_OWNER_GO_HELIOS_NOW|110
+# END OWNER GO
 TABLE
 }
 
@@ -151,7 +166,7 @@ CLEAN_POLL_SECONDS=${LIVE_CLEAN_POLL_SECONDS:-3}
 declare -a NAMES=()
 declare -A KIND PKG TEST GATES INPUTS CONTEXTS STATUS
 declare -A HOST PROFILE PARTITION QOS SLOT ACCTKEY GPUS CPUS MEM TLIMIT TMIN EXTRA
-declare -A STACK ALIAS
+declare -A STACK ALIAS OGSET OGMIN
 declare -A S=()
 
 load_tables() {
@@ -176,6 +191,11 @@ load_tables() {
     [ -n "$name" ] || continue
     ALIAS[$name]=${pk//,/ }
   done < <(alias_table | grep -v -e '^#' -e '^$')
+  local og_key og_min
+  while IFS='|' read -r name og_key og_min; do
+    [ -n "$name" ] || continue
+    OGSET[$name]=$og_key OGMIN[$name]=$og_min
+  done < <(owner_go_table | grep -v -e '^#' -e '^$')
 }
 
 say() { printf '%s\n' "$*"; }
@@ -214,7 +234,7 @@ load_settings() {
     [ "$k" != "$line" ] || continue
     v=${v%\"}; v=${v#\"}; v=${v%\'}; v=${v#\'}
     case $k in
-      LIVE_OUT_DIR|LIVE_LOCK_DIR|LIVE_BUILD_LOCK|LIVE_LLMLAB_CREDENTIALS|LIVE_LLMLAB_MODEL|LIVE_CONF_CREDENTIALS_HELIOS|LIVE_CONF_CREDENTIALS_ATHENA|ACCOUNT_HELIOS_CPU|ACCOUNT_HELIOS_GH200|ACCOUNT_ATHENA_A100|LIVE_DIALHOME_MODE|LIVE_DIALHOME_ADDR|LIVE_DIALHOME_KEY|LIVE_BIN_DIR|LIVE_ISSUE_174_LANDED)
+      LIVE_OUT_DIR|LIVE_LOCK_DIR|LIVE_BUILD_LOCK|LIVE_LLMLAB_CREDENTIALS|LIVE_LLMLAB_MODEL|LIVE_CONF_CREDENTIALS_HELIOS|LIVE_CONF_CREDENTIALS_ATHENA|ACCOUNT_HELIOS_CPU|ACCOUNT_HELIOS_GH200|ACCOUNT_ATHENA_A100|LIVE_DIALHOME_MODE|LIVE_DIALHOME_ADDR|LIVE_DIALHOME_KEY|LIVE_BIN_DIR|LIVE_ISSUE_174_LANDED|LIVE_OWNER_GO_HELIOS_NOW)
         S[$k]=$v ;;
     esac
   done 2>/dev/null < "$HPCBURST_LIVE_SETTINGS"
@@ -246,10 +266,32 @@ check_settings() {
         fi
         case $name in
           alpha-*|tunnel-hour-*) check_alpha_settings "$name" || bad=1 ;;
-        esac ;;
+        esac
+        check_owner_go "$name" || bad=1 ;;
     esac
   done
   return $bad
+}
+
+# fmt_hold <minutes>: "2 h 40 min".
+fmt_hold() { printf '%d h %02d min' $(($1 / 60)) $(($1 % 60)); }
+
+# owner_go_note <name>: what a row that holds QOS now's GPU says before it runs.
+owner_go_note() {
+  say "$1: holds QOS now's GPU for about $(fmt_hold "${OGMIN[$1]}"); the owner's go is needed (the development rule on #145)"
+}
+
+# check_owner_go <name>: refuses (the caller counts it) a row in the owner-go table unless its setting holds
+# today's UTC date. The note is printed either way the run goes, so the hold is read before it starts.
+check_owner_go() {
+  local name=$1 key today
+  key=${OGSET[$name]:-}
+  [ -n "$key" ] || return 0
+  today=$(date -u +%F)
+  [ "${S[$key]:-}" = "$today" ] && return 0
+  owner_go_note "$name"
+  say "live-checks: setting $key must hold today's UTC date ($today) once the owner has said yes to this hold; it is missing or from another day"
+  return 1
 }
 
 # check_alpha_settings <name>: what a row that runs the stack needs besides a cluster test's own settings: the
@@ -639,6 +681,7 @@ run_cluster() {
   local n=$1 host=${HOST[$1]} t0 t1 verdict=0
   local qos=""; [ "${QOS[$n]}" = - ] || qos=", qos ${QOS[$n]}"
   say "$n: shape: partition ${PARTITION[$n]}$qos, ${GPUS[$n]} GPU, ${CPUS[$n]} CPU, ${MEM[$n]}, time limit ${TLIMIT[$n]}, one job, no requeue"
+  [ -z "${OGSET[$n]:-}" ] || owner_go_note "$n"
   if [ "${SLOT[$n]}" != - ]; then check_slot "$n" || return 3; fi
   estimate "$n" || true
   if [ "$YES" != 1 ]; then say "$n: not run: pass --yes to run it"; return 4; fi
