@@ -368,7 +368,8 @@ func (b *Batch) Observe(_ context.Context, jobID string) (provider.Job, bool, er
 // job's as of now with Source accounting and Accounting set, whether or not the
 // listing still shows the job. found is false when accounting does not have the
 // job (Vanish). FailReads makes it fail. It is logged as op "sacct-job" with the
-// job ID, so a test counts the reads.
+// job ID, so a test counts the reads. LagAccounting makes it find nothing while
+// the queue listing still shows the job.
 func (b *Batch) ReadAccounting(_ context.Context, jobID string) (provider.Job, bool, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -377,7 +378,7 @@ func (b *Batch) ReadAccounting(_ context.Context, jobID string) (provider.Job, b
 		return provider.Job{}, false, b.readErr
 	}
 	j, ok := b.jobs[jobID]
-	if !ok || j.vanished {
+	if !ok || j.vanished || j.accountingLags {
 		return provider.Job{}, false, nil
 	}
 	r := b.record(j, b.clock.Now())

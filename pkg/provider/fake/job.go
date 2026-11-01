@@ -31,6 +31,10 @@ type jobRec struct {
 	restartCount int32
 	requeued     bool
 	vanished     bool
+	// accountingLags: ReadAccounting finds nothing, the queue listing as usual.
+	// noElapsed: accounting's record has no time.elapsed.
+	accountingLags bool
+	noElapsed      bool
 
 	// priorRun is the time the job's earlier executions ran, added by each
 	// requeue (accounting sums the executions of a requeued job).
@@ -168,7 +172,9 @@ func (b *Batch) accountingOf(j *jobRec, r provider.Job, now time.Time) *provider
 			a.AllocatedGPUs = &gpus
 		}
 	}
-	a.Elapsed = &run
+	if !j.noElapsed {
+		a.Elapsed = &run
+	}
 	return a
 }
 

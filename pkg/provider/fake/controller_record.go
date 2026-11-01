@@ -16,21 +16,32 @@ import (
 // files and finalizer go (HBEP-8, Provider accounting). It uses the jobs the
 // deleting pass already read (deletingJobs) and makes no Batch call. wait is
 // true when the finalizer is to be kept for the final read; err keeps it too.
+// It mirrors the real controller's step, with the same order of rules.
 //
-//   - The recorded job is the one the job-ID annotation names, else the job
-//     adoption would pick. With neither there is nothing to account, and no
-//     record is written.
-//   - A recorded job that was read has ended: its hours are AccountingOf's over
-//     the stored accounting, which keeps the counts of an earlier read. One
-//     that never started has every hours field unknown, and its end time if it
-//     has one; that is written at once.
-//   - A recorded job that no source shows, and that the stored status shows
-//     started, is waited for up to LostGrace from status.atProvider.absentSince,
-//     which the first such pass sets (the only status a deleting Allocation is
-//     given) and a live Lost pass may have set earlier. When the grace has
-//     passed, the record has the elapsed and end times unknown, and the counts
-//     and start time of the stored status. One never seen started is written at
-//     once, with nothing known.
+// The recorded job is the one the job-ID annotation names, else the job
+// adoption would pick. With neither there is nothing to account, and no record
+// is written. Then, in order:
+//   - a requeued job (provider.AccountingRequeued of the recorded job read, with
+//     the stored status's sticky flag; or the flag alone when no read showed it)
+//     is written at once with its counts and elapsed time unknown, and its start
+//     and end times from the read if the job was read, else from the stored
+//     status;
+//   - a read of the recorded job that shows it never started, or whose
+//     provider.AccountingOf has the elapsed time, is written at once, from the
+//     read: the stored accounting keeps the counts of an earlier read;
+//   - else a known final observation in the stored status (provider.FinalKnown)
+//     is written at once, from the stored status: a later absence or incomplete
+//     read never erases it;
+//   - else a recorded job no read showed, and the stored status never showed
+//     started, is written at once with nothing known;
+//   - else the step waits, for a recorded job that started, for the read that
+//     gives the final elapsed time, whether no source shows the job or the read
+//     of it lacks the elapsed time (incomplete). The wait is at most LostGrace
+//     from status.atProvider.absentSince, which the first such pass sets (the
+//     only status a deleting Allocation is given) and a live Lost pass may have
+//     set earlier. After it the record is written with what is known and the
+//     elapsed time unknown: from the read if the job was read, else the counts
+//     and start time of the stored status, and its end time.
 //
 // The record is created if absent: an AlreadyExists is success, and the record
 // is never read back, updated or owned by the Allocation. A failed create
@@ -44,16 +55,49 @@ func (c *Controller) keepAccounting(ctx context.Context, p *pass, s *allocState,
 		return false, nil
 	}
 	data := v1alpha1.AccountingRecordData{Provider: c.Provider, Tag: s.tag, JobIDs: jobIDsWith(jobs, id)}
+	gpus := requestedGPUs(s)
 	if bp := s.a.Spec.ForProvider.Batch; bp != nil {
 		data.Partition = bp.Partition
 	}
+	o := s.prior
+	var recorded *provider.Job
+	var read *v1alpha1.AllocationAccounting
+	requeued := o.Requeued
 	if job, ok := jobByID(jobs, id); ok {
-		fillFromJob(&data, job, requestedGPUs(s), s.prior.Accounting, p)
-	} else if s.prior.StartTime != nil {
+		recorded = &job
+		j := job
+		j.Requeued = j.Requeued || o.Requeued
+		requeued = provider.AccountingRequeued(j)
+		read = provider.AccountingOf(j, gpus, o.Accounting, p.now)
+	}
+	fromRead := func() {
+		data.StartTime, data.EndTime = mtp(recorded.StartTime), mtp(recorded.EndTime)
+		fillAccounting(&data, read)
+	}
+	switch {
+	case requeued:
+		// Its counts and elapsed time are unknown however long it waits.
+		data.StartTime, data.EndTime = o.StartTime, o.EndTime
+		if recorded != nil {
+			data.StartTime, data.EndTime = mtp(recorded.StartTime), mtp(recorded.EndTime)
+		}
+	case recorded != nil && (recorded.StartTime == nil || read.ElapsedSeconds != nil):
+		fromRead()
+	case provider.FinalKnown(o):
+		data.StartTime, data.EndTime = o.StartTime, o.EndTime
+		fillAccounting(&data, o.Accounting)
+	case recorded == nil && o.StartTime == nil:
+		// A job never seen started: no hours to wait for.
+	default:
 		if wait, err := c.waitForFinalRead(ctx, p, s); wait || err != nil {
 			return wait, err
 		}
-		fillFromStored(&data, s.prior)
+		if recorded != nil {
+			fromRead()
+		} else {
+			data.StartTime, data.EndTime = o.StartTime, o.EndTime
+			fillAccounting(&data, provider.AccountingLost(&o.StartTime.Time, gpus, o.Accounting, p.now))
+		}
 	}
 	rec, err := v1alpha1.NewAccountingRecord(s.a.Namespace, s.a.UID, data)
 	if err != nil {
@@ -67,11 +111,11 @@ func (c *Controller) keepAccounting(ctx context.Context, p *pass, s *allocState,
 }
 
 // waitForFinalRead keeps the finalizer while a started job is absent from both
-// sources and LostGrace has not passed since status.atProvider.absentSince,
-// strictly as the Lost rule is (equal waits, a second more writes). The first
-// such pass sets the anchor with a status write of that one field; a stored
-// anchor, from a live pass or an earlier deleting one, is kept, so a restarted
-// Controller keeps the wait.
+// sources, or read without its elapsed time, and LostGrace has not passed since
+// status.atProvider.absentSince, strictly as the Lost rule is (equal waits, a
+// second more writes). The first such pass sets the anchor with a status write
+// of that one field; a stored anchor, from a live pass or an earlier deleting
+// one, is kept, so a restarted Controller keeps the wait.
 func (c *Controller) waitForFinalRead(ctx context.Context, p *pass, s *allocState) (wait bool, err error) {
 	if s.prior.AbsentSince == nil {
 		obs := s.prior.DeepCopy()
@@ -85,22 +129,12 @@ func (c *Controller) waitForFinalRead(ctx context.Context, p *pass, s *allocStat
 	return p.now.Sub(s.prior.AbsentSince.Time) <= c.lostGrace(), nil
 }
 
-// fillFromJob sets the hours fields and times of data from the recorded job.
-func fillFromJob(data *v1alpha1.AccountingRecordData, job provider.Job, gpus int32, stored *v1alpha1.AllocationAccounting, p *pass) {
-	if acct := provider.AccountingOf(job, gpus, stored, p.now); acct != nil {
+// fillAccounting copies the counts and the elapsed time into the record; nil
+// leaves them unknown.
+func fillAccounting(data *v1alpha1.AccountingRecordData, acct *v1alpha1.AllocationAccounting) {
+	if acct != nil {
 		data.AllocatedCPUs, data.AllocatedGPUs, data.ElapsedSeconds = acct.AllocatedCPUs, acct.AllocatedGPUs, acct.ElapsedSeconds
 	}
-	data.StartTime, data.EndTime = mtp(job.StartTime), mtp(job.EndTime)
-}
-
-// fillFromStored sets what the stored status knew of a job no source shows any
-// more: the allocated counts and the start time. The elapsed and end times are
-// unknown, since the last stored values were a running snapshot.
-func fillFromStored(data *v1alpha1.AccountingRecordData, stored *v1alpha1.AllocationObservation) {
-	if acct := stored.Accounting; acct != nil {
-		data.AllocatedCPUs, data.AllocatedGPUs = acct.AllocatedCPUs, acct.AllocatedGPUs
-	}
-	data.StartTime = stored.StartTime
 }
 
 // jobByID returns the job with the ID among those the pass read.
