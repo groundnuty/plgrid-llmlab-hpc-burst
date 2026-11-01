@@ -143,8 +143,8 @@ func keepStart(rg *rig, pol *v1alpha1.RetentionPolicy) *v1alpha1.Instance {
 //     and its Allocation kept: Keep releases nothing early;
 //   - from the drain start to the successor's readiness the deployment has
 //     Degraded NoOverlapSlot naming the Provider and the limit, with
-//     SubmitLimitReached added once the successor is held back, and no
-//     ReplacementLate;
+//     SubmitLimitReached added on every step the successor is held back by
+//     the old job's slot, after the restart too, and no ReplacementLate;
 //   - the controller restarts mid-hold and the gap goes on;
 //   - once the successor is ready the gap is over.
 func TestNoOverlapKeepHoldsTheSlotToTheHardEnd(t *testing.T) {
@@ -171,9 +171,8 @@ func TestNoOverlapKeepHoldsTheSlotToTheHardEnd(t *testing.T) {
 	// invariants run after every step of the run. They read the fake Slurm.
 	var (
 		primaryEnded, restarted bool
-		keptIdleSteps           int  // steps with the primary's Instance ended and its job still live
-		sawSubmitLimit          bool // the message added SubmitLimitReached during the hold
-		heldAfterRestart        int
+		keptIdleSteps           int // steps with the primary's Instance ended and its job still live
+		heldAfterRestart        int // those after the controller's restart
 	)
 	invariants := func() {
 		now := rg.clock.Now()
@@ -220,8 +219,11 @@ func TestNoOverlapKeepHoldsTheSlotToTheHardEnd(t *testing.T) {
 				!strings.Contains(c.Message, "Provider "+rigProvider) || !strings.Contains(c.Message, "maxSubmitPerUser 1 of QOS example-now") {
 				t.Fatalf("at %s in the gap Degraded = %s/%s %q, want NoOverlapSlot naming Provider %s and its maxSubmitPerUser 1", at, c.Status, c.Reason, c.Message, rigProvider)
 			}
-			if primaryEnded && oldLive && strings.Contains(c.Message, v1alpha1.ReasonSubmitLimitReached+": ") {
-				sawSubmitLimit = true
+			// The hold: the Instance has ended, so a primary is missing and its successor is held back
+			// by the slot on every step, the first and the ones after the restart too; the message lists
+			// SubmitLimitReached each time (HBEP-7 line 314).
+			if primaryEnded && oldLive && !strings.Contains(c.Message, v1alpha1.ReasonSubmitLimitReached+": ") {
+				t.Fatalf("at %s the successor is held back by the old job's slot, but Degraded %q does not list SubmitLimitReached (after the restart: %v)", at, c.Message, restarted)
 			}
 		}
 
@@ -304,9 +306,6 @@ func TestNoOverlapKeepHoldsTheSlotToTheHardEnd(t *testing.T) {
 	hoStepUntil(rg, hardEnd.Add(10*time.Minute), 10*time.Second, func() bool { return successorReady(rg) }, invariants)
 	if !restarted || heldAfterRestart == 0 || keptIdleSteps < 20 {
 		t.Fatalf("restarted %v; %d hold steps after it, %d in all, want a restart mid-hold with the hold checked after it", restarted, heldAfterRestart, keptIdleSteps)
-	}
-	if !sawSubmitLimit {
-		t.Fatal("the held-back successor never added SubmitLimitReached to the message during the hold")
 	}
 
 	calls := slurm.sbatchCalls()
