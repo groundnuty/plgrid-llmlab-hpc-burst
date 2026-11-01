@@ -6,6 +6,8 @@ package scenario_test
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -70,6 +72,35 @@ func (r *rig) providerReady() {
 	waitFor(r.t, waitDeadline, "the Provider to be Ready over the login node", func() bool {
 		return r.get(&p, providerName, "") && v1alpha1.ProviderReady(&p, time.Now())
 	})
+	r.assertRealSSH()
+}
+
+// assertRealSSH checks that the controller reached the login node with the
+// system's ssh client: its ssh master, a child process, runs the ssh found on
+// PATH, never this test binary, which the engine double's fakes link to.
+// Otherwise the "real wire" would be a fake that every step still passes.
+func (r *rig) assertRealSSH() {
+	r.t.Helper()
+	want, err := exec.LookPath("ssh")
+	if err == nil {
+		want, err = filepath.EvalSymlinks(want)
+	}
+	self, serr := os.Executable()
+	if err != nil || serr != nil {
+		r.t.Fatalf("the system ssh (%v) or this binary (%v) is unknown", err, serr)
+	}
+	pid, found := r.statusPID("controller"), false
+	for _, c := range childrenOf(pid) {
+		switch exe := processExe(c); exe {
+		case want:
+			found = true
+		case self:
+			r.t.Errorf("the controller's child %d runs this test binary, a fake, not the system ssh", c)
+		}
+	}
+	if !found {
+		r.t.Errorf("the controller (pid %d) has no child running %s: its ssh master to the login node is not the system ssh", pid, want)
+	}
 }
 
 // allocations lists the deployment's Allocations.
