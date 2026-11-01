@@ -375,14 +375,15 @@ type PlatformProfileSpec struct {
 	// QOS lists the QOSes that a Provider's qos or a partition's qos names,
 	// with their limits (HBEP-4, QOS limits and Platform profile schema;
 	// `@hpc-burst-science-agent`, 1 Nov 2026). Helios lists now, plgrid and
-	// normal; Athena plgrid-now. At most 16: the CEL cost of the rule on
-	// maxMemPerUser, a quantity of unbounded length, grows with this bound
-	// and exceeds the API server's budget at 32.
+	// normal; Athena plgrid-now. At most 8: the estimated CEL cost of the
+	// rule on maxMemPerUser, which parses a quantity of unbounded length
+	// (controller-gen gives a quantity no maxLength), grows with this bound
+	// and exceeds the API server's per-rule budget at 16 (by 1.0066 times).
 	//
 	// +optional
 	// +listType=map
 	// +listMapKey=name
-	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:MaxItems=8
 	QOS []QOSProfile `json:"qos,omitempty"`
 
 	// HoldRelease says whether a plain user's sbatch --hold is honoured and
