@@ -7,9 +7,13 @@
 #   hack/live-checks.sh --plan <base>..<head>        which live tests cover what the range changed; runs nothing
 #   hack/live-checks.sh --run <name>... [--yes]      runs only the named tests
 #
-# --plan maps the range's changed files to the code each live test runs: the
-# packages it imports (go list -deps -test), the files it embeds, and the
-# non-Go inputs the table names. A test file counts only for its own package.
+# --plan maps the range's changed files to the code each live test runs, read from
+# the two ends of the range (copies of their trees, not the current checkout): the
+# packages the test's package imports (go list -deps -test, in the host build and,
+# for the real-engine run, the linux/arm64 build), the files they embed wherever
+# those sit, and the inputs the table names. A test file counts only for its own
+# package. A discovery that fails, or lists nothing, fails the plan (exit 2): it
+# never reads as "no live test covers this range".
 #
 # --run gates each test by its environment, set from the settings file (below),
 # and reads every credential from its own mode-600 file. A cluster test first
@@ -35,38 +39,48 @@
 # Cluster calls go through the ssh aliases helios and athena, one at a time per
 # host under <LIVE_LOCK_DIR>/<host>.lock. The aliases' ssh configuration is yours.
 #
-# Output is statuses and counts. Logs, records and every remote reply go to
-# LIVE_OUT_DIR; the screen never carries a key, a URL, a job ID, a host, an
-# account or a private path.
+# What reaches the screen is statuses, counts and fixed labels: never a key, a URL, a job ID, a host, an
+# account, a private path or the name of a failed subtest. A tool's own diagnostics, every remote reply and
+# every test log go to files in LIVE_OUT_DIR. Those files are raw (a test's log can hold anything the test
+# printed): the screen is clean, they are not, and they are mode 600 in a mode-700 tree.
 #
 # Development rule for the one-job slots (QOS now on Helios, plgrid-now on
 # Athena; owner, 1 Nov 2026, issue #145): the script refuses to queue behind a
 # job that already holds the slot, runs one live run per host at a time with
 # the shortest time limit the test allows, builds before it takes the slot, and
-# on any exit (a failure or a signal included) cancels what the run left: the
-# real-engine job by its ID, a conformance run's new hb- jobs in the test's own
-# partition. It prints each slot use as a UTC start, end and duration, to post
-# on the issue the run served.
+# on any exit (a failure or a signal included) cancels what this run owns, and
+# only that: the real-engine job by its ID (its name is written down before the
+# submit, so a lost reply is found by it), a conformance run's jobs by the tags
+# its test wrote down before submitting (job-tags.txt). A job that merely
+# appeared in the same partition is never touched. It prints each slot use as a
+# UTC start, end and duration, to post on the issue the run served.
 #
 # The table below is the one map from a live test to its package. Add a row
-# when a test is added; hack/livechecks fails when a package holds a live test
-# that no row names.
+# when a test is added, and a //livecheck: directive on its Test function;
+# hack/livechecks fails when a package holds a live test that no row names, when
+# a Test function of a live file has no directive, or when a row's -run pattern
+# and the functions that name the row disagree.
 
 set -u -o pipefail
 
 SELF=${BASH_SOURCE[0]}
 ROOT=$(cd "$(dirname "$SELF")/.." && pwd -P)
 
-# name | kind | package | test | gate variables | non-Go inputs | status
+# name | kind | package | test | gate variables | non-Go inputs | build contexts | status
+# Inputs are files, directories or globs of the repository that the test reads without importing them.
+# Build contexts are the ones whose dependency closure the test runs: host, and linux-arm64 for the binaries
+# the real-engine job runs on the cluster. hack/livechecks checks this table against the tree: every test
+# function of a live file carries a //livecheck: directive that names its rows (or says none and why), and
+# every row's test pattern matches exactly the functions that name it.
 live_table() {
   cat <<'TABLE'
 # BEGIN LIVE TESTS
-llmlab-smoke|local|internal/front|^TestLLMLabThroughTheFront$|HPCBURST_LLMLAB_CREDENTIALS|-|ready
-hub-golden|local|pkg/hubfiles|^TestGoldenHub$|HPCBURST_TEST_HUB|-|ready
-conformance-helios|cluster|internal/providerctl/conformance|^TestConformance$|HPCBURST_CONFORMANCE|profiles/helios.yaml|ready
-conformance-athena|cluster|internal/providerctl/conformance|^TestConformance$|HPCBURST_CONFORMANCE|profiles/athena.yaml|ready
-real-engine|cluster|cmd/hb-agent|^TestRealEngine$|HB_REAL_ENGINE_PLAN|spikes/s94/job.sh|ready
-rehearsal|cluster|-|-|-|-|pending
+llmlab-smoke|local|internal/front|^TestLLMLabThroughTheFront$|HPCBURST_LLMLAB_CREDENTIALS|-|host|ready
+hub-golden|local|pkg/hubfiles|^TestGoldenHub$|HPCBURST_TEST_HUB|spikes/s7/checkpoints.env,spikes/s7/results/run1/hub,spikes/s7/results/run1/hash-*.jsonl|host|ready
+conformance-helios|cluster|internal/providerctl/conformance|^TestConformance$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host|ready
+conformance-athena|cluster|internal/providerctl/conformance|^TestConformance$|HPCBURST_CONFORMANCE|profiles/athena.yaml|host|ready
+real-engine|cluster|cmd/hb-agent|^TestRealEngine$|HB_REAL_ENGINE_PLAN|spikes/s94/job.sh|host,linux-arm64|ready
+rehearsal|cluster|-|-|-|-|-|pending
 # END LIVE TESTS
 TABLE
 }
@@ -91,16 +105,16 @@ POLL_SECONDS=${LIVE_POLL_SECONDS:-60}
 CLEAN_POLL_SECONDS=${LIVE_CLEAN_POLL_SECONDS:-3}
 
 declare -a NAMES=()
-declare -A KIND PKG TEST GATES INPUTS STATUS
+declare -A KIND PKG TEST GATES INPUTS CONTEXTS STATUS
 declare -A HOST PROFILE PARTITION QOS SLOT ACCTKEY GPUS CPUS MEM TLIMIT TMIN EXTRA
 declare -A S=()
 
 load_tables() {
-  local name kind pkg test gates inputs status
-  while IFS='|' read -r name kind pkg test gates inputs status; do
+  local name kind pkg test gates inputs contexts status
+  while IFS='|' read -r name kind pkg test gates inputs contexts status; do
     [ -n "$name" ] || continue
     NAMES+=("$name")
-    KIND[$name]=$kind PKG[$name]=$pkg TEST[$name]=$test GATES[$name]=$gates INPUTS[$name]=$inputs STATUS[$name]=$status
+    KIND[$name]=$kind PKG[$name]=$pkg TEST[$name]=$test GATES[$name]=$gates INPUTS[$name]=$inputs CONTEXTS[$name]=$contexts STATUS[$name]=$status
   done < <(live_table | grep -v -e '^#' -e '^$')
   local h pr pa q sl ak g c m tl tm ex
   while IFS='|' read -r name h pr pa q sl ak g c m tl tm ex; do
@@ -148,7 +162,7 @@ load_settings() {
       LIVE_OUT_DIR|LIVE_LOCK_DIR|LIVE_BUILD_LOCK|LIVE_LLMLAB_CREDENTIALS|LIVE_LLMLAB_MODEL|LIVE_CONF_CREDENTIALS_HELIOS|LIVE_CONF_CREDENTIALS_ATHENA|ACCOUNT_HELIOS_CPU|ACCOUNT_HELIOS_GH200|ACCOUNT_ATHENA_A100)
         S[$k]=$v ;;
     esac
-  done < "$HPCBURST_LIVE_SETTINGS"
+  done 2>/dev/null < "$HPCBURST_LIVE_SETTINGS"
 }
 
 # check_settings <name>...: every setting the named tests need, all problems reported at once.
@@ -184,7 +198,6 @@ check_settings() {
 
 OUT=""
 ACTIVE_HOST=""      # the host of the cluster test in flight, for cleanup
-BASELINE=""         # the hb- jobs the queue held before the test
 JOBID=""            # the real-engine job this run submitted
 CHILD=""
 INTERRUPTED=""
@@ -201,7 +214,7 @@ preamble() { local k; while [ $# -ge 2 ]; do k=$1; printf '%s=%q\n' "$k" "$2"; s
 
 # queue_jobs <host>: the user's hb- jobs, one "id|name|partition" per line.
 # Returns 1 when squeue could not be read, so an unreadable queue is never taken for an empty one.
-queue_jobs() {
+queue_jobs() { # id|name|partition lines
   local reply
   reply=$(remote "$1" <<'EOS'
 out=$(squeue --me -h -o '%i|%j|%P') || { echo "squeue=failed"; exit 0; }
@@ -209,8 +222,9 @@ echo "squeue=ok"
 printf '%s\n' "$out" | grep '|hb-' || true
 EOS
   ) || return 1
-  [ "$(printf '%s\n' "$reply" | head -1)" = squeue=ok ] || return 1
-  printf '%s\n' "$reply" | tail -n +2 | grep -E '^[0-9][0-9_+]*\|hb-[A-Za-z0-9._-]*\|[A-Za-z0-9._-]+$' || true
+  # The marker line, wherever it sits: a login banner can come before it.
+  printf '%s\n' "$reply" | grep -q -x 'squeue=ok' || return 1
+  printf '%s\n' "$reply" | sed -n '/^squeue=ok$/,$p' | tail -n +2 | grep -E '^[0-9][0-9_+]*\|hb-[A-Za-z0-9._-]*\|[A-Za-z0-9._-]+$' || true
 }
 
 # slot_jobs <host> <token>: how many of the user's jobs sit in the slot, or "unknown".
@@ -290,42 +304,53 @@ EOS
   printf '%s\n' "$reply" | grep -c '^cancelled=1$' || true
 }
 
-# clean_cluster: cancels what this run left, then checks. Idempotent; sets CLEAN_LEFT. Runs on every exit path.
-# The real-engine run knows its job: only that ID is cancelled. A harness-driven run does not know the IDs
-# its test submitted, so only the hb- jobs that appeared during the run in the test's own partition are
-# cancelled; a job queued before the run, or in another partition, is never touched.
+# own_tags: the job names this run submitted (or may have submitted), one per line, from OWN_TAGS_FILE.
+# The real-engine run writes its tag there before it submits; a conformance run's test writes each
+# Allocation's tag before anything can submit it (job-tags.txt). Only a name of this shape is accepted.
+OWN_TAGS_FILE=""
+own_tags() {
+  [ -n "$OWN_TAGS_FILE" ] && [ -f "$OWN_TAGS_FILE" ] || return 0
+  grep -E '^hb-[A-Za-z0-9._-]{1,60}$' "$OWN_TAGS_FILE" 2>/dev/null | sort -u || true
+}
+
+# clean_cluster: cancels what this run owns, then checks. Ownership is this run's own: the job ID it was
+# given (real-engine), and the jobs named by a tag it wrote down before submitting. A job that merely
+# appeared in the same partition is never touched: the owner's controller or a manual run does not take
+# this script's lock. The known ID is cancelled even when squeue cannot be read; the failed verification is
+# reported apart, and the EXIT trap tries once more. Idempotent; sets CLEAN_LEFT.
 CLEAN_LEFT=0
-CLEAN_MODE=partition   # job | partition
-CLEAN_PARTITION=""
+CLEAN_TRIES=0
 clean_cluster() {
   [ -n "$ACTIVE_HOST" ] || return 0
-  local host=$ACTIVE_HOST now ids line id cancelled=0 left=0 try
-  if ! now=$(queue_jobs "$host"); then
-    say "cleanup: the queue could not be read; check the cluster for jobs of this run by hand"
-    CLEAN_LEFT=1; ACTIVE_HOST=""; return 1
-  fi
-  ids=""
-  if [ "$CLEAN_MODE" = job ]; then
-    if [ -n "$JOBID" ] && printf '%s\n' "$now" | grep -q "^${JOBID}|"; then ids=$JOBID; fi
-  else
-    while IFS= read -r line; do
-      [ -n "$line" ] || continue
-      printf '%s\n' "$BASELINE" | grep -q -x -F "$line" && continue
-      [ "${line##*|}" = "$CLEAN_PARTITION" ] || continue
-      ids="$ids ${line%%|*}"
+  local host=$ACTIVE_HOST now="" ids="" tags line id name cancelled=0 left=0 try readable=1
+  CLEAN_TRIES=$((CLEAN_TRIES+1))
+  tags=$(own_tags)
+  [ -z "$JOBID" ] || ids=$JOBID
+  now=$(queue_jobs "$host") || readable=0
+  if [ "$readable" = 1 ] && [ -n "$tags" ]; then
+    while IFS='|' read -r id name _; do
+      [ -n "$id" ] || continue
+      printf '%s\n' "$tags" | grep -q -x -F "$name" || continue
+      case " $ids " in *" $id "*) ;; *) ids="$ids $id" ;; esac
     done <<<"$now"
   fi
   # shellcheck disable=SC2086
   [ -z "$ids" ] || cancelled=$(cancel_ids "$host" $ids)
-  if [ -n "$ids" ]; then
+  if [ "$readable" = 1 ] && [ -n "$ids" ]; then
     # A cancelled job can show as completing for a few seconds: look again before calling it left behind.
     for try in 1 2 3 4 5 6 7 8 9 10; do
-      now=$(queue_jobs "$host") || { say "cleanup: the queue could not be read after the cancel"; CLEAN_LEFT=1; ACTIVE_HOST=""; return 1; }
+      now=$(queue_jobs "$host") || { readable=0; break; }
       left=0
       for id in $ids; do printf '%s\n' "$now" | grep -q "^${id}|" && left=$((left+1)); done
       [ "$left" -eq 0 ] && break
       sleep "$CLEAN_POLL_SECONDS"
     done
+  fi
+  if [ "$readable" = 0 ]; then
+    say "cleanup: the queue could not be read, so the cleanup could not look for this run's jobs by tag or confirm a cancel (cancelled $cancelled known job(s)); check the queue by hand"
+    CLEAN_LEFT=1
+    [ "$CLEAN_TRIES" -lt 2 ] || ACTIVE_HOST=""
+    return 1
   fi
   say "cleanup: left behind $left (cancelled $cancelled)"
   [ "$left" -eq 0 ] || CLEAN_LEFT=1
@@ -358,20 +383,21 @@ wait_child() {
 
 # ---------------------------------------------------------------- results
 
-# judge <name> <log> <rc>: the verdict from the test's verbose log and exit status. A skip is not a pass.
+# judge <name> <log> <rc>: the verdict from the test's verbose log and exit status. A skip is not a pass, at
+# any level. Only counts and fixed labels reach the screen: a subtest's name can hold anything.
 judge() {
-  local n=$1 log=$2 rc=$3 test pass fail skip named failed
+  local n=$1 log=$2 rc=$3 test pass fail skip named
   test=${TEST[$n]#^}; test=${test%\$}
-  pass=$(grep -c -E '^--- PASS: ' "$log" 2>/dev/null); fail=$(grep -c -E '^--- FAIL: ' "$log" 2>/dev/null)
-  skip=$(grep -c -E '^--- SKIP: ' "$log" 2>/dev/null)
+  pass=$(grep -c -E '^--- PASS: ' "$log" 2>/dev/null); fail=$(grep -c -E '^ *--- FAIL: ' "$log" 2>/dev/null)
+  skip=$(grep -c -E '^ *--- SKIP: ' "$log" 2>/dev/null)
   named=$(sed -n -E "s/^--- (PASS|FAIL|SKIP): ${test}( .*)?\$/\\1/p" "$log" 2>/dev/null | head -1)
   say "$n: tests: ${pass:-0} passed, ${fail:-0} failed, ${skip:-0} skipped"
   if [ "$rc" = 130 ]; then say "$n: FAIL (interrupted)"; return 1; fi
   if [ "$rc" = 124 ]; then say "$n: FAIL (timed out)"; return 1; fi
   if [ "$named" = SKIP ]; then say "$n: FAIL (skipped: its gate was not met, so nothing ran)"; return 1; fi
+  if [ "${skip:-0}" != 0 ]; then say "$n: FAIL (a subtest was skipped, so part of the run did not happen)"; return 1; fi
   if [ "$rc" = 0 ] && [ "$named" = PASS ] && [ "${fail:-0}" = 0 ]; then say "$n: PASS"; return 0; fi
-  failed=$(grep -E '^ *--- FAIL: ' "$log" 2>/dev/null | awk '{print $3}' | grep -E '^[A-Za-z0-9_/.-]{1,80}$' | head -8 | tr '\n' ' ')
-  [ -z "$failed" ] || say "$n: failed: $failed"
+  [ "${fail:-0}" = 0 ] || say "$n: ${fail} test(s) failed; their names are in the log in the output directory"
   say "$n: FAIL (exit status $rc)"
   return 1
 }
@@ -379,6 +405,7 @@ judge() {
 # ---------------------------------------------------------------- running
 
 CONTROL_DIR=""
+REC_DIR=""
 
 # with_build_lock <command>...: runs the command under the shared build lock when LIVE_BUILD_LOCK names one.
 # Only builds take it; a test binary never runs while it is held.
@@ -420,7 +447,7 @@ env_conformance() {
   # shellcheck disable=SC2016
   export HPCBURST_CONF_STAGING='$SCRATCH/hpc-burst-conformance'
   export HPCBURST_CONF_HOST_LOCK=${S[LIVE_LOCK_DIR]}/$host.lock HPCBURST_CONF_CONTROL_DIR=$CONTROL_DIR
-  export HPCBURST_CONF_OUT=$OUT/$n-record
+  export HPCBURST_CONF_OUT=$REC_DIR
 }
 
 run_local() { # <name>
@@ -484,10 +511,14 @@ run_cluster() {
   exec {RUN_FD}>"${S[LIVE_LOCK_DIR]}/$host-live.lock"
   flock -n "$RUN_FD" || { release_run_lock; refuse "$n: another live run holds this host's run lock"; return 3; }
   if [ "${SLOT[$n]}" != - ]; then check_slot "$n" || { release_run_lock; return 3; }; fi
-  BASELINE=$(queue_jobs "$host") || { release_run_lock; say "$n: FAIL (the queue could not be read before the run)"; return 1; }
+  # A queue that cannot be read now could not be read for the cleanup either: refuse before submitting.
+  queue_jobs "$host" >/dev/null || { release_run_lock; say "$n: FAIL (the queue could not be read before the run)"; return 1; }
   [ -z "$INTERRUPTED" ] || { release_run_lock; say "$n: FAIL (interrupted before the run started)"; return 1; }
-  mkdir -p -m 700 "$OUT/$n-record"
-  CLEAN_PARTITION=${PARTITION[$n]}; CLEAN_MODE=partition; [ "$n" != real-engine ] || CLEAN_MODE=job
+  # Each run records in a directory of its own, so a tag file of an earlier run is never read as this run's.
+  REC_DIR="$OUT/$n-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  mkdir -m 700 "$REC_DIR" || { release_run_lock; say "$n: FAIL (the record directory could not be made)"; return 1; }
+  if [ "$n" = real-engine ]; then OWN_TAGS_FILE="$RE_DIR/submission-tag"; else OWN_TAGS_FILE="$REC_DIR/job-tags.txt"; fi
+  JOBID=""; CLEAN_TRIES=0
   ACTIVE_HOST=$host
   t0=$(date +%s)
   execute_cluster "$n" || verdict=1
@@ -522,11 +553,12 @@ RE_TAG=""
 # prepare_real_engine <name>: build the arm64 agent and its test binary, write the plan, stage all of it.
 # Nothing here holds the slot.
 prepare_real_engine() {
-  local n=$1 host=${HOST[$1]} w="$OUT/real-engine" tag sha
-  mkdir -p "$w/bin" && chmod 700 "$w" || return 1
+  local n=$1 host=${HOST[$1]} w tag sha
   sha=$(git -C "$ROOT" rev-parse --short=9 HEAD 2>/dev/null || echo unknown)
   tag="live-$(date -u +%Y%m%d%H%M%S)-$sha"
   [[ $tag =~ ^live-[0-9]{14}-[0-9a-f]{7,12}$ ]] || { say "$n: FAIL (no commit to name the run by)"; return 1; }
+  w="$OUT/real-engine-$tag"
+  mkdir -m 700 "$w" && mkdir "$w/bin" || { say "$n: FAIL (the run's directory could not be made)"; return 1; }
   say "$n: building hb-agent, its test binary and the plan"
   ( cd "$ROOT" &&
     with_build_lock env CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-X main.version=live-$sha" -o "$w/bin/hb-agent" ./cmd/hb-agent &&
@@ -539,7 +571,7 @@ prepare_real_engine() {
   say "$n: staging under \$SCRATCH on the cluster"
   # shellcheck disable=SC2016
   tar -C "$w" -cf - bin plan.json job.sh | flock -o -w 600 "${S[LIVE_LOCK_DIR]}/$host.lock" timeout 600 ssh -o BatchMode=yes "$host" \
-    "mkdir -p \"\$SCRATCH/hpc-burst-live/$tag/logs\" && tar -C \"\$SCRATCH/hpc-burst-live/$tag\" -xf -" 2>>"$OUT/remote.log" ||
+    "mkdir -p \"\$SCRATCH/hpc-burst-live/$tag/logs\" && tar -C \"\$SCRATCH/hpc-burst-live/$tag\" -xf -" >>"$OUT/remote.log" 2>&1 ||
     { say "$n: FAIL (staging did not complete)"; return 1; }
   RE_DIR=$w; RE_TAG=$tag
 }
@@ -551,6 +583,9 @@ execute_real_engine() {
   local n=$1 host=${HOST[$1]} w=$RE_DIR tag=$RE_TAG acct reply state last="" errs=0 st log finished
   local submit_t run_t="" now limit_s pend_max=${LIVE_PENDING_MAX_SECONDS:-7200} margin=${LIVE_RUN_MARGIN_SECONDS:-900}
   acct=${S[${ACCTKEY[$n]}]}
+  # The job's name is written down before the submit. If the reply is lost, or a signal arrives, the
+  # cleanup finds the job by this name and cancels it.
+  printf 'hb-live-%s\n' "$tag" >"$RE_DIR/submission-tag" || { say "$n: FAIL (the submission tag could not be written)"; return 1; }
   reply=$({ preamble ACCOUNT "$acct" SHAPE_OPTS "$(shape_opts "$n")" TAG "$tag"; cat <<'EOS'
 D="$SCRATCH/hpc-burst-live/$TAG"
 sbatch --parsable -A "$ACCOUNT" $SHAPE_OPTS -J "hb-live-$TAG" -o "$D/logs/job-%j.out" --export=ALL,H="$D",RUN_TAG="$TAG" "$D/job.sh" 2>/dev/null
@@ -613,63 +648,122 @@ EOS
   } | remote "${HOST[$n]}") || { say "$n: FAIL (the job log could not be fetched)"; return 1; }
   printf '%s\n' "$reply" | sed -n -E 's/^final=([A-Z_]+ [0-9]+:[0-9]+)$/state=\1/p' | head -1 >"$w/final.txt"
   printf '%s\n' "$reply" | sed -n '/^---LOG---$/,$p' | tail -n +2 >"$w/job.log"
-  mkdir -p "$w/record" && chmod 700 "$w/record"
-  flock -o -w 600 "${S[LIVE_LOCK_DIR]}/${HOST[$n]}.lock" timeout 600 ssh -o BatchMode=yes "${HOST[$n]}" \
-    "tar -C \"\$SCRATCH/hpc-burst-live/$tag/run-$tag\" -cf - . 2>/dev/null" 2>>"$OUT/remote.log" | tar -C "$w/record" -xf - 2>/dev/null || true
+  # A fresh directory (w is this run's own), and a failed or empty fetch fails the run: the record
+  # reported is this run's.
+  mkdir -m 700 "$w/record" || { say "$n: FAIL (the record directory could not be made)"; return 1; }
+  if ! flock -o -w 600 "${S[LIVE_LOCK_DIR]}/${HOST[$n]}.lock" timeout 600 ssh -o BatchMode=yes "${HOST[$n]}" \
+    "tar -C \"\$SCRATCH/hpc-burst-live/$tag/run-$tag\" -cf - ." 2>>"$OUT/remote.log" | tar -C "$w/record" -xf -; then
+    say "$n: FAIL (the run's record could not be fetched)"; return 1
+  fi
   files=$(find "$w/record" -type f | wc -l)
   say "$n: record: $files file(s) fetched"
+  [ "$files" -gt 0 ] || { say "$n: FAIL (the fetched record is empty)"; return 1; }
 }
 
 # ---------------------------------------------------------------- plan
 
-# pkg_deps <package>: the module's directories the package's tests run (relative), one per line, then
-# "embed:<path>" lines for the files they embed.
+# The build contexts a row's dependency closure is taken in. linux-arm64 is the one the real-engine job's
+# binaries are built for; a dependency that only that build imports must still be found.
+declare -A CTXENV=([host]="" [linux-arm64]="CGO_ENABLED=0 GOOS=linux GOARCH=arm64")
+
+PLAN_TMP=""
+
+# extract_tree <rev> <dir>: the module's files at rev, without spikes/ and hbep/ (their own modules and prose).
+# The plan reads the two ends of the range from these copies, never from the current checkout, which may be
+# anywhere else.
+extract_tree() {
+  git -C "$ROOT" archive "$1" 2>/dev/null | tar -x --anchored --exclude=spikes --exclude=hbep -C "$2" 2>/dev/null
+}
+
+# pkg_deps <tree> <package> <context>: the tree's directories the package's tests run (relative), one per
+# line, then "embed:<path>" lines for the files they embed (paths as go list gives them, nested ones too).
+# Fails when go list fails or prints nothing: a partial listing must never read as "nothing covers this".
 pkg_deps() {
-  ( cd "$ROOT" && go list -deps -test -f '{{.Dir}}|{{join .EmbedFiles ","}}' "./$1" 2>/dev/null ) | awk -F'|' -v root="$ROOT" '
-    index($1, root "/") == 1 || $1 == root {
-      rel = substr($1, length(root) + 2); if (rel == "") rel = "."
-      print rel
-      n = split($2, e, ","); for (i = 1; i <= n; i++) if (e[i] != "") print "embed:" rel "/" e[i]
-    }' | sort -u
+  local tree root out
+  tree=$(cd "$1" 2>/dev/null && pwd -P) || return 1
+  # shellcheck disable=SC2086
+  out=$( ( cd "$tree" && env ${CTXENV[$3]} go list -deps -test -f '{{.Dir}}|{{join .EmbedFiles ","}}' "./$2" 2>/dev/null ) |
+    awk -F'|' -v root="$tree" '
+      index($1, root "/") == 1 || $1 == root {
+        rel = substr($1, length(root) + 2); if (rel == "") rel = "."
+        print rel
+        n = split($2, e, ","); for (i = 1; i <= n; i++) if (e[i] != "") print "embed:" rel "/" e[i]
+      }' | sort -u ) || return 1
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+}
+
+# input_matches <file> <inputs>: whether the file is one of the comma-separated inputs (a file, a glob or a directory).
+input_matches() {
+  local f=$1 inp
+  for inp in ${2//,/ }; do
+    # shellcheck disable=SC2053
+    { [[ $f == $inp ]] || [[ $f == "$inp"/* ]]; } && return 0
+  done
+  return 1
 }
 
 plan() {
-  local range=$1 files name pkg f d b reason
+  local range=$1 base head bsha hsha files name pkg ctx side f d b reason key out
   local -A deps=() reasons=() hit=()
   case $range in *..*) ;; *) say "live-checks: --plan needs <base>..<head>"; return 2 ;; esac
-  files=$(git -C "$ROOT" diff --name-only --no-renames "$range" -- 2>/dev/null) || { say "live-checks: git cannot read that range here"; return 2; }
+  base=${range%%..*}; head=${range##*..}
+  bsha=$(git -C "$ROOT" rev-parse --verify --quiet "${base}^{commit}" 2>/dev/null) &&
+    hsha=$(git -C "$ROOT" rev-parse --verify --quiet "${head:-HEAD}^{commit}" 2>/dev/null) ||
+    { say "live-checks: git cannot read that range here"; return 2; }
+  case $range in *...*) bsha=$(git -C "$ROOT" merge-base "$bsha" "$hsha" 2>/dev/null) || { say "live-checks: git cannot read that range here"; return 2; } ;; esac
+  files=$(git -C "$ROOT" diff --name-only --no-renames "$bsha" "$hsha" -- 2>/dev/null) || { say "live-checks: git cannot read that range here"; return 2; }
   local -a changed=()
   [ -z "$files" ] || mapfile -t changed <<<"$files"
   say "range: $range, ${#changed[@]} file(s) changed"
+
+  PLAN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/hbp.XXXXXX" 2>/dev/null) || { say "live-checks: no scratch directory for the plan"; return 2; }
+  trap 'rm -rf "$PLAN_TMP"' EXIT
+  mkdir "$PLAN_TMP/base" "$PLAN_TMP/head"
+  extract_tree "$bsha" "$PLAN_TMP/base" && extract_tree "$hsha" "$PLAN_TMP/head" || { say "live-checks: the range's trees could not be read"; return 2; }
+
+  # The closure at both ends of the range: a file deleted by the range was a dependency at its base.
   for name in "${NAMES[@]}"; do
     [ "${STATUS[$name]}" = ready ] || continue
     pkg=${PKG[$name]}
-    if [ -z "${deps[$pkg]+x}" ]; then
-      deps[$pkg]=$(pkg_deps "$pkg")
-      [ -n "${deps[$pkg]}" ] || { say "live-checks: go list found nothing for package $pkg"; return 2; }
-    fi
+    for ctx in ${CONTEXTS[$name]//,/ }; do
+      key="$pkg|$ctx"
+      [ -z "${deps[$key]+x}" ] || continue
+      deps[$key]=""
+      for side in base head; do
+        [ -d "$PLAN_TMP/$side/$pkg" ] || continue   # the package may be new, or deleted, in the range
+        out=$(pkg_deps "$PLAN_TMP/$side" "$pkg" "$ctx") || { say "live-checks: dependency discovery failed for package $pkg ($ctx) at the $side of the range; nothing is planned"; return 2; }
+        deps[$key]+="$out"$'\n'
+      done
+      [ -n "${deps[$key]}" ] || { say "live-checks: package $pkg exists at neither end of the range; nothing is planned"; return 2; }
+      deps[$key]=$(printf '%s' "${deps[$key]}" | sort -u)
+    done
   done
+
   for f in "${changed[@]}"; do
     d=$(dirname "$f"); b=$(basename "$f")
     for name in "${NAMES[@]}"; do
       [ "${STATUS[$name]}" = ready ] || continue
       pkg=${PKG[$name]}; reason=""
       case $f in go.mod|go.sum|go.work|go.work.sum) reason="go.mod/go.sum" ;; esac
-      if [ -z "$reason" ] && [ "${INPUTS[$name]}" != - ]; then
-        local inp
-        for inp in ${INPUTS[$name]//,/ }; do
-          { [ "$f" = "$inp" ] || [[ $f == "$inp"/* ]]; } && reason=$f
+      if [ -z "$reason" ] && [ "${INPUTS[$name]}" != - ] && input_matches "$f" "${INPUTS[$name]}"; then reason=$f; fi
+      if [ -z "$reason" ]; then
+        for ctx in ${CONTEXTS[$name]//,/ }; do
+          # An embedded file counts wherever it sits and whatever it is called.
+          if printf '%s\n' "${deps[$pkg|$ctx]}" | grep -q -x -F "embed:$f"; then reason=$f; break; fi
         done
       fi
       if [ -z "$reason" ]; then
         if [ "$d" = "$pkg" ] || [[ $f == "$pkg"/* ]]; then
           case $b in *.md) ;; *) reason=$pkg ;; esac
-        elif printf '%s\n' "${deps[$pkg]}" | grep -q -x -F "$d"; then
-          case $b in
-            *_test.go) ;;
-            *.go|*.s|*.S|*.c|*.h|*.cc|*.cpp) reason=$d ;;
-            *) printf '%s\n' "${deps[$pkg]}" | grep -q -x -F "embed:$f" && reason=$d ;;
-          esac
+        else
+          for ctx in ${CONTEXTS[$name]//,/ }; do
+            printf '%s\n' "${deps[$pkg|$ctx]}" | grep -q -x -F "$d" || continue
+            case $b in
+              *_test.go) ;;
+              *.go|*.s|*.S|*.c|*.h|*.cc|*.cpp) reason=$d; break ;;
+            esac
+          done
         fi
       fi
       [ -n "$reason" ] || continue
@@ -731,9 +825,14 @@ done
 load_settings || exit 3
 check_settings "${REQUESTED[@]}" || exit 3
 OUT=${S[LIVE_OUT_DIR]}
-mkdir -p "$OUT" && chmod 700 "$OUT" || { say "live-checks: the output directory could not be made"; exit 3; }
-: >>"$OUT/remote.log" && chmod 600 "$OUT/remote.log"
-CONTROL_DIR=$(mktemp -d "${TMPDIR:-/tmp}/hbl.XXXXXX") || exit 3
+# Everything private is mode 600 (directories 700), and a tool's own diagnostics, which can name a path,
+# go to a log in the output directory, never to the screen. The logs there are raw: the screen is clean,
+# the logs are not, and they stay private.
+umask 077
+mkdir -p "$OUT" 2>/dev/null && chmod 700 "$OUT" 2>/dev/null || { say "live-checks: the output directory could not be made"; exit 3; }
+exec 2>>"$OUT/script.log"
+: >>"$OUT/remote.log"
+CONTROL_DIR=$(mktemp -d "${TMPDIR:-/tmp}/hbl.XXXXXX") || { say "live-checks: no scratch directory for the ssh master"; exit 3; }
 trap on_signal INT TERM HUP
 trap on_exit EXIT
 

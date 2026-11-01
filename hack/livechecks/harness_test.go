@@ -26,7 +26,8 @@ const fixtureGoMod = "module example.test/fx\n\ngo 1.21\n"
 func fixtureFiles() map[string]string {
 	return map[string]string{
 		"go.mod":                                     fixtureGoMod,
-		"internal/front/front.go":                    "package front\n\nimport _ \"example.test/fx/pkg/provider\"\n",
+		"internal/front/front.go":                    "package front\n\nimport (\n\t_ \"embed\"\n\n\t_ \"example.test/fx/pkg/provider\"\n)\n\n//go:embed embedded.md\nvar doc string\n",
+		"internal/front/embedded.md":                 "embedded prose\n",
 		"internal/front/front_test.go":               "package front\n\nimport \"testing\"\n\nfunc TestLLMLabThroughTheFront(t *testing.T) {}\n",
 		"internal/front/README.md":                   "front\n",
 		"pkg/provider/provider.go":                   "package provider\n",
@@ -38,7 +39,16 @@ func fixtureFiles() map[string]string {
 		"internal/providerctl/conformance/c_test.go": "package conformance\n\nimport (\n\t\"testing\"\n\n\t_ \"example.test/fx/internal/providerctl\"\n)\n\nfunc TestConformance(t *testing.T) {}\n",
 		"cmd/hb-agent/main.go":                       "package main\n\nimport _ \"example.test/fx/internal/agent\"\n\nfunc main() {}\n",
 		"cmd/hb-agent/realengine_test.go":            "package main\n\nimport \"testing\"\n\nfunc TestRealEngine(t *testing.T) {}\n",
-		"internal/agent/agent.go":                    "package agent\n\nimport _ \"embed\"\n\n//go:embed data.txt\nvar data string\n",
+		"internal/agent/agent.go":                    "package agent\n\nimport \"embed\"\n\n//go:embed data.txt\nvar data string\n\n//go:embed assets/*.txt\nvar assets embed.FS\n",
+		"internal/agent/assets/a.txt":                "asset a\n",
+		"internal/agent/assets/b.txt":                "asset b\n",
+		"internal/agent/arm64.go":                    "//go:build linux && arm64\n\npackage agent\n\nimport _ \"example.test/fx/internal/armonly\"\n",
+		"internal/armonly/armonly.go":                "package armonly\n",
+		"spikes/s7/checkpoints.env":                  "REV=1\n",
+		"spikes/s7/results/run1/hub/a.json":          "{}\n",
+		"spikes/s7/results/run1/hash-a.jsonl":        "{}\n",
+		"spikes/s7/results/run1/other.txt":           "not an input\n",
+		"spikes/s7/README.md":                        "readme\n",
 		"internal/agent/data.txt":                    "embedded\n",
 		"internal/agent/notes.txt":                   "not embedded\n",
 		"unrelated/unrelated.go":                     "package unrelated\n",
@@ -112,6 +122,19 @@ func newWorld(t *testing.T) *world {
 	w.writeSettings(nil)
 	t.Cleanup(func() { _ = os.RemoveAll(w.tmp) })
 	return w
+}
+
+// commitFile changes (or, with content "", deletes) one file in a new commit and returns the commit.
+func (w *world) commitFile(path, content string) string {
+	w.t.Helper()
+	if content == "" {
+		git(w.t, w.repo, "rm", "-q", path)
+	} else {
+		write(w.t, filepath.Join(w.repo, path), content, 0o644)
+		git(w.t, w.repo, "add", "-A")
+	}
+	git(w.t, w.repo, "commit", "-q", "-m", "change "+path)
+	return git(w.t, w.repo, "rev-parse", "HEAD")
 }
 
 // commit changes one file and returns the range from the base to the new commit.

@@ -122,6 +122,8 @@ func (m modelSpec) launch() agentapi.Launch {
 // TestRealEnginePlan writes the plan to $HB_REAL_PLAN_OUT. Each Instance's
 // file list is the identity record's, read from the Hub by package hubfiles
 // (HBEP-3), not by the agent's stager.
+//
+//livecheck:none a step of the real-engine row: its build step runs it
 func TestRealEnginePlan(t *testing.T) {
 	out := os.Getenv("HB_REAL_PLAN_OUT")
 	if out == "" {
@@ -299,6 +301,8 @@ func deploymentIDFor(label string) string {
 
 // The judgements on hand-made inputs, so the run's verdicts are not the
 // code's say-so.
+//
+//livecheck:none offline: CI runs it
 func TestRealEngineJudgements(t *testing.T) {
 	for _, c := range []struct{ declared, reported, want string }{
 		{"0.50", "0.5", "equal"},

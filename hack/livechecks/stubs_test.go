@@ -17,13 +17,27 @@ host=$1; shift
 export PATH="$STUB_STATE/../bin/slurm:$PATH"
 export SCRATCH="$STUB_STATE/scratch-$host"
 mkdir -p "$SCRATCH"
-if [ "$1" = "bash -s" ]; then exec bash -s; else exec bash -c "$1"; fi
+# A login banner on standard output, as a shell start-up file can print one; not into a tar stream, which it would corrupt.
+case "$1" in *"-cf - ."*) ;; *) [ -z "${STUB_BANNER:-}" ] || echo "welcome to seedhost01, account SEEDACCT" ;; esac
+if [ "$1" = "bash -s" ]; then
+  script=$(cat)
+  case "$script" in
+    *"sbatch --parsable"*)
+      if [ -n "${STUB_LOSE_SUBMIT_REPLY:-}" ]; then printf '%s\n' "$script" | bash -s >/dev/null 2>&1; exit 255; fi ;;
+  esac
+  printf '%s\n' "$script" | exec bash -s
+fi
+case "$1" in
+  *"-cf - ."*) [ -z "${STUB_FETCH_FAIL:-}" ] || exit 255 ;;
+esac
+exec bash -c "$1"
 `
 
 // stubSqueue also advances the fake clock by STUB_CLOCK_STEP seconds on every
 // poll of a job, so the budgets of the real-engine run are tested without waiting.
 const stubSqueue = `#!/bin/bash
 Q="$STUB_STATE/queue"
+[ ! -e "$STUB_STATE/squeue-broken" ] || { echo "squeue: error: unable to contact slurm controller seedhost01" >&2; exit 1; }
 [ -z "${STUB_SQUEUE_FAIL:-}" ] || { echo "squeue: error: unable to contact slurm controller seedhost01" >&2; exit 1; }
 fmt=""; id=""
 while [ $# -gt 0 ]; do
@@ -68,6 +82,7 @@ h=$(printf '%s' "$exp" | sed -n 's/.*,H=\([^,]*\).*/\1/p'); tag=$(printf '%s' "$
 mkdir -p "$h/run-$tag" && echo '{}' > "$h/run-$tag/summary.json"
 id=7001
 echo "$id|$name|now|plgrid-gpu-gh200|PENDING" >> "$STUB_STATE/queue"
+[ -z "${STUB_BREAK_SQUEUE_AFTER_SUBMIT:-}" ] || touch "$STUB_STATE/squeue-broken"
 [ -z "${STUB_FOREIGN:-}" ] || echo "9002|hb-controller-xxxxxxxxxxxx|now|plgrid-gpu-gh200|RUNNING" >> "$STUB_STATE/queue"
 case "${STUB_JOB_FOREVER:-}" in
   '') printf '%s\n' ${STUB_JOB_STATES:-PENDING RUNNING} > "$STUB_STATE/jobstates-$id" ;;
@@ -131,8 +146,11 @@ case $t in
   TestRealEnginePlan) echo '{}' > "$HB_REAL_PLAN_OUT"; echo "--- PASS: $t (0.01s)"; exit 0 ;;
 esac
 leave() {
+  # Like the real harness: the tag is written down before anything submits it.
+  [ -z "${HPCBURST_CONF_OUT:-}" ] || echo "hb-leftover-aaaaaaaaaaaa" >> "$HPCBURST_CONF_OUT/job-tags.txt"
   echo "9001|hb-leftover-aaaaaaaaaaaa|${STUB_JOB_QOS:-normal}|${STUB_JOB_PART:-plgrid}|PENDING" >> "$STUB_STATE/queue"
-  [ -z "${STUB_FOREIGN:-}" ] || echo "9002|hb-controller-xxxxxxxxxxxx|now|plgrid-gpu-gh200|RUNNING" >> "$STUB_STATE/queue"
+  # Someone else's hb- job, new in the same partition during the run: not this run's to cancel.
+  [ -z "${STUB_FOREIGN:-}" ] || echo "9002|hb-controller-xxxxxxxxxxxx|${STUB_JOB_QOS:-normal}|${STUB_JOB_PART:-plgrid}|RUNNING" >> "$STUB_STATE/queue"
 }
 case $mode in
   pass) echo "=== RUN   $t"; echo "--- PASS: $t (0.01s)"; echo PASS ;;
@@ -140,6 +158,8 @@ case $mode in
   fail) echo "--- FAIL: $t (0.01s)"; echo FAIL; exit 1 ;;
   leave-fail) leave; echo "--- FAIL: $t (0.01s)"; echo FAIL; exit 1 ;;
   leave-pass) leave; echo "--- PASS: $t (0.01s)"; echo PASS ;;
-  sleep) leave; touch "$STUB_STATE/started"; exec sleep 30 ;;
+  skip-sub) echo "=== RUN   $t"; echo "    --- SKIP: $t/part (0.00s)"; echo "--- PASS: $t (0.01s)"; echo PASS ;;
+  fail-sub) echo "    --- FAIL: $t/SEEDKEY-424242 (0.00s)"; echo "--- FAIL: $t (0.01s)"; echo FAIL; exit 1 ;;
+  sleep) leave; touch "$STUB_STATE/started"; exec sleep 3600 ;;
 esac
 `

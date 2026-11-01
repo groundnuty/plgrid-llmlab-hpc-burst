@@ -1,7 +1,9 @@
 package livechecks
 
 import (
+	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -295,7 +297,9 @@ func index(ev []string, prefix string, nth int) int {
 	return -1
 }
 
-func TestCleanupSparesJobsOutsideTheTestsPartition(t *testing.T) {
+// The owner's controller or a manual run does not take the script's lock. An hb- job that merely appeared in
+// the same partition during the run is not this run's: only the tag the test wrote down is.
+func TestCleanupCancelsOnlyTheJobsThisRunTagged(t *testing.T) {
 	w := newWorld(t)
 	w.useStubGo()
 	res := w.run([]string{"STUB_TEST_MODE=leave-fail", "STUB_FOREIGN=1"}, "--run", "conformance-helios", "--yes")
@@ -303,10 +307,10 @@ func TestCleanupSparesJobsOutsideTheTestsPartition(t *testing.T) {
 		t.Fatalf("exit %d, want 1:\n%s", res.code, res.out)
 	}
 	if got := lines(w.stateFile("cancelled")); len(got) != 1 || got[0] != "9001" {
-		t.Errorf("cancelled %v: only the job in the test's partition is this run's", got)
+		t.Errorf("cancelled %v: only the job with this run's tag is this run's", got)
 	}
 	if q := w.stateFile("queue"); !strings.Contains(q, "9002|") || strings.Contains(q, "9001|") {
-		t.Errorf("another hb- job (a controller's, in another partition) must stay:\n%s", q)
+		t.Errorf("another hb- job in the same partition must stay, and the tagged one must go:\n%s", q)
 	}
 }
 
@@ -416,5 +420,165 @@ func TestSignalDuringTheBuildStopsBeforeTheSlotIsTaken(t *testing.T) {
 		if index(w.events(), "squeue %i|%j|%P", 1) >= 0 {
 			t.Errorf("the run went on to read the queue for a baseline after the signal:\n%s", strings.Join(w.events(), "\n"))
 		}
+	}
+}
+
+func TestASkippedSubtestIsAFailure(t *testing.T) {
+	w := newWorld(t)
+	w.useStubGo()
+	res := w.run([]string{"STUB_TEST_MODE=skip-sub"}, "--run", "conformance-helios", "--yes")
+	if res.code != 1 {
+		t.Fatalf("exit %d, want 1:\n%s", res.code, res.out)
+	}
+	w.contains(res, "1 skipped", "FAIL (a subtest was skipped, so part of the run did not happen)")
+}
+
+// A failed subtest's name can hold anything: the screen gets a count, and the names stay in the private log.
+func TestFailedSubtestNamesStayOffTheScreen(t *testing.T) {
+	w := newWorld(t)
+	w.useStubGo()
+	res := w.run([]string{"STUB_TEST_MODE=fail-sub"}, "--run", "conformance-helios", "--yes")
+	if res.code != 1 {
+		t.Fatalf("exit %d, want 1:\n%s", res.code, res.out)
+	}
+	w.contains(res, "2 test(s) failed; their names are in the log in the output directory") // w.run's noLeak checks the seeds
+	if log, _ := os.ReadFile(filepath.Join(w.out(), "conformance-helios.log")); !strings.Contains(string(log), "SEEDKEY-424242") {
+		t.Errorf("the failed subtest's name is not in the private log")
+	}
+}
+
+// A tool's own diagnostic can name a private path: it goes to a log, not to the screen.
+func TestAToolFailureNamesNoPrivatePathOnTheScreen(t *testing.T) {
+	w := newWorld(t)
+	w.useStubGo()
+	blocker := filepath.Join(w.dir, "blocker")
+	write(t, blocker, "a file, not a directory\n", 0o600)
+	w.writeSettings(func(m map[string]string) { m["LIVE_OUT_DIR"] = filepath.Join(blocker, "out") })
+	res := w.run(nil, "--run", "hub-golden")
+	if res.code != 3 {
+		t.Fatalf("exit %d, want 3:\n%s", res.code, res.out)
+	}
+	w.contains(res, "the output directory could not be made") // w.run's noLeak checks that no path came with it
+}
+
+// The staging command's output (a login banner can name the host and the account) goes to the private log.
+func TestStagingOutputStaysOffTheScreen(t *testing.T) {
+	w := newWorld(t)
+	w.useStubGo()
+	res := w.run([]string{"STUB_BANNER=1"}, "--run", "real-engine", "--yes")
+	if res.code != 0 {
+		t.Fatalf("exit %d:\n%s", res.code, res.out)
+	}
+	if log, _ := os.ReadFile(filepath.Join(w.out(), "remote.log")); !strings.Contains(string(log), "seedhost01") {
+		t.Errorf("the banner did not reach the private log: the screen check would prove nothing")
+	}
+}
+
+// Everything the run leaves is private: the logs are raw, so only their owner may read them.
+func TestEverythingTheRunLeavesIsPrivate(t *testing.T) {
+	w := newWorld(t)
+	w.useStubGo()
+	if res := w.run(nil, "--run", "real-engine", "--yes"); res.code != 0 {
+		t.Fatalf("exit %d:\n%s", res.code, res.out)
+	}
+	n := 0
+	_ = filepath.WalkDir(w.out(), func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, _ := d.Info()
+		n++
+		if info.Mode().Perm()&0o077 != 0 {
+			t.Errorf("%s has mode %v: group or others can read it", strings.TrimPrefix(p, w.out()), info.Mode().Perm())
+		}
+		return nil
+	})
+	if n < 8 {
+		t.Errorf("only %d entries under the output directory: the walk saw too little to prove anything", n)
+	}
+}
+
+// B9: the registry token reaches curl on standard input, never in its arguments.
+func TestJobScriptKeepsTheRegistryTokenOutOfCurlsArguments(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join(repoRoot(t), "spikes/s94/job.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?ms)^registry_head\(\) \{.*?^\}`).Find(b)
+	if m == nil {
+		t.Fatal("job.sh has no registry_head function")
+	}
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "curl"), "#!/bin/bash\nprintf '%s\\n' \"$*\" > \"$OUT/argv\"\ncat > \"$OUT/stdin\"\n", 0o755)
+	run := func(token string) (string, int) {
+		cmd := exec.Command("bash", "-c", string(m)+"\nregistry_head \"$1\" https://registry.example/x application/json", "bash", token)
+		cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "OUT="+dir)
+		out, err := cmd.CombinedOutput()
+		return string(out), exitCode(err)
+	}
+	if _, code := run("SEEDTOKEN.abc-123_x"); code != 0 {
+		t.Fatalf("registry_head exited %d", code)
+	}
+	argv, _ := os.ReadFile(filepath.Join(dir, "argv"))
+	stdin, _ := os.ReadFile(filepath.Join(dir, "stdin"))
+	if strings.Contains(string(argv), "SEEDTOKEN") {
+		t.Errorf("the token is in curl's arguments: %s", argv)
+	}
+	if !strings.Contains(string(stdin), `header = "Authorization: Bearer SEEDTOKEN.abc-123_x"`) {
+		t.Errorf("curl did not get the header on standard input: %q", stdin)
+	}
+	_ = os.Remove(filepath.Join(dir, "argv"))
+	if _, code := run(`bad"; rm -rf /`); code != 2 {
+		t.Errorf("a token that could break out of the quotes: exit %d, want 2", code)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "argv")); err == nil {
+		t.Errorf("curl ran for a token that was refused")
+	}
+}
+
+// A missing tool makes bash itself print "<script path>: line N: <tool>: command not found". The script's
+// own stderr goes to a private log, so the screen does not get the path of the script.
+func TestAShellDiagnosticNamesNoPathOnTheScreen(t *testing.T) {
+	for _, missing := range []string{"flock", "date"} {
+		t.Run(missing, func(t *testing.T) {
+			w := newWorld(t)
+			w.useStubGo()
+			// A PATH with every tool the script needs except one.
+			limited := filepath.Join(w.dir, "limited")
+			if err := os.MkdirAll(limited, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for _, dir := range strings.Split(os.Getenv("PATH"), ":") {
+				entries, _ := os.ReadDir(dir)
+				for _, e := range entries {
+					if e.Name() != missing {
+						_ = os.Symlink(filepath.Join(dir, e.Name()), filepath.Join(limited, e.Name()))
+					}
+				}
+			}
+			for _, name := range []string{"ssh", "go"} {
+				_ = os.Remove(filepath.Join(limited, name))
+				if err := os.Symlink(filepath.Join(w.bin, name), filepath.Join(limited, name)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := w.command([]string{"PATH=" + limited}, "--run", "conformance-helios", "--yes")
+			out, _ := cmd.CombinedOutput()
+			w.noLeak(string(out))
+			w.noLeftoverProcess(cmd)
+			for _, bad := range []string{"command not found", "syntax error", "live-checks.sh"} {
+				if strings.Contains(string(out), bad) {
+					t.Errorf("a shell diagnostic (%q) reached the screen:\n%s", bad, out)
+				}
+			}
+			var logs []byte
+			for _, f := range []string{"script.log", "remote.log"} {
+				b, _ := os.ReadFile(filepath.Join(w.out(), f))
+				logs = append(logs, b...)
+			}
+			if !strings.Contains(string(logs), "command not found") {
+				t.Errorf("the shell's diagnostic is in no private log: the screen check would prove nothing")
+			}
+		})
 	}
 }

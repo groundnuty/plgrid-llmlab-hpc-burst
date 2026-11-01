@@ -2,6 +2,7 @@ package livechecks
 
 import (
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -46,6 +47,14 @@ func TestPlanMapsChangedFilesToTheLiveTestsThatRunThem(t *testing.T) {
 		{"the real-engine job script", "spikes/s94/job.sh", "#!/bin/bash\n# changed\n", []string{"real-engine"}},
 		{"a file the agent embeds", "internal/agent/data.txt", "changed\n", []string{"real-engine"}},
 		{"a file the agent does not embed", "internal/agent/notes.txt", "changed\n", nil},
+		{"an embedded asset in a directory that is not a package", "internal/agent/assets/a.txt", "changed\n", []string{"real-engine"}},
+		{"an embedded markdown file of the holding package", "internal/front/embedded.md", "changed\n", []string{"llmlab-smoke"}},
+		{"a dependency that only the arm64 build imports", "internal/armonly/armonly.go", "package armonly\n\nvar X = 1\n", []string{"real-engine"}},
+		{"the Hub golden test's pinned checkpoints", "spikes/s7/checkpoints.env", "REV=2\n", []string{"hub-golden"}},
+		{"a Hub reference listing", "spikes/s7/results/run1/hub/a.json", "{\"x\":1}\n", []string{"hub-golden"}},
+		{"a hash reference of the Hub golden test", "spikes/s7/results/run1/hash-a.jsonl", "{\"x\":1}\n", []string{"hub-golden"}},
+		{"a file of the spike that the Hub golden test does not read", "spikes/s7/results/run1/other.txt", "changed\n", nil},
+		{"the spike's readme", "spikes/s7/README.md", "changed\n", nil},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -108,5 +117,58 @@ func TestListNamesEveryRowAndRunsNothing(t *testing.T) {
 		if !strings.Contains(res.out, r.name) {
 			t.Errorf("--list lacks %s", r.name)
 		}
+	}
+}
+
+// A file the range deletes was an embedded asset at its base; the head no longer lists it.
+func TestPlanCoversADeletedEmbeddedAsset(t *testing.T) {
+	w := newWorld(t)
+	head := w.commitFile("internal/agent/assets/b.txt", "")
+	res := w.run(nil, "--plan", w.base+".."+head)
+	if res.code != 0 {
+		t.Fatalf("exit %d:\n%s", res.code, res.out)
+	}
+	if got := runSet(t, res.out); strings.Join(got, ",") != "real-engine" {
+		t.Errorf("run set %v, want [real-engine]\n%s", got, res.out)
+	}
+}
+
+// Discovery reads the range's own head, not the checkout the user happens to be on. The range adds an
+// import edge (provider imports a new package) and the new package in one commit, with the checkout left
+// on the base, which has neither: only a closure taken at the head lists the new package, and the plan
+// says so by naming it.
+func TestPlanReadsTheHeadOfTheRangeNotTheCheckout(t *testing.T) {
+	w := newWorld(t)
+	write(t, filepath.Join(w.repo, "pkg/newdep/newdep.go"), "package newdep\n", 0o644)
+	head := w.commitFile("pkg/provider/provider.go", "package provider\n\nimport _ \"example.test/fx/pkg/newdep\"\n")
+	git(t, w.repo, "checkout", "-q", w.base) // the checkout predates the dependency
+	res := w.run(nil, "--plan", w.base+".."+head)
+	if res.code != 0 {
+		t.Fatalf("exit %d:\n%s", res.code, res.out)
+	}
+	var covered string
+	for _, l := range strings.Split(res.out, "\n") {
+		if strings.HasPrefix(l, "covered: llmlab-smoke") {
+			covered = l
+		}
+	}
+	if !strings.Contains(covered, "pkg/newdep") {
+		t.Errorf("pkg/newdep is a dependency at the range's head and must be named among what covers llmlab-smoke:\n%s", res.out)
+	}
+}
+
+// A discovery that fails, or lists only part of the closure, must not read as "no live test covers this".
+func TestPlanFailsWhenDependencyDiscoveryFails(t *testing.T) {
+	w := newWorld(t)
+	head := w.commitFile("internal/slurm/broken.go", "package slurm\n\nimport _ \"example.test/fx/nonexistent\"\n")
+	res := w.run(nil, "--plan", w.base+".."+head)
+	if res.code != 2 {
+		t.Fatalf("exit %d, want 2:\n%s", res.code, res.out)
+	}
+	if strings.Contains(res.out, "run:") {
+		t.Errorf("a failed discovery printed a run line:\n%s", res.out)
+	}
+	if !strings.Contains(res.out, "dependency discovery failed for package internal/providerctl/conformance (host) at the head of the range") {
+		t.Errorf("no fixed failure message:\n%s", res.out)
 	}
 }
