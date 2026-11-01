@@ -99,7 +99,7 @@ Open questions 1 to 5 were removed with the licence policy and `build/dependenci
 | A pin that a design decision rests on | Pinned versions, below | the bump PR's review |
 
 - **`build/dependencies.yaml` does not exist on `main`, and this HBEP does not create it.** The pins files above already hold each binary's sha256, and the launcher embeds them. A central list would be a second copy to keep in step.
-- HBEP-4, HBEP-6 and HBEP-11 still name `build/dependencies.yaml` as the record of frp's and k3s's checksums. The pins files hold them; those HBEPs' text is corrected by amendment.
+- HBEP-4, HBEP-6 and HBEP-11 named `build/dependencies.yaml` as the record of frp's and k3s's checksums. They now name the pins files, by erratum in the same PR as this HBEP's move to implementable.
 
 ### Dependencies
 
