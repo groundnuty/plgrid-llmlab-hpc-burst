@@ -33,6 +33,15 @@ type providerView struct {
 	// architecture (Degraded, ProviderUnavailable).
 	problem     string
 	agentDigest string
+	// limits are the QOS limits that apply to the Provider's Allocations:
+	// its partition's qos and its own qos, in Slurm's order
+	// (v1alpha1.EffectiveQOSLimits; HBEP-4, QOS limits).
+	limits v1alpha1.QOSLimits
+	// tooShort, when set, says why the Provider's time limit cannot host an
+	// Instance: it is not longer than the lead an Instance needs, so the
+	// Provider takes no new Allocation (Degraded, PartitionTooShort; HBEP-7,
+	// Provisioning, A partition too short).
+	tooShort string
 	// extra marks a Provider the deployment no longer allows but whose
 	// Instances or Allocations still exist: it is read for their drain window
 	// and retention, and takes nothing new.
@@ -136,6 +145,12 @@ func (r *Reconciler) loadProviders(ctx context.Context, md *v1alpha1.ModelDeploy
 		}
 		pv.partition = prof.Spec.Partitions[idx]
 		pv.class, pv.hasClass = pv.partition.AcceleratorClass, true
+		limits, err := v1alpha1.EffectiveQOSLimits(&prof.Spec, pv.partition, p.Spec.QOS)
+		if err != nil {
+			pv.problem = fmt.Sprintf("Provider %s: PlatformProfile %s: %v", n, prof.Name, err)
+			continue
+		}
+		pv.limits = limits
 		if !v1alpha1.ProviderReady(p, r.Clock.Now()) {
 			pv.problem = fmt.Sprintf("Provider %s is not Ready", n)
 			continue
@@ -164,39 +179,74 @@ func classes(pvs []*providerView) []v1alpha1.AcceleratorClass {
 
 // partitionSizing returns an Allocation's submission parameters on a Provider
 // for an Instance of gpus GPUs (HBEP-7, Provisioning), or an *unsupported
-// error: a GPU count above gpusPerNode, or a profile without the per-GPU
-// values or a time limit.
+// error: a GPU count above the smaller of gpusPerNode and the QOS limits'
+// maxGpusPerUser (refused, never capped, since it is the engine's parallel
+// size), or a profile without the per-GPU values or a time limit. CPUs and
+// memory, gpus times cpusPerGpu and memPerGpu, are capped at the QOS limits'
+// maxCpusPerUser and maxMemPerUser: they are an allotment in proportion, so a
+// cap shrinks them and leaves the GPU count as it is (HBEP-4, QOS limits).
 func partitionSizing(pv *providerView, gpus int32, leaseLimit *v1alpha1.Duration) (v1alpha1.BatchParameters, error) {
 	part := pv.partition
 	if part.GPUsPerNode == nil || part.CPUsPerGPU == nil || part.MemPerGPU == nil {
 		return v1alpha1.BatchParameters{}, fmt.Errorf("PlatformProfile %s does not give gpusPerNode, cpusPerGpu and memPerGpu for partition %s", pv.profile.Name, part.Name)
 	}
-	if gpus > *part.GPUsPerNode {
+	maxGPUs, _ := v1alpha1.MaxAllocationGPUs(part, pv.limits)
+	if gpus > maxGPUs {
+		if q := pv.limits.MaxGPUsPerUser; q != nil && *q < *part.GPUsPerNode {
+			return v1alpha1.BatchParameters{}, refuse("the serving spec needs %d GPUs (tensor-parallel-size times pipeline-parallel-size), above the %s %d of QOS %s on Provider %s (partition %s); a parallel size is refused, never capped (HBEP-7, Provisioning)", gpus, v1alpha1.LimitMaxGPUsPerUser, *q, pv.limits.From[v1alpha1.LimitMaxGPUsPerUser], pv.name, part.Name)
+		}
 		return v1alpha1.BatchParameters{}, refuse("the serving spec needs %d GPUs (tensor-parallel-size times pipeline-parallel-size), above the %d per node of partition %s; alpha Instances are single-node (HBEP-7, Provisioning)", gpus, *part.GPUsPerNode, part.Name)
 	}
+	lim, _, err := allocationTimeLimit(pv, leaseLimit)
+	if err != nil {
+		return v1alpha1.BatchParameters{}, err
+	}
+	cpus := gpus * *part.CPUsPerGPU
+	if q := pv.limits.MaxCPUsPerUser; q != nil && cpus > *q {
+		if *q < 1 {
+			return v1alpha1.BatchParameters{}, fmt.Errorf("QOS %s on Provider %s sets %s %d, which leaves an Allocation no CPU", pv.limits.From[v1alpha1.LimitMaxCPUsPerUser], pv.name, v1alpha1.LimitMaxCPUsPerUser, *q)
+		}
+		cpus = *q
+	}
+	mem := part.MemPerGPU.DeepCopy()
+	mem.Mul(int64(gpus))
+	if q := pv.limits.MaxMemPerUser; q != nil && mem.Cmp(*q) > 0 {
+		if q.Sign() <= 0 {
+			// --mem=0 asks Slurm for a node's whole memory: never send it.
+			return v1alpha1.BatchParameters{}, fmt.Errorf("QOS %s on Provider %s sets %s %s, which leaves an Allocation no memory", pv.limits.From[v1alpha1.LimitMaxMemPerUser], pv.name, v1alpha1.LimitMaxMemPerUser, q.String())
+		}
+		mem = q.DeepCopy()
+	}
+	return v1alpha1.BatchParameters{
+		Partition: part.Name, TimeLimit: formatMinutes(lim), GPUs: gpus,
+		CPUsPerTask: cpus, Memory: mem, Nodes: 1, AgentDigest: pv.agentDigest,
+	}, nil
+}
+
+// allocationTimeLimit is an Allocation's time limit on the Provider and the
+// bound that set it: the smallest of the partition's maxTime, the QOS limits'
+// maxWall and the deployment's leaseLimit, in whole minutes
+// (v1alpha1.AllocationTimeLimit; HBEP-4, QOS limits; HBEP-7, Provisioning).
+func allocationTimeLimit(pv *providerView, leaseLimit *v1alpha1.Duration) (time.Duration, v1alpha1.TimeLimitBound, error) {
+	part := pv.partition
 	var maxT, lease *time.Duration
 	if part.MaxTime != nil {
 		d, err := part.MaxTime.AsDuration()
 		if err != nil {
-			return v1alpha1.BatchParameters{}, fmt.Errorf("partition %s maxTime: %w", part.Name, err)
+			return 0, "", fmt.Errorf("partition %s maxTime: %w", part.Name, err)
 		}
 		maxT = &d
 	}
 	if leaseLimit != nil {
 		d, err := leaseLimit.AsDuration()
 		if err != nil {
-			return v1alpha1.BatchParameters{}, refuse("leaseLimit %q: %v", *leaseLimit, err)
+			return 0, "", refuse("leaseLimit %q: %v", *leaseLimit, err)
 		}
 		lease = &d
 	}
-	lim, ok := timeLimit(maxT, lease)
+	lim, bound, ok := v1alpha1.AllocationTimeLimit(maxT, pv.limits.MaxWall, lease)
 	if !ok {
-		return v1alpha1.BatchParameters{}, fmt.Errorf("partition %s has no maxTime and the deployment no leaseLimit of a minute or more", part.Name)
+		return 0, "", fmt.Errorf("partition %s has no maxTime, its QOS no maxWall and the deployment no leaseLimit of a minute or more", part.Name)
 	}
-	mem := part.MemPerGPU.DeepCopy()
-	mem.Mul(int64(gpus))
-	return v1alpha1.BatchParameters{
-		Partition: part.Name, TimeLimit: formatMinutes(lim), GPUs: gpus,
-		CPUsPerTask: gpus * *part.CPUsPerGPU, Memory: mem, Nodes: 1, AgentDigest: pv.agentDigest,
-	}, nil
+	return lim, bound, nil
 }

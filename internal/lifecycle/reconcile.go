@@ -50,6 +50,10 @@ type Reconciler struct {
 	mem     *memory
 	invOnce sync.Once
 	inv     *inventory
+	// slotsOnce and slotTab: the per-Provider submit-slot locks and
+	// expectations every worker shares (slots.go).
+	slotsOnce sync.Once
+	slotTab   *slotTable
 }
 
 func (r *Reconciler) memory() *memory {
@@ -96,9 +100,13 @@ type pass struct {
 	deferred bool
 
 	degraded []degradedReason
-	// sizingRefused collects Providers that refused the spec's size.
-	sizingRefused []string
-	next          time.Time
+	// sizingRefused collects the Providers that refused the spec's size, by
+	// name, with the refusal.
+	sizingRefused map[string]string
+	// noSlot collects the Providers that had no free submit slot, by name,
+	// naming each one's count and limit (SubmitLimitReached).
+	noSlot map[string]string
+	next   time.Time
 }
 
 // at asks for the next pass no later than t.
@@ -335,6 +343,9 @@ func (p *pass) prepareServed() error {
 		return err
 	default:
 		p.plan = plan
+	}
+	if !p.shutdown {
+		p.checkTimeLimits()
 	}
 	if !p.r.Config.FrontConfigured {
 		p.degrade(v1alpha1.ReasonFrontNotConfigured, "no front address and dial-home mode are configured, so no Allocation is submitted (HBEP-11, Single-user host); record one with hpcburst up --front-mode and --front-addr")

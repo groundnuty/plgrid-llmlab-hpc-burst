@@ -70,26 +70,6 @@ func lateAt(drainStart time.Time, s2r time.Duration) time.Time {
 	return drainStart.Add(-s2r)
 }
 
-// timeLimit is an Allocation's time limit: the partition's maxTime, or the
-// deployment's leaseLimit when that is shorter, rounded down to whole minutes
-// (HBEP-7, Provisioning; docs/development.md, Time limits). It returns false
-// when neither is known or the result is below a minute.
-func timeLimit(maxTime, leaseLimit *time.Duration) (time.Duration, bool) {
-	var lim time.Duration
-	switch {
-	case maxTime != nil && leaseLimit != nil:
-		lim = min(*maxTime, *leaseLimit)
-	case maxTime != nil:
-		lim = *maxTime
-	case leaseLimit != nil:
-		lim = *leaseLimit
-	default:
-		return 0, false
-	}
-	lim = lim.Truncate(time.Minute)
-	return lim, lim >= time.Minute
-}
-
 // formatMinutes writes a whole-minute duration as the API keeps it, for
 // example "4h0m0s".
 func formatMinutes(d time.Duration) v1alpha1.Duration {

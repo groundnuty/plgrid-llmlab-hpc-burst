@@ -23,7 +23,9 @@ import (
 // controller stopped between two steps finishes them on its next pass: a
 // pending Instance whose Allocation does not exist gets it (ensureAllocation),
 // and an Allocation without its credential file gets one (ensureCredentials),
-// so nothing is submitted twice and no Allocation is orphaned.
+// so nothing is submitted twice and no Allocation is orphaned. On a Provider
+// with a submit limit, a slot is reserved under the Allocation's name before
+// the Instance is created (slots.go).
 
 // canProvision reports whether new Allocations may be created at all.
 func (p *pass) canProvision() bool {
@@ -47,7 +49,7 @@ func (p *pass) provision(pred *v1alpha1.Instance) (bool, error) {
 		}
 	}
 	for _, pv := range order {
-		if !pv.usable() {
+		if !pv.usable() || pv.tooShort != "" {
 			continue
 		}
 		cid := p.ids[pv.class]
@@ -63,7 +65,10 @@ func (p *pass) provision(pred *v1alpha1.Instance) (bool, error) {
 		if err != nil {
 			var u *unsupported
 			if asUnsupported(err, &u) {
-				p.sizingRefused = append(p.sizingRefused, u.msg)
+				if p.sizingRefused == nil {
+					p.sizingRefused = map[string]string{}
+				}
+				p.sizingRefused[pv.name] = u.msg
 			} else {
 				p.degrade(v1alpha1.ReasonProviderUnavailable, "Provider %s: %v", pv.name, err)
 			}
@@ -86,7 +91,17 @@ func (p *pass) provision(pred *v1alpha1.Instance) (bool, error) {
 		if err != nil {
 			return false, err
 		}
+		// The slot is reserved before the Instance, the durable intent, so
+		// no two workers both pass the count (slots.go).
+		ok, err := p.reserveSlot(pv, name)
+		if err != nil {
+			return false, err
+		}
+		if !ok {
+			continue
+		}
 		if err := p.createInstance(pv, cid, pred, name); err != nil {
+			p.releaseSlot(pv, name)
 			return false, err
 		}
 		return true, p.createAllocation(pv, name, params)
@@ -216,8 +231,9 @@ func (p *pass) createAllocation(pv *providerView, name string, params v1alpha1.B
 	}
 	if err := p.r.Client.Create(p.ctx, a, owner); err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			return nil
+			return nil // it exists, so it holds its slot
 		}
+		p.releaseSlot(pv, name)
 		return fmt.Errorf("create Allocation %s: %w", name, err)
 	}
 	p.allocs[a.Name] = a
@@ -225,17 +241,29 @@ func (p *pass) createAllocation(pv *providerView, name string, params v1alpha1.B
 }
 
 // ensureAllocation creates the Allocation a pending Instance names, after a
-// pass that created the Instance stopped before the Allocation.
+// pass that created the Instance stopped before the Allocation. It reserves
+// the slot under that name first: one this controller reserved before it
+// stopped is still held, and after a restart the slot is reserved anew. With
+// no free slot the Instance waits, and the deployment shows SubmitLimitReached.
 func (p *pass) ensureAllocation(in *v1alpha1.Instance) error {
 	pv := p.pvOf(in.Labels)
-	if pv == nil || !pv.usable() || !p.canProvision() {
+	if pv == nil || !pv.usable() || pv.tooShort != "" || !p.canProvision() {
 		return nil // retried on a later pass, when the Provider is usable again
 	}
 	params, err := partitionSizing(pv, in.Spec.Launch.GPUs, p.md.Spec.LeaseLimit)
 	if err != nil {
 		return nil
 	}
-	return p.createAllocation(pv, in.Spec.AllocationRef.Name, params)
+	name := in.Spec.AllocationRef.Name
+	ok, err := p.reserveSlot(pv, name)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		p.degrade(v1alpha1.ReasonSubmitLimitReached, "Instance %s waits for a submit slot for its Allocation %s: %s", in.Name, name, p.noSlot[pv.name])
+		return nil
+	}
+	return p.createAllocation(pv, name, params)
 }
 
 // ensureCredential writes an Allocation's credential file, 256 random bits as
