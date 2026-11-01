@@ -386,3 +386,60 @@ func TestSlotTableExpectations(t *testing.T) {
 		t.Fatal("a limit of 0 gave a slot")
 	}
 }
+
+// TestSlotsHalfDonePassWaitsForASlot: a pass is cut short after md-a's
+// Instance and before its Allocation, and the controller restarts, so its
+// expectations are gone. md-b then takes the only slot. md-a's next pass
+// finishes the half-done provisioning (ensureAllocation) only with a slot: it
+// creates no Allocation, its Instance waits, and the deployment has
+// SubmitLimitReached naming the Instance, the Provider and the limit.
+func TestSlotsHalfDonePassWaitsForASlot(t *testing.T) {
+	var mu sync.Mutex
+	failA := true
+	rg := newRig(t, oneSlotOpts(withInterceptors(interceptor.Funcs{Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+		if a, ok := obj.(*v1alpha1.Allocation); ok && a.Spec.ModelDeploymentRef != nil && a.Spec.ModelDeploymentRef.Name == "md-a" {
+			mu.Lock()
+			f := failA
+			failA = false
+			mu.Unlock()
+			if f {
+				return apierrors.NewServiceUnavailable("the controller stopped here")
+			}
+		}
+		return c.Create(ctx, obj, opts...)
+	}}))...)
+	rg.Step()
+	rg.create(mdSpec("md-a"))
+	reconcile := func(md string) error {
+		_, err := rg.r.Reconcile(rg.ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: rigNS, Name: md}})
+		return err
+	}
+	if err := reconcile("md-a"); err == nil {
+		t.Fatal("md-a's cut-short pass reported no error")
+	}
+	if ins, as := rg.instances("md-a"), rg.allocations("md-a"); len(ins) != 1 || len(as) != 0 {
+		t.Fatalf("md-a has %d Instances and %d Allocations, want the half-done 1 and 0", len(ins), len(as))
+	}
+	rg.restartController()
+	rg.create(mdSpec("md-b"))
+	if err := reconcile("md-b"); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(rg.allocations("md-b")); n != 1 {
+		t.Fatalf("md-b has %d Allocations, want the slot", n)
+	}
+	if err := reconcile("md-a"); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(rg.allocations("md-a")); n != 0 {
+		t.Fatalf("md-a has %d Allocations, want none past the limit", n)
+	}
+	ins := rg.instances("md-a")
+	if len(ins) != 1 || ins[0].Status.Phase != v1alpha1.InstancePending {
+		t.Fatalf("md-a's Instances %+v, want one pending", ins)
+	}
+	c := rg.condition("md-a", v1alpha1.ConditionDegraded)
+	if c.Reason != v1alpha1.ReasonSubmitLimitReached || !strings.Contains(c.Message, "Instance "+ins[0].Name) || !strings.Contains(c.Message, "Provider "+rigProvider) || !strings.Contains(c.Message, "maxSubmitPerUser 1 of QOS example-now") {
+		t.Fatalf("md-a Degraded = %s/%s %q, want SubmitLimitReached naming the Instance, the Provider and the limit", c.Status, c.Reason, c.Message)
+	}
+}
