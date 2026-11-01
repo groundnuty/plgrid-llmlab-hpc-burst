@@ -355,6 +355,15 @@ func InstanceKeyPath(dir, instanceUID string) string {
 // to stage by that digest.
 func AgentBuildName(cpuArch string) string { return AgentBinaryName + "-" + cpuArch }
 
+// FrpcBuildName is the file name of the frpc build for a CPU architecture in
+// the same agent-builds directory: frpc-<cpuArch>, with the profile's cpuArch
+// strings (aarch64, x86_64), not frp's own (arm64, amd64). Its SHA-256 is the
+// pinned digest in internal/launcher/frp-pins.txt, which the controller puts in
+// agent.json (AgentConfig.FrpcDigest); the provider stages the file at
+// StagedFrpcPath of that digest, and refuses one with another digest (HBEP-4,
+// Submission: Files first). hack/fetch-frp.sh --agent-builds places it.
+func FrpcBuildName(cpuArch string) string { return FrpcBinaryName + "-" + cpuArch }
+
 // CheckCredential returns an error unless b is an Allocation credential's exact
 // form, which is a key's form (CheckKey): 256 random bits as 64 lowercase hex
 // characters, with no newline (HBEP-7, Provisioning). The error never contains b.
