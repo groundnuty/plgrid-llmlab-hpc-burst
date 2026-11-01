@@ -36,20 +36,25 @@ package lifecycle
 // its hard end is its start + 4 h and its drain start that minus the default
 // 2h10m drain window, its start + 1h50m. Its replacement R2 is planned at:
 //
-//	SHORT: drain start 10:01:10 + 1h50m = 11:51:10. With R1's start-to-ready
-//	  S1, R2 is created at 11:51:10 - (41m30s + S1 + 30 min). S1 is 50 s when
-//	  the provider's pass sees R1's start in the pass that cancels P0's job,
-//	  and 60 s when it sees it one pass later: the pass handles Allocations in
-//	  the order the client lists them, and their names are random (HBEP-3).
-//	  S1 = 50 s gives 11:51:10 - 1h12m20s = 10:38:50; S1 = 60 s gives
-//	  11:51:10 - 1h12m30s = 10:38:40. Both are after R1's start, so neither is
-//	  clamped.
+//	SHORT: drain start 10:01:10 + 1h50m = 11:51:10. R1's start is seen in
+//	  the pass that cancels P0's job (the pass order, below), so R1 is ready
+//	  50 s after its start, at 10:02:00, and its start-to-ready is 50 s. R2 is
+//	  created at 11:51:10 - (41m30s + 50 s + 30 min) = 11:51:10 - 1h12m20s =
+//	  10:38:50, after R1's start, so not clamped.
 //	LONG: drain start 10:56:10 + 1h50m = 12:46:10. R1 is not ready yet when
 //	  R2 is due, so the start-to-ready is still P0's 50 s: 12:46:10 -
 //	  (1h36m30s + 50 s + 30 min) = 12:46:10 - 2h7m20s = 10:38:50, before R1's
 //	  start at 10:56:10. The plan reaches back to R1's start, and R2 is created
-//	  in the first pass that sees R1's Allocation Running (10:56:10 or
-//	  10:56:20, by the same order).
+//	  in the first pass that sees R1's Allocation Running: 10:56:10, the pass
+//	  that cancels P0's job.
+//
+// The pass order. The provider's pass handles Allocations in the order its
+// client lists them, and their names are random (HBEP-3). With P0's handled
+// first, the pass cancels P0's job and then sees R1 started; with R1's first,
+// it sees R1 still pending and the start only one pass, 10 s, later, which
+// moves R1's start-to-ready to 60 s and each time above that follows from it.
+// So that each case has one exact value, capWaitRig gives the provider's
+// client a fixed order, oldest Allocation first (P0 before R1).
 //
 // So the 55 min longer cap wait moves R2's plan from about 37 min after R1's
 // start to R1's start itself: the growth is visible. (Without the cap, R1
@@ -68,6 +73,8 @@ package lifecycle
 // expected wait by subtracting the fake job's submit time from its start.
 
 import (
+	"context"
+	"sort"
 	"testing"
 	"time"
 
@@ -88,30 +95,55 @@ type capWaitCase struct {
 	// coarseTo is how far the clock moves in coarse steps after P0's end,
 	// before 10 s steps around the release.
 	coarseTo time.Time
-	// r2At gives R2's expected creation time for R1's start-to-ready s1;
-	// clamped cases give the zero time: R2 is due at R1's start.
-	r2At func(s1 time.Duration) time.Time
+	// r2At is R2's expected creation time. clamped: the plan reaches back
+	// before R1's start, so R2 comes in the first pass that sees R1 Running,
+	// before R1 is ready.
+	r2At    time.Time
+	clamped bool
 }
 
 var capWaitCases = []capWaitCase{{
 	name: "short", idle: 5 * time.Minute,
 	pJobEnd: hoT(10, 1, 10), wait: 41*time.Minute + 30*time.Second,
 	r1LeaseEnd: hoT(14, 1, 10), coarseTo: hoT(10, 0, 0),
-	r2At: func(s1 time.Duration) time.Time {
-		switch s1 {
-		case 50 * time.Second:
-			return hoT(10, 38, 50)
-		case 60 * time.Second:
-			return hoT(10, 38, 40)
-		}
-		return time.Time{}
-	},
+	r2At: hoT(10, 38, 50),
 }, {
 	name: "long", idle: 60 * time.Minute,
 	pJobEnd: hoT(10, 56, 10), wait: time.Hour + 36*time.Minute + 30*time.Second,
 	r1LeaseEnd: hoT(14, 56, 10), coarseTo: hoT(10, 55, 0),
-	r2At: nil,
+	r2At: hoT(10, 56, 10), clamped: true,
 }}
+
+// oldestFirst is a client whose Allocation lists come oldest first, by
+// creation time, then by name: the provider's pass then handles a
+// predecessor's Allocation before its replacement's, whatever their random
+// names (see the pass order above).
+type oldestFirst struct{ client.Client }
+
+func (o oldestFirst) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if err := o.Client.List(ctx, list, opts...); err != nil {
+		return err
+	}
+	if l, ok := list.(*v1alpha1.AllocationList); ok {
+		sort.SliceStable(l.Items, func(i, k int) bool {
+			a, b := l.Items[i], l.Items[k]
+			if !a.CreationTimestamp.Equal(&b.CreationTimestamp) {
+				return a.CreationTimestamp.Before(&b.CreationTimestamp)
+			}
+			return a.Name < b.Name
+		})
+	}
+	return nil
+}
+
+// capWaitRig is noOverlapQueuedRig with the provider's pass in a fixed order,
+// oldest Allocation first. Only the provider's client is wrapped; the
+// lifecycle controller lists as before.
+func capWaitRig(t *testing.T) *rig {
+	rg := noOverlapQueuedRig(t)
+	rg.prov.Client = oldestFirst{rg.prov.Client}
+	return rg
+}
 
 // TestNoOverlapQueueWaitAfterCapWait: a queued replacement waits on the GPU
 // cap until its predecessor's job ends, then starts. Its whole cap wait is
@@ -204,7 +236,7 @@ func capWaitQueued(t *testing.T, r2 v1alpha1.Instance) {
 }
 
 func runCapWait(t *testing.T, tc capWaitCase) {
-	rg := noOverlapQueuedRig(t)
+	rg := capWaitRig(t)
 	p := capWaitPrimary(t, rg, tc.idle)
 	// R1: created at 09:19:30, submitted at 09:19:40.
 	r1 := capWaitR1(t, rg, p)
@@ -253,37 +285,34 @@ func runCapWait(t *testing.T, tc capWaitCase) {
 	if r1i.Status.LeaseEnd == nil || !r1i.Status.LeaseEnd.Time.Equal(tc.r1LeaseEnd) {
 		t.Fatalf("R1's leaseEnd is %v, want %s", r1i.Status.LeaseEnd, tc.r1LeaseEnd.Format(time.TimeOnly))
 	}
-	if !r1Seen.Equal(tc.pJobEnd) && !r1Seen.Equal(tc.pJobEnd.Add(10*time.Second)) {
-		t.Fatalf("R1's start was first seen at %s, want in the pass that frees the GPU (%s) or the next", r1Seen.Format(time.TimeOnly), tc.pJobEnd.Format(time.TimeOnly))
+	if !r1Seen.Equal(tc.pJobEnd) {
+		t.Fatalf("R1's start was first seen at %s, want in the pass that frees the GPU, %s", r1Seen.Format(time.TimeOnly), tc.pJobEnd.Format(time.TimeOnly))
 	}
-	t.Logf("R1's start first seen %s after the GPU freed", r1Seen.Sub(tc.pJobEnd))
+	if r1i.Status.ReadyTime == nil || !r1i.Status.ReadyTime.Time.Equal(tc.pJobEnd.Add(50*time.Second)) {
+		t.Fatalf("R1 was ready at %v, want 50 s after its start %s", r1i.Status.ReadyTime, tc.pJobEnd.Format(time.TimeOnly))
+	}
+	if s := rg.md(hoMD).Status.StartToReady; len(s) != 1 || s[0].Duration != "50s" {
+		t.Fatalf("the class's start-to-ready is %+v, want 50s", s)
+	}
 
 	// The queue-wait estimate: R1's whole cap wait is recorded, and with
 	// fewer than 20 waits it is the planning wait.
 	capWaitPlan(t, rg, tc.wait)
 
-	if tc.r2At == nil {
+	if tc.clamped {
 		// LONG: the plan reaches back before R1's start, so R2 is created in
 		// the first pass that sees R1's Allocation Running, and not before.
-		if r2 == nil || !r2Seen.Equal(r1Seen) || !r2.CreationTimestamp.Time.Equal(r1Seen) {
-			t.Fatalf("R2 %v first seen at %s, want created at %s, the first pass that saw R1 Running", r2, r2Seen.Format(time.TimeOnly), r1Seen.Format(time.TimeOnly))
+		if r2 == nil || !r2Seen.Equal(tc.r2At) || !r2.CreationTimestamp.Time.Equal(tc.r2At) {
+			t.Fatalf("R2 %v first seen at %s, want created at %s, the first pass that saw R1 Running", r2, r2Seen.Format(time.TimeOnly), tc.r2At.Format(time.TimeOnly))
 		}
 		capWaitQueued(t, *r2)
 		return
 	}
-	// SHORT: R2 at its planned time, from R1's start-to-ready.
-	s1 := r1i.Status.ReadyTime.Time.Sub(tc.pJobEnd)
-	want := tc.r2At(s1)
-	if want.IsZero() {
-		t.Fatalf("R1's start-to-ready is %s, want 50s or 60s (by the provider pass's order)", s1)
-	}
-	if s := rg.md(hoMD).Status.StartToReady; len(s) != 1 || s[0].Duration != v1alpha1.Duration(s1.String()) {
-		t.Fatalf("the class's start-to-ready is %+v, want R1's %s", s, s1)
-	}
+	// SHORT: R2 at its planned time.
 	if r2 != nil {
-		t.Fatalf("R2 was created at %s, before its planned time %s", r2Seen.Format(time.TimeOnly), want.Format(time.TimeOnly))
+		t.Fatalf("R2 was created at %s, before its planned time %s", r2Seen.Format(time.TimeOnly), tc.r2At.Format(time.TimeOnly))
 	}
-	capWaitR2At(t, rg, r1, want)
+	capWaitR2At(t, rg, r1, tc.r2At)
 }
 
 // capWaitJob returns the job ID of the Allocation named alloc.

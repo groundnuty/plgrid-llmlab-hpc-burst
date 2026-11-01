@@ -3,10 +3,12 @@ package lifecycle
 // Issue #174, the refusal variant: a queued replacement whose submissions are
 // refused for a full submit limit (SubmitLimitReached) before one is accepted.
 // A queue wait is one job's wait from the scheduler's recorded submission to
-// its start (HBEP-4, queueWaits), and a refusal records no job (HBEP-4, QOS
-// limits), so the refused time is not part of the replacement's queue wait,
-// and the next plan does not grow with it. HBEP-7 does not speak of the
-// refused time itself; this test pins HBEP-4's definition.
+// its start (hbep/0004-provider-interface/README.md:373, queueWaits), and a
+// refusal records no job (the same file, :633, "A limit refusal is no
+// failure"). So the refused interval stays out of the replacement's queue
+// wait and out of the planning wait, and a longer refusal gives a SMALLER
+// recorded wait, not a larger one (`@hpc-burst-science-agent`'s ruling on
+// #174, 1 Nov 2026, relayed by the code agent).
 //
 // The timeline is nooverlap_wait_test.go's, with the idle limit 5 min: R1 is
 // created at 09:19:30, P0 ends at 09:56:00, and its job leaves the GPU at
@@ -19,19 +21,20 @@ package lifecycle
 //	SHORT, one refusal: attempt 2, at 09:20:40, is accepted. R1 pends on the
 //	  GPU cap until 10:01:10 and starts then. Its wait is 10:01:10 - 09:20:40
 //	  = 40m30s: the refused minute is not in it, and the wait is a minute
-//	  shorter than on the path with no refusal (41m30s). R1's drain start is
+//	  shorter than on the path with no refusal (41m30s). With the provider's
+//	  pass in a fixed order, oldest Allocation first (capWaitRig, as in
+//	  nooverlap_wait_test.go), R1's start is seen in the pass that cancels
+//	  P0's job, so R1 is ready 50 s after its start. R1's drain start is
 //	  10:01:10 + 4 h - 2h10m = 11:51:10, so R2 is created at 11:51:10 -
-//	  (40m30s + S1 + 30 min): 10:39:50 with R1's start-to-ready S1 = 50 s,
-//	  10:39:40 with 60 s (the provider pass's order, as in
-//	  nooverlap_wait_test.go).
+//	  (40m30s + 50 s + 30 min) = 11:51:10 - 1h11m20s = 10:39:50.
 //	LONG, 42 refusals: attempts 1 to 42, 09:19:40 to 10:00:40, are refused.
 //	  Attempt 43, at 10:01:40, comes after P0's job left the GPU, so R1 is
 //	  accepted and starts at once: its wait is 0 s. Its drain start is
 //	  10:01:40 + 1h50m = 11:51:40. R1 starts in a pass that cancels nothing,
-//	  so its start-to-ready is 50 s, and R2 is created at 11:51:40 - (0 s +
-//	  50 s + 30 min) = 11:20:50.
+//	  so it is ready 50 s after its start, and R2 is created at 11:51:40 -
+//	  (0 s + 50 s + 30 min) = 11:20:50.
 //
-// So 41 more minutes of refusals leave the estimate smaller (0 s against
+// So 41 more minutes of refusals leave the recorded wait SMALLER (0 s against
 // 40m30s), and R2's plan later (11:20:50 against 10:39:50). Every value is
 // worked out by hand; the independence argument of nooverlap_wait_test.go
 // holds here too.
@@ -53,33 +56,18 @@ type refusalWaitCase struct {
 	accepted, r1Start time.Time
 	wait              time.Duration
 	r1LeaseEnd        time.Time
-	// r2At gives R2's expected creation time for R1's start-to-ready s1.
-	r2At func(s1 time.Duration) time.Time
+	// r2At is R2's expected creation time.
+	r2At time.Time
 }
 
 var refusalWaitCases = []refusalWaitCase{{
 	name: "short", refusals: 1,
 	accepted: hoT(9, 20, 40), r1Start: hoT(10, 1, 10), wait: 40*time.Minute + 30*time.Second,
-	r1LeaseEnd: hoT(14, 1, 10),
-	r2At: func(s1 time.Duration) time.Time {
-		switch s1 {
-		case 50 * time.Second:
-			return hoT(10, 39, 50)
-		case 60 * time.Second:
-			return hoT(10, 39, 40)
-		}
-		return time.Time{}
-	},
+	r1LeaseEnd: hoT(14, 1, 10), r2At: hoT(10, 39, 50),
 }, {
 	name: "long", refusals: 42,
 	accepted: hoT(10, 1, 40), r1Start: hoT(10, 1, 40), wait: 0,
-	r1LeaseEnd: hoT(14, 1, 40),
-	r2At: func(s1 time.Duration) time.Time {
-		if s1 == 50*time.Second {
-			return hoT(11, 20, 50)
-		}
-		return time.Time{}
-	},
+	r1LeaseEnd: hoT(14, 1, 40), r2At: hoT(11, 20, 50),
 }}
 
 // TestNoOverlapQueueWaitAfterRefusal: a queued replacement refused for a full
@@ -92,7 +80,7 @@ func TestNoOverlapQueueWaitAfterRefusal(t *testing.T) {
 }
 
 func runRefusalWait(t *testing.T, tc refusalWaitCase) {
-	rg := noOverlapQueuedRig(t)
+	rg := capWaitRig(t)
 	p := capWaitPrimary(t, rg, 5*time.Minute)
 	// The primary's submission has taken its script: the refusals are R1's.
 	for range tc.refusals {
@@ -136,11 +124,11 @@ func runRefusalWait(t *testing.T, tc refusalWaitCase) {
 	// The estimate: the accepted job's wait alone.
 	capWaitPlan(t, rg, tc.wait)
 
-	s1 := r1i.Status.ReadyTime.Time.Sub(tc.r1Start)
-	want := tc.r2At(s1)
-	if want.IsZero() {
-		t.Fatalf("R1's start-to-ready is %s, not one this case works out", s1)
+	if r1i.Status.ReadyTime == nil || !r1i.Status.ReadyTime.Time.Equal(tc.r1Start.Add(50*time.Second)) {
+		t.Fatalf("R1 was ready at %v, want 50 s after its start %s", r1i.Status.ReadyTime, tc.r1Start.Format(time.TimeOnly))
 	}
-	t.Logf("R1's start-to-ready %s", s1)
-	capWaitR2At(t, rg, r1, want)
+	if s := rg.md(hoMD).Status.StartToReady; len(s) != 1 || s[0].Duration != "50s" {
+		t.Fatalf("the class's start-to-ready is %+v, want 50s", s)
+	}
+	capWaitR2At(t, rg, r1, tc.r2At)
 }
