@@ -172,7 +172,10 @@ func TestReleaseRetriedAfterALateRenew(t *testing.T) {
 // client-go does not retry it, so the Lease stays held by the stopped
 // manager until it expires. It is the control for
 // TestReleaseRetriedAfterALateRenew: it shows the late renew does make
-// client-go's single release fail.
+// client-go's single release fail. It pins client-go v0.35.3's single-shot
+// release: if it fails after a client-go upgrade, upstream may now retry the
+// release itself, and leaderlock's retry should be revisited, not this
+// control deleted.
 func TestReleaseLostToALateRenew(t *testing.T) {
 	const name = "release-race-plain"
 	lock := lateRenewLock(t, name)

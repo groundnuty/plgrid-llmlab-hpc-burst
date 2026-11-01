@@ -1,8 +1,9 @@
 // Package leaderlock builds the controllers' leader-election Lease locks
 // (HBEP-11, Controllers): the lifecycle controller's Lease and each
-// Provider manager's provider-<name> Lease. Its lock retries a release that
-// a late renew made fail, so a stopped manager's Lease is given up at once
-// instead of staying held until it expires (issue #131).
+// Provider manager's provider-<name> Lease. Its lock retries a release whose
+// write failed, as when a late renew made it conflict, so the stopped
+// manager's Lease is given up after all instead of staying held until it
+// expires (issue #131).
 //
 // client-go's LeaderElector.release (k8s.io/client-go v0.35.3,
 // tools/leaderelection/leaderelection.go:310-345) reads the Lease, then
@@ -17,6 +18,14 @@
 // applied in pkg/manager/manager.go:546-557). WithRetriedRelease reads the
 // Lease again and repeats the release while the Lease still names this
 // holder, within ReleaseBudget.
+//
+// Not covered: a release whose read fails. release returns before its write
+// when Lock.Get fails (leaderelection.go:315-322), and the lock cannot tell
+// the release's read from a renew's or an acquire's, so it does not retry
+// reads. The Lease then stays held until it expires, as before: the next
+// start waits at most the lease duration plus a retry period, about 17 s
+// with the defaults. Covering it needs a release after the manager's Start
+// has returned, by the code that runs the manager.
 package leaderlock
 
 import (
