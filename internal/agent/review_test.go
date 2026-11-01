@@ -232,13 +232,25 @@ func TestAnUncheckedImageGetsNoDigest(t *testing.T) {
 }
 
 // slowCancelEngine makes a cancelled warm-up round take a while to return, as
-// requests unwinding do, and records when it returned.
+// requests unwinding do, and records when it returned. A round also waits hold
+// before it calls the engine (or until it is cancelled), so that the first
+// request reaches the engine only that long after the round starts. That is the
+// delay of an engine that is slow to take a request, and it is what makes a test
+// that drops warm-up without waiting for the request fail every time: the drop
+// then comes before any request is admitted (#184).
 type slowCancelEngine struct {
 	agent.Engine
 	returned *atomic.Int64 // unix nanos
+	hold     time.Duration
 }
 
 func (e slowCancelEngine) WarmUpRound(ctx context.Context, n int32, req agentapi.WarmUpRequest) agentapi.WarmUpRound {
+	if e.hold > 0 {
+		select {
+		case <-time.After(e.hold):
+		case <-ctx.Done():
+		}
+	}
 	r := e.Engine.WarmUpRound(ctx, n, req)
 	if ctx.Err() != nil {
 		time.Sleep(500 * time.Millisecond)
@@ -249,18 +261,39 @@ func (e slowCancelEngine) WarmUpRound(ctx context.Context, n int32, req agentapi
 
 // WarmUp.Done is published only after the cancelled round has returned, so no
 // report says warm-up is done while its requests are still unwinding (Astra
-// B7).
+// B7). The round that is cancelled must really have a request in flight: the
+// test waits for the engine to admit a streaming request that has no end (the
+// engine double's "admitted" line; warm-up requests stream, verification's does
+// not), and not for a fixed time, and then drops warm-up. It checks afterwards
+// that the engine saw that request cancelled, which a drop before any request
+// was admitted cannot produce: the round is held for a second before it calls
+// the engine, so such a drop finds no request to cancel.
 func TestWarmUpDoneOnlyAfterTheCancelledRoundReturned(t *testing.T) {
 	var returned atomic.Int64
-	h := newHarness(t, harnessOptions{engineWrap: func(e agent.Engine) agent.Engine { return slowCancelEngine{e, &returned} }})
+	h := newHarness(t, harnessOptions{engineWrap: func(e agent.Engine) agent.Engine { return slowCancelEngine{e, &returned, time.Second} }})
 	h.set(h.runState("stall", 1, 0, warmUpChecks(1, 2)))
 	h.waitReport("warm-up started", 30*time.Second, func(r agentapi.Report) bool {
 		c := checksOf(r)
 		return c != nil && c.WarmUp != nil
 	})
-	time.Sleep(300 * time.Millisecond)
+	eventually(t, 30*time.Second, "the engine to hold a warm-up request in flight", func() bool {
+		admitted, ended := streamingCounts(t, h)
+		return admitted > ended
+	})
 	h.set(h.runState("stall", 1, 0, &agentapi.Checks{VerificationGeneration: 1}))
 	h.waitReport("warm-up done", 20*time.Second, warmDone)
+	eventually(t, 30*time.Second, "the engine to log the admitted warm-up request cancelled by its client", func() bool {
+		var admitted, cancelled int
+		for _, ev := range engineEvents(t, h) {
+			switch {
+			case ev.Event == "admitted" && ev.Stream:
+				admitted++
+			case ev.Event == "request" && ev.Stream && ev.Outcome == "cancelled":
+				cancelled++
+			}
+		}
+		return admitted > 0 && cancelled > 0
+	})
 	reps, times := h.backend.Reports(hAllocUID), h.timed.reportTimes()
 	if len(reps) != len(times) {
 		t.Fatalf("%d reports, %d times", len(reps), len(times))
