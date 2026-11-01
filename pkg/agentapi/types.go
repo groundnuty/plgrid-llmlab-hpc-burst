@@ -586,6 +586,18 @@ type VerifyResult struct {
 	// model, false makes the checks greedy (CheckSampling; HBEP-7, The
 	// allocation agent, Checks; `@hpc-burst-science-agent`, 1 Nov 2026).
 	DoSample *bool `json:"doSample,omitempty"`
+	// GenerationConfigRefused is the first sampling value of the staged
+	// generation_config.json that CheckGenerationConfig refuses, checked on
+	// the file's own JSON text, for every model; nil when it refuses none or
+	// there is no file. When it is set the agent sends no check request for
+	// this verification generation (not the fingerprint, not qualification
+	// or warm-up), and the controller fails verification with
+	// VerificationFailed, the settings contradiction's stop, keyed on the
+	// deployment ID. It is how a value that is not a number reaches the
+	// controller, since GenerationConfig carries numbers only
+	// (`@hpc-burst-science-agent`, 1 Nov 2026, from the reviews of PRs #155
+	// and #156).
+	GenerationConfigRefused *GenerationConfigError `json:"generationConfigRefused,omitempty"`
 	// Error says why verification could not run, when it could not. It is
 	// free text, cut to MaxMessageBytes (TruncateUTF8).
 	Error string `json:"error,omitempty"`
