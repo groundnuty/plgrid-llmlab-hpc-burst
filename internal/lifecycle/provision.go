@@ -58,14 +58,6 @@ type placeOpts struct {
 	// gapOf, when set with successorOf, names the primary that drained in the
 	// mode and is written as annotationNoOverlapGap: the gap has begun.
 	gapOf string
-	// queued, with successorOf, says the successor is made on the queued path:
-	// it is created at its planned time to pend behind its own predecessor's
-	// per-user cap. Its Instance and its Allocation then carry
-	// v1alpha1.AnnotationQueuedSuccessor from their creation, so the Provider
-	// records no queue wait for it (HBEP-7, No-overlap mode; issue #195). A
-	// successor made on the one-slot path, or as the retry of a failed one,
-	// is created after its predecessor's job left the slot and is not.
-	queued bool
 }
 
 func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error) {
@@ -111,9 +103,6 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 			return false, nil
 		}
 		if warm != nil {
-			// An existing Allocation is never marked later, so an Instance placed on one is no queued
-			// successor: it pends behind nothing.
-			o.queued = false
 			if err := p.createInstance(pv, cid, pred, warm.Name, o); err != nil {
 				return false, err
 			}
@@ -137,7 +126,7 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 			p.releaseSlot(pv, name)
 			return false, err
 		}
-		return true, p.createAllocation(pv, name, params, o.queuedMark())
+		return true, p.createAllocation(pv, name, params, p.queuedMark(pv, o.primaryName(pred), o.successorOf))
 	}
 	return false, nil
 }
@@ -203,12 +192,43 @@ func drainWindowOf(pv *providerView, md *v1alpha1.ModelDeployment) time.Duration
 	return w
 }
 
-// queuedMark is the value of v1alpha1.AnnotationQueuedSuccessor for the
-// Instance and the Allocation the placement creates: the Provider and the
-// limit, or "" when the successor is not made on the queued path.
-func (o placeOpts) queuedMark() string {
-	if o.queued {
-		return o.successorOf
+// primaryName names the primary a no-overlap successor made with these options
+// replaces: the one that drained, for a retry (gapOf), else the predecessor. It
+// is "" for an Instance that is no no-overlap successor.
+func (o placeOpts) primaryName(pred *v1alpha1.Instance) string {
+	switch {
+	case o.successorOf == "":
+		return ""
+	case o.gapOf != "":
+		return o.gapOf
+	case pred != nil:
+		return pred.Name
+	}
+	return ""
+}
+
+// queuedMark returns the value of v1alpha1.AnnotationQueuedSuccessor for an
+// Allocation about to be created on the Provider for a no-overlap successor, or
+// a retry of one, of the named primary: successorOf (the Provider and the limit)
+// when the primary's own Allocation is on the same Provider and still holds its
+// slot, else "" (HBEP-7, Handover, No-overlap mode; issue #195). The primary is
+// the one the chain replaces, read through any failed successors: a retry names
+// it directly. It is judged when the Allocation is created, and again for a
+// Allocation created later for a pending Instance (ensureAllocation), never
+// afterwards. On the one-slot path the successor is created after the primary's
+// job left the slot, so by this condition it is not marked.
+func (p *pass) queuedMark(pv *providerView, primary, successorOf string) string {
+	if primary == "" || successorOf == "" {
+		return ""
+	}
+	for _, in := range p.insts {
+		if in.Name != primary {
+			continue
+		}
+		a := p.allocs[in.Spec.AllocationRef.Name]
+		if a != nil && a.Labels[v1alpha1.LabelProvider] == pv.name && holdsSlot(a) {
+			return successorOf
+		}
 	}
 	return ""
 }
@@ -217,9 +237,7 @@ func (o placeOpts) queuedMark() string {
 // named Allocation, owned by the ModelDeployment, with the drain finalizer. A
 // no-overlap successor carries annotationNoOverlapSuccessor with o.successorOf,
 // which names the Provider and the limit, and annotationNoOverlapGap with
-// o.gapOf once the gap has begun; one made on the queued path also carries
-// v1alpha1.AnnotationQueuedSuccessor, the intent from which its Allocation
-// gets the same mark at its creation (ensureAllocation).
+// o.gapOf once the gap has begun.
 func (p *pass) createInstance(pv *providerView, cid *classID, pred *v1alpha1.Instance, alloc string, o placeOpts) error {
 	name, err := randomName(truncate(p.md.Name, 40))
 	if err != nil {
@@ -251,9 +269,6 @@ func (p *pass) createInstance(pv *providerView, cid *classID, pred *v1alpha1.Ins
 			in.Annotations[annotationNoOverlapSuccessor] = o.successorOf
 			if o.gapOf != "" {
 				in.Annotations[annotationNoOverlapGap] = o.gapOf
-			}
-			if mark := o.queuedMark(); mark != "" {
-				in.Annotations[v1alpha1.AnnotationQueuedSuccessor] = mark
 			}
 		}
 	}
@@ -336,7 +351,13 @@ func (p *pass) ensureAllocation(in *v1alpha1.Instance) error {
 		p.degrade(v1alpha1.ReasonSubmitLimitReached, "Instance %s waits for a submit slot for its Allocation %s: %s", in.Name, name, p.noSlot[pv.name])
 		return nil
 	}
-	return p.createAllocation(pv, name, params, in.Annotations[v1alpha1.AnnotationQueuedSuccessor])
+	// A successor, or a retry of one, names the primary it replaces: the one that drained once the gap has
+	// begun, else its predecessor. The mark is judged now, as for any Allocation at its creation.
+	primary := in.Annotations[annotationNoOverlapGap]
+	if primary == "" {
+		primary = in.Annotations[v1alpha1.AnnotationPredecessor]
+	}
+	return p.createAllocation(pv, name, params, p.queuedMark(pv, primary, in.Annotations[annotationNoOverlapSuccessor]))
 }
 
 // ensureCredential writes an Allocation's credential file, 256 random bits as

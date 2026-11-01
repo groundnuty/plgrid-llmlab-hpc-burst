@@ -202,6 +202,14 @@ func (t *slotTable) listBounded(ctx context.Context, r client.Reader, provider s
 	return listProviderAllocations(ctx, r, provider)
 }
 
+// holdsSlot reports whether the Allocation still holds a submit slot as the
+// count reads it: its phase is not Ended. The queued-successor mark reads it
+// too (queuedMark), so the two never disagree about a primary that has left
+// the slot. An Allocation whose deletion has completed is not listed at all.
+func holdsSlot(a *v1alpha1.Allocation) bool {
+	return a.Status.AtProvider.Phase != v1alpha1.AllocationEnded
+}
+
 // listProviderAllocations lists the Allocations of every namespace whose
 // providerConfigRef names the Provider: seen holds all of them, listed those
 // whose phase is not Ended. A deleting Allocation counts until its deletion
@@ -219,7 +227,7 @@ func listProviderAllocations(ctx context.Context, r client.Reader, provider stri
 		}
 		k := a.Namespace + "/" + a.Name
 		seen[k] = true
-		if a.Status.AtProvider.Phase != v1alpha1.AllocationEnded {
+		if holdsSlot(a) {
 			listed[k] = true
 		}
 	}
