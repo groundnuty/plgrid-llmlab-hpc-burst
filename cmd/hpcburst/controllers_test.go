@@ -308,7 +308,8 @@ func TestControllerSupervision(t *testing.T) {
 	})
 	s, _ := statusOf(t, h)
 	if s.Supervisor == nil || !s.Supervisor.Running || s.Supervisor.PID != sup.PID ||
-		len(s.Controllers) != 1 || !s.Controllers[0].Running || s.Controllers[0].PID != child.PID ||
+		len(s.Controllers) != 2 || s.Controllers[1].Name != "frps" || !s.Controllers[1].Running || // frps runs beside the controller (HBEP-6)
+		!s.Controllers[0].Running || s.Controllers[0].PID != child.PID ||
 		s.Controllers[0].HealthzOK == nil || !*s.Controllers[0].HealthzOK || s.Controllers[0].Restarts != 0 {
 		t.Fatalf("status: %+v", s)
 	}
@@ -323,7 +324,7 @@ func TestControllerSupervision(t *testing.T) {
 	}
 	waitFor(t, 30*time.Second, "the controller to be restarted and healthy", func() bool {
 		s, code := statusOf(t, h)
-		return code == exitOK && len(s.Controllers) == 1 && s.Controllers[0].Restarts == 1 && s.Controllers[0].PID != child.PID
+		return code == exitOK && len(s.Controllers) == 2 && s.Controllers[0].Restarts == 1 && s.Controllers[0].PID != child.PID
 	})
 	s, _ = statusOf(t, h)
 	newChild := s.Controllers[0].PID
