@@ -19,9 +19,9 @@ import (
 // the sha256 of the executable. The launcher copies the file it opened into a sealed memory file,
 // hashes that copy, and runs that very descriptor, so no write to the file on disk, by path or in
 // place, can change the bytes between the check and the exec. The same file pins frpc's sha256,
-// which the controller puts in agent.json. HBEP-6 names build/dependencies.yaml (HBEP-15) as the
-// source of frps's checksum; the file does not exist yet, so frp-pins.txt stands in for it, as
-// k3s-pins.txt does for k3s.
+// which the controller puts in agent.json. HBEP-15 names frp-pins.txt, as it names k3s-pins.txt
+// for k3s, as the record of these checksums, and keeps no central list of versions.
+// hack/fetch-frp.sh holds its own amd64 copy, which TestFrpPinsAgreeWithTheFetchScript compares.
 
 //go:embed frp-pins.txt
 var frpPinsFile string
