@@ -10,12 +10,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal"
 )
 
 // rehearsalTiming: a 6 min lease whose drain window is 90 s + 30 s, so a
@@ -50,9 +52,13 @@ func startRig(t *testing.T, mode string) *rig {
 	if err := r.cl.login.WriteCredentials(creds); err != nil {
 		t.Fatal(err)
 	}
+	dh := dialHome{mode: "direct", addr: dialHomeAddr}
+	if mode == "ssh" {
+		dh = r.startGateway(dir)
+	}
 	// The controller lists the checkpoint from the Hub double through
 	// HF_ENDPOINT, which up passes on to it.
-	r.h = startHost(t, b, dir, mode, cleanEnv("HF_ENDPOINT="+r.hub.url))
+	r.h = startHost(t, b, dir, dh, cleanEnv("HF_ENDPOINT="+r.hub.url))
 	arch := cpuArch(t)
 	r.h.placeAgentBuild(arch)
 	r.c = kubeClient(t, r.h.state)
@@ -204,4 +210,73 @@ func TestRehearsalDirect(t *testing.T) {
 	in := r.stepStart()
 	r.stepControllerRestart(in)
 	r.stepScaleToZero()
+}
+
+// startGateway starts the control-plane host's ssh server for ssh mode, with
+// HBEP-6's restricted key for the agent endpoint (base+3) and the front's
+// dial-home listener (base+7), and puts the key and known_hosts where the
+// agent looks, the cluster user's ~/.hpcburst/dial-home.
+func (r *rig) startGateway(dir string) dialHome {
+	r.t.Helper()
+	gwDir := filepath.Join(dir, "gw")
+	if err := os.Mkdir(gwDir, 0o700); err != nil {
+		r.t.Fatal(err)
+	}
+	gw, err := rehearsal.StartGateway(rehearsal.GatewayConfig{Dir: gwDir, AgentPort: portBase + 3, DialHomePort: portBase + 7})
+	if err != nil {
+		r.t.Fatalf("the dial-home gateway: %v", err)
+	}
+	r.t.Cleanup(func() {
+		if err := gw.Close(); err != nil {
+			r.t.Errorf("the gateway's Close: %v", err)
+		}
+	})
+	dhDir := filepath.Join(r.cl.home, ".hpcburst", "dial-home")
+	if err := os.MkdirAll(filepath.Dir(dhDir), 0o700); err != nil {
+		r.t.Fatal(err)
+	}
+	if err := gw.WriteDialHome(dhDir); err != nil {
+		r.t.Fatalf("the dial-home files: %v", err)
+	}
+	return dialHome{mode: "ssh", addr: gw.Addr(), keyPath: filepath.Join(dhDir, "key")}
+}
+
+// jobSSHForwards lists the agent's ssh processes in its job: the system ssh
+// running a local forward. In ssh mode the agent reaches this host through
+// them (HBEP-6, Dial-home modes).
+func (r *rig) jobSSHForwards(jobID int) []int {
+	r.t.Helper()
+	want, _ := exec.LookPath("ssh")
+	want, _ = filepath.EvalSymlinks(want)
+	pids, err := r.cl.plat.Processes(jobID)
+	if err != nil {
+		r.t.Fatalf("job %d's processes: %v", jobID, err)
+	}
+	var out []int
+	for _, p := range pids {
+		args, _ := os.ReadFile("/proc/" + strconv.Itoa(p) + "/cmdline")
+		if processExe(p) == want && strings.Contains(string(args), "-L\x00") {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// TestRehearsalSSH is criterion 3's ssh dial-home mode, run once: the agent
+// reaches the agent endpoint and the dial-home listener through two ssh
+// forwards to the gateway, and nothing of them outlives its job.
+func TestRehearsalSSH(t *testing.T) {
+	r := startRig(t, "ssh")
+	in := r.stepStart()
+	jobID, _ := strconv.Atoi(in.Status.JobID)
+	fwd := r.jobSSHForwards(jobID)
+	if len(fwd) < 2 {
+		t.Errorf("the agent of job %d has %d ssh forwards (%v), want 2: the agent endpoint and the dial-home listener", jobID, len(fwd), fwd)
+	}
+	r.stepScaleToZero()
+	for _, p := range fwd {
+		if alive(p) {
+			t.Errorf("the agent's ssh forward %d outlived its job (HBEP-6: no ssh process behind)", p)
+		}
+	}
 }

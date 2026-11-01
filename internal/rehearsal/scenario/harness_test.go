@@ -320,9 +320,17 @@ type host struct {
 	downed    bool // hpcburst down has run
 }
 
+// dialHome is how jobs reach this host: direct, to the front's dial-home
+// listener, or ssh, through the gateway's sshd with the restricted key.
+type dialHome struct {
+	mode    string // "direct" or "ssh"
+	addr    string // --front-addr: the listener (direct) or the gateway (ssh)
+	keyPath string // --front-key, ssh only: recorded, never read
+}
+
 // startHost runs hpcburst up in the given dial-home mode, with the front and
 // its client and dial-home listeners, and registers hpcburst down.
-func startHost(t *testing.T, b binaries, dir, mode string, env []string) *host {
+func startHost(t *testing.T, b binaries, dir string, dh dialHome, env []string) *host {
 	t.Helper()
 	h := &host{t: t, b: b, state: filepath.Join(dir, "st"), env: env, usageDir: filepath.Join(dir, "usage"), clientKey: strings.Repeat("c1", 32)}
 	keys := filepath.Join(dir, "client-keys.json")
@@ -332,8 +340,14 @@ func startHost(t *testing.T, b binaries, dir, mode string, env []string) *host {
 	cfg := filepath.Join(dir, "front.json")
 	// Scaled probe and pause times (step d): a 2 s probe, and a 10 s pause
 	// after HBEP-5's three Instance-emitted 5xx in a row.
-	front := `{"clientListen":"` + clientAddr + `","clientKeysFile":"` + keys + `","usageDir":"` + h.usageDir +
-		`","dialHomeListen":"` + dialHomeAddr + `","probeInterval":"2s","pauseAfterFailures":3,"pauseDuration":"10s"}`
+	// In ssh mode the dial-home listener takes its default, 127.0.0.1:base+7,
+	// which the gateway's key permits.
+	listen := ""
+	if dh.mode == "direct" {
+		listen = `"dialHomeListen":"` + dialHomeAddr + `",`
+	}
+	front := `{"clientListen":"` + clientAddr + `","clientKeysFile":"` + keys + `","usageDir":"` + h.usageDir + `",` +
+		listen + `"probeInterval":"2s","pauseAfterFailures":3,"pauseDuration":"10s"}`
 	if err := os.WriteFile(cfg, []byte(front), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -342,9 +356,9 @@ func startHost(t *testing.T, b binaries, dir, mode string, env []string) *host {
 	}
 	args := []string{"up", "--state-dir", h.state, "--bin-dir", b.k3sDir, "--port-base", strconv.Itoa(portBase), "--nice", "10",
 		"--manifests", filepath.Join(b.repo, "config", "crd"), "--controller-bin", b.controller,
-		"--front-config", cfg, "--front-bin", b.front, "--frps-bin", b.frps, "--front-mode", mode}
-	if mode == "direct" {
-		args = append(args, "--front-addr", dialHomeAddr)
+		"--front-config", cfg, "--front-bin", b.front, "--frps-bin", b.frps, "--front-mode", dh.mode, "--front-addr", dh.addr}
+	if dh.keyPath != "" {
+		args = append(args, "--front-key", dh.keyPath)
 	}
 	t.Cleanup(h.down)
 	if out, err := run(t, env, b.hpcburst, args...); err != nil {
