@@ -69,6 +69,10 @@ type Config struct {
 	// SqueueDesc lists squeue jobs by descending job ID, to show that a reader
 	// sorts by ID itself.
 	SqueueDesc bool
+	// Run, when set, puts the platform in run mode (doc.go, Run mode): the
+	// file system is a real directory, and each job's --wrap runs as a local
+	// process. A Platform in run mode must be closed.
+	Run *RunMode
 }
 
 // Call is one simple command that ran on the login node (doc.go, Call log).
@@ -89,10 +93,14 @@ type Platform struct {
 	cfg   Config
 	zone  *time.Location
 
+	// run is the normalized run mode; nil outside it.
+	run *RunMode
+
 	mu       sync.Mutex
 	jobs     []*job
 	nextID   int
-	fs       fsState
+	fs       fileSystem
+	closed   bool // run mode: Close was called, no job starts any more
 	phantoms map[string]int
 	calls    []Call
 	faulted  []Fault
@@ -130,10 +138,16 @@ func New(clock Clock, cfg Config) *Platform {
 		panic(fmt.Sprintf("fakeslurm: TimeZone: %v", err))
 	}
 	cfg.Partitions = append([]Partition(nil), cfg.Partitions...)
-	return &Platform{
+	p := &Platform{
 		clock: clock, cfg: cfg, zone: zone, nextID: firstJobID, fs: newFS(),
 		phantoms: map[string]int{}, gates: map[string][]*Gate{},
 	}
+	if cfg.Run != nil {
+		p.run = normalizeRun(*cfg.Run)
+		p.cfg.Run = p.run
+		p.fs = &diskFS{root: p.run.Root}
+	}
+	return p
 }
 
 // Login is a user's login: a name and the environment of the user's shell.

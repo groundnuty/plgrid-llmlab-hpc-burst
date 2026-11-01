@@ -18,9 +18,10 @@
 // Jobs, files and the call log belong to the Platform, so two Sessions share
 // one cluster and one file system, but squeue --me and the default sacct show
 // only the calling user's jobs, and each Session has its own environment
-// (HOME, SCRATCH, ...). Jobs never progress on their own: a test moves them
-// with Start, End, Requeue and the other job controls. The only thing the clock
-// does by itself is the purge of an ended job after MinJobAge.
+// (HOME, SCRATCH, ...). Outside run mode jobs never progress on their own: a
+// test moves them with Start, End, Requeue and the other job controls. The
+// only thing the clock does by itself is the purge of an ended job after
+// MinJobAge.
 //
 // # Command grammar
 //
@@ -78,4 +79,59 @@
 //   - Command.Timeout is ignored. A test that needs a timed-out command uses
 //     FailNext with slurm.ErrTimeout, or LostReply for one that registered the
 //     job first.
+//
+// # Run mode
+//
+// With Config.Run set, the fake runs each job (issue #146). The command
+// grammar, the JSON replies and the job controls are those above; what
+// changes:
+//
+//   - The file system is the real directory RunMode.Root, at the same paths,
+//     as a cluster's compute nodes share the login node's file system. The
+//     logins' HOME and SCRATCH must be under it. A path outside it reads as
+//     missing, and a write, mkdir, chmod, mv or rm there is refused (exit 1),
+//     so no command touches the host outside the test's directory. Files
+//     reads every file under the root and reports no Owner.
+//   - A job starts as soon as it is eligible (not held, a free slot), within
+//     the command that made it so: sbatch, scontrol release, FreePhantoms, or
+//     the end of another job's execution. Start is refused. Starting at once
+//     is a modelling choice: real slurmctld schedules a little later.
+//   - The batch script is "#!/bin/sh" and the --wrap command, as sbatch writes
+//     it, run by /bin/sh in a session of its own, so it leads its own process
+//     group. Standard input is /dev/null; standard output and error go to
+//     --output and --error (default slurm-<id>.out in the submit directory),
+//     truncated, or appended to after a requeue. The job starts in the login's
+//     HOME, the submit directory of a non-interactive ssh command.
+//   - Its environment is PATH (/usr/local/bin:/usr/bin:/bin unless set), the
+//     login's environment (sbatch exports it by default), RunMode.Env, the
+//     Slurm variables (SLURM_JOB_ID, SLURM_JOBID, SLURM_JOB_NAME,
+//     SLURM_JOB_USER, SLURM_JOB_PARTITION, SLURM_JOB_ACCOUNT,
+//     SLURM_SUBMIT_DIR, SLURM_CPUS_PER_TASK, SLURM_MEM_PER_NODE,
+//     SLURM_JOB_NUM_NODES, SLURM_NNODES, and SLURM_RESTART_COUNT after a
+//     requeue), TMPDIR, and the job variables (RunMode.JobVars): each a fresh
+//     directory of the execution under RunMode.JobDir, a featured one only
+//     for a job whose --constraint names the feature. The execution's
+//     directory goes when its processes are gone.
+//   - The job is RUNNING while its batch shell runs. When the shell exits,
+//     whatever is left of the job is killed, as Slurm's cgroup does: the
+//     session's processes and their descendants, so a child in a process
+//     group of its own goes too. Then the job is COMPLETED for exit 0 and
+//     FAILED otherwise, a signal included. A child that calls setsid and
+//     whose parent has died escapes this; a cgroup would catch it.
+//   - scancel ends the job CANCELLED at once, as slurmctld does, then sends
+//     CONT and TERM to its processes and, after RunMode.KillWait, KILL to
+//     what is left. The time limit (RunMode.Minute per minute of --time, from
+//     the start) ends it TIMEOUT the same way; SetTimeLimit moves the limit.
+//     End and Requeue send KILL at once, as a failed node does; a requeued
+//     job's new execution starts once the old one's processes are gone.
+//   - Job carries the execution's PID, whether its processes are gone
+//     (Finished), its exit code or signal, and when TERM and KILL were sent;
+//     Processes lists the live ones. Tests wait on these, never on a sleep.
+//   - Close sends KILL to every job's processes and waits for them, and no
+//     job starts after it. A Platform in run mode must be closed. Timers and
+//     the grace are wall time; job states and times use the Platform's
+//     clock, so a full-stack run passes a real clock.
+//   - The fake has no Pdeathsig: in Go it fires when the forking thread
+//     exits, not the process. A process that ends without Close leaves its
+//     jobs running, as a Slurm job outlives the login session.
 package fakeslurm

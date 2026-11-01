@@ -1,7 +1,8 @@
 package fakeslurm
 
 // Ported from spikes/s4/fakeslurm/scancel.go. Added: another user's job gives
-// "Access/permission denied", and a cancelled running job frees its slot.
+// "Access/permission denied", a cancelled running job frees its slot, and in
+// run mode its processes get TERM, then KILL after KillWait.
 
 import (
 	"strconv"
@@ -47,7 +48,7 @@ func (sh *shell) cancelOne(s string) string {
 	case IsTerminal(j.state()):
 		return "Job/step already completing or completed"
 	}
-	if err := sh.p.endJob(j, sh.now, Cancelled); err != nil {
+	if err := sh.p.endJob(j, sh.now, Cancelled, sh.p.killWait()); err != nil {
 		return err.Error()
 	}
 	return ""

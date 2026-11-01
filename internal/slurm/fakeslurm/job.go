@@ -6,6 +6,7 @@ package fakeslurm
 
 import (
 	"fmt"
+	"syscall"
 	"time"
 )
 
@@ -44,6 +45,9 @@ type execution struct {
 	submit, start, end time.Time
 	state              string
 	reason             string
+	// run is the execution's process in run mode; nil before it starts and
+	// outside run mode.
+	run *jobRun
 }
 
 // job is one submitted job, guarded by Platform.mu.
@@ -71,6 +75,9 @@ type job struct {
 	estimate *time.Time
 	// acctHidden hides every accounting record of the job from sacct.
 	acctHidden bool
+	// env is the submitting login's environment, which sbatch exports to
+	// the job by default (run mode).
+	env map[string]string
 }
 
 func newExecution(at time.Time, reason string) *execution {
@@ -197,8 +204,30 @@ type Job struct {
 	// Wrap is the --wrap command, the batch script.
 	Wrap string
 	// Constraint is the --constraint value, "" when none was given. The fake
-	// accepts any feature; it does not model node features.
+	// accepts any feature; it does not model node features, except that a
+	// run-mode JobVar can depend on one.
 	Constraint string
+
+	// Run mode only, for the current execution; zero otherwise.
+	//
+	// PID is the batch shell's PID, which is also its process group and
+	// session ID; 0 until the execution starts.
+	PID int
+	// Finished is true once every process of the execution is gone: the
+	// batch shell was reaped and nothing is left in its session.
+	Finished bool
+	// ExitCode is the batch shell's exit status once it has been reaped, -1
+	// when a signal ended it; ExitSignal is that signal.
+	ExitCode   int
+	ExitSignal syscall.Signal
+	// TermAt and KillAt are the wall-clock times the fake sent the job TERM
+	// (scancel or the time limit) and, after the grace, KILL (or KILL at once
+	// for a control or Close); zero when it did not. The KILL that clears
+	// what is left after the batch shell exits is not counted.
+	TermAt, KillAt time.Time
+	// StartErr is why the execution could not start (its directory or an
+	// output file could not be made); the job then ended FAILED.
+	StartErr error
 }
 
 func (j *job) snapshot() Job {
@@ -212,6 +241,12 @@ func (j *job) snapshot() Job {
 	}
 	if j.held {
 		s.HoldReason = e.reason
+	}
+	if r := e.run; r != nil {
+		s.PID, s.Finished, s.TermAt, s.KillAt, s.StartErr = r.pid, r.done, r.termAt, r.killAt, r.startErr
+		if r.done {
+			s.ExitCode, s.ExitSignal = r.exitCode, r.exitSignal
+		}
 	}
 	if j.estimate != nil {
 		t := *j.estimate
