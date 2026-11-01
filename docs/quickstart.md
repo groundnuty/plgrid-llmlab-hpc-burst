@@ -16,27 +16,34 @@ Commands run from the repository root. `<user>`, `<account>`, `<grant>` and `<lo
 
 ## 2. Build and fetch the binaries
 
+Two directories matter, and the launcher resolves each of them itself: the state directory, where the host keeps its records, its kubeconfig and the controller's agent builds, and the binary directory, where it looks for the pinned k3s and frps. Set them once, in the shell you use for the rest of this page. The two lines below apply the launcher's own rule (`DefaultStateDir` and `DefaultBinDir` in `internal/launcher/state.go`, plus the `HPCBURST_BIN_DIR` override that `cmd/hpcburst/main.go` puts first), so with none of the variables set they are the launcher's defaults, and with some set they follow them:
+
+```
+STATE=${XDG_STATE_HOME:-$HOME/.local/state}/hpcburst
+BIN=${HPCBURST_BIN_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/hpcburst/k3s}
+```
+
+Every command below passes `"$STATE"` or `"$BIN"` explicitly: to the launcher as `--state-dir` and `--bin-dir`, to the scripts as their directory argument. The build step, the launcher and `kubectl` therefore cannot end up in different places. Set both again in a new shell. To use other directories, give the two lines other values.
+
 ```
 mkdir -p bin
 go build -o bin/ ./cmd/hpcburst ./cmd/hpcburst-controller ./cmd/hpcburst-front
-hack/fetch-k3s.sh
-hack/fetch-frp.sh ~/.cache/hpcburst/k3s/frp-0.71.1
+hack/fetch-k3s.sh "$BIN"
+hack/fetch-frp.sh "$BIN/frp-0.71.1"
 ```
 
 - `hpcburst up` looks for `hpcburst-controller` and `hpcburst-front` beside itself, which is why they share `bin/`.
-- `hack/fetch-k3s.sh` puts the pinned k3s releases under `~/.cache/hpcburst/k3s/k3s-<version>/`, the default `--bin-dir`, and checks their sha256 against the launcher's pins ([HBEP-15](../hbep/0015-dependencies-and-provenance/README.md)). `hack/fetch-frp.sh DIR` places the pinned `frps` (and `frpc`) under `frp-0.71.1/` in the same directory, where `up` finds it.
+- `hack/fetch-k3s.sh` puts the pinned k3s releases under `"$BIN"/k3s-<version>/`, where `hpcburst up --bin-dir "$BIN"` finds them, and checks their sha256 against the launcher's pins ([HBEP-15](../hbep/0015-dependencies-and-provenance/README.md)). `hack/fetch-frp.sh DIR` places the pinned `frps` (and `frpc`) in `DIR`; `up` looks for `frps` in `frp-0.71.1/` under the binary directory.
 
-The jobs also need an allocation agent and `frpc`, built for each CPU architecture of the partitions you will use. The Provider's controller stages them from `<state>/agent-builds/`, the state directory being `~/.local/state/hpcburst` by default ([HBEP-4](../hbep/0004-provider-interface/README.md), Submission):
+The jobs also need an allocation agent and `frpc`, built for each CPU architecture of the partitions you will use. The Provider's controller stages them from `agent-builds/` in the state directory that `up` is given with `--state-dir` ([HBEP-4](../hbep/0004-provider-interface/README.md), Submission):
 
 ```
-STATE=~/.local/state/hpcburst
 install -d -m 700 "$STATE" "$STATE/agent-builds"
 hack/fetch-frp.sh --agent-builds "$STATE/agent-builds"
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o "$STATE/agent-builds/hb-agent-aarch64" ./cmd/hb-agent
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$STATE/agent-builds/hb-agent-x86_64" ./cmd/hb-agent
+hack/build-agents.sh "$STATE/agent-builds"
 ```
 
-Helios `plgrid-gpu-gh200` needs `aarch64`; Athena `plgrid-gpu-a100` needs `x86_64`. The build's sha256 is the digest the controller puts in each Allocation, so build with the same toolchain each time.
+`hack/build-agents.sh` builds `hb-agent-x86_64` and `hb-agent-aarch64`, or only the architectures you name after the directory. Helios `plgrid-gpu-gh200` needs `aarch64`; Athena `plgrid-gpu-a100` needs `x86_64`. The build's sha256 is the digest the controller puts in each Allocation. The script pins the Go toolchain, the flags and the environment, so the same source gives the same digest on any machine; it prints each digest with the Go version beside it.
 
 ## 3. Write your credentials files
 
@@ -92,20 +99,20 @@ EOF
 ## 4. Start the host
 
 ```
-bin/hpcburst up --manifests config/crd \
+bin/hpcburst up --state-dir "$STATE" --bin-dir "$BIN" --manifests config/crd \
   --front-config ~/.config/hpcburst/front.json \
   --front-mode ssh --front-addr <front-host> --front-key ~/.config/hpcburst/dial-home-key
-bin/hpcburst status
+bin/hpcburst status --state-dir "$STATE"
 ```
 
 - `--manifests config/crd` installs the framework's CRDs once the host is ready ([HBEP-11](../hbep/0011-kubernetes-control-plane/README.md), the launcher).
 - `--front-mode`, `--front-addr` and, in `ssh` mode, `--front-key` (the path of the restricted dial-home key, recorded and never read) say how jobs reach the front. With none of them, `up` warns, the controllers submit no job, and every ModelDeployment shows `FrontNotConfigured`. `--front-mode direct --front-addr <host>:<port>` is the other mode, and also needs `dialHomeListen` in `front.json`. [Alpha's limits](#alphas-limits) says what each mode asks of you.
-- `up` prints the kubeconfig path, `~/.local/state/hpcburst/kubeconfig` by default. `status` exits 0 when the host is healthy, 1 when it is not, and 3 when it is stopped.
+- `up` prints the kubeconfig path, `kubeconfig` in the state directory. `status` and `down` take the same `--state-dir`; without it they use the launcher's default, which is not `"$STATE"` if you chose another directory. `status` exits 0 when the host is healthy, 1 when it is not, and 3 when it is stopped.
 
-Use that kubeconfig with the `kubectl` of the k3s you fetched, or with your own:
+Use that kubeconfig with the `kubectl` of the k3s you fetched, or with your own. The alias reads `STATE` and `BIN` when you run it:
 
 ```
-alias hbk='KUBECONFIG=~/.local/state/hpcburst/kubeconfig ~/.cache/hpcburst/k3s/k3s-1.36.5/k3s kubectl'
+alias hbk='KUBECONFIG="$STATE/kubeconfig" "$BIN/k3s-1.36.5/k3s" kubectl'
 ```
 
 ## 5. Apply a Provider and a ModelDeployment
@@ -163,7 +170,7 @@ hbk get instances,allocations
 Deleting a ModelDeployment drains its Instances, which lets requests in flight finish, and cancels an Allocation that is still pending. A started Allocation follows its retention policy: the examples release it after 30 minutes without an Instance ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Retention). When both lists are empty:
 
 ```
-bin/hpcburst down
+bin/hpcburst down --state-dir "$STATE"
 ```
 
 `down` stops the processes it started and confirms that nothing of theirs still listens. It does not call the clusters, so a job left behind runs to its time limit; check your queue (`squeue`) if the lists were not empty.

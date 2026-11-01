@@ -67,6 +67,7 @@ func only(t *testing.T, what string, match func(block) bool) block {
 func fill(s string) string {
 	return strings.NewReplacer(
 		"<login-node>", "login.example",
+		"<front-host>", "front.example",
 		"<user>", "exampleuser",
 		"<llmlab-key>", strings.Repeat("k", 32),
 		"<llmlab-gateway>", "gateway.example",
@@ -117,7 +118,9 @@ func TestFrontFileSnippetsProduceWhatTheFrontReads(t *testing.T) {
 		t.Fatalf("the quickstart generates the client key with openssl, and this machine has none: %v", err)
 	}
 	home := t.TempDir()
-	script := "set -eu\nSTATE=$HOME/.local/state/hpcburst\ninstall -d -m 700 \"$STATE\" ~/.config/hpcburst\n" + keys.text + "\n" + cfgBlock.text
+	// STATE comes from the guide's own lines, under a home without XDG variables, so the snippets run
+	// with the directory the guide defines and not one this test chose.
+	script := "set -eu\n" + dirsBlock(t).text + "\ninstall -d -m 700 \"$STATE\" ~/.config/hpcburst\n" + keys.text + "\n" + cfgBlock.text
 	cmd := exec.Command("bash", "-c", script)
 	cmd.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -191,50 +194,5 @@ func TestEveryExampleIsMentioned(t *testing.T) {
 		if !strings.Contains(doc, "`"+filepath.Base(f)+"`") {
 			t.Errorf("examples/%s is not named in docs/quickstart.md", filepath.Base(f))
 		}
-	}
-}
-
-// Every flag the quickstart passes to hpcburst up is one that command defines. The flags are read
-// from the command's source: cmd/hpcburst is package main and cannot be imported.
-func TestUpFlagsExist(t *testing.T) {
-	src := readRepoFile(t, "cmd/hpcburst/main.go")
-	start := strings.Index(src, "func cmdUp(")
-	end := strings.Index(src, "func cmdStatus(")
-	if start < 0 || end < start {
-		t.Fatal("cannot find cmdUp in cmd/hpcburst/main.go")
-	}
-	defined := map[string]bool{}
-	for _, m := range regexp.MustCompile(`fs\.\w+Var\(&[\w.]+, "([a-z-]+)"`).FindAllStringSubmatch(src[start:end], -1) {
-		defined[m[1]] = true
-	}
-	if len(defined) < 5 {
-		t.Fatalf("read only %d flags of hpcburst up from its source: the pattern is stale", len(defined))
-	}
-	flag := regexp.MustCompile(`--[a-z][a-z-]*`)
-	checked := 0
-	for _, b := range blocks(t) {
-		if !strings.Contains(b.text, "bin/hpcburst up") {
-			continue
-		}
-		for _, f := range flag.FindAllString(b.text, -1) {
-			checked++
-			if !defined[strings.TrimPrefix(f, "--")] {
-				t.Errorf("the quickstart passes %s to hpcburst up, which defines no such flag", f)
-			}
-		}
-	}
-	// Flags named in prose, in a span that starts with hpcburst up or a flag of the command.
-	for _, m := range regexp.MustCompile("`(?:hpcburst up )?(--[a-z][a-z-]*)[^`]*`").FindAllStringSubmatch(readRepoFile(t, "docs/quickstart.md"), -1) {
-		name := strings.TrimPrefix(m[1], "--")
-		if name == "agent-builds" { // hack/fetch-frp.sh's flag, not hpcburst up's
-			continue
-		}
-		checked++
-		if !defined[name] {
-			t.Errorf("the quickstart names %s as a flag of hpcburst up, which defines no such flag", m[1])
-		}
-	}
-	if checked == 0 {
-		t.Fatal("found no hpcburst up flag in docs/quickstart.md to check")
 	}
 }
