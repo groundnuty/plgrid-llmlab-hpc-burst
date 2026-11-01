@@ -65,7 +65,9 @@
 // job runs under the QOS its --qos names, else Config.DefaultQOS, and counts
 // against that QOS and its partition's own QOS (Partition.QOS). For each limit
 // the first QOS in the order partition QOS, job QOS that sets it applies (no
-// OverPartQOS). The submit limit (MaxSubmitPerUser) counts the user's pending
+// OverPartQOS). A limit is a pointer: nil is not set, and Cap(0) is set to 0
+// and allows nothing, so a partition QOS with a GPU cap of 0 is not skipped
+// for the job QOS's cap, and a submit limit of 0 refuses every submission. The submit limit (MaxSubmitPerUser) counts the user's pending
 // and running jobs of any name, a held job included: a submission over it is
 // refused with the two lines Slurm prints, the reason line
 // "sbatch: error: QOSMaxSubmitJobPerUserLimit" first, then the accounting-policy

@@ -15,19 +15,26 @@ import (
 	"time"
 )
 
-// QOS is one quality of service of the fake cluster. A limit of 0 is no limit.
+// QOS is one quality of service of the fake cluster. A limit that is nil is
+// not set; a limit of 0 is set, and allows nothing, as in Slurm (a QOS with
+// MaxSubmitJobsPerUser 0 refuses every submission, one with a GPU cap of 0
+// never starts a job with a GPU), so Cap(0) and nil differ. For each limit the
+// first QOS in the order that sets it applies, whatever its value.
 type QOS struct {
 	Name string
 	// MaxSubmitPerUser is the most jobs one user may have pending or running
 	// under the QOS (MaxSubmitJobsPerUser). A job counts against the QOS it
 	// was submitted under and against its partition's QOS. A held job is a
 	// pending one.
-	MaxSubmitPerUser int
+	MaxSubmitPerUser *int
 	// MaxGPUsPerUser bounds the GPUs of one user's running jobs under the QOS
 	// (MaxTRESPerUser gres/gpu). A job that fits alone but not beside the
 	// user's running jobs is accepted and pends; Start refuses it.
-	MaxGPUsPerUser int
+	MaxGPUsPerUser *int
 }
+
+// Cap is a limit that is set to n, 0 included, for QOS's fields.
+func Cap(n int) *int { return &n }
 
 // Slurm's text for a policy refusal: sbatch prints the reason's name, then the
 // accounting-policy line (HBEP-4, QOS limits, A limit refusal; Slurm's
@@ -123,12 +130,12 @@ func (p *Platform) qosOrder(partition, jobQOS string) []QOS {
 	return out
 }
 
-// firstQOS returns the first QOS in the order whose limit pick reads as set,
-// and that limit.
-func firstQOS(order []QOS, pick func(QOS) int) (QOS, int, bool) {
+// firstQOS returns the first QOS in the order that sets the limit pick reads
+// (a nil limit is not set; 0 is), and that limit.
+func firstQOS(order []QOS, pick func(QOS) *int) (QOS, int, bool) {
 	for _, q := range order {
-		if n := pick(q); n > 0 {
-			return q, n, true
+		if n := pick(q); n != nil {
+			return q, *n, true
 		}
 	}
 	return QOS{}, 0, false
@@ -147,7 +154,7 @@ func (p *Platform) underQOS(j *job, name string) bool {
 // submitLimitRefusal returns QOSMaxSubmitJobPerUserLimit when the user is at
 // the submit limit that applies to a job with this partition and QOS, else "".
 func (p *Platform) submitLimitRefusal(user, partition, jobQOS string) string {
-	q, limit, ok := firstQOS(p.qosOrder(partition, jobQOS), func(q QOS) int { return q.MaxSubmitPerUser })
+	q, limit, ok := firstQOS(p.qosOrder(partition, jobQOS), func(q QOS) *int { return q.MaxSubmitPerUser })
 	if !ok {
 		return ""
 	}
@@ -168,7 +175,7 @@ func (p *Platform) submitLimitRefusal(user, partition, jobQOS string) string {
 // it. A job that does not fit stays pending. Every way of starting a job goes
 // through it (Start, and the run mode's scheduler).
 func (p *Platform) canStart(j *job) error {
-	q, limit, ok := firstQOS(p.qosOrder(j.partition, j.qos), func(q QOS) int { return q.MaxGPUsPerUser })
+	q, limit, ok := firstQOS(p.qosOrder(j.partition, j.qos), func(q QOS) *int { return q.MaxGPUsPerUser })
 	if !ok {
 		return nil
 	}

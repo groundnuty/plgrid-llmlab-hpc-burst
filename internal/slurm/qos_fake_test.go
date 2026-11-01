@@ -102,7 +102,7 @@ func TestQOSRefusalsMakeNoCall(t *testing.T) {
 // returns a PolicyRefusal for the reason name with the outcome Rejected, and
 // records no job. After the other job ends, the next attempt is accepted.
 func TestSubmitUnderAFullSlotIsAPolicyRefusal(t *testing.T) {
-	limits := []fakeslurm.QOS{{Name: "now", MaxSubmitPerUser: 1}, {Name: "normal"}}
+	limits := []fakeslurm.QOS{{Name: "now", MaxSubmitPerUser: fakeslurm.Cap(1)}, {Name: "normal"}}
 	b, plat := qosRig(t, "now", limits)
 	other := plat.OutsideJob("example-user", "another-project-job", fakePart, "now", 1)
 

@@ -28,8 +28,8 @@ func heliosShape() Config {
 	return Config{
 		Partitions: []Partition{{Name: "gh", GPUOnly: true, QOS: "plgrid"}, {Name: "plain"}},
 		QOS: []QOS{
-			{Name: "now", MaxSubmitPerUser: 1, MaxGPUsPerUser: 1},
-			{Name: "plgrid", MaxSubmitPerUser: 2000},
+			{Name: "now", MaxSubmitPerUser: Cap(1), MaxGPUsPerUser: Cap(1)},
+			{Name: "plgrid", MaxSubmitPerUser: Cap(2000)},
 			{Name: "normal"},
 		},
 	}
@@ -74,7 +74,7 @@ func TestQOSFlagShowsInTheArgvLog(t *testing.T) {
 
 // A job with no --qos runs under the association's default.
 func TestDefaultQOSApplies(t *testing.T) {
-	r := newRig(t, Config{QOS: []QOS{{Name: "normal"}, {Name: "now", MaxSubmitPerUser: 1}}, DefaultQOS: "normal"})
+	r := newRig(t, Config{QOS: []QOS{{Name: "normal"}, {Name: "now", MaxSubmitPerUser: Cap(1)}}, DefaultQOS: "normal"})
 	if j, _ := r.p.Job(r.sbatch()); j.QOS != "normal" {
 		t.Errorf("QOS = %q, want the default normal", j.QOS)
 	}
@@ -98,7 +98,7 @@ func TestUnknownQOSIsRefused(t *testing.T) {
 // whatever their name: a job with another tag holds the slot, as the owner's
 // other projects would. The refusal is two lines, the reason first.
 func TestSubmitLimitCountsEveryJobOfTheUser(t *testing.T) {
-	cfg := Config{Partitions: []Partition{{Name: "p"}}, QOS: []QOS{{Name: "now", MaxSubmitPerUser: 1}}}
+	cfg := Config{Partitions: []Partition{{Name: "p"}}, QOS: []QOS{{Name: "now", MaxSubmitPerUser: Cap(1)}}}
 	r := newRig(t, cfg)
 	bob := loginAs(r.p, "bob")
 
@@ -127,7 +127,7 @@ func TestSubmitLimitCountsEveryJobOfTheUser(t *testing.T) {
 
 // A held job is a pending job, so it takes the slot (HBEP-4, QOS limits).
 func TestAHeldJobTakesTheSlot(t *testing.T) {
-	r := newRig(t, Config{QOS: []QOS{{Name: "now", MaxSubmitPerUser: 1}}})
+	r := newRig(t, Config{QOS: []QOS{{Name: "now", MaxSubmitPerUser: Cap(1)}}})
 	held := r.sbatch("--qos=now", "--hold")
 	if j, _ := r.p.Job(held); !j.Held {
 		t.Fatal("the job is not held")
@@ -162,6 +162,58 @@ func TestPartitionQOSComesFirstAndTheGPUCapHolds(t *testing.T) {
 	r.start(b) // the GPU is free
 	if j, _ := r.p.Job(b); j.State != Running {
 		t.Errorf("job b is %s, want RUNNING", j.State)
+	}
+}
+
+// A limit of 0 is set, and allows nothing, as in Slurm; a limit that is absent
+// is no limit, and does not stop the next QOS in the order from setting it
+// (PR 168's review, Astra N1 and Opus N7). The cases are written out by hand:
+//   - a job QOS whose submit limit is 0 refuses the first submission;
+//   - a partition QOS whose GPU cap is 0 holds a GPU job pending for ever,
+//     although the job QOS's own cap of 1 would let it start;
+//   - the same partition QOS with its GPU cap absent leaves the job QOS's cap
+//     of 1 to decide, and the job starts;
+//   - a partition QOS whose submit limit is 0 refuses a submission whose job
+//     QOS allows 5.
+func TestAZeroLimitIsSetAndAnAbsentOneIsNot(t *testing.T) {
+	zeroSubmit := Config{Partitions: []Partition{{Name: "p"}}, QOS: []QOS{{Name: "closed", MaxSubmitPerUser: Cap(0)}, {Name: "open"}}}
+	r := newRig(t, zeroSubmit)
+	_, errOut, code := r.run("sbatch --wrap=true --partition=p --qos=closed")
+	if code != 1 || errOut != twoLines("QOSMaxSubmitJobPerUserLimit") {
+		t.Errorf("a submit limit of 0: exit %d stderr %q, want exit 1 and %q", code, errOut, twoLines("QOSMaxSubmitJobPerUserLimit"))
+	}
+	if n := len(r.p.Jobs()); n != 0 {
+		t.Errorf("%d jobs after a refusal under a limit of 0, want 0", n)
+	}
+	r.sbatch("--partition=p", "--qos=open") // a QOS with the limit absent has none
+
+	gpuZero := Config{
+		Partitions: []Partition{{Name: "gh", GPUOnly: true, QOS: "plgrid"}},
+		QOS:        []QOS{{Name: "now", MaxGPUsPerUser: Cap(1)}, {Name: "plgrid", MaxGPUsPerUser: Cap(0)}},
+	}
+	r = newRig(t, gpuZero)
+	held := r.sbatch("--partition=gh", "--qos=now", "--gres=gpu:1") // accepted: the cap makes a job pend
+	if err := r.p.Start(held); err == nil || !strings.Contains(err.Error(), "QOSMaxGRESPerUser") || !strings.Contains(err.Error(), "of QOS plgrid") {
+		t.Errorf("Start under the partition QOS's GPU cap of 0 = %v, want a refusal naming QOSMaxGRESPerUser and QOS plgrid: now's cap of 1 is not reached", err)
+	}
+	if j, _ := r.p.Job(held); j.State != Pending {
+		t.Errorf("the job is %s, want PENDING", j.State)
+	}
+
+	gpuAbsent := Config{
+		Partitions: []Partition{{Name: "gh", GPUOnly: true, QOS: "plgrid"}},
+		QOS:        []QOS{{Name: "now", MaxGPUsPerUser: Cap(1)}, {Name: "plgrid", MaxSubmitPerUser: Cap(2000)}},
+	}
+	r = newRig(t, gpuAbsent)
+	r.start(r.sbatch("--partition=gh", "--qos=now", "--gres=gpu:1")) // plgrid sets no GPU cap: now's 1 lets the job start
+
+	partSubmitZero := Config{
+		Partitions: []Partition{{Name: "gh", QOS: "plgrid"}},
+		QOS:        []QOS{{Name: "now", MaxSubmitPerUser: Cap(5)}, {Name: "plgrid", MaxSubmitPerUser: Cap(0)}},
+	}
+	r = newRig(t, partSubmitZero)
+	if _, errOut, code := r.run("sbatch --wrap=true --partition=gh --qos=now"); code != 1 || errOut != twoLines("QOSMaxSubmitJobPerUserLimit") {
+		t.Errorf("a partition QOS's submit limit of 0 under a job QOS's 5: exit %d stderr %q, want the refusal", code, errOut)
 	}
 }
 
@@ -230,7 +282,7 @@ func TestLinesAgreeWithTheContract(t *testing.T) {
 // attempt is refused for the limit (HBEP-4, QOS limits, A lost reply under a
 // one-job limit).
 func TestLostReplyLateRegistersBeforeTheNextSubmissionIsChecked(t *testing.T) {
-	cfg := Config{Partitions: []Partition{{Name: "p"}}, QOS: []QOS{{Name: "now", MaxSubmitPerUser: 1}}}
+	cfg := Config{Partitions: []Partition{{Name: "p"}}, QOS: []QOS{{Name: "now", MaxSubmitPerUser: Cap(1)}}}
 	r := newRig(t, cfg)
 	r.p.Script(LostReplyLate(slurm.ErrTimeout))
 	_, err := r.s.Run(t.Context(), slurm.Command{Line: "sbatch --parsable --job-name=hb-example-0123456789ab --hold --partition=p --qos=now --wrap=true"})
@@ -265,7 +317,7 @@ func TestRunModeGPUCapKeepsASecondJobPendingUntilTheFirstEnds(t *testing.T) {
 	r := newRunRigCfg(t, Config{
 		Run: &RunMode{}, NotListed: NotListedAthena,
 		Partitions: []Partition{{Name: "p"}},
-		QOS:        []QOS{{Name: "now", MaxGPUsPerUser: 1}},
+		QOS:        []QOS{{Name: "now", MaxGPUsPerUser: Cap(1)}},
 	}, true)
 	release, ran := r.home+"/release", r.home+"/ran"
 	first := r.submit(waitLoop(release), "--partition=p", "--qos=now", "--gres=gpu:1")

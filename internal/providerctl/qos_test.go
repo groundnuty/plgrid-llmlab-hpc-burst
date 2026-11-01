@@ -50,8 +50,8 @@ func heliosLikeSlurm(clock *fake.Clock) *fakeslurm.Platform {
 	return fakeslurm.New(clock, fakeslurm.Config{
 		Partitions: []fakeslurm.Partition{{Name: gpuPart, GPUOnly: true, QOS: "plgrid"}},
 		QOS: []fakeslurm.QOS{
-			{Name: "now", MaxSubmitPerUser: 1, MaxGPUsPerUser: 1},
-			{Name: "plgrid", MaxSubmitPerUser: 2000},
+			{Name: "now", MaxSubmitPerUser: fakeslurm.Cap(1), MaxGPUsPerUser: fakeslurm.Cap(1)},
+			{Name: "plgrid", MaxSubmitPerUser: fakeslurm.Cap(2000)},
 		},
 	})
 }
@@ -61,7 +61,7 @@ func heliosLikeSlurm(clock *fake.Clock) *fakeslurm.Platform {
 func nowOnlySlurm(clock *fake.Clock) *fakeslurm.Platform {
 	return fakeslurm.New(clock, fakeslurm.Config{
 		Partitions: []fakeslurm.Partition{{Name: gpuPart, GPUOnly: true}},
-		QOS:        []fakeslurm.QOS{{Name: "now", MaxSubmitPerUser: 1, MaxGPUsPerUser: 1}},
+		QOS:        []fakeslurm.QOS{{Name: "now", MaxSubmitPerUser: fakeslurm.Cap(1), MaxGPUsPerUser: fakeslurm.Cap(1)}},
 	})
 }
 
