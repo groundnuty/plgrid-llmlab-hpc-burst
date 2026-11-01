@@ -145,16 +145,16 @@ func checkServed(md *v1alpha1.ModelDeployment) (servedPlan, error) {
 // on top, and its max_new_tokens caps every request below what the checks ask
 // for) and hf-config-path (the config comes from another, separately pinned
 // repository). The value is compared exactly: vLLM reads anything but auto as
-// a path (HBEP-7, The allocation agent, Checks; `@hpc-burst-science-agent`,
+// a path (HBEP-7, The allocation agent, What it runs; `@hpc-burst-science-agent`,
 // 1 Nov 2026, for #169). They stay deployment-ID inputs (HBEP-3), so a later
 // version can allow them.
 func checkGenerationConfig(s *v1alpha1.ServingSpec) error {
 	if v, ok := flagValue(s, "generation-config"); ok && v != "auto" {
-		return refuse("generation-config %q: alpha serves with vLLM's default, generation-config auto, so any other value is refused (HBEP-7, Checks)", v)
+		return refuse("generation-config %q: alpha serves with vLLM's default, generation-config auto, so any other value is refused (HBEP-7, What it runs)", v)
 	}
 	for _, name := range []string{"override-generation-config", "hf-config-path"} {
 		if _, ok := flagValue(s, name); ok {
-			return refuse("engine flag %s changes the generation config vLLM applies in a way the checks do not model, so alpha refuses it (HBEP-7, Checks)", name)
+			return refuse("engine flag %s changes the generation config vLLM applies in a way the checks do not model, so alpha refuses it (HBEP-7, What it runs)", name)
 		}
 	}
 	return nil
