@@ -196,12 +196,13 @@ func (s *slot) meanTimePerOutputToken() float64 {
 }
 
 // beforeFirstToken returns how long a request waits before its first token
-// because of slow-first and never-settle, and counts the request in its shape.
+// because of slow-first and never-settle, and how many requests of its shape
+// came before it (n, from 0), and counts the request in its shape.
 //
 // slow-first: the first request of a shape waits SlowFirst. never-settle: the
 // n-th request of a shape (counting from 0) waits n * NeverSettle percent of
 // TokenDelay * tokens, so each waits that share longer than the one before.
-func (e *engine) beforeFirstToken(k shapeKey, tokens int) time.Duration {
+func (e *engine) beforeFirstToken(k shapeKey, tokens int) (wait time.Duration, nth int) {
 	e.mu.Lock()
 	n := e.shapes[k]
 	e.shapes[k]++
@@ -214,7 +215,7 @@ func (e *engine) beforeFirstToken(k shapeKey, tokens int) time.Duration {
 		share := float64(e.cfg.NeverSettle) / 100 * float64(e.cfg.TokenDelay) * float64(tokens)
 		d += time.Duration(float64(n) * share)
 	}
-	return d
+	return d, n
 }
 
 // repeatOf counts a greedy request and returns how many identical ones came
