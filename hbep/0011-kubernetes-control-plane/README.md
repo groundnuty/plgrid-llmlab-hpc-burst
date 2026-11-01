@@ -224,7 +224,7 @@ Decided for alpha (amended 2026-10-30, after S3's fix, PR #36):
 - has the API server write its audit log at the Metadata level, with no request bodies, so a Secret's content is never logged;
 - gives the lifecycle controller's `/metrics` the loopback port at its port base + 12 (HBEP-8, Metrics);
 - has `hpcburst status` read the front's `/healthz`, and report the front as "degraded: usage writes failing" while its usage sink says `failing`, not as a readiness failure: the exit code stays 0 and the overall health `healthy`, and only the front's line says degraded (HBEP-8, Usage records);
-- has `hpcburst status` read the lifecycle controller's `/readyz` for its health, which fails until its caches have synced and it leads its `Lease`; `/healthz` stays the liveness check that restarts it. While no front `Lease` exists, the front is shown as absent (HBEP-8, Observers);
+- has `hpcburst status` read the lifecycle controller's `/readyz` for its health, which fails until its caches have synced and it leads its `Lease`; `/healthz` stays its liveness check; the launcher restarts it when it exits. While no front `Lease` exists, the front is shown as absent (HBEP-8, Observers);
 - has the API server keep events 7 days: it passes `--kube-apiserver-arg=event-ttl=168h`, where the default is 1 h. k3s passes the flag through, and kine, its SQLite datastore, deletes each event once the TTL has elapsed. kine starts each event's clock again when the host restarts, so an event lives at least 7 days (HBEP-8, Retention, with the sources);
 - backs up the store before every upgrade: an etcd snapshot, or a copy of the SQLite file;
 - upgrades the host one minor version at a time, as S3 tested.
