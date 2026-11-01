@@ -24,11 +24,28 @@ const capBlock = 4096
 
 type capVolume struct {
 	backing string
-	limit   int64
+	limit   atomic.Int64 // bytes; grow raises it, as freeing space on a full disk would
 	enospc  atomic.Int64 // how many requests were refused, so a test can show the volume really was full
 	server  *fuse.Server
 	mount   string
+
+	// frozen is the steady state of a full store (#180): once set, every write, allocation and
+	// truncation is refused with ENOSPC, including one that fits in space the files already hold, which
+	// a volume that is merely at its limit accepts (SQLite reusing pages, or its WAL restarting after a
+	// checkpoint, writes inside the files). A real full disk can accept such rewrites now and then; the
+	// frozen volume models the state in which none is, so that "the store is full" holds until the test
+	// unfreezes it, and a test can make assertions about that state without racing the store's own
+	// housekeeping. frozenRefusals counts the requests that only the freeze refused.
+	frozen         atomic.Bool
+	frozenRefusals atomic.Int64
 }
+
+// grow adds bytes to the volume's limit, as freeing space on a full disk does.
+func (v *capVolume) grow(bytes int64) { v.limit.Add(bytes) }
+
+// freeze makes the volume refuse every write from now on; unfreeze lifts it.
+func (v *capVolume) freeze()   { v.frozen.Store(true) }
+func (v *capVolume) unfreeze() { v.frozen.Store(false) }
 
 // used is the space the files in the backing directory take, in bytes of allocated blocks.
 func (v *capVolume) used() int64 {
@@ -46,8 +63,14 @@ func (v *capVolume) used() int64 {
 	return n
 }
 
-// admit decides whether growing the file at path to newSize fits.
+// admit decides whether growing the file at path to newSize fits. A frozen volume refuses every
+// request, whatever it would take.
 func (v *capVolume) admit(path string, newSize int64) syscall.Errno {
+	if v.frozen.Load() {
+		v.frozenRefusals.Add(1)
+		v.enospc.Add(1)
+		return syscall.ENOSPC
+	}
 	var cur int64
 	if fi, err := os.Stat(path); err == nil {
 		cur = fi.Size()
@@ -56,7 +79,7 @@ func (v *capVolume) admit(path string, newSize int64) syscall.Errno {
 	if growth <= 0 {
 		return 0
 	}
-	if v.used()+growth > v.limit {
+	if v.used()+growth > v.limit.Load() {
 		v.enospc.Add(1)
 		return syscall.ENOSPC
 	}
@@ -121,12 +144,12 @@ func (n *capNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttr
 
 func (n *capNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
 	used := n.vol.used()
-	free := n.vol.limit - used
+	free := n.vol.limit.Load() - used
 	if free < 0 {
 		free = 0
 	}
 	out.Bsize, out.Frsize, out.NameLen = capBlock, capBlock, 255
-	out.Blocks = uint64(n.vol.limit / capBlock)
+	out.Blocks = uint64(n.vol.limit.Load() / capBlock)
 	out.Bfree, out.Bavail = uint64(free/capBlock), uint64(free/capBlock)
 	out.Files, out.Ffree = 1<<16, 1<<16
 	return 0
@@ -142,7 +165,8 @@ func newCapVolume(t *testing.T, limit int64) *capVolume {
 	if err != nil {
 		t.Fatal(err)
 	}
-	v := &capVolume{backing: filepath.Join(dir, "backing"), mount: filepath.Join(dir, "mnt"), limit: limit}
+	v := &capVolume{backing: filepath.Join(dir, "backing"), mount: filepath.Join(dir, "mnt")}
+	v.limit.Store(limit)
 	for _, d := range []string{v.backing, v.mount} {
 		if err := os.Mkdir(d, 0o700); err != nil {
 			t.Fatal(err)

@@ -246,12 +246,61 @@ func (w *world) start(extra []string, args ...string) (*exec.Cmd, *bytes.Buffer)
 	return cmd, &out
 }
 
-// noLeftoverProcess fails when anything of the run's process group is alive.
+// leftoverDeadline bounds how long a member of the run's process group may outlive the script.
+// The script's last children (a subshell, a command substitution, a timeout and what it killed)
+// can still be exiting, or be waiting for init to reap them, when the script's own exit is
+// seen, and that takes milliseconds, a little longer on a loaded host. The check catches a
+// process that is still alive when the deadline passes; one that exits within the grace passes.
+// Five seconds is generous for ordinary teardown. It is no guarantee against a host that starves
+// the run for longer, or an init that does not reap zombies (a zombie keeps the group alive).
+const leftoverDeadline = 5 * time.Second
+
+// groupExists reports whether process group pgid has a member, a zombie included. Only ESRCH
+// means the group is gone: EPERM, or any other error, means something is there.
+func groupExists(pgid int) bool {
+	return !errors.Is(syscall.Kill(-pgid, 0), syscall.ESRCH)
+}
+
+// groupOutlives polls process group pgid until it is empty and returns false, or returns true
+// when a member is still there at the deadline. It waits on the group's state, never on a
+// fixed window: an empty group ends the wait at once.
+func groupOutlives(pgid int, deadline time.Duration) bool {
+	return pollGroup(pgid, deadline, nil)
+}
+
+// pollGroup is groupOutlives with a hook. onMember, when not nil, is called once, on the polling
+// goroutine, right after the first probe that finds a member and before the next probe. A test
+// uses it to let a member exit only after the detector has seen it alive, so the member is
+// certainly alive at the first probe and certainly gone later, and a detector that probes only
+// once reports it.
+func pollGroup(pgid int, deadline time.Duration, onMember func()) bool {
+	end := time.Now().Add(deadline)
+	seen := false
+	for groupExists(pgid) {
+		if !seen {
+			seen = true
+			if onMember != nil {
+				onMember()
+			}
+		}
+		if time.Now().After(end) {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return false
+}
+
+// noLeftoverProcess fails when a process of the run's group is still alive leftoverDeadline
+// after the script exited, and kills what is left. The kill goes to the group by number. If the
+// group were already empty and its number reused by an unrelated group in the time between the
+// last probe and the kill, it would hit that group; the harness had this limit before it polled.
 func (w *world) noLeftoverProcess(cmd *exec.Cmd) {
 	w.t.Helper()
-	if err := syscall.Kill(-cmd.Process.Pid, 0); err == nil {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		w.t.Errorf("a process of the run was still alive after the script exited")
+	pgid := cmd.Process.Pid
+	if groupOutlives(pgid, leftoverDeadline) {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		w.t.Errorf("a process of the run was still alive %s after the script exited", leftoverDeadline)
 	}
 }
 

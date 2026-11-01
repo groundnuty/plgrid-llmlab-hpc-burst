@@ -1,0 +1,24 @@
+# A batch Provider on Helios' GH200 partition: your access to one platform (HBEP-3, HBEP-4
+# Provider settings). Replace every <placeholder>. Apply profiles/helios.yaml first.
+#
+# credentialsRef.file is an ssh client configuration (HBEP-4, Provider settings; the format is in
+# docs/quickstart.md), mode 600 and owned by the user who runs the controllers. The key file it
+# names must be mode 600 too. The API never holds a credential, only this path.
+apiVersion: hpcburst.groundnuty.github.io/v1alpha1
+kind: Provider
+metadata:
+  name: helios-gh200
+  labels:
+    hpcburst.groundnuty.github.io/organization: cyfronet
+    hpcburst.groundnuty.github.io/platform: helios
+    hpcburst.groundnuty.github.io/partition: plgrid-gpu-gh200
+spec:
+  platformProfileRef:
+    name: helios
+  account: <account>
+  grant: <grant>
+  # Alpha allows exactly one partition per Provider (HBEP-4, open question 12).
+  allowedPartitions:
+    - plgrid-gpu-gh200
+  credentialsRef:
+    file: /home/<user>/.config/hpcburst/credentials/helios-gh200.ssh

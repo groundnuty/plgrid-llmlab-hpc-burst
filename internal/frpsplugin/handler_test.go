@@ -209,6 +209,24 @@ func TestNewProxyAcceptsAnInstancePlacedOnTheTokensAllocation(t *testing.T) {
 	if got := ev.all(); len(got) != 1 || got[0] != "NewProxy "+uidA {
 		t.Errorf("the Notifier heard %v, want [NewProxy %s]", got, uidA)
 	}
+	// The accepted NewProxy carries the UID of the Allocation whose credential admitted it:
+	// syncedIndex gives tokA to alloc-a (HBEP-8: TunnelOrphaned regards it).
+	if got := ev.allocation("NewProxy " + uidA); got != "alloc-a" {
+		t.Errorf("the Notifier heard Allocation %q with the NewProxy, want alloc-a, whose credential admitted it", got)
+	}
+}
+
+// Each Allocation's tunnel is reported with its own UID, not the first one's.
+func TestNewProxyCarriesTheUIDOfTheAllocationThatAdmittedIt(t *testing.T) {
+	ev := &events{}
+	h := newTestHandler(t, syncedIndex(t), ev)
+	b := with(t, with(t, with(t, fixture(t, "newproxy"), "content.proxy_name", uidB), "content.custom_domains", []any{uidB}), "content.user.metas.token", tokB)
+	if a := call(t, h, OpNewProxy, b); a.Reject {
+		t.Fatalf("Allocation b's own Instance with b's token: %q", a.RejectReason)
+	}
+	if got := ev.allocation("NewProxy " + uidB); got != "alloc-b" {
+		t.Errorf("the Notifier heard Allocation %q with the NewProxy of %s, want alloc-b", got, uidB)
+	}
 }
 
 func TestNewProxyRefusals(t *testing.T) {
@@ -275,6 +293,10 @@ func TestCloseProxyIsAcceptedAndTriggersARead(t *testing.T) {
 		}
 		if got := ev.all(); len(got) != 1 || got[0] != "CloseProxy "+uidA {
 			t.Errorf("the Notifier heard %v, want [CloseProxy %s]", got, uidA)
+		}
+		// A CloseProxy carries no token, so it names no Allocation.
+		if got := ev.allocation("CloseProxy " + uidA); got != "" {
+			t.Errorf("the Notifier heard Allocation %q with a CloseProxy, want none", got)
 		}
 	}
 	// With no Notifier at all it is still accepted.
@@ -472,7 +494,7 @@ func TestABlockedIndexIsAnsweredWithARefusalWithinOneSecond(t *testing.T) {
 // blockingNotifier waits, as a Notifier that breaks its contract would.
 type blockingNotifier struct{ release chan struct{} }
 
-func (b blockingNotifier) ProxyChanged(string, string) {
+func (b blockingNotifier) ProxyChanged(string, string, string) {
 	select {
 	case <-b.release:
 	case <-time.After(3 * time.Second):
