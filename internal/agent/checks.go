@@ -201,6 +201,7 @@ func (a *Agent) startVerify(in *instance, req agentapi.VerifyRequest, key procKe
 		res := eng.Verify(ctx)
 		res.ImageDigest = digest
 		res.GenerationConfig = readGenerationConfig(ckptDir)
+		res.GenerationConfigFile = generationConfigFile(ckptDir)
 		switch {
 		case len(files) == 0:
 		case reuse:

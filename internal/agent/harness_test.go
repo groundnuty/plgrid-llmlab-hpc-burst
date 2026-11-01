@@ -89,6 +89,7 @@ type harness struct {
 	hubMu      sync.Mutex
 	hubHits    int
 	hubAuth    []string
+	stopOnce   sync.Once
 }
 
 type harnessOptions struct {
@@ -230,17 +231,22 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 }
 
 // stop ends the agent (as a job end does) and waits for it, which stops every
-// worker.
+// worker. When it returns, every unit the agent started (a check, a warm-up
+// round) has returned too: Run waits for them. A test may call it to have that
+// as a synchronization point; the clean-up that every harness registers calls it
+// again, and the second call does nothing.
 func (h *harness) stop() {
-	h.cancel()
-	select {
-	case <-h.done:
-	case <-time.After(30 * time.Second):
-		h.t.Errorf("the agent did not stop within 30 s")
-	}
-	if h.t.Failed() {
-		h.t.Logf("agent log:\n%s", h.logs.String())
-	}
+	h.stopOnce.Do(func() {
+		h.cancel()
+		select {
+		case <-h.done:
+		case <-time.After(30 * time.Second):
+			h.t.Errorf("the agent did not stop within 30 s")
+		}
+		if h.t.Failed() {
+			h.t.Logf("agent log:\n%s", h.logs.String())
+		}
+	})
 }
 
 // noExitSleep stops a race-built fake from sleeping a second at its exit
