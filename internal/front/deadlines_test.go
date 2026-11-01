@@ -217,33 +217,58 @@ func TestDeadlinesPositiveControlOnTheFakeClock(t *testing.T) {
 }
 
 // TestDeadlinesPositiveControlInRealTime: the same cut on the wall clock.
-// maxRequestDuration is 2 s, and the engine would send 50 tokens 100 ms apart
-// (4.9 s), so the front cuts it at about 2 s, after about 21 tokens.
+// maxRequestDuration is 2 s. The engine sends its first token at once and
+// holds the other 49 at its gate, which the test never opens, so the stream
+// can end only by a cut: the client gets that one token and then stream_cut,
+// detail deadline. A timer on the wall clock never fires early, so the stream
+// ends at 2 s or later, by the client's watch and by the record's
+// durationMs; a loaded machine only makes it later. The request's context
+// bounds the whole exchange at a minute, so a front that never cut would fail
+// the test instead of hanging it.
+//
+// The engine used to pace 50 tokens 100 ms apart, and the test wanted the cut
+// between 1.9 s and 4.5 s after 10 to 25 tokens: windows a loaded machine
+// could leave (PR #137 review, Astra).
 func TestDeadlinesPositiveControlInRealTime(t *testing.T) {
-	f := newScFix(t, scOpts{realClock: true, cfg: func(c *Config) { c.MaxRequestDuration = Duration(2 * time.Second) }})
-	f.engines[0].Set(enginetest.Behaviour{Tokens: 50, PerToken: 100 * time.Millisecond})
+	const maxReq = 2 * time.Second
+	f := newScFix(t, scOpts{realClock: true, cfg: func(c *Config) { c.MaxRequestDuration = Duration(maxReq) }})
+	gate := make(chan struct{}) // never sent on: the engine holds every token after the first
+	f.engines[0].Set(enginetest.Behaviour{Tokens: 50, Gate: gate})
 
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, f.url+scChat, strings.NewReader(errChatBody(scModel, true, "hello there")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+f.clientKey)
+	req.Header.Set("Content-Type", "application/json")
 	start := time.Now()
-	resp := f.errPost(scChat, errChatBody(scModel, true, "hello there"))
+	resp, err := errClient.Do(req)
+	if err != nil {
+		t.Fatalf("the request: %v", err)
+	}
 	id := resp.Header.Get("hpcburst-request-id")
 	body := readAll(t, resp)
 	elapsed := time.Since(start)
+	if ctx.Err() != nil {
+		t.Fatalf("the stream was not cut within a minute; the body so far ends %q", scTail(body))
+	}
 
 	checkStreamCut(t, body, "deadline")
 	scOneCut(t, body)
-	if elapsed < 1900*time.Millisecond || elapsed > 4500*time.Millisecond {
-		t.Errorf("the stream ended after %v, want about 2 s and well before the 4.9 s of the whole stream", elapsed)
+	if elapsed < maxReq {
+		t.Errorf("the stream ended after %v, before maxRequestDuration's %v", elapsed, maxReq)
 	}
-	// A token every 100 ms for 2 s is at most 21 or 22 tokens.
-	if n := scContentEvents(body); n < 10 || n > 25 {
-		t.Errorf("the client got %d token events, want about 21", n)
+	if n := scContentEvents(body); n != 1 {
+		t.Errorf("the client got %d token events, want the 1 the engine sent before its gate", n)
 	}
 	rec := f.record(id)
 	if rec.Finish == nil || *rec.Finish != "cut" || rec.CutBy == nil || *rec.CutBy != "front_deadline" {
 		t.Errorf("finish %v cutBy %v, want cut and front_deadline", rec.Finish, rec.CutBy)
 	}
-	if rec.DurationMs < 1900 || rec.DurationMs > 4500 {
-		t.Errorf("durationMs = %d, want about 2,000", rec.DurationMs)
+	if rec.DurationMs < maxReq.Milliseconds() {
+		t.Errorf("durationMs = %d, want at least maxRequestDuration's %d", rec.DurationMs, maxReq.Milliseconds())
 	}
 }
 
