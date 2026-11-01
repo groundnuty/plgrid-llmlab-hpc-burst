@@ -41,7 +41,7 @@ func (r *rig) stepScaleToZero(steps string) {
 	patchAt := r.scaleToZero()
 	r.waitAllEnded(insts)
 	r.checkShutdown(insts, patchAt)
-	r.checkAllocationsNeverFailed()
+	r.checkAllocations(uids)
 	r.waitRecords(uids)
 	r.waitJobsGone()
 	r.checkProxiesOffline(r.watch.uids())
@@ -141,21 +141,49 @@ func (r *rig) checkShutdown(insts []types.UID, patchAt time.Time) {
 	}
 }
 
-// checkAllocationsNeverFailed: no Allocation of the run was ever seen Failed,
-// Lost or Refused, also one deleted since (the watch). A normal stop ends a
-// job CANCELLED or COMPLETED, which is Ended (pkg/provider/phase.go).
-func (r *rig) checkAllocationsNeverFailed() {
+// checkAllocations holds every Allocation of the run to its end, from the
+// watch, deleted ones included: none was ever seen Failed, Lost or Refused,
+// and each of those listed at the scale to 0 was last seen Ended or deleted. A
+// normal stop ends a job CANCELLED or COMPLETED, which is Ended
+// (pkg/provider/phase.go); a released Allocation is deleted
+// (internal/lifecycle/retention.go), in the rehearsal while still Running.
+func (r *rig) checkAllocations(atZero map[types.UID]string) {
 	r.t.Helper()
-	ended := map[string]bool{}
+	type seen struct {
+		name    string
+		phases  []v1alpha1.AllocationPhase
+		deleted bool
+	}
+	all := map[types.UID]*seen{}
+	var order []types.UID
 	for _, a := range r.watch.allocations() {
+		s := all[a.uid]
+		if s == nil {
+			s = &seen{name: a.name}
+			all[a.uid] = s
+			order = append(order, a.uid)
+		}
+		if n := len(s.phases); n == 0 || s.phases[n-1] != a.phase {
+			s.phases = append(s.phases, a.phase)
+		}
+		s.deleted = s.deleted || a.deleted
 		switch a.phase {
 		case v1alpha1.AllocationFailed, v1alpha1.AllocationLost, v1alpha1.AllocationRefused:
 			r.t.Errorf("Allocation %s was seen %s at %s", a.name, a.phase, a.at.Format(time.RFC3339Nano))
-		case v1alpha1.AllocationEnded:
-			ended[a.name] = true
 		}
 	}
-	r.t.Logf("step (g): %d Allocations of the run seen Ended", len(ended))
+	for uid, name := range atZero {
+		s := all[uid]
+		switch {
+		case s == nil:
+			r.t.Errorf("step (g): the watch never saw Allocation %s", name)
+		case !s.deleted && s.phases[len(s.phases)-1] != v1alpha1.AllocationEnded:
+			r.t.Errorf("step (g): Allocation %s was last seen %s, neither Ended nor deleted", name, s.phases[len(s.phases)-1])
+		}
+	}
+	for _, uid := range order {
+		r.t.Logf("Allocation %s: phases %v, deleted %v", all[uid].name, all[uid].phases, all[uid].deleted)
+	}
 }
 
 // waitRecords waits for the acct-<UID> record of every Allocation.
@@ -270,6 +298,9 @@ func (r *rig) stackProcesses() []procID {
 	}
 	var procs []procID
 	add := func(name string, pid int) {
+		if slices.ContainsFunc(procs, func(p procID) bool { return p.pid == pid }) {
+			return // the supervisor is both a recorded process and the supervisor
+		}
 		start, ok := procStart(pid)
 		if !ok {
 			r.t.Errorf("hpcburst status reports %s as pid %d, which does not run", name, pid)
