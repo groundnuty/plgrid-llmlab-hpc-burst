@@ -533,3 +533,41 @@ func TestMetricsNegativeCountIsUnknown(t *testing.T) {
 		t.Errorf("%d engine samples, want the %d of the metrics with a known count", got, 9-len(negative))
 	}
 }
+
+// TestMetricsNoReportSinceRestartIsUnknown: after a controller restart, an
+// Instance whose agent has sent no report since has its info series and every
+// engine metric of its one worker unknown, not_reported at first and
+// agent_unreachable once the pass has judged the agent unreachable, so that a
+// share-of-unknown query does not read 0/0. The control is the same Instance
+// before the restart: fresh, with none unknown.
+func TestMetricsNoReportSinceRestartIsUnknown(t *testing.T) {
+	rg, in, alloc := healthRig(t, func() afake.Engine { return afake.Engine{Health: knownHealth} })
+	uid := string(in.UID)
+	if before := scrape(t, rg); len(before.engineSeries(uid)) != 9 || len(before.unknowns(uid, "worker-0")) != 0 {
+		t.Fatalf("before the restart: %d engine samples, unknowns %v; want all 9 and none unknown", len(before.engineSeries(uid)), before.unknowns(uid, "worker-0"))
+	}
+	rg.agentOf(alloc).agent.Silence(true) // the path stays down across the controller's restart
+	rg.restartController()
+	rg.run(startTick, startTick) // a pass records the Instance with no report from its agent
+	if isTrue(rg.instance(in.Name).Status.Conditions, v1alpha1.ConditionAgentUnreachable) {
+		t.Fatal("the agent is judged unreachable at once after the restart; the not_reported case proves nothing")
+	}
+	check := func(reason string) {
+		t.Helper()
+		ex := scrape(t, rg)
+		if series := ex.engineSeries(uid); len(series) != 0 {
+			t.Fatalf("engine series %v with no report since the restart; an unknown value is absent", series)
+		}
+		if u := ex.unknowns(uid, "worker-0"); len(u) != 1 || !slices.Equal(u[reason], sorted(engineNames)) {
+			t.Fatalf("unknown series %v, want every engine metric of worker-0 with reason %s", u, reason)
+		}
+		if len(ex.find("hpcburst_instance_info", map[string]string{"instance_uid": uid})) != 1 {
+			t.Fatal("no info series for an Instance that has not ended")
+		}
+	}
+	check(unknownNotReported)
+	rg.until(10*time.Minute, startTick, "AgentUnreachable after the restart", func() bool {
+		return isTrue(rg.instance(in.Name).Status.Conditions, v1alpha1.ConditionAgentUnreachable)
+	})
+	check(unknownAgentUnreachable)
+}

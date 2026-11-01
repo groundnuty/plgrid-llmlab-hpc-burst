@@ -243,7 +243,14 @@ func (c *instanceCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 		rep, at, from := c.backend.latest(e.allocUID)
 		if rep == nil || from != e.agentID || rep.Instance == nil || rep.Instance.UID != string(e.uid) {
-			continue // no report of this Instance from its agent: no worker known yet
+			// No report of this Instance from its agent since this controller
+			// started, so no worker is known: the alpha Instance's one worker
+			// (the Backend's desiredInstance) stands in, and its metrics are
+			// unknown. Without this, an agent that never reports again after
+			// a controller restart leaves its Instance with the info series
+			// only, and a share-of-unknown query reads 0/0.
+			c.collectUnreported(ch, e)
+			continue
 		}
 		av := agentView{report: rep.Instance, reportAt: at, reportTime: rep.Time, unreachable: e.unreachable, now: now, probeInterval: e.probeInterval}
 		gen := strconv.FormatInt(rep.Instance.Generation, 10)
@@ -251,6 +258,21 @@ func (c *instanceCollector) Collect(ch chan<- prometheus.Metric) {
 			w := &rep.Instance.Workers[i]
 			c.collectWorker(ch, e, av, w, gen)
 		}
+	}
+}
+
+// collectUnreported sends the unknown series of an Instance whose agent has
+// sent no report of it since this controller started: every engine metric of
+// the Instance's one worker is unknown, agent_unreachable once the pass has
+// judged the agent unreachable (health.agentTimeout, with the restart grace),
+// and not_reported until then.
+func (c *instanceCollector) collectUnreported(ch chan<- prometheus.Metric, e instanceEntry) {
+	reason := unknownNotReported
+	if e.unreachable {
+		reason = unknownAgentUnreachable
+	}
+	for _, m := range engineMetrics {
+		ch <- prometheus.MustNewConstMetric(descUnknown, prometheus.GaugeValue, 1, string(e.uid), agentapi.WorkerName(0), m.name, reason)
 	}
 }
 
