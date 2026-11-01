@@ -130,6 +130,16 @@ func dryGPUAccounting(t *testing.T) {
 		Partitions: []fakeslurm.Partition{{Name: r.Partition, GPUOnly: true}}, Run: run,
 	})
 	t.Cleanup(func() {
+		// Close must not meet a process in the middle of exiting: wait until every job's processes are gone.
+		for deadline := time.Now().Add(time.Minute); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+			all := true
+			for _, j := range plat.Jobs() {
+				all = all && j.Finished
+			}
+			if all {
+				break
+			}
+		}
 		if err := plat.Close(); err != nil {
 			t.Errorf("the fake cluster did not close cleanly: %v", err)
 		}

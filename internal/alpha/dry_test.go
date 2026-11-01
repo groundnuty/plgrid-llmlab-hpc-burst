@@ -107,6 +107,7 @@ func newDrySteps(t *testing.T, cfg Config, family string) *drySteps {
 		for i := 1; i <= d.jobs; i++ {
 			_ = os.WriteFile(d.gate(i), nil, 0o600)
 		}
+		waitJobsFinished(plat)
 		if err := plat.Close(); err != nil {
 			t.Errorf("the fake cluster did not close cleanly: %v", err)
 		}
@@ -366,3 +367,20 @@ type tickClock struct {
 }
 
 func (t *tickClock) Now() time.Time { return t.c.Now().Add(time.Duration(t.n.Add(1))) }
+
+// waitJobsFinished waits until every job's execution is terminal and none of its processes is left (the
+// fake's Finished), so that Close never meets a process in the middle of exiting. It waits on that state,
+// with a generous deadline; a job that is not finished by then is Close's to report.
+func waitJobsFinished(plat *fakeslurm.Platform) {
+	deadline := time.Now().Add(dryWait * 4)
+	for time.Now().Before(deadline) {
+		all := true
+		for _, j := range plat.Jobs() {
+			all = all && j.Finished
+		}
+		if all {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}

@@ -46,7 +46,7 @@ Helios QOS `now` and Athena `plgrid-now` allow one job per user, and the owner s
 "One cluster job at a time" holds as one live run per host, plus the slot refusal. It cannot mean one job, because two of the rows are about a successor beside a predecessor:
 
 - a handover runs the predecessor and its replacement together on Athena, whose `plgrid-gpu-a100` has no one-job slot;
-- no-overlap mode on Helios holds a pending replacement beside the running job in `now` (the partition's QOS allows 2,000 submitted jobs, the QOS `now` one GPU: `hbep/0007-lifecycle-controller/README.md:593`). The slot holds two jobs for the predecessor's remaining life. Say so in the post.
+- no-overlap mode on Helios holds a pending replacement beside the running job in `now` (the partition's QOS allows 2,000 submitted jobs, the QOS `now` one GPU: `hbep/0007-lifecycle-controller/README.md:594`). The slot holds two jobs for the predecessor's remaining life. Say so in the post.
 
 Cleanup is by tag: each Allocation's job tag is written to `job-tags.txt` before anything can submit it, and the script cancels those jobs, and only those, on every exit, a signal included.
 
@@ -80,8 +80,8 @@ hack/live-checks.sh --run alpha-athena-handover --yes
 - **What it does:** one deployment through the front and the real tunnel, with streams open across the predecessor's drain start; the successor takes over; one restart at the worker rung.
 - **Posts:** `posts.md` (handovers completed, streams in flight at the drain start and cut, worker-rung restarts, responses with attribution) and the run's lines (no slot). To #145 and #93.
 - **Pass criteria:**
-  - `hbep/0007-lifecycle-controller/README.md:619`: "on Athena `plgrid-gpu-a100`, one deployment completes one handover end to end through the front with no request cut;"
-  - `hbep/0007-lifecycle-controller/README.md:621`: "on each alpha platform, Helios `plgrid-gpu-gh200` and Athena `plgrid-gpu-a100`, one restart at the worker rung;"
+  - `hbep/0007-lifecycle-controller/README.md:620`: "on Athena `plgrid-gpu-a100`, one deployment completes one handover end to end through the front with no request cut;"
+  - `hbep/0007-lifecycle-controller/README.md:622`: "on each alpha platform, Helios `plgrid-gpu-gh200` and Athena `plgrid-gpu-a100`, one restart at the worker rung;"
   - `hbep/0005-llmlab-compatible-front/README.md:450`: "on Athena `plgrid-gpu-a100`, through the front, one handover cuts no request (with HBEP-7)."
   - Checked: at least one stream was in flight at the drain start (`hbep/0007-lifecycle-controller/README.md:592`: "A run with no stream in flight at the drain start proves nothing here."); none was cut or left unfinished; exactly one handover; the successor ready before the predecessor ended; exactly one worker-rung restart; every response attributed; both jobs on `plgrid-gpu-a100` in the cluster's own record.
 
@@ -96,10 +96,10 @@ hack/live-checks.sh --run alpha-helios-nooverlap --yes     # with LIVE_ISSUE_174
 - **What it does:** one deployment with `ReleaseWhenIdle`, a short `idleLimit` and a stream in flight at the drain start. The replacement is queued ahead and pends until the predecessor's GPU frees.
 - **Posts:** `posts.md` (the gap from the drain start to the successor's `ready`, the successor's queue wait once the GPU freed, streams cut, `NoOverlapSlot` seen, 503 `no_ready_target` answers) and the slot use. To #145 and #94.
 - **Pass criteria:**
-  - `hbep/0007-lifecycle-controller/README.md:620`: "on Helios `plgrid-gpu-gh200` under QOS `now`, one deployment goes through no-overlap mode end to end through the front with no request cut, and the gap is measured (Handover, No-overlap mode)."
-  - `hbep/0007-lifecycle-controller/README.md:599`: "The gap from the drain start to the successor's `ready`, and the successor's queue wait once the GPU frees, are measured and recorded."
+  - `hbep/0007-lifecycle-controller/README.md:621`: "on Helios `plgrid-gpu-gh200` under QOS `now`, one deployment goes through no-overlap mode end to end through the front with no request cut, and the gap is measured (Handover, No-overlap mode)."
+  - `hbep/0007-lifecycle-controller/README.md:600`: "The gap from the drain start to the successor's `ready`, and the successor's queue wait once the GPU frees, are measured and recorded."
   - `hbep/0007-lifecycle-controller/README.md:466`: "the gap is the time from the primary's drain start until its successor is `ready`."
-  - Checked: a stream in flight at the drain start, none cut; exactly two Allocations; a positive gap, with both ends seen in order; `NoOverlapSlot` shown; from the cluster's times, the successor was submitted before the predecessor ended and started after it (`hbep/0007-lifecycle-controller/README.md:593`: "it never starts before the predecessor's job ends"); both jobs on `plgrid-gpu-gh200`.
+  - Checked: a stream in flight at the drain start, none cut; exactly two Allocations; a positive gap, with both ends seen in order; `NoOverlapSlot` shown; from the cluster's times, the successor was submitted before the predecessor ended and started after it (`hbep/0007-lifecycle-controller/README.md:594`: "it never starts before the predecessor's job ends"); both jobs on `plgrid-gpu-gh200`.
 
 ### `tunnel-hour-helios`, `tunnel-hour-athena`
 
