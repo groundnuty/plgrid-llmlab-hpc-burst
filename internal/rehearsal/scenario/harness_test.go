@@ -30,6 +30,7 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 func TestMain(m *testing.M) {
@@ -388,16 +389,19 @@ func (h *host) down() {
 	h.t.Logf("memory peak of the run's cgroup (the whole stack): %s", memoryPeak())
 }
 
-// placeAgentBuild puts the hb-agent build where the controller reads it, as
-// an operator does (HBEP-4: <state>/agent-builds/hb-agent-<cpuArch>).
+// placeAgentBuild puts the hb-agent build and the pinned frpc where the
+// controller reads them, as an operator does (HBEP-4:
+// <state>/agent-builds/hb-agent-<cpuArch> and frpc-<cpuArch>); the controller
+// stages both on the cluster.
 func (h *host) placeAgentBuild(arch string) {
 	h.t.Helper()
-	src, err := os.ReadFile(h.b.agent)
-	if err != nil {
-		h.t.Fatal(err)
-	}
-	dst := filepath.Join(h.state, "agent-builds", "hb-agent-"+arch)
-	if err := os.WriteFile(dst, src, 0o700); err != nil {
-		h.t.Fatal(err)
+	for src, name := range map[string]string{h.b.agent: agentapi.AgentBuildName(arch), h.b.frpc: agentapi.FrpcBuildName(arch)} {
+		b, err := os.ReadFile(src)
+		if err != nil {
+			h.t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(h.state, "agent-builds", name), b, 0o700); err != nil {
+			h.t.Fatal(err)
+		}
 	}
 }
