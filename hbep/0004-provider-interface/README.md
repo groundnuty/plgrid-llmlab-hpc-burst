@@ -495,7 +495,7 @@ The register holds upstream bugs tied to versions. Each entry has one regression
 
 - **Alpha:**
   - the Slurm plugin passes the Test plan's fake-Slurm suite, the ported S4 scenarios included;
-  - on each alpha platform, Helios and Athena, one Allocation is submitted held, its hold lifted once, read back, observed Running with its hard end in UTC, cancelled by deleting it, observed with `jobCompleting` true and its files present until the flag clears, and then found ended in accounting after it has left the queue listing. slurmctld sets the flag before it replies to the cancel (Core operations, Phases), so the forced listing after the cancel is the one that shows it;
+  - on each alpha platform, Helios and Athena, one Allocation is submitted held, its hold lifted once, read back, observed Running with its hard end in UTC, cancelled by deleting it, and then found ended in accounting after it has left the queue listing. When the forced listing after the cancel shows the job completing, `jobCompleting` is true and its files stay until the flag clears; a fast epilog can clear the flag before any listing (spike S7 saw it on GH200 for one 2 s poll only), so a run where no listing shows the flag is not a failure (Core operations, Phases);
   - the `sbatch` latency over ssh is measured on each alpha platform, and each profile's `inflightWindow` exceeds the worst value seen;
   - a 56-character job name comes back unchanged on each alpha partition;
   - the LLMLab provider lists its catalog into its status, with managed IDs that match HBEP-3's managed golden vector.
