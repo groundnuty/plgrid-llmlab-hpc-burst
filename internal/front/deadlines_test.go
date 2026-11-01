@@ -1,6 +1,7 @@
 package front
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"testing"
@@ -25,13 +26,38 @@ import (
 // 7,000 tokens, pausing 1 s before every token after the first: 6,999 pauses,
 // 6,999 s = 116 min 39 s on the fake clock, below the default 2 h (7,200 s).
 // The idle time-out (30 min) is reset by every token.
+//
+// The engine moves the fake clock itself, and paces each token only after
+// the client has read the one before (scGated). Ungated, it wrote ahead into
+// the socket buffers and moved the clock 30 min past the front's last read,
+// so the front's idle timer fell due before the read that would have reset
+// it (issue #136: "the fake clock moved by 45m16s").
+//
+// The harness sets the headers timeout to 24 h (newHarnessOn), so this test
+// proves the default total deadline (maxRequestDuration) and idle time-out,
+// not every default deadline; TestStreamHeadersTimeoutDefault checks the
+// headers timeout's default.
 func TestDeadlinesLongStreamCompletesUnderTheDefault(t *testing.T) {
 	f := newScFix(t, scOpts{})
-	f.engines[0].Set(enginetest.Behaviour{Tokens: 7000, PerToken: time.Second})
+	gate := make(chan struct{})
+	f.engines[0].Set(enginetest.Behaviour{Tokens: 7000, PerToken: time.Second, Gate: gate})
 
-	resp := f.errPost(scChat, errChatBody(scModel, true, "hello there"))
+	// The whole exchange, headers and body, is bounded by the request's
+	// context: two minutes, where it takes about a second.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, f.url+scChat, strings.NewReader(errChatBody(scModel, true, "hello there")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+f.clientKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := errClient.Do(req)
+	if err != nil {
+		t.Fatalf("the request: %v", err)
+	}
 	id := resp.Header.Get("hpcburst-request-id")
-	body := readAll(t, resp)
+	body := scGated(t, resp, gate, 6999)
 	if resp.StatusCode != 200 {
 		t.Fatalf("status %d, want 200", resp.StatusCode)
 	}
@@ -39,7 +65,11 @@ func TestDeadlinesLongStreamCompletesUnderTheDefault(t *testing.T) {
 	// The fake clock moved by 6,999 s: the front's real 2 h deadline had
 	// more than 3 minutes left, and the test did pass the 1 h 56 min mark.
 	if got := f.clk.Now().Sub(t0); got < 116*time.Minute || got >= 2*time.Hour {
-		t.Fatalf("the fake clock moved by %v, want about 117 min and below 2 h", got)
+		cutBy := "none"
+		if rec := f.record(id); rec.CutBy != nil {
+			cutBy = *rec.CutBy
+		}
+		t.Fatalf("the fake clock moved by %v, want about 117 min and below 2 h; the record's cutBy is %s", got, cutBy)
 	}
 	events := splitEvents(body)
 	if n := scContentEvents(body); n != 7000 {

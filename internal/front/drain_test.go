@@ -250,15 +250,19 @@ func TestDrainLeaseEndCutsAStreamStillRunning(t *testing.T) {
 // own deadline 10 min and 1 s before the lease end: no request is cut at the
 // lease end (Test plan, Drain). Lease end t0 + 3 h; drain start t0 + 50 min;
 // routed at t0 + 49 min 59 s; deadline t0 + 2 h 49 min 59 s. The test moves the
-// clock 60 s after each token, 120 times: exactly the 2 h deadline.
+// clock 60 s after each token, 120 times: exactly the 2 h deadline. The engine
+// sends each token only on the test's go-ahead (scLockstepGated), so the
+// front reads a token between any two moves: 30 moves with no read between
+// them would reach the 30 min idle time-out first (issue #136).
 func TestDrainDefaultWindowCutsNoRequestAtTheLeaseEnd(t *testing.T) {
 	f := newScFix(t, scOpts{engineReal: true, inst: drainOpts})
-	f.engines[0].Set(enginetest.Behaviour{Tokens: 100000, PerToken: 2 * time.Millisecond})
+	gate := make(chan struct{})
+	f.engines[0].Set(enginetest.Behaviour{Tokens: 100000, PerToken: 2 * time.Millisecond, Gate: gate})
 	f.clk.Advance(drainStartAt - time.Second)
 
 	resp := f.errPost(scChat, errChatBody(scModel, true, "hello there"))
 	id := resp.Header.Get("hpcburst-request-id")
-	_, body := scLockstep(t, f.harness, resp, time.Minute, 2*time.Hour)
+	_, body := scLockstepGated(t, f.harness, resp, gate, time.Minute, 2*time.Hour)
 
 	checkStreamCut(t, body, "deadline")
 	scOneCut(t, body)

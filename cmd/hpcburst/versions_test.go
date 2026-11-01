@@ -107,7 +107,7 @@ func assertNothingStarted(t *testing.T, h *host) {
 	if pids := k3sProcessesUsing(h.dir); len(pids) != 0 {
 		t.Errorf("processes use %s: %v", h.dir, pids)
 	}
-	if rows := listeningInRange(t, 29220, 29239); len(rows) != 0 {
+	if rows := listeningInRange(t, launcherPortsLo, launcherPortsHi); len(rows) != 0 {
 		t.Errorf("listeners in the block: %v", rows)
 	}
 }

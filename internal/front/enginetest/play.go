@@ -1,6 +1,7 @@
 package enginetest
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 // play answers one request with the engine's behaviour.
 type play struct {
 	e      *Engine
+	ctx    context.Context // the request's
 	w      http.ResponseWriter
 	b      Behaviour
 	model  string
@@ -40,12 +42,27 @@ func (p *play) wait(d time.Duration) {
 	time.Sleep(d)
 }
 
-// beforeToken waits the pace before token i (0-based), and kills the
-// connection when the behaviour says so.
+// gate waits for the test's go-ahead on the behaviour's Gate, if it has one.
+// A request that ends first is abandoned, as one whose client has gone.
+func (p *play) gate() {
+	if p.b.Gate == nil {
+		return
+	}
+	select {
+	case <-p.b.Gate:
+	case <-p.ctx.Done():
+		panic(http.ErrAbortHandler)
+	}
+}
+
+// beforeToken waits the pace before token i (0-based), after the go-ahead
+// for a token after the first, and kills the connection when the behaviour
+// says so.
 func (p *play) beforeToken(i int) {
 	if i == 0 {
 		p.wait(p.b.FirstToken)
 	} else {
+		p.gate()
 		p.wait(p.b.PerToken)
 	}
 	if p.b.KillAfter > 0 && i >= p.b.KillAfter {

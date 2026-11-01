@@ -212,6 +212,10 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 	if workers <= 0 {
 		workers = DefaultWorkers
 	}
+	// The work-queue options are controllerOptions' alone; the name check is
+	// the one thing set here, from the test-only skipNameCheck (see Options).
+	options := controllerOptions(workers)
+	options.SkipNameValidation = &o.skipNameCheck
 	c := mgr.GetClient()
 	err = ctrl.NewControllerManagedBy(mgr).
 		Named("lifecycle").
@@ -233,19 +237,36 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 			return deploymentsInNamespace(ctx, c, o.GetNamespace())
 		})).
 		WatchesRawSource(source.Channel(events, &handler.TypedEnqueueRequestForObject[*v1alpha1.ModelDeployment]{})).
-		// A failing key retries with backoff capped at the requeue bound, not
-		// controller-runtime's 1000 s, so one Instance's failing write does not
-		// hold the deployment back for minutes.
-		WithOptions(controller.Options{
-			MaxConcurrentReconciles: workers,
-			RateLimiter:             workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](time.Second, maxRequeue),
-			SkipNameValidation:      &o.skipNameCheck,
-		}).
+		WithOptions(options).
 		Complete(r)
 	if err != nil {
 		return nil, nil, fmt.Errorf("lifecycle: controller: %w", err)
 	}
 	return mgr, backend, nil
+}
+
+// controllerOptions are the lifecycle controller's work-queue options.
+//
+// A failing key retries with backoff capped at the requeue bound, not
+// controller-runtime's 1000 s, so one Instance's failing write does not hold
+// the deployment back for minutes.
+//
+// The queue is client-go's, not controller-runtime's priority queue (its
+// default). The priority queue of controller-runtime v0.23.1 can deadlock on
+// shutdown: after the cancel, handleReadyItems still counts a worker that has
+// left GetWithPriority, sends it an item on an unbuffered channel and blocks
+// there holding the queue's locks; a worker that then finishes its reconcile
+// waits in Done forever, and the manager gives up after its 30 s grace with
+// "failed waiting for all runnables to end" (issue #136). Upstream fixed it
+// in https://github.com/kubernetes-sigs/controller-runtime/pull/3540, first
+// released in v0.25.0; no v0.23 release has the fix.
+func controllerOptions(workers int) controller.Options {
+	priorityQueue := false
+	return controller.Options{
+		MaxConcurrentReconciles: workers,
+		RateLimiter:             workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](time.Second, maxRequeue),
+		UsePriorityQueue:        &priorityQueue,
+	}
 }
 
 func objectMeta(k types.NamespacedName) metav1.ObjectMeta {
