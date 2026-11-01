@@ -186,7 +186,8 @@ func TestNoCapNoWait(t *testing.T) {
 // RejectPolicy prints the reason line and then the policy line for any reason
 // name, exits 1 and registers nothing; Reject prints the one line.
 func TestRejectPolicyPrintsBothLines(t *testing.T) {
-	names := []string{"QOSMaxSubmitJobPerUserLimit", "AssocMaxSubmitJobLimit", "MaxSubmitJobsPerAccount", "QOSMaxWallDurationPerJobLimit"}
+	names := []string{"QOSMaxSubmitJobPerUserLimit", "AssocMaxSubmitJobLimit", "MaxSubmitJobsPerAccount",
+		"QOSGrpSubmitJobsLimit", "AssocGrpSubmitJobsLimit", "QOSMaxWallDurationPerJobLimit"}
 	r := newRig(t, Config{})
 	for _, n := range names {
 		r.p.Script(RejectPolicy(n))

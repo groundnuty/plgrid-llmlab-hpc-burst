@@ -27,6 +27,11 @@ func TestClassifySubmitPolicyRefusals(t *testing.T) {
 		{"a full per-user QOS limit", "sbatch: error: QOSMaxSubmitJobPerUserLimit\n" + policyText, "QOSMaxSubmitJobPerUserLimit", true, "sbatch: error: QOSMaxSubmitJobPerUserLimit"},
 		{"a full association limit", "sbatch: error: AssocMaxSubmitJobLimit\n" + policyText, "AssocMaxSubmitJobLimit", true, "sbatch: error: AssocMaxSubmitJobLimit"},
 		{"a full account limit", "sbatch: error: MaxSubmitJobsPerAccount\n" + policyText, "MaxSubmitJobsPerAccount", true, "sbatch: error: MaxSubmitJobsPerAccount"},
+		// The group limits are full slots too, shared by the grant's users
+		// (`@hpc-burst-science-agent`, 1 Nov 2026, N1): the code is the same,
+		// and the error's text says whose limit it is.
+		{"a full QOS group limit", "sbatch: error: QOSGrpSubmitJobsLimit\n" + policyText, "QOSGrpSubmitJobsLimit", true, "sbatch: error: QOSGrpSubmitJobsLimit (group limit, shared by the grant's users)"},
+		{"a full association group limit", "sbatch: error: AssocGrpSubmitJobsLimit\n" + policyText, "AssocGrpSubmitJobsLimit", true, "sbatch: error: AssocGrpSubmitJobsLimit (group limit, shared by the grant's users)"},
 		{"a stand-alone breach is another reason", "sbatch: error: QOSMaxWallDurationPerJobLimit\n" + policyText, "QOSMaxWallDurationPerJobLimit", false, "sbatch: error: QOSMaxWallDurationPerJobLimit"},
 		{"another reason that is no submit limit", "sbatch: error: QOSMaxGRESPerUser\n" + policyText, "QOSMaxGRESPerUser", false, "sbatch: error: QOSMaxGRESPerUser"},
 		{"carriage returns, as an ssh pty may add", "sbatch: error: QOSMaxSubmitJobPerUserLimit\r\n" + strings.ReplaceAll(policyText, "\n", "\r\n"), "QOSMaxSubmitJobPerUserLimit", true, "sbatch: error: QOSMaxSubmitJobPerUserLimit"},
@@ -55,8 +60,13 @@ func TestClassifySubmitPolicyRefusals(t *testing.T) {
 				if pr.Reason != c.reason || pr.SubmitLimit() != c.limit {
 					t.Errorf("refusal %+v: reason %q limit %v, want %q and %v", pr, pr.Reason, pr.SubmitLimit(), c.reason, c.limit)
 				}
-				if want := "sbatch: error: " + c.reason; pr.Line != want || err.Error() != want {
-					t.Errorf("Line %q and text %q, want exactly %q: the reason line, one line", pr.Line, err.Error(), want)
+				// Line is the reason line as printed; the error's text is that
+				// line, with the group-limit note for the two group names.
+				if want := "sbatch: error: " + c.reason; pr.Line != want || !strings.HasPrefix(err.Error(), want) {
+					t.Errorf("Line %q and text %q, want the reason line %q first", pr.Line, err.Error(), want)
+				}
+				if c.text != "" && err.Error() != c.text {
+					t.Errorf("text %q, want exactly %q", err.Error(), c.text)
 				}
 			}
 			if c.text != "" && !strings.Contains(err.Error(), c.text) {

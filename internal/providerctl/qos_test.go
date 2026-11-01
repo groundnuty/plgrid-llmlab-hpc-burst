@@ -20,6 +20,7 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider/fake"
 )
 
@@ -34,6 +35,10 @@ func withQOS(jobQOS, partQOS string, list ...v1alpha1.QOSProfile) realOption {
 		})
 	}
 }
+
+// groupNote is what the error of a group limit adds to Slurm's reason line
+// (provider.GroupLimitNote): the limit is shared by the grant's users.
+const groupNote = " (group limit, shared by the grant's users)"
 
 func withRecorder(r *recorder) realOption { return func(e *realEnv) { e.opts.Recorder = r } }
 
@@ -109,6 +114,9 @@ func TestPolicyRefusalSettlesWithoutFlapping(t *testing.T) {
 		{"QOSMaxSubmitJobPerUserLimit", fakeslurm.RejectPolicy("QOSMaxSubmitJobPerUserLimit"), "SubmitLimitReached", "sbatch: error: QOSMaxSubmitJobPerUserLimit"},
 		{"AssocMaxSubmitJobLimit", fakeslurm.RejectPolicy("AssocMaxSubmitJobLimit"), "SubmitLimitReached", "sbatch: error: AssocMaxSubmitJobLimit"},
 		{"MaxSubmitJobsPerAccount", fakeslurm.RejectPolicy("MaxSubmitJobsPerAccount"), "SubmitLimitReached", "sbatch: error: MaxSubmitJobsPerAccount"},
+		// The group limits are shared by the grant's users, and say so (N1).
+		{"QOSGrpSubmitJobsLimit", fakeslurm.RejectPolicy("QOSGrpSubmitJobsLimit"), "SubmitLimitReached", "sbatch: error: QOSGrpSubmitJobsLimit" + groupNote},
+		{"AssocGrpSubmitJobsLimit", fakeslurm.RejectPolicy("AssocGrpSubmitJobsLimit"), "SubmitLimitReached", "sbatch: error: AssocGrpSubmitJobsLimit" + groupNote},
 		{"QOSMaxWallDurationPerJobLimit", fakeslurm.RejectPolicy("QOSMaxWallDurationPerJobLimit"), "", "sbatch: error: QOSMaxWallDurationPerJobLimit"},
 		{"no reason line", fakeslurm.Reject("Job violates accounting/QOS policy (job submit limit, user's size and/or time limits)"), "", policyLine},
 	} {
@@ -253,7 +261,11 @@ func TestAFullSlotWaitsAndTheNextAttemptAfterTheBackoffIsAccepted(t *testing.T) 
 // The same holds for the other two full-slot names, scripted; after each
 // refusal the next attempt after the backoff is accepted.
 func TestEachFullSlotNameWaitsThenTheNextAttemptIsAccepted(t *testing.T) {
-	for _, name := range []string{"QOSMaxSubmitJobPerUserLimit", "AssocMaxSubmitJobLimit", "MaxSubmitJobsPerAccount"} {
+	for _, name := range []string{"QOSMaxSubmitJobPerUserLimit", "AssocMaxSubmitJobLimit", "MaxSubmitJobsPerAccount", "QOSGrpSubmitJobsLimit", "AssocGrpSubmitJobsLimit"} {
+		line := "sbatch: error: " + name
+		if strings.Contains(name, "Grp") {
+			line += groupNote
+		}
 		t.Run(name, func(t *testing.T) {
 			clock := fake.NewClock(at(12, 0, 0))
 			sl := nowOnlySlurm(clock)
@@ -262,10 +274,10 @@ func TestEachFullSlotNameWaitsThenTheNextAttemptIsAccepted(t *testing.T) {
 			e.newAlloc("alloc-a", 1)
 			e.run("alloc-a", 3)
 			a := e.get("alloc-a")
-			if rec, _ := readRecord(a); rec.sub == nil || rec.sub.Code != "SubmitLimitReached" || rec.sub.Reason != "sbatch: error: "+name {
-				t.Fatalf("record %+v, want code SubmitLimitReached and the reason line of %s", rec.sub, name)
+			if rec, _ := readRecord(a); rec.sub == nil || rec.sub.Code != "SubmitLimitReached" || rec.sub.Reason != line {
+				t.Fatalf("record %+v, want code SubmitLimitReached and the reason %q", rec.sub, line)
 			}
-			if a.Status.AtProvider.Reason != "SubmitLimitReached" || !strings.Contains(a.GetCondition(xpv2.TypeReady).Message, name) {
+			if a.Status.AtProvider.Reason != "SubmitLimitReached" || !strings.Contains(a.GetCondition(xpv2.TypeReady).Message, line) {
 				t.Errorf("reason %q, Ready %q; want SubmitLimitReached and a message naming %s", a.Status.AtProvider.Reason, a.GetCondition(xpv2.TypeReady).Message, name)
 			}
 			clock.Advance(2 * time.Minute)
@@ -661,5 +673,12 @@ func TestALimitRefusalLeavesNoCreationIncompleteAndTheNextAttemptIsMade(t *testi
 	}
 	if rec, _ := readRecord(e.get("alloc-a")); rec.jobID == "" || rec.sub.Attempt != 2 {
 		t.Errorf("record %+v, job %q; want attempt 2 accepted", rec.sub, rec.jobID)
+	}
+}
+
+// The literal note the tests expect for a group limit is the contract's.
+func TestGroupNoteAgreesWithTheContract(t *testing.T) {
+	if want := " (" + provider.GroupLimitNote + ")"; groupNote != want {
+		t.Errorf("groupNote = %q, want %q", groupNote, want)
 	}
 }
