@@ -1,11 +1,12 @@
 # Platform profiles
 
-`helios.yaml` and `athena.yaml` are the alpha `PlatformProfile` objects of Helios and Athena (HBEP-4, open questions 3, 7 and 8). A Provider names one in `spec.platformProfileRef`. Sano is not shipped here; it follows in fallback mode.
+`helios.yaml` and `athena.yaml` are the alpha `PlatformProfile` objects of Helios and Athena (HBEP-4, open questions 3, 7 and 8), and `llmlab.yaml` is the managed one of LLMLab. A Provider names one in `spec.platformProfileRef`. Sano is not shipped here; it follows in fallback mode.
 
 | File | Object name | Partitions in the typed list |
 |---|---|---|
 | `helios.yaml` | `helios` | `plgrid` (CPU), `plgrid-gpu-gh200` |
 | `athena.yaml` | `athena` | `plgrid-gpu-a100`, `plgrid-now` (conformance runs and short checks only) |
+| `llmlab.yaml` | `llmlab` | none: a managed profile has no batch fields (HBEP-4, "A managed profile"); the gateway's address and key are in the Provider's credentials file |
 
 Only a partition on which `holdRelease` was verified is in the typed list (HBEP-4, Platform profile schema). Every other partition is in the untyped block only.
 
@@ -52,6 +53,7 @@ A fact that nothing states is absent, not false (HBEP-4, Platform profile schema
 ## How the manifests are checked
 
 - `api/v1alpha1/e2e/shipped_profiles_test.go` applies each file, read from `profiles/`, to the real CRD with strict field validation, so a misspelled typed key is refused instead of pruned. It then shows that copies with one value broken are refused (`imageFormat: oci` among them), that the untyped block comes back unchanged, and that every envelope has a known method, a source and a text date.
+- `api/v1alpha1/e2e/examples_test.go` also admits each profile here by dry run (the managed `llmlab.yaml` among them), and checks that every Provider in `examples/` names a profile and, for a batch one, a partition that this directory lists.
 - `internal/slurm/shipped_profiles_test.go` runs the Slurm provider's own `ReadProfile` on each alpha partition.
 - The same file shows that the provider refuses a GPU request on Helios `plgrid` and accepts it on `plgrid-gpu-gh200`.
 - None compares a typed value with the fact it was copied from: that would prove only the copy. The checks that matter are admission, the provider's own checks, and the conformance runs that read these profiles.
