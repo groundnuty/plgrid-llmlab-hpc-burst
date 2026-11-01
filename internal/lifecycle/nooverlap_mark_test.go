@@ -10,9 +10,15 @@ package lifecycle
 // the GPU. The timeline is nooverlap_test.go's (see nooverlap_waits_test.go).
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 )
@@ -176,5 +182,83 @@ func TestAStepSevenRetryWhileThePrimaryHoldsTheSlotIsMarked(t *testing.T) {
 	waits := providerWaits(rg, rigProvider)
 	if len(waits) != 1 || waits[0].JobID != jobs[0].ID {
 		t.Fatalf("the Provider's waits %+v, want the primary's job %s alone: neither marked successor records a wait", waits, jobs[0].ID)
+	}
+}
+
+// TestTheMarkConditionReadsTheSlotCountsOwnTest: the mark's condition is that the primary's
+// Allocation "still holds its slot as the slot count reads it": its phase is not Ended, and its
+// deletion has not completed (README line 464). The rig's primaries leave by deletion, so no
+// scenario above has an Allocation that is Ended and still listed when the successor's is
+// created; this table is where that case, the Failed one that still holds its slot, and the
+// other Provider's are judged. Each case also asks the slot count itself (listProviderAllocations,
+// over a client that holds the Allocation) and requires the same answer, so the mark and the count
+// cannot part.
+func TestTheMarkConditionReadsTheSlotCountsOwnTest(t *testing.T) {
+	const prov, other = "example-provider", "example-other"
+	for _, tc := range []struct {
+		name    string
+		phase   v1alpha1.AllocationPhase
+		onProv  string
+		deleted bool // its deletion completed: the Allocation is gone
+		want    bool
+	}{
+		{"running", v1alpha1.AllocationRunning, prov, false, true},
+		{"pending", v1alpha1.AllocationPending, prov, false, true},
+		{"failed, not yet released: it holds its slot as the count reads it", v1alpha1.AllocationFailed, prov, false, true},
+		{"ended and still listed", v1alpha1.AllocationEnded, prov, false, false},
+		{"gone: its deletion completed", v1alpha1.AllocationRunning, prov, true, false},
+		{"running on another Provider", v1alpha1.AllocationRunning, other, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			primary := &v1alpha1.Instance{
+				ObjectMeta: metav1.ObjectMeta{Name: "primary", Namespace: rigNS},
+				Spec:       v1alpha1.InstanceSpec{AllocationRef: v1alpha1.ObjectReference{Name: "alloc"}},
+			}
+			alloc := &v1alpha1.Allocation{
+				ObjectMeta: metav1.ObjectMeta{Name: "alloc", Namespace: rigNS, Labels: map[string]string{v1alpha1.LabelProvider: tc.onProv}},
+				Spec:       v1alpha1.AllocationSpec{ProviderConfigReference: providerRef(tc.onProv)},
+				Status:     v1alpha1.AllocationStatus{AtProvider: v1alpha1.AllocationObservation{Phase: tc.phase}},
+			}
+			p := &pass{insts: []*v1alpha1.Instance{primary}, allocs: map[string]*v1alpha1.Allocation{}}
+			if !tc.deleted {
+				p.allocs[alloc.Name] = alloc
+			}
+			pv := &providerView{name: prov}
+			if got := p.queuedMark(pv, "primary", "Provider "+prov+": maxGpusPerUser 1") != ""; got != tc.want {
+				t.Errorf("marked = %v, want %v", got, tc.want)
+			}
+			// The slot count's own reading of the same Allocation on the same Provider.
+			scheme := runtime.NewScheme()
+			if err := v1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			b := clientfake.NewClientBuilder().WithScheme(scheme)
+			if !tc.deleted {
+				b = b.WithObjects(alloc.DeepCopy()).WithStatusSubresource(&v1alpha1.Allocation{})
+			}
+			c := b.Build()
+			if !tc.deleted {
+				stored := alloc.DeepCopy()
+				if err := c.Get(context.Background(), client.ObjectKeyFromObject(alloc), stored); err != nil {
+					t.Fatal(err)
+				}
+				stored.Status = alloc.Status
+				if err := c.Status().Update(context.Background(), stored); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, listed, err := listProviderAllocations(context.Background(), c, prov)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if counted := listed[rigNS+"/alloc"]; counted != tc.want {
+				t.Errorf("the slot count lists the Allocation: %v, want %v, as the mark's condition says", counted, tc.want)
+			}
+		})
+	}
+	// Not a no-overlap successor, or no primary named: never marked.
+	p := &pass{insts: nil, allocs: map[string]*v1alpha1.Allocation{}}
+	if p.queuedMark(&providerView{name: prov}, "primary", "") != "" || p.queuedMark(&providerView{name: prov}, "", "why") != "" {
+		t.Error("an Allocation for no successor, or with no primary named, is marked")
 	}
 }
