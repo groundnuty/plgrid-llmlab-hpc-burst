@@ -52,7 +52,7 @@ A fact that nothing states is absent, not false (HBEP-4, Platform profile schema
 
 ## How the manifests are checked
 
-- `api/v1alpha1/e2e/shipped_profiles_test.go` applies each file, read from `profiles/`, to the real CRD with strict field validation, so a misspelled typed key is refused instead of pruned. It then shows that copies with one value broken are refused (`imageFormat: oci` among them), that the untyped block comes back unchanged, and that every envelope has a known method, a source and a text date.
+- `api/v1alpha1/e2e/shipped_profiles_test.go` applies each file, read from `profiles/`, to the real CRD with strict field validation, so a misspelled typed key is refused instead of pruned. It then shows that copies with one value broken are refused (`imageFormat: oci` among them), that the untyped block comes back unchanged, and that every envelope has a known method, a source and a text date. The managed `llmlab.yaml` has no envelope to keep, so it gets its own check (a managed kind, no partitions, no untyped block). The test's list of files is compared with this directory, so a profile added here cannot stay out of the checks, as `llmlab.yaml` once did.
 - `api/v1alpha1/e2e/examples_test.go` also admits each profile here by dry run (the managed `llmlab.yaml` among them), and checks that every Provider in `examples/` names a profile and, for a batch one, a partition that this directory lists.
 - `internal/slurm/shipped_profiles_test.go` runs the Slurm provider's own `ReadProfile` on each alpha partition.
 - The same file shows that the provider refuses a GPU request on Helios `plgrid` and accepts it on `plgrid-gpu-gh200`.

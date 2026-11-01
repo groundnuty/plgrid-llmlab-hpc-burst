@@ -1,12 +1,7 @@
 package e2e
 
 import (
-	"bufio"
-	"bytes"
-	"errors"
 	"fmt"
-	"io"
-	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -16,9 +11,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/yaml"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 )
@@ -33,71 +26,6 @@ import (
 // other examples, and with the list of examples the issue asks for.
 
 func examplesDir() string { return filepath.Join("..", "..", "..", "examples") }
-
-// An example is one object of one file of examples/.
-type example struct {
-	file string // the file's name
-	doc  int    // the object's index in the file, from 0
-	obj  map[string]any
-}
-
-func (e example) kind() string { s, _ := e.obj["kind"].(string); return s }
-
-func (e example) name() string {
-	n, _, _ := unstructured.NestedString(e.obj, "metadata", "name")
-	return n
-}
-
-func (e example) label() string { return fmt.Sprintf("%s#%d %s %s", e.file, e.doc, e.kind(), e.name()) }
-
-// readManifestFile splits a YAML file into its objects. A document that holds
-// nothing (a comment-only one) is skipped.
-func readManifestFile(t *testing.T, path string) []map[string]any {
-	t.Helper()
-	raw, err := os.ReadFile(path)
-	must(t, err, "read "+path)
-	rd := utilyaml.NewYAMLReader(bufio.NewReader(bytes.NewReader(raw)))
-	var out []map[string]any
-	for i := 0; ; i++ {
-		doc, err := rd.Read()
-		if errors.Is(err, io.EOF) {
-			return out
-		}
-		must(t, err, fmt.Sprintf("read document %d of %s", i, path))
-		obj := map[string]any{}
-		must(t, yaml.UnmarshalStrict(doc, &obj), fmt.Sprintf("parse document %d of %s", i, path))
-		if len(obj) > 0 {
-			out = append(out, obj)
-		}
-	}
-}
-
-// loadExamples reads every file of examples/. It fails on a directory with no
-// object in it, on a file that is not a .yaml manifest, and on an object that
-// is not one of this group's kinds, so a wrong path or a stray file cannot
-// leave the checks with nothing to check.
-func loadExamples(t *testing.T) []example {
-	t.Helper()
-	entries, err := os.ReadDir(examplesDir())
-	must(t, err, "read examples/")
-	var out []example
-	for _, ent := range entries {
-		if ent.IsDir() || filepath.Ext(ent.Name()) != ".yaml" {
-			t.Fatalf("examples/%s is not a .yaml manifest: examples/ holds only manifests that are applied as they are", ent.Name())
-		}
-		for i, obj := range readManifestFile(t, filepath.Join(examplesDir(), ent.Name())) {
-			e := example{file: ent.Name(), doc: i, obj: obj}
-			if e.obj["apiVersion"] != v1alpha1.GroupVersion.String() {
-				t.Fatalf("%s: apiVersion is %v; want %s", e.label(), e.obj["apiVersion"], v1alpha1.GroupVersion)
-			}
-			out = append(out, e)
-		}
-	}
-	if len(out) == 0 {
-		t.Fatalf("examples/ holds no object: the checks would pass on nothing")
-	}
-	return out
-}
 
 // dryRunStrict sends obj to the API server's admission as a create, with strict
 // field validation, and stores nothing.
