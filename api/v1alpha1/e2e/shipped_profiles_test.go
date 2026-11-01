@@ -165,6 +165,14 @@ func TestShippedProfilesRefuseABrokenValue(t *testing.T) {
 		{"failureThreshold of zero", "athena.yaml", int64(0), []any{"spec", "health", "failureThreshold"}, []string{"failureThreshold"}},
 		{"timeZone that is not a zone name", "helios.yaml", "Warsaw time", []any{"spec", "timeZone"}, []string{"timeZone"}},
 		{"stagingDir with a .. segment", "athena.yaml", "$SCRATCH/..", []any{"spec", "stagingDir"}, []string{"stagingDir must not contain a '..' segment"}},
+		// The typed QOS limits (HBEP-4, QOS limits): a partition's qos must be
+		// listed, and a limit must be a valid value.
+		{"a partition qos that the profile does not list", "helios.yaml", "unlisted", []any{"spec", "partitions", 1, "qos"}, []string{"must be listed in qos"}},
+		{"a maxWall that is not a duration", "helios.yaml", "twelve hours", []any{"spec", "qos", 0, "maxWall"}, []string{"maxWall"}},
+		{"a maxWall of zero", "helios.yaml", "0s", []any{"spec", "qos", 0, "maxWall"}, []string{"maxWall must be a positive duration"}},
+		{"a negative submit limit", "athena.yaml", int64(-1), []any{"spec", "qos", 0, "maxSubmitPerUser"}, []string{"maxSubmitPerUser"}},
+		{"a negative memory cap", "athena.yaml", "-125Gi", []any{"spec", "qos", 0, "maxMemPerUser"}, []string{"maxMemPerUser must not be negative"}},
+		{"a QOS with no name", "helios.yaml", nil, []any{"spec", "qos", 2, "name"}, []string{"name", "Required value"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -174,6 +182,67 @@ func TestShippedProfilesRefuseABrokenValue(t *testing.T) {
 			must(t, err, "create an unbroken copy of "+tc.file)
 			_, err = strictCreate(t, edit(t, edit(t, obj, tc.value, tc.path...), uniq("bad"), "metadata", "name"))
 			requireRefused(t, err, tc.want...)
+		})
+	}
+}
+
+// The typed QOS limits come back from the API server as they were written, and
+// each partition's own QOS with them (HBEP-4, QOS limits and Platform profile
+// schema). The expected values are written out from the HBEP's table of the
+// measurements, not read from the manifest: Helios lists now (12 h, 1 job, 1
+// GPU, 72 CPUs, 122400Mi), plgrid (2000 jobs) and normal (none), and
+// plgrid-gpu-gh200's partition QOS is plgrid; Athena lists plgrid-now (1 job,
+// 1 GPU, 16 CPUs, 125Gi, no wall limit) for the partition of that name. No QOS
+// has overPartQos, so the CRD's default false comes back.
+func TestShippedProfilesKeepTheirTypedQOS(t *testing.T) {
+	for _, tc := range []struct {
+		file         string
+		qos          string
+		partitionQOS map[string]string
+		noQOS        []string
+	}{
+		{"helios.yaml",
+			`[{"name":"now","maxWall":"12h","maxSubmitPerUser":1,"maxGpusPerUser":1,"maxCpusPerUser":72,"maxMemPerUser":"122400Mi","overPartQos":false},` +
+				`{"name":"plgrid","maxSubmitPerUser":2000,"overPartQos":false},{"name":"normal","overPartQos":false}]`,
+			map[string]string{"plgrid-gpu-gh200": "plgrid"}, []string{"plgrid"}},
+		{"athena.yaml",
+			`[{"name":"plgrid-now","maxSubmitPerUser":1,"maxGpusPerUser":1,"maxCpusPerUser":16,"maxMemPerUser":"125Gi","overPartQos":false}]`,
+			map[string]string{"plgrid-now": "plgrid-now"}, []string{"plgrid-gpu-a100"}},
+	} {
+		t.Run(tc.file, func(t *testing.T) {
+			stored, err := strictCreate(t, edit(t, loadShipped(t, tc.file), uniq("qos"), "metadata", "name"))
+			must(t, err, "create the shipped "+tc.file)
+			got := &unstructured.Unstructured{}
+			got.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("PlatformProfile"))
+			must(t, c.Get(bg(), client.ObjectKeyFromObject(stored), got), "get")
+
+			have, found, err := unstructured.NestedSlice(got.Object, "spec", "qos")
+			if err != nil || !found {
+				t.Fatalf("spec.qos: found %v, error %v", found, err)
+			}
+			var want any
+			must(t, json.Unmarshal([]byte(tc.qos), &want), "parse the expected qos")
+			if a, b := canonicalJSON(t, want), canonicalJSON(t, have); a != b {
+				t.Errorf("spec.qos\n got  %s\n want %s", b, a)
+			}
+			parts, _, _ := unstructured.NestedSlice(got.Object, "spec", "partitions")
+			seen := map[string]string{}
+			for _, p := range parts {
+				m, _ := p.(map[string]any)
+				name, _ := m["name"].(string)
+				q, _ := m["qos"].(string)
+				seen[name] = q
+			}
+			for name, q := range tc.partitionQOS {
+				if seen[name] != q {
+					t.Errorf("partition %s names the QOS %q, want %q", name, seen[name], q)
+				}
+			}
+			for _, name := range tc.noQOS {
+				if q, ok := seen[name]; !ok || q != "" {
+					t.Errorf("partition %s: listed %v with QOS %q, want listed with none", name, ok, q)
+				}
+			}
 		})
 	}
 }
