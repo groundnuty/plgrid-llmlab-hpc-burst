@@ -68,7 +68,12 @@ spec:
 
   holdRelease: true # facts.slurm.hold_release.value: user_release_ok true on plgrid and plgrid-gpu-gh200 (S1's hold check)
   lostGrace: 2m # framework default (HBEP-4, Platform profile schema, lostGrace): above the measured gap of about 2 s between queue and accounting (S7's capture)
-  inflightWindow: 5m # framework default (HBEP-4, Platform profile schema, inflightWindow): 5 min until the sbatch latency over ssh is measured (HBEP-4, Graduation criteria)
+  # inflightWindow keeps the framework default. The sbatch latency over ssh it waited for is now measured
+  # (HBEP-4, Graduation criteria): 143 to 187 ms on plgrid (four sbatch calls in the conformance run of
+  # 31 Oct 2026; issue #93, comment 6550844149) and 153 and 207 ms on plgrid-gpu-gh200 (the conformance run of
+  # 1 Nov 2026; issue #93, comment 6558126530), each under 0.1% of the window. A change to the value is
+  # `@hpc-burst-science-agent`'s call.
+  inflightWindow: 5m # framework default (HBEP-4, Platform profile schema, inflightWindow); the measured sbatch latency is in the comment above
   unknownBound: 10m # framework default (HBEP-4, Platform profile schema, unknownBound): S4's default
   timeZone: Europe/Warsaw # facts.time.slurm_time_zone.value.iana
   requeueDefault: true # facts.slurm.job_requeue, 1
