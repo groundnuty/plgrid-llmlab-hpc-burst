@@ -38,7 +38,7 @@
 //   - "cat > <file>" is the only redirection. It writes standard input to the
 //     file with mode 0666 &^ umask and needs the parent directory to exist;
 //   - commands: sbatch, squeue, sacct, scancel, scontrol release, printenv,
-//     sha256sum, umask, mkdir -p, chmod, mv -f, rm -f, rm -rf and test -f.
+//     sha256sum, umask, mkdir -p, chmod, mv -f and mv -fT, rm -f, rm -rf and test -f.
 //     Anything else is exit 127, "command not found". Options the plugin never
 //     sends are refused (exit 1), so an unexpected flag cannot pass silently.
 //
