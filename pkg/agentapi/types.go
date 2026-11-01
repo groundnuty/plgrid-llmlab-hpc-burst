@@ -540,6 +540,13 @@ type FileResult struct {
 	SHA256 string `json:"sha256,omitempty"`
 }
 
+// The values of VerifyResult.GenerationConfigFile.
+const (
+	GenerationConfigAbsent     = "absent"
+	GenerationConfigPresent    = "present"
+	GenerationConfigUnreadable = "unreadable"
+)
+
 // VerifyResult is what verification reads (HBEP-7, Instance start; HBEP-9).
 // The controller judges it. An engine that reports nothing fails, because the
 // engine version, the image digest and max-model-len are required.
@@ -580,6 +587,23 @@ type VerifyResult struct {
 	// checkpoint has no such file, the file is refused as a whole
 	// (GenerationConfigRefused with an empty Param), or it sets none of them.
 	GenerationConfig map[string]string `json:"generationConfig,omitempty"`
+	// GenerationConfigFile says what the agent found at the staged
+	// checkpoint's generation_config.json, so that a record can tell "the
+	// checkpoint has no such file" from "the file holds none of the keys":
+	// GenerationConfigAbsent (the checkpoint directory has no entry of that
+	// name at all; vLLM then builds its defaults from the model's
+	// config.json, which the checks do not read), GenerationConfigPresent (an
+	// entry resolves to a regular file the agent can open, whatever it holds,
+	// an empty file or one that is not JSON included; GenerationConfig holds
+	// the keys it sets of those vLLM applies, none when it sets none), or
+	// GenerationConfigUnreadable (an entry is there that does not resolve to
+	// a readable regular file: a directory, a dangling symlink, a permission
+	// error, or a checkpoint directory that cannot be read). Empty when the
+	// agent did not look because it had no staged checkpoint directory.
+	// The controller copies it into the verification record (HBEP-7, The
+	// verification record: "the record says the file is absent";
+	// `@hpc-burst-science-agent`, 1 Nov 2026, issue #175).
+	GenerationConfigFile string `json:"generationConfigFile,omitempty"`
 	// DoSample is the staged generation_config.json's do_sample, when the
 	// file sets it as a JSON boolean; nil when the file is absent, is not a
 	// JSON object (refused as a whole), or does not set do_sample as a

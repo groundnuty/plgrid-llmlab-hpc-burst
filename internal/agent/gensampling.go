@@ -62,9 +62,21 @@ type generationFile struct {
 	// that is not a number: "warm" is refused, not read as absent.
 	refused *agentapi.GenerationConfigError
 	// cause is the operating system's reason when the file could not be read
-	// (permission denied, is a directory), for agent.log only: it is not
+	// (permission denied, not a regular file), for agent.log only: it is not
 	// reported, and it carries no path.
 	cause string
+	// state is what is at the path, for VerifyResult.GenerationConfigFile
+	// (issue #175): agentapi.GenerationConfigAbsent when the checkpoint
+	// directory has no entry of that name at all; GenerationConfigPresent when
+	// the entry resolves to a regular file the agent could open and read,
+	// whatever it holds (a symbolic link to one counts, and so does a file
+	// that is oversized, empty or not JSON, which is refused by its content);
+	// GenerationConfigUnreadable when an entry is there that does not resolve
+	// to a readable regular file, or the checkpoint directory itself cannot be
+	// read. Every unreadable is also a refusal as a whole, so the report never
+	// says "unreadable" and lets the checks run. Empty when the agent has no
+	// checkpoint directory, which says nothing about the file.
+	state string
 }
 
 // readGenerationConfig reads the staged checkpoint's generation_config.json
@@ -80,8 +92,12 @@ type generationFile struct {
 // refuses), and one that is valid JSON but not an object (a list, a string,
 // null). vLLM would load such a file, and could refuse what the agent did not
 // see; reading it as "no values" would send the checks greedy while client
-// traffic fails (PR #169 review, Astra B1 and Opus N3). Only a missing file, or
-// no checkpoint directory, is absent.
+// traffic fails (PR #169 review, Astra B1 and Opus N3). Only a path with no
+// entry in the checkpoint directory is absent. The same Lstat, open and read
+// give the file's state for VerifyResult.GenerationConfigFile (generationFile.
+// state), so the two answers cannot part: every unreadable is also a refusal,
+// and a present file is refused only by its content. With no checkpoint
+// directory given (dir is empty) nothing is looked at and the state is empty.
 //
 // config holds the sampling parameters the file sets of those vLLM applies
 // (samplingParams), each as its JSON number text, and nothing else, so no other
@@ -103,10 +119,17 @@ func readGenerationConfig(dir string) generationFile {
 	if dir == "" {
 		return out
 	}
-	whole := func(value, cause string) generationFile {
+	// whole refuses the file as a whole, with the state the path is in.
+	whole := func(state, value, cause string) generationFile {
+		out.state, out.cause = state, cause
 		out.refused = &agentapi.GenerationConfigError{Value: value, Want: agentapi.FileWant}
-		out.cause = cause
 		return out
+	}
+	unreadable := func(cause string) generationFile {
+		return whole(agentapi.GenerationConfigUnreadable, agentapi.FileUnreadable, cause)
+	}
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		return unreadable("no checkpoint directory") // nothing to look in is not an absent file
 	}
 	path := filepath.Join(dir, generationConfigName)
 	// Only a path with no entry at all is an absent file. Lstat does not follow
@@ -117,36 +140,40 @@ func readGenerationConfig(dir string) generationFile {
 	// a whole, as is a file nobody can read. The Stat comes before the Open
 	// because opening a named pipe blocks.
 	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
+		out.state = agentapi.GenerationConfigAbsent
 		return out
 	} else if err != nil {
-		return whole(agentapi.FileUnreadable, osReason(err))
+		return unreadable(osReason(err))
 	}
 	fi, err := os.Stat(path)
 	if err != nil {
-		return whole(agentapi.FileUnreadable, osReason(err))
+		return unreadable(osReason(err))
 	}
 	if !fi.Mode().IsRegular() {
-		return whole(agentapi.FileUnreadable, "not a regular file")
+		return unreadable("not a regular file")
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return whole(agentapi.FileUnreadable, osReason(err))
+		return unreadable(osReason(err))
 	}
 	defer f.Close()
 	// One byte past the limit tells a file of exactly the limit from a larger one.
 	b, err := io.ReadAll(io.LimitReader(f, agentapi.MaxGenerationConfigFileBytes+1))
 	if err != nil {
-		return whole(agentapi.FileUnreadable, osReason(err))
+		return unreadable(osReason(err))
 	}
+	// A file that was read is present, whatever it holds: its content is judged next.
+	out.state = agentapi.GenerationConfigPresent
+	present := func(value string) generationFile { return whole(agentapi.GenerationConfigPresent, value, "") }
 	if len(b) > agentapi.MaxGenerationConfigFileBytes {
-		return whole(agentapi.FileTooLarge, "")
+		return present(agentapi.FileTooLarge)
 	}
 	if !json.Valid(b) {
-		return whole(agentapi.FileNotJSON, "")
+		return present(agentapi.FileNotJSON)
 	}
 	var obj map[string]json.RawMessage
 	if json.Unmarshal(b, &obj) != nil || obj == nil { // a null unmarshals into a nil map without error
-		return whole(agentapi.FileNotObject, "")
+		return present(agentapi.FileNotObject)
 	}
 	cfg := map[string]string{}
 	text := map[string]string{} // the JSON text of each key vLLM judges

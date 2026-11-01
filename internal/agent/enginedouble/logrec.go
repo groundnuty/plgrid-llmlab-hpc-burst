@@ -18,8 +18,11 @@ const (
 )
 
 // LogEvent is one line of the engine's log (HB_ENGINE_DOUBLE_LOG). A test
-// decodes the lines with it. Event is "start" (Argv, Env, PID), "request"
-// (Path, PromptTokens, MaxTokens, Stream, Outcome, Tokens, Sampling, Tail) or empty for the
+// decodes the lines with it. Event is "start" (Argv, Env, PID), "admitted"
+// (PromptTokens, MaxTokens, Stream: a chat request has a slot and is about to wait, if
+// the modes make it, and generate; written at once, so a test can tell that a
+// request is in flight), "request" (Path, PromptTokens, MaxTokens, Stream,
+// Outcome, Tokens, InjectedNS, Nth, Sampling, Tail: written when the request ends) or empty for the
 // line {"pids":[...]} of the ignore-term mode.
 type LogEvent struct {
 	Event string `json:"event,omitempty"`
@@ -43,6 +46,17 @@ type LogEvent struct {
 	Stream       bool   `json:"stream,omitempty"`
 	Outcome      string `json:"outcome,omitempty"`
 	Tokens       int    `json:"tokens,omitempty"`
+	// InjectedNS is the time in nanoseconds that slow-first and never-settle made
+	// the request wait before its first token, as the double decided it. A test
+	// that needs a latency to have grown from one request to the next reads it
+	// here, and does not measure a clock that a loaded machine skews.
+	InjectedNS int64 `json:"injected_ns,omitempty"`
+	// Nth is how many requests of the same shape (prompt tokens and max tokens, the key of
+	// slow-first and never-settle) the double had admitted before this one, counting from 0. It
+	// is the request's place in its shape's sequence, and never-settle's wait is Nth times a
+	// share, so a test that wants the waits in the order the requests came keys them by it and
+	// does not sort the waits.
+	Nth int `json:"nth,omitempty"`
 	// Sampling holds the sampling parameters the request carried, each
 	// absent when the request left it out; Tail is the last 120 bytes of its
 	// last user message, which tells the agent's checks apart by their

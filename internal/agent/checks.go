@@ -216,6 +216,7 @@ func (a *Agent) startVerify(in *instance, req agentapi.VerifyRequest, key procKe
 		res.ImageDigest = digest
 		res.GenerationConfig = maps.Clone(g.file.config)
 		res.DoSample = copyBool(g.file.doSample)
+		res.GenerationConfigFile = g.file.state
 		switch {
 		case len(files) == 0:
 		case reuse:

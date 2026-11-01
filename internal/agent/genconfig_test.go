@@ -569,3 +569,121 @@ func TestANullValueIsReadAsAMissingKey(t *testing.T) {
 		})
 	}
 }
+
+// With no staged checkpoint directory the agent has looked at nothing, and says nothing: an empty state, which
+// is not "absent" (issue #175).
+func TestGenerationConfigFileOfNoDirectoryIsEmpty(t *testing.T) {
+	if f := readGenerationConfig(""); f.state != "" || f.refused != nil {
+		t.Errorf("no directory: state %q, refusal %+v, want neither", f.state, f.refused)
+	}
+}
+
+// A checkpoint directory that is not there cannot be looked in, so the file is not claimed absent, and the
+// agent refuses it as a whole. And the classification of one entry, without the harness: nothing, a dangling
+// link and a link to a regular file. (Issue #175 and #182; the reader gives the state and the refusal from one
+// Lstat and open.)
+func TestGenerationConfigFileOfADirectoryThatIsGoneAndOfLinks(t *testing.T) {
+	root := t.TempDir()
+	if f := readGenerationConfig(filepath.Join(root, "no-such-dir")); f.state != "unreadable" || f.refused == nil || f.refused.Param != "" {
+		t.Errorf("a missing checkpoint directory: state %q, refusal %+v, want unreadable and a whole-file refusal", f.state, f.refused)
+	}
+	dir := filepath.Join(root, "ckpt")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if f := readGenerationConfig(dir); f.state != "absent" || f.refused != nil {
+		t.Errorf("no entry: state %q, refusal %+v, want absent and none", f.state, f.refused)
+	}
+	link := filepath.Join(dir, "generation_config.json")
+	if err := os.Symlink("nowhere.json", link); err != nil {
+		t.Fatal(err)
+	}
+	if f := readGenerationConfig(dir); f.state != "unreadable" || f.refused == nil || f.refused.Param != "" {
+		t.Errorf("a dangling symlink: state %q, refusal %+v, want unreadable and a whole-file refusal", f.state, f.refused)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "nowhere.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if f := readGenerationConfig(dir); f.state != "present" || f.refused != nil {
+		t.Errorf("the link once its target exists: state %q, refusal %+v, want present and none", f.state, f.refused)
+	}
+}
+
+// The state of the file (VerifyResult.GenerationConfigFile) and the refusal come from one read, and agree
+// on every case (`@hpc-burst-science-agent`, 1 Nov 2026, for #175 and #182): an unreadable file is always
+// refused as a whole (an empty Param), so the checks never run on it; a present file is refused only by its
+// content, and a refusal by content (too large, not valid JSON, not an object) leaves it present; an
+// absent file is not refused, and its checks are greedy. The expected pairs are written out by hand.
+func TestTheFilesStateAndItsRefusalAgreeOnEveryCase(t *testing.T) {
+	const present, absent, unreadable = "present", "absent", "unreadable"
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, dir, path string)
+		state string
+		whole string // the whole-file refusal's Value, "" for none
+	}{
+		{"a valid file", func(t *testing.T, dir, path string) { writeGenerationConfig(t, dir, `{"temperature": 0.6}`) }, present, ""},
+		{"a file with none of the keys", func(t *testing.T, dir, path string) { writeGenerationConfig(t, dir, `{"bos_token_id": 1}`) }, present, ""},
+		{"an empty object", func(t *testing.T, dir, path string) { writeGenerationConfig(t, dir, `{}`) }, present, ""},
+		{"a file above 1 MiB", func(t *testing.T, dir, path string) { writeGenerationConfig(t, dir, paddedGenerationConfig(t, 1<<20+1)) }, present, "larger than 1 MiB"},
+		{"a file that is not JSON", func(t *testing.T, dir, path string) { writeGenerationConfig(t, dir, `{`) }, present, "not valid JSON"},
+		{"an empty file", func(t *testing.T, dir, path string) { writeGenerationConfig(t, dir, ``) }, present, "not valid JSON"},
+		{"a file that is not an object", func(t *testing.T, dir, path string) { writeGenerationConfig(t, dir, `[1]`) }, present, "not a JSON object"},
+		{"a missing file", func(t *testing.T, dir, path string) {}, absent, ""},
+		{"a directory", func(t *testing.T, dir, path string) {
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}, unreadable, "unreadable"},
+		{"a dangling symbolic link", func(t *testing.T, dir, path string) {
+			if err := os.Symlink("no-such-target.json", path); err != nil {
+				t.Fatal(err)
+			}
+		}, unreadable, "unreadable"},
+		{"a link to a readable file", func(t *testing.T, dir, path string) {
+			writeGenerationConfig(t, dir, `{"top_p": 0.9}`)
+			if err := os.Rename(path, filepath.Join(dir, "real.json")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("real.json", path); err != nil {
+				t.Fatal(err)
+			}
+		}, present, ""},
+		{"a link to a directory", func(t *testing.T, dir, path string) {
+			if err := os.Mkdir(filepath.Join(dir, "d"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("d", path); err != nil {
+				t.Fatal(err)
+			}
+		}, unreadable, "unreadable"},
+		{"a file with mode 000", func(t *testing.T, dir, path string) {
+			writeGenerationConfig(t, dir, `{"temperature": 0.6}`)
+			if err := os.Chmod(path, 0); err != nil {
+				t.Fatal(err)
+			}
+			if f, err := os.Open(path); err == nil {
+				f.Close()
+				t.Skip("this process reads a mode-000 file (it is the superuser), so the file is not unreadable to it")
+			}
+		}, unreadable, "unreadable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tc.setup(t, dir, filepath.Join(dir, "generation_config.json"))
+			f := readGenerationConfig(dir)
+			if f.state != tc.state {
+				t.Errorf("state %q, want %q", f.state, tc.state)
+			}
+			switch {
+			case tc.whole == "" && f.refused != nil && f.refused.Param == "":
+				t.Errorf("refused as a whole (%+v), want a file that is read", f.refused)
+			case tc.whole != "" && (f.refused == nil || f.refused.Param != "" || f.refused.Value != tc.whole):
+				t.Errorf("refusal %+v, want a whole-file refusal %q", f.refused, tc.whole)
+			}
+			if f.state == unreadable && f.refused == nil {
+				t.Error("unreadable and not refused: the checks would run on it")
+			}
+		})
+	}
+}

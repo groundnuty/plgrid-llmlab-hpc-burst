@@ -107,6 +107,12 @@ type verificationData struct {
 	// agent read them from the staged checkpoint (VerifyResult.GenerationConfig;
 	// science-agent rulings, 1 Nov 2026, issue #125).
 	GenerationConfig map[string]string `json:"generationConfig,omitempty"`
+	// GenerationConfigFile is what the agent found at the staged checkpoint's
+	// generation_config.json: absent, present or unreadable (agentapi.
+	// GenerationConfigAbsent and the like; empty when the agent did not look).
+	// It is how the record tells a checkpoint with no such file from one whose
+	// file holds none of the keys (HBEP-7, The verification record; issue #175).
+	GenerationConfigFile string `json:"generationConfigFile,omitempty"`
 	// Sampling is what this verification's checks sent: the sampling values
 	// and the seeds of a reasoning model checked with its file's values, or
 	// Greedy true for a model checked greedily (agentapi.CheckSampling over
@@ -160,7 +166,7 @@ func judgeVerify(d declared, v *agentapi.VerifyResult, rehash bool, sh shapes) v
 	refusal := refusedGenerationConfig(v)
 	out := verificationData{
 		EngineVersion: v.EngineVersion, ImageDigest: v.ImageDigest, Settings: v.Settings,
-		Fingerprint: v.Fingerprint, Overhead: v.TemplateOverhead, GenerationConfig: v.GenerationConfig, GenerationConfigRefused: refusal,
+		Fingerprint: v.Fingerprint, Overhead: v.TemplateOverhead, GenerationConfig: v.GenerationConfig, GenerationConfigFile: v.GenerationConfigFile, GenerationConfigRefused: refusal,
 		Verdict: v1alpha1.VerdictPass, Undeclared: map[string]string{},
 	}
 	if refusal == nil {

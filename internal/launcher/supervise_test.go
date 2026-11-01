@@ -80,6 +80,7 @@ func TestSuperviseRestartsAnyExit(t *testing.T) {
 			if second.LastExit == nil || second.LastExit.Code != code {
 				t.Errorf("last exit %+v, want code %d", second.LastExit, code)
 			}
+			// Safe as a post-condition: the restart is recorded only after Supervise's cmd.Wait reaped the first child.
 			if !waitNotRunning(pid1, 5*time.Second) {
 				t.Errorf("the first child (pid %d) still runs", pid1)
 			}
@@ -207,6 +208,7 @@ func TestSuperviseStopsItsChildren(t *testing.T) {
 	if err := stop(); err != nil {
 		t.Fatalf("Supervise returned %v", err)
 	}
+	// Safe as a post-condition: Supervise returns only after cmd.Wait reaped the child (the exit 0 below shows it did).
 	if !waitNotRunning(pid, 5*time.Second) {
 		t.Fatalf("the child (pid %d) still runs after the supervisor returned", pid)
 	}
@@ -237,6 +239,7 @@ func TestSuperviseKillsAChildThatIgnoresTerm(t *testing.T) {
 	if took := time.Since(t0); took < 300*time.Millisecond {
 		t.Errorf("returned after %s, before the grace period", took)
 	}
+	// Safe as a post-condition: Supervise returns only after cmd.Wait reaped the child (the "killed" exit below shows it did).
 	if !waitNotRunning(pid, 5*time.Second) {
 		t.Fatalf("pid %d survived SIGTERM and SIGKILL", pid)
 	}
