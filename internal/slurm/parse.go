@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,9 +23,9 @@ import (
 //     infinite, number} triples in epoch seconds;
 //   - accounting: job_id, name, partition, state.current (a list) and
 //     state.reason, time.submission, time.start and time.end in epoch
-//     seconds, time.limit, tres.requested and tres.allocated; restart_cnt
-//     only in v0.0.42, where v0.0.40 shows an earlier execution as a record
-//     with the REQUEUED state.
+//     seconds, time.elapsed in seconds (HBEP-8), time.limit, tres.requested
+//     and tres.allocated; restart_cnt only in v0.0.42, where v0.0.40 shows an
+//     earlier execution as a record with the REQUEUED state.
 //
 // The v0.0.42 shapes are S7's real Helios captures (spikes/s7/
 // slurm-json-real.md). The v0.0.40 shapes follow Slurm's source, as S4's fake
@@ -175,9 +176,12 @@ type queueReply struct {
 }
 
 type tresEntry struct {
-	Type  string `json:"type"`
-	Name  string `json:"name"`
-	Count int64  `json:"count"`
+	Type string `json:"type"`
+	Name string `json:"name"`
+	// Count is nil when the entry has no count or a null one: an unknown count,
+	// which the allocated readers never take for a number. Some entries carry a
+	// negative sentinel (v0.0.42's energy entry has -2).
+	Count *int64 `json:"count"`
 }
 
 // accountingRecord is one record of sacct --json; with -D a job has one record
@@ -198,6 +202,7 @@ type accountingRecord struct {
 		Submission noVal `json:"submission"`
 		Start      noVal `json:"start"`
 		End        noVal `json:"end"`
+		Elapsed    noVal `json:"elapsed"`
 		Limit      noVal `json:"limit"`
 	} `json:"time"`
 	Tres struct {
@@ -307,7 +312,10 @@ func gpusOfTres(s string) int32 {
 	return int32(typed)
 }
 
-// gpusOfTresList reads the GPU count from accounting's tres lists.
+// gpusOfTresList reads the GPU count from accounting's tres lists, for the
+// read-back of a job's GPU count: it compares a count that is reported, and a
+// count that is missing or null adds 0, as it always did. The allocated count
+// of a job's accounting is read with allocatedGPUsOfTresList instead.
 func gpusOfTresList(l []tresEntry) (int32, bool) {
 	var untyped, typed int64
 	seen, any := false, false
@@ -315,17 +323,92 @@ func gpusOfTresList(l []tresEntry) (int32, bool) {
 		if e.Type != "gres" {
 			continue
 		}
+		var n int64
+		if e.Count != nil {
+			n = *e.Count
+		}
 		switch {
 		case e.Name == "gpu":
-			untyped, seen, any = e.Count, true, true
+			untyped, seen, any = n, true, true
 		case strings.HasPrefix(e.Name, "gpu:"):
-			typed, any = typed+e.Count, true
+			typed, any = typed+n, true
 		}
 	}
 	if seen {
 		return int32(untyped), true
 	}
 	return int32(typed), any
+}
+
+// tresCount returns the count of an allocated entry as an int32. ok is false
+// when the count is missing, null, negative or above math.MaxInt32: a negative
+// number is a sentinel (v0.0.42's energy entry has -2), not a count.
+func tresCount(c *int64) (n int32, ok bool) {
+	if c == nil || *c < 0 || *c > math.MaxInt32 {
+		return 0, false
+	}
+	return int32(*c), true
+}
+
+// allocatedGPUsOfTresList reads the GPUs of a tres.allocated list: the gres
+// entries named gpu (untyped) and gpu:<type> (typed). Only those entries are
+// read; the others (energy, mem, billing) never make the count unknown.
+//
+// listed is true when the list has at least one such entry, readable or not.
+// gpus is nil when the list has none, and when a count that the result depends
+// on cannot be read (tresCount), never a total made of the counts that can:
+//
+//   - An untyped entry takes precedence, the typed entries being aliases of it.
+//     If an untyped count cannot be read, or two untyped entries disagree, the
+//     result is unknown: it does not fall back to the typed entries.
+//   - Without an untyped entry, the typed counts are summed. If one cannot be
+//     read, or the sum is above math.MaxInt32, the result is unknown.
+func allocatedGPUsOfTresList(l []tresEntry) (gpus *int32, listed bool) {
+	var (
+		untyped, typedSum    int64
+		untypedSeen          bool
+		untypedBad, typedBad bool
+	)
+	for _, e := range l {
+		if e.Type != "gres" {
+			continue
+		}
+		switch {
+		case e.Name == "gpu":
+			listed = true
+			n, ok := tresCount(e.Count)
+			switch {
+			case !ok:
+				untypedBad = true
+			case untypedSeen && int64(n) != untyped:
+				untypedBad = true
+			default:
+				untyped = int64(n)
+			}
+			untypedSeen = true
+		case strings.HasPrefix(e.Name, "gpu:"):
+			listed = true
+			if n, ok := tresCount(e.Count); ok {
+				typedSum += int64(n)
+			} else {
+				typedBad = true
+			}
+		}
+	}
+	switch {
+	case !listed:
+		return nil, false
+	case untypedSeen:
+		if untypedBad {
+			return nil, true
+		}
+		g := int32(untyped)
+		return &g, true
+	case typedBad || typedSum > math.MaxInt32:
+		return nil, true
+	}
+	g := int32(typedSum)
+	return &g, true
 }
 
 // isTerminalBase reports whether a base state is an end state.
@@ -437,9 +520,53 @@ func mergeAccounting(recs []accountingRecord, parser string) ([]provider.Job, er
 			errs = append(errs, err)
 			continue
 		}
+		j.Accounting = accountingOf(rs)
 		out = append(out, j)
 	}
 	return out, errors.Join(errs...)
+}
+
+// allocatedCPUsOfTresList reads the CPUs of a tres.allocated list: the count of
+// its first entry of type cpu. It is nil when the list has none, and when that
+// count cannot be read (tresCount); a later cpu entry is not looked at then.
+func allocatedCPUsOfTresList(l []tresEntry) *int32 {
+	for _, e := range l {
+		if e.Type != "cpu" {
+			continue
+		}
+		if n, ok := tresCount(e.Count); ok {
+			return &n
+		}
+		return nil
+	}
+	return nil
+}
+
+// accountingOf reads the allocated time of a job from its records, oldest
+// first, one per execution (HBEP-8, Provider accounting). The allocated counts
+// are the latest execution's; the elapsed time is time.elapsed summed over all
+// the executions. It is unknown when an execution has none, and when the records
+// are fewer than the executions the latest record's restart count says there
+// were (v0.0.42): an earlier execution that the read did not return would
+// otherwise be left out of the sum without a sign.
+func accountingOf(rs []accountingRecord) *provider.JobAccounting {
+	a := &provider.JobAccounting{Executions: len(rs)}
+	latest := rs[len(rs)-1]
+	a.AllocatedCPUs = allocatedCPUsOfTresList(latest.Tres.Allocated)
+	a.AllocatedGPUs, a.GPUsListed = allocatedGPUsOfTresList(latest.Tres.Allocated)
+	var total time.Duration
+	for _, r := range rs {
+		v, ok := r.Time.Elapsed.value()
+		if !ok || v < 0 {
+			return a
+		}
+		total += time.Duration(v) * time.Second
+	}
+	if latest.RestartCnt != nil && int(*latest.RestartCnt) >= len(rs) {
+		return a
+	}
+	a.Elapsed = &total
+	return a
 }
 
 // job turns the latest accounting record of a job into a job record.

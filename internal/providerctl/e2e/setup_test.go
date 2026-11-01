@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -14,11 +16,13 @@ import (
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
@@ -213,6 +217,35 @@ func TestSetupInARealManager(t *testing.T) {
 		t.Errorf("another Provider's Allocation was touched: finalizers %v, annotations %v", g.Finalizers, g.Annotations)
 	}
 
+	// The running job's allocated CPUs and GPUs come from the one accounting
+	// read; the API server has checked the block against the CRD.
+	eventually(t, "the running job's accounting is in the status", 60*time.Second, func() bool {
+		a, _ = get("alloc-a")
+		acc := a.Status.AtProvider.Accounting
+		return acc != nil && acc.AllocatedCPUs != nil && acc.AllocatedGPUs != nil && acc.ElapsedSeconds != nil
+	})
+	if acc := a.Status.AtProvider.Accounting; *acc.AllocatedCPUs != 8 || *acc.AllocatedGPUs != 1 || *acc.ElapsedSeconds < 0 || *acc.ElapsedSeconds > 120 {
+		t.Errorf("status.atProvider.accounting = cpus %d gpus %d elapsed %d s, want 8, 1 and a few seconds", *acc.AllocatedCPUs, *acc.AllocatedGPUs, *acc.ElapsedSeconds)
+	}
+	if n := countSacctJob(sl, id); n != 1 {
+		t.Errorf("%d accounting reads of the running job, want the one for its allocated CPUs and GPUs", n)
+	}
+	// A second Allocation whose record already exists under acct-<UID>: the
+	// controller must leave that record as it is. Its job is not started.
+	b := newAlloc("alloc-b", prov.Name)
+	eventually(t, "the second Allocation's job is recorded", 60*time.Second, func() bool {
+		b, _ = get("alloc-b")
+		return b.Annotations[v1alpha1.AnnotationJobID] != ""
+	})
+	earlier := &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{Name: "acct-" + string(b.UID), Namespace: ns.Name},
+		Data:       runtime.RawExtension{Raw: []byte(`{"basis":"allocated","marker":"written earlier"}`)},
+		Revision:   1,
+	}
+	if err := c.Create(ctx, earlier); err != nil {
+		t.Fatal(err)
+	}
+
 	// Deleting cancels the job, and then the finalizer goes.
 	if err := c.Delete(ctx, a); err != nil {
 		t.Fatal(err)
@@ -221,12 +254,68 @@ func TestSetupInARealManager(t *testing.T) {
 		_, ok := get("alloc-a")
 		return !ok
 	})
+	// The accounting record outlives the Allocation: written once, with no
+	// owner, holding the job's allocation and its times.
+	var rec appsv1.ControllerRevision
+	if err := c.Get(ctx, client.ObjectKey{Namespace: ns.Name, Name: "acct-" + string(a.UID)}, &rec); err != nil {
+		t.Fatalf("no accounting record after the Allocation is gone: %v", err)
+	}
+	if len(rec.OwnerReferences) != 0 || rec.Labels[v1alpha1.LabelRecord] != v1alpha1.RecordAccounting || rec.Labels[v1alpha1.LabelProvider] != prov.Name {
+		t.Errorf("record owners %v labels %v, want no owner and record=accounting, provider=%s", rec.OwnerReferences, rec.Labels, prov.Name)
+	}
+	var data v1alpha1.AccountingRecordData
+	if err := json.Unmarshal(rec.Data.Raw, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Provider != prov.Name || data.Partition != "example-gpu" || data.Tag != tag || !reflect.DeepEqual(data.JobIDs, []string{strconv.Itoa(id)}) ||
+		data.Basis != "allocated" || len(data.Unknown) != 0 {
+		t.Errorf("record data %s: want provider %s, partition example-gpu, tag %s, job %d, basis allocated and nothing unknown", rec.Data.Raw, prov.Name, tag, id)
+	}
+	if data.AllocatedCPUs == nil || *data.AllocatedCPUs != 8 || data.AllocatedGPUs == nil || *data.AllocatedGPUs != 1 ||
+		data.ElapsedSeconds == nil || *data.ElapsedSeconds < 0 || *data.ElapsedSeconds > 120 || data.StartTime == nil || data.EndTime == nil {
+		t.Errorf("record data %s: want 8 CPUs, 1 GPU, a few seconds elapsed, a start and an end", rec.Data.Raw)
+	}
 	if n := sl.Count("scancel"); n != 1 {
 		t.Errorf("%d scancel calls, want 1", n)
 	}
 	if j, ok := sl.Job(id); !ok || j.State != "CANCELLED" {
 		t.Errorf("job %d ended as %q, want CANCELLED", id, j.State)
 	}
+
+	// The record that existed before is not rewritten: same data, and the same
+	// resourceVersion, which a write of any kind would move. The API server
+	// refuses an update of a ControllerRevision's data, so only a delete and a
+	// create could rewrite it; either moves the resourceVersion.
+	if err := c.Delete(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the second Allocation is gone", 60*time.Second, func() bool {
+		_, ok := get("alloc-b")
+		return !ok
+	})
+	var kept appsv1.ControllerRevision
+	if err := c.Get(ctx, client.ObjectKeyFromObject(earlier), &kept); err != nil {
+		t.Fatal(err)
+	}
+	if string(kept.Data.Raw) != string(earlier.Data.Raw) || kept.ResourceVersion != earlier.ResourceVersion {
+		t.Errorf("the existing record was rewritten: data %s, resourceVersion %s -> %s", kept.Data.Raw, earlier.ResourceVersion, kept.ResourceVersion)
+	}
+}
+
+// countSacctJob counts the accounting reads of one job by its ID.
+func countSacctJob(sl *fakeslurm.Platform, id int) int {
+	n := 0
+	for _, call := range sl.Calls() {
+		if len(call.Words) == 0 || call.Words[0] != "sacct" {
+			continue
+		}
+		for i, w := range call.Words {
+			if w == "-j" && i+1 < len(call.Words) && call.Words[i+1] == strconv.Itoa(id) {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 func controllerHas(list []string, s string) bool {

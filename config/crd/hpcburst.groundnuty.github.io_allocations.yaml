@@ -331,6 +331,50 @@ spec:
                       operations).
                     format: date-time
                     type: string
+                  accounting:
+                    description: |-
+                      Accounting is the allocated time of the recorded job: allocated, not
+                      billed (HBEP-8, Provider accounting). It is absent while the job has not
+                      started, so a pending Allocation's hours are unknown, never 0. The
+                      Provider's controller is its only writer; the record that outlives the
+                      Allocation is the ControllerRevision acct-<Allocation UID>.
+                    properties:
+                      allocatedCPUs:
+                        description: |-
+                          AllocatedCPUs is the number of CPUs the scheduler allocated: the cpu
+                          entry of accounting's tres.allocated. Absent when accounting gave none.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      allocatedGPUs:
+                        description: |-
+                          AllocatedGPUs is the number of GPUs the scheduler allocated: the gres
+                          entry named gpu of accounting's tres.allocated; 0 for a job that asked
+                          for no GPU and whose accounting lists none. Absent when a GPU was asked
+                          for and accounting lists none, or has not been read.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      elapsedSeconds:
+                        description: |-
+                          ElapsedSeconds is how long the job has been allocated: while it runs,
+                          from the scheduler's start time to ReadTime; once it has ended, the queue
+                          listing's end time minus its start time when the final state came from
+                          the listing, and otherwise accounting's time.elapsed summed over every
+                          execution. Absent when unknown, for example for a requeued job whose
+                          final state came from the listing, whose earlier executions are unknown.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      readTime:
+                        description: |-
+                          ReadTime is when the controller made the read that these numbers rest
+                          on. The Provider's clock; UTC.
+                        format: date-time
+                        type: string
+                    required:
+                    - readTime
+                    type: object
                   duplicates:
                     description: |-
                       Duplicates lists the IDs of extra jobs that carry the tag and are not
