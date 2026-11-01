@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -65,6 +66,11 @@ func (p *pass) capacity() error {
 }
 
 // noProvider explains why an Instance that is needed could not be placed.
+// When every usable Provider that is not too short refused the spec's size,
+// the spec is unsupported (HBEP-7, Provisioning). When a Provider would have
+// taken it but had no free submit slot, the deployment has SubmitLimitReached,
+// naming each such Provider and its limit (Per-user limits). A deployment whose
+// every usable Provider is too short has PartitionTooShort alone.
 func (p *pass) noProvider() {
 	if !p.canProvision() {
 		return
@@ -74,18 +80,52 @@ func (p *pass) noProvider() {
 			return // a transient Hub failure sets no reason: it is retried (HBEP-3)
 		}
 	}
-	if len(p.sizingRefused) > 0 && len(p.sizingRefused) == countUsable(p.providers) {
-		p.specErr = p.sizingRefused[0]
-		p.degrade(v1alpha1.ReasonSpecUnsupported, "%s", p.sizingRefused[0])
+	short := 0
+	for _, pv := range p.providers {
+		if pv.usable() && pv.tooShort != "" {
+			short++
+		}
+	}
+	if len(p.sizingRefused) > 0 && len(p.sizingRefused) == countUsable(p.providers)-short {
+		msg := p.firstByProvider(p.sizingRefused)
+		p.specErr = msg
+		p.degrade(v1alpha1.ReasonSpecUnsupported, "%s", msg)
+		return
+	}
+	if len(p.noSlot) > 0 {
+		p.degrade(v1alpha1.ReasonSubmitLimitReached, "no allowed Provider has a free submit slot for a missing primary: %s", p.allByProvider(p.noSlot))
 		return
 	}
 	for _, d := range p.degraded {
 		switch d.reason {
-		case v1alpha1.ReasonProviderUnavailable, v1alpha1.ReasonVerificationFailed, v1alpha1.ReasonRestartLoop, v1alpha1.ReasonIdentityUnresolved:
+		case v1alpha1.ReasonProviderUnavailable, v1alpha1.ReasonVerificationFailed, v1alpha1.ReasonRestartLoop, v1alpha1.ReasonIdentityUnresolved,
+			v1alpha1.ReasonPartitionTooShort, v1alpha1.ReasonSubmitLimitReached:
 			return // already explained
 		}
 	}
 	p.degrade(v1alpha1.ReasonProviderUnavailable, "no allowed batch Provider can take a new Allocation")
+}
+
+// firstByProvider returns the entry of the first Provider, in the allowed
+// order, that has one.
+func (p *pass) firstByProvider(m map[string]string) string {
+	for _, pv := range p.providers {
+		if msg, ok := m[pv.name]; ok {
+			return msg
+		}
+	}
+	return ""
+}
+
+// allByProvider joins the entries in the allowed Providers' order.
+func (p *pass) allByProvider(m map[string]string) string {
+	var parts []string
+	for _, pv := range p.providers {
+		if msg, ok := m[pv.name]; ok {
+			parts = append(parts, msg)
+		}
+	}
+	return strings.Join(parts, "; ")
 }
 
 func countUsable(pvs []*providerView) int {
