@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"time"
+
+	"k8s.io/client-go/rest"
 )
 
 // Health values of a status report.
@@ -51,6 +53,10 @@ type StatusReport struct {
 	// identity check and each supervised process.
 	Supervisor  *SupervisorHealth `json:"supervisor,omitempty"`
 	Controllers []EntryHealth     `json:"controllers,omitempty"`
+	// AgentBuilds is the check of the agent and frpc builds the PlatformProfiles' partitions need
+	// (#158), set when controllers run. Its Checked is false when the API server was not asked
+	// (--no-api, or an unhealthy host) or could not give the profiles, and Detail says why.
+	AgentBuilds *AgentBuilds `json:"agent_builds,omitempty"`
 }
 
 // StatusOptions are the inputs of Status.
@@ -170,6 +176,13 @@ func Status(ctx context.Context, o StatusOptions) (*StatusReport, error) {
 		statusStageHook("listeners")
 	}
 	if hostBad || o.NoAPI {
+		if st.Controllers != nil {
+			reason := "the host is unhealthy, so the API server was not asked"
+			if o.NoAPI {
+				reason = "--no-api: the profiles that say which builds are needed are read from the API server, which was not asked"
+			}
+			rep.AgentBuilds = &AgentBuilds{Dir: l.host(st.Ports).AgentBuildsDir(), Detail: reason}
+		}
 		final()
 		return rep, nil
 	}
@@ -214,6 +227,10 @@ func Status(ctx context.Context, o StatusOptions) (*StatusReport, error) {
 			rep.GC = ptr(true)
 		}
 	}
+	// The builds are staged by the controllers, so a host without them has none to check.
+	if st.Controllers != nil {
+		checkBuildsInStatus(ctx, cfg, l.host(st.Ports).AgentBuildsDir(), rep, bad)
+	}
 	// The answers count only if the recorded processes held the ports throughout: the listeners
 	// again, then the identities.
 	if owned, others, err := listeners(); err != nil {
@@ -225,4 +242,24 @@ func Status(ctx context.Context, o StatusOptions) (*StatusReport, error) {
 	}
 	final()
 	return rep, nil
+}
+
+// checkBuildsInStatus sets rep.AgentBuilds from the API server's PlatformProfiles, and makes every
+// missing or mismatched build a reason the host is unhealthy: a host whose first submission would
+// be refused is not ready for work. Status exits 1 until the builds are fixed, and 0 after.
+func checkBuildsInStatus(ctx context.Context, cfg *rest.Config, dir string, rep *StatusReport, bad func(string, ...any)) {
+	if rep.Readyz == nil || !*rep.Readyz {
+		rep.AgentBuilds = &AgentBuilds{Dir: dir, Detail: "the API server is not ready, so the PlatformProfiles were not read"}
+		return
+	}
+	ab, err := CheckAgentBuilds(ctx, cfg, dir)
+	if err != nil {
+		rep.AgentBuilds = &AgentBuilds{Dir: dir, Detail: err.Error()}
+		bad("agent builds could not be checked: %v", err)
+		return
+	}
+	rep.AgentBuilds = ab
+	for _, p := range ab.Problems {
+		bad("agent builds: %s", p)
+	}
 }

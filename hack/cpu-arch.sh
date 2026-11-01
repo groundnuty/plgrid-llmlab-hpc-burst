@@ -2,7 +2,7 @@
 #
 # The one bash map between the architecture names Go and frp use (GOARCH: amd64, arm64) and the
 # platform profiles' cpuArch (the kernel's machine names: x86_64, aarch64). The launcher's
-# cpuArchOf (internal/launcher/frps_pins.go) is the Go one, and TestScriptsMapArchitecturesAsCPUArchOfDoes
+# archTable (internal/launcher/arch.go, which also holds the ELF machine type of each) is the Go one, and TestScriptsMapArchitecturesAsCPUArchOfDoes
 # compares the two. Both directions below are read from this one table, and a script that spells its
 # own pair of names instead of sourcing this file fails that test.
 
