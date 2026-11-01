@@ -261,10 +261,12 @@ type wiring struct {
 }
 
 // providerGrace is each Provider manager's shutdown grace. The Provider
-// managers run inside the lifecycle manager, whose grace is controller-runtime's
-// default, 30 s (lifecycle.NewManager sets none), and hpcburst down sends
-// SIGKILL 30 s after SIGTERM (launcher.DefaultGrace), so a longer outer grace
-// would not help. At a stop the lifecycle manager first stops the agent API,
+// managers run inside the lifecycle manager, whose grace is
+// lifecycle.ShutdownGrace, 30 s, and the supervisor sends the controller
+// SIGKILL launcher.ControllerTermGrace (34 s) after SIGTERM: that grace and the
+// lifecycle Lease's release (leaderlock.ReleaseBudget) together, and a margin
+// (launcher.ControllerStopBudget), so a longer outer grace would not help.
+// At a stop the lifecycle manager first stops the agent API,
 // then the lifecycle controller and the two supervisors together, and with the
 // supervisors every Provider manager at once (providerctl.Supervisor), each for
 // at most providerGrace; that leaves 10 s for the lifecycle controller, the

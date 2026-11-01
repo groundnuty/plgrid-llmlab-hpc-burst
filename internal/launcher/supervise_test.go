@@ -222,8 +222,12 @@ func TestSuperviseStopsItsChildren(t *testing.T) {
 	}
 }
 
-// TestSuperviseKillsAChildThatIgnoresTerm: SIGKILL follows the grace period.
+// TestSuperviseKillsAChildThatIgnoresTerm: SIGKILL follows the grace period. The child is the
+// controller, given the supervisor's general grace here instead of its own ControllerTermGrace.
 func TestSuperviseKillsAChildThatIgnoresTerm(t *testing.T) {
+	saved := controllerTermGrace
+	controllerTermGrace = 0
+	t.Cleanup(func() { controllerTermGrace = saved })
 	f := newCtlFixture(t, Front{})
 	f.steer("ignore-term", "1")
 	var log syncBuffer
