@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -120,9 +121,12 @@ func TestHubDownloadsAskForTheIdentityEncoding(t *testing.T) {
 }
 
 // A response with no Content-Length, even to a request for the identity
-// encoding, leaves that file's length unknown: it counts in neither the total
-// nor the bytes done, and no length is guessed. The file is still staged and
-// checked. The other file, 1,000 bytes with its length, is the whole total.
+// encoding, leaves that file's length unknown: while it downloads, the total
+// is omitted (reported as 0) and the bytes done still count; once it is in,
+// its length is known and counts (science-agent rulings, 1 Nov 2026, issue
+// #125 and the #127 review). Here the unknown-length file (300 bytes) comes
+// first, then a 1,000-byte file with its length: the first report is during
+// the unknown one, so it shows done > 0 with no total.
 func TestHubFileWithNoContentLengthHasAnUnknownTotal(t *testing.T) {
 	cfg := strings.Repeat("c", 300)
 	weights := strings.Repeat("w", 1000)
@@ -155,16 +159,55 @@ func TestHubFileWithNoContentLengthHasAnUnknownTotal(t *testing.T) {
 		t.Fatalf("config.json staged as %d bytes (%v), want the 300-byte file", len(b), err)
 	}
 	reports := log.all()
-	for _, r := range reports {
-		if r[0] > r[1] {
-			t.Errorf("report done %d of total %d: done passed the total", r[0], r[1])
-		}
-	}
 	if len(reports) == 0 {
 		t.Fatal("no progress reported")
 	}
-	if last := reports[len(reports)-1]; last != [2]int64{1000, 1000} {
-		t.Errorf("final report %v, want {1000 1000}: the unknown-length file counts in neither", last)
+	if first := reports[0]; first[0] == 0 || first[1] != 0 {
+		t.Errorf("first report %v, want bytes done with the total omitted (0)", first)
+	}
+	for _, r := range reports {
+		if r[1] != 0 && r[0] > r[1] {
+			t.Errorf("report done %d of total %d: done passed a shown total", r[0], r[1])
+		}
+	}
+	if last := reports[len(reports)-1]; last != [2]int64{1300, 1300} {
+		t.Errorf("final report %v, want {1300 1300}", last)
+	}
+}
+
+// The tally, report by report (every report passes, interval 0): a known
+// file's total shows; while a file of unknown length downloads, the total is
+// omitted and done keeps counting; once it is in, the total counts it; a
+// failed unknown-length try takes its bytes back and shows the total again.
+func TestTallyOmitsTheTotalWhileALengthIsUnknown(t *testing.T) {
+	var log progressLog
+	tl := &tally{fn: log.fn}
+	a := tl.begin()
+	a.expect(1000)
+	a.got(1000)
+	a.complete()
+	b := tl.begin()
+	b.lengthUnknown()
+	b.got(100)
+	b.got(200)
+	b.complete()
+	c := tl.begin()
+	c.lengthUnknown()
+	c.got(50)
+	c.undo()
+	d := tl.begin()
+	d.expect(10)
+	d.got(10)
+	d.complete()
+	tl.finish()
+	want := [][2]int64{
+		{0, 1000}, {1000, 1000}, // a, length known
+		{1100, 0}, {1300, 0}, // b downloading: total omitted, done counts
+		{1350, 0},                                // c downloading
+		{1300, 1310}, {1310, 1310}, {1310, 1310}, // c undone; b known (300); d
+	}
+	if got := log.all(); !slices.Equal(got, want) {
+		t.Errorf("reports\n got %v\nwant %v", got, want)
 	}
 }
 

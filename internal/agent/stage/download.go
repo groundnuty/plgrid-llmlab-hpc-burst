@@ -43,12 +43,17 @@ func hubRedirectPolicy(hubHost string, next func(*http.Request, []*http.Request)
 }
 
 // tally counts the bytes of one Checkpoint call for its Progress function:
-// the bytes done and the bytes to download so far.
+// the bytes done and the bytes to download so far. While a file of unknown
+// length is downloading, the total is reported as 0, which the report omits,
+// and the bytes done still count (science-agent rulings, 1 Nov 2026, issue
+// #125 and the #127 review). Once that file is in, its length is known, so
+// the total counts it again: no length is ever guessed.
 type tally struct {
 	fn          func(done, total int64)
 	every       time.Duration
 	last        time.Time
 	done, total int64
+	unknown     int // downloads in progress whose length is unknown
 	touched     bool
 }
 
@@ -61,7 +66,11 @@ func (t *tally) report(force bool) {
 	t.touched = true
 	if now := time.Now(); force || t.last.IsZero() || now.Sub(t.last) >= t.every {
 		t.last = now
-		t.fn(t.done, t.total)
+		total := t.total
+		if t.unknown > 0 {
+			total = 0
+		}
+		t.fn(t.done, total)
 	}
 }
 
@@ -74,35 +83,49 @@ func (t *tally) finish() {
 
 // attempt is one try at downloading one file. A try that fails takes back what
 // it added, so a retry does not count the file twice (PR #87 review, Opus nit).
-// A file counts only once its length is known (expect): one whose response
-// carries no Content-Length counts in neither the total nor the bytes done, so
-// done never passes total and no length is guessed (science-agent ruling,
-// 1 Nov 2026, issue #125).
 type attempt struct {
 	t           *tally
 	done, total int64
-	known       bool
+	unknown     bool // its response carried no Content-Length
 }
 
 func (t *tally) begin() *attempt { return &attempt{t: t} }
 
+// expect adds the file's length, from its Content-Length.
 func (a *attempt) expect(n int64) {
-	a.known = true
 	a.total += n
 	a.t.total += n
 	a.t.report(false)
 }
 
+// lengthUnknown marks a file whose response carried no Content-Length.
+func (a *attempt) lengthUnknown() {
+	a.unknown = true
+	a.t.unknown++
+}
+
 func (a *attempt) got(n int64) {
-	if !a.known {
-		return
-	}
 	a.done += n
 	a.t.done += n
 	a.t.report(false)
 }
 
+// complete records a finished download: a file of unknown length is now
+// known to be the bytes it took.
+func (a *attempt) complete() {
+	if a.unknown {
+		a.unknown = false
+		a.t.unknown--
+		a.total = a.done
+		a.t.total += a.done
+	}
+}
+
 func (a *attempt) undo() {
+	if a.unknown {
+		a.unknown = false
+		a.t.unknown--
+	}
 	a.t.total -= a.total
 	a.t.done -= a.done
 	a.total, a.done = 0, 0
@@ -174,6 +197,8 @@ func (s *Stager) downloadOnce(ctx context.Context, dir string, req agent.Checkpo
 	}
 	if resp.ContentLength >= 0 {
 		a.expect(resp.ContentLength)
+	} else {
+		a.lengthUnknown()
 	}
 	p := filepath.Join(dir, filepath.FromSlash(f.Path))
 	if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
@@ -221,5 +246,6 @@ func (s *Stager) downloadOnce(ctx context.Context, dir string, req agent.Checkpo
 		return false, err
 	}
 	ok = true
+	a.complete()
 	return false, nil
 }
