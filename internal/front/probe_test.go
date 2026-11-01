@@ -228,3 +228,36 @@ func TestProberRunsEveryProbeInterval(t *testing.T) {
 	clk.Advance(time.Millisecond)
 	waitFor("the second round", func() bool { return m.hit(uid) == 2 })
 }
+
+// TestProbeCutByTheFrontsStopIsNoVerdict: a probe that the front's own
+// context ended neither fails nor passes: the registration stays and nothing
+// is reported, so a stop raises no PathProbeFailing.
+func TestProbeCutByTheFrontsStopIsNoVerdict(t *testing.T) {
+	m := startMuxDouble(t)
+	var mu sync.Mutex
+	insts := []v1alpha1.Instance{probeInstance("00000000-0000-4000-8000-000000000031", v1alpha1.InstanceReady, metav1.ConditionTrue)}
+	uid := insts[0].UID
+	m.set(uid, http.StatusOK)
+	p, tun, ev := newTestProber(t, m, clock.Real{}, &insts, &mu)
+	p.Round(context.Background())
+	if !tun.Registered(uid) {
+		t.Fatal("not registered after a passing probe")
+	}
+	m.set(uid, http.StatusServiceUnavailable) // a verdict now would be a failure
+	stopped, cancel := context.WithCancel(context.Background())
+	cancel()
+	for i := 0; i < 3; i++ {
+		p.Round(stopped)
+	}
+	ev.mu.Lock()
+	probed := len(ev.probed)
+	ev.mu.Unlock()
+	if !tun.Registered(uid) || probed != 1 || len(ev.failings()) != 0 {
+		t.Errorf("after probes cut by a stop: registered %v, %d results, %d PathProbeFailing; want registered, 1, 0", tun.Registered(uid), probed, len(ev.failings()))
+	}
+	p.Round(context.Background())
+	p.Round(context.Background())
+	if tun.Registered(uid) {
+		t.Error("two real failures after the stop's cut probes did not unregister: the cut probes counted")
+	}
+}

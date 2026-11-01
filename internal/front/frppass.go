@@ -103,6 +103,9 @@ func (p *frpPassthrough) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		head.Write(b)
 	}
 	if _, err := up.Write(head.Bytes()); err != nil {
+		// untrack only forgets them, and the client's deadline is cleared.
+		_ = conn.Close()
+		_ = up.Close()
 		p.log.Warn("the tunnel's upgrade could not be passed to frps", "error", err.Error())
 		return
 	}

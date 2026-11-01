@@ -186,6 +186,13 @@ func (p *Prober) Round(ctx context.Context) {
 func (p *Prober) probeOne(ctx context.Context, in *v1alpha1.Instance, st *probeState) {
 	began := time.Now()
 	status, err := p.check(ctx, in.UID)
+	if ctx.Err() != nil {
+		// The front is stopping: a probe it cut says nothing about the path.
+		p.mu.Lock()
+		st.running = false
+		p.mu.Unlock()
+		return
+	}
 	res := ProbeResult{UID: in.UID, Instance: in.Namespace + "/" + in.Name, Phase: in.Status.Phase, Status: status, Passed: err == nil, Duration: time.Since(began)}
 	p.mu.Lock()
 	st.running = false
