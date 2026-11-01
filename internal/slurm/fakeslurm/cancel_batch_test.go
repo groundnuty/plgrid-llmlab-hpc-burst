@@ -29,9 +29,16 @@ import (
 type hookRunner struct {
 	slurm.Runner
 	before func(line string) error
+	// reply, when it says ok for a line, answers the line itself and the session never sees it.
+	reply func(line string) (slurm.Result, bool)
 }
 
 func (h hookRunner) Run(ctx context.Context, cmd slurm.Command) (slurm.Result, error) {
+	if h.reply != nil {
+		if res, ok := h.reply(cmd.Line); ok {
+			return res, nil
+		}
+	}
 	if h.before != nil {
 		if err := h.before(cmd.Line); err != nil {
 			return slurm.Result{}, err
@@ -268,24 +275,111 @@ func TestCancelWhenTheStateCannotBeReadIsAnError(t *testing.T) {
 	}
 }
 
+// The queue does not show the job, so accounting decides, and accounting cannot be read: the
+// state is unknown, so an error, never ErrNotFound (the job may exist) and never AlreadyEnded,
+// and no scancel runs. Three ways a read can fail, for a job that has ended and for one that
+// never existed.
+func TestCancelWhenTheQueueDoesNotShowTheJobAndAccountingCannotBeReadIsAnError(t *testing.T) {
+	failures := map[string]func(line string) (slurm.Result, bool){
+		"sacct fails to connect": nil, // handled by before, below
+		"sacct exits 1": func(line string) (slurm.Result, bool) {
+			if strings.HasPrefix(line, "sacct") {
+				return slurm.Result{ExitCode: 1, Stderr: []byte("sacct: error: Problem talking to the database\n")}, true
+			}
+			return slurm.Result{}, false
+		},
+		"sacct prints what cannot be parsed": func(line string) (slurm.Result, bool) {
+			if strings.HasPrefix(line, "sacct") {
+				return slurm.Result{Stdout: []byte("this is not json")}, true
+			}
+			return slurm.Result{}, false
+		},
+	}
+	for name, reply := range failures {
+		for _, job := range []string{"ended", "unknown"} {
+			t.Run(name+"/"+job, func(t *testing.T) {
+				r := newCancelRig(t, fakeslurm.Config{})
+				id := "424242"
+				if job == "ended" {
+					id = r.submit(false)
+					r.start(id)
+					r.clock.Advance(time.Minute)
+					r.end(id, fakeslurm.Completed)
+					r.clock.Advance(time.Second)
+				}
+				if _, listed, err := r.batch.QueueJob(context.Background(), id); err != nil || listed {
+					t.Fatalf("QueueJob = listed %v, %v; the Helios shape does not list the job, so accounting decides", listed, err)
+				}
+				if reply == nil {
+					r.hook.before = func(line string) error {
+						if strings.HasPrefix(line, "sacct") {
+							return slurm.ErrTransport
+						}
+						return nil
+					}
+				} else {
+					r.hook.reply = reply
+				}
+				res := r.cancel(id)
+				if res.Outcome != provider.CancelError || res.Err == nil {
+					t.Fatalf("Cancel = %+v, want a CancelError", res)
+				}
+				if errors.Is(res.Err, provider.ErrNotFound) {
+					t.Errorf("Cancel = %+v: an unreadable accounting must not read as ErrNotFound", res)
+				}
+				if n := r.plat.Count("scancel"); n != 0 {
+					t.Errorf("%d scancel calls with the job's state unknown, want 0", n)
+				}
+				if job == "ended" {
+					if got := r.state(id); got != fakeslurm.Completed {
+						t.Errorf("the ended job is %s, want %s untouched", got, fakeslurm.Completed)
+					}
+				}
+			})
+		}
+	}
+}
+
 // A job that ends in the instant between the read and the scancel still reports
 // Cancelled on a Slurm that is quiet about it, as 24.11 is. This is the known
 // limit of reading the state before the scancel; the test pins it so that it
-// stays a conscious choice.
+// stays a conscious choice. It also checks the order that makes it the limit and
+// not a skipped observation: the fresh single-job read came before the scancel,
+// the end happened in between (the hook fired), and the job stayed Completed.
 func TestACancelOfAJobThatEndsAfterTheReadIsCancelledOnAQuietSlurm(t *testing.T) {
 	r := newCancelRig(t, fakeslurm.Config{})
 	id := r.submit(false)
 	r.start(id)
 	r.clock.Advance(time.Minute)
+	fired := false
 	r.hook.before = func(line string) error {
 		if strings.HasPrefix(line, "scancel") {
 			r.hook.before = nil
+			fired = true
 			r.end(id, fakeslurm.Completed)
 		}
 		return nil
 	}
 	if res := r.cancel(id); res.Outcome != provider.Cancelled {
 		t.Errorf("Cancel of a job that ended after the read = %+v, want Cancelled on a quiet Slurm", res)
+	}
+	if !fired {
+		t.Fatal("the hook never fired: no scancel ran, so the job did not end after the read and this test proves nothing")
+	}
+	if got := r.state(id); got != fakeslurm.Completed {
+		t.Errorf("the job is %s, want %s: it ended before the scancel, which left it alone", got, fakeslurm.Completed)
+	}
+	read, scancel := -1, -1
+	for i, c := range r.plat.Calls() {
+		switch {
+		case len(c.Words) > 0 && c.Words[0] == "squeue" && strings.Contains(strings.Join(c.Words, " "), "--jobs="+id) && read < 0:
+			read = i
+		case len(c.Words) > 0 && c.Words[0] == "scancel":
+			scancel = i
+		}
+	}
+	if read < 0 || scancel < 0 || read > scancel {
+		t.Errorf("the single-job read was call %d and the scancel call %d, want the read first: the outcome must come from observing the job", read, scancel)
 	}
 }
 
