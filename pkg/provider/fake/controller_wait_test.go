@@ -175,7 +175,8 @@ func TestARecordedQueueWaitIsNotAddedAgainAfterItsEntryWasEvicted(t *testing.T) 
 }
 
 // A queued-path no-overlap successor records no queue wait (issue #195; HBEP-7,
-// Handover, No-overlap mode): its Allocation carries
+// Handover, No-overlap mode, README lines 463 to 466 and Test plan lines 599 to 605;
+// HBEP-4, Provider status, line 479): its Allocation carries
 // v1alpha1.AnnotationQueuedSuccessor from its creation, and this controller
 // skips a marked Allocation. Three jobs are submitted at 12:00:00, in the order
 // of the Allocations' names: a primary whose script waits 3 min, a marked

@@ -1,12 +1,13 @@
 package providerctl
 
 // A queued-path no-overlap successor records no queue wait (issue #195; HBEP-7,
-// Handover, No-overlap mode). Its Allocation carries v1alpha1.AnnotationQueuedSuccessor
-// from its creation, because the job pends behind its own predecessor's per-user
-// cap and not in the scheduler's queue: a wait recorded for it would inflate the
-// Provider's waits for every plan that reads them. The Provider's controller
-// (observe.go) skips a marked Allocation. An unmarked Allocation on the same
-// Provider records its wait as ever.
+// Handover, No-overlap mode, README lines 463 to 466 and Test plan lines 599 to 605;
+// HBEP-4, Provider status, line 479). Its Allocation carries
+// v1alpha1.AnnotationQueuedSuccessor from its creation, because the job pends behind
+// its own predecessor's per-user cap and not in the scheduler's queue: a wait recorded
+// for it would inflate the Provider's waits for every plan that reads them. The
+// Provider's controller (observe.go) skips a marked Allocation. An unmarked Allocation
+// on the same Provider (line 604: the primary) records its wait as ever.
 
 import (
 	"testing"
