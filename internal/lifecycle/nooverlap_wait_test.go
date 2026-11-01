@@ -123,10 +123,13 @@ func TestNoOverlapQueueWaitAfterCapWait(t *testing.T) {
 	}
 }
 
-func runCapWait(t *testing.T, tc capWaitCase) {
-	rg := noOverlapQueuedRig(t)
+// capWaitPrimary creates the deployment, releasing when idle after idle, and
+// runs it to the primary's ready at 08:01:10, checking the facts the
+// timeline rests on. It returns the primary.
+func capWaitPrimary(t *testing.T, rg *rig, idle time.Duration) v1alpha1.Instance {
+	t.Helper()
 	md := mdSpec(hoMD)
-	md.Spec.RetentionPolicy = &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionReleaseWhenIdle, IdleLimit: dur(tc.idle)}
+	md.Spec.RetentionPolicy = &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionReleaseWhenIdle, IdleLimit: dur(idle)}
 	rg.create(md)
 	for range 7 {
 		rg.clock.Advance(10 * time.Second)
@@ -139,8 +142,13 @@ func runCapWait(t *testing.T, tc capWaitCase) {
 	if w := hoWaits(rg); len(w) != 1 || w[0] != 0 {
 		t.Fatalf("waits %v after the primary's start, want its own 0s alone", w)
 	}
+	return p
+}
 
-	// R1: created at 09:19:30, submitted at 09:19:40.
+// capWaitR1 steps to 09:19:40 and returns R1, created at 09:19:30, its
+// planned time, and marked as a no-overlap successor.
+func capWaitR1(t *testing.T, rg *rig, p v1alpha1.Instance) v1alpha1.Instance {
+	t.Helper()
 	hoStepTo(rg, hoT(9, 19, 20), 5*time.Minute, nil)
 	if n := len(hoRepl(rg, p.Name)); n != 0 {
 		t.Fatalf("a replacement exists before its planned time 09:19:30")
@@ -150,7 +158,56 @@ func runCapWait(t *testing.T, tc capWaitCase) {
 	if len(reps) != 1 || !reps[0].CreationTimestamp.Time.Equal(hoT(9, 19, 30)) || reps[0].Annotations[annotationNoOverlapSuccessor] == "" {
 		t.Fatalf("replacements %+v, want one created at 09:19:30, marked as a no-overlap successor", reps)
 	}
-	r1 := reps[0]
+	return reps[0]
+}
+
+// capWaitPlan checks the queue-wait estimate once R1 has started: the
+// Provider holds the primary's 0 s and R1's wait, and with fewer than 20 the
+// planning wait is the largest, R1's.
+func capWaitPlan(t *testing.T, rg *rig, wait time.Duration) {
+	t.Helper()
+	if w := hoWaits(rg); len(w) != 2 || w[0] != 0 || w[1] != wait {
+		t.Fatalf("waits %v once R1 started, want [0s %s]", w, wait)
+	}
+	var prov v1alpha1.Provider
+	if err := rg.c.Get(rg.ctx, client.ObjectKey{Name: rigProvider}, &prov); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := p90Wait(prov.Status.QueueWaits); !ok || got != wait {
+		t.Fatalf("planning wait %s (%v), want %s", got, ok, wait)
+	}
+}
+
+// capWaitR2At steps to want and checks that R1's replacement R2 is created
+// then, not before, as a no-overlap successor on the rig's Provider.
+func capWaitR2At(t *testing.T, rg *rig, r1 v1alpha1.Instance, want time.Time) {
+	t.Helper()
+	hoStepTo(rg, want.Add(-10*time.Second), 5*time.Minute, nil)
+	if n := len(hoRepl(rg, r1.Name)); n != 0 {
+		t.Fatalf("at %s R2 exists before its planned time %s", rg.clock.Now().Format(time.TimeOnly), want.Format(time.TimeOnly))
+	}
+	hoStepTo(rg, want, 10*time.Second, nil)
+	rs := hoRepl(rg, r1.Name)
+	if len(rs) != 1 || !rs[0].CreationTimestamp.Time.Equal(want) {
+		t.Fatalf("R2 %+v, want one created at %s", rs, want.Format(time.TimeOnly))
+	}
+	capWaitQueued(t, rs[0])
+}
+
+// capWaitQueued fails unless r2 is a no-overlap successor on the rig's
+// Provider (the queued path).
+func capWaitQueued(t *testing.T, r2 v1alpha1.Instance) {
+	t.Helper()
+	if r2.Annotations[annotationNoOverlapSuccessor] == "" || r2.Labels[v1alpha1.LabelProvider] != rigProvider {
+		t.Fatalf("R2 %+v, want a no-overlap successor on %s (the queued path)", r2, rigProvider)
+	}
+}
+
+func runCapWait(t *testing.T, tc capWaitCase) {
+	rg := noOverlapQueuedRig(t)
+	p := capWaitPrimary(t, rg, tc.idle)
+	// R1: created at 09:19:30, submitted at 09:19:40.
+	r1 := capWaitR1(t, rg, p)
 	r1Job := capWaitJob(rg, r1.Spec.AllocationRef.Name)
 	if j, ok := rg.batch.Job(r1Job); !ok || !j.SubmitTime.Equal(hoT(9, 19, 40)) || j.StartTime != nil {
 		t.Fatalf("R1's job %s is %+v, want submitted at 09:19:40 and not started", r1Job, j)
@@ -203,16 +260,7 @@ func runCapWait(t *testing.T, tc capWaitCase) {
 
 	// The queue-wait estimate: R1's whole cap wait is recorded, and with
 	// fewer than 20 waits it is the planning wait.
-	if w := hoWaits(rg); len(w) != 2 || w[0] != 0 || w[1] != tc.wait {
-		t.Fatalf("waits %v once R1 started, want [0s %s]", w, tc.wait)
-	}
-	var prov v1alpha1.Provider
-	if err := rg.c.Get(rg.ctx, client.ObjectKey{Name: rigProvider}, &prov); err != nil {
-		t.Fatal(err)
-	}
-	if got, ok := p90Wait(prov.Status.QueueWaits); !ok || got != tc.wait {
-		t.Fatalf("planning wait %s (%v), want %s", got, ok, tc.wait)
-	}
+	capWaitPlan(t, rg, tc.wait)
 
 	if tc.r2At == nil {
 		// LONG: the plan reaches back before R1's start, so R2 is created in
@@ -220,33 +268,22 @@ func runCapWait(t *testing.T, tc capWaitCase) {
 		if r2 == nil || !r2Seen.Equal(r1Seen) || !r2.CreationTimestamp.Time.Equal(r1Seen) {
 			t.Fatalf("R2 %v first seen at %s, want created at %s, the first pass that saw R1 Running", r2, r2Seen.Format(time.TimeOnly), r1Seen.Format(time.TimeOnly))
 		}
-	} else {
-		// SHORT: R2 at its planned time, from R1's start-to-ready.
-		s1 := r1i.Status.ReadyTime.Time.Sub(tc.pJobEnd)
-		want := tc.r2At(s1)
-		if want.IsZero() {
-			t.Fatalf("R1's start-to-ready is %s, want 50s or 60s (by the provider pass's order)", s1)
-		}
-		if s := rg.md(hoMD).Status.StartToReady; len(s) != 1 || s[0].Duration != v1alpha1.Duration(s1.String()) {
-			t.Fatalf("the class's start-to-ready is %+v, want R1's %s", s, s1)
-		}
-		if r2 != nil {
-			t.Fatalf("R2 was created at %s, before its planned time %s", r2Seen.Format(time.TimeOnly), want.Format(time.TimeOnly))
-		}
-		hoStepTo(rg, want.Add(-10*time.Second), 5*time.Minute, nil)
-		if n := len(hoRepl(rg, r1.Name)); n != 0 {
-			t.Fatalf("at %s R2 exists before its planned time %s", rg.clock.Now().Format(time.TimeOnly), want.Format(time.TimeOnly))
-		}
-		hoStepTo(rg, want, 10*time.Second, nil)
-		rs := hoRepl(rg, r1.Name)
-		if len(rs) != 1 || !rs[0].CreationTimestamp.Time.Equal(want) {
-			t.Fatalf("R2 %+v, want one created at %s", rs, want.Format(time.TimeOnly))
-		}
-		r2 = &rs[0]
+		capWaitQueued(t, *r2)
+		return
 	}
-	if r2.Annotations[annotationNoOverlapSuccessor] == "" || r2.Labels[v1alpha1.LabelProvider] != rigProvider {
-		t.Fatalf("R2 %+v, want a no-overlap successor on %s (the queued path)", r2, rigProvider)
+	// SHORT: R2 at its planned time, from R1's start-to-ready.
+	s1 := r1i.Status.ReadyTime.Time.Sub(tc.pJobEnd)
+	want := tc.r2At(s1)
+	if want.IsZero() {
+		t.Fatalf("R1's start-to-ready is %s, want 50s or 60s (by the provider pass's order)", s1)
 	}
+	if s := rg.md(hoMD).Status.StartToReady; len(s) != 1 || s[0].Duration != v1alpha1.Duration(s1.String()) {
+		t.Fatalf("the class's start-to-ready is %+v, want R1's %s", s, s1)
+	}
+	if r2 != nil {
+		t.Fatalf("R2 was created at %s, before its planned time %s", r2Seen.Format(time.TimeOnly), want.Format(time.TimeOnly))
+	}
+	capWaitR2At(t, rg, r1, want)
 }
 
 // capWaitJob returns the job ID of the Allocation named alloc.
