@@ -27,8 +27,10 @@ func runSet(t *testing.T, out string) []string {
 
 // Each case changes one file of the fixture module. The expected tests follow
 // from how the fixture is wired (front imports pkg/provider; the conformance
-// package imports providerctl, which imports slurm; hb-agent imports agent,
-// which embeds data.txt), not from the script's table or its output.
+// package, which the accounting rows share, imports providerctl, which imports
+// slurm; hb-agent imports agent, which embeds data.txt; the alpha rows run the
+// stack, so they take the closure of the three host binaries and hb-agent too),
+// not from the script's table or its output.
 func TestPlanMapsChangedFilesToTheLiveTestsThatRunThem(t *testing.T) {
 	cases := []struct {
 		name, path, content string
@@ -37,19 +39,19 @@ func TestPlanMapsChangedFilesToTheLiveTestsThatRunThem(t *testing.T) {
 		{"docs only", "docs/notes.md", "changed\n", nil},
 		{"a readme inside a live package", "internal/front/README.md", "changed\n", nil},
 		{"a package that nothing live imports", "unrelated/unrelated.go", "package unrelated\n\nvar X = 1\n", nil},
-		{"a dependency only: slurm", "internal/slurm/slurm.go", "package slurm\n\nvar X = 1\n", []string{"conformance-athena", "conformance-helios"}},
+		{"a dependency only: slurm", "internal/slurm/slurm.go", "package slurm\n\nvar X = 1\n", []string{"conformance-athena", "conformance-helios", "gpu-accounting-athena", "gpu-accounting-helios"}},
 		{"a dependency of one test: pkg/provider", "pkg/provider/provider.go", "package provider\n\nvar X = 1\n", []string{"llmlab-smoke"}},
 		{"a holding package", "internal/front/front.go", "package front\n\nimport _ \"example.test/fx/pkg/provider\"\n\nvar X = 1\n", []string{"llmlab-smoke"}},
 		{"a test file of the holding package", "internal/front/front_test.go", "package front\n\nimport \"testing\"\n\nfunc TestLLMLabThroughTheFront(t *testing.T) { _ = 1 }\n", []string{"llmlab-smoke"}},
 		{"a test file of a dependency", "internal/slurm/slurm_test.go", "package slurm\n\nimport \"testing\"\n\nfunc TestSlurm(t *testing.T) { _ = 1 }\n", nil},
-		{"go.mod", "go.mod", fixtureGoMod + "\n// a comment\n", []string{"conformance-athena", "conformance-helios", "hub-golden", "llmlab-smoke", "real-engine"}},
-		{"a profile read whole by one run", "profiles/helios.yaml", "name: helios\nx: 1\n", []string{"conformance-helios"}},
+		{"go.mod", "go.mod", fixtureGoMod + "\n// a comment\n", []string{"alpha-athena-handover", "alpha-helios-nooverlap", "conformance-athena", "conformance-helios", "gpu-accounting-athena", "gpu-accounting-helios", "hub-golden", "llmlab-smoke", "real-engine", "tunnel-hour-athena", "tunnel-hour-helios"}},
+		{"a profile read whole by the runs on that platform", "profiles/helios.yaml", "name: helios\nx: 1\n", []string{"alpha-helios-nooverlap", "conformance-helios", "gpu-accounting-helios", "tunnel-hour-helios"}},
 		{"the real-engine job script", "spikes/s94/job.sh", "#!/bin/bash\n# changed\n", []string{"real-engine"}},
-		{"a file the agent embeds", "internal/agent/data.txt", "changed\n", []string{"real-engine"}},
+		{"a file the agent embeds", "internal/agent/data.txt", "changed\n", agentEmbedders},
 		{"a file the agent does not embed", "internal/agent/notes.txt", "changed\n", nil},
-		{"an embedded asset in a directory that is not a package", "internal/agent/assets/a.txt", "changed\n", []string{"real-engine"}},
+		{"an embedded asset in a directory that is not a package", "internal/agent/assets/a.txt", "changed\n", agentEmbedders},
 		{"an embedded markdown file of the holding package", "internal/front/embedded.md", "changed\n", []string{"llmlab-smoke"}},
-		{"a dependency that only the arm64 build imports", "internal/armonly/armonly.go", "package armonly\n\nvar X = 1\n", []string{"real-engine"}},
+		{"a dependency that only the arm64 build imports", "internal/armonly/armonly.go", "package armonly\n\nvar X = 1\n", []string{"alpha-helios-nooverlap", "real-engine", "tunnel-hour-helios"}},
 		{"the Hub golden test's pinned checkpoints", "spikes/s7/checkpoints.env", "REV=2\n", []string{"hub-golden"}},
 		{"a Hub reference listing", "spikes/s7/results/run1/hub/a.json", "{\"x\":1}\n", []string{"hub-golden"}},
 		{"a hash reference of the Hub golden test", "spikes/s7/results/run1/hash-a.jsonl", "{\"x\":1}\n", []string{"hub-golden"}},
@@ -84,10 +86,14 @@ func TestPlanMapsChangedFilesToTheLiveTestsThatRunThem(t *testing.T) {
 	}
 }
 
+// agentEmbedders are the rows whose build contains hb-agent, and so what it embeds: the real-engine run
+// and the four rows that run the stack (sorted, as runSet gives them).
+var agentEmbedders = []string{"alpha-athena-handover", "alpha-helios-nooverlap", "real-engine", "tunnel-hour-athena", "tunnel-hour-helios"}
+
 func TestPlanNamesWhatChangedAndNothingPrivate(t *testing.T) {
 	w := newWorld(t)
 	res := w.run(nil, "--plan", w.commit("internal/slurm/slurm.go", "package slurm\n\nvar X = 1\n"))
-	for _, want := range []string{"1 file(s) changed", "covered: conformance-helios", "changed internal/slurm", "not covered: llmlab-smoke hub-golden real-engine"} {
+	for _, want := range []string{"1 file(s) changed", "covered: conformance-helios", "changed internal/slurm", "not covered: llmlab-smoke hub-golden real-engine alpha-athena-handover alpha-helios-nooverlap tunnel-hour-helios tunnel-hour-athena"} {
 		if !strings.Contains(res.out, want) {
 			t.Errorf("the plan lacks %q:\n%s", want, res.out)
 		}
@@ -128,8 +134,8 @@ func TestPlanCoversADeletedEmbeddedAsset(t *testing.T) {
 	if res.code != 0 {
 		t.Fatalf("exit %d:\n%s", res.code, res.out)
 	}
-	if got := runSet(t, res.out); strings.Join(got, ",") != "real-engine" {
-		t.Errorf("run set %v, want [real-engine]\n%s", got, res.out)
+	if got := runSet(t, res.out); strings.Join(got, ",") != strings.Join(agentEmbedders, ",") {
+		t.Errorf("run set %v, want %v\n%s", got, agentEmbedders, res.out)
 	}
 }
 

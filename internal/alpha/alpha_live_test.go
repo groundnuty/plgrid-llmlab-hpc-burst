@@ -12,9 +12,15 @@ import (
 	"testing"
 )
 
+// gate is the variable that asks for a row, as hack/live-checks.sh's table names it.
+const gate = "HPCBURST_ALPHA_ROW"
+
 // runRow runs one row, live or dry, and reports its verdict.
 func runRow(t *testing.T, family string, rows ...string) {
 	t.Helper()
+	if gate != envRow {
+		t.Fatalf("the table's gate %s is not the one the config reads, %s", gate, envRow)
+	}
 	cfg, skip, err := ConfigFromEnv(os.Getenv, rows...)
 	if skip != "" {
 		t.Skip(skip + " (this test needs a real cluster)")

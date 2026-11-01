@@ -24,7 +24,7 @@ const fixtureGoMod = "module example.test/fx\n\ngo 1.21\n"
 // fixtureFiles is a miniature of the module: the five packages the script's
 // table names, a dependency of each kind, and files that belong to none.
 func fixtureFiles() map[string]string {
-	return map[string]string{
+	m := map[string]string{
 		"go.mod":                                     fixtureGoMod,
 		"internal/front/front.go":                    "package front\n\nimport (\n\t_ \"embed\"\n\n\t_ \"example.test/fx/pkg/provider\"\n)\n\n//go:embed embedded.md\nvar doc string\n",
 		"internal/front/embedded.md":                 "embedded prose\n",
@@ -58,6 +58,10 @@ func fixtureFiles() map[string]string {
 		"spikes/s94/job.sh":                          "#!/bin/bash\n",
 		"spikes/s94/README.md":                       "readme\n",
 	}
+	for p, c := range alphaFixtureFiles() {
+		m[p] = c
+	}
+	return m
 }
 
 type world struct {
