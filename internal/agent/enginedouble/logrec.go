@@ -18,8 +18,11 @@ const (
 )
 
 // LogEvent is one line of the engine's log (HB_ENGINE_DOUBLE_LOG). A test
-// decodes the lines with it. Event is "start" (Argv, Env, PID), "request"
-// (Path, PromptTokens, MaxTokens, Stream, Outcome, Tokens) or empty for the
+// decodes the lines with it. Event is "start" (Argv, Env, PID), "admitted"
+// (PromptTokens, MaxTokens, Stream: a chat request has a slot and is about to wait, if
+// the modes make it, and generate; written at once, so a test can tell that a
+// request is in flight), "request" (Path, PromptTokens, MaxTokens, Stream,
+// Outcome, Tokens, InjectedNS: written when the request ends) or empty for the
 // line {"pids":[...]} of the ignore-term mode.
 type LogEvent struct {
 	Event string `json:"event,omitempty"`
@@ -42,6 +45,11 @@ type LogEvent struct {
 	Stream       bool   `json:"stream,omitempty"`
 	Outcome      string `json:"outcome,omitempty"`
 	Tokens       int    `json:"tokens,omitempty"`
+	// InjectedNS is the time in nanoseconds that slow-first and never-settle made
+	// the request wait before its first token, as the double decided it. A test
+	// that needs a latency to have grown from one request to the next reads it
+	// here, and does not measure a clock that a loaded machine skews.
+	InjectedNS int64 `json:"injected_ns,omitempty"`
 }
 
 // logFile appends one JSON line per record.
