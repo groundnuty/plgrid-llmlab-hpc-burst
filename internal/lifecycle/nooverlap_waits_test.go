@@ -1,17 +1,18 @@
 package lifecycle
 
-// Queue waits and no-overlap mode (issue #195; HBEP-7, Handover, No-overlap mode, and
-// Test plan, "Queue waits on the queued path").
+// Queue waits and no-overlap mode (issue #195; HBEP-7, Handover, No-overlap mode, README
+// lines 463 to 466, and Test plan, "Queue waits and the queued-successor mark", lines 599 to
+// 606; HBEP-4, Provider status, line 479; HBEP-11, Ownership, line 158).
 //
 // A successor made on the queued path pends behind its own predecessor's per-user cap, not
-// in the scheduler's queue, so no queue wait is recorded for it: the lifecycle controller
-// creates its Instance and its Allocation with v1alpha1.AnnotationQueuedSuccessor, and the
-// Provider's controller skips a marked Allocation. Otherwise the Provider's observed waits
-// would grow with every generation, and a deployment planning in normal mode on that
-// Provider, such as one that also allows a second Provider, would plan its replacement as
-// early as its primary's start while the inflated waits dominate. A successor made on the
-// one-slot path is created after its predecessor's job left the slot, pends in the
-// scheduler's queue like any job, and keeps its wait.
+// in the scheduler's queue, so no queue wait is recorded for it. The lifecycle controller marks
+// its Allocation in the create request (v1alpha1.AnnotationQueuedSuccessor), when at its
+// creation the Allocation is for a no-overlap successor of a primary, or for a retry of one,
+// and that primary's Allocation on the same Provider still holds its slot (README line 464).
+// The Provider's controller adds no wait for a marked Allocation. Otherwise the Provider's
+// observed waits would grow with every generation. A successor made on the one-slot path is
+// created after its predecessor's job left the slot, pends in the scheduler's queue like any
+// job, is not marked, and keeps its wait. The Instance carries no mark.
 //
 // Timeline, nooverlap_test.go's: the first primary's job starts at 08:00:20 with a 4 h
 // limit, its drain start is 09:50:20, and the deployment releases when idle after 5 min.
@@ -29,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 	pfake "github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider/fake"
 )
 
@@ -47,6 +49,7 @@ type creationLog struct {
 	mu            sync.Mutex
 	allocs, insts []createdObject
 	failNextAlloc bool
+	failAllocs    bool // every Allocation create fails until reopened
 	failed        int
 }
 
@@ -57,7 +60,7 @@ func (l *creationLog) funcs() interceptor.Funcs {
 		o := createdObject{name: obj.GetName(), annotations: maps.Clone(obj.GetAnnotations()), provider: obj.GetLabels()[v1alpha1.LabelProvider]}
 		switch obj.(type) {
 		case *v1alpha1.Allocation:
-			if l.failNextAlloc {
+			if l.failNextAlloc || l.failAllocs {
 				l.failNextAlloc = false
 				l.failed++
 				return errHOKilled
@@ -90,9 +93,23 @@ func (l *creationLog) instances() []createdObject {
 	return append([]createdObject(nil), l.insts...)
 }
 
+// failedCount is how many Allocation creates the log has failed.
+func (l *creationLog) failedCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.failed
+}
+
 func (l *creationLog) armAllocFailure() {
 	l.mu.Lock()
 	l.failNextAlloc = true
+	l.mu.Unlock()
+}
+
+// failAllocations makes every Allocation create fail until it is called with false.
+func (l *creationLog) failAllocations(on bool) {
+	l.mu.Lock()
+	l.failAllocs = on
 	l.mu.Unlock()
 }
 
@@ -107,25 +124,41 @@ func providerWaits(rg *rig, name string) []v1alpha1.QueueWait {
 }
 
 // TestAQueuedPathSuccessorRecordsNoWaitAndNormalModePlansFromGenuineWaits runs a queued-path
-// handover to the successor's readiness, then a deployment in normal mode on the same Provider.
+// handover to the successor's readiness, then a deployment in normal mode on the same Provider,
+// with no refusal before the successor's acceptance and with two (README line 600: "whatever its
+// refusal history").
 //   - The first primary's Allocation is created unmarked, the successor's marked, at the Create
 //     call. The successor's job pends behind the primary's for over 40 min, as the fake Slurm
-//     records it, and starts.
-//   - The Provider holds the primary's wait and none for the successor's job.
+//     records it, and starts. No Instance carries the mark.
+//   - The Provider holds the primary's wait and none for the successor's job (README line
+//     604: an unmarked primary on the same Provider records its wait).
 //   - A second deployment, which also allows a second Provider with room, runs its primary on the
 //     first Provider and plans its replacement at its drain start minus (the largest wait the
 //     Provider holds + the start-to-ready time + the margin). The waits are the two primaries',
 //     worked out from the fake Slurm's records of their jobs, never read from the Provider's
-//     status. Had the successor's 40 min been recorded, the plan would be over 40 min earlier.
+//     status. Had the successor's 40 min been recorded, the plan would be over 30 min earlier.
 func TestAQueuedPathSuccessorRecordsNoWaitAndNormalModePlansFromGenuineWaits(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		refusals int
+	}{{"no refusal", 0}, {"two refusals before acceptance", 2}} {
+		t.Run(tc.name, func(t *testing.T) { queuedPathRecordsNoWait(t, tc.refusals) })
+	}
+}
+
+func queuedPathRecordsNoWait(t *testing.T, refusals int) {
 	log := &creationLog{}
 	rg := noOverlapQueuedRig(t, withInterceptors(log.funcs()))
 	slurm := &slurmView{rg: rg}
 	noOverlapStart(rg)
+	// The primary's submission has taken its script: the refusals are the successor's.
+	for range refusals {
+		rg.batch.Enqueue(pfake.Script{Outcome: provider.Rejected, Policy: "QOSMaxSubmitJobPerUserLimit"})
+	}
 	hoStepTo(rg, hoT(9, 19, 0), 5*time.Minute, nil)
 	hoStepUntil(rg, hoT(10, 30, 0), 10*time.Second, func() bool { return successorReady(rg) }, nil)
 
-	// Marked at creation, the successor's Allocation and Instance; the primary's neither.
+	// Marked at creation, the successor's Allocation; the primary's not; no Instance either.
 	allocs, insts := log.allocations(), log.instances()
 	if len(allocs) != 2 || len(insts) != 2 {
 		t.Fatalf("%d Allocations and %d Instances created, want the primary's and the successor's each: %+v %+v", len(allocs), len(insts), allocs, insts)
@@ -134,22 +167,29 @@ func TestAQueuedPathSuccessorRecordsNoWaitAndNormalModePlansFromGenuineWaits(t *
 		what string
 		o    createdObject
 		want bool
-	}{{"the primary's Allocation", allocs[0], false}, {"the primary's Instance", insts[0], false},
-		{"the successor's Allocation", allocs[1], true}, {"the successor's Instance", insts[1], true}} {
+	}{{"the primary's Allocation", allocs[0], false}, {"the successor's Allocation", allocs[1], true},
+		{"the primary's Instance", insts[0], false}, {"the successor's Instance", insts[1], false}} {
 		if got := c.o.annotations[v1alpha1.AnnotationQueuedSuccessor] != ""; got != c.want {
 			t.Errorf("%s %s has the queued-successor mark at its creation: %v, want %v (annotations %v)", c.what, c.o.name, got, c.want, c.o.annotations)
 		}
 	}
+	if a, ok := rg.allocation(allocs[1].name); !ok || a.Status.AtProvider.Submission == nil || int(a.Status.AtProvider.Submission.Attempt) != refusals+1 {
+		t.Fatalf("the successor's Allocation %+v, want its attempt %d accepted after %d refusals", a, refusals+1, refusals)
+	}
 
-	// The fake Slurm's records: the primary's job, then the successor's, which pended a long time.
+	// The fake Slurm's records: every sbatch call (the refused ones too), then the primary's job
+	// and the successor's, which pended a long time.
+	if calls := slurm.sbatchCalls(); len(calls) != refusals+2 {
+		t.Fatalf("%d sbatch calls, want the primary's, %d refused and the successor's: %+v", len(calls), refusals, calls)
+	}
 	jobs := slurm.jobs()
 	if len(jobs) != 2 || jobs[0].StartTime == nil || jobs[1].StartTime == nil {
 		t.Fatalf("the fake Slurm holds %+v, want the primary's and the successor's job, both started", jobs)
 	}
 	primary, successor := jobs[0], jobs[1]
 	primaryWait, successorWait := primary.StartTime.Sub(primary.SubmitTime), successor.StartTime.Sub(successor.SubmitTime)
-	if successorWait < 40*time.Minute {
-		t.Fatalf("the successor's job waited %v (submitted %s, started %s), want over 40 min behind the primary's job, which ended no sooner than 10:01:00", successorWait, successor.SubmitTime.Format(time.TimeOnly), successor.StartTime.Format(time.TimeOnly))
+	if successorWait < 40*time.Minute-time.Duration(refusals)*time.Minute {
+		t.Fatalf("the successor's job waited %v (submitted %s, started %s), want over 38 min behind the primary's job, which ended no sooner than 10:01:00", successorWait, successor.SubmitTime.Format(time.TimeOnly), successor.StartTime.Format(time.TimeOnly))
 	}
 
 	waits := providerWaits(rg, rigProvider)
@@ -220,64 +260,19 @@ func TestAQueuedPathSuccessorRecordsNoWaitAndNormalModePlansFromGenuineWaits(t *
 	if len(reps) != 1 || !reps[0].CreationTimestamp.Time.Equal(planned) {
 		t.Fatalf("B's replacements %+v at %s, want one created exactly at %s (the largest genuine wait %v, start-to-ready 50s, margin 30m before the drain start %s)", reps, rg.clock.Now().Format(time.TimeOnly), planned.Format(time.TimeOnly), genuine, drainStart.Format(time.TimeOnly))
 	}
-	if reps[0].Labels[v1alpha1.LabelProvider] != "example-second" || reps[0].Annotations[v1alpha1.AnnotationQueuedSuccessor] != "" {
-		t.Errorf("B's replacement %+v, want one on example-second with no queued-successor mark: normal mode", reps[0])
+	if reps[0].Labels[v1alpha1.LabelProvider] != "example-second" {
+		t.Errorf("B's replacement %+v, want one on example-second: normal mode", reps[0])
 	}
 	if last := log.allocations(); last[len(last)-1].annotations[v1alpha1.AnnotationQueuedSuccessor] != "" {
 		t.Errorf("B's replacement Allocation %+v carries the queued-successor mark", last[len(last)-1])
 	}
 }
 
-// TestAQueuedSuccessorsAllocationIsMarkedWhenThePassWasCutShortBetweenTheTwoCreates: the
-// Instance is the durable intent and is created before its Allocation. A pass that stops
-// between the two leaves a pending successor, and the Allocation that a later pass creates
-// (ensureAllocation) gets the mark from the Instance, at its creation like any other.
-func TestAQueuedSuccessorsAllocationIsMarkedWhenThePassWasCutShortBetweenTheTwoCreates(t *testing.T) {
-	log := &creationLog{}
-	rg := noOverlapQueuedRig(t, withInterceptors(log.funcs()))
-	p := noOverlapStart(rg)
-	hoStepTo(rg, hoT(9, 19, 0), 5*time.Minute, nil)
-	log.armAllocFailure() // the successor's Allocation is the next one created
-	died := false
-	for !died {
-		if !rg.clock.Now().Before(hoT(9, 25, 0)) {
-			t.Fatal("the controller never reached the successor's Allocation by 09:25:00")
-		}
-		rg.clock.Advance(10 * time.Second)
-		switch err := stepTolerant(rg); {
-		case err == nil:
-		case log.failed == 1:
-			died = true
-		default:
-			t.Fatalf("reconcile at %s: %v", rg.clock.Now().Format(time.TimeOnly), err)
-		}
-	}
-	reps := hoRepl(rg, p.Name)
-	if len(reps) != 1 || reps[0].Annotations[v1alpha1.AnnotationQueuedSuccessor] == "" {
-		t.Fatalf("after the cut-short pass the successors are %+v, want one Instance with the queued-successor mark", reps)
-	}
-	if _, ok := rg.allocation(reps[0].Spec.AllocationRef.Name); ok {
-		t.Fatalf("the successor's Allocation %s exists although its creation failed", reps[0].Spec.AllocationRef.Name)
-	}
-	if n := len(log.allocations()); n != 1 {
-		t.Fatalf("%d Allocations created, want the primary's alone", n)
-	}
-
-	rg.restartController()
-	rg.until(5*time.Minute, 10*time.Second, "the successor's Allocation is created", func() bool { return len(log.allocations()) == 2 })
-	succ := log.allocations()[1]
-	if succ.name != reps[0].Spec.AllocationRef.Name || succ.annotations[v1alpha1.AnnotationQueuedSuccessor] == "" {
-		t.Fatalf("the successor's Allocation %+v, want %s, marked at its creation", succ, reps[0].Spec.AllocationRef.Name)
-	}
-	if succ.annotations[v1alpha1.AnnotationQueuedSuccessor] != reps[0].Annotations[v1alpha1.AnnotationQueuedSuccessor] {
-		t.Errorf("the Allocation's mark %q differs from the Instance's %q", succ.annotations[v1alpha1.AnnotationQueuedSuccessor], reps[0].Annotations[v1alpha1.AnnotationQueuedSuccessor])
-	}
-}
-
 // TestAOneSlotPathSuccessorIsNotMarkedAndKeepsItsWait: on the one-slot path the successor is
 // created after the predecessor's job left the slot, so it pends in the scheduler's queue like
-// any job, and its wait is recorded (HBEP-7, "On the one-slot path the successor's whole queue
-// wait is added"). It carries annotationNoOverlapSuccessor and no queued-successor mark.
+// any job, and its wait is recorded (README lines 465 and 603: it "is not marked and records a
+// genuine wait"). The primary's Allocation no longer holds its slot when the successor's is
+// created, so the mark's condition is false.
 func TestAOneSlotPathSuccessorIsNotMarkedAndKeepsItsWait(t *testing.T) {
 	log := &creationLog{}
 	rg := noOverlapRig(t, oneSlotOpts(withInterceptors(log.funcs()), withBatchConfig(func(c *pfake.Config) { c.MaxSubmitPerUser, c.MaxGPUsPerUser = 1, 1 }))...)
