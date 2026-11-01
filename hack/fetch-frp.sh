@@ -32,8 +32,8 @@
 # line's tarball from the release, checks the tarball's sha256 against the line's tarball column
 # before extracting anything, extracts frpc, checks frpc's sha256 against the line's frpc column,
 # and renames it into place as DIR/frpc-<cpuArch>, mode 755. frp names its architectures amd64 and
-# arm64, the platform profiles x86_64 and aarch64, and cpu_arch below is the one place in this script
-# that maps them (the launcher's cpuArchOf is the Go one, and a test compares the two); a line whose
+# arm64, the platform profiles x86_64 and aarch64, and cpu_arch (hack/cpu-arch.sh, the one table that
+# hack/build-agents.sh reads too; the launcher's cpuArchOf is the Go one, and a test compares the two); a line whose
 # architecture it does not know stops the run before anything is fetched. An architecture is
 # fetched on its own: one whose tarball or frpc does not match is deleted and the run exits 1, and
 # one that has been placed already stays. A DIR that already holds a matching frpc-<cpuArch> is left
@@ -56,13 +56,9 @@ die() { echo "fetch-frp.sh: $*" >&2; exit 1; }
 sha_ok() { [ -f "$1" ] && echo "$2  $1" | sha256sum -c --status -; }
 
 # cpu_arch FRP_ARCH: the platform profiles' cpuArch for frp's architecture name; fails for any other.
-cpu_arch() {
-  case "$1" in
-    amd64) echo x86_64 ;;
-    arm64) echo aarch64 ;;
-    *) return 1 ;;
-  esac
-}
+# The one table is hack/cpu-arch.sh's, which hack/build-agents.sh reads too.
+# shellcheck source=hack/cpu-arch.sh
+. "$(dirname "${BASH_SOURCE[0]}")/cpu-arch.sh"
 
 # agent_builds DIR: agent-builds mode, see the header.
 agent_builds() {

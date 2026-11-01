@@ -72,7 +72,8 @@ const (
 	// change (science-agent ruling, 31 Oct 2026).
 	ReasonVerificationFailed = "VerificationFailed"
 	// ReasonSubmissionRejected: the provider's last attempt was Rejected; the
-	// message carries the scheduler's reason.
+	// message carries the scheduler's reason. A refusal for a full submit
+	// limit shows as ReasonSubmitLimitReached instead (HBEP-7, Provisioning).
 	ReasonSubmissionRejected = "SubmissionRejected"
 	// ReasonProviderUnavailable: an allowed batch Provider is missing or not
 	// Ready, and was skipped. A served ModelDeployment ignores managed
@@ -113,6 +114,31 @@ const (
 	//     spec or the identity records change; neither a token change nor the
 	//     periodic resync re-evaluates it (HBEP-3, Display form).
 	ReasonIdentityUnresolved = "IdentityUnresolved"
+	// ReasonSubmitLimitReached: a submission was refused for a full submit
+	// limit, told by Slurm's reason name (QOSMaxSubmitJobPerUserLimit,
+	// AssocMaxSubmitJobLimit, MaxSubmitJobsPerAccount, or the group limits
+	// QOSGrpSubmitJobsLimit and AssocGrpSubmitJobsLimit), or no allowed
+	// Provider has a free slot for a missing primary. It names the Provider,
+	// the limit and Slurm's reason line. It is no failure: the attempt is
+	// retried with the Rejected backoff, and it counts toward neither
+	// RestartLoop nor a class pause. It takes the place of
+	// ReasonSubmissionRejected for such a refusal (HBEP-7, Provisioning and
+	// Events and conditions; HBEP-4, QOS limits; `@hpc-burst-science-agent`,
+	// 1 Nov 2026).
+	ReasonSubmitLimitReached = "SubmitLimitReached"
+	// ReasonNoOverlapSlot: in no-overlap mode, from the primary's drain start
+	// until its successor is ready, because no allowed Provider can take the
+	// replacement beside its predecessor. It names the Provider and the limit.
+	// ReasonReplacementLate is not set in this mode (HBEP-7, Handover,
+	// No-overlap mode; `@hpc-burst-science-agent`, 1 Nov 2026).
+	ReasonNoOverlapSlot = "NoOverlapSlot"
+	// ReasonPartitionTooShort: an allowed Provider's time limit is not longer
+	// than the lead an Instance needs (its drain window plus handoverMargin
+	// plus health.startTimeout), so no Allocation is created there. It names
+	// the partition, the time limit, the bound that set it (maxTime, the QOS's
+	// maxWall or leaseLimit) and the lead (HBEP-7, Provisioning, A partition
+	// too short; `@hpc-burst-science-agent`, 1 Nov 2026).
+	ReasonPartitionTooShort = "PartitionTooShort"
 )
 
 // Reasons of a ModelDeployment's Ready, Progressing and Degraded conditions in

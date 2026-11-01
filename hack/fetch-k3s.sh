@@ -24,11 +24,19 @@ dest=${1:-${HPCBURST_BIN_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/hpcburst/k3s}}
 [ $# -gt 0 ] && shift
 want=("$@")
 
-case $(uname -m) in
-  x86_64 | amd64) arch=amd64 ;;
-  aarch64 | arm64) arch=arm64 ;;
-  *) echo "fetch-k3s.sh: no pinned k3s binary for $(uname -m)" >&2; exit 1 ;;
-esac
+# The pins name an architecture as Go does; this machine's name for it is the kernel's (x86_64,
+# aarch64) or, on some systems, Go's own. hack/cpu-arch.sh is the one table of the two.
+# shellcheck source=hack/cpu-arch.sh
+. "$here/cpu-arch.sh"
+machine=$(uname -m)
+if go_arch "$machine" > /dev/null; then
+  arch=$(go_arch "$machine")
+elif cpu_arch "$machine" > /dev/null; then
+  arch=$machine
+else
+  echo "fetch-k3s.sh: no pinned k3s binary for $machine" >&2
+  exit 1
+fi
 [ -r "$pins" ] || { echo "fetch-k3s.sh: cannot read $pins" >&2; exit 1; }
 
 matches() { # does version $1 (v1.36.5+k3s1) match one of the requested names?
