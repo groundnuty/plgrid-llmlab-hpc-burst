@@ -74,20 +74,29 @@ func (t *tally) finish() {
 
 // attempt is one try at downloading one file. A try that fails takes back what
 // it added, so a retry does not count the file twice (PR #87 review, Opus nit).
+// A file counts only once its length is known (expect): one whose response
+// carries no Content-Length counts in neither the total nor the bytes done, so
+// done never passes total and no length is guessed (science-agent ruling,
+// 1 Nov 2026, issue #125).
 type attempt struct {
 	t           *tally
 	done, total int64
+	known       bool
 }
 
 func (t *tally) begin() *attempt { return &attempt{t: t} }
 
 func (a *attempt) expect(n int64) {
+	a.known = true
 	a.total += n
 	a.t.total += n
 	a.t.report(false)
 }
 
 func (a *attempt) got(n int64) {
+	if !a.known {
+		return
+	}
 	a.done += n
 	a.t.done += n
 	a.t.report(false)
@@ -144,6 +153,13 @@ func (s *Stager) downloadOnce(ctx context.Context, dir string, req agent.Checkpo
 	if req.HubToken != "" {
 		hreq.Header.Set("Authorization", "Bearer "+req.HubToken)
 	}
+	// The Hub gzips the files that are not in LFS, with no Content-Length,
+	// unless asked for the identity encoding; Go's client asks for gzip and
+	// decodes it, so the length was unknown and the bytes done passed the
+	// total (#94, finding 2). Asked for identity, the body is the file itself
+	// and Content-Length its exact size. Setting the header also turns off the
+	// client's own decoding, so a body sent encoded anyway is refused below.
+	hreq.Header.Set("Accept-Encoding", "identity")
 	resp, err := s.c.HTTPClient.Do(hreq)
 	if err != nil {
 		return ctx.Err() == nil, fmt.Errorf("GET %s: %w", u, err)
@@ -153,7 +169,10 @@ func (s *Stager) downloadOnce(ctx context.Context, dir string, req agent.Checkpo
 		retry := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
 		return retry, fmt.Errorf("GET %s: HTTP %d", u, resp.StatusCode)
 	}
-	if resp.ContentLength > 0 {
+	if enc := resp.Header.Get("Content-Encoding"); enc != "" && !strings.EqualFold(enc, "identity") {
+		return false, fmt.Errorf("GET %s: the Hub sent Content-Encoding %q to a request for the identity encoding", u, enc)
+	}
+	if resp.ContentLength >= 0 {
 		a.expect(resp.ContentLength)
 	}
 	p := filepath.Join(dir, filepath.FromSlash(f.Path))
