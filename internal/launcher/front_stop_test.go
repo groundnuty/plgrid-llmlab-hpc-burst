@@ -96,6 +96,10 @@ func TestSupervisorGivesTheFrontItsOwnGrace(t *testing.T) {
 	running := func(e EntryRecord) bool { return e.State == entryRunning && e.Proc != nil }
 	f.entryNamed("controller", "the controller to run", running)
 	f.entryNamed(frontEntryName, "the front to run", running)
+	// Each fake installs its SIGTERM handler before it binds its health port, so an answer on that
+	// port means a SIGTERM now reaches the handler, not the default action.
+	awaitHealthy(t, f.ports.ControllerAddr())
+	awaitHealthy(t, f.st.Ports.FrontHealthAddr())
 	if err := stop(); err != nil {
 		t.Fatal(err)
 	}
