@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/clock"
@@ -23,11 +24,15 @@ import (
 
 // Options are the inputs of Run.
 type Options struct {
-	Config     Config
-	Host       agentapi.Host
-	Mode       string // ModeDirect, ModeSSH, or "" when the launcher recorded no front
-	Clock      clock.Clock
-	Dynamic    dynamic.Interface
+	Config  Config
+	Host    agentapi.Host
+	Mode    string // ModeDirect, ModeSSH, or "" when the launcher recorded no front
+	Clock   clock.Clock
+	Dynamic dynamic.Interface
+	// Kube, when set, is the client for the front's heartbeat Lease. Nil: the
+	// front keeps no Lease (a test, or a run without a control plane), and a
+	// usage failure raises no event, as it has no Lease to regard.
+	Kube       kubernetes.Interface
 	Recorder   Recorder
 	Transports Transports // nil: HBEP-6's Tunnel through frps, registered by the front's probe
 	// PathEvents receives the probe's results when the front builds its own
@@ -43,6 +48,9 @@ type Options struct {
 	// ShutdownGrace is how long a stop waits for requests in flight before
 	// it cuts them; 0 means DefaultShutdownGrace.
 	ShutdownGrace time.Duration
+	// FreeBytes reads the free space behind hpcburst_usage_dir_free_bytes;
+	// nil is statfs. A test moves it.
+	FreeBytes FreeBytesFunc
 }
 
 // DefaultShutdownGrace is how long a stop lets requests in flight finish.
@@ -50,10 +58,11 @@ const DefaultShutdownGrace = 10 * time.Second
 
 // Front is a running front, for its health endpoint and for tests.
 type Front struct {
-	Router *Router
-	Watch  *inventory.Watch
-	Proxy  *Proxy
-	Sink   *usage.Sink
+	Router  *Router
+	Watch   *inventory.Watch
+	Proxy   *Proxy
+	Sink    *usage.Sink
+	Metrics *Metrics
 	// Tunnel is HBEP-6's transport, when the front built its own.
 	Tunnel *Tunnel
 	Client net.Addr
@@ -63,7 +72,10 @@ type Front struct {
 
 // Run starts the front and serves until ctx ends: it reads its keys, opens
 // the usage sink, waits for the control plane's first list, then opens its
-// listeners. On return the listeners are closed and the usage sink flushed.
+// listeners and, when Options.Kube is set, starts renewing the front's
+// heartbeat Lease (HBEP-8). On return the listeners are closed, the Lease
+// keeper is stopped and the usage sink flushed. The health listener serves
+// /healthz and /metrics.
 // The client listener's server sets no read or write deadline: the front's
 // own maxRequestDuration and idleTimeout bound each request, and its idle
 // client connections are kept clientKeepAlive (HBEP-5, Time-outs and
@@ -73,12 +85,19 @@ func Run(ctx context.Context, o Options) error {
 	if o.Clock == nil {
 		o.Clock = clock.Real{}
 	}
-	frpsBind, frpsMux, err := cfg.FrpsAddrs(o.Host)
-	if err != nil {
-		return err
+	// With no dial-home mode recorded no job dials home, so frps's addresses
+	// may be unknown; then no Instance can be reached and nothing is passed
+	// to frps, as dialHomeTLS allows a plain listener then.
+	frpsBind, frpsMux, ferr := cfg.FrpsAddrs(o.Host)
+	if ferr != nil && (o.Mode == ModeDirect || o.Mode == ModeSSH) {
+		return ferr
 	}
 	var tunnel *Tunnel
-	if o.Transports == nil {
+	switch {
+	case o.Transports != nil:
+	case ferr != nil:
+		o.Transports = NewStaticTransports()
+	default:
 		tunnel = NewTunnel(frpsMux, cfg.TunnelSetupTimeout.D())
 		o.Transports = tunnel
 	}
@@ -86,7 +105,9 @@ func Run(ctx context.Context, o Options) error {
 	if err != nil {
 		return err
 	}
-	sink, err := usage.OpenLog(cfg.UsageDir, o.Log) // each failed batch is logged at Error
+	// Each failed batch is logged at Error; a record goes to the file of the
+	// UTC day of the front's clock.
+	sink, err := usage.OpenOptions(cfg.UsageDir, usage.Options{Logger: o.Log, Now: o.Clock.Now})
 	if err != nil {
 		return fmt.Errorf("usage records: %w", err)
 	}
@@ -95,17 +116,21 @@ func Run(ctx context.Context, o Options) error {
 			o.Log.Error("usage sink", "error", err.Error())
 		}
 	}()
-	router := NewRouter(cfg, o.Clock, o.Transports, o.Recorder, o.Log)
+	metrics := NewMetrics(sink, cfg.UsageDir, o.FreeBytes)
+	router := NewRouter(cfg, o.Clock, o.Transports, o.Recorder, o.Log, metrics)
 	watch, err := startWatch(ctx, o, router)
 	if err != nil {
 		return err
 	}
-	proxy := NewProxy(ProxyOptions{Config: cfg, Host: o.Host, Clock: o.Clock, Router: router, Transports: o.Transports, Keys: keys, Sink: sink, Log: o.Log})
-	f := &Front{Router: router, Watch: watch, Proxy: proxy, Sink: sink, Tunnel: tunnel}
+	proxy := NewProxy(ProxyOptions{Config: cfg, Host: o.Host, Clock: o.Clock, Router: router, Transports: o.Transports, Keys: keys, Sink: sink, Metrics: metrics, Log: o.Log})
+	f := &Front{Router: router, Watch: watch, Proxy: proxy, Sink: sink, Metrics: metrics, Tunnel: tunnel}
 	if tunnel != nil {
 		defer startProber(ctx, cfg, tunnel, o, watch)()
 	}
-	frp := newFrpPassthrough(frpsBind, cfg.TunnelSetupTimeout.D(), o.Log)
+	var frp *frpPassthrough
+	if ferr == nil {
+		frp = newFrpPassthrough(frpsBind, cfg.TunnelSetupTimeout.D(), o.Log)
+	}
 	// The client server's base context: cancelled at a stop, after the
 	// grace, so the requests still in flight are cut with front_shutdown.
 	base, cancelBase := context.WithCancelCause(context.Background())
@@ -115,6 +140,19 @@ func Run(ctx context.Context, o Options) error {
 		return err
 	}
 	o.Log.Info("front serving", "client", f.Client.String(), "dialHome", f.Dial.String(), "mode", o.Mode)
+	if o.Kube != nil {
+		// The heartbeat Lease, and with it the ObservationGap of a restart.
+		// It stops with ctx, and Run waits for it so nothing outlives Run.
+		var keeper sync.WaitGroup
+		keeper.Add(1)
+		go func() {
+			defer keeper.Done()
+			k := newLeaseKeeper(o.Kube, o.Clock, o.Recorder, router.lease, o.Log)
+			k.onHeld = router.flushUsageEvent
+			k.run(ctx)
+		}()
+		defer keeper.Wait()
+	}
 	if o.Ready != nil {
 		o.Ready(f)
 	}
@@ -125,7 +163,9 @@ func Run(ctx context.Context, o Options) error {
 	}
 	stopServing(servers, cancelBase, proxy, grace, o.Log)
 	// The tunnels carried the requests that just ended.
-	frp.Close()
+	if frp != nil {
+		frp.Close()
+	}
 	return nil // the deferred Close then flushes the usage sink
 }
 
@@ -207,7 +247,7 @@ func startProber(ctx context.Context, cfg Config, tunnel *Tunnel, o Options, wat
 // listen opens the three listeners and starts their servers. The dial-home
 // listener passes /agent/v1/ to the agent endpoint in direct mode and frpc's
 // websocket to frps in both modes (HBEP-6, Dial-home modes).
-func listen(o Options, f *Front, frp http.Handler, base context.Context) ([]*http.Server, error) {
+func listen(o Options, f *Front, frp *frpPassthrough, base context.Context) ([]*http.Server, error) {
 	cfg := o.Config
 	var servers []*http.Server
 	var opened []net.Listener
@@ -222,7 +262,11 @@ func listen(o Options, f *Front, frp http.Handler, base context.Context) ([]*htt
 		return fail(fmt.Errorf("clientListen: %w", err))
 	}
 	opened = append(opened, cl)
-	dh, err := NewDialHome(o.Mode, o.Host, frp)
+	var tunnel http.Handler // nil, not a nil *frpPassthrough, when there is none
+	if frp != nil {
+		tunnel = frp
+	}
+	dh, err := NewDialHome(o.Mode, o.Host, tunnel)
 	if err != nil {
 		return fail(err)
 	}
@@ -284,11 +328,38 @@ func serve(s *http.Server, l net.Listener, log *slog.Logger) *http.Server {
 	return s
 }
 
+// usageHealth is the /healthz body's usage member (HBEP-8, Usage records,
+// Failures are never silent).
+type usageHealth struct {
+	// State is "ok" or "failing": failing from a batch or counter block that
+	// failed until a later batch is written and synced.
+	State string `json:"state"`
+	// LostRecords is the records not written since the front started: the
+	// same count as hpcburst_usage_write_failures_total
+	// (@hpc-burst-science-agent, 31 Oct 2026: named lostRecords).
+	LostRecords uint64 `json:"lostRecords"`
+	// Since is when the sink entered its state, in UTC.
+	Since string `json:"since"`
+	// Error is the latest failure; absent while the state is ok.
+	Error string `json:"error,omitempty"`
+}
+
+func usageHealthOf(st usage.Stats) usageHealth {
+	h := usageHealth{State: "ok", LostRecords: st.Lost, Since: usage.Time(st.Since)}
+	if st.Err != nil {
+		h.State, h.Error = "failing", st.Err.Error()
+	}
+	return h
+}
+
 // healthHandler serves GET /healthz: 200 once the watches have synced, with
 // the age of the membership view and of each watch (HBEP-5, Operational
-// readiness 1).
+// readiness 1), and GET /metrics (HBEP-8, Metrics). A usage failure is stated
+// in the body and never changes the status: the front keeps serving, and a
+// readiness failure would restart it (HBEP-8, Usage records).
 func healthHandler(f *Front) http.Handler {
 	mux := http.NewServeMux()
+	mux.Handle("/metrics", f.Metrics.Handler())
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		now := time.Now()
 		st := f.Router.Status()
@@ -301,14 +372,15 @@ func healthHandler(f *Front) http.Handler {
 			"watchAges": ages, "deployments": st.Deployments, "managedTargets": st.Managed, "waiting": st.Waiting,
 			"instances": st.Instances, "leaseEnds": st.LeaseEnds,
 		}
-		// A sink that fails loses records: the health body shows the latest
-		// failure and the count, the status stays 200, and each failure is
+		// A sink that fails loses records: the body shows the state, the count
+		// and the latest failure, the status stays 200, and each failure is
 		// logged and raises a UsageWriteFailed event (@hpc-burst-science-agent,
-		// 31 Oct 2026).
+		// 31 Oct 2026). usageError repeats the error at the top level.
 		if f.Sink != nil {
-			body["usageFailures"] = f.Sink.Failures()
-			if err := f.Sink.Err(); err != nil {
-				body["usageError"] = err.Error()
+			u := usageHealthOf(f.Sink.Stats())
+			body["usage"] = u
+			if u.Error != "" {
+				body["usageError"] = u.Error
 			}
 		}
 		code := http.StatusOK

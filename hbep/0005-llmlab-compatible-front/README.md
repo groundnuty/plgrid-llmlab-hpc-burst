@@ -454,7 +454,7 @@ Against HBEP-4's managed fake, S4's fake Slurm and an engine double, then agains
 
 ## Operational readiness
 
-1. **Working:** the front's health endpoint, plus the age of its membership view and of each watch, and the usage sink's state (`ok` or `failing`, with the failure count, since when and the last error). End to end, a synthetic request per naming level returns the expected attribution headers, and its usage record appears. A failed synthetic request, a response without headers, or a stale watch says it is not working.
+1. **Working:** the front's health endpoint, plus the age of its membership view and of each watch, and the usage sink's state (`ok` or `failing`, with `lostRecords` (records lost), since when and the last error). End to end, a synthetic request per naming level returns the expected attribution headers, and its usage record appears. A failed synthetic request, a response without headers, or a stale watch says it is not working.
 2. **Restart:** it re-reads the ready set, lease ends, ModelDeployments, Providers and PlatformProfiles from the control plane, and rebuilds every ring from them. Balancer counts start at zero, which is consistent, since the restart cut every stream through it. The usage counter resumes at the persisted end. Instance transports come back as the tunnels reconnect through the restarted dial-home listener and each Instance's first probe passes (HBEP-6).
 3. **Silent failure:**
    - a cut stream that looks complete: judged by its endpoint's completion rule (Contract), never closed with `[DONE]`;
@@ -549,6 +549,7 @@ The front grows from www-2027's hand-tuned per-stack routers: affinity and polic
 - 2026-10-31: amendment from the science agent's rulings for #64 and PR #96's review: how a stream ends (`response.incomplete`, `response.failed`, vLLM's failures mid-stream), what counts toward a pause and what resets it, and the configured ssh port.
 - 2026-10-31: the front's later rulings from building #64: credential redaction in passed errors, the shutdown cut, `GET /v1/models/{name}`, and two Errors rows.
 - 2026-10-31: amendment with HBEP-8 becoming implementable: the usage sink syncs each record before `Write` returns, counts and raises every failure, keeps serving, states its state in `/healthz`, and rotates daily keeping every file; `contentEvents` named.
+- 2026-10-31: the usage state's field is `lostRecords` (HBEP-8's amendment of the same day).
 
 ## Amendments
 
@@ -583,3 +584,4 @@ The front grows from www-2027's hand-tuned per-stack routers: affinity and polic
   - **The front keeps serving** while usage cannot be written, with `/healthz` still 200.
   - **Rotation.** Records go to `usage-<YYYY-MM-DD>.jsonl` by the UTC day of the write, every file is kept for the grant's life, and the counter runs across files. Before, there was one file and no rotation.
   - **`contentEvents`** is named among the fields, as PR #95 writes it. Before, the text named the front's count of content events but not its field.
+- **2026-10-31: the usage state's field** (science-agent ruling for #112). The usage sink's state in Operational readiness names `lostRecords`, the records lost; before, a failure count.

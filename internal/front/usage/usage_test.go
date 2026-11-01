@@ -22,14 +22,22 @@ import (
 // records show as a gap. File and member names are written as literals.
 
 const (
-	logName     = "usage.jsonl"
+	// logName is the file of tNow's day: the tests that are not about
+	// rotation run on a clock that stays in that day.
+	logName     = "usage-2026-10-31.jsonl"
 	counterName = "counter"
 )
 
-// sink opens a Sink in dir and fails the test when it cannot.
+// tNow is the fixed time of the sink's clock in the tests that do not move it.
+var tNow = time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+
+func fixedClock() time.Time { return tNow }
+
+// sink opens a Sink in dir, on a clock fixed in tNow's day, and fails the
+// test when it cannot.
 func sink(t *testing.T, dir string) *usage.Sink {
 	t.Helper()
-	s, err := usage.Open(dir)
+	s, err := usage.OpenOptions(dir, usage.Options{Now: fixedClock})
 	if err != nil {
 		t.Fatalf("Open(%s): %v", dir, err)
 	}

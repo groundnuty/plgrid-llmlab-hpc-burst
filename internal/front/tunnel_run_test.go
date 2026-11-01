@@ -14,6 +14,7 @@ import (
 	dynfake "k8s.io/client-go/dynamic/fake"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/inventory"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 // TestRunTunnelInBothDialHomeModes is HBEP-6's wiring test for the front, in
@@ -115,5 +116,23 @@ func TestRunTunnelInBothDialHomeModes(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestRunNeedsFrpsAddressesWhenJobsDialHome: in direct and ssh mode the
+// front must know frps's addresses, from the configuration or the launcher's
+// port base, or it does not start. With no mode recorded no job dials home,
+// and it starts without them (TestRunNamesTheUsageFileByItsClock runs so).
+func TestRunNeedsFrpsAddressesWhenJobsDialHome(t *testing.T) {
+	for _, mode := range []string{ModeDirect, ModeSSH} {
+		host := agentapi.Host{StateDir: t.TempDir()}
+		writeDialHomeCert(t, host)
+		o := runOptions(t, mode, host, "127.0.0.1:0")
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := Run(ctx, o)
+		cancel()
+		if err == nil || !strings.Contains(err.Error(), "frpsBindAddr or frpsMuxAddr") {
+			t.Errorf("%s mode with no port base and no frps addresses: Run = %v, want a refusal naming them", mode, err)
+		}
 	}
 }

@@ -14,9 +14,10 @@
 //   - inventory: the routing view, built from the control plane by watch;
 //   - balancer: one KubeAI CHWBL group per ModelDeployment, wrapped;
 //   - convkey and naming: the conversation key and the name grammar;
-//   - usage: the usage records and their counter;
+//   - usage: the usage records, their daily files and their counter;
 //   - this package: configuration, keys, the router, the request path, the
-//     stream judge, errors and attribution, and the listeners.
+//     stream judge, errors and attribution, the listeners, the metrics served
+//     at /metrics and the heartbeat Lease (HBEP-8).
 //
 // What is reused, and from where (HBEP-15):
 //   - KubeAI's CHWBL group (kubeai-project/kubeai, Apache-2.0, commit
@@ -24,7 +25,12 @@
 //     balancer package.
 //   - github.com/cespare/xxhash v1.1.0 (MIT): the ring hash, the fork's.
 //   - k8s.io/client-go v0.35.3 (Apache-2.0, already a dependency): the
-//     dynamic informers of the watch and the events recorder.
+//     dynamic informers of the watch, the events recorder and the heartbeat
+//     Lease's client.
+//   - github.com/prometheus/client_golang v1.23.2 (Apache-2.0,
+//     https://github.com/prometheus/client_golang; already in go.mod as an
+//     indirect dependency, now direct): the registry, collectors and text
+//     exposition of /metrics (HBEP-8, Metrics).
 //   - The Go standard library's httputil.ReverseProxy for the /agent/v1/
 //     passthrough.
 //   - frp v0.71.1 (fatedier/frp, Apache-2.0, https://github.com/fatedier/frp,
@@ -38,5 +44,7 @@
 //   - www-2027's lessons L-2.5, L-4.1, L-4.3, L-4.14, L-6.1 to L-6.7 (HBEP-5,
 //     Field lessons answered).
 //   - New: the request path, the stream judge, the error table, the usage
-//     sink and the router.
+//     sink with its rotation, the router, the front's metric set and the
+//     heartbeat Lease keeper (a heartbeat in the manner of Kubernetes' node
+//     Leases, HBEP-8 Prior art).
 package front

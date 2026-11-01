@@ -3,14 +3,15 @@ package front
 import (
 	"fmt"
 	"sync"
+	"unicode/utf8"
 
 	coordinationv1 "k8s.io/api/coordination/v1"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/events"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
 // HBEP-8's event type the front emits, and its reason codes. CapacityDropped
@@ -28,6 +29,23 @@ const (
 	reasonUsageWriteFailed = "UsageWriteFailed"
 )
 
+// maxNoteBytes is the API's limit on an event's note (HBEP-8, Events, Form):
+// the API refuses a longer one, and the recorder does not retry a refusal.
+const maxNoteBytes = 1024
+
+// cutNote cuts a note to maxNoteBytes at a character boundary, so the result
+// is valid UTF-8.
+func cutNote(s string) string {
+	if len(s) <= maxNoteBytes {
+		return s
+	}
+	cut := maxNoteBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
 // Recorder emits HBEP-8's events. Events are best effort and never block a
 // request. Messages carry names, counts and times, never a key or a body.
 type Recorder interface {
@@ -41,11 +59,11 @@ type KubeRecorder struct{ R events.EventRecorder }
 
 // Event implements Recorder.
 func (k KubeRecorder) Event(obj runtime.Object, warning bool, typ, code, message string) {
-	et := corev1.EventTypeNormal
+	et := provider.EventKindOrdinary
 	if warning {
-		et = corev1.EventTypeWarning
+		et = provider.EventKindWarning
 	}
-	k.R.Eventf(obj, nil, et, code, typ, "%s", message)
+	k.R.Eventf(obj, nil, et, code, typ, "%s", cutNote(message))
 }
 
 // NewKubeRecorder starts an events broadcaster on the clientset and returns
@@ -63,7 +81,7 @@ func NewKubeRecorder(cs kubernetes.Interface) (KubeRecorder, func(), error) {
 	b := events.NewBroadcaster(&events.EventSinkImpl{Interface: cs.EventsV1()})
 	stop := make(chan struct{})
 	b.StartRecordingToSink(stop)
-	return KubeRecorder{R: b.NewRecorder(scheme, "hpcburst-front")}, func() { close(stop); b.Shutdown() }, nil
+	return KubeRecorder{R: b.NewRecorder(scheme, fieldManagerFront)}, func() { close(stop); b.Shutdown() }, nil
 }
 
 // RecordedEvent is one event a MemoryRecorder holds.

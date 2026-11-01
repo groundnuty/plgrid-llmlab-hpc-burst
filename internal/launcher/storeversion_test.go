@@ -131,7 +131,7 @@ func (f *fakeHostOps) start(ctx context.Context, spec launchSpec, front Front, t
 // after the start would hold the new release's.
 func TestReplaceHostOrder(t *testing.T) {
 	newBin := Binary{Version: mustVersion(t, "v1.36.5+k3s1")}
-	st := &State{Version: "v1.35.9+k3s1", Ports: Ports{1, 2, 3, 4}}
+	st := &State{Version: "v1.35.9+k3s1", Ports: Ports{API: 1, HTTPS: 2, KCM: 3, LB: 4}}
 	t.Run("in order", func(t *testing.T) {
 		l := storeLayout(t)
 		putStore(t, l, "v1", "tok", "")

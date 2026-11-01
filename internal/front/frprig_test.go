@@ -467,8 +467,8 @@ func newTunFront(t *testing.T, rig *frpRig) *tunFront {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.router = NewRouter(h.cfg, clock.Real{}, f.tun, h.rec, f.log)
-	h.proxy = NewProxy(ProxyOptions{Config: h.cfg, Host: h.host, Clock: clock.Real{}, Router: h.router, Transports: f.tun, Keys: keys, Sink: h.sink, Log: f.log})
+	h.router = NewRouter(h.cfg, clock.Real{}, f.tun, h.rec, f.log, h.metrics)
+	h.proxy = NewProxy(ProxyOptions{Config: h.cfg, Host: h.host, Clock: clock.Real{}, Router: h.router, Transports: f.tun, Keys: keys, Sink: h.sink, Metrics: h.metrics, Log: f.log})
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

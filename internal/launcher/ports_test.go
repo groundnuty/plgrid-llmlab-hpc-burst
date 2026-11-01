@@ -3,9 +3,12 @@ package launcher
 import (
 	"fmt"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 func TestPortsFromBase(t *testing.T) {
@@ -13,20 +16,62 @@ func TestPortsFromBase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := Ports{API: 29220, HTTPS: 29221, KCM: 29222, LB: 29225}
+	want := Ports{API: 29220, HTTPS: 29221, KCM: 29222, Agent: 29223, LB: 29225, Controller: 29226}
 	if p != want {
 		t.Fatalf("got %+v, want %+v", p, want)
+	}
+	if got := (agentapi.Host{PortBase: 29220}).AgentEndpointPort(); p.Agent != got {
+		t.Errorf("the reserved agent port is %d, the shared host layout's agent endpoint is %d", p.Agent, got)
+	}
+	if p.Base() != 29220 {
+		t.Errorf("base %d", p.Base())
 	}
 	if got := p.Expected(); len(got) != 3 || got[0] != 29220 || got[1] != 29221 || got[2] != 29222 {
 		t.Errorf("expected ports %v", got)
 	}
-	if got := p.All(); len(got) != 4 || got[3] != 29225 {
+	// The ports that must be free before a start are base..base+6 less base+4: the agent
+	// endpoint (base+3) and the controller's health port (base+6) join the four of the launcher
+	// itself. base+4 (the front's /healthz) and base+7 (its ssh dial-home listener) are the
+	// front's and not checked.
+	if got := p.All(); fmt.Sprint(got) != "[29220 29221 29222 29223 29225 29226]" {
 		t.Errorf("all ports %v", got)
 	}
-	for _, bad := range []int{0, 80, 1023, 65531, 70000, -1} {
+	if got := p.ControllerAddr(); got != "127.0.0.1:29226" {
+		t.Errorf("controller address %q", got)
+	}
+	for _, bad := range []int{0, 80, 1023, 65530, 65531, 70000, -1} {
 		if _, err := PortsFromBase(bad); err == nil {
 			t.Errorf("port base %d accepted", bad)
 		}
+	}
+	// The launcher's own ports end at base+6, so the last base it accepts is 65529.
+	if p, err := PortsFromBase(65529); err != nil || p.Controller != 65535 || p.Agent != 65532 {
+		t.Errorf("port base 65529: %+v, %v", p, err)
+	}
+}
+
+// TestAgentEndpointPortIsInTheBlock: a listener on base+3, the agent endpoint's port (reserved for
+// the controller's server, never bound by the launcher), makes the check that up runs refuse.
+func TestAgentEndpointPortIsInTheBlock(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		skipOrFail(t, fmt.Sprintf("cannot listen on loopback: %v", err))
+	}
+	defer l.Close()
+	held := portOf(t, l)
+	ports, err := PortsFromBase(held - 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The block's other ports are not reserved here, and on a busy machine any
+	// of them can belong to another process, so the check runs on base+3 alone:
+	// the block must contain it, and checkPortsFree must report a listener on it.
+	if !slices.Contains(ports.All(), held) {
+		t.Fatalf("the block at base %d does not contain base+3 (port %d): %v", held-3, held, ports.All())
+	}
+	err = checkPortsFree([]int{held})
+	if err == nil || !strings.Contains(err.Error(), "port "+strconv.Itoa(held)) {
+		t.Fatalf("a listener on base+3 (port %d): want an error naming it, got %v", held, err)
 	}
 }
 

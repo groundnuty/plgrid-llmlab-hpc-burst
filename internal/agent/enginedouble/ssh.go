@@ -135,26 +135,38 @@ func (a sshArgs) validate() error {
 	return nil
 }
 
-// parseForward reads "-L <local-socket-path>:<host>:<port>".
-func parseForward(spec string) (socket, host, port string, err error) {
+// parseForward reads "-L <local-socket-path>:<host>:<port>" (network "unix")
+// and "-L [<bind-address>:]<local-port>:<host>:<port>" (network "tcp", the
+// bind address 127.0.0.1 when absent), as ssh does.
+func parseForward(spec string) (network, local, host, port string, err error) {
 	i := strings.LastIndex(spec, ":")
 	if i < 0 {
-		return "", "", "", fmt.Errorf("-L %q is not <socket>:<host>:<port>", spec)
+		return "", "", "", "", fmt.Errorf("-L %q is not <local>:<host>:<port>", spec)
 	}
 	port, rest := spec[i+1:], spec[:i]
 	j := strings.LastIndex(rest, ":")
 	if j < 1 {
-		return "", "", "", fmt.Errorf("-L %q is not <socket>:<host>:<port>", spec)
+		return "", "", "", "", fmt.Errorf("-L %q is not <local>:<host>:<port>", spec)
 	}
-	socket, host = rest[:j], rest[j+1:]
+	local, host = rest[:j], rest[j+1:]
 	if n, perr := strconv.Atoi(port); perr != nil || n < 1 || n > 65535 || host == "" {
-		return "", "", "", fmt.Errorf("-L %q has no valid host and port", spec)
+		return "", "", "", "", fmt.Errorf("-L %q has no valid host and port", spec)
 	}
-	return socket, host, port, nil
+	if strings.HasPrefix(local, "/") {
+		return "unix", local, host, port, nil
+	}
+	addr, lport, ok := strings.Cut(local, ":")
+	if !ok {
+		addr, lport = "127.0.0.1", local
+	}
+	if n, perr := strconv.Atoi(lport); perr != nil || n < 1 || n > 65535 || strings.Contains(lport, ":") {
+		return "", "", "", "", fmt.Errorf("-L %q has no valid local port", spec)
+	}
+	return "tcp", net.JoinHostPort(addr, lport), host, port, nil
 }
 
 // SSHMain is the fake ssh: it records its arguments, validates them, then
-// listens on the -L socket and forwards each connection to the TCP address
+// listens on the -L socket or loopback port and forwards each connection to the TCP address
 // <host>:<port>, as "ssh -N -L" does. args are the arguments after the program
 // name. It exits 255 on a refusal, and when EnvSSHDieAfter ends; on TERM it
 // removes the socket and returns 0.
@@ -175,7 +187,7 @@ func SSHMain(args []string) int {
 	if err != nil {
 		return refuse(err)
 	}
-	socket, host, port, err := parseForward(a.forwards[0])
+	network, local, host, port, err := parseForward(a.forwards[0])
 	if err != nil {
 		return refuse(err)
 	}
@@ -192,14 +204,16 @@ func SSHMain(args []string) int {
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
 	defer signal.Stop(sigs)
 
-	_ = os.Remove(socket) // a stale socket, as with StreamLocalBindUnlink
-	ln, err := net.Listen("unix", socket)
+	if network == "unix" {
+		_ = os.Remove(local) // a stale socket, as with StreamLocalBindUnlink
+		defer func() { _ = os.Remove(local) }()
+	}
+	ln, err := net.Listen(network, local)
 	if err != nil {
 		return refuse(fmt.Errorf("Could not request local forwarding: %w", err))
 	}
 	f := &forwarder{target: net.JoinHostPort(host, port), conns: map[net.Conn]struct{}{}}
 	go f.serve(ln)
-	defer func() { _ = os.Remove(socket) }()
 
 	select {
 	case <-sigs:

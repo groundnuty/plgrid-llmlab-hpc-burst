@@ -10,6 +10,8 @@
 #
 # The go, crd and launcher-k3s jobs also fetch the pinned frp binaries (hack/fetch-frp.sh) and set
 # HPCBURST_REQUIRE_FRP=1, so the tests that start frps and frpc fail rather than skip without them.
+# The go and crd jobs also provide OpenSSH's sshd (HPCBURST_SSHD) for the ssh-mode tunnel tests,
+# which fail under HPCBURST_REQUIRE_FRP=1 without it; the runner's sshd service is never started.
 #
 # The workflow reads no secret and pushes nothing. Every action is pinned by commit SHA.
 #
@@ -78,6 +80,24 @@ jobs:
             echo "HPCBURST_FRP_DIR=$RUNNER_TEMP/frp"
             echo "HPCBURST_REQUIRE_FRP=1"
           } >> "$GITHUB_ENV"
+
+      # The ssh-mode tunnel tests (internal/agent) run OpenSSH's sshd as this user, in inetd
+      # mode, with no service and no root. With HPCBURST_REQUIRE_FRP=1 a missing sshd fails them.
+      # The package is installed only when sshd is missing, with policy-rc.d refusing to start
+      # its service. The system ssh units are then disabled every time, installed or not, so
+      # the runner keeps no listening sshd.
+      - name: Provide OpenSSH's sshd for the tunnel tests
+        run: |
+          if ! test -x /usr/sbin/sshd; then
+            printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
+            sudo chmod 755 /usr/sbin/policy-rc.d
+            sudo apt-get update -q
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server
+            sudo rm -f /usr/sbin/policy-rc.d
+          fi
+          sudo systemctl disable --now ssh.socket ssh.service 2> /dev/null || true
+          /usr/sbin/sshd -V 2>&1 | head -1
+          echo "HPCBURST_SSHD=/usr/sbin/sshd" >> "$GITHUB_ENV"
 
       - name: gofmt
         run: |
@@ -179,6 +199,24 @@ jobs:
             echo "HPCBURST_FRP_DIR=$RUNNER_TEMP/frp"
             echo "HPCBURST_REQUIRE_FRP=1"
           } >> "$GITHUB_ENV"
+
+      # The ssh-mode tunnel tests (internal/agent) run OpenSSH's sshd as this user, in inetd
+      # mode, with no service and no root. With HPCBURST_REQUIRE_FRP=1 a missing sshd fails them.
+      # The package is installed only when sshd is missing, with policy-rc.d refusing to start
+      # its service. The system ssh units are then disabled every time, installed or not, so
+      # the runner keeps no listening sshd.
+      - name: Provide OpenSSH's sshd for the tunnel tests
+        run: |
+          if ! test -x /usr/sbin/sshd; then
+            printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
+            sudo chmod 755 /usr/sbin/policy-rc.d
+            sudo apt-get update -q
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server
+            sudo rm -f /usr/sbin/policy-rc.d
+          fi
+          sudo systemctl disable --now ssh.socket ssh.service 2> /dev/null || true
+          /usr/sbin/sshd -V 2>&1 | head -1
+          echo "HPCBURST_SSHD=/usr/sbin/sshd" >> "$GITHUB_ENV"
 
       # check.sh runs gofmt, vet, tidy, the CRD drift check (hack/verify-generated.sh) and the
       # tests. The tests fetch the pinned Kubernetes binaries through hack/test-binaries.sh,

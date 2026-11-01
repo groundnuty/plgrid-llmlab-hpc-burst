@@ -122,10 +122,9 @@ func prepareIsolation(l layout) error {
 }
 
 // launch starts k3s detached from the launcher (own session, no stdin, output to the log), and
-// returns a handle on it. It does not wait for readiness. The pidfd comes from clone itself, so it
-// exists before the child could be reaped, and the identity (start time, boot ID) is read while
-// it is held; only then may the child be reaped. The caller records the identity before anything
-// else, so that a crash from here on can still be cleaned up by down.
+// returns a handle on it (see startProc for how the identity is pinned). It does not wait for
+// readiness. The caller records the identity before anything else, so that a crash from here on
+// can still be cleaned up by down.
 func launch(s launchSpec) (*procHandle, error) {
 	if s.bin.file == nil {
 		return nil, errors.New("the k3s binary was not opened and verified")
@@ -155,27 +154,13 @@ func launch(s launchSpec) (*procHandle, error) {
 	if s.nice == 0 {
 		cmd.Args[0] = s.bin.Path // what ps shows; the file executed is still the descriptor
 	}
-	pidfd := -1
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, PidFD: &pidfd}
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start k3s: %w", err)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	h, err := startProc("k3s", cmd)
+	if err != nil {
+		return nil, err
 	}
 	// Reap the child if it exits while this process lives (a library caller or a test); the
 	// command line launcher exits first and k3s is then reparented.
-	reap := func() { go func() { _ = cmd.Wait() }() }
-	if pidfd < 0 {
-		// Not reaped yet, so the PID is still the child's and this kill cannot reach another process.
-		_ = cmd.Process.Kill()
-		reap()
-		return nil, errors.New("the kernel gave no pidfd for k3s, so its identity could not be pinned; it was stopped again")
-	}
-	h := &procHandle{rec: ProcRec{Name: "k3s", PID: cmd.Process.Pid}, fd: pidfd}
-	if _, err := h.record(); err != nil {
-		_ = pidfds.signal(h.fd, syscall.SIGKILL)
-		h.Close()
-		reap()
-		return nil, fmt.Errorf("record the identity of k3s: %w", err)
-	}
-	reap()
+	go func() { _ = cmd.Wait() }()
 	return h, nil
 }
