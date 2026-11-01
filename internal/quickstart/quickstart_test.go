@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"sigs.k8s.io/yaml"
+
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
@@ -194,5 +196,24 @@ func TestEveryExampleIsMentioned(t *testing.T) {
 		if !strings.Contains(doc, "`"+filepath.Base(f)+"`") {
 			t.Errorf("examples/%s is not named in docs/quickstart.md", filepath.Base(f))
 		}
+	}
+}
+
+// The quickstart says which QOS the Helios example asks for, so a change to the example, or to the
+// sentence, shows here. The value is read from the example, not written in this test.
+func TestQuickstartNamesTheQOSOfTheHeliosExample(t *testing.T) {
+	var prov struct {
+		Spec struct {
+			QOS string `json:"qos"`
+		} `json:"spec"`
+	}
+	if err := yaml.Unmarshal([]byte(readRepoFile(t, "examples/provider-helios-gh200.yaml")), &prov); err != nil {
+		t.Fatal(err)
+	}
+	if prov.Spec.QOS == "" {
+		t.Fatal("examples/provider-helios-gh200.yaml sets no spec.qos, and the quickstart says the Helios example asks for a QOS")
+	}
+	if want := "`qos: " + prov.Spec.QOS + "`"; !strings.Contains(readRepoFile(t, "docs/quickstart.md"), want) {
+		t.Errorf("docs/quickstart.md does not name %s, the QOS the Helios example asks for", want)
 	}
 }
