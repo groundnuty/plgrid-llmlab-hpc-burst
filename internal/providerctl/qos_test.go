@@ -574,14 +574,30 @@ func TestSubmitLimitEventIsEmittedWhenItStartsThenAtMostOnceAnHour(t *testing.T)
 		t.Errorf("%d events with the reason SubmitLimitReached, want 0: it is a condition reason only", n)
 	}
 	// crossplane-runtime's own events (reconciler.go:1473, reasonCreated, and
-	// :1388, reasonCannotCreate, in v2.4.3), which the gate above does not bound:
-	// a Create that returns no error emits a Normal CreatedExternalResource on
-	// every attempt, where an error would emit a Warning CannotCreateExternalResource.
-	if n, m := count(rec, "CreatedExternalResource"), count(rec, "CannotCreateExternalResource"); n != attempts || m != 0 {
-		t.Errorf("crossplane emitted %d CreatedExternalResource and %d CannotCreateExternalResource events over %d attempts; want one Created per attempt and no CannotCreate", n, m, attempts)
+	// :1388, reasonCannotCreate, in v2.4.3): a Create that returns no error
+	// would report a creation, once per attempt, although nothing was created;
+	// createdFilter drops that event for a recorded full slot. An error would
+	// emit a Warning CannotCreateExternalResource per attempt instead; there is
+	// none.
+	if n, m := count(rec, "CreatedExternalResource"), count(rec, "CannotCreateExternalResource"); n != 0 || m != 0 {
+		t.Errorf("crossplane's events over %d refused attempts: %d CreatedExternalResource and %d CannotCreateExternalResource, want 0 and 0", attempts, n, m)
 	}
-	t.Logf("%d attempts in 70 minutes: %d SubmissionRejected events (the gate), %d CreatedExternalResource events (crossplane's, one per attempt)",
-		attempts, count(rec, "SubmissionRejected"), count(rec, "CreatedExternalResource"))
+	t.Logf("%d attempts in 70 minutes: %d SubmissionRejected events (the gate), %d CreatedExternalResource events", attempts, count(rec, "SubmissionRejected"), count(rec, "CreatedExternalResource"))
+
+	// The slot clears: the next attempt is accepted, and crossplane's event
+	// for that real creation passes through the filter.
+	if err := sl.End(1001, fakeslurm.Completed); err != nil { // the outside job, the first job of the cluster
+		t.Fatal(err)
+	}
+	e.run("alloc-a", 3)
+	clock.Advance(61 * time.Second)
+	e.run("alloc-a", 3)
+	if r, _ := readRecord(e.get("alloc-a")); r.jobID == "" {
+		t.Fatalf("record %+v: the attempt after the slot cleared was not accepted", r.sub)
+	}
+	if n := count(rec, "CreatedExternalResource"); n != 1 {
+		t.Errorf("%d CreatedExternalResource events after the accepted submission, want 1: the real creation", n)
+	}
 }
 
 // Plain Rejected attempts keep their event on every attempt, as before.
