@@ -15,6 +15,28 @@ import (
 	"testing"
 )
 
+// goDirective is the Go version a go.mod pins, as hack/build-agents.sh reads it: the version after
+// "go" on its go line, up to a comment, such as 1.26.0, 1.26 (the 1.26.0 release) or 1.27rc1. Lines
+// that only mention go in a comment do not count. ok is false when there is no go line, or its
+// version is not of that form.
+func goDirective(goMod string) (version string, ok bool) {
+	for _, line := range strings.Split(goMod, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 2 || f[0] != "go" {
+			continue
+		}
+		v, _, _ := strings.Cut(f[1], "//")
+		if !regexp.MustCompile(`^\d+\.\d+(\.\d+|(alpha|beta|rc)\d+)?$`).MatchString(v) {
+			return "", false
+		}
+		if regexp.MustCompile(`^\d+\.\d+$`).MatchString(v) {
+			v += ".0"
+		}
+		return v, true
+	}
+	return "", false
+}
+
 // goModVersion is the go line of the repository's go.mod, such as 1.26.0.
 func goModVersion(t *testing.T) string {
 	t.Helper()
@@ -26,11 +48,11 @@ func goModVersion(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := regexp.MustCompile(`(?m)^go (\d+\.\d+\.\d+)\s*$`).FindSubmatch(b)
-	if m == nil {
+	v, ok := goDirective(string(b))
+	if !ok {
 		t.Fatal("go.mod has no go line of the form 1.26.0")
 	}
-	return string(m[1])
+	return v
 }
 
 func fileSum(t *testing.T, path string) string {
