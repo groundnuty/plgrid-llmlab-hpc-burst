@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -112,6 +113,23 @@ type verificationData struct {
 	// It is how the record tells a checkpoint with no such file from one whose
 	// file holds none of the keys (HBEP-7, The verification record; issue #175).
 	GenerationConfigFile string `json:"generationConfigFile,omitempty"`
+	// Sampling is what this verification's checks sent: the sampling values
+	// and the seeds of a reasoning model checked with its file's values, or
+	// Greedy true for a model checked greedily (agentapi.CheckSampling over
+	// GenerationConfig, VerifyResult.DoSample and whether the spec declares a
+	// reasoning parser, the inputs the agent computed its requests from;
+	// HBEP-7, One record per verification; science-agent decision, 1 Nov
+	// 2026, issue #151). A pointer: a record written before it has none, and
+	// reads as unknown, not as a sampled model at temperature 0.
+	Sampling *agentapi.Sampling `json:"sampling,omitempty"`
+	// GenerationConfigRefused is the value of the staged generation_config.json
+	// that vLLM refuses, when there is one: the agent's report
+	// (VerifyResult.GenerationConfigRefused, judged on the file's own JSON
+	// text) or the controller's own check of VerifyResult.GenerationConfig,
+	// the same agentapi.CheckGenerationConfig. Verification fails with it, for
+	// every model; no check request was sent, so Sampling is absent
+	// (science-agent ruling, 1 Nov 2026, N7).
+	GenerationConfigRefused *agentapi.GenerationConfigError `json:"generationConfigRefused,omitempty"`
 	// BehaviourContextTokens is the context, in tokens, that this
 	// generation's behaviour check runs at: agentapi.BehaviourContextTokens
 	// of the resolved shapes, the reported max-model-len, the measured
@@ -144,15 +162,33 @@ type rehashOutcome struct {
 // equals its value; every rendered request, with the template overhead, fits
 // the reported context limit.
 func judgeVerify(d declared, v *agentapi.VerifyResult, rehash bool, sh shapes) verificationData {
+	_, reasoning := d.flags["reasoning-parser"]
+	refusal := refusedGenerationConfig(v)
 	out := verificationData{
 		EngineVersion: v.EngineVersion, ImageDigest: v.ImageDigest, Settings: v.Settings,
-		Fingerprint: v.Fingerprint, Overhead: v.TemplateOverhead, GenerationConfig: v.GenerationConfig, GenerationConfigFile: v.GenerationConfigFile, Verdict: v1alpha1.VerdictPass,
-		Undeclared: map[string]string{},
+		Fingerprint: v.Fingerprint, Overhead: v.TemplateOverhead, GenerationConfig: v.GenerationConfig, GenerationConfigFile: v.GenerationConfigFile, GenerationConfigRefused: refusal,
+		Verdict: v1alpha1.VerdictPass, Undeclared: map[string]string{},
+	}
+	if refusal == nil {
+		// The sampling the checks used is recorded on every record, a failed
+		// one and a worker restart's too: verification's own fingerprint
+		// request used it either way. A refused file sends no check request,
+		// so there is none to record.
+		sampling := agentapi.CheckSampling(v.GenerationConfig, v.DoSample, reasoning)
+		out.Sampling = &sampling
 	}
 	failWith := func(cause, msg string) verificationData {
 		out.Verdict, out.Cause, out.Message = v1alpha1.VerdictFail, cause, msg
 		return out
 	}
+	// A failed or mismatching rehash is judged before the refusal, on purpose.
+	// The agent rehashes the checkpoint even when it refuses the file, and a
+	// rehash that fails (v.Error) or mismatches means the staged copy may
+	// differ from the one the agent read: it must be restaged and read again
+	// before its values may stop the class. The refusal below stops it only on
+	// a verification whose rehash held, or that skipped it (a worker restart).
+	// The worker-restart rung and the restage are bounded by the restart limits,
+	// and the next verification reads the file again (PR #169 review, Opus N2).
 	if v.Error != "" {
 		return failWith(causeError, "the agent could not verify: "+v.Error)
 	}
@@ -179,6 +215,13 @@ func judgeVerify(d declared, v *agentapi.VerifyResult, rehash bool, sh shapes) v
 		if len(out.Rehash.Mismatch) > 0 {
 			return failWith(causeRehash, "checkpoint files differ from the identity record: "+strings.Join(out.Rehash.Mismatch, ", "))
 		}
+	}
+	if refusal != nil {
+		// vLLM applies the file's values as the server's defaults, so it would
+		// refuse them on every request, for any model: the settings
+		// contradiction's stop, keyed on the deployment ID, held until the
+		// serving spec changes (a new checkpoint revision is a new ID).
+		return failWith(causeContradiction, refusal.Error())
 	}
 	var missing []string
 	if v.EngineVersion == "" {
@@ -244,10 +287,31 @@ func judgeVerify(d declared, v *agentapi.VerifyResult, rehash bool, sh shapes) v
 	}
 	out.Shapes = &resolved
 	if rehash { // a worker restart keeps Qualified: no behaviour check runs
-		_, reasoning := d.flags["reasoning-parser"]
 		out.BehaviourContextTokens = agentapi.BehaviourContextTokens(resolved, mml, v.TemplateOverhead, reasoning)
 	}
 	return out
+}
+
+// refusedGenerationConfig returns the value of the staged generation_config.json
+// that vLLM refuses: the agent's report, which judged the file's own JSON text,
+// else the controller's check of the numbers the agent recorded
+// (agentapi.CheckGenerationConfig); nil when there is none.
+func refusedGenerationConfig(v *agentapi.VerifyResult) *agentapi.GenerationConfigError {
+	if v.GenerationConfigRefused != nil {
+		return v.GenerationConfigRefused
+	}
+	if v.GenerationConfigFile == agentapi.GenerationConfigUnreadable {
+		// The agent found an entry at the path that is not a readable regular
+		// file. It pairs that with a whole-file refusal, so this is not reached
+		// from it; an agent that does not must still never pass the file as
+		// greedy checks (`@hpc-burst-science-agent`, 1 Nov 2026, for #175).
+		return &agentapi.GenerationConfigError{Value: agentapi.FileUnreadable, Want: agentapi.FileWant}
+	}
+	var ge *agentapi.GenerationConfigError
+	if err := agentapi.CheckGenerationConfig(v.GenerationConfig); errors.As(err, &ge) {
+		return ge
+	}
+	return nil
 }
 
 // sameSetting compares a reported setting with its declared value under one
@@ -379,7 +443,7 @@ func judgeWarmUp(w *agentapi.WarmUpResult, targetSessions int32) (warmUpState, s
 		}
 	}
 	for i := 1; i < len(rounds); i++ {
-		if settled(rounds[i-1], rounds[i]) {
+		if agentapi.WarmUpSettled(rounds[i-1], rounds[i]) {
 			return warmUpSettled, fmt.Sprintf("settled in round %d", rounds[i].Round), throughput(rounds[i], targetSessions)
 		}
 	}
@@ -387,46 +451,6 @@ func judgeWarmUp(w *agentapi.WarmUpResult, targetSessions int32) (warmUpState, s
 		return warmUpFailed, fmt.Sprintf("warm-up did not settle after %d rounds", len(rounds)), nil
 	}
 	return warmUpRunning, "", nil
-}
-
-// meanTotals is the mean Total of each fixed-length shape's requests in r;
-// a shape whose length varies is left out (judgeWarmUp).
-func meanTotals(r agentapi.WarmUpRound) map[agentapi.Shape]time.Duration {
-	sum := map[agentapi.Shape]time.Duration{}
-	n := map[agentapi.Shape]int{}
-	for _, q := range r.Requests {
-		if !q.Shape.FixedLength() {
-			continue
-		}
-		sum[q.Shape] += time.Duration(q.Total)
-		n[q.Shape]++
-	}
-	for s := range sum {
-		sum[s] /= time.Duration(n[s])
-	}
-	return sum
-}
-
-func settled(prev, cur agentapi.WarmUpRound) bool {
-	a, b := meanTotals(prev), meanTotals(cur)
-	if len(b) == 0 || len(a) != len(b) {
-		return false
-	}
-	for s, t := range b {
-		p, ok := a[s]
-		if !ok || t-p > settleLimit(p) {
-			return false
-		}
-	}
-	return true
-}
-
-// settleLimit is how much slower than prev a shape may be in the next round
-// and still count as settled: max(warmUpTolerance of prev, warmUpFloor). The
-// floor keeps one request's noise on a short shape from blocking settling (in
-// #94's run, 0.208 s to 0.253 s between two rounds).
-func settleLimit(prev time.Duration) time.Duration {
-	return max(time.Duration(float64(prev)*warmUpTolerance), warmUpFloor)
 }
 
 func throughput(r agentapi.WarmUpRound, targetSessions int32) *v1alpha1.Throughput {
