@@ -224,7 +224,7 @@ func (p *pass) placeReplacement(in *v1alpha1.Instance, ov overlapCheck) (bool, e
 	case !ov.blocked:
 		return p.provisionWith(in, placeOpts{skip: in.Labels[v1alpha1.LabelProvider]})
 	case ov.queued:
-		return p.provisionWith(in, placeOpts{only: in.Labels[v1alpha1.LabelProvider], successorOf: ov.why})
+		return p.provisionWith(in, placeOpts{only: in.Labels[v1alpha1.LabelProvider], successorOf: ov.why, queued: true})
 	}
 	return false, nil
 }

@@ -58,6 +58,14 @@ type placeOpts struct {
 	// gapOf, when set with successorOf, names the primary that drained in the
 	// mode and is written as annotationNoOverlapGap: the gap has begun.
 	gapOf string
+	// queued, with successorOf, says the successor is made on the queued path:
+	// it is created at its planned time to pend behind its own predecessor's
+	// per-user cap. Its Instance and its Allocation then carry
+	// v1alpha1.AnnotationQueuedSuccessor from their creation, so the Provider
+	// records no queue wait for it (HBEP-7, No-overlap mode; issue #195). A
+	// successor made on the one-slot path, or as the retry of a failed one,
+	// is created after its predecessor's job left the slot and is not.
+	queued bool
 }
 
 func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error) {
@@ -103,7 +111,10 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 			return false, nil
 		}
 		if warm != nil {
-			if err := p.createInstance(pv, cid, pred, warm.Name, o.successorOf, o.gapOf); err != nil {
+			// An existing Allocation is never marked later, so an Instance placed on one is no queued
+			// successor: it pends behind nothing.
+			o.queued = false
+			if err := p.createInstance(pv, cid, pred, warm.Name, o); err != nil {
 				return false, err
 			}
 			// Placed: the Allocation is no longer idle (v1alpha1.ClearIdleSince).
@@ -122,11 +133,11 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 		if !ok {
 			continue
 		}
-		if err := p.createInstance(pv, cid, pred, name, o.successorOf, o.gapOf); err != nil {
+		if err := p.createInstance(pv, cid, pred, name, o); err != nil {
 			p.releaseSlot(pv, name)
 			return false, err
 		}
-		return true, p.createAllocation(pv, name, params)
+		return true, p.createAllocation(pv, name, params, o.queuedMark())
 	}
 	return false, nil
 }
@@ -192,12 +203,24 @@ func drainWindowOf(pv *providerView, md *v1alpha1.ModelDeployment) time.Duration
 	return w
 }
 
+// queuedMark is the value of v1alpha1.AnnotationQueuedSuccessor for the
+// Instance and the Allocation the placement creates: the Provider and the
+// limit, or "" when the successor is not made on the queued path.
+func (o placeOpts) queuedMark() string {
+	if o.queued {
+		return o.successorOf
+	}
+	return ""
+}
+
 // createInstance creates a pending Instance of the class's current ID on the
 // named Allocation, owned by the ModelDeployment, with the drain finalizer. A
-// no-overlap successor carries annotationNoOverlapSuccessor with successorOf,
+// no-overlap successor carries annotationNoOverlapSuccessor with o.successorOf,
 // which names the Provider and the limit, and annotationNoOverlapGap with
-// gapOf once the gap has begun.
-func (p *pass) createInstance(pv *providerView, cid *classID, pred *v1alpha1.Instance, alloc, successorOf, gapOf string) error {
+// o.gapOf once the gap has begun; one made on the queued path also carries
+// v1alpha1.AnnotationQueuedSuccessor, the intent from which its Allocation
+// gets the same mark at its creation (ensureAllocation).
+func (p *pass) createInstance(pv *providerView, cid *classID, pred *v1alpha1.Instance, alloc string, o placeOpts) error {
 	name, err := randomName(truncate(p.md.Name, 40))
 	if err != nil {
 		return err
@@ -224,10 +247,13 @@ func (p *pass) createInstance(pv *providerView, cid *classID, pred *v1alpha1.Ins
 	}
 	if pred != nil {
 		in.Annotations = map[string]string{v1alpha1.AnnotationPredecessor: pred.Name}
-		if successorOf != "" {
-			in.Annotations[annotationNoOverlapSuccessor] = successorOf
-			if gapOf != "" {
-				in.Annotations[annotationNoOverlapGap] = gapOf
+		if o.successorOf != "" {
+			in.Annotations[annotationNoOverlapSuccessor] = o.successorOf
+			if o.gapOf != "" {
+				in.Annotations[annotationNoOverlapGap] = o.gapOf
+			}
+			if mark := o.queuedMark(); mark != "" {
+				in.Annotations[v1alpha1.AnnotationQueuedSuccessor] = mark
 			}
 		}
 	}
@@ -242,8 +268,10 @@ func (p *pass) createInstance(pv *providerView, cid *classID, pred *v1alpha1.Ins
 	return nil
 }
 
-// createAllocation creates the Allocation, then its credential file.
-func (p *pass) createAllocation(pv *providerView, name string, params v1alpha1.BatchParameters) error {
+// createAllocation creates the Allocation, then its credential file. A
+// non-empty queuedOf is the value of v1alpha1.AnnotationQueuedSuccessor: the
+// Allocation is created with the mark, so no recorder ever sees it without.
+func (p *pass) createAllocation(pv *providerView, name string, params v1alpha1.BatchParameters, queuedOf string) error {
 	a := &v1alpha1.Allocation{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name, Namespace: p.md.Namespace,
@@ -259,6 +287,9 @@ func (p *pass) createAllocation(pv *providerView, name string, params v1alpha1.B
 			ModelDeploymentRef:      &v1alpha1.ObjectReference{Name: p.md.Name},
 			RetentionPolicy:         p.md.Spec.RetentionPolicy.DeepCopy(),
 		},
+	}
+	if queuedOf != "" {
+		a.Annotations = map[string]string{v1alpha1.AnnotationQueuedSuccessor: queuedOf}
 	}
 	if err := p.r.Client.Create(p.ctx, a, owner); err != nil {
 		if apierrors.IsAlreadyExists(err) {
@@ -305,7 +336,7 @@ func (p *pass) ensureAllocation(in *v1alpha1.Instance) error {
 		p.degrade(v1alpha1.ReasonSubmitLimitReached, "Instance %s waits for a submit slot for its Allocation %s: %s", in.Name, name, p.noSlot[pv.name])
 		return nil
 	}
-	return p.createAllocation(pv, name, params)
+	return p.createAllocation(pv, name, params, in.Annotations[v1alpha1.AnnotationQueuedSuccessor])
 }
 
 // ensureCredential writes an Allocation's credential file, 256 random bits as

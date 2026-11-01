@@ -91,6 +91,19 @@ const (
 	// maxIdle (HBEP-7, Retention). Its one writer is the lifecycle
 	// controller, unlike the annotations above (IdleSince, SetIdleSince).
 	AnnotationIdleSince = Group + "/idle-since"
+
+	// AnnotationQueuedSuccessor marks the Allocation of a queued-path
+	// no-overlap successor: one created at its planned time to pend behind its
+	// own predecessor's per-user cap (HBEP-7, Handover, No-overlap mode). The
+	// lifecycle controller writes it when it creates the Allocation, never
+	// later, with the Provider and the limit as its value, so no recorder sees
+	// the Allocation unmarked. Its pend is behind that cap, not in the
+	// scheduler's queue, so the Provider's controller records no queue wait
+	// for a marked Allocation (HBEP-4, Provider status): the Provider's waits
+	// hold genuine queue waits only. The Instance carries the same key and
+	// value from its creation, so a pass cut short between the two creates
+	// still gives the Allocation its mark.
+	AnnotationQueuedSuccessor = Group + "/queued-successor"
 )
 
 // Annotation keys on an Instance, written by the lifecycle controller with a
