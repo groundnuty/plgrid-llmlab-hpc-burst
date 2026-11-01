@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -92,19 +91,7 @@ func TestCheckEntry(t *testing.T) {
 		// a killed process closes its descriptors and its leader reads Z for a moment before its
 		// pidfd fires, and in that moment checkEntry rightly sees a live process. HBEP-11 (Operational
 		// readiness, "Silent failure") and handle.go: death is read from the pidfd only.
-		victim, v, d := openRec(*stale.Proc)
-		if v != Ours {
-			t.Fatalf("the child is %v before the kill: %s", v, d)
-		}
-		if err := syscall.Kill(stale.Proc.PID, syscall.SIGKILL); err != nil {
-			victim.Close()
-			t.Fatal(err)
-		}
-		killed := waitExited(context.Background(), []*procHandle{victim}, 5*time.Second)
-		victim.Close()
-		if !killed {
-			t.Fatal("could not kill the child")
-		}
+		killAndWaitExited(t, *stale.Proc)
 		eh, problems := checkEntry(sup, supPID, stale)
 		if eh.Running || !strings.Contains(joined(problems), "not running") {
 			t.Fatalf("stale record: %+v, problems %v", eh, problems)
