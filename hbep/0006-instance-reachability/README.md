@@ -232,7 +232,7 @@ The lifecycle controller's process serves frps's HTTP plugin on loopback at base
 
 ### Path state and the inventory
 
-- **The condition.** The lifecycle controller records whether each Instance's tunnel is connected as an Instance condition, which it writes. An Instance becomes `ready` only with it True, also while the condition is absent, so a tunnel that never comes up fails the Instance at `health.startTimeout`. The reason names the tunnel, `TunnelNotConnected`, when the condition is present and not True; while it is absent, before the reader's first write, the reason is `StartTimeout` (HBEP-7). Proposed names, for the code agent, who owns `api/v1alpha1/conditions.go`:
+- **The condition.** The lifecycle controller records whether each Instance's tunnel is connected as an Instance condition, which it writes. An Instance first becomes `ready` only with it True, also while the condition is absent, so a tunnel that never comes up fails the Instance at `health.startTimeout`. The gate is on that first entry only: an Instance that returns to `ready` after a restart does so when its checks pass, and while its tunnel is down it is the healthy Instance with a dropped tunnel of Risks, not eligible at the front, with nothing restarted, ended or released on that basis (HBEP-7, Instance start; science-agent ruling, 1 Nov 2026, for #167). The reason names the tunnel, `TunnelNotConnected`, when the condition is present and not True; while it is absent, before the reader's first write, the reason is `StartTimeout` (HBEP-7). Proposed names, for the code agent, who owns `api/v1alpha1/conditions.go`:
   - type `TunnelConnected`;
   - status True with reason `ProxyOnline`: frps lists the Instance's proxy as online;
   - status False with reason `ProxyOffline`: frps lists it as offline, or not at all;
@@ -496,6 +496,7 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
 - 2026-10-31: frpc's staging path stated as HBEP-4's, `frpc/<digest>/frpc` (wording only).
 - 2026-11-01: amendment with HBEP-7's of the same day: the end reason of an Instance whose `TunnelConnected` is absent at `health.startTimeout`.
 - 2026-11-01: erratum (with HBEP-15's move to implementable): frp's and k3s's checksums are recorded in the launcher's pins files, `internal/launcher/frp-pins.txt` and `internal/launcher/k3s-pins.txt`, not in `build/dependencies.yaml`, which never existed.
+- 2026-11-01: the `TunnelConnected` gate applies to an Instance's first entry to `ready` only (ruled for #167, with HBEP-7's amendment of the same day).
 
 ## Amendments
 
@@ -504,3 +505,4 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
   - **Open question 8's source** is corrected. S1's step 0 saw port 22 answer at the VM's address, but that sshd was the gateway's (L-17.7), so it did not show that the VM accepted port 22. Before, the source said it did.
   - **Open question 4** now names an ssh port forward that an operator opens, so that it does not read as the gateway's network forward. The decision is unchanged.
 - **2026-11-01: the end reason before the first read** (Path state and the inventory). Science-agent ruling of 1 Nov 2026, for #111, and the review round of PR #127. An Instance still becomes `ready` only with `TunnelConnected` True, also while the condition is absent. At `health.startTimeout` the reason is `TunnelNotConnected` when the condition is present and not True, and `StartTimeout` while it is absent, before the reader's first write. The reader writes it for every placed Instance (#90), so it is absent only until then. Before, the text said only that the reason names the tunnel. The names are on `main` (`api/v1alpha1/conditions.go`).
+- **2026-11-01: the tunnel gate on first entry only** (science-agent ruling for #167, the final tunnel PR, from its Opus review). An Instance first becomes `ready` only with `TunnelConnected` True. After a restart it returns to `ready` when its checks pass; a tunnel that is down then makes it ineligible at the front, as for any healthy Instance whose tunnel drops, and nothing restarts, ends or is released on that basis. Before, the gate applied on every entry, so a tunnel outage after a restart climbed the restart ladder and released the Allocation, against this HBEP's own rule.
