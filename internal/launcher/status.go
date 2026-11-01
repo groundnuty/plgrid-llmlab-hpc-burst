@@ -62,8 +62,10 @@ type StatusReport struct {
 // StatusOptions are the inputs of Status.
 type StatusOptions struct {
 	StateDir string
-	// NoAPI skips the questions asked of the API (/readyz, the controller manager's /healthz,
-	// the write probe and the garbage-collector probe); the process and socket checks always run.
+	// NoAPI skips the questions asked of the API server (its /readyz, the controller manager's
+	// /healthz, the write probe and the garbage-collector probe). The process and socket checks
+	// always run, and so do the questions asked of the supervised processes' own health ports:
+	// their /healthz and the lifecycle controller's /readyz.
 	NoAPI bool
 	// NoGCProbe skips the garbage-collector probe only.
 	NoGCProbe bool

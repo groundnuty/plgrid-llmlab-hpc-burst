@@ -192,7 +192,7 @@ func cmdStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	var sd string
 	var asJSON bool
 	fs.StringVar(&sd, "state-dir", "", stateDirUsage)
-	fs.BoolVar(&o.NoAPI, "no-api", false, "check only the processes and the sockets they hold; do not ask the API (no /readyz, no write or garbage-collector probe)")
+	fs.BoolVar(&o.NoAPI, "no-api", false, "check the processes, the sockets they hold and the supervised processes' own health ports (/healthz, and the controller's /readyz); do not ask the API server (no apiserver /readyz, no controller manager /healthz, no write or garbage-collector probe)")
 	fs.BoolVar(&o.NoGCProbe, "no-gc-probe", false, "skip the garbage-collector probe (an owner and a dependent ConfigMap; the dependent must go within a minute)")
 	fs.BoolVar(&asJSON, "json", false, "print the report as JSON")
 	if code, done := parse(fs, args); done {
