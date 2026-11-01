@@ -64,6 +64,19 @@ type Config struct {
 	// *provider.PolicyRefusal for QOSMaxSubmitJobPerUserLimit. Zero means no
 	// limit; a negative value panics in NewBatch.
 	MaxSubmitPerUser int
+	// MaxGPUsPerUser is the cap on the GPUs of the user's running jobs, a QOS's
+	// MaxTRESPerUser for gres/gpu (HBEP-4, QOS limits): Helios's now allows one.
+	// A job starts at the earliest moment, not before its eligibility plus
+	// Script.QueueWait, where its GPUs plus those of the user's other running
+	// jobs (the outside jobs of AddOutsideJob included) fit the cap. Until
+	// then it is PENDING with reason QOSMaxGRESPerUser, phase Pending; a job with
+	// more GPUs than the cap pends for ever (Submit still accepts it, as Slurm
+	// does). A job that waits on the cap has no StartEstimate. Every read of the
+	// job shows the same start, computed from the facts and the clock at the
+	// call, so a cancel or end that frees GPUs moves a pending job's start, and a
+	// start already reached never moves. Zero means no cap, the behaviour
+	// without this field; a negative value panics in NewBatch.
+	MaxGPUsPerUser int32
 }
 
 // Script says what the next Submit does. Enqueue queues one per future Submit.
@@ -122,6 +135,7 @@ type Batch struct {
 
 	mu      sync.Mutex
 	nextID  int
+	nextPos int // the next jobRec.seq
 	jobs    map[string]*jobRec
 	scripts []Script
 	files   map[string]provider.File
@@ -136,6 +150,9 @@ type Batch struct {
 func NewBatch(clock *Clock, cfg Config) *Batch {
 	if cfg.MaxSubmitPerUser < 0 {
 		panic(fmt.Sprintf("fake: MaxSubmitPerUser %d is negative", cfg.MaxSubmitPerUser))
+	}
+	if cfg.MaxGPUsPerUser < 0 {
+		panic(fmt.Sprintf("fake: MaxGPUsPerUser %d is negative", cfg.MaxGPUsPerUser))
 	}
 	cfg.Partitions = append([]Partition(nil), cfg.Partitions...)
 	if cfg.MinJobAge == 0 {
@@ -313,6 +330,7 @@ func (b *Batch) register(req provider.SubmitRequest, sc Script) string {
 		submit:    now,
 		script:    sc,
 		eligible:  now,
+		seq:       b.takeSeq(),
 	}
 	b.nextID++
 	switch {
@@ -323,6 +341,12 @@ func (b *Batch) register(req provider.SubmitRequest, sc Script) string {
 	}
 	b.jobs[j.id] = j
 	return j.id
+}
+
+// takeSeq returns the next queue position (jobRec.seq). The caller holds b.mu.
+func (b *Batch) takeSeq() int {
+	b.nextPos++
+	return b.nextPos
 }
 
 // byID sorts jobs by job ID, numerically (Slurm IDs), never in listing order.

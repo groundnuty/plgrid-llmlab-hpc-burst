@@ -42,11 +42,12 @@ func (b *Batch) liveJobs(now time.Time) int {
 }
 
 // AddOutsideJob registers a job the framework did not submit: the user's other
-// work, which the scheduler counts against the user's limits all the same. The
-// job has the given name, partition, GPU count and time limit; it is unheld,
-// eligible at the clock's now, and runs the DefaultScript (no queue wait), so
-// it is running at once and ends at its limit unless CancelExternally ends it
-// sooner. It returns the job's ID.
+// work, which the scheduler counts against the user's limits all the same, the
+// cap on the user's GPUs (Config.MaxGPUsPerUser) included. The job has the
+// given name, partition, GPU count and time limit; it is unheld, eligible at
+// the clock's now, and runs the DefaultScript (no queue wait), so it runs at
+// once, unless the GPU cap holds it back like any job, and ends at its limit
+// unless CancelExternally ends it sooner. It returns the job's ID.
 //
 // It is set-up state, not a call of the framework: the call log gets no entry,
 // no queued Script is consumed, and the submit limit does not refuse it. A name
@@ -83,6 +84,7 @@ func (b *Batch) AddOutsideJob(name, partition string, gpus int32, limit time.Dur
 		submit:    now,
 		script:    DefaultScript,
 		eligible:  now,
+		seq:       b.takeSeq(),
 	}
 	b.nextID++
 	b.jobs[j.id] = j
