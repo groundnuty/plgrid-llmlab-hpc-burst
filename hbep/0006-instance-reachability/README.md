@@ -125,7 +125,7 @@ The plugin endpoint has its own port. It is not on base+3, because the restricte
 
 ### frps on the control-plane host
 
-The launcher verifies frps's checksum against `build/dependencies.yaml` (HBEP-15), writes its configuration file (mode 600, in the launcher's state directory), starts it, records it by process ID plus start time, and restarts it when it exits, as it does for k3s (HBEP-11).
+The launcher verifies frps's checksum against `internal/launcher/frp-pins.txt` (HBEP-15), writes its configuration file (mode 600, in the launcher's state directory), starts it, records it by process ID plus start time, and restarts it when it exits, as it does for k3s (HBEP-11).
 
 ```toml
 bindAddr = "127.0.0.1"
@@ -354,7 +354,7 @@ Against the launcher's frps, the front, the agent and an engine double on one ho
 ### Compatibility and upgrades
 
 - Clients see only the front, so a path change is invisible to them.
-- **frps and frpc move together.** Both are pinned to one frp version in `build/dependencies.yaml`. New Allocations get the current frpc. An frps upgrade waits until no running Allocation has another frpc version, or until that pair is tested.
+- **frps and frpc move together.** Both are pinned to one frp version in `internal/launcher/frp-pins.txt`. New Allocations get the current frpc. An frps upgrade waits until no running Allocation has another frpc version, or until that pair is tested.
 - **The agent protocol** (`/agent/v1/`) is unchanged; frpc's tunnel is separate from it.
 - **Stored state:** none of this HBEP's own. Path state is soft, rebuilt from frps's list; frps's state lives in memory and is rebuilt by reconnects.
 - **Downgrade:** start the earlier frps with the earlier frpc pin, under the same rule.
@@ -440,7 +440,7 @@ Dial home replaces www-2027's central relays and forward watchdogs, which kept h
 
 | Component | Origin (project, URL) | Licence | How used (dependency, copied code, optional) |
 |---|---|---|---|
-| frp v0.71.1 (frps, frpc) | [fatedier/frp](https://github.com/fatedier/frp), release `v0.71.1` | Apache-2.0 (its `LICENSE`, read 2026-10-31) | Dependency: two pinned release binaries, recorded in `build/dependencies.yaml` (HBEP-15). frps runs on the control-plane host, started by the launcher; frpc runs in each job, staged by the Provider's controller. Its server plugin interface admits each tunnel. frp's Go packages are not imported |
+| frp v0.71.1 (frps, frpc) | [fatedier/frp](https://github.com/fatedier/frp), release `v0.71.1` | Apache-2.0 (its `LICENSE`, read 2026-10-31) | Dependency: two pinned release binaries, recorded in `internal/launcher/frp-pins.txt` (HBEP-15). frps runs on the control-plane host, started by the launcher; frpc runs in each job, staged by the Provider's controller. Its server plugin interface admits each tunnel. frp's Go packages are not imported |
 | vLLM | [vllm-project/vllm](https://github.com/vllm-project/vllm) v0.32.0 | Apache-2.0 | Dependency (HBEP-9): the engine behind the tunnel; its unguarded `/health` is the probe's target |
 | Headscale + tsnet | [juanfont/headscale](https://github.com/juanfont/headscale); [tsnet](https://pkg.go.dev/tailscale.com/tsnet) | BSD-3-Clause (both) | Optional, not in alpha: a front behind NAT without root (open question 8) |
 
@@ -495,6 +495,7 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
 - 2026-10-31: amendment from the owner's decision on the dial-home route (issue #18): ssh mode runs over the configured ssh port, 22 by default; open questions 4 and 8 corrected.
 - 2026-10-31: frpc's staging path stated as HBEP-4's, `frpc/<digest>/frpc` (wording only).
 - 2026-11-01: amendment with HBEP-7's of the same day: the end reason of an Instance whose `TunnelConnected` is absent at `health.startTimeout`.
+- 2026-11-01: erratum (with HBEP-15's move to implementable): frp's and k3s's checksums are recorded in the launcher's pins files, `internal/launcher/frp-pins.txt` and `internal/launcher/k3s-pins.txt`, not in `build/dependencies.yaml`, which never existed.
 
 ## Amendments
 

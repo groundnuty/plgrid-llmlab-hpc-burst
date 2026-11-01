@@ -259,7 +259,7 @@ For a managed provider:
   - a memory request of 0, because Slurm reads `--mem=0` as the whole node (science-agent decision, 31 Oct 2026).
 - **Files first.** Before claiming an attempt, the plugin ensures four files under `stagingDir`:
   - the agent's binary, at `agent/<digest>/hb-agent`, copied from the control-plane host's build of that digest;
-  - frpc, the tunnel's client (HBEP-6), at `frpc/<digest>/frpc`, for the partition's `cpuArch`, copied from the control-plane host's copy, whose checksum `build/dependencies.yaml` pins (HBEP-15);
+  - frpc, the tunnel's client (HBEP-6), at `frpc/<digest>/frpc`, for the partition's `cpuArch`, copied from the control-plane host's copy, whose checksum `internal/launcher/frp-pins.txt` pins (HBEP-15);
   - the Allocation's credential, at `alloc/<tag>/credential`, mode 600;
   - the launcher's dial-home certificate, at `alloc/<tag>/dial-home.crt`. It is public; frpc verifies the front with it (HBEP-6, HBEP-11).
 
@@ -362,7 +362,7 @@ A partition enters the typed list only when `holdRelease` has been verified on i
 
 ### Known-issues register
 
-The register holds upstream bugs tied to versions. Each entry has one regression test and a workaround expressed as configuration. A platform profile pins the versions it uses, and an entry's workaround applies only within its version range. Alpha reads no register: its format waits for beta (open question 6), and alpha's pins are the ModelDeployment's image digest and `build/dependencies.yaml` (HBEP-15).
+The register holds upstream bugs tied to versions. Each entry has one regression test and a workaround expressed as configuration. A platform profile pins the versions it uses, and an entry's workaround applies only within its version range. Alpha reads no register: its format waits for beta (open question 6), and alpha's pins are the ModelDeployment's image digest and the launcher's pins files (HBEP-15, Where each origin is recorded) (HBEP-15).
 
 ### Test plan
 
@@ -535,6 +535,7 @@ The Slurm provider plugin grows from www-2027's per-cluster ssh over one shared 
 - 2026-10-31: accounting reads and requeued jobs' hours, from building #113, and the managed events' skip cap and `ready` events, from #114 (HBEP-8's amendment of the same day).
 - 2026-11-01: amendment from the first real-engine run (issue #94): the proposed typed fields `partitions[].tmpDir`, from which the bootstrap sets `TMPDIR`, and `partitions[].tmpDirFeature`, which adds `--constraint` (`$SCRATCH_LOCAL` with `localfs` on Helios GH200), and two facts for the untyped block, the open-files limit and QOS `now`.
 - 2026-11-01: Helios GH200's `tmpDir` is `$MEMFS` with `memfs`, since Helios refuses `-C localfs` at submission (measured for #125); no pre-build check, and the build's peak is reported.
+- 2026-11-01: erratum (with HBEP-15's move to implementable): frp's and k3s's checksums are recorded in the launcher's pins files, `internal/launcher/frp-pins.txt` and `internal/launcher/k3s-pins.txt`, not in `build/dependencies.yaml`, which never existed.
 
 ## Amendments
 
@@ -555,7 +556,7 @@ The Slurm provider plugin grows from www-2027's per-cluster ssh over one shared 
   - **A memory request of 0 is refused** before any call, because Slurm reads `--mem=0` as the whole node.
   - **`PathUnresolved`** is the Provider condition for a `HOME` or `stagingDir` variable that does not resolve. Before, the text named only "a condition".
 - **2026-10-31: staging the tunnel's files** (HBEP-6 becoming implementable; science-agent decision, 31 Oct 2026).
-  - **Files first** (Submission) gains frpc, at `frpc/<digest>/frpc` for the partition's `cpuArch`, from the control-plane host's copy pinned in `build/dependencies.yaml`, and the launcher's public dial-home certificate, at `alloc/<tag>/dial-home.crt`. frpc is a pinned release binary, not part of the agent's build, so the agent cannot carry it. Before, the plugin ensured the agent's binary and the credential only.
+  - **Files first** (Submission) gains frpc, at `frpc/<digest>/frpc` for the partition's `cpuArch`, from the control-plane host's copy pinned in `internal/launcher/frp-pins.txt`, and the launcher's public dial-home certificate, at `alloc/<tag>/dial-home.crt`. frpc is a pinned release binary, not part of the agent's build, so the agent cannot carry it. Before, the plugin ensured the agent's binary and the credential only.
   - **`agent.json`** also carries frpc's digest, which the agent checks before it runs frpc, and in ssh mode the dial-home listener's loopback port, the target of the second forward (HBEP-7). The field names are the code agent's.
   - **Wording.** `DialHomeUnreachable` is set when an Instance's registration over the dial-home path fails; the text said "through the tunnel", which HBEP-6 now uses for frp's serving tunnel only. The trigger is unchanged.
 - **2026-10-31: the managed catalog's bound, readiness and expiry** (science-agent decisions while building PR #85).
