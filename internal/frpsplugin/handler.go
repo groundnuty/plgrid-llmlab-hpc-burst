@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
@@ -22,13 +25,14 @@ const (
 )
 
 const (
-	// DefaultDeadline is how long the handler waits for the Index before it refuses. HBEP-6 wants
-	// every answer within 1 s, because frps calls NewProxy on the session's own read loop with no
-	// timeout on its HTTP client. The budget leaves the rest of the second to the HTTP exchange.
+	// DefaultDeadline is how long the handler takes over a call, from the moment it starts, for
+	// reading the body and for the Index, before it refuses. HBEP-6 wants every answer within
+	// 1 s, because frps calls NewProxy on the session's own read loop with no timeout on its HTTP
+	// client. The budget leaves the rest of the second to the HTTP exchange.
 	DefaultDeadline = 700 * time.Millisecond
-	// DefaultMaxInFlight bounds the lookups running at once. A lookup that does not return keeps
-	// its slot, so a stuck Index fills the slots, and then every call is refused at once instead
-	// of piling up goroutines.
+	// DefaultMaxInFlight bounds the calls being handled at once, from the start of the body read.
+	// A call that does not return (an Index that blocks) keeps its slot, so a stuck Index fills
+	// the slots, and then every call is refused at once instead of piling up goroutines.
 	DefaultMaxInFlight = 128
 	// maxBody is the most a request body may hold: frps's messages are a few hundred bytes.
 	maxBody = 64 << 10
@@ -50,23 +54,25 @@ const (
 	reasonDomains     = "custom_domains must hold exactly one entry, equal to proxy_name"
 	reasonNotPlaced   = "proxy_name is not the UID of an Instance placed on this Allocation"
 	reasonExtraFields = "subdomain, group, http_user and route_by_http_user must be empty"
+	reasonSlowBody    = "the request body did not arrive in time; retry"
 	reasonBusy        = "the plugin is busy; retry"
 	reasonInternal    = "the plugin failed internally; retry"
 )
 
 // Options configures a Handler.
 type Options struct {
-	// Deadline is how long a call waits for the Index; zero means DefaultDeadline. It must be
-	// shorter than one second (HBEP-6).
+	// Deadline is the whole budget of a call, reading its body included; zero means
+	// DefaultDeadline. It must be shorter than one second (HBEP-6).
 	Deadline time.Duration
-	// MaxInFlight bounds the lookups running at once; zero means DefaultMaxInFlight.
+	// MaxInFlight bounds the calls being handled at once; zero means DefaultMaxInFlight.
 	MaxInFlight int
 	// Notifier hears accepted NewProxy and CloseProxy calls; nil means nobody does.
 	Notifier Notifier
 }
 
 // Handler is frps's HTTP server plugin. It serves agentapi.FrpsPluginPath, and answers 404 anywhere
-// else. Mount it on agentapi.Host.FrpsPluginAddr, with read and write timeouts on the server.
+// else. Mount it on agentapi.Host.FrpsPluginAddr, on a server with ReadHeaderTimeout and
+// WriteTimeout set: the handler's deadline starts once the headers are read.
 type Handler struct {
 	idx      Index
 	notify   Notifier
@@ -154,7 +160,13 @@ func refuse(why string) verdict { return verdict{reject: true, reason: why} }
 
 // ServeHTTP answers a plugin call. Every call frps can make gets HTTP 200 with a verdict, a refusal
 // included, so that the reason reaches frpc; a call that is not one of frps's gets an error status.
-// It decides only from the Index, and a decision that has not come within the deadline is a refusal.
+//
+// One absolute deadline, from the moment the handler starts, covers everything after the request's
+// headers: taking a slot, reading the body, and the decision from the Index. The headers are read
+// before the handler runs, so the server mounting it sets ReadHeaderTimeout. A call that has not been
+// decided by the deadline (a body that stalls, an Index that blocks) is a refusal, and a call that
+// finds every slot taken is a refusal at once. The slot is taken before the body is read, so a
+// flood of stalled bodies counts against the cap like any other call.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != agentapi.FrpsPluginPath {
 		http.NotFound(w, r)
@@ -165,59 +177,49 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	write := func(v verdict) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(response{Reject: v.reject, RejectReason: v.reason, Unchange: true})
+	deadline := time.Now().Add(h.deadline)
+	// The body comes off the connection, and a client can stall it. This bounds the read at the
+	// connection, which also lets the server finish the request afterwards. A ResponseWriter that
+	// has no connection (a test recorder) reports ErrNotSupported, and the race in guarded still
+	// answers in time.
+	_ = http.NewResponseController(w).SetReadDeadline(deadline)
+	ctx, cancel := context.WithDeadline(r.Context(), deadline)
+	defer cancel()
+	var op atomic.Value // the call's op, once the body has been read
+	v := h.guarded(ctx, func(ctx context.Context) verdict { return h.handle(ctx, r, &op) })
+	// CloseProxy is a notification: frps ignores the answer's content and logs a rejection only. It
+	// is accepted whatever the Index or the Notifier does, unless it was malformed.
+	if got, _ := op.Load().(string); got == OpCloseProxy && v.reject && v.reason != reasonMalformed {
+		v = accept()
 	}
-	var req request
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody)).Decode(&req); err != nil {
-		write(refuse(reasonMalformed))
-		return
-	}
-	// frps puts the operation in the body and in the query; a call where they differ is not frps's.
-	if q := r.URL.Query().Get("op"); q != "" && q != req.Op {
-		write(refuse(reasonMalformed))
-		return
-	}
-	switch req.Op {
-	case OpLogin:
-		write(h.decide(r.Context(), func(ctx context.Context) verdict { return h.login(ctx, req.Content) }))
-	case OpNewProxy:
-		write(h.decide(r.Context(), func(ctx context.Context) verdict { return h.newProxy(ctx, req.Content) }))
-	case OpCloseProxy:
-		// A notification: frps ignores the answer's content, and logs a rejection only. It is
-		// accepted whatever the Index does, and the Notifier hears it.
-		v := h.decide(r.Context(), func(ctx context.Context) verdict { return h.closeProxy(req.Content) })
-		if v.reject && v.reason != reasonMalformed {
-			v = accept()
-		}
-		write(v)
-	default:
-		write(refuse(fmt.Sprintf("op %q is not served by this plugin", req.Op)))
-	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(response{Reject: v.reject, RejectReason: v.reason, Unchange: true})
 }
 
-// decide runs fn with a context that expires at the deadline, and answers with its verdict, or with
-// a refusal when fn has not returned by then (or panics, or no slot is free). fn runs in its own
-// goroutine, so an Index that blocks without looking at its context does not hold the answer; the
-// goroutine ends when the call returns, and keeps its slot until then.
-func (h *Handler) decide(parent context.Context, fn func(context.Context) verdict) verdict {
+// guarded runs fn in its own goroutine and answers with its verdict, or with a refusal when fn has
+// not returned by the context's deadline, when it panics, or when no slot is free. Because fn runs
+// apart from the caller, one that blocks without looking at its context does not hold the answer;
+// the goroutine keeps its slot until fn returns.
+func (h *Handler) guarded(ctx context.Context, fn func(context.Context) verdict) verdict {
 	select {
 	case h.slots <- struct{}{}:
 	default:
 		return refuse(reasonBusy)
 	}
-	ctx, cancel := context.WithTimeout(parent, h.deadline)
-	defer cancel()
 	out := make(chan verdict, 1)
 	go func() {
-		defer func() { <-h.slots }()
-		defer func() {
-			if recover() != nil {
-				out <- refuse(reasonInternal)
-			}
+		v := func() (v verdict) {
+			defer func() {
+				if recover() != nil {
+					v = refuse(reasonInternal)
+				}
+			}()
+			return fn(ctx)
 		}()
-		out <- fn(ctx)
+		// The slot is free before the answer is handed over, so a caller that has the answer
+		// finds it free.
+		<-h.slots
+		out <- v
 	}()
 	select {
 	case v := <-out:
@@ -225,6 +227,35 @@ func (h *Handler) decide(parent context.Context, fn func(context.Context) verdic
 	case <-ctx.Done():
 		return refuse(fmt.Sprintf("the plugin could not decide within %s; retry", h.deadline))
 	}
+}
+
+// handle reads the call and decides it. It runs inside guarded.
+func (h *Handler) handle(ctx context.Context, r *http.Request, op *atomic.Value) verdict {
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
+	switch {
+	case errors.Is(err, os.ErrDeadlineExceeded):
+		return refuse(reasonSlowBody)
+	case err != nil || len(body) > maxBody:
+		return refuse(reasonMalformed)
+	}
+	var req request
+	if err := json.Unmarshal(body, &req); err != nil {
+		return refuse(reasonMalformed)
+	}
+	// frps puts the operation in the body and in the query; a call where they differ is not frps's.
+	if q := r.URL.Query().Get("op"); q != "" && q != req.Op {
+		return refuse(reasonMalformed)
+	}
+	op.Store(req.Op)
+	switch req.Op {
+	case OpLogin:
+		return h.login(ctx, req.Content)
+	case OpNewProxy:
+		return h.newProxy(ctx, req.Content)
+	case OpCloseProxy:
+		return h.closeProxy(req.Content)
+	}
+	return refuse(fmt.Sprintf("op %q is not served by this plugin", req.Op))
 }
 
 // allocation returns the Allocation whose credential the session's metas carry, or the verdict that

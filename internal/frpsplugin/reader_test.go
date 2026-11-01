@@ -93,6 +93,18 @@ func TestListFailuresAreErrorsNeverAList(t *testing.T) {
 		{"a 200 with proxies of the wrong type", serve(`{"proxies":"x"}`)},
 		{"a 200 with an array", serve(`[]`)},
 		{"a 200 with nothing", serve(``)},
+		{"a null entry", serve(`{"proxies":[null]}`)},
+		{"an entry that is not an object", serve(`{"proxies":[1]}`)},
+		{"an entry with no fields", serve(`{"proxies":[{}]}`)},
+		{"an entry with a name and no status", serve(`{"proxies":[{"name":"u1"}]}`)},
+		{"an entry with a status and no name", serve(`{"proxies":[{"status":"online"}]}`)},
+		{"an entry with an empty name", serve(`{"proxies":[{"name":"","status":"online"}]}`)},
+		{"an unknown status", serve(`{"proxies":[{"name":"u1","status":"starting"}]}`)},
+		{"a status in capitals", serve(`{"proxies":[{"name":"u1","status":"Online"}]}`)},
+		{"an online entry beside a null one", serve(`{"proxies":[{"name":"u1","status":"online"},null]}`)},
+		{"an online entry beside one with an unknown status", serve(`{"proxies":[{"name":"u1","status":"online"},{"name":"u2","status":"gone"}]}`)},
+		{"conflicting duplicates", serve(`{"proxies":[{"name":"u1","status":"online"},{"name":"u1","status":"offline"}]}`)},
+		{"identical duplicates", serve(`{"proxies":[{"name":"u1","status":"online"},{"name":"u1","status":"online"}]}`)},
 		{"a truncated list", serve(`{"proxies":[{"name":"u1","sta`)},
 		{"a list longer than the limit", serve(huge)},
 		{"an answer that does not come", func(w http.ResponseWriter, r *http.Request) {
@@ -186,12 +198,11 @@ func TestBuildReportMapsTheListToTheConditions(t *testing.T) {
 	list := []Proxy{
 		{Name: "on", Status: "online"},
 		{Name: "off", Status: "offline"},
-		{Name: "odd", Status: "starting"},
 		{Name: "orphan-b", Status: "online"},
 		{Name: "orphan-a", Status: "online"},
 		{Name: "orphan-gone", Status: "offline"}, // an offline entry no one owns is no orphan
 	}
-	rep := BuildReport([]string{"on", "off", "odd", "missing"}, list, nil)
+	rep := BuildReport([]string{"on", "off", "missing"}, list, nil)
 	for _, c := range []struct {
 		uid    string
 		status metav1.ConditionStatus
@@ -199,7 +210,6 @@ func TestBuildReportMapsTheListToTheConditions(t *testing.T) {
 	}{
 		{"on", metav1.ConditionTrue, v1alpha1.ReasonProxyOnline},
 		{"off", metav1.ConditionFalse, v1alpha1.ReasonProxyOffline},
-		{"odd", metav1.ConditionFalse, v1alpha1.ReasonProxyOffline}, // only "online" counts
 		{"missing", metav1.ConditionFalse, v1alpha1.ReasonProxyOffline},
 	} {
 		got, ok := rep.Conditions[c.uid]
@@ -207,8 +217,8 @@ func TestBuildReportMapsTheListToTheConditions(t *testing.T) {
 			t.Errorf("%s: %+v, want %s/%s with a message", c.uid, got, c.status, c.reason)
 		}
 	}
-	if len(rep.Conditions) != 4 {
-		t.Errorf("%d conditions for 4 Instances", len(rep.Conditions))
+	if len(rep.Conditions) != 3 {
+		t.Errorf("%d conditions for 3 Instances", len(rep.Conditions))
 	}
 	if want := []string{"orphan-a", "orphan-b"}; !reflect.DeepEqual(rep.Orphans, want) {
 		t.Errorf("orphans = %v, want %v", rep.Orphans, want)
@@ -259,5 +269,38 @@ func TestNewHostReaderUsesTheHostsWebAddressUserAndPasswordFile(t *testing.T) {
 	want := ReaderConfig{Addr: "127.0.0.1:40011", User: agentapi.FrpsWebUser, PasswordFile: "/state/frps/web-password", Timeout: DefaultReadTimeout}
 	if rd.cfg != want {
 		t.Errorf("config = %+v, want %+v", rd.cfg, want)
+	}
+}
+
+// TestBuildReportOfAListNoFrpsWritesIsUnknownForEveryInstance: BuildReport takes a list from any
+// caller, so it checks the list itself. A guess of "offline" for an entry it cannot read, or an
+// "online" from a list it half trusts, would put a wrong value in the condition.
+func TestBuildReportOfAListNoFrpsWritesIsUnknownForEveryInstance(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		list []Proxy
+	}{
+		{"an entry with no fields", []Proxy{{}}},
+		{"no name", []Proxy{{Status: "online"}}},
+		{"no status", []Proxy{{Name: "u1"}}},
+		{"an unknown status", []Proxy{{Name: "u1", Status: "starting"}}},
+		{"a bad entry beside an online one", []Proxy{{Name: "u1", Status: "online"}, {Name: "u2"}}},
+		{"conflicting duplicates", []Proxy{{Name: "u1", Status: "online"}, {Name: "u1", Status: "offline"}}},
+		{"identical duplicates", []Proxy{{Name: "u1", Status: "online"}, {Name: "u1", Status: "online"}}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rep := BuildReport([]string{"u1", "u2"}, c.list, nil)
+			if rep.Err == nil {
+				t.Fatal("no error for a list no frps writes")
+			}
+			for _, uid := range []string{"u1", "u2"} {
+				if st, reason := condOf(rep, uid); st != metav1.ConditionUnknown || reason != v1alpha1.ReasonProxyListUnreadable {
+					t.Errorf("%s: %s/%s, want Unknown/ProxyListUnreadable", uid, st, reason)
+				}
+			}
+			if len(rep.Orphans) != 0 {
+				t.Errorf("orphans %v from a list that was not read", rep.Orphans)
+			}
+		})
 	}
 }

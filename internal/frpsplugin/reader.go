@@ -20,10 +20,11 @@ const (
 	// proxyListPath is frps's list of tcpmux proxies, online and offline (frp v0.71.1,
 	// server/api_router.go:27-49, server/http/controller.go:151-161).
 	proxyListPath = "/api/proxy/tcpmux"
-	// StatusOnline is the status of a proxy frps has registered. Every other value, "offline"
-	// included, means the proxy is not connected (HBEP-6: offline entries stay in the list, so only
-	// "online" counts).
-	StatusOnline = "online"
+	// StatusOnline is the status of a proxy frps has registered; StatusOffline that of one it
+	// remembers but has not registered. Pinned frps produces these two and no others (server/http/
+	// controller.go:234-257). Offline entries stay in the list, so only "online" counts as connected.
+	StatusOnline  = "online"
+	StatusOffline = "offline"
 	// DefaultReadTimeout bounds one read of the list.
 	DefaultReadTimeout = 5 * time.Second
 	// maxListBytes bounds the list's size: an Instance's entry is a few hundred bytes.
@@ -113,9 +114,10 @@ func (r *Reader) List(ctx context.Context) ([]Proxy, error) {
 		return nil, fmt.Errorf("frps web API: the list is longer than %d bytes", maxListBytes)
 	}
 	// "proxies" is a pointer so that an answer without the key (another page, another API) is
-	// an error, not an empty list that would read as every Instance offline.
+	// an error, not an empty list that would read as every Instance offline. The entries are
+	// pointers so that a null entry shows as one.
 	var doc struct {
-		Proxies *[]Proxy `json:"proxies"`
+		Proxies *[]*Proxy `json:"proxies"`
 	}
 	if err := json.Unmarshal(body, &doc); err != nil {
 		return nil, fmt.Errorf("frps web API: the answer is not JSON: %w", err)
@@ -123,7 +125,38 @@ func (r *Reader) List(ctx context.Context) ([]Proxy, error) {
 	if doc.Proxies == nil {
 		return nil, errors.New("frps web API: the answer has no proxies list")
 	}
-	return *doc.Proxies, nil
+	list := make([]Proxy, len(*doc.Proxies))
+	for i, p := range *doc.Proxies {
+		if p == nil {
+			return nil, fmt.Errorf("frps web API: entry %d of the list is null", i)
+		}
+		list[i] = *p
+	}
+	if err := checkList(list); err != nil {
+		return nil, fmt.Errorf("frps web API: %w", err)
+	}
+	return list, nil
+}
+
+// checkList refuses a list that pinned frps could not have produced: an entry with no name, a status
+// other than online or offline (an entry that lacks one has the empty status), or a name listed
+// twice. Any of them means the answer is not the list of the frps this was built for, and reading it
+// as "offline" would put a guess in the condition.
+func checkList(list []Proxy) error {
+	seen := make(map[string]struct{}, len(list))
+	for i, p := range list {
+		switch {
+		case p.Name == "":
+			return fmt.Errorf("entry %d of the list has no name", i)
+		case p.Status != StatusOnline && p.Status != StatusOffline:
+			return fmt.Errorf("entry %d of the list has the status %q, want %q or %q", i, p.Status, StatusOnline, StatusOffline)
+		}
+		if _, dup := seen[p.Name]; dup {
+			return fmt.Errorf("the name %q is listed twice", p.Name)
+		}
+		seen[p.Name] = struct{}{}
+	}
+	return nil
 }
 
 // Report is the path state for a set of Instances.
@@ -148,11 +181,16 @@ func (r *Reader) Read(ctx context.Context, uids []string) Report {
 
 // BuildReport turns a read of frps's list into the Instances' TunnelConnected conditions (HBEP-6,
 // Path state):
-//   - the list could not be read (err): Unknown with ProxyListUnreadable, for every Instance, so the
-//     condition is never left True on a list that was not read;
+//   - the list could not be read (err), or has an entry no pinned frps writes (no name, a status
+//     other than online and offline, a name twice): Unknown with ProxyListUnreadable, for every
+//     Instance, so the condition is never left True on a list that was not read;
 //   - frps lists the Instance's proxy as online: True with ProxyOnline;
 //   - it lists it as anything else, or not at all: False with ProxyOffline.
 func BuildReport(uids []string, list []Proxy, err error) Report {
+	if err == nil {
+		// A list that could not have come from the pinned frps is a list that was not read.
+		err = checkList(list)
+	}
 	rep := Report{Conditions: make(map[string]metav1.Condition, len(uids)), Err: err}
 	if err != nil {
 		for _, uid := range uids {

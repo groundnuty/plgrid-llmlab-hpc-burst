@@ -1,9 +1,12 @@
 package frpsplugin
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -539,19 +543,131 @@ func TestStuckLookupsFillTheSlotsAndThenCallsAreRefusedAtOnce(t *testing.T) {
 	}
 }
 
-type panickingIndex struct{ Index }
+// panicOnceIndex panics in its first lookup and answers normally after that.
+type panicOnceIndex struct {
+	Index
+	n atomic.Int32
+}
 
-func (panickingIndex) AllocationForToken(context.Context, string) (string, bool) { panic("boom") }
+func (p *panicOnceIndex) AllocationForToken(ctx context.Context, tok string) (string, bool) {
+	if p.n.Add(1) == 1 {
+		panic("boom")
+	}
+	return p.Index.AllocationForToken(ctx, tok)
+}
 
-func TestAPanicInTheIndexIsARefusal(t *testing.T) {
-	h := newTestHandler(t, panickingIndex{syncedIndex(t)}, nil)
+// TestAPanicInTheIndexIsARefusalAndLeaksNoSlot: with one slot, a second call through the same handler
+// is accepted only if the panicking call gave its slot back and the handler still serves.
+func TestAPanicInTheIndexIsARefusalAndLeaksNoSlot(t *testing.T) {
+	h, err := NewHandler(&panicOnceIndex{Index: syncedIndex(t)}, Options{MaxInFlight: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
 	a := call(t, h, OpLogin, fixture(t, "login"))
 	if !a.Reject || a.RejectReason != reasonInternal {
 		t.Fatalf("answer %+v, want a refusal with %q", a, reasonInternal)
 	}
-	// And the handler goes on serving.
-	if a := call(t, newTestHandler(t, syncedIndex(t), nil), OpLogin, fixture(t, "login")); a.Reject {
-		t.Fatalf("a fresh handler refused: %q", a.RejectReason)
+	for i := 0; i < 3; i++ { // the same handler, the same single slot
+		if a := call(t, h, OpLogin, fixture(t, "login")); a.Reject {
+			t.Fatalf("call %d after the panic: %q", i+2, a.RejectReason)
+		}
+	}
+}
+
+// stalledBody opens a connection to srv, sends a Login's headers announcing a body of 4000 bytes and
+// the start of it, and then sends nothing more.
+func stalledBody(t *testing.T, srv *httptest.Server) net.Conn {
+	t.Helper()
+	c, err := net.Dial("tcp", strings.TrimPrefix(srv.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	if _, err := io.WriteString(c, "POST "+agentapi.FrpsPluginPath+"?version=0.1.0&op=Login HTTP/1.1\r\nHost: plugin\r\n"+
+		"Content-Type: application/json\r\nContent-Length: 4000\r\n\r\n"+`{"version":"0.1.0","op":"Login","content":{"metas":{`); err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// answeredOrClosed waits for the server's answer on c, or for it to close the connection, and
+// returns how long that took and the answer ("" when it closed without one). A server that does
+// neither is waited on for 3 s, so that a handler without a deadline fails the test and does not hang it.
+func answeredOrClosed(t *testing.T, c net.Conn) (time.Duration, answer, bool) {
+	t.Helper()
+	start := time.Now()
+	_ = c.SetReadDeadline(start.Add(3 * time.Second))
+	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+	took := time.Since(start)
+	if err != nil {
+		return took, answer{}, false
+	}
+	defer resp.Body.Close()
+	var a answer
+	if err := json.NewDecoder(resp.Body).Decode(&a); err != nil {
+		t.Fatalf("the answer is not JSON: %v", err)
+	}
+	return took, a, true
+}
+
+// TestAStalledBodyIsAnsweredOrClosedWithinOneSecond: the deadline starts when the handler does and
+// covers the read of the body. The server here has no timeouts of its own, so only the handler stops
+// a client that sends its headers and then goes quiet.
+func TestAStalledBodyIsAnsweredOrClosedWithinOneSecond(t *testing.T) {
+	srv := httptest.NewServer(newTestHandler(t, syncedIndex(t), nil))
+	defer srv.Close()
+	c := stalledBody(t, srv)
+	took, a, answered := answeredOrClosed(t, c)
+	t.Logf("answered=%v after %s", answered, took)
+	if took >= time.Second {
+		t.Fatalf("after %s the server had neither answered nor closed the connection", took)
+	}
+	if answered && (!a.Reject || a.RejectReason == "") {
+		t.Errorf("answer %+v, want a refusal with a reason", a)
+	}
+}
+
+// TestStalledBodiesTakeSlotsAndGiveThemBack: a stalled body holds a slot from the start of its read
+// (so a flood of them counts against the cap), and gives it back when the deadline ends it (so it
+// does not hold a well-formed Login out for good).
+func TestStalledBodiesTakeSlotsAndGiveThemBack(t *testing.T) {
+	h, err := NewHandler(syncedIndex(t), Options{MaxInFlight: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	login := mustJSON(fixture(t, "login"))
+	client := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
+	postLogin := func() answer {
+		t.Helper()
+		resp, err := client.Post(srv.URL+agentapi.FrpsPluginPath+"?op=Login", "application/json", bytes.NewReader(login))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var a answer
+		if err := json.NewDecoder(resp.Body).Decode(&a); err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+	if a := postLogin(); a.Reject {
+		t.Fatalf("a well-formed Login with nothing stalled: %q", a.RejectReason)
+	}
+	conns := []net.Conn{stalledBody(t, srv), stalledBody(t, srv)}
+	// While the two stalled bodies are being read, they hold both slots.
+	waitFor(t, time.Second, "the stalled bodies never took the slots", func() bool {
+		return postLogin().RejectReason == reasonBusy
+	})
+	for _, c := range conns {
+		if took, _, _ := answeredOrClosed(t, c); took >= time.Second {
+			t.Errorf("a stalled body was still held after %s", took)
+		}
+	}
+	// Both have been ended: the slots are free and a well-formed Login is accepted.
+	if a := postLogin(); a.Reject {
+		t.Fatalf("a well-formed Login after the stalled bodies ended: %q", a.RejectReason)
 	}
 }
 
