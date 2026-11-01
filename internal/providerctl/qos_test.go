@@ -157,6 +157,35 @@ func TestPolicyRefusalSettlesWithoutFlapping(t *testing.T) {
 			if n := sl.Count("sbatch"); n != 1 {
 				t.Errorf("%d sbatch calls while waiting for the backoff, want 1", n)
 			}
+			// Across the backoff: attempt 2 is refused the same way. The Create
+			// pass of every attempt ends in crossplane-runtime's
+			// MarkConditions(Creating(), ReconcileSuccess()) (reconciler.go:1474 in
+			// v2.4.3), which empties the Ready message; the next pass, requeued at
+			// once, writes it again. The test logs what that pass shows, and holds
+			// everything else to the waiting passes.
+			sl.Script(c.step)
+			clock.Advance(time.Minute)
+			e.run("alloc-a", 1) // Create of attempt 2
+			second := snapshot(e.get("alloc-a"))
+			t.Logf("Create pass of attempt 2: Ready %s/%s %q, Synced %s, phase %q, reason %q",
+				second.ReadyStatus, second.ReadyReason, second.ReadyMessage, second.SyncedStatus, second.Phase, second.Reason)
+			if second.RecordState != "Rejected" || second.RecordCode != c.code {
+				t.Fatalf("attempt 2: record state %q code %q, want Rejected and %q", second.RecordState, second.RecordCode, c.code)
+			}
+			if c.code != "" {
+				// Nothing but the Ready message differs on the Create pass: the
+				// phase, the reason and Synced are those of the waiting passes.
+				if second.Phase != base.Phase || second.Reason != base.Reason || second.SyncedStatus != "True" || second.RecordCode != base.RecordCode {
+					t.Errorf("attempt 2's Create pass %+v differs from the waiting passes %+v in more than the Ready message", second, base)
+				}
+				for i := 0; i < 3; i++ {
+					clock.Advance(5 * time.Second)
+					e.run("alloc-a", 1)
+					if s := snapshot(e.get("alloc-a")); s != base {
+						t.Fatalf("pass %d after attempt 2 differs from the waiting passes of attempt 1:\n got  %+v\n want %+v", i+1, s, base)
+					}
+				}
+			}
 			if c.code != "" {
 				// A limit refusal does not flip Synced between Create and Observe.
 				if first.SyncedStatus != "True" || base.SyncedStatus != "True" {
@@ -425,6 +454,16 @@ func TestSubmitLimitEventIsEmittedWhenItStartsThenAtMostOnceAnHour(t *testing.T)
 	if n := count(rec, "SubmissionRejected"); n != 0 {
 		t.Errorf("%d SubmissionRejected events for a full slot, want 0", n)
 	}
+	// crossplane-runtime's own events (reconciler.go:1473, reasonCreated, and
+	// :1388, reasonCannotCreate, in v2.4.3), which the gate above does not bound:
+	// a Create that returns no error emits a Normal CreatedExternalResource on
+	// every attempt, where an error would emit a Warning CannotCreateExternalResource.
+	attempts := sl.Count("sbatch")
+	if n, m := count(rec, "CreatedExternalResource"), count(rec, "CannotCreateExternalResource"); n != attempts || m != 0 {
+		t.Errorf("crossplane emitted %d CreatedExternalResource and %d CannotCreateExternalResource events over %d attempts; want one Created per attempt and no CannotCreate", n, m, attempts)
+	}
+	t.Logf("%d attempts in 70 minutes: %d SubmitLimitReached events (the gate), %d CreatedExternalResource events (crossplane's, one per attempt)",
+		attempts, count(rec, "SubmitLimitReached"), count(rec, "CreatedExternalResource"))
 }
 
 // Plain Rejected attempts keep their event on every attempt, as before.
@@ -449,6 +488,15 @@ func TestAPlainRejectionKeepsItsEventOnEveryAttempt(t *testing.T) {
 	if n != 3 {
 		t.Errorf("%d SubmissionRejected events over 3 attempts, want 3", n)
 	}
+	m := 0
+	for _, x := range rec.reasons() {
+		if x == "CannotCreateExternalResource" {
+			m++
+		}
+	}
+	if m != 3 {
+		t.Errorf("%d CannotCreateExternalResource events (crossplane's) over 3 refused attempts, want 3", m)
+	}
 }
 
 // Create returns no error for a recorded limit refusal, so crossplane-runtime
@@ -458,8 +506,9 @@ func TestAPlainRejectionKeepsItsEventOnEveryAttempt(t *testing.T) {
 // crossplane's default creation grace period of 30 s, which counts real time,
 // the reconciler waits that long after a succeeded Create before it trusts an
 // Observe that says the job is missing, and the Rejected backoff is a minute.
-// So the test keeps the default grace, shows the annotations, then ages the
-// succeeded one as 30 s of real time would, and the next attempt is made.
+// So the test keeps the default grace, shows the annotations, sets the
+// succeeded one an hour ahead (inside the period, whatever the wall clock
+// does) and then an hour back, and the next attempt is made.
 func TestALimitRefusalLeavesNoCreationIncompleteAndTheNextAttemptIsMade(t *testing.T) {
 	clock := fake.NewClock(at(12, 0, 0))
 	sl := nowOnlySlurm(clock)
@@ -480,19 +529,26 @@ func TestALimitRefusalLeavesNoCreationIncompleteAndTheNextAttemptIsMade(t *testi
 		t.Fatalf("record %+v, want attempt 1 refused for the limit", rec.sub)
 	}
 
-	// Past the Rejected backoff, but the succeeded annotation is fresh in real
-	// time: crossplane waits out its grace period, and makes no attempt.
+	// Past the Rejected backoff, but inside crossplane's grace period: the
+	// annotation is set an hour ahead, so that time.Since is negative whatever
+	// the wall clock does, and no timing decides the test. The reconciler waits
+	// the period out, and makes no attempt.
+	setSucceeded := func(at time.Time) {
+		t.Helper()
+		a := e.get("alloc-a")
+		meta.AddAnnotations(a, map[string]string{meta.AnnotationKeyExternalCreateSucceeded: at.Format(time.RFC3339)})
+		if err := e.c.Update(e.ctx, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setSucceeded(time.Now().Add(time.Hour))
 	clock.Advance(2 * time.Minute)
 	e.run("alloc-a", 2)
 	if n := sl.Count("sbatch"); n != 1 {
 		t.Fatalf("%d sbatch calls inside crossplane's grace period, want 1", n)
 	}
-	// 30 s of real time later the grace period has passed: the next attempt is made.
-	a = e.get("alloc-a")
-	meta.AddAnnotations(a, map[string]string{meta.AnnotationKeyExternalCreateSucceeded: time.Now().Add(-time.Hour).Format(time.RFC3339)})
-	if err := e.c.Update(e.ctx, a); err != nil {
-		t.Fatal(err)
-	}
+	// The grace period has passed (an hour of real time ago): the next attempt is made.
+	setSucceeded(time.Now().Add(-time.Hour))
 	e.run("alloc-a", 3)
 	if n := sl.Count("sbatch"); n != 2 {
 		t.Fatalf("%d sbatch calls after the grace period, want 2: a recorded limit refusal blocked the next attempt", n)
