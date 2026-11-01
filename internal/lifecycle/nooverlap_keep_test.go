@@ -173,7 +173,6 @@ func TestNoOverlapKeepHoldsTheSlotToTheHardEnd(t *testing.T) {
 		primaryEnded, restarted bool
 		keptIdleSteps           int  // steps with the primary's Instance ended and its job still live
 		sawSubmitLimit          bool // the message added SubmitLimitReached during the hold
-		holdSteps               int  // steps in that hold with no successor Allocation yet
 		heldAfterRestart        int
 	)
 	invariants := func() {
@@ -193,6 +192,11 @@ func TestNoOverlapKeepHoldsTheSlotToTheHardEnd(t *testing.T) {
 				t.Fatalf("at %s an sbatch call was made at %s, before the old job ended (%v)", at, c.Time.Format(time.TimeOnly), old.EndTime)
 			}
 		}
+		// The controller has made no successor Allocation either: the slot is
+		// held, so it waits (HBEP-7 line 464, 592).
+		if n := len(rg.allAllocations()); oldLive && n != 1 {
+			t.Fatalf("at %s %d Allocations while the old job is live, want only the old one: %+v", at, n, rg.allAllocations())
+		}
 		noReplacementLate(t, rg)
 		streamNotCut(t, rg, p.Name)
 		pi := rg.instancesByName()[p.Name]
@@ -203,9 +207,6 @@ func TestNoOverlapKeepHoldsTheSlotToTheHardEnd(t *testing.T) {
 		// Before the drain start: the primary serves, nothing is wrong and
 		// nothing else is submitted.
 		if now.Before(drainStart) {
-			if n := len(rg.allAllocations()); n != 1 {
-				t.Fatalf("at %s %d Allocations, want only the primary's before its drain start", at, n)
-			}
 			if c := rg.condition(hoMD, v1alpha1.ConditionDegraded); c.Status != metav1.ConditionFalse || c.Reason != v1alpha1.ReasonAsDesired {
 				t.Fatalf("at %s Degraded = %s/%s %q before the drain start, want False/AsDesired", at, c.Status, c.Reason, c.Message)
 			}
@@ -240,10 +241,6 @@ func TestNoOverlapKeepHoldsTheSlotToTheHardEnd(t *testing.T) {
 			if old.Phase != v1alpha1.AllocationRunning {
 				t.Fatalf("at %s the old job is %s, want running to its hard end", at, old.Phase)
 			}
-			if n := len(rg.allAllocations()); n != 1 {
-				t.Fatalf("at %s %d Allocations while the old job holds the slot, want only the old one", at, n)
-			}
-			holdSteps++
 			if restarted {
 				heldAfterRestart++
 			}
