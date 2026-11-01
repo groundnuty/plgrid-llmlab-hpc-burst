@@ -182,8 +182,10 @@ func TestOrphanEventRestartsWhenTheOrphanWentAwayAndCameBack(t *testing.T) {
 	r.wantEvents("an hour after the new start", 3)
 }
 
-// A read of the list that fails says nothing about the orphans: it neither ends the orphan, so
-// that the next read would count as a new start, nor emits.
+// A read of the list that fails is no evidence that the orphan went away: the hourly gate holds
+// through it (it is not a new start), and nothing is emitted. It restarts the grace's clock
+// (TestOrphanGraceAnUnreadableListRestartsTheClock), so the orphan is one again a grace later,
+// still inside the hour of the first event, which the gate keeps quiet.
 func TestOrphanGateSurvivesAnUnreadableList(t *testing.T) {
 	r := newOrphanRig(t, orphanAllocation("al-a", "alloc-uid-1"))
 	r.adm.ProxyChanged(frpsplugin.OpNewProxy, "gone-instance", "alloc-uid-1")
@@ -198,8 +200,32 @@ func TestOrphanGateSurvivesAnUnreadableList(t *testing.T) {
 
 	r.rd.err = nil
 	r.read(20 * time.Minute)
-	evs := r.wantEvents("readable again, 20 minutes after the first", 1)
+	r.read(20*time.Minute + orphanGrace)
+	evs := r.wantEvents("readable again for a grace, inside the hour of the first", 1)
 	r.wantRegarding(evs[0], "*v1alpha1.Allocation", "team-a", "al-a") // the admission was kept through the outage
+	r.read(orphanGate)
+	evs = r.wantEvents("the hour after the first event", 2)
+	r.wantRegarding(evs[1], "*v1alpha1.Allocation", "team-a", "al-a")
+}
+
+// An unreadable list restarts the grace's clock (`@hpc-burst-science-agent`, 1 Nov 2026, review
+// of #186): an interval nobody observed must not count toward the grace. The science agent's
+// timeline, written out: listed at 0 s (and each read to 100 s), unreadable at 110 s, listed at
+// 130 s: no event then, nor at 240 s; one at 250 s, a whole grace after 130 s.
+func TestOrphanGraceAnUnreadableListRestartsTheClock(t *testing.T) {
+	r := newOrphanRig(t, orphanAllocation("al-a", "alloc-uid-1"))
+	r.adm.ProxyChanged(frpsplugin.OpNewProxy, "lingering", "alloc-uid-1")
+	r.rd.orphans = []string{"lingering"}
+	r.readEvery(0, 100*time.Second)
+	r.rd.err = errors.New("frps's web server is down")
+	r.read(110 * time.Second)
+	r.rd.err = nil
+	r.read(130 * time.Second)
+	r.wantEvents("listed at 130 s after an unreadable read at 110 s", 0)
+	r.readEvery(140*time.Second, 130*time.Second+orphanGrace-10*time.Second)
+	r.wantEvents("one read short of a grace after 130 s", 0)
+	r.read(130*time.Second + orphanGrace)
+	r.wantRegarding(r.wantEvents("a whole grace after 130 s", 1)[0], "*v1alpha1.Allocation", "team-a", "al-a")
 }
 
 // Without the plugin's admission (after a restart the map is empty) or with the Allocation gone
