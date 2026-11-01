@@ -47,6 +47,9 @@ func TestClusterTestWithoutYesPrintsTheEstimateAndRunsNothing(t *testing.T) {
 	w.contains(res, "conformance-athena: shape: partition plgrid-now, 1 GPU, 4 CPU, 32Gi, time limit 00:05:00, one job, no requeue",
 		"queue estimate: a start in about", "not run: pass --yes")
 	w.noSubmit()
+	if w.stateFile("go-argv") != "" {
+		t.Errorf("the test was built before --yes: %s", w.stateFile("go-argv"))
+	}
 	// The estimate asks for the shape the test would use.
 	argv := lines(w.stateFile("sbatch-argv"))
 	if len(argv) != 1 {
@@ -275,5 +278,143 @@ func TestMissingSettingsFileIsRefused(t *testing.T) {
 	out, err := cmd.CombinedOutput()
 	if exitCode(err) != 3 || !strings.Contains(string(out), "HPCBURST_LIVE_SETTINGS is not set") {
 		t.Errorf("exit %d:\n%s", exitCode(err), out)
+	}
+}
+
+func (w *world) events() []string { return lines(w.stateFile("events")) }
+
+// index returns the position of the nth (from 1) event that starts with prefix, or -1.
+func index(ev []string, prefix string, nth int) int {
+	for i, e := range ev {
+		if strings.HasPrefix(e, prefix) {
+			if nth--; nth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+func TestCleanupSparesJobsOutsideTheTestsPartition(t *testing.T) {
+	w := newWorld(t)
+	w.useStubGo()
+	res := w.run([]string{"STUB_TEST_MODE=leave-fail", "STUB_FOREIGN=1"}, "--run", "conformance-helios", "--yes")
+	if res.code != 1 {
+		t.Fatalf("exit %d, want 1:\n%s", res.code, res.out)
+	}
+	if got := lines(w.stateFile("cancelled")); len(got) != 1 || got[0] != "9001" {
+		t.Errorf("cancelled %v: only the job in the test's partition is this run's", got)
+	}
+	if q := w.stateFile("queue"); !strings.Contains(q, "9002|") || strings.Contains(q, "9001|") {
+		t.Errorf("another hb- job (a controller's, in another partition) must stay:\n%s", q)
+	}
+}
+
+// Another live run on the same host would make the cleanup's diff unsafe, slot or not.
+func TestOneLiveRunPerHost(t *testing.T) {
+	for _, name := range []string{"conformance-helios", "conformance-athena"} {
+		t.Run(name, func(t *testing.T) {
+			w := newWorld(t)
+			w.useStubGo()
+			host := strings.TrimPrefix(name, "conformance-")
+			f, err := os.OpenFile(filepath.Join(w.dir, "locks", host+"-live.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.Close()
+			if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+				t.Fatal(err)
+			}
+			res := w.run(nil, "--run", name, "--yes")
+			if res.code != 3 {
+				t.Fatalf("exit %d, want 3:\n%s", res.code, res.out)
+			}
+			w.contains(res, "another live run holds this host's run lock")
+			w.noSubmit()
+		})
+	}
+}
+
+// The slot's use starts after the builds: the compile (and, for the real-engine run, the plan and the
+// staging) come before the second look at the slot, the baseline and the submit.
+func TestBuildsFinishBeforeTheSlotIsTaken(t *testing.T) {
+	w := newWorld(t)
+	w.useStubGo()
+	if res := w.run(nil, "--run", "conformance-athena", "--yes"); res.code != 0 {
+		t.Fatalf("exit %d:\n%s", res.code, res.out)
+	}
+	ev := w.events()
+	est, build, check2, base, run := index(ev, "sbatch test-only", 1), index(ev, "go test", 1), index(ev, "squeue %q|%P", 2), index(ev, "squeue %i|%j|%P", 1), index(ev, "testbin TestConformance", 1)
+	if !(index(ev, "squeue %q|%P", 1) < est && est < build && build < check2 && check2 < base && base < run) {
+		t.Errorf("conformance order wrong, events:\n%s", strings.Join(ev, "\n"))
+	}
+
+	w = newWorld(t)
+	w.useStubGo()
+	if res := w.run(nil, "--run", "real-engine", "--yes"); res.code != 0 {
+		t.Fatalf("exit %d:\n%s", res.code, res.out)
+	}
+	ev = w.events()
+	lastBuild, plan, check2, base, submit := index(ev, "go test", 2), index(ev, "testbin TestRealEnginePlan", 1), index(ev, "squeue %q|%P", 2), index(ev, "squeue %i|%j|%P", 1), index(ev, "sbatch submit", 1)
+	if !(index(ev, "go build", 1) < lastBuild && lastBuild < plan && plan < check2 && check2 < base && base < submit) {
+		t.Errorf("real-engine order wrong, events:\n%s", strings.Join(ev, "\n"))
+	}
+}
+
+func TestBuildsTakeTheBuildLockAndTestRunsDoNot(t *testing.T) {
+	w := newWorld(t)
+	w.useStubGo()
+	lock := filepath.Join(w.dir, "locks", "gobuild.lock")
+	w.writeSettings(func(m map[string]string) { m["LIVE_BUILD_LOCK"] = lock })
+	for _, args := range [][]string{{"--run", "conformance-helios", "--yes"}, {"--run", "hub-golden"}, {"--run", "real-engine", "--yes"}} {
+		res := w.run([]string{"STUB_BUILD_LOCK=" + lock}, args...)
+		if res.code != 0 {
+			t.Fatalf("%v: exit %d:\n%s", args, res.code, res.out)
+		}
+	}
+	builds := lines(w.stateFile("go-lock"))
+	if len(builds) != 5 {
+		t.Fatalf("go ran %d times, want 5 (one build each for conformance and the hub test, three for real-engine)", len(builds))
+	}
+	for _, b := range builds {
+		if b != "held" {
+			t.Errorf("a build ran without the build lock: %v", builds)
+			break
+		}
+	}
+	for _, b := range lines(w.stateFile("testbin-lock")) {
+		if b != "free" {
+			t.Errorf("a test binary ran while the build lock was held")
+		}
+	}
+}
+
+// A signal while the builds run must stop the run before it takes the slot and starts the test.
+func TestSignalDuringTheBuildStopsBeforeTheSlotIsTaken(t *testing.T) {
+	w := newWorld(t)
+	w.useStubGo()
+	cmd, out := w.start([]string{"STUB_GO_HOLD=1"}, "--run", "conformance-athena", "--yes")
+	w.waitFor("building")
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(w.state, "release"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := cmd.Wait()
+	w.noLeak(out.String())
+	w.noLeftoverProcess(cmd)
+	if exitCode(err) == 0 {
+		t.Errorf("an interrupted run exited 0:\n%s", out)
+	}
+	if !strings.Contains(out.String(), "FAIL (interrupted before the run started)") {
+		t.Errorf("no interrupt report:\n%s", out)
+	}
+	w.noSubmit()
+	if _, err := os.Stat(filepath.Join(w.dir, "locks", "athena-live.lock")); err == nil {
+		// The lock file may exist from a stale run; what matters is that no baseline was read.
+		if index(w.events(), "squeue %i|%j|%P", 1) >= 0 {
+			t.Errorf("the run went on to read the queue for a baseline after the signal:\n%s", strings.Join(w.events(), "\n"))
+		}
 	}
 }

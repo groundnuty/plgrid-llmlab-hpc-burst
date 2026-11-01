@@ -41,10 +41,14 @@ func TestRealEngineRunBuildsStagesSubmitsPollsAndFetches(t *testing.T) {
 	// The builds are the documented ones.
 	goArgv := w.stateFile("go-argv")
 	for _, f := range []string{"build -trimpath -ldflags -X main.version=live-", "-o " + filepath.Join(w.out(), "real-engine/bin/hb-agent") + " ./cmd/hb-agent",
-		"test -c -trimpath -o " + filepath.Join(w.out(), "real-engine/bin/hbagent.test") + " ./cmd/hb-agent", "test -count=1 -run ^TestRealEnginePlan$ ./cmd/hb-agent"} {
+		"test -c -trimpath -o " + filepath.Join(w.out(), "real-engine/bin/hbagent.test") + " ./cmd/hb-agent",
+		"test -c -o " + filepath.Join(w.out(), "real-engine/plan.test") + " ./cmd/hb-agent"} {
 		if !strings.Contains(goArgv, f) {
 			t.Errorf("go was not run as %q:\n%s", f, goArgv)
 		}
+	}
+	if !strings.Contains(w.stateFile("test-env-TestRealEnginePlan"), "HB_REAL_PLAN_OUT="+filepath.Join(w.out(), "real-engine", "plan.json")) {
+		t.Errorf("the plan test did not run with HB_REAL_PLAN_OUT set:\n%s", w.stateFile("test-env-TestRealEnginePlan"))
 	}
 	// What the job needs reached the cluster, under the user's own directory.
 	staged, _ := filepath.Glob(filepath.Join(w.state, "scratch-helios", "hpc-burst-live", "live-*"))
@@ -77,7 +81,7 @@ func TestRealEngineRunFailsWhenTheJobLeftProcessesBehind(t *testing.T) {
 func TestRealEngineRunCancelsItsJobWhenInterrupted(t *testing.T) {
 	w := newWorld(t)
 	w.useStubGo()
-	cmd, out := w.start([]string{"STUB_JOB_FOREVER=1", "LIVE_POLL_SECONDS=1"}, "--run", "real-engine", "--yes")
+	cmd, out := w.start([]string{"STUB_JOB_FOREVER=1", "STUB_FOREIGN=1", "LIVE_POLL_SECONDS=1"}, "--run", "real-engine", "--yes")
 	w.waitFor("polled")
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
@@ -94,7 +98,68 @@ func TestRealEngineRunCancelsItsJobWhenInterrupted(t *testing.T) {
 	if !strings.Contains(out.String(), "cleanup: left behind 0 (cancelled 1)") {
 		t.Errorf("no cleanup report:\n%s", out)
 	}
-	if strings.Contains(w.stateFile("queue"), "7001|") {
-		t.Errorf("the job is still queued")
+	if q := w.stateFile("queue"); strings.Contains(q, "7001|") || !strings.Contains(q, "9002|") {
+		t.Errorf("the run's job must be gone and another hb- job (a controller's, say) must stay:\n%s", q)
 	}
+}
+
+func (w *world) fakeClock() []string {
+	write(w.t, filepath.Join(w.state, "clock"), "1000000", 0o644)
+	return []string{"LIVE_FAKE_CLOCK=" + filepath.Join(w.state, "clock")}
+}
+
+// The job waited 90 minutes in the queue, longer than its whole run budget (57 min limit plus 15). It
+// must still pass: the run's clock starts at the first state that is not PENDING.
+func TestRealEnginePendingTimeIsNotRunTime(t *testing.T) {
+	w := newWorld(t)
+	w.useStubGo()
+	res := w.run(append(w.fakeClock(), "STUB_CLOCK_STEP=1800", "STUB_JOB_STATES=PENDING PENDING PENDING RUNNING"), "--run", "real-engine", "--yes")
+	if res.code != 0 {
+		t.Fatalf("exit %d:\n%s", res.code, res.out)
+	}
+	w.contains(res, "job state: PENDING", "job state: RUNNING", "processes left in the job 0")
+	if w.stateFile("cancelled") != "" {
+		t.Errorf("a job that was only waiting was cancelled")
+	}
+}
+
+func TestRealEngineJobPendingForTooLongIsCancelled(t *testing.T) {
+	w := newWorld(t)
+	w.useStubGo()
+	res := w.run(append(w.fakeClock(), "STUB_CLOCK_STEP=3600", "STUB_JOB_FOREVER=PENDING"), "--run", "real-engine", "--yes")
+	if res.code != 1 {
+		t.Fatalf("exit %d, want 1:\n%s", res.code, res.out)
+	}
+	w.contains(res, "FAIL (the job was still pending after 120 minutes; cancelling it)", "cleanup: left behind 0 (cancelled 1)")
+	if got := lines(w.stateFile("cancelled")); len(got) != 1 || got[0] != "7001" {
+		t.Errorf("cancelled %v, want the submitted job", got)
+	}
+}
+
+func TestRealEngineJobRunningPastItsLimitIsCancelled(t *testing.T) {
+	w := newWorld(t)
+	w.useStubGo()
+	res := w.run(append(w.fakeClock(), "STUB_CLOCK_STEP=1800", "STUB_JOB_FOREVER=RUNNING"), "--run", "real-engine", "--yes")
+	if res.code != 1 {
+		t.Fatalf("exit %d, want 1:\n%s", res.code, res.out)
+	}
+	w.contains(res, "FAIL (the job ran past its time limit plus 15 minutes; cancelling it)", "cleanup: left behind 0 (cancelled 1)")
+}
+
+// sacct can answer nothing for a moment after the job leaves squeue.
+func TestRealEngineAsksSacctAgainBeforeCallingTheStateUnknown(t *testing.T) {
+	w := newWorld(t)
+	w.useStubGo()
+	res := w.run([]string{"STUB_SACCT_EMPTY=2", "LIVE_SACCT_GAP=0"}, "--run", "real-engine", "--yes")
+	if res.code != 0 {
+		t.Errorf("a lagging sacct: exit %d, want 0:\n%s", res.code, res.out)
+	}
+	w.contains(res, "job ended COMPLETED 0:0")
+	w2 := newWorld(t)
+	w2.useStubGo()
+	res = w2.run([]string{"STUB_SACCT_EMPTY=99", "LIVE_SACCT_GAP=0"}, "--run", "real-engine", "--yes")
+	if res.code != 1 {
+		t.Errorf("a sacct that never answers: exit %d, want 1:\n%s", res.code, res.out)
+	}
+	w2.contains(res, "job ended unknown")
 }

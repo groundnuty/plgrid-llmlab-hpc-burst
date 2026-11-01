@@ -25,6 +25,7 @@
 # 600, owned by you. Keys (none is ever printed):
 #   LIVE_OUT_DIR                 absolute path of a private directory for logs and records (always)
 #   LIVE_LOCK_DIR                absolute path of the directory with the hosts' lock files (cluster tests)
+#   LIVE_BUILD_LOCK              optional absolute path of the shared build lock; builds, never test runs, take it
 #   LIVE_LLMLAB_CREDENTIALS      absolute path of the managed credentials file, mode 600 (llmlab-smoke)
 #   LIVE_LLMLAB_MODEL            optional model override (llmlab-smoke)
 #   LIVE_CONF_CREDENTIALS_HELIOS, LIVE_CONF_CREDENTIALS_ATHENA
@@ -40,10 +41,12 @@
 #
 # Development rule for the one-job slots (QOS now on Helios, plgrid-now on
 # Athena; owner, 1 Nov 2026, issue #145): the script refuses to queue behind a
-# job that already holds the slot, runs one cluster test at a time with the
-# shortest time limit the test allows, and on any exit (a failure or a signal
-# included) cancels the jobs the run left. It prints each slot use as a UTC
-# start, end and duration, to post on the issue the run served.
+# job that already holds the slot, runs one live run per host at a time with
+# the shortest time limit the test allows, builds before it takes the slot, and
+# on any exit (a failure or a signal included) cancels what the run left: the
+# real-engine job by its ID, a conformance run's new hb- jobs in the test's own
+# partition. It prints each slot use as a UTC start, end and duration, to post
+# on the issue the run served.
 #
 # The table below is the one map from a live test to its package. Add a row
 # when a test is added; hack/livechecks fails when a package holds a live test
@@ -142,7 +145,7 @@ load_settings() {
     [ "$k" != "$line" ] || continue
     v=${v%\"}; v=${v#\"}; v=${v%\'}; v=${v#\'}
     case $k in
-      LIVE_OUT_DIR|LIVE_LOCK_DIR|LIVE_LLMLAB_CREDENTIALS|LIVE_LLMLAB_MODEL|LIVE_CONF_CREDENTIALS_HELIOS|LIVE_CONF_CREDENTIALS_ATHENA|ACCOUNT_HELIOS_CPU|ACCOUNT_HELIOS_GH200|ACCOUNT_ATHENA_A100)
+      LIVE_OUT_DIR|LIVE_LOCK_DIR|LIVE_BUILD_LOCK|LIVE_LLMLAB_CREDENTIALS|LIVE_LLMLAB_MODEL|LIVE_CONF_CREDENTIALS_HELIOS|LIVE_CONF_CREDENTIALS_ATHENA|ACCOUNT_HELIOS_CPU|ACCOUNT_HELIOS_GH200|ACCOUNT_ATHENA_A100)
         S[$k]=$v ;;
     esac
   done < "$HPCBURST_LIVE_SETTINGS"
@@ -153,6 +156,9 @@ check_settings() {
   local name bad=0 acct key
   need() { [ -n "${S[$1]:-}" ] || { say "live-checks: setting $1 is missing"; bad=1; return 1; }; }
   need LIVE_OUT_DIR && case ${S[LIVE_OUT_DIR]} in /*) ;; *) say "live-checks: LIVE_OUT_DIR must be an absolute path"; bad=1 ;; esac
+  if [ -n "${S[LIVE_BUILD_LOCK]:-}" ]; then
+    case ${S[LIVE_BUILD_LOCK]} in /*) ;; *) say "live-checks: LIVE_BUILD_LOCK must be an absolute path"; bad=1 ;; esac
+  fi
   for name in "$@"; do
     case $name in
       llmlab-smoke) need LIVE_LLMLAB_CREDENTIALS && { private_file LIVE_LLMLAB_CREDENTIALS "${S[LIVE_LLMLAB_CREDENTIALS]}" || bad=1; } ;;
@@ -182,7 +188,7 @@ BASELINE=""         # the hb- jobs the queue held before the test
 JOBID=""            # the real-engine job this run submitted
 CHILD=""
 INTERRUPTED=""
-SLOT_FD=""
+RUN_FD=""
 
 # remote <host>: runs the script on stdin on the host's login node, one ssh call at a time per host.
 # stderr goes to the private remote log: it can name the account.
@@ -193,18 +199,18 @@ remote() {
 # preamble <var> <value>...: assignments for the head of a remote script, quoted.
 preamble() { local k; while [ $# -ge 2 ]; do k=$1; printf '%s=%q\n' "$k" "$2"; shift 2; done; }
 
-# queue_jobs <host>: the ids and names of the user's hb- jobs, one "id|name" per line.
+# queue_jobs <host>: the user's hb- jobs, one "id|name|partition" per line.
 # Returns 1 when squeue could not be read, so an unreadable queue is never taken for an empty one.
 queue_jobs() {
   local reply
   reply=$(remote "$1" <<'EOS'
-out=$(squeue --me -h -o '%i|%j') || { echo "squeue=failed"; exit 0; }
+out=$(squeue --me -h -o '%i|%j|%P') || { echo "squeue=failed"; exit 0; }
 echo "squeue=ok"
 printf '%s\n' "$out" | grep '|hb-' || true
 EOS
   ) || return 1
   [ "$(printf '%s\n' "$reply" | head -1)" = squeue=ok ] || return 1
-  printf '%s\n' "$reply" | tail -n +2 | grep -E '^[0-9][0-9_+]*\|hb-[A-Za-z0-9._-]*$' || true
+  printf '%s\n' "$reply" | tail -n +2 | grep -E '^[0-9][0-9_+]*\|hb-[A-Za-z0-9._-]*\|[A-Za-z0-9._-]+$' || true
 }
 
 # slot_jobs <host> <token>: how many of the user's jobs sit in the slot, or "unknown".
@@ -284,31 +290,35 @@ EOS
   printf '%s\n' "$reply" | grep -c '^cancelled=1$' || true
 }
 
-# clean_cluster: cancels the hb- jobs this run left (those the queue did not hold before it) and
-# the real-engine job, then checks. Idempotent; sets CLEAN_LEFT. Runs on every exit path.
+# clean_cluster: cancels what this run left, then checks. Idempotent; sets CLEAN_LEFT. Runs on every exit path.
+# The real-engine run knows its job: only that ID is cancelled. A harness-driven run does not know the IDs
+# its test submitted, so only the hb- jobs that appeared during the run in the test's own partition are
+# cancelled; a job queued before the run, or in another partition, is never touched.
 CLEAN_LEFT=0
+CLEAN_MODE=partition   # job | partition
+CLEAN_PARTITION=""
 clean_cluster() {
   [ -n "$ACTIVE_HOST" ] || return 0
-  local host=$ACTIVE_HOST now new ids line id cancelled=0 left=0
+  local host=$ACTIVE_HOST now ids line id cancelled=0 left=0 try
   if ! now=$(queue_jobs "$host"); then
     say "cleanup: the queue could not be read; check the cluster for jobs of this run by hand"
     CLEAN_LEFT=1; ACTIVE_HOST=""; return 1
   fi
   ids=""
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    id=${line%%|*}
-    printf '%s\n' "$BASELINE" | grep -q -x -F "$line" && continue
-    ids="$ids $id"
-  done <<<"$now"
-  if [ -n "$JOBID" ] && printf '%s\n' "$now" | grep -q "^${JOBID}|"; then
-    case " $ids " in *" $JOBID "*) ;; *) ids="$ids $JOBID" ;; esac
+  if [ "$CLEAN_MODE" = job ]; then
+    if [ -n "$JOBID" ] && printf '%s\n' "$now" | grep -q "^${JOBID}|"; then ids=$JOBID; fi
+  else
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      printf '%s\n' "$BASELINE" | grep -q -x -F "$line" && continue
+      [ "${line##*|}" = "$CLEAN_PARTITION" ] || continue
+      ids="$ids ${line%%|*}"
+    done <<<"$now"
   fi
   # shellcheck disable=SC2086
   [ -z "$ids" ] || cancelled=$(cancel_ids "$host" $ids)
   if [ -n "$ids" ]; then
     # A cancelled job can show as completing for a few seconds: look again before calling it left behind.
-    local try
     for try in 1 2 3 4 5 6 7 8 9 10; do
       now=$(queue_jobs "$host") || { say "cleanup: the queue could not be read after the cancel"; CLEAN_LEFT=1; ACTIVE_HOST=""; return 1; }
       left=0
@@ -370,9 +380,15 @@ judge() {
 
 CONTROL_DIR=""
 
+# with_build_lock <command>...: runs the command under the shared build lock when LIVE_BUILD_LOCK names one.
+# Only builds take it; a test binary never runs while it is held.
+with_build_lock() {
+  if [ -n "${S[LIVE_BUILD_LOCK]:-}" ]; then flock -o -w 1800 "${S[LIVE_BUILD_LOCK]}" "$@"; else "$@"; fi
+}
+
 build_test_binary() { # <name> <bin>
   local n=$1 bin=$2
-  ( cd "$ROOT" && go test -c -o "$bin" "./${PKG[$n]}" ) >"$OUT/$n-build.log" 2>&1 || {
+  ( cd "$ROOT" && with_build_lock go test -c -o "$bin" "./${PKG[$n]}" ) >"$OUT/$n-build.log" 2>&1 || {
     say "$n: FAIL (the test binary did not build; see the build log in the output directory)"; return 1; }
 }
 
@@ -380,7 +396,7 @@ build_test_binary() { # <name> <bin>
 run_binary() {
   local n=$1 bin=$2 tmin=$3 setup=$4
   (
-    [ -z "$SLOT_FD" ] || eval "exec ${SLOT_FD}>&-"
+    [ -z "$RUN_FD" ] || eval "exec ${RUN_FD}>&-"
     "$setup" "$n"
     cd "$ROOT/${PKG[$n]}" || exit 1
     exec timeout "${tmin}m" "$bin" -test.run "${TEST[$n]}" -test.v -test.count=1 -test.timeout "$((tmin+1))m"
@@ -411,6 +427,7 @@ run_local() { # <name>
   local n=$1 bin="$OUT/$1.test" setup
   case $n in llmlab-smoke) setup=env_llmlab ;; hub-golden) setup=env_hub ;; esac
   build_test_binary "$n" "$bin" || return 1
+  [ -z "$INTERRUPTED" ] || { say "$n: FAIL (interrupted before the run started)"; return 1; }
   run_binary "$n" "$bin" "$LOCAL_TIMEOUT_MIN" "$setup"
   judge "$n" "$OUT/$n.log" "$CHILD_RC"
 }
@@ -433,7 +450,27 @@ check_slot() {
   esac
 }
 
-# run_cluster <name>: preflight, estimate, the --yes gate, the run, the cleanup, the report.
+# prepare_cluster <name>: everything that needs no slot: the builds, and for the real-engine run
+# the plan and the staging. Not part of the slot's use.
+prepare_cluster() {
+  case $1 in
+    real-engine) prepare_real_engine "$1" ;;
+    *) build_test_binary "$1" "$OUT/$1.test" ;;
+  esac
+}
+
+execute_cluster() {
+  local n=$1
+  case $n in
+    real-engine) execute_real_engine "$n" ;;
+    *) run_binary "$n" "$OUT/$n.test" "${TMIN[$n]}" env_conformance; judge "$n" "$OUT/$n.log" "$CHILD_RC" ;;
+  esac
+}
+
+release_run_lock() { [ -z "$RUN_FD" ] || { eval "exec ${RUN_FD}>&-"; RUN_FD=""; }; }
+
+# run_cluster <name>: preflight, estimate, the --yes gate, the builds, the run lock and a second look at
+# the slot, the run, the cleanup, the report. The slot's use starts after the builds.
 run_cluster() {
   local n=$1 host=${HOST[$1]} t0 t1 verdict=0
   local qos=""; [ "${QOS[$n]}" = - ] || qos=", qos ${QOS[$n]}"
@@ -441,29 +478,24 @@ run_cluster() {
   if [ "${SLOT[$n]}" != - ]; then check_slot "$n" || return 3; fi
   estimate "$n" || true
   if [ "$YES" != 1 ]; then say "$n: not run: pass --yes to run it"; return 4; fi
-  if [ "${SLOT[$n]}" != - ]; then
-    exec {SLOT_FD}>"${S[LIVE_LOCK_DIR]}/$host-slot.lock"
-    flock -n "$SLOT_FD" || { refuse "$n: another live run holds the slot lock"; return 3; }
-    check_slot "$n" || { eval "exec ${SLOT_FD}>&-"; SLOT_FD=""; return 3; }
-  fi
-  BASELINE=$(queue_jobs "$host") || { say "$n: FAIL (the queue could not be read before the run)"; return 1; }
+  prepare_cluster "$n" || return 1
+  [ -z "$INTERRUPTED" ] || { say "$n: FAIL (interrupted before the run started)"; return 1; }
+  # One live run per host at a time, slot or not: the cleanup below is only safe if no other run is here.
+  exec {RUN_FD}>"${S[LIVE_LOCK_DIR]}/$host-live.lock"
+  flock -n "$RUN_FD" || { release_run_lock; refuse "$n: another live run holds this host's run lock"; return 3; }
+  if [ "${SLOT[$n]}" != - ]; then check_slot "$n" || { release_run_lock; return 3; }; fi
+  BASELINE=$(queue_jobs "$host") || { release_run_lock; say "$n: FAIL (the queue could not be read before the run)"; return 1; }
+  [ -z "$INTERRUPTED" ] || { release_run_lock; say "$n: FAIL (interrupted before the run started)"; return 1; }
   mkdir -p -m 700 "$OUT/$n-record"
+  CLEAN_PARTITION=${PARTITION[$n]}; CLEAN_MODE=partition; [ "$n" != real-engine ] || CLEAN_MODE=job
   ACTIVE_HOST=$host
   t0=$(date +%s)
-  case $n in
-    real-engine) run_real_engine "$n" || verdict=1 ;;
-    *)
-      local bin="$OUT/$n.test"
-      if build_test_binary "$n" "$bin"; then
-        run_binary "$n" "$bin" "${TMIN[$n]}" env_conformance
-        judge "$n" "$OUT/$n.log" "$CHILD_RC" || verdict=1
-      else verdict=1; fi ;;
-  esac
+  execute_cluster "$n" || verdict=1
   clean_cluster || true
   t1=$(date +%s)
   slot_report "$n" "$t0" "$t1"
   [ "$CLEAN_LEFT" -eq 0 ] || verdict=1
-  [ -z "$SLOT_FD" ] || { eval "exec ${SLOT_FD}>&-"; SLOT_FD=""; }
+  release_run_lock
   return $verdict
 }
 
@@ -481,25 +513,44 @@ EOS
   printf '%s\n' "$reply" | sed -n -E 's/^state=([A-Z_]{1,24}|gone|error)$/\1/p' | head -1
 }
 
-run_real_engine() { # <name>: build, stage, submit, poll, fetch. The job's own cleanup is clean_cluster.
-  local n=$1 host=${HOST[$1]} w="$OUT/real-engine" tag sha acct reply state last="" errs=0 deadline st log finished
-  acct=${S[${ACCTKEY[$n]}]}
+# now_epoch: the clock for the job's budgets. LIVE_FAKE_CLOCK is a test seam: a file holding the epoch seconds.
+now_epoch() { if [ -n "${LIVE_FAKE_CLOCK:-}" ]; then cat "$LIVE_FAKE_CLOCK"; else date +%s; fi; }
+
+RE_DIR=""
+RE_TAG=""
+
+# prepare_real_engine <name>: build the arm64 agent and its test binary, write the plan, stage all of it.
+# Nothing here holds the slot.
+prepare_real_engine() {
+  local n=$1 host=${HOST[$1]} w="$OUT/real-engine" tag sha
   mkdir -p "$w/bin" && chmod 700 "$w" || return 1
   sha=$(git -C "$ROOT" rev-parse --short=9 HEAD 2>/dev/null || echo unknown)
   tag="live-$(date -u +%Y%m%d%H%M%S)-$sha"
   [[ $tag =~ ^live-[0-9]{14}-[0-9a-f]{7,12}$ ]] || { say "$n: FAIL (no commit to name the run by)"; return 1; }
   say "$n: building hb-agent, its test binary and the plan"
   ( cd "$ROOT" &&
-    CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-X main.version=live-$sha" -o "$w/bin/hb-agent" ./cmd/hb-agent &&
-    CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go test -c -trimpath -o "$w/bin/hbagent.test" ./cmd/hb-agent &&
-    HB_REAL_PLAN_OUT="$w/plan.json" go test -count=1 -run '^TestRealEnginePlan$' ./cmd/hb-agent &&
-    cp spikes/s94/job.sh "$w/job.sh" ) >"$OUT/$n-build.log" 2>&1 || { say "$n: FAIL (build or plan step failed; see the build log in the output directory)"; return 1; }
+    with_build_lock env CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-X main.version=live-$sha" -o "$w/bin/hb-agent" ./cmd/hb-agent &&
+    with_build_lock env CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go test -c -trimpath -o "$w/bin/hbagent.test" ./cmd/hb-agent &&
+    with_build_lock go test -c -o "$w/plan.test" ./cmd/hb-agent &&
+    cd cmd/hb-agent && HB_REAL_PLAN_OUT="$w/plan.json" "$w/plan.test" -test.run '^TestRealEnginePlan$' -test.count=1 &&
+    cd "$ROOT" && cp spikes/s94/job.sh "$w/job.sh" ) >"$OUT/$n-build.log" 2>&1 ||
+    { say "$n: FAIL (build or plan step failed; see the build log in the output directory)"; return 1; }
   [ -s "$w/plan.json" ] || { say "$n: FAIL (the plan was not written)"; return 1; }
   say "$n: staging under \$SCRATCH on the cluster"
   # shellcheck disable=SC2016
   tar -C "$w" -cf - bin plan.json job.sh | flock -o -w 600 "${S[LIVE_LOCK_DIR]}/$host.lock" timeout 600 ssh -o BatchMode=yes "$host" \
     "mkdir -p \"\$SCRATCH/hpc-burst-live/$tag/logs\" && tar -C \"\$SCRATCH/hpc-burst-live/$tag\" -xf -" 2>>"$OUT/remote.log" ||
     { say "$n: FAIL (staging did not complete)"; return 1; }
+  RE_DIR=$w; RE_TAG=$tag
+}
+
+# execute_real_engine <name>: submit, poll, fetch. The slot is held from the submit to the job's end.
+# The job's budget has two clocks: the time it may wait in the queue, and, from the first state that is not
+# PENDING, its time limit plus a margin. A wait of 40 minutes in QOS now must not eat the run's time.
+execute_real_engine() {
+  local n=$1 host=${HOST[$1]} w=$RE_DIR tag=$RE_TAG acct reply state last="" errs=0 st log finished
+  local submit_t run_t="" now limit_s pend_max=${LIVE_PENDING_MAX_SECONDS:-7200} margin=${LIVE_RUN_MARGIN_SECONDS:-900}
+  acct=${S[${ACCTKEY[$n]}]}
   reply=$({ preamble ACCOUNT "$acct" SHAPE_OPTS "$(shape_opts "$n")" TAG "$tag"; cat <<'EOS'
 D="$SCRATCH/hpc-burst-live/$TAG"
 sbatch --parsable -A "$ACCOUNT" $SHAPE_OPTS -J "hb-live-$TAG" -o "$D/logs/job-%j.out" --export=ALL,H="$D",RUN_TAG="$TAG" "$D/job.sh" 2>/dev/null
@@ -508,7 +559,7 @@ EOS
   JOBID=$(printf '%s\n' "$reply" | sed -n -E 's/^([0-9][0-9_+]*)(;.*)?$/\1/p' | head -1)
   [ -n "$JOBID" ] || { say "$n: FAIL (the submit returned no job)"; return 1; }
   say "$n: submitted one job; polling every ${POLL_SECONDS}s"
-  deadline=$(( $(date +%s) + $(slurm_seconds "${TLIMIT[$n]}") + 900 ))
+  submit_t=$(now_epoch); limit_s=$(slurm_seconds "${TLIMIT[$n]}")
   while :; do
     state=$(job_state "$host" "$JOBID")
     if [ "$state" = error ]; then
@@ -519,7 +570,14 @@ EOS
       [ "$state" != gone ] || break
     fi
     [ -z "$INTERRUPTED" ] || { say "$n: FAIL (interrupted)"; return 1; }
-    [ "$(date +%s)" -lt "$deadline" ] || { say "$n: FAIL (the job outlived its time limit plus 15 minutes)"; return 1; }
+    now=$(now_epoch)
+    if [ "$state" != PENDING ] && [ "$state" != error ] && [ -z "$run_t" ]; then run_t=$now; fi
+    if [ -z "$run_t" ] && [ $((now - submit_t)) -gt "$pend_max" ]; then
+      say "$n: FAIL (the job was still pending after $((pend_max/60)) minutes; cancelling it)"; return 1
+    fi
+    if [ -n "$run_t" ] && [ $((now - run_t)) -gt $((limit_s + margin)) ]; then
+      say "$n: FAIL (the job ran past its time limit plus $((margin/60)) minutes; cancelling it)"; return 1
+    fi
     sleep "$POLL_SECONDS"
   done
   finished=$JOBID; JOBID=""
@@ -539,9 +597,16 @@ slurm_seconds() { local h m s; IFS=: read -r h m s <<<"$1"; echo $(( 10#$h * 360
 # fetch_real_engine <name> <tag> <job> <dir>: the job's log, its final state, and the run's record.
 fetch_real_engine() {
   local n=$1 tag=$2 job=$3 w=$4 reply files
-  reply=$({ preamble JOB "$job" TAG "$tag"; cat <<'EOS'
+  # sacct can lag the job's leaving squeue: ask a few times before calling the state unknown.
+  reply=$({ preamble JOB "$job" TAG "$tag" GAP "${LIVE_SACCT_GAP:-2}"; cat <<'EOS'
 D="$SCRATCH/hpc-burst-live/$TAG"
-echo "final=$(sacct -j "$JOB" -X -n -P -o State,ExitCode 2>/dev/null | head -1 | tr '|' ' ')"
+final=""
+for i in 1 2 3 4 5; do
+  final=$(sacct -j "$JOB" -X -n -P -o State,ExitCode 2>/dev/null | head -1 | tr '|' ' ')
+  [ -z "$final" ] || break
+  sleep "$GAP"
+done
+echo "final=$final"
 echo "---LOG---"
 cat "$D/logs/job-$JOB.out" 2>/dev/null
 EOS
