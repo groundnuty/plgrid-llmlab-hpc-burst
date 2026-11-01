@@ -94,26 +94,33 @@ func IsSubmitLimitReason(name string) bool {
 	return false
 }
 
+// PolicyLine is the line sbatch prints last for every accounting-policy
+// refusal, a full submit limit or any other limit: Slurm's error text for
+// ESLURM_ACCOUNTING_POLICY after "Batch job submission failed:" (HBEP-4, QOS
+// limits, from src/sbatch/sbatch.c and src/common/slurm_errno.c). It is the
+// same for every reason, so it never tells one from another.
+const PolicyLine = "Batch job submission failed: Job violates accounting/QOS policy (job submit limit, user's size and/or time limits)"
+
 // PolicyRefusal is a submission that Slurm refused for its accounting policy:
-// sbatch's standard error ended with the accounting-policy line ("Batch job
-// submission failed: Job violates accounting/QOS policy ..."), and the line
-// before it named the reason (HBEP-4, QOS limits, A limit refusal). Submit
-// returns it, possibly wrapped, with the outcome Rejected; callers find it
-// with errors.As and classify it by Reason, never by its text. A refusal with
-// no reason line is not a PolicyRefusal.
+// sbatch's standard error ended with PolicyLine, and the line before it named
+// the reason (HBEP-4, QOS limits, A limit refusal). Submit returns it,
+// possibly wrapped, with the outcome Rejected; callers find it with errors.As
+// and classify it by Reason, never by its text (`@hpc-burst-science-agent`,
+// 1 Nov 2026). A refusal with no reason line is not a PolicyRefusal.
 type PolicyRefusal struct {
 	// Reason is Slurm's reason name, for example QOSMaxSubmitJobPerUserLimit.
 	Reason string
-	// Text is what Slurm printed, the reason line and the policy line, for
-	// messages: the Allocation's message carries it.
-	Text string
+	// Line is Slurm's reason line as printed, for example "sbatch: error:
+	// QOSMaxSubmitJobPerUserLimit", with paths redacted. It is for people:
+	// the Allocation's message carries it, and Error returns it.
+	Line string
 }
 
 func (e *PolicyRefusal) Error() string {
-	if e.Text == "" {
-		return "sbatch: refused for the accounting policy: " + e.Reason
+	if e.Line == "" {
+		return "sbatch: error: " + e.Reason
 	}
-	return e.Text
+	return e.Line
 }
 
 // SubmitLimit reports whether the refusal is for a full submit limit
