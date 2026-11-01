@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -91,8 +92,10 @@ func TestRequestRecordsTheWaitNeverSettleInjected(t *testing.T) {
 		t.Fatal(err)
 	}
 	var got []time.Duration
+	var nth []int
 	for _, ev := range r.events("request") {
 		got = append(got, time.Duration(ev.InjectedNS))
+		nth = append(nth, ev.Nth)
 	}
 	want := []time.Duration{0, 8 * time.Millisecond, 16 * time.Millisecond, 24 * time.Millisecond, 0}
 	if len(got) != len(want) {
@@ -102,6 +105,10 @@ func TestRequestRecordsTheWaitNeverSettleInjected(t *testing.T) {
 		if d := got[i] - want[i]; d < -time.Microsecond || d > time.Microsecond {
 			t.Errorf("request %d waited %v by injection, want %v (all: %v)", i, got[i], want[i], got)
 		}
+	}
+	// Each record names its place in its shape's sequence: 0, 1, 2, 3, and 0 again for the other shape.
+	if wantNth := []int{0, 1, 2, 3, 0}; !reflect.DeepEqual(nth, wantNth) {
+		t.Errorf("the records' places in their shapes are %v, want %v", nth, wantNth)
 	}
 }
 
@@ -129,6 +136,7 @@ func TestAdmittedIsLoggedWhileTheRequestIsInFlight(t *testing.T) {
 	cfg.Stall = true
 	r := serveRecorded(t, cfg)
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // at once: a failure before the explicit cancel must not leave the stalled request to hang the server's Close
 	done := make(chan error, 1)
 	go func() {
 		done <- r.chat(ctx, map[string]any{"model": "m", "stream": true, "max_tokens": 4, "ignore_eos": true,

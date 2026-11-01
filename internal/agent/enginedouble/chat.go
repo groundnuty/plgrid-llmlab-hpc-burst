@@ -200,8 +200,8 @@ func (h *handler) chat(w http.ResponseWriter, r *http.Request) {
 	if h.e.record != nil {
 		h.e.record(LogEvent{Event: "admitted", PromptTokens: len(promptIDs), MaxTokens: max, Stream: req.Stream})
 	}
-	wait := h.e.beforeFirstToken(shapeKey{len(promptIDs), max}, ans.tokens())
-	rec.InjectedNS = wait.Nanoseconds()
+	wait, nth := h.e.beforeFirstToken(shapeKey{len(promptIDs), max}, ans.tokens())
+	rec.InjectedNS, rec.Nth = wait.Nanoseconds(), nth
 	if !sleep(ctx, wait) {
 		return
 	}

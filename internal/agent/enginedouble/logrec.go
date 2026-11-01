@@ -50,6 +50,12 @@ type LogEvent struct {
 	// that needs a latency to have grown from one request to the next reads it
 	// here, and does not measure a clock that a loaded machine skews.
 	InjectedNS int64 `json:"injected_ns,omitempty"`
+	// Nth is how many requests of the same shape (prompt tokens and max tokens, the key of
+	// slow-first and never-settle) the double had admitted before this one, counting from 0. It
+	// is the request's place in its shape's sequence, and never-settle's wait is Nth times a
+	// share, so a test that wants the waits in the order the requests came keys them by it and
+	// does not sort the waits.
+	Nth int `json:"nth,omitempty"`
 }
 
 // logFile appends one JSON line per record.
