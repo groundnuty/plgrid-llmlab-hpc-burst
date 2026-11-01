@@ -119,6 +119,13 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 	case provider.Rejected:
 		return managed.ExternalCreation{}, e.rejected(wctx, a, claim, serr)
 	default:
+		// An Unknown outcome ends a run of full-slot refusals, like any other
+		// outcome that is not one: the next full slot has its own event
+		// (PR 168's review, Opus N3). An operator's abandon of the attempt
+		// needs no reset of its own: nothing is submitted while an attempt is
+		// unresolved, so no refusal can set the gate between this reset and
+		// the abandon.
+		e.s.limitEvents.Delete(a.UID)
 		u := claim
 		u.State, u.Reason = v1alpha1.SubmissionUnknown, truncate(errText(serr))
 		wrote, err := writeOwn(wctx, e.s.kube, e.s.reader, a, claim.Token, func(record) map[string]string {
@@ -221,6 +228,10 @@ func (e *external) refuse(ctx context.Context, a *v1alpha1.Allocation, rec recor
 		return fmt.Errorf("attempt %d is refused before any call, but the refusal was not recorded: %w", n, err)
 	}
 	e.showRejected(a, &r)
+	// A refusal before any call ends a run of full-slot refusals: the next
+	// full slot starts a new one and has its own event (HBEP-8, Repeating
+	// conditions; PR 168's review, Opus N3).
+	e.s.limitEvents.Delete(a.UID)
 	e.event(a, event.Warning("SubmissionRejected", fmt.Errorf("attempt %d: %s", n, r.Reason)))
 	return fmt.Errorf("attempt %d rejected: %s", n, r.Reason)
 }
