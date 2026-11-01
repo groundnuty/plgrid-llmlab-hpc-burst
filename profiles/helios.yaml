@@ -239,6 +239,12 @@ spec:
           source: "issue #94, comment 6550908687 (the real-engine run). sbatch --test-only for 1 GPU on partition plgrid-gpu-gh200, with --no-requeue, under the account of the largest active GH200 grant (not named here); the job was then submitted under QOS now"
           note: "One estimate pair and one job, at one moment: the queue state of that run, not a rule. QOS now has a wall limit of 12 h and one submitted job per user (facts.slurm.qos), so this holds for short jobs. The estimate under QOS now was a range, and the job started at once. The date is that of the report comment; the run was no later."
           value: {partition: plgrid-gpu-gh200, gpus: 1, start_estimate_normal_qos: "16 days", start_estimate_qos_now: "13 to 29 min", started_at_once_under_qos_now: true}
+        test_only_estimate_is_an_upper_bound:
+          method: measured
+          date: "2026-11-01"
+          source: "issue #93, comment 6562118604 (the live-checks conformance run of 1 Nov 2026). sbatch --test-only for a 5-minute job on partition plgrid, then the job itself"
+          note: "One estimate and one job, at one moment: the queue state of that run, not a rule. The job started at once although the estimate was about 3 days, so a --test-only estimate is an upper bound, not a prediction (`@hpc-burst-science-agent`, 1 Nov 2026), and HBEP-7 plans from the queue waits it has observed (the Provider's status.queueWaits), not from --test-only. No job ID or node name is recorded."
+          value: {partition: plgrid, time_limit: "5 min", start_estimate: "about 3 days", started_at_once: true}
       partitions:
         # The six partitions below are the ones the documentation or the QOS list
         # points users at. Time limits, node counts and hardware are per partition.
