@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
@@ -31,11 +32,12 @@ func testLaunch() agentapi.Launch {
 // at /hpcburst/run, then the image and the launch's Command unchanged. The
 // expected vector is written out by hand.
 func TestWorkerExecArgs(t *testing.T) {
-	w := WorkerExec{Image: "/s/images/x.sif", CheckpointDir: "/s/checkpoints/org/model/rev", RunDir: "/tmp/hb-1", Launch: testLaunch(), Key: testKey}
+	w := WorkerExec{Image: "/s/images/x.sif", CheckpointDir: "/s/checkpoints/org/model/rev", RunDir: "/tmp/hb-1", CacheDir: "/s/alloc/hb-x/cache", Launch: testLaunch(), Key: testKey}
 	want := []string{
-		"exec", "--nv", "--cleanenv",
+		"exec", "--nv", "--cleanenv", "--no-home",
 		"--bind", "/s/checkpoints/org/model/rev:/hpcburst/model:ro",
 		"--bind", "/tmp/hb-1:/hpcburst/run",
+		"--bind", "/s/alloc/hb-x/cache:/hpcburst/cache",
 		"/s/images/x.sif",
 		"vllm", "serve", "/hpcburst/model", "--uds=/hpcburst/run/worker-0.sock", "--max-num-seqs=256",
 	}
@@ -73,9 +75,40 @@ func TestWorkerExecEnvironmentIsTheLaunchs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"PATH=/usr/bin", "HOME=/home/u", "APPTAINERENV_HF_HUB_OFFLINE=1", "APPTAINERENV_VLLM_API_KEY=" + testKey}
+	want := []string{"PATH=/usr/bin", "HOME=/home/u", "APPTAINERENV_HF_HUB_OFFLINE=1",
+		"APPTAINERENV_XDG_CACHE_HOME=/hpcburst/cache/xdg",
+		"APPTAINERENV_VLLM_CACHE_ROOT=/hpcburst/cache/vllm",
+		"APPTAINERENV_TORCHINDUCTOR_CACHE_DIR=/hpcburst/cache/torchinductor",
+		"APPTAINERENV_TRITON_CACHE_DIR=/hpcburst/cache/triton",
+		"APPTAINERENV_FLASHINFER_WORKSPACE_BASE=/hpcburst/cache/flashinfer",
+		"APPTAINERENV_CUDA_CACHE_PATH=/hpcburst/cache/cuda",
+		"APPTAINERENV_VLLM_API_KEY=" + testKey}
 	if !reflect.DeepEqual(env, want) {
 		t.Fatalf("env:\n got %q\nwant %q", env, want)
+	}
+}
+
+// A launch that sets a cache variable itself keeps its value: the launch's
+// variables are a deployment-ID input, so the agent adds a cache variable only
+// where the launch is silent (science-agent ruling, 1 Nov 2026, issue #125).
+func TestWorkerExecLaunchCacheVariableWins(t *testing.T) {
+	l := testLaunch()
+	l.Env = append(l.Env, agentapi.EnvVar{Name: "VLLM_CACHE_ROOT", Value: "/opt/vllm-cache"})
+	env, err := (WorkerExec{Launch: l, Key: testKey}).Env()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "APPTAINERENV_VLLM_CACHE_ROOT=") {
+			got = append(got, kv)
+		}
+	}
+	if want := []string{"APPTAINERENV_VLLM_CACHE_ROOT=/opt/vllm-cache"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("VLLM_CACHE_ROOT carried as %q, want only the launch's %q", got, want)
+	}
+	if !slices.Contains(env, "APPTAINERENV_TRITON_CACHE_DIR=/hpcburst/cache/triton") {
+		t.Errorf("the other cache variables are no longer set: %q", env)
 	}
 }
 
@@ -295,5 +328,36 @@ func TestWorkerExecForwardsTheJobsGPUs(t *testing.T) {
 	}
 	if env, _ := (WorkerExec{Launch: testLaunch(), Key: testKey, BaseEnv: []string{"PATH=/usr/bin"}}).Env(); slices.ContainsFunc(env, func(s string) bool { return strings.Contains(s, "CUDA_VISIBLE_DEVICES") }) {
 		t.Fatalf("env %q sets GPUs the job has not", env)
+	}
+}
+
+// readLogTail keeps the last MaxLogTailBytes of the engine's log, starting at a
+// rune boundary, with invalid bytes replaced and the Instance's key replaced
+// (WorkerReport.LogTail). The log here is 9,000 bytes of "é" (two bytes each,
+// so an odd cut splits one), an invalid byte, the key and a last line.
+func TestReadLogTail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "engine-worker-0.log")
+	body := strings.Repeat("é", 4500) + "\xff key=" + testKey + "\nlast line\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := readLogTail(path, testKey)
+	if len(got) > agentapi.MaxLogTailBytes {
+		t.Errorf("tail is %d bytes, above %d", len(got), agentapi.MaxLogTailBytes)
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("tail is not valid UTF-8")
+	}
+	if strings.Contains(got, testKey) {
+		t.Errorf("tail carries the key")
+	}
+	if !strings.HasSuffix(got, "key="+agentapi.RedactedValue+"\nlast line\n") {
+		t.Errorf("tail does not end with the redacted key and the last line: %q", got[max(0, len(got)-80):])
+	}
+	if !strings.HasPrefix(got, "é") {
+		t.Errorf("tail does not start at a rune boundary: %q", got[:8])
+	}
+	if readLogTail(filepath.Join(t.TempDir(), "missing.log"), testKey) != "" {
+		t.Errorf("a missing log gives a tail")
 	}
 }

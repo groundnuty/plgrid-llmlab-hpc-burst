@@ -30,6 +30,7 @@ func (a *Agent) snapshot() agentapi.Report {
 			Phase:        w.phase,
 			Generation:   w.generation,
 			EngineSocket: w.socket,
+			LogTail:      w.logTail,
 		}
 		if w.proc != nil {
 			start := w.proc.Start()

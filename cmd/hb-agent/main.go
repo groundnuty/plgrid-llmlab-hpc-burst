@@ -32,6 +32,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent"
@@ -138,6 +139,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		Apptainer:    apptainer,
 		RunDir:       runDir,
 		LogDir:       job.AllocDir,
+		CacheDir:     filepath.Join(job.AllocDir, agentapi.AllocationCacheDirName),
 		Registration: reg,
 		BaseEnv:      os.Environ(),
 		Logger:       log,

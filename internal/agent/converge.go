@@ -84,6 +84,9 @@ type worker struct {
 	// cleaning: the leader exited without being told to, and the rest of its
 	// process group is being stopped.
 	cleaning bool
+	// logTail is the end of the engine's output once the worker exited
+	// without being told to, or why it could not start (WorkerReport.LogTail).
+	logTail string
 }
 
 func (w *worker) alive() bool {

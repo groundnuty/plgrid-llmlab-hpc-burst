@@ -2,11 +2,13 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/procgroup"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
@@ -40,9 +42,16 @@ func (a *Agent) startWorker(in *instance, dw agentapi.DesiredWorker, instGen int
 		code := startFailedExitCode
 		w.phase = agentapi.PartExited
 		w.exitCode = &code
+		w.logTail = redactKey(agentapi.TruncateUTF8("the worker did not start: "+err.Error(), agentapi.MaxLogTailBytes), in.key)
 		return w
 	}
 	_ = os.Remove(w.socket)
+	if a.o.CacheDir == "" {
+		return fail(errors.New("no cache directory is configured"))
+	}
+	if err := os.MkdirAll(a.o.CacheDir, 0o700); err != nil {
+		return fail(fmt.Errorf("cache directory: %w", err))
+	}
 	if err := writeChatTemplate(a.o.RunDir, in.launch); err != nil {
 		return fail(fmt.Errorf("chat template: %w", err))
 	}
@@ -51,6 +60,7 @@ func (a *Agent) startWorker(in *instance, dw agentapi.DesiredWorker, instGen int
 		Image:         in.imagePath,
 		CheckpointDir: in.ckptDir,
 		RunDir:        a.o.RunDir,
+		CacheDir:      a.o.CacheDir,
 		Launch:        in.launch,
 		Key:           in.key,
 		BaseEnv:       a.o.BaseEnv,
@@ -59,7 +69,7 @@ func (a *Agent) startWorker(in *instance, dw agentapi.DesiredWorker, instGen int
 	if err != nil {
 		return fail(err)
 	}
-	logf, err := os.OpenFile(filepath.Join(a.o.LogDir, "engine-"+dw.Name+".log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	logf, err := os.OpenFile(engineLogPath(a.o.LogDir, dw.Name), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return fail(fmt.Errorf("engine log: %w", err))
 	}
@@ -219,6 +229,7 @@ func (a *Agent) leaderExited(in *instance, g *procgroup.Group) {
 	}
 	w.phase = agentapi.PartExited
 	w.cleaning = true
+	w.logTail = readLogTail(engineLogPath(a.o.LogDir, w.name), in.key)
 	a.log.Warn("worker exited without being told to", "worker", w.name, "pid", g.PID(), "exitCode", code)
 	g.Stop(a.stopGrace)
 }
@@ -298,4 +309,52 @@ func (a *Agent) shutdown() {
 			w.cleaning = false
 		}
 	}
+}
+
+// engineLogPath is a worker's engine log in the log directory.
+func engineLogPath(logDir, worker string) string {
+	return filepath.Join(logDir, "engine-"+worker+".log")
+}
+
+// readLogTail returns the last agentapi.MaxLogTailBytes of a worker's engine
+// log, starting at a UTF-8 boundary, with any invalid byte replaced and the
+// Instance's key replaced (WorkerReport.LogTail). An unreadable log gives "".
+func readLogTail(path, key string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	off := max(0, fi.Size()-agentapi.MaxLogTailBytes)
+	buf := make([]byte, fi.Size()-off)
+	n, _ := f.ReadAt(buf, off)
+	b := buf[:n]
+	for len(b) > 0 && !utf8.RuneStart(b[0]) {
+		b = b[1:]
+	}
+	return tailUTF8(redactKey(strings.ToValidUTF8(string(b), "\uFFFD"), key), agentapi.MaxLogTailBytes)
+}
+
+// redactKey replaces every occurrence of the Instance's key in s.
+func redactKey(s, key string) string {
+	if key == "" {
+		return s
+	}
+	return strings.ReplaceAll(s, key, agentapi.RedactedValue)
+}
+
+// tailUTF8 returns the last at most n bytes of s, starting at a rune boundary.
+func tailUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	s = s[len(s)-n:]
+	for len(s) > 0 && !utf8.RuneStart(s[0]) {
+		s = s[1:]
+	}
+	return s
 }

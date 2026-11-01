@@ -44,6 +44,10 @@ type Options struct {
 	RunDir string
 	// LogDir receives one log file per worker, the engine's output.
 	LogDir string
+	// CacheDir is the engines' cache directory, in the Allocation's directory
+	// (agentapi.AllocationCacheDirName); the agent creates it and binds it
+	// into every worker (WorkerExec).
+	CacheDir string
 	// Registration is what the agent registers with.
 	Registration agentapi.RegisterRequest
 	// BaseEnv is the environment apptainer runs with, before the launch's

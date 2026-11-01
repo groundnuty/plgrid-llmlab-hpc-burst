@@ -143,6 +143,7 @@ func apptainerExec(args []string) int {
 	var (
 		binds    []bind
 		cleanEnv bool
+		noHome   bool
 		i        = 1
 	)
 	for ; i < len(args) && strings.HasPrefix(args[i], "-"); i++ {
@@ -150,6 +151,7 @@ func apptainerExec(args []string) int {
 		switch {
 		case execBoolFlags[name] && !hasVal:
 			cleanEnv = cleanEnv || name == "--cleanenv" || name == "-e"
+			noHome = noHome || name == "--no-home"
 		case execValueFlags[name]:
 			if !hasVal {
 				if i+1 >= len(args) {
@@ -182,6 +184,21 @@ func apptainerExec(args []string) int {
 		}
 	}
 	env, hidden := childEnv(os.Environ(), cleanEnv)
+	// The home directory: Apptainer sets HOME to the caller's and binds it.
+	// With --no-home HOME names the same path, but nothing is bound there and
+	// the image has no such directory, so nothing can be written under it: the
+	// fake's child gets noHomeDir, which no one can write.
+	home := os.Getenv("HOME")
+	if home != "" {
+		env = setEnv(env, "HOME", home)
+	}
+	// The record shows the container's environment; the child, which runs on
+	// the host, gets each carried-in path that a bind covers as its host path.
+	containerEnv := env
+	env = rewriteEnv(env, hidden, binds)
+	if noHome && home != "" {
+		env = setEnv(env, "HOME", noHomeDir)
+	}
 	rewritten := make([]string, len(cmdArgs)-1)
 	for k, a := range cmdArgs[1:] {
 		rewritten[k] = rewriteArg(a, binds)
@@ -213,7 +230,7 @@ func apptainerExec(args []string) int {
 	if err := cmd.Start(); err != nil {
 		return refuse("exec: %v", err)
 	}
-	recordApptainer(ExecRecord{Argv: args, Env: redactedEnv(env, func(n string) bool { return hidden[n] && secretName(n) }), PID: cmd.Process.Pid})
+	recordApptainer(ExecRecord{Argv: args, Env: redactedEnv(containerEnv, func(n string) bool { return hidden[n] && secretName(n) }), PID: cmd.Process.Pid})
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	for {
@@ -292,6 +309,25 @@ func rewritePath(p string, binds []bind) string {
 		}
 	}
 	return p
+}
+
+// noHomeDir is the child's HOME under --no-home: a path in /proc, where no
+// process, root included, can create a file.
+const noHomeDir = "/proc/fake-apptainer-no-home"
+
+// rewriteEnv returns env with the value of each variable carried in (hidden)
+// that is a container path a bind covers replaced by its host path
+// (rewritePath), as the bind makes the same files visible there.
+func rewriteEnv(env []string, hidden map[string]bool, binds []bind) []string {
+	out := make([]string, len(env))
+	for i, kv := range env {
+		name, val, _ := strings.Cut(kv, "=")
+		if hidden[name] && strings.HasPrefix(val, "/") {
+			kv = name + "=" + rewritePath(val, binds)
+		}
+		out[i] = kv
+	}
+	return out
 }
 
 // childEnv builds the container's environment: empty with --cleanenv, else the

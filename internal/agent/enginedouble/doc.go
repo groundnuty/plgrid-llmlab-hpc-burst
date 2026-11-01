@@ -74,7 +74,10 @@
 // a real vLLM reports as two counters at 0), no-tpot, no-tpot-sum and
 // no-tpot-count;
 // the startup modes, used by Main only, are start-delay=<dur>,
-// exit-after=<dur>[:code] and ignore-term.
+// exit-after=<dur>[:code], ignore-term, write-caches (writeCaches: one file in
+// each cache a real engine fills at start, each at its variable) and
+// write-home (one file under HOME, as a cache that ignores its variable
+// writes).
 //
 // # The executables
 //
@@ -86,8 +89,11 @@
 //
 // ApptainerMain handles pull, build --sandbox and exec. Its exec runs the
 // image's "vllm" command as the engine double (Main) in a separate process,
-// after rewriting each container path that a bind covers to the host path. It
-// honours --cleanenv and the APPTAINERENV_ and SINGULARITYENV_ prefixes, so
+// after rewriting each container path that a bind covers to the host path, in
+// the arguments and in the values of the variables it carries in. Like
+// Apptainer it sets HOME to the caller's home directory and binds it; with
+// --no-home nothing is bound, so the engine gets a HOME no one can write, and
+// a cache that ignores its variable fails to write. It honours --cleanenv and the APPTAINERENV_ and SINGULARITYENV_ prefixes, so
 // under --cleanenv the engine's HB_ENGINE_DOUBLE and HB_ENGINE_DOUBLE_LOG
 // reach it only as APPTAINERENV_HB_ENGINE_DOUBLE and
 // APPTAINERENV_HB_ENGINE_DOUBLE_LOG. After the rewrite, /v1/models reports the

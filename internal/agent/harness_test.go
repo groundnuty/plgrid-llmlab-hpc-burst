@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -76,6 +77,7 @@ type harness struct {
 	root       string // short temp dir: run, staging, logs
 	runDir     string
 	stagingDir string
+	cacheDir   string // the Allocation's cache directory (Options.CacheDir)
 	appLog     string // the fake apptainer's invocations
 	engLog     string // the engine double's starts and requests
 	aid        string
@@ -102,6 +104,8 @@ type harnessOptions struct {
 	backendWrap func(agentapi.Backend) agentapi.Backend
 	// tunnel is told which Instance the agent serves.
 	tunnel agent.Tunnel
+	// home, when set, is the agent's HOME in place of the test process's.
+	home string
 }
 
 // newHarness starts a real agent against a fake Backend behind a fake Gate,
@@ -159,6 +163,11 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 		apptainer = o.apptainer
 	}
 	baseEnv := append(os.Environ(), "HB_FAKE_APPTAINER_LOG="+h.appLog, noExitSleep)
+	if o.home != "" {
+		baseEnv = slices.DeleteFunc(baseEnv, func(kv string) bool { return strings.HasPrefix(kv, "HOME=") })
+		baseEnv = append(baseEnv, "HOME="+o.home)
+	}
+	h.cacheDir = filepath.Join(root, agentapi.AllocationCacheDirName)
 	files := map[string]string{"/org/model/resolve/" + strings.Repeat("c", 40) + "/" + defaultFile.Path: defaultContent}
 	for k, v := range o.hub {
 		files[k] = v
@@ -193,6 +202,7 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 		Apptainer:            apptainer,
 		RunDir:               h.runDir,
 		LogDir:               root,
+		CacheDir:             h.cacheDir,
 		Registration:         agentapi.RegisterRequest{RestartCount: o.restart, Node: "node-test", CPUArch: "x86_64"},
 		BaseEnv:              baseEnv,
 		Tunnel:               o.tunnel,

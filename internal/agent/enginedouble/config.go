@@ -83,6 +83,8 @@ type Config struct {
 	ExitAfterSet bool
 	ExitCode     int  // the exit code of ExitAfter
 	IgnoreTerm   bool // ignore SIGTERM, with a child process that ignores it too
+	WriteCaches  bool // write a file into each cache a real engine fills at start (writeCaches)
+	WriteHome    bool // write a file under HOME, as a cache that ignores its variable does (writeCaches)
 }
 
 // DefaultConfig returns the documented defaults: vLLM's 32768-token context,
