@@ -32,14 +32,18 @@ spec:
       memPerGpu: 128000Mi # facts.hardware.node_documented.value.proportional_ram_per_gpu_mb, 128000 (the node's 1024000 divided by its 8 GPUs)
       imageFormat: sandbox # facts.containers.apptainer_compute_nodes.value.plgrid-gpu-a100 (S1 probe 2: a SIF fails, a sandbox runs); also facts.partitions[name=plgrid-gpu-a100].image_format
 
-    # plgrid-now is for conformance runs and short checks only, and hosts no Instance
-    # (`@hpc-burst-science-agent`, 1 Nov 2026, issue #93). Its time limit is 1 h, below what an Instance
-    # needs: HBEP-7's drain lead (drainWindow 2h10m below) plus useful serving time, and handoverMargin
-    # (30m below). The profile lists it so that the conformance harness can run there. cpusPerGpu and
-    # memPerGpu are left absent on purpose: the lifecycle controller then refuses to size an Instance on
-    # this partition (internal/lifecycle, partitionSizing), the same stance as Helios plgrid. Sourcing them
-    # (the QoS cap is cpu=16 and 125G) would lift that refusal, so it needs the science agent's ruling first.
-    # imageFormat is absent as well: probe 2 ran on plgrid-gpu-a100 only.
+    # plgrid-now: three things (`@hpc-burst-science-agent`, 1 Nov 2026, issue #93).
+    #   - cpusPerGpu and memPerGpu are left absent on purpose, so that no Instance is planned here: the
+    #     lifecycle controller refuses to size an Instance on a partition that does not give them
+    #     (internal/lifecycle, partitionSizing; TestShippedAthenaNowCannotBeSized pins it). Sourcing them
+    #     (the QoS cap is cpu=16 and 125G) would lift that refusal.
+    #   - It is for conformance runs and short checks only: maxTime 1h is shorter than drainWindow (2h10m)
+    #     plus handoverMargin (30m), both below. The profile lists it so that the conformance harness can run there.
+    #   - Both hold until HBEP-7's PartitionTooShort check lands (maxTime must exceed drainWindow plus
+    #     handoverMargin plus health.startTimeout, or the ModelDeployment goes Degraded). No marker field or
+    #     controller check is added before then.
+    # The measured limits (1 h, one GPU, one running and one submitted job per user) are facts in the untyped
+    # block, cited on each value below. imageFormat is absent as well: probe 2 ran on plgrid-gpu-a100 only.
     - name: plgrid-now # spec.profile.facts.partitions[name=plgrid-now].name
       gpuModel: A100 # HBEP-4 fixes the string. facts.partitions[name=plgrid-now].gres is "gpu:a100:8", the same node type as plgrid-gpu-a100 (facts.hardware.node_documented.value.accelerator, "8x NVIDIA A100-SXM4-40GB")
       cpuArch: x86_64 # facts.partitions[name=plgrid-now].arch
