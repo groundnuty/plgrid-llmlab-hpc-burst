@@ -187,7 +187,7 @@ For a batch provider (Slurm):
   - **What remains** is a known risk (Risks): a leader stalls after its re-read; another leader releases the job, and it starts; an administrator requeues it with a hold (the plugin submits `--no-requeue`, so only an administrator's action can requeue it); then the stalled leader resumes and releases that later hold. `scontrol release` names the job, not the hold, so nothing stops it. It needs a stall and a manual requeue with a hold in the same window, so it is rare, and it is accepted for alpha (science-agent decision, 31 Oct 2026, from PR #96's review). The test is tracked in #93.
 - **`Cancel(jobIDs) → results`.** `scancel` per job, with a result per job: cancelled, already ended, or error. Cancelling an ended job reports "already ended", so the operation is idempotent.
 - **`EnsureFile(path, sha256, mode, content) → error`.** Places one file under the profile's `stagingDir`. It does nothing when a file there already has that SHA-256. Otherwise it writes the content through the ssh connection's standard input to a temporary name, sets the mode, and renames it into place. The content never appears on a command line. Idempotent.
-- **`RemoveAllocationFiles(tag) → error`.** Removes the Allocation's directory under `stagingDir` once its jobs are gone. Idempotent.
+- **`RemoveAllocationFiles(tag) → error`.** Removes the Allocation's directory under `stagingDir` once its jobs are gone; a completing job is not gone (Allocation status, a completing job). Idempotent.
 
 A job record holds:
 - the job ID, the name, and the state as Slurm lists it (base state and flags);
@@ -204,6 +204,7 @@ Phases:
 - `Ended`: COMPLETED, TIMEOUT (the lease end) or CANCELLED.
 - `Failed`: FAILED, NODE_FAIL, OUT_OF_MEMORY, BOOT_FAIL, PREEMPTED or DEADLINE, or a requeue in any state (reason `Requeued`, kept once seen).
 - `Lost`: absent from both sources for longer than `lostGrace`, counting only reads that succeeded. It returns to the real phase if the job reappears.
+- **A completing job** (science-agent ruling, 1 Nov 2026, for #198). The queue listing's `job_state` is a list, the base state plus flags; a job whose list carries `COMPLETING` has a terminal base state but processes that may still run until Slurm's `KillWait` has passed. Its phase follows the base state (`["CANCELLED","COMPLETING"]` is `Ended`, `["FAILED","COMPLETING"]` is `Failed`), so failure handling is not delayed, and the Allocation's status records `atProvider.jobCompleting` (proposed) as true, with a condition message naming the state and since when. Until the flag clears, the job is still live wherever this HBEP or HBEP-7 says live or gone: `RemoveAllocationFiles` removes nothing, the deletion finalizer stays (HBEP-7), HBEP-7's slot accounting counts the Allocation, and the `acct-` record is written once the flag has cleared, from the final state. A job stuck in `COMPLETING` on a bad node therefore holds its Allocation until it clears; that is a known risk, visible in the status, and not engineered further.
 - While submitting: `Submitting` and `SubmissionUnknown`.
 - `Refused`: an invalid profile, a non-canonical external name, or a rewritten job name.
 
@@ -417,6 +418,7 @@ The register holds upstream bugs tied to versions. Each entry has one regression
   - a login throttle (master failures, then reconnect).
 - **Managed fake behaviours:** a no-byte cut, periodic stalls, models going inactive, ambiguous errors, key expiry and request rewriting. The alpha catalog loop is tested against listing changes and a rejected key.
 - **Two providers on one fake platform,** with separate accounts: their Allocations, files and credentials never mix, and their ssh masters are separate.
+- **A completing job.** A job listed as `["CANCELLED","COMPLETING"]` gives phase `Ended`, and `["FAILED","COMPLETING"]` gives `Failed`, at once, each with `jobCompleting` true. While the flag lasts, `RemoveAllocationFiles` removes nothing, and the Allocation's finalizer stays; once it clears, the files go and `jobCompleting` turns false. The run-mode fake keeps the flag on a cancelled, failed or timed-out job until its processes have exited. A fixture whose jobs never carry the flag proves nothing here.
 - **Final state and GPU rules.** A job purged from the queue listing is reported from accounting as ended, never as missing. A submission without GPUs to a GPU partition, or to an unlisted partition, is refused before any call, and so is one with a memory request of 0.
 - **The QOS flag.** A Provider with `qos: now` sends `--qos=now`. One with no `qos` sends no `--qos` at all, so Slurm uses the association's default QOS, whose limits the profile cannot know: only the partition QOS's typed limits apply then, and Slurm's own refusals still read by their reason names. To plan with a QOS's limits, a Provider names it in `qos`. With no `qos`, the fake's argv log holds neither the flag nor an empty value. A `qos` with a character outside the safe pattern is refused before any call. A `qos` that the profile does not list fails `ReadProfile`, with the field named.
 - **The QOS list's bound.** A profile with 9 QOSes is refused by admission and one with 8 is accepted; two QOSes with the same name are refused.
@@ -582,6 +584,7 @@ The Slurm provider plugin grows from www-2027's per-cluster ssh over one shared 
 - 2026-11-01: from PR #151's review: GH200's partition QOS `plgrid` typed and Slurm's order of limits stated, with `qos[].overPartQos`, after a second held submission under `now` was accepted; a refusal is two lines and is classified by its reason name.
 - 2026-11-01: the group submit limits count as a full slot; a 0 CPU or memory cap is refused; with no `qos`, only the partition QOS's typed limits apply (rulings for #155).
 - 2026-11-01: the profile's `qos` list holds at most 8 QOSes, with unique names (ruled for #155).
+- 2026-11-01: a job whose state carries `COMPLETING` keeps its terminal phase but is still live for file removal, the finalizer and the slot count (ruled for #198).
 
 ## Amendments
 
@@ -639,3 +642,4 @@ The Slurm provider plugin grows from www-2027's per-cluster ssh over one shared 
   - **Zero caps:** `maxCpusPerUser` and `maxMemPerUser` must be positive when set. An effective `maxSubmitPerUser` or `maxGpusPerUser` of 0 means the Provider cannot host the Instance.
   - **No `qos`:** only the partition QOS's typed limits apply, since the association's default QOS is not known to the profile.
 - **2026-11-01: the profile's QOS list is bounded** (science-agent ruling for #155, the QOS contracts). `qos` holds at most 8 entries, keyed by name, so two with one name are refused. The positive-memory rule's estimated cost grows with the list's bound, and at 16 the API server refused the CRD for exceeding its validation cost budget. The alpha profiles list 3 QOSes (Helios) and 1 (Athena). Before, the list had no bound.
+- **2026-11-01: a completing job** (Allocation status; Batch operations; Test plan). Science-agent ruling for #198, from reading Slurm 24.11's job states. A job whose `job_state` carries `COMPLETING` takes its base state's phase at once, records `atProvider.jobCompleting`, and stays live for `RemoveAllocationFiles`, the deletion finalizer, HBEP-7's slot accounting and the `acct-` record until the flag clears. Before, the text was silent, and the plugin read the base state alone, so it could remove an Allocation's files under a live agent and free its slot early.
