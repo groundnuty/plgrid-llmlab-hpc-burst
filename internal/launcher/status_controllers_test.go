@@ -88,10 +88,21 @@ func TestCheckEntry(t *testing.T) {
 	})
 	t.Run("the child died: the stale record is not trusted, the fresh one is", func(t *testing.T) {
 		stale := e
+		// The child is dead when its pidfd says so, not when /proc reads as if it were (issue #154):
+		// a killed process closes its descriptors and its leader reads Z for a moment before its
+		// pidfd fires, and in that moment checkEntry rightly sees a live process. HBEP-11 (Operational
+		// readiness, "Silent failure") and handle.go: death is read from the pidfd only.
+		victim, v, d := openRec(*stale.Proc)
+		if v != Ours {
+			t.Fatalf("the child is %v before the kill: %s", v, d)
+		}
 		if err := syscall.Kill(stale.Proc.PID, syscall.SIGKILL); err != nil {
+			victim.Close()
 			t.Fatal(err)
 		}
-		if !waitNotRunning(stale.Proc.PID, 5*time.Second) {
+		killed := waitExited(context.Background(), []*procHandle{victim}, 5*time.Second)
+		victim.Close()
+		if !killed {
 			t.Fatal("could not kill the child")
 		}
 		eh, problems := checkEntry(sup, supPID, stale)
