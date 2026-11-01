@@ -205,16 +205,24 @@ func processExe(pid int) string {
 	return exe
 }
 
-// childrenOf lists the live direct children of pid.
+// childrenOf lists the live direct children of pid. The kernel lists a
+// child under the thread that forked it, and a Go program forks from any of
+// its threads, so every thread's list is read.
 func childrenOf(pid int) []int {
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/task/%d/children", pid, pid))
+	tasks, err := os.ReadDir(fmt.Sprintf("/proc/%d/task", pid))
 	if err != nil {
 		return nil
 	}
 	var out []int
-	for _, f := range strings.Fields(string(b)) {
-		if n, err := strconv.Atoi(f); err == nil {
-			out = append(out, n)
+	for _, task := range tasks {
+		b, err := os.ReadFile(fmt.Sprintf("/proc/%d/task/%s/children", pid, task.Name()))
+		if err != nil {
+			continue // the thread ended since the listing
+		}
+		for _, f := range strings.Fields(string(b)) {
+			if n, err := strconv.Atoi(f); err == nil {
+				out = append(out, n)
+			}
 		}
 	}
 	return out
