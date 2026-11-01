@@ -25,6 +25,10 @@
 // credentials directory is Host.CredentialsDir() and the agent builds are in
 // Host.AgentBuildsDir(); the agent API binds Host.AgentEndpointAddr().
 //
+// Environment: HF_ENDPOINT, when set, is the origin of the Hugging Face Hub
+// that the lifecycle controller lists checkpoints from, as hb-agent downloads
+// them from it (cmd/hb-agent); unset, it is https://huggingface.co.
+//
 // It exits 0 after SIGTERM or SIGINT once the manager has stopped, 1 on a
 // failure (a Provider-manager scheme without apps/v1, and front settings that
 // agent.json would refuse, are refused before anything starts), and 2 on a
@@ -44,6 +48,7 @@ import (
 	"syscall"
 
 	"github.com/go-logr/logr/funcr"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -156,10 +161,7 @@ func run(ctx context.Context, f flags, d deps) error {
 	if err != nil {
 		return fmt.Errorf("kubeconfig: %w", err)
 	}
-	mgr, backend, err := lifecycle.NewManager(lifecycle.Options{
-		Config: cfg, CredentialsDir: f.host.CredentialsDir(), AgentBuildsDir: f.host.AgentBuildsDir(),
-		FrontConfigured: f.frontMode != "", HealthAddr: f.healthAddr, LeaderElection: f.leaderElect, Workers: f.workers,
-	})
+	mgr, backend, err := lifecycle.NewManager(managerOptions(f, cfg, os.Getenv))
 	if err != nil {
 		return err
 	}
@@ -196,5 +198,18 @@ func main() {
 	if err := run(ctx, f, defaultDeps()); err != nil {
 		fmt.Fprintln(os.Stderr, "hpcburst-controller:", err)
 		os.Exit(1)
+	}
+}
+
+// hubEndpointEnv names the Hub's origin, as for hb-agent.
+const hubEndpointEnv = "HF_ENDPOINT"
+
+// managerOptions are the lifecycle manager's options from the flags and the
+// environment.
+func managerOptions(f flags, cfg *rest.Config, getenv func(string) string) lifecycle.Options {
+	return lifecycle.Options{
+		Config: cfg, CredentialsDir: f.host.CredentialsDir(), AgentBuildsDir: f.host.AgentBuildsDir(),
+		FrontConfigured: f.frontMode != "", HealthAddr: f.healthAddr, LeaderElection: f.leaderElect, Workers: f.workers,
+		HubEndpoint: getenv(hubEndpointEnv),
 	}
 }

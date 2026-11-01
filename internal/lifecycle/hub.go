@@ -22,13 +22,21 @@ type HubSource struct {
 	entries map[string][]hubfiles.Entry
 }
 
+// endpoint is the Hub's origin the source lists from.
+func (h *HubSource) endpoint() string {
+	if h.BaseURL == "" {
+		return hubfiles.DefaultBaseURL
+	}
+	return h.BaseURL
+}
+
 func (h *HubSource) client(tokenFile string) (*hubfiles.Client, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if c, ok := h.clients[tokenFile]; ok {
 		return c, nil
 	}
-	c, err := hubfiles.New(hubfiles.Config{BaseURL: h.BaseURL, TokenFile: tokenFile})
+	c, err := hubfiles.New(hubfiles.Config{BaseURL: h.endpoint(), TokenFile: tokenFile})
 	if err != nil {
 		return nil, err
 	}
