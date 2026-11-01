@@ -442,7 +442,7 @@ func (r *Reconciler) classBlocked(ctx context.Context, md *v1alpha1.ModelDeploym
 				return fmt.Sprintf("verification record %s found max-model-len %d and a template overhead of %d, and the workload does not fit: %v", name, d.MaxModelLen, d.Overhead, err), nil
 			}
 			if r.memory().once("shape-lift/" + name + "/" + key) {
-				r.Recorder.Event(md, nil, eventReady, "ShapesFit",
+				r.Recorder.Event(md, nil, eventReady, v1alpha1.EventReasonShapesFit,
 					fmt.Sprintf("the workload now fits the context limit %d that verification record %s found; provisioning in the class resumes", d.MaxModelLen, name))
 			}
 		}
