@@ -124,6 +124,14 @@ The lifecycle controller never imports `internal/slurm` or `internal/providerctl
 
 ## Pinned versions
 
+[HBEP-15](../hbep/0015-dependencies-and-provenance/README.md) holds the pins that a design decision rests on, in its "Pinned versions" table, each with its reason and the event that triggers a bump, and the rule for a bump in "Upgrading a pinned dependency". The record of each pin is a file that the code or the build reads:
+- `go.mod` and `go.sum` for the Go modules;
+- `internal/launcher/k3s-pins.txt` for k3s;
+- `internal/launcher/frp-pins.txt` for frps and frpc;
+- `hack/test-binaries.sh` for the test host's `kube-apiserver`, `kube-controller-manager` and `etcd`.
+
+The table below lists the pins of the build and the tests, the test host's binaries included.
+
 The Kubernetes libraries match crossplane-runtime v2.4.3, which HBEP-4's provider builds on. That way the provider needs no version bump:
 
 | Dependency | Version |
@@ -140,7 +148,7 @@ The Kubernetes libraries match crossplane-runtime v2.4.3, which HBEP-4's provide
 | `etcd` (the assembled test host) | v3.6.8, sha256-pinned in `hack/test-binaries.sh` |
 | `frps`, `frpc` (HBEP-6's tunnel; the launcher runs frps, the tests start both) | [frp](https://github.com/fatedier/frp) v0.71.1 (Apache-2.0), linux_amd64. Pinned in two places that must agree: `internal/launcher/frp-pins.txt`, embedded in the launcher, which checks frps against it before every start, and `hack/fetch-frp.sh`, which fetches both binaries (the pin spike S1c used) |
 
-Kubernetes' explicit ±1-minor skew rule is written for kubectl. client-go instead documents compatibility through the APIs a client and a cluster share ([client-go compatibility](https://github.com/kubernetes/client-go/blob/v0.35.3/README.md#compatibility-client-go---kubernetes-clusters)). A 0.35 client against a 1.36 server is a reasonable choice for shared stable APIs, and the tests against k3s 1.36 check the APIs we use. A change to any of these pins is its own PR.
+Kubernetes' explicit ±1-minor skew rule is written for kubectl. client-go instead documents compatibility through the APIs a client and a cluster share ([client-go compatibility](https://github.com/kubernetes/client-go/blob/v0.35.3/README.md#compatibility-client-go---kubernetes-clusters)). A 0.35 client against a 1.36 server is a reasonable choice for shared stable APIs, and the tests against k3s 1.36 check the APIs we use. A change to any of these pins is its own PR (HBEP-15, "Upgrading a pinned dependency").
 
 ## Checks
 
@@ -150,20 +158,6 @@ Kubernetes' explicit ±1-minor skew rule is written for kubectl. client-go inste
 - Tests that start frp read `HPCBURST_FRP_DIR=<dir>` (an absolute path: a test runs in its package directory, so a relative one fails the test) through `testenv.FrpBinaries(t)`; a plain `go test ./...` takes it the same way (`hack/fetch-frp.sh <dir>`, then `HPCBURST_FRP_DIR=<dir> go test ./...`). `hack/fetch-frp.sh <dir>` installs the pinned `frps` and `frpc` there (the tarball's sha256 is checked before anything is extracted). Without `HPCBURST_FRP_DIR` those tests skip with a message; `HPCBURST_REQUIRE_FRP=1` fails them instead, and CI sets both in the `go`, `crd and envtest` and `launcher-k3s` jobs. A binary that is there but not executable, not runnable or not 0.71.1 fails in either mode.
 - The `go` and `crd and envtest` jobs provide OpenSSH's sshd for the ssh-mode tunnel tests in `internal/agent` (`HPCBURST_SSHD`). This is the workflow's one use of sudo. It installs only `openssh-server`, and only when `/usr/sbin/sshd` is missing; the ubuntu-24.04 runner already has OpenSSH_9.6p1, so in practice the install does not run. It never starts the system service and stops it if it runs. The tests run sshd as the user, in inetd mode (`@hpc-burst-science-agent`, 31 Oct 2026).
 - The test host (`internal/testenv`) binds only loopback ports 29200 to 29219 and, in k3s mode, accepts only a kubeconfig whose server is loopback on 29200 to 29239. The control-plane binaries are always sha256-checked; `HPCBURST_TESTENV_UNPINNED=1` is the explicit override for a binary you built yourself.
-
-### The licence check
-
-**Disabled since 31 Oct 2026.** The owner dropped licence checking ("I don't care about those licenses, so feel free to disable this job for now"), so both jobs below carry `if: false`. The scripts and fixtures in `hack/` are kept, and deleting the two `if: false` lines switches the check back on. Provenance is still recorded: every reuse names its origin and URL.
-
-When enabled, HBEP-15's licence check runs in two CI jobs, **not yet required checks**: they become required only after they have been green on main (HBEP-15's protocol), and a matrix job's name, `licences (<module>)`, changes when a module is added.
-
-- **`licence-modules`** runs the tests of the licence scripts (`hack/test_licence*.py`, Python standard library only, no Go; run them with `python3 -I -m unittest discover -s hack -p 'test_licence*.py' -v`), then `hack/test-licence-fixtures.sh` with the pinned go-licenses (see below), then `hack/licence-modules.sh --json .`. That lists every `go.mod` outside the top-level `spikes/`, found by a search of the whole tree, so a module added anywhere is checked without editing the workflow. Spikes are outside the check (HBEP-15). The search refuses, and names, a directory symlink anywhere outside `spikes/` (find does not follow one, so a module behind it would be left out), and a module directory whose name has a newline, another control character or a character outside `A-Z a-z 0-9 . _ - /`.
-- **`licences (<module>)`** runs `hack/licence-check.sh` once per module, with the Go version that module's `go.mod` names (`third_party/forked/kubeai` names a newer one than the root) and go-licenses v2.0.1, against `hack/allowed-licenses.txt`, HBEP-15's list (a test compares the two). There is no exemption: a module's own packages need a `LICENSE`, the root's for the root module and the copy's own under `third_party/forked/`. The root module is also checked with `--include_tests`, and with a negative control that takes BSD-3-Clause off the list and must fail. A failing module does not stop the others.
-- **No empty run.** go-licenses exits 0 over a module with no buildable package having checked nothing, so a run that saw no package fails unless `hack/known-zero-modules.txt` lists the module with a reason. Today that is `third_party/forked/kcp`: its one Go file is behind the `s3embedded` build tag, so no package matches. HBEP-15's copy check (Test plan) is meant to cover the copy; it is planned and does not run in CI yet. Add a line `<module dir>: <reason>` only when an empty run is expected, never to make a run pass.
-- **Fixtures.** `hack/test-licence-fixtures.sh <go-licenses>` runs `hack/licence-check.sh` with the real go-licenses on five throwaway repositories whose licences are written by hand: an MIT dependency (the passing control, which must show in the report), an off-list BSD-4-Clause one and an unknown one (each must be rejected, naming its library), a package whose own `LICENSE` is unreadable beside a readable one at its module's root (go-licenses logs the error and exits 0; the gate must fail it), and the same dependency without the unreadable file. It takes about 15 seconds, offline. It is ported from spike S12 (`spikes/s12/licence-fixtures.sh`).
-- **Fails closed.** `licence-check.sh` checks every write it makes (temporary directory, report template, a module's section, the output files); a write that fails exits non-zero and never prints `licence check: PASS`.
-
-To run it on your machine, install `github.com/google/go-licenses/v2@v2.0.1` and call `hack/licence-check.sh --negative-control <go-licenses> . <output dir> [module dir ...]`. With no module dir it finds the modules itself. Use a Go toolchain at least as new as the newest `go.mod` it checks, or `third_party/forked/kubeai` fails.
 
 ## Running the e2e suite on the launcher's k3s
 
@@ -185,7 +179,7 @@ Every field of the CRDs is camelCase, as the Kubernetes API conventions ask (own
 
 ## Rules for every change
 
-- **Dependencies:** each one's licence must be on HBEP-15's allowlist (Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, ISC and the others it lists). Copied code goes under `third_party/forked/<project>/` with its upstream `LICENSE` and an `ORIGIN.md`.
+- **Dependencies (provenance):** a Go module enters through `go.mod` and `go.sum` only. The PR description lists each new direct dependency with its project, URL and version, and answers the questions in HBEP-15, "Dependencies". The HBEP that adopts it lists it under "Community software reused". A binary the framework downloads is pinned by sha256 in the pins file the code reads (see "Pinned versions"). Copied code goes under `third_party/forked/<project>/` with its upstream `LICENSE` and an `ORIGIN.md`.
 - **Tests:** they come with the change. Expected values come from specifications or an independent implementation, never from the code under test.
 - **Public content:** this repository is public. No host names, IP addresses other than loopback, job IDs, account or grant names, credentials or internal paths (HBEP-1).
 
@@ -202,7 +196,7 @@ hpcburst down    --state-dir D
 ```
 
 - **State:** everything the launcher owns is in the state directory (default `$XDG_STATE_HOME/hpcburst`, else `~/.local/state/hpcburst`): k3s's data directory, home and log, the record of the processes it started (`state.json`, with PID and start time), and `kubeconfig` (mode 600, written only once the host is ready).
-- **Binaries:** `up` and `upgrade` look for `k3s-X.Y.Z/k3s` under `--bin-dir` (or `$HPCBURST_BIN_DIR`, else `~/.cache/hpcburst/k3s`), open it, and check the sha256 of what they opened against `internal/launcher/k3s-pins.txt`. k3s is then executed from that same descriptor (`/proc/self/fd/3`), so the bytes that run are the bytes that were checked. `hack/fetch-k3s.sh [DIR]` downloads and checks them. The pins file is the one place that says which versions are allowed. HBEP-11 puts these checksums in `build/dependencies.yaml` (HBEP-15); when HBEP-15's check lands, the pins move there, and this file and `hack/fetch-k3s.sh` read them from it rather than keeping a copy.
+- **Binaries:** `up` and `upgrade` look for `k3s-X.Y.Z/k3s` under `--bin-dir` (or `$HPCBURST_BIN_DIR`, else `~/.cache/hpcburst/k3s`), open it, and check the sha256 of what they opened against `internal/launcher/k3s-pins.txt`. k3s is then executed from that same descriptor (`/proc/self/fd/3`), so the bytes that run are the bytes that were checked. `hack/fetch-k3s.sh [DIR]` downloads and checks them. The pins file is the one place that says which versions are allowed, and `hack/fetch-k3s.sh` reads the same file, so there is no second copy. HBEP-15 keeps the checksums in this file; it adds no central list of versions.
 - **Versions:** `store-version.json` in the state directory records the release that last wrote the store, and `down` keeps it. `up` without `--version` starts that release; `up` with another one is refused. A newer release goes through `upgrade` (the next minor, or a newer patch or k3s revision of the same minor), which backs the store up first. An older one only through `restore`, from a backup that `upgrade` took.
 - **Backups and restore:** `upgrade` stops the host, copies `data/server/db` and the server token to `backups/<time>-<release>/` (mode 0600, synced), records the new release, and only then starts it. `restore` needs the host stopped. It moves the current store and token aside to `data/server/replaced-<time>/`, copies the backup back, and records the backup's release. Changes made after the backup are lost from the store.
 - **Health:** `status` judges from the recorded processes, through a pidfd for each: PID, start time and boot ID must match. k3s must run a binary unpacked in its own data directory (k3s otherwise falls back silently to a system k3s's `/var/lib/rancher/k3s/data`). The process must hold exactly its loopback ports. Only then does it ask `/readyz`, the controller manager's `/healthz`, a small write to the store, and a garbage-collector probe (an owner and a dependent ConfigMap in namespace `hpcburst-launcher`; the dependent must be gone within a minute; `--no-gc-probe` skips it). Afterwards it checks the listeners and identities again. A listener that answers on a port but is not held by the recorded process never counts.

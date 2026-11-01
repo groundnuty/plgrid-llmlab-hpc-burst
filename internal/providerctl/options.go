@@ -50,10 +50,10 @@ type FrontSettings struct {
 	AgentPort    int
 	DialHomePort int
 	// FrpcDigests is the SHA-256 of the frpc binary for each cpuArch, as
-	// build/dependencies.yaml pins it (HBEP-4, Submission: Files first). The
-	// digest depends on the partition's cpuArch, so agent.json takes the one
-	// for the Allocation's partition. Staging frpc and the dial-home
-	// certificate is not done yet.
+	// internal/launcher/frp-pins.txt pins it (HBEP-15; HBEP-4, Submission:
+	// Files first). The digest depends on the partition's cpuArch, so
+	// agent.json takes the one for the Allocation's partition. Staging frpc
+	// and the dial-home certificate is not done yet.
 	FrpcDigests map[string]string
 }
 
