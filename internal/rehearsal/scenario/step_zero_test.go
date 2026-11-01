@@ -135,7 +135,7 @@ func (r *rig) checkShutdown(insts []types.UID, patchAt time.Time) {
 			r.t.Errorf("step (g): Instance %s was ready at the scale to 0 and ended with no draining version: it was not drained", at.name)
 		}
 	}
-	r.t.Logf("step (g): %d Instances ready at the scale to 0 drained, %d others ended Drained", ready, other)
+	r.t.Logf("step (g): %d Instances were ready at the scale to 0, %d others had not ended; each held to the drain above", ready, other)
 	if ready == 0 {
 		r.t.Errorf("step (g): no Instance was ready at the scale to 0: the drain was not exercised")
 	}
