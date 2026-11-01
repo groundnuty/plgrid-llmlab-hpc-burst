@@ -67,6 +67,9 @@ func (b *Batch) requeue(id, op string, hold bool) {
 		panic("fake: job " + id + " has ended: it cannot be requeued")
 	}
 	b.log(op, id)
+	if r := b.record(j, now); r.StartTime != nil {
+		j.priorRun += now.Sub(*r.StartTime)
+	}
 	j.restartCount++
 	j.requeued = true
 	j.eligible = now
@@ -87,6 +90,35 @@ func (b *Batch) Reappear(id string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.must(id).vanished = false
+}
+
+// LagAccounting makes ReadAccounting (sacct -j) find nothing for the job while
+// the queue listing and Observe still show it, as accounting does when it lags
+// the queue; false undoes it. A read that finds nothing is logged all the same.
+func (b *Batch) LagAccounting(id string, lag bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.must(id).accountingLags = lag
+}
+
+// ForgetRequeue makes every later read show the job as never requeued: one
+// execution, the latest, with a restart count of 0, as a reply that lost the
+// earlier execution does (review of PR 118, Astra B3). The Controller's stored
+// status keeps the requeue it saw.
+func (b *Batch) ForgetRequeue(id string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	j := b.must(id)
+	j.restartCount, j.requeued, j.priorRun = 0, false, 0
+}
+
+// OmitElapsed makes accounting's record of the job lack time.elapsed, the
+// counts as usual, so a read of an ended job from accounting is incomplete;
+// false undoes it.
+func (b *Batch) OmitElapsed(id string, omit bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.must(id).noElapsed = omit
 }
 
 // FailReads makes FindByTag, Observe and Poll return err; nil clears it.

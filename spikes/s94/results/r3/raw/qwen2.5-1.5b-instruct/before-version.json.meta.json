@@ -1,0 +1,8 @@
+{
+  "contentType": "application/json",
+  "method": "GET",
+  "path": "/version",
+  "request": null,
+  "seconds": 0.00030364,
+  "status": 200
+}

@@ -358,6 +358,21 @@ func (b *Batch) Observe(ctx context.Context, jobID string) (provider.Job, bool, 
 	if len(listed) > 0 {
 		return listed[0], true, nil
 	}
+	return b.ReadAccounting(ctx, jobID)
+}
+
+// ReadAccounting reads one job from accounting alone, past the queue listing
+// (sacct --json -X -D -j <id>): the job's record from accounting, with
+// Accounting set from every execution -D returns (HBEP-8, Provider accounting).
+// The controller makes it once for a recorded job after the job is first seen
+// started, to learn what the scheduler allocated (HBEP-4, Poll rate); Observe
+// makes the same read for a job the listing does not show. found is false when
+// the read succeeded and accounting does not show the job; a failed read is an
+// error and counts in Health.ReadFailures.
+func (b *Batch) ReadAccounting(ctx context.Context, jobID string) (provider.Job, bool, error) {
+	if err := checkJobID(jobID); err != nil {
+		return provider.Job{}, false, err
+	}
 	acct, err := b.accounting(ctx, accountingJobLine(jobID))
 	if err != nil {
 		return provider.Job{}, false, err

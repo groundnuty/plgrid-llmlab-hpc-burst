@@ -41,7 +41,7 @@ Slurm's "MB" is 2^20 bytes (the provider sends `--mem=<MiB>M`), so memory values
 ## What is not set, and why
 
 A fact that nothing states is absent, not false (HBEP-4, Platform profile schema).
-- **`jobName`** (both): unset. No draft records a job-name maximum or a pattern, and the 56-character round trip is pending (HBEP-4, Risks and Graduation criteria). `maxLength` is set per partition once a conformance run has submitted a 56-character name there and read it back, and that run is its source. 56 is neither a fact nor a default (`@hpc-burst-science-agent`, 31 Oct 2026).
+- **`jobName`**: `maxLength` is 56 on Helios, sourced to the conformance run on `plgrid` of 31 Oct 2026 (step 5, issue #93, comment 6550844149); the profile holds it for the whole profile, so it covers `plgrid-gpu-gh200` too, since Helios runs one Slurm configuration and the read-back refuses a job whose name came back shortened (`@hpc-burst-science-agent`, option (b), 1 Nov 2026). Unset on Athena until its run. `pattern` is unset on both: no fact states one.
 - **`jobCommentAccounted`** (both): unset. HBEP-4 makes it optional and only recorded; the tag is in the job name either way.
 - **`maxIdle`** (Helios): unset outside Athena.
 - **`imageFormat`, `cpusPerGpu`, `memPerGpu`** on Helios `plgrid`: the partition is a CPU partition for conformance runs only and hosts no Instance (`@hpc-burst-science-agent`, 31 Oct 2026). Probe 2 ran on `plgrid-gpu-gh200` only, and the partition has no GPU. Its `gpusPerNode` is 0, so the Slurm provider refuses any request for a GPU there (`internal/slurm`, `TestShippedCPUPartitionRefusesGPUAllocations`). Absent `imageFormat` means `sif` (`v1alpha1.ImageFormatOf`), which only an Instance would use.

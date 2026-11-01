@@ -3,7 +3,8 @@
 // path (HBEP-5, Test plan: "an engine double"). It checks the Instance key
 // the front must send, records every request as it arrived, and plays the
 // behaviours a test sets: a number of tokens at a pace, a stream with no
-// finish reason, a connection killed mid-stream, a held response. Its pace
+// finish reason, a last token in the finish chunk, a connection killed
+// mid-stream, a held response. Its pace
 // runs on the front's clock, so with a fake clock a 7,000-token stream at one
 // token per second takes milliseconds while the front's real 2 h and 30 min
 // timers see two hours pass.
@@ -39,6 +40,25 @@ type Behaviour struct {
 	// response.completed, "incomplete" with response.incomplete (a capped
 	// reply), "failed" with response.failed and error.code server_error.
 	ResponsesEnd string
+	// LastWithFinish puts the reply's last token in the finish chunk's delta
+	// instead of a chunk of its own, as vLLM v0.32.0 does with the token
+	// that ends a reply (spike S94: "delta":{"reasoning":","} next to
+	// "finish_reason":"length"). With Tokens 1 the whole reply is the finish
+	// chunk. It has no effect while NoFinish is set.
+	LastWithFinish bool
+	// DeltaField is the member of a chat stream's delta that holds the
+	// token text: "" or "content", "reasoning" (vLLM v0.32.0) or
+	// "reasoning_content" (older engines). A completions stream always uses
+	// "text".
+	DeltaField string
+	// FinishReason is the finish chunk's reason in a chat or completions
+	// stream; "" means "stop".
+	FinishReason string
+	// CachedTokens is the cached prompt token count the usage reports. Nil,
+	// the default, leaves prompt_tokens_details (input_tokens_details on
+	// /v1/responses) out of the usage, as vLLM does without
+	// --enable-prompt-tokens-details.
+	CachedTokens *int64
 	// CloseBeforeHeaders reads the request, then closes the connection with
 	// no response byte, as frps does with a request it accepted for a dead
 	// tunnel (HBEP-6).

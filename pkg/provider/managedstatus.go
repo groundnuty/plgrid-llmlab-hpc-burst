@@ -2,6 +2,7 @@ package provider
 
 import (
 	"fmt"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -29,25 +30,64 @@ const (
 	EventCatalogTruncated = "CatalogTruncated"
 )
 
+// shortName is an entry's name as an event shows it, quoted: a name above 64
+// characters is shortened.
+func shortName(name string) string {
+	if utf8.RuneCountInString(name) > 64 {
+		name = string([]rune(name)[:64]) + "..."
+	}
+	return fmt.Sprintf("%q", name)
+}
+
 // SkippedNote is the note of an EventCatalogEntrySkipped event, before
 // NewManagedEvent cuts it to MaxEventNote. A name above 64 characters is
 // shortened.
 func SkippedNote(s SkippedEntry) string {
-	name := s.Name
-	if utf8.RuneCountInString(name) > 64 {
-		name = string([]rune(name)[:64]) + "..."
-	}
-	return fmt.Sprintf("catalog entry %q skipped: %s", name, s.Why)
+	return fmt.Sprintf("catalog entry %s skipped: %s", shortName(s.Name), s.Why)
 }
 
-// SkippedSummaryNote is the note of the one event that stands for the n
-// skipped entries beyond MaxSkipEventsPerHour, which have no event of their
-// own that hour.
-func SkippedSummaryNote(n int) string {
-	if n == 1 {
-		return fmt.Sprintf("1 more catalog entry skipped (at most %d skipped entries are named in an hour)", MaxSkipEventsPerHour)
+// skippedEllipsis ends a summary note whose list of names is cut short.
+const skippedEllipsis = "\u2026"
+
+// SkippedSummaryNote is the note of the one event that stands for the entries
+// beyond MaxSkipEventsPerHour, which have no event of their own that hour. It
+// counts them and names as many as fit in MaxEventNote bytes, in the order
+// given and whole (a name is never cut), and ends with "…" when some are
+// left out (@hpc-burst-science-agent, 31 Oct 2026, for #114). The ten named
+// entries are the caller's, and are never in rest.
+func SkippedSummaryNote(rest []SkippedEntry) string {
+	head := fmt.Sprintf("%d more catalog entries skipped", len(rest))
+	if len(rest) == 1 {
+		head = "1 more catalog entry skipped"
 	}
-	return fmt.Sprintf("%d more catalog entries skipped (at most %d skipped entries are named in an hour)", n, MaxSkipEventsPerHour)
+	note := head + fmt.Sprintf(" (at most %d skipped entries are named in an hour): ", MaxSkipEventsPerHour)
+	const sep = ", "
+	names := make([]string, len(rest))
+	for i, s := range rest {
+		names[i] = shortName(s.Name)
+	}
+	// The complete list, when it fits, with no ellipsis and none reserved: the
+	// ellipsis is only for a list that is cut, and the entries after a name
+	// (which may be as short as an empty name's two quotes) decide whether it
+	// fits.
+	if full := note + strings.Join(names, sep); len(full) <= MaxEventNote {
+		return full
+	}
+	// Otherwise as many whole names as leave room for the ellipsis after them.
+	for i, name := range names {
+		add := name
+		if i > 0 {
+			add = sep + name
+		}
+		if len(note)+len(add)+len(sep)+len(skippedEllipsis) > MaxEventNote {
+			if i == 0 {
+				return note + skippedEllipsis
+			}
+			return note + sep + skippedEllipsis
+		}
+		note += add
+	}
+	return note // unreachable: the complete list did not fit
 }
 
 // TruncatedNote is the note of an EventCatalogTruncated event.
