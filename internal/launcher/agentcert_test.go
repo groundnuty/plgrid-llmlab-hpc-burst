@@ -13,9 +13,11 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net"
 	"os"
@@ -337,6 +339,169 @@ func TestAgentEndpointCertificateIsIssuedForAKeyAlone(t *testing.T) {
 	}
 	if m := mode(t, h.AgentKeyFile()); m != 0o600 {
 		t.Errorf("key mode %04o", m)
+	}
+}
+
+// writeOldStylePair writes key and a certificate made the way the launcher made it before it carried
+// agentapi.DialHomeServerName: the same template as issueAgentCert's, with localhost and 127.0.0.1
+// as its only names. The fixture is valid in every other way, so a handshake that fails on it fails
+// on the name.
+func writeOldStylePair(t *testing.T, h agentapi.Host, key *ecdsa.PrivateKey) {
+	t.Helper()
+	writePair(t, h, key, key, 0o600)
+	now := time.Now()
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(7),
+		Subject:               pkix.Name{CommonName: "hpcburst agent endpoint"},
+		NotBefore:             now.Add(-time.Hour),
+		NotAfter:              now.Add(agentCertValidity),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		DNSNames:              []string{"localhost"},
+		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1)},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.AgentCertFile(), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// handshakeAs makes a TLS 1.3 handshake with a server that presents the pair at h's paths, from a
+// client that is verified by Go's standard verifier, as frpc's is: its only trusted root is the
+// certificate in the pair, and it checks the name serverName against it. It returns the client's
+// error.
+func handshakeAs(t *testing.T, h agentapi.Host, serverName string) error {
+	t.Helper()
+	kp, err := tls.LoadX509KeyPair(h.AgentCertFile(), h.AgentKeyFile())
+	if err != nil {
+		t.Fatalf("the pair does not load: %v", err)
+	}
+	leaf, err := x509.ParseCertificate(kp.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{kp}, MinVersion: tls.VersionTLS13})
+	if err != nil {
+		skipOrFail(t, "cannot listen on loopback: "+err.Error())
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() { _ = c.(*tls.Conn).Handshake(); c.Close() }()
+		}
+	}()
+	pool := x509.NewCertPool()
+	pool.AddCert(leaf)
+	c, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", ln.Addr().String(),
+		&tls.Config{RootCAs: pool, ServerName: serverName, MinVersion: tls.VersionTLS13})
+	if err == nil {
+		c.Close()
+	}
+	return err
+}
+
+func isHostnameError(err error) bool {
+	var he x509.HostnameError
+	return errors.As(err, &he)
+}
+
+// TestAgentEndpointCertificateIsValidForTheDialHomeName: frpc verifies the launcher's certificate
+// by the name agentapi.DialHomeServerName (HBEP-6), with Go's verifier, the certificate being its own
+// trusted root. A certificate made the old way, with localhost and 127.0.0.1 alone, is the control:
+// the same handshake fails on its name, and passes for localhost, so the fixture is otherwise valid.
+func TestAgentEndpointCertificateIsValidForTheDialHomeName(t *testing.T) {
+	h := testHost(t)
+	if err := ensureAgentEndpointPair(h, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"dial-home.hpcburst.invalid", "localhost", "127.0.0.1"} {
+		if err := handshakeAs(t, h, name); err != nil {
+			t.Errorf("the launcher's certificate is refused for %q: %v", name, err)
+		}
+	}
+	if err := handshakeAs(t, h, "other.hpcburst.invalid"); !isHostnameError(err) {
+		t.Errorf("a name the certificate does not carry gave %v, want a host name error: the check does not discriminate", err)
+	}
+
+	old := testHost(t)
+	writeOldStylePair(t, old, newKey(t))
+	if err := handshakeAs(t, old, "localhost"); err != nil {
+		t.Fatalf("the control certificate is refused for localhost, so the fixture is not valid: %v", err)
+	}
+	if err := handshakeAs(t, old, "dial-home.hpcburst.invalid"); !isHostnameError(err) {
+		t.Errorf("a certificate made the old way, checked for the dial-home name, gave %v, want a host name error", err)
+	}
+}
+
+// TestAgentEndpointKeptCertificateWithoutTheNameIsReissued: a pair from before the name was added
+// is kept in every respect but the certificate: the key file is not touched and the pin, which an
+// agent may already hold, is the key's own, as before. The certificate then passes the handshake
+// for the name, and a second call changes nothing.
+func TestAgentEndpointKeptCertificateWithoutTheNameIsReissued(t *testing.T) {
+	h := testHost(t)
+	k := newKey(t)
+	writeOldStylePair(t, h, k)
+	oldCert, oldPin := loadPair(t, h)
+	if oldPin != pinOfKey(t, k) {
+		t.Fatalf("the fixture's pin %s is not the key's %s", oldPin, pinOfKey(t, k))
+	}
+	if oldCert.VerifyHostname("dial-home.hpcburst.invalid") == nil {
+		t.Fatal("the fixture already carries the name")
+	}
+	certBefore, keyBefore := mustRead(t, h.AgentCertFile()), mustRead(t, h.AgentKeyFile())
+	keyInfoBefore, err := os.Stat(h.AgentKeyFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var log bytes.Buffer
+	if err := ensureAgentEndpointPair(h, &log); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(mustRead(t, h.AgentKeyFile()), keyBefore) {
+		t.Error("the key file changed")
+	}
+	if fi, err := os.Stat(h.AgentKeyFile()); err != nil || fi.Mode().Perm() != 0o600 || !os.SameFile(fi, keyInfoBefore) {
+		t.Errorf("the key file was replaced or its mode changed: %v, %v", fi, err)
+	}
+	if bytes.Equal(mustRead(t, h.AgentCertFile()), certBefore) {
+		t.Fatal("the certificate without the name was kept as it was")
+	}
+	cert, pin := loadPair(t, h)
+	if pin != pinOfKey(t, k) || pin != oldPin {
+		t.Errorf("pin %s after the re-issue; the key's is %s and it was %s", pin, pinOfKey(t, k), oldPin)
+	}
+	if m := mode(t, h.AgentCertFile()); m != 0o644 {
+		t.Errorf("certificate mode %04o, want 0644", m)
+	}
+	for _, name := range []string{"dial-home.hpcburst.invalid", "localhost", "127.0.0.1"} {
+		if err := cert.VerifyHostname(name); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+		if err := handshakeAs(t, h, name); err != nil {
+			t.Errorf("handshake for %q after the re-issue: %v", name, err)
+		}
+	}
+	if !strings.Contains(log.String(), "re-issued") || !strings.Contains(log.String(), pin) || strings.Contains(log.String(), "created") {
+		t.Errorf("the log %q should say the certificate was re-issued, with the pin", log.String())
+	}
+
+	// Kept now: a second call leaves both files as they are and says nothing.
+	certAfter := mustRead(t, h.AgentCertFile())
+	log.Reset()
+	if err := ensureAgentEndpointPair(h, &log); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(mustRead(t, h.AgentCertFile()), certAfter) || !bytes.Equal(mustRead(t, h.AgentKeyFile()), keyBefore) || log.Len() != 0 {
+		t.Errorf("a second call changed the pair or logged: %q", log.String())
 	}
 }
 

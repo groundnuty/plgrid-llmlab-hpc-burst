@@ -5,9 +5,11 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -32,15 +34,17 @@ const agentKeyReadLimit = 64 << 10
 // ensureAgentEndpointPair makes sure the agent endpoint's certificate and key (Host.AgentCertFile
 // and Host.AgentKeyFile) exist and are usable, before anything that loads them starts:
 //
-//   - neither exists: it creates both, a self-signed ECDSA P-256 certificate for 127.0.0.1 and
-//     localhost, the key first;
+//   - neither exists: it creates both, a self-signed ECDSA P-256 certificate for 127.0.0.1,
+//     localhost and agentapi.DialHomeServerName (the name frpc verifies, HBEP-6), the key first;
 //   - the key exists without the certificate (a start that was killed between the two writes): it
 //     issues a certificate for that key, so the pin, which follows the key, does not change;
 //   - the certificate exists without the key: an error naming the key. The key is never invented
 //     for a certificate that agents may already pin;
 //   - both exist: they are kept, after checking that they load as a pair (as the server loads them,
 //     with tls.X509KeyPair) and that the key is a regular file owned by the user with no
-//     permission bit for the group or others.
+//     permission bit for the group or others. A certificate that lacks agentapi.DialHomeServerName
+//     (one made before the name was added) is issued again for the same key, so the pin does not
+//     change; the key is never replaced.
 //
 // The directory is made 0700 and the key 0600. An error names the file and never holds key bytes.
 func ensureAgentEndpointPair(host agentapi.Host, log io.Writer) error {
@@ -63,7 +67,10 @@ func ensureAgentEndpointPair(host agentapi.Host, log io.Writer) error {
 	haveCert, haveKey := certErr == nil, keyErr == nil
 	switch {
 	case haveCert && haveKey:
-		return checkAgentPair(certPath, keyPath, certPEM, keyPEM)
+		if err := checkAgentPair(certPath, keyPath, certPEM, keyPEM); err != nil {
+			return err
+		}
+		return reissueWithoutName(certPath, keyPath, certPEM, keyPEM, log)
 	case haveCert:
 		return fmt.Errorf("agent endpoint key %s is missing, but its certificate %s exists: restore the key, or remove the certificate to have up create a new pair (agents that pin the old certificate then need the new pin)", keyPath, certPath)
 	case haveKey:
@@ -71,7 +78,7 @@ func ensureAgentEndpointPair(host agentapi.Host, log io.Writer) error {
 		if err != nil {
 			return fmt.Errorf("agent endpoint key %s: %w", keyPath, err)
 		}
-		return issueAgentCert(certPath, keyPath, signer, log)
+		return issueAgentCert(certPath, keyPath, signer, "created", log)
 	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -84,11 +91,40 @@ func ensureAgentEndpointPair(host agentapi.Host, log io.Writer) error {
 	if err := writeFileAtomic(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600); err != nil {
 		return fmt.Errorf("agent endpoint key %s: %w", keyPath, err)
 	}
-	if err := issueAgentCert(certPath, keyPath, key, log); err != nil {
+	if err := issueAgentCert(certPath, keyPath, key, "created", log); err != nil {
 		_ = os.Remove(keyPath) // a half-made pair would be refused at the next start
 		return err
 	}
 	return nil
+}
+
+// reissueWithoutName issues the certificate again when the kept one (which checkAgentPair has
+// accepted with its key) is not valid for agentapi.DialHomeServerName, and leaves it alone
+// otherwise. The new certificate is for the same key, so the pin the agents hold stays the same;
+// a new key is never made here. The key file is not written.
+func reissueWithoutName(certPath, keyPath string, certPEM, keyPEM []byte, log io.Writer) error {
+	cert, err := parseCertPEM(certPEM)
+	if err != nil {
+		return fmt.Errorf("agent endpoint certificate %s is not usable: %w", certPath, err)
+	}
+	if cert.VerifyHostname(agentapi.DialHomeServerName) == nil {
+		return nil
+	}
+	signer, err := signerOf(keyPEM)
+	if err != nil {
+		return fmt.Errorf("agent endpoint key %s: %w", keyPath, err)
+	}
+	// The pin is the hash of the public key. The pair loaded, so the keys agree; this refuses to
+	// write if they somehow do not, since a changed pin would break every agent that holds it.
+	spki, err := x509.MarshalPKIXPublicKey(signer.Public())
+	if err != nil {
+		return fmt.Errorf("agent endpoint key %s: %w", keyPath, err)
+	}
+	if sum := sha256.Sum256(spki); hex.EncodeToString(sum[:]) != agentapi.PinOf(cert) {
+		return fmt.Errorf("agent endpoint certificate %s: not re-issued for %s, because the new certificate would have another pin than the one agents hold", certPath, agentapi.DialHomeServerName)
+	}
+	logf(log, "the agent endpoint certificate %s is not valid for %s; issuing it again for the same key", certPath, agentapi.DialHomeServerName)
+	return issueAgentCert(certPath, keyPath, signer, "re-issued", log)
 }
 
 // readAgentKey reads the key file after checking what it is: a regular file (not a link) owned by
@@ -185,8 +221,8 @@ func signerOf(keyPEM []byte) (crypto.Signer, error) {
 }
 
 // issueAgentCert writes a self-signed certificate for signer's key at certPath (mode 0644: it is
-// public) and checks that it loads with the key at keyPath.
-func issueAgentCert(certPath, keyPath string, signer crypto.Signer, log io.Writer) error {
+// public) and checks that it loads with the key at keyPath. verb is how the log says what was done.
+func issueAgentCert(certPath, keyPath string, signer crypto.Signer, verb string, log io.Writer) error {
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 127))
 	if err != nil {
 		return fmt.Errorf("agent endpoint certificate: %w", err)
@@ -200,7 +236,7 @@ func issueAgentCert(certPath, keyPath string, signer crypto.Signer, log io.Write
 		KeyUsage:              x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
-		DNSNames:              []string{"localhost"},
+		DNSNames:              []string{"localhost", agentapi.DialHomeServerName},
 		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1)},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, signer.Public(), signer)
@@ -217,6 +253,6 @@ func issueAgentCert(certPath, keyPath string, signer crypto.Signer, log io.Write
 	if err != nil {
 		return fmt.Errorf("agent endpoint certificate: %w", err)
 	}
-	logf(log, "created the agent endpoint certificate %s (pin %s)", certPath, agentapi.PinOf(cert))
+	logf(log, "%s the agent endpoint certificate %s (pin %s)", verb, certPath, agentapi.PinOf(cert))
 	return nil
 }
