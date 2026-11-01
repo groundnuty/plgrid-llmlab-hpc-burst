@@ -106,6 +106,12 @@ func checkSupervision(l layout, st *State, sup *procHandle, rep *StatusReport, b
 // hold its health address (that address and port exactly), and only then does its /healthz on that
 // address count. After the answer it checks the identity and the address again, so an answer from
 // something that took the address over means nothing.
+//
+// Death is read from the pidfd only (handle.go), and it can come at any point of the check. A
+// process that exits tears down its descriptors before its pidfd fires, so a socket read that
+// finds nothing proves nothing until the pidfd has been asked again: every finding that rests on
+// a /proc read (the parent, the sockets) is confirmed against the handle before it is blamed on
+// the process, and a handle that is no longer the recorded process is reported as not running.
 func checkEntry(sup *procHandle, supPID int, e EntryRecord) (EntryHealth, []string) {
 	eh := EntryHealth{Name: e.Name, State: e.State, Restarts: e.Restarts, LastExit: e.LastExit, Health: e.Health}
 	var problems []string
@@ -125,7 +131,23 @@ func checkEntry(sup *procHandle, supPID int, e EntryRecord) (EntryHealth, []stri
 		return eh, problems
 	}
 	defer h.Close()
-	st, _, _ := h.check()
+	// lost reports the process as not running when the handle is no longer the recorded one. The
+	// finding it guards came from /proc, which a process that is exiting empties before its pidfd
+	// fires, so the pidfd is asked again and its answer wins.
+	lost := func() bool {
+		v, d := h.verify()
+		if v == Ours {
+			return false
+		}
+		eh.Running = false
+		add("pid %d is not running: %s", e.Proc.PID, d)
+		return true
+	}
+	st, v, detail := h.check()
+	if v != Ours { // it exited since openRec looked, and st is empty
+		add("pid %d is not running: %s", e.Proc.PID, detail)
+		return eh, problems
+	}
 	if st.PPID != supPID || sup == nil {
 		add("pid %d is not a child of the supervisor (pid %d): its parent is pid %d", e.Proc.PID, supPID, st.PPID)
 		return eh, problems
@@ -139,7 +161,9 @@ func checkEntry(sup *procHandle, supPID int, e EntryRecord) (EntryHealth, []stri
 		add("cannot list the sockets of pid %d: %v", e.Proc.PID, err)
 		return eh, problems
 	} else if !own {
-		add("pid %d does not hold its health address %s", e.Proc.PID, e.Health)
+		if !lost() {
+			add("pid %d does not hold its health address %s", e.Proc.PID, e.Health)
+		}
 		return eh, problems
 	}
 	if len(e.Ports) > 0 {
@@ -157,8 +181,10 @@ func checkEntry(sup *procHandle, supPID int, e EntryRecord) (EntryHealth, []stri
 			want = append(want, sock{Listener: Listener{Addr: "127.0.0.1", Port: p}, proto: "tcp"})
 		}
 		if probs := verifyExactListeners(want, owned, others); len(probs) > 0 {
-			for _, p := range probs {
-				add("pid %d: %s", e.Proc.PID, p)
+			if !lost() {
+				for _, p := range probs {
+					add("pid %d: %s", e.Proc.PID, p)
+				}
 			}
 			return eh, problems
 		}
@@ -183,7 +209,7 @@ func checkEntry(sup *procHandle, supPID int, e EntryRecord) (EntryHealth, []stri
 	}
 	if v, d := h.verify(); v != Ours {
 		add("pid %d changed while it was being checked: %s", e.Proc.PID, d)
-	} else if own, err := addrOwned(h, e.Health); err != nil || !own {
+	} else if own, err := addrOwned(h, e.Health); (err != nil || !own) && !lost() {
 		add("pid %d did not hold %s after the answer", e.Proc.PID, e.Health)
 	}
 	return eh, problems
