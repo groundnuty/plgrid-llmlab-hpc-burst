@@ -29,12 +29,14 @@ func checkJobID(id string) error {
 // submission is one sbatch call, after the request has been checked.
 type submission struct {
 	tag, partition, account string
-	hold                    bool
-	minutes                 int64
-	gpus, cpusPerTask       int32
-	memMiB                  int64
-	allocDir, agentPath     string // absolute
-	agentDigest             string
+	// qos is the Provider's qos, sent as --qos; "" sends no flag at all.
+	qos                 string
+	hold                bool
+	minutes             int64
+	gpus, cpusPerTask   int32
+	memMiB              int64
+	allocDir, agentPath string // absolute
+	agentDigest         string
 	// tmpDir and tmpDirFeature are the partition's (checkTmpDir): the job's
 	// temporary directory and the node feature it needs; "" when absent.
 	tmpDir, tmpDirFeature string
@@ -83,12 +85,14 @@ func setTmpDir(dir string) string {
 // submitLine is HBEP-4's submission:
 //
 //	sbatch --parsable --job-name=<tag> --no-requeue [--hold] --partition=<p>
-//	  --account=<a> --time=<minutes> --nodes=1 [--gres=gpu:<n>]
+//	  --account=<a> [--qos=<qos>] --time=<minutes> --nodes=1 [--gres=gpu:<n>]
 //	  --cpus-per-task=<c> --mem=<m>M [--constraint=<tmpDirFeature>]
 //	  --output=<dir>/job.out --error=<dir>/job.err --wrap=<bootstrap>
 //
 // GPUs are requested untyped, and --gres is left out for a CPU job. The
-// account is left out only when the Provider names none. --constraint comes
+// account is left out only when the Provider names none, and --qos only when
+// the Provider names no qos: then no flag is sent at all, and the association's
+// default QOS applies (HBEP-4, The Slurm dialect). --constraint comes
 // after --mem, where HBEP-4 lists it. It is the partition's tmpDirFeature, the
 // node feature its tmpDir needs, and is left out when the partition names none
 // (science-agent ruling, 1 Nov 2026, issue #125).
@@ -100,6 +104,9 @@ func submitLine(s submission) (string, error) {
 	w = append(w, "--partition="+s.partition)
 	if s.account != "" {
 		w = append(w, "--account="+s.account)
+	}
+	if s.qos != "" {
+		w = append(w, "--qos="+s.qos)
 	}
 	w = append(w, "--time="+strconv.FormatInt(s.minutes, 10), "--nodes=1")
 	if s.gpus > 0 {
@@ -187,7 +194,9 @@ const submissionFailed = "Batch job submission failed:"
 //     <jobid>[;<cluster>]).
 //   - Rejected: "Batch job submission failed:" with a reason that is not
 //     transient, or a command that never started (no connection; sbatch not
-//     found on the login node).
+//     found on the login node). A refusal for the accounting policy whose
+//     reason line names its reason is a *provider.PolicyRefusal; any other
+//     Rejected outcome is a plain error with Slurm's text.
 //   - Unknown: a time-out, a transport error, a signal, unparseable output, a
 //     transient reason, or any other failure.
 func classifySubmit(res Result, runErr error) (string, provider.SubmitOutcome, error) {
@@ -217,6 +226,11 @@ func classifySubmit(res Result, runErr error) (string, provider.SubmitOutcome, e
 		if strings.Contains(stderr, t) {
 			return "", provider.Unknown, fmt.Errorf("sbatch: transient failure: %s", redactPaths(reason))
 		}
+	}
+	// A policy refusal names its reason on the line before the accounting-policy
+	// line; the caller classifies it by that name (provider.PolicyRefusal).
+	if pr := policyRefusal(stderr); pr != nil {
+		return "", provider.Rejected, pr
 	}
 	return "", provider.Rejected, fmt.Errorf("%s %s", submissionFailed, redactPaths(reason))
 }

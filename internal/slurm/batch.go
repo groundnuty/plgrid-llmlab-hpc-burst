@@ -463,8 +463,26 @@ func checkRequest(req provider.SubmitRequest, profile provider.Profile, settings
 		return s, refuse("gpus %d is negative", p.GPUs)
 	case p.GPUs == 0 && part.GPUModel != "none":
 		return s, refuse("partition %q is a GPU partition (%s) and the request has no GPU", part.Name, part.GPUModel)
-	case part.GPUsPerNode != nil && p.GPUs > *part.GPUsPerNode:
-		return s, refuse("gpus %d is above gpusPerNode %d of partition %q", p.GPUs, *part.GPUsPerNode, part.Name)
+	}
+	// The QOS comes before the limits it sets: the flag is checked against the
+	// safe pattern, and the limits are those that apply on the partition under
+	// it (HBEP-4, QOS limits). One source feeds both, so a request cannot name
+	// a QOS other than the one whose limits were checked.
+	if req.QOS != settings.QOS {
+		return s, refuse("qos %q is not the Provider's qos %q", req.QOS, settings.QOS)
+	}
+	if req.QOS != "" {
+		if err := CheckValue("qos", req.QOS); err != nil {
+			return s, refuse("%v", err)
+		}
+	}
+	s.qos = req.QOS
+	limits, err := v1alpha1.EffectiveQOSLimits(&profile.Spec, part, settings.QOS)
+	if err != nil {
+		return s, refuse("%v", err)
+	}
+	if err := checkGPUs(p.GPUs, part, limits); err != nil {
+		return s, err
 	}
 	s.gpus = p.GPUs
 	limit, err := p.TimeLimit.AsDuration()
@@ -474,18 +492,15 @@ func checkRequest(req provider.SubmitRequest, profile provider.Profile, settings
 	case limit <= 0 || limit%time.Minute != 0:
 		return s, refuse("time limit %q is not a positive whole number of minutes", p.TimeLimit)
 	}
-	if part.MaxTime != nil {
-		max, err := part.MaxTime.AsDuration()
-		if err != nil {
-			return s, refuse("the profile's maxTime of partition %q is not a duration", part.Name)
-		}
-		if limit > max {
-			return s, refuse("time limit %q is above maxTime %s of partition %q", p.TimeLimit, max, part.Name)
-		}
+	if err := checkTimeLimit(limit, p.TimeLimit, part, limits); err != nil {
+		return s, err
 	}
 	s.minutes = int64(limit / time.Minute)
 	if p.CPUsPerTask < 1 {
 		return s, refuse("cpusPerTask %d is below 1", p.CPUsPerTask)
+	}
+	if m := limits.MaxCPUsPerUser; m != nil && p.CPUsPerTask > *m {
+		return s, refuse("cpusPerTask %d is above maxCpusPerUser %d of qos %q", p.CPUsPerTask, *m, limits.From[v1alpha1.LimitMaxCPUsPerUser])
 	}
 	s.cpusPerTask = p.CPUsPerTask
 	// Memory 0 is refused although the CRD admits it: Slurm reads --mem=0 as
@@ -495,6 +510,15 @@ func checkRequest(req provider.SubmitRequest, profile provider.Profile, settings
 		return s, refuse("memory is not positive; --mem=0 would take the whole node")
 	}
 	s.memMiB = (mem + (1<<20 - 1)) >> 20
+	if m := limits.MaxMemPerUser; m != nil {
+		// Compared in the whole MiB that go to Slurm, rounded up, against the
+		// cap in whole MiB, rounded down: a job never gets less than it asked
+		// for, and never more than the cap.
+		if capMiB := m.Value() >> 20; s.memMiB > capMiB {
+			return s, refuse("memory %s (%d MiB) is above maxMemPerUser %s (%d MiB) of qos %q",
+				p.Memory.String(), s.memMiB, m.String(), capMiB, limits.From[v1alpha1.LimitMaxMemPerUser])
+		}
+	}
 	if p.Nodes > 1 {
 		return s, refuse("nodes %d: alpha Allocations are single-node", p.Nodes)
 	}
