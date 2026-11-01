@@ -128,6 +128,65 @@ func (f *fakeHostOps) start(ctx context.Context, spec launchSpec, front Front, t
 	return &State{Version: spec.bin.Version.String()}, time.Millisecond, nil
 }
 
+// TestReplaceHostStartsK3sWithTheEventTTL: an upgrade starts the new k3s from arguments built afresh,
+// so a host whose record has no event TTL (one that an earlier release started) gets event-ttl=168h
+// then. This is support for the real upgrade test, which shows the record: the arguments alone say
+// nothing about what the API server does.
+func TestReplaceHostStartsK3sWithTheEventTTL(t *testing.T) {
+	l := storeLayout(t)
+	putStore(t, l, "v1", "tok", "")
+	if err := l.saveStoreVersion("v1.35.9+k3s1", "up"); err != nil {
+		t.Fatal(err)
+	}
+	st := &State{Version: "v1.35.9+k3s1", Ports: Ports{API: 1, HTTPS: 2, KCM: 3, LB: 4}} // no EventTTL
+	ops := &fakeHostOps{t: t, l: l}
+	if _, _, _, _, err := replaceHost(context.Background(), l, st, Binary{Version: mustVersion(t, "v1.36.5+k3s1")}, ops, time.Second, time.Second, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := ttlArgs(ops.spec.k3sArgs()); len(got) != 1 || got[0] != "168h" {
+		t.Errorf("the new k3s was started with event-ttl arguments %q, want exactly 168h", got)
+	}
+}
+
+// TestReplaceHostWarnsWhenTheRecordRunsNoFrps: an upgrade keeps what the record runs and resolves
+// no frps, so a host recorded with the controllers but without frps comes back without it; the
+// upgrade says so, as up does when it finds no frps. A record with frps, and one without the
+// controllers (which runs no frps by design), are the controls: no warning.
+func TestReplaceHostWarnsWhenTheRecordRunsNoFrps(t *testing.T) {
+	ctl := &ControllerConfig{Binary: "/opt/hpcburst-controller"}
+	for _, c := range []struct {
+		name string
+		st   State
+		warn bool
+	}{
+		{"controllers without frps", State{Controllers: ctl}, true},
+		{"controllers with frps", State{Controllers: ctl, Frps: &FrpsRunConfig{Binary: "/opt/frp/frps", Version: DefaultFrpVersion}}, false},
+		{"no controllers", State{}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			l := storeLayout(t)
+			putStore(t, l, "v1", "tok", "")
+			if err := l.saveStoreVersion("v1.35.9+k3s1", "up"); err != nil {
+				t.Fatal(err)
+			}
+			st := c.st
+			st.Version, st.Ports = "v1.35.9+k3s1", Ports{API: 1, HTTPS: 2, KCM: 3, LB: 4}
+			var log strings.Builder
+			ops := &fakeHostOps{t: t, l: l}
+			if _, _, _, _, err := replaceHost(context.Background(), l, &st, Binary{Version: mustVersion(t, "v1.36.5+k3s1")}, ops, time.Second, time.Second, &log); err != nil {
+				t.Fatal(err)
+			}
+			const want = "warning: the host runs the controllers without frps"
+			if got := strings.Contains(log.String(), want); got != c.warn {
+				t.Errorf("warned %v, want %v; log:\n%s", got, c.warn, log.String())
+			}
+			if c.warn && !strings.Contains(log.String(), "dial-home tunnels") {
+				t.Errorf("the warning does not say what is lost: %s", log.String())
+			}
+		})
+	}
+}
+
 // TestReplaceHostOrder pins the order of an upgrade's store steps: stop, back up, record the new
 // release, start. A backup taken before the stop would miss the old host's last writes; one taken
 // after the start would hold the new release's.

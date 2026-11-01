@@ -112,8 +112,11 @@ type supervisorRecord struct {
 	} `json:"entries"`
 }
 
+// readSupervisorRecord reads the record of a host that runs the controller and frps (HBEP-6),
+// in that order.
 func readSupervisorRecord(t testing.TB, dir string) (supervisorRecord, bool) {
-	return readSupervisorRecordN(t, dir, 1)
+	r, ok := readSupervisorRecordN(t, dir, 2)
+	return r, ok && r.Entries[1].Name == "frps"
 }
 
 // readSupervisorRecordN reads supervisor.json, which must hold exactly n entries, the controller's
@@ -221,8 +224,8 @@ func TestControllerSupervision(t *testing.T) {
 	bin, ctlDir := fakeController(t)
 	c := h.clients // a method value: the clients exist once up has written the kubeconfig
 
-	r := cli(t, h.upArgs(base, "--json", "--controller-bin", bin,
-		"--front-mode", "direct", "--front-addr", "front.example.test:8443")...)
+	r := cli(t, h.upArgs(base, append(frpsArgs(t), "--json", "--controller-bin", bin,
+		"--front-mode", "direct", "--front-addr", "front.example.test:8443")...)...)
 	if r.code != exitOK {
 		t.Fatalf("up exited %d", r.code)
 	}
@@ -305,7 +308,8 @@ func TestControllerSupervision(t *testing.T) {
 	})
 	s, _ := statusOf(t, h)
 	if s.Supervisor == nil || !s.Supervisor.Running || s.Supervisor.PID != sup.PID ||
-		len(s.Controllers) != 1 || !s.Controllers[0].Running || s.Controllers[0].PID != child.PID ||
+		len(s.Controllers) != 2 || s.Controllers[1].Name != "frps" || !s.Controllers[1].Running || // frps runs beside the controller (HBEP-6)
+		!s.Controllers[0].Running || s.Controllers[0].PID != child.PID ||
 		s.Controllers[0].HealthzOK == nil || !*s.Controllers[0].HealthzOK || s.Controllers[0].Restarts != 0 {
 		t.Fatalf("status: %+v", s)
 	}
@@ -320,7 +324,7 @@ func TestControllerSupervision(t *testing.T) {
 	}
 	waitFor(t, 30*time.Second, "the controller to be restarted and healthy", func() bool {
 		s, code := statusOf(t, h)
-		return code == exitOK && len(s.Controllers) == 1 && s.Controllers[0].Restarts == 1 && s.Controllers[0].PID != child.PID
+		return code == exitOK && len(s.Controllers) == 2 && s.Controllers[0].Restarts == 1 && s.Controllers[0].PID != child.PID
 	})
 	s, _ = statusOf(t, h)
 	newChild := s.Controllers[0].PID
@@ -351,7 +355,7 @@ func TestControllerSupervision(t *testing.T) {
 	}
 
 	// ---- a killed supervisor: unhealthy, and down still cleans up ----
-	if r := cli(t, h.upArgs(base, "--json", "--controller-bin", bin)...); r.code != exitOK {
+	if r := cli(t, h.upArgs(base, append(frpsArgs(t), "--json", "--controller-bin", bin)...)...); r.code != exitOK {
 		t.Fatalf("second up exited %d", r.code)
 	}
 	// The pair survived the stop and the second start: the same files, so the same pin.
@@ -392,7 +396,7 @@ func TestControllerSupervision(t *testing.T) {
 	if err := os.Chmod(keyFile, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	r = cli(t, h.upArgs(base, "--json", "--controller-bin", bin)...)
+	r = cli(t, h.upArgs(base, append(frpsArgs(t), "--json", "--controller-bin", bin)...)...)
 	if r.code != exitFail || !strings.Contains(r.err, keyFile) || !strings.Contains(r.err, "0644") {
 		t.Errorf("up with a world-readable key: exit %d, stderr %q; want exit %d naming %s", r.code, r.err, exitFail, keyFile)
 	}

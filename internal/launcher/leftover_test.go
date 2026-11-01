@@ -10,6 +10,7 @@ package launcher
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -55,18 +56,52 @@ func procRows() []procRow {
 	return rows
 }
 
-// cwdUnder is true when the process's working directory is dir or below it, also when dir has been
-// removed since (the kernel then appends " (deleted)").
-func cwdUnder(pid int, dir string) bool {
+// dirForms returns the spellings in which the kernel may show a working directory that was named
+// dir: dir itself and, when a symbolic link lies on its path, dir with the links resolved. The
+// kernel shows /proc/<pid>/cwd resolved, so a directory named through a link (a $TMPDIR that is a
+// link, which shortDir takes) never matches the way it was named. A directory that has been removed
+// since cannot be resolved as a whole; the part that still exists is, and the rest is added back.
+func dirForms(dir string) []string {
 	if dir == "" {
-		return false
+		return nil
 	}
+	forms := []string{dir}
+	if r := resolveExisting(dir); r != dir {
+		forms = append(forms, r)
+	}
+	return forms
+}
+
+// resolveExisting resolves the symbolic links in p, through its nearest ancestor that still exists.
+func resolveExisting(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	parent := filepath.Dir(p)
+	if parent == p {
+		return p
+	}
+	return filepath.Join(resolveExisting(parent), filepath.Base(p))
+}
+
+// cwdUnder is true when the process's working directory is dir or below it, however dir is spelled
+// (see dirForms), also when dir has been removed since (the kernel then appends " (deleted)").
+func cwdUnder(pid int, dir string) bool { return cwdUnderForms(pid, dirForms(dir)) }
+
+// cwdUnderForms is cwdUnder for the spellings dirForms made, so a caller that asks about many
+// processes resolves the directory once.
+func cwdUnderForms(pid int, forms []string) bool {
 	cwd, err := os.Readlink("/proc/" + strconv.Itoa(pid) + "/cwd")
 	if err != nil {
 		return false
 	}
 	cwd = strings.TrimSuffix(cwd, " (deleted)")
-	return cwd == dir || strings.HasPrefix(cwd, dir+"/")
+	for _, dir := range forms {
+		if cwd == dir || strings.HasPrefix(cwd, dir+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // killTree finds the live processes that belong to a test's fixture and kills them all with
@@ -78,6 +113,7 @@ func cwdUnder(pid int, dir string) bool {
 // touched.
 func killTree(roots []int, dir string) []int {
 	rows := procRows()
+	forms := dirForms(dir)
 	self, selfPgrp := os.Getpid(), syscall.Getpgrp()
 	live := func(r procRow) bool { return r.state != 'Z' && r.state != 'X' && r.pid != self && r.pgrp != selfPgrp }
 	set := map[int]procRow{}
@@ -90,7 +126,7 @@ func killTree(roots []int, dir string) []int {
 				set[r.pid] = r
 			}
 		}
-		if cwdUnder(r.pid, dir) {
+		if cwdUnderForms(r.pid, forms) {
 			set[r.pid] = r
 		}
 	}
@@ -206,5 +242,123 @@ func TestKillTreeFindsAChildInItsOwnGroup(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// symlinkedDir makes a real directory and, at a short path, a symbolic link to it. The link is not
+// made in t.TempDir(): shortDir takes $TMPDIR only when it is under 60 bytes, and a link in a long
+// directory would be ignored.
+func symlinkedDir(t *testing.T) (link, real string) {
+	t.Helper()
+	parent, err := os.MkdirTemp("/tmp", "hbl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(parent) })
+	real, err = filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	link = filepath.Join(parent, "l")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	return link, real
+}
+
+// sleeperIn starts a sleep whose working directory is dir, killed at the end of the test. It leads a
+// session of its own: killTree never touches the test's process group.
+func sleeperIn(t *testing.T, dir string) int {
+	t.Helper()
+	cmd := exec.Command("sleep", "300")
+	cmd.Dir = dir
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(done) }()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+	})
+	return cmd.Process.Pid
+}
+
+// TestCwdUnderSeesThroughASymbolicLink: the kernel shows a working directory resolved, so a directory
+// named through a link must still be recognised, also below the link and after the directory below
+// it was removed. The preconditions show the trap is there: the kernel's spelling is not the link's.
+func TestCwdUnderSeesThroughASymbolicLink(t *testing.T) {
+	link, real := symlinkedDir(t)
+	pid := sleeperIn(t, link)
+	if cwd, err := os.Readlink("/proc/" + strconv.Itoa(pid) + "/cwd"); err != nil || cwd != real || cwd == link {
+		t.Fatalf("the kernel shows the working directory as %q (%v); want the resolved %q, which is not the link %q", cwd, err, real, link)
+	}
+	for name, c := range map[string]struct {
+		dir  string
+		want bool
+	}{
+		"the link":                 {link, true},
+		"the real directory":       {real, true},
+		"a directory it is not in": {filepath.Join(link, "sub"), false},
+		"a sibling of the link":    {filepath.Join(filepath.Dir(link), "other"), false},
+	} {
+		if got := cwdUnder(pid, c.dir); got != c.want {
+			t.Errorf("%s: cwdUnder(%s) = %v, want %v", name, c.dir, got, c.want)
+		}
+	}
+
+	// A directory below the link, removed while a process is in it: the kernel shows
+	// "<real>/sub (deleted)", and the directory named through the link cannot be resolved as a whole.
+	if err := os.Mkdir(filepath.Join(real, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	below := filepath.Join(link, "sub")
+	pid2 := sleeperIn(t, below)
+	if err := os.Remove(filepath.Join(real, "sub")); err != nil {
+		t.Fatal(err)
+	}
+	if cwd, err := os.Readlink("/proc/" + strconv.Itoa(pid2) + "/cwd"); err != nil || cwd != filepath.Join(real, "sub")+" (deleted)" {
+		t.Fatalf("the kernel shows %q (%v), want %q", cwd, err, filepath.Join(real, "sub")+" (deleted)")
+	}
+	if !cwdUnder(pid2, below) {
+		t.Errorf("cwdUnder(%s) is false for a process in that directory, removed since", below)
+	}
+	if !cwdUnder(pid2, link) {
+		t.Errorf("cwdUnder(%s) is false for a process below that directory", link)
+	}
+	if cwdUnder(pid2, filepath.Join(link, "other")) {
+		t.Error("cwdUnder is true for a directory the process was never in")
+	}
+}
+
+// TestKillTreeFindsAProcessUnderASymlinkedTMPDIR is the failure that was seen: with $TMPDIR a link,
+// shortDir names its directories through it, the kernel shows the resolved spelling, and killTree,
+// asked about the directory by working directory alone, found nothing. t.Setenv keeps this test
+// serial.
+func TestKillTreeFindsAProcessUnderASymlinkedTMPDIR(t *testing.T) {
+	link, _ := symlinkedDir(t)
+	t.Setenv("TMPDIR", link)
+	dir := shortDir(t)
+	if !strings.HasPrefix(dir, link+"/") {
+		t.Fatalf("shortDir made %s, which is not under the link %s: the test would not go through the link", dir, link)
+	}
+	if r, err := filepath.EvalSymlinks(dir); err != nil || r == dir {
+		t.Fatalf("%s resolves to %s (%v): it has no symbolic link on its path", dir, r, err)
+	}
+	pid := sleeperIn(t, dir)
+	found := killTree(nil, dir)
+	ok := false
+	for _, f := range found {
+		ok = ok || f == pid
+	}
+	if !ok {
+		t.Errorf("killTree did not report pid %d, which has the directory as its working directory (found %v)", pid, found)
+	}
+	if runningNow(pid) {
+		t.Errorf("pid %d still runs", pid)
 	}
 }
