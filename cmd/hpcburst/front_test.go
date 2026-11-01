@@ -339,14 +339,16 @@ func TestFrontSupervision(t *testing.T) {
 	// ---- status reports the front ----
 	st, scode := statusOf(t, h)
 	var front *struct {
-		Name       string `json:"name"`
-		Running    bool   `json:"running"`
-		PID        int    `json:"pid"`
-		Restarts   int    `json:"restarts"`
-		HealthzOK  *bool  `json:"healthz_ok"`
-		UsageState string `json:"usage_state"`
-		Degraded   string `json:"degraded"`
-		LastExit   *struct {
+		Name        string `json:"name"`
+		Running     bool   `json:"running"`
+		PID         int    `json:"pid"`
+		Restarts    int    `json:"restarts"`
+		HealthzOK   *bool  `json:"healthz_ok"`
+		ReadyzOK    *bool  `json:"readyz_ok"`
+		ReadyzState string `json:"readyz_state"`
+		UsageState  string `json:"usage_state"`
+		Degraded    string `json:"degraded"`
+		LastExit    *struct {
 			Detail string `json:"detail"`
 		} `json:"last_exit"`
 	}
@@ -358,6 +360,11 @@ func TestFrontSupervision(t *testing.T) {
 	if scode != exitOK || front == nil || !front.Running || front.Restarts != 1 || front.HealthzOK == nil || !*front.HealthzOK {
 		t.Errorf("status exited %d and reports the front as %+v (reasons %v)", scode, front, st.Reasons)
 	}
+	// The control of TestControllerSupervision, whose host runs no front: this host runs one, so
+	// its front is not absent.
+	if st.FrontAbsent {
+		t.Errorf("status reports the front as absent although one runs")
+	}
 	// The usage state comes from the real front's /healthz body (HBEP-8: usage.state), so a
 	// launcher that read another member would find none here. Its sink writes, so it is ok.
 	if front != nil && (front.UsageState != "ok" || front.Degraded != "") {
@@ -367,7 +374,7 @@ func TestFrontSupervision(t *testing.T) {
 	if bs, bcode := statusBuilds(t, h); bcode != exitOK || bs.AgentBuilds == nil || !bs.AgentBuilds.Checked || bs.AgentBuilds.Profiles != 1 || len(bs.AgentBuilds.Problems) != 0 {
 		t.Errorf("status exited %d with agent_builds %+v (reasons %v), want the check run on one profile and no problem", bcode, bs.AgentBuilds, bs.Reasons)
 	}
-	if r := cli(t, h.args("status", "--no-gc-probe")...); r.code != exitOK || strings.Contains(r.out, "degraded") ||
+	if r := cli(t, h.args("status", "--no-gc-probe")...); r.code != exitOK || strings.Contains(r.out, "degraded") || strings.Contains(r.out, "front: absent") ||
 		!strings.Contains(r.out, "supervised front: running=true") {
 		t.Errorf("status text (exit %d):\n%s", r.code, r.out)
 	}

@@ -26,6 +26,15 @@ type EntryHealth struct {
 	LastExit  *ExitRecord `json:"last_exit,omitempty"`
 	Health    string      `json:"health_addr"`
 	HealthzOK *bool       `json:"healthz_ok,omitempty"` // nil: not asked
+	// ReadyzOK is whether the lifecycle controller is ready (HBEP-8, Observers), read from its
+	// /readyz checks by status code (readyz.go): false for any answer but 200, or none. nil: not
+	// asked, which is every process but the controller, and a controller whose /healthz did not
+	// answer 200.
+	ReadyzOK *bool `json:"readyz_ok,omitempty"`
+	// ReadyzState says which of the readiness states the controller is in while ReadyzOK is
+	// asked: ReadyzReady, ReadyzStarting, ReadyzNotLeading, or ReadyzUnspecified for a controller
+	// whose /readyz does not name its checks apart. It is empty when the answer was an error.
+	ReadyzState string `json:"readyz_state,omitempty"`
 	// UsageState is the process's usage sink as its /healthz body states it in the usage member
 	// (HBEP-8, Usage records): "ok" or "failing". The front reports it; it is empty for a process
 	// whose body has no usage member, such as the controller.
@@ -196,6 +205,9 @@ func checkEntry(sup *procHandle, supPID int, e EntryRecord) (EntryHealth, []stri
 		add("GET /healthz on %s: %v", e.Health, err)
 	}
 	eh.HealthzOK = &ok
+	if ok && e.Name == controllerEntryName {
+		checkReadyz(e.Health, &eh, add)
+	}
 	if ok {
 		// A failing usage sink is stated, never counted against health: the front keeps serving.
 		switch eh.UsageState = usageStateOf(body); {
@@ -225,26 +237,40 @@ const healthzBodyLimit = 1 << 20
 // healthz asks a supervised process for GET /healthz on its loopback address and returns the body
 // of a 200 answer. Any other status is an error.
 func healthz(addr string, timeout time.Duration) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/healthz", nil)
+	code, body, err := probeEndpoint(addr, "/healthz", timeout)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := (&http.Client{Timeout: timeout}).Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("answered %d", resp.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, healthzBodyLimit))
-	if err != nil {
-		return nil, fmt.Errorf("read the answer: %w", err)
+	if code != http.StatusOK {
+		return nil, fmt.Errorf("answered %d", code)
 	}
 	return body, nil
 }
+
+// probeEndpoint asks a supervised process for GET path on its loopback address and returns the
+// status and the body, cut at healthzBodyLimit, whatever the status is.
+func probeEndpoint(addr, path string, timeout time.Duration) (int, []byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+path, nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	resp, err := (&http.Client{Timeout: timeout}).Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, healthzBodyLimit))
+	if err != nil {
+		return 0, nil, fmt.Errorf("read the answer: %w", err)
+	}
+	return resp.StatusCode, body, nil
+}
+
+// controllerEntryName is the lifecycle controller's entry in the supervised set and in
+// supervisor.json: the one process whose health is judged by its /readyz.
+const controllerEntryName = "controller"
 
 // usageStateOf returns the usage member's state from a /healthz body (HBEP-8: /healthz carries
 // usage with state ok or failing), or "" when the body is not a JSON object with that member.

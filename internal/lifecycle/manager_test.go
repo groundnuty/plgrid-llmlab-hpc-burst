@@ -446,10 +446,15 @@ func TestManagerOnControlPlane(t *testing.T) {
 		}
 		return false, "no LongNote event"
 	})
-	for _, path := range []string{"/healthz", "/readyz"} {
+	for _, path := range []string{"/healthz", "/readyz", "/readyz/" + ReadyzCaches, "/readyz/" + ReadyzLeading} {
 		if code := getStatus(t, "http://"+managerHealthAddr+path); code != http.StatusOK {
 			t.Fatalf("GET %s: %d", path, code)
 		}
+	}
+	// The one check of controllers before the split is gone: a status that
+	// asks for it would read a 404 as an older controller.
+	if code := getStatus(t, "http://"+managerHealthAddr+"/readyz/serving"); code != http.StatusNotFound {
+		t.Fatalf("GET /readyz/serving: %d, want 404 (the check was split into %s and %s)", code, ReadyzCaches, ReadyzLeading)
 	}
 	// /metrics on loopback at the configured address (HBEP-8, Metrics): the
 	// pending Instance's info series, and controller-runtime's own work-queue
@@ -562,9 +567,23 @@ func withoutLeaderElection(t *testing.T, ctx context.Context, cl client.Client, 
 		return before.Spec.HolderIdentity == nil || *before.Spec.HolderIdentity == "", "still held"
 	})
 	collisions := collisionEvents(t, ctx, cl)
+	// The caches' sync is held at first, as in restartAfterGap. The manager's
+	// Elected channel does not close until after that sync (controller-runtime
+	// v0.23.1, pkg/manager/internal.go:476-480), so a "leading" check that
+	// read it would fail here; under --leader-elect=false it always passes.
+	gate := make(chan struct{})
+	release := sync.OnceFunc(func() { close(gate) })
+	defer release()
 	mgr, _, err := NewManager(Options{
 		Config: cfg, CredentialsDir: creds, AgentBuildsDir: builds, FrontConfigured: true, HealthAddr: managerHealthAddr,
 		MetricsAddr: managerMetricsAddr, LeaderElection: false, Checkpoints: &stubSource{},
+		newCache: func(c *rest.Config, o cache.Options) (cache.Cache, error) {
+			inner, err := cache.New(c, o)
+			if err != nil {
+				return nil, err
+			}
+			return heldCache{Cache: inner, gate: gate}, nil
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -573,9 +592,23 @@ func withoutLeaderElection(t *testing.T, ctx context.Context, cl client.Client, 
 	done := make(chan error, 1)
 	go func() { done <- mgr.Start(mctx) }()
 	defer stopManager(t, "no-leader-election", stop, done)
+	eventually(t, time.Minute, "the health server answers", func() (bool, string) {
+		return getStatus(t, "http://"+managerHealthAddr+"/healthz") == http.StatusOK, "no /healthz"
+	})
+	for i := 0; i < 5; i++ { // the gate holds the state; see it hold
+		caches := getStatus(t, "http://"+managerHealthAddr+"/readyz/"+ReadyzCaches)
+		leading := getStatus(t, "http://"+managerHealthAddr+"/readyz/"+ReadyzLeading)
+		if caches != http.StatusInternalServerError || leading != http.StatusOK || getStatus(t, "http://"+managerHealthAddr+"/readyz") == http.StatusOK {
+			t.Fatalf("with the caches' sync held and no leader election: /readyz/%s %d, /readyz/%s %d; want 500 and 200, and /readyz not 200", ReadyzCaches, caches, ReadyzLeading, leading)
+		}
+	}
+	release()
 	eventually(t, time.Minute, "/readyz passes with synced caches and no Lease", func() (bool, string) {
-		code := getStatus(t, "http://"+managerHealthAddr+"/readyz")
-		return code == http.StatusOK, fmt.Sprintf("/readyz %d", code)
+		codes := [3]int{}
+		for i, path := range []string{"/readyz", "/readyz/" + ReadyzCaches, "/readyz/" + ReadyzLeading} {
+			codes[i] = getStatus(t, "http://"+managerHealthAddr+path)
+		}
+		return codes == [3]int{200, 200, 200}, fmt.Sprintf("/readyz, /readyz/%s, /readyz/%s answered %v", ReadyzCaches, ReadyzLeading, codes)
 	})
 	eventually(t, time.Minute, "this run's own collision event reaches the API", func() (bool, string) {
 		n := collisionEvents(t, ctx, cl)
@@ -651,7 +684,10 @@ func restartAfterGap(t *testing.T, ctx context.Context, cl client.Client, cfg *r
 	})
 	// Each state below is held by the test (the gate, a Lease of 3600 s), so
 	// it cannot end on its own; the checks repeat a few times to see it hold.
-	notReady := func(why string) {
+	// The two readiness checks are read on their own paths (HBEP-8, Observers:
+	// "starting" and "not leading" are told apart by them), and each answers
+	// 500 while it fails, never 404.
+	notReady := func(why string, wantCaches, wantLeading int) {
 		t.Helper()
 		for i := 0; i < 5; i++ {
 			if code := getStatus(t, "http://"+managerHealthAddr+"/readyz"); code == http.StatusOK {
@@ -660,12 +696,17 @@ func restartAfterGap(t *testing.T, ctx context.Context, cl client.Client, cfg *r
 			if code := getStatus(t, "http://"+managerHealthAddr+"/healthz"); code != http.StatusOK {
 				t.Fatalf("/healthz answered %d %s; it is liveness and answers", code, why)
 			}
+			caches := getStatus(t, "http://"+managerHealthAddr+"/readyz/"+ReadyzCaches)
+			leading := getStatus(t, "http://"+managerHealthAddr+"/readyz/"+ReadyzLeading)
+			if caches != wantCaches || leading != wantLeading {
+				t.Fatalf("/readyz/%s answered %d and /readyz/%s %d %s; want %d and %d", ReadyzCaches, caches, ReadyzLeading, leading, why, wantCaches, wantLeading)
+			}
 		}
 		if gaps := observationGaps(t, ctx, cl); len(gaps) != 0 {
 			t.Fatalf("%d ObservationGap events %s, before the Lease could be taken", len(gaps), why)
 		}
 	}
-	notReady("while the caches' sync is held")
+	notReady("while the caches' sync is held", http.StatusInternalServerError, http.StatusInternalServerError)
 	select {
 	case <-leaseRead:
 		t.Fatal("the elector read the Lease while the caches' sync was held; leader election starts only after it")
@@ -678,7 +719,13 @@ func restartAfterGap(t *testing.T, ctx context.Context, cl client.Client, cfg *r
 	case <-time.After(2 * time.Minute):
 		t.Fatal("the elector did not read the lifecycle Lease within 2 min of the caches' release")
 	}
-	notReady("while a second copy holds the lifecycle Lease")
+	// The caches are ready while the controller does not lead: "caches" does
+	// not wait for the Lease, or status could not say "not leading".
+	eventually(t, time.Minute, "/readyz/caches passes while a second copy holds the Lease", func() (bool, string) {
+		code := getStatus(t, "http://"+managerHealthAddr+"/readyz/"+ReadyzCaches)
+		return code == http.StatusOK, fmt.Sprintf("/readyz/%s %d", ReadyzCaches, code)
+	})
+	notReady("while a second copy holds the lifecycle Lease", http.StatusOK, http.StatusInternalServerError)
 	var l coordinationv1.Lease
 	if err := cl.Get(ctx, client.ObjectKey{Namespace: v1alpha1.ControllerNamespace, Name: v1alpha1.LeaseLifecycle}, &l); err != nil {
 		t.Fatal(err)
@@ -688,8 +735,11 @@ func restartAfterGap(t *testing.T, ctx context.Context, cl client.Client, cfg *r
 	}
 	prev := writeLifecycleLease(t, ctx, cl, "", 1) // the second copy releases it, as client-go's release does
 	eventually(t, time.Minute, "/readyz passes once the caches have synced and the Lease is held", func() (bool, string) {
-		code := getStatus(t, "http://"+managerHealthAddr+"/readyz")
-		return code == http.StatusOK, fmt.Sprintf("/readyz %d", code)
+		codes := [3]int{}
+		for i, path := range []string{"/readyz", "/readyz/" + ReadyzCaches, "/readyz/" + ReadyzLeading} {
+			codes[i] = getStatus(t, "http://"+managerHealthAddr+path)
+		}
+		return codes == [3]int{200, 200, 200}, fmt.Sprintf("/readyz, /readyz/%s, /readyz/%s answered %v", ReadyzCaches, ReadyzLeading, codes)
 	})
 	want := prev.UTC().Format(metav1.RFC3339Micro)
 	eventually(t, time.Minute, "one ObservationGap regards the lifecycle Lease", func() (bool, string) {
