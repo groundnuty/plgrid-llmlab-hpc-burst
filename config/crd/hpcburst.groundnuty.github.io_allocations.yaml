@@ -478,7 +478,9 @@ spec:
                           nothing fails. Empty for any other refusal, a policy refusal for another
                           limit included, and for every other state. The Provider's controller
                           writes it with the state, in one record, so the lifecycle controller
-                          never sees a Rejected state without its code.
+                          never sees a Rejected state without its code: the fake controller
+                          (pkg/provider/fake) does today, the Slurm provider's from #151's
+                          provider change.
                         enum:
                         - SubmitLimitReached
                         type: string
@@ -512,6 +514,9 @@ spec:
                     - attempt
                     - state
                     type: object
+                    x-kubernetes-validations:
+                    - message: code is set on a Rejected attempt only
+                      rule: '!has(self.code) || self.state == ''Rejected'''
                   submitTime:
                     description: SubmitTime is when the scheduler accepted the recorded
                       job.
