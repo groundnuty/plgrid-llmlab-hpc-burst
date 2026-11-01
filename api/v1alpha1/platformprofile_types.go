@@ -20,6 +20,8 @@ const (
 
 // PartitionProfile is what the framework reads of one partition: its name and
 // its accelerator class (HBEP-11, API, PlatformProfile schema).
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.tmpDirFeature) || has(self.tmpDir)",message="tmpDirFeature is the node feature that tmpDir needs, so it requires tmpDir"
 type PartitionProfile struct {
 	// Name of the partition.
 	//
@@ -92,6 +94,20 @@ type PartitionProfile struct {
 	// +kubebuilder:validation:Pattern=`^(/|\$[A-Za-z_][A-Za-z0-9_]*)[A-Za-z0-9._:=,/-]*$`
 	// +kubebuilder:validation:XValidation:rule="!self.split('/').exists(s, s == '..')",message="tmpDir must not contain a '..' segment"
 	TmpDir string `json:"tmpDir,omitempty"`
+
+	// TmpDirFeature is the Slurm node feature that TmpDir needs, such as
+	// localfs, the feature that gives a Helios job its node-local disk in
+	// $SCRATCH_LOCAL. The Slurm provider then submits with
+	// --constraint=<feature>, so the job lands on a node that sets TmpDir's
+	// variable. One feature name, never a constraint expression. Absent, no
+	// constraint is added (science-agent ruling, 1 Nov 2026, issue #125). It
+	// requires TmpDir.
+	//
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9_.-]*$`
+	TmpDirFeature string `json:"tmpDirFeature,omitempty"`
 }
 
 // ImageFormat is a container image format Apptainer runs (PartitionProfile).

@@ -394,11 +394,28 @@ spec:
                       x-kubernetes-validations:
                       - message: tmpDir must not contain a '..' segment
                         rule: '!self.split(''/'').exists(s, s == ''..'')'
+                    tmpDirFeature:
+                      description: |-
+                        TmpDirFeature is the Slurm node feature that TmpDir needs, such as
+                        localfs, the feature that gives a Helios job its node-local disk in
+                        $SCRATCH_LOCAL. The Slurm provider then submits with
+                        --constraint=<feature>, so the job lands on a node that sets TmpDir's
+                        variable. One feature name, never a constraint expression. Absent, no
+                        constraint is added (science-agent ruling, 1 Nov 2026, issue #125). It
+                        requires TmpDir.
+                      maxLength: 64
+                      minLength: 1
+                      pattern: ^[A-Za-z0-9][A-Za-z0-9_.-]*$
+                      type: string
                   required:
                   - cpuArch
                   - gpuModel
                   - name
                   type: object
+                  x-kubernetes-validations:
+                  - message: tmpDirFeature is the node feature that tmpDir needs,
+                      so it requires tmpDir
+                    rule: '!has(self.tmpDirFeature) || has(self.tmpDir)'
                 maxItems: 256
                 type: array
                 x-kubernetes-list-map-keys:

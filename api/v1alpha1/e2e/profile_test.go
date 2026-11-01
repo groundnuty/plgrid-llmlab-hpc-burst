@@ -159,6 +159,41 @@ func TestPartitionTmpDirRefusesDotDotSegments(t *testing.T) {
 	}
 }
 
+// A partition's tmpDirFeature is the node feature its tmpDir needs, so it is
+// refused without a tmpDir (rule platformprofiles:$.spec.partitions[]#0), and
+// it is one feature name, never a constraint expression (science-agent ruling,
+// 1 Nov 2026, issue #125).
+func TestPartitionTmpDirFeatureNeedsTmpDir(t *testing.T) {
+	const msg = "tmpDirFeature is the node feature that tmpDir needs, so it requires tmpDir"
+	p := newProfile(uniq("prof"))
+	p.Spec.Partitions[0].TmpDirFeature = "localfs"
+	requireRefused(t, c.Create(bg(), p), msg)
+
+	p = newProfile(uniq("prof"))
+	p.Spec.Partitions[0].TmpDir, p.Spec.Partitions[0].TmpDirFeature = "$SCRATCH_LOCAL", "localfs"
+	must(t, c.Create(bg(), p), "create with tmpDir and tmpDirFeature")
+	var got v1alpha1.PlatformProfile
+	must(t, c.Get(bg(), client.ObjectKeyFromObject(p), &got), "read back")
+	if g := got.Spec.Partitions[0]; g.TmpDir != "$SCRATCH_LOCAL" || g.TmpDirFeature != "localfs" {
+		t.Errorf("read back tmpDir %q, tmpDirFeature %q", g.TmpDir, g.TmpDirFeature)
+	}
+	cleanup(t, p)
+
+	// A tmpDir alone needs no feature.
+	p = newProfile(uniq("prof"))
+	p.Spec.Partitions[0].TmpDir = "/dev/shm"
+	must(t, c.Create(bg(), p), "create with tmpDir alone")
+	cleanup(t, p)
+
+	for _, f := range []string{"localfs&memfs", "localfs|memfs", "[localfs]", "local fs", "-localfs", "localfs,memfs"} {
+		t.Run("refuse "+f, func(t *testing.T) {
+			p := newProfile(uniq("prof"))
+			p.Spec.Partitions[0].TmpDir, p.Spec.Partitions[0].TmpDirFeature = "$SCRATCH_LOCAL", f
+			requireRefused(t, c.Create(bg(), p), "tmpDirFeature")
+		})
+	}
+}
+
 // The scheduling facts of spikes S4 and S5 are typed fields, and a fact that is
 // not stated is absent: an absent bool is unknown, not false, and it round-trips
 // as absent.
