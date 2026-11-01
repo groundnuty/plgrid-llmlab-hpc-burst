@@ -2,9 +2,12 @@ package front
 
 import (
 	"bufio"
+	"crypto/tls"
+	"crypto/x509"
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -201,5 +204,50 @@ func TestFrpPassthroughAnswers502WithoutFrps(t *testing.T) {
 	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
 	if err != nil || resp.StatusCode != http.StatusBadGateway {
 		t.Fatalf("an upgrade with frps down: %v, %v; want 502", resp, err)
+	}
+}
+
+// TestRunPassesReadAheadBytesOverTLS (PR #129 review, N6): Run's dial-home
+// listener terminates TLS with the agent endpoint's certificate in both
+// modes, and the bytes a client sends right after its upgrade's headers reach
+// frps's bind port with them. The client writes the headers and the bytes in
+// one write, one TLS record, so the server reads the bytes ahead with the
+// headers.
+func TestRunPassesReadAheadBytesOverTLS(t *testing.T) {
+	for _, mode := range []string{ModeDirect, ModeSSH} {
+		t.Run(mode, func(t *testing.T) {
+			up := startRawUpstream(t, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+			host := agentapi.Host{StateDir: t.TempDir()}
+			certFile := writeDialHomeCert(t, host)
+			f, _ := runProbeFront(t, startMuxDouble(t), func(o *Options) {
+				o.Mode, o.Host = mode, host
+				o.Config.FrpsBindAddr = up.ln.Addr().String()
+			})
+			pem, err := os.ReadFile(certFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			roots := x509.NewCertPool()
+			if !roots.AppendCertsFromPEM(pem) {
+				t.Fatal("the dial-home certificate did not parse")
+			}
+			c, err := tls.Dial("tcp", f.Dial.String(), &tls.Config{RootCAs: roots, ServerName: agentapi.DialHomeServerName, MinVersion: tls.VersionTLS12})
+			if err != nil {
+				t.Fatalf("TLS to the dial-home listener: %v", err)
+			}
+			defer c.Close()
+			_ = c.SetDeadline(time.Now().Add(30 * time.Second))
+			if _, err := io.WriteString(c, frpUpgrade+"EARLY"); err != nil {
+				t.Fatal(err)
+			}
+			resp, err := http.ReadResponse(bufio.NewReader(c), &http.Request{Method: http.MethodGet})
+			if err != nil || resp.StatusCode != http.StatusSwitchingProtocols {
+				t.Fatalf("the upgrade's answer over TLS: %v, %v", resp, err)
+			}
+			got := up.received()
+			if len(got) != 1 || !strings.HasPrefix(got[0], "GET /~!frp HTTP/1.1\r\n") || !strings.HasSuffix(got[0], "\r\n\r\nEARLY") {
+				t.Errorf("frps got %q; want the upgrade with the bytes sent after its headers", got)
+			}
+		})
 	}
 }
