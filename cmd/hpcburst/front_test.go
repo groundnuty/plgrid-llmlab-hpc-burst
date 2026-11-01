@@ -244,6 +244,10 @@ func TestFrontSupervision(t *testing.T) {
 	conn.Close()
 
 	// ---- the watch sees objects created in the cluster, status included ----
+	// The profile has a partition, so the host needs the agent builds for its cpuArch (#158): the ones
+	// that pass the real check are in place before the profile is created, and status is asserted healthy
+	// below with the check having run against it.
+	placeAgentBuilds(t, h)
 	c := h.clients()
 	ctx := t.Context()
 	// drainWindow 1h is below the front's 2 h maxRequestDuration plus the 10 min margin, so the
@@ -251,7 +255,7 @@ func TestFrontSupervision(t *testing.T) {
 	shortWindow := v1alpha1.Duration("1h")
 	prof := &v1alpha1.PlatformProfile{ObjectMeta: metav1.ObjectMeta{Name: "example-platform"}, Spec: v1alpha1.PlatformProfileSpec{ProviderKind: v1alpha1.PlatformBatch,
 		DrainWindow: &shortWindow,
-		Partitions:  []v1alpha1.PartitionProfile{{Name: "example-gpu", AcceleratorClass: v1alpha1.AcceleratorClass{GPUModel: "GH200", CPUArch: "aarch64"}}}}}
+		Partitions:  []v1alpha1.PartitionProfile{{Name: "example-gpu", AcceleratorClass: v1alpha1.AcceleratorClass{GPUModel: "A100", CPUArch: "x86_64"}}}}}
 	prov := &v1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "helios-a", Labels: map[string]string{v1alpha1.LabelPlatform: "example-platform"}},
 		Spec: v1alpha1.ProviderSpec{PlatformProfileRef: v1alpha1.ObjectReference{Name: "example-platform"}}}
 	for _, o := range []struct {
@@ -358,6 +362,10 @@ func TestFrontSupervision(t *testing.T) {
 	// launcher that read another member would find none here. Its sink writes, so it is ok.
 	if front != nil && (front.UsageState != "ok" || front.Degraded != "") {
 		t.Errorf("the front's usage state %q, degraded %q: want ok, not degraded", front.UsageState, front.Degraded)
+	}
+	// The agent-builds check ran against the profile's x86_64 partition and found its builds.
+	if bs, bcode := statusBuilds(t, h); bcode != exitOK || bs.AgentBuilds == nil || !bs.AgentBuilds.Checked || bs.AgentBuilds.Profiles != 1 || len(bs.AgentBuilds.Problems) != 0 {
+		t.Errorf("status exited %d with agent_builds %+v (reasons %v), want the check run on one profile and no problem", bcode, bs.AgentBuilds, bs.Reasons)
 	}
 	if r := cli(t, h.args("status", "--no-gc-probe")...); r.code != exitOK || strings.Contains(r.out, "degraded") ||
 		!strings.Contains(r.out, "supervised front: running=true") {
