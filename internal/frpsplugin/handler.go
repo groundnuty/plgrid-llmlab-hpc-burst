@@ -310,7 +310,7 @@ func (h *Handler) newProxy(ctx context.Context, raw json.RawMessage) verdict {
 	if c.SubDomain != "" || c.Group != "" || c.HTTPUser != "" || c.RouteByHTTPUser != "" {
 		return refuse(reasonExtraFields)
 	}
-	h.tell(OpNewProxy, c.ProxyName)
+	h.tell(OpNewProxy, c.ProxyName, alloc)
 	return accept()
 }
 
@@ -320,12 +320,12 @@ func (h *Handler) closeProxy(raw json.RawMessage) verdict {
 	if err := json.Unmarshal(raw, &c); err != nil {
 		return refuse(reasonMalformed)
 	}
-	h.tell(OpCloseProxy, c.ProxyName)
+	h.tell(OpCloseProxy, c.ProxyName, "")
 	return accept()
 }
 
-func (h *Handler) tell(op, name string) {
+func (h *Handler) tell(op, name, allocationUID string) {
 	if h.notify != nil {
-		h.notify.ProxyChanged(op, name)
+		h.notify.ProxyChanged(op, name, allocationUID)
 	}
 }

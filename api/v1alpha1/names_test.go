@@ -9,6 +9,8 @@ func TestNamesForTheLifecycleControllerAndTheFront(t *testing.T) {
 		ReasonCatalogEntryListed: "CatalogEntryListed",
 		ReasonAgentRegistered:    "AgentRegistered",
 		EventReasonShapesFit:     "ShapesFit",
+		// HBEP-8's Reasons table spells it TunnelOrphaned.
+		EventReasonTunnelOrphaned: "TunnelOrphaned",
 	} {
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)

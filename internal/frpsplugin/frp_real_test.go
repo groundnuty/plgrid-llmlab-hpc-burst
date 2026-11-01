@@ -163,6 +163,11 @@ func TestRealFrpsAdmissionAndPathState(t *testing.T) {
 	if got := ev.all(); len(got) != 1 || got[0] != "NewProxy "+uidA {
 		t.Errorf("the Notifier heard %v, want only the accepted NewProxy for %s", got, uidA)
 	}
+	// The real frps's NewProxy carried the Allocation that admitted it: alloc-a holds tokA, the
+	// token frpc logged in with.
+	if got := ev.allocation("NewProxy " + uidA); got != "alloc-a" {
+		t.Errorf("the Notifier heard Allocation %q with the real NewProxy of %s, want alloc-a", got, uidA)
+	}
 
 	// Orphans: the same list, read for an Instance set that does not include uidA.
 	if rep := rd.Read(ctx, []string{uidB}); len(rep.Orphans) != 1 || rep.Orphans[0] != uidA {

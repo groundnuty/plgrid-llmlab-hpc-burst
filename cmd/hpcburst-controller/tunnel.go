@@ -41,6 +41,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/frpsplugin"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/lifecycle"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -86,7 +87,8 @@ func addTunnel(mgr manager.Manager, host agentapi.Host, _ agentapi.Backend) (man
 	}
 	trigger := frpsplugin.NewTrigger()
 	index := &frpsplugin.MemIndex{}
-	handler, err := frpsplugin.NewHandler(index, frpsplugin.Options{Notifier: trigger})
+	admitted := newAdmissions(trigger)
+	handler, err := frpsplugin.NewHandler(index, frpsplugin.Options{Notifier: admitted})
 	if err != nil {
 		return nil, err
 	}
@@ -97,6 +99,9 @@ func addTunnel(mgr manager.Manager, host agentapi.Host, _ agentapi.Backend) (man
 	state := &pathState{
 		cache: mgr.GetCache(), cached: mgr.GetClient(), fresh: mgr.GetAPIReader(), writer: mgr.GetClient(),
 		reader: reader, trigger: trigger.C(), log: named("tunnel-state"),
+		// TunnelOrphaned is the lifecycle controller's event, from its own recorder (HBEP-8).
+		rec:      lifecycle.KubeRecorder{R: mgr.GetEventRecorder(v1alpha1.FieldManagerLifecycle)},
+		admitted: admitted,
 	}
 	if err := mgr.Add(component{name: "tunnel-state", log: state.log, leader: true, start: state.run}); err != nil {
 		return nil, err

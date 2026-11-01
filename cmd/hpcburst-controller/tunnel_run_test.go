@@ -36,6 +36,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
+	eventsv1 "k8s.io/api/events/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
@@ -338,6 +339,36 @@ func (r *tunnelRig) instance(name, allocation string, phase v1alpha1.InstancePha
 		}
 	}
 	return in
+}
+
+// setInstancePhase sets an Instance's phase, as the lifecycle controller does when it ends one.
+func (r *tunnelRig) setInstancePhase(in *v1alpha1.Instance, phase v1alpha1.InstancePhase) {
+	r.t.Helper()
+	ctx := context.Background()
+	if err := r.api.client.Get(ctx, client.ObjectKeyFromObject(in), in); err != nil {
+		r.t.Fatal(err)
+	}
+	in.Status.Phase = phase
+	if err := r.api.client.Status().Update(ctx, in); err != nil {
+		r.t.Fatal(err)
+	}
+}
+
+// orphanEvents lists the TunnelOrphaned events in the API server as "action type kind name
+// reportingController".
+func (r *tunnelRig) orphanEvents() []string {
+	r.t.Helper()
+	var l eventsv1.EventList
+	if err := r.api.client.List(context.Background(), &l, client.InNamespace(tunnelNS)); err != nil {
+		r.t.Fatal(err)
+	}
+	var out []string
+	for _, e := range l.Items {
+		if e.Reason == v1alpha1.EventReasonTunnelOrphaned {
+			out = append(out, fmt.Sprintf("%s %s %s %s %s", e.Action, e.Type, e.Regarding.Kind, e.Regarding.Name, e.ReportingController))
+		}
+	}
+	return out
 }
 
 // markSettled returns a position in the watch's history once the watch has delivered every
@@ -649,6 +680,27 @@ func TestTunnelWithRealFrpsAndFrpc(t *testing.T) {
 	frpcA3 := r.runFrpc(credA, uid(a1))
 	r.waitCond(b, a1, statusTrue, reasonOnline)
 	_ = frpcA3
+
+	// An orphan, through the whole binary (HBEP-6, The inventory; HBEP-8, Reasons in alpha): a3's
+	// proxy registers through Allocation A's credential, then a3 ends while its frpc stays up, so
+	// frps lists a proxy that is no current Instance's UID. The lifecycle controller's recorder
+	// raises a degraded TunnelOrphaned regarding Allocation al-a, the one whose credential
+	// admitted it. The test reads at least one event with its fields and no count: HBEP-8 says an
+	// API-level test never counts events, since a repeat folds into a series on one object. The
+	// hourly gate is pathState's, tested on its own clock (tunnel_orphan_test.go).
+	a3 := r.instance("in-a3", allocA.Name, v1alpha1.InstanceStarting)
+	r.runFrpc(credA, uid(a3))
+	r.waitCond(b, a3, statusTrue, reasonOnline)
+	if got := r.orphanEvents(); len(got) != 0 {
+		t.Fatalf("TunnelOrphaned events %v while a3 lives, want none", got)
+	}
+	r.setInstancePhase(a3, v1alpha1.InstanceEnded)
+	b.eventually(t, "the TunnelOrphaned event for a3's proxy", 60*time.Second, func() bool { return len(r.orphanEvents()) > 0 })
+	for _, got := range r.orphanEvents() {
+		if want := "degraded Warning Allocation al-a hpcburst-lifecycle"; got != want {
+			t.Fatalf("a TunnelOrphaned event is %q, want %q (action, type, regarding, reporting controller)", got, want)
+		}
+	}
 
 	// frps stops while a1 is True: Unknown, never False, and no write at all while it stays down.
 	stopMark := r.markSettled(a1, a2)
