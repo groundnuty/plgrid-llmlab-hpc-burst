@@ -232,7 +232,7 @@ The lifecycle controller's process serves frps's HTTP plugin on loopback at base
 
 ### Path state and the inventory
 
-- **The condition.** The lifecycle controller records whether each Instance's tunnel is connected as an Instance condition, which it writes. An Instance becomes `ready` only with it True, so a tunnel that never comes up fails the Instance at `health.startTimeout`, with a reason that names the tunnel (HBEP-7). Proposed names, for the code agent, who owns `api/v1alpha1/conditions.go`:
+- **The condition.** The lifecycle controller records whether each Instance's tunnel is connected as an Instance condition, which it writes. An Instance becomes `ready` only with it True, also while the condition is absent, so a tunnel that never comes up fails the Instance at `health.startTimeout`. The reason names the tunnel, `TunnelNotConnected`, when the condition is present and not True; while it is absent, before the reader's first write, the reason is `StartTimeout` (HBEP-7). Proposed names, for the code agent, who owns `api/v1alpha1/conditions.go`:
   - type `TunnelConnected`;
   - status True with reason `ProxyOnline`: frps lists the Instance's proxy as online;
   - status False with reason `ProxyOffline`: frps lists it as offline, or not at all;
@@ -494,6 +494,7 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
 - 2026-10-31: L-17.7 cited in Field lessons answered. The note on the development VM corrected: the ssh banner from the compute nodes was a gateway's sshd, as its host key showed (issue #18).
 - 2026-10-31: amendment from the owner's decision on the dial-home route (issue #18): ssh mode runs over the configured ssh port, 22 by default; open questions 4 and 8 corrected.
 - 2026-10-31: frpc's staging path stated as HBEP-4's, `frpc/<digest>/frpc` (wording only).
+- 2026-11-01: amendment with HBEP-7's of the same day: the end reason of an Instance whose `TunnelConnected` is absent at `health.startTimeout`.
 
 ## Amendments
 
@@ -501,3 +502,4 @@ Spike S1 (step 0 and probe 2, issue #18) and spike S1c (PR #78) measured the fac
   - **The ssh port is configurable, 22 by default** (Notes; Dial-home modes; Operational readiness 4). The compute nodes reach the development VM's sshd through a port forward on the gateway in front of it, at the gateway's address and port. The key's restriction is on the VM's side and is unchanged. Before, ssh mode named port 22.
   - **Open question 8's source** is corrected. S1's step 0 saw port 22 answer at the VM's address, but that sshd was the gateway's (L-17.7), so it did not show that the VM accepted port 22. Before, the source said it did.
   - **Open question 4** now names an ssh port forward that an operator opens, so that it does not read as the gateway's network forward. The decision is unchanged.
+- **2026-11-01: the end reason before the first read** (Path state and the inventory). Science-agent ruling of 1 Nov 2026, for #111, and the review round of PR #127. An Instance still becomes `ready` only with `TunnelConnected` True, also while the condition is absent. At `health.startTimeout` the reason is `TunnelNotConnected` when the condition is present and not True, and `StartTimeout` while it is absent, before the reader's first write. The reader writes it for every placed Instance (#90), so it is absent only until then. Before, the text said only that the reason names the tunnel. The names are on `main` (`api/v1alpha1/conditions.go`).
