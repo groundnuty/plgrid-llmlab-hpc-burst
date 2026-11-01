@@ -32,6 +32,11 @@ import (
 // the socket buffers and moved the clock 30 min past the front's last read,
 // so the front's idle timer fell due before the read that would have reset
 // it (issue #136: "the fake clock moved by 45m16s").
+//
+// The harness sets the headers timeout to 24 h (newHarnessOn), so this test
+// proves the default total deadline (maxRequestDuration) and idle time-out,
+// not every default deadline; TestStreamHeadersTimeoutDefault checks the
+// headers timeout's default.
 func TestDeadlinesLongStreamCompletesUnderTheDefault(t *testing.T) {
 	f := newScFix(t, scOpts{})
 	gate := make(chan struct{})

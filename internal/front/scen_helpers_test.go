@@ -331,6 +331,51 @@ func scGated(t *testing.T, resp *http.Response, gate chan<- struct{}, n int) str
 	}
 }
 
+// scLockstepGated is scLockstep for an engine that waits for a go-ahead
+// before each token after the first (enginetest.Behaviour.Gate): after each
+// token event it moves the fake clock by step, until it has moved it by
+// total, and then, while it has not, sends the engine its go-ahead. The
+// engine writes a token only after the client has read the one before and the
+// clock has moved, so every move of the clock comes after the front's read of
+// the token before it, and the front's idle timer is reset between any two
+// moves. Without the gate an engine on the wall clock ran ahead: several
+// buffered tokens reached the client after one read of the front, and the
+// test's moves added up to the idle time-out. After the last move the engine
+// is left waiting at its gate until the request ends. It returns the number of
+// token events read and the whole body.
+func scLockstepGated(t *testing.T, h *harness, resp *http.Response, gate chan<- struct{}, step, total time.Duration) (int, string) {
+	t.Helper()
+	defer resp.Body.Close()
+	br := bufio.NewReader(resp.Body)
+	var body strings.Builder
+	content := 0
+	for moved := time.Duration(0); ; {
+		ev, err := scReadEvent(br)
+		body.WriteString(ev)
+		if scIsContent(ev) {
+			content++
+			if moved < total {
+				h.clk.Advance(step)
+				moved += step
+			}
+			if moved < total {
+				select {
+				case gate <- struct{}{}:
+				case <-time.After(scGoAheadLimit):
+					t.Fatalf("the engine did not take its go-ahead after token event %d (clock moved by %v) within %s; the body so far ends %q",
+						content, moved, scGoAheadLimit, scTail(body.String()))
+				}
+			}
+		}
+		if err != nil {
+			if err != io.EOF && err != io.ErrUnexpectedEOF {
+				t.Fatalf("reading the stream: %v", err)
+			}
+			return content, body.String()
+		}
+	}
+}
+
 // scTail is the end of a body, for a failure message.
 func scTail(s string) string {
 	if len(s) > 300 {
