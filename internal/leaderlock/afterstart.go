@@ -79,7 +79,7 @@ func (m *releasingManager) Start(ctx context.Context) error {
 	released, rerr := releaseHeld(rctx, m.lock)
 	switch {
 	case rerr != nil:
-		m.log.WithName("leader-election").Error(rerr, "the leader Lease could not be released after the manager stopped; it stays held until it expires", "lock", m.lock.Describe())
+		m.log.WithName("leader-election").Error(rerr, "could not release the leader Lease after the manager stopped; if this manager still held it, it stays held until it expires", "lock", m.lock.Describe())
 	case released:
 		m.log.WithName("leader-election").Info("released the leader Lease after the manager stopped; the elector's own release was lost", "lock", m.lock.Describe())
 	}

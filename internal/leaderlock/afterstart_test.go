@@ -96,7 +96,7 @@ func TestTheReleaseAfterStartLeavesALeaseItDoesNotHold(t *testing.T) {
 			if _, updates := tc.f.state(); updates != 0 || tc.f.gets == 0 {
 				t.Fatalf("%d writes after %d reads; want a read and no write", updates, tc.f.gets)
 			}
-			if l.has("released the leader Lease") || l.has("could not be released") {
+			if l.has("released the leader Lease") || l.has("could not release") {
 				t.Errorf("logged a release or a failure for a Lease this holder does not hold: %v", l.lines)
 			}
 		})
@@ -114,7 +114,7 @@ func TestTheReleaseAfterStartGivesUpWithinItsBudget(t *testing.T) {
 	if holder, updates := f.state(); holder != me || updates != 0 || f.gets < 2 {
 		t.Fatalf("the Lease is held by %q after %d writes and %d reads; want it still held, the read retried and nothing written", holder, updates, f.gets)
 	}
-	if !l.has("could not be released after the manager stopped") {
+	if !l.has("could not release the leader Lease after the manager stopped") {
 		t.Errorf("the give-up was not logged: %v", l.lines)
 	}
 }
