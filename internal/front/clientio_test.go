@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -69,17 +68,14 @@ func TestStalledUploadIsCutAtTheDeadline(t *testing.T) {
 // written with cutBy front_deadline and the reservation is released.
 func TestStalledDownloadIsCutAtTheDeadline(t *testing.T) {
 	f := ciFix(t)
-	var written atomic.Int64
 	f.retarget(f.uids[0], rawEngine(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(200)
 		rc := http.NewResponseController(w)
 		for r.Context().Err() == nil {
-			n, err := io.WriteString(w, chatToken)
-			if err != nil {
+			if _, err := io.WriteString(w, chatToken); err != nil {
 				return
 			}
-			written.Add(int64(n))
 			_ = rc.Flush()
 		}
 	}))
@@ -92,21 +88,17 @@ func TestStalledDownloadIsCutAtTheDeadline(t *testing.T) {
 	if err != nil || !strings.Contains(line, "200") {
 		t.Fatalf("status line %q: %v", line, err)
 	}
-	// The client reads nothing more. Wait until the flood stops: the front
-	// is blocked writing to the client and no longer reads the engine.
-	last := int64(-1)
-	errWaitFor(t, "the front to block on the stalled client", func() bool {
-		n := written.Load()
-		stalled := n == last && n > 0
-		last = n
-		time.Sleep(200 * time.Millisecond)
-		return stalled
-	})
+	// The client reads nothing more. Wait until the front's handler is parked
+	// in a write to the client (blockedWritingToClient): the state this test
+	// is about, seen directly. The test used to wait for the engine's count
+	// of written bytes to stay the same across 200 ms, which an engine paused
+	// by a loaded machine also does (PR #137 review, Astra).
+	waitGoroutine(t, "the front's handler to block writing to the stalled client", blockedWritingToClient)
 	if n := f.scLoad(scDep, f.names[0]); n != 1 {
 		t.Fatalf("the Instance counts %d in flight while the stream is stalled, want 1", n)
 	}
 	f.clk.Advance(ciMaxReq)
-	errWaitFor(t, "the usage record after the deadline", func() bool { return len(f.records()) == 1 })
+	waitState(t, "the usage record after the deadline", func() bool { return len(f.records()) == 1 })
 	if rec := f.records()[0]; rec.CutBy == nil || *rec.CutBy != cutFrontDeadline {
 		t.Errorf("cutBy %v, want front_deadline", rec.CutBy)
 	}

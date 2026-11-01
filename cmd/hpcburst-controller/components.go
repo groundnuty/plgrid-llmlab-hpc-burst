@@ -36,6 +36,7 @@ import (
 	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
 	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus"
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -66,6 +67,12 @@ type deps struct {
 	// username gives the ssh dial-home user; nil means the user who runs the
 	// binary (user.Current).
 	username func() (string, error)
+	// registry is where the lifecycle controller registers its metrics
+	// collectors; nil means controller-runtime's registry, which its metrics
+	// server serves. A test that runs several copies of the controller in one
+	// process gives each its own: the collectors' names are registered once
+	// per registry.
+	registry prometheus.Registerer
 }
 
 func (d deps) digests() (map[string]string, error) {

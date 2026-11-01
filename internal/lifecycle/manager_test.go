@@ -11,8 +11,8 @@ package lifecycle
 //
 // It uses #61's envtest block, 29204-29207, unless HPCBURST_TESTENV_PORT_BASE
 // is set, so it does not collide with the other packages' blocks when go test
-// runs packages in parallel; the health probe binds 127.0.0.1:29301 (#61's
-// block).
+// runs packages in parallel; the health probe binds 127.0.0.1:29301 and the
+// metrics server 127.0.0.1:29302 (#61's block).
 
 import (
 	"bytes"
@@ -21,10 +21,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -42,6 +44,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -52,6 +55,10 @@ import (
 
 const (
 	managerHealthAddr = "127.0.0.1:29301"
+	// managerMetricsAddr is the metrics server's address in this test, in
+	// #61's test block 29300-29319: controller-runtime's metrics server does
+	// not report a kernel-chosen port.
+	managerMetricsAddr = "127.0.0.1:29302"
 	// managerPortBase is the first port of #61's envtest block, 29204-29207.
 	// One control plane takes four loopback ports (etcd client, etcd peer,
 	// kube-apiserver, kube-controller-manager) inside issue #40's range
@@ -290,7 +297,7 @@ func TestManagerOnControlPlane(t *testing.T) {
 	// fake client. FrontNotConfigured is covered by the rig and by the k3s run.
 	mgr, backend, err := NewManager(Options{
 		Config: cp.Config, CredentialsDir: creds, AgentBuildsDir: builds, FrontConfigured: true, HealthAddr: managerHealthAddr,
-		LeaderElection: true, Checkpoints: &stubSource{},
+		MetricsAddr: managerMetricsAddr, LeaderElection: true, Checkpoints: &stubSource{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -304,7 +311,7 @@ func TestManagerOnControlPlane(t *testing.T) {
 	stop := func() bool {
 		if !stopped {
 			stopped = true
-			stopOK = stopManager(t, stopMgr, done)
+			stopOK = stopManager(t, "first", stopMgr, done)
 		}
 		return stopOK
 	}
@@ -414,14 +421,29 @@ func TestManagerOnControlPlane(t *testing.T) {
 		return false, "no LongNote event"
 	})
 	for _, path := range []string{"/healthz", "/readyz"} {
-		resp, err := http.Get("http://" + managerHealthAddr + path)
-		if err != nil {
-			t.Fatalf("GET %s: %v", path, err)
+		if code := getStatus(t, "http://"+managerHealthAddr+path); code != http.StatusOK {
+			t.Fatalf("GET %s: %d", path, code)
 		}
-		_ = resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("GET %s: %d", path, resp.StatusCode)
+	}
+	// /metrics on loopback at the configured address (HBEP-8, Metrics): the
+	// pending Instance's info series, and controller-runtime's own work-queue
+	// metrics beside it.
+	eventually(t, time.Minute, "/metrics serves the Instance's info series", func() (bool, string) {
+		body := getBody(t, "http://"+managerMetricsAddr+"/metrics")
+		info := fmt.Sprintf(`instance_uid="%s"`, in.UID)
+		for _, line := range strings.Split(body, "\n") {
+			if strings.HasPrefix(line, "hpcburst_instance_info{") && strings.Contains(line, info) && strings.HasSuffix(line, " 1") &&
+				strings.Contains(body, "workqueue_") {
+				return true, ""
+			}
 		}
+		return false, "no hpcburst_instance_info line for " + string(in.UID)
+	})
+	// A first start, with no previous Lease, raises no ObservationGap (HBEP-8,
+	// Gaps after a restart). The collision's event above shows the recorder
+	// reaches the API server.
+	if gaps := observationGaps(t, ctx, cl); len(gaps) != 0 {
+		t.Fatalf("a first start raised %d ObservationGap events", len(gaps))
 	}
 
 	// DialHomeUnreachable by server-side apply, beside the Provider
@@ -467,13 +489,269 @@ func TestManagerOnControlPlane(t *testing.T) {
 	if !stop() {
 		t.FailNow()
 	}
+	var released coordinationv1.Lease
 	eventually(t, 30*time.Second, "the Lease is released on stop", func() (bool, string) {
-		var l coordinationv1.Lease
-		if err := cl.Get(ctx, client.ObjectKey{Namespace: v1alpha1.ControllerNamespace, Name: v1alpha1.LeaseLifecycle}, &l); err != nil {
+		if err := cl.Get(ctx, client.ObjectKey{Namespace: v1alpha1.ControllerNamespace, Name: v1alpha1.LeaseLifecycle}, &released); err != nil {
 			return false, err.Error()
 		}
-		return l.Spec.HolderIdentity == nil || *l.Spec.HolderIdentity == "", "still held"
+		return released.Spec.HolderIdentity == nil || *released.Spec.HolderIdentity == "", "still held"
 	})
+	if released.Spec.RenewTime == nil {
+		t.Fatal("the released Lease has no renewTime")
+	}
+	restartAfterGap(t, ctx, cl, cp.Config, creds, builds)
+	withoutLeaderElection(t, ctx, cl, cp.Config, creds, builds)
+}
+
+// collisionEvents counts the IdentityUnresolved events about md-collide, which
+// each controller process raises once.
+func collisionEvents(t *testing.T, ctx context.Context, cl client.Client) int {
+	t.Helper()
+	var evs eventsv1.EventList
+	if err := cl.List(ctx, &evs, client.InNamespace(rigNS)); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, e := range evs.Items {
+		if e.Reason == "IdentityUnresolved" && e.Regarding.Name == "md-collide" {
+			n++
+		}
+	}
+	return n
+}
+
+// withoutLeaderElection runs the controller with --leader-elect=false, a
+// development and test mode (HBEP-8, Observers, and Test plan, Observers that
+// never start): it takes no Lease, so the lifecycle Lease is not written, and
+// emits no ObservationGap, while its /readyz needs only synced caches. The
+// run's own collision event reaching the API shows its recorder works, so the
+// unchanged ObservationGap count is not silence for want of a recorder.
+func withoutLeaderElection(t *testing.T, ctx context.Context, cl client.Client, cfg *rest.Config, creds, builds string) {
+	t.Helper()
+	var before coordinationv1.Lease
+	eventually(t, 30*time.Second, "the second run released the Lease", func() (bool, string) {
+		if err := cl.Get(ctx, client.ObjectKey{Namespace: v1alpha1.ControllerNamespace, Name: v1alpha1.LeaseLifecycle}, &before); err != nil {
+			return false, err.Error()
+		}
+		return before.Spec.HolderIdentity == nil || *before.Spec.HolderIdentity == "", "still held"
+	})
+	collisions := collisionEvents(t, ctx, cl)
+	mgr, _, err := NewManager(Options{
+		Config: cfg, CredentialsDir: creds, AgentBuildsDir: builds, FrontConfigured: true, HealthAddr: managerHealthAddr,
+		MetricsAddr: managerMetricsAddr, LeaderElection: false, Checkpoints: &stubSource{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mctx, stop := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- mgr.Start(mctx) }()
+	defer stopManager(t, "no-leader-election", stop, done)
+	eventually(t, time.Minute, "/readyz passes with synced caches and no Lease", func() (bool, string) {
+		code := getStatus(t, "http://"+managerHealthAddr+"/readyz")
+		return code == http.StatusOK, fmt.Sprintf("/readyz %d", code)
+	})
+	eventually(t, time.Minute, "this run's own collision event reaches the API", func() (bool, string) {
+		n := collisionEvents(t, ctx, cl)
+		return n > collisions, fmt.Sprintf("%d IdentityUnresolved events on md-collide, %d before this run", n, collisions)
+	})
+	var after coordinationv1.Lease
+	if err := cl.Get(ctx, client.ObjectKey{Namespace: v1alpha1.ControllerNamespace, Name: v1alpha1.LeaseLifecycle}, &after); err != nil {
+		t.Fatal(err)
+	}
+	if after.ResourceVersion != before.ResourceVersion {
+		t.Fatalf("the lifecycle Lease changed (resourceVersion %s to %s, holder %v) under --leader-elect=false", before.ResourceVersion, after.ResourceVersion, after.Spec.HolderIdentity)
+	}
+	if gaps := observationGaps(t, ctx, cl); len(gaps) != 1 {
+		t.Fatalf("%d ObservationGap events after a run with --leader-elect=false, want still the one of the second run", len(gaps))
+	}
+}
+
+// writeLifecycleLease writes the lifecycle Lease as another copy of the
+// controller would: holder, renewTime now and a lease duration. It returns the
+// renewTime as stored.
+func writeLifecycleLease(t *testing.T, ctx context.Context, cl client.Client, holder string, seconds int32) time.Time {
+	t.Helper()
+	var l coordinationv1.Lease
+	if err := cl.Get(ctx, client.ObjectKey{Namespace: v1alpha1.ControllerNamespace, Name: v1alpha1.LeaseLifecycle}, &l); err != nil {
+		t.Fatal(err)
+	}
+	now := metav1.NewMicroTime(time.Now())
+	l.Spec.HolderIdentity, l.Spec.LeaseDurationSeconds, l.Spec.RenewTime = &holder, &seconds, &now
+	if err := cl.Update(ctx, &l); err != nil {
+		t.Fatal(err)
+	}
+	return l.Spec.RenewTime.Time
+}
+
+// restartAfterGap starts the controller again after the first run's stop
+// (HBEP-8, Test plan, Readiness and Restart). A second copy holds the
+// lifecycle Lease, and the new run's caches' sync is held: /readyz fails while
+// the caches have not synced, and still fails once they have while the second
+// copy holds the Lease; /healthz answers throughout, and no ObservationGap
+// exists, since the Lease is not taken. Once the second copy releases the
+// Lease, /readyz passes, and exactly one ObservationGap regards the lifecycle
+// Lease, naming the release's renewTime, the last one before the take, to the
+// microsecond: one event, not a series of two.
+func restartAfterGap(t *testing.T, ctx context.Context, cl client.Client, cfg *rest.Config, creds, builds string) {
+	t.Helper()
+	const second = "lifecycle-second-copy"
+	writeLifecycleLease(t, ctx, cl, second, 3600)
+	gate := make(chan struct{})
+	release := sync.OnceFunc(func() { close(gate) })
+	defer release()
+	leaseRead := make(chan struct{})
+	readOnce := sync.OnceFunc(func() { close(leaseRead) })
+	mgr, _, err := NewManager(Options{
+		Config: cfg, CredentialsDir: creds, AgentBuildsDir: builds, FrontConfigured: true, HealthAddr: managerHealthAddr,
+		MetricsAddr: managerMetricsAddr, LeaderElection: true, Checkpoints: &stubSource{}, onLeaseRead: readOnce,
+		newCache: func(c *rest.Config, o cache.Options) (cache.Cache, error) {
+			inner, err := cache.New(c, o)
+			if err != nil {
+				return nil, err
+			}
+			return heldCache{Cache: inner, gate: gate}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mctx, stop := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- mgr.Start(mctx) }()
+	defer stopManager(t, "restarted", stop, done)
+	eventually(t, time.Minute, "the health server answers", func() (bool, string) {
+		return getStatus(t, "http://"+managerHealthAddr+"/healthz") == http.StatusOK, "no /healthz"
+	})
+	// Each state below is held by the test (the gate, a Lease of 3600 s), so
+	// it cannot end on its own; the checks repeat a few times to see it hold.
+	notReady := func(why string) {
+		t.Helper()
+		for i := 0; i < 5; i++ {
+			if code := getStatus(t, "http://"+managerHealthAddr+"/readyz"); code == http.StatusOK {
+				t.Fatalf("/readyz answered 200 %s", why)
+			}
+			if code := getStatus(t, "http://"+managerHealthAddr+"/healthz"); code != http.StatusOK {
+				t.Fatalf("/healthz answered %d %s; it is liveness and answers", code, why)
+			}
+		}
+		if gaps := observationGaps(t, ctx, cl); len(gaps) != 0 {
+			t.Fatalf("%d ObservationGap events %s, before the Lease could be taken", len(gaps), why)
+		}
+	}
+	notReady("while the caches' sync is held")
+	select {
+	case <-leaseRead:
+		t.Fatal("the elector read the Lease while the caches' sync was held; leader election starts only after it")
+	default:
+	}
+	release()
+	// The caches synced and the elector read the Lease the second copy holds.
+	select {
+	case <-leaseRead:
+	case <-time.After(2 * time.Minute):
+		t.Fatal("the elector did not read the lifecycle Lease within 2 min of the caches' release")
+	}
+	notReady("while a second copy holds the lifecycle Lease")
+	var l coordinationv1.Lease
+	if err := cl.Get(ctx, client.ObjectKey{Namespace: v1alpha1.ControllerNamespace, Name: v1alpha1.LeaseLifecycle}, &l); err != nil {
+		t.Fatal(err)
+	}
+	if l.Spec.HolderIdentity == nil || *l.Spec.HolderIdentity != second {
+		t.Fatalf("the Lease's holder is %v, want the second copy still", l.Spec.HolderIdentity)
+	}
+	prev := writeLifecycleLease(t, ctx, cl, "", 1) // the second copy releases it, as client-go's release does
+	eventually(t, time.Minute, "/readyz passes once the caches have synced and the Lease is held", func() (bool, string) {
+		code := getStatus(t, "http://"+managerHealthAddr+"/readyz")
+		return code == http.StatusOK, fmt.Sprintf("/readyz %d", code)
+	})
+	want := prev.UTC().Format(metav1.RFC3339Micro)
+	eventually(t, time.Minute, "one ObservationGap regards the lifecycle Lease", func() (bool, string) {
+		gaps := observationGaps(t, ctx, cl)
+		if len(gaps) != 1 {
+			return false, fmt.Sprintf("%d ObservationGap events", len(gaps))
+		}
+		e := gaps[0]
+		if e.Action != "degraded" || e.Type != "Warning" || e.Regarding.Kind != "Lease" || e.Regarding.Name != v1alpha1.LeaseLifecycle || e.Regarding.Namespace != v1alpha1.ControllerNamespace {
+			t.Fatalf("ObservationGap %s/%s regarding %+v; want degraded, Warning, the Lease %s/%s", e.Action, e.Type, e.Regarding, v1alpha1.ControllerNamespace, v1alpha1.LeaseLifecycle)
+		}
+		if !strings.Contains(e.Note, want) {
+			t.Fatalf("ObservationGap note %q does not name the previous renewTime %s", e.Note, want)
+		}
+		// This check cannot see a second emission within the test's wait: the
+		// recorder turns a second isomorphic event into a series in memory,
+		// and the count reaches the API only every 30 minutes or once the
+		// series has been quiet for 6 minutes (HBEP-8, What the recorder
+		// merges and drops). It would catch only a series that is already
+		// there. The proof that a process emits one ObservationGap is
+		// gap_test.go, which counts the emitter's recorder calls.
+		if e.Series != nil {
+			t.Fatalf("ObservationGap is a series of %d: emitted more than once", e.Series.Count)
+		}
+		return true, ""
+	})
+}
+
+// heldCache holds its sync until gate closes.
+type heldCache struct {
+	cache.Cache
+	gate <-chan struct{}
+}
+
+func (h heldCache) WaitForCacheSync(ctx context.Context) bool {
+	select {
+	case <-h.gate:
+	case <-ctx.Done():
+		return false
+	}
+	return h.Cache.WaitForCacheSync(ctx)
+}
+
+// observationGaps lists the ObservationGap events in the controllers'
+// namespace, where the lifecycle Lease is.
+func observationGaps(t *testing.T, ctx context.Context, cl client.Client) []eventsv1.Event {
+	t.Helper()
+	var evs eventsv1.EventList
+	if err := cl.List(ctx, &evs, client.InNamespace(v1alpha1.ControllerNamespace)); err != nil {
+		t.Fatal(err)
+	}
+	var out []eventsv1.Event
+	for _, e := range evs.Items {
+		if e.Reason == "ObservationGap" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// probeClient makes the health and metrics probes. It keeps no connection
+// alive: a probe's idle connection from http.DefaultClient is still on the
+// manager's health server when the manager stops, and net/http's
+// Server.Shutdown, which controller-runtime runs on that server, waits up to
+// 5 s for a connection it still counts as new (3 of 30 stops took 5.2 to
+// 6.4 s). stopManager also closes the client's idle connections before it
+// cancels.
+var probeClient = &http.Client{Transport: &http.Transport{DisableKeepAlives: true}, Timeout: 30 * time.Second}
+
+func getStatus(t *testing.T, url string) int {
+	t.Helper()
+	resp, err := probeClient.Get(url)
+	if err != nil {
+		return 0
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode
+}
+
+func getBody(t *testing.T, url string) string {
+	t.Helper()
+	resp, err := probeClient.Get(url)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return string(b)
 }
 
 // managerStopLimit bounds the wait for a cancelled manager's Start to return
@@ -489,21 +767,23 @@ const managerStopLimit = 10 * time.Second
 // stopped. A manager that does not return in time, or returns an error, is
 // reported with every goroutine's stack, which names the runnable that did
 // not stop. It reports with Errorf, so a deferred call after an earlier
-// failure can use it too.
-func stopManager(t *testing.T, cancel context.CancelFunc, done <-chan error) bool {
+// failure can use it too. what names the manager in the log line that reports
+// how long its stop took.
+func stopManager(t *testing.T, what string, cancel context.CancelFunc, done <-chan error) bool {
 	t.Helper()
+	probeClient.CloseIdleConnections()
 	cancel()
 	start := time.Now()
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Errorf("manager: %v; goroutines:\n%s", err, goroutines())
+			t.Errorf("%s manager: %v; goroutines:\n%s", what, err, goroutines())
 			return false
 		}
-		t.Logf("the manager returned %s after its cancel", time.Since(start).Round(time.Millisecond))
+		t.Logf("the %s manager returned %s after its cancel", what, time.Since(start).Round(time.Millisecond))
 		return true
 	case <-time.After(managerStopLimit):
-		t.Errorf("the manager did not return within %s of its cancel; goroutines:\n%s", managerStopLimit, goroutines())
+		t.Errorf("the %s manager did not return within %s of its cancel; goroutines:\n%s", what, managerStopLimit, goroutines())
 		return false
 	}
 }

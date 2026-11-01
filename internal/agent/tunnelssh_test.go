@@ -350,6 +350,17 @@ func TestTunnelRestartsFrpcWhenConnection2sPortChanges(t *testing.T) {
 	if len(first) != 1 {
 		t.Fatalf("frpc started %d times before any port changed", len(first))
 	}
+	// Each forward keeps the port it got at the start (HBEP-6: kept for the
+	// Allocation). Two forwards that got the same port once had one move at
+	// once, so the counts below started from 1 (the timing sweep, 1 Nov 2026).
+	for _, f := range []struct {
+		name string
+		st   agent.ForwardState
+	}{{"tunnel", stateOf(r.tunnel)}, {"control", stateOf(r.control)}} {
+		if f.st.PortChanges != 0 {
+			t.Fatalf("the %s forward changed its port %d times at the start", f.name, f.st.PortChanges)
+		}
+	}
 
 	_, old := r.killSSH(t, "tunnel", r.tunnel)
 	takePort(t, old)
@@ -515,4 +526,10 @@ func ephemeralRange(t *testing.T) (int, int) {
 		t.Fatalf("ip_local_port_range %q", b)
 	}
 	return lo, hi
+}
+
+// stateOf is a forward's state now.
+func stateOf(f *agent.SSHForward) agent.ForwardState {
+	st, _ := f.State()
+	return st
 }

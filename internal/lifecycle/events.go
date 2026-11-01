@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -88,9 +89,22 @@ type RecordedEvent struct {
 	Message     string
 }
 
+// Sequence numbers calls from several sources from one counter: HBEP-8's
+// shared sequence, on which a test checks the order of a recorder call against
+// a status write, which the API cannot show (HBEP-8, What the recorder merges
+// and drops). The zero value starts at 1. It is safe for concurrent use.
+type Sequence struct{ n atomic.Int64 }
+
+// Next returns the next number.
+func (s *Sequence) Next() int { return int(s.n.Add(1)) }
+
 // MemoryRecorder keeps every event in order, for tests and diagnostics. It is
 // safe for concurrent use.
 type MemoryRecorder struct {
+	// Seq, when set, numbers the events from a shared Sequence; otherwise
+	// they are numbered from 1 on their own.
+	Seq *Sequence
+
 	mu     sync.Mutex
 	events []RecordedEvent
 }
@@ -100,8 +114,12 @@ type MemoryRecorder struct {
 func (m *MemoryRecorder) Event(regarding, related client.Object, typ, code, message string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	seq := len(m.events) + 1
+	if m.Seq != nil {
+		seq = m.Seq.Next()
+	}
 	e := RecordedEvent{
-		Seq: len(m.events) + 1, Kind: fmt.Sprintf("%T", regarding), Namespace: regarding.GetNamespace(), Name: regarding.GetName(),
+		Seq: seq, Kind: fmt.Sprintf("%T", regarding), Namespace: regarding.GetNamespace(), Name: regarding.GetName(),
 		Warning: warningType(typ), Type: typ, Code: code, Message: eventNote(message),
 	}
 	if related != nil {

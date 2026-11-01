@@ -34,6 +34,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -488,8 +489,11 @@ func (r *tunnelRig) pluginRefusesLogin(token string) bool {
 	return a.Reject
 }
 
+// start runs a copy of the binary. Each copy has its own metrics registry: the collectors' names
+// are registered once per registry, and a test that runs two copies in one process (one after the
+// other, as the restart does) would fail on the second with controller-runtime's.
 func (r *tunnelRig) start() *binary {
-	return startBinary(r.t, r.f, deps{providerScheme: providerScheme})
+	return startBinary(r.t, r.f, deps{providerScheme: providerScheme, registry: prometheus.NewRegistry()})
 }
 
 // TestTunnelWithRealFrpsAndFrpc is the path end to end: what the plugin refuses, what each state of
