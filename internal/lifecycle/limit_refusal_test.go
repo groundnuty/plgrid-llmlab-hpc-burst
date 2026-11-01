@@ -145,43 +145,95 @@ func TestLimitRefusalOtherPolicyReason(t *testing.T) {
 	})
 }
 
-// TestLostReplyUnderOneJobLimit: the reply to the first submission is lost
-// but the scheduler registered the job, under the fake user's one-job limit.
-// The attempt resolves by tag: exactly one Allocation and one job with the tag
-// remain, its hold is lifted once, the Instance starts, and no second
-// Allocation is created.
+// TestLostReplyUnderOneJobLimit is HBEP-4's "A lost reply under a one-job
+// limit" (the Test plan names the same test; HBEP-7 runs it as HBEP-4 does).
+// Attempt n's reply is lost and the scheduler registers its job LATE, held,
+// when the next sbatch arrives (pfake.Script.RegisteredLate), after the 5
+// minute in-flight window, so attempt n is dropped. Attempt n+1 is refused for
+// the limit, because the late job holds the user's only job. During the refusal
+// the deployment shows SubmitLimitReached with the reason line and has exactly
+// one Allocation. The next pass finds attempt n's job by its tag and adopts it
+// before any new claim; one hold lift reaches the fake's log, no attempt n+2 is
+// made, and the Instance starts. A fixture in which the late job never
+// registers proves nothing here: n+1 would be accepted and the case never
+// arises.
 func TestLostReplyUnderOneJobLimit(t *testing.T) {
 	rg := newRig(t, oneSlotOpts(withBatchConfig(oneJobUser))...)
-	rg.batch.Enqueue(pfake.Script{Outcome: provider.Unknown, Registered: true})
+	rg.batch.Enqueue(pfake.Script{Outcome: provider.Unknown, RegisteredLate: true})
 	rg.create(mdSpec("md"))
+	sawLost := false
+	rg.until(15*time.Minute, 10*time.Second, "attempt 2 is refused for the limit", func() bool {
+		if n := len(rg.allAllocations()); n > 1 {
+			t.Fatalf("%d Allocations, want one throughout", n)
+		}
+		as := rg.allocations("md")
+		if len(as) == 0 || as[0].Status.AtProvider.Submission == nil {
+			return false
+		}
+		sub := as[0].Status.AtProvider.Submission
+		if sub.Attempt == 1 && sub.State == v1alpha1.SubmissionUnknown {
+			sawLost = true
+			if n := rg.batch.LateJobs(); n != 1 {
+				t.Fatalf("%d late jobs while attempt 1 is Unknown, want 1", n)
+			}
+		}
+		return sub.Attempt == 2 && sub.State == v1alpha1.SubmissionRejected
+	})
+	if !sawLost {
+		t.Fatal("attempt 1 never showed as Unknown; the test proves nothing")
+	}
+	a := onlyAllocation(rg, "md")
+	if sub := a.Status.AtProvider.Submission; sub.Code != v1alpha1.ReasonSubmitLimitReached || !strings.Contains(sub.Reason, submitLimitLine) {
+		t.Fatalf("attempt 2 record %+v, want Rejected with code SubmitLimitReached and the reason line", sub)
+	}
+	if rg.batch.LateJobs() != 0 || rg.submissions() != 2 {
+		t.Fatalf("%d late jobs and %d sbatch calls, want the late job registered (0) and 2 calls", rg.batch.LateJobs(), rg.submissions())
+	}
+	tag := a.Annotations[v1alpha1.AnnotationExternalName]
+	jobs, err := rg.batch.FindByTag(rg.ctx, tag, rigStart.Add(-time.Hour))
+	if err != nil || len(jobs) != 1 || !jobs[0].Held() {
+		t.Fatalf("jobs with tag %s = %v, %v; want exactly the late one, held", tag, jobs, err)
+	}
+	if a.Annotations[v1alpha1.AnnotationJobID] != "" {
+		t.Fatalf("job ID %q recorded while the attempt is refused", a.Annotations[v1alpha1.AnnotationJobID])
+	}
+	c := rg.condition("md", v1alpha1.ConditionDegraded)
+	if c.Status != metav1.ConditionTrue || c.Reason != v1alpha1.ReasonSubmitLimitReached || !strings.Contains(c.Message, submitLimitLine) ||
+		!strings.Contains(c.Message, "Provider "+rigProvider+", at its maxSubmitPerUser 1 of QOS example-now") {
+		t.Fatalf("during the refusal Degraded = %s/%s %q, want SubmitLimitReached naming the Provider, the limit and the reason line", c.Status, c.Reason, c.Message)
+	}
+	late := jobs[0].ID
+
 	rg.until(10*time.Minute, 10*time.Second, "the Instance starts", func() bool {
+		if n := len(rg.allAllocations()); n != 1 {
+			t.Fatalf("%d Allocations, want one throughout", n)
+		}
 		ins := rg.instances("md")
 		return len(ins) == 1 && ins[0].Status.Phase != v1alpha1.InstancePending && ins[0].Status.Phase != ""
 	})
-	a := onlyAllocation(rg, "md")
-	tag := a.Annotations[v1alpha1.AnnotationExternalName]
-	jobs, err := rg.batch.FindByTag(rg.ctx, tag, rigStart.Add(-time.Hour))
-	if err != nil || len(jobs) != 1 {
+	a = onlyAllocation(rg, "md")
+	if got := a.Annotations[v1alpha1.AnnotationJobID]; got != late {
+		t.Fatalf("Allocation job ID %q, want the late job %s adopted by its tag", got, late)
+	}
+	if jobs, err := rg.batch.FindByTag(rg.ctx, tag, rigStart.Add(-time.Hour)); err != nil || len(jobs) != 1 {
 		t.Fatalf("jobs with tag %s = %v, %v; want exactly one", tag, jobs, err)
 	}
-	if n := rg.submissions(); n != 1 {
-		t.Fatalf("%d sbatch calls, want the one whose reply was lost", n)
+	if n := rg.submissions(); n != 2 {
+		t.Fatalf("%d sbatch calls, want 2: no attempt n+2", n)
 	}
 	lifts := 0
-	for _, c := range rg.batch.Calls() {
-		if c.Op == "scontrol-release" {
+	for _, call := range rg.batch.Calls() {
+		if call.Op == "scontrol-release" {
 			lifts++
 		}
 	}
 	if lifts != 1 {
 		t.Fatalf("%d hold lifts, want one", lifts)
 	}
-	if n := len(rg.allAllocations()); n != 1 {
-		t.Fatalf("%d Allocations, want one", n)
-	}
 	if c := rg.condition("md", v1alpha1.ConditionDegraded); strings.Contains(c.Message, v1alpha1.ReasonSubmitLimitReached) {
-		t.Fatalf("Degraded %q: the lost reply was read as a refusal", c.Message)
+		t.Fatalf("Degraded %q after the adoption: the refusal was not cleared", c.Message)
 	}
+	noRestartLoop(t, rg, "md")
 }
 
 // TestSlotsLeaderHandOver: an old and a new leader, each with its own
