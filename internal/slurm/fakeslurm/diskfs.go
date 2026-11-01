@@ -96,7 +96,12 @@ func (d *diskFS) mkdirAll(p string, mode fs.FileMode) error {
 		return fmt.Errorf("cannot create directory '%s': %v", p, errOutside)
 	}
 	var chain []string
-	for q := p; q != d.root && q != "/"; q = path.Dir(q) { // in(p) means it ends at root
+	for q := p; q != d.root; q = path.Dir(q) {
+		// A fixed point of path.Dir ("/" or ".") before the root means p
+		// is not under it: a second guard, so the walk always ends.
+		if path.Dir(q) == q {
+			return fmt.Errorf("cannot create directory '%s': %v", p, errOutside)
+		}
 		chain = append(chain, q)
 	}
 	for i := len(chain) - 1; i >= 0; i-- {
