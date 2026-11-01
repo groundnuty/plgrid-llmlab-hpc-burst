@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 )
 
@@ -27,13 +26,15 @@ type EntryHealth struct {
 	LastExit  *ExitRecord `json:"last_exit,omitempty"`
 	Health    string      `json:"health_addr"`
 	HealthzOK *bool       `json:"healthz_ok,omitempty"` // nil: not asked
-	// ReadyzOK is the answer of the lifecycle controller's GET /readyz (HBEP-8, Observers): true
-	// for 200, false for any other answer or none. nil: not asked, which is every process but the
-	// controller, and a controller whose /healthz did not answer 200.
+	// ReadyzOK is whether the lifecycle controller is ready (HBEP-8, Observers), read from its
+	// /readyz checks by status code (readyz.go): false for any answer but 200, or none. nil: not
+	// asked, which is every process but the controller, and a controller whose /healthz did not
+	// answer 200.
 	ReadyzOK *bool `json:"readyz_ok,omitempty"`
-	// ReadyzFailing lists the checks that /readyz named as failing (the lines "[-]name failed" of
-	// its body), while ReadyzOK is false.
-	ReadyzFailing []string `json:"readyz_failing,omitempty"`
+	// ReadyzState says which of the readiness states the controller is in while ReadyzOK is
+	// asked: ReadyzReady, ReadyzStarting, ReadyzNotLeading, or ReadyzUnspecified for a controller
+	// whose /readyz does not name its checks apart. It is empty when the answer was an error.
+	ReadyzState string `json:"readyz_state,omitempty"`
 	// UsageState is the process's usage sink as its /healthz body states it in the usage member
 	// (HBEP-8, Usage records): "ok" or "failing". The front reports it; it is empty for a process
 	// whose body has no usage member, such as the controller.
@@ -241,71 +242,6 @@ func probeEndpoint(addr, path string, timeout time.Duration) (int, []byte, error
 // controllerEntryName is the lifecycle controller's entry in the supervised set and in
 // supervisor.json: the one process whose health is judged by its /readyz.
 const controllerEntryName = "controller"
-
-// readyzServing is the name of the one readiness check the lifecycle controller registers on main
-// (internal/lifecycle/manager.go, readiness.check). It fails both while the controller does not
-// lead its Lease and while its caches have not synced, and controller-runtime withholds the
-// reason (pkg/healthz: "[-]serving failed: reason withheld"), so a failing /readyz cannot tell
-// the two apart.
-const readyzServing = "serving"
-
-// checkReadyz asks the lifecycle controller for GET /readyz (HBEP-8, Observers: it fails until the
-// caches have synced and the controller leads its Lease; /healthz stays liveness) and adds a
-// problem unless it answers 200. controller-runtime answers a failing check with 500 and a body
-// that names it, a Kubernetes API server with 503, so any other status is not ready.
-func checkReadyz(addr string, eh *EntryHealth, add func(string, ...any)) {
-	code, body, err := probeEndpoint(addr, "/readyz", healthzTimeout)
-	ready := err == nil && code == http.StatusOK
-	eh.ReadyzOK = &ready
-	switch {
-	case ready:
-	case err != nil:
-		add("GET /readyz on %s: %v", addr, err)
-	default:
-		eh.ReadyzFailing = failingChecks(body)
-		why := ""
-		switch {
-		case len(eh.ReadyzFailing) == 1 && eh.ReadyzFailing[0] == readyzServing:
-			why = ", failing check: " + readyzServing + " (starting, or not leading its Lease: /readyz does not say which)"
-		case len(eh.ReadyzFailing) > 0:
-			why = ", failing checks: " + strings.Join(eh.ReadyzFailing, ", ")
-		}
-		add("not ready: GET /readyz on %s answered %d%s", addr, code, why)
-	}
-}
-
-// maxFailingChecks bounds how many failing check names a report carries.
-const maxFailingChecks = 8
-
-// failingChecks returns the names of the checks a health endpoint's body marks as failing, in
-// controller-runtime's form: one line "[-]<name> failed: reason withheld" for each. A name outside
-// letters, digits, "_", "-" and "." (at most 64 of them) is skipped, so nothing odd reaches a report.
-func failingChecks(body []byte) []string {
-	var names []string
-	for _, line := range strings.Split(string(body), "\n") {
-		rest, ok := strings.CutPrefix(line, "[-]")
-		if !ok {
-			continue
-		}
-		name, _, _ := strings.Cut(rest, " ")
-		if validCheckName(name) && len(names) < maxFailingChecks {
-			names = append(names, name)
-		}
-	}
-	return names
-}
-
-func validCheckName(n string) bool {
-	if n == "" || len(n) > 64 {
-		return false
-	}
-	for _, r := range n {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' || r == '.') {
-			return false
-		}
-	}
-	return true
-}
 
 // usageStateOf returns the usage member's state from a /healthz body (HBEP-8: /healthz carries
 // usage with state ok or failing), or "" when the body is not a JSON object with that member.

@@ -335,15 +335,16 @@ func TestFrontSupervision(t *testing.T) {
 	// ---- status reports the front ----
 	st, scode := statusOf(t, h)
 	var front *struct {
-		Name       string `json:"name"`
-		Running    bool   `json:"running"`
-		PID        int    `json:"pid"`
-		Restarts   int    `json:"restarts"`
-		HealthzOK  *bool  `json:"healthz_ok"`
-		ReadyzOK   *bool  `json:"readyz_ok"`
-		UsageState string `json:"usage_state"`
-		Degraded   string `json:"degraded"`
-		LastExit   *struct {
+		Name        string `json:"name"`
+		Running     bool   `json:"running"`
+		PID         int    `json:"pid"`
+		Restarts    int    `json:"restarts"`
+		HealthzOK   *bool  `json:"healthz_ok"`
+		ReadyzOK    *bool  `json:"readyz_ok"`
+		ReadyzState string `json:"readyz_state"`
+		UsageState  string `json:"usage_state"`
+		Degraded    string `json:"degraded"`
+		LastExit    *struct {
 			Detail string `json:"detail"`
 		} `json:"last_exit"`
 	}

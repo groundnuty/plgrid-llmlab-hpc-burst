@@ -66,7 +66,7 @@ func TestPrintStatusFrontAndController(t *testing.T) {
 	}
 	yes, no := true, false
 	ready := launcher.EntryHealth{Name: "controller", Running: true, PID: 7, State: "running", Health: "127.0.0.1:1", HealthzOK: &yes, ReadyzOK: &yes}
-	notReady := launcher.EntryHealth{Name: "controller", Running: true, PID: 7, State: "running", Health: "127.0.0.1:1", HealthzOK: &yes, ReadyzOK: &no, ReadyzFailing: []string{"serving"}}
+	notReady := launcher.EntryHealth{Name: "controller", Running: true, PID: 7, State: "running", Health: "127.0.0.1:1", HealthzOK: &yes, ReadyzOK: &no, ReadyzState: launcher.ReadyzNotLeading}
 	front := launcher.EntryHealth{Name: "front", Running: true, PID: 8, State: "running", Health: "127.0.0.1:2", HealthzOK: &yes}
 	sup := &launcher.SupervisorHealth{Running: true, PID: 6}
 	for _, c := range []struct {
@@ -74,8 +74,8 @@ func TestPrintStatusFrontAndController(t *testing.T) {
 		entry launcher.EntryHealth
 		want  string
 	}{
-		{"ready", ready, "supervised controller: running=true pid 7, running, restarts 0, GET /healthz on 127.0.0.1:1: true, GET /readyz: true\n"},
-		{"not ready", notReady, "supervised controller: running=true pid 7, running, restarts 0, GET /healthz on 127.0.0.1:1: true, GET /readyz: false (failing: serving)\n"},
+		{"ready", ready, "supervised controller: running=true pid 7, running, restarts 0, GET /healthz on 127.0.0.1:1: true, readiness: ready\n"},
+		{"not ready", notReady, "supervised controller: running=true pid 7, running, restarts 0, GET /healthz on 127.0.0.1:1: true, readiness: not leading\n"},
 		{"the front is not asked", front, "supervised front: running=true pid 8, running, restarts 0, GET /healthz on 127.0.0.1:2: true\n"},
 	} {
 		out := text(&launcher.StatusReport{Health: launcher.Healthy, Version: "v1", Supervisor: sup, Controllers: []launcher.EntryHealth{c.entry}})

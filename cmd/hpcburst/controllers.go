@@ -1,10 +1,10 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"io"
-	"strings"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/launcher"
 )
@@ -58,10 +58,8 @@ func printSupervision(w io.Writer, r *launcher.StatusReport) {
 			line += fmt.Sprintf(", GET /healthz on %s: %v", c.Health, *c.HealthzOK)
 		}
 		if c.ReadyzOK != nil {
-			line += fmt.Sprintf(", GET /readyz: %v", *c.ReadyzOK)
-			if len(c.ReadyzFailing) > 0 {
-				line += " (failing: " + strings.Join(c.ReadyzFailing, ", ") + ")"
-			}
+			// The state is empty when the readiness could not be read at all.
+			line += ", readiness: " + cmp.Or(c.ReadyzState, "not read")
 		}
 		if c.Degraded != "" {
 			line += ", degraded: " + c.Degraded

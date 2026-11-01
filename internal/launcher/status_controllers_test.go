@@ -1,10 +1,8 @@
 package launcher
 
 import (
-	"cmp"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -51,39 +48,73 @@ func TestCheckEntry(t *testing.T) {
 		if len(problems) != 0 || !eh.Running || eh.HealthzOK == nil || !*eh.HealthzOK || eh.PID != e.Proc.PID {
 			t.Fatalf("%+v, problems %v", eh, problems)
 		}
-		if eh.ReadyzOK == nil || !*eh.ReadyzOK || len(eh.ReadyzFailing) != 0 {
-			t.Fatalf("a controller that answers 200 on /readyz: %+v", eh)
+		if eh.ReadyzOK == nil || !*eh.ReadyzOK || eh.ReadyzState != ReadyzReady {
+			t.Fatalf("a controller that answers 200 on both readiness checks: %+v", eh)
 		}
 	})
-	// The fake answers /healthz and /readyz on their own: not-ready changes /readyz only, so the
-	// cases below fail because /readyz is asked, not because both endpoints changed together.
-	for _, c := range []struct{ name, steer string }{
-		{"as controller-runtime answers a failing check (500)", ""},
-		{"as the API server answers (503)", "503"},
+	// The fake answers /healthz and /readyz on their own, /readyz with controller-runtime's own
+	// handler: each steering file changes one readiness check, so the cases below fail because of
+	// that check and nothing else. Each case also reads the three paths directly first, which shows
+	// that the fake answers them differently (a fake that answered every path alike would prove
+	// nothing about reading them apart).
+	steered := func(t *testing.T, files ...string) {
+		t.Helper()
+		for _, name := range files {
+			f.steer(name, "")
+			t.Cleanup(func() { f.unsteer(name) })
+		}
+	}
+	for _, c := range []struct {
+		name     string
+		files    []string
+		paths    map[string]int // what the fake answers, read directly
+		state    string
+		wantProb string // "" when ready
+	}{
+		{"ready, a controller before the split (only serving)", []string{"readyz-before-split"},
+			map[string]int{"/readyz": 200, "/readyz/caches": 404, "/readyz/leading": 404}, ReadyzReady, ""},
+		{"starting: the caches have not synced", []string{"caches-failing"},
+			map[string]int{"/readyz": 500, "/readyz/caches": 500, "/readyz/leading": 200}, ReadyzStarting,
+			"not ready: starting: GET /readyz/caches on " + e.Health + " answered 500"},
+		{"not leading: the Lease is held by another", []string{"leading-failing"},
+			map[string]int{"/readyz": 500, "/readyz/caches": 200, "/readyz/leading": 500}, ReadyzNotLeading,
+			"not ready: not leading: GET /readyz/leading on " + e.Health + " answered 500"},
+		{"both fail: the caches decide first", []string{"caches-failing", "leading-failing"},
+			map[string]int{"/readyz": 500, "/readyz/caches": 500, "/readyz/leading": 500}, ReadyzStarting,
+			"not ready: starting: GET /readyz/caches on " + e.Health + " answered 500"},
+		{"a controller before the split, not ready: /readyz does not say which", []string{"readyz-before-split", "serving-failing"},
+			map[string]int{"/readyz": 500, "/readyz/caches": 404, "/readyz/leading": 404}, ReadyzUnspecified,
+			"not ready: GET /readyz on " + e.Health + " answered 500 (starting, or not leading its Lease: /readyz does not say which)"},
 	} {
-		t.Run("alive but not ready, "+c.name, func(t *testing.T) {
-			f.steer("not-ready", c.steer)
-			defer f.unsteer("not-ready")
+		t.Run("alive, "+c.name, func(t *testing.T) {
+			steered(t, c.files...)
 			if code, err := healthzCode(f.ports.ControllerAddr()); err != nil || code != 200 {
 				t.Fatalf("setup: /healthz answers %d, %v; the controller must stay alive", code, err)
 			}
+			for path, want := range c.paths {
+				if code, _, err := probeEndpoint(e.Health, path, healthzTimeout); err != nil || code != want {
+					t.Fatalf("setup: the fake answers %d on %s, %v; want %d", code, path, err, want)
+				}
+			}
 			eh, problems := checkEntry(sup, supPID, e)
-			if !eh.Running || eh.HealthzOK == nil || !*eh.HealthzOK || eh.ReadyzOK == nil || *eh.ReadyzOK ||
-				!slices.Equal(eh.ReadyzFailing, []string{"serving"}) {
+			if !eh.Running || eh.HealthzOK == nil || !*eh.HealthzOK || eh.ReadyzOK == nil || *eh.ReadyzOK != (c.wantProb == "") || eh.ReadyzState != c.state {
 				t.Fatalf("%+v, problems %v", eh, problems)
 			}
-			want := "not ready: GET /readyz on " + e.Health + " answered " + cmp.Or(c.steer, "500")
-			if len(problems) != 1 || !strings.Contains(problems[0], want) || !strings.Contains(problems[0], "failing check: serving") {
-				t.Fatalf("problems %q, want one with %q", problems, want)
+			if c.wantProb == "" {
+				if len(problems) != 0 {
+					t.Fatalf("problems %q, want none", problems)
+				}
+			} else if len(problems) != 1 || problems[0] != c.wantProb {
+				t.Fatalf("problems %q, want one: %q", problems, c.wantProb)
 			}
 		})
 	}
 	t.Run("ready again once the controller says so", func(t *testing.T) {
-		f.steer("not-ready", "")
+		f.steer("caches-failing", "")
 		if _, problems := checkEntry(sup, supPID, e); len(problems) != 1 {
 			t.Fatalf("setup: problems %v", problems)
 		}
-		f.unsteer("not-ready")
+		f.unsteer("caches-failing")
 		eh, problems := checkEntry(sup, supPID, e)
 		if len(problems) != 0 || eh.ReadyzOK == nil || !*eh.ReadyzOK {
 			t.Fatalf("%+v, problems %v", eh, problems)
@@ -169,13 +200,9 @@ type supervisedFakeHost struct {
 	health           string
 	code             *int    // the status code /healthz answers
 	body             *string // the body it answers with
-	// /readyz is answered on its own by controller-runtime's own healthz.Handler with one check,
-	// serving, as internal/lifecycle registers it: it passes while ready is true. A non-zero
-	// readyzStatus answers that status instead, with the same body shape; readyzHits counts the
-	// requests, so a test can show that a process was or was not asked.
-	ready        *atomic.Bool
-	readyzStatus *atomic.Int32
-	readyzHits   *atomic.Int32
+	// readyz answers /readyz on its own (readyzFake): a test steers the readiness checks and reads
+	// which paths were asked.
+	readyz *readyzFake
 }
 
 func newSupervisedFakeHost(t *testing.T) *supervisedFakeHost {
@@ -183,25 +210,11 @@ func newSupervisedFakeHost(t *testing.T) *supervisedFakeHost {
 	h := newFakeHost(t)
 	quietControllerRuntime.Do(func() { crlog.SetLogger(logr.Discard()) })
 	code, body := http.StatusOK, ""
-	ready, status, hits := new(atomic.Bool), new(atomic.Int32), new(atomic.Int32)
-	ready.Store(true)
-	readyz := http.StripPrefix("/readyz", &crhealthz.Handler{Checks: map[string]crhealthz.Checker{
-		"ping": crhealthz.Ping,
-		"serving": func(*http.Request) error {
-			if !ready.Load() {
-				return errors.New("not leading, or caches not synced")
-			}
-			return nil
-		},
-	}})
+	readyz := newReadyzFake()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/readyz" {
-			hits.Add(1)
-			if st := int(status.Load()); st != 0 {
-				w.WriteHeader(st)
-				_, _ = io.WriteString(w, "[+]ping ok\n[-]serving failed: reason withheld\nhealthz check failed\n")
-				return
-			}
+		// As the manager mounts its readiness handler (pkg/manager/internal.go:308-310): /readyz
+		// and everything under /readyz/.
+		if r.URL.Path == "/readyz" || strings.HasPrefix(r.URL.Path, "/readyz/") {
 			readyz.ServeHTTP(w, r)
 			return
 		}
@@ -210,7 +223,7 @@ func newSupervisedFakeHost(t *testing.T) *supervisedFakeHost {
 	}))
 	t.Cleanup(srv.Close)
 	u, _ := url.Parse(srv.URL)
-	s := &supervisedFakeHost{fakeHost: h, health: u.Host, code: &code, body: &body, ready: ready, readyzStatus: status, readyzHits: hits}
+	s := &supervisedFakeHost{fakeHost: h, health: u.Host, code: &code, body: &body, readyz: readyz}
 	port, _ := strconv.Atoi(u.Port())
 	const supPID, childPID = 4343, 4344
 	writeFakeProc(t, h.root, supPID, "S", 1, 2000)
@@ -266,8 +279,8 @@ func TestStatusWithControllers(t *testing.T) {
 				len(c) != 1 || !c[0].Running || c[0].PID != 4344 || c[0].Restarts != 2 || c[0].HealthzOK == nil || !*c[0].HealthzOK {
 				t.Fatalf("supervisor %+v, controllers %+v", rep.Supervisor, c)
 			}
-			if c[0].ReadyzOK == nil || !*c[0].ReadyzOK || s.readyzHits.Load() == 0 {
-				t.Fatalf("noAPI=%v: the controller was not asked for /readyz, or it did not answer 200: %+v, %d requests", noAPI, c[0], s.readyzHits.Load())
+			if c[0].ReadyzOK == nil || !*c[0].ReadyzOK || len(s.readyz.paths()) == 0 {
+				t.Fatalf("noAPI=%v: the controller was not asked for its readiness, or it did not answer 200: %+v, %d requests", noAPI, c[0], len(s.readyz.paths()))
 			}
 			if len(rep.Processes) != 2 || rep.Processes[1].Name != supervisorName || rep.Processes[1].Verdict != "ours" {
 				t.Errorf("processes %+v", rep.Processes)
@@ -443,129 +456,270 @@ func TestStatusFrontUsageDegraded(t *testing.T) {
 	})
 }
 
-// TestStatusControllerReadyz: status judges the lifecycle controller by its /readyz (HBEP-8,
-// Observers), which fails until the caches have synced and the controller leads its Lease, and
-// keeps /healthz as liveness. The fake host answers the two endpoints on their own, /readyz with
-// controller-runtime's own handler, so each case changes one of them.
-func TestStatusControllerReadyz(t *testing.T) {
-	reasons := func(r *StatusReport) string { return strings.Join(r.Reasons, "; ") }
-	notReady := func(t *testing.T, rep *StatusReport, answered string) {
-		t.Helper()
-		c := rep.Controllers[0]
-		if rep.Health != Unhealthy || !strings.Contains(reasons(rep), "controller: not ready: GET /readyz on") ||
-			!strings.Contains(reasons(rep), "answered "+answered) || !strings.Contains(reasons(rep), "failing check: serving (starting, or not leading its Lease") {
-			t.Fatalf("%s: %v", rep.Health, rep.Reasons)
+// readyzFake is the lifecycle controller's /readyz on a test server: controller-runtime's own
+// healthz.Handler, mounted as the manager mounts it (pkg/manager/internal.go:308-310), so the
+// statuses are its: 200, 500 for a failing check, and 404 for a name it does not know. The
+// controller registers two checks, caches and leading; beforeSplit registers the one check
+// "serving" that controllers had before the split. A forced answer replaces the handler's on one
+// path, to put a status or a body on the wire that the handler would not write.
+type readyzFake struct {
+	mu                  sync.Mutex
+	cachesOK, leadingOK bool
+	servingOK           bool
+	beforeSplit         bool
+	forced              map[string]forcedAnswer
+	seen                []string
+}
+
+type forcedAnswer struct {
+	code int
+	body string
+	drop bool // close the connection without an answer
+}
+
+func newReadyzFake() *readyzFake {
+	return &readyzFake{cachesOK: true, leadingOK: true, servingOK: true, forced: map[string]forcedAnswer{}}
+}
+
+// set changes the fake's state while it serves.
+func (f *readyzFake) set(change func(*readyzFake)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	change(f)
+}
+
+// paths returns the paths asked since the fake was made or last cleared.
+func (f *readyzFake) paths() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.seen)
+}
+
+func (f *readyzFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	f.seen = append(f.seen, r.URL.Path)
+	fa, forced := f.forced[r.URL.Path]
+	before := f.beforeSplit
+	f.mu.Unlock()
+	if forced && fa.drop {
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err == nil {
+			_ = conn.Close()
 		}
-		if !c.Running || c.HealthzOK == nil || !*c.HealthzOK || c.ReadyzOK == nil || *c.ReadyzOK || !slices.Equal(c.ReadyzFailing, []string{"serving"}) {
-			t.Errorf("the controller is alive but not ready: %+v", c)
+		return
+	}
+	if forced {
+		w.WriteHeader(fa.code)
+		_, _ = io.WriteString(w, fa.body)
+		return
+	}
+	check := func(ok func(*readyzFake) bool, why string) crhealthz.Checker {
+		return func(*http.Request) error {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if !ok(f) {
+				return errors.New(why)
+			}
+			return nil
 		}
 	}
-	t.Run("control: alive and ready", func(t *testing.T) {
+	checks := map[string]crhealthz.Checker{
+		"caches":  check(func(f *readyzFake) bool { return f.cachesOK }, "caches not synced"),
+		"leading": check(func(f *readyzFake) bool { return f.leadingOK }, "not leading its Lease"),
+	}
+	if before {
+		checks = map[string]crhealthz.Checker{"serving": check(func(f *readyzFake) bool { return f.servingOK }, "not leading, or caches not synced")}
+	}
+	http.StripPrefix("/readyz", &crhealthz.Handler{Checks: checks}).ServeHTTP(w, r)
+}
+
+// TestControllerRuntimeReadyzStatuses pins the facts about controller-runtime v0.23.1's handler that
+// the status reading rests on (pkg/healthz/healthz.go:158-165 serves /readyz/<name> and answers 404
+// for an unknown name, :175-180 answers 200 or 500 for one check, :96-97 the aggregate 500): a
+// bump of controller-runtime that changes one of them fails here before it changes what status says.
+func TestControllerRuntimeReadyzStatuses(t *testing.T) {
+	quietControllerRuntime.Do(func() { crlog.SetLogger(logr.Discard()) })
+	pass := func(*http.Request) error { return nil }
+	fail := func(*http.Request) error { return errors.New("a reason") }
+	h := http.StripPrefix("/readyz", &crhealthz.Handler{Checks: map[string]crhealthz.Checker{"caches": pass, "leading": fail}})
+	for path, want := range map[string]int{"/readyz": 500, "/readyz/": 500, "/readyz/caches": 200, "/readyz/leading": 500, "/readyz/serving": 404, "/readyz/caches/x": 404} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != want {
+			t.Errorf("GET %s answered %d, want %d", path, rec.Code, want)
+		}
+	}
+	rec := httptest.NewRecorder()
+	http.StripPrefix("/readyz", &crhealthz.Handler{Checks: map[string]crhealthz.Checker{"caches": pass, "leading": pass}}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != 200 {
+		t.Errorf("the aggregate answered %d with every check passing", rec.Code)
+	}
+}
+
+// TestStatusControllerReadyz: status judges the lifecycle controller by its readiness checks
+// (HBEP-8, Observers), which fail until the caches have synced and the controller leads its Lease,
+// and keeps /healthz as liveness. It reads the two checks on their own paths by status code only
+// and tells "starting" from "not leading" (`@hpc-burst-science-agent`, 1 Nov 2026, #147). The fake
+// host answers the endpoints on their own, /readyz with controller-runtime's own handler, so each
+// case changes one of them.
+func TestStatusControllerReadyz(t *testing.T) {
+	reasons := func(r *StatusReport) string { return strings.Join(r.Reasons, "; ") }
+	const cachesPath, leadingPath = "/readyz/caches", "/readyz/leading"
+	// notReady checks the report of a controller that is alive and whose readiness is state.
+	notReady := func(t *testing.T, rep *StatusReport, state, reason string) {
+		t.Helper()
+		c := rep.Controllers[0]
+		if rep.Health != Unhealthy || len(rep.Reasons) != 1 || !strings.Contains(reasons(rep), "controller: not ready: ") || !strings.Contains(reasons(rep), reason) {
+			t.Fatalf("%s: %v; want one reason with %q", rep.Health, rep.Reasons, reason)
+		}
+		if !c.Running || c.HealthzOK == nil || !*c.HealthzOK || c.ReadyzOK == nil || *c.ReadyzOK || c.ReadyzState != state {
+			t.Errorf("the controller is alive but not ready (%s): %+v", state, c)
+		}
+	}
+	t.Run("control: alive and ready, each check asked on its own path", func(t *testing.T) {
 		s := newSupervisedFakeHost(t)
 		rep := s.status(true)
-		if rep.Health != Healthy || len(rep.Reasons) != 0 || s.readyzHits.Load() == 0 {
-			t.Fatalf("%s: %v, %d /readyz requests", rep.Health, rep.Reasons, s.readyzHits.Load())
+		if rep.Health != Healthy || len(rep.Reasons) != 0 || !slices.Equal(s.readyz.paths(), []string{cachesPath, leadingPath}) {
+			t.Fatalf("%s: %v, paths asked %v", rep.Health, rep.Reasons, s.readyz.paths())
+		}
+		if c := rep.Controllers[0]; c.ReadyzOK == nil || !*c.ReadyzOK || c.ReadyzState != ReadyzReady {
+			t.Errorf("%+v", c)
 		}
 	})
-	t.Run("alive but not ready: 200 on /healthz, 500 on /readyz from controller-runtime's handler", func(t *testing.T) {
+	t.Run("starting: the caches have not synced, and nothing else is asked", func(t *testing.T) {
 		s := newSupervisedFakeHost(t)
-		s.ready.Store(false)
-		notReady(t, s.status(true), "500")
+		s.readyz.set(func(f *readyzFake) { f.cachesOK = false })
+		notReady(t, s.status(true), ReadyzStarting, "starting: GET "+cachesPath+" on "+s.health+" answered 500")
+		if got := s.readyz.paths(); !slices.Equal(got, []string{cachesPath}) {
+			t.Errorf("paths asked %v, want only %s", got, cachesPath)
+		}
 	})
-	t.Run("alive but not ready: 200 on /healthz, 503 on /readyz", func(t *testing.T) {
+	t.Run("not leading: the caches have synced and the Lease is held by another", func(t *testing.T) {
 		s := newSupervisedFakeHost(t)
-		s.readyzStatus.Store(http.StatusServiceUnavailable)
-		notReady(t, s.status(true), "503")
+		s.readyz.set(func(f *readyzFake) { f.leadingOK = false })
+		notReady(t, s.status(true), ReadyzNotLeading, "not leading: GET "+leadingPath+" on "+s.health+" answered 500")
+		if got := s.readyz.paths(); !slices.Equal(got, []string{cachesPath, leadingPath}) {
+			t.Errorf("paths asked %v, want %s then %s", got, cachesPath, leadingPath)
+		}
+	})
+	t.Run("both fail: starting", func(t *testing.T) {
+		s := newSupervisedFakeHost(t)
+		s.readyz.set(func(f *readyzFake) { f.cachesOK, f.leadingOK = false, false })
+		notReady(t, s.status(true), ReadyzStarting, "starting: GET "+cachesPath)
 	})
 	t.Run("not ready, and the API is asked too", func(t *testing.T) {
 		s := newSupervisedFakeHost(t)
-		s.ready.Store(false)
-		notReady(t, s.status(false), "500")
+		s.readyz.set(func(f *readyzFake) { f.leadingOK = false })
+		notReady(t, s.status(false), ReadyzNotLeading, "not leading: GET "+leadingPath)
 	})
-	t.Run("ready again: the same host turns healthy", func(t *testing.T) {
+	// The decision is the status code, never the body: a body that says the opposite changes
+	// nothing, and neither does the status class (the API server answers 503).
+	for _, c := range []struct {
+		name    string
+		forced  map[string]forcedAnswer
+		state   string
+		healthy bool
+	}{
+		{"caches 200 whose body names a failing check", map[string]forcedAnswer{cachesPath: {code: 200, body: "[+]ping ok\n[-]caches failed: reason withheld\nhealthz check failed\n"}}, ReadyzReady, true},
+		{"caches 500 whose body says ok", map[string]forcedAnswer{cachesPath: {code: 500, body: "ok"}}, ReadyzStarting, false},
+		{"caches 503", map[string]forcedAnswer{cachesPath: {code: 503, body: ""}}, ReadyzStarting, false},
+		{"leading 503 with a body that says ok", map[string]forcedAnswer{leadingPath: {code: 503, body: "ok"}}, ReadyzNotLeading, false},
+		{"leading 200 whose body names a failing check", map[string]forcedAnswer{leadingPath: {code: 200, body: "[-]leading failed: reason withheld\n"}}, ReadyzReady, true},
+	} {
+		t.Run("by status code only: "+c.name, func(t *testing.T) {
+			s := newSupervisedFakeHost(t)
+			s.readyz.set(func(f *readyzFake) { f.forced = c.forced })
+			rep := s.status(true)
+			if c.healthy {
+				if rep.Health != Healthy || len(rep.Reasons) != 0 || rep.Controllers[0].ReadyzState != c.state {
+					t.Fatalf("%s: %v, %+v", rep.Health, rep.Reasons, rep.Controllers[0])
+				}
+				return
+			}
+			notReady(t, rep, c.state, "")
+		})
+	}
+	// A controller from before the split registers one check, "serving". Its per-check paths
+	// answer 404 from controller-runtime itself, and the aggregate decides.
+	const unspecified = "answered 500 (starting, or not leading its Lease: /readyz does not say which)"
+	t.Run("an older controller, not ready: the aggregate's code and the fallback text", func(t *testing.T) {
 		s := newSupervisedFakeHost(t)
-		s.ready.Store(false)
-		if rep := s.status(true); rep.Health != Unhealthy {
-			t.Fatalf("setup: %s: %v", rep.Health, rep.Reasons)
-		}
-		s.ready.Store(true)
-		if rep := s.status(true); rep.Health != Healthy || len(rep.Reasons) != 0 {
-			t.Fatalf("%s: %v", rep.Health, rep.Reasons)
+		s.readyz.set(func(f *readyzFake) { f.beforeSplit, f.servingOK = true, false })
+		notReady(t, s.status(true), ReadyzUnspecified, "GET /readyz on "+s.health+" "+unspecified)
+		if got := s.readyz.paths(); !slices.Equal(got, []string{cachesPath, "/readyz"}) {
+			t.Errorf("paths asked %v, want %s then /readyz", got, cachesPath)
 		}
 	})
-	t.Run("not alive but answering ready: unhealthy by liveness, and /readyz is not asked", func(t *testing.T) {
+	t.Run("an older controller, ready: healthy", func(t *testing.T) {
 		s := newSupervisedFakeHost(t)
-		*s.code = http.StatusServiceUnavailable
+		s.readyz.set(func(f *readyzFake) { f.beforeSplit = true })
 		rep := s.status(true)
-		if rep.Health != Unhealthy || !strings.Contains(reasons(rep), "GET /healthz") || strings.Contains(reasons(rep), "not ready") ||
-			rep.Controllers[0].ReadyzOK != nil || s.readyzHits.Load() != 0 {
-			t.Fatalf("%s: %v, entry %+v, %d /readyz requests", rep.Health, rep.Reasons, rep.Controllers[0], s.readyzHits.Load())
+		if rep.Health != Healthy || len(rep.Reasons) != 0 || rep.Controllers[0].ReadyzState != ReadyzReady || rep.Controllers[0].ReadyzOK == nil || !*rep.Controllers[0].ReadyzOK {
+			t.Fatalf("%s: %v, %+v", rep.Health, rep.Reasons, rep.Controllers[0])
 		}
 	})
-	t.Run("a controller that does not serve /readyz is not ready", func(t *testing.T) {
+	t.Run("a 404 on the second path alone is the older controller too", func(t *testing.T) {
 		s := newSupervisedFakeHost(t)
-		s.readyzStatus.Store(http.StatusNotFound)
+		s.readyz.set(func(f *readyzFake) {
+			f.forced = map[string]forcedAnswer{leadingPath: {code: 404, body: "404 page not found\n"}}
+			f.leadingOK = false
+		})
+		// The fake would fail "leading" if it were asked as a check: the 404 sends status to the
+		// aggregate instead, which the failing check turns to 500.
+		notReady(t, s.status(true), ReadyzUnspecified, unspecified)
+		if got := s.readyz.paths(); !slices.Equal(got, []string{cachesPath, leadingPath, "/readyz"}) {
+			t.Errorf("paths asked %v", got)
+		}
+	})
+	t.Run("a controller that serves no /readyz at all is not ready", func(t *testing.T) {
+		s := newSupervisedFakeHost(t)
+		s.readyz.set(func(f *readyzFake) {
+			f.forced = map[string]forcedAnswer{cachesPath: {code: 404, body: ""}, leadingPath: {code: 404, body: ""}, "/readyz": {code: 404, body: ""}}
+		})
 		rep := s.status(true)
 		if rep.Health != Unhealthy || !strings.Contains(reasons(rep), "not ready: GET /readyz on") || !strings.Contains(reasons(rep), "answered 404") {
 			t.Fatalf("%s: %v", rep.Health, rep.Reasons)
 		}
 	})
+	t.Run("the paths cannot be read: unhealthy, and no state", func(t *testing.T) {
+		s := newSupervisedFakeHost(t)
+		s.readyz.set(func(f *readyzFake) { f.forced = map[string]forcedAnswer{cachesPath: {drop: true}} })
+		rep := s.status(true)
+		if rep.Health != Unhealthy || len(rep.Reasons) != 1 || !strings.Contains(reasons(rep), "GET "+cachesPath+" on") {
+			t.Fatalf("%s: %v", rep.Health, rep.Reasons)
+		}
+		if c := rep.Controllers[0]; c.ReadyzOK == nil || *c.ReadyzOK || c.ReadyzState != "" {
+			t.Errorf("%+v", c)
+		}
+	})
+	t.Run("ready again: the same host turns healthy", func(t *testing.T) {
+		s := newSupervisedFakeHost(t)
+		s.readyz.set(func(f *readyzFake) { f.leadingOK = false })
+		if rep := s.status(true); rep.Health != Unhealthy {
+			t.Fatalf("setup: %s: %v", rep.Health, rep.Reasons)
+		}
+		s.readyz.set(func(f *readyzFake) { f.leadingOK = true })
+		if rep := s.status(true); rep.Health != Healthy || len(rep.Reasons) != 0 {
+			t.Fatalf("%s: %v", rep.Health, rep.Reasons)
+		}
+	})
+	t.Run("not alive but answering ready: unhealthy by liveness, and readiness is not asked", func(t *testing.T) {
+		s := newSupervisedFakeHost(t)
+		*s.code = http.StatusServiceUnavailable
+		rep := s.status(true)
+		if rep.Health != Unhealthy || !strings.Contains(reasons(rep), "GET /healthz") || strings.Contains(reasons(rep), "not ready") ||
+			rep.Controllers[0].ReadyzOK != nil || len(s.readyz.paths()) != 0 {
+			t.Fatalf("%s: %v, entry %+v, paths asked %v", rep.Health, rep.Reasons, rep.Controllers[0], s.readyz.paths())
+		}
+	})
 	t.Run("only the controller is asked: a front on a not-ready host is judged by /healthz", func(t *testing.T) {
 		s := newSupervisedFakeHost(t)
-		s.ready.Store(false)
+		s.readyz.set(func(f *readyzFake) { f.cachesOK = false })
 		*s.body = `{"synced":true,"usage":{"state":"ok"}}`
 		s.writeSupervisorFile(s.supRec, EntryRecord{Name: "front", Health: s.health, State: entryRunning, Proc: &s.childRec})
 		rep := s.status(true)
-		if rep.Health != Healthy || len(rep.Reasons) != 0 || rep.Controllers[0].ReadyzOK != nil || s.readyzHits.Load() != 0 {
-			t.Fatalf("%s: %v, entry %+v, %d /readyz requests", rep.Health, rep.Reasons, rep.Controllers[0], s.readyzHits.Load())
-		}
-	})
-}
-
-// TestFailingChecks reads the failing checks' names from bodies that controller-runtime's own
-// healthz.Handler writes, never from a body this package wrote, and shows that the handler answers
-// a failing check with a status other than 200 (the code reads any such status as not ready).
-func TestFailingChecks(t *testing.T) {
-	fail := func(*http.Request) error { return errors.New("a reason that must not be needed") }
-	pass := func(*http.Request) error { return nil }
-	for _, c := range []struct {
-		name   string
-		checks map[string]crhealthz.Checker
-		want   []string
-	}{
-		{"all pass", map[string]crhealthz.Checker{"ping": crhealthz.Ping, "serving": pass}, nil},
-		{"serving fails", map[string]crhealthz.Checker{"ping": crhealthz.Ping, "serving": fail}, []string{"serving"}},
-		{"two fail", map[string]crhealthz.Checker{"ping": crhealthz.Ping, "leading": fail, "caches": fail}, []string{"caches", "leading"}},
-		{"a name with a dot and a dash", map[string]crhealthz.Checker{"a.b-c_D1": fail}, []string{"a.b-c_D1"}},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			rec := httptest.NewRecorder()
-			http.StripPrefix("/readyz", &crhealthz.Handler{Checks: c.checks}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
-			if (len(c.want) == 0) != (rec.Code == http.StatusOK) {
-				t.Fatalf("the handler answered %d for failing checks %v", rec.Code, c.want)
-			}
-			got := failingChecks(rec.Body.Bytes())
-			slices.Sort(got)
-			if !slices.Equal(got, c.want) {
-				t.Errorf("failingChecks(%q) = %v, want %v", rec.Body.String(), got, c.want)
-			}
-		})
-	}
-	t.Run("odd lines give no name", func(t *testing.T) {
-		long := strings.Repeat("x", 65)
-		for _, body := range []string{"", "ok", "[+]ping ok\n", "[-] failed\n", "[-]bad\x00name failed\n", "[-]" + long + " failed\n", "[-]sp\u00e9cial failed\n", "x[-]serving failed\n"} {
-			if got := failingChecks([]byte(body)); len(got) != 0 {
-				t.Errorf("failingChecks(%q) = %v, want none", body, got)
-			}
-		}
-	})
-	t.Run("the list is bounded", func(t *testing.T) {
-		var b strings.Builder
-		for i := 0; i < 3*maxFailingChecks; i++ {
-			fmt.Fprintf(&b, "[-]c%d failed: reason withheld\n", i)
-		}
-		if got := failingChecks([]byte(b.String())); len(got) != maxFailingChecks {
-			t.Errorf("%d names, want %d", len(got), maxFailingChecks)
+		if rep.Health != Healthy || len(rep.Reasons) != 0 || rep.Controllers[0].ReadyzOK != nil || len(s.readyz.paths()) != 0 {
+			t.Fatalf("%s: %v, entry %+v, paths asked %v", rep.Health, rep.Reasons, rep.Controllers[0], s.readyz.paths())
 		}
 	})
 }

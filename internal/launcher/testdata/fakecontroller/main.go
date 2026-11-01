@@ -14,9 +14,15 @@
 //	ignore-term   SIGTERM is ignored
 //	slow-term     its content is milliseconds: SIGTERM is answered with exit 0 after that long
 //	unhealthy     /healthz answers 503
-//	not-ready     /readyz answers with the status in the file (500 when it is empty or not a
-//	              status) and the body controller-runtime writes for a failing check; without
-//	              the file the controller answers 200 on /readyz
+//	caches-failing   the readiness check "caches" fails (the lifecycle controller's caches have
+//	              not synced)
+//	leading-failing  the readiness check "leading" fails (it does not hold its Lease)
+//	readyz-before-split  the controller registers the one check "serving" of controllers before
+//	              the split instead of "caches" and "leading": /readyz/caches and /readyz/leading
+//	              answer 404, and "serving" fails while the file serving-failing exists
+//	              Without these files every readiness check passes. /readyz is served by
+//	              controller-runtime's own handler, mounted as its manager mounts it, so the
+//	              statuses (200, 500, and 404 for an unknown check) and bodies are its.
 //	no-health     the process serves nothing
 //	listen-tcp    one host:port per line: the process also listens there (TCP), and serves
 //	              /healthz there too
@@ -37,6 +43,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -48,9 +55,16 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/go-logr/logr"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 func main() {
+	// controller-runtime's healthz handler logs each failing check, and without a sink it prints a
+	// notice and a goroutine dump to stderr.
+	log.SetLogger(logr.Discard())
 	fs := flag.NewFlagSet("fakecontroller", flag.ContinueOnError)
 	asFront := filepath.Base(os.Args[0]) == "hpcburst-front"
 	var config *string
@@ -111,6 +125,7 @@ func main() {
 			}
 		}
 	}
+	readyz := readyzHandler(ctl)
 	if _, off := ctl("no-health"); !off {
 		l, err := net.Listen("tcp", *health)
 		if err != nil {
@@ -118,8 +133,8 @@ func main() {
 			os.Exit(1)
 		}
 		go http.Serve(l, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/readyz" && !asFront {
-				serveReadyz(w, ctl)
+			if !asFront && (r.URL.Path == "/readyz" || strings.HasPrefix(r.URL.Path, "/readyz/")) {
+				readyz.ServeHTTP(w, r)
 				return
 			}
 			if _, bad := ctl("unhealthy"); bad || r.URL.Path != "/healthz" {
@@ -158,24 +173,33 @@ func main() {
 	}
 }
 
-// serveReadyz answers GET /readyz as the lifecycle controller does: 200 and "ok" while ready; while
-// the not-ready file exists, the status in it and the body of controller-runtime's pkg/healthz for
-// one failing check named serving (the lifecycle controller's only readiness check), which
-// withholds the reason.
-func serveReadyz(w http.ResponseWriter, ctl func(string) (string, bool)) {
-	content, notReady := ctl("not-ready")
-	if !notReady {
-		w.WriteHeader(http.StatusOK)
-		_, _ = fmt.Fprint(w, "ok")
-		return
+// readyzHandler is the lifecycle controller's /readyz: controller-runtime's own healthz.Handler
+// with the checks the controller registers, mounted the way the manager mounts it (pkg/manager/
+// internal.go:308-310: the prefix is stripped, for /readyz and /readyz/). Each check reads its
+// steering file when it is asked, so a test changes the answer while the process runs.
+func readyzHandler(ctl func(string) (string, bool)) http.Handler {
+	failing := func(file, why string) healthz.Checker {
+		return func(*http.Request) error {
+			if _, bad := ctl(file); bad {
+				return errors.New(why)
+			}
+			return nil
+		}
 	}
-	code, err := strconv.Atoi(content)
-	if err != nil || code < 400 || code > 599 {
-		code = http.StatusInternalServerError
-	}
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(code)
-	_, _ = fmt.Fprint(w, "[+]ping ok\n[-]serving failed: reason withheld\nhealthz check failed\n")
+	split := http.StripPrefix("/readyz", &healthz.Handler{Checks: map[string]healthz.Checker{
+		"caches":  failing("caches-failing", "caches not synced"),
+		"leading": failing("leading-failing", "not leading its Lease"),
+	}})
+	beforeSplit := http.StripPrefix("/readyz", &healthz.Handler{Checks: map[string]healthz.Checker{
+		"serving": failing("serving-failing", "not leading, or caches not synced"),
+	}})
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, old := ctl("readyz-before-split"); old {
+			beforeSplit.ServeHTTP(w, r)
+			return
+		}
+		split.ServeHTTP(w, r)
+	})
 }
 
 // recordedRunning reports whether the supervisor's record in stateDir names pid as a running
