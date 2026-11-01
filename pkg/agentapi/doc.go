@@ -110,8 +110,9 @@
 //   - the controller judges everything with a threshold or a declared value:
 //     the file rehash, the settings comparison, the engine version, the
 //     served model names, the maximum length, KV capacity against
-//     targetSessions times contextTokens.typical, warm-up settling (no shape
-//     more than 10% slower than the round before; at most MaxWarmUpRounds),
+//     targetSessions times contextTokens.typical, warm-up settling (no
+//     fixed-length shape slower than the round before by more than max(10%,
+//     100 ms); at most MaxWarmUpRounds),
 //     and every health signal.
 //
 // # How reports reach the controller

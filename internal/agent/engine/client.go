@@ -44,6 +44,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"sync"
@@ -62,6 +63,10 @@ type Client struct {
 	// engine then splits a reply into reasoning and a final answer, and
 	// the checks that need an answer allow for the reasoning (WithReasoning).
 	reasoning bool
+
+	// log receives what the client notes but does not report: the warm-up
+	// tool-call shape's answer, which warm-up does not judge (WithLogger).
+	log *slog.Logger
 
 	mu           sync.Mutex
 	model        string
@@ -84,6 +89,10 @@ type Option func(*Client)
 // ruling, 31 Oct 2026). Its other shapes need no option and get no extra
 // budget: their declared output length already counts the reasoning.
 func WithReasoning(on bool) Option { return func(c *Client) { c.reasoning = on } }
+
+// WithLogger gives the client a log for what it notes but does not report;
+// without one those notes are dropped.
+func WithLogger(l *slog.Logger) Option { return func(c *Client) { c.log = l } }
 
 // New returns a Client of the engine listening on socket, which it reaches
 // with key, the Instance's key.

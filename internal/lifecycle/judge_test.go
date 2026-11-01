@@ -1,6 +1,8 @@
 package lifecycle
 
 import (
+	"encoding/json"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -79,6 +81,58 @@ func TestJudgeVerifyPasses(t *testing.T) {
 	}
 	if len(got.NotReported) != 0 || len(got.Contradictions) != 0 || len(got.Undeclared) != 0 {
 		t.Errorf("notReported %v contradictions %v undeclared %v, want none", got.NotReported, got.Contradictions, got.Undeclared)
+	}
+}
+
+// The verification record holds the model's generation_config defaults as the
+// agent reported them (science-agent rulings, 1 Nov 2026, issue #125), on a
+// pass and on a failure, and none when the agent reported none.
+func TestJudgeVerifyRecordsTheGenerationConfig(t *testing.T) {
+	r := judgeResult()
+	r.GenerationConfig = map[string]string{"repetition_penalty": "1.1", "temperature": "0.7", "top_k": "20", "top_p": "0.8"}
+	got := judgeVerify(judgeDeclared(), r, true, judgeShapes())
+	if got.Verdict != v1alpha1.VerdictPass || !maps.Equal(got.GenerationConfig, r.GenerationConfig) {
+		t.Errorf("verdict %q, generationConfig %v, want a pass recording %v", got.Verdict, got.GenerationConfig, r.GenerationConfig)
+	}
+	b, err := json.Marshal(got)
+	if err != nil || !strings.Contains(string(b), `"generationConfig":{"repetition_penalty":"1.1"`) {
+		t.Errorf("record data %s (%v) does not carry generationConfig", b, err)
+	}
+	r.Files[0].Outcome = agentapi.FileMismatch
+	if got := judgeVerify(judgeDeclared(), r, true, judgeShapes()); got.Verdict != v1alpha1.VerdictFail || got.GenerationConfig["top_p"] != "0.8" {
+		t.Errorf("on a failed rehash: verdict %q, generationConfig %v", got.Verdict, got.GenerationConfig)
+	}
+	if got := judgeVerify(judgeDeclared(), judgeResult(), true, judgeShapes()); got.GenerationConfig != nil {
+		t.Errorf("none reported, recorded %v", got.GenerationConfig)
+	}
+}
+
+// The verification record fixes the behaviour check's context (science-agent
+// ruling, 31 Oct 2026, for #88; issue #125, item 9). Without a reasoning
+// parser it is the longest context: 32768 - 512 - 12 = 32244. With one it is
+// #94's hand figure for Qwen3-0.6B, 8192 - 8 - 128 - 4096 = 3960 (issue #94,
+// comment 6550908687, the behaviour row). After a worker restart, which runs
+// no qualification, there is none.
+func TestJudgeVerifyRecordsTheBehaviourContext(t *testing.T) {
+	if got := judgeVerify(judgeDeclared(), judgeResult(), true, judgeShapes()); got.BehaviourContextTokens != 32244 {
+		t.Errorf("no reasoning parser: %d, want 32244", got.BehaviourContextTokens)
+	}
+	d := judgeDeclared()
+	d.flags["max-model-len"], d.flags["reasoning-parser"] = "8192", "qwen3"
+	r := judgeResult()
+	r.Settings["max-model-len"], r.TemplateOverhead = "8192", 8
+	longest := int32(4096)
+	sh := shapes{short: 128, typical: 1024, longest: &longest, outputTypical: 128, outputLongest: 512, targetSessions: 8}
+	got := judgeVerify(d, r, true, sh)
+	if got.Verdict != v1alpha1.VerdictPass || got.BehaviourContextTokens != 3960 {
+		t.Errorf("reasoning parser: verdict %q (%s), context %d, want a pass at 3960", got.Verdict, got.Message, got.BehaviourContextTokens)
+	}
+	b, _ := json.Marshal(got)
+	if !strings.Contains(string(b), `"behaviourContextTokens":3960`) {
+		t.Errorf("record data %s does not carry behaviourContextTokens", b)
+	}
+	if got := judgeVerify(d, r, false, sh); got.BehaviourContextTokens != 0 {
+		t.Errorf("worker restart: %d, want none", got.BehaviourContextTokens)
 	}
 }
 
@@ -410,6 +464,112 @@ func TestJudgeWarmUpSettles(t *testing.T) {
 				t.Errorf("settled %v but throughput %v", state == warmUpSettled, thr)
 			}
 		})
+	}
+}
+
+// withToolCall appends one tool-call request to r, with the given total and
+// error.
+func withToolCall(r agentapi.WarmUpRound, total time.Duration, errText string) agentapi.WarmUpRound {
+	q := judgeReq(agentapi.ShapeToolCall, 50*time.Millisecond, total, 40)
+	q.Error = errText
+	r.Requests = append(slices.Clone(r.Requests), q)
+	return r
+}
+
+// TestJudgeWarmUpSettleFloor covers the settling rule of the science agent's
+// ruling of 1 Nov 2026 (issue #125): a shape is settled when its mean Total
+// rises by at most max(10% of the round before, 100 ms). Every round here also
+// carries a tool-call request at a steady 1 s, so the judged set is the one an
+// Instance with tool calls reports. The figures are #125's acceptance tests:
+//
+//	200 ms -> 244 ms: +22%, +44 ms, under the 100 ms floor: settled
+//	2 s -> 2.24 s:    +12%, +240 ms, above max(200 ms, 100 ms): not settled
+//
+// and the floor's edges: 200 ms -> 300 ms (+100 ms) settles, 200 ms -> 301 ms
+// does not; 2 s -> 2.2 s (+200 ms, the 10%) settles.
+//
+// HBEP-7's Test plan (Warm-up) names the other figures, worked out by hand: a
+// 200 ms request may grow by max(10% = 20 ms, 100 ms) = 100 ms, so +90 ms
+// settles and +110 ms does not; a 5 s request by max(10% = 500 ms, 100 ms) =
+// 500 ms, so +450 ms settles and +550 ms does not.
+func TestJudgeWarmUpSettleFloor(t *testing.T) {
+	s, ms := time.Second, time.Millisecond
+	round := func(n int32, short, typical time.Duration) agentapi.WarmUpRound {
+		return withToolCall(judgeRound(n, short, typical, 2*s, 2*s), s, "")
+	}
+	tests := []struct {
+		name        string
+		prev, cur   [2]time.Duration // short, typical
+		wantSettled bool
+	}{
+		{"200 ms shape +22% is under the 100 ms floor", [2]time.Duration{200 * ms, 2 * s}, [2]time.Duration{244 * ms, 2 * s}, true},
+		{"2 s shape +12% is above 10%", [2]time.Duration{200 * ms, 2 * s}, [2]time.Duration{200 * ms, 2240 * ms}, false},
+		{"200 ms shape +100 ms is at the floor", [2]time.Duration{200 * ms, 2 * s}, [2]time.Duration{300 * ms, 2 * s}, true},
+		{"200 ms shape +101 ms is above the floor", [2]time.Duration{200 * ms, 2 * s}, [2]time.Duration{301 * ms, 2 * s}, false},
+		{"2 s shape +10% is at the tolerance", [2]time.Duration{200 * ms, 2 * s}, [2]time.Duration{200 * ms, 2200 * ms}, true},
+		{"200 ms shape +90 ms settles, the floor exceeding 10%", [2]time.Duration{200 * ms, 2 * s}, [2]time.Duration{290 * ms, 2 * s}, true},
+		{"200 ms shape +110 ms does not settle", [2]time.Duration{200 * ms, 2 * s}, [2]time.Duration{310 * ms, 2 * s}, false},
+		{"5 s shape +450 ms settles, under 10%", [2]time.Duration{200 * ms, 5 * s}, [2]time.Duration{200 * ms, 5450 * ms}, true},
+		{"5 s shape +550 ms does not settle, over 10%", [2]time.Duration{200 * ms, 5 * s}, [2]time.Duration{200 * ms, 5550 * ms}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rounds := []agentapi.WarmUpRound{round(1, tc.prev[0], tc.prev[1]), round(2, tc.cur[0], tc.cur[1])}
+			state, msg, _ := judgeWarmUp(&agentapi.WarmUpResult{Rounds: rounds}, 4)
+			if got := state == warmUpSettled; got != tc.wantSettled || state == warmUpFailed {
+				t.Fatalf("state = %d (%q), want settled %v", state, msg, tc.wantSettled)
+			}
+		})
+	}
+}
+
+// TestJudgeWarmUpVaryingShapeIsNotJudged: the tool-call shape, whose output
+// length varies, runs in every round but its timings are never judged
+// (science-agent ruling, 1 Nov 2026, issue #125): a total ten times the round
+// before's does not block settling. A control shows the same slowdown on a
+// fixed-length shape does. A failed request is judged on every shape: an error
+// on the tool call fails warm-up, as one on the typical shape does (the agent
+// reports one only for an HTTP error or a cut stream, never for the answer).
+func TestJudgeWarmUpVaryingShapeIsNotJudged(t *testing.T) {
+	s := time.Second
+	r1 := withToolCall(judgeEven(1, 2*s), 400*time.Millisecond, "")
+	slow := withToolCall(judgeEven(2, 2*s), 4*s, "")
+	if state, msg, thr := judgeWarmUp(&agentapi.WarmUpResult{Rounds: []agentapi.WarmUpRound{r1, slow}}, 4); state != warmUpSettled || thr == nil || !strings.Contains(msg, "round 2") {
+		t.Errorf("tool call ten times slower: state = %d (%q), want settled in round 2", state, msg)
+	}
+	// Control: the same tenfold slowdown on the typical shape does not settle.
+	ctl := withToolCall(judgeRound(2, 2*s, 20*s, 2*s, 2*s), 400*time.Millisecond, "")
+	if state, msg, _ := judgeWarmUp(&agentapi.WarmUpResult{Rounds: []agentapi.WarmUpRound{r1, ctl}}, 4); state != warmUpRunning {
+		t.Errorf("typical shape ten times slower: state = %d (%q), want running", state, msg)
+	}
+	// A failed request fails warm-up on the tool call and on a fixed shape.
+	toolFailed := withToolCall(judgeEven(2, 2*s), 400*time.Millisecond, "stream: unexpected EOF")
+	typFailed := withToolCall(judgeEven(2, 2*s), 400*time.Millisecond, "")
+	typFailed.Requests[1].Error = "HTTP 500"
+	for name, r2 := range map[string]agentapi.WarmUpRound{"tool call": toolFailed, "typical": typFailed} {
+		if state, msg, _ := judgeWarmUp(&agentapi.WarmUpResult{Rounds: []agentapi.WarmUpRound{r1, r2}}, 4); state != warmUpFailed {
+			t.Errorf("%s request failed: state = %d (%q), want failed", name, state, msg)
+		}
+	}
+}
+
+// TestJudgeWarmUpRun94ReasoningTrace replays the two rounds of #94's
+// reasoning model (Qwen3-0.6B) that the old rule could not settle (issue #94,
+// comment 6550908687, finding 3): rounds 3 and 4, one request per sequential
+// shape. Round 3's tool call spent its whole budget reasoning (4,224 tokens),
+// which the agent now logs and does not report as an error; short went
+// 0.208 -> 0.253 s (+22%) and typical 0.214 -> 0.266 s (+24%). The longest,
+// long-output and concurrent figures are not in the report; they are held
+// steady here. Under the ruling the tool call's timing is not judged and both
+// rises are under the 100 ms floor, so warm-up settles in round 4.
+func TestJudgeWarmUpRun94ReasoningTrace(t *testing.T) {
+	ms := time.Millisecond
+	r3 := withToolCall(judgeRound(3, 208*ms, 214*ms, 300*ms, 1100*ms), 9*time.Second, "")
+	r3.Requests[len(r3.Requests)-1].OutputTokens = 4224
+	r4 := withToolCall(judgeRound(4, 253*ms, 266*ms, 300*ms, 1100*ms), 600*ms, "")
+	state, msg, thr := judgeWarmUp(&agentapi.WarmUpResult{Rounds: []agentapi.WarmUpRound{r3, r4}}, 8)
+	if state != warmUpSettled || thr == nil || !strings.Contains(msg, "round 4") {
+		t.Fatalf("state = %d (%q), want settled in round 4", state, msg)
 	}
 }
 

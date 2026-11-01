@@ -68,6 +68,18 @@ const (
 	// agent cuts each to it (TruncateUTF8).
 	MaxMessageBytes = 256
 
+	// MaxLogTailBytes is the most bytes of WorkerReport.LogTail: the end of
+	// the engine's output, enough for a Python traceback's last frames. Only
+	// an exited worker carries one, and an Instance has few workers.
+	MaxLogTailBytes = 8192
+
+	// MaxGenerationConfigKeys, MaxGenerationConfigKeyBytes and
+	// MaxGenerationConfigValueBytes bound VerifyResult.GenerationConfig: a
+	// generation_config.json holds a dozen short keys.
+	MaxGenerationConfigKeys       = 32
+	MaxGenerationConfigKeyBytes   = 64
+	MaxGenerationConfigValueBytes = 128
+
 	// WarmUpBudgetBytes is the most the warm-up results of one report take, at
 	// the admission bounds: MaxWarmUpRounds rounds of 4 + 1 + MaxTargetSessions
 	// timings, each as long as JSON can make it. The rest of a report fits the

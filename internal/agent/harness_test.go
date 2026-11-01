@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -76,6 +78,7 @@ type harness struct {
 	root       string // short temp dir: run, staging, logs
 	runDir     string
 	stagingDir string
+	cacheDir   string // the Allocation's cache directory (Options.CacheDir)
 	appLog     string // the fake apptainer's invocations
 	engLog     string // the engine double's starts and requests
 	aid        string
@@ -93,6 +96,9 @@ type harnessOptions struct {
 	jobID      string // presented job ID; hJobID when empty
 	restart    int32
 	hub        map[string]string // files the fake Hub serves, by URL path
+	// hubIntercept sees every Hub request first and returns true when it
+	// has answered it.
+	hubIntercept func(w http.ResponseWriter, r *http.Request) bool
 	// apptainer replaces the fake Apptainer with another program.
 	apptainer string
 	// engineWrap, stagerWrap and backendWrap wrap the real engine client,
@@ -102,6 +108,10 @@ type harnessOptions struct {
 	backendWrap func(agentapi.Backend) agentapi.Backend
 	// tunnel is told which Instance the agent serves.
 	tunnel agent.Tunnel
+	// home, when set, is the agent's HOME in place of the test process's.
+	home string
+	// buildReportTimeout is Options.BuildReportTimeout (the default when 0).
+	buildReportTimeout time.Duration
 }
 
 // newHarness starts a real agent against a fake Backend behind a fake Gate,
@@ -159,11 +169,16 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 		apptainer = o.apptainer
 	}
 	baseEnv := append(os.Environ(), "HB_FAKE_APPTAINER_LOG="+h.appLog, noExitSleep)
+	if o.home != "" {
+		baseEnv = slices.DeleteFunc(baseEnv, func(kv string) bool { return strings.HasPrefix(kv, "HOME=") })
+		baseEnv = append(baseEnv, "HOME="+o.home)
+	}
+	h.cacheDir = filepath.Join(root, agentapi.AllocationCacheDirName)
 	files := map[string]string{"/org/model/resolve/" + strings.Repeat("c", 40) + "/" + defaultFile.Path: defaultContent}
 	for k, v := range o.hub {
 		files[k] = v
 	}
-	hubClient, hubURL := h.startHub(files)
+	hubClient, hubURL := h.startHub(files, o.hubIntercept)
 	st, err := stage.New(stage.Config{
 		StagingDir:  h.stagingDir,
 		Apptainer:   apptainer,
@@ -193,6 +208,7 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 		Apptainer:            apptainer,
 		RunDir:               h.runDir,
 		LogDir:               root,
+		CacheDir:             h.cacheDir,
 		Registration:         agentapi.RegisterRequest{RestartCount: o.restart, Node: "node-test", CPUArch: "x86_64"},
 		BaseEnv:              baseEnv,
 		Tunnel:               o.tunnel,
@@ -201,6 +217,7 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 		StartupProbeInterval: 50 * time.Millisecond,
 		MinBackoff:           20 * time.Millisecond,
 		MaxBackoff:           200 * time.Millisecond,
+		BuildReportTimeout:   o.buildReportTimeout,
 	})
 	if err != nil {
 		t.Fatal(err)
