@@ -157,10 +157,7 @@ func (p *pluginServer) start(ctx context.Context) error {
 	case err := <-served:
 		served1, first = true, fmt.Errorf("serve the plugin endpoint: %w", err)
 	case err := <-fed:
-		fed1, first = true, err
-		if first == nil {
-			first = errors.New("the plugin's feeder returned before the component was stopped")
-		}
+		fed1, first = true, feederReturned(ctx, err)
 	}
 	stopFeed()
 	grace, cancel := context.WithTimeout(context.Background(), pluginShutdownGrace)
@@ -180,6 +177,18 @@ func (p *pluginServer) start(ctx context.Context) error {
 		}
 	}
 	return first
+}
+
+// feederReturned says what the feeder's return means for the component. The feeder returns nil
+// once its context ends, which is also what a stop does to the component's, so when both are
+// ready select may pick either: nil with ctx done is the stop, and reading it as a failure
+// would make a clean SIGTERM end the manager's run with an error. A return with ctx alive is the
+// feeder's own failure, nil included.
+func feederReturned(ctx context.Context, err error) error {
+	if err == nil && ctx.Err() == nil {
+		return errors.New("the plugin's feeder returned before the component was stopped")
+	}
+	return err
 }
 
 // pluginFeed keeps a MemIndex current (HBEP-6, Admission: the plugin answers

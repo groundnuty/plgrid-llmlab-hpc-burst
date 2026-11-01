@@ -1060,6 +1060,38 @@ func TestPluginComponentStopsFromEveryState(t *testing.T) {
 	}
 }
 
+// The feeder's return, read by the component: with its context ended, nil is the stop (the
+// feeder returns nil once its context ends, which is also what a stop does to the component's,
+// so select can pick this case when the stop comes: a stop under load showed it as a failure).
+// With the context alive, any return is the feeder's failure, nil included.
+func TestFeederReturnedReadsAStopAsAStop(t *testing.T) {
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	boom := errors.New("example: the informer failed")
+	for _, c := range []struct {
+		name    string
+		ctx     context.Context
+		err     error
+		wantNil bool
+		want    error
+	}{
+		{"nil after the stop", ended, nil, true, nil},
+		{"an error after the stop", ended, boom, false, boom},
+		{"nil with the component running", context.Background(), nil, false, nil},
+		{"an error with the component running", context.Background(), boom, false, boom},
+	} {
+		got := feederReturned(c.ctx, c.err)
+		switch {
+		case c.wantNil && got != nil:
+			t.Errorf("%s: %v, want nil", c.name, got)
+		case !c.wantNil && got == nil:
+			t.Errorf("%s: nil, want an error", c.name)
+		case c.want != nil && !errors.Is(got, c.want):
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 // A feeder that fails with its context alive is the component's error, and the server it started
 // is shut down: the manager is told, and nothing is left listening.
 func TestPluginComponentReturnsTheFeedersError(t *testing.T) {
