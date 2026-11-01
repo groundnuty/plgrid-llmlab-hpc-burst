@@ -54,6 +54,7 @@ type realRun struct {
 	summary  map[string]any
 }
 
+//livecheck:real-engine
 func TestRealEngine(t *testing.T) {
 	planPath := os.Getenv("HB_REAL_ENGINE_PLAN")
 	if planPath == "" {
