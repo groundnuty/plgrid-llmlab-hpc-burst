@@ -274,6 +274,10 @@ func (r *releaseTwo) syncAgents() {
 			r.errs = append(r.errs, err)
 		}
 	}
+	// The tunnel follows the agent, as in the rig's own syncAgents.
+	if !r.noTunnels {
+		r.syncTunnels()
+	}
 }
 
 // TestReleaseInterruptedProviderReportsEachOutcome covers "An operation

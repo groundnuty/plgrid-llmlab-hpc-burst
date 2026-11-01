@@ -23,7 +23,9 @@ import (
 // controller stopped between two steps finishes them on its next pass: a
 // pending Instance whose Allocation does not exist gets it (ensureAllocation),
 // and an Allocation without its credential file gets one (ensureCredentials),
-// so nothing is submitted twice and no Allocation is orphaned.
+// so nothing is submitted twice and no Allocation is orphaned. On a Provider
+// with a submit limit, a slot is reserved under the Allocation's name before
+// the Instance is created (slots.go).
 
 // canProvision reports whether new Allocations may be created at all.
 func (p *pass) canProvision() bool {
@@ -37,6 +39,28 @@ func (p *pass) canProvision() bool {
 // that has lease enough, it places the Instance there (HBEP-7, open question
 // 14). It returns false when no Provider could take it.
 func (p *pass) provision(pred *v1alpha1.Instance) (bool, error) {
+	return p.provisionWith(pred, placeOpts{})
+}
+
+// placeOpts narrow where provisionWith places an Instance (HBEP-7, Handover,
+// No-overlap mode).
+type placeOpts struct {
+	// skip names a Provider not to try: the predecessor's, when its per-user
+	// caps keep the replacement from running beside the predecessor while
+	// another Provider has room.
+	skip string
+	// only, when set, names the one Provider to try: the predecessor's, on
+	// the queued path, where only a per-user cap blocks the overlap.
+	only string
+	// successorOf, when set, is written on the new Instance as
+	// annotationNoOverlapSuccessor: it is a no-overlap successor.
+	successorOf string
+	// gapOf, when set with successorOf, names the primary that drained in the
+	// mode and is written as annotationNoOverlapGap: the gap has begun.
+	gapOf string
+}
+
+func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error) {
 	if !p.canProvision() {
 		return false, nil
 	}
@@ -47,7 +71,7 @@ func (p *pass) provision(pred *v1alpha1.Instance) (bool, error) {
 		}
 	}
 	for _, pv := range order {
-		if !pv.usable() {
+		if !pv.usable() || pv.tooShort != "" || pv.name == o.skip || (o.only != "" && pv.name != o.only) {
 			continue
 		}
 		cid := p.ids[pv.class]
@@ -63,7 +87,10 @@ func (p *pass) provision(pred *v1alpha1.Instance) (bool, error) {
 		if err != nil {
 			var u *unsupported
 			if asUnsupported(err, &u) {
-				p.sizingRefused = append(p.sizingRefused, u.msg)
+				if p.sizingRefused == nil {
+					p.sizingRefused = map[string]string{}
+				}
+				p.sizingRefused[pv.name] = u.msg
 			} else {
 				p.degrade(v1alpha1.ReasonProviderUnavailable, "Provider %s: %v", pv.name, err)
 			}
@@ -76,7 +103,7 @@ func (p *pass) provision(pred *v1alpha1.Instance) (bool, error) {
 			return false, nil
 		}
 		if warm != nil {
-			if err := p.createInstance(pv, cid, pred, warm.Name); err != nil {
+			if err := p.createInstance(pv, cid, pred, warm.Name, o.successorOf, o.gapOf); err != nil {
 				return false, err
 			}
 			// Placed: the Allocation is no longer idle (v1alpha1.ClearIdleSince).
@@ -86,7 +113,17 @@ func (p *pass) provision(pred *v1alpha1.Instance) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		if err := p.createInstance(pv, cid, pred, name); err != nil {
+		// The slot is reserved before the Instance, the durable intent, so
+		// no two workers both pass the count (slots.go).
+		ok, err := p.reserveSlot(pv, name)
+		if err != nil {
+			return false, err
+		}
+		if !ok {
+			continue
+		}
+		if err := p.createInstance(pv, cid, pred, name, o.successorOf, o.gapOf); err != nil {
+			p.releaseSlot(pv, name)
 			return false, err
 		}
 		return true, p.createAllocation(pv, name, params)
@@ -156,8 +193,11 @@ func drainWindowOf(pv *providerView, md *v1alpha1.ModelDeployment) time.Duration
 }
 
 // createInstance creates a pending Instance of the class's current ID on the
-// named Allocation, owned by the ModelDeployment, with the drain finalizer.
-func (p *pass) createInstance(pv *providerView, cid *classID, pred *v1alpha1.Instance, alloc string) error {
+// named Allocation, owned by the ModelDeployment, with the drain finalizer. A
+// no-overlap successor carries annotationNoOverlapSuccessor with successorOf,
+// which names the Provider and the limit, and annotationNoOverlapGap with
+// gapOf once the gap has begun.
+func (p *pass) createInstance(pv *providerView, cid *classID, pred *v1alpha1.Instance, alloc, successorOf, gapOf string) error {
 	name, err := randomName(truncate(p.md.Name, 40))
 	if err != nil {
 		return err
@@ -184,6 +224,12 @@ func (p *pass) createInstance(pv *providerView, cid *classID, pred *v1alpha1.Ins
 	}
 	if pred != nil {
 		in.Annotations = map[string]string{v1alpha1.AnnotationPredecessor: pred.Name}
+		if successorOf != "" {
+			in.Annotations[annotationNoOverlapSuccessor] = successorOf
+			if gapOf != "" {
+				in.Annotations[annotationNoOverlapGap] = gapOf
+			}
+		}
 	}
 	if err := p.r.Client.Create(p.ctx, in, owner); err != nil {
 		return fmt.Errorf("create Instance on Allocation %s: %w", alloc, err)
@@ -216,8 +262,9 @@ func (p *pass) createAllocation(pv *providerView, name string, params v1alpha1.B
 	}
 	if err := p.r.Client.Create(p.ctx, a, owner); err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			return nil
+			return nil // it exists, so it holds its slot
 		}
+		p.releaseSlot(pv, name)
 		return fmt.Errorf("create Allocation %s: %w", name, err)
 	}
 	p.allocs[a.Name] = a
@@ -225,17 +272,40 @@ func (p *pass) createAllocation(pv *providerView, name string, params v1alpha1.B
 }
 
 // ensureAllocation creates the Allocation a pending Instance names, after a
-// pass that created the Instance stopped before the Allocation.
+// pass that created the Instance stopped before the Allocation. It reserves
+// the slot under that name first: one this controller reserved before it
+// stopped is still held, and after a restart the slot is reserved anew. With
+// no free slot the Instance waits, and the deployment shows SubmitLimitReached.
 func (p *pass) ensureAllocation(in *v1alpha1.Instance) error {
 	pv := p.pvOf(in.Labels)
-	if pv == nil || !pv.usable() || !p.canProvision() {
+	if pv == nil || !pv.usable() || pv.tooShort != "" || !p.canProvision() {
 		return nil // retried on a later pass, when the Provider is usable again
 	}
+	name := in.Spec.AllocationRef.Name
 	params, err := partitionSizing(pv, in.Spec.Launch.GPUs, p.md.Spec.LeaseLimit)
 	if err != nil {
+		// The Provider's limits changed between the two creates (a zero GPU
+		// cap, say), and the pending Instance already counts as a primary, so
+		// provision never reports the refusal: report it here, as provision
+		// does, or the deployment shows AsDesired while the Instance waits for
+		// ever (review of PR 171, Astra B4).
+		var u *unsupported
+		if asUnsupported(err, &u) {
+			p.degrade(v1alpha1.ReasonSpecUnsupported, "Instance %s waits for its Allocation %s: %s", in.Name, name, u.msg)
+		} else {
+			p.degrade(v1alpha1.ReasonProviderUnavailable, "Instance %s waits for its Allocation %s: Provider %s: %v", in.Name, name, pv.name, err)
+		}
 		return nil
 	}
-	return p.createAllocation(pv, in.Spec.AllocationRef.Name, params)
+	ok, err := p.reserveSlot(pv, name)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		p.degrade(v1alpha1.ReasonSubmitLimitReached, "Instance %s waits for a submit slot for its Allocation %s: %s", in.Name, name, p.noSlot[pv.name])
+		return nil
+	}
+	return p.createAllocation(pv, name, params)
 }
 
 // ensureCredential writes an Allocation's credential file, 256 random bits as

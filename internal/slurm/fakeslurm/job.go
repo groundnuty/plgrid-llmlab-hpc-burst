@@ -56,7 +56,8 @@ type job struct {
 	name, user string
 	partition  string
 	account    string
-	timeLimit  int // minutes; 0 means none was given
+	qos        string // the job QOS: --qos, else the cluster's default
+	timeLimit  int    // minutes; 0 means none was given
 	cpus       int
 	nodes      int
 	gpus       int
@@ -207,6 +208,9 @@ type Job struct {
 	// accepts any feature; it does not model node features, except that a
 	// run-mode JobVar can depend on one.
 	Constraint string
+	// QOS is the job's QOS: the one --qos named, else the cluster's default,
+	// "" when neither.
+	QOS string
 
 	// Run mode only, for the current execution; zero otherwise.
 	//
@@ -245,7 +249,7 @@ type Job struct {
 func (j *job) snapshot() Job {
 	e := j.cur()
 	s := Job{
-		ID: j.id, Name: j.name, User: j.user, Partition: j.partition, Account: j.account,
+		ID: j.id, Name: j.name, User: j.user, Partition: j.partition, Account: j.account, QOS: j.qos,
 		TimeLimit: j.timeLimit, CPUs: j.cpus, GPUs: j.gpus, MemMiB: j.memMiB,
 		State: e.state, Held: j.held, RestartCount: j.restartCnt, Executions: len(j.execs),
 		Submit: e.submit, Start: e.start, End: e.end, AcctHidden: j.acctHidden,

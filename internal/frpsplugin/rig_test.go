@@ -120,14 +120,26 @@ func (c *capture) calls(op string) []captured {
 
 // events is a Notifier that records what it hears.
 type events struct {
-	mu   sync.Mutex
-	list []string // "NewProxy uid"
+	mu     sync.Mutex
+	list   []string          // "NewProxy uid"
+	allocs map[string]string // "NewProxy uid" -> the Allocation UID it came with
 }
 
-func (e *events) ProxyChanged(op, name string) {
+func (e *events) ProxyChanged(op, name, allocationUID string) {
 	e.mu.Lock()
+	if e.allocs == nil {
+		e.allocs = map[string]string{}
+	}
 	e.list = append(e.list, op+" "+name)
+	e.allocs[op+" "+name] = allocationUID
 	e.mu.Unlock()
+}
+
+// allocation is the Allocation UID the Notifier heard with the call, "" when it heard none.
+func (e *events) allocation(call string) string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.allocs[call]
 }
 
 func (e *events) has(s string) bool {

@@ -197,7 +197,7 @@ func TestMemIndexSwapsAtomicallyUnderLoad(t *testing.T) {
 func TestTriggerCoalescesAndNeverBlocks(t *testing.T) {
 	tr := NewTrigger()
 	for i := 0; i < 1000; i++ { // nobody drains: it must not block
-		tr.ProxyChanged("CloseProxy", "x")
+		tr.ProxyChanged("CloseProxy", "x", "")
 	}
 	n := 0
 	for drained := false; !drained; {
@@ -211,11 +211,11 @@ func TestTriggerCoalescesAndNeverBlocks(t *testing.T) {
 	if n != 1 {
 		t.Errorf("%d signals pending after 1000 calls, want 1", n)
 	}
-	tr.ProxyChanged("NewProxy", "y")
+	tr.ProxyChanged("NewProxy", "y", "alloc-y")
 	select {
 	case <-tr.C():
 	default:
 		t.Error("no signal after a call on a drained trigger")
 	}
-	(&Trigger{}).ProxyChanged("NewProxy", "z") // a zero Trigger does not block or panic either
+	(&Trigger{}).ProxyChanged("NewProxy", "z", "alloc-z") // a zero Trigger does not block or panic either
 }

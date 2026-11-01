@@ -180,7 +180,7 @@ func TestTimeLimit(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := timeLimit(tc.maxT, tc.lease)
+			got, _, ok := v1alpha1.AllocationTimeLimit(tc.maxT, nil, tc.lease)
 			if ok != tc.wantOK {
 				t.Fatalf("timeLimit ok = %v, want %v (got %s)", ok, tc.wantOK, got)
 			}

@@ -80,9 +80,13 @@ const (
 	// Providers in its selection, even when their labels match, and sets no
 	// condition for them (HBEP-7, Reconcile loop, step 1; HBEP-5).
 	ReasonProviderUnavailable = "ProviderUnavailable"
-	// ReasonSpecUnsupported: a data-parallel-size above 1, or a workload shape
-	// that does not fit the declared context limit. No Allocation is created.
-	// A reason on Degraded (`@hpc-burst-science-agent`, 31 Oct 2026).
+	// ReasonSpecUnsupported: a data-parallel-size above 1, a workload shape
+	// that does not fit the declared context limit, a generation-config other
+	// than auto, an override-generation-config or an hf-config-path (each
+	// changes which generation config vLLM applies, in a way the checks do not
+	// model). No Allocation is created. A reason on Degraded
+	// (`@hpc-burst-science-agent`, 31 Oct 2026; the generation-config flags,
+	// 1 Nov 2026).
 	ReasonSpecUnsupported = "SpecUnsupported"
 	// ReasonFrontNotConfigured: no front address and dial-home mode are
 	// configured, so no Allocation is submitted (HBEP-11, Single-user host:
@@ -327,6 +331,15 @@ const ReasonAgentRegistered = "AgentRegistered"
 // a ModelDeployment when a shape-misfit stop lifts, because the workload's
 // resolved shapes now fit (HBEP-7, Verification).
 const EventReasonShapesFit = "ShapesFit"
+
+// EventReasonTunnelOrphaned is the degraded event the lifecycle controller
+// raises when frps lists an online proxy whose name is no current Instance's
+// UID: an orphan (HBEP-6, The inventory; HBEP-8, Reasons in alpha). It regards
+// the Allocation whose credential admitted the tunnel, else the lifecycle
+// Lease, and repeats at most once an hour while the orphan lasts (HBEP-8,
+// Repeating conditions). It is a Go constant only: no condition or CRD field
+// carries it (`@hpc-burst-science-agent`, 1 Nov 2026, for #167).
+const EventReasonTunnelOrphaned = "TunnelOrphaned"
 
 // Reasons of a managed Provider's conditions (HBEP-4, Managed provider in
 // alpha; HBEP-11, Credentials), so the lifecycle controller and the front can
