@@ -39,6 +39,28 @@ func (p *pass) canProvision() bool {
 // that has lease enough, it places the Instance there (HBEP-7, open question
 // 14). It returns false when no Provider could take it.
 func (p *pass) provision(pred *v1alpha1.Instance) (bool, error) {
+	return p.provisionWith(pred, placeOpts{})
+}
+
+// placeOpts narrow where provisionWith places an Instance (HBEP-7, Handover,
+// No-overlap mode).
+type placeOpts struct {
+	// skip names a Provider not to try: the predecessor's, when its per-user
+	// caps keep the replacement from running beside the predecessor while
+	// another Provider has room.
+	skip string
+	// only, when set, names the one Provider to try: the predecessor's, on
+	// the queued path, where only a per-user cap blocks the overlap.
+	only string
+	// successorOf, when set, is written on the new Instance as
+	// annotationNoOverlapSuccessor: it is a no-overlap successor.
+	successorOf string
+	// gapOf, when set with successorOf, names the primary that drained in the
+	// mode and is written as annotationNoOverlapGap: the gap has begun.
+	gapOf string
+}
+
+func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error) {
 	if !p.canProvision() {
 		return false, nil
 	}
@@ -49,7 +71,7 @@ func (p *pass) provision(pred *v1alpha1.Instance) (bool, error) {
 		}
 	}
 	for _, pv := range order {
-		if !pv.usable() || pv.tooShort != "" {
+		if !pv.usable() || pv.tooShort != "" || pv.name == o.skip || (o.only != "" && pv.name != o.only) {
 			continue
 		}
 		cid := p.ids[pv.class]
@@ -81,7 +103,7 @@ func (p *pass) provision(pred *v1alpha1.Instance) (bool, error) {
 			return false, nil
 		}
 		if warm != nil {
-			if err := p.createInstance(pv, cid, pred, warm.Name); err != nil {
+			if err := p.createInstance(pv, cid, pred, warm.Name, o.successorOf, o.gapOf); err != nil {
 				return false, err
 			}
 			// Placed: the Allocation is no longer idle (v1alpha1.ClearIdleSince).
@@ -100,7 +122,7 @@ func (p *pass) provision(pred *v1alpha1.Instance) (bool, error) {
 		if !ok {
 			continue
 		}
-		if err := p.createInstance(pv, cid, pred, name); err != nil {
+		if err := p.createInstance(pv, cid, pred, name, o.successorOf, o.gapOf); err != nil {
 			p.releaseSlot(pv, name)
 			return false, err
 		}
@@ -171,8 +193,11 @@ func drainWindowOf(pv *providerView, md *v1alpha1.ModelDeployment) time.Duration
 }
 
 // createInstance creates a pending Instance of the class's current ID on the
-// named Allocation, owned by the ModelDeployment, with the drain finalizer.
-func (p *pass) createInstance(pv *providerView, cid *classID, pred *v1alpha1.Instance, alloc string) error {
+// named Allocation, owned by the ModelDeployment, with the drain finalizer. A
+// no-overlap successor carries annotationNoOverlapSuccessor with successorOf,
+// which names the Provider and the limit, and annotationNoOverlapGap with
+// gapOf once the gap has begun.
+func (p *pass) createInstance(pv *providerView, cid *classID, pred *v1alpha1.Instance, alloc, successorOf, gapOf string) error {
 	name, err := randomName(truncate(p.md.Name, 40))
 	if err != nil {
 		return err
@@ -199,6 +224,12 @@ func (p *pass) createInstance(pv *providerView, cid *classID, pred *v1alpha1.Ins
 	}
 	if pred != nil {
 		in.Annotations = map[string]string{v1alpha1.AnnotationPredecessor: pred.Name}
+		if successorOf != "" {
+			in.Annotations[annotationNoOverlapSuccessor] = successorOf
+			if gapOf != "" {
+				in.Annotations[annotationNoOverlapGap] = gapOf
+			}
+		}
 	}
 	if err := p.r.Client.Create(p.ctx, in, owner); err != nil {
 		return fmt.Errorf("create Instance on Allocation %s: %w", alloc, err)

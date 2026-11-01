@@ -47,8 +47,21 @@ func (p *pass) capacity() error {
 	}
 	prim := p.primaries()
 	desired := int(p.md.Spec.Instances)
+	// A missing primary whose predecessor drained in no-overlap mode, or whose
+	// predecessor was such a primary's successor that failed, is that
+	// predecessor's successor, marked, on its Provider first (HBEP-7,
+	// Handover, No-overlap mode, the one-slot path and the retries).
+	carriers := p.noOverlapCarriers()
 	for i := len(prim); i < desired; i++ {
-		ok, err := p.provision(nil)
+		var ok bool
+		var err error
+		if len(carriers) > 0 {
+			g := carriers[0]
+			carriers = carriers[1:]
+			ok, err = p.provisionWith(g.in, placeOpts{successorOf: g.why, gapOf: g.drained})
+		} else {
+			ok, err = p.provision(nil)
+		}
 		if err != nil {
 			return err
 		}
@@ -203,6 +216,21 @@ func leaseBefore(a, b *v1alpha1.Instance) bool {
 	return a.Status.LeaseEnd.Before(b.Status.LeaseEnd)
 }
 
+// overlapOrDefer is p.overlap for a primary's replacement rules. When the check
+// fails (it lists Allocations across namespaces), the rules for that primary
+// wait for the next pass, which the returned error brings about with backoff:
+// the error is kept in p.overlapErrs and returned at the end of the pass, so
+// it neither skips retention and the status write nor, by guessing, sets or
+// withholds ReplacementLate, an event that is recorded once.
+func (p *pass) overlapOrDefer(in *v1alpha1.Instance) (overlapCheck, bool) {
+	ov, err := p.overlap(in)
+	if err != nil {
+		p.overlapErrs = append(p.overlapErrs, fmt.Errorf("no-overlap check of Instance %s: %w", in.Name, err))
+		return overlapCheck{}, false
+	}
+	return ov, true
+}
+
 // replacements gives every primary whose Allocation runs, that has no live
 // replacement, and whose replacement's planned time has come, one replacement;
 // it sets ReplacementLate when a replacement has not started by its
@@ -233,7 +261,11 @@ func (p *pass) replacements() error {
 			if p.now.Before(t) {
 				p.at(t)
 			} else {
-				placed, err := p.provision(in)
+				ov, ok := p.overlapOrDefer(in)
+				if !ok {
+					continue
+				}
+				placed, err := p.placeReplacement(in, ov)
 				if err != nil {
 					return err
 				}
@@ -246,6 +278,13 @@ func (p *pass) replacements() error {
 		if p.now.Before(late) {
 			p.at(late)
 			continue
+		}
+		ov, ok := p.overlapOrDefer(in)
+		if !ok {
+			continue
+		}
+		if ov.blocked {
+			continue // no-overlap mode: the gap is planned, so no ReplacementLate
 		}
 		started := false
 		if repl != nil {
