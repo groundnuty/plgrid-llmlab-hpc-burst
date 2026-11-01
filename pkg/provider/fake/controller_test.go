@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -657,5 +658,59 @@ func TestSubmitLimitRefusalIsRecordedWithItsCode(t *testing.T) {
 	}
 	if n := e.batch.Count("sbatch"); n != 3 {
 		t.Fatalf("sbatch count = %d, want 3: each refusal waits for the backoff, then the next attempt runs", n)
+	}
+}
+
+// Each full-slot reason name, and another policy reason, run through the
+// submission (Create) and then the passes that observe the backoff (Observe):
+// the Allocation settles at once and stays the same on every pass, with no
+// write between them, so nothing reading it can see it flap. A full slot shows
+// atProvider.reason SubmitLimitReached and the record's code; the other reason
+// shows neither (`@hpc-burst-science-agent`, 1 Nov 2026, on the refusal
+// contract).
+func TestPolicyRefusalSettlesWithoutFlapping(t *testing.T) {
+	for _, tc := range []struct {
+		policy string
+		code   string
+	}{
+		{"QOSMaxSubmitJobPerUserLimit", v1alpha1.ReasonSubmitLimitReached},
+		{"AssocMaxSubmitJobLimit", v1alpha1.ReasonSubmitLimitReached},
+		{"MaxSubmitJobsPerAccount", v1alpha1.ReasonSubmitLimitReached},
+		{"QOSMaxWallDurationPerJobLimit", ""},
+	} {
+		t.Run(tc.policy, func(t *testing.T) {
+			e := newEnv(t)
+			e.batch.Enqueue(Script{Outcome: provider.Rejected, Policy: tc.policy})
+			e.newAlloc("a1", testProvider)
+			e.syncAt(at(12, 0, 0)) // the submission, refused
+			first := e.alloc("a1")
+			check := func(a *v1alpha1.Allocation, when string) {
+				t.Helper()
+				o := a.Status.AtProvider
+				rec := submission(t, a)
+				if o.Phase != v1alpha1.AllocationSubmitting || o.Reason != tc.code || rec.State != v1alpha1.SubmissionRejected ||
+					rec.Code != tc.code || rec.Reason != "sbatch: error: "+tc.policy {
+					t.Fatalf("%s: phase %q, reason %q, record %+v; want Submitting, reason %q, a Rejected record with code %q and the reason line",
+						when, o.Phase, o.Reason, rec, tc.code, tc.code)
+				}
+				if o.Submission == nil || o.Submission.Code != tc.code {
+					t.Fatalf("%s: submission mirror %+v, want code %q", when, o.Submission, tc.code)
+				}
+			}
+			check(first, "after the submission")
+			// Passes inside the 1-minute backoff observe and submit nothing.
+			for _, s := range []int{10, 20, 30, 59} {
+				e.syncAt(at(12, 0, s))
+				a := e.alloc("a1")
+				check(a, fmt.Sprintf("pass at 12:00:%02d", s))
+				if a.ResourceVersion != first.ResourceVersion {
+					t.Fatalf("pass at 12:00:%02d wrote the Allocation (resourceVersion %s, then %s): its state changed between passes",
+						s, first.ResourceVersion, a.ResourceVersion)
+				}
+			}
+			if n := e.batch.Count("sbatch"); n != 1 {
+				t.Fatalf("sbatch count = %d during the backoff, want 1", n)
+			}
+		})
 	}
 }

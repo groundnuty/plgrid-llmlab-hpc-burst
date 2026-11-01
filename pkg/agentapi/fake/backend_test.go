@@ -338,6 +338,9 @@ func richReport() agentapi.Report {
 				// A map the protocol added for issue #125; the Backend must
 				// own it like Settings.
 				GenerationConfig: map[string]string{"repetition_penalty": "1.1"},
+				// A pointer the protocol added for #151; the Backend must own
+				// it too.
+				DoSample: boolp(true),
 			},
 			Qualify: &agentapi.QualifyResult{
 				Checks:           []agentapi.CheckOutcome{{Name: agentapi.CheckChat, Passed: true}},
@@ -373,6 +376,7 @@ func scrambleReport(r *agentapi.Report) {
 	i.Checks.Verify.Files[0].Path = "x"
 	i.Checks.Verify.Settings["max-model-len"] = "x"
 	i.Checks.Verify.GenerationConfig["repetition_penalty"] = "x"
+	*i.Checks.Verify.DoSample = false
 	i.Checks.Qualify.Checks[0].Passed = false
 	i.Checks.Qualify.ServedModelNames[0] = "x"
 	i.Checks.WarmUp.Rounds[0].Requests[0].OutputTokens = 99

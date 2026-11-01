@@ -28,7 +28,7 @@ func TestIsSubmitLimitReason(t *testing.T) {
 // A caller finds a policy refusal through any wrapping, and classifies it by
 // its reason name; the text is what Slurm printed.
 func TestPolicyRefusalIsFoundThroughWrapping(t *testing.T) {
-	full := &PolicyRefusal{Reason: "QOSMaxSubmitJobPerUserLimit", Text: "sbatch: error: QOSMaxSubmitJobPerUserLimit\nsbatch: error: Batch job submission failed: ..."}
+	full := &PolicyRefusal{Reason: "QOSMaxSubmitJobPerUserLimit", Line: "sbatch: error: QOSMaxSubmitJobPerUserLimit"}
 	other := &PolicyRefusal{Reason: "QOSMaxWallDurationPerJobLimit"}
 	for _, tc := range []struct {
 		name     string
@@ -37,8 +37,8 @@ func TestPolicyRefusalIsFoundThroughWrapping(t *testing.T) {
 		limit    bool
 		wantText string
 	}{
-		{"a full submit limit", fmt.Errorf("attempt 3: %w", full), true, true, full.Text},
-		{"another policy reason", fmt.Errorf("sbatch: %w", other), true, false, "sbatch: refused for the accounting policy: QOSMaxWallDurationPerJobLimit"},
+		{"a full submit limit", fmt.Errorf("attempt 3: %w", full), true, true, full.Line},
+		{"another policy reason, no line given", fmt.Errorf("sbatch: %w", other), true, false, "sbatch: error: QOSMaxWallDurationPerJobLimit"},
 		{"a refusal with no reason line", errors.New("sbatch: Batch job submission failed: Invalid account"), false, false, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
