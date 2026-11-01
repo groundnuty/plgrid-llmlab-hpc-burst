@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	eventsv1 "k8s.io/api/events/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -180,23 +181,33 @@ func eventsFor(t *testing.T, c client.Client, name string) []corev1.Event {
 	return out
 }
 
-// reportOrphanedTunnels logs every TunnelOrphaned event (an Instance that
-// ended while its frpc was still up, an agent teardown out of order) as a
-// FINDING: the issue's criteria do not cover it, so it fails nothing, and it
-// is never left out.
-func reportOrphanedTunnels(t *testing.T, c client.Client, step string) {
+// orphanEvents lists the events.k8s.io Events whose reason is TunnelOrphaned:
+// frps listed a proxy online with no current Instance for TunnelOrphanGrace
+// (HBEP-6, an orphan). The controller raises it regarding the Allocation that
+// admitted the tunnel, or its Lease.
+func orphanEvents(t *testing.T, c client.Client) []eventsv1.Event {
 	t.Helper()
-	var l corev1.EventList
+	var l eventsv1.EventList
 	if err := c.List(context.Background(), &l); err != nil {
-		t.Errorf("step (%s): list events: %v", step, err)
-		return
+		t.Fatalf("list events.k8s.io events: %v", err)
 	}
-	n := 0
+	var out []eventsv1.Event
 	for _, e := range l.Items {
 		if e.Reason == v1alpha1.EventReasonTunnelOrphaned {
-			n++
-			t.Logf("FINDING step (%s): %s event on %s %s: %.300s", step, e.Reason, e.InvolvedObject.Kind, e.InvolvedObject.Name, e.Message)
+			out = append(out, e)
 		}
 	}
-	t.Logf("step (%s): %d TunnelOrphaned events", step, n)
+	return out
+}
+
+// reportOrphanedTunnels logs each TunnelOrphaned event so far as a FINDING
+// about the agent's teardown order, and returns how many there are.
+func reportOrphanedTunnels(t *testing.T, c client.Client, step string) int {
+	t.Helper()
+	evs := orphanEvents(t, c)
+	for _, e := range evs {
+		t.Logf("FINDING step (%s): %s regarding %s %s: %.300s", step, e.Reason, e.Regarding.Kind, e.Regarding.Name, e.Note)
+	}
+	t.Logf("step (%s): %d TunnelOrphaned events", step, len(evs))
+	return len(evs)
 }

@@ -14,18 +14,19 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal"
 )
 
-// rehearsalTiming: a 7 min lease whose drain window is 90 s + 30 s (the
+// rehearsalTiming: a 6 min lease whose drain window is 90 s + 30 s (the
 // explicit drainWindow, 10 min, is longer), so a handover happens in minutes
 // and steps (b), (d), (e) and (f) fit before the primary's drain start; the
 // agent's stop grace is short, so scancel's TERM finishes before the fake's
 // KillWait.
-var rehearsalTiming = timing{lease: "7m", maxRequest: "90s", drainMargin: "30s", drainWindow: "10m", stopGrace: "5s", agentTimeout: "20s"}
+var rehearsalTiming = timing{lease: "6m", maxRequest: "90s", drainMargin: "30s", drainWindow: "10m", stopGrace: "5s", agentTimeout: "20s"}
 
 // rehearsalAgentTimeout is rehearsalTiming's agentTimeout: how long a
 // controller waits for a silent agent before it judges it unreachable.
@@ -71,6 +72,9 @@ type rig struct {
 	engineEnv []v1alpha1.EnvVar
 	// watch records every Instance version the API sends (startWatch).
 	watch *recorder
+	// proxyEnds is when frps was first seen to list each ended Instance's
+	// proxy offline (proxyEnded), for the TunnelOrphaned window.
+	proxyEnds map[types.UID]time.Time
 }
 
 func startRig(t *testing.T, mode string) *rig {
@@ -265,7 +269,7 @@ func TestRehearsalDirect(t *testing.T) {
 	r.stepControllerRestart(in, key)
 	r.stepHandover(in)
 	done = r.stepTimer("g")
-	r.stepScaleToZero()
+	r.stepScaleToZero(true)
 	done()
 }
 
@@ -330,7 +334,7 @@ func TestRehearsalSSH(t *testing.T) {
 	if len(fwd) < 2 {
 		t.Errorf("the agent of job %d has %d ssh forwards (%v), want 2: the agent endpoint and the dial-home listener", jobID, len(fwd), fwd)
 	}
-	r.stepScaleToZero()
+	r.stepScaleToZero(false)
 	for _, p := range fwd {
 		if alive(p) {
 			t.Errorf("the agent's ssh forward %d outlived its job (HBEP-6: no ssh process behind)", p)

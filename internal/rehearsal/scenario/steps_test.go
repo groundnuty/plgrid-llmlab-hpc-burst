@@ -212,8 +212,10 @@ func (r *rig) frpsProxies() map[string]bool {
 // stepScaleToZero is step (g): scale to 0. The Instances drain and end, the
 // Allocations end, and each has its acct-<UID> record; every job's processes
 // are gone, frps lists no online proxy for an ended Instance, and hpcburst
-// down stops everything within its grace.
-func (r *rig) stepScaleToZero() {
+// down stops everything within its grace. With orphanWindow (the direct run),
+// down waits until TunnelOrphanGrace and a read have passed since the last
+// proxy ended, and no TunnelOrphaned event may have fired (assertNoOrphans).
+func (r *rig) stepScaleToZero(orphanWindow bool) {
 	r.t.Helper()
 	uids := map[types.UID]string{}
 	for _, a := range r.allocations() {
@@ -274,12 +276,19 @@ func (r *rig) stepScaleToZero() {
 			return s.Finished || s.PID == 0 && s.State != "PENDING" && s.State != "RUNNING"
 		})
 	}
-	reportOrphanedTunnels(r.t, r.c, "g")
+	checked := time.Now()
 	online := r.frpsProxies()
 	for _, uid := range insts {
 		if online[uid] {
 			r.t.Errorf("step (g): frps still lists the ended Instance %s online", uid)
+		} else {
+			r.markProxyEnd(types.UID(uid), checked)
 		}
+	}
+	if orphanWindow {
+		r.assertNoOrphans()
+	} else {
+		reportOrphanedTunnels(r.t, r.c, "g")
 	}
 	start := time.Now()
 	r.h.down()

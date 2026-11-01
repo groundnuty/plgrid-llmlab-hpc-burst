@@ -169,10 +169,12 @@ func (r *rig) stepHandover(p *v1alpha1.Instance) {
 // ends Drained, its Allocation ends, and its acct- record exists.
 func (r *rig) checkDrained(pred, repl *v1alpha1.Instance, ds, streamEnd time.Time) {
 	r.t.Helper()
-	now, _ := r.instance(pred.Name)
-	began, err := time.Parse(time.RFC3339, now.Annotations[annotationDrainStarted])
+	// The ended Instance may already be gone with its Allocation: the
+	// controller's recorded drain start is read from the watch.
+	o, _ := r.watch.first(pred.UID, time.Time{}, func(o observation) bool { return o.drainBegan != "" })
+	began, err := time.Parse(time.RFC3339, o.drainBegan)
 	if err != nil || began.Before(ds) || !began.Before(streamEnd) {
-		r.t.Errorf("step (c): the recorded drain start %q (%v) is not in [drain start %s, stream end %s)", now.Annotations[annotationDrainStarted], err, ds.Format(time.RFC3339), streamEnd.Format(time.RFC3339Nano))
+		r.t.Errorf("step (c): the recorded drain start %q (%v) is not in [drain start %s, stream end %s)", o.drainBegan, err, ds.Format(time.RFC3339), streamEnd.Format(time.RFC3339Nano))
 	}
 	if countReason(r.eventReasons(pred.Name), "HandedOver") == 0 {
 		r.t.Errorf("step (c): no HandedOver event on %s: the replacement was not ready at the drain start (events %v)", pred.Name, r.eventReasons(pred.Name))
@@ -186,17 +188,19 @@ func (r *rig) checkDrained(pred, repl *v1alpha1.Instance, ds, streamEnd time.Tim
 			repl.Name, repl.CreationTimestamp.Format(time.RFC3339), repl.Status.ReadyTime, alloc.Status.AtProvider.StartTime.Format(time.RFC3339), ds.Format(time.RFC3339))
 	}
 	r.t.Logf("step (c): replacement %s created %s after the primary's Allocation started", repl.Name, repl.CreationTimestamp.Sub(alloc.Status.AtProvider.StartTime.Time))
-	// A released Allocation is deleted (internal/lifecycle/retention.go), so
-	// it ends gone or Ended, and its job leaves the fake cluster's queue.
+	// A released Allocation is deleted (internal/lifecycle/retention.go), and
+	// the ended Instance goes with it, so the watch shows how the Instance
+	// ended; the Allocation ends gone or Ended, and its job leaves the fake
+	// cluster's queue.
 	jobID, _ := strconv.Atoi(pred.Status.JobID)
 	waitState(r.t, waitDeadline, "the primary to end Drained, its Allocation to end and its job to finish", func() (bool, string) {
-		in, ok := r.instance(pred.Name)
+		o, ended := r.watch.first(pred.UID, time.Time{}, func(o observation) bool { return o.phase == v1alpha1.InstanceEnded })
 		var a v1alpha1.Allocation
 		gone := !r.get(&a, alloc.Name, namespace)
 		j, _ := r.cl.plat.Job(jobID)
-		state := fmt.Sprintf("Instance %s phase %s end %q; Allocation gone %v phase %s; job %d %s finished %v",
-			pred.Name, in.Status.Phase, in.Status.EndReason, gone, a.Status.AtProvider.Phase, jobID, j.State, j.Finished)
-		return ok && in.Status.Phase == v1alpha1.InstanceEnded && in.Status.EndReason == v1alpha1.ReasonDrained &&
+		state := fmt.Sprintf("Instance %s seen ended %v (reason %q); Allocation gone %v phase %s; job %d %s finished %v",
+			pred.Name, ended, o.endReason, gone, a.Status.AtProvider.Phase, jobID, j.State, j.Finished)
+		return ended && o.endReason == v1alpha1.ReasonDrained &&
 			(gone || a.Status.AtProvider.Phase == v1alpha1.AllocationEnded) &&
 			(j.Finished || j.State != "PENDING" && j.State != "RUNNING"), state
 	})
@@ -205,6 +209,7 @@ func (r *rig) checkDrained(pred, repl *v1alpha1.Instance, ds, streamEnd time.Tim
 		r.t.Fatal(err)
 	}
 	defer reportOrphanedTunnels(r.t, r.c, "c")
+	r.proxyEnded(pred.UID)
 	waitFor(r.t, waitDeadline, "the primary's Allocation's record "+name, func() bool {
 		var l appsv1.ControllerRevisionList
 		if err := r.c.List(context.Background(), &l); err != nil {
