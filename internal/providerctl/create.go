@@ -254,7 +254,8 @@ func writeOwnOrRecorded(ctx context.Context, e *external, a *v1alpha1.Allocation
 // be configured (HBEP-11) with a frpc digest for the partition's CPU
 // architecture (agent.json names it; a configuration check, so it comes before
 // any remote call or status write) and with the launcher's dial-home
-// certificate, whose pin is the front's (Front.CheckCertificate), the
+// certificate, which the agent would accept with the front's pin
+// (Front.CheckCertificate: agentapi.VerifyDialHomeCert, the agent's own check), the
 // Allocation's credential must exist (docs/development.md: until it does, the
 // provider waits; it neither submits nor marks the attempt Rejected), an agent
 // build with the Allocation's digest must exist for the partition's CPU
@@ -269,7 +270,7 @@ func (e *external) prerequisites(a *v1alpha1.Allocation) string {
 	if err != nil {
 		return err.Error()
 	}
-	if err := e.s.o.Front.CheckCertificate(); err != nil {
+	if err := e.s.o.Front.CheckCertificate(e.now()); err != nil {
 		return err.Error()
 	}
 	if _, err := e.credential(a); err != nil {
@@ -318,7 +319,7 @@ func (e *external) credential(a *v1alpha1.Allocation) ([]byte, error) {
 // Allocation's credential, the launcher's dial-home certificate, and agent.json.
 // Every file's content is the one its digest names: the builds are read with
 // the digest and refused otherwise (buildCache.read), and the certificate's pin
-// is checked against the front's (FrontSettings.CheckCertificate).
+// is checked as the agent will check it (FrontSettings.CheckCertificate).
 //
 // Modes: the two binaries 700, as they run; the credential and agent.json 600,
 // since they name a secret and a private address; the certificate 644, since it
@@ -344,7 +345,7 @@ func (e *external) files(a *v1alpha1.Allocation, tag string, paths slurm.Paths) 
 		return nil, err
 	}
 	f := e.s.o.Front
-	if err := f.CheckCertificate(); err != nil {
+	if err := f.CheckCertificate(e.now()); err != nil {
 		return nil, err
 	}
 	cfg := agentapi.AgentConfig{

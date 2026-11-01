@@ -98,6 +98,9 @@ func (b *Batch) EnsureFile(ctx context.Context, f provider.File) error {
 		return fmt.Errorf("install %s: %w", name, err)
 	}
 	if res.ExitCode != 0 {
+		// A path that cannot take the file (a directory is there) leaves the
+		// verified temporary file behind; scratch inodes are scarce, so it goes.
+		_, _ = b.run(ctx, removeLine(tmp), nil)
 		return fmt.Errorf("install %s: exit %d", name, res.ExitCode)
 	}
 	return nil

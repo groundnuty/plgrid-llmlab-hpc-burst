@@ -23,19 +23,41 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
-// Cert returns a new self-signed certificate for agentapi.DialHomeServerName,
-// as PEM, and its pin (agentapi.PinOf). Every call has its own key.
-func Cert(t testing.TB) (certPEM []byte, pin string) {
+// CertOptions are what a test sets on an example launcher certificate; the zero
+// value is a good one.
+type CertOptions struct {
+	// Names are its DNS names; nil means agentapi.DialHomeServerName.
+	Names []string
+	// NotBefore and NotAfter bound its validity; zero values mean 2020-01-01 and
+	// 2120-01-01, wide enough for the tests' manual clocks and the wall clock.
+	NotBefore, NotAfter time.Time
+}
+
+// Cert returns a new good self-signed certificate for
+// agentapi.DialHomeServerName, as PEM, and its pin (agentapi.PinOf). Every call
+// has its own key.
+func Cert(t testing.TB) (certPEM []byte, pin string) { return CertWith(t, CertOptions{}) }
+
+// CertWith is Cert with the options set; a certificate with another name, or
+// outside its validity, still has a pin of its own key.
+func CertWith(t testing.TB, o CertOptions) (certPEM []byte, pin string) {
 	t.Helper()
+	if o.Names == nil {
+		o.Names = []string{agentapi.DialHomeServerName}
+	}
+	if o.NotBefore.IsZero() {
+		o.NotBefore = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	}
+	if o.NotAfter.IsZero() {
+		o.NotAfter = time.Date(2120, 1, 1, 0, 0, 0, 0, time.UTC)
+	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now()
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "example launcher"},
-		DNSNames:  []string{agentapi.DialHomeServerName},
-		NotBefore: now.Add(-time.Hour), NotAfter: now.Add(24 * time.Hour),
+		DNSNames: o.Names, NotBefore: o.NotBefore, NotAfter: o.NotAfter,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
