@@ -66,13 +66,13 @@ Problems this addresses:
 
 ### Risks and mitigations
 
-- **A copy loses its origin.** Mitigation: `ORIGIN.md` has required fields, checked in CI (the copy check); resyncing with upstream is a PR that updates it.
+- **A copy loses its origin.** Mitigation: `ORIGIN.md` has required fields, checked in CI by the copy check (planned; Test plan); resyncing with upstream is a PR that updates it.
 - **Two files pin the same binary and drift apart.** Mitigation: one file per pin wherever the code can read it, as `hack/fetch-k3s.sh` reads `k3s-pins.txt`. Where a script keeps its own copy, as `hack/fetch-frp.sh` does, a test compares the two and reads the script as text.
 - **A bump leaves HBEP citations at lines the framework no longer runs.** Mitigation: the bump PR re-checks each one (Upgrading a pinned dependency).
 - **A bump passes the unit tests and fails on a real cluster or engine.** The doubles were written from a reading of the old version's source. Mitigation: the live tests under the changed code are run again after the bump merges.
 - **A pin held back for a reason is bumped as routine.** Mitigation: Pinned versions records the reason and the trigger, and a bump PR cites the row.
-- **A lesson's ID changes and citations break.** Mitigation: IDs are only appended; CI checks that every ID on `main` still exists and that every ID an HBEP cites exists.
-- **A lesson leaks private data.** Mitigation: the catalogue's content rules, a CI grep for generic forbidden shapes, a private pre-push scan for named patterns, and the reviewer's check.
+- **A lesson's ID changes and citations break.** Mitigation: IDs are only appended; the lesson ID check (planned; Test plan) makes sure every ID on `main` still exists and every ID an HBEP cites exists.
+- **A lesson leaks private data.** Mitigation: the catalogue's content rules, a CI grep for generic forbidden shapes (planned; Test plan), a private pre-push scan for named patterns, and the reviewer's check.
 
 ### Open questions
 
@@ -142,14 +142,14 @@ The pins that a design decision rests on, as on `main` on 2026-11-01. The file i
   - A citation whose cited behaviour is unchanged gets the new version and line. That is an erratum of its HBEP, and it goes in the bump PR (HBEP-1).
   - A citation whose behaviour changed is an amendment of its HBEP. The amendment merges first, with approval, and the bump follows it (HBEP-1, Building from an HBEP).
   - The PR lists each citation with the line it now cites. A grep that finds no old version string shows only that the citations were renamed, not that they were read again.
-- **The record.** The PR changes the file in "Recorded in", its row in `docs/development.md` where it has one, and its row here. Because the file is the record, bringing this table's pin and reason in line with it is an erratum. A new row, or a changed trigger, is an amendment of this HBEP.
+- **The record.** The bump PR changes the file in "Recorded in", and its row in `docs/development.md` where it has one. When a row's reason and trigger still hold, the bump PR also updates its pin here, as an erratum. A new row, or a changed reason or trigger, is an amendment of this HBEP, merged before the bump (HBEP-1).
 - **Live re-run after merge.** After the bump merges, every live test that runs the changed code is run again on `main`: tests that need a real cluster, GPU or engine and do not run in CI, such as the real-engine run on GH200 (issue #94) and the Slurm provider's conformance runs (issue #93). This is the post-merge live-rerun rule, as applied in issue #94 on 1 Nov 2026. The bump is done once the re-runs are posted on its issue.
 
 **Worked example: controller-runtime after alpha.**
 1. **The bump.** controller-runtime goes from v0.23.1 to a v0.25 release, the first line with PR #3540's fix. v0.25 requires `k8s.io/api`, `k8s.io/apimachinery` and `k8s.io/client-go` v0.37. crossplane-runtime v2.4.3 was built against controller-runtime v0.23.1 and `k8s.io` v0.35.3, so it moves too, to a release built on controller-runtime v0.25. All three are one bump, in one PR.
 2. **The citations.** The PR searches `hbep/` for `v0.35.3`, `v0.23.1` and `v2.4.3`. Among the hits are HBEP-8's citations of client-go's `tools/events` and `tools/record`, api's `events/v1/types.go`, apimachinery's `pkg/watch/mux.go`, controller-runtime's `pkg/cluster/cluster.go` and crossplane-runtime's `pkg/event/event.go`, and HBEP-11's of crossplane-runtime's `pkg/resource/enqueue_handlers.go`. Each is read against the new version, and listed with its new line.
 3. **The workaround stays.** Our controllers keep `UsePriorityQueue` false. Turning the priority queue back on is a change of behaviour, decided on its own.
-4. **The record.** `go.mod`, `go.sum`, `docs/development.md` and the three rows above change in the PR.
+4. **The record.** The three rows above get a new reason and trigger, so they change by an amendment of this HBEP, merged before the bump. A citation from step 2 whose behaviour changed is amended in its own HBEP before the bump too. The bump PR then carries `go.mod`, `go.sum`, `docs/development.md` and the citations that still hold.
 5. **After merge.** The live tests that run the controllers are run again: the Slurm provider's conformance runs (issue #93), and the one-host alpha rehearsal (issue #146) once it exists.
 
 ### Copied code
