@@ -225,7 +225,11 @@ func (a *Agent) leaderExited(in *instance, g *procgroup.Group) {
 	if in.unit != nil {
 		a.cancelUnit(in) // its process is gone; a result from it is never used
 	}
-	if w.phase == agentapi.PartStopping {
+	if w.phase == agentapi.PartStopping || w.phase == agentapi.PartStopped {
+		// An intentional stop. The leader's exit and the group's end are two
+		// events from two goroutines (watch), so the group's end can be
+		// handled first and have made the worker stopped already; the leader's
+		// exit that follows is no unexpected exit.
 		return
 	}
 	w.phase = agentapi.PartExited
