@@ -21,19 +21,29 @@ import (
 //
 // Apptainer's layer cache is a directory of its own under TmpDir for this one
 // run, removed with it: the OCI layers of a pull are not needed once the image
-// is written, and kept beside the images they pile up (Opus nit).
+// is written, and kept beside the images they pile up (Opus nit). So is its
+// build tree (APPTAINER_TMPDIR): it is removed as soon as the run ends,
+// written or failed, before the image is recorded and long before the engine
+// starts, so a RAM-disk TmpDir gives its memory back before the engine loads
+// its weights; Apptainer itself leaves the tree behind when it is killed
+// (science-agent ruling, 1 Nov 2026, issue #125; HBEP-4).
 func (s *Stager) runApptainer(ctx context.Context, args []string) error {
 	cache, err := os.MkdirTemp(s.c.TmpDir, "hb-apptainer-cache-")
 	if err != nil {
 		return err
 	}
 	defer removeAll(cache)
+	build, err := os.MkdirTemp(s.c.TmpDir, "hb-apptainer-tmp-")
+	if err != nil {
+		return err
+	}
+	defer removeAll(build)
 	g, err := procgroup.Start(procgroup.Spec{
 		Path: s.c.Apptainer,
 		Args: args,
 		Env: append(append([]string(nil), s.c.BaseEnv...),
 			"APPTAINER_CACHEDIR="+cache,
-			"APPTAINER_TMPDIR="+s.c.TmpDir,
+			"APPTAINER_TMPDIR="+build,
 		),
 		Stdout: s.c.Log,
 		Stderr: s.c.Log,
