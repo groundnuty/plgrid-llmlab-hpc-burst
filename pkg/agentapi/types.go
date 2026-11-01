@@ -333,8 +333,23 @@ type Staging struct {
 	Phase      StagingPhase `json:"phase"`
 	BytesDone  int64        `json:"bytesDone,omitempty"`
 	BytesTotal int64        `json:"bytesTotal,omitempty"`
-	// Message is free text, cut to MaxMessageBytes (TruncateUTF8).
+	// Message is free text, cut to MaxMessageBytes (TruncateUTF8). While an
+	// image is built it reads "building image <image>@<digest> in the
+	// temporary directory <TMPDIR>", sent as the build starts, so the last
+	// report before a build that runs out of the job's memory (the job then
+	// ends OUT_OF_MEMORY, AllocationFailed) names the build (HBEP-4).
 	Message string `json:"message,omitempty"`
+	// BuildPeakTmpBytes is the peak use, in bytes, of the job's temporary
+	// directory while the agent built the Instance's image (a pull to a SIF
+	// or a sandbox build, on a cache miss); absent when no build ran. The
+	// agent samples it with statfs, (blocks - free blocks) * block size,
+	// every 250 ms and once more when the build ends, so a shorter spike can
+	// be missed. On a per-job tmpfs such as Helios's $MEMFS it counts the
+	// job's bytes alone; on a shared TMPDIR such as Lustre it counts other
+	// users' too and is only an upper bound. It measures the RAM-disk budget
+	// a partition's memPerGpu includes (HBEP-4; science-agent ruling, 1 Nov
+	// 2026, issue #125).
+	BuildPeakTmpBytes int64 `json:"buildPeakTmpBytes,omitempty"`
 }
 
 // PartPhase is the state of one process the agent runs.
