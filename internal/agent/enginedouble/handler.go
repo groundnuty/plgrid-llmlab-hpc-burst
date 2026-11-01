@@ -48,6 +48,7 @@ var routes = map[string]string{
 	"/v1/models":           http.MethodGet,
 	"/tokenize":            http.MethodPost,
 	"/v1/chat/completions": http.MethodPost,
+	"/v1/completions":      http.MethodPost,
 	"/metrics":             http.MethodGet,
 }
 
@@ -85,6 +86,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.tokenize(rec, r)
 		case "/v1/chat/completions":
 			h.chat(rec, r)
+		case "/v1/completions":
+			h.completion(rec, r)
 		case "/metrics":
 			h.metrics(rec)
 		}
