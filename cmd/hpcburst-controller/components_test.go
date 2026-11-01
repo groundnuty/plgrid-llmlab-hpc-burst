@@ -17,6 +17,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/launcher"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/lifecycle"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -217,13 +218,17 @@ func TestFrontSettingsRefusals(t *testing.T) {
 	}
 }
 
-// The Provider managers' grace leaves the lifecycle manager's 30 s, which is
-// also hpcburst down's wait before SIGKILL, a margin for the rest of the stop
-// (review of PR 132: N3; run_test.go stops during a submission).
+// The Provider managers' grace leaves the lifecycle manager's 30 s a margin
+// for the rest of the stop (review of PR 132: N3; run_test.go stops during a
+// submission), and the supervisor's kill grace for the controller is longer
+// than the lifecycle manager's (launcher.TestControllerStopBudget; PR #159).
 func TestProviderGraceFitsTheStop(t *testing.T) {
 	const margin = 10 * time.Second
-	if providerGrace+margin > launcher.DefaultGrace {
-		t.Fatalf("providerGrace %s leaves less than %s of hpcburst down's %s", providerGrace, margin, launcher.DefaultGrace)
+	if providerGrace+margin > lifecycle.ShutdownGrace {
+		t.Fatalf("providerGrace %s leaves less than %s of the lifecycle manager's shutdown grace, %s", providerGrace, margin, lifecycle.ShutdownGrace)
+	}
+	if lifecycle.ShutdownGrace >= launcher.ControllerTermGrace {
+		t.Fatalf("the lifecycle manager's shutdown grace %s is not below the supervisor's kill grace for the controller, %s", lifecycle.ShutdownGrace, launcher.ControllerTermGrace)
 	}
 }
 
