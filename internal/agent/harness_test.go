@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -95,6 +96,9 @@ type harnessOptions struct {
 	jobID      string // presented job ID; hJobID when empty
 	restart    int32
 	hub        map[string]string // files the fake Hub serves, by URL path
+	// hubIntercept sees every Hub request first and returns true when it
+	// has answered it.
+	hubIntercept func(w http.ResponseWriter, r *http.Request) bool
 	// apptainer replaces the fake Apptainer with another program.
 	apptainer string
 	// engineWrap, stagerWrap and backendWrap wrap the real engine client,
@@ -172,7 +176,7 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 	for k, v := range o.hub {
 		files[k] = v
 	}
-	hubClient, hubURL := h.startHub(files)
+	hubClient, hubURL := h.startHub(files, o.hubIntercept)
 	st, err := stage.New(stage.Config{
 		StagingDir:  h.stagingDir,
 		Apptainer:   apptainer,

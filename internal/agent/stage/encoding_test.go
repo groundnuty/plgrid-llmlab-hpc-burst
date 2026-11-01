@@ -125,8 +125,10 @@ func TestHubDownloadsAskForTheIdentityEncoding(t *testing.T) {
 // is omitted (reported as 0) and the bytes done still count; once it is in,
 // its length is known and counts (science-agent rulings, 1 Nov 2026, issue
 // #125 and the #127 review). Here the unknown-length file (300 bytes) comes
-// first, then a 1,000-byte file with its length: the first report is during
-// the unknown one, so it shows done > 0 with no total.
+// first, then a 1,000-byte file with its length: the first report comes as
+// the unknown one's headers arrive, before its first byte, with no total (PR
+// #138 review, Astra B5); TestTallyOmitsTheTotalWhileALengthIsUnknown follows
+// the bytes done that count while it downloads.
 func TestHubFileWithNoContentLengthHasAnUnknownTotal(t *testing.T) {
 	cfg := strings.Repeat("c", 300)
 	weights := strings.Repeat("w", 1000)
@@ -162,8 +164,8 @@ func TestHubFileWithNoContentLengthHasAnUnknownTotal(t *testing.T) {
 	if len(reports) == 0 {
 		t.Fatal("no progress reported")
 	}
-	if first := reports[0]; first[0] == 0 || first[1] != 0 {
-		t.Errorf("first report %v, want bytes done with the total omitted (0)", first)
+	if first := reports[0]; first != [2]int64{0, 0} {
+		t.Errorf("first report %v, want the total omitted (0) before the unknown file's first byte", first)
 	}
 	for _, r := range reports {
 		if r[1] != 0 && r[0] > r[1] {
@@ -176,8 +178,9 @@ func TestHubFileWithNoContentLengthHasAnUnknownTotal(t *testing.T) {
 }
 
 // The tally, report by report (every report passes, interval 0): a known
-// file's total shows; while a file of unknown length downloads, the total is
-// omitted and done keeps counting; once it is in, the total counts it; a
+// file's total shows; a file whose length is unknown withdraws the total at
+// once, before its first byte; while it downloads, the total is omitted and
+// done keeps counting; once it is in, the total counts it; a
 // failed unknown-length try takes its bytes back and shows the total again.
 func TestTallyOmitsTheTotalWhileALengthIsUnknown(t *testing.T) {
 	var log progressLog
@@ -202,8 +205,9 @@ func TestTallyOmitsTheTotalWhileALengthIsUnknown(t *testing.T) {
 	tl.finish()
 	want := [][2]int64{
 		{0, 1000}, {1000, 1000}, // a, length known
+		{1000, 0},            // b's length unknown: the total is withdrawn at once
 		{1100, 0}, {1300, 0}, // b downloading: total omitted, done counts
-		{1350, 0},                                // c downloading
+		{1300, 0}, {1350, 0}, // c's length unknown, c downloading
 		{1300, 1310}, {1310, 1310}, {1310, 1310}, // c undone; b known (300); d
 	}
 	if got := log.all(); !slices.Equal(got, want) {

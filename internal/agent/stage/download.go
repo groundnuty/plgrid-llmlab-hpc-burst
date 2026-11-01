@@ -98,10 +98,14 @@ func (a *attempt) expect(n int64) {
 	a.t.report(false)
 }
 
-// lengthUnknown marks a file whose response carried no Content-Length.
+// lengthUnknown marks a file whose response carried no Content-Length, and
+// reports at once that the total is unknown: a body that stalls before its
+// first byte would otherwise leave the total of the files before it shown
+// (PR #138 review, Astra B5).
 func (a *attempt) lengthUnknown() {
 	a.unknown = true
 	a.t.unknown++
+	a.t.report(true)
 }
 
 func (a *attempt) got(n int64) {
