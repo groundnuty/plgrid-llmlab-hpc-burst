@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,7 +34,7 @@ import (
 
 const (
 	dryOtherPartition = "dry-other-partition"
-	dryWait           = 60 * time.Second
+	dryWait           = 8 * time.Second
 )
 
 // dryFaults lists every fault the stand-in knows, per row family. An unknown
@@ -100,7 +101,7 @@ func newDrySteps(t *testing.T, cfg Config, family string) *drySteps {
 		Partition: v1alpha1.PartitionProfile{Name: cfg.Row.Partition}}
 	set := provider.Settings{Provider: "dry", Account: "example-account", Partition: cfg.Row.Partition}
 	// A listing is never older than a read: the tests move the clock and the jobs, not the cache.
-	d.batch = slurm.NewBatch(d.sess, prof, set, slurm.Options{Clock: clock, PollInterval: time.Nanosecond, BusyInterval: time.Nanosecond})
+	d.batch = slurm.NewBatch(d.sess, prof, set, slurm.Options{Clock: &tickClock{c: clock}, PollInterval: time.Nanosecond, BusyInterval: time.Nanosecond})
 	t.Cleanup(func() {
 		// End whatever is left, then close: a Platform in run mode must be closed.
 		for i := 1; i <= d.jobs; i++ {
@@ -138,7 +139,7 @@ func (d *drySteps) submit(tag, partition, qos string) (n int, id string) {
 	d.jobs++
 	n = d.jobs
 	wrap := fmt.Sprintf("while [ ! -e %s ]; do sleep 0.02; done", d.gate(n))
-	line := fmt.Sprintf("sbatch --parsable --no-requeue --job-name=%s --partition=%s --account=example-account --time=00:30:00 --gres=gpu:1 --cpus-per-task=1 --mem=1024", tag, partition)
+	line := fmt.Sprintf("sbatch --parsable --no-requeue --job-name=%s --partition=%s --account=example-account --time=00:30:00 --gres=gpu:1 --cpus-per-task=1 --mem=1024 --output=%s --error=%s", tag, partition, d.out(n), d.out(n))
 	if qos != "" {
 		line += " --qos=" + qos
 	}
@@ -163,7 +164,8 @@ func (d *drySteps) waitFor(what string, cond func(provider.Job) bool, id string)
 			return j
 		}
 		if time.Now().After(deadline) {
-			d.t.Fatalf("timed out after %s waiting for %s", dryWait, what)
+			out, _ := os.ReadFile(d.out(1))
+			d.t.Fatalf("timed out after %s waiting for %s (last read: found %t, err %v, state %v, phase %s, source %v; job 1 output %q)", dryWait, what, found, err, j.State, j.Phase, j.Source, out)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -323,7 +325,8 @@ func (d *drySteps) NoOverlap(_ context.Context, p Plan) (NoOverlapObs, error) {
 
 func (d *drySteps) TunnelHour(_ context.Context, p Plan) (TunnelHourObs, error) {
 	tag := d.tag(p, "tunnel")
-	n, id := d.submit(tag, d.partitionFor(false), d.cfg.Row.QOS)
+	// The run's only job is the one the wrong-partition fault sends elsewhere.
+	n, id := d.submit(tag, d.partitionFor(true), d.cfg.Row.QOS)
 	j := d.running(id)
 	opened := *j.StartTime
 	held := 61 * time.Minute
@@ -351,3 +354,15 @@ func (d *drySteps) TunnelHour(_ context.Context, p Plan) (TunnelHourObs, error) 
 	}
 	return obs, nil
 }
+
+func (d *drySteps) out(n int) string { return filepath.Join(d.root, fmt.Sprintf("job-%d.out", n)) }
+
+// tickClock is the manual clock plus one nanosecond for every reading, so that
+// the Batch's cached listing is always due: the manual clock alone never moves
+// between two reads, and the Batch would serve the first listing for ever.
+type tickClock struct {
+	c *fake.Clock
+	n atomic.Int64
+}
+
+func (t *tickClock) Now() time.Time { return t.c.Now().Add(time.Duration(t.n.Add(1))) }
