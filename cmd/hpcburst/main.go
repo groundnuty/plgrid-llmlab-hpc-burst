@@ -119,6 +119,9 @@ func emitJSON(w io.Writer, v any) {
 
 func fail(stderr io.Writer, err error) int {
 	fmt.Fprintf(stderr, "hpcburst: %v\n", err)
+	if errors.Is(err, launcher.ErrGraceTooShort) {
+		return exitUsage // a flag the host cannot honour: nothing was stopped
+	}
 	return exitFail
 }
 
@@ -255,7 +258,7 @@ func cmdDown(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	var sd string
 	var asJSON bool
 	fs.StringVar(&sd, "state-dir", "", stateDirUsage)
-	fs.DurationVar(&o.Grace, "grace", launcher.DefaultGrace, "how long to wait after SIGTERM before SIGKILL")
+	fs.DurationVar(&o.Grace, "grace", launcher.DefaultGrace, "how long to wait after SIGTERM before SIGKILL; when the supervisor runs the front, at least "+launcher.SupervisorGraceWithFront.String()+" (the front needs up to "+launcher.FrontTermGrace.String()+" to flush its usage records), and a shorter grace is refused")
 	fs.BoolVar(&asJSON, "json", false, "print the result as JSON")
 	if code, done := parse(fs, args); done {
 		return code
@@ -309,7 +312,7 @@ func cmdUpgrade(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	fs.StringVar(&sd, "state-dir", "", stateDirUsage)
 	fs.StringVar(&bd, "bin-dir", "", binDirUsage)
 	fs.StringVar(&o.To, "to", "", "k3s release to upgrade to (required, pinned): the next minor, or a newer patch of the running minor")
-	fs.DurationVar(&o.Grace, "grace", launcher.DefaultGrace, "how long to wait after SIGTERM before SIGKILL")
+	fs.DurationVar(&o.Grace, "grace", launcher.DefaultGrace, "how long to wait after SIGTERM before SIGKILL; when the supervisor runs the front, at least "+launcher.SupervisorGraceWithFront.String()+" (the front needs up to "+launcher.FrontTermGrace.String()+" to flush its usage records), and a shorter grace is refused")
 	fs.DurationVar(&o.ReadyTimeout, "ready-timeout", launcher.DefaultReadyTimeout, "how long to wait for readiness of the new host")
 	fs.BoolVar(&asJSON, "json", false, "print the result as JSON")
 	if code, done := parse(fs, args); done {

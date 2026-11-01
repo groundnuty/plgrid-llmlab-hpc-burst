@@ -6,7 +6,37 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 )
+
+// FrontStopBudget is the front's longest normal stop (HBEP-5, stop order), the sum of its parts
+// in internal/front:
+//   - the requests in flight run for its shutdown grace, front.DefaultShutdownGrace: 10 s;
+//   - the rest are cut, and their handlers are waited for up to that long again: 10 s;
+//   - a cut stream may spend its write grace (internal/front's defaultWriteGrace) writing its
+//     last event: 5 s;
+//   - then the usage sink is flushed and closed: 1 s.
+//
+// A SIGKILL before the sink is closed loses the cut requests' front_shutdown records and leaves a
+// counter gap. A front configured with a longer shutdown grace needs more.
+const FrontStopBudget = 2*frontShutdownGrace + frontWriteGrace + frontSinkClose
+
+// The parts of FrontStopBudget. TestFrontStopBudget checks frontShutdownGrace against
+// front.DefaultShutdownGrace.
+const (
+	frontShutdownGrace = 10 * time.Second
+	frontWriteGrace    = 5 * time.Second
+	frontSinkClose     = time.Second
+)
+
+// FrontTermGrace is how long the supervisor lets the front stop, from SIGTERM to SIGKILL:
+// FrontStopBudget and a margin of 4 s.
+const FrontTermGrace = FrontStopBudget + 4*time.Second
+
+// SupervisorGraceWithFront is the least grace down and upgrade accept for a host whose supervisor
+// runs a front: FrontTermGrace, and 5 s for the supervisor to see the front's exit, write its
+// record and exit. A shorter --grace is refused (ErrGraceTooShort); DefaultGrace is longer.
+const SupervisorGraceWithFront = FrontTermGrace + 5*time.Second
 
 // FrontBinName is the front's binary (issue #64, HBEP-5), looked for beside the running hpcburst
 // unless --front-bin names another.
@@ -30,7 +60,7 @@ func resolveFrontRun(config, explicitBin string) (*FrontRunConfig, error) {
 		}
 		return nil, nil
 	}
-	cfg, err := regularFile(config, "front configuration")
+	cfg, _, err := regularFile(config, "front configuration")
 	if err != nil {
 		return nil, err
 	}
@@ -42,30 +72,35 @@ func resolveFrontRun(config, explicitBin string) (*FrontRunConfig, error) {
 		}
 		bin = filepath.Join(filepath.Dir(self), FrontBinName)
 	}
-	bin, err = regularFile(bin, "front binary")
+	bin, fi, err := regularFile(bin, "front binary")
 	if err != nil {
 		return nil, err
 	}
-	if fi, _ := os.Stat(bin); fi.Mode().Perm()&0o111 == 0 {
+	if fi.Mode().Perm()&0o111 == 0 {
 		return nil, fmt.Errorf("front binary %s is not executable", bin)
 	}
 	return &FrontRunConfig{Binary: bin, Config: cfg}, nil
 }
 
-func regularFile(path, what string) (string, error) {
+// regularFile returns the absolute path of a regular file and the FileInfo it was judged by, so
+// the caller checks the same file and never stats it a second time.
+func regularFile(path, what string) (string, os.FileInfo, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	fi, err := os.Stat(abs)
 	if err != nil {
-		return "", fmt.Errorf("%s: %w", what, err)
+		return "", nil, fmt.Errorf("%s: %w", what, err)
 	}
 	if !fi.Mode().IsRegular() {
-		return "", fmt.Errorf("%s %s is not a regular file", what, abs)
+		return "", nil, fmt.Errorf("%s %s is not a regular file", what, abs)
 	}
-	return abs, nil
+	return abs, fi, nil
 }
+
+// frontEntryName is the front's entry in the supervised set and in supervisor.json.
+const frontEntryName = "front"
 
 // frontEntry is the front's supervised entry, or nil when no front was configured. Its command
 // line is the contract with cmd/hpcburst-front: it fills an agentapi.Host from --state-dir and
@@ -83,5 +118,5 @@ func (s *State) frontEntry(l layout) (*supervised, error) {
 	if s.Front.Mode != "" {
 		args = append(args, "--mode", s.Front.Mode)
 	}
-	return &supervised{Name: "front", Path: s.FrontRun.Binary, Args: args, Health: health}, nil
+	return &supervised{Name: frontEntryName, Path: s.FrontRun.Binary, Args: args, Health: health, TermGrace: FrontTermGrace, WaitReady: true}, nil
 }

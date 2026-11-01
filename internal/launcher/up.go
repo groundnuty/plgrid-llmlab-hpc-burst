@@ -87,6 +87,7 @@ func startAndWait(ctx context.Context, spec launchSpec, front Front, timeout tim
 	st := &State{
 		Version: spec.bin.Version.String(), Binary: spec.bin.Path, BinarySHA256: spec.bin.SHA256,
 		Nice: spec.nice, Ports: spec.ports, Procs: []ProcRec{rec}, StartedAt: t0, Front: front,
+		Controllers: spec.controllers, FrontRun: spec.frontRun,
 	}
 	// Record before waiting: an interrupted or crashed start is then still cleaned up by down.
 	if err := spec.l.saveState(st); err != nil {
@@ -230,7 +231,11 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 		return nil, fmt.Errorf("refusing to start: %w", err)
 	}
 
-	st, readyzAt, readyAt, err := startAndWait(ctx, launchSpec{l: l, bin: bin, ports: ports, nice: o.Nice}, front, o.ReadyTimeout, o.Log)
+	spec := launchSpec{l: l, bin: bin, ports: ports, nice: o.Nice}
+	if ctrlBin != "" {
+		spec.controllers, spec.frontRun = &ControllerConfig{Binary: ctrlBin}, frontRun
+	}
+	st, readyzAt, readyAt, err := startAndWait(ctx, spec, front, o.ReadyTimeout, o.Log)
 	if err != nil {
 		return nil, err
 	}

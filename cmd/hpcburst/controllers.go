@@ -59,6 +59,9 @@ func printSupervision(w io.Writer, r *launcher.StatusReport) {
 		if c.Degraded != "" {
 			line += ", degraded: " + c.Degraded
 		}
+		if c.UsageState == launcher.UsageUnknown {
+			line += ", usage state unknown"
+		}
 		if c.LastExit != nil {
 			line += fmt.Sprintf(", last exit %q (code %d) at %s", c.LastExit.Detail, c.LastExit.Code, c.LastExit.At.Format("15:04:05"))
 		}

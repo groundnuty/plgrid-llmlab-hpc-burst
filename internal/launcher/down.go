@@ -12,8 +12,27 @@ import (
 	"time"
 )
 
-// DefaultGrace is how long down waits after SIGTERM before it sends SIGKILL.
-const DefaultGrace = 30 * time.Second
+// DefaultGrace is how long down waits after SIGTERM before it sends SIGKILL. It is longer than
+// SupervisorGraceWithFront, the least a supervisor that runs the front needs.
+const DefaultGrace = 40 * time.Second
+
+// ErrGraceTooShort is returned by Down and Upgrade, before anything is stopped, when the grace is
+// shorter than SupervisorGraceWithFront and the supervisor runs a front.
+var ErrGraceTooShort = errors.New("the grace is too short for the front to stop")
+
+// checkGrace refuses a grace the recorded front cannot stop within.
+func checkGrace(st *State, grace time.Duration) error {
+	if st.FrontRun == nil || grace >= SupervisorGraceWithFront {
+		return nil
+	}
+	for _, p := range st.Procs {
+		if p.Name == supervisorName {
+			return fmt.Errorf("%w: --grace %s, but the supervisor runs the front, which needs up to %s to stop and flush its usage records, so give at least %s (nothing was stopped)",
+				ErrGraceTooShort, grace, FrontTermGrace, SupervisorGraceWithFront)
+		}
+	}
+	return nil
+}
 
 // killWait is how long down waits for a process to disappear after SIGKILL.
 const killWait = 10 * time.Second
@@ -64,7 +83,15 @@ func stopRecorded(ctx context.Context, st *State, grace time.Duration, log io.Wr
 		if len(group) == 0 {
 			continue
 		}
-		rep, unk, err := stopGroup(ctx, st, group, grace, log)
+		g := grace
+		if group[0].Name == supervisorName && st.FrontRun != nil && g < SupervisorGraceWithFront {
+			// The supervisor gives the front FrontTermGrace to flush its usage records; killing the
+			// supervisor sooner kills the front with it (Pdeathsig). Down and Upgrade refuse such a
+			// grace (checkGrace); this covers the internal stops, such as an aborted up.
+			logf(log, "the supervisor runs the front, which needs %s to stop: waiting up to %s for it, not %s", FrontTermGrace, SupervisorGraceWithFront, g)
+			g = SupervisorGraceWithFront
+		}
+		rep, unk, err := stopGroup(ctx, st, group, g, log)
 		out.Procs = append(out.Procs, rep.Procs...)
 		out.GoneListeners += rep.GoneListeners
 		out.ForeignOnPorts = append(out.ForeignOnPorts, rep.ForeignOnPorts...)
@@ -233,6 +260,9 @@ func Down(ctx context.Context, o DownOptions) (*StopReport, error) {
 	}
 	if o.Grace <= 0 {
 		o.Grace = DefaultGrace
+	}
+	if err := checkGrace(st, o.Grace); err != nil {
+		return nil, err
 	}
 	rep, err := stopRecorded(ctx, st, o.Grace, o.Log)
 	if err != nil {

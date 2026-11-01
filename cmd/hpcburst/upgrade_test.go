@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -201,6 +202,16 @@ func TestUpgrade(t *testing.T) {
 		}
 		if !ok {
 			t.Errorf("after the upgrade supervisor.json is %+v (before: %+v)", newRec, oldRec)
+		} else {
+			// The new front runs with exactly the front's command line, its configuration
+			// included (PR 134 review, N1): the fake accepts any --config path, so only the
+			// process's own argv shows the configuration was carried across.
+			pid := newRec.Entries[1].Proc.PID
+			got := strings.Split(strings.TrimRight(fileOf(fmt.Sprintf("/proc/%d/cmdline", pid)), "\x00"), "\x00")
+			want := []string{frontBin, "--config", frontCfg, "--state-dir", h.dir, "--port-base", "29220", "--health-addr", frontHealthAddr, "--mode", "ssh"}
+			if strings.Join(got, " ") != strings.Join(want, " ") {
+				t.Errorf("the front after the upgrade runs\n got %q\nwant %q", got, want)
+			}
 		}
 		waitFor(t, 30*time.Second, "the front's /healthz after the upgrade", func() bool {
 			resp, err := (&http.Client{Timeout: 3 * time.Second}).Get("http://" + frontHealthAddr + "/healthz")
@@ -428,4 +439,67 @@ func checkObjects(ctx context.Context, t *testing.T, c clients, objs []created) 
 		kept++
 	}
 	return kept
+}
+
+// TestInterruptedUpgradeKeepsTheSupervision: an upgrade killed while the new k3s starts leaves a
+// record that still names the controllers and the front (PR 134 review, B3), so status says that
+// no supervisor runs. A record without them has no such reason: once k3s is ready it would call
+// the host healthy and leave the front stopped with nothing to say so. The reason is judged
+// whatever state the new k3s is in, so the test does not wait for k3s.
+func TestInterruptedUpgradeKeepsTheSupervision(t *testing.T) {
+	const base = 29220
+	h := newHost(t)
+	ctlBin, _ := fakeController(t)
+	frontBin, _ := fakeFront(t)
+	frontCfg := filepath.Join(filepath.Dir(h.dir), "front.json")
+	if err := os.WriteFile(frontCfg, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if r := cli(t, h.upArgs(base, "--version", "1.35.9", "--controller-bin", ctlBin, "--front-config", frontCfg, "--front-bin", frontBin)...); r.code != exitOK {
+		t.Fatalf("up exited %d: %s", r.code, r.err)
+	}
+	oldK3s := readState(t, h.dir).Processes[0].PID
+	cmd := startCLI(t, h.args("upgrade", "--bin-dir", h.binDir, "--to", "1.36.5")...)
+	// The moment: the replacement's first record, naming a new k3s, is on disk and the launcher
+	// waits for that k3s to be ready.
+	var newK3s int
+	waitFor(t, 120*time.Second, "the new host's first record", func() bool {
+		b, err := os.ReadFile(filepath.Join(h.dir, "state.json"))
+		if err != nil {
+			return false
+		}
+		var s struct {
+			Version   string      `json:"version"`
+			Processes []stateProc `json:"processes"`
+		}
+		if json.Unmarshal(b, &s) != nil || len(s.Processes) == 0 || s.Processes[0].PID == oldK3s || !strings.HasPrefix(s.Version, "v1.36.5") {
+			return false
+		}
+		newK3s = s.Processes[0].PID
+		return true
+	})
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+	var raw struct {
+		Controllers *struct {
+			Binary string `json:"binary"`
+		} `json:"controllers"`
+		FrontRun *struct {
+			Binary string `json:"binary"`
+			Config string `json:"config"`
+		} `json:"front_run"`
+	}
+	parseJSON(t, fileOf(filepath.Join(h.dir, "state.json")), &raw)
+	if raw.Controllers == nil || raw.Controllers.Binary != ctlBin || raw.FrontRun == nil || raw.FrontRun.Binary != frontBin || raw.FrontRun.Config != frontCfg {
+		t.Errorf("the interrupted upgrade's record names controllers %+v and front %+v, want %s and %s with %s", raw.Controllers, raw.FrontRun, ctlBin, frontBin, frontCfg)
+	}
+	r := cli(t, h.args("status", "--json", "--no-gc-probe")...)
+	var st controllerStatus
+	parseJSON(t, r.out, &st)
+	if r.code != exitFail || !strings.Contains(strings.Join(st.Reasons, "; "), "no supervisor is recorded") {
+		t.Errorf("status after the interrupted upgrade exited %d with reasons %v; want unhealthy, no supervisor recorded", r.code, st.Reasons)
+	}
+	if !running(newK3s) {
+		t.Errorf("the new k3s (pid %d) is gone", newK3s)
+	}
 }

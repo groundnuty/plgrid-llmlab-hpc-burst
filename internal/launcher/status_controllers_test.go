@@ -327,9 +327,25 @@ func TestStatusFrontUsageDegraded(t *testing.T) {
 			t.Errorf("health %s, entries %+v", rep.Health, rep.Controllers)
 		}
 	})
-	t.Run("no usage member, as the controller answers: not degraded", func(t *testing.T) {
-		rep := front(newSupervisedFakeHost(t), "")
-		if rep.Health != Healthy || rep.Controllers[0].UsageState != "" || rep.Controllers[0].Degraded != "" {
+	// The front always states its sink, so a body without a known state is reported as unknown
+	// (PR 134 review, N2), still without touching the health; a controller states none.
+	for _, c := range []struct{ name, body string }{
+		{"no body", ""},
+		{"no usage member", `{"synced":true}`},
+		{"a state HBEP-8 does not name", `{"synced":true,"usage":{"state":"draining"}}`},
+		{"a body cut at the read limit", `{"synced":true,"usage":{"state":"ok"` + strings.Repeat(" ", healthzBodyLimit) + `}}`},
+	} {
+		t.Run("front, "+c.name+": usage state unknown", func(t *testing.T) {
+			rep := front(newSupervisedFakeHost(t), c.body)
+			if rep.Health != Healthy || len(rep.Reasons) != 0 || rep.Controllers[0].UsageState != "unknown" || rep.Controllers[0].Degraded != "" {
+				t.Errorf("health %s, reasons %v, entries %+v", rep.Health, rep.Reasons, rep.Controllers)
+			}
+		})
+	}
+	t.Run("the controller, which states no usage: nothing said", func(t *testing.T) {
+		s := newSupervisedFakeHost(t) // its entry is the controller
+		rep := s.status(true)
+		if rep.Health != Healthy || rep.Controllers[0].Name != "controller" || rep.Controllers[0].UsageState != "" {
 			t.Errorf("health %s, entries %+v", rep.Health, rep.Controllers)
 		}
 	})
