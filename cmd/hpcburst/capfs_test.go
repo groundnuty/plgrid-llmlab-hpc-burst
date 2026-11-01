@@ -28,7 +28,21 @@ type capVolume struct {
 	enospc  atomic.Int64 // how many requests were refused, so a test can show the volume really was full
 	server  *fuse.Server
 	mount   string
+
+	// frozen is the steady state of a full store (#180): once set, every write, allocation and
+	// truncation is refused with ENOSPC, including one that fits in space the files already hold, which
+	// a volume that is merely at its limit accepts (SQLite reusing pages, or its WAL restarting after a
+	// checkpoint, writes inside the files). A real full disk can accept such rewrites now and then; the
+	// frozen volume models the state in which none is, so that "the store is full" holds until the test
+	// unfreezes it, and a test can make assertions about that state without racing the store's own
+	// housekeeping. frozenRefusals counts the requests that only the freeze refused.
+	frozen         atomic.Bool
+	frozenRefusals atomic.Int64
 }
+
+// freeze makes the volume refuse every write from now on; unfreeze lifts it.
+func (v *capVolume) freeze()   { v.frozen.Store(true) }
+func (v *capVolume) unfreeze() { v.frozen.Store(false) }
 
 // used is the space the files in the backing directory take, in bytes of allocated blocks.
 func (v *capVolume) used() int64 {
@@ -46,8 +60,14 @@ func (v *capVolume) used() int64 {
 	return n
 }
 
-// admit decides whether growing the file at path to newSize fits.
+// admit decides whether growing the file at path to newSize fits. A frozen volume refuses every
+// request, whatever it would take.
 func (v *capVolume) admit(path string, newSize int64) syscall.Errno {
+	if v.frozen.Load() {
+		v.frozenRefusals.Add(1)
+		v.enospc.Add(1)
+		return syscall.ENOSPC
+	}
 	var cur int64
 	if fi, err := os.Stat(path); err == nil {
 		cur = fi.Size()
