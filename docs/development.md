@@ -22,6 +22,8 @@ Code under `spikes/` and `third_party/forked/*` is not part of this module.
 | `cmd/hpcburst-front/` | the front's binary, which `hpcburst up` supervises | HBEP-5 |
 | `hack/` | scripts for generation, verification, pinned tools and the live checks (`live-checks.sh`) | |
 | `hack/livechecks/` | tests of `hack/live-checks.sh` only, no code: its table names every package that holds a live test, and its plan, gates, slot rules and cleanup are run against a stub cluster | HBEP-15 |
+| `examples/` | the manifests `docs/quickstart.md` applies; `api/v1alpha1/e2e/examples_test.go` admits each one against the real CRDs | HBEP-3, HBEP-4 |
+| `internal/quickstart/` | tests only: they keep `docs/quickstart.md` true (its file samples parse, its snippets work, its paths exist, its commands are accepted by the real `hpcburst` and `hack/` scripts, and the directories it passes are the launcher's) | |
 | `third_party/forked/<project>/` | copied code, each with its `LICENSE` and `ORIGIN.md` | HBEP-15 |
 | `spikes/<id>/` | spike code and results; each Go spike is its own module | |
 
