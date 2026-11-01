@@ -407,6 +407,57 @@ jobs:
   # added. They become required only after they have been green on main (HBEP-15's protocol).
   # Everything they run is in hack/ (licence-modules.sh, licence-check.sh, licence_gate.py, the
   # allowlist and the known-zero list), never in spikes/. The check is strict: no exemption.
+  # The one-host alpha rehearsal (issue #146): the whole stack on this runner, the real hpcburst
+  # up (k3s, the controller, frps and the front) over a fake Slurm cluster in run mode, reached
+  # over a real sshd, with the real hb-agent in the fake job. hack/rehearsal.sh builds the four
+  # binaries and runs it. It is not one of the required checks: a failure here is a finding to
+  # read, not a block on merging.
+  rehearsal:
+    name: rehearsal
+    runs-on: ubuntu-24.04
+    # Compiling the four binaries and the test from scratch, then a run the test bounds at 15 min.
+    timeout-minutes: 35
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # The rehearsal's hpcburst up starts k3s 1.36.5 only.
+      - name: Fetch the pinned k3s binary
+        run: |
+          echo "HPCBURST_BIN_DIR=$RUNNER_TEMP/k3s-bin" >> "$GITHUB_ENV"
+          bash hack/fetch-k3s.sh "$RUNNER_TEMP/k3s-bin" 1.36.5
+
+      - name: Fetch the pinned frp binaries
+        run: |
+          bash hack/fetch-frp.sh "$RUNNER_TEMP/frp"
+          echo "HPCBURST_FRP_DIR=$RUNNER_TEMP/frp" >> "$GITHUB_ENV"
+
+      # The fake login node and the ssh dial-home run OpenSSH's sshd as this user, in inetd mode,
+      # with no service and no root, as for the go job's tunnel tests.
+      - name: Provide OpenSSH's sshd for the login node
+        run: |
+          if ! test -x /usr/sbin/sshd; then
+            printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
+            sudo chmod 755 /usr/sbin/policy-rc.d
+            sudo apt-get update -q
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server
+            sudo rm -f /usr/sbin/policy-rc.d
+          fi
+          sudo systemctl disable --now ssh.socket ssh.service 2> /dev/null || true
+          /usr/sbin/sshd -V 2>&1 | head -1
+          echo "HPCBURST_SSHD=/usr/sbin/sshd" >> "$GITHUB_ENV"
+
+      - name: hack/rehearsal.sh
+        run: REHEARSAL_OUT="$RUNNER_TEMP/rehearsal" bash hack/rehearsal.sh
+
   licence-modules:
     name: licence-modules
     # Disabled: the owner dropped licence checking on 31 Oct 2026 ("I don't care about those
