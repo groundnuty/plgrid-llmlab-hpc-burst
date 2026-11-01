@@ -627,46 +627,54 @@ func TestAStalledBodyIsAnsweredOrClosedWithinOneSecond(t *testing.T) {
 	}
 }
 
+// waitInFlight polls the handler's in-flight count every 2 ms until it is n, and fails after d with
+// the count it last saw.
+func waitInFlight(t *testing.T, h *Handler, n int, d time.Duration, what string) {
+	t.Helper()
+	end := time.Now().Add(d)
+	for h.inFlight() != n {
+		if time.Now().After(end) {
+			t.Fatalf("after %s the in-flight count is %d, want %d: %s", d, h.inFlight(), n, what)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
 // TestStalledBodiesTakeSlotsAndGiveThemBack: a stalled body holds a slot from the start of its read
-// (so a flood of them counts against the cap), and gives it back when the deadline ends it (so it
-// does not hold a well-formed Login out for good).
+// (so a flood of them counts against the cap), and gives it back at the deadline (so it does not hold a
+// well-formed Login out for good). The test waits on the handler's in-flight count, not on timing:
+// the count reaches 2 because of the two stalled bodies (nothing else is sent), a Login then finds
+// the cap full, and the count returns to 0 when the deadline ends the stalled reads. The deadline is
+// 999 ms, the largest the handler accepts (NewHandler refuses 1 s), to keep the window wide; the
+// Login probe goes straight to the handler, so no network round trip eats into it.
 func TestStalledBodiesTakeSlotsAndGiveThemBack(t *testing.T) {
-	h, err := NewHandler(syncedIndex(t), Options{MaxInFlight: 2})
+	h, err := NewHandler(syncedIndex(t), Options{MaxInFlight: 2, Deadline: 999 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close) // registered before the client connections, so it closes after them
-	login := mustJSON(fixture(t, "login"))
-	client := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
-	postLogin := func() answer {
-		t.Helper()
-		resp, err := client.Post(srv.URL+agentapi.FrpsPluginPath+"?op=Login", "application/json", bytes.NewReader(login))
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer resp.Body.Close()
-		var a answer
-		if err := json.NewDecoder(resp.Body).Decode(&a); err != nil {
-			t.Fatal(err)
-		}
-		return a
-	}
-	if a := postLogin(); a.Reject {
+
+	if a := call(t, h, OpLogin, fixture(t, "login")); a.Reject {
 		t.Fatalf("a well-formed Login with nothing stalled: %q", a.RejectReason)
 	}
-	conns := []net.Conn{stalledBody(t, srv), stalledBody(t, srv)}
-	// While the two stalled bodies are being read, they hold both slots.
-	waitFor(t, time.Second, "the stalled bodies never took the slots", func() bool {
-		return postLogin().RejectReason == reasonBusy
-	})
-	for _, c := range conns {
-		if took, _, _ := answeredOrClosed(t, c); took >= time.Second {
-			t.Errorf("a stalled body was still held after %s", took)
-		}
+	if n := h.inFlight(); n != 0 {
+		t.Fatalf("the in-flight count is %d after an answered call, want 0 (the slot is freed before the answer)", n)
 	}
-	// Both have been ended: the slots are free and a well-formed Login is accepted.
-	if a := postLogin(); a.Reject {
+
+	conns := []net.Conn{stalledBody(t, srv), stalledBody(t, srv)}
+	waitInFlight(t, h, 2, 5*time.Second, "the two stalled bodies never took the two slots")
+	// Both slots are taken by stalled reads, so a Login finds the cap full and is refused at once.
+	if a := call(t, h, OpLogin, fixture(t, "login")); !a.Reject || a.RejectReason != reasonBusy {
+		t.Fatalf("a Login while two stalled bodies hold the two slots: %+v, want a refusal with %q", a, reasonBusy)
+	}
+
+	// The deadline ends the stalled reads and the slots come back.
+	waitInFlight(t, h, 0, 5*time.Second, "the stalled bodies never gave their slots back")
+	for _, c := range conns { // the stalled clients were answered or cut off, whatever it took
+		answeredOrClosed(t, c)
+	}
+	if a := call(t, h, OpLogin, fixture(t, "login")); a.Reject {
 		t.Fatalf("a well-formed Login after the stalled bodies ended: %q", a.RejectReason)
 	}
 }
