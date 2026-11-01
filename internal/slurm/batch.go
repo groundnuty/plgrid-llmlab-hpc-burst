@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -486,7 +487,39 @@ func checkRequest(req provider.SubmitRequest, profile provider.Profile, settings
 		return s, refuse("agentDigest is not 64 lowercase hex characters")
 	}
 	s.agentDigest = p.AgentDigest
+	if err := checkTmpDir(part); err != nil {
+		return s, refuse("partition %q: %v", part.Name, err)
+	}
+	s.tmpDir, s.tmpDirFeature = part.TmpDir, part.TmpDirFeature
 	return s, nil
+}
+
+// tmpDirForm and featureForm are the CRD's patterns for a partition's tmpDir
+// and tmpDirFeature (v1alpha1.PartitionProfile).
+var (
+	tmpDirForm  = regexp.MustCompile(`^(/|\$[A-Za-z_][A-Za-z0-9_]*)[A-Za-z0-9._:=,/-]*$`)
+	featureForm = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
+)
+
+// checkTmpDir holds a partition's tmpDir and tmpDirFeature to the CRD's rules
+// again, because the bootstrap puts them into a shell line: tmpDir an absolute
+// path or one that starts with a variable, of letters, digits and ._:=,/-,
+// with no ".." segment; tmpDirFeature one feature name, and only with a tmpDir.
+func checkTmpDir(p v1alpha1.PartitionProfile) error {
+	if d := p.TmpDir; d != "" {
+		if len(d) > 1024 || !tmpDirForm.MatchString(d) || slices.Contains(strings.Split(d, "/"), "..") {
+			return fmt.Errorf("tmpDir %q is not an absolute path or $VARIABLE path of letters, digits and ._:=,/- without a '..' segment", d)
+		}
+	}
+	if f := p.TmpDirFeature; f != "" {
+		if !featureForm.MatchString(f) {
+			return fmt.Errorf("tmpDirFeature %q is not one node feature name", f)
+		}
+		if p.TmpDir == "" {
+			return fmt.Errorf("tmpDirFeature %q names the feature tmpDir needs, and no tmpDir is set", f)
+		}
+	}
+	return nil
 }
 
 // Submit implements provider.Batch: one sbatch, held when req.Hold is set. A

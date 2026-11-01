@@ -35,6 +35,9 @@ type submission struct {
 	memMiB                  int64
 	allocDir, agentPath     string // absolute
 	agentDigest             string
+	// tmpDir and tmpDirFeature are the partition's (checkTmpDir): the job's
+	// temporary directory and the node feature it needs; "" when absent.
+	tmpDir, tmpDirFeature string
 }
 
 // bootstrap is the batch script, the --wrap command (HBEP-4, Submission): it
@@ -44,18 +47,50 @@ type submission struct {
 // plain POSIX shell, with no single quote, because the whole value travels as
 // one single-quoted word through the login node's shell.
 func bootstrap(agentPath, digest, allocDir string) string {
-	return "[ $(sha256sum " + agentPath + " | cut -c1-64) = " + digest + " ] && exec " + agentPath + " " + allocDir
+	return bootstrapIn(agentPath, digest, allocDir, "")
+}
+
+// bootstrapIn is bootstrap with the partition's tmpDir: between the digest
+// check and the agent it sets and exports TMPDIR (setTmpDir). With no tmpDir
+// it is bootstrap's line, byte for byte, and the job keeps its own TMPDIR.
+func bootstrapIn(agentPath, digest, allocDir, tmpDir string) string {
+	check := "[ $(sha256sum " + agentPath + " | cut -c1-64) = " + digest + " ]"
+	run := "exec " + agentPath + " " + allocDir
+	if tmpDir == "" {
+		return check + " && " + run
+	}
+	return check + " && " + setTmpDir(tmpDir) + " && " + run
+}
+
+// setTmpDir sets TMPDIR to the partition's tmpDir, expanded by the job's own
+// shell: its variable is one the job sets, such as $SCRATCH_LOCAL, unset on the
+// login node (science-agent ruling, 1 Nov 2026, issue #125). The variable is
+// written ${NAME:?}, so an unset or empty one stops the job before the agent
+// starts, never falling back to the scheduler's TMPDIR. Then the value is held
+// to the rule stagingDir's resolution applies (absSafe): an absolute path of
+// letters, digits and ._:=,/- with no ".." segment. The directory is created.
+func setTmpDir(dir string) string {
+	v := dir
+	if m := varPrefix.FindStringSubmatch(dir); m != nil {
+		v = "${" + m[1] + ":?}" + dir[len(m[0]):]
+	}
+	return "TMPDIR=" + v +
+		` && case "$TMPDIR" in ""|[!/]*|*[!A-Za-z0-9._:=,/-]*|*/../*|*/..) echo "hb: tmpDir resolves to $TMPDIR, not an absolute path of letters, digits and ._:=,/-" >&2; exit 1 ;; esac` +
+		` && mkdir -p "$TMPDIR" && export TMPDIR`
 }
 
 // submitLine is HBEP-4's submission:
 //
 //	sbatch --parsable --job-name=<tag> --no-requeue [--hold] --partition=<p>
 //	  --account=<a> --time=<minutes> --nodes=1 [--gres=gpu:<n>]
-//	  --cpus-per-task=<c> --mem=<m>M --output=<dir>/job.out
-//	  --error=<dir>/job.err --wrap=<bootstrap>
+//	  [--constraint=<tmpDirFeature>] --cpus-per-task=<c> --mem=<m>M
+//	  --output=<dir>/job.out --error=<dir>/job.err --wrap=<bootstrap>
 //
 // GPUs are requested untyped, and --gres is left out for a CPU job. The
-// account is left out only when the Provider names none.
+// account is left out only when the Provider names none. --constraint is the
+// partition's tmpDirFeature, the node feature its tmpDir needs, and is left
+// out when the partition names none (science-agent ruling, 1 Nov 2026, issue
+// #125).
 func submitLine(s submission) (string, error) {
 	w := []string{"sbatch", "--parsable", "--job-name=" + s.tag, "--no-requeue"}
 	if s.hold {
@@ -69,12 +104,15 @@ func submitLine(s submission) (string, error) {
 	if s.gpus > 0 {
 		w = append(w, "--gres=gpu:"+strconv.Itoa(int(s.gpus)))
 	}
+	if s.tmpDirFeature != "" {
+		w = append(w, "--constraint="+s.tmpDirFeature)
+	}
 	w = append(w,
 		"--cpus-per-task="+strconv.Itoa(int(s.cpusPerTask)),
 		"--mem="+strconv.FormatInt(s.memMiB, 10)+"M",
 		"--output="+path.Join(s.allocDir, agentapi.JobOutputName),
 		"--error="+path.Join(s.allocDir, agentapi.JobErrorName),
-		"--wrap="+bootstrap(s.agentPath, s.agentDigest, s.allocDir),
+		"--wrap="+bootstrapIn(s.agentPath, s.agentDigest, s.allocDir, s.tmpDir),
 	)
 	return Line(w...)
 }
