@@ -217,6 +217,13 @@ func TestAllocationPhasesAndSubmissionStates(t *testing.T) {
 	must(t, c.Get(bg(), objKey(a), got), "get")
 	got.Status.AtProvider.Submission = &v1alpha1.SubmissionRecord{Attempt: 1, State: v1alpha1.SubmissionRejected, Code: "SubmissionRejected"}
 	requireRefused(t, c.Status().Update(bg(), got), "Unsupported value")
+	// The code goes with a Rejected attempt only (rule
+	// allocations:$.status.atProvider.submission#0; review of PR #155, N6).
+	for _, st := range []v1alpha1.SubmissionState{v1alpha1.SubmissionDone, v1alpha1.SubmissionUnknown, v1alpha1.SubmissionInFlight} {
+		must(t, c.Get(bg(), objKey(a), got), "get")
+		got.Status.AtProvider.Submission = &v1alpha1.SubmissionRecord{Attempt: 1, State: st, Code: v1alpha1.ReasonSubmitLimitReached}
+		requireRefused(t, c.Status().Update(bg(), got), "code is set on a Rejected attempt only")
+	}
 	must(t, c.Get(bg(), objKey(a), got), "get")
 	got.Status.AtProvider.Submission = &v1alpha1.SubmissionRecord{Attempt: 1, State: v1alpha1.SubmissionRejected,
 		Code: v1alpha1.ReasonSubmitLimitReached, Reason: "sbatch: error: QOSMaxSubmitJobPerUserLimit"}

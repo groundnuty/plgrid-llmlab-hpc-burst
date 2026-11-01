@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -70,21 +71,46 @@ func TestPartitionQOSIsListed(t *testing.T) {
 	}
 }
 
-// maxMemPerUser is never negative (rule platformprofiles:$.spec.qos[].maxMemPerUser#0).
-func TestQOSMaxMemPerUserIsNotNegative(t *testing.T) {
-	const msg = "maxMemPerUser must not be negative"
-	for _, q := range []string{"-1Gi", "-1", "-125G"} {
+// maxMemPerUser is positive when set (rule
+// platformprofiles:$.spec.qos[].maxMemPerUser#0; `@hpc-burst-science-agent`,
+// 1 Nov 2026, from PR #155's review): zero in any form and a negative value
+// are refused.
+func TestQOSMaxMemPerUserIsPositive(t *testing.T) {
+	const msg = "maxMemPerUser must be positive"
+	for _, q := range []string{"-1Gi", "-1", "-125G", "0", "0Gi", "0.0"} {
 		t.Run("refuse "+q, func(t *testing.T) {
 			p := newProfile(uniq("prof"))
 			p.Spec.QOS = []v1alpha1.QOSProfile{{Name: "fast", MaxMemPerUser: ptr.To(resource.MustParse(q))}}
 			requireRefused(t, c.Create(bg(), p), msg)
 		})
 	}
-	for _, q := range []string{"0", "125G", "122400Mi"} {
+	for _, q := range []string{"1", "1Mi", "125G", "122400Mi"} {
 		t.Run("accept "+q, func(t *testing.T) {
 			p := newProfile(uniq("prof"))
 			p.Spec.QOS = []v1alpha1.QOSProfile{{Name: "fast", MaxMemPerUser: ptr.To(resource.MustParse(q))}}
 			must(t, c.Create(bg(), p), "create with maxMemPerUser "+q)
+			cleanup(t, p)
+		})
+	}
+}
+
+// maxCpusPerUser is positive when set (rule
+// platformprofiles:$.spec.qos[].maxCpusPerUser#0; `@hpc-burst-science-agent`,
+// 1 Nov 2026, from PR #155's review).
+func TestQOSMaxCpusPerUserIsPositive(t *testing.T) {
+	const msg = "maxCpusPerUser must be positive"
+	for _, n := range []int32{0, -1, -72} {
+		t.Run(fmt.Sprintf("refuse %d", n), func(t *testing.T) {
+			p := newProfile(uniq("prof"))
+			p.Spec.QOS = []v1alpha1.QOSProfile{{Name: "fast", MaxCPUsPerUser: ptr.To(n)}}
+			requireRefused(t, c.Create(bg(), p), msg)
+		})
+	}
+	for _, n := range []int32{1, 16, 72} {
+		t.Run(fmt.Sprintf("accept %d", n), func(t *testing.T) {
+			p := newProfile(uniq("prof"))
+			p.Spec.QOS = []v1alpha1.QOSProfile{{Name: "fast", MaxCPUsPerUser: ptr.To(n)}}
+			must(t, c.Create(bg(), p), fmt.Sprintf("create with maxCpusPerUser %d", n))
 			cleanup(t, p)
 		})
 	}
@@ -140,23 +166,47 @@ func TestQOSListRoundTrips(t *testing.T) {
 		{"a negative GPU cap", func(p *v1alpha1.PlatformProfile) {
 			p.Spec.QOS = []v1alpha1.QOSProfile{{Name: "fast", MaxGPUsPerUser: ptr.To(int32(-1))}}
 		}, "maxGpusPerUser"},
-		{"a negative CPU cap", func(p *v1alpha1.PlatformProfile) {
-			p.Spec.QOS = []v1alpha1.QOSProfile{{Name: "fast", MaxCPUsPerUser: ptr.To(int32(-1))}}
-		}, "maxCpusPerUser"},
 		{"a QOS name longer than 64 characters", func(p *v1alpha1.PlatformProfile) {
 			p.Spec.QOS = []v1alpha1.QOSProfile{{Name: strings.Repeat("q", 65)}}
 		}, "name"},
-		{"more than 16 QOS entries", func(p *v1alpha1.PlatformProfile) {
-			for i := range 17 {
+		{"more than 8 QOS entries", func(p *v1alpha1.PlatformProfile) {
+			for i := range 9 {
 				p.Spec.QOS = append(p.Spec.QOS, v1alpha1.QOSProfile{Name: "q" + strings.Repeat("x", i)})
 			}
-		}, "qos"},
+		}, "spec.qos: Too many: 9: must have at most 8 items"},
 	}
 	for _, tc := range refused {
 		t.Run("refuse "+tc.name, func(t *testing.T) {
 			p := newProfile(uniq("prof"))
 			tc.mutate(p)
 			requireRefused(t, c.Create(bg(), p), tc.want)
+		})
+	}
+
+	// The other side of each bound: exactly 8 entries, each with every limit
+	// set, so the CRD's cost estimate is met by real objects, and a submit limit
+	// and a GPU cap of 0, which stay valid (an effective 0 means no
+	// Allocation can be hosted).
+	for _, tc := range []struct {
+		name   string
+		mutate func(*v1alpha1.PlatformProfile)
+	}{
+		{"exactly 8 QOS entries", func(p *v1alpha1.PlatformProfile) {
+			for i := range 8 {
+				p.Spec.QOS = append(p.Spec.QOS, v1alpha1.QOSProfile{Name: "q" + strings.Repeat("x", i),
+					MaxWall: ptr.To(v1alpha1.Duration("12h")), MaxSubmitPerUser: ptr.To(int32(1)), MaxGPUsPerUser: ptr.To(int32(1)),
+					MaxCPUsPerUser: ptr.To(int32(72)), MaxMemPerUser: ptr.To(resource.MustParse("122400Mi"))})
+			}
+		}},
+		{"a submit limit and a GPU cap of 0", func(p *v1alpha1.PlatformProfile) {
+			p.Spec.QOS = []v1alpha1.QOSProfile{{Name: "fast", MaxSubmitPerUser: ptr.To(int32(0)), MaxGPUsPerUser: ptr.To(int32(0))}}
+		}},
+	} {
+		t.Run("accept "+tc.name, func(t *testing.T) {
+			p := newProfile(uniq("prof"))
+			tc.mutate(p)
+			must(t, c.Create(bg(), p), "create PlatformProfile")
+			cleanup(t, p)
 		})
 	}
 }

@@ -49,6 +49,7 @@ allocations:$.spec.managementPolicies#1|^TestAllocationManagementPolicies$
 allocations:$.spec.retentionPolicy#0|^TestAllocationRetentionPolicyRule$
 allocations:$.spec.retentionPolicy#1|^TestAllocationRetentionUntilGoesWithKeep$
 allocations:$.spec.retentionPolicy.idleLimit#0|^TestDurationsArePositiveAndFit$
+allocations:$.status.atProvider.submission#0|^TestAllocationPhasesAndSubmissionStates$
 instances:$.spec#0|^TestInstanceSpecIsImmutable$
 instances:$.spec#1|^TestInstanceIdentityReference$
 instances:$.spec.launch#0|^TestInstanceLaunchCommandAgreesWithMaxNumSeqs$
@@ -108,7 +109,8 @@ platformprofiles:$.spec.minJobAge#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.partitions[]#0|^TestPartitionTmpDirFeatureNeedsTmpDir$
 platformprofiles:$.spec.partitions[].maxTime#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.partitions[].tmpDir#0|^TestPartitionTmpDirRefusesDotDotSegments$
-platformprofiles:$.spec.qos[].maxMemPerUser#0|^TestQOSMaxMemPerUserIsNotNegative$
+platformprofiles:$.spec.qos[].maxCpusPerUser#0|^TestQOSMaxCpusPerUserIsPositive$
+platformprofiles:$.spec.qos[].maxMemPerUser#0|^TestQOSMaxMemPerUserIsPositive$
 platformprofiles:$.spec.qos[].maxWall#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.restart.backoff#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.restart.stopGrace#0|^TestDurationsArePositiveAndFit$

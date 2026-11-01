@@ -1,6 +1,8 @@
 package v1alpha1
 
 import (
+	"fmt"
+
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -212,7 +214,10 @@ const (
 // SubmissionRecord is one submission attempt. The record itself is the value of
 // the annotation AnnotationSubmission, this type as JSON, written with a
 // resourceVersion precondition (HBEP-11, Ownership, records and deletion);
-// status.atProvider.submission mirrors it for display.
+// status.atProvider.submission mirrors it for display. Readers of the
+// annotation check it with Validate; the CRD checks the mirror's code.
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.code) || self.state == 'Rejected'",message="code is set on a Rejected attempt only"
 type SubmissionRecord struct {
 	// Attempt is the attempt's number, from 1.
 	Attempt int32 `json:"attempt"`
@@ -250,11 +255,36 @@ type SubmissionRecord struct {
 	// nothing fails. Empty for any other refusal, a policy refusal for another
 	// limit included, and for every other state. The Provider's controller
 	// writes it with the state, in one record, so the lifecycle controller
-	// never sees a Rejected state without its code.
+	// never sees a Rejected state without its code: the fake controller
+	// (pkg/provider/fake) does today, the Slurm provider's from #151's
+	// provider change.
 	//
 	// +optional
 	// +kubebuilder:validation:Enum=SubmitLimitReached
 	Code string `json:"code,omitempty"`
+}
+
+// Validate checks what every reader of a submission record relies on: the
+// attempt counts from 1, the state is one of the five, and a code is
+// ReasonSubmitLimitReached, on a Rejected attempt only (review of PR #155,
+// N6). A record that fails is malformed, never "no record": guessing could
+// submit twice.
+func (r SubmissionRecord) Validate() error {
+	if r.Attempt < 1 {
+		return fmt.Errorf("the submission record names attempt %d; attempts count from 1", r.Attempt)
+	}
+	switch r.State {
+	case SubmissionInFlight, SubmissionRejected, SubmissionUnknown, SubmissionDone, SubmissionAbandoned:
+	default:
+		return fmt.Errorf("the submission record's state %q is not one of InFlight, Rejected, Unknown, Done and Abandoned", r.State)
+	}
+	switch {
+	case r.Code != "" && r.Code != ReasonSubmitLimitReached:
+		return fmt.Errorf("the submission record's code %q is not %s", r.Code, ReasonSubmitLimitReached)
+	case r.Code != "" && r.State != SubmissionRejected:
+		return fmt.Errorf("the submission record has code %s on a %s attempt; a code is set on a Rejected attempt only", r.Code, r.State)
+	}
+	return nil
 }
 
 // AllocationPhase is the phase of an Allocation's job as its Provider's
