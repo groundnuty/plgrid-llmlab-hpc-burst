@@ -126,6 +126,11 @@ func TestReadinessAsksForEveryWatchedKind(t *testing.T) {
 // TestReadinessChecks: the two checks on their own, with the Elected channel open and closed.
 // Without leader election "leading" passes with the channel open (R3 of #147).
 func TestReadinessChecks(t *testing.T) {
+	// A leader-election runnable would not start until the Lease is held, and then "caches" could not
+	// be told from "leading" (TestManagerOnControlPlane shows the difference on a real API server).
+	if (&readiness{}).NeedLeaderElection() {
+		t.Fatal("readiness must start without the Lease: the caches' check does not wait for it")
+	}
 	elected := make(chan struct{})
 	le := &readiness{elected: elected, leaderElection: true}
 	if le.checkCaches() == nil || le.checkLeading() == nil || le.serving() {

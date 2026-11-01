@@ -65,8 +65,14 @@ func TestPrintStatusFrontAndController(t *testing.T) {
 		}
 	}
 	yes, no := true, false
-	ready := launcher.EntryHealth{Name: "controller", Running: true, PID: 7, State: "running", Health: "127.0.0.1:1", HealthzOK: &yes, ReadyzOK: &yes}
+	ready := launcher.EntryHealth{Name: "controller", Running: true, PID: 7, State: "running", Health: "127.0.0.1:1", HealthzOK: &yes, ReadyzOK: &yes, ReadyzState: launcher.ReadyzReady}
 	notReady := launcher.EntryHealth{Name: "controller", Running: true, PID: 7, State: "running", Health: "127.0.0.1:1", HealthzOK: &yes, ReadyzOK: &no, ReadyzState: launcher.ReadyzNotLeading}
+	starting := notReady
+	starting.ReadyzState = launcher.ReadyzStarting
+	unspecified := notReady
+	unspecified.ReadyzState = launcher.ReadyzUnspecified
+	unread := notReady // the paths could not be read: a state is not made up
+	unread.ReadyzState = ""
 	front := launcher.EntryHealth{Name: "front", Running: true, PID: 8, State: "running", Health: "127.0.0.1:2", HealthzOK: &yes}
 	sup := &launcher.SupervisorHealth{Running: true, PID: 6}
 	for _, c := range []struct {
@@ -76,6 +82,10 @@ func TestPrintStatusFrontAndController(t *testing.T) {
 	}{
 		{"ready", ready, "supervised controller: running=true pid 7, running, restarts 0, GET /healthz on 127.0.0.1:1: true, readiness: ready\n"},
 		{"not ready", notReady, "supervised controller: running=true pid 7, running, restarts 0, GET /healthz on 127.0.0.1:1: true, readiness: not leading\n"},
+		{"starting", starting, "supervised controller: running=true pid 7, running, restarts 0, GET /healthz on 127.0.0.1:1: true, readiness: starting\n"},
+		{"an older controller whose /readyz does not say which", unspecified,
+			"supervised controller: running=true pid 7, running, restarts 0, GET /healthz on 127.0.0.1:1: true, readiness: starting, or not leading its Lease: /readyz does not say which\n"},
+		{"the readiness could not be read", unread, "supervised controller: running=true pid 7, running, restarts 0, GET /healthz on 127.0.0.1:1: true, readiness: not read\n"},
 		{"the front is not asked", front, "supervised front: running=true pid 8, running, restarts 0, GET /healthz on 127.0.0.1:2: true\n"},
 	} {
 		out := text(&launcher.StatusReport{Health: launcher.Healthy, Version: "v1", Supervisor: sup, Controllers: []launcher.EntryHealth{c.entry}})
