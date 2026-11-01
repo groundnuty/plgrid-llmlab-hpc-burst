@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -27,6 +29,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -78,6 +81,9 @@ type Options struct {
 	// newCache, when set, builds the manager's cache: a test holds the
 	// caches' sync with it.
 	newCache cache.NewCacheFunc
+	// discoveryTimeout, when set, replaces DiscoveryTimeout: a test shortens
+	// the bound on a stalled discovery request.
+	discoveryTimeout time.Duration
 	// onLeaseRead, when set, runs after each read of the lifecycle Lease
 	// that the start's ObservationGap counts: a test waits on it to know the
 	// elector has read a Lease another copy holds.
@@ -104,6 +110,34 @@ func Scheme() (*runtime.Scheme, error) {
 // stop budget (launcher.ControllerStopBudget) can name it. The lifecycle
 // Lease's release comes after it.
 const ShutdownGrace = 30 * time.Second
+
+// DiscoveryTimeout bounds one request of the REST mapper's discovery (the
+// group and resource lists it asks the API server for the first time a kind is
+// used). Creating an informer maps its kind while holding the informers' mutex
+// (controller-runtime v0.23.1, pkg/cache/internal/informers.go:366-380), the
+// discovery request carries no context of the caller's, and the manager's
+// shared HTTP client has no timeout in production, so a discovery that stalls
+// holds that mutex; the cache's own stop then waits for it (:243-246) and the
+// manager's stop can use up its ShutdownGrace (PR 187 review, B3). The mapper
+// gets an HTTP client of its own with this timeout. The manager's shared
+// client keeps none: a timeout on it would cut every watch. A discovery that
+// times out fails the informer's start, which both its callers retry
+// (readiness every cacheRetry, a controller's Kind source every 10 s).
+const DiscoveryTimeout = 10 * time.Second
+
+// boundedMapper returns the manager's MapperProvider: controller-runtime's
+// dynamic REST mapper over an HTTP client whose requests end after timeout.
+func boundedMapper(timeout time.Duration) func(*rest.Config, *http.Client) (meta.RESTMapper, error) {
+	return func(c *rest.Config, _ *http.Client) (meta.RESTMapper, error) {
+		cfg := rest.CopyConfig(c)
+		cfg.Timeout = timeout
+		hc, err := rest.HTTPClientFor(cfg)
+		if err != nil {
+			return nil, err
+		}
+		return apiutil.NewDynamicRESTMapper(cfg, hc)
+	}
+}
 
 // leaderRenewDeadline is controller-runtime's default renew deadline
 // (v0.23.1, pkg/manager/manager.go, defaultRenewDeadline), which the lifecycle
@@ -147,6 +181,7 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 		LeaderElectionReleaseOnCancel: true,
 		GracefulShutdownTimeout:       &grace,
 		NewCache:                      o.newCache,
+		MapperProvider:                boundedMapper(cmp.Or(o.discoveryTimeout, DiscoveryTimeout)),
 	}
 	// With leader election off there is no Lease to read or regard, so no
 	// ObservationGap (`@hpc-burst-science-agent`, 31 Oct 2026, for #111).
@@ -466,16 +501,32 @@ func (r *readiness) Start(ctx context.Context) error {
 }
 
 // startInformer returns the cache's informer for k without waiting for it to sync, trying again
-// while the API server cannot serve the kind. It reports false when ctx ends first.
+// while the API server cannot serve the kind. It reports false when ctx ends first, also while
+// GetInformer itself is stuck: it maps the kind through the REST mapper, whose discovery request
+// does not take ctx (DiscoveryTimeout), so the call runs on a goroutine of its own and a stop does
+// not wait for it.
 func (r *readiness) startInformer(ctx context.Context, k client.Object) (cache.Informer, bool) {
 	retry := r.retry
 	if retry == 0 {
 		retry = cacheRetry
 	}
+	type answer struct {
+		inf cache.Informer
+		err error
+	}
 	for {
-		inf, err := r.cache.GetInformer(ctx, k, cache.BlockUntilSynced(false))
-		if err == nil {
-			return inf, true
+		got := make(chan answer, 1)
+		go func() {
+			inf, err := r.cache.GetInformer(ctx, k, cache.BlockUntilSynced(false))
+			got <- answer{inf, err}
+		}()
+		select {
+		case a := <-got:
+			if a.err == nil {
+				return a.inf, true
+			}
+		case <-ctx.Done():
+			return nil, false
 		}
 		select {
 		case <-time.After(retry):

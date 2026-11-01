@@ -1,8 +1,10 @@
 package launcher
 
 import (
+	"context"
 	"fmt"
 	"net/http"
+	"time"
 )
 
 // The names of the lifecycle controller's two readiness checks (internal/lifecycle, ReadyzCaches
@@ -38,14 +40,16 @@ const (
 // The paths are controller-runtime v0.23.1's (sigs.k8s.io/controller-runtime): pkg/manager/
 // internal.go:308-310 mounts /readyz and /readyz/ on the health server; pkg/healthz/healthz.go:
 // 158-165 serves /readyz/<name> for one registered check and answers 404 for an unknown name;
-// CheckHandler (healthz.go:175-180) answers 200 when the check passes and 500 when it fails; and
-// the aggregate answers 500 when any check fails (healthz.go:96-97). The body of a failing check
-// withholds its reason, so there is nothing in it to read.
+// CheckHandler (healthz.go:175-180) answers 200 when the check passes and 500 when it fails, and
+// writes the checker's error into the body of the 500; the aggregate answers 500 when any check
+// fails (healthz.go:96-97) and withholds the reasons. Neither body is read: each path is asked with
+// probeStatus, which takes the status from the response headers and closes the body unread, so a
+// truncated or stalled body can neither lose the status nor delay the verdict.
 func checkReadyz(addr string, eh *EntryHealth, add func(string, ...any)) {
 	ready := false
 	eh.ReadyzOK = &ready
 	probe := func(path string) (int, bool) {
-		code, _, err := probeEndpoint(addr, path, healthzTimeout)
+		code, err := probeStatus(addr, path, healthzTimeout)
 		if err != nil {
 			add("GET %s on %s: %v", path, addr, err)
 			return 0, false
@@ -97,4 +101,24 @@ func ReadReadiness(addr string) (state string, problems []string) {
 	var eh EntryHealth
 	checkReadyz(addr, &eh, func(format string, a ...any) { problems = append(problems, fmt.Sprintf(format, a...)) })
 	return eh.ReadyzState, problems
+}
+
+// probeStatus asks a supervised process for GET path on its loopback address and returns the
+// status from the response headers alone. The body is closed unread (the connection with it): a
+// body that is truncated, or that never ends, can neither lose a status already received nor hold
+// the verdict until the timeout. Readiness is decided by status code only (#147, PR 187 review B2).
+func probeStatus(addr, path string, timeout time.Duration) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+path, nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := (&http.Client{Timeout: timeout, Transport: &http.Transport{DisableKeepAlives: true}}).Do(req)
+	if err != nil {
+		return 0, err
+	}
+	code := resp.StatusCode
+	_ = resp.Body.Close()
+	return code, nil
 }

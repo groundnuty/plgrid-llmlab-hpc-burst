@@ -83,15 +83,19 @@ func newCachesRig(t *testing.T) *cachesRig {
 }
 
 // start runs one copy of the controller and returns its stop, which waits once for the manager to
-// return and is also run at the test's end. Each copy has a registry of its own: two managers in
+// return and is also run at the test's end. The beforeStart functions run once the manager is built
+// and before it starts. Each copy has a registry of its own: two managers in
 // one process cannot register the same collectors twice.
-func (g *cachesRig) start(t *testing.T, name string, cfg *rest.Config, o Options) (stop func(), mgr manager.Manager) {
+func (g *cachesRig) start(t *testing.T, name string, cfg *rest.Config, o Options, beforeStart ...func()) (stop func(), mgr manager.Manager) {
 	t.Helper()
 	o.Config, o.CredentialsDir, o.AgentBuildsDir = cfg, g.creds, g.builds
 	o.FrontConfigured, o.Checkpoints, o.Registry = true, &stubSource{}, prometheus.NewRegistry()
 	mgr, _, err := NewManager(o)
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, f := range beforeStart {
+		f()
 	}
 	mctx, cancel := context.WithCancel(g.ctx)
 	done := make(chan error, 1)
@@ -150,10 +154,12 @@ func heldConfig(cfg *rest.Config, resource string, gate <-chan struct{}) (*rest.
 }
 
 // The six kinds whose informers "caches" waits for (HBEP-11): the resource name each is listed by.
-var cachesKinds = []struct {
+type cachesKind struct {
 	name, resource string
 	obj            client.Object
-}{
+}
+
+var cachesKinds = []cachesKind{
 	{"ModelDeployment", "modeldeployments", &v1alpha1.ModelDeployment{}},
 	{"Allocation", "allocations", &v1alpha1.Allocation{}},
 	{"Instance", "instances", &v1alpha1.Instance{}},
@@ -184,14 +190,131 @@ func othersSynced(ctx context.Context, mgr manager.Manager, held string) (bool, 
 // (tools/cache, syncedPollPeriod): the check can lag an informer's sync by this much.
 const cachesPollPeriod = 100 * time.Millisecond
 
-// TestCachesNeedsEveryWatchedInformer is HBEP-11's two-copies case, once for each of the six kinds.
-// A leader holds the Lease. A second copy, the standby, starts with the initial list of one kind
-// held in front of the API server (a real informer that has not synced, the other five unaffected):
-// its caches check fails and `hpcburst status` reads "starting". Once the list is released the
-// standby's caches check passes, its leading check keeps failing while the leader holds the Lease,
-// and status reads "not leading". The last case takes the leader down: the standby takes the Lease
-// and is ready. The holds are lifted by the test, never by a window, so each state lasts as long as
-// the test looks at it (five reads each).
+// heldKindCache is the manager's cache with one kind's informer held unsynced: the informer it
+// hands out for that kind reports HasSynced false until the gate closes, though the real informer
+// behind it has long synced. It is HBEP-11's "one kind's informer held unsynced through the
+// manager's cache hook" (NewCache). It says when the kind's informer was first asked for.
+type heldKindCache struct {
+	cache.Cache
+	kind  string // the %T of the held kind's object
+	gate  <-chan struct{}
+	asked chan struct{}
+	once  sync.Once
+}
+
+func (c *heldKindCache) GetInformer(ctx context.Context, obj client.Object, opts ...cache.InformerGetOption) (cache.Informer, error) {
+	inf, err := c.Cache.GetInformer(ctx, obj, opts...)
+	if err != nil || fmt.Sprintf("%T", obj) != c.kind {
+		return inf, err
+	}
+	c.once.Do(func() { close(c.asked) })
+	return heldInformer{Informer: inf, gate: c.gate}, nil
+}
+
+type heldInformer struct {
+	cache.Informer
+	gate <-chan struct{}
+}
+
+func (i heldInformer) HasSynced() bool {
+	select {
+	case <-i.gate:
+		return i.Informer.HasSynced()
+	default:
+		return false
+	}
+}
+
+// cachesHold is a way to hold one kind's informer unsynced on a real manager: the configuration and
+// the cache hook to build it with, and a channel closed once the copy has asked for the held kind.
+type cachesHold struct {
+	name  string
+	apply func(g *cachesRig, k cachesKind, gate <-chan struct{}) (*rest.Config, cache.NewCacheFunc, <-chan struct{})
+}
+
+var cachesHolds = []cachesHold{
+	{"through the cache hook", func(g *cachesRig, k cachesKind, gate <-chan struct{}) (*rest.Config, cache.NewCacheFunc, <-chan struct{}) {
+		held := &heldKindCache{kind: fmt.Sprintf("%T", k.obj), gate: gate, asked: make(chan struct{})}
+		return g.cfg, func(c *rest.Config, o cache.Options) (cache.Cache, error) {
+			inner, err := cache.New(c, o)
+			if err != nil {
+				return nil, err
+			}
+			held.Cache = inner
+			return held, nil
+		}, held.asked
+	}},
+	{"by holding its initial list at the API", func(g *cachesRig, k cachesKind, gate <-chan struct{}) (*rest.Config, cache.NewCacheFunc, <-chan struct{}) {
+		cfg, arrived := heldConfig(g.cfg, k.resource, gate)
+		return cfg, nil, arrived
+	}},
+}
+
+// holdOne starts one copy built through NewManager's production wiring, holds the informer of kind
+// k unsynced, and looks at the copy before and after the release. The copy is a standby when a
+// leader holds the Lease, and the sole copy, with leader election off, otherwise. While the
+// informer is held and the other five are seen synced the copy's caches check is 500 and status
+// reads "starting"; once released it is 200, and status reads "not leading" for the standby (its
+// leading check is 500) and "ready" for the sole copy (leading always passes).
+func (g *cachesRig) holdOne(t *testing.T, h cachesHold, k cachesKind, standby bool) {
+	t.Helper()
+	gate := make(chan struct{})
+	release := sync.OnceFunc(func() { close(gate) })
+	defer release()
+	cfg, newCache, asked := h.apply(g, k, gate)
+	stop, mgr := g.start(t, "copy, "+k.name+" held", cfg, Options{HealthAddr: cachesStandbyAddr, LeaderElection: standby, newCache: newCache})
+	defer stop()
+	select {
+	case <-asked:
+	case <-time.After(time.Minute):
+		t.Fatalf("the copy never asked for the %s informer", k.name)
+	}
+	eventually(t, time.Minute, "the copy's health server answers", func() (bool, string) {
+		return getStatus(t, "http://"+cachesStandbyAddr+"/healthz") == http.StatusOK, "no /healthz"
+	})
+	wantLeading, afterState, afterProblem := http.StatusOK, launcher.ReadyzReady, ""
+	if standby {
+		wantLeading, afterState, afterProblem = http.StatusInternalServerError, launcher.ReadyzNotLeading, "not leading: GET /readyz/leading"
+	}
+	// Only the held informer keeps the check failing: the other five are seen synced first. The check
+	// lags an informer by up to one poll period, so the hold is looked at for five of them, and for
+	// at least three reads. It lasts until the test lifts it, so a longer look can only find a fault.
+	eventually(t, time.Minute, "the other five informers have synced", func() (bool, string) {
+		return othersSynced(g.ctx, mgr, k.name)
+	})
+	seen := time.Now()
+	for i := 0; i < 3 || time.Since(seen) < 5*cachesPollPeriod; i++ {
+		caches, leading := readyzCodes(t, cachesStandbyAddr)
+		st, problems := launcher.ReadReadiness(cachesStandbyAddr)
+		if caches != http.StatusInternalServerError || leading != wantLeading ||
+			st != launcher.ReadyzStarting || len(problems) != 1 || !strings.Contains(problems[0], "starting: GET /readyz/caches") {
+			t.Fatalf("with the %s informer held and the others synced: caches %d, leading %d, status %q %v; want 500, %d and starting", k.name, caches, leading, st, problems, wantLeading)
+		}
+	}
+	release()
+	eventually(t, time.Minute, "the caches pass once the held informer is released", func() (bool, string) {
+		caches, _ := readyzCodes(t, cachesStandbyAddr)
+		return caches == http.StatusOK, fmt.Sprintf("/readyz/caches %d", caches)
+	})
+	for i := 0; i < 3; i++ {
+		caches, leading := readyzCodes(t, cachesStandbyAddr)
+		st, problems := launcher.ReadReadiness(cachesStandbyAddr)
+		if caches != http.StatusOK || leading != wantLeading || st != afterState ||
+			(afterProblem == "") != (len(problems) == 0) || (afterProblem != "" && (len(problems) != 1 || !strings.Contains(problems[0], afterProblem))) {
+			t.Fatalf("after the %s informer was released: caches %d, leading %d, status %q %v; want 200, %d and %q", k.name, caches, leading, st, problems, wantLeading, afterState)
+		}
+	}
+}
+
+// TestCachesNeedsEveryWatchedInformer is HBEP-11's case on a real manager built through
+// NewManager's production wiring, for each of the six kinds, each held two ways (through the
+// manager's cache hook, and by holding the kind's initial list in front of the API server) and on
+// two copies. A leader holds the Lease. A standby starts with one kind's informer held unsynced:
+// its caches check fails and `hpcburst status` reads "starting"; once released its caches check
+// passes, its leading check keeps failing while the leader holds the Lease, and status reads "not
+// leading". Then the leader goes: the standby takes the Lease and reads "ready". Last, the sole
+// copy (leader election off, so leading always passes) is held and released the same way. The holds
+// are lifted by the test, so no state depends on a window.
 func TestCachesNeedsEveryWatchedInformer(t *testing.T) {
 	g := newCachesRig(t)
 	stopLeader, _ := g.start(t, "leader", g.cfg, Options{HealthAddr: cachesLeaderAddr, LeaderElection: true})
@@ -199,55 +322,15 @@ func TestCachesNeedsEveryWatchedInformer(t *testing.T) {
 		st, p := launcher.ReadReadiness(cachesLeaderAddr)
 		return st == launcher.ReadyzReady, fmt.Sprintf("state %q %v", st, p)
 	})
-	for _, k := range cachesKinds {
-		t.Run(k.name+" held", func(t *testing.T) {
-			gate := make(chan struct{})
-			release := sync.OnceFunc(func() { close(gate) })
-			defer release()
-			cfg, arrived := heldConfig(g.cfg, k.resource, gate)
-			stop, mgr := g.start(t, "standby, "+k.name+" held", cfg, Options{HealthAddr: cachesStandbyAddr, LeaderElection: true})
-			defer stop()
-			select {
-			case <-arrived:
-			case <-time.After(time.Minute):
-				t.Fatalf("the standby never asked for %s", k.resource)
-			}
-			eventually(t, time.Minute, "the standby's health server answers", func() (bool, string) {
-				return getStatus(t, "http://"+cachesStandbyAddr+"/healthz") == http.StatusOK, "no /healthz"
-			})
-			// The other five informers have synced: only the held one keeps the check failing. The
-			// check lags the informers by up to one poll period, so the hold is looked at for ten of
-			// them, and for at least five reads, after the others are seen synced. The hold lasts until
-			// the test lifts it, so a longer look can only find a fault, never make one.
-			eventually(t, time.Minute, "the other five informers have synced", func() (bool, string) {
-				return othersSynced(g.ctx, mgr, k.name)
-			})
-			seen := time.Now()
-			for i := 0; i < 5 || time.Since(seen) < 10*cachesPollPeriod; i++ {
-				caches, leading := readyzCodes(t, cachesStandbyAddr)
-				st, problems := launcher.ReadReadiness(cachesStandbyAddr)
-				if caches != http.StatusInternalServerError || leading != http.StatusInternalServerError ||
-					st != launcher.ReadyzStarting || len(problems) != 1 || !strings.Contains(problems[0], "starting: GET /readyz/caches") {
-					t.Fatalf("with the %s informer held and the others synced: caches %d, leading %d, status %q %v; want 500, 500 and starting", k.name, caches, leading, st, problems)
+	for _, h := range cachesHolds {
+		for _, k := range cachesKinds {
+			t.Run("standby, "+k.name+" held "+h.name, func(t *testing.T) {
+				g.holdOne(t, h, k, true)
+				if st, _ := launcher.ReadReadiness(cachesLeaderAddr); st != launcher.ReadyzReady {
+					t.Errorf("the leader reads %q beside the standby, want ready", st)
 				}
-			}
-			release()
-			eventually(t, time.Minute, "the standby's caches pass once the held informer synced", func() (bool, string) {
-				caches, _ := readyzCodes(t, cachesStandbyAddr)
-				return caches == http.StatusOK, fmt.Sprintf("/readyz/caches %d", caches)
 			})
-			for i := 0; i < 5; i++ {
-				caches, leading := readyzCodes(t, cachesStandbyAddr)
-				st, problems := launcher.ReadReadiness(cachesStandbyAddr)
-				if caches != http.StatusOK || leading != http.StatusInternalServerError ||
-					st != launcher.ReadyzNotLeading || len(problems) != 1 || !strings.Contains(problems[0], "not leading: GET /readyz/leading") {
-					t.Fatalf("standby after the %s informer synced: caches %d, leading %d, status %q %v; want 200, 500 and not leading", k.name, caches, leading, st, problems)
-				}
-			}
-			if st, _ := launcher.ReadReadiness(cachesLeaderAddr); st != launcher.ReadyzReady {
-				t.Errorf("the leader reads %q beside the standby, want ready", st)
-			}
-		})
+		}
 	}
 	t.Run("the standby takes over when the leader goes", func(t *testing.T) {
 		stop, _ := g.start(t, "standby", g.cfg, Options{HealthAddr: cachesStandbyAddr, LeaderElection: true})
@@ -262,6 +345,79 @@ func TestCachesNeedsEveryWatchedInformer(t *testing.T) {
 			return st == launcher.ReadyzReady, fmt.Sprintf("state %q %v", st, p)
 		})
 	})
+	for _, h := range cachesHolds {
+		for _, k := range cachesKinds {
+			t.Run("sole copy, "+k.name+" held "+h.name, func(t *testing.T) { g.holdOne(t, h, k, false) })
+		}
+	}
+}
+
+// discoveryStall holds every discovery request (the group and resource lists) until the gate
+// closes, or until the request's own context ends, and says when the first has come. A request
+// whose context never ends, as client-go's discovery inside the REST mapper, is held until the gate.
+type discoveryStall struct {
+	next http.RoundTripper
+	*discoveryState
+}
+
+// discoveryState is shared by every client built from the configuration.
+type discoveryState struct {
+	gate    <-chan struct{}
+	arrived chan struct{}
+	once    sync.Once
+}
+
+func isDiscoveryPath(p string) bool {
+	parts := strings.Split(strings.Trim(p, "/"), "/")
+	switch parts[0] {
+	case "api":
+		return len(parts) <= 2
+	case "apis":
+		return len(parts) <= 3
+	}
+	return false
+}
+
+func (d *discoveryStall) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method == http.MethodGet && isDiscoveryPath(req.URL.Path) {
+		d.once.Do(func() { close(d.arrived) })
+		select {
+		case <-d.gate:
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		}
+	}
+	return d.next.RoundTrip(req)
+}
+
+// TestCachesStopDuringAStalledDiscovery: a manager that stops while the REST mapper's discovery
+// request is stalled (PR 187 review, B3) returns within its grace. Creating an informer maps the
+// kind under the cache's mutex, with a request that takes no context, and the cache's own stop
+// waits for that mutex (controller-runtime v0.23.1, pkg/cache/internal/informers.go:366-380, :243);
+// DiscoveryTimeout, here shortened, ends the request, and the readiness check's Start returns on
+// the cancel without waiting for the call. A proxy in front of the API server holds the discovery
+// until the test ends.
+func TestCachesStopDuringAStalledDiscovery(t *testing.T) {
+	g := newCachesRig(t)
+	gate := make(chan struct{})
+	release := sync.OnceFunc(func() { close(gate) })
+	defer release()
+	stall := &discoveryState{gate: gate, arrived: make(chan struct{})}
+	cfg := rest.CopyConfig(g.cfg)
+	cfg.WrapTransport = func(rt http.RoundTripper) http.RoundTripper { return &discoveryStall{next: rt, discoveryState: stall} }
+	stop, _ := g.start(t, "stalled discovery", cfg, Options{HealthAddr: cachesStandbyAddr, LeaderElection: false, discoveryTimeout: 2 * time.Second})
+	select {
+	case <-stall.arrived:
+	case <-time.After(time.Minute):
+		t.Fatal("no discovery request reached the proxy")
+	}
+	// Not synced: the stalled discovery keeps even the first informer from starting.
+	if caches, _ := readyzCodes(t, cachesStandbyAddr); caches != http.StatusInternalServerError {
+		t.Errorf("caches answered %d while discovery stalls, want 500", caches)
+	}
+	start := time.Now()
+	stop() // stopManager fails the test when the manager does not return within managerStopLimit
+	t.Logf("the manager stopped %s after the cancel, with a discovery request stalled", time.Since(start).Round(100*time.Millisecond))
 }
 
 // recordingCache records the kinds asked of GetInformer, which is how a controller's sources (For,

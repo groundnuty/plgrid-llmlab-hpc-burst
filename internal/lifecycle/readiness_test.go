@@ -47,6 +47,9 @@ type stubCache struct {
 	synced func(kind string) bool
 	calls  atomic.Int64
 	polls  atomic.Int64 // calls of HasSynced on any informer
+	// stall, when set, holds every GetInformer until it is closed, whatever its ctx says: the REST
+	// mapper's discovery inside the real GetInformer takes no ctx.
+	stall chan struct{}
 }
 
 func (c *stubCache) GetInformer(ctx context.Context, obj client.Object, opts ...cache.InformerGetOption) (cache.Informer, error) {
@@ -60,6 +63,9 @@ func (c *stubCache) GetInformer(ctx context.Context, obj client.Object, opts ...
 	c.blocking = append(c.blocking, o.BlockUntilSynced == nil || *o.BlockUntilSynced)
 	c.mu.Unlock()
 	n := int(c.calls.Add(1))
+	if c.stall != nil {
+		<-c.stall
+	}
 	if c.informer != nil {
 		if err := c.informer(ctx, n); err != nil {
 			return nil, err
@@ -253,6 +259,7 @@ func TestReadinessStopsWhereverItWaits(t *testing.T) {
 		{"a cache that waits for the sync inside GetInformer", func() *stubCache { return &stubCache{informer: blockForever} }, 0, func(c *stubCache) bool { return c.calls.Load() == 1 }},
 		{"the wait between tries", func() *stubCache { return &stubCache{informer: failing} }, time.Hour, func(c *stubCache) bool { return c.calls.Load() == 1 }},
 		{"an informer that never syncs", func() *stubCache { return &stubCache{synced: never} }, 0, func(c *stubCache) bool { return c.polls.Load() >= 1 }},
+		{"a GetInformer stuck in discovery, which ignores its ctx", func() *stubCache { return &stubCache{stall: make(chan struct{})} }, 0, func(c *stubCache) bool { return c.calls.Load() == 1 }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			for round := 0; round < rounds && !t.Failed(); round++ {
@@ -261,6 +268,9 @@ func TestReadinessStopsWhereverItWaits(t *testing.T) {
 				stop := startReadiness(t, r)
 				untilTrue(t, "Start to reach the wait", func() bool { return c.waits(sc) })
 				stop()
+				if sc.stall != nil {
+					close(sc.stall) // only now: a stop that waited for the stuck call would have failed above
+				}
 				if r.synced.Load() {
 					t.Fatalf("round %d: synced after a stop in %s", round, c.name)
 				}
