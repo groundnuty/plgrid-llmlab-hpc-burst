@@ -103,6 +103,9 @@ func TestRunModeShellStaysAZombieUntilTheSweepEnds(t *testing.T) {
 	}
 	close(release)
 	j = r.waitFinished(id)
+	if !j.TermAt.IsZero() || !j.KillAt.IsZero() {
+		t.Errorf("TermAt %v, KillAt %v for a job that exited by itself; the sweep's KILL is not counted", j.TermAt, j.KillAt)
+	}
 	if st := procState(shell); st != "" {
 		t.Errorf("the shell %d is %q after the job finished, want it reaped", shell, st)
 	}
