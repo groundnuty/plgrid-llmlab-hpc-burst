@@ -224,6 +224,12 @@ func TestNoOverlapKeepHoldsTheSlotToTheHardEnd(t *testing.T) {
 			}
 		}
 
+		// Keep releases nothing early: once the Instance has ended, the old
+		// job lives on, as the fake lists it, until its hard end.
+		if primaryEnded && !oldLive && now.Before(jobEnd) {
+			t.Fatalf("at %s the old job has ended (%s, %v), before its hard end %s: the kept Allocation was released early", at, old.Phase, old.EndTime, jobEnd.Format(time.TimeOnly))
+		}
+
 		// The hold: the primary's Instance has ended, its job has not.
 		if primaryEnded && oldLive {
 			keptIdleSteps++
