@@ -52,7 +52,7 @@ func usageChunk(completion int) string {
 func timedOnce(t *testing.T, h http.Handler, out int32) agentapi.RequestTiming {
 	t.Helper()
 	c := New(serveOn(t, h), "key")
-	return c.timed(context.Background(), warmShape{shape: agentapi.ShapeTypical, context: 0, output: out})
+	return c.timed(context.Background(), testGreedy, warmShape{shape: agentapi.ShapeTypical, context: 0, output: out})
 }
 
 // A stream that is all reasoning, the whole budget spent before any content,
@@ -110,7 +110,7 @@ func TestWarmUpWithoutUsageIsAnError(t *testing.T) {
 // first token at the first reasoning delta, long before the first content.
 func TestWarmUpTTFTWithReasoningDouble(t *testing.T) {
 	c := double(t, "reasoning-first=50,token-delay=10ms", nil, WithReasoning(true))
-	got := c.timed(context.Background(), warmShape{shape: agentapi.ShapeTypical, context: 20, output: 80})
+	got := c.timed(context.Background(), testGreedy, warmShape{shape: agentapi.ShapeTypical, context: 20, output: 80})
 	if got.Error != "" {
 		t.Fatalf("timing %+v", got)
 	}
@@ -148,7 +148,7 @@ func TestChatCheckAcceptsReasoningText(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := New(serveOn(t, reply(tc.message)), "key")
-			fp, err := c.chatCheck(context.Background())
+			fp, err := c.chatCheck(context.Background(), testGreedy)
 			if (err == nil) != tc.pass {
 				t.Errorf("chatCheck error = %v, want pass = %v", err, tc.pass)
 			}
@@ -174,10 +174,10 @@ func TestReasoningTextIsNeverJudged(t *testing.T) {
 		})
 	}
 	c, _ := doubleWith(t, "", nil, reply, WithReasoning(true))
-	if err := c.toolCallCheck(context.Background()); err == nil || reasonOf(err) == agentapi.ReasonReasoningBudgetExhausted {
+	if err := c.toolCallCheck(context.Background(), testGreedy); err == nil || reasonOf(err) == agentapi.ReasonReasoningBudgetExhausted {
 		t.Errorf("toolCallCheck = %v, want a failure for the missing call that is not ReasoningBudgetExhausted (the reply stopped)", err)
 	}
-	if _, err := c.behaviourCheck(context.Background(), agentapi.QualifyRequest{Shapes: shapes}); err == nil || !strings.Contains(err.Error(), "empty") {
+	if _, err := c.behaviourCheck(context.Background(), testGreedy, agentapi.QualifyRequest{Shapes: shapes}); err == nil || !strings.Contains(err.Error(), "empty") {
 		t.Errorf("behaviourCheck = %v, want the empty-answer failure", err)
 	}
 }
@@ -189,7 +189,7 @@ func TestReasoningTextIsNeverJudged(t *testing.T) {
 func TestReasoningBudgetIsAdded(t *testing.T) {
 	req := agentapi.QualifyRequest{Shapes: shapes, ToolCalls: true}
 	on, onRec := doubleWith(t, "reasoning-first=500", nil, nil, WithReasoning(true))
-	res := on.Qualify(context.Background(), req)
+	res := on.Qualify(context.Background(), req, testGreedy)
 	for _, name := range []agentapi.CheckName{agentapi.CheckChat, agentapi.CheckToolCall, agentapi.CheckCorruption, agentapi.CheckBehaviour} {
 		if o := outcomeOf(t, res, name); !o.Passed {
 			t.Errorf("reasoning on, %s: %q, want passed", name, o.Message)
@@ -201,7 +201,7 @@ func TestReasoningBudgetIsAdded(t *testing.T) {
 	}
 
 	off, offRec := doubleWith(t, "reasoning-first=500", nil, nil)
-	res = off.Qualify(context.Background(), req)
+	res = off.Qualify(context.Background(), req, testGreedy)
 	for _, name := range []agentapi.CheckName{agentapi.CheckToolCall, agentapi.CheckBehaviour} {
 		if o := outcomeOf(t, res, name); o.Passed || o.Reason != agentapi.ReasonReasoningBudgetExhausted {
 			t.Errorf("reasoning off, %s: passed %v, reason %q, %q; want a ReasoningBudgetExhausted failure", name, o.Passed, o.Reason, o.Message)
@@ -220,7 +220,7 @@ func TestReasoningBudgetExhausted(t *testing.T) {
 	for _, toolCalls := range []bool{true, false} {
 		t.Run(fmt.Sprintf("toolCalls=%v", toolCalls), func(t *testing.T) {
 			c := double(t, "reasoning-forever", nil, WithReasoning(true))
-			res := c.Qualify(context.Background(), agentapi.QualifyRequest{Shapes: shapes, ToolCalls: toolCalls})
+			res := c.Qualify(context.Background(), agentapi.QualifyRequest{Shapes: shapes, ToolCalls: toolCalls}, testGreedy)
 			if o := outcomeOf(t, res, agentapi.CheckChat); !o.Passed {
 				t.Errorf("chat: %q, want passed on reasoning text", o.Message)
 			}
@@ -248,7 +248,7 @@ func TestBehaviourCheckShortensTheContextForReasoning(t *testing.T) {
 	req := agentapi.QualifyRequest{Shapes: longest}
 
 	c, rec := doubleWith(t, "reasoning-first=50", tune, nil, WithReasoning(true))
-	run, err := c.behaviourCheck(context.Background(), req)
+	run, err := c.behaviourCheck(context.Background(), testGreedy, req)
 	if err != nil {
 		t.Fatalf("behaviour check: %v", err)
 	}
@@ -259,19 +259,19 @@ func TestBehaviourCheckShortensTheContextForReasoning(t *testing.T) {
 		t.Errorf("max_tokens %v, want 4160 for the behaviour request", got)
 	}
 	// the outcome carries the note on a pass
-	res := c.Qualify(context.Background(), req)
+	res := c.Qualify(context.Background(), req, testGreedy)
 	if o := outcomeOf(t, res, agentapi.CheckBehaviour); !o.Passed || !strings.Contains(o.Message, "ran at a context of 4023 tokens") {
 		t.Errorf("behaviour outcome %+v, want passed with the context in its message", o)
 	}
 
 	// without a reasoning parser the longest context is used as it is, with no note
 	off, _ := doubleWith(t, "", tune, nil)
-	if run, err := off.behaviourCheck(context.Background(), req); err != nil || run.note != "" || run.contextTokens != 8000 {
+	if run, err := off.behaviourCheck(context.Background(), testGreedy, req); err != nil || run.note != "" || run.contextTokens != 8000 {
 		t.Errorf("reasoning off: %+v, error %v; want 8000 tokens and no note", run, err)
 	}
 	// room for the longest context: no shortening, the context is still named
 	roomy, _ := doubleWith(t, "reasoning-first=50", nil, nil, WithReasoning(true))
-	if run, err := roomy.behaviourCheck(context.Background(), agentapi.QualifyRequest{Shapes: shapes}); err != nil || run.contextTokens != 200 || run.note != "ran at a context of 200 tokens" {
+	if run, err := roomy.behaviourCheck(context.Background(), testGreedy, agentapi.QualifyRequest{Shapes: shapes}); err != nil || run.contextTokens != 200 || run.note != "ran at a context of 200 tokens" {
 		t.Errorf("roomy: %+v, error %v; want 200 tokens named", run, err)
 	}
 }
@@ -302,14 +302,14 @@ func TestBehaviourCheckContextFloor(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, _ := doubleWith(t, tc.modes, tc.tune, nil, WithReasoning(true))
-			run, err := c.behaviourCheck(context.Background(), req)
+			run, err := c.behaviourCheck(context.Background(), testGreedy, req)
 			if err != nil {
 				t.Fatalf("the check failed: %v", err)
 			}
 			if run.contextTokens != tc.tokens || !strings.Contains(run.note, fmt.Sprintf("ran at a context of %d tokens", tc.tokens)) || !strings.Contains(run.note, tc.note) {
 				t.Errorf("ran at %d tokens, note %q; want %d tokens and a note containing %q", run.contextTokens, run.note, tc.tokens, tc.note)
 			}
-			res := c.Qualify(context.Background(), req)
+			res := c.Qualify(context.Background(), req, testGreedy)
 			if o := outcomeOf(t, res, agentapi.CheckBehaviour); !o.Passed || !strings.Contains(o.Message, "ran at a context of") || o.ContextTokens != tc.tokens {
 				t.Errorf("behaviour outcome %+v, want passed, naming the context, with ContextTokens %d", o, tc.tokens)
 			}
@@ -322,7 +322,7 @@ func TestBehaviourCheckContextFloor(t *testing.T) {
 // own about room.
 func TestBehaviourCheckAtTheFloorFailsWithTheEnginesError(t *testing.T) {
 	c, _ := doubleWith(t, "", func(c *enginedouble.Config) { c.MaxModelLen = 4000 }, nil, WithReasoning(true))
-	run, err := c.behaviourCheck(context.Background(), agentapi.QualifyRequest{Shapes: shapes})
+	run, err := c.behaviourCheck(context.Background(), testGreedy, agentapi.QualifyRequest{Shapes: shapes})
 	if err == nil || !strings.Contains(err.Error(), "HTTP 400") || strings.Contains(err.Error(), "no room") {
 		t.Errorf("error %v, want the engine's HTTP 400", err)
 	}

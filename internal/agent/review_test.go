@@ -283,12 +283,12 @@ type heldRoundEngine struct {
 	hr *heldRounds
 }
 
-func (e heldRoundEngine) WarmUpRound(ctx context.Context, n int32, req agentapi.WarmUpRequest) agentapi.WarmUpRound {
+func (e heldRoundEngine) WarmUpRound(ctx context.Context, n int32, req agentapi.WarmUpRequest, s agentapi.Sampling) agentapi.WarmUpRound {
 	select {
 	case <-e.hr.admit:
 	case <-ctx.Done():
 	}
-	r := e.Engine.WarmUpRound(ctx, n, req)
+	r := e.Engine.WarmUpRound(ctx, n, req, s)
 	if ctx.Err() != nil {
 		e.hr.cancelledAt.Store(time.Now().UnixNano())
 		e.hr.cancelOnce.Do(func() { close(e.hr.cancelled) })

@@ -1,12 +1,19 @@
 package agent
 
 import (
+	"bytes"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 func writeGenerationConfig(t *testing.T, dir, body string) {
@@ -25,21 +32,21 @@ func writeGenerationConfig(t *testing.T, dir, body string) {
 // JSON object and one that sets none of them give none.
 func TestReadGenerationConfig(t *testing.T) {
 	dir := t.TempDir()
-	if got := readGenerationConfig(dir); got != nil {
+	if got := readGenerationConfig(dir).config; got != nil {
 		t.Errorf("no file: %v, want none", got)
 	}
 	writeGenerationConfig(t, dir, `{"bos_token_id": 151643, "do_sample": true, "eos_token_id": [151645, 151643],
   "repetition_penalty": 1.1, "temperature": 0.7, "top_p": 0.8, "top_k": 20, "transformers_version": "4.37.0"}`)
 	want := map[string]string{"repetition_penalty": "1.1", "temperature": "0.7", "top_p": "0.8", "top_k": "20"}
-	if got := readGenerationConfig(dir); !reflect.DeepEqual(got, want) {
+	if got := readGenerationConfig(dir).config; !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v\nwant %v", got, want)
 	}
 	writeGenerationConfig(t, dir, `[1, 2]`)
-	if got := readGenerationConfig(dir); got != nil {
+	if got := readGenerationConfig(dir).config; got != nil {
 		t.Errorf("not an object: %v, want none", got)
 	}
 	writeGenerationConfig(t, dir, `{"bos_token_id": 1, "transformers_version": "4.37.0"}`)
-	if got := readGenerationConfig(dir); got != nil {
+	if got := readGenerationConfig(dir).config; got != nil {
 		t.Errorf("no sampling parameter: %v, want none", got)
 	}
 }
@@ -64,7 +71,7 @@ func TestReadGenerationConfigRecordsOnlyTheSamplingKeys(t *testing.T) {
 		"repetition_penalty": "1.05", "presence_penalty": "0.5", "frequency_penalty": "-0.25", "temperature": "0.6",
 		"top_k": "20", "top_p": "0.95", "min_p": "0", "max_new_tokens": "2048",
 	}
-	got := readGenerationConfig(dir)
+	got := readGenerationConfig(dir).config
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v\nwant %v", got, want)
 	}
@@ -84,11 +91,11 @@ func TestReadGenerationConfigChecksTheTypes(t *testing.T) {
 	writeGenerationConfig(t, dir, `{"temperature": "0.7", "top_k": 20.5, "max_new_tokens": 2.0e3, "min_p": null,
   "presence_penalty": true, "frequency_penalty": [0], "repetition_penalty": {"v": 1}, "top_p": 1e-1}`)
 	want := map[string]string{"top_p": "1e-1"}
-	if got := readGenerationConfig(dir); !reflect.DeepEqual(got, want) {
+	if got := readGenerationConfig(dir).config; !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v\nwant %v", got, want)
 	}
 	writeGenerationConfig(t, dir, `{"top_k": 40, "max_new_tokens": 9223372036854775808}`)
-	if got := readGenerationConfig(dir); !reflect.DeepEqual(got, map[string]string{"top_k": "40"}) {
+	if got := readGenerationConfig(dir).config; !reflect.DeepEqual(got, map[string]string{"top_k": "40"}) {
 		t.Errorf("an integer past int64: got %v, want only top_k", got)
 	}
 }
@@ -106,7 +113,7 @@ func TestReadGenerationConfigBounds(t *testing.T) {
 		t.Fatalf("fixture lengths %d %d", len(at), len(over))
 	}
 	writeGenerationConfig(t, dir, `{"temperature": `+at+`, "top_p": `+over+`}`)
-	if got := readGenerationConfig(dir); !reflect.DeepEqual(got, map[string]string{"temperature": at}) {
+	if got := readGenerationConfig(dir).config; !reflect.DeepEqual(got, map[string]string{"temperature": at}) {
 		t.Errorf("got %v, want the 128-byte temperature only", got)
 	}
 	if len(samplingParams) > 32 {
@@ -119,39 +126,566 @@ func TestReadGenerationConfigBounds(t *testing.T) {
 	}
 }
 
-// With no staged checkpoint directory the agent has looked at nothing, and says nothing: empty, which is not
-// "absent" (issue #175).
-func TestGenerationConfigFileOfNoDirectoryIsEmpty(t *testing.T) {
-	if got := generationConfigFile(""); got != "" {
-		t.Errorf("generationConfigFile(\"\") = %q, want empty", got)
+func boolPtr(v bool) *bool { return &v }
+
+// do_sample counts only as a JSON boolean (agentapi.VerifyResult.DoSample):
+// a string, a number, a list, a null and a missing key all leave it nil, and
+// a file that sets only do_sample still reports it. The expected values are
+// written out by hand.
+func TestReadGenerationConfigDoSample(t *testing.T) {
+	temp := map[string]string{"temperature": "0.6"}
+	for _, tc := range []struct {
+		name, body string
+		wantCfg    map[string]string
+		wantDo     *bool
+	}{
+		{"true with a key", `{"do_sample": true, "temperature": 0.6}`, temp, boolPtr(true)},
+		{"false with a key", `{"do_sample": false, "temperature": 0.6}`, temp, boolPtr(false)},
+		{"false alone", `{"do_sample": false}`, nil, boolPtr(false)},
+		{"true alone", `{"do_sample": true}`, nil, boolPtr(true)},
+		{"the string false", `{"do_sample": "false", "temperature": 0.6}`, temp, nil},
+		{"the string true", `{"do_sample": "true", "temperature": 0.6}`, temp, nil},
+		{"the number 0", `{"do_sample": 0, "temperature": 0.6}`, temp, nil},
+		{"the number 1", `{"do_sample": 1, "temperature": 0.6}`, temp, nil},
+		{"null", `{"do_sample": null, "temperature": 0.6}`, temp, nil},
+		{"a list", `{"do_sample": [false], "temperature": 0.6}`, temp, nil},
+		{"absent", `{"temperature": 0.6}`, temp, nil},
+		{"not an object", `[true]`, nil, nil},
+		{"not JSON", `{"do_sample": false`, nil, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeGenerationConfig(t, dir, tc.body)
+			f := readGenerationConfig(dir)
+			if !reflect.DeepEqual(f.config, tc.wantCfg) || !reflect.DeepEqual(f.doSample, tc.wantDo) {
+				t.Errorf("got %v, do_sample %v; want %v, %v", f.config, f.doSample, tc.wantCfg, tc.wantDo)
+			}
+		})
+	}
+	if f := readGenerationConfig(t.TempDir()); f.config != nil || f.doSample != nil || f.refused != nil {
+		t.Errorf("no file: %+v, want none", f)
+	}
+	if f := readGenerationConfig(""); f.config != nil || f.doSample != nil || f.refused != nil {
+		t.Errorf("no directory: %+v, want none", f)
 	}
 }
 
-// A checkpoint directory that is not there cannot be looked in, so the file is not claimed absent. And the
-// classification of one entry, without the harness: nothing, a dangling link and a link to a regular file.
+// The sampling of a verification generation's checks is computed once, from
+// the file as it stood at the first check unit: a later unit of the same
+// generation gets the same values even if the file has changed, so what the
+// checks send and what the record reports cannot part. Expected values are
+// written out by hand from the fixture (Qwen3-0.6B's keys).
+func TestGenSamplingIsComputedOnce(t *testing.T) {
+	dir := t.TempDir()
+	writeGenerationConfig(t, dir, `{"do_sample": true, "temperature": 0.6, "top_k": 20, "top_p": 0.95}`)
+	g := &genSampling{}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	topK, minP := int64(20), 0.0
+	want := agentapi.Sampling{
+		Temperature: 0.6, TopP: 0.95, TopK: &topK, MinP: &minP, RepetitionPenalty: 1, PresencePenalty: 0, FrequencyPenalty: 0,
+		Seeds: map[string]int64{"verify": 1101, "chat": 1102, "toolCall": 1103, "corruption": 1104, "behaviour": 1105, "warmUp": 1106},
+	}
+	r := g.resolve(dir, true, log, 1)
+	if !reflect.DeepEqual(r.sampling, want) || !reflect.DeepEqual(r.file.config, map[string]string{"temperature": "0.6", "top_k": "20", "top_p": "0.95"}) || r.file.doSample == nil || !*r.file.doSample {
+		t.Fatalf("first resolve: %+v", r)
+	}
+	writeGenerationConfig(t, dir, `{"do_sample": false}`)
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r := g.resolve(dir, false, log, 1)
+			if !reflect.DeepEqual(r.sampling, want) || !reflect.DeepEqual(r.file.config, map[string]string{"temperature": "0.6", "top_k": "20", "top_p": "0.95"}) || r.file.doSample == nil || !*r.file.doSample {
+				t.Errorf("a later resolve changed: %+v", r)
+			}
+		}()
+	}
+	wg.Wait()
+	// A new generation resolves again.
+	if fresh := (&genSampling{}).resolve(dir, true, log, 2); !fresh.sampling.Greedy {
+		t.Errorf("the next generation's file sets do_sample false: %+v, want greedy", fresh.sampling)
+	}
+}
+
+// readGenerationConfig judges the file's own JSON text of the seven sampling
+// keys with agentapi.CheckGenerationConfig, before the number-only record
+// reader drops anything: a value vLLM v0.32.0 refuses is reported with its key,
+// its text and what vLLM wants; a null is skipped, as vLLM skips it; and
+// max_new_tokens, which each check sets itself, is not judged. The refusals
+// are written out by hand from vLLM's ranges (temperature [0, 2], top_p (0, 1],
+// top_k an integer, and so on); the first in vLLM's order wins.
+func TestReadGenerationConfigRefusesWhatVLLMRefuses(t *testing.T) {
+	long := strings.Repeat("a", 300)
+	for _, tc := range []struct {
+		name, body string
+		want       *agentapi.GenerationConfigError
+	}{
+		{"a valid file (Qwen3-0.6B's keys)", `{"do_sample": true, "temperature": 0.6, "top_k": 20, "top_p": 0.95}`, nil},
+		{"no sampling key", `{"bos_token_id": 1}`, nil},
+		{"temperature above 2", `{"temperature": 2.5}`, &agentapi.GenerationConfigError{Param: "temperature", Value: "2.5", Want: "[0, 2]"}},
+		{"temperature a string", `{"temperature": "warm"}`, &agentapi.GenerationConfigError{Param: "temperature", Value: `"warm"`, Want: "a number"}},
+		{"temperature a boolean, which vLLM would accept as 1", `{"temperature": true}`,
+			&agentapi.GenerationConfigError{Param: "temperature", Value: "true", Want: "a number (a JSON boolean is refused here although vLLM would accept it)"}},
+		{"top_p a boolean false, which vLLM refuses too", `{"top_p": false}`, &agentapi.GenerationConfigError{Param: "top_p", Value: "false", Want: "a number"}},
+		{"top_k past int64, which vLLM would accept", `{"top_k": 9223372036854775808}`,
+			&agentapi.GenerationConfigError{Param: "top_k", Value: "9223372036854775808", Want: "an integer of at most 64 bits (a larger one is refused here although vLLM would accept it)"}},
+		{"top_k with a fraction", `{"top_k": 2.5}`, &agentapi.GenerationConfigError{Param: "top_k", Value: "2.5", Want: "an integer"}},
+		{"top_k written 20.0", `{"top_k": 20.0}`, &agentapi.GenerationConfigError{Param: "top_k", Value: "20.0", Want: "an integer"}},
+		{"top_p zero", `{"top_p": 0}`, &agentapi.GenerationConfigError{Param: "top_p", Value: "0", Want: "(0, 1]"}},
+		{"a null is skipped", `{"temperature": null, "top_p": 0.9}`, nil},
+		{"max_new_tokens is not judged", `{"max_new_tokens": "lots", "temperature": 0.6}`, nil},
+		{"the first in vLLM's order: temperature before top_p", `{"top_p": "x", "temperature": 2.5}`, &agentapi.GenerationConfigError{Param: "temperature", Value: "2.5", Want: "[0, 2]"}},
+		{"a long value is cut to 128 bytes", `{"temperature": "` + long + `"}`, &agentapi.GenerationConfigError{Param: "temperature", Value: `"` + long[:127], Want: "a number"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeGenerationConfig(t, dir, tc.body)
+			if got := readGenerationConfig(dir).refused; !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("refused %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+	// The record's own reader is unchanged: it keeps the numbers and drops the rest.
+	dir := t.TempDir()
+	writeGenerationConfig(t, dir, `{"temperature": "warm", "top_p": 0.9}`)
+	if got := readGenerationConfig(dir).config; !reflect.DeepEqual(got, map[string]string{"top_p": "0.9"}) {
+		t.Errorf("config %v, want only top_p", got)
+	}
+}
+
+// A refused file makes no sampling: resolve reports the refusal, leaves the
+// sampling empty, and the loop starts no more units (refused).
+func TestAResolvedGenSamplingKnowsItWasRefused(t *testing.T) {
+	dir := t.TempDir()
+	writeGenerationConfig(t, dir, `{"temperature": 2.5}`)
+	g := &genSampling{}
+	if g.refused() {
+		t.Error("refused before it was resolved")
+	}
+	r := g.resolve(dir, true, slog.New(slog.NewTextHandler(io.Discard, nil)), 1)
+	if !g.refused() || r.file.refused == nil || r.file.refused.Param != "temperature" || !reflect.DeepEqual(r.sampling, agentapi.Sampling{}) {
+		t.Errorf("resolved %+v, refused %v", r, g.refused())
+	}
+	var none *genSampling
+	if none.refused() {
+		t.Error("a missing genSampling reads as refused")
+	}
+}
+
+// paddedGenerationConfig returns a valid generation_config.json of exactly n
+// bytes: temperature 2.5, which vLLM refuses, then one long unrelated string.
+func paddedGenerationConfig(t *testing.T, n int) string {
+	t.Helper()
+	const head, tail = `{"temperature": 2.5, "pad": "`, `"}`
+	body := head + strings.Repeat("x", n-len(head)-len(tail)) + tail
+	if len(body) != n {
+		t.Fatalf("fixture is %d bytes, want %d", len(body), n)
+	}
+	return body
+}
+
+// A present generation_config.json that the agent cannot judge is refused as a
+// whole (an empty Param), never read as absent: vLLM would load it, and could
+// refuse what the agent did not see (PR #169 review, Astra B1 and Opus N3).
+// That covers a valid file above the 1 MiB limit, a file that is not valid
+// JSON, among them one with the NaN, Infinity and -Infinity that Python's json
+// accepts, and one that is valid JSON but not an object. A file of exactly
+// 1 MiB is read whole, so its temperature 2.5 is refused by key. The expected
+// refusals are written out by hand, whole, so a refusal of the wrong kind (a
+// truncated read that fails to parse is "not valid JSON", not "larger") fails.
+func TestReadGenerationConfigRefusesAFileItCannotJudge(t *testing.T) {
+	const mib = 1 << 20
+	wholeFile := func(value string) *agentapi.GenerationConfigError {
+		return &agentapi.GenerationConfigError{Param: "", Value: value, Want: "a JSON object of at most 1 MiB"}
+	}
+	for _, tc := range []struct {
+		name, body string
+		want       *agentapi.GenerationConfigError
+	}{
+		{"a valid file one byte over 1 MiB, with temperature 2.5", paddedGenerationConfig(t, mib+1), wholeFile("larger than 1 MiB")},
+		{"a valid file of exactly 1 MiB is read whole, and its temperature refused by key", paddedGenerationConfig(t, mib),
+			&agentapi.GenerationConfigError{Param: "temperature", Value: "2.5", Want: "[0, 2]"}},
+		{"a file of garbage above 1 MiB is too large, not invalid", strings.Repeat("z", mib+1), wholeFile("larger than 1 MiB")},
+		{"NaN", `{"temperature": NaN}`, wholeFile("not valid JSON")},
+		{"Infinity", `{"top_p": Infinity}`, wholeFile("not valid JSON")},
+		{"-Infinity", `{"repetition_penalty": -Infinity, "temperature": 0.6}`, wholeFile("not valid JSON")},
+		{"a truncated file", `{"temperature": 0.6`, wholeFile("not valid JSON")},
+		{"an empty file", ``, wholeFile("not valid JSON")},
+		{"a trailing comma", `{"temperature": 0.6,}`, wholeFile("not valid JSON")},
+		{"a list", `[1, 2]`, wholeFile("not a JSON object")},
+		{"a string", `"temperature"`, wholeFile("not a JSON object")},
+		{"a number", `12`, wholeFile("not a JSON object")},
+		{"a boolean", `true`, wholeFile("not a JSON object")},
+		{"null, which Go reads into a nil map without an error", `null`, wholeFile("not a JSON object")},
+		{"an empty object is a file that sets nothing", `{}`, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeGenerationConfig(t, dir, tc.body)
+			f := readGenerationConfig(dir)
+			if !reflect.DeepEqual(f.refused, tc.want) {
+				t.Errorf("refused %+v, want %+v", f.refused, tc.want)
+			}
+			if tc.want != nil && tc.want.Param == "" && (f.config != nil || f.doSample != nil) {
+				t.Errorf("a refused file gave config %v and do_sample %v", f.config, f.doSample)
+			}
+		})
+	}
+
+	// A present file the agent cannot read is refused too: a directory named
+	// like the file reads with an error whatever the user, unlike a mode that
+	// the superuser ignores. The reason stays in the agent's log.
+	t.Run("unreadable", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Mkdir(filepath.Join(dir, "generation_config.json"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		f := readGenerationConfig(dir)
+		want := &agentapi.GenerationConfigError{Param: "", Value: "unreadable", Want: "a JSON object of at most 1 MiB"}
+		if !reflect.DeepEqual(f.refused, want) {
+			t.Errorf("refused %+v, want %+v", f.refused, want)
+		}
+		if f.cause == "" || strings.Contains(f.cause, dir) {
+			t.Errorf("the log-only cause is %q, want a reason without the path", f.cause)
+		}
+	})
+
+	// So is a file whose mode lets nobody read it, unless this process reads it
+	// anyway (the superuser), where the test says so and skips.
+	t.Run("unreadable by mode", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "generation_config.json")
+		writeGenerationConfig(t, dir, `{"temperature": 0.6}`)
+		if err := os.Chmod(path, 0); err != nil {
+			t.Fatal(err)
+		}
+		if f, err := os.Open(path); err == nil {
+			f.Close()
+			t.Skip("this process reads a mode-000 file (it is the superuser), so the file is not unreadable to it")
+		}
+		f := readGenerationConfig(dir)
+		want := &agentapi.GenerationConfigError{Param: "", Value: "unreadable", Want: "a JSON object of at most 1 MiB"}
+		if !reflect.DeepEqual(f.refused, want) {
+			t.Errorf("refused %+v, want %+v", f.refused, want)
+		}
+		if f.config != nil {
+			t.Errorf("an unreadable file gave config %v", f.config)
+		}
+	})
+
+	// An entry at the path that does not resolve to a readable regular file is
+	// unreadable, not absent: a dangling symbolic link (which os.Open reports as
+	// not existing), a link to a directory, a named pipe (which the reader must
+	// not open, since that blocks). A link to a readable file is that file.
+	unreadable := &agentapi.GenerationConfigError{Param: "", Value: "unreadable", Want: "a JSON object of at most 1 MiB"}
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, dir, path string)
+		want  *agentapi.GenerationConfigError
+		cfg   map[string]string
+	}{
+		{"a dangling symbolic link", func(t *testing.T, dir, path string) {
+			if err := os.Symlink("no-such-target.json", path); err != nil {
+				t.Fatal(err)
+			}
+		}, unreadable, nil},
+		{"a link to a directory", func(t *testing.T, dir, path string) {
+			if err := os.Mkdir(filepath.Join(dir, "a-directory"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("a-directory", path); err != nil {
+				t.Fatal(err)
+			}
+		}, unreadable, nil},
+		{"a named pipe", func(t *testing.T, dir, path string) {
+			if err := syscall.Mkfifo(path, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, unreadable, nil},
+		{"a link to a readable file is read as that file", func(t *testing.T, dir, path string) {
+			if err := os.WriteFile(filepath.Join(dir, "real.json"), []byte(`{"temperature": 0.6, "top_p": 0.95}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("real.json", path); err != nil {
+				t.Fatal(err)
+			}
+		}, nil, map[string]string{"temperature": "0.6", "top_p": "0.95"}},
+		{"a link to a readable file whose value vLLM refuses", func(t *testing.T, dir, path string) {
+			if err := os.WriteFile(filepath.Join(dir, "real.json"), []byte(`{"temperature": 2.5}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("real.json", path); err != nil {
+				t.Fatal(err)
+			}
+		}, &agentapi.GenerationConfigError{Param: "temperature", Value: "2.5", Want: "[0, 2]"}, map[string]string{"temperature": "2.5"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tc.setup(t, dir, filepath.Join(dir, "generation_config.json"))
+			f := readGenerationConfig(dir) // a named pipe that was opened would hang here
+			if !reflect.DeepEqual(f.refused, tc.want) || !reflect.DeepEqual(f.config, tc.cfg) {
+				t.Errorf("refused %+v and config %v, want %+v and %v", f.refused, f.config, tc.want, tc.cfg)
+			}
+		})
+	}
+
+	// A missing file, and no checkpoint directory, are absent: nothing is refused.
+	t.Run("absent", func(t *testing.T) {
+		for name, dir := range map[string]string{"a missing file": t.TempDir(), "no directory": ""} {
+			if f := readGenerationConfig(dir); f.refused != nil || f.config != nil || f.doSample != nil {
+				t.Errorf("%s: %+v, want an absent file", name, f)
+			}
+		}
+	})
+}
+
+// The empty Param belongs to the refusals of the file as a whole and to no
+// other (`@hpc-burst-science-agent`'s condition, 1 Nov 2026): over every file
+// the reader can refuse, Param is empty exactly when no key is to blame, and a
+// refusal of one key names it in its message.
+func TestOnlyAWholeFileRefusalHasAnEmptyParam(t *testing.T) {
+	for _, tc := range []struct {
+		body  string
+		whole bool
+	}{
+		{`{"temperature": NaN}`, true}, {`[]`, true}, {`null`, true}, {``, true}, {paddedGenerationConfig(t, 1<<20+1), true},
+		{`{"temperature": 2.5}`, false}, {`{"temperature": "warm"}`, false}, {`{"top_k": 2.5}`, false}, {`{"top_p": 0}`, false},
+		{`{"min_p": true}`, false}, {`{"presence_penalty": [1]}`, false}, {`{"frequency_penalty": 5}`, false}, {`{"repetition_penalty": 0}`, false},
+	} {
+		dir := t.TempDir()
+		writeGenerationConfig(t, dir, tc.body)
+		r := readGenerationConfig(dir).refused
+		switch {
+		case r == nil:
+			t.Errorf("%.40s: not refused", tc.body)
+		case (r.Param == "") != tc.whole:
+			t.Errorf("%.40s: param %q, whole-file %v", tc.body, r.Param, tc.whole)
+		case !tc.whole && !strings.Contains(r.Error(), r.Param):
+			t.Errorf("%.40s: message %q does not name %q", tc.body, r.Error(), r.Param)
+		case tc.whole && !strings.Contains(r.Error(), "generation_config.json"):
+			t.Errorf("%.40s: message %q does not name the file", tc.body, r.Error())
+		}
+	}
+}
+
+// The warning that a file is refused names the key and what is expected there,
+// and never the value's text: the file is arbitrary configuration, and a string
+// under a checked key can hold a token, a URL with a query or a private path
+// (PR #169 review, Astra B2). Each synthetic value sits under temperature,
+// which the agent judges, is shorter than the 128 bytes the report keeps, and
+// has a distinctive part that the log must not hold. A number is shown as a
+// number. The expected texts are written out by hand.
+func TestTheRefusalIsLoggedWithoutTheValuesText(t *testing.T) {
+	for _, tc := range []struct {
+		name, value string   // value is the JSON text under temperature
+		secrets     []string // parts of it that must not reach the log
+	}{
+		{"a token-like string", `"hf_0123456789abcdefABCDEF0123456789"`, []string{"hf_0123", "abcdefABCDEF"}},
+		{"a query string", `"https://example.invalid/models?token=SECRET123&sig=0f9e"`, []string{"SECRET123", "token=", "example.invalid"}},
+		{"a private path", `"/home/ExampleUser/private/qwen"`, []string{"ExampleUser", "/home/", "private"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeGenerationConfig(t, dir, `{"temperature": `+tc.value+`}`)
+			var buf bytes.Buffer
+			(&genSampling{}).resolve(dir, true, slog.New(slog.NewTextHandler(&buf, nil)), 3)
+			out := buf.String()
+			for _, secret := range tc.secrets {
+				if strings.Contains(out, secret) {
+					t.Errorf("the log holds %q of the value: %s", secret, out)
+				}
+			}
+			for _, want := range []string{"level=WARN", "verificationGeneration=3", "param=temperature", `want="a number"`} {
+				if !strings.Contains(out, want) {
+					t.Errorf("the log lacks %s: %s", want, out)
+				}
+			}
+		})
+	}
+
+	// A number is shown as a number, with its key and its range.
+	dir := t.TempDir()
+	writeGenerationConfig(t, dir, `{"temperature": 2.5}`)
+	var buf bytes.Buffer
+	(&genSampling{}).resolve(dir, true, slog.New(slog.NewTextHandler(&buf, nil)), 1)
+	for _, want := range []string{"param=temperature", "value=2.5", `want="[0, 2]"`} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("the log lacks %s: %s", want, buf.String())
+		}
+	}
+
+	// A file refused as a whole is logged by the contract's phrase, and the
+	// operating system's reason without the path.
+	dir = t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "generation_config.json"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	buf.Reset()
+	(&genSampling{}).resolve(dir, true, slog.New(slog.NewTextHandler(&buf, nil)), 1)
+	for _, want := range []string{"level=WARN", "file=unreadable", "cause=\"not a regular file\""} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("the log lacks %s: %s", want, buf.String())
+		}
+	}
+	if strings.Contains(buf.String(), dir) {
+		t.Errorf("the log holds the staging path: %s", buf.String())
+	}
+}
+
+// A JSON null for a key is read as the key missing, as vLLM reads it
+// (get_diff_sampling_param keeps a key only when its value is not None): it is
+// neither refused, nor recorded, nor does it count as a sampling key that is
+// given (`@hpc-burst-science-agent`, 1 Nov 2026, N4). Each file is checked
+// against the values written out by hand, and against the same file without
+// the nulls.
+func TestANullValueIsReadAsAMissingKey(t *testing.T) {
+	for _, tc := range []struct {
+		name, withNull, without string
+		wantConfig              map[string]string
+		wantDoSample            *bool
+	}{
+		{"a null temperature beside a valid top_p", `{"temperature": null, "top_p": 0.9}`, `{"top_p": 0.9}`,
+			map[string]string{"top_p": "0.9"}, nil},
+		{"a null on each of the seven keys", `{"temperature": null, "top_p": null, "top_k": null, "min_p": null, "repetition_penalty": null, "presence_penalty": null, "frequency_penalty": null, "do_sample": true}`,
+			`{"do_sample": true}`, nil, boolPtr(true)},
+		{"a null max_new_tokens", `{"max_new_tokens": null, "temperature": 0.6}`, `{"temperature": 0.6}`,
+			map[string]string{"temperature": "0.6"}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, b := t.TempDir(), t.TempDir()
+			writeGenerationConfig(t, a, tc.withNull)
+			writeGenerationConfig(t, b, tc.without)
+			got, control := readGenerationConfig(a), readGenerationConfig(b)
+			if got.refused != nil {
+				t.Errorf("the nulls are refused: %+v", got.refused)
+			}
+			if !reflect.DeepEqual(got.config, tc.wantConfig) || !reflect.DeepEqual(got.doSample, tc.wantDoSample) {
+				t.Errorf("read config %v and do_sample %v, want %v and %v", got.config, got.doSample, tc.wantConfig, tc.wantDoSample)
+			}
+			if !reflect.DeepEqual(got, control) {
+				t.Errorf("read %+v, but the file without the keys reads %+v", got, control)
+			}
+		})
+	}
+}
+
+// With no staged checkpoint directory the agent has looked at nothing, and says nothing: an empty state, which
+// is not "absent" (issue #175).
+func TestGenerationConfigFileOfNoDirectoryIsEmpty(t *testing.T) {
+	if f := readGenerationConfig(""); f.state != "" || f.refused != nil {
+		t.Errorf("no directory: state %q, refusal %+v, want neither", f.state, f.refused)
+	}
+}
+
+// A checkpoint directory that is not there cannot be looked in, so the file is not claimed absent, and the
+// agent refuses it as a whole. And the classification of one entry, without the harness: nothing, a dangling
+// link and a link to a regular file. (Issue #175 and #182; the reader gives the state and the refusal from one
+// Lstat and open.)
 func TestGenerationConfigFileOfADirectoryThatIsGoneAndOfLinks(t *testing.T) {
 	root := t.TempDir()
-	if got := generationConfigFile(filepath.Join(root, "no-such-dir")); got != "unreadable" {
-		t.Errorf("a missing checkpoint directory: %q, want unreadable", got)
+	if f := readGenerationConfig(filepath.Join(root, "no-such-dir")); f.state != "unreadable" || f.refused == nil || f.refused.Param != "" {
+		t.Errorf("a missing checkpoint directory: state %q, refusal %+v, want unreadable and a whole-file refusal", f.state, f.refused)
 	}
 	dir := filepath.Join(root, "ckpt")
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if got := generationConfigFile(dir); got != "absent" {
-		t.Errorf("no entry: %q, want absent", got)
+	if f := readGenerationConfig(dir); f.state != "absent" || f.refused != nil {
+		t.Errorf("no entry: state %q, refusal %+v, want absent and none", f.state, f.refused)
 	}
 	link := filepath.Join(dir, "generation_config.json")
 	if err := os.Symlink("nowhere.json", link); err != nil {
 		t.Fatal(err)
 	}
-	if got := generationConfigFile(dir); got != "unreadable" {
-		t.Errorf("a dangling symlink: %q, want unreadable", got)
+	if f := readGenerationConfig(dir); f.state != "unreadable" || f.refused == nil || f.refused.Param != "" {
+		t.Errorf("a dangling symlink: state %q, refusal %+v, want unreadable and a whole-file refusal", f.state, f.refused)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "nowhere.json"), []byte(`{}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := generationConfigFile(dir); got != "present" {
-		t.Errorf("the link once its target exists: %q, want present", got)
+	if f := readGenerationConfig(dir); f.state != "present" || f.refused != nil {
+		t.Errorf("the link once its target exists: state %q, refusal %+v, want present and none", f.state, f.refused)
+	}
+}
+
+// The state of the file (VerifyResult.GenerationConfigFile) and the refusal come from one read, and agree
+// on every case (`@hpc-burst-science-agent`, 1 Nov 2026, for #175 and #182): an unreadable file is always
+// refused as a whole (an empty Param), so the checks never run on it; a present file is refused only by its
+// content, and a refusal by content (too large, not valid JSON, not an object) leaves it present; an
+// absent file is not refused, and its checks are greedy. The expected pairs are written out by hand.
+func TestTheFilesStateAndItsRefusalAgreeOnEveryCase(t *testing.T) {
+	const present, absent, unreadable = "present", "absent", "unreadable"
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, dir, path string)
+		state string
+		whole string // the whole-file refusal's Value, "" for none
+	}{
+		{"a valid file", func(t *testing.T, dir, path string) { writeGenerationConfig(t, dir, `{"temperature": 0.6}`) }, present, ""},
+		{"a file with none of the keys", func(t *testing.T, dir, path string) { writeGenerationConfig(t, dir, `{"bos_token_id": 1}`) }, present, ""},
+		{"an empty object", func(t *testing.T, dir, path string) { writeGenerationConfig(t, dir, `{}`) }, present, ""},
+		{"a file above 1 MiB", func(t *testing.T, dir, path string) {
+			writeGenerationConfig(t, dir, paddedGenerationConfig(t, 1<<20+1))
+		}, present, "larger than 1 MiB"},
+		{"a file that is not JSON", func(t *testing.T, dir, path string) { writeGenerationConfig(t, dir, `{`) }, present, "not valid JSON"},
+		{"an empty file", func(t *testing.T, dir, path string) { writeGenerationConfig(t, dir, ``) }, present, "not valid JSON"},
+		{"a file that is not an object", func(t *testing.T, dir, path string) { writeGenerationConfig(t, dir, `[1]`) }, present, "not a JSON object"},
+		{"a missing file", func(t *testing.T, dir, path string) {}, absent, ""},
+		{"a directory", func(t *testing.T, dir, path string) {
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}, unreadable, "unreadable"},
+		{"a dangling symbolic link", func(t *testing.T, dir, path string) {
+			if err := os.Symlink("no-such-target.json", path); err != nil {
+				t.Fatal(err)
+			}
+		}, unreadable, "unreadable"},
+		{"a link to a readable file", func(t *testing.T, dir, path string) {
+			writeGenerationConfig(t, dir, `{"top_p": 0.9}`)
+			if err := os.Rename(path, filepath.Join(dir, "real.json")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("real.json", path); err != nil {
+				t.Fatal(err)
+			}
+		}, present, ""},
+		{"a link to a directory", func(t *testing.T, dir, path string) {
+			if err := os.Mkdir(filepath.Join(dir, "d"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("d", path); err != nil {
+				t.Fatal(err)
+			}
+		}, unreadable, "unreadable"},
+		{"a file with mode 000", func(t *testing.T, dir, path string) {
+			writeGenerationConfig(t, dir, `{"temperature": 0.6}`)
+			if err := os.Chmod(path, 0); err != nil {
+				t.Fatal(err)
+			}
+			if f, err := os.Open(path); err == nil {
+				f.Close()
+				t.Skip("this process reads a mode-000 file (it is the superuser), so the file is not unreadable to it")
+			}
+		}, unreadable, "unreadable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tc.setup(t, dir, filepath.Join(dir, "generation_config.json"))
+			f := readGenerationConfig(dir)
+			if f.state != tc.state {
+				t.Errorf("state %q, want %q", f.state, tc.state)
+			}
+			switch {
+			case tc.whole == "" && f.refused != nil && f.refused.Param == "":
+				t.Errorf("refused as a whole (%+v), want a file that is read", f.refused)
+			case tc.whole != "" && (f.refused == nil || f.refused.Param != "" || f.refused.Value != tc.whole):
+				t.Errorf("refusal %+v, want a whole-file refusal %q", f.refused, tc.whole)
+			}
+			if f.state == unreadable && f.refused == nil {
+				t.Error("unreadable and not refused: the checks would run on it")
+			}
+		})
 	}
 }

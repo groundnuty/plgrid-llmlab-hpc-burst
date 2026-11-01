@@ -47,7 +47,7 @@ func assertCut(t *testing.T, what, got string) {
 // gives to agentapi.MaxMessageBytes.
 func TestVerifyCutsTheEnginesStrings(t *testing.T) {
 	c := New(serveOn(t, hugeEngine()), "key")
-	res := c.Verify(context.Background())
+	res := c.Verify(context.Background(), testGreedy)
 	assertCut(t, "version", res.EngineVersion)
 	assertCut(t, "fingerprint", res.Fingerprint)
 	for _, flag := range []string{"kv-cache-dtype", "block-size", "enable-prefix-caching", "gpu-memory-utilization"} {
@@ -58,7 +58,7 @@ func TestVerifyCutsTheEnginesStrings(t *testing.T) {
 // Qualify cuts the fingerprint and the served model names.
 func TestQualifyCutsTheEnginesStrings(t *testing.T) {
 	c := New(serveOn(t, hugeEngine()), "key")
-	res := c.Qualify(context.Background(), agentapi.QualifyRequest{Shapes: agentapi.Shapes{OutputTypical: 8}})
+	res := c.Qualify(context.Background(), agentapi.QualifyRequest{Shapes: agentapi.Shapes{OutputTypical: 8}}, testGreedy)
 	assertCut(t, "fingerprint", res.Fingerprint)
 	if len(res.ServedModelNames) != 1 {
 		t.Fatalf("served names %q", res.ServedModelNames)

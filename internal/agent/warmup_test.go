@@ -95,9 +95,9 @@ type startsCountingEngine struct {
 	starts *roundStarts
 }
 
-func (e startsCountingEngine) WarmUpRound(ctx context.Context, n int32, req agentapi.WarmUpRequest) agentapi.WarmUpRound {
+func (e startsCountingEngine) WarmUpRound(ctx context.Context, n int32, req agentapi.WarmUpRequest, s agentapi.Sampling) agentapi.WarmUpRound {
 	e.starts.add(n)
-	return e.Engine.WarmUpRound(ctx, n, req)
+	return e.Engine.WarmUpRound(ctx, n, req, s)
 }
 
 // A round sends the shapes HBEP-7 lists, in order: the three context lengths

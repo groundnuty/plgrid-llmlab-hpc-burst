@@ -13,7 +13,11 @@
 //     (serve/tokenize/protocol.py), for the template's overhead and the
 //     synthetic prompts' lengths;
 //   - POST /v1/chat/completions: ignore_eos, min_tokens and return_token_ids
-//     are vLLM's extensions (openai/chat_completion/protocol.py);
+//     are vLLM's extensions (openai/chat_completion/protocol.py); it also takes
+//     top_k, min_p and seed, which a sampled reasoning model's checks send beside
+//     temperature, top_p and the three penalties (chat_completion/protocol.py
+//     lines 238 and 274-275, and the seed passed to SamplingParams at line
+//     757, as HBEP-7 cites them for v0.32.0);
 //     system_fingerprint is the engine fingerprint, recorded and never
 //     compared (HBEP-3); with a reasoning parser the reply splits into
 //     message.reasoning and message.content, and a stream's deltas into

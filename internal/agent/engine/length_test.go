@@ -52,7 +52,7 @@ func wantOutput(s agentapi.Shape) int32 {
 // exactly the output it asked for from the engine that stops early.
 func TestWarmUpAsksForTheExactLength(t *testing.T) {
 	c, rec := doubleWith(t, "early-stop=10", nil, nil)
-	round := c.WarmUpRound(context.Background(), 1, agentapi.WarmUpRequest{Shapes: shapes, TargetSessions: 2})
+	round := c.WarmUpRound(context.Background(), 1, agentapi.WarmUpRequest{Shapes: shapes, TargetSessions: 2}, testGreedy)
 	timings := fixedLength(round)
 	if len(timings) != 6 { // short, typical, longest, longOutput, 2 concurrent
 		t.Fatalf("%d requests, want 6", len(timings))
@@ -74,7 +74,7 @@ func TestWarmUpAsksForTheExactLength(t *testing.T) {
 // nothing to the controller (agentapi.RequestTiming).
 func TestWarmUpDetectsAnEarlyStop(t *testing.T) {
 	c, _ := doubleWith(t, "early-stop=10", nil, stripMinTokens)
-	round := c.WarmUpRound(context.Background(), 1, agentapi.WarmUpRequest{Shapes: shapes, TargetSessions: 2})
+	round := c.WarmUpRound(context.Background(), 1, agentapi.WarmUpRequest{Shapes: shapes, TargetSessions: 2}, testGreedy)
 	for _, q := range fixedLength(round) {
 		want := "stopped early: 10 of 64 tokens"
 		if q.Shape == agentapi.ShapeLongOutput {
@@ -92,7 +92,7 @@ func TestCorruptionCheckAsksForTheExactLength(t *testing.T) {
 	c, rec := doubleWith(t, "early-stop=10", nil, nil)
 	own := shapes
 	own.OutputTypical = 50 // the behaviour check's budget must not look like the corruption check's 64
-	res := c.Qualify(context.Background(), agentapi.QualifyRequest{Shapes: own})
+	res := c.Qualify(context.Background(), agentapi.QualifyRequest{Shapes: own}, testGreedy)
 	if o := outcomeOf(t, res, agentapi.CheckCorruption); !o.Passed {
 		t.Fatalf("corruption: %+v", o)
 	}

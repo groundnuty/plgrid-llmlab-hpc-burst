@@ -39,6 +39,11 @@ import (
 // runs hb-agent: the same code path as the built binary, in its own process.
 const roleAgent = "hb-agent-under-test"
 
+// roleLocalTime makes this test binary print the current time in its own
+// local zone, which TestAgentLogTimesAreUTC uses to show that the zone it sets
+// reaches a child process.
+const roleLocalTime = "local-time-under-test"
+
 func TestMain(m *testing.M) {
 	// The fakes first: the agent's children (apptainer, ssh) inherit its role
 	// variable but are told apart by their program name.
@@ -50,6 +55,10 @@ func TestMain(m *testing.M) {
 	}
 	if os.Getenv("HB_TEST_ROLE") == roleAgent {
 		os.Exit(run(os.Args[1:], os.Getenv, os.Stderr))
+	}
+	if os.Getenv("HB_TEST_ROLE") == roleLocalTime {
+		fmt.Println(time.Now().Format(time.RFC3339))
+		os.Exit(0)
 	}
 	os.Exit(m.Run())
 }
@@ -560,7 +569,8 @@ func waitReport(t *testing.T, b *fake.Backend, what string, ok func(agentapi.Rep
 
 // exercise drives one agent through a run, verification and a stop, through
 // the real endpoint over TLS with the pinned certificate.
-func exercise(t *testing.T, ep endpoint, j job) {
+// It returns the agent's output.
+func exercise(t *testing.T, ep endpoint, j job) string {
 	t.Helper()
 	cmd, out := j.start(t)
 	ep.backend.SetDesired(eUID, runState(j.engLog, &agentapi.Checks{VerificationGeneration: 1, Verify: &agentapi.VerifyRequest{}}))
@@ -610,6 +620,7 @@ func exercise(t *testing.T, ep endpoint, j job) {
 			t.Errorf("%s is in the agent's output (or empty: %q)", name, secret)
 		}
 	}
+	return out.String()
 }
 
 func shortRoot(t *testing.T) string {

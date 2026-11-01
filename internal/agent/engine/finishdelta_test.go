@@ -21,7 +21,7 @@ func TestFinishChunkDeltaIsTheFirstToken(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := New(serveOn(t, sseHandler([]sseEvent2{role, ev(chunk(tc.delta, `"length"`)), ev(usageChunk(1)), ev("[DONE]")})), "key")
-			got, _ := c.timedCall(context.Background(), warmShape{shape: agentapi.ShapeShort, context: 0, output: 1})
+			got, _ := c.timedCall(context.Background(), testGreedy, warmShape{shape: agentapi.ShapeShort, context: 0, output: 1})
 			if got.Error != "" || got.TimeToFirstToken <= 0 || got.OutputTokens != 1 {
 				t.Errorf("timing %+v: want no error, a first-token time and 1 output token", got)
 			}
@@ -49,7 +49,7 @@ func TestFinishChunkDeltaCompletesTheToolCall(t *testing.T) {
 // drop that coverage unseen.
 func TestDoubleSendsANonEmptyFinishDelta(t *testing.T) {
 	c, rec := doubleWith(t, "", nil, nil)
-	round := c.WarmUpRound(context.Background(), 1, agentapi.WarmUpRequest{Shapes: shapes, ToolCalls: true, TargetSessions: 1})
+	round := c.WarmUpRound(context.Background(), 1, agentapi.WarmUpRequest{Shapes: shapes, ToolCalls: true, TargetSessions: 1}, testGreedy)
 	for _, q := range round.Requests {
 		if q.Error != "" {
 			t.Errorf("%s: %q", q.Shape, q.Error)

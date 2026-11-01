@@ -15,8 +15,10 @@ import (
 // engine that reports nothing fails the controller's required fields
 // (HBEP-7, Risks: verification passes because it read nothing). Files and
 // ImageDigest are the agent's. A read that fails is named in Error; the
-// others are still reported.
-func (c *Client) Verify(ctx context.Context) agentapi.VerifyResult {
+// others are still reported. s is the sampling of this verification
+// generation's checks, which the fingerprint request carries as every check
+// request does.
+func (c *Client) Verify(ctx context.Context, s agentapi.Sampling) agentapi.VerifyResult {
 	var res agentapi.VerifyResult
 	var failed []string
 	fail := func(what string, err error) { failed = append(failed, what+": "+err.Error()) }
@@ -41,7 +43,7 @@ func (c *Client) Verify(ctx context.Context) agentapi.VerifyResult {
 			}
 		}
 	}
-	if fp, err := c.fingerprint(ctx); err != nil {
+	if fp, err := c.fingerprint(ctx, s); err != nil {
 		fail("fingerprint", err)
 	} else {
 		res.Fingerprint = cut(fp)
@@ -60,10 +62,11 @@ func (c *Client) Verify(ctx context.Context) agentapi.VerifyResult {
 	return res
 }
 
-// fingerprint sends one short greedy chat request and returns the engine
+// fingerprint sends one short chat request, sampled as s says (the check
+// sampling of this verification generation), and returns the engine
 // fingerprint it carries, "" when it carries none.
-func (c *Client) fingerprint(ctx context.Context) (string, error) {
-	r, err := c.chat(ctx, chatRequest{
+func (c *Client) fingerprint(ctx context.Context, s agentapi.Sampling) (string, error) {
+	r, err := c.chat(ctx, s, agentapi.SeedKeyVerify, chatRequest{
 		Messages:  []message{{Role: "user", Content: "Reply with one word: ready."}},
 		MaxTokens: 4,
 	})

@@ -45,7 +45,7 @@ func toolDelta(index int, id, typ, name, args string) string {
 func toolTimed(t *testing.T, events ...sseEvent2) (agentapi.RequestTiming, error) {
 	t.Helper()
 	c := New(serveOn(t, sseHandler(events)), "key")
-	return c.timedCall(context.Background(), warmShape{shape: agentapi.ShapeToolCall, context: 0, output: 64, tools: true})
+	return c.timedCall(context.Background(), testGreedy, warmShape{shape: agentapi.ShapeToolCall, context: 0, output: 64, tools: true})
 }
 
 // logBuffer is a slog handler's target that tests read back.
@@ -163,7 +163,7 @@ func TestToolShapeAnswerIsLoggedNotReported(t *testing.T) {
 		t.Run("modes="+tc.modes, func(t *testing.T) {
 			var log logBuffer
 			c, _ := doubleWith(t, tc.modes, nil, nil, WithLogger(log.logger()))
-			round := c.WarmUpRound(context.Background(), 1, agentapi.WarmUpRequest{Shapes: shapes, ToolCalls: true, TargetSessions: 1})
+			round := c.WarmUpRound(context.Background(), 1, agentapi.WarmUpRequest{Shapes: shapes, ToolCalls: true, TargetSessions: 1}, testGreedy)
 			var sawTool bool
 			for _, q := range round.Requests {
 				sawTool = sawTool || q.Shape == agentapi.ShapeToolCall
@@ -209,7 +209,7 @@ func TestToolShapeRequestFailureIsAWarmUpError(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := New(serveOn(t, tc.handler), "key")
-			got := c.timed(context.Background(), shape)
+			got := c.timed(context.Background(), testGreedy, shape)
 			if !strings.Contains(got.Error, tc.wantErr) {
 				t.Errorf("timing %+v: want an error containing %q", got, tc.wantErr)
 			}
@@ -223,7 +223,7 @@ func TestToolShapeRequestFailureIsAWarmUpError(t *testing.T) {
 // merely offers tools would fail the shape (Astra B9).
 func TestToolShapePromptAsksForTheCall(t *testing.T) {
 	c, rec := doubleWith(t, "", nil, nil)
-	round := c.WarmUpRound(context.Background(), 1, agentapi.WarmUpRequest{Shapes: shapes, ToolCalls: true, TargetSessions: 1})
+	round := c.WarmUpRound(context.Background(), 1, agentapi.WarmUpRequest{Shapes: shapes, ToolCalls: true, TargetSessions: 1}, testGreedy)
 	for _, q := range round.Requests {
 		if q.Error != "" {
 			t.Errorf("%s request: %q", q.Shape, q.Error)
@@ -258,7 +258,7 @@ func TestToolShapePromptAsksForTheCall(t *testing.T) {
 func TestToolShapeReasoningBudget(t *testing.T) {
 	req := agentapi.WarmUpRequest{Shapes: shapes, ToolCalls: true, TargetSessions: 1}
 	toolTiming := func(c *Client) agentapi.RequestTiming {
-		for _, q := range c.WarmUpRound(context.Background(), 1, req).Requests {
+		for _, q := range c.WarmUpRound(context.Background(), 1, req, testGreedy).Requests {
 			if q.Shape == agentapi.ShapeToolCall {
 				return q
 			}
@@ -297,7 +297,7 @@ func TestToolCallChecksAgainstTheFailingDoubles(t *testing.T) {
 	} {
 		t.Run(tc.modes, func(t *testing.T) {
 			c := double(t, tc.modes, nil)
-			res := c.Qualify(context.Background(), agentapi.QualifyRequest{Shapes: shapes, ToolCalls: true})
+			res := c.Qualify(context.Background(), agentapi.QualifyRequest{Shapes: shapes, ToolCalls: true}, testGreedy)
 			for _, name := range []agentapi.CheckName{agentapi.CheckToolCall, agentapi.CheckBehaviour} {
 				if o := outcomeOf(t, res, name); o.Passed || !strings.Contains(o.Message, tc.wantErr) {
 					t.Errorf("%s: passed %v, %q; want a failure containing %q", name, o.Passed, o.Message, tc.wantErr)
