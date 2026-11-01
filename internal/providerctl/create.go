@@ -34,7 +34,8 @@ import (
 // settles at once, so the hold lasts the time of one listing read. It returns
 // an error for anything that kept it from submitting and for a Rejected
 // outcome, so crossplane backs off; an Unknown outcome is no error, and the
-// tag resolves it.
+// tag resolves it. So is a refusal for a full submit limit once it is
+// recorded (rejected).
 func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.ExternalCreation, error) {
 	a, ok := mg.(*v1alpha1.Allocation)
 	if !ok {
@@ -60,7 +61,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 	case s != nil && s.State == v1alpha1.SubmissionRejected && now.Sub(attemptTime(a, s)) < e.s.o.RejectBackoff:
 		return managed.ExternalCreation{}, fmt.Errorf("attempt %d was rejected; the next waits for backoff", s.Attempt)
 	}
-	req := provider.SubmitRequest{Tag: name, Hold: e.hold(), Account: e.v.Settings.Account, Params: *a.Spec.ForProvider.Batch}
+	req := provider.SubmitRequest{Tag: name, Hold: e.hold(), Account: e.v.Settings.Account, QOS: e.v.Settings.QOS, Params: *a.Spec.ForProvider.Batch}
 	if err := slurm.CheckRequest(req, e.v.Profile, e.v.Settings); err != nil {
 		return managed.ExternalCreation{}, e.refuse(ctx, a, rec, now, err)
 	}
@@ -109,17 +110,10 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 	defer cancel()
 	switch outcome {
 	case provider.Accepted:
+		e.s.limitEvents.Delete(a.UID) // a full slot, if there was one, has cleared
 		return managed.ExternalCreation{}, e.accepted(wctx, a, claim, id)
 	case provider.Rejected:
-		r := claim
-		r.State, r.Time, r.Reason = v1alpha1.SubmissionRejected, mt(e.now()), truncate(errText(serr))
-		if _, err := writeOwn(wctx, e.s.kube, e.s.reader, a, claim.Token, func(record) map[string]string {
-			return map[string]string{v1alpha1.AnnotationSubmission: recordValue(r)}
-		}); err != nil {
-			e.s.o.Log.Info("cannot record the rejection", "attempt", n, "error", err)
-		}
-		e.event(a, event.Warning("SubmissionRejected", fmt.Errorf("attempt %d: %s", n, r.Reason)))
-		return managed.ExternalCreation{}, fmt.Errorf("attempt %d rejected: %s", n, r.Reason)
+		return managed.ExternalCreation{}, e.rejected(wctx, a, claim, serr)
 	default:
 		u := claim
 		u.State, u.Reason = v1alpha1.SubmissionUnknown, truncate(errText(serr))
@@ -131,6 +125,45 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 		e.event(a, event.Warning("SubmissionUnknown", fmt.Errorf("attempt %d: %s; the tag will resolve it", n, u.Reason)))
 		return managed.ExternalCreation{}, nil
 	}
+}
+
+// rejected records a Rejected outcome as the attempt's state, and tells the
+// caller what to return. A refusal for a full submit limit (a
+// *provider.PolicyRefusal that is a SubmitLimit) is written with its Code in
+// the same record as the state, so nothing ever sees the state without it; it
+// waits for the backoff and fails nothing (HBEP-4, QOS limits). Once the
+// record is written it returns no error, because a full slot can last hours
+// and an error would flip the Allocation's Synced condition between
+// ReconcileError and ReconcileSuccess at every backoff (`@hpc-burst-science-agent`,
+// 1 Nov 2026, on the refusal contract). If the record cannot be written the
+// error is returned, as for any Rejected outcome. Any other refusal keeps
+// returning an error, so crossplane backs off.
+func (e *external) rejected(ctx context.Context, a *v1alpha1.Allocation, claim v1alpha1.SubmissionRecord, serr error) error {
+	r := claim
+	r.State, r.Time, r.Reason = v1alpha1.SubmissionRejected, mt(e.now()), truncate(errText(serr))
+	var pr *provider.PolicyRefusal
+	limit := errors.As(serr, &pr) && pr.SubmitLimit()
+	if limit {
+		r.Code = v1alpha1.ReasonSubmitLimitReached
+	}
+	_, werr := writeOwn(ctx, e.s.kube, e.s.reader, a, claim.Token, func(record) map[string]string {
+		return map[string]string{v1alpha1.AnnotationSubmission: recordValue(r)}
+	})
+	if werr != nil {
+		e.s.o.Log.Info("cannot record the rejection", "attempt", claim.Attempt, "error", werr)
+	}
+	if !limit {
+		e.s.limitEvents.Delete(a.UID) // the condition, if there was one, has ended
+		e.event(a, event.Warning("SubmissionRejected", fmt.Errorf("attempt %d: %s", claim.Attempt, r.Reason)))
+		return fmt.Errorf("attempt %d rejected: %s", claim.Attempt, r.Reason)
+	}
+	if e.s.limitEventDue(a.UID, e.now()) {
+		e.event(a, event.Warning(v1alpha1.ReasonSubmitLimitReached, fmt.Errorf("attempt %d: %s; the next waits for backoff", claim.Attempt, r.Reason)))
+	}
+	if werr != nil {
+		return fmt.Errorf("attempt %d rejected: %s", claim.Attempt, r.Reason)
+	}
+	return nil
 }
 
 // refuse records a request that HBEP-4 refuses before any call (Submission:

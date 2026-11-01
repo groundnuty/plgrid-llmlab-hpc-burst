@@ -1,0 +1,29 @@
+package providerctl
+
+import (
+	"time"
+
+	"k8s.io/apimachinery/pkg/types"
+)
+
+// limitEventEvery is the most often the SubmitLimitReached event is emitted
+// for one Allocation while the refusal lasts. A full slot can last hours and
+// each attempt, one every Rejected backoff, is refused again, so the event is a
+// repeating condition: emitted when it starts, then at most once an hour,
+// never on every attempt (HBEP-8, Repeating conditions).
+const limitEventEvery = time.Hour
+
+// limitEventDue reports whether to emit the SubmitLimitReached event for the
+// Allocation now, and records the emission if so. The first refusal of a run
+// emits; later ones emit once limitEventEvery has passed since the last. A
+// refusal for any other reason or an accepted job ends the run (the callers
+// delete the entry), so the next full slot emits again.
+func (s *shared) limitEventDue(uid types.UID, now time.Time) bool {
+	if last, ok := s.limitEvents.Load(uid); ok {
+		if t, ok := last.(time.Time); ok && now.Sub(t) < limitEventEvery {
+			return false
+		}
+	}
+	s.limitEvents.Store(uid, now)
+	return true
+}

@@ -36,6 +36,11 @@ type shared struct {
 	// finals are the recorded jobs whose end this controller read from
 	// accounting: they are not read again (external.final).
 	finals sync.Map
+	// limitEvents holds, by Allocation UID, when the last SubmitLimitReached
+	// event was emitted (limitEventDue). It is kept in memory, so a restart or
+	// a new leader emits it once more, which is "when it starts" for that
+	// process (HBEP-8, Repeating conditions).
+	limitEvents sync.Map
 }
 
 // connector implements managed.ExternalConnector.
@@ -252,8 +257,7 @@ func (e *external) establish(ctx context.Context, a *v1alpha1.Allocation, rec *r
 		return e.stall(ctx, a, rec, now)
 	}
 	if s := rec.sub; s != nil && s.State == v1alpha1.SubmissionRejected && now.Sub(attemptTime(a, s)) < e.s.o.RejectBackoff {
-		o.Phase, o.Reason, o.Submission = v1alpha1.AllocationSubmitting, truncate(s.Reason), s
-		a.SetConditions(xpv2.Creating().WithMessage("the last attempt was rejected; the next waits for backoff"))
+		e.showRejected(a, s)
 		e.p.SetBusy(name, true)
 		return exists, true, nil
 	}
@@ -272,6 +276,25 @@ func (e *external) establish(ctx context.Context, a *v1alpha1.Allocation, rec *r
 	}
 	e.p.SetBusy(name, false)
 	return missing, true, nil
+}
+
+// showRejected reports a Rejected attempt whose backoff has not passed. A
+// refusal for a full submit limit shows phase Submitting and reason
+// SubmitLimitReached, read from the record's Code and never from its text, and
+// the condition's message carries Slurm's reason line, which the record keeps;
+// nothing in them depends on the attempt or the time, so they stay the same
+// from one pass to the next (HBEP-4, QOS limits). Any other Rejected attempt
+// shows the scheduler's reason as before.
+func (e *external) showRejected(a *v1alpha1.Allocation, s *v1alpha1.SubmissionRecord) {
+	o := &a.Status.AtProvider
+	o.Phase, o.Submission = v1alpha1.AllocationSubmitting, s
+	if s.Code == v1alpha1.ReasonSubmitLimitReached {
+		o.Reason = s.Code
+		a.SetConditions(xpv2.Creating().WithMessage(fmt.Sprintf("%s: the last attempt was refused for a full submit limit (%s); the next waits for backoff", s.Code, truncate(s.Reason))))
+		return
+	}
+	o.Reason = truncate(s.Reason)
+	a.SetConditions(xpv2.Creating().WithMessage("the last attempt was rejected; the next waits for backoff"))
 }
 
 // stall applies the retry rules to an unresolved attempt whose tag finds no job
