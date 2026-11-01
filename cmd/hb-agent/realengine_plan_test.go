@@ -370,6 +370,8 @@ func TestRealEngineJudgements(t *testing.T) {
 // The launch's environment leaves the cache variables to the agent, which sets
 // them itself and lets a launch's own value override its default; the names are
 // HBEP-7's (What it runs: Home and caches), written out here.
+//
+//livecheck:none offline: CI runs it
 func TestRealEnvLeavesTheCachesToTheAgent(t *testing.T) {
 	got := map[string]string{}
 	for _, e := range realEnv() {
