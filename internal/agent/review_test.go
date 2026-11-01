@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -231,43 +232,139 @@ func TestAnUncheckedImageGetsNoDigest(t *testing.T) {
 	}
 }
 
-// slowCancelEngine makes a cancelled warm-up round take a while to return, as
-// requests unwinding do, and records when it returned.
-type slowCancelEngine struct {
-	agent.Engine
-	returned *atomic.Int64 // unix nanos
+// heldRounds controls a warm-up round from the test, with gates and no timers (#184). Before the round calls
+// the engine it waits for admit, which only the test's admission helper closes, so no request reaches the
+// engine until the test has chosen to let it; and when the round comes back cancelled it announces that
+// (cancelled, at cancelledAt) and does not return to the agent until the test closes release, so the agent
+// has a cancelled round that is still unwinding for as long as the test wants.
+type heldRounds struct {
+	admit       chan struct{}
+	release     chan struct{}
+	cancelled   chan struct{}
+	cancelledAt atomic.Int64 // unix nanos, when the cancelled round came back from the engine
+	returned    atomic.Int64 // unix nanos, when it returned to the agent
+	cancelOnce  sync.Once
+	admitOnce   sync.Once
+	releaseOnce sync.Once
 }
 
-func (e slowCancelEngine) WarmUpRound(ctx context.Context, n int32, req agentapi.WarmUpRequest) agentapi.WarmUpRound {
+func newHeldRounds(t *testing.T) *heldRounds {
+	return &heldRounds{admit: make(chan struct{}), release: make(chan struct{}), cancelled: make(chan struct{})}
+}
+
+// letGo registers the clean-up that opens the gate and releases the round. A test that fails before it lets
+// the round go must not leave the agent waiting for it when the harness stops the agent, so this is
+// registered after the harness: clean-ups run last-in first-out, and this one runs first.
+func (hr *heldRounds) letGo(t *testing.T) {
+	t.Cleanup(func() {
+		hr.openGate()
+		hr.releaseRound()
+	})
+}
+
+func (hr *heldRounds) openGate()     { hr.admitOnce.Do(func() { close(hr.admit) }) }
+func (hr *heldRounds) releaseRound() { hr.releaseOnce.Do(func() { close(hr.release) }) }
+
+// letAdmit opens the gate and waits for the engine to hold a warm-up request in flight: the engine
+// double's "admitted" line of a streaming request (warm-up requests stream; verification's does not) with
+// no end yet. It is the only thing that opens the gate, so a test that skips it never has a request admitted.
+func (hr *heldRounds) letAdmit(t *testing.T, h *harness) {
+	t.Helper()
+	hr.openGate()
+	eventually(t, 30*time.Second, "the engine to hold a warm-up request in flight", func() bool {
+		admitted, ended := streamingCounts(t, h)
+		return admitted > ended
+	})
+}
+
+// heldRoundEngine is the agent's engine client with every warm-up round passed through the heldRounds.
+type heldRoundEngine struct {
+	agent.Engine
+	hr *heldRounds
+}
+
+func (e heldRoundEngine) WarmUpRound(ctx context.Context, n int32, req agentapi.WarmUpRequest) agentapi.WarmUpRound {
+	select {
+	case <-e.hr.admit:
+	case <-ctx.Done():
+	}
 	r := e.Engine.WarmUpRound(ctx, n, req)
 	if ctx.Err() != nil {
-		time.Sleep(500 * time.Millisecond)
-		e.returned.Store(time.Now().UnixNano())
+		e.hr.cancelledAt.Store(time.Now().UnixNano())
+		e.hr.cancelOnce.Do(func() { close(e.hr.cancelled) })
+		<-e.hr.release
+		e.hr.returned.Store(time.Now().UnixNano())
 	}
 	return r
 }
 
-// WarmUp.Done is published only after the cancelled round has returned, so no
-// report says warm-up is done while its requests are still unwinding (Astra
-// B7).
+// WarmUp.Done is published only after the cancelled round has returned, so no report says warm-up is done
+// while its requests are still unwinding (Astra B7). Nothing here is timed:
+//
+//   - The round cannot reach the engine until the test's admission helper (letAdmit) opens the gate, and
+//     the helper returns when the engine double holds an admitted streaming request with no end. The drop
+//     comes after that, so a request is in flight when it is cancelled; a test that skipped the helper would
+//     drop warm-up while the gate is shut, and no request would ever be admitted to be cancelled.
+//   - The cancelled round is then held: it does not return to the agent until the test releases it. The
+//     test waits until the round has seen the cancellation, and then for a report that the agent took after
+//     that, by its own clock (Report.Time). The agent takes every snapshot in its one loop, so that report
+//     comes after the loop has handled the drop, and it must not say Done: the round has not returned. An
+//     agent that published Done when it cancelled the round would say it here, in every such report.
+//   - Only then is the round released, and Done must come, with a report taken after the round returned.
+//   - The engine must have logged the admitted warm-up request as cancelled by its client.
 func TestWarmUpDoneOnlyAfterTheCancelledRoundReturned(t *testing.T) {
-	var returned atomic.Int64
-	h := newHarness(t, harnessOptions{engineWrap: func(e agent.Engine) agent.Engine { return slowCancelEngine{e, &returned} }})
+	hr := newHeldRounds(t)
+	h := newHarness(t, harnessOptions{engineWrap: func(e agent.Engine) agent.Engine { return heldRoundEngine{e, hr} }})
+	hr.letGo(t)
 	h.set(h.runState("stall", 1, 0, warmUpChecks(1, 2)))
 	h.waitReport("warm-up started", 30*time.Second, func(r agentapi.Report) bool {
 		c := checksOf(r)
 		return c != nil && c.WarmUp != nil
 	})
-	time.Sleep(300 * time.Millisecond)
+	hr.letAdmit(t, h)
 	h.set(h.runState("stall", 1, 0, &agentapi.Checks{VerificationGeneration: 1}))
+	select {
+	case <-hr.cancelled:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the warm-up round never saw its cancellation")
+	}
+	cancelledAt := time.Unix(0, hr.cancelledAt.Load())
+	var after []agentapi.Report
+	eventually(t, 30*time.Second, "a report that the agent took after the round saw its cancellation", func() bool {
+		after = after[:0]
+		for _, r := range h.backend.Reports(hAllocUID) {
+			if r.Time.After(cancelledAt) {
+				after = append(after, r)
+			}
+		}
+		return len(after) > 0
+	})
+	for _, r := range after {
+		if warmDone(r) {
+			t.Fatalf("a report taken at %s, after the cancellation at %s, says warm-up is done while the cancelled round has not returned", r.Time.Format(time.StampMicro), cancelledAt.Format(time.StampMicro))
+		}
+	}
+	hr.releaseRound()
 	h.waitReport("warm-up done", 20*time.Second, warmDone)
+	eventually(t, 15*time.Second, "the engine to log the admitted warm-up request cancelled by its client", func() bool {
+		var admitted, cancelled int
+		for _, ev := range engineEvents(t, h) {
+			switch {
+			case ev.Event == "admitted" && ev.Stream:
+				admitted++
+			case ev.Event == "request" && ev.Stream && ev.Outcome == "cancelled":
+				cancelled++
+			}
+		}
+		return admitted > 0 && cancelled > 0
+	})
 	reps, times := h.backend.Reports(hAllocUID), h.timed.reportTimes()
 	if len(reps) != len(times) {
 		t.Fatalf("%d reports, %d times", len(reps), len(times))
 	}
 	for k, r := range reps {
 		if warmDone(r) {
-			if ret := returned.Load(); ret == 0 || times[k].UnixNano() < ret {
+			if ret := hr.returned.Load(); ret == 0 || times[k].UnixNano() < ret {
 				t.Fatalf("warm-up was reported done at %s, before the cancelled round returned (%d)", times[k].Format(time.StampMicro), ret)
 			}
 			return

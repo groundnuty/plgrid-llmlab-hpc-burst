@@ -57,6 +57,26 @@ type Config struct {
 	// DataParser is the data_parser version the replies carry; empty means
 	// "v0.0.42".
 	DataParser string
+	// MaxSubmitPerUser is the user's submit limit, a QOS's MaxSubmitJobsPerUser
+	// (HBEP-4, QOS limits): the most jobs the user may have held, pending or
+	// running at once. Every job in one Batch is that one user's, the outside
+	// jobs of AddOutsideJob included. A Submit at the limit is refused with a
+	// *provider.PolicyRefusal for QOSMaxSubmitJobPerUserLimit. Zero means no
+	// limit; a negative value panics in NewBatch.
+	MaxSubmitPerUser int
+	// MaxGPUsPerUser is the cap on the GPUs of the user's running jobs, a QOS's
+	// MaxTRESPerUser for gres/gpu (HBEP-4, QOS limits): Helios's now allows one.
+	// A job starts at the earliest moment, not before its eligibility plus
+	// Script.QueueWait, where its GPUs plus those of the user's other running
+	// jobs (the outside jobs of AddOutsideJob included) fit the cap. Until
+	// then it is PENDING with reason QOSMaxGRESPerUser, phase Pending; a job with
+	// more GPUs than the cap pends for ever (Submit still accepts it, as Slurm
+	// does). A job that waits on the cap has no StartEstimate. Every read of the
+	// job shows the same start, computed from the facts and the clock at the
+	// call, so a cancel or end that frees GPUs moves a pending job's start, and a
+	// start already reached never moves. Zero means no cap, the behaviour
+	// without this field; a negative value panics in NewBatch.
+	MaxGPUsPerUser int32
 }
 
 // Script says what the next Submit does. Enqueue queues one per future Submit.
@@ -93,6 +113,16 @@ type Script struct {
 	// AsTimeLimit establishes the job with this limit instead of the
 	// requested one.
 	AsTimeLimit time.Duration
+	// RegisteredLate, for Unknown, loses the reply as Registered does, but the
+	// scheduler has not registered the job yet: it registers it, held when the
+	// request had Hold, when the next Submit arrives, before that Submit is
+	// checked against the submit limit. So the job takes its user's slot, and
+	// the next attempt is refused for the limit, which is how a reply lost
+	// under a one-job limit plays out (HBEP-4, QOS limits and the Test plan's
+	// "A lost reply under a one-job limit"; internal/slurm/fakeslurm's
+	// LostReplyLate). Until then FindByTag finds nothing. It excludes
+	// Registered, and Enqueue panics on it with any other outcome.
+	RegisteredLate bool
 }
 
 // DefaultScript applies when no Script is queued: Accepted, no queue wait.
@@ -115,6 +145,7 @@ type Batch struct {
 
 	mu      sync.Mutex
 	nextID  int
+	nextPos int // the last jobRec.seq issued (takeSeq increments it, then returns it)
 	jobs    map[string]*jobRec
 	scripts []Script
 	files   map[string]provider.File
@@ -123,10 +154,19 @@ type Batch struct {
 	// liftErrs are the errors the next LiftHold calls return, one each, in
 	// order (FailNextLiftHold).
 	liftErrs []error
+	// late are the jobs a RegisteredLate Script lost the reply of and the
+	// scheduler registers at the next Submit (batch_late.go).
+	late []lateJob
 }
 
 // NewBatch returns a fake Slurm that reads clock.
 func NewBatch(clock *Clock, cfg Config) *Batch {
+	if cfg.MaxSubmitPerUser < 0 {
+		panic(fmt.Sprintf("fake: MaxSubmitPerUser %d is negative", cfg.MaxSubmitPerUser))
+	}
+	if cfg.MaxGPUsPerUser < 0 {
+		panic(fmt.Sprintf("fake: MaxGPUsPerUser %d is negative", cfg.MaxGPUsPerUser))
+	}
 	cfg.Partitions = append([]Partition(nil), cfg.Partitions...)
 	if cfg.MinJobAge == 0 {
 		cfg.MinJobAge = 10 * time.Second
@@ -151,6 +191,9 @@ func (b *Batch) Enqueue(scripts ...Script) {
 		case "", provider.Accepted, provider.Rejected, provider.Unknown:
 		default:
 			panic(fmt.Sprintf("fake: script has unknown outcome %q", s.Outcome))
+		}
+		if s.RegisteredLate && (s.Outcome != provider.Unknown || s.Registered) {
+			panic(fmt.Sprintf("fake: RegisteredLate needs outcome Unknown and no Registered (outcome %q, Registered %v)", s.Outcome, s.Registered))
 		}
 	}
 	b.mu.Lock()
@@ -239,6 +282,12 @@ func (b *Batch) Submit(_ context.Context, req provider.SubmitRequest) (string, p
 		return "", provider.Rejected, err
 	}
 	b.log("sbatch", req.Tag, req.Params.Partition, string(req.Params.TimeLimit), strconv.Itoa(int(req.Params.GPUs)))
+	b.registerLate() // a job whose reply was lost earlier registers now, before the limit is checked
+	// A full submit limit refuses the call before any Script is read: it
+	// registers nothing and a queued Script is still there for the next Submit.
+	if refusal := b.submitLimitRefusal(b.clock.Now()); refusal != nil {
+		return "", provider.Rejected, refusal
+	}
 	sc := DefaultScript
 	if len(b.scripts) > 0 {
 		sc, b.scripts = b.scripts[0], b.scripts[1:]
@@ -252,6 +301,9 @@ func (b *Batch) Submit(_ context.Context, req provider.SubmitRequest) (string, p
 	case provider.Unknown:
 		if sc.Registered {
 			b.register(req, sc)
+		}
+		if sc.RegisteredLate {
+			b.late = append(b.late, lateJob{req: req, sc: sc})
 		}
 		return "", provider.Unknown, errors.New(reasonOr(sc.Reason, "scripted unknown outcome: the reply was lost"))
 	default:
@@ -298,6 +350,7 @@ func (b *Batch) register(req provider.SubmitRequest, sc Script) string {
 		submit:    now,
 		script:    sc,
 		eligible:  now,
+		seq:       b.takeSeq(),
 	}
 	b.nextID++
 	switch {
@@ -308,6 +361,12 @@ func (b *Batch) register(req provider.SubmitRequest, sc Script) string {
 	}
 	b.jobs[j.id] = j
 	return j.id
+}
+
+// takeSeq returns the next queue position (jobRec.seq). The caller holds b.mu.
+func (b *Batch) takeSeq() int {
+	b.nextPos++
+	return b.nextPos
 }
 
 // byID sorts jobs by job ID, numerically (Slurm IDs), never in listing order.

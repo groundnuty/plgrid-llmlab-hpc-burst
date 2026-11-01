@@ -44,7 +44,7 @@ func (b *Batch) lift(jobID string) (string, error) {
 	case provider.HoldAdmin:
 		return LiftAdminHold, fmt.Errorf("job %s: %w", jobID, provider.ErrAdminHold)
 	case provider.HoldUser:
-		j.hold, j.eligible = provider.HoldNone, now
+		j.hold, j.eligible, j.seq = provider.HoldNone, now, b.takeSeq()
 		return LiftApplied, nil
 	default:
 		return LiftNotHeld, fmt.Errorf("job %s: %w", jobID, provider.ErrNotHeld)

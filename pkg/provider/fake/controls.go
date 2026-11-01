@@ -45,10 +45,13 @@ func (b *Batch) CancelExternally(id string) {
 // Requeue requeues the job as scontrol requeue does. The job returns to
 // PENDING: its restart count goes up by one, Requeued is true, its start is
 // cleared, it is eligible again from now, and it starts after its script's
-// QueueWait from now. The phase is Failed, as for any requeued job (HBEP-4,
-// Phases; provider.SlurmPhase). A job that is held stays held: a requeue does
-// not lift a hold. The call log has op "requeue" with the job ID. A job that
-// has ended cannot be requeued, so it panics.
+// QueueWait from now, or later when the cap on the user's GPUs (Config.
+// MaxGPUsPerUser) holds it; the run it had until now still counts against the
+// cap, and the requeued job queues by its new nominal start, behind a waiting
+// job whose nominal start is earlier. The phase is Failed, as for any requeued
+// job (HBEP-4, Phases; provider.SlurmPhase). A job that is held stays held: a
+// requeue does not lift a hold. The call log has op "requeue" with the job ID.
+// A job that has ended cannot be requeued, so it panics.
 func (b *Batch) Requeue(id string) { b.requeue(id, "requeue", false) }
 
 // RequeueHold requeues the job like Requeue, and holds it by its user (reason
@@ -69,10 +72,11 @@ func (b *Batch) requeue(id, op string, hold bool) {
 	b.log(op, id)
 	if r := b.record(j, now); r.StartTime != nil {
 		j.priorRun += now.Sub(*r.StartTime)
+		j.ran = append(j.ran, span{start: *r.StartTime, end: now})
 	}
 	j.restartCount++
 	j.requeued = true
-	j.eligible = now
+	j.eligible, j.seq = now, b.takeSeq()
 	if hold && j.hold != provider.HoldAdmin {
 		j.hold = provider.HoldUser
 	}
