@@ -107,11 +107,24 @@ func (j *job) completing() bool {
 // live reports whether the job is pending or running.
 func (j *job) live() bool { return j.state() == Pending || j.state() == Running }
 
-// purged reports whether slurmctld has forgotten the job: terminal for at
-// least MinJobAge. The boundary is inclusive, as in S4.
+// purged reports whether slurmctld has forgotten the job: terminal, not
+// completing, and ended at least MinJobAge ago. The boundary is inclusive, as
+// in S4.
+//
+// A completing job is never purged, whatever its age. Slurm's purge test
+// (_list_find_job_old in src/slurmctld/job_mgr.c, 24.11) returns "still
+// completing" before it looks at the age, and then compares the job's end_time
+// with now minus MinJobAge. end_time is when the end state was set, and
+// clearing the COMPLETING flag leaves it alone (cleanup_completing in
+// job_scheduler.c only logs how long the completion took, from it). So the age
+// counts from the end, not from when the processes were gone: a job whose
+// processes outlive MinJobAge is purged as soon as they are gone. Slurm does
+// that at its next purge pass; the fake has no pass, so the next query finds
+// it purged. A job whose processes cannot be cleared (Finished stays false)
+// completes for ever and is never purged, as a Slurm job stuck in CG is not.
 func (j *job) purged(now time.Time, minAge time.Duration) bool {
 	e := j.cur()
-	if !IsTerminal(e.state) {
+	if !IsTerminal(e.state) || j.completing() {
 		return false
 	}
 	return !e.end.Add(minAge).After(now)
