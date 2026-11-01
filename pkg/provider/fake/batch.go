@@ -135,7 +135,7 @@ type Batch struct {
 
 	mu      sync.Mutex
 	nextID  int
-	nextPos int // the next jobRec.seq
+	nextPos int // the last jobRec.seq issued (takeSeq increments it, then returns it)
 	jobs    map[string]*jobRec
 	scripts []Script
 	files   map[string]provider.File
