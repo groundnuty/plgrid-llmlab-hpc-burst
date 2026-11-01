@@ -327,8 +327,11 @@ spec:
                       minLength: 1
                       type: string
                     gpusPerNode:
-                      description: GPUsPerNode is the most GPUs one Allocation may
-                        request here.
+                      description: |-
+                        GPUsPerNode is the GPUs on one node, the hardware fact. The most GPUs
+                        one Allocation may request here is the smaller of it and the
+                        maxGpusPerUser of the QOS limits that apply, when set; a larger count is
+                        refused, never capped (HBEP-4, Submission, GPU sizing and QOS limits).
                       format: int32
                       maximum: 1024
                       minimum: 0
@@ -353,7 +356,10 @@ spec:
                     maxTime:
                       description: |-
                         MaxTime is the partition's longest time limit (HBEP-4, Platform profile
-                        schema, the fields the lifecycle controller reads).
+                        schema, the fields the lifecycle controller reads). An Allocation's time
+                        limit is the smallest of it, the maxWall of the QOS limits that apply
+                        and the ModelDeployment's leaseLimit (AllocationTimeLimit; HBEP-4, QOS
+                        limits).
                       maxLength: 63
                       pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                       type: string
@@ -372,6 +378,18 @@ spec:
                     name:
                       description: Name of the partition.
                       maxLength: 253
+                      minLength: 1
+                      type: string
+                    qos:
+                      description: |-
+                        QOS is the partition's own QOS, which Slurm applies to every job on the
+                        partition: for each limit, its value comes before the job QOS's unless
+                        the job QOS has overPartQos (EffectiveQOSLimits). It must be listed in
+                        the profile's qos. Helios plgrid-gpu-gh200's is plgrid, whose 2,000
+                        submitted jobs per user apply before QOS now's 1 (HBEP-4, QOS limits
+                        and Platform profile schema; `@hpc-burst-science-agent`, 1 Nov 2026).
+                        Absent, the partition has none.
+                      maxLength: 64
                       minLength: 1
                       type: string
                     tmpDir:
@@ -438,6 +456,89 @@ spec:
                 - batch
                 - static
                 type: string
+              qos:
+                description: |-
+                  QOS lists the QOSes that a Provider's qos or a partition's qos names,
+                  with their limits (HBEP-4, QOS limits and Platform profile schema;
+                  `@hpc-burst-science-agent`, 1 Nov 2026). Helios lists now, plgrid and
+                  normal; Athena plgrid-now.
+                items:
+                  description: |-
+                    QOSProfile is one Slurm QOS that a Provider's qos or a partition's qos names,
+                    with the limits the plan reads (HBEP-4, QOS limits and Platform profile
+                    schema; `@hpc-burst-science-agent`, 1 Nov 2026). Every limit is optional,
+                    and an absent one is no limit as far as the plan knows. A QOS with no limits
+                    is listed with none, so every QOS named is known.
+                  properties:
+                    maxCpusPerUser:
+                      description: |-
+                        MaxCPUsPerUser is the CPU entry of the QOS's MaxTRESPerUser. An
+                        Allocation's CPUs, gpus times cpusPerGpu, are capped at it.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    maxGpusPerUser:
+                      description: |-
+                        MaxGPUsPerUser is the GPU entry of the QOS's MaxTRESPerUser: the most
+                        GPUs over one user's running jobs. A job that fits alone but not beside
+                        the user's others pends.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    maxMemPerUser:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      description: |-
+                        MaxMemPerUser is the memory entry of the QOS's MaxTRESPerUser. An
+                        Allocation's memory, gpus times memPerGpu, is capped at it. It is never
+                        negative.
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                      x-kubernetes-validations:
+                      - message: maxMemPerUser must not be negative
+                        rule: '!string(self).startsWith(''-'')'
+                    maxSubmitPerUser:
+                      description: |-
+                        MaxSubmitPerUser is the most jobs one user may have pending or running
+                        at once under the QOS (MaxSubmitJobsPerUser). A held job is a pending
+                        job, and every job of the login counts, the owner's other projects'
+                        included. The lifecycle controller plans within it (HBEP-7,
+                        Provisioning, Per-user limits).
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    maxWall:
+                      description: |-
+                        MaxWall is the QOS's wall limit per job (MaxWall). It never lifts the
+                        partition's maxTime: an Allocation's time limit is the smaller.
+                      maxLength: 63
+                      pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                      type: string
+                      x-kubernetes-validations:
+                      - message: maxWall must be a positive duration that fits Go's
+                          time.Duration (above 0s, at most 2562047h)
+                        rule: duration(self) > duration('0s')
+                    name:
+                      description: Name of the QOS, as sacctmgr shows it.
+                      maxLength: 64
+                      minLength: 1
+                      type: string
+                    overPartQos:
+                      default: false
+                      description: |-
+                        OverPartQOS is whether the QOS carries Slurm's OverPartQOS flag, which
+                        puts its limits before the partition QOS's (EffectiveQOSLimits). No QOS
+                        the alpha profiles type has it.
+                      type: boolean
+                  required:
+                  - name
+                  type: object
+                maxItems: 32
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               requeueDefault:
                 description: |-
                   RequeueDefault says whether the scheduler requeues a job by default (for
@@ -533,6 +634,10 @@ spec:
                 Allocation and job identity)
               rule: '!has(self.jobName) || !has(self.jobName.maxLength) || self.jobName.maxLength
                 >= 56'
+            - message: every partition's qos must be listed in qos, so the plan knows
+                its limits (HBEP-4, QOS limits)
+              rule: '!has(self.partitions) || self.partitions.all(p, !has(p.qos) ||
+                (has(self.qos) && self.qos.exists(q, q.name == p.qos)))'
           status:
             description: PlatformProfileStatus is the observed state of a PlatformProfile.
             properties:

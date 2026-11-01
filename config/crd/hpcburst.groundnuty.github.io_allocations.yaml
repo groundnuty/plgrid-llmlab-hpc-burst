@@ -88,8 +88,9 @@ spec:
                         type: string
                       cpusPerTask:
                         description: |-
-                          CPUsPerTask is gpus times the partition's cpusPerGpu (HBEP-7,
-                          Provisioning).
+                          CPUsPerTask is gpus times the partition's cpusPerGpu, capped at the QOS
+                          limits' maxCpusPerUser when set (HBEP-7, Provisioning; HBEP-4, QOS
+                          limits).
                         format: int32
                         maximum: 65536
                         minimum: 1
@@ -99,7 +100,9 @@ spec:
                           GPUs is the number of GPUs, requested untyped (--gres=gpu:<n>). In alpha
                           it is tensor-parallel-size times pipeline-parallel-size (HBEP-4, GPU
                           sizing). Zero only on a partition whose gpuModel is none; the provider
-                          refuses zero on a GPU partition, and more than gpusPerNode.
+                          refuses zero on a GPU partition, and more than the smaller of
+                          gpusPerNode and the QOS limits' maxGpusPerUser (MaxAllocationGPUs;
+                          HBEP-4, QOS limits).
                         format: int32
                         maximum: 1024
                         minimum: 0
@@ -109,8 +112,10 @@ spec:
                         - type: integer
                         - type: string
                         description: |-
-                          Memory is gpus times the partition's memPerGpu (HBEP-7, Provisioning).
-                          The provider passes it to Slurm in whole MiB. It is never negative.
+                          Memory is gpus times the partition's memPerGpu, capped at the QOS
+                          limits' maxMemPerUser when set (HBEP-7, Provisioning; HBEP-4, QOS
+                          limits). The provider passes it to Slurm in whole MiB. It is never
+                          negative.
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
                         x-kubernetes-validations:
@@ -134,9 +139,10 @@ spec:
                         type: string
                       timeLimit:
                         description: |-
-                          TimeLimit is the job's time limit: the partition's maxTime, or the
-                          ModelDeployment's leaseLimit when that is shorter (HBEP-4, open question
-                          11). It is a whole number of minutes, because Slurm counts limits in
+                          TimeLimit is the job's time limit: the smallest of the partition's
+                          maxTime, the maxWall of the QOS limits that apply and the
+                          ModelDeployment's leaseLimit (AllocationTimeLimit; HBEP-4, open question
+                          11 and QOS limits). It is a whole number of minutes, because Slurm counts limits in
                           minutes and the read-back compares the limit it reports (HBEP-4, The
                           Slurm dialect); the provider refuses any other value before a call.
                         maxLength: 63

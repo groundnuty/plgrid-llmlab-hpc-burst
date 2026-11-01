@@ -90,6 +90,7 @@ modeldeployments:$.spec.source.served.flags[]#12|^TestMaxModelLenIsAPlainPositiv
 modeldeployments:$.spec.source.served.flags[]#13|^TestParallelSizesArePlainPositiveIntegers$
 modeldeployments:$.spec.workload.contextTokens#0|^TestContextTokensTypicalIsAtMostLongest$
 platformprofiles:$.spec#0|^TestPlatformProfileTypedFields$
+platformprofiles:$.spec#1|^TestPartitionQOSIsListed$
 platformprofiles:$.spec.drainMargin#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.drainWindow#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.handoverMargin#0|^TestDurationsArePositiveAndFit$
@@ -107,6 +108,8 @@ platformprofiles:$.spec.minJobAge#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.partitions[]#0|^TestPartitionTmpDirFeatureNeedsTmpDir$
 platformprofiles:$.spec.partitions[].maxTime#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.partitions[].tmpDir#0|^TestPartitionTmpDirRefusesDotDotSegments$
+platformprofiles:$.spec.qos[].maxMemPerUser#0|^TestQOSMaxMemPerUserIsNotNegative$
+platformprofiles:$.spec.qos[].maxWall#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.restart.backoff#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.restart.stopGrace#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.restart.window#0|^TestDurationsArePositiveAndFit$

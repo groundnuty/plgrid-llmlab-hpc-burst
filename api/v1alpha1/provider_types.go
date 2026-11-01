@@ -37,6 +37,21 @@ type ProviderSpec struct {
 	// +kubebuilder:validation:items:MaxLength=253
 	AllowedPartitions []string `json:"allowedPartitions,omitempty"`
 
+	// QOS is the Slurm quality of service the provider's jobs are submitted
+	// under: the Slurm provider adds --qos=<qos> to sbatch, after checking it
+	// against the safe pattern of every value placed in a command. Which QOS a
+	// user may name belongs to the user's association, like the account, so
+	// it is a provider setting, not a profile field. The PlatformProfile must
+	// list it in its qos, with its limits, or reading the profile fails with
+	// this field named. Absent, no --qos is sent and the association's default
+	// QOS applies (HBEP-4, Provider settings, The Slurm dialect and QOS
+	// limits; `@hpc-burst-science-agent`, 1 Nov 2026).
+	//
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	QOS string `json:"qos,omitempty"`
+
 	// CredentialsRef refers to the provider's credentials: a mode-600 file on
 	// the control-plane host, or a Secret. The API never holds credentials.
 	//

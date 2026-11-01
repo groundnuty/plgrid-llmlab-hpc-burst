@@ -42,7 +42,9 @@ type ProfileReader interface {
 	// ReadProfile reads the named Provider, its PlatformProfile and its
 	// credentials reference, and validates them: the profile's kind matches
 	// the plugin; the Provider allows exactly one partition and the profile
-	// lists it; jobName.maxLength is at least 56 and the tag form matches
+	// lists it; the Provider's qos, when set, and the partition's qos, when
+	// set, are listed in the profile's qos (HBEP-4, QOS limits);
+	// jobName.maxLength is at least 56 and the tag form matches
 	// jobName.pattern when one is set; jsonDataParser is one the plugin knows;
 	// inflightWindow is set and exceeds SubmitTimeout; the credentials file,
 	// and for ssh the key file it names, are mode 600 and owned by the
@@ -77,12 +79,16 @@ type Batch interface {
 
 	// Submit runs one submission, held when req.Hold is set, which hold mode
 	// always sets. err is nil exactly when the outcome is Accepted; otherwise
-	// it says why. A request refused before any call (an unsafe value, a
-	// partition the Provider does not allow or the profile does not list, no
-	// GPU on a GPU partition, more GPUs than gpusPerNode, a time limit above
-	// maxTime or not in whole minutes) is Rejected with an error that wraps
-	// ErrInvalidRequest. Not idempotent: it runs only under a claimed attempt,
-	// and never retries by itself.
+	// it says why. A request refused before any call (an unsafe value, a QOS
+	// among them, a partition the Provider does not allow or the profile does
+	// not list, no GPU on a GPU partition, more GPUs than the smaller of
+	// gpusPerNode and the QOS limits' maxGpusPerUser, more CPUs or memory than
+	// their maxCpusPerUser or maxMemPerUser, a time limit above the smaller of
+	// maxTime and their maxWall, or not in whole minutes) is Rejected with an
+	// error that wraps ErrInvalidRequest. The QOS limits are those that apply
+	// on the partition under req.QOS (v1alpha1.EffectiveQOSLimits; HBEP-4,
+	// Submission and QOS limits). Not idempotent: it runs only under a claimed
+	// attempt, and never retries by itself.
 	Submit(ctx context.Context, req SubmitRequest) (jobID string, outcome SubmitOutcome, err error)
 
 	// LiftHold lifts the job's user hold. Its errors wrap ErrNotHeld,
@@ -131,8 +137,8 @@ type Profile struct {
 }
 
 // Settings are a Provider's settings (HBEP-4, Provider settings): account,
-// grant, credentials reference, allowed partition and labels. The grant is
-// recorded in alpha but not read.
+// grant, credentials reference, allowed partition, labels and an optional QOS.
+// The grant is recorded in alpha but not read.
 type Settings struct {
 	// Provider is the Provider's name.
 	Provider string
@@ -142,6 +148,11 @@ type Settings struct {
 	Grant string
 	// Partition is the one partition the Provider allows.
 	Partition string
+	// QOS is the Provider's qos: the QOS its jobs are submitted under, sent
+	// as --qos, or "" for the association's default, when no --qos is sent
+	// (HBEP-4, Provider settings). ReadProfile checks that the profile lists
+	// it.
+	QOS string
 	// CredentialsFile is the path of the mode-600 credentials file on the
 	// control-plane host: for a Slurm provider an ssh client configuration
 	// naming the login node, the user and the key file; for a managed
@@ -163,6 +174,10 @@ type SubmitRequest struct {
 	Hold bool
 	// Account comes from the Provider's settings, never from the Allocation.
 	Account string
+	// QOS comes from the Provider's settings, never from the Allocation: the
+	// submission adds --qos=<QOS> when it is set, and no --qos at all when it
+	// is "" (HBEP-4, The Slurm dialect).
+	QOS string
 	// Params are the Allocation's submission parameters.
 	Params v1alpha1.BatchParameters
 }

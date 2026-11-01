@@ -24,9 +24,10 @@ type BatchParameters struct {
 	// +kubebuilder:validation:MaxLength=253
 	Partition string `json:"partition"`
 
-	// TimeLimit is the job's time limit: the partition's maxTime, or the
-	// ModelDeployment's leaseLimit when that is shorter (HBEP-4, open question
-	// 11). It is a whole number of minutes, because Slurm counts limits in
+	// TimeLimit is the job's time limit: the smallest of the partition's
+	// maxTime, the maxWall of the QOS limits that apply and the
+	// ModelDeployment's leaseLimit (AllocationTimeLimit; HBEP-4, open question
+	// 11 and QOS limits). It is a whole number of minutes, because Slurm counts limits in
 	// minutes and the read-back compares the limit it reports (HBEP-4, The
 	// Slurm dialect); the provider refuses any other value before a call.
 	//
@@ -36,21 +37,26 @@ type BatchParameters struct {
 	// GPUs is the number of GPUs, requested untyped (--gres=gpu:<n>). In alpha
 	// it is tensor-parallel-size times pipeline-parallel-size (HBEP-4, GPU
 	// sizing). Zero only on a partition whose gpuModel is none; the provider
-	// refuses zero on a GPU partition, and more than gpusPerNode.
+	// refuses zero on a GPU partition, and more than the smaller of
+	// gpusPerNode and the QOS limits' maxGpusPerUser (MaxAllocationGPUs;
+	// HBEP-4, QOS limits).
 	//
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=1024
 	GPUs int32 `json:"gpus"`
 
-	// CPUsPerTask is gpus times the partition's cpusPerGpu (HBEP-7,
-	// Provisioning).
+	// CPUsPerTask is gpus times the partition's cpusPerGpu, capped at the QOS
+	// limits' maxCpusPerUser when set (HBEP-7, Provisioning; HBEP-4, QOS
+	// limits).
 	//
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=65536
 	CPUsPerTask int32 `json:"cpusPerTask"`
 
-	// Memory is gpus times the partition's memPerGpu (HBEP-7, Provisioning).
-	// The provider passes it to Slurm in whole MiB. It is never negative.
+	// Memory is gpus times the partition's memPerGpu, capped at the QOS
+	// limits' maxMemPerUser when set (HBEP-7, Provisioning; HBEP-4, QOS
+	// limits). The provider passes it to Slurm in whole MiB. It is never
+	// negative.
 	//
 	// +kubebuilder:validation:XValidation:rule="!string(self).startsWith('-')",message="memory must not be negative"
 	Memory resource.Quantity `json:"memory"`

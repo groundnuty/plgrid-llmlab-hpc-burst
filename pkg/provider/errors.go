@@ -18,9 +18,11 @@ var (
 	ErrNotFound = errors.New("job not found")
 	// ErrInvalidRequest: a submission or file refused before any call: an
 	// unsafe value, a partition the Provider does not allow or the profile
-	// does not list, no GPU on a GPU partition, more GPUs than gpusPerNode, a
-	// time limit above maxTime or not in whole minutes, a path outside the
-	// staging directory.
+	// does not list, no GPU on a GPU partition, more GPUs than the smaller of
+	// gpusPerNode and the QOS limits' maxGpusPerUser, more CPUs or memory than
+	// their maxCpusPerUser or maxMemPerUser, a time limit above the smaller of
+	// maxTime and their maxWall or not in whole minutes, a path outside the
+	// staging directory (Batch.Submit).
 	ErrInvalidRequest = errors.New("request refused before any call")
 	// ErrDialectMismatch: a reply's data_parser, without its "data_parser/"
 	// prefix, differs from the profile's jsonDataParser. The reply is not
