@@ -1,12 +1,15 @@
 package providerctl
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"testing"
 
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/providerctl/ctltest"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider/fake"
@@ -27,7 +30,10 @@ import (
 // get DialHomeKeyMissing, which Create would otherwise have written first.
 func TestFrpcDigestForThePartitionsCPUArch(t *testing.T) {
 	const staging = "/scratch/user-a/stage/"
-	digest := strings.Repeat("d", 64)
+	// The digest of the example frpc build for x86_64, hashed here, not by the
+	// fixture's helper.
+	sum := sha256.Sum256(ctltest.FrpcContent(testArch))
+	digest := hex.EncodeToString(sum[:])
 	for _, tc := range []struct {
 		name    string
 		mode    agentapi.DialHomeMode
@@ -42,7 +48,8 @@ func TestFrpcDigestForThePartitionsCPUArch(t *testing.T) {
 			clock := fake.NewClock(at(12, 0, 0))
 			sl := newSlurm(clock, fakeslurm.Config{})
 			e := newRealEnv(t, clock, sl, newFakeClient(t, "prov-a"), "prov-a", "user-a", func(e *realEnv) {
-				f := &FrontSettings{Mode: tc.mode, Endpoint: "front.example.org:29443", CertPin: strings.Repeat("c", 64), FrpcDigests: tc.digests}
+				f := e.opts.Front
+				f.Mode, f.FrpcDigests = tc.mode, tc.digests
 				if tc.mode == agentapi.DialHomeSSH {
 					f.Endpoint, f.SSHUser, f.AgentPort, f.DialHomePort = "front.example.org:22", "example-user", 29270, 29274
 				}
@@ -85,8 +92,8 @@ func TestFrpcDigestForThePartitionsCPUArch(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if cfg.FrpcDigest != "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" {
-				t.Errorf("agent.json frpcDigest %q, want the x86_64 digest", cfg.FrpcDigest)
+			if cfg.FrpcDigest != digest {
+				t.Errorf("agent.json frpcDigest %q, want the x86_64 digest %s", cfg.FrpcDigest, digest)
 			}
 		})
 	}

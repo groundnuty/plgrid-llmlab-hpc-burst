@@ -59,6 +59,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/providerctl"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/providerctl/ctltest"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/sshrun"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
@@ -194,6 +195,8 @@ func newWorld(t *testing.T) *world {
 	if err := os.WriteFile(filepath.Join(builds, agentapi.AgentBuildName(s.part.CPUArch)), agent, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	certPEM, certPin := ctltest.Cert(t)
+	frpcDigest := ctltest.Frpc(t, builds, s.part.CPUArch)
 	w.credDir = t.TempDir()
 
 	ctl, err := providerctl.New(w.c, w.c, scheme, providerctl.Options{
@@ -210,8 +213,8 @@ func newWorld(t *testing.T) *world {
 			return w.batch, t, nil
 		},
 		CredentialsDir: w.credDir, AgentBuildsDir: builds,
-		Front: &providerctl.FrontSettings{Mode: agentapi.DialHomeDirect, Endpoint: "127.0.0.1:29261", CertPin: strings.Repeat("0", 64),
-			FrpcDigests: map[string]string{s.part.CPUArch: strings.Repeat("d", 64)}},
+		Front: &providerctl.FrontSettings{Mode: agentapi.DialHomeDirect, Endpoint: "127.0.0.1:29261", CertPin: certPin, CertPEM: certPEM,
+			FrpcDigests: map[string]string{s.part.CPUArch: frpcDigest}},
 		PollInterval: 10 * time.Second, BusyInterval: 3 * time.Second, CreationGracePeriod: -1,
 	})
 	if err != nil {
