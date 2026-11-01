@@ -9,7 +9,8 @@ import "fmt"
 
 const (
 	// CorruptionOutputs is how many times the corruption check sends its
-	// greedy request, and so how many outputs CorruptionVerdict wants.
+	// request, greedy or, on a reasoning model, sampled with one seed
+	// (CheckSampling), and so how many outputs CorruptionVerdict wants.
 	CorruptionOutputs = 3
 	// CorruptionPrefix is how many leading tokens the outputs must share.
 	CorruptionPrefix = 32

@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -171,12 +170,11 @@ func TestCheckEntry(t *testing.T) {
 	})
 	t.Run("the child died: the stale record is not trusted, the fresh one is", func(t *testing.T) {
 		stale := e
-		if err := syscall.Kill(stale.Proc.PID, syscall.SIGKILL); err != nil {
-			t.Fatal(err)
-		}
-		if !waitNotRunning(stale.Proc.PID, 5*time.Second) {
-			t.Fatal("could not kill the child")
-		}
+		// The child is dead when its pidfd says so, not when /proc reads as if it were (issue #154):
+		// a killed process closes its descriptors and its leader reads Z for a moment before its
+		// pidfd fires, and in that moment checkEntry rightly sees a live process. HBEP-11 (Operational
+		// readiness, "Silent failure") and handle.go: death is read from the pidfd only.
+		killAndWaitExited(t, *stale.Proc)
 		eh, problems := checkEntry(sup, supPID, stale)
 		if eh.Running || !strings.Contains(joined(problems), "not running") {
 			t.Fatalf("stale record: %+v, problems %v", eh, problems)
@@ -198,6 +196,7 @@ type supervisedFakeHost struct {
 	*fakeHost
 	supRec, childRec ProcRec
 	health           string
+	ports            []int   // the fixed ports the controller's entry names (EntryRecord.Ports); none by default
 	code             *int    // the status code /healthz answers
 	body             *string // the body it answers with
 	// readyz answers /readyz on its own (readyzFake): a test steers the readiness checks and reads

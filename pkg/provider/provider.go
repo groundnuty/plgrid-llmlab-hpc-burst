@@ -49,6 +49,10 @@ type ProfileReader interface {
 	// controller's user (HBEP-11). It fails with an *InvalidProfileError that
 	// names every invalid field, or ErrCredentials for a file it refuses.
 	// Read-only.
+	//
+	// HBEP-4's QOS limits add one check, which the Slurm plugin gains in
+	// #151's provider change and does not make yet: the Provider's qos, when
+	// set, and the partition's qos, when set, are listed in the profile's qos.
 	ReadProfile(ctx context.Context, provider string) (Profile, Settings, error)
 }
 
@@ -81,8 +85,16 @@ type Batch interface {
 	// partition the Provider does not allow or the profile does not list, no
 	// GPU on a GPU partition, more GPUs than gpusPerNode, a time limit above
 	// maxTime or not in whole minutes) is Rejected with an error that wraps
-	// ErrInvalidRequest. Not idempotent: it runs only under a claimed attempt,
-	// and never retries by itself.
+	// ErrInvalidRequest. Not idempotent: it runs only under a claimed
+	// attempt, and never retries by itself.
+	//
+	// HBEP-4's QOS limits extend the refusals before any call, in #151's
+	// provider change (not made yet), with the limits that apply on the
+	// partition under req.QOS (v1alpha1.EffectiveQOSLimits): an unsafe QOS,
+	// more GPUs than v1alpha1.MaxAllocationGPUs, more CPUs or memory than
+	// maxCpusPerUser or maxMemPerUser, and a time limit above the smaller of
+	// maxTime and maxWall. A policy refusal is then returned as a
+	// *PolicyRefusal.
 	Submit(ctx context.Context, req SubmitRequest) (jobID string, outcome SubmitOutcome, err error)
 
 	// LiftHold lifts the job's user hold. Its errors wrap ErrNotHeld,
@@ -131,8 +143,8 @@ type Profile struct {
 }
 
 // Settings are a Provider's settings (HBEP-4, Provider settings): account,
-// grant, credentials reference, allowed partition and labels. The grant is
-// recorded in alpha but not read.
+// grant, credentials reference, allowed partition, labels and an optional QOS.
+// The grant is recorded in alpha but not read.
 type Settings struct {
 	// Provider is the Provider's name.
 	Provider string
@@ -142,6 +154,11 @@ type Settings struct {
 	Grant string
 	// Partition is the one partition the Provider allows.
 	Partition string
+	// QOS is the Provider's qos, the QOS its jobs are to be submitted under,
+	// or "" for the association's default (HBEP-4, Provider settings).
+	// ReadProfile fills it, sending it as --qos and checking that the profile
+	// lists it, from #151's provider change; until then it stays "".
+	QOS string
 	// CredentialsFile is the path of the mode-600 credentials file on the
 	// control-plane host: for a Slurm provider an ssh client configuration
 	// naming the login node, the user and the key file; for a managed
@@ -163,6 +180,11 @@ type SubmitRequest struct {
 	Hold bool
 	// Account comes from the Provider's settings, never from the Allocation.
 	Account string
+	// QOS comes from the Provider's settings, never from the Allocation. From
+	// #151's provider change the submission adds --qos=<QOS> when it is set,
+	// and no --qos at all when it is "" (HBEP-4, The Slurm dialect); until
+	// then no --qos is sent.
+	QOS string
 	// Params are the Allocation's submission parameters.
 	Params v1alpha1.BatchParameters
 }
