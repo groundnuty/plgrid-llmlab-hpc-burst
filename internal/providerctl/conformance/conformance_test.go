@@ -7,24 +7,31 @@
 // with the profile's data_parser version, so a run on Helios (v0.0.42) and one
 // on Athena (v0.0.40) parse real replies of both.
 //
-// It runs only with HPCBURST_CONFORMANCE=1 and the settings below, all from
-// the environment; nothing about a platform is in this file. It skips, loudly,
-// otherwise. Job IDs, the account, host names and paths go only to the
-// private output directory, never to the test log.
+// The platform under test is a shipped PlatformProfile, profiles/helios.yaml or
+// profiles/athena.yaml, read whole (profile_test.go); only its stagingDir is
+// replaced by a fresh subdirectory of it. Nothing about a platform is in this
+// file.
 //
+// It runs only with HPCBURST_CONFORMANCE=1 and the settings below, all from
+// the environment. It skips, loudly, otherwise. Job IDs, the account, host
+// names and paths go only to the private output directory, never to the test
+// log.
+//
+//	HPCBURST_CONF_PROFILE      the shipped profile: helios or athena
+//	HPCBURST_CONF_PARTITION    the partition under test; the profile must list it
 //	HPCBURST_CONF_CREDENTIALS  the mode-600 ssh credentials file (slurm.SSHConfig form)
 //	HPCBURST_CONF_ACCOUNT      the account; never logged
-//	HPCBURST_CONF_PARTITION    the partition
 //	HPCBURST_CONF_GPUS         GPUs per job (0 for a CPU partition)
-//	HPCBURST_CONF_GPU_MODEL    the partition's gpuModel ("none" for CPU)
-//	HPCBURST_CONF_CPU_ARCH     the partition's cpuArch
 //	HPCBURST_CONF_CPUS         cpusPerTask
 //	HPCBURST_CONF_MEMORY       memory, a Kubernetes quantity
-//	HPCBURST_CONF_DATA_PARSER  the profile's jsonDataParser
-//	HPCBURST_CONF_STAGING      stagingDir, for example $SCRATCH/<own dir>
+//	HPCBURST_CONF_STAGING      the run's stagingDir, a directory below the profile's
+//	                           (for example $SCRATCH/<own dir>), not the root
 //	HPCBURST_CONF_HOST_LOCK    the host's lock file: one ssh call at a time
 //	HPCBURST_CONF_CONTROL_DIR  a short private directory for the ssh master
 //	HPCBURST_CONF_OUT          a private directory for the run's records
+//
+// HPCBURST_CONF_GPU_MODEL, _CPU_ARCH and _DATA_PARSER are not read any more:
+// the profile holds them, and a run that sets one stops.
 package conformance
 
 import (
@@ -37,13 +44,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
-	"k8s.io/apimachinery/pkg/api/resource"
+	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -59,41 +65,17 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
-type settings struct {
-	creds, account, partition, gpuModel, cpuArch, parser, staging, lock, control, out string
-	gpus, cpus                                                                        int32
-	memory                                                                            resource.Quantity
-}
-
 func load(t *testing.T) settings {
 	t.Helper()
 	if os.Getenv("HPCBURST_CONFORMANCE") != "1" {
 		t.Skip("set HPCBURST_CONFORMANCE=1 and the HPCBURST_CONF_* settings to run against a real platform")
 	}
-	get := func(k string) string {
-		v := os.Getenv(k)
-		if v == "" {
-			t.Fatalf("%s is not set", k)
-		}
-		return v
-	}
-	num := func(k string) int32 {
-		n, err := strconv.Atoi(get(k))
-		if err != nil {
-			t.Fatalf("%s is not a number", k)
-		}
-		return int32(n)
-	}
-	mem, err := resource.ParseQuantity(get("HPCBURST_CONF_MEMORY"))
+	s, err := readSettings(os.Getenv)
 	if err != nil {
-		t.Fatal("HPCBURST_CONF_MEMORY is not a quantity")
+		t.Fatal(err)
 	}
-	return settings{
-		creds: get("HPCBURST_CONF_CREDENTIALS"), account: get("HPCBURST_CONF_ACCOUNT"), partition: get("HPCBURST_CONF_PARTITION"),
-		gpuModel: get("HPCBURST_CONF_GPU_MODEL"), cpuArch: get("HPCBURST_CONF_CPU_ARCH"), parser: get("HPCBURST_CONF_DATA_PARSER"),
-		staging: get("HPCBURST_CONF_STAGING"), lock: get("HPCBURST_CONF_HOST_LOCK"), control: get("HPCBURST_CONF_CONTROL_DIR"),
-		out: get("HPCBURST_CONF_OUT"), gpus: num("HPCBURST_CONF_GPUS"), cpus: num("HPCBURST_CONF_CPUS"), memory: mem,
-	}
+	t.Logf("profile %s, partition %s, data_parser %s", s.profile.Name, s.partition, s.profile.Spec.JSONDataParser)
+	return s
 }
 
 // private records go to the output directory, mode 600, never to the log.
@@ -187,18 +169,13 @@ func newWorld(t *testing.T) *world {
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	window := v1alpha1.Duration("5m")
-	maxTime := v1alpha1.Duration("1h")
-	jobNameMax := int32(v1alpha1.JobTagLength)
-	part := v1alpha1.PartitionProfile{Name: s.partition, AcceleratorClass: v1alpha1.AcceleratorClass{GPUModel: s.gpuModel, CPUArch: s.cpuArch}, MaxTime: &maxTime}
-	if s.gpus > 0 {
-		g := s.gpus
-		part.GPUsPerNode = &g
+	// The deleting pass writes the accounting record, a ControllerRevision.
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
 	}
-	pp := &v1alpha1.PlatformProfile{ObjectMeta: metav1.ObjectMeta{Name: "conformance-profile"}, Spec: v1alpha1.PlatformProfileSpec{
-		ProviderKind: v1alpha1.PlatformBatch, HoldRelease: true, JSONDataParser: s.parser, InflightWindow: &window,
-		StagingDir: s.staging, Partitions: []v1alpha1.PartitionProfile{part}, JobName: &v1alpha1.JobNameRules{MaxLength: &jobNameMax},
-	}}
+	// The profile is the shipped file as read; the Provider names it and allows
+	// the one partition under test.
+	pp := s.profile
 	prov := &v1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "conformance"}, Spec: v1alpha1.ProviderSpec{
 		PlatformProfileRef: v1alpha1.ObjectReference{Name: pp.Name}, Account: s.account, AllowedPartitions: []string{s.partition},
 		CredentialsRef: &v1alpha1.CredentialsReference{File: s.creds},
@@ -214,7 +191,7 @@ func newWorld(t *testing.T) *world {
 	sum := sha256.Sum256(agent)
 	w.digest = hex.EncodeToString(sum[:])
 	builds := t.TempDir()
-	if err := os.WriteFile(filepath.Join(builds, agentapi.AgentBuildName(s.cpuArch)), agent, 0o700); err != nil {
+	if err := os.WriteFile(filepath.Join(builds, agentapi.AgentBuildName(s.part.CPUArch)), agent, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	w.credDir = t.TempDir()
@@ -234,7 +211,7 @@ func newWorld(t *testing.T) *world {
 		},
 		CredentialsDir: w.credDir, AgentBuildsDir: builds,
 		Front: &providerctl.FrontSettings{Mode: agentapi.DialHomeDirect, Endpoint: "127.0.0.1:29261", CertPin: strings.Repeat("0", 64),
-			FrpcDigests: map[string]string{s.cpuArch: strings.Repeat("d", 64)}},
+			FrpcDigests: map[string]string{s.part.CPUArch: strings.Repeat("d", 64)}},
 		PollInterval: 10 * time.Second, BusyInterval: 3 * time.Second, CreationGracePeriod: -1,
 	})
 	if err != nil {
@@ -493,6 +470,11 @@ func TestConformance(t *testing.T) {
 		return a.Status.AtProvider.Phase == v1alpha1.AllocationEnded || a.Status.AtProvider.Phase == v1alpha1.AllocationFailed
 	})
 	w.endedInAccounting(id2, 3*time.Minute)
+
+	// 5. A job name of the tag's full 56 characters comes back unchanged from
+	// squeue and from sacct (jobname_test.go). After the counts above, since it
+	// adds one sbatch and one scancel of its own.
+	w.jobNameRoundTrip()
 
 	if w.ssh.Starts() != 1 {
 		t.Errorf("%d ssh masters were started; want 1 for the whole run", w.ssh.Starts())
