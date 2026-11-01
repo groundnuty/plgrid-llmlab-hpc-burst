@@ -140,7 +140,7 @@ func restOfReport(warm *WarmUpResult) Report {
 			Checks: &CheckResults{
 				VerificationGeneration: 1,
 				Verify: &VerifyResult{Done: true, Files: files, EngineVersion: "0.99.0", ImageDigest: "sha256:" + strings.Repeat("ab", 32),
-					Settings: map[string]string{"max-model-len": "32768", "max-num-seqs": "256"}, Fingerprint: "fp_0123456789", TemplateOverhead: 12, Error: msg, GenerationConfig: genCfg},
+					Settings: map[string]string{"max-model-len": "32768", "max-num-seqs": "256"}, Fingerprint: "fp_0123456789", TemplateOverhead: 12, Error: msg, GenerationConfig: genCfg, GenerationConfigFile: GenerationConfigUnreadable},
 				Qualify: &QualifyResult{Done: true, Checks: []CheckOutcome{
 					{Name: CheckHealth, Passed: true, Reason: ReasonReasoningBudgetExhausted, Message: msg},
 					{Name: CheckChat, Passed: true, Reason: ReasonReasoningBudgetExhausted, Message: msg},
