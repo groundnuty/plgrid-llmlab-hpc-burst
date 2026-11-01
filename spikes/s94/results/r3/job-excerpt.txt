@@ -1,0 +1,58 @@
+23:47:18 job start
+23:47:18 job TMPDIR filesystem: lustre; MEMFS: set, tmpfs
+23:47:18 TMPDIR filesystem: tmpfs (path length 17)
+TMPDIR size 470G, free 470G
+NVIDIA GH200 120GB, 615.71.09, 97871 MiB
+Sun Nov  1 00:47:18 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 615.71.09              KMD Version: 615.71.09     CUDA UMD Version: 13.4     |
++-----------------------------------------+------------------------+----------------------+
+Driver Version                                         : 615.71.09 [Deprecated; will be removed in CUDA 14.0. Use KMD Version instead]
+CUDA Version                                           : 13.4 [Deprecated; will be removed in CUDA 14.0. Use CUDA UMD Version instead]
+CUDA UMD Version                                       : 13.4
+23:47:18 driver major version: 615
+apptainer version 1.5.4-1.el9
+23:47:18 cpus 72
+hub: HTTP 200 in 0.243066s
+HTTP/2 200 
+docker-content-digest: sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34
+23:47:19 driver start
+=== RUN   TestRealEngine
+23:47:19 agent started
+23:47:19 qwen3-0.6b: run with verification
+23:47:20 verification: staging inProgress 0/0
+23:53:10 verification: staging inProgress 1/1433
+23:53:26 verification: staging inProgress 1377/1433
+23:53:27 verification: staging done 1448/1444 worker starting
+23:54:41 verification: staging done 1448/1444 worker running
+23:54:43 qwen3-0.6b: qualify and warm up
+23:54:43 qualification: staging done 1448/1444 worker running
+23:54:44 warm-up settling: staging done 1448/1444 worker running
+23:54:48 qwen3-0.6b: warm-up round 1
+23:54:51 qwen3-0.6b: warm-up round 2
+23:55:01 qwen3-0.6b: warm-up round 3
+23:55:05 qwen3-0.6b: warm-up round 4
+23:55:07 qwen3-0.6b: warm-up round 5
+23:55:07 warm-up done: staging done 1448/1444 worker running
+23:55:42 worker stopped: staging done 1448/1444 worker running
+23:55:43 worker stopped: staging done 1448/1444 worker stopped
+23:55:43 qwen2.5-1.5b-instruct: run with verification
+23:55:44 verification: staging inProgress 0/0
+23:55:50 verification: staging inProgress 1/2944
+23:56:19 verification: staging inProgress 2946/2944
+23:56:20 verification: staging done 2955/2944 worker starting
+23:57:12 verification: staging done 2955/2944 worker running
+23:57:12 qwen2.5-1.5b-instruct: qualify and warm up
+23:57:12 qualification: staging done 2955/2944 worker running
+23:57:13 warm-up settling: staging done 2955/2944 worker running
+23:57:16 qwen2.5-1.5b-instruct: warm-up round 1
+23:57:18 qwen2.5-1.5b-instruct: warm-up round 2
+23:57:18 warm-up done: staging done 2955/2944 worker running
+23:57:54 worker stopped: staging done 2955/2944 worker running
+23:57:55 worker stopped: staging done 2955/2944 worker stopped
+23:57:55 agent exited after stop: <nil>
+--- PASS: TestRealEngine (636.20s)
+PASS
+23:57:55 driver exit 0
+23:57:55 processes left in the job: 0
+23:57:55 job end

@@ -1,0 +1,8 @@
+{
+  "contentType": "application/json",
+  "method": "GET",
+  "path": "/v1/models",
+  "request": null,
+  "seconds": 0.000360055,
+  "status": 200
+}

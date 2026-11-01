@@ -19,6 +19,9 @@ package main
 // outlive the job), HB_REAL_STAGING (the staging directory), HB_REAL_BUDGET
 // (the whole run, default 48m) and HB_REAL_STAGE_BUDGET (verification of the
 // first Instance, which includes the image pull, default 30m).
+//
+// The Slurm job that runs it, the record of its first run and the findings
+// are in spikes/s94.
 
 import (
 	"bytes"

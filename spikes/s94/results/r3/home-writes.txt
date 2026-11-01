@@ -1,0 +1,19 @@
+# Entries under the home directory on the cluster created or modified during the job (23:47-23:59Z,
+# local times CET), relative to $HOME, from: find "$HOME" -xdev -newermt <start> ! -newermt <end>
+# The times match the two engine starts (00:53:39 and 00:56:31 local in engine-excerpt.txt).
+2026-11-01T00:53 d .cache
+2026-11-01T00:53 d .cache/flashinfer
+2026-11-01T00:53 d .cache/flashinfer/0.7.0.post1
+2026-11-01T00:53 d .cache/flashinfer/0.7.0.post1/90a
+2026-11-01T00:57 f .cache/flashinfer/0.7.0.post1/90a/flashinfer_jit.log
+2026-11-01T00:53 d .nv
+2026-11-01T00:53 d .nv/ComputeCache
+2026-11-01T00:53 d .humming
+2026-11-01T00:53 f .humming, then tmp, lock, launcher.lock (two directories and a 0-byte lock file below it)
+2026-11-01T00:54 d .tilelang
+2026-11-01T00:54 d .tilelang/cache
+2026-11-01T00:54 d .tilelang/cache/tmp
+2026-11-01T00:54 d .tilelang/cache/0.1.12
+2026-11-01T00:54 d .tilelang/cache/0.1.12/linux-aarch64
+2026-11-01T00:54 d .tilelang/cache/0.1.12/linux-aarch64/kernels
+2026-11-01T00:54 d .tilelang/cache/0.1.12/linux-aarch64/.staging
