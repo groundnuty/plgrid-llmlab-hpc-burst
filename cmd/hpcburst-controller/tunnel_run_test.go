@@ -177,6 +177,13 @@ func (cw *condWatch) events(name string, from int) []condObs {
 	return out
 }
 
+// lastRV is the resourceVersion of the last state the watch has delivered for the Instance.
+func (cw *condWatch) lastRV(name string) string {
+	cw.mu.Lock()
+	defer cw.mu.Unlock()
+	return cw.last[name].rv
+}
+
 // conds is the sequence of distinct conditions the Instance had after the mark, "" for none.
 func (cw *condWatch) conds(name string, from int) []string {
 	var out []string
@@ -331,6 +338,20 @@ func (r *tunnelRig) instance(name, allocation string, phase v1alpha1.InstancePha
 		}
 	}
 	return in
+}
+
+// markSettled returns a position in the watch's history once the watch has delivered every
+// Instance's stored state. The watch runs behind the writes: a mark taken as soon as a poll sees a
+// state would put that state's own event after the mark (a failure seen once in 15 loaded runs).
+// The Instances must not be written meanwhile, which is so wherever this is used: the condition
+// is stable, or the binary is down.
+func (r *tunnelRig) markSettled(ins ...*v1alpha1.Instance) int {
+	r.t.Helper()
+	for _, in := range ins {
+		_, _, rv := r.stored(in)
+		waitUntil(r.t, 30*time.Second, "the watch to deliver "+in.Name+"'s stored state, resourceVersion "+rv, func() bool { return r.watch.lastRV(in.Name) == rv })
+	}
+	return r.watch.mark()
 }
 
 // stored reads the Instance's TunnelConnected condition from the API server, "" "" for none, with
@@ -579,7 +600,7 @@ func TestTunnelWithRealFrpsAndFrpc(t *testing.T) {
 	b.eventually(t, "the plugin refuses the credential of the Allocation that ended", 60*time.Second, func() bool { return r.pluginRefusesLogin(credB) })
 	frpcB.kill()
 	r.waitCond(b, b1, statusFalse, reasonOffline)
-	endedAt := r.watch.mark()
+	endedAt := r.markSettled(b1)
 	frpcB2 := r.runFrpc(credB, uid(b1))
 	b.eventually(t, "frpc's log shows the plugin's reason for refusing the ended Allocation's token", 60*time.Second,
 		func() bool { return strings.Contains(frpcB2.logText(), refusedCredential) })
@@ -616,7 +637,7 @@ func TestTunnelWithRealFrpsAndFrpc(t *testing.T) {
 	if s, rs, _ := r.stored(a1); s != statusTrue || rs != reasonOnline {
 		t.Fatalf("with the controller down a1 is %s/%s, want the stored True/ProxyOnline", s, rs)
 	}
-	restart := r.watch.mark()
+	restart := r.markSettled(a1, a2)
 	b = r.start()
 	for _, in := range []*v1alpha1.Instance{a1, a2} {
 		r.waitCond(b, in, statusFalse, reasonOffline)
@@ -630,7 +651,7 @@ func TestTunnelWithRealFrpsAndFrpc(t *testing.T) {
 	_ = frpcA3
 
 	// frps stops while a1 is True: Unknown, never False, and no write at all while it stays down.
-	stopMark := r.watch.mark()
+	stopMark := r.markSettled(a1, a2)
 	reads := tunnelReads.Load()
 	r.stopFrpsIfRunning()
 	r.waitCond(b, a1, statusUnknown, reasonUnreadable)
