@@ -13,6 +13,14 @@ import (
 // (30 s) after the request's last byte; it is not resent, the record says
 // cutBy front_headers, and it counts toward the pause. A non-streamed
 // request is exempt.
+//
+// "Not cut before 30 s" is read from the fake clock, not from a real wait:
+// Advance runs every timer that falls due on the test's goroutine, so a timer
+// due by 29 s has fired, and is no longer pending, when Advance returns. The
+// request's timers all still pending after Advance(29 s) is therefore the
+// state that a cut before 30 s would have changed first. (The test used to
+// wait 200 ms of real time for an answer that should not come, which a slow
+// machine could pass wrongly; PR #137 review, Astra.)
 func TestStreamHeadersDeadline(t *testing.T) {
 	for _, stream := range []bool{true, false} {
 		name := map[bool]string{true: "streamed", false: "not streamed (exempt)"}[stream]
@@ -29,15 +37,18 @@ func TestStreamHeadersDeadline(t *testing.T) {
 			if stream {
 				want++
 			}
-			errWaitFor(t, "the request's timers", func() bool { return e.Open() == 1 && f.clk.Pending() == want })
+			waitState(t, "the request's timers", func() bool { return e.Open() == 1 && f.clk.Pending() == want })
 			f.clk.Advance(29 * time.Second)
-			if isDone(call) {
-				t.Fatalf("answered before streamHeadersTimeout: %d %s", call.resp.StatusCode, call.body)
+			if n := f.clk.Pending(); n != want || doneNow(call) {
+				t.Fatalf("after 29 s %d timers are pending, want %d, and the request finished %v: a timer fell due before streamHeadersTimeout", n, want, doneNow(call))
 			}
 			f.clk.Advance(1 * time.Second)
 			if !stream {
-				if isDone(call) {
-					t.Fatalf("a non-streamed request was cut at 30 s: %d %s", call.resp.StatusCode, call.body)
+				// No headers timer: the deadline (2 h), idle (30 min) and
+				// lease timers are all still pending at 30 s, and the 200
+				// once the engine answers shows the request was never cut.
+				if n := f.clk.Pending(); n != want || doneNow(call) {
+					t.Fatalf("after 30 s %d timers are pending, want %d, and the request finished %v: a non-streamed request was cut", n, want, doneNow(call))
 				}
 				close(hold)
 				if resp, body := call.wait(t); resp.StatusCode != 200 {
@@ -63,12 +74,12 @@ func TestStreamHeadersDeadline(t *testing.T) {
 	}
 }
 
-// isDone reports, after a short real wait, whether the call has finished.
-func isDone(c *scCall) bool {
+// doneNow reports whether the call has finished, without waiting.
+func doneNow(c *scCall) bool {
 	select {
 	case <-c.done:
 		return true
-	case <-time.After(200 * time.Millisecond):
+	default:
 		return false
 	}
 }
