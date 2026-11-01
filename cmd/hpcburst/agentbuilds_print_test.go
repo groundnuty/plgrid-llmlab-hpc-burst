@@ -60,3 +60,16 @@ func TestPrintAgentBuildsLines(t *testing.T) {
 		t.Errorf("%s", out)
 	}
 }
+
+// An agent build for another architecture is WRONG, with what is wrong and the digest found, and
+// the build that is right shows its ELF machine.
+func TestBuildStateOfAnAgentBuild(t *testing.T) {
+	right := launcher.BuildFile{Name: "hb-agent-x86_64", Present: true, SHA256: "aa", Machine: "EM_X86_64", OK: true}
+	wrong := launcher.BuildFile{Name: "hb-agent-aarch64", Present: true, SHA256: "bb", Machine: "EM_X86_64", Detail: "is an ELF file for EM_X86_64, not for EM_AARCH64 as aarch64 is"}
+	if got, want := buildState(right), "hb-agent-x86_64 ok (EM_X86_64, sha256 aa)"; got != want {
+		t.Errorf("%q, want %q", got, want)
+	}
+	if got, want := buildState(wrong), "hb-agent-aarch64 WRONG (is an ELF file for EM_X86_64, not for EM_AARCH64 as aarch64 is, sha256 bb)"; got != want {
+		t.Errorf("%q, want %q", got, want)
+	}
+}

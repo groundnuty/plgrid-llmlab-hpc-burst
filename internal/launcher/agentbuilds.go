@@ -3,6 +3,7 @@ package launcher
 import (
 	"context"
 	"crypto/sha256"
+	"debug/elf"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -39,7 +40,13 @@ type BuildFile struct {
 	SHA256 string `json:"sha256,omitempty"`
 	// Expected is the pinned digest (frpc only; the agent build has none).
 	Expected string `json:"expected_sha256,omitempty"`
-	OK       bool   `json:"ok"`
+	// Machine is the ELF machine type of the agent build (EM_X86_64, EM_AARCH64), which must be the
+	// one its cpuArch names: a build for another architecture under the right name is the failure
+	// that the digest cannot show. Detail says what is wrong with a file that is there but not OK
+	// for a reason other than its digest.
+	Machine string `json:"machine,omitempty"`
+	Detail  string `json:"detail,omitempty"`
+	OK      bool   `json:"ok"`
 }
 
 // ArchBuilds is the check of one cpuArch some partition has.
@@ -89,6 +96,11 @@ func (e *AgentBuildsError) Error() string {
 	}
 	return b.String()
 }
+
+// elfMachineOf is the ELF machine type of a build for each cpuArch. It is the one fact the agent
+// build's file is judged by beyond being there; TestElfMachineOfCoversEveryCPUArch keeps its keys
+// the cpuArchs of cpuArchOf, so a cpuArch added there has to be given its machine here.
+var elfMachineOf = map[string]elf.Machine{"x86_64": elf.EM_X86_64, "aarch64": elf.EM_AARCH64}
 
 // CPUArchs lists the cpuArch values builds exist for, sorted: the values of cpuArchOf, the one map
 // of the architecture names (hack/cpu-arch.sh is the bash copy).
@@ -179,7 +191,7 @@ func checkAgentBuilds(profiles int, refs []partitionArch, dir string, pins map[s
 			continue
 		}
 		a := ArchBuilds{CPUArch: arch, Partitions: parts}
-		a.Agent = checkBuildFile(agentapi.AgentBuildName(arch), dir, "")
+		a.Agent = checkAgentFile(agentapi.AgentBuildName(arch), dir, arch)
 		a.Frpc = checkBuildFile(agentapi.FrpcBuildName(arch), dir, pins[arch])
 		rep.Archs = append(rep.Archs, a)
 		problem := func(what, fix string) {
@@ -214,6 +226,8 @@ func (f BuildFile) problem(dir string) string {
 		return fmt.Sprintf("%s is missing from %s", f.Name, dir)
 	case f.SHA256 == "":
 		return fmt.Sprintf("%s in %s cannot be read as a file", f.Name, dir)
+	case f.Detail != "":
+		return fmt.Sprintf("%s in %s %s", f.Name, dir, f.Detail)
 	default:
 		return fmt.Sprintf("%s in %s has sha256 %s, but the pin (frp-pins.txt) says %s", f.Name, dir, f.SHA256, f.Expected)
 	}
@@ -233,6 +247,32 @@ func checkBuildFile(name, dir, expected string) BuildFile {
 	}
 	f.Present, f.SHA256 = true, sum
 	f.OK = expected == "" || sum == expected
+	return f
+}
+
+// checkAgentFile is checkBuildFile for the agent build of a cpuArch, which has no pinned digest and
+// is judged by its ELF machine type instead: the file must be an ELF file for the machine the
+// cpuArch names.
+func checkAgentFile(name, dir, cpuArch string) BuildFile {
+	f := checkBuildFile(name, dir, "")
+	if !f.Present || f.SHA256 == "" {
+		return f // missing, or not a readable file: already said
+	}
+	want, ok := elfMachineOf[cpuArch]
+	if !ok {
+		f.OK, f.Detail = false, "has no known ELF machine type for cpuArch "+cpuArch
+		return f
+	}
+	ef, err := elf.Open(filepath.Join(dir, name))
+	if err != nil {
+		f.OK, f.Detail = false, "is not an ELF file ("+err.Error()+")"
+		return f
+	}
+	defer ef.Close()
+	f.Machine = ef.Machine.String()
+	if ef.Machine != want {
+		f.OK, f.Detail = false, fmt.Sprintf("is an ELF file for %s, not for %s as %s is", ef.Machine, want, cpuArch)
+	}
 	return f
 }
 

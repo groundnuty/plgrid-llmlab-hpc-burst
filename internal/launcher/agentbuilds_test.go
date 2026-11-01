@@ -9,6 +9,7 @@ package launcher
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"net/http"
@@ -64,9 +65,31 @@ var both = []partitionArch{
 	{"example-batch", "example-cpu", "x86_64"},
 }
 
+// The machine numbers of ELF's e_machine, written out here (EM_X86_64 and EM_AARCH64), not taken
+// from debug/elf, which the code under test reads them with.
+const (
+	machX86_64  = 62
+	machAarch64 = 183
+)
+
+// fakeELF is the 64-byte ELF64 header of a little-endian executable for the machine, and then tag: a
+// file debug/elf opens and a loader would not run, whose bytes differ with the tag.
+func fakeELF(machine uint16, tag string) []byte {
+	h := make([]byte, 64)
+	copy(h, "\x7fELF")
+	h[4], h[5], h[6] = 2, 1, 1                     // 64-bit, little-endian, version 1
+	binary.LittleEndian.PutUint16(h[16:], 2)       // ET_EXEC
+	binary.LittleEndian.PutUint16(h[18:], machine) // e_machine
+	binary.LittleEndian.PutUint32(h[20:], 1)       // e_version
+	binary.LittleEndian.PutUint16(h[52:], 64)      // e_ehsize
+	binary.LittleEndian.PutUint16(h[54:], 56)      // e_phentsize
+	binary.LittleEndian.PutUint16(h[58:], 64)      // e_shentsize
+	return append(h, tag...)
+}
+
 var allBuilds = map[string][]byte{
-	"hb-agent-x86_64": []byte("an example agent for x86_64\n"), "frpc-x86_64": frpcX86,
-	"hb-agent-aarch64": []byte("an example agent for aarch64\n"), "frpc-aarch64": frpcArm,
+	"hb-agent-x86_64": fakeELF(machX86_64, " an example agent for x86_64\n"), "frpc-x86_64": frpcX86,
+	"hb-agent-aarch64": fakeELF(machAarch64, " an example agent for aarch64\n"), "frpc-aarch64": frpcArm,
 }
 
 func problemOf(t *testing.T, rep *AgentBuilds, cpuArch string) []BuildProblem {
@@ -105,7 +128,11 @@ func TestAgentBuildsAllPresent(t *testing.T) {
 		if !a.Agent.OK || !a.Frpc.OK || !a.Agent.Present || a.Frpc.Expected != testPin[a.CPUArch] || a.Frpc.SHA256 != testPin[a.CPUArch] {
 			t.Errorf("%s: agent %+v, frpc %+v", a.CPUArch, a.Agent, a.Frpc)
 		}
-		// The agent build has no pin; the digest found is the agentDigest.
+		// The agent build has no pin; the digest found is the agentDigest, and its ELF machine is the
+		// cpuArch's (the numbers are the test's own).
+		if want := map[string]string{"x86_64": "EM_X86_64", "aarch64": "EM_AARCH64"}[a.CPUArch]; a.Agent.Machine != want {
+			t.Errorf("%s: agent machine %q, want %q", a.CPUArch, a.Agent.Machine, want)
+		}
 		if want := hexSum(allBuilds["hb-agent-"+a.CPUArch]); a.Agent.SHA256 != want || a.Agent.Expected != "" {
 			t.Errorf("%s: agent sha256 %q (expected %q), want found %s and none expected", a.CPUArch, a.Agent.SHA256, a.Agent.Expected, want)
 		}
@@ -184,6 +211,59 @@ func TestAgentBuildsMismatchedFrpcNamesBothDigests(t *testing.T) {
 	// frpc-x86_64 is the pinned one and stays fine: the mismatch is per cpuArch.
 	if f := archOf(t, rep, "x86_64").Frpc; !f.OK {
 		t.Errorf("x86_64 frpc %+v", f)
+	}
+}
+
+// A binary for the other architecture under the right name has the right name and a digest of its own,
+// which is all a file check sees: it is the ELF machine type that shows it. The control is the same
+// directory with each binary under its own name.
+func TestAgentBuildsAnAgentForAnotherArchitecture(t *testing.T) {
+	if rep := checkAgentBuilds(1, both, buildsIn(t, allBuilds), testPin); len(rep.Problems) != 0 {
+		t.Fatalf("control: %+v", rep.Problems)
+	}
+	files := map[string][]byte{}
+	for k, v := range allBuilds {
+		files[k] = v
+	}
+	files["hb-agent-aarch64"] = allBuilds["hb-agent-x86_64"] // an x86_64 binary under the aarch64 name
+	dir := buildsIn(t, files)
+	rep := checkAgentBuilds(1, both, dir, testPin)
+	ps := problemOf(t, rep, "aarch64")
+	if len(rep.Problems) != 1 || len(ps) != 1 {
+		t.Fatalf("problems %+v, want only the aarch64 agent build", rep.Problems)
+	}
+	for _, want := range []string{"hb-agent-aarch64 in " + dir, "ELF file for EM_X86_64", "not for EM_AARCH64"} {
+		if !strings.Contains(ps[0].What, want) {
+			t.Errorf("what %q lacks %q", ps[0].What, want)
+		}
+	}
+	if want := "hack/build-agents.sh " + dir + " aarch64"; ps[0].Fix != want {
+		t.Errorf("fix %q, want %q", ps[0].Fix, want)
+	}
+	if a := archOf(t, rep, "aarch64"); a.Agent.OK || a.Agent.Machine != "EM_X86_64" || a.Agent.SHA256 != hexSum(allBuilds["hb-agent-x86_64"]) {
+		t.Errorf("aarch64 agent %+v", a.Agent)
+	}
+	// And the other way round, and a file that is not an ELF file at all.
+	files["hb-agent-aarch64"] = allBuilds["hb-agent-aarch64"]
+	files["hb-agent-x86_64"] = []byte("#!/bin/sh\necho not a binary\n")
+	rep = checkAgentBuilds(1, both, buildsIn(t, files), testPin)
+	if ps := problemOf(t, rep, "x86_64"); len(rep.Problems) != 1 || len(ps) != 1 || !strings.Contains(ps[0].What, "is not an ELF file") {
+		t.Errorf("a script as the x86_64 agent build: %+v", rep.Problems)
+	}
+}
+
+// elfMachineOf has an entry for exactly the cpuArchs of cpuArchOf, and the machine numbers are ELF's.
+func TestElfMachineOfCoversEveryCPUArch(t *testing.T) {
+	if len(elfMachineOf) != len(CPUArchs()) {
+		t.Errorf("elfMachineOf has %d entries, cpuArchOf has %d cpuArchs", len(elfMachineOf), len(CPUArchs()))
+	}
+	for _, arch := range CPUArchs() {
+		if _, ok := elfMachineOf[arch]; !ok {
+			t.Errorf("no ELF machine for cpuArch %s", arch)
+		}
+	}
+	if uint16(elfMachineOf["x86_64"]) != machX86_64 || uint16(elfMachineOf["aarch64"]) != machAarch64 {
+		t.Errorf("x86_64 is machine %d and aarch64 %d, want %d and %d", elfMachineOf["x86_64"], elfMachineOf["aarch64"], machX86_64, machAarch64)
 	}
 }
 

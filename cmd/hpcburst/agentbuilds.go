@@ -43,16 +43,21 @@ func hasArch(ab *launcher.AgentBuilds, cpuArch string) bool {
 	return false
 }
 
-// buildState is one build's state in a line of the status: its name, and ok with the digest found,
-// missing, or the digest found against the one expected.
+// buildState is one build's state in a line of the status: its name, and ok with the digest found
+// (and the ELF machine of an agent build), missing, wrong for its architecture, or the digest found
+// against the one expected.
 func buildState(f launcher.BuildFile) string {
 	switch {
+	case f.OK && f.Machine != "":
+		return fmt.Sprintf("%s ok (%s, sha256 %s)", f.Name, f.Machine, f.SHA256)
 	case f.OK:
 		return fmt.Sprintf("%s ok (sha256 %s)", f.Name, f.SHA256)
 	case !f.Present:
 		return f.Name + " MISSING"
 	case f.SHA256 == "":
 		return f.Name + " UNREADABLE"
+	case f.Detail != "":
+		return fmt.Sprintf("%s WRONG (%s, sha256 %s)", f.Name, f.Detail, f.SHA256)
 	default:
 		return fmt.Sprintf("%s MISMATCH (found %s, expected %s)", f.Name, f.SHA256, f.Expected)
 	}

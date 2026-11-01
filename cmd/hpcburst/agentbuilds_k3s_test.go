@@ -4,13 +4,15 @@ package main
 // The profile has an x86_64 partition and an aarch64 one, as on Athena and Helios: a profile of the
 // host's own cpuArch only would pass whatever the builds for the other were. The digests the test
 // expects are read from internal/launcher/frp-pins.txt and computed from bytes the test chose, not
-// asked of the launcher.
+// asked of the launcher; the agent builds are the real ones, made by hack/build-agents.sh, the
+// command up names in its fix.
 
 import (
 	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -147,13 +149,22 @@ func TestUpAndStatusCheckTheAgentBuilds(t *testing.T) {
 		t.Errorf("status --no-api exited %d with agent_builds %+v, want 0 and not checked", code, s.AgentBuilds)
 	}
 
-	// ---- agent builds placed, the aarch64 frpc is not the pinned one, the x86_64 frpc is ----
-	if err := os.WriteFile(filepath.Join(buildsDir, "hb-agent-x86_64"), []byte("an example agent build\n"), 0o755); err != nil {
-		t.Fatal(err)
+	// ---- the fix up printed: hack/build-agents.sh places both agent builds (real ones, built here) ----
+	build := exec.Command("bash", filepath.Join("..", "..", "hack", "build-agents.sh"), buildsDir)
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("hack/build-agents.sh: %v\n%s", err, out)
 	}
-	if err := os.WriteFile(filepath.Join(buildsDir, "hb-agent-aarch64"), []byte("another example agent build\n"), 0o755); err != nil {
-		t.Fatal(err)
+	s, code = statusBuilds(t, h)
+	if code != exitFail || s.AgentBuilds == nil || len(s.AgentBuilds.Problems) != 2 {
+		t.Fatalf("status exited %d with %+v, want only the two frpc builds left", code, s.AgentBuilds)
 	}
+	for _, p := range s.AgentBuilds.Problems {
+		if !strings.Contains(p.What, "frpc-"+p.CPUArch+" is missing") {
+			t.Errorf("a problem is left that is not a missing frpc: %+v", p)
+		}
+	}
+
+	// ---- the x86_64 frpc is the pinned one, the aarch64 frpc is not ----
 	pinnedX86, err := os.ReadFile(realFrpc)
 	if err != nil {
 		t.Fatal(err)
@@ -176,6 +187,32 @@ func TestUpAndStatusCheckTheAgentBuilds(t *testing.T) {
 	if p := s.AgentBuilds.Problems[0]; p.CPUArch != "aarch64" || !strings.Contains(p.What, hex.EncodeToString(found[:])) || !strings.Contains(p.What, pins["aarch64"]) ||
 		p.Fix != "hack/fetch-frp.sh --agent-builds "+buildsDir {
 		t.Errorf("the problem is %+v, want the aarch64 frpc with its found and pinned digests", p)
+	}
+
+	// ---- an x86_64 binary under the aarch64 name: right name, wrong machine ----
+	x86, err := os.ReadFile(filepath.Join(buildsDir, "hb-agent-x86_64"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(buildsDir, "hb-agent-aarch64"), x86, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s, code = statusBuilds(t, h)
+	var agentProblem string
+	for _, p := range s.AgentBuilds.Problems {
+		if strings.HasPrefix(p.What, "hb-agent-aarch64 in") {
+			agentProblem = p.What
+		}
+	}
+	if code != exitFail || len(s.AgentBuilds.Problems) != 2 || !strings.Contains(agentProblem, "EM_X86_64") || !strings.Contains(agentProblem, "not for EM_AARCH64") {
+		t.Fatalf("status exited %d with %+v, want the aarch64 frpc and the wrong-machine agent build", code, s.AgentBuilds)
+	}
+	if out, err := exec.Command("bash", filepath.Join("..", "..", "hack", "build-agents.sh"), buildsDir, "aarch64").CombinedOutput(); err != nil {
+		t.Fatalf("hack/build-agents.sh aarch64: %v\n%s", err, out)
+	}
+	s, code = statusBuilds(t, h)
+	if code != exitFail || len(s.AgentBuilds.Problems) != 1 || s.AgentBuilds.Problems[0].Fix != "hack/fetch-frp.sh --agent-builds "+buildsDir {
+		t.Fatalf("status exited %d with %+v after the fix, want only the aarch64 frpc", code, s.AgentBuilds)
 	}
 
 	// ---- the profiles are the source: without the aarch64 partition the host is healthy ----
