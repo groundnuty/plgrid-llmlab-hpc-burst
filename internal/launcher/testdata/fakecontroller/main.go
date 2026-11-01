@@ -18,6 +18,14 @@
 //
 // It records argv-<pid>.json and env-<pid>.json, and appends "<pid> <unix nanoseconds>" to the file
 // starts, before it serves anything.
+//
+// Installed under the name hpcburst-front it stands in for the front instead (issue #64), and then
+// accepts exactly the front's command line as the launcher writes it: --config, --state-dir,
+// --port-base and --health-addr, all required, and optionally --mode. In that role a file usage in
+// $FAKECTRL_DIR holds the usage state its /healthz reports in the front's usage member (HBEP-8:
+// "ok" or "failing"); without the file it reports "ok". A file bind-gate makes it bind its health
+// port late, as the real front does after its first lists: it writes front-waiting (its PID) and
+// waits, at most 30 s, for a file bind-now before it binds; a port taken by then makes it exit 1.
 package main
 
 import (
@@ -37,13 +45,20 @@ import (
 
 func main() {
 	fs := flag.NewFlagSet("fakecontroller", flag.ContinueOnError)
-	for _, name := range []string{"front-mode", "front-addr"} {
-		fs.String(name, "", "")
+	asFront := filepath.Base(os.Args[0]) == "hpcburst-front"
+	var config *string
+	if asFront {
+		config = fs.String("config", "", "")
+		fs.String("mode", "", "")
+	} else {
+		for _, name := range []string{"front-mode", "front-addr"} {
+			fs.String(name, "", "")
+		}
 	}
 	stateDir := fs.String("state-dir", "", "")
 	portBase := fs.Int("port-base", 0, "")
 	health := fs.String("health-addr", "", "")
-	if err := fs.Parse(os.Args[1:]); err != nil || fs.NArg() > 0 || *stateDir == "" || *portBase <= 0 || *health == "" {
+	if err := fs.Parse(os.Args[1:]); err != nil || fs.NArg() > 0 || *stateDir == "" || *portBase <= 0 || *health == "" || (asFront && *config == "") {
 		fmt.Fprintln(os.Stderr, "fakecontroller: bad command line:", os.Args[1:])
 		os.Exit(2)
 	}
@@ -81,6 +96,14 @@ func main() {
 	} else {
 		signal.Notify(term, syscall.SIGTERM)
 	}
+	if _, gated := ctl("bind-gate"); asFront && gated {
+		_ = os.WriteFile(filepath.Join(dir, "front-waiting"), []byte(strconv.Itoa(pid)), 0o644)
+		for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+			if _, open := ctl("bind-now"); open {
+				break
+			}
+		}
+	}
 	if _, off := ctl("no-health"); !off {
 		l, err := net.Listen("tcp", *health)
 		if err != nil {
@@ -92,7 +115,16 @@ func main() {
 				w.WriteHeader(http.StatusServiceUnavailable)
 				return
 			}
-			w.WriteHeader(http.StatusOK)
+			if !asFront {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			state, ok := ctl("usage")
+			if !ok {
+				state = "ok"
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"synced": true, "usage": map[string]any{"state": state, "lostRecords": 0}})
 		}))
 	}
 	tick := time.NewTicker(10 * time.Millisecond)

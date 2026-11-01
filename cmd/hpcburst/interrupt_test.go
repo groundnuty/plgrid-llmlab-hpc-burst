@@ -45,7 +45,7 @@ func TestKilledUpIsCleanedByDown(t *testing.T) {
 	if !waitDone(pid) {
 		t.Fatalf("k3s (pid %d) still runs after down", pid)
 	}
-	if rows := listeningInRange(t, 29220, 29239); len(rows) != 0 {
+	if rows := listeningInRange(t, launcherPortsLo, launcherPortsHi); len(rows) != 0 {
 		t.Errorf("listeners remain: %v", rows)
 	}
 }
@@ -76,7 +76,7 @@ func TestInterruptedUpStopsWhatItStarted(t *testing.T) {
 	if !waitDone(pid) {
 		t.Fatalf("k3s (pid %d) still runs after the interrupted up", pid)
 	}
-	if rows := listeningInRange(t, 29220, 29239); len(rows) != 0 {
+	if rows := listeningInRange(t, launcherPortsLo, launcherPortsHi); len(rows) != 0 {
 		t.Errorf("listeners remain: %v", rows)
 	}
 	if r := cli(t, h.args("status")...); r.code != exitStopped {

@@ -42,6 +42,7 @@ func TestMain(m *testing.M) {
 	rootK3sStart = rootK3sPorts()
 	code := m.Run()
 	removeFakeController()
+	removeFrontBinary()
 	os.Exit(code)
 }
 
@@ -222,6 +223,11 @@ func listeningOn(t testing.TB, port int) bool {
 	return false
 }
 
+// launcherPortsLo and launcherPortsHi bound the launcher tests' two blocks of 13 ports: the
+// default base 29220 (29220-29232) and the second base 29233 (29233-29245) of
+// TestUpRefusesWhenAPortIsTaken.
+const launcherPortsLo, launcherPortsHi = 29220, 29245
+
 // listeningInRange lists every listener, whoever owns it, on a port in [lo, hi].
 func listeningInRange(t testing.TB, lo, hi int) []string {
 	var out []string
@@ -322,7 +328,8 @@ func newHost(t *testing.T) *host {
 	h := &host{t: t, dir: filepath.Join(d, "st"), binDir: bin}
 	t.Cleanup(func() {
 		if _, err := os.Stat(h.dir); err == nil {
-			r := cli(t, "down", "--state-dir", h.dir, "--grace", "20s")
+			// The default grace: a host that runs the front refuses a shorter one.
+			r := cli(t, "down", "--state-dir", h.dir)
 			if r.code != 0 {
 				t.Errorf("clean-up: down exited %d: %s", r.code, r.err)
 			}

@@ -104,6 +104,7 @@ type fakeHostOps struct {
 	l          layout
 	steps      []string
 	recordSeen string
+	spec       launchSpec // what start was given
 	stopErr    error
 }
 
@@ -117,6 +118,7 @@ func (f *fakeHostOps) stop(ctx context.Context, st *State, grace time.Duration, 
 
 func (f *fakeHostOps) start(ctx context.Context, spec launchSpec, front Front, timeout time.Duration, log io.Writer) (*State, time.Duration, error) {
 	f.steps = append(f.steps, "start")
+	f.spec = spec
 	sv, err := f.l.loadStoreVersion()
 	if err != nil || sv == nil {
 		f.t.Fatalf("no store record at start: %v", err)
@@ -278,5 +280,28 @@ func TestRestore(t *testing.T) {
 	}
 	if _, err := startVersion(l, "1.36.5"); err == nil {
 		t.Error("after the restore up would start 1.36.5 on the restored store")
+	}
+}
+
+// TestReplaceHostCarriesTheSupervision: the replacement host is started with the old record's
+// controllers and front, which startAndWait writes into its first record (PR 134 review, B3). An
+// upgrade interrupted while the new k3s starts then leaves a record that still names them, so
+// status says the supervisor is missing instead of judging a host that needs none.
+func TestReplaceHostCarriesTheSupervision(t *testing.T) {
+	newBin := Binary{Version: mustVersion(t, "v1.36.5+k3s1")}
+	ctl := &ControllerConfig{Binary: "/opt/hpcburst-controller"}
+	front := &FrontRunConfig{Binary: "/opt/hpcburst-front", Config: "/etc/front.json"}
+	st := &State{Version: "v1.35.9+k3s1", Ports: Ports{API: 1, HTTPS: 2, KCM: 3, LB: 4}, Controllers: ctl, FrontRun: front}
+	l := storeLayout(t)
+	putStore(t, l, "v1", "tok", "")
+	if err := l.saveStoreVersion("v1.35.9+k3s1", "up"); err != nil {
+		t.Fatal(err)
+	}
+	ops := &fakeHostOps{t: t, l: l}
+	if _, _, _, _, err := replaceHost(context.Background(), l, st, newBin, ops, time.Second, time.Second, nil); err != nil {
+		t.Fatal(err)
+	}
+	if ops.spec.controllers != ctl || ops.spec.frontRun != front {
+		t.Errorf("the new host was started with controllers %+v and front %+v, want the old record's %+v and %+v", ops.spec.controllers, ops.spec.frontRun, ctl, front)
 	}
 }

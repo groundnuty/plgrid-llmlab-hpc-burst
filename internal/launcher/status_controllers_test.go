@@ -2,6 +2,7 @@ package launcher
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -114,17 +115,21 @@ type supervisedFakeHost struct {
 	*fakeHost
 	supRec, childRec ProcRec
 	health           string
-	code             *int // the status code /healthz answers
+	code             *int    // the status code /healthz answers
+	body             *string // the body it answers with
 }
 
 func newSupervisedFakeHost(t *testing.T) *supervisedFakeHost {
 	t.Helper()
 	h := newFakeHost(t)
-	code := http.StatusOK
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(code) }))
+	code, body := http.StatusOK, ""
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(code)
+		_, _ = io.WriteString(w, body)
+	}))
 	t.Cleanup(srv.Close)
 	u, _ := url.Parse(srv.URL)
-	s := &supervisedFakeHost{fakeHost: h, health: u.Host, code: &code}
+	s := &supervisedFakeHost{fakeHost: h, health: u.Host, code: &code, body: &body}
 	port, _ := strconv.Atoi(u.Port())
 	const supPID, childPID = 4343, 4344
 	writeFakeProc(t, h.root, supPID, "S", 1, 2000)
@@ -287,4 +292,69 @@ func TestSupervisorFileMode(t *testing.T) {
 	if got, want := f.l.supervisorFile(), filepath.Join(f.l.dir, "controller", "supervisor.json"); got != want {
 		t.Errorf("path %s, want %s", got, want)
 	}
+}
+
+// TestStatusFrontUsageDegraded: a front whose /healthz says its usage sink is failing is reported
+// as degraded, "usage writes failing", and the host stays healthy: status exits 0, and no reason
+// is added (@hpc-burst-science-agent, 31 Oct 2026; HBEP-8, Usage records). The bodies follow
+// HBEP-8's statement of the front's /healthz: a usage member with state ok or failing,
+// lostRecords, since and the last error. That the real front writes this member is checked
+// against the real binary in cmd/hpcburst's TestFrontSupervision.
+func TestStatusFrontUsageDegraded(t *testing.T) {
+	const failing = `{"synced":true,"usage":{"state":"failing","lostRecords":3,"since":"2026-10-31T12:00:00.000Z","error":"usage: write usage-2026-10-31.jsonl: no space left on device"},"usageError":"usage: write usage-2026-10-31.jsonl: no space left on device"}`
+	const ok = `{"synced":true,"usage":{"state":"ok","lostRecords":0,"since":"2026-10-31T12:00:00.000Z"}}`
+	front := func(s *supervisedFakeHost, body string) *StatusReport {
+		s.t.Helper()
+		*s.body = body
+		s.writeSupervisorFile(s.supRec, EntryRecord{Name: "front", Health: s.health, State: entryRunning, Proc: &s.childRec})
+		return s.status(true)
+	}
+	t.Run("failing usage: degraded, and still healthy", func(t *testing.T) {
+		rep := front(newSupervisedFakeHost(t), failing)
+		if rep.Health != Healthy || len(rep.Reasons) != 0 {
+			t.Fatalf("health %s, reasons %v: a failing usage sink is not a health problem", rep.Health, rep.Reasons)
+		}
+		if len(rep.Controllers) != 1 {
+			t.Fatalf("entries %+v", rep.Controllers)
+		}
+		if c := rep.Controllers[0]; c.Name != "front" || c.UsageState != "failing" || c.Degraded != "usage writes failing" || c.HealthzOK == nil || !*c.HealthzOK {
+			t.Errorf("the front is reported as %+v", c)
+		}
+	})
+	t.Run("usage ok: not degraded", func(t *testing.T) {
+		rep := front(newSupervisedFakeHost(t), ok)
+		if rep.Health != Healthy || len(rep.Controllers) != 1 || rep.Controllers[0].UsageState != "ok" || rep.Controllers[0].Degraded != "" {
+			t.Errorf("health %s, entries %+v", rep.Health, rep.Controllers)
+		}
+	})
+	// The front always states its sink, so a body without a known state is reported as unknown
+	// (PR 134 review, N2), still without touching the health; a controller states none.
+	for _, c := range []struct{ name, body string }{
+		{"no body", ""},
+		{"no usage member", `{"synced":true}`},
+		{"a state HBEP-8 does not name", `{"synced":true,"usage":{"state":"draining"}}`},
+		{"a body cut at the read limit", `{"synced":true,"usage":{"state":"ok"` + strings.Repeat(" ", healthzBodyLimit) + `}}`},
+	} {
+		t.Run("front, "+c.name+": usage state unknown", func(t *testing.T) {
+			rep := front(newSupervisedFakeHost(t), c.body)
+			if rep.Health != Healthy || len(rep.Reasons) != 0 || rep.Controllers[0].UsageState != "unknown" || rep.Controllers[0].Degraded != "" {
+				t.Errorf("health %s, reasons %v, entries %+v", rep.Health, rep.Reasons, rep.Controllers)
+			}
+		})
+	}
+	t.Run("the controller, which states no usage: nothing said", func(t *testing.T) {
+		s := newSupervisedFakeHost(t) // its entry is the controller
+		rep := s.status(true)
+		if rep.Health != Healthy || rep.Controllers[0].Name != "controller" || rep.Controllers[0].UsageState != "" {
+			t.Errorf("health %s, entries %+v", rep.Health, rep.Controllers)
+		}
+	})
+	t.Run("a 503 stays unhealthy, whatever its body says", func(t *testing.T) {
+		s := newSupervisedFakeHost(t)
+		*s.code = http.StatusServiceUnavailable
+		rep := front(s, failing)
+		if rep.Health != Unhealthy || rep.Controllers[0].Degraded != "" {
+			t.Errorf("health %s, entries %+v", rep.Health, rep.Controllers)
+		}
+	})
 }
