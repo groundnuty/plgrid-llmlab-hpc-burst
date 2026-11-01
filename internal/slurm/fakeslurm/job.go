@@ -213,11 +213,20 @@ type Job struct {
 	// PID is the batch shell's PID, which is also its process group and
 	// session ID; 0 until the execution starts.
 	PID int
-	// Finished is true once every process of the execution is gone: the
-	// batch shell was reaped and nothing is left in its session.
+	// Finished is true once the execution is terminal and none of its
+	// processes is left: the batch shell was reaped and nothing is in its
+	// session. An execution that ended without ever having a process
+	// (cancelled while pending or held, ended by a control, one whose
+	// start failed) is Finished as soon as it is terminal. It is never true
+	// while a process of the execution may live: if the fake cannot list or
+	// kill them (processes that survive KILL, an unreadable /proc), it stays
+	// false and CleanupErr says why. A test that waits for the job's
+	// processes to end waits for Finished.
 	Finished bool
-	// ExitCode is the batch shell's exit status once it has been reaped, -1
-	// when a signal ended it; ExitSignal is that signal.
+	// ExitCode is the batch shell's exit status once it has exited, -1 when
+	// a signal ended it; ExitSignal is that signal. The job's state follows
+	// at once (unless it had ended already), before its other processes are
+	// cleared.
 	ExitCode   int
 	ExitSignal syscall.Signal
 	// TermAt and KillAt are the wall-clock times the fake sent the job TERM
@@ -228,6 +237,9 @@ type Job struct {
 	// StartErr is why the execution could not start (its directory or an
 	// output file could not be made); the job then ended FAILED.
 	StartErr error
+	// CleanupErr is why the execution's processes or directory could not be
+	// cleared, or a signal could not be sent; nil when all went well.
+	CleanupErr error
 }
 
 func (j *job) snapshot() Job {
@@ -243,8 +255,9 @@ func (j *job) snapshot() Job {
 		s.HoldReason = e.reason
 	}
 	if r := e.run; r != nil {
-		s.PID, s.Finished, s.TermAt, s.KillAt, s.StartErr = r.pid, r.done, r.termAt, r.killAt, r.startErr
-		if r.done {
+		s.PID, s.Finished, s.TermAt, s.KillAt = r.pid, r.done, r.termAt, r.killAt
+		s.StartErr, s.CleanupErr = r.startErr, r.cleanupErr
+		if r.exitSeen {
 			s.ExitCode, s.ExitSignal = r.exitCode, r.exitSignal
 		}
 	}

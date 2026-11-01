@@ -129,25 +129,49 @@
 //     directory of the execution under RunMode.JobDir, a featured one only
 //     for a job whose --constraint names the feature. The execution's
 //     directory goes when its processes are gone.
-//   - The job is RUNNING while its batch shell runs. When the shell exits,
-//     whatever is left of the job is killed, as Slurm's cgroup does: the
-//     session's processes and their descendants, so a child in a process
-//     group of its own goes too. Then the job is COMPLETED for exit 0 and
-//     FAILED otherwise, a signal included. A child that calls setsid and
-//     whose parent has died escapes this; a cgroup would catch it.
+//   - The job is RUNNING while its batch shell runs. The moment the shell
+//     exits the job is COMPLETED for exit 0 and FAILED otherwise, a signal
+//     included, unless something ended it first; a scancel that comes later
+//     finds a finished job. Then whatever is left of the job is killed, as
+//     Slurm's cgroup does: the session's processes and their descendants, so
+//     a child in a process group of its own goes too. A child that calls
+//     setsid and whose parent has died escapes this; a cgroup would catch it.
 //   - scancel ends the job CANCELLED at once, as slurmctld does, then sends
 //     CONT and TERM to its processes and, after RunMode.KillWait, KILL to
 //     what is left. The time limit (RunMode.Minute per minute of --time, from
-//     the start) ends it TIMEOUT the same way; SetTimeLimit moves the limit.
-//     End and Requeue send KILL at once, as a failed node does; a requeued
-//     job's new execution starts once the old one's processes are gone.
-//   - Job carries the execution's PID, whether its processes are gone
-//     (Finished), its exit code or signal, and when TERM and KILL were sent;
-//     Processes lists the live ones. Tests wait on these, never on a sleep.
+//     the start) ends it TIMEOUT the same way; SetTimeLimit moves the limit,
+//     counted from the start, and one already passed ends the job TIMEOUT
+//     before it returns. End and Requeue send KILL at once, as a failed node
+//     does; a requeued job's new execution starts once the old one's
+//     processes are gone.
+//   - The fake signals only processes it started. The batch shell stays a
+//     zombie until the last scan of its session, because a zombie keeps its
+//     PID, the session ID the scans select by; no scan of /proc runs after
+//     the shell is reaped. A member is signalled through a pidfd, opened
+//     before its start time is checked again, so a recycled PID is left
+//     alone. What is left is a window inside one listing of /proc: a
+//     descendant is a process whose parent's PID is a member's, and a stranger
+//     would be signalled only if a member exited, its PID went to an
+//     unrelated process and that process forked, all within the few
+//     milliseconds of one listing; that takes a wrap of the PID space and
+//     cannot be tested. A /proc that cannot be read is an error, never "none".
+//   - Job carries the execution's PID, Finished, its exit code or signal, when
+//     TERM and KILL were sent, and CleanupErr. Finished is true once the
+//     execution is terminal and none of its processes is left (the shell is
+//     reaped and nothing is in its session), at once for an execution that
+//     never had a process (cancelled while held, ended by a control), and
+//     never while a process may live: if the processes survive KILL for 30 s
+//     or /proc cannot be read, Finished stays false and CleanupErr says why.
+//     Processes lists the live ones, and returns an error when it cannot tell.
+//     Tests wait on these, never on a sleep. Finished is not "every
+//     descendant reaped": an orphan that init has not reaped yet is a zombie
+//     in the job's process group, which the kernel still counts as a member.
 //   - Close sends KILL to every job's processes and waits for them, and no
-//     job starts after it. A Platform in run mode must be closed. Timers and
-//     the grace are wall time; job states and times use the Platform's
-//     clock, so a full-stack run passes a real clock.
+//     job starts after it; a job still RUNNING then ends FAILED, killed by a
+//     signal, like any job whose shell is killed. It returns an error for a
+//     job whose processes survived or could not be listed. A Platform in run
+//     mode must be closed. Timers and the grace are wall time; job states and
+//     times use the Platform's clock, so a full-stack run passes a real clock.
 //   - The fake has no Pdeathsig: in Go it fires when the forking thread
 //     exits, not the process. A process that ends without Close leaves its
 //     jobs running, as a Slurm job outlives the login session.

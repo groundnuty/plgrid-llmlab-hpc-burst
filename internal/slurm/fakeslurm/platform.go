@@ -94,7 +94,8 @@ type Platform struct {
 	zone  *time.Location
 
 	// run is the normalized run mode; nil outside it.
-	run *RunMode
+	run   *RunMode
+	knobs runKnobs // run mode only
 
 	mu       sync.Mutex
 	jobs     []*job
@@ -150,6 +151,7 @@ func New(clock Clock, cfg Config) *Platform {
 			panic(fmt.Sprintf("fakeslurm: RunMode.Root: %v", err))
 		}
 		p.fs = d
+		p.knobs = hostKnobs()
 	}
 	return p
 }

@@ -32,8 +32,11 @@ const waitDeadline = 60 * time.Second
 const helperEnv = "FAKESLURM_TEST_HELPER"
 
 func TestMain(m *testing.M) {
-	if os.Getenv(helperEnv) == "setpgid-sleep" {
+	switch os.Getenv(helperEnv) {
+	case "setpgid-sleep":
 		os.Exit(setpgidSleep(os.Args[1]))
+	case "setpgid-term":
+		os.Exit(setpgidTerm(os.Args[1], os.Args[2]))
 	}
 	os.Exit(m.Run())
 }
@@ -60,8 +63,20 @@ type runRig struct {
 // the test if a job's processes survive.
 func newRunRig(t *testing.T, mode RunMode) *runRig {
 	t.Helper()
+	// The Athena shape lists an ended job in its end state until MinJobAge,
+	// which the manual clock never reaches, so squeue shows the end state.
+	return newRunRigCfg(t, Config{Run: &mode, NotListed: NotListedAthena}, true)
+}
+
+// newRunRigCfg is newRunRig for any Config, whose Run is set. With
+// checkClose false the cleanup closes the platform without judging it, for a
+// test that expects Close to fail and checks that itself.
+func newRunRigCfg(t *testing.T, cfg Config, checkClose bool) *runRig {
+	t.Helper()
 	root := t.TempDir()
+	mode := *cfg.Run
 	mode.Root = root
+	cfg.Run = &mode
 	home, scratch := filepath.Join(root, "home", "example-user"), filepath.Join(root, "scratch", "example-user")
 	for _, d := range []string{home, scratch} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
@@ -69,11 +84,9 @@ func newRunRig(t *testing.T, mode RunMode) *runRig {
 		}
 	}
 	clock := fake.NewClock(t0)
-	// The Athena shape lists an ended job in its end state until MinJobAge,
-	// which the manual clock never reaches, so squeue shows the end state.
-	p := New(clock, Config{Run: &mode, NotListed: NotListedAthena})
+	p := New(clock, cfg)
 	t.Cleanup(func() {
-		if err := p.Close(); err != nil {
+		if err := p.Close(); err != nil && checkClose {
 			t.Errorf("Close: %v", err)
 		}
 	})
@@ -203,9 +216,7 @@ func TestRunModeRunsWrapUnderShInItsOwnGroup(t *testing.T) {
 	if j.State != Completed || j.ExitCode != 0 {
 		t.Errorf("after exit 0: state %s, exit code %d; want COMPLETED, 0", j.State, j.ExitCode)
 	}
-	if !groupGone(j.PID) {
-		t.Errorf("process group %d still has processes after the job finished", j.PID)
-	}
+	waitGroupGone(t, j.PID)
 }
 
 func equalStrings(v any, want ...string) bool {
