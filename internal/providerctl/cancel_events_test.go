@@ -13,13 +13,17 @@ package providerctl
 // is not due) and without a Batch write (which would mark it stale).
 
 import (
+	"context"
+	"io"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider/fake"
 )
 
@@ -148,5 +152,89 @@ func TestDeleteRaisesNoJobCancelledForAJobSlurmNoLongerKnows(t *testing.T) {
 	}
 	if got := jobCancelled(rec); got != 0 {
 		t.Errorf("%d JobCancelled events by the end of the deletion, want 0: %v", got, rec.reasons())
+	}
+}
+
+// beforeCancel runs a hook once, just before the Platform's next Cancel: the
+// window between Observe's listing and the cancel, in which a job can end.
+type beforeCancel struct {
+	Platform
+	hook func()
+}
+
+func (b *beforeCancel) Cancel(ctx context.Context, ids []string) []provider.CancelResult {
+	if h := b.hook; h != nil {
+		b.hook = nil
+		h()
+	}
+	return b.Platform.Cancel(ctx, ids)
+}
+
+func withBeforeCancel(b *beforeCancel) realOption {
+	return func(e *realEnv) {
+		inner := e.opts.NewPlatform
+		e.opts.NewPlatform = func(v slurm.Validated) (Platform, io.Closer, error) {
+			p, c, err := inner(v)
+			b.Platform = p
+			return b, c, err
+		}
+	}
+}
+
+func heldCancelled(rec *recorder) (n int) {
+	for _, r := range rec.reasons() {
+		if r == "HeldDuplicateCancelled" {
+			n++
+		}
+	}
+	return n
+}
+
+// settle cancels a held extra job with the tag, and says so only for a job the
+// Batch cancelled live. One that ended after the listing that showed it held
+// is a no-op: no event, and no error either.
+func TestSettleReportsAHeldExtraCancelledOnlyWhenItWasLive(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		endsFirst bool
+		events    int
+	}{{"live", false, 1}, {"ended before the cancel", true, 0}} {
+		t.Run(c.name, func(t *testing.T) {
+			rec := &recorder{}
+			hook := &beforeCancel{}
+			clock := fake.NewClock(at(12, 0, 0))
+			sl := newSlurm(clock, fakeslurm.Config{NotListed: fakeslurm.NotListedHelios})
+			e := newRealEnv(t, clock, sl, newFakeClient(t, "prov-a"), "prov-a", "user-a", withRecorder(rec), withBeforeCancel(hook))
+			a := e.newAlloc("alloc-a", 1)
+			e.run("alloc-a", 2)
+			recorded := e.get("alloc-a").Annotations[v1alpha1.AnnotationJobID]
+			e.extraSbatch(tagOf(a), true)
+			var extra int
+			for _, j := range sl.Jobs() {
+				if strconv.Itoa(j.ID) != recorded && j.Name == tagOf(a) {
+					extra = j.ID
+				}
+			}
+			if extra == 0 {
+				t.Fatal("precondition: the extra job is not on the platform")
+			}
+			if c.endsFirst {
+				hook.hook = func() {
+					if err := sl.End(extra, fakeslurm.Cancelled); err != nil {
+						t.Error(err)
+					}
+				}
+			}
+			e.poll("alloc-a", 1)
+			if c.endsFirst && hook.hook != nil {
+				t.Fatal("precondition: settle did not cancel the extra, so the job never ended before the cancel")
+			}
+			if got := heldCancelled(rec); got != c.events {
+				t.Errorf("%d HeldDuplicateCancelled events, want %d: %v", got, c.events, rec.reasons())
+			}
+			if reasons := strings.Join(rec.reasons(), " "); strings.Contains(reasons, "Cannot") {
+				t.Errorf("a failure event: %v", rec.reasons())
+			}
+		})
 	}
 }
