@@ -257,8 +257,8 @@ func TestTheReaperSignalsOnlyDirectChildren(t *testing.T) {
 	table := map[int]procInfo{
 		100: {ppid: 1}, 101: {ppid: 100}, 102: {ppid: 101}, 103: {ppid: 100}, 104: {ppid: 103}, 200: {ppid: 1},
 	}
-	if got, want := directChildrenOf(100, table), []int{101, 103}; !reflect.DeepEqual(got, want) {
-		t.Errorf("directChildrenOf(100) = %v, want %v: grandchildren are never signalled", got, want)
+	if got, want := killTargets(100, table), []int{101, 103}; !reflect.DeepEqual(got, want) {
+		t.Errorf("killTargets(100) = %v, want %v: grandchildren are never signalled", got, want)
 	}
 	if got, want := descendantsOf(100, table), []int{101, 102, 103, 104}; !reflect.DeepEqual(got, want) {
 		t.Errorf("descendantsOf(100) = %v, want %v (it names; it does not signal)", got, want)

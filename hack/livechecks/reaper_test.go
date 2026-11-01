@@ -454,7 +454,7 @@ func killChildren(self int, within time.Duration) string {
 			return ""
 		}
 		if table, err := readProcTable(); err == nil {
-			for _, p := range directChildrenOf(self, table) {
+			for _, p := range killTargets(self, table) {
 				_ = syscall.Kill(p, syscall.SIGKILL)
 			}
 		}
@@ -484,8 +484,10 @@ func awaitZombies(self int) {
 	}
 }
 
-// directChildrenOf lists the processes whose parent is root in table, in pid order. These are
-// the only processes the reaper signals.
+// killTargets are the processes killChildren signals: self's direct children and nothing deeper.
+func killTargets(self int, table map[int]procInfo) []int { return directChildrenOf(self, table) }
+
+// directChildrenOf lists the processes whose parent is root in table, in pid order.
 func directChildrenOf(root int, table map[int]procInfo) []int {
 	var out []int
 	for pid, p := range table {
