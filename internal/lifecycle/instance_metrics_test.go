@@ -498,3 +498,38 @@ func TestMetricsRestartAtEachRungStartsNewSeries(t *testing.T) {
 		t.Fatalf("%d restarts recorded, want 2 (worker, then whole Instance)", len(got))
 	}
 }
+
+// TestMetricsNegativeCountIsUnknown: a negative count is no count. Each count
+// field that arrives negative is unknown (absent, with reason not_reported),
+// never passed on as a negative sample, and a real zero stays 0.
+func TestMetricsNegativeCountIsUnknown(t *testing.T) {
+	rg, in, _ := healthRig(t, func() afake.Engine {
+		return afake.Engine{Health: func(now time.Time, p afake.Process) agentapi.Health {
+			h := knownHealth(now, p)
+			h.RunningRequests, h.Preemptions, h.PrefixCacheHitTokens = agentapi.Int64(-1), agentapi.Int64(-5), agentapi.Int64(-600)
+			h.WaitingRequests = agentapi.Int64(0)
+			return h
+		}}
+	})
+	uid := string(in.UID)
+	ex := scrape(t, rg)
+	negative := []string{
+		"hpcburst_instance_running_requests",
+		"hpcburst_instance_preemptions_total",
+		"hpcburst_instance_prefix_cache_hit_tokens_total",
+	}
+	if u := ex.unknowns(uid, "worker-0"); len(u) != 1 || !slices.Equal(u[unknownNotReported], sorted(negative)) {
+		t.Fatalf("unknown series %v, want %v with reason not_reported", u, sorted(negative))
+	}
+	for _, name := range negative {
+		if got := ex.find(name, map[string]string{"instance_uid": uid}); len(got) != 0 {
+			t.Errorf("%s: %v, want absent for a negative count", name, got)
+		}
+	}
+	if got := ex.value(t, "hpcburst_instance_waiting_requests", map[string]string{"instance_uid": uid}); got != "0" {
+		t.Errorf("waiting requests %s, want the real zero 0", got)
+	}
+	if got := len(ex.engineSeries(uid)); got != 9-len(negative) {
+		t.Errorf("%d engine samples, want the %d of the metrics with a known count", got, 9-len(negative))
+	}
+}

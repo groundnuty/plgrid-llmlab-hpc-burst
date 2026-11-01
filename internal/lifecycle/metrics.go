@@ -51,7 +51,8 @@ type engineMetric struct {
 
 func intOf(f func(*agentapi.Health) *int64) func(*agentapi.Health) (float64, bool) {
 	return func(h *agentapi.Health) (float64, bool) {
-		if v := f(h); v != nil {
+		// A negative count is no count: unknown, as engineMetric says.
+		if v := f(h); v != nil && *v >= 0 {
 			return float64(*v), true
 		}
 		return 0, false
