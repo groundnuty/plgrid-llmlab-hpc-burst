@@ -326,21 +326,56 @@ func TestSlowFirstDelaysTheFirstRequestOfEachShape(t *testing.T) {
 	}
 }
 
-// never-settle=100: with TokenDelay 20 ms and 10 tokens, each request of a shape
-// waits 100% of 20*10 ms = 200 ms longer than the one before. The bounds are
-// loose, since a loaded machine only adds time; the upper one rules out a
-// multiplicative growth, which would double the wait each time.
+// never-settle=100: with TokenDelay 20 ms and 10 tokens, the n-th request of a shape (counting from 0)
+// waits n * 100% * 20 ms * 10 = n * 200 ms before its first token (engine.beforeFirstToken), so each waits
+// 200 ms longer than the one before. The test shows two things, each with a bound that a loaded machine
+// cannot move, and sets no other:
+//   - the double decided the growth: each request's record holds exactly n * 200 ms of injected wait, the
+//     double's own number (LogEvent.InjectedNS), so a growth that doubles each time, or stops, is caught
+//     with no clock in it;
+//   - the double slept the wait: the first byte comes at least that wait after the request was sent. A
+//     timer never fires early and the request is sent before the double starts the timer, so this holds
+//     on any machine (no tolerance is needed), and load only adds time to it.
+//
+// There is deliberately no bound on the step between two consecutive first bytes, and none from above on
+// a first byte: a step is a difference of two waits that load lengthens by different amounts, so it can
+// shrink as well as grow (283 ms, then 427 ms: a step of 144 ms, issue #203).
 func TestNeverSettleGrowsEachRequest(t *testing.T) {
 	cfg := cfgFor()
 	cfg.TokenDelay, cfg.NeverSettle = 20*time.Millisecond, 100
-	s := serve(t, cfg)
+	const requests, share = 4, 200 * time.Millisecond // share: 100% of 20 ms * 10 tokens
+	var mu sync.Mutex
+	var recs []LogEvent
+	s := serveHandler(t, newHandler(cfg, func(ev LogEvent) {
+		if ev.Event == "request" {
+			mu.Lock()
+			recs = append(recs, ev)
+			mu.Unlock()
+		}
+	}))
 	var ttfb []time.Duration
-	for i := 0; i < 4; i++ {
+	for i := 0; i < requests; i++ {
 		ttfb = append(ttfb, s.timeToFirstByte(chatBody(5, map[string]any{"max_tokens": 10, "ignore_eos": true})))
 	}
-	for i := 1; i < len(ttfb); i++ {
-		if step := ttfb[i] - ttfb[i-1]; step < 150*time.Millisecond || step > 500*time.Millisecond {
-			t.Errorf("request %d waited %v, request %d %v: the step is %v, want about 200ms (all: %v)", i, ttfb[i], i-1, ttfb[i-1], step, ttfb)
+	// A request's record is written when its handler returns, which can be just after the client has read
+	// the end of the answer: wait for the four records.
+	var got []LogEvent
+	eventually(t, 10*time.Second, "four request records", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append([]LogEvent(nil), recs...)
+		return len(got) == requests
+	})
+	for i, ev := range got {
+		want := time.Duration(i) * share
+		if ev.Nth != i || time.Duration(ev.InjectedNS) != want {
+			t.Errorf("request %d is the %dth of its shape and the double made it wait %v, want the %dth and exactly %v (records: %+v)", i, ev.Nth, time.Duration(ev.InjectedNS), i, want, got)
+		}
+		if ttfb[i] < time.Duration(ev.InjectedNS) {
+			t.Errorf("request %d had its first byte after %v, before the %v the double says it slept (all: %v)", i, ttfb[i], time.Duration(ev.InjectedNS), ttfb)
+		}
+		if ttfb[i] < time.Duration(i)*share {
+			t.Errorf("request %d had its first byte after %v, want at least %v (all: %v)", i, ttfb[i], time.Duration(i)*share, ttfb)
 		}
 	}
 }
