@@ -212,10 +212,15 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 	if workers <= 0 {
 		workers = DefaultWorkers
 	}
-	// The work-queue options are controllerOptions' alone; the name check is
-	// the one thing set here, from the test-only skipNameCheck (see Options).
+	// The work-queue options are controllerOptions' alone. The test-only
+	// skipNameCheck is set here, and only when true, so that nothing here can
+	// switch off a SkipNameValidation that controllerOptions itself sets (see
+	// Options).
 	options := controllerOptions(workers)
-	options.SkipNameValidation = &o.skipNameCheck
+	if o.skipNameCheck {
+		skip := true
+		options.SkipNameValidation = &skip
+	}
 	c := mgr.GetClient()
 	err = ctrl.NewControllerManagedBy(mgr).
 		Named("lifecycle").
