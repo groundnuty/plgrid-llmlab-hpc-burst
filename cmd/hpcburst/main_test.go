@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -368,6 +369,15 @@ func (h *host) args(extra ...string) []string {
 
 func (h *host) upArgs(base int, extra ...string) []string {
 	return append([]string{"up", "--state-dir", h.dir, "--bin-dir", h.binDir, "--port-base", strconv.Itoa(base), "--nice", "10"}, extra...)
+}
+
+// frpsArgs names the pinned frps for an up that runs the controllers, which also runs frps
+// (HBEP-6): the frps of $HPCBURST_FRP_DIR, so the same frps runs here and in CI, where it is not
+// under --bin-dir. testenv.FrpBinaries skips without it, or fails under HPCBURST_REQUIRE_FRP=1.
+func frpsArgs(t *testing.T) []string {
+	t.Helper()
+	frps, _ := testenv.FrpBinaries(t)
+	return []string{"--frps-bin", frps}
 }
 
 // k3sProcessesUsing finds processes whose environment names the state directory (HOME is inside

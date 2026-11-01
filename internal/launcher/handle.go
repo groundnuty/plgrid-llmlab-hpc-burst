@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -313,6 +315,14 @@ func ownedListeners(hs []*procHandle) (owned, others []sock, err error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	owned, others = splitOwned(hs, all)
+	return owned, others, nil
+}
+
+// splitOwned divides all into the sockets held by the handles' processes and the rest, by socket
+// inode, with ownedListeners's rule: a process's descriptors count only if it is verified again
+// after they were read.
+func splitOwned(hs []*procHandle, all []sock) (owned, others []sock) {
 	inodes := map[string]bool{}
 	for _, h := range hs {
 		got := fdSocketInodes(h.rec.PID)
@@ -330,7 +340,7 @@ func ownedListeners(hs []*procHandle) (owned, others []sock, err error) {
 			others = append(others, s)
 		}
 	}
-	return owned, others, nil
+	return owned, others
 }
 
 // treeListeners is ownedListeners for the root and its adopted descendants.
@@ -338,6 +348,43 @@ func treeListeners(root *procHandle) (owned, others []sock, err error) {
 	tree := openTree(root)
 	defer closeAll(tree[1:])
 	return ownedListeners(tree)
+}
+
+// treeBound is treeListeners with UDP: every socket of the network namespace that can be reached
+// from outside it (boundSockets), divided into those of root's tree and the rest.
+func treeBound(root *procHandle) (owned, others []sock, err error) {
+	all, err := boundSockets()
+	if err != nil {
+		return nil, nil, err
+	}
+	tree := openTree(root)
+	defer closeAll(tree[1:])
+	owned, others = splitOwned(tree, all)
+	return owned, others, nil
+}
+
+// addrOwned reports whether root's tree holds a TCP LISTEN socket bound to exactly addr (host and
+// port). A socket on the same port at another address does not count: a connection to addr does
+// not reach it, and whatever holds addr itself answers instead.
+func addrOwned(root *procHandle, addr string) (bool, error) {
+	host, p, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false, err
+	}
+	ip, port := net.ParseIP(host), 0
+	if port, err = strconv.Atoi(p); err != nil || ip == nil {
+		return false, fmt.Errorf("%q is not an IP address and port", addr)
+	}
+	owned, _, err := treeListeners(root)
+	if err != nil {
+		return false, err
+	}
+	for _, s := range owned {
+		if s.Port == port && ip.Equal(net.ParseIP(s.Addr)) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // portOwned reports whether a LISTEN socket on port is held by the process tree of root.

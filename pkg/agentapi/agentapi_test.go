@@ -72,6 +72,42 @@ func TestAgentConfigEncodeIsStableAndRoundTrips(t *testing.T) {
 	}
 }
 
+// The ssh user is a portable user name of at most 32 characters: capitals
+// are taken (the controller's own user may have them, as the development VM's
+// does), a leading digit or '-', a 33rd character, a space and an '@' are not
+// (`@hpc-burst-science-agent`, 1 Nov 2026, review of PR 132: B2).
+func TestAgentConfigSSHUser(t *testing.T) {
+	for user, ok := range map[string]bool{
+		"Mixed_Case.Name":       true,
+		"ExampleUser":           true,
+		"example-user":          true,
+		"_svc.user-1":           true,
+		"A":                     true,
+		strings.Repeat("a", 32): true,
+		"":                      false,
+		"1user":                 false,
+		"-user":                 false,
+		".user":                 false,
+		strings.Repeat("a", 33): false,
+		"example user":          false,
+		"user@example.org":      false,
+		"user;id":               false,
+		"us\u00e9r":             false,
+	} {
+		c := validConfig()
+		ssh := *c.SSH
+		c.SSH = &ssh
+		c.SSH.User = user
+		err := c.Validate()
+		if ok && err != nil {
+			t.Errorf("ssh.user %q was refused: %v", user, err)
+		}
+		if !ok && (err == nil || !strings.Contains(err.Error(), "ssh.user")) {
+			t.Errorf("ssh.user %q: %v, want a refusal naming ssh.user", user, err)
+		}
+	}
+}
+
 func TestAgentConfigValidate(t *testing.T) {
 	direct := validConfig()
 	direct.Mode, direct.Endpoint, direct.SSH = DialHomeDirect, "front.example:8443", nil

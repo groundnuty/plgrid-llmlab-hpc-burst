@@ -40,6 +40,13 @@ type StatusReport struct {
 	Writes     *bool        `json:"writes_ok,omitempty"`
 	GC         *bool        `json:"gc_ok,omitempty"` // the garbage-collector probe
 	Front      *Front       `json:"front,omitempty"`
+	// EventTTL is how long the API server keeps an Event, from the launcher's own record of the
+	// arguments it started k3s with (State.EventTTL; HBEP-8, Retention), never from the API server.
+	// EventTTLDefault is true when the record has none, as it has not after a start by an earlier
+	// release: EventTTL is then the API server's own default, and a restart (down and up, or
+	// upgrade) applies DefaultEventTTL. That host is not unhealthy.
+	EventTTL        string `json:"event_ttl,omitempty"`
+	EventTTLDefault bool   `json:"event_ttl_default,omitempty"`
 	// Supervisor and Controllers are set when the launcher runs controllers: the supervisor's
 	// identity check and each supervised process.
 	Supervisor  *SupervisorHealth `json:"supervisor,omitempty"`
@@ -89,6 +96,9 @@ func Status(ctx context.Context, o StatusOptions) (*StatusReport, error) {
 		return rep, nil
 	}
 	rep.Version, rep.StartedAt, rep.Ports, rep.Front = st.Version, &st.StartedAt, &st.Ports, &st.Front
+	if rep.EventTTL = st.EventTTL; rep.EventTTL == "" {
+		rep.EventTTL, rep.EventTTLDefault = apiserverEventTTL, true
+	}
 	rep.Health = Healthy
 	bad := func(format string, a ...any) {
 		rep.Health = Unhealthy

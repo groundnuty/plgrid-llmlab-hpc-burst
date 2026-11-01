@@ -58,7 +58,7 @@ func TestCheckEntry(t *testing.T) {
 		other := e
 		other.Health = decoy
 		eh, problems := checkEntry(sup, supPID, other)
-		if !strings.Contains(joined(problems), "does not hold its health port") || eh.HealthzOK != nil {
+		if !strings.Contains(joined(problems), "does not hold its health address") || eh.HealthzOK != nil {
 			t.Fatalf("%+v, problems %v: the decoy's answer must not be asked for, let alone count", eh, problems)
 		}
 	})
@@ -232,7 +232,7 @@ func TestStatusWithControllers(t *testing.T) {
 		s := newSupervisedFakeHost(t)
 		s.giveSocket(9999, s.st.Ports.Controller) // the socket now belongs to some other process
 		rep := s.status(true)
-		if rep.Health != Unhealthy || !strings.Contains(reasons(rep), "does not hold its health port") {
+		if rep.Health != Unhealthy || !strings.Contains(reasons(rep), "does not hold its health address") {
 			t.Fatalf("%s: %v", rep.Health, rep.Reasons)
 		}
 		if c := rep.Controllers[0]; c.HealthzOK != nil {

@@ -88,6 +88,10 @@ type State struct {
 	Procs        []ProcRec `json:"processes"`
 	StartedAt    time.Time `json:"started_at"`
 	Front        Front     `json:"front"`
+	// EventTTL is the event-ttl the launcher started k3s with (HBEP-8, Retention), written with the
+	// first record of a start. status reports it. Empty in the record of a host that an earlier
+	// release started: that k3s ran with the API server's own default of one hour.
+	EventTTL string `json:"event_ttl,omitempty"`
 	// Controllers is what the supervisor runs. up records it before it starts the supervisor,
 	// which reads it back from here, and upgrade starts the supervisor again from it. Nil when no
 	// controller binary was found: no controllers run.
@@ -95,6 +99,9 @@ type State struct {
 	// FrontRun is the front the supervisor runs beside the controllers (issue #64). Nil when up was
 	// given no --front-config.
 	FrontRun *FrontRunConfig `json:"front_run,omitempty"`
+	// Frps is the frps the supervisor runs (HBEP-6). Nil when no frps was found at up, or no
+	// controllers run.
+	Frps *FrpsRunConfig `json:"frps,omitempty"`
 }
 
 // ControllerConfig is the launcher's choice of what to run beside k3s.

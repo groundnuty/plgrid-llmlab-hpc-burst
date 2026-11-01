@@ -4,9 +4,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
@@ -259,9 +263,64 @@ func TestFrpPinsFile(t *testing.T) {
 	if _, err := frpPinFor(pins, DefaultFrpVersion, "riscv64"); err == nil {
 		t.Error("an architecture with no pin was accepted")
 	}
-	for _, bad := range []string{"0.71.1 amd64 x.tgz abc def", "0.71.1 amd64 x.tgz", strings.Repeat("g", 64)} {
+	sum := strings.Repeat("a", 64)
+	for _, bad := range []string{
+		"0.71.1 amd64 x.tgz abc def ghi",
+		"0.71.1 amd64 x.tgz",
+		strings.Repeat("g", 64),
+		"0.71.1 amd64 x.tgz " + sum + " " + sum, // the five fields of a file without frpc
+		"0.71.1 amd64 x.tgz " + sum + " " + sum + " " + strings.Repeat("A", 64),       // upper case: not agent.json's form
+		"0.71.1 amd64 x.tgz " + sum + " " + sum + " " + sum + " " + sum,               // seven fields
+		"0.71.1 amd64 x.tgz " + sum + " " + sum + " " + strings.Repeat("a", 63) + "g", // not hex
+	} {
 		if _, err := parseFrpPins(bad); err == nil {
 			t.Errorf("parsed %q", bad)
+		}
+	}
+}
+
+// TestFrpcDigests: the frpc digests are keyed by cpuArch, the kernel's machine name that platform
+// profiles use (x86_64, aarch64), each from its own line's frpc column. The fixture's sums are
+// distinct, so a column or an architecture taken from the wrong place shows.
+func TestFrpcDigests(t *testing.T) {
+	a, b, c, d := strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64), strings.Repeat("d", 64)
+	pins, err := parseFrpPins("0.71.1 amd64 x.tgz " + a + " " + b + " " + c + "\n0.71.1 arm64 y.tgz " + b + " " + c + " " + d + "\n0.70.0 arm64 z.tgz " + a + " " + a + " " + a + "\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := frpcDigests(pins, "0.71.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got["x86_64"] != c || got["aarch64"] != d {
+		t.Errorf("frpcDigests = %v, want x86_64 %s and aarch64 %s", got, c, d)
+	}
+	if _, err := frpcDigests(pins, "9.9.9"); err == nil {
+		t.Error("a version with no pin gave digests")
+	}
+	riscv := append(pins, FrpPin{Version: "0.71.1", Arch: "riscv64", FrpcSHA256: a})
+	if got, err := frpcDigests(riscv, "0.71.1"); err == nil || !strings.Contains(err.Error(), "riscv64") {
+		t.Errorf("an architecture with no cpuArch name: %v, %v; want an error naming it, not a digest left out", got, err)
+	}
+
+	// The embedded file: both architectures of the default release, distinct from each other and
+	// from the frps sums of their lines (a column mix-up).
+	all, err := parseFrpPins(frpPinsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned, err := FrpcDigests(DefaultFrpVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pinned) != 2 || pinned["x86_64"] == "" || pinned["aarch64"] == "" || pinned["x86_64"] == pinned["aarch64"] {
+		t.Fatalf("FrpcDigests(%s) = %v, want two distinct digests, for x86_64 and aarch64", DefaultFrpVersion, pinned)
+	}
+	for _, p := range all {
+		for _, v := range pinned {
+			if v == p.FrpsSHA256 || v == p.TarballSHA256 {
+				t.Errorf("frpc digest %s is %s's frps or tarball sum", v, p.Arch)
+			}
 		}
 	}
 }
@@ -314,7 +373,8 @@ func TestResolveFrpsChecksTheBytesItOpened(t *testing.T) {
 }
 
 // TestFrpPinsAgreeWithTheFetchScript: hack/fetch-frp.sh pins the same release as frp-pins.txt (it
-// downloads what the launcher will then verify), so the two must not drift. The script is read as
+// downloads what the launcher will then verify, and the frpc that agent.json names), so the two
+// must not drift, in any of the three sums. The script is read as
 // text; its values are not computed from the pin file.
 func TestFrpPinsAgreeWithTheFetchScript(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join("..", "..", "hack", "fetch-frp.sh"))
@@ -335,7 +395,72 @@ func TestFrpPinsAgreeWithTheFetchScript(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if vars["FRP_VERSION"] != pin.Version || vars["FRP_TARBALL_SHA"] != pin.TarballSHA256 || vars["FRPS_SHA"] != pin.FrpsSHA256 {
+	if vars["FRP_VERSION"] != pin.Version || vars["FRP_TARBALL_SHA"] != pin.TarballSHA256 || vars["FRPS_SHA"] != pin.FrpsSHA256 ||
+		vars["FRPC_SHA"] != pin.FrpcSHA256 {
 		t.Errorf("hack/fetch-frp.sh pins %v, frp-pins.txt pins %+v", vars, pin)
+	}
+}
+
+// TestResolvedFrpsIsASealedCopy: the descriptor that resolveFrps verified is what runs, whatever
+// happens to the file on disk afterwards. The file is a script that prints "checked", pinned by a
+// sum the test computes itself. After the verification the file is rewritten in place, the same
+// inode with other bytes of the same length (an ordinary descriptor on it would now read "swapped",
+// and so would an exec of it), and a write is attempted through the descriptor itself, by reopening
+// /proc/self/fd/N for writing, as another process could. Then the descriptor runs at fd 3, as the
+// supervisor runs it: it must print "checked". The seals are read back as the kernel holds them.
+func TestResolvedFrpsIsASealedCopy(t *testing.T) {
+	dir := shortDir(t)
+	path := filepath.Join(dir, "frps")
+	checked, swapped := []byte("#!/bin/sh\necho checked\n"), []byte("#!/bin/sh\necho swapped\n")
+	if len(checked) != len(swapped) {
+		t.Fatal("the two scripts must have the same length, so the rewrite keeps the size")
+	}
+	if err := os.WriteFile(path, checked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(checked)
+	pins := []FrpPin{{Version: "9.9.9", Arch: "amd64", Tarball: "x.tar.gz", TarballSHA256: strings.Repeat("0", 64), FrpsSHA256: hex.EncodeToString(sum[:])}}
+	b, err := resolveFrps(pins, "amd64", "9.9.9", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.WriteAt(swapped, 0); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	if after, err := os.Stat(path); err != nil || !os.SameFile(before, after) {
+		t.Fatalf("the rewrite must keep the inode: %v", err)
+	}
+	if out, err := exec.Command(path).Output(); err != nil || string(out) != "swapped\n" {
+		t.Fatalf("the rewritten file prints %q, %v: the fixture does not discriminate", out, err)
+	}
+
+	fd := int(b.file.Fd())
+	if seals, err := unix.FcntlInt(uintptr(fd), unix.F_GET_SEALS, 0); err != nil || seals&frpsSeals != frpsSeals {
+		t.Errorf("the descriptor's seals are %#x (%v), want %#x set", seals, err, frpsSeals)
+	}
+	if rw, err := os.OpenFile("/proc/self/fd/"+strconv.Itoa(fd), os.O_WRONLY, 0); err == nil {
+		_, werr := rw.WriteAt(swapped, 0)
+		rw.Close()
+		if werr == nil {
+			t.Error("a write through the verified descriptor succeeded")
+		}
+	}
+
+	cmd := exec.Command(execPath())
+	cmd.ExtraFiles = []*os.File{b.file}
+	out, err := cmd.Output()
+	if err != nil || string(out) != "checked\n" {
+		t.Errorf("the verified descriptor runs and prints %q (%v), want the checked bytes' \"checked\"", out, err)
 	}
 }

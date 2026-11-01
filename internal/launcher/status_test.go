@@ -25,7 +25,9 @@ func statusFixture(t *testing.T, rec ProcRec, ports Ports) layout {
 }
 
 func TestStatusStopped(t *testing.T) {
-	for name, dir := range map[string]string{"missing directory": filepath.Join(t.TempDir(), "none"), "empty directory": shortDir(t)} {
+	// Both directories are short, whatever $TMPDIR is: a state directory over 80 bytes is refused
+	// before status looks at it (shortDir; t.TempDir names carry the test name).
+	for name, dir := range map[string]string{"missing directory": filepath.Join(shortDir(t), "none"), "empty directory": shortDir(t)} {
 		rep, err := Status(context.Background(), StatusOptions{StateDir: dir})
 		if err != nil || rep.Health != Stopped || len(rep.Reasons) == 0 {
 			t.Errorf("%s: %+v, %v", name, rep, err)

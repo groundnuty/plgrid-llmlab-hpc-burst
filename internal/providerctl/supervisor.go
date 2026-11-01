@@ -22,10 +22,16 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 )
 
-// ManagerOptions are a Provider manager's leader-election timings; zero means
-// controller-runtime's defaults (15 s, 10 s, 2 s).
+// ManagerOptions are a Provider manager's leader-election timings and its
+// shutdown grace; zero means controller-runtime's defaults (15 s, 10 s, 2 s;
+// a 30 s grace).
 type ManagerOptions struct {
 	LeaseDuration, RenewDeadline, RetryPeriod time.Duration
+	// GracefulShutdownTimeout bounds how long the manager waits for its
+	// controllers when it stops. A manager that runs inside another, as in the
+	// controller binary, needs one shorter than its parent's (review of PR
+	// 132: N3).
+	GracefulShutdownTimeout time.Duration
 }
 
 // NewProviderManager returns a controller-runtime manager for one Provider
@@ -55,6 +61,9 @@ func NewProviderManager(cfg *rest.Config, scheme *runtime.Scheme, provider strin
 	}
 	if o.RetryPeriod > 0 {
 		mo.RetryPeriod = &o.RetryPeriod
+	}
+	if o.GracefulShutdownTimeout > 0 {
+		mo.GracefulShutdownTimeout = &o.GracefulShutdownTimeout
 	}
 	return ctrl.NewManager(cfg, mo)
 }
@@ -293,6 +302,12 @@ func (s *Supervisor) start(ctx context.Context, name string, r *run) {
 	}()
 }
 
+// stopAll stops every manager and waits for them. They stop at once, not one
+// after another: each manager's context derives from Start's (start), so all
+// of them see it end at the same moment, each starting its own grace
+// (ManagerOptions.GracefulShutdownTimeout) then, and the supervisor's stop
+// lasts as long as the slowest manager's, at most one grace, not one per
+// Provider (review of PR 132: N3; TestSupervisorStopsEveryManagerAtOnce).
 func (s *Supervisor) stopAll() {
 	s.mu.Lock()
 	runs := s.runs

@@ -186,3 +186,41 @@ func verifyListeners(expected []int, owned, others []sock) []string {
 	}
 	return probs
 }
+
+// verifyExactListeners is verifyListeners for a process whose every reachable socket is known
+// (frps, HBEP-6): owned must be exactly want, matched by protocol, address and port, and nothing
+// else, TCP or UDP, on any address. others are the other processes' reachable sockets; one on a
+// port of want, at any address, is a problem too. It returns one sentence per problem.
+func verifyExactListeners(want, owned, others []sock) []string {
+	have, wanted, ports := map[string]bool{}, map[string]bool{}, map[int]bool{}
+	for _, s := range owned {
+		have[s.key()] = true
+	}
+	var probs []string
+	for _, w := range want {
+		wanted[w.key()], ports[w.Port] = true, true
+		if !have[w.key()] {
+			probs = append(probs, fmt.Sprintf("expected listener %s is missing", w.key()))
+		}
+	}
+	var extra, foreign []string
+	for _, s := range owned {
+		if !wanted[s.key()] {
+			extra = append(extra, s.key())
+		}
+	}
+	for _, s := range others {
+		if ports[s.Port] {
+			foreign = append(foreign, s.key())
+		}
+	}
+	sort.Strings(extra)
+	sort.Strings(foreign)
+	if len(extra) > 0 {
+		probs = append(probs, fmt.Sprintf("it also listens on %v, which it must not", extra))
+	}
+	if len(foreign) > 0 {
+		probs = append(probs, fmt.Sprintf("other processes listen on its ports: %v", foreign))
+	}
+	return probs
+}
