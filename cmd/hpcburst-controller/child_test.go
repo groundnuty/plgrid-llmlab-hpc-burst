@@ -56,7 +56,9 @@ func controllerChild(args []string, runnerAddr string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 	runner := &remoteRunner{addr: runnerAddr}
-	d := deps{providerScheme: providerScheme, newPlatform: remotePlatforms(runner)}
+	// The state directory holds prepareState's example frpc builds, so the
+	// child pins their digests, as startBinary does for an in-process run.
+	d := deps{providerScheme: providerScheme, newPlatform: remotePlatforms(runner), frpcDigests: exampleFrpcDigests}
 	if err := run(ctx, f, d); err != nil {
 		fmt.Fprintln(os.Stderr, "hpcburst-controller:", err)
 		return 1
