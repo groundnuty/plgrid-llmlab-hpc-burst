@@ -25,6 +25,9 @@ func serveRecording(t *testing.T, cfg Config) (*testServer, func() []LogEvent) {
 		t.Fatal(err)
 	}
 	srv := &http.Server{Handler: HandlerRecording(cfg, func(ev LogEvent) {
+		if ev.Event != "request" { // the double also logs a request as "admitted" when it has a slot
+			return
+		}
 		mu.Lock()
 		events = append(events, ev)
 		mu.Unlock()

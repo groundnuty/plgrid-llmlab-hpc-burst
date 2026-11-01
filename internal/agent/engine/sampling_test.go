@@ -48,6 +48,9 @@ func recordingDouble(t *testing.T, modes string, opts ...Option) (*Client, func(
 	var mu sync.Mutex
 	var events []enginedouble.LogEvent
 	h := enginedouble.HandlerRecording(cfg, func(ev enginedouble.LogEvent) {
+		if ev.Event != "request" { // the double also logs a request as "admitted" when it has a slot
+			return
+		}
 		mu.Lock()
 		events = append(events, ev)
 		mu.Unlock()
