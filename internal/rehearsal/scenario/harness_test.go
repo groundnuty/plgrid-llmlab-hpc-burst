@@ -255,6 +255,11 @@ func startCluster(t *testing.T, dir string, jobEnv map[string]string) *cluster {
 			t.Fatal(err)
 		}
 	}
+	// The login node's directory holds the relay socket, which runs commands
+	// on the fake cluster: mode 700.
+	if err := os.Mkdir(filepath.Join(dir, "ln"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := enginedouble.Install(c.fakes); err != nil {
 		t.Fatal(err)
 	}

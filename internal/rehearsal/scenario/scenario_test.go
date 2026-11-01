@@ -89,7 +89,7 @@ func (r *rig) describe() string {
 	s := ""
 	if r.get(&md, mdName, namespace) {
 		for _, c := range md.Status.Conditions {
-			s += fmt.Sprintf(" md:%s=%s(%s)", c.Type, c.Status, c.Reason)
+			s += fmt.Sprintf(" md:%s=%s(%s: %.160s)", c.Type, c.Status, c.Reason, c.Message)
 		}
 	}
 	for _, a := range r.allocations() {

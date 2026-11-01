@@ -117,8 +117,10 @@ func servedDeployment(tm timing, engineEnv ...v1alpha1.EnvVar) *v1alpha1.ModelDe
 			LeaseLimit: dur(tm.lease),
 			Routing:    &v1alpha1.Routing{MaxRequestDuration: dur(tm.maxRequest)},
 			Workload: &v1alpha1.Workload{
-				ContextTokens:  v1alpha1.ContextTokens{Typical: 512},
-				OutputTokens:   v1alpha1.OutputTokens{Typical: 64},
+				ContextTokens: v1alpha1.ContextTokens{Typical: 512},
+				// Longest defaults to 4096, which with the typical context
+				// would not fit max-model-len 4096 (HBEP-7: every shape fits).
+				OutputTokens:   v1alpha1.OutputTokens{Typical: 64, Longest: ptr(int32(256))},
 				TargetSessions: 2,
 			},
 		},
