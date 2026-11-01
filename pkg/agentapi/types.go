@@ -594,6 +594,22 @@ const (
 	ShapeConcurrent Shape = "concurrent"
 )
 
+// FixedLength reports whether the agent sends the shape at a fixed output
+// length, min_tokens equal to max_tokens with the end-of-sequence token
+// ignored, so its output length is the same in every round. Settling judges
+// only these shapes (science-agent ruling, 1 Nov 2026, issue #125): the
+// sequential shapes and the concurrent one. ShapeToolCall is not one: it ends
+// with its call, and on a reasoning model after reasoning of any length. It
+// still runs in every round to warm its path, but is not judged. A shape this
+// package does not name is not fixed-length either.
+func (s Shape) FixedLength() bool {
+	switch s {
+	case ShapeShort, ShapeTypical, ShapeLongest, ShapeLongOutput, ShapeConcurrent:
+		return true
+	}
+	return false
+}
+
 // WarmUpResult holds every round run so far for one verification generation.
 type WarmUpResult struct {
 	Rounds []WarmUpRound `json:"rounds,omitempty"`
@@ -604,9 +620,12 @@ type WarmUpResult struct {
 
 // WarmUpRound is one round's requests. The controller reads them as
 // RequestTiming says: a request with an Error counts for nothing. Settling
-// compares, per Shape, the mean Total of the round's requests without an Error
-// with the round before; a Shape that is more than 10% slower than in the round
-// before, or that has no successful request in this round, means not settled.
+// judges only the fixed-length shapes (Shape.FixedLength). It compares, per
+// such Shape, the mean Total of the round's requests with the round before; a
+// Shape whose mean Total rose by more than max(10% of the round before, 100
+// ms), or that has no successful request in this round, means not settled
+// (science-agent ruling, 1 Nov 2026, issue #125). A Shape whose length varies
+// runs in every round, but neither its timings nor its errors are judged.
 // The Instance's throughput is the mean time per output token
 // (RequestTiming.TimePerOutputToken) and the mean time to first token over the
 // requests of the last round's ShapeConcurrent that have them; it is not
@@ -626,8 +645,8 @@ type WarmUpRound struct {
 //     counts only for a request with OutputTokens of 2 or more
 //     (TimePerOutputToken); a one-token request has no token interval, and the
 //     formula would divide by zero;
-//   - Total counts for settling for every request without an Error (see
-//     WarmUpRound).
+//   - Total counts for settling for every request of a fixed-length shape
+//     without an Error (see WarmUpRound).
 //
 // The workload schema admits an output of one token, so a request with fewer
 // than two output tokens is normal, not a fault.

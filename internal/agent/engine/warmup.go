@@ -93,17 +93,20 @@ func (c *Client) timed(ctx context.Context, w warmShape) agentapi.RequestTiming 
 	ignoreEOS := false
 	maxTokens := w.output
 	if w.tools {
-		// The tool-call shape ends with its call, at no fixed length: no
-		// min_tokens, and the end-of-sequence token is not ignored.
 		tools, choice, tail = []tool{weatherTool}, "auto", warmUpToolTail
-		// With a reasoning parser the call comes after the reasoning, and this
-		// shape is judged (it needs a valid call), so it asks for the same
-		// extra reasoning budget as the tool-call smoke test (science-agent
-		// ruling, 31 Oct 2026). A fixed figure in alpha, and a known limit.
+		// With a reasoning parser the call comes after the reasoning, so it
+		// asks for the same extra reasoning budget as the tool-call smoke test
+		// (science-agent ruling, 31 Oct 2026). A fixed figure in alpha, and a
+		// known limit.
 		if c.reasoning {
 			maxTokens += reasoningTokens
 		}
-	} else {
+	}
+	// A fixed-length shape asks for min_tokens = max_tokens; the controller
+	// judges settling on these shapes alone (agentapi.Shape.FixedLength). The
+	// tool-call shape ends with its call, at no fixed length: no min_tokens,
+	// and the end-of-sequence token is not ignored.
+	if w.shape.FixedLength() {
 		minTokens, ignoreEOS = w.output, true
 	}
 	// The longest shape sits at the context limit: count its own prompt.
@@ -188,6 +191,9 @@ func (c *Client) timed(ctx context.Context, w warmShape) agentapi.RequestTiming 
 		if err := judgeStreamedCalls(calls.assembled(), finish); err != nil {
 			t.Error = agentapi.TruncateUTF8(errorText(err), agentapi.MaxTimingErrorBytes)
 		}
+		return t
+	}
+	if !w.shape.FixedLength() {
 		return t
 	}
 	if completion != w.output {

@@ -334,17 +334,21 @@ const (
 	warmUpFailed
 )
 
-// judgeWarmUp decides warm-up (HBEP-7, Instance start): it is done at the first
-// round in which no shape is more than 10% slower, by its mean total time,
-// than in the round before; one that has not settled after
-// MaxWarmUpRounds fails, as does a round with a failed request. The settled
-// round's time per output token and time to first token are the throughput.
+// judgeWarmUp decides warm-up (HBEP-7, Instance start). Only the fixed-length
+// shapes are judged (agentapi.Shape.FixedLength; science-agent ruling, 1 Nov
+// 2026, issue #125): warm-up is done at the first round in which no such shape
+// is slower, by its mean total time, than in the round before by more than
+// max(10% of that round's, 100 ms). One that has not settled after
+// MaxWarmUpRounds fails, as does a failed request of a fixed-length shape. A
+// shape whose length varies (the tool call) runs in every round to warm its
+// path, but neither its timings nor its errors are judged. The settled round's
+// time per output token and time to first token are the throughput.
 func judgeWarmUp(w *agentapi.WarmUpResult, targetSessions int32) (warmUpState, string, *v1alpha1.Throughput) {
 	rounds := append([]agentapi.WarmUpRound(nil), w.Rounds...)
 	sort.Slice(rounds, func(i, j int) bool { return rounds[i].Round < rounds[j].Round })
 	for _, r := range rounds {
 		for _, q := range r.Requests {
-			if q.Error != "" {
+			if q.Error != "" && q.Shape.FixedLength() {
 				return warmUpFailed, fmt.Sprintf("warm-up round %d: a %s request failed: %s", r.Round, q.Shape, q.Error), nil
 			}
 		}
@@ -360,10 +364,15 @@ func judgeWarmUp(w *agentapi.WarmUpResult, targetSessions int32) (warmUpState, s
 	return warmUpRunning, "", nil
 }
 
+// meanTotals is the mean Total of each fixed-length shape's requests in r;
+// a shape whose length varies is left out (judgeWarmUp).
 func meanTotals(r agentapi.WarmUpRound) map[agentapi.Shape]time.Duration {
 	sum := map[agentapi.Shape]time.Duration{}
 	n := map[agentapi.Shape]int{}
 	for _, q := range r.Requests {
+		if !q.Shape.FixedLength() {
+			continue
+		}
 		sum[q.Shape] += time.Duration(q.Total)
 		n[q.Shape]++
 	}
@@ -380,11 +389,19 @@ func settled(prev, cur agentapi.WarmUpRound) bool {
 	}
 	for s, t := range b {
 		p, ok := a[s]
-		if !ok || float64(t) > float64(p)*(1+warmUpTolerance) {
+		if !ok || t-p > settleLimit(p) {
 			return false
 		}
 	}
 	return true
+}
+
+// settleLimit is how much slower than prev a shape may be in the next round
+// and still count as settled: max(warmUpTolerance of prev, warmUpFloor). The
+// floor keeps one request's noise on a short shape from blocking settling (in
+// #94's run, 0.208 s to 0.253 s between two rounds).
+func settleLimit(prev time.Duration) time.Duration {
+	return max(time.Duration(float64(prev)*warmUpTolerance), warmUpFloor)
 }
 
 func throughput(r agentapi.WarmUpRound, targetSessions int32) *v1alpha1.Throughput {
