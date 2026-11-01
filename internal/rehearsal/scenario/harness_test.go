@@ -309,6 +309,7 @@ type host struct {
 	env       []string
 	usageDir  string
 	clientKey string
+	downed    bool // hpcburst down has run
 }
 
 // startHost runs hpcburst up in the given dial-home mode, with the front and
@@ -351,9 +352,10 @@ func startHost(t *testing.T, b binaries, dir, mode string, env []string) *host {
 // k3s still listens.
 func (h *host) down() {
 	h.t.Helper()
-	if _, err := os.Stat(h.state); err != nil {
+	if _, err := os.Stat(h.state); err != nil || h.downed {
 		return
 	}
+	h.downed = true
 	out, err := run(h.t, h.env, h.b.hpcburst, "down", "--state-dir", h.state)
 	if err != nil {
 		h.t.Errorf("hpcburst down: %v\n%s", err, out)

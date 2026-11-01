@@ -19,7 +19,11 @@ import (
 // rehearsalTiming: a 6 min lease whose drain window is 90 s + 30 s, so a
 // handover happens in minutes; the agent's stop grace is short, so scancel's
 // TERM finishes before the fake's KillWait (30 s).
-var rehearsalTiming = timing{lease: "6m", maxRequest: "90s", drainMargin: "30s", stopGrace: "5s"}
+var rehearsalTiming = timing{lease: "6m", maxRequest: "90s", drainMargin: "30s", stopGrace: "5s", agentTimeout: "20s"}
+
+// rehearsalAgentTimeout is rehearsalTiming's agentTimeout: how long a
+// controller waits for a silent agent before it judges it unreachable.
+const rehearsalAgentTimeout = 20 * time.Second
 
 // rig is one running rehearsal: the fake cluster, the host and the API.
 type rig struct {
@@ -36,13 +40,16 @@ func startRig(t *testing.T, mode string) *rig {
 	b := requireRehearsal(t)
 	dir := shortDir(t)
 	r := &rig{t: t, b: b, hub: startHub(t)}
-	r.cl = startCluster(t, dir, map[string]string{"HF_ENDPOINT": r.hub.url})
+	// The job's environment has no HF_ENDPOINT: the agent learns the Hub
+	// from agent.json, which the controller writes from its own (ruling of 1
+	// Nov 2026 on #156; step (a) checks the downloads reached the double).
+	r.cl = startCluster(t, dir, nil)
 	creds := filepath.Join(dir, "provider-ssh")
 	if err := r.cl.login.WriteCredentials(creds); err != nil {
 		t.Fatal(err)
 	}
-	// The controller's checkpoint listing goes to the Hub double too, if the
-	// controller honours HF_ENDPOINT (issue #146 finding F1).
+	// The controller lists the checkpoint from the Hub double through
+	// HF_ENDPOINT, which up passes on to it.
 	r.h = startHost(t, b, dir, mode, cleanEnv("HF_ENDPOINT="+r.hub.url))
 	arch := cpuArch(t)
 	r.h.placeAgentBuild(arch)
@@ -142,6 +149,19 @@ func (r *rig) stepStart() *v1alpha1.Instance {
 		}
 		return false
 	})
+	// The agent staged from the Hub double, whose address reached the job only
+	// through agent.json. The LFS file shows it: the controller downloads only
+	// the files outside LFS, to hash them, and takes an LFS file's SHA-256 from
+	// the listing, so only the agent fetches the weights.
+	agentFetched := false
+	for _, p := range r.hub.resolved() {
+		for _, f := range hubFiles {
+			agentFetched = agentFetched || f.lfs && f.path == p
+		}
+	}
+	if !agentFetched {
+		r.t.Errorf("the agent never downloaded the LFS weights from the Hub double (downloads %v): agent.json's hubEndpoint did not reach it", r.hub.resolved())
+	}
 	if !conditionTrue(ready.Status.Conditions, v1alpha1.ConditionTunnelConnected) {
 		r.t.Errorf("Instance %s is ready without TunnelConnected True: %v", ready.Name, ready.Status.Conditions)
 	}
@@ -150,5 +170,7 @@ func (r *rig) stepStart() *v1alpha1.Instance {
 
 func TestRehearsalDirect(t *testing.T) {
 	r := startRig(t, "direct")
-	r.stepStart()
+	in := r.stepStart()
+	r.stepControllerRestart(in)
+	r.stepScaleToZero()
 }

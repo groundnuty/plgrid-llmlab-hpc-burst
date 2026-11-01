@@ -61,7 +61,7 @@ func ptr[T any](v T) *T { return &v }
 // the profile's drainMargin, when that is shorter than the profile's
 // drainWindow (api/v1alpha1/writers.go, InstanceDrainWindow).
 type timing struct {
-	lease, maxRequest, drainMargin, stopGrace string
+	lease, maxRequest, drainMargin, stopGrace, agentTimeout string
 }
 
 func batchProfile(arch string, tm timing) *v1alpha1.PlatformProfile {
@@ -72,6 +72,7 @@ func batchProfile(arch string, tm timing) *v1alpha1.PlatformProfile {
 			InflightWindow: dur("5m"), StagingDir: "$SCRATCH/stage",
 			DrainMargin: dur(tm.drainMargin), HandoverMargin: dur("0s"),
 			Restart: &v1alpha1.RestartPolicy{StopGrace: dur(tm.stopGrace)},
+			Health:  &v1alpha1.HealthThresholds{AgentTimeout: dur(tm.agentTimeout)},
 			Partitions: []v1alpha1.PartitionProfile{{
 				Name: partition, AcceleratorClass: v1alpha1.AcceleratorClass{GPUModel: "example-gpu", CPUArch: arch},
 				MaxTime: dur("30m"), GPUsPerNode: ptr(int32(1)), CPUsPerGPU: ptr(int32(2)),
