@@ -189,16 +189,18 @@ func TestUpStatusDown(t *testing.T) {
 
 	// ---- status ----
 	var rep struct {
-		Health     string   `json:"health"`
-		Reasons    []string `json:"reasons"`
-		Listeners  []string `json:"listeners"`
-		RSSMiB     float64  `json:"rss_mib"`
-		Readyz     *bool    `json:"readyz_ok"`
-		KCM        *bool    `json:"controller_manager_ok"`
-		Writes     *bool    `json:"writes_ok"`
-		GC         *bool    `json:"gc_ok"`
-		Executable string   `json:"executable"`
-		Processes  []struct {
+		Health          string   `json:"health"`
+		Reasons         []string `json:"reasons"`
+		Listeners       []string `json:"listeners"`
+		RSSMiB          float64  `json:"rss_mib"`
+		Readyz          *bool    `json:"readyz_ok"`
+		KCM             *bool    `json:"controller_manager_ok"`
+		Writes          *bool    `json:"writes_ok"`
+		GC              *bool    `json:"gc_ok"`
+		Executable      string   `json:"executable"`
+		EventTTL        string   `json:"event_ttl"`
+		EventTTLDefault bool     `json:"event_ttl_default"`
+		Processes       []struct {
 			PID     int    `json:"pid"`
 			Verdict string `json:"verdict"`
 		} `json:"processes"`
@@ -238,7 +240,18 @@ func TestUpStatusDown(t *testing.T) {
 	if probeRV() == rvBefore {
 		t.Error("status reports a successful write probe, but the probe object did not change")
 	}
-	if r := cli(t, h.args("status")...); r.code != exitOK || !strings.HasPrefix(r.out, "healthy") {
+	// Events are kept 7 days (#109, HBEP-8): up recorded the event TTL it started k3s with, in
+	// state.json, and status reports it from there, in the JSON and in the text. The values are the
+	// literals the issue names.
+	var recorded map[string]any
+	parseJSON(t, fileOf(filepath.Join(h.dir, "state.json")), &recorded)
+	if recorded["event_ttl"] != "168h" {
+		t.Errorf("state.json: event_ttl %v, want 168h", recorded["event_ttl"])
+	}
+	if rep.EventTTL != "168h" || rep.EventTTLDefault {
+		t.Errorf("status --json: event_ttl %q (default %v), want 168h and not the default", rep.EventTTL, rep.EventTTLDefault)
+	}
+	if r := cli(t, h.args("status")...); r.code != exitOK || !strings.HasPrefix(r.out, "healthy") || !strings.Contains(r.out, "\nevent TTL: 168h\n") {
 		t.Errorf("text status: exit %d: %q", r.code, r.out)
 	}
 

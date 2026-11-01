@@ -237,6 +237,12 @@ func printStatus(w io.Writer, r *launcher.StatusReport) {
 	if r.Executable != "" {
 		fmt.Fprintf(w, "executable: %s\n", r.Executable)
 	}
+	switch {
+	case r.EventTTL != "" && r.EventTTLDefault:
+		fmt.Fprintf(w, "event TTL: %s (default; restart to apply %s)\n", r.EventTTL, launcher.DefaultEventTTL)
+	case r.EventTTL != "":
+		fmt.Fprintf(w, "event TTL: %s\n", r.EventTTL)
+	}
 	if r.RSSMiB > 0 {
 		fmt.Fprintf(w, "RSS %.0f MiB\n", r.RSSMiB)
 	}

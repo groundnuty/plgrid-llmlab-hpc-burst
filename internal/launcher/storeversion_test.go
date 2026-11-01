@@ -128,6 +128,26 @@ func (f *fakeHostOps) start(ctx context.Context, spec launchSpec, front Front, t
 	return &State{Version: spec.bin.Version.String()}, time.Millisecond, nil
 }
 
+// TestReplaceHostStartsK3sWithTheEventTTL: an upgrade starts the new k3s from arguments built afresh,
+// so a host whose record has no event TTL (one that an earlier release started) gets event-ttl=168h
+// then. This is support for the real upgrade test, which shows the record: the arguments alone say
+// nothing about what the API server does.
+func TestReplaceHostStartsK3sWithTheEventTTL(t *testing.T) {
+	l := storeLayout(t)
+	putStore(t, l, "v1", "tok", "")
+	if err := l.saveStoreVersion("v1.35.9+k3s1", "up"); err != nil {
+		t.Fatal(err)
+	}
+	st := &State{Version: "v1.35.9+k3s1", Ports: Ports{API: 1, HTTPS: 2, KCM: 3, LB: 4}} // no EventTTL
+	ops := &fakeHostOps{t: t, l: l}
+	if _, _, _, _, err := replaceHost(context.Background(), l, st, Binary{Version: mustVersion(t, "v1.36.5+k3s1")}, ops, time.Second, time.Second, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := ttlArgs(ops.spec.k3sArgs()); len(got) != 1 || got[0] != "168h" {
+		t.Errorf("the new k3s was started with event-ttl arguments %q, want exactly 168h", got)
+	}
+}
+
 // TestReplaceHostOrder pins the order of an upgrade's store steps: stop, back up, record the new
 // release, start. A backup taken before the stop would miss the old host's last writes; one taken
 // after the start would hold the new release's.

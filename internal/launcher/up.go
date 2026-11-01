@@ -40,6 +40,9 @@ type UpOptions struct {
 
 	// supervisorArgv, set by tests only, replaces the supervisor's command line.
 	supervisorArgv []string
+	// eventTTL and omitEventTTL, set by tests only, are launchSpec's fields of the same names.
+	eventTTL     string
+	omitEventTTL bool
 }
 
 // UpReport is the outcome of a start.
@@ -79,6 +82,16 @@ func logTail(path string, n int) string {
 	return "\n--- last lines of " + path + " ---\n" + string(bytes.Join(lines, []byte("\n")))
 }
 
+// newRecord is the first durable record of a start: k3s as it was launched, with what the launcher
+// chose for it, the event TTL among that.
+func newRecord(spec launchSpec, rec ProcRec, front Front, startedAt time.Time) *State {
+	return &State{
+		Version: spec.bin.Version.String(), Binary: spec.bin.Path, BinarySHA256: spec.bin.SHA256,
+		Nice: spec.nice, Ports: spec.ports, Procs: []ProcRec{rec}, StartedAt: startedAt, Front: front,
+		Controllers: spec.controllers, FrontRun: spec.frontRun, Frps: spec.frps, EventTTL: spec.eventTTLValue(),
+	}
+}
+
 // startAndWait launches k3s from spec, records it at once, waits for readiness, and writes the
 // kubeconfig (mode 0600) only after the host is ready. If anything fails it stops what it
 // started, so a failed start never leaves a process behind.
@@ -90,11 +103,7 @@ func startAndWait(ctx context.Context, spec launchSpec, front Front, timeout tim
 	}
 	defer h.Close()
 	rec := h.rec
-	st := &State{
-		Version: spec.bin.Version.String(), Binary: spec.bin.Path, BinarySHA256: spec.bin.SHA256,
-		Nice: spec.nice, Ports: spec.ports, Procs: []ProcRec{rec}, StartedAt: t0, Front: front,
-		Controllers: spec.controllers, FrontRun: spec.frontRun, Frps: spec.frps,
-	}
+	st := newRecord(spec, rec, front, t0)
 	// Record before waiting: an interrupted or crashed start is then still cleaned up by down.
 	if err := spec.l.saveState(st); err != nil {
 		_, _ = stopRecorded(context.Background(), st, 10*time.Second, log)
@@ -245,7 +254,7 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 		return nil, fmt.Errorf("refusing to start: %w", err)
 	}
 
-	spec := launchSpec{l: l, bin: bin, ports: ports, nice: o.Nice}
+	spec := launchSpec{l: l, bin: bin, ports: ports, nice: o.Nice, eventTTL: o.eventTTL, omitEventTTL: o.omitEventTTL}
 	if ctrlBin != "" {
 		spec.controllers, spec.frontRun, spec.frps = &ControllerConfig{Binary: ctrlBin}, frontRun, frpsRun
 	}

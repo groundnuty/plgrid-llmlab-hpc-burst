@@ -27,6 +27,12 @@ type launchSpec struct {
 	controllers *ControllerConfig
 	frontRun    *FrontRunConfig
 	frps        *FrpsRunConfig
+	// eventTTL and omitEventTTL are set by tests only. eventTTL replaces DefaultEventTTL, so that a
+	// test can see the API server expire an Event within minutes; omitEventTTL leaves the argument
+	// out, as the releases before it was added did, to start the host that an upgrade must bring up
+	// to date. Neither is reachable from the command line.
+	eventTTL     string
+	omitEventTTL bool
 }
 
 // niceBin is nice(1), named by absolute path so the caller's PATH cannot choose it.
@@ -93,6 +99,12 @@ func (s launchSpec) k3sArgs() []string {
 		"--kube-apiserver-arg=audit-log-path=" + s.l.auditLog(),
 		"--kube-apiserver-arg=audit-log-maxsize=100",
 		"--kube-apiserver-arg=audit-log-maxbackup=3",
+	}
+	if ttl := s.eventTTLValue(); ttl != "" {
+		// Events are kept seven days, not the API server's hour (HBEP-8, Retention). Every start builds
+		// its arguments afresh, so a host that was started without this one has it after the next
+		// restart, an upgrade included.
+		a = append(a, "--kube-apiserver-arg="+eventTTLKey+"="+ttl)
 	}
 	return append(a, s.extraArgs...)
 }

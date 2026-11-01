@@ -24,7 +24,9 @@
 #
 # The tests use loopback ports 29220-29246 (two blocks of 13 from the bases 29220 and 29233, and
 # 29246, just past the second, which TestUpRefusesWhenAPortIsTaken's outside-block control holds)
-# and, for the frps rig, 29252-29259. They run one at a time.
+# and, for the frps rig, 29252-29259. They run one at a time, except the two real-k3s event TTL tests
+# (internal/launcher/eventttl_k3s_test.go): those are parallel, one on each block, after the serial tests
+# of the package.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
