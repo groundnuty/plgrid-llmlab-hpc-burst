@@ -498,6 +498,76 @@ func TestManagerOnControlPlane(t *testing.T) {
 		t.Fatal("the released Lease has no renewTime")
 	}
 	restartAfterGap(t, ctx, cl, cp.Config, creds, builds)
+	withoutLeaderElection(t, ctx, cl, cp.Config, creds, builds)
+}
+
+// collisionEvents counts the IdentityUnresolved events about md-collide, which
+// each controller process raises once.
+func collisionEvents(t *testing.T, ctx context.Context, cl client.Client) int {
+	t.Helper()
+	var evs eventsv1.EventList
+	if err := cl.List(ctx, &evs, client.InNamespace(rigNS)); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, e := range evs.Items {
+		if e.Reason == "IdentityUnresolved" && e.Regarding.Name == "md-collide" {
+			n++
+		}
+	}
+	return n
+}
+
+// withoutLeaderElection runs the controller with --leader-elect=false, a
+// development and test mode (HBEP-8, Observers, and Test plan, Observers that
+// never start): it takes no Lease, so the lifecycle Lease is not written, and
+// emits no ObservationGap, while its /readyz needs only synced caches. The
+// run's own collision event reaching the API shows its recorder works, so the
+// unchanged ObservationGap count is not silence for want of a recorder.
+func withoutLeaderElection(t *testing.T, ctx context.Context, cl client.Client, cfg *rest.Config, creds, builds string) {
+	t.Helper()
+	var before coordinationv1.Lease
+	eventually(t, 30*time.Second, "the second run released the Lease", func() (bool, string) {
+		if err := cl.Get(ctx, client.ObjectKey{Namespace: v1alpha1.ControllerNamespace, Name: v1alpha1.LeaseLifecycle}, &before); err != nil {
+			return false, err.Error()
+		}
+		return before.Spec.HolderIdentity == nil || *before.Spec.HolderIdentity == "", "still held"
+	})
+	collisions := collisionEvents(t, ctx, cl)
+	mgr, _, err := NewManager(Options{
+		Config: cfg, CredentialsDir: creds, AgentBuildsDir: builds, FrontConfigured: true, HealthAddr: managerHealthAddr,
+		MetricsAddr: managerMetricsAddr, LeaderElection: false, Checkpoints: &stubSource{}, skipNameCheck: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mctx, stop := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- mgr.Start(mctx) }()
+	defer func() {
+		stop()
+		if err := <-done; err != nil {
+			t.Errorf("manager without leader election: %v", err)
+		}
+	}()
+	eventually(t, time.Minute, "/readyz passes with synced caches and no Lease", func() (bool, string) {
+		code := getStatus(t, "http://"+managerHealthAddr+"/readyz")
+		return code == http.StatusOK, fmt.Sprintf("/readyz %d", code)
+	})
+	eventually(t, time.Minute, "this run's own collision event reaches the API", func() (bool, string) {
+		n := collisionEvents(t, ctx, cl)
+		return n > collisions, fmt.Sprintf("%d IdentityUnresolved events on md-collide, %d before this run", n, collisions)
+	})
+	var after coordinationv1.Lease
+	if err := cl.Get(ctx, client.ObjectKey{Namespace: v1alpha1.ControllerNamespace, Name: v1alpha1.LeaseLifecycle}, &after); err != nil {
+		t.Fatal(err)
+	}
+	if after.ResourceVersion != before.ResourceVersion {
+		t.Fatalf("the lifecycle Lease changed (resourceVersion %s to %s, holder %v) under --leader-elect=false", before.ResourceVersion, after.ResourceVersion, after.Spec.HolderIdentity)
+	}
+	if gaps := observationGaps(t, ctx, cl); len(gaps) != 1 {
+		t.Fatalf("%d ObservationGap events after a run with --leader-elect=false, want still the one of the second run", len(gaps))
+	}
 }
 
 // writeLifecycleLease writes the lifecycle Lease as another copy of the
