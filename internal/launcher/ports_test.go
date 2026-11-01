@@ -3,6 +3,7 @@ package launcher
 import (
 	"fmt"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -62,7 +63,13 @@ func TestAgentEndpointPortIsInTheBlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = checkPortsFree(ports.All())
+	// The block's other ports are not reserved here, and on a busy machine any
+	// of them can belong to another process, so the check runs on base+3 alone:
+	// the block must contain it, and checkPortsFree must report a listener on it.
+	if !slices.Contains(ports.All(), held) {
+		t.Fatalf("the block at base %d does not contain base+3 (port %d): %v", held-3, held, ports.All())
+	}
+	err = checkPortsFree([]int{held})
 	if err == nil || !strings.Contains(err.Error(), "port "+strconv.Itoa(held)) {
 		t.Fatalf("a listener on base+3 (port %d): want an error naming it, got %v", held, err)
 	}
