@@ -102,6 +102,10 @@ func (l *gapLock) gapStart() (time.Time, bool) {
 	return l.previous, l.took && l.observed && !l.previous.IsZero()
 }
 
+// newLeaseLock builds the Lease lock inside the gapLock; a test wraps it to
+// see the manager lead through the lock it returns.
+var newLeaseLock = leaderlock.New
+
 // newGapLock builds the lifecycle Lease's lock with leaderlock.New, as
 // controller-runtime's leaderelection.NewResourceLock does (v0.23.1, pkg/
 // leaderelection/leader_election.go, lines 66-136: a hostname_UUID identity, a
@@ -116,7 +120,7 @@ func (l *gapLock) gapStart() (time.Time, bool) {
 // show in the Lease itself, and the gap after a restart is the typed
 // ObservationGap (`@hpc-burst-science-agent`, 1 Nov 2026, for #111).
 func newGapLock(cfg *rest.Config, renewDeadline time.Duration) (*gapLock, error) {
-	inner, err := leaderlock.New(cfg, v1alpha1.ControllerNamespace, v1alpha1.LeaseLifecycle, renewDeadline, ctrl.Log)
+	inner, err := newLeaseLock(cfg, v1alpha1.ControllerNamespace, v1alpha1.LeaseLifecycle, renewDeadline, ctrl.Log)
 	if err != nil {
 		return nil, err
 	}

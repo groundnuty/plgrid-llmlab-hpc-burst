@@ -40,6 +40,10 @@ type ManagerOptions struct {
 // RenewDeadline gets, and from which the Lease lock's client time-out is set.
 const defaultRenewDeadline = 10 * time.Second
 
+// newLeaseLock builds a Lease lock; a test wraps it to see the manager lead
+// through the lock it returns.
+var newLeaseLock = leaderlock.New
+
 // providerLeaseLock is the lock of a Provider manager's Lease: leaderlock's,
 // whose release is retried, with the client time-out set from the manager's
 // renew deadline as controller-runtime sets it.
@@ -49,7 +53,7 @@ func providerLeaseLock(cfg *rest.Config, provider string, o ManagerOptions) (res
 		renew = o.RenewDeadline
 	}
 	name := v1alpha1.ProviderLeaseName(provider)
-	return leaderlock.New(cfg, v1alpha1.ControllerNamespace, name, renew, ctrl.Log)
+	return newLeaseLock(cfg, v1alpha1.ControllerNamespace, name, renew, ctrl.Log)
 }
 
 // NewProviderManager returns a controller-runtime manager for one Provider
