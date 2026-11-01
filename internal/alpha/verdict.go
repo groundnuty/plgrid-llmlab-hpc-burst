@@ -17,7 +17,7 @@ import (
 const Hour = time.Hour
 
 // minRate is S1's flag line: "a rate under 629,146 B/s" is flagged, not failed
-// (spikes/s1-frp/README.md, C6).
+// (spikes/s1-frp/README.md:288, C6; branch spike/s1-frp-dial-home).
 const minRate = 629146
 
 // jobsByTag maps the cluster's record of the run's jobs by their tags.
@@ -162,8 +162,8 @@ func SuccessorQueueWait(pre, suc provider.Job) (d time.Duration, ok bool) {
 // VerifyTunnelHour judges tunnel-hour-helios and tunnel-hour-athena.
 //
 //	hbep/0006-instance-reachability/README.md:354: "S1's one-hour runs pass with this wiring on Helios and on Athena, in the mode each uses, with the path rate measured."
-//	spikes/s1-frp/README.md (C2, C3): every lane has "a completed stream of at least 3600 s", and no stream is cut over that hour.
-//	spikes/s1-frp/README.md (C6): the path rate is "ok, at least 30 s asked, at least 29 s timed at the VM's receiver", and moved bytes.
+//	spikes/s1-frp/README.md:284 and :285 (C2, C3; branch spike/s1-frp-dial-home, 01c2ecd): every lane has "a completed stream of at least 3600 s", and no stream is cut over that hour.
+//	spikes/s1-frp/README.md:288 (C6): the path rate is "ok, at least 30 s asked, at least 29 s timed at the VM's receiver", and moved bytes.
 func VerifyTunnelHour(row Row, o TunnelHourObs, jobs []provider.Job) []string {
 	var f []string
 	if len(o.Lanes) == 0 {

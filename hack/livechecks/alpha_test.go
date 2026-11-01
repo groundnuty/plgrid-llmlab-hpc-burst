@@ -65,6 +65,7 @@ run=""; prev=""
 for a in "$@"; do [ "$prev" = -test.run ] && run=$a; prev=$a; done
 t=${run#^}; t=${t%\$}
 echo "testbin $t" >> "$STUB_STATE/events"
+printf '%s\n' "$*" > "$STUB_STATE/test-args-$t"
 env | grep -E '^(HPCBURST|HB_)' | sort > "$STUB_STATE/test-env-$t.$$"
 cp "$STUB_STATE/test-env-$t.$$" "$STUB_STATE/test-env-$t"
 echo "log line: host seedhost01 job 424242 key SEEDKEY dialhome gateway-seed.example"
@@ -494,5 +495,84 @@ func TestPlanNamesTheAlphaRowsWhenTheStackChanges(t *testing.T) {
 				w.contains(res, "covered: "+r+" (cluster; gate ")
 			}
 		})
+	}
+}
+
+// The script's timeout for a queued row is the row's run time plus the wait in the queue the operator allows,
+// so a long wait does not eat the run's time (the real-engine row has the same two clocks). The expected
+// values are the shape's timeout column, 150 minutes for the handover and 25 for the accounting rows, plus the wait.
+func TestTheTimeoutIsTheRunTimePlusTheWaitInTheQueue(t *testing.T) {
+	for _, c := range []struct{ row, test, want string }{
+		{"alpha-athena-handover", "TestAlphaAthenaHandover", "-test.timeout 161m"}, // 150 + 600/60 + 1
+		{"gpu-accounting-athena", "TestGPUAccounting", "-test.timeout 36m"},        // 25 + 600/60 + 1
+	} {
+		t.Run(c.row, func(t *testing.T) {
+			w := newAlphaWorld(t)
+			if res := w.run([]string{"LIVE_PENDING_MAX_SECONDS=600"}, "--run", c.row, "--yes"); res.code != 0 {
+				t.Fatalf("exit %d:\n%s", res.code, res.out)
+			}
+			if args := w.stateFile("test-args-" + c.test); !strings.Contains(args, c.want) {
+				t.Errorf("the test binary ran with %q, want %q", args, c.want)
+			}
+			if env := w.stateFile("test-env-" + c.test); !strings.Contains(env, "PENDING_MAX_SECONDS=600") {
+				t.Errorf("the test did not get the wait as its first clock:\n%s", env)
+			}
+		})
+	}
+}
+
+// Every environment that reaches a gpu-accounting row is the script's own: the caller's dry switch and record
+// directory are removed, and the row's QOS and its first clock are set.
+func TestTheAccountingRowsGetTheirQOSAndNoDryEnvironment(t *testing.T) {
+	w := newAlphaWorld(t)
+	res := w.run([]string{"HPCBURST_ALPHA_DRY=1", "HPCBURST_ALPHA_DRY_FAULT=node-two", "HPCBURST_ALPHA_ROW=gpu-accounting-helios", "HPCBURST_ALPHA_OUT=/caller/out"},
+		"--run", "gpu-accounting-helios", "--yes")
+	if res.code != 0 {
+		t.Fatalf("exit %d:\n%s", res.code, res.out)
+	}
+	env := w.stateFile("test-env-TestGPUAccounting")
+	for _, bad := range []string{"HPCBURST_ALPHA_DRY", "HPCBURST_ALPHA_ROW", "HPCBURST_ALPHA_OUT"} {
+		if strings.Contains(env, bad) {
+			t.Errorf("%s reached a live accounting run:\n%s", bad, env)
+		}
+	}
+	for _, want := range []string{"HPCBURST_CONF_QOS=now", "HPCBURST_CONF_PENDING_MAX_SECONDS=7200", "HPCBURST_CONF_PARTITION=plgrid-gpu-gh200", "HPCBURST_CONF_GPUS=1"} {
+		if !strings.Contains(env, want) {
+			t.Errorf("the test did not get %s:\n%s", want, env)
+		}
+	}
+	// A row with no QOS gets none.
+	w2 := newAlphaWorld(t)
+	if res := w2.run(nil, "--run", "gpu-accounting-athena", "--yes"); res.code != 0 {
+		t.Fatalf("exit %d:\n%s", res.code, res.out)
+	}
+	if env := w2.stateFile("test-env-TestGPUAccounting"); strings.Contains(env, "HPCBURST_CONF_QOS") {
+		t.Errorf("a QOS reached a row that has none:\n%s", env)
+	}
+}
+
+// In ssh mode the dial-home key's path reaches the test; in direct mode no key does.
+func TestTheDialHomeKeyReachesTheTestInSSHModeOnly(t *testing.T) {
+	w := newAlphaWorld(t)
+	key := filepath.Join(w.dir, "dialhome-key")
+	w.alphaSettings(func(m map[string]string) {
+		m["LIVE_DIALHOME_MODE"] = "ssh"
+		m["LIVE_DIALHOME_KEY"] = key
+	})
+	if res := w.run(nil, "--run", "tunnel-hour-athena", "--yes"); res.code != 0 {
+		t.Fatalf("exit %d:\n%s", res.code, res.out)
+	}
+	env := w.stateFile("test-env-TestTunnelHour")
+	for _, want := range []string{"HPCBURST_ALPHA_DIALHOME_MODE=ssh", "HPCBURST_ALPHA_DIALHOME_KEY=" + key} {
+		if !strings.Contains(env, want) {
+			t.Errorf("the test did not get %s:\n%s", want, env)
+		}
+	}
+	w2 := newAlphaWorld(t)
+	if res := w2.run(nil, "--run", "tunnel-hour-athena", "--yes"); res.code != 0 {
+		t.Fatalf("exit %d:\n%s", res.code, res.out)
+	}
+	if env := w2.stateFile("test-env-TestTunnelHour"); strings.Contains(env, "DIALHOME_KEY") {
+		t.Errorf("a key reached a direct-mode run:\n%s", env)
 	}
 }

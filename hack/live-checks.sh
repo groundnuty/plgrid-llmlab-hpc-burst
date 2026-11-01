@@ -325,7 +325,6 @@ EOS
 slurm_mem() {
   case $1 in
     *Gi) echo "$(( ${1%Gi} * 1024 ))M" ;;
-    *Mi) echo "${1%Mi}M" ;;
     *M) echo "$1" ;;
     *) return 1 ;;
   esac
