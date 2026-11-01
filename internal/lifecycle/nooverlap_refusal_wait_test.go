@@ -3,12 +3,14 @@ package lifecycle
 // Issue #174, the refusal variant: a queued replacement whose submissions are
 // refused for a full submit limit (SubmitLimitReached) before one is accepted.
 // A queue wait is one job's wait from the scheduler's recorded submission to
-// its start (hbep/0004-provider-interface/README.md:373, queueWaits), and a
-// refusal records no job (the same file, :633, "A limit refusal is no
-// failure"). So the refused interval stays out of the replacement's queue
-// wait and out of the planning wait, and a longer refusal gives a SMALLER
-// recorded wait, not a larger one (`@hpc-burst-science-agent`'s ruling on
-// #174, 1 Nov 2026, relayed by the code agent).
+// its start (HBEP-4, Provider status, queueWaits:
+// hbep/0004-provider-interface/README.md:373 here, :374 on main after PR #196),
+// and a refusal records no job (HBEP-4, Notes, "A limit refusal is no
+// failure": :633 here, :636 on main). So the refused interval stays out of the
+// replacement's queue wait and out of the planning wait, and a longer refusal
+// gives a SMALLER recorded wait, not a larger one (`@hpc-burst-science-agent`'s
+// ruling on #174, 1 Nov 2026, now in HBEP-7, Handover, No-overlap mode, and
+// its Test plan item "Queue waits on the queued path", by PR #196).
 //
 // The timeline is nooverlap_wait_test.go's, with the idle limit 5 min: R1 is
 // created at 09:19:30, P0 ends at 09:56:00, and its job leaves the GPU at

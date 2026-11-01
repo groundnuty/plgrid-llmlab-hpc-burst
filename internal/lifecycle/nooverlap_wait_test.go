@@ -31,6 +31,15 @@ package lifecycle
 //	LONG, idle limit 60 min: P0's job ends at 09:56:00 + 60 min + 10 s =
 //	  10:56:10. R1's wait is 10:56:10 - 09:19:40 = 1h36m30s.
 //
+// HBEP-7's accumulation rule (Handover, No-overlap mode, as amended by PR
+// #196; its Test plan item "Queue waits on the queued path") gives the same:
+// a recorded wait is about the previous planning wait plus the predecessor's
+// time from its drain start to its job's end, start-to-ready and the margin.
+// SHORT: 0 s + (09:50:20 to 10:01:10, 10m50s) + 50 s + 30 min = 41m40s; LONG:
+// 0 s + (09:50:20 to 10:56:10, 1h5m50s) + 50 s + 30 min = 1h37m40s. Each is
+// 10 s above the exact wait, because R1's job is submitted by the provider's
+// pass 10 s after R1's planned creation.
+//
 // The Provider then holds two waits, 0 s and R1's. With fewer than 20, the
 // planning wait is the largest, R1's. R1's job runs the rig's 4 h limit, so
 // its hard end is its start + 4 h and its drain start that minus the default
