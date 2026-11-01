@@ -129,16 +129,20 @@ func parseJobIDs(v string) ([]int, error) {
 //
 // Whether an ended job is listed is the NotListed mode: Helios never lists it
 // (an empty answer for it by --jobs until it is purged), Athena lists it in its
-// end state until it is purged. A purged job is never listed. A job another
-// user owns is known to slurmctld, so --me --jobs=<id> for it is an empty list,
-// not the error.
+// end state until it is purged. A purged job is never listed. A completing job
+// (an end state while its processes live, run mode) is listed in both modes,
+// by --me and by --jobs, and is not purged, until its processes are gone: by
+// default squeue reports pending, running and completing jobs, and Slurm's
+// purge skips a completing job (see job.purged). Once they are gone the mode's
+// rule applies again. A job another user owns is known to slurmctld, so --me
+// --jobs=<id> for it is an empty list, not the error.
 func (p *Platform) squeueRows(user string, me bool, ids []int, now time.Time) ([]*job, bool) {
 	var rows []*job
 	listed := func(j *job) bool {
 		if j.purged(now, p.cfg.MinJobAge) || (me && j.user != user) {
 			return false
 		}
-		return !IsTerminal(j.state()) || p.cfg.NotListed == NotListedAthena
+		return !IsTerminal(j.state()) || j.completing() || p.cfg.NotListed == NotListedAthena
 	}
 	if len(ids) == 0 {
 		for _, j := range p.jobs {

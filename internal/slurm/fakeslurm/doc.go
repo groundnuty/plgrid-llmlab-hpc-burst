@@ -21,7 +21,7 @@
 // (HOME, SCRATCH, ...). Outside run mode jobs never progress on their own: a
 // test moves them with Start, End, Requeue and the other job controls. The
 // only thing the clock does by itself is the purge of an ended job after
-// MinJobAge.
+// MinJobAge (in run mode, not of one that is still completing).
 //
 // # Command grammar
 //
@@ -155,6 +155,26 @@
 //     unrelated process and that process forked, all within the few
 //     milliseconds of one listing; that takes a wrap of the PID space and
 //     cannot be tested. A /proc that cannot be read is an error, never "none".
+//   - A job whose end state is set while its processes still live is
+//     completing, as in Slurm: squeue lists ["<end state>", "COMPLETING"] (ST
+//     CG) until Finished, in either NotListed mode, by --me and by
+//     --jobs=<id>, and it is not purged, however long ago it ended. squeue
+//     reports pending, running and completing jobs by default, and the purge
+//     (_list_find_job_old, Slurm 24.11, src/slurmctld/job_mgr.c) returns for a
+//     completing job before it looks at its age. scancel gives "Job/step
+//     already completing or completed" and sends nothing more to the
+//     processes (job_signal returns ESLURM_ALREADY_DONE when
+//     IS_JOB_FINISHED, which ignores the COMPLETING flag); scontrol release
+//     gives "Job has already finished" (update_job, ESLURM_JOB_FINISHED).
+//     MinJobAge counts from the end (the job's end_time), not from when the
+//     processes were gone, as in Slurm: clearing COMPLETING leaves end_time
+//     alone. A job whose processes were gone before end + MinJobAge then
+//     follows the NotListed mode (Helios: an empty list, then the error from
+//     end + MinJobAge; Athena: listed in its end state until then), and one
+//     whose processes outlive it is purged the moment they are gone. Slurm
+//     purges in periodic passes, the fake on the next query. A job whose
+//     processes cannot be cleared (Finished stays false) completes for ever
+//     and is never purged.
 //   - Job carries the execution's PID, Finished, its exit code or signal, when
 //     TERM and KILL were sent, and CleanupErr. Finished is true once the
 //     execution is terminal and none of its processes is left (the shell is
