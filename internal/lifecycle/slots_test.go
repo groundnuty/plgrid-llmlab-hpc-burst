@@ -92,6 +92,9 @@ func (s *staleReader) List(ctx context.Context, list client.ObjectList, opts ...
 	return nil
 }
 
+// fixedAt is a clock that always reads t.
+func fixedAt(t time.Time) func() time.Time { return func() time.Time { return t } }
+
 // oneSlotOpts: the Provider's QOS sets maxSubmitPerUser 1, the partition has
 // no QOS, so the effective limit is 1.
 func oneSlotOpts(extra ...rigOption) []rigOption {
@@ -153,6 +156,10 @@ func TestSlotsReservedAtomicallyTwoWorkers(t *testing.T) {
 				select {
 				case <-release:
 				case <-time.After(30 * time.Second): // a safety net, not a window: the test is released by state
+					// A timeout is a failure, not a release: it would let the
+					// test pass without the observable-state release it checks.
+					t.Error("the first create was held 30 s and never released by the other worker")
+					return apierrors.NewServiceUnavailable("the first create was never released")
 				}
 			} else {
 				open()
@@ -331,7 +338,7 @@ func TestSlotTableExpectations(t *testing.T) {
 	stale := newStaleReader(t, rg.c)
 	reserve := func(key string, at time.Time) (bool, int) {
 		t.Helper()
-		ok, n, err := tab.reserve(ctx, stale, rigProvider, key, two, at)
+		ok, n, err := tab.reserve(ctx, stale, rigProvider, key, two, fixedAt(at))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -398,21 +405,25 @@ func TestSlotTableExpectations(t *testing.T) {
 		t.Fatalf("count at the expiry = %d, want 0", n)
 	}
 	// No limit: nothing is listed or reserved.
-	if ok, n, err := tab.reserve(ctx, stale, rigProvider, rigNS+"/d", nil, t0); !ok || n != 0 || err != nil {
+	if ok, n, err := tab.reserve(ctx, stale, rigProvider, rigNS+"/d", nil, fixedAt(t0)); !ok || n != 0 || err != nil {
 		t.Fatalf("reserve with no limit = %v, %d, %v; want true, 0, nil", ok, n, err)
 	}
 	// A limit of 0 leaves no slot.
-	if ok, _, _ := tab.reserve(ctx, stale, rigProvider, rigNS+"/e", i32(0), t0); ok {
+	if ok, _, _ := tab.reserve(ctx, stale, rigProvider, rigNS+"/e", i32(0), fixedAt(t0)); ok {
 		t.Fatal("a limit of 0 gave a slot")
 	}
 }
 
 // TestSlotsHalfDonePassWaitsForASlot: a pass is cut short after md-a's
-// Instance and before its Allocation, and the controller restarts, so its
-// expectations are gone. md-b then takes the only slot. md-a's next pass
-// finishes the half-done provisioning (ensureAllocation) only with a slot: it
-// creates no Allocation, its Instance waits, and the deployment has
-// SubmitLimitReached naming the Instance, the Provider and the limit.
+// Instance and before its Allocation, and the controller restarts, so nothing
+// of its memory is left, as after a crash between the two creates (where no
+// release runs). The restart is part of that model only: the cut-short pass
+// here is a failed create, which already gave its slot back, and
+// TestSlotsFailedAllocationCreateGivesItsSlotBack tests the give-back. md-b
+// then takes the only slot. md-a's next pass finishes the half-done
+// provisioning (ensureAllocation) only with a slot: it creates no Allocation,
+// its Instance waits, and the deployment has SubmitLimitReached naming the
+// Instance, the Provider and the limit.
 func TestSlotsHalfDonePassWaitsForASlot(t *testing.T) {
 	var mu sync.Mutex
 	failA := true
