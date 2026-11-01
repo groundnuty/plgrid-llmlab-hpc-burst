@@ -191,6 +191,27 @@ func (r *supRig) versions() string {
 	return string(b)
 }
 
+// waitRecorded waits until a start's own process has written its line to
+// versions.log, and returns that line's version. The stand-in writes the
+// line after it starts, so a start that the supervisor stops at once, at the
+// next Serve, may never write it: a test that reads which file a start ran
+// waits for the start's line before it changes what frpc serves (issue
+// #141: a frpc stopped 11 ms after its start had not written its line yet).
+func (r *supRig) waitRecorded(s supStart, d time.Duration) string {
+	r.t.Helper()
+	tail := fmt.Sprintf(" %d\n", s.id.PID)
+	eventually(r.t, d, fmt.Sprintf("frpc %d to record itself", s.id.PID), func() bool {
+		return strings.Contains(r.versions(), tail)
+	})
+	for _, line := range strings.SplitAfter(r.versions(), "\n") {
+		if strings.HasSuffix(line, tail) {
+			return strings.TrimSuffix(line, tail)
+		}
+	}
+	r.t.Fatalf("no line of frpc %d in:\n%s", s.id.PID, r.versions())
+	return ""
+}
+
 func waitGoneID(t *testing.T, id agent.ProcessID, d time.Duration) {
 	t.Helper()
 	eventually(t, d, fmt.Sprintf("frpc %d to be gone", id.PID), func() bool { return !id.Alive() })
@@ -351,24 +372,30 @@ func TestFrpcRetriesFilesItCannotReadYet(t *testing.T) {
 //     the checked copy in the run directory, unchanged;
 //   - the hashed file itself is written to: it is hashed again before the
 //     next start, and refused.
+//
+// Which file a start ran is read from the line its process writes, so each
+// start's line is waited for before the next Serve stops it (waitRecorded).
 func TestFrpcRunsWhatItCheckedAfterTheStagedFilesChange(t *testing.T) {
+	const wait = 30 * time.Second
 	r := newSupRig(t, time.Second, nil)
 	staged, err := os.ReadFile(r.f.CertFile)
 	if err != nil {
 		t.Fatal(err)
 	}
 	r.f.Serve(uidA)
-	r.waitStarts(1, 5*time.Second)
+	s := r.waitStarts(1, wait)
+	ran := []string{r.waitRecorded(s[0], wait)}
 
 	held := filepath.Join(r.dir, "held-frpc") // the hashed file, renamed away
 	if err := os.Rename(r.bin, held); err != nil {
 		t.Fatal(err)
 	}
 	r.f.Serve(uidB)
-	s := r.waitStarts(2, 5*time.Second)
+	s = r.waitStarts(2, wait)
 	if s[1].uid != uidB {
 		t.Fatalf("after the purge frpc serves %q", s[1].uid)
 	}
+	ran = append(ran, r.waitRecorded(s[1], wait))
 
 	v2 := stubScript("v2", filepath.Join(r.dir, "versions.log"))
 	writeFile(t, r.bin, v2)
@@ -377,15 +404,18 @@ func TestFrpcRunsWhatItCheckedAfterTheStagedFilesChange(t *testing.T) {
 	}
 	writeFile(t, r.f.CertFile, makeCert(t, launcherName).pem)
 	r.f.Serve(uidC)
-	s = r.waitStarts(3, 5*time.Second)
-	eventually(t, 5*time.Second, "the third frpc to record itself", func() bool {
-		return strings.Contains(r.versions(), fmt.Sprintf(" %d\n", s[2].id.PID))
-	})
+	s = r.waitStarts(3, wait)
+	ran = append(ran, r.waitRecorded(s[2], wait))
 	if strings.Contains(r.versions(), "v2") {
 		t.Fatalf("the frpc put at the staged path ran:\n%s", r.versions())
 	}
-	if n := strings.Count(r.versions(), "v1 "); n != 3 {
-		t.Fatalf("the hashed frpc ran %d times, want 3:\n%s", n, r.versions())
+	for i, v := range ran {
+		if v != "v1" {
+			t.Fatalf("start %d ran %q, want the hashed v1:\n%s", i+1, v, r.versions())
+		}
+	}
+	if n := strings.Count(r.versions(), "v1 "); n != 3 || len(r.all()) != 3 {
+		t.Fatalf("the hashed frpc ran %d times in %d starts, want 3 and 3:\n%s", n, len(r.all()), r.versions())
 	}
 	cfg, err := os.ReadFile(r.f.ConfigPath())
 	if err != nil {
@@ -414,7 +444,7 @@ func TestFrpcRunsWhatItCheckedAfterTheStagedFilesChange(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "SHA-256") {
 			t.Fatalf("Run returned %v; want the digest refusal", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(wait):
 		t.Fatal("Run went on with a frpc that no longer has agent.json's digest")
 	}
 	if n := len(r.all()); n != 3 {
