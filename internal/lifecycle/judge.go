@@ -373,7 +373,7 @@ func judgeWarmUp(w *agentapi.WarmUpResult, targetSessions int32) (warmUpState, s
 		}
 	}
 	for i := 1; i < len(rounds); i++ {
-		if settled(rounds[i-1], rounds[i]) {
+		if agentapi.WarmUpSettled(rounds[i-1], rounds[i]) {
 			return warmUpSettled, fmt.Sprintf("settled in round %d", rounds[i].Round), throughput(rounds[i], targetSessions)
 		}
 	}
@@ -381,46 +381,6 @@ func judgeWarmUp(w *agentapi.WarmUpResult, targetSessions int32) (warmUpState, s
 		return warmUpFailed, fmt.Sprintf("warm-up did not settle after %d rounds", len(rounds)), nil
 	}
 	return warmUpRunning, "", nil
-}
-
-// meanTotals is the mean Total of each fixed-length shape's requests in r;
-// a shape whose length varies is left out (judgeWarmUp).
-func meanTotals(r agentapi.WarmUpRound) map[agentapi.Shape]time.Duration {
-	sum := map[agentapi.Shape]time.Duration{}
-	n := map[agentapi.Shape]int{}
-	for _, q := range r.Requests {
-		if !q.Shape.FixedLength() {
-			continue
-		}
-		sum[q.Shape] += time.Duration(q.Total)
-		n[q.Shape]++
-	}
-	for s := range sum {
-		sum[s] /= time.Duration(n[s])
-	}
-	return sum
-}
-
-func settled(prev, cur agentapi.WarmUpRound) bool {
-	a, b := meanTotals(prev), meanTotals(cur)
-	if len(b) == 0 || len(a) != len(b) {
-		return false
-	}
-	for s, t := range b {
-		p, ok := a[s]
-		if !ok || t-p > settleLimit(p) {
-			return false
-		}
-	}
-	return true
-}
-
-// settleLimit is how much slower than prev a shape may be in the next round
-// and still count as settled: max(warmUpTolerance of prev, warmUpFloor). The
-// floor keeps one request's noise on a short shape from blocking settling (in
-// #94's run, 0.208 s to 0.253 s between two rounds).
-func settleLimit(prev time.Duration) time.Duration {
-	return max(time.Duration(float64(prev)*warmUpTolerance), warmUpFloor)
 }
 
 func throughput(r agentapi.WarmUpRound, targetSessions int32) *v1alpha1.Throughput {
