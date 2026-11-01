@@ -90,10 +90,11 @@ type Batch interface {
 	//
 	// HBEP-4's QOS limits extend the refusals before any call, which the
 	// Slurm plugin makes, with the limits that apply on the partition under
-	// req.QOS (v1alpha1.EffectiveQOSLimits): an unsafe QOS, more GPUs than
-	// v1alpha1.MaxAllocationGPUs, more CPUs or memory than maxCpusPerUser or
-	// maxMemPerUser, and a time limit above the smaller of maxTime and
-	// maxWall. A policy refusal is returned as a *PolicyRefusal.
+	// req.QOS (v1alpha1.EffectiveQOSLimits): an unsafe QOS, an effective
+	// maxSubmitPerUser of 0, more GPUs than v1alpha1.MaxAllocationGPUs, more
+	// CPUs or memory than maxCpusPerUser or maxMemPerUser, and a time limit
+	// above the smaller of maxTime and maxWall. A policy refusal is returned
+	// as a *PolicyRefusal.
 	Submit(ctx context.Context, req SubmitRequest) (jobID string, outcome SubmitOutcome, err error)
 
 	// LiftHold lifts the job's user hold. Its errors wrap ErrNotHeld,

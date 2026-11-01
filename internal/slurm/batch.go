@@ -481,6 +481,14 @@ func checkRequest(req provider.SubmitRequest, profile provider.Profile, settings
 	if err != nil {
 		return s, refuse("%v", err)
 	}
+	// A submit limit of 0 allows no job at all (`@hpc-burst-science-agent`,
+	// 1 Nov 2026: an effective 0 means the Provider cannot host). Slurm would
+	// refuse every submission with a reason that reads as a full slot, one that
+	// never clears, so the request is refused here, before any call, as a GPU
+	// cap of 0 is below (checkGPUs).
+	if m := limits.MaxSubmitPerUser; m != nil && *m < 1 {
+		return s, refuse("maxSubmitPerUser is %d under qos %q: no job can be submitted there", *m, limits.From[v1alpha1.LimitMaxSubmitPerUser])
+	}
 	if err := checkGPUs(p.GPUs, part, limits); err != nil {
 		return s, err
 	}

@@ -175,6 +175,66 @@ func TestGPUBoundIsTheSmallerOfGPUsPerNodeAndMaxGPUsPerUser(t *testing.T) {
 	accepted(t, req, profile, settings)
 }
 
+// An effective maxSubmitPerUser of 0 means no Allocation can be hosted
+// (`@hpc-burst-science-agent`, 1 Nov 2026, the ruling on a GPU cap or a submit
+// limit of 0). Slurm would accept nothing under it, and the refusal would read
+// as a full slot that never ends, so the request is refused before any call, as
+// a GPU cap of 0 already is (PR 168's review, Opus N6). The limit that applies
+// is the first set in Slurm's order, so a partition QOS's 2000 beats the job
+// QOS's 0, and a partition QOS's 0 beats the job QOS's 1.
+func TestASubmitLimitOfZeroIsRefusedBeforeAnyCall(t *testing.T) {
+	type edit = func(*provider.SubmitRequest, *v1alpha1.PlatformProfileSpec, *v1alpha1.PartitionProfile)
+	jobZero := func(_ *provider.SubmitRequest, spec *v1alpha1.PlatformProfileSpec, _ *v1alpha1.PartitionProfile) {
+		spec.QOS[0].MaxSubmitPerUser = i32(0)
+	}
+	partition := func(sub *int32) edit {
+		return func(_ *provider.SubmitRequest, spec *v1alpha1.PlatformProfileSpec, p *v1alpha1.PartitionProfile) {
+			spec.QOS[1].MaxSubmitPerUser = sub
+			p.QOS = "plgrid"
+		}
+	}
+	both := func(fs ...edit) edit {
+		return func(r *provider.SubmitRequest, s *v1alpha1.PlatformProfileSpec, p *v1alpha1.PartitionProfile) {
+			for _, f := range fs {
+				f(r, s, p)
+			}
+		}
+	}
+	for _, c := range []struct {
+		name  string
+		edit  edit
+		ok    bool
+		names []string
+	}{
+		{"the job QOS's limit is 0", jobZero, false, []string{"maxSubmitPerUser", `"now"`, "0"}},
+		{"the partition QOS's 2000 comes before the job QOS's 0", both(jobZero, partition(i32(2000))), true, nil},
+		{"the partition QOS's 0 comes before the job QOS's 1", partition(i32(0)), false, []string{"maxSubmitPerUser", `"plgrid"`}},
+		{"the job QOS's limit is 1 (the fixture)", nil, true, nil},
+		{"the partition QOS sets none and the job QOS's 0 applies", both(jobZero, partition(nil)), false, []string{"maxSubmitPerUser", `"now"`}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			req, profile, settings := qosFixture(c.edit)
+			if c.ok {
+				accepted(t, req, profile, settings)
+				return
+			}
+			refusedWith(t, req, profile, settings, c.names...)
+			runner := &countingRunner{}
+			id, outcome, err := NewBatch(runner, profile, settings, Options{}).Submit(t.Context(), req)
+			if id != "" || outcome != provider.Rejected || !errors.Is(err, provider.ErrInvalidRequest) {
+				t.Errorf("Submit = %q, %s, %v; want no ID, Rejected and ErrInvalidRequest", id, outcome, err)
+			}
+			if n := runner.calls.Load(); n != 0 {
+				t.Errorf("the runner was called %d times, want 0: a limit of 0 is refused before any call", n)
+			}
+		})
+	}
+	// With no Provider qos only the partition QOS's limits apply; its 0 is refused.
+	req, profile, settings := qosFixture(partition(i32(0)))
+	req.QOS, settings.QOS = "", ""
+	refusedWith(t, req, profile, settings, "maxSubmitPerUser", `"plgrid"`)
+}
+
 // More CPUs or memory than the QOS's caps are refused the same way. Memory is
 // compared in the whole MiB that go to Slurm, rounded up: 122400Mi passes,
 // 122401Mi is refused, and 122400Mi plus one byte rounds up to 122401 MiB and
