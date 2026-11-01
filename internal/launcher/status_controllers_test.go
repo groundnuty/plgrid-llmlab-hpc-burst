@@ -14,13 +14,21 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	crhealthz "sigs.k8s.io/controller-runtime/pkg/healthz"
+	crlog "sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+// quietControllerRuntime gives controller-runtime's logger a sink once per process. Its healthz
+// handler logs each failing check, and without a logger controller-runtime prints a notice and a
+// goroutine dump into the test output, where a failure that is not one would be hard to tell apart.
+var quietControllerRuntime sync.Once
 
 // TestCheckEntry runs checkEntry on real processes: this test process is the supervisor, and the
 // fake controller is its child. Each case changes one thing, and the first is the control that
@@ -173,6 +181,7 @@ type supervisedFakeHost struct {
 func newSupervisedFakeHost(t *testing.T) *supervisedFakeHost {
 	t.Helper()
 	h := newFakeHost(t)
+	quietControllerRuntime.Do(func() { crlog.SetLogger(logr.Discard()) })
 	code, body := http.StatusOK, ""
 	ready, status, hits := new(atomic.Bool), new(atomic.Int32), new(atomic.Int32)
 	ready.Store(true)
