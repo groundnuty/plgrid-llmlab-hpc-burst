@@ -135,7 +135,7 @@ func TestCheckPortsFree(t *testing.T) {
 }
 
 func s(addr string, port int, inode string) sock {
-	return sock{Listener{Addr: addr, Port: port}, inode}
+	return sock{Listener: Listener{Addr: addr, Port: port}, inode: inode, proto: "tcp"}
 }
 
 func TestVerifyListeners(t *testing.T) {
@@ -160,6 +160,46 @@ func TestVerifyListeners(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			got := strings.Join(verifyListeners(expected, c.owned, c.others), "; ")
+			if len(c.wantProblems) == 0 && got != "" {
+				t.Fatalf("unexpected problems: %s", got)
+			}
+			for _, w := range c.wantProblems {
+				if !strings.Contains(got, w) {
+					t.Errorf("problems %q lack %q", got, w)
+				}
+			}
+		})
+	}
+}
+
+func u(addr string, port int, inode string) sock {
+	return sock{Listener: Listener{Addr: addr, Port: port}, inode: inode, proto: "udp"}
+}
+
+// TestVerifyExactListeners: frps's rule, matched by protocol, address and port. The wanted set is
+// written here as HBEP-6 has it, three TCP ports on 127.0.0.1.
+func TestVerifyExactListeners(t *testing.T) {
+	want := []sock{s("127.0.0.1", 100, ""), s("127.0.0.1", 101, ""), s("127.0.0.1", 102, "")}
+	exact := []sock{s("127.0.0.1", 100, "1"), s("127.0.0.1", 101, "2"), s("127.0.0.1", 102, "3")}
+	cases := []struct {
+		name          string
+		owned, others []sock
+		wantProblems  []string // substrings; none means clean
+	}{
+		{"exactly the three, others elsewhere", exact, []sock{s("127.0.0.1", 6443, "8"), u("0.0.0.0", 53, "9")}, nil},
+		{"an extra UDP socket (KCP or QUIC)", append(slices.Clone(exact), u("127.0.0.1", 100, "4")), nil, []string{"it also listens on [udp 127.0.0.1:100]"}},
+		{"an extra TCP port", append(slices.Clone(exact), s("127.0.0.1", 6443, "4")), nil, []string{"it also listens on [tcp 127.0.0.1:6443]"}},
+		{"the right port on another loopback address, a foreign process on the right one",
+			[]sock{s("127.0.0.1", 100, "1"), s("127.0.0.1", 101, "2"), s("127.0.0.2", 102, "3")}, []sock{s("127.0.0.1", 102, "9")},
+			[]string{"expected listener tcp 127.0.0.1:102 is missing", "it also listens on [tcp 127.0.0.2:102]", "other processes listen on its ports: [tcp 127.0.0.1:102]"}},
+		{"on all addresses instead of loopback", []sock{s("127.0.0.1", 100, "1"), s("0.0.0.0", 101, "2"), s("127.0.0.1", 102, "3")}, nil,
+			[]string{"expected listener tcp 127.0.0.1:101 is missing", "it also listens on [tcp 0.0.0.0:101]"}},
+		{"a foreign socket shares a port, at another address", exact, []sock{u("::", 101, "9")}, []string{"other processes listen on its ports: [udp [::]:101]"}},
+		{"nothing owned", nil, nil, []string{"tcp 127.0.0.1:100 is missing", "tcp 127.0.0.1:101 is missing", "tcp 127.0.0.1:102 is missing"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := strings.Join(verifyExactListeners(want, c.owned, c.others), "; ")
 			if len(c.wantProblems) == 0 && got != "" {
 				t.Fatalf("unexpected problems: %s", got)
 			}

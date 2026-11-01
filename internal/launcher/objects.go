@@ -26,7 +26,7 @@ type ObjRec struct {
 // Snapshot maps "group/resource/namespace/name" to the object's record.
 type Snapshot map[string]ObjRec
 
-// ephemeral kinds are left out of upgrade checks: Events expire by design (a TTL of an hour),
+// ephemeral kinds are left out of upgrade checks: Events expire by design (a TTL of seven days),
 // and Leases are renewed and recreated by controllers that restart with the host.
 var ephemeral = map[string]bool{
 	"/events":                    true,

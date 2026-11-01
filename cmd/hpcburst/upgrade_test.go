@@ -51,9 +51,9 @@ func TestUpgrade(t *testing.T) {
 	if err := os.WriteFile(frontCfg, []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	r := cli(t, h.upArgs(base, "--version", "1.35.9", "--json",
+	r := cli(t, h.upArgs(base, append(frpsArgs(t), "--version", "1.35.9", "--json",
 		"--front-mode", "ssh", "--front-addr", "front.example.test", "--front-key", keyFile,
-		"--manifests", "testdata/manifests", "--controller-bin", ctlBin, "--front-config", frontCfg, "--front-bin", frontBin)...)
+		"--manifests", "testdata/manifests", "--controller-bin", ctlBin, "--front-config", frontCfg, "--front-bin", frontBin)...)...)
 	if r.code != exitOK {
 		t.Fatalf("up exited %d", r.code)
 	}
@@ -67,7 +67,7 @@ func TestUpgrade(t *testing.T) {
 	oldPID := st.Processes[0].PID
 	// The controllers run beside the old host: remember them, to see them replaced.
 	oldProcs := recordedProcs(t, h.dir)
-	oldRec, ok := readSupervisorRecordN(t, h.dir, 2)
+	oldRec, ok := readSupervisorRecordN(t, h.dir, 3) // the controller, the front and frps
 	if len(oldProcs) != 2 || oldProcs[1].Name != "supervisor" || !ok || oldRec.Entries[0].Proc == nil ||
 		oldRec.Entries[1].Name != "front" || oldRec.Entries[1].Proc == nil {
 		t.Fatalf("before the upgrade: %+v, %+v", oldProcs, oldRec)
@@ -193,8 +193,8 @@ func TestUpgrade(t *testing.T) {
 	} else {
 		// Both the controller and the front run again, as new children of the new supervisor, and
 		// the front answers on its own health port.
-		newRec, ok := readSupervisorRecordN(t, h.dir, 2)
-		for i := 0; ok && i < 2; i++ {
+		newRec, ok := readSupervisorRecordN(t, h.dir, 3)
+		for i := 0; ok && i < 3; i++ {
 			e, old := newRec.Entries[i], oldRec.Entries[i]
 			if e.Name != old.Name || e.Proc == nil || e.Proc.PID == old.Proc.PID || !running(e.Proc.PID) || ppidOfPID(t, e.Proc.PID) != newProcs[1].PID {
 				ok = false
@@ -455,7 +455,7 @@ func TestInterruptedUpgradeKeepsTheSupervision(t *testing.T) {
 	if err := os.WriteFile(frontCfg, []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if r := cli(t, h.upArgs(base, "--version", "1.35.9", "--controller-bin", ctlBin, "--front-config", frontCfg, "--front-bin", frontBin)...); r.code != exitOK {
+	if r := cli(t, h.upArgs(base, append(frpsArgs(t), "--version", "1.35.9", "--controller-bin", ctlBin, "--front-config", frontCfg, "--front-bin", frontBin)...)...); r.code != exitOK {
 		t.Fatalf("up exited %d: %s", r.code, r.err)
 	}
 	oldK3s := readState(t, h.dir).Processes[0].PID

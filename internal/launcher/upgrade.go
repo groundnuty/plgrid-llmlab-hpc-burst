@@ -23,6 +23,14 @@ type UpgradeOptions struct {
 	supervisorArgv []string
 }
 
+// noFrpsUpgradeWarning is printed when upgrade keeps a host whose record runs the controllers
+// without frps (one that an earlier release started, or one up found no frps for): upgrade runs
+// what the record names and resolves no binary.
+const noFrpsUpgradeWarning = "warning: the host runs the controllers without frps, and upgrade keeps what it runs: Instances cannot open their dial-home tunnels (HBEP-6); to run frps, hpcburst down, then up with --frps-bin or frp-" + DefaultFrpVersion + "/frps in --bin-dir"
+
+// frpsMissing reports whether the record runs the controllers but no frps.
+func (s *State) frpsMissing() bool { return s.Controllers != nil && s.Frps == nil }
+
 // UpgradeReport is the outcome of an upgrade.
 type UpgradeReport struct {
 	From         string       `json:"from"`
@@ -33,6 +41,7 @@ type UpgradeReport struct {
 	ReadyMS      int64        `json:"ready_ms"`
 	StopToReady  int64        `json:"stop_to_ready_ms"`
 	RSSMiB       float64      `json:"rss_mib"`
+	Warnings     []string     `json:"warnings,omitempty"`
 }
 
 // Upgrade moves a running host one step up (the next minor, or a newer patch of the same minor):
@@ -120,6 +129,9 @@ func Upgrade(ctx context.Context, o UpgradeOptions) (*UpgradeReport, error) {
 	// taken from here on says they are missing until they are started again, and the new
 	// supervisor runs the same set.
 	rep := &UpgradeReport{From: st.Version, To: nst.Version, Backup: backup, StopMS: stopDur.Milliseconds(), ReadyMS: readyAt.Milliseconds()}
+	if nst.frpsMissing() {
+		rep.Warnings = append(rep.Warnings, noFrpsUpgradeWarning) // replaceHost has logged it
+	}
 	rep.StopToReady = stopDur.Milliseconds() + readyAt.Milliseconds()
 	if rss, err := rssMiB([]int{nst.Procs[0].PID}); err == nil {
 		rep.RSSMiB = rss
@@ -192,7 +204,10 @@ func replaceHost(ctx context.Context, l layout, st *State, bin Binary, ops hostO
 	}
 	// The replacement's first record carries the old host's supervision, so an upgrade interrupted
 	// while the new k3s starts leaves a record that still names the controllers and the front.
-	spec := launchSpec{l: l, bin: bin, ports: st.Ports, nice: st.Nice, controllers: st.Controllers, frontRun: st.FrontRun}
+	spec := launchSpec{l: l, bin: bin, ports: st.Ports, nice: st.Nice, controllers: st.Controllers, frontRun: st.FrontRun, frps: st.Frps}
+	if st.frpsMissing() {
+		logf(log, "%s", noFrpsUpgradeWarning)
+	}
 	nst, readyAt, err = ops.start(ctx, spec, st.Front, timeout, log)
 	if err != nil {
 		return nil, backup, stopDur, 0, fmt.Errorf("the new host did not come up (the host is stopped; the store in %s is recorded as written by %s; to go back to %s, run hpcburst restore --backup %s): %w",

@@ -93,6 +93,35 @@ func TestParseListenTable(t *testing.T) {
 	}
 }
 
+func TestParseUnconnectedTable(t *testing.T) {
+	// A trimmed /proc/net/udp and udp6, as the kernel writes them. A socket with no remote address
+	// takes datagrams from anyone (a server's, state 07); the connected one (a client's DNS query,
+	// state 01, remote 127.0.0.1:53) talks to its peer alone and must not count.
+	const udp = `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops
+  123: 0100007F:7325 00000000:0000 07 00000000:00000000 00:00000000 00000000  1001        0 44444 2 0000000000000000 0
+  456: 0100007F:D431 0100007F:0035 01 00000000:00000000 00:00000000 00000000  1001        0 55555 2 0000000000000000 0
+`
+	const udp6 = `  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops
+    0: 00000000000000000000000000000000:14E9 00000000000000000000000000000000:0000 07 00000000:00000000 00:00000000 00000000  1001        0 66666 2 0000000000000000 0
+`
+	got, err := parseUnconnectedTable(udp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 0x7325 = 29477.
+	if len(got) != 1 || got[0].key() != "udp 127.0.0.1:29477" || got[0].inode != "44444" {
+		t.Fatalf("udp: %+v, want the unconnected socket alone", got)
+	}
+	got, err = parseUnconnectedTable(udp6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 0x14E9 = 5353.
+	if len(got) != 1 || got[0].key() != "udp [::]:5353" || got[0].inode != "66666" {
+		t.Fatalf("udp6: %+v", got)
+	}
+}
+
 // fakeProc points procRoot at a temporary tree for the duration of the test.
 func fakeProc(t *testing.T, boot string) string {
 	t.Helper()

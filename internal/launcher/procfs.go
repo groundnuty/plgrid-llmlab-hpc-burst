@@ -267,7 +267,11 @@ func (l Listener) Loopback() bool {
 type sock struct {
 	Listener
 	inode string
+	proto string // "tcp" or "udp"
 }
+
+// key names a socket by protocol, address and port: "tcp 127.0.0.1:29229".
+func (s sock) key() string { return s.proto + " " + s.Listener.String() }
 
 // parseHexAddr decodes an address from /proc/net/tcp or tcp6: 4 or 16 bytes in groups of one
 // 32-bit word each, written in host (little-endian) byte order.
@@ -290,6 +294,19 @@ func parseHexAddr(h string) (string, error) {
 
 // parseListenTable returns the LISTEN rows (state 0A) of a /proc/net/tcp-style table.
 func parseListenTable(content string) ([]sock, error) {
+	return parseSockTable(content, "tcp", func(state, _ string) bool { return state == "0A" })
+}
+
+// parseUnconnectedTable returns the rows of a /proc/net/udp-style table that have no remote
+// address: sockets that take datagrams from anyone, which is how a UDP server (KCP, QUIC) listens.
+// A connected socket (a client's, such as a DNS query's) only talks to its one peer.
+func parseUnconnectedTable(content string) ([]sock, error) {
+	return parseSockTable(content, "udp", func(_, remote string) bool { return strings.Trim(remote, "0:") == "" })
+}
+
+// parseSockTable returns the rows of a /proc/net table (tcp, tcp6, udp, udp6: the same columns)
+// that keep accepts, given the row's state and remote address as the kernel writes them.
+func parseSockTable(content, proto string, keep func(state, remote string) bool) ([]sock, error) {
 	lines := strings.Split(content, "\n")
 	var out []sock
 	for i, l := range lines {
@@ -303,7 +320,7 @@ func parseListenTable(content string) ([]sock, error) {
 		if len(p) < 10 {
 			return nil, fmt.Errorf("line %d: %d fields, want at least 10", i+1, len(p))
 		}
-		if p[3] != "0A" {
+		if !keep(p[3], p[2]) {
 			continue
 		}
 		hp := strings.Split(p[1], ":")
@@ -318,7 +335,7 @@ func parseListenTable(content string) ([]sock, error) {
 		if err != nil {
 			return nil, fmt.Errorf("line %d: %w", i+1, err)
 		}
-		out = append(out, sock{Listener{Addr: addr, Port: int(port)}, p[9]})
+		out = append(out, sock{Listener: Listener{Addr: addr, Port: int(port)}, inode: p[9], proto: proto})
 	}
 	return out, nil
 }
@@ -326,16 +343,36 @@ func parseListenTable(content string) ([]sock, error) {
 // listenSockets returns every TCP LISTEN socket of the network namespace. A table that cannot
 // be read is an error: "no listener found" must never come from "could not look".
 func listenSockets() ([]sock, error) {
+	return readSockTables(parseListenTable, "net/tcp", "net/tcp6")
+}
+
+// boundSockets returns every socket of the network namespace that can be reached from outside it:
+// TCP LISTEN sockets and UDP sockets without a remote address, IPv4 and IPv6.
+func boundSockets() ([]sock, error) {
+	tcp, err := listenSockets()
+	if err != nil {
+		return nil, err
+	}
+	udp, err := readSockTables(parseUnconnectedTable, "net/udp", "net/udp6")
+	if err != nil {
+		return nil, err
+	}
+	return append(tcp, udp...), nil
+}
+
+// readSockTables parses each of the /proc/net tables; the IPv6 one (the second) may be missing
+// when IPv6 is not compiled in.
+func readSockTables(parse func(string) ([]sock, error), v4, v6 string) ([]sock, error) {
 	var out []sock
-	for _, f := range []string{"net/tcp", "net/tcp6"} {
+	for _, f := range []string{v4, v6} {
 		b, err := os.ReadFile(procRoot + "/" + f)
 		if err != nil {
-			if f == "net/tcp6" && errors.Is(err, os.ErrNotExist) {
+			if f == v6 && errors.Is(err, os.ErrNotExist) {
 				continue // IPv6 not compiled in
 			}
 			return nil, err
 		}
-		rows, err := parseListenTable(string(b))
+		rows, err := parse(string(b))
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", f, err)
 		}

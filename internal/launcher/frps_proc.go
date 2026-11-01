@@ -97,24 +97,15 @@ func StartFrps(s FrpsSpec) (*FrpsProc, error) {
 	if s.Nice == 0 {
 		cmd.Args[0] = s.Bin.Path // what ps shows; the file executed is still the descriptor
 	}
-	pidfd := -1
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, PidFD: &pidfd}
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start frps: %w", err)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	// startProc takes the pidfd from clone and records the identity while it is held; on a failure
+	// it stops the child again and reaps it.
+	h, err := startProc(FrpsProcName, cmd)
+	if err != nil {
+		return nil, err
 	}
-	p := &FrpsProc{cmd: cmd, done: make(chan struct{})}
+	p := &FrpsProc{h: h, cmd: cmd, done: make(chan struct{})}
 	go func() { _ = cmd.Wait(); close(p.done) }()
-	if pidfd < 0 {
-		// Not reaped yet, so the PID is still the child's and this kill cannot reach another process.
-		_ = cmd.Process.Kill()
-		return nil, errors.New("the kernel gave no pidfd for frps, so its identity could not be pinned; it was stopped again")
-	}
-	p.h = &procHandle{rec: ProcRec{Name: FrpsProcName, PID: cmd.Process.Pid}, fd: pidfd}
-	if _, err := p.h.record(); err != nil {
-		_ = pidfds.signal(p.h.fd, syscall.SIGKILL)
-		p.h.Close()
-		return nil, fmt.Errorf("record the identity of frps: %w", err)
-	}
 	return p, nil
 }
 

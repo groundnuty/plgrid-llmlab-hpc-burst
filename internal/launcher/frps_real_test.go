@@ -36,11 +36,17 @@ func TestFrpsRealHoldsExactlyItsThreeLoopbackPorts(t *testing.T) {
 	r := newFrpsRig(t, frpsRigBase, 10)
 	h, rec := r.host, r.proc.Rec()
 
-	// It runs the file whose sum was checked, whatever wraps it (nice execs into frps).
+	// It runs the sealed copy whose sum was checked, whatever wraps it (nice execs into frps): its
+	// image is the memory file, and holds the verified bytes.
 	if exe, err := os.Readlink("/proc/" + strconv.Itoa(rec.PID) + "/exe"); err != nil {
 		t.Fatal(err)
-	} else if want, _ := filepath.EvalSymlinks(r.bin.Path); exe != want {
-		t.Errorf("pid %d runs %s, want the verified %s", rec.PID, exe, want)
+	} else if exe != frpsMemfdExe {
+		t.Errorf("pid %d runs %s, want the verified copy %s", rec.PID, exe, frpsMemfdExe)
+	}
+	if img, err := os.ReadFile("/proc/" + strconv.Itoa(rec.PID) + "/exe"); err != nil {
+		t.Fatal(err)
+	} else if sum := sha256.Sum256(img); hex.EncodeToString(sum[:]) != r.bin.SHA256 {
+		t.Errorf("the image of pid %d has sha256 %x, not the verified %s", rec.PID, sum, r.bin.SHA256)
 	}
 	if cmdline, _ := os.ReadFile("/proc/" + strconv.Itoa(rec.PID) + "/cmdline"); !strings.Contains(string(cmdline), "--strict-config=true") {
 		t.Errorf("command line %q lacks --strict-config=true", cmdline)
@@ -402,8 +408,8 @@ func TestStartFrpsSurvivesAnImmediateExit(t *testing.T) {
 	}
 }
 
-// TestFrpsRealRunsTheVerifiedDescriptorNotTheReplacedPath: the launcher hashes the file it opened
-// and runs that descriptor. After the verification the path is made to name another executable (a
+// TestFrpsRealRunsTheVerifiedDescriptorNotTheReplacedPath: the launcher hashes a sealed copy of the
+// file it opened and runs that copy's descriptor. After the verification the path is made to name another executable (a
 // new file, as an installer or an attacker would leave it); frps must still be the verified one,
 // with and without nice(1) in front. Executing the path instead would start the impostor, which
 // writes a marker and never answers.
@@ -437,10 +443,10 @@ func TestFrpsRealRunsTheVerifiedDescriptorNotTheReplacedPath(t *testing.T) {
 			if _, err := os.Stat(marker); !os.IsNotExist(err) {
 				t.Errorf("the impostor ran (%v)", err)
 			}
-			// The process runs the old, unlinked inode: its image is the file that was hashed.
+			// The process runs the sealed copy: its image is the bytes that were hashed.
 			exe, err := os.Readlink("/proc/" + strconv.Itoa(pid) + "/exe")
-			if err != nil || exe != path+" (deleted)" {
-				t.Errorf("/proc/%d/exe = %q, %v, want %q", pid, exe, err, path+" (deleted)")
+			if err != nil || exe != frpsMemfdExe {
+				t.Errorf("/proc/%d/exe = %q, %v, want %q", pid, exe, err, frpsMemfdExe)
 			}
 			img, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/exe")
 			if err != nil {
@@ -453,6 +459,10 @@ func TestFrpsRealRunsTheVerifiedDescriptorNotTheReplacedPath(t *testing.T) {
 		})
 	}
 }
+
+// frpsMemfdExe is what /proc/<pid>/exe of an frps the launcher started names: the sealed memory
+// file (sealedCopy) that holds the verified bytes, not the file on disk.
+const frpsMemfdExe = "/memfd:frps (deleted)"
 
 // TestResolveFrpsRealBinaryAgainstThePin: the executable in HPCBURST_FRP_DIR has the sum that
 // frp-pins.txt records for this architecture, which was computed from the verified release asset.
