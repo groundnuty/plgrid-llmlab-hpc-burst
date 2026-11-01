@@ -36,6 +36,13 @@
 #                                the ssh credentials files of the conformance runs, mode 600
 #   ACCOUNT_HELIOS_CPU, ACCOUNT_HELIOS_GH200, ACCOUNT_ATHENA_A100
 #                                the grant account of each job kind
+#   The alpha rows (issue #194; docs/alpha-runbook.md) also read, for the rows that run the stack
+#   (alpha-*, tunnel-hour-*):
+#   LIVE_DIALHOME_MODE           direct or ssh: how the jobs reach the host (HBEP-6)
+#   LIVE_DIALHOME_ADDR           host:port of the dial-home route, as the compute nodes see it
+#   LIVE_DIALHOME_KEY            ssh mode only: the restricted dial-home key file, mode 600
+#   LIVE_BIN_DIR                 absolute path of the directory with k3s-1.36.5/ and the pinned frp
+#   LIVE_ISSUE_174_LANDED        yes, once #174 is on main: alpha-helios-nooverlap refuses without it
 # Cluster calls go through the ssh aliases helios and athena, one at a time per
 # host under <LIVE_LOCK_DIR>/<host>.lock. The aliases' ssh configuration is yours.
 #
@@ -80,6 +87,12 @@ hub-golden|local|pkg/hubfiles|^TestGoldenHub$|HPCBURST_TEST_HUB|spikes/s7/checkp
 conformance-helios|cluster|internal/providerctl/conformance|^TestConformance$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host|ready
 conformance-athena|cluster|internal/providerctl/conformance|^TestConformance$|HPCBURST_CONFORMANCE|profiles/athena.yaml|host|ready
 real-engine|cluster|cmd/hb-agent|^TestRealEngine$|HB_REAL_ENGINE_PLAN|spikes/s94/job.sh|host,linux-arm64|ready
+alpha-athena-handover|cluster|internal/alpha|^TestAlphaAthenaHandover$|HPCBURST_ALPHA_ROW|profiles/athena.yaml,examples/provider-athena-a100.yaml|host|ready
+alpha-helios-nooverlap|cluster|internal/alpha|^TestAlphaHeliosNoOverlap$|HPCBURST_ALPHA_ROW|profiles/helios.yaml,examples/provider-helios-gh200.yaml|host,linux-arm64|ready
+tunnel-hour-helios|cluster|internal/alpha|^TestTunnelHour$|HPCBURST_ALPHA_ROW|profiles/helios.yaml|host,linux-arm64|ready
+tunnel-hour-athena|cluster|internal/alpha|^TestTunnelHour$|HPCBURST_ALPHA_ROW|profiles/athena.yaml|host|ready
+gpu-accounting-helios|cluster|internal/providerctl/conformance|^TestGPUAccounting$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host|ready
+gpu-accounting-athena|cluster|internal/providerctl/conformance|^TestGPUAccounting$|HPCBURST_CONFORMANCE|profiles/athena.yaml|host|ready
 rehearsal|cluster|-|-|-|-|-|pending
 # END LIVE TESTS
 TABLE
@@ -96,7 +109,38 @@ cluster_table() {
 conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|80|-
 conformance-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|4|32Gi|00:05:00|80|-
 real-engine|helios|-|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|00:57:00|75|-C memfs
+alpha-athena-handover|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|01:00:00|150|-
+alpha-helios-nooverlap|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|01:00:00|200|-C memfs
+tunnel-hour-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|01:25:00|110|-C memfs
+tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|01:25:00|110|-
+gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|00:10:00|25|-
+gpu-accounting-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|00:10:00|25|-
 # END CLUSTER SHAPES
+TABLE
+}
+
+# The rows that run the whole stack (the controllers, the front, frps and the agent) take the dependency
+# closure of these packages too, in each of their build contexts, so --plan names them when a stack package
+# changes: the thin test package alone would show none of it. name | packages (comma separated).
+plan_stack_table() {
+  cat <<'TABLE'
+# BEGIN PLAN STACK
+alpha-athena-handover|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
+alpha-helios-nooverlap|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
+tunnel-hour-helios|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
+tunnel-hour-athena|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
+# END PLAN STACK
+TABLE
+}
+
+# A bare name that stands for several rows, one per cluster, run one after the other (issue #194).
+# name | rows.
+alias_table() {
+  cat <<'TABLE'
+# BEGIN ALIASES
+tunnel-hour|tunnel-hour-helios,tunnel-hour-athena
+gpu-accounting|gpu-accounting-helios,gpu-accounting-athena
+# END ALIASES
 TABLE
 }
 
@@ -107,6 +151,7 @@ CLEAN_POLL_SECONDS=${LIVE_CLEAN_POLL_SECONDS:-3}
 declare -a NAMES=()
 declare -A KIND PKG TEST GATES INPUTS CONTEXTS STATUS
 declare -A HOST PROFILE PARTITION QOS SLOT ACCTKEY GPUS CPUS MEM TLIMIT TMIN EXTRA
+declare -A STACK ALIAS
 declare -A S=()
 
 load_tables() {
@@ -122,6 +167,15 @@ load_tables() {
     HOST[$name]=$h PROFILE[$name]=$pr PARTITION[$name]=$pa QOS[$name]=$q SLOT[$name]=$sl ACCTKEY[$name]=$ak
     GPUS[$name]=$g CPUS[$name]=$c MEM[$name]=$m TLIMIT[$name]=$tl TMIN[$name]=$tm EXTRA[$name]=$ex
   done < <(cluster_table | grep -v -e '^#' -e '^$')
+  local pk
+  while IFS='|' read -r name pk; do
+    [ -n "$name" ] || continue
+    STACK[$name]=${pk//,/ }
+  done < <(plan_stack_table | grep -v -e '^#' -e '^$')
+  while IFS='|' read -r name pk; do
+    [ -n "$name" ] || continue
+    ALIAS[$name]=${pk//,/ }
+  done < <(alias_table | grep -v -e '^#' -e '^$')
 }
 
 say() { printf '%s\n' "$*"; }
@@ -129,7 +183,8 @@ usage() {
   cat <<'USAGE'
 usage: hack/live-checks.sh --list
        hack/live-checks.sh --plan <base>..<head>      which live tests cover the range; runs nothing
-       hack/live-checks.sh --run <name>... [--yes]    runs only the named tests (a cluster test needs --yes)
+       hack/live-checks.sh --run <name>... [--yes]    runs only the named tests (a cluster test needs --yes);
+                                                      tunnel-hour and gpu-accounting stand for their two rows
 Settings: HPCBURST_LIVE_SETTINGS names a mode-600 KEY=VALUE file; the keys are listed in this script's header.
 Exit: 0 passed; 1 failed, skipped or left a job; 2 usage; 3 refused; 4 cluster test not run (no --yes).
 USAGE
@@ -159,7 +214,7 @@ load_settings() {
     [ "$k" != "$line" ] || continue
     v=${v%\"}; v=${v#\"}; v=${v%\'}; v=${v#\'}
     case $k in
-      LIVE_OUT_DIR|LIVE_LOCK_DIR|LIVE_BUILD_LOCK|LIVE_LLMLAB_CREDENTIALS|LIVE_LLMLAB_MODEL|LIVE_CONF_CREDENTIALS_HELIOS|LIVE_CONF_CREDENTIALS_ATHENA|ACCOUNT_HELIOS_CPU|ACCOUNT_HELIOS_GH200|ACCOUNT_ATHENA_A100)
+      LIVE_OUT_DIR|LIVE_LOCK_DIR|LIVE_BUILD_LOCK|LIVE_LLMLAB_CREDENTIALS|LIVE_LLMLAB_MODEL|LIVE_CONF_CREDENTIALS_HELIOS|LIVE_CONF_CREDENTIALS_ATHENA|ACCOUNT_HELIOS_CPU|ACCOUNT_HELIOS_GH200|ACCOUNT_ATHENA_A100|LIVE_DIALHOME_MODE|LIVE_DIALHOME_ADDR|LIVE_DIALHOME_KEY|LIVE_BIN_DIR|LIVE_ISSUE_174_LANDED)
         S[$k]=$v ;;
     esac
   done 2>/dev/null < "$HPCBURST_LIVE_SETTINGS"
@@ -188,9 +243,37 @@ check_settings() {
         if [ "${PROFILE[$name]}" != - ]; then
           key=LIVE_CONF_CREDENTIALS_$(printf '%s' "${HOST[$name]}" | tr a-z A-Z)
           need "$key" && { private_file "$key" "${S[$key]}" || bad=1; }
-        fi ;;
+        fi
+        case $name in
+          alpha-*|tunnel-hour-*) check_alpha_settings "$name" || bad=1 ;;
+        esac ;;
     esac
   done
+  return $bad
+}
+
+# check_alpha_settings <name>: what a row that runs the stack needs besides a cluster test's own settings: the
+# dial-home route (the owner provides it, HBEP-6), the directory with the pinned binaries, and for the
+# no-overlap row the word that #174 is on main. Every problem is reported.
+check_alpha_settings() {
+  local name=$1 bad=0 mode
+  alpha_need() { [ -n "${S[$1]:-}" ] || { say "live-checks: setting $1 is missing"; bad=1; return 1; }; }
+  if alpha_need LIVE_DIALHOME_MODE; then
+    mode=${S[LIVE_DIALHOME_MODE]}
+    case $mode in
+      direct) ;;
+      ssh) alpha_need LIVE_DIALHOME_KEY && { private_file LIVE_DIALHOME_KEY "${S[LIVE_DIALHOME_KEY]}" || bad=1; } ;;
+      *) say "live-checks: LIVE_DIALHOME_MODE must be direct or ssh"; bad=1 ;;
+    esac
+  fi
+  alpha_need LIVE_DIALHOME_ADDR && { [[ ${S[LIVE_DIALHOME_ADDR]} =~ ^[A-Za-z0-9._-]+:[0-9]{1,5}$ ]] || { say "live-checks: LIVE_DIALHOME_ADDR must be host:port"; bad=1; }; }
+  if alpha_need LIVE_BIN_DIR; then
+    case ${S[LIVE_BIN_DIR]} in /*) [ -d "${S[LIVE_BIN_DIR]}" ] || { say "live-checks: LIVE_BIN_DIR is not a directory"; bad=1; } ;; *) say "live-checks: LIVE_BIN_DIR must be an absolute path"; bad=1 ;; esac
+  fi
+  if [ "$name" = alpha-helios-nooverlap ] && [ "${S[LIVE_ISSUE_174_LANDED]:-}" != yes ]; then
+    say "live-checks: setting LIVE_ISSUE_174_LANDED must be yes: $name needs #174 (no-overlap queue-wait growth), which is not marked as landed"
+    bad=1
+  fi
   return $bad
 }
 
@@ -242,6 +325,7 @@ EOS
 slurm_mem() {
   case $1 in
     *Gi) echo "$(( ${1%Gi} * 1024 ))M" ;;
+    *Mi) echo "${1%Mi}M" ;;
     *M) echo "$1" ;;
     *) return 1 ;;
   esac
@@ -448,6 +532,33 @@ env_conformance() {
   export HPCBURST_CONF_STAGING='$SCRATCH/hpc-burst-conformance'
   export HPCBURST_CONF_HOST_LOCK=${S[LIVE_LOCK_DIR]}/$host.lock HPCBURST_CONF_CONTROL_DIR=$CONTROL_DIR
   export HPCBURST_CONF_OUT=$REC_DIR
+  # A GPU row that waits in a queue, and under a QOS (gpu-accounting-*; issue #194): the test's own
+  # pending clock, which the script's timeout takes in (execute_cluster).
+  unset HPCBURST_CONF_QOS HPCBURST_CONF_PENDING_MAX_SECONDS
+  case $n in
+    gpu-accounting-*)
+      [ "${QOS[$n]}" = - ] || export HPCBURST_CONF_QOS=${QOS[$n]}
+      export HPCBURST_CONF_PENDING_MAX_SECONDS=${LIVE_PENDING_MAX_SECONDS:-7200} ;;
+  esac
+}
+
+# env_alpha <name>: the environment of an alpha row's test binary (issue #194). The row's name is the gate; the
+# test refuses a name that is not its own. The dry switch is unset here, always: a run that this script starts
+# is never a dry run, so a dry pass can never stand for a live one.
+env_alpha() {
+  local n=$1 host=${HOST[$1]} up
+  up=$(printf '%s' "$host" | tr a-z A-Z)
+  unset HPCBURST_ALPHA_DRY HPCBURST_ALPHA_DRY_FAULT HPCBURST_ALPHA_DRY_ROOT
+  export HPCBURST_ALPHA_ROW=$n HPCBURST_ALPHA_PROFILE=${PROFILE[$n]} HPCBURST_ALPHA_PARTITION=${PARTITION[$n]}
+  export HPCBURST_ALPHA_GPUS=${GPUS[$n]} HPCBURST_ALPHA_CPUS=${CPUS[$n]} HPCBURST_ALPHA_MEMORY=${MEM[$n]}
+  export HPCBURST_ALPHA_ACCOUNT=${S[${ACCTKEY[$n]}]} HPCBURST_ALPHA_CREDENTIALS=${S[LIVE_CONF_CREDENTIALS_$up]}
+  export HPCBURST_ALPHA_HOST_LOCK=${S[LIVE_LOCK_DIR]}/$host.lock HPCBURST_ALPHA_CONTROL_DIR=$CONTROL_DIR
+  export HPCBURST_ALPHA_OUT=$REC_DIR HPCBURST_ALPHA_BIN_DIR=${S[LIVE_BIN_DIR]} HPCBURST_ALPHA_BUILD_DIR=${ALPHA_BUILD_DIR:-}
+  export HPCBURST_ALPHA_DIALHOME_MODE=${S[LIVE_DIALHOME_MODE]} HPCBURST_ALPHA_DIALHOME_ADDR=${S[LIVE_DIALHOME_ADDR]}
+  export HPCBURST_ALPHA_PENDING_MAX_SECONDS=${LIVE_PENDING_MAX_SECONDS:-7200}
+  unset HPCBURST_ALPHA_QOS HPCBURST_ALPHA_DIALHOME_KEY
+  [ "${QOS[$n]}" = - ] || export HPCBURST_ALPHA_QOS=${QOS[$n]}
+  [ "${S[LIVE_DIALHOME_MODE]}" != ssh ] || export HPCBURST_ALPHA_DIALHOME_KEY=${S[LIVE_DIALHOME_KEY]}
 }
 
 run_local() { # <name>
@@ -482,14 +593,41 @@ check_slot() {
 prepare_cluster() {
   case $1 in
     real-engine) prepare_real_engine "$1" ;;
+    alpha-*|tunnel-hour-*) prepare_alpha "$1" ;;
     *) build_test_binary "$1" "$OUT/$1.test" ;;
   esac
+}
+
+# prepare_alpha <name>: the test binary, the three host binaries of the stack, and the agent and frpc builds of
+# the controller's agent-builds directory, all before the slot is taken. The test finds them through
+# HPCBURST_ALPHA_BUILD_DIR. Nothing here holds the slot.
+ALPHA_BUILD_DIR=""
+prepare_alpha() {
+  local n=$1 w
+  w="$OUT/$n-build-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  mkdir -m 700 "$w" && mkdir "$w/bin" "$w/agent-builds" || { say "$n: FAIL (the build directory could not be made)"; return 1; }
+  say "$n: building the test binary, the host binaries and the agent builds"
+  ( cd "$ROOT" &&
+    with_build_lock go test -c -o "$OUT/$n.test" "./${PKG[$n]}" &&
+    with_build_lock go build -o "$w/bin/" ./cmd/hpcburst ./cmd/hpcburst-controller ./cmd/hpcburst-front &&
+    with_build_lock hack/build-agents.sh "$w/agent-builds" &&
+    hack/fetch-frp.sh --agent-builds "$w/agent-builds" ) >"$OUT/$n-build.log" 2>&1 ||
+    { say "$n: FAIL (a build step failed; see the build log in the output directory)"; return 1; }
+  ALPHA_BUILD_DIR=$w
 }
 
 execute_cluster() {
   local n=$1
   case $n in
     real-engine) execute_real_engine "$n" ;;
+    alpha-*|tunnel-hour-*)
+      # The test owns the two clocks of a queued run (HPCBURST_ALPHA_PENDING_MAX_SECONDS, then the row's run
+      # budget); this timeout is their sum, so a long wait in the queue does not eat the run's time.
+      run_binary "$n" "$OUT/$n.test" "$(( ${TMIN[$n]} + ${LIVE_PENDING_MAX_SECONDS:-7200} / 60 ))" env_alpha
+      judge "$n" "$OUT/$n.log" "$CHILD_RC" ;;
+    gpu-accounting-*)
+      run_binary "$n" "$OUT/$n.test" "$(( ${TMIN[$n]} + ${LIVE_PENDING_MAX_SECONDS:-7200} / 60 ))" env_conformance
+      judge "$n" "$OUT/$n.log" "$CHILD_RC" ;;
     *) run_binary "$n" "$OUT/$n.test" "${TMIN[$n]}" env_conformance; judge "$n" "$OUT/$n.log" "$CHILD_RC" ;;
   esac
 }
@@ -703,6 +841,9 @@ input_matches() {
   return 1
 }
 
+# plan_key <name> <ctx>: the key of a row's dependency closure. Rows with the same package and stack share it.
+plan_key() { printf '%s|%s|%s' "${PKG[$1]}" "${STACK[$1]:--}" "$2"; }
+
 plan() {
   local range=$1 base head bsha hsha files name pkg ctx side f d b reason key out
   local -A deps=() reasons=() hit=()
@@ -722,20 +863,26 @@ plan() {
   mkdir "$PLAN_TMP/base" "$PLAN_TMP/head"
   extract_tree "$bsha" "$PLAN_TMP/base" && extract_tree "$hsha" "$PLAN_TMP/head" || { say "live-checks: the range's trees could not be read"; return 2; }
 
-  # The closure at both ends of the range: a file deleted by the range was a dependency at its base.
+  # The closure at both ends of the range: a file deleted by the range was a dependency at its base. A row
+  # that runs the stack adds the closure of the stack's packages (plan_stack_table), per build context.
+  local spkg
   for name in "${NAMES[@]}"; do
     [ "${STATUS[$name]}" = ready ] || continue
     pkg=${PKG[$name]}
     for ctx in ${CONTEXTS[$name]//,/ }; do
-      key="$pkg|$ctx"
+      key=$(plan_key "$name" "$ctx")
       [ -z "${deps[$key]+x}" ] || continue
       deps[$key]=""
-      for side in base head; do
-        [ -d "$PLAN_TMP/$side/$pkg" ] || continue   # the package may be new, or deleted, in the range
-        out=$(pkg_deps "$PLAN_TMP/$side" "$pkg" "$ctx") || { say "live-checks: dependency discovery failed for package $pkg ($ctx) at the $side of the range; nothing is planned"; return 2; }
-        deps[$key]+="$out"$'\n'
+      for spkg in $pkg ${STACK[$name]-}; do
+        local found=0
+        for side in base head; do
+          [ -d "$PLAN_TMP/$side/$spkg" ] || continue   # the package may be new, or deleted, in the range
+          found=1
+          out=$(pkg_deps "$PLAN_TMP/$side" "$spkg" "$ctx") || { say "live-checks: dependency discovery failed for package $spkg ($ctx) at the $side of the range; nothing is planned"; return 2; }
+          deps[$key]+="$out"$'\n'
+        done
+        [ "$found" = 1 ] || { say "live-checks: package $spkg exists at neither end of the range; nothing is planned"; return 2; }
       done
-      [ -n "${deps[$key]}" ] || { say "live-checks: package $pkg exists at neither end of the range; nothing is planned"; return 2; }
       deps[$key]=$(printf '%s' "${deps[$key]}" | sort -u)
     done
   done
@@ -750,7 +897,7 @@ plan() {
       if [ -z "$reason" ]; then
         for ctx in ${CONTEXTS[$name]//,/ }; do
           # An embedded file counts wherever it sits and whatever it is called.
-          if printf '%s\n' "${deps[$pkg|$ctx]}" | grep -q -x -F "embed:$f"; then reason=$f; break; fi
+          if printf '%s\n' "${deps[$(plan_key "$name" "$ctx")]}" | grep -q -x -F "embed:$f"; then reason=$f; break; fi
         done
       fi
       if [ -z "$reason" ]; then
@@ -758,7 +905,7 @@ plan() {
           case $b in *.md) ;; *) reason=$pkg ;; esac
         else
           for ctx in ${CONTEXTS[$name]//,/ }; do
-            printf '%s\n' "${deps[$pkg|$ctx]}" | grep -q -x -F "$d" || continue
+            printf '%s\n' "${deps[$(plan_key "$name" "$ctx")]}" | grep -q -x -F "$d" || continue
             case $b in
               *_test.go) ;;
               *.go|*.s|*.S|*.c|*.h|*.cc|*.cpp) reason=$d; break ;;
@@ -812,12 +959,24 @@ load_tables
 case $MODE in
   list)
     for name in "${NAMES[@]}"; do say "$name  ${KIND[$name]}  ${STATUS[$name]}  gate ${GATES[$name]}"; done
+    for name in "${!ALIAS[@]}"; do say "$name  alias  runs ${ALIAS[$name]// /, } in turn"; done | sort
     exit 0 ;;
   plan) plan "$RANGE"; exit $? ;;
 esac
 
 # --run
 [ ${#REQUESTED[@]} -gt 0 ] || { say "live-checks: --run needs at least one test name"; exit 2; }
+# A bare name for a row per cluster (tunnel-hour, gpu-accounting) stands for its rows, run one after the other.
+declare -a EXPANDED=()
+for name in "${REQUESTED[@]}"; do
+  if [ -n "${ALIAS[$name]+x}" ]; then
+    # shellcheck disable=SC2206
+    EXPANDED+=(${ALIAS[$name]})
+  else
+    EXPANDED+=("$name")
+  fi
+done
+REQUESTED=("${EXPANDED[@]}")
 for name in "${REQUESTED[@]}"; do
   [ -n "${KIND[$name]+x}" ] || { say "live-checks: unknown test (see --list)"; exit 2; }
   [ "${STATUS[$name]}" = ready ] || { say "live-checks: $name is pending and cannot run yet"; exit 2; }
