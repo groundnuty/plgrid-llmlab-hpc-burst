@@ -297,6 +297,25 @@ func (e *external) showRejected(a *v1alpha1.Allocation, s *v1alpha1.SubmissionRe
 	a.SetConditions(xpv2.Creating().WithMessage("the last attempt was rejected; the next waits for backoff"))
 }
 
+// showRecord reports the record a holds now, for a Create that lost its attempt
+// to another writer (writeOwn re-read the record and found another token). It
+// is the derivation every pass makes: a Rejected attempt is showRejected, an
+// attempt in flight or unknown is showAttempt, and a Done or Abandoned one, or
+// a record that cannot be read, leaves nothing of the last observation, as an
+// accepted Create does, for the next Observe to derive from the job.
+func (e *external) showRecord(a *v1alpha1.Allocation) {
+	rec, err := readRecord(a)
+	switch s := rec.sub; {
+	case err == nil && s != nil && s.State == v1alpha1.SubmissionRejected:
+		e.showRejected(a, s)
+	case err == nil && unresolved(s):
+		e.showAttempt(a, s)
+	default:
+		a.Status.AtProvider.Reason, a.Status.AtProvider.Submission = "", nil
+		a.SetConditions(xpv2.Creating())
+	}
+}
+
 // stall applies the retry rules to an unresolved attempt whose tag finds no job
 // (HBEP-7, open question 11: Hold mode, Fallback mode, The operator
 // condition).

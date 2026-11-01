@@ -121,12 +121,19 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 	default:
 		u := claim
 		u.State, u.Reason = v1alpha1.SubmissionUnknown, truncate(errText(serr))
-		if _, err := writeOwn(wctx, e.s.kube, e.s.reader, a, claim.Token, func(record) map[string]string {
+		wrote, err := writeOwn(wctx, e.s.kube, e.s.reader, a, claim.Token, func(record) map[string]string {
 			return map[string]string{v1alpha1.AnnotationSubmission: recordValue(u)}
-		}); err != nil {
+		})
+		switch {
+		case err != nil:
 			e.s.o.Log.Info("cannot record the unknown outcome; the claim stays InFlight", "attempt", n, "error", err)
 			e.showAttempt(a, &claim)
-		} else {
+		case !wrote:
+			// Another attempt replaced this one while sbatch ran: the display
+			// is that record's. The event below still reports this attempt,
+			// whose job the tag may yet find.
+			e.showRecord(a)
+		default:
 			e.showAttempt(a, &u)
 		}
 		e.event(a, event.Warning("SubmissionUnknown", fmt.Errorf("attempt %d: %s; the tag will resolve it", n, u.Reason)))
@@ -153,9 +160,19 @@ func (e *external) rejected(ctx context.Context, a *v1alpha1.Allocation, claim v
 	if limit {
 		r.Code = v1alpha1.ReasonSubmitLimitReached
 	}
-	_, werr := writeOwn(ctx, e.s.kube, e.s.reader, a, claim.Token, func(record) map[string]string {
+	wrote, werr := writeOwn(ctx, e.s.kube, e.s.reader, a, claim.Token, func(record) map[string]string {
 		return map[string]string{v1alpha1.AnnotationSubmission: recordValue(r)}
 	})
+	if werr == nil && !wrote {
+		// Another attempt replaced this one while sbatch ran (a new leader),
+		// and writeOwn has re-read the record. This refusal is not the
+		// record, so it is neither shown nor reported as one: no gated event,
+		// no change to the gate, and an error, so that crossplane records no
+		// creation (PR 168's review, Astra B1).
+		e.showRecord(a)
+		e.s.o.Log.Info("the rejection is not recorded: another attempt replaced the record", "attempt", claim.Attempt)
+		return fmt.Errorf("attempt %d was refused (%s), but another attempt replaced the record, so the refusal is not recorded", claim.Attempt, r.Reason)
+	}
 	// What the Allocation shows is derived from the record as it now stands,
 	// never carried over from the stored status: a full slot's reason must not
 	// outlive the record that gave it (HBEP-4, QOS limits; the refusal
