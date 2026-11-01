@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"regexp"
 	"sync"
 	"time"
 
@@ -66,8 +67,13 @@ func (t *Tunnel) Dial(ctx context.Context, uid types.UID) (net.Conn, error) {
 	}
 	deadline, _ := ctx.Deadline()
 	_ = c.SetDeadline(deadline)
-	// A request cut while it waits (its client left, the front stops) ends
-	// the exchange at once rather than at the deadline.
+	// A context that ends while the exchange waits ends it at once rather
+	// than at the deadline. That cuts the probe's dial when the front stops,
+	// but not a proxied request's: net/http dials with the request's context
+	// detached from its cancellation (getConn's context.WithoutCancel,
+	// net/http/transport.go:1596 in Go 1.27.3), so a CONNECT goes on up to
+	// tunnelSetupTimeout after its client left, and the connection it opens
+	// then waits in the idle pool for upstreamIdleTimeout.
 	stop := context.AfterFunc(ctx, func() { _ = c.SetDeadline(time.Unix(1, 0)) })
 	ok := false
 	defer func() {
@@ -118,17 +124,17 @@ func (t *Tunnel) setupErr(ctx context.Context, uid types.UID, step string, err e
 	return fmt.Errorf("CONNECT %s: %s: %w", uid, step, err)
 }
 
-// checkUID refuses a UID that cannot stand in a request line as it is. A
-// Kubernetes UID is a UUID; anything else is a bug upstream, so it fails at
-// once rather than reaching frps.
+// uidForm is the agent's rule for the Instance UID it gives frpc as the
+// proxy's name and its tcpmux domain (internal/agent/frpcconf.go, uidForm),
+// matched exactly: a Kubernetes UID's alphabet, lowercase.
+var uidForm = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+
+// checkUID refuses a UID that frpc could not have registered, so it fails at
+// once rather than reaching frps; a Kubernetes UID is a lowercase UUID, and
+// anything else is a bug upstream.
 func checkUID(uid types.UID) error {
-	if uid == "" || len(uid) > 128 {
-		return fmt.Errorf("instance UID %q is empty or too long for a CONNECT", uid)
-	}
-	for _, r := range string(uid) {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-') {
-			return fmt.Errorf("instance UID %q holds a character other than a letter, a digit or a hyphen", uid)
-		}
+	if !uidForm.MatchString(string(uid)) {
+		return fmt.Errorf("instance UID %q is not a Kubernetes UID (%s), so no frpc registers it", uid, uidForm)
 	}
 	return nil
 }
