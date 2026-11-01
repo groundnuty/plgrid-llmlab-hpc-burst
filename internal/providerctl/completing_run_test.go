@@ -115,6 +115,16 @@ func TestCompletingJobKeepsFinalizerFilesAndRecordPastMinJobAgeInRunMode(t *test
 		if _, err := os.Stat(allocDir); err != nil {
 			t.Fatalf("pass %d: the Allocation's directory is gone while the job is completing: %v", i, err)
 		}
+		// The deleting pass writes the flag too: a deletion that waits on a job
+		// stuck in COMPLETING must say so (HBEP-4, Risks, line 109; Test plan,
+		// the alpha conformance step, line 498). The status was Running with no
+		// flag before the delete; the cancel was at 12:00:40.
+		a := e.get("alloc-a")
+		cond := a.GetCondition(v1alpha1.ConditionJobCompleting)
+		const want = "job 1001 is completing in state CANCELLED since 2026-10-30T12:00:40Z"
+		if !a.Status.AtProvider.JobCompleting || cond.Status != "True" || cond.Message != want {
+			t.Fatalf("pass %d: the deleted Allocation shows jobCompleting %v and condition %s %q, want true and True %q", i, a.Status.AtProvider.JobCompleting, cond.Status, cond.Message, want)
+		}
 	}
 	if n := sl.Count("scancel"); n != scancels {
 		t.Errorf("%d scancel calls after the job ended, want none beyond the first (a completing job is not cancelled again)", n-scancels)

@@ -417,6 +417,18 @@ func TestCompletingJobHoldsTheProtectionsUntilTheFlagClears(t *testing.T) {
 					r.run("alloc-a", 2)
 					hold("successful listings")
 				}
+				// The deleted Allocation shows the flag in its status too (HBEP-4,
+				// Risks): for the requeued job it is the cancelled one the deleting
+				// pass read, CANCELLED at 12:03:10, and no longer PENDING.
+				wantState, wantSince := c.state, "2026-10-30T12:02:30Z"
+				if c.requeue {
+					wantState, wantSince = fakeslurm.Cancelled, "2026-10-30T12:03:10Z"
+				}
+				a := r.get("alloc-a")
+				cond := a.GetCondition(v1alpha1.ConditionJobCompleting)
+				if want := "job 1001 is completing in state " + wantState + " since " + wantSince; !a.Status.AtProvider.JobCompleting || cond.Status != corev1.ConditionTrue || cond.Message != want {
+					t.Errorf("the deleted Allocation shows jobCompleting %v and condition %s %q, want true and True %q", a.Status.AtProvider.JobCompleting, cond.Status, cond.Message, want)
+				}
 				f.fail("squeue", -1, slurm.ErrTransport)
 				for i := 0; i < 3; i++ { // a failing listing, for longer than lostGrace
 					r.clock.Advance(10 * time.Minute)

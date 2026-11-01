@@ -62,6 +62,16 @@ func (e *external) observeDeleting(ctx context.Context, a *v1alpha1.Allocation, 
 			return exists, err
 		}
 	}
+	// The reads succeeded, so what they show of the recorded job's flag is
+	// written: a job that the delete cancelled shows COMPLETING while its
+	// processes and epilog run, and a deletion that stalls on a job stuck in
+	// COMPLETING must say so (HBEP-4, Risks, and Test plan, the alpha
+	// conformance step). This and the absentSince anchor are the only status a
+	// deleting pass writes; the phase and the rest stay as the last live pass
+	// left them.
+	if rec.jobID != "" {
+		e.mirrorDeletingCompleting(a, rec.jobID, jobs)
+	}
 	e.toCancel = nil
 	for _, j := range jobs {
 		if j.EndTime == nil {
@@ -99,6 +109,19 @@ func (e *external) observeDeleting(ctx context.Context, a *v1alpha1.Allocation, 
 	e.s.finals.Delete(rec.jobID)
 	e.s.limitEvents.Delete(a.UID)
 	return missing, nil
+}
+
+// mirrorDeletingCompleting writes status.atProvider.jobCompleting and the
+// JobCompleting condition from the deleting pass's reads: the recorded job's
+// flag if a read lists it, cleared if both reads succeeded and neither does.
+func (e *external) mirrorDeletingCompleting(a *v1alpha1.Allocation, id string, jobs []provider.Job) {
+	for _, j := range jobs {
+		if j.ID == id {
+			e.mirrorCompleting(a, id, j)
+			return
+		}
+	}
+	e.clearCompleting(a)
 }
 
 // completingJob returns the ID of the first job among jobs that carries the

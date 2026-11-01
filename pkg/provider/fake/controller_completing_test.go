@@ -132,3 +132,35 @@ func TestDeletedAllocationWaitsForACompletingJob(t *testing.T) {
 		t.Errorf("%d file removals after the flag cleared, want 1", n)
 	}
 }
+
+// A deleted Allocation whose job the delete cancelled shows the job completing
+// in its status: the deleting pass writes jobCompleting and the JobCompleting
+// condition (HBEP-4, Risks; it is, with absentSince, the only status a deleting
+// pass writes), and the next one after the epilog clears them with the record,
+// the files and the finalizer. Job 998 runs from 12:00:00; the delete cancels it
+// at 12:03:00 and its epilog is 10 minutes.
+func TestDeletedAllocationShowsTheJobCompleting(t *testing.T) {
+	e := newEnv(t)
+	e.batch.Enqueue(Script{Epilog: 10 * time.Minute})
+	e.newAlloc("a1", testProvider)
+	e.sync()
+	if o := e.obs("a1"); o.Phase != v1alpha1.AllocationRunning || o.JobCompleting {
+		t.Fatalf("precondition: phase %s, jobCompleting %v; want Running, false", o.Phase, o.JobCompleting)
+	}
+	e.clock.Set(at(12, 3, 0))
+	e.del("a1")
+	e.sync() // cancels the job at 12:03:00
+	a := e.alloc("a1")
+	c := a.GetCondition(v1alpha1.ConditionJobCompleting)
+	const want = "job 998 is completing in state CANCELLED since 2026-10-30T12:03:00Z"
+	if !a.Status.AtProvider.JobCompleting || c.Status != corev1.ConditionTrue || c.Message != want {
+		t.Fatalf("the deleted Allocation shows jobCompleting %v and condition %s %q, want true and True %q", a.Status.AtProvider.JobCompleting, c.Status, c.Message, want)
+	}
+	if e.gone("a1") {
+		t.Fatal("the Allocation is gone while its job is completing")
+	}
+	e.syncAt(at(12, 13, 1)) // the epilog ended at 12:13:00
+	if !e.gone("a1") {
+		t.Fatal("the Allocation is still there after the epilog")
+	}
+}

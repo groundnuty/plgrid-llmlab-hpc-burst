@@ -5,7 +5,11 @@ import (
 	"errors"
 	"fmt"
 
+	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
+	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -60,6 +64,9 @@ func (c *Controller) syncDeleting(ctx context.Context, p *pass, s *allocState) e
 	// flag to clear. It is not cancelled again; scancel would answer that it
 	// is already completing (the real provider's observeDeleting does the
 	// same).
+	if err := c.mirrorDeletingCompleting(ctx, p, s, jobs); err != nil {
+		return err
+	}
 	if completing(jobs) {
 		return nil
 	}
@@ -130,4 +137,40 @@ func completing(jobs []provider.Job) bool {
 		}
 	}
 	return false
+}
+
+// mirrorDeletingCompleting writes status.atProvider.jobCompleting and the
+// JobCompleting condition from the deleting pass's reads, as the real provider
+// does: a job the delete cancelled shows COMPLETING while its epilog runs, and a
+// deletion that waits on it must say so (HBEP-4, Risks). The recorded job's flag
+// is mirrored when a read lists it and cleared when neither read does; nothing
+// is written when the stored status already says the same. It is, with the
+// absentSince anchor, the only status a deleting pass writes.
+func (c *Controller) mirrorDeletingCompleting(ctx context.Context, p *pass, s *allocState, jobs []provider.Job) error {
+	id := s.a.Annotations[v1alpha1.AnnotationJobID]
+	if id == "" {
+		return nil
+	}
+	job, listed := jobByID(jobs, id)
+	obs := s.prior.DeepCopy()
+	var conds []xpv2.Condition
+	switch cur := s.a.GetCondition(v1alpha1.ConditionJobCompleting); {
+	case listed && job.Completing:
+		obs.JobCompleting = true
+		conds = append(conds, xpv2.Condition{Type: v1alpha1.ConditionJobCompleting, Status: corev1.ConditionTrue, Reason: v1alpha1.ReasonJobCompleting,
+			LastTransitionTime: metav1.NewTime(p.now), Message: completingMessage(id, job)})
+	case cur.Status == corev1.ConditionTrue:
+		conds = append(conds, xpv2.Condition{Type: v1alpha1.ConditionJobCompleting, Status: corev1.ConditionFalse, Reason: v1alpha1.ReasonJobNotCompleting,
+			LastTransitionTime: metav1.NewTime(p.now)})
+	}
+	storedConds := append([]xpv2.Condition(nil), s.a.Status.Conditions...)
+	s.a.SetConditions(conds...)
+	if obs.JobCompleting == s.prior.JobCompleting && apiequality.Semantic.DeepEqual(storedConds, s.a.Status.Conditions) {
+		return nil
+	}
+	s.a.Status.AtProvider = *obs
+	if err := updateStatus(ctx, c.Client, s.a); err != nil {
+		return fmt.Errorf("update status: %w", err)
+	}
+	return nil
 }
