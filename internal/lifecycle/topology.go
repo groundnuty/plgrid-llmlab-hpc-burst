@@ -187,12 +187,15 @@ func classes(pvs []*providerView) []v1alpha1.AcceleratorClass {
 // cap shrinks them and leaves the GPU count as it is (HBEP-4, QOS limits).
 func partitionSizing(pv *providerView, gpus int32, leaseLimit *v1alpha1.Duration) (v1alpha1.BatchParameters, error) {
 	part := pv.partition
-	if part.GPUsPerNode == nil || part.CPUsPerGPU == nil || part.MemPerGPU == nil {
-		return v1alpha1.BatchParameters{}, fmt.Errorf("PlatformProfile %s does not give gpusPerNode, cpusPerGpu and memPerGpu for partition %s", pv.profile.Name, part.Name)
+	maxGPUs, known := v1alpha1.MaxAllocationGPUs(part, pv.limits)
+	if !known || part.CPUsPerGPU == nil || part.MemPerGPU == nil {
+		return v1alpha1.BatchParameters{}, fmt.Errorf("PlatformProfile %s does not give gpusPerNode (nor does a QOS maxGpusPerUser), cpusPerGpu and memPerGpu for partition %s", pv.profile.Name, part.Name)
 	}
-	maxGPUs, _ := v1alpha1.MaxAllocationGPUs(part, pv.limits)
 	if gpus > maxGPUs {
-		if q := pv.limits.MaxGPUsPerUser; q != nil && *q < *part.GPUsPerNode {
+		// An effective maxGpusPerUser of 0 refuses every GPU count here: the
+		// Provider cannot host the Instance (`@hpc-burst-science-agent`,
+		// 1 Nov 2026, from PR 1's review).
+		if q := pv.limits.MaxGPUsPerUser; q != nil && (part.GPUsPerNode == nil || *q < *part.GPUsPerNode) {
 			return v1alpha1.BatchParameters{}, refuse("the serving spec needs %d GPUs (tensor-parallel-size times pipeline-parallel-size), above the %s %d of QOS %s on Provider %s (partition %s); a parallel size is refused, never capped (HBEP-7, Provisioning)", gpus, v1alpha1.LimitMaxGPUsPerUser, *q, pv.limits.From[v1alpha1.LimitMaxGPUsPerUser], pv.name, part.Name)
 		}
 		return v1alpha1.BatchParameters{}, refuse("the serving spec needs %d GPUs (tensor-parallel-size times pipeline-parallel-size), above the %d per node of partition %s; alpha Instances are single-node (HBEP-7, Provisioning)", gpus, *part.GPUsPerNode, part.Name)

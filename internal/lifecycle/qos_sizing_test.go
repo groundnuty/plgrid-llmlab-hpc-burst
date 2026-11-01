@@ -221,3 +221,42 @@ func otherAllocation(name string) *v1alpha1.Allocation {
 	a.Spec.ProviderConfigReference = providerRef(rigProvider)
 	return a
 }
+
+// TestQOSEffectiveZeroLimits: an effective maxGpusPerUser or maxSubmitPerUser
+// of 0 means the Provider cannot host the Instance: no Allocation is created
+// there, and the deployment gets a reason naming the limit and the Provider
+// (`@hpc-burst-science-agent`, 1 Nov 2026, from PR 1's review).
+//   - maxGpusPerUser 0: one GPU is above min(4, 0) = 0, the GPU-bound
+//     refusal; with no other Provider, SpecUnsupported.
+//   - maxSubmitPerUser 0: the count, 0, is already at the limit, so there is
+//     no slot: SubmitLimitReached.
+func TestQOSEffectiveZeroLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		qos        v1alpha1.QOSProfile
+		wantReason string
+		wantText   string
+	}{
+		{"maxGpusPerUser 0", v1alpha1.QOSProfile{Name: "example-now", MaxGPUsPerUser: i32(0)}, v1alpha1.ReasonSpecUnsupported, "maxGpusPerUser 0 of QOS example-now on Provider " + rigProvider},
+		{"maxSubmitPerUser 0", v1alpha1.QOSProfile{Name: "example-now", MaxSubmitPerUser: i32(0)}, v1alpha1.ReasonSubmitLimitReached, "Provider " + rigProvider + " has 0 Allocations not ended, at its maxSubmitPerUser 0 of QOS example-now"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rg := newRig(t, qosOpts([]v1alpha1.QOSProfile{tc.qos}, "", "example-now")...)
+			rg.create(mdSpec("md"))
+			for range 2 {
+				rg.clock.Advance(10 * time.Second)
+				rg.Step()
+			}
+			if n := len(rg.allAllocations()); n != 0 {
+				t.Fatalf("%d Allocations, want none on a Provider that cannot host the Instance", n)
+			}
+			if n := len(rg.instances("md")); n != 0 {
+				t.Fatalf("%d Instances, want none", n)
+			}
+			c := rg.condition("md", v1alpha1.ConditionDegraded)
+			if c.Status != metav1.ConditionTrue || c.Reason != tc.wantReason || !strings.Contains(c.Message, tc.wantText) {
+				t.Fatalf("Degraded = %s/%s %q, want %s naming %q", c.Status, c.Reason, c.Message, tc.wantReason, tc.wantText)
+			}
+		})
+	}
+}
