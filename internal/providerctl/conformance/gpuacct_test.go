@@ -37,20 +37,32 @@ import (
 )
 
 // gpuAgent is the agent stand-in of the accounting row, run by the bootstrap with
-// the Allocation's directory as its argument. It writes the number of GPUs its
-// node shows into node-gpus there and holds them for a few seconds.
-var gpuAgent = []byte("#!/bin/sh\nn=$(nvidia-smi -L 2>/dev/null | grep -c '^GPU')\nprintf '%s\\n' \"$n\" > \"$1/node-gpus\"\nsleep 20\nexit 0\n")
+// the Allocation's directory as its argument. It writes into node-gpus there the
+// GPUs its job was given and holds them for a few seconds: the count of
+// CUDA_VISIBLE_DEVICES, which Slurm sets to the GPUs it gave the job (- when it is
+// unset), and the count nvidia-smi lists, which is the whole node's where the
+// cluster does not confine devices to the job.
+var gpuAgent = []byte("#!/bin/sh\n" +
+	"smi=$(nvidia-smi -L 2>/dev/null | grep -c '^GPU')\n" +
+	"if [ -n \"$CUDA_VISIBLE_DEVICES\" ]; then cvd=$(printf '%s\\n' \"$CUDA_VISIBLE_DEVICES\" | tr ',' '\\n' | grep -c .); else cvd=-; fi\n" +
+	"printf 'cvd=%s smi=%s\\n' \"$cvd\" \"$smi\" > \"$1/node-gpus\"\n" +
+	"sleep 20\nexit 0\n")
 
-// dryGPUAgent is the same in a dry run, where the fake node's GPUs are the
-// environment's FAKE_NODE_GPUS.
-var dryGPUAgent = []byte("#!/bin/sh\nprintf '%s\\n' \"$FAKE_NODE_GPUS\" > \"$1/node-gpus\"\nsleep 2\nexit 0\n")
+// dryGPUAgent is the same in a dry run, where the fake node's two counts are the
+// environment's FAKE_NODE_CVD and FAKE_NODE_SMI.
+var dryGPUAgent = []byte("#!/bin/sh\nprintf 'cvd=%s smi=%s\\n' \"$FAKE_NODE_CVD\" \"$FAKE_NODE_SMI\" > \"$1/node-gpus\"\nsleep 2\nexit 0\n")
 
 // nodeGPUsFile is the file name in the Allocation's directory (agentapi.AllocationDir).
 const nodeGPUsFile = "node-gpus"
 
-// dryFaults of this row: what the fake node shows. "" is the healthy node, with
-// the one GPU the job asked for.
-var dryGPUFaults = map[string]string{"": "1", "node-two": "2", "node-none": "0"}
+// dryGPUFaults are what the fake node shows, as {CUDA_VISIBLE_DEVICES count or -, nvidia-smi count}. The
+// healthy node has the one GPU the job asked for. node-two and node-none must fail the row; the last two
+// must pass it: a cluster that does not confine devices lists the whole node to nvidia-smi
+// (smi-whole-node), and one that does not set CUDA_VISIBLE_DEVICES leaves nvidia-smi as the witness.
+var dryGPUFaults = map[string][2]string{
+	"": {"1", "1"}, "node-two": {"2", "2"}, "node-none": {"-", "0"},
+	"smi-whole-node": {"1", "8"}, "cvd-unset": {"-", "1"},
+}
 
 // TestGPUAccounting is the run on one platform.
 //
@@ -80,7 +92,7 @@ func dryGPUAccounting(t *testing.T) {
 			t.Fatalf("a dry run refuses to start with live settings present (%s)", strings.SplitN(k, "=", 2)[0])
 		}
 	}
-	nodeGPUs, known := dryGPUFaults[os.Getenv("HPCBURST_ALPHA_DRY_FAULT")]
+	node, known := dryGPUFaults[os.Getenv("HPCBURST_ALPHA_DRY_FAULT")]
 	if !known {
 		t.Fatalf("the dry fault %q is not one of the row's", os.Getenv("HPCBURST_ALPHA_DRY_FAULT"))
 	}
@@ -119,7 +131,7 @@ func dryGPUAccounting(t *testing.T) {
 	if r.Cluster == "athena" {
 		notListed = fakeslurm.NotListedAthena
 	}
-	run := &fakeslurm.RunMode{Root: root, Env: map[string]string{"FAKE_NODE_GPUS": nodeGPUs}}
+	run := &fakeslurm.RunMode{Root: root, Env: map[string]string{"FAKE_NODE_CVD": node[0], "FAKE_NODE_SMI": node[1]}}
 	if r.Cluster == "helios" {
 		// The shipped Helios profile makes the job's temporary directory $MEMFS (tmpDir), which
 		// a job gets by asking for the feature memfs.
@@ -174,7 +186,11 @@ func gpuAccountingBody(t *testing.T, w *world, rowName string) {
 		}
 		return a.Status.AtProvider.Phase == v1alpha1.AllocationEnded
 	})
-	nodeGPUs := w.nodeGPUs(ctx, tag)
+	cvd, smi := w.nodeGPUs(ctx, tag)
+	nodeGPUs, source := smi, "nvidia-smi"
+	if cvd >= 0 {
+		nodeGPUs, source = cvd, "CUDA_VISIBLE_DEVICES"
+	}
 	// Deleting the Allocation writes the kept record, then lets the finalizer go.
 	if err := w.c.Delete(ctx, w.get(name)); err != nil {
 		t.Fatal(err)
@@ -199,7 +215,7 @@ func gpuAccountingBody(t *testing.T, w *world, rowName string) {
 	if err := json.Unmarshal(rev.Data.Raw, &data); err != nil {
 		t.Fatalf("the accounting record's data is not JSON: %v", err)
 	}
-	obs := alpha.AccountingObs{Partition: data.Partition, RecordGPUs: data.AllocatedGPUs, Basis: data.Basis, RequestedGPUs: int(w.s.gpus), NodeGPUs: nodeGPUs}
+	obs := alpha.AccountingObs{Partition: data.Partition, RecordGPUs: data.AllocatedGPUs, Basis: data.Basis, RequestedGPUs: int(w.s.gpus), NodeGPUs: nodeGPUs, NodeSource: source, SmiGPUs: smi}
 	failures := alpha.VerifyAccounting(row, obs)
 	verdict := "PASS"
 	if len(failures) > 0 {
@@ -209,24 +225,25 @@ func gpuAccountingBody(t *testing.T, w *world, rowName string) {
 	if data.AllocatedGPUs != nil {
 		recGPUs = fmt.Sprint(*data.AllocatedGPUs)
 	}
-	posts := fmt.Sprintf("%s: %s (posts to %s)\n- the kept record's allocatedGPUs: %s; the GPUs the job's node showed: %d; requested: %d; basis: %s\n",
-		row.Name, verdict, row.PostsTo, recGPUs, nodeGPUs, w.s.gpus, data.Basis)
+	posts := fmt.Sprintf("%s: %s (posts to %s)\n- the kept record's allocatedGPUs: %s; the GPUs the job was given: %d (by %s); requested: %d; basis: %s\n- nvidia-smi -L listed %d GPU(s) (recorded, not judged: it counts the node where devices are not confined to the job)\n",
+		row.Name, verdict, row.PostsTo, recGPUs, nodeGPUs, source, w.s.gpus, data.Basis, smi)
 	if len(failures) > 0 {
 		posts += "- failed checks: " + alpha.Summary(failures) + "\n"
 	}
 	w.p.save(alpha.PostsFile, []byte(posts))
-	w.p.save(alpha.RecordFile, []byte(fmt.Sprintf("{\"row\": %q, \"verdict\": %q, \"nodeGPUs\": %d, \"requestedGPUs\": %d}\n", row.Name, verdict, nodeGPUs, w.s.gpus)))
+	w.p.save(alpha.RecordFile, []byte(fmt.Sprintf("{\"row\": %q, \"verdict\": %q, \"nodeGPUs\": %d, \"nodeSource\": %q, \"smiGPUs\": %d, \"requestedGPUs\": %d}\n", row.Name, verdict, nodeGPUs, source, smi, w.s.gpus)))
 	if len(failures) > 0 {
 		t.Fatalf("%s failed: %s", row.Name, alpha.Summary(failures))
 	}
 	t.Logf("%s passed; the text to post is in %s", row.Name, alpha.PostsFile)
 }
 
-// nodeGPUs reads how many GPUs the job's node showed from the file the job wrote
-// in the Allocation's directory. The file is read by its sha256 (the one file
+// nodeGPUs reads the two counts the job wrote in the Allocation's directory:
+// cvd is the count of its CUDA_VISIBLE_DEVICES (-1 when that was unset) and smi
+// the count nvidia-smi listed. The file is read by its sha256 (the one file
 // command both the real login node and the fake have), against the sums of the
-// few counts a node can show.
-func (w *world) nodeGPUs(ctx context.Context, tag string) int {
+// few contents a node can give.
+func (w *world) nodeGPUs(ctx context.Context, tag string) (cvd, smi int) {
 	w.t.Helper()
 	paths, err := w.batch.Paths(ctx)
 	if err != nil {
@@ -234,18 +251,24 @@ func (w *world) nodeGPUs(ctx context.Context, tag string) int {
 	}
 	res, err := w.cap.Run(ctx, slurm.Command{Line: "sha256sum " + paths.Staging + "/alloc/" + tag + "/" + nodeGPUsFile})
 	if err != nil || res.ExitCode != 0 {
-		w.t.Fatalf("the job did not leave its GPU count (err %v, exit %d)", err, res.ExitCode)
+		w.t.Fatalf("the job did not leave its GPU counts (err %v, exit %d)", err, res.ExitCode)
 	}
 	got := strings.Fields(string(res.Stdout))
 	if len(got) == 0 {
-		w.t.Fatal("the GPU count's sha256 is empty")
+		w.t.Fatal("the GPU counts file's sha256 is empty")
 	}
-	for n := 0; n <= 16; n++ {
-		sum := sha256.Sum256([]byte(fmt.Sprintf("%d\n", n)))
-		if got[0] == hex.EncodeToString(sum[:]) {
-			return n
+	for c := -1; c <= 16; c++ {
+		for n := 0; n <= 16; n++ {
+			shown := "-"
+			if c >= 0 {
+				shown = fmt.Sprint(c)
+			}
+			sum := sha256.Sum256([]byte(fmt.Sprintf("cvd=%s smi=%d\n", shown, n)))
+			if got[0] == hex.EncodeToString(sum[:]) {
+				return c, n
+			}
 		}
 	}
-	w.t.Fatal("the job's GPU count file holds something that is not a count from 0 to 16")
-	return -1
+	w.t.Fatal("the job's GPU counts file holds something that is not two counts from 0 to 16")
+	return -1, -1
 }

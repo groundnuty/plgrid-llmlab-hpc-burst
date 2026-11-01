@@ -62,8 +62,17 @@ exec "@REAL@" "$@"
 
 var builtTests = map[string]string{}
 
+// TestMain removes the directories this package built test binaries into.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	for _, p := range builtTests {
+		_ = os.RemoveAll(filepath.Dir(p))
+	}
+	os.Exit(code)
+}
+
 // realTestBinary returns the compiled test of a package: the prebuilt one when its variable is set, else a
-// build in a directory of this test run.
+// build in a directory of this test run (removed by TestMain).
 func realTestBinary(t *testing.T, envName, pkg string) string {
 	t.Helper()
 	if p := os.Getenv(envName); p != "" {
@@ -98,6 +107,8 @@ func (w *world) installDry(template, real, realDir string) {
 type dryRow struct {
 	row, pkg, env string
 	faults        []string
+	// passing are variants of the stand-in that must still pass the row.
+	passing []string
 }
 
 var handoverFaults = []string{"cut", "no-stream", "two-restarts", "no-restart", "no-handover", "late-successor", "wrong-partition", "untagged", "unattributed"}
@@ -105,18 +116,31 @@ var noOverlapFaults = []string{"nocap", "nogap", "noslot", "cut", "no-stream", "
 var tunnelFaults = []string{"short", "cut", "drops", "no-rate", "short-rate", "wrong-direction", "untagged", "wrong-partition"}
 var accountingFaults = []string{"node-two", "node-none"}
 
+// accountingPassing: a cluster that does not confine devices lists the whole node to nvidia-smi, and one that
+// does not set CUDA_VISIBLE_DEVICES leaves nvidia-smi the witness; neither is a false failure.
+var accountingPassing = []string{"smi-whole-node", "cvd-unset"}
+
 const (
 	alphaPkg = "internal/alpha"
 	confPkg  = "internal/providerctl/conformance"
 )
 
 var dryRows = []dryRow{
-	{"alpha-athena-handover", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", handoverFaults},
-	{"alpha-helios-nooverlap", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", noOverlapFaults},
-	{"tunnel-hour-helios", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", tunnelFaults},
-	{"tunnel-hour-athena", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", tunnelFaults},
-	{"gpu-accounting-helios", confPkg, "HPCBURST_LIVECHECKS_CONF_TEST", accountingFaults},
-	{"gpu-accounting-athena", confPkg, "HPCBURST_LIVECHECKS_CONF_TEST", accountingFaults},
+	{"alpha-athena-handover", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", handoverFaults, nil},
+	{"alpha-helios-nooverlap", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", noOverlapFaults, nil},
+	{"tunnel-hour-helios", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", tunnelFaults, nil},
+	{"tunnel-hour-athena", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", tunnelFaults, nil},
+	{"gpu-accounting-helios", confPkg, "HPCBURST_LIVECHECKS_CONF_TEST", accountingFaults, accountingPassing},
+	{"gpu-accounting-athena", confPkg, "HPCBURST_LIVECHECKS_CONF_TEST", accountingFaults, accountingPassing},
+}
+
+func containsString(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
 
 // postsOf returns the text the row left to post, from the run's record directory.
@@ -143,17 +167,18 @@ func TestEveryAlphaRowPassesItsDryRunAndEveryFaultFailsIt(t *testing.T) {
 				shape = s
 			}
 		}
-		for _, fault := range append([]string{""}, d.faults...) {
+		for _, fault := range append(append([]string{""}, d.passing...), d.faults...) {
 			name := d.row + "/healthy"
 			if fault != "" {
 				name = d.row + "/" + fault
 			}
+			passes := fault == "" || containsString(d.passing, fault)
 			t.Run(name, func(t *testing.T) {
 				t.Parallel()
 				w := newAlphaWorld(t)
 				w.installDry(dryWrapper, real, realDir)
 				res := w.run([]string{"STUB_DRY_FAULT=" + fault}, "--run", d.row, "--yes")
-				if fault == "" {
+				if passes {
 					if res.code != 0 {
 						t.Fatalf("exit %d:\n%s", res.code, res.out)
 					}

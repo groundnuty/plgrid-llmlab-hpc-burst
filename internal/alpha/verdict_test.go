@@ -216,6 +216,8 @@ func TestAccountingBoundaries(t *testing.T) {
 		want   string
 	}{
 		{"as it should be", func(*AccountingObs) {}, ""},
+		// nvidia-smi lists the whole node where devices are not confined to the job; it is posted, not judged.
+		{"nvidia-smi listing the whole node", func(o *AccountingObs) { o.SmiGPUs = 8 }, ""},
 		{"the record says 1, the node showed 2", func(o *AccountingObs) { o.NodeGPUs = 2; o.RequestedGPUs = 2 }, "differs from the GPUs the job saw"},
 		{"the record says 2, the node showed 1", func(o *AccountingObs) { o.RecordGPUs = &two }, "differs from the GPUs the job saw"},
 		{"the node showed 2 and the job asked for 1", func(o *AccountingObs) { o.NodeGPUs = 2; o.RecordGPUs = &two }, "differ from what it asked for"},

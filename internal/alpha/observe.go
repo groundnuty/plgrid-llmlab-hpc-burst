@@ -122,7 +122,15 @@ type AccountingObs struct {
 	Basis string `json:"basis"`
 	// RequestedGPUs is what the job asked for.
 	RequestedGPUs int `json:"requestedGPUs"`
-	// NodeGPUs is the number of GPUs the job saw on its node, read by the job
-	// itself, not from the scheduler's accounting the record is built from.
-	NodeGPUs int `json:"nodeGPUs"`
+	// NodeGPUs is the number of GPUs the job was given on its node, read by the
+	// job itself, not from the scheduler's accounting the record is built from:
+	// the count of its CUDA_VISIBLE_DEVICES, which Slurm sets to the GPUs it gave
+	// the job, or, where that is unset, the count nvidia-smi lists. NodeSource
+	// says which.
+	NodeGPUs   int    `json:"nodeGPUs"`
+	NodeSource string `json:"nodeSource,omitempty"`
+	// SmiGPUs is what nvidia-smi -L listed. It is recorded and posted, not
+	// judged: it counts the whole node where the cluster does not confine
+	// devices to the job.
+	SmiGPUs int `json:"smiGPUs"`
 }
