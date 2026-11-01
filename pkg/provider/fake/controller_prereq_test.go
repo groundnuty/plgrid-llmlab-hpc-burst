@@ -13,15 +13,19 @@ import (
 )
 
 // With Prerequisites set, the Controller submits only once a front is
-// configured, the Allocation's credential is a mode-600 key file and an agent
-// build with the agentDigest exists, as the real provider-slurm does (review of
-// PR 76, Opus's item 5). Each missing piece keeps the Allocation Submitting
-// with its reason, no sbatch and no record; once it is fixed, one sbatch.
+// configured, the Allocation's credential is a mode-600 key file, an agent
+// build with the agentDigest exists and so does a frpc build with the pinned
+// digest, as the real provider-slurm does (review of PR 76, Opus's item 5;
+// PR 157, S3). Each missing piece keeps the Allocation Submitting with its
+// reason, no sbatch and no record; once it is fixed, one sbatch.
 func TestPrerequisitesHoldTheSubmission(t *testing.T) {
 	const arch = "x86_64"
 	build := []byte("#!/bin/sh\n# an example agent build\n")
 	sum := sha256.Sum256(build)
 	digest := hex.EncodeToString(sum[:])
+	frpc := []byte("#!/bin/sh\n# an example frpc build\n")
+	fsum := sha256.Sum256(frpc)
+	frpcDigest := hex.EncodeToString(fsum[:])
 	for _, tc := range []struct {
 		name   string
 		want   string
@@ -40,11 +44,26 @@ func TestPrerequisitesHoldTheSubmission(t *testing.T) {
 		{"an agent build with another digest", PrerequisiteAgentMismatch,
 			func(p *Prerequisites, _ string) { writeBuild(t, p, arch, []byte("another build")) },
 			func(p *Prerequisites, _ string) { writeBuild(t, p, arch, build) }},
+		{"no frpc digest configured", PrerequisiteNoFrpcDigest,
+			func(p *Prerequisites, _ string) { p.FrpcDigest = "" },
+			func(p *Prerequisites, _ string) { p.FrpcDigest = frpcDigest }},
+		{"no frpc build", PrerequisiteNoFrpcBuild,
+			func(p *Prerequisites, _ string) { removeFrpc(t, p, arch) },
+			func(p *Prerequisites, _ string) { writeFrpc(t, p, arch, frpc) }},
+		{"a frpc build with another digest", PrerequisiteFrpcMismatch,
+			func(p *Prerequisites, _ string) { writeFrpc(t, p, arch, []byte("another frpc")) },
+			func(p *Prerequisites, _ string) { writeFrpc(t, p, arch, frpc) }},
+		{"another architecture's frpc under this one's name", PrerequisiteFrpcMismatch,
+			func(p *Prerequisites, _ string) {
+				writeFrpc(t, p, arch, []byte("#!/bin/sh\n# an example frpc build for aarch64\n"))
+			},
+			func(p *Prerequisites, _ string) { writeFrpc(t, p, arch, frpc) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newEnv(t)
-			p := &Prerequisites{Front: true, CredentialsDir: t.TempDir(), AgentBuildsDir: t.TempDir(), CPUArch: arch}
+			p := &Prerequisites{Front: true, CredentialsDir: t.TempDir(), AgentBuildsDir: t.TempDir(), CPUArch: arch, FrpcDigest: frpcDigest}
 			writeBuild(t, p, arch, build)
+			writeFrpc(t, p, arch, frpc)
 			e.ctl.Prerequisites = p
 			a := e.newAlloc("a1", testProvider)
 			a.Spec.ForProvider.Batch.AgentDigest = digest
@@ -104,6 +123,20 @@ func mustChmod(t *testing.T, path string, mode os.FileMode) {
 func writeBuild(t *testing.T, p *Prerequisites, arch string, content []byte) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(p.AgentBuildsDir, agentapi.AgentBuildName(arch)), content, 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeFrpc(t *testing.T, p *Prerequisites, arch string, content []byte) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(p.AgentBuildsDir, agentapi.FrpcBuildName(arch)), content, 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func removeFrpc(t *testing.T, p *Prerequisites, arch string) {
+	t.Helper()
+	if err := os.Remove(filepath.Join(p.AgentBuildsDir, agentapi.FrpcBuildName(arch))); err != nil {
 		t.Fatal(err)
 	}
 }
