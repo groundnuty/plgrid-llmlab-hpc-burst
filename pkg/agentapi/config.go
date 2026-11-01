@@ -142,8 +142,16 @@ var (
 	tagForm = regexp.MustCompile(`^hb-[a-z0-9][-a-z0-9.]{0,39}-[0-9a-f]{12}$`)
 	// pinForm is 64 lowercase hex characters: a certificate pin, and the
 	// SHA-256 digest of a staged binary (FrpcDigest).
-	pinForm  = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	userForm = regexp.MustCompile(`^[a-z_][a-z0-9_.-]*$`)
+	pinForm = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	// userForm is a portable user name, as POSIX allows them: letters of
+	// either case, digits, '.', '_' and '-', with no leading '-', and here
+	// also no leading digit and at most 32 characters, the limit of Linux's
+	// useradd. The ssh user is the one who runs the controller
+	// (user.Current), whose name may have capitals ("MichalOrzechowski" on
+	// the development VM); every such name is still safe in an ssh argument
+	// and a shell word (decision of `@hpc-burst-code-agent`, 1 Nov 2026,
+	// review of PR 132: B2).
+	userForm = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]{0,31}$`)
 )
 
 // Validate returns every problem with c, joined.
