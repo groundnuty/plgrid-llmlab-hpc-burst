@@ -125,6 +125,12 @@ func newGapLock(cfg *rest.Config, renewDeadline time.Duration) (*gapLock, error)
 	if err != nil {
 		return nil, err
 	}
+	// The lock is given no EventRecorder, where controller-runtime's own would
+	// pass the manager's, so the elector raises none of the legacy
+	// leader-election events (became leader, stopped leading). They carry no
+	// action, so under HBEP-8 no tool may act on them. Leadership changes
+	// still show in the Lease itself, and the gap after a restart is the typed
+	// ObservationGap (`@hpc-burst-science-agent`, 1 Nov 2026, for #111).
 	inner, err := resourcelock.New(resourcelock.LeasesResourceLock, v1alpha1.ControllerNamespace, v1alpha1.LeaseLifecycle,
 		core, coord, resourcelock.ResourceLockConfig{Identity: host + "_" + string(uuid.NewUUID())})
 	if err != nil {
