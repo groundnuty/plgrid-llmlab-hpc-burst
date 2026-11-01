@@ -102,7 +102,7 @@ func TestADryRunNeedsNoLiveSettingAndRefusesAnyOfThem(t *testing.T) {
 		t.Fatalf("cfg %+v skip %q err %v", cfg, skip, err)
 	}
 	for _, k := range liveEnv {
-		_, _, err := ConfigFromEnv(env(map[string]string{envRow: "tunnel-hour-athena", envOut: dir, envDry: "1", k: "x"}), "tunnel-hour-athena")
+		_, _, err := ConfigFromEnv(env(map[string]string{envRow: "tunnel-hour-athena", envOut: dir, envDry: "1", k: "/a/live/value"}), "tunnel-hour-athena")
 		if err == nil || !strings.Contains(err.Error(), k) {
 			t.Errorf("a dry run with %s set: err %v, want a refusal naming it", k, err)
 		}

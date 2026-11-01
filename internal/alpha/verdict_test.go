@@ -113,6 +113,7 @@ func TestNoOverlapBoundaries(t *testing.T) {
 		{"no drain start", func(o *NoOverlapObs, _ *[]provider.Job) { o.DrainStart = time.Time{} }, "the gap was not measured"},
 		{"NoOverlapSlot never shown", func(o *NoOverlapObs, _ *[]provider.Job) { o.NoOverlapSlotSeen = false }, "never showed NoOverlapSlot"},
 		{"a third Allocation", func(o *NoOverlapObs, _ *[]provider.Job) { o.Tags = append(o.Tags, "hb-x-cccccccccccc") }, "exactly two Allocations"},
+		{"one Allocation", func(o *NoOverlapObs, _ *[]provider.Job) { o.Tags = o.Tags[:1] }, "exactly two Allocations"},
 		{"the successor starts at the predecessor's end", func(o *NoOverlapObs, j *[]provider.Job) { (*j)[1].StartTime = (*j)[0].EndTime }, ""},
 		{"the successor starts a second early", func(o *NoOverlapObs, j *[]provider.Job) {
 			(*j)[1].StartTime = ptr((*j)[0].EndTime.Add(-time.Second))
