@@ -87,9 +87,7 @@ func (r *rig) instance(name string) (v1alpha1.Instance, bool) {
 func (r *rig) stepControllerRestart(in *v1alpha1.Instance, key string) {
 	r.t.Helper()
 	defer r.stepTimer("f")()
-	if key != "" {
-		r.beforeDrain("f", in)
-	}
+	r.beforeDrain("f", in)
 	before, ok := r.instance(in.Name)
 	if !ok || before.Status.Phase != v1alpha1.InstanceReady || before.Status.Agent == nil {
 		r.t.Fatalf("step (f) needs a ready, registered Instance %s: %+v", in.Name, before.Status)
@@ -105,12 +103,8 @@ func (r *rig) stepControllerRestart(in *v1alpha1.Instance, key string) {
 	if oldPID == 0 || oldHolder == "" {
 		r.t.Fatalf("step (f): the controller's PID %d or Lease holder %q is unknown", oldPID, oldHolder)
 	}
-	var done <-chan streamed
-	if key != "" {
-		var first <-chan struct{}
-		first, done = r.startStream(chatBody(restartTokens, restartTokens, true), key)
-		<-first
-	}
+	first, done := r.startStream(chatBody(restartTokens, restartTokens, true), key)
+	<-first
 	if err := syscall.Kill(oldPID, syscall.SIGKILL); err != nil {
 		r.t.Fatalf("kill the controller %d: %v", oldPID, err)
 	}
@@ -153,9 +147,7 @@ func (r *rig) stepControllerRestart(in *v1alpha1.Instance, key string) {
 	if n := len(r.allocations()); n != allocs {
 		r.t.Errorf("step (f): %d Allocations after the controller restart, %d before", n, allocs)
 	}
-	if done != nil {
-		r.checkRestartStream(in, done, killAt, ledAt)
-	}
+	r.checkRestartStream(in, done, killAt, ledAt)
 }
 
 // restartTokens is step (f)'s stream: 2,250 tokens at tokenDelay, about 45 s,
