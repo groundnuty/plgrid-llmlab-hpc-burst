@@ -254,10 +254,13 @@ func (e *external) accepted(ctx context.Context, a *v1alpha1.Allocation, claim v
 	}
 	if recorded != id {
 		if e.hold() {
-			if err := e.cancel(ctx, []string{id}); err != nil {
+			cancelled, err := e.cancel(ctx, []string{id})
+			if err != nil {
 				e.s.o.Log.Info("cannot cancel the extra held job", "job", id, "error", err)
 			}
-			e.event(a, event.Normal("HeldDuplicateCancelled", fmt.Sprintf("job %s was cancelled while held: job %s was recorded first", id, recorded)))
+			if len(cancelled) > 0 {
+				e.event(a, event.Normal("HeldDuplicateCancelled", fmt.Sprintf("job %s was cancelled while held: job %s was recorded first", id, recorded)))
+			}
 		} else {
 			e.event(a, event.Warning("DuplicateJob", fmt.Errorf("job %s carries the tag but job %s was recorded first", id, recorded)))
 		}

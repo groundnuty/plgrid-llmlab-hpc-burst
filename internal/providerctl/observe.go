@@ -347,7 +347,8 @@ func (e *external) refuseRenamed(ctx context.Context, a *v1alpha1.Allocation, pr
 	if job.EndTime != nil {
 		return nil
 	}
-	return e.cancel(ctx, []string{job.ID})
+	_, err := e.cancel(ctx, []string{job.ID})
+	return err
 }
 
 var errLiftFailed = errors.New("lifting the hold failed")
@@ -380,10 +381,13 @@ func (e *external) cancelHeldExtras(ctx context.Context, a *v1alpha1.Allocation,
 	if len(extras) == 0 {
 		return nil
 	}
-	if err := e.cancel(ctx, extras); err != nil {
+	cancelled, err := e.cancel(ctx, extras)
+	if err != nil {
 		return err
 	}
-	e.event(a, event.Normal("HeldDuplicateCancelled", fmt.Sprintf("held job(s) %s with the tag were cancelled; job %s is the Allocation's", strings.Join(extras, ", "), rec.jobID)))
+	if len(cancelled) > 0 {
+		e.event(a, event.Normal("HeldDuplicateCancelled", fmt.Sprintf("held job(s) %s with the tag were cancelled; job %s is the Allocation's", strings.Join(cancelled, ", "), rec.jobID)))
+	}
 	return nil
 }
 
@@ -542,14 +546,20 @@ func (e *external) duplicates(ctx context.Context, a *v1alpha1.Allocation, name,
 	return nil
 }
 
-// cancel cancels jobs and returns the failures; a job Slurm no longer knows is
-// not a failure.
-func (e *external) cancel(ctx context.Context, ids []string) error {
+// cancel cancels jobs and returns the IDs it cancelled and the failures. A job
+// that had already ended (AlreadyEnded) and a job Slurm no longer knows
+// (CancelError wrapping ErrNotFound) are neither: the cancel was a no-op, not a
+// failure, and no caller may report them as cancelled. An event that says a job
+// was cancelled names only the IDs this returns (#199).
+func (e *external) cancel(ctx context.Context, ids []string) (cancelled []string, err error) {
 	var errs []error
 	for _, r := range e.p.Cancel(ctx, ids) {
-		if r.Outcome == provider.CancelError && !errors.Is(r.Err, provider.ErrNotFound) {
+		switch {
+		case r.Outcome == provider.Cancelled:
+			cancelled = append(cancelled, r.JobID)
+		case r.Outcome == provider.CancelError && !errors.Is(r.Err, provider.ErrNotFound):
 			errs = append(errs, fmt.Errorf("cancel job %s: %w", r.JobID, r.Err))
 		}
 	}
-	return errors.Join(errs...)
+	return cancelled, errors.Join(errs...)
 }
