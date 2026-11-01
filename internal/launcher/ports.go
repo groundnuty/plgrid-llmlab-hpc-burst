@@ -52,25 +52,31 @@ const controllerPortOffset = 6
 const frontHealthPortOffset = 4
 
 // dialHomePortOffset is the front's ssh-mode dial-home listener, relative to the base:
-// agentapi.DialHomePortOffset (7), the last port the launcher checks; base+8 to base+11 are frps's (HBEP-6). Each platform's restricted VM
-// key permits forwards to exactly 127.0.0.1:base+3 (the agent endpoint) and 127.0.0.1:base+7, so a
-// launcher started with another base needs new restricted keys (docs/development.md, The
-// launcher, Ports).
+// agentapi.DialHomePortOffset (7). Each platform's restricted VM key permits forwards to exactly
+// 127.0.0.1:base+3 (the agent endpoint) and 127.0.0.1:base+7, so a launcher started with another
+// base needs new restricted keys (docs/development.md, The launcher, Ports).
 //
 // TODO(#64): warn at up when the base differs from the one the configured restricted keys were
 // made for. Nothing records that base yet: the step that makes the keys does not exist, so there
 // is nothing to compare with.
 const dialHomePortOffset = agentapi.DialHomePortOffset
 
+// blockLastOffset is the block's last port relative to the base: the lifecycle controller's
+// /metrics, agentapi.ControllerMetricsPortOffset (12, issue #111). The block is the 13 ports
+// base..base+12.
+const blockLastOffset = agentapi.ControllerMetricsPortOffset
+
 // PortsFromBase lays the first four ports out as spike S3 did (base, base+1, base+2 and base+5)
 // and adds the controllers' two: the agent endpoint at agentapi.AgentEndpointPortOffset (base+3,
 // shared with the controller through agentapi.Host) and the controller's /healthz at base+6.
 // base+4 is the front's /healthz (frontHealthPortOffset), and base+7 the front's ssh-mode
-// dial-home listener (dialHomePortOffset). The launcher checks base..base+7; frps's ports above
-// them are not checked until the launcher starts frps.
+// dial-home listener (dialHomePortOffset). The rest of the shared block belongs to the other
+// components: base+8, the frps server plugin the controller binds, and base+9 to base+11, frps's
+// own (HBEP-6); and base+12, the controller's /metrics (issue #111). The whole block,
+// base..base+12, must fit below 65536.
 func PortsFromBase(base int) (Ports, error) {
-	if base < 1024 || base+dialHomePortOffset > 65535 {
-		return Ports{}, fmt.Errorf("port base %d is out of range: the block base..base+%d must lie in 1024..65535", base, dialHomePortOffset)
+	if base < 1024 || base+blockLastOffset > 65535 {
+		return Ports{}, fmt.Errorf("port base %d is out of range: the block base..base+%d must lie in 1024..65535", base, blockLastOffset)
 	}
 	host := agentapi.Host{PortBase: base}
 	return Ports{API: base, HTTPS: base + 1, KCM: base + 2, LB: base + 5, Controller: base + controllerPortOffset, Agent: host.AgentEndpointPort(),
@@ -81,10 +87,15 @@ func PortsFromBase(base int) (Ports, error) {
 // not among them: status checks those per supervised process.
 func (p Ports) Expected() []int { return []int{p.API, p.HTTPS, p.KCM} }
 
-// All are the ports that must be free before a start: the expected ones and the reserved ones.
-// The agent endpoint's is among them, so an operator's listener on it makes up refuse.
+// All are the ports that must be free before a start: the whole block, base..base+12. k3s binds
+// three of them and the controller, the front and frps the others, so an operator's listener on
+// any of them makes up refuse. down warns about a foreign listener left on any of them.
 func (p Ports) All() []int {
-	return []int{p.API, p.HTTPS, p.KCM, p.Agent, p.FrontHealth, p.LB, p.Controller, p.DialHome}
+	all := make([]int, 0, blockLastOffset+1)
+	for port := p.Base(); port <= p.Base()+blockLastOffset; port++ {
+		all = append(all, port)
+	}
+	return all
 }
 
 // FrontHealthAddr is where the front serves /healthz.

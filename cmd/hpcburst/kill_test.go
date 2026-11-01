@@ -41,7 +41,7 @@ func TestStatusAfterTheProcessIsKilled(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, 15*time.Second, "k3s to die", func() bool { return !running(pid) })
-	waitFor(t, 15*time.Second, "the kernel to release k3s's sockets", func() bool { return len(listeningInRange(t, 29220, 29239)) == 0 })
+	waitFor(t, 15*time.Second, "the kernel to release k3s's sockets", func() bool { return len(listeningInRange(t, launcherPortsLo, launcherPortsHi)) == 0 })
 
 	for _, p := range []int{base, base + 1, base + 2} {
 		decoy(t, p)
@@ -92,7 +92,7 @@ func TestStatusAfterTheProcessIsKilled(t *testing.T) {
 	if r := cli(t, h.args("down")...); r.code != exitOK {
 		t.Fatalf("down exited %d", r.code)
 	}
-	rows := listeningInRange(t, 29220, 29239)
+	rows := listeningInRange(t, launcherPortsLo, launcherPortsHi)
 	if len(rows) != 3 {
 		t.Errorf("down disturbed the decoys: %v", rows)
 	}
@@ -118,7 +118,7 @@ func TestFailedStartLeavesNothingBehind(t *testing.T) {
 		t.Errorf("the error does not show the end of the k3s log: %q", r.err)
 	}
 	waitFor(t, 20*time.Second, "the failed start's k3s to be gone", func() bool { return len(k3sProcessesUsing(h.dir)) == 0 })
-	if rows := listeningInRange(t, 29220, 29239); len(rows) != 0 {
+	if rows := listeningInRange(t, launcherPortsLo, launcherPortsHi); len(rows) != 0 {
 		t.Errorf("listeners remain: %v", rows)
 	}
 	if r := cli(t, h.args("status")...); r.code != exitStopped {
