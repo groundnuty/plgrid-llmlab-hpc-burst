@@ -28,7 +28,7 @@ import (
 
 // Create implements managed.ExternalClient (HBEP-4, Two controllers, Create):
 // in ssh dial-home mode it checks the dial-home key; it stages the agent's
-// binary and the Allocation's files; it claims attempt n+1 by compare-and-swap
+// binary, frpc and the Allocation's files; it claims attempt n+1 by compare-and-swap
 // (a lost claim submits nothing); it submits, held in hold mode; it records the
 // outcome, and an accepted job's ID by compare-and-swap; and in hold mode it
 // settles at once, so the hold lasts the time of one listing read. It returns
@@ -253,21 +253,33 @@ func writeOwnOrRecorded(ctx context.Context, e *external, a *v1alpha1.Allocation
 // control-plane host alone (no platform call), or "" when it can: a front must
 // be configured (HBEP-11) with a frpc digest for the partition's CPU
 // architecture (agent.json names it; a configuration check, so it comes before
-// any remote call or status write), the Allocation's credential must exist
-// (docs/development.md: until it does, the provider waits; it neither submits
-// nor marks the attempt Rejected), and an agent build with the Allocation's
-// digest must exist for the partition's CPU architecture.
+// any remote call or status write) and with the launcher's dial-home
+// certificate, whose pin is the front's (Front.CheckCertificate), the
+// Allocation's credential must exist (docs/development.md: until it does, the
+// provider waits; it neither submits nor marks the attempt Rejected), an agent
+// build with the Allocation's digest must exist for the partition's CPU
+// architecture, and so must a frpc build with that frpc digest. A file with
+// another digest is refused here, before any file is staged and before the
+// claim (HBEP-4, Submission: Files first).
 func (e *external) prerequisites(a *v1alpha1.Allocation) string {
 	if e.s.o.Front == nil {
 		return "no front is configured, so no job is submitted (HBEP-11)"
 	}
-	if _, err := e.frpcDigest(); err != nil {
+	frpc, err := e.frpcDigest()
+	if err != nil {
+		return err.Error()
+	}
+	if err := e.s.o.Front.CheckCertificate(); err != nil {
 		return err.Error()
 	}
 	if _, err := e.credential(a); err != nil {
 		return "waiting for the Allocation's credential: " + err.Error()
 	}
-	if _, err := e.s.builds.find(e.s.o.AgentBuildsDir, e.v.Profile.Partition.CPUArch, a.Spec.ForProvider.Batch.AgentDigest); err != nil {
+	arch := e.v.Profile.Partition.CPUArch
+	if _, err := e.s.builds.find(agentBuild, e.s.o.AgentBuildsDir, arch, a.Spec.ForProvider.Batch.AgentDigest); err != nil {
+		return err.Error()
+	}
+	if _, err := e.s.builds.find(frpcBuild, e.s.o.AgentBuildsDir, arch, frpc); err != nil {
 		return err.Error()
 	}
 	return ""
@@ -301,11 +313,29 @@ func (e *external) credential(a *v1alpha1.Allocation) ([]byte, error) {
 	return []byte(key), nil
 }
 
-// files are the three files staged before a claim (HBEP-4, Submission): the
-// agent's binary, the Allocation's credential and agent.json.
+// files are the files staged before a claim, in HBEP-4's order (Submission:
+// Files first): the agent's binary, frpc for the partition's cpuArch, the
+// Allocation's credential, the launcher's dial-home certificate, and agent.json.
+// Every file's content is the one its digest names: the builds are read with
+// the digest and refused otherwise (buildCache.read), and the certificate's pin
+// is checked against the front's (FrontSettings.CheckCertificate).
+//
+// Modes: the two binaries 700, as they run; the credential and agent.json 600,
+// since they name a secret and a private address; the certificate 644, since it
+// is public (HBEP-4) and is the same bytes as the launcher's own
+// agent-endpoint/tls.crt, which is 644.
 func (e *external) files(a *v1alpha1.Allocation, tag string, paths slurm.Paths) ([]provider.File, error) {
 	digest := a.Spec.ForProvider.Batch.AgentDigest
-	bin, err := e.s.builds.read(e.s.o.AgentBuildsDir, e.v.Profile.Partition.CPUArch, digest)
+	arch := e.v.Profile.Partition.CPUArch
+	bin, err := e.s.builds.read(agentBuild, e.s.o.AgentBuildsDir, arch, digest)
+	if err != nil {
+		return nil, err
+	}
+	frpcSum, err := e.frpcDigest()
+	if err != nil {
+		return nil, err
+	}
+	frpc, err := e.s.builds.read(frpcBuild, e.s.o.AgentBuildsDir, arch, frpcSum)
 	if err != nil {
 		return nil, err
 	}
@@ -314,13 +344,12 @@ func (e *external) files(a *v1alpha1.Allocation, tag string, paths slurm.Paths) 
 		return nil, err
 	}
 	f := e.s.o.Front
-	frpc, err := e.frpcDigest()
-	if err != nil {
+	if err := f.CheckCertificate(); err != nil {
 		return nil, err
 	}
 	cfg := agentapi.AgentConfig{
 		ProtocolVersion: agentapi.ProtocolVersion, Tag: tag, Mode: f.Mode, Endpoint: f.Endpoint,
-		CertSPKISHA256: f.CertPin, FrpcDigest: frpc, StagingDir: paths.Staging, DialHomeDir: paths.DialHomeDir(),
+		CertSPKISHA256: f.CertPin, FrpcDigest: frpcSum, StagingDir: paths.Staging, DialHomeDir: paths.DialHomeDir(),
 	}
 	if f.Mode == agentapi.DialHomeSSH {
 		cfg.SSH = &agentapi.SSHForward{User: f.SSHUser, AgentPort: f.AgentPort, DialHomePort: f.DialHomePort}
@@ -331,7 +360,9 @@ func (e *external) files(a *v1alpha1.Allocation, tag string, paths slurm.Paths) 
 	}
 	return []provider.File{
 		file(agentapi.StagedAgentPath(digest), 0o700, bin),
+		file(agentapi.StagedFrpcPath(frpcSum), 0o700, frpc),
 		file(agentapi.StagedCredentialPath(tag), 0o600, cred),
+		file(agentapi.StagedDialHomeCertPath(tag), 0o644, f.CertPEM),
 		file(agentapi.StagedConfigPath(tag), 0o600, js),
 	}, nil
 }
@@ -354,9 +385,26 @@ func file(path string, mode os.FileMode, content []byte) provider.File {
 	return provider.File{Path: path, SHA256: hex.EncodeToString(sum[:]), Mode: mode, Content: content}
 }
 
-// buildCache finds an agent build by digest without hashing it on every
+// buildKind is one kind of build the controller stages from the agent-builds
+// directory: the agent's binary and frpc.
+type buildKind struct {
+	// what names it in errors, which reach the Allocation's status.
+	what string
+	// digestOf names the digest the file must have, in the mismatch errors.
+	digestOf string
+	// file is its file name in the directory for a cpuArch.
+	file func(cpuArch string) string
+}
+
+var (
+	agentBuild = buildKind{what: "agent build", digestOf: "the Allocation's agentDigest", file: agentapi.AgentBuildName}
+	frpcBuild  = buildKind{what: "frpc build", digestOf: "the pinned frpc digest", file: agentapi.FrpcBuildName}
+)
+
+// buildCache finds a build by digest without hashing it on every
 // reconcile: a file's digest is kept while its size and modification time
-// stay the same.
+// stay the same. Its key is the file's path, so the agent's and frpc's entries
+// do not meet.
 type buildCache struct {
 	mu   sync.Mutex
 	seen map[string]buildKey
@@ -368,75 +416,75 @@ type buildKey struct {
 	digest string
 }
 
-// maxAgentBuild bounds an agent build read into memory.
+// maxAgentBuild bounds a build read into memory: the agent's and frpc's.
 const maxAgentBuild = 256 << 20
 
-func (c *buildCache) path(dir, arch string) (string, error) {
+func (c *buildCache) path(k buildKind, dir, arch string) (string, error) {
 	if dir == "" {
 		return "", errors.New("no agent-builds directory is configured")
 	}
 	if arch == "" || strings.ContainsAny(arch, "/\\") {
 		return "", errors.New("the partition names no usable cpuArch")
 	}
-	return filepath.Join(dir, agentapi.AgentBuildName(arch)), nil
+	return filepath.Join(dir, k.file(arch)), nil
 }
 
 // find checks that the build for arch has the digest.
-func (c *buildCache) find(dir, arch, digest string) (string, error) {
-	p, err := c.path(dir, arch)
+func (c *buildCache) find(k buildKind, dir, arch, digest string) (string, error) {
+	p, err := c.path(k, dir, arch)
 	if err != nil {
 		return "", err
 	}
 	fi, err := os.Stat(p)
 	if err != nil {
-		return "", fmt.Errorf("no agent build for cpuArch %s", arch)
+		return "", fmt.Errorf("no %s for cpuArch %s", k.what, arch)
 	}
 	c.mu.Lock()
-	k, ok := c.seen[p]
+	seen, ok := c.seen[p]
 	c.mu.Unlock()
-	if !ok || k.size != fi.Size() || !k.mtime.Equal(fi.ModTime()) {
-		b, err := c.read(dir, arch, "")
+	if !ok || seen.size != fi.Size() || !seen.mtime.Equal(fi.ModTime()) {
+		b, err := c.read(k, dir, arch, "")
 		if err != nil {
 			return "", err
 		}
 		sum := sha256.Sum256(b)
-		k = buildKey{size: fi.Size(), mtime: fi.ModTime(), digest: hex.EncodeToString(sum[:])}
+		seen = buildKey{size: fi.Size(), mtime: fi.ModTime(), digest: hex.EncodeToString(sum[:])}
 		c.mu.Lock()
 		if c.seen == nil {
 			c.seen = map[string]buildKey{}
 		}
-		c.seen[p] = k
+		c.seen[p] = seen
 		c.mu.Unlock()
 	}
-	if k.digest != digest {
-		return "", fmt.Errorf("the agent build for cpuArch %s has digest %s, not the Allocation's agentDigest %s", arch, k.digest, digest)
+	if seen.digest != digest {
+		return "", fmt.Errorf("the %s for cpuArch %s has digest %s, not %s %s", k.what, arch, seen.digest, k.digestOf, digest)
 	}
 	return p, nil
 }
 
 // read returns the build for arch; with a digest, only when its content has
 // that digest.
-func (c *buildCache) read(dir, arch, digest string) ([]byte, error) {
-	p, err := c.path(dir, arch)
+func (c *buildCache) read(k buildKind, dir, arch, digest string) ([]byte, error) {
+	p, err := c.path(k, dir, arch)
 	if err != nil {
 		return nil, err
 	}
 	f, err := os.Open(p)
 	if err != nil {
-		return nil, fmt.Errorf("no agent build for cpuArch %s", arch)
+		return nil, fmt.Errorf("no %s for cpuArch %s", k.what, arch)
 	}
 	defer f.Close()
 	b, err := io.ReadAll(io.LimitReader(f, maxAgentBuild+1))
 	if err != nil {
-		return nil, fmt.Errorf("read the agent build for cpuArch %s: %w", arch, err)
+		return nil, fmt.Errorf("read the %s for cpuArch %s: %w", k.what, arch, err)
 	}
 	if len(b) > maxAgentBuild {
-		return nil, fmt.Errorf("the agent build for cpuArch %s is larger than %d bytes", arch, maxAgentBuild)
+		return nil, fmt.Errorf("the %s for cpuArch %s is larger than %d bytes", k.what, arch, maxAgentBuild)
 	}
 	if digest != "" {
 		sum := sha256.Sum256(b)
-		if hex.EncodeToString(sum[:]) != digest {
-			return nil, fmt.Errorf("the agent build for cpuArch %s does not have the Allocation's agentDigest", arch)
+		if got := hex.EncodeToString(sum[:]); got != digest {
+			return nil, fmt.Errorf("the %s for cpuArch %s has digest %s, not %s %s", k.what, arch, got, k.digestOf, digest)
 		}
 	}
 	return b, nil

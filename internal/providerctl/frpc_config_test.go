@@ -1,12 +1,16 @@
 package providerctl
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"testing"
 
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/providerctl/ctltest"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider/fake"
@@ -27,26 +31,40 @@ import (
 // get DialHomeKeyMissing, which Create would otherwise have written first.
 func TestFrpcDigestForThePartitionsCPUArch(t *testing.T) {
 	const staging = "/scratch/user-a/stage/"
-	digest := strings.Repeat("d", 64)
+	// The digest of the example frpc build for x86_64, hashed here, not by the
+	// fixture's helper.
+	sum := sha256.Sum256(ctltest.FrpcContent(testArch))
+	digest := hex.EncodeToString(sum[:])
 	for _, tc := range []struct {
 		name    string
 		mode    agentapi.DialHomeMode
 		digests map[string]string
 		submits bool
+		// cpuArch, when set, replaces the partition's cpuArch; reason is what the
+		// Allocation's reason must name when nothing is submitted.
+		cpuArch, reason string
 	}{
-		{"direct, digest for the partition's cpuArch", agentapi.DialHomeDirect, map[string]string{"x86_64": digest}, true},
-		{"direct, digest for another cpuArch only", agentapi.DialHomeDirect, map[string]string{"aarch64": digest}, false},
-		{"ssh without the dial-home keys, digest for another cpuArch only", agentapi.DialHomeSSH, map[string]string{"aarch64": digest}, false},
+		{"direct, digest for the partition's cpuArch", agentapi.DialHomeDirect, map[string]string{"x86_64": digest}, true, "", ""},
+		{"direct, digest for another cpuArch only", agentapi.DialHomeDirect, map[string]string{"aarch64": digest}, false, "", "cpuArch x86_64"},
+		{"ssh without the dial-home keys, digest for another cpuArch only", agentapi.DialHomeSSH, map[string]string{"aarch64": digest}, false, "", "cpuArch x86_64"},
+		// frp's own name for the architecture is not a cpuArch: the digests are keyed by the
+		// profile's strings, and nothing maps one to the other here (internal/launcher's
+		// cpuArchOf does it once, where the pins are read), so the lookup fails closed.
+		{"direct, a partition whose cpuArch is frp's amd64", agentapi.DialHomeDirect, map[string]string{"x86_64": digest, "aarch64": digest}, false, "amd64", "cpuArch amd64"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clock := fake.NewClock(at(12, 0, 0))
 			sl := newSlurm(clock, fakeslurm.Config{})
 			e := newRealEnv(t, clock, sl, newFakeClient(t, "prov-a"), "prov-a", "user-a", func(e *realEnv) {
-				f := &FrontSettings{Mode: tc.mode, Endpoint: "front.example.org:29443", CertPin: strings.Repeat("c", 64), FrpcDigests: tc.digests}
+				f := e.opts.Front
+				f.Mode, f.FrpcDigests = tc.mode, tc.digests
 				if tc.mode == agentapi.DialHomeSSH {
 					f.Endpoint, f.SSHUser, f.AgentPort, f.DialHomePort = "front.example.org:22", "example-user", 29270, 29274
 				}
 				e.opts.Front = f
+				if tc.cpuArch != "" {
+					e.profiles.set(func(v *slurm.Validated) { v.Profile.Partition.AcceleratorClass.CPUArch = tc.cpuArch })
+				}
 			})
 			a := e.newAlloc("alloc-a", 1)
 			e.run("alloc-a", 3)
@@ -72,6 +90,12 @@ func TestFrpcDigestForThePartitionsCPUArch(t *testing.T) {
 				if c := apimeta.FindStatusCondition(e.provStatus().Conditions, v1alpha1.ConditionDialHomeKeyMissing); c != nil {
 					t.Errorf("DialHomeKeyMissing is %+v, want it untouched: the digest check comes first", c)
 				}
+				if got := e.get("alloc-a").Annotations[v1alpha1.AnnotationSubmission]; got != "" {
+					t.Errorf("a submission record %q was written, want no claim", got)
+				}
+				if reason := e.get("alloc-a").Status.AtProvider.Reason; !strings.Contains(reason, tc.reason) {
+					t.Errorf("reason %q does not name %q", reason, tc.reason)
+				}
 				return
 			}
 			if n := sl.Count("sbatch"); n != 1 {
@@ -85,8 +109,8 @@ func TestFrpcDigestForThePartitionsCPUArch(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if cfg.FrpcDigest != "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" {
-				t.Errorf("agent.json frpcDigest %q, want the x86_64 digest", cfg.FrpcDigest)
+			if cfg.FrpcDigest != digest {
+				t.Errorf("agent.json frpcDigest %q, want the x86_64 digest %s", cfg.FrpcDigest, digest)
 			}
 		})
 	}
