@@ -73,6 +73,25 @@ type PartitionProfile struct {
 	//
 	// +optional
 	ImageFormat ImageFormat `json:"imageFormat,omitempty"`
+
+	// TmpDir is the job's temporary directory on this partition: the batch
+	// script sets TMPDIR to it before it starts the allocation agent, which
+	// keeps its run directory (the engine's socket) and Apptainer's build tree
+	// there. It has stagingDir's form, an absolute path or one that starts
+	// with an environment variable, but the variable is one the job sets, such
+	// as $SCRATCH_LOCAL, the node-local disk of Helios's localfs feature, so it
+	// is expanded inside the job, never on the login node. A variable that is
+	// unset or empty there stops the job before the agent starts. Absent, the
+	// job keeps the TMPDIR the scheduler gives it (science-agent ruling, 1 Nov
+	// 2026, issue #125: on Helios plgrid-gpu-gh200 that TMPDIR is on Lustre,
+	// near its inode quota).
+	//
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=1024
+	// +kubebuilder:validation:Pattern=`^(/|\$[A-Za-z_][A-Za-z0-9_]*)[A-Za-z0-9._:=,/-]*$`
+	// +kubebuilder:validation:XValidation:rule="!self.split('/').exists(s, s == '..')",message="tmpDir must not contain a '..' segment"
+	TmpDir string `json:"tmpDir,omitempty"`
 }
 
 // ImageFormat is a container image format Apptainer runs (PartitionProfile).
