@@ -207,7 +207,7 @@ func TestNoOverlapOneSlotPath(t *testing.T) {
 		}
 	}
 	hoStepTo(rg, hoT(10, 0, 0), time.Minute, gap)
-	hoStepTo(rg, hoT(10, 10, 0), 10*time.Second, gap)
+	hoStepUntil(rg, hoT(10, 30, 0), 10*time.Second, func() bool { return rg.readyCount(hoMD) > 0 }, gap)
 	if !restarted {
 		t.Fatal("the controller was not restarted in the gap")
 	}
@@ -219,7 +219,7 @@ func TestNoOverlapOneSlotPath(t *testing.T) {
 		t.Fatal("the held-back successor never added SubmitLimitReached to the message")
 	}
 	if succAlloc == "" {
-		t.Fatal("no successor Allocation by 10:10:00")
+		t.Fatal("no successor Allocation once an Instance is ready")
 	}
 	// ReleaseWhenIdle: the primary ended on the first report after 09:56:00
 	// and its Allocation went 5 min later, so the successor came no earlier
@@ -237,24 +237,50 @@ func TestNoOverlapOneSlotPath(t *testing.T) {
 		t.Fatalf("successor %+v, want the primary's successor, marked", succ)
 	}
 	if succ.Status.Phase != v1alpha1.InstanceReady {
-		t.Fatalf("the successor is %s at 10:10:00, want ready", succ.Status.Phase)
+		t.Fatalf("the successor is %s once an Instance is ready, want ready", succ.Status.Phase)
 	}
 	if c := rg.condition(hoMD, v1alpha1.ConditionDegraded); c.Status != metav1.ConditionFalse {
 		t.Fatalf("Degraded = %s/%s %q once the successor is ready, want False", c.Status, c.Reason, c.Message)
 	}
 }
 
-// TestNoOverlapQueuedPath covers "No-overlap mode on the queued path, as on
-// Helios": the partition QOS allows 2,000 jobs (it comes first, so the
-// effective submit limit is 2000) and the Provider's QOS one GPU per user; the
-// fake user's QOS is the same (2,000 jobs, one GPU).
-func TestNoOverlapQueuedPath(t *testing.T) {
+// noOverlapQueuedRig is noOverlapRig for the queued path, as on Helios: the
+// partition QOS allows 2,000 jobs (it comes first, so the effective submit
+// limit is 2000) and the Provider's QOS one GPU per user; the fake user's QOS
+// is the same (2,000 jobs, one GPU).
+func noOverlapQueuedRig(t *testing.T, extra ...rigOption) *rig {
 	qos := []v1alpha1.QOSProfile{
 		{Name: "example-plgrid", MaxSubmitPerUser: i32(2000)},
 		{Name: "example-now", MaxSubmitPerUser: i32(1), MaxGPUsPerUser: i32(1)},
 	}
 	opts := append(qosOpts(qos, "example-plgrid", "example-now"), withBatchConfig(func(c *pfake.Config) { c.MaxSubmitPerUser, c.MaxGPUsPerUser = 2000, 1 }))
-	rg := noOverlapRig(t, opts...)
+	return noOverlapRig(t, append(opts, extra...)...)
+}
+
+// hoStepUntil moves the clock in steps of at most coarse and runs one rig step
+// after each, then each, until done reports true. A wait for a state that the
+// controller reaches by itself ends on that state, not on a fixed date; the
+// test fails if deadline comes first. The explicit clock advances of the
+// tests stay at the submission and drain boundaries.
+func hoStepUntil(rg *rig, deadline time.Time, coarse time.Duration, done func() bool, each func()) {
+	rg.t.Helper()
+	for !done() {
+		now := rg.clock.Now()
+		if !now.Before(deadline) {
+			rg.t.Fatalf("the awaited state was not reached by %s", deadline.Format(time.TimeOnly))
+		}
+		rg.clock.Advance(min(coarse, deadline.Sub(now)))
+		rg.Step()
+		if each != nil {
+			each()
+		}
+	}
+}
+
+// TestNoOverlapQueuedPath covers "No-overlap mode on the queued path, as on
+// Helios".
+func TestNoOverlapQueuedPath(t *testing.T) {
+	rg := noOverlapQueuedRig(t)
 	p := noOverlapStart(rg)
 	pAlloc := p.Spec.AllocationRef.Name
 	// The replacement is created at its planned time, 09:19:30, not before.
@@ -294,6 +320,13 @@ func TestNoOverlapQueuedPath(t *testing.T) {
 		}
 		noReplacementLate(t, rg)
 		streamNotCut(t, rg, p.Name)
+		// Before the drain start the primary serves and nothing is missing:
+		// the pending successor is no gap (one rule, nooverlap.go).
+		if now.Before(hoT(9, 50, 20)) {
+			if c := rg.condition(hoMD, v1alpha1.ConditionDegraded); c.Status != metav1.ConditionFalse || c.Reason != v1alpha1.ReasonAsDesired {
+				t.Fatalf("at %s Degraded = %s/%s %q before the drain start, want False/AsDesired", now.Format(time.TimeOnly), c.Status, c.Reason, c.Message)
+			}
+		}
 		ra, ok := rg.allocation(rAlloc)
 		if !ok {
 			t.Fatalf("at %s the replacement's Allocation is gone", now.Format(time.TimeOnly))
@@ -326,9 +359,9 @@ func TestNoOverlapQueuedPath(t *testing.T) {
 	if n := len(rg.rec.Find(eventDegraded, v1alpha1.ReasonCapacityDropped)); n == 0 {
 		t.Fatal("no CapacityDropped event at the drain start")
 	}
-	hoStepTo(rg, hoT(10, 10, 0), 10*time.Second, watch)
+	hoStepUntil(rg, hoT(10, 30, 0), 10*time.Second, func() bool { return rg.instance(r.Name).Status.Phase == v1alpha1.InstanceReady }, watch)
 	if pJobEnd.IsZero() || rStart.IsZero() {
-		t.Fatalf("the predecessor's job ended at %v and the replacement started at %v, want both by 10:10:00", pJobEnd, rStart)
+		t.Fatalf("the predecessor's job ended at %v and the replacement started at %v, want both once the replacement is ready", pJobEnd, rStart)
 	}
 	if !restarted || gapAfterRestart == 0 {
 		t.Fatalf("restarted %v with %d in-gap steps after it, want a restart after the predecessor's removal and the gap checked after it", restarted, gapAfterRestart)
@@ -337,9 +370,6 @@ func TestNoOverlapQueuedPath(t *testing.T) {
 	// and job went 5 min later.
 	if pJobEnd.Before(hoT(10, 1, 0)) {
 		t.Fatalf("the predecessor's job ended at %s, before its end plus the 5 min idle limit", pJobEnd.Format(time.TimeOnly))
-	}
-	if got := rg.instance(r.Name); got.Status.Phase != v1alpha1.InstanceReady {
-		t.Fatalf("the replacement is %s at 10:10:00, want ready", got.Status.Phase)
 	}
 	if c := rg.condition(hoMD, v1alpha1.ConditionDegraded); c.Status != metav1.ConditionFalse {
 		t.Fatalf("Degraded = %s/%s %q once the replacement is ready, want False", c.Status, c.Reason, c.Message)

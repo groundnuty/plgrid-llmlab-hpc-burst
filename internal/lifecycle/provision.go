@@ -55,6 +55,9 @@ type placeOpts struct {
 	// successorOf, when set, is written on the new Instance as
 	// annotationNoOverlapSuccessor: it is a no-overlap successor.
 	successorOf string
+	// gapOf, when set with successorOf, names the primary that drained in the
+	// mode and is written as annotationNoOverlapGap: the gap has begun.
+	gapOf string
 }
 
 func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error) {
@@ -100,7 +103,7 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 			return false, nil
 		}
 		if warm != nil {
-			if err := p.createInstance(pv, cid, pred, warm.Name, o.successorOf); err != nil {
+			if err := p.createInstance(pv, cid, pred, warm.Name, o.successorOf, o.gapOf); err != nil {
 				return false, err
 			}
 			// Placed: the Allocation is no longer idle (v1alpha1.ClearIdleSince).
@@ -119,7 +122,7 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 		if !ok {
 			continue
 		}
-		if err := p.createInstance(pv, cid, pred, name, o.successorOf); err != nil {
+		if err := p.createInstance(pv, cid, pred, name, o.successorOf, o.gapOf); err != nil {
 			p.releaseSlot(pv, name)
 			return false, err
 		}
@@ -192,8 +195,9 @@ func drainWindowOf(pv *providerView, md *v1alpha1.ModelDeployment) time.Duration
 // createInstance creates a pending Instance of the class's current ID on the
 // named Allocation, owned by the ModelDeployment, with the drain finalizer. A
 // no-overlap successor carries annotationNoOverlapSuccessor with successorOf,
-// which names the Provider and the limit.
-func (p *pass) createInstance(pv *providerView, cid *classID, pred *v1alpha1.Instance, alloc, successorOf string) error {
+// which names the Provider and the limit, and annotationNoOverlapGap with
+// gapOf once the gap has begun.
+func (p *pass) createInstance(pv *providerView, cid *classID, pred *v1alpha1.Instance, alloc, successorOf, gapOf string) error {
 	name, err := randomName(truncate(p.md.Name, 40))
 	if err != nil {
 		return err
@@ -222,6 +226,9 @@ func (p *pass) createInstance(pv *providerView, cid *classID, pred *v1alpha1.Ins
 		in.Annotations = map[string]string{v1alpha1.AnnotationPredecessor: pred.Name}
 		if successorOf != "" {
 			in.Annotations[annotationNoOverlapSuccessor] = successorOf
+			if gapOf != "" {
+				in.Annotations[annotationNoOverlapGap] = gapOf
+			}
 		}
 	}
 	if err := p.r.Client.Create(p.ctx, in, owner); err != nil {

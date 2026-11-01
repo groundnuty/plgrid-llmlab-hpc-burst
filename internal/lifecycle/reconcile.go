@@ -108,7 +108,10 @@ type pass struct {
 	noSlot map[string]string
 	// overlaps memoizes the no-overlap decision per primary (nooverlap.go).
 	overlaps map[types.UID]overlapCheck
-	next     time.Time
+	// overlapErrs collects the failed no-overlap checks of the replacement
+	// rules (overlapOrDefer); run returns them at the end of the pass.
+	overlapErrs []error
+	next        time.Time
 }
 
 // at asks for the next pass no later than t.
@@ -188,8 +191,11 @@ func (p *pass) run() error {
 			return errors.Join(instErr, err)
 		}
 		if err := p.replacements(); err != nil {
-			return errors.Join(instErr, err)
+			return errors.Join(instErr, err, errors.Join(p.overlapErrs...))
 		}
+		// A failed no-overlap check waits for the next pass without holding
+		// back retention and the status write.
+		instErr = errors.Join(instErr, errors.Join(p.overlapErrs...))
 	}
 	if err := p.retention(); err != nil {
 		return errors.Join(instErr, err)
