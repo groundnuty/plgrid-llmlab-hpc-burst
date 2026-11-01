@@ -187,3 +187,9 @@ func outcomeOf(t *testing.T, res agentapi.QualifyResult, name agentapi.CheckName
 	t.Fatalf("no %s outcome in %+v", name, res.Checks)
 	return agentapi.CheckOutcome{}
 }
+
+// testGreedy is HBEP-7's greedy request, written out by hand: temperature 0,
+// top_p 1, repetition_penalty 1, presence_penalty 0, frequency_penalty 0, no
+// seed. Tests that do not study sampling use it, as the checks of a model
+// without a reasoning parser do.
+var testGreedy = agentapi.Sampling{Greedy: true, Temperature: 0, TopP: 1, RepetitionPenalty: 1, PresencePenalty: 0, FrequencyPenalty: 0}

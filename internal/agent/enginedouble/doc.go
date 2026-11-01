@@ -45,12 +45,14 @@
 //
 // # What reached the engine
 //
-// Each chat request that the engine accepted is recorded when it ends, as a
+// Each chat request is recorded when it ends, as a
 // LogEvent (the "request" line of HB_ENGINE_DOUBLE_LOG, or the callback of
 // HandlerRecording), with the sampling parameters it carried (RequestSampling:
 // temperature, top_p, top_k, min_p, the three penalties and seed, each nil
 // when the request left it out) and the last 120 bytes of its last user
-// message (Tail). A request that the double refuses with a 4xx is not recorded.
+// message (Tail). A request the double refuses (the errors-only mode, a 4xx)
+// is recorded too, with the Outcome "refused", so a test counts the attempts
+// a check made. A body that does not decode is not recorded.
 //
 // # Reasoning and tool calls
 //

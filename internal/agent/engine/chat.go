@@ -53,25 +53,75 @@ type chatRequest struct {
 	ToolChoice     string `json:"tool_choice,omitempty"`
 }
 
-// MarshalJSON writes the request with every sampling parameter the agent's
-// requests rely on set explicitly: greedy decoding (temperature 0, top_p 1)
-// with no repetition, presence or frequency penalty. vLLM fills a parameter a
-// request leaves out from the model's generation_config.json (Qwen2.5 sets
-// repetition_penalty 1.1, #94 finding 6), so without these a model's defaults
-// would change a check; client traffic keeps vLLM's defaults (science-agent
-// rulings, 1 Nov 2026, issue #125). Every agent request goes through here, so
-// no call site can leave one out.
+// MarshalJSON refuses a chatRequest: it cannot be sent without the sampling
+// of its check. Every request goes out as a sampledRequest (chatRequest.sampled),
+// so no call site can leave a sampling parameter out.
 func (r chatRequest) MarshalJSON() ([]byte, error) {
-	type plain chatRequest
-	return json.Marshal(struct {
-		plain
-		Temperature       float64 `json:"temperature"`
-		TopP              float64 `json:"top_p"`
-		RepetitionPenalty float64 `json:"repetition_penalty"`
-		PresencePenalty   float64 `json:"presence_penalty"`
-		FrequencyPenalty  float64 `json:"frequency_penalty"`
-	}{plain: plain(r), Temperature: 0, TopP: 1, RepetitionPenalty: 1, PresencePenalty: 0, FrequencyPenalty: 0})
+	return nil, errors.New("a chat request is sent only with the sampling of its check (sampled)")
 }
+
+// sampledRequest is a chatRequest with the sampling parameters of the check it
+// belongs to. It is the only form that is sent.
+type sampledRequest struct {
+	chatRequest
+	sampling agentapi.Sampling
+	// check is the key of the request's seed in sampling.Seeds: agentapi's
+	// SeedKeyVerify and SeedKeyWarmUp, or a CheckName.
+	check string
+}
+
+// sampled returns r as a request of the check named check (agentapi's
+// SeedKeyVerify, SeedKeyWarmUp, or string(CheckName)), sampled as s says.
+func (r chatRequest) sampled(s agentapi.Sampling, check string) sampledRequest {
+	return sampledRequest{chatRequest: r, sampling: s, check: check}
+}
+
+// MarshalJSON writes the request with every sampling parameter the agent's
+// requests rely on set explicitly (HBEP-7, The allocation agent, Checks). vLLM
+// fills a parameter a request leaves out from the model's generation_config.json
+// (Qwen2.5 sets repetition_penalty 1.1, #94 finding 6), so without these a
+// model's defaults would change a check; client traffic keeps vLLM's defaults
+// (science-agent rulings, 1 Nov 2026, issues #125 and #151).
+//
+//   - A greedy Sampling writes temperature 0, top_p 1 and the three penalties,
+//     and no top_k, min_p or seed.
+//   - A sampled Sampling writes those five from the model's file, top_k and
+//     min_p, and the seed of the request's check, the same on every request of
+//     one check. It is an error for it to lack top_k, min_p or that seed:
+//     the zero Sampling is not greedy (top_p 0, repetition_penalty 0), so it
+//     must never go out as a default.
+func (r sampledRequest) MarshalJSON() ([]byte, error) {
+	s := r.sampling
+	body := struct {
+		plainChatRequest
+		Temperature       float64  `json:"temperature"`
+		TopP              float64  `json:"top_p"`
+		RepetitionPenalty float64  `json:"repetition_penalty"`
+		PresencePenalty   float64  `json:"presence_penalty"`
+		FrequencyPenalty  float64  `json:"frequency_penalty"`
+		TopK              *int64   `json:"top_k,omitempty"`
+		MinP              *float64 `json:"min_p,omitempty"`
+		Seed              *int64   `json:"seed,omitempty"`
+	}{
+		plainChatRequest: plainChatRequest(r.chatRequest),
+		Temperature:      s.Temperature, TopP: s.TopP, RepetitionPenalty: s.RepetitionPenalty,
+		PresencePenalty: s.PresencePenalty, FrequencyPenalty: s.FrequencyPenalty,
+	}
+	if !s.Greedy {
+		seed, ok := s.Seeds[r.check]
+		switch {
+		case !ok:
+			return nil, fmt.Errorf("sampled request of check %q: the sampling has no seed for it", r.check)
+		case s.TopK == nil || s.MinP == nil:
+			return nil, fmt.Errorf("sampled request of check %q: the sampling lacks top_k or min_p", r.check)
+		}
+		body.TopK, body.MinP, body.Seed = s.TopK, s.MinP, &seed
+	}
+	return json.Marshal(body)
+}
+
+// plainChatRequest is chatRequest without its MarshalJSON.
+type plainChatRequest chatRequest
 
 type streamOptions struct {
 	IncludeUsage bool `json:"include_usage"`
@@ -105,8 +155,9 @@ type chatResponse struct {
 	SystemFingerprint string `json:"system_fingerprint"`
 }
 
-// chat sends a non-streamed chat request.
-func (c *Client) chat(ctx context.Context, req chatRequest) (chatResponse, error) {
+// chat sends a non-streamed chat request of the check named check (agentapi's
+// SeedKeyVerify or a CheckName), sampled as s says.
+func (c *Client) chat(ctx context.Context, s agentapi.Sampling, check string, req chatRequest) (chatResponse, error) {
 	var out chatResponse
 	if req.Model == "" {
 		m, err := c.servedModel(ctx)
@@ -115,7 +166,7 @@ func (c *Client) chat(ctx context.Context, req chatRequest) (chatResponse, error
 		}
 		req.Model = m
 	}
-	err := c.postJSON(ctx, "/v1/chat/completions", req, &out)
+	err := c.postJSON(ctx, "/v1/chat/completions", req.sampled(s, check), &out)
 	return out, err
 }
 

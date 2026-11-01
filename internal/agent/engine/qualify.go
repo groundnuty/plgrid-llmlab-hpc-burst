@@ -25,8 +25,9 @@ const (
 // smoke test when req.ToolCalls, the corruption check, and the behaviour
 // check at the longest context; the KV capacity the engine reported at
 // start-up and the served model names. The checks come in the order health,
-// chat, toolCall, corruption, behaviour.
-func (c *Client) Qualify(ctx context.Context, req agentapi.QualifyRequest) agentapi.QualifyResult {
+// chat, toolCall, corruption, behaviour. Every check request is sampled as s
+// says, with the check's own seed when s is not greedy (agentapi.CheckSampling).
+func (c *Client) Qualify(ctx context.Context, req agentapi.QualifyRequest, s agentapi.Sampling) agentapi.QualifyResult {
 	var res agentapi.QualifyResult
 	// add records an outcome; a note is a fact the controller should read
 	// beside the verdict, kept on a pass too.
@@ -60,14 +61,14 @@ func (c *Client) Qualify(ctx context.Context, req agentapi.QualifyRequest) agent
 	if m, err := c.metrics(ctx); err == nil {
 		res.KVCapacityTokens = kvCapacity(m.cacheConfig())
 	}
-	fp, err := c.chatCheck(ctx)
+	fp, err := c.chatCheck(ctx, s)
 	res.Fingerprint = cut(fp)
 	add(agentapi.CheckChat, "", err)
 	if req.ToolCalls {
-		add(agentapi.CheckToolCall, "", c.toolCallCheck(ctx))
+		add(agentapi.CheckToolCall, "", c.toolCallCheck(ctx, s))
 	}
-	add(agentapi.CheckCorruption, "", c.corruptionCheck(ctx))
-	run, err := c.behaviourCheck(ctx, req)
+	add(agentapi.CheckCorruption, "", c.corruptionCheck(ctx, s))
+	run, err := c.behaviourCheck(ctx, s, req)
 	add(agentapi.CheckBehaviour, run.note, err)
 	res.Checks[len(res.Checks)-1].ContextTokens = run.contextTokens
 	return res
@@ -88,8 +89,8 @@ func failedOutcome(name agentapi.CheckName, reason, message string) agentapi.Che
 
 // chatCheck sends one chat request; it passes when the engine answers with
 // text, in either field: a reasoning model may spend all 32 tokens thinking.
-func (c *Client) chatCheck(ctx context.Context) (string, error) {
-	r, err := c.chat(ctx, chatRequest{Messages: []message{{Role: "user", Content: chatPrompt}}, MaxTokens: 32})
+func (c *Client) chatCheck(ctx context.Context, s agentapi.Sampling) (string, error) {
+	r, err := c.chat(ctx, s, string(agentapi.CheckChat), chatRequest{Messages: []message{{Role: "user", Content: chatPrompt}}, MaxTokens: 32})
 	if err != nil {
 		return "", err
 	}
@@ -106,12 +107,12 @@ const toolCallTokens = 128
 // asked to use it, the engine answers with a well-formed call of it. Only the
 // final answer is judged, never the reasoning; with a reasoning parser the
 // request asks for reasoningTokens more.
-func (c *Client) toolCallCheck(ctx context.Context) error {
+func (c *Client) toolCallCheck(ctx context.Context, s agentapi.Sampling) error {
 	budget := int32(toolCallTokens)
 	if c.reasoning {
 		budget += reasoningTokens
 	}
-	r, err := c.chat(ctx, chatRequest{
+	r, err := c.chat(ctx, s, string(agentapi.CheckToolCall), chatRequest{
 		Messages:   []message{{Role: "user", Content: toolPrompt}},
 		MaxTokens:  budget,
 		Tools:      []tool{weatherTool},
@@ -141,14 +142,15 @@ func wellFormedToolCall(r chatResponse) error {
 	return nil
 }
 
-// corruptionCheck sends one greedy request three times in a row and judges
-// the token outputs by agentapi.JudgeCorruption: they share their first 32
-// tokens and none is empty or a single repeated token (HBEP-7, Instance start).
-// The outputs never leave the job.
-func (c *Client) corruptionCheck(ctx context.Context) error {
+// corruptionCheck sends one request three times in a row, greedy or, on a
+// reasoning model, sampled with one seed (s), and judges the token outputs by
+// agentapi.JudgeCorruption: they share their first 32 tokens and none is empty
+// or a single repeated token (HBEP-7, Instance start). Each of the three is one
+// attempt, with no retry. The outputs never leave the job.
+func (c *Client) corruptionCheck(ctx context.Context, s agentapi.Sampling) error {
 	outs := make([][]int32, 0, agentapi.CorruptionOutputs)
 	for range agentapi.CorruptionOutputs {
-		r, err := c.chat(ctx, chatRequest{
+		r, err := c.chat(ctx, s, string(agentapi.CheckCorruption), chatRequest{
 			Messages:       []message{{Role: "user", Content: corruptionPrompt}},
 			MaxTokens:      corruptionTokens,
 			MinTokens:      corruptionTokens,
@@ -200,7 +202,7 @@ type behaviourRun struct {
 // still refuse the request, and then the check fails with its error). An engine
 // that reports no max_model_len cannot be fitted, and runs at ContextTypical
 // too. The note names the context the check ran at, on a pass too.
-func (c *Client) behaviourCheck(ctx context.Context, req agentapi.QualifyRequest) (run behaviourRun, err error) {
+func (c *Client) behaviourCheck(ctx context.Context, s agentapi.Sampling, req agentapi.QualifyRequest) (run behaviourRun, err error) {
 	tail, tools, choice := behaviourTail, []tool(nil), ""
 	if req.ToolCalls {
 		tail, tools, choice = behaviourToolTail, []tool{weatherTool}, "auto"
@@ -220,7 +222,7 @@ func (c *Client) behaviourCheck(ctx context.Context, req agentapi.QualifyRequest
 	if err != nil {
 		return run, err
 	}
-	r, err := c.chat(ctx, chatRequest{
+	r, err := c.chat(ctx, s, string(agentapi.CheckBehaviour), chatRequest{
 		Messages:       []message{{Role: "user", Content: content}},
 		MaxTokens:      budget,
 		ReturnTokenIDs: true,

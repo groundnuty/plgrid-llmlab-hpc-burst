@@ -34,8 +34,9 @@ type LogEvent struct {
 	// the ignore-term line
 	PIDs []int `json:"pids,omitempty"`
 
-	// request: MaxTokens is the resolved limit; Outcome is "completed" or
-	// "cancelled" (the client went away); Tokens is how many tokens were sent.
+	// request: MaxTokens is the resolved limit; Outcome is "completed",
+	// "cancelled" (the client went away) or "refused" (the double answered
+	// with an error status); Tokens is how many tokens were sent.
 	Path         string `json:"path,omitempty"`
 	PromptTokens int    `json:"prompt_tokens,omitempty"`
 	MaxTokens    int    `json:"max_tokens,omitempty"`

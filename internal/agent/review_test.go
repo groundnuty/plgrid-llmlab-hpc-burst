@@ -238,8 +238,8 @@ type slowCancelEngine struct {
 	returned *atomic.Int64 // unix nanos
 }
 
-func (e slowCancelEngine) WarmUpRound(ctx context.Context, n int32, req agentapi.WarmUpRequest) agentapi.WarmUpRound {
-	r := e.Engine.WarmUpRound(ctx, n, req)
+func (e slowCancelEngine) WarmUpRound(ctx context.Context, n int32, req agentapi.WarmUpRequest, s agentapi.Sampling) agentapi.WarmUpRound {
+	r := e.Engine.WarmUpRound(ctx, n, req, s)
 	if ctx.Err() != nil {
 		time.Sleep(500 * time.Millisecond)
 		e.returned.Store(time.Now().UnixNano())

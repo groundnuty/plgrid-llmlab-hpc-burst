@@ -2,11 +2,16 @@ package agent
 
 import (
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 func writeGenerationConfig(t *testing.T, dir, body string) {
@@ -25,21 +30,21 @@ func writeGenerationConfig(t *testing.T, dir, body string) {
 // JSON object and one that sets none of them give none.
 func TestReadGenerationConfig(t *testing.T) {
 	dir := t.TempDir()
-	if got := readGenerationConfig(dir); got != nil {
+	if got, _ := readGenerationConfig(dir); got != nil {
 		t.Errorf("no file: %v, want none", got)
 	}
 	writeGenerationConfig(t, dir, `{"bos_token_id": 151643, "do_sample": true, "eos_token_id": [151645, 151643],
   "repetition_penalty": 1.1, "temperature": 0.7, "top_p": 0.8, "top_k": 20, "transformers_version": "4.37.0"}`)
 	want := map[string]string{"repetition_penalty": "1.1", "temperature": "0.7", "top_p": "0.8", "top_k": "20"}
-	if got := readGenerationConfig(dir); !reflect.DeepEqual(got, want) {
+	if got, _ := readGenerationConfig(dir); !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v\nwant %v", got, want)
 	}
 	writeGenerationConfig(t, dir, `[1, 2]`)
-	if got := readGenerationConfig(dir); got != nil {
+	if got, _ := readGenerationConfig(dir); got != nil {
 		t.Errorf("not an object: %v, want none", got)
 	}
 	writeGenerationConfig(t, dir, `{"bos_token_id": 1, "transformers_version": "4.37.0"}`)
-	if got := readGenerationConfig(dir); got != nil {
+	if got, _ := readGenerationConfig(dir); got != nil {
 		t.Errorf("no sampling parameter: %v, want none", got)
 	}
 }
@@ -64,7 +69,7 @@ func TestReadGenerationConfigRecordsOnlyTheSamplingKeys(t *testing.T) {
 		"repetition_penalty": "1.05", "presence_penalty": "0.5", "frequency_penalty": "-0.25", "temperature": "0.6",
 		"top_k": "20", "top_p": "0.95", "min_p": "0", "max_new_tokens": "2048",
 	}
-	got := readGenerationConfig(dir)
+	got, _ := readGenerationConfig(dir)
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v\nwant %v", got, want)
 	}
@@ -84,11 +89,11 @@ func TestReadGenerationConfigChecksTheTypes(t *testing.T) {
 	writeGenerationConfig(t, dir, `{"temperature": "0.7", "top_k": 20.5, "max_new_tokens": 2.0e3, "min_p": null,
   "presence_penalty": true, "frequency_penalty": [0], "repetition_penalty": {"v": 1}, "top_p": 1e-1}`)
 	want := map[string]string{"top_p": "1e-1"}
-	if got := readGenerationConfig(dir); !reflect.DeepEqual(got, want) {
+	if got, _ := readGenerationConfig(dir); !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v\nwant %v", got, want)
 	}
 	writeGenerationConfig(t, dir, `{"top_k": 40, "max_new_tokens": 9223372036854775808}`)
-	if got := readGenerationConfig(dir); !reflect.DeepEqual(got, map[string]string{"top_k": "40"}) {
+	if got, _ := readGenerationConfig(dir); !reflect.DeepEqual(got, map[string]string{"top_k": "40"}) {
 		t.Errorf("an integer past int64: got %v, want only top_k", got)
 	}
 }
@@ -106,7 +111,7 @@ func TestReadGenerationConfigBounds(t *testing.T) {
 		t.Fatalf("fixture lengths %d %d", len(at), len(over))
 	}
 	writeGenerationConfig(t, dir, `{"temperature": `+at+`, "top_p": `+over+`}`)
-	if got := readGenerationConfig(dir); !reflect.DeepEqual(got, map[string]string{"temperature": at}) {
+	if got, _ := readGenerationConfig(dir); !reflect.DeepEqual(got, map[string]string{"temperature": at}) {
 		t.Errorf("got %v, want the 128-byte temperature only", got)
 	}
 	if len(samplingParams) > 32 {
@@ -116,5 +121,88 @@ func TestReadGenerationConfigBounds(t *testing.T) {
 		if len(k) > 64 {
 			t.Errorf("sampling key %q is above the contract's 64 bytes", k)
 		}
+	}
+}
+
+func boolPtr(v bool) *bool { return &v }
+
+// do_sample counts only as a JSON boolean (agentapi.VerifyResult.DoSample):
+// a string, a number, a list, a null and a missing key all leave it nil, and
+// a file that sets only do_sample still reports it. The expected values are
+// written out by hand.
+func TestReadGenerationConfigDoSample(t *testing.T) {
+	temp := map[string]string{"temperature": "0.6"}
+	for _, tc := range []struct {
+		name, body string
+		wantCfg    map[string]string
+		wantDo     *bool
+	}{
+		{"true with a key", `{"do_sample": true, "temperature": 0.6}`, temp, boolPtr(true)},
+		{"false with a key", `{"do_sample": false, "temperature": 0.6}`, temp, boolPtr(false)},
+		{"false alone", `{"do_sample": false}`, nil, boolPtr(false)},
+		{"true alone", `{"do_sample": true}`, nil, boolPtr(true)},
+		{"the string false", `{"do_sample": "false", "temperature": 0.6}`, temp, nil},
+		{"the string true", `{"do_sample": "true", "temperature": 0.6}`, temp, nil},
+		{"the number 0", `{"do_sample": 0, "temperature": 0.6}`, temp, nil},
+		{"the number 1", `{"do_sample": 1, "temperature": 0.6}`, temp, nil},
+		{"null", `{"do_sample": null, "temperature": 0.6}`, temp, nil},
+		{"a list", `{"do_sample": [false], "temperature": 0.6}`, temp, nil},
+		{"absent", `{"temperature": 0.6}`, temp, nil},
+		{"not an object", `[true]`, nil, nil},
+		{"not JSON", `{"do_sample": false`, nil, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeGenerationConfig(t, dir, tc.body)
+			cfg, do := readGenerationConfig(dir)
+			if !reflect.DeepEqual(cfg, tc.wantCfg) || !reflect.DeepEqual(do, tc.wantDo) {
+				t.Errorf("got %v, do_sample %v; want %v, %v", cfg, do, tc.wantCfg, tc.wantDo)
+			}
+		})
+	}
+	if cfg, do := readGenerationConfig(t.TempDir()); cfg != nil || do != nil {
+		t.Errorf("no file: %v, %v, want none", cfg, do)
+	}
+	if cfg, do := readGenerationConfig(""); cfg != nil || do != nil {
+		t.Errorf("no directory: %v, %v, want none", cfg, do)
+	}
+}
+
+// The sampling of a verification generation's checks is computed once, from
+// the file as it stood at the first check unit: a later unit of the same
+// generation gets the same values even if the file has changed, so what the
+// checks send and what the record reports cannot part. Expected values are
+// written out by hand from the fixture (Qwen3-0.6B's keys).
+func TestGenSamplingIsComputedOnce(t *testing.T) {
+	dir := t.TempDir()
+	writeGenerationConfig(t, dir, `{"do_sample": true, "temperature": 0.6, "top_k": 20, "top_p": 0.95}`)
+	g := &genSampling{}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	topK, minP := int64(20), 0.0
+	want := agentapi.Sampling{
+		Temperature: 0.6, TopP: 0.95, TopK: &topK, MinP: &minP, RepetitionPenalty: 1, PresencePenalty: 0, FrequencyPenalty: 0,
+		Seeds: map[string]int64{"verify": 1101, "chat": 1102, "toolCall": 1103, "corruption": 1104, "behaviour": 1105, "warmUp": 1106},
+	}
+	cfg, do, got := g.resolve(dir, true, log, 1)
+	if !reflect.DeepEqual(got, want) || !reflect.DeepEqual(cfg, map[string]string{"temperature": "0.6", "top_k": "20", "top_p": "0.95"}) || do == nil || !*do {
+		t.Fatalf("first resolve: %+v, %v, %v", got, cfg, do)
+	}
+	writeGenerationConfig(t, dir, `{"do_sample": false}`)
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cfg, do, got := g.resolve(dir, false, log, 1)
+			if !reflect.DeepEqual(got, want) || !reflect.DeepEqual(cfg, map[string]string{"temperature": "0.6", "top_k": "20", "top_p": "0.95"}) || do == nil || !*do {
+				t.Errorf("a later resolve changed: %+v, %v, %v", got, cfg, do)
+			}
+		}()
+	}
+	wg.Wait()
+	// A new generation resolves again.
+	_, _, fresh := (&genSampling{}).resolve(dir, true, log, 2)
+	if !fresh.Greedy {
+		t.Errorf("the next generation's file sets do_sample false: %+v, want greedy", fresh)
 	}
 }

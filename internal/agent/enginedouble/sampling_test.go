@@ -162,3 +162,32 @@ func TestGreedyDivergeActsOnSeededRequests(t *testing.T) {
 		t.Error("seed 1105 should walk on its own and diverge only on its own repeat")
 	}
 }
+
+// A request the double refuses is recorded too, so a test counts a check's
+// attempts and not only its answers: the errors-only mode answers 500, and a
+// min_tokens above max_tokens is a 400.
+func TestTheDoubleRecordsTheRequestsItRefuses(t *testing.T) {
+	cfg := cfgFor()
+	modes, err := ParseModes("errors-only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ErrorsOnly = modes.ErrorsOnly
+	s, finish := serveRecording(t, cfg)
+	if r := s.post("/v1/chat/completions", chatBody(5, map[string]any{"seed": 1104})); r.status != 500 {
+		t.Fatalf("errors-only answered %d, want 500", r.status)
+	}
+	got := finish()
+	if len(got) != 1 || got[0].Outcome != "refused" || got[0].Sampling == nil || got[0].Sampling.Seed == nil || *got[0].Sampling.Seed != 1104 {
+		t.Errorf("records %+v, want one refused request with seed 1104", got)
+	}
+
+	s, finish = serveRecording(t, cfgFor())
+	if r := s.post("/v1/chat/completions", chatBody(5, map[string]any{"max_tokens": 4, "min_tokens": 9})); r.status != 400 {
+		t.Fatalf("min_tokens above max_tokens answered %d, want 400", r.status)
+	}
+	got = finish()
+	if len(got) != 1 || got[0].Outcome != "refused" || got[0].MaxTokens != 4 {
+		t.Errorf("records %+v, want one refused request with max_tokens 4", got)
+	}
+}

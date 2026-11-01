@@ -164,13 +164,24 @@ func (h *handler) maxTokensOf(req chatRequest, promptLen int) (int, error) {
 
 // chat is POST /v1/chat/completions.
 func (h *handler) chat(w http.ResponseWriter, r *http.Request) {
+	var req chatRequest
+	decodeErr := decodeBody(r, &req)
+	// Every request that decoded is recorded when it ends, a refused one too
+	// (errors-only, a 4xx), so a test counts the attempts a check made, not
+	// only the answers it got.
+	rec := LogEvent{Event: "request", Path: r.URL.Path, Stream: req.Stream, Outcome: "refused",
+		Sampling: samplingOf(req), Tail: tailOf(lastUserText(req.Messages))}
+	defer func() {
+		if decodeErr == nil && h.e.record != nil {
+			h.e.record(rec)
+		}
+	}()
 	if h.cfg.ErrorsOnly {
 		writeError(w, http.StatusInternalServerError, "InternalServerError", "the engine failed")
 		return
 	}
-	var req chatRequest
-	if err := decodeBody(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "BadRequestError", err.Error())
+	if decodeErr != nil {
+		writeError(w, http.StatusBadRequest, "BadRequestError", decodeErr.Error())
 		return
 	}
 	if len(req.Messages) == 0 {
@@ -182,11 +193,13 @@ func (h *handler) chat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, promptIDs := tokenize(renderChat(req.Messages, true, h.cfg.TemplateOverhead))
+	rec.PromptTokens = len(promptIDs)
 	max, err := h.maxTokensOf(req, len(promptIDs))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "BadRequestError", err.Error())
 		return
 	}
+	rec.MaxTokens = max
 	if req.MinTokens < 0 || req.MinTokens > max {
 		// SamplingParams._verify_args, vllm/sampling_params.py:694-701.
 		writeError(w, http.StatusBadRequest, "BadRequestError", fmt.Sprintf("min_tokens must be less than or equal to max_tokens=%d, got %d.", max, req.MinTokens))
@@ -194,14 +207,8 @@ func (h *handler) chat(w http.ResponseWriter, r *http.Request) {
 	}
 	ans := h.answerFor(req, promptIDs, max)
 
-	rec := LogEvent{Event: "request", Path: r.URL.Path, PromptTokens: len(promptIDs), MaxTokens: max, Stream: req.Stream, Outcome: "cancelled",
-		Sampling: samplingOf(req), Tail: tailOf(lastUserText(req.Messages))}
+	rec.Outcome = "cancelled"
 	finish := "abort"
-	defer func() {
-		if h.e.record != nil {
-			h.e.record(rec)
-		}
-	}()
 
 	ctx := r.Context()
 	s, ok := h.e.admit(ctx, promptIDs)

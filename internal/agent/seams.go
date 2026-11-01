@@ -27,6 +27,11 @@ type API interface {
 // the agent cancels a check whose worker stopped running, and cancels
 // warm-up requests still in flight once the desired state no longer asks
 // for warm-up.
+//
+// The three check methods take the sampling of the verification generation's
+// checks (agentapi.CheckSampling): the agent computes it once per generation
+// from the staged generation_config.json, and no check request can go out
+// without it.
 type Engine interface {
 	// Probe is the local health probe (GET /health); nil means healthy.
 	Probe(ctx context.Context) error
@@ -38,12 +43,14 @@ type Engine interface {
 	// Files and ImageDigest are the agent's, not the engine's, and are left
 	// empty. Only what the engine itself reports is set: a declared setting
 	// is never copied in (HBEP-7, Risks: verification passes because it read
-	// nothing).
-	Verify(ctx context.Context) agentapi.VerifyResult
-	// Qualify runs the qualification checks (HBEP-7, Instance start).
-	Qualify(ctx context.Context, req agentapi.QualifyRequest) agentapi.QualifyResult
-	// WarmUpRound runs warm-up round n, counted from 1.
-	WarmUpRound(ctx context.Context, n int32, req agentapi.WarmUpRequest) agentapi.WarmUpRound
+	// nothing). Its chat request is sampled as s says.
+	Verify(ctx context.Context, s agentapi.Sampling) agentapi.VerifyResult
+	// Qualify runs the qualification checks (HBEP-7, Instance start). Every
+	// check request is sampled as s says.
+	Qualify(ctx context.Context, req agentapi.QualifyRequest, s agentapi.Sampling) agentapi.QualifyResult
+	// WarmUpRound runs warm-up round n, counted from 1. Every request is
+	// sampled as s says.
+	WarmUpRound(ctx context.Context, n int32, req agentapi.WarmUpRequest, s agentapi.Sampling) agentapi.WarmUpRound
 }
 
 // EngineFactory returns the Engine behind a worker's Unix socket, reached with

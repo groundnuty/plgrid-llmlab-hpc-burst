@@ -5,10 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
@@ -88,6 +91,7 @@ func (a *Agent) runChecks(in *instance, i agentapi.DesiredInstance) {
 		a.cancelUnit(in)
 		in.checks = &agentapi.CheckResults{VerificationGeneration: c.VerificationGeneration}
 		in.sectionKeys = map[string]procKey{}
+		in.sampling = nil // the new generation reads the staged file again
 	}
 	// Results stand only while the processes they were taken against run:
 	// when the desired workers do not all run (one restarts, exits, or its
@@ -195,12 +199,20 @@ func (a *Agent) startVerify(in *instance, req agentapi.VerifyRequest, key procKe
 	cached := append([]agentapi.FileResult(nil), in.fileResults...)
 	launch := in.launch
 	ckptDir := in.ckptDir
+	gs := in.genSampling()
+	reasoning := DeclaresReasoningParser(launch.Command)
+	gen := u.gen
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
-		res := eng.Verify(ctx)
+		// The sampling of this generation's checks, read from the staged file
+		// before the first request goes out: verification's own fingerprint
+		// request carries it, and the record reports the same file's values.
+		genConfig, doSample, smp := gs.resolve(ckptDir, reasoning, a.log, gen)
+		res := eng.Verify(ctx, smp)
 		res.ImageDigest = digest
-		res.GenerationConfig = readGenerationConfig(ckptDir)
+		res.GenerationConfig = maps.Clone(genConfig)
+		res.DoSample = copyBool(doSample)
 		switch {
 		case len(files) == 0:
 		case reuse:
@@ -234,10 +246,12 @@ func (a *Agent) startVerify(in *instance, req agentapi.VerifyRequest, key procKe
 func (a *Agent) startQualify(in *instance, req agentapi.QualifyRequest, key procKey) {
 	u, ctx := a.newUnit(in, unitQualify, 0, key)
 	eng := a.engine0(in)
+	gs, ckptDir, reasoning, gen := in.genSampling(), in.ckptDir, DeclaresReasoningParser(in.launch.Command), u.gen
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
-		res := eng.Qualify(ctx, req)
+		_, _, smp := gs.resolve(ckptDir, reasoning, a.log, gen)
+		res := eng.Qualify(ctx, req, smp)
 		res.Done = true
 		a.post(func() {
 			if a.unitDone(in, u) {
@@ -251,10 +265,12 @@ func (a *Agent) startQualify(in *instance, req agentapi.QualifyRequest, key proc
 func (a *Agent) startWarmUp(in *instance, n int32, req agentapi.WarmUpRequest, key procKey) {
 	u, ctx := a.newUnit(in, unitWarmUp, n, key)
 	eng := a.engine0(in)
+	gs, ckptDir, reasoning, gen := in.genSampling(), in.ckptDir, DeclaresReasoningParser(in.launch.Command), u.gen
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
-		round := eng.WarmUpRound(ctx, n, req)
+		_, _, smp := gs.resolve(ckptDir, reasoning, a.log, gen)
+		round := eng.WarmUpRound(ctx, n, req, smp)
 		round.Round = n
 		a.post(func() {
 			if !a.unitDone(in, u) {
@@ -315,32 +331,39 @@ var samplingParams = map[string]bool{
 }
 
 // readGenerationConfig reads the staged checkpoint's generation_config.json
-// for VerifyResult.GenerationConfig: the sampling parameters it sets of those
-// vLLM applies (samplingParams), each as its JSON number text, and nothing
-// else, so no other metadata the file holds (a token, a local path) enters
-// the immutable verification record (PR #138 review, Astra B2, Opus 2;
-// HBEP-7, The verification record). A value is kept only when it is a JSON
-// number, an integer for top_k and max_new_tokens, of at most
+// once, for VerifyResult.GenerationConfig and VerifyResult.DoSample.
+//
+// The map holds the sampling parameters the file sets of those vLLM applies
+// (samplingParams), each as its JSON number text, and nothing else, so no other
+// metadata the file holds (a token, a local path) enters the immutable
+// verification record (PR #138 review, Astra B2, Opus 2; HBEP-7, The
+// verification record). A value is kept only when it is a JSON number, an
+// integer for top_k and max_new_tokens, of at most
 // agentapi.MaxGenerationConfigValueBytes: a null, which vLLM skips, a value of
 // another type, and a longer number, which a cut would change, are left out.
-// nil when the file is absent, unreadable, not a JSON object or sets none of
-// them: the record then holds none.
-func readGenerationConfig(dir string) map[string]string {
+// The map is nil when the file is absent, unreadable, not a JSON object or sets
+// none of them: the record then holds none.
+//
+// do_sample is the file's do_sample when it is a JSON boolean, else nil: a
+// string, a number, a null or an absent key all leave it nil, which does not
+// force greedy decoding (agentapi.CheckSampling). A file that sets only
+// do_sample gives a nil map and a non-nil do_sample.
+func readGenerationConfig(dir string) (map[string]string, *bool) {
 	if dir == "" {
-		return nil
+		return nil, nil
 	}
 	f, err := os.Open(filepath.Join(dir, generationConfigName))
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	defer f.Close()
 	b, err := io.ReadAll(io.LimitReader(f, 1<<20))
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	var obj map[string]json.RawMessage
 	if json.Unmarshal(b, &obj) != nil {
-		return nil
+		return nil, nil
 	}
 	out := map[string]string{}
 	for k, integer := range samplingParams {
@@ -353,9 +376,74 @@ func readGenerationConfig(dir string) map[string]string {
 		}
 	}
 	if len(out) == 0 {
+		out = nil
+	}
+	return out, doSampleOf(obj["do_sample"])
+}
+
+// doSampleOf returns raw as a boolean when it is a JSON true or false, else
+// nil (an absent key, a null, a string such as "false", a number).
+func doSampleOf(raw json.RawMessage) *bool {
+	if len(raw) == 0 {
 		return nil
 	}
-	return out
+	var v any
+	if json.Unmarshal(raw, &v) != nil {
+		return nil
+	}
+	b, ok := v.(bool)
+	if !ok {
+		return nil
+	}
+	return &b
+}
+
+func copyBool(p *bool) *bool {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
+}
+
+// genSampling is the sampling of one verification generation's checks
+// (agentapi.CheckSampling), computed once, from the staged
+// generation_config.json, by whichever check unit of the generation runs
+// first, and used by every later one: the file is read once, so the values
+// the checks send and the record reports are the same ones. A new
+// generation, and a new staging, make a new one.
+type genSampling struct {
+	once     sync.Once
+	config   map[string]string
+	doSample *bool
+	sampling agentapi.Sampling
+}
+
+// genSampling returns the instance's sampling state for its current
+// verification generation. Only the agent's loop calls it.
+func (in *instance) genSampling() *genSampling {
+	if in.sampling == nil {
+		in.sampling = &genSampling{}
+	}
+	return in.sampling
+}
+
+// resolve reads the staged file in dir on its first call and returns the
+// sampling parameters it reported (VerifyResult.GenerationConfig), its
+// do_sample, and the sampling of the generation's checks. reasoning says the
+// launch declares a reasoning parser. Safe for concurrent use.
+func (g *genSampling) resolve(dir string, reasoning bool, log *slog.Logger, gen int64) (map[string]string, *bool, agentapi.Sampling) {
+	g.once.Do(func() {
+		g.config, g.doSample = readGenerationConfig(dir)
+		g.sampling = agentapi.CheckSampling(g.config, g.doSample, reasoning)
+		attrs := []any{"verificationGeneration", gen, "reasoningParser", reasoning, "greedy", g.sampling.Greedy}
+		if !g.sampling.Greedy {
+			attrs = append(attrs, "temperature", g.sampling.Temperature, "topP", g.sampling.TopP, "topK", *g.sampling.TopK, "minP", *g.sampling.MinP,
+				"repetitionPenalty", g.sampling.RepetitionPenalty, "presencePenalty", g.sampling.PresencePenalty, "frequencyPenalty", g.sampling.FrequencyPenalty)
+		}
+		log.Info("check sampling fixed for the verification generation", attrs...)
+	})
+	return g.config, g.doSample, g.sampling
 }
 
 // samplingValue returns raw's number text when raw is a JSON number (not a
