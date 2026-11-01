@@ -615,7 +615,7 @@ func answeredOrClosed(t *testing.T, c net.Conn) (time.Duration, answer, bool) {
 // a client that sends its headers and then goes quiet.
 func TestAStalledBodyIsAnsweredOrClosedWithinOneSecond(t *testing.T) {
 	srv := httptest.NewServer(newTestHandler(t, syncedIndex(t), nil))
-	defer srv.Close()
+	t.Cleanup(srv.Close) // registered before the client connection, so it closes after it
 	c := stalledBody(t, srv)
 	took, a, answered := answeredOrClosed(t, c)
 	t.Logf("answered=%v after %s", answered, took)
@@ -636,7 +636,7 @@ func TestStalledBodiesTakeSlotsAndGiveThemBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(h)
-	defer srv.Close()
+	t.Cleanup(srv.Close) // registered before the client connections, so it closes after them
 	login := mustJSON(fixture(t, "login"))
 	client := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
 	postLogin := func() answer {

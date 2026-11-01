@@ -135,6 +135,7 @@ func TestMemIndexSwapsAtomicallyUnderLoad(t *testing.T) {
 				default:
 				}
 				rounds[r].Add(1)
+				runtime.Gosched() // lets the replacer run on a single processor too
 				// Whichever snapshot is current, at most one of these matches, and it must name
 				// the Allocation that has this k, whose Instance must be on it.
 				if uid, ok := idx.AllocationForToken(ctx, credA(k)); ok {
@@ -156,30 +157,40 @@ func TestMemIndexSwapsAtomicallyUnderLoad(t *testing.T) {
 	}
 	ready.Wait()
 	close(begin)
-	// Replace until the readers have found something, and at least 300 times, so that hits were
-	// counted while replacements were running.
-	deadline := time.Now().Add(10 * time.Second)
+	// Replace 200 times, and after each one wait until some lookup has succeeded, so that lookups
+	// are known to have succeeded while replacements ran, whatever the scheduling (GOMAXPROCS=1
+	// included). The readers do not pause, so a Replace still lands in the middle of their loops.
+	deadline := time.Now().Add(20 * time.Second)
 	replaced := 0
-	for k := 1; k < 300 || hits.Load() == 0; k++ {
-		if time.Now().After(deadline) {
-			break
-		}
+	for k := 1; k <= 200; k++ {
+		before := hits.Load()
 		if err := idx.Replace(snap(k % kinds)); err != nil {
 			t.Fatal(err)
 		}
 		replaced++
-		runtime.Gosched()
+		for hits.Load() == before {
+			if time.Now().After(deadline) {
+				close(stop)
+				done.Wait()
+				t.Fatalf("no lookup succeeded after replacement %d: the readers checked nothing", replaced)
+			}
+			time.Sleep(20 * time.Microsecond)
+		}
 	}
-	during := hits.Load()
+	// Every reader must have run its loop, not only some: wait for the slowest to be scheduled.
+	for r := range rounds {
+		for rounds[r].Load() == 0 {
+			if time.Now().After(deadline) {
+				t.Errorf("reader %d never took part", r)
+				break
+			}
+			time.Sleep(20 * time.Microsecond)
+		}
+	}
 	close(stop)
 	done.Wait()
-	if during == 0 {
+	if hits.Load() == 0 {
 		t.Fatalf("no lookup succeeded in %d replacements: the readers checked nothing", replaced)
-	}
-	for r := range rounds {
-		if rounds[r].Load() == 0 {
-			t.Errorf("reader %d never took part", r)
-		}
 	}
 }
 
