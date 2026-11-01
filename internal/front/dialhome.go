@@ -26,8 +26,9 @@ const (
 // lifecycle controller's loopback agent endpoint and streams the answer back,
 // long polls included; the controller authenticates the agent and the front
 // adds nothing. In ssh mode the agent reaches that endpoint through its
-// forward, and the passthrough is unused. Every other path belongs to
-// HBEP-6's tunnel, which is not built yet: 404 until then.
+// forward, and the passthrough is unused. Every other path goes to tunnel,
+// HBEP-6's /~!frp passthrough to frps in both modes, which answers 404 to
+// anything but frpc's websocket upgrade.
 type DialHome struct {
 	mode   string
 	agent  http.Handler
