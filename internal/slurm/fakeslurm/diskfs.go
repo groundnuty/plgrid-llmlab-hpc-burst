@@ -96,7 +96,7 @@ func (d *diskFS) mkdirAll(p string, mode fs.FileMode) error {
 		return fmt.Errorf("cannot create directory '%s': %v", p, errOutside)
 	}
 	var chain []string
-	for q := p; q != d.root; q = path.Dir(q) {
+	for q := p; q != d.root && q != "/"; q = path.Dir(q) { // in(p) means it ends at root
 		chain = append(chain, q)
 	}
 	for i := len(chain) - 1; i >= 0; i-- {
@@ -155,6 +155,8 @@ func (d *diskFS) removeTree(p string) error {
 	return nil
 }
 
+// snapshotFiles and snapshotDirs are test views: an entry that a job removes
+// during the walk, or that cannot be read, is left out.
 func (d *diskFS) snapshotFiles() map[string]File {
 	out := map[string]File{}
 	_ = filepath.WalkDir(d.root, func(p string, e fs.DirEntry, err error) error {
