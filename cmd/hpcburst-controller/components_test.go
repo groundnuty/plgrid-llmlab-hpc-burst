@@ -243,8 +243,8 @@ func TestFrontSettingsRefusesAFileOfTwoCertificates(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := deps{frpcDigests: func() (map[string]string, error) { return map[string]string{"x86_64": strings.Repeat("a", 64)}, nil }}
-	if fs, err := frontSettings(f, d); err == nil || !strings.Contains(err.Error(), "exactly one PEM certificate") {
-		t.Fatalf("frontSettings = %+v, %v; want a refusal: exactly one PEM certificate", fs, err)
+	if fs, err := frontSettings(f, d); err == nil || !strings.Contains(err.Error(), "the dial-home certificate: it holds 2 certificates") {
+		t.Fatalf("frontSettings = %+v, %v; want the agent's refusal of two certificates", fs, err)
 	}
 }
 

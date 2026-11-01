@@ -201,7 +201,7 @@ func checkFront(fs *providerctl.FrontSettings) error {
 	// The certificate Create stages must be exactly one, with the pin agent.json
 	// names: a file of two certificates would stop every job's frpc.
 	var errs []error
-	if err := fs.CheckCertificate(); err != nil {
+	if err := fs.CheckCertificate(time.Now()); err != nil {
 		errs = append(errs, err)
 	}
 	for _, arch := range slices.Sorted(maps.Keys(fs.FrpcDigests)) {

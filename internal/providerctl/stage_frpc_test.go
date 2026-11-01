@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -272,13 +273,17 @@ func TestEveryFileIsEnsuredBeforeTheClaimAndTheSbatch(t *testing.T) {
 			if n := e.count("sbatch"); n != 1 {
 				t.Fatalf("%d sbatch calls, want 1", n)
 			}
-			last := -1
+			// No staging call after the sbatch: the log is read in order, and the
+			// first sbatch closes staging for good.
+			sbatched := false
 			for i, c := range e.batch.Calls() {
-				if c.Op == "ensure-file" {
-					last = i
-				}
-				if c.Op == "sbatch" && i < last {
-					t.Errorf("the sbatch (call %d) came before an ensure-file (call %d)", i, last)
+				switch c.Op {
+				case "sbatch":
+					sbatched = true
+				case "ensure-file":
+					if sbatched {
+						t.Errorf("an ensure-file of %s (call %d) came after the sbatch", c.Args[0], i)
+					}
 				}
 			}
 		})
@@ -369,32 +374,49 @@ func TestFrpcWithTheWrongDigestIsRefusedBeforeAnyClaim(t *testing.T) {
 	}
 }
 
-// A certificate that is not the front's is refused the same way: none at all, a
-// pin that is not CertPin (another launcher's certificate), a file of two
-// certificates (the agent refuses it too), and text that is no certificate.
-func TestACertificateThatIsNotTheFrontsIsRefusedBeforeAnyClaim(t *testing.T) {
+// A certificate the agent would refuse is refused the same way, before any
+// call (the check is the agent's own, agentapi.VerifyDialHomeCert): none at all,
+// another launcher's certificate (another pin), a file of two certificates,
+// text that is no certificate, text before a PEM that has the right pin, a
+// certificate that does not name the dial-home server, and one outside its
+// validity (the controller's manual clock is at 2026-10-30). Where the case is
+// about the name or the dates, the front's pin is the certificate's own, so the
+// pin check passes and only the other check can refuse it.
+func TestACertificateTheAgentWouldRefuseIsRefusedBeforeAnyClaim(t *testing.T) {
 	otherPEM, otherPin := ctltest.Cert(t)
+	day := func(m time.Month, d int) time.Time { return time.Date(2026, m, d, 0, 0, 0, 0, time.UTC) }
+	wrongNamePEM, wrongNamePin := ctltest.CertWith(t, ctltest.CertOptions{Names: []string{"other.hpcburst.invalid"}})
+	expiredPEM, expiredPin := ctltest.CertWith(t, ctltest.CertOptions{NotBefore: day(9, 1), NotAfter: day(10, 1)})
+	earlyPEM, earlyPin := ctltest.CertWith(t, ctltest.CertOptions{NotBefore: day(12, 1), NotAfter: day(12, 31)})
 	for _, tc := range []struct {
 		name string
-		pem  func(good []byte) []byte
+		set  func(f *FrontSettings, good []byte) // changes the front's certificate and pin
 		want []string
 	}{
-		{"no certificate", func([]byte) []byte { return nil }, []string{"no dial-home certificate"}},
-		{"a certificate with another pin", func([]byte) []byte { return otherPEM }, []string{"pin " + otherPin}},
-		{"two certificates", func(good []byte) []byte { return append(append([]byte{}, good...), otherPEM...) }, []string{"exactly one PEM certificate"}},
-		{"text that is no certificate", func([]byte) []byte { return []byte("not a certificate\n") }, []string{"not a PEM certificate"}},
+		{"no certificate", func(f *FrontSettings, _ []byte) { f.CertPEM = nil }, []string{"no dial-home certificate"}},
+		{"a certificate with another pin", func(f *FrontSettings, _ []byte) { f.CertPEM = otherPEM }, []string{"pin " + otherPin}},
+		{"two certificates", func(f *FrontSettings, good []byte) { f.CertPEM = append(append([]byte{}, good...), otherPEM...) }, []string{"2 certificates"}},
+		{"text that is no certificate", func(f *FrontSettings, _ []byte) { f.CertPEM = []byte("not a certificate\n") }, []string{"not a PEM block"}},
+		{"text before a PEM with the right pin", func(f *FrontSettings, good []byte) {
+			f.CertPEM = append([]byte("Certificate:\n    Data: ...\n"), good...)
+		}, []string{"not a PEM block"}},
+		{"a certificate that does not name the dial-home server", func(f *FrontSettings, _ []byte) {
+			f.CertPEM, f.CertPin = wrongNamePEM, wrongNamePin
+		}, []string{"does not name " + agentapi.DialHomeServerName}},
+		{"an expired certificate", func(f *FrontSettings, _ []byte) { f.CertPEM, f.CertPin = expiredPEM, expiredPin }, []string{"not now (2026-10-30"}},
+		{"a certificate that is not yet valid", func(f *FrontSettings, _ []byte) { f.CertPEM, f.CertPin = earlyPEM, earlyPin }, []string{"not now (2026-10-30"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clock := fake.NewClock(at(12, 0, 0))
 			sl := newSlurm(clock, fakeslurm.Config{})
 			e := newRealEnv(t, clock, sl, newFakeClient(t, "prov-a"), "prov-a", "user-a")
-			good := e.opts.Front.CertPEM
-			e.opts.Front.CertPEM = tc.pem(good)
+			goodPEM, goodPin := e.opts.Front.CertPEM, e.opts.Front.CertPin
+			tc.set(e.opts.Front, goodPEM)
 			e.newAlloc("alloc-a", 1)
 			e.run("alloc-a", 3)
 			refusedBeforeAnyCall(t, e, sl, "alloc-a", tc.want...)
 
-			e.opts.Front.CertPEM = good
+			e.opts.Front.CertPEM, e.opts.Front.CertPin = goodPEM, goodPin
 			e.run("alloc-a", 4)
 			if n := sl.Count("sbatch"); n != 1 {
 				t.Errorf("%d sbatch calls with the front's certificate, want 1", n)
@@ -454,10 +476,15 @@ func TestAFrpcOnTheClusterWithOtherContentIsReplacedBeforeTheClaim(t *testing.T)
 	}
 }
 
-// CheckCertificate, directly: what it accepts and each way it refuses.
+// CheckCertificate, directly: what it accepts and each way it refuses. It is
+// the agent's own check, so the cases are the agent's (internal/agent's
+// TestCheckDialHomeCert) as the provider sees them, plus an empty CertPEM.
 func TestCheckCertificate(t *testing.T) {
+	now := at(12, 0, 0)
 	good, pin := ctltest.Cert(t)
 	other, _ := ctltest.Cert(t)
+	wrongName, wrongNamePin := ctltest.CertWith(t, ctltest.CertOptions{Names: []string{"other.hpcburst.invalid"}})
+	expired, expiredPin := ctltest.CertWith(t, ctltest.CertOptions{NotBefore: at(0, 0, 0).AddDate(0, -2, 0), NotAfter: at(0, 0, 0).AddDate(0, -1, 0)})
 	for _, tc := range []struct {
 		name string
 		f    FrontSettings
@@ -466,16 +493,19 @@ func TestCheckCertificate(t *testing.T) {
 		{"one certificate with its pin", FrontSettings{CertPEM: good, CertPin: pin}, ""},
 		{"surrounding white space", FrontSettings{CertPEM: append(append([]byte("\n"), good...), "\n\n"...), CertPin: pin}, ""},
 		{"no certificate", FrontSettings{CertPin: pin}, "no dial-home certificate"},
-		{"another pin", FrontSettings{CertPEM: good, CertPin: strings.Repeat("0", 64)}, "is not the front's certificate pin " + strings.Repeat("0", 64)},
-		{"no pin", FrontSettings{CertPEM: good}, "is not the front's certificate pin"},
-		{"a second certificate", FrontSettings{CertPEM: append(append([]byte{}, good...), other...), CertPin: pin}, "exactly one"},
-		{"text after the certificate", FrontSettings{CertPEM: append(append([]byte{}, good...), "tail\n"...), CertPin: pin}, "exactly one"},
-		{"a PEM header", FrontSettings{CertPEM: bytes.Replace(good, []byte("-----\n"), []byte("-----\nProc-Type: 4,ENCRYPTED\n"), 1), CertPin: pin}, "exactly one"},
-		{"another PEM type", FrontSettings{CertPEM: bytes.ReplaceAll(good, []byte("CERTIFICATE"), []byte("PRIVATE KEY")), CertPin: pin}, "not a PEM certificate"},
+		{"another pin", FrontSettings{CertPEM: good, CertPin: strings.Repeat("0", 64)}, "is not agent.json's " + strings.Repeat("0", 64)},
+		{"no pin", FrontSettings{CertPEM: good}, "no pin"},
+		{"a second certificate", FrontSettings{CertPEM: append(append([]byte{}, good...), other...), CertPin: pin}, "2 certificates"},
+		{"text after the certificate", FrontSettings{CertPEM: append(append([]byte{}, good...), "tail\n"...), CertPin: pin}, "not a PEM block"},
+		{"text before the certificate, the right pin", FrontSettings{CertPEM: append([]byte("Certificate:\n"), good...), CertPin: pin}, "not a PEM block"},
+		{"a PEM header", FrontSettings{CertPEM: bytes.Replace(good, []byte("-----\n"), []byte("-----\nProc-Type: 4,ENCRYPTED\n"), 1), CertPin: pin}, "PEM headers"},
+		{"another PEM type", FrontSettings{CertPEM: bytes.ReplaceAll(good, []byte("CERTIFICATE"), []byte("PRIVATE KEY")), CertPin: pin}, "want one certificate only"},
 		{"a block that is no certificate", FrontSettings{CertPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("junk")}), CertPin: pin}, "the dial-home certificate:"},
+		{"another name", FrontSettings{CertPEM: wrongName, CertPin: wrongNamePin}, "does not name " + agentapi.DialHomeServerName},
+		{"expired", FrontSettings{CertPEM: expired, CertPin: expiredPin}, "not now (2026-10-30T12:00:00Z)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := tc.f.CheckCertificate()
+			err := tc.f.CheckCertificate(now)
 			switch {
 			case tc.want == "" && err != nil:
 				t.Errorf("refused: %v", err)
