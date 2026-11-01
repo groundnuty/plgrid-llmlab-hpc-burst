@@ -370,6 +370,15 @@ func assertRefusedFileSendsNothing(t *testing.T, reasoning bool, file string, wa
 	sum := sha256.Sum256([]byte(file))
 	files := append(append([]agentapi.FileDigest(nil), defaultFiles...), agentapi.FileDigest{Path: "generation_config.json", SHA256: hex.EncodeToString(sum[:])})
 	h := newHarness(t, harnessOptions{hub: map[string]string{"/org/model/resolve/" + samplingRevision + "/generation_config.json": file}})
+	assertRefusalSendsNothing(t, h, reasoning, files, want, config)
+}
+
+// assertRefusalSendsNothing runs verification, qualification and warm-up on the
+// harness with files as the file list, and checks the agent's refusal (want and
+// config), that it read nothing from the engine, and that no chat request
+// reached it.
+func assertRefusalSendsNothing(t *testing.T, h *harness, reasoning bool, files []agentapi.FileDigest, want agentapi.GenerationConfigError, config map[string]string) {
+	t.Helper()
 	checks := &agentapi.Checks{
 		VerificationGeneration: 1,
 		Verify:                 &agentapi.VerifyRequest{Files: files},
@@ -403,6 +412,56 @@ func assertRefusedFileSendsNothing(t *testing.T, reasoning bool, file string, wa
 	}
 	if events := h.chatEvents(); len(events) != 0 {
 		t.Errorf("%d chat requests reached the engine, want none: %+v", len(events), events)
+	}
+}
+
+// A generation_config.json the agent cannot read is a refusal of the file as a
+// whole, never an absent file run greedy: a directory at the path, and a file
+// whose mode lets nobody read it. Only a missing path is absent (the cases of
+// TestTheChecksSendTheSamplingOfTheirModel without a file). The report carries
+// an empty Param and the plain word, no path, and no check request is sent
+// (`@hpc-burst-science-agent`, 1 Nov 2026, for #175 and #182). The mode-000 case
+// is skipped, with its reason, by a process that reads such a file anyway (the
+// superuser).
+func TestAnUnreadableFileFailsVerificationAndSendsNoCheckRequest(t *testing.T) {
+	want := agentapi.GenerationConfigError{Param: "", Value: "unreadable", Want: "a JSON object of at most 1 MiB"}
+	for _, tc := range []struct {
+		name    string
+		prepare func(t *testing.T, path string)
+	}{
+		{"a directory at the path", func(t *testing.T, path string) {
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"a file with mode 000", func(t *testing.T, path string) {
+			if err := os.WriteFile(path, []byte(`{"temperature": 0.6}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, 0); err != nil {
+				t.Fatal(err)
+			}
+			if f, err := os.Open(path); err == nil {
+				f.Close()
+				t.Skip("this process reads a mode-000 file (it is the superuser), so the file is not unreadable to it")
+			}
+		}},
+	} {
+		for _, reasoning := range []bool{true, false} {
+			name := tc.name + ", a model without a parser"
+			if reasoning {
+				name = tc.name + ", a reasoning model"
+			}
+			t.Run(name, func(t *testing.T) {
+				h := newHarness(t, harnessOptions{})
+				dir := filepath.Join(h.stagingDir, agentapi.StagedCheckpointDir("org/model", samplingRevision))
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				tc.prepare(t, filepath.Join(dir, "generation_config.json"))
+				assertRefusalSendsNothing(t, h, reasoning, defaultFiles, want, nil)
+			})
+		}
 	}
 }
 

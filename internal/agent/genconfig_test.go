@@ -350,6 +350,29 @@ func TestReadGenerationConfigRefusesAFileItCannotJudge(t *testing.T) {
 		}
 	})
 
+	// So is a file whose mode lets nobody read it, unless this process reads it
+	// anyway (the superuser), where the test says so and skips.
+	t.Run("unreadable by mode", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "generation_config.json")
+		writeGenerationConfig(t, dir, `{"temperature": 0.6}`)
+		if err := os.Chmod(path, 0); err != nil {
+			t.Fatal(err)
+		}
+		if f, err := os.Open(path); err == nil {
+			f.Close()
+			t.Skip("this process reads a mode-000 file (it is the superuser), so the file is not unreadable to it")
+		}
+		f := readGenerationConfig(dir)
+		want := &agentapi.GenerationConfigError{Param: "", Value: "unreadable", Want: "a JSON object of at most 1 MiB"}
+		if !reflect.DeepEqual(f.refused, want) {
+			t.Errorf("refused %+v, want %+v", f.refused, want)
+		}
+		if f.config != nil {
+			t.Errorf("an unreadable file gave config %v", f.config)
+		}
+	})
+
 	// A missing file, and no checkpoint directory, are absent: nothing is refused.
 	t.Run("absent", func(t *testing.T) {
 		for name, dir := range map[string]string{"a missing file": t.TempDir(), "no directory": ""} {

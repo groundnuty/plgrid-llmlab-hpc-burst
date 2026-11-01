@@ -45,6 +45,10 @@ func TestVerifyRefusedGenerationConfigStopsClass(t *testing.T) {
 			v := afake.DefaultVerify(i, r)
 			return *asTheAgentReportsARefusal(&v, &agentapi.GenerationConfigError{Value: "larger than 1 MiB", Want: "a JSON object of at most 1 MiB"})
 		}, []string{`"param":""`, `larger than 1 MiB`}},
+		{"a file the agent cannot read, refused as a whole", func(i agentapi.DesiredInstance, r agentapi.VerifyRequest) agentapi.VerifyResult {
+			v := afake.DefaultVerify(i, r)
+			return *asTheAgentReportsARefusal(&v, &agentapi.GenerationConfigError{Value: "unreadable", Want: "a JSON object of at most 1 MiB"})
+		}, []string{`"param":""`, `unreadable`}},
 		{"a file with NaN, refused as a whole", func(i agentapi.DesiredInstance, r agentapi.VerifyRequest) agentapi.VerifyResult {
 			v := afake.DefaultVerify(i, r)
 			return *asTheAgentReportsARefusal(&v, &agentapi.GenerationConfigError{Value: "not valid JSON", Want: "a JSON object of at most 1 MiB"})
