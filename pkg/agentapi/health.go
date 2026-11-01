@@ -13,13 +13,18 @@ const MetricsStaleProbeIntervals = 2
 // sample sets.
 func Int64(v int64) *int64 { return &v }
 
-// Float64 returns a pointer to v, for Health.KVCacheUsage.
+// Float64 returns a pointer to v, for the float fields of Health that a sample
+// sets: KVCacheUsage and TimePerOutputTokenSecondsSum.
 func Float64(v float64) *float64 { return &v }
 
 // MetricsFresh reports whether the sample's metrics (RunningRequests,
-// WaitingRequests, GeneratedTokens, KVCacheUsage and ResponsesByStatus) are
-// current. When it is false the controller treats all of them as unknown and
-// takes no gauge-based action.
+// WaitingRequests, GeneratedTokens, KVCacheUsage, Preemptions,
+// PrefixCacheQueriedTokens, PrefixCacheHitTokens,
+// TimePerOutputTokenSecondsSum, TimePerOutputTokenCount and ResponsesByStatus)
+// are current. They all come from the one /metrics read that MetricsReadAt
+// dates, so the judgement is the same for every one of them and looks at none
+// of their values. When it is false the controller treats all of them as
+// unknown and takes no gauge-based action.
 //
 // The arguments are what the controller holds about the sample: reportTime is
 // the Time of the Report that carried it (the agent's clock), receivedAt is

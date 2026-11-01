@@ -23,6 +23,7 @@ type engine struct {
 	genTokens     int64
 	prefixQueries int64
 	prefixHits    int64
+	tpot          tpotHistogram
 	success       map[string]int64 // finished_reason -> requests
 	httpCount     map[httpKey]int64
 	shapes        map[shapeKey]int
@@ -43,6 +44,35 @@ type repeatKey struct {
 
 type httpKey struct{ handler, method, status string }
 
+// tpotBounds are the upper bounds of vllm:request_time_per_output_token_seconds,
+// in seconds: vLLM v0.32.0's INTER_TOKEN_LATENCY_BUCKETS
+// (vllm/v1/metrics/buckets.py, lines 84-104), which loggers.py, line 953, gives
+// this histogram.
+var tpotBounds = [...]float64{
+	0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0, 20.0, 40.0, 80.0,
+}
+
+// tpotHistogram is the time per output token, one observation per finished
+// request: the number of requests, the sum of their means and the requests in
+// each bucket (not cumulative; the exposition adds them up).
+type tpotHistogram struct {
+	count   int64
+	sum     float64
+	buckets [len(tpotBounds)]int64
+}
+
+// observe records one finished request's mean time per output token.
+func (t *tpotHistogram) observe(seconds float64) {
+	t.count++
+	t.sum += seconds
+	for i, b := range tpotBounds {
+		if seconds <= b {
+			t.buckets[i]++
+			return
+		}
+	}
+}
+
 func newEngine(cfg Config, record func(LogEvent)) *engine {
 	e := &engine{
 		cfg:       cfg,
@@ -61,9 +91,10 @@ func newEngine(cfg Config, record func(LogEvent)) *engine {
 
 // slot is one admitted request's share of the engine.
 type slot struct {
-	e    *engine
-	kv   int64
-	done sync.Once
+	e         *engine
+	kv        int64
+	generated int64 // tokens this request has generated
+	done      sync.Once
 }
 
 // admit waits for a free sequence slot, counting the request as waiting while
@@ -131,6 +162,7 @@ func (s *slot) token() {
 	s.e.mu.Lock()
 	defer s.e.mu.Unlock()
 	s.kv++
+	s.generated++
 	s.e.kvTokens++
 	s.e.genTokens++
 }
@@ -142,11 +174,25 @@ func (s *slot) release(finish string) {
 		s.e.running--
 		s.e.kvTokens -= s.kv
 		s.e.success[finish]++
+		s.e.tpot.observe(s.meanTimePerOutputToken())
 		s.e.mu.Unlock()
 		if s.e.sem != nil {
 			<-s.e.sem
 		}
 	})
+}
+
+// meanTimePerOutputToken is what vLLM observes for a finished request: the
+// decode time over the output tokens after the first, and 0 for a request of
+// one token or none (vllm/v1/metrics/stats.py, lines 607-612). The double waits
+// TokenDelay before each token, so the decode time of n tokens is (n-1) times
+// TokenDelay and the mean is TokenDelay itself: it is exact, not measured, so a
+// test can compute the histogram's sum.
+func (s *slot) meanTimePerOutputToken() float64 {
+	if s.generated <= 1 {
+		return 0
+	}
+	return s.e.cfg.TokenDelay.Seconds()
 }
 
 // beforeFirstToken returns how long a request waits before its first token

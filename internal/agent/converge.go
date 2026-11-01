@@ -144,15 +144,33 @@ func (a *Agent) converge() {
 		return
 	}
 	a.takeSettings(d.Settings)
+	serve := ""
 	switch d.Action {
 	case agentapi.ActionRun:
 		a.applyRun(*d.Instance)
+		if a.inst != nil && a.inst.uid == d.Instance.UID {
+			serve = a.inst.uid
+		}
 	case agentapi.ActionIdle:
 		a.idle()
 	case agentapi.ActionStop:
 		a.stopping = true
 		a.idle()
 	}
+	a.serveTunnel(serve)
+}
+
+// serveTunnel tells the tunnel which Instance to serve, when that changed:
+// the desired Instance from its first run instruction, none once the desired
+// state idles or stops it, or the agent ends (HBEP-6, Paths: frpc stops when
+// the Instance ends).
+func (a *Agent) serveTunnel(uid string) {
+	if a.o.Tunnel == nil || uid == a.tunnelUID {
+		return
+	}
+	a.tunnelUID = uid
+	a.log.Info("tunnel serves", "uid", uid)
+	a.o.Tunnel.Serve(uid)
 }
 
 // checkDesired refuses a desired state the agent cannot act on.

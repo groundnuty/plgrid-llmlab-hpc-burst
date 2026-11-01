@@ -134,6 +134,10 @@ const ControllerNamespace = "hpcburst-system"
 // (HBEP-7, Controllers).
 const LeaseLifecycle = "lifecycle"
 
+// LeaseFront is the name of the heartbeat Lease the front renews in
+// ControllerNamespace (HBEP-8, Events: Observers; HBEP-11).
+const LeaseFront = "front"
+
 // ProviderLeaseName returns the name of a Provider's leader Lease: one per
 // Provider, named after it (HBEP-11, Controllers). The "provider-" prefix
 // keeps a Provider named "lifecycle" from sharing the lifecycle controller's

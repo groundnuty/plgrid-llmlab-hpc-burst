@@ -418,14 +418,18 @@ func TestHostLayout(t *testing.T) {
 		t.Errorf("DialHomePort = %d, want 29227 (base + 7)", p)
 	}
 	for name, c := range map[string]struct{ got, want int }{
-		"FrpsPluginPort": {h.FrpsPluginPort(), 29228},
-		"FrpsBindPort":   {h.FrpsBindPort(), 29229},
-		"FrpsTCPMuxPort": {h.FrpsTCPMuxPort(), 29230},
-		"FrpsWebPort":    {h.FrpsWebPort(), 29231},
+		"FrpsPluginPort":        {h.FrpsPluginPort(), 29228},
+		"FrpsBindPort":          {h.FrpsBindPort(), 29229},
+		"FrpsTCPMuxPort":        {h.FrpsTCPMuxPort(), 29230},
+		"FrpsWebPort":           {h.FrpsWebPort(), 29231},
+		"ControllerMetricsPort": {h.ControllerMetricsPort(), 29232},
 	} {
 		if c.got != c.want {
 			t.Errorf("%s = %d, want %d", name, c.got, c.want)
 		}
+	}
+	if a := h.ControllerMetricsAddr(); a != "127.0.0.1:29232" {
+		t.Errorf("ControllerMetricsAddr = %q, want 127.0.0.1:29232", a)
 	}
 	// A block at another base moves every port with it, and no two ports meet.
 	other := Host{StateDir: h.StateDir, PortBase: 40000}

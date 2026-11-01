@@ -245,6 +245,9 @@ spec:
                             mean load cannot place every request (KubeAI''s meanLoadFactor
                             has the same floor of 100 percent)'
                           rule: double(self) >= 1.0
+                        - message: 'a load bound has at most two decimal places: write
+                            1.25, not 1.005'
+                          rule: self.matches('^[0-9]+([.][0-9]{1,2})?$')
                       tight:
                         default: "1.25"
                         description: |-
@@ -259,6 +262,9 @@ spec:
                             mean load cannot place every request (KubeAI''s meanLoadFactor
                             has the same floor of 100 percent)'
                           rule: double(self) >= 1.0
+                        - message: 'a load bound has at most two decimal places: write
+                            1.25, not 1.005'
+                          rule: self.matches('^[0-9]+([.][0-9]{1,2})?$')
                     type: object
                     x-kubernetes-validations:
                     - message: 'the tight load bound is at most the loose one: tight
@@ -530,6 +536,14 @@ spec:
                                 `@hpc-burst-science-agent`, 31 Oct 2026). A flag in flags is a typed
                                 name and value, not a free-form map, so the rule is on the flag and
                                 tests the name after "_" is replaced with "-".
+                              - tensor-parallel-size, pipeline-parallel-size and data-parallel-size take
+                                only a plain positive decimal integer, by the same pattern: the lifecycle
+                                controller multiplies the first two to size an Instance's GPUs and reads
+                                the third to refuse a data-parallel size above 1 (HBEP-4, HBEP-7;
+                                `@hpc-burst-science-agent`, 31 Oct 2026). Only the forms that are never
+                                valid are refused here (0, a negative value, a non-integer, auto, a sign,
+                                an exponent, whitespace). A data-parallel-size above 1 is admitted: the
+                                controller turns it into SpecUnsupported, so CEL does not.
 
                             The alias list is vLLM v0.32.0's. The lists of known names and booleans are
                             the table's; a change to the table changes these markers (HBEP-3).
@@ -654,6 +668,15 @@ spec:
                               context from it'
                             rule: self.name.replace('_', '-') != 'max-model-len' ||
                               self.value.matches('^[1-9][0-9]*$')
+                          - message: 'tensor-parallel-size, pipeline-parallel-size
+                              and data-parallel-size are plain positive decimal integers
+                              such as 2: values such as 0, -1, +2, 1.5, 1e2, auto
+                              and '' 2'' are refused, because the controller multiplies
+                              the first two to size the GPUs and reads the third to
+                              refuse a data-parallel size above 1'
+                            rule: '!(self.name.replace(''_'', ''-'') in [''tensor-parallel-size'',
+                              ''pipeline-parallel-size'', ''data-parallel-size''])
+                              || self.value.matches(''^[1-9][0-9]*$'')'
                         maxItems: 128
                         type: array
                         x-kubernetes-list-type: atomic

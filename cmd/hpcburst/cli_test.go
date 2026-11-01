@@ -22,7 +22,10 @@ func TestUsageAndExitCodes(t *testing.T) {
 		{"unknown command", []string{"frobnicate"}, exitUsage, "unknown command"},
 		{"upgrade without --to", []string{"upgrade", "--state-dir", empty}, exitUsage, "--to is required"},
 		{"unknown flag", []string{"up", "--nonsense"}, exitUsage, "nonsense"},
+		{"the removed --agent-builds-dir", []string{"up", "--state-dir", empty, "--agent-builds-dir", "/builds"}, exitUsage, "agent-builds-dir"},
 		{"stray argument", []string{"status", "--state-dir", empty, "extra"}, exitUsage, "unexpected argument"},
+		{"supervise without a handoff", []string{"supervise", "--state-dir", empty}, exitUsage, "--handoff-fd is required"},
+		{"supervise with a handoff descriptor that is not open", []string{"supervise", "--state-dir", empty, "--handoff-fd", "9"}, exitFail, "handoff descriptor 9"},
 		{"status of an empty directory is 'stopped'", []string{"status", "--state-dir", empty}, exitStopped, "stopped"},
 		{"down with nothing recorded succeeds", []string{"down", "--state-dir", empty}, exitOK, "nothing to stop"},
 		{"help", []string{"help"}, exitOK, "usage"},
@@ -45,11 +48,14 @@ func TestUpRejectsBadInputBeforeStarting(t *testing.T) {
 		args []string
 		msg  string
 	}{
-		"front address without a mode": {[]string{"--front-addr", "front.example.test:8443"}, "front mode"},
-		"ssh without a key":            {[]string{"--front-mode", "ssh", "--front-addr", "front.example.test"}, "--front-key"},
-		"ssh on port 99999":            {[]string{"--front-mode", "ssh", "--front-addr", "front.example.test:99999", "--front-key", "/dev/null"}, "not a port"},
-		"port base too low":            {[]string{"--port-base", "80"}, "out of range"},
-		"state directory too long":     {[]string{"--state-dir", "/tmp/" + strings.Repeat("d", 90)}, "shorter"},
+		"front address without a mode":                 {[]string{"--front-addr", "front.example.test:8443"}, "front mode"},
+		"ssh without a key":                            {[]string{"--front-mode", "ssh", "--front-addr", "front.example.test"}, "--front-key"},
+		"ssh on port 99999":                            {[]string{"--front-mode", "ssh", "--front-addr", "front.example.test:99999", "--front-key", "/dev/null"}, "not a port"},
+		"port base too low":                            {[]string{"--port-base", "80"}, "out of range"},
+		"port base leaves no room for the controllers": {[]string{"--port-base", "65530"}, "out of range"},
+		"controller binary missing":                    {[]string{"--controller-bin", "/nonexistent/hpcburst-controller"}, "controller binary"},
+		"controller binary is a directory":             {[]string{"--controller-bin", "/tmp"}, "not a regular file"},
+		"state directory too long":                     {[]string{"--state-dir", "/tmp/" + strings.Repeat("d", 90)}, "shorter"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			args := append([]string{"up", "--state-dir", state, "--bin-dir", t.TempDir()}, c.args...)
@@ -99,6 +105,7 @@ func TestUpNeedsAPinnedBinary(t *testing.T) {
 type stateFile struct {
 	Version   string `json:"version"`
 	Processes []struct {
+		Name       string `json:"name"`
 		PID        int    `json:"pid"`
 		StartTicks uint64 `json:"start_ticks"`
 	} `json:"processes"`
@@ -119,8 +126,13 @@ func readState(t testing.TB, dir string) stateFile {
 	if err := json.Unmarshal(b, &s); err != nil {
 		t.Fatal(err)
 	}
-	if len(s.Processes) != 1 {
-		t.Fatalf("state records %d processes", len(s.Processes))
+	// k3s first; a host started with a controller binary also records its
+	// supervisor, second.
+	switch {
+	case len(s.Processes) == 1:
+	case len(s.Processes) == 2 && s.Processes[1].Name == "supervisor":
+	default:
+		t.Fatalf("state records %d processes: %+v", len(s.Processes), s.Processes)
 	}
 	return s
 }

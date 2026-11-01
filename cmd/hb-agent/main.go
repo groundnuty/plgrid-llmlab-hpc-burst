@@ -13,7 +13,9 @@
 // The environment may name the tools it runs: HPCBURST_APPTAINER (default
 // "apptainer" on PATH), HPCBURST_SSH (default "ssh"), HPCBURST_NVIDIA_SMI
 // (default "nvidia-smi"), and HF_ENDPOINT, the Hugging Face Hub (default
-// https://huggingface.co).
+// https://huggingface.co). frpc is the staged one, <stagingDir>/frpc/
+// <frpcDigest>/frpc, checked against agent.json's frpcDigest, with the
+// launcher's certificate dial-home.crt from the Allocation's directory.
 //
 // It is built statically, with CGO_ENABLED=0, for amd64 and arm64.
 //
@@ -30,7 +32,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent"
@@ -104,39 +105,15 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		log.Warn("no GPU list: registering without one", "err", err)
 	}
 
-	co := agent.ClientOptions{
-		Endpoint:        job.Config.Endpoint,
-		Pin:             job.Config.CertSPKISHA256,
-		Credential:      job.Credential,
-		Tag:             job.Config.Tag,
-		JobID:           job.JobID,
-		AgentInstanceID: aid,
-	}
-	if job.Config.Mode == agentapi.DialHomeSSH {
-		sshBin, err := lookTool(getenv("HPCBURST_SSH"), "ssh")
-		if err != nil {
-			log.Error("no ssh for the ssh dial-home mode", "err", err)
-			return 1
-		}
-		fwd := agent.SSHForward{SSH: sshBin, Socket: filepath.Join(runDir, "agent.sock"), Config: job.Config, Log: stderr, Logger: log}
-		// The forward outlives the agent's loop, which sends its last report
-		// through it. It is stopped before this function returns, on every
-		// path (a stop, a signal, an error): its ssh process gets TERM, then
-		// KILL, and is reaped (HBEP-6, teardown). os.Exit would otherwise leave
-		// ssh behind, an orphan holding the job's output open.
-		fwdCtx, cancelFwd := context.WithCancel(context.Background())
-		fwdDone := make(chan struct{})
-		go func() {
-			defer close(fwdDone)
-			if err := fwd.Run(fwdCtx); err != nil {
-				log.Error("ssh forward", "err", err)
-			}
-		}()
-		defer func() {
-			cancelFwd()
-			<-fwdDone
-		}()
-		co.Dial = fwd.Dial
+	tr, err := startTransport(job, runDir, aid, getenv, stderr, log)
+	// The transport outlives the agent's loop, which sends its last report
+	// through it, and is stopped on every path out of run: os.Exit would
+	// otherwise leave ssh or frpc behind, an orphan holding the job's output
+	// open (HBEP-6, teardown).
+	defer tr.stop()
+	if err != nil {
+		log.Error("cannot start the dial-home transport", "err", err)
+		return 1
 	}
 
 	stager, err := stage.New(stage.Config{
@@ -152,7 +129,8 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		return 1
 	}
 	a, err := agent.New(agent.Options{
-		API: agent.NewClient(co),
+		API:    tr.client,
+		Tunnel: tr.frpc,
 		Engines: func(socket, key string, l agentapi.Launch) agent.Engine {
 			return engine.New(socket, key, engine.WithReasoning(agent.DeclaresReasoningParser(l.Command)))
 		},

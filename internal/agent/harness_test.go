@@ -100,6 +100,8 @@ type harnessOptions struct {
 	engineWrap  func(agent.Engine) agent.Engine
 	stagerWrap  func(agent.Stager) agent.Stager
 	backendWrap func(agentapi.Backend) agentapi.Backend
+	// tunnel is told which Instance the agent serves.
+	tunnel agent.Tunnel
 }
 
 // newHarness starts a real agent against a fake Backend behind a fake Gate,
@@ -193,6 +195,7 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 		LogDir:               root,
 		Registration:         agentapi.RegisterRequest{RestartCount: o.restart, Node: "node-test", CPUArch: "x86_64"},
 		BaseEnv:              baseEnv,
+		Tunnel:               o.tunnel,
 		Logger:               slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		ReportInterval:       200 * time.Millisecond,
 		StartupProbeInterval: 50 * time.Millisecond,

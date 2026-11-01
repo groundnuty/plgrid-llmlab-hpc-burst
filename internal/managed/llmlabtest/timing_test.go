@@ -141,7 +141,6 @@ func TestNoByteCutOnTheManualClock(t *testing.T) {
 
 var stallRoutes = []struct{ name, method, path, body string }{
 	{"listing", http.MethodGet, routeModels, ""},
-	{"entry", http.MethodGet, routeModels + "/" + modelA, ""},
 	{"chat", http.MethodPost, routeChat, chatReq(modelA)},
 	{"completions", http.MethodPost, routeCompletions, `{"model":"example-9b","prompt":"one two"}`},
 	{"responses", http.MethodPost, routeResponses, `{"model":"example-9b","input":"one two"}`},

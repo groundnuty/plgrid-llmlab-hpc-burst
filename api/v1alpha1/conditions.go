@@ -39,6 +39,10 @@ const (
 	// ReasonCatalogEntryUnlisted: Ready is false, because no allowed managed
 	// Provider's status lists the entry's catalog name now.
 	ReasonCatalogEntryUnlisted = "CatalogEntryUnlisted"
+	// ReasonCatalogEntryListed: Ready is true for a managed source, because
+	// an allowed managed Provider on the entry's platform lists it now
+	// (HBEP-7, Reconcile loop, step 1).
+	ReasonCatalogEntryListed = "CatalogEntryListed"
 	// ReasonCredentialsRejected: Ready is false, because the Provider that
 	// lists the entry has CredentialsRejected true.
 	ReasonCredentialsRejected = "CredentialsRejected"
@@ -287,6 +291,16 @@ const (
 	// `@hpc-burst-science-agent` confirmed (31 Oct 2026).
 	ConditionDialHomeUnreachable = "DialHomeUnreachable"
 )
+
+// ReasonAgentRegistered: ConditionDialHomeUnreachable is False, because an
+// agent on the Provider registered through the dial-home path. The True
+// reason is ReasonRegistrationTimeout.
+const ReasonAgentRegistered = "AgentRegistered"
+
+// EventReasonShapesFit is the ready event the lifecycle controller raises on
+// a ModelDeployment when a shape-misfit stop lifts, because the workload's
+// resolved shapes now fit (HBEP-7, Verification).
+const EventReasonShapesFit = "ShapesFit"
 
 // Reasons of a managed Provider's conditions (HBEP-4, Managed provider in
 // alpha; HBEP-11, Credentials), so the lifecycle controller and the front can

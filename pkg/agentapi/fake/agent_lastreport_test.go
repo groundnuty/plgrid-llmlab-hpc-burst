@@ -14,10 +14,13 @@ import (
 // may change with them (Astra's finding on PR 92).
 func TestLastReportDoesNotFollowAnEngineCallbacksVariables(t *testing.T) {
 	tokens, running, waiting, kv, read := int64(100), int64(3), int64(1), 0.25, t0
+	preempt, queried, hit, tpotSum, tpotCount := int64(2), int64(300), int64(200), 1.5, int64(30)
 	e := fake.Engine{Health: func(now time.Time, _ fake.Process) agentapi.Health {
 		return agentapi.Health{
 			ProbeOK: true, MetricsReadAt: &read, RunningRequests: &running, WaitingRequests: &waiting,
 			GeneratedTokens: &tokens, KVCacheUsage: &kv,
+			Preemptions: &preempt, PrefixCacheQueriedTokens: &queried, PrefixCacheHitTokens: &hit,
+			TimePerOutputTokenSecondsSum: &tpotSum, TimePerOutputTokenCount: &tpotCount,
 		}
 	}}
 	r := newRig(t, e)
@@ -33,6 +36,7 @@ func TestLastReportDoesNotFollowAnEngineCallbacksVariables(t *testing.T) {
 
 	// The callback's variables change after the report was accepted.
 	tokens, running, waiting, kv, read = 999, 99, 98, 0.99, t0.Add(time.Hour)
+	preempt, queried, hit, tpotSum, tpotCount = 999, 998, 997, 99.5, 996
 
 	after, _ := r.a.LastReport()
 	got := after.Instance.Workers[0].Health
@@ -41,8 +45,19 @@ func TestLastReportDoesNotFollowAnEngineCallbacksVariables(t *testing.T) {
 	eq(t, "waiting", *got.WaitingRequests, int64(1))
 	eq(t, "KV cache", *got.KVCacheUsage, 0.25)
 	eq(t, "metrics read at", *got.MetricsReadAt, t0)
+	eq(t, "preemptions", *got.Preemptions, int64(2))
+	eq(t, "prefix-cache queried tokens", *got.PrefixCacheQueriedTokens, int64(300))
+	eq(t, "prefix-cache hit tokens", *got.PrefixCacheHitTokens, int64(200))
+	eq(t, "time per output token, sum", *got.TimePerOutputTokenSecondsSum, 1.5)
+	eq(t, "time per output token, count", *got.TimePerOutputTokenCount, int64(30))
 	// And the Backend's own copy.
 	eq(t, "the Backend's tokens", *r.workerOf("worker-0").Health.GeneratedTokens, int64(100))
+	bh := r.workerOf("worker-0").Health
+	eq(t, "the Backend's preemptions", *bh.Preemptions, int64(2))
+	eq(t, "the Backend's prefix-cache queries", *bh.PrefixCacheQueriedTokens, int64(300))
+	eq(t, "the Backend's prefix-cache hits", *bh.PrefixCacheHitTokens, int64(200))
+	eq(t, "the Backend's time per output token sum", *bh.TimePerOutputTokenSecondsSum, 1.5)
+	eq(t, "the Backend's time per output token count", *bh.TimePerOutputTokenCount, int64(30))
 }
 
 // A known-empty ResponsesByStatus and an unknown (nil) one stay what they are

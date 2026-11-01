@@ -64,10 +64,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		if x.method(http.MethodGet) && x.admit() {
 			x.list()
 		}
-	case strings.HasPrefix(path, pathModels+"/") && len(path) > len(pathModels)+1:
-		if x.method(http.MethodGet) && x.admit() {
-			x.entry(strings.TrimPrefix(path, pathModels+"/"))
-		}
+	case strings.HasPrefix(path, pathModels+"/"):
+		// LLMLab has no retrieve route: FastAPI answers 404 with its own
+		// body for every name, before any key check (#69,
+		// https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/69#issuecomment-6548710093).
+		x.writeJSON(http.StatusNotFound, map[string]any{"detail": "Not Found"})
 	case path == pathChat || path == pathCompletions || path == pathResponses || path == pathEmbeddings:
 		if x.method(http.MethodPost) && x.admit() {
 			x.infer(path, body)
@@ -257,21 +258,4 @@ func (x *exchange) list() {
 		data[i] = toListed(m)
 	}
 	x.writeJSON(http.StatusOK, map[string]any{"object": "list", "data": data})
-}
-
-// entry answers GET /v1/models/{id}.
-func (x *exchange) entry(id string) {
-	x.s.mu.Lock()
-	m, ok := x.s.models[id]
-	found := ok && m.listed
-	var listed Model
-	if found {
-		listed = m.Model
-	}
-	x.s.mu.Unlock()
-	if !found {
-		x.fail(http.StatusNotFound, "invalid_request_error", "the model does not exist", "model")
-		return
-	}
-	x.writeJSON(http.StatusOK, toListed(listed))
 }

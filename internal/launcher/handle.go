@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -70,17 +71,50 @@ func (sysPidfd) close(fd int) { _ = unix.Close(fd) }
 var pidfds pidfdAPI = sysPidfd{}
 
 // procHandle is a held pidfd and the record it is checked against.
+//
+// Once Close has run, the descriptor number belongs to the kernel again and may be handed out to
+// anything that opens a file next, including another process's pidfd. A closed handle must
+// therefore never touch fd: a poll or a signal through it would reach whichever process now owns
+// the number, while the identity checks (which read /proc by PID) still look at the recorded
+// one. mu makes the closed check and the use of fd one step, so a Close from another goroutine
+// cannot come between them, and every method that uses fd goes through it.
 type procHandle struct {
 	rec    ProcRec
 	fd     int
+	mu     sync.Mutex
 	closed bool
 }
 
+// errHandleClosed is what a closed handle answers to every use of its descriptor.
+var errHandleClosed = errors.New("the process handle is closed; its descriptor number may belong to another process now")
+
 func (h *procHandle) Close() {
-	if h != nil && !h.closed {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.closed {
 		pidfds.close(h.fd)
 		h.closed = true
 	}
+}
+
+// isClosed reports whether Close has run.
+func (h *procHandle) isClosed() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.closed
+}
+
+// signal sends sig through the descriptor, or fails with errHandleClosed without sending anything.
+func (h *procHandle) signal(sig syscall.Signal) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return errHandleClosed
+	}
+	return pidfds.signal(h.fd, sig)
 }
 
 func closeAll(hs []*procHandle) {
@@ -89,7 +123,14 @@ func closeAll(hs []*procHandle) {
 	}
 }
 
-func (h *procHandle) exited() (bool, error) { return pidfds.exited(h.fd) }
+func (h *procHandle) exited() (bool, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return false, errHandleClosed
+	}
+	return pidfds.exited(h.fd)
+}
 
 var errExited = errors.New("the process has exited")
 
@@ -348,10 +389,15 @@ func checkExe(l layout, h *procHandle) (string, error) {
 // signalHandle sends sig through the held pidfd, after checking once more that the handle is the
 // recorded process. It reports whether the signal was sent.
 func signalHandle(h *procHandle, sig syscall.Signal) (bool, error) {
+	// A closed handle is an error, never "not ours": a caller that asked to signal a process and
+	// was told nothing was sent must be able to tell it apart from a process that is gone.
+	if h.isClosed() {
+		return false, errHandleClosed
+	}
 	if v, _ := h.verify(); v != Ours {
 		return false, nil
 	}
-	if err := pidfds.signal(h.fd, sig); err != nil {
+	if err := h.signal(sig); err != nil {
 		if errors.Is(err, syscall.ESRCH) {
 			return false, nil
 		}

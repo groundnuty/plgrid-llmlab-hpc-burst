@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -50,6 +51,10 @@ type Options struct {
 	BaseEnv []string
 	// Logger receives the agent's log; it never gets a secret.
 	Logger *slog.Logger
+	// Tunnel, when set, is told which Instance the agent serves, so that frpc
+	// serves that Instance's proxy (HBEP-6, frpc in the job): its UID while
+	// the desired state runs it, and "" once it ends. *Frpc is one.
+	Tunnel Tunnel
 
 	// ReportInterval: a report at least this often (agentapi.ReportInterval
 	// when 0).
@@ -63,6 +68,17 @@ type Options struct {
 	// Now is the clock (time.Now when nil).
 	Now func() time.Time
 }
+
+// Tunnel is the agent's dial-home tunnel, as the convergence loop sees it.
+type Tunnel interface {
+	// Serve sets the Instance whose proxy the tunnel serves; "" serves none.
+	// It never blocks.
+	Serve(uid string)
+}
+
+// ServingSocket is the agent's serving socket in the run directory: the
+// Forwarder listens on it, and frpc's proxy serves it.
+func ServingSocket(runDir string) string { return filepath.Join(runDir, "serve.sock") }
 
 // Agent is the allocation agent (HBEP-7, The allocation agent): it registers,
 // long-polls its Allocation's desired state, converges on it and reports full
@@ -95,6 +111,8 @@ type Agent struct {
 	malformedLogged string
 	fwd             *Forwarder
 	lastOffered     []byte
+	// tunnelUID is the Instance the tunnel was last told to serve.
+	tunnelUID string
 	// settings from the newest desired state with an Action the agent knows.
 	stopGrace     time.Duration
 	probeInterval time.Duration
@@ -170,12 +188,13 @@ func (a *Agent) Run(ctx context.Context) error {
 	if err := CloseInheritedFDs(); err != nil {
 		a.log.Warn("cannot mark inherited file descriptors close-on-exec", "err", err)
 	}
-	fwd, err := NewForwarder(a.o.RunDir + "/serve.sock")
+	fwd, err := NewForwarder(ServingSocket(a.o.RunDir))
 	if err != nil {
 		return fmt.Errorf("agent: serving socket: %w", err)
 	}
 	a.fwd = fwd
 	defer fwd.Close()
+	defer a.serveTunnel("")
 
 	loopCtx, cancelLoop := context.WithCancel(ctx)
 	defer cancelLoop()
