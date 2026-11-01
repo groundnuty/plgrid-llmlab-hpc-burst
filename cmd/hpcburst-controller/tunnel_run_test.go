@@ -754,16 +754,21 @@ func TestTunnelTriggerCausesARead(t *testing.T) {
 	allocA, credA := r.allocation("al-a", v1alpha1.AllocationRunning)
 	a1 := r.instance("in-a1", allocA.Name, "")
 	r.startFrps() // before the binary, so that its read at the start reads the list
+	before := tunnelReads.Load()
 	b := r.start()
 	// The read at the start says offline. Only now does frpc start, so that the start's read
 	// cannot be what turns the condition True.
+	//
+	// tunnelReads counts a read once it has written its conditions, so the counter moves a moment
+	// AFTER the condition a read wrote is visible: the baseline is taken only once the start's read
+	// is counted, and after True the test waits for the trigger's read to be counted, not one load
+	// (CI caught a load that came between the write and the count, 1 Nov 2026).
 	r.waitCond(b, a1, statusFalse, reasonOffline)
+	b.eventually(t, "the start's read is counted", 60*time.Second, func() bool { return tunnelReads.Load() >= before+1 })
 	reads := tunnelReads.Load()
 	r.runFrpc(credA, uid(a1))
 	r.waitCond(b, a1, statusTrue, reasonOnline)
-	if n := tunnelReads.Load(); n < reads+1 {
-		t.Errorf("the condition turned True with %d reads since frpc started", n-reads)
-	}
+	b.eventually(t, "the read that turned the condition True is counted", 60*time.Second, func() bool { return tunnelReads.Load() >= reads+1 })
 	if err := b.stop(t); err != nil {
 		t.Fatalf("run returned %v after its context ended, want nil", err)
 	}
