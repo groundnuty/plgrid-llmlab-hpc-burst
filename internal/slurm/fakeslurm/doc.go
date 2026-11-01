@@ -88,10 +88,27 @@
 //
 //   - The file system is the real directory RunMode.Root, at the same paths,
 //     as a cluster's compute nodes share the login node's file system. The
-//     logins' HOME and SCRATCH must be under it. A path outside it reads as
-//     missing, and a write, mkdir, chmod, mv or rm there is refused (exit 1),
-//     so no command touches the host outside the test's directory. Files
-//     reads every file under the root and reports no Owner.
+//     logins' HOME and SCRATCH must be under it. Every operation of the
+//     fake's own (the commands, the job's output files, Files and Dirs) goes
+//     through an os.Root opened on the directory. A path outside it reads as
+//     missing, a write, mkdir, chmod, mv or rm there is refused (exit 1), and
+//     so is a path that is not cleaned ("root/../x") and one that goes
+//     through a symbolic link that resolves outside the root, which a job's
+//     processes can make. A link that stays inside works if it is relative
+//     (as a Hugging Face cache's are); os.Root refuses an absolute one even
+//     when its target is inside. So no command of the fake touches the host
+//     outside the test's directory. That is the fake's own reach: the jobs'
+//     processes run as the test does and are not confined.
+//   - Reads are bounded, because the root can hold what jobs wrote and the
+//     VM has no swap. sha256sum streams, for at most 256 MiB, and exits 1
+//     for a bigger file. Files reads every regular file under the root, with
+//     no Owner, but a file over 16 MiB, files over 64 MiB in all or more than
+//     50,000 files are a test bug: Files panics, naming the file, rather than
+//     return a partial map (its signature is the in-memory one's). It holds
+//     no lock while it reads. Do not call it on a root that holds staged
+//     models or a cache; stat the file instead. A FIFO, a device or a
+//     directory as --output or --error fails the job, and no open of the fake
+//     waits for a FIFO's other end.
 //   - A job starts as soon as it is eligible (not held, a free slot), within
 //     the command that made it so: sbatch, scontrol release, FreePhantoms, or
 //     the end of another job's execution. Start is refused. Starting at once

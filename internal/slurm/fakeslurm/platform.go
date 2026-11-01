@@ -145,7 +145,11 @@ func New(clock Clock, cfg Config) *Platform {
 	if cfg.Run != nil {
 		p.run = normalizeRun(*cfg.Run)
 		p.cfg.Run = p.run
-		p.fs = &diskFS{root: p.run.Root}
+		d, err := newDiskFS(p.run.Root)
+		if err != nil {
+			panic(fmt.Sprintf("fakeslurm: RunMode.Root: %v", err))
+		}
+		p.fs = d
 	}
 	return p
 }
