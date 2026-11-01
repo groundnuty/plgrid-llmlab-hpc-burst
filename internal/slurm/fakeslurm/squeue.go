@@ -212,7 +212,7 @@ func squeueJobOf(j *job, minute time.Duration) squeueJob {
 		CPUs: nv(int64(j.cpus)), CPUsPerTask: nv(int64(j.cpus)),
 		DerivedExitCode: exitCodeFor(state), EligibleTime: nvTime(e.submit), EndTime: end,
 		ExitCode: exitCodeFor(state), Flags: []string{}, Hold: prio.Number == 0 && state == Pending,
-		JobID: j.id, JobState: []string{state},
+		JobID: j.id, JobState: jobState(j),
 		MemoryPerCPU: NV{}, MemoryPerNode: nv(j.memMiB), Name: j.name, NodeCount: nv(int64(j.nodes)),
 		Partition: j.partition, Priority: prio, QOS: "normal", Requeue: j.requeue, RestartCnt: j.restartCnt,
 		StandardError: j.errPath, StandardOutput: j.output, StartTime: start,
@@ -220,6 +220,23 @@ func squeueJobOf(j *job, minute time.Duration) squeueJob {
 		Tasks: nv(1), TimeLimit: limitNV(j.timeLimit), TresAllocStr: alloc, TresReqStr: tresStr(j),
 		UserName: j.user,
 	}
+}
+
+// jobState is squeue's job_state: the state, and COMPLETING beside an end
+// state while the job's processes still live (run mode).
+func jobState(j *job) []string {
+	if j.completing() {
+		return []string{j.state(), Completing}
+	}
+	return []string{j.state()}
+}
+
+// stateCode is the text table's state: CG while the job completes.
+func stateCode(j *job) string {
+	if j.completing() {
+		return "CG"
+	}
+	return stateCodes[j.state()]
 }
 
 // stateCodes are squeue's short state names.
@@ -250,7 +267,7 @@ func (p *Platform) squeueText(rows []*job, now time.Time) string {
 			nodes = "example-node-1"
 		}
 		fmt.Fprintf(&b, "%8d %-9s %-12s %-10s %-2s %9s %5d %-18s %-19s %-19s\n",
-			j.id, j.partition, j.name, j.user, stateCodes[e.state], runTime(e, now), j.nodes, nodes,
+			j.id, j.partition, j.name, j.user, stateCode(j), runTime(e, now), j.nodes, nodes,
 			e.submit.In(p.zone).Format(textTime), start)
 	}
 	return b.String()

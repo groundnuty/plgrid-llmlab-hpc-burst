@@ -69,8 +69,12 @@ type Options struct {
 	LeaderElection bool
 	// Workers is the work queue's worker count; 0 means DefaultWorkers.
 	Workers int
-	// Checkpoints reads checkpoints; nil means the Hub, cached.
+	// Checkpoints reads checkpoints; nil means the Hub at HubEndpoint, cached.
 	Checkpoints CheckpointSource
+	// HubEndpoint is the Hugging Face Hub's origin that checkpoints are
+	// listed from; "" means hubfiles.DefaultBaseURL. hpcburst-controller
+	// sets it from HF_ENDPOINT, the variable hb-agent downloads by.
+	HubEndpoint string
 	// Clock is the time source; nil means SystemClock.
 	Clock Clock
 
@@ -175,10 +179,7 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 			}
 		},
 	}
-	src := o.Checkpoints
-	if src == nil {
-		src = NewCachedSource(&HubSource{}, clock)
-	}
+	src := checkpointSource(o, clock)
 	builds := &agentBuilds{dir: o.AgentBuildsDir}
 	r := &Reconciler{
 		Client: mgr.GetClient(), Reader: mgr.GetAPIReader(), Clock: clock, Backend: backend, Checkpoints: src,
@@ -426,6 +427,15 @@ func (b *agentBuilds) digest(cpuArch string) (string, error) {
 	d := hex.EncodeToString(h.Sum(nil))
 	b.sum[cpuArch] = buildSum{size: fi.Size(), modTime: fi.ModTime(), digest: d}
 	return d, nil
+}
+
+// checkpointSource is Options.Checkpoints, or the Hub at Options.HubEndpoint,
+// cached.
+func checkpointSource(o Options, clock Clock) CheckpointSource {
+	if o.Checkpoints != nil {
+		return o.Checkpoints
+	}
+	return NewCachedSource(&HubSource{BaseURL: o.HubEndpoint}, clock)
 }
 
 // collectorRegistration registers the lifecycle controller's collectors, the

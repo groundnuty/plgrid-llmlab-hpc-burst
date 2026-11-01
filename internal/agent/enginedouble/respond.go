@@ -11,8 +11,14 @@ import (
 
 var idCounter atomic.Uint64
 
-func newID() string {
-	return fmt.Sprintf("chatcmpl-%08x%08x", uint32(time.Now().Unix()), idCounter.Add(1))
+// newID is a chat completion's id, newCompletionID a completion's: vLLM
+// prefixes them chatcmpl- and cmpl-.
+func newID() string { return nextID("chatcmpl-") }
+
+func newCompletionID() string { return nextID("cmpl-") }
+
+func nextID(prefix string) string {
+	return fmt.Sprintf("%s%08x%08x", prefix, uint32(time.Now().Unix()), idCounter.Add(1))
 }
 
 type functionJSON struct {
@@ -154,28 +160,9 @@ type delta struct {
 // the time to the first byte is the time to the first token. In the stall mode
 // the stream stops after the first token and waits for the client to go.
 func (h *handler) stream(w http.ResponseWriter, r *http.Request, req chatRequest, a answer, s *slot, u usage) (int, bool) {
-	fl, _ := w.(http.Flusher)
+	sw := newSSEWriter(w)
 	id, created := newID(), time.Now().Unix()
-	started := false
-	send := func(c chunk) bool {
-		b, err := json.Marshal(c)
-		if err != nil {
-			return false
-		}
-		if !started {
-			w.Header().Set("Content-Type", "text/event-stream")
-			w.Header().Set("Cache-Control", "no-cache")
-			w.WriteHeader(http.StatusOK)
-			started = true
-		}
-		if _, err := fmt.Fprintf(w, "data: %s\n\n", b); err != nil {
-			return false
-		}
-		if fl != nil {
-			fl.Flush()
-		}
-		return true
-	}
+	send := func(c chunk) bool { return sw.send(c) }
 	newChunk := func(choices ...chunkChoice) chunk {
 		if choices == nil {
 			choices = []chunkChoice{}
@@ -233,11 +220,7 @@ func (h *handler) stream(w http.ResponseWriter, r *http.Request, req chatRequest
 		if !send(out) {
 			return false
 		}
-		if g == 0 && h.cfg.Stall {
-			<-r.Context().Done() // hangs until the client goes away
-			return false
-		}
-		return true
+		return !h.stalls(r, g)
 	})
 	if !ok {
 		return n, false
@@ -250,11 +233,54 @@ func (h *handler) stream(w http.ResponseWriter, r *http.Request, req chatRequest
 			return n, false
 		}
 	}
-	if _, err := fmt.Fprint(w, "data: [DONE]\n\n"); err != nil {
-		return n, false
+	return n, sw.done()
+}
+
+// sseWriter writes server-sent events as vLLM does: each event is
+// "data: <json>" and a blank line, flushed at once. The response headers go
+// out with the first event.
+type sseWriter struct {
+	w       http.ResponseWriter
+	fl      http.Flusher
+	started bool
+}
+
+func newSSEWriter(w http.ResponseWriter) *sseWriter {
+	fl, _ := w.(http.Flusher)
+	return &sseWriter{w: w, fl: fl}
+}
+
+// send writes v as one event; it returns false if v cannot be encoded or the
+// client went away.
+func (s *sseWriter) send(v any) bool {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return false
 	}
-	if fl != nil {
-		fl.Flush()
+	if !s.started {
+		s.w.Header().Set("Content-Type", "text/event-stream")
+		s.w.Header().Set("Cache-Control", "no-cache")
+		s.w.WriteHeader(http.StatusOK)
+		s.started = true
 	}
-	return n, true
+	if _, err := fmt.Fprintf(s.w, "data: %s\n\n", b); err != nil {
+		return false
+	}
+	s.flush()
+	return true
+}
+
+// done writes the last event, "data: [DONE]".
+func (s *sseWriter) done() bool {
+	if _, err := fmt.Fprint(s.w, "data: [DONE]\n\n"); err != nil {
+		return false
+	}
+	s.flush()
+	return true
+}
+
+func (s *sseWriter) flush() {
+	if s.fl != nil {
+		s.fl.Flush()
+	}
 }

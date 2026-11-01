@@ -351,6 +351,7 @@ func (e *external) files(a *v1alpha1.Allocation, tag string, paths slurm.Paths) 
 	cfg := agentapi.AgentConfig{
 		ProtocolVersion: agentapi.ProtocolVersion, Tag: tag, Mode: f.Mode, Endpoint: f.Endpoint,
 		CertSPKISHA256: f.CertPin, FrpcDigest: frpcSum, StagingDir: paths.Staging, DialHomeDir: paths.DialHomeDir(),
+		HubEndpoint: e.s.o.HubEndpoint,
 	}
 	if f.Mode == agentapi.DialHomeSSH {
 		cfg.SSH = &agentapi.SSHForward{User: f.SSHUser, AgentPort: f.AgentPort, DialHomePort: f.DialHomePort}
