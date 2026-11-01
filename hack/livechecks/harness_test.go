@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -64,6 +65,7 @@ type world struct {
 	t                     *testing.T
 	repo, dir, state, bin string
 	settings, base, tmp   string
+	reports               map[*exec.Cmd]string // the reaper's report of each command built by command
 }
 
 func (w *world) out() string { return filepath.Join(w.dir, "out") }
@@ -103,9 +105,9 @@ func newWorld(t *testing.T) *world {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := &world{t: t, dir: t.TempDir()}
+	w := &world{t: t, dir: t.TempDir(), reports: map[*exec.Cmd]string{}}
 	w.repo, w.state, w.bin, w.tmp = filepath.Join(w.dir, "repo"), filepath.Join(w.dir, "state"), filepath.Join(w.dir, "bin"), filepath.Join(w.dir, "tmp")
-	for _, d := range []string{w.repo, w.state, w.bin, w.tmp, filepath.Join(w.dir, "locks")} {
+	for _, d := range []string{w.repo, w.state, w.bin, w.tmp, filepath.Join(w.dir, "locks"), filepath.Join(w.dir, "reports")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -202,11 +204,13 @@ func (w *world) env(extra []string) []string {
 	return append(env, extra...)
 }
 
+// command builds the command that runs the script under the reaper (reaper_test.go). Its process
+// is the reaper: a signal sent to it is forwarded to the script, and its exit status is the
+// script's. noLeftoverProcess reads the reaper's report of this command.
 func (w *world) command(extra []string, args ...string) *exec.Cmd {
-	cmd := exec.Command("bash", append([]string{filepath.Join(w.repo, "hack/live-checks.sh")}, args...)...)
-	cmd.Dir = w.repo
-	cmd.Env = w.env(extra)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	report := filepath.Join(w.dir, "reports", strconv.Itoa(len(w.reports)+1))
+	cmd := reaperCommand(w.t, report, reaperOpts{grace: leftoverDeadline}, w.repo, w.env(extra), append([]string{filepath.Join(w.repo, "hack/live-checks.sh")}, args...)...)
+	w.reports[cmd] = report
 	return cmd
 }
 
@@ -242,65 +246,62 @@ func (w *world) start(extra []string, args ...string) (*exec.Cmd, *bytes.Buffer)
 	if err := cmd.Start(); err != nil {
 		w.t.Fatal(err)
 	}
-	w.t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) })
+	// No cleanup here: reaperCommand's closes the pipe to the reaper, which kills and reaps what
+	// is left of the run, descendants in other sessions included.
 	return cmd, &out
 }
 
-// leftoverDeadline bounds how long a member of the run's process group may outlive the script.
-// The script's last children (a subshell, a command substitution, a timeout and what it killed)
-// can still be exiting, or be waiting for init to reap them, when the script's own exit is
-// seen, and that takes milliseconds, a little longer on a loaded host. The check catches a
-// process that is still alive when the deadline passes; one that exits within the grace passes.
-// Five seconds is generous for ordinary teardown. It is no guarantee against a host that starves
-// the run for longer, or an init that does not reap zombies (a zombie keeps the group alive).
-const leftoverDeadline = 5 * time.Second
-
-// groupExists reports whether process group pgid has a member, a zombie included. Only ESRCH
-// means the group is gone: EPERM, or any other error, means something is there.
-func groupExists(pgid int) bool {
-	return !errors.Is(syscall.Kill(-pgid, 0), syscall.ESRCH)
-}
-
-// groupOutlives polls process group pgid until it is empty and returns false, or returns true
-// when a member is still there at the deadline. It waits on the group's state, never on a
-// fixed window: an empty group ends the wait at once.
-func groupOutlives(pgid int, deadline time.Duration) bool {
-	return pollGroup(pgid, deadline, nil)
-}
-
-// pollGroup is groupOutlives with a hook. onMember, when not nil, is called once, on the polling
-// goroutine, right after the first probe that finds a member and before the next probe. A test
-// uses it to let a member exit only after the detector has seen it alive, so the member is
-// certainly alive at the first probe and certainly gone later, and a detector that probes only
-// once reports it.
-func pollGroup(pgid int, deadline time.Duration, onMember func()) bool {
-	end := time.Now().Add(deadline)
-	seen := false
-	for groupExists(pgid) {
-		if !seen {
-			seen = true
-			if onMember != nil {
-				onMember()
-			}
+// signal sends sig to the reaper, which forwards it to the script, and returns once the reaper
+// has acknowledged the forward. A test that goes on to release what the script waits on needs
+// this: forwarding is asynchronous, and without the acknowledgement the script could see the
+// release before the signal.
+func (w *world) signal(cmd *exec.Cmd, sig syscall.Signal) {
+	w.t.Helper()
+	report, ok := w.reports[cmd]
+	if !ok {
+		w.t.Fatal("the command was not built by world.command, so no reaper forwards its signals")
+	}
+	if err := cmd.Process.Signal(sig); err != nil {
+		w.t.Fatal(err)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if _, err := os.Stat(ackPath(report)); err == nil {
+			return
 		}
-		if time.Now().After(end) {
-			return true
+		if time.Now().After(deadline) {
+			w.t.Fatalf("the reaper never acknowledged forwarding %v", sig)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	return false
 }
 
-// noLeftoverProcess fails when a process of the run's group is still alive leftoverDeadline
-// after the script exited, and kills what is left. The kill goes to the group by number. If the
-// group were already empty and its number reused by an unrelated group in the time between the
-// last probe and the kill, it would hit that group; the harness had this limit before it polled.
+// leftoverDeadline bounds how long a process the script started may outlive it. The script's
+// last children (a subshell, a command substitution, a timeout and what it killed) can still be
+// exiting when the script's own exit is seen, and that takes milliseconds, a little longer on a
+// loaded host. The check catches a process that is still alive when the deadline passes; one that
+// exits within the grace passes. Five seconds is generous for ordinary teardown, and no guarantee
+// against a host that starves the run for longer.
+const leftoverDeadline = 5 * time.Second
+
+// noLeftoverProcess fails when the reaper that ran cmd found a process of the run still alive
+// leftoverDeadline after the script exited (in any process group or session; the reaper killed
+// it), and when the reaper left no report: a missing report is never read as "clean".
 func (w *world) noLeftoverProcess(cmd *exec.Cmd) {
 	w.t.Helper()
-	pgid := cmd.Process.Pid
-	if groupOutlives(pgid, leftoverDeadline) {
-		_ = syscall.Kill(-pgid, syscall.SIGKILL)
-		w.t.Errorf("a process of the run was still alive %s after the script exited", leftoverDeadline)
+	report, ok := w.reports[cmd]
+	if !ok {
+		w.t.Fatal("the command was not built by world.command, so no reaper watched it")
+	}
+	kind, details, err := readReport(report)
+	switch {
+	case err != nil:
+		w.t.Errorf("%v", err)
+	case kind == "clean":
+	case kind == "leftover":
+		w.t.Errorf("a process of the run was still alive %s after the script exited: %s", leftoverDeadline, strings.Join(details, ", "))
+	default:
+		w.t.Errorf("the reaper failed (%s): %s", kind, strings.Join(details, "; "))
 	}
 }
 
