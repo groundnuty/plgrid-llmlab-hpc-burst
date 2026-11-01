@@ -36,7 +36,8 @@ type Options struct {
 	Recorder   Recorder
 	Transports Transports // nil: HBEP-6's Tunnel through frps, registered by the front's probe
 	// PathEvents receives the probe's results when the front builds its own
-	// Tunnel; nil drops them (NopPathEvents).
+	// Tunnel; nil raises HBEP-6's degraded event, reason PathProbeFailing,
+	// through Recorder (recorderPathEvents), as the command does.
 	PathEvents PathEvents
 	Log        *slog.Logger
 	// The listeners. Nil ones are opened on the configured addresses; the
@@ -63,8 +64,10 @@ type Front struct {
 	Proxy   *Proxy
 	Sink    *usage.Sink
 	Metrics *Metrics
-	// Tunnel is HBEP-6's transport, when the front built its own.
+	// Tunnel is HBEP-6's transport, when the front built its own, and Prober
+	// its end-to-end probe.
 	Tunnel *Tunnel
+	Prober *Prober
 	Client net.Addr
 	Dial   net.Addr
 	Health net.Addr
@@ -125,7 +128,9 @@ func Run(ctx context.Context, o Options) error {
 	proxy := NewProxy(ProxyOptions{Config: cfg, Host: o.Host, Clock: o.Clock, Router: router, Transports: o.Transports, Keys: keys, Sink: sink, Metrics: metrics, Log: o.Log})
 	f := &Front{Router: router, Watch: watch, Proxy: proxy, Sink: sink, Metrics: metrics, Tunnel: tunnel}
 	if tunnel != nil {
-		defer startProber(ctx, cfg, tunnel, o, watch)()
+		var stop func()
+		f.Prober, stop = startProber(ctx, cfg, tunnel, o, watch)
+		defer stop()
 	}
 	var frp *frpPassthrough
 	if ferr == nil {
@@ -148,7 +153,13 @@ func Run(ctx context.Context, o Options) error {
 		go func() {
 			defer keeper.Done()
 			k := newLeaseKeeper(o.Kube, o.Clock, o.Recorder, router.lease, o.Log)
-			k.onHeld = router.flushUsageEvent
+			k.onHeld = func() {
+				router.flushUsageEvent()
+				// The probe's heartbeat is judged here, apart from its loop.
+				if f.Prober != nil {
+					f.Prober.raiseHeartbeatMissed(o.Recorder, router.lease)
+				}
+			}
 			k.run(ctx)
 		}()
 		defer keeper.Wait()
@@ -228,20 +239,25 @@ func startWatch(ctx context.Context, o Options, router *Router) (*inventory.Watc
 }
 
 // startProber runs the probe of HBEP-6 over the watched Instances until ctx
-// ends or the returned stop is called; stop returns once it has stopped.
-func startProber(ctx context.Context, cfg Config, tunnel *Tunnel, o Options, watch *inventory.Watch) (stop func()) {
+// ends or the returned stop is called; stop returns once it has stopped. With
+// no Options.PathEvents its PathProbeFailing goes to the front's Recorder.
+func startProber(ctx context.Context, cfg Config, tunnel *Tunnel, o Options, watch *inventory.Watch) (*Prober, func()) {
 	source := func() []v1alpha1.Instance {
 		snap, _ := watch.Snapshot()
 		return snap.Instances
 	}
-	p := NewProber(cfg, tunnel, o.Clock, source, o.PathEvents, o.Log)
+	events := o.PathEvents
+	if events == nil {
+		events = recorderPathEvents{rec: o.Recorder}
+	}
+	p := NewProber(cfg, tunnel, o.Clock, source, events, o.Log)
 	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		p.Run(ctx)
 	}()
-	return func() { cancel(); <-done }
+	return p, func() { cancel(); <-done }
 }
 
 // listen opens the three listeners and starts their servers. The dial-home
@@ -371,6 +387,11 @@ func healthHandler(f *Front) http.Handler {
 			"synced": f.Watch.Synced(), "viewAge": now.Sub(st.BuiltAt).Round(time.Second).String(),
 			"watchAges": ages, "deployments": st.Deployments, "managedTargets": st.Managed, "waiting": st.Waiting,
 			"instances": st.Instances, "leaseEnds": st.LeaseEnds,
+		}
+		// The probe's state per Instance, unknown while the probe is stale
+		// (HBEP-8, Observers). It never changes the status.
+		if f.Prober != nil {
+			body["probe"] = f.Prober.Health()
 		}
 		// A sink that fails loses records: the body shows the state, the count
 		// and the latest failure, the status stays 200, and each failure is

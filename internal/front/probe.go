@@ -39,9 +39,8 @@ type ProbeResult struct {
 }
 
 // PathEvents receives what the probe finds (HBEP-6, The front's half:
-// Reporting). The front's Lease and metric registry (#112, PR #117) wire it
-// to the degraded event and the probe metric; until then Run uses
-// NopPathEvents.
+// Reporting). Run's default, recorderPathEvents, raises the degraded event
+// through the front's Recorder.
 type PathEvents interface {
 	// Probed is called after every probe.
 	Probed(r ProbeResult)
@@ -83,11 +82,23 @@ type Prober struct {
 
 	mu    sync.Mutex
 	state map[types.UID]*probeState
+	// beat is the probe's heartbeat: when its latest round ended, which holds
+	// every probed Instance's result (a round with none to probe counts), or
+	// when the prober was made. missedAt is when HeartbeatMissed last went
+	// out in this staleness; zero once a round ends (probe_report.go).
+	beat     time.Time
+	missedAt time.Time
 }
 
 type probeState struct {
+	name    string // namespace/name
 	fails   int
 	running bool
+	// The latest verdict: passed, at the front's clock time at; has is false
+	// before the first.
+	has    bool
+	passed bool
+	at     time.Time
 }
 
 // NewProber returns a prober over the Tunnel's registry. source returns the
@@ -98,7 +109,7 @@ func NewProber(cfg Config, tun *Tunnel, clk clock.Clock, source func() []v1alpha
 	}
 	return &Prober{
 		tun: tun, clk: clk, interval: cfg.ProbeInterval.D(), timeout: cfg.ProbeTimeout.D(), failures: cfg.ProbeFailures,
-		source: source, events: events, log: log, state: map[types.UID]*probeState{},
+		source: source, events: events, log: log, state: map[types.UID]*probeState{}, beat: clk.Now(),
 	}
 }
 
@@ -158,7 +169,7 @@ func (p *Prober) Round(ctx context.Context) {
 	for uid, in := range live {
 		st := p.state[uid]
 		if st == nil {
-			st = &probeState{}
+			st = &probeState{name: in.Namespace + "/" + in.Name}
 			p.state[uid] = st
 		}
 		if st.running {
@@ -180,6 +191,9 @@ func (p *Prober) Round(ctx context.Context) {
 		}(start[i], states[i])
 	}
 	wg.Wait()
+	p.mu.Lock()
+	p.beat, p.missedAt = p.clk.Now(), time.Time{}
+	p.mu.Unlock()
 }
 
 // probeOne probes one Instance and applies the verdict.
@@ -207,6 +221,7 @@ func (p *Prober) probeOne(ctx context.Context, in *v1alpha1.Instance, st *probeS
 		res.Error = err.Error()
 	}
 	res.Failures = st.fails
+	st.has, st.passed, st.at = true, err == nil, p.clk.Now()
 	register := err == nil || (st.fails < p.failures && p.tun.Registered(in.UID))
 	p.mu.Unlock()
 	res.Registered = register
