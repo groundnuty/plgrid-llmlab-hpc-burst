@@ -20,12 +20,13 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal"
 )
 
-// rehearsalTiming: a 6 min lease whose drain window is 90 s + 30 s (the
+// rehearsalTiming: a 7 min lease whose drain window is 90 s + 30 s (the
 // explicit drainWindow, 10 min, is longer), so a handover happens in minutes
-// and steps (b), (d), (e) and (f) fit before the primary's drain start; the
-// agent's stop grace is short, so scancel's TERM finishes before the fake's
-// KillWait.
-var rehearsalTiming = timing{lease: "6m", maxRequest: "90s", drainMargin: "30s", drainWindow: "10m", stopGrace: "5s", agentTimeout: "20s"}
+// and steps (b), (d), (e) and (f) fit before the primary's drain start, after
+// step (a)'s tunnel hold (about 45 s) and the 30 s frpc backoff that the hold
+// leaves for step (e); the agent's stop grace is short, so scancel's TERM
+// finishes before the fake's KillWait.
+var rehearsalTiming = timing{lease: "7m", maxRequest: "90s", drainMargin: "30s", drainWindow: "10m", stopGrace: "5s", agentTimeout: "20s"}
 
 // rehearsalAgentTimeout is rehearsalTiming's agentTimeout: how long a
 // controller waits for a silent agent before it judges it unreachable.
