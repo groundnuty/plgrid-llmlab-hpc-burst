@@ -1,0 +1,19 @@
+{
+  "version": "0.1.0",
+  "op": "NewProxy",
+  "content": {
+    "user": {
+      "user": "",
+      "metas": {
+        "token": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+      },
+      "run_id": "0123456789abcdef"
+    },
+    "proxy_name": "uid-a-1111",
+    "proxy_type": "tcpmux",
+    "custom_domains": [
+      "uid-a-1111"
+    ],
+    "multiplexer": "httpconnect"
+  }
+}

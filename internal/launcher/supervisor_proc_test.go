@@ -197,7 +197,7 @@ func TestStartSupervisorFailures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	falseBin, err := exec.LookPath("false")
+	shBin, err := exec.LookPath("sh")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,9 +211,16 @@ func TestStartSupervisorFailures(t *testing.T) {
 		{"the controller binary cannot be started", []string{self}, func(f *ctlFixture) {
 			f.st.Controllers.Binary = f.ctl + "/no-such-binary"
 		}, 30 * time.Second, []string{"controller exited while it was being started", "start failed", "last lines of"}},
-		{"the controller exits at once", []string{self}, func(f *ctlFixture) { f.steer("always-exit", "7") },
+		// The controller exits as soon as the supervisor has recorded it. With always-exit it could
+		// be gone before the supervisor's startProc had pinned its identity, and the entry then
+		// showed "start failed" instead of its exit status (issue #130).
+		{"the controller exits at once", []string{self}, func(f *ctlFixture) { f.steer("exit-once-recorded", "7") },
 			30 * time.Second, []string{"controller exited while it was being started", "exit status 7"}},
-		{"the supervisor exits before starting anything", []string{falseBin}, nil,
+		// The stand-in waits for the launcher's confirmation on the handoff descriptor, as the
+		// real supervisor does, and then exits having started nothing. A stand-in that exits at
+		// once (false) could be gone before startProc had pinned its identity, and then the start
+		// failed in startProc instead of here (issue #130).
+		{"the supervisor exits before starting anything", []string{shBin, "-c", "head -c 1 <&" + strconv.Itoa(HandoffFD) + " >/dev/null; exit 1"}, nil,
 			30 * time.Second, []string{"the supervisor exited before its processes started"}},
 		{"a stale record is not taken for this start's", []string{sleep, "300"}, func(f *ctlFixture) {
 			stale := ProcRec{Name: supervisorName, PID: 2, StartTicks: 1, BootID: "old"}
