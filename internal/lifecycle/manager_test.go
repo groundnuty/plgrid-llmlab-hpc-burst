@@ -311,7 +311,7 @@ func TestManagerOnControlPlane(t *testing.T) {
 	stop := func() bool {
 		if !stopped {
 			stopped = true
-			stopOK = stopManager(t, stopMgr, done)
+			stopOK = stopManager(t, "first", stopMgr, done)
 		}
 		return stopOK
 	}
@@ -546,12 +546,7 @@ func withoutLeaderElection(t *testing.T, ctx context.Context, cl client.Client, 
 	mctx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() { done <- mgr.Start(mctx) }()
-	defer func() {
-		stop()
-		if err := <-done; err != nil {
-			t.Errorf("manager without leader election: %v", err)
-		}
-	}()
+	defer stopManager(t, "no-leader-election", stop, done)
 	eventually(t, time.Minute, "/readyz passes with synced caches and no Lease", func() (bool, string) {
 		code := getStatus(t, "http://"+managerHealthAddr+"/readyz")
 		return code == http.StatusOK, fmt.Sprintf("/readyz %d", code)
@@ -624,12 +619,7 @@ func restartAfterGap(t *testing.T, ctx context.Context, cl client.Client, cfg *r
 	mctx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() { done <- mgr.Start(mctx) }()
-	defer func() {
-		stop()
-		if err := <-done; err != nil {
-			t.Errorf("second manager: %v", err)
-		}
-	}()
+	defer stopManager(t, "restarted", stop, done)
 	eventually(t, time.Minute, "the health server answers", func() (bool, string) {
 		return getStatus(t, "http://"+managerHealthAddr+"/healthz") == http.StatusOK, "no /healthz"
 	})
@@ -734,9 +724,18 @@ func observationGaps(t *testing.T, ctx context.Context, cl client.Client) []even
 	return out
 }
 
+// probeClient makes the health and metrics probes. It keeps no connection
+// alive: a probe's idle connection from http.DefaultClient is still on the
+// manager's health server when the manager stops, and net/http's
+// Server.Shutdown, which controller-runtime runs on that server, waits up to
+// 5 s for a connection it still counts as new (3 of 30 stops took 5.2 to
+// 6.4 s). stopManager also closes the client's idle connections before it
+// cancels.
+var probeClient = &http.Client{Transport: &http.Transport{DisableKeepAlives: true}, Timeout: 30 * time.Second}
+
 func getStatus(t *testing.T, url string) int {
 	t.Helper()
-	resp, err := http.Get(url)
+	resp, err := probeClient.Get(url)
 	if err != nil {
 		return 0
 	}
@@ -746,7 +745,7 @@ func getStatus(t *testing.T, url string) int {
 
 func getBody(t *testing.T, url string) string {
 	t.Helper()
-	resp, err := http.Get(url)
+	resp, err := probeClient.Get(url)
 	if err != nil {
 		return ""
 	}
@@ -768,21 +767,23 @@ const managerStopLimit = 10 * time.Second
 // stopped. A manager that does not return in time, or returns an error, is
 // reported with every goroutine's stack, which names the runnable that did
 // not stop. It reports with Errorf, so a deferred call after an earlier
-// failure can use it too.
-func stopManager(t *testing.T, cancel context.CancelFunc, done <-chan error) bool {
+// failure can use it too. what names the manager in the log line that reports
+// how long its stop took.
+func stopManager(t *testing.T, what string, cancel context.CancelFunc, done <-chan error) bool {
 	t.Helper()
+	probeClient.CloseIdleConnections()
 	cancel()
 	start := time.Now()
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Errorf("manager: %v; goroutines:\n%s", err, goroutines())
+			t.Errorf("%s manager: %v; goroutines:\n%s", what, err, goroutines())
 			return false
 		}
-		t.Logf("the manager returned %s after its cancel", time.Since(start).Round(time.Millisecond))
+		t.Logf("the %s manager returned %s after its cancel", what, time.Since(start).Round(time.Millisecond))
 		return true
 	case <-time.After(managerStopLimit):
-		t.Errorf("the manager did not return within %s of its cancel; goroutines:\n%s", managerStopLimit, goroutines())
+		t.Errorf("the %s manager did not return within %s of its cancel; goroutines:\n%s", what, managerStopLimit, goroutines())
 		return false
 	}
 }
