@@ -92,6 +92,9 @@ type State struct {
 	// which reads it back from here, and upgrade starts the supervisor again from it. Nil when no
 	// controller binary was found: no controllers run.
 	Controllers *ControllerConfig `json:"controllers,omitempty"`
+	// FrontRun is the front the supervisor runs beside the controllers (issue #64). Nil when up was
+	// given no --front-config.
+	FrontRun *FrontRunConfig `json:"front_run,omitempty"`
 }
 
 // ControllerConfig is the launcher's choice of what to run beside k3s.

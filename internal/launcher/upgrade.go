@@ -84,6 +84,9 @@ func Upgrade(ctx context.Context, o UpgradeOptions) (*UpgradeReport, error) {
 	if err := checkUpgradePath(from, bin.Version); err != nil {
 		return nil, err
 	}
+	if err := checkGrace(st, o.Grace); err != nil {
+		return nil, err
+	}
 	// Only a healthy host is upgraded: the snapshot below needs the API, and a host that is
 	// already sick would make the comparison meaningless.
 	if sr, err := Status(ctx, StatusOptions{StateDir: l.dir}); err != nil {
@@ -112,13 +115,10 @@ func Upgrade(ctx context.Context, o UpgradeOptions) (*UpgradeReport, error) {
 	if err != nil {
 		return nil, err
 	}
-	// replaceHost stopped the supervisor with the old host. The record keeps what it ran, so a
-	// status taken from here on says the controllers are missing until they are started again.
-	if nst.Controllers = st.Controllers; nst.Controllers != nil {
-		if err := l.saveState(nst); err != nil {
-			return nil, fmt.Errorf("the new host is running, but its record could not be written: %w", err)
-		}
-	}
+	// replaceHost stopped the supervisor with the old host. The new record keeps what it ran, the
+	// controllers and the front (issue #64), from its first write on (replaceHost), so a status
+	// taken from here on says they are missing until they are started again, and the new
+	// supervisor runs the same set.
 	rep := &UpgradeReport{From: st.Version, To: nst.Version, Backup: backup, StopMS: stopDur.Milliseconds(), ReadyMS: readyAt.Milliseconds()}
 	rep.StopToReady = stopDur.Milliseconds() + readyAt.Milliseconds()
 	if rss, err := rssMiB([]int{nst.Procs[0].PID}); err == nil {
@@ -190,7 +190,9 @@ func replaceHost(ctx context.Context, l layout, st *State, bin Binary, ops hostO
 	if err := l.saveStoreVersion(bin.Version.String(), "upgrade"); err != nil {
 		return nil, backup, stopDur, 0, fmt.Errorf("the old host is stopped and backed up to %s, but the new release could not be recorded: %w", backup, err)
 	}
-	spec := launchSpec{l: l, bin: bin, ports: st.Ports, nice: st.Nice}
+	// The replacement's first record carries the old host's supervision, so an upgrade interrupted
+	// while the new k3s starts leaves a record that still names the controllers and the front.
+	spec := launchSpec{l: l, bin: bin, ports: st.Ports, nice: st.Nice, controllers: st.Controllers, frontRun: st.FrontRun}
 	nst, readyAt, err = ops.start(ctx, spec, st.Front, timeout, log)
 	if err != nil {
 		return nil, backup, stopDur, 0, fmt.Errorf("the new host did not come up (the host is stopped; the store in %s is recorded as written by %s; to go back to %s, run hpcburst restore --backup %s): %w",

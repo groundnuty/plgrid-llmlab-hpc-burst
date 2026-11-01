@@ -42,6 +42,7 @@ func TestMain(m *testing.M) {
 	rootK3sStart = rootK3sPorts()
 	code := m.Run()
 	removeFakeController()
+	removeFrontBinary()
 	os.Exit(code)
 }
 
@@ -322,7 +323,8 @@ func newHost(t *testing.T) *host {
 	h := &host{t: t, dir: filepath.Join(d, "st"), binDir: bin}
 	t.Cleanup(func() {
 		if _, err := os.Stat(h.dir); err == nil {
-			r := cli(t, "down", "--state-dir", h.dir, "--grace", "20s")
+			// The default grace: a host that runs the front refuses a shorter one.
+			r := cli(t, "down", "--state-dir", h.dir)
 			if r.code != 0 {
 				t.Errorf("clean-up: down exited %d: %s", r.code, r.err)
 			}
