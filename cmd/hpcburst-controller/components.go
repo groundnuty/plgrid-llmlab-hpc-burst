@@ -24,6 +24,8 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"slices"
+	"time"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
@@ -37,6 +39,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agentserver"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/launcher"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/managed"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/providerctl"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
@@ -51,6 +54,30 @@ type deps struct {
 	// newPlatform makes a batch Provider's Platform; nil means the production
 	// one, a slurm.Batch over ssh (providerctl.SSHPlatform).
 	newPlatform providerctl.PlatformFactory
+	// frpcDigests gives the frpc digest per cpuArch; nil means the pinned
+	// ones, launcher.FrpcDigests of the release the launcher runs.
+	frpcDigests func() (map[string]string, error)
+	// username gives the ssh dial-home user; nil means the user who runs the
+	// binary (user.Current).
+	username func() (string, error)
+}
+
+func (d deps) digests() (map[string]string, error) {
+	if d.frpcDigests != nil {
+		return d.frpcDigests()
+	}
+	return launcher.FrpcDigests(launcher.DefaultFrpVersion)
+}
+
+func (d deps) user() (string, error) {
+	if d.username != nil {
+		return d.username()
+	}
+	u, err := user.Current()
+	if err != nil {
+		return "", err
+	}
+	return u.Username, nil
 }
 
 func defaultDeps() deps { return deps{providerScheme: providerScheme} }
@@ -74,13 +101,21 @@ func providerScheme() (*runtime.Scheme, error) {
 // #113). providerctl.New refuses such a scheme too (#118), but it runs inside
 // the supervisor, which only backs off and retries, so the binary would keep
 // running with no Provider controller at all; here it exits instead.
+//
+// The list kinds are checked too: the managers' typed informers list each
+// kind they cache, so a scheme without, say, AllocationList would pass a check
+// of Allocation alone and fail only after the start (review of PR 132: N1).
 func checkScheme(s *runtime.Scheme) error {
 	var missing []error
 	for _, gvk := range []schema.GroupVersionKind{
 		appsv1.SchemeGroupVersion.WithKind("ControllerRevision"),
+		appsv1.SchemeGroupVersion.WithKind("ControllerRevisionList"),
 		v1alpha1.GroupVersion.WithKind("Allocation"),
+		v1alpha1.GroupVersion.WithKind("AllocationList"),
 		v1alpha1.GroupVersion.WithKind("Provider"),
+		v1alpha1.GroupVersion.WithKind("ProviderList"),
 		v1alpha1.GroupVersion.WithKind("PlatformProfile"),
+		v1alpha1.GroupVersion.WithKind("PlatformProfileList"),
 	} {
 		if !s.Recognizes(gvk) {
 			missing = append(missing, fmt.Errorf("the Provider managers' scheme does not know %s (register %s)", gvk, gvk.GroupVersion()))
@@ -89,23 +124,18 @@ func checkScheme(s *runtime.Scheme) error {
 	return errors.Join(missing...)
 }
 
-// frpcDigests are the SHA-256 of the frpc binary per cpuArch that agent.json
-// names (HBEP-4, Submission: Files first; providerctl.FrontSettings): frp
-// v0.71.1's frpc for linux_amd64, hack/fetch-frp.sh's FRPC_SHA, which a test
-// keeps equal to it. Only linux_amd64 is pinned, so a Create on an aarch64
-// partition stops before any platform call with "no frpc digest is configured
-// for cpuArch aarch64".
-var frpcDigests = map[string]string{
-	"x86_64": "35c6054d4549bbcf2f02875543895fd9e44c2aae2925f61cd8ff5a693703c28b",
-}
-
 // frontSettings are the batch Providers' front and agent-endpoint settings
 // (providerctl.FrontSettings), from the front the launcher recorded; nil when
 // it recorded none, and then nothing is submitted (HBEP-11, open question 8).
-// The pin is the agent endpoint certificate's, which the launcher created; in
-// ssh mode the user is the one who runs this binary, and the two forwarded
-// ports are the Host's (agentapi.Host).
-func frontSettings(f flags) (*providerctl.FrontSettings, error) {
+// The pin is the agent endpoint certificate's, which the launcher created; the
+// frpc digest per cpuArch is the one internal/launcher/frp-pins.txt pins for
+// the frp release the launcher runs (HBEP-4, Submission: Files first), for
+// x86_64 and aarch64 (Helios GH200) alike; in ssh mode the user is the one who
+// runs this binary, and the two forwarded ports are the Host's
+// (agentapi.Host). The settings are checked as agent.json takes them
+// (checkFront), so a value every submission would fail on stops the binary
+// here, before anything listens.
+func frontSettings(f flags, d deps) (*providerctl.FrontSettings, error) {
 	if f.frontMode == "" {
 		return nil, nil
 	}
@@ -113,18 +143,60 @@ func frontSettings(f flags) (*providerctl.FrontSettings, error) {
 	if err != nil {
 		return nil, err
 	}
+	digests, err := d.digests()
+	if err != nil {
+		return nil, fmt.Errorf("the frpc digests: %w", err)
+	}
 	fs := &providerctl.FrontSettings{
 		Mode: agentapi.DialHomeMode(f.frontMode), Endpoint: f.frontAddr, CertPin: pin,
-		FrpcDigests: maps.Clone(frpcDigests),
+		FrpcDigests: maps.Clone(digests),
 	}
 	if fs.Mode == agentapi.DialHomeSSH {
-		u, err := user.Current()
+		u, err := d.user()
 		if err != nil {
 			return nil, fmt.Errorf("the ssh dial-home user: %w", err)
 		}
-		fs.SSHUser, fs.AgentPort, fs.DialHomePort = u.Username, f.host.AgentEndpointPort(), f.host.DialHomePort()
+		fs.SSHUser, fs.AgentPort, fs.DialHomePort = u, f.host.AgentEndpointPort(), f.host.DialHomePort()
+	}
+	if err := checkFront(fs); err != nil {
+		return nil, fmt.Errorf("the front settings: %w", err)
 	}
 	return fs, nil
+}
+
+// sampleTag, sampleStaging and sampleDialHome stand in, in checkFront, for
+// the values a Create fills from the Allocation and the platform.
+var (
+	sampleTag      = v1alpha1.JobTag("example", "example", "00000000-0000-0000-0000-000000000000")
+	sampleStaging  = "/scratch/example/stage"
+	sampleDialHome = filepath.Join("/home/example", agentapi.DialHomeDir)
+)
+
+// checkFront encodes, for each cpuArch, the agent.json a Create would write,
+// through agentapi's own Encode and its validation, with the front's values
+// and sample ones for the rest. Validation used to happen only at Encode,
+// inside a Create and after the platform calls, so a front address without a
+// usable port, a digest that is not 64 lowercase hex characters or a user
+// name agentapi refuses let the binary start, report ready and fail every
+// submission (review of PR 132: B3).
+func checkFront(fs *providerctl.FrontSettings) error {
+	if len(fs.FrpcDigests) == 0 {
+		return errors.New("no frpc digest is configured for any cpuArch")
+	}
+	var errs []error
+	for _, arch := range slices.Sorted(maps.Keys(fs.FrpcDigests)) {
+		c := agentapi.AgentConfig{
+			ProtocolVersion: agentapi.ProtocolVersion, Tag: sampleTag, Mode: fs.Mode, Endpoint: fs.Endpoint,
+			CertSPKISHA256: fs.CertPin, FrpcDigest: fs.FrpcDigests[arch], StagingDir: sampleStaging, DialHomeDir: sampleDialHome,
+		}
+		if fs.Mode == agentapi.DialHomeSSH {
+			c.SSH = &agentapi.SSHForward{User: fs.SSHUser, AgentPort: fs.AgentPort, DialHomePort: fs.DialHomePort}
+		}
+		if _, err := c.Encode(); err != nil {
+			errs = append(errs, fmt.Errorf("agent.json for cpuArch %s: %w", arch, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // certPin reads the agent endpoint's PEM certificate and returns its pin.
@@ -167,8 +239,29 @@ type wiring struct {
 	log         logr.Logger
 }
 
+// providerGrace is each Provider manager's shutdown grace. The Provider
+// managers run inside the lifecycle manager, whose grace is controller-runtime's
+// default, 30 s (lifecycle.NewManager sets none), and hpcburst down sends
+// SIGKILL 30 s after SIGTERM (launcher.DefaultGrace), so a longer outer grace
+// would not help. At a stop the lifecycle manager first stops the components,
+// and with them every Provider manager at once (providerctl.Supervisor), each
+// for at most providerGrace; that leaves 10 s for the lifecycle controller,
+// the caches, the health server and the Leases' release. With equal graces a
+// Provider controller still busy at the stop (a submission's outcome is
+// written for up to 30 s; providerctl's Create) used up the outer grace, and a
+// normal SIGTERM became exit 1 (review of PR 132: N3).
+//
+// When this replica loses the lifecycle Lease instead, controller-runtime sets
+// the lifecycle manager's grace to 0 (its OnStoppedLeading), so run returns at
+// once with an error, without waiting for the Provider managers, and main
+// exits 1. They get no graceful stop and their Leases are not released: each
+// expires after its duration (controller-runtime's 15 s; providerctl's
+// ManagerOptions), and then another replica can take it. No change is needed
+// for that (review of PR 132: N3).
+const providerGrace = 20 * time.Second
+
 func (w wiring) newProviderManager(provider string) (manager.Manager, error) {
-	return providerctl.NewProviderManager(w.cfg, w.scheme, provider, providerctl.ManagerOptions{})
+	return providerctl.NewProviderManager(w.cfg, w.scheme, provider, providerctl.ManagerOptions{GracefulShutdownTimeout: providerGrace})
 }
 
 // setupBatch registers a batch Provider's controller with its manager. Its

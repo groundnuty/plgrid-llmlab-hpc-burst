@@ -24,8 +24,9 @@
 // Host.AgentBuildsDir(); the agent API binds Host.AgentEndpointAddr().
 //
 // It exits 0 after SIGTERM or SIGINT once the manager has stopped, 1 on a
-// failure (a Provider-manager scheme without apps/v1 is one, refused before
-// anything starts), and 2 on a usage error.
+// failure (a Provider-manager scheme without apps/v1, and front settings that
+// agent.json would refuse, are refused before anything starts), and 2 on a
+// usage error.
 package main
 
 import (
@@ -145,7 +146,7 @@ func run(ctx context.Context, f flags, d deps) error {
 	if err := checkCredentialsDir(f.host.CredentialsDir()); err != nil {
 		return err
 	}
-	front, err := frontSettings(f)
+	front, err := frontSettings(f, d)
 	if err != nil {
 		return err
 	}
