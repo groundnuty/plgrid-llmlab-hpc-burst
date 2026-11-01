@@ -43,10 +43,32 @@ var agentWant = map[string]struct {
 // combined output and exit code. Extra environment entries come last and win.
 func runBuildAgents(t *testing.T, root string, args []string, env ...string) (string, int) {
 	t.Helper()
+	return runBuildAgentsIn(t, root, "", args, env...)
+}
+
+// runBuildAgentsIn is runBuildAgents with the working directory wd (empty: this process's). An env
+// entry of the form -NAME removes NAME from the inherited environment instead of setting it.
+func runBuildAgentsIn(t *testing.T, root, wd string, args []string, env ...string) (string, int) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), buildAgentsTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", append([]string{filepath.Join(root, "hack", "build-agents.sh")}, args...)...)
-	cmd.Env = append(os.Environ(), env...)
+	cmd.Dir = wd
+	removed := map[string]bool{}
+	var set []string
+	for _, e := range env {
+		if strings.HasPrefix(e, "-") {
+			removed[e[1:]] = true
+		} else {
+			set = append(set, e)
+		}
+	}
+	for _, e := range os.Environ() {
+		if name, _, _ := strings.Cut(e, "="); !removed[name] {
+			cmd.Env = append(cmd.Env, e)
+		}
+	}
+	cmd.Env = append(cmd.Env, set...)
 	out, err := cmd.CombinedOutput()
 	var ee *exec.ExitError
 	if errors.As(err, &ee) {
@@ -186,14 +208,21 @@ func TestBuildAgentsIsReproducibleFromAnotherPath(t *testing.T) {
 		t.Fatal("the copy has a .git")
 	}
 	a, b := t.TempDir(), t.TempDir()
+	// What `go env -w` saved on the copy's caller's machine: an experiment, flags and an architecture
+	// level, each of which would change the bytes if the go command read it.
+	savedConfig := filepath.Join(t.TempDir(), "go-env")
+	if err := os.WriteFile(savedConfig, []byte("GOEXPERIMENT=arenas\nGOFLAGS=-ldflags=-buildid=saved -gcflags=all=-N\nGOAMD64=v3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	// The copy is built by a caller whose environment asks for other architecture levels, which the
 	// script ignores (it pins Go's defaults), for the local toolchain, which the script ignores too
-	// (it pins go.mod's), for a build parallelism, which does not change the bytes, and for a go.work
-	// that names nothing.
+	// (it pins go.mod's), for flags of its own (-p changes nothing, -ldflags and -tags change the
+	// bytes), for a saved go configuration, for the FIPS 140 module, and for a go.work that names nothing.
 	for _, run := range []struct {
 		root, dir string
 		env       []string
-	}{{root, a, nil}, {copyRoot, b, []string{"GOAMD64=v3", "GOARM64=v8.2", "GOFLAGS=-p=3", "GOTOOLCHAIN=local", "GOWORK=" + filepath.Join(copyRoot, "no-such.work")}}} {
+	}{{root, a, nil}, {copyRoot, b, []string{"GOAMD64=v3", "GOARM64=v8.2", "GOFLAGS=-p=3 -ldflags=-buildid=host-B -tags=sometag", "GOTOOLCHAIN=local",
+		"GOENV=" + savedConfig, "GOFIPS140=latest", "GOWORK=" + filepath.Join(copyRoot, "no-such.work")}}} {
 		if out, code := runBuildAgents(t, run.root, []string{run.dir}, run.env...); code != 0 {
 			t.Fatalf("building from %s: exit %d:\n%s", run.root, code, out)
 		}
@@ -310,9 +339,10 @@ func TestBuildAgentsKeepsTheStaleBuildWhenTheCompilationFails(t *testing.T) {
 	}
 }
 
-// The toolchain is go.mod's go line, nothing else. A go.mod without one has no toolchain to pin, so
-// nothing is built; a go line naming a Go that cannot be had (here: one the module proxy cannot be
-// asked for) stops the run before any build, and does not fall back to the Go on PATH.
+// The toolchain is go.mod's go line, nothing else (the environment it is given to the go command in is
+// the subject of build_agents_env_test.go). A go.mod without one has no toolchain to pin, so nothing is
+// built; a go line naming a Go that cannot be had (here: one the module proxy cannot be asked for) stops
+// the run before any build, and does not fall back to the Go on PATH.
 func TestBuildAgentsPinsTheToolchainOrStops(t *testing.T) {
 	requireGNU(t)
 	t.Run("no go line", func(t *testing.T) {
@@ -324,50 +354,6 @@ func TestBuildAgentsPinsTheToolchainOrStops(t *testing.T) {
 		out, code := runBuildAgents(t, copyRoot, []string{dir})
 		if code != 1 || !strings.Contains(out, "no go line") || len(dirNames(t, dir)) != 0 {
 			t.Errorf("exit %d, dir %v:\n%s", code, dirNames(t, dir), out)
-		}
-	})
-	// A go on PATH that logs what it is given and runs the real one: the toolchain is the pinned one
-	// whatever the caller asked for, and the caller's GOFLAGS stay with -mod=readonly after them.
-	t.Run("what the go command is given", func(t *testing.T) {
-		realGo, err := exec.LookPath("go")
-		if err != nil {
-			t.Fatal(err)
-		}
-		shim, logFile := t.TempDir(), filepath.Join(t.TempDir(), "calls")
-		script := "#!/bin/sh\necho \"$1|$GOFLAGS|$GOTOOLCHAIN\" >> \"$SHIM_LOG\"\nexec \"$REAL_GO\" \"$@\"\n"
-		if err := os.WriteFile(filepath.Join(shim, "go"), []byte(script), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		root, err := repoRoot()
-		if err != nil {
-			t.Fatal(err)
-		}
-		dir := t.TempDir()
-		out, code := runBuildAgents(t, root, []string{dir, "aarch64"}, "PATH="+shim+string(os.PathListSeparator)+os.Getenv("PATH"),
-			"REAL_GO="+realGo, "SHIM_LOG="+logFile, "GOFLAGS=-p=3", "GOTOOLCHAIN=local")
-		if code != 0 {
-			t.Fatalf("exit %d:\n%s", code, out)
-		}
-		b, err := os.ReadFile(logFile)
-		if err != nil {
-			t.Fatal(err)
-		}
-		pin := "go" + goModVersion(t)
-		var sawBuild bool
-		for _, call := range strings.Split(strings.TrimSpace(string(b)), "\n") {
-			f := strings.Split(call, "|")
-			if len(f) != 3 || f[2] != pin {
-				t.Errorf("go was called as %q, want the toolchain %s in every call", call, pin)
-			}
-			if f[0] == "build" {
-				sawBuild = true
-				if f[1] != "-p=3 -mod=readonly" {
-					t.Errorf("go build got GOFLAGS %q, want the caller's -p=3 and then -mod=readonly", f[1])
-				}
-			}
-		}
-		if !sawBuild {
-			t.Errorf("no go build call was logged:\n%s", b)
 		}
 	})
 	t.Run("a toolchain that cannot be had", func(t *testing.T) {
