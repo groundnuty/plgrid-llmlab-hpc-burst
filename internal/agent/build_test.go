@@ -13,7 +13,7 @@ import (
 
 // As an image build starts, the agent reports it: while Apptainer's pull is
 // held, the last report already says "building image <image>@<digest> in the
-// temporary directory <TMPDIR>", so a build that runs out of the job's memory
+// job's temporary directory ($TMPDIR)", so a build that runs out of the job's memory
 // (OUT_OF_MEMORY, AllocationFailed) leaves that report last. Once the build is
 // done, the report carries its peak TMPDIR use (statfs, the production
 // sampler) and no build tree is left under TMPDIR (science-agent rulings,
@@ -48,7 +48,7 @@ exec %[3]s "$@"
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	want := "building image docker.io/vllm/vllm-openai@" + hDigest + " in the temporary directory " + h.runDir
+	want := "building image docker.io/vllm/vllm-openai@" + hDigest + " in the job's temporary directory ($TMPDIR)"
 	h.waitReport("the build reported while held", 20*time.Second, func(r agentapi.Report) bool {
 		return r.Instance != nil && r.Instance.Staging != nil && r.Instance.Staging.Message == want
 	})

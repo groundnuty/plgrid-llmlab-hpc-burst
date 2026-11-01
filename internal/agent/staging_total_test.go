@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,13 +24,14 @@ func TestStalledUnknownLengthWithdrawsTheTotal(t *testing.T) {
 	sum := sha256.Sum256([]byte(held))
 	heldFile := agentapi.FileDigest{Path: "tokenizer.json", SHA256: hex.EncodeToString(sum[:])}
 	holding, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
 	h := newHarness(t, harnessOptions{hubIntercept: func(w http.ResponseWriter, r *http.Request) bool {
 		if !strings.HasSuffix(r.URL.Path, "/"+heldFile.Path) {
 			return false
 		}
 		w.WriteHeader(http.StatusOK)
 		w.(http.Flusher).Flush() // the headers, chunked: no Content-Length
-		close(holding)
+		once.Do(func() { close(holding) })
 		select {
 		case <-release:
 		case <-r.Context().Done():

@@ -110,6 +110,8 @@ type harnessOptions struct {
 	tunnel agent.Tunnel
 	// home, when set, is the agent's HOME in place of the test process's.
 	home string
+	// buildReportTimeout is Options.BuildReportTimeout (the default when 0).
+	buildReportTimeout time.Duration
 }
 
 // newHarness starts a real agent against a fake Backend behind a fake Gate,
@@ -215,6 +217,7 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 		StartupProbeInterval: 50 * time.Millisecond,
 		MinBackoff:           20 * time.Millisecond,
 		MaxBackoff:           200 * time.Millisecond,
+		BuildReportTimeout:   o.buildReportTimeout,
 	})
 	if err != nil {
 		t.Fatal(err)

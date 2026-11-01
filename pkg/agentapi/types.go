@@ -334,14 +334,21 @@ type Staging struct {
 	BytesDone  int64        `json:"bytesDone,omitempty"`
 	BytesTotal int64        `json:"bytesTotal,omitempty"`
 	// Message is free text, cut to MaxMessageBytes (TruncateUTF8). While an
-	// image is built it reads "building image <image>@<digest> in the
-	// temporary directory <TMPDIR>", sent as the build starts, so the last
+	// image is built it reads "building image <image>@<digest> in the job's
+	// temporary directory ($TMPDIR)", naming the directory by its variable,
+	// not its path, which can hold the job's ID. The agent sends it before
+	// the build starts, and the build waits for its delivery, so the last
 	// report before a build that runs out of the job's memory (the job then
-	// ends OUT_OF_MEMORY, AllocationFailed) names the build (HBEP-4).
+	// ends OUT_OF_MEMORY, AllocationFailed) names the build (HBEP-4; PR #138
+	// review). It is cleared when the build ends.
 	Message string `json:"message,omitempty"`
 	// BuildPeakTmpBytes is the peak use, in bytes, of the job's temporary
 	// directory while the agent built the Instance's image (a pull to a SIF
-	// or a sandbox build, on a cache miss); absent when no build ran. The
+	// or a sandbox build, on a cache miss). It is reported as soon as the
+	// build ends, written or failed, and every later staging report of the
+	// Instance carries it, a failed one or a restage that finds the image
+	// cached too (PR #138 review). Absent when no build has run for the
+	// Instance, or when none of the build's samples succeeded. The
 	// agent samples it with statfs, (blocks - free blocks) * block size,
 	// every 250 ms and once more when the build ends, so a shorter spike can
 	// be missed. On a per-job tmpfs such as Helios's $MEMFS it counts the

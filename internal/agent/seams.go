@@ -109,7 +109,8 @@ type ImageResult struct {
 	Path string
 	// BuildPeakTmpBytes is the peak use of the temporary directory while the
 	// image was built (agentapi.Staging.BuildPeakTmpBytes); 0 when no build
-	// ran.
+	// ran or none of its samples succeeded. Image sets it on a build that
+	// failed too, beside its error.
 	BuildPeakTmpBytes int64
 	// Verified says the image's content was checked at this staging against
 	// its integrity record: a SIF's SHA-256 sidecar, a sandbox's manifest,
@@ -127,6 +128,8 @@ type Stager interface {
 	// staged image against the integrity record written when it was pulled or
 	// built, pulls or builds it again when the check fails, and returns its
 	// absolute path (agentapi.StagedImagePath under the staging directory).
+	// When it fails after a build ran, the result still carries the build's
+	// BuildPeakTmpBytes.
 	Image(ctx context.Context, image, digest string, format agentapi.ImageFormat) (ImageResult, error)
 	// Checkpoint stages the checkpoint's missing files and rehashes the
 	// present ones.
@@ -140,7 +143,10 @@ type imageBuildKey struct{}
 // Apptainer runs, with the temporary directory it builds in: the agent then
 // reports the build, so the last report before a build that runs out of the
 // job's memory names it (HBEP-4; science-agent ruling, 1 Nov 2026, issue
-// #125).
+// #125). Apptainer starts only once fn returns, and the agent's fn returns
+// once that report has been delivered (Options.BuildReportTimeout), so the
+// report precedes the build (PR #138 review, Astra B3); Image does not start
+// the build when ctx has ended meanwhile.
 func WithImageBuild(ctx context.Context, fn func(tmpDir string)) context.Context {
 	return context.WithValue(ctx, imageBuildKey{}, fn)
 }

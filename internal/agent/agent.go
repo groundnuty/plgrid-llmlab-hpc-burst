@@ -28,6 +28,8 @@ const (
 	DefaultStartupProbeInterval = 2 * time.Second
 	// finalReportTimeout bounds the tries of the last report after a stop.
 	finalReportTimeout = 30 * time.Second
+	// DefaultBuildReportTimeout applies when Options.BuildReportTimeout is 0.
+	DefaultBuildReportTimeout = 30 * time.Second
 )
 
 // Options configure an Agent.
@@ -69,6 +71,11 @@ type Options struct {
 	// MinBackoff and MaxBackoff bound the retries of a failed call (1 s and
 	// 30 s when 0).
 	MinBackoff, MaxBackoff time.Duration
+	// BuildReportTimeout bounds how long an image build waits for the report
+	// that announces it to be delivered before Apptainer starts
+	// (DefaultBuildReportTimeout when 0): with the endpoint unreachable, the
+	// build then starts anyway.
+	BuildReportTimeout time.Duration
 	// Now is the clock (time.Now when nil).
 	Now func() time.Time
 }
@@ -168,6 +175,9 @@ func New(o Options) (*Agent, error) {
 	}
 	if o.Now == nil {
 		o.Now = time.Now
+	}
+	if o.BuildReportTimeout <= 0 {
+		o.BuildReportTimeout = DefaultBuildReportTimeout
 	}
 	if o.LogDir == "" {
 		o.LogDir = o.RunDir
@@ -283,6 +293,14 @@ func (a *Agent) offer(force bool) {
 	}
 	a.lastOffered = key
 	a.rep.offer(r)
+}
+
+// offerNow hands the reporter the current snapshot and returns its sequence
+// number, for reporter.waitSent.
+func (a *Agent) offerNow() uint64 {
+	r := a.snapshot()
+	a.lastOffered = snapshotKey(r)
+	return a.rep.offer(r)
 }
 
 // snapshotKey is the snapshot without its time, to tell a change.
@@ -403,34 +421,82 @@ func (b *backoff) reset() { b.cur = b.min }
 // reporter sends the newest snapshot it was offered, retrying failures with
 // backoff. It runs on its own goroutine, so a slow or lost endpoint never
 // holds up the loop.
+//
+// Each offer gets the next sequence number, and the reporter keeps the
+// highest one it has sent: a newer snapshot supersedes an older one not yet
+// sent, and carries everything the older one did that still holds, so a sent
+// number at or above an offer's means that offer's state reached the endpoint
+// (waitSent).
 type reporter struct {
-	a    *Agent
-	mu   sync.Mutex
-	next *agentapi.Report
-	kick chan struct{}
-	done chan struct{} // closed when run returns
+	a         *Agent
+	mu        sync.Mutex
+	next      *agentapi.Report
+	queuedSeq uint64
+	seq       uint64        // the last number given to an offer
+	sent      uint64        // the highest number sent
+	sentCh    chan struct{} // closed, and replaced, when sent rises
+	kick      chan struct{}
+	done      chan struct{} // closed when run returns
 }
 
 func newReporter(a *Agent) *reporter {
-	return &reporter{a: a, kick: make(chan struct{}, 1), done: make(chan struct{})}
+	return &reporter{a: a, kick: make(chan struct{}, 1), done: make(chan struct{}), sentCh: make(chan struct{})}
 }
 
-func (r *reporter) offer(rep agentapi.Report) {
+// offer queues rep, superseding any snapshot not yet sent, and returns its
+// sequence number.
+func (r *reporter) offer(rep agentapi.Report) uint64 {
 	r.mu.Lock()
-	r.next = &rep
+	r.seq++
+	n := r.seq
+	r.next, r.queuedSeq = &rep, n
 	r.mu.Unlock()
 	select {
 	case r.kick <- struct{}{}:
 	default:
 	}
+	return n
 }
 
-func (r *reporter) take() *agentapi.Report {
+func (r *reporter) take() (*agentapi.Report, uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	n := r.next
+	n, seq := r.next, r.queuedSeq
 	r.next = nil
-	return n
+	return n, seq
+}
+
+// markSent records that the snapshot offered as seq reached the endpoint.
+func (r *reporter) markSent(seq uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if seq > r.sent {
+		r.sent = seq
+		close(r.sentCh)
+		r.sentCh = make(chan struct{})
+	}
+}
+
+// waitSent waits until a snapshot offered as seq or later has been sent, and
+// says whether one was; it gives up when ctx ends or timeout passes.
+func (r *reporter) waitSent(ctx context.Context, seq uint64, timeout time.Duration) bool {
+	t := time.NewTimer(timeout)
+	defer t.Stop()
+	for {
+		r.mu.Lock()
+		sent, ch := r.sent, r.sentCh
+		r.mu.Unlock()
+		if sent >= seq {
+			return true
+		}
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return false
+		case <-t.C:
+			return false
+		}
+	}
 }
 
 func (r *reporter) run(ctx context.Context) {
@@ -443,7 +509,7 @@ func (r *reporter) run(ctx context.Context) {
 		case <-r.kick:
 		}
 		for {
-			rep := r.take()
+			rep, seq := r.take()
 			if rep == nil {
 				break
 			}
@@ -454,12 +520,13 @@ func (r *reporter) run(ctx context.Context) {
 				r.a.log.Warn("report failed; retrying", "code", codeOf(err), "err", err)
 				r.mu.Lock()
 				if r.next == nil { // keep the failed one unless a newer came
-					r.next = rep
+					r.next, r.queuedSeq = rep, seq
 				}
 				r.mu.Unlock()
 				b.wait(ctx)
 				continue
 			}
+			r.markSent(seq)
 			b.reset()
 		}
 	}

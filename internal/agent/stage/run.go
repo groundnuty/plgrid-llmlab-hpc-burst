@@ -41,12 +41,12 @@ func (s *Stager) runApptainer(ctx context.Context, args []string) (int64, error)
 	if err != nil {
 		return 0, err
 	}
-	defer removeAll(cache)
+	defer s.removeTree(cache)
 	build, err := os.MkdirTemp(s.c.TmpDir, "hb-apptainer-tmp-")
 	if err != nil {
 		return 0, err
 	}
-	defer removeAll(build)
+	defer s.removeTree(build)
 	var sampled sampler
 	stopSampling := sampled.start(s.c.UsedSpace, s.c.TmpDir, s.c.SampleEvery)
 	g, err := procgroup.Start(procgroup.Spec{
@@ -80,7 +80,10 @@ func (s *Stager) runApptainer(ctx context.Context, args []string) (int64, error)
 	case <-ctx.Done():
 		stop()
 	}
-	peak := stopSampling() // the last sample, before the deferred removals
+	peak, measured := stopSampling() // the last sample, before the deferred removals
+	if !measured {
+		s.logf("apptainer %s: no sample of the use of %s succeeded; the build's peak is unknown", args[0], s.c.TmpDir)
+	}
 	if code := g.ExitCode(); code != 0 {
 		if err := ctx.Err(); err != nil {
 			return peak, fmt.Errorf("apptainer %s: %w", args[0], err)
@@ -93,6 +96,15 @@ func (s *Stager) runApptainer(ctx context.Context, args []string) (int64, error)
 	return peak, nil
 }
 
+// removeTree removes a temporary tree of a run and logs a failure: a tree
+// left on a RAM-disk TmpDir keeps its memory until the job ends (PR #138
+// review, Opus 5).
+func (s *Stager) removeTree(dir string) {
+	if err := removeAll(dir); err != nil {
+		s.logf("removing %s: %v", dir, err)
+	}
+}
+
 // logf writes one line to the log.
 func (s *Stager) logf(format string, a ...any) {
 	fmt.Fprintf(s.c.Log, "stage: "+format+"\n", a...)
@@ -101,19 +113,27 @@ func (s *Stager) logf(format string, a ...any) {
 // UsedSpace returns the bytes in use on the file system that holds path.
 type UsedSpace func(path string) (int64, error)
 
-// statfsUsed is UsedSpace from statfs(2): (blocks - free blocks) * block size.
+// statfsUsed is UsedSpace from statfs(2) (usedBytes).
 func statfsUsed(path string) (int64, error) {
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(path, &st); err != nil {
 		return 0, err
 	}
-	return int64(st.Blocks-st.Bfree) * int64(st.Bsize), nil
+	return usedBytes(st), nil
 }
 
-// sampler keeps the peak of a series of UsedSpace samples.
+// usedBytes is a file system's use from its statfs(2) counts: (blocks - free
+// blocks) * block size, f_blocks, f_bfree and f_bsize.
+func usedBytes(st syscall.Statfs_t) int64 {
+	return int64(st.Blocks-st.Bfree) * int64(st.Bsize)
+}
+
+// sampler keeps the peak of a series of UsedSpace samples, and whether any
+// succeeded.
 type sampler struct {
 	mu   sync.Mutex
 	peak int64
+	ok   bool
 }
 
 func (p *sampler) take(used UsedSpace, path string) {
@@ -123,13 +143,16 @@ func (p *sampler) take(used UsedSpace, path string) {
 	}
 	p.mu.Lock()
 	p.peak = max(p.peak, n)
+	p.ok = true
 	p.mu.Unlock()
 }
 
 // start samples now and then every interval until the returned function is
 // called; that function takes a last sample, waits for the sampling to stop
-// and returns the peak.
-func (p *sampler) start(used UsedSpace, path string, every time.Duration) func() int64 {
+// and returns the peak and whether any sample succeeded. With none, the peak
+// is 0, which the report leaves out: a measurement that failed is not
+// reported as a use of 0 bytes (PR #138 review, Opus 6).
+func (p *sampler) start(used UsedSpace, path string, every time.Duration) func() (int64, bool) {
 	p.take(used, path)
 	done, stopped := make(chan struct{}), make(chan struct{})
 	go func() {
@@ -145,12 +168,12 @@ func (p *sampler) start(used UsedSpace, path string, every time.Duration) func()
 			}
 		}
 	}()
-	return func() int64 {
+	return func() (int64, bool) {
 		close(done)
 		<-stopped
 		p.take(used, path)
 		p.mu.Lock()
 		defer p.mu.Unlock()
-		return p.peak
+		return p.peak, p.ok
 	}
 }

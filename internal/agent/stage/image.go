@@ -104,7 +104,9 @@ func (s *Stager) Image(ctx context.Context, image, digest string, format agentap
 	}
 	var peak int64
 	if err := s.stageImage(ctx, image, digest, format, final, hex, &peak); err != nil {
-		return agent.ImageResult{}, err
+		// A build that ran and failed still reports its peak (PR #138
+		// review, Astra B4).
+		return agent.ImageResult{BuildPeakTmpBytes: peak}, err
 	}
 	ok.BuildPeakTmpBytes = peak
 	return ok, nil
@@ -214,6 +216,9 @@ func (s *Stager) stageImage(ctx context.Context, image, digest string, format ag
 	}
 	if hook := agent.ImageBuildHook(ctx); hook != nil {
 		hook(s.c.TmpDir)
+		if err := ctx.Err(); err != nil {
+			return fail(err)
+		}
 	}
 	peak, err := s.runApptainer(ctx, args)
 	*buildPeak = peak
