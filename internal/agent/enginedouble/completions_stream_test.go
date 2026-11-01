@@ -114,6 +114,9 @@ func TestCompletionStreamedTextEqualsTheWholeAnswer(t *testing.T) {
 	var text strings.Builder
 	var ids []int32
 	for _, c := range completionChunks(t, s.streamAt("/v1/completions", body())) {
+		if len(c.Choices) == 0 {
+			continue
+		}
 		text.WriteString(c.Choices[0].Text)
 		ids = append(ids, c.Choices[0].TokenIDs...)
 	}
