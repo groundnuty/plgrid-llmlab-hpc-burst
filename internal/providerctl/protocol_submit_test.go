@@ -76,12 +76,6 @@ func TestRejectedOutcomeWaitsForTheBackoffThenRetries(t *testing.T) {
 	}
 }
 
-// ptHarnessFront is the front newEnv configures.
-func ptHarnessFront() *FrontSettings {
-	return &FrontSettings{Mode: agentapi.DialHomeDirect, Endpoint: "front.example.org:29443", CertPin: strings.Repeat("c", 64),
-		FrpcDigests: map[string]string{testArch: strings.Repeat("d", 64)}}
-}
-
 // The prerequisites (create.go: prerequisites; docs/development.md): no
 // credential file, no front, or an agent build with another digest keeps the
 // Allocation Submitting with a reason, with no sbatch, no staged file and no
@@ -109,7 +103,7 @@ func TestPrerequisitesKeepTheAllocationFromSubmitting(t *testing.T) {
 			mods:   []envOption{func(e *env) { e.opts.Front = nil }},
 			breaks: func(*env, *v1alpha1.Allocation) {},
 			fix: func(e *env, _ *v1alpha1.Allocation) {
-				e.opts.Front = ptHarnessFront()
+				e.opts.Front = exampleFront(e.t, e.buildDir) // the front newEnv configures
 				e.build()
 			},
 		},
@@ -211,9 +205,8 @@ func TestUnresolvedPathMakesNoFileCallAndNoSbatch(t *testing.T) {
 // the error names DialHomeKeyMissing. With the keys, the same Allocation submits.
 func TestMissingDialHomeKeyKeepsTheSubmissionBack(t *testing.T) {
 	sshFront := func(e *env) {
-		e.opts.Front = &FrontSettings{Mode: agentapi.DialHomeSSH, Endpoint: "control.example.org:22",
-			CertPin: strings.Repeat("c", 64), SSHUser: "example-user", AgentPort: 29444, DialHomePort: 29448,
-			FrpcDigests: map[string]string{testArch: strings.Repeat("d", 64)}}
+		f := e.opts.Front
+		f.Mode, f.Endpoint, f.SSHUser, f.AgentPort, f.DialHomePort = agentapi.DialHomeSSH, "control.example.org:22", "example-user", 29444, 29448
 	}
 	for _, m := range ptModes {
 		t.Run(m.name, func(t *testing.T) {

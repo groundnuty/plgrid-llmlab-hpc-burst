@@ -102,7 +102,7 @@ func (sh *shell) squeue(args []string) int {
 		Meta: sh.p.newMeta(sh.s.user, "squeue"), Errors: []any{}, Warnings: []any{},
 	}
 	for _, j := range rows {
-		resp.Jobs = append(resp.Jobs, squeueJobOf(j))
+		resp.Jobs = append(resp.Jobs, squeueJobOf(j, sh.p.minute()))
 	}
 	out, err := marshalOut(resp)
 	if err != nil {
@@ -175,7 +175,9 @@ func (p *Platform) find(id int) *job {
 	return nil
 }
 
-func squeueJobOf(j *job) squeueJob {
+// squeueJobOf is j's job object; minute is the wall time of one minute of
+// --time (RunMode.Minute), which the projected end_time of a running job uses.
+func squeueJobOf(j *job, minute time.Duration) squeueJob {
 	e := j.cur()
 	state := e.state
 	// Slurm reports hold = (priority == 0); derive it the same way. A requeued
@@ -185,7 +187,7 @@ func squeueJobOf(j *job) squeueJob {
 	if state == Pending && j.held {
 		prio = nv(0)
 	}
-	limit := time.Duration(j.timeLimit) * time.Minute
+	limit := time.Duration(j.timeLimit) * minute
 	start, end := nvTime(e.start), NV{}
 	switch {
 	case state == Pending:

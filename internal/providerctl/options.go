@@ -43,6 +43,13 @@ type FrontSettings struct {
 	Endpoint string
 	// CertPin is the agent endpoint certificate's pin (agentapi.PinOf).
 	CertPin string
+	// CertPEM is that certificate, as the launcher keeps it
+	// (agentapi.Host.AgentCertFile): exactly one PEM certificate, whose pin is
+	// CertPin. Create stages it, unchanged, as every Allocation's
+	// alloc/<tag>/dial-home.crt, which frpc verifies the front with (HBEP-4,
+	// Submission: Files first; HBEP-6, frpc in the job). Both dial-home modes
+	// run frpc, so both need it (CheckCertificate).
+	CertPEM []byte
 	// SSHUser, AgentPort and DialHomePort are the ssh mode's user on the
 	// control-plane host, the agent endpoint's loopback port and the dial-home
 	// listener's loopback port (agentapi.Host.DialHomePort).
@@ -52,9 +59,25 @@ type FrontSettings struct {
 	// FrpcDigests is the SHA-256 of the frpc binary for each cpuArch, as
 	// internal/launcher/frp-pins.txt pins it (HBEP-15; HBEP-4, Submission:
 	// Files first). The digest depends on the partition's cpuArch, so
-	// agent.json takes the one for the Allocation's partition. Staging frpc
-	// and the dial-home certificate is not done yet.
+	// agent.json takes the one for the Allocation's partition, and Create
+	// stages the frpc build of that cpuArch in the agent-builds directory
+	// (agentapi.FrpcBuildName) only when its content has this digest.
 	FrpcDigests map[string]string
+}
+
+// CheckCertificate returns an error unless the agent would accept CertPEM as the
+// staged dial-home certificate with the pin CertPin at time now: it is
+// agentapi.VerifyDialHomeCert, the very function the agent runs before it
+// starts frpc (HBEP-6, Certificate checks). Exactly one PEM certificate, with
+// nothing around it, whose pin is CertPin, which names
+// agentapi.DialHomeServerName and is valid at now. Create calls it before any
+// call to the platform, so a certificate the agent would refuse is never staged;
+// the agent's own check stays the last one. The errors never hold the PEM.
+func (f *FrontSettings) CheckCertificate(now time.Time) error {
+	if len(f.CertPEM) == 0 {
+		return errors.New("no dial-home certificate is configured (CertPEM): frpc would verify nothing without one")
+	}
+	return agentapi.VerifyDialHomeCert(f.CertPEM, f.CertPin, now)
 }
 
 // ProfileSource reads and validates a Provider's profile, settings and

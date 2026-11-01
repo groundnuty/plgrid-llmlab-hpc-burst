@@ -49,6 +49,9 @@ import (
 // (v1.35.0, line 72): an expectation not observed within it lapses.
 const expectationsTimeout = 5 * time.Minute
 
+// listTimeout is how long the List under a Provider's lock may take.
+const listTimeout = 30 * time.Second
+
 // slotTable holds the per-Provider locks and the expectations.
 //
 // Lock order (internal/lifecycle): a Provider's lock (slotLock) is taken with
@@ -58,9 +61,12 @@ const expectationsTimeout = 5 * time.Minute
 // Backend.mu, the identity cache, the Hub cache, the metrics views, the
 // secrets sweep) is taken while either is held, and neither is taken while one
 // of those is held. The Provider's lock is held across one List call to the
-// API and no other call.
+// API, bounded by listTimeout, and no other call.
 type slotTable struct {
-	mu sync.Mutex
+	// listTimeout bounds the List call made under a Provider's lock, so one
+	// hung API call cannot hold every worker that reserves on that Provider.
+	listTimeout time.Duration
+	mu          sync.Mutex
 	// locks holds one lock per Provider name, created on first use.
 	locks map[string]*sync.Mutex
 	// expect holds, per Provider, the Allocations (namespace/name) this
@@ -70,7 +76,7 @@ type slotTable struct {
 }
 
 func newSlotTable() *slotTable {
-	return &slotTable{locks: map[string]*sync.Mutex{}, expect: map[string]map[string]time.Time{}}
+	return &slotTable{listTimeout: listTimeout, locks: map[string]*sync.Mutex{}, expect: map[string]map[string]time.Time{}}
 }
 
 func (t *slotTable) slotLock(provider string) *sync.Mutex {
@@ -121,20 +127,28 @@ func (t *slotTable) observe(provider string, seen, listed map[string]bool, now t
 // already holds one or a slot is free, and then counts it until the list shows
 // it or the reservation is released. With no limit it reserves nothing and
 // returns true. count is the Provider's count before this reservation.
-func (t *slotTable) reserve(ctx context.Context, r client.Reader, provider, key string, limit *int32, now time.Time) (ok bool, count int, err error) {
+//
+// now is read once the lock is held and the list is back, and that one time
+// both expires the old expectations and stamps the new one. A time taken when
+// the pass began could be more than expectationsTimeout old by then (a slow
+// identity resolution or Hub call before the reservation), and a reservation
+// stamped with it would lapse at once: another worker could then take the same
+// slot before this one's Allocation is created (review of PR 171, Astra B1).
+func (t *slotTable) reserve(ctx context.Context, r client.Reader, provider, key string, limit *int32, now func() time.Time) (ok bool, count int, err error) {
 	if limit == nil {
 		return true, 0, nil
 	}
 	l := t.slotLock(provider)
 	l.Lock()
 	defer l.Unlock()
-	seen, listed, err := listProviderAllocations(ctx, r, provider)
+	seen, listed, err := t.listBounded(ctx, r, provider)
 	if err != nil {
 		return false, 0, err
 	}
+	at := now()
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	c := t.observe(provider, seen, listed, now)
+	c := t.observe(provider, seen, listed, at)
 	if t.holds(provider, key, c) {
 		return true, c.total(), nil
 	}
@@ -144,7 +158,7 @@ func (t *slotTable) reserve(ctx context.Context, r client.Reader, provider, key 
 	if t.expect[provider] == nil {
 		t.expect[provider] = map[string]time.Time{}
 	}
-	t.expect[provider][key] = now
+	t.expect[provider][key] = at
 	return true, c.total(), nil
 }
 
@@ -158,12 +172,14 @@ func (t *slotTable) release(provider, key string) {
 }
 
 // count returns the Provider's count against its submit limit now, excluding
-// the Allocations in skip (namespace/name), without reserving.
+// the Allocations in skip (namespace/name), without reserving. It is for the
+// no-overlap path of PR 3b, which asks whether a successor could run beside
+// its predecessor; this PR's tests exercise it on the table alone.
 func (t *slotTable) count(ctx context.Context, r client.Reader, provider string, now time.Time, skip ...string) (int, error) {
 	l := t.slotLock(provider)
 	l.Lock()
 	defer l.Unlock()
-	seen, listed, err := listProviderAllocations(ctx, r, provider)
+	seen, listed, err := t.listBounded(ctx, r, provider)
 	if err != nil {
 		return 0, err
 	}
@@ -177,6 +193,13 @@ func (t *slotTable) count(ctx context.Context, r client.Reader, provider string,
 		}
 	}
 	return n, nil
+}
+
+// listBounded is listProviderAllocations with the table's timeout.
+func (t *slotTable) listBounded(ctx context.Context, r client.Reader, provider string) (seen, listed map[string]bool, err error) {
+	ctx, cancel := context.WithTimeout(ctx, t.listTimeout)
+	defer cancel()
+	return listProviderAllocations(ctx, r, provider)
 }
 
 // listProviderAllocations lists the Allocations of every namespace whose
@@ -218,7 +241,7 @@ func submitLimitText(pv *providerView) string {
 // deployment's namespace. When none is free it records the Provider and its
 // limit for SubmitLimitReached and returns false.
 func (p *pass) reserveSlot(pv *providerView, name string) (bool, error) {
-	ok, n, err := p.r.slots().reserve(p.ctx, p.r.Reader, pv.name, p.key.Namespace+"/"+name, pv.limits.MaxSubmitPerUser, p.now)
+	ok, n, err := p.r.slots().reserve(p.ctx, p.r.Reader, pv.name, p.key.Namespace+"/"+name, pv.limits.MaxSubmitPerUser, p.reserveTime)
 	if err != nil || ok {
 		return ok, err
 	}
@@ -228,6 +251,10 @@ func (p *pass) reserveSlot(pv *providerView, name string) (bool, error) {
 	p.noSlot[pv.name] = fmt.Sprintf("Provider %s has %d Allocations not ended, at its %s", pv.name, n, submitLimitText(pv))
 	return false, nil
 }
+
+// reserveTime is the clock's time, as a pass reads it: whole seconds, UTC. A
+// reservation reads it when it is made, never the pass's start time (p.now).
+func (p *pass) reserveTime() time.Time { return p.r.Clock.Now().UTC().Truncate(time.Second) }
 
 // releaseSlot gives back a slot whose creation failed.
 func (p *pass) releaseSlot(pv *providerView, name string) {

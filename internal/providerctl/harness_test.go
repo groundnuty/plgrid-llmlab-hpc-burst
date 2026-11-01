@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/providerctl/ctltest"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
@@ -197,6 +198,17 @@ type env struct {
 
 type envOption func(*env)
 
+// exampleFront is a direct-mode front with an example launcher certificate and
+// the digest of an example frpc build for testArch, which it writes into the
+// agent-builds directory builds. Tests that judge what is staged write their
+// own fixtures and hash them by hand (stage_frpc_test.go).
+func exampleFront(t *testing.T, builds string) *FrontSettings {
+	t.Helper()
+	certPEM, pin := ctltest.Cert(t)
+	return &FrontSettings{Mode: agentapi.DialHomeDirect, Endpoint: "front.example.org:29443", CertPin: pin, CertPEM: certPEM,
+		FrpcDigests: map[string]string{testArch: ctltest.Frpc(t, builds, testArch)}}
+}
+
 // fallback runs fallback mode (holdRelease false).
 func fallback(e *env) {
 	e.profiles.set(func(v *slurm.Validated) { v.Profile.Spec.HoldRelease = false })
@@ -251,8 +263,7 @@ func newEnv(t *testing.T, mods ...envOption) *env {
 		Provider: testProvider, Profiles: e.profiles,
 		NewPlatform: func(slurm.Validated) (Platform, io.Closer, error) { return e.platform, io.NopCloser(nil), nil },
 		Clock:       clock, CredentialsDir: e.credDir, AgentBuildsDir: e.buildDir,
-		Front: &FrontSettings{Mode: agentapi.DialHomeDirect, Endpoint: "front.example.org:29443",
-			CertPin: strings.Repeat("c", 64), FrpcDigests: map[string]string{testArch: strings.Repeat("d", 64)}},
+		Front:    exampleFront(t, e.buildDir),
 		Recorder: e.rec, CreationGracePeriod: -1, Identity: "test-controller",
 	}
 	for _, m := range mods {

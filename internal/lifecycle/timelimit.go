@@ -26,8 +26,9 @@ func leadOf(pv *providerView, md *v1alpha1.ModelDeployment) (lead, drain time.Du
 // longer than the lead an Instance needs, and degrades the deployment with
 // PartitionTooShort naming the partition, the time limit, the bound that set
 // it and the lead. It holds while the Provider is allowed, also when another
-// Provider takes the deployment's Allocations. A Provider whose time limit
-// cannot be worked out is left to partitionSizing, which reports it.
+// Provider takes the deployment's Allocations. A limit that is set but under a
+// minute (a maxWall of 30 s) is too short, named with its raw value; a Provider
+// with no limit at all is left to partitionSizing, which reports it.
 func (p *pass) checkTimeLimits() {
 	for _, pv := range p.providers {
 		if !pv.usable() {
@@ -38,8 +39,8 @@ func (p *pass) checkTimeLimits() {
 			continue
 		}
 		lead, drain := leadOf(pv, p.md)
-		if lim > lead {
-			continue
+		if lim > lead && lim >= time.Minute {
+			continue // a known limit under a minute is too short whatever the lead (Slurm counts whole minutes)
 		}
 		pv.tooShort = fmt.Sprintf("partition %s of Provider %s: its time limit %s, set by %s, is not longer than the lead %s an Instance needs (drain window %s + handoverMargin %s + health.startTimeout %s), so no Allocation is created there (HBEP-7, Provisioning, A partition too short)",
 			pv.partition.Name, pv.name, lim, bound, lead, drain, pv.settings.handoverMargin, pv.settings.startTimeout)

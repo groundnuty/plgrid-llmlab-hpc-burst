@@ -281,11 +281,22 @@ func (p *pass) ensureAllocation(in *v1alpha1.Instance) error {
 	if pv == nil || !pv.usable() || pv.tooShort != "" || !p.canProvision() {
 		return nil // retried on a later pass, when the Provider is usable again
 	}
+	name := in.Spec.AllocationRef.Name
 	params, err := partitionSizing(pv, in.Spec.Launch.GPUs, p.md.Spec.LeaseLimit)
 	if err != nil {
+		// The Provider's limits changed between the two creates (a zero GPU
+		// cap, say), and the pending Instance already counts as a primary, so
+		// provision never reports the refusal: report it here, as provision
+		// does, or the deployment shows AsDesired while the Instance waits for
+		// ever (review of PR 171, Astra B4).
+		var u *unsupported
+		if asUnsupported(err, &u) {
+			p.degrade(v1alpha1.ReasonSpecUnsupported, "Instance %s waits for its Allocation %s: %s", in.Name, name, u.msg)
+		} else {
+			p.degrade(v1alpha1.ReasonProviderUnavailable, "Instance %s waits for its Allocation %s: Provider %s: %v", in.Name, name, pv.name, err)
+		}
 		return nil
 	}
-	name := in.Spec.AllocationRef.Name
 	ok, err := p.reserveSlot(pv, name)
 	if err != nil {
 		return err

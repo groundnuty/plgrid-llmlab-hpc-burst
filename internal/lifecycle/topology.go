@@ -7,6 +7,7 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -184,7 +185,8 @@ func classes(pvs []*providerView) []v1alpha1.AcceleratorClass {
 // size), or a profile without the per-GPU values or a time limit. CPUs and
 // memory, gpus times cpusPerGpu and memPerGpu, are capped at the QOS limits'
 // maxCpusPerUser and maxMemPerUser: they are an allotment in proportion, so a
-// cap shrinks them and leaves the GPU count as it is (HBEP-4, QOS limits).
+// cap shrinks them and leaves the GPU count as it is (HBEP-4, QOS limits). A
+// memory request is capped at the maxMemPerUser in whole MiB, rounded down.
 func partitionSizing(pv *providerView, gpus int32, leaseLimit *v1alpha1.Duration) (v1alpha1.BatchParameters, error) {
 	part := pv.partition
 	maxGPUs, known := v1alpha1.MaxAllocationGPUs(part, pv.limits)
@@ -200,9 +202,14 @@ func partitionSizing(pv *providerView, gpus int32, leaseLimit *v1alpha1.Duration
 		}
 		return v1alpha1.BatchParameters{}, refuse("the serving spec needs %d GPUs (tensor-parallel-size times pipeline-parallel-size), above the %d per node of partition %s; alpha Instances are single-node (HBEP-7, Provisioning)", gpus, *part.GPUsPerNode, part.Name)
 	}
-	lim, _, err := allocationTimeLimit(pv, leaseLimit)
+	lim, bound, err := allocationTimeLimit(pv, leaseLimit)
 	if err != nil {
 		return v1alpha1.BatchParameters{}, err
+	}
+	if lim < time.Minute {
+		// A known limit under a minute is PartitionTooShort (checkTimeLimits);
+		// no Allocation is ever sized for it, whatever the caller does.
+		return v1alpha1.BatchParameters{}, fmt.Errorf("the time limit %s, set by %s on partition %s, is under a minute: Slurm counts whole minutes", lim, bound, part.Name)
 	}
 	cpus := gpus * *part.CPUsPerGPU
 	if q := pv.limits.MaxCPUsPerUser; q != nil && cpus > *q {
@@ -213,12 +220,21 @@ func partitionSizing(pv *providerView, gpus int32, leaseLimit *v1alpha1.Duration
 	}
 	mem := part.MemPerGPU.DeepCopy()
 	mem.Mul(int64(gpus))
-	if q := pv.limits.MaxMemPerUser; q != nil && mem.Cmp(*q) > 0 {
-		if q.Sign() <= 0 {
+	if q := pv.limits.MaxMemPerUser; q != nil {
+		// Slurm counts memory in whole MiB. The provider rounds a request up and
+		// a cap down (internal/slurm: a job never gets less than it asked for
+		// and never more than the cap), so a request is checked against the cap
+		// in whole MiB, rounded down: a request equal to a decimal-unit cap such
+		// as 100G rounds up above the cap's 95,367 MiB and would be refused for
+		// ever (review of PR 171, Astra B2).
+		capMiB := q.Value() >> mibShift
+		if capMiB < 1 {
 			// --mem=0 asks Slurm for a node's whole memory: never send it.
 			return v1alpha1.BatchParameters{}, fmt.Errorf("QOS %s on Provider %s sets %s %s, which leaves an Allocation no memory", pv.limits.From[v1alpha1.LimitMaxMemPerUser], pv.name, v1alpha1.LimitMaxMemPerUser, q.String())
 		}
-		mem = q.DeepCopy()
+		if mem.Value() > capMiB<<mibShift {
+			mem = *resource.NewQuantity(capMiB<<mibShift, resource.BinarySI)
+		}
 	}
 	return v1alpha1.BatchParameters{
 		Partition: part.Name, TimeLimit: formatMinutes(lim), GPUs: gpus,
@@ -248,8 +264,36 @@ func allocationTimeLimit(pv *providerView, leaseLimit *v1alpha1.Duration) (time.
 		lease = &d
 	}
 	lim, bound, ok := v1alpha1.AllocationTimeLimit(maxT, pv.limits.MaxWall, lease)
-	if !ok {
-		return 0, "", fmt.Errorf("partition %s has no maxTime, its QOS no maxWall and the deployment no leaseLimit of a minute or more", part.Name)
+	switch {
+	case bound == "":
+		// None of the three is set: the profile cannot give a time limit.
+		return 0, "", fmt.Errorf("partition %s has no maxTime, its QOS no maxWall and the deployment no leaseLimit", part.Name)
+	case !ok:
+		// A limit is set but rounds to under a minute (maxWall 30s, say). It is
+		// a known, unusably short limit, not an absent one: the caller marks
+		// the Provider too short, naming the bound and its raw value (review
+		// of PR 171, Astra B3).
+		return rawBound(bound, maxT, pv.limits.MaxWall, lease), bound, nil
 	}
 	return lim, bound, nil
 }
+
+// rawBound returns the value of the named bound, before rounding.
+func rawBound(bound v1alpha1.TimeLimitBound, maxTime, maxWall, leaseLimit *time.Duration) time.Duration {
+	var d *time.Duration
+	switch bound {
+	case v1alpha1.TimeLimitMaxTime:
+		d = maxTime
+	case v1alpha1.TimeLimitMaxWall:
+		d = maxWall
+	case v1alpha1.TimeLimitLeaseLimit:
+		d = leaseLimit
+	}
+	if d == nil {
+		return 0
+	}
+	return *d
+}
+
+// mibShift converts bytes to MiB.
+const mibShift = 20

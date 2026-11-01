@@ -113,6 +113,16 @@ type Script struct {
 	// AsTimeLimit establishes the job with this limit instead of the
 	// requested one.
 	AsTimeLimit time.Duration
+	// RegisteredLate, for Unknown, loses the reply as Registered does, but the
+	// scheduler has not registered the job yet: it registers it, held when the
+	// request had Hold, when the next Submit arrives, before that Submit is
+	// checked against the submit limit. So the job takes its user's slot, and
+	// the next attempt is refused for the limit, which is how a reply lost
+	// under a one-job limit plays out (HBEP-4, QOS limits and the Test plan's
+	// "A lost reply under a one-job limit"; internal/slurm/fakeslurm's
+	// LostReplyLate). Until then FindByTag finds nothing. It excludes
+	// Registered, and Enqueue panics on it with any other outcome.
+	RegisteredLate bool
 }
 
 // DefaultScript applies when no Script is queued: Accepted, no queue wait.
@@ -144,6 +154,9 @@ type Batch struct {
 	// liftErrs are the errors the next LiftHold calls return, one each, in
 	// order (FailNextLiftHold).
 	liftErrs []error
+	// late are the jobs a RegisteredLate Script lost the reply of and the
+	// scheduler registers at the next Submit (batch_late.go).
+	late []lateJob
 }
 
 // NewBatch returns a fake Slurm that reads clock.
@@ -178,6 +191,9 @@ func (b *Batch) Enqueue(scripts ...Script) {
 		case "", provider.Accepted, provider.Rejected, provider.Unknown:
 		default:
 			panic(fmt.Sprintf("fake: script has unknown outcome %q", s.Outcome))
+		}
+		if s.RegisteredLate && (s.Outcome != provider.Unknown || s.Registered) {
+			panic(fmt.Sprintf("fake: RegisteredLate needs outcome Unknown and no Registered (outcome %q, Registered %v)", s.Outcome, s.Registered))
 		}
 	}
 	b.mu.Lock()
@@ -266,6 +282,7 @@ func (b *Batch) Submit(_ context.Context, req provider.SubmitRequest) (string, p
 		return "", provider.Rejected, err
 	}
 	b.log("sbatch", req.Tag, req.Params.Partition, string(req.Params.TimeLimit), strconv.Itoa(int(req.Params.GPUs)))
+	b.registerLate() // a job whose reply was lost earlier registers now, before the limit is checked
 	// A full submit limit refuses the call before any Script is read: it
 	// registers nothing and a queued Script is still there for the next Submit.
 	if refusal := b.submitLimitRefusal(b.clock.Now()); refusal != nil {
@@ -284,6 +301,9 @@ func (b *Batch) Submit(_ context.Context, req provider.SubmitRequest) (string, p
 	case provider.Unknown:
 		if sc.Registered {
 			b.register(req, sc)
+		}
+		if sc.RegisteredLate {
+			b.late = append(b.late, lateJob{req: req, sc: sc})
 		}
 		return "", provider.Unknown, errors.New(reasonOr(sc.Reason, "scripted unknown outcome: the reply was lost"))
 	default:
