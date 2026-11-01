@@ -625,7 +625,9 @@ func TestTheFilesStateAndItsRefusalAgreeOnEveryCase(t *testing.T) {
 		{"a valid file", func(t *testing.T, dir, path string) { writeGenerationConfig(t, dir, `{"temperature": 0.6}`) }, present, ""},
 		{"a file with none of the keys", func(t *testing.T, dir, path string) { writeGenerationConfig(t, dir, `{"bos_token_id": 1}`) }, present, ""},
 		{"an empty object", func(t *testing.T, dir, path string) { writeGenerationConfig(t, dir, `{}`) }, present, ""},
-		{"a file above 1 MiB", func(t *testing.T, dir, path string) { writeGenerationConfig(t, dir, paddedGenerationConfig(t, 1<<20+1)) }, present, "larger than 1 MiB"},
+		{"a file above 1 MiB", func(t *testing.T, dir, path string) {
+			writeGenerationConfig(t, dir, paddedGenerationConfig(t, 1<<20+1))
+		}, present, "larger than 1 MiB"},
 		{"a file that is not JSON", func(t *testing.T, dir, path string) { writeGenerationConfig(t, dir, `{`) }, present, "not valid JSON"},
 		{"an empty file", func(t *testing.T, dir, path string) { writeGenerationConfig(t, dir, ``) }, present, "not valid JSON"},
 		{"a file that is not an object", func(t *testing.T, dir, path string) { writeGenerationConfig(t, dir, `[1]`) }, present, "not a JSON object"},

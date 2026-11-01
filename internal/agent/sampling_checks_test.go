@@ -201,6 +201,15 @@ func TestTheChecksSendTheSamplingOfTheirModel(t *testing.T) {
 			if !reflect.DeepEqual(v.GenerationConfig, tc.config) {
 				t.Errorf("GenerationConfig %v, want %v", v.GenerationConfig, tc.config)
 			}
+			// A checkpoint with no file is absent and checked greedily; one with a file
+			// is present (the cases without a file are those with an empty fixture).
+			wantState := "present"
+			if tc.file == "" {
+				wantState = "absent"
+			}
+			if v.GenerationConfigFile != wantState {
+				t.Errorf("GenerationConfigFile %q, want %q", v.GenerationConfigFile, wantState)
+			}
 			if !reflect.DeepEqual(v.DoSample, tc.doSample) {
 				t.Errorf("DoSample %v, want %v", ptrText(v.DoSample), ptrText(tc.doSample))
 			}
@@ -370,14 +379,14 @@ func assertRefusedFileSendsNothing(t *testing.T, reasoning bool, file string, wa
 	sum := sha256.Sum256([]byte(file))
 	files := append(append([]agentapi.FileDigest(nil), defaultFiles...), agentapi.FileDigest{Path: "generation_config.json", SHA256: hex.EncodeToString(sum[:])})
 	h := newHarness(t, harnessOptions{hub: map[string]string{"/org/model/resolve/" + samplingRevision + "/generation_config.json": file}})
-	assertRefusalSendsNothing(t, h, reasoning, files, want, config)
+	assertRefusalSendsNothing(t, h, reasoning, files, "present", want, config)
 }
 
 // assertRefusalSendsNothing runs verification, qualification and warm-up on the
 // harness with files as the file list, and checks the agent's refusal (want and
-// config), that it read nothing from the engine, and that no chat request
-// reached it.
-func assertRefusalSendsNothing(t *testing.T, h *harness, reasoning bool, files []agentapi.FileDigest, want agentapi.GenerationConfigError, config map[string]string) {
+// config) and the state it reports for the file (VerifyResult.GenerationConfigFile),
+// that it read nothing from the engine, and that no chat request reached it.
+func assertRefusalSendsNothing(t *testing.T, h *harness, reasoning bool, files []agentapi.FileDigest, state string, want agentapi.GenerationConfigError, config map[string]string) {
 	t.Helper()
 	checks := &agentapi.Checks{
 		VerificationGeneration: 1,
@@ -401,6 +410,9 @@ func assertRefusalSendsNothing(t *testing.T, h *harness, reasoning bool, files [
 	if !reflect.DeepEqual(v.GenerationConfig, config) {
 		t.Errorf("GenerationConfig %v, want %v", v.GenerationConfig, config)
 	}
+	if v.GenerationConfigFile != state {
+		t.Errorf("GenerationConfigFile %q, want %q", v.GenerationConfigFile, state)
+	}
 	// The agent is told to stop; once the engine has gone, its log is final.
 	h.set(agentapi.DesiredState{Action: agentapi.ActionIdle, Settings: d.Settings})
 	last := h.waitReport("worker stopped", 60*time.Second, func(r agentapi.Report) bool {
@@ -421,9 +433,11 @@ func assertRefusalSendsNothing(t *testing.T, h *harness, reasoning bool, files [
 // lets nobody read it. Only a missing path is absent (the cases of
 // TestTheChecksSendTheSamplingOfTheirModel without a file). The report carries
 // an empty Param and the plain word, no path, and no check request is sent
-// (`@hpc-burst-science-agent`, 1 Nov 2026, for #175 and #182). The mode-000 case
-// is skipped, with its reason, by a process that reads such a file anyway (the
-// superuser).
+// (`@hpc-burst-science-agent`, 1 Nov 2026, for #175 and #182). The report also
+// says the file is "unreadable" (VerifyResult.GenerationConfigFile): the two always
+// come together, so an unreadable file is never reported and then checked greedily.
+// The mode-000 case is skipped, with its reason, by a process that reads such a
+// file anyway (the superuser).
 func TestAnUnreadableFileFailsVerificationAndSendsNoCheckRequest(t *testing.T) {
 	want := agentapi.GenerationConfigError{Param: "", Value: "unreadable", Want: "a JSON object of at most 1 MiB"}
 	for _, tc := range []struct {
@@ -465,7 +479,7 @@ func TestAnUnreadableFileFailsVerificationAndSendsNoCheckRequest(t *testing.T) {
 					t.Fatal(err)
 				}
 				tc.prepare(t, filepath.Join(dir, "generation_config.json"))
-				assertRefusalSendsNothing(t, h, reasoning, defaultFiles, want, nil)
+				assertRefusalSendsNothing(t, h, reasoning, defaultFiles, "unreadable", want, nil)
 			})
 		}
 	}

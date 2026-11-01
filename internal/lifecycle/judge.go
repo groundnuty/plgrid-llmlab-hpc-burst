@@ -300,6 +300,13 @@ func refusedGenerationConfig(v *agentapi.VerifyResult) *agentapi.GenerationConfi
 	if v.GenerationConfigRefused != nil {
 		return v.GenerationConfigRefused
 	}
+	if v.GenerationConfigFile == agentapi.GenerationConfigUnreadable {
+		// The agent found an entry at the path that is not a readable regular
+		// file. It pairs that with a whole-file refusal, so this is not reached
+		// from it; an agent that does not must still never pass the file as
+		// greedy checks (`@hpc-burst-science-agent`, 1 Nov 2026, for #175).
+		return &agentapi.GenerationConfigError{Value: agentapi.FileUnreadable, Want: agentapi.FileWant}
+	}
 	var ge *agentapi.GenerationConfigError
 	if err := agentapi.CheckGenerationConfig(v.GenerationConfig); errors.As(err, &ge) {
 		return ge

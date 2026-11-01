@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"testing"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -47,5 +48,52 @@ func TestTheVerificationMessageSaysWhenTheContractIsStricterThanVLLM(t *testing.
 	want := "generation_config.json's temperature is true, not a number (a JSON boolean is refused here although vLLM would accept it)"
 	if got.Cause != causeContradiction || got.Message != want {
 		t.Errorf("cause %q, message %q\nwant %s and %q", got.Cause, got.Message, causeContradiction, want)
+	}
+}
+
+// The pairing of #175 and the whole-file refusal (`@hpc-burst-science-agent`,
+// 1 Nov 2026): a generation_config.json that is unreadable (the agent reports
+// GenerationConfigFile "unreadable") fails verification with the settings
+// contradiction, with or without the agent's own refusal, and never passes or
+// leaves the checks greedy; an absent file passes, checked greedily, and a
+// present one passes. The record carries the state. The expected verdicts are
+// written out by hand.
+func TestAnUnreadableFileNeverPassesOrIsCheckedGreedily(t *testing.T) {
+	d, base, sh := reasoningSpec()
+	for _, tc := range []struct {
+		name    string
+		state   string
+		refusal *agentapi.GenerationConfigError
+		pass    bool
+		greedy  bool
+	}{
+		{"unreadable with the agent's whole-file refusal", "unreadable", &agentapi.GenerationConfigError{Value: "unreadable", Want: "a JSON object of at most 1 MiB"}, false, false},
+		{"unreadable from an agent that sends no refusal", "unreadable", nil, false, false},
+		{"absent: a pass, checked greedily", "absent", nil, true, true},
+		{"present with no keys: a pass, checked greedily", "present", nil, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := *base
+			r.GenerationConfigFile, r.GenerationConfigRefused = tc.state, tc.refusal
+			if tc.refusal != nil {
+				asTheAgentReportsARefusal(&r, tc.refusal)
+			}
+			got := judgeVerify(d, &r, true, sh)
+			if tc.pass {
+				if got.Verdict != v1alpha1.VerdictPass || got.Sampling == nil || got.Sampling.Greedy != tc.greedy {
+					t.Errorf("verdict %q (%s), sampling %+v, want a pass with greedy %v", got.Verdict, got.Message, got.Sampling, tc.greedy)
+				}
+			} else {
+				if got.Verdict != v1alpha1.VerdictFail || got.Cause != causeContradiction || got.Message != "generation_config.json is unreadable (want a JSON object of at most 1 MiB)" {
+					t.Errorf("verdict %q, cause %q, message %q, want a fail by %s", got.Verdict, got.Cause, got.Message, causeContradiction)
+				}
+				if got.Sampling != nil {
+					t.Errorf("sampling %+v, but no check request may be sent", got.Sampling)
+				}
+			}
+			if got.GenerationConfigFile != tc.state {
+				t.Errorf("the record holds the file state %q, want %q", got.GenerationConfigFile, tc.state)
+			}
+		})
 	}
 }
