@@ -32,6 +32,10 @@ import (
 type gapLock struct {
 	resourcelock.Interface
 
+	// onObserve, when set, runs after each read that counts as the start's
+	// observation: a test waits on it to know the elector has read the Lease.
+	onObserve func()
+
 	mu       sync.Mutex
 	took     bool
 	observed bool
@@ -43,17 +47,29 @@ type gapLock struct {
 // Get implements resourcelock.Interface.
 func (l *gapLock) Get(ctx context.Context) (*resourcelock.LeaderElectionRecord, []byte, error) {
 	rec, raw, err := l.Interface.Get(ctx)
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if !l.took {
-		switch {
-		case apierrors.IsNotFound(err):
-			l.observed, l.previous = true, time.Time{}
-		case err == nil && rec != nil && rec.HolderIdentity != l.Identity():
-			l.observed, l.previous = true, rec.RenewTime.Time
-		}
+	if l.observe(rec, err) && l.onObserve != nil {
+		l.onObserve()
 	}
 	return rec, raw, err
+}
+
+// observe keeps a read made before the take as the start's observation, and
+// reports whether it did.
+func (l *gapLock) observe(rec *resourcelock.LeaderElectionRecord, err error) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.took {
+		return false
+	}
+	switch {
+	case apierrors.IsNotFound(err):
+		l.observed, l.previous = true, time.Time{}
+	case err == nil && rec != nil && rec.HolderIdentity != l.Identity():
+		l.observed, l.previous = true, rec.RenewTime.Time
+	default:
+		return false
+	}
+	return true
 }
 
 // Create implements resourcelock.Interface.

@@ -54,11 +54,26 @@ func (l *memLock) setLocked(r resourcelock.LeaderElectionRecord) {
 
 // write sets the record as another process would, with a lease of 1 s: the
 // elector judges a holder's expiry by the record's own duration.
-func (l *memLock) write(holder string, renew time.Time) {
+func (l *memLock) write(holder string, renew time.Time) { l.writeFor(holder, renew, 1) }
+
+// writeFor sets the record with a lease of the given seconds.
+func (l *memLock) writeFor(holder string, renew time.Time, seconds int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	t := metav1.NewTime(renew)
-	l.setLocked(resourcelock.LeaderElectionRecord{HolderIdentity: holder, LeaseDurationSeconds: 1, AcquireTime: t, RenewTime: t})
+	l.setLocked(resourcelock.LeaderElectionRecord{HolderIdentity: holder, LeaseDurationSeconds: seconds, AcquireTime: t, RenewTime: t})
+}
+
+// readBy reports whether the elector has read the record held by holder.
+func (l *memLock) readBy(holder string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, o := range l.ops {
+		if o.op == "get" && o.holder == holder {
+			return true
+		}
+	}
+	return false
 }
 
 func (l *memLock) Get(context.Context) (*resourcelock.LeaderElectionRecord, []byte, error) {
@@ -114,10 +129,21 @@ func (l *memLock) renewTime() time.Time {
 	return l.rec.RenewTime.Time
 }
 
-// lead runs client-go's leader elector over the lock until it leads, runs the
-// gap emitter in OnStartedLeading, as controller-runtime starts its
-// leader-election runnables, and returns the recorder's events.
-func lead(t *testing.T, mem *memLock, rec *MemoryRecorder) *gapLock {
+// lead runs client-go's leader elector over the lock until it leads, running
+// the gap emitter in OnStartedLeading, as controller-runtime starts its
+// leader-election runnables.
+func lead(t *testing.T, mem *memLock, rec *MemoryRecorder) {
+	t.Helper()
+	select {
+	case <-startLead(t, mem, rec):
+	case <-time.After(time.Minute):
+		t.Fatalf("did not lead within a minute; lock calls %+v", mem.opsCopy())
+	}
+}
+
+// startLead starts the elector and returns a channel closed once it leads and
+// the gap emitter has run.
+func startLead(t *testing.T, mem *memLock, rec *MemoryRecorder) <-chan struct{} {
 	t.Helper()
 	gl := &gapLock{Interface: mem}
 	em := &gapEmitter{lock: gl, rec: rec}
@@ -144,12 +170,7 @@ func lead(t *testing.T, mem *memLock, rec *MemoryRecorder) *gapLock {
 	done := make(chan struct{})
 	go func() { le.Run(ctx); close(done) }()
 	t.Cleanup(func() { cancel(); <-done })
-	select {
-	case <-led:
-	case <-time.After(20 * time.Second):
-		t.Fatalf("did not lead within 20 s; lock calls %+v", mem.opsCopy())
-	}
-	return gl
+	return led
 }
 
 // gapEvents returns the degraded/ObservationGap events, checking that each
@@ -226,28 +247,36 @@ func TestObservationGapAfterARelease(t *testing.T) {
 	checkGapOrder(t, mem.opsCopy(), got[0], mem.id)
 }
 
-// TestObservationGapAfterALiveHolder: a stale second copy holds the Lease and
-// renews it until T1, then stops. The new run takes the Lease once it expires;
-// the gap starts at T1, the renewTime read just before the take, not at the
-// first renewTime it read.
+// TestObservationGapAfterALiveHolder: a stale second copy holds the Lease,
+// with a duration of an hour, so the new run cannot take it. Once the new run
+// has read it (observed on the lock), the second copy renews it a last time at
+// T1 with a lease of 1 s and stops. The new run takes the Lease once that
+// expires; the gap starts at T1, the renewTime read just before the take, not
+// at the first renewTime it read.
 func TestObservationGapAfterALiveHolder(t *testing.T) {
 	seq := &Sequence{}
 	mem := &memLock{id: "lifecycle-new", seq: seq}
 	first := micro(time.Now().Add(-time.Second))
-	mem.write("lifecycle-old", first)
-	stop := make(chan struct{})
-	var last time.Time
-	go func() {
-		defer close(stop)
-		for i := 0; i < 6; i++ {
-			time.Sleep(100 * time.Millisecond)
-			last = micro(time.Now())
-			mem.write("lifecycle-old", last)
-		}
-	}()
+	mem.writeFor("lifecycle-old", first, 3600)
 	rec := &MemoryRecorder{Seq: seq}
-	lead(t, mem, rec)
-	<-stop
+	led := startLead(t, mem, rec)
+	for deadline := time.Now().Add(time.Minute); !mem.readBy("lifecycle-old"); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the elector did not read the held Lease within a minute; lock calls %+v", mem.opsCopy())
+		}
+	}
+	select {
+	case <-led:
+		t.Fatal("the new run took a Lease another copy holds for an hour")
+	default:
+	}
+	last := micro(time.Now())
+	mem.write("lifecycle-old", last)
+	select {
+	case <-led:
+	case <-time.After(time.Minute):
+		t.Fatalf("did not lead within a minute of the last renewal; lock calls %+v", mem.opsCopy())
+	}
 	got := gapEvents(t, rec)
 	if len(got) != 1 {
 		t.Fatalf("%d ObservationGap events, want exactly one", len(got))

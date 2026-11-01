@@ -533,9 +533,11 @@ func restartAfterGap(t *testing.T, ctx context.Context, cl client.Client, cfg *r
 	gate := make(chan struct{})
 	release := sync.OnceFunc(func() { close(gate) })
 	defer release()
+	leaseRead := make(chan struct{})
+	readOnce := sync.OnceFunc(func() { close(leaseRead) })
 	mgr, _, err := NewManager(Options{
 		Config: cfg, CredentialsDir: creds, AgentBuildsDir: builds, FrontConfigured: true, HealthAddr: managerHealthAddr,
-		MetricsAddr: managerMetricsAddr, LeaderElection: true, Checkpoints: &stubSource{}, again: true,
+		MetricsAddr: managerMetricsAddr, LeaderElection: true, Checkpoints: &stubSource{}, again: true, onLeaseRead: readOnce,
 		newCache: func(c *rest.Config, o cache.Options) (cache.Cache, error) {
 			inner, err := cache.New(c, o)
 			if err != nil {
@@ -559,23 +561,35 @@ func restartAfterGap(t *testing.T, ctx context.Context, cl client.Client, cfg *r
 	eventually(t, time.Minute, "the health server answers", func() (bool, string) {
 		return getStatus(t, "http://"+managerHealthAddr+"/healthz") == http.StatusOK, "no /healthz"
 	})
+	// Each state below is held by the test (the gate, a Lease of 3600 s), so
+	// it cannot end on its own; the checks repeat a few times to see it hold.
 	notReady := func(why string) {
 		t.Helper()
-		for i := 0; i < 25; i++ {
+		for i := 0; i < 5; i++ {
 			if code := getStatus(t, "http://"+managerHealthAddr+"/readyz"); code == http.StatusOK {
 				t.Fatalf("/readyz answered 200 %s", why)
 			}
 			if code := getStatus(t, "http://"+managerHealthAddr+"/healthz"); code != http.StatusOK {
 				t.Fatalf("/healthz answered %d %s; it is liveness and answers", code, why)
 			}
-			time.Sleep(200 * time.Millisecond)
 		}
 		if gaps := observationGaps(t, ctx, cl); len(gaps) != 0 {
 			t.Fatalf("%d ObservationGap events %s, before the Lease could be taken", len(gaps), why)
 		}
 	}
 	notReady("while the caches' sync is held")
+	select {
+	case <-leaseRead:
+		t.Fatal("the elector read the Lease while the caches' sync was held; leader election starts only after it")
+	default:
+	}
 	release()
+	// The caches synced and the elector read the Lease the second copy holds.
+	select {
+	case <-leaseRead:
+	case <-time.After(2 * time.Minute):
+		t.Fatal("the elector did not read the lifecycle Lease within 2 min of the caches' release")
+	}
 	notReady("while a second copy holds the lifecycle Lease")
 	var l coordinationv1.Lease
 	if err := cl.Get(ctx, client.ObjectKey{Namespace: v1alpha1.ControllerNamespace, Name: v1alpha1.LeaseLifecycle}, &l); err != nil {

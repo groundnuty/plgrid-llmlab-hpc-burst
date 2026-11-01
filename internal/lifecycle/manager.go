@@ -77,6 +77,10 @@ type Options struct {
 	// newCache, when set, builds the manager's cache: a test holds the
 	// caches' sync with it.
 	newCache cache.NewCacheFunc
+	// onLeaseRead, when set, runs after each read of the lifecycle Lease
+	// that the start's ObservationGap counts: a test waits on it to know the
+	// elector has read a Lease another copy holds.
+	onLeaseRead func()
 	// again marks a second manager in one process, a test's restart:
 	// controller-runtime refuses a second controller named lifecycle in a
 	// process unless its name check is skipped.
@@ -144,6 +148,7 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 		if lock, err = newGapLock(o.Config, leaderRenewDeadline); err != nil {
 			return nil, nil, fmt.Errorf("lifecycle: the lifecycle Lease's lock: %w", err)
 		}
+		lock.onObserve = o.onLeaseRead
 		mopts.LeaderElectionResourceLockInterface = lock
 	}
 	mgr, err := ctrl.NewManager(o.Config, mopts)
