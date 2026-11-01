@@ -584,8 +584,8 @@ type VerifyResult struct {
 	// JSON number, an integer for top_k and max_new_tokens, of at most
 	// MaxGenerationConfigValueBytes; there are at most MaxGenerationConfigKeys
 	// keys of at most MaxGenerationConfigKeyBytes each. Absent when the
-	// checkpoint has no such file, it is not a JSON object, or it sets none
-	// of them.
+	// checkpoint has no such file, the file is refused as a whole
+	// (GenerationConfigRefused with an empty Param), or it sets none of them.
 	GenerationConfig map[string]string `json:"generationConfig,omitempty"`
 	// GenerationConfigFile says what the agent found at the staged
 	// checkpoint's generation_config.json, so that a record can tell "the
@@ -606,9 +606,10 @@ type VerifyResult struct {
 	GenerationConfigFile string `json:"generationConfigFile,omitempty"`
 	// DoSample is the staged generation_config.json's do_sample, when the
 	// file sets it as a JSON boolean; nil when the file is absent, is not a
-	// JSON object, or does not set do_sample as a boolean. On a reasoning
-	// model, false makes the checks greedy (CheckSampling; HBEP-7, The
-	// allocation agent, Checks; `@hpc-burst-science-agent`, 1 Nov 2026).
+	// JSON object (refused as a whole), or does not set do_sample as a
+	// boolean. On a reasoning model, false makes the checks greedy
+	// (CheckSampling; HBEP-7, The allocation agent, Checks;
+	// `@hpc-burst-science-agent`, 1 Nov 2026).
 	DoSample *bool `json:"doSample,omitempty"`
 	// GenerationConfigRefused is the first sampling value of the staged
 	// generation_config.json that CheckGenerationConfig refuses, checked on
@@ -618,7 +619,10 @@ type VerifyResult struct {
 	// or warm-up), and the controller fails verification with
 	// VerificationFailed, the settings contradiction's stop, keyed on the
 	// deployment ID. It is how a value that is not a number reaches the
-	// controller, since GenerationConfig carries numbers only
+	// controller, since GenerationConfig carries numbers only. A present file
+	// the agent cannot judge at all (larger than MaxGenerationConfigFileBytes,
+	// unreadable, not valid JSON, not a JSON object) is refused as a whole,
+	// with an empty Param, and never read as absent
 	// (`@hpc-burst-science-agent`, 1 Nov 2026, from the reviews of PRs #155
 	// and #156).
 	GenerationConfigRefused *GenerationConfigError `json:"generationConfigRefused,omitempty"`

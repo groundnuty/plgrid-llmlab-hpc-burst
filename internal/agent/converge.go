@@ -73,6 +73,10 @@ type instance struct {
 	// sectionKeys holds, for each section of checks, the processes it was
 	// taken against.
 	sectionKeys map[string]procKey
+	// sampling is the sampling of the current verification generation's
+	// checks, computed once from the staged file (genSampling); nil until a
+	// check unit needs it, and again after a new generation or staging.
+	sampling *genSampling
 }
 
 // worker is one engine process of the Instance.
@@ -501,6 +505,7 @@ func (a *Agent) stagingDone(in *instance, gen int64, img ImageResult, ck Checkpo
 	in.imagePath = img.Path
 	in.imageVerified = img.Verified
 	in.ckptDir = ck.Dir
+	in.sampling = nil // a staging may bring a new file
 	in.fileResults = ck.Files
 	in.filesKey = filesKey(files)
 	in.fileResultsFresh = true

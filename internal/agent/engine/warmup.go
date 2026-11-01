@@ -46,20 +46,24 @@ type warmShape struct {
 // end-of-sequence token either: a streamed auto tool call finishes with
 // "tool_calls" only when the engine stopped of its own accord, and with the
 // underlying reason ("length") otherwise (chat_completion/serving.py:766-777).
-func (c *Client) WarmUpRound(ctx context.Context, n int32, req agentapi.WarmUpRequest) agentapi.WarmUpRound {
-	s := req.Shapes
+//
+// Every request is sampled as s says, with the warm-up seed on a sampled
+// model: the same seed on every request of a round and of every round, whose
+// prompts differ by their nonce.
+func (c *Client) WarmUpRound(ctx context.Context, n int32, req agentapi.WarmUpRequest, s agentapi.Sampling) agentapi.WarmUpRound {
+	sh := req.Shapes
 	seq := []warmShape{
-		{agentapi.ShapeShort, s.ContextShort, s.OutputTypical, false},
-		{agentapi.ShapeTypical, s.ContextTypical, s.OutputTypical, false},
-		{agentapi.ShapeLongest, s.ContextLongest, s.OutputTypical, false},
-		{agentapi.ShapeLongOutput, s.ContextTypical, s.OutputLongest, false},
+		{agentapi.ShapeShort, sh.ContextShort, sh.OutputTypical, false},
+		{agentapi.ShapeTypical, sh.ContextTypical, sh.OutputTypical, false},
+		{agentapi.ShapeLongest, sh.ContextLongest, sh.OutputTypical, false},
+		{agentapi.ShapeLongOutput, sh.ContextTypical, sh.OutputLongest, false},
 	}
 	if req.ToolCalls {
-		seq = append(seq, warmShape{agentapi.ShapeToolCall, s.ContextTypical, s.OutputTypical, true})
+		seq = append(seq, warmShape{agentapi.ShapeToolCall, sh.ContextTypical, sh.OutputTypical, true})
 	}
 	round := agentapi.WarmUpRound{Round: n}
 	for _, w := range seq {
-		round.Requests = append(round.Requests, c.timed(ctx, w))
+		round.Requests = append(round.Requests, c.timed(ctx, s, w))
 	}
 	sessions := int(req.TargetSessions)
 	conc := make([]agentapi.RequestTiming, sessions)
@@ -68,7 +72,7 @@ func (c *Client) WarmUpRound(ctx context.Context, n int32, req agentapi.WarmUpRe
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			conc[i] = c.timed(ctx, warmShape{agentapi.ShapeConcurrent, s.ContextTypical, s.OutputTypical, false})
+			conc[i] = c.timed(ctx, s, warmShape{agentapi.ShapeConcurrent, sh.ContextTypical, sh.OutputTypical, false})
 		}()
 	}
 	wg.Wait()
@@ -84,8 +88,8 @@ func (c *Client) WarmUpRound(ctx context.Context, n int32, req agentapi.WarmUpRe
 // a text answer, a reply that the token limit ended before any call (on a
 // reasoning model, a reasoning-budget exhaustion) or an invalid call is only
 // logged.
-func (c *Client) timed(ctx context.Context, w warmShape) agentapi.RequestTiming {
-	t, answer := c.timedCall(ctx, w)
+func (c *Client) timed(ctx context.Context, s agentapi.Sampling, w warmShape) agentapi.RequestTiming {
+	t, answer := c.timedCall(ctx, s, w)
 	if answer != nil && c.log != nil {
 		c.log.Info("warm-up tool-call answer, not judged in warm-up", "shape", w.shape, "outcome", errorText(answer))
 	}
@@ -95,7 +99,7 @@ func (c *Client) timed(ctx context.Context, w warmShape) agentapi.RequestTiming 
 // timedCall is timed, with the tool-call shape's answer judged apart: the
 // error is the judgement of its assembled call (judgeStreamedCalls), nil for
 // a valid call and for every other shape.
-func (c *Client) timedCall(ctx context.Context, w warmShape) (agentapi.RequestTiming, error) {
+func (c *Client) timedCall(ctx context.Context, s agentapi.Sampling, w warmShape) (agentapi.RequestTiming, error) {
 	t := agentapi.RequestTiming{Shape: w.shape}
 	fail := func(err error) (agentapi.RequestTiming, error) {
 		if ctx.Err() != nil {
@@ -147,7 +151,7 @@ func (c *Client) timedCall(ctx context.Context, w warmShape) (agentapi.RequestTi
 		MinTokens:     minTokens,
 		Tools:         tools,
 		ToolChoice:    choice,
-	})
+	}.sampled(s, agentapi.SeedKeyWarmUp))
 	if err != nil {
 		return fail(err)
 	}
