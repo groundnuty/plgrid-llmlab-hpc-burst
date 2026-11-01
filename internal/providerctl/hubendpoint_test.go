@@ -20,9 +20,9 @@ func TestAgentJSONCarriesTheHubEndpoint(t *testing.T) {
 		t.Run("hub="+hub, func(t *testing.T) {
 			clock := fake.NewClock(at(12, 0, 0))
 			sl := newSlurm(clock, fakeslurm.Config{})
+			// The environment's own Front, with its staged frpc build and
+			// certificate; only the Hub origin differs between the cases.
 			e := newRealEnv(t, clock, sl, newFakeClient(t, "prov-a"), "prov-a", "user-a", func(e *realEnv) {
-				e.opts.Front = &FrontSettings{Mode: agentapi.DialHomeDirect, Endpoint: "front.example.org:29443",
-					CertPin: strings.Repeat("c", 64), FrpcDigests: map[string]string{"x86_64": strings.Repeat("d", 64)}}
 				e.opts.HubEndpoint = hub
 			})
 			a := e.newAlloc("alloc-a", 1)
