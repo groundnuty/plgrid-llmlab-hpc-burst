@@ -225,7 +225,8 @@ Decided for alpha (amended 2026-10-30, after S3's fix, PR #36):
 - has the API server write its audit log at the Metadata level, with no request bodies, so a Secret's content is never logged;
 - gives the lifecycle controller's `/metrics` the loopback port at its port base + 12 (HBEP-8, Metrics);
 - has `hpcburst status` read the front's `/healthz`, and report the front as "degraded: usage writes failing" while its usage sink says `failing`, not as a readiness failure: the exit code stays 0 and the overall health `healthy`, and only the front's line says degraded (HBEP-8, Usage records);
-- has `hpcburst status` read the lifecycle controller's `/readyz` for its health, which fails until its caches have synced and it leads its `Lease`; `/healthz` stays its liveness check; the launcher restarts it when it exits. While no front `Lease` exists, the front is shown as absent (HBEP-8, Observers);
+- passes the Hub's base URL from its configuration to the controllers as `HF_ENDPOINT`, default `https://huggingface.co`; the lifecycle controller writes it into each Allocation's `agent.json`, so the identity read and the staging use one Hub (HBEP-7, Instance start; HBEP-4, Files first);
+- has `hpcburst status` read the lifecycle controller's `/readyz` for its health. Its two named checks are `caches`, which fails until the caches have synced, and `leading`, which fails while the controller does not lead its `Lease` and always passes under `--leader-elect=false`. `status` reads each check's own path, never a verbose body, and reports "starting" or "not leading" accordingly. `/healthz` stays its liveness check, and the launcher restarts the controller when it exits. The front is shown as absent only when the host has no front configured; a configured front that is down is unhealthy (HBEP-8, Observers; science-agent rulings, 1 Nov 2026, for #147);
 - has the API server keep events 7 days: it passes `--kube-apiserver-arg=event-ttl=168h`, where the default is 1 h. k3s passes the flag through, and kine, its SQLite datastore, deletes each event once the TTL has elapsed. kine starts each event's clock again when the host restarts, so an event lives at least 7 days (HBEP-8, Retention, with the sources);
 - backs up the store before every upgrade: an etcd snapshot, or a copy of the SQLite file;
 - upgrades the host one minor version at a time, as S3 tested.
@@ -408,6 +409,7 @@ The control plane replaces the files and scripts that held www-2027's state: per
 - 2026-11-01: the Provider supervisors run only in the `lifecycle` leader's process (for #132), and a risk for an upgrade killed midway (seen for #134).
 - 2026-11-01: erratum (with HBEP-15's move to implementable): frp's and k3s's checksums are recorded in the launcher's pins files, `internal/launcher/frp-pins.txt` and `internal/launcher/k3s-pins.txt`, not in `build/dependencies.yaml`, which never existed.
 - 2026-11-01: the Provider's optional `qos`, the profile's QOS list and partition QOS (HBEP-4), and the verification record's check sampling values and seeds (HBEP-7), from the amendments of the same day.
+- 2026-11-01: the controller's `/readyz` has two named checks, `caches` and `leading`, and an absent front means none configured (rulings for #147).
 
 ## Amendments
 
@@ -458,3 +460,4 @@ The control plane replaces the files and scripts that held www-2027's state: per
   - **The Provider's spec** gains an optional `qos`, the QOS its jobs are submitted under, which the plugin sends as `--qos`. Before, the provider settings were the account, the grant and the allowed partitions only.
   - **The profile's fields** gain the partition's own QOS (`partitions[].qos`) and the QOS list (`qos`), with each QOS's wall limit, submit limit, per-user caps on GPUs, CPUs and memory, and whether it carries `OverPartQOS`. Before, QOS facts sat only in the untyped block.
   - **The verification record** also holds the sampling values and seeds of the checks, or that they ran greedily, since a reasoning model's checks now sample with its own `generation_config.json` values (HBEP-7). Before, it held the file's defaults but not what the checks sent.
+- **2026-11-01: `/readyz`'s checks and an absent front** (science-agent rulings for #147). The lifecycle controller's `/readyz` has two named checks, `caches` and `leading`, which `hpcburst status` reads by path. The front is absent only when none is configured; a configured front that is down is unhealthy. Before, the text named no checks, and a front that was not running read as absent.
