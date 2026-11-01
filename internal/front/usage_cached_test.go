@@ -7,8 +7,9 @@ import "testing"
 // target's record holds an explicit null cachedTokens next to the counts it did
 // get: unknown, not 0. The LLMLab double sends none either (llmlabtest's
 // TestUsageNamesNoCachedTokens), so this is the front's reading of a gateway
-// that omits the member. The Instance engine double sends a 0, and
-// TestUsageCountsOfAStreamWithUsage keeps that one.
+// that omits the member. The Instance engine double sends none by default
+// either (TestUsageCachedTokensAreNullFromAnInstanceEngine), and a count it
+// is told to send reaches the record.
 func TestUsageCachedTokensAreNullFromLLMLab(t *testing.T) {
 	m := newErrManagedFix(t, nil)
 	for _, c := range []struct {

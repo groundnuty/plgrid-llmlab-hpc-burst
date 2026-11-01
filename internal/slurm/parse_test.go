@@ -1272,7 +1272,7 @@ func TestGPUsOfTres(t *testing.T) {
 }
 
 func TestGPUsOfTresList(t *testing.T) {
-	e := func(typ, name string, count int64) tresEntry { return tresEntry{Type: typ, Name: name, Count: count} }
+	e := func(typ, name string, count int64) tresEntry { return tresEntry{Type: typ, Name: name, Count: &count} }
 	for _, c := range []struct {
 		name string
 		l    []tresEntry

@@ -7,6 +7,10 @@
 //
 //	exit          its content is an exit code: the process removes the file and exits with it
 //	always-exit   the process exits with the code in the file at once, at every start
+//	exit-once-recorded  like always-exit, but the process first waits (at most 10 s) until
+//	              <state-dir>/controller/supervisor.json names its PID as a running entry: the
+//	              supervisor writes that only after it has recorded the process's identity, so
+//	              the exit cannot overtake that record (issue #130)
 //	ignore-term   SIGTERM is ignored
 //	slow-term     its content is milliseconds: SIGTERM is answered with exit 0 after that long
 //	unhealthy     /healthz answers 503
@@ -63,6 +67,13 @@ func main() {
 		n, _ := strconv.Atoi(code)
 		os.Exit(n)
 	}
+	if code, ok := ctl("exit-once-recorded"); ok {
+		for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline) && !recordedRunning(*stateDir, pid); {
+			time.Sleep(5 * time.Millisecond)
+		}
+		n, _ := strconv.Atoi(code)
+		os.Exit(n)
+	}
 
 	term := make(chan os.Signal, 1)
 	if _, ignore := ctl("ignore-term"); ignore {
@@ -101,6 +112,32 @@ func main() {
 			}
 		}
 	}
+}
+
+// recordedRunning reports whether the supervisor's record in stateDir names pid as a running
+// entry's process.
+func recordedRunning(stateDir string, pid int) bool {
+	b, err := os.ReadFile(filepath.Join(stateDir, "controller", "supervisor.json"))
+	if err != nil {
+		return false
+	}
+	var f struct {
+		Entries []struct {
+			State string `json:"state"`
+			Proc  *struct {
+				PID int `json:"pid"`
+			} `json:"proc"`
+		} `json:"entries"`
+	}
+	if json.Unmarshal(b, &f) != nil {
+		return false
+	}
+	for _, e := range f.Entries {
+		if e.State == "running" && e.Proc != nil && e.Proc.PID == pid {
+			return true
+		}
+	}
+	return false
 }
 
 func record(path string, v any) {

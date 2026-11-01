@@ -162,7 +162,11 @@ func TestEndedJobThatNeverStartedIsNotReadAgain(t *testing.T) {
 
 // Astra B5: a terminal state shown by the queue listing is not final. Athena
 // lists an ended job in its end state until MinJobAge; the job is read from
-// accounting once after the listing drops it, and never again.
+// accounting once after the listing drops it, and never again. Besides that
+// final read the job has the one accounting read of HBEP-4 (Poll rate), made
+// after it was first seen started, for the CPUs and GPUs allocated (HBEP-8): so
+// one sacct -j while it runs, none while the listing still shows it ended, and
+// one more after the drop.
 func TestEndedJobInTheListingIsReadFromAccountingOnce(t *testing.T) {
 	clock := fake.NewClock(at(12, 0, 0))
 	sl := newSlurm(clock, fakeslurm.Config{NotListed: fakeslurm.NotListedAthena, MinJobAge: 90 * time.Second})
@@ -173,15 +177,18 @@ func TestEndedJobInTheListingIsReadFromAccountingOnce(t *testing.T) {
 	e.poll("alloc-a", 1)
 	id := e.get("alloc-a").Annotations[v1alpha1.AnnotationJobID]
 	n, _ := strconv.Atoi(id)
+	if got := jobReads(sl, id); got != 1 {
+		t.Fatalf("precondition: %d accounting reads of the running job, want the one for the allocated CPUs and GPUs", got)
+	}
 	if err := sl.End(n, fakeslurm.Completed); err != nil {
 		t.Fatal(err)
 	}
 	e.poll("alloc-a", 1)
-	if o := e.get("alloc-a").Status.AtProvider; o.Phase != v1alpha1.AllocationEnded || jobReads(sl, id) != 0 {
-		t.Fatalf("precondition: phase %s after %d accounting reads; want Ended from the listing alone", o.Phase, jobReads(sl, id))
+	if o := e.get("alloc-a").Status.AtProvider; o.Phase != v1alpha1.AllocationEnded || jobReads(sl, id) != 1 {
+		t.Fatalf("precondition: phase %s after %d accounting reads; want Ended from the listing, with no read besides the allocated one", o.Phase, jobReads(sl, id))
 	}
 	e.poll("alloc-a", 6) // past MinJobAge: the listing drops it
-	if got := jobReads(sl, id); got != 1 {
-		t.Errorf("%d accounting reads of job %s, want exactly 1: once the listing dropped it", got, id)
+	if got := jobReads(sl, id); got != 2 {
+		t.Errorf("%d accounting reads of job %s, want exactly 2: the allocated one, and one once the listing dropped it", got, id)
 	}
 }
