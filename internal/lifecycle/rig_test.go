@@ -21,6 +21,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -186,6 +187,10 @@ func newRig(t *testing.T, opts ...rigOption) *rig {
 		t.Fatal(err)
 	}
 	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	// The front's Lease, which the observer reads (HBEP-8, Observers).
+	if err := coordinationv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	clock := pfake.NewClock(rigStart)
@@ -389,6 +394,11 @@ func (rg *rig) Step() {
 	}
 	rg.syncAgents()
 	rg.reconcileAll()
+	// The leader's observer judges the Providers' and the front's heartbeats
+	// beside the reconcile loop (HBEP-8, Observers).
+	if err := rg.r.checkHeartbeats(rg.ctx); err != nil {
+		rg.t.Fatalf("checkHeartbeats: %v", err)
+	}
 }
 
 // syncAgents keeps the gate's table and the agents in line with the jobs: a

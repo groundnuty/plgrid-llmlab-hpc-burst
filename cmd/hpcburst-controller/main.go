@@ -23,7 +23,9 @@
 // the shared paths and ports (docs/development.md, Runtime conventions): the
 // kubeconfig is <state>/kubeconfig unless --kubeconfig says otherwise, the
 // credentials directory is Host.CredentialsDir() and the agent builds are in
-// Host.AgentBuildsDir(); the agent API binds Host.AgentEndpointAddr().
+// Host.AgentBuildsDir(); the agent API binds Host.AgentEndpointAddr(). The
+// lifecycle controller serves /metrics at Host.ControllerMetricsAddr(), on
+// loopback at the port base + 12 (HBEP-8, Metrics).
 //
 // It exits 0 after SIGTERM or SIGINT once the manager has stopped, 1 on a
 // failure (a Provider-manager scheme without apps/v1, and front settings that
@@ -158,7 +160,7 @@ func run(ctx context.Context, f flags, d deps) error {
 	}
 	mgr, backend, err := lifecycle.NewManager(lifecycle.Options{
 		Config: cfg, CredentialsDir: f.host.CredentialsDir(), AgentBuildsDir: f.host.AgentBuildsDir(),
-		FrontConfigured: f.frontMode != "", HealthAddr: f.healthAddr, LeaderElection: f.leaderElect, Workers: f.workers,
+		FrontConfigured: f.frontMode != "", HealthAddr: f.healthAddr, MetricsAddr: f.host.ControllerMetricsAddr(), Registry: d.registry, LeaderElection: f.leaderElect, Workers: f.workers,
 	})
 	if err != nil {
 		return err

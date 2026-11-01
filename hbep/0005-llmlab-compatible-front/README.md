@@ -446,7 +446,8 @@ Against HBEP-4's managed fake, S4's fake Slurm and an engine double, then agains
 
 - **Alpha:**
   - the Test plan passes against HBEP-4's managed fake and S4's fake Slurm with an engine double;
-  - on one batch provider, through the front: the Test plan's 7,000-token stream completes, one handover cuts no request (with HBEP-7), and every response carries its attribution;
+  - on one batch provider, through the front: the Test plan's 7,000-token stream completes, and every response carries its attribution;
+  - on Athena `plgrid-gpu-a100`, through the front, one handover cuts no request (with HBEP-7). Helios serves under QOS `now`, whose limits leave no room for a replacement beside its predecessor, so there HBEP-7 shows no-overlap mode with no request cut instead (owner decision, 1 Nov 2026, [issue #145, comment 6557452958](https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/145#issuecomment-6557452958));
   - against LLMLab: chat and streaming through an attached managed provider, and the inactive-model error without one.
 - **Beta:**
   - spike S2c (issue #62, one worker per GPU) validates the router default's hit rate, balance across workers and latency, or replaces it; the router keeps nested request fields; and Instances with several workers run behind it with its three conditions (open question 2; HBEP-7's beta criteria);
@@ -556,6 +557,7 @@ The front grows from www-2027's hand-tuned per-stack routers: affinity and polic
 - 2026-10-31: amendment with HBEP-8 becoming implementable: the usage sink syncs each record before `Write` returns, counts and raises every failure, keeps serving, states its state in `/healthz`, and rotates daily keeping every file; `contentEvents` named.
 - 2026-10-31: the usage state's field is `lostRecords` (HBEP-8's amendment of the same day).
 - 2026-11-01: amendment from the real LLMLab smoke test (PR #121): `cachedTokens` is null when the usage carries no cached count, never 0, and the doubles send none by default.
+- 2026-11-01: amendment from the owner's decision on Helios's queues (#145): the alpha handover with no request cut is shown on Athena `plgrid-gpu-a100` (HBEP-7's amendment of the same day).
 
 ## Amendments
 
@@ -594,3 +596,4 @@ The front grows from www-2027's hand-tuned per-stack routers: affinity and polic
 - **2026-11-01: `cachedTokens`** (Usage records; Test plan). Science-agent ruling of 1 Nov 2026, from the real LLMLab smoke test through the front (PR #121). The name is on `main` (`internal/front/usage/usage.go`).
   - **Null means unknown, never 0.** LLMLab's `usage` has no `cached_tokens`. vLLM v0.32.0 sends `prompt_tokens_details` on chat and completions only with `--enable-prompt-tokens-details` (`vllm/entrypoints/launchers/cli_args.py` line 148), which the framework does not pass; on `/v1/responses` it always sends `input_tokens_details.cached_tokens`. Before, the text named the field but not its unknown value.
   - **The doubles send none by default.** On `main` the engine double sends `cached_tokens` 0 (`internal/front/enginetest/play.go` lines 75, 125 and 150), which a test cannot tell from a real count; that changes with this amendment.
+- **2026-11-01: where the alpha handover is shown** (Graduation criteria). The owner's decision of 1 Nov 2026, "gap on Helios, handover on Athena" ([issue #145, comment 6557452958](https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/145#issuecomment-6557452958)), with HBEP-7's amendment of the same day. The handover that cuts no request is shown on Athena `plgrid-gpu-a100`. On Helios the provider runs under QOS `now`, which allows one GPU per user, so HBEP-7's no-overlap mode serves there: the Instance drains with no cut, and the front answers new requests with 503 `no_ready_target` until the next Instance is ready, as its Errors table already says. Before, the criterion named "one batch provider" for the handover.

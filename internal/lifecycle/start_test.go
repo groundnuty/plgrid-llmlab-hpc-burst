@@ -416,9 +416,15 @@ func TestStartAgentUnreachableRestartsNothing(t *testing.T) {
 		if got := unreachable(); got != want {
 			t.Fatalf("%s after the last report: AgentUnreachable = %q, want %q", silent, got, want)
 		}
-		if st := rg.instance(in.Name); st.Status.Phase != v1alpha1.InstanceReady || len(rg.rec.Find("failing", "")) != 0 || len(st.Annotations) != 0 {
-			t.Fatalf("%s silent: phase %s, %d failing events, annotations %v; nothing may restart", silent, st.Status.Phase, len(rg.rec.Find("failing", "")), st.Annotations)
+		// HeartbeatMissed is the unreachable agent's own failing event (HBEP-8,
+		// Observers); no other failing event, restart or annotation may come.
+		restarts := len(rg.rec.Find("failing", "")) - len(rg.rec.Find("failing", reasonHeartbeatMissed))
+		if st := rg.instance(in.Name); st.Status.Phase != v1alpha1.InstanceReady || restarts != 0 || len(st.Annotations) != 0 {
+			t.Fatalf("%s silent: phase %s, %d failing events besides HeartbeatMissed, annotations %v; nothing may restart", silent, st.Status.Phase, restarts, st.Annotations)
 		}
+	}
+	if n := len(rg.rec.Find("failing", reasonHeartbeatMissed)); n != 1 {
+		t.Errorf("%d HeartbeatMissed events over the silence, want 1", n)
 	}
 	ag.Silence(false)
 	startStep(rg, "md", startTick)

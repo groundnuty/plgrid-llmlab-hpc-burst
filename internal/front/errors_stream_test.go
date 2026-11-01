@@ -51,22 +51,39 @@ func checkStreamCut(t *testing.T, body, detail string) []string {
 }
 
 // midStreamCut sends a streaming chat request to an engine that sends one
-// token at once and the next after 10 s of real time, reads the first event,
-// then moves the fake clock by d: the timers armed for the request fire with
-// one token delivered. It returns the request ID and the whole body.
+// token at once and holds the next two at its gate, which the test never
+// opens; it reads the first event, then moves the fake clock by d: the timers
+// armed for the request fire with one token delivered, and the stream can end
+// only by their cut. It returns the request ID and the whole body. The whole
+// exchange, headers, first event and the rest, is bounded by requestLimit
+// (postBounded): a stream that is not cut, or whose first event never comes,
+// fails the test within it.
+//
+// The engine used to send its second token after 10 s of real time, so a test
+// slowed for 10 s between its read and its move of the clock would have seen
+// a second token (PR #137 review, Astra).
 func midStreamCut(t *testing.T, s *errFix, d time.Duration) (string, string) {
 	t.Helper()
-	s.e.Set(enginetest.Behaviour{Tokens: 3, PerToken: 10 * time.Second})
-	resp := s.post("/v1/chat/completions", errChatBody(efModel, true, "hello there"))
+	s.e.Set(enginetest.Behaviour{Tokens: 3, Gate: make(chan struct{})})
+	resp, ctx := postBounded(t, s.harness, "/v1/chat/completions", errChatBody(efModel, true, "hello there"))
 	if resp.StatusCode != 200 {
 		t.Fatalf("status %d, want 200: the headers were sent before the cut", resp.StatusCode)
 	}
 	id := checkAttribution(t, resp, s.instanceAttr("instance"))
 	defer resp.Body.Close()
 	br := bufio.NewReader(resp.Body)
-	first := readEvent(t, br)
+	first, err := scReadEvent(br)
+	if err != nil {
+		if ctx.Err() != nil {
+			t.Fatalf("no first event within %s; read %q", requestLimit, first)
+		}
+		t.Fatalf("reading the first event: %v (got %q)", err, first)
+	}
 	s.clk.Advance(d)
 	rest, err := io.ReadAll(br)
+	if ctx.Err() != nil {
+		t.Fatalf("the stream was not cut within %s of the request after the clock's move by %v; it so far reads %q", requestLimit, d, first+string(rest))
+	}
 	if err != nil {
 		t.Fatalf("reading the rest of the stream: %v", err)
 	}

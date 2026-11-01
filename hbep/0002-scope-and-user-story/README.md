@@ -28,7 +28,7 @@ All stages (0–7). Without one story, proposals optimise for different users an
 - **Stage 0.** A researcher sends requests to PLGrid LLMLab through its OpenAI-compatible API, with an OpenAI client and a key.
 - **Stage 1.** The researcher's runs start to fail or crawl: shared capacity binds, the gateway stalls periodically, models go inactive without warning, and the researcher cannot see why.
 - **Stage 2.** The researcher holds grants on HPC platforms such as Cyfronet Helios or Athena; each grant is a provider (HBEP-3). They ask for `example-27b`, four instances, until Friday. The framework submits the jobs, sets up the environment and starts the engine. It may start a few more instances than asked, qualify each, and keep the best.
-- **Stage 3.** Every job ends at a hard time limit, and some fail earlier. The framework restarts failed instances and hands over to a successor before each lease ends.
+- **Stage 3.** Every job ends at a hard time limit, and some fail earlier. The framework restarts failed instances and hands over to a successor before each lease ends. Where a provider's per-user limits allow only one GPU per user at a time, as Helios's fast QOS does, the successor follows with a planned gap and no request is cut (HBEP-7, no-overlap mode).
 - **Stage 4.** The researcher, or an agent acting for them, sees each instance's health, performance and usage while it runs.
 - **Stage 5.** The client changes only its base URL. The operator attaches the providers that serve `example-27b`, the LLMLab provider among them if requests should keep reaching LLMLab, as one setup step. The name is then served by LLMLab and by the researcher's own instances, behind one endpoint.
 - **Stage 6.** A reviewer asks which configuration produced a result. Every response names the deployment and instance that produced it.
@@ -159,7 +159,7 @@ N/A: a scope HBEP has no stages of its own.
 | A managed gateway stalls periodically for every model. | L-6.2 | Stage 1; HBEP-4 and HBEP-8 own the response. |
 | Models on a managed gateway go inactive without the listing showing it. | L-6.5 | Stage 1; HBEP-4 and HBEP-5 own the response. |
 | Job priority came only from a manual push by center staff. | L-1.10 | Non-goals: no design depends on a priority push; hedging is the lever. |
-| Time limits cannot be extended, and centers may not act at weekends. | L-1.6 | Risks: no stage waits on center staff; stage 3 hands over before each lease ends. |
+| Time limits cannot be extended, and centers may not act at weekends. | L-1.6 | Risks: no stage waits on center staff; stage 3 hands over before each lease ends, or with a planned gap under a one-GPU-per-user limit (HBEP-7). |
 | Converting idle capacity between models was done by hand. | L-3.9 | User stories: an agent repurposes Allocations as one model's work ends (HBEP-7). |
 | Releasing capacity saves grant hours but can lose the node. | L-13.5 | User stories: the operator's retention policy decides (HBEP-7). |
 
@@ -170,6 +170,7 @@ N/A: a scope HBEP has no stages of its own.
 - 2026-10-30: Prior art and reuse filled from the state-of-the-art evaluation.
 - 2026-10-30: open question 3 notes that HBEP-11's alpha is for one user.
 - 2026-10-30: the story test's test doubles point to HBEP-4's and HBEP-7's test plans.
+- 2026-11-01: stage 3 allows a planned gap where a provider's per-user limits allow one GPU per user at a time (HBEP-7's no-overlap mode; owner decision, 1 Nov 2026, #145).
 
 ## Amendments
 

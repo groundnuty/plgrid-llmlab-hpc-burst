@@ -8,6 +8,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -134,9 +135,23 @@ func (p *pass) startSignal(in *v1alpha1.Instance, av agentView, st settings) str
 // anything else climbs the restart ladder.
 func (p *pass) malfunction(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, signal string, st settings) error {
 	if signal == v1alpha1.ReasonStartTimeout && in.Status.ReadyTime == nil && verificationGeneration(in) == 1 {
-		return p.fail(in, alloc, v1alpha1.ReasonStartTimeout, fmt.Sprintf("not ready within %s of its start instruction", st.startTimeout))
+		reason, msg := startTimeoutReason(in, st)
+		return p.fail(in, alloc, reason, msg)
 	}
 	return p.restart(in, alloc, signal, "", st)
+}
+
+// startTimeoutReason is the end reason of a first start that timed out: when
+// the Instance's TunnelConnected condition is there and not True (False,
+// ProxyOffline, or Unknown, ProxyListUnreadable) it is TunnelNotConnected,
+// otherwise StartTimeout (HBEP-7, Instance start). An absent condition keeps
+// StartTimeout until the controller writes it from frps's proxy list (#90)
+// (`@hpc-burst-science-agent`, 31 Oct 2026, for #111).
+func startTimeoutReason(in *v1alpha1.Instance, st settings) (string, string) {
+	if c := apimeta.FindStatusCondition(in.Status.Conditions, v1alpha1.ConditionTunnelConnected); c != nil && c.Status != metav1.ConditionTrue {
+		return v1alpha1.ReasonTunnelNotConnected, fmt.Sprintf("not ready within %s of its start instruction, and its tunnel is not connected (TunnelConnected %s, %s: %s)", st.startTimeout, c.Status, c.Reason, c.Message)
+	}
+	return v1alpha1.ReasonStartTimeout, fmt.Sprintf("not ready within %s of its start instruction", st.startTimeout)
 }
 
 // workerRunning reports whether the agent runs worker-0 at the current
