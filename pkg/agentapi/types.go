@@ -590,13 +590,16 @@ type VerifyResult struct {
 	// GenerationConfigFile says what the agent found at the staged
 	// checkpoint's generation_config.json, so that a record can tell "the
 	// checkpoint has no such file" from "the file holds none of the keys":
-	// GenerationConfigAbsent (there is no such file; vLLM then builds its
-	// defaults from the model's config.json, which the checks do not read),
-	// GenerationConfigPresent (a file is there, and GenerationConfig holds
+	// GenerationConfigAbsent (the checkpoint directory has no entry of that
+	// name at all; vLLM then builds its defaults from the model's
+	// config.json, which the checks do not read), GenerationConfigPresent (an
+	// entry resolves to a regular file the agent can open, whatever it holds,
+	// an empty file or one that is not JSON included; GenerationConfig holds
 	// the keys it sets of those vLLM applies, none when it sets none), or
-	// GenerationConfigUnreadable (something is at that path that the agent
-	// could not read as a file: a directory, a permission error). Empty when
-	// the agent did not look because it had no staged checkpoint directory.
+	// GenerationConfigUnreadable (an entry is there that does not resolve to
+	// a readable regular file: a directory, a dangling symlink, a permission
+	// error, or a checkpoint directory that cannot be read). Empty when the
+	// agent did not look because it had no staged checkpoint directory.
 	// The controller copies it into the verification record (HBEP-7, The
 	// verification record: "the record says the file is absent";
 	// `@hpc-burst-science-agent`, 1 Nov 2026, issue #175).

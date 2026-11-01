@@ -266,8 +266,9 @@ func TestVerificationReportsTheGenerationConfig(t *testing.T) {
 // The verification report says what the agent found at the staged checkpoint's generation_config.json, so a
 // record can tell a checkpoint with no such file from one whose file holds none of the keys (issue #175). The
 // agent reads a directory that the stager staged, with each case's file placed in it, and the report is the one
-// the Backend received: an absent file, a file with none of the keys (and one whose keys are all null), a file
-// with keys, and something at the path that is not a file.
+// the Backend received: an absent file, a file with none of the keys (and one whose keys are all null, an empty
+// one and one that is not JSON), a file with keys, a symlink to one, and something at the path that is not a
+// readable file (a directory, a dangling symlink).
 func TestVerificationSaysWhetherTheGenerationConfigFileIsThere(t *testing.T) {
 	file := func(body string) func(t *testing.T, dir string) {
 		return func(t *testing.T, dir string) {
@@ -289,6 +290,26 @@ func TestVerificationSaysWhetherTheGenerationConfigFileIsThere(t *testing.T) {
 			map[string]string{"repetition_penalty": "1.1", "temperature": "0.7"}},
 		{"a directory at the path", func(t *testing.T, dir string) {
 			if err := os.Mkdir(filepath.Join(dir, "generation_config.json"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}, agentapi.GenerationConfigUnreadable, nil},
+		// An empty file and one that is not JSON are files: present, with no keys.
+		{"an empty file", file(``), agentapi.GenerationConfigPresent, nil},
+		{"a file that is not JSON", file(`this is not json {`), agentapi.GenerationConfigPresent, nil},
+		{"a file that is not an object", file(`[1, 2]`), agentapi.GenerationConfigPresent, nil},
+		// A symlink is an entry. One that resolves to a readable regular file is that file; one that does not
+		// resolve is unreadable, and is not absent: opening it fails with the error of a missing file.
+		{"a symlink to a file with keys", func(t *testing.T, dir string) {
+			file(`{"temperature": 0.7}`)(t, dir)
+			if err := os.Rename(filepath.Join(dir, "generation_config.json"), filepath.Join(dir, "real-config.json")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("real-config.json", filepath.Join(dir, "generation_config.json")); err != nil {
+				t.Fatal(err)
+			}
+		}, agentapi.GenerationConfigPresent, map[string]string{"temperature": "0.7"}},
+		{"a dangling symlink", func(t *testing.T, dir string) {
+			if err := os.Symlink("missing-target.json", filepath.Join(dir, "generation_config.json")); err != nil {
 				t.Fatal(err)
 			}
 		}, agentapi.GenerationConfigUnreadable, nil},

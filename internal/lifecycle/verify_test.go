@@ -340,11 +340,12 @@ func TestVerifyNoInstanceReadyBeforeChecksPass(t *testing.T) {
 	}
 }
 
-// The record the controller writes through the API server says whether the checkpoint's generation_config.json is
-// there (issue #175): an agent that finds no file, one that finds a file with no keys and one that finds keys give
-// three records, read back from the ControllerRevision the API server stored, and the record of the absent file is
-// the only one that says so. The record is opaque JSON in a ControllerRevision, not a CRD field, so no CEL rule
-// applies to it.
+// The record the controller writes says whether the checkpoint's generation_config.json is there (issue #175): an
+// agent that finds no file, one that finds a file with no keys and one that finds keys give three records, and
+// the record of the absent file is the only one that says so. This runs the whole controller against the rig's
+// FAKE client (rig_test.go), so no API server takes part; the record on a real API server is the subject of
+// TestVerificationRecordRoundTripsThroughTheAPIServer (record_apiserver_test.go). The record is opaque JSON in a
+// ControllerRevision, not a CRD field, so no CEL rule applies to it.
 func TestVerificationRecordTellsAnAbsentGenerationConfigFromNoKeys(t *testing.T) {
 	for _, c := range []struct {
 		name, file string

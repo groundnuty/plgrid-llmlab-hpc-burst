@@ -126,3 +126,32 @@ func TestGenerationConfigFileOfNoDirectoryIsEmpty(t *testing.T) {
 		t.Errorf("generationConfigFile(\"\") = %q, want empty", got)
 	}
 }
+
+// A checkpoint directory that is not there cannot be looked in, so the file is not claimed absent. And the
+// classification of one entry, without the harness: nothing, a dangling link and a link to a regular file.
+func TestGenerationConfigFileOfADirectoryThatIsGoneAndOfLinks(t *testing.T) {
+	root := t.TempDir()
+	if got := generationConfigFile(filepath.Join(root, "no-such-dir")); got != "unreadable" {
+		t.Errorf("a missing checkpoint directory: %q, want unreadable", got)
+	}
+	dir := filepath.Join(root, "ckpt")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got := generationConfigFile(dir); got != "absent" {
+		t.Errorf("no entry: %q, want absent", got)
+	}
+	link := filepath.Join(dir, "generation_config.json")
+	if err := os.Symlink("nowhere.json", link); err != nil {
+		t.Fatal(err)
+	}
+	if got := generationConfigFile(dir); got != "unreadable" {
+		t.Errorf("a dangling symlink: %q, want unreadable", got)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "nowhere.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := generationConfigFile(dir); got != "present" {
+		t.Errorf("the link once its target exists: %q, want present", got)
+	}
+}
