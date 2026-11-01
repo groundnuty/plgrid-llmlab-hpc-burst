@@ -414,10 +414,14 @@ spec:
                       delayed; until the flag clears the job is still live for the deletion
                       finalizer, for the removal of the Allocation's files, for the lifecycle
                       controller's slot count and for the accounting record, which is written
-                      once, after it has cleared. The flag clears when a successful read shows
-                      the job without it, when no read lists the job, or when the job is read
-                      from accounting, which never carries it; a failed read keeps the last
-                      value. It is written in the same status write as the phase, and
+                      once, after it has cleared. The flag clears when a successful listing
+                      shows the job without it, or no longer shows the job at all and
+                      accounting gives the final state, which never carries the flag. An
+                      accounting read alone does not clear it: while the listing still shows
+                      the job with COMPLETING, accounting's terminal state does not count
+                      (spike S7 saw sacct say FAILED while squeue still showed COMPLETING). A
+                      failed read keeps the last value. It is written in the same status write
+                      as the phase, and
                       ConditionJobCompleting says since when. A job stuck in COMPLETING on a bad
                       node holds its Allocation until it clears: a known risk, visible here
                       (HBEP-4, Phases, A completing job; `@hpc-burst-science-agent`, 1 Nov

@@ -242,8 +242,12 @@ func (e *external) mirror(a *v1alpha1.Allocation, prior *v1alpha1.AllocationObse
 // status.atProvider.jobCompleting and the JobCompleting condition. It runs only
 // for a read that succeeded and showed the job, so a failed read keeps the last
 // evidence (the caller restores the stored status), and a successful listing
-// that shows the job without the flag, or accounting, which never carries it,
-// clears it. The message names the job, its base state and since when, from the
+// that shows the job without the flag clears it, as does accounting's record of
+// a job the listing no longer shows (accounting never carries the flag).
+// Observe reads accounting only for a job the listing does not show: an
+// accounting read made for the job's counts (allocatedRead) never clears the
+// flag, since accounting's terminal state says nothing about the listing's
+// COMPLETING (spike S7: sacct said FAILED while squeue still showed it). The message names the job, its base state and since when, from the
 // listing's end_time, never from the clock, so it does not change from one pass
 // to the next.
 func (e *external) mirrorCompleting(a *v1alpha1.Allocation, id string, job provider.Job) {

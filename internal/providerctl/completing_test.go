@@ -41,6 +41,18 @@ type cgRig struct {
 // newCGRig starts the job at 12:01:00 and observes it Running.
 func newCGRig(t *testing.T, mode fakeslurm.NotListedMode, minAge time.Duration, mods ...realOption) *cgRig {
 	t.Helper()
+	r := startCGRig(t, mode, minAge, mods...)
+	r.poll("alloc-a", 1)
+	if p := r.get("alloc-a").Status.AtProvider.Phase; p != v1alpha1.AllocationRunning {
+		t.Fatalf("precondition: phase %s, want Running", p)
+	}
+	return r
+}
+
+// startCGRig starts the job at 12:01:00 and makes no observation after it, so
+// the first read of the job finds it ended.
+func startCGRig(t *testing.T, mode fakeslurm.NotListedMode, minAge time.Duration, mods ...realOption) *cgRig {
+	t.Helper()
 	clock := fake.NewClock(at(12, 0, 0))
 	sl := newSlurm(clock, fakeslurm.Config{NotListed: mode, MinJobAge: minAge})
 	e := newRealEnv(t, clock, sl, newFakeClient(t, "prov-a"), "prov-a", "user-a", mods...)
@@ -52,10 +64,6 @@ func newCGRig(t *testing.T, mode fakeslurm.NotListedMode, minAge time.Duration, 
 	}
 	clock.Advance(60 * time.Second)
 	e.start("alloc-a") // 12:01:00
-	e.poll("alloc-a", 1)
-	if p := e.get("alloc-a").Status.AtProvider.Phase; p != v1alpha1.AllocationRunning {
-		t.Fatalf("precondition: phase %s, want Running", p)
-	}
 	return &cgRig{realEnv: e, sl: sl, id: id, n: jobNumber(t, id)}
 }
 
@@ -290,5 +298,71 @@ func withCompletingFlagOnRequeued() realOption {
 			p, c, err := inner(v)
 			return flagOnRequeued{p}, c, err
 		}
+	}
+}
+
+// Clearance is a listing without the flag, or a listing that no longer shows the
+// job; an accounting read alone is not (science agent, 1 Nov 2026, after spike
+// S7: sacct said FAILED while squeue still showed COMPLETING). Accounting here
+// says FAILED, with the elapsed time and the counts, for a job whose listing
+// still shows ["FAILED","COMPLETING"], and the controller reads accounting for
+// it (the job ended between two polls, so its first read finds it ended and
+// takes its CPUs and GPUs from accounting). The job stays live: jobCompleting
+// stays true, the finalizer stays, the files stay, no accounting record is
+// written, however long and however often it is read; the flag's own clearing
+// then releases everything, once.
+func TestAccountingSayingTerminalDoesNotClearTheFlagWhileTheListingShowsIt(t *testing.T) {
+	for _, shape := range bothShapes {
+		t.Run(shape.name, func(t *testing.T) {
+			r := startCGRig(t, shape.mode, 10*time.Minute)
+			r.clock.Set(at(12, 2, 30))
+			endJob(t, r.sl, r.id, fakeslurm.Failed)
+			if err := r.sl.HoldCompleting(r.n, true); err != nil {
+				t.Fatal(err)
+			}
+			// The precondition: accounting does say FAILED, ended, with its hours.
+			acct, found, err := r.batch.ReadAccounting(r.ctx, r.id)
+			if err != nil || !found || acct.Phase != v1alpha1.AllocationFailed || acct.EndTime == nil || acct.Completing || acct.Accounting == nil || acct.Accounting.Elapsed == nil {
+				t.Fatalf("precondition: accounting gave %+v, found %v, %v; want FAILED with an end time and its elapsed time", acct, found, err)
+			}
+			reads := r.sl.Count("sacct")
+			for i := 0; i < 3; i++ {
+				r.clock.Advance(10 * time.Minute) // past the accounting refresh and MinJobAge
+				r.run("alloc-a", 1)
+				r.wantCompleting("accounting says FAILED", v1alpha1.AllocationFailed, "FAILED", "2026-10-30T12:02:30Z")
+			}
+			if r.sl.Count("sacct") == reads {
+				t.Fatal("the controller read no accounting while the job completed: the test proves nothing")
+			}
+			head := head(r.realEnv, "alloc-a", "1001")
+			r.del("alloc-a")
+			for i := 0; i < 3; i++ {
+				r.clock.Advance(10 * time.Minute)
+				r.run("alloc-a", 1)
+				if r.gone("alloc-a") {
+					t.Fatalf("pass %d: the Allocation is gone while the listing still shows the flag", i)
+				}
+				if _, ok := r.record("alloc-a"); ok {
+					t.Fatalf("pass %d: the accounting record was written while the listing shows the flag", i)
+				}
+				if n := r.sl.Count("rm"); n != 0 {
+					t.Fatalf("pass %d: %d file removals while the listing shows the flag, want 0", i, n)
+				}
+			}
+			// The listing stops showing the flag: everything follows, once.
+			if err := r.sl.HoldCompleting(r.n, false); err != nil {
+				t.Fatal(err)
+			}
+			r.clock.Advance(10 * time.Second)
+			r.run("alloc-a", 3)
+			if !r.gone("alloc-a") {
+				t.Fatal("the Allocation is still there after the flag cleared")
+			}
+			if n := r.sl.Count("rm"); n != 1 {
+				t.Errorf("%d file removals after the flag cleared, want 1", n)
+			}
+			r.wantRecord("alloc-a", head+`,"allocatedCPUs":8,"allocatedGPUs":1,"elapsedSeconds":90,`+
+				`"startTime":"2026-10-30T12:01:00Z","endTime":"2026-10-30T12:02:30Z","basis":"allocated"}`)
+		})
 	}
 }
