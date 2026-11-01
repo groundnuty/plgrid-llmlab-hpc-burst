@@ -43,9 +43,15 @@ type nameReadBack struct{ queue, accounting string }
 // roundTripJobName submits req held, reads the job's name from the queue,
 // cancels the job, waits until the queue no longer lists it, reads the name
 // from accounting, and returns an error unless both equal req.Tag. req.Tag must
-// have nameLength characters. It returns the job ID as soon as it is known,
-// also with an error, so a caller can see to the job. pause is called between
-// polls; at most polls polls of each reader are made.
+// have nameLength characters. The job must be held when the queue lists it
+// (it is then one that cannot start). It returns the job ID as soon as it is
+// known, also with an error, so a caller can see to the job. pause is called
+// between polls; at most polls polls of each reader are made.
+//
+// Every way out cancels the job. A submission whose reply was lost (outcome
+// Unknown, no job ID) may still have registered the job, so the queue is
+// searched for the tag and what it holds is cancelled (review of PR 124,
+// Astra); the ID of such a job is returned.
 func roundTripJobName(ctx context.Context, b *slurm.Batch, req provider.SubmitRequest, polls int, pause func()) (string, nameReadBack, error) {
 	var got nameReadBack
 	if len(req.Tag) != nameLength {
@@ -56,6 +62,13 @@ func roundTripJobName(ctx context.Context, b *slurm.Batch, req provider.SubmitRe
 	}
 	id, outcome, err := b.Submit(ctx, req)
 	if err != nil || outcome != provider.Accepted {
+		found, cerr := cancelByTag(ctx, b, req.Tag, 3, pause)
+		if cerr != nil {
+			return found, got, fmt.Errorf("submit: %s: %v; searching the queue for the tag also failed: %v", outcome, err, cerr)
+		}
+		if found != "" {
+			return found, got, fmt.Errorf("submit: %s: %v; the job was registered all the same and was cancelled by its tag", outcome, err)
+		}
 		return id, got, fmt.Errorf("submit: %s: %v", outcome, err)
 	}
 	// The job is cancelled on every way out, so a failed step leaves none live.
@@ -74,6 +87,9 @@ func roundTripJobName(ctx context.Context, b *slurm.Batch, req provider.SubmitRe
 		}
 		if listed {
 			got.queue = j.Name
+			if !j.Held() {
+				return id, got, fmt.Errorf("the job was not held when squeue listed it (%s): it could start", j.Phase)
+			}
 			break
 		}
 		if i >= polls {
@@ -105,6 +121,35 @@ func roundTripJobName(ctx context.Context, b *slurm.Batch, req provider.SubmitRe
 		pause()
 	}
 	return id, got, sameName("sacct", req.Tag, got.accounting)
+}
+
+// cancelByTag cancels every live job of the user whose name is tag, looking at
+// the queue up to looks times with pause between the looks, and stops after the
+// first look that finds one. It returns the ID of the first job it cancelled,
+// or "" when it found none.
+func cancelByTag(ctx context.Context, b *slurm.Batch, tag string, looks int, pause func()) (string, error) {
+	for i := 0; i < looks; i++ {
+		jobs, err := b.ListByTag(ctx, tag)
+		if err != nil {
+			return "", fmt.Errorf("squeue: %w", err)
+		}
+		var ids []string
+		for _, j := range jobs {
+			if j.EndTime == nil {
+				ids = append(ids, j.ID)
+			}
+		}
+		if len(ids) > 0 {
+			for _, r := range b.Cancel(ctx, ids) {
+				if r.Outcome != provider.Cancelled && r.Outcome != provider.AlreadyEnded {
+					return ids[0], fmt.Errorf("cancel: %s: %v", r.Outcome, r.Err)
+				}
+			}
+			return ids[0], nil
+		}
+		pause()
+	}
+	return "", nil
 }
 
 // sameName compares without printing the names: the lengths and the first
@@ -170,11 +215,16 @@ type rewrite struct {
 	sbatchTo int
 	// sacctTo is the length the name is cut to in sacct's reply; 0 keeps it.
 	sacctTo int
+	// dropHold removes --hold from the sbatch line: a job that could start.
+	dropHold bool
 }
 
 func (r *rewrite) Run(ctx context.Context, c slurm.Command) (slurm.Result, error) {
 	if r.sbatchTo > 0 && strings.HasPrefix(c.Line, "sbatch") {
 		c.Line = strings.Replace(c.Line, "--job-name="+r.tag, "--job-name="+r.tag[:r.sbatchTo], 1)
+	}
+	if r.dropHold && strings.HasPrefix(c.Line, "sbatch") {
+		c.Line = strings.Replace(c.Line, " --hold", "", 1)
 	}
 	res, err := r.Runner.Run(ctx, c)
 	if r.sacctTo > 0 && strings.HasPrefix(c.Line, "sacct") {
@@ -187,11 +237,20 @@ func TestRoundTripJobNameAgainstTheFakePlatform(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		rewrite rewrite
-		wantErr string // "" for a name that comes back unchanged
+		script  []fakeslurm.SubmitStep // the outcome of the first sbatch; empty: accepted
+		wantErr string                 // "" for a name that comes back unchanged
 	}{
-		{"unchanged", rewrite{}, ""},
-		{"shortened by the scheduler", rewrite{sbatchTo: 55}, "squeue returned a name of 55 characters, want 56"},
-		{"shortened in accounting", rewrite{sacctTo: 40}, "sacct returned a name of 40 characters, want 56"},
+		{"unchanged", rewrite{}, nil, ""},
+		{"shortened by the scheduler", rewrite{sbatchTo: 55}, nil, "squeue returned a name of 55 characters, want 56"},
+		{"shortened in accounting", rewrite{sacctTo: 40}, nil, "sacct returned a name of 40 characters, want 56"},
+		// Review of PR 124 (Astra): the job is registered but its reply is lost, so
+		// Submit returns Unknown with no job ID. The step finds the job by its tag
+		// and cancels it, whether the runner failed or sbatch printed a timeout.
+		{"the reply is lost", rewrite{}, []fakeslurm.SubmitStep{fakeslurm.LostReply(slurm.ErrTransport)}, "registered all the same and was cancelled by its tag"},
+		{"a timeout after the job is registered", rewrite{}, []fakeslurm.SubmitStep{fakeslurm.Transient(true)}, "registered all the same and was cancelled by its tag"},
+		// Not held, a job could start; the fake does not start jobs by itself, so
+		// only the held check can fail here.
+		{"submitted without a hold", rewrite{dropHold: true}, nil, "was not held when squeue listed it"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clock := fake.NewClock(time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC))
@@ -203,6 +262,7 @@ func TestRoundTripJobNameAgainstTheFakePlatform(t *testing.T) {
 			}
 			name := "conformance-job-name-round-trip-of-56-chars"
 			tag := v1alpha1.JobTag("conformance", name, "example-uid")
+			sl.Script(tc.script...)
 			rw := tc.rewrite
 			rw.Runner, rw.tag = session, tag
 			b := slurm.NewBatch(&rw, provider.Profile{Name: pp.Name, Spec: pp.Spec, Partition: part},
@@ -230,29 +290,30 @@ func TestRoundTripJobNameAgainstTheFakePlatform(t *testing.T) {
 			if n := sl.Count("scontrol"); n != 0 {
 				t.Errorf("%d scontrol calls, want 0: the job must never be released", n)
 			}
-			if id == "" {
-				t.Fatal("no job ID returned")
+			// The fake holds exactly one job, whatever happened to the reply (a lost
+			// reply must not be followed by a second submission); it never started;
+			// it was submitted held, except where the test took the hold away; and it
+			// ends cancelled.
+			jobs := sl.Jobs()
+			if len(jobs) != 1 {
+				t.Fatalf("the fake Slurm holds %d jobs, want 1", len(jobs))
+			}
+			j := jobs[0]
+			if id != strconv.Itoa(j.ID) {
+				t.Errorf("the step returned job %q, want the fake's only job", id)
 			}
 			if n := sl.Count("scancel"); n != 1 {
 				t.Errorf("%d scancel calls, want 1", n)
 			}
-			if j := slurmJobState(t, sl, id); j != fakeslurm.Cancelled {
-				t.Errorf("the job is %s at the end, want %s", j, fakeslurm.Cancelled)
+			if j.State != fakeslurm.Cancelled {
+				t.Errorf("the job is %s at the end, want %s", j.State, fakeslurm.Cancelled)
+			}
+			if !j.Start.IsZero() || j.Executions > 1 {
+				t.Errorf("the job started (start %v, %d executions)", j.Start, j.Executions)
+			}
+			if wantHeld := !tc.rewrite.dropHold; j.Held != wantHeld {
+				t.Errorf("the job was held: %v, want %v", j.Held, wantHeld)
 			}
 		})
 	}
-}
-
-// slurmJobState is the fake's own record of the job's state.
-func slurmJobState(t *testing.T, sl *fakeslurm.Platform, id string) string {
-	t.Helper()
-	n, err := strconv.Atoi(id)
-	if err != nil {
-		t.Fatalf("job ID %q: %v", id, err)
-	}
-	j, ok := sl.Job(n)
-	if !ok {
-		t.Fatalf("the fake Slurm has no job %s", id)
-	}
-	return j.State
 }
