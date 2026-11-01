@@ -28,21 +28,38 @@ func goroutineStacks() []string {
 }
 
 // waitGoroutine waits until some goroutine's stack satisfies match, or fails
-// the test after stateLimit.
+// the test after stateLimit with the stacks of the front's goroutines, so a
+// change in how Go prints a stack shows in the failure.
 func waitGoroutine(t *testing.T, what string, match func(stack string) bool) {
 	t.Helper()
 	deadline := time.Now().Add(stateLimit)
 	for {
-		for _, g := range goroutineStacks() {
+		stacks := goroutineStacks()
+		for _, g := range stacks {
 			if match(g) {
 				return
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("timed out after %s waiting for %s", stateLimit, what)
+			t.Fatalf("timed out after %s waiting for %s; the front's goroutines:\n%s", stateLimit, what, frontStacks(stacks))
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// frontStacks joins the stacks that run the front's code, cut to 32 KiB.
+func frontStacks(stacks []string) string {
+	var b strings.Builder
+	for _, g := range stacks {
+		if strings.Contains(g, "/internal/front.") {
+			b.WriteString(g)
+			b.WriteString("\n\n")
+		}
+	}
+	if out := b.String(); len(out) > 32<<10 {
+		return out[:32<<10] + "\n... cut at 32 KiB"
+	}
+	return b.String()
 }
 
 // requestLimit bounds a whole exchange whose end the test holds back (an

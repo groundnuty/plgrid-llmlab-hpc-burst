@@ -394,16 +394,23 @@ func (f *syncGate) Sync() error {
 
 func (f *syncGate) unblock() { f.once.Do(func() { close(f.release) }) }
 
-// parkedInWrite reports whether a goroutine is parked receiving from a channel
-// with usage.(*Sink).Write as its innermost frame outside the runtime: a Write
-// waiting for its batch's outcome. It reads every goroutine's stack (debug 2,
-// the form of a test binary's time-out dump).
-func parkedInWrite() bool {
+// parkedInWrite reports whether the Write goroutine that
+// TestWriteReturnsOnlyAfterTheSync started is parked receiving from a channel
+// with usage.(*Sink).Write as its innermost frame outside the runtime: the
+// Write waiting for its batch's outcome. It reads every goroutine's stack
+// (debug 2, the form of a test binary's time-out dump) and also returns the
+// stacks of the goroutines in the sink's code, for a failure message.
+func parkedInWrite() (bool, string) {
 	var b strings.Builder
 	_ = pprof.Lookup("goroutine").WriteTo(&b, 2)
+	var sink strings.Builder
 	for _, g := range strings.Split(b.String(), "\n\n") {
+		if strings.Contains(g, "/internal/front/usage.") {
+			sink.WriteString(g)
+			sink.WriteString("\n\n")
+		}
 		lines := strings.Split(g, "\n")
-		if !strings.Contains(lines[0], "[chan receive") {
+		if !strings.Contains(lines[0], "[chan receive") || !strings.Contains(g, "TestWriteReturnsOnlyAfterTheSync") {
 			continue
 		}
 		for _, l := range lines[1:] {
@@ -411,12 +418,12 @@ func parkedInWrite() bool {
 				continue // a file line, or a runtime frame (GOTRACEBACK=system shows them)
 			}
 			if strings.Contains(l, "/internal/front/usage.(*Sink).Write(") {
-				return true
+				return true, ""
 			}
 			break
 		}
 	}
-	return false
+	return false, sink.String()
 }
 
 // TestWriteReturnsOnlyAfterTheSync: with the log's sync blocked, the record is
@@ -445,14 +452,18 @@ func TestWriteReturnsOnlyAfterTheSync(t *testing.T) {
 		t.Errorf("%d lines in the log while the sync is blocked, want 1: the write comes before the sync", n)
 	}
 	deadline := time.Now().Add(20 * time.Second)
-	for !parkedInWrite() {
+	for {
+		parked, stacks := parkedInWrite()
+		if parked {
+			break
+		}
 		select {
 		case err := <-done:
 			t.Fatalf("Write returned %v while the sync of its record was blocked", err)
 		default:
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("Write was not seen waiting for its record's sync within 20 s, and has not returned")
+			t.Fatalf("Write was not seen waiting for its record's sync within 20 s, and has not returned; the sink's goroutines:\n%s", stacks)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
