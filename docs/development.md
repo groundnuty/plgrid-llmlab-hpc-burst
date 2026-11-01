@@ -20,7 +20,8 @@ Code under `spikes/` and `third_party/forked/*` is not part of this module.
 | `cmd/hpcburst/` | the `hpcburst` command (`up`, `down`, `status`, `upgrade`) | HBEP-11 |
 | `internal/front/` | the LLMLab-compatible front: configuration, client keys, the router, the request path, the stream judge, errors and attribution, the listeners. Subpackages: `inventory` (the routing view, by watch), `balancer` (KubeAI's CHWBL group, wrapped), `convkey`, `naming`, `usage`, `clock`, and `enginetest` (an engine double for tests) | HBEP-5 |
 | `cmd/hpcburst-front/` | the front's binary, which `hpcburst up` supervises | HBEP-5 |
-| `hack/` | scripts for generation, verification and pinned tools | |
+| `hack/` | scripts for generation, verification, pinned tools and the live checks (`live-checks.sh`) | |
+| `hack/livechecks/` | tests of `hack/live-checks.sh` only, no code: its table names every package that holds a live test, and its plan, gates, slot rules and cleanup are run against a stub cluster | HBEP-15 |
 | `third_party/forked/<project>/` | copied code, each with its `LICENSE` and `ORIGIN.md` | HBEP-15 |
 | `spikes/<id>/` | spike code and results; each Go spike is its own module | |
 
@@ -158,6 +159,20 @@ Kubernetes' explicit ±1-minor skew rule is written for kubectl. client-go inste
 - Tests that start frp read `HPCBURST_FRP_DIR=<dir>` (an absolute path: a test runs in its package directory, so a relative one fails the test) through `testenv.FrpBinaries(t)`; a plain `go test ./...` takes it the same way (`hack/fetch-frp.sh <dir>`, then `HPCBURST_FRP_DIR=<dir> go test ./...`). `hack/fetch-frp.sh <dir>` installs the pinned `frps` and `frpc` there (the tarball's sha256 is checked before anything is extracted). Without `HPCBURST_FRP_DIR` those tests skip with a message; `HPCBURST_REQUIRE_FRP=1` fails them instead, and CI sets both in the `go`, `crd and envtest` and `launcher-k3s` jobs. A binary that is there but not executable, not runnable or not 0.71.1 fails in either mode.
 - The `go` and `crd and envtest` jobs provide OpenSSH's sshd for the ssh-mode tunnel tests in `internal/agent` (`HPCBURST_SSHD`). This is the workflow's one use of sudo. It installs only `openssh-server`, and only when `/usr/sbin/sshd` is missing; the ubuntu-24.04 runner already has OpenSSH_9.6p1, so in practice the install does not run. It never starts the system service and stops it if it runs. The tests run sshd as the user, in inetd mode (`@hpc-burst-science-agent`, 31 Oct 2026).
 - The test host (`internal/testenv`) binds only loopback ports 29200 to 29219 and, in k3s mode, accepts only a kubeconfig whose server is loopback on 29200 to 29239. The control-plane binaries are always sha256-checked; `HPCBURST_TESTENV_UNPINNED=1` is the explicit override for a binary you built yourself.
+
+## Live checks
+
+Some tests run only against a real system and never in CI: the real LLMLab smoke test (`internal/front`), the Slurm conformance runs (`internal/providerctl/conformance`), the real-engine run (`cmd/hb-agent`) and the Hub golden test (`pkg/hubfiles`). HBEP-15 (Upgrading a pinned dependency) requires every live test that runs the changed code to run again after a merge. `hack/live-checks.sh` is the one entry point (issue #163).
+
+- `hack/live-checks.sh --plan <base>..<head>` lists which live tests cover the range and runs nothing. It maps each changed file to the code a test runs: the packages the test's package imports (`go list -deps -test`), the files they embed, and the inputs named in the table (the profile a conformance run reads, the real-engine job script). A change to `go.mod` or `go.sum` selects every test. A test file counts only for its own package. The last line, `run: <names>`, is the list to pass to `--run`.
+- `hack/live-checks.sh --run <name>... [--yes]` runs only the named tests, each with its gate set from a settings file. `HPCBURST_LIVE_SETTINGS` names that mode-600 file; the script's header lists its keys (the output directory, the lock directory, the grant accounts, the credentials files). A cluster test prints its shape and the queue estimate (`sbatch --test-only`) and runs only with `--yes`. The script prints statuses and counts and keeps every log and record in the output directory; it never prints a key, a URL, a job ID, a host, an account or a private path.
+- **Skips are failures.** A live test that skips because its gate was not met reports FAIL.
+- **Exit codes:** 0 passed; 1 failed, skipped or left a job; 2 usage error or an unreadable range; 3 refused; 4 a cluster test not run for want of `--yes`.
+- **The one-job slots** (QOS `now` on Helios, `plgrid-now` on Athena; owner's rule of 1 Nov 2026, issue #145). The script refuses to queue behind a job that already holds a slot, runs one cluster test at a time with the test's own shortest time limit, and on every exit, signals included, cancels the `hb-` jobs that appeared during the run (never one that was queued before it). It prints each use as a UTC start, end and duration: post that line on the issue the run served. A run killed with SIGKILL cannot clean up; look at the queue.
+- **The real-engine run** builds the arm64 agent and test binary and the plan on this host, stages them under `$SCRATCH/hpc-burst-live/<tag>` on the cluster, submits `spikes/s94/job.sh`, polls with short calls and fetches the log and the record. It leaves the staged files; deleting them needs the owner's go.
+- **Adding a live test.** Add a row to the table in `hack/live-checks.sh` (and a shape row for a cluster test). `hack/livechecks` finds live tests by scanning the tree for a `t.Skip` that says it needs a real system next to an environment read, for a `_live_` file name, and for the table's gate variables, and fails when a package that holds one has no row. Say "real" or "live" in the skip message of a new live test.
+- The tests of the script itself run in the `go` job with the rest of the module (`go test ./hack/livechecks`). They start no live test and read no credential.
+- **Pending:** the one-host rehearsal (#146) has a `pending` row; give it a package and a gate when its PR merges.
 
 ## Running the e2e suite on the launcher's k3s
 
