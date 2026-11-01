@@ -27,6 +27,13 @@ import (
 var (
 	tunnelReadPeriod = 10 * time.Second
 	tunnelReadSettle = time.Second
+	// tunnelOrphanGrace is TunnelOrphanGrace (`@hpc-burst-science-agent`, 1 Nov 2026, for
+	// #167): an online proxy that names no current Instance is an orphan only once every
+	// readable read for at least this long has listed it so. Two minutes is above the read
+	// period (10 s), the agent's report interval (agentapi.ReportInterval, 15 s) and the
+	// desired-state long poll, so a normal drain, whose frpc stops within them after the
+	// Instance ends, raises nothing.
+	tunnelOrphanGrace = 2 * time.Minute
 )
 
 // orphanEventEvery is HBEP-8's gate for a repeating event: an orphan proxy's TunnelOrphaned is
@@ -82,6 +89,10 @@ type pathState struct {
 	now func() time.Time
 
 	orphans map[string]time.Time // when each orphan's event was last emitted; absent once it is gone
+	// suspects holds, for each online proxy that names no current Instance, when the unbroken
+	// run of readable reads that list it so began; it is an orphan once that is tunnelOrphanGrace
+	// ago. A read that does not list it ends the run, so its clock starts again.
+	suspects map[string]time.Time
 }
 
 func (s *pathState) clock() time.Time {
@@ -174,21 +185,35 @@ func (s *pathState) apply(ctx context.Context, in *v1alpha1.Instance, want metav
 // reportOrphans raises TunnelOrphaned for each online proxy that is no current Instance's UID
 // (HBEP-6: an orphan; HBEP-8, Reasons in alpha): when it is first seen, then at most once an hour
 // while it lasts (HBEP-8, Repeating conditions; orphanEventEvery). The gate is in memory, so a new
-// leader emits once more, which is "when it starts" for that process. An orphan that is gone from a
-// read leaves the gate, so one that comes back is a new start. A list that could not be read says
-// nothing about the orphans: the gate and the admissions stay as they were.
+// leader emits once more, which is "when it starts" for that process. A proxy is an orphan only
+// after every readable read for tunnelOrphanGrace has listed it so (TunnelOrphanGrace,
+// `@hpc-burst-science-agent`, 1 Nov 2026, for #167), so a drain whose frpc stops within the grace
+// raises nothing. One that is gone from a read leaves both the grace's clock and the gate, so one
+// that comes back starts again. A list that could not be read says nothing about the orphans: it
+// neither ends a run nor counts as one of its reads, and the gate and the admissions stay as they
+// were.
 func (s *pathState) reportOrphans(ctx context.Context, rep frpsplugin.Report, live []string) {
 	if rep.Err != nil {
 		return
 	}
 	now := s.clock()
 	next := make(map[string]time.Time, len(rep.Orphans))
+	suspects := make(map[string]time.Time, len(rep.Orphans))
 	keep := make(map[string]struct{}, len(rep.Orphans)+len(live))
 	for _, uid := range live {
 		keep[uid] = struct{}{}
 	}
+	defer func() { s.suspects = suspects }()
 	for _, name := range rep.Orphans {
 		keep[name] = struct{}{}
+		since, listed := s.suspects[name]
+		if !listed {
+			since = now
+		}
+		suspects[name] = since
+		if now.Sub(since) < tunnelOrphanGrace {
+			continue // not an orphan yet
+		}
 		last, seen := s.orphans[name]
 		if seen && now.Sub(last) < orphanEventEvery {
 			next[name] = last

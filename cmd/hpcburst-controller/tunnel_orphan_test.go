@@ -28,8 +28,13 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/lifecycle"
 )
 
-// orphanGate is HBEP-8's hour, written out here, not read from the code under test.
-const orphanGate = time.Hour
+// orphanGate is HBEP-8's hour, and orphanGrace TunnelOrphanGrace (`@hpc-burst-science-agent`,
+// 1 Nov 2026, for #167: an orphan only after every read for 2 minutes listed it so), both written
+// out here, not read from the code under test.
+const (
+	orphanGate  = time.Hour
+	orphanGrace = 2 * time.Minute
+)
 
 // orphanSteps is a Reader whose answer the test changes between reads.
 type orphanSteps struct {
@@ -122,8 +127,10 @@ func TestOrphanEventsFollowHBEP8sHourlyGate(t *testing.T) {
 	// The plugin admitted the proxy through Allocation al-b, not the first one in the list.
 	r.adm.ProxyChanged(frpsplugin.OpNewProxy, "gone-instance", "alloc-uid-2")
 
+	r.read(-orphanGrace)
+	r.wantEvents("first seen, the grace starts", 0)
 	r.read(0)
-	first := r.wantEvents("first seen", 1)[0]
+	first := r.wantEvents("listed for the whole grace", 1)[0]
 	r.wantRegarding(first, "*v1alpha1.Allocation", "team-a", "al-b")
 
 	// The gate holds for the hour: at the read period, in a burst, and one second short of it.
@@ -153,20 +160,25 @@ func TestOrphanEventRestartsWhenTheOrphanWentAwayAndCameBack(t *testing.T) {
 	r := newOrphanRig(t, orphanAllocation("al-a", "alloc-uid-1"))
 	r.adm.ProxyChanged(frpsplugin.OpNewProxy, "gone-instance", "alloc-uid-1")
 	r.rd.orphans = []string{"gone-instance"}
+	r.read(-orphanGrace)
 	r.read(0)
-	r.wantEvents("first seen", 1)
+	r.wantEvents("an orphan after the grace", 1)
 
 	r.rd.orphans = nil // frps no longer lists it online
 	r.read(10 * time.Minute)
 	r.wantEvents("gone", 1)
 
+	// Back: its grace starts again, and then the event comes, inside the hour of the first.
 	r.rd.orphans = []string{"gone-instance"}
 	r.read(20 * time.Minute)
-	r.wantEvents("back after 20 minutes", 2)
+	r.wantEvents("back after 20 minutes, inside a new grace", 1)
+	back := 20*time.Minute + orphanGrace
+	r.read(back)
+	r.wantEvents("back for a whole grace", 2)
 	// The new start has its own hour.
-	r.read(20*time.Minute + orphanGate - time.Second)
+	r.read(back + orphanGate - time.Second)
 	r.wantEvents("one second short of an hour after the new start", 2)
-	r.read(20*time.Minute + orphanGate)
+	r.read(back + orphanGate)
 	r.wantEvents("an hour after the new start", 3)
 }
 
@@ -176,8 +188,9 @@ func TestOrphanGateSurvivesAnUnreadableList(t *testing.T) {
 	r := newOrphanRig(t, orphanAllocation("al-a", "alloc-uid-1"))
 	r.adm.ProxyChanged(frpsplugin.OpNewProxy, "gone-instance", "alloc-uid-1")
 	r.rd.orphans = []string{"gone-instance"}
+	r.read(-orphanGrace)
 	r.read(0)
-	r.wantEvents("first seen", 1)
+	r.wantEvents("an orphan after the grace", 1)
 
 	r.rd.err = errors.New("frps's web server is down")
 	r.read(10 * time.Minute)
@@ -195,6 +208,7 @@ func TestOrphanGateSurvivesAnUnreadableList(t *testing.T) {
 func TestOrphanEventRegardsTheLifecycleLeaseWhenNoAllocationIsKnown(t *testing.T) {
 	r := newOrphanRig(t, orphanAllocation("al-a", "alloc-uid-1"))
 	r.rd.orphans = []string{"unadmitted"}
+	r.read(-orphanGrace)
 	r.read(0)
 	r.wantRegarding(r.wantEvents("no admission known", 1)[0], "*v1.Lease", v1alpha1.ControllerNamespace, v1alpha1.LeaseLifecycle)
 	if v1alpha1.ControllerNamespace != "hpcburst-system" || v1alpha1.LeaseLifecycle != "lifecycle" {
@@ -205,13 +219,17 @@ func TestOrphanEventRegardsTheLifecycleLeaseWhenNoAllocationIsKnown(t *testing.T
 	r.adm.ProxyChanged(frpsplugin.OpNewProxy, "from-a-deleted-allocation", "alloc-uid-deleted")
 	r.rd.orphans = []string{"unadmitted", "from-a-deleted-allocation"}
 	r.read(time.Minute)
+	r.wantEvents("a second proxy, inside its grace", 1)
+	r.read(time.Minute + orphanGrace)
 	evs := r.wantEvents("a second orphan, its Allocation gone", 2)
 	r.wantRegarding(evs[1], "*v1.Lease", v1alpha1.ControllerNamespace, v1alpha1.LeaseLifecycle)
 
 	// And one whose Allocation is there regards it, beside them.
 	r.adm.ProxyChanged(frpsplugin.OpNewProxy, "admitted", "alloc-uid-1")
 	r.rd.orphans = []string{"admitted", "from-a-deleted-allocation", "unadmitted"}
-	r.read(2 * time.Minute)
+	r.read(10 * time.Minute)
+	r.wantEvents("a third proxy, inside its grace", 2)
+	r.read(10*time.Minute + orphanGrace)
 	evs = r.wantEvents("a third orphan, its Allocation known", 3)
 	r.wantRegarding(evs[2], "*v1alpha1.Allocation", "team-a", "al-a")
 }
@@ -297,13 +315,15 @@ func TestEndedInstanceKeepsItsConditionAndItsOnlineProxyIsAnOrphan(t *testing.T)
 	k.updates.Store(0)
 	asked = nil
 	r.read(10 * time.Second)
-	evs := r.wantEvents("its proxy still online after the end", 1)
+	r.wantEvents("its proxy still online right after the end, inside the grace", 0)
+	r.read(10*time.Second + orphanGrace)
+	evs := r.wantEvents("its proxy still online a whole grace after the end", 1)
 	r.wantRegarding(evs[0], "*v1alpha1.Allocation", "team-a", "al-a")
 
 	// The proxy goes offline: a read that would turn a live Instance's condition False.
 	proxyOnline = false
-	r.read(20 * time.Second)
-	r.read(30 * time.Second)
+	r.read(20*time.Second + orphanGrace)
+	r.read(30*time.Second + orphanGrace)
 
 	if len(asked) != 0 {
 		t.Errorf("after it ended the reader was asked about %v, want no UID", asked)
@@ -316,4 +336,57 @@ func TestEndedInstanceKeepsItsConditionAndItsOnlineProxyIsAnOrphan(t *testing.T)
 		t.Errorf("the ended Instance's TunnelConnected = %+v, want the True/ProxyOnline it had at the end", tc)
 	}
 	r.wantEvents("the proxy offline: no orphan any more", 1)
+}
+
+// readEvery reads at from, then every 10 s (HBEP-6's read period) up to and including to.
+func (r *orphanRig) readEvery(from, to time.Duration) {
+	r.t.Helper()
+	for at := from; at <= to; at += 10 * time.Second {
+		r.read(at)
+	}
+}
+
+// TunnelOrphanGrace (`@hpc-burst-science-agent`, 1 Nov 2026, for #167): a normal drain. The
+// Instance has ended and its frpc still serves the proxy for a while; it goes offline within the
+// grace, so no read ever made it an orphan, and nothing is raised, then or later.
+func TestOrphanGraceANormalDrainRaisesNothing(t *testing.T) {
+	r := newOrphanRig(t, orphanAllocation("al-a", "alloc-uid-1"))
+	r.adm.ProxyChanged(frpsplugin.OpNewProxy, "drained-instance", "alloc-uid-1")
+	r.rd.orphans = []string{"drained-instance"}
+	r.readEvery(0, orphanGrace-10*time.Second) // listed on every read for 1 m 50 s
+	r.rd.orphans = nil                         // frpc stopped: frps lists it offline
+	r.readEvery(orphanGrace, orphanGrace+orphanGate)
+	r.wantEvents("a drain whose proxy went offline within the grace", 0)
+}
+
+// TunnelOrphanGrace: a proxy still online after the grace raises exactly one event, at the first
+// read a whole grace after it was first listed, not one read earlier, and then only on the hour.
+func TestOrphanGraceStillOnlineAfterTheGraceRaisesExactlyOne(t *testing.T) {
+	r := newOrphanRig(t, orphanAllocation("al-a", "alloc-uid-1"))
+	r.adm.ProxyChanged(frpsplugin.OpNewProxy, "lingering", "alloc-uid-1")
+	r.rd.orphans = []string{"lingering"}
+	r.readEvery(0, orphanGrace-10*time.Second)
+	r.wantEvents("one read short of the grace", 0)
+	r.read(orphanGrace)
+	r.wantRegarding(r.wantEvents("a whole grace", 1)[0], "*v1alpha1.Allocation", "team-a", "al-a")
+	r.readEvery(orphanGrace+10*time.Second, orphanGrace+30*time.Minute)
+	r.wantEvents("half an hour on", 1)
+}
+
+// TunnelOrphanGrace: a proxy that flaps offline and back starts its clock again. Listed for a
+// minute, missing from one read, listed again: two minutes after it was FIRST listed it is still
+// inside the grace of its return, and the event comes a whole grace after the return.
+func TestOrphanGraceAFlapRestartsTheClock(t *testing.T) {
+	r := newOrphanRig(t, orphanAllocation("al-a", "alloc-uid-1"))
+	r.adm.ProxyChanged(frpsplugin.OpNewProxy, "flapping", "alloc-uid-1")
+	r.rd.orphans = []string{"flapping"}
+	r.readEvery(0, time.Minute)
+	r.rd.orphans = nil
+	r.read(time.Minute + 10*time.Second) // one read without it
+	r.rd.orphans = []string{"flapping"}
+	back := time.Minute + 20*time.Second
+	r.readEvery(back, back+orphanGrace-10*time.Second)
+	r.wantEvents("two minutes after it was first listed, inside the grace of its return", 0)
+	r.read(back + orphanGrace)
+	r.wantEvents("a whole grace after its return", 1)
 }
