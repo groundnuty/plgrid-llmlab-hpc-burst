@@ -148,6 +148,45 @@ func TestReplaceHostStartsK3sWithTheEventTTL(t *testing.T) {
 	}
 }
 
+// TestReplaceHostWarnsWhenTheRecordRunsNoFrps: an upgrade keeps what the record runs and resolves
+// no frps, so a host recorded with the controllers but without frps comes back without it; the
+// upgrade says so, as up does when it finds no frps. A record with frps, and one without the
+// controllers (which runs no frps by design), are the controls: no warning.
+func TestReplaceHostWarnsWhenTheRecordRunsNoFrps(t *testing.T) {
+	ctl := &ControllerConfig{Binary: "/opt/hpcburst-controller"}
+	for _, c := range []struct {
+		name string
+		st   State
+		warn bool
+	}{
+		{"controllers without frps", State{Controllers: ctl}, true},
+		{"controllers with frps", State{Controllers: ctl, Frps: &FrpsRunConfig{Binary: "/opt/frp/frps", Version: DefaultFrpVersion}}, false},
+		{"no controllers", State{}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			l := storeLayout(t)
+			putStore(t, l, "v1", "tok", "")
+			if err := l.saveStoreVersion("v1.35.9+k3s1", "up"); err != nil {
+				t.Fatal(err)
+			}
+			st := c.st
+			st.Version, st.Ports = "v1.35.9+k3s1", Ports{API: 1, HTTPS: 2, KCM: 3, LB: 4}
+			var log strings.Builder
+			ops := &fakeHostOps{t: t, l: l}
+			if _, _, _, _, err := replaceHost(context.Background(), l, &st, Binary{Version: mustVersion(t, "v1.36.5+k3s1")}, ops, time.Second, time.Second, &log); err != nil {
+				t.Fatal(err)
+			}
+			const want = "warning: the host runs the controllers without frps"
+			if got := strings.Contains(log.String(), want); got != c.warn {
+				t.Errorf("warned %v, want %v; log:\n%s", got, c.warn, log.String())
+			}
+			if c.warn && !strings.Contains(log.String(), "dial-home tunnels") {
+				t.Errorf("the warning does not say what is lost: %s", log.String())
+			}
+		})
+	}
+}
+
 // TestReplaceHostOrder pins the order of an upgrade's store steps: stop, back up, record the new
 // release, start. A backup taken before the stop would miss the old host's last writes; one taken
 // after the start would hold the new release's.
