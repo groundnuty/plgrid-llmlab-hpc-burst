@@ -18,7 +18,9 @@ import (
 type Clock interface{ Now() time.Time }
 
 // NotListedMode says how squeue treats a job after it ends (S7's measured
-// shapes).
+// shapes). In run mode a job whose end state is set while its processes still
+// live is completing, and both modes list it (and do not purge it) until they
+// are gone; the rules below apply to an ended job with no process left.
 type NotListedMode string
 
 const (
