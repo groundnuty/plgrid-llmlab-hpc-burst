@@ -89,6 +89,75 @@ func TestNoOverlapWarmAllocationTakesTheReplacement(t *testing.T) {
 	}
 }
 
+// TestNoOverlapWarmAllocationOnAnotherProviderTakesTheReplacement: the
+// primary's Provider has one submit slot and it is taken, but a second
+// allowed Provider, with a submit limit of 1 too, holds a retained warm
+// Allocation of the deployment with lease to spare. Provisioning would place
+// the replacement on it without a new job, so the deployment is not in the
+// mode: the replacement goes there at its planned time, and there is no gap.
+//
+// The timeline: the deployment first runs on the second Provider alone (its
+// partition allows 6 h) and is scaled to zero at 08:30, which keeps its
+// Allocation; at 09:00 it is scaled to one Instance and allowed on both
+// Providers. The first takes it: the job starts at 09:00:20 with a hard end of
+// 13:00:20 (the rig's 4 h), so the drain start is 10:50:20 and the
+// replacement's planned time 10:50:20 - (0 + 50 s + 30 min) = 10:19:30. The
+// warm Allocation's hard end, 14:00:20, leaves more than the 2h11m40s that a
+// replacement needs.
+func TestNoOverlapWarmAllocationOnAnotherProviderTakesTheReplacement(t *testing.T) {
+	qos := []v1alpha1.QOSProfile{
+		{Name: "example-a1", MaxSubmitPerUser: i32(1)},
+		{Name: "example-b1", MaxSubmitPerUser: i32(1)},
+	}
+	rg := newRig(t, append(qosOpts(qos, "", "example-a1"), withMaxTime(4*time.Hour), withBatchConfig(func(c *pfake.Config) { c.MaxSubmitPerUser = 1 }))...)
+	b := rg.addProvider("example-b", "gpu-long", 6*time.Hour, func(pp *v1alpha1.PartitionProfile) { pp.QOS = "example-b1" }, func(c *pfake.Config) { c.MaxSubmitPerUser = 1 })
+	md := mdSpec(hoMD)
+	md.Spec.Providers.Names = []string{"example-b"}
+	rg.create(md)
+	rg.until(5*time.Minute, 10*time.Second, "the Instance on example-b is ready", func() bool { return rg.readyCount(hoMD) == 1 })
+	hoStepTo(rg, hoT(8, 30, 0), 5*time.Minute, nil)
+	rg.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 0 })
+	rg.until(5*time.Minute, 10*time.Second, "scaled to zero", func() bool { return len(rg.liveInstances(hoMD)) == 0 })
+	warm := rg.allocations(hoMD)[0]
+	if allocReleased(rg, warm.Name) {
+		t.Fatal("the Allocation on example-b was not kept as warm capacity; the test proves nothing")
+	}
+
+	hoStepTo(rg, hoT(9, 0, 0), 5*time.Minute, nil)
+	rg.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) {
+		m.Spec.Instances = 1
+		m.Spec.Providers.Names = []string{rigProvider, "example-b"}
+	})
+	rg.until(5*time.Minute, 10*time.Second, "the primary is ready", func() bool { return rg.readyCount(hoMD) == 1 })
+	live := rg.liveInstances(hoMD)
+	if len(live) != 1 || live[0].Labels[v1alpha1.LabelProvider] != rigProvider {
+		t.Fatalf("live Instances %+v, want one, on %s", live, rigProvider)
+	}
+	p := live[0]
+	if p.Status.LeaseEnd == nil || !p.Status.LeaseEnd.Time.Equal(hoT(13, 0, 20)) {
+		t.Fatalf("the primary's leaseEnd is %v, want 13:00:20", p.Status.LeaseEnd)
+	}
+	submitted := b.batch.Count("sbatch")
+
+	noGap := func() {
+		if c := rg.condition(hoMD, v1alpha1.ConditionDegraded); c.Reason == v1alpha1.ReasonNoOverlapSlot {
+			t.Fatalf("at %s Degraded = %s/%s %q: example-b's warm Allocation takes the replacement, so there is no gap", rg.clock.Now().Format(time.TimeOnly), c.Status, c.Reason, c.Message)
+		}
+	}
+	hoStepTo(rg, hoT(10, 19, 20), 5*time.Minute, noGap)
+	hoStepTo(rg, hoT(10, 19, 40), 10*time.Second, noGap)
+	reps := hoRepl(rg, p.Name)
+	if len(reps) != 1 || reps[0].Labels[v1alpha1.LabelProvider] != "example-b" || reps[0].Spec.AllocationRef.Name != warm.Name {
+		t.Fatalf("replacements %+v, want one, on example-b's warm Allocation %s", reps, warm.Name)
+	}
+	if reps[0].Annotations[annotationNoOverlapSuccessor] != "" {
+		t.Fatal("the replacement on the warm Allocation is marked as a no-overlap successor")
+	}
+	if n := b.batch.Count("sbatch"); n != submitted {
+		t.Fatalf("example-b received %d submissions after the replacement was placed, want none", n-submitted)
+	}
+}
+
 // TestNoOverlapSuccessorStaysWhenTheModeLifts: on the queued path the
 // successor is created at 09:19:30 and pends on the GPU cap. At 09:30 a second
 // Provider with room joins the deployment, so the mode lifts. The pending
