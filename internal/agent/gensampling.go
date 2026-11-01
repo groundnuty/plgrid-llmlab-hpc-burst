@@ -248,8 +248,7 @@ func (g *genSampling) resolve(dir string, reasoning bool, log *slog.Logger, gen 
 		defer g.resolved.Store(true)
 		g.file = readGenerationConfig(dir)
 		if g.file.refused != nil {
-			log.Warn("generation_config.json holds a value vLLM refuses: verification fails, no check request is sent",
-				"verificationGeneration", gen, "param", g.file.refused.Param, "refusal", g.file.refused.Error())
+			log.Warn("generation_config.json is refused: verification fails, no check request is sent", refusalAttrs(gen, g.file)...)
 			return
 		}
 		g.sampling = agentapi.CheckSampling(g.file.config, g.file.doSample, reasoning)
@@ -265,6 +264,45 @@ func (g *genSampling) resolve(dir string, reasoning bool, log *slog.Logger, gen 
 		log.Info("check sampling fixed for the verification generation", attrs...)
 	})
 	return g
+}
+
+// refusalAttrs are the log attributes of a refused file: the key and what is
+// expected there, or what is wrong with the file as a whole, and never the
+// value's text. The file is arbitrary configuration, so a string value can
+// hold a token, a URL with a query or a private path (PR #169 review, Astra
+// B2). A value that is a JSON number may be shown, as a number. The
+// controller's verification record carries the value, cut to
+// agentapi.MaxGenerationConfigValueBytes, as the contract says; the log does
+// not.
+func refusalAttrs(gen int64, f generationFile) []any {
+	r := f.refused
+	attrs := []any{"verificationGeneration", gen}
+	if r.Param == "" {
+		// Value is one of the contract's fixed phrases for the file as a whole.
+		attrs = append(attrs, "file", r.Value, "want", r.Want)
+		if f.cause != "" {
+			attrs = append(attrs, "cause", f.cause)
+		}
+		return attrs
+	}
+	attrs = append(attrs, "param", r.Param, "want", r.Want)
+	if n, ok := jsonNumberValue(r.Value); ok {
+		attrs = append(attrs, "value", n)
+	}
+	return attrs
+}
+
+// jsonNumberValue returns text as a number when it is a JSON number that a
+// float64 holds, so that what is logged is a number and cannot carry text.
+func jsonNumberValue(text string) (float64, bool) {
+	if text == "" || (text[0] != '-' && (text[0] < '0' || text[0] > '9')) {
+		return 0, false // a string, a boolean, a null, a list
+	}
+	var n float64
+	if json.Unmarshal([]byte(text), &n) != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // refused reports whether the generation's file was read and refused. The

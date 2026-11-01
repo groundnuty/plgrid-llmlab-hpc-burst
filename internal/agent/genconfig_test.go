@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"log/slog"
@@ -381,5 +382,69 @@ func TestOnlyAWholeFileRefusalHasAnEmptyParam(t *testing.T) {
 		case tc.whole && !strings.Contains(r.Error(), "generation_config.json"):
 			t.Errorf("%.40s: message %q does not name the file", tc.body, r.Error())
 		}
+	}
+}
+
+// The warning that a file is refused names the key and what is expected there,
+// and never the value's text: the file is arbitrary configuration, and a string
+// under a checked key can hold a token, a URL with a query or a private path
+// (PR #169 review, Astra B2). Each synthetic value sits under temperature,
+// which the agent judges, is shorter than the 128 bytes the report keeps, and
+// has a distinctive part that the log must not hold. A number is shown as a
+// number. The expected texts are written out by hand.
+func TestTheRefusalIsLoggedWithoutTheValuesText(t *testing.T) {
+	for _, tc := range []struct {
+		name, value string   // value is the JSON text under temperature
+		secrets     []string // parts of it that must not reach the log
+	}{
+		{"a token-like string", `"hf_0123456789abcdefABCDEF0123456789"`, []string{"hf_0123", "abcdefABCDEF"}},
+		{"a query string", `"https://example.invalid/models?token=SECRET123&sig=0f9e"`, []string{"SECRET123", "token=", "example.invalid"}},
+		{"a private path", `"/home/ExampleUser/private/qwen"`, []string{"ExampleUser", "/home/", "private"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeGenerationConfig(t, dir, `{"temperature": `+tc.value+`}`)
+			var buf bytes.Buffer
+			(&genSampling{}).resolve(dir, true, slog.New(slog.NewTextHandler(&buf, nil)), 3)
+			out := buf.String()
+			for _, secret := range tc.secrets {
+				if strings.Contains(out, secret) {
+					t.Errorf("the log holds %q of the value: %s", secret, out)
+				}
+			}
+			for _, want := range []string{"level=WARN", "verificationGeneration=3", "param=temperature", `want="a number"`} {
+				if !strings.Contains(out, want) {
+					t.Errorf("the log lacks %s: %s", want, out)
+				}
+			}
+		})
+	}
+
+	// A number is shown as a number, with its key and its range.
+	dir := t.TempDir()
+	writeGenerationConfig(t, dir, `{"temperature": 2.5}`)
+	var buf bytes.Buffer
+	(&genSampling{}).resolve(dir, true, slog.New(slog.NewTextHandler(&buf, nil)), 1)
+	for _, want := range []string{"param=temperature", "value=2.5", `want="[0, 2]"`} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("the log lacks %s: %s", want, buf.String())
+		}
+	}
+
+	// A file refused as a whole is logged by the contract's phrase, and the
+	// operating system's reason without the path.
+	dir = t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "generation_config.json"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	buf.Reset()
+	(&genSampling{}).resolve(dir, true, slog.New(slog.NewTextHandler(&buf, nil)), 1)
+	for _, want := range []string{"level=WARN", "file=unreadable", "cause=\"is a directory\""} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("the log lacks %s: %s", want, buf.String())
+		}
+	}
+	if strings.Contains(buf.String(), dir) {
+		t.Errorf("the log holds the staging path: %s", buf.String())
 	}
 }
