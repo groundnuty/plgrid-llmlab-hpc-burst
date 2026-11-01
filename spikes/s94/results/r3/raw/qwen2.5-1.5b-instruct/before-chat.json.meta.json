@@ -1,0 +1,18 @@
+{
+  "contentType": "application/json",
+  "method": "POST",
+  "path": "/v1/chat/completions",
+  "request": {
+    "max_tokens": 256,
+    "messages": [
+      {
+        "content": "Reply with one word: ready.",
+        "role": "user"
+      }
+    ],
+    "model": "hb-test/qwen2.5-1.5b-instruct",
+    "temperature": 0
+  },
+  "seconds": 0.014729384,
+  "status": 200
+}

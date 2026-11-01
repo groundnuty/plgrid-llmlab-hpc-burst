@@ -1,0 +1,17 @@
+# Hub responses for a non-LFS and an LFS file of Qwen/Qwen3-0.6B at c1899de, as Go's client asks for them (gzip accepted). Taken 2026-11-01T00:07:42Z with:
+#   curl -s -L -o /dev/null -D - -H 'Accept-Encoding: gzip' <resolve URL>          (vocab.json, non-LFS)
+#   curl -s -L -o /dev/null -D - -H 'Accept-Encoding: gzip' -r 0-0 <resolve URL>   (tokenizer.json, LFS)
+== vocab.json
+HTTP/2 307 
+content-length: 268
+HTTP/2 200 
+content-encoding: gzip
+== tokenizer.json
+HTTP/2 302 
+content-length: 1164
+HTTP/2 206 
+content-length: 1
+content-range: bytes 0-0/11422654
+== listing sizes (MiB): LFS and non-LFS, per revision
+Qwen/Qwen3-0.6B/tree/c1899de289a04d12100db370d81485cdf75e47ca LFS 1444.6 non-LFS 4.28 all 1448.8
+Qwen/Qwen2.5-1.5B-Instruct/tree/989aa7980e4cf806f80c7fef2b1adb7bc71aa306 LFS 2944.4 non-LFS 10.97 all 2955.4

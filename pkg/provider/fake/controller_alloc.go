@@ -132,6 +132,7 @@ func (c *Controller) observe(ctx context.Context, p *pass, s *allocState) error 
 	c.mirror(p, s, id, job, found)
 	errs := []error{settleErr, c.recordQueueWait(ctx, s, id, job, found)}
 	if found {
+		c.liveAccounting(ctx, p, s, job)
 		errs = append(errs, c.readBack(ctx, p, s, job))
 	}
 	return errors.Join(errs...)
