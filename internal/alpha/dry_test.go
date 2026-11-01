@@ -40,9 +40,9 @@ const (
 // dryFaults lists every fault the stand-in knows, per row family. An unknown
 // name stops the run: a typo must not pass as "no fault".
 var dryFaults = map[string][]string{
-	"handover":  {"cut", "no-stream", "two-restarts", "no-restart", "no-handover", "late-successor", "wrong-partition", "untagged", "unattributed"},
-	"nooverlap": {"nocap", "nogap", "noslot", "cut", "no-stream", "late-submit", "untagged", "wrong-partition"},
-	"tunnel":    {"short", "cut", "drops", "no-rate", "short-rate", "wrong-direction", "untagged", "wrong-partition"},
+	"handover":  {"cut", "no-stream", "two-restarts", "no-restart", "no-handover", "late-successor", "wrong-partition", "untagged", "unattributed", "adds-helios", "default-lease", "short-lease"},
+	"nooverlap": {"nocap", "nogap", "noslot", "cut", "no-stream", "late-submit", "untagged", "wrong-partition", "adds-athena", "default-lease", "short-lease", "no-release-when-idle"},
+	"tunnel":    {"short", "cut", "drops", "no-rate", "short-rate", "wrong-direction", "untagged", "wrong-partition", "adds-other-cluster", "default-lease", "short-lease"},
 }
 
 type drySteps struct {
@@ -115,6 +115,37 @@ func newDrySteps(t *testing.T, cfg Config, family string) *drySteps {
 	return d
 }
 
+// slurmTime is a duration as sbatch --time takes it, HH:MM:SS.
+func slurmTime(x time.Duration) string {
+	return fmt.Sprintf("%02d:%02d:%02d", int(x.Hours()), int(x.Minutes())%60, int(x.Seconds())%60)
+}
+
+// deployment is what the stand-in's ModelDeployment holds: the row's plan, or the way a fault departs from it.
+// The jobs it submits take their time limit from it, as the controller's Allocations do.
+func (d *drySteps) deployment() DeploymentSpec {
+	dep := d.cfg.Row.Plan()
+	switch d.cfg.DryFault {
+	case "adds-helios":
+		dep.Providers = append(dep.Providers, ProviderRef{Name: "helios", Cluster: "helios"})
+	case "adds-athena":
+		dep.Providers = append(dep.Providers, ProviderRef{Name: "athena", Cluster: "athena"})
+	case "adds-other-cluster":
+		other := "helios"
+		if d.cfg.Row.Cluster == "helios" {
+			other = "athena"
+		}
+		dep.Providers = append(dep.Providers, ProviderRef{Name: other, Cluster: other})
+	case "default-lease":
+		dep.LeaseLimit = 2 * dep.LeaseLimit
+	case "short-lease":
+		// a lease at the lead: PartitionTooShort on the real controller, which would make no Allocation
+		dep.LeaseLimit = Lead()
+	case "no-release-when-idle":
+		dep.ReleaseWhenIdle, dep.IdleLimit = false, 0
+	}
+	return dep
+}
+
 func (d *drySteps) gate(n int) string      { return filepath.Join(d.root, fmt.Sprintf("release-%d", n)) }
 func (d *drySteps) now() time.Time         { return d.clock.Now() }
 func (d *drySteps) tick(x time.Duration)   { d.clock.Advance(x) }
@@ -140,7 +171,7 @@ func (d *drySteps) submit(tag, partition, qos string) (n int, id string) {
 	d.jobs++
 	n = d.jobs
 	wrap := fmt.Sprintf("while [ ! -e %s ]; do sleep 0.02; done", d.gate(n))
-	line := fmt.Sprintf("sbatch --parsable --no-requeue --job-name=%s --partition=%s --account=example-account --time=00:30:00 --gres=gpu:1 --cpus-per-task=1 --mem=1024 --output=%s --error=%s", tag, partition, d.out(n), d.out(n))
+	line := fmt.Sprintf("sbatch --parsable --no-requeue --job-name=%s --partition=%s --account=example-account --time=%s --gres=gpu:1 --cpus-per-task=1 --mem=1024 --output=%s --error=%s", tag, partition, slurmTime(d.deployment().LeaseLimit), d.out(n), d.out(n))
 	if qos != "" {
 		line += " --qos=" + qos
 	}
@@ -256,7 +287,7 @@ func (d *drySteps) Handover(_ context.Context, p Plan) (HandoverObs, error) {
 		streams[0].Complete, streams[0].CutBy = false, "tunnel"
 	}
 	obs := HandoverObs{Tags: append([]string(nil), d.tags...), Streams: streams, DrainStart: drain, Handovers: 1, WorkerRestarts: 1, Responses: 20, Attributed: 20,
-		Instances: []InstanceSpan{{Tag: tag0, ReadyAt: opened, EndedAt: ended0}, {Tag: tag1, ReadyAt: ready}}}
+		Instances: []InstanceSpan{{Tag: tag0, ReadyAt: opened, EndedAt: ended0}, {Tag: tag1, ReadyAt: ready}}, Deployment: d.deployment()}
 	switch {
 	case d.fault("two-restarts"):
 		obs.WorkerRestarts = 2
@@ -314,7 +345,7 @@ func (d *drySteps) NoOverlap(_ context.Context, p Plan) (NoOverlapObs, error) {
 		streams[0].Complete, streams[0].CutBy = false, "tunnel"
 	}
 	_ = j1
-	obs := NoOverlapObs{Tags: append([]string(nil), d.tags...), Streams: streams, DrainStart: drain, SuccessorReady: ready, NoOverlapSlotSeen: true, NoReadyTarget: 3}
+	obs := NoOverlapObs{Tags: append([]string(nil), d.tags...), Streams: streams, DrainStart: drain, SuccessorReady: ready, NoOverlapSlotSeen: true, NoReadyTarget: 3, Deployment: d.deployment()}
 	switch {
 	case d.fault("nogap"):
 		obs.SuccessorReady = drain.Add(-time.Second)
@@ -341,7 +372,7 @@ func (d *drySteps) TunnelHour(_ context.Context, p Plan) (TunnelHourObs, error) 
 	if d.fault("cut") {
 		lane.Complete, lane.CutBy = false, "tunnel"
 	}
-	obs := TunnelHourObs{Tags: append([]string(nil), d.tags...), Lanes: []Stream{lane, {ID: "lane2", Opened: opened, Ended: ended, Complete: true}},
+	obs := TunnelHourObs{Deployment: d.deployment(), Tags: append([]string(nil), d.tags...), Lanes: []Stream{lane, {ID: "lane2", Opened: opened, Ended: ended, Complete: true}},
 		Rate: PathRate{Direction: "up", OK: true, AskedSeconds: 30, TimedSeconds: 30.2, Bytes: 31 << 20}}
 	switch {
 	case d.fault("drops"):

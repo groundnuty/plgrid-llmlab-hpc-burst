@@ -55,6 +55,45 @@ func streamChecks(streams []Stream, drainStart time.Time) []string {
 	return dedupe(f)
 }
 
+// deploymentChecks judges the ModelDeployment the scenario applied against the
+// row's plan (Row.Plan).
+//
+// One Provider, the row's. For Helios, hbep/0007-lifecycle-controller/README.md:468
+// ("Alpha's fence"): "QOS `now`'s one GPU per user makes a second deployment's
+// primary on the Helios Provider pend behind the first ... So in alpha the Helios
+// Provider serves one deployment, and that deployment allows the Helios Provider
+// alone". For every stack row, the run measures one cluster, and a deployment
+// that could also place an Instance elsewhere measures none.
+//
+// The shortest lease: a lease at or under the lead is PartitionTooShort and
+// makes no Allocation (internal/lifecycle/timelimit.go:42), and a longer one
+// holds the owner's shared slot, or a queue place, for longer than the run needs.
+//
+// The no-overlap row: "one deployment with `ReleaseWhenIdle`, a short `idleLimit`
+// and a stream in flight at the drain start" (hbep/0007-lifecycle-controller/
+// README.md:614).
+func deploymentChecks(row Row, d DeploymentSpec) []string {
+	var f []string
+	if len(d.Providers) != 1 {
+		f = append(f, "the deployment does not allow exactly one Provider")
+	} else if d.Providers[0].Cluster != row.Cluster {
+		f = append(f, "the deployment's Provider is not on the row's cluster")
+	}
+	switch {
+	case d.LeaseLimit <= Lead():
+		f = append(f, "the deployment's leaseLimit is not longer than the lead an Instance needs (PartitionTooShort)")
+	case d.LeaseLimit != row.Lease:
+		f = append(f, "the deployment's leaseLimit is not the row's shortest lease")
+	}
+	if d.MaxRequestDuration != MaxRequestDuration {
+		f = append(f, "the deployment's routing.maxRequestDuration is not the row's")
+	}
+	if want := row.Plan(); want.ReleaseWhenIdle && (!d.ReleaseWhenIdle || d.IdleLimit <= 0 || d.IdleLimit > 10*time.Minute) {
+		f = append(f, "the no-overlap deployment lacks ReleaseWhenIdle with a short idleLimit")
+	}
+	return f
+}
+
 // ledgerChecks judges what the cluster itself recorded of the run's jobs: the
 // partition each ran on, and that every tag the run wrote down is a job there.
 func ledgerChecks(row Row, tags []string, jobs []provider.Job) ([]string, map[string]provider.Job) {
@@ -67,6 +106,8 @@ func ledgerChecks(row Row, tags []string, jobs []provider.Job) ([]string, map[st
 			f = append(f, "the cluster has no record of a job the run made")
 		case j.Partition != row.Partition:
 			f = append(f, "a job ran on another partition than the row's")
+		case j.TimeLimit != row.Lease:
+			f = append(f, "a job's time limit in the cluster's record is not the row's lease")
 		}
 	}
 	return f, by
@@ -78,7 +119,7 @@ func ledgerChecks(row Row, tags []string, jobs []provider.Job) ([]string, map[st
 //	hbep/0007-lifecycle-controller/README.md:637: "on each alpha platform, Helios `plgrid-gpu-gh200` and Athena `plgrid-gpu-a100`, one restart at the worker rung;"
 //	hbep/0005-llmlab-compatible-front/README.md:450: "on Athena `plgrid-gpu-a100`, through the front, one handover cuts no request (with HBEP-7)."
 func VerifyHandover(row Row, o HandoverObs, jobs []provider.Job) []string {
-	f := streamChecks(o.Streams, o.DrainStart)
+	f := append(deploymentChecks(row, o.Deployment), streamChecks(o.Streams, o.DrainStart)...)
 	if len(o.Tags) < 2 {
 		f = append(f, "fewer than two Allocations: a handover needs a predecessor and a successor")
 	}
@@ -108,7 +149,7 @@ func VerifyHandover(row Row, o HandoverObs, jobs []provider.Job) []string {
 //	hbep/0007-lifecycle-controller/README.md:608: "The replacement is created at its planned time, accepted, and pends on the fake's GPU cap while the predecessor runs; it never starts before the predecessor's job ends ... A fixture without a GPU cap proves nothing here, since its replacement would start beside the predecessor."
 //	hbep/0007-lifecycle-controller/README.md:471: "the gap is the time from the primary's drain start until its successor is `ready`."
 func VerifyNoOverlap(row Row, o NoOverlapObs, jobs []provider.Job) []string {
-	f := streamChecks(o.Streams, o.DrainStart)
+	f := append(deploymentChecks(row, o.Deployment), streamChecks(o.Streams, o.DrainStart)...)
 	if len(o.Tags) != 2 {
 		f = append(f, "a no-overlap run makes exactly two Allocations: a predecessor and a successor")
 	}
@@ -165,7 +206,7 @@ func SuccessorQueueWait(pre, suc provider.Job) (d time.Duration, ok bool) {
 //	spikes/s1-frp/README.md:284 and :285 (C2, C3; branch spike/s1-frp-dial-home, 01c2ecd): every lane has "a completed stream of at least 3600 s", and no stream is cut over that hour.
 //	spikes/s1-frp/README.md:288 (C6): the path rate is "ok, at least 30 s asked, at least 29 s timed at the VM's receiver", and moved bytes.
 func VerifyTunnelHour(row Row, o TunnelHourObs, jobs []provider.Job) []string {
-	var f []string
+	f := deploymentChecks(row, o.Deployment)
 	if len(o.Lanes) == 0 {
 		f = append(f, "no stream was held for the hour")
 	}

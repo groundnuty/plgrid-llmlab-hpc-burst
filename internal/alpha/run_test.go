@@ -32,6 +32,9 @@ var dryCases = map[string][]dryCase{
 		{"wrong-partition", "a job ran on another partition than the row's"},
 		{"untagged", "a job tag was not written down before its submission"},
 		{"unattributed", "a response lacked its attribution headers"},
+		{"adds-helios", "the deployment does not allow exactly one Provider"},
+		{"default-lease", "the deployment's leaseLimit is not the row's shortest lease"},
+		{"short-lease", "not longer than the lead an Instance needs (PartitionTooShort)"},
 	},
 	"alpha-helios-nooverlap": {
 		{"", ""},
@@ -43,6 +46,11 @@ var dryCases = map[string][]dryCase{
 		{"late-submit", "the successor was not queued before the predecessor ended"},
 		{"untagged", "a job tag was not written down before its submission"},
 		{"wrong-partition", "a job ran on another partition than the row's"},
+		// The Helios Provider alone: a deployment that also allowed Athena breaks alpha's fence (HBEP-7, #205).
+		{"adds-athena", "the deployment does not allow exactly one Provider"},
+		{"default-lease", "the deployment's leaseLimit is not the row's shortest lease"},
+		{"short-lease", "not longer than the lead an Instance needs (PartitionTooShort)"},
+		{"no-release-when-idle", "lacks ReleaseWhenIdle with a short idleLimit"},
 	},
 	"tunnel-hour-helios": tunnelCases,
 	"tunnel-hour-athena": tunnelCases,
@@ -58,6 +66,9 @@ var tunnelCases = []dryCase{
 	{"wrong-direction", "the path rate is not in the token direction"},
 	{"untagged", "a job tag was not written down before its submission"},
 	{"wrong-partition", "a job ran on another partition than the row's"},
+	{"adds-other-cluster", "the deployment does not allow exactly one Provider"},
+	{"default-lease", "the deployment's leaseLimit is not the row's shortest lease"},
+	{"short-lease", "not longer than the lead an Instance needs (PartitionTooShort)"},
 }
 
 func familyOf(row string) string {

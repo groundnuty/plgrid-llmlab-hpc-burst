@@ -21,6 +21,14 @@ func job(tag, partition string, submit, start, end time.Duration) provider.Job {
 	return provider.Job{Name: tag, Partition: partition, SubmitTime: at(submit), StartTime: ptr(at(start)), EndTime: ptr(at(end))}
 }
 
+// leased sets the time limit the cluster's record gives a job.
+func leased(row Row, jobs ...provider.Job) []provider.Job {
+	for i := range jobs {
+		jobs[i].TimeLimit = row.Lease
+	}
+	return jobs
+}
+
 func wantFailure(t *testing.T, got []string, want string) {
 	t.Helper()
 	if want == "" {
@@ -42,9 +50,9 @@ func goodHandover() (HandoverObs, []provider.Job) {
 		Instances: []InstanceSpan{
 			{Tag: "hb-pre-aaaaaaaaaaaa", ReadyAt: at(time.Minute), EndedAt: at(30 * time.Minute)},
 			{Tag: "hb-suc-bbbbbbbbbbbb", ReadyAt: at(15 * time.Minute)}},
-		DrainStart: at(10 * time.Minute), Handovers: 1, WorkerRestarts: 1, Responses: 5, Attributed: 5,
+		DrainStart: at(10 * time.Minute), Handovers: 1, WorkerRestarts: 1, Responses: 5, Attributed: 5, Deployment: row.Plan(),
 	}
-	return o, []provider.Job{job(o.Tags[0], row.Partition, 0, time.Minute, 30*time.Minute), job(o.Tags[1], row.Partition, 5*time.Minute, 14*time.Minute, 50*time.Minute)}
+	return o, leased(row, job(o.Tags[0], row.Partition, 0, time.Minute, 30*time.Minute), job(o.Tags[1], row.Partition, 5*time.Minute, 14*time.Minute, 50*time.Minute))
 }
 
 func TestHandoverBoundaries(t *testing.T) {
@@ -90,11 +98,11 @@ func goodNoOverlap() (NoOverlapObs, []provider.Job) {
 		Tags:    []string{"hb-pre-aaaaaaaaaaaa", "hb-suc-bbbbbbbbbbbb"},
 		Streams: []Stream{{ID: "s", Opened: at(time.Minute), Ended: at(31 * time.Minute), Complete: true}},
 		// The drain start at 30 min, the successor ready at 50 min: a gap of 20 min.
-		DrainStart: at(30 * time.Minute), SuccessorReady: at(50 * time.Minute), NoOverlapSlotSeen: true,
+		DrainStart: at(30 * time.Minute), SuccessorReady: at(50 * time.Minute), NoOverlapSlotSeen: true, Deployment: row.Plan(),
 	}
-	return o, []provider.Job{
+	return o, leased(row,
 		job(o.Tags[0], row.Partition, 0, time.Minute, 40*time.Minute),
-		job(o.Tags[1], row.Partition, 5*time.Minute, 41*time.Minute, 90*time.Minute)}
+		job(o.Tags[1], row.Partition, 5*time.Minute, 41*time.Minute, 90*time.Minute))
 }
 
 func TestNoOverlapBoundaries(t *testing.T) {
@@ -152,9 +160,9 @@ func goodTunnel() (TunnelHourObs, []provider.Job) {
 	o := TunnelHourObs{
 		Tags:  []string{"hb-t-aaaaaaaaaaaa"},
 		Lanes: []Stream{{ID: "l1", Opened: at(time.Minute), Ended: at(time.Minute + Hour), Complete: true}, {ID: "l2", Opened: at(time.Minute), Ended: at(time.Minute + Hour + 5*time.Second), Complete: true}},
-		Rate:  PathRate{Direction: "up", OK: true, AskedSeconds: 30, TimedSeconds: 29, Bytes: 1},
+		Rate:  PathRate{Direction: "up", OK: true, AskedSeconds: 30, TimedSeconds: 29, Bytes: 1}, Deployment: row.Plan(),
 	}
-	return o, []provider.Job{job(o.Tags[0], row.Partition, 0, 0, Hour+10*time.Minute)}
+	return o, leased(row, job(o.Tags[0], row.Partition, 0, 0, Hour+10*time.Minute))
 }
 
 func TestTunnelHourBoundaries(t *testing.T) {

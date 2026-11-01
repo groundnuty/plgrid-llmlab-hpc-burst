@@ -41,6 +41,8 @@ type HandoverObs struct {
 	Streams []Stream `json:"streams"`
 	// Instances are the predecessor's and the successor's, in that order.
 	Instances []InstanceSpan `json:"instances"`
+	// Deployment is what the run's ModelDeployment held (see DeploymentSpec).
+	Deployment DeploymentSpec `json:"deployment"`
 	// DrainStart is the predecessor's drain start, from its recorded lease end.
 	DrainStart time.Time `json:"drainStart"`
 	// Handovers counts the handovers that completed end to end.
@@ -57,6 +59,9 @@ type HandoverObs struct {
 type NoOverlapObs struct {
 	Tags    []string `json:"tags"`
 	Streams []Stream `json:"streams"`
+	// Deployment is what the run's ModelDeployment held: for this row, the
+	// Helios Provider alone, ReleaseWhenIdle and the shortest lease.
+	Deployment DeploymentSpec `json:"deployment"`
 	// DrainStart is the predecessor's drain start; SuccessorReady is when
 	// the successor Instance became ready. Their difference is the gap.
 	DrainStart     time.Time `json:"drainStart"`
@@ -105,6 +110,8 @@ type TunnelHourObs struct {
 	Tags []string `json:"tags"`
 	// Lanes are the streams held behind frpc for the hour, one per lane.
 	Lanes []Stream `json:"lanes"`
+	// Deployment is what the run's ModelDeployment held (see DeploymentSpec).
+	Deployment DeploymentSpec `json:"deployment"`
 	// TunnelDrops counts the times the Instance's TunnelConnected condition
 	// went False during the hour.
 	TunnelDrops int      `json:"tunnelDrops"`
