@@ -370,6 +370,26 @@ func TestSlotTableExpectations(t *testing.T) {
 	if n, err := tab.count(ctx, stale, rigProvider, t0); err != nil || n != 1 {
 		t.Fatalf("count = %d, %v; want 1 (c expected; a Ended)", n, err)
 	}
+	// A deleting Allocation counts until its deletion completes.
+	gone := otherAllocation("deleting")
+	gone.Namespace = rigNS
+	gone.Finalizers = []string{"example.org/hold"}
+	rg.create(gone)
+	if err := rg.c.Delete(ctx, gone); err != nil {
+		t.Fatal(err)
+	}
+	stale.catchUp(t)
+	if n, err := tab.count(ctx, stale, rigProvider, t0); err != nil || n != 2 {
+		t.Fatalf("count = %d, %v; want 2 (c expected, the deleting one listed)", n, err)
+	}
+	if err := rg.c.Get(ctx, client.ObjectKeyFromObject(gone), gone); err != nil {
+		t.Fatal(err)
+	}
+	gone.Finalizers = nil
+	if err := rg.c.Update(ctx, gone); err != nil {
+		t.Fatal(err)
+	}
+	stale.catchUp(t)
 	// c is never seen: its expectation lapses at 5 min, not before.
 	if n, _ := tab.count(ctx, stale, rigProvider, t0.Add(5*time.Minute-time.Second)); n != 1 {
 		t.Fatalf("count 1 s before the expiry = %d, want 1", n)

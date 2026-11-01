@@ -165,8 +165,12 @@ func (p *pass) measuredStartToReady() []v1alpha1.ClassStartToReady {
 // Provisioning). A refusal for a full submit limit, which the record's Code
 // says (told by Slurm's reason name), is no failure: it shows as
 // SubmitLimitReached in place of SubmissionRejected, with Slurm's reason line
-// (HBEP-4, QOS limits). Neither ends an Instance, so neither counts toward
-// RestartLoop or a class pause (HBEP-7, Health and restarts).
+// (HBEP-4, QOS limits). It names the Provider, the limit and Slurm's reason
+// line (HBEP-7, Events and conditions): the limit is the profile's
+// maxSubmitPerUser when it models one; otherwise, as for an association's
+// AssocMaxSubmitJobLimit, the reason name in the line is the only statement
+// of the limit. Neither ends an Instance, so neither counts toward RestartLoop
+// or a class pause (HBEP-7, Health and restarts).
 func (p *pass) submissionRejected() {
 	for _, a := range p.allocs {
 		sub := a.Status.AtProvider.Submission
@@ -174,7 +178,11 @@ func (p *pass) submissionRejected() {
 			continue
 		}
 		if sub.Code == v1alpha1.ReasonSubmitLimitReached {
-			p.degrade(v1alpha1.ReasonSubmitLimitReached, "Allocation %s on Provider %s: attempt %d was refused for a full submit limit and waits for the backoff: %s", a.Name, a.Labels[v1alpha1.LabelProvider], sub.Attempt, sub.Reason)
+			limit := ""
+			if pv := p.pvOf(a.Labels); pv != nil && pv.limits.MaxSubmitPerUser != nil {
+				limit = ", at its " + submitLimitText(pv)
+			}
+			p.degrade(v1alpha1.ReasonSubmitLimitReached, "Allocation %s on Provider %s%s: attempt %d was refused for a full submit limit and waits for the backoff: %s", a.Name, a.Labels[v1alpha1.LabelProvider], limit, sub.Attempt, sub.Reason)
 			continue
 		}
 		p.degrade(v1alpha1.ReasonSubmissionRejected, "Allocation %s: attempt %d was rejected: %s", a.Name, sub.Attempt, sub.Reason)
