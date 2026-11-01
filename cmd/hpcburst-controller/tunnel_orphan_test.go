@@ -154,9 +154,10 @@ func TestOrphanEventsFollowHBEP8sHourlyGate(t *testing.T) {
 	}
 }
 
-// An orphan that is gone from a read leaves the gate: when it is back it is a new start, and the
-// event comes at once, inside the hour of the first.
-func TestOrphanEventRestartsWhenTheOrphanWentAwayAndCameBack(t *testing.T) {
+// An orphan that goes offline and comes back restarts its grace, and keeps its hourly gate
+// (`@hpc-burst-science-agent`, 1 Nov 2026, review of #186): a proxy that flaps raises at most one
+// event an hour. Back after the hour is over, it is an orphan again a grace after its return.
+func TestOrphanGateHoldsWhenTheOrphanWentAwayAndCameBack(t *testing.T) {
 	r := newOrphanRig(t, orphanAllocation("al-a", "alloc-uid-1"))
 	r.adm.ProxyChanged(frpsplugin.OpNewProxy, "gone-instance", "alloc-uid-1")
 	r.rd.orphans = []string{"gone-instance"}
@@ -168,22 +169,30 @@ func TestOrphanEventRestartsWhenTheOrphanWentAwayAndCameBack(t *testing.T) {
 	r.read(10 * time.Minute)
 	r.wantEvents("gone", 1)
 
-	// Back: its grace starts again, and then the event comes, inside the hour of the first.
+	// Back: a new grace, and the gate of the first event still holds.
 	r.rd.orphans = []string{"gone-instance"}
 	r.read(20 * time.Minute)
-	r.wantEvents("back after 20 minutes, inside a new grace", 1)
-	back := 20*time.Minute + orphanGrace
+	r.read(20*time.Minute + orphanGrace)
+	r.wantEvents("back for a whole grace, inside the hour of the first event", 1)
+	r.read(orphanGate - time.Second)
+	r.wantEvents("one second short of the hour", 1)
+	r.read(orphanGate)
+	evs := r.wantEvents("the hour after the first event", 2)
+	r.wantRegarding(evs[1], "*v1alpha1.Allocation", "team-a", "al-a") // its admission was kept while gated
+
+	// Gone again until the gate is over, then back: an orphan again a grace after its return.
+	r.rd.orphans = nil
+	r.read(orphanGate + 10*time.Minute)
+	r.rd.orphans = []string{"gone-instance"}
+	back := 2*orphanGate + 10*time.Minute
 	r.read(back)
-	r.wantEvents("back for a whole grace", 2)
-	// The new start has its own hour.
-	r.read(back + orphanGate - time.Second)
-	r.wantEvents("one second short of an hour after the new start", 2)
-	r.read(back + orphanGate)
-	r.wantEvents("an hour after the new start", 3)
+	r.wantEvents("back after the gate is over, inside a new grace", 2)
+	r.read(back + orphanGrace)
+	r.wantEvents("a whole grace after that return", 3)
 }
 
-// A read of the list that fails says nothing about the orphans: it neither ends the orphan, so
-// that the next read would count as a new start, nor emits.
+// A read of the list that fails is skipped: no evidence that the orphan went away, so the orphan
+// stays one and its hourly gate holds through the outage, and nothing is emitted until the hour.
 func TestOrphanGateSurvivesAnUnreadableList(t *testing.T) {
 	r := newOrphanRig(t, orphanAllocation("al-a", "alloc-uid-1"))
 	r.adm.ProxyChanged(frpsplugin.OpNewProxy, "gone-instance", "alloc-uid-1")
@@ -198,8 +207,30 @@ func TestOrphanGateSurvivesAnUnreadableList(t *testing.T) {
 
 	r.rd.err = nil
 	r.read(20 * time.Minute)
-	evs := r.wantEvents("readable again, 20 minutes after the first", 1)
+	r.read(20*time.Minute + orphanGrace)
+	evs := r.wantEvents("readable again for a grace, inside the hour of the first", 1)
 	r.wantRegarding(evs[0], "*v1alpha1.Allocation", "team-a", "al-a") // the admission was kept through the outage
+	r.read(orphanGate)
+	evs = r.wantEvents("the hour after the first event", 2)
+	r.wantRegarding(evs[1], "*v1alpha1.Allocation", "team-a", "al-a")
+}
+
+// A failed read is skipped (`@hpc-burst-science-agent`, 1 Nov 2026, as corrected after the review
+// of #186): it neither restarts the grace's clock nor counts. Listed from 0 s, a failed read at
+// 110 s, listed again: no event at 1:59, one at 2:00, as without the failed read. Restarting on a
+// failed read would let a web server that fails every two minutes silence the event for good.
+func TestOrphanGraceAFailedReadDoesNotRestartTheClock(t *testing.T) {
+	r := newOrphanRig(t, orphanAllocation("al-a", "alloc-uid-1"))
+	r.adm.ProxyChanged(frpsplugin.OpNewProxy, "lingering", "alloc-uid-1")
+	r.rd.orphans = []string{"lingering"}
+	r.readEvery(0, 100*time.Second)
+	r.rd.err = errors.New("frps's web server is down")
+	r.read(110 * time.Second)
+	r.rd.err = nil
+	r.read(orphanGrace - time.Second)
+	r.wantEvents("at 1:59, a failed read at 1:50 between", 0)
+	r.read(orphanGrace)
+	r.wantRegarding(r.wantEvents("at 2:00, the failed read not restarting the clock", 1)[0], "*v1alpha1.Allocation", "team-a", "al-a")
 }
 
 // Without the plugin's admission (after a restart the map is empty) or with the Allocation gone
