@@ -1,0 +1,22 @@
+{
+  "contentType": "text/event-stream; charset=utf-8",
+  "method": "POST",
+  "path": "/v1/chat/completions",
+  "request": {
+    "max_tokens": 4,
+    "messages": [
+      {
+        "content": "Reply with one word: ready.",
+        "role": "user"
+      }
+    ],
+    "model": "hb-test/qwen2.5-1.5b-instruct",
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    },
+    "temperature": 0
+  },
+  "seconds": 0.015305017,
+  "status": 200
+}

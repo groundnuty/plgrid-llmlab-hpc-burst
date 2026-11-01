@@ -325,8 +325,17 @@ func wantSkipped25(i int) sentEvent {
 		`catalog entry "` + shown + `..." skipped: a name of 257 characters, above 253`}
 }
 
-var wantSummary = sentEvent{"Warning", "CatalogEntrySkipped", "degraded",
-	"15 more catalog entries skipped (at most 10 skipped entries are named in an hour)"}
+// wantSummary names the remaining 15 as far as 1,024 bytes allow: "n10-" to
+// "n22-", 13 names of 69 bytes each, after an 83-byte head, then an ellipsis
+// (83 + 13*69 + 12*2 + 5 = 1,009; a 14th would make 1,080).
+var wantSummary = func() sentEvent {
+	var named []string
+	for i := 10; i < 23; i++ {
+		named = append(named, fmt.Sprintf(`"n%02d-`, i)+strings.Repeat("n", 60)+`..."`)
+	}
+	return sentEvent{"Warning", "CatalogEntrySkipped", "degraded",
+		"15 more catalog entries skipped (at most 10 skipped entries are named in an hour): " + strings.Join(named, ", ") + ", …"}
+}()
 
 // At most 10 skip events for entries an hour, then one summary with the count
 // (@hpc-burst-science-agent, 31 Oct 2026): 25 bad names give 10 and 1.
@@ -350,6 +359,12 @@ func TestSkippedEntriesAreCappedAtTenAnHourWithASummary(t *testing.T) {
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("in the first hour: events = %+v, want the 10 first entries and the summary %+v", got, want)
+	}
+	// The summary names some of the remaining 15 and not all (13 fit), ends
+	// with an ellipsis, and is within the 1,024 bytes of a note.
+	sum := got[len(got)-1].Note
+	if len(sum) > 1024 || !strings.HasSuffix(sum, "\u2026") || !strings.Contains(sum, `"n22-`) || strings.Contains(sum, `"n23-`) {
+		t.Fatalf("summary note of %d bytes: want at most 1024, an ellipsis, n22- named and n23- not: %q", len(sum), sum)
 	}
 	// An hour on, the same again.
 	e.syncAt(at(13, 0, 0))

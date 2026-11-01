@@ -275,7 +275,7 @@ func (r *Reconciler) catalogReady(ctx context.Context, md *v1alpha1.ModelDeploym
 				rejected = pr.Name
 				continue
 			}
-			return metav1.ConditionTrue, reasonCatalogEntryListed, fmt.Sprintf("Provider %s lists %s", pr.Name, m.CatalogName), nil
+			return metav1.ConditionTrue, v1alpha1.ReasonCatalogEntryListed, fmt.Sprintf("Provider %s lists %s", pr.Name, m.CatalogName), nil
 		}
 	}
 	if rejected != "" {

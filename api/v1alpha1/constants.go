@@ -38,7 +38,8 @@ const (
 	// deployment ID's display form: a label value holds at most 63 characters.
 	LabelDeploymentID = Group + "/deployment-id"
 
-	// On identity and verification records: RecordIdentity or RecordVerification.
+	// On identity, verification and accounting records: RecordIdentity,
+	// RecordVerification or RecordAccounting.
 	LabelRecord = Group + "/record"
 
 	// On verification records: the UID of the Instance they belong to.
@@ -49,6 +50,7 @@ const (
 const (
 	RecordIdentity     = "identity"
 	RecordVerification = "verification"
+	RecordAccounting   = "accounting"
 )
 
 // Annotation keys on an Allocation (HBEP-11, The Allocation's record). The
@@ -132,6 +134,10 @@ const ControllerNamespace = "hpcburst-system"
 // (HBEP-7, Controllers).
 const LeaseLifecycle = "lifecycle"
 
+// LeaseFront is the name of the heartbeat Lease the front renews in
+// ControllerNamespace (HBEP-8, Events: Observers; HBEP-11).
+const LeaseFront = "front"
+
 // ProviderLeaseName returns the name of a Provider's leader Lease: one per
 // Provider, named after it (HBEP-11, Controllers). The "provider-" prefix
 // keeps a Provider named "lifecycle" from sharing the lifecycle controller's
@@ -152,3 +158,7 @@ const IdentityRecordPrefix = "id-"
 // VerificationRecordPrefix starts the name of a verification record,
 // ver-<instance UID>-<generation> (HBEP-7, Instance start).
 const VerificationRecordPrefix = "ver-"
+
+// AccountingRecordPrefix starts the name of an accounting record,
+// acct-<Allocation UID> (HBEP-8, Provider accounting).
+const AccountingRecordPrefix = "acct-"

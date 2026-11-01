@@ -119,3 +119,39 @@ func TestShippedCPUPartitionRefusesGPUAllocations(t *testing.T) {
 		})
 	}
 }
+
+// The job-name rules of the shipped profiles (issue #93). Helios has measured
+// them: the conformance run on plgrid of 31 Oct 2026, step 5, a 56-character
+// name read back unchanged from squeue and sacct. The schema holds the rules
+// per profile, not per partition, so the value stands for plgrid-gpu-gh200
+// too (`@hpc-burst-science-agent`, option (b), 1 Nov 2026). Athena has not
+// run the step, and its rules stay unset: 56 is neither a fact nor a default
+// there. The values are the ruling's, written out here.
+func TestShippedProfilesJobNameRules(t *testing.T) {
+	for _, tc := range []struct {
+		file      string
+		maxLength int32 // 0: unset
+	}{
+		{"helios.yaml", 56},
+		{"athena.yaml", 0},
+	} {
+		raw, err := os.ReadFile(filepath.Join("..", "..", "profiles", tc.file))
+		if err != nil {
+			t.Fatalf("read the shipped profile: %v", err) // a missing file fails; it never skips
+		}
+		var pp v1alpha1.PlatformProfile
+		if err := yaml.UnmarshalStrict(raw, &pp); err != nil {
+			t.Fatalf("%s: %v", tc.file, err)
+		}
+		rules := pp.Spec.JobName
+		switch {
+		case tc.maxLength == 0 && rules != nil && rules.MaxLength != nil:
+			t.Errorf("%s: jobName.maxLength is %d; want it unset until a run on that platform measures it", tc.file, *rules.MaxLength)
+		case tc.maxLength != 0 && (rules == nil || rules.MaxLength == nil || *rules.MaxLength != tc.maxLength):
+			t.Errorf("%s: jobName = %+v; want maxLength %d", tc.file, rules, tc.maxLength)
+		}
+		if rules != nil && rules.Pattern != "" {
+			t.Errorf("%s: jobName.pattern is %q; no fact states a pattern", tc.file, rules.Pattern)
+		}
+	}
+}

@@ -152,26 +152,31 @@ func TestKillTreeFindsAChildInItsOwnGroup(t *testing.T) {
 			done := make(chan struct{})
 			go func() { _ = cmd.Wait(); close(done) }()
 			shell := cmd.Process.Pid
+			// Poll until the shell has both children and one of them leads a session of its own.
+			// The second child is a forked shell until it has exec'd setsid and called setsid(), so
+			// a single look taken as soon as both children exist can find neither leading a
+			// session (issue #130).
 			var sleeps []int
+			var own int // the sleep that leads a session of its own
 			deadline := time.Now().Add(10 * time.Second)
-			for len(sleeps) < 2 && time.Now().Before(deadline) {
-				sleeps = sleeps[:0]
+			for time.Now().Before(deadline) {
+				sleeps, own = sleeps[:0], 0
 				for _, r := range procRows() {
 					if r.ppid == shell {
 						sleeps = append(sleeps, r.pid)
+						if r.sid == r.pid {
+							own = r.pid
+						}
 					}
+				}
+				if len(sleeps) == 2 && own != 0 {
+					break
 				}
 				time.Sleep(10 * time.Millisecond)
 			}
 			if len(sleeps) != 2 {
 				killTree([]int{shell}, dir)
 				t.Fatalf("the shell started %d children, want 2", len(sleeps))
-			}
-			var own int // the sleep that leads a session of its own
-			for _, r := range procRows() {
-				if (r.pid == sleeps[0] || r.pid == sleeps[1]) && r.sid == r.pid {
-					own = r.pid
-				}
 			}
 			if own == 0 {
 				killTree([]int{shell}, dir)
