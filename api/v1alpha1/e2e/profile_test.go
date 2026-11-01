@@ -5,6 +5,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 )
@@ -100,6 +101,95 @@ func TestStagingDirRefusesDotDotSegments(t *testing.T) {
 			p.Spec.StagingDir = dir
 			must(t, c.Create(bg(), p), "create with stagingDir "+dir)
 			cleanup(t, p)
+		})
+	}
+}
+
+// A partition's tmpDir has stagingDir's form: an absolute path, or one that
+// starts with a variable the job sets (science-agent ruling, 1 Nov 2026, issue
+// #125). The pattern refuses a relative path, ~, a space and a substitution.
+func TestPartitionTmpDirForm(t *testing.T) {
+	for _, dir := range []string{"memfs", "~/tmp", "$MEMFS/a b", "$(id)", "${MEMFS}", "$1/x", ""} {
+		t.Run("refuse "+dir, func(t *testing.T) {
+			p := newProfile(uniq("prof"))
+			p.Spec.Partitions[0].TmpDir = dir
+			if dir == "" {
+				// An empty string is the absent field (omitempty): admitted.
+				must(t, c.Create(bg(), p), "create with no tmpDir")
+				cleanup(t, p)
+				return
+			}
+			requireRefused(t, c.Create(bg(), p), "tmpDir")
+		})
+	}
+	for _, dir := range []string{"$MEMFS", "$MEMFS/hb", "/dev/shm", "$SCRATCH_LOCAL/t-1"} {
+		t.Run("accept "+dir, func(t *testing.T) {
+			p := newProfile(uniq("prof"))
+			p.Spec.Partitions[0].TmpDir = dir
+			must(t, c.Create(bg(), p), "create with tmpDir "+dir)
+			var got v1alpha1.PlatformProfile
+			must(t, c.Get(bg(), client.ObjectKeyFromObject(p), &got), "read back")
+			if got.Spec.Partitions[0].TmpDir != dir {
+				t.Errorf("tmpDir read back as %q, want %q", got.Spec.Partitions[0].TmpDir, dir)
+			}
+			cleanup(t, p)
+		})
+	}
+}
+
+// A partition's tmpDir names no ".." segment, like stagingDir. A ".." inside a
+// longer segment is an ordinary name. This is the rule
+// platformprofiles:$.spec.partitions[].tmpDir#0.
+func TestPartitionTmpDirRefusesDotDotSegments(t *testing.T) {
+	const msg = "tmpDir must not contain a '..' segment"
+	for _, dir := range []string{"$MEMFS/..", "/dev/shm/../etc", "$MEMFS/a/../b", "/.."} {
+		t.Run("refuse "+dir, func(t *testing.T) {
+			p := newProfile(uniq("prof"))
+			p.Spec.Partitions[0].TmpDir = dir
+			requireRefused(t, c.Create(bg(), p), msg)
+		})
+	}
+	for _, dir := range []string{"$MEMFS/a..b", "/dev/shm/.../x", "$MEMFS/..a/b.."} {
+		t.Run("accept "+dir, func(t *testing.T) {
+			p := newProfile(uniq("prof"))
+			p.Spec.Partitions[0].TmpDir = dir
+			must(t, c.Create(bg(), p), "create with tmpDir "+dir)
+			cleanup(t, p)
+		})
+	}
+}
+
+// A partition's tmpDirFeature is the node feature its tmpDir needs, so it is
+// refused without a tmpDir (rule platformprofiles:$.spec.partitions[]#0), and
+// it is one feature name, never a constraint expression (science-agent ruling,
+// 1 Nov 2026, issue #125).
+func TestPartitionTmpDirFeatureNeedsTmpDir(t *testing.T) {
+	const msg = "tmpDirFeature is the node feature that tmpDir needs, so it requires tmpDir"
+	p := newProfile(uniq("prof"))
+	p.Spec.Partitions[0].TmpDirFeature = "localfs"
+	requireRefused(t, c.Create(bg(), p), msg)
+
+	p = newProfile(uniq("prof"))
+	p.Spec.Partitions[0].TmpDir, p.Spec.Partitions[0].TmpDirFeature = "$SCRATCH_LOCAL", "localfs"
+	must(t, c.Create(bg(), p), "create with tmpDir and tmpDirFeature")
+	var got v1alpha1.PlatformProfile
+	must(t, c.Get(bg(), client.ObjectKeyFromObject(p), &got), "read back")
+	if g := got.Spec.Partitions[0]; g.TmpDir != "$SCRATCH_LOCAL" || g.TmpDirFeature != "localfs" {
+		t.Errorf("read back tmpDir %q, tmpDirFeature %q", g.TmpDir, g.TmpDirFeature)
+	}
+	cleanup(t, p)
+
+	// A tmpDir alone needs no feature.
+	p = newProfile(uniq("prof"))
+	p.Spec.Partitions[0].TmpDir = "/dev/shm"
+	must(t, c.Create(bg(), p), "create with tmpDir alone")
+	cleanup(t, p)
+
+	for _, f := range []string{"localfs&memfs", "localfs|memfs", "[localfs]", "local fs", "-localfs", "localfs,memfs"} {
+		t.Run("refuse "+f, func(t *testing.T) {
+			p := newProfile(uniq("prof"))
+			p.Spec.Partitions[0].TmpDir, p.Spec.Partitions[0].TmpDirFeature = "$SCRATCH_LOCAL", f
+			requireRefused(t, c.Create(bg(), p), "tmpDirFeature")
 		})
 	}
 }

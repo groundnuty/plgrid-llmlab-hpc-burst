@@ -333,8 +333,30 @@ type Staging struct {
 	Phase      StagingPhase `json:"phase"`
 	BytesDone  int64        `json:"bytesDone,omitempty"`
 	BytesTotal int64        `json:"bytesTotal,omitempty"`
-	// Message is free text, cut to MaxMessageBytes (TruncateUTF8).
+	// Message is free text, cut to MaxMessageBytes (TruncateUTF8). While an
+	// image is built it reads "building image <image>@<digest> in the job's
+	// temporary directory ($TMPDIR)", naming the directory by its variable,
+	// not its path, which can hold the job's ID. The agent sends it before
+	// the build starts, and the build waits for its delivery, so the last
+	// report before a build that runs out of the job's memory (the job then
+	// ends OUT_OF_MEMORY, AllocationFailed) names the build (HBEP-4; PR #138
+	// review). It is cleared when the build ends.
 	Message string `json:"message,omitempty"`
+	// BuildPeakTmpBytes is the peak use, in bytes, of the job's temporary
+	// directory while the agent built the Instance's image (a pull to a SIF
+	// or a sandbox build, on a cache miss). It is reported as soon as the
+	// build ends, written or failed, and every later staging report of the
+	// Instance carries it, a failed one or a restage that finds the image
+	// cached too (PR #138 review). Absent when no build has run for the
+	// Instance, or when none of the build's samples succeeded. The
+	// agent samples it with statfs, (blocks - free blocks) * block size,
+	// every 250 ms and once more when the build ends, so a shorter spike can
+	// be missed. On a per-job tmpfs such as Helios's $MEMFS it counts the
+	// job's bytes alone; on a shared TMPDIR such as Lustre it counts other
+	// users' too and is only an upper bound. It measures the RAM-disk budget
+	// a partition's memPerGpu includes (HBEP-4, Platform profile schema;
+	// HBEP-7, The allocation agent and Test plan).
+	BuildPeakTmpBytes int64 `json:"buildPeakTmpBytes,omitempty"`
 }
 
 // PartPhase is the state of one process the agent runs.
@@ -373,6 +395,17 @@ type WorkerReport struct {
 	EngineSocket string `json:"engineSocket,omitempty"`
 	// Health is the latest sample of this worker's health.
 	Health *Health `json:"health,omitempty"`
+	// LogTail is the end of the engine's output, at most MaxLogTailBytes and
+	// cut at a UTF-8 boundary, once the worker has exited without being told
+	// to or could not start; absent otherwise. It says why a start failed,
+	// for example a cache that ignores its variable and cannot write in a
+	// container without the home directory (science-agent ruling, 1 Nov 2026,
+	// #127 review of issue #125). The agent replaces in it every Instance key
+	// it has drawn in the job, the current one and the earlier ones, whose
+	// output the log may still hold, before it cuts the tail, so no part of a
+	// key is left at the cut (PR #138 review). Report.Redacted leaves it as
+	// it is.
+	LogTail string `json:"logTail,omitempty"`
 }
 
 // Health is one sample of an engine's health: the local probe every
@@ -529,6 +562,24 @@ type VerifyResult struct {
 	// prompt) rendered through the engine's template. The controller fixes
 	// the longest context with it (HBEP-7, What the controller reads).
 	TemplateOverhead int32 `json:"templateOverhead,omitempty"`
+	// GenerationConfig is the model's generation defaults: the sampling
+	// parameters that the staged checkpoint's generation_config.json sets of
+	// those vLLM applies as the server's defaults (repetition_penalty,
+	// presence_penalty, frequency_penalty, temperature, top_k, top_p, min_p
+	// and max_new_tokens: vLLM v0.32.0, vllm/config/model.py lines
+	// 1869-1878), each as its JSON number text, for example
+	// {"repetition_penalty": "1.1", "temperature": "0.7"}. No other key of the
+	// file is carried (PR #138 review; HBEP-7, The verification record). vLLM
+	// takes a request's sampling defaults from them; the agent's own requests
+	// set every sampling parameter they rely on, so they change no check. The
+	// controller records them in the verification record (science-agent
+	// rulings, 1 Nov 2026, issue #125). A value is carried only when it is a
+	// JSON number, an integer for top_k and max_new_tokens, of at most
+	// MaxGenerationConfigValueBytes; there are at most MaxGenerationConfigKeys
+	// keys of at most MaxGenerationConfigKeyBytes each. Absent when the
+	// checkpoint has no such file, it is not a JSON object, or it sets none
+	// of them.
+	GenerationConfig map[string]string `json:"generationConfig,omitempty"`
 	// Error says why verification could not run, when it could not. It is
 	// free text, cut to MaxMessageBytes (TruncateUTF8).
 	Error string `json:"error,omitempty"`
@@ -594,6 +645,22 @@ const (
 	ShapeConcurrent Shape = "concurrent"
 )
 
+// FixedLength reports whether the agent sends the shape at a fixed output
+// length, min_tokens equal to max_tokens with the end-of-sequence token
+// ignored, so its output length is the same in every round. Settling judges
+// only these shapes (science-agent ruling, 1 Nov 2026, issue #125): the
+// sequential shapes and the concurrent one. ShapeToolCall is not one: it ends
+// with its call, and on a reasoning model after reasoning of any length. It
+// still runs in every round to warm its path, but is not judged. A shape this
+// package does not name is not fixed-length either.
+func (s Shape) FixedLength() bool {
+	switch s {
+	case ShapeShort, ShapeTypical, ShapeLongest, ShapeLongOutput, ShapeConcurrent:
+		return true
+	}
+	return false
+}
+
 // WarmUpResult holds every round run so far for one verification generation.
 type WarmUpResult struct {
 	Rounds []WarmUpRound `json:"rounds,omitempty"`
@@ -604,9 +671,15 @@ type WarmUpResult struct {
 
 // WarmUpRound is one round's requests. The controller reads them as
 // RequestTiming says: a request with an Error counts for nothing. Settling
-// compares, per Shape, the mean Total of the round's requests without an Error
-// with the round before; a Shape that is more than 10% slower than in the round
-// before, or that has no successful request in this round, means not settled.
+// judges only the fixed-length shapes (Shape.FixedLength). It compares, per
+// such Shape, the mean Total of the round's requests with the round before; a
+// Shape whose mean Total rose by more than max(10% of the round before, 100
+// ms), or that has no successful request in this round, means not settled
+// (science-agent ruling, 1 Nov 2026, issue #125). A Shape whose length varies
+// runs in every round, but its timings are not judged. A request of any Shape
+// with an Error fails warm-up; the agent sets one only for a request that
+// failed (an HTTP error, a cut stream), never for the tool call's answer,
+// which qualification's tool-call smoke test judges.
 // The Instance's throughput is the mean time per output token
 // (RequestTiming.TimePerOutputToken) and the mean time to first token over the
 // requests of the last round's ShapeConcurrent that have them; it is not
@@ -626,8 +699,8 @@ type WarmUpRound struct {
 //     counts only for a request with OutputTokens of 2 or more
 //     (TimePerOutputToken); a one-token request has no token interval, and the
 //     formula would divide by zero;
-//   - Total counts for settling for every request without an Error (see
-//     WarmUpRound).
+//   - Total counts for settling for every request of a fixed-length shape
+//     without an Error (see WarmUpRound).
 //
 // The workload schema admits an output of one token, so a request with fewer
 // than two output tokens is normal, not a fault.

@@ -144,8 +144,10 @@ func TestReadProfileRefusals(t *testing.T) {
 		"secret reference": {func(r *profileRig) {
 			r.prov.Spec.CredentialsRef = &v1alpha1.CredentialsReference{SecretRef: &v1alpha1.SecretKeyReference{Name: "s", Namespace: "n", Key: "k"}}
 		}, "provider.spec.credentialsRef.secretRef"},
-		"no stagingDir":  {func(r *profileRig) { r.pp.Spec.StagingDir = "" }, "spec.stagingDir"},
-		"unsafe account": {func(r *profileRig) { r.prov.Spec.Account = "acct;rm" }, "provider.spec.account"},
+		"no stagingDir":                {func(r *profileRig) { r.pp.Spec.StagingDir = "" }, "spec.stagingDir"},
+		"tmpDir with a substitution":   {func(r *profileRig) { r.pp.Spec.Partitions[0].TmpDir = "$(id)" }, "spec.partitions[0].tmpDir"},
+		"tmpDirFeature without tmpDir": {func(r *profileRig) { r.pp.Spec.Partitions[0].TmpDirFeature = "localfs" }, "spec.partitions[0].tmpDir"},
+		"unsafe account":               {func(r *profileRig) { r.prov.Spec.Account = "acct;rm" }, "provider.spec.account"},
 		"forwarding config": {func(r *profileRig) {
 			writeFile(t, r.creds, "HostName h\nUser u\nIdentityFile "+r.key+"\nLocalForward 1 h:2\n", 0o600)
 		}, "provider.spec.credentialsRef.file"},

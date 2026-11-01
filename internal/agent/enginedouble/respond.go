@@ -138,7 +138,9 @@ type delta struct {
 // stream answers a request with server-sent events, as vLLM's
 // chat_completion_stream_generator does (chat_completion/serving.py): a first
 // chunk whose delta is the role with empty content, one chunk per token, the
-// finish reason on the last of them, a usage chunk with no choices when
+// finish reason on the last of them (a finish chunk with a non-empty delta,
+// which real vLLM sends too: Qwen3's capture before-stream-length.sse line 7,
+// issue #125 item 10), a usage chunk with no choices when
 // stream_options.include_usage is set, then "data: [DONE]". Each event is
 // "data: <json>" and a blank line, flushed at once. token_ids ride on a chunk
 // only with return_token_ids, as in vLLM.

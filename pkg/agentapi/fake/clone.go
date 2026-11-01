@@ -96,6 +96,7 @@ func cloneCheckResults(c agentapi.CheckResults) agentapi.CheckResults {
 	c.Verify = clonePtr(c.Verify, func(v agentapi.VerifyResult) agentapi.VerifyResult {
 		v.Files = slices.Clone(v.Files)
 		v.Settings = maps.Clone(v.Settings)
+		v.GenerationConfig = maps.Clone(v.GenerationConfig)
 		return v
 	})
 	c.Qualify = clonePtr(c.Qualify, func(q agentapi.QualifyResult) agentapi.QualifyResult {

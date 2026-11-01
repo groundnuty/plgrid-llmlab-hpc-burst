@@ -130,6 +130,11 @@ type Config struct {
 	StopGrace time.Duration
 	// Log receives Apptainer's output and the stager's own notices.
 	Log io.Writer
+	// UsedSpace reads the use of TmpDir while an image is built; statfs when
+	// nil (runApptainer).
+	UsedSpace UsedSpace
+	// SampleEvery is how often UsedSpace is read during a build; 250 ms when 0.
+	SampleEvery time.Duration
 }
 
 // Stager implements agent.Stager.
@@ -171,6 +176,12 @@ func New(c Config) (*Stager, error) {
 	c.HTTPClient = &hc
 	if c.Readers <= 0 {
 		c.Readers = 4
+	}
+	if c.UsedSpace == nil {
+		c.UsedSpace = statfsUsed
+	}
+	if c.SampleEvery <= 0 {
+		c.SampleEvery = 250 * time.Millisecond
 	}
 	if c.TmpDir == "" {
 		c.TmpDir = os.TempDir()

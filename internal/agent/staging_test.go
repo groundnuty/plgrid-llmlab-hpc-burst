@@ -168,13 +168,16 @@ func (h *harness) hubRequests() int {
 
 // startHub serves files over a Unix socket for the stager, as the Hub's
 // resolve endpoint does.
-func (h *harness) startHub(files map[string]string) (*http.Client, string) {
+func (h *harness) startHub(files map[string]string, intercept func(http.ResponseWriter, *http.Request) bool) (*http.Client, string) {
 	sock := filepath.Join(h.root, "hub.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		h.t.Fatal(err)
 	}
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if intercept != nil && intercept(w, r) {
+			return
+		}
 		content, ok := files[r.URL.Path]
 		if !ok {
 			b, _ := json.Marshal(map[string]string{"error": "Entry not found"})

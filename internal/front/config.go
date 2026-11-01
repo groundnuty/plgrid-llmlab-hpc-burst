@@ -31,9 +31,24 @@ type Config struct {
 	// request only, the wait from the request's last byte to the response's
 	// headers (HBEP-5, Parameters: streamHeadersTimeout, a proposed name).
 	StreamHeadersTimeout Duration `json:"streamHeadersTimeout,omitempty"`
-	PauseAfterFailures   int      `json:"pauseAfterFailures,omitempty"`
-	PauseDuration        Duration `json:"pauseDuration,omitempty"`
-	UsageDir             string   `json:"usageDir"`
+	// FrpsBindAddr is frps's bind port, where the dial-home listener passes
+	// frpc's websocket, and FrpsMuxAddr its tcpmux CONNECT port, which the
+	// Instance transport dials (HBEP-5, Parameters; HBEP-6, The front's
+	// half). Unset, they default to the IPv4 loopback address at the
+	// launcher's port base + 9 and + 10 (FrpsAddrs).
+	FrpsBindAddr string `json:"frpsBindAddr,omitempty"`
+	FrpsMuxAddr  string `json:"frpsMuxAddr,omitempty"`
+	// TunnelSetupTimeout bounds, toward an Instance, the dial to frps plus
+	// the CONNECT exchange (HBEP-5, Parameters: tunnelSetupTimeout).
+	TunnelSetupTimeout Duration `json:"tunnelSetupTimeout,omitempty"`
+	// ProbeInterval, ProbeTimeout and ProbeFailures set the end-to-end
+	// probe of each Instance through its tunnel (HBEP-6, The front's half).
+	ProbeInterval      Duration `json:"probeInterval,omitempty"`
+	ProbeTimeout       Duration `json:"probeTimeout,omitempty"`
+	ProbeFailures      int      `json:"probeFailures,omitempty"`
+	PauseAfterFailures int      `json:"pauseAfterFailures,omitempty"`
+	PauseDuration      Duration `json:"pauseDuration,omitempty"`
+	UsageDir           string   `json:"usageDir"`
 	// Namespaces are the namespaces whose ModelDeployments and Instances the
 	// front watches; empty means all (HBEP-5, Request path step 3).
 	Namespaces []string `json:"namespaces,omitempty"`
@@ -76,6 +91,10 @@ const (
 	DefaultClientKeepAlive     = 120 * time.Second
 	DefaultQueueTimeout        = 60 * time.Second
 	DefaultStreamHeaders       = 30 * time.Second
+	DefaultTunnelSetupTimeout  = 5 * time.Second
+	DefaultProbeInterval       = 10 * time.Second
+	DefaultProbeTimeout        = 10 * time.Second
+	DefaultProbeFailures       = 2
 	defaultWriteGrace          = 5 * time.Second
 	DefaultPauseAfterFailures  = 3
 	DefaultPauseDuration       = 30 * time.Second
@@ -121,6 +140,12 @@ func (c Config) WithDefaults() Config {
 	setDur(&c.ClientKeepAlive, DefaultClientKeepAlive)
 	setDur(&c.QueueTimeout, DefaultQueueTimeout)
 	setDur(&c.StreamHeadersTimeout, DefaultStreamHeaders)
+	setDur(&c.TunnelSetupTimeout, DefaultTunnelSetupTimeout)
+	setDur(&c.ProbeInterval, DefaultProbeInterval)
+	setDur(&c.ProbeTimeout, DefaultProbeTimeout)
+	if c.ProbeFailures == 0 {
+		c.ProbeFailures = DefaultProbeFailures
+	}
 	if c.writeGrace == 0 {
 		c.writeGrace = defaultWriteGrace
 	}
@@ -138,9 +163,10 @@ func (c Config) WithDefaults() Config {
 // problem at once.
 func (c Config) Validate() error {
 	var probs []string
-	for name, addr := range map[string]string{"clientListen": c.ClientListen, "dialHomeListen": c.DialHomeListen} {
-		if name == "dialHomeListen" && addr == "" {
-			continue // its default depends on the mode: DialHomeAddr
+	for name, addr := range map[string]string{"clientListen": c.ClientListen, "dialHomeListen": c.DialHomeListen,
+		"frpsBindAddr": c.FrpsBindAddr, "frpsMuxAddr": c.FrpsMuxAddr} {
+		if name != "clientListen" && addr == "" {
+			continue // the default depends on the host: DialHomeAddr, FrpsAddrs
 		}
 		if _, _, err := net.SplitHostPort(addr); err != nil {
 			probs = append(probs, fmt.Sprintf("%s %q is not host:port", name, addr))
@@ -156,6 +182,7 @@ func (c Config) Validate() error {
 		"maxRequestDuration": c.MaxRequestDuration, "idleTimeout": c.IdleTimeout, "connectTimeout": c.ConnectTimeout,
 		"upstreamIdleTimeout": c.UpstreamIdleTimeout, "clientKeepAlive": c.ClientKeepAlive,
 		"queueTimeout": c.QueueTimeout, "pauseDuration": c.PauseDuration, "streamHeadersTimeout": c.StreamHeadersTimeout,
+		"tunnelSetupTimeout": c.TunnelSetupTimeout, "probeInterval": c.ProbeInterval, "probeTimeout": c.ProbeTimeout,
 	} {
 		if d <= 0 {
 			probs = append(probs, name+" must be positive")
@@ -163,6 +190,9 @@ func (c Config) Validate() error {
 	}
 	if c.PauseAfterFailures < 1 {
 		probs = append(probs, "pauseAfterFailures must be at least 1")
+	}
+	if c.ProbeFailures < 1 {
+		probs = append(probs, "probeFailures must be at least 1")
 	}
 	for _, h := range c.SessionHeaders {
 		if strings.TrimSpace(h) == "" {
@@ -194,4 +224,26 @@ func (c Config) DialHomeAddr(mode string, host agentapi.Host) (string, error) {
 		return "", errors.New("dialHomeListen is unset and no launcher port base is known for its default")
 	}
 	return host.DialHomeAddr(), nil
+}
+
+// FrpsAddrs are frps's bind and tcpmux addresses (HBEP-5, Parameters:
+// frpsBindAddr, frpsMuxAddr). Set in the configuration, each is used as
+// given; unset, it is the IPv4 loopback address at the launcher's port base
+// plus agentapi.FrpsBindPortOffset (9) or agentapi.FrpsTCPMuxPortOffset (10),
+// where the launcher's frps listens (HBEP-6, frps on the control-plane host).
+func (c Config) FrpsAddrs(host agentapi.Host) (bind, mux string, err error) {
+	bind, mux = c.FrpsBindAddr, c.FrpsMuxAddr
+	if bind != "" && mux != "" {
+		return bind, mux, nil
+	}
+	if host.PortBase <= 0 {
+		return "", "", errors.New("frpsBindAddr or frpsMuxAddr is unset and no launcher port base is known for its default")
+	}
+	if bind == "" {
+		bind = host.FrpsBindAddr()
+	}
+	if mux == "" {
+		mux = host.FrpsTCPMuxAddr()
+	}
+	return bind, mux, nil
 }
