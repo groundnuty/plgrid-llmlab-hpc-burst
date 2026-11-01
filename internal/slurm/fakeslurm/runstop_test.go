@@ -49,8 +49,10 @@ func TestRunModeScancelSendsTermThenKill(t *testing.T) {
 		if j := r.job(id); j.State != Cancelled {
 			t.Fatalf("after scancel: state %s, want CANCELLED", j.State)
 		}
-		if got := r.squeueJob(id)["job_state"]; !equalStrings(got, Cancelled) {
-			t.Errorf("squeue job_state %v after scancel, want [CANCELLED]", got)
+		// The job ignores TERM, so its processes live until the KILL:
+		// Slurm's COMPLETING flag stands beside the end state until then.
+		if got := r.squeueJob(id)["job_state"]; !equalStrings(got, Cancelled, Completing) {
+			t.Errorf("squeue job_state %v after scancel, want [CANCELLED COMPLETING]", got)
 		}
 		j := r.waitFinished(id)
 		switch {
