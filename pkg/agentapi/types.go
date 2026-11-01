@@ -373,6 +373,13 @@ type WorkerReport struct {
 	EngineSocket string `json:"engineSocket,omitempty"`
 	// Health is the latest sample of this worker's health.
 	Health *Health `json:"health,omitempty"`
+	// LogTail is the end of the engine's output, at most MaxLogTailBytes and
+	// cut at a UTF-8 boundary, once the worker has exited without being told
+	// to or could not start; absent otherwise. It says why a start failed,
+	// for example a cache that ignores its variable and cannot write in a
+	// container without the home directory (science-agent ruling, 1 Nov 2026,
+	// #127 review of issue #125). The agent replaces the Instance's key in it.
+	LogTail string `json:"logTail,omitempty"`
 }
 
 // Health is one sample of an engine's health: the local probe every

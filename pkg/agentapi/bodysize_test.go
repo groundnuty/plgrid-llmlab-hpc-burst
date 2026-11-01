@@ -46,7 +46,7 @@ func worstWarmUp(rounds int) *WarmUpResult {
 // The bounds are the contract's numbers; a change is a decision, so the test
 // names them.
 func TestSizeBounds(t *testing.T) {
-	if MaxTargetSessions != 1024 || MaxTimingErrorBytes != 64 || MaxMessageBytes != 256 ||
+	if MaxTargetSessions != 1024 || MaxTimingErrorBytes != 64 || MaxMessageBytes != 256 || MaxLogTailBytes != 8192 ||
 		WarmUpBudgetBytes != 3145728 || MaxBodyBytes != 4194304 || MaxWarmUpRounds != 5 {
 		t.Errorf("bounds changed: %d %d %d %d %d %d", MaxTargetSessions, MaxTimingErrorBytes, MaxMessageBytes,
 			WarmUpBudgetBytes, MaxBodyBytes, MaxWarmUpRounds)
@@ -122,7 +122,7 @@ func restOfReport(warm *WarmUpResult) Report {
 			Staging: &Staging{Phase: StagingDone, BytesDone: 1 << 40, BytesTotal: 1 << 40, Message: msg},
 			Workers: []WorkerReport{{
 				Name: "worker-0", Phase: PartRunning, PID: 4242, StartTime: &start, ExitCode: &exit, Generation: 1,
-				EngineSocket: "/tmp/hb-run/worker-0.sock",
+				EngineSocket: "/tmp/hb-run/worker-0.sock", LogTail: strings.Repeat("<", MaxLogTailBytes),
 				Health: &Health{Time: start, ProbeOK: true, MetricsReadAt: &start, RunningRequests: Int64(12), WaitingRequests: Int64(3),
 					GeneratedTokens: Int64(1 << 40), KVCacheUsage: Float64(0.5),
 					Preemptions: Int64(1 << 40), PrefixCacheQueriedTokens: Int64(1 << 40), PrefixCacheHitTokens: Int64(1 << 40),
