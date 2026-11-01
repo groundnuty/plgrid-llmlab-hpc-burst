@@ -10,8 +10,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -60,12 +62,16 @@ func usageLines(t *testing.T, dir string) []usageLine {
 	return out
 }
 
-// TestFrontStopFlushesARequestInFlight: a chat request to a managed entry whose upstream (the LLMLab
-// double) stalls is in flight when hpcburst down stops the host. The front lets it run for its
-// 10 s shutdown grace, cuts it with front_shutdown, writes its record and closes the sink, all
-// within the grace the supervisor gives it. The record is there, the counters run without a gap,
-// and the counter file holds the last one, as only a clean close leaves it.
-func TestFrontStopFlushesARequestInFlight(t *testing.T) {
+// managedFront starts a host with the real front and a managed entry on the LLMLab double, and
+// waits until the front routes it.
+type managedFront struct {
+	h                                  *host
+	llm                                *llmlabtest.Server
+	usageDir, clientKey, model, health string
+}
+
+func startManagedFront(t *testing.T) managedFront {
+	t.Helper()
 	const base = 29220
 	h := newHost(t)
 	ctl, _ := fakeController(t)
@@ -144,6 +150,17 @@ func TestFrontStopFlushesARequestInFlight(t *testing.T) {
 		return code == http.StatusOK && strings.Contains(body, `"id":"`+model+`"`) && strings.Contains(body, `"routable":true`)
 	})
 
+	return managedFront{h: h, llm: llm, usageDir: usageDir, clientKey: clientKey, model: model, health: healthAddr}
+}
+
+// TestFrontStopFlushesARequestInFlight: a chat request to a managed entry whose upstream (the LLMLab
+// double) stalls is in flight when hpcburst down stops the host. The front lets it run for its
+// 10 s shutdown grace, cuts it with front_shutdown, writes its record and closes the sink, all
+// within the grace the supervisor gives it. The record is there, the counters run without a gap,
+// and the counter file holds the last one, as only a clean close leaves it.
+func TestFrontStopFlushesARequestInFlight(t *testing.T) {
+	m := startManagedFront(t)
+	h, llm, usageDir, clientKey, model, healthAddr := m.h, m.llm, m.usageDir, m.clientKey, m.model, m.health
 	// ---- a request in flight: the double holds it before its first byte ----
 	llm.Stall(true)
 	done := make(chan error, 1)
@@ -200,4 +217,79 @@ func TestFrontStopFlushesARequestInFlight(t *testing.T) {
 		t.Error("the front still answers after down")
 	}
 	t.Logf("down took %s with a request in flight", took)
+}
+
+// sendQueue is the Send-Q of the front's end of the client connection whose local port is
+// clientPort, from ss(8): the bytes the front has written that the client has not taken.
+func sendQueue(t *testing.T, clientPort int) int {
+	t.Helper()
+	out, err := exec.Command("ss", "-tnH", "state", "established", fmt.Sprintf("( sport = :%d and dport = :%d )", frontClientPort, clientPort)).Output()
+	if err != nil {
+		t.Fatalf("ss: %v", err)
+	}
+	f := strings.Fields(string(out))
+	if len(f) < 2 {
+		return 0
+	}
+	n, _ := strconv.Atoi(f[1])
+	return n
+}
+
+// TestFrontStopWaitsForABlockedClient: a streaming request whose client stops reading holds its
+// handler in a blocked write until the stop cuts it; the cut then gives the write the front's
+// write grace (5 s) before the record is written. The front's stop therefore takes about 15 s, its
+// shutdown grace and its write grace, and the supervisor must let it: the record cut by
+// front_shutdown is written and the counters run without a gap. A kill grace of 10 s, the
+// supervisor's general one, would kill the front in that write (PR 134 review, B1).
+func TestFrontStopWaitsForABlockedClient(t *testing.T) {
+	m := startManagedFront(t)
+	// A long reply, streamed as fast as the double can: one chunk of about 2 KiB per word.
+	m.llm.SetReply(strings.Repeat(strings.Repeat("y", 2000)+" ", 20000))
+	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", frontClientPort))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.(*net.TCPConn).SetReadBuffer(4096); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf(`{"model":%q,"stream":true,"messages":[{"role":"user","content":"hello"}]}`, m.model)
+	req := fmt.Sprintf("POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", m.clientKey, len(body), body)
+	if _, err := conn.Write([]byte(req)); err != nil {
+		t.Fatal(err)
+	}
+	// The client reads nothing. Wait until the front's writes back up: its end of the connection
+	// holds data the client has not taken, and keeps holding it.
+	clientPort := conn.LocalAddr().(*net.TCPAddr).Port
+	waitFor(t, 60*time.Second, "the front's writes to the client to block", func() bool { return sendQueue(t, clientPort) > 64<<10 })
+	before := len(usageLines(t, m.usageDir))
+
+	start := time.Now()
+	if r := cli(t, m.h.args("down")...); r.code != exitOK {
+		t.Fatalf("down exited %d: %s", r.code, r.err)
+	}
+	took := time.Since(start)
+	lines := usageLines(t, m.usageDir)
+	var cut int
+	for _, l := range lines {
+		if l.CutBy != nil && *l.CutBy == "front_shutdown" {
+			cut++
+		}
+	}
+	if len(lines) != before+1 || cut != 1 {
+		t.Fatalf("after down: %d records (%d before), %d cut by front_shutdown; want the blocked request's record, cut by front_shutdown (down took %s)", len(lines), before, cut, took)
+	}
+	for i, l := range lines {
+		if l.Counter != lines[0].Counter+uint64(i) {
+			t.Fatalf("record %d has counter %d after %d: a gap", i, l.Counter, lines[i-1].Counter)
+		}
+	}
+	cb, err := os.ReadFile(filepath.Join(m.usageDir, "counter"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(cb)); got != strconv.FormatUint(lines[len(lines)-1].Counter, 10) {
+		t.Errorf("the counter file holds %q, the last record's counter is %d: the sink was not closed", got, lines[len(lines)-1].Counter)
+	}
+	t.Logf("down took %s with a client that stopped reading", took)
 }
