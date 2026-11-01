@@ -59,6 +59,18 @@ func waitUntil(t *testing.T, d time.Duration, what string, cond func() bool) {
 	}
 }
 
+// await receives from ch, and fails the test when nothing comes in a minute.
+func await[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(time.Minute):
+		t.Fatal("nothing arrived within a minute")
+		panic("unreachable")
+	}
+}
+
 // setVars sets a package-level timing variable for one test and puts it back when the test has
 // ended. Every run a test starts must have returned by then: tests register their stops after
 // the call, so that they run first.
@@ -557,7 +569,7 @@ func (r *loopRig) stop(t *testing.T) {
 func TestPathStateReadsAfterTheSyncAtStartAndEveryPeriod(t *testing.T) {
 	setVars(t, &tunnelReadPeriod, 20*time.Millisecond)
 	r := newLoopRig(t, nil, nil)
-	<-r.cache.entered // the loop is waiting for the sync: it has read nothing before it
+	await(t, r.cache.entered) // the loop is waiting for the sync: it has read nothing before it
 	r.cache.open()
 	waitUntil(t, 30*time.Second, "four reads", func() bool { return r.nreads.Load() >= 4 })
 	if r.readBeforeSync.Load() {
@@ -578,7 +590,7 @@ func TestPathStateReadsAfterATriggerSignal(t *testing.T) {
 	tr := frpsplugin.NewTrigger()
 	r := newLoopRig(t, tr.C(), nil)
 	r.cache.open()
-	<-r.reads // the read at the start
+	await(t, r.reads) // the read at the start
 	for range 5 {
 		signalled := time.Now()
 		tr.ProxyChanged("NewProxy", "uid-1")
@@ -604,7 +616,7 @@ func TestPathStateWritesNothingFromAReadTheStopCut(t *testing.T) {
 		}}
 	})
 	r.cache.open()
-	<-inRead
+	await(t, inRead)
 	r.stop(t)
 	if n := r.k.updates.Load(); n != 0 {
 		t.Errorf("%d status updates after a stop cut the read, want none", n)
@@ -655,7 +667,7 @@ func newPluginRig(t *testing.T, creds string, cl client.Client) *pluginRig {
 	var ctx context.Context
 	ctx, r.cancel = context.WithCancel(context.Background())
 	go func() { r.done <- srv.start(ctx) }()
-	<-bound
+	await(t, bound)
 	t.Cleanup(func() { r.stop() })
 	return r
 }
@@ -750,7 +762,7 @@ func TestPluginAnswersFromTheFeed(t *testing.T) {
 
 	// The cache has not synced: the feeder has not read anything, so every login is refused, as one
 	// whose token is right.
-	<-r.cache.entered
+	await(t, r.cache.entered)
 	if reject, reason := r.login(credA); !reject || !contains(reason, textNotLoaded) {
 		t.Fatalf("before the sync: reject=%v %q, want a refusal saying the Allocations are not loaded", reject, reason)
 	}
@@ -797,6 +809,53 @@ func TestPluginAnswersFromTheFeed(t *testing.T) {
 	}
 	r.cache.fire()
 	waitUntil(t, 30*time.Second, "the plugin to refuse the credential of the Allocation that ended", func() bool {
+		reject, _ := r.login(credA)
+		return reject
+	})
+}
+
+// With the periodic refresh an hour away, an Allocation or Instance event alone makes the feeder
+// refresh: an Allocation that ends stops being admitted, and a new Instance can register.
+func TestPluginRefreshesOnInformerEvents(t *testing.T) {
+	setVars(t, &feedPeriod, time.Hour)
+	setVars(t, &feedMinGap, time.Millisecond)
+	creds := t.TempDir()
+	writeUnitCredential(t, creds, "uid-live", credA)
+	live := unitAllocation("al-live", "uid-live", v1alpha1.AllocationRunning)
+	cl := tunnelScheme(t).WithObjects(live).Build()
+	r := newPluginRig(t, creds, cl)
+	r.cache.open()
+	waitUntil(t, 30*time.Second, "the plugin to admit the live Allocation", func() bool {
+		reject, _ := r.login(credA)
+		return !reject
+	})
+
+	// A new Instance placed on the Allocation: refused until the event, accepted after it.
+	if reject, _ := r.newProxy(credA, "inst-new"); !reject {
+		t.Fatal("a proxy of an Instance that does not exist yet was accepted")
+	}
+	in := unitInstance("in-new", "inst-new", 1)
+	in.Spec.AllocationRef.Name = "al-live"
+	if err := cl.Create(t.Context(), in); err != nil {
+		t.Fatal(err)
+	}
+	r.cache.fire()
+	waitUntil(t, 30*time.Second, "the plugin to accept the proxy of the Instance that was created", func() bool {
+		reject, _ := r.newProxy(credA, "inst-new")
+		return !reject
+	})
+
+	// The Allocation ends.
+	got := &v1alpha1.Allocation{}
+	if err := cl.Get(t.Context(), client.ObjectKeyFromObject(live), got); err != nil {
+		t.Fatal(err)
+	}
+	got.Status.AtProvider.Phase = v1alpha1.AllocationFailed
+	if err := cl.Status().Update(t.Context(), got); err != nil {
+		t.Fatal(err)
+	}
+	r.cache.fire()
+	waitUntil(t, 30*time.Second, "the plugin to refuse the credential of the Allocation that failed", func() bool {
 		reject, _ := r.login(credA)
 		return reject
 	})
@@ -881,7 +940,7 @@ func TestPathStateStopsFromEveryState(t *testing.T) {
 			s.cache = sc
 			done := make(chan error, 1)
 			go func() { done <- s.run(ctx) }()
-			<-sc.entered
+			await(t, sc.entered)
 			return done, func() {}
 		}},
 		{"blocked in a read of the list", func(t *testing.T, ctx context.Context) (<-chan error, func()) {
@@ -894,7 +953,7 @@ func TestPathStateStopsFromEveryState(t *testing.T) {
 			}), nil)
 			done := make(chan error, 1)
 			go func() { done <- s.run(ctx) }()
-			<-inRead
+			await(t, inRead)
 			return done, func() {}
 		}},
 		{"idle between reads", func(t *testing.T, ctx context.Context) (<-chan error, func()) {
@@ -906,7 +965,7 @@ func TestPathStateStopsFromEveryState(t *testing.T) {
 			}), nil)
 			done := make(chan error, 1)
 			go func() { done <- s.run(ctx) }()
-			<-read
+			await(t, read)
 			return done, func() {}
 		}},
 		{"waiting out the settle time after a signal", func(t *testing.T, ctx context.Context) (<-chan error, func()) {
@@ -919,7 +978,7 @@ func TestPathStateStopsFromEveryState(t *testing.T) {
 			}), tr.C())
 			done := make(chan error, 1)
 			go func() { done <- s.run(ctx) }()
-			<-read
+			await(t, read)
 			tr.ProxyChanged("NewProxy", "uid-1")
 			for len(tr.C()) > 0 { // the loop took the signal: it is in the settle wait
 				runtime.Gosched()
@@ -964,7 +1023,7 @@ func TestPluginComponentStopsFromEveryState(t *testing.T) {
 		// atOnce stops the component without waiting for it to bind.
 		atOnce bool
 	}{
-		{"waiting for the cache to sync, bound", func(r *pluginRig) { <-r.cache.entered }, false, false},
+		{"waiting for the cache to sync, bound", func(r *pluginRig) { await(r.t, r.cache.entered) }, false, false},
 		{"synced and refreshing", func(r *pluginRig) {
 			waitUntil(r.t, 30*time.Second, "the index to be synced", r.index.Synced)
 		}, true, false},
@@ -1047,7 +1106,7 @@ func newPluginRigWithCacheError(t *testing.T, getErr error) *pluginRig {
 	var ctx context.Context
 	ctx, r.cancel = context.WithCancel(context.Background())
 	go func() { r.done <- srv.start(ctx) }()
-	<-bound
+	await(t, bound)
 	t.Cleanup(func() { r.cancel() })
 	return r
 }
