@@ -62,14 +62,32 @@ scope_procs() {
 	fi
 }
 
-# stop_scope kills whatever is left in the scope, then waits for systemd to stop it. The test
-# itself is killed too, in case a signal came before systemd-run had made the scope.
+# stop_scope kills whatever is left in the scope and returns once its cgroup holds no process,
+# killing again each second, for at most a minute: a SIGKILL is delivered at once, but a large
+# process (k3s) takes a moment to exit and give back its ports. The test itself is killed too, in
+# case a signal came before systemd-run had made the scope.
 stop_scope() {
+	local i left n=0
 	if [ -n "${child:-}" ]; then
 		kill -KILL "$child" 2> /dev/null || true
 	fi
-	systemctl --user kill --signal=SIGKILL "$scope" 2> /dev/null || true
+	for i in $(seq 1 60); do
+		left=$(scope_procs)
+		[ -n "$left" ] || break
+		[ "$i" -gt 1 ] || n=$(echo "$left" | wc -l)
+		systemctl --user kill --signal=SIGKILL "$scope" 2> /dev/null || true
+		# shellcheck disable=SC2086 # one PID a word
+		kill -KILL $left 2> /dev/null || true
+		sleep 1
+	done
 	systemctl --user stop "$scope" 2> /dev/null || true
+	if [ -n "$(scope_procs)" ]; then
+		echo "rehearsal.sh: $scope still holds processes after a minute of SIGKILL: $(scope_procs | tr '\n' ' ')" >&2
+		exit 1 # in the EXIT trap: the run fails
+	fi
+	if [ "$n" -gt 0 ]; then
+		echo "rehearsal.sh: stopped $scope: killed $n processes, none left" >&2
+	fi
 }
 
 trap stop_scope EXIT
