@@ -39,34 +39,30 @@ func TestScancel(t *testing.T) {
 		wantNV(t, "end_time", j["end_time"], true, float64(cancelledAt.Unix()))
 	}
 
-	// Ended but not purged.
+	// Ended but not purged, an unknown ID, and a purged job: real Slurm 24.11
+	// prints nothing and exits 0 for all three (#199), and touches nothing.
 	for _, id := range []int{done, pending} {
-		_, errOut, code := r.run("scancel " + itoa(id))
-		want := "scancel: error: Kill job error on job id " + itoa(id) + ": Job/step already completing or completed\n"
-		if code != 1 || errOut != want {
-			t.Errorf("scancel %d of an ended job: exit %d stderr %q, want exit 1 and %q", id, code, errOut, want)
+		if out, errOut, code := r.run("scancel " + itoa(id)); code != 0 || out != "" || errOut != "" {
+			t.Errorf("scancel %d of an ended job: exit %d stdout %q stderr %q, want a silent exit 0", id, code, out, errOut)
 		}
 	}
-
-	// An unknown ID.
-	_, errOut, code := r.run("scancel 9999")
-	if want := "scancel: error: Kill job error on job id 9999: Invalid job id specified\n"; code != 1 || errOut != want {
-		t.Errorf("scancel of an unknown ID: exit %d stderr %q, want exit 1 and %q", code, errOut, want)
+	if j, _ := r.p.Job(done); j.State != Completed {
+		t.Errorf("job %d is %s after a scancel of the ended job, want COMPLETED", done, j.State)
 	}
-
+	if out, errOut, code := r.run("scancel 9999"); code != 0 || out != "" || errOut != "" {
+		t.Errorf("scancel of an unknown ID: exit %d stdout %q stderr %q, want a silent exit 0", code, out, errOut)
+	}
 	// Purged: the job `done` ended at t0+1 and MinJobAge is 10 s.
 	r.clock.Set(t0.Add(11 * time.Second))
-	_, errOut, code = r.run("scancel " + itoa(done))
-	if want := "scancel: error: Kill job error on job id " + itoa(done) + ": Invalid job id specified\n"; code != 1 || errOut != want {
-		t.Errorf("scancel of a purged job: exit %d stderr %q, want exit 1 and %q", code, errOut, want)
+	if out, errOut, code := r.run("scancel " + itoa(done)); code != 0 || out != "" || errOut != "" {
+		t.Errorf("scancel of a purged job: exit %d stdout %q stderr %q, want a silent exit 0", code, out, errOut)
 	}
 
-	// Several IDs: one failure gives exit 1 but the others are still cancelled.
+	// Several IDs: an unknown one changes nothing, and the others are cancelled.
 	r.clock.Set(t0.Add(time.Minute))
 	again := r.sbatch("--job-name=again")
-	_, errOut, code = r.run("scancel 9999 " + itoa(again))
-	if code != 1 || !strings.Contains(errOut, "job id 9999: Invalid job id specified") {
-		t.Errorf("scancel 9999 %d: exit %d stderr %q", again, code, errOut)
+	if out, errOut, code := r.run("scancel 9999 " + itoa(again)); code != 0 || out != "" || errOut != "" {
+		t.Errorf("scancel 9999 %d: exit %d stdout %q stderr %q, want a silent exit 0", again, code, out, errOut)
 	}
 	if j, _ := r.p.Job(again); j.State != Cancelled {
 		t.Errorf("job %d state %s after a mixed scancel, want CANCELLED", again, j.State)
@@ -78,13 +74,49 @@ func TestScancel(t *testing.T) {
 	}
 }
 
-// The same ID twice in one call: the first cancels the job, the second finds it ended.
+// The same ID twice in one call: the first cancels the job, the second finds it ended, which
+// real scancel does not mention.
 func TestScancelTwiceInOneCall(t *testing.T) {
 	r := newRig(t, Config{})
 	id := r.sbatch()
-	_, errOut, code := r.run("scancel " + itoa(id) + " " + itoa(id))
-	if code != 1 || !strings.Contains(errOut, "Job/step already completing or completed") || strings.Count(errOut, "\n") != 1 {
-		t.Errorf("exit %d stderr %q, want one 'already completing' line", code, errOut)
+	if out, errOut, code := r.run("scancel " + itoa(id) + " " + itoa(id)); code != 0 || out != "" || errOut != "" {
+		t.Errorf("exit %d stdout %q stderr %q, want a silent exit 0", code, out, errOut)
+	}
+	if j, _ := r.p.Job(id); j.State != Cancelled {
+		t.Errorf("job %d state %s, want CANCELLED", id, j.State)
+	}
+}
+
+// Config.NoisyScancel brings back the error text the fake printed before #199, for a test of the
+// plugin against a Slurm that is noisy. Only the two texts real scancel keeps quiet come back;
+// another user's job still gives "Access/permission denied" either way.
+func TestNoisyScancelPrintsTheErrorsAndExitsOne(t *testing.T) {
+	r := newRig(t, Config{NoisyScancel: true})
+	done := r.sbatch("--job-name=done")
+	r.start(done)
+	r.clock.Advance(time.Second)
+	r.end(done, Completed)
+
+	_, errOut, code := r.run("scancel " + itoa(done))
+	if want := "scancel: error: Kill job error on job id " + itoa(done) + ": Job/step already completing or completed\n"; code != 1 || errOut != want {
+		t.Errorf("scancel of an ended job: exit %d stderr %q, want exit 1 and %q", code, errOut, want)
+	}
+	_, errOut, code = r.run("scancel 9999")
+	if want := "scancel: error: Kill job error on job id 9999: Invalid job id specified\n"; code != 1 || errOut != want {
+		t.Errorf("scancel of an unknown ID: exit %d stderr %q, want exit 1 and %q", code, errOut, want)
+	}
+	r.clock.Advance(11 * time.Second) // MinJobAge is 10 s
+	_, errOut, code = r.run("scancel " + itoa(done))
+	if want := "scancel: error: Kill job error on job id " + itoa(done) + ": Invalid job id specified\n"; code != 1 || errOut != want {
+		t.Errorf("scancel of a purged job: exit %d stderr %q, want exit 1 and %q", code, errOut, want)
+	}
+	again := r.sbatch("--job-name=again")
+	_, errOut, code = r.run("scancel 9999 " + itoa(again) + " " + itoa(again))
+	if code != 1 || !strings.Contains(errOut, "job id 9999: Invalid job id specified") || !strings.Contains(errOut, "Job/step already completing or completed") {
+		t.Errorf("scancel 9999 %d %d: exit %d stderr %q", again, again, code, errOut)
+	}
+	if j, _ := r.p.Job(again); j.State != Cancelled {
+		t.Errorf("job %d state %s after a mixed scancel, want CANCELLED", again, j.State)
 	}
 }
 

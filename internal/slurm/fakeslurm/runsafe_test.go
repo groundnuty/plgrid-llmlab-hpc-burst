@@ -86,8 +86,8 @@ func TestRunModeShellStaysAZombieUntilTheSweepEnds(t *testing.T) {
 	if j.State != Completed || j.ExitCode != 0 || j.Finished {
 		t.Errorf("during the sweep: state %s, exit code %d, finished %v; want COMPLETED, 0, not finished", j.State, j.ExitCode, j.Finished)
 	}
-	if out, errOut, code := r.run("scancel " + itoa(id)); code != 1 || !strings.Contains(errOut, "already completing or completed") {
-		t.Errorf("scancel of a job that exited: exit %d, stdout %q, stderr %q; want 1, already completing or completed", code, out, errOut)
+	if out, errOut, code := r.run("scancel " + itoa(id)); code != 0 || out != "" || errOut != "" {
+		t.Errorf("scancel of a job that exited: exit %d, stdout %q, stderr %q; want a silent exit 0", code, out, errOut)
 	}
 	if j := r.job(id); j.State != Completed || !j.TermAt.IsZero() {
 		t.Errorf("after the scancel: state %s, TermAt %v; want COMPLETED and no TERM", j.State, j.TermAt)

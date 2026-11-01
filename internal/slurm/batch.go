@@ -630,34 +630,82 @@ func (b *Batch) LiftHold(ctx context.Context, jobID string) error {
 	return fmt.Errorf("scontrol release %s: exit %d: %s", jobID, res.ExitCode, slurmMessage(stderr))
 }
 
-// Cancel implements provider.Batch: scancel per job, one result per job, in
-// order. An ended job reports AlreadyEnded; a job ID Slurm no longer knows
-// reports an error that wraps provider.ErrNotFound.
+// Cancel implements provider.Batch: one result per job, in order. The outcome
+// comes from the job's state, read just before the scancel, never from what
+// scancel prints. Real Slurm 24.11's scancel prints nothing and exits 0 for a
+// job that has ended and for a job it does not know (ESLURM_ALREADY_DONE and
+// ESLURM_INVALID_JOB_ID, scancel.c in tag slurm-24-11-5-1), so its output
+// cannot tell either from a cancel (#199). The state is read here, fresh and
+// past the cache, and not taken from the caller's listing, which may be a poll
+// interval old. It is read before the scancel, not after: the question is
+// whether the job was live when it was cancelled, and a read after could only
+// infer that from the final state, which a job cancelled by someone else shares.
+//
+// A job live at that read is cancelled and reports Cancelled. A job that has
+// ended reports AlreadyEnded, and no scancel runs. A job neither the queue nor
+// accounting shows reports an error that wraps provider.ErrNotFound. A job
+// that ends in the instant between the read and the scancel still reports
+// Cancelled on Slurm 24.11, which stays quiet about it. A read that fails is a
+// CancelError: the job's state is unknown, and the caller retries.
 func (b *Batch) Cancel(ctx context.Context, jobIDs []string) []provider.CancelResult {
 	out := make([]provider.CancelResult, 0, len(jobIDs))
 	defer b.markStale()
 	for _, id := range jobIDs {
-		if err := checkJobID(id); err != nil {
-			out = append(out, provider.CancelResult{JobID: id, Outcome: provider.CancelError, Err: err})
-			continue
-		}
-		res, err := b.run(ctx, cancelLine(id), nil)
-		stderr := string(res.Stderr)
-		switch {
-		case err != nil:
-			out = append(out, provider.CancelResult{JobID: id, Outcome: provider.CancelError, Err: fmt.Errorf("scancel %s: %w", id, err)})
-		case strings.Contains(stderr, "already completing or completed"):
-			out = append(out, provider.CancelResult{JobID: id, Outcome: provider.AlreadyEnded})
-		case strings.Contains(stderr, "Invalid job id specified"):
-			out = append(out, provider.CancelResult{JobID: id, Outcome: provider.CancelError, Err: fmt.Errorf("job %s: %w", id, provider.ErrNotFound)})
-		case res.ExitCode != 0 || strings.Contains(stderr, "error"):
-			out = append(out, provider.CancelResult{JobID: id, Outcome: provider.CancelError,
-				Err: fmt.Errorf("scancel %s: exit %d: %s", id, res.ExitCode, slurmMessage(stderr))})
-		default:
-			out = append(out, provider.CancelResult{JobID: id, Outcome: provider.Cancelled})
-		}
+		out = append(out, b.cancelOne(ctx, id))
 	}
 	return out
+}
+
+func (b *Batch) cancelOne(ctx context.Context, id string) provider.CancelResult {
+	failed := func(err error) provider.CancelResult {
+		return provider.CancelResult{JobID: id, Outcome: provider.CancelError, Err: err}
+	}
+	if err := checkJobID(id); err != nil {
+		return failed(err)
+	}
+	live, notFound, err := b.liveBeforeCancel(ctx, id)
+	switch {
+	case err != nil:
+		return failed(fmt.Errorf("cancel job %s: read its state: %w", id, err))
+	case notFound:
+		return failed(fmt.Errorf("job %s: %w", id, provider.ErrNotFound))
+	case !live:
+		return provider.CancelResult{JobID: id, Outcome: provider.AlreadyEnded}
+	}
+	res, err := b.run(ctx, cancelLine(id), nil)
+	stderr := string(res.Stderr)
+	switch {
+	case err != nil:
+		return failed(fmt.Errorf("scancel %s: %w", id, err))
+	// Real Slurm 24.11 says nothing about a job that ended after the read, but
+	// an older or a noisier one (scancel -v) does. The job was live when it was
+	// read, so these two texts only refine a job that ended in the window.
+	case strings.Contains(stderr, "already completing or completed"):
+		return provider.CancelResult{JobID: id, Outcome: provider.AlreadyEnded}
+	case strings.Contains(stderr, "Invalid job id specified"):
+		return failed(fmt.Errorf("job %s: %w", id, provider.ErrNotFound))
+	case res.ExitCode != 0 || strings.Contains(stderr, "error"):
+		return failed(fmt.Errorf("scancel %s: exit %d: %s", id, res.ExitCode, slurmMessage(stderr)))
+	}
+	return provider.CancelResult{JobID: id, Outcome: provider.Cancelled}
+}
+
+// liveBeforeCancel reads the job once, fresh: from the queue (squeue --me
+// --jobs=<id>), else from accounting. live is true for a job with no end time;
+// notFound is true when both reads succeeded and neither shows the job.
+func (b *Batch) liveBeforeCancel(ctx context.Context, id string) (live, notFound bool, err error) {
+	job, listed, err := b.QueueJob(ctx, id)
+	if err != nil {
+		return false, false, err
+	}
+	if listed {
+		return job.EndTime == nil, false, nil
+	}
+	job, found, err := b.ReadAccounting(ctx, id)
+	if err != nil {
+		return false, false, err
+	}
+	return found && job.EndTime == nil, !found, nil
 }
 
 var varPrefix = regexp.MustCompile(`^\$([A-Za-z_][A-Za-z0-9_]*)`)
