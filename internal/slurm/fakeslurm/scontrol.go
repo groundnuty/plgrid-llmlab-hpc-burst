@@ -28,6 +28,7 @@ func (sh *shell) scontrol(args []string) int {
 			code = 1
 		}
 	}
+	sh.p.schedule(sh.now) // run mode: a released job starts now
 	return code
 }
 
