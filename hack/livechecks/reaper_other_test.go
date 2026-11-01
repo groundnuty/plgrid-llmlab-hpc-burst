@@ -10,3 +10,7 @@ import "errors"
 func setSubreaper() error { return errors.New("this needs Linux (PR_SET_CHILD_SUBREAPER)") }
 
 func readProcTable() (map[int]procInfo, error) { return nil, errors.New("this needs Linux (/proc)") }
+
+func markedPIDs(string) []int { return nil }
+
+func killMarked(string) {}

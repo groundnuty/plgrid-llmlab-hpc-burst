@@ -209,7 +209,7 @@ func (w *world) env(extra []string) []string {
 // script's. noLeftoverProcess reads the reaper's report of this command.
 func (w *world) command(extra []string, args ...string) *exec.Cmd {
 	report := filepath.Join(w.dir, "reports", strconv.Itoa(len(w.reports)+1))
-	cmd := reaperCommand(w.t, report, leftoverDeadline, "", w.repo, w.env(extra), append([]string{filepath.Join(w.repo, "hack/live-checks.sh")}, args...)...)
+	cmd := reaperCommand(w.t, report, reaperOpts{grace: leftoverDeadline}, w.repo, w.env(extra), append([]string{filepath.Join(w.repo, "hack/live-checks.sh")}, args...)...)
 	w.reports[cmd] = report
 	return cmd
 }
@@ -246,8 +246,34 @@ func (w *world) start(extra []string, args ...string) (*exec.Cmd, *bytes.Buffer)
 	if err := cmd.Start(); err != nil {
 		w.t.Fatal(err)
 	}
-	w.t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) })
+	// No cleanup here: reaperCommand's closes the pipe to the reaper, which kills and reaps what
+	// is left of the run, descendants in other sessions included.
 	return cmd, &out
+}
+
+// signal sends sig to the reaper, which forwards it to the script, and returns once the reaper
+// has acknowledged the forward. A test that goes on to release what the script waits on needs
+// this: forwarding is asynchronous, and without the acknowledgement the script could see the
+// release before the signal.
+func (w *world) signal(cmd *exec.Cmd, sig syscall.Signal) {
+	w.t.Helper()
+	report, ok := w.reports[cmd]
+	if !ok {
+		w.t.Fatal("the command was not built by world.command, so no reaper forwards its signals")
+	}
+	if err := cmd.Process.Signal(sig); err != nil {
+		w.t.Fatal(err)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if _, err := os.Stat(ackPath(report)); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			w.t.Fatalf("the reaper never acknowledged forwarding %v", sig)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // leftoverDeadline bounds how long a process the script started may outlive it. The script's
