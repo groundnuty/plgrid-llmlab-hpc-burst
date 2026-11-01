@@ -221,8 +221,10 @@ func TestTunnelConnectedAndReconcilerWritesInterfereBothWays(t *testing.T) {
 			t.Fatalf("WriteTunnelConnected: %v", err)
 		}
 
+		// Both are reported, so that a write that lands over the reconciler's with no
+		// conflict is seen both as that and as the lost condition it leaves behind.
 		if got, want := tunnelB.outcomes(), []string{"update conflict", "update ok"}; !slices.Equal(got, want) {
-			t.Fatalf("the writer's status writes ended %v, want %v: a Conflict on the stale copy, then the write over a fresh read", got, want)
+			t.Errorf("the writer's status writes ended %v, want %v: a Conflict on the stale copy, then the write over a fresh read", got, want)
 		}
 		st.checkBoth(tunnelOnline, "written between the writer's read and its write")
 	})
@@ -243,18 +245,18 @@ func TestTunnelConnectedAndReconcilerWritesInterfereBothWays(t *testing.T) {
 		close(lifeB.release)
 		err := <-done
 		if !apierrors.IsConflict(err) {
-			t.Fatalf("setStatus on a copy the writer has written since: %v, want a Conflict that fails the pass", err)
+			t.Errorf("setStatus on a copy the writer has written since: %v, want a Conflict that fails the pass", err)
 		}
 		if got, want := lifeB.outcomes(), []string{"update conflict"}; !slices.Equal(got, want) {
-			t.Fatalf("the reconciler's status writes ended %v, want %v", got, want)
+			t.Errorf("the reconciler's status writes ended %v, want %v", got, want)
 		}
 		// The stale write changed nothing: the writer's condition is there, the reconciler's is not.
 		mid := st.get()
 		if tc := apimeta.FindStatusCondition(mid.Status.Conditions, v1alpha1.ConditionTunnelConnected); tc == nil || tc.Reason != tunnelOffline.Reason {
-			t.Fatalf("after the reconciler's conflict TunnelConnected = %+v, want the writer's %s", tc, tunnelOffline.Reason)
+			t.Errorf("after the reconciler's conflict TunnelConnected = %+v, want the writer's %s", tc, tunnelOffline.Reason)
 		}
 		if h := apimeta.FindStatusCondition(mid.Status.Conditions, v1alpha1.ConditionHealthy); h != nil || mid.Status.Phase != v1alpha1.InstanceVerifying {
-			t.Fatalf("after the reconciler's conflict Healthy = %+v, phase %q: the stale write must have changed nothing", h, mid.Status.Phase)
+			t.Errorf("after the reconciler's conflict Healthy = %+v, phase %q: the stale write must have changed nothing", h, mid.Status.Phase)
 		}
 		// The requeued pass reads again and writes.
 		if err := reconcilerWrite(ctx, lifeC, st.get(), "the reconciler's write"); err != nil {
