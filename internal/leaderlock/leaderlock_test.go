@@ -140,8 +140,25 @@ func TestAReleaseNeverOverwritesAnotherHolder(t *testing.T) {
 	if holder, updates := f.state(); holder != "host_2222" || updates != 1 {
 		t.Fatalf("the Lease is held by %q after %d writes; want the other holder's, untouched", holder, updates)
 	}
-	if !l.has("no longer names this holder") {
+	if !l.has("does not name this holder") {
 		t.Errorf("leaving the Lease to its new holder was not logged: %v", l.lines)
+	}
+}
+
+// client-go's release writes on its cached view of leadership. A Lease that
+// already names another holder when the release comes is not written at all
+// (PR #159 review).
+func TestAReleaseDoesNotWriteALeaseAnotherHolderTook(t *testing.T) {
+	f := &fakeLease{holder: "host_2222"}
+	lock, l := newLock(f)
+	if err := lock.Update(context.Background(), release); err != nil {
+		t.Fatalf("the release returned %v", err)
+	}
+	if holder, updates := f.state(); holder != "host_2222" || updates != 0 {
+		t.Fatalf("the Lease is held by %q after %d writes; want the other holder's, never written", holder, updates)
+	}
+	if !l.has("does not name this holder") {
+		t.Errorf("leaving the Lease to its holder was not logged: %v", l.lines)
 	}
 }
 
@@ -188,8 +205,8 @@ func TestAReleaseRetriesAFailedRead(t *testing.T) {
 	if err := lock.Update(context.Background(), release); err != nil {
 		t.Fatalf("the release returned %v", err)
 	}
-	if holder, updates := f.state(); holder != "" || updates != 2 || f.gets != 3 {
-		t.Fatalf("the Lease is held by %q after %d writes and %d reads; want it released after 2 writes and 3 reads", holder, updates, f.gets)
+	if holder, updates := f.state(); holder != "" || updates != 2 || f.gets != 4 {
+		t.Fatalf("the Lease is held by %q after %d writes and %d reads; want it released after 2 writes and 4 reads (the first try's, two failed, the last)", holder, updates, f.gets)
 	}
 }
 
