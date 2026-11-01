@@ -246,12 +246,41 @@ func (w *world) start(extra []string, args ...string) (*exec.Cmd, *bytes.Buffer)
 	return cmd, &out
 }
 
-// noLeftoverProcess fails when anything of the run's process group is alive.
+// leftoverDeadline bounds how long a member of the run's process group may outlive the script.
+// The script's last children (a subshell, a command substitution, a timeout and what it killed)
+// can still be exiting, or be waiting for init to reap them, when the script's own exit is
+// seen, and that takes milliseconds, a little longer on a loaded host. A run that leaves a
+// process behind leaves it for good, so it is still there when the deadline passes.
+const leftoverDeadline = 5 * time.Second
+
+// groupExists reports whether process group pgid has a member, a zombie included. Only ESRCH
+// means the group is gone: EPERM, or any other error, means something is there.
+func groupExists(pgid int) bool {
+	return !errors.Is(syscall.Kill(-pgid, 0), syscall.ESRCH)
+}
+
+// groupOutlives polls process group pgid until it is empty and returns false, or returns true
+// when a member is still there at the deadline. It waits on the group's state, never on a
+// fixed window: an empty group ends the wait at once.
+func groupOutlives(pgid int, deadline time.Duration) bool {
+	end := time.Now().Add(deadline)
+	for groupExists(pgid) {
+		if time.Now().After(end) {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return false
+}
+
+// noLeftoverProcess fails when a process of the run's group is still alive leftoverDeadline
+// after the script exited, and kills what is left.
 func (w *world) noLeftoverProcess(cmd *exec.Cmd) {
 	w.t.Helper()
-	if err := syscall.Kill(-cmd.Process.Pid, 0); err == nil {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		w.t.Errorf("a process of the run was still alive after the script exited")
+	pgid := cmd.Process.Pid
+	if groupOutlives(pgid, leftoverDeadline) {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		w.t.Errorf("a process of the run was still alive %s after the script exited", leftoverDeadline)
 	}
 }
 
