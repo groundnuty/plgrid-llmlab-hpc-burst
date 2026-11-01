@@ -78,7 +78,7 @@ func TestAgentConfigEncodeIsStableAndRoundTrips(t *testing.T) {
 // (`@hpc-burst-science-agent`, 1 Nov 2026, review of PR 132: B2).
 func TestAgentConfigSSHUser(t *testing.T) {
 	for user, ok := range map[string]bool{
-		"MichalOrzechowski":     true,
+		"Mixed_Case.Name":       true,
 		"ExampleUser":           true,
 		"example-user":          true,
 		"_svc.user-1":           true,
