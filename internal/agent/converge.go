@@ -380,7 +380,15 @@ func (a *Agent) startStaging(in *instance) {
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
-		imgRes, err := a.o.Stager.Image(ctx, launch.Image, launch.ImageDigest, format)
+		buildCtx := WithImageBuild(ctx, func(tmpDir string) {
+			msg := agentapi.TruncateUTF8(fmt.Sprintf("building image %s@%s in the temporary directory %s", launch.Image, launch.ImageDigest, tmpDir), agentapi.MaxMessageBytes)
+			a.post(func() {
+				if a.inst == in && in.stageGen == gen && in.stageRunning {
+					in.staging.Message = msg
+				}
+			})
+		})
+		imgRes, err := a.o.Stager.Image(buildCtx, launch.Image, launch.ImageDigest, format)
 		var ck CheckpointResult
 		if err == nil {
 			ck, err = a.o.Stager.Checkpoint(ctx, CheckpointRequest{
@@ -419,6 +427,7 @@ func (a *Agent) stagingDone(in *instance, gen int64, img ImageResult, ck Checkpo
 	}
 	in.staging.Phase = agentapi.StagingDone
 	in.staging.Message = ""
+	in.staging.BuildPeakTmpBytes = img.BuildPeakTmpBytes
 	in.staged = true
 	in.imagePath = img.Path
 	in.imageVerified = img.Verified

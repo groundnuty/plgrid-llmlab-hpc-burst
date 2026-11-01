@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/procgroup"
@@ -27,17 +29,26 @@ import (
 // starts, so a RAM-disk TmpDir gives its memory back before the engine loads
 // its weights; Apptainer itself leaves the tree behind when it is killed
 // (science-agent ruling, 1 Nov 2026, issue #125; HBEP-4).
-func (s *Stager) runApptainer(ctx context.Context, args []string) error {
+//
+// While it runs, the use of TmpDir is sampled with UsedSpace every
+// SampleEvery, and once more when the run ends, before the tree is removed:
+// the peak is returned (agentapi.Staging.BuildPeakTmpBytes). statfs counts a
+// whole file system in one call, which on a per-job tmpfs ($MEMFS) is the
+// job's own use, with no walk of a tree that changes as it is read; a spike
+// shorter than the interval can be missed.
+func (s *Stager) runApptainer(ctx context.Context, args []string) (int64, error) {
 	cache, err := os.MkdirTemp(s.c.TmpDir, "hb-apptainer-cache-")
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer removeAll(cache)
 	build, err := os.MkdirTemp(s.c.TmpDir, "hb-apptainer-tmp-")
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer removeAll(build)
+	var sampled sampler
+	stopSampling := sampled.start(s.c.UsedSpace, s.c.TmpDir, s.c.SampleEvery)
 	g, err := procgroup.Start(procgroup.Spec{
 		Path: s.c.Apptainer,
 		Args: args,
@@ -49,7 +60,8 @@ func (s *Stager) runApptainer(ctx context.Context, args []string) error {
 		Stderr: s.c.Log,
 	}, time.Now())
 	if err != nil {
-		return err
+		stopSampling()
+		return 0, err
 	}
 	stop := func() {
 		g.Stop(s.c.StopGrace)
@@ -68,19 +80,77 @@ func (s *Stager) runApptainer(ctx context.Context, args []string) error {
 	case <-ctx.Done():
 		stop()
 	}
+	peak := stopSampling() // the last sample, before the deferred removals
 	if code := g.ExitCode(); code != 0 {
 		if err := ctx.Err(); err != nil {
-			return fmt.Errorf("apptainer %s: %w", args[0], err)
+			return peak, fmt.Errorf("apptainer %s: %w", args[0], err)
 		}
 		if code == procgroup.KilledExitCode {
-			return fmt.Errorf("apptainer %s: ended by a signal", args[0])
+			return peak, fmt.Errorf("apptainer %s: ended by a signal", args[0])
 		}
-		return fmt.Errorf("apptainer %s: exit code %d", args[0], code)
+		return peak, fmt.Errorf("apptainer %s: exit code %d", args[0], code)
 	}
-	return nil
+	return peak, nil
 }
 
 // logf writes one line to the log.
 func (s *Stager) logf(format string, a ...any) {
 	fmt.Fprintf(s.c.Log, "stage: "+format+"\n", a...)
+}
+
+// UsedSpace returns the bytes in use on the file system that holds path.
+type UsedSpace func(path string) (int64, error)
+
+// statfsUsed is UsedSpace from statfs(2): (blocks - free blocks) * block size.
+func statfsUsed(path string) (int64, error) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(path, &st); err != nil {
+		return 0, err
+	}
+	return int64(st.Blocks-st.Bfree) * int64(st.Bsize), nil
+}
+
+// sampler keeps the peak of a series of UsedSpace samples.
+type sampler struct {
+	mu   sync.Mutex
+	peak int64
+}
+
+func (p *sampler) take(used UsedSpace, path string) {
+	n, err := used(path)
+	if err != nil {
+		return // a failed sample counts for nothing
+	}
+	p.mu.Lock()
+	p.peak = max(p.peak, n)
+	p.mu.Unlock()
+}
+
+// start samples now and then every interval until the returned function is
+// called; that function takes a last sample, waits for the sampling to stop
+// and returns the peak.
+func (p *sampler) start(used UsedSpace, path string, every time.Duration) func() int64 {
+	p.take(used, path)
+	done, stopped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(stopped)
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				p.take(used, path)
+			}
+		}
+	}()
+	return func() int64 {
+		close(done)
+		<-stopped
+		p.take(used, path)
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.peak
+	}
 }

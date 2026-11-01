@@ -107,6 +107,10 @@ type CheckpointResult struct {
 type ImageResult struct {
 	// Path is the image's absolute path.
 	Path string
+	// BuildPeakTmpBytes is the peak use of the temporary directory while the
+	// image was built (agentapi.Staging.BuildPeakTmpBytes); 0 when no build
+	// ran.
+	BuildPeakTmpBytes int64
 	// Verified says the image's content was checked at this staging against
 	// its integrity record: a SIF's SHA-256 sidecar, a sandbox's manifest,
 	// both written in the same step as the pinned pull or build. A fresh pull
@@ -127,4 +131,22 @@ type Stager interface {
 	// Checkpoint stages the checkpoint's missing files and rehashes the
 	// present ones.
 	Checkpoint(ctx context.Context, req CheckpointRequest) (CheckpointResult, error)
+}
+
+type imageBuildKey struct{}
+
+// WithImageBuild returns ctx carrying fn, which Stager.Image calls when it
+// starts a build (a pull or a sandbox build, on a cache miss) and before
+// Apptainer runs, with the temporary directory it builds in: the agent then
+// reports the build, so the last report before a build that runs out of the
+// job's memory names it (HBEP-4; science-agent ruling, 1 Nov 2026, issue
+// #125).
+func WithImageBuild(ctx context.Context, fn func(tmpDir string)) context.Context {
+	return context.WithValue(ctx, imageBuildKey{}, fn)
+}
+
+// ImageBuildHook returns the function WithImageBuild put in ctx, or nil.
+func ImageBuildHook(ctx context.Context) func(tmpDir string) {
+	fn, _ := ctx.Value(imageBuildKey{}).(func(string))
+	return fn
 }
