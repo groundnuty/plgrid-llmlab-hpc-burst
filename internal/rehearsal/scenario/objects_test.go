@@ -116,7 +116,11 @@ func servedDeployment(tm timing, engineEnv ...v1alpha1.EnvVar) *v1alpha1.ModelDe
 			Instances:  1,
 			Providers:  v1alpha1.ProviderSelection{Names: []string{providerName}},
 			LeaseLimit: dur(tm.lease),
-			Routing:    &v1alpha1.Routing{MaxRequestDuration: dur(tm.maxRequest)},
+			// Step (g) expects the Allocations to end at scale 0: the default,
+			// Keep, would hold a warm Allocation until its hard end. 10 s is
+			// the scaled idle limit.
+			RetentionPolicy: &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionReleaseWhenIdle, IdleLimit: dur("10s")},
+			Routing:         &v1alpha1.Routing{MaxRequestDuration: dur(tm.maxRequest)},
 			Workload: &v1alpha1.Workload{
 				ContextTokens: v1alpha1.ContextTokens{Typical: 512},
 				// Longest defaults to 4096, which with the typical context

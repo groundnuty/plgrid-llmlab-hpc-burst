@@ -198,7 +198,12 @@ func (r *rig) stepScaleToZero() {
 	if err := r.c.Patch(context.Background(), &md, patch); err != nil {
 		r.t.Fatalf("scale to 0: %v", err)
 	}
+	last := time.Now()
 	waitFor(r.t, waitDeadline, "every Instance to end and every Allocation to go", func() bool {
+		if time.Since(last) > 10*time.Second {
+			r.t.Logf("step (g) waiting:%s", r.describe())
+			last = time.Now()
+		}
 		for _, in := range r.instances() {
 			if in.Status.Phase != v1alpha1.InstanceEnded {
 				return false
