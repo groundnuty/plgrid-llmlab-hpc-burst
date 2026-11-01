@@ -123,7 +123,6 @@ func Setup(mgr manager.Manager, o Options) error {
 		return err
 	}
 	name := c.shared.o.Provider
-	skip := true
 	err = builder.ControllerManagedBy(mgr).
 		Named("allocation-"+name).
 		For(&v1alpha1.Allocation{}, builder.WithPredicates(
@@ -133,16 +132,34 @@ func Setup(mgr manager.Manager, o Options) error {
 				return ok && a.Spec.ProviderConfigReference != nil && a.Spec.ProviderConfigReference.Name == name
 			}),
 		)).
-		WithOptions(controller.Options{
-			MaxConcurrentReconciles: c.shared.o.MaxConcurrentReconciles,
-			// A Provider's manager is started again after a failure, in the
-			// same process, under the same controller name.
-			SkipNameValidation: &skip,
-			RateLimiter:        workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](time.Second, time.Minute),
-		}).
+		WithOptions(controllerOptions(c.shared.o.MaxConcurrentReconciles)).
 		Complete(c.Reconciler)
 	if err != nil {
 		return err
 	}
 	return mgr.Add(c.status)
+}
+
+// controllerOptions are the Allocation controller's options.
+//
+// A Provider's manager is started again after a failure, in the same process,
+// under the same controller name, so the name is not checked for repeats.
+//
+// The queue is client-go's, not controller-runtime's priority queue (its
+// default). The priority queue of controller-runtime v0.23.1 can deadlock on
+// shutdown: after the cancel, handleReadyItems still counts a worker that has
+// left GetWithPriority, sends it an item on an unbuffered channel and blocks
+// there holding the queue's locks; a worker that then finishes its reconcile
+// waits in Done forever, so the Provider's manager does not stop when told
+// (issue #136). Upstream fixed it in
+// https://github.com/kubernetes-sigs/controller-runtime/pull/3540, first
+// released in v0.25.0; no v0.23 release has the fix.
+func controllerOptions(workers int) controller.Options {
+	skip, priorityQueue := true, false
+	return controller.Options{
+		MaxConcurrentReconciles: workers,
+		SkipNameValidation:      &skip,
+		RateLimiter:             workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](time.Second, time.Minute),
+		UsePriorityQueue:        &priorityQueue,
+	}
 }
