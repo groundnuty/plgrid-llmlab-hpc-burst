@@ -171,7 +171,13 @@ func (p *pass) measuredStartToReady() []v1alpha1.ClassStartToReady {
 // of the limit. Neither ends an Instance, so neither counts toward RestartLoop
 // or a class pause (HBEP-7, Health and restarts).
 func (p *pass) submissionRejected() {
-	for _, a := range p.allocs {
+	names := make([]string, 0, len(p.allocs))
+	for n := range p.allocs {
+		names = append(names, n)
+	}
+	sort.Strings(names) // a map ranges in any order; the messages of one reason must not
+	for _, n := range names {
+		a := p.allocs[n]
 		sub := a.Status.AtProvider.Submission
 		if !a.DeletionTimestamp.IsZero() || sub == nil || sub.State != v1alpha1.SubmissionRejected || a.Annotations[v1alpha1.AnnotationJobID] != "" {
 			continue
