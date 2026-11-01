@@ -11,7 +11,7 @@ import (
 // The pass criteria. Each function returns the failed checks as fixed labels
 // (no job ID, host or account can be in one) and nothing when the run passes.
 // Each check quotes the criterion it enforces, with the file and line at main's
-// c7c41a4 (1 Nov 2026); docs/alpha-runbook.md lists the same quotes.
+// 84341d8 (2 Nov 2026); docs/alpha-runbook.md lists the same quotes.
 
 // Hour is S1's stream length: "a completed stream of at least 3600 s".
 const Hour = time.Hour
@@ -33,8 +33,8 @@ func jobsByTag(jobs []provider.Job) map[string]provider.Job {
 // criteria say "no request cut", and both tests warn that a run with nothing in
 // flight proves nothing:
 //
-//	hbep/0007-lifecycle-controller/README.md:592: "A run with no stream in flight at the drain start proves nothing here"
-//	hbep/0007-lifecycle-controller/README.md:620: "one deployment completes one handover end to end through the front with no request cut"
+//	hbep/0007-lifecycle-controller/README.md:597: "A run with no stream in flight at the drain start proves nothing here"
+//	hbep/0007-lifecycle-controller/README.md:635: "one deployment completes one handover end to end through the front with no request cut"
 //	hbep/0006-instance-reachability/README.md:349: "A test that restarts the controller with no stream running proves nothing about cuts."
 func streamChecks(streams []Stream, drainStart time.Time) []string {
 	var f []string
@@ -74,8 +74,8 @@ func ledgerChecks(row Row, tags []string, jobs []provider.Job) ([]string, map[st
 
 // VerifyHandover judges alpha-athena-handover.
 //
-//	hbep/0007-lifecycle-controller/README.md:620: "on Athena `plgrid-gpu-a100`, one deployment completes one handover end to end through the front with no request cut;"
-//	hbep/0007-lifecycle-controller/README.md:622: "on each alpha platform, Helios `plgrid-gpu-gh200` and Athena `plgrid-gpu-a100`, one restart at the worker rung;"
+//	hbep/0007-lifecycle-controller/README.md:635: "on Athena `plgrid-gpu-a100`, one deployment completes one handover end to end through the front with no request cut;"
+//	hbep/0007-lifecycle-controller/README.md:637: "on each alpha platform, Helios `plgrid-gpu-gh200` and Athena `plgrid-gpu-a100`, one restart at the worker rung;"
 //	hbep/0005-llmlab-compatible-front/README.md:450: "on Athena `plgrid-gpu-a100`, through the front, one handover cuts no request (with HBEP-7)."
 func VerifyHandover(row Row, o HandoverObs, jobs []provider.Job) []string {
 	f := streamChecks(o.Streams, o.DrainStart)
@@ -104,9 +104,9 @@ func VerifyHandover(row Row, o HandoverObs, jobs []provider.Job) []string {
 
 // VerifyNoOverlap judges alpha-helios-nooverlap.
 //
-//	hbep/0007-lifecycle-controller/README.md:621: "on Helios `plgrid-gpu-gh200` under QOS `now`, one deployment goes through no-overlap mode end to end through the front with no request cut, and the gap is measured"
-//	hbep/0007-lifecycle-controller/README.md:594: "The replacement is created at its planned time, accepted, and pends on the fake's GPU cap while the predecessor runs; it never starts before the predecessor's job ends ... A fixture without a GPU cap proves nothing here, since its replacement would start beside the predecessor."
-//	hbep/0007-lifecycle-controller/README.md:466: "the gap is the time from the primary's drain start until its successor is `ready`."
+//	hbep/0007-lifecycle-controller/README.md:636: "on Helios `plgrid-gpu-gh200` under QOS `now`, one deployment goes through no-overlap mode end to end through the front with no request cut, and the gap is measured"
+//	hbep/0007-lifecycle-controller/README.md:608: "The replacement is created at its planned time, accepted, and pends on the fake's GPU cap while the predecessor runs; it never starts before the predecessor's job ends ... A fixture without a GPU cap proves nothing here, since its replacement would start beside the predecessor."
+//	hbep/0007-lifecycle-controller/README.md:471: "the gap is the time from the primary's drain start until its successor is `ready`."
 func VerifyNoOverlap(row Row, o NoOverlapObs, jobs []provider.Job) []string {
 	f := streamChecks(o.Streams, o.DrainStart)
 	if len(o.Tags) != 2 {
@@ -150,7 +150,7 @@ func queuedAheadChecks(pre, suc provider.Job) []string {
 
 // SuccessorQueueWait is the successor's queue wait once the GPU freed: its start
 // minus the predecessor's end, which the Helios run records
-// (hbep/0007-lifecycle-controller/README.md:600). ok is false when the cluster
+// (hbep/0007-lifecycle-controller/README.md:614). ok is false when the cluster
 // does not give both times.
 func SuccessorQueueWait(pre, suc provider.Job) (d time.Duration, ok bool) {
 	if pre.EndTime == nil || suc.StartTime == nil {
