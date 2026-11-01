@@ -57,11 +57,19 @@ func (p *Platform) wait(r *jobRun) {
 }
 
 // waitFailed ends an execution whose shell could not be waited for or whose
-// status could not be read. Nothing is known about its processes, so it is not
-// swept, and it is not done: the shell is reaped for the status Go can give,
-// and the error is kept.
+// status could not be read. Nothing is known about its processes, and the
+// shell may not be a zombie, so its PID is no anchor: every scan of the
+// execution is shut out first, then the shell is killed through its pidfd (a
+// shell that is still alive would otherwise be waited for under the lock that
+// Close's KILL needs) and reaped. The execution is not swept and not done, and
+// the error is kept. This path is not tested: waitid on a child does not
+// fail.
 func (p *Platform) waitFailed(r *jobRun, cause error) {
-	p.reap(r)
+	r.procMu.Lock()
+	r.leaderReaped = true
+	r.procMu.Unlock()
+	_ = r.cmd.Process.Kill() // no-op if it has exited
+	_ = r.cmd.Wait()
 	status := syscall.WaitStatus(0)
 	if ps := r.cmd.ProcessState; ps != nil {
 		if ws, ok := ps.Sys().(syscall.WaitStatus); ok {

@@ -7,6 +7,7 @@ package fakeslurm
 import (
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -207,14 +208,16 @@ func TestRunModeFinishedMeansNoProcessLeft(t *testing.T) {
 	// A job with a process is terminal at the scancel but not Finished until
 	// the process is gone: the terminator is held before it sends TERM.
 	entered, release := make(chan struct{}), make(chan struct{})
-	r.p.knobs.terminateEnter = func(*jobRun) { close(entered); <-release }
-	defer func() {
-		select {
-		case <-release:
-		default:
-			close(release)
+	var first atomic.Bool
+	var releaseOnce sync.Once
+	letGo := func() { releaseOnce.Do(func() { close(release) }) }
+	defer letGo() // a failed test must not leave a terminator blocked for Close
+	r.p.knobs.terminateEnter = func(*jobRun) {
+		if first.CompareAndSwap(false, true) {
+			close(entered)
+			<-release
 		}
-	}()
+	}
 	goFile := r.home + "/go"
 	running := r.submit(waitLoop(goFile))
 	r.must("scancel " + itoa(running))
@@ -231,7 +234,7 @@ func TestRunModeFinishedMeansNoProcessLeft(t *testing.T) {
 	if j.State != Cancelled || j.Finished || err != nil || len(pids) == 0 {
 		t.Errorf("a running job cancelled: state %s, finished %v, processes %v (%v); want CANCELLED, not finished, a process", j.State, j.Finished, pids, err)
 	}
-	close(release)
+	letGo()
 	if err := os.WriteFile(goFile, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}

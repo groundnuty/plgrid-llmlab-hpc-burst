@@ -130,8 +130,17 @@ func TestRunModeNoScanAfterTheShellIsReaped(t *testing.T) {
 	var scans atomic.Int64
 	r.p.knobs.proc.scanned = func(int) { scans.Add(1) }
 	entered, release, ended := make(chan struct{}), make(chan struct{}), make(chan struct{})
-	r.p.knobs.terminateEnter = func(*jobRun) { close(entered); <-release }
-	r.p.knobs.terminateDone = func(*jobRun) { close(ended) }
+	var first atomic.Bool
+	var releaseOnce, endOnce sync.Once
+	letGo := func() { releaseOnce.Do(func() { close(release) }) }
+	defer letGo() // a failed test must not leave a terminator blocked for Close
+	r.p.knobs.terminateEnter = func(*jobRun) {
+		if first.CompareAndSwap(false, true) {
+			close(entered)
+			<-release
+		}
+	}
+	r.p.knobs.terminateDone = func(*jobRun) { endOnce.Do(func() { close(ended) }) }
 	goFile := r.home + "/go"
 	id := r.submit(waitLoop(goFile))
 	r.must("scancel " + itoa(id))
@@ -151,7 +160,7 @@ func TestRunModeNoScanAfterTheShellIsReaped(t *testing.T) {
 	if before == 0 {
 		t.Fatalf("the sweep made no scan; the test has nothing to compare")
 	}
-	close(release)
+	letGo()
 	waitFor(t, "the late terminator to end", func() bool {
 		select {
 		case <-ended:
