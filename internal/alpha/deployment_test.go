@@ -83,6 +83,7 @@ func TestDeploymentBoundaries(t *testing.T) {
 		{"a lease a minute below the lead", "alpha-athena-handover", func(d *DeploymentSpec) { d.LeaseLimit = Lead() - time.Minute }, "not longer than the lead"},
 		{"the shortest lease", "alpha-athena-handover", func(d *DeploymentSpec) { d.LeaseLimit = Lead() + time.Minute }, ""},
 		{"a lease a minute over the shortest", "alpha-athena-handover", func(d *DeploymentSpec) { d.LeaseLimit = MinLease() + time.Minute }, "not the row's shortest lease"},
+		{"a shorter request deadline than the row's", "tunnel-hour-athena", func(d *DeploymentSpec) { d.MaxRequestDuration = 4 * time.Minute }, "maxRequestDuration is not the row's"},
 		{"the default drain window's request deadline", "tunnel-hour-athena", func(d *DeploymentSpec) { d.MaxRequestDuration = 2 * time.Hour }, "maxRequestDuration is not the row's"},
 		{"no ReleaseWhenIdle", "alpha-helios-nooverlap", func(d *DeploymentSpec) { d.ReleaseWhenIdle = false }, "lacks ReleaseWhenIdle"},
 		{"an idle limit of 0", "alpha-helios-nooverlap", func(d *DeploymentSpec) { d.IdleLimit = 0 }, "lacks ReleaseWhenIdle"},
