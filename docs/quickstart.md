@@ -43,7 +43,7 @@ hack/fetch-frp.sh --agent-builds "$STATE/agent-builds"
 hack/build-agents.sh "$STATE/agent-builds"
 ```
 
-`hack/build-agents.sh` builds `hb-agent-x86_64` and `hb-agent-aarch64`, or only the architectures you name after the directory. Helios `plgrid-gpu-gh200` needs `aarch64`; Athena `plgrid-gpu-a100` needs `x86_64`. The build's sha256 is the digest the controller puts in each Allocation. The script pins the Go toolchain, the flags and the environment, so the same source gives the same digest on any machine; it prints each digest with the Go version beside it.
+`hack/build-agents.sh` builds `hb-agent-x86_64` and `hb-agent-aarch64`. Helios `plgrid-gpu-gh200` needs `aarch64`; Athena `plgrid-gpu-a100` needs `x86_64`. Build both: `hpcburst status` checks the builds of every architecture that a partition of an applied profile has, and the Helios profile also lists an `x86_64` CPU partition. The build's sha256 is the digest the controller puts in each Allocation. The script pins the Go toolchain, the flags and the environment, so the same source gives the same digest on any machine; it prints each digest with the Go version beside it.
 
 ## 3. Write your credentials files
 
@@ -107,7 +107,7 @@ bin/hpcburst status --state-dir "$STATE"
 
 - `--manifests config/crd` installs the framework's CRDs once the host is ready ([HBEP-11](../hbep/0011-kubernetes-control-plane/README.md), the launcher).
 - `--front-mode`, `--front-addr` and, in `ssh` mode, `--front-key` (the path of the restricted dial-home key, recorded and never read) say how jobs reach the front. With none of them, `up` warns, the controllers submit no job, and every ModelDeployment shows `FrontNotConfigured`. `--front-mode direct --front-addr <host>:<port>` is the other mode, and also needs `dialHomeListen` in `front.json`. [Alpha's limits](#alphas-limits) says what each mode asks of you.
-- `up` prints the kubeconfig path, `kubeconfig` in the state directory. `status` and `down` take the same `--state-dir`; without it they use the launcher's default, which is not `"$STATE"` if you chose another directory. `status` exits 0 when the host is healthy, 1 when it is not, and 3 when it is stopped.
+- `up` prints the kubeconfig path, `kubeconfig` in the state directory. `status` and `down` take the same `--state-dir`; without it they use the launcher's default, which is not `"$STATE"` if you chose another directory. `status` exits 0 when the host is healthy, 1 when it is not, and 3 when it is stopped. `up` exits 4 when the host is up but an agent build that a profile needs is missing or wrong; the host keeps running, and the message names the command that fixes the build.
 
 Use that kubeconfig with the `kubectl` of the k3s you fetched, or with your own. The alias reads `STATE` and `BIN` when you run it:
 
@@ -127,7 +127,10 @@ hbk apply -f ~/.config/hpcburst/provider-helios-gh200.yaml
 hbk apply -f examples/modeldeployment-qwen25-instruct.yaml
 hbk get providers
 hbk get modeldeployments
+bin/hpcburst status --state-dir "$STATE"
 ```
+
+The profiles are what tell `status` which agent builds the host needs: once they are applied, it lists `hb-agent-<cpuArch>` and `frpc-<cpuArch>` for each architecture and marks a missing or mismatched one, which makes the host unhealthy until you fix it with the commands of step 2.
 
 | Example | What it is |
 |---|---|
