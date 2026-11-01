@@ -112,6 +112,14 @@ func (m *muxDouble) set(uid types.UID, status int) {
 	m.health[uid] = status
 }
 
+// drop takes the UID's proxy away: the double answers 404 for it, as frps does for a UID with no
+// proxy online.
+func (m *muxDouble) drop(uid types.UID) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.health, uid)
+}
+
 func (m *muxDouble) hit(uid types.UID) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -227,6 +235,61 @@ func TestProbeReportsPathProbeFailingOnlyForAReadyInstanceWithItsTunnelUp(t *tes
 	defer cmu.Unlock()
 	if changes != 2*len(insts) {
 		t.Errorf("subscribers heard %d changes, want %d: one registration and one loss each", changes, 2*len(insts))
+	}
+}
+
+// TestProbeRoutesOnTheProbeNotTheTunnelCondition: a ready Instance is eligible when its probe
+// passes and not when it fails, whatever its TunnelConnected condition says (HBEP-6, The front's
+// half: the front routes on its own probe, and the controller restarts nothing on the path). The
+// condition here is False for the whole test, as it is for a restarted Instance that returned to
+// ready with its tunnel down (`@hpc-burst-science-agent`, 1 Nov 2026, 17:29Z):
+//   - no proxy online (frps answers 404): not eligible, the same as a ready Instance whose
+//     tunnel dropped, and no PathProbeFailing, which is for an Instance whose tunnel is up;
+//   - the proxy back (frpc reconnected), one passing probe: eligible, with the condition still
+//     False, since the writer's next read has not come, and a passing probe is the front's
+//     evidence;
+//   - the proxy gone again: eligible after one failed probe, not after the second (HBEP-6's two),
+//     and eligible again after one passing probe.
+func TestProbeRoutesOnTheProbeNotTheTunnelCondition(t *testing.T) {
+	m := startMuxDouble(t)
+	var mu sync.Mutex
+	in := probeInstance("00000000-0000-4000-8000-000000000021", v1alpha1.InstanceReady, metav1.ConditionFalse)
+	insts := []v1alpha1.Instance{in}
+	p, tun, ev := newTestProber(t, m, clock.Real{}, &insts, &mu)
+	ctx := context.Background()
+	want := func(step string, eligible bool) {
+		t.Helper()
+		if got := tun.Registered(in.UID); got != eligible {
+			t.Fatalf("%s: eligible %t, want %t", step, got, eligible)
+		}
+	}
+
+	p.Round(ctx) // no proxy: the double answers 404
+	want("ready, no proxy online", false)
+	p.Round(ctx)
+	want("ready, still no proxy online", false)
+
+	m.set(in.UID, http.StatusOK) // frpc is back
+	p.Round(ctx)
+	want("the proxy back, one passing probe", true)
+
+	m.drop(in.UID)
+	p.Round(ctx)
+	want("the proxy gone again, one failed probe", true)
+	p.Round(ctx)
+	want("the proxy gone again, two failed probes", false)
+
+	m.set(in.UID, http.StatusOK)
+	p.Round(ctx)
+	want("the proxy back again, one passing probe", true)
+
+	if f := ev.failings(); len(f) != 0 {
+		t.Errorf("PathProbeFailing reports %+v for an Instance whose TunnelConnected is False, want none", f)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if c := insts[0].Status.Conditions; len(c) != 1 || c[0].Status != metav1.ConditionFalse {
+		t.Errorf("conditions %+v: the test holds TunnelConnected False throughout", c)
 	}
 }
 
