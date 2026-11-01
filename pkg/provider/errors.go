@@ -18,11 +18,10 @@ var (
 	ErrNotFound = errors.New("job not found")
 	// ErrInvalidRequest: a submission or file refused before any call: an
 	// unsafe value, a partition the Provider does not allow or the profile
-	// does not list, no GPU on a GPU partition, more GPUs than the smaller of
-	// gpusPerNode and the QOS limits' maxGpusPerUser, more CPUs or memory than
-	// their maxCpusPerUser or maxMemPerUser, a time limit above the smaller of
-	// maxTime and their maxWall or not in whole minutes, a path outside the
-	// staging directory (Batch.Submit).
+	// does not list, no GPU on a GPU partition, more GPUs than gpusPerNode, a
+	// time limit above maxTime or not in whole minutes, a path outside the
+	// staging directory; and, from #151's provider change, the QOS bounds
+	// (Batch.Submit).
 	ErrInvalidRequest = errors.New("request refused before any call")
 	// ErrDialectMismatch: a reply's data_parser, without its "data_parser/"
 	// prefix, differs from the profile's jsonDataParser. The reply is not
@@ -73,25 +72,43 @@ func (e *InvalidProfileError) Error() string {
 }
 
 // Slurm's reason names for a full submit limit (HBEP-4, QOS limits): a QOS's
-// MaxSubmitJobsPerUser, an association's MaxSubmitJobs and an account's. A
-// policy refusal with one of them is SubmitLimitReached; any other reason is an
+// MaxSubmitJobsPerUser, an association's MaxSubmitJobs and an account's, and
+// the group limits GrpSubmitJobs of a QOS and of an association. A policy
+// refusal with one of them is SubmitLimitReached; any other reason is an
 // ordinary Rejected attempt (`@hpc-burst-science-agent`, 1 Nov 2026, from PR
-// #151's review).
+// #151's review; the two group names from PR #155's review). Each is a job
+// reason string in Slurm 24.11.5 (src/common/job_state_reason.c lines 210,
+// 246, 278, 306 and 720) and 23.11.7 (src/common/slurm_protocol_defs.c).
 const (
 	ReasonQOSMaxSubmitJobPerUserLimit = "QOSMaxSubmitJobPerUserLimit"
 	ReasonAssocMaxSubmitJobLimit      = "AssocMaxSubmitJobLimit"
 	ReasonMaxSubmitJobsPerAccount     = "MaxSubmitJobsPerAccount"
+	ReasonQOSGrpSubmitJobsLimit       = "QOSGrpSubmitJobsLimit"
+	ReasonAssocGrpSubmitJobsLimit     = "AssocGrpSubmitJobsLimit"
 )
 
+// GroupLimitNote is what a refusal for a group submit limit adds to its
+// message: the slot it waits for may be held by any of the grant's users, not
+// only by this login (`@hpc-burst-science-agent`, 1 Nov 2026).
+const GroupLimitNote = "group limit, shared by the grant's users"
+
 // IsSubmitLimitReason reports whether a Slurm reason name is a full submit
-// limit: exactly one of the three names above. Any other name, a stand-alone
+// limit: exactly one of the five names above. Any other name, a stand-alone
 // breach such as QOSMaxWallDurationPerJobLimit included, is not.
 func IsSubmitLimitReason(name string) bool {
 	switch name {
-	case ReasonQOSMaxSubmitJobPerUserLimit, ReasonAssocMaxSubmitJobLimit, ReasonMaxSubmitJobsPerAccount:
+	case ReasonQOSMaxSubmitJobPerUserLimit, ReasonAssocMaxSubmitJobLimit, ReasonMaxSubmitJobsPerAccount,
+		ReasonQOSGrpSubmitJobsLimit, ReasonAssocGrpSubmitJobsLimit:
 		return true
 	}
 	return false
+}
+
+// IsGroupSubmitLimitReason reports whether a Slurm reason name is a group
+// submit limit, QOSGrpSubmitJobsLimit or AssocGrpSubmitJobsLimit: a full
+// slot, whose message carries GroupLimitNote.
+func IsGroupSubmitLimitReason(name string) bool {
+	return name == ReasonQOSGrpSubmitJobsLimit || name == ReasonAssocGrpSubmitJobsLimit
 }
 
 // PolicyLine is the line sbatch prints last for every accounting-policy
@@ -112,15 +129,22 @@ type PolicyRefusal struct {
 	Reason string
 	// Line is Slurm's reason line as printed, for example "sbatch: error:
 	// QOSMaxSubmitJobPerUserLimit", with paths redacted. It is for people:
-	// the Allocation's message carries it, and Error returns it.
+	// the Allocation's message carries it, through Error.
 	Line string
 }
 
+// Error returns the reason line, and for a group submit limit the line
+// followed by GroupLimitNote in parentheses, so the Allocation's message
+// says whose jobs fill the slot.
 func (e *PolicyRefusal) Error() string {
-	if e.Line == "" {
-		return "sbatch: error: " + e.Reason
+	line := e.Line
+	if line == "" {
+		line = "sbatch: error: " + e.Reason
 	}
-	return e.Line
+	if IsGroupSubmitLimitReason(e.Reason) {
+		return line + " (" + GroupLimitNote + ")"
+	}
+	return line
 }
 
 // SubmitLimit reports whether the refusal is for a full submit limit

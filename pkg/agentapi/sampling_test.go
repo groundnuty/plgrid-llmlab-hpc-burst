@@ -1,7 +1,9 @@
 package agentapi
 
 import (
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -88,11 +90,6 @@ func TestCheckSamplingTakesEachKeyAndNeutralForTheRest(t *testing.T) {
 			RepetitionPenalty: 1, PresencePenalty: 0, FrequencyPenalty: 0, Seeds: seeds}},
 		{"only min_p", map[string]string{"min_p": "0.1"}, Sampling{Temperature: 1, TopP: 1, TopK: i64(0), MinP: f64(0.1),
 			RepetitionPenalty: 1, PresencePenalty: 0, FrequencyPenalty: 0, Seeds: seeds}},
-		// A value that does not parse counts as not given; a top_k that is not
-		// an integer too. With nothing else, that is no keys: greedy.
-		{"an unparsable value only", map[string]string{"temperature": "warm", "top_k": "2.5"}, greedy},
-		{"an unparsable value beside a good one", map[string]string{"temperature": "warm", "top_p": "0.9"}, Sampling{Temperature: 1, TopP: 0.9,
-			TopK: i64(0), MinP: f64(0), RepetitionPenalty: 1, PresencePenalty: 0, FrequencyPenalty: 0, Seeds: seeds}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := CheckSampling(tc.genConfig, nil, true)
@@ -121,5 +118,80 @@ func TestCheckSeedsAreFixedAndDistinct(t *testing.T) {
 	*a.TopK = 99
 	if b.Seeds["chat"] != 1102 || *b.TopK != 20 {
 		t.Errorf("two results share memory: %+v", b)
+	}
+}
+
+// The ranges are vLLM v0.32.0's (vllm/sampling_params.py lines 631-687),
+// written out by hand: each bound is tested at the bound and just past it. A
+// value that is not a number, or a top_k that is not an integer, fails too; it
+// is never read as absent (`@hpc-burst-science-agent`, 1 Nov 2026, from the
+// reviews of PRs #155 and #156: refuse, no fallback, no clamping, for every
+// model).
+func TestCheckGenerationConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		values  map[string]string
+		wantKey string // "" accepts
+		want    string // the whole message, when set
+	}{
+		{"Qwen3-0.6B's file", qwen3, "", ""},
+		{"no file", nil, "", ""},
+		{"keys that are not among the seven", map[string]string{"max_new_tokens": "0", "do_sample": "true"}, "", ""},
+		{"a null, which vLLM skips", map[string]string{"temperature": "null"}, "", ""},
+		{"presence_penalty -2", map[string]string{"presence_penalty": "-2"}, "", ""},
+		{"presence_penalty below -2", map[string]string{"presence_penalty": "-2.0001"}, "presence_penalty", ""},
+		{"presence_penalty 2", map[string]string{"presence_penalty": "2"}, "", ""},
+		{"presence_penalty above 2", map[string]string{"presence_penalty": "2.0001"}, "presence_penalty",
+			"generation_config.json's presence_penalty is 2.0001, outside the range vLLM accepts, [-2, 2]"},
+		{"frequency_penalty -2", map[string]string{"frequency_penalty": "-2"}, "", ""},
+		{"frequency_penalty below -2", map[string]string{"frequency_penalty": "-2.0001"}, "frequency_penalty", ""},
+		{"frequency_penalty 2", map[string]string{"frequency_penalty": "2"}, "", ""},
+		{"frequency_penalty above 2", map[string]string{"frequency_penalty": "2.0001"}, "frequency_penalty", ""},
+		{"repetition_penalty just above 0", map[string]string{"repetition_penalty": "0.0001"}, "", ""},
+		{"repetition_penalty 0", map[string]string{"repetition_penalty": "0"}, "repetition_penalty", ""},
+		{"repetition_penalty overflows to infinity", map[string]string{"repetition_penalty": "1e400"}, "repetition_penalty",
+			"generation_config.json's repetition_penalty is 1e400, outside the range vLLM accepts, a finite number greater than 0"},
+		{"temperature 0", map[string]string{"temperature": "0"}, "", ""},
+		{"temperature below 0", map[string]string{"temperature": "-0.0001"}, "temperature", ""},
+		{"temperature 2", map[string]string{"temperature": "2"}, "", ""},
+		{"temperature above 2", map[string]string{"temperature": "2.5"}, "temperature",
+			"generation_config.json's temperature is 2.5, outside the range vLLM accepts, [0, 2]"},
+		{"top_p 1", map[string]string{"top_p": "1"}, "", ""},
+		{"top_p above 1", map[string]string{"top_p": "1.0001"}, "top_p", ""},
+		{"top_p just above 0", map[string]string{"top_p": "0.0001"}, "", ""},
+		{"top_p 0", map[string]string{"top_p": "0"}, "top_p", ""},
+		{"top_k -1", map[string]string{"top_k": "-1"}, "", ""},
+		{"top_k 0", map[string]string{"top_k": "0"}, "", ""},
+		{"top_k -2", map[string]string{"top_k": "-2"}, "top_k", ""},
+		{"min_p 0", map[string]string{"min_p": "0"}, "", ""},
+		{"min_p 1", map[string]string{"min_p": "1"}, "", ""},
+		{"min_p below 0", map[string]string{"min_p": "-0.0001"}, "min_p", ""},
+		{"min_p above 1", map[string]string{"min_p": "1.0001"}, "min_p", ""},
+		// Not a number, or not an integer: refused, never read as absent.
+		{"a temperature that is a string", map[string]string{"temperature": `"warm"`}, "temperature",
+			`generation_config.json's temperature is "warm", not a number`},
+		{"a top_k with a fraction", map[string]string{"top_k": "2.5"}, "top_k",
+			"generation_config.json's top_k is 2.5, not an integer"},
+		{"a top_k written as a float", map[string]string{"top_k": "20.0"}, "top_k", ""},
+		{"a top_p that is a boolean", map[string]string{"top_p": "true"}, "top_p", ""},
+		{"Go's float syntax that JSON lacks", map[string]string{"temperature": "NaN"}, "temperature", ""},
+		{"the reviewers' case", map[string]string{"temperature": "warm", "top_k": "2.5"}, "temperature", ""},
+		// vLLM's order: the first bad key in it is named.
+		{"two bad values: presence_penalty first", map[string]string{"top_p": "0", "presence_penalty": "3"}, "presence_penalty", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := CheckGenerationConfig(tc.values)
+			var ge *GenerationConfigError
+			switch {
+			case tc.wantKey == "" && err != nil:
+				t.Errorf("CheckGenerationConfig = %v, want nil", err)
+			case tc.wantKey != "" && !errors.As(err, &ge):
+				t.Errorf("CheckGenerationConfig = %v, want a GenerationConfigError for %s", err, tc.wantKey)
+			case tc.wantKey != "" && (ge.Key != tc.wantKey || !strings.Contains(err.Error(), tc.wantKey)):
+				t.Errorf("CheckGenerationConfig = %v (key %q), want key %q named in the message", err, ge.Key, tc.wantKey)
+			case tc.want != "" && err.Error() != tc.want:
+				t.Errorf("CheckGenerationConfig = %q, want %q", err.Error(), tc.want)
+			}
+		})
 	}
 }

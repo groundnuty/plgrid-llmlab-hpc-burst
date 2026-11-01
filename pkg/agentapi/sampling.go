@@ -1,6 +1,11 @@
 package agentapi
 
-import "strconv"
+import (
+	"errors"
+	"fmt"
+	"math"
+	"strconv"
+)
 
 // The sampling parameters of the checks (HBEP-7, The allocation agent, Checks,
 // "Sampling parameters of the checks"; science-agent rulings, 1 Nov 2026). The
@@ -116,10 +121,11 @@ func CheckSeeds() map[string]int64 {
 //     305-318), with every check's fixed seed (CheckSeeds).
 //
 // genConfig is VerifyResult.GenerationConfig: each value a JSON number's text,
-// an integer for top_k. A value that does not parse as that counts as not
-// given. doSample is VerifyResult.DoSample, nil when the file does not set it,
-// which does not force greedy decoding. The result shares no memory with its
-// inputs.
+// an integer for top_k. Callers check the file with CheckGenerationConfig
+// first, since a refused file fails verification; here, defensively, a value
+// that does not parse counts as not given. doSample is VerifyResult.DoSample,
+// nil when the file does not set it, which does not force greedy decoding.
+// The result shares no memory with its inputs.
 func CheckSampling(genConfig map[string]string, doSample *bool, reasoning bool) Sampling {
 	if !reasoning || (doSample != nil && !*doSample) {
 		return greedySampling()
@@ -156,4 +162,113 @@ func CheckSampling(genConfig map[string]string, doSample *bool, reasoning bool) 
 	}
 	s.TopK, s.MinP, s.Seeds = &topK, &minP, CheckSeeds()
 	return s
+}
+
+// GenerationConfigError is a sampling value of a staged generation_config.json
+// that vLLM v0.32.0 refuses (vllm/sampling_params.py, SamplingParams.
+// _verify_args, lines 631-687): a value that is not a number, a top_k that is
+// not an integer, or a number outside its range. vLLM applies the file's
+// values as the server's defaults, so it refuses them for every model, greedy
+// or sampled, and every request the defaults reach would fail. Verification
+// fails instead, with VerificationFailed, naming the key and the value, before
+// any check request; there is no fallback and no clamping
+// (`@hpc-burst-science-agent`, 1 Nov 2026, from the reviews of PRs #155 and
+// #156).
+type GenerationConfigError struct {
+	// Key is the file's key, which is vLLM's request field, for example
+	// "top_p".
+	Key string
+	// Value is the value's JSON text as the file holds it, for example "1.5"
+	// or "\"warm\"".
+	Value string
+	// Want says what vLLM accepts: "a number", "an integer", or the range as
+	// vLLM's own message writes it, for example "(0, 1]".
+	Want string
+}
+
+func (e *GenerationConfigError) Error() string {
+	if e.Want == "a number" || e.Want == "an integer" {
+		return fmt.Sprintf("generation_config.json's %s is %s, not %s", e.Key, e.Value, e.Want)
+	}
+	return fmt.Sprintf("generation_config.json's %s is %s, outside the range vLLM accepts, %s", e.Key, e.Value, e.Want)
+}
+
+// vLLM v0.32.0's ranges for the seven keys, in the order its _verify_args
+// tests them.
+var generationConfigRanges = []struct {
+	key     string
+	integer bool
+	ok      func(float64) bool // false for NaN
+	want    string
+}{
+	{genPresencePenalty, false, func(v float64) bool { return v >= -2 && v <= 2 }, "[-2, 2]"},
+	{genFrequencyPenalty, false, func(v float64) bool { return v >= -2 && v <= 2 }, "[-2, 2]"},
+	{genRepetitionPenalty, false, func(v float64) bool { return !math.IsInf(v, 0) && v > 0 }, "a finite number greater than 0"},
+	{genTemperature, false, func(v float64) bool { return v >= 0 && v <= 2 }, "[0, 2]"},
+	{genTopP, false, func(v float64) bool { return v > 0 && v <= 1 }, "(0, 1]"},
+	{genTopK, true, func(v float64) bool { return v >= -1 }, "0 (disable), -1 (disable) or at least 1"},
+	{genMinP, false, func(v float64) bool { return v >= 0 && v <= 1 }, "[0, 1]"},
+}
+
+// CheckGenerationConfig returns a *GenerationConfigError for the first of the
+// seven sampling keys whose value vLLM v0.32.0 refuses, in vLLM's own order,
+// and nil when every one the file gives is acceptable:
+//
+//   - each value is a JSON number, and top_k an integer (no fraction, no
+//     exponent);
+//   - presence_penalty and frequency_penalty in [-2, 2];
+//   - repetition_penalty finite and above 0;
+//   - temperature in [0, 2];
+//   - top_p in (0, 1];
+//   - top_k at least -1 (0 and -1 disable it);
+//   - min_p in [0, 1].
+//
+// values maps each key to its JSON text: the agent passes the file's own text
+// of each of the seven keys it finds, and the controller passes
+// VerifyResult.GenerationConfig, which carries only numbers. A JSON null is
+// skipped, as vLLM skips it; other keys are not checked. It applies to every
+// model, with or without a reasoning parser, because vLLM applies the file's
+// values as the server's defaults. Callers run it before CheckSampling, whose
+// result for a refused file is not used.
+func CheckGenerationConfig(values map[string]string) error {
+	for _, r := range generationConfigRanges {
+		text, ok := values[r.key]
+		if !ok || text == "null" {
+			continue
+		}
+		var v float64
+		if r.integer {
+			n, err := strconv.ParseInt(text, 10, 64)
+			if err != nil {
+				return &GenerationConfigError{Key: r.key, Value: text, Want: "an integer"}
+			}
+			v = float64(n)
+		} else {
+			// A JSON number too large for a float64 reads as infinity, as
+			// it does in Python, and then fails its range.
+			f, err := strconv.ParseFloat(text, 64)
+			if (err != nil && !errors.Is(err, strconv.ErrRange)) || !jsonNumber(text) {
+				return &GenerationConfigError{Key: r.key, Value: text, Want: "a number"}
+			}
+			v = f
+		}
+		if !r.ok(v) {
+			return &GenerationConfigError{Key: r.key, Value: text, Want: r.want}
+		}
+	}
+	return nil
+}
+
+// jsonNumber reports whether text has the form of a JSON number, so that Go's
+// wider float syntax ("Inf", "NaN", "0x1p-2", "1_0") is not read as one.
+func jsonNumber(text string) bool {
+	if text == "" {
+		return false
+	}
+	for _, c := range text {
+		if !(c >= '0' && c <= '9' || c == '-' || c == '+' || c == '.' || c == 'e' || c == 'E') {
+			return false
+		}
+	}
+	return text[0] == '-' || (text[0] >= '0' && text[0] <= '9')
 }

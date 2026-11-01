@@ -152,7 +152,8 @@ type QOSProfile struct {
 	// at once under the QOS (MaxSubmitJobsPerUser). A held job is a pending
 	// job, and every job of the login counts, the owner's other projects'
 	// included. The lifecycle controller plans within it (HBEP-7,
-	// Provisioning, Per-user limits).
+	// Provisioning, Per-user limits). 0 is valid: an effective 0 means no
+	// Allocation can be hosted there (`@hpc-burst-science-agent`, 1 Nov 2026).
 	//
 	// +optional
 	// +kubebuilder:validation:Minimum=0
@@ -160,25 +161,28 @@ type QOSProfile struct {
 
 	// MaxGPUsPerUser is the GPU entry of the QOS's MaxTRESPerUser: the most
 	// GPUs over one user's running jobs. A job that fits alone but not beside
-	// the user's others pends.
+	// the user's others pends. 0 is valid, like maxSubmitPerUser's: no GPU
+	// Allocation can be hosted.
 	//
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	MaxGPUsPerUser *int32 `json:"maxGpusPerUser,omitempty"`
 
 	// MaxCPUsPerUser is the CPU entry of the QOS's MaxTRESPerUser. An
-	// Allocation's CPUs, gpus times cpusPerGpu, are capped at it.
+	// Allocation's CPUs, gpus times cpusPerGpu, are capped at it. Positive
+	// when set: a cap of 0 would shrink every request to nothing
+	// (`@hpc-burst-science-agent`, 1 Nov 2026, from PR #155's review).
 	//
 	// +optional
-	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:XValidation:rule="self > 0",message="maxCpusPerUser must be positive"
 	MaxCPUsPerUser *int32 `json:"maxCpusPerUser,omitempty"`
 
 	// MaxMemPerUser is the memory entry of the QOS's MaxTRESPerUser. An
-	// Allocation's memory, gpus times memPerGpu, is capped at it. It is never
-	// negative.
+	// Allocation's memory, gpus times memPerGpu, is capped at it. Positive
+	// when set, like maxCpusPerUser.
 	//
 	// +optional
-	// +kubebuilder:validation:XValidation:rule="!string(self).startsWith('-')",message="maxMemPerUser must not be negative"
+	// +kubebuilder:validation:XValidation:rule="quantity(string(self)).isGreaterThan(quantity('0'))",message="maxMemPerUser must be positive"
 	MaxMemPerUser *resource.Quantity `json:"maxMemPerUser,omitempty"`
 
 	// OverPartQOS is whether the QOS carries Slurm's OverPartQOS flag, which

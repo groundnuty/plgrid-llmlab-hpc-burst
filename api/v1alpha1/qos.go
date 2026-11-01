@@ -48,8 +48,11 @@ func FindQOS(spec *PlatformProfileSpec, name string) (QOSProfile, bool) {
 }
 
 // EffectiveQOSLimits returns the QOS limits Slurm applies to a job on the
-// partition under jobQOS: the Provider's qos, or "" when it sets none, so the
-// association's default applies, which the profile cannot know. For each limit
+// partition under jobQOS: the Provider's qos, or "" when it sets none. With
+// none, the job runs under the association's default QOS, which the profile
+// cannot know, so only the partition QOS's typed limits apply; the default's
+// limits are not planned for (`@hpc-burst-science-agent`, 1 Nov 2026, from PR
+// #155's review). For each limit
 // it takes the partition QOS's value if that sets one, else the job QOS's;
 // when the job QOS has overPartQos, the order is reversed. That is Slurm's
 // order: the partition QOS comes before the job's QOS, reversible only by the
@@ -151,18 +154,21 @@ func AllocationTimeLimit(maxTime, maxWall, leaseLimit *time.Duration) (limit tim
 
 // MaxAllocationGPUs returns the most GPUs one Allocation may request on the
 // partition under the QOS limits that apply: the smaller of the partition's
-// gpusPerNode, the node's hardware, and the limits' maxGpusPerUser when set. A
-// larger count is refused, never capped, because it is the engine's
-// tensor-parallel size times its pipeline-parallel size (HBEP-4, Submission,
-// GPU sizing; HBEP-7, Provisioning). ok is false when the partition does not
-// give gpusPerNode.
+// gpusPerNode, the node's hardware, and the limits' maxGpusPerUser, each when
+// set; the one that is set when only one is. A larger count is refused, never
+// capped, because it is the engine's tensor-parallel size times its
+// pipeline-parallel size (HBEP-4, Submission, GPU sizing; HBEP-7,
+// Provisioning). The QOS cap bounds the request even when the profile does not
+// give gpusPerNode (review of PR #155, N4). ok is false only when neither is
+// set: no bound is known.
 func MaxAllocationGPUs(partition PartitionProfile, limits QOSLimits) (int32, bool) {
-	if partition.GPUsPerNode == nil {
+	switch {
+	case partition.GPUsPerNode == nil && limits.MaxGPUsPerUser == nil:
 		return 0, false
+	case partition.GPUsPerNode == nil:
+		return *limits.MaxGPUsPerUser, true
+	case limits.MaxGPUsPerUser == nil:
+		return *partition.GPUsPerNode, true
 	}
-	n := *partition.GPUsPerNode
-	if limits.MaxGPUsPerUser != nil && *limits.MaxGPUsPerUser < n {
-		n = *limits.MaxGPUsPerUser
-	}
-	return n, true
+	return min(*partition.GPUsPerNode, *limits.MaxGPUsPerUser), true
 }

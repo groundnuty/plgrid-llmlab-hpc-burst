@@ -75,7 +75,13 @@ func TestEffectiveQOSLimitsPrecedence(t *testing.T) {
 	partOver.Name, partOver.OverPartQOS = "part-over", true
 	wallPart := QOSProfile{Name: "short-part", MaxWall: dur("1h")}
 	plain := QOSProfile{Name: "plain"}
-	spec := qosSpec(partQOS, jobQOS, jobOver, partOver, wallPart, plain)
+	capsPart := QOSProfile{Name: "caps-part", MaxGPUsPerUser: ptr.To(int32(4)), MaxMemPerUser: qty("200Gi")}
+	capsJob := QOSProfile{Name: "caps-job", MaxWall: dur("6h"), MaxSubmitPerUser: ptr.To(int32(5)), MaxGPUsPerUser: ptr.To(int32(2)),
+		MaxCPUsPerUser: ptr.To(int32(32)), MaxMemPerUser: qty("100Gi")}
+	capsJobOver := capsJob
+	capsJobOver.Name, capsJobOver.OverPartQOS = "caps-job-over", true
+	gpuOnlyOver := QOSProfile{Name: "gpu-only-over", MaxGPUsPerUser: ptr.To(int32(1)), OverPartQOS: true}
+	spec := qosSpec(partQOS, jobQOS, jobOver, partOver, wallPart, plain, capsPart, capsJob, capsJobOver, gpuOnlyOver)
 	onPart := func(q string) PartitionProfile { return PartitionProfile{Name: "example-gpu", QOS: q} }
 
 	for _, tc := range []struct {
@@ -133,6 +139,25 @@ func TestEffectiveQOSLimitsPrecedence(t *testing.T) {
 		{
 			name: "a QOS listed with no limits sets none", partition: onPart("plain"), job: "plain",
 			want: limitsWant{from: map[string]string{}},
+		},
+		{
+			// Both QOSes set the GPU and memory caps, with different values:
+			// the partition QOS's win, and the job QOS fills the rest.
+			name: "conflicting GPU and memory caps: the partition QOS's", partition: onPart("caps-part"), job: "caps-job",
+			want: limitsWant{wall: 6 * time.Hour, submit: ptr.To(int32(5)), gpus: ptr.To(int32(4)), cpus: ptr.To(int32(32)), mem: "200Gi",
+				from: map[string]string{"maxWall": "caps-job", "maxSubmitPerUser": "caps-job", "maxGpusPerUser": "caps-part", "maxCpusPerUser": "caps-job", "maxMemPerUser": "caps-part"}},
+		},
+		{
+			name: "conflicting caps with overPartQos: the job QOS's", partition: onPart("caps-part"), job: "caps-job-over",
+			want: limitsWant{wall: 6 * time.Hour, submit: ptr.To(int32(5)), gpus: ptr.To(int32(2)), cpus: ptr.To(int32(32)), mem: "100Gi",
+				from: map[string]string{"maxWall": "caps-job-over", "maxSubmitPerUser": "caps-job-over", "maxGpusPerUser": "caps-job-over", "maxCpusPerUser": "caps-job-over", "maxMemPerUser": "caps-job-over"}},
+		},
+		{
+			// overPartQos puts the job QOS first, but a limit it does not set
+			// still comes from the partition QOS.
+			name: "overPartQos: a limit the job QOS lacks falls back to the partition QOS", partition: onPart("part-qos"), job: "gpu-only-over",
+			want: limitsWant{submit: ptr.To(int32(2000)), gpus: ptr.To(int32(1)),
+				from: map[string]string{"maxSubmitPerUser": "part-qos", "maxGpusPerUser": "gpu-only-over"}},
 		},
 		{
 			name: "the same QOS on the partition and the job", partition: onPart("fast"), job: "fast",
@@ -239,7 +264,9 @@ func TestMaxAllocationGPUs(t *testing.T) {
 		{"a cap above gpusPerNode leaves the node's count", part(ptr.To(int32(4))), QOSLimits{MaxGPUsPerUser: ptr.To(int32(8))}, 4, true},
 		{"no cap: gpusPerNode", part(ptr.To(int32(4))), QOSLimits{}, 4, true},
 		{"a cap of zero", part(ptr.To(int32(4))), QOSLimits{MaxGPUsPerUser: ptr.To(int32(0))}, 0, true},
-		{"no gpusPerNode", part(nil), QOSLimits{MaxGPUsPerUser: ptr.To(int32(1))}, 0, false},
+		// The QOS cap bounds the request without gpusPerNode (review of PR #155, N4).
+		{"no gpusPerNode: the QOS cap", part(nil), QOSLimits{MaxGPUsPerUser: ptr.To(int32(1))}, 1, true},
+		{"neither: no bound", part(nil), QOSLimits{}, 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, ok := MaxAllocationGPUs(tc.part, tc.limits)
