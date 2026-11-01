@@ -81,11 +81,6 @@ type Options struct {
 	// that the start's ObservationGap counts: a test waits on it to know the
 	// elector has read a Lease another copy holds.
 	onLeaseRead func()
-	// skipNameCheck lets a test build more than one manager in a process (a
-	// restart, or a run with -count above 1): controller-runtime refuses a
-	// second controller named lifecycle in a process unless its name check is
-	// skipped. Production builds one manager and never sets it.
-	skipNameCheck bool
 }
 
 // Scheme returns the scheme the controller uses: the built-in kinds and the
@@ -212,15 +207,6 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 	if workers <= 0 {
 		workers = DefaultWorkers
 	}
-	// The work-queue options are controllerOptions' alone. The test-only
-	// skipNameCheck is set here, and only when true, so that nothing here can
-	// switch off a SkipNameValidation that controllerOptions itself sets (see
-	// Options).
-	options := controllerOptions(workers)
-	if o.skipNameCheck {
-		skip := true
-		options.SkipNameValidation = &skip
-	}
 	c := mgr.GetClient()
 	err = ctrl.NewControllerManagedBy(mgr).
 		Named("lifecycle").
@@ -242,7 +228,7 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 			return deploymentsInNamespace(ctx, c, o.GetNamespace())
 		})).
 		WatchesRawSource(source.Channel(events, &handler.TypedEnqueueRequestForObject[*v1alpha1.ModelDeployment]{})).
-		WithOptions(options).
+		WithOptions(controllerOptions(workers)).
 		Complete(r)
 	if err != nil {
 		return nil, nil, fmt.Errorf("lifecycle: controller: %w", err)
