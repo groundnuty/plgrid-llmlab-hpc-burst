@@ -12,6 +12,12 @@ package main
 //     endpoint, agentapi.Host.AgentEndpointAddr() (base+3), which
 //     authenticates each call from the manager's cache and the credential files
 //     and then calls the lifecycle controller's Backend.
+//
+// The two supervisors follow the lifecycle leader: they run only in the
+// process that leads the Lease v1alpha1.LeaseLifecycle, or in the one process
+// with --leader-elect=false (HBEP-11, Controllers: one manager per provider;
+// `@hpc-burst-science-agent`, 1 Nov 2026, for #132). The agent API runs in
+// every copy and answers CodeUnavailable where it does not lead.
 
 import (
 	"context"
@@ -243,10 +249,11 @@ type wiring struct {
 // managers run inside the lifecycle manager, whose grace is controller-runtime's
 // default, 30 s (lifecycle.NewManager sets none), and hpcburst down sends
 // SIGKILL 30 s after SIGTERM (launcher.DefaultGrace), so a longer outer grace
-// would not help. At a stop the lifecycle manager first stops the components,
-// and with them every Provider manager at once (providerctl.Supervisor), each
-// for at most providerGrace; that leaves 10 s for the lifecycle controller,
-// the caches, the health server and the Leases' release. With equal graces a
+// would not help. At a stop the lifecycle manager first stops the agent API,
+// then the lifecycle controller and the two supervisors together, and with the
+// supervisors every Provider manager at once (providerctl.Supervisor), each for
+// at most providerGrace; that leaves 10 s for the lifecycle controller, the
+// caches, the health server and the Leases' release. With equal graces a
 // Provider controller still busy at the stop (a submission's outcome is
 // written for up to 30 s; providerctl's Create) used up the outer grace, and a
 // normal SIGTERM became exit 1 (review of PR 132: N3).
@@ -256,8 +263,13 @@ type wiring struct {
 // once with an error, without waiting for the Provider managers, and main
 // exits 1. They get no graceful stop and their Leases are not released: each
 // expires after its duration (controller-runtime's 15 s; providerctl's
-// ManagerOptions), and then another replica can take it. No change is needed
-// for that (review of PR 132: N3).
+// ManagerOptions), and then the new lifecycle leader's supervisors take it. No
+// change is needed for that (review of PR 132: N3). That is the one hand-over
+// in which two copies' Provider controllers can overlap, since a Lease does
+// not fence (HBEP-11, Controllers). After a clean stop there is none: the old
+// leader stops its Provider managers, and they release their Leases, before it
+// releases the lifecycle Lease, and the new leader starts its supervisors only
+// once it holds that.
 const providerGrace = 20 * time.Second
 
 func (w wiring) newProviderManager(provider string) (manager.Manager, error) {
@@ -284,18 +296,24 @@ func (w wiring) setupBatch(pm manager.Manager, provider string) error {
 
 // component is one part of the binary in the lifecycle controller's manager.
 // It logs when it starts and stops, so the controller's log shows every part
-// running, and none waits for the lifecycle Lease: each Provider's manager
-// takes its own Lease, and the agent API answers through the Backend, which
-// says CodeUnavailable while this replica does not lead.
+// running. A leader component starts only once this process leads the
+// lifecycle Lease (or at once with --leader-elect=false): the two Provider
+// supervisors, so that a copy that does not lead runs no Provider, with
+// credentials and a front endpoint the leader never wrote; each Provider's
+// manager still takes its own Lease, provider-<name> (HBEP-11, Controllers;
+// `@hpc-burst-science-agent`, 1 Nov 2026, for #132; review of PR 132: B5).
+// The agent API is not a leader component: it answers through the Backend,
+// which says CodeUnavailable while this process does not lead.
 type component struct {
-	name  string
-	log   logr.Logger
-	start func(context.Context) error
+	name   string
+	log    logr.Logger
+	leader bool
+	start  func(context.Context) error
 }
 
 var _ manager.LeaderElectionRunnable = component{}
 
-func (c component) NeedLeaderElection() bool { return false }
+func (c component) NeedLeaderElection() bool { return c.leader }
 
 func (c component) Start(ctx context.Context) error {
 	c.log.Info("component starting")
@@ -335,8 +353,8 @@ func mount(mgr manager.Manager, w wiring, backend agentapi.Backend) error {
 		return w.log.WithValues(append([]any{"component", name}, kv...)...)
 	}
 	for _, c := range []component{
-		{name: "provider-supervisor-batch", log: named("provider-supervisor-batch"), start: batch.Start},
-		{name: "provider-supervisor-managed", log: named("provider-supervisor-managed"), start: catalog.Start},
+		{name: "provider-supervisor-batch", log: named("provider-supervisor-batch"), leader: true, start: batch.Start},
+		{name: "provider-supervisor-managed", log: named("provider-supervisor-managed"), leader: true, start: catalog.Start},
 		{name: "agent-api", log: named("agent-api", "addr", w.host.AgentEndpointAddr()), start: srv.Start},
 	} {
 		if err := mgr.Add(c); err != nil {

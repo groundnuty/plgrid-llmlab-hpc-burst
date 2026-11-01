@@ -366,8 +366,8 @@ const exampleFront = "front.example.org:29443"
 // prepareState prepares a state directory as hpcburst up leaves it: the
 // kubeconfig, the private credentials directory, an x86_64 agent build, whose
 // digest it returns, and the endpoint certificate; the recorded front is mode
-// at addr.
-func prepareState(t *testing.T, api *apiServer, mode, addr string) (flags, *x509.Certificate, string) {
+// at addr, and extra are further flags.
+func prepareState(t *testing.T, api *apiServer, mode, addr string, extra ...string) (flags, *x509.Certificate, string) {
 	t.Helper()
 	state := t.TempDir()
 	h := agentapi.Host{StateDir: state, PortBase: freePortBase(t)}
@@ -384,7 +384,7 @@ func prepareState(t *testing.T, api *apiServer, mode, addr string) (flags, *x509
 	args := []string{"--state-dir", state, "--port-base", strconv.Itoa(h.PortBase),
 		"--health-addr", net.JoinHostPort("127.0.0.1", strconv.Itoa(freePort(t))),
 		"--front-mode", mode, "--front-addr", addr}
-	f, err := parse(args, io.Discard)
+	f, err := parse(append(args, extra...), io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -481,6 +481,25 @@ func writeCredential(t *testing.T, h agentapi.Host, a *v1alpha1.Allocation) stri
 		t.Fatal(err)
 	}
 	return cred
+}
+
+// componentLine is the log text of a component's message in the copy of the
+// binary on that port base.
+func componentLine(msg string, portBase int, name string) string {
+	return fmt.Sprintf(`"msg"="%s" "portBase"=%d "component"="%s"`, msg, portBase, name)
+}
+
+// holder returns the Lease's holder and when it acquired it, "" if it has none.
+func holder(ctx context.Context, c client.Client, lease string) (string, time.Time) {
+	var l coordinationv1.Lease
+	if err := c.Get(ctx, client.ObjectKey{Namespace: v1alpha1.ControllerNamespace, Name: lease}, &l); err != nil || l.Spec.HolderIdentity == nil {
+		return "", time.Time{}
+	}
+	var at time.Time
+	if l.Spec.AcquireTime != nil {
+		at = l.Spec.AcquireTime.Time
+	}
+	return *l.Spec.HolderIdentity, at
 }
 
 // held reports whether the Lease in the controller namespace has a holder.
@@ -774,7 +793,7 @@ func testBinaryComponents(t *testing.T, api *apiServer) {
 	out := logs.String()[from:]
 	for _, name := range []string{"provider-supervisor-batch", "provider-supervisor-managed", "agent-api"} {
 		for _, msg := range []string{"component starting", "component stopped"} {
-			if !strings.Contains(out, fmt.Sprintf(`"msg"="%s" "component"="%s"`, msg, name)) {
+			if !strings.Contains(out, componentLine(msg, f.host.PortBase, name)) {
 				t.Errorf("the log has no %q line for %s", msg, name)
 			}
 		}
@@ -890,4 +909,124 @@ func register(t *testing.T, h agentapi.Host, pin, tag, cred, jobID string) agent
 		t.Fatalf("register: status %d with a body that is not an agent API error: %v", resp.StatusCode, err)
 	}
 	return e.Code
+}
+
+// recordingPlatforms is a batch platform factory over the fake Slurm session
+// that records each Provider it serves: a provider call by this copy.
+func recordingPlatforms(session *fakeslurm.Session, served *sync.Map) providerctl.PlatformFactory {
+	return func(v slurm.Validated) (providerctl.Platform, io.Closer, error) {
+		served.Store(v.Settings.Provider, true)
+		return slurm.NewBatch(session, v.Profile, v.Settings, slurm.Options{PollInterval: time.Second, BusyInterval: 500 * time.Millisecond}), io.NopCloser(nil), nil
+	}
+}
+
+// The Provider supervisors follow the lifecycle leader (HBEP-11, Controllers
+// and the Lease test; `@hpc-burst-science-agent`, 1 Nov 2026, for #132;
+// review of PR 132: B5). While a first copy leads lifecycle, a second copy
+// on the same control plane starts no Provider supervisor, so no Provider
+// manager: it makes no provider call and the Provider's Lease keeps its
+// holder. When the first stops, the second takes lifecycle and then
+// provider-<name>, and serves the Provider; the first's supervisor stopped
+// before the second's started, so in a clean hand-over the two copies'
+// Providers never overlap. A copy with --leader-elect=false runs them alone.
+// Every wait is on observable state, the log's order among it.
+func TestControllerBinaryProvidersFollowTheLifecycleLeader(t *testing.T) {
+	api := startAPIServer(t)
+	ctx := context.Background()
+	c := api.client
+	profile := batchProfile("follow-slurm")
+	prov := batchProvider("follow-batch", profile.Name, partX86, sshCredentials(t))
+	for _, o := range []client.Object{&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: v1alpha1.ControllerNamespace}}, profile, prov} {
+		if err := c.Create(ctx, o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	provLease := v1alpha1.ProviderLeaseName(prov.Name)
+	_, session := newFakeSlurm()
+	from := len(logs.String()) // this test's log lines only, under -count=N
+	since := func(at int) string { return logs.String()[at:] }
+	supervisors := []string{"provider-supervisor-batch", "provider-supervisor-managed"}
+
+	// The first copy leads lifecycle and runs the Provider.
+	fa, _, _ := prepareState(t, api, "direct", exampleFront)
+	var servedA, servedB, servedC sync.Map
+	a := startBinary(t, fa, deps{providerScheme: providerScheme, newPlatform: recordingPlatforms(session, &servedA)})
+	a.eventually(t, "the first copy leads lifecycle, holds "+provLease+" and serves the Provider", 90*time.Second, func() bool {
+		_, ok := servedA.Load(prov.Name)
+		return ok && held(ctx, c, v1alpha1.LeaseLifecycle) && held(ctx, c, provLease)
+	})
+	lifecycleA, _ := holder(ctx, c, v1alpha1.LeaseLifecycle)
+	provA, _ := holder(ctx, c, provLease)
+
+	// The second copy, with its own state directory and port base, runs: its
+	// health endpoint answers and its agent API started. Its supervisors,
+	// added beside the agent API, have not started.
+	fb, _, _ := prepareState(t, api, "direct", exampleFront)
+	b := startBinary(t, fb, deps{providerScheme: providerScheme, newPlatform: recordingPlatforms(session, &servedB)})
+	b.eventually(t, "the second copy's health endpoint answers and its agent API started", 60*time.Second, func() bool {
+		resp, err := http.Get("http://" + fb.healthAddr + "/healthz")
+		if err != nil {
+			return false
+		}
+		resp.Body.Close()
+		return resp.StatusCode == http.StatusOK && strings.Contains(since(from), componentLine("component starting", fb.host.PortBase, "agent-api"))
+	})
+	for _, name := range supervisors {
+		if strings.Contains(since(from), componentLine("component starting", fb.host.PortBase, name)) {
+			t.Errorf("the second copy started %s while the first leads lifecycle", name)
+		}
+	}
+	if _, ok := servedB.Load(prov.Name); ok {
+		t.Error("the second copy made a provider call while the first leads lifecycle")
+	}
+	if h, _ := holder(ctx, c, provLease); h != provA {
+		t.Errorf("%s is held by %q, not the first copy's %q", provLease, h, provA)
+	}
+	if h, _ := holder(ctx, c, v1alpha1.LeaseLifecycle); h != lifecycleA {
+		t.Errorf("lifecycle is held by %q, not the first copy's %q", h, lifecycleA)
+	}
+
+	// The hand-over: the first copy stops, as SIGTERM does, and releases its
+	// Leases; the second takes lifecycle, then provider-<name>, and serves the
+	// Provider.
+	handover := len(logs.String())
+	if err := a.stop(t); err != nil {
+		t.Fatalf("the first copy's run returned %v after its context ended, want nil", err)
+	}
+	b.eventually(t, "the second copy takes lifecycle and "+provLease+" and serves the Provider", 90*time.Second, func() bool {
+		_, ok := servedB.Load(prov.Name)
+		l, _ := holder(ctx, c, v1alpha1.LeaseLifecycle)
+		p, _ := holder(ctx, c, provLease)
+		return ok && l != "" && l != lifecycleA && p != "" && p != provA
+	})
+	_, lifecycleAt := holder(ctx, c, v1alpha1.LeaseLifecycle)
+	_, provAt := holder(ctx, c, provLease)
+	if provAt.Before(lifecycleAt) {
+		t.Errorf("the second copy took %s at %s, before lifecycle at %s", provLease, provAt, lifecycleAt)
+	}
+	out := since(handover)
+	for _, name := range supervisors {
+		stopped := strings.Index(out, componentLine("component stopped", fa.host.PortBase, name))
+		started := strings.Index(out, componentLine("component starting", fb.host.PortBase, name))
+		if stopped < 0 || started < 0 || started < stopped {
+			t.Errorf("%s: the first copy's stop at log offset %d, the second's start at %d; want the start after the stop", name, stopped, started)
+		}
+	}
+	if err := b.stop(t); err != nil {
+		t.Fatalf("the second copy's run returned %v after its context ended, want nil", err)
+	}
+
+	// Without leader election the one process runs the Providers.
+	fc, _, _ := prepareState(t, api, "direct", exampleFront, "--leader-elect=false")
+	cc := startBinary(t, fc, deps{providerScheme: providerScheme, newPlatform: recordingPlatforms(session, &servedC)})
+	cc.eventually(t, "the copy with --leader-elect=false holds "+provLease+" and serves the Provider", 90*time.Second, func() bool {
+		_, ok := servedC.Load(prov.Name)
+		return ok && held(ctx, c, provLease)
+	})
+	if held(ctx, c, v1alpha1.LeaseLifecycle) {
+		t.Error("the copy with --leader-elect=false holds lifecycle")
+	}
+	if err := cc.stop(t); err != nil {
+		t.Fatalf("the --leader-elect=false copy's run returned %v after its context ended, want nil", err)
+	}
 }

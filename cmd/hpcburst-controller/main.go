@@ -6,9 +6,11 @@
 //
 // Beside the lifecycle controller, in its manager, it runs the components of
 // components.go: the per-Provider manager supervisors for the batch and the
-// managed Providers (internal/providerctl, #59; internal/managed, #69), and
-// the agent API's HTTP server (internal/agentserver, #60), which serves the
-// lifecycle controller's agentapi.Backend on the agent endpoint. frps's server
+// managed Providers (internal/providerctl, #59; internal/managed, #69), which
+// follow the lifecycle leader (HBEP-11, Controllers), and the agent API's HTTP
+// server (internal/agentserver, #60), which serves the lifecycle controller's
+// agentapi.Backend on the agent endpoint. Its log names its port base, which
+// tells two copies on one host apart. frps's server
 // plugin (#90) plugs in at extraRunnables once it merges.
 //
 // Usage (hpcburst up passes the first three and the front it recorded):
@@ -161,7 +163,7 @@ func run(ctx context.Context, f flags, d deps) error {
 	if err != nil {
 		return err
 	}
-	w := wiring{cfg: cfg, host: f.host, scheme: scheme, front: front, newPlatform: d.newPlatform, log: ctrl.Log.WithName("hpcburst-controller")}
+	w := wiring{cfg: cfg, host: f.host, scheme: scheme, front: front, newPlatform: d.newPlatform, log: ctrl.Log.WithName("hpcburst-controller").WithValues("portBase", f.host.PortBase)}
 	if err := mount(mgr, w, backend); err != nil {
 		return err
 	}
