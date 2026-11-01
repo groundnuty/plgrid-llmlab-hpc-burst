@@ -127,6 +127,12 @@ func (p *pass) decideOverlap(in *v1alpha1.Instance) (overlapCheck, error) {
 	if slotFree && capWhy == "" {
 		return overlapCheck{beside: true}, nil
 	}
+	// A retained warm Allocation of this deployment takes the replacement
+	// without a new submission, so it needs neither a slot nor room under the
+	// caps: both jobs already run (HBEP-7, Provisioning, open question 14).
+	if p.reusableWarm(pv, params) {
+		return overlapCheck{beside: true}, nil
+	}
 	for _, q := range p.providers {
 		if q == pv || !q.usable() || q.tooShort != "" {
 			continue
@@ -134,14 +140,15 @@ func (p *pass) decideOverlap(in *v1alpha1.Instance) (overlapCheck, error) {
 		if cid := p.ids[q.class]; cid == nil || cid.id == "" || cid.blocked != "" {
 			continue
 		}
-		if _, err := partitionSizing(q, p.plan.gpus, p.md.Spec.LeaseLimit); err != nil {
+		qparams, err := partitionSizing(q, p.plan.gpus, p.md.Spec.LeaseLimit)
+		if err != nil {
 			continue
 		}
 		free, _, err := p.slotFor(q, skip)
 		if err != nil {
 			return overlapCheck{}, err
 		}
-		if free {
+		if free || p.reusableWarm(q, qparams) {
 			return overlapCheck{}, nil // another Provider has room: not no-overlap mode
 		}
 	}
@@ -150,6 +157,15 @@ func (p *pass) decideOverlap(in *v1alpha1.Instance) (overlapCheck, error) {
 		why = capWhy
 	}
 	return overlapCheck{blocked: true, queued: slotFree, why: why}, nil
+}
+
+// reusableWarm reports whether the Provider has a warm Allocation of this
+// deployment that takes a replacement of the given size: one that provisioning
+// would place it on (warmAllocation), or one whose agent has not registered
+// again yet after the controller's restart, which provisioning waits for.
+func (p *pass) reusableWarm(pv *providerView, params v1alpha1.BatchParameters) bool {
+	warm, deferUntil := p.warmAllocation(pv, params)
+	return warm != nil || !deferUntil.IsZero()
 }
 
 // slotFor reports whether the Provider's count leaves a free submit slot,
