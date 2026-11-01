@@ -1,12 +1,16 @@
 package launcher
 
 import (
+	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestSupervisedSetRunsFrps: with frps recorded, the set ends with frps's entry, whose command line
@@ -105,7 +109,109 @@ func TestCheckEntryExactPorts(t *testing.T) {
 	other := freePort(t)
 	e.Ports = []int{f.ports.Controller, other}
 	_, problems := checkEntry(sup, os.Getpid(), e)
-	if !strings.Contains(strings.Join(problems, "; "), "expected listener on port "+strconv.Itoa(other)+" is missing") {
+	if !strings.Contains(strings.Join(problems, "; "), "expected listener tcp 127.0.0.1:"+strconv.Itoa(other)+" is missing") {
 		t.Fatalf("a missing port is not reported: %v", problems)
 	}
+}
+
+// awaitEntry polls supervisor.json until cond holds for the named entry.
+func (f *ctlFixture) awaitEntry(name, what string, cond func(e EntryRecord) bool) EntryRecord {
+	f.t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if sf, err := readSupervisorFile(f.l); err == nil {
+			for _, e := range sf.Entries {
+				if e.Name == name && cond(e) {
+					return e
+				}
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	f.t.Fatalf("timed out waiting for %s; supervisor.json: %s", what, fileOf(f.l.supervisorFile()))
+	return EntryRecord{}
+}
+
+// extraBound waits for the fake's extra-bound-<pid> file (listen-tcp, listen-udp) and returns the
+// sockets it names, as "tcp 127.0.0.2:1234" or "udp 127.0.0.1:5678".
+func (f *ctlFixture) extraBound(pid int) []string {
+	f.t.Helper()
+	var v []string
+	f.readJSON(fmt.Sprintf("extra-bound-%d", pid), &v)
+	return v
+}
+
+// supervisorHandle is a verified handle on this process, which plays the supervisor.
+func (f *ctlFixture) supervisorHandle() *procHandle {
+	f.t.Helper()
+	sup, v, d := openRec(f.st.Procs[0])
+	if v != Ours {
+		f.t.Fatalf("this process is %v: %s", v, d)
+	}
+	f.t.Cleanup(sup.Close)
+	return sup
+}
+
+// TestCheckEntryExactSockets: a process with a fixed set of ports (frps) must hold exactly those, as
+// TCP on 127.0.0.1, and no other reachable socket, matched by socket inode. The fake controller, a
+// real child of this process, binds what the test asks; its health port alone passes in
+// TestCheckEntryExactPorts, the control.
+func TestCheckEntryExactSockets(t *testing.T) {
+	t.Run("an extra UDP socket", func(t *testing.T) {
+		// KCP and QUIC listen on UDP: a TCP-only view would see exactly the expected ports.
+		f := newCtlFixture(t, Front{})
+		f.steer("listen-udp", "127.0.0.1:0")
+		f.supervise(SuperviseOptions{})
+		e := f.awaitRunning()
+		bound := f.extraBound(e.Proc.PID)
+		awaitHealthy(t, f.ports.ControllerAddr())
+		e.Ports = []int{f.ports.Controller}
+		eh, problems := checkEntry(f.supervisorHandle(), os.Getpid(), e)
+		if len(bound) != 1 || !strings.Contains(strings.Join(problems, "; "), "it also listens on ["+bound[0]+"]") || eh.HealthzOK != nil {
+			t.Fatalf("an extra UDP socket %v: %+v, problems %v", bound, eh, problems)
+		}
+	})
+	t.Run("the right port at another address", func(t *testing.T) {
+		// The child listens on 127.0.0.2:P, and this test process (a foreign listener) on
+		// 127.0.0.1:P, answering /healthz with 200. Matching port numbers alone would call the
+		// child the holder of 127.0.0.1:P, and count the foreign answer.
+		f := newCtlFixture(t, Front{})
+		port := freePort(t)
+		foreign, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })}
+		go srv.Serve(foreign)
+		t.Cleanup(func() { srv.Close() })
+		f.steer("listen-tcp", "127.0.0.2:"+strconv.Itoa(port))
+		f.supervise(SuperviseOptions{})
+		e := f.awaitRunning()
+		if bound := f.extraBound(e.Proc.PID); len(bound) != 1 || bound[0] != "tcp 127.0.0.2:"+strconv.Itoa(port) {
+			t.Fatalf("the child bound %v", bound)
+		}
+		awaitHealthy(t, f.ports.ControllerAddr())
+		addr := "127.0.0.1:" + strconv.Itoa(port)
+		if code, err := healthzCode(addr); err != nil || code != 200 {
+			t.Fatalf("the foreign listener does not answer: %d, %v", code, err)
+		}
+		sup := f.supervisorHandle()
+
+		// As the health address: the foreign answer must not be asked for.
+		e.Ports = []int{f.ports.Controller, port}
+		asHealth := e
+		asHealth.Health = addr
+		eh, problems := checkEntry(sup, os.Getpid(), asHealth)
+		if !strings.Contains(strings.Join(problems, "; "), "does not hold its health address "+addr) || eh.HealthzOK != nil {
+			t.Errorf("health on the foreign address: %+v, problems %v", eh, problems)
+		}
+		// As one of the fixed ports (frps's bind or tcpmux port).
+		_, problems = checkEntry(sup, os.Getpid(), e)
+		got := strings.Join(problems, "; ")
+		for _, want := range []string{"expected listener tcp " + addr + " is missing", "it also listens on [tcp 127.0.0.2:" + strconv.Itoa(port) + "]", "other processes listen on its ports: [tcp " + addr + "]"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("a fixed port at another address: problems %v, want %q", problems, want)
+			}
+		}
+	})
 }

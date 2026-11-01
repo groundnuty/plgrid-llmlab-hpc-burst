@@ -15,6 +15,10 @@
 //	slow-term     its content is milliseconds: SIGTERM is answered with exit 0 after that long
 //	unhealthy     /healthz answers 503
 //	no-health     the process serves nothing
+//	listen-tcp    one host:port per line: the process also listens there (TCP), and serves
+//	              /healthz there too
+//	listen-udp    one host:port per line: the process also binds a UDP socket there; after
+//	              binding every extra socket it writes extra-bound-<pid>, holding their addresses
 //
 // It records argv-<pid>.json and env-<pid>.json, and appends "<pid> <unix nanoseconds>" to the file
 // starts, before it serves anything.
@@ -127,6 +131,7 @@ func main() {
 			_ = json.NewEncoder(w).Encode(map[string]any{"synced": true, "usage": map[string]any{"state": state, "lostRecords": 0}})
 		}))
 	}
+	bindExtra(dir, pid, ctl)
 	tick := time.NewTicker(10 * time.Millisecond)
 	for {
 		select {
@@ -170,6 +175,39 @@ func recordedRunning(stateDir string, pid int) bool {
 		}
 	}
 	return false
+}
+
+// held keeps the extra UDP sockets referenced for the life of the process.
+var held []net.PacketConn
+
+// bindExtra opens the extra sockets that listen-tcp and listen-udp name and keeps them open for
+// the life of the process; a socket that cannot be bound makes it exit 1.
+func bindExtra(dir string, pid int, ctl func(string) (string, bool)) {
+	var bound []string
+	tcp, okT := ctl("listen-tcp")
+	udp, okU := ctl("listen-udp")
+	if !okT && !okU {
+		return
+	}
+	for _, a := range strings.Fields(tcp) {
+		l, err := net.Listen("tcp", a)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "fakecontroller:", err)
+			os.Exit(1)
+		}
+		go http.Serve(l, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
+		bound = append(bound, "tcp "+l.Addr().String())
+	}
+	for _, a := range strings.Fields(udp) {
+		c, err := net.ListenPacket("udp", a)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "fakecontroller:", err)
+			os.Exit(1)
+		}
+		held = append(held, c) // a socket nothing refers to is closed by its finalizer
+		bound = append(bound, "udp "+c.LocalAddr().String())
+	}
+	record(filepath.Join(dir, fmt.Sprintf("extra-bound-%d", pid)), bound)
 }
 
 func record(path string, v any) {

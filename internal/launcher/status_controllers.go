@@ -103,8 +103,9 @@ func checkSupervision(l layout, st *State, sup *procHandle, rep *StatusReport, b
 
 // checkEntry checks one supervised process the way the host's own are checked: it must be the
 // recorded process (PID, start time and boot ID, through a pidfd), a child of the supervisor, and
-// hold its health port, and only then does its /healthz count. After the answer it checks the
-// identity and the port again, so an answer from something that took the port over means nothing.
+// hold its health address (that address and port exactly), and only then does its /healthz on that
+// address count. After the answer it checks the identity and the address again, so an answer from
+// something that took the address over means nothing.
 func checkEntry(sup *procHandle, supPID int, e EntryRecord) (EntryHealth, []string) {
 	eh := EntryHealth{Name: e.Name, State: e.State, Restarts: e.Restarts, LastExit: e.LastExit, Health: e.Health}
 	var problems []string
@@ -130,28 +131,32 @@ func checkEntry(sup *procHandle, supPID int, e EntryRecord) (EntryHealth, []stri
 		return eh, problems
 	}
 	eh.Running = true
-	port, err := parsePort(e.Health)
-	if err != nil {
+	if _, err := parsePort(e.Health); err != nil {
 		add("health address %q: %v", e.Health, err)
 		return eh, problems
 	}
-	if own, err := portOwned(h, port); err != nil {
+	if own, err := addrOwned(h, e.Health); err != nil {
 		add("cannot list the sockets of pid %d: %v", e.Proc.PID, err)
 		return eh, problems
 	} else if !own {
-		add("pid %d does not hold its health port %d", e.Proc.PID, port)
+		add("pid %d does not hold its health address %s", e.Proc.PID, e.Health)
 		return eh, problems
 	}
 	if len(e.Ports) > 0 {
-		// A process with a fixed set of ports (frps, HBEP-6) must hold exactly those, all on
-		// loopback: a missing one is a listener that failed, an extra or a non-loopback one is a
-		// listener that must not exist.
-		owned, _, err := treeListeners(h)
+		// A process with a fixed set of ports (frps, HBEP-6) must hold exactly those, TCP on
+		// 127.0.0.1, and nothing else reachable, TCP or UDP, on any address: a missing one is a
+		// listener that failed, any other is a listener that must not exist (such as KCP or QUIC
+		// on UDP), and a socket at another address on the same port lets something else answer.
+		owned, others, err := treeBound(h)
 		if err != nil {
 			add("cannot list the sockets of pid %d: %v", e.Proc.PID, err)
 			return eh, problems
 		}
-		if probs := verifyListeners(e.Ports, owned, nil); len(probs) > 0 {
+		want := make([]sock, 0, len(e.Ports))
+		for _, p := range e.Ports {
+			want = append(want, sock{Listener: Listener{Addr: "127.0.0.1", Port: p}, proto: "tcp"})
+		}
+		if probs := verifyExactListeners(want, owned, others); len(probs) > 0 {
 			for _, p := range probs {
 				add("pid %d: %s", e.Proc.PID, p)
 			}
@@ -178,8 +183,8 @@ func checkEntry(sup *procHandle, supPID int, e EntryRecord) (EntryHealth, []stri
 	}
 	if v, d := h.verify(); v != Ours {
 		add("pid %d changed while it was being checked: %s", e.Proc.PID, d)
-	} else if own, err := portOwned(h, port); err != nil || !own {
-		add("pid %d did not hold port %d after the answer", e.Proc.PID, port)
+	} else if own, err := addrOwned(h, e.Health); err != nil || !own {
+		add("pid %d did not hold %s after the answer", e.Proc.PID, e.Health)
 	}
 	return eh, problems
 }
