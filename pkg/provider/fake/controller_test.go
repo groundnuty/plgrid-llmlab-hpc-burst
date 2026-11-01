@@ -709,14 +709,18 @@ func TestSubmitLimitReasonClearsOnUnknown(t *testing.T) {
 // shows neither (`@hpc-burst-science-agent`, 1 Nov 2026, on the refusal
 // contract).
 func TestPolicyRefusalSettlesWithoutFlapping(t *testing.T) {
+	const group = " (group limit, shared by the grant's users)"
 	for _, tc := range []struct {
 		policy string
 		code   string
+		note   string // what the message adds after the reason line
 	}{
-		{"QOSMaxSubmitJobPerUserLimit", v1alpha1.ReasonSubmitLimitReached},
-		{"AssocMaxSubmitJobLimit", v1alpha1.ReasonSubmitLimitReached},
-		{"MaxSubmitJobsPerAccount", v1alpha1.ReasonSubmitLimitReached},
-		{"QOSMaxWallDurationPerJobLimit", ""},
+		{"QOSMaxSubmitJobPerUserLimit", v1alpha1.ReasonSubmitLimitReached, ""},
+		{"AssocMaxSubmitJobLimit", v1alpha1.ReasonSubmitLimitReached, ""},
+		{"MaxSubmitJobsPerAccount", v1alpha1.ReasonSubmitLimitReached, ""},
+		{"QOSGrpSubmitJobsLimit", v1alpha1.ReasonSubmitLimitReached, group},
+		{"AssocGrpSubmitJobsLimit", v1alpha1.ReasonSubmitLimitReached, group},
+		{"QOSMaxWallDurationPerJobLimit", "", ""},
 	} {
 		t.Run(tc.policy, func(t *testing.T) {
 			e := newEnv(t)
@@ -729,7 +733,7 @@ func TestPolicyRefusalSettlesWithoutFlapping(t *testing.T) {
 				o := a.Status.AtProvider
 				rec := submission(t, a)
 				if o.Phase != v1alpha1.AllocationSubmitting || o.Reason != tc.code || rec.State != v1alpha1.SubmissionRejected ||
-					rec.Code != tc.code || rec.Reason != "sbatch: error: "+tc.policy {
+					rec.Code != tc.code || rec.Reason != "sbatch: error: "+tc.policy+tc.note {
 					t.Fatalf("%s: phase %q, reason %q, record %+v; want Submitting, reason %q, a Rejected record with code %q and the reason line",
 						when, o.Phase, o.Reason, rec, tc.code, tc.code)
 				}
