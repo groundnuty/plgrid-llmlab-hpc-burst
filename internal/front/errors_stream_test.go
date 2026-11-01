@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"io"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -51,12 +52,18 @@ func checkStreamCut(t *testing.T, body, detail string) []string {
 }
 
 // midStreamCut sends a streaming chat request to an engine that sends one
-// token at once and the next after 10 s of real time, reads the first event,
-// then moves the fake clock by d: the timers armed for the request fire with
-// one token delivered. It returns the request ID and the whole body.
+// token at once and holds the next two at its gate, which the test never
+// opens; it reads the first event, then moves the fake clock by d: the timers
+// armed for the request fire with one token delivered, and the stream can end
+// only by their cut. It returns the request ID and the whole body. A stream
+// that is not cut within 30 s is closed by the test and fails it.
+//
+// The engine used to send its second token after 10 s of real time, so a test
+// slowed for 10 s between its read and its move of the clock would have seen
+// a second token (PR #137 review, Astra).
 func midStreamCut(t *testing.T, s *errFix, d time.Duration) (string, string) {
 	t.Helper()
-	s.e.Set(enginetest.Behaviour{Tokens: 3, PerToken: 10 * time.Second})
+	s.e.Set(enginetest.Behaviour{Tokens: 3, Gate: make(chan struct{})})
 	resp := s.post("/v1/chat/completions", errChatBody(efModel, true, "hello there"))
 	if resp.StatusCode != 200 {
 		t.Fatalf("status %d, want 200: the headers were sent before the cut", resp.StatusCode)
@@ -66,7 +73,13 @@ func midStreamCut(t *testing.T, s *errFix, d time.Duration) (string, string) {
 	br := bufio.NewReader(resp.Body)
 	first := readEvent(t, br)
 	s.clk.Advance(d)
+	var gaveUp atomic.Bool
+	limit := time.AfterFunc(30*time.Second, func() { gaveUp.Store(true); resp.Body.Close() })
 	rest, err := io.ReadAll(br)
+	limit.Stop()
+	if gaveUp.Load() {
+		t.Fatalf("the stream was not cut within 30 s of the clock's move by %v; it so far reads %q", d, first+string(rest))
+	}
 	if err != nil {
 		t.Fatalf("reading the rest of the stream: %v", err)
 	}
