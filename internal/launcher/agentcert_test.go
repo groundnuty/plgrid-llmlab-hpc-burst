@@ -505,6 +505,48 @@ func TestAgentEndpointKeptCertificateWithoutTheNameIsReissued(t *testing.T) {
 	}
 }
 
+// TestAgentEndpointReissueWithAnotherPinWritesNothing: a re-issue whose new certificate would carry
+// another pin than the kept one, which agents may hold, is refused before anything is written. The
+// new certificate is signed by another key than the kept pair's (what a re-issue that made a new key
+// for the certificate alone would do); the kept certificate must then be the same file, byte for
+// byte and inode for inode (a write replaces it by rename), and still load with the key. The control
+// is the same call with the pair's own key: it writes, and the pin stays.
+func TestAgentEndpointReissueWithAnotherPinWritesNothing(t *testing.T) {
+	h := testHost(t)
+	k := newKey(t)
+	writeOldStylePair(t, h, k)
+	_, oldPin := loadPair(t, h)
+	certBefore, keyBefore := mustRead(t, h.AgentCertFile()), mustRead(t, h.AgentKeyFile())
+	infoBefore, err := os.Stat(h.AgentCertFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = issueAgentCert(h.AgentCertFile(), h.AgentKeyFile(), newKey(t), oldPin, "re-issued", nil)
+	if err == nil || !strings.Contains(err.Error(), oldPin) || !strings.Contains(err.Error(), "unchanged") {
+		t.Fatalf("a re-issue with another pin: %v; want a refusal that names the pin agents hold", err)
+	}
+	if !bytes.Equal(mustRead(t, h.AgentCertFile()), certBefore) || !bytes.Equal(mustRead(t, h.AgentKeyFile()), keyBefore) {
+		t.Fatal("the refused re-issue changed the kept pair")
+	}
+	if fi, err := os.Stat(h.AgentCertFile()); err != nil || !os.SameFile(fi, infoBefore) {
+		t.Fatalf("the refused re-issue replaced the certificate file: %v", err)
+	}
+	if _, pin := loadPair(t, h); pin != oldPin {
+		t.Fatalf("pin %s after the refusal, want %s", pin, oldPin)
+	}
+
+	if err := issueAgentCert(h.AgentCertFile(), h.AgentKeyFile(), k, oldPin, "re-issued", nil); err != nil {
+		t.Fatalf("control: a re-issue with the pair's own key: %v", err)
+	}
+	if bytes.Equal(mustRead(t, h.AgentCertFile()), certBefore) {
+		t.Error("control: the re-issue with the pair's own key wrote nothing")
+	}
+	if _, pin := loadPair(t, h); pin != oldPin {
+		t.Errorf("control: pin %s after the re-issue, want %s", pin, oldPin)
+	}
+}
+
 // snapshot is the content and mode of every file in a directory.
 type snapshot map[string]string
 

@@ -5,11 +5,9 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -78,7 +76,7 @@ func ensureAgentEndpointPair(host agentapi.Host, log io.Writer) error {
 		if err != nil {
 			return fmt.Errorf("agent endpoint key %s: %w", keyPath, err)
 		}
-		return issueAgentCert(certPath, keyPath, signer, "created", log)
+		return issueAgentCert(certPath, keyPath, signer, "", "created", log)
 	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -91,7 +89,7 @@ func ensureAgentEndpointPair(host agentapi.Host, log io.Writer) error {
 	if err := writeFileAtomic(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600); err != nil {
 		return fmt.Errorf("agent endpoint key %s: %w", keyPath, err)
 	}
-	if err := issueAgentCert(certPath, keyPath, key, "created", log); err != nil {
+	if err := issueAgentCert(certPath, keyPath, key, "", "created", log); err != nil {
 		_ = os.Remove(keyPath) // a half-made pair would be refused at the next start
 		return err
 	}
@@ -114,17 +112,10 @@ func reissueWithoutName(certPath, keyPath string, certPEM, keyPEM []byte, log io
 	if err != nil {
 		return fmt.Errorf("agent endpoint key %s: %w", keyPath, err)
 	}
-	// The pin is the hash of the public key. The pair loaded, so the keys agree; this refuses to
-	// write if they somehow do not, since a changed pin would break every agent that holds it.
-	spki, err := x509.MarshalPKIXPublicKey(signer.Public())
-	if err != nil {
-		return fmt.Errorf("agent endpoint key %s: %w", keyPath, err)
-	}
-	if sum := sha256.Sum256(spki); hex.EncodeToString(sum[:]) != agentapi.PinOf(cert) {
-		return fmt.Errorf("agent endpoint certificate %s: not re-issued for %s, because the new certificate would have another pin than the one agents hold", certPath, agentapi.DialHomeServerName)
-	}
 	logf(log, "the agent endpoint certificate %s is not valid for %s; issuing it again for the same key", certPath, agentapi.DialHomeServerName)
-	return issueAgentCert(certPath, keyPath, signer, "re-issued", log)
+	// The new certificate must keep the pin agents hold: issueAgentCert compares the new
+	// certificate's pin with the kept one's before it writes anything.
+	return issueAgentCert(certPath, keyPath, signer, agentapi.PinOf(cert), "re-issued", log)
 }
 
 // readAgentKey reads the key file after checking what it is: a regular file (not a link) owned by
@@ -221,8 +212,11 @@ func signerOf(keyPEM []byte) (crypto.Signer, error) {
 }
 
 // issueAgentCert writes a self-signed certificate for signer's key at certPath (mode 0644: it is
-// public) and checks that it loads with the key at keyPath. verb is how the log says what was done.
-func issueAgentCert(certPath, keyPath string, signer crypto.Signer, verb string, log io.Writer) error {
+// public) and checks that it loads with the key at keyPath. keepPin, when set, is the pin of the
+// certificate being replaced, which agents may hold: a new certificate with another pin is refused
+// before anything is written, so the kept certificate stays as it was. verb is how the log says
+// what was done.
+func issueAgentCert(certPath, keyPath string, signer crypto.Signer, keepPin, verb string, log io.Writer) error {
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 127))
 	if err != nil {
 		return fmt.Errorf("agent endpoint certificate: %w", err)
@@ -243,16 +237,20 @@ func issueAgentCert(certPath, keyPath string, signer crypto.Signer, verb string,
 	if err != nil {
 		return fmt.Errorf("agent endpoint certificate: %w", err)
 	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		return fmt.Errorf("agent endpoint certificate: %w", err)
+	}
+	pin := agentapi.PinOf(cert)
+	if keepPin != "" && pin != keepPin {
+		return fmt.Errorf("agent endpoint certificate %s: not %s, because the new certificate would have pin %s, not the pin %s that agents hold; the kept certificate is unchanged", certPath, verb, pin, keepPin)
+	}
 	if err := writeFileAtomic(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
 		return fmt.Errorf("agent endpoint certificate %s: %w", certPath, err)
 	}
 	if _, err := tls.LoadX509KeyPair(certPath, keyPath); err != nil {
 		return fmt.Errorf("the agent endpoint certificate %s just written does not load with %s: %w", certPath, keyPath, err)
 	}
-	cert, err := x509.ParseCertificate(der)
-	if err != nil {
-		return fmt.Errorf("agent endpoint certificate: %w", err)
-	}
-	logf(log, "%s the agent endpoint certificate %s (pin %s)", verb, certPath, agentapi.PinOf(cert))
+	logf(log, "%s the agent endpoint certificate %s (pin %s)", verb, certPath, pin)
 	return nil
 }
