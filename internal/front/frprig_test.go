@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -19,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -28,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/clock"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/enginetest"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/launcher"
@@ -238,31 +241,19 @@ func (r *frpRig) startFrpc(uid types.UID, sock, dialHome string) *frpcProc {
 	if err != nil {
 		r.t.Fatal(err)
 	}
+	portNum, err := strconv.Atoi(port)
+	if err != nil {
+		r.t.Fatal(err)
+	}
 	cfg := filepath.Join(r.dir, fmt.Sprintf("frpc%d.toml", r.n))
-	text := fmt.Sprintf(`serverAddr = %q
-serverPort = %s
-loginFailExit = false
-log.to = %q
-metadatas.token = "credential-of-the-allocation"
-transport.protocol = "wss"
-transport.tls.trustedCaFile = %q
-transport.tls.serverName = %q
-transport.poolCount = 0
-transport.tcpMuxKeepaliveInterval = 10
-transport.heartbeatInterval = 10
-transport.heartbeatTimeout = 25
-transport.dialServerKeepalive = 30
-
-[[proxies]]
-name = %q
-type = "tcpmux"
-multiplexer = "httpconnect"
-customDomains = [%q]
-[proxies.plugin]
-type = "unix_domain_socket"
-unixPath = %q
-`, host, port, cfg+".log", r.cert, agentapi.DialHomeServerName, string(uid), string(uid), sock)
-	if err := os.WriteFile(cfg, []byte(text), 0o600); err != nil {
+	// The agent's own rendering of HBEP-6's frpc block, so the rig runs the
+	// product's configuration. The plugin stub admits any token.
+	text, err := agent.FrpcConfig{ServerAddr: host, ServerPort: portNum, LogFile: cfg + ".log", Token: newKey(r.t),
+		CAFile: r.cert, ServerName: agentapi.DialHomeServerName, UID: string(uid), Socket: sock}.Render()
+	if err != nil {
+		r.t.Fatalf("render frpc's configuration: %v", err)
+	}
+	if err := os.WriteFile(cfg, text, 0o600); err != nil {
 		r.t.Fatal(err)
 	}
 	out, err := os.Create(cfg + ".out")
@@ -303,9 +294,32 @@ type frpcProc struct {
 }
 
 // pause and resume freeze frpc with SIGSTOP and SIGCONT: a frozen path, which
-// sends no FIN (HBEP-6, Test plan).
-func (p *frpcProc) pause()  { _ = p.cmd.Process.Signal(syscall.SIGSTOP) }
-func (p *frpcProc) resume() { _ = p.cmd.Process.Signal(syscall.SIGCONT) }
+// sends no FIN (HBEP-6, Test plan). The signal is delivered asynchronously, so
+// pause returns only once every frpc thread has stopped, as the rig's stop
+// does for frps.
+func (p *frpcProc) pause() {
+	p.t.Helper()
+	if err := p.cmd.Process.Signal(syscall.SIGSTOP); err != nil {
+		p.t.Fatalf("SIGSTOP to frpc (pid %d): %v", p.cmd.Process.Pid, err)
+	}
+	for end := time.Now().Add(30 * time.Second); !allStopped(p.cmd.Process.Pid); time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(end) {
+			p.t.Fatalf("frpc (pid %d) did not stop after SIGSTOP", p.cmd.Process.Pid)
+		}
+	}
+}
+
+// resume lets a paused frpc run again; a frpc that has exited needs none.
+func (p *frpcProc) resume() {
+	select {
+	case <-p.done:
+		return
+	default:
+	}
+	if err := p.cmd.Process.Signal(syscall.SIGCONT); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		p.t.Errorf("SIGCONT to frpc (pid %d): %v", p.cmd.Process.Pid, err)
+	}
+}
 
 func (p *frpcProc) kill() {
 	p.once.Do(func() {

@@ -72,6 +72,7 @@ func TestRunTunnelInBothDialHomeModes(t *testing.T) {
 			select {
 			case front = <-ready:
 			case err := <-done:
+				stopped = true // Run has finished: the deferred stop must not wait for it
 				t.Fatalf("Run returned early: %v", err)
 			case <-time.After(10 * time.Second):
 				t.Fatal("the front did not start")
