@@ -106,6 +106,15 @@ type verificationData struct {
 	// agent read them from the staged checkpoint (VerifyResult.GenerationConfig;
 	// science-agent rulings, 1 Nov 2026, issue #125).
 	GenerationConfig map[string]string `json:"generationConfig,omitempty"`
+	// Sampling is what this verification's checks sent: the sampling values
+	// and the seeds of a reasoning model checked with its file's values, or
+	// Greedy true for a model checked greedily (agentapi.CheckSampling over
+	// GenerationConfig, VerifyResult.DoSample and whether the spec declares a
+	// reasoning parser, the inputs the agent computed its requests from;
+	// HBEP-7, One record per verification; science-agent decision, 1 Nov
+	// 2026, issue #151). A pointer: a record written before it has none, and
+	// reads as unknown, not as a sampled model at temperature 0.
+	Sampling *agentapi.Sampling `json:"sampling,omitempty"`
 	// BehaviourContextTokens is the context, in tokens, that this
 	// generation's behaviour check runs at: agentapi.BehaviourContextTokens
 	// of the resolved shapes, the reported max-model-len, the measured
@@ -138,10 +147,15 @@ type rehashOutcome struct {
 // equals its value; every rendered request, with the template overhead, fits
 // the reported context limit.
 func judgeVerify(d declared, v *agentapi.VerifyResult, rehash bool, sh shapes) verificationData {
+	_, reasoning := d.flags["reasoning-parser"]
+	// The sampling the checks used is recorded on every record, a failed one
+	// and a worker restart's too: verification's own fingerprint request used
+	// it either way.
+	sampling := agentapi.CheckSampling(v.GenerationConfig, v.DoSample, reasoning)
 	out := verificationData{
 		EngineVersion: v.EngineVersion, ImageDigest: v.ImageDigest, Settings: v.Settings,
-		Fingerprint: v.Fingerprint, Overhead: v.TemplateOverhead, GenerationConfig: v.GenerationConfig, Verdict: v1alpha1.VerdictPass,
-		Undeclared: map[string]string{},
+		Fingerprint: v.Fingerprint, Overhead: v.TemplateOverhead, GenerationConfig: v.GenerationConfig, Sampling: &sampling,
+		Verdict: v1alpha1.VerdictPass, Undeclared: map[string]string{},
 	}
 	failWith := func(cause, msg string) verificationData {
 		out.Verdict, out.Cause, out.Message = v1alpha1.VerdictFail, cause, msg
@@ -238,7 +252,6 @@ func judgeVerify(d declared, v *agentapi.VerifyResult, rehash bool, sh shapes) v
 	}
 	out.Shapes = &resolved
 	if rehash { // a worker restart keeps Qualified: no behaviour check runs
-		_, reasoning := d.flags["reasoning-parser"]
 		out.BehaviourContextTokens = agentapi.BehaviourContextTokens(resolved, mml, v.TemplateOverhead, reasoning)
 	}
 	return out
