@@ -89,6 +89,9 @@ func durationFields(ns string) []durationField {
 	profile("spec.unknownBound", "unknownBound", false, func(p *v1alpha1.PlatformProfile, d v1alpha1.Duration) { p.Spec.UnknownBound = &d })
 	profile("spec.drainWindow", "drainWindow", false, func(p *v1alpha1.PlatformProfile, d v1alpha1.Duration) { p.Spec.DrainWindow = &d })
 	profile("spec.maxIdle", "maxIdle", false, func(p *v1alpha1.PlatformProfile, d v1alpha1.Duration) { p.Spec.MaxIdle = &d })
+	profile("spec.qos[].maxWall", "maxWall", false, func(p *v1alpha1.PlatformProfile, d v1alpha1.Duration) {
+		p.Spec.QOS = []v1alpha1.QOSProfile{{Name: "fast", MaxWall: &d}}
+	})
 
 	health := func(name string, set func(*v1alpha1.HealthThresholds, v1alpha1.Duration)) {
 		profile("spec.health."+name, name, false, func(p *v1alpha1.PlatformProfile, d v1alpha1.Duration) {
@@ -125,11 +128,11 @@ func durationFields(ns string) []durationField {
 func TestDurationsArePositiveAndFit(t *testing.T) {
 	ns := newNamespace(t)
 	fields := durationFields(ns)
-	// The list is the 24 spec fields of type Duration that carry a rule. A
+	// The list is the 25 spec fields of type Duration that carry a rule. A
 	// field added without a row here is caught by hack/mutate-cel.sh, which
 	// maps every rule to this test; this count catches a row dropped by mistake.
-	if len(fields) != 24 {
-		t.Fatalf("the table has %d fields, want the 24 Duration fields that carry a rule", len(fields))
+	if len(fields) != 25 {
+		t.Fatalf("the table has %d fields, want the 25 Duration fields that carry a rule", len(fields))
 	}
 	for _, f := range fields {
 		t.Run(f.path, func(t *testing.T) {

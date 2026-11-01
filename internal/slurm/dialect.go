@@ -153,9 +153,11 @@ func writeTempLine(dir, tmp string) string {
 	return And("umask 077", "mkdir -p "+dir, "cat > "+tmp)
 }
 
-// installLine sets the mode of tmp and renames it into place.
+// installLine sets the mode of tmp and renames it into place. mv -T takes abs
+// as the file's own path: without it, a directory at abs would take tmp inside
+// it and mv would exit 0, and the file would never be at abs.
 func installLine(mode, tmp, abs string) string {
-	return And("chmod "+mode+" "+tmp, "mv -f "+tmp+" "+abs)
+	return And("chmod "+mode+" "+tmp, "mv -fT "+tmp+" "+abs)
 }
 
 func removeLine(abs string) string { return "rm -f " + abs }

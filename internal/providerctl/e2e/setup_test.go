@@ -28,6 +28,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/providerctl"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/providerctl/ctltest"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
@@ -63,6 +64,8 @@ func TestSetupInARealManager(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(builds, agentapi.AgentBuildName("x86_64")), agent, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	certPEM, certPin := ctltest.Cert(t)
+	frpcDigest := ctltest.Frpc(t, builds, "x86_64")
 
 	gpus := int32(4)
 	maxTime, window := v1alpha1.Duration("48h"), v1alpha1.Duration("5m")
@@ -110,8 +113,8 @@ func TestSetupInARealManager(t *testing.T) {
 					return slurm.NewBatch(session, v.Profile, v.Settings, slurm.Options{PollInterval: time.Second, BusyInterval: 500 * time.Millisecond}), io.NopCloser(nil), nil
 				},
 				CredentialsDir: credDir, AgentBuildsDir: builds,
-				Front: &providerctl.FrontSettings{Mode: agentapi.DialHomeDirect, Endpoint: "front.example.org:29443", CertPin: strings.Repeat("c", 64),
-					FrpcDigests: map[string]string{"x86_64": strings.Repeat("d", 64)}},
+				Front: &providerctl.FrontSettings{Mode: agentapi.DialHomeDirect, Endpoint: "front.example.org:29443", CertPin: certPin, CertPEM: certPEM,
+					FrpcDigests: map[string]string{"x86_64": frpcDigest}},
 				PollInterval: time.Second, BusyInterval: 500 * time.Millisecond, CreationGracePeriod: -1,
 			})
 		},

@@ -9,6 +9,7 @@ package conformance
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -140,7 +141,8 @@ func TestReadSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	if s.account != "example-account" || s.partition != "plgrid" || s.gpus != 0 || s.cpus != 1 || s.memory.String() != "1Gi" ||
-		s.part.Name != "plgrid" || s.profile.Spec.StagingDir != "$SCRATCH/hpc-burst-conformance" {
+		s.part.Name != "plgrid" || s.staging != "$SCRATCH/hpc-burst-conformance" ||
+		!regexp.MustCompile(`^\$SCRATCH/hpc-burst-conformance/run-[0-9a-f]{12}$`).MatchString(s.profile.Spec.StagingDir) {
 		t.Errorf("settings = %+v", s)
 	}
 

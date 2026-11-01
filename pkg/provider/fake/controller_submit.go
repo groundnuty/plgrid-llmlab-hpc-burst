@@ -22,6 +22,7 @@ func unresolved(rec *v1alpha1.SubmissionRecord) bool {
 // it has set obs to the phase that explains why not.
 func (c *Controller) establish(ctx context.Context, p *pass, s *allocState) (settled bool, err error) {
 	rec := s.rec
+	limitReason(s.obs, rec)
 	if unresolved(rec) {
 		jobs, err := c.findByTag(ctx, p, s.tag, s.a.CreationTimestamp.Add(-listLookback))
 		if err != nil {
@@ -79,7 +80,14 @@ func (c *Controller) submit(ctx context.Context, p *pass, s *allocState) (bool, 
 		return true, nil
 	case provider.Rejected:
 		s.obs.Phase = v1alpha1.AllocationSubmitting
-		return false, c.writeRecord(ctx, s, c.newRecord(attempt, v1alpha1.SubmissionRejected, errText(serr), p.now))
+		r := c.newRecord(attempt, v1alpha1.SubmissionRejected, errText(serr), p.now)
+		// A refusal for a full submit limit carries its code in the same
+		// record (v1alpha1.SubmissionRecord.Code; HBEP-4, QOS limits).
+		var pr *provider.PolicyRefusal
+		if errors.As(serr, &pr) && pr.SubmitLimit() {
+			r.Code = v1alpha1.ReasonSubmitLimitReached
+		}
+		return false, c.writeRecord(ctx, s, r)
 	default:
 		s.obs.Phase = v1alpha1.AllocationSubmissionUnknown
 		return false, c.writeRecord(ctx, s, c.newRecord(attempt, v1alpha1.SubmissionUnknown, errText(serr), p.now))
@@ -94,7 +102,24 @@ func (c *Controller) writeRecord(ctx context.Context, s *allocState, r v1alpha1.
 		return fmt.Errorf("record attempt %d as %s: %w", r.Attempt, r.State, err)
 	}
 	s.rec, s.obs.Submission = &r, &r
+	limitReason(s.obs, &r)
 	return nil
+}
+
+// limitReason derives the observation's reason from the current submission
+// record: SubmitLimitReached while the record carries that code, and never
+// otherwise. Each pass starts from the stored status, so a reason set for an
+// earlier limit refusal is cleared once the record moves on: to a refusal of
+// another kind, which HBEP-4 says is never read as a full slot, to an Unknown
+// outcome, a new claim or an established job. Any other reason is left as it
+// is.
+func limitReason(obs *v1alpha1.AllocationObservation, rec *v1alpha1.SubmissionRecord) {
+	switch {
+	case rec != nil && rec.State == v1alpha1.SubmissionRejected && rec.Code == v1alpha1.ReasonSubmitLimitReached:
+		obs.Reason = v1alpha1.ReasonSubmitLimitReached
+	case obs.Reason == v1alpha1.ReasonSubmitLimitReached:
+		obs.Reason = ""
+	}
 }
 
 func errText(err error) string {

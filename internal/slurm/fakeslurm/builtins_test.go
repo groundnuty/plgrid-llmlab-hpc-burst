@@ -120,8 +120,10 @@ func TestMv(t *testing.T) {
 	for _, line := range []string{
 		"mv -f /d/nope /d/c",  // no source
 		"mv -f /d/b /nodir/c", // no destination directory
-		"mv -f /d/b /d",       // destination is a directory
-		"mv /d/b /d/c",        // only mv -f exists
+		"mv -fT /d/b /d",      // destination is a directory, and -T says it is the file's own path
+		"mv /d/b /d/c",        // only mv -f and mv -fT exist
+		"mv -T /d/b /d/c",     // no -f
+		"mv -fx /d/b /d/c",    // another option
 	} {
 		if _, _, code := r.run(line); code == 0 {
 			t.Errorf("%q succeeded, want a failure", line)
