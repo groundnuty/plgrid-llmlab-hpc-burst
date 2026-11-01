@@ -53,8 +53,9 @@ func (p *Platform) startJob(j *job, now time.Time) error {
 }
 
 // endJob ends a pending or running job. A running job's slot goes at once to a
-// phantom job of another user.
-func (p *Platform) endJob(j *job, now time.Time, state string) error {
+// phantom job of another user. In run mode its processes are stopped: TERM,
+// then KILL after grace, or KILL at once for no grace.
+func (p *Platform) endJob(j *job, now time.Time, state string, grace time.Duration) error {
 	wasRunning := j.state() == Running
 	if err := j.markEnd(now, state); err != nil {
 		return err
@@ -62,33 +63,54 @@ func (p *Platform) endJob(j *job, now time.Time, state string) error {
 	if wasRunning && p.slotsOf(j.partition) > 0 {
 		p.phantoms[j.partition]++
 	}
+	p.stop(j.cur().run, grace)
 	return nil
 }
 
 // requeueJob requeues a job; a running execution frees its slot like an end.
+// In run mode its processes get KILL at once, and the new execution starts
+// once they are gone.
 func (p *Platform) requeueJob(j *job, now time.Time) {
 	if j.state() == Running && p.slotsOf(j.partition) > 0 {
 		p.phantoms[j.partition]++
 	}
+	p.stop(j.cur().run, 0)
 	j.markRequeue(now)
 }
 
 // Start moves a pending job to RUNNING. It is refused for a held job, for a
-// job that is not pending, and when the partition has no free slot.
+// job that is not pending, and when the partition has no free slot. In run
+// mode the fake starts jobs itself, and Start is refused.
 func (p *Platform) Start(id int) error {
-	return p.withJob(id, func(j *job, now time.Time) error { return p.startJob(j, now) })
+	return p.withJob(id, func(j *job, now time.Time) error {
+		if p.run != nil {
+			return fmt.Errorf("fakeslurm: job %d: run mode starts a job itself once it is eligible; hold it, or use slots, to keep it pending", j.id)
+		}
+		return p.startJob(j, now)
+	})
 }
 
 // End closes a pending or running job in a terminal state (COMPLETED, FAILED,
-// CANCELLED, TIMEOUT or NODE_FAIL).
+// CANCELLED, TIMEOUT or NODE_FAIL). In run mode a running job's processes get
+// KILL at once, as when its node fails.
 func (p *Platform) End(id int, state string) error {
-	return p.withJob(id, func(j *job, now time.Time) error { return p.endJob(j, now, state) })
+	return p.withJob(id, func(j *job, now time.Time) error {
+		if err := p.endJob(j, now, state, 0); err != nil {
+			return err
+		}
+		p.schedule(now)
+		return nil
+	})
 }
 
 // Requeue closes the current execution as REQUEUED and opens a PENDING one
 // under the same job ID, with the restart count raised.
 func (p *Platform) Requeue(id int) error {
-	return p.withJob(id, func(j *job, now time.Time) error { p.requeueJob(j, now); return nil })
+	return p.withJob(id, func(j *job, now time.Time) error {
+		p.requeueJob(j, now)
+		p.schedule(now)
+		return nil
+	})
 }
 
 // RequeueHold requeues the job, then puts the new execution on a user hold.
@@ -142,9 +164,15 @@ func (p *Platform) SetEstimate(id int, t *time.Time) error {
 }
 
 // SetTimeLimit changes the job's time limit, in minutes: a centre's extension.
-// A running job's projected end_time follows.
+// A running job's projected end_time follows, and in run mode so does its
+// timer, counted from the start; a limit already passed ends it TIMEOUT at
+// once.
 func (p *Platform) SetTimeLimit(id, minutes int) error {
-	return p.withJob(id, func(j *job, _ time.Time) error { j.timeLimit = minutes; return nil })
+	return p.withJob(id, func(j *job, _ time.Time) error {
+		j.timeLimit = minutes
+		p.rearmLimit(j.cur().run, minutes)
+		return nil
+	})
 }
 
 // FreePhantoms releases the slots that phantom jobs of other users hold, in
@@ -152,6 +180,7 @@ func (p *Platform) SetTimeLimit(id, minutes int) error {
 func (p *Platform) FreePhantoms(partitions ...string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	defer p.schedule(p.clock.Now())
 	if len(partitions) == 0 {
 		p.phantoms = map[string]int{}
 		return
@@ -168,6 +197,18 @@ func (p *Platform) Phantoms(partition string) int {
 	return p.phantoms[partition]
 }
 
+// snapshot is the job's snapshot. In run mode an execution that is terminal
+// and never had a process (cancelled while pending or held, ended by a
+// control) has nothing left to wait for, so it is Finished. The caller holds
+// mu.
+func (p *Platform) snapshot(j *job) Job {
+	s := j.snapshot()
+	if p.run != nil && j.cur().run == nil && IsTerminal(j.state()) {
+		s.Finished = true
+	}
+	return s
+}
+
 // Job returns a snapshot of the job, and false when there is none.
 func (p *Platform) Job(id int) (Job, bool) {
 	p.mu.Lock()
@@ -176,7 +217,7 @@ func (p *Platform) Job(id int) (Job, bool) {
 	if j == nil {
 		return Job{}, false
 	}
-	return j.snapshot(), true
+	return p.snapshot(j), true
 }
 
 // Jobs returns a snapshot of every job, by job ID.
@@ -185,7 +226,7 @@ func (p *Platform) Jobs() []Job {
 	defer p.mu.Unlock()
 	out := make([]Job, len(p.jobs))
 	for i, j := range p.jobs {
-		out[i] = j.snapshot()
+		out[i] = p.snapshot(j)
 	}
 	return out
 }

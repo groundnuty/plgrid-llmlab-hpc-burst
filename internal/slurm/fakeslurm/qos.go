@@ -87,7 +87,7 @@ func (p *Platform) LateJobs() int {
 // registerFor registers the job of a session. It is the one place the QOS code
 // reaches register, so a change to register's signature is a change here.
 func (p *Platform) registerFor(sess *Session, s sbatchSpec, now time.Time, step SubmitStep) *job {
-	return p.register(sess.user, s, now, step)
+	return p.register(sess, s, now, step)
 }
 
 // jobQOS is the QOS a submission runs under: the one --qos names, else the

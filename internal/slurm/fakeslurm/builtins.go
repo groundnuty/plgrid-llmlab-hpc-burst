@@ -2,10 +2,9 @@ package fakeslurm
 
 // New. The file and environment commands of the grammar: cat >, printenv,
 // sha256sum, umask, mkdir -p, chmod, mv -f, rm -f, rm -rf and test -f, over
-// the platform's in-memory file system.
+// the platform's file system (in memory, or on disk in run mode).
 
 import (
-	"crypto/sha256"
 	"encoding/hex"
 	"io/fs"
 	"path"
@@ -21,19 +20,16 @@ func (sh *shell) cat(c simpleCmd) int {
 		return sh.fail(2, "bash: line 1: the fake supports only: cat > <file>")
 	}
 	name := sh.path(c.redirect)
-	fsys := &sh.p.fs
+	fsys := sh.p.fs
 	switch {
 	case fsys.isDir(name):
 		return sh.fail(1, "bash: line 1: %s: Is a directory", name)
 	case !fsys.isDir(path.Dir(name)):
 		return sh.fail(1, "bash: line 1: %s: No such file or directory", name)
 	}
-	content := append([]byte(nil), sh.stdin...)
-	if f := fsys.files[name]; f != nil {
-		f.Content = content
-		return 0
+	if err := fsys.write(name, sh.stdin, sh.fileMode(), sh.s.user); err != nil {
+		return sh.fail(1, "bash: line 1: %s: %v", name, err)
 	}
-	fsys.files[name] = &File{Content: content, Mode: sh.fileMode(), Owner: sh.s.user}
 	return 0
 }
 
@@ -55,11 +51,13 @@ func (sh *shell) sha256sum(args []string) int {
 	if len(args) != 1 {
 		return sh.fail(2, "sha256sum: the fake supports only: sha256sum <path>")
 	}
-	f := sh.p.fs.files[sh.path(args[0])]
-	if f == nil {
+	sum, ok, err := sh.p.fs.sum(sh.path(args[0]))
+	switch {
+	case !ok:
 		return sh.fail(1, "sha256sum: %s: No such file or directory", args[0])
+	case err != nil:
+		return sh.fail(1, "sha256sum: %s: %v", args[0], err)
 	}
-	sum := sha256.Sum256(f.Content)
 	sh.out("%s  %s\n", hex.EncodeToString(sum[:]), args[0])
 	return 0
 }
@@ -97,14 +95,11 @@ func (sh *shell) chmod(args []string) int {
 	if err != nil || m > 0o7777 {
 		return sh.fail(1, "chmod: invalid mode: '%s'", args[0])
 	}
-	name := sh.path(args[1])
-	fsys := &sh.p.fs
+	found, err := sh.p.fs.chmod(sh.path(args[1]), fs.FileMode(m).Perm())
 	switch {
-	case fsys.files[name] != nil:
-		fsys.files[name].Mode = fs.FileMode(m).Perm()
-	case fsys.isDir(name):
-		fsys.dirs[name] = fs.FileMode(m).Perm()
-	default:
+	case err != nil:
+		return sh.fail(1, "chmod: changing permissions of '%s': %v", args[1], err)
+	case !found:
 		return sh.fail(1, "chmod: cannot access '%s': No such file or directory", args[1])
 	}
 	return 0
@@ -117,18 +112,18 @@ func (sh *shell) mv(args []string) int {
 		return sh.fail(2, "mv: the fake supports only: mv -f <a> <b>")
 	}
 	from, to := sh.path(args[1]), sh.path(args[2])
-	fsys := &sh.p.fs
-	f := fsys.files[from]
+	fsys := sh.p.fs
 	switch {
-	case f == nil:
+	case !fsys.isFile(from):
 		return sh.fail(1, "mv: cannot stat '%s': No such file or directory", args[1])
 	case fsys.isDir(to):
 		return sh.fail(1, "mv: cannot overwrite directory '%s' with non-directory", args[2])
 	case !fsys.isDir(path.Dir(to)):
 		return sh.fail(1, "mv: cannot move '%s' to '%s': No such file or directory", args[1], args[2])
 	}
-	delete(fsys.files, from)
-	fsys.files[to] = f
+	if err := fsys.rename(from, to); err != nil {
+		return sh.fail(1, "mv: cannot move '%s' to '%s': %v", args[1], args[2], err)
+	}
 	return 0
 }
 
@@ -139,11 +134,13 @@ func (sh *shell) rm(args []string) int {
 		return sh.fail(2, "rm: the fake supports only: rm -f <file> and rm -rf <path>")
 	}
 	name := sh.path(args[1])
-	fsys := &sh.p.fs
+	fsys := sh.p.fs
 	if args[0] == "-f" && fsys.isDir(name) {
 		return sh.fail(1, "rm: cannot remove '%s': Is a directory", args[1])
 	}
-	fsys.removeTree(name)
+	if err := fsys.removeTree(name); err != nil {
+		return sh.fail(1, "rm: cannot remove '%s': %v", args[1], err)
+	}
 	return 0
 }
 

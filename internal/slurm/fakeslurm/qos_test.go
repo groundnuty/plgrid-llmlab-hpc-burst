@@ -6,6 +6,7 @@ package fakeslurm
 
 import (
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -252,5 +253,41 @@ func TestLostReplyLateRegistersBeforeTheNextSubmissionIsChecked(t *testing.T) {
 	}
 	if n := r.p.LateJobs(); n != 0 {
 		t.Errorf("%d late jobs left, want 0", n)
+	}
+}
+
+// In run mode the scheduler goes through the same GPU cap as Start (canStart):
+// a second job that fits alone is accepted and stays pending, with no process,
+// while the first runs, and starts within the command that ends the first. The
+// test waits on observable state (a process, a state, a file), never on a
+// window.
+func TestRunModeGPUCapKeepsASecondJobPendingUntilTheFirstEnds(t *testing.T) {
+	r := newRunRigCfg(t, Config{
+		Run: &RunMode{}, NotListed: NotListedAthena,
+		Partitions: []Partition{{Name: "p"}},
+		QOS:        []QOS{{Name: "now", MaxGPUsPerUser: 1}},
+	}, true)
+	release, ran := r.home+"/release", r.home+"/ran"
+	first := r.submit(waitLoop(release), "--partition=p", "--qos=now", "--gres=gpu:1")
+	waitFor(t, "the first job to run", func() bool { return r.job(first).PID > 0 })
+	second := r.submit("echo ran > "+ran, "--partition=p", "--qos=now", "--gres=gpu:1")
+	if j := r.job(second); j.State != Pending || j.PID != 0 {
+		t.Fatalf("the second job is %s with PID %d beside the first: want PENDING and no process (the cap is one GPU)", j.State, j.PID)
+	}
+	// A job with no GPU is no part of the cap and starts at once.
+	other := r.submit("true", "--partition=p", "--qos=now")
+	waitFor(t, "the job with no GPU to run or end", func() bool { return r.job(other).State != Pending })
+	if err := os.WriteFile(release, []byte("go"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the second job to start once the first ended", func() bool { return r.job(second).State != Pending })
+	if got := r.waitFile(ran); got != "ran\n" {
+		t.Errorf("the second job wrote %q", got)
+	}
+	if j := r.waitFinished(first); j.State != Completed {
+		t.Errorf("the first job ended %s, want COMPLETED", j.State)
+	}
+	if j := r.waitFinished(second); j.State != Completed {
+		t.Errorf("the second job ended %s, want COMPLETED", j.State)
 	}
 }
