@@ -192,7 +192,7 @@ func tunnelDown(in *v1alpha1.Instance) bool {
 func startTimeoutReason(in *v1alpha1.Instance, st settings) (string, string) {
 	if tunnelDown(in) {
 		c := apimeta.FindStatusCondition(in.Status.Conditions, v1alpha1.ConditionTunnelConnected)
-		return v1alpha1.ReasonTunnelNotConnected, fmt.Sprintf("not ready within %s of its start instruction, and its tunnel is not connected (TunnelConnected %s, %s: %s)", st.startTimeout, c.Status, c.Reason, c.Message)
+		return v1alpha1.ReasonTunnelNotConnected, fmt.Sprintf("not ready within %s of its start instruction or its last restart, and its tunnel is not connected (TunnelConnected %s, %s: %s)", st.startTimeout, c.Status, c.Reason, c.Message)
 	}
 	return v1alpha1.ReasonStartTimeout, fmt.Sprintf("not ready within %s of its start instruction", st.startTimeout)
 }
