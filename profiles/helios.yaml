@@ -46,9 +46,10 @@ spec:
       # The centre documents a billing share of 120 GB per GPU (facts.other.billing) without saying
       # which GB; if it is decimal, a one-GPU request of this memory may be billed as more than one GPU.
       # It includes a RAM-disk budget of 24 GiB for tmpDir below, which counts against --mem: the SIF
-      # build's peak, about twice the image, plus the run directory's small files (HBEP-4;
-      # `@hpc-burst-science-agent`, 1 Nov 2026). The agent removes the build tree once the SIF is
-      # written, before the engine loads its weights, and refuses a build that does not fit.
+      # build's peak, about twice the image, plus the run directory's small files (HBEP-4, Platform
+      # profile schema; `@hpc-burst-science-agent`, 1 Nov 2026). The agent removes the build tree once
+      # the SIF is cached, before the engine loads its weights, and reports the build's peak TMPDIR
+      # use, which measures this budget (HBEP-7, The allocation agent).
       memPerGpu: 122375Mi
       imageFormat: sif # facts.containers.apptainer_compute_nodes.value.plgrid-gpu-gh200 (S1 probe 2: a SIF runs); also facts.partitions[name=plgrid-gpu-gh200].image_format
       # The job's temporary directory is the job's RAM disk (HBEP-4, Submission and Platform profile
