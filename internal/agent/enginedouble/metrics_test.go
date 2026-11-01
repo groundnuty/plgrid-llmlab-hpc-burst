@@ -369,7 +369,7 @@ func TestNeverSettleGrowsEachRequest(t *testing.T) {
 	for i, ev := range got {
 		want := time.Duration(i) * share
 		if ev.Nth != i || time.Duration(ev.InjectedNS) != want {
-			t.Errorf("request %d is the %dth of its shape and the double made it wait %v, want the %dth and exactly %v (records: %+v)", i, ev.Nth, time.Duration(ev.InjectedNS), i, want, got)
+			t.Errorf("request %d has place %d in its shape and the double made it wait %v, want place %d and exactly %v (records: %+v)", i, ev.Nth, time.Duration(ev.InjectedNS), i, want, got)
 		}
 		if ttfb[i] < time.Duration(ev.InjectedNS) {
 			t.Errorf("request %d had its first byte after %v, before the %v the double says it slept (all: %v)", i, ttfb[i], time.Duration(ev.InjectedNS), ttfb)
