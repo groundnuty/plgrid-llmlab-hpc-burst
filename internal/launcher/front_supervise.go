@@ -33,10 +33,17 @@ const (
 // FrontStopBudget and a margin of 4 s.
 const FrontTermGrace = FrontStopBudget + 4*time.Second
 
+// SupervisorGrace is the least grace the supervisor needs to stop: the longest kill grace it gives
+// a child (the controller's ControllerTermGrace; the front's FrontTermGrace when it runs one), and
+// 5 s for the supervisor to see the exits, write its record and exit. down kills the supervisor
+// sooner only when given a shorter --grace, and its children die with it (Pdeathsig).
+const SupervisorGrace = max(ControllerTermGrace, FrontTermGrace) + 5*time.Second
+
 // SupervisorGraceWithFront is the least grace down and upgrade accept for a host whose supervisor
-// runs a front: FrontTermGrace, and 5 s for the supervisor to see the front's exit, write its
-// record and exit. A shorter --grace is refused (ErrGraceTooShort); DefaultGrace is longer.
-const SupervisorGraceWithFront = FrontTermGrace + 5*time.Second
+// runs a front: SupervisorGrace. A shorter --grace is refused (ErrGraceTooShort), since a killed
+// front loses usage records; DefaultGrace is longer. A host without a front accepts a shorter
+// grace: a controller killed before its stop ends leaves its Leases held until they expire.
+const SupervisorGraceWithFront = SupervisorGrace
 
 // FrontBinName is the front's binary (issue #64, HBEP-5), looked for beside the running hpcburst
 // unless --front-bin names another.

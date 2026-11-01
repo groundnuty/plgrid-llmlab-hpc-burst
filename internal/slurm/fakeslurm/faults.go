@@ -85,6 +85,8 @@ const (
 	stepRename
 	stepAsTimeLimit
 	stepAdminHold
+	stepPolicy
+	stepLostReplyLate
 )
 
 // SubmitStep is the outcome of one sbatch call, scripted with Script.

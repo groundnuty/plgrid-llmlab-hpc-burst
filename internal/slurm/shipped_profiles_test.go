@@ -125,11 +125,11 @@ func TestShippedCPUPartitionRefusesGPUAllocations(t *testing.T) {
 // Athena plgrid-now is a short-job lane (issue #93, `@hpc-burst-science-agent`,
 // 1 Nov 2026): the partition's time limit is 1 h, and its gpusPerNode is the
 // node's 8, since the field is a node fact. The QoS cap of one GPU per user is
-// an untyped fact until the typed maxGpusPerUser of the HBEP-4/7 amendment
-// (PR #151), so the profile does not refuse a second GPU yet; the absent
-// per-GPU sizing keeps Instances off the partition instead
-// (internal/lifecycle, TestShippedAthenaNowCannotBeSized). The expected values
-// are the measured time limit and the node's GPU count, written out here. A
+// typed (qos plgrid-now, maxGpusPerUser), and TestShippedProfilesTypeTheirQOS
+// checks the refusal of a second GPU; the absent per-GPU sizing keeps
+// Instances off the partition (internal/lifecycle,
+// TestShippedAthenaNowCannotBeSized). The expected values are the measured
+// time limit and the node's GPU count, written out here. A
 // request above the time limit is refused before any call; the control is the
 // same request on plgrid-gpu-a100, whose profile allows 48 h, so the refusal
 // comes from the plgrid-now entry.
@@ -214,5 +214,156 @@ func TestShippedProfilesJobNameRules(t *testing.T) {
 		if rules != nil && rules.Pattern != "" {
 			t.Errorf("%s: jobName.pattern is %q; no fact states a pattern", tc.file, rules.Pattern)
 		}
+	}
+}
+
+// The typed QOS limits of the shipped profiles (HBEP-4, QOS limits), with the
+// Provider's qos that each alpha partition names. The expected numbers are
+// written out from the measurements the HBEP cites (the QOS now: 12 h, one
+// submitted job, one GPU, 72 CPUs, 122,400 MiB; plgrid-now: no wall limit, one
+// job, 1 GPU, 16 CPUs, 125 GiB, which is 128,000 MiB), never read from the
+// profile. Each refusal is paired with a control that the same code accepts,
+// so the refusal comes from the one limit changed.
+func TestShippedProfilesTypeTheirQOS(t *testing.T) {
+	load := func(file string) v1alpha1.PlatformProfile {
+		raw, err := os.ReadFile(filepath.Join("..", "..", "profiles", file))
+		if err != nil {
+			t.Fatalf("read the shipped profile: %v", err)
+		}
+		var pp v1alpha1.PlatformProfile
+		if err := yaml.UnmarshalStrict(raw, &pp); err != nil {
+			t.Fatalf("%s: %v", file, err)
+		}
+		return pp
+	}
+	type shape struct {
+		gpus, cpus int32
+		mem, limit string
+	}
+	for _, tc := range []struct {
+		file, partition, qos string
+		atCaps               shape // accepted: exactly at every cap
+		refused              []struct {
+			name string
+			s    shape
+			want string // named by the refusal
+		}
+	}{
+		{"helios.yaml", "plgrid-gpu-gh200", "now", shape{1, 72, "122400Mi", "12h"}, []struct {
+			name string
+			s    shape
+			want string
+		}{
+			{"12h and a minute", shape{1, 72, "122375Mi", "12h1m"}, "maxWall"},
+			{"two GPUs", shape{2, 72, "122375Mi", "12h"}, "maxGpusPerUser"},
+			{"73 CPUs", shape{1, 73, "122375Mi", "12h"}, "maxCpusPerUser"},
+			{"one MiB over the memory", shape{1, 72, "122401Mi", "12h"}, "maxMemPerUser"},
+		}},
+		{"athena.yaml", "plgrid-now", "plgrid-now", shape{1, 16, "125Gi", "1h"}, []struct {
+			name string
+			s    shape
+			want string
+		}{
+			{"an hour and a minute", shape{1, 16, "125Gi", "61m"}, "maxTime"},
+			{"two GPUs of the node's eight", shape{2, 16, "125Gi", "1h"}, "maxGpusPerUser"},
+			{"17 CPUs", shape{1, 17, "125Gi", "1h"}, "maxCpusPerUser"},
+			{"one MiB over 125Gi", shape{1, 16, "128001Mi", "1h"}, "maxMemPerUser"},
+		}},
+	} {
+		t.Run(tc.file+"/"+tc.partition, func(t *testing.T) {
+			pp := load(tc.file)
+			// ReadProfile accepts the Provider's qos and fills the settings.
+			r := newProfileRig(t)
+			r.pp = pp.DeepCopy()
+			r.prov.Spec.PlatformProfileRef.Name = pp.Name
+			r.prov.Spec.AllowedPartitions = []string{tc.partition}
+			r.prov.Spec.QOS = tc.qos
+			v, err := r.read()
+			if err != nil {
+				t.Fatalf("ReadProfile refuses the shipped profile with qos %s: %v", tc.qos, err)
+			}
+			if v.Settings.QOS != tc.qos {
+				t.Fatalf("Settings.QOS = %q, want %q", v.Settings.QOS, tc.qos)
+			}
+			check := func(s shape) error {
+				req := provider.SubmitRequest{
+					Tag: "hb-example-0123456789ab", Hold: true, Account: "example-account", QOS: tc.qos,
+					Params: v1alpha1.BatchParameters{
+						Partition: tc.partition, TimeLimit: v1alpha1.Duration(s.limit), GPUs: s.gpus, CPUsPerTask: s.cpus,
+						Memory: resource.MustParse(s.mem), Nodes: 1, AgentDigest: strings.Repeat("a", 64),
+					},
+				}
+				return CheckRequest(req, v.Profile, v.Settings)
+			}
+			if err := check(tc.atCaps); err != nil {
+				t.Fatalf("the request at every cap is refused, so the refusals below prove nothing: %v", err)
+			}
+			for _, c := range tc.refused {
+				err := check(c.s)
+				if !errors.Is(err, provider.ErrInvalidRequest) || !strings.Contains(err.Error(), c.want) {
+					t.Errorf("%s: got %v; want a refusal wrapping ErrInvalidRequest that names %s", c.name, err, c.want)
+				}
+			}
+		})
+	}
+}
+
+// On Helios plgrid-gpu-gh200 the partition's own QOS, plgrid, comes before the
+// Provider's now (HBEP-4, QOS limits): its submit limit of 2000 is the one that
+// applies, and now's cap of one GPU holds because plgrid sets none. With no
+// qos the Provider runs under the association's default, normal, which sets
+// nothing: four GPUs and 48 h are within the limits. Expected values by hand.
+func TestShippedHeliosGH200AppliesThePartitionQOSFirst(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "profiles", "helios.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pp v1alpha1.PlatformProfile
+	if err := yaml.UnmarshalStrict(raw, &pp); err != nil {
+		t.Fatal(err)
+	}
+	var part v1alpha1.PartitionProfile
+	for _, p := range pp.Spec.Partitions {
+		if p.Name == "plgrid-gpu-gh200" {
+			part = p
+		}
+	}
+	if part.QOS != "plgrid" {
+		t.Fatalf("plgrid-gpu-gh200 names the partition QOS %q, want plgrid", part.QOS)
+	}
+	limits, err := v1alpha1.EffectiveQOSLimits(&pp.Spec, part, "now")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if limits.MaxSubmitPerUser == nil || *limits.MaxSubmitPerUser != 2000 || limits.From[v1alpha1.LimitMaxSubmitPerUser] != "plgrid" {
+		t.Errorf("the submit limit under now is %v from %q, want 2000 from plgrid", limits.MaxSubmitPerUser, limits.From[v1alpha1.LimitMaxSubmitPerUser])
+	}
+	if limits.MaxGPUsPerUser == nil || *limits.MaxGPUsPerUser != 1 || limits.From[v1alpha1.LimitMaxGPUsPerUser] != "now" {
+		t.Errorf("the GPU cap under now is %v from %q, want 1 from now", limits.MaxGPUsPerUser, limits.From[v1alpha1.LimitMaxGPUsPerUser])
+	}
+	if limits.MaxWall == nil || limits.MaxWall.Hours() != 12 {
+		t.Errorf("the wall limit under now is %v, want 12h", limits.MaxWall)
+	}
+	// The association's default sets no limit but the partition QOS's.
+	check := func(qos string, gpus int32, limit string) error {
+		req := provider.SubmitRequest{
+			Tag: "hb-example-0123456789ab", Hold: true, Account: "example-account", QOS: qos,
+			Params: v1alpha1.BatchParameters{
+				Partition: "plgrid-gpu-gh200", TimeLimit: v1alpha1.Duration(limit), GPUs: gpus, CPUsPerTask: 72 * gpus,
+				Memory: resource.MustParse("122375Mi"), Nodes: 1, AgentDigest: strings.Repeat("a", 64),
+			},
+		}
+		req.Params.Memory.Mul(int64(gpus))
+		return CheckRequest(req, provider.Profile{Name: pp.Name, Spec: pp.Spec, Partition: part},
+			provider.Settings{Provider: "example", Account: "example-account", Partition: "plgrid-gpu-gh200", QOS: qos})
+	}
+	if err := check("", 4, "48h"); err != nil {
+		t.Errorf("no qos, 4 GPUs for 48h: %v; want it accepted (only the partition's plgrid applies)", err)
+	}
+	if err := check("normal", 4, "48h"); err != nil {
+		t.Errorf("qos normal, 4 GPUs for 48h: %v; want it accepted", err)
+	}
+	if err := check("now", 4, "12h"); err == nil {
+		t.Error("qos now, 4 GPUs: accepted, but now's cap is one GPU")
 	}
 }

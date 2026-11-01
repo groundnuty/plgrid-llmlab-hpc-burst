@@ -24,6 +24,12 @@ type SystemClock struct{}
 // Now returns the current time in UTC.
 func (SystemClock) Now() time.Time { return time.Now().UTC() }
 
+// EventDegraded is HBEP-8's degraded type for an emitter outside this package
+// (the tunnel's TunnelOrphaned, which cmd/hpcburst-controller raises through
+// the lifecycle controller's own recorder). KubeRecorder gives it the Warning
+// severity.
+const EventDegraded = eventDegraded
+
 // Recorder emits HBEP-8's events. Events are best-effort; conditions are the
 // level truth (HBEP-7, Events and conditions). regarding is the object the
 // event is about and related, when not nil, another object it names (the

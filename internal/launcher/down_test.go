@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -26,6 +27,11 @@ func downFixture(t *testing.T, rec ProcRec) layout {
 	return l
 }
 
+// waitNotRunning polls /proc until no thread of pid runs. It is the test's own view and says
+// nothing about the pidfd, which fires only when the whole thread group is gone, so it is a
+// post-condition after a stop that already read the exit from a pidfd (Down, StopFrps) or from
+// cmd.Wait (Supervise). It does not establish that a process the code under test reads through a
+// pidfd has died: kill that one with killAndWaitExited (issue #154).
 func waitNotRunning(pid int, d time.Duration) bool {
 	end := time.Now().Add(d)
 	for time.Now().Before(end) {
@@ -35,6 +41,25 @@ func waitNotRunning(pid int, d time.Duration) bool {
 		time.Sleep(20 * time.Millisecond)
 	}
 	return !runningNow(pid)
+}
+
+// killAndWaitExited kills the process recorded as rec and returns once a pidfd taken before the
+// kill says it has exited. Death is read from the pidfd only (handle.go): /proc can read a killed
+// process as gone, or its leader as Z, while the pidfd has not fired, and then the code under test
+// still sees a live process. The signal goes through the same pidfd, so it cannot reach a reused PID.
+func killAndWaitExited(t *testing.T, rec ProcRec) {
+	t.Helper()
+	h, v, d := openRec(rec)
+	if v != Ours {
+		t.Fatalf("pid %d is %v before the kill: %s", rec.PID, v, d)
+	}
+	defer h.Close()
+	if err := h.signal(syscall.SIGKILL); err != nil {
+		t.Fatalf("SIGKILL to pid %d: %v", rec.PID, err)
+	}
+	if !waitExited(context.Background(), []*procHandle{h}, 5*time.Second) {
+		t.Fatalf("pid %d is still running 5s after SIGKILL", rec.PID)
+	}
 }
 
 // TestDownNeverSignalsAForeignProcess is the PID-reuse test: the recorded PID is alive, but it is
@@ -88,6 +113,7 @@ func TestDownNeverSignalsAForeignProcess(t *testing.T) {
 					t.Error("a foreign verdict must say why")
 				}
 			} else {
+				// Safe as a post-condition: Down returns only after its pidfd wait saw the exit.
 				if !waitNotRunning(pid, 5*time.Second) {
 					t.Fatal("the control process was not stopped")
 				}
@@ -109,10 +135,7 @@ func TestDownWithAGoneProcess(t *testing.T) {
 	cmd := startBystander(t, "sleep", "300")
 	pid := cmd.Process.Pid
 	rec, _ := newRec("k3s", pid)
-	_ = cmd.Process.Kill()
-	if !waitNotRunning(pid, 5*time.Second) {
-		t.Fatal("could not kill the fixture process")
-	}
+	killAndWaitExited(t, rec)
 	l := downFixture(t, rec)
 	rep, err := Down(context.Background(), DownOptions{StateDir: l.dir, Grace: time.Second})
 	if err != nil || rep.Procs[0].Before != "gone" || rep.Procs[0].Signals != "" {
@@ -169,6 +192,8 @@ func TestDownEscalatesAndStopsDescendants(t *testing.T) {
 	if time.Since(start) < 400*time.Millisecond {
 		t.Errorf("down returned after %s, before the grace period", time.Since(start))
 	}
+	// Safe as a post-condition: Down waited on the pidfds of the shell and of the child it adopted
+	// (stopGroup's tree) before it returned.
 	if !waitNotRunning(pid, 5*time.Second) || !waitNotRunning(child, 5*time.Second) {
 		t.Fatalf("parent running=%v, child running=%v", runningNow(pid), runningNow(child))
 	}

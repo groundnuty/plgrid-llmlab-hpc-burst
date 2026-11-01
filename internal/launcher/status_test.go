@@ -46,10 +46,7 @@ func TestStatusGoneAndForeignProcesses(t *testing.T) {
 		t.Fatalf("foreign: %+v, %v", rep, err)
 	}
 
-	_ = cmd.Process.Kill()
-	if !waitNotRunning(cmd.Process.Pid, 5*time.Second) {
-		t.Fatal("could not kill the fixture")
-	}
+	killAndWaitExited(t, rec)
 	rep, err = Status(context.Background(), StatusOptions{StateDir: statusFixture(t, rec, Ports{API: 1, HTTPS: 2, KCM: 3, LB: 4}).dir})
 	if err != nil || rep.Health != Unhealthy || rep.Processes[0].Verdict != "gone" {
 		t.Fatalf("gone: %+v, %v", rep, err)

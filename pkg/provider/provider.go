@@ -50,9 +50,9 @@ type ProfileReader interface {
 	// names every invalid field, or ErrCredentials for a file it refuses.
 	// Read-only.
 	//
-	// HBEP-4's QOS limits add one check, which the Slurm plugin gains in
-	// #151's provider change and does not make yet: the Provider's qos, when
-	// set, and the partition's qos, when set, are listed in the profile's qos.
+	// HBEP-4's QOS limits add one check, which the Slurm plugin makes: the
+	// Provider's qos, when set, and the partition's qos, when set, are listed
+	// in the profile's qos.
 	ReadProfile(ctx context.Context, provider string) (Profile, Settings, error)
 }
 
@@ -88,13 +88,13 @@ type Batch interface {
 	// ErrInvalidRequest. Not idempotent: it runs only under a claimed
 	// attempt, and never retries by itself.
 	//
-	// HBEP-4's QOS limits extend the refusals before any call, in #151's
-	// provider change (not made yet), with the limits that apply on the
-	// partition under req.QOS (v1alpha1.EffectiveQOSLimits): an unsafe QOS,
-	// more GPUs than v1alpha1.MaxAllocationGPUs, more CPUs or memory than
-	// maxCpusPerUser or maxMemPerUser, and a time limit above the smaller of
-	// maxTime and maxWall. A policy refusal is then returned as a
-	// *PolicyRefusal.
+	// HBEP-4's QOS limits extend the refusals before any call, which the
+	// Slurm plugin makes, with the limits that apply on the partition under
+	// req.QOS (v1alpha1.EffectiveQOSLimits): an unsafe QOS, an effective
+	// maxSubmitPerUser of 0, more GPUs than v1alpha1.MaxAllocationGPUs, more
+	// CPUs or memory than maxCpusPerUser or maxMemPerUser, and a time limit
+	// above the smaller of maxTime and maxWall. A policy refusal is returned
+	// as a *PolicyRefusal.
 	Submit(ctx context.Context, req SubmitRequest) (jobID string, outcome SubmitOutcome, err error)
 
 	// LiftHold lifts the job's user hold. Its errors wrap ErrNotHeld,
@@ -156,8 +156,8 @@ type Settings struct {
 	Partition string
 	// QOS is the Provider's qos, the QOS its jobs are to be submitted under,
 	// or "" for the association's default (HBEP-4, Provider settings).
-	// ReadProfile fills it, sending it as --qos and checking that the profile
-	// lists it, from #151's provider change; until then it stays "".
+	// ReadProfile fills it, checking that the profile lists it; the Slurm
+	// plugin sends it as --qos.
 	QOS string
 	// CredentialsFile is the path of the mode-600 credentials file on the
 	// control-plane host: for a Slurm provider an ssh client configuration
@@ -180,10 +180,9 @@ type SubmitRequest struct {
 	Hold bool
 	// Account comes from the Provider's settings, never from the Allocation.
 	Account string
-	// QOS comes from the Provider's settings, never from the Allocation. From
-	// #151's provider change the submission adds --qos=<QOS> when it is set,
-	// and no --qos at all when it is "" (HBEP-4, The Slurm dialect); until
-	// then no --qos is sent.
+	// QOS comes from the Provider's settings, never from the Allocation. The
+	// Slurm plugin's submission adds --qos=<QOS> when it is set, and no --qos
+	// at all when it is "" (HBEP-4, The Slurm dialect).
 	QOS string
 	// Params are the Allocation's submission parameters.
 	Params v1alpha1.BatchParameters
