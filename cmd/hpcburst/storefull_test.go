@@ -70,6 +70,20 @@ func TestStoreFull(t *testing.T) { storeFull(t, false) }
 // 260 MiB) and the store, with 40 MiB to spare.
 func TestStoreFullWholeDataDir(t *testing.T) { storeFull(t, true) }
 
+// The fill is judged full by streaks of refused tiny writes, not by one refusal (#180).
+const (
+	// refusedStreak: tiny writes refused in a row before the store counts as full. The pages a rolled-back
+	// write leaves behind take a few tiny writes to use up, so one refusal proves nothing about the next,
+	// and ten in a row do: more than the pages a single refused write can have freed.
+	refusedStreak = 10
+	// followingRefused: tiny writes that must be refused after the streak.
+	followingRefused = 3
+	// maxTinyAttempts bounds the settling loop, so a store that keeps accepting writes ends the test.
+	maxTinyAttempts = 1000
+	// statusRounds: status runs, each after settling the store again, allowed to find space returned.
+	statusRounds = 3
+)
+
 func storeFull(t *testing.T, wholeDataDir bool) {
 	binDirOrSkip(t)
 	limit := int64(32 << 20)
@@ -147,29 +161,89 @@ func storeFull(t *testing.T, wholeDataDir bool) {
 	if !strings.Contains(firstErr.Error(), "database or disk is full") {
 		t.Fatalf("the first refused write failed for another reason than a full store: %v", firstErr)
 	}
+	// The store is full when writes are refused over and over, not when one was: SQLite reuses the pages
+	// that rolled-back writes left, and a checkpoint can free some, while the file system stays at its
+	// limit, so a tiny write can succeed once after the fill. Keep writing tiny objects until
+	// refusedStreak of them in a row are refused (the successes in between are those leftover pages being
+	// used up), and then require the writes that follow to be refused too.
+	tiny := func(name string) error {
+		_, err := c.cs.CoreV1().ConfigMaps("fill").Create(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name}, Data: map[string]string{"d": "x"}}, metav1.CreateOptions{})
+		return err
+	}
+	var tinyCreated int
+	tinyAttempts := 0
+	settleTiny := func() {
+		t.Helper()
+		streak := 0
+		for streak < refusedStreak {
+			if tinyAttempts++; tinyAttempts > maxTinyAttempts {
+				t.Fatalf("the store did not settle to full: %d tiny writes tried, %d of them accepted, and never %d refused in a row", tinyAttempts, tinyCreated, refusedStreak)
+			}
+			if err := tiny(fmt.Sprintf("tiny-%04d", tinyAttempts)); err != nil {
+				if !strings.Contains(err.Error(), "database or disk is full") {
+					t.Fatalf("a tiny write failed for another reason than a full store: %v", err)
+				}
+				streak++
+				continue
+			}
+			tinyCreated++
+			streak = 0
+		}
+	}
+	settleTiny()
+	t.Logf("settled: %d tiny writes tried, %d accepted after the fill, then %d refused in a row", tinyAttempts, tinyCreated, refusedStreak)
 	// Writes are refused, even a tiny one; reads are not.
-	if _, err := c.cs.CoreV1().ConfigMaps("fill").Create(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "one-more"}, Data: map[string]string{"d": "x"}}, metav1.CreateOptions{}); err == nil {
-		t.Fatal("a tiny write still succeeds: the store is not full")
+	for i := 0; i < followingRefused; i++ {
+		if err := tiny(fmt.Sprintf("one-more-%d", i)); err == nil {
+			t.Fatalf("tiny write %d after %d refusals in a row succeeded: the store is not full", i+1, refusedStreak)
+		}
 	}
 	list, err := c.cs.CoreV1().ConfigMaps("fill").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		t.Errorf("reads should still work: %v", err)
-	} else if len(list.Items) < created {
-		t.Errorf("reads lost objects: %d listed, %d created", len(list.Items), created)
-	} else if len(list.Items) > created {
+	} else if want := created + tinyCreated; len(list.Items) < want {
+		t.Errorf("reads lost objects: %d listed, %d created", len(list.Items), want)
+	} else if len(list.Items) > want {
 		// HBEP-11, Operational readiness 3: a write can return an error and still take effect.
 		// Here a refused create left an object behind, which is why controllers re-read after
 		// every failed write.
-		t.Logf("%d object(s) exist although their create returned an error: a refused write that took effect", len(list.Items)-created)
+		t.Logf("%d object(s) exist although their create returned an error: a refused write that took effect", len(list.Items)-want)
 	}
 
-	// status reports the write failure. The process view alone cannot see it.
-	r = cli(t, h.args("status", "--json")...)
+	// status reports the write failure. The process view alone cannot see it. Its write probe is a tiny
+	// write too, so what it reports is judged against the store's state around it: a tiny write refused
+	// just before and just after a run means the store was full while it probed, and then the run must say
+	// so. If space came back in between (a tiny write was accepted), the premise did not hold for that run:
+	// the store is settled to full again and status asked again, at most statusRounds times. A status that
+	// reports healthy writes while the store stays full fails at once.
+	statusWhileFull := func(args ...string) cliResult {
+		t.Helper()
+		for round := 1; ; round++ {
+			before := tiny(fmt.Sprintf("before-status-%d-%d", len(args), round))
+			r := cli(t, h.args(args...)...)
+			after := tiny(fmt.Sprintf("after-status-%d-%d", len(args), round))
+			if before != nil && after != nil {
+				return r // the store refused tiny writes before and after: it was full while status probed it
+			}
+			if round == statusRounds {
+				t.Fatalf("status %v: a tiny write was accepted around each of %d runs, so the store was not full while it probed", args, statusRounds)
+			}
+			t.Logf("status %v, round %d: a tiny write was accepted around it (before: %v, after: %v): the store regained space; settling it again", args, round, before, after)
+			if before == nil {
+				tinyCreated++
+			}
+			if after == nil {
+				tinyCreated++
+			}
+			settleTiny()
+		}
+	}
+	r = statusWhileFull("status", "--json")
 	parseJSON(t, r.out, &rep)
 	t.Logf("NUMBERS store full: status exit %d, health %s, readyz_ok=%v, controller_manager_ok=%v, writes_ok=%v, reasons=%v",
 		r.code, rep.Health, ptrStr(rep.Readyz), ptrStr(rep.KCM), ptrStr(rep.Writes), rep.Reasons)
 	if r.code != exitFail || rep.Health != "unhealthy" || rep.Writes == nil || *rep.Writes {
-		t.Fatalf("status did not report the failing writes: exit %d %+v", r.code, rep)
+		t.Fatalf("status did not report the failing writes while the store refused tiny writes around it: exit %d %+v", r.code, rep)
 	}
 	if !strings.Contains(strings.Join(rep.Reasons, ";"), "writes are failing") {
 		t.Errorf("reasons %v do not say that writes are failing", rep.Reasons)
@@ -177,8 +251,8 @@ func storeFull(t *testing.T, wholeDataDir bool) {
 	if r := cli(t, h.args("status", "--no-api")...); r.code != exitOK {
 		t.Errorf("the process-only view should still be healthy (that is why the write probe exists): exit %d", r.code)
 	}
-	if r := cli(t, h.args("status")...); r.code != exitFail || !strings.Contains(r.out, "writes are failing") {
-		t.Errorf("text status: exit %d: %q", r.code, r.out)
+	if r := statusWhileFull("status"); r.code != exitFail || !strings.Contains(r.out, "writes are failing") {
+		t.Errorf("text status while the store was full: exit %d: %q", r.code, r.out)
 	}
 }
 
