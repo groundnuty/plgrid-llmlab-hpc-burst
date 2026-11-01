@@ -105,21 +105,28 @@ func (r *rig) stepWorkerRestart(in *v1alpha1.Instance, key string) {
 	}
 	killAt := time.Now()
 	var outs []outcome
-	ask := func() outcome {
+	sent := 0
+	send := func() reply {
 		rp := r.send("/v1/chat/completions", chatBody(4, 0, false), key)
 		if rp.err != nil {
-			r.t.Fatalf("step (d): request %d after the engine's kill got no answer within %s: %v (a hang)", len(outs), requestTimeout, rp.err)
+			r.t.Fatalf("step (d): request %d after the engine's kill got no answer within %s: %v (a hang)", sent, requestTimeout, rp.err)
 		}
-		return outcome{rp: rp, row: r.rowOf(rp.id)}
+		sent++
+		return rp
 	}
-	// Back to back first, so that the front's pause rule, not its probe,
-	// meets the failures; then one at a time until the primary serves the key
-	// again after the controller restarted its worker.
+	// Back to back first, records read after, so that the front's pause
+	// rule, not its probe, meets the failures; then one at a time until the
+	// primary serves the key again after the controller restarted its worker.
+	var burst []reply
 	for i := 0; i <= pauseAfterFailures; i++ {
-		outs = append(outs, ask())
+		burst = append(burst, send())
+	}
+	for _, rp := range burst {
+		outs = append(outs, outcome{rp: rp, row: r.rowOf(rp.id)})
 	}
 	waitFor(r.t, waitDeadline, "the primary to serve again after a worker restart", func() bool {
-		o := ask()
+		rp := send()
+		o := outcome{rp: rp, row: r.rowOf(rp.id)}
 		outs = append(outs, o)
 		now, ok := r.instance(in.Name)
 		return ok && now.Status.Phase == v1alpha1.InstanceReady && len(now.Status.Restarts) > len(before.Status.Restarts) &&
