@@ -29,11 +29,11 @@ func TestPortsFromBase(t *testing.T) {
 	if got := p.Expected(); len(got) != 3 || got[0] != 29220 || got[1] != 29221 || got[2] != 29222 {
 		t.Errorf("expected ports %v", got)
 	}
-	// The launcher's block is base..base+7: the agent endpoint (base+3), the front's health port
-	// (base+4, issue #64), the controller's health port (base+6) and the front's ssh-mode
-	// dial-home port (base+7, where the restricted keys forward) join the four that must be free
-	// before a start. base+8 is not reserved.
-	if got := p.All(); fmt.Sprint(got) != "[29220 29221 29222 29223 29224 29225 29226 29227]" {
+	// The ports that must be free before a start are the whole block of 13, base..base+12
+	// (agentapi.ControllerMetricsPortOffset, issue #111): k3s's three, the agent endpoint, the
+	// front's /healthz (base+4) and ssh-mode dial-home port (base+7), the reserved base+5, the
+	// controller's /healthz, the frps plugin, frps's three and the controller's /metrics.
+	if got := p.All(); fmt.Sprint(got) != "[29220 29221 29222 29223 29224 29225 29226 29227 29228 29229 29230 29231 29232]" {
 		t.Errorf("all ports %v", got)
 	}
 	if got := p.ControllerAddr(); got != "127.0.0.1:29226" {
@@ -42,14 +42,14 @@ func TestPortsFromBase(t *testing.T) {
 	if got := p.FrontHealthAddr(); got != "127.0.0.1:29224" {
 		t.Errorf("front health address %q", got)
 	}
-	for _, bad := range []int{0, 80, 1023, 65529, 65530, 65531, 70000, -1} {
+	for _, bad := range []int{0, 80, 1023, 65524, 65528, 65530, 70000, -1} {
 		if _, err := PortsFromBase(bad); err == nil {
 			t.Errorf("port base %d accepted", bad)
 		}
 	}
-	// The block ends at base+7, so the last base that fits is 65528.
-	if p, err := PortsFromBase(65528); err != nil || p.DialHome != 65535 || p.Controller != 65534 || p.Agent != 65531 {
-		t.Errorf("port base 65528: %+v, %v", p, err)
+	// The block ends at base+12, so the last base that fits is 65523, whose last port is 65535.
+	if p, err := PortsFromBase(65523); err != nil || p.DialHome != 65530 || p.Controller != 65529 || p.Agent != 65526 || p.All()[12] != 65535 {
+		t.Errorf("port base 65523: %+v, %v", p, err)
 	}
 }
 

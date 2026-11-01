@@ -73,7 +73,7 @@ func TestUpStatusDown(t *testing.T) {
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Errorf("k3s listens on %v, want %v", got, want)
 	}
-	if rows := listeningInRange(t, 29220, 29239); len(rows) != len(want) {
+	if rows := listeningInRange(t, launcherPortsLo, launcherPortsHi); len(rows) != len(want) {
 		t.Errorf("listeners in the block: %v", rows)
 	}
 
@@ -343,7 +343,7 @@ func TestUpStatusDown(t *testing.T) {
 	if !waitDone(pid) {
 		t.Fatalf("k3s (pid %d) is still running after down: state %c", pid, procState(pid))
 	}
-	if rows := listeningInRange(t, 29220, 29239); len(rows) != 0 {
+	if rows := listeningInRange(t, launcherPortsLo, launcherPortsHi); len(rows) != 0 {
 		t.Errorf("listeners remain after down: %v", rows)
 	}
 	if pids := k3sProcessesUsing(h.dir); len(pids) != 0 {

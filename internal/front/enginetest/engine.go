@@ -69,6 +69,11 @@ type Behaviour struct {
 	// Health is the status of GET /health; 0 means 200. vLLM answers 503
 	// there when its engine is dead (HBEP-6, The front's half).
 	Health int
+	// Gate, when set, holds each token after the first, before its pause,
+	// until the test sends on the channel or the request ends. A test that
+	// sends only after its client has read the token before keeps an engine
+	// on the fake clock from moving the clock ahead of the front's reads.
+	Gate chan struct{}
 }
 
 // Request is one request as it arrived.
@@ -284,7 +289,7 @@ func (e *Engine) serve(w http.ResponseWriter, r *http.Request) {
 		Input  any `json:"input"`
 	}
 	_ = json.Unmarshal(body, &req)
-	p := play{e: e, w: w, b: b, model: req.Model, usage: req.StreamOptions.IncludeUsage, prompt: promptTokens(req.Messages, req.Prompt, req.Input)}
+	p := play{e: e, ctx: r.Context(), w: w, b: b, model: req.Model, usage: req.StreamOptions.IncludeUsage, prompt: promptTokens(req.Messages, req.Prompt, req.Input)}
 	switch {
 	case r.URL.Path == "/v1/embeddings":
 		p.embeddings()

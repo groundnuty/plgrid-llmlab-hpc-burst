@@ -20,6 +20,8 @@ const (
 
 // PartitionProfile is what the framework reads of one partition: its name and
 // its accelerator class (HBEP-11, API, PlatformProfile schema).
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.tmpDirFeature) || has(self.tmpDir)",message="tmpDirFeature is the node feature that tmpDir needs, so it requires tmpDir"
 type PartitionProfile struct {
 	// Name of the partition.
 	//
@@ -73,6 +75,39 @@ type PartitionProfile struct {
 	//
 	// +optional
 	ImageFormat ImageFormat `json:"imageFormat,omitempty"`
+
+	// TmpDir is the job's temporary directory on this partition: the batch
+	// script sets TMPDIR to it before it starts the allocation agent, which
+	// keeps its run directory (the engine's socket) and Apptainer's build tree
+	// there. It has stagingDir's form, an absolute path or one that starts
+	// with an environment variable, but the variable is one the job sets, such
+	// as $MEMFS, the RAM disk of Helios's memfs feature, so it is expanded
+	// inside the job, never on the login node. A variable that is unset or
+	// empty there stops the job before the agent starts, and the job ends
+	// AllocationFailed. Absent, the job keeps the TMPDIR the scheduler gives
+	// it (HBEP-4, Submission and Platform profile schema; HBEP-7, The
+	// allocation agent: on Helios plgrid-gpu-gh200 that TMPDIR is on Lustre,
+	// near its inode quota).
+	//
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=1024
+	// +kubebuilder:validation:Pattern=`^(/|\$[A-Za-z_][A-Za-z0-9_]*)[A-Za-z0-9._:=,/-]*$`
+	// +kubebuilder:validation:XValidation:rule="!self.split('/').exists(s, s == '..')",message="tmpDir must not contain a '..' segment"
+	TmpDir string `json:"tmpDir,omitempty"`
+
+	// TmpDirFeature is the Slurm node feature that TmpDir needs, such as
+	// memfs, the feature that gives a Helios job its RAM disk in $MEMFS. The
+	// Slurm provider then submits with --constraint=<feature>, so the job
+	// gets the variable TmpDir names. One feature name, never a constraint
+	// expression. Absent, no constraint is added (HBEP-4, The Slurm dialect
+	// and Platform profile schema). It requires TmpDir.
+	//
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9_.-]*$`
+	TmpDirFeature string `json:"tmpDirFeature,omitempty"`
 }
 
 // ImageFormat is a container image format Apptainer runs (PartitionProfile).

@@ -340,7 +340,7 @@ func TestControllerSupervision(t *testing.T) {
 			t.Errorf("%s (pid %d) still runs after down", name, pid)
 		}
 	}
-	if rows := listeningInRange(t, 29220, 29239); len(rows) != 0 {
+	if rows := listeningInRange(t, launcherPortsLo, launcherPortsHi); len(rows) != 0 {
 		t.Errorf("listeners remain after down: %v", rows)
 	}
 	if _, err := os.Stat(filepath.Join(h.dir, "state.json")); err == nil {
@@ -399,7 +399,7 @@ func TestControllerSupervision(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(h.dir, "state.json")); err == nil {
 		t.Error("up started k3s though the agent endpoint's key was refused")
 	}
-	if rows := listeningInRange(t, 29220, 29239); len(rows) != 0 {
+	if rows := listeningInRange(t, launcherPortsLo, launcherPortsHi); len(rows) != 0 {
 		t.Errorf("listeners remain after the refused up: %v", rows)
 	}
 	if got := fileOf(keyFile); got != string(pair.key) {

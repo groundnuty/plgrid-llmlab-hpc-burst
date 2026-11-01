@@ -9,8 +9,11 @@ import (
 // snapshot returns the full report of the agent's state now (HBEP-7,
 // Reports). It copies everything, so later changes never reach a report
 // already handed to the reporter. Free text is cut to the protocol's bounds.
+// Every time in it is in UTC, so it is written with Z and never with the
+// node's local offset, which a string comparison misorders (issue #94,
+// finding 7). Never set time.Local for this: it races.
 func (a *Agent) snapshot() agentapi.Report {
-	r := agentapi.Report{Time: a.o.Now()}
+	r := agentapi.Report{Time: a.o.Now().UTC()}
 	in := a.inst
 	if in == nil {
 		return r
@@ -30,9 +33,10 @@ func (a *Agent) snapshot() agentapi.Report {
 			Phase:        w.phase,
 			Generation:   w.generation,
 			EngineSocket: w.socket,
+			LogTail:      w.logTail,
 		}
 		if w.proc != nil {
-			start := w.proc.Start()
+			start := w.proc.Start().UTC()
 			wr.PID = w.proc.PID()
 			wr.StartTime = &start
 		}
@@ -42,6 +46,11 @@ func (a *Agent) snapshot() agentapi.Report {
 		}
 		if w.phase == agentapi.PartRunning && w.health != nil {
 			h := cloneHealth(*w.health)
+			h.Time = h.Time.UTC()
+			if h.MetricsReadAt != nil {
+				read := h.MetricsReadAt.UTC()
+				h.MetricsReadAt = &read
+			}
 			wr.Health = &h
 		}
 		ir.Workers = append(ir.Workers, wr)

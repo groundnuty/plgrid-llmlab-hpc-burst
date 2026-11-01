@@ -223,6 +223,11 @@ func listeningOn(t testing.TB, port int) bool {
 	return false
 }
 
+// launcherPortsLo and launcherPortsHi bound the launcher tests' two blocks of 13 ports: the
+// default base 29220 (29220-29232) and the second base 29233 (29233-29245) of
+// TestUpRefusesWhenAPortIsTaken.
+const launcherPortsLo, launcherPortsHi = 29220, 29245
+
 // listeningInRange lists every listener, whoever owns it, on a port in [lo, hi].
 func listeningInRange(t testing.TB, lo, hi int) []string {
 	var out []string
