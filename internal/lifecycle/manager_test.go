@@ -688,6 +688,13 @@ func restartAfterGap(t *testing.T, ctx context.Context, cl client.Client, cfg *r
 		if !strings.Contains(e.Note, want) {
 			t.Fatalf("ObservationGap note %q does not name the previous renewTime %s", e.Note, want)
 		}
+		// This check cannot see a second emission within the test's wait: the
+		// recorder turns a second isomorphic event into a series in memory,
+		// and the count reaches the API only every 30 minutes or once the
+		// series has been quiet for 6 minutes (HBEP-8, What the recorder
+		// merges and drops). It would catch only a series that is already
+		// there. The proof that a process emits one ObservationGap is
+		// gap_test.go, which counts the emitter's recorder calls.
 		if e.Series != nil {
 			t.Fatalf("ObservationGap is a series of %d: emitted more than once", e.Series.Count)
 		}
