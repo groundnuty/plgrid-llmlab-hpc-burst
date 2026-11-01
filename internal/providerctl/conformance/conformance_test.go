@@ -24,8 +24,10 @@
 //	HPCBURST_CONF_GPUS         GPUs per job (0 for a CPU partition)
 //	HPCBURST_CONF_CPUS         cpusPerTask
 //	HPCBURST_CONF_MEMORY       memory, a Kubernetes quantity
-//	HPCBURST_CONF_STAGING      the run's stagingDir, a directory below the profile's
-//	                           (for example $SCRATCH/<own dir>), not the root
+//	HPCBURST_CONF_STAGING      a directory below the profile's stagingDir (for example
+//	                           $SCRATCH/<own dir>), not the root. Each run stages into
+//	                           a run-<12 hex> directory of its own below it, and removes
+//	                           that directory when it ends, pass or fail
 //	HPCBURST_CONF_HOST_LOCK    the host's lock file: one ssh call at a time
 //	HPCBURST_CONF_CONTROL_DIR  a short private directory for the ssh master
 //	HPCBURST_CONF_OUT          a private directory for the run's records
@@ -59,6 +61,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/providerctl"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/providerctl/ctltest"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/sshrun"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
@@ -80,12 +83,12 @@ func load(t *testing.T) settings {
 
 // private records go to the output directory, mode 600, never to the log.
 type private struct {
-	t   *testing.T
+	t   testing.TB
 	dir string
 	f   *os.File
 }
 
-func newPrivate(t *testing.T, dir string) *private {
+func newPrivate(t testing.TB, dir string) *private {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -147,7 +150,7 @@ func (c *capture) Connect(ctx context.Context) error {
 // world is one run: the controller over a fake API client, and the real
 // platform over ssh.
 type world struct {
-	t       *testing.T
+	t       testing.TB
 	s       settings
 	p       *private
 	c       client.Client
@@ -194,6 +197,8 @@ func newWorld(t *testing.T) *world {
 	if err := os.WriteFile(filepath.Join(builds, agentapi.AgentBuildName(s.part.CPUArch)), agent, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	certPEM, certPin := ctltest.Cert(t)
+	frpcDigest := ctltest.Frpc(t, builds, s.part.CPUArch)
 	w.credDir = t.TempDir()
 
 	ctl, err := providerctl.New(w.c, w.c, scheme, providerctl.Options{
@@ -210,8 +215,8 @@ func newWorld(t *testing.T) *world {
 			return w.batch, t, nil
 		},
 		CredentialsDir: w.credDir, AgentBuildsDir: builds,
-		Front: &providerctl.FrontSettings{Mode: agentapi.DialHomeDirect, Endpoint: "127.0.0.1:29261", CertPin: strings.Repeat("0", 64),
-			FrpcDigests: map[string]string{s.part.CPUArch: strings.Repeat("d", 64)}},
+		Front: &providerctl.FrontSettings{Mode: agentapi.DialHomeDirect, Endpoint: "127.0.0.1:29261", CertPin: certPin, CertPEM: certPEM,
+			FrpcDigests: map[string]string{s.part.CPUArch: frpcDigest}},
 		PollInterval: 10 * time.Second, BusyInterval: 3 * time.Second, CreationGracePeriod: -1,
 	})
 	if err != nil {
@@ -222,8 +227,11 @@ func newWorld(t *testing.T) *world {
 	return w
 }
 
-// cleanup cancels every job ID this run saw that is still live, and closes the
-// ssh master. It cancels only this run's own job IDs.
+// cleanup cancels every job ID this run saw that is still live, removes the
+// run's staging directory from the platform, and closes the ssh master. It
+// cancels only this run's own job IDs, and removes only the directory of this
+// run (removeStaging refuses any other). It is registered with t.Cleanup, so it
+// runs after a pass and after a failure alike.
 func (w *world) cleanup() {
 	if w.batch != nil {
 		var ids []string
@@ -236,6 +244,12 @@ func (w *world) cleanup() {
 			w.p.log("cleanup cancel %s: %s %v", r.JobID, r.Outcome, r.Err)
 		}
 	}
+	if w.batch != nil && w.cap != nil {
+		if err := removeStaging(context.Background(), w.batch, w.cap); err != nil {
+			w.p.log("cleanup staging: %v", err)
+			w.t.Errorf("the run's staging directory was not removed: %v", err)
+		}
+	}
 	if w.ssh != nil {
 		w.t.Logf("ssh masters started in this run: %d", w.ssh.Starts())
 		_ = w.ssh.Close()
@@ -243,7 +257,9 @@ func (w *world) cleanup() {
 	if w.cap != nil {
 		w.t.Logf("sbatch latencies over ssh: %v", w.cap.sbatchD)
 	}
-	w.ctl.Close()
+	if w.ctl != nil {
+		w.ctl.Close()
+	}
 }
 
 func (w *world) newAlloc(name string) *v1alpha1.Allocation {
