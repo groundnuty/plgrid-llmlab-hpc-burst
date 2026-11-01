@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -275,6 +276,13 @@ func (r *rig) stepScaleToZero(orphanWindow bool) {
 			s, _ := r.cl.plat.Job(jj.ID)
 			return s.Finished || s.PID == 0 && s.State != "PENDING" && s.State != "RUNNING"
 		})
+	}
+	// Every Instance of the run, also those already gone with their
+	// Allocation (the watch saw them), has no online proxy.
+	for _, uid := range r.watch.uids() {
+		if !slices.Contains(insts, string(uid)) {
+			insts = append(insts, string(uid))
+		}
 	}
 	checked := time.Now()
 	online := r.frpsProxies()

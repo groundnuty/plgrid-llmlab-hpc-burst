@@ -96,6 +96,25 @@ func (rec *recorder) first(uid types.UID, since time.Time, match func(observatio
 	return observation{}, false
 }
 
+// uids returns every Instance UID the watch saw, in the order first seen;
+// none for a rig without a watch.
+func (rec *recorder) uids() []types.UID {
+	if rec == nil {
+		return nil
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	seen := map[types.UID]bool{}
+	var out []types.UID
+	for _, o := range rec.obs {
+		if !seen[o.uid] {
+			seen[o.uid] = true
+			out = append(out, o.uid)
+		}
+	}
+	return out
+}
+
 // between returns the Instance's observations received in [from, to].
 func (rec *recorder) between(uid types.UID, from, to time.Time) []observation {
 	rec.mu.Lock()
