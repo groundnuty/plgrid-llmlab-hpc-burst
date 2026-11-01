@@ -104,9 +104,14 @@ type Batch interface {
 	LiftHold(ctx context.Context, jobID string) error
 
 	// Cancel cancels each job and returns one result per job, in the order
-	// given. Cancelling an ended job reports AlreadyEnded, so it is
-	// idempotent. A partly applied cancel is reported job by job, never as one
-	// status.
+	// given. A job that was live when it was cancelled reports Cancelled. A
+	// job that had already ended reports AlreadyEnded and nothing is
+	// cancelled, so Cancel is idempotent. A job the platform does not know
+	// reports CancelError with an error that wraps ErrNotFound. The outcome
+	// comes from the job's state at the time of the call, never from what the
+	// platform's cancel command prints, which can be silent for both of the
+	// last two (Slurm 24.11's scancel is). A partly applied cancel is reported
+	// job by job, never as one status.
 	Cancel(ctx context.Context, jobIDs []string) []CancelResult
 
 	// EnsureFile places one file under the profile's stagingDir. It does

@@ -87,6 +87,8 @@
 //     running job ends that execution, so it frees its slot to a phantom too.
 //   - scancel and scontrol release on another user's job give "Access/
 //     permission denied", exit 1.
+//   - scancel of an ended or unknown job prints nothing and exits 0, as real
+//     Slurm 24.11's does (Config.NoisyScancel brings back the error text).
 //   - A scripted sbatch step is consumed by every sbatch that gets past option
 //     parsing, including one that a partition policy then refuses; the policy
 //     check comes first.
