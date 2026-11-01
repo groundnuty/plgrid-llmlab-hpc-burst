@@ -84,31 +84,50 @@ func TestFrontStopBudget(t *testing.T) {
 	}
 }
 
-// TestSupervisorGivesTheFrontItsOwnGrace: on shutdown the supervisor waits for a front that takes
-// longer to stop than the other processes' grace, instead of killing it, while the controller,
-// which stops as slowly, is killed after that grace. Both fakes answer SIGTERM after 1.5 s; the
-// test shortens the general grace to 0.3 s, so only the front's own grace lets it finish.
-func TestSupervisorGivesTheFrontItsOwnGrace(t *testing.T) {
-	f := newCtlFixture(t, Front{})
-	withFront(f)
-	f.steer("slow-term", "1500")
-	stop := f.supervise(SuperviseOptions{TermGrace: 300 * time.Millisecond})
-	running := func(e EntryRecord) bool { return e.State == entryRunning && e.Proc != nil }
-	f.entryNamed("controller", "the controller to run", running)
-	f.entryNamed(frontEntryName, "the front to run", running)
-	// Each fake installs its SIGTERM handler before it binds its health port, so an answer on that
-	// port means a SIGTERM now reaches the handler, not the default action.
-	awaitHealthy(t, f.ports.ControllerAddr())
-	awaitHealthy(t, f.st.Ports.FrontHealthAddr())
-	if err := stop(); err != nil {
-		t.Fatal(err)
-	}
-	exited := func(e EntryRecord) bool { return e.State == entryStopped && e.LastExit != nil }
-	if e := f.entryNamed(frontEntryName, "the front's exit", exited); e.LastExit.Detail != "exit status 0" {
-		t.Errorf("the front ended with %q: it was not given its own grace to stop", e.LastExit.Detail)
-	}
-	if e := f.entryNamed("controller", "the controller's exit", exited); e.LastExit.Detail != "signal: killed" {
-		t.Errorf("the controller ended with %q, want signal: killed (the control: the short grace applies to it)", e.LastExit.Detail)
+// TestSupervisorGivesTheControllerAndTheFrontTheirOwnGraces: on shutdown the supervisor waits for
+// a controller and a front that take longer to stop than the other processes' grace, instead of
+// killing them. The controller's stop includes the release of its Leases, so a kill cuts that
+// short and the Leases stay held until they expire (issue #131; PR #159 review). Both fakes answer
+// SIGTERM after 1.5 s; the test shortens the general grace to 0.3 s, so only each one's own grace
+// lets it finish. The control gives the controller no grace of its own: it is then killed after
+// the general grace, while the front still finishes.
+func TestSupervisorGivesTheControllerAndTheFrontTheirOwnGraces(t *testing.T) {
+	for _, c := range []struct {
+		name       string
+		ownGrace   bool
+		controller string // the controller's last exit
+	}{
+		{"each its own grace", true, "exit status 0"},
+		{"control: the controller with the general grace", false, "signal: killed"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if !c.ownGrace {
+				saved := controllerTermGrace
+				controllerTermGrace = 0
+				t.Cleanup(func() { controllerTermGrace = saved })
+			}
+			f := newCtlFixture(t, Front{})
+			withFront(f)
+			f.steer("slow-term", "1500")
+			stop := f.supervise(SuperviseOptions{TermGrace: 300 * time.Millisecond})
+			running := func(e EntryRecord) bool { return e.State == entryRunning && e.Proc != nil }
+			f.entryNamed("controller", "the controller to run", running)
+			f.entryNamed(frontEntryName, "the front to run", running)
+			// Each fake installs its SIGTERM handler before it binds its health port, so an answer
+			// on that port means a SIGTERM now reaches the handler, not the default action.
+			awaitHealthy(t, f.ports.ControllerAddr())
+			awaitHealthy(t, f.st.Ports.FrontHealthAddr())
+			if err := stop(); err != nil {
+				t.Fatal(err)
+			}
+			exited := func(e EntryRecord) bool { return e.State == entryStopped && e.LastExit != nil }
+			if e := f.entryNamed(frontEntryName, "the front's exit", exited); e.LastExit.Detail != "exit status 0" {
+				t.Errorf("the front ended with %q: it was not given its own grace to stop", e.LastExit.Detail)
+			}
+			if e := f.entryNamed("controller", "the controller's exit", exited); e.LastExit.Detail != c.controller {
+				t.Errorf("the controller ended with %q, want %q", e.LastExit.Detail, c.controller)
+			}
+		})
 	}
 }
 

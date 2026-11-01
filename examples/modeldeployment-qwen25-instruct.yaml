@@ -1,0 +1,48 @@
+# A served ModelDeployment: a small instruct model on Helios' GH200 partition (HBEP-3, HBEP-7).
+# Clients ask the front for it by its plain name, spec.model.
+#
+# The checkpoint is pinned by a full commit ID and the engine by an image digest, because they
+# make up the deployment ID (HBEP-3, Deployment ID). A branch name, a tag or an abbreviated ID is
+# refused. The revision is Qwen/Qwen2.5-1.5B-Instruct as spike S2b ran it; the digest is the
+# vLLM v0.32.0 multi-architecture index that spike used.
+#
+# The workload shapes must fit max-model-len (HBEP-7): the longest context plus the longest
+# output stay within it.
+apiVersion: hpcburst.groundnuty.github.io/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: helios-qwen25-instruct
+  namespace: default
+spec:
+  model: Qwen/Qwen2.5-1.5B-Instruct
+  source:
+    served:
+      checkpoint:
+        repository: Qwen/Qwen2.5-1.5B-Instruct
+        revision: 989aa7980e4cf806f80c7fef2b1adb7bc71aa306
+      engine:
+        name: vllm
+        version: 0.32.0
+        image: docker.io/vllm/vllm-openai
+        imageDigest: sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34
+      flags:
+        - name: max-model-len
+          value: "4096"
+  instances: 1
+  providers:
+    names:
+      - helios-gh200
+  # Release the Allocation when it has hosted no Instance for this long. The default, Keep,
+  # holds it until its hard end, which on a shared grant is rarely what a first trial wants.
+  retentionPolicy:
+    mode: ReleaseWhenIdle
+    idleLimit: 30m
+  workload:
+    contextTokens:
+      short: 128
+      typical: 1024
+      longest: 3072
+    outputTokens:
+      typical: 128
+      longest: 512
+    targetSessions: 4

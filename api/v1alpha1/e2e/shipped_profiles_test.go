@@ -28,21 +28,25 @@ import (
 func profilesDir() string { return filepath.Join("..", "..", "..", "profiles") }
 
 // shippedProfiles are the manifests of profiles/, and the keys, under
-// spec.profile.facts, of the facts spike S1 added to each (issue #18).
+// spec.profile.facts, of the facts spike S1 added to each (issue #18). A managed
+// profile (llmlab.yaml, HBEP-4 "A managed profile") has no batch fields and no
+// untyped block, so it has no facts to key.
 var shippedProfiles = []struct {
 	file, name string
 	s1Facts    [][]string
+	managed    bool
 }{
 	{"helios.yaml", "helios", [][]string{
 		{"slurm", "hold_release"}, {"containers", "apptainer_compute_nodes"}, {"containers", "user_namespaces_compute_nodes"},
 		{"storage", "home_readable_from_compute_nodes"}, {"reachability", "compute_outbound_internet"},
 		{"compute_node", "host_python3"}, {"compute_node", "architecture"},
-	}},
+	}, false},
 	{"athena.yaml", "athena", [][]string{
 		{"slurm", "hold_release"}, {"containers", "apptainer_compute_nodes"}, {"containers", "user_namespaces_compute_nodes"},
 		{"storage", "home_readable_from_compute_nodes"}, {"reachability", "compute_node_outbound_internet"},
 		{"compute_node", "host_python3"}, {"compute_node", "architecture"},
-	}},
+	}, false},
+	{"llmlab.yaml", "llmlab", nil, true},
 }
 
 // loadShipped reads a shipped manifest as the object an operator would apply.
@@ -112,7 +116,7 @@ func edit(t *testing.T, obj map[string]any, value any, path ...any) map[string]a
 	return nil
 }
 
-// Both manifests are admitted by the real CRD, under strict validation, and the
+// Every shipped manifest is admitted by the real CRD, under strict validation, and the
 // untyped block comes back from the API server as it was sent.
 func TestShippedProfilesAreAdmitted(t *testing.T) {
 	for _, sp := range shippedProfiles {
@@ -218,6 +222,20 @@ func TestShippedProfilesKeepTheEnvelope(t *testing.T) {
 	for _, sp := range shippedProfiles {
 		t.Run(sp.name, func(t *testing.T) {
 			obj := loadShipped(t, sp.file)
+			if sp.managed {
+				// A managed profile is the other branch of the same contract: it names its kind and
+				// holds neither partitions nor the untyped block, whose envelope the batch profiles
+				// keep. A batch field here would be a platform LLMLab does not have.
+				if kind, _, _ := unstructured.NestedString(obj, "spec", "providerKind"); kind != string(v1alpha1.PlatformManaged) {
+					t.Errorf("%s: providerKind is %q; want %q", sp.file, kind, v1alpha1.PlatformManaged)
+				}
+				for _, key := range []string{"profile", "partitions", "qos"} {
+					if _, has, _ := unstructured.NestedFieldNoCopy(obj, "spec", key); has {
+						t.Errorf("%s: a managed profile holds spec.%s", sp.file, key)
+					}
+				}
+				return
+			}
 			profile, found, _ := unstructured.NestedMap(obj, "spec", "profile")
 			if !found {
 				t.Fatalf("%s has no spec.profile", sp.file)
@@ -272,5 +290,26 @@ func TestShippedProfilesKeepTheEnvelope(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The hard-coded list above names every PlatformProfile that profiles/ ships, so a profile added
+// to the directory cannot stay out of the admission and envelope checks (PR #170 review: the list
+// did not cover llmlab.yaml). The directory is read with the loader the example checks use.
+func TestShippedProfilesListCoversTheDirectory(t *testing.T) {
+	listed := map[string]string{}
+	for _, sp := range shippedProfiles {
+		listed[sp.name] = sp.file
+	}
+	onDisk := loadProfileManifests(t)
+	for name, p := range onDisk {
+		if listed[name] != p.file {
+			t.Errorf("profiles/%s (PlatformProfile %q) is not in shippedProfiles", p.file, name)
+		}
+	}
+	for name, file := range listed {
+		if p, ok := onDisk[name]; !ok || p.file != file {
+			t.Errorf("shippedProfiles lists %s as PlatformProfile %q, which profiles/ does not hold", file, name)
+		}
 	}
 }

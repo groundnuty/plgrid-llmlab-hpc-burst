@@ -97,6 +97,14 @@ func cloneCheckResults(c agentapi.CheckResults) agentapi.CheckResults {
 		v.Files = slices.Clone(v.Files)
 		v.Settings = maps.Clone(v.Settings)
 		v.GenerationConfig = maps.Clone(v.GenerationConfig)
+		if v.DoSample != nil {
+			d := *v.DoSample
+			v.DoSample = &d
+		}
+		if v.GenerationConfigRefused != nil {
+			g := *v.GenerationConfigRefused
+			v.GenerationConfigRefused = &g
+		}
 		return v
 	})
 	c.Qualify = clonePtr(c.Qualify, func(q agentapi.QualifyResult) agentapi.QualifyResult {

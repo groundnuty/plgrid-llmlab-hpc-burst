@@ -135,6 +135,8 @@ func TestStartSupervisorAndDown(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, pid := range map[string]int{"supervisor": sup.PID, "controller": e.Proc.PID, "k3s stand-in": k3s.Process.Pid} {
+		// Safe as a post-condition: Down returned only after stopGroup's pidfd waits saw k3s, the
+		// supervisor and its adopted controller exit.
 		if !waitNotRunning(pid, 5*time.Second) {
 			t.Errorf("%s (pid %d) still runs after down", name, pid)
 		}
@@ -175,6 +177,8 @@ func TestDownKeepsTheRecordWhenTheSupervisorCannotBeChecked(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "could not check the identity of supervisor") {
 		t.Fatalf("stopRecorded = %v", err)
 	}
+	// Safe as a post-condition: stopRecorded stopped k3s through its pidfd (stopGroup's waitExited)
+	// before it returned the identity error.
 	if !waitNotRunning(k3s.Process.Pid, 5*time.Second) {
 		t.Error("k3s was left running because the supervisor could not be checked")
 	}
@@ -267,6 +271,8 @@ func TestStartSupervisorFailures(t *testing.T) {
 			if _, err := stopRecorded(context.Background(), f.st, 10*time.Second, nil); err != nil {
 				t.Fatal(err)
 			}
+			// Safe as a post-condition: stopRecorded stopped the supervisor through its pidfd
+			// (stopGroup's waitExited), or found it already gone.
 			if !waitNotRunning(sup.PID, 5*time.Second) {
 				t.Errorf("the supervisor (pid %d) was left running", sup.PID)
 			}

@@ -163,6 +163,11 @@ type fakeHost struct {
 	inodes  map[int]string // port -> socket inode
 	onKCM   func()         // runs when the controller manager's /healthz is asked
 	kcmHits int
+	// profilesStatus and profilesBody are what the apiserver answers to a list of PlatformProfiles
+	// (#158): the default, 0, is a server without the CRD (404), and a test sets them before the
+	// request. A non-zero status with a body is served as JSON.
+	profilesStatus int
+	profilesBody   string
 }
 
 const fakeK3sPID = 4242
@@ -187,6 +192,10 @@ func newFakeHost(t *testing.T) *fakeHost {
 		switch {
 		case r.URL.Path == "/readyz":
 			w.WriteHeader(200)
+		case r.Method == http.MethodGet && r.URL.Path == platformProfilesPath && h.profilesStatus != 0:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(h.profilesStatus)
+			fmt.Fprint(w, h.profilesBody)
 		case r.Method == http.MethodPatch && r.URL.Path == "/api/v1/namespaces/kube-system/configmaps/hpcburst-launcher-probe":
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"kind":"ConfigMap","apiVersion":"v1","metadata":{"name":"hpcburst-launcher-probe","namespace":"kube-system"}}`)

@@ -247,7 +247,11 @@ func (h *handler) run(r *http.Request, promptIDs []int32, limit int, ans answer,
 		return
 	}
 	defer func() { s.release(finish) }()
-	wait := h.e.beforeFirstToken(shapeKey{len(promptIDs), limit}, ans.tokens())
+	if h.e.record != nil {
+		h.e.record(LogEvent{Event: "admitted", PromptTokens: len(promptIDs), MaxTokens: limit, Stream: stream})
+	}
+	wait, nth := h.e.beforeFirstToken(shapeKey{len(promptIDs), limit}, ans.tokens())
+	rec.InjectedNS, rec.Nth = wait.Nanoseconds(), nth
 	if !sleep(ctx, wait) {
 		return
 	}

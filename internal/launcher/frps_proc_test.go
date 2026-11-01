@@ -92,6 +92,7 @@ func TestStopFrpsNeverSignalsAReusedPID(t *testing.T) {
 	if rep.Signals != "TERM" || rep.Before != "ours" {
 		t.Errorf("report = %+v", rep)
 	}
+	// Safe as a post-condition: StopFrps returns nil only after its pidfd wait saw the exit.
 	if !waitNotRunning(pid, 5*time.Second) {
 		t.Fatal("the process is still running after SIGTERM")
 	}
@@ -123,6 +124,7 @@ func TestStopFrpsEscalatesToKill(t *testing.T) {
 	if d := time.Since(start); d < 400*time.Millisecond {
 		t.Errorf("SIGKILL came after %s, before the grace period was over", d)
 	}
+	// Safe as a post-condition: StopFrps returns nil only after its pidfd wait saw the exit after SIGKILL.
 	if !waitNotRunning(pid, 5*time.Second) {
 		t.Fatal("still running after SIGKILL")
 	}
@@ -148,6 +150,7 @@ func TestStopFrpsCancelledContextCutsTheGraceShort(t *testing.T) {
 	if d := time.Since(start); d > 5*time.Second || rep.Signals != "TERM+KILL" {
 		t.Errorf("took %s, signals %q: the cancelled context did not cut the hour-long grace short", d, rep.Signals)
 	}
+	// Safe as a post-condition: StopFrps returns nil only after its pidfd wait saw the exit after SIGKILL.
 	if !waitNotRunning(pid, 5*time.Second) {
 		t.Fatal("still running")
 	}

@@ -478,6 +478,8 @@ func llSetup(t *testing.T) *llLive {
 }
 
 // TestLLMLabThroughTheFront is the smoke test described above.
+//
+//livecheck:llmlab-smoke
 func TestLLMLabThroughTheFront(t *testing.T) {
 	l := llSetup(t)
 
@@ -602,6 +604,8 @@ func chatRequest(model string, stream, includeUsage bool) string {
 // the path, the key search finds the key wherever it sits, and a value outside
 // a closed set never prints. The positive controls: the library's own error
 // does hold the path, and the search does fire.
+//
+//livecheck:none offline: CI runs it
 func TestLLMLabLiveDiagnosticsAreSafe(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name string, mode os.FileMode, content string) string {

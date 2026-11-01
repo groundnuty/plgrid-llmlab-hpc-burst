@@ -1,0 +1,21 @@
+# A managed ModelDeployment: a model LLMLab already serves, attached to the plain name so that the
+# front can route to it (HBEP-3, HBEP-5 The LLMLab route). Nothing is started for it; Ready follows
+# the catalog entry (HBEP-7, Reconcile loop, step 1).
+#
+# source.managed.platform matches the platform label of examples/provider-llmlab.yaml, and
+# catalogName is the model's name in LLMLab's catalog. LLMLab reports no revision, so none is given.
+apiVersion: hpcburst.groundnuty.github.io/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: llmlab-qwen3-vl
+  namespace: default
+spec:
+  model: Qwen/Qwen3-VL-8B-Instruct
+  source:
+    managed:
+      platform: llmlab
+      catalogName: Qwen/Qwen3-VL-8B-Instruct
+  instances: 1
+  providers:
+    names:
+      - llmlab

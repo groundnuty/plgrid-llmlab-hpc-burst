@@ -1,0 +1,20 @@
+# A managed Provider: LLMLab itself, as one more platform of the Cyfronet organization (HBEP-4,
+# Managed provider in alpha; HBEP-5, plain model names). It lists LLMLab's catalog once a minute
+# and runs nothing. Apply profiles/llmlab.yaml first.
+#
+# The platform label is what a managed ModelDeployment's source.managed.platform matches
+# (examples/modeldeployment-llmlab.yaml). credentialsRef.file is strict JSON, mode 600, with
+# exactly the members key, baseURL and an optional expiry (HBEP-4, Provider settings; the format
+# is in docs/quickstart.md).
+apiVersion: hpcburst.groundnuty.github.io/v1alpha1
+kind: Provider
+metadata:
+  name: llmlab
+  labels:
+    hpcburst.groundnuty.github.io/organization: cyfronet
+    hpcburst.groundnuty.github.io/platform: llmlab
+spec:
+  platformProfileRef:
+    name: llmlab
+  credentialsRef:
+    file: /home/<user>/.config/hpcburst/credentials/llmlab.json

@@ -29,11 +29,19 @@ if [ -z "$drv" ] || [ "$drv" -lt 580 ]; then say "ABORT: the driver is older tha
 apptainer --version
 say "cpus $(nproc)"; free -g | sed -n 2p
 
+# registry_head <token> <url> <accept>: a HEAD request with the registry token. The token reaches curl on
+# standard input, as a config line (-K -), and never in its arguments, which every process on the node can
+# read. A token with a character outside the base64url set is refused, so it cannot break out of the quotes.
+registry_head() {
+  case $1 in ''|*[!A-Za-z0-9._~+/=-]*) echo "registry_head: no usable token" >&2; return 2 ;; esac
+  printf 'header = "Authorization: Bearer %s"\n' "$1" | curl -sS -I -K - -H "Accept: $3" "$2"
+}
+
 # Network: the Hub and the registry (a HEAD does not count against the pull limit).
 curl -sS -o /dev/null -w "hub: HTTP %{http_code} in %{time_total}s\n" "https://huggingface.co/api/models/Qwen/Qwen3-0.6B/revision/c1899de289a04d12100db370d81485cdf75e47ca" || say "hub: unreachable"
 tok=$(curl -sS "https://auth.docker.io/token?service=registry.docker.io&scope=repository:vllm/vllm-openai:pull" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
-hdr=$(curl -sS -I -H "Authorization: Bearer $tok" -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
-  "https://registry-1.docker.io/v2/vllm/vllm-openai/manifests/sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34" 2>&1)
+hdr=$(registry_head "$tok" "https://registry-1.docker.io/v2/vllm/vllm-openai/manifests/sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34" \
+  "application/vnd.docker.distribution.manifest.list.v2+json" 2>&1)
 echo "$hdr" | grep -i -E '^HTTP|ratelimit|docker-content-digest' | tr -d '\r'
 rem=$(echo "$hdr" | tr -d '\r' | sed -n 's/^ratelimit-remaining: *\([0-9]*\).*/\1/Ip')
 if [ -n "$rem" ] && [ "$rem" -lt 3 ]; then say "ABORT: Docker Hub pulls left for this address: $rem"; exit 3; fi

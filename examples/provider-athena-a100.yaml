@@ -1,0 +1,23 @@
+# A batch Provider on Athena's A100 partition (HBEP-3, HBEP-4 Provider settings). Replace every
+# <placeholder>. Apply profiles/athena.yaml first. Athena is GPU-only, so its jobs always ask for
+# a GPU.
+#
+# credentialsRef.file is an ssh client configuration, mode 600, with a mode-600 key file (see
+# examples/provider-helios-gh200.yaml and docs/quickstart.md).
+apiVersion: hpcburst.groundnuty.github.io/v1alpha1
+kind: Provider
+metadata:
+  name: athena-a100
+  labels:
+    hpcburst.groundnuty.github.io/organization: cyfronet
+    hpcburst.groundnuty.github.io/platform: athena
+    hpcburst.groundnuty.github.io/partition: plgrid-gpu-a100
+spec:
+  platformProfileRef:
+    name: athena
+  account: <account>
+  grant: <grant>
+  allowedPartitions:
+    - plgrid-gpu-a100
+  credentialsRef:
+    file: /home/<user>/.config/hpcburst/credentials/athena-a100.ssh

@@ -125,6 +125,7 @@ func (c *countingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return http.DefaultTransport.RoundTrip(r)
 }
 
+//livecheck:hub-golden
 func TestGoldenHub(t *testing.T) {
 	if os.Getenv(goldenGate) != "1" {
 		t.Skipf("SKIPPED: the golden test against the real Hugging Face Hub needs the network; run it with %s=1", goldenGate)

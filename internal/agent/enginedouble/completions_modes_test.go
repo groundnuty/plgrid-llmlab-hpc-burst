@@ -67,8 +67,12 @@ func TestCompletionIsInTheEngineLog(t *testing.T) {
 	post, events := engineRecord(t, cfgFor())
 	post("/v1/completions", completionBody(3, map[string]any{"max_tokens": 5, "min_tokens": 5}))
 	post("/v1/completions", completionBody(2, map[string]any{"max_tokens": 4, "min_tokens": 4, "stream": true}))
+	// Each request is logged twice, as a chat request is: "admitted" when it
+	// takes a sequence slot, then "request" when it ends.
 	want := []LogEvent{
+		{Event: "admitted", PromptTokens: 3, MaxTokens: 5},
 		{Event: "request", Path: "/v1/completions", PromptTokens: 3, MaxTokens: 5, Outcome: "completed", Tokens: 5},
+		{Event: "admitted", PromptTokens: 2, MaxTokens: 4, Stream: true},
 		{Event: "request", Path: "/v1/completions", PromptTokens: 2, MaxTokens: 4, Stream: true, Outcome: "completed", Tokens: 4},
 	}
 	if got := events(); !reflect.DeepEqual(got, want) {

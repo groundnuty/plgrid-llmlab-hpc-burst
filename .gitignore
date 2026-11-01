@@ -1,3 +1,6 @@
 # Python bytecode records the path of its source, so a committed .pyc leaks the machine's private paths.
 __pycache__/
 *.pyc
+
+# The quickstart builds the binaries into bin/ (docs/quickstart.md).
+/bin/

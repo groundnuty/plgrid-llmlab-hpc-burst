@@ -57,6 +57,9 @@ func readRecord(a *v1alpha1.Allocation) (record, error) {
 		if sub.Attempt < 1 {
 			return r, fmt.Errorf("annotation %s names attempt %d; attempts count from 1", v1alpha1.AnnotationSubmission, sub.Attempt)
 		}
+		if err := sub.Validate(); err != nil {
+			return r, fmt.Errorf("annotation %s: %w", v1alpha1.AnnotationSubmission, err)
+		}
 		r.sub = &sub
 	}
 	r.jobID = an[v1alpha1.AnnotationJobID]

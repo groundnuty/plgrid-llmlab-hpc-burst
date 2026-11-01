@@ -36,13 +36,19 @@ type PartitionProfile struct {
 	AcceleratorClass `json:",inline"`
 
 	// MaxTime is the partition's longest time limit (HBEP-4, Platform profile
-	// schema, the fields the lifecycle controller reads).
+	// schema, the fields the lifecycle controller reads). An Allocation's time
+	// limit is the smallest of it, the maxWall of the QOS limits that apply
+	// and the ModelDeployment's leaseLimit (AllocationTimeLimit; HBEP-4, QOS
+	// limits).
 	//
 	// +optional
 	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="maxTime must be a positive duration that fits Go's time.Duration (above 0s, at most 2562047h)"
 	MaxTime *Duration `json:"maxTime,omitempty"`
 
-	// GPUsPerNode is the most GPUs one Allocation may request here.
+	// GPUsPerNode is the GPUs on one node, the hardware fact. The most GPUs
+	// one Allocation may request here is the smaller of it and the
+	// maxGpusPerUser of the QOS limits that apply, when set; a larger count is
+	// refused, never capped (HBEP-4, Submission, GPU sizing and QOS limits).
 	//
 	// +optional
 	// +kubebuilder:validation:Minimum=0
@@ -108,6 +114,84 @@ type PartitionProfile struct {
 	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9_.-]*$`
 	TmpDirFeature string `json:"tmpDirFeature,omitempty"`
+
+	// QOS is the partition's own QOS, which Slurm applies to every job on the
+	// partition: for each limit, its value comes before the job QOS's unless
+	// the job QOS has overPartQos (EffectiveQOSLimits). It must be listed in
+	// the profile's qos. Helios plgrid-gpu-gh200's is plgrid, whose 2,000
+	// submitted jobs per user apply before QOS now's 1 (HBEP-4, QOS limits
+	// and Platform profile schema; `@hpc-burst-science-agent`, 1 Nov 2026).
+	// Absent, the partition has none.
+	//
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	QOS string `json:"qos,omitempty"`
+}
+
+// QOSProfile is one Slurm QOS that a Provider's qos or a partition's qos names,
+// with the limits the plan reads (HBEP-4, QOS limits and Platform profile
+// schema; `@hpc-burst-science-agent`, 1 Nov 2026). Every limit is optional,
+// and an absent one is no limit as far as the plan knows. A QOS with no limits
+// is listed with none, so every QOS named is known.
+type QOSProfile struct {
+	// Name of the QOS, as sacctmgr shows it.
+	//
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	Name string `json:"name"`
+
+	// MaxWall is the QOS's wall limit per job (MaxWall). It never lifts the
+	// partition's maxTime: an Allocation's time limit is the smaller.
+	//
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="maxWall must be a positive duration that fits Go's time.Duration (above 0s, at most 2562047h)"
+	MaxWall *Duration `json:"maxWall,omitempty"`
+
+	// MaxSubmitPerUser is the most jobs one user may have pending or running
+	// at once under the QOS (MaxSubmitJobsPerUser). A held job is a pending
+	// job, and every job of the login counts, the owner's other projects'
+	// included. The lifecycle controller plans within it (HBEP-7,
+	// Provisioning, Per-user limits). 0 is valid: an effective 0 means no
+	// Allocation can be hosted there (`@hpc-burst-science-agent`, 1 Nov 2026).
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	MaxSubmitPerUser *int32 `json:"maxSubmitPerUser,omitempty"`
+
+	// MaxGPUsPerUser is the GPU entry of the QOS's MaxTRESPerUser: the most
+	// GPUs over one user's running jobs. A job that fits alone but not beside
+	// the user's others pends. 0 is valid, like maxSubmitPerUser's: no GPU
+	// Allocation can be hosted.
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	MaxGPUsPerUser *int32 `json:"maxGpusPerUser,omitempty"`
+
+	// MaxCPUsPerUser is the CPU entry of the QOS's MaxTRESPerUser. An
+	// Allocation's CPUs, gpus times cpusPerGpu, are capped at it. Positive
+	// when set: a cap of 0 would shrink every request to nothing
+	// (`@hpc-burst-science-agent`, 1 Nov 2026, from PR #155's review).
+	//
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="self > 0",message="maxCpusPerUser must be positive"
+	MaxCPUsPerUser *int32 `json:"maxCpusPerUser,omitempty"`
+
+	// MaxMemPerUser is the memory entry of the QOS's MaxTRESPerUser. An
+	// Allocation's memory, gpus times memPerGpu, is capped at it. Positive
+	// when set, like maxCpusPerUser.
+	//
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="quantity(string(self)).isGreaterThan(quantity('0'))",message="maxMemPerUser must be positive"
+	MaxMemPerUser *resource.Quantity `json:"maxMemPerUser,omitempty"`
+
+	// OverPartQOS is whether the QOS carries Slurm's OverPartQOS flag, which
+	// puts its limits before the partition QOS's (EffectiveQOSLimits). No QOS
+	// the alpha profiles type has it.
+	//
+	// +optional
+	// +kubebuilder:default=false
+	OverPartQOS bool `json:"overPartQos"`
 }
 
 // ImageFormat is a container image format Apptainer runs (PartitionProfile).
@@ -273,6 +357,7 @@ type JobNameRules struct {
 // managed profile no batch fields, so nothing reads them there.
 //
 // +kubebuilder:validation:XValidation:rule="!has(self.jobName) || !has(self.jobName.maxLength) || self.jobName.maxLength >= 56",message="jobName.maxLength must allow the job tag's 56 characters (HBEP-3, Allocation and job identity)"
+// +kubebuilder:validation:XValidation:rule="!has(self.partitions) || self.partitions.all(p, !has(p.qos) || (has(self.qos) && self.qos.exists(q, q.name == p.qos)))",message="every partition's qos must be listed in qos, so the plan knows its limits (HBEP-4, QOS limits)"
 type PlatformProfileSpec struct {
 	// ProviderKind is managed, batch or static: the kind of provider the
 	// platform offers (HBEP-3, Vocabulary, Provider). It is not the object's
@@ -286,6 +371,20 @@ type PlatformProfileSpec struct {
 	// +listMapKey=name
 	// +kubebuilder:validation:MaxItems=256
 	Partitions []PartitionProfile `json:"partitions,omitempty"`
+
+	// QOS lists the QOSes that a Provider's qos or a partition's qos names,
+	// with their limits (HBEP-4, QOS limits and Platform profile schema;
+	// `@hpc-burst-science-agent`, 1 Nov 2026). Helios lists now, plgrid and
+	// normal; Athena plgrid-now. At most 8: the estimated CEL cost of the
+	// rule on maxMemPerUser, which parses a quantity of unbounded length
+	// (controller-gen gives a quantity no maxLength), grows with this bound
+	// and exceeds the API server's per-rule budget at 16 (by 1.0066 times).
+	//
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=8
+	QOS []QOSProfile `json:"qos,omitempty"`
 
 	// HoldRelease says whether a plain user's sbatch --hold is honoured and
 	// that user can lift it. It is verified per platform. False runs the

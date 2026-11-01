@@ -107,6 +107,32 @@ func TestJudgeVerifyRecordsTheGenerationConfig(t *testing.T) {
 	}
 }
 
+// The record carries what the agent found at generation_config.json: absent, present, or unreadable, on a
+// pass and on a failure, and nothing when the agent did not say (issue #175). A present file with no keys
+// and a missing file differ in the record, and only there.
+func TestJudgeVerifyRecordsWhetherTheGenerationConfigFileIsThere(t *testing.T) {
+	for _, file := range []string{agentapi.GenerationConfigAbsent, agentapi.GenerationConfigPresent, agentapi.GenerationConfigUnreadable} {
+		r := judgeResult()
+		r.GenerationConfigFile = file
+		got := judgeVerify(judgeDeclared(), r, true, judgeShapes())
+		b, err := json.Marshal(got)
+		if err != nil || got.GenerationConfigFile != file || !strings.Contains(string(b), `"generationConfigFile":"`+file+`"`) {
+			t.Errorf("%s: record data %s (%v)", file, b, err)
+		}
+		if got.GenerationConfig != nil || strings.Contains(string(b), `"generationConfig":`) {
+			t.Errorf("%s: keys recorded when none were reported: %s", file, b)
+		}
+		r.Files[0].Outcome = agentapi.FileMismatch
+		if got := judgeVerify(judgeDeclared(), r, true, judgeShapes()); got.Verdict != v1alpha1.VerdictFail || got.GenerationConfigFile != file {
+			t.Errorf("%s on a failed rehash: verdict %q, file %q", file, got.Verdict, got.GenerationConfigFile)
+		}
+	}
+	got := judgeVerify(judgeDeclared(), judgeResult(), true, judgeShapes())
+	if b, _ := json.Marshal(got); got.GenerationConfigFile != "" || strings.Contains(string(b), "generationConfigFile") {
+		t.Errorf("the agent did not say, and the record has %s", b)
+	}
+}
+
 // The verification record fixes the behaviour check's context (science-agent
 // ruling, 31 Oct 2026, for #88; issue #125, item 9). Without a reasoning
 // parser it is the longest context: 32768 - 512 - 12 = 32244. With one it is

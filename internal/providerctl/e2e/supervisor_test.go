@@ -23,10 +23,18 @@ type tracker struct {
 	mu            sync.Mutex
 	starts, stops map[string]int
 	running       map[string]bool
+	startedAt     map[string][]time.Time
 }
 
 func newTracker() *tracker {
-	return &tracker{starts: map[string]int{}, stops: map[string]int{}, running: map[string]bool{}}
+	return &tracker{starts: map[string]int{}, stops: map[string]int{}, running: map[string]bool{}, startedAt: map[string][]time.Time{}}
+}
+
+// startTimes is when each start of the Provider's runnable began.
+func (t *tracker) startTimes(p string) []time.Time {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]time.Time(nil), t.startedAt[p]...)
 }
 
 func (t *tracker) get(p string) (starts, stops int, running bool) {
@@ -49,6 +57,7 @@ func (p probe) Start(ctx context.Context) error {
 	p.t.mu.Lock()
 	p.t.starts[p.name]++
 	p.t.running[p.name] = true
+	p.t.startedAt[p.name] = append(p.t.startedAt[p.name], time.Now())
 	p.t.mu.Unlock()
 	defer func() {
 		p.t.mu.Lock()
@@ -168,12 +177,17 @@ func TestSupervisor(t *testing.T) {
 	if !ok || l.Spec.HolderIdentity == nil || *l.Spec.HolderIdentity == "" {
 		t.Fatalf("sup-good's Lease %s in %s is missing or held by nobody", v1alpha1.ProviderLeaseName("sup-good"), v1alpha1.ControllerNamespace)
 	}
-	// Backoff: the restarts of sup-broken are spaced, not a hot loop.
-	s1, _, _ := tr.get("sup-broken")
-	time.Sleep(time.Second)
-	s2, _, _ := tr.get("sup-broken")
-	if s2-s1 > 3 {
-		t.Errorf("sup-broken restarted %d times in one second; the backoff should space them", s2-s1)
+	// Backoff: the restarts of sup-broken are spaced, not a hot loop. Start
+	// n+1 comes no sooner than failure n plus the n-th backoff (300 ms, then
+	// doubled up to 2 s), and failure n comes after start n, so each gap
+	// between recorded starts is at least that backoff; a loaded machine only
+	// widens it. (The test used to count the restarts in one second of sleep.)
+	times := tr.startTimes("sup-broken")
+	for n := 1; n < len(times); n++ {
+		want := min(sup.MinBackoff<<(n-1), sup.MaxBackoff)
+		if gap := times[n].Sub(times[n-1]); gap < want {
+			t.Errorf("sup-broken's start %d came %v after start %d; the backoff after %d failures is %v", n+1, gap, n, n, want)
+		}
 	}
 
 	if err := c.Delete(context.Background(), good); err != nil {

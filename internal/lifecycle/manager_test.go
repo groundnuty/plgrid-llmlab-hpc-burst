@@ -27,9 +27,12 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/go-logr/logr"
 
 	appsv1 "k8s.io/api/apps/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -44,10 +47,12 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/leaderlock"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/deploymentid"
@@ -199,6 +204,24 @@ func TestManagerOnControlPlane(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
+	// The manager must lead through the gapLock over leaderlock's lock, whose
+	// release is retried (issue #131): the lock newLeaseLock returns counts
+	// the elector's writes, and a manager that led through controller-runtime's
+	// own lock would leave it at none (PR #159 review).
+	lead := &countingLeaseLock{}
+	realLock := newLeaseLock
+	t.Cleanup(func() { newLeaseLock = realLock })
+	newLeaseLock = func(cfg *rest.Config, ns, name string, renew time.Duration, log logr.Logger) (resourcelock.Interface, error) {
+		inner, err := realLock(cfg, ns, name, renew, log)
+		if err != nil {
+			return nil, err
+		}
+		if !leaderlock.RetriesRelease(inner) {
+			t.Errorf("leaderlock.New returned a %T, not its retrying lock", inner)
+		}
+		lead.Interface = inner
+		return lead, nil
+	}
 	cp, err := testenv.Start(ctx, t.TempDir(), testenv.Options{BeforeControllerManager: installTestCRDs})
 	if err != nil {
 		t.Fatalf("start the control plane: %v", err)
@@ -324,6 +347,9 @@ func TestManagerOnControlPlane(t *testing.T) {
 		}
 		return l.Spec.HolderIdentity != nil && *l.Spec.HolderIdentity != "", "no holder"
 	})
+	if lead.writes.Load() == 0 {
+		t.Fatal("the lifecycle Lease is held, but no write went through the lock newLeaseLock built: the manager leads through another lock")
+	}
 	eventually(t, time.Minute, "the Backend serves agents", func() (bool, string) {
 		return backend.serving() == nil, "not serving"
 	})
@@ -794,4 +820,20 @@ func phases(items []v1alpha1.Instance) []v1alpha1.InstancePhase {
 		out = append(out, in.Status.Phase)
 	}
 	return out
+}
+
+// countingLeaseLock counts the writes the elector makes through a Lease lock.
+type countingLeaseLock struct {
+	resourcelock.Interface
+	writes atomic.Int64
+}
+
+func (c *countingLeaseLock) Create(ctx context.Context, ler resourcelock.LeaderElectionRecord) error {
+	c.writes.Add(1)
+	return c.Interface.Create(ctx, ler)
+}
+
+func (c *countingLeaseLock) Update(ctx context.Context, ler resourcelock.LeaderElectionRecord) error {
+	c.writes.Add(1)
+	return c.Interface.Update(ctx, ler)
 }

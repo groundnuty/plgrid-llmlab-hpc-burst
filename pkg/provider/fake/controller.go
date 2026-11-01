@@ -384,6 +384,9 @@ func record(a *v1alpha1.Allocation) (*v1alpha1.SubmissionRecord, error) {
 	if err := json.Unmarshal([]byte(raw), &r); err != nil {
 		return nil, fmt.Errorf("annotation %s: %w", v1alpha1.AnnotationSubmission, err)
 	}
+	if err := r.Validate(); err != nil {
+		return nil, fmt.Errorf("annotation %s: %w", v1alpha1.AnnotationSubmission, err)
+	}
 	return &r, nil
 }
 

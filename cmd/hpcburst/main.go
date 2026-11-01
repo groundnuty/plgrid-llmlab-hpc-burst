@@ -11,7 +11,11 @@
 // up also starts the controllers' supervisor, a hidden "hpcburst supervise" process that keeps
 // hpcburst-controller running and restarts it when it exits.
 //
-// Exit codes: 0 success, 1 failure (status: unhealthy), 2 usage error, 3 (status only) stopped.
+// Exit codes: 0 success, 1 failure (status: unhealthy), 2 usage error, 3 (status only) stopped,
+// 4 (up only) the host is up and left running, but an agent build or frpc build that a
+// PlatformProfile partition needs is missing or does not match its pin (or the check could not
+// read the profiles): fix the builds (hack/build-agents.sh, hack/fetch-frp.sh --agent-builds) and
+// run status.
 package main
 
 import (
@@ -33,6 +37,7 @@ const (
 	exitFail      = 1
 	exitUsage     = 2
 	exitStopped   = 3
+	exitBuilds    = 4
 	envBinDir     = "HPCBURST_BIN_DIR"
 	usageSummary  = "usage: hpcburst <up|status|upgrade|restore|down> [flags]  (hpcburst <command> -h lists a command's flags)"
 	stateDirUsage = "state directory (default $XDG_STATE_HOME/hpcburst, or ~/.local/state/hpcburst)"
@@ -157,12 +162,22 @@ func cmdUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	o.Log = stderr
 	rep, err := launcher.Up(ctx, o)
-	if err != nil {
+	// An AgentBuildsError comes with the report: the host is up, and the builds are the operator's
+	// to fix. The report is printed as usual, and the ERROR and the exit code come last.
+	var buildsErr *launcher.AgentBuildsError
+	if err != nil && !(errors.As(err, &buildsErr) && rep != nil) {
 		return fail(stderr, err)
+	}
+	done := func() int {
+		if buildsErr == nil {
+			return exitOK
+		}
+		printBuildsError(stderr, buildsErr, o.StateDir)
+		return exitBuilds
 	}
 	if asJSON {
 		emitJSON(stdout, rep)
-		return exitOK
+		return done()
 	}
 	fmt.Fprintf(stdout, "k3s %s is ready (pid %d): readyz after %d ms, controller manager after %d ms, RSS %.0f MiB\n",
 		rep.Version, rep.PID, rep.ReadyzMS, rep.ReadyMS, rep.RSSMiB)
@@ -183,7 +198,8 @@ func cmdUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if o.ManifestsDir != "" {
 		fmt.Fprintf(stdout, "applied %d manifests from %s\n", rep.Applied, o.ManifestsDir)
 	}
-	return exitOK
+	printAgentBuilds(stdout, rep.AgentBuilds)
+	return done()
 }
 
 func cmdStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -255,6 +271,7 @@ func printStatus(w io.Writer, r *launcher.StatusReport) {
 		}
 	}
 	printSupervision(w, r)
+	printAgentBuilds(w, r.AgentBuilds)
 	if r.Front != nil && r.Front.Set() {
 		fmt.Fprintf(w, "front: %s %s\n", r.Front.Mode, r.Front.Addr)
 	} else if r.Version != "" {

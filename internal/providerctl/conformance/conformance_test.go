@@ -30,7 +30,9 @@
 //	                           that directory when it ends, pass or fail
 //	HPCBURST_CONF_HOST_LOCK    the host's lock file: one ssh call at a time
 //	HPCBURST_CONF_CONTROL_DIR  a short private directory for the ssh master
-//	HPCBURST_CONF_OUT          a private directory for the run's records
+//	HPCBURST_CONF_OUT          a private directory for the run's records; it also
+//	                           holds job-tags.txt, the tag of every job the run may
+//	                           submit, written before the submission
 //
 // HPCBURST_CONF_GPU_MODEL, _CPU_ARCH and _DATA_PARSER are not read any more:
 // the profile holds them, and a run that sets one stops.
@@ -104,6 +106,24 @@ func newPrivate(t testing.TB, dir string) *private {
 func (p *private) log(format string, a ...any) {
 	fmt.Fprintf(p.f, time.Now().UTC().Format(time.RFC3339)+" "+format+"\n", a...)
 }
+
+// tag records the job tag an Allocation will carry, one per line, in job-tags.txt
+// (mode 600), before anything can submit it. hack/live-checks.sh reads the file
+// to find and cancel this run's own jobs by name, also when the run is killed
+// or an sbatch reply is lost: a job it did not tag is never its to cancel.
+func (p *private) tag(tag string) {
+	f, err := os.OpenFile(filepath.Join(p.dir, jobTagsFile), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		p.t.Fatalf("the job tag could not be recorded: %v", err)
+	}
+	defer f.Close()
+	if _, err := fmt.Fprintln(f, tag); err != nil {
+		p.t.Fatalf("the job tag could not be recorded: %v", err)
+	}
+}
+
+// jobTagsFile is the file of this run's job tags in the private directory.
+const jobTagsFile = "job-tags.txt"
 
 func (p *private) save(name string, b []byte) {
 	_ = os.WriteFile(filepath.Join(p.dir, name), b, 0o600)
@@ -263,8 +283,10 @@ func (w *world) cleanup() {
 }
 
 func (w *world) newAlloc(name string) *v1alpha1.Allocation {
+	uid := types.UID(fmt.Sprintf("conf-%d-%s", time.Now().UnixNano(), name))
+	w.p.tag(v1alpha1.JobTag(testNS, name, uid))
 	a := &v1alpha1.Allocation{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS, UID: types.UID(fmt.Sprintf("conf-%d-%s", time.Now().UnixNano(), name)),
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS, UID: uid,
 			CreationTimestamp: metav1.NewTime(time.Now())},
 		Spec: v1alpha1.AllocationSpec{
 			ProviderConfigReference: &xpv2.ProviderConfigReference{Kind: v1alpha1.ProviderConfigKind, Name: "conformance"},
@@ -354,6 +376,8 @@ func count(words []string, w string) int {
 }
 
 // TestConformance is the run on one platform.
+//
+//livecheck:conformance-helios,conformance-athena
 func TestConformance(t *testing.T) {
 	w := newWorld(t)
 	ctx := context.Background()
@@ -525,6 +549,8 @@ func (w *world) endedInAccounting(id string, timeout time.Duration) provider.Job
 // TestProbe is the read-only part: one master, the login-node paths, one
 // queue listing parsed with the profile's data_parser, and the dial-home key
 // check. It submits nothing. Run it first on a new platform.
+//
+//livecheck:none probes a new platform by hand and submits nothing
 func TestProbe(t *testing.T) {
 	if os.Getenv("HPCBURST_CONFORMANCE_PROBE") != "1" {
 		t.Skip("set HPCBURST_CONFORMANCE_PROBE=1 and the HPCBURST_CONF_* settings to probe a real platform")
