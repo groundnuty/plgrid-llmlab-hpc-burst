@@ -123,9 +123,26 @@ func toU(t *testing.T, obj runtime.Object, kind string) *unstructured.Unstructur
 }
 
 // usageCounters reads the counters of the front's usage records.
-func usageCounters(t *testing.T, path string) []uint64 {
+// usageFiles are the front's usage files in dir, oldest first: HBEP-8 names them
+// usage-<YYYY-MM-DD>.jsonl by the UTC day of the write, so a run across midnight has two.
+func usageFiles(t *testing.T, dir string) []string {
 	t.Helper()
-	b, _ := os.ReadFile(path)
+	files, err := filepath.Glob(filepath.Join(dir, "usage-????-??-??.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(files)
+	return files
+}
+
+// usageCounters reads the counters of every usage record in dir, in file and line order.
+func usageCounters(t *testing.T, dir string) []uint64 {
+	t.Helper()
+	var b []byte
+	for _, f := range usageFiles(t, dir) {
+		data, _ := os.ReadFile(f)
+		b = append(b, data...)
+	}
 	var out []uint64
 	dec := json.NewDecoder(bytes.NewReader(b))
 	for dec.More() {
@@ -298,8 +315,7 @@ func TestFrontSupervision(t *testing.T) {
 	if code != http.StatusOK || !strings.Contains(body, `"id":"example-27b"`) || !strings.Contains(body, `"routable":false`) {
 		t.Fatalf("GET /v1/models = %d %s", code, body)
 	}
-	usagePath := filepath.Join(usageDir, "usage.jsonl")
-	waitFor(t, 10*time.Second, "the first usage record", func() bool { return len(usageCounters(t, usagePath)) == 1 })
+	waitFor(t, 10*time.Second, "the first usage record", func() bool { return len(usageCounters(t, usageDir)) == 1 })
 
 	// ---- a killed front is restarted, and its usage counter shows the gap ----
 	verifiedKill(t, *fe.Proc)
@@ -311,8 +327,8 @@ func TestFrontSupervision(t *testing.T) {
 	if code, _ := listModels(t, clientKey); code != http.StatusOK {
 		t.Fatalf("after the restart GET /v1/models = %d", code)
 	}
-	waitFor(t, 10*time.Second, "the second usage record", func() bool { return len(usageCounters(t, usagePath)) == 2 })
-	if got := usageCounters(t, usagePath); got[0] != 1 || got[1] != 1001 {
+	waitFor(t, 10*time.Second, "the second usage record", func() bool { return len(usageCounters(t, usageDir)) == 2 })
+	if got := usageCounters(t, usageDir); got[0] != 1 || got[1] != 1001 {
 		t.Errorf("usage counters %v, want [1 1001]: the kill must show as a gap", got)
 	}
 
@@ -347,7 +363,7 @@ func TestFrontSupervision(t *testing.T) {
 		!strings.Contains(r.out, "supervised front: running=true") {
 		t.Errorf("status text (exit %d):\n%s", r.code, r.out)
 	}
-	for _, f := range []string{filepath.Join(h.dir, "logs", "front.log"), usagePath} {
+	for _, f := range append([]string{filepath.Join(h.dir, "logs", "front.log")}, usageFiles(t, usageDir)...) {
 		if strings.Contains(fileOf(f), clientKey) {
 			t.Errorf("%s holds the client key", f)
 		}
