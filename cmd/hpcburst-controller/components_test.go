@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/pem"
 	"maps"
 	"os"
 	"os/user"
@@ -145,6 +147,13 @@ func TestFrontSettings(t *testing.T) {
 		!maps.Equal(fs.FrpcDigests, shared) {
 		t.Fatalf("direct: %+v", fs)
 	}
+	// The settings keep the certificate's PEM, which Create stages as each
+	// Allocation's dial-home.crt: the PEM of the launcher's certificate, as the
+	// test encodes it from the certificate it wrote, and not another PEM of the
+	// same key.
+	if want := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw}); !bytes.Equal(fs.CertPEM, want) {
+		t.Errorf("CertPEM = %q, want the PEM of the agent endpoint's certificate", fs.CertPEM)
+	}
 	fs.FrpcDigests["x86_64"] = "changed"
 	if shared["x86_64"] == "changed" {
 		t.Fatal("the settings share the digests' map; a change to one changes the pin")
@@ -215,6 +224,28 @@ func TestFrontSettingsRefusals(t *testing.T) {
 				t.Fatalf("frontSettings = %+v, %v; want a refusal naming %q", fs, err, tc.want)
 			}
 		})
+	}
+}
+
+// The certificate file the settings keep is the one Create stages, and the agent
+// refuses any but exactly one certificate (HBEP-6, Certificate checks), so a
+// file of two stops the binary here, before anything listens, not every job.
+func TestFrontSettingsRefusesAFileOfTwoCertificates(t *testing.T) {
+	state := t.TempDir()
+	h := agentapi.Host{StateDir: state, PortBase: 29300}
+	cert := writeEndpointCert(t, h)
+	one := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
+	if err := os.WriteFile(h.AgentCertFile(), append(append([]byte{}, one...), one...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := parse([]string{"--state-dir", state, "--port-base", "29300", "--health-addr", "127.0.0.1:29306",
+		"--front-mode", "direct", "--front-addr", "front.example.org:29443"}, os.Stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := deps{frpcDigests: func() (map[string]string, error) { return map[string]string{"x86_64": strings.Repeat("a", 64)}, nil }}
+	if fs, err := frontSettings(f, d); err == nil || !strings.Contains(err.Error(), "the dial-home certificate: it holds 2 certificates") {
+		t.Fatalf("frontSettings = %+v, %v; want the agent's refusal of two certificates", fs, err)
 	}
 }
 

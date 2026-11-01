@@ -1,7 +1,7 @@
 package fakeslurm
 
 // New. The file and environment commands of the grammar: cat >, printenv,
-// sha256sum, umask, mkdir -p, chmod, mv -f, rm -f, rm -rf and test -f, over
+// sha256sum, umask, mkdir -p, chmod, mv -f and mv -fT, rm -f, rm -rf and test -f, over
 // the platform's file system (in memory, or on disk in run mode).
 
 import (
@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"path"
 	"strconv"
+	"strings"
 )
 
 func cleanPath(p string) string { return path.Clean(p) }
@@ -105,24 +106,50 @@ func (sh *shell) chmod(args []string) int {
 	return 0
 }
 
-// mv is "mv -f <a> <b>" for a file: it needs the directory of b, replaces b,
-// and keeps the file's mode and owner.
+// mv is "mv -f <a> <b>" or "mv -fT <a> <b>" for a file, as GNU mv does it
+// (mv_real_test.go compares the two on the real mv): it replaces b and keeps the
+// file's mode and owner. A destination that is a directory takes the file
+// inside it under its own name, and succeeds, unless -T says b is the file's
+// own path, which fails ("cannot overwrite directory"). The plugin installs with
+// -fT, so a directory at the path fails the install instead of swallowing the
+// file.
 func (sh *shell) mv(args []string) int {
-	if len(args) != 3 || args[0] != "-f" {
-		return sh.fail(2, "mv: the fake supports only: mv -f <a> <b>")
+	force, noTarget := false, false
+	for len(args) > 0 && strings.HasPrefix(args[0], "-") && len(args[0]) > 1 {
+		for _, c := range args[0][1:] {
+			switch c {
+			case 'f':
+				force = true
+			case 'T':
+				noTarget = true
+			default:
+				return sh.fail(2, "mv: the fake supports only: mv -f|-fT <a> <b>")
+			}
+		}
+		args = args[1:]
 	}
-	from, to := sh.path(args[1]), sh.path(args[2])
+	if !force || len(args) != 2 {
+		return sh.fail(2, "mv: the fake supports only: mv -f|-fT <a> <b>")
+	}
+	from, to, toArg := sh.path(args[0]), sh.path(args[1]), args[1]
 	fsys := sh.p.fs
-	switch {
-	case !fsys.isFile(from):
-		return sh.fail(1, "mv: cannot stat '%s': No such file or directory", args[1])
-	case fsys.isDir(to):
-		return sh.fail(1, "mv: cannot overwrite directory '%s' with non-directory", args[2])
-	case !fsys.isDir(path.Dir(to)):
-		return sh.fail(1, "mv: cannot move '%s' to '%s': No such file or directory", args[1], args[2])
+	if !fsys.isFile(from) {
+		return sh.fail(1, "mv: cannot stat '%s': No such file or directory", args[0])
+	}
+	if fsys.isDir(to) {
+		if noTarget {
+			return sh.fail(1, "mv: cannot overwrite directory '%s' with non-directory", toArg)
+		}
+		to, toArg = path.Join(to, path.Base(from)), path.Join(toArg, path.Base(from))
+		if fsys.isDir(to) {
+			return sh.fail(1, "mv: cannot overwrite directory '%s' with non-directory", toArg)
+		}
+	}
+	if !fsys.isDir(path.Dir(to)) {
+		return sh.fail(1, "mv: cannot move '%s' to '%s': No such file or directory", args[0], toArg)
 	}
 	if err := fsys.rename(from, to); err != nil {
-		return sh.fail(1, "mv: cannot move '%s' to '%s': %v", args[1], args[2], err)
+		return sh.fail(1, "mv: cannot move '%s' to '%s': %v", args[0], toArg, err)
 	}
 	return 0
 }

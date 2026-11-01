@@ -106,6 +106,12 @@ type verificationData struct {
 	// agent read them from the staged checkpoint (VerifyResult.GenerationConfig;
 	// science-agent rulings, 1 Nov 2026, issue #125).
 	GenerationConfig map[string]string `json:"generationConfig,omitempty"`
+	// GenerationConfigFile is what the agent found at the staged checkpoint's
+	// generation_config.json: absent, present or unreadable (agentapi.
+	// GenerationConfigAbsent and the like; empty when the agent did not look).
+	// It is how the record tells a checkpoint with no such file from one whose
+	// file holds none of the keys (HBEP-7, The verification record; issue #175).
+	GenerationConfigFile string `json:"generationConfigFile,omitempty"`
 	// BehaviourContextTokens is the context, in tokens, that this
 	// generation's behaviour check runs at: agentapi.BehaviourContextTokens
 	// of the resolved shapes, the reported max-model-len, the measured
@@ -140,7 +146,7 @@ type rehashOutcome struct {
 func judgeVerify(d declared, v *agentapi.VerifyResult, rehash bool, sh shapes) verificationData {
 	out := verificationData{
 		EngineVersion: v.EngineVersion, ImageDigest: v.ImageDigest, Settings: v.Settings,
-		Fingerprint: v.Fingerprint, Overhead: v.TemplateOverhead, GenerationConfig: v.GenerationConfig, Verdict: v1alpha1.VerdictPass,
+		Fingerprint: v.Fingerprint, Overhead: v.TemplateOverhead, GenerationConfig: v.GenerationConfig, GenerationConfigFile: v.GenerationConfigFile, Verdict: v1alpha1.VerdictPass,
 		Undeclared: map[string]string{},
 	}
 	failWith := func(cause, msg string) verificationData {

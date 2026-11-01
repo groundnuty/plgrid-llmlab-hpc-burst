@@ -49,6 +49,7 @@ func withoutTime(h agentapi.Health) agentapi.Health {
 }
 
 func i64p(v int64) *int64     { return &v }
+func boolp(v bool) *bool      { return &v }
 func f64p(v float64) *float64 { return &v }
 
 // withZeroCounters returns h with the five counters HBEP-8 adds (preemptions,

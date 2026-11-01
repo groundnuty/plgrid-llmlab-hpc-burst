@@ -1,6 +1,8 @@
 package v1alpha1
 
 import (
+	"fmt"
+
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -24,9 +26,10 @@ type BatchParameters struct {
 	// +kubebuilder:validation:MaxLength=253
 	Partition string `json:"partition"`
 
-	// TimeLimit is the job's time limit: the partition's maxTime, or the
-	// ModelDeployment's leaseLimit when that is shorter (HBEP-4, open question
-	// 11). It is a whole number of minutes, because Slurm counts limits in
+	// TimeLimit is the job's time limit: the smallest of the partition's
+	// maxTime, the maxWall of the QOS limits that apply and the
+	// ModelDeployment's leaseLimit (AllocationTimeLimit; HBEP-4, open question
+	// 11 and QOS limits). It is a whole number of minutes, because Slurm counts limits in
 	// minutes and the read-back compares the limit it reports (HBEP-4, The
 	// Slurm dialect); the provider refuses any other value before a call.
 	//
@@ -36,21 +39,26 @@ type BatchParameters struct {
 	// GPUs is the number of GPUs, requested untyped (--gres=gpu:<n>). In alpha
 	// it is tensor-parallel-size times pipeline-parallel-size (HBEP-4, GPU
 	// sizing). Zero only on a partition whose gpuModel is none; the provider
-	// refuses zero on a GPU partition, and more than gpusPerNode.
+	// refuses zero on a GPU partition, and more than the smaller of
+	// gpusPerNode and the QOS limits' maxGpusPerUser (MaxAllocationGPUs;
+	// HBEP-4, QOS limits).
 	//
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=1024
 	GPUs int32 `json:"gpus"`
 
-	// CPUsPerTask is gpus times the partition's cpusPerGpu (HBEP-7,
-	// Provisioning).
+	// CPUsPerTask is gpus times the partition's cpusPerGpu, capped at the QOS
+	// limits' maxCpusPerUser when set (HBEP-7, Provisioning; HBEP-4, QOS
+	// limits).
 	//
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=65536
 	CPUsPerTask int32 `json:"cpusPerTask"`
 
-	// Memory is gpus times the partition's memPerGpu (HBEP-7, Provisioning).
-	// The provider passes it to Slurm in whole MiB. It is never negative.
+	// Memory is gpus times the partition's memPerGpu, capped at the QOS
+	// limits' maxMemPerUser when set (HBEP-7, Provisioning; HBEP-4, QOS
+	// limits). The provider passes it to Slurm in whole MiB. It is never
+	// negative.
 	//
 	// +kubebuilder:validation:XValidation:rule="!string(self).startsWith('-')",message="memory must not be negative"
 	Memory resource.Quantity `json:"memory"`
@@ -206,7 +214,10 @@ const (
 // SubmissionRecord is one submission attempt. The record itself is the value of
 // the annotation AnnotationSubmission, this type as JSON, written with a
 // resourceVersion precondition (HBEP-11, Ownership, records and deletion);
-// status.atProvider.submission mirrors it for display.
+// status.atProvider.submission mirrors it for display. Readers of the
+// annotation check it with Validate; the CRD checks the mirror's code.
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.code) || self.state == 'Rejected'",message="code is set on a Rejected attempt only"
 type SubmissionRecord struct {
 	// Attempt is the attempt's number, from 1.
 	Attempt int32 `json:"attempt"`
@@ -230,10 +241,50 @@ type SubmissionRecord struct {
 	Time *metav1.Time `json:"time,omitempty"`
 
 	// Reason for the state: for Rejected, the scheduler's reason, which the
-	// lifecycle controller shows as SubmissionRejected (HBEP-7, Provisioning).
+	// lifecycle controller shows as SubmissionRejected, or as
+	// SubmitLimitReached when Code says so (HBEP-7, Provisioning). It is text
+	// for people; a controller matches on Code, never on it.
 	//
 	// +optional
 	Reason string `json:"reason,omitempty"`
+
+	// Code classifies a Rejected attempt: ReasonSubmitLimitReached when Slurm
+	// refused it for a full submit limit, told by its reason name
+	// (provider.PolicyRefusal.SubmitLimit; HBEP-4, QOS limits). The
+	// Allocation then stays Submitting and waits for the Rejected backoff, and
+	// nothing fails. Empty for any other refusal, a policy refusal for another
+	// limit included, and for every other state. The Provider's controller
+	// writes it with the state, in one record, so the lifecycle controller
+	// never sees a Rejected state without its code: the fake controller
+	// (pkg/provider/fake) does today, the Slurm provider's from #151's
+	// provider change.
+	//
+	// +optional
+	// +kubebuilder:validation:Enum=SubmitLimitReached
+	Code string `json:"code,omitempty"`
+}
+
+// Validate checks what every reader of a submission record relies on: the
+// attempt counts from 1, the state is one of the five, and a code is
+// ReasonSubmitLimitReached, on a Rejected attempt only (review of PR #155,
+// N6). A record that fails is malformed, never "no record": guessing could
+// submit twice.
+func (r SubmissionRecord) Validate() error {
+	if r.Attempt < 1 {
+		return fmt.Errorf("the submission record names attempt %d; attempts count from 1", r.Attempt)
+	}
+	switch r.State {
+	case SubmissionInFlight, SubmissionRejected, SubmissionUnknown, SubmissionDone, SubmissionAbandoned:
+	default:
+		return fmt.Errorf("the submission record's state %q is not one of InFlight, Rejected, Unknown, Done and Abandoned", r.State)
+	}
+	switch {
+	case r.Code != "" && r.Code != ReasonSubmitLimitReached:
+		return fmt.Errorf("the submission record's code %q is not %s", r.Code, ReasonSubmitLimitReached)
+	case r.Code != "" && r.State != SubmissionRejected:
+		return fmt.Errorf("the submission record has code %s on a %s attempt; a code is set on a Rejected attempt only", r.Code, r.State)
+	}
+	return nil
 }
 
 // AllocationPhase is the phase of an Allocation's job as its Provider's

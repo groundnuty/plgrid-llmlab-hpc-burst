@@ -264,6 +264,8 @@ func TestLayout(t *testing.T) {
 		AllocationCredentialPath("/state/cred", "u"): "/state/cred/allocations/u",
 		InstanceKeyPath("/state/cred", "u"):          "/state/cred/instances/u",
 		AgentBuildName("aarch64"):                    "hb-agent-aarch64",
+		FrpcBuildName("aarch64"):                     "frpc-aarch64",
+		FrpcBuildName("x86_64"):                      "frpc-x86_64",
 		ContainerEngineSocket(WorkerName(0)):         "/hpcburst/run/worker-0.sock",
 		ContainerChatTemplate:                        "/hpcburst/run/chat-template.jinja",
 	} {

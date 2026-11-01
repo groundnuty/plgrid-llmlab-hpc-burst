@@ -69,6 +69,11 @@ type Script struct {
 	// Reason is the text of the error that Rejected and Unknown return. The
 	// error's message is exactly this text.
 	Reason string
+	// Policy, for Rejected, makes the error a *provider.PolicyRefusal with
+	// this reason name, such as QOSMaxSubmitJobPerUserLimit, and Slurm's
+	// reason line, "sbatch: error: <name>", as its Line (HBEP-4, QOS limits).
+	// Reason, when also set, replaces the line.
+	Policy string
 	// QueueWait is the time from eligibility to start. A job is eligible at
 	// its submit time, or at its hold-lift time when it was held.
 	QueueWait time.Duration
@@ -240,6 +245,9 @@ func (b *Batch) Submit(_ context.Context, req provider.SubmitRequest) (string, p
 	}
 	switch sc.Outcome {
 	case provider.Rejected:
+		if sc.Policy != "" {
+			return "", provider.Rejected, &provider.PolicyRefusal{Reason: sc.Policy, Line: reasonOr(sc.Reason, "sbatch: error: "+sc.Policy)}
+		}
 		return "", provider.Rejected, errors.New(reasonOr(sc.Reason, "Batch job submission failed: scripted rejection"))
 	case provider.Unknown:
 		if sc.Registered {
@@ -249,6 +257,15 @@ func (b *Batch) Submit(_ context.Context, req provider.SubmitRequest) (string, p
 	default:
 		return b.register(req, sc), provider.Accepted, nil
 	}
+}
+
+// PolicyRefusalLines is what sbatch prints on its standard error for a
+// policy refusal with the reason name: the reason line, then the
+// accounting-policy line (HBEP-4, QOS limits, from Slurm's source: job_mgr.c,
+// slurm_protocol_pack.c, sbatch.c and slurm_errno.c). A fake scheduler that
+// prints a refusal prints these two lines.
+func PolicyRefusalLines(reason string) string {
+	return "sbatch: error: " + reason + "\nsbatch: error: " + provider.PolicyLine + "\n"
 }
 
 func reasonOr(reason, def string) string {

@@ -67,6 +67,10 @@ type UpReport struct {
 	FrontHealth string `json:"front_health,omitempty"`
 	// FrpsPorts are frps's bind, tcpmux and web ports when frps runs.
 	FrpsPorts []int `json:"frps_ports,omitempty"`
+	// AgentBuilds is the check of the builds the PlatformProfiles' partitions need (#158), made
+	// once the controllers run. When it finds a problem, Up returns this report together with an
+	// *AgentBuildsError, and the host keeps running.
+	AgentBuilds *AgentBuilds `json:"agent_builds,omitempty"`
 }
 
 // logTail returns the last few lines of the k3s log, for error messages.
@@ -339,7 +343,32 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 		rep.Warnings = append(rep.Warnings, frontWarning)
 		logf(o.Log, "%s", frontWarning)
 	}
+	if ctrlBin != "" {
+		// Last, with the host and its controllers up: a problem with the builds is not a failed
+		// start. The host keeps running, so the operator can place the builds and run status.
+		return rep, checkBuildsAtUp(ctx, l, ports, rep)
+	}
 	return rep, nil
+}
+
+// checkBuildsAtUp sets rep.AgentBuilds. It returns an *AgentBuildsError when a build is missing or
+// does not match, or when the PlatformProfiles could not be read (the check did not run).
+func checkBuildsAtUp(ctx context.Context, l layout, ports Ports, rep *UpReport) error {
+	dir := l.host(ports).AgentBuildsDir()
+	cfg, err := restConfig(l.kubeconfig(), ports, 30*time.Second)
+	var ab *AgentBuilds
+	if err == nil {
+		ab, err = CheckAgentBuilds(ctx, cfg, dir)
+	}
+	if err != nil {
+		rep.AgentBuilds = &AgentBuilds{Dir: dir, Detail: err.Error()}
+		return &AgentBuildsError{rep.AgentBuilds}
+	}
+	rep.AgentBuilds = ab
+	if len(ab.Problems) > 0 {
+		return &AgentBuildsError{ab}
+	}
+	return nil
 }
 
 var errNotRunning = errors.New("no host is recorded in the state directory")

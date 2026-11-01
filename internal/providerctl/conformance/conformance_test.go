@@ -24,11 +24,15 @@
 //	HPCBURST_CONF_GPUS         GPUs per job (0 for a CPU partition)
 //	HPCBURST_CONF_CPUS         cpusPerTask
 //	HPCBURST_CONF_MEMORY       memory, a Kubernetes quantity
-//	HPCBURST_CONF_STAGING      the run's stagingDir, a directory below the profile's
-//	                           (for example $SCRATCH/<own dir>), not the root
+//	HPCBURST_CONF_STAGING      a directory below the profile's stagingDir (for example
+//	                           $SCRATCH/<own dir>), not the root. Each run stages into
+//	                           a run-<12 hex> directory of its own below it, and removes
+//	                           that directory when it ends, pass or fail
 //	HPCBURST_CONF_HOST_LOCK    the host's lock file: one ssh call at a time
 //	HPCBURST_CONF_CONTROL_DIR  a short private directory for the ssh master
-//	HPCBURST_CONF_OUT          a private directory for the run's records
+//	HPCBURST_CONF_OUT          a private directory for the run's records; it also
+//	                           holds job-tags.txt, the tag of every job the run may
+//	                           submit, written before the submission
 //
 // HPCBURST_CONF_GPU_MODEL, _CPU_ARCH and _DATA_PARSER are not read any more:
 // the profile holds them, and a run that sets one stops.
@@ -59,6 +63,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/providerctl"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/providerctl/ctltest"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/sshrun"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
@@ -80,12 +85,12 @@ func load(t *testing.T) settings {
 
 // private records go to the output directory, mode 600, never to the log.
 type private struct {
-	t   *testing.T
+	t   testing.TB
 	dir string
 	f   *os.File
 }
 
-func newPrivate(t *testing.T, dir string) *private {
+func newPrivate(t testing.TB, dir string) *private {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -101,6 +106,24 @@ func newPrivate(t *testing.T, dir string) *private {
 func (p *private) log(format string, a ...any) {
 	fmt.Fprintf(p.f, time.Now().UTC().Format(time.RFC3339)+" "+format+"\n", a...)
 }
+
+// tag records the job tag an Allocation will carry, one per line, in job-tags.txt
+// (mode 600), before anything can submit it. hack/live-checks.sh reads the file
+// to find and cancel this run's own jobs by name, also when the run is killed
+// or an sbatch reply is lost: a job it did not tag is never its to cancel.
+func (p *private) tag(tag string) {
+	f, err := os.OpenFile(filepath.Join(p.dir, jobTagsFile), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		p.t.Fatalf("the job tag could not be recorded: %v", err)
+	}
+	defer f.Close()
+	if _, err := fmt.Fprintln(f, tag); err != nil {
+		p.t.Fatalf("the job tag could not be recorded: %v", err)
+	}
+}
+
+// jobTagsFile is the file of this run's job tags in the private directory.
+const jobTagsFile = "job-tags.txt"
 
 func (p *private) save(name string, b []byte) {
 	_ = os.WriteFile(filepath.Join(p.dir, name), b, 0o600)
@@ -147,7 +170,7 @@ func (c *capture) Connect(ctx context.Context) error {
 // world is one run: the controller over a fake API client, and the real
 // platform over ssh.
 type world struct {
-	t       *testing.T
+	t       testing.TB
 	s       settings
 	p       *private
 	c       client.Client
@@ -194,6 +217,8 @@ func newWorld(t *testing.T) *world {
 	if err := os.WriteFile(filepath.Join(builds, agentapi.AgentBuildName(s.part.CPUArch)), agent, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	certPEM, certPin := ctltest.Cert(t)
+	frpcDigest := ctltest.Frpc(t, builds, s.part.CPUArch)
 	w.credDir = t.TempDir()
 
 	ctl, err := providerctl.New(w.c, w.c, scheme, providerctl.Options{
@@ -210,8 +235,8 @@ func newWorld(t *testing.T) *world {
 			return w.batch, t, nil
 		},
 		CredentialsDir: w.credDir, AgentBuildsDir: builds,
-		Front: &providerctl.FrontSettings{Mode: agentapi.DialHomeDirect, Endpoint: "127.0.0.1:29261", CertPin: strings.Repeat("0", 64),
-			FrpcDigests: map[string]string{s.part.CPUArch: strings.Repeat("d", 64)}},
+		Front: &providerctl.FrontSettings{Mode: agentapi.DialHomeDirect, Endpoint: "127.0.0.1:29261", CertPin: certPin, CertPEM: certPEM,
+			FrpcDigests: map[string]string{s.part.CPUArch: frpcDigest}},
 		PollInterval: 10 * time.Second, BusyInterval: 3 * time.Second, CreationGracePeriod: -1,
 	})
 	if err != nil {
@@ -222,8 +247,11 @@ func newWorld(t *testing.T) *world {
 	return w
 }
 
-// cleanup cancels every job ID this run saw that is still live, and closes the
-// ssh master. It cancels only this run's own job IDs.
+// cleanup cancels every job ID this run saw that is still live, removes the
+// run's staging directory from the platform, and closes the ssh master. It
+// cancels only this run's own job IDs, and removes only the directory of this
+// run (removeStaging refuses any other). It is registered with t.Cleanup, so it
+// runs after a pass and after a failure alike.
 func (w *world) cleanup() {
 	if w.batch != nil {
 		var ids []string
@@ -236,6 +264,12 @@ func (w *world) cleanup() {
 			w.p.log("cleanup cancel %s: %s %v", r.JobID, r.Outcome, r.Err)
 		}
 	}
+	if w.batch != nil && w.cap != nil {
+		if err := removeStaging(context.Background(), w.batch, w.cap); err != nil {
+			w.p.log("cleanup staging: %v", err)
+			w.t.Errorf("the run's staging directory was not removed: %v", err)
+		}
+	}
 	if w.ssh != nil {
 		w.t.Logf("ssh masters started in this run: %d", w.ssh.Starts())
 		_ = w.ssh.Close()
@@ -243,12 +277,16 @@ func (w *world) cleanup() {
 	if w.cap != nil {
 		w.t.Logf("sbatch latencies over ssh: %v", w.cap.sbatchD)
 	}
-	w.ctl.Close()
+	if w.ctl != nil {
+		w.ctl.Close()
+	}
 }
 
 func (w *world) newAlloc(name string) *v1alpha1.Allocation {
+	uid := types.UID(fmt.Sprintf("conf-%d-%s", time.Now().UnixNano(), name))
+	w.p.tag(v1alpha1.JobTag(testNS, name, uid))
 	a := &v1alpha1.Allocation{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS, UID: types.UID(fmt.Sprintf("conf-%d-%s", time.Now().UnixNano(), name)),
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS, UID: uid,
 			CreationTimestamp: metav1.NewTime(time.Now())},
 		Spec: v1alpha1.AllocationSpec{
 			ProviderConfigReference: &xpv2.ProviderConfigReference{Kind: v1alpha1.ProviderConfigKind, Name: "conformance"},
@@ -338,6 +376,8 @@ func count(words []string, w string) int {
 }
 
 // TestConformance is the run on one platform.
+//
+//livecheck:conformance-helios,conformance-athena
 func TestConformance(t *testing.T) {
 	w := newWorld(t)
 	ctx := context.Background()
@@ -509,6 +549,8 @@ func (w *world) endedInAccounting(id string, timeout time.Duration) provider.Job
 // TestProbe is the read-only part: one master, the login-node paths, one
 // queue listing parsed with the profile's data_parser, and the dial-home key
 // check. It submits nothing. Run it first on a new platform.
+//
+//livecheck:none probes a new platform by hand and submits nothing
 func TestProbe(t *testing.T) {
 	if os.Getenv("HPCBURST_CONFORMANCE_PROBE") != "1" {
 		t.Skip("set HPCBURST_CONFORMANCE_PROBE=1 and the HPCBURST_CONF_* settings to probe a real platform")

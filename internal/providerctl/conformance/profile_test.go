@@ -36,8 +36,12 @@ var retired = []string{"HPCBURST_CONF_GPU_MODEL", "HPCBURST_CONF_CPU_ARCH", "HPC
 // settings is one run's inputs.
 type settings struct {
 	creds, account, partition, staging, lock, control, out string
-	gpus, cpus                                             int32
-	memory                                                 resource.Quantity
+	// runStaging is this run's own staging directory, below staging
+	// (newRunStaging); the profile's stagingDir is it, and it is removed when the
+	// run ends.
+	runStaging string
+	gpus, cpus int32
+	memory     resource.Quantity
 
 	// profile is the shipped PlatformProfile, whole, with its stagingDir
 	// replaced by staging; part is the entry of the partition under test.
@@ -129,7 +133,12 @@ func readSettings(env func(string) string) (settings, error) {
 	if len(problems) > 0 {
 		return s, fmt.Errorf("%s", strings.Join(problems, "; "))
 	}
-	pp, part, err := loadProfile(profilesDir(), profile, s.partition, s.staging)
+	runDir, err := newRunStaging(s.staging)
+	if err != nil {
+		return s, err
+	}
+	s.runStaging = runDir
+	pp, part, err := loadProfile(profilesDir(), profile, s.partition, s.runStaging)
 	if err != nil {
 		return s, err
 	}
