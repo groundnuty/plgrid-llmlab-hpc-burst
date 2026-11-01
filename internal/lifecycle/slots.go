@@ -18,8 +18,9 @@ import (
 // Allocations run under (maxSubmitPerUser of the QOS limits that apply,
 // v1alpha1.EffectiveQOSLimits). It counts every Allocation of that Provider, of
 // every ModelDeployment in every namespace: from its creation until its phase
-// is Ended or its deletion completes, so Submitting, SubmissionUnknown, held,
-// pending, running, Failed, Lost, Refused and deleting ones all count.
+// is Ended with its job no longer completing, or its deletion completes, so
+// Submitting, SubmissionUnknown, held, pending, running, Failed, Lost, Refused,
+// completing and deleting ones all count.
 //
 // Before it creates an Allocation, a worker reserves a slot under the
 // Provider's lock, which every worker takes. The count it checks is the listed
@@ -204,8 +205,10 @@ func (t *slotTable) listBounded(ctx context.Context, r client.Reader, provider s
 
 // listProviderAllocations lists the Allocations of every namespace whose
 // providerConfigRef names the Provider: seen holds all of them, listed those
-// whose phase is not Ended. A deleting Allocation counts until its deletion
-// completes.
+// whose phase is not Ended or whose job is still completing
+// (status.atProvider.jobCompleting). A deleting Allocation counts until its
+// deletion completes, and the Provider's controller keeps the finalizer of one
+// whose job is completing.
 func listProviderAllocations(ctx context.Context, r client.Reader, provider string) (seen, listed map[string]bool, err error) {
 	var al v1alpha1.AllocationList
 	if err := r.List(ctx, &al); err != nil {
@@ -219,7 +222,12 @@ func listProviderAllocations(ctx context.Context, r client.Reader, provider stri
 		}
 		k := a.Namespace + "/" + a.Name
 		seen[k] = true
-		if a.Status.AtProvider.Phase != v1alpha1.AllocationEnded {
+		// A job whose state still carries COMPLETING has the phase of its base
+		// state, Ended for a cancel or a lease end, but its processes and its
+		// epilog may run: the Allocation counts until the flag clears, and
+		// then until its deletion completes (HBEP-7, Provisioning, Per-user
+		// limits; HBEP-4, Phases, A completing job).
+		if o := &a.Status.AtProvider; o.Phase != v1alpha1.AllocationEnded || o.JobCompleting {
 			listed[k] = true
 		}
 	}

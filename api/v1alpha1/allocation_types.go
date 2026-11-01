@@ -424,6 +424,26 @@ type AllocationObservation struct {
 	// +listType=set
 	Duplicates []string `json:"duplicates,omitempty"`
 
+	// JobCompleting is true while the recorded job's state carries Slurm's
+	// COMPLETING flag, whatever its base state: the end state is set, but the
+	// job's processes and its epilog may still run, for up to Slurm's
+	// KillWait and longer. The phase follows the base state as ever
+	// (CANCELLED is Ended, FAILED is Failed), so failure handling is not
+	// delayed; until the flag clears the job is still live for the deletion
+	// finalizer, for the removal of the Allocation's files, for the lifecycle
+	// controller's slot count and for the accounting record, which is written
+	// once, after it has cleared. The flag clears when a successful read shows
+	// the job without it, when no read lists the job, or when the job is read
+	// from accounting, which never carries it; a failed read keeps the last
+	// value. It is written in the same status write as the phase, and
+	// ConditionJobCompleting says since when. A job stuck in COMPLETING on a bad
+	// node holds its Allocation until it clears: a known risk, visible here
+	// (HBEP-4, Phases, A completing job; `@hpc-burst-science-agent`, 1 Nov
+	// 2026, for #198; proposed).
+	//
+	// +optional
+	JobCompleting bool `json:"jobCompleting,omitempty"`
+
 	// QueueWaitRecorded is true once the Provider's controller has added the
 	// recorded job's queue wait to the Provider's status (HBEP-4, Provider
 	// status). It is set only after that write succeeded, so a failed write

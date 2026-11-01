@@ -55,6 +55,14 @@ func (c *Controller) syncDeleting(ctx context.Context, p *pass, s *allocState) e
 			return nil
 		}
 	}
+	// A completing job has an end time but is still live: its processes and
+	// its epilog may run. The record, the files and the finalizer wait for the
+	// flag to clear. It is not cancelled again; scancel would answer that it
+	// is already completing (the real provider's observeDeleting does the
+	// same).
+	if completing(jobs) {
+		return nil
+	}
 	if unresolved(s.rec) && a.Annotations[v1alpha1.AnnotationJobID] == "" && !c.attemptReleased(s, p.now) {
 		return nil // an unresolved attempt keeps the finalizer
 	}
@@ -112,4 +120,14 @@ func liveIDs(jobs []provider.Job) []string {
 		}
 	}
 	return ids
+}
+
+// completing reports whether any job carries the COMPLETING flag.
+func completing(jobs []provider.Job) bool {
+	for _, j := range jobs {
+		if j.Completing {
+			return true
+		}
+	}
+	return false
 }

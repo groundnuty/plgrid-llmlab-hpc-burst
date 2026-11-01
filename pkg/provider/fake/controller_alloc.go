@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
+	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -143,6 +146,9 @@ func (c *Controller) mirror(p *pass, s *allocState, id string, job provider.Job,
 	obs := s.obs
 	obs.JobID, obs.Submission = id, s.rec
 	if !found {
+		// Both reads succeeded and neither lists the job: it is no longer
+		// completing, whatever it was.
+		c.clearCompleting(p, s)
 		if obs.AbsentSince == nil {
 			obs.AbsentSince = mt(p.now)
 		}
@@ -163,4 +169,41 @@ func (c *Controller) mirror(p *pass, s *allocState, id string, job provider.Job,
 	obs.SubmitTime = mt(job.SubmitTime)
 	obs.StartEstimate, obs.StartTime = mtp(job.StartEstimate), mtp(job.StartTime)
 	obs.HardEnd, obs.EndTime = mtp(job.HardEnd), mtp(job.EndTime)
+	if !job.Completing {
+		c.clearCompleting(p, s)
+		return
+	}
+	obs.JobCompleting = true
+	s.conds = append(s.conds, xpv2.Condition{
+		Type: v1alpha1.ConditionJobCompleting, Status: corev1.ConditionTrue, Reason: v1alpha1.ReasonJobCompleting,
+		LastTransitionTime: metav1.NewTime(p.now), Message: completingMessage(id, job),
+	})
+}
+
+// clearCompleting records that the job is not completing: the flag is cleared,
+// and a JobCompleting condition that was True turns False. A job never seen
+// completing gets no condition. It runs only for a read that succeeded, so a
+// failed read keeps the last evidence (observe restores the stored status).
+func (c *Controller) clearCompleting(p *pass, s *allocState) {
+	s.obs.JobCompleting = false
+	if s.a.GetCondition(v1alpha1.ConditionJobCompleting).Status == corev1.ConditionTrue {
+		s.conds = append(s.conds, xpv2.Condition{
+			Type: v1alpha1.ConditionJobCompleting, Status: corev1.ConditionFalse, Reason: v1alpha1.ReasonJobNotCompleting,
+			LastTransitionTime: metav1.NewTime(p.now),
+		})
+	}
+}
+
+// completingMessage is the JobCompleting condition's message while the flag
+// lasts: the job, its base state and since when, from the listing's end_time,
+// never from the clock, so it is the same at every pass.
+func completingMessage(id string, job provider.Job) string {
+	base := ""
+	if len(job.State) > 0 {
+		base = job.State[0]
+	}
+	if job.CompletingSince == nil {
+		return fmt.Sprintf("job %s is completing in state %s; the listing gives no end_time", id, base)
+	}
+	return fmt.Sprintf("job %s is completing in state %s since %s", id, base, job.CompletingSince.UTC().Format(time.RFC3339))
 }

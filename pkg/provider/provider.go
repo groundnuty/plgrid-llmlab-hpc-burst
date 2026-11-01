@@ -247,6 +247,19 @@ type Job struct {
 	// Requeued is true when the job was requeued: a restart count above 0, or
 	// a REQUEUED record in accounting.
 	Requeued bool
+	// Completing is true when the queue listing's state carries the COMPLETING
+	// flag, whatever the base state: the end state is set while processes and
+	// the epilog may still run. The phase still follows the base state, and
+	// the job is still live for the deletion finalizer, the removal of the
+	// Allocation's files, the slot count and the accounting record (HBEP-4,
+	// Phases, A completing job). Only the queue listing sets it: a record read
+	// from accounting never does, since accounting never carries the flag.
+	Completing bool
+	// CompletingSince is the listing's end_time for a completing job: when its
+	// end state was set. Nil when the job is not completing or the listing
+	// gives none. EndTime is not it, since a base state that has not ended has
+	// none.
+	CompletingSince *time.Time
 	// Partition, TimeLimit and GPUs are what the job was established with,
 	// for the read-back.
 	Partition string

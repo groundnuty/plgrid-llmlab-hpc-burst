@@ -452,6 +452,15 @@ func (q queueRecord) job(parser string) (provider.Job, error) {
 	if held {
 		j.Hold = provider.HoldOf(true, q.StateReason)
 	}
+	// The COMPLETING flag, in any position of job_state, whatever the base
+	// state (HBEP-4, Phases, A completing job). Only the queue listing carries
+	// it: the accounting reader below never sets it. The listing's end_time is
+	// when the end state was set, kept whatever the base state, since EndTime
+	// stays nil for one that has not ended.
+	if q.JobState.has(provider.FlagCompleting) {
+		j.Completing = true
+		j.CompletingSince = q.EndTime.epoch()
+	}
 	if t := q.SubmitTime.epoch(); t != nil {
 		j.SubmitTime = *t
 	}

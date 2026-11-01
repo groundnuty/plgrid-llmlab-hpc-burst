@@ -17,7 +17,8 @@ import (
 
 // observeDeleting decides whether a deleting Allocation still holds anything:
 // it exists while any job with the tag, or the recorded job, is live (held,
-// pending, running or suspended: no end time), or an attempt is unresolved
+// pending, running or suspended: no end time; or completing: the state still
+// carries COMPLETING), or an attempt is unresolved
 // (HBEP-7, open question 11, Deletion). A submission that returns during
 // deletion is recorded, never lifted, and cancelled. Once nothing is left, the
 // accounting record is written (keepAccounting, which may wait for the final
@@ -70,6 +71,16 @@ func (e *external) observeDeleting(ctx context.Context, a *v1alpha1.Allocation, 
 	if len(e.toCancel) > 0 {
 		return exists, nil
 	}
+	// A completing job has ended as far as scancel goes (EndTime is set, and
+	// Slurm's submit limit no longer counts it), but its processes and its
+	// epilog may still run, so it is live for everything below: the files, the
+	// accounting record and the finalizer wait for the flag to clear, which a
+	// listing without it, a job that is no longer listed, or accounting shows
+	// (HBEP-4, Phases, A completing job; HBEP-7, Deletion). It is not
+	// cancelled again: scancel would answer already completing.
+	if _, ok := completingJob(jobs); ok {
+		return exists, nil
+	}
 	if needsResolution(rec) && !e.attemptReleased(a, rec.sub, now) {
 		if !e.hold() && now.Sub(attemptTime(a, rec.sub)) > e.unknownBound() {
 			e.needOperator(a, rec.sub)
@@ -88,6 +99,17 @@ func (e *external) observeDeleting(ctx context.Context, a *v1alpha1.Allocation, 
 	e.s.finals.Delete(rec.jobID)
 	e.s.limitEvents.Delete(a.UID)
 	return missing, nil
+}
+
+// completingJob returns the ID of the first job among jobs that carries the
+// COMPLETING flag, in the order given (by job ID).
+func completingJob(jobs []provider.Job) (string, bool) {
+	for _, j := range jobs {
+		if j.Completing {
+			return j.ID, true
+		}
+	}
+	return "", false
 }
 
 func hasJob(jobs []provider.Job, id string) bool {
