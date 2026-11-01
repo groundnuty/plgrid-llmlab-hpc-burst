@@ -20,5 +20,10 @@ spec:
   # Alpha allows exactly one partition per Provider (HBEP-4, open question 12).
   allowedPartitions:
     - plgrid-gpu-gh200
+  # The Slurm QOS the jobs are submitted under. On Helios, now starts jobs promptly but allows each
+  # user one submitted job, one GPU and 12 hours (HBEP-4, QOS limits), and the profile lists it so
+  # that the controller plans within those limits. Remove the line to use your association's
+  # default QOS.
+  qos: now
   credentialsRef:
     file: /home/<user>/.config/hpcburst/credentials/helios-gh200.ssh

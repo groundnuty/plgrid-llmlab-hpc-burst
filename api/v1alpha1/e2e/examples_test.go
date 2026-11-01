@@ -39,6 +39,7 @@ type shippedProfile struct {
 	file       string
 	kind       string          // spec.providerKind
 	partitions map[string]bool // spec.partitions[].name
+	qos        map[string]bool // spec.qos[].name
 }
 
 // loadProfileManifests reads the PlatformProfile objects of profiles/, by the
@@ -56,11 +57,16 @@ func loadProfileManifests(t *testing.T) map[string]shippedProfile {
 			}
 			name, _, _ := unstructured.NestedString(obj, "metadata", "name")
 			kind, _, _ := unstructured.NestedString(obj, "spec", "providerKind")
-			p := shippedProfile{file: filepath.Base(f), kind: kind, partitions: map[string]bool{}}
+			p := shippedProfile{file: filepath.Base(f), kind: kind, partitions: map[string]bool{}, qos: map[string]bool{}}
 			parts, _, _ := unstructured.NestedSlice(obj, "spec", "partitions")
 			for _, raw := range parts {
 				pn, _ := raw.(map[string]any)["name"].(string)
 				p.partitions[pn] = true
+			}
+			qoses, _, _ := unstructured.NestedSlice(obj, "spec", "qos")
+			for _, raw := range qoses {
+				qn, _ := raw.(map[string]any)["name"].(string)
+				p.qos[qn] = true
 			}
 			if prev, dup := out[name]; dup {
 				t.Fatalf("profiles/%s and profiles/%s are both PlatformProfile %q", prev.file, p.file, name)
@@ -150,6 +156,10 @@ func TestExamplesAgreeWithTheirProfilesAndEachOther(t *testing.T) {
 				default:
 					t.Errorf("profiles/%s has providerKind %q", p.file, p.kind)
 				}
+				qos, _, _ := unstructured.NestedString(e.obj, "spec", "qos")
+				if msg := qosProblem(qos, p); msg != "" {
+					t.Error(msg)
+				}
 				if lbl, _, _ := unstructured.NestedString(e.obj, "metadata", "labels", v1alpha1.LabelPlatform); lbl == "" {
 					t.Errorf("the Provider has no %s label: HBEP-3 makes the platform a label, and a managed ModelDeployment matches it", v1alpha1.LabelPlatform)
 				}
@@ -185,6 +195,58 @@ func TestExamplesAgreeWithTheirProfilesAndEachOther(t *testing.T) {
 		default:
 			t.Errorf("%s: examples/ holds Providers and ModelDeployments; kind %q is neither", e.label(), e.kind())
 		}
+	}
+}
+
+// qosProblem says why a Provider's spec.qos cannot be used with its profile, or "" when it can or
+// is unset. The Slurm provider fails reading the profile, with the field named, when the profile's
+// qos list does not hold the Provider's (HBEP-4, Provider settings and QOS limits), so an example
+// that names an unlisted QOS would be admitted and then never ready. A profile with no qos list at
+// all lists none.
+func qosProblem(qos string, p shippedProfile) string {
+	if qos == "" || p.qos[qos] {
+		return ""
+	}
+	return fmt.Sprintf("spec.qos %q is not listed in profiles/%s qos (%s): the Slurm provider fails reading the profile", qos, p.file, sortedKeys(p.qos))
+}
+
+// The Helios example asks for QOS now, as the quickstart says, and the profile it names lists it.
+// The control cases show qosProblem refuses an unlisted QOS, one on a profile with no list, and
+// accepts an unset one, so the agreement check above is not one that accepts everything.
+func TestExampleProviderQOSIsListedInItsProfile(t *testing.T) {
+	profs := loadProfileManifests(t)
+	var helios example
+	for _, e := range loadExamples(t) {
+		if e.file == "provider-helios-gh200.yaml" {
+			helios = e
+		}
+	}
+	if helios.obj == nil {
+		t.Fatalf("this check reads provider-helios-gh200.yaml")
+	}
+	if qos, _, _ := unstructured.NestedString(helios.obj, "spec", "qos"); qos != "now" {
+		t.Errorf("the Helios example's spec.qos is %q; the quickstart says it asks for now", qos)
+	}
+	helProf := profs["helios"]
+	if !helProf.qos["now"] {
+		t.Fatalf("profiles/%s does not list the QOS now (%s)", helProf.file, sortedKeys(helProf.qos))
+	}
+	for _, tc := range []struct {
+		name string
+		qos  string
+		prof shippedProfile
+		bad  bool
+	}{
+		{"a listed QOS", "now", helProf, false},
+		{"no QOS", "", helProf, false},
+		{"an unlisted QOS", "nowx", helProf, true},
+		{"a QOS on a profile with no list", "now", profs["llmlab"], true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := qosProblem(tc.qos, tc.prof); (got != "") != tc.bad {
+				t.Errorf("qosProblem(%q, profiles/%s) = %q; want a problem: %v", tc.qos, tc.prof.file, got, tc.bad)
+			}
+		})
 	}
 }
 
