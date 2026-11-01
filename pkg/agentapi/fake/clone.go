@@ -101,6 +101,10 @@ func cloneCheckResults(c agentapi.CheckResults) agentapi.CheckResults {
 			d := *v.DoSample
 			v.DoSample = &d
 		}
+		if v.GenerationConfigRefused != nil {
+			g := *v.GenerationConfigRefused
+			v.GenerationConfigRefused = &g
+		}
 		return v
 	})
 	c.Qualify = clonePtr(c.Qualify, func(q agentapi.QualifyResult) agentapi.QualifyResult {

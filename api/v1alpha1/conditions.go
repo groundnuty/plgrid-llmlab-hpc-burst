@@ -116,7 +116,8 @@ const (
 	ReasonIdentityUnresolved = "IdentityUnresolved"
 	// ReasonSubmitLimitReached: a submission was refused for a full submit
 	// limit, told by Slurm's reason name (QOSMaxSubmitJobPerUserLimit,
-	// AssocMaxSubmitJobLimit or MaxSubmitJobsPerAccount), or no allowed
+	// AssocMaxSubmitJobLimit, MaxSubmitJobsPerAccount, or the group limits
+	// QOSGrpSubmitJobsLimit and AssocGrpSubmitJobsLimit), or no allowed
 	// Provider has a free slot for a missing primary. It names the Provider,
 	// the limit and Slurm's reason line. It is no failure: the attempt is
 	// retried with the Rejected backoff, and it counts toward neither

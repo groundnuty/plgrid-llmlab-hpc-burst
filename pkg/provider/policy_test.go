@@ -6,21 +6,54 @@ import (
 	"testing"
 )
 
-// Only Slurm's three submit-count reason names are a full submit limit
-// (HBEP-4, QOS limits); every other policy reason, a stand-alone breach
-// included, is not. The names are written out by hand from HBEP-4.
+// Only Slurm's five submit-count reason names are a full submit limit
+// (HBEP-4, QOS limits; the two group names from PR #155's review); every other
+// policy reason, a stand-alone breach included, is not. The names are written
+// out by hand.
 func TestIsSubmitLimitReason(t *testing.T) {
-	for _, name := range []string{"QOSMaxSubmitJobPerUserLimit", "AssocMaxSubmitJobLimit", "MaxSubmitJobsPerAccount"} {
-		if !IsSubmitLimitReason(name) {
-			t.Errorf("%s: not a submit limit, want one", name)
+	for _, tc := range []struct {
+		name  string
+		group bool
+	}{
+		{"QOSMaxSubmitJobPerUserLimit", false}, {"AssocMaxSubmitJobLimit", false}, {"MaxSubmitJobsPerAccount", false},
+		{"QOSGrpSubmitJobsLimit", true}, {"AssocGrpSubmitJobsLimit", true},
+	} {
+		if !IsSubmitLimitReason(tc.name) {
+			t.Errorf("%s: not a submit limit, want one", tc.name)
+		}
+		if IsGroupSubmitLimitReason(tc.name) != tc.group {
+			t.Errorf("%s: group = %v, want %v", tc.name, !tc.group, tc.group)
 		}
 	}
 	for _, name := range []string{
 		"QOSMaxWallDurationPerJobLimit", "QOSMaxGRESPerUser", "AssocGrpBillingMinutes", "QOSMaxSubmitJobPerUserLimitX",
-		"qosmaxsubmitjobperuserlimit", " QOSMaxSubmitJobPerUserLimit", "",
+		"QOSGrpJobsLimit", "AssocGrpJobsLimit", "qosmaxsubmitjobperuserlimit", " QOSMaxSubmitJobPerUserLimit", "",
 	} {
-		if IsSubmitLimitReason(name) {
+		if IsSubmitLimitReason(name) || IsGroupSubmitLimitReason(name) {
 			t.Errorf("%q: a submit limit, want none", name)
+		}
+	}
+}
+
+// A group submit limit's message says the slot is shared by the grant's users;
+// a per-user one's does not (`@hpc-burst-science-agent`, 1 Nov 2026).
+func TestGroupSubmitLimitMessageNamesTheGrant(t *testing.T) {
+	for _, tc := range []struct {
+		pr   PolicyRefusal
+		want string
+	}{
+		{PolicyRefusal{Reason: "QOSGrpSubmitJobsLimit", Line: "sbatch: error: QOSGrpSubmitJobsLimit"},
+			"sbatch: error: QOSGrpSubmitJobsLimit (group limit, shared by the grant's users)"},
+		{PolicyRefusal{Reason: "AssocGrpSubmitJobsLimit"},
+			"sbatch: error: AssocGrpSubmitJobsLimit (group limit, shared by the grant's users)"},
+		{PolicyRefusal{Reason: "QOSMaxSubmitJobPerUserLimit", Line: "sbatch: error: QOSMaxSubmitJobPerUserLimit"},
+			"sbatch: error: QOSMaxSubmitJobPerUserLimit"},
+	} {
+		if got := tc.pr.Error(); got != tc.want {
+			t.Errorf("%s: Error() = %q, want %q", tc.pr.Reason, got, tc.want)
+		}
+		if !tc.pr.SubmitLimit() {
+			t.Errorf("%s: SubmitLimit() = false, want true", tc.pr.Reason)
 		}
 	}
 }

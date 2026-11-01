@@ -9,6 +9,7 @@ package lifecycle
 // EffectiveQOSLimits or the sizing code.
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -258,5 +259,35 @@ func TestQOSEffectiveZeroLimits(t *testing.T) {
 				t.Fatalf("Degraded = %s/%s %q, want %s naming %q", c.Status, c.Reason, c.Message, tc.wantReason, tc.wantText)
 			}
 		})
+	}
+}
+
+// TestQOSGPUCapWithoutGPUsPerNode: with no gpusPerNode in the profile, the QOS
+// limits' maxGpusPerUser alone bounds an Allocation (MaxAllocationGPUs;
+// `@hpc-burst-science-agent`, 1 Nov 2026, from PR 1's review). Under a cap of
+// 2, two GPUs are sized (2 * 16 = 32 CPUs, 2 * 120Gi = 240Gi), three are
+// refused as an unsupported spec naming the cap; with neither value set, the
+// profile cannot size an Allocation, which is a profile problem, not an
+// unsupported spec.
+func TestQOSGPUCapWithoutGPUsPerNode(t *testing.T) {
+	pv := planProvider()
+	pv.partition.GPUsPerNode = nil
+	pv.limits = v1alpha1.QOSLimits{MaxGPUsPerUser: i32(2), From: map[string]string{v1alpha1.LimitMaxGPUsPerUser: "example-now"}}
+	got, err := partitionSizing(pv, 2, nil)
+	if err != nil {
+		t.Fatalf("two GPUs under a cap of 2: %v", err)
+	}
+	if got.GPUs != 2 || got.CPUsPerTask != 32 || got.Memory.Cmp(resource.MustParse("240Gi")) != 0 {
+		t.Fatalf("sized %d GPUs, %d CPUs, %s; want 2, 32, 240Gi", got.GPUs, got.CPUsPerTask, got.Memory.String())
+	}
+	_, err = partitionSizing(pv, 3, nil)
+	var u *unsupported
+	if !errors.As(err, &u) || !strings.Contains(err.Error(), "maxGpusPerUser 2 of QOS example-now") {
+		t.Fatalf("three GPUs: error %v, want an unsupported spec naming maxGpusPerUser 2 of QOS example-now", err)
+	}
+	pv.limits = v1alpha1.QOSLimits{}
+	_, err = partitionSizing(pv, 1, nil)
+	if err == nil || errors.As(err, &u) {
+		t.Fatalf("neither gpusPerNode nor a cap: error %v, want a profile problem", err)
 	}
 }
