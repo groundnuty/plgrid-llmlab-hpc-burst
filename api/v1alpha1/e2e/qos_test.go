@@ -146,8 +146,8 @@ func TestQOSListRoundTrips(t *testing.T) {
 		{"a QOS name longer than 64 characters", func(p *v1alpha1.PlatformProfile) {
 			p.Spec.QOS = []v1alpha1.QOSProfile{{Name: strings.Repeat("q", 65)}}
 		}, "name"},
-		{"more than 32 QOS entries", func(p *v1alpha1.PlatformProfile) {
-			for i := range 33 {
+		{"more than 16 QOS entries", func(p *v1alpha1.PlatformProfile) {
+			for i := range 17 {
 				p.Spec.QOS = append(p.Spec.QOS, v1alpha1.QOSProfile{Name: "q" + strings.Repeat("x", i)})
 			}
 		}, "qos"},

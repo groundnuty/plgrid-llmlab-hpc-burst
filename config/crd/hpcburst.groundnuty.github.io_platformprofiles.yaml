@@ -461,7 +461,9 @@ spec:
                   QOS lists the QOSes that a Provider's qos or a partition's qos names,
                   with their limits (HBEP-4, QOS limits and Platform profile schema;
                   `@hpc-burst-science-agent`, 1 Nov 2026). Helios lists now, plgrid and
-                  normal; Athena plgrid-now.
+                  normal; Athena plgrid-now. At most 16: the CEL cost of the rule on
+                  maxMemPerUser, a quantity of unbounded length, grows with this bound
+                  and exceeds the API server's budget at 32.
                 items:
                   description: |-
                     QOSProfile is one Slurm QOS that a Provider's qos or a partition's qos names,
@@ -534,7 +536,7 @@ spec:
                   required:
                   - name
                   type: object
-                maxItems: 32
+                maxItems: 16
                 type: array
                 x-kubernetes-list-map-keys:
                 - name
