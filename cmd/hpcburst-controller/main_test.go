@@ -61,7 +61,7 @@ func TestMetricsAddr(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := metricsAddr(f.host); got != "127.0.0.1:29232" {
+	if got := f.host.ControllerMetricsAddr(); got != "127.0.0.1:29232" {
 		t.Fatalf("metrics address %q, want 127.0.0.1:29232", got)
 	}
 }

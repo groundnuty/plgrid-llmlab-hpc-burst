@@ -21,8 +21,8 @@
 // kubeconfig is <state>/kubeconfig unless --kubeconfig says otherwise, the
 // credentials directory is Host.CredentialsDir() and the agent builds are in
 // Host.AgentBuildsDir(); #60's server will bind Host.AgentEndpointAddr(). The
-// lifecycle controller serves /metrics on loopback at the port base + 12
-// (HBEP-8, Metrics).
+// lifecycle controller serves /metrics at Host.ControllerMetricsAddr(), on
+// loopback at the port base + 12 (HBEP-8, Metrics).
 //
 // It exits 0 after SIGTERM or SIGINT once the manager has stopped, 1 on a
 // failure, and 2 on a usage error.
@@ -38,7 +38,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"syscall"
 
 	"github.com/go-logr/logr/funcr"
@@ -82,7 +81,7 @@ func parse(args []string, stderr io.Writer) (flags, error) {
 	case f.host.StateDir == "":
 		return flags{}, errors.New("--state-dir is required")
 	// The block ends at the controller's metrics, base+12 (HBEP-8, Metrics).
-	case f.host.PortBase < 1024 || f.host.PortBase > 65535-controllerMetricsPortOffset:
+	case f.host.PortBase < 1024 || f.host.PortBase > 65535-agentapi.ControllerMetricsPortOffset:
 		return flags{}, fmt.Errorf("--port-base %d is out of range", f.host.PortBase)
 	case f.healthAddr == "":
 		return flags{}, errors.New("--health-addr is required")
@@ -104,16 +103,6 @@ func parse(args []string, stderr io.Writer) (flags, error) {
 		return flags{}, fmt.Errorf("--health-addr %q: the controller listens on loopback only", f.healthAddr)
 	}
 	return f, nil
-}
-
-// controllerMetricsPortOffset is the lifecycle controller's /metrics port,
-// relative to the port base (HBEP-8, Metrics).
-// TODO(#122): agentapi.ControllerMetricsPortOffset and Host.ControllerMetricsAddr.
-const controllerMetricsPortOffset = 12
-
-// metricsAddr is the metrics server's bind address: loopback, port base + 12.
-func metricsAddr(h agentapi.Host) string {
-	return net.JoinHostPort("127.0.0.1", strconv.Itoa(h.PortBase+controllerMetricsPortOffset))
 }
 
 // checkCredentialsDir refuses a credentials directory that others can reach
@@ -159,7 +148,7 @@ func run(ctx context.Context, f flags) error {
 	}
 	mgr, backend, err := lifecycle.NewManager(lifecycle.Options{
 		Config: cfg, CredentialsDir: f.host.CredentialsDir(), AgentBuildsDir: f.host.AgentBuildsDir(),
-		FrontConfigured: f.frontMode != "", HealthAddr: f.healthAddr, MetricsAddr: metricsAddr(f.host), LeaderElection: f.leaderElect, Workers: f.workers,
+		FrontConfigured: f.frontMode != "", HealthAddr: f.healthAddr, MetricsAddr: f.host.ControllerMetricsAddr(), LeaderElection: f.leaderElect, Workers: f.workers,
 	})
 	if err != nil {
 		return err

@@ -27,10 +27,6 @@ const (
 	reasonObservationGap = "ObservationGap"
 )
 
-// frontLeaseName is the front's heartbeat Lease in v1alpha1.ControllerNamespace
-// (HBEP-8, Observers). TODO(#122): v1alpha1.LeaseFront once PR 122 merges.
-const frontLeaseName = "front"
-
 // frontLeaseDefaultDuration is the front's leaseDurationSeconds (HBEP-8,
 // Observers: renewed every 10 s with leaseDurationSeconds 30), the staleness
 // bound of a front Lease that carries none.
@@ -49,7 +45,7 @@ func instanceHeartbeatKey(in *v1alpha1.Instance) string {
 	return "heartbeat/instance/" + string(in.UID)
 }
 
-const frontHeartbeatKey = "heartbeat/lease/" + frontLeaseName
+const frontHeartbeatKey = "heartbeat/lease/" + v1alpha1.LeaseFront
 
 // observer judges, on the leader, the heartbeats of the observers the
 // lifecycle controller does not depend on: every Provider's status read and
@@ -141,7 +137,7 @@ func providerHeartbeatStale(p *v1alpha1.Provider, now time.Time) (bool, string) 
 func (r *Reconciler) checkFrontLease(ctx context.Context, now time.Time) error {
 	mem := r.memory()
 	var l coordinationv1.Lease
-	err := r.Reader.Get(ctx, client.ObjectKey{Namespace: v1alpha1.ControllerNamespace, Name: frontLeaseName}, &l)
+	err := r.Reader.Get(ctx, client.ObjectKey{Namespace: v1alpha1.ControllerNamespace, Name: v1alpha1.LeaseFront}, &l)
 	if apierrors.IsNotFound(err) {
 		mem.clear(frontHeartbeatKey)
 		return nil
