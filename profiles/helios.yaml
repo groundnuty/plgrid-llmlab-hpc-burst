@@ -30,6 +30,9 @@ spec:
       cpuArch: x86_64 # facts.partitions[name=plgrid].arch
       maxTime: 72h # facts.partitions[name=plgrid].max_time, "3-00:00:00"
       gpusPerNode: 0 # facts.partitions[name=plgrid].gres, "(none)"
+      # The partition's own QOS, as on plgrid-gpu-gh200 below: Slurm applies plgrid to every job here before the
+      # job's QOS, so a Provider's qos now has its submit limit of 1 overridden by plgrid's 2000 (HBEP-4, QOS limits).
+      qos: plgrid # facts.partitions[name=plgrid].qos, "plgrid" (scontrol show partition, 30 Oct 2026); its limits are typed in qos below
       # This is a CPU partition for conformance runs only. It hosts no Instance
       # (`@hpc-burst-science-agent`, 31 Oct 2026). gpusPerNode 0 makes the Slurm provider refuse
       # any request for a GPU here (internal/slurm CheckRequest; test TestShippedCPUPartitionRefusesGPUAllocations).
@@ -65,6 +68,28 @@ spec:
       # (facts.storage.node_local.localfs_refused), and /tmp is not to be used (facts.storage.tmp_rule).
       tmpDir: $MEMFS # facts.storage.node_local.memfs ("path in $MEMFS"); memfs_in_job: a per-job tmpfs of about the node's RAM, counted against --mem
       tmpDirFeature: memfs # facts.storage.node_local.memfs ("request with -C memfs"); memfs_in_job: a job with -C memfs was accepted and had $MEMFS
+      # The partition's own QOS, which Slurm applies to every job on it before the job's QOS (HBEP-4, QOS
+      # limits and Platform profile schema). It is plgrid, whose 2000 submitted jobs per user come first, so
+      # a Provider's qos now has its submit limit of 1 overridden here, and its cap of one GPU per user
+      # holds, since plgrid sets none: a second held submission under now was accepted while the first was
+      # held (issue #94, comment 6558113194).
+      qos: plgrid # scontrol show partition (issue #94, comment 6557416899); facts.slurm.qos and facts.partitions[name=plgrid-gpu-gh200].qos
+
+  # The QOSes that a Provider's qos or a partition's qos names, with the limits the plan reads (HBEP-4, QOS
+  # limits and Platform profile schema; `@hpc-burst-science-agent`, 1 Nov 2026). An absent limit is no limit
+  # as far as the plan knows. Every value is from facts.slurm.qos and from the measurement of 1 Nov 2026,
+  # `sacctmgr -nP show qos now,normal` (issue #94, comment 6557416899). None has overPartQos: no QOS here
+  # carries Slurm's OverPartQOS flag (the same comment: flags DenyOnLimit only on now).
+  qos:
+    - name: now
+      maxWall: 12h # facts.slurm.qos.value[name=now].max_wall, "12:00:00"; issue #94, comment 6557416899
+      maxSubmitPerUser: 1 # facts.slurm.qos.value[name=now].max_submit_per_user, 1; held by the partition's plgrid, which sets 2000 first
+      maxGpusPerUser: 1 # issue #94, comment 6557416899: MaxTRESPU cpu=72,gres/gpu=1,mem=122400M,node=1, the GPU entry
+      maxCpusPerUser: 72 # the same MaxTRESPU, the CPU entry
+      maxMemPerUser: 122400Mi # the same MaxTRESPU, the memory entry; Slurm's M is 2^20 bytes
+    - name: plgrid # facts.slurm.qos.value[name=plgrid]: the GH200 partition's QOS (scontrol show partition, issue #94, comment 6557416899)
+      maxSubmitPerUser: 2000 # facts.slurm.qos.value[name=plgrid].max_submit_per_user, 2000. Its max_jobs_per_user, 1000, has no typed field, so it is not typed
+    - name: normal # facts.slurm.qos.value[name=normal]: no limits. It is the association's default (issue #94, comment 6557416899), listed so that every QOS named is known
 
   holdRelease: true # facts.slurm.hold_release.value: user_release_ok true on plgrid and plgrid-gpu-gh200 (S1's hold check)
   lostGrace: 2m # framework default (HBEP-4, Platform profile schema, lostGrace): above the measured gap of about 2 s between queue and accounting (S7's capture)
@@ -214,6 +239,12 @@ spec:
           source: "issue #94, comment 6550908687 (the real-engine run). sbatch --test-only for 1 GPU on partition plgrid-gpu-gh200, with --no-requeue, under the account of the largest active GH200 grant (not named here); the job was then submitted under QOS now"
           note: "One estimate pair and one job, at one moment: the queue state of that run, not a rule. QOS now has a wall limit of 12 h and one submitted job per user (facts.slurm.qos), so this holds for short jobs. The estimate under QOS now was a range, and the job started at once. The date is that of the report comment; the run was no later."
           value: {partition: plgrid-gpu-gh200, gpus: 1, start_estimate_normal_qos: "16 days", start_estimate_qos_now: "13 to 29 min", started_at_once_under_qos_now: true}
+        test_only_estimate_is_an_upper_bound:
+          method: measured
+          date: "2026-11-01"
+          source: "issue #93, comment 6562118604 (the live-checks conformance run of 1 Nov 2026). sbatch --test-only for a 5-minute job on partition plgrid, then the job itself"
+          note: "One estimate and one job, at one moment: the queue state of that run, not a rule. The job started at once although the estimate was about 3 days, so a --test-only estimate is an upper bound, not a prediction (`@hpc-burst-science-agent`, 1 Nov 2026), and HBEP-7 plans from the queue waits it has observed (the Provider's status.queueWaits), not from --test-only. No job ID or node name is recorded."
+          value: {partition: plgrid, time_limit: "5 min", start_estimate: "about 3 days", started_at_once: true}
       partitions:
         # The six partitions below are the ones the documentation or the QOS list
         # points users at. Time limits, node counts and hardware are per partition.
