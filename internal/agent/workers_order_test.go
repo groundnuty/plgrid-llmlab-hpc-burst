@@ -19,7 +19,8 @@ import (
 // must not turn it into an unexpected exit, reported exited, with a warning
 // (found by PR #169's count-50 run, where an idle instruction after a refused
 // verification left worker-0 exited). A worker that was not being stopped is
-// still exited when its leader exits.
+// still exited when its leader exits, and the same holds in the reverse order, when the group's end of a
+// running worker is handled first (#189): it is exited, and not left cleaning a group that is already gone.
 func TestAStoppedWorkerIsNotExitedByALateLeaderExit(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -31,6 +32,9 @@ func TestAStoppedWorkerIsNotExitedByALateLeaderExit(t *testing.T) {
 		{"stopping: the leader's exit first", "leader", agentapi.PartStopping, agentapi.PartStopped, false},
 		{"stopping: the group's end first", "group", agentapi.PartStopping, agentapi.PartStopped, false},
 		{"running: the leader's exit is unexpected", "leader", agentapi.PartRunning, agentapi.PartExited, true},
+		// The reverse case (#189): a running worker dies at once, and the group's end is handled before the
+		// leader's exit. The worker is exited all the same, and nothing of its group is left to clean up.
+		{"running: the group's end first", "group", agentapi.PartRunning, agentapi.PartExited, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g, err := procgroup.Start(procgroup.Spec{Path: "/bin/sh", Args: []string{"-c", "exit 0"}, Dir: t.TempDir()}, time.Now())
@@ -56,6 +60,11 @@ func TestAStoppedWorkerIsNotExitedByALateLeaderExit(t *testing.T) {
 			}
 			if w.phase != tc.want {
 				t.Errorf("worker is %s, want %s", w.phase, tc.want)
+			}
+			// Both events are handled and the group is gone: no process of the worker may be counted live. A worker
+			// still "cleaning" is live, and no restart ever starts beside it (convergeWorkers waits for !live()).
+			if w.cleaning || w.live() {
+				t.Errorf("after both events the worker is cleaning=%v live=%v, want neither: it can never be restarted", w.cleaning, w.live())
 			}
 			if warned := strings.Contains(logs.String(), "without being told to"); warned != tc.warns {
 				t.Errorf("warning logged %v, want %v: %s", warned, tc.warns, logs.String())
