@@ -60,8 +60,10 @@ func providerLeaseLock(cfg *rest.Config, provider string, o ManagerOptions) (res
 // (HBEP-11, Controllers; docs/development.md, Process layout): its own leader
 // Lease, v1alpha1.ProviderLeaseName(provider), in v1alpha1.ControllerNamespace,
 // released when the manager stops, with the release retried if a late renew
-// made it fail (leaderlock, issue #131); no metrics, health or pprof listener;
-// and controller names that may repeat when the manager is started again.
+// made it fail (leaderlock, issue #131) and made again after a clean stop's
+// Start has returned if the elector's release read failed (issue #160); no
+// metrics, health or pprof listener; and controller names that may repeat
+// when the manager is started again.
 func NewProviderManager(cfg *rest.Config, scheme *runtime.Scheme, provider string, o ManagerOptions) (manager.Manager, error) {
 	name := v1alpha1.ProviderLeaseName(provider)
 	lock, err := providerLeaseLock(cfg, provider, o)
@@ -94,7 +96,11 @@ func NewProviderManager(cfg *rest.Config, scheme *runtime.Scheme, provider strin
 	if o.GracefulShutdownTimeout > 0 {
 		mo.GracefulShutdownTimeout = &o.GracefulShutdownTimeout
 	}
-	return ctrl.NewManager(cfg, mo)
+	mgr, err := ctrl.NewManager(cfg, mo)
+	if err != nil {
+		return nil, err
+	}
+	return leaderlock.ReleaseAfterStart(mgr, lock, ctrl.Log), nil
 }
 
 // Supervisor runs one manager per Provider of one kind, batch by default

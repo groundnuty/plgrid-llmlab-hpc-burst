@@ -9,10 +9,11 @@ import (
 )
 
 // TestControllerStopBudget: the supervisor's kill grace for the controller covers the controller's
-// longest normal stop, its lifecycle manager's shutdown grace and the lifecycle Lease's release
-// budget (issue #131), and each grace above it is longer than the one it contains, up to down's
-// default. The parts are checked against the controller's own constants, so a controller that stops
-// slower makes this fail instead of being killed before it releases its Lease (PR #159 review).
+// longest normal stop: its lifecycle manager's shutdown grace and the lifecycle Lease's two release
+// phases, the elector's retries (issue #131) and the release after Start (issue #160). Each grace
+// above it is longer than the one it contains, up to down's default. The parts are checked against
+// the controller's own constants, so a controller that stops slower makes this fail instead of being
+// killed before it releases its Lease (PR #159 review).
 func TestControllerStopBudget(t *testing.T) {
 	if controllerShutdownGrace != lifecycle.ShutdownGrace {
 		t.Errorf("the budget counts a shutdown grace of %s, the lifecycle manager's is %s", controllerShutdownGrace, lifecycle.ShutdownGrace)
@@ -20,8 +21,11 @@ func TestControllerStopBudget(t *testing.T) {
 	if controllerReleaseBudget != leaderlock.ReleaseBudget {
 		t.Errorf("the budget counts a release budget of %s, leaderlock's is %s", controllerReleaseBudget, leaderlock.ReleaseBudget)
 	}
-	if want := lifecycle.ShutdownGrace + leaderlock.ReleaseBudget; ControllerStopBudget != want {
-		t.Errorf("ControllerStopBudget %s, want %s: the lifecycle manager's shutdown grace and the Lease's release", ControllerStopBudget, want)
+	if controllerAfterStartBudget != leaderlock.AfterStartBudget {
+		t.Errorf("the budget counts an after-Start release budget of %s, leaderlock's is %s", controllerAfterStartBudget, leaderlock.AfterStartBudget)
+	}
+	if want := lifecycle.ShutdownGrace + leaderlock.ReleaseBudget + leaderlock.AfterStartBudget; ControllerStopBudget != want {
+		t.Errorf("ControllerStopBudget %s, want %s: the lifecycle manager's shutdown grace and the Lease's two release phases", ControllerStopBudget, want)
 	}
 	for _, c := range []struct {
 		inner, outer       time.Duration

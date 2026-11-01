@@ -263,14 +263,15 @@ type wiring struct {
 // providerGrace is each Provider manager's shutdown grace. The Provider
 // managers run inside the lifecycle manager, whose grace is
 // lifecycle.ShutdownGrace, 30 s, and the supervisor sends the controller
-// SIGKILL launcher.ControllerTermGrace (34 s) after SIGTERM: that grace and the
-// lifecycle Lease's release (leaderlock.ReleaseBudget) together, and a margin
-// (launcher.ControllerStopBudget), so a longer outer grace would not help.
-// At a stop the lifecycle manager first stops the agent API,
-// then the lifecycle controller and the two supervisors together, and with the
-// supervisors every Provider manager at once (providerctl.Supervisor), each for
-// at most providerGrace; that leaves 10 s for the lifecycle controller, the
-// caches, the health server and the Leases' release. With equal graces a
+// SIGKILL launcher.ControllerTermGrace (34 s) after SIGTERM: that grace, the
+// lifecycle Lease's two release phases (leaderlock.ReleaseBudget and
+// leaderlock.AfterStartBudget, 1 s each; launcher.ControllerStopBudget), and a
+// margin, so a longer outer grace would not help. At a stop the lifecycle
+// manager first stops the agent API, then the lifecycle controller and the two
+// supervisors together, and with the supervisors every Provider manager at once
+// (providerctl.Supervisor), each for at most providerGrace and then its own
+// Lease's two release phases, 2 s; that leaves 8 s for the lifecycle
+// controller, the caches and the health server (TestProviderGraceFitsTheStop). With equal graces a
 // Provider controller still busy at the stop (a submission's outcome is
 // written for up to 30 s; providerctl's Create) used up the outer grace, and a
 // normal SIGTERM became exit 1 (review of PR 132: N3).

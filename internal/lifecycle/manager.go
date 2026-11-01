@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/leaderlock"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -242,6 +243,11 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 		Complete(r)
 	if err != nil {
 		return nil, nil, fmt.Errorf("lifecycle: controller: %w", err)
+	}
+	if lock != nil {
+		// A clean stop releases the lifecycle Lease after Start even when the
+		// elector's release read failed (issue #160).
+		mgr = leaderlock.ReleaseAfterStart(mgr, lock, ctrl.Log)
 	}
 	return mgr, backend, nil
 }
