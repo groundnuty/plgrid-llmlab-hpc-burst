@@ -29,6 +29,7 @@ var sbatchDefs = []optDef{
 	{name: "output", value: valRequired},
 	{name: "error", value: valRequired},
 	{name: "wrap", value: valRequired},
+	{name: "constraint", value: valRequired},
 }
 
 // Definite refusals, each "Batch job submission failed: <reason>". None holds a
@@ -43,6 +44,7 @@ const (
 
 type sbatchSpec struct {
 	name, partition, account, output, errPath, wrap string
+	constraint                                      string
 	minutes, cpus, nodes, gpus                      int
 	memMiB                                          int64
 	hold, requeue, parsable                         bool
@@ -67,6 +69,7 @@ func parseSbatch(args []string) (sbatchSpec, error) {
 	s.account, _ = p.get("account")
 	s.output, _ = p.get("output")
 	s.errPath, _ = p.get("error")
+	s.constraint, _ = p.get("constraint")
 	var ok bool
 	if s.wrap, ok = p.get("wrap"); !ok {
 		return s, fmt.Errorf("This does not look like a batch script")
@@ -228,7 +231,8 @@ func (p *Platform) register(user string, s sbatchSpec, now time.Time, step Submi
 		id: p.nextID, name: s.name, user: user, partition: s.partition, account: s.account,
 		timeLimit: s.minutes, cpus: s.cpus, nodes: s.nodes, gpus: s.gpus, memMiB: s.memMiB,
 		requeue: s.requeue, output: s.output, errPath: s.errPath, wrap: s.wrap,
-		execs: []*execution{newExecution(now, "None")},
+		constraint: s.constraint,
+		execs:      []*execution{newExecution(now, "None")},
 	}
 	p.nextID++
 	if j.name == "" {

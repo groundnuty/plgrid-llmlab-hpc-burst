@@ -27,6 +27,9 @@ const (
 	// reasonUsageWriteFailed: a usage record could not be written and synced
 	// (@hpc-burst-science-agent, 31 Oct 2026; HBEP-8 will list it).
 	reasonUsageWriteFailed = "UsageWriteFailed"
+	// reasonHeartbeatMissed: the front's end-to-end probe has given no result
+	// for more than three probe intervals (proposed in HBEP-8, Observers).
+	reasonHeartbeatMissed = "HeartbeatMissed"
 )
 
 // maxNoteBytes is the API's limit on an event's note (HBEP-8, Events, Form):

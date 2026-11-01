@@ -102,9 +102,13 @@ func (s *Stager) Image(ctx context.Context, image, digest string, format agentap
 	if !errors.Is(err, errImageAbsent) {
 		s.logf("staged image %s failed its check (%v): staging it again", final, err)
 	}
-	if err := s.stageImage(ctx, image, digest, format, final, hex); err != nil {
-		return agent.ImageResult{}, err
+	var peak int64
+	if err := s.stageImage(ctx, image, digest, format, final, hex, &peak); err != nil {
+		// A build that ran and failed still reports its peak (PR #138
+		// review, Astra B4).
+		return agent.ImageResult{BuildPeakTmpBytes: peak}, err
 	}
+	ok.BuildPeakTmpBytes = peak
 	return ok, nil
 }
 
@@ -180,7 +184,7 @@ func readSIFRecord(path, digest string) (sifRecord, error) {
 // stageImage moves what is at final aside, pulls or builds the image into a
 // temporary name, writes its record, and renames the record and then the image
 // into place. The caller holds the digest's lock.
-func (s *Stager) stageImage(ctx context.Context, image, digest string, format agentapi.ImageFormat, final, hex string) error {
+func (s *Stager) stageImage(ctx context.Context, image, digest string, format agentapi.ImageFormat, final, hex string, buildPeak *int64) error {
 	dir := filepath.Dir(final)
 	rec := recordPath(final, format)
 	aside := ""
@@ -210,7 +214,15 @@ func (s *Stager) stageImage(ctx context.Context, image, digest string, format ag
 	if format == agentapi.ImageFormatSandbox {
 		args = []string{"build", "--sandbox", tmp, ref}
 	}
-	if err := s.runApptainer(ctx, args); err != nil {
+	if hook := agent.ImageBuildHook(ctx); hook != nil {
+		hook(s.c.TmpDir)
+		if err := ctx.Err(); err != nil {
+			return fail(err)
+		}
+	}
+	peak, err := s.runApptainer(ctx, args)
+	*buildPeak = peak
+	if err != nil {
 		return fail(fmt.Errorf("%w for %s", err, ref))
 	}
 	if err := s.writeRecord(ctx, tmp, tmpRec, digest, format); err != nil {

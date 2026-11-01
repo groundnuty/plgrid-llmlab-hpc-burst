@@ -73,6 +73,12 @@ func applyMode(c *Config, name, val string, hasVal bool) error {
 		return flag(&c.OmitTPOTCount)
 	case "ignore-term":
 		return flag(&c.IgnoreTerm)
+	case "write-caches":
+		return flag(&c.WriteCaches)
+	case "write-home":
+		return flag(&c.WriteHome)
+	case "print-key":
+		return flag(&c.PrintKey)
 	case "reasoning-forever":
 		return flag(&c.ReasoningForever)
 	case "reasoning-first":

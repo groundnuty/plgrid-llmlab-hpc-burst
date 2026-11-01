@@ -44,11 +44,18 @@ type instance struct {
 	awaitWarned   int64 // the generation whose wait for files was logged, +1
 	imageVerified bool  // the staged image passed its integrity check
 	staging       agentapi.Staging
-	stageRunning  bool
-	stageCancel   context.CancelFunc
-	staged        bool // staging for stageGen succeeded
-	imagePath     string
-	ckptDir       string
+	// buildPeak is the peak TMPDIR use of the last image build run for the
+	// Instance, 0 before one has ended with a sample. Every later staging
+	// report of the Instance carries it, a failed one too, so a failure after
+	// the build, or a restage that finds the image cached, does not lose the
+	// one measurement of the RAM-disk budget (PR #138 review, Astra B4, Opus
+	// 6).
+	buildPeak    int64
+	stageRunning bool
+	stageCancel  context.CancelFunc
+	staged       bool // staging for stageGen succeeded
+	imagePath    string
+	ckptDir      string
 	// fileResults are the rehash results of the last staging, for the file
 	// list whose hash is filesKey. They serve only the first verification
 	// after that staging (fileResultsFresh); a later one rehashes (PR #87
@@ -84,6 +91,9 @@ type worker struct {
 	// cleaning: the leader exited without being told to, and the rest of its
 	// process group is being stopped.
 	cleaning bool
+	// logTail is the end of the engine's output once the worker exited
+	// without being told to, or why it could not start (WorkerReport.LogTail).
+	logTail string
 }
 
 func (w *worker) alive() bool {
@@ -244,6 +254,7 @@ func (a *Agent) applyRun(i agentapi.DesiredInstance) {
 			a.log.Error("cannot draw the Instance's key", "err", err)
 			return
 		}
+		a.keys = append(a.keys, key)
 		a.inst = &instance{uid: i.UID, launch: i.Launch, key: key, generation: i.Generation, firstGen: i.Generation, stageGen: i.Generation}
 		a.log.Info("new Instance", "instance", i.Name, "uid", i.UID, "generation", i.Generation)
 	}
@@ -283,7 +294,7 @@ func (a *Agent) applyRun(i agentapi.DesiredInstance) {
 			// A first start and a rung-2 restage need the identity record's
 			// file list for this generation: without it the checkpoint cannot
 			// be staged or rehashed, so no worker starts.
-			in.staging = agentapi.Staging{Phase: agentapi.StagingInProgress, Message: msgFilesAwaited}
+			in.staging = agentapi.Staging{Phase: agentapi.StagingInProgress, Message: msgFilesAwaited, BuildPeakTmpBytes: in.buildPeak}
 			if in.awaitWarned != in.stageGen+1 {
 				in.awaitWarned = in.stageGen + 1
 				a.log.Warn("not starting: the desired state for this Instance generation carries no checks.verify.files", "uid", in.uid, "generation", in.stageGen)
@@ -364,20 +375,48 @@ func (in *instance) runsFor(i agentapi.DesiredInstance) bool {
 // identity record's file list.
 const msgFilesAwaited = "file list awaited: the start instruction for this Instance generation must carry checks.verify.files"
 
+// buildMessage is the staging message while an image is built. It names the
+// job's temporary directory by its variable, not by its resolved path, which
+// on Helios's $MEMFS holds the job's ID (PR #138 review, Opus 9).
+func buildMessage(l agentapi.Launch) string {
+	return agentapi.TruncateUTF8(fmt.Sprintf("building image %s@%s in the job's temporary directory ($TMPDIR)", l.Image, l.ImageDigest), agentapi.MaxMessageBytes)
+}
+
 func (a *Agent) startStaging(in *instance) {
 	ctx, cancel := context.WithCancel(a.ctx)
 	in.stageCancel = cancel
 	in.stageRunning = true
-	in.staging = agentapi.Staging{Phase: agentapi.StagingInProgress}
+	in.staging = agentapi.Staging{Phase: agentapi.StagingInProgress, BuildPeakTmpBytes: in.buildPeak}
 	gen := in.stageGen
 	restage := gen > in.firstGen // a whole-Instance restart: rung 2
 	files := append([]agentapi.FileDigest(nil), in.files...)
 	launch, token, format := in.launch, in.hubToken, a.imageFormat
 	loadFormat := LoadFormat(launch.Command)
+	msg := buildMessage(launch)
+	current := func() bool { return a.inst == in && in.stageGen == gen && in.stageRunning }
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
-		imgRes, err := a.o.Stager.Image(ctx, launch.Image, launch.ImageDigest, format)
+		buildCtx := WithImageBuild(ctx, func(tmpDir string) {
+			a.announceBuild(ctx, current, msg, tmpDir)
+		})
+		imgRes, err := a.o.Stager.Image(buildCtx, launch.Image, launch.ImageDigest, format)
+		// The build is over, written or failed: its message goes, and its
+		// peak is reported at once, before the checkpoint is staged (PR #138
+		// review, Opus 3; Astra B4).
+		peak := imgRes.BuildPeakTmpBytes
+		a.post(func() {
+			if !current() {
+				return
+			}
+			if in.staging.Message == msg {
+				in.staging.Message = ""
+			}
+			if peak > 0 {
+				in.buildPeak = peak
+				in.staging.BuildPeakTmpBytes = peak
+			}
+		})
 		var ck CheckpointResult
 		if err == nil {
 			ck, err = a.o.Stager.Checkpoint(ctx, CheckpointRequest{
@@ -400,6 +439,41 @@ func (a *Agent) startStaging(in *instance) {
 	}()
 }
 
+// announceBuild reports an image build before Apptainer starts it (HBEP-7,
+// Staging: the last report before a build that runs out of the job's memory
+// names the build). It runs on the staging goroutine, inside Stager.Image:
+// it has the loop set the staging message and hand the snapshot to the
+// reporter, then waits until that snapshot, or a newer one, has reached the
+// endpoint, so a build that fails at once or is killed with the job still
+// leaves its announcement delivered (PR #138 review, Astra B3). With the
+// endpoint unreachable it waits at most BuildReportTimeout, then lets the
+// build start.
+func (a *Agent) announceBuild(ctx context.Context, current func() bool, msg, tmpDir string) {
+	seqc := make(chan uint64, 1)
+	a.post(func() {
+		if !current() {
+			close(seqc)
+			return
+		}
+		a.inst.staging.Message = msg
+		seqc <- a.offerNow()
+	})
+	var seq uint64
+	var ok bool
+	select {
+	case seq, ok = <-seqc:
+	case <-ctx.Done():
+		return
+	}
+	if !ok {
+		return
+	}
+	a.log.Info("building image", "tmpDir", tmpDir)
+	if !a.rep.waitSent(ctx, seq, a.o.BuildReportTimeout) && ctx.Err() == nil {
+		a.log.Warn("the report announcing the image build was not delivered in time; building anyway", "timeout", a.o.BuildReportTimeout)
+	}
+}
+
 func (a *Agent) stagingDone(in *instance, gen int64, img ImageResult, ck CheckpointResult, files []agentapi.FileDigest, err error) {
 	if a.inst != in || in.stageGen != gen || !in.stageRunning {
 		return
@@ -411,11 +485,18 @@ func (a *Agent) stagingDone(in *instance, gen int64, img ImageResult, ck Checkpo
 			return
 		}
 		a.log.Warn("staging failed", "uid", in.uid, "generation", gen, "err", err)
-		in.staging = agentapi.Staging{Phase: agentapi.StagingFailed, Message: agentapi.TruncateUTF8(err.Error(), agentapi.MaxMessageBytes)}
+		if img.BuildPeakTmpBytes > 0 {
+			in.buildPeak = img.BuildPeakTmpBytes
+		}
+		in.staging = agentapi.Staging{Phase: agentapi.StagingFailed, Message: agentapi.TruncateUTF8(err.Error(), agentapi.MaxMessageBytes), BuildPeakTmpBytes: in.buildPeak}
 		return
+	}
+	if img.BuildPeakTmpBytes > 0 {
+		in.buildPeak = img.BuildPeakTmpBytes
 	}
 	in.staging.Phase = agentapi.StagingDone
 	in.staging.Message = ""
+	in.staging.BuildPeakTmpBytes = in.buildPeak
 	in.staged = true
 	in.imagePath = img.Path
 	in.imageVerified = img.Verified

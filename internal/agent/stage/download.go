@@ -43,12 +43,17 @@ func hubRedirectPolicy(hubHost string, next func(*http.Request, []*http.Request)
 }
 
 // tally counts the bytes of one Checkpoint call for its Progress function:
-// the bytes done and the bytes to download so far.
+// the bytes done and the bytes to download so far. While a file of unknown
+// length is downloading, the total is reported as 0, which the report omits,
+// and the bytes done still count (science-agent rulings, 1 Nov 2026, issue
+// #125 and the #127 review). Once that file is in, its length is known, so
+// the total counts it again: no length is ever guessed.
 type tally struct {
 	fn          func(done, total int64)
 	every       time.Duration
 	last        time.Time
 	done, total int64
+	unknown     int // downloads in progress whose length is unknown
 	touched     bool
 }
 
@@ -61,7 +66,11 @@ func (t *tally) report(force bool) {
 	t.touched = true
 	if now := time.Now(); force || t.last.IsZero() || now.Sub(t.last) >= t.every {
 		t.last = now
-		t.fn(t.done, t.total)
+		total := t.total
+		if t.unknown > 0 {
+			total = 0
+		}
+		t.fn(t.done, total)
 	}
 }
 
@@ -77,14 +86,26 @@ func (t *tally) finish() {
 type attempt struct {
 	t           *tally
 	done, total int64
+	unknown     bool // its response carried no Content-Length
 }
 
 func (t *tally) begin() *attempt { return &attempt{t: t} }
 
+// expect adds the file's length, from its Content-Length.
 func (a *attempt) expect(n int64) {
 	a.total += n
 	a.t.total += n
 	a.t.report(false)
+}
+
+// lengthUnknown marks a file whose response carried no Content-Length, and
+// reports at once that the total is unknown: a body that stalls before its
+// first byte would otherwise leave the total of the files before it shown
+// (PR #138 review, Astra B5).
+func (a *attempt) lengthUnknown() {
+	a.unknown = true
+	a.t.unknown++
+	a.t.report(true)
 }
 
 func (a *attempt) got(n int64) {
@@ -93,7 +114,22 @@ func (a *attempt) got(n int64) {
 	a.t.report(false)
 }
 
+// complete records a finished download: a file of unknown length is now
+// known to be the bytes it took.
+func (a *attempt) complete() {
+	if a.unknown {
+		a.unknown = false
+		a.t.unknown--
+		a.total = a.done
+		a.t.total += a.done
+	}
+}
+
 func (a *attempt) undo() {
+	if a.unknown {
+		a.unknown = false
+		a.t.unknown--
+	}
 	a.t.total -= a.total
 	a.t.done -= a.done
 	a.total, a.done = 0, 0
@@ -144,6 +180,13 @@ func (s *Stager) downloadOnce(ctx context.Context, dir string, req agent.Checkpo
 	if req.HubToken != "" {
 		hreq.Header.Set("Authorization", "Bearer "+req.HubToken)
 	}
+	// The Hub gzips the files that are not in LFS, with no Content-Length,
+	// unless asked for the identity encoding; Go's client asks for gzip and
+	// decodes it, so the length was unknown and the bytes done passed the
+	// total (#94, finding 2). Asked for identity, the body is the file itself
+	// and Content-Length its exact size. Setting the header also turns off the
+	// client's own decoding, so a body sent encoded anyway is refused below.
+	hreq.Header.Set("Accept-Encoding", "identity")
 	resp, err := s.c.HTTPClient.Do(hreq)
 	if err != nil {
 		return ctx.Err() == nil, fmt.Errorf("GET %s: %w", u, err)
@@ -153,8 +196,13 @@ func (s *Stager) downloadOnce(ctx context.Context, dir string, req agent.Checkpo
 		retry := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
 		return retry, fmt.Errorf("GET %s: HTTP %d", u, resp.StatusCode)
 	}
-	if resp.ContentLength > 0 {
+	if enc := resp.Header.Get("Content-Encoding"); enc != "" && !strings.EqualFold(enc, "identity") {
+		return false, fmt.Errorf("GET %s: the Hub sent Content-Encoding %q to a request for the identity encoding", u, enc)
+	}
+	if resp.ContentLength >= 0 {
 		a.expect(resp.ContentLength)
+	} else {
+		a.lengthUnknown()
 	}
 	p := filepath.Join(dir, filepath.FromSlash(f.Path))
 	if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
@@ -202,5 +250,6 @@ func (s *Stager) downloadOnce(ctx context.Context, dir string, req agent.Checkpo
 		return false, err
 	}
 	ok = true
+	a.complete()
 	return false, nil
 }
