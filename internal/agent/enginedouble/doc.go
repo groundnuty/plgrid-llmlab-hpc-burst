@@ -77,7 +77,8 @@
 // exit-after=<dur>[:code], ignore-term, write-caches (writeCaches: one file in
 // each cache a real engine fills at start, each at its variable) and
 // write-home (one file under HOME, as a cache that ignores its variable
-// writes).
+// writes) and print-key (the API key on stderr, which the engine's log then
+// holds, as an engine that logs its arguments does).
 //
 // # The executables
 //

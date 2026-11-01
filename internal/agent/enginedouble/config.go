@@ -85,6 +85,7 @@ type Config struct {
 	IgnoreTerm   bool // ignore SIGTERM, with a child process that ignores it too
 	WriteCaches  bool // write a file into each cache a real engine fills at start (writeCaches)
 	WriteHome    bool // write a file under HOME, as a cache that ignores its variable does (writeCaches)
+	PrintKey     bool // print the API key to stderr at start, as an engine that logs its arguments may
 }
 
 // DefaultConfig returns the documented defaults: vLLM's 32768-token context,

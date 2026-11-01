@@ -247,6 +247,7 @@ func (a *Agent) applyRun(i agentapi.DesiredInstance) {
 			a.log.Error("cannot draw the Instance's key", "err", err)
 			return
 		}
+		a.keys = append(a.keys, key)
 		a.inst = &instance{uid: i.UID, launch: i.Launch, key: key, generation: i.Generation, firstGen: i.Generation, stageGen: i.Generation}
 		a.log.Info("new Instance", "instance", i.Name, "uid", i.UID, "generation", i.Generation)
 	}

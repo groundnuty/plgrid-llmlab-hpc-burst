@@ -342,7 +342,7 @@ func TestReadLogTail(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got := readLogTail(path, testKey)
+	got := readLogTail(path, []string{testKey})
 	if len(got) > agentapi.MaxLogTailBytes {
 		t.Errorf("tail is %d bytes, above %d", len(got), agentapi.MaxLogTailBytes)
 	}
@@ -358,7 +358,7 @@ func TestReadLogTail(t *testing.T) {
 	if !strings.HasPrefix(got, "é") {
 		t.Errorf("tail does not start at a rune boundary: %q", got[:8])
 	}
-	if readLogTail(filepath.Join(t.TempDir(), "missing.log"), testKey) != "" {
+	if readLogTail(filepath.Join(t.TempDir(), "missing.log"), []string{testKey}) != "" {
 		t.Errorf("a missing log gives a tail")
 	}
 }

@@ -154,6 +154,9 @@ func Main(args []string) int {
 		}
 	}
 	logv(LogEvent{Event: "start", Argv: args, Env: redactedEnv(os.Environ(), secretName), PID: os.Getpid()})
+	if cfg.PrintKey {
+		fmt.Fprintln(os.Stderr, "enginedouble: api key "+cfg.APIKey)
+	}
 	if cfg.WriteCaches || cfg.WriteHome {
 		if err := writeCaches(os.Getenv, cfg.WriteCaches, cfg.WriteHome); err != nil {
 			return fail(err)

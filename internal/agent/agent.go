@@ -110,6 +110,10 @@ type Agent struct {
 	desired     agentapi.DesiredState
 	stopping    bool
 	inst        *instance
+	// keys holds every Instance key drawn in this job, oldest first: an
+	// engine log is appended to across Instances, so a LogTail is cleared of
+	// them all (readLogTail).
+	keys []string
 	// malformedLogged is the Version of the last malformed desired state
 	// logged, so one is logged once, not at every converge.
 	malformedLogged string

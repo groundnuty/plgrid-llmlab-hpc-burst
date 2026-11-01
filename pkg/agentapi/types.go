@@ -393,7 +393,11 @@ type WorkerReport struct {
 	// to or could not start; absent otherwise. It says why a start failed,
 	// for example a cache that ignores its variable and cannot write in a
 	// container without the home directory (science-agent ruling, 1 Nov 2026,
-	// #127 review of issue #125). The agent replaces the Instance's key in it.
+	// #127 review of issue #125). The agent replaces in it every Instance key
+	// it has drawn in the job, the current one and the earlier ones, whose
+	// output the log may still hold, before it cuts the tail, so no part of a
+	// key is left at the cut (PR #138 review). Report.Redacted leaves it as
+	// it is.
 	LogTail string `json:"logTail,omitempty"`
 }
 
