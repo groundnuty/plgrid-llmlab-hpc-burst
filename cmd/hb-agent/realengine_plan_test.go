@@ -337,6 +337,23 @@ func TestRealEngineJudgements(t *testing.T) {
 	if tp.TTFTCount != 3 || tp.TPOTCount != 2 || abs(tp.TTFTSeconds-0.2) > 1e-9 || abs(tp.TPOTSeconds-0.3) > 1e-9 {
 		t.Errorf("throughput %+v, want TTFT 0.2 s over 3, TPOT 0.3 s over 2", tp)
 	}
+	// The length probe's finish reasons, from streams written by hand: a cut
+	// stream whose finish chunk carries the last token, as Qwen3's did in the
+	// first run, a stopped one, and no stream at all.
+	cut := "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"content\":\"2\"},\"finish_reason\":\"length\"}]}\n\n" +
+		"data: {\"choices\":[],\"usage\":{\"completion_tokens\":4}}\n\ndata: [DONE]\n\n"
+	stopped := "data: {\"choices\":[{\"delta\":{\"content\":\"Ready.\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+	if got := streamFinishes([]byte(cut)); len(got) != 1 || got[0] != "length" {
+		t.Errorf("streamFinishes(cut) = %v, want [length]", got)
+	}
+	if got := streamFinishes([]byte(stopped)); len(got) != 1 || got[0] != "stop" {
+		t.Errorf("streamFinishes(stopped) = %v, want [stop]", got)
+	}
+	if got := streamFinishes(nil); len(got) != 0 {
+		t.Errorf("streamFinishes(nil) = %v, want none", got)
+	}
 }
 
 func abs(f float64) float64 {

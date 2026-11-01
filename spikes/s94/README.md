@@ -20,7 +20,7 @@ This step ran the real agent against a real vLLM v0.32.0 in a SIF on one Helios 
 - **What the agent assumed.** Its assumptions about vLLM held:
   - the metric names;
   - `delta.reasoning`, never `reasoning_content`;
-  - the stream's end: a finish reason, then the usage, then `[DONE]`.
+  - the stream's end: a finish reason, then the usage, then `[DONE]`. The finish chunk is not always empty: on a stream cut by `max_tokens` it carries the last token's delta.
 - **Findings.** Eight, listed below. Their fixes are issue #125.
 
 ## Setup
@@ -125,6 +125,13 @@ Two earlier submissions stopped at the job's own guards after 3 s each:
    go test -count=1 -run '^TestRealEngineJudgements$' ./cmd/hb-agent
    ```
 
+   `analyze.py` derives these numbers itself:
+   - from `reports.jsonl.gz`: the timeline's phases, the staging totals, and the Health sample counts and freshness;
+   - from the warm-up rounds: the means, the change between rounds, the settling verdicts under HBEP-7's rule, and TTFT and TPOT;
+   - from `raw/`: every fact about the engine's bytes, including each stream's finish chunk.
+
+   It prints the checks, the settings verdicts and the last Health sample as the driver recorded them. The image and download durations come from `job-excerpt.txt`, finding 2's listing sums from `hub-headers.txt`, and finding 5 from `home-writes.txt`.
+
 ## Results
 
 All numbers come from `results/r3`.
@@ -192,7 +199,7 @@ This is each Instance's last sample, idle after warm-up.
 | responsesByStatus | {"2xx": 136} | {"2xx": 74} |
 
 - Every value equals the engine's own `/metrics`, read by the driver after the last sample (`raw/*/after-metrics.txt.gz`).
-- Of the 31 samples taken while the worker ran, none lacked a value and none had a failed probe.
+- While the workers ran, 31 reports carried 12 distinct Health samples (7 for A, 5 for B, counted by `metricsReadAt`). None lacked a value and none had a failed probe.
 - No sample was taken during start-up: Health appears from the first report with the worker running.
 
 ### TTFT and TPOT
@@ -223,13 +230,13 @@ The fixes are issue #125.
    - The Hub sends the non-LFS files gzip-encoded with no `Content-Length`: 4.3 MiB for A, 11.0 MiB for B. Go's client asks for gzip and decodes it, so the length is unknown, but `bytesDone` still counts the bytes.
    - So done ends at the whole checkpoint, and total at the LFS files only. Those are exactly the two sums of the Hub's listing.
 3. **The reasoning model's warm-up does not settle, so by HBEP-7 its Instance fails qualification,** although every check passed (`summary.json`, `warmUp`). There are two causes:
-   - **The tool-call shape failed in rounds 3 and 5.**
-     - In round 3 the reply spent its whole budget reasoning: 4,224 output tokens, which is 128 + 4,096.
-     - In round 5 the model answered in text after 180 tokens.
+   - **The tool-call shape failed in rounds 3 and 5.** Both have the error "the answer calls no tool". The record holds only each request's output tokens and that error, not the reply's text or its split into reasoning and content, so the causes below are inferences:
+     - Round 3 produced 4,224 output tokens, exactly its budget: the typical output (128) plus the 4,096 reasoning tokens the agent adds to a reasoning model's tool call. It ran to `max_tokens`. That the reasoning used the whole budget is inferred, not recorded.
+     - Round 5 ended by itself after 180 tokens, without a tool call. Whether it answered in text is not recorded.
      - A shape with no successful request means "not settled".
-   - **The 10% tolerance is within the noise of a single request.** With one request per shape, requests under 300 ms moved by more than 10% between rounds 3 and 4: short went from 0.208 to 0.253 s (+22%), typical from 0.214 to 0.266 s (+24%).
-   - The non-reasoning model happened to settle, with a largest change of +6.9%. The rule needs a ruling; the test was not loosened.
-4. **The warm-up's error text mislabels an exhausted reasoning budget.** Round 3's tool call says "the answer calls no tool". HBEP-7 names this case `ReasoningBudgetExhausted` for the qualification checks. Warm-up errors are free text, so this is a nit.
+   - **The 10% tolerance is within the noise of a single request.** With one request per shape, requests under 300 ms moved by more than 10% between rounds 3 and 4: short went from 207.8 to 253.2 ms (+21.9%), typical from 214.2 to 266.5 ms (+24.4%).
+   - The non-reasoning model happened to settle at round 2. Its largest change was +6.61%: typical went from 289.4 to 308.5 ms. The rule needs a ruling; the test was not loosened.
+4. **The warm-up's error text may mislabel an exhausted reasoning budget (an inference).** Round 3's tool call says "the answer calls no tool", for a reply that ran to its `max_tokens`. If that reply was all reasoning, which finding 3 infers but the record cannot show, HBEP-7 names the case `ReasoningBudgetExhausted` for the qualification checks. Warm-up errors are free text, so this is a nit.
 5. **The engine writes into the home directory** (`home-writes.txt`).
    - Apptainer binds `$HOME` by default. HBEP-7's "a clean environment plus the launch's variables" does not cover HOME.
    - FlashInfer, the CUDA compute cache, tilelang and one more JIT cache wrote under `~/.cache/flashinfer`, `~/.nv`, `~/.tilelang` and `~/.humming`. That happened although `XDG_CACHE_HOME`, `VLLM_CACHE_ROOT`, `TRITON_CACHE_DIR` and `TORCHINDUCTOR_CACHE_DIR` pointed at the run directory.
@@ -258,10 +265,12 @@ Everything below is from the raw captures in `raw/`.
 - **`delta.reasoning`.** Streamed reasoning arrives as `delta.reasoning`, and the non-streamed reply carries `message.reasoning`. No `reasoning_content` appeared.
   - Every reasoning stream's first non-empty delta is reasoning.
   - The content after it starts with `"\n\n"`.
-- **How a stream ends (HBEP-5's completion rule).** It ends the same way for stop, length and tool calls:
-  1. a chunk with an empty delta and the finish reason;
+- **How a stream ends (HBEP-5's completion rule).** Every stream ended the same way, for stop, length and tool calls:
+  1. a chunk that carries the finish reason;
   2. with `include_usage`, a chunk with empty `choices` and the usage;
   3. `data: [DONE]`.
+
+  **The finish chunk can carry a final delta.** Five streams ended with an empty one: both models' stop and tool-call streams, and Qwen2.5's "length" probe, which in fact stopped. Qwen3's stream cut by `max_tokens` carried its last token in the finish chunk, `"delta":{"reasoning":","}` beside `"finish_reason":"length"` (`raw/qwen3-0.6b/before-stream-length.sse`). A consumer must read the delta of the finish chunk too.
 
   Other details:
   - Every event, the last included, ends with a blank line.
@@ -272,6 +281,7 @@ Everything below is from the raw captures in `raw/`.
 ## Unknowns
 
 - **A failure mid-stream** was not exercised. vLLM's error event followed by `[DONE]` (HBEP-5) still rests on the source reading.
+- **A stream cut by `max_tokens` on a model without reasoning.** Qwen2.5's length probe ("Reply with one word", `max_tokens` 4) stopped by itself after 3 tokens, so the only cut stream is Qwen3's, whose last token was reasoning. The driver now asks for a long reply in that probe and records in `summary.json` whether it was cut (`captures.lengthProbeCut`).
 - **Scale.** The models were small and ran on one GPU at 8 sessions. Larger models, longer contexts and more sessions were not run.
 - **The Docker Hub pull limit for the cluster's address.** The anonymous HEAD returned no rate-limit headers.
 - **A kept Allocation's second Instance after a restart.** The second Instance here followed an idle. Restarts (the alpha ladder's rungs) were not run.

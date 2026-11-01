@@ -211,7 +211,7 @@ func (r *realRun) runInstance(plan realPlan, idx int, inst realInstance, verifyB
 	sum["verify"] = v
 	sum["settings"] = r.judgeSettings(inst.Launch, v)
 	if w := vr.Workers; len(w) > 0 {
-		r.capture(inst, w[0].EngineSocket, r.keys[uid], "before")
+		sum["captures"] = r.capture(inst, w[0].EngineSocket, r.keys[uid], "before")
 	}
 
 	di.Checks = &agentapi.Checks{VerificationGeneration: 1, Verify: verify, Qualify: &inst.Qualify, WarmUp: &inst.WarmUp}
@@ -388,11 +388,14 @@ func (r *realRun) judgeSettings(l agentapi.Launch, v *agentapi.VerifyResult) map
 }
 
 // capture reads the engine directly, over its socket, and keeps the raw bytes.
-func (r *realRun) capture(inst realInstance, socket, key, when string) {
+// It returns what the probes saw: the finish reasons of the length probe, which
+// must be cut by max_tokens to show how a "length" stream ends.
+func (r *realRun) capture(inst realInstance, socket, key, when string) map[string]any {
+	seen := map[string]any{}
 	dir := filepath.Join(r.out, "raw", inst.Label)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		r.t.Errorf("raw captures: %v", err)
-		return
+		return seen
 	}
 	hc := &http.Client{Timeout: 5 * time.Minute, Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		var d net.Dialer
@@ -403,7 +406,7 @@ func (r *realRun) capture(inst realInstance, socket, key, when string) {
 	}
 	get("metrics.txt", "/metrics")
 	if when != "before" {
-		return
+		return seen
 	}
 	get("version.json", "/version")
 	get("models.json", "/v1/models")
@@ -424,22 +427,61 @@ func (r *realRun) capture(inst realInstance, socket, key, when string) {
 		body map[string]any
 	}{
 		{"stream-stop.sse", map[string]any{"model": model, "messages": msg, "max_tokens": inst.CaptureMaxTokens, "temperature": 0, "stream": true, "stream_options": usage}},
-		{"stream-length.sse", map[string]any{"model": model, "messages": msg, "max_tokens": 4, "temperature": 0, "stream": true, "stream_options": usage}},
+		// A reply far longer than 4 tokens, so max_tokens cuts it: "Reply with one
+		// word" finished with "stop" after 3 tokens on Qwen2.5 in the first run.
+		{"stream-length.sse", map[string]any{"model": model, "messages": []map[string]any{{"role": "user", "content": "Count from 1 to 50, one number per line."}},
+			"max_tokens": 4, "temperature": 0, "stream": true, "stream_options": usage}},
 		{"stream-tool.sse", map[string]any{"model": model, "messages": []map[string]any{{"role": "user", "content": "What is the weather in Krakow? Use the tool."}},
 			"tools": tools, "tool_choice": "auto", "max_tokens": inst.CaptureMaxTokens, "temperature": 0, "stream": true, "stream_options": usage}},
 		{"chat.json", map[string]any{"model": model, "messages": msg, "max_tokens": inst.CaptureMaxTokens, "temperature": 0}},
 	} {
 		b, _ := json.Marshal(c.body)
-		r.keep(hc, dir, when+"-"+c.name, http.MethodPost, "/v1/chat/completions", key, b)
+		raw := r.keep(hc, dir, when+"-"+c.name, http.MethodPost, "/v1/chat/completions", key, b)
+		if c.name == "stream-length.sse" {
+			fr := streamFinishes(raw)
+			seen["lengthProbeFinishReasons"] = fr
+			seen["lengthProbeCut"] = len(fr) == 1 && fr[0] == "length"
+			if !seen["lengthProbeCut"].(bool) {
+				r.logf("%s: the length probe was not cut by max_tokens (finish reasons %v)", inst.Label, fr)
+			}
+		}
 	}
+	return seen
 }
 
-// keep sends one request and writes its status, content type and raw body.
-func (r *realRun) keep(hc *http.Client, dir, name, method, path, key string, body []byte) {
+// streamFinishes returns the finish reasons a chat completion stream carried,
+// in order, from its complete "data:" events.
+func streamFinishes(raw []byte) []string {
+	var out []string
+	for _, ev := range strings.Split(string(raw), "\n\n") {
+		data, ok := strings.CutPrefix(strings.TrimSpace(ev), "data: ")
+		if !ok || data == "[DONE]" {
+			continue
+		}
+		var chunk struct {
+			Choices []struct {
+				FinishReason *string `json:"finish_reason"`
+			} `json:"choices"`
+		}
+		if json.Unmarshal([]byte(data), &chunk) != nil {
+			continue
+		}
+		for _, c := range chunk.Choices {
+			if c.FinishReason != nil && *c.FinishReason != "" {
+				out = append(out, *c.FinishReason)
+			}
+		}
+	}
+	return out
+}
+
+// keep sends one request, writes its status, content type and raw body, and
+// returns the body (nil when the request failed).
+func (r *realRun) keep(hc *http.Client, dir, name, method, path, key string, body []byte) []byte {
 	req, err := http.NewRequest(method, "http://engine"+path, bytes.NewReader(body))
 	if err != nil {
 		r.t.Errorf("%s: %v", name, err)
-		return
+		return nil
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -450,10 +492,12 @@ func (r *realRun) keep(hc *http.Client, dir, name, method, path, key string, bod
 	started := time.Now()
 	resp, err := hc.Do(req)
 	meta := map[string]any{"method": method, "path": path, "request": json.RawMessage(orNull(body))}
+	var raw []byte
 	if err != nil {
 		meta["error"] = err.Error()
 	} else {
-		raw, rerr := io.ReadAll(resp.Body)
+		var rerr error
+		raw, rerr = io.ReadAll(resp.Body)
 		resp.Body.Close()
 		meta["status"], meta["contentType"], meta["seconds"] = resp.StatusCode, resp.Header.Get("Content-Type"), time.Since(started).Seconds()
 		if rerr != nil {
@@ -465,6 +509,7 @@ func (r *realRun) keep(hc *http.Client, dir, name, method, path, key string, bod
 	}
 	mb, _ := json.MarshalIndent(meta, "", "  ")
 	_ = os.WriteFile(filepath.Join(dir, name+".meta.json"), mb, 0o600)
+	return raw
 }
 
 func orNull(b []byte) []byte {
