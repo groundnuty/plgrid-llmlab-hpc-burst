@@ -175,6 +175,14 @@ func judgeVerify(d declared, v *agentapi.VerifyResult, rehash bool, sh shapes) v
 		out.Verdict, out.Cause, out.Message = v1alpha1.VerdictFail, cause, msg
 		return out
 	}
+	// A failed or mismatching rehash is judged before the refusal, on purpose.
+	// The agent rehashes the checkpoint even when it refuses the file, and a
+	// rehash that fails (v.Error) or mismatches means the staged copy may
+	// differ from the one the agent read: it must be restaged and read again
+	// before its values may stop the class. The refusal below stops it only on
+	// a verification whose rehash held, or that skipped it (a worker restart).
+	// The worker-restart rung and the restage are bounded by the restart limits,
+	// and the next verification reads the file again (PR #169 review, Opus N2).
 	if v.Error != "" {
 		return failWith(causeError, "the agent could not verify: "+v.Error)
 	}
