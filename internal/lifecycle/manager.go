@@ -77,6 +77,10 @@ type Options struct {
 	// newCache, when set, builds the manager's cache: a test holds the
 	// caches' sync with it.
 	newCache cache.NewCacheFunc
+	// again marks a second manager in one process, a test's restart:
+	// controller-runtime refuses a second controller named lifecycle in a
+	// process unless its name check is skipped.
+	again bool
 }
 
 // Scheme returns the scheme the controller uses: the built-in kinds and the
@@ -226,6 +230,7 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 		WithOptions(controller.Options{
 			MaxConcurrentReconciles: workers,
 			RateLimiter:             workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](time.Second, maxRequeue),
+			SkipNameValidation:      &o.again,
 		}).
 		Complete(r)
 	if err != nil {

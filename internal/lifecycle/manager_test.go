@@ -11,8 +11,8 @@ package lifecycle
 //
 // It uses #61's envtest block, 29204-29207, unless HPCBURST_TESTENV_PORT_BASE
 // is set, so it does not collide with the other packages' blocks when go test
-// runs packages in parallel; the health probe binds 127.0.0.1:29301 (#61's
-// block).
+// runs packages in parallel; the health probe binds 127.0.0.1:29301 and the
+// metrics server 127.0.0.1:29302 (#61's block).
 
 import (
 	"bytes"
@@ -21,10 +21,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -42,6 +44,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -52,6 +55,10 @@ import (
 
 const (
 	managerHealthAddr = "127.0.0.1:29301"
+	// managerMetricsAddr is the metrics server's address in this test, in
+	// #61's test block 29300-29319: controller-runtime's metrics server does
+	// not report a kernel-chosen port.
+	managerMetricsAddr = "127.0.0.1:29302"
 	// managerPortBase is the first port of #61's envtest block, 29204-29207.
 	// One control plane takes four loopback ports (etcd client, etcd peer,
 	// kube-apiserver, kube-controller-manager) inside issue #40's range
@@ -290,7 +297,7 @@ func TestManagerOnControlPlane(t *testing.T) {
 	// fake client. FrontNotConfigured is covered by the rig and by the k3s run.
 	mgr, backend, err := NewManager(Options{
 		Config: cp.Config, CredentialsDir: creds, AgentBuildsDir: builds, FrontConfigured: true, HealthAddr: managerHealthAddr,
-		LeaderElection: true, Checkpoints: &stubSource{},
+		MetricsAddr: managerMetricsAddr, LeaderElection: true, Checkpoints: &stubSource{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -410,14 +417,29 @@ func TestManagerOnControlPlane(t *testing.T) {
 		return false, "no LongNote event"
 	})
 	for _, path := range []string{"/healthz", "/readyz"} {
-		resp, err := http.Get("http://" + managerHealthAddr + path)
-		if err != nil {
-			t.Fatalf("GET %s: %v", path, err)
+		if code := getStatus(t, "http://"+managerHealthAddr+path); code != http.StatusOK {
+			t.Fatalf("GET %s: %d", path, code)
 		}
-		_ = resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("GET %s: %d", path, resp.StatusCode)
+	}
+	// /metrics on loopback at the configured address (HBEP-8, Metrics): the
+	// pending Instance's info series, and controller-runtime's own work-queue
+	// metrics beside it.
+	eventually(t, time.Minute, "/metrics serves the Instance's info series", func() (bool, string) {
+		body := getBody(t, "http://"+managerMetricsAddr+"/metrics")
+		info := fmt.Sprintf(`instance_uid="%s"`, in.UID)
+		for _, line := range strings.Split(body, "\n") {
+			if strings.HasPrefix(line, "hpcburst_instance_info{") && strings.Contains(line, info) && strings.HasSuffix(line, " 1") &&
+				strings.Contains(body, "workqueue_") {
+				return true, ""
+			}
 		}
+		return false, "no hpcburst_instance_info line for " + string(in.UID)
+	})
+	// A first start, with no previous Lease, raises no ObservationGap (HBEP-8,
+	// Gaps after a restart). The collision's event above shows the recorder
+	// reaches the API server.
+	if gaps := observationGaps(t, ctx, cl); len(gaps) != 0 {
+		t.Fatalf("a first start raised %d ObservationGap events", len(gaps))
 	}
 
 	// DialHomeUnreachable by server-side apply, beside the Provider
@@ -465,13 +487,141 @@ func TestManagerOnControlPlane(t *testing.T) {
 		t.Fatalf("manager: %v", err)
 	}
 	stopped = true
+	var released coordinationv1.Lease
 	eventually(t, 30*time.Second, "the Lease is released on stop", func() (bool, string) {
-		var l coordinationv1.Lease
-		if err := cl.Get(ctx, client.ObjectKey{Namespace: v1alpha1.ControllerNamespace, Name: v1alpha1.LeaseLifecycle}, &l); err != nil {
+		if err := cl.Get(ctx, client.ObjectKey{Namespace: v1alpha1.ControllerNamespace, Name: v1alpha1.LeaseLifecycle}, &released); err != nil {
 			return false, err.Error()
 		}
-		return l.Spec.HolderIdentity == nil || *l.Spec.HolderIdentity == "", "still held"
+		return released.Spec.HolderIdentity == nil || *released.Spec.HolderIdentity == "", "still held"
 	})
+	if released.Spec.RenewTime == nil {
+		t.Fatal("the released Lease has no renewTime")
+	}
+	restartAfterGap(t, ctx, cl, cp.Config, creds, builds, released.Spec.RenewTime.Time)
+}
+
+// restartAfterGap starts the controller again after the first run's stop,
+// with its caches' sync held. /readyz fails while the caches have not synced
+// and no ObservationGap exists yet, since the Lease is taken only after the
+// sync. Once the sync is let go, /readyz passes, and exactly one
+// ObservationGap regards the lifecycle Lease, naming the first run's last
+// renewTime to the microsecond: one event, not a series of two.
+func restartAfterGap(t *testing.T, ctx context.Context, cl client.Client, cfg *rest.Config, creds, builds string, prev time.Time) {
+	t.Helper()
+	gate := make(chan struct{})
+	release := sync.OnceFunc(func() { close(gate) })
+	defer release()
+	mgr, _, err := NewManager(Options{
+		Config: cfg, CredentialsDir: creds, AgentBuildsDir: builds, FrontConfigured: true, HealthAddr: managerHealthAddr,
+		MetricsAddr: managerMetricsAddr, LeaderElection: true, Checkpoints: &stubSource{}, again: true,
+		newCache: func(c *rest.Config, o cache.Options) (cache.Cache, error) {
+			inner, err := cache.New(c, o)
+			if err != nil {
+				return nil, err
+			}
+			return heldCache{Cache: inner, gate: gate}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mctx, stop := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- mgr.Start(mctx) }()
+	defer func() {
+		stop()
+		if err := <-done; err != nil {
+			t.Errorf("second manager: %v", err)
+		}
+	}()
+	eventually(t, time.Minute, "the health server answers", func() (bool, string) {
+		return getStatus(t, "http://"+managerHealthAddr+"/healthz") == http.StatusOK, "no /healthz"
+	})
+	for i := 0; i < 15; i++ {
+		if code := getStatus(t, "http://"+managerHealthAddr+"/readyz"); code == http.StatusOK {
+			t.Fatalf("/readyz answered 200 while the caches' sync is held")
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if gaps := observationGaps(t, ctx, cl); len(gaps) != 0 {
+		t.Fatalf("%d ObservationGap events before the Lease could be taken", len(gaps))
+	}
+	release()
+	eventually(t, time.Minute, "/readyz passes once the caches have synced", func() (bool, string) {
+		code := getStatus(t, "http://"+managerHealthAddr+"/readyz")
+		return code == http.StatusOK, fmt.Sprintf("/readyz %d", code)
+	})
+	want := prev.UTC().Format(metav1.RFC3339Micro)
+	eventually(t, time.Minute, "one ObservationGap regards the lifecycle Lease", func() (bool, string) {
+		gaps := observationGaps(t, ctx, cl)
+		if len(gaps) != 1 {
+			return false, fmt.Sprintf("%d ObservationGap events", len(gaps))
+		}
+		e := gaps[0]
+		if e.Action != "degraded" || e.Type != "Warning" || e.Regarding.Kind != "Lease" || e.Regarding.Name != v1alpha1.LeaseLifecycle || e.Regarding.Namespace != v1alpha1.ControllerNamespace {
+			t.Fatalf("ObservationGap %s/%s regarding %+v; want degraded, Warning, the Lease %s/%s", e.Action, e.Type, e.Regarding, v1alpha1.ControllerNamespace, v1alpha1.LeaseLifecycle)
+		}
+		if !strings.Contains(e.Note, want) {
+			t.Fatalf("ObservationGap note %q does not name the previous renewTime %s", e.Note, want)
+		}
+		if e.Series != nil {
+			t.Fatalf("ObservationGap is a series of %d: emitted more than once", e.Series.Count)
+		}
+		return true, ""
+	})
+}
+
+// heldCache holds its sync until gate closes.
+type heldCache struct {
+	cache.Cache
+	gate <-chan struct{}
+}
+
+func (h heldCache) WaitForCacheSync(ctx context.Context) bool {
+	select {
+	case <-h.gate:
+	case <-ctx.Done():
+		return false
+	}
+	return h.Cache.WaitForCacheSync(ctx)
+}
+
+// observationGaps lists the ObservationGap events in the controllers'
+// namespace, where the lifecycle Lease is.
+func observationGaps(t *testing.T, ctx context.Context, cl client.Client) []eventsv1.Event {
+	t.Helper()
+	var evs eventsv1.EventList
+	if err := cl.List(ctx, &evs, client.InNamespace(v1alpha1.ControllerNamespace)); err != nil {
+		t.Fatal(err)
+	}
+	var out []eventsv1.Event
+	for _, e := range evs.Items {
+		if e.Reason == "ObservationGap" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func getStatus(t *testing.T, url string) int {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		return 0
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode
+}
+
+func getBody(t *testing.T, url string) string {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return string(b)
 }
 
 func phases(items []v1alpha1.Instance) []v1alpha1.InstancePhase {
