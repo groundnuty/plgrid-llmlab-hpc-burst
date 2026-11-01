@@ -60,9 +60,9 @@ type Options struct {
 	// /metrics, on loopback at the launcher's port base + 12 (HBEP-8,
 	// Metrics); "0" or empty disables it.
 	MetricsAddr string
-	// Registry is where the engine gauges' collector registers while the
-	// manager runs; nil means controller-runtime's registry, the one its
-	// metrics server serves.
+	// Registry is where the engine and accounting gauges' collectors
+	// register while the manager runs; nil means controller-runtime's
+	// registry, the one its metrics server serves.
 	Registry prometheus.Registerer
 	// LeaderElection takes the Lease v1alpha1.LeaseLifecycle in
 	// v1alpha1.ControllerNamespace, a guard against a stale second copy.
@@ -196,7 +196,10 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 	if reg == nil {
 		reg = ctrlmetrics.Registry
 	}
-	if err := mgr.Add(&collectorRegistration{reg: reg, c: &instanceCollector{inv: r.inventory(), backend: backend, clock: clock}}); err != nil {
+	if err := mgr.Add(&collectorRegistration{reg: reg, cs: []prometheus.Collector{
+		&instanceCollector{inv: r.inventory(), backend: backend, clock: clock},
+		&accountingCollector{allocs: mgr.GetClient()},
+	}}); err != nil {
 		return nil, nil, err
 	}
 	workers := o.Workers
@@ -406,21 +409,29 @@ func (b *agentBuilds) digest(cpuArch string) (string, error) {
 	return d, nil
 }
 
-// collectorRegistration registers the engine gauges' collector while the
-// manager runs, on every replica (its inventory is empty but on the leader),
-// and unregisters it at the stop, so a manager started again in the same
-// process registers afresh.
+// collectorRegistration registers the lifecycle controller's collectors, the
+// engine gauges and the accounting gauges, while the manager runs, on every
+// replica (the engine gauges' inventory is empty but on the leader), and
+// unregisters them at the stop, so a manager started again in the same process
+// registers afresh.
 type collectorRegistration struct {
 	reg prometheus.Registerer
-	c   prometheus.Collector
+	cs  []prometheus.Collector
 }
 
 func (m *collectorRegistration) Start(ctx context.Context) error {
-	if err := m.reg.Register(m.c); err != nil {
-		return fmt.Errorf("lifecycle: register the engine gauges: %w", err)
+	for i, c := range m.cs {
+		if err := m.reg.Register(c); err != nil {
+			for _, done := range m.cs[:i] {
+				m.reg.Unregister(done)
+			}
+			return fmt.Errorf("lifecycle: register the metrics collectors: %w", err)
+		}
 	}
 	<-ctx.Done()
-	m.reg.Unregister(m.c)
+	for _, c := range m.cs {
+		m.reg.Unregister(c)
+	}
 	return nil
 }
 
