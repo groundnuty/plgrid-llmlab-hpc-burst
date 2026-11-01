@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,6 +32,44 @@ func matches(err error) []string {
 		}
 	}
 	return out
+}
+
+// notify sends one value on ch and never blocks, so a server's handler is never held up by a
+// test that has stopped listening.
+func notify(ch chan<- struct{}) {
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
+// The command's time-out test runs a call with a short time-out against a server that holds the
+// command. The time-out covers the dial and the send as well as the wait, so under load it can
+// pass before the server has the command; then the call ends (ErrNotStarted when the dial was
+// cut, ErrTimeout otherwise) with nothing held, and the premise of the test, a command running
+// past its time-out, did not happen. The test says so and tries again with a longer time-out:
+// it does not count that as a pass, since no command ran past its time-out, and it does not wait
+// for an arrival that will not come. The receive of the arrival is bounded by heldGrace,
+// far above what a loopback server needs to see a request that was sent.
+var (
+	timeoutAttempts = []time.Duration{300 * time.Millisecond, 2 * time.Second, 10 * time.Second}
+	heldGrace       = 10 * time.Second
+)
+
+// runPastItsTimeout calls Run with each time-out in turn until the server reports the command's
+// arrival on held within grace of the call's return. It returns that call's error and true, or
+// the last attempt's error and false when no attempt was delivered.
+func runPastItsTimeout(r *remoteRunner, held <-chan struct{}, attempts []time.Duration, grace time.Duration) (error, bool) {
+	var err error
+	for _, timeout := range attempts {
+		_, err = r.Run(context.Background(), slurm.Command{Line: "printenv HOME", Timeout: timeout})
+		select {
+		case <-held:
+			return err, true
+		case <-time.After(grace):
+		}
+	}
+	return err, false
 }
 
 func TestWireErrorsKeepTheirIdentity(t *testing.T) {
@@ -186,15 +225,18 @@ func TestRemoteRunnerTransportErrors(t *testing.T) {
 	// the caller's context and the command's own time-out.
 	_, session := newFakeSlurm()
 	held := make(chan struct{}, 4)
-	srv := serveRunner(t, session, runnerHooks{before: func(slurm.Command) bool { held <- struct{}{}; return true }})
+	srv := serveRunner(t, session, runnerHooks{before: func(slurm.Command) bool { notify(held); return true }})
 	r := &remoteRunner{addr: srv.Addr()}
 
 	t.Run("the caller's context ends while the command runs", func(t *testing.T) {
 		cctx, cancel := context.WithCancel(ctx)
 		defer cancel()
 		go func() {
-			<-held // the server has the command
-			cancel()
+			select {
+			case <-held: // the server has the command
+				cancel()
+			case <-cctx.Done(): // the test is over: do not wait for a command that never came
+			}
 		}()
 		_, err := r.Run(cctx, slurm.Command{Line: "printenv HOME"})
 		if !errors.Is(err, slurm.ErrTransport) || errors.Is(err, slurm.ErrNotStarted) {
@@ -203,10 +245,48 @@ func TestRemoteRunnerTransportErrors(t *testing.T) {
 	})
 
 	t.Run("the command's time-out", func(t *testing.T) {
-		_, err := r.Run(ctx, slurm.Command{Line: "printenv HOME", Timeout: 100 * time.Millisecond})
-		<-held
+		err, delivered := runPastItsTimeout(r, held, timeoutAttempts, heldGrace)
+		if !delivered {
+			t.Fatalf("the command never reached the server, in attempts of %v each followed by %s of waiting (the last call ended %v)", timeoutAttempts, heldGrace, err)
+		}
 		if !errors.Is(err, slurm.ErrTimeout) || errors.Is(err, slurm.ErrTransport) {
 			t.Errorf("Run past its time-out = %v, want ErrTimeout alone", err)
+		}
+	})
+
+	t.Run("a call whose deadline passed before the command arrived is tried again, not waited on", func(t *testing.T) {
+		// The server reports no arrival for the first command it gets (as if the
+		// deadline had cut the call before the command got there) and reports the
+		// next. The first command to arrive is the first attempt's, or the second's
+		// when the first attempt was cut in the dial, so there are three attempts and
+		// the second or the third is the one delivered.
+		_, session := newFakeSlurm()
+		arrived := make(chan struct{}, 4)
+		var mu sync.Mutex
+		seen := 0
+		srv := serveRunner(t, session, runnerHooks{before: func(slurm.Command) bool {
+			mu.Lock()
+			seen++
+			first := seen == 1
+			mu.Unlock()
+			if !first {
+				notify(arrived)
+			}
+			return true
+		}})
+		started := time.Now()
+		err, delivered := runPastItsTimeout(&remoteRunner{addr: srv.Addr()}, arrived, []time.Duration{100 * time.Millisecond, 400 * time.Millisecond, 2 * time.Second}, 200*time.Millisecond)
+		if !delivered || !errors.Is(err, slurm.ErrTimeout) || errors.Is(err, slurm.ErrTransport) {
+			t.Errorf("after a first attempt with no arrival: delivered %t, %v; want a later attempt delivered and ErrTimeout alone", delivered, err)
+		}
+		if took := time.Since(started); took > 30*time.Second {
+			t.Errorf("took %s: the receive of the arrival was not bounded by the grace", took)
+		}
+		// With no arrival at all it ends, bounded, saying so.
+		_, session = newFakeSlurm()
+		silent := serveRunner(t, session, runnerHooks{before: func(slurm.Command) bool { return true }})
+		if _, delivered := runPastItsTimeout(&remoteRunner{addr: silent.Addr()}, make(chan struct{}), []time.Duration{50 * time.Millisecond, 100 * time.Millisecond}, 100*time.Millisecond); delivered {
+			t.Error("a server that reports no arrival was reported as delivered")
 		}
 	})
 
