@@ -7,8 +7,6 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
-	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -23,6 +21,7 @@ import (
 // rehearsal reads.
 type usageRow struct {
 	Counter        uint64  `json:"counter"`
+	RequestID      string  `json:"requestID"`
 	StartTime      string  `json:"startTime"`
 	EndTime        string  `json:"endTime"`
 	Path           string  `json:"path"`
@@ -35,6 +34,10 @@ type usageRow struct {
 	Finish         *string `json:"finish"`
 	CutBy          *string `json:"cutBy"`
 	ErrorCode      *string `json:"errorCode"`
+	// CompletionTokens and DurationMs: the reply's tokens and the request's
+	// time at the front.
+	CompletionTokens *int64 `json:"completionTokens"`
+	DurationMs       int64  `json:"durationMs"`
 }
 
 // usageRows reads every usage record so far, by counter.
@@ -71,40 +74,6 @@ func (r *rig) checkNoGap(rows []usageRow) {
 	}
 }
 
-// post sends a request to the front's client listener with the client key.
-func (r *rig) post(path, body string, timeout time.Duration) (int, http.Header, []byte, error) {
-	req, err := http.NewRequest(http.MethodPost, "http://"+clientAddr+path, strings.NewReader(body))
-	if err != nil {
-		return 0, nil, nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+r.h.clientKey)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{Timeout: timeout}).Do(req)
-	if err != nil {
-		return 0, nil, nil, err
-	}
-	defer resp.Body.Close()
-	b, err := io.ReadAll(resp.Body)
-	return resp.StatusCode, resp.Header, b, err
-}
-
-// routable is the number of routable Instances the front reports for the
-// deployment on its health address (base+4).
-func (r *rig) routable() int {
-	resp, err := (&http.Client{Timeout: 3 * time.Second}).Get(fmt.Sprintf("http://127.0.0.1:%d/healthz", portBase+4))
-	if err != nil {
-		return -1
-	}
-	defer resp.Body.Close()
-	var h struct {
-		Deployments map[string]int `json:"deployments"`
-	}
-	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&h) != nil {
-		return -1
-	}
-	return h.Deployments[namespace+"/"+mdName]
-}
-
 // sseDone reports whether a streamed body ends with "data: [DONE]" and has a
 // chunk with a finish reason.
 func sseDone(body []byte) (done, finished bool) {
@@ -123,43 +92,43 @@ func sseDone(body []byte) (done, finished bool) {
 }
 
 // stepRequests is step (b): chat, streamed chat and completions through the
-// front by the plain model name. Each is served by the ready Instance, and its
-// usage record names that Instance; the counters have no gap.
-func (r *rig) stepRequests(in *v1alpha1.Instance) {
+// front by the plain model name, with a conversation key the ring maps to the
+// primary (keyFor), since its replacement is routable too. Each is served by
+// the primary, and its usage record names it; the counters have no gap. The
+// front's record names an Instance by its inventory key, namespace/name
+// (internal/front/inventory/build.go), and its UID.
+func (r *rig) stepRequests(in *v1alpha1.Instance, key string) {
 	r.t.Helper()
-	waitFor(r.t, waitDeadline, "the front to route the deployment", func() bool { return r.routable() >= 1 })
-	before := len(r.usageRows())
 	reqs := []struct{ path, body string }{
-		{"/v1/chat/completions", `{"model":"` + model + `","messages":[{"role":"user","content":"hello"}],"max_tokens":16}`},
-		{"/v1/chat/completions", `{"model":"` + model + `","messages":[{"role":"user","content":"hello"}],"max_tokens":16,"stream":true,"stream_options":{"include_usage":true}}`},
+		{"/v1/chat/completions", chatBody(16, 0, false)},
+		{"/v1/chat/completions", chatBody(16, 0, true)},
 		{"/v1/completions", `{"model":"` + model + `","prompt":"hello","max_tokens":16}`},
 	}
 	for i, q := range reqs {
-		code, _, body, err := r.post(q.path, q.body, 60*time.Second)
-		if err != nil || code != http.StatusOK {
-			r.t.Fatalf("step (b) request %d (%s): %d %v: %.300s", i, q.path, code, err, body)
+		rp := r.send(q.path, q.body, key)
+		if rp.err != nil || rp.status != http.StatusOK {
+			r.t.Fatalf("step (b) request %d (%s): %d %v: %.300s", i, q.path, rp.status, rp.err, rp.body)
 		}
 		if i == 1 {
-			if done, finished := sseDone(body); !done || !finished {
-				r.t.Errorf("step (b) streamed chat: [DONE] %v, a finish reason %v: %.300s", done, finished, body)
+			if done, finished := sseDone(rp.body); !done || !finished {
+				r.t.Errorf("step (b) streamed chat: [DONE] %v, a finish reason %v: %.300s", done, finished, rp.body)
 			}
 		}
-	}
-	rows := r.usageRows()
-	if len(rows) != before+len(reqs) {
-		r.t.Fatalf("step (b): %d usage records after %d requests, want %d", len(rows), len(reqs), before+len(reqs))
-	}
-	for i, row := range rows[before:] {
+		row := r.rowOf(rp.id)
 		switch {
-		case row.Path != reqs[i].path || row.RequestedModel != model || row.Status != http.StatusOK:
-			r.t.Errorf("step (b) record %d: %+v, want %s, %s, 200", i, row, reqs[i].path, model)
-		case row.Instance != in.Name || row.InstanceUID != string(in.UID):
-			r.t.Errorf("step (b) record %d names Instance %s (%s), want %s (%s)", i, row.Instance, row.InstanceUID, in.Name, in.UID)
+		case row.Path != q.path || row.RequestedModel != model || row.Status != http.StatusOK:
+			r.t.Errorf("step (b) record %d: %+v, want %s, %s, 200", i, row, q.path, model)
+		case row.InstanceUID != string(in.UID) || row.Instance != in.Namespace+"/"+in.Name || row.Emitter != "instance":
+			r.t.Errorf("step (b) record %d names Instance %s (%s), emitter %s; want %s/%s (%s), instance", i, row.Instance, row.InstanceUID, row.Emitter, in.Namespace, in.Name, in.UID)
 		case row.Finish == nil || *row.Finish == "stream_cut" || row.CutBy != nil:
 			r.t.Errorf("step (b) record %d: finish %v, cut by %v", i, row.Finish, row.CutBy)
 		case row.Stream != (i == 1):
 			r.t.Errorf("step (b) record %d: stream %v", i, row.Stream)
+		case row.CompletionTokens == nil || time.Duration(row.DurationMs)*time.Millisecond < time.Duration(*row.CompletionTokens)*tokenDelay:
+			// Each token takes tokenDelay: the mode reached the engine
+			// through the launch's env and Apptainer's --cleanenv.
+			r.t.Errorf("step (b) record %d: %v tokens in %d ms, below %s a token: the engine double's token-delay mode did not reach the engine", i, row.CompletionTokens, row.DurationMs, tokenDelay)
 		}
 	}
-	r.checkNoGap(rows)
+	r.checkNoGap(r.usageRows())
 }

@@ -20,14 +20,43 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal"
 )
 
-// rehearsalTiming: a 6 min lease whose drain window is 90 s + 30 s, so a
-// handover happens in minutes; the agent's stop grace is short, so scancel's
-// TERM finishes before the fake's KillWait (30 s).
-var rehearsalTiming = timing{lease: "6m", maxRequest: "90s", drainMargin: "30s", stopGrace: "5s", agentTimeout: "20s"}
+// rehearsalTiming: an 8 min lease whose drain window is 90 s + 30 s (the
+// explicit drainWindow, 10 min, is longer), so a handover happens in minutes
+// and steps (b), (d), (e) and (f) fit before the primary's drain start; the
+// agent's stop grace is short, so scancel's TERM finishes before the fake's
+// KillWait.
+var rehearsalTiming = timing{lease: "8m", maxRequest: "90s", drainMargin: "30s", drainWindow: "10m", stopGrace: "5s", agentTimeout: "20s"}
 
 // rehearsalAgentTimeout is rehearsalTiming's agentTimeout: how long a
 // controller waits for a silent agent before it judges it unreachable.
 const rehearsalAgentTimeout = 20 * time.Second
+
+// rehearsalDrainWindow is rehearsalTiming's drain window as the brief and
+// HBEP-7 define it, from the spec alone: routing.maxRequestDuration (90 s)
+// plus the profile's drainMargin (30 s), shorter than its drainWindow (10 min).
+const rehearsalDrainWindow = 90*time.Second + 30*time.Second
+
+// maxRequestDuration is rehearsalTiming's routing.maxRequestDuration: the
+// front cuts a request at it, so no stream of the rehearsal may be longer,
+// and a request that gets no answer within it and a margin hangs.
+const maxRequestDuration = 90 * time.Second
+
+// tokenDelay is the engine double's token-delay mode in the direct run
+// (HB_ENGINE_DOUBLE, through spec.source.served.env): each generated token
+// takes this long, so a stream of n tokens lasts at least n times it. 20 ms
+// keeps a warm-up round (about 512 sequential tokens) near 10 s, and a 50 s
+// stream within max-model-len 4096.
+const tokenDelay = 20 * time.Millisecond
+
+// drainStartOf is an Instance's drain start from its recorded lease end:
+// status.leaseEnd minus rehearsalDrainWindow. It is computed here, not with
+// v1alpha1.DrainStart, which the controller and the front both use.
+func drainStartOf(in *v1alpha1.Instance) (time.Time, bool) {
+	if in.Status.LeaseEnd == nil {
+		return time.Time{}, false
+	}
+	return in.Status.LeaseEnd.Add(-rehearsalDrainWindow), true
+}
 
 // rig is one running rehearsal: the fake cluster, the host and the API.
 type rig struct {
@@ -37,6 +66,11 @@ type rig struct {
 	h   *host
 	hub *hub
 	c   client.Client
+	// engineEnv is the served deployment's engine env: the engine double's
+	// modes (direct run only).
+	engineEnv []v1alpha1.EnvVar
+	// watch records every Instance version the API sends (startWatch).
+	watch *recorder
 }
 
 func startRig(t *testing.T, mode string) *rig {
@@ -151,7 +185,7 @@ func (r *rig) describe() string {
 func (r *rig) stepStart() *v1alpha1.Instance {
 	r.t.Helper()
 	r.providerReady()
-	create(r.t, r.c, servedDeployment(rehearsalTiming))
+	create(r.t, r.c, servedDeployment(rehearsalTiming, r.engineEnv...))
 	var alloc v1alpha1.Allocation
 	waitFor(r.t, waitDeadline, "an Allocation with a job ID", func() bool {
 		for _, a := range r.allocations() {
@@ -175,10 +209,13 @@ func (r *rig) stepStart() *v1alpha1.Instance {
 	if n := r.cl.plat.Count("scontrol"); n < 1 {
 		r.t.Errorf("the job started with no scontrol release (%d calls): it was not submitted held", n)
 	}
+	// The primary is the Instance with no predecessor: its replacement is
+	// created at its start when no queue wait is observed (HBEP-7), so two
+	// Instances start, and either may be ready first.
 	var ready *v1alpha1.Instance
-	waitFor(r.t, waitDeadline, "an Instance to be ready", func() bool {
+	waitFor(r.t, waitDeadline, "the primary Instance to be ready", func() bool {
 		for _, in := range r.instances() {
-			if in.Status.Phase == v1alpha1.InstanceReady {
+			if in.Status.Phase == v1alpha1.InstanceReady && in.Annotations[v1alpha1.AnnotationPredecessor] == "" {
 				in := in
 				ready = &in
 				return true
@@ -205,11 +242,31 @@ func (r *rig) stepStart() *v1alpha1.Instance {
 	return ready
 }
 
+// TestRehearsalDirect is criterion 2 in direct mode. Steps (b), (d), (e) and
+// (f) run on the primary before its drain start, then the handover (c), then
+// the scale to 0 (g). The replacement is ready from the start (HBEP-7: with
+// no queue wait observed it is created at the primary's start), so the
+// requests carry a conversation key the ring maps to the primary.
 func TestRehearsalDirect(t *testing.T) {
 	r := startRig(t, "direct")
+	r.engineEnv = []v1alpha1.EnvVar{{Name: "HB_ENGINE_DOUBLE", Value: "token-delay=" + tokenDelay.String()}}
+	r.startWatch()
+	done := r.stepTimer("a")
 	in := r.stepStart()
-	r.stepControllerRestart(in)
+	done()
+	r.replacementReady(in)
+	key := r.keyFor(in)
+	done = r.stepTimer("b")
+	r.beforeDrain("b", in)
+	r.stepRequests(in, key)
+	done()
+	r.stepWorkerRestart(in, key)
+	r.stepTunnelLoss(in, key)
+	r.stepControllerRestart(in, key)
+	r.stepHandover(in)
+	done = r.stepTimer("g")
 	r.stepScaleToZero()
+	done()
 }
 
 // startGateway starts the control-plane host's ssh server for ssh mode, with

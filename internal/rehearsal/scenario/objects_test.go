@@ -16,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -34,10 +35,28 @@ const (
 
 func kubeClient(t *testing.T, state string) client.Client {
 	t.Helper()
+	c, err := client.New(restConfig(t, state), client.Options{Scheme: apiScheme(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// restConfig is the API's client configuration from up's kubeconfig. Several
+// waits poll at once, so the client-side rate limit is raised above
+// client-go's default of 5 per second, which would slow every wait.
+func restConfig(t *testing.T, state string) *rest.Config {
+	t.Helper()
 	cfg, err := clientcmd.BuildConfigFromFlags("", filepath.Join(state, "kubeconfig"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg.QPS, cfg.Burst = 50, 100
+	return cfg
+}
+
+func apiScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
 	s := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(s); err != nil {
 		t.Fatal(err)
@@ -45,11 +64,7 @@ func kubeClient(t *testing.T, state string) client.Client {
 	if err := v1alpha1.AddToScheme(s); err != nil {
 		t.Fatal(err)
 	}
-	c, err := client.New(cfg, client.Options{Scheme: s})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return c
+	return s
 }
 
 func dur(s string) *v1alpha1.Duration { d := v1alpha1.Duration(s); return &d }
@@ -59,9 +74,12 @@ func ptr[T any](v T) *T { return &v }
 // timing is the rehearsal's scaled clock: a lease of minutes, not HBEP-7's
 // 2 h 10 min drain window. The drain window is routing.maxRequestDuration plus
 // the profile's drainMargin, when that is shorter than the profile's
-// drainWindow (api/v1alpha1/writers.go, InstanceDrainWindow).
+// drainWindow (api/v1alpha1/writers.go, InstanceDrainWindow). The profile sets
+// drainWindow explicitly, longer than that sum, so the test computes the drain
+// start from the spec alone (drainStartOf) rather than with the helper the
+// controller and the front share.
 type timing struct {
-	lease, maxRequest, drainMargin, stopGrace, agentTimeout string
+	lease, maxRequest, drainMargin, drainWindow, stopGrace, agentTimeout string
 }
 
 func batchProfile(arch string, tm timing) *v1alpha1.PlatformProfile {
@@ -70,7 +88,7 @@ func batchProfile(arch string, tm timing) *v1alpha1.PlatformProfile {
 		Spec: v1alpha1.PlatformProfileSpec{
 			ProviderKind: v1alpha1.PlatformBatch, HoldRelease: true, JSONDataParser: "v0.0.42",
 			InflightWindow: dur("5m"), StagingDir: "$SCRATCH/stage",
-			DrainMargin: dur(tm.drainMargin), HandoverMargin: dur("0s"),
+			DrainMargin: dur(tm.drainMargin), DrainWindow: dur(tm.drainWindow), HandoverMargin: dur("0s"),
 			Restart: &v1alpha1.RestartPolicy{StopGrace: dur(tm.stopGrace)},
 			Health:  &v1alpha1.HealthThresholds{AgentTimeout: dur(tm.agentTimeout)},
 			Partitions: []v1alpha1.PartitionProfile{{

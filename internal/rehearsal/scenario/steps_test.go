@@ -80,11 +80,16 @@ func (r *rig) instance(name string) (v1alpha1.Instance, bool) {
 // to rehearsalAgentTimeout) the agent keeps serving: the Instance stays ready
 // with the same agentInstanceID and no new restart, its job keeps its process,
 // and no Allocation is added. That is HBEP-7's "the controller restarts while
-// agents serve". The tunnel half, frps's proxy staying online and no stream
-// cut (HBEP-6), needs the final tunnel PR: frpsProxies checks it once there
-// are proxies at all.
-func (r *rig) stepControllerRestart(in *v1alpha1.Instance) {
+// agents serve". The tunnel half (HBEP-6): frps's proxy for the Instance,
+// online before the kill, stays online throughout, and a stream through the
+// front, in flight at the kill and sized to outlast the new controller's
+// takeover, ends with its finish reason and [DONE].
+func (r *rig) stepControllerRestart(in *v1alpha1.Instance, key string) {
 	r.t.Helper()
+	defer r.stepTimer("f")()
+	if key != "" {
+		r.beforeDrain("f", in)
+	}
 	before, ok := r.instance(in.Name)
 	if !ok || before.Status.Phase != v1alpha1.InstanceReady || before.Status.Agent == nil {
 		r.t.Fatalf("step (f) needs a ready, registered Instance %s: %+v", in.Name, before.Status)
@@ -93,19 +98,31 @@ func (r *rig) stepControllerRestart(in *v1alpha1.Instance) {
 	job, _ := r.cl.plat.Job(jobID)
 	allocs := len(r.allocations())
 	online := r.frpsProxies()
+	if !online[string(in.UID)] {
+		r.t.Fatalf("step (f): frps lists no online proxy for Instance %s (%s) before the kill (online: %v); the check would be vacuous", in.Name, in.UID, online)
+	}
 	oldPID, oldHolder := r.statusPID("controller"), r.leaseHolder()
 	if oldPID == 0 || oldHolder == "" {
 		r.t.Fatalf("step (f): the controller's PID %d or Lease holder %q is unknown", oldPID, oldHolder)
 	}
+	var done <-chan streamed
+	if key != "" {
+		var first <-chan struct{}
+		first, done = r.startStream(chatBody(restartTokens, restartTokens, true), key)
+		<-first
+	}
 	if err := syscall.Kill(oldPID, syscall.SIGKILL); err != nil {
 		r.t.Fatalf("kill the controller %d: %v", oldPID, err)
 	}
+	killAt := time.Now()
 	waitFor(r.t, waitDeadline, "the supervisor to start a new controller that leads the Lease", func() bool {
 		p := r.statusPID("controller")
 		h := r.leaseHolder()
 		return p != 0 && p != oldPID && h != "" && h != oldHolder &&
 			httpStatus(fmt.Sprintf("http://127.0.0.1:%d/readyz", portBase+6)) == http.StatusOK
 	})
+	ledAt := time.Now()
+	r.t.Logf("step (f): a new controller led the Lease %s after the kill", ledAt.Sub(killAt).Round(100*time.Millisecond))
 	// For one agentTimeout the new controller would have judged a silent
 	// agent unreachable; sample until then that nothing gave way.
 	until := time.Now().Add(rehearsalAgentTimeout + 5*time.Second)
@@ -135,6 +152,31 @@ func (r *rig) stepControllerRestart(in *v1alpha1.Instance) {
 	}
 	if n := len(r.allocations()); n != allocs {
 		r.t.Errorf("step (f): %d Allocations after the controller restart, %d before", n, allocs)
+	}
+	if done != nil {
+		r.checkRestartStream(in, done, killAt, ledAt)
+	}
+}
+
+// restartTokens is step (f)'s stream: 2,250 tokens at tokenDelay, about 45 s,
+// longer than a new controller's takeover of the Lease.
+const restartTokens = 2250
+
+// checkRestartStream: the stream was in flight at the controller's kill and
+// after the new controller led the Lease, and ended uncut with [DONE].
+func (r *rig) checkRestartStream(in *v1alpha1.Instance, done <-chan streamed, killAt, ledAt time.Time) {
+	r.t.Helper()
+	var s streamed
+	select {
+	case s = <-done:
+	case <-time.After(requestTimeout):
+		r.t.Fatalf("step (f): the stream did not end within %s", requestTimeout)
+	}
+	row := r.checkStream("f", s, in, restartTokens)
+	rs, re := parseRecordTime(row.StartTime), parseRecordTime(row.EndTime)
+	if !rs.Before(killAt) || !re.After(ledAt) {
+		r.t.Errorf("step (f): the stream ran %s to %s, not across the kill %s and the new leader %s", row.StartTime, row.EndTime,
+			killAt.UTC().Format(time.RFC3339Nano), ledAt.UTC().Format(time.RFC3339Nano))
 	}
 }
 
