@@ -387,8 +387,13 @@ func TestTunnelFrozenPathClosesBeforeTheHeaders(t *testing.T) {
 	if n := strings.Count(f.logs.String(), "no connection to the target; nothing was sent"); n != 0 {
 		t.Errorf("a written request was treated as never sent %d times, and resent", n)
 	}
-	p.resume()
+	// Every client has its 502 and frpc is still frozen: nothing reached the
+	// engine. The count is read before the thaw, because a thawed frpc may
+	// still hand the engine a request that frps had already written to it
+	// (2 of 50 runs did): the client was told upstream_closed, and HBEP-5
+	// does not resend a written request since it may yet run.
 	if n := len(e.Requests()); n != 0 {
-		t.Errorf("the engine saw %d requests through the frozen path", n)
+		t.Errorf("the engine saw %d requests through the frozen path before the thaw", n)
 	}
+	p.resume()
 }
