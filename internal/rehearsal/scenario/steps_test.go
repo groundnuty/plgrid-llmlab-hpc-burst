@@ -1,28 +1,23 @@
 package scenario_test
 
-// Steps (f) and (g) of issue #146's scenario: a controller restart while the
-// Instance serves, and the scale to 0 with hpcburst down. Each is asserted
-// from the API, the fake cluster's job snapshots, frps's proxy list and the
-// launcher's own status, never from log lines.
+// Step (f) of issue #146's scenario: a controller restart while the Instance
+// serves, asserted from the API, the fake cluster's job snapshots, frps's
+// proxy list and the launcher's own status, never from log lines.
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
-	appsv1 "k8s.io/api/apps/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 )
@@ -31,7 +26,7 @@ import (
 // 0 when it reports none running.
 func (r *rig) statusPID(name string) int {
 	r.t.Helper()
-	out, err := run(r.t, r.h.env, r.b.hpcburst, "status", "--state-dir", r.h.state, "--json", "--no-api")
+	out, err := run(r.t, within(r.t, statusTimeout), r.h.env, r.b.hpcburst, "status", "--state-dir", r.h.state, "--json", "--no-api")
 	var doc any
 	if jerr := json.Unmarshal([]byte(out), &doc); jerr != nil {
 		r.t.Logf("hpcburst status --json (%v): %v: %.300s", err, jerr, out)
@@ -63,7 +58,9 @@ func (r *rig) statusPID(name string) int {
 // leaseHolder is the lifecycle controller's Lease holder, "" when unknown.
 func (r *rig) leaseHolder() string {
 	var l coordinationv1.Lease
-	if err := r.c.Get(context.Background(), types.NamespacedName{Namespace: v1alpha1.ControllerNamespace, Name: v1alpha1.LeaseLifecycle}, &l); err != nil || l.Spec.HolderIdentity == nil {
+	ctx, cancel := callCtx(r.t)
+	defer cancel()
+	if err := r.c.Get(ctx, types.NamespacedName{Namespace: v1alpha1.ControllerNamespace, Name: v1alpha1.LeaseLifecycle}, &l); err != nil || l.Spec.HolderIdentity == nil {
 		return ""
 	}
 	return *l.Spec.HolderIdentity
@@ -208,102 +205,4 @@ func (r *rig) frpsProxies() map[string]bool {
 		}
 	}
 	return out
-}
-
-// stepScaleToZero is step (g): scale to 0. The Instances drain and end, the
-// Allocations end, and each has its acct-<UID> record; every job's processes
-// are gone, frps lists no online proxy for an ended Instance, and hpcburst
-// down stops everything within its grace. With orphanWindow (the direct run),
-// down waits until TunnelOrphanGrace and a read have passed since the last
-// proxy ended, and no TunnelOrphaned event may have fired (assertNoOrphans).
-func (r *rig) stepScaleToZero(orphanWindow bool) {
-	r.t.Helper()
-	uids := map[types.UID]string{}
-	for _, a := range r.allocations() {
-		uids[a.UID] = a.Name
-	}
-	var insts []string
-	for _, in := range r.instances() {
-		insts = append(insts, string(in.UID))
-	}
-	var md v1alpha1.ModelDeployment
-	if !r.get(&md, mdName, namespace) {
-		r.t.Fatal("step (g): no ModelDeployment")
-	}
-	patch := client.MergeFrom(md.DeepCopy())
-	md.Spec.Instances = 0
-	if err := r.c.Patch(context.Background(), &md, patch); err != nil {
-		r.t.Fatalf("scale to 0: %v", err)
-	}
-	last := time.Now()
-	waitFor(r.t, waitDeadline, "every Instance to end and every Allocation to go", func() bool {
-		if time.Since(last) > 10*time.Second {
-			r.t.Logf("step (g) waiting:%s", r.describe())
-			last = time.Now()
-		}
-		for _, in := range r.instances() {
-			if in.Status.Phase != v1alpha1.InstanceEnded {
-				return false
-			}
-		}
-		for _, a := range r.allocations() {
-			if a.Status.AtProvider.Phase != v1alpha1.AllocationEnded && a.Status.AtProvider.Phase != v1alpha1.AllocationFailed {
-				return false
-			}
-		}
-		return true
-	})
-	waitFor(r.t, waitDeadline, "an acct- record for every Allocation", func() bool {
-		var l appsv1.ControllerRevisionList
-		if err := r.c.List(context.Background(), &l); err != nil {
-			return false
-		}
-		have := map[string]bool{}
-		for _, cr := range l.Items {
-			have[cr.Name] = true
-		}
-		for uid := range uids {
-			name, err := v1alpha1.AccountingRecordName(uid)
-			if err != nil || !have[name] {
-				return false
-			}
-		}
-		return true
-	})
-	for _, j := range r.cl.plat.Jobs() {
-		jj := j
-		waitFor(r.t, waitDeadline, fmt.Sprintf("job %d's processes to be gone", jj.ID), func() bool {
-			s, _ := r.cl.plat.Job(jj.ID)
-			return s.Finished || s.PID == 0 && s.State != "PENDING" && s.State != "RUNNING"
-		})
-	}
-	// Every Instance of the run, also those already gone with their
-	// Allocation (the watch saw them), has no online proxy.
-	for _, uid := range r.watch.uids() {
-		if !slices.Contains(insts, string(uid)) {
-			insts = append(insts, string(uid))
-		}
-	}
-	checked := time.Now()
-	online := r.frpsProxies()
-	for _, uid := range insts {
-		if online[uid] {
-			r.t.Errorf("step (g): frps still lists the ended Instance %s online", uid)
-		} else {
-			r.markProxyEnd(types.UID(uid), checked)
-		}
-	}
-	if orphanWindow {
-		r.assertNoOrphans()
-	} else {
-		reportOrphanedTunnels(r.t, r.c, "g")
-	}
-	start := time.Now()
-	r.h.down()
-	if d := time.Since(start); d > 40*time.Second {
-		r.t.Errorf("step (g): hpcburst down took %s, above its default grace of 40 s", d)
-	}
-	if p := r.statusPID("controller"); p != 0 {
-		r.t.Errorf("step (g): status still reports a controller (pid %d) after down", p)
-	}
 }

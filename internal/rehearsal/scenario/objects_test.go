@@ -6,7 +6,6 @@ package scenario_test
 // way the real controller writes a launch (internal/lifecycle/desired.go).
 
 import (
-	"context"
 	"path/filepath"
 	"testing"
 
@@ -36,7 +35,7 @@ const (
 
 func kubeClient(t *testing.T, state string) client.Client {
 	t.Helper()
-	c, err := client.New(restConfig(t, state), client.Options{Scheme: apiScheme(t)})
+	c, err := client.New(pollingConfig(t, state), client.Options{Scheme: apiScheme(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,6 +52,15 @@ func restConfig(t *testing.T, state string) *rest.Config {
 		t.Fatal(err)
 	}
 	cfg.QPS, cfg.Burst = 50, 100
+	return cfg
+}
+
+// pollingConfig is restConfig for the client that polls: each request also
+// bounded by apiCallTimeout, behind the per-call contexts. Not for a watch,
+// which the timeout would cut.
+func pollingConfig(t *testing.T, state string) *rest.Config {
+	cfg := restConfig(t, state)
+	cfg.Timeout = apiCallTimeout
 	return cfg
 }
 
@@ -154,7 +162,10 @@ func servedDeployment(tm timing, engineEnv ...v1alpha1.EnvVar) *v1alpha1.ModelDe
 func create(t *testing.T, c client.Client, objs ...client.Object) {
 	t.Helper()
 	for _, o := range objs {
-		if err := c.Create(context.Background(), o); err != nil {
+		ctx, cancel := callCtx(t)
+		err := c.Create(ctx, o)
+		cancel()
+		if err != nil {
 			t.Fatalf("create %T %s: %v", o, o.GetName(), err)
 		}
 	}
@@ -169,7 +180,9 @@ func conditionTrue(conds []metav1.Condition, typ string) bool {
 func eventsFor(t *testing.T, c client.Client, name string) []corev1.Event {
 	t.Helper()
 	var l corev1.EventList
-	if err := c.List(context.Background(), &l); err != nil {
+	ctx, cancel := callCtx(t)
+	defer cancel()
+	if err := c.List(ctx, &l); err != nil {
 		t.Fatalf("list events: %v", err)
 	}
 	var out []corev1.Event
@@ -188,7 +201,9 @@ func eventsFor(t *testing.T, c client.Client, name string) []corev1.Event {
 func orphanEvents(t *testing.T, c client.Client) []eventsv1.Event {
 	t.Helper()
 	var l eventsv1.EventList
-	if err := c.List(context.Background(), &l); err != nil {
+	ctx, cancel := callCtx(t)
+	defer cancel()
+	if err := c.List(ctx, &l); err != nil {
 		t.Fatalf("list events.k8s.io events: %v", err)
 	}
 	var out []eventsv1.Event

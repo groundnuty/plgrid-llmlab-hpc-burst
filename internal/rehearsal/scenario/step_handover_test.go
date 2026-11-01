@@ -9,7 +9,6 @@ package scenario_test
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"strconv"
 	"testing"
@@ -80,13 +79,16 @@ func (r *rig) replacementReady(p *v1alpha1.Instance) v1alpha1.Instance {
 // waitState is waitFor whose failure names the state cond saw last.
 func waitState(t *testing.T, d time.Duration, what string, cond func() (bool, string)) {
 	t.Helper()
-	deadline := time.Now().Add(d)
+	deadline, cut := boundedDeadline(t, d)
 	for {
 		ok, state := cond()
 		if ok {
 			return
 		}
 		if time.Now().After(deadline) {
+			if cut {
+				t.Fatalf("gave up waiting for %s %s before the test's deadline, so that its clean-up runs; last: %s", what, cleanupMargin, state)
+			}
 			t.Fatalf("timed out after %s waiting for %s; last: %s", d, what, state)
 		}
 		time.Sleep(200 * time.Millisecond)
@@ -212,7 +214,9 @@ func (r *rig) checkDrained(pred, repl *v1alpha1.Instance, ds, streamEnd time.Tim
 	r.proxyEnded(pred.UID)
 	waitFor(r.t, waitDeadline, "the primary's Allocation's record "+name, func() bool {
 		var l appsv1.ControllerRevisionList
-		if err := r.c.List(context.Background(), &l); err != nil {
+		ctx, cancel := callCtx(r.t)
+		defer cancel()
+		if err := r.c.List(ctx, &l); err != nil {
 			return false
 		}
 		for _, cr := range l.Items {

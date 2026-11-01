@@ -9,6 +9,8 @@ package scenario_test
 import (
 	"bytes"
 	"io/fs"
+	"maps"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -122,7 +124,54 @@ func (r *rig) stepTunnelLoss(in *v1alpha1.Instance, key string) {
 	})
 	r.t.Logf("step (e): %d frpc kills; TunnelConnected False seen %s and the front's registration gone %s after the first",
 		len(killed), falseAt.Sub(start).Round(100*time.Millisecond), goneAt.Sub(start).Round(100*time.Millisecond))
+	r.requestDuringLoss(in, key, jobID, staged, killed)
 	r.checkTunnelBack(in, key, jobID, staged, killed, parent, start)
+}
+
+// requestDuringLoss sends a request with the primary's key while the loss is
+// held: every frpc the agent starts meanwhile is killed too. The front must
+// route it to another Instance, which shows from its usage record that the
+// primary left routing for the real client path, not only for /healthz.
+func (r *rig) requestDuringLoss(in *v1alpha1.Instance, key string, jobID int, staged string, killed map[int]bool) {
+	r.t.Helper()
+	stop, done := make(chan struct{}), make(chan []int, 1)
+	seen := maps.Clone(killed)
+	go func() {
+		var more []int
+		defer func() { done <- more }()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+			pids, err := r.cl.plat.Processes(jobID)
+			if err != nil {
+				continue
+			}
+			for _, p := range pids {
+				if !seen[p] && processExe(p) == staged && syscall.Kill(p, syscall.SIGKILL) == nil {
+					seen[p] = true
+					more = append(more, p)
+				}
+			}
+		}
+	}()
+	rp := r.send("/v1/chat/completions", chatBody(4, 0, false), key)
+	reg, known := registered(in)
+	close(stop)
+	for _, p := range <-done {
+		killed[p] = true
+	}
+	if rp.err != nil || rp.status != http.StatusOK {
+		r.t.Fatalf("step (e): a request with the primary's key during the loss: %d %v: %.300s", rp.status, rp.err, rp.body)
+	}
+	row := r.rowOf(rp.id)
+	if row.Emitter != "instance" || row.InstanceUID == "" || row.InstanceUID == string(in.UID) {
+		r.t.Errorf("step (e): the primary's key during the loss went to %s (%s, emitter %s), not to another Instance; the primary registered %v (known %v) after it",
+			row.Instance, row.InstanceUID, row.Emitter, reg, known)
+	}
+	r.t.Logf("step (e): during the loss the primary's key was served by %s", row.Instance)
 }
 
 // checkTunnelBack: the agent starts frpc again (a new process, child of the

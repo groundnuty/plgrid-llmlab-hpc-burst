@@ -4,7 +4,6 @@ package scenario_test
 // mode; ssh mode runs once in TestRehearsalSSH (criterion 3).
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -101,11 +100,16 @@ func startRig(t *testing.T, mode string) *rig {
 	r.h.placeAgentBuild(arch)
 	r.c = kubeClient(t, r.h.state)
 	create(t, r.c, batchProfile(arch, rehearsalTiming), batchProvider(creds))
+	// Before the deployment exists, so the watch sees every Instance and
+	// Allocation from its first version.
+	r.startWatch()
 	return r
 }
 
 func (r *rig) get(obj client.Object, name, ns string) bool {
-	return r.c.Get(context.Background(), client.ObjectKey{Name: name, Namespace: ns}, obj) == nil
+	ctx, cancel := callCtx(r.t)
+	defer cancel()
+	return r.c.Get(ctx, client.ObjectKey{Name: name, Namespace: ns}, obj) == nil
 }
 
 // providerReady waits until the Provider is Ready from a fresh queue read
@@ -150,7 +154,9 @@ func (r *rig) assertRealSSH() {
 // allocations lists the deployment's Allocations.
 func (r *rig) allocations() []v1alpha1.Allocation {
 	var l v1alpha1.AllocationList
-	if err := r.c.List(context.Background(), &l, client.InNamespace(namespace)); err != nil {
+	ctx, cancel := callCtx(r.t)
+	defer cancel()
+	if err := r.c.List(ctx, &l, client.InNamespace(namespace)); err != nil {
 		r.t.Fatalf("list allocations: %v", err)
 	}
 	return l.Items
@@ -158,7 +164,9 @@ func (r *rig) allocations() []v1alpha1.Allocation {
 
 func (r *rig) instances() []v1alpha1.Instance {
 	var l v1alpha1.InstanceList
-	if err := r.c.List(context.Background(), &l, client.InNamespace(namespace)); err != nil {
+	ctx, cancel := callCtx(r.t)
+	defer cancel()
+	if err := r.c.List(ctx, &l, client.InNamespace(namespace)); err != nil {
 		r.t.Fatalf("list instances: %v", err)
 	}
 	return l.Items
@@ -183,69 +191,6 @@ func (r *rig) describe() string {
 	return s
 }
 
-// stepStart is step (a): an Allocation submitted held and released, the
-// agent in the job, and an Instance that reaches ready only once its tunnel
-// is connected.
-func (r *rig) stepStart() *v1alpha1.Instance {
-	r.t.Helper()
-	r.providerReady()
-	create(r.t, r.c, servedDeployment(rehearsalTiming, r.engineEnv...))
-	var alloc v1alpha1.Allocation
-	waitFor(r.t, waitDeadline, "an Allocation with a job ID", func() bool {
-		for _, a := range r.allocations() {
-			if a.Status.AtProvider.JobID != "" {
-				alloc = a
-				return true
-			}
-		}
-		r.t.Logf("waiting:%s", r.describe())
-		return false
-	})
-	id, err := strconv.Atoi(alloc.Status.AtProvider.JobID)
-	if err != nil {
-		r.t.Fatalf("job ID %q: %v", alloc.Status.AtProvider.JobID, err)
-	}
-	// Submitted held, then released: the job ran only after scontrol release.
-	waitFor(r.t, waitDeadline, "the job to start in the fake cluster", func() bool {
-		j, ok := r.cl.plat.Job(id)
-		return ok && j.PID > 0
-	})
-	if n := r.cl.plat.Count("scontrol"); n < 1 {
-		r.t.Errorf("the job started with no scontrol release (%d calls): it was not submitted held", n)
-	}
-	// The primary is the Instance with no predecessor: its replacement is
-	// created at its start when no queue wait is observed (HBEP-7), so two
-	// Instances start, and either may be ready first.
-	var ready *v1alpha1.Instance
-	waitFor(r.t, waitDeadline, "the primary Instance to be ready", func() bool {
-		for _, in := range r.instances() {
-			if in.Status.Phase == v1alpha1.InstanceReady && in.Annotations[v1alpha1.AnnotationPredecessor] == "" {
-				in := in
-				ready = &in
-				return true
-			}
-		}
-		return false
-	})
-	// The agent staged from the Hub double, whose address reached the job only
-	// through agent.json. The LFS file shows it: the controller downloads only
-	// the files outside LFS, to hash them, and takes an LFS file's SHA-256 from
-	// the listing, so only the agent fetches the weights.
-	agentFetched := false
-	for _, p := range r.hub.resolved() {
-		for _, f := range hubFiles {
-			agentFetched = agentFetched || f.lfs && f.path == p
-		}
-	}
-	if !agentFetched {
-		r.t.Errorf("the agent never downloaded the LFS weights from the Hub double (downloads %v): agent.json's hubEndpoint did not reach it", r.hub.resolved())
-	}
-	if !conditionTrue(ready.Status.Conditions, v1alpha1.ConditionTunnelConnected) {
-		r.t.Errorf("Instance %s is ready without TunnelConnected True: %v", ready.Name, ready.Status.Conditions)
-	}
-	return ready
-}
-
 // TestRehearsalDirect is criterion 2 in direct mode. Steps (b), (d), (e) and
 // (f) run on the primary before its drain start, then the handover (c), then
 // the scale to 0 (g). The replacement is ready from the start (HBEP-7: with
@@ -254,7 +199,6 @@ func (r *rig) stepStart() *v1alpha1.Instance {
 func TestRehearsalDirect(t *testing.T) {
 	r := startRig(t, "direct")
 	r.engineEnv = []v1alpha1.EnvVar{{Name: "HB_ENGINE_DOUBLE", Value: "token-delay=" + tokenDelay.String()}}
-	r.startWatch()
 	done := r.stepTimer("a")
 	in := r.stepStart()
 	done()
@@ -269,7 +213,7 @@ func TestRehearsalDirect(t *testing.T) {
 	r.stepControllerRestart(in, key)
 	r.stepHandover(in)
 	done = r.stepTimer("g")
-	r.stepScaleToZero(true)
+	r.stepScaleToZero("c, g")
 	done()
 }
 
@@ -334,7 +278,7 @@ func TestRehearsalSSH(t *testing.T) {
 	if len(fwd) < 2 {
 		t.Errorf("the agent of job %d has %d ssh forwards (%v), want 2: the agent endpoint and the dial-home listener", jobID, len(fwd), fwd)
 	}
-	r.stepScaleToZero(false)
+	r.stepScaleToZero("g")
 	for _, p := range fwd {
 		if alive(p) {
 			t.Errorf("the agent's ssh forward %d outlived its job (HBEP-6: no ssh process behind)", p)

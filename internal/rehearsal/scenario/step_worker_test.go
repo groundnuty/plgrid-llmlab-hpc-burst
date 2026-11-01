@@ -3,15 +3,17 @@ package scenario_test
 // Step (d) of issue #146: a worker-rung restart. The engine double's process
 // in the primary's job is killed; the requests during the outage each end
 // with a definite status and a usage record; the front pauses the Instance
-// after HBEP-5's three Instance-emitted 5xx in a row; and the lifecycle
-// controller restarts the worker (HBEP-7, Health and restarts), so the
-// Instance serves again on the same Allocation (science-agent ruling, 1 Nov
-// 2026).
+// after HBEP-5's three Instance-emitted 5xx in a row, and the other Instance
+// serves; and the lifecycle controller restarts the worker (HBEP-7, Health and
+// restarts), so the Instance serves again on the same Allocation
+// (science-agent rulings, 1 Nov 2026).
 
 import (
 	"bytes"
+	"maps"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"syscall"
 	"time"
@@ -79,7 +81,22 @@ func (r *rig) eventReasons(name string) []string {
 	return out
 }
 
-// stepWorkerRestart is step (d).
+// stepWorkerRestart is step (d). The front's pause is proved apart from the
+// two other things that can take an Instance out of routing: the controller's
+// move to verifying when it learns the worker exited, and the front's probe,
+// which unregisters a transport after probeFailures (2) failed probes 2 s
+// apart (HBEP-6, The front's half). The agent learns of a worker's exit only
+// from its leader process (internal/agent/workers.go, leaderExited), which in
+// the rehearsal is the fake Apptainer, the engine's parent. So the leader is
+// stopped (SIGSTOP) before the engine is killed: requests then meet the dead
+// engine and get the agent's 5xx, while the controller sees a running worker
+// and keeps the Instance ready. pauseAfterFailures+1 requests go back to back;
+// the first pauseAfterFailures must be the primary's 5xx and the next must be
+// served by the other Instance, with the pause counter up, the primary still
+// ready on the watch and still registered at the front: only the pause can
+// have moved it. Then the leader continues, reaps the engine and exits, and
+// the controller restarts the worker; requests go one at a time until the
+// restarted primary serves the key again.
 func (r *rig) stepWorkerRestart(in *v1alpha1.Instance, key string) {
 	r.t.Helper()
 	defer r.stepTimer("d")()
@@ -96,15 +113,28 @@ func (r *rig) stepWorkerRestart(in *v1alpha1.Instance, key string) {
 	if len(engines) != 1 {
 		r.t.Fatalf("step (d): job %d has %d engine processes %v, want 1", jobID, len(engines), engines)
 	}
+	leader := r.workerLeader(jobID, engines[0])
 	pauses, ok := frontCounter("hpcburst_front_pauses_total")
 	if !ok {
 		r.t.Fatal("step (d): the front's /metrics cannot be read")
 	}
+	if err := syscall.Kill(leader, syscall.SIGSTOP); err != nil {
+		r.t.Fatalf("step (d): stop the worker's leader %d: %v", leader, err)
+	}
+	stopped := true
+	resume := func() {
+		if stopped {
+			stopped = false
+			if err := syscall.Kill(leader, syscall.SIGCONT); err != nil {
+				r.t.Errorf("step (d): continue the worker's leader %d: %v", leader, err)
+			}
+		}
+	}
+	defer resume()
 	if err := syscall.Kill(engines[0], syscall.SIGKILL); err != nil {
 		r.t.Fatalf("step (d): kill the engine %d: %v", engines[0], err)
 	}
 	killAt := time.Now()
-	var outs []outcome
 	sent := 0
 	send := func() reply {
 		rp := r.send("/v1/chat/completions", chatBody(4, 0, false), key)
@@ -114,15 +144,27 @@ func (r *rig) stepWorkerRestart(in *v1alpha1.Instance, key string) {
 		sent++
 		return rp
 	}
-	// Back to back first, records read after, so that the front's pause
-	// rule, not its probe, meets the failures; then one at a time until the
-	// primary serves the key again after the controller restarted its worker.
+	// Back to back, records read after.
 	var burst []reply
 	for i := 0; i <= pauseAfterFailures; i++ {
 		burst = append(burst, send())
 	}
+	pausesAfter, _ := frontCounter("hpcburst_front_pauses_total")
+	reg, known := registered(in)
+	still, _ := r.instance(in.Name)
+	moved, left := r.watch.first(in.UID, killAt, func(o observation) bool { return o.phase != v1alpha1.InstanceReady })
+	resume()
+	var outs []outcome
 	for _, rp := range burst {
 		outs = append(outs, outcome{rp: rp, row: r.rowOf(rp.id)})
+	}
+	r.checkPause(in, outs, pauses, pausesAfter)
+	switch {
+	case !known || !reg:
+		r.t.Errorf("step (d): after the burst the front's probe no longer held Instance %s registered (known %v): the probe, not the pause, may have moved its key", in.Name, known)
+	case still.Status.Phase != v1alpha1.InstanceReady || left && !moved.at.After(parseRecordTime(outs[pauseAfterFailures].row.StartTime)):
+		r.t.Errorf("step (d): Instance %s left ready (%s; first seen %s at %s) before the request after the 5xx: the controller, not the pause, may have moved its key",
+			in.Name, still.Status.Phase, moved.phase, moved.at.Format(time.RFC3339Nano))
 	}
 	waitFor(r.t, waitDeadline, "the primary to serve again after a worker restart", func() bool {
 		rp := send()
@@ -133,19 +175,53 @@ func (r *rig) stepWorkerRestart(in *v1alpha1.Instance, key string) {
 			o.rp.status == http.StatusOK && o.row.InstanceUID == string(in.UID)
 	})
 	r.t.Logf("step (d): %d requests; the primary served again %s after the engine's kill", len(outs), time.Since(killAt).Round(100*time.Millisecond))
-	r.checkOutage(in, outs, pauses)
+	r.checkOutage(in, outs)
 	r.checkWorkerRestart(in, before, job.PID, allocs, restartEvents, engines[0], killAt)
 }
 
-// checkOutage holds every request of the outage to HBEP-5 and the ruling:
-// each has a record with its emitter; at most pauseAfterFailures
-// Instance-emitted 5xx come in a row, and such a run pauses the Instance;
-// the rest are served by another ready Instance (the replacement, routable
-// too) or are the front's own model_inactive/no_ready_target with
-// Retry-After.
-func (r *rig) checkOutage(in *v1alpha1.Instance, outs []outcome, pausesBefore float64) {
+// workerLeader is the engine's parent, the fake Apptainer (this test binary
+// under the name apptainer), a process of the job.
+func (r *rig) workerLeader(jobID, engine int) int {
 	r.t.Helper()
-	run, longest, fivexx, other, front := 0, 0, 0, 0, 0
+	leader := parentOf(engine)
+	pids, err := r.cl.plat.Processes(jobID)
+	self, serr := os.Executable()
+	if err != nil || serr != nil || leader == 0 || !slices.Contains(pids, leader) || processExe(leader) != self {
+		r.t.Fatalf("step (d): the engine %d's parent %d (%s) is not the fake Apptainer of job %d (%v, %v)", engine, leader, processExe(leader), jobID, err, serr)
+	}
+	return leader
+}
+
+// checkPause holds the burst to HBEP-5's pause: the first pauseAfterFailures
+// requests are the primary's own 5xx, the next is served by another Instance,
+// and the front counted a pause.
+func (r *rig) checkPause(in *v1alpha1.Instance, burst []outcome, pausesBefore, pausesAfter float64) {
+	r.t.Helper()
+	for i, o := range burst[:pauseAfterFailures] {
+		if o.row.Emitter != "instance" || o.row.InstanceUID != string(in.UID) || o.row.Status < 500 {
+			r.t.Errorf("step (d) burst request %d: record %+v, want the primary's own 5xx: %.300s", i, o.row, o.rp.body)
+		}
+	}
+	next := burst[pauseAfterFailures]
+	if next.rp.status != http.StatusOK || next.row.Emitter != "instance" || next.row.InstanceUID == "" || next.row.InstanceUID == string(in.UID) {
+		r.t.Errorf("step (d): the request after %d of the primary's 5xx in a row: %d, record %+v; want another Instance's 200 (HBEP-5, Pauses): %.300s",
+			pauseAfterFailures, next.rp.status, next.row, next.rp.body)
+	}
+	if pausesAfter <= pausesBefore {
+		r.t.Errorf("step (d): hpcburst_front_pauses_total stayed %v across %d of the primary's 5xx in a row", pausesAfter, pauseAfterFailures)
+	}
+	r.t.Logf("step (d): the burst: %d of the primary's 5xx, then %s served it; pauses %v -> %v", pauseAfterFailures, next.row.Instance, pausesBefore, pausesAfter)
+}
+
+// checkOutage holds every request of the outage to HBEP-5 and the ruling of
+// 1 Nov 2026 (13:25Z, with a second routable Instance): each has a record
+// with its emitter; at most pauseAfterFailures of the primary's own 5xx come
+// in a row; every other is served, by the other Instance or by the primary
+// after its restart; and none is the front's own error, since the front's
+// no_ready_target applies only when the paused Instance is the only one.
+func (r *rig) checkOutage(in *v1alpha1.Instance, outs []outcome) {
+	r.t.Helper()
+	run, longest, fivexx, other, own := 0, 0, 0, 0, 0
 	for i, o := range outs {
 		row := o.row
 		switch {
@@ -156,36 +232,18 @@ func (r *rig) checkOutage(in *v1alpha1.Instance, outs []outcome, pausesBefore fl
 			run++
 			longest = max(longest, run)
 			continue
+		case row.Emitter == "instance" && row.Status == http.StatusOK && row.InstanceUID == string(in.UID):
+			own++
 		case row.Emitter == "instance" && row.Status == http.StatusOK:
-			if row.InstanceUID != string(in.UID) {
-				other++
-			}
-		case row.Emitter == "front":
-			front++
-			e := errorOf(o.rp.body)
-			if row.Status != http.StatusServiceUnavailable || e.Code != "model_inactive" || e.Detail == nil || *e.Detail != "no_ready_target" || o.rp.header.Get("Retry-After") == "" {
-				r.t.Errorf("step (d) request %d: the front's row is %d %+v (Retry-After %q), want 503 model_inactive/no_ready_target with Retry-After: %.300s",
-					i, row.Status, e, o.rp.header.Get("Retry-After"), o.rp.body)
-			}
+			other++
 		default:
-			r.t.Errorf("step (d) request %d: unexpected record %+v: %.300s", i, row, o.rp.body)
+			r.t.Errorf("step (d) request %d: record %+v, want the primary's 5xx or an Instance's 200 (a front row is no_ready_target, for a sole Instance): %.300s", i, row, o.rp.body)
 		}
 		run = 0
 	}
-	r.t.Logf("step (d): %d Instance-emitted 5xx (longest run %d), %d served by another Instance, %d front rows", fivexx, longest, other, front)
-	if fivexx == 0 {
-		r.t.Errorf("step (d): no request met the dead engine: the outage never reached a client")
-	}
+	r.t.Logf("step (d): %d of the primary's 5xx (longest run %d), %d served by another Instance, %d by the restarted primary", fivexx, longest, other, own)
 	if longest > pauseAfterFailures {
-		r.t.Errorf("step (d): %d Instance-emitted 5xx came in a row; the front pauses after %d (HBEP-5, Pauses)", longest, pauseAfterFailures)
-	}
-	if other+front == 0 {
-		r.t.Errorf("step (d): every request went to the dead primary; the pause never made it ineligible")
-	}
-	if longest == pauseAfterFailures {
-		if after, _ := frontCounter("hpcburst_front_pauses_total"); after <= pausesBefore {
-			r.t.Errorf("step (d): %d failures in a row and hpcburst_front_pauses_total stayed %v", longest, after)
-		}
+		r.t.Errorf("step (d): %d of the primary's 5xx came in a row; the front pauses after %d (HBEP-5, Pauses)", longest, pauseAfterFailures)
 	}
 	r.checkNoGap(r.usageRows())
 }
@@ -213,7 +271,7 @@ func (r *rig) checkWorkerRestart(in *v1alpha1.Instance, before v1alpha1.Instance
 	if now.Spec.AllocationRef.Name != before.Spec.AllocationRef.Name {
 		r.t.Errorf("step (d): the Instance's Allocation changed from %s to %s", before.Spec.AllocationRef.Name, now.Spec.AllocationRef.Name)
 	}
-	if after := r.allocationNames(); len(after) != len(allocs) {
+	if after := r.allocationNames(); !maps.Equal(after, allocs) {
 		r.t.Errorf("step (d): Allocations %v after the restart, %v before: a new Allocation", after, allocs)
 	}
 	jobID, _ := strconv.Atoi(now.Status.JobID)

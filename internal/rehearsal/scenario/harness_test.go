@@ -12,8 +12,9 @@ package scenario_test
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -36,8 +37,23 @@ import (
 func TestMain(m *testing.M) {
 	enginedouble.Dispatch() // the fake apptainer and engine roles
 	rehearsal.Dispatch()    // the login node's forced command
-	os.Exit(m.Run())
+	start := time.Now()
+	code := m.Run()
+	if os.Getenv("HPCBURST_REHEARSAL") == "1" {
+		// Issue #146, criterion 4: the rehearsal should take under 15 minutes.
+		// It is a measured target, not a bound: hack/rehearsal.sh sets
+		// -test.timeout well above it, so that a slow run still cleans up.
+		took := time.Since(start).Round(time.Second)
+		fmt.Printf("the rehearsal's tests took %s (issue #146's target: under %s)\n", took, rehearsalTarget)
+		if took > rehearsalTarget {
+			fmt.Printf("FINDING: the rehearsal took %s, above issue #146's target of %s\n", took, rehearsalTarget)
+		}
+	}
+	os.Exit(code)
 }
+
+// rehearsalTarget is issue #146's time for the whole rehearsal.
+const rehearsalTarget = 15 * time.Minute
 
 // Ports: issue #146's block is 29500-29539. hpcburst up takes launcher base
 // 29520 (29520-29532); the front's client and dial-home listeners take 29500
@@ -50,6 +66,42 @@ const (
 
 // waitDeadline bounds every wait on state; the stack's own start is slower.
 const waitDeadline = 3 * time.Minute
+
+// cleanupMargin is how long before the test binary's deadline (-test.timeout)
+// every wait, request and command gives up. The deadline's panic skips
+// t.Cleanup, which is what stops the stack, so a run that is too slow must end
+// in t.Fatal early enough for the clean-up to run: hpcburst down within its
+// 40 s grace, the fake cluster's KILL of every job, and the ssh servers.
+const cleanupMargin = 2 * time.Minute
+
+// waitCap is when the test's waits and bounded calls give up: cleanupMargin
+// before the test's deadline, or never when it has none.
+func waitCap(t *testing.T) (time.Time, bool) {
+	d, ok := t.Deadline()
+	if !ok {
+		return time.Time{}, false
+	}
+	return d.Add(-cleanupMargin), true
+}
+
+// boundedDeadline is now plus d, or waitCap when that comes first; cut says
+// the cap shortened it.
+func boundedDeadline(t *testing.T, d time.Duration) (deadline time.Time, cut bool) {
+	deadline = time.Now().Add(d)
+	if c, ok := waitCap(t); ok && c.Before(deadline) {
+		return c, true
+	}
+	return deadline, false
+}
+
+// apiCallTimeout bounds one call to the API server.
+const apiCallTimeout = 30 * time.Second
+
+// callCtx bounds one call to the API server by apiCallTimeout and waitCap.
+func callCtx(t *testing.T) (context.Context, context.CancelFunc) {
+	d, _ := boundedDeadline(t, apiCallTimeout)
+	return context.WithDeadline(context.Background(), d)
+}
 
 // binaries are what the rehearsal runs: the four of this repo, built by
 // hack/rehearsal.sh into $HPCBURST_REHEARSAL_BIN, k3s from $HPCBURST_BIN_DIR,
@@ -117,12 +169,16 @@ func cpuArch(t *testing.T) string {
 	return ""
 }
 
-// waitFor polls cond until it holds, failing at the deadline.
+// waitFor polls cond until it holds, failing at the deadline, or at waitCap
+// when that comes first.
 func waitFor(t *testing.T, d time.Duration, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(d)
+	deadline, cut := boundedDeadline(t, d)
 	for !cond() {
 		if time.Now().After(deadline) {
+			if cut {
+				t.Fatalf("gave up waiting for %s %s before the test's deadline, so that its clean-up runs", what, cleanupMargin)
+			}
 			t.Fatalf("timed out after %s waiting for %s", d, what)
 		}
 		time.Sleep(200 * time.Millisecond)
@@ -140,28 +196,94 @@ func httpStatus(url string) int {
 	return resp.StatusCode
 }
 
-// rootK3sListens reports whether something still listens on the root k3s's
-// ports 6443 and 10250; the rehearsal must never touch them.
-func rootK3sListens() bool {
-	for _, p := range []string{"6443", "10250"} {
-		c, err := net.DialTimeout("tcp", "127.0.0.1:"+p, 2*time.Second)
-		if err != nil {
-			return false
-		}
-		c.Close()
+// rootK3sPorts are a system k3s's ports (IMPL-COMMON), which the rehearsal
+// never touches; a CI runner has no system k3s at all.
+var rootK3sPorts = []int{6443, 6444, 10250}
+
+// listening lists which of ports have a TCP listener on this host, from
+// ss(8), in the order given.
+func listening(t *testing.T, ports []int) []int {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ss", "-ltnH").Output()
+	if err != nil {
+		t.Fatalf("ss -ltnH: %v", err)
 	}
-	return true
+	var have []int
+	for _, p := range ports {
+		for _, l := range strings.Split(string(out), "\n") {
+			if f := strings.Fields(l); len(f) >= 4 && strings.HasSuffix(f[3], ":"+strconv.Itoa(p)) {
+				have = append(have, p)
+				break
+			}
+		}
+	}
+	return have
 }
 
-// run runs one of the stack's commands and returns its output.
-func run(t *testing.T, env []string, name string, args ...string) (string, error) {
+// rootK3sListening is which of the system k3s's ports listen, "6443,6444,10250"
+// on a host that runs one, "" on a CI runner (internal/frpsplugin's rig).
+func rootK3sListening(t *testing.T) string {
 	t.Helper()
-	cmd := exec.Command(name, args...)
+	var s []string
+	for _, p := range listening(t, rootK3sPorts) {
+		s = append(s, strconv.Itoa(p))
+	}
+	return strings.Join(s, ",")
+}
+
+// rootK3sBefore is the guard before the run: with HPCBURST_TEST_ROOT_K3S=1 a
+// system k3s must listen on all its ports; without it none need to, so the
+// rehearsal runs on a host with no system k3s, such as a CI runner.
+func rootK3sBefore(before string, required bool) error {
+	if required && before != "6443,6444,10250" {
+		return fmt.Errorf("HPCBURST_TEST_ROOT_K3S=1, but the root k3s listens only on %q", before)
+	}
+	return nil
+}
+
+// rootK3sAfter is the check after the run: the system k3s's listeners are the
+// ones there were before it, whichever those were.
+func rootK3sAfter(before, after string) error {
+	if after != before {
+		return fmt.Errorf("the root k3s's listeners changed across the rehearsal: %q -> %q", before, after)
+	}
+	return nil
+}
+
+// Bounds of the stack's commands. hpcburst up starts k3s and waits for it; down
+// stops everything within its 40 s grace and then k3s; status only reads.
+const (
+	upTimeout     = 5 * time.Minute
+	downTimeout   = 100 * time.Second
+	statusTimeout = 30 * time.Second
+)
+
+// run runs one of the stack's commands within timeout and returns its output.
+// The command is killed at its deadline, and its output is read for at most
+// 10 s after that, in case a process it started kept the pipe open.
+func run(t *testing.T, timeout time.Duration, env []string, name string, args ...string) (string, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = env
+	cmd.WaitDelay = 10 * time.Second
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	err := cmd.Run()
+	if ctx.Err() != nil {
+		err = errors.Join(err, fmt.Errorf("%s did not end within %s", filepath.Base(name), timeout))
+	}
 	return out.String(), err
+}
+
+// within is d, or less when waitCap comes first: a command the test body runs
+// ends before the clean-up's margin.
+func within(t *testing.T, d time.Duration) time.Duration {
+	dl, _ := boundedDeadline(t, d)
+	return max(time.Until(dl), time.Second)
 }
 
 // cleanEnv is the environment for hpcburst up: this process's, without
@@ -352,9 +474,17 @@ func startHost(t *testing.T, b binaries, dir string, dh dialHome, env []string) 
 	if err := os.WriteFile(cfg, []byte(front), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if !rootK3sListens() {
-		t.Fatal("the root k3s does not listen on 6443 and 10250 before the rehearsal; refusing to start")
+	before := rootK3sListening(t)
+	if err := rootK3sBefore(before, os.Getenv("HPCBURST_TEST_ROOT_K3S") == "1"); err != nil {
+		t.Fatal(err)
 	}
+	t.Logf("the root k3s's listeners before the rehearsal: %q", before)
+	// Registered before down's clean-up, so it runs after it.
+	t.Cleanup(func() {
+		if err := rootK3sAfter(before, rootK3sListening(t)); err != nil {
+			t.Error(err)
+		}
+	})
 	args := []string{"up", "--state-dir", h.state, "--bin-dir", b.k3sDir, "--port-base", strconv.Itoa(portBase), "--nice", "10",
 		"--manifests", filepath.Join(b.repo, "config", "crd"), "--controller-bin", b.controller,
 		"--front-config", cfg, "--front-bin", b.front, "--frps-bin", b.frps, "--front-mode", dh.mode, "--front-addr", dh.addr}
@@ -362,7 +492,7 @@ func startHost(t *testing.T, b binaries, dir string, dh dialHome, env []string) 
 		args = append(args, "--front-key", dh.keyPath)
 	}
 	t.Cleanup(h.down)
-	if out, err := run(t, env, b.hpcburst, args...); err != nil {
+	if out, err := run(t, within(t, upTimeout), env, b.hpcburst, args...); err != nil {
 		t.Fatalf("hpcburst up: %v\n%s", err, out)
 	}
 	waitFor(t, waitDeadline, "the controller's /readyz", func() bool {
@@ -371,20 +501,17 @@ func startHost(t *testing.T, b binaries, dir string, dh dialHome, env []string) 
 	return h
 }
 
-// down runs hpcburst down with its default grace, then checks that the root
-// k3s still listens.
+// down runs hpcburst down with its default grace. It is also the clean-up, so
+// its bound is its own, not waitCap.
 func (h *host) down() {
 	h.t.Helper()
 	if _, err := os.Stat(h.state); err != nil || h.downed {
 		return
 	}
 	h.downed = true
-	out, err := run(h.t, h.env, h.b.hpcburst, "down", "--state-dir", h.state)
+	out, err := run(h.t, downTimeout, h.env, h.b.hpcburst, "down", "--state-dir", h.state)
 	if err != nil {
 		h.t.Errorf("hpcburst down: %v\n%s", err, out)
-	}
-	if !rootK3sListens() {
-		h.t.Errorf("the root k3s no longer listens on 6443 and 10250 after the rehearsal")
 	}
 	h.t.Logf("memory peak of the run's cgroup (the whole stack): %s", memoryPeak())
 }

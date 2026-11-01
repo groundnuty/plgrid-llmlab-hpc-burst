@@ -34,10 +34,18 @@ type reply struct {
 	id     string // the front's request ID (Hpcburst-Request-Id)
 }
 
+// requestCtx bounds one request by requestTimeout and waitCap.
+func (r *rig) requestCtx() (context.Context, context.CancelFunc) {
+	d, _ := boundedDeadline(r.t, requestTimeout)
+	return context.WithDeadline(context.Background(), d)
+}
+
 // send posts body to the front's client listener with the client key and,
 // when key is set, the x-session-id conversation key.
 func (r *rig) send(path, body, key string) reply {
-	req, err := http.NewRequest(http.MethodPost, "http://"+clientAddr+path, strings.NewReader(body))
+	ctx, cancel := r.requestCtx()
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+clientAddr+path, strings.NewReader(body))
 	if err != nil {
 		return reply{err: err}
 	}
@@ -130,7 +138,7 @@ func (r *rig) startStream(body, key string) (first <-chan struct{}, done <-chan 
 			}
 		}
 		defer once()
-		ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+		ctx, cancel := r.requestCtx()
 		defer cancel()
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+clientAddr+"/v1/chat/completions", strings.NewReader(body))
 		if err != nil {
