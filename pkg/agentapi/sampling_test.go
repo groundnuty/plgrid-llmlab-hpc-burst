@@ -1,6 +1,7 @@
 package agentapi
 
 import (
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -187,11 +188,38 @@ func TestCheckGenerationConfig(t *testing.T) {
 				t.Errorf("CheckGenerationConfig = %v, want nil", err)
 			case tc.wantKey != "" && !errors.As(err, &ge):
 				t.Errorf("CheckGenerationConfig = %v, want a GenerationConfigError for %s", err, tc.wantKey)
-			case tc.wantKey != "" && (ge.Key != tc.wantKey || !strings.Contains(err.Error(), tc.wantKey)):
-				t.Errorf("CheckGenerationConfig = %v (key %q), want key %q named in the message", err, ge.Key, tc.wantKey)
+			case tc.wantKey != "" && (ge.Param != tc.wantKey || !strings.Contains(err.Error(), tc.wantKey)):
+				t.Errorf("CheckGenerationConfig = %v (key %q), want key %q named in the message", err, ge.Param, tc.wantKey)
 			case tc.want != "" && err.Error() != tc.want:
 				t.Errorf("CheckGenerationConfig = %q, want %q", err.Error(), tc.want)
 			}
 		})
+	}
+}
+
+// The agent reports a refused value as a structured field, which survives the
+// wire and gives the same message on the controller's side.
+func TestGenerationConfigRefusedRoundTrips(t *testing.T) {
+	err := CheckGenerationConfig(map[string]string{"temperature": `"warm"`})
+	var ge *GenerationConfigError
+	if !errors.As(err, &ge) {
+		t.Fatalf("CheckGenerationConfig = %v, want a GenerationConfigError", err)
+	}
+	b, merr := json.Marshal(VerifyResult{Done: true, GenerationConfigRefused: ge})
+	if merr != nil {
+		t.Fatal(merr)
+	}
+	if want := `{"done":true,"generationConfigRefused":{"param":"temperature","value":"\"warm\"","want":"a number"}}`; string(b) != want {
+		t.Errorf("wire form %s, want %s", b, want)
+	}
+	var back VerifyResult
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.GenerationConfigRefused == nil || back.GenerationConfigRefused.Error() != `generation_config.json's temperature is "warm", not a number` {
+		t.Errorf("read back %+v", back.GenerationConfigRefused)
+	}
+	if b, _ := json.Marshal(VerifyResult{Done: true}); strings.Contains(string(b), "generationConfigRefused") {
+		t.Errorf("an absent refusal is on the wire: %s", b)
 	}
 }

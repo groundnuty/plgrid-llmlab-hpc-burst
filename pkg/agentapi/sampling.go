@@ -174,23 +174,28 @@ func CheckSampling(genConfig map[string]string, doSample *bool, reasoning bool) 
 // any check request; there is no fallback and no clamping
 // (`@hpc-burst-science-agent`, 1 Nov 2026, from the reviews of PRs #155 and
 // #156).
+//
+// The agent reports the one it finds in VerifyResult.GenerationConfigRefused,
+// since a value that is not a number never reaches VerifyResult.
+// GenerationConfig.
 type GenerationConfigError struct {
-	// Key is the file's key, which is vLLM's request field, for example
-	// "top_p".
-	Key string
+	// Param is the file's key, which is vLLM's request field (its
+	// VLLMValidationError's parameter), for example "top_p".
+	Param string `json:"param"`
 	// Value is the value's JSON text as the file holds it, for example "1.5"
-	// or "\"warm\"".
-	Value string
+	// or "\"warm\"". The agent cuts it to MaxGenerationConfigValueBytes
+	// (TruncateUTF8) before reporting it.
+	Value string `json:"value"`
 	// Want says what vLLM accepts: "a number", "an integer", or the range as
 	// vLLM's own message writes it, for example "(0, 1]".
-	Want string
+	Want string `json:"want"`
 }
 
 func (e *GenerationConfigError) Error() string {
 	if e.Want == "a number" || e.Want == "an integer" {
-		return fmt.Sprintf("generation_config.json's %s is %s, not %s", e.Key, e.Value, e.Want)
+		return fmt.Sprintf("generation_config.json's %s is %s, not %s", e.Param, e.Value, e.Want)
 	}
-	return fmt.Sprintf("generation_config.json's %s is %s, outside the range vLLM accepts, %s", e.Key, e.Value, e.Want)
+	return fmt.Sprintf("generation_config.json's %s is %s, outside the range vLLM accepts, %s", e.Param, e.Value, e.Want)
 }
 
 // vLLM v0.32.0's ranges for the seven keys, in the order its _verify_args
@@ -240,7 +245,7 @@ func CheckGenerationConfig(values map[string]string) error {
 		if r.integer {
 			n, err := strconv.ParseInt(text, 10, 64)
 			if err != nil {
-				return &GenerationConfigError{Key: r.key, Value: text, Want: "an integer"}
+				return &GenerationConfigError{Param: r.key, Value: text, Want: "an integer"}
 			}
 			v = float64(n)
 		} else {
@@ -248,12 +253,12 @@ func CheckGenerationConfig(values map[string]string) error {
 			// it does in Python, and then fails its range.
 			f, err := strconv.ParseFloat(text, 64)
 			if (err != nil && !errors.Is(err, strconv.ErrRange)) || !jsonNumber(text) {
-				return &GenerationConfigError{Key: r.key, Value: text, Want: "a number"}
+				return &GenerationConfigError{Param: r.key, Value: text, Want: "a number"}
 			}
 			v = f
 		}
 		if !r.ok(v) {
-			return &GenerationConfigError{Key: r.key, Value: text, Want: r.want}
+			return &GenerationConfigError{Param: r.key, Value: text, Want: r.want}
 		}
 	}
 	return nil
