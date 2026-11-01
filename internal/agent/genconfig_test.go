@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
@@ -373,6 +374,62 @@ func TestReadGenerationConfigRefusesAFileItCannotJudge(t *testing.T) {
 		}
 	})
 
+	// An entry at the path that does not resolve to a readable regular file is
+	// unreadable, not absent: a dangling symbolic link (which os.Open reports as
+	// not existing), a link to a directory, a named pipe (which the reader must
+	// not open, since that blocks). A link to a readable file is that file.
+	unreadable := &agentapi.GenerationConfigError{Param: "", Value: "unreadable", Want: "a JSON object of at most 1 MiB"}
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, dir, path string)
+		want  *agentapi.GenerationConfigError
+		cfg   map[string]string
+	}{
+		{"a dangling symbolic link", func(t *testing.T, dir, path string) {
+			if err := os.Symlink("no-such-target.json", path); err != nil {
+				t.Fatal(err)
+			}
+		}, unreadable, nil},
+		{"a link to a directory", func(t *testing.T, dir, path string) {
+			if err := os.Mkdir(filepath.Join(dir, "a-directory"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("a-directory", path); err != nil {
+				t.Fatal(err)
+			}
+		}, unreadable, nil},
+		{"a named pipe", func(t *testing.T, dir, path string) {
+			if err := syscall.Mkfifo(path, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, unreadable, nil},
+		{"a link to a readable file is read as that file", func(t *testing.T, dir, path string) {
+			if err := os.WriteFile(filepath.Join(dir, "real.json"), []byte(`{"temperature": 0.6, "top_p": 0.95}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("real.json", path); err != nil {
+				t.Fatal(err)
+			}
+		}, nil, map[string]string{"temperature": "0.6", "top_p": "0.95"}},
+		{"a link to a readable file whose value vLLM refuses", func(t *testing.T, dir, path string) {
+			if err := os.WriteFile(filepath.Join(dir, "real.json"), []byte(`{"temperature": 2.5}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("real.json", path); err != nil {
+				t.Fatal(err)
+			}
+		}, &agentapi.GenerationConfigError{Param: "temperature", Value: "2.5", Want: "[0, 2]"}, map[string]string{"temperature": "2.5"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tc.setup(t, dir, filepath.Join(dir, "generation_config.json"))
+			f := readGenerationConfig(dir) // a named pipe that was opened would hang here
+			if !reflect.DeepEqual(f.refused, tc.want) || !reflect.DeepEqual(f.config, tc.cfg) {
+				t.Errorf("refused %+v and config %v, want %+v and %v", f.refused, f.config, tc.want, tc.cfg)
+			}
+		})
+	}
+
 	// A missing file, and no checkpoint directory, are absent: nothing is refused.
 	t.Run("absent", func(t *testing.T) {
 		for name, dir := range map[string]string{"a missing file": t.TempDir(), "no directory": ""} {
@@ -466,7 +523,7 @@ func TestTheRefusalIsLoggedWithoutTheValuesText(t *testing.T) {
 	}
 	buf.Reset()
 	(&genSampling{}).resolve(dir, true, slog.New(slog.NewTextHandler(&buf, nil)), 1)
-	for _, want := range []string{"level=WARN", "file=unreadable", "cause=\"is a directory\""} {
+	for _, want := range []string{"level=WARN", "file=unreadable", "cause=\"not a regular file\""} {
 		if !strings.Contains(buf.String(), want) {
 			t.Errorf("the log lacks %s: %s", want, buf.String())
 		}

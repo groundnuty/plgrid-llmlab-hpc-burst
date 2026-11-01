@@ -72,7 +72,10 @@ type generationFile struct {
 //
 // A file that is present and cannot be judged is refused as a whole, never
 // read as absent (an empty Param; agentapi.GenerationConfigError): one larger
-// than the limit, one that cannot be read, one that is not valid JSON (Python's
+// than the limit, one that cannot be read (a directory, a dangling symbolic
+// link, a permission error, any other file that is not a regular one: only a
+// path with no entry at all is absent, and a link to a readable file is that
+// file), one that is not valid JSON (Python's
 // json, which vLLM uses, accepts NaN, Infinity and -Infinity, which Go's
 // refuses), and one that is valid JSON but not an object (a list, a string,
 // null). vLLM would load such a file, and could refuse what the agent did not
@@ -105,10 +108,27 @@ func readGenerationConfig(dir string) generationFile {
 		out.cause = cause
 		return out
 	}
-	f, err := os.Open(filepath.Join(dir, generationConfigName))
-	if errors.Is(err, fs.ErrNotExist) {
+	path := filepath.Join(dir, generationConfigName)
+	// Only a path with no entry at all is an absent file. Lstat does not follow
+	// a symbolic link, so a dangling link is an entry, not an absent file, as
+	// os.Open's not-exist error would make it; then whatever is there must
+	// resolve to a readable regular file (a link to one is read as that file),
+	// and a directory, a dangling link, a named pipe or a device is refused as
+	// a whole, as is a file nobody can read. The Stat comes before the Open
+	// because opening a named pipe blocks.
+	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
 		return out
+	} else if err != nil {
+		return whole(agentapi.FileUnreadable, osReason(err))
 	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return whole(agentapi.FileUnreadable, osReason(err))
+	}
+	if !fi.Mode().IsRegular() {
+		return whole(agentapi.FileUnreadable, "not a regular file")
+	}
+	f, err := os.Open(path)
 	if err != nil {
 		return whole(agentapi.FileUnreadable, osReason(err))
 	}

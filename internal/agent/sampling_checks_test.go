@@ -416,8 +416,9 @@ func assertRefusalSendsNothing(t *testing.T, h *harness, reasoning bool, files [
 }
 
 // A generation_config.json the agent cannot read is a refusal of the file as a
-// whole, never an absent file run greedy: a directory at the path, and a file
-// whose mode lets nobody read it. Only a missing path is absent (the cases of
+// whole, never an absent file run greedy: a directory at the path, a dangling
+// symbolic link (which os.Open reports as not existing), and a file whose mode
+// lets nobody read it. Only a missing path is absent (the cases of
 // TestTheChecksSendTheSamplingOfTheirModel without a file). The report carries
 // an empty Param and the plain word, no path, and no check request is sent
 // (`@hpc-burst-science-agent`, 1 Nov 2026, for #175 and #182). The mode-000 case
@@ -431,6 +432,11 @@ func TestAnUnreadableFileFailsVerificationAndSendsNoCheckRequest(t *testing.T) {
 	}{
 		{"a directory at the path", func(t *testing.T, path string) {
 			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"a dangling symbolic link", func(t *testing.T, path string) {
+			if err := os.Symlink("no-such-target.json", path); err != nil {
 				t.Fatal(err)
 			}
 		}},
