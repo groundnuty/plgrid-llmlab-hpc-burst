@@ -149,8 +149,8 @@ var (
 	// useradd. The ssh user is the one who runs the controller
 	// (user.Current), whose name may have capitals, as on the development
 	// VM; every such name is still safe in an ssh argument and a shell word
-	// (decision of `@hpc-burst-code-agent`, 1 Nov 2026, review of PR 132:
-	// B2).
+	// (decision of `@hpc-burst-code-agent`, confirmed by
+	// `@hpc-burst-science-agent`, 1 Nov 2026; review of PR 132: B2).
 	userForm = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]{0,31}$`)
 )
 

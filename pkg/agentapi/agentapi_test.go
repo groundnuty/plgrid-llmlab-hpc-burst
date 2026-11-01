@@ -73,10 +73,12 @@ func TestAgentConfigEncodeIsStableAndRoundTrips(t *testing.T) {
 }
 
 // The ssh user is a portable user name of at most 32 characters: capitals
-// are taken (the controller's own user may have them), a leading digit or
-// '-', a 33rd character, a space and an '@' are not.
+// are taken (the controller's own user may have them, as the development VM's
+// does), a leading digit or '-', a 33rd character, a space and an '@' are not
+// (`@hpc-burst-science-agent`, 1 Nov 2026, review of PR 132: B2).
 func TestAgentConfigSSHUser(t *testing.T) {
 	for user, ok := range map[string]bool{
+		"MichalOrzechowski":     true,
 		"ExampleUser":           true,
 		"example-user":          true,
 		"_svc.user-1":           true,
