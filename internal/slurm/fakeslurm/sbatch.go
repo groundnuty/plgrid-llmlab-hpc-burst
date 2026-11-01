@@ -154,7 +154,8 @@ func (sh *shell) sbatch(args []string) int {
 	case step.kind == stepTransient && !step.registered:
 		return sh.submitFailed(transientTimeout)
 	}
-	j := sh.p.register(sh.s.user, spec, sh.now, step)
+	j := sh.p.register(sh.s, spec, sh.now, step)
+	sh.p.schedule(sh.now) // run mode: a job that is not held starts now
 	switch step.kind {
 	case stepTransient:
 		return sh.submitFailed(transientTimeout)
@@ -226,13 +227,13 @@ func (p *Platform) liveJobs(user, partition string) int {
 }
 
 // register adds the job, applying the scripted step's changes.
-func (p *Platform) register(user string, s sbatchSpec, now time.Time, step SubmitStep) *job {
+func (p *Platform) register(sess *Session, s sbatchSpec, now time.Time, step SubmitStep) *job {
 	j := &job{
-		id: p.nextID, name: s.name, user: user, partition: s.partition, account: s.account,
+		id: p.nextID, name: s.name, user: sess.user, partition: s.partition, account: s.account,
 		timeLimit: s.minutes, cpus: s.cpus, nodes: s.nodes, gpus: s.gpus, memMiB: s.memMiB,
 		requeue: s.requeue, output: s.output, errPath: s.errPath, wrap: s.wrap,
-		constraint: s.constraint,
-		execs:      []*execution{newExecution(now, "None")},
+		constraint: s.constraint, env: sess.env,
+		execs: []*execution{newExecution(now, "None")},
 	}
 	p.nextID++
 	if j.name == "" {

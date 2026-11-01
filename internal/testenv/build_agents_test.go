@@ -2,7 +2,8 @@ package testenv
 
 // hack/build-agents.sh DIR cross-compiles cmd/hb-agent for each cpuArch and places it as
 // DIR/hb-agent-<cpuArch> (agentapi.AgentBuildName), where the Provider's controller finds it. The
-// tests build the real command, offline (GOPROXY=off), and read the results the way a node would
+// tests build the real command (the module needs nothing fetched, but the pinned toolchain is
+// downloaded once when the Go on PATH is another version) and read the results the way a node would
 // meet them: the ELF header and program headers of each file, and the build settings Go embeds. A
 // file that merely has the right name proves nothing, and neither does building twice from one
 // tree: the second build below is from a copy of the sources at another path, with no .git, which
@@ -45,7 +46,7 @@ func runBuildAgents(t *testing.T, root string, args []string, env ...string) (st
 	ctx, cancel := context.WithTimeout(context.Background(), buildAgentsTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", append([]string{filepath.Join(root, "hack", "build-agents.sh")}, args...)...)
-	cmd.Env = append(os.Environ(), append([]string{"GOPROXY=off"}, env...)...)
+	cmd.Env = append(os.Environ(), env...)
 	out, err := cmd.CombinedOutput()
 	var ee *exec.ExitError
 	if errors.As(err, &ee) {
@@ -120,6 +121,10 @@ func requireBuilt(t *testing.T, dir, cpuArch string) {
 			t.Errorf("%s carries the build setting %s, so its bytes follow the git state", path, k)
 		}
 	}
+	// The toolchain is the module's pinned Go, read from go.mod here, whichever Go runs the test.
+	if want := "go" + goModVersion(t); bi.GoVersion != want {
+		t.Errorf("%s was built with %s, want %s (the go line of go.mod)", path, bi.GoVersion, want)
+	}
 	if !strings.HasSuffix(bi.Path, "/cmd/hb-agent") {
 		t.Errorf("%s is the command %q, want cmd/hb-agent", path, bi.Path)
 	}
@@ -182,11 +187,13 @@ func TestBuildAgentsIsReproducibleFromAnotherPath(t *testing.T) {
 	}
 	a, b := t.TempDir(), t.TempDir()
 	// The copy is built by a caller whose environment asks for other architecture levels, which the
-	// script ignores (it pins Go's defaults), and for a go.work that names nothing.
+	// script ignores (it pins Go's defaults), for the local toolchain, which the script ignores too
+	// (it pins go.mod's), for a build parallelism, which does not change the bytes, and for a go.work
+	// that names nothing.
 	for _, run := range []struct {
 		root, dir string
 		env       []string
-	}{{root, a, nil}, {copyRoot, b, []string{"GOAMD64=v3", "GOARM64=v8.2", "GOWORK=" + filepath.Join(copyRoot, "no-such.work")}}} {
+	}{{root, a, nil}, {copyRoot, b, []string{"GOAMD64=v3", "GOARM64=v8.2", "GOFLAGS=-p=3", "GOTOOLCHAIN=local", "GOWORK=" + filepath.Join(copyRoot, "no-such.work")}}} {
 		if out, code := runBuildAgents(t, run.root, []string{run.dir}, run.env...); code != 0 {
 			t.Fatalf("building from %s: exit %d:\n%s", run.root, code, out)
 		}
@@ -301,4 +308,79 @@ func TestBuildAgentsKeepsTheStaleBuildWhenTheCompilationFails(t *testing.T) {
 	if got := dirNames(t, dir); strings.Join(got, " ") != "hb-agent-x86_64" {
 		t.Errorf("%s holds %v, want only the stale build", dir, got)
 	}
+}
+
+// The toolchain is go.mod's go line, nothing else. A go.mod without one has no toolchain to pin, so
+// nothing is built; a go line naming a Go that cannot be had (here: one the module proxy cannot be
+// asked for) stops the run before any build, and does not fall back to the Go on PATH.
+func TestBuildAgentsPinsTheToolchainOrStops(t *testing.T) {
+	requireGNU(t)
+	t.Run("no go line", func(t *testing.T) {
+		copyRoot := sourceCopy(t)
+		if err := os.WriteFile(filepath.Join(copyRoot, "go.mod"), []byte("module example.test/none\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		out, code := runBuildAgents(t, copyRoot, []string{dir})
+		if code != 1 || !strings.Contains(out, "no go line") || len(dirNames(t, dir)) != 0 {
+			t.Errorf("exit %d, dir %v:\n%s", code, dirNames(t, dir), out)
+		}
+	})
+	// A go on PATH that logs what it is given and runs the real one: the toolchain is the pinned one
+	// whatever the caller asked for, and the caller's GOFLAGS stay with -mod=readonly after them.
+	t.Run("what the go command is given", func(t *testing.T) {
+		realGo, err := exec.LookPath("go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		shim, logFile := t.TempDir(), filepath.Join(t.TempDir(), "calls")
+		script := "#!/bin/sh\necho \"$1|$GOFLAGS|$GOTOOLCHAIN\" >> \"$SHIM_LOG\"\nexec \"$REAL_GO\" \"$@\"\n"
+		if err := os.WriteFile(filepath.Join(shim, "go"), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		root, err := repoRoot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		out, code := runBuildAgents(t, root, []string{dir, "aarch64"}, "PATH="+shim+string(os.PathListSeparator)+os.Getenv("PATH"),
+			"REAL_GO="+realGo, "SHIM_LOG="+logFile, "GOFLAGS=-p=3", "GOTOOLCHAIN=local")
+		if code != 0 {
+			t.Fatalf("exit %d:\n%s", code, out)
+		}
+		b, err := os.ReadFile(logFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pin := "go" + goModVersion(t)
+		var sawBuild bool
+		for _, call := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+			f := strings.Split(call, "|")
+			if len(f) != 3 || f[2] != pin {
+				t.Errorf("go was called as %q, want the toolchain %s in every call", call, pin)
+			}
+			if f[0] == "build" {
+				sawBuild = true
+				if f[1] != "-p=3 -mod=readonly" {
+					t.Errorf("go build got GOFLAGS %q, want the caller's -p=3 and then -mod=readonly", f[1])
+				}
+			}
+		}
+		if !sawBuild {
+			t.Errorf("no go build call was logged:\n%s", b)
+		}
+	})
+	t.Run("a toolchain that cannot be had", func(t *testing.T) {
+		copyRoot := sourceCopy(t)
+		if err := os.WriteFile(filepath.Join(copyRoot, "go.mod"), []byte("module example.test/future\n\ngo 1.99.0\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		// GOPROXY=off: the go command cannot download go1.99.0 (which does not exist), and the Go on PATH
+		// is not a stand-in for it.
+		out, code := runBuildAgents(t, copyRoot, []string{dir}, "GOPROXY=off", "GOTOOLCHAIN=local")
+		if code != 1 || !strings.Contains(out, "cannot run Go 1.99.0") || len(dirNames(t, dir)) != 0 {
+			t.Errorf("exit %d, dir %v:\n%s", code, dirNames(t, dir), out)
+		}
+	})
 }

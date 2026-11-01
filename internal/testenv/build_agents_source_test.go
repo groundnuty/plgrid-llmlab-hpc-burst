@@ -10,9 +10,28 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
+
+// goModVersion is the go line of the repository's go.mod, such as 1.26.0.
+func goModVersion(t *testing.T) string {
+	t.Helper()
+	root, err := repoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^go (\d+\.\d+\.\d+)\s*$`).FindSubmatch(b)
+	if m == nil {
+		t.Fatal("go.mod has no go line of the form 1.26.0")
+	}
+	return string(m[1])
+}
 
 func fileSum(t *testing.T, path string) string {
 	t.Helper()
@@ -76,7 +95,7 @@ func sourceCopy(t *testing.T) string {
 		cmd := exec.Command("go", "list", "-deps", "-f",
 			`{{if not .Standard}}D {{.Dir}}{{"\n"}}{{range .EmbedFiles}}E {{$.Dir}}/{{.}}{{"\n"}}{{end}}{{end}}`, "./cmd/hb-agent")
 		cmd.Dir = root
-		cmd.Env = append(os.Environ(), "GOPROXY=off", "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+want.goarch)
+		cmd.Env = append(os.Environ(), "GOPROXY=off", "GOTOOLCHAIN=local", "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+want.goarch)
 		out, err := cmd.Output()
 		if err != nil {
 			t.Fatalf("go list for %s: %v", want.goarch, err)

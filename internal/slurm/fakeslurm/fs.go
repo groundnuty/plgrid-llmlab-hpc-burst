@@ -1,9 +1,11 @@
 package fakeslurm
 
-// New. The platform's in-memory file system: files (content, mode, owner) and a
-// set of directories (with modes). The file system is shared by every Session.
+// New. The platform's file system, shared by every Session: in memory (files
+// with content, mode and owner, and a set of directories with modes), or in
+// run mode a real directory on disk (diskfs.go).
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"io/fs"
 	"path"
@@ -19,13 +21,103 @@ type File struct {
 	Owner string
 }
 
+// fileSystem is what the commands and the setup helpers need of a file system.
+// Every path is absolute and cleaned. The caller holds Platform.mu.
+type fileSystem interface {
+	isDir(p string) bool
+	isFile(p string) bool
+	// sum is the SHA-256 of a file's content. found is false for anything
+	// but a file; err is why a file's sum could not be taken (run mode: it
+	// is over the size limit).
+	sum(p string) (sum [sha256.Size]byte, found bool, err error)
+	// write replaces a file's content and keeps its mode and owner, or
+	// creates the file with mode and owner.
+	write(p string, content []byte, mode fs.FileMode, owner string) error
+	// put creates or replaces a file with mode and no owner (test setup).
+	put(p string, content []byte, mode fs.FileMode) error
+	// mkdirAll creates p and any missing ancestor with mode. A file in the
+	// way is an error, and nothing is created below it.
+	mkdirAll(p string, mode fs.FileMode) error
+	// chmod sets the mode of a file or a directory; false when p is neither.
+	chmod(p string, mode fs.FileMode) (bool, error)
+	// rename moves the file from to to; the caller has checked both.
+	rename(from, to string) error
+	// removeTree removes p and everything below it; a missing p is no error.
+	removeTree(p string) error
+	// snapshotFiles copies every file. The in-memory one cannot fail; the
+	// disk one reports a file or a tree over its limits.
+	snapshotFiles() (map[string]File, error)
+	snapshotDirs() map[string]fs.FileMode
+}
+
+// fsState is the in-memory file system.
 type fsState struct {
 	files map[string]*File
 	dirs  map[string]fs.FileMode
 }
 
-func newFS() fsState {
-	return fsState{files: map[string]*File{}, dirs: map[string]fs.FileMode{"/": 0o755}}
+var _ fileSystem = (*fsState)(nil)
+
+func newFS() *fsState {
+	return &fsState{files: map[string]*File{}, dirs: map[string]fs.FileMode{"/": 0o755}}
+}
+
+func (f *fsState) sum(p string) ([sha256.Size]byte, bool, error) {
+	file := f.files[p]
+	if file == nil {
+		return [sha256.Size]byte{}, false, nil
+	}
+	return sha256.Sum256(file.Content), true, nil
+}
+
+func (f *fsState) write(p string, content []byte, mode fs.FileMode, owner string) error {
+	content = append([]byte(nil), content...)
+	if file := f.files[p]; file != nil {
+		file.Content = content
+		return nil
+	}
+	f.files[p] = &File{Content: content, Mode: mode, Owner: owner}
+	return nil
+}
+
+func (f *fsState) put(p string, content []byte, mode fs.FileMode) error {
+	f.files[p] = &File{Content: append([]byte(nil), content...), Mode: mode.Perm()}
+	return nil
+}
+
+func (f *fsState) chmod(p string, mode fs.FileMode) (bool, error) {
+	switch {
+	case f.files[p] != nil:
+		f.files[p].Mode = mode.Perm()
+	case f.isDir(p):
+		f.dirs[p] = mode.Perm()
+	default:
+		return false, nil
+	}
+	return true, nil
+}
+
+func (f *fsState) rename(from, to string) error {
+	file := f.files[from]
+	delete(f.files, from)
+	f.files[to] = file
+	return nil
+}
+
+func (f *fsState) snapshotFiles() (map[string]File, error) {
+	out := make(map[string]File, len(f.files))
+	for name, file := range f.files {
+		out[name] = File{Content: append([]byte(nil), file.Content...), Mode: file.Mode, Owner: file.Owner}
+	}
+	return out, nil
+}
+
+func (f *fsState) snapshotDirs() map[string]fs.FileMode {
+	out := make(map[string]fs.FileMode, len(f.dirs))
+	for name, m := range f.dirs {
+		out[name] = m
+	}
+	return out
 }
 
 // isDir and isFile look a cleaned absolute path up.
@@ -52,10 +144,10 @@ func (f *fsState) mkdirAll(p string, mode fs.FileMode) error {
 }
 
 // removeTree removes p and everything below it.
-func (f *fsState) removeTree(p string) {
+func (f *fsState) removeTree(p string) error {
 	delete(f.files, p)
 	if p == "/" {
-		return
+		return nil
 	}
 	delete(f.dirs, p)
 	prefix := p + "/"
@@ -69,6 +161,7 @@ func (f *fsState) removeTree(p string) {
 			delete(f.dirs, q)
 		}
 	}
+	return nil
 }
 
 func absolute(name string) (string, error) {
@@ -93,8 +186,7 @@ func (p *Platform) WriteFile(name string, content []byte, mode fs.FileMode) erro
 	if err := p.fs.mkdirAll(path.Dir(abs), 0o755); err != nil {
 		return err
 	}
-	p.fs.files[abs] = &File{Content: append([]byte(nil), content...), Mode: mode.Perm()}
-	return nil
+	return p.fs.put(abs, content, mode)
 }
 
 // MkdirAll creates a directory and its missing parents for test setup.
@@ -117,28 +209,37 @@ func (p *Platform) Remove(name string) error {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.fs.removeTree(abs)
-	return nil
+	return p.fs.removeTree(abs)
 }
 
-// Files returns a copy of every file, by absolute path.
+// Files returns a copy of every file, by absolute path. In run mode it reads
+// every regular file under the root, and Owner is "". The read is bounded: a
+// file over 16 MiB, files over 64 MiB in all, or more than 50,000 files are a
+// test bug (a root that holds staged models or a cache is not a tree to
+// snapshot), and Files panics with the file that broke the limit rather than
+// return a partial map. It holds no lock while it reads the disk.
 func (p *Platform) Files() map[string]File {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	out := make(map[string]File, len(p.fs.files))
-	for name, f := range p.fs.files {
-		out[name] = File{Content: append([]byte(nil), f.Content...), Mode: f.Mode, Owner: f.Owner}
+	files, err := p.snapshotFiles()
+	if err != nil {
+		panic(err)
 	}
-	return out
+	return files
 }
 
-// Dirs returns a copy of every directory with its mode, by absolute path.
-func (p *Platform) Dirs() map[string]fs.FileMode {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	out := make(map[string]fs.FileMode, len(p.fs.dirs))
-	for name, m := range p.fs.dirs {
-		out[name] = m
+func (p *Platform) snapshotFiles() (map[string]File, error) {
+	if p.run == nil {
+		p.mu.Lock()
+		defer p.mu.Unlock()
 	}
-	return out
+	return p.fs.snapshotFiles()
+}
+
+// Dirs returns a copy of every directory with its mode, by absolute path. In
+// run mode it lists the root and every directory under it, with no lock held.
+func (p *Platform) Dirs() map[string]fs.FileMode {
+	if p.run == nil {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+	}
+	return p.fs.snapshotDirs()
 }

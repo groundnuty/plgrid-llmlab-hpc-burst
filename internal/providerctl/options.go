@@ -1,10 +1,7 @@
 package providerctl
 
 import (
-	"bytes"
 	"context"
-	"crypto/x509"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -68,31 +65,19 @@ type FrontSettings struct {
 	FrpcDigests map[string]string
 }
 
-// CheckCertificate returns an error unless CertPEM is exactly one PEM
-// certificate whose pin is CertPin. Create calls it before any call to the
-// platform, so a certificate that the agent would refuse to start frpc with
-// (it checks the staged file's pin against agent.json's, HBEP-6, Certificate
-// checks) is never staged; the agent's own check stays the last one. The
-// errors name both pins, which are public.
-func (f *FrontSettings) CheckCertificate() error {
+// CheckCertificate returns an error unless the agent would accept CertPEM as the
+// staged dial-home certificate with the pin CertPin at time now: it is
+// agentapi.VerifyDialHomeCert, the very function the agent runs before it
+// starts frpc (HBEP-6, Certificate checks). Exactly one PEM certificate, with
+// nothing around it, whose pin is CertPin, which names
+// agentapi.DialHomeServerName and is valid at now. Create calls it before any
+// call to the platform, so a certificate the agent would refuse is never staged;
+// the agent's own check stays the last one. The errors never hold the PEM.
+func (f *FrontSettings) CheckCertificate(now time.Time) error {
 	if len(f.CertPEM) == 0 {
 		return errors.New("no dial-home certificate is configured (CertPEM): frpc would verify nothing without one")
 	}
-	blk, rest := pem.Decode(f.CertPEM)
-	switch {
-	case blk == nil || blk.Type != "CERTIFICATE":
-		return errors.New("the dial-home certificate is not a PEM certificate")
-	case len(blk.Headers) != 0 || len(bytes.TrimSpace(rest)) != 0:
-		return errors.New("the dial-home certificate must be exactly one PEM certificate, with no headers and nothing after it")
-	}
-	c, err := x509.ParseCertificate(blk.Bytes)
-	if err != nil {
-		return fmt.Errorf("the dial-home certificate: %w", err)
-	}
-	if got := agentapi.PinOf(c); got != f.CertPin {
-		return fmt.Errorf("the dial-home certificate's pin %s is not the front's certificate pin %s", got, f.CertPin)
-	}
-	return nil
+	return agentapi.VerifyDialHomeCert(f.CertPEM, f.CertPin, now)
 }
 
 // ProfileSource reads and validates a Provider's profile, settings and
