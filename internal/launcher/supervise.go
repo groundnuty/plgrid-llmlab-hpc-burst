@@ -112,7 +112,8 @@ type supervised struct {
 	Args   []string // after argv[0]
 	Health string   // host:port that serves GET /healthz
 	// TermGrace is how long this process gets between SIGTERM and SIGKILL when the supervisor
-	// stops; 0 means SuperviseOptions.TermGrace. The front's is FrontTermGrace.
+	// stops; 0 means SuperviseOptions.TermGrace. The front's is FrontTermGrace, the controller's
+	// ControllerTermGrace.
 	TermGrace time.Duration
 	// WaitReady makes the start (up, upgrade) wait, within its timeout, until this process holds
 	// its health port and answers /healthz with 200. The front binds its listeners only after its
@@ -147,7 +148,7 @@ func (s *State) supervisedSet(l layout) ([]supervised, error) {
 	if s.Front.Set() {
 		args = append(args, "--front-mode", s.Front.Mode, "--front-addr", s.Front.Addr)
 	}
-	set := []supervised{{Name: controllerEntryName, Path: s.Controllers.Binary, Args: args, Health: health}}
+	set := []supervised{{Name: controllerEntryName, Path: s.Controllers.Binary, Args: args, Health: health, TermGrace: controllerTermGrace}}
 	front, err := s.frontEntry(l)
 	if err != nil {
 		return nil, err

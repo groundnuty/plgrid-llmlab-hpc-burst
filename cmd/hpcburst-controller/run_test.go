@@ -72,13 +72,27 @@ import (
 var logs = &syncBuffer{}
 
 type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
+	mu        sync.Mutex
+	buf       bytes.Buffer
+	truncated bool
 }
+
+// maxLogBytes caps what the buffer keeps. Every test of the package appends to it for the whole
+// run, so a loop that logs without waiting (a trigger or a refresh that never sleeps) would
+// otherwise fill the machine's memory (a mutation test binary once grew to 16 GB this way, 1 Nov
+// 2026). Past the cap the lines are dropped, and a test that looks for one fails on its own wait.
+const maxLogBytes = 64 << 20
 
 func (b *syncBuffer) line(s string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.buf.Len()+len(s)+1 > maxLogBytes {
+		if !b.truncated {
+			b.truncated = true
+			b.buf.WriteString("[the test log reached its cap; later lines are dropped]\n")
+		}
+		return
+	}
 	b.buf.WriteString(s)
 	b.buf.WriteByte('\n')
 }
@@ -90,6 +104,10 @@ func (b *syncBuffer) String() string {
 }
 
 func TestMain(m *testing.M) {
+	// A controller process of failover_test.go: the test binary run again.
+	if addr := os.Getenv(childEnvRunner); addr != "" {
+		os.Exit(controllerChild(os.Args[1:], addr))
+	}
 	ctrl.SetLogger(funcr.New(func(prefix, args string) { logs.line(prefix + " " + args) }, funcr.Options{}))
 	os.Exit(m.Run())
 }
@@ -377,8 +395,15 @@ const exampleFront = "front.example.org:29443"
 // at addr, and extra are further flags.
 func prepareState(t *testing.T, api *apiServer, mode, addr string, extra ...string) (flags, *x509.Certificate, string) {
 	t.Helper()
+	return prepareStateAt(t, api, freePortBase(t), mode, addr, extra...)
+}
+
+// prepareStateAt is prepareState with the port base chosen by the caller, for a test that needs
+// more of the block than freePortBase checks (the tunnel tests' frps ports).
+func prepareStateAt(t *testing.T, api *apiServer, portBase int, mode, addr string, extra ...string) (flags, *x509.Certificate, string) {
+	t.Helper()
 	state := t.TempDir()
-	h := agentapi.Host{StateDir: state, PortBase: freePortBase(t)}
+	h := agentapi.Host{StateDir: state, PortBase: portBase}
 	if err := os.WriteFile(filepath.Join(state, "kubeconfig"), api.kubeconfig, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -832,7 +857,7 @@ func testBinaryComponents(t *testing.T, api *apiServer) {
 		}
 	}
 	out := logs.String()[from:]
-	for _, name := range []string{"provider-supervisor-batch", "provider-supervisor-managed", "agent-api"} {
+	for _, name := range []string{"provider-supervisor-batch", "provider-supervisor-managed", "agent-api", "frps-plugin", "tunnel-state"} {
 		for _, msg := range []string{"component starting", "component stopped"} {
 			if !strings.Contains(out, componentLine(msg, f.host.PortBase, name)) {
 				t.Errorf("the log has no %q line for %s", msg, name)
@@ -986,7 +1011,9 @@ func TestControllerBinaryProvidersFollowTheLifecycleLeader(t *testing.T) {
 	_, session := newFakeSlurm()
 	from := len(logs.String()) // this test's log lines only, under -count=N
 	since := func(at int) string { return logs.String()[at:] }
-	supervisors := []string{"provider-supervisor-batch", "provider-supervisor-managed"}
+	// tunnel-state is a leader component too (#90): it writes the Instances' conditions, so only
+	// the copy that leads writes them. frps-plugin is not: every copy serves the plugin.
+	supervisors := []string{"provider-supervisor-batch", "provider-supervisor-managed", "tunnel-state"}
 
 	// The first copy leads lifecycle and runs the Provider.
 	fa, _, _ := prepareState(t, api, "direct", exampleFront)
@@ -1004,13 +1031,14 @@ func TestControllerBinaryProvidersFollowTheLifecycleLeader(t *testing.T) {
 	// added beside the agent API, have not started.
 	fb, _, _ := prepareState(t, api, "direct", exampleFront)
 	b := startBinary(t, fb, deps{providerScheme: providerScheme, newPlatform: recordingPlatforms(session, &servedB), registry: prometheus.NewRegistry()})
-	b.eventually(t, "the second copy's health endpoint answers and its agent API started", 60*time.Second, func() bool {
+	b.eventually(t, "the second copy's health endpoint answers and its agent API and frps plugin started", 60*time.Second, func() bool {
 		resp, err := http.Get("http://" + fb.healthAddr + "/healthz")
 		if err != nil {
 			return false
 		}
 		resp.Body.Close()
-		return resp.StatusCode == http.StatusOK && strings.Contains(since(from), componentLine("component starting", fb.host.PortBase, "agent-api"))
+		return resp.StatusCode == http.StatusOK && strings.Contains(since(from), componentLine("component starting", fb.host.PortBase, "agent-api")) &&
+			strings.Contains(since(from), componentLine("component starting", fb.host.PortBase, "frps-plugin"))
 	})
 	for _, name := range supervisors {
 		if strings.Contains(since(from), componentLine("component starting", fb.host.PortBase, name)) {

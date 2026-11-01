@@ -97,6 +97,14 @@ func Scheme() (*runtime.Scheme, error) {
 	return s, nil
 }
 
+// ShutdownGrace is the lifecycle manager's graceful shutdown timeout: how long
+// its stop waits for its runnables, the Provider supervisors and their
+// managers among them, before it returns. It is controller-runtime's default
+// (v0.23.1, pkg/manager/internal.go:57), set here so that the controller's
+// stop budget (launcher.ControllerStopBudget) can name it. The lifecycle
+// Lease's release comes after it.
+const ShutdownGrace = 30 * time.Second
+
 // leaderRenewDeadline is controller-runtime's default renew deadline
 // (v0.23.1, pkg/manager/manager.go, defaultRenewDeadline), which the lifecycle
 // Lease's lock sizes its client timeout by.
@@ -128,6 +136,7 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 	if metricsAddr == "" {
 		metricsAddr = "0"
 	}
+	grace := ShutdownGrace
 	mopts := manager.Options{
 		Scheme:                        scheme,
 		Metrics:                       metricsserver.Options{BindAddress: metricsAddr},
@@ -136,6 +145,7 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 		LeaderElectionID:              v1alpha1.LeaseLifecycle,
 		LeaderElectionNamespace:       v1alpha1.ControllerNamespace,
 		LeaderElectionReleaseOnCancel: true,
+		GracefulShutdownTimeout:       &grace,
 		NewCache:                      o.newCache,
 	}
 	// With leader election off there is no Lease to read or regard, so no
