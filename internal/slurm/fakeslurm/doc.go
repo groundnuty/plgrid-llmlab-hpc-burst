@@ -197,6 +197,20 @@
 //     purges in periodic passes, the fake on the next query. A job whose
 //     processes cannot be cleared (Finished stays false) completes for ever
 //     and is never purged.
+//   - The flag outlasts the processes by RunMode.Epilog (default none), on the
+//     platform's clock, counted from the moment they were gone: Slurm's epilog
+//     and the nodes' reports run after the job's processes end, and
+//     COMPLETING stays until they are done. Job.Completing says so; Finished
+//     does not (it is true once the processes are gone). The job is listed
+//     with the flag in both NotListed modes, and not purged, until the epilog
+//     ends; after that the mode's rule applies, so the Athena shape (listed in
+//     its end state until MinJobAge, counted from the end) shows only for an
+//     epilog that ends before end + MinJobAge, and the Helios shape drops the
+//     job at once. Slurm sets the flag when it sets the end state, and frees
+//     the job's submit slot and its GPUs then: a completing job is neither
+//     pending nor running, so the submit limit, the GPU cap and a partition's
+//     slots do not count it, and a pending job that was waiting on them
+//     starts while it completes.
 //   - Job carries the execution's PID, Finished, its exit code or signal, when
 //     TERM and KILL were sent, and CleanupErr. Finished is true once the
 //     execution is terminal and none of its processes is left (the shell is

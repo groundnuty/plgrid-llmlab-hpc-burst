@@ -97,11 +97,16 @@ func (j *job) state() string { return j.cur().state }
 const Completing = "COMPLETING"
 
 // completing reports whether the job's current execution has its end state
-// while its processes still live (run mode): an execution that never had a
-// process, or whose processes are all gone, is not completing.
+// while its processes still live, or its epilog still runs (run mode,
+// RunMode.Epilog): an execution that never had a process, or whose processes
+// are gone and whose epilog has ended, is not completing. Slurm frees the
+// job's submit slot and its GPUs when it sets the flag, which is when the end
+// state is set, so a completing job is neither live nor running here: nothing
+// that counts jobs (the submit limit, the GPU cap, a partition's slots) counts
+// it.
 func (j *job) completing() bool {
 	e := j.cur()
-	return IsTerminal(e.state) && e.run != nil && !e.run.done
+	return IsTerminal(e.state) && e.run != nil && e.run.completing()
 }
 
 // live reports whether the job is pending or running.
@@ -238,6 +243,13 @@ type Job struct {
 	// "" when neither.
 	QOS string
 
+	// Completing is true while the current execution has its end state and
+	// still has processes, or its epilog (RunMode.Epilog) has not ended: the
+	// job squeue lists with the COMPLETING flag. Finished is not it: a job is
+	// Finished when its processes are gone, and completing until its epilog
+	// has ended too.
+	Completing bool
+
 	// Run mode only, for the current execution; zero otherwise.
 	//
 	// PID is the batch shell's PID, which is also its process group and
@@ -284,6 +296,7 @@ func (j *job) snapshot() Job {
 	if j.held {
 		s.HoldReason = e.reason
 	}
+	s.Completing = j.completing()
 	if r := e.run; r != nil {
 		s.PID, s.Finished, s.TermAt, s.KillAt = r.pid, r.done, r.termAt, r.killAt
 		s.StartErr, s.CleanupErr = r.startErr, r.cleanupErr

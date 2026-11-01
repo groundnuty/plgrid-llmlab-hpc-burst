@@ -37,6 +37,15 @@ type RunMode struct {
 	// KillWait is the time between the TERM of a scancel or a time limit and
 	// the KILL of whatever is left; default 30 s, Slurm's KillWait default.
 	KillWait time.Duration
+	// Epilog is how long a job whose processes are gone stays COMPLETING, on
+	// the platform's clock, counted from the moment they were gone: Slurm's
+	// epilog and the nodes' report that they are done run after the job's
+	// processes end, and the flag stays until then. Default 0, which is no
+	// epilog: the flag clears with the processes. Slurm frees the job's submit
+	// slot and its GPUs when it sets the flag, which the fake does as well (a
+	// completing job is no longer pending or running). A job that ended
+	// without a process, or whose start failed, has no epilog.
+	Epilog time.Duration
 	// Minute is the wall time of one minute of --time: the time limit's
 	// timer and a running job's projected end_time in squeue use it. Default
 	// one minute. sacct's time limit and every reply's time_limit stay in
@@ -88,6 +97,9 @@ func normalizeRun(r RunMode) *RunMode {
 			panic(fmt.Sprintf("fakeslurm: JobVar %q is not a variable name the fake may set, or its directory %q is taken", v.Name, d))
 		}
 		dirs[d] = true
+	}
+	if r.Epilog < 0 {
+		panic(fmt.Sprintf("fakeslurm: RunMode.Epilog %s is negative", r.Epilog))
 	}
 	if r.KillWait <= 0 {
 		r.KillWait = 30 * time.Second
@@ -153,6 +165,11 @@ type jobRun struct {
 	// recorded; done when, after that, no process of the execution is left
 	// and the shell is reaped. A sweep that fails leaves done false.
 	exitSeen, done bool
+	// epilogEnd is when the epilog ends, set with done: the clock's time then
+	// plus RunMode.Epilog. clock is the platform's. A run with no clock, or
+	// not done, completes by its processes alone (completing).
+	epilogEnd time.Time
+	clock     Clock
 	// startErr is why the execution could not start; cleanupErr what went
 	// wrong clearing its processes or its directory.
 	startErr, cleanupErr error
@@ -167,6 +184,16 @@ type jobRun struct {
 	// Platform.mu where both are needed, never after.
 	procMu       sync.Mutex
 	leaderReaped bool
+}
+
+// completing reports whether the execution, whose end state is set, still has
+// processes, or has them gone and its epilog (RunMode.Epilog) not ended. The
+// caller holds mu or has no concurrent writer of done and epilogEnd.
+func (r *jobRun) completing() bool {
+	if !r.done {
+		return true
+	}
+	return r.clock != nil && r.clock.Now().Before(r.epilogEnd)
 }
 
 // scanLive runs fn, which scans /proc for the execution's session and may
@@ -241,7 +268,7 @@ func (p *Platform) dying(j *job) bool {
 // as a job whose output file Slurm cannot open does. The caller holds mu.
 func (p *Platform) launch(j *job, now time.Time) {
 	e := j.cur()
-	r := &jobRun{j: j, e: e, exited: make(chan struct{}), settled: make(chan struct{})}
+	r := &jobRun{j: j, e: e, clock: p.clock, exited: make(chan struct{}), settled: make(chan struct{})}
 	e.run = r
 	if err := p.startProcess(r); err != nil {
 		r.done, r.exitSeen, r.startErr = true, true, err

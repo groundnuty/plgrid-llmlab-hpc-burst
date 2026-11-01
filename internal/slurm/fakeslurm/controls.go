@@ -64,6 +64,10 @@ func (p *Platform) endJob(j *job, now time.Time, state string, grace time.Durati
 		p.phantoms[j.partition]++
 	}
 	p.stop(j.cur().run, grace)
+	// Slurm frees the job's submit slot and its GPUs when it sets the end
+	// state, which also sets COMPLETING while processes or the epilog run, so a
+	// pending job they held back starts now, not when the processes are gone.
+	p.schedule(now)
 	return nil
 }
 
