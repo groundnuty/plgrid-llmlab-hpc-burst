@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -49,16 +50,15 @@ type realInstance struct {
 	CaptureMaxTokens int `json:"captureMaxTokens"`
 }
 
-// The engine's environment: compile caches under the job's run directory, not
-// in the home directory Apptainer binds; no Hub access and no usage reports.
+// The engine's environment: no Hub access and no usage reports. The compile
+// caches (XDG_CACHE_HOME, VLLM_CACHE_ROOT, TORCHINDUCTOR_CACHE_DIR,
+// TRITON_CACHE_DIR, FLASHINFER_WORKSPACE_BASE, CUDA_CACHE_PATH) are not set
+// here: the agent points them into the Allocation's own cache directory
+// itself, and a launch's own value would override it (HBEP-7, What it runs:
+// Home and caches), so the run exercises the agent's defaults.
 // VLLM_USE_FLASHINFER_SAMPLER=0 is www-2027's Helios serving recipe (spikes/s2b).
 func realEnv() []agentapi.EnvVar {
-	run := agentapi.ContainerRunDir
 	return []agentapi.EnvVar{
-		{Name: "XDG_CACHE_HOME", Value: run + "/cache"},
-		{Name: "VLLM_CACHE_ROOT", Value: run + "/cache/vllm"},
-		{Name: "TRITON_CACHE_DIR", Value: run + "/cache/triton"},
-		{Name: "TORCHINDUCTOR_CACHE_DIR", Value: run + "/cache/inductor"},
 		{Name: "HF_HUB_OFFLINE", Value: "1"},
 		{Name: "VLLM_NO_USAGE_STATS", Value: "1"},
 		{Name: "DO_NOT_TRACK", Value: "1"},
@@ -216,44 +216,24 @@ func verdict(ok bool) string {
 	return "contradiction"
 }
 
-// shapeMeans is the mean Total, in seconds, of a round's requests without an
-// Error, per shape; a shape whose requests all failed maps to -1.
-func shapeMeans(r agentapi.WarmUpRound) map[agentapi.Shape]float64 {
-	sum, n, seen := map[agentapi.Shape]float64{}, map[agentapi.Shape]int{}, map[agentapi.Shape]bool{}
-	for _, q := range r.Requests {
-		seen[q.Shape] = true
-		if q.Error != "" {
-			continue
-		}
-		sum[q.Shape] += time.Duration(q.Total).Seconds()
-		n[q.Shape]++
-	}
-	out := map[agentapi.Shape]float64{}
-	for s := range seen {
-		if n[s] == 0 {
-			out[s] = -1
-			continue
-		}
-		out[s] = sum[s] / float64(n[s])
-	}
-	return out
-}
-
-// settled applies HBEP-7's warm-up rule to the last two rounds: no shape more
-// than 10% slower than in the round before, and every shape with a successful
-// request in this round.
+// settled applies HBEP-7's warm-up rule to the last two rounds, as the
+// controller does (agentapi.WarmUpSettled): only the fixed-length shapes
+// count, and one whose mean Total rose by more than max(10% of the round
+// before's, 100 ms) means not settled. A failed request in any round fails
+// warm-up before the controller asks about settling (judgeWarmUp), so it is
+// never settled here either.
 func settled(rounds []agentapi.WarmUpRound) bool {
 	if len(rounds) < 2 {
 		return false
 	}
-	cur, prev := shapeMeans(rounds[len(rounds)-1]), shapeMeans(rounds[len(rounds)-2])
-	for s, m := range cur {
-		p, ok := prev[s]
-		if m < 0 || !ok || p < 0 || m > 1.1*p {
-			return false
+	for _, r := range rounds {
+		for _, q := range r.Requests {
+			if q.Error != "" {
+				return false
+			}
 		}
 	}
-	return len(cur) > 0
+	return agentapi.WarmUpSettled(rounds[len(rounds)-2], rounds[len(rounds)-1])
 }
 
 // throughput is the last round's concurrent requests' mean time to first
@@ -326,6 +306,33 @@ func TestRealEngineJudgements(t *testing.T) {
 	if settled([]agentapi.WarmUpRound{r1}) || !settled([]agentapi.WarmUpRound{r1, r2}) || settled([]agentapi.WarmUpRound{r2, r3}) || settled([]agentapi.WarmUpRound{r3, r4}) {
 		t.Error("settled: want false, true, false, false")
 	}
+	// The controller's rule (#138, HBEP-7), each case by hand: a tool call 10x
+	// slower is not judged; a rise under the 100 ms floor settles (0.2 s to
+	// 0.25 s, #94's run: 10% of 0.2 s is only 20 ms); a rise of 110 ms on 0.2 s
+	// does not; the fixed-length shapes must all be there in both rounds; and a
+	// failed request in an earlier round keeps warm-up from ever settling.
+	at := func(n int32, short, tool float64) agentapi.WarmUpRound {
+		return agentapi.WarmUpRound{Round: n, Requests: []agentapi.RequestTiming{
+			{Shape: "short", Total: sec(short)}, {Shape: "toolCall", Total: sec(tool)}, {Shape: "concurrent", Total: sec(2)}, {Shape: "concurrent", Total: sec(4)}}}
+	}
+	for _, tc := range []struct {
+		name   string
+		rounds []agentapi.WarmUpRound
+		want   bool
+	}{
+		{"the tool call 10x slower is not judged", []agentapi.WarmUpRound{at(1, 1, 1), at(2, 1, 10)}, true},
+		{"a rise under the floor settles", []agentapi.WarmUpRound{at(1, 0.2, 1), at(2, 0.25, 1)}, true},
+		{"a rise of 110 ms on 0.2 s does not", []agentapi.WarmUpRound{at(1, 0.2, 1), at(2, 0.31, 1)}, false},
+		{"a rise of 11% on 2 s does not", []agentapi.WarmUpRound{at(1, 2, 1), at(2, 2.22, 1)}, false},
+		{"a rise of 9% on 2 s does", []agentapi.WarmUpRound{at(1, 2, 1), at(2, 2.18, 1)}, true},
+		{"a shape missing from the new round", []agentapi.WarmUpRound{at(1, 1, 1), {Round: 2, Requests: []agentapi.RequestTiming{{Shape: "short", Total: sec(1)}}}}, false},
+		{"only the last two rounds are compared", []agentapi.WarmUpRound{at(1, 1, 1), at(2, 5, 1), at(3, 5.1, 1)}, true},
+		{"an error in an earlier round", []agentapi.WarmUpRound{r4, at(5, 1, 1), at(6, 1, 1)}, false},
+	} {
+		if got := settled(tc.rounds); got != tc.want {
+			t.Errorf("settled, %s: %v, want %v", tc.name, got, tc.want)
+		}
+	}
 	// (Total - TTFT) / (OutputTokens - 1): (1.0 - 0.2) / 4 = 0.2, and (0.5 - 0.1) / 1 = 0.4.
 	tp := roundThroughput(agentapi.WarmUpRound{Requests: []agentapi.RequestTiming{
 		{Shape: "concurrent", TimeToFirstToken: sec(0.2), Total: sec(1.0), OutputTokens: 5},
@@ -353,6 +360,32 @@ func TestRealEngineJudgements(t *testing.T) {
 	}
 	if got := streamFinishes(nil); len(got) != 0 {
 		t.Errorf("streamFinishes(nil) = %v, want none", got)
+	}
+}
+
+// The launch's environment leaves the cache variables to the agent, which sets
+// them itself and lets a launch's own value override its default; the names are
+// HBEP-7's (What it runs: Home and caches), written out here.
+func TestRealEnvLeavesTheCachesToTheAgent(t *testing.T) {
+	got := map[string]string{}
+	for _, e := range realEnv() {
+		got[e.Name] = e.Value
+	}
+	for _, name := range []string{"XDG_CACHE_HOME", "VLLM_CACHE_ROOT", "TORCHINDUCTOR_CACHE_DIR", "TRITON_CACHE_DIR", "FLASHINFER_WORKSPACE_BASE", "CUDA_CACHE_PATH"} {
+		if v, set := got[name]; set {
+			t.Errorf("realEnv sets %s=%s: the agent's own default must be what the run exercises", name, v)
+		}
+	}
+	want := map[string]string{"HF_HUB_OFFLINE": "1", "VLLM_NO_USAGE_STATS": "1", "DO_NOT_TRACK": "1", "VLLM_USE_FLASHINFER_SAMPLER": "0"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("realEnv = %v, want %v", got, want)
+	}
+	for _, m := range realModels {
+		for _, e := range m.launch().Env {
+			if strings.HasSuffix(e.Name, "_CACHE_DIR") || strings.HasSuffix(e.Name, "_CACHE_HOME") || strings.HasSuffix(e.Name, "_CACHE_ROOT") {
+				t.Errorf("%s: launch sets %s", m.label, e.Name)
+			}
+		}
 	}
 }
 
