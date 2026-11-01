@@ -99,7 +99,8 @@
 //
 //   - the agent judges what needs the outputs, which never leave the job:
 //     the chat request, the tool-call smoke test, the corruption check (three
-//     greedy outputs share their first 32 tokens, none empty or a single
+//     outputs of one request, greedy or on a reasoning model sampled with one
+//     seed (CheckSampling), share their first 32 tokens, none empty or a single
 //     repeated token; the rule is CorruptionVerdict, which the real agent and
 //     the fake both apply) and the behaviour check (a well-formed answer at
 //     the longest context, no loop). It reports each as a CheckOutcome, with a

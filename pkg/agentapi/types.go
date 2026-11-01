@@ -580,6 +580,12 @@ type VerifyResult struct {
 	// checkpoint has no such file, it is not a JSON object, or it sets none
 	// of them.
 	GenerationConfig map[string]string `json:"generationConfig,omitempty"`
+	// DoSample is the staged generation_config.json's do_sample, when the
+	// file sets it as a JSON boolean; nil when the file is absent, is not a
+	// JSON object, or does not set do_sample as a boolean. On a reasoning
+	// model, false makes the checks greedy (CheckSampling; HBEP-7, The
+	// allocation agent, Checks; `@hpc-burst-science-agent`, 1 Nov 2026).
+	DoSample *bool `json:"doSample,omitempty"`
 	// Error says why verification could not run, when it could not. It is
 	// free text, cut to MaxMessageBytes (TruncateUTF8).
 	Error string `json:"error,omitempty"`
