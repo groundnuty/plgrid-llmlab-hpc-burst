@@ -265,6 +265,7 @@ For a managed provider:
   - more GPUs than the smaller of `gpusPerNode` and the QOS's `maxGpusPerUser`;
   - more CPUs or memory than the QOS's `maxCpusPerUser` or `maxMemPerUser`;
   - a time limit above the smaller of `maxTime` and the QOS's `maxWall`;
+  - an effective `maxSubmitPerUser` of 0, which no job can fit (QOS limits);
   - a memory request of 0, because Slurm reads `--mem=0` as the whole node (science-agent decision, 31 Oct 2026).
 - **Files first.** Before claiming an attempt, the plugin ensures four files under `stagingDir`:
   - the agent's binary, at `agent/<digest>/hb-agent`, copied from the control-plane host's build of that digest;
@@ -582,6 +583,7 @@ The Slurm provider plugin grows from www-2027's per-cluster ssh over one shared 
 - 2026-11-01: from PR #151's review: GH200's partition QOS `plgrid` typed and Slurm's order of limits stated, with `qos[].overPartQos`, after a second held submission under `now` was accepted; a refusal is two lines and is classified by its reason name.
 - 2026-11-01: the group submit limits count as a full slot; a 0 CPU or memory cap is refused; with no `qos`, only the partition QOS's typed limits apply (rulings for #155).
 - 2026-11-01: the profile's `qos` list holds at most 8 QOSes, with unique names (ruled for #155).
+- 2026-11-01: erratum: an effective `maxSubmitPerUser` of 0 is in the list of requests refused before any call, as #168 builds it.
 
 ## Amendments
 
@@ -639,3 +641,4 @@ The Slurm provider plugin grows from www-2027's per-cluster ssh over one shared 
   - **Zero caps:** `maxCpusPerUser` and `maxMemPerUser` must be positive when set. An effective `maxSubmitPerUser` or `maxGpusPerUser` of 0 means the Provider cannot host the Instance.
   - **No `qos`:** only the partition QOS's typed limits apply, since the association's default QOS is not known to the profile.
 - **2026-11-01: the profile's QOS list is bounded** (science-agent ruling for #155, the QOS contracts). `qos` holds at most 8 entries, keyed by name, so two with one name are refused. The positive-memory rule's estimated cost grows with the list's bound, and at 16 the API server refused the CRD for exceeding its validation cost budget. The alpha profiles list 3 QOSes (Helios) and 1 (Athena). Before, the list had no bound.
+- **2026-11-01: erratum, the refusals before any call** (Submission). The list names an effective `maxSubmitPerUser` of 0, which the QOS limits already make unhostable and which #168 refuses before any call. Before, the case was implied by the per-user limits but not listed.
