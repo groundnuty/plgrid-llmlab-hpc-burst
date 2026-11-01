@@ -26,36 +26,49 @@ func TestReadyzCheckNamesAreTheLaunchers(t *testing.T) {
 	}
 }
 
-// stubCache stands in for the manager's cache in the tests of readiness's own logic (the checks
-// on a real API server are in TestManagerOnControlPlane). Only the two methods readiness calls
-// are defined; any other call panics on the nil embedded Cache, which would fail the test.
-type stubCache struct {
-	cache.Cache
-	mu        sync.Mutex
-	asked     []string
-	informer  func(ctx context.Context, n int) error // the nth GetInformer call (1-based)
-	syncReply func(ctx context.Context) bool
-	calls     atomic.Int64
-	inSync    atomic.Bool // WaitForCacheSync has been called
+// stubInformer is an informer that only says whether it has synced.
+type stubInformer struct {
+	cache.Informer // nil: readiness calls only HasSynced
+	synced         func() bool
 }
 
-func (c *stubCache) GetInformer(ctx context.Context, obj client.Object, _ ...cache.InformerGetOption) (cache.Informer, error) {
+func (i stubInformer) HasSynced() bool { return i.synced() }
+
+// stubCache stands in for the manager's cache in the tests of readiness's own logic (the checks
+// on a real API server are in TestManagerOnControlPlane and caches_test.go). Only GetInformer is
+// defined; any other call panics on the nil embedded Cache, which would fail the test.
+type stubCache struct {
+	cache.Cache
+	mu       sync.Mutex
+	asked    []string
+	blocking []bool                                 // per call: whether GetInformer was asked to wait for the sync
+	informer func(ctx context.Context, n int) error // the nth GetInformer call (1-based); nil error returns an informer
+	// synced says whether the informer of the given kind has synced; nil means every one has.
+	synced func(kind string) bool
+	calls  atomic.Int64
+	polls  atomic.Int64 // calls of HasSynced on any informer
+}
+
+func (c *stubCache) GetInformer(ctx context.Context, obj client.Object, opts ...cache.InformerGetOption) (cache.Informer, error) {
+	kind := fmt.Sprintf("%T", obj)
+	var o cache.InformerGetOptions
+	for _, f := range opts {
+		f(&o)
+	}
 	c.mu.Lock()
-	c.asked = append(c.asked, fmt.Sprintf("%T", obj))
+	c.asked = append(c.asked, kind)
+	c.blocking = append(c.blocking, o.BlockUntilSynced == nil || *o.BlockUntilSynced)
 	c.mu.Unlock()
 	n := int(c.calls.Add(1))
 	if c.informer != nil {
-		return nil, c.informer(ctx, n)
+		if err := c.informer(ctx, n); err != nil {
+			return nil, err
+		}
 	}
-	return nil, nil
-}
-
-func (c *stubCache) WaitForCacheSync(ctx context.Context) bool {
-	c.inSync.Store(true)
-	if c.syncReply != nil {
-		return c.syncReply(ctx)
-	}
-	return true
+	return stubInformer{synced: func() bool {
+		c.polls.Add(1)
+		return c.synced == nil || c.synced(kind)
+	}}, nil
 }
 
 func (c *stubCache) kinds() []string {
@@ -120,6 +133,42 @@ func TestReadinessAsksForEveryWatchedKind(t *testing.T) {
 	untilTrue(t, "the caches to count as synced", r.synced.Load)
 	if got := c.kinds(); !slices.Equal(got, want) {
 		t.Fatalf("informers asked for: %v\nwant: %v", got, want)
+	}
+	// The informers are started together and waited for as a set, not one after the other: a kind
+	// that cannot sync must not keep the later kinds from starting.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i, blocks := range c.blocking {
+		if blocks {
+			t.Errorf("the informer of %s was asked for with a wait for its sync", want[i])
+		}
+	}
+}
+
+// TestReadinessWaitsForEachInformerItself: "caches" passes only when the informer of every watched
+// kind has synced, whichever one is held (HBEP-11, Readiness). The cache's own WaitForCacheSync is
+// not what it asks (it passes with no informer started), so the stub cache has none: only the
+// informers answer. Waits on the stub's counter of HasSynced calls, never on a window.
+func TestReadinessWaitsForEachInformerItself(t *testing.T) {
+	kinds := []client.Object{&v1alpha1.ModelDeployment{}}
+	for _, w := range lifecycleWatches(nil) {
+		kinds = append(kinds, w.obj)
+	}
+	for _, k := range kinds {
+		held := fmt.Sprintf("%T", k)
+		t.Run(held, func(t *testing.T) {
+			var open atomic.Bool
+			c := &stubCache{synced: func(kind string) bool { return kind != held || open.Load() }}
+			r := &readiness{cache: c, elected: make(chan struct{}), kinds: kinds}
+			startReadiness(t, r)
+			// The held informer has been polled several times and the check still fails.
+			untilTrue(t, "the held informer to be polled", func() bool { return c.polls.Load() >= 3 })
+			if r.synced.Load() || r.checkCaches() == nil {
+				t.Fatalf("caches passes while the informer of %s has not synced", held)
+			}
+			open.Store(true)
+			untilTrue(t, "caches to pass once the held informer synced", r.synced.Load)
+		})
 	}
 }
 
@@ -186,25 +235,24 @@ func TestReadinessKeepsTryingAnInformerTheAPICannotServe(t *testing.T) {
 	untilTrue(t, "synced after the informer started", r.synced.Load)
 }
 
-// TestReadinessStopsWhereverItWaits: a cancel returns Start with nil, whether it is blocked in an
-// informer that never syncs, in the wait between two tries, or in the final cache sync. 200 rounds
+// TestReadinessStopsWhereverItWaits: a cancel returns Start with nil, whether it is blocked in
+// GetInformer, in the wait between two tries, or in the wait for an informer that never syncs. 200 rounds
 // each, as for every runnable that a manager stops (IMPL-COMMON, Controller work queues): a stop
 // that hangs holds the supervisor's restart.
 func TestReadinessStopsWhereverItWaits(t *testing.T) {
 	const rounds = 200
 	blockForever := func(ctx context.Context, _ int) error { <-ctx.Done(); return ctx.Err() }
 	failing := func(context.Context, int) error { return errors.New("no matches for kind") }
+	never := func(string) bool { return false }
 	for _, c := range []struct {
 		name  string
 		cache func() *stubCache
 		retry time.Duration
 		waits func(*stubCache) bool // true once Start is waiting where the case says
 	}{
-		{"an informer that never syncs", func() *stubCache { return &stubCache{informer: blockForever} }, 0, func(c *stubCache) bool { return c.calls.Load() == 1 }},
+		{"a cache that waits for the sync inside GetInformer", func() *stubCache { return &stubCache{informer: blockForever} }, 0, func(c *stubCache) bool { return c.calls.Load() == 1 }},
 		{"the wait between tries", func() *stubCache { return &stubCache{informer: failing} }, time.Hour, func(c *stubCache) bool { return c.calls.Load() == 1 }},
-		{"the final cache sync", func() *stubCache {
-			return &stubCache{syncReply: func(ctx context.Context) bool { <-ctx.Done(); return false }}
-		}, 0, func(c *stubCache) bool { return c.inSync.Load() }},
+		{"an informer that never syncs", func() *stubCache { return &stubCache{synced: never} }, 0, func(c *stubCache) bool { return c.polls.Load() >= 1 }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			for round := 0; round < rounds && !t.Failed(); round++ {

@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	toolscache "k8s.io/client-go/tools/cache"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -412,8 +413,9 @@ const cacheRetry = 2 * time.Second
 // no informer yet by then: the controller's sources start them only on being
 // elected, and WaitForCacheSync with none is vacuously true. So it starts the
 // informer of each kind the controller watches itself (the shared cache hands
-// the controller the same ones later) and waits for them: "caches" is true
-// only when the controller could read what it watches.
+// the controller the same ones later) and waits for each of those informers:
+// "caches" is true only when the controller could read what it watches
+// (`@hpc-burst-science-agent`, 1 Nov 2026, #147: eager start accepted).
 //
 // Alpha runs one controller; a standby replica after alpha would need a
 // readiness state of its own, since this one would call it not ready.
@@ -433,33 +435,44 @@ type readiness struct {
 
 func (r *readiness) Start(ctx context.Context) error {
 	defer r.synced.Store(false)
-	retry := r.retry
-	if retry == 0 {
-		retry = cacheRetry
-	}
+	// Start every kind's informer without waiting, then wait for each of these informers itself:
+	// controller-runtime v0.23.1's cache.WaitForCacheSync waits only for the informers that exist,
+	// so on its own it passes with none of ours started or synced, and it would also wait for
+	// informers the controller does not watch. Starting them all first lets the six sync together.
+	var synced []toolscache.InformerSynced
 	for _, k := range r.kinds {
-		// GetInformer blocks until the informer has synced.
-		for {
-			_, err := r.cache.GetInformer(ctx, k)
-			if err == nil {
-				break
-			}
-			if ctx.Err() != nil {
-				return nil // a stop, not a failure of the controller
-			}
-			select {
-			case <-time.After(retry):
-			case <-ctx.Done():
-				return nil
-			}
+		inf, ok := r.startInformer(ctx, k)
+		if !ok {
+			return nil // a stop, not a failure of the controller
 		}
+		synced = append(synced, inf.HasSynced)
 	}
-	if !r.cache.WaitForCacheSync(ctx) {
+	if !toolscache.WaitForCacheSync(ctx.Done(), synced...) {
 		return nil // the manager is stopping
 	}
 	r.synced.Store(true)
 	<-ctx.Done()
 	return nil
+}
+
+// startInformer returns the cache's informer for k without waiting for it to sync, trying again
+// while the API server cannot serve the kind. It reports false when ctx ends first.
+func (r *readiness) startInformer(ctx context.Context, k client.Object) (cache.Informer, bool) {
+	retry := r.retry
+	if retry == 0 {
+		retry = cacheRetry
+	}
+	for {
+		inf, err := r.cache.GetInformer(ctx, k, cache.BlockUntilSynced(false))
+		if err == nil {
+			return inf, true
+		}
+		select {
+		case <-time.After(retry):
+		case <-ctx.Done():
+			return nil, false
+		}
+	}
 }
 
 // NeedLeaderElection is false: see readiness.

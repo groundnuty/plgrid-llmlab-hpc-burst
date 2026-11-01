@@ -1,6 +1,7 @@
 package launcher
 
 import (
+	"fmt"
 	"net/http"
 )
 
@@ -86,4 +87,14 @@ func checkReadyz(addr string, eh *EntryHealth, add func(string, ...any)) {
 	}
 	eh.ReadyzState = ReadyzUnspecified
 	add("not ready: GET /readyz on %s answered %d (%s)", addr, code, ReadyzUnspecified)
+}
+
+// ReadReadiness reads the lifecycle controller's readiness at its health address the way status
+// does, and returns the state (EntryHealth.ReadyzState: ReadyzReady, ReadyzStarting,
+// ReadyzNotLeading, ReadyzUnspecified, or empty when the paths could not be read) and the
+// problems status would report. The controller's own tests read a real controller with it.
+func ReadReadiness(addr string) (state string, problems []string) {
+	var eh EntryHealth
+	checkReadyz(addr, &eh, func(format string, a ...any) { problems = append(problems, fmt.Sprintf(format, a...)) })
+	return eh.ReadyzState, problems
 }
