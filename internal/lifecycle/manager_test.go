@@ -298,13 +298,17 @@ func TestManagerOnControlPlane(t *testing.T) {
 	mctx, stopMgr := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() { done <- mgr.Start(mctx) }()
-	stopped := false
-	defer func() {
+	// stop cancels the manager and waits for it once: done carries one value,
+	// so a second receive would block for good (issue #136's 10-minute hang).
+	stopped, stopOK := false, false
+	stop := func() bool {
 		if !stopped {
-			stopMgr()
-			<-done
+			stopped = true
+			stopOK = stopManager(t, stopMgr, done)
 		}
-	}()
+		return stopOK
+	}
+	defer stop()
 
 	eventually(t, time.Minute, "the lifecycle Lease is held", func() (bool, string) {
 		var l coordinationv1.Lease
@@ -460,11 +464,9 @@ func TestManagerOnControlPlane(t *testing.T) {
 		t.Fatalf("after the second apply, want DialHomeUnreachable false and Ready kept: %+v", got.Status.Conditions)
 	}
 
-	stopMgr()
-	if err := <-done; err != nil {
-		t.Fatalf("manager: %v", err)
+	if !stop() {
+		t.FailNow()
 	}
-	stopped = true
 	eventually(t, 30*time.Second, "the Lease is released on stop", func() (bool, string) {
 		var l coordinationv1.Lease
 		if err := cl.Get(ctx, client.ObjectKey{Namespace: v1alpha1.ControllerNamespace, Name: v1alpha1.LeaseLifecycle}, &l); err != nil {
@@ -472,6 +474,38 @@ func TestManagerOnControlPlane(t *testing.T) {
 		}
 		return l.Spec.HolderIdentity == nil || *l.Spec.HolderIdentity == "", "still held"
 	})
+}
+
+// managerStopLimit bounds the wait for a cancelled manager's Start to return
+// with every runnable stopped: HBEP-11's hpcburst down and the supervisor's
+// restart rely on a controller that stops when told (@hpc-burst-science-agent,
+// 1 Nov 2026). It is below controller-runtime's 30 s graceful shutdown
+// timeout, so a runnable that does not stop is caught while it still hangs,
+// and far above the second or so a stop takes.
+const managerStopLimit = 10 * time.Second
+
+// stopManager cancels a manager and waits up to managerStopLimit for its
+// Start to return on done. Start returns nil only once every runnable has
+// stopped. A manager that does not return in time, or returns an error, is
+// reported with every goroutine's stack, which names the runnable that did
+// not stop. It reports with Errorf, so a deferred call after an earlier
+// failure can use it too.
+func stopManager(t *testing.T, cancel context.CancelFunc, done <-chan error) bool {
+	t.Helper()
+	cancel()
+	start := time.Now()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("manager: %v; goroutines:\n%s", err, goroutines())
+			return false
+		}
+		t.Logf("the manager returned %s after its cancel", time.Since(start).Round(time.Millisecond))
+		return true
+	case <-time.After(managerStopLimit):
+		t.Errorf("the manager did not return within %s of its cancel; goroutines:\n%s", managerStopLimit, goroutines())
+		return false
+	}
 }
 
 func phases(items []v1alpha1.Instance) []v1alpha1.InstancePhase {

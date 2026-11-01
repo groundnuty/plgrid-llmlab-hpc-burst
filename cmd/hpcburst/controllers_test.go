@@ -38,6 +38,18 @@ var (
 // records (it records beside its binary when $FAKECTRL_DIR is not set).
 func fakeController(t *testing.T) (bin, dir string) {
 	t.Helper()
+	return fakeBinary(t, "hpcburst-controller")
+}
+
+// fakeFront returns a copy of the same fake installed as hpcburst-front, the name under which it
+// takes the front's command line and reports a usage state (its usage file) in /healthz.
+func fakeFront(t *testing.T) (bin, dir string) {
+	t.Helper()
+	return fakeBinary(t, "hpcburst-front")
+}
+
+func fakeBinary(t *testing.T, name string) (bin, dir string) {
+	t.Helper()
 	fakeCtlOnce.Do(func() {
 		if fakeCtlDir, fakeCtlErr = os.MkdirTemp("", "hbfake"); fakeCtlErr != nil {
 			return
@@ -56,7 +68,7 @@ func fakeController(t *testing.T) (bin, dir string) {
 		t.Fatal(err)
 	}
 	dir = t.TempDir()
-	bin = filepath.Join(dir, "hpcburst-controller")
+	bin = filepath.Join(dir, name)
 	if err := os.WriteFile(bin, b, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -101,9 +113,15 @@ type supervisorRecord struct {
 }
 
 func readSupervisorRecord(t testing.TB, dir string) (supervisorRecord, bool) {
+	return readSupervisorRecordN(t, dir, 1)
+}
+
+// readSupervisorRecordN reads supervisor.json, which must hold exactly n entries, the controller's
+// first.
+func readSupervisorRecordN(t testing.TB, dir string, n int) (supervisorRecord, bool) {
 	var r supervisorRecord
 	b, err := os.ReadFile(filepath.Join(dir, "controller", "supervisor.json"))
-	if err != nil || json.Unmarshal(b, &r) != nil || len(r.Entries) != 1 {
+	if err != nil || json.Unmarshal(b, &r) != nil || len(r.Entries) != n || r.Entries[0].Name != "controller" {
 		return r, false
 	}
 	return r, true
@@ -133,12 +151,14 @@ type controllerStatus struct {
 		PID     int  `json:"pid"`
 	} `json:"supervisor"`
 	Controllers []struct {
-		Name      string `json:"name"`
-		Running   bool   `json:"running"`
-		PID       int    `json:"pid"`
-		Restarts  int    `json:"restarts"`
-		HealthzOK *bool  `json:"healthz_ok"`
-		LastExit  *struct {
+		Name       string `json:"name"`
+		Running    bool   `json:"running"`
+		PID        int    `json:"pid"`
+		Restarts   int    `json:"restarts"`
+		HealthzOK  *bool  `json:"healthz_ok"`
+		UsageState string `json:"usage_state"`
+		Degraded   string `json:"degraded"`
+		LastExit   *struct {
 			Detail string `json:"detail"`
 		} `json:"last_exit"`
 	} `json:"controllers"`
@@ -320,7 +340,7 @@ func TestControllerSupervision(t *testing.T) {
 			t.Errorf("%s (pid %d) still runs after down", name, pid)
 		}
 	}
-	if rows := listeningInRange(t, 29220, 29239); len(rows) != 0 {
+	if rows := listeningInRange(t, launcherPortsLo, launcherPortsHi); len(rows) != 0 {
 		t.Errorf("listeners remain after down: %v", rows)
 	}
 	if _, err := os.Stat(filepath.Join(h.dir, "state.json")); err == nil {
@@ -379,7 +399,7 @@ func TestControllerSupervision(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(h.dir, "state.json")); err == nil {
 		t.Error("up started k3s though the agent endpoint's key was refused")
 	}
-	if rows := listeningInRange(t, 29220, 29239); len(rows) != 0 {
+	if rows := listeningInRange(t, launcherPortsLo, launcherPortsHi); len(rows) != 0 {
 		t.Errorf("listeners remain after the refused up: %v", rows)
 	}
 	if got := fileOf(keyFile); got != string(pair.key) {

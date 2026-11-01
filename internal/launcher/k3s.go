@@ -21,6 +21,11 @@ type launchSpec struct {
 	// extraArgs are appended to k3s's arguments. Only tests set them (to start a host whose
 	// garbage collector is off); no command-line flag reaches them.
 	extraArgs []string
+	// controllers and frontRun are the supervision the host is meant to have. startAndWait puts
+	// them in the first durable record, so a launcher that dies while it waits for k3s leaves a
+	// record whose status says the supervisor is missing, not a healthy host that needs none.
+	controllers *ControllerConfig
+	frontRun    *FrontRunConfig
 }
 
 // niceBin is nice(1), named by absolute path so the caller's PATH cannot choose it.
