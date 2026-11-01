@@ -64,12 +64,19 @@ type testServer struct {
 
 func serve(t *testing.T, cfg Config) *testServer {
 	t.Helper()
+	return serveHandler(t, Handler(cfg))
+}
+
+// serveHandler serves h on a Unix socket, for a test that builds the handler itself (newHandler, with a
+// record function).
+func serveHandler(t *testing.T, h http.Handler) *testServer {
+	t.Helper()
 	socket := sockPath(t, shortDir(t), "e.sock")
 	ln, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &http.Server{Handler: Handler(cfg)}
+	srv := &http.Server{Handler: h}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
 	return &testServer{t: t, hc: unixClient(socket)}
