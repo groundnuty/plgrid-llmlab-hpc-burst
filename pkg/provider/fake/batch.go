@@ -57,6 +57,13 @@ type Config struct {
 	// DataParser is the data_parser version the replies carry; empty means
 	// "v0.0.42".
 	DataParser string
+	// MaxSubmitPerUser is the user's submit limit, a QOS's MaxSubmitJobsPerUser
+	// (HBEP-4, QOS limits): the most jobs the user may have held, pending or
+	// running at once. Every job in one Batch is that one user's, the outside
+	// jobs of AddOutsideJob included. A Submit at the limit is refused with a
+	// *provider.PolicyRefusal for QOSMaxSubmitJobPerUserLimit. Zero means no
+	// limit; a negative value panics in NewBatch.
+	MaxSubmitPerUser int
 }
 
 // Script says what the next Submit does. Enqueue queues one per future Submit.
@@ -127,6 +134,9 @@ type Batch struct {
 
 // NewBatch returns a fake Slurm that reads clock.
 func NewBatch(clock *Clock, cfg Config) *Batch {
+	if cfg.MaxSubmitPerUser < 0 {
+		panic(fmt.Sprintf("fake: MaxSubmitPerUser %d is negative", cfg.MaxSubmitPerUser))
+	}
 	cfg.Partitions = append([]Partition(nil), cfg.Partitions...)
 	if cfg.MinJobAge == 0 {
 		cfg.MinJobAge = 10 * time.Second
@@ -239,6 +249,11 @@ func (b *Batch) Submit(_ context.Context, req provider.SubmitRequest) (string, p
 		return "", provider.Rejected, err
 	}
 	b.log("sbatch", req.Tag, req.Params.Partition, string(req.Params.TimeLimit), strconv.Itoa(int(req.Params.GPUs)))
+	// A full submit limit refuses the call before any Script is read: it
+	// registers nothing and a queued Script is still there for the next Submit.
+	if refusal := b.submitLimitRefusal(b.clock.Now()); refusal != nil {
+		return "", provider.Rejected, refusal
+	}
 	sc := DefaultScript
 	if len(b.scripts) > 0 {
 		sc, b.scripts = b.scripts[0], b.scripts[1:]
