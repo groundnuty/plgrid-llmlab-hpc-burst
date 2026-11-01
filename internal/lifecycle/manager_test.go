@@ -497,17 +497,39 @@ func TestManagerOnControlPlane(t *testing.T) {
 	if released.Spec.RenewTime == nil {
 		t.Fatal("the released Lease has no renewTime")
 	}
-	restartAfterGap(t, ctx, cl, cp.Config, creds, builds, released.Spec.RenewTime.Time)
+	restartAfterGap(t, ctx, cl, cp.Config, creds, builds)
 }
 
-// restartAfterGap starts the controller again after the first run's stop,
-// with its caches' sync held. /readyz fails while the caches have not synced
-// and no ObservationGap exists yet, since the Lease is taken only after the
-// sync. Once the sync is let go, /readyz passes, and exactly one
-// ObservationGap regards the lifecycle Lease, naming the first run's last
-// renewTime to the microsecond: one event, not a series of two.
-func restartAfterGap(t *testing.T, ctx context.Context, cl client.Client, cfg *rest.Config, creds, builds string, prev time.Time) {
+// writeLifecycleLease writes the lifecycle Lease as another copy of the
+// controller would: holder, renewTime now and a lease duration. It returns the
+// renewTime as stored.
+func writeLifecycleLease(t *testing.T, ctx context.Context, cl client.Client, holder string, seconds int32) time.Time {
 	t.Helper()
+	var l coordinationv1.Lease
+	if err := cl.Get(ctx, client.ObjectKey{Namespace: v1alpha1.ControllerNamespace, Name: v1alpha1.LeaseLifecycle}, &l); err != nil {
+		t.Fatal(err)
+	}
+	now := metav1.NewMicroTime(time.Now())
+	l.Spec.HolderIdentity, l.Spec.LeaseDurationSeconds, l.Spec.RenewTime = &holder, &seconds, &now
+	if err := cl.Update(ctx, &l); err != nil {
+		t.Fatal(err)
+	}
+	return l.Spec.RenewTime.Time
+}
+
+// restartAfterGap starts the controller again after the first run's stop
+// (HBEP-8, Test plan, Readiness and Restart). A second copy holds the
+// lifecycle Lease, and the new run's caches' sync is held: /readyz fails while
+// the caches have not synced, and still fails once they have while the second
+// copy holds the Lease; /healthz answers throughout, and no ObservationGap
+// exists, since the Lease is not taken. Once the second copy releases the
+// Lease, /readyz passes, and exactly one ObservationGap regards the lifecycle
+// Lease, naming the release's renewTime, the last one before the take, to the
+// microsecond: one event, not a series of two.
+func restartAfterGap(t *testing.T, ctx context.Context, cl client.Client, cfg *rest.Config, creds, builds string) {
+	t.Helper()
+	const second = "lifecycle-second-copy"
+	writeLifecycleLease(t, ctx, cl, second, 3600)
 	gate := make(chan struct{})
 	release := sync.OnceFunc(func() { close(gate) })
 	defer release()
@@ -537,17 +559,33 @@ func restartAfterGap(t *testing.T, ctx context.Context, cl client.Client, cfg *r
 	eventually(t, time.Minute, "the health server answers", func() (bool, string) {
 		return getStatus(t, "http://"+managerHealthAddr+"/healthz") == http.StatusOK, "no /healthz"
 	})
-	for i := 0; i < 15; i++ {
-		if code := getStatus(t, "http://"+managerHealthAddr+"/readyz"); code == http.StatusOK {
-			t.Fatalf("/readyz answered 200 while the caches' sync is held")
+	notReady := func(why string) {
+		t.Helper()
+		for i := 0; i < 25; i++ {
+			if code := getStatus(t, "http://"+managerHealthAddr+"/readyz"); code == http.StatusOK {
+				t.Fatalf("/readyz answered 200 %s", why)
+			}
+			if code := getStatus(t, "http://"+managerHealthAddr+"/healthz"); code != http.StatusOK {
+				t.Fatalf("/healthz answered %d %s; it is liveness and answers", code, why)
+			}
+			time.Sleep(200 * time.Millisecond)
 		}
-		time.Sleep(200 * time.Millisecond)
+		if gaps := observationGaps(t, ctx, cl); len(gaps) != 0 {
+			t.Fatalf("%d ObservationGap events %s, before the Lease could be taken", len(gaps), why)
+		}
 	}
-	if gaps := observationGaps(t, ctx, cl); len(gaps) != 0 {
-		t.Fatalf("%d ObservationGap events before the Lease could be taken", len(gaps))
-	}
+	notReady("while the caches' sync is held")
 	release()
-	eventually(t, time.Minute, "/readyz passes once the caches have synced", func() (bool, string) {
+	notReady("while a second copy holds the lifecycle Lease")
+	var l coordinationv1.Lease
+	if err := cl.Get(ctx, client.ObjectKey{Namespace: v1alpha1.ControllerNamespace, Name: v1alpha1.LeaseLifecycle}, &l); err != nil {
+		t.Fatal(err)
+	}
+	if l.Spec.HolderIdentity == nil || *l.Spec.HolderIdentity != second {
+		t.Fatalf("the Lease's holder is %v, want the second copy still", l.Spec.HolderIdentity)
+	}
+	prev := writeLifecycleLease(t, ctx, cl, "", 1) // the second copy releases it, as client-go's release does
+	eventually(t, time.Minute, "/readyz passes once the caches have synced and the Lease is held", func() (bool, string) {
 		code := getStatus(t, "http://"+managerHealthAddr+"/readyz")
 		return code == http.StatusOK, fmt.Sprintf("/readyz %d", code)
 	})

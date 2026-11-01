@@ -47,10 +47,11 @@ type expoSample struct {
 	value  string
 }
 
-// exposition is a scrape: its samples and the TYPE of each family.
+// exposition is a scrape: its samples, and the TYPE and HELP of each family.
 type exposition struct {
 	samples []expoSample
 	types   map[string]string
+	help    map[string]string
 }
 
 var (
@@ -58,11 +59,18 @@ var (
 	labelPair  = regexp.MustCompile(`([a-zA-Z_][a-zA-Z0-9_]*)="((?:[^"\\]|\\.)*)"`)
 )
 
-// scrape serves the rig's collector as /metrics and parses the text.
+// scrape serves the rig's engine gauges as /metrics and parses the text.
 func scrape(t *testing.T, rg *rig) exposition {
 	t.Helper()
+	return scrapeCollectors(t, &instanceCollector{inv: rg.r.inventory(), backend: rg.backend, clock: rg.clock})
+}
+
+// scrapeCollectors serves collectors as /metrics through a pedantic registry
+// and parses the text.
+func scrapeCollectors(t *testing.T, cs ...prometheus.Collector) exposition {
+	t.Helper()
 	reg := prometheus.NewPedanticRegistry()
-	reg.MustRegister(&instanceCollector{inv: rg.r.inventory(), backend: rg.backend, clock: rg.clock})
+	reg.MustRegister(cs...)
 	srv := httptest.NewServer(promhttp.HandlerFor(reg, promhttp.HandlerOpts{ErrorHandling: promhttp.HTTPErrorOnError}))
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/metrics")
@@ -73,12 +81,16 @@ func scrape(t *testing.T, rg *rig) exposition {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET /metrics: %d", resp.StatusCode)
 	}
-	ex := exposition{types: map[string]string{}}
+	ex := exposition{types: map[string]string{}, help: map[string]string{}}
 	sc := bufio.NewScanner(resp.Body)
 	for sc.Scan() {
 		line := sc.Text()
 		if f := strings.Fields(line); len(f) == 4 && f[0] == "#" && f[1] == "TYPE" {
 			ex.types[f[2]] = f[3]
+			continue
+		}
+		if f := strings.SplitN(line, " ", 4); len(f) == 4 && f[0] == "#" && f[1] == "HELP" {
+			ex.help[f[2]] = f[3]
 			continue
 		}
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -350,6 +362,43 @@ func TestMetricsSeriesScope(t *testing.T) {
 		}
 		if len(of) != 1 || of[0].name != "hpcburst_instance_info" {
 			t.Fatalf("series of the pending Instance %v, want its info series only", of)
+		}
+	})
+	// HBEP-8, Test plan, Series scope: an Instance not yet ready whose report
+	// lists the worker, with no fresh read yet, shows each engine metric of the
+	// worker as unknown with reason stale, beside its info series.
+	t.Run("starting-worker-stale", func(t *testing.T) {
+		rg := newRig(t)
+		rg.engine = func(string) afake.Engine { return afake.Engine{Health: afake.HealthMetricsUnreadable} }
+		rg.create(mdSpec("md"))
+		var in v1alpha1.Instance
+		startUntil(rg, "md", 10*time.Minute, "a report that lists worker-0", func() bool {
+			insts := rg.instances("md")
+			if len(insts) != 1 || insts[0].Spec.AllocationRef.Name == "" {
+				return false
+			}
+			in = insts[0]
+			ra, ok := rg.agents[in.Spec.AllocationRef.Name]
+			if !ok {
+				return false
+			}
+			rep, ok := ra.agent.LastReport()
+			return ok && rep.Instance != nil && worker0(rep.Instance) != nil
+		})
+		in = *rg.instance(in.Name)
+		if ph := in.Status.Phase; ph != v1alpha1.InstanceStarting && ph != v1alpha1.InstanceVerifying {
+			t.Fatalf("phase %s when worker-0 is first reported, want starting or verifying; the case proves nothing", ph)
+		}
+		uid := string(in.UID)
+		ex := scrape(t, rg)
+		if len(ex.find("hpcburst_instance_info", map[string]string{"instance_uid": uid})) != 1 {
+			t.Fatal("no info series for the starting Instance")
+		}
+		if u := ex.unknowns(uid, "worker-0"); len(u) != 1 || !slices.Equal(u[unknownStale], sorted(engineNames)) {
+			t.Fatalf("unknown series %v, want every engine metric of worker-0 with reason stale", u)
+		}
+		if series := ex.engineSeries(uid); len(series) != 0 {
+			t.Fatalf("engine series %v before the first fresh read", series)
 		}
 	})
 	t.Run("ended-nothing", func(t *testing.T) {
