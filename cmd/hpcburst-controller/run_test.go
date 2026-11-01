@@ -72,13 +72,27 @@ import (
 var logs = &syncBuffer{}
 
 type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
+	mu        sync.Mutex
+	buf       bytes.Buffer
+	truncated bool
 }
+
+// maxLogBytes caps what the buffer keeps. Every test of the package appends to it for the whole
+// run, so a loop that logs without waiting (a trigger or a refresh that never sleeps) would
+// otherwise fill the machine's memory (a mutation test binary once grew to 16 GB this way, 1 Nov
+// 2026). Past the cap the lines are dropped, and a test that looks for one fails on its own wait.
+const maxLogBytes = 64 << 20
 
 func (b *syncBuffer) line(s string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.buf.Len()+len(s)+1 > maxLogBytes {
+		if !b.truncated {
+			b.truncated = true
+			b.buf.WriteString("[the test log reached its cap; later lines are dropped]\n")
+		}
+		return
+	}
 	b.buf.WriteString(s)
 	b.buf.WriteByte('\n')
 }
@@ -90,6 +104,10 @@ func (b *syncBuffer) String() string {
 }
 
 func TestMain(m *testing.M) {
+	// A controller process of failover_test.go: the test binary run again.
+	if addr := os.Getenv(childEnvRunner); addr != "" {
+		os.Exit(controllerChild(os.Args[1:], addr))
+	}
 	ctrl.SetLogger(funcr.New(func(prefix, args string) { logs.line(prefix + " " + args) }, funcr.Options{}))
 	os.Exit(m.Run())
 }
@@ -294,6 +312,13 @@ type binary struct {
 
 func startBinary(t *testing.T, f flags, d deps) *binary {
 	t.Helper()
+	// The frpc builds prepareState writes are examples, not the pinned release
+	// binaries (only x86_64's is cached here, and a test must not fetch), so
+	// the settings pin their digests. TestFrpcDigestsArePinned checks the real
+	// wiring from frp-pins.txt.
+	if d.frpcDigests == nil {
+		d.frpcDigests = exampleFrpcDigests
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	b := &binary{f: f, cancel: cancel, exited: make(chan struct{})}
 	go func() {
@@ -370,8 +395,15 @@ const exampleFront = "front.example.org:29443"
 // at addr, and extra are further flags.
 func prepareState(t *testing.T, api *apiServer, mode, addr string, extra ...string) (flags, *x509.Certificate, string) {
 	t.Helper()
+	return prepareStateAt(t, api, freePortBase(t), mode, addr, extra...)
+}
+
+// prepareStateAt is prepareState with the port base chosen by the caller, for a test that needs
+// more of the block than freePortBase checks (the tunnel tests' frps ports).
+func prepareStateAt(t *testing.T, api *apiServer, portBase int, mode, addr string, extra ...string) (flags, *x509.Certificate, string) {
+	t.Helper()
 	state := t.TempDir()
-	h := agentapi.Host{StateDir: state, PortBase: freePortBase(t)}
+	h := agentapi.Host{StateDir: state, PortBase: portBase}
 	if err := os.WriteFile(filepath.Join(state, "kubeconfig"), api.kubeconfig, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -381,6 +413,11 @@ func prepareState(t *testing.T, api *apiServer, mode, addr string, extra ...stri
 		}
 	}
 	digest := writeAgentBuild(t, h, "x86_64")
+	for _, arch := range []string{"x86_64", "aarch64"} {
+		if err := os.WriteFile(filepath.Join(h.AgentBuildsDir(), agentapi.FrpcBuildName(arch)), exampleFrpc(arch), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	cert := writeEndpointCert(t, h)
 	args := []string{"--state-dir", state, "--port-base", strconv.Itoa(h.PortBase),
 		"--health-addr", net.JoinHostPort("127.0.0.1", strconv.Itoa(freePort(t))),
@@ -390,6 +427,21 @@ func prepareState(t *testing.T, api *apiServer, mode, addr string, extra ...stri
 		t.Fatal(err)
 	}
 	return f, cert, digest
+}
+
+// exampleFrpc is the example frpc build for a cpuArch, another for each, and
+// exampleFrpcDigests their digests, keyed by cpuArch as the settings take them.
+func exampleFrpc(cpuArch string) []byte {
+	return []byte("#!/bin/sh\n# an example frpc build for " + cpuArch + "\n")
+}
+
+func exampleFrpcDigests() (map[string]string, error) {
+	out := map[string]string{}
+	for _, arch := range []string{"x86_64", "aarch64"} {
+		sum := sha256.Sum256(exampleFrpc(arch))
+		out[arch] = hex.EncodeToString(sum[:])
+	}
+	return out, nil
 }
 
 // writeAgentBuild writes an example agent build for cpuArch where the
@@ -687,15 +739,28 @@ func testBinaryComponents(t *testing.T, api *apiServer) {
 	}
 
 	// agent.json as staged names the frpc of the partition's cpuArch: the
-	// GH200 Allocation the arm64 build's, which frp-pins.txt pins, and the
-	// other the amd64 one (review of PR 132: B1).
-	pins := pinnedFrpc(t)
+	// GH200 Allocation the aarch64 build's, and the other the x86_64 one
+	// (review of PR 132: B1). The frpc builds themselves, and the launcher's
+	// certificate, are staged too: the settings reach Create through
+	// frontSettings, with the PEM of the certificate the launcher created.
+	// Each digest is hashed here from the bytes the test wrote.
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
 	for _, tc := range []struct {
 		a    *v1alpha1.Allocation
-		want string
-	}{{a, pins["amd64"]}, {g, pins["arm64"]}} {
-		if got := stagedConfig(t, sl, tc.a).FrpcDigest; got != tc.want {
-			t.Errorf("%s's agent.json names frpc %s, want %s", tc.a.Name, got, tc.want)
+		arch string
+	}{{a, "x86_64"}, {g, "aarch64"}} {
+		sum := sha256.Sum256(exampleFrpc(tc.arch))
+		want := hex.EncodeToString(sum[:])
+		if got := stagedConfig(t, sl, tc.a).FrpcDigest; got != want {
+			t.Errorf("%s's agent.json names frpc %s, want %s", tc.a.Name, got, want)
+		}
+		files := sl.Files()
+		if f := files["/scratch/example-user/stage/frpc/"+want+"/frpc"]; !bytes.Equal(f.Content, exampleFrpc(tc.arch)) {
+			t.Errorf("%s: the staged frpc at frpc/%s/frpc is %q, want the %s build", tc.a.Name, want, f.Content, tc.arch)
+		}
+		tag := v1alpha1.JobTag(tc.a.Namespace, tc.a.Name, tc.a.UID)
+		if f := files["/scratch/example-user/stage/alloc/"+tag+"/dial-home.crt"]; !bytes.Equal(f.Content, certPEM) {
+			t.Errorf("%s: the staged dial-home.crt is %q, want the launcher certificate's PEM", tc.a.Name, f.Content)
 		}
 	}
 
@@ -792,7 +857,7 @@ func testBinaryComponents(t *testing.T, api *apiServer) {
 		}
 	}
 	out := logs.String()[from:]
-	for _, name := range []string{"provider-supervisor-batch", "provider-supervisor-managed", "agent-api"} {
+	for _, name := range []string{"provider-supervisor-batch", "provider-supervisor-managed", "agent-api", "frps-plugin", "tunnel-state"} {
 		for _, msg := range []string{"component starting", "component stopped"} {
 			if !strings.Contains(out, componentLine(msg, f.host.PortBase, name)) {
 				t.Errorf("the log has no %q line for %s", msg, name)
@@ -946,7 +1011,9 @@ func TestControllerBinaryProvidersFollowTheLifecycleLeader(t *testing.T) {
 	_, session := newFakeSlurm()
 	from := len(logs.String()) // this test's log lines only, under -count=N
 	since := func(at int) string { return logs.String()[at:] }
-	supervisors := []string{"provider-supervisor-batch", "provider-supervisor-managed"}
+	// tunnel-state is a leader component too (#90): it writes the Instances' conditions, so only
+	// the copy that leads writes them. frps-plugin is not: every copy serves the plugin.
+	supervisors := []string{"provider-supervisor-batch", "provider-supervisor-managed", "tunnel-state"}
 
 	// The first copy leads lifecycle and runs the Provider.
 	fa, _, _ := prepareState(t, api, "direct", exampleFront)
@@ -964,13 +1031,14 @@ func TestControllerBinaryProvidersFollowTheLifecycleLeader(t *testing.T) {
 	// added beside the agent API, have not started.
 	fb, _, _ := prepareState(t, api, "direct", exampleFront)
 	b := startBinary(t, fb, deps{providerScheme: providerScheme, newPlatform: recordingPlatforms(session, &servedB), registry: prometheus.NewRegistry()})
-	b.eventually(t, "the second copy's health endpoint answers and its agent API started", 60*time.Second, func() bool {
+	b.eventually(t, "the second copy's health endpoint answers and its agent API and frps plugin started", 60*time.Second, func() bool {
 		resp, err := http.Get("http://" + fb.healthAddr + "/healthz")
 		if err != nil {
 			return false
 		}
 		resp.Body.Close()
-		return resp.StatusCode == http.StatusOK && strings.Contains(since(from), componentLine("component starting", fb.host.PortBase, "agent-api"))
+		return resp.StatusCode == http.StatusOK && strings.Contains(since(from), componentLine("component starting", fb.host.PortBase, "agent-api")) &&
+			strings.Contains(since(from), componentLine("component starting", fb.host.PortBase, "frps-plugin"))
 	})
 	for _, name := range supervisors {
 		if strings.Contains(since(from), componentLine("component starting", fb.host.PortBase, name)) {

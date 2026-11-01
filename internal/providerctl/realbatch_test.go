@@ -55,6 +55,7 @@ type realEnv struct {
 	ctl      *Controller
 	opts     Options
 	credDir  string
+	builds   string // the agent-builds directory
 	digest   string
 	provider string
 	user     string
@@ -91,6 +92,7 @@ func newRealEnv(t *testing.T, clock *fake.Clock, sl *fakeslurm.Platform, c clien
 	}}
 	e.credDir = t.TempDir()
 	builds := t.TempDir()
+	e.builds = builds
 	agent := []byte("#!/bin/sh\n# an example agent build\n")
 	sum := sha256.Sum256(agent)
 	e.digest = hex.EncodeToString(sum[:])
@@ -103,8 +105,7 @@ func newRealEnv(t *testing.T, clock *fake.Clock, sl *fakeslurm.Platform, c clien
 			e.batch = slurm.NewBatch(e.session, v.Profile, v.Settings, slurm.Options{Clock: clock})
 			return e.batch, io.NopCloser(nil), nil
 		},
-		Front: &FrontSettings{Mode: agentapi.DialHomeDirect, Endpoint: "front.example.org:29443", CertPin: strings.Repeat("c", 64),
-			FrpcDigests: map[string]string{testArch: strings.Repeat("d", 64)}},
+		Front:               exampleFront(t, builds),
 		CreationGracePeriod: -1,
 	}
 	for _, m := range mods {
@@ -346,8 +347,8 @@ func TestStagingDirectoryResolution(t *testing.T) {
 		t.Errorf("agent.json %+v", cfg)
 	}
 	// The frpc digest of the partition's cpuArch (x86_64) from the Front settings.
-	if cfg.FrpcDigest != "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" {
-		t.Errorf("agent.json frpcDigest %q, want the x86_64 digest of the Front settings", cfg.FrpcDigest)
+	if want := e.opts.Front.FrpcDigests[testArch]; cfg.FrpcDigest != want {
+		t.Errorf("agent.json frpcDigest %q, want the x86_64 digest of the Front settings, %s", cfg.FrpcDigest, want)
 	}
 	if js.Mode.Perm() != 0o600 {
 		t.Errorf("agent.json mode %o, want 600", js.Mode.Perm())
@@ -397,8 +398,8 @@ func TestDialHomeKeyMissing(t *testing.T) {
 	clock := fake.NewClock(at(12, 0, 0))
 	sl := newSlurm(clock, fakeslurm.Config{})
 	e := newRealEnv(t, clock, sl, newFakeClient(t, "prov-a"), "prov-a", "user-a", func(e *realEnv) {
-		e.opts.Front = &FrontSettings{Mode: agentapi.DialHomeSSH, Endpoint: "front.example.org:22", CertPin: strings.Repeat("c", 64),
-			SSHUser: "example-user", AgentPort: 29270, DialHomePort: 29274, FrpcDigests: map[string]string{testArch: strings.Repeat("d", 64)}}
+		f := e.opts.Front
+		f.Mode, f.Endpoint, f.SSHUser, f.AgentPort, f.DialHomePort = agentapi.DialHomeSSH, "front.example.org:22", "example-user", 29270, 29274
 	})
 	if err := sl.MkdirAll("/home/user-a/.hpcburst/dial-home", 0o700); err != nil {
 		t.Fatal(err)

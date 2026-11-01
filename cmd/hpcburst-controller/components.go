@@ -140,7 +140,9 @@ func checkScheme(s *runtime.Scheme) error {
 // frontSettings are the batch Providers' front and agent-endpoint settings
 // (providerctl.FrontSettings), from the front the launcher recorded; nil when
 // it recorded none, and then nothing is submitted (HBEP-11, open question 8).
-// The pin is the agent endpoint certificate's, which the launcher created; the
+// The pin is the agent endpoint certificate's, which the launcher created, and
+// the settings keep the certificate's PEM too, from the same read: Create stages
+// it as each Allocation's dial-home.crt (HBEP-4, Submission: Files first); the
 // frpc digest per cpuArch is the one internal/launcher/frp-pins.txt pins for
 // the frp release the launcher runs (HBEP-4, Submission: Files first), for
 // x86_64 and aarch64 (Helios GH200) alike; in ssh mode the user is the one who
@@ -152,7 +154,7 @@ func frontSettings(f flags, d deps) (*providerctl.FrontSettings, error) {
 	if f.frontMode == "" {
 		return nil, nil
 	}
-	pin, err := certPin(f.host.AgentCertFile())
+	certPEM, pin, err := endpointCert(f.host.AgentCertFile())
 	if err != nil {
 		return nil, err
 	}
@@ -161,7 +163,7 @@ func frontSettings(f flags, d deps) (*providerctl.FrontSettings, error) {
 		return nil, fmt.Errorf("the frpc digests: %w", err)
 	}
 	fs := &providerctl.FrontSettings{
-		Mode: agentapi.DialHomeMode(f.frontMode), Endpoint: f.frontAddr, CertPin: pin,
+		Mode: agentapi.DialHomeMode(f.frontMode), Endpoint: f.frontAddr, CertPin: pin, CertPEM: certPEM,
 		FrpcDigests: maps.Clone(digests),
 	}
 	if fs.Mode == agentapi.DialHomeSSH {
@@ -196,7 +198,12 @@ func checkFront(fs *providerctl.FrontSettings) error {
 	if len(fs.FrpcDigests) == 0 {
 		return errors.New("no frpc digest is configured for any cpuArch")
 	}
+	// The certificate Create stages must be exactly one, with the pin agent.json
+	// names: a file of two certificates would stop every job's frpc.
 	var errs []error
+	if err := fs.CheckCertificate(time.Now()); err != nil {
+		errs = append(errs, err)
+	}
 	for _, arch := range slices.Sorted(maps.Keys(fs.FrpcDigests)) {
 		c := agentapi.AgentConfig{
 			ProtocolVersion: agentapi.ProtocolVersion, Tag: sampleTag, Mode: fs.Mode, Endpoint: fs.Endpoint,
@@ -212,21 +219,22 @@ func checkFront(fs *providerctl.FrontSettings) error {
 	return errors.Join(errs...)
 }
 
-// certPin reads the agent endpoint's PEM certificate and returns its pin.
-func certPin(path string) (string, error) {
+// endpointCert reads the agent endpoint's PEM certificate and returns it with
+// its pin, from one read, so the two always agree.
+func endpointCert(path string) (certPEM []byte, pin string, err error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("the agent endpoint certificate: %w", err)
+		return nil, "", fmt.Errorf("the agent endpoint certificate: %w", err)
 	}
 	blk, _ := pem.Decode(b)
 	if blk == nil || blk.Type != "CERTIFICATE" {
-		return "", fmt.Errorf("the agent endpoint certificate %s holds no PEM certificate", path)
+		return nil, "", fmt.Errorf("the agent endpoint certificate %s holds no PEM certificate", path)
 	}
 	c, err := x509.ParseCertificate(blk.Bytes)
 	if err != nil {
-		return "", fmt.Errorf("the agent endpoint certificate %s: %w", path, err)
+		return nil, "", fmt.Errorf("the agent endpoint certificate %s: %w", path, err)
 	}
-	return agentapi.PinOf(c), nil
+	return b, agentapi.PinOf(c), nil
 }
 
 // sshControlDir is where the batch Providers' ssh masters keep their sockets.

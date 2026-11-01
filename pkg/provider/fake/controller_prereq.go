@@ -14,12 +14,14 @@ import (
 
 // Prerequisites, set on a Controller, make it wait, as the real provider-slurm
 // does before Create (internal/providerctl, prerequisites), for what it needs
-// from the control-plane host: a configured front, the Allocation's credential
-// file, and an agent build with the Allocation's agentDigest. Until all three
-// are there, the Allocation shows phase Submitting with a reason that names
-// what is missing, and nothing is submitted: no attempt is claimed, no
-// Rejected record is written, so the wait is not an attempt. A nil
-// Prerequisites (the default) checks none of them, as before.
+// from the control-plane host: a configured front with the pinned frpc digest of
+// the partition's cpuArch, the Allocation's credential file, an agent build
+// with the Allocation's agentDigest, and a frpc build with the pinned digest
+// (HBEP-4, Submission: Files first). Until all are there, the Allocation shows
+// phase Submitting with a reason that names what is missing, and nothing is
+// submitted: no attempt is claimed, no Rejected record is written, so the wait
+// is not an attempt. A nil Prerequisites (the default) checks none of them, as
+// before.
 type Prerequisites struct {
 	// Front says whether the launcher's front is configured (HBEP-11).
 	Front bool
@@ -29,8 +31,13 @@ type Prerequisites struct {
 	// provider requires; "" means it is never there.
 	CredentialsDir string
 	// AgentBuildsDir holds agentapi.AgentBuildName(CPUArch), whose sha256
-	// must be the Allocation's agentDigest; "" means no build is there.
+	// must be the Allocation's agentDigest, and agentapi.FrpcBuildName(CPUArch),
+	// whose sha256 must be FrpcDigest; "" means no build is there.
 	AgentBuildsDir string
+	// FrpcDigest is the pinned frpc digest for CPUArch (the front's
+	// FrpcDigests[CPUArch]); "" means none is configured, which the real
+	// provider refuses too.
+	FrpcDigest string
 	// CPUArch is the partition's CPU architecture.
 	CPUArch string
 }
@@ -41,6 +48,9 @@ const (
 	PrerequisiteNoCredential  = "waiting for the Allocation's credential"
 	PrerequisiteNoAgentBuild  = "no agent build for cpuArch"
 	PrerequisiteAgentMismatch = "the agent build does not have the Allocation's agentDigest"
+	PrerequisiteNoFrpcDigest  = "no frpc digest is configured for cpuArch"
+	PrerequisiteNoFrpcBuild   = "no frpc build for cpuArch"
+	PrerequisiteFrpcMismatch  = "the frpc build does not have the pinned frpc digest"
 )
 
 // missing returns why the Allocation cannot be submitted yet, or "".
@@ -50,6 +60,9 @@ func (p *Prerequisites) missing(a *v1alpha1.Allocation) string {
 	}
 	if !p.Front {
 		return PrerequisiteNoFront
+	}
+	if p.FrpcDigest == "" {
+		return PrerequisiteNoFrpcDigest + " " + p.CPUArch
 	}
 	if err := p.credential(a); err != nil {
 		return PrerequisiteNoCredential + ": " + err.Error()
@@ -64,6 +77,13 @@ func (p *Prerequisites) missing(a *v1alpha1.Allocation) string {
 	sum := sha256.Sum256(b)
 	if bp := a.Spec.ForProvider.Batch; bp == nil || hex.EncodeToString(sum[:]) != bp.AgentDigest {
 		return PrerequisiteAgentMismatch
+	}
+	f, err := os.ReadFile(filepath.Join(p.AgentBuildsDir, agentapi.FrpcBuildName(p.CPUArch)))
+	if err != nil {
+		return PrerequisiteNoFrpcBuild + " " + p.CPUArch
+	}
+	if fsum := sha256.Sum256(f); hex.EncodeToString(fsum[:]) != p.FrpcDigest {
+		return PrerequisiteFrpcMismatch
 	}
 	return ""
 }
