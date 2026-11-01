@@ -3,7 +3,6 @@ package lifecycle
 import (
 	"context"
 	"errors"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -57,6 +56,9 @@ func TestMetricsAccountingGauges(t *testing.T) {
 		accountedAllocation("team-a", "alloc-requeued", "helios-gpu", &v1alpha1.AllocationAccounting{AllocatedGPUs: i32(2), AllocatedCPUs: i32(32), ReadTime: read}),
 	).Build()
 	ex := scrapeCollectors(t, &accountingCollector{allocs: c})
+	if got := collectorSuccess(t, ex, collectorAccounting); got != "1" {
+		t.Errorf("hpcburst_collector_success{collector=accounting} %s after a successful list, want 1", got)
+	}
 	const gpu, cpu = "hpcburst_allocation_allocated_gpu_seconds", "hpcburst_allocation_allocated_cpu_seconds"
 	for _, tc := range []struct {
 		name                string
@@ -95,48 +97,100 @@ func TestMetricsAccountingGauges(t *testing.T) {
 	}
 }
 
-// failingLister is a reader whose list always fails, as a cache that cannot
-// serve one.
-type failingLister struct{ client.Reader }
-
-func (failingLister) List(context.Context, client.ObjectList, ...client.ListOption) error {
-	return errors.New("the cache cannot list Allocations")
+// flakyLister is a reader whose lists fail while down is set, as a cache that
+// cannot serve one.
+type flakyLister struct {
+	client.Reader
+	down bool
 }
 
-// TestMetricsAccountingListFailureKeepsTheScrape: controller-runtime serves
-// /metrics with HTTPErrorOnError, so a collector that reports an invalid
-// metric makes the whole scrape answer 500, the engine gauges with it. A failed
-// list of the Allocations gives instead no accounting series, an unknown series
-// for each accounting gauge with reason list_failed, and the engine gauges
-// intact. scrapeCollectors serves the collectors as /metrics the same way and
-// fails the test on any status but 200.
+func (f *flakyLister) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if f.down {
+		return errors.New("the cache cannot list Allocations")
+	}
+	return f.Reader.List(ctx, list, opts...)
+}
+
+// allocationReader is a fake store of the given objects.
+func allocationReader(t *testing.T, objs ...client.Object) client.Client {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	return clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+}
+
+// collectorSuccess returns the value of hpcburst_collector_success for a
+// collector, failing unless it is exposed exactly once with that one label.
+func collectorSuccess(t *testing.T, ex exposition, collector string) string {
+	t.Helper()
+	got := ex.find("hpcburst_collector_success", map[string]string{"collector": collector})
+	if len(got) != 1 || len(got[0].labels) != 1 {
+		t.Fatalf("hpcburst_collector_success{collector=%q}: %v, want one series with that one label", collector, got)
+	}
+	return got[0].value
+}
+
+// TestMetricsAccountingListFailureKeepsTheScrape (HBEP-8, Unknown samples and
+// Test plan, A failed Allocation list): controller-runtime serves /metrics
+// with HTTPErrorOnError, so a collector that reports an invalid metric would
+// make the whole scrape answer 500, the engine gauges with it. A failed list
+// of the Allocations gives instead no accounting series and
+// hpcburst_collector_success{collector="accounting"} 0, with the engine gauges
+// intact; after the next successful list it is 1 and the series are back.
+// scrapeCollectors serves the collectors as /metrics the same way and fails
+// the test on any status but 200.
 func TestMetricsAccountingListFailureKeepsTheScrape(t *testing.T) {
 	rg, in, _ := healthRig(t, func() afake.Engine { return afake.Engine{Health: knownHealth} })
 	uid := string(in.UID)
-	ex := scrapeCollectors(t,
-		&instanceCollector{inv: rg.r.inventory(), backend: rg.backend, clock: rg.clock},
-		&accountingCollector{allocs: failingLister{}})
+	read := metav1.NewTime(time.Date(2026, 11, 1, 8, 0, 0, 0, time.UTC))
+	// 4 GPUs and 64 CPUs for an hour: 14,400 GPU-seconds, 230,400 CPU-seconds.
+	lister := &flakyLister{Reader: allocationReader(t,
+		accountedAllocation("team-a", "alloc-1", "helios-gpu", &v1alpha1.AllocationAccounting{AllocatedGPUs: i32(4), AllocatedCPUs: i32(64), ElapsedSeconds: i64(3600), ReadTime: read}))}
 	const gpu, cpu = "hpcburst_allocation_allocated_gpu_seconds", "hpcburst_allocation_allocated_cpu_seconds"
-	for _, name := range []string{gpu, cpu} {
-		if got := ex.find(name, nil); len(got) != 0 {
-			t.Errorf("%s series %v after a failed list, want none (unknown, never 0)", name, got)
+	scrapeBoth := func() exposition {
+		return scrapeCollectors(t,
+			&instanceCollector{inv: rg.r.inventory(), backend: rg.backend, clock: rg.clock},
+			&accountingCollector{allocs: lister})
+	}
+	check := func(when, success string, series bool) {
+		t.Helper()
+		ex := scrapeBoth()
+		if got := collectorSuccess(t, ex, collectorAccounting); got != success {
+			t.Errorf("%s: hpcburst_collector_success{collector=accounting} %s, want %s", when, got, success)
+		}
+		if n := len(ex.find(gpu, nil)) + len(ex.find(cpu, nil)); (n == 2) != series || (n != 0 && n != 2) {
+			t.Errorf("%s: %d accounting series, want present=%v (both gauges of the one Allocation, or neither)", when, n, series)
+		}
+		if got := len(ex.engineSeries(uid)); got != 9 {
+			t.Errorf("%s: %d engine samples beside the accounting collector, want all 9 intact", when, got)
+		}
+		if n := len(ex.find("hpcburst_instance_info", map[string]string{"instance_uid": uid})); n != 1 {
+			t.Errorf("%s: %d info series, want 1", when, n)
 		}
 	}
-	var metrics []string
-	for _, s := range ex.find("hpcburst_allocation_metrics_unknown", nil) {
-		if s.value != "1" || s.labels["reason"] != "list_failed" || len(s.labels) != 2 {
-			t.Errorf("unknown series %+v, want value 1 with exactly the labels metric and reason=list_failed", s)
+	check("before the failure", "1", true)
+	lister.down = true
+	check("while the list fails", "0", false)
+	lister.down = false
+	check("after the next successful list", "1", true)
+}
+
+// TestMetricsAccountingNoAllocationsIsNotAFailure: an empty list gives success
+// 1 and no accounting series, which tells "no Allocations" from "could not list
+// them" (success 0).
+func TestMetricsAccountingNoAllocationsIsNotAFailure(t *testing.T) {
+	ex := scrapeCollectors(t, &accountingCollector{allocs: allocationReader(t)})
+	if got := collectorSuccess(t, ex, collectorAccounting); got != "1" {
+		t.Errorf("hpcburst_collector_success{collector=accounting} %s for an empty list, want 1", got)
+	}
+	for _, s := range ex.samples {
+		if strings.HasPrefix(s.name, "hpcburst_allocation_") {
+			t.Errorf("series %v for an empty list, want none", s)
 		}
-		metrics = append(metrics, s.labels["metric"])
 	}
-	slices.Sort(metrics)
-	if !slices.Equal(metrics, []string{cpu, gpu}) {
-		t.Errorf("unknown series for %v, want one for each of %s and %s", metrics, cpu, gpu)
-	}
-	if series := ex.engineSeries(uid); len(series) != 9 {
-		t.Errorf("%d engine samples beside the failed accounting list, want all 9 intact", len(series))
-	}
-	if n := len(ex.find("hpcburst_instance_info", map[string]string{"instance_uid": uid})); n != 1 {
-		t.Errorf("%d info series beside the failed accounting list, want 1", n)
+	if ex.types["hpcburst_collector_success"] != "gauge" || ex.help["hpcburst_collector_success"] == "" {
+		t.Errorf("hpcburst_collector_success: TYPE %q, HELP %q; want a gauge with help", ex.types["hpcburst_collector_success"], ex.help["hpcburst_collector_success"])
 	}
 }
