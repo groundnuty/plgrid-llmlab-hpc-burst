@@ -72,13 +72,27 @@ import (
 var logs = &syncBuffer{}
 
 type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
+	mu        sync.Mutex
+	buf       bytes.Buffer
+	truncated bool
 }
+
+// maxLogBytes caps what the buffer keeps. Every test of the package appends to it for the whole
+// run, so a loop that logs without waiting (a trigger or a refresh that never sleeps) would
+// otherwise fill the machine's memory (a mutation test binary once grew to 16 GB this way, 1 Nov
+// 2026). Past the cap the lines are dropped, and a test that looks for one fails on its own wait.
+const maxLogBytes = 64 << 20
 
 func (b *syncBuffer) line(s string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.buf.Len()+len(s)+1 > maxLogBytes {
+		if !b.truncated {
+			b.truncated = true
+			b.buf.WriteString("[the test log reached its cap; later lines are dropped]\n")
+		}
+		return
+	}
 	b.buf.WriteString(s)
 	b.buf.WriteByte('\n')
 }
