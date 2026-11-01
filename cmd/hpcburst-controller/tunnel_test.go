@@ -39,6 +39,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/frpsplugin"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/lifecycle"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -259,7 +260,7 @@ func getInstance(t *testing.T, c client.Client, name string) *v1alpha1.Instance 
 func stateFor(c client.Client, cached client.Reader, rd pathReader, trigger <-chan struct{}) *pathState {
 	sc := newStubCache()
 	sc.open()
-	return &pathState{cache: sc, cached: cached, fresh: c, writer: c, reader: rd, trigger: trigger, log: logr.Discard()}
+	return &pathState{cache: sc, cached: cached, fresh: c, writer: c, reader: rd, trigger: trigger, log: logr.Discard(), rec: &lifecycle.MemoryRecorder{}}
 }
 
 // counted counts the status updates, and what each one answered.
@@ -482,7 +483,7 @@ func TestPathStateAfterAConflictDecidesOnTheFreshObject(t *testing.T) {
 	}
 }
 
-// A conflict that never clears gives up after tunnelWriteAttempts, and says so.
+// A conflict that never clears gives up after lifecycle.TunnelWriteAttempts, and says so.
 func TestPathStateGivesUpAgainstAConstantConflict(t *testing.T) {
 	k := &counted{fail: func(int64, client.Object) error {
 		return apierrors.NewConflict(instanceGR, "in-1", errors.New("the object has been modified"))
@@ -493,8 +494,8 @@ func TestPathStateGivesUpAgainstAConstantConflict(t *testing.T) {
 	if err == nil {
 		t.Fatal("apply returned nil against a conflict that never clears")
 	}
-	if n := k.updates.Load(); n != tunnelWriteAttempts {
-		t.Errorf("%d update calls, want %d", n, tunnelWriteAttempts)
+	if n := k.updates.Load(); n != lifecycle.TunnelWriteAttempts {
+		t.Errorf("%d update calls, want %d", n, lifecycle.TunnelWriteAttempts)
 	}
 }
 
@@ -543,7 +544,7 @@ func newLoopRig(t *testing.T, trigger <-chan struct{}, block func(ctx context.Co
 		}
 		return reportOf(cond(metav1.ConditionFalse, "ProxyOffline", "none"))(ctx, uids)
 	})
-	r.state = &pathState{cache: r.cache, cached: r.client, fresh: r.client, writer: r.client, reader: rd, trigger: trigger, log: logr.Discard()}
+	r.state = &pathState{cache: r.cache, cached: r.client, fresh: r.client, writer: r.client, reader: rd, trigger: trigger, log: logr.Discard(), rec: &lifecycle.MemoryRecorder{}}
 	var ctx context.Context
 	ctx, r.cancel = context.WithCancel(context.Background())
 	go func() { r.done <- r.state.run(ctx) }()
@@ -593,7 +594,7 @@ func TestPathStateReadsAfterATriggerSignal(t *testing.T) {
 	await(t, r.reads) // the read at the start
 	for range 5 {
 		signalled := time.Now()
-		tr.ProxyChanged("NewProxy", "uid-1")
+		tr.ProxyChanged("NewProxy", "uid-1", "")
 		select {
 		case at := <-r.reads:
 			if d := at.Sub(signalled); d < settle {
@@ -979,7 +980,7 @@ func TestPathStateStopsFromEveryState(t *testing.T) {
 			done := make(chan error, 1)
 			go func() { done <- s.run(ctx) }()
 			await(t, read)
-			tr.ProxyChanged("NewProxy", "uid-1")
+			tr.ProxyChanged("NewProxy", "uid-1", "")
 			for len(tr.C()) > 0 { // the loop took the signal: it is in the settle wait
 				runtime.Gosched()
 			}

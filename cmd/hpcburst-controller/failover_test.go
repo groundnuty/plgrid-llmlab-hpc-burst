@@ -294,6 +294,12 @@ func (r *failoverRig) killFirst() {
 	if !r.a.gone() {
 		t.Error("the first copy's PID is still there after it was reaped")
 	}
+	// The first copy is dead and cannot write again: what it recorded is final. A job it had
+	// recorded in the gap between checkMidSubmit's read and the kill would let the second copy
+	// skip the lookup by tag that the test is about, so the Allocation is read again now.
+	if id := r.get().Annotations[v1alpha1.AnnotationJobID]; id != "" {
+		t.Errorf("after the first copy was killed and reaped job %s is recorded on the Allocation, so the second copy has no lookup by tag to make", id)
+	}
 }
 
 // checkTakeover waits for the second copy to take lifecycle and then
@@ -381,8 +387,10 @@ func (r *failoverRig) checkOneJob(wantJob string) {
 			if j.Held || j.State == fakeslurm.Cancelled {
 				t.Errorf("the recorded job %d is held=%t in state %s, want its hold lifted and the job live", j.ID, j.Held, j.State)
 			}
-			if releases[j.ID] == 0 {
-				t.Errorf("the log has no scontrol release of the recorded job %d", j.ID)
+			// HBEP-11: "The hold is never lifted again". The recorded job's hold is lifted
+			// once: none would leave it held, a second would lift it again.
+			if releases[j.ID] != 1 {
+				t.Errorf("the log has %d scontrol release calls of the recorded job %d, want exactly 1", releases[j.ID], j.ID)
 			}
 		case j.State != fakeslurm.Cancelled:
 			t.Errorf("job %d carries the tag, is not the recorded job %s and is %s (held=%t), want it cancelled", j.ID, recorded, j.State, j.Held)
