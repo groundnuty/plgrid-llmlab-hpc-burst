@@ -46,6 +46,7 @@ import (
 
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	"github.com/go-logr/logr/funcr"
+	"github.com/prometheus/client_golang/prometheus"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -950,7 +951,7 @@ func TestControllerBinaryProvidersFollowTheLifecycleLeader(t *testing.T) {
 	// The first copy leads lifecycle and runs the Provider.
 	fa, _, _ := prepareState(t, api, "direct", exampleFront)
 	var servedA, servedB, servedC sync.Map
-	a := startBinary(t, fa, deps{providerScheme: providerScheme, newPlatform: recordingPlatforms(session, &servedA)})
+	a := startBinary(t, fa, deps{providerScheme: providerScheme, newPlatform: recordingPlatforms(session, &servedA), registry: prometheus.NewRegistry()})
 	a.eventually(t, "the first copy leads lifecycle, holds "+provLease+" and serves the Provider", 90*time.Second, func() bool {
 		_, ok := servedA.Load(prov.Name)
 		return ok && held(ctx, c, v1alpha1.LeaseLifecycle) && held(ctx, c, provLease)
@@ -962,7 +963,7 @@ func TestControllerBinaryProvidersFollowTheLifecycleLeader(t *testing.T) {
 	// health endpoint answers and its agent API started. Its supervisors,
 	// added beside the agent API, have not started.
 	fb, _, _ := prepareState(t, api, "direct", exampleFront)
-	b := startBinary(t, fb, deps{providerScheme: providerScheme, newPlatform: recordingPlatforms(session, &servedB)})
+	b := startBinary(t, fb, deps{providerScheme: providerScheme, newPlatform: recordingPlatforms(session, &servedB), registry: prometheus.NewRegistry()})
 	b.eventually(t, "the second copy's health endpoint answers and its agent API started", 60*time.Second, func() bool {
 		resp, err := http.Get("http://" + fb.healthAddr + "/healthz")
 		if err != nil {
@@ -1018,7 +1019,7 @@ func TestControllerBinaryProvidersFollowTheLifecycleLeader(t *testing.T) {
 
 	// Without leader election the one process runs the Providers.
 	fc, _, _ := prepareState(t, api, "direct", exampleFront, "--leader-elect=false")
-	cc := startBinary(t, fc, deps{providerScheme: providerScheme, newPlatform: recordingPlatforms(session, &servedC)})
+	cc := startBinary(t, fc, deps{providerScheme: providerScheme, newPlatform: recordingPlatforms(session, &servedC), registry: prometheus.NewRegistry()})
 	cc.eventually(t, "the copy with --leader-elect=false holds "+provLease+" and serves the Provider", 90*time.Second, func() bool {
 		_, ok := servedC.Load(prov.Name)
 		return ok && held(ctx, c, provLease)

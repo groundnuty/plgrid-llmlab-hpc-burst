@@ -37,7 +37,7 @@ func TestDiskFSMkdirAllRefusesPathsOutsideTheRoot(t *testing.T) {
 	if err := os.Mkdir(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	d := &diskFS{root: root}
+	d := newTestDiskFS(t, root)
 	for _, p := range []string{
 		"/", ".", "", "relative", "relative/dir",
 		parent, parent + "/sibling/a", root + "x/a", // root+"x" shares the root's prefix but is not under it
@@ -61,4 +61,15 @@ func TestDiskFSMkdirAllRefusesPathsOutsideTheRoot(t *testing.T) {
 	if fi, err := os.Stat(root + "/a/b"); err != nil || !fi.IsDir() {
 		t.Errorf("%s/a/b was not made: %v", root, err)
 	}
+}
+
+// newTestDiskFS is a diskFS on root, closed with the test.
+func newTestDiskFS(t *testing.T, root string) *diskFS {
+	t.Helper()
+	d, err := newDiskFS(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.rt.Close() })
+	return d
 }

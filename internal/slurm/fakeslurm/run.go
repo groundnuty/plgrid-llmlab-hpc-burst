@@ -10,6 +10,7 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -103,8 +104,37 @@ func normalizeRun(r RunMode) *RunMode {
 	return &r
 }
 
-// jobRun is one execution's process. Platform.mu guards its fields; the
-// channels need no lock.
+// runKnobs are the parts of run mode a test replaces: the kernel interface,
+// the sweep's timings and hooks at the points where goroutines meet. New sets
+// the real ones; a test changes a field before it submits a job.
+type runKnobs struct {
+	proc *procAPI
+	// sweepLimit is how long processes may survive KILL before the sweep
+	// gives up (Slurm's UnkillableStepTimeout is a minute; the fake's is
+	// 30 s), sweepInterval the pause between its listings.
+	sweepLimit, sweepInterval time.Duration
+	// Hooks, called with no lock held: terminateEnter when a terminator
+	// goroutine starts and terminateDone when it ends, limitFired when a time
+	// limit timer's callback starts and limitDecided when it has decided
+	// whether the job ended.
+	terminateEnter, terminateDone func(r *jobRun)
+	limitFired                    func(r *jobRun)
+	limitDecided                  func(r *jobRun, ended bool)
+}
+
+func hostKnobs() runKnobs {
+	return runKnobs{proc: hostProc(), sweepLimit: 30 * time.Second, sweepInterval: 10 * time.Millisecond}
+}
+
+// jobRun is one execution's process. Platform.mu guards its fields, except
+// those marked otherwise; the channels need no lock.
+//
+// Its lifetime is: started, then the batch shell exits (exitSeen: the exit is
+// recorded and the job ends COMPLETED or FAILED, unless something else ended
+// it first), then the sweep clears what the shell left, then the shell is
+// reaped (leaderReaped) and the directory removed, then done. The shell stays
+// a zombie until the sweep has finished, because a zombie keeps its PID, which
+// is the session ID the sweep selects by.
 type jobRun struct {
 	j       *job
 	e       *execution
@@ -119,12 +149,39 @@ type jobRun struct {
 	termAt, killAt    time.Time
 	exitCode          int
 	exitSignal        syscall.Signal
-	done              bool
-	// startErr is why the execution could not start; sweepErr what went
+	// exitSeen is set when the batch shell has exited and its status is
+	// recorded; done when, after that, no process of the execution is left
+	// and the shell is reaped. A sweep that fails leaves done false.
+	exitSeen, done bool
+	// startErr is why the execution could not start; cleanupErr what went
 	// wrong clearing its processes or its directory.
-	startErr, sweepErr error
-	reaped             chan struct{} // closed when the batch shell is reaped
-	finished           chan struct{} // closed when every process is gone
+	startErr, cleanupErr error
+	// sweepErr is why the processes of the execution are not known to be
+	// gone (the sweep failed); it is set before the shell is reaped.
+	sweepErr error
+	exited   chan struct{} // closed when the batch shell has exited
+	settled  chan struct{} // closed when the waiter has finished, done or not
+
+	// procMu serializes every scan of /proc for this execution with the reap
+	// of the batch shell, and guards leaderReaped. It is taken before
+	// Platform.mu where both are needed, never after.
+	procMu       sync.Mutex
+	leaderReaped bool
+}
+
+// scanLive runs fn, which scans /proc for the execution's session and may
+// signal what it finds, only while the batch shell has not been reaped, and
+// reports whether it ran. The reap takes the same lock, so no scan is in
+// flight when the shell is reaped and none starts after: past that point the
+// session ID is a free number that another process may hold.
+func (r *jobRun) scanLive(fn func()) bool {
+	r.procMu.Lock()
+	defer r.procMu.Unlock()
+	if r.leaderReaped {
+		return false
+	}
+	fn()
+	return true
 }
 
 // minute is the wall time of one minute of --time.
@@ -181,12 +238,12 @@ func (p *Platform) dying(j *job) bool {
 // as a job whose output file Slurm cannot open does. The caller holds mu.
 func (p *Platform) launch(j *job, now time.Time) {
 	e := j.cur()
-	r := &jobRun{j: j, e: e, reaped: make(chan struct{}), finished: make(chan struct{})}
+	r := &jobRun{j: j, e: e, exited: make(chan struct{}), settled: make(chan struct{})}
 	e.run = r
 	if err := p.startProcess(r); err != nil {
-		r.done, r.startErr = true, err
-		close(r.reaped)
-		close(r.finished)
+		r.done, r.exitSeen, r.startErr = true, true, err
+		close(r.exited)
+		close(r.settled)
 		_ = p.endJob(j, now, Failed, 0)
 		return
 	}

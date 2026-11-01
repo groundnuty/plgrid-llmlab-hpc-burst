@@ -191,6 +191,18 @@ func (p *Platform) Phantoms(partition string) int {
 	return p.phantoms[partition]
 }
 
+// snapshot is the job's snapshot. In run mode an execution that is terminal
+// and never had a process (cancelled while pending or held, ended by a
+// control) has nothing left to wait for, so it is Finished. The caller holds
+// mu.
+func (p *Platform) snapshot(j *job) Job {
+	s := j.snapshot()
+	if p.run != nil && j.cur().run == nil && IsTerminal(j.state()) {
+		s.Finished = true
+	}
+	return s
+}
+
 // Job returns a snapshot of the job, and false when there is none.
 func (p *Platform) Job(id int) (Job, bool) {
 	p.mu.Lock()
@@ -199,7 +211,7 @@ func (p *Platform) Job(id int) (Job, bool) {
 	if j == nil {
 		return Job{}, false
 	}
-	return j.snapshot(), true
+	return p.snapshot(j), true
 }
 
 // Jobs returns a snapshot of every job, by job ID.
@@ -208,7 +220,7 @@ func (p *Platform) Jobs() []Job {
 	defer p.mu.Unlock()
 	out := make([]Job, len(p.jobs))
 	for i, j := range p.jobs {
-		out[i] = j.snapshot()
+		out[i] = p.snapshot(j)
 	}
 	return out
 }

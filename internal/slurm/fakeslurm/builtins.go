@@ -5,7 +5,6 @@ package fakeslurm
 // the platform's file system (in memory, or on disk in run mode).
 
 import (
-	"crypto/sha256"
 	"encoding/hex"
 	"io/fs"
 	"path"
@@ -52,11 +51,13 @@ func (sh *shell) sha256sum(args []string) int {
 	if len(args) != 1 {
 		return sh.fail(2, "sha256sum: the fake supports only: sha256sum <path>")
 	}
-	content, ok := sh.p.fs.read(sh.path(args[0]))
-	if !ok {
+	sum, ok, err := sh.p.fs.sum(sh.path(args[0]))
+	switch {
+	case !ok:
 		return sh.fail(1, "sha256sum: %s: No such file or directory", args[0])
+	case err != nil:
+		return sh.fail(1, "sha256sum: %s: %v", args[0], err)
 	}
-	sum := sha256.Sum256(content)
 	sh.out("%s  %s\n", hex.EncodeToString(sum[:]), args[0])
 	return 0
 }

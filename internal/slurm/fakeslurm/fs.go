@@ -5,6 +5,7 @@ package fakeslurm
 // run mode a real directory on disk (diskfs.go).
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"io/fs"
 	"path"
@@ -25,8 +26,10 @@ type File struct {
 type fileSystem interface {
 	isDir(p string) bool
 	isFile(p string) bool
-	// read returns a file's content, and false for anything but a file.
-	read(p string) ([]byte, bool)
+	// sum is the SHA-256 of a file's content. found is false for anything
+	// but a file; err is why a file's sum could not be taken (run mode: it
+	// is over the size limit).
+	sum(p string) (sum [sha256.Size]byte, found bool, err error)
 	// write replaces a file's content and keeps its mode and owner, or
 	// creates the file with mode and owner.
 	write(p string, content []byte, mode fs.FileMode, owner string) error
@@ -41,7 +44,9 @@ type fileSystem interface {
 	rename(from, to string) error
 	// removeTree removes p and everything below it; a missing p is no error.
 	removeTree(p string) error
-	snapshotFiles() map[string]File
+	// snapshotFiles copies every file. The in-memory one cannot fail; the
+	// disk one reports a file or a tree over its limits.
+	snapshotFiles() (map[string]File, error)
 	snapshotDirs() map[string]fs.FileMode
 }
 
@@ -57,12 +62,12 @@ func newFS() *fsState {
 	return &fsState{files: map[string]*File{}, dirs: map[string]fs.FileMode{"/": 0o755}}
 }
 
-func (f *fsState) read(p string) ([]byte, bool) {
+func (f *fsState) sum(p string) ([sha256.Size]byte, bool, error) {
 	file := f.files[p]
 	if file == nil {
-		return nil, false
+		return [sha256.Size]byte{}, false, nil
 	}
-	return file.Content, true
+	return sha256.Sum256(file.Content), true, nil
 }
 
 func (f *fsState) write(p string, content []byte, mode fs.FileMode, owner string) error {
@@ -99,12 +104,12 @@ func (f *fsState) rename(from, to string) error {
 	return nil
 }
 
-func (f *fsState) snapshotFiles() map[string]File {
+func (f *fsState) snapshotFiles() (map[string]File, error) {
 	out := make(map[string]File, len(f.files))
 	for name, file := range f.files {
 		out[name] = File{Content: append([]byte(nil), file.Content...), Mode: file.Mode, Owner: file.Owner}
 	}
-	return out
+	return out, nil
 }
 
 func (f *fsState) snapshotDirs() map[string]fs.FileMode {
@@ -208,17 +213,33 @@ func (p *Platform) Remove(name string) error {
 }
 
 // Files returns a copy of every file, by absolute path. In run mode it reads
-// every regular file under the root, and Owner is "".
+// every regular file under the root, and Owner is "". The read is bounded: a
+// file over 16 MiB, files over 64 MiB in all, or more than 50,000 files are a
+// test bug (a root that holds staged models or a cache is not a tree to
+// snapshot), and Files panics with the file that broke the limit rather than
+// return a partial map. It holds no lock while it reads the disk.
 func (p *Platform) Files() map[string]File {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	files, err := p.snapshotFiles()
+	if err != nil {
+		panic(err)
+	}
+	return files
+}
+
+func (p *Platform) snapshotFiles() (map[string]File, error) {
+	if p.run == nil {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+	}
 	return p.fs.snapshotFiles()
 }
 
 // Dirs returns a copy of every directory with its mode, by absolute path. In
-// run mode it lists the root and every directory under it.
+// run mode it lists the root and every directory under it, with no lock held.
 func (p *Platform) Dirs() map[string]fs.FileMode {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	if p.run == nil {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+	}
 	return p.fs.snapshotDirs()
 }

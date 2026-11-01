@@ -48,11 +48,20 @@ type Reconciler struct {
 
 	memOnce sync.Once
 	mem     *memory
+	invOnce sync.Once
+	inv     *inventory
 }
 
 func (r *Reconciler) memory() *memory {
 	r.memOnce.Do(func() { r.mem = newMemory(r.Clock.Now().UTC().Truncate(time.Second)) })
 	return r.mem
+}
+
+// inventory is what the metrics collector reads: the Instances the passes saw
+// that have not ended (HBEP-8, Metrics).
+func (r *Reconciler) inventory() *inventory {
+	r.invOnce.Do(func() { r.inv = &inventory{} })
+	return r.inv
 }
 
 // degradedReason is one reason the ModelDeployment is degraded now.
@@ -157,6 +166,7 @@ func (p *pass) run() error {
 	} else if err := p.loadReferencedProviders(); err != nil {
 		return err
 	}
+	p.recordInventory()
 	// An Instance's failure does not hold back the rest of the pass; it is
 	// returned at the end, so the key is retried with backoff.
 	instErr := p.instances()
@@ -226,6 +236,27 @@ func (p *pass) observe() error {
 		return a.Name < b.Name
 	})
 	return nil
+}
+
+// recordInventory records the deployment's Instances that have not ended for
+// the metrics collector, each with its identity, and forgets the others. What
+// the pass learns of an Instance's agent is added in agent(), and an Instance
+// that ends in this pass is dropped in end().
+func (p *pass) recordInventory() {
+	inv := p.r.inventory()
+	live := map[types.UID]bool{}
+	for _, in := range p.insts {
+		if ended(in) {
+			continue
+		}
+		live[in.UID] = true
+		e := instanceEntry{uid: in.UID, namespace: in.Namespace, name: in.Name, md: p.key.Name, provider: in.Labels[v1alpha1.LabelProvider]}
+		if pv := p.pvOf(in.Labels); pv != nil && pv.hasClass {
+			e.gpuMdl = pv.class.GPUModel
+		}
+		inv.setIdentity(p.key, e)
+	}
+	inv.keep(p.key, live)
 }
 
 // ownedBy reports whether the Instance belongs to the ModelDeployment: its

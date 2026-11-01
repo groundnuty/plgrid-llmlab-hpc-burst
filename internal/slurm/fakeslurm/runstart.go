@@ -61,7 +61,7 @@ func (p *Platform) startIn(r *jobRun, dir string) error {
 	if err := os.WriteFile(script, []byte("#!"+jobShell+"\n"+j.wrap+"\n"), 0o700); err != nil {
 		return err
 	}
-	submitDir := j.env["HOME"]
+	submitDir := path.Clean(j.env["HOME"]) // "." for an unset HOME: not absolute, so not a directory
 	if !p.fs.isDir(submitDir) {
 		submitDir = p.run.Root
 	}
@@ -109,15 +109,32 @@ func (p *Platform) openOutputs(j *job, submitDir string) (out, errOut *os.File, 
 		}
 		return path.Clean(name)
 	}
-	flag := os.O_WRONLY | os.O_CREATE | os.O_TRUNC
-	if len(j.execs) > 1 {
-		flag = os.O_WRONLY | os.O_CREATE | os.O_APPEND
-	}
+	// Truncated for the first execution and appended to after a requeue. The
+	// open is non-blocking and refuses anything but a regular file (a FIFO
+	// with no reader would block the submission, with Platform.mu held), and
+	// it is anchored to the root, so a link a job made cannot lead it out.
+	appendMode := len(j.execs) > 1
+	d := p.fs.(*diskFS)
 	open := func(name string) (*os.File, error) {
-		if !p.fs.(*diskFS).in(name) {
+		rel, ok := d.rel(name)
+		if !ok {
 			return nil, fmt.Errorf("output file %s is outside the run-mode root", name)
 		}
-		return os.OpenFile(name, flag, 0o644)
+		flag := os.O_WRONLY | os.O_CREATE
+		if appendMode {
+			flag |= os.O_APPEND
+		}
+		f, err := d.openRegular(rel, flag, 0o644)
+		if err != nil {
+			return nil, fmt.Errorf("output file %s: %w", name, cause(err))
+		}
+		if !appendMode {
+			if err := f.Truncate(0); err != nil {
+				f.Close()
+				return nil, fmt.Errorf("output file %s: %w", name, err)
+			}
+		}
+		return f, nil
 	}
 	outName, errName := resolve(j.output), resolve(j.output)
 	if j.errPath != "" {

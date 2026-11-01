@@ -151,6 +151,13 @@ func (b *Backend) Report(ctx context.Context, c agentapi.Caller, r agentapi.Repo
 	if !b.registered(c) {
 		return agentapi.Errorf(agentapi.CodeNotRegistered, "agent instance %s is not registered", c.AgentInstanceID)
 	}
+	// Before anything is stored: a refused report has no effect, and the
+	// earlier one stays the latest.
+	if r.Instance != nil {
+		if err := checkWorkerNames(r.Instance.Workers); err != nil {
+			return err
+		}
+	}
 	now := b.Clock.Now()
 	if r.Instance != nil && r.Instance.Key != "" {
 		if err := b.storeKey(ctx, c, r.Instance.UID, r.Instance.Key); err != nil {
@@ -171,6 +178,22 @@ func (b *Backend) Report(ctx context.Context, c agentapi.Caller, r agentapi.Repo
 	}
 	b.mu.Unlock()
 	b.enqueueFor(ctx, c)
+	return nil
+}
+
+// checkWorkerNames refuses a report in which two workers share a name. A
+// worker is named WorkerName(i) for its index (agentapi.DesiredWorker), so a
+// repeated name is a malformed report; the metrics key a worker's series by
+// its name, and two with one name would make duplicate series and fail the
+// whole scrape.
+func checkWorkerNames(ws []agentapi.WorkerReport) error {
+	seen := make(map[string]bool, len(ws))
+	for _, w := range ws {
+		if seen[w.Name] {
+			return agentapi.Errorf(agentapi.CodeBadRequest, "the report lists the worker %q twice; worker names are unique", w.Name)
+		}
+		seen[w.Name] = true
+	}
 	return nil
 }
 

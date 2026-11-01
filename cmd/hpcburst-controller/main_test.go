@@ -54,6 +54,18 @@ func TestParse(t *testing.T) {
 	}
 }
 
+// The metrics server binds loopback at the port base + 12 (HBEP-8, Metrics):
+// 29232 for the base 29220, written out so a change of offset shows.
+func TestMetricsAddr(t *testing.T) {
+	f, err := parse([]string{"--state-dir", "/state", "--port-base", "29220", "--health-addr", "127.0.0.1:29226"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := f.host.ControllerMetricsAddr(); got != "127.0.0.1:29232" {
+		t.Fatalf("metrics address %q, want 127.0.0.1:29232", got)
+	}
+}
+
 // A credentials directory others can reach is refused (HBEP-11, Credentials);
 // a private one gets its allocations and instances subdirectories.
 func TestCheckCredentialsDir(t *testing.T) {

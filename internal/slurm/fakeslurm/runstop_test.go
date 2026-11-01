@@ -25,14 +25,25 @@ func procGone(pid int) bool {
 	return len(f) > 0 && (f[0] == "Z" || f[0] == "X")
 }
 
+// waitGroupGone waits until the kernel reports no process in the group. It is
+// a different thing from Finished: a zombie is a member until its parent reaps
+// it, and an orphaned descendant is reaped by init, a little after the fake
+// has found it dead.
+func waitGroupGone(t *testing.T, pgid int) {
+	t.Helper()
+	waitFor(t, "process group "+itoa(pgid)+" to be empty", func() bool { return groupGone(pgid) })
+}
+
 // scancel ends the job CANCELLED at once, sends TERM to its processes and,
 // after KillWait, KILL to whatever ignores the TERM.
 func TestRunModeScancelSendsTermThenKill(t *testing.T) {
-	t.Run("a job that traps TERM gets KILL after the grace", func(t *testing.T) {
+	t.Run("a job that ignores TERM gets KILL after the grace", func(t *testing.T) {
+		// The shell ignores TERM, so nothing depends on how fast it runs a
+		// handler: it lives until the KILL, and the grace is a lower bound.
 		const grace = 300 * time.Millisecond
 		r := newRunRig(t, RunMode{KillWait: grace})
-		up, term := r.home+"/up", r.home+"/term"
-		id := r.submit("trap \"echo term >> "+term+"\" TERM; echo up > "+up+"; "+waitLoop(r.home+"/never"), "--time=10")
+		up := r.home + "/up"
+		id := r.submit("trap \"\" TERM; echo up > "+up+"; "+waitLoop(r.home+"/never"), "--time=10")
 		r.waitFile(up)
 		r.must("scancel " + itoa(id))
 		if j := r.job(id); j.State != Cancelled {
@@ -41,7 +52,6 @@ func TestRunModeScancelSendsTermThenKill(t *testing.T) {
 		if got := r.squeueJob(id)["job_state"]; !equalStrings(got, Cancelled) {
 			t.Errorf("squeue job_state %v after scancel, want [CANCELLED]", got)
 		}
-		r.waitFile(term) // the trap ran: the job got TERM and lived on
 		j := r.waitFinished(id)
 		switch {
 		case j.TermAt.IsZero() || j.KillAt.IsZero():
@@ -52,9 +62,7 @@ func TestRunModeScancelSendsTermThenKill(t *testing.T) {
 		if j.ExitSignal != syscall.SIGKILL || j.State != Cancelled {
 			t.Errorf("ended by %v in state %s, want SIGKILL and CANCELLED", j.ExitSignal, j.State)
 		}
-		if !groupGone(j.PID) {
-			t.Errorf("process group %d still has processes", j.PID)
-		}
+		waitGroupGone(t, j.PID)
 	})
 	t.Run("a job that dies of TERM gets no KILL", func(t *testing.T) {
 		r := newRunRig(t, RunMode{KillWait: 10 * time.Minute})
@@ -70,39 +78,25 @@ func TestRunModeScancelSendsTermThenKill(t *testing.T) {
 }
 
 // The time limit, in RunMode.Minute units, ends a running job TIMEOUT and
-// sends it TERM; squeue's projected end_time is the start plus the limit in
-// those units. A limit lowered below the time already run ends it at once.
+// sends it TERM, no sooner than the limit after the job started: the wall
+// time before the submission is a lower bound on the start. squeue's
+// projected end_time is the start plus the limit in those units. A limit set
+// by SetTimeLimit is in runlimit_test.go.
 func TestRunModeTimeLimitGivesTimeout(t *testing.T) {
-	t.Run("the limit passes", func(t *testing.T) {
-		r := newRunRig(t, RunMode{Minute: 100 * time.Millisecond, KillWait: 10 * time.Minute})
-		id := r.submit(waitLoop(r.home+"/never"), "--time=2")
-		j := r.waitFinished(id)
-		if j.State != Timeout || j.TermAt.IsZero() || j.ExitSignal != syscall.SIGTERM {
-			t.Errorf("state %s, TermAt %v, signal %v; want TIMEOUT after a TERM", j.State, j.TermAt, j.ExitSignal)
-		}
-		if got := r.squeueJob(id)["state_reason"]; got != "TimeLimit" {
-			t.Errorf("squeue state_reason %v, want TimeLimit", got)
-		}
-	})
-	t.Run("a lowered limit", func(t *testing.T) {
-		r := newRunRig(t, RunMode{Minute: 50 * time.Millisecond, KillWait: 10 * time.Minute})
-		up := r.home + "/up"
-		id := r.submit("echo up > "+up+"; "+waitLoop(r.home+"/never"), "--time=6000") // 300 s in 50 ms minutes
-		r.waitFile(up)
-		end := r.squeueJob(id)["end_time"].(map[string]any)
-		if want := float64(t0.Add(300 * time.Second).Unix()); end["set"] != true || end["number"] != want {
-			t.Errorf("projected end_time %v, want set at %v (start plus 6000 minutes of 50 ms)", end, want)
-		}
-		if j := r.job(id); j.State != Running {
-			t.Fatalf("state %s before the limit is lowered, want RUNNING", j.State)
-		}
-		if err := r.p.SetTimeLimit(id, 1); err != nil {
-			t.Fatal(err)
-		}
-		if j := r.waitFinished(id); j.State != Timeout {
-			t.Errorf("state %s after the limit was lowered below the time run, want TIMEOUT", j.State)
-		}
-	})
+	const minute = 100 * time.Millisecond
+	r := newRunRig(t, RunMode{Minute: minute, KillWait: 10 * time.Minute})
+	before := time.Now()
+	id := r.submit(waitLoop(r.home+"/never"), "--time=2")
+	j := r.waitFinished(id)
+	if j.State != Timeout || j.TermAt.IsZero() || j.ExitSignal != syscall.SIGTERM {
+		t.Errorf("state %s, TermAt %v, signal %v; want TIMEOUT after a TERM", j.State, j.TermAt, j.ExitSignal)
+	}
+	if got := j.TermAt.Sub(before); got < 2*minute {
+		t.Errorf("TERM came %s after the submission, before the limit of %s", got, 2*minute)
+	}
+	if got := r.squeueJob(id)["state_reason"]; got != "TimeLimit" {
+		t.Errorf("squeue state_reason %v, want TimeLimit", got)
+	}
 }
 
 // When the batch script ends, what it left behind is killed, as Slurm's
@@ -154,9 +148,7 @@ func TestRunModeRequeueRestartsTheScript(t *testing.T) {
 	if j.PID == old || j.Executions != 2 || j.State != Running {
 		t.Errorf("after the requeue: PID %d (was %d), %d executions, state %s; want a new process, 2, RUNNING", j.PID, old, j.Executions, j.State)
 	}
-	if !groupGone(old) {
-		t.Errorf("the first execution's group %d still has processes", old)
-	}
+	waitGroupGone(t, old)
 	if err := os.WriteFile(r.home+"/go", nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -175,9 +167,7 @@ func TestRunModeCloseEndsEveryProcess(t *testing.T) {
 	if err := r.p.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if !groupGone(pid) {
-		t.Errorf("process group %d still has processes after Close", pid)
-	}
+	waitGroupGone(t, pid)
 	late := r.submit("true")
 	if j := r.job(late); j.State != Pending || j.PID != 0 {
 		t.Errorf("a job submitted after Close: state %s, PID %d; want PENDING, no process", j.State, j.PID)

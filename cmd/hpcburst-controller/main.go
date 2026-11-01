@@ -23,7 +23,9 @@
 // the shared paths and ports (docs/development.md, Runtime conventions): the
 // kubeconfig is <state>/kubeconfig unless --kubeconfig says otherwise, the
 // credentials directory is Host.CredentialsDir() and the agent builds are in
-// Host.AgentBuildsDir(); the agent API binds Host.AgentEndpointAddr().
+// Host.AgentBuildsDir(); the agent API binds Host.AgentEndpointAddr(). The
+// lifecycle controller serves /metrics at Host.ControllerMetricsAddr(), on
+// loopback at the port base + 12 (HBEP-8, Metrics).
 //
 // Environment: HF_ENDPOINT, when set, is the origin of the Hugging Face Hub
 // that the lifecycle controller lists checkpoints from; it is written into
@@ -165,6 +167,7 @@ func run(ctx context.Context, f flags, d deps) error {
 		return fmt.Errorf("kubeconfig: %w", err)
 	}
 	opts := managerOptions(f, cfg, os.Getenv)
+	opts.Registry = d.registry
 	if opts.HubEndpoint != "" {
 		if err := agentapi.CheckHubEndpoint(opts.HubEndpoint); err != nil {
 			return fmt.Errorf("%s: %w", hubEndpointEnv, err)
@@ -214,11 +217,11 @@ func main() {
 const hubEndpointEnv = "HF_ENDPOINT"
 
 // managerOptions are the lifecycle manager's options from the flags and the
-// environment.
+// environment; the caller adds the metrics registry.
 func managerOptions(f flags, cfg *rest.Config, getenv func(string) string) lifecycle.Options {
 	return lifecycle.Options{
 		Config: cfg, CredentialsDir: f.host.CredentialsDir(), AgentBuildsDir: f.host.AgentBuildsDir(),
-		FrontConfigured: f.frontMode != "", HealthAddr: f.healthAddr, LeaderElection: f.leaderElect, Workers: f.workers,
-		HubEndpoint: getenv(hubEndpointEnv),
+		FrontConfigured: f.frontMode != "", HealthAddr: f.healthAddr, MetricsAddr: f.host.ControllerMetricsAddr(),
+		LeaderElection: f.leaderElect, Workers: f.workers, HubEndpoint: getenv(hubEndpointEnv),
 	}
 }
