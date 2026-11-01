@@ -216,6 +216,9 @@ func (p *Platform) schedule(now time.Time) {
 		if n := p.slotsOf(j.partition); n > 0 && p.running(j.partition)+p.phantoms[j.partition] >= n {
 			continue
 		}
+		if p.canStart(j) != nil { // the user's GPU cap under the QOS (qos.go)
+			continue
+		}
 		if err := j.markStart(now); err != nil {
 			continue
 		}

@@ -159,7 +159,10 @@ func TestSbatchPartitionPolicies(t *testing.T) {
 	// A one-job-per-user partition refuses a second live job of the same user.
 	a := r.sbatch("--partition=single")
 	_, errOut, code := r.run("sbatch --wrap=true --partition=single")
-	const oneJob = submitFailedPrefix + "Job violates accounting/QOS policy (job submit limit, user's size and/or time limits)\n"
+	// Slurm's refusal is two lines, the reason's name first (HBEP-4, QOS limits,
+	// A limit refusal).
+	const oneJob = "sbatch: error: QOSMaxSubmitJobPerUserLimit\n" +
+		submitFailedPrefix + "Job violates accounting/QOS policy (job submit limit, user's size and/or time limits)\n"
 	if code != 1 || errOut != oneJob {
 		t.Errorf("second job: exit %d stderr %q, want exit 1 and %q", code, errOut, oneJob)
 	}
@@ -208,7 +211,7 @@ func TestDefiniteRejectionsAreNeverTransient(t *testing.T) {
 		"sbatch --wrap=true --partition=gpu --gres=gpu:a100:1",
 	} {
 		_, errOut, code := r.run(line)
-		if code != 1 || !strings.HasPrefix(errOut, submitFailedPrefix) {
+		if code != 1 || !strings.Contains(errOut, submitFailedPrefix) {
 			t.Fatalf("%q: exit %d stderr %q, want a definite rejection", line, code, errOut)
 		}
 		for _, bad := range transientReasons {

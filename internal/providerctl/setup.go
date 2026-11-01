@@ -82,7 +82,7 @@ func New(kube client.Client, reader client.Reader, scheme *runtime.Scheme, o Opt
 		managed.WithPollIntervalHook(pollHook(o)),
 		managed.WithTimeout(o.Timeout),
 		managed.WithLogger(o.Log),
-		managed.WithRecorder(o.Recorder),
+		managed.WithRecorder(createdFilter{inner: o.Recorder}),
 	}
 	if o.CreationGracePeriod != 0 {
 		opts = append(opts, managed.WithCreationGracePeriod(max(o.CreationGracePeriod, 0)))

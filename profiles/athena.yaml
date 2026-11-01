@@ -31,24 +31,46 @@ spec:
       cpusPerGpu: 16 # facts.hardware.node_documented.value.proportional_cpus_per_gpu
       memPerGpu: 128000Mi # facts.hardware.node_documented.value.proportional_ram_per_gpu_mb, 128000 (the node's 1024000 divided by its 8 GPUs)
       imageFormat: sandbox # facts.containers.apptainer_compute_nodes.value.plgrid-gpu-a100 (S1 probe 2: a SIF fails, a sandbox runs); also facts.partitions[name=plgrid-gpu-a100].image_format
+      qos: plgrid # facts.partitions[name=plgrid-gpu-a100].qos, "plgrid" (scontrol show partition, 30 Oct 2026): the QOS Slurm applies to every job on this partition; its limit is typed in qos below
 
     # plgrid-now: three things (`@hpc-burst-science-agent`, 1 Nov 2026, issue #93).
     #   - cpusPerGpu and memPerGpu are left absent on purpose, so that no Instance is planned here: the
     #     lifecycle controller refuses to size an Instance on a partition that does not give them
     #     (internal/lifecycle, partitionSizing; TestShippedAthenaNowCannotBeSized pins it). Sourcing them
-    #     (the QoS cap is cpu=16 and 125G) would lift that refusal.
+    #     (the QoS cap is cpu=16 and 125G, typed in qos below) would lift that refusal; that waits for
+    #     PartitionTooShort, the last step of the QoS work (`@hpc-burst-science-agent`, 1 Nov 2026).
     #   - It is for conformance runs and short checks only: maxTime 1h is shorter than drainWindow (2h10m)
     #     plus handoverMargin (30m), both below. The profile lists it so that the conformance harness can run there.
     #   - Both hold until HBEP-7's PartitionTooShort check lands (maxTime must exceed drainWindow plus
     #     handoverMargin plus health.startTimeout, or the ModelDeployment goes Degraded). No marker field or
     #     controller check is added before then.
     # The measured limits (1 h, one GPU, one running and one submitted job per user) are facts in the untyped
-    # block, cited on each value below. The per-user cap of one GPU is not typed: gpusPerNode is the node's 8. imageFormat is absent as well: probe 2 ran on plgrid-gpu-a100 only.
+    # block, cited on each value below. The per-user limits are typed in qos (plgrid-now), which this
+    # partition names: gpusPerNode stays the node's 8, and the most GPUs one Allocation may request is the
+    # smaller of that and the QOS's maxGpusPerUser, 1 (HBEP-4, Submission, GPU sizing and QOS limits).
+    # imageFormat is absent as well: probe 2 ran on plgrid-gpu-a100 only.
     - name: plgrid-now # spec.profile.facts.partitions[name=plgrid-now].name
       gpuModel: A100 # HBEP-4 fixes the string. facts.partitions[name=plgrid-now].gres is "gpu:a100:8", the same node type as plgrid-gpu-a100 (facts.hardware.node_documented.value.accelerator, "8x NVIDIA A100-SXM4-40GB")
       cpuArch: x86_64 # facts.partitions[name=plgrid-now].arch
       maxTime: 1h # facts.partitions[name=plgrid-now].max_time, "01:00:00"
-      gpusPerNode: 8 # facts.partitions[name=plgrid-now].gres, "gpu:a100:8": the field is a node fact. The per-user cap of one GPU (facts.slurm.qos.value[name=plgrid-now].max_tres_per_user, "cpu=16,gres/gpu=1,mem=125G") stays in the untyped facts; it becomes a typed QoS limit (maxGpusPerUser) in the HBEP-4/7 amendment (PR #151), and the most GPUs one Allocation may request will be the smaller of the two (`@hpc-burst-science-agent`, 1 Nov 2026). Until then nothing reads the cap: the absent sizing keeps Instances off this partition
+      gpusPerNode: 8 # facts.partitions[name=plgrid-now].gres, "gpu:a100:8": the field is a node fact. The per-user cap of one GPU (facts.slurm.qos.value[name=plgrid-now].max_tres_per_user, "cpu=16,gres/gpu=1,mem=125G") is typed in qos below, maxGpusPerUser, and the most GPUs one Allocation may request is the smaller of the two, 1 (`@hpc-burst-science-agent`, 1 Nov 2026). Nothing sizes an Instance here until cpusPerGpu and memPerGpu are given: the absent sizing keeps Instances off this partition
+      qos: plgrid-now # facts.partitions[name=plgrid-now].qos, "plgrid-now" (scontrol show partition): the QOS Slurm applies to every job on this partition; its limits are typed in qos below
+
+  # The QOSes that a partition's qos or a Provider's qos names, with the limits the plan reads (HBEP-4,
+  # QOS limits and Platform profile schema; `@hpc-burst-science-agent`, 1 Nov 2026). An absent limit is no
+  # limit as far as the plan knows. Each partition's QOS is typed: plgrid for plgrid-gpu-a100 and plgrid-now for
+  # the partition of that name. A Provider that sets no qos runs under the association's default, which the
+  # profile cannot know.
+  qos:
+    - name: plgrid # facts.slurm.qos.value[name=plgrid] (sacctmgr, 30 Oct 2026): the QOS of plgrid-gpu-a100
+      # No wall limit and no per-user TRES limit (facts.slurm.qos.value[name=plgrid].max_wall and .max_tres_per_user are empty), so the partition's maxTime, 48h, is the limit.
+      maxSubmitPerUser: 1000 # facts.slurm.qos.value[name=plgrid].max_submit_per_user, 1000. Its max_jobs_per_user is empty, and its flag DenyOnLimit has no typed field
+    - name: plgrid-now # facts.slurm.qos.value[name=plgrid-now] (sacctmgr, 30 Oct 2026)
+      # maxWall is absent: the QOS has none (facts.slurm.qos.value[name=plgrid-now].max_wall is empty); the partition's maxTime, 1h, is the limit.
+      maxSubmitPerUser: 1 # facts.slurm.qos.value[name=plgrid-now].max_submit_per_user, 1 (max_jobs_per_user is 1 as well)
+      maxGpusPerUser: 1 # facts.slurm.qos.value[name=plgrid-now].max_tres_per_user, "cpu=16,gres/gpu=1,mem=125G", the GPU entry
+      maxCpusPerUser: 16 # the same max_tres_per_user, the CPU entry
+      maxMemPerUser: 125Gi # the same max_tres_per_user, the memory entry: Slurm's G is 2^30 bytes, so 125Gi, which is 128000 MiB, the same as plgrid-gpu-a100's memPerGpu
 
   holdRelease: true # facts.slurm.hold_release.value.plgrid-gpu-a100: user_release_ok true (S1's hold check); facts.slurm.plgrid_now_conformance: the provider's held submit and one release on plgrid-now, 1 Nov 2026
   lostGrace: 2m # framework default (HBEP-4, Platform profile schema, lostGrace): above the measured gap of about 2 s between queue and accounting (S7's capture)

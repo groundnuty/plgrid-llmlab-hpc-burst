@@ -255,9 +255,9 @@ type SubmissionRecord struct {
 	// nothing fails. Empty for any other refusal, a policy refusal for another
 	// limit included, and for every other state. The Provider's controller
 	// writes it with the state, in one record, so the lifecycle controller
-	// never sees a Rejected state without its code: the fake controller
-	// (pkg/provider/fake) does today, the Slurm provider's from #151's
-	// provider change.
+	// never sees a Rejected state without its code. The fake controller
+	// (pkg/provider/fake) and the Slurm provider's controller both write it
+	// so.
 	//
 	// +optional
 	// +kubebuilder:validation:Enum=SubmitLimitReached
