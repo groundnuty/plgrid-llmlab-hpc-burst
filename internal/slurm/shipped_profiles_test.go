@@ -126,9 +126,9 @@ func TestShippedCPUPartitionRefusesGPUAllocations(t *testing.T) {
 // 1 Nov 2026): the partition's time limit is 1 h, and its gpusPerNode is the
 // node's 8, since the field is a node fact. The QoS cap of one GPU per user is
 // typed (qos plgrid-now, maxGpusPerUser), and TestShippedProfilesTypeTheirQOS
-// checks the refusal of a second GPU; the absent per-GPU sizing keeps
+// checks the refusal of a second GPU; HBEP-7's PartitionTooShort keeps
 // Instances off the partition (internal/lifecycle,
-// TestShippedAthenaNowCannotBeSized). The expected values are the measured
+// TestShippedAthenaNowIsTooShort). The expected values are the measured
 // time limit and the node's GPU count, written out here. A
 // request above the time limit is refused before any call; the control is the
 // same request on plgrid-gpu-a100, whose profile allows 48 h, so the refusal

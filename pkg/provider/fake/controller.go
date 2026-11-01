@@ -55,6 +55,11 @@ import (
 //     later acts.
 //   - A Rejected attempt (the scheduler's refusal, or a pre-call refusal) keeps
 //     phase Submitting until RejectBackoff has passed, then attempt n+1 runs.
+//     Every pass looks the tag up first, a Rejected record's included, and a
+//     job found is adopted: the record stays Rejected and the job ID is set.
+//     That is how a job that registered late (Script.RegisteredLate) is found
+//     after the refusal it caused, with no attempt n+2 (HBEP-4, Test plan, "A
+//     lost reply under a one-job limit").
 //   - Hold mode (HoldRelease true), the submission. The same pass that finds
 //     InflightWindow passed since the attempt, with no job carrying the tag,
 //     drops the attempt, whether it is Unknown or InFlight: it claims n+1 as

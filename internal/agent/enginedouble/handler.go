@@ -23,6 +23,15 @@ type handler struct {
 // socket (a TCP listener needs a port in the test's block).
 func Handler(cfg Config) http.Handler { return newHandler(cfg, nil) }
 
+// HandlerRecording is Handler, and calls record with a "request" LogEvent
+// (the line the engine process writes to HB_ENGINE_DOUBLE_LOG) as each chat
+// request ends, so an in-process test can assert what reached the engine:
+// its sampling parameters and the tail of its prompt. record may be called
+// from several goroutines at once.
+func HandlerRecording(cfg Config, record func(LogEvent)) http.Handler {
+	return newHandler(cfg, record)
+}
+
 func newHandler(cfg Config, record func(LogEvent)) http.Handler {
 	cfg = cfg.withDefaults()
 	if err := cfg.Validate(); err != nil {

@@ -39,16 +39,43 @@ type jobRec struct {
 	// priorRun is the time the job's earlier executions ran, added by each
 	// requeue (accounting sums the executions of a requeued job).
 	priorRun time.Duration
+
+	// ran are the intervals of the job's earlier executions, one per requeue of
+	// a job that had started: they held the job's GPUs, which the user's GPU cap
+	// counts, though the requeue cleared the start (Config.MaxGPUsPerUser).
+	ran []span
+	// seq is the job's place in the queue among jobs with the same nominal
+	// start: it grows each time the job becomes eligible (submission, hold lift,
+	// requeue), so the job that became eligible first goes first. For a job
+	// never lifted or requeued it is the job ID's order.
+	seq int
 }
+
+// span is a stretch of time from start up to, not including, end.
+type span struct{ start, end time.Time }
+
+// nominalStart is when an unheld job would start with no cap in the way: its
+// eligibility plus the script's queue wait.
+func (j *jobRec) nominalStart() time.Time { return j.eligible.Add(j.script.QueueWait) }
 
 // timeline returns when the job starts and when it ends if nothing else
 // happens, from the facts alone. A nil start means the job is held and has no
 // start yet; a nil end means it has no end yet. endState is the Slurm state at
 // the end. A cancel clips the timeline.
 func (j *jobRec) timeline() (start, end *time.Time, endState string) {
+	var s *time.Time
 	if j.hold == provider.HoldNone {
-		s := j.eligible.Add(j.script.QueueWait)
-		start = &s
+		n := j.nominalStart()
+		s = &n
+	}
+	return j.timelineFrom(s)
+}
+
+// timelineFrom is timeline for a job that starts at s: a nil s means the job
+// has no start. The cap on the user's GPUs can put s after the nominal start.
+func (j *jobRec) timelineFrom(s *time.Time) (start, end *time.Time, endState string) {
+	if s != nil {
+		start = s
 		hard := s.Add(j.limit)
 		end, endState = &hard, "TIMEOUT"
 		if fa := j.script.FailAfter; fa != nil {
@@ -90,7 +117,7 @@ func endReason(state string) string {
 // is decided. The source is the queue listing until EndTime plus MinJobAge,
 // and accounting after.
 func (b *Batch) record(j *jobRec, now time.Time) provider.Job {
-	start, end, endState := j.timeline()
+	start, end, endState, waitsOnCap := b.timelineOf(j)
 	out := provider.Job{
 		ID:           j.id,
 		Name:         j.name,
@@ -115,9 +142,14 @@ func (b *Batch) record(j *jobRec, now time.Time) provider.Job {
 		}
 	case start != nil && !now.Before(*start):
 		state, reason = "RUNNING", "None"
-	case start != nil:
+	case start != nil || waitsOnCap:
+		// Pending. Until the nominal start the reason is Priority, with the
+		// script's estimate; from then on a job still waiting waits only on the
+		// cap on the user's GPUs (a start after the nominal start, or none).
 		state, reason = "PENDING", "Priority"
-		if est := j.script.StartEstimate; est > 0 {
+		if !now.Before(j.nominalStart()) {
+			reason = ReasonQOSMaxGRESPerUser
+		} else if est := j.script.StartEstimate; est > 0 {
 			t := j.eligible.Add(est)
 			out.StartEstimate = &t
 		}
