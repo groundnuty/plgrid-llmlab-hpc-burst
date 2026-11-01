@@ -84,8 +84,9 @@ func TestLimitRefusalIsNoFailure(t *testing.T) {
 			t.Fatalf("after refusal %d the Instances are %+v, want one pending", refusals, ins)
 		}
 		c := rg.condition("md", v1alpha1.ConditionDegraded)
-		if c.Status != metav1.ConditionTrue || c.Reason != v1alpha1.ReasonSubmitLimitReached || !strings.Contains(c.Message, submitLimitLine) {
-			t.Fatalf("after refusal %d Degraded = %s/%s %q, want SubmitLimitReached with the reason line", refusals, c.Status, c.Reason, c.Message)
+		if c.Status != metav1.ConditionTrue || c.Reason != v1alpha1.ReasonSubmitLimitReached || !strings.Contains(c.Message, submitLimitLine) ||
+			!strings.Contains(c.Message, "Provider "+rigProvider+", at its maxSubmitPerUser 1 of QOS example-now") {
+			t.Fatalf("after refusal %d Degraded = %s/%s %q, want SubmitLimitReached naming the Provider, the limit and the reason line", refusals, c.Status, c.Reason, c.Message)
 		}
 		if strings.Contains(c.Message, v1alpha1.ReasonSubmissionRejected+":") {
 			t.Fatalf("a submit-limit refusal also shows as SubmissionRejected: %q", c.Message)
@@ -236,8 +237,9 @@ func TestSlotsLeaderHandOver(t *testing.T) {
 		t.Fatalf("%d sbatch calls, want both submitted", n)
 	}
 	c := rg.condition(refused, v1alpha1.ConditionDegraded)
-	if c.Reason != v1alpha1.ReasonSubmitLimitReached || !strings.Contains(c.Message, submitLimitLine) {
-		t.Fatalf("%s Degraded = %s/%s %q, want SubmitLimitReached with the reason line", refused, c.Status, c.Reason, c.Message)
+	if c.Reason != v1alpha1.ReasonSubmitLimitReached || !strings.Contains(c.Message, submitLimitLine) ||
+		!strings.Contains(c.Message, "Provider "+rigProvider+", at its maxSubmitPerUser 1 of QOS example-now") {
+		t.Fatalf("%s Degraded = %s/%s %q, want SubmitLimitReached naming the Provider, the limit and the reason line", refused, c.Status, c.Reason, c.Message)
 	}
 	if ph := onlyAllocation(rg, refused).Status.AtProvider.Phase; ph != v1alpha1.AllocationSubmitting {
 		t.Fatalf("the refused Allocation is %s, want Submitting: it waits", ph)
