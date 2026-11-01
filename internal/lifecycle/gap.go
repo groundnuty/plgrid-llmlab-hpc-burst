@@ -3,22 +3,19 @@ package lifecycle
 import (
 	"context"
 	"fmt"
-	"os"
 	"sync"
 	"time"
 
 	coordinationv1 "k8s.io/api/coordination/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/uuid"
-	coordinationv1client "k8s.io/client-go/kubernetes/typed/coordination/v1"
-	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/leaderlock"
 )
 
 // gapLock is the leader election's lock with the start's observation of HBEP-8,
@@ -105,34 +102,21 @@ func (l *gapLock) gapStart() (time.Time, bool) {
 	return l.previous, l.took && l.observed && !l.previous.IsZero()
 }
 
-// newGapLock builds the lifecycle Lease's lock as controller-runtime's
-// leaderelection.NewResourceLock does (v0.23.1, pkg/leaderelection/
-// leader_election.go, lines 66-136: a hostname_UUID identity, a
+// newGapLock builds the lifecycle Lease's lock with leaderlock.New, as
+// controller-runtime's leaderelection.NewResourceLock does (v0.23.1, pkg/
+// leaderelection/leader_election.go, lines 66-136: a hostname_UUID identity, a
 // "leader-election" user agent, a client timeout of half the renew deadline),
-// wrapped in a gapLock.
+// with its release retried if a late renew made it fail (issue #131), and
+// wraps it in a gapLock.
+//
+// The lock is given no EventRecorder, where controller-runtime's own would
+// pass the manager's, so the elector raises none of the legacy
+// leader-election events (became leader, stopped leading). They carry no
+// action, so under HBEP-8 no tool may act on them. Leadership changes still
+// show in the Lease itself, and the gap after a restart is the typed
+// ObservationGap (`@hpc-burst-science-agent`, 1 Nov 2026, for #111).
 func newGapLock(cfg *rest.Config, renewDeadline time.Duration) (*gapLock, error) {
-	host, err := os.Hostname()
-	if err != nil {
-		return nil, err
-	}
-	cfg = rest.AddUserAgent(rest.CopyConfig(cfg), "leader-election")
-	cfg.Timeout = max(renewDeadline/2, time.Second)
-	core, err := corev1client.NewForConfig(cfg)
-	if err != nil {
-		return nil, err
-	}
-	coord, err := coordinationv1client.NewForConfig(cfg)
-	if err != nil {
-		return nil, err
-	}
-	// The lock is given no EventRecorder, where controller-runtime's own would
-	// pass the manager's, so the elector raises none of the legacy
-	// leader-election events (became leader, stopped leading). They carry no
-	// action, so under HBEP-8 no tool may act on them. Leadership changes
-	// still show in the Lease itself, and the gap after a restart is the typed
-	// ObservationGap (`@hpc-burst-science-agent`, 1 Nov 2026, for #111).
-	inner, err := resourcelock.New(resourcelock.LeasesResourceLock, v1alpha1.ControllerNamespace, v1alpha1.LeaseLifecycle,
-		core, coord, resourcelock.ResourceLockConfig{Identity: host + "_" + string(uuid.NewUUID())})
+	inner, err := leaderlock.New(cfg, v1alpha1.ControllerNamespace, v1alpha1.LeaseLifecycle, renewDeadline, ctrl.Log)
 	if err != nil {
 		return nil, err
 	}

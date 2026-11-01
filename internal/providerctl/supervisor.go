@@ -20,6 +20,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/leaderlock"
 )
 
 // ManagerOptions are a Provider manager's leader-election timings and its
@@ -34,24 +35,48 @@ type ManagerOptions struct {
 	GracefulShutdownTimeout time.Duration
 }
 
+// defaultRenewDeadline is controller-runtime's default renew deadline
+// (v0.23.1, pkg/manager/internal.go:55), which a ManagerOptions with no
+// RenewDeadline gets, and from which the Lease lock's client time-out is set.
+const defaultRenewDeadline = 10 * time.Second
+
+// providerLeaseLock is the lock of a Provider manager's Lease: leaderlock's,
+// whose release is retried, with the client time-out set from the manager's
+// renew deadline as controller-runtime sets it.
+func providerLeaseLock(cfg *rest.Config, provider string, o ManagerOptions) (resourcelock.Interface, error) {
+	renew := defaultRenewDeadline
+	if o.RenewDeadline > 0 {
+		renew = o.RenewDeadline
+	}
+	name := v1alpha1.ProviderLeaseName(provider)
+	return leaderlock.New(cfg, v1alpha1.ControllerNamespace, name, renew, ctrl.Log)
+}
+
 // NewProviderManager returns a controller-runtime manager for one Provider
 // (HBEP-11, Controllers; docs/development.md, Process layout): its own leader
 // Lease, v1alpha1.ProviderLeaseName(provider), in v1alpha1.ControllerNamespace,
-// released when the manager stops; no metrics, health or pprof listener; and
-// controller names that may repeat when the manager is started again.
+// released when the manager stops, with the release retried if a late renew
+// made it fail (leaderlock, issue #131); no metrics, health or pprof listener;
+// and controller names that may repeat when the manager is started again.
 func NewProviderManager(cfg *rest.Config, scheme *runtime.Scheme, provider string, o ManagerOptions) (manager.Manager, error) {
+	name := v1alpha1.ProviderLeaseName(provider)
+	lock, err := providerLeaseLock(cfg, provider, o)
+	if err != nil {
+		return nil, fmt.Errorf("provider %s: the leader Lease's lock: %w", provider, err)
+	}
 	skip := true
 	mo := manager.Options{
-		Scheme:                        scheme,
-		Metrics:                       metricsserver.Options{BindAddress: "0"},
-		HealthProbeBindAddress:        "0",
-		PprofBindAddress:              "0",
-		LeaderElection:                true,
-		LeaderElectionID:              v1alpha1.ProviderLeaseName(provider),
-		LeaderElectionNamespace:       v1alpha1.ControllerNamespace,
-		LeaderElectionResourceLock:    resourcelock.LeasesResourceLock,
-		LeaderElectionReleaseOnCancel: true,
-		Controller:                    config.Controller{SkipNameValidation: &skip},
+		Scheme:                              scheme,
+		Metrics:                             metricsserver.Options{BindAddress: "0"},
+		HealthProbeBindAddress:              "0",
+		PprofBindAddress:                    "0",
+		LeaderElection:                      true,
+		LeaderElectionID:                    name,
+		LeaderElectionNamespace:             v1alpha1.ControllerNamespace,
+		LeaderElectionResourceLock:          resourcelock.LeasesResourceLock,
+		LeaderElectionResourceLockInterface: lock,
+		LeaderElectionReleaseOnCancel:       true,
+		Controller:                          config.Controller{SkipNameValidation: &skip},
 	}
 	if o.LeaseDuration > 0 {
 		mo.LeaseDuration = &o.LeaseDuration
