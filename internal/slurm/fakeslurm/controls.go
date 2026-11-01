@@ -152,15 +152,18 @@ func (p *Platform) setHidden(id int, hidden bool) error {
 // false): squeue lists its end state with the flag, nothing purges it, and its
 // accounting record keeps the end state alone, as in Slurm. It is the control
 // of the tests that run no processes, where run mode's own flag (processes
-// that live, RunMode.Epilog) does not exist. The job must have ended, and run
-// mode refuses it: there the processes and the epilog decide.
+// that live, RunMode.Epilog) does not exist. The job must have ended, or be the
+// PENDING execution a requeue opened (Slurm lists a job requeued while its nodes
+// clean up as ["PENDING", "COMPLETING"]); run mode refuses it: there the
+// processes and the epilog decide. A flag held on a pending execution stays when
+// the job is cancelled, which turns it CANCELLED with the flag.
 func (p *Platform) HoldCompleting(id int, on bool) error {
 	return p.withJob(id, func(j *job, _ time.Time) error {
 		if p.run != nil {
 			return fmt.Errorf("fakeslurm: job %d: run mode decides COMPLETING from its processes and RunMode.Epilog", id)
 		}
-		if on && !IsTerminal(j.state()) {
-			return fmt.Errorf("fakeslurm: job %d is %s: only an ended job can be COMPLETING", id, j.state())
+		if on && !IsTerminal(j.state()) && !j.requeuedPending() {
+			return fmt.Errorf("fakeslurm: job %d is %s: only an ended job, or a requeued one that is pending again, can be COMPLETING", id, j.state())
 		}
 		j.cur().heldCompleting = on
 		return nil

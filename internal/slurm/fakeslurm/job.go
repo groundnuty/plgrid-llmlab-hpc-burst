@@ -109,8 +109,16 @@ const Completing = "COMPLETING"
 // it.
 func (j *job) completing() bool {
 	e := j.cur()
-	return IsTerminal(e.state) && (e.heldCompleting || (e.run != nil && e.run.completing()))
+	if e.heldCompleting && (IsTerminal(e.state) || j.requeuedPending()) {
+		return true
+	}
+	return IsTerminal(e.state) && e.run != nil && e.run.completing()
 }
+
+// requeuedPending reports whether the current execution is the PENDING one a
+// requeue opened: Slurm lists a job requeued while its nodes clean up as
+// ["PENDING", "COMPLETING"] (_set_requeued_job_pending_completing, job_mgr.c).
+func (j *job) requeuedPending() bool { return j.state() == Pending && j.restartCnt > 0 }
 
 // live reports whether the job is pending or running.
 func (j *job) live() bool { return j.state() == Pending || j.state() == Running }

@@ -59,3 +59,26 @@ func TestHoldCompletingNeedsAnEndedJobAndNoRunMode(t *testing.T) {
 		t.Errorf("HoldCompleting in run mode: %v, want a refusal", err)
 	}
 }
+
+// A job requeued while its nodes clean up is listed ["PENDING","COMPLETING"]
+// with its restart count above 0; cancelling it turns it CANCELLED, the flag
+// still held (HBEP-4, Phases, A completing job, Adoption and cancel).
+func TestHoldCompletingOnARequeuedPendingJobThenCancel(t *testing.T) {
+	r := newRig(t, Config{NotListed: NotListedAthena, MinJobAge: 10 * time.Minute})
+	id := r.sbatch()
+	r.start(id)
+	if err := r.p.Requeue(id); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.p.HoldCompleting(id, true); err != nil {
+		t.Fatalf("HoldCompleting on a requeued pending job: %v", err)
+	}
+	j := r.squeueJob(id)
+	if !equalStrings(j["job_state"], Pending, Completing) || j["restart_cnt"].(float64) != 1 {
+		t.Errorf("job_state %v restart_cnt %v, want [PENDING COMPLETING] and 1", j["job_state"], j["restart_cnt"])
+	}
+	r.must("scancel " + itoa(id))
+	if got := r.squeueJob(id)["job_state"]; !equalStrings(got, Cancelled, Completing) {
+		t.Errorf("after scancel: job_state %v, want [CANCELLED COMPLETING]", got)
+	}
+}

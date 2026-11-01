@@ -46,7 +46,8 @@ func (b *Batch) EnsureFile(_ context.Context, f provider.File) error {
 }
 
 // RemoveAllocationFiles implements provider.Batch: it deletes every stored
-// file under alloc/<tag>/.
+// file under alloc/<tag>/. It looks at no job; its caller does not call it
+// while a job with the tag is live or completing.
 func (b *Batch) RemoveAllocationFiles(_ context.Context, tag string) error {
 	if !safeValue.MatchString(tag) || strings.Contains(tag, "..") || strings.Contains(tag, "/") {
 		return fmt.Errorf("%w: tag %q is empty or unsafe", provider.ErrInvalidRequest, tag)

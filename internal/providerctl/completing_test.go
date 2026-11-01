@@ -10,13 +10,18 @@ package providerctl
 // the job from the listing the moment the flag clears (the job then reads from
 // accounting), Athena 23.11 keeps it listed in its base state until MinJobAge.
 //
+// The rules are HBEP-4 (hbep/0004-provider-interface/README.md on main: Core
+// operations, Phases, "A completing job", lines 208-233; Test plan, "A
+// completing job, in both shapes", lines 448-452; Risks, line 109), HBEP-7
+// (Deletion, line 206; Per-user limits, lines 310 and 312), HBEP-8 (the kept
+// record, line 331; Test plan, line 372). Helios's shape is Slurm 24.11 with
+// data_parser v0.0.42, Athena's is 23.11 with v0.0.40.
+//
 // The clock starts at 12:00:00, the job starts at 12:01:00 and ends at 12:02:30.
 // Expected values are written out by hand: the job ID is the fake Slurm's
 // first, 1001, and every instant is a literal.
 
 import (
-	"context"
-	"io"
 	"testing"
 	"time"
 
@@ -25,7 +30,6 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
-	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider/fake"
 )
 
@@ -54,7 +58,16 @@ func newCGRig(t *testing.T, mode fakeslurm.NotListedMode, minAge time.Duration, 
 func startCGRig(t *testing.T, mode fakeslurm.NotListedMode, minAge time.Duration, mods ...realOption) *cgRig {
 	t.Helper()
 	clock := fake.NewClock(at(12, 0, 0))
-	sl := newSlurm(clock, fakeslurm.Config{NotListed: mode, MinJobAge: minAge})
+	// Helios's shape is Slurm 24.11 with data_parser v0.0.42, Athena's is 23.11
+	// with v0.0.40 (HBEP-4, Test plan, A completing job, in both shapes).
+	parser := "v0.0.42"
+	if mode == fakeslurm.NotListedAthena {
+		parser = "v0.0.40"
+	}
+	sl := newSlurm(clock, fakeslurm.Config{NotListed: mode, MinJobAge: minAge, DataParser: parser})
+	mods = append([]realOption{func(e *realEnv) {
+		e.profiles.set(func(v *slurm.Validated) { v.Profile.Spec.JSONDataParser = parser })
+	}}, mods...)
 	e := newRealEnv(t, clock, sl, newFakeClient(t, "prov-a"), "prov-a", "user-a", mods...)
 	e.newAlloc("alloc-a", 1)
 	e.run("alloc-a", 2)
@@ -149,24 +162,32 @@ func TestCompletingJobGivesItsPhaseAtOnceWithJobCompleting(t *testing.T) {
 	}
 }
 
-// A requeued job whose state still carries the flag, ["PENDING","COMPLETING"],
-// stays Failed by the requeue rule, with the flag recorded: completing is the
-// flag, whatever the base state. The fake Slurm cannot list a pending job
-// with the flag, so the platform in between adds it to a requeued job, as the
-// parser test's fixture does.
+// A requeued job whose state still carries the flag, ["PENDING","COMPLETING"]
+// with a restart count of 1 (HBEP-4, Phases: the requeued job is PENDING with
+// the flag while its nodes clean up), stays Failed with reason Requeued by the
+// requeue rule, with the flag recorded: completing is the flag, whatever the
+// base state. The listing gives no end_time for it, so the condition says so.
 func TestRequeuedCompletingJobStaysFailedAndIsCompleting(t *testing.T) {
-	r := newCGRig(t, fakeslurm.NotListedHelios, 10*time.Minute, withCompletingFlagOnRequeued())
-	if err := r.sl.Requeue(r.n); err != nil {
-		t.Fatal(err)
-	}
-	r.poll("alloc-a", 1)
-	a := r.get("alloc-a")
-	o := a.Status.AtProvider
-	if o.Phase != v1alpha1.AllocationFailed || o.Reason != v1alpha1.ReasonRequeued || !o.Requeued || !o.JobCompleting {
-		t.Errorf("phase %s reason %q requeued %v jobCompleting %v; want Failed, Requeued, true, true", o.Phase, o.Reason, o.Requeued, o.JobCompleting)
-	}
-	if c := a.GetCondition(v1alpha1.ConditionJobCompleting); c.Status != corev1.ConditionTrue {
-		t.Errorf("condition JobCompleting %s, want True", c.Status)
+	for _, shape := range bothShapes {
+		t.Run(shape.name, func(t *testing.T) {
+			r := newCGRig(t, shape.mode, 10*time.Minute)
+			if err := r.sl.Requeue(r.n); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.sl.HoldCompleting(r.n, true); err != nil {
+				t.Fatal(err)
+			}
+			r.poll("alloc-a", 1)
+			a := r.get("alloc-a")
+			o := a.Status.AtProvider
+			if o.Phase != v1alpha1.AllocationFailed || o.Reason != v1alpha1.ReasonRequeued || !o.Requeued || !o.JobCompleting || o.RestartCount != 1 {
+				t.Errorf("phase %s reason %q requeued %v jobCompleting %v restarts %d; want Failed, Requeued, true, true, 1", o.Phase, o.Reason, o.Requeued, o.JobCompleting, o.RestartCount)
+			}
+			c := a.GetCondition(v1alpha1.ConditionJobCompleting)
+			if want := "job 1001 is completing in state PENDING; the listing gives no end_time"; c.Status != corev1.ConditionTrue || c.Message != want {
+				t.Errorf("condition JobCompleting %s %q, want True %q", c.Status, c.Message, want)
+			}
+		})
 	}
 }
 
@@ -257,112 +278,126 @@ func TestAJobWhoseStoredStatusIsCompletingIsNotFinal(t *testing.T) {
 	}
 }
 
-// flagOnRequeued is a Platform that lists a requeued job with the COMPLETING
-// flag after its state, as ["PENDING","COMPLETING"]: Slurm's listing of a job
-// requeued while it completed, which the fake Slurm cannot produce.
-type flagOnRequeued struct{ Platform }
-
-func (f flagOnRequeued) flag(j provider.Job) provider.Job {
-	if j.Requeued && j.Source == provider.SourceQueue {
-		j.State = append(append([]string(nil), j.State...), provider.FlagCompleting)
-		j.Completing = true
-	}
-	return j
-}
-
-func (f flagOnRequeued) Observe(ctx context.Context, id string) (provider.Job, bool, error) {
-	j, found, err := f.Platform.Observe(ctx, id)
-	return f.flag(j), found, err
-}
-
-func (f flagOnRequeued) ListByTag(ctx context.Context, tag string) ([]provider.Job, error) {
-	jobs, err := f.Platform.ListByTag(ctx, tag)
-	for i := range jobs {
-		jobs[i] = f.flag(jobs[i])
-	}
-	return jobs, err
-}
-
-func (f flagOnRequeued) FindByTag(ctx context.Context, tag string, since time.Time) ([]provider.Job, error) {
-	jobs, err := f.Platform.FindByTag(ctx, tag, since)
-	for i := range jobs {
-		jobs[i] = f.flag(jobs[i])
-	}
-	return jobs, err
-}
-
-func withCompletingFlagOnRequeued() realOption {
-	return func(e *realEnv) {
-		inner := e.opts.NewPlatform
-		e.opts.NewPlatform = func(v slurm.Validated) (Platform, io.Closer, error) {
-			p, c, err := inner(v)
-			return flagOnRequeued{p}, c, err
+// All the protections of HBEP-4's Test plan, "A completing job, in both shapes",
+// in every case and both shapes, while the flag lasts: the Allocation is deleted
+// and keeps its finalizer and its files and has no acct- record, however many
+// passes run past MinJobAge; a listing that fails for longer than lostGrace
+// clears nothing and the job is never Lost; nothing is cancelled again. (The
+// slot count is HBEP-7's, tested in internal/lifecycle.) Once the flag clears,
+// the files and the finalizer go and exactly one record is written. The cases
+// are the four end states and the requeue, ["PENDING","COMPLETING"] with a
+// restart count of 1, which deletion cancels, turning it CANCELLED with the
+// flag (HBEP-4, Adoption and cancel).
+func TestCompletingJobHoldsTheProtectionsUntilTheFlagClears(t *testing.T) {
+	const ended = `,"allocatedCPUs":8,"allocatedGPUs":1,"elapsedSeconds":90,` +
+		`"startTime":"2026-10-30T12:01:00Z","endTime":"2026-10-30T12:02:30Z","basis":"allocated"}`
+	for _, shape := range bothShapes {
+		for _, c := range []struct {
+			name, state string
+			requeue     bool
+			phase       v1alpha1.AllocationPhase
+		}{
+			{"CANCELLED", fakeslurm.Cancelled, false, v1alpha1.AllocationEnded},
+			{"FAILED", fakeslurm.Failed, false, v1alpha1.AllocationFailed},
+			{"TIMEOUT", fakeslurm.Timeout, false, v1alpha1.AllocationEnded},
+			{"COMPLETED", fakeslurm.Completed, false, v1alpha1.AllocationEnded},
+			{"requeued PENDING", "", true, v1alpha1.AllocationFailed},
+		} {
+			t.Run(shape.name+"/"+c.name, func(t *testing.T) {
+				f := &lineFaults{}
+				r := newCGRig(t, shape.mode, 10*time.Minute, withLineFaults(f))
+				if c.requeue {
+					r.clock.Set(at(12, 2, 30))
+					if err := r.sl.Requeue(r.n); err != nil {
+						t.Fatal(err)
+					}
+					if err := r.sl.HoldCompleting(r.n, true); err != nil {
+						t.Fatal(err)
+					}
+					r.poll("alloc-a", 1)
+				} else {
+					r.endCompleting(c.state, at(12, 2, 30))
+				}
+				if o := r.get("alloc-a").Status.AtProvider; o.Phase != c.phase || !o.JobCompleting {
+					t.Fatalf("precondition: phase %s, jobCompleting %v; want %s, true", o.Phase, o.JobCompleting, c.phase)
+				}
+				head := head(r.realEnv, "alloc-a", "1001")
+				r.del("alloc-a")
+				r.run("alloc-a", 1) // a requeued job is cancelled here, once
+				if c.requeue {
+					if j := slurmJob(t, r.sl, r.id); j.State != fakeslurm.Cancelled || !j.Completing {
+						t.Fatalf("the requeued job after the delete: state %s, completing %v; want CANCELLED, true", j.State, j.Completing)
+					}
+				}
+				scancels := r.sl.Count("scancel")
+				hold := func(what string) {
+					t.Helper()
+					if r.gone("alloc-a") {
+						t.Fatalf("%s: the Allocation is gone while its job is completing", what)
+					}
+					if _, ok := r.record("alloc-a"); ok {
+						t.Fatalf("%s: the accounting record was written while the job is completing", what)
+					}
+					if n := r.sl.Count("rm"); n != 0 {
+						t.Fatalf("%s: %d file removals while the job is completing, want 0", what, n)
+					}
+					if n := r.sl.Count("scancel") - scancels; n != 0 {
+						t.Fatalf("%s: %d more scancel calls for a completing job, want 0", what, n)
+					}
+				}
+				for i := 0; i < 3; i++ { // past MinJobAge and past lostGrace
+					r.clock.Advance(10 * time.Minute)
+					r.run("alloc-a", 2)
+					hold("successful listings")
+				}
+				f.fail("squeue", -1, slurm.ErrTransport)
+				for i := 0; i < 3; i++ { // a failing listing, for longer than lostGrace
+					r.clock.Advance(10 * time.Minute)
+					r.run("alloc-a", 2)
+					hold("a failing listing")
+				}
+				f.clear()
+				if err := r.sl.HoldCompleting(r.n, false); err != nil {
+					t.Fatal(err)
+				}
+				r.clock.Advance(10 * time.Second)
+				r.run("alloc-a", 3)
+				if !r.gone("alloc-a") {
+					t.Fatal("the Allocation is still there after the flag cleared")
+				}
+				if n := r.sl.Count("rm"); n != 1 {
+					t.Errorf("%d file removals after the flag cleared, want 1", n)
+				}
+				if c.requeue {
+					// A requeued job's hours are unknown (HBEP-8); it never
+					// started again, so its start is unknown as well. The
+					// delete cancelled it at 12:03:10: 12:02:30 plus the
+					// poll's 40 s.
+					r.wantRecord("alloc-a", head+`,"endTime":"2026-10-30T12:03:10Z","basis":"allocated",`+
+						`"unknown":["allocatedCPUs","allocatedGPUs","elapsedSeconds","startTime"]}`)
+					return
+				}
+				r.wantRecord("alloc-a", head+ended)
+			})
 		}
 	}
 }
 
-// Clearance is a listing without the flag, or a listing that no longer shows the
-// job; an accounting read alone is not (science agent, 1 Nov 2026, after spike
-// S7: sacct said FAILED while squeue still showed COMPLETING). Accounting here
-// says FAILED, with the elapsed time and the counts, for a job whose listing
-// still shows ["FAILED","COMPLETING"], and the controller reads accounting for
-// it (the job ended between two polls, so its first read finds it ended and
-// takes its CPUs and GPUs from accounting). The job stays live: jobCompleting
-// stays true, the finalizer stays, the files stay, no accounting record is
-// written, however long and however often it is read; the flag's own clearing
-// then releases everything, once.
-func TestAccountingSayingTerminalDoesNotClearTheFlagWhileTheListingShowsIt(t *testing.T) {
+// A completing job is never Lost: it is always listed while the flag lasts, so
+// a long run of successful passes keeps its phase (HBEP-4, Phases: "Lost is
+// unaffected, since a completing job is always listed").
+func TestCompletingJobIsNeverLost(t *testing.T) {
 	for _, shape := range bothShapes {
 		t.Run(shape.name, func(t *testing.T) {
-			r := startCGRig(t, shape.mode, 10*time.Minute)
-			r.clock.Set(at(12, 2, 30))
-			endJob(t, r.sl, r.id, fakeslurm.Failed)
-			if err := r.sl.HoldCompleting(r.n, true); err != nil {
-				t.Fatal(err)
-			}
-			// The precondition: accounting does say FAILED, ended, with its hours.
-			acct, found, err := r.batch.ReadAccounting(r.ctx, r.id)
-			if err != nil || !found || acct.Phase != v1alpha1.AllocationFailed || acct.EndTime == nil || acct.Completing || acct.Accounting == nil || acct.Accounting.Elapsed == nil {
-				t.Fatalf("precondition: accounting gave %+v, found %v, %v; want FAILED with an end time and its elapsed time", acct, found, err)
-			}
-			reads := r.sl.Count("sacct")
-			for i := 0; i < 3; i++ {
-				r.clock.Advance(10 * time.Minute) // past the accounting refresh and MinJobAge
+			r := newCGRig(t, shape.mode, 10*time.Minute)
+			r.endCompleting(fakeslurm.Cancelled, at(12, 2, 30))
+			for i := 0; i < 12; i++ {
+				r.clock.Advance(10 * time.Minute) // two hours, far past lostGrace
 				r.run("alloc-a", 1)
-				r.wantCompleting("accounting says FAILED", v1alpha1.AllocationFailed, "FAILED", "2026-10-30T12:02:30Z")
-			}
-			if r.sl.Count("sacct") == reads {
-				t.Fatal("the controller read no accounting while the job completed: the test proves nothing")
-			}
-			head := head(r.realEnv, "alloc-a", "1001")
-			r.del("alloc-a")
-			for i := 0; i < 3; i++ {
-				r.clock.Advance(10 * time.Minute)
-				r.run("alloc-a", 1)
-				if r.gone("alloc-a") {
-					t.Fatalf("pass %d: the Allocation is gone while the listing still shows the flag", i)
-				}
-				if _, ok := r.record("alloc-a"); ok {
-					t.Fatalf("pass %d: the accounting record was written while the listing shows the flag", i)
-				}
-				if n := r.sl.Count("rm"); n != 0 {
-					t.Fatalf("pass %d: %d file removals while the listing shows the flag, want 0", i, n)
+				if o := r.get("alloc-a").Status.AtProvider; o.Phase != v1alpha1.AllocationEnded || o.AbsentSince != nil || !o.JobCompleting {
+					t.Fatalf("pass %d: phase %s, absentSince %v, jobCompleting %v; want Ended, unset, true", i, o.Phase, o.AbsentSince, o.JobCompleting)
 				}
 			}
-			// The listing stops showing the flag: everything follows, once.
-			if err := r.sl.HoldCompleting(r.n, false); err != nil {
-				t.Fatal(err)
-			}
-			r.clock.Advance(10 * time.Second)
-			r.run("alloc-a", 3)
-			if !r.gone("alloc-a") {
-				t.Fatal("the Allocation is still there after the flag cleared")
-			}
-			if n := r.sl.Count("rm"); n != 1 {
-				t.Errorf("%d file removals after the flag cleared, want 1", n)
-			}
-			r.wantRecord("alloc-a", head+`,"allocatedCPUs":8,"allocatedGPUs":1,"elapsedSeconds":90,`+
-				`"startTime":"2026-10-30T12:01:00Z","endTime":"2026-10-30T12:02:30Z","basis":"allocated"}`)
 		})
 	}
 }

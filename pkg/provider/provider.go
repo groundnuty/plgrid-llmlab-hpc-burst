@@ -117,7 +117,11 @@ type Batch interface {
 	EnsureFile(ctx context.Context, f File) error
 
 	// RemoveAllocationFiles removes the Allocation's directory under
-	// stagingDir, alloc/<tag>/, once its jobs are gone. Idempotent.
+	// stagingDir, alloc/<tag>/. It takes only a tag and does not look at jobs,
+	// so its caller enforces the precondition: it is called only once no job
+	// with the tag is live, a completing one included, whose processes and
+	// epilog may still run (HBEP-4, Core operations, RemoveAllocationFiles and
+	// Phases, A completing job). Idempotent.
 	RemoveAllocationFiles(ctx context.Context, tag string) error
 }
 

@@ -1,8 +1,9 @@
 package lifecycle
 
-// A COMPLETING job holds its Allocation's slot (HBEP-7, Provisioning, Per-user
-// limits; HBEP-4, Phases, A completing job; science-agent ruling for #198,
-// 1 Nov 2026): the slot count lists an Allocation whose phase is Ended while its
+// A COMPLETING job holds its Allocation's slot (HBEP-7, hbep/0007-lifecycle-
+// controller/README.md on main, Provisioning, Per-user limits, lines 310 and
+// 312; HBEP-4, Core operations, Phases, A completing job, lines 208-233;
+// science-agent ruling for #198, 1 Nov 2026): the slot count lists an Allocation whose phase is Ended while its
 // job's status says jobCompleting, until the flag clears, and a one-slot
 // successor (no-overlap mode, Handover) is created only after that, once.
 
@@ -61,15 +62,32 @@ func TestListProviderAllocationsCountsACompletingEndedAllocation(t *testing.T) {
 	}
 }
 
-// The one-slot path (TestNoOverlapOneSlotPath's rig): the primary's job is
-// cancelled from outside at 09:57:00, after its stream ended, and its epilog
-// keeps COMPLETING for 20 minutes, so the flag clears at 10:17:00, past
-// MinJobAge. Its Allocation is Ended with jobCompleting from then, and its
-// idle release at about 10:01 deletes it, its finalizer staying. No successor
-// Allocation exists before 10:17:00, however many passes run; once the flag has
-// cleared, exactly one is created, and no second one in the hour after.
+// A completing predecessor holds the slot (HBEP-7, Test plan, line 593; and the
+// one-slot path, line 592). The one-slot path (TestNoOverlapOneSlotPath's rig):
+// the primary's job is cancelled from outside at 09:57:00, after its stream
+// ended, and its epilog keeps COMPLETING for 20 minutes, so the flag clears at
+// 10:17:00, past MinJobAge. Its Allocation is Ended with jobCompleting from
+// then, and its idle release at about 10:01 deletes it, its finalizer staying.
+// No successor Allocation exists before 10:17:00, however many passes run; once
+// the flag has cleared, exactly one is created, and no second one in the hour
+// after. It runs in HBEP-4's two listing shapes: Helios's, where the job leaves
+// the listing when the flag clears (MinJobAge 10 s, so it reads from accounting),
+// and Athena's, where it stays listed in its base state without the flag until
+// MinJobAge (2 h here). The fake frees its own submit count when it sets the
+// flag, as Slurm does, so only the controller's count can hold the successor.
 func TestNoOverlapOneSlotSuccessorWaitsForTheFlagToClear(t *testing.T) {
-	rg := noOverlapRig(t, oneSlotOpts(withBatchConfig(func(c *pfake.Config) { c.MaxSubmitPerUser, c.MaxGPUsPerUser = 1, 1 }))...)
+	for _, shape := range []struct {
+		name   string
+		minAge time.Duration
+	}{{"Helios shape", 10 * time.Second}, {"Athena shape", 2 * time.Hour}} {
+		t.Run(shape.name, func(t *testing.T) { oneSlotSuccessorWaits(t, shape.minAge) })
+	}
+}
+
+func oneSlotSuccessorWaits(t *testing.T, minAge time.Duration) {
+	rg := noOverlapRig(t, oneSlotOpts(withBatchConfig(func(c *pfake.Config) {
+		c.MaxSubmitPerUser, c.MaxGPUsPerUser, c.MinJobAge = 1, 1, minAge
+	}))...)
 	rg.batch.Enqueue(pfake.Script{Epilog: 20 * time.Minute}) // the primary's job; the successor's gets the default
 	p := noOverlapStart(rg)
 	pAlloc := p.Spec.AllocationRef.Name
