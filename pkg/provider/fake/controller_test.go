@@ -628,12 +628,16 @@ func TestOneBadAllocationDoesNotStopTheOthers(t *testing.T) {
 // A refusal for a full submit limit is recorded Rejected with the code
 // SubmitLimitReached in the same record, and waits for the backoff like any
 // Rejected attempt; a policy refusal for another limit, and a refusal with no
-// reason line, carry no code (HBEP-4, QOS limits).
+// reason line, carry no code (HBEP-4, QOS limits). atProvider.reason follows
+// the current record on every pass, the backoff passes included: a refusal of
+// another kind after a full slot is never read as a full slot (review of PR
+// #155, B1).
 func TestSubmitLimitRefusalIsRecordedWithItsCode(t *testing.T) {
 	e := newEnv(t)
 	e.batch.Enqueue(
 		Script{Outcome: provider.Rejected, Policy: "QOSMaxSubmitJobPerUserLimit"},
 		Script{Outcome: provider.Rejected, Policy: "QOSMaxWallDurationPerJobLimit"},
+		Script{Outcome: provider.Rejected, Policy: "AssocMaxSubmitJobLimit"},
 		Script{Outcome: provider.Rejected, Reason: "Batch job submission failed: Invalid account"},
 	)
 	e.newAlloc("a1", testProvider)
@@ -643,21 +647,57 @@ func TestSubmitLimitRefusalIsRecordedWithItsCode(t *testing.T) {
 		wantText string
 	}{
 		{at(12, 0, 0), v1alpha1.ReasonSubmitLimitReached, "QOSMaxSubmitJobPerUserLimit"},
-		{at(12, 1, 0), "", "QOSMaxWallDurationPerJobLimit"},
-		{at(12, 2, 0), "", "Invalid account"},
+		{at(12, 1, 0), "", "QOSMaxWallDurationPerJobLimit"}, // limit, then another policy reason
+		{at(12, 2, 0), v1alpha1.ReasonSubmitLimitReached, "AssocMaxSubmitJobLimit"},
+		{at(12, 3, 0), "", "Invalid account"}, // limit, then a refusal with no reason line
 	} {
-		e.syncAt(tc.at)
-		o := e.wantPhase("a1", v1alpha1.AllocationSubmitting)
-		rec := submission(t, e.alloc("a1"))
-		if rec.Attempt != int32(i+1) || rec.State != v1alpha1.SubmissionRejected || rec.Code != tc.wantCode || !strings.Contains(rec.Reason, tc.wantText) {
-			t.Fatalf("attempt %d: record = %+v, want Rejected with code %q and a reason naming %s", i+1, rec, tc.wantCode, tc.wantText)
-		}
-		if o.Submission == nil || o.Submission.Code != tc.wantCode {
-			t.Fatalf("attempt %d: submission mirror = %+v, want code %q", i+1, o.Submission, tc.wantCode)
+		// The attempt, then two passes inside its backoff: each shows the
+		// same record and the reason its code gives, and submits nothing.
+		for j, when := range []time.Time{tc.at, tc.at.Add(20 * time.Second), tc.at.Add(40 * time.Second)} {
+			e.syncAt(when)
+			o := e.wantPhase("a1", v1alpha1.AllocationSubmitting)
+			rec := submission(t, e.alloc("a1"))
+			if rec.Attempt != int32(i+1) || rec.State != v1alpha1.SubmissionRejected || rec.Code != tc.wantCode || !strings.Contains(rec.Reason, tc.wantText) {
+				t.Fatalf("attempt %d, pass %d: record = %+v, want Rejected with code %q and a reason naming %s", i+1, j, rec, tc.wantCode, tc.wantText)
+			}
+			if o.Submission == nil || o.Submission.Code != tc.wantCode {
+				t.Fatalf("attempt %d, pass %d: submission mirror = %+v, want code %q", i+1, j, o.Submission, tc.wantCode)
+			}
+			if o.Reason != tc.wantCode {
+				t.Fatalf("attempt %d, pass %d: atProvider.reason = %q, want %q (the record's code)", i+1, j, o.Reason, tc.wantCode)
+			}
 		}
 	}
-	if n := e.batch.Count("sbatch"); n != 3 {
-		t.Fatalf("sbatch count = %d, want 3: each refusal waits for the backoff, then the next attempt runs", n)
+	if n := e.batch.Count("sbatch"); n != 4 {
+		t.Fatalf("sbatch count = %d, want 4: each refusal waits for the backoff, then the next attempt runs", n)
+	}
+}
+
+// A full slot followed by an Unknown outcome clears the reason: the outcome is
+// unknown, not a full slot, and only finding the tag resolves it (review of PR
+// #155, B1).
+func TestSubmitLimitReasonClearsOnUnknown(t *testing.T) {
+	e := newEnv(t)
+	e.batch.Enqueue(
+		Script{Outcome: provider.Rejected, Policy: "MaxSubmitJobsPerAccount"},
+		Script{Outcome: provider.Unknown, Reason: "sbatch: Socket timed out on send/recv operation"},
+	)
+	e.newAlloc("a1", testProvider)
+	e.syncAt(at(12, 0, 0))
+	if o := e.wantPhase("a1", v1alpha1.AllocationSubmitting); o.Reason != v1alpha1.ReasonSubmitLimitReached {
+		t.Fatalf("after the limit refusal: atProvider.reason = %q, want SubmitLimitReached", o.Reason)
+	}
+	e.syncAt(at(12, 1, 0)) // the next attempt, Unknown
+	o := e.wantPhase("a1", v1alpha1.AllocationSubmissionUnknown)
+	if rec := submission(t, e.alloc("a1")); rec.State != v1alpha1.SubmissionUnknown || rec.Code != "" {
+		t.Fatalf("record = %+v, want Unknown with no code", rec)
+	}
+	if o.Reason == v1alpha1.ReasonSubmitLimitReached {
+		t.Fatalf("after an Unknown outcome atProvider.reason is still %q", o.Reason)
+	}
+	e.syncAt(at(12, 1, 30)) // a pass that waits on the unknown outcome
+	if o := e.alloc("a1").Status.AtProvider; o.Reason == v1alpha1.ReasonSubmitLimitReached {
+		t.Fatalf("a pass after the Unknown outcome shows atProvider.reason %q", o.Reason)
 	}
 }
 

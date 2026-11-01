@@ -22,6 +22,7 @@ func unresolved(rec *v1alpha1.SubmissionRecord) bool {
 // it has set obs to the phase that explains why not.
 func (c *Controller) establish(ctx context.Context, p *pass, s *allocState) (settled bool, err error) {
 	rec := s.rec
+	limitReason(s.obs, rec)
 	if unresolved(rec) {
 		jobs, err := c.findByTag(ctx, p, s.tag, s.a.CreationTimestamp.Add(-listLookback))
 		if err != nil {
@@ -36,9 +37,6 @@ func (c *Controller) establish(ctx context.Context, p *pass, s *allocState) (set
 		}
 	} else if rec != nil && rec.State == v1alpha1.SubmissionRejected && rec.Time != nil && p.now.Sub(rec.Time.Time) < c.rejectBackoff() {
 		s.obs.Phase, s.obs.Submission = v1alpha1.AllocationSubmitting, rec
-		if rec.Code != "" {
-			s.obs.Reason = rec.Code
-		}
 		return false, nil
 	}
 	if why := c.Prerequisites.missing(s.a); why != "" {
@@ -88,7 +86,6 @@ func (c *Controller) submit(ctx context.Context, p *pass, s *allocState) (bool, 
 		var pr *provider.PolicyRefusal
 		if errors.As(serr, &pr) && pr.SubmitLimit() {
 			r.Code = v1alpha1.ReasonSubmitLimitReached
-			s.obs.Reason = r.Code
 		}
 		return false, c.writeRecord(ctx, s, r)
 	default:
@@ -105,7 +102,24 @@ func (c *Controller) writeRecord(ctx context.Context, s *allocState, r v1alpha1.
 		return fmt.Errorf("record attempt %d as %s: %w", r.Attempt, r.State, err)
 	}
 	s.rec, s.obs.Submission = &r, &r
+	limitReason(s.obs, &r)
 	return nil
+}
+
+// limitReason derives the observation's reason from the current submission
+// record: SubmitLimitReached while the record carries that code, and never
+// otherwise. Each pass starts from the stored status, so a reason set for an
+// earlier limit refusal is cleared once the record moves on: to a refusal of
+// another kind, which HBEP-4 says is never read as a full slot, to an Unknown
+// outcome, a new claim or an established job. Any other reason is left as it
+// is.
+func limitReason(obs *v1alpha1.AllocationObservation, rec *v1alpha1.SubmissionRecord) {
+	switch {
+	case rec != nil && rec.State == v1alpha1.SubmissionRejected && rec.Code == v1alpha1.ReasonSubmitLimitReached:
+		obs.Reason = v1alpha1.ReasonSubmitLimitReached
+	case obs.Reason == v1alpha1.ReasonSubmitLimitReached:
+		obs.Reason = ""
+	}
 }
 
 func errText(err error) string {
