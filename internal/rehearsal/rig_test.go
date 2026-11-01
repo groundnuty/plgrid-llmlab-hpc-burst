@@ -170,6 +170,35 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	}
 }
 
+// await waits for ch to close, failing the test at the deadline.
+func await(t *testing.T, what string, ch <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(waitDeadline):
+		t.Fatalf("timed out after %s waiting for %s", waitDeadline, what)
+	}
+}
+
+// nodeProcs lists, with no waiting, the live processes of the login node: an
+// sshd below this test process, and any process whose command line or
+// environment names the node's directory (sshd's configuration, the relay
+// socket in a forced command's environment).
+func (r *rig) nodeProcs() []string {
+	var left []string
+	for _, p := range below(os.Getpid()) {
+		if b, _ := os.ReadFile("/proc/" + strconv.Itoa(p.pid) + "/comm"); strings.HasPrefix(string(b), "sshd") {
+			left = append(left, strconv.Itoa(p.pid)+" sshd")
+		}
+	}
+	for _, p := range liveProcs() {
+		if p.pid != os.Getpid() && namesDir(p.pid, filepath.Join(r.base, "n")) {
+			left = append(left, strconv.Itoa(p.pid)+" (names the node's directory)")
+		}
+	}
+	return left
+}
+
 // ---- the end-of-test check ----
 
 // watch records every process below the test process while the test runs, and

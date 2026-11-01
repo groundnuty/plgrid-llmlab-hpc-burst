@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
@@ -244,11 +245,7 @@ func TestConcurrentSessions(t *testing.T) {
 				}()
 			}
 			for i, g := range gates {
-				select {
-				case <-g.Blocked():
-				case <-t.Context().Done():
-					t.Fatalf("gate %d was never reached", i)
-				}
+				await(t, "gate "+strconv.Itoa(i)+" to be reached", g.Blocked())
 			}
 			if got := r.plat.MaxConcurrent(); got != n {
 				t.Errorf("the platform saw at most %d commands at once, want %d", got, n)
@@ -256,7 +253,9 @@ func TestConcurrentSessions(t *testing.T) {
 			for _, g := range gates {
 				g.Release()
 			}
-			wg.Wait()
+			finished := make(chan struct{})
+			go func() { wg.Wait(); close(finished) }()
+			await(t, "the commands to return", finished)
 			for i, o := range outs {
 				if q := decodeSqueue(t, []byte(o)); q.Meta.Client.User != clusterUser {
 					t.Errorf("command %d: client user %q", i, q.Meta.Client.User)
@@ -285,7 +284,10 @@ func TestPlatformOutlivesTheTransport(t *testing.T) {
 }
 
 // Close with a command in flight does not hang on it: the command ends with a
-// transport error and nothing is left behind (the rig's check).
+// transport error, and when Close returns no sshd or forced command of the
+// node is left, though the controller's ssh master is still up (the rig closes
+// it later). The check is made at once, with no wait: Close promises that they
+// are gone.
 func TestCloseEndsACommandInFlight(t *testing.T) {
 	r, s := newRig(t)
 	g := r.plat.Gate("squeue")
@@ -295,16 +297,23 @@ func TestCloseEndsACommandInFlight(t *testing.T) {
 		_, err := s.Run(t.Context(), slurm.Command{Line: "squeue --me --json"})
 		errc <- err
 	}()
-	select {
-	case <-g.Blocked():
-	case <-t.Context().Done():
-		t.Fatal("the command never reached the gate")
+	await(t, "the command to reach the gate", g.Blocked())
+	if before := r.nodeProcs(); len(before) == 0 {
+		t.Fatal("no sshd or forced command is alive before Close: the check after it proves nothing")
 	}
 	if err := r.node.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-errc; !errors.Is(err, slurm.ErrTransport) {
-		t.Errorf("the command in flight at Close: error %v, want one wrapping slurm.ErrTransport", err)
+	if left := r.nodeProcs(); len(left) != 0 {
+		t.Errorf("processes of the node left when Close returned: %s", strings.Join(left, ", "))
+	}
+	select {
+	case err := <-errc:
+		if !errors.Is(err, slurm.ErrTransport) {
+			t.Errorf("the command in flight at Close: error %v, want one wrapping slurm.ErrTransport", err)
+		}
+	case <-time.After(waitDeadline):
+		t.Fatalf("the command in flight at Close did not return within %s", waitDeadline)
 	}
 	if err := r.node.Close(); err != nil {
 		t.Errorf("a second Close: %v", err)
