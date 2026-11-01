@@ -66,6 +66,17 @@ func (p *pass) starting(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av ag
 			return nil
 		}
 		pass, msg := judgeQualify(c.Qualify, sh, p.modelName(in))
+		if pass {
+			rec, found, err := p.r.readVerification(p.ctx, in.Namespace, in.Status.VerificationRecord)
+			if err != nil {
+				return err
+			}
+			if found {
+				if ok, why := behaviourContextAgrees(c.Qualify, rec.BehaviourContextTokens); !ok {
+					pass, msg = false, why
+				}
+			}
+		}
 		if !pass {
 			return p.fail(in, alloc, v1alpha1.ReasonQualificationFailed, msg)
 		}

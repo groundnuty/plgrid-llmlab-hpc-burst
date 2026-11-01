@@ -107,6 +107,52 @@ func TestJudgeVerifyRecordsTheGenerationConfig(t *testing.T) {
 	}
 }
 
+// The verification record fixes the behaviour check's context (science-agent
+// ruling, 31 Oct 2026, for #88; issue #125, item 9). Without a reasoning
+// parser it is the longest context: 32768 - 512 - 12 = 32244. With one it is
+// #94's hand figure for Qwen3-0.6B, 8192 - 8 - 128 - 4096 = 3960 (issue #94,
+// comment 6550908687, the behaviour row). After a worker restart, which runs
+// no qualification, there is none.
+func TestJudgeVerifyRecordsTheBehaviourContext(t *testing.T) {
+	if got := judgeVerify(judgeDeclared(), judgeResult(), true, judgeShapes()); got.BehaviourContextTokens != 32244 {
+		t.Errorf("no reasoning parser: %d, want 32244", got.BehaviourContextTokens)
+	}
+	d := judgeDeclared()
+	d.flags["max-model-len"], d.flags["reasoning-parser"] = "8192", "qwen3"
+	r := judgeResult()
+	r.Settings["max-model-len"], r.TemplateOverhead = "8192", 8
+	longest := int32(4096)
+	sh := shapes{short: 128, typical: 1024, longest: &longest, outputTypical: 128, outputLongest: 512, targetSessions: 8}
+	got := judgeVerify(d, r, true, sh)
+	if got.Verdict != v1alpha1.VerdictPass || got.BehaviourContextTokens != 3960 {
+		t.Errorf("reasoning parser: verdict %q (%s), context %d, want a pass at 3960", got.Verdict, got.Message, got.BehaviourContextTokens)
+	}
+	b, _ := json.Marshal(got)
+	if !strings.Contains(string(b), `"behaviourContextTokens":3960`) {
+		t.Errorf("record data %s does not carry behaviourContextTokens", b)
+	}
+	if got := judgeVerify(d, r, false, sh); got.BehaviourContextTokens != 0 {
+		t.Errorf("worker restart: %d, want none", got.BehaviourContextTokens)
+	}
+}
+
+// Qualification holds the behaviour check's reported context to the record's.
+func TestBehaviourContextAgrees(t *testing.T) {
+	q := &agentapi.QualifyResult{Checks: []agentapi.CheckOutcome{{Name: agentapi.CheckChat, Passed: true}, {Name: agentapi.CheckBehaviour, Passed: true, ContextTokens: 3960}}}
+	if ok, why := behaviourContextAgrees(q, 3960); !ok {
+		t.Errorf("same context refused: %s", why)
+	}
+	if ok, why := behaviourContextAgrees(q, 3072); ok || !strings.Contains(why, "ran at 3960 context tokens, not the 3072") {
+		t.Errorf("another context: %v %q", ok, why)
+	}
+	if ok, _ := behaviourContextAgrees(q, 0); !ok {
+		t.Error("a record without the field refused the check")
+	}
+	if ok, _ := behaviourContextAgrees(&agentapi.QualifyResult{}, 3960); ok {
+		t.Error("no behaviour check passed")
+	}
+}
+
 // TestJudgeVerifyFileMismatch: a changed checkpoint file fails the rehash
 // (HBEP-7, Test plan, "Verification").
 func TestJudgeVerifyFileMismatch(t *testing.T) {
