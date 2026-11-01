@@ -136,23 +136,6 @@ func TestJudgeVerifyRecordsTheBehaviourContext(t *testing.T) {
 	}
 }
 
-// Qualification holds the behaviour check's reported context to the record's.
-func TestBehaviourContextAgrees(t *testing.T) {
-	q := &agentapi.QualifyResult{Checks: []agentapi.CheckOutcome{{Name: agentapi.CheckChat, Passed: true}, {Name: agentapi.CheckBehaviour, Passed: true, ContextTokens: 3960}}}
-	if ok, why := behaviourContextAgrees(q, 3960); !ok {
-		t.Errorf("same context refused: %s", why)
-	}
-	if ok, why := behaviourContextAgrees(q, 3072); ok || !strings.Contains(why, "ran at 3960 context tokens, not the 3072") {
-		t.Errorf("another context: %v %q", ok, why)
-	}
-	if ok, _ := behaviourContextAgrees(q, 0); !ok {
-		t.Error("a record without the field refused the check")
-	}
-	if ok, _ := behaviourContextAgrees(&agentapi.QualifyResult{}, 3960); ok {
-		t.Error("no behaviour check passed")
-	}
-}
-
 // TestJudgeVerifyFileMismatch: a changed checkpoint file fails the rehash
 // (HBEP-7, Test plan, "Verification").
 func TestJudgeVerifyFileMismatch(t *testing.T) {

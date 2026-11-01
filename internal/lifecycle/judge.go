@@ -110,8 +110,8 @@ type verificationData struct {
 	// generation's behaviour check runs at: agentapi.BehaviourContextTokens
 	// of the resolved shapes, the reported max-model-len, the measured
 	// template overhead and whether a reasoning parser is declared, the
-	// function the agent runs it with. Qualification fails when the agent
-	// reports another (behaviourContextAgrees). 0 after a worker restart,
+	// function the agent runs the check with, from the same inputs. 0 after a
+	// worker restart,
 	// which runs no qualification (science-agent ruling, 31 Oct 2026, for
 	// #88: it belongs in this record, immutable per generation).
 	BehaviourContextTokens int64            `json:"behaviourContextTokens,omitempty"`
@@ -242,24 +242,6 @@ func judgeVerify(d declared, v *agentapi.VerifyResult, rehash bool, sh shapes) v
 		out.BehaviourContextTokens = agentapi.BehaviourContextTokens(resolved, mml, v.TemplateOverhead, reasoning)
 	}
 	return out
-}
-
-// behaviourContextAgrees holds the behaviour check's reported context to the
-// one its verification record fixed (verificationData.BehaviourContextTokens),
-// so the record states the context the check ran at. A record without one
-// (written before the field existed) checks nothing.
-func behaviourContextAgrees(q *agentapi.QualifyResult, recorded int64) (bool, string) {
-	if recorded == 0 {
-		return true, ""
-	}
-	i := slices.IndexFunc(q.Checks, func(c agentapi.CheckOutcome) bool { return c.Name == agentapi.CheckBehaviour })
-	if i < 0 {
-		return false, "the agent reported no behaviour check"
-	}
-	if got := q.Checks[i].ContextTokens; got != recorded {
-		return false, fmt.Sprintf("the behaviour check ran at %d context tokens, not the %d its verification record holds", got, recorded)
-	}
-	return true, ""
 }
 
 // sameSetting compares a reported setting with its declared value under one
