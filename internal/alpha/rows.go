@@ -27,8 +27,7 @@ type Row struct {
 	PostsTo string
 }
 
-// Rows are the live rows of the runbook that run the stack. The accounting
-// rows are in internal/providerctl/conformance.
+// rows are the live rows of the runbook that run the stack.
 var rows = []Row{
 	{Name: "alpha-athena-handover", Cluster: "athena", Partition: "plgrid-gpu-a100", GPUs: 1, Lease: 40 * time.Minute, Budget: 150 * time.Minute, PostsTo: "#145 and #93"},
 	{Name: "alpha-helios-nooverlap", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: 40 * time.Minute, Budget: 200 * time.Minute, PostsTo: "#145 and #94"},
@@ -36,12 +35,23 @@ var rows = []Row{
 	{Name: "tunnel-hour-athena", Cluster: "athena", Partition: "plgrid-gpu-a100", GPUs: 1, Lease: 85 * time.Minute, Budget: 110 * time.Minute, PostsTo: "#145"},
 }
 
-// Rows returns a copy of the stack rows.
+// accountingRows are the rows of the accounting check, which runs in
+// internal/providerctl/conformance (a GPU job through the Provider's controller,
+// no stack and no dial-home route). Lease and Budget are the job's.
+var accountingRows = []Row{
+	{Name: "gpu-accounting-helios", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: 5 * time.Minute, Budget: 25 * time.Minute, PostsTo: "#145 and #93"},
+	{Name: "gpu-accounting-athena", Cluster: "athena", Partition: "plgrid-gpu-a100", GPUs: 1, Lease: 5 * time.Minute, Budget: 25 * time.Minute, PostsTo: "#145 and #93"},
+}
+
+// Rows returns a copy of the stack rows: the ones this package runs.
 func Rows() []Row { return append([]Row(nil), rows...) }
 
-// RowByName finds a row.
+// AccountingRows returns a copy of the accounting rows.
+func AccountingRows() []Row { return append([]Row(nil), accountingRows...) }
+
+// RowByName finds a row, of either kind.
 func RowByName(name string) (Row, bool) {
-	for _, r := range rows {
+	for _, r := range append(append([]Row(nil), rows...), accountingRows...) {
 		if r.Name == name {
 			return r, true
 		}

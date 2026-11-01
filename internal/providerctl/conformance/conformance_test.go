@@ -185,8 +185,33 @@ type world struct {
 
 const testNS = "conformance"
 
+// dialer makes the Runner a world's batch client runs over: the ssh transport on
+// a real platform, a fake Slurm login in a dry run.
+type dialer func(v slurm.Validated) (slurm.Runner, io.Closer, error)
+
+// worldKit is what a world takes that differs between the runs: the transport
+// and the agent stand-in the bootstrap runs.
+type worldKit struct {
+	dial  dialer
+	agent []byte
+}
+
+// conformanceAgent is TestConformance's agent stand-in, run by the bootstrap
+// after its digest check, with the Allocation's directory as its argument: the
+// first job outlives its 5 min limit, so it is still running when its
+// Allocation is deleted; the second sleeps 90 s and ends by itself.
+var conformanceAgent = []byte("#!/bin/sh\ncase \"$1\" in *held-submit*) sleep 600 ;; *) sleep 90 ;; esac\nexit 0\n")
+
 func newWorld(t *testing.T) *world {
 	s := load(t)
+	return buildWorld(t, s, worldKit{agent: conformanceAgent, dial: func(v slurm.Validated) (slurm.Runner, io.Closer, error) {
+		ssh, err := sshrunNew(s, v)
+		return ssh, ssh, err
+	}})
+}
+
+// buildWorld is the world over the settings and the kit.
+func buildWorld(t *testing.T, s settings, kit worldKit) *world {
 	w := &world{t: t, s: s, p: newPrivate(t, s.out), jobIDs: map[string]bool{}}
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
@@ -201,16 +226,12 @@ func newWorld(t *testing.T) *world {
 	pp := s.profile
 	prov := &v1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "conformance"}, Spec: v1alpha1.ProviderSpec{
 		PlatformProfileRef: v1alpha1.ObjectReference{Name: pp.Name}, Account: s.account, AllowedPartitions: []string{s.partition},
-		CredentialsRef: &v1alpha1.CredentialsReference{File: s.creds},
+		QOS: s.qos, CredentialsRef: &v1alpha1.CredentialsReference{File: s.creds},
 	}}
 	w.c = clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(pp, prov).
 		WithStatusSubresource(&v1alpha1.Allocation{}, &v1alpha1.Provider{}).Build()
 
-	// The agent stand-in, run by the bootstrap after its digest check, with the
-	// Allocation's directory as its argument: the first job outlives its 5 min
-	// limit, so it is still running when its Allocation is deleted; the
-	// second sleeps 90 s and ends by itself.
-	agent := []byte("#!/bin/sh\ncase \"$1\" in *held-submit*) sleep 600 ;; *) sleep 90 ;; esac\nexit 0\n")
+	agent := kit.agent
 	sum := sha256.Sum256(agent)
 	w.digest = hex.EncodeToString(sum[:])
 	builds := t.TempDir()
@@ -225,14 +246,16 @@ func newWorld(t *testing.T) *world {
 		Provider: prov.Name,
 		Profiles: &slurm.ProfileReader{Reader: w.c},
 		NewPlatform: func(v slurm.Validated) (providerctl.Platform, io.Closer, error) {
-			t, err := sshrun.New(sshrun.Options{Name: v.Settings.Provider, Config: v.SSH, ControlDir: s.control, HostLock: s.lock, MaxConcurrent: 1})
+			r, closer, err := kit.dial(v)
 			if err != nil {
 				return nil, nil, err
 			}
-			w.ssh = t
-			w.cap = &capture{Runner: t, p: w.p, submitted: func(id string) { w.jobIDs[id] = true }}
+			if ssh, ok := r.(*sshrun.SSH); ok {
+				w.ssh = ssh
+			}
+			w.cap = &capture{Runner: r, p: w.p, submitted: func(id string) { w.jobIDs[id] = true }}
 			w.batch = slurm.NewBatch(w.cap, v.Profile, v.Settings, slurm.Options{PollInterval: 10 * time.Second, BusyInterval: 3 * time.Second})
-			return w.batch, t, nil
+			return w.batch, closer, nil
 		},
 		CredentialsDir: w.credDir, AgentBuildsDir: builds,
 		Front: &providerctl.FrontSettings{Mode: agentapi.DialHomeDirect, Endpoint: "127.0.0.1:29261", CertPin: certPin, CertPEM: certPEM,
@@ -589,4 +612,9 @@ func TestProbe(t *testing.T) {
 	for _, c := range prov.Status.Conditions {
 		t.Logf("Provider condition %s=%s (%s)", c.Type, c.Status, c.Reason)
 	}
+}
+
+// sshrunNew makes the ssh transport of a real run.
+func sshrunNew(s settings, v slurm.Validated) (*sshrun.SSH, error) {
+	return sshrun.New(sshrun.Options{Name: v.Settings.Provider, Config: v.SSH, ControlDir: s.control, HostLock: s.lock, MaxConcurrent: 1})
 }

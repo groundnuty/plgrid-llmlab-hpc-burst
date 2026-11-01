@@ -113,8 +113,8 @@ alpha-athena-handover|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16
 alpha-helios-nooverlap|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|01:00:00|200|-C memfs
 tunnel-hour-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|01:25:00|110|-C memfs
 tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|01:25:00|110|-
-gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|00:10:00|25|-
-gpu-accounting-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|00:10:00|25|-
+gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|25|-
+gpu-accounting-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|00:05:00|25|-
 # END CLUSTER SHAPES
 TABLE
 }
@@ -534,7 +534,7 @@ env_conformance() {
   export HPCBURST_CONF_OUT=$REC_DIR
   # A GPU row that waits in a queue, and under a QOS (gpu-accounting-*; issue #194): the test's own
   # pending clock, which the script's timeout takes in (execute_cluster).
-  unset HPCBURST_CONF_QOS HPCBURST_CONF_PENDING_MAX_SECONDS
+  unset HPCBURST_CONF_QOS HPCBURST_CONF_PENDING_MAX_SECONDS HPCBURST_ALPHA_DRY HPCBURST_ALPHA_DRY_FAULT HPCBURST_ALPHA_ROW HPCBURST_ALPHA_OUT
   case $n in
     gpu-accounting-*)
       [ "${QOS[$n]}" = - ] || export HPCBURST_CONF_QOS=${QOS[$n]}
