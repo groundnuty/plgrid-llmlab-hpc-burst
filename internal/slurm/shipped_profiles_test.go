@@ -189,16 +189,17 @@ func TestShippedAthenaNowRefusesWhatItsLimitsForbid(t *testing.T) {
 // them: the conformance run on plgrid of 31 Oct 2026, step 5, a 56-character
 // name read back unchanged from squeue and sacct. The schema holds the rules
 // per profile, not per partition, so the value stands for plgrid-gpu-gh200
-// too (`@hpc-burst-science-agent`, option (b), 1 Nov 2026). Athena has not
-// run the step, and its rules stay unset: 56 is neither a fact nor a default
-// there. The values are the ruling's, written out here.
+// too (`@hpc-burst-science-agent`, option (b), 1 Nov 2026). Athena measured
+// the same on plgrid-now, 1 Nov 2026 (issue #93), and the value stands for
+// plgrid-gpu-a100 on the same ruling. The values are the runs', written out
+// here.
 func TestShippedProfilesJobNameRules(t *testing.T) {
 	for _, tc := range []struct {
 		file      string
 		maxLength int32 // 0: unset
 	}{
 		{"helios.yaml", 56},
-		{"athena.yaml", 0},
+		{"athena.yaml", 56},
 	} {
 		raw, err := os.ReadFile(filepath.Join("..", "..", "profiles", tc.file))
 		if err != nil {

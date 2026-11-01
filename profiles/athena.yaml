@@ -46,7 +46,7 @@ spec:
       maxTime: 1h # facts.partitions[name=plgrid-now].max_time, "01:00:00"
       gpusPerNode: 1 # the most GPUs one Allocation may request (PartitionProfile.gpusPerNode): facts.slurm.qos.value[name=plgrid-now].max_tres_per_user, "cpu=16,gres/gpu=1,mem=125G". The node has 8 (facts.partitions[name=plgrid-now].gres), but the QoS caps a user at one GPU, one running and one submitted job (max_jobs_per_user 1, max_submit_per_user 1)
 
-  holdRelease: true # facts.slurm.hold_release.value.plgrid-gpu-a100: user_release_ok true (S1's hold check)
+  holdRelease: true # facts.slurm.hold_release.value.plgrid-gpu-a100: user_release_ok true (S1's hold check); facts.slurm.plgrid_now_conformance: the provider's held submit and one release on plgrid-now, 1 Nov 2026
   lostGrace: 2m # framework default (HBEP-4, Platform profile schema, lostGrace): above the measured gap of about 2 s between queue and accounting (S7's capture)
   inflightWindow: 5m # framework default (HBEP-4, Platform profile schema, inflightWindow): 5 min until the sbatch latency over ssh is measured (HBEP-4, Graduation criteria)
   unknownBound: 10m # framework default (HBEP-4, Platform profile schema, unknownBound): S4's default
@@ -58,12 +58,19 @@ spec:
   jsonDataParser: v0.0.40
   stagingDir: $SCRATCH # facts.storage.scratch_fstype: a Lustre file system, reached through $SCRATCH (HBEP-4, Transport)
   maxIdle: 30m # HBEP-4, Platform profile schema, maxIdle: Athena 30 min (HBEP-7, Retention); motivated by facts.login_node_policy.gpu_only (GPU jobs only)
+  # jobName.maxLength is measured, not a default: the conformance run on Athena plgrid-now of 1 Nov 2026
+  # (step 5, a 56-character job name submitted and read back unchanged from squeue and from sacct; issue #93) is
+  # its source. The schema holds job-name rules per profile, not per partition, so this value covers
+  # plgrid-gpu-a100 too, which has not run the step. That is sound because Athena runs one Slurm
+  # configuration for all its partitions, and the read-back is the safety net against a partition-specific rename:
+  # a job whose name came back shortened is refused and cancelled (HBEP-4, Risks)
+  # (`@hpc-burst-science-agent`, option (b), 1 Nov 2026).
+  jobName:
+    maxLength: 56
+
   # Not set, because no fact states it (HBEP-4, Platform profile schema: an unstated fact is absent, not false):
-  #   jobName (maxLength, pattern): unset. No draft records a job-name maximum or a pattern, and the
-  #     56-character round trip is pending (HBEP-4, Risks and Graduation criteria). maxLength is set per
-  #     partition once a conformance run has submitted a 56-character name there and read it back,
-  #     and that run is its source. 56 is neither a fact nor a default here
-  #     (`@hpc-burst-science-agent`, 31 Oct 2026).
+  #   jobName.pattern: unset. No draft records a pattern, and the round trip above used the tag form, which a
+  #     pattern would have to match; it records no restriction on the characters.
   #   jobCommentAccounted: unset. HBEP-4 makes it optional and only recorded: the tag is in the job
   #     name either way (`@hpc-burst-science-agent`, 31 Oct 2026).
 
@@ -178,6 +185,12 @@ spec:
           value:
             plgrid-gpu-a100: {hold_honoured: true, state_reason_after_submit: "PENDING|JobHeldUser", user_release_ok: true, release_exit: 0, state_reason_after_release: "PENDING|Priority", final_state: "CANCELLED"}
           note: "A plain user's sbatch --hold was honoured (reason JobHeldUser, not JobHeldAdmin) and the same user released it with scontrol release (exit 0, no message). Two seconds later the job was PENDING with reason Priority, so the release took effect and the job queued normally; it was cancelled at once and never ran. One job, one trial. Not tested: other job shapes (arrays, --begin), how long a held job may stay held before the site purges it, and the other partitions."
+        plgrid_now_conformance:
+          value: {hold_honoured_and_released_by_the_provider: true, running_hard_end_is_start_plus_limit_utc: true, cancel_on_delete_read_cancelled_from_accounting: true, job_name_56_characters_unchanged_in_squeue_and_sacct: true, sbatch_latency_over_ssh_ms: [87, 98, 88], sacct_tres_allocated_and_requested_gpu: "gres gpu count 1 (untyped), with cpu 4, mem 32768 and billing 1", data_parser: "v0.0.40"}
+          method: measured
+          source: "the conformance run of internal/providerctl/conformance on plgrid-now, 1 Nov 2026, 11:30Z to 11:33Z, TestConformance: 1 GPU, 4 CPUs, 32Gi, 5 min, --no-requeue; issue #93"
+          date: "2026-11-01"
+          note: "The run passed all five steps (held submit and one release, Running with its hard end, cancel on delete, adoption of a job whose record was lost, the 56-character name). The sacct reply of the running and of the cancelled job carry the same tres list. plgrid-now is the partition the run used, so the hold fact above (plgrid-gpu-a100, S1) and this one agree on one Slurm configuration; plgrid-gpu-a100 itself has not run the conformance."
         max_job_count:
           value: 100000
           method: measured

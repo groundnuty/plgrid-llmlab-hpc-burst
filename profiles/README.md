@@ -9,7 +9,7 @@
 
 Only a partition on which `holdRelease` was verified is in the typed list (HBEP-4, Platform profile schema). Every other partition is in the untyped block only.
 
-`plgrid-now` is the exception that the science agent ruled on issue #93 (comment 6557245889, 1 Nov 2026): it is listed so that the conformance harness can run on a partition where a job starts at once. Its time limit is 1 h and its QoS allows one GPU and one job per user, so it hosts no Instance, and the lifecycle controller must never plan one there. What keeps it off today is that the entry gives no `cpusPerGpu` or `memPerGpu`, so `partitionSizing` refuses it (`TestShippedAthenaNowCannotBeSized`). Sourcing either value lifts that refusal and needs the science agent's ruling first.
+`plgrid-now` is the exception that the science agent ruled on issue #93 (comment 6557245889, 1 Nov 2026): it is listed so that the conformance harness can run on a partition where a job starts at once, and the run of 1 Nov 2026 on it passed (fact `slurm.plgrid_now_conformance`). Its time limit is 1 h and its QoS allows one GPU and one job per user, so it hosts no Instance, and the lifecycle controller must never plan one there. What keeps it off today is that the entry gives no `cpusPerGpu` or `memPerGpu`, so `partitionSizing` refuses it (`TestShippedAthenaNowCannotBeSized`). Sourcing either value lifts that refusal and needs the science agent's ruling first.
 
 ## What a manifest holds
 
@@ -43,9 +43,10 @@ Slurm's "MB" is 2^20 bytes (the provider sends `--mem=<MiB>M`), so memory values
 ## What is not set, and why
 
 A fact that nothing states is absent, not false (HBEP-4, Platform profile schema).
-- **`jobName`**: `maxLength` is 56 on Helios, sourced to the conformance run on `plgrid` of 31 Oct 2026 (step 5, issue #93, comment 6550844149); the profile holds it for the whole profile, so it covers `plgrid-gpu-gh200` too, since Helios runs one Slurm configuration and the read-back refuses a job whose name came back shortened (`@hpc-burst-science-agent`, option (b), 1 Nov 2026). Unset on Athena until its run. `pattern` is unset on both: no fact states one.
+- **`jobName`**: `maxLength` is 56 on Helios, sourced to the conformance run on `plgrid` of 31 Oct 2026 (step 5, issue #93, comment 6550844149); the profile holds it for the whole profile, so it covers `plgrid-gpu-gh200` too, since Helios runs one Slurm configuration and the read-back refuses a job whose name came back shortened (`@hpc-burst-science-agent`, option (b), 1 Nov 2026). `maxLength` is 56 on Athena too, sourced to the conformance run on `plgrid-now` of 1 Nov 2026 (step 5, issue #93); it covers `plgrid-gpu-a100` on the same ruling, since Athena runs one Slurm configuration. `pattern` is unset on both: no fact states one.
 - **`jobCommentAccounted`** (both): unset. HBEP-4 makes it optional and only recorded; the tag is in the job name either way.
 - **`maxIdle`** (Helios): unset outside Athena.
+- **`imageFormat`, `cpusPerGpu`, `memPerGpu`** on Athena `plgrid-now`: absent on purpose, for the reason given in the paragraph on `plgrid-now` above. The conformance run there used 1 GPU, 4 CPUs and 32 GiB, because a request for the QoS cap (16 CPUs, 125 G) was estimated to start 52 minutes later while this one started at once (fact `submission.plgrid_now_start`).
 - **`imageFormat`, `cpusPerGpu`, `memPerGpu`** on Helios `plgrid`: the partition is a CPU partition for conformance runs only and hosts no Instance (`@hpc-burst-science-agent`, 31 Oct 2026). Probe 2 ran on `plgrid-gpu-gh200` only, and the partition has no GPU. Its `gpusPerNode` is 0, so the Slurm provider refuses any request for a GPU there (`internal/slurm`, `TestShippedCPUPartitionRefusesGPUAllocations`). Absent `imageFormat` means `sif` (`v1alpha1.ImageFormatOf`), which only an Instance would use.
 
 ## How the manifests are checked
