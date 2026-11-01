@@ -62,12 +62,12 @@ hack/live-checks.sh --run gpu-accounting --yes
 
 - **Settings:** the account, the credentials file, `LIVE_OUT_DIR`, `LIVE_LOCK_DIR`. No dial-home route.
 - **Duration and slot:** one GPU job of 5 minutes' limit per cluster, holding its GPU for about 20 seconds; the run is about 10 minutes once the job starts. Helios uses QOS `now` (slot use of that length); Athena's `plgrid-gpu-a100` has no slot.
-- **What it does:** one GPU job goes through the Provider's controller. The job writes how many GPUs its node shows (`nvidia-smi -L`); when it has ended, the Allocation is deleted, which writes the kept record `acct-<UID>`; the record's `allocatedGPUs` is compared with the node's count. The record is built from the scheduler's accounting, so it is not compared with the scheduler.
-- **Posts:** the run's `posts.md` (the record's GPU entry, the node's count, the request) and the slot use. To #145 and #93 (the conformance runs of both clusters).
+- **What it does:** one GPU job goes through the Provider's controller. The job writes the GPUs it was given: the count of its `CUDA_VISIBLE_DEVICES`, which Slurm sets to the GPUs it gave the job (the agent forwards it for that reason, `internal/agent/apptainer.go:110`), and the count `nvidia-smi -L` lists. When the job has ended, the Allocation is deleted, which writes the kept record `acct-<UID>`; the record's `allocatedGPUs` is compared with the job's own count. The record is built from the scheduler's accounting, so it is not compared with the scheduler. `nvidia-smi` is posted and not judged: it lists the whole node where a cluster does not confine devices to the job. A 1-GPU GH200 job registered one GPU through `nvidia-smi` (`spikes/s94/results/r3/summary.json:988`), so Helios confines them; no Athena run shows it, which is why both counts are recorded. Where `CUDA_VISIBLE_DEVICES` is unset the `nvidia-smi` count is the witness, and the post says which was used.
+- **Posts:** the run's `posts.md` (the record's GPU entry, the job's count and which variable gave it, the `nvidia-smi` count, the request) and the slot use. To #145 and #93 (the conformance runs of both clusters).
 - **Pass criteria:**
   - `hbep/0008-observability-and-events/README.md:395`: "the Test plan passes, and the kept accounting record's GPU entry is checked once on a real GPU job on each alpha partition;"
   - `hbep/0008-observability-and-events/README.md:331`: the kept record holds "`allocatedGPUs`" and "`basis: allocated`".
-  - Checked: the record's partition is the row's; its basis is `allocated`; the job asked for and saw at least one GPU (a CPU job would agree at 0); the record's GPU entry equals what the node showed, which equals the request; an unknown entry fails.
+  - Checked: the record's partition is the row's; its basis is `allocated`; the job asked for and saw at least one GPU (a CPU job would agree at 0); the record's GPU entry equals the count the job was given, which equals the request; an unknown entry fails.
 
 ### `alpha-athena-handover`
 
@@ -126,6 +126,6 @@ hack/live-checks.sh --run tunnel-hour --yes
 
 ## What the dry runs show, and what they cannot
 
-The package tests and `hack/livechecks` run every row's own compiled test, through the script, over a fake Slurm in run mode with stand-in steps. The healthy run passes; each of 37 faults (a cut stream, no stream in flight, a second restart, a successor that starts beside its predecessor, a lane an hour short, a node with two GPUs against a record of one, and so on) fails its row with exit 1, and `hack/mutate-alpha.sh` changes each criterion's condition and requires a test to fail. A dry binary refuses live settings, and the script never passes the dry switch on.
+The package tests and `hack/livechecks` run every row's own compiled test, through the script, over a fake Slurm in run mode with stand-in steps. The healthy run passes; each of 37 faults (a cut stream, no stream in flight, a second restart, a successor that starts beside its predecessor, a lane an hour short, a node with two GPUs against a record of one, and so on) fails its row with exit 1, while a node whose `nvidia-smi` lists eight GPUs to a job given one still passes, and `hack/mutate-alpha.sh` changes each criterion's condition and requires a test to fail. A dry binary refuses live settings, and the script never passes the dry switch on.
 
 They cannot show that the real controllers, front and tunnel behave: the stand-in steps report what the real scenario will report, and the criteria judge it. That is the part PR #161 supplies.
