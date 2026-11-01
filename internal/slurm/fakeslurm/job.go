@@ -90,6 +90,19 @@ func (j *job) cur() *execution { return j.execs[len(j.execs)-1] }
 // state is the latest execution's state.
 func (j *job) state() string { return j.cur().state }
 
+// Completing is Slurm's flag for a job whose end state is set while some of
+// its processes still live: squeue lists the pair, ["CANCELLED",
+// "COMPLETING"] (state code CG), until they are gone.
+const Completing = "COMPLETING"
+
+// completing reports whether the job's current execution has its end state
+// while its processes still live (run mode): an execution that never had a
+// process, or whose processes are all gone, is not completing.
+func (j *job) completing() bool {
+	e := j.cur()
+	return IsTerminal(e.state) && e.run != nil && !e.run.done
+}
+
 // live reports whether the job is pending or running.
 func (j *job) live() bool { return j.state() == Pending || j.state() == Running }
 
