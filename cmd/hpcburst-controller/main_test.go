@@ -23,9 +23,10 @@ func TestParse(t *testing.T) {
 		{"unknown front mode", append(append([]string{}, base...), "--front-mode", "x", "--front-addr", "a:1"), "want direct or ssh"},
 		{"no state directory", base[2:], "--state-dir is required"},
 		{"port base out of range", []string{"--state-dir", "/s", "--port-base", "80", "--health-addr", "127.0.0.1:29226"}, "out of range"},
-		// The block reaches base+11, frps's web port (agentapi.FrpsWebPortOffset):
-		// 65525 would put it past 65535, though base+7 still fits.
-		{"port base too high for the block", []string{"--state-dir", "/s", "--port-base", "65525", "--health-addr", "127.0.0.1:29226"}, "out of range"},
+		// The block reaches base+12, the controller's metrics (HBEP-8): 65524
+		// would put it past 65535, though base+11, frps's web port, still fits.
+		{"port base too high for the block", []string{"--state-dir", "/s", "--port-base", "65524", "--health-addr", "127.0.0.1:29226"}, "out of range"},
+		{"port base at the top of the block", []string{"--state-dir", "/state", "--port-base", "65523", "--health-addr", "127.0.0.1:29226"}, ""},
 		{"an old flag", append(append([]string{}, base...), "--credentials-dir", "c"), "not defined"},
 		{"health on all interfaces", []string{"--state-dir", "/s", "--port-base", "29220", "--health-addr", ":29226"}, "loopback only"},
 		{"zero workers", append(append([]string{}, base...), "--workers", "0"), "at least 1"},

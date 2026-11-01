@@ -150,6 +150,9 @@ func checkPartition(field string, p v1alpha1.PartitionProfile, bad func(string, 
 	if p.GPUModel != "" && p.GPUModel != "none" && p.GPUsPerNode == nil {
 		bad(field+".gpusPerNode", "is required on a GPU partition")
 	}
+	if err := checkTmpDir(p); err != nil {
+		bad(field+".tmpDir", "%v", err)
+	}
 }
 
 func checkProfile(s v1alpha1.PlatformProfileSpec, bad func(string, string, ...any)) {

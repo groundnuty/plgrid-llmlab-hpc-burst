@@ -7,6 +7,7 @@ package fakeslurm
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -106,15 +107,32 @@ func TestSbatchHold(t *testing.T) {
 	wantNV(t, "free priority", sq["priority"], true, 1000)
 }
 
+// --constraint, which the dialect sends for a partition's tmpDirFeature (issue
+// #125), is accepted and recorded; the fake does not model node features.
+func TestSbatchRecordsTheConstraint(t *testing.T) {
+	r := newRig(t, Config{})
+	out, errOut, code := r.run("sbatch --parsable --wrap=true --constraint=localfs")
+	if code != 0 {
+		t.Fatalf("exit %d stderr %q", code, errOut)
+	}
+	id, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		t.Fatalf("job ID %q: %v", out, err)
+	}
+	if j, ok := r.p.Job(id); !ok || j.Constraint != "localfs" {
+		t.Errorf("job %d: %+v, want Constraint localfs", id, j)
+	}
+}
+
 func TestSbatchRefusesWhatTheDialectNeverSends(t *testing.T) {
 	r := newRig(t, Config{})
 	for _, line := range []string{
-		"sbatch --parsable",                    // no --wrap
-		"sbatch --wrap=true --exclusive",       // unknown option
-		"sbatch --wrap=true script.sh",         // a script file
-		"sbatch --wrap=true --time",            // missing value at the end
-		"sbatch -t 30 --wrap=true",             // short options are not sent
-		"sbatch --wrap=true --constraint=a100", // unknown option
+		"sbatch --parsable",               // no --wrap
+		"sbatch --wrap=true --exclusive",  // unknown option
+		"sbatch --wrap=true script.sh",    // a script file
+		"sbatch --wrap=true --time",       // missing value at the end
+		"sbatch -t 30 --wrap=true",        // short options are not sent
+		"sbatch --wrap=true --exclude=n1", // unknown option
 	} {
 		if _, errOut, code := r.run(line); code != 1 || !strings.HasPrefix(errOut, "sbatch: error: ") {
 			t.Errorf("%q: exit %d stderr %q, want exit 1 and an sbatch error", line, code, errOut)

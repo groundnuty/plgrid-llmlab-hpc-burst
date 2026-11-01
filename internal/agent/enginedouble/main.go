@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -153,6 +154,14 @@ func Main(args []string) int {
 		}
 	}
 	logv(LogEvent{Event: "start", Argv: args, Env: redactedEnv(os.Environ(), secretName), PID: os.Getpid()})
+	if cfg.PrintKey {
+		fmt.Fprintln(os.Stderr, "enginedouble: api key "+cfg.APIKey)
+	}
+	if cfg.WriteCaches || cfg.WriteHome {
+		if err := writeCaches(os.Getenv, cfg.WriteCaches, cfg.WriteHome); err != nil {
+			return fail(err)
+		}
+	}
 	if cfg.IgnoreTerm {
 		logv(LogEvent{PIDs: []int{os.Getpid(), childPID}})
 	}
@@ -249,4 +258,54 @@ func ChildMain() int {
 			return 0
 		}
 	}
+}
+
+// writeCaches is the write-caches and write-home modes. write-caches writes
+// one file in each cache a real engine fills at start, each where its variable
+// points, as #94's run found them (issue #94, comment 6550908687, finding 5):
+// vLLM (VLLM_CACHE_ROOT, else XDG_CACHE_HOME/vllm), TorchInductor
+// (TORCHINDUCTOR_CACHE_DIR, when set), Triton (TRITON_CACHE_DIR, else
+// HOME/.triton/cache), FlashInfer (FLASHINFER_WORKSPACE_BASE, else HOME, then
+// .cache/flashinfer), the CUDA compute cache (CUDA_CACHE_PATH, else
+// HOME/.nv/ComputeCache) and an XDG writer (XDG_CACHE_HOME, else HOME/.cache).
+// write-home writes one file under HOME whatever is set, as a cache that
+// ignores its variable does; in a container without the home directory it
+// fails, and so does the start.
+func writeCaches(getenv func(string) string, caches, homeOnly bool) error {
+	home := getenv("HOME")
+	or := func(name, def string) string {
+		if v := getenv(name); v != "" {
+			return v
+		}
+		return def
+	}
+	xdg := or("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	var dirs []string
+	if caches {
+		dirs = append(dirs,
+			filepath.Join(xdg, "hb-double-jit"),
+			filepath.Join(or("VLLM_CACHE_ROOT", filepath.Join(xdg, "vllm")), "torch_compile_cache"),
+			or("TRITON_CACHE_DIR", filepath.Join(home, ".triton", "cache")),
+			filepath.Join(or("FLASHINFER_WORKSPACE_BASE", home), ".cache", "flashinfer"),
+			or("CUDA_CACHE_PATH", filepath.Join(home, ".nv", "ComputeCache")),
+		)
+		if d := getenv("TORCHINDUCTOR_CACHE_DIR"); d != "" {
+			dirs = append(dirs, d)
+		}
+	}
+	if homeOnly {
+		dirs = append(dirs, filepath.Join(home, ".hb-double-ignores-variables"))
+	}
+	for _, d := range dirs {
+		if !filepath.IsAbs(d) {
+			return fmt.Errorf("write-caches: cache directory %q is not absolute (HOME %q)", d, home)
+		}
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			return fmt.Errorf("write-caches: %w", err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "entry"), []byte("cached\n"), 0o600); err != nil {
+			return fmt.Errorf("write-caches: %w", err)
+		}
+	}
+	return nil
 }

@@ -117,7 +117,17 @@ const (
 	// ContainerChatTemplate is where the agent writes the launch's chat
 	// template, when it has one.
 	ContainerChatTemplate = ContainerRunDir + "/chat-template.jinja"
+	// ContainerCacheDir is where the agent binds the Allocation's cache
+	// directory (AllocationCacheDirName); the engine's cache variables point
+	// under it.
+	ContainerCacheDir = "/hpcburst/cache"
 )
+
+// AllocationCacheDirName is the engines' cache directory inside the
+// Allocation's directory: compile and JIT caches that worker restarts within
+// the Allocation reuse, and that its teardown, which removes the Allocation's
+// directory, removes with it (science-agent ruling, 1 Nov 2026, issue #125).
+const AllocationCacheDirName = "cache"
 
 // WorkerName returns the name of an Instance's i-th worker: worker-<i>. It
 // equals v1alpha1.WorkerName, which names the worker's restart-generation

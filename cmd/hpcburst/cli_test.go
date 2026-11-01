@@ -40,6 +40,20 @@ func TestUsageAndExitCodes(t *testing.T) {
 	}
 }
 
+// TestUpAcceptsTheTopPortBase: 65523 is the highest base whose block of 13 (base..base+12) fits
+// below 65536, so up gets past the port check. With an empty --bin-dir it then stops at the k3s
+// binary, before anything starts or binds: the error must be that one, not "out of range".
+func TestUpAcceptsTheTopPortBase(t *testing.T) {
+	state := filepath.Join(shortTmp(t, false), "st")
+	r := cli(t, "up", "--state-dir", state, "--bin-dir", t.TempDir(), "--port-base", "65523")
+	if r.code != exitFail || strings.Contains(r.err, "out of range") || !strings.Contains(r.err, "k3s") {
+		t.Fatalf("exit %d, stderr %q; want the port base accepted and the start stopped at the missing k3s binary", r.code, r.err)
+	}
+	if _, err := os.Stat(filepath.Join(state, "state.json")); err == nil {
+		t.Error("a record was written")
+	}
+}
+
 // TestUpRejectsBadInputBeforeStarting: bad flags are refused at the boundary, with a message that
 // names what was wrong, before any binary is looked up or any process started.
 func TestUpRejectsBadInputBeforeStarting(t *testing.T) {
@@ -53,9 +67,11 @@ func TestUpRejectsBadInputBeforeStarting(t *testing.T) {
 		"ssh on port 99999":                            {[]string{"--front-mode", "ssh", "--front-addr", "front.example.test:99999", "--front-key", "/dev/null"}, "not a port"},
 		"port base too low":                            {[]string{"--port-base", "80"}, "out of range"},
 		"port base leaves no room for the controllers": {[]string{"--port-base", "65530"}, "out of range"},
-		"controller binary missing":                    {[]string{"--controller-bin", "/nonexistent/hpcburst-controller"}, "controller binary"},
-		"controller binary is a directory":             {[]string{"--controller-bin", "/tmp"}, "not a regular file"},
-		"state directory too long":                     {[]string{"--state-dir", "/tmp/" + strings.Repeat("d", 90)}, "shorter"},
+		// The block of 13 ends at base+12, the controller's metrics: 65524 would put it at 65536.
+		"port base one past the top of the block": {[]string{"--port-base", "65524"}, "out of range"},
+		"controller binary missing":               {[]string{"--controller-bin", "/nonexistent/hpcburst-controller"}, "controller binary"},
+		"controller binary is a directory":        {[]string{"--controller-bin", "/tmp"}, "not a regular file"},
+		"state directory too long":                {[]string{"--state-dir", "/tmp/" + strings.Repeat("d", 90)}, "shorter"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			args := append([]string{"up", "--state-dir", state, "--bin-dir", t.TempDir()}, c.args...)

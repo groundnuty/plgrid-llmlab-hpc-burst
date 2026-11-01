@@ -9,22 +9,12 @@ import (
 
 // Waits on observable state for the tests that wait on concurrency or time
 // (IMPL-COMMON, Timing tests): a generous deadline, never a fixed window.
+// waitState, the wait for a condition with the same 30 s bound, is in
+// probe_report_test.go.
 
 // stateLimit bounds a wait for state the test expects to reach; it is far
 // above the time the state takes, so a loaded machine cannot reach it.
 const stateLimit = 30 * time.Second
-
-// waitState polls cond until it holds, or fails the test after stateLimit.
-func waitState(t *testing.T, what string, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(stateLimit)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out after %s waiting for %s", stateLimit, what)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
 
 // goroutineStacks returns every goroutine's stack, one per element, in the
 // form of a test binary's time-out dump (debug 2): a header line such as

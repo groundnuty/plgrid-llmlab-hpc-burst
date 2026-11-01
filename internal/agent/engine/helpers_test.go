@@ -73,7 +73,60 @@ func doubleWith(t *testing.T, modes string, tune func(*enginedouble.Config), wra
 type recorder struct {
 	mu       sync.Mutex
 	requests []map[string]any
-	prompts  []int // usage.prompt_tokens of each non-streamed answer
+	prompts  []int    // usage.prompt_tokens of each non-streamed answer
+	streams  []string // the body of each streamed answer
+}
+
+// teeWriter copies a streamed answer while it passes, flushes included.
+type teeWriter struct {
+	http.ResponseWriter
+	buf *bytes.Buffer
+}
+
+func (t teeWriter) Write(p []byte) (int, error) {
+	t.buf.Write(p)
+	return t.ResponseWriter.Write(p)
+}
+
+func (t teeWriter) Flush() {
+	if f, ok := t.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// finishDeltas counts the recorded streams' finish chunks whose delta is not
+// empty: content, reasoning or a tool call.
+func (r *recorder) finishDeltas() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, body := range r.streams {
+		for _, ev := range strings.Split(body, "\n\n") {
+			data, ok := strings.CutPrefix(strings.TrimSpace(ev), "data: ")
+			if !ok || data == "[DONE]" {
+				continue
+			}
+			var c struct {
+				Choices []struct {
+					Delta struct {
+						Content   string            `json:"content"`
+						Reasoning string            `json:"reasoning"`
+						ToolCalls []json.RawMessage `json:"tool_calls"`
+					} `json:"delta"`
+					FinishReason *string `json:"finish_reason"`
+				} `json:"choices"`
+			}
+			if json.Unmarshal([]byte(data), &c) != nil {
+				continue
+			}
+			for _, ch := range c.Choices {
+				if ch.FinishReason != nil && (ch.Delta.Content != "" || ch.Delta.Reasoning != "" || len(ch.Delta.ToolCalls) > 0) {
+					n++
+				}
+			}
+		}
+	}
+	return n
 }
 
 func (r *recorder) wrap(next http.Handler) http.Handler {
@@ -89,7 +142,15 @@ func (r *recorder) wrap(next http.Handler) http.Handler {
 		r.mu.Lock()
 		r.requests = append(r.requests, body)
 		r.mu.Unlock()
-		next.ServeHTTP(w, req)
+		if body["stream"] != true {
+			next.ServeHTTP(w, req)
+			return
+		}
+		buf := &bytes.Buffer{}
+		next.ServeHTTP(teeWriter{w, buf}, req)
+		r.mu.Lock()
+		r.streams = append(r.streams, buf.String())
+		r.mu.Unlock()
 	})
 }
 

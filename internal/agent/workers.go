@@ -1,12 +1,15 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/procgroup"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
@@ -40,9 +43,16 @@ func (a *Agent) startWorker(in *instance, dw agentapi.DesiredWorker, instGen int
 		code := startFailedExitCode
 		w.phase = agentapi.PartExited
 		w.exitCode = &code
+		w.logTail = startFailureTail(err, a.keys)
 		return w
 	}
 	_ = os.Remove(w.socket)
+	if a.o.CacheDir == "" {
+		return fail(errors.New("no cache directory is configured"))
+	}
+	if err := os.MkdirAll(a.o.CacheDir, 0o700); err != nil {
+		return fail(fmt.Errorf("cache directory: %w", err))
+	}
 	if err := writeChatTemplate(a.o.RunDir, in.launch); err != nil {
 		return fail(fmt.Errorf("chat template: %w", err))
 	}
@@ -51,6 +61,7 @@ func (a *Agent) startWorker(in *instance, dw agentapi.DesiredWorker, instGen int
 		Image:         in.imagePath,
 		CheckpointDir: in.ckptDir,
 		RunDir:        a.o.RunDir,
+		CacheDir:      a.o.CacheDir,
 		Launch:        in.launch,
 		Key:           in.key,
 		BaseEnv:       a.o.BaseEnv,
@@ -59,7 +70,7 @@ func (a *Agent) startWorker(in *instance, dw agentapi.DesiredWorker, instGen int
 	if err != nil {
 		return fail(err)
 	}
-	logf, err := os.OpenFile(filepath.Join(a.o.LogDir, "engine-"+dw.Name+".log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	logf, err := os.OpenFile(engineLogPath(a.o.LogDir, dw.Name), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return fail(fmt.Errorf("engine log: %w", err))
 	}
@@ -219,6 +230,7 @@ func (a *Agent) leaderExited(in *instance, g *procgroup.Group) {
 	}
 	w.phase = agentapi.PartExited
 	w.cleaning = true
+	w.logTail = readLogTail(engineLogPath(a.o.LogDir, w.name), a.keys)
 	a.log.Warn("worker exited without being told to", "worker", w.name, "pid", g.PID(), "exitCode", code)
 	g.Stop(a.stopGrace)
 }
@@ -298,4 +310,117 @@ func (a *Agent) shutdown() {
 			w.cleaning = false
 		}
 	}
+}
+
+// engineLogPath is a worker's engine log in the log directory.
+func engineLogPath(logDir, worker string) string {
+	return filepath.Join(logDir, "engine-"+worker+".log")
+}
+
+// readLogTail returns the last agentapi.MaxLogTailBytes of a worker's engine
+// log, starting at a UTF-8 boundary, with any invalid byte replaced and every
+// key in keys replaced (WorkerReport.LogTail). The keys are every Instance key
+// the agent has drawn in this job, the current one and the earlier ones: the
+// log is appended to across Instances, so its tail can hold an earlier
+// Instance's output. The keys are replaced before the tail is cut (PR #138
+// review, Astra B1, Opus 1): the read starts len(key)-1 bytes before the
+// window, so a key that crosses the window's edge is read whole and replaced,
+// and those first bytes, which can hold only the end of a key that began
+// before the read, are never shown. An unreadable log gives "".
+func readLogTail(path string, keys []string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	overlap := int64(max(longest(keys)-1, 0))
+	off := max(0, fi.Size()-agentapi.MaxLogTailBytes-overlap)
+	buf := make([]byte, fi.Size()-off)
+	n, _ := f.ReadAt(buf, off)
+	drop := 0
+	if off > 0 {
+		drop = int(overlap)
+	}
+	b := redactKeys(buf[:n], drop, keys)
+	for len(b) > 0 && !utf8.RuneStart(b[0]) {
+		b = b[1:]
+	}
+	return tailUTF8(strings.ToValidUTF8(string(b), "\uFFFD"), agentapi.MaxLogTailBytes)
+}
+
+// startFailureTail is the LogTail of a worker that could not start: why, with
+// every key in keys replaced before the text is cut to
+// agentapi.MaxLogTailBytes, so a cut never leaves part of a key.
+func startFailureTail(err error, keys []string) string {
+	b := redactKeys([]byte("the worker did not start: "+err.Error()), 0, keys)
+	return agentapi.TruncateUTF8(strings.ToValidUTF8(string(b), "\uFFFD"), agentapi.MaxLogTailBytes)
+}
+
+// redactKeys returns b with every occurrence of each key replaced by
+// agentapi.RedactedValue, one marker for each run of overlapping or adjacent
+// occurrences, and without b[:drop]: bytes that can hold the end of a key
+// whose start is before b. An occurrence that starts in b[:drop] and ends past
+// it is replaced by the marker.
+func redactKeys(b []byte, drop int, keys []string) []byte {
+	cover := make([]bool, len(b))
+	for _, k := range keys {
+		if k == "" {
+			continue
+		}
+		kb := []byte(k)
+		for i := 0; i+len(kb) <= len(b); {
+			j := bytes.Index(b[i:], kb)
+			if j < 0 {
+				break
+			}
+			for x := i + j; x < i+j+len(kb); x++ {
+				cover[x] = true
+			}
+			i += j + 1
+		}
+	}
+	out := make([]byte, 0, len(b))
+	for i := 0; i < len(b); {
+		if cover[i] {
+			j := i
+			for j < len(b) && cover[j] {
+				j++
+			}
+			if j > drop {
+				out = append(out, agentapi.RedactedValue...)
+			}
+			i = j
+			continue
+		}
+		if i >= drop {
+			out = append(out, b[i])
+		}
+		i++
+	}
+	return out
+}
+
+// longest returns the length of the longest string in ss.
+func longest(ss []string) int {
+	n := 0
+	for _, s := range ss {
+		n = max(n, len(s))
+	}
+	return n
+}
+
+// tailUTF8 returns the last at most n bytes of s, starting at a rune boundary.
+func tailUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	s = s[len(s)-n:]
+	for len(s) > 0 && !utf8.RuneStart(s[0]) {
+		s = s[1:]
+	}
+	return s
 }

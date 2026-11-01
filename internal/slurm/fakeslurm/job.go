@@ -61,6 +61,7 @@ type job struct {
 	output     string
 	errPath    string
 	wrap       string
+	constraint string
 	restartCnt int
 	execs      []*execution
 	// held is true while the job waits on a hold; the reason (HeldUser or
@@ -195,6 +196,9 @@ type Job struct {
 	Output, Error      string
 	// Wrap is the --wrap command, the batch script.
 	Wrap string
+	// Constraint is the --constraint value, "" when none was given. The fake
+	// accepts any feature; it does not model node features.
+	Constraint string
 }
 
 func (j *job) snapshot() Job {
@@ -204,7 +208,7 @@ func (j *job) snapshot() Job {
 		TimeLimit: j.timeLimit, CPUs: j.cpus, GPUs: j.gpus, MemMiB: j.memMiB,
 		State: e.state, Held: j.held, RestartCount: j.restartCnt, Executions: len(j.execs),
 		Submit: e.submit, Start: e.start, End: e.end, AcctHidden: j.acctHidden,
-		Output: j.output, Error: j.errPath, Wrap: j.wrap,
+		Output: j.output, Error: j.errPath, Wrap: j.wrap, Constraint: j.constraint,
 	}
 	if j.held {
 		s.HoldReason = e.reason
