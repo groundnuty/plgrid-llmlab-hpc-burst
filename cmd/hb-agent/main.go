@@ -63,7 +63,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "usage: hb-agent <allocation directory>")
 		return 2
 	}
-	log := slog.New(slog.NewTextHandler(stderr, nil))
+	log := newLogger(stderr)
 	if err := agent.CloseInheritedFDs(); err != nil {
 		log.Warn("cannot mark inherited file descriptors close-on-exec", "err", err)
 	}
@@ -155,6 +155,24 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	}
 	log.Info("allocation agent exiting")
 	return 0
+}
+
+// newLogger is the agent's log, whose output the job keeps as agent.log: slog's
+// text form with every time in UTC. The job's TZ is the node's local zone (+01:00
+// on the clusters), and a log of local times misorders against the reports and
+// the controller's records, which are all in UTC (HBEP-7: the agent's times are
+// formatted in UTC; science-agent ruling, 1 Nov 2026, issue #94).
+func newLogger(w io.Writer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{ReplaceAttr: utcTime}))
+}
+
+// utcTime moves every time in a log line to UTC: the record's own time and
+// any time a caller logs as an attribute.
+func utcTime(_ []string, a slog.Attr) slog.Attr {
+	if a.Value.Kind() == slog.KindTime {
+		a.Value = slog.TimeValue(a.Value.Time().UTC())
+	}
+	return a
 }
 
 // lookTool returns the tool's path: the configured one, else name on PATH.
