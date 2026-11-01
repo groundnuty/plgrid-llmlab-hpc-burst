@@ -59,6 +59,10 @@ import (
 // until it expires, as before.
 const ReleaseBudget = time.Second
 
+// UserAgent is the user agent New adds to its lock's requests, as
+// controller-runtime adds it to its own lock's (rest.AddUserAgent).
+const UserAgent = "leader-election"
+
 // releaseRetryEvery is the pause before each retry of a release.
 const releaseRetryEvery = 100 * time.Millisecond
 
@@ -79,7 +83,7 @@ func New(cfg *rest.Config, namespace, name string, renewDeadline time.Duration, 
 	if err != nil {
 		return nil, err
 	}
-	cfg = rest.AddUserAgent(rest.CopyConfig(cfg), "leader-election")
+	cfg = rest.AddUserAgent(rest.CopyConfig(cfg), UserAgent)
 	cfg.Timeout = max(renewDeadline/2, time.Second)
 	core, err := corev1client.NewForConfig(cfg)
 	if err != nil {

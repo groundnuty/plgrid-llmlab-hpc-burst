@@ -1,7 +1,14 @@
-// Package leasefault fails chosen requests for one leader Lease, at the
+// Package leasefault fails chosen requests of a leader Lease's lock, at the
 // transport of a rest.Config, for the tests of the managers' stop (issue
 // #160). It reaches the request the tests need, the elector's release read,
 // without a hook in the code under test.
+//
+// It sees only the lock's own requests: those for the Lease that carry the
+// user agent leaderlock.New adds (leaderlock.UserAgent, through
+// rest.AddUserAgent, whose round tripper wraps the config's WrapTransport:
+// client-go v0.35.3, transport/round_trippers.go:42-62). Other readers of the
+// Lease, such as the lifecycle manager's ObservationGap, pass untouched and
+// unrecorded.
 //
 // client-go's elector (k8s.io/client-go v0.35.3) reads and writes the Lease
 // for its acquire and its renews with a context derived from the one the
@@ -10,8 +17,8 @@
 // context.WithoutCancel), so they carry its values. Its release alone reads
 // with a new context (tools/leaderelection/leaderelection.go:311,
 // context.Background()). A test that starts the manager with a context from
-// Mark therefore tells the release read apart: it is the one read of the
-// Lease that is not marked. Those line numbers pin the versions: after an
+// Mark therefore tells the release read apart: of the lock's reads, it is the
+// one that is not marked. Those line numbers pin the versions: after an
 // upgrade, a failed match shows as a test whose fault never fired, which the
 // tests check, never as a test that passes without it.
 package leasefault
@@ -20,9 +27,12 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 
 	"k8s.io/client-go/rest"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/leaderlock"
 )
 
 type startMark struct{}
@@ -43,25 +53,26 @@ type Mode int
 const (
 	// None fails nothing.
 	None Mode = iota
-	// ReleaseRead fails every read of the Lease whose context is not marked:
+	// ReleaseRead fails every read of the lock whose context is not marked:
 	// with the manager started on a marked context, client-go's release read
 	// and nothing else.
 	ReleaseRead
-	// All fails every request for the Lease, marked or not: the elector's
+	// All fails every request of the lock, marked or not: the elector's
 	// renews fail until it gives up its leadership, and its release read fails
 	// too, so the Lease keeps naming the holder.
 	All
 )
 
-// Request is one request for the Lease that reached the transport.
+// Request is one request of the lock for the Lease that reached the
+// transport.
 type Request struct {
 	Method string
 	Marked bool
 	Failed bool
 }
 
-// Faults fails requests for one Lease in its Mode, and records every request
-// for that Lease.
+// Faults fails requests of the lock for one Lease in its Mode, and records
+// every request of the lock for that Lease.
 type Faults struct {
 	path string
 
@@ -162,7 +173,7 @@ type transport struct {
 // that client-go does not retry: it retries a GET only on a reset connection,
 // a probable EOF or a lost HTTP/2 connection (rest/request.go:1064-1076).
 func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.URL.Path == t.f.path && t.f.fail(req) {
+	if req.URL.Path == t.f.path && strings.HasSuffix(req.Header.Get("User-Agent"), "/"+leaderlock.UserAgent) && t.f.fail(req) {
 		return nil, fmt.Errorf("leasefault: injected failure of %s %s", req.Method, req.URL.Path)
 	}
 	return t.next.RoundTrip(req)
