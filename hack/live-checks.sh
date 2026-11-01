@@ -78,6 +78,7 @@ live_table() {
 llmlab-smoke|local|internal/front|^TestLLMLabThroughTheFront$|HPCBURST_LLMLAB_CREDENTIALS|-|host|ready
 hub-golden|local|pkg/hubfiles|^TestGoldenHub$|HPCBURST_TEST_HUB|spikes/s7/checkpoints.env,spikes/s7/results/run1/hub,spikes/s7/results/run1/hash-*.jsonl|host|ready
 conformance-helios|cluster|internal/providerctl/conformance|^TestConformance$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host|ready
+conformance-helios-gh200|cluster|internal/providerctl/conformance|^TestConformance$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host|ready
 conformance-athena|cluster|internal/providerctl/conformance|^TestConformance$|HPCBURST_CONFORMANCE|profiles/athena.yaml|host|ready
 real-engine|cluster|cmd/hb-agent|^TestRealEngine$|HB_REAL_ENGINE_PLAN|spikes/s94/job.sh|host,linux-arm64|ready
 rehearsal|cluster|-|-|-|-|-|pending
@@ -88,12 +89,21 @@ TABLE
 # What a cluster test asks of the scheduler. name | host | profile | partition |
 # qos | slot | account key | GPUs | CPUs | memory | time limit | timeout (min) | extra.
 # slot is the token that marks the one-job slot in squeue's QOS or partition column.
-# The conformance time limit is the harness's own (TimeLimit "5m", conformance_test.go);
-# the real-engine one is the documented run's (spikes/s94/README.md).
+# The conformance time limit is the harness's own (allocTimeLimit "5m", conformance_test.go;
+# TestConformanceRowsPassTheRequestCheck compares them); the real-engine one is the documented
+# run's (spikes/s94/README.md).
+# conformance-helios-gh200 runs under QOS now, the only way to a running job there (the normal QOS
+# starts one in weeks): the qos reaches the test as HPCBURST_CONF_QOS and the test's Provider.
+# Its 1 CPU and 1Gi are the smallest requests the request check takes (cpusPerTask >= 1, memory > 0,
+# slurm.CheckRequest) for the stand-in agent, which writes nothing to the RAM disk that -C memfs
+# gives; the test submits with --constraint=memfs, so the estimate asks for it too. Its timeout is
+# the sum of the test's own deadlines (30+5+3+30+8+3+3 min) plus a margin, so that a slow queue
+# fails in the test, with its message, before this cap does.
 cluster_table() {
   cat <<'TABLE'
 # BEGIN CLUSTER SHAPES
 conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|80|-
+conformance-helios-gh200|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|85|-C memfs
 conformance-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|4|32Gi|00:05:00|80|-
 real-engine|helios|-|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|00:57:00|75|-C memfs
 # END CLUSTER SHAPES
@@ -440,7 +450,7 @@ env_hub() { export HPCBURST_TEST_HUB=1; }
 env_conformance() {
   local n=$1 host=${HOST[$1]} up
   up=$(printf '%s' "$host" | tr a-z A-Z)
-  unset HPCBURST_CONF_GPU_MODEL HPCBURST_CONF_CPU_ARCH HPCBURST_CONF_DATA_PARSER
+  unset HPCBURST_CONF_GPU_MODEL HPCBURST_CONF_CPU_ARCH HPCBURST_CONF_DATA_PARSER HPCBURST_CONF_QOS
   export HPCBURST_CONFORMANCE=1 HPCBURST_CONF_PROFILE=${PROFILE[$n]} HPCBURST_CONF_PARTITION=${PARTITION[$n]}
   export HPCBURST_CONF_CREDENTIALS=${S[LIVE_CONF_CREDENTIALS_$up]} HPCBURST_CONF_ACCOUNT=${S[${ACCTKEY[$n]}]}
   export HPCBURST_CONF_GPUS=${GPUS[$n]} HPCBURST_CONF_CPUS=${CPUS[$n]} HPCBURST_CONF_MEMORY=${MEM[$n]}
@@ -448,6 +458,8 @@ env_conformance() {
   export HPCBURST_CONF_STAGING='$SCRATCH/hpc-burst-conformance'
   export HPCBURST_CONF_HOST_LOCK=${S[LIVE_LOCK_DIR]}/$host.lock HPCBURST_CONF_CONTROL_DIR=$CONTROL_DIR
   export HPCBURST_CONF_OUT=$REC_DIR
+  # Unset above, so a value inherited from the caller's shell never reaches a row that names none.
+  [ "${QOS[$n]}" = - ] || export HPCBURST_CONF_QOS=${QOS[$n]}
 }
 
 run_local() { # <name>

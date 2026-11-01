@@ -24,6 +24,9 @@
 //	HPCBURST_CONF_GPUS         GPUs per job (0 for a CPU partition)
 //	HPCBURST_CONF_CPUS         cpusPerTask
 //	HPCBURST_CONF_MEMORY       memory, a Kubernetes quantity
+//	HPCBURST_CONF_QOS          optional: the Provider's qos, which the profile must list
+//	                           in its qos. Unset: no --qos. Helios plgrid-gpu-gh200 needs
+//	                           now: its normal qos will not start a job for weeks
 //	HPCBURST_CONF_STAGING      a directory below the profile's stagingDir (for example
 //	                           $SCRATCH/<own dir>), not the root. Each run stages into
 //	                           a run-<12 hex> directory of its own below it, and removes
@@ -185,6 +188,29 @@ type world struct {
 
 const testNS = "conformance"
 
+// allocTimeLimit is every Allocation's time limit, and the hard end the run
+// asserts. hack/live-checks.sh carries it in each conformance row's time limit
+// (TestConformanceRowsPassTheRequestCheck compares the two).
+const allocTimeLimit = "5m"
+
+// conformanceProvider is the Provider of the run: it names the shipped profile
+// and allows the one partition under test, under the account and the qos of the
+// settings. newWorld creates it, so a test of it tests the run's own Provider.
+func conformanceProvider(s settings) *v1alpha1.Provider {
+	return &v1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "conformance"}, Spec: v1alpha1.ProviderSpec{
+		PlatformProfileRef: v1alpha1.ObjectReference{Name: s.profile.Name}, Account: s.account, AllowedPartitions: []string{s.partition},
+		QOS: s.qos, CredentialsRef: &v1alpha1.CredentialsReference{File: s.creds},
+	}}
+}
+
+// heldRequest is a held submission of the run, built where the Provider's
+// settings are known: the plugin refuses a request whose qos is not the
+// Provider's (slurm.CheckRequest), so every direct submit of the run is made
+// here and none writes the literal.
+func heldRequest(s settings, tag string, params v1alpha1.BatchParameters) provider.SubmitRequest {
+	return provider.SubmitRequest{Tag: tag, Hold: true, Account: s.account, QOS: s.qos, Params: params}
+}
+
 func newWorld(t *testing.T) *world {
 	s := load(t)
 	w := &world{t: t, s: s, p: newPrivate(t, s.out), jobIDs: map[string]bool{}}
@@ -199,10 +225,7 @@ func newWorld(t *testing.T) *world {
 	// The profile is the shipped file as read; the Provider names it and allows
 	// the one partition under test.
 	pp := s.profile
-	prov := &v1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "conformance"}, Spec: v1alpha1.ProviderSpec{
-		PlatformProfileRef: v1alpha1.ObjectReference{Name: pp.Name}, Account: s.account, AllowedPartitions: []string{s.partition},
-		CredentialsRef: &v1alpha1.CredentialsReference{File: s.creds},
-	}}
+	prov := conformanceProvider(s)
 	w.c = clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(pp, prov).
 		WithStatusSubresource(&v1alpha1.Allocation{}, &v1alpha1.Provider{}).Build()
 
@@ -292,7 +315,7 @@ func (w *world) newAlloc(name string) *v1alpha1.Allocation {
 			ProviderConfigReference: &xpv2.ProviderConfigReference{Kind: v1alpha1.ProviderConfigKind, Name: "conformance"},
 			ManagementPolicies:      v1alpha1.DefaultManagementPolicies(),
 			ForProvider: v1alpha1.AllocationParameters{Batch: &v1alpha1.BatchParameters{
-				Partition: w.s.partition, TimeLimit: "5m", GPUs: w.s.gpus, CPUsPerTask: w.s.cpus, Memory: w.s.memory, Nodes: 1, AgentDigest: w.digest,
+				Partition: w.s.partition, TimeLimit: allocTimeLimit, GPUs: w.s.gpus, CPUsPerTask: w.s.cpus, Memory: w.s.memory, Nodes: 1, AgentDigest: w.digest,
 			}},
 		},
 	}
@@ -377,7 +400,7 @@ func count(words []string, w string) int {
 
 // TestConformance is the run on one platform.
 //
-//livecheck:conformance-helios,conformance-athena
+//livecheck:conformance-helios,conformance-helios-gh200,conformance-athena
 func TestConformance(t *testing.T) {
 	w := newWorld(t)
 	ctx := context.Background()
@@ -488,7 +511,7 @@ func TestConformance(t *testing.T) {
 	if err := w.batch.EnsureFile(ctx, provider.File{Path: agentapi.StagedCredentialPath(lostTag), SHA256: hex.EncodeToString(csum[:]), Mode: 0o600, Content: cred}); err != nil {
 		t.Fatal(err)
 	}
-	id2, outcome, err := w.batch.Submit(ctx, provider.SubmitRequest{Tag: lostTag, Hold: true, Account: w.s.account, Params: *b.Spec.ForProvider.Batch})
+	id2, outcome, err := w.batch.Submit(ctx, heldRequest(w.s, lostTag, *b.Spec.ForProvider.Batch))
 	if err != nil || outcome != provider.Accepted {
 		t.Fatalf("direct held submit: %s %v", outcome, err)
 	}

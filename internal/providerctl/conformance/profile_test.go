@@ -36,6 +36,9 @@ var retired = []string{"HPCBURST_CONF_GPU_MODEL", "HPCBURST_CONF_CPU_ARCH", "HPC
 // settings is one run's inputs.
 type settings struct {
 	creds, account, partition, staging, lock, control, out string
+	// qos is the Provider's qos (HPCBURST_CONF_QOS), or "" for none: the Provider
+	// sends no --qos, and every request the run submits agrees (heldRequest).
+	qos string
 	// runStaging is this run's own staging directory, below staging
 	// (newRunStaging); the profile's stagingDir is it, and it is removed when the
 	// run ends.
@@ -92,6 +95,8 @@ func loadProfile(dir, name, partition, staging string) (*v1alpha1.PlatformProfil
 
 // readSettings reads the run's settings from env, a lookup that returns "" for
 // an unset name. Every missing or malformed setting is reported at once.
+// HPCBURST_CONF_QOS is the one optional setting; when it is set, the profile
+// must list it in its qos (the Provider's own check, run here before any call).
 func readSettings(env func(string) string) (settings, error) {
 	var problems []string
 	get := func(k string) string {
@@ -116,6 +121,7 @@ func readSettings(env func(string) string) (settings, error) {
 		creds: get("HPCBURST_CONF_CREDENTIALS"), account: get("HPCBURST_CONF_ACCOUNT"), partition: get("HPCBURST_CONF_PARTITION"),
 		staging: get("HPCBURST_CONF_STAGING"), lock: get("HPCBURST_CONF_HOST_LOCK"), control: get("HPCBURST_CONF_CONTROL_DIR"),
 		out: get("HPCBURST_CONF_OUT"), gpus: num("HPCBURST_CONF_GPUS"), cpus: num("HPCBURST_CONF_CPUS"),
+		qos: env("HPCBURST_CONF_QOS"),
 	}
 	if m := get("HPCBURST_CONF_MEMORY"); m != "" {
 		q, err := resource.ParseQuantity(m)
@@ -141,6 +147,15 @@ func readSettings(env func(string) string) (settings, error) {
 	pp, part, err := loadProfile(profilesDir(), profile, s.partition, s.runStaging)
 	if err != nil {
 		return s, err
+	}
+	if s.qos != "" {
+		if _, ok := v1alpha1.FindQOS(&pp.Spec, s.qos); !ok {
+			var listed []string
+			for _, q := range pp.Spec.QOS {
+				listed = append(listed, q.Name)
+			}
+			return s, fmt.Errorf("HPCBURST_CONF_QOS %q is not a qos profile %q lists; it lists %s", s.qos, profile, strings.Join(listed, ", "))
+		}
 	}
 	s.profile, s.part = pp, part
 	return s, nil
