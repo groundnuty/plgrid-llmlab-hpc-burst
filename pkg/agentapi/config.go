@@ -143,16 +143,22 @@ var (
 	// pinForm is 64 lowercase hex characters: a certificate pin, and the
 	// SHA-256 digest of a staged binary (FrpcDigest).
 	pinForm = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	// userForm is a portable user name, as POSIX allows them: letters of
-	// either case, digits, '.', '_' and '-', with no leading '-', and here
-	// also no leading digit and at most 32 characters, the limit of Linux's
-	// useradd. The ssh user is the one who runs the controller
-	// (user.Current), whose name may have capitals, as on the development
-	// VM; every such name is still safe in an ssh argument and a shell word
-	// (decision of `@hpc-burst-code-agent`, confirmed by
-	// `@hpc-burst-science-agent`, 1 Nov 2026; review of PR 132: B2).
+	// userForm is ValidUserName's form.
 	userForm = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]{0,31}$`)
 )
+
+// ValidUserName reports whether name is a portable user name, as POSIX allows
+// them: letters of either case, digits, '.', '_' and '-', with no leading '-',
+// and here also no leading digit and at most 32 characters, the limit of
+// Linux's useradd. Every such name is safe in an ssh argument and a shell
+// word. It is the one rule for every user name the framework puts into ssh:
+// agent.json's dial-home user, who runs the controller (user.Current) and may
+// have capitals, as on the development VM (decision of
+// `@hpc-burst-code-agent`, confirmed by `@hpc-burst-science-agent`, 1 Nov
+// 2026; review of PR 132: B2), and a batch Provider's cluster login in its
+// credentials file (internal/slurm, ParseSSHConfig; the same ruling extended
+// to it for issue #146, 1 Nov 2026).
+func ValidUserName(name string) bool { return userForm.MatchString(name) }
 
 // Validate returns every problem with c, joined.
 func (c AgentConfig) Validate() error {
@@ -179,7 +185,7 @@ func (c AgentConfig) Validate() error {
 		if c.SSH == nil {
 			bad("ssh mode needs ssh.user, ssh.agentPort and ssh.dialHomePort")
 		} else {
-			if !userForm.MatchString(c.SSH.User) {
+			if !ValidUserName(c.SSH.User) {
 				bad("ssh.user %q is not a user name", c.SSH.User)
 			}
 			if c.SSH.AgentPort < 1 || c.SSH.AgentPort > 65535 {

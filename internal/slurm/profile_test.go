@@ -224,6 +224,28 @@ func TestReadProfileCredentialModes(t *testing.T) {
 // zero value of an integer would mean root, and every Provider of a caller
 // that forgot the field would be CredentialsInvalid. The test names no UID, so
 // it compiles whatever the field's type.
+// A cluster login follows agentapi.ValidUserName, the one user-name rule for
+// ssh: capitals are accepted, as on a host whose account has them, and the
+// 32-character limit and the leading-digit rule hold (issue #146 ruling, 1 Nov
+// 2026). Example names only.
+func TestParseSSHConfigTakesThePortableUserForm(t *testing.T) {
+	for _, c := range []struct {
+		user string
+		ok   bool
+	}{
+		{"Mixed_Case.Name", true},
+		{"A" + strings.Repeat("b", 31), true},
+		{"A" + strings.Repeat("b", 32), false},
+		{"1user", false},
+		{"-user", false},
+	} {
+		_, err := ParseSSHConfig([]byte("HostName login.example.org\nUser "+c.user+"\nIdentityFile /k\n"), "")
+		if (err == nil) != c.ok {
+			t.Errorf("User %q: error %v, want accepted %v", c.user, err, c.ok)
+		}
+	}
+}
+
 func TestZeroValueProfileReaderAcceptsFilesOfTheCurrentUser(t *testing.T) {
 	r := newProfileRig(t)
 	if _, err := (&ProfileReader{Reader: r.client(), Home: r.dir}).Read(context.Background(), "example-provider"); err != nil {
