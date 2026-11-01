@@ -279,8 +279,19 @@ func TestNoOverlapQueuedPath(t *testing.T) {
 	// never started before the predecessor's job ends. No ReplacementLate at
 	// 09:49:30 or after.
 	var pJobEnd, rStart time.Time
+	// Once the predecessor is removed with its Allocation, and before the
+	// replacement is ready, only the replacement's own mark carries the gap:
+	// the controller restarts there, and the gap must hold on.
+	restarted, gapAfterRestart := false, 0
 	watch := func() {
 		now := rg.clock.Now()
+		if restarted && rg.readyCount(hoMD) == 0 {
+			gapAfterRestart++
+		}
+		if !restarted && rg.instancesByName()[p.Name] == nil && rg.readyCount(hoMD) == 0 {
+			restarted = true
+			rg.restartController()
+		}
 		noReplacementLate(t, rg)
 		streamNotCut(t, rg, p.Name)
 		ra, ok := rg.allocation(rAlloc)
@@ -318,6 +329,9 @@ func TestNoOverlapQueuedPath(t *testing.T) {
 	hoStepTo(rg, hoT(10, 10, 0), 10*time.Second, watch)
 	if pJobEnd.IsZero() || rStart.IsZero() {
 		t.Fatalf("the predecessor's job ended at %v and the replacement started at %v, want both by 10:10:00", pJobEnd, rStart)
+	}
+	if !restarted || gapAfterRestart == 0 {
+		t.Fatalf("restarted %v with %d in-gap steps after it, want a restart after the predecessor's removal and the gap checked after it", restarted, gapAfterRestart)
 	}
 	// ReleaseWhenIdle: the predecessor ended after 09:56:00, its Allocation
 	// and job went 5 min later.
