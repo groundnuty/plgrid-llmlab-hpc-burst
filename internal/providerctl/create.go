@@ -111,6 +111,10 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 	switch outcome {
 	case provider.Accepted:
 		e.s.limitEvents.Delete(a.UID) // a full slot, if there was one, has cleared
+		// The stored reason and submission mirror are those of the last
+		// observation, a full slot's perhaps; the next Observe derives them
+		// from the record and the job.
+		a.Status.AtProvider.Reason, a.Status.AtProvider.Submission = "", nil
 		return managed.ExternalCreation{}, e.accepted(wctx, a, claim, id)
 	case provider.Rejected:
 		return managed.ExternalCreation{}, e.rejected(wctx, a, claim, serr)
@@ -121,6 +125,9 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 			return map[string]string{v1alpha1.AnnotationSubmission: recordValue(u)}
 		}); err != nil {
 			e.s.o.Log.Info("cannot record the unknown outcome; the claim stays InFlight", "attempt", n, "error", err)
+			e.showAttempt(a, &claim)
+		} else {
+			e.showAttempt(a, &u)
 		}
 		e.event(a, event.Warning("SubmissionUnknown", fmt.Errorf("attempt %d: %s; the tag will resolve it", n, u.Reason)))
 		return managed.ExternalCreation{}, nil
@@ -149,8 +156,15 @@ func (e *external) rejected(ctx context.Context, a *v1alpha1.Allocation, claim v
 	_, werr := writeOwn(ctx, e.s.kube, e.s.reader, a, claim.Token, func(record) map[string]string {
 		return map[string]string{v1alpha1.AnnotationSubmission: recordValue(r)}
 	})
+	// What the Allocation shows is derived from the record as it now stands,
+	// never carried over from the stored status: a full slot's reason must not
+	// outlive the record that gave it (HBEP-4, QOS limits; the refusal
+	// contract, PR 151's review).
 	if werr != nil {
 		e.s.o.Log.Info("cannot record the rejection", "attempt", claim.Attempt, "error", werr)
+		e.showAttempt(a, &claim)
+	} else {
+		e.showRejected(a, &r)
 	}
 	if !limit {
 		e.s.limitEvents.Delete(a.UID) // the condition, if there was one, has ended
@@ -189,6 +203,7 @@ func (e *external) refuse(ctx context.Context, a *v1alpha1.Allocation, rec recor
 	if err := write(ctx, e.s.kube, a, map[string]string{v1alpha1.AnnotationSubmission: recordValue(r)}); err != nil {
 		return fmt.Errorf("attempt %d is refused before any call, but the refusal was not recorded: %w", n, err)
 	}
+	e.showRejected(a, &r)
 	e.event(a, event.Warning("SubmissionRejected", fmt.Errorf("attempt %d: %s", n, r.Reason)))
 	return fmt.Errorf("attempt %d rejected: %s", n, r.Reason)
 }

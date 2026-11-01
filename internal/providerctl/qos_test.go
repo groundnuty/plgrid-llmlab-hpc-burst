@@ -418,6 +418,88 @@ func TestASecondJobBesideARunningOneIsAcceptedAndPends(t *testing.T) {
 	}
 }
 
+// What the Allocation shows is derived from the record as it stands, on every
+// pass, never carried over from the stored status (HBEP-4, QOS limits: another
+// refusal is "never read as a full slot"; PR 151's review, blocker B1). A full
+// slot followed by another policy reason shows the plain Rejected display from
+// the Create pass on, and one followed by an Unknown outcome shows the wait for
+// the tag; neither keeps SubmitLimitReached, with or without a code. The reason
+// is asserted at every step, the backoff passes and the Create passes included,
+// and the record's code, the submission mirror and the reason must agree.
+func TestTheReasonFollowsTheCurrentRecordAtEveryStep(t *testing.T) {
+	const (
+		limit      = "SubmitLimitReached"
+		wallLine   = "sbatch: error: QOSMaxWallDurationPerJobLimit"
+		unknownMsg = "submission attempt 3 is Unknown and no job with the tag is found yet; nothing new is submitted"
+	)
+	type step struct {
+		what            string
+		advance         time.Duration
+		reason, code    string // the display and the record's code after the pass
+		phase, recState string
+	}
+	for _, tc := range []struct {
+		name   string
+		script []fakeslurm.SubmitStep
+		steps  []step
+	}{
+		{"a full slot, then another policy reason, then a full slot again", []fakeslurm.SubmitStep{
+			fakeslurm.RejectPolicy("QOSMaxSubmitJobPerUserLimit"), fakeslurm.RejectPolicy("QOSMaxWallDurationPerJobLimit"),
+			fakeslurm.RejectPolicy("AssocMaxSubmitJobLimit"), fakeslurm.Accept(),
+		}, []step{
+			{"Create of attempt 1", 0, limit, limit, "", "Rejected"},
+			{"backoff", 5 * time.Second, limit, limit, "Submitting", "Rejected"},
+			{"backoff", 5 * time.Second, limit, limit, "Submitting", "Rejected"},
+			{"Create of attempt 2, another reason", time.Minute, wallLine, "", "Submitting", "Rejected"},
+			{"backoff", 5 * time.Second, wallLine, "", "Submitting", "Rejected"},
+			{"backoff", 5 * time.Second, wallLine, "", "Submitting", "Rejected"},
+			{"Create of attempt 3, a full slot again", time.Minute, limit, limit, "Submitting", "Rejected"},
+			{"backoff", 5 * time.Second, limit, limit, "Submitting", "Rejected"},
+			{"Create of attempt 4, accepted", time.Minute, "", "", "Submitting", "Done"},
+		}},
+		{"a full slot, then an unknown outcome", []fakeslurm.SubmitStep{
+			fakeslurm.RejectPolicy("MaxSubmitJobsPerAccount"), fakeslurm.RejectPolicy("QOSMaxSubmitJobPerUserLimit"), fakeslurm.Transient(false),
+		}, []step{
+			{"Create of attempt 1", 0, limit, limit, "", "Rejected"},
+			{"backoff", 5 * time.Second, limit, limit, "Submitting", "Rejected"},
+			{"Create of attempt 2, a full slot again", time.Minute, limit, limit, "Submitting", "Rejected"},
+			{"backoff", 5 * time.Second, limit, limit, "Submitting", "Rejected"},
+			{"Create of attempt 3, a transient failure", time.Minute, unknownMsg, "", "SubmissionUnknown", "Unknown"},
+			{"Observe, waiting for the tag", 5 * time.Second, unknownMsg, "", "SubmissionUnknown", "Unknown"},
+			{"Observe, waiting for the tag", 5 * time.Second, unknownMsg, "", "SubmissionUnknown", "Unknown"},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := fake.NewClock(at(12, 0, 0))
+			sl := nowOnlySlurm(clock)
+			sl.Script(tc.script...)
+			e := newRealEnv(t, clock, sl, newFakeClient(t, "prov-a"), "prov-a", "user-a", withQOS("now", "", nowProfile()...))
+			e.newAlloc("alloc-a", 1)
+			for i, st := range tc.steps {
+				clock.Advance(st.advance)
+				e.run("alloc-a", 1)
+				a := e.get("alloc-a")
+				got := snapshot(a)
+				if got.Reason != st.reason || got.RecordCode != st.code || got.RecordState != st.recState {
+					t.Fatalf("step %d (%s): reason %q, record code %q, record state %q; want %q, %q, %q",
+						i+1, st.what, got.Reason, got.RecordCode, got.RecordState, st.reason, st.code, st.recState)
+				}
+				// The reason is the limit's exactly when the record says so, in
+				// the record and in its mirror, and in nothing else.
+				if (got.Reason == limit) != (got.RecordCode == limit) {
+					t.Errorf("step %d (%s): reason %q and record code %q disagree", i+1, st.what, got.Reason, got.RecordCode)
+				}
+				if st.phase != "" && got.Phase != st.phase {
+					t.Errorf("step %d (%s): phase %q, want %q", i+1, st.what, got.Phase, st.phase)
+				}
+				if m := a.Status.AtProvider.Submission; m != nil && m.Code != got.RecordCode {
+					t.Errorf("step %d (%s): the submission mirror has code %q, the record %q", i+1, st.what, m.Code, got.RecordCode)
+				}
+			}
+		})
+	}
+}
+
 // The event of a full submit limit keeps today's reason, SubmissionRejected
 // (SubmitLimitReached is a condition reason only, so HBEP-8's event reasons are
 // unchanged), and is a repeating one: emitted when the refusal starts, then at
