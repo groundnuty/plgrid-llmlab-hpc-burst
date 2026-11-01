@@ -276,14 +276,22 @@ func (a *Agent) groupDone(in *instance, g *procgroup.Group) {
 	if w == nil {
 		return
 	}
+	a.groupGone(w)
+}
+
+// groupGone is what the end of a worker's whole group means for the worker: it is no longer cleaning, and
+// one the agent was stopping is stopped. The end of a group is posted once, so whoever finds the group gone
+// while the worker is stopping has to call this: groupDone, or terminate when it begins a stop on a group
+// whose end was handled already.
+func (a *Agent) groupGone(w *worker) {
 	w.cleaning = false
 	if w.phase == agentapi.PartStopping {
 		w.phase = agentapi.PartStopped
 		if w.exitCode == nil {
-			code := g.ExitCode()
+			code := w.proc.ExitCode()
 			w.exitCode = &code
 		}
-		a.log.Info("worker stopped", "worker", w.name, "pid", g.PID(), "exitCode", *w.exitCode)
+		a.log.Info("worker stopped", "worker", w.name, "pid", w.proc.PID(), "exitCode", *w.exitCode)
 	}
 }
 
@@ -304,6 +312,16 @@ func (a *Agent) terminate(w *worker) {
 		w.stopProbe()
 	}
 	a.log.Info("stopping worker", "worker", w.name, "pid", w.proc.PID(), "grace", a.stopGrace)
+	select {
+	case <-w.proc.Done():
+		// Every process of the group is gone already. Its end was handled before this stop began, when the
+		// worker was still running and the end changed nothing, or is queued behind this call. Nothing is left
+		// to stop, and the end is not posted again: were the worker left stopping, it would count as live for
+		// good, and the leader's exit that follows would not make it stopped (#189, found by PR #197's review).
+		a.groupGone(w)
+		return
+	default:
+	}
 	w.proc.Stop(a.stopGrace)
 }
 
