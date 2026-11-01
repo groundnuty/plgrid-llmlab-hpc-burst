@@ -25,11 +25,9 @@ import (
 // leaseDurationSeconds of 30. It is a heartbeat, not an election: the
 // lifecycle controller judges it stale once its renewTime is older than the
 // duration. It gives the front's own events (UsageWriteFailed,
-// ObservationGap) a namespaced object to regard. api/v1alpha1 has no constant
-// for the name yet: this package defines it, and the next contracts PR adds
-// v1alpha1.LeaseFront (@hpc-burst-science-agent, 31 Oct 2026).
+// ObservationGap) a namespaced object to regard. Its name is v1alpha1.LeaseFront.
 const (
-	leaseName            = "front"
+	leaseName            = v1alpha1.LeaseFront
 	leaseRenewEvery      = 10 * time.Second
 	leaseDurationSeconds = 30
 	// fieldManagerFront names the front in the managedFields of what it

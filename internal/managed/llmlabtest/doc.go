@@ -69,8 +69,10 @@
 //     per token and per stream chunk; prompt tokens are the
 //     whitespace-separated words of the request's text, plus the injected
 //     segment when rewriting is on. A stream sends usage when the request
-//     asks for it (stream_options.include_usage), as OpenAI's does. A
-//     Responses stream ends with response.completed, or with
+//     asks for it (stream_options.include_usage), as OpenAI's does. Its
+//     usage names no cached tokens and has no prompt_tokens_details, as the
+//     real gateway's has none (the front's record holds a null cachedTokens
+//     for it). A Responses stream ends with response.completed, or with
 //     response.incomplete when the output was capped (max_output_tokens or
 //     Model.MaxTokensCap), as OpenAI's does.
 //   - Anything else is 404, and a wrong method 405.

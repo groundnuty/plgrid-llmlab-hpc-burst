@@ -21,6 +21,7 @@ import (
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
+	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -205,6 +206,10 @@ func newEnv(t *testing.T, mods ...envOption) *env {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	// The deleting pass writes the accounting record, a ControllerRevision.
+	if err := appsv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	clock := fake.NewClock(at(12, 0, 0))

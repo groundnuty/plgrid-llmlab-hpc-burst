@@ -71,12 +71,19 @@ spec:
   minJobAge: 10s # facts.slurm.min_job_age_s, 10
   jsonDataParser: v0.0.42 # facts.slurm.squeue_json.note: meta.plugin.data_parser is data_parser/v0.0.42 (HBEP-4, The Slurm dialect), without the prefix
   stagingDir: $SCRATCH # facts.storage.scratch: a Lustre file system, reached through $SCRATCH (HBEP-4, Transport)
+  # jobName.maxLength is measured, not a default: the conformance run on Helios plgrid of 31 Oct 2026 (step 5,
+  # a 56-character job name submitted and read back unchanged from squeue and from sacct; issue #93,
+  # comment 6550844149) is its source. The schema holds job-name rules per profile, not per partition, so this
+  # value covers plgrid-gpu-gh200 too, which has not run the step. That is sound because Helios runs one Slurm
+  # configuration for all its partitions, and the read-back is the safety net against a partition-specific rename:
+  # a job whose name came back shortened is refused and cancelled (HBEP-4, Risks)
+  # (`@hpc-burst-science-agent`, option (b), 1 Nov 2026).
+  jobName:
+    maxLength: 56
+
   # Not set, because no fact states it (HBEP-4, Platform profile schema: an unstated fact is absent, not false):
-  #   jobName (maxLength, pattern): unset. No draft records a job-name maximum or a pattern, and the
-  #     56-character round trip is pending (HBEP-4, Risks and Graduation criteria). maxLength is set per
-  #     partition once a conformance run has submitted a 56-character name there and read it back,
-  #     and that run is its source. 56 is neither a fact nor a default here
-  #     (`@hpc-burst-science-agent`, 31 Oct 2026).
+  #   jobName.pattern: unset. No draft records a pattern, and the round trip above used the tag form, which a
+  #     pattern would have to match; it records no restriction on the characters.
   #   jobCommentAccounted: unset. HBEP-4 makes it optional and only recorded: the tag is in the job
   #     name either way (`@hpc-burst-science-agent`, 31 Oct 2026).
   #   maxIdle: unset outside Athena (HBEP-4, Platform profile schema).

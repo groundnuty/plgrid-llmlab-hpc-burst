@@ -1,0 +1,996 @@
+{
+  "agentExit": "\u003cnil\u003e",
+  "qwen2.5-1.5b-instruct": {
+    "behaviourContextExpected": 3072,
+    "health": {
+      "time": "2026-11-01T00:57:52.238463256+01:00",
+      "probeOK": true,
+      "metricsReadAt": "2026-11-01T00:57:52.238463256+01:00",
+      "runningRequests": 0,
+      "waitingRequests": 0,
+      "generatedTokens": 4308,
+      "kvCacheUsage": 0,
+      "preemptions": 0,
+      "prefixCacheQueriedTokens": 34638,
+      "prefixCacheHitTokens": 1184,
+      "timePerOutputTokenSecondsSum": 0.08389342690321075,
+      "timePerOutputTokenCount": 38,
+      "responsesByStatus": {
+        "2xx": 74
+      }
+    },
+    "healthReportTime": "2026-11-01T00:57:52.238473591+01:00",
+    "qualify": {
+      "done": true,
+      "checks": [
+        {
+          "name": "health",
+          "passed": true
+        },
+        {
+          "name": "chat",
+          "passed": true
+        },
+        {
+          "name": "toolCall",
+          "passed": true
+        },
+        {
+          "name": "corruption",
+          "passed": true
+        },
+        {
+          "name": "behaviour",
+          "passed": true,
+          "contextTokens": 3072
+        }
+      ],
+      "kvCapacityTokens": 1636800,
+      "servedModelNames": [
+        "hb-test/qwen2.5-1.5b-instruct"
+      ],
+      "fingerprint": "vllm-0.32.0-79f7fb36"
+    },
+    "settings": {
+      "compared": {
+        "block-size": {
+          "declared": "16",
+          "reported": "16",
+          "verdict": "equal"
+        },
+        "enable-prefix-caching": {
+          "declared": "true",
+          "reported": "True",
+          "verdict": "equal"
+        },
+        "gpu-memory-utilization": {
+          "declared": "0.50",
+          "reported": "0.5",
+          "verdict": "equal"
+        },
+        "kv-cache-dtype": {
+          "declared": "auto",
+          "reported": "auto",
+          "verdict": "resolved"
+        },
+        "max-model-len": {
+          "declared": "4096",
+          "reported": "4096",
+          "verdict": "equal"
+        }
+      },
+      "declaredNotReport": [
+        "served-model-name",
+        "max-num-seqs",
+        "tool-call-parser",
+        "uds",
+        "enable-auto-tool-choice"
+      ],
+      "engineVersionEqual": true,
+      "imageDigestEqual": true,
+      "maxModelLenPresent": true
+    },
+    "throughputLastRound": {
+      "ttftSeconds": 0.06041518675,
+      "ttftCount": 8,
+      "tpotSeconds": 0.0024431096151574807,
+      "tpotCount": 8
+    },
+    "throughputLastRoundByShape": {
+      "concurrent": {
+        "ttftSeconds": 0.06041518675,
+        "ttftCount": 8,
+        "tpotSeconds": 0.0024431096151574807,
+        "tpotCount": 8
+      },
+      "longOutput": {
+        "ttftSeconds": 0.031227715,
+        "ttftCount": 1,
+        "tpotSeconds": 0.0021931170352250486,
+        "tpotCount": 1
+      },
+      "longest": {
+        "ttftSeconds": 0.025737903,
+        "ttftCount": 1,
+        "tpotSeconds": 0.0022888701102362205,
+        "tpotCount": 1
+      },
+      "short": {
+        "ttftSeconds": 0.018673219,
+        "ttftCount": 1,
+        "tpotSeconds": 0.002175067661417323,
+        "tpotCount": 1
+      },
+      "toolCall": {
+        "ttftSeconds": 0.044478452,
+        "ttftCount": 1,
+        "tpotSeconds": 0.0012937940952380954,
+        "tpotCount": 1
+      },
+      "typical": {
+        "ttftSeconds": 0.031556058,
+        "ttftCount": 1,
+        "tpotSeconds": 0.0021810510157480316,
+        "tpotCount": 1
+      }
+    },
+    "uid": "aaaaaaaa-1111-2222-3333-000000000002",
+    "verify": {
+      "done": true,
+      "files": [
+        {
+          "path": ".gitattributes",
+          "outcome": "match"
+        },
+        {
+          "path": "LICENSE",
+          "outcome": "match"
+        },
+        {
+          "path": "README.md",
+          "outcome": "match"
+        },
+        {
+          "path": "config.json",
+          "outcome": "match"
+        },
+        {
+          "path": "generation_config.json",
+          "outcome": "match"
+        },
+        {
+          "path": "merges.txt",
+          "outcome": "match"
+        },
+        {
+          "path": "model.safetensors",
+          "outcome": "match"
+        },
+        {
+          "path": "tokenizer.json",
+          "outcome": "match"
+        },
+        {
+          "path": "tokenizer_config.json",
+          "outcome": "match"
+        },
+        {
+          "path": "vocab.json",
+          "outcome": "match"
+        }
+      ],
+      "engineVersion": "0.32.0",
+      "imageDigest": "sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34",
+      "settings": {
+        "block-size": "16",
+        "enable-prefix-caching": "True",
+        "gpu-memory-utilization": "0.5",
+        "kv-cache-dtype": "auto",
+        "max-model-len": "4096"
+      },
+      "fingerprint": "vllm-0.32.0-79f7fb36",
+      "templateOverhead": 29
+    },
+    "warmUp": {
+      "rounds": [
+        {
+          "round": 1,
+          "requests": [
+            {
+              "shape": "short",
+              "timeToFirstToken": "23.31083ms",
+              "total": "288.530305ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "typical",
+              "timeToFirstToken": "23.889951ms",
+              "total": "289.408329ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "longest",
+              "timeToFirstToken": "28.957887ms",
+              "total": "298.748636ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "longOutput",
+              "timeToFirstToken": "19.852838ms",
+              "total": "1.123046104s",
+              "outputTokens": 512
+            },
+            {
+              "shape": "toolCall",
+              "timeToFirstToken": "41.770807ms",
+              "total": "72.118129ms",
+              "outputTokens": 22
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "67.085968ms",
+              "total": "379.726154ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "83.237557ms",
+              "total": "382.241386ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "83.306898ms",
+              "total": "382.497219ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "83.281204ms",
+              "total": "382.353703ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "83.377617ms",
+              "total": "382.693918ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "83.364977ms",
+              "total": "382.61424ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "83.275091ms",
+              "total": "382.409573ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "83.196277ms",
+              "total": "382.118924ms",
+              "outputTokens": 128
+            }
+          ]
+        },
+        {
+          "round": 2,
+          "requests": [
+            {
+              "shape": "short",
+              "timeToFirstToken": "18.673219ms",
+              "total": "294.906812ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "typical",
+              "timeToFirstToken": "31.556058ms",
+              "total": "308.549537ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "longest",
+              "timeToFirstToken": "25.737903ms",
+              "total": "316.424407ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "longOutput",
+              "timeToFirstToken": "31.227715ms",
+              "total": "1.15191052s",
+              "outputTokens": 512
+            },
+            {
+              "shape": "toolCall",
+              "timeToFirstToken": "44.478452ms",
+              "total": "71.648128ms",
+              "outputTokens": 22
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "63.362484ms",
+              "total": "370.926114ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "63.454577ms",
+              "total": "371.222938ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "63.365908ms",
+              "total": "371.003904ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "63.311829ms",
+              "total": "370.807844ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "63.489041ms",
+              "total": "371.322072ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "63.274262ms",
+              "total": "370.684296ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "63.421458ms",
+              "total": "371.121021ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "39.641935ms",
+              "total": "368.432674ms",
+              "outputTokens": 128
+            }
+          ]
+        }
+      ],
+      "done": true
+    },
+    "warmUpSettledAtRound": 2
+  },
+  "qwen3-0.6b": {
+    "behaviourContextExpected": 3960,
+    "health": {
+      "time": "2026-11-01T00:55:41.946608745+01:00",
+      "probeOK": true,
+      "metricsReadAt": "2026-11-01T00:55:41.946608745+01:00",
+      "runningRequests": 0,
+      "waitingRequests": 0,
+      "generatedTokens": 17570,
+      "kvCacheUsage": 0,
+      "preemptions": 0,
+      "prefixCacheQueriedTokens": 82361,
+      "prefixCacheHitTokens": 960,
+      "timePerOutputTokenSecondsSum": 0.14562992582399675,
+      "timePerOutputTokenCount": 76,
+      "responsesByStatus": {
+        "2xx": 136
+      }
+    },
+    "healthReportTime": "2026-11-01T00:55:41.946620489+01:00",
+    "qualify": {
+      "done": true,
+      "checks": [
+        {
+          "name": "health",
+          "passed": true
+        },
+        {
+          "name": "chat",
+          "passed": true
+        },
+        {
+          "name": "toolCall",
+          "passed": true
+        },
+        {
+          "name": "corruption",
+          "passed": true
+        },
+        {
+          "name": "behaviour",
+          "passed": true,
+          "message": "ran at a context of 3960 tokens, shortened from 4096 to leave room for 128 answer and 4096 reasoning tokens",
+          "contextTokens": 3960
+        }
+      ],
+      "kvCapacityTokens": 428176,
+      "servedModelNames": [
+        "hb-test/qwen3-0.6b"
+      ],
+      "fingerprint": "vllm-0.32.0-f5c1e941"
+    },
+    "settings": {
+      "compared": {
+        "block-size": {
+          "declared": "16",
+          "reported": "16",
+          "verdict": "equal"
+        },
+        "enable-prefix-caching": {
+          "declared": "true",
+          "reported": "True",
+          "verdict": "equal"
+        },
+        "gpu-memory-utilization": {
+          "declared": "0.50",
+          "reported": "0.5",
+          "verdict": "equal"
+        },
+        "kv-cache-dtype": {
+          "declared": "auto",
+          "reported": "auto",
+          "verdict": "resolved"
+        },
+        "max-model-len": {
+          "declared": "8192",
+          "reported": "8192",
+          "verdict": "equal"
+        }
+      },
+      "declaredNotReport": [
+        "reasoning-parser",
+        "enable-auto-tool-choice",
+        "tool-call-parser",
+        "uds",
+        "served-model-name",
+        "max-num-seqs"
+      ],
+      "engineVersionEqual": true,
+      "imageDigestEqual": true,
+      "maxModelLenPresent": true
+    },
+    "throughputLastRound": {
+      "ttftSeconds": 0.0484580145,
+      "ttftCount": 8,
+      "tpotSeconds": 0.0021978106909448817,
+      "tpotCount": 8
+    },
+    "throughputLastRoundByShape": {
+      "concurrent": {
+        "ttftSeconds": 0.0484580145,
+        "ttftCount": 8,
+        "tpotSeconds": 0.0021978106909448817,
+        "tpotCount": 8
+      },
+      "longOutput": {
+        "ttftSeconds": 0.025402264,
+        "ttftCount": 1,
+        "tpotSeconds": 0.0018241144070450098,
+        "tpotCount": 1
+      },
+      "longest": {
+        "ttftSeconds": 0.031608696,
+        "ttftCount": 1,
+        "tpotSeconds": 0.001955656748031496,
+        "tpotCount": 1
+      },
+      "short": {
+        "ttftSeconds": 0.019505101,
+        "ttftCount": 1,
+        "tpotSeconds": 0.0018868698503937008,
+        "tpotCount": 1
+      },
+      "toolCall": {
+        "ttftSeconds": 0,
+        "ttftCount": 0,
+        "tpotSeconds": 0,
+        "tpotCount": 0
+      },
+      "typical": {
+        "ttftSeconds": 0.033360428,
+        "ttftCount": 1,
+        "tpotSeconds": 0.0018672208346456694,
+        "tpotCount": 1
+      }
+    },
+    "uid": "aaaaaaaa-1111-2222-3333-000000000001",
+    "verify": {
+      "done": true,
+      "files": [
+        {
+          "path": ".gitattributes",
+          "outcome": "match"
+        },
+        {
+          "path": "LICENSE",
+          "outcome": "match"
+        },
+        {
+          "path": "README.md",
+          "outcome": "match"
+        },
+        {
+          "path": "config.json",
+          "outcome": "match"
+        },
+        {
+          "path": "generation_config.json",
+          "outcome": "match"
+        },
+        {
+          "path": "merges.txt",
+          "outcome": "match"
+        },
+        {
+          "path": "model.safetensors",
+          "outcome": "match"
+        },
+        {
+          "path": "tokenizer.json",
+          "outcome": "match"
+        },
+        {
+          "path": "tokenizer_config.json",
+          "outcome": "match"
+        },
+        {
+          "path": "vocab.json",
+          "outcome": "match"
+        }
+      ],
+      "engineVersion": "0.32.0",
+      "imageDigest": "sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34",
+      "settings": {
+        "block-size": "16",
+        "enable-prefix-caching": "True",
+        "gpu-memory-utilization": "0.5",
+        "kv-cache-dtype": "auto",
+        "max-model-len": "8192"
+      },
+      "fingerprint": "vllm-0.32.0-f5c1e941",
+      "templateOverhead": 8
+    },
+    "warmUp": {
+      "rounds": [
+        {
+          "round": 1,
+          "requests": [
+            {
+              "shape": "short",
+              "timeToFirstToken": "36.859859ms",
+              "total": "266.617862ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "typical",
+              "timeToFirstToken": "24.661577ms",
+              "total": "245.155881ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "longest",
+              "timeToFirstToken": "35.559956ms",
+              "total": "262.251957ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "longOutput",
+              "timeToFirstToken": "21.837523ms",
+              "total": "846.631078ms",
+              "outputTokens": 512
+            },
+            {
+              "shape": "toolCall",
+              "timeToFirstToken": "25.495381ms",
+              "total": "1.517783822s",
+              "outputTokens": 856
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "51.985904ms",
+              "total": "321.380623ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "52.755195ms",
+              "total": "323.436026ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "52.728604ms",
+              "total": "323.268542ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "52.776315ms",
+              "total": "323.704147ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "52.829466ms",
+              "total": "323.991116ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "52.829049ms",
+              "total": "324.096969ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "52.792283ms",
+              "total": "323.838608ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "52.797467ms",
+              "total": "323.606006ms",
+              "outputTokens": 128
+            }
+          ]
+        },
+        {
+          "round": 2,
+          "requests": [
+            {
+              "shape": "short",
+              "timeToFirstToken": "25.870059ms",
+              "total": "257.654922ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "typical",
+              "timeToFirstToken": "34.816935ms",
+              "total": "272.162809ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "longest",
+              "timeToFirstToken": "35.28425ms",
+              "total": "277.572109ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "longOutput",
+              "timeToFirstToken": "22.323526ms",
+              "total": "904.380611ms",
+              "outputTokens": 512
+            },
+            {
+              "shape": "toolCall",
+              "timeToFirstToken": "21.723414ms",
+              "total": "1.245090564s",
+              "outputTokens": 734
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "48.723172ms",
+              "total": "309.242853ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "49.559502ms",
+              "total": "311.55041ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "49.574127ms",
+              "total": "311.681032ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "49.518159ms",
+              "total": "311.253394ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "49.617869ms",
+              "total": "311.834403ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "49.535919ms",
+              "total": "311.402606ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "49.629069ms",
+              "total": "311.964992ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "49.519024ms",
+              "total": "311.117781ms",
+              "outputTokens": 128
+            }
+          ]
+        },
+        {
+          "round": 3,
+          "requests": [
+            {
+              "shape": "short",
+              "timeToFirstToken": "19.393904ms",
+              "total": "207.7561ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "typical",
+              "timeToFirstToken": "21.434812ms",
+              "total": "214.243871ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "longest",
+              "timeToFirstToken": "26.557369ms",
+              "total": "252.961858ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "longOutput",
+              "timeToFirstToken": "33.998427ms",
+              "total": "906.715846ms",
+              "outputTokens": 512
+            },
+            {
+              "shape": "toolCall",
+              "timeToFirstToken": "33.653893ms",
+              "total": "7.643506866s",
+              "outputTokens": 4224,
+              "error": "the answer calls no tool"
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "51.115142ms",
+              "total": "305.80534ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "51.25437ms",
+              "total": "306.339663ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "51.179492ms",
+              "total": "306.06511ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "49.981155ms",
+              "total": "303.492312ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "51.16554ms",
+              "total": "305.133006ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "51.063783ms",
+              "total": "305.321737ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "50.995497ms",
+              "total": "305.046032ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "51.169573ms",
+              "total": "305.62397ms",
+              "outputTokens": 128
+            }
+          ]
+        },
+        {
+          "round": 4,
+          "requests": [
+            {
+              "shape": "short",
+              "timeToFirstToken": "24.618444ms",
+              "total": "253.172606ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "typical",
+              "timeToFirstToken": "25.43343ms",
+              "total": "266.453577ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "longest",
+              "timeToFirstToken": "26.230626ms",
+              "total": "268.12192ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "longOutput",
+              "timeToFirstToken": "22.13841ms",
+              "total": "851.617381ms",
+              "outputTokens": 512
+            },
+            {
+              "shape": "toolCall",
+              "timeToFirstToken": "20.505652ms",
+              "total": "1.907008919s",
+              "outputTokens": 1036
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "47.915928ms",
+              "total": "297.473617ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "48.120627ms",
+              "total": "298.029763ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "48.079316ms",
+              "total": "298.213535ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "48.095252ms",
+              "total": "297.883431ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "47.231018ms",
+              "total": "295.669375ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "48.092692ms",
+              "total": "298.331196ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "48.07778ms",
+              "total": "298.103329ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "48.061877ms",
+              "total": "297.725227ms",
+              "outputTokens": 128
+            }
+          ]
+        },
+        {
+          "round": 5,
+          "requests": [
+            {
+              "shape": "short",
+              "timeToFirstToken": "19.505101ms",
+              "total": "259.137572ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "typical",
+              "timeToFirstToken": "33.360428ms",
+              "total": "270.497474ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "longest",
+              "timeToFirstToken": "31.608696ms",
+              "total": "279.977103ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "longOutput",
+              "timeToFirstToken": "25.402264ms",
+              "total": "957.524726ms",
+              "outputTokens": 512
+            },
+            {
+              "shape": "toolCall",
+              "timeToFirstToken": "25.76859ms",
+              "total": "352.685871ms",
+              "outputTokens": 180,
+              "error": "the answer calls no tool"
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "48.489673ms",
+              "total": "327.11686ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "48.623591ms",
+              "total": "328.347453ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "48.648454ms",
+              "total": "328.573079ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "48.550664ms",
+              "total": "327.851498ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "48.534568ms",
+              "total": "327.616303ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "48.524969ms",
+              "total": "327.392117ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "48.597319ms",
+              "total": "328.117218ms",
+              "outputTokens": 128
+            },
+            {
+              "shape": "concurrent",
+              "timeToFirstToken": "47.694878ms",
+              "total": "325.62525ms",
+              "outputTokens": 128
+            }
+          ]
+        }
+      ],
+      "done": true
+    },
+    "warmUpSettledAtRound": 0
+  },
+  "registration": {
+    "agentVersion": "main-469acd5",
+    "node": "\u003cnode\u003e",
+    "cpuArch": "aarch64",
+    "gpus": [
+      {
+        "index": 0,
+        "name": "NVIDIA GH200 120GB",
+        "memoryMiB": 97871
+      }
+    ]
+  }
+}

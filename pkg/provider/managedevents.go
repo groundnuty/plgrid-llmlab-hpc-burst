@@ -114,8 +114,11 @@ type repeatKey struct {
 //     measured values can change), so an entry that starts to be skipped fires
 //     at once. At most MaxSkipEventsPerHour of them fire in any hour; when
 //     more are due, one summary event, also CatalogEntrySkipped, says how many
-//     more entries are skipped, and fires at most once an hour. An entry over
-//     the limit stays due, and fires when the budget frees;
+//     more entries are skipped and names as many of them as fit in
+//     MaxEventNote bytes (SkippedSummaryNote), and fires at most once an hour.
+//     The named entries are the first MaxSkipEventsPerHour in listing order,
+//     and the summary never takes their place. An entry over the limit stays
+//     due, and fires when the budget frees;
 //   - one degraded CatalogTruncated while the listing alone does not fit.
 //
 // A condition fires when it was not reported by the previous call, or fired at
@@ -147,7 +150,7 @@ func (g *RepeatGate) CatalogEvents(now time.Time, m CatalogMerge) []ManagedEvent
 	}
 	var out []ManagedEvent
 	seen := make(map[repeatKey]bool, len(m.Skipped))
-	over := 0
+	var over []SkippedEntry // due, but beyond the budget: the summary names them
 	for _, s := range m.Skipped {
 		k := repeatKey{reason: EventCatalogEntrySkipped, name: s.Name, category: s.Category}
 		if seen[k] { // the same condition twice in one read: one event
@@ -157,7 +160,7 @@ func (g *RepeatGate) CatalogEvents(now time.Time, m CatalogMerge) []ManagedEvent
 		switch {
 		case !due(k):
 		case len(fired) >= MaxSkipEventsPerHour:
-			over++
+			over = append(over, s)
 		default:
 			fired = append(fired, now)
 			next[k] = now
@@ -165,7 +168,7 @@ func (g *RepeatGate) CatalogEvents(now time.Time, m CatalogMerge) []ManagedEvent
 		}
 	}
 	g.skipFired = fired
-	if over > 0 && (g.summaryAt.IsZero() || g.summaryAt.After(now) || now.Sub(g.summaryAt) >= EventRepeatInterval) {
+	if len(over) > 0 && (g.summaryAt.IsZero() || g.summaryAt.After(now) || now.Sub(g.summaryAt) >= EventRepeatInterval) {
 		g.summaryAt = now
 		out = append(out, NewManagedEvent(EventActionDegraded, EventCatalogEntrySkipped, SkippedSummaryNote(over)))
 	}

@@ -383,6 +383,15 @@ type AllocationObservation struct {
 	//
 	// +optional
 	QueueWaitRecorded bool `json:"queueWaitRecorded,omitempty"`
+
+	// Accounting is the allocated time of the recorded job: allocated, not
+	// billed (HBEP-8, Provider accounting). It is absent while the job has not
+	// started, so a pending Allocation's hours are unknown, never 0. The
+	// Provider's controller is its only writer; the record that outlives the
+	// Allocation is the ControllerRevision acct-<Allocation UID>.
+	//
+	// +optional
+	Accounting *AllocationAccounting `json:"accounting,omitempty"`
 }
 
 // AllocationStatus is the observed state of an Allocation. Conditions,

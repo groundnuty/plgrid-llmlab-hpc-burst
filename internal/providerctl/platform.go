@@ -43,6 +43,15 @@ import (
 type Platform interface {
 	provider.Batch
 
+	// ReadAccounting reads one job from accounting alone, past the queue
+	// listing (sacct -j): the record from accounting with Job.Accounting set.
+	// The controller calls it once for a recorded job after it is first seen
+	// started, to learn the CPUs and GPUs the scheduler allocated (HBEP-4, Poll
+	// rate; HBEP-8, Provider accounting). found is false when the read
+	// succeeded and accounting does not show the job. internal/slurm.Batch and
+	// pkg/provider/fake.Batch implement it.
+	ReadAccounting(ctx context.Context, jobID string) (job provider.Job, found bool, err error)
+
 	// ListByTag returns the jobs with the tag in the queue listing only (held,
 	// pending, running): what settle needs, without an accounting read.
 	ListByTag(ctx context.Context, tag string) ([]provider.Job, error)

@@ -203,6 +203,11 @@ const (
 	// FrpsWebUser and the password in Host.FrpsWebPasswordFile; the launcher's
 	// health check uses its unauthenticated /healthz.
 	FrpsWebPortOffset = 11
+	// ControllerMetricsPortOffset is the lifecycle controller's /metrics,
+	// served on loopback by controller-runtime's metrics server, relative to
+	// the launcher's port base (HBEP-8, Metrics; HBEP-11). It makes the
+	// launcher's block 13 ports, base to base+12.
+	ControllerMetricsPortOffset = 12
 
 	// FrpsDirName is the launcher's frps directory under the state directory,
 	// which holds the web password file.
@@ -286,6 +291,14 @@ func (h Host) FrpsWebPort() int { return h.PortBase + FrpsWebPortOffset }
 // FrpsWebAddr is "127.0.0.1:<FrpsWebPort>", the IPv4 loopback address of frps's
 // web server (HBEP-6, Path state).
 func (h Host) FrpsWebAddr() string { return loopback(h.FrpsWebPort()) }
+
+// ControllerMetricsPort is the lifecycle controller's /metrics port: the port
+// base plus ControllerMetricsPortOffset.
+func (h Host) ControllerMetricsPort() int { return h.PortBase + ControllerMetricsPortOffset }
+
+// ControllerMetricsAddr is "127.0.0.1:<ControllerMetricsPort>", the bind
+// address of the lifecycle controller's metrics server.
+func (h Host) ControllerMetricsAddr() string { return loopback(h.ControllerMetricsPort()) }
 
 // FrpsWebPasswordFile is <state>/frps/web-password, mode 600, which holds the
 // password of frps's web server (HBEP-6, frps on the control-plane host, which
