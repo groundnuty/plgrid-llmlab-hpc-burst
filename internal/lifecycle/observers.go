@@ -39,10 +39,19 @@ const frontLeaseDefaultDuration = 30 * time.Second
 // cannot alias against the heartbeat (HBEP-8, Risks).
 const observeEvery = 10 * time.Second
 
-// Repeat-gate keys of the heartbeats the lifecycle controller judges.
-func providerHeartbeatKey(p *v1alpha1.Provider) string { return "heartbeat/provider/" + string(p.UID) }
+// Repeat-gate keys of the heartbeats the lifecycle controller judges, each
+// under its kind's prefix, so a pass over the objects of one kind can forget
+// the keys of those that are gone.
+const (
+	providerHeartbeatPrefix = "heartbeat/provider/"
+	instanceHeartbeatPrefix = "heartbeat/instance/"
+)
+
+func providerHeartbeatKey(p *v1alpha1.Provider) string {
+	return providerHeartbeatPrefix + string(p.UID)
+}
 func instanceHeartbeatKey(in *v1alpha1.Instance) string {
-	return "heartbeat/instance/" + string(in.UID)
+	return instanceHeartbeatPrefix + string(in.UID)
 }
 
 const frontHeartbeatKey = "heartbeat/lease/" + v1alpha1.LeaseFront
@@ -91,9 +100,11 @@ func (r *Reconciler) checkHeartbeats(ctx context.Context) error {
 	if errProv != nil {
 		errProv = fmt.Errorf("list Providers: %w", errProv)
 	} else {
+		live := make(map[string]bool, len(provs.Items))
 		for i := range provs.Items {
 			p := &provs.Items[i]
 			key := providerHeartbeatKey(p)
+			live[key] = true
 			stale, msg := providerHeartbeatStale(p, now)
 			if !stale {
 				mem.clear(key)
@@ -103,8 +114,30 @@ func (r *Reconciler) checkHeartbeats(ctx context.Context) error {
 				r.Recorder.Event(p, nil, eventFailing, reasonHeartbeatMissed, msg)
 			}
 		}
+		// A deleted Provider's key is never cleared by a check of it.
+		mem.prune(providerHeartbeatPrefix, live)
 	}
-	return errors.Join(errProv, r.checkFrontLease(ctx, now))
+	return errors.Join(errProv, r.pruneInstanceKeys(ctx, mem), r.checkFrontLease(ctx, now))
+}
+
+// pruneInstanceKeys forgets the repeat keys of Instances that no longer exist.
+// An Instance that ends in a pass has its key cleared there, but one deleted
+// without passing through end() (garbage-collected with its deployment, or
+// removed by hand) never does. A list that fails prunes nothing. The list
+// comes from the same cache as the passes', so a pass cannot hold a key for
+// an Instance this list lacks, other than one created in the instant between
+// the two.
+func (r *Reconciler) pruneInstanceKeys(ctx context.Context, mem *memory) error {
+	var insts v1alpha1.InstanceList
+	if err := r.Client.List(ctx, &insts); err != nil {
+		return fmt.Errorf("list Instances: %w", err)
+	}
+	live := make(map[string]bool, len(insts.Items))
+	for i := range insts.Items {
+		live[instanceHeartbeatKey(&insts.Items[i])] = true
+	}
+	mem.prune(instanceHeartbeatPrefix, live)
+	return nil
 }
 
 // providerHeartbeatStale judges a Provider's heartbeat, batch or managed alike,

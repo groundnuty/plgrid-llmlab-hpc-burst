@@ -2,6 +2,9 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -316,5 +319,110 @@ func TestHeartbeatMissedAgentUnreachable(t *testing.T) {
 	got = heartbeatTimes(t, rg, kind, in.Name, last.Time, startTick, 5*time.Minute, func() { rg.Step() })
 	if len(got) != 1 || got[0] != 2*time.Minute {
 		t.Fatalf("a second silence: fired at %v, want once at +2m", got)
+	}
+}
+
+// heldKeys returns the repeat-gate keys with a prefix, sorted: the conditions
+// the gate still remembers.
+func heldKeys(rg *rig, prefix string) []string {
+	mem := rg.r.memory()
+	mem.mu.Lock()
+	defer mem.mu.Unlock()
+	var out []string
+	for k := range mem.repeats {
+		if strings.HasPrefix(k, prefix) {
+			out = append(out, k)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// TestHeartbeatKeysOfGoneObjectsAreForgotten: the repeat gate keeps a key per
+// object whose heartbeat is stale, and only a check of that object clears it.
+// The keys of a Provider deleted while stale, and of an Instance that left
+// without passing through end(), would stay for the life of the process; a
+// check that lists the objects successfully forgets the keys of those that are
+// absent, keeps the others', and a list that fails forgets none.
+func TestHeartbeatKeysOfGoneObjectsAreForgotten(t *testing.T) {
+	failList := false
+	rg := newRig(t, withInterceptors(interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+		if failList {
+			return errors.New("the list is down")
+		}
+		return c.List(ctx, list, opts...)
+	}}))
+	provider := func(name string) *v1alpha1.Provider {
+		return &v1alpha1.Provider{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec:       v1alpha1.ProviderSpec{PlatformProfileRef: v1alpha1.ObjectReference{Name: rigProfile}, AllowedPartitions: []string{rigPartition}},
+		}
+	}
+	rg.create(provider("gone-provider"))
+	rg.create(provider("kept-provider"))
+	rg.create(mdSpec("md"))
+	in, alloc := startReady(rg)
+	// A silent agent: its Instance goes AgentUnreachable and holds a key.
+	rg.agentOf(alloc).agent.Silence(true)
+	rg.until(10*time.Minute, startTick, "AgentUnreachable", func() bool {
+		return isTrue(rg.instance(in.Name).Status.Conditions, v1alpha1.ConditionAgentUnreachable)
+	})
+	var gone, kept v1alpha1.Provider
+	for name, p := range map[string]*v1alpha1.Provider{"gone-provider": &gone, "kept-provider": &kept} {
+		if err := rg.c.Get(rg.ctx, client.ObjectKey{Name: name}, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Past ProviderReadyStaleness for the two Providers that nothing reads;
+	// the rig's own Provider is read, so it stays fresh and holds no key.
+	rg.clock.Advance(6 * time.Minute)
+	if err := rg.prov.Sync(rg.ctx); err != nil {
+		t.Fatal(err)
+	}
+	rg.checkHeartbeats()
+	wantProviders := []string{providerHeartbeatKey(&gone), providerHeartbeatKey(&kept)}
+	slices.Sort(wantProviders)
+	if got := heldKeys(rg, providerHeartbeatPrefix); !slices.Equal(got, wantProviders) {
+		t.Fatalf("Provider keys %v after the stale check, want %v (the control: both stale Providers are held)", got, wantProviders)
+	}
+	instKey := instanceHeartbeatKey(rg.instance(in.Name))
+	if got := heldKeys(rg, instanceHeartbeatPrefix); !slices.Equal(got, []string{instKey}) {
+		t.Fatalf("Instance keys %v, want [%s] (the control: the unreachable Instance is held)", got, instKey)
+	}
+
+	// Both objects go without a pass over them: the Provider is deleted, and
+	// the Instance loses its finalizers and is deleted.
+	if err := rg.c.Delete(rg.ctx, &gone); err != nil {
+		t.Fatal(err)
+	}
+	live := rg.instance(in.Name)
+	live.Finalizers = nil
+	if err := rg.c.Update(rg.ctx, live); err != nil {
+		t.Fatal(err)
+	}
+	if err := rg.c.Delete(rg.ctx, live); err != nil {
+		t.Fatal(err)
+	}
+
+	// A list that fails forgets nothing, and the check reports it.
+	failList = true
+	if err := rg.r.checkHeartbeats(rg.ctx); err == nil {
+		t.Fatal("checkHeartbeats returned no error while every list fails")
+	}
+	failList = false
+	if got := heldKeys(rg, providerHeartbeatPrefix); !slices.Equal(got, wantProviders) {
+		t.Fatalf("Provider keys %v after a check whose lists failed, want %v untouched", got, wantProviders)
+	}
+	if got := heldKeys(rg, instanceHeartbeatPrefix); !slices.Equal(got, []string{instKey}) {
+		t.Fatalf("Instance keys %v after a check whose lists failed, want [%s] untouched", got, instKey)
+	}
+
+	// A successful list forgets the keys of what is gone and keeps the other's.
+	rg.checkHeartbeats()
+	if got := heldKeys(rg, providerHeartbeatPrefix); !slices.Equal(got, []string{providerHeartbeatKey(&kept)}) {
+		t.Fatalf("Provider keys %v after the check, want only the kept Provider's %s", got, providerHeartbeatKey(&kept))
+	}
+	if got := heldKeys(rg, instanceHeartbeatPrefix); len(got) != 0 {
+		t.Fatalf("Instance keys %v after the Instance was deleted, want none", got)
 	}
 }

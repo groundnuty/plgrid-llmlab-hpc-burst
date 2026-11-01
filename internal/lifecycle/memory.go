@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"strings"
 	"sync"
 	"time"
 
@@ -97,6 +98,20 @@ func (m *memory) repeat(key string, now time.Time) bool {
 	}
 	m.repeats[key] = now
 	return true
+}
+
+// prune forgets the repeat keys that begin with prefix and are not in live: the
+// objects they stood for are gone, and a key for one is never cleared, since
+// only a pass over its object clears it. The caller passes the keys of the
+// objects a successful list found; a failed list prunes nothing.
+func (m *memory) prune(prefix string, live map[string]bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for k := range m.repeats {
+		if strings.HasPrefix(k, prefix) && !live[k] {
+			delete(m.repeats, k)
+		}
+	}
 }
 
 // clear forgets a condition that ended, so its next start fires at once.
