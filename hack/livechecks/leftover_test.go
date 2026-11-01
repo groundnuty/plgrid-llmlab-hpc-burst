@@ -12,7 +12,8 @@ import (
 // leader runs script as bash does for the live-checks tests: the leader of its own process
 // group, with no pipe on its output, so the wait ends when bash exits and not when its
 // children close a pipe. It returns the group id after the leader has exited and been reaped,
-// and kills what is left of the group when the test ends.
+// and kills what is left of the group when the test ends (by number, so with the PID-reuse limit
+// that noLeftoverProcess notes).
 func leader(t *testing.T, script string, env ...string) int {
 	t.Helper()
 	cmd := exec.Command("bash", "-c", script)
@@ -42,19 +43,28 @@ func TestLeftoverCheckReportsAProcessThatNeverExits(t *testing.T) {
 }
 
 // A process that is still exiting when the script's exit is seen is waited for, not reported.
-// The child here exits on a file the test writes, so it is certainly alive when the leader
-// exits (the old one-shot probe fails on it), and certainly gone once the file is there.
+// The child exits on a file, and the file is written by pollGroup's hook, which runs right after
+// the first probe that finds a member. So the child is certainly alive at the first probe, and
+// certainly gone only after it: a detector that probes once reports the child and fails here,
+// whatever the scheduler does. (Releasing it from a goroutine after a sleep would leave a window
+// in which the child could exit before the first probe, and a one-shot detector would pass.)
 func TestLeftoverCheckWaitsOutAProcessThatIsStillExiting(t *testing.T) {
 	release := filepath.Join(t.TempDir(), "release")
 	pgid := leader(t, `( while [ ! -e "$RELEASE" ]; do sleep 0.02; done ) >/dev/null 2>&1 </dev/null &`, "RELEASE="+release)
 	if !groupExists(pgid) {
 		t.Fatal("the late child is not in the group, so this test proves nothing: the old probe would pass too")
 	}
-	go func() {
-		time.Sleep(100 * time.Millisecond) // only so that the poll runs a few rounds; the verdict does not depend on it
-		_ = os.WriteFile(release, nil, 0o600)
-	}()
-	if groupOutlives(pgid, 60*time.Second) {
+	released := false
+	outlives := pollGroup(pgid, 60*time.Second, func() {
+		released = true
+		if err := os.WriteFile(release, nil, 0o600); err != nil {
+			t.Fatalf("the child cannot be released, so this test proves nothing: %v", err)
+		}
+	})
+	if !released {
+		t.Error("the detector never saw the child, so it never released it")
+	}
+	if outlives {
 		t.Error("a process that exits soon after the script was reported as left behind")
 	}
 }
