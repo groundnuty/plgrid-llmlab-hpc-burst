@@ -309,3 +309,33 @@ func waitUntil(t *testing.T, what string, cond func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// A test that ends while its run is still going, a t.Fatal half way through, leaves nothing: the
+// cleanup closes the pipe to the reaper and waits for it, and the reaper kills and reaps what the
+// script started, a command in its own session included. A cleanup that killed the reaper's
+// process group first would take the reaper before it had collected anything, and the command in
+// the other session would survive.
+func TestATestThatEndsMidRunLeavesNothing(t *testing.T) {
+	dir := t.TempDir()
+	mark := "MID_MARK=" + dir
+	t.Cleanup(func() { killMarked(mark) }) // the last resort, if the cleanup below does not do it
+	t.Run("run", func(t *testing.T) {
+		ready := filepath.Join(dir, "ready")
+		script := `setsid sleep 600 >/dev/null 2>&1 </dev/null &
+: > "$READY"
+sleep 600`
+		cmd := reaperCommand(t, filepath.Join(dir, "report"), reaperOpts{grace: 5 * time.Second}, dir, append(os.Environ(), mark, "READY="+ready), "-c", script)
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		waitUntil(t, "the script to start", func() bool {
+			_, err := os.Stat(ready)
+			return err == nil
+		})
+		if n := len(markedPIDs(mark)); n < 3 {
+			t.Fatalf("%d processes carry the mark, want at least the reaper, the script and a sleep: the setup did not run", n)
+		}
+		// The subtest ends here, with the run going.
+	})
+	waitUntil(t, "every process of the ended run to go", func() bool { return len(markedPIDs(mark)) == 0 })
+}
