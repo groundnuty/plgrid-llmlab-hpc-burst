@@ -80,11 +80,28 @@ func TestEventNotes(t *testing.T) {
 }
 
 // restOf returns skipped entries whose names are the given lengths, distinct
-// and below the 64 characters a note shows whole.
+// where the length allows and at most the 64 characters a note shows whole. A
+// length of 0 is the empty name (SkipEmptyName), and 1 is one character.
 func restOf(lengths ...int) []SkippedEntry {
 	var out []SkippedEntry
 	for i, l := range lengths {
-		out = append(out, SkippedEntry{Name: fmt.Sprintf("%02d", i) + strings.Repeat("x", l-2), Category: "NameTooLong"})
+		name := ""
+		switch {
+		case l == 1:
+			name = "x"
+		case l >= 2:
+			name = fmt.Sprintf("%02d", i) + strings.Repeat("x", l-2)
+		}
+		out = append(out, SkippedEntry{Name: name, Category: "NameTooLong"})
+	}
+	return out
+}
+
+// sixtyFours is n names of 64 characters, the longest a note shows whole.
+func sixtyFours(n int) []int {
+	out := make([]int, n)
+	for i := range out {
+		out[i] = 64
 	}
 	return out
 }
@@ -135,6 +152,18 @@ func TestSkippedSummaryNoteNamesAsManyAsFit(t *testing.T) {
 		{"two", restOf(4, 6), `2 more catalog entries skipped (at most 10 skipped entries are named in an hour): "00xx", "01xxxx"`, 0, false},
 		{"all fit, to the byte", exact, "", 1024, false},
 		{"one byte over", over, "", 0, true},
+		// Review of PR 124 (Astra, B1): 15 entries of 13 names of 64 characters, one
+		// of 51 and an empty one. The head is 83 bytes, the 13 names with their
+		// quotes and separators 13*66 + 12*2 = 882, the 51-character name ", " and
+		// 53 more, and the empty name ", " and two quotes: 83 + 882 + 55 + 4 = 1,024.
+		// The complete list fits to the byte, but a 51-character name that is not
+		// the last used to reserve 5 bytes for an ellipsis the empty name made
+		// needless, and the note stopped at 970 bytes.
+		{"the last name is empty and the whole list fits to the byte", restOf(append(sixtyFours(13), 51, 0)...), "", 1024, false},
+		// One byte more (a last name of one character, 5 bytes with its separator) does
+		// not fit: the 51-character name has to leave room for the ellipsis, and goes.
+		// 83 + 882 = 965 bytes of head and 13 names, and ", \u2026" is 5 more.
+		{"the last name is one character, one byte over", restOf(append(sixtyFours(13), 51, 1)...), "", 970, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := SkippedSummaryNote(tc.rest)
@@ -182,6 +211,30 @@ func TestSkippedSummaryNoteNamesAsManyAsFit(t *testing.T) {
 		}
 		if want := refSummary(restOf(lengths...)); got != want {
 			t.Errorf("margin %d: note differs from the longest list that fits", margin)
+		}
+	}
+	// The cut against the longest list that fits, for every pair of lengths of
+	// the last two names (the empty name and the one-character name included)
+	// after 13 names of 64 characters, and for every triple from a few lengths
+	// around the boundary after 12. Whether the complete list fits is decided
+	// by the bytes of the entries after a name, not by a fixed reserve.
+	for a := 0; a <= 64; a++ {
+		for b := 0; b <= 64; b++ {
+			rest := restOf(append(sixtyFours(13), a, b)...)
+			if got, want := SkippedSummaryNote(rest), refSummary(rest); got != want {
+				t.Fatalf("last names of %d and %d characters: note of %d bytes, want the longest list that fits, %d bytes", a, b, len(got), len(want))
+			}
+		}
+	}
+	around := []int{0, 1, 2, 3, 49, 50, 51, 52, 64}
+	for _, a := range around {
+		for _, b := range around {
+			for _, c := range around {
+				rest := restOf(append(sixtyFours(12), a, b, c)...)
+				if got, want := SkippedSummaryNote(rest), refSummary(rest); got != want {
+					t.Fatalf("last names of %d, %d and %d characters: note of %d bytes, want %d", a, b, c, len(got), len(want))
+				}
+			}
 		}
 	}
 }

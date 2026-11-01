@@ -2,6 +2,7 @@ package provider
 
 import (
 	"fmt"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -61,18 +62,24 @@ func SkippedSummaryNote(rest []SkippedEntry) string {
 	}
 	note := head + fmt.Sprintf(" (at most %d skipped entries are named in an hour): ", MaxSkipEventsPerHour)
 	const sep = ", "
+	names := make([]string, len(rest))
 	for i, s := range rest {
-		name := shortName(s.Name)
+		names[i] = shortName(s.Name)
+	}
+	// The complete list, when it fits, with no ellipsis and none reserved: the
+	// ellipsis is only for a list that is cut, and the entries after a name
+	// (which may be as short as an empty name's two quotes) decide whether it
+	// fits.
+	if full := note + strings.Join(names, sep); len(full) <= MaxEventNote {
+		return full
+	}
+	// Otherwise as many whole names as leave room for the ellipsis after them.
+	for i, name := range names {
 		add := name
 		if i > 0 {
 			add = sep + name
 		}
-		// A name that is not the last must leave room for the ellipsis after it.
-		room := 0
-		if i < len(rest)-1 {
-			room = len(sep) + len(skippedEllipsis)
-		}
-		if len(note)+len(add)+room > MaxEventNote {
+		if len(note)+len(add)+len(sep)+len(skippedEllipsis) > MaxEventNote {
 			if i == 0 {
 				return note + skippedEllipsis
 			}
@@ -80,7 +87,7 @@ func SkippedSummaryNote(rest []SkippedEntry) string {
 		}
 		note += add
 	}
-	return note
+	return note // unreachable: the complete list did not fit
 }
 
 // TruncatedNote is the note of an EventCatalogTruncated event.
