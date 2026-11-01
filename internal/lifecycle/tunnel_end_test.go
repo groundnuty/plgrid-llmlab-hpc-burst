@@ -35,6 +35,7 @@ func TestStartTimeoutTunnelNotConnected(t *testing.T) {
 			rg, writes := sequencedRig(t, withProfile(func(p *v1alpha1.PlatformProfileSpec) {
 				p.Health = &v1alpha1.HealthThresholds{StartTimeout: dur(10 * time.Minute)}
 			}))
+			rg.noTunnels = true // the test writes TunnelConnected itself, or never
 			rg.create(mdSpec("md"))
 			startUntil(rg, "md", 10*time.Minute, "an Instance starting", func() bool {
 				insts := rg.instances("md")

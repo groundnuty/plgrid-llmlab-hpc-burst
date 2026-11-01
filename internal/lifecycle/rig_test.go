@@ -22,6 +22,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -141,6 +142,9 @@ type rig struct {
 	onAgent func(*rigAgent)
 	// errs collects agent errors; a test asserts on them when it cares.
 	errs []error
+	// noTunnels: Step does not play the path-state writer (syncTunnels), so
+	// a test sets TunnelConnected itself, or leaves it absent.
+	noTunnels bool
 }
 
 type rigOption func(*rigConfig)
@@ -393,11 +397,42 @@ func (rg *rig) Step() {
 		rg.t.Fatalf("provider sync: %v", err)
 	}
 	rg.syncAgents()
+	if !rg.noTunnels {
+		rg.syncTunnels()
+	}
 	rg.reconcileAll()
 	// The leader's observer judges the Providers' and the front's heartbeats
 	// beside the reconcile loop (HBEP-8, Observers).
 	if err := rg.r.checkHeartbeats(rg.ctx); err != nil {
 		rg.t.Fatalf("checkHeartbeats: %v", err)
+	}
+}
+
+// syncTunnels plays #90's path-state writer, which sets TunnelConnected from
+// frps's proxy list (HBEP-6, Path state): the agent starts frpc when it runs
+// the Instance, so every Instance that has not ended, on an Allocation whose
+// agent runs, has its proxy online, True with reason ProxyOnline. It writes
+// only a change, as the writer does. A test that sets the condition itself
+// sets rg.noTunnels.
+func (rg *rig) syncTunnels() {
+	rg.t.Helper()
+	var l v1alpha1.InstanceList
+	if err := rg.c.List(rg.ctx, &l); err != nil {
+		rg.t.Fatal(err)
+	}
+	for i := range l.Items {
+		in := &l.Items[i]
+		ra, ok := rg.agents[in.Spec.AllocationRef.Name]
+		if ended(in) || !ok || ra.stopped || isTrue(in.Status.Conditions, v1alpha1.ConditionTunnelConnected) {
+			continue
+		}
+		apimeta.SetStatusCondition(&in.Status.Conditions, metav1.Condition{
+			Type: v1alpha1.ConditionTunnelConnected, Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonProxyOnline,
+			Message: "frps lists the Instance's proxy as online", LastTransitionTime: metav1.NewTime(rg.clock.Now()),
+		})
+		if err := rg.c.Status().Update(rg.ctx, in); err != nil {
+			rg.t.Fatalf("set TunnelConnected on %s: %v", in.Name, err)
+		}
 	}
 }
 

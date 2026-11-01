@@ -103,6 +103,19 @@ func (p *pass) starting(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av ag
 	if c.WarmUp == nil || !c.WarmUp.Done {
 		return nil
 	}
+	// The tunnel gates ready too: ready needs TunnelConnected True, also while
+	// the condition is absent, before the path-state writer's first read of
+	// frps's list (HBEP-6, Path state; HBEP-7, Instance start and ready). An
+	// Instance held here fails at health.startTimeout, with TunnelNotConnected
+	// when the condition is present and not True, else StartTimeout
+	// (startTimeoutReason; `@hpc-burst-science-agent`, 1 Nov 2026). It gates
+	// the entry only, here in starting and verifying: a ready Instance whose
+	// tunnel drops stays ready, since a tunnel down is not a dead Instance and
+	// the front routes on its own probe, not on the condition (HBEP-6, The
+	// front's half; frpc in the job).
+	if !isTrue(in.Status.Conditions, v1alpha1.ConditionTunnelConnected) {
+		return nil
+	}
 	return p.becomeReady(in, alloc)
 }
 
