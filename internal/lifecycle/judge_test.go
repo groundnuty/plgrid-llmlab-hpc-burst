@@ -487,6 +487,11 @@ func withToolCall(r agentapi.WarmUpRound, total time.Duration, errText string) a
 //
 // and the floor's edges: 200 ms -> 300 ms (+100 ms) settles, 200 ms -> 301 ms
 // does not; 2 s -> 2.2 s (+200 ms, the 10%) settles.
+//
+// HBEP-7's Test plan (Warm-up) names the other figures, worked out by hand: a
+// 200 ms request may grow by max(10% = 20 ms, 100 ms) = 100 ms, so +90 ms
+// settles and +110 ms does not; a 5 s request by max(10% = 500 ms, 100 ms) =
+// 500 ms, so +450 ms settles and +550 ms does not.
 func TestJudgeWarmUpSettleFloor(t *testing.T) {
 	s, ms := time.Second, time.Millisecond
 	round := func(n int32, short, typical time.Duration) agentapi.WarmUpRound {
@@ -502,6 +507,10 @@ func TestJudgeWarmUpSettleFloor(t *testing.T) {
 		{"200 ms shape +100 ms is at the floor", [2]time.Duration{200 * ms, 2 * s}, [2]time.Duration{300 * ms, 2 * s}, true},
 		{"200 ms shape +101 ms is above the floor", [2]time.Duration{200 * ms, 2 * s}, [2]time.Duration{301 * ms, 2 * s}, false},
 		{"2 s shape +10% is at the tolerance", [2]time.Duration{200 * ms, 2 * s}, [2]time.Duration{200 * ms, 2200 * ms}, true},
+		{"200 ms shape +90 ms settles, the floor exceeding 10%", [2]time.Duration{200 * ms, 2 * s}, [2]time.Duration{290 * ms, 2 * s}, true},
+		{"200 ms shape +110 ms does not settle", [2]time.Duration{200 * ms, 2 * s}, [2]time.Duration{310 * ms, 2 * s}, false},
+		{"5 s shape +450 ms settles, under 10%", [2]time.Duration{200 * ms, 5 * s}, [2]time.Duration{200 * ms, 5450 * ms}, true},
+		{"5 s shape +550 ms does not settle, over 10%", [2]time.Duration{200 * ms, 5 * s}, [2]time.Duration{200 * ms, 5550 * ms}, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
