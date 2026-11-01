@@ -85,8 +85,15 @@ func run(args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	return front.Run(ctx, front.Options{
-		Config: cfg, Host: agentapi.Host{StateDir: *stateDir, PortBase: *portBase}, Mode: *mode,
-		Clock: clock.Real{}, Dynamic: dyn, Kube: cs, Recorder: rec, Log: log, HealthAddr: *health,
-	})
+	return front.Run(ctx, options(cfg, agentapi.Host{StateDir: *stateDir, PortBase: *portBase}, *mode, dyn, cs, rec, log, *health))
+}
+
+// options are Run's inputs in production. They set no Transports, so Run
+// builds HBEP-6's Tunnel and its probe, and no PathEvents, so the probe's
+// PathProbeFailing goes to the API server through rec (HBEP-6, Reporting).
+func options(cfg front.Config, host agentapi.Host, mode string, dyn dynamic.Interface, cs kubernetes.Interface, rec front.Recorder, log *slog.Logger, health string) front.Options {
+	return front.Options{
+		Config: cfg, Host: host, Mode: mode,
+		Clock: clock.Real{}, Dynamic: dyn, Kube: cs, Recorder: rec, Log: log, HealthAddr: health,
+	}
 }
