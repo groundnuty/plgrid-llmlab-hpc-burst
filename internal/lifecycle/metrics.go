@@ -244,11 +244,12 @@ func (c *instanceCollector) Collect(ch chan<- prometheus.Metric) {
 		rep, at, from := c.backend.latest(e.allocUID)
 		if rep == nil || from != e.agentID || rep.Instance == nil || rep.Instance.UID != string(e.uid) {
 			// No report of this Instance from its agent since this controller
-			// started, so no worker is known: the alpha Instance's one worker
-			// (the Backend's desiredInstance) stands in, and its metrics are
-			// unknown. Without this, an agent that never reports again after
-			// a controller restart leaves its Instance with the info series
-			// only, and a share-of-unknown query reads 0/0.
+			// started, so no worker is reported: the alpha Instance's one
+			// desired worker (the Backend's desiredInstance) stands in, and
+			// its metrics are unknown. Without this, an agent that never
+			// reports again after a controller restart leaves its Instance
+			// with the info series only, and a share-of-unknown query reads
+			// 0/0.
 			c.collectUnreported(ch, e)
 			continue
 		}
@@ -262,12 +263,15 @@ func (c *instanceCollector) Collect(ch chan<- prometheus.Metric) {
 }
 
 // collectUnreported sends the unknown series of an Instance whose agent has
-// sent no report of it since this controller started: every engine metric of
-// the Instance's one worker is unknown, agent_unreachable once the pass has
-// judged the agent unreachable (health.agentTimeout, with the restart grace),
-// and not_reported until then.
+// sent no report of it since this controller started, new or after a restart
+// (reports are held in memory): every engine metric of its desired state's one
+// worker, worker-0 in alpha, is unknown. It has no fresh read, so the reason is
+// stale, or agent_unreachable once the pass has judged the agent unreachable
+// (health.agentTimeout, with the restart grace); not_reported is for a metric
+// the engine does not export (HBEP-8, Unknown samples; `@hpc-burst-science-agent`,
+// 1 Nov 2026, for #111).
 func (c *instanceCollector) collectUnreported(ch chan<- prometheus.Metric, e instanceEntry) {
-	reason := unknownNotReported
+	reason := unknownStale
 	if e.unreachable {
 		reason = unknownAgentUnreachable
 	}

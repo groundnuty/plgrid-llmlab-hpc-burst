@@ -13,6 +13,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -534,9 +535,10 @@ func TestMetricsNegativeCountIsUnknown(t *testing.T) {
 	}
 }
 
-// TestMetricsNoReportSinceRestartIsUnknown: after a controller restart, an
-// Instance whose agent has sent no report since has its info series and every
-// engine metric of its one worker unknown, not_reported at first and
+// TestMetricsNoReportSinceRestartIsUnknown (HBEP-8, Test plan, A restart of
+// the lifecycle controller): after a controller restart, an Instance whose
+// agent has sent no report since has its info series and every engine metric
+// of its one worker unknown, stale at first (it has no fresh read) and
 // agent_unreachable once the pass has judged the agent unreachable, so that a
 // share-of-unknown query does not read 0/0. The control is the same Instance
 // before the restart: fresh, with none unknown.
@@ -550,7 +552,7 @@ func TestMetricsNoReportSinceRestartIsUnknown(t *testing.T) {
 	rg.restartController()
 	rg.run(startTick, startTick) // a pass records the Instance with no report from its agent
 	if isTrue(rg.instance(in.Name).Status.Conditions, v1alpha1.ConditionAgentUnreachable) {
-		t.Fatal("the agent is judged unreachable at once after the restart; the not_reported case proves nothing")
+		t.Fatal("the agent is judged unreachable at once after the restart; the stale case proves nothing")
 	}
 	check := func(reason string) {
 		t.Helper()
@@ -565,9 +567,51 @@ func TestMetricsNoReportSinceRestartIsUnknown(t *testing.T) {
 			t.Fatal("no info series for an Instance that has not ended")
 		}
 	}
-	check(unknownNotReported)
+	check(unknownStale)
 	rg.until(10*time.Minute, startTick, "AgentUnreachable after the restart", func() bool {
 		return isTrue(rg.instance(in.Name).Status.Conditions, v1alpha1.ConditionAgentUnreachable)
 	})
+	check(unknownAgentUnreachable)
+}
+
+// TestMetricsNewInstanceWithNoReportIsStale (HBEP-8, Test plan, Series scope):
+// an Instance whose agent has registered and has sent no report yet has its
+// info series and, for worker-0, every engine metric as an unknown series with
+// reason stale; with the agent judged unreachable, agent_unreachable. An
+// Instance with no agent yet has its info series only. The collector is built
+// over an inventory and an empty Backend, the state of a new Instance.
+func TestMetricsNewInstanceWithNoReportIsStale(t *testing.T) {
+	md := types.NamespacedName{Namespace: rigNS, Name: "md"}
+	inv := &inventory{}
+	inv.setIdentity(md, instanceEntry{uid: "uid-new", namespace: rigNS, name: "inst-new", md: "md", provider: "helios", gpuMdl: "gpu"})
+	inv.setIdentity(md, instanceEntry{uid: "uid-pending", namespace: rigNS, name: "inst-pending", md: "md", provider: "helios", gpuMdl: "gpu"})
+	inv.setAgent(md, "uid-new", "alloc-uid", "agent-1", false, 10*time.Second)
+	scrapeNew := func() exposition {
+		return scrapeCollectors(t, &instanceCollector{inv: inv, backend: &Backend{}, clock: SystemClock{}})
+	}
+	check := func(reason string) {
+		t.Helper()
+		ex := scrapeNew()
+		if series := ex.engineSeries("uid-new"); len(series) != 0 {
+			t.Fatalf("engine series %v for an Instance with no report; an unknown value is absent", series)
+		}
+		if u := ex.unknowns("uid-new", "worker-0"); len(u) != 1 || !slices.Equal(u[reason], sorted(engineNames)) {
+			t.Fatalf("unknown series %v, want every engine metric of worker-0 with reason %s", u, reason)
+		}
+		if len(ex.find("hpcburst_instance_info", map[string]string{"instance_uid": "uid-new"})) != 1 {
+			t.Fatal("no info series for the new Instance")
+		}
+		var pending []expoSample
+		for _, s := range ex.samples {
+			if s.labels["instance_uid"] == "uid-pending" {
+				pending = append(pending, s)
+			}
+		}
+		if len(pending) != 1 || pending[0].name != "hpcburst_instance_info" {
+			t.Fatalf("series of the Instance with no agent %v, want its info series only", pending)
+		}
+	}
+	check(unknownStale)
+	inv.setAgent(md, "uid-new", "alloc-uid", "agent-1", true, 10*time.Second)
 	check(unknownAgentUnreachable)
 }
