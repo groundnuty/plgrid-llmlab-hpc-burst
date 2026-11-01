@@ -25,8 +25,13 @@
 // Generation follows the prompt's token ids. A greedy request (temperature 0
 // or absent) gives the same output every time, as a walk over the vocabulary
 // whose odd step varies from token to token: no output repeats one token
-// next to itself, and no output is periodic. A sampled request seeds the walk
-// at random. With min_tokens at or above max_tokens, an output has exactly
+// next to itself, and no output is periodic. A sampled request (temperature
+// above 0) with a seed gives the same output every time too, a function of the
+// prompt and the seed: the double stands for vLLM's seeded sampling in the
+// case where it is reproducible (a batch-invariant engine), not for the known
+// limit that a seed does not guarantee reproducibility online. The
+// greedy-repeat and greedy-diverge modes act on these requests as on greedy
+// ones. A sampled request without a seed seeds the walk at random. With min_tokens at or above max_tokens, an output has exactly
 // max_tokens tokens and finish reason "length". Otherwise it stops naturally
 // after max(NaturalLen, min_tokens) tokens, or at max_tokens if that comes
 // first. ignore_eos does not change that: vLLM merges the server's default
@@ -37,6 +42,15 @@
 // vllm:num_preemptions_total stays 0 and the time-per-output-token histogram
 // observes, for each finished request, TokenDelay if it generated more than one
 // token and 0 otherwise (the mean vLLM computes, exactly, not measured).
+//
+// # What reached the engine
+//
+// Each chat request that the engine accepted is recorded when it ends, as a
+// LogEvent (the "request" line of HB_ENGINE_DOUBLE_LOG, or the callback of
+// HandlerRecording), with the sampling parameters it carried (RequestSampling:
+// temperature, top_p, top_k, min_p, the three penalties and seed, each nil
+// when the request left it out) and the last 120 bytes of its last user
+// message (Tail). A request that the double refuses with a 4xx is not recorded.
 //
 // # Reasoning and tool calls
 //

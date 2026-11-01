@@ -19,7 +19,7 @@ const (
 
 // LogEvent is one line of the engine's log (HB_ENGINE_DOUBLE_LOG). A test
 // decodes the lines with it. Event is "start" (Argv, Env, PID), "request"
-// (Path, PromptTokens, MaxTokens, Stream, Outcome, Tokens) or empty for the
+// (Path, PromptTokens, MaxTokens, Stream, Outcome, Tokens, Sampling, Tail) or empty for the
 // line {"pids":[...]} of the ignore-term mode.
 type LogEvent struct {
 	Event string `json:"event,omitempty"`
@@ -42,6 +42,27 @@ type LogEvent struct {
 	Stream       bool   `json:"stream,omitempty"`
 	Outcome      string `json:"outcome,omitempty"`
 	Tokens       int    `json:"tokens,omitempty"`
+	// Sampling holds the sampling parameters the request carried, each
+	// absent when the request left it out; Tail is the last 120 bytes of its
+	// last user message, which tells the agent's checks apart by their
+	// closing words.
+	Sampling *RequestSampling `json:"sampling,omitempty"`
+	Tail     string           `json:"tail,omitempty"`
+}
+
+// RequestSampling is the sampling parameters of one chat request as the
+// engine received them. A parameter the request did not set is nil, never
+// zero: a temperature of 0 and a missing temperature differ, and so do a seed
+// of 0 and no seed. A test asserts what reached the engine from these.
+type RequestSampling struct {
+	Temperature       *float64 `json:"temperature,omitempty"`
+	TopP              *float64 `json:"top_p,omitempty"`
+	TopK              *int64   `json:"top_k,omitempty"`
+	MinP              *float64 `json:"min_p,omitempty"`
+	RepetitionPenalty *float64 `json:"repetition_penalty,omitempty"`
+	PresencePenalty   *float64 `json:"presence_penalty,omitempty"`
+	FrequencyPenalty  *float64 `json:"frequency_penalty,omitempty"`
+	Seed              *int64   `json:"seed,omitempty"`
 }
 
 // logFile appends one JSON line per record.

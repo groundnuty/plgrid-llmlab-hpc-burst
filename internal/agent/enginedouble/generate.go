@@ -13,9 +13,18 @@ type genParams struct {
 	minTokens int
 	ignoreEOS bool
 	greedy    bool
-	// repeat is how many earlier requests were identical to this greedy one.
+	// seeded says a sampled request carried a seed, seedValue.
+	seeded    bool
+	seedValue int64
+	// repeat is how many earlier requests were identical to this repeatable
+	// one.
 	repeat int
 }
+
+// repeatable says the same request gives the same output: a greedy one, and
+// a sampled one with a seed. The greedy-repeat and greedy-diverge modes act
+// on these.
+func (p genParams) repeatable() bool { return p.greedy || p.seeded }
 
 // output is what the model says: indices into vocab, and the finish reason.
 type output struct {
@@ -51,10 +60,14 @@ func (c Config) length(p genParams) (n int, finish string) {
 	return n, finish
 }
 
-// seed is the walk's seed: the prompt's for a greedy request, else random.
+// seed is the walk's seed: the prompt's for a greedy request, the prompt's
+// and the request's seed for a seeded sampled one, else random.
 func (p genParams) seed() uint64 {
-	if p.greedy {
+	switch {
+	case p.greedy:
 		return promptSeed(p.promptIDs)
+	case p.seeded:
+		return mix64(promptSeed(p.promptIDs) ^ mix64(uint64(p.seedValue)))
 	}
 	return rand.Uint64()
 }
@@ -69,11 +82,11 @@ func (c Config) tokens(p genParams, n int) []int {
 		for i := 3; i < n; i++ {
 			toks[i] = toks[i%3]
 		}
-	case p.greedy && c.GreedyRepeat:
+	case p.repeatable() && c.GreedyRepeat:
 		for i := range toks {
 			toks[i] = toks[0]
 		}
-	case p.greedy && c.GreedyDiverge && p.repeat > 0:
+	case p.repeatable() && c.GreedyDiverge && p.repeat > 0:
 		diverge(toks, seed, c.GreedyDivergeAt, p.repeat)
 	}
 	return toks

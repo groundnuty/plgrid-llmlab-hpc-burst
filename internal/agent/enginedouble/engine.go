@@ -35,11 +35,14 @@ type engine struct {
 // token count and max_tokens. The request nonce varies and the count does not.
 type shapeKey struct{ prompt, maxTokens int }
 
-// repeatKey identifies an identical greedy request.
+// repeatKey identifies an identical repeatable request: a greedy one, or a
+// sampled one with the same seed.
 type repeatKey struct {
 	prompt               uint64
 	maxTokens, minTokens int
 	ignoreEOS            bool
+	seeded               bool
+	seed                 int64
 }
 
 type httpKey struct{ handler, method, status string }
@@ -217,7 +220,7 @@ func (e *engine) beforeFirstToken(k shapeKey, tokens int) time.Duration {
 	return d
 }
 
-// repeatOf counts a greedy request and returns how many identical ones came
+// repeatOf counts a repeatable request and returns how many identical ones came
 // before it.
 func (e *engine) repeatOf(k repeatKey) int {
 	e.mu.Lock()
