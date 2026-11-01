@@ -1,6 +1,6 @@
 package rehearsal
 
-// New. What the login node needs from the host, and the skip-or-fail rule of
+// New. What the login node and the gateway need from the host, and the skip-or-fail rule of
 // the tests that need it (the rule of internal/agent's sshdBinary, with its
 // own switch).
 
@@ -36,7 +36,7 @@ func CheckTools(sshd string) error {
 		}
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("rehearsal: the login node needs OpenSSH; missing: %s", strings.Join(missing, ", "))
+		return fmt.Errorf("rehearsal: the login node and the gateway need OpenSSH; missing: %s", strings.Join(missing, ", "))
 	}
 	return nil
 }

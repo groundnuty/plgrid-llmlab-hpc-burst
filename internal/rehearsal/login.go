@@ -34,6 +34,14 @@
 //   - The credentials file names the OS account that runs the test, because a
 //     non-root sshd can only log in as the account it runs as.
 //
+// # The dial-home gateway
+//
+// StartGateway runs the same kind of sshd (sshd.go) as the control-plane
+// host's ssh server for the agent's ssh mode (HBEP-6, Dial-home modes): the
+// client key's line is HBEP-6's restricted line for two loopback ports, the
+// agent endpoint's and the front's dial-home listener's, and WriteDialHome
+// puts the key and known_hosts where the agent looks for them. See gateway.go.
+//
 // Provenance: new package. The sshd harness follows internal/agent/
 // tunnelrig_test.go (startSSHServer); the process helpers follow
 // internal/slurm/fakeslurm/procfs.go.
@@ -42,9 +50,7 @@ package rehearsal
 import (
 	"errors"
 	"fmt"
-	"net"
 	"os"
-	"os/user"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -83,10 +89,8 @@ type LoginNode struct {
 	sock  string
 	sess  *fakeslurm.Session
 
-	ln    net.Listener
-	pool  *sshdPool
+	srv   *sshdServer
 	relay *relayServer
-	log   *os.File
 
 	closeOnce sync.Once
 }
@@ -112,64 +116,51 @@ func StartLoginNode(cfg LoginConfig) (*LoginNode, error) {
 	if err := n.check(exe); err != nil {
 		return nil, err
 	}
-	u, err := user.Current()
-	if err != nil {
-		return nil, fmt.Errorf("rehearsal: the current user: %w", err)
-	}
-	n.user = u.Username
-	if !safeText.MatchString(n.user) {
-		return nil, errors.New("rehearsal: the current user name holds a character that is not allowed in sshd's configuration")
+	if n.user, err = sshdUser(); err != nil {
+		return nil, err
 	}
 	n.sess = cfg.Platform.Login(cfg.Login)
-	if n.ln, err = net.Listen("tcp", "127.0.0.1:0"); err != nil {
-		return nil, fmt.Errorf("rehearsal: listen: %w", err)
-	}
-	if _, err := slurm.ParseSSHConfig([]byte(n.SSHConfig()), ""); err != nil {
-		n.ln.Close()
-		return nil, fmt.Errorf("rehearsal: the controller's parser refuses the login node's credentials: %w", err)
+	if n.relay, err = startRelay(n.sock, n.sess); err != nil {
+		return nil, err
 	}
 	forced := fmt.Sprintf("%s=%s %s=%s %s", EnvRole, RoleRelay, EnvRelay, n.sock, exe)
-	if err := writeSSHDFiles(n.files, n.user, forced, n.port()); err != nil {
-		n.ln.Close()
-		return nil, fmt.Errorf("rehearsal: write sshd's files: %w", err)
-	}
-	if n.log, err = os.Create(n.files.log); err != nil {
-		n.ln.Close()
+	spec := sshdSpec{user: n.user, options: fmt.Sprintf("restrict,command=%q", forced), conf: loginConf}
+	if n.srv, err = startSSHD(cfg.SSHD, n.files, spec); err != nil {
+		n.relay.close()
 		return nil, err
 	}
-	if n.relay, err = startRelay(n.sock, n.sess); err != nil {
-		n.ln.Close()
-		n.log.Close()
-		return nil, err
+	if _, err := slurm.ParseSSHConfig([]byte(n.SSHConfig()), ""); err != nil {
+		_ = n.Close()
+		return nil, fmt.Errorf("rehearsal: the controller's parser refuses the login node's credentials: %w", err)
 	}
-	n.pool = &sshdPool{bin: cfg.SSHD, conf: n.files.conf, log: n.log}
-	n.pool.wg.Add(1)
-	go n.pool.serve(n.ln)
 	return n, nil
+}
+
+// loginConf is sshd_config for the login node: commands only (the key's
+// restrict switches off forwarding, a terminal, agent and X11 as well).
+var loginConf = []string{
+	"AllowTcpForwarding no", "AllowStreamLocalForwarding no", "GatewayPorts no",
+	"X11Forwarding no", "PermitTTY no", "PrintMotd no", "PermitUserEnvironment no",
 }
 
 // check refuses what would break the forced command or the socket.
 func (n *LoginNode) check(exe string) error {
-	fi, err := os.Stat(n.cfg.Dir)
+	if err := checkDir(n.cfg.Dir, "the relay socket in it runs commands on the fake cluster"); err != nil {
+		return err
+	}
 	switch {
-	case n.cfg.Dir == "" || !filepath.IsAbs(n.cfg.Dir):
-		return errors.New("rehearsal: Dir must be an absolute path")
-	case err != nil || !fi.IsDir():
-		return errors.New("rehearsal: Dir must be an existing directory")
-	case fi.Mode().Perm()&0o077 != 0:
-		return errors.New("rehearsal: Dir must have mode 700: the relay socket in it runs commands on the fake cluster")
-	case !safeText.MatchString(n.cfg.Dir) || !safeText.MatchString(exe):
-		return errors.New("rehearsal: Dir and the test binary's path must hold only letters, digits and ._:=,/+@-: sshd's login shell reads them")
+	case !safeText.MatchString(exe):
+		return errors.New("rehearsal: the test binary's path must hold only letters, digits and ._:=,/+@-: sshd's login shell reads it")
 	case len(n.sock) > maxSocketPath:
 		return fmt.Errorf("rehearsal: the relay socket path is %d bytes, above %d: use a shorter Dir", len(n.sock), maxSocketPath)
 	}
 	return nil
 }
 
-func (n *LoginNode) port() int { return n.ln.Addr().(*net.TCPAddr).Port }
+func (n *LoginNode) port() int { return n.srv.port() }
 
 // Addr is the sshd listener's address, 127.0.0.1:<kernel port>.
-func (n *LoginNode) Addr() string { return n.ln.Addr().String() }
+func (n *LoginNode) Addr() string { return n.srv.ln.Addr().String() }
 
 // Session is the cluster user's session that the relay runs commands as. The
 // test can use it too, for example to read what the controller did.
@@ -193,21 +184,7 @@ func (n *LoginNode) SSHConfig() string {
 // file in the same directory and a rename, so a reader never sees a partial
 // file.
 func (n *LoginNode) WriteCredentials(path string) error {
-	f, err := os.CreateTemp(filepath.Dir(path), ".creds-*") // mode 600
-	if err != nil {
-		return err
-	}
-	_, werr := f.WriteString(n.SSHConfig())
-	if cerr := f.Close(); werr == nil {
-		werr = cerr
-	}
-	if werr == nil {
-		werr = os.Rename(f.Name(), path)
-	}
-	if werr != nil {
-		_ = os.Remove(f.Name())
-	}
-	return werr
+	return writeAtomic(path, []byte(n.SSHConfig()))
 }
 
 // Close stops the listener, the relay and every sshd child with the
@@ -215,10 +192,9 @@ func (n *LoginNode) WriteCredentials(path string) error {
 // Platform. It is safe to call twice.
 func (n *LoginNode) Close() error {
 	n.closeOnce.Do(func() {
-		n.ln.Close()
+		n.srv.stopListening()
 		n.relay.close()
-		n.pool.stop(withRelayEnv(n.sock))
-		n.log.Close()
+		n.srv.stop(withRelayEnv(n.sock))
 		_ = os.Remove(n.sock)
 	})
 	return nil
