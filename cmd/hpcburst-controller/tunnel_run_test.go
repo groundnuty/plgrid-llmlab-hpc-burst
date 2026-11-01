@@ -552,6 +552,9 @@ func (r *tunnelRig) start() *binary {
 // frps and frpc does to each Instance's condition, and what a restart of the binary keeps.
 func TestTunnelWithRealFrpsAndFrpc(t *testing.T) {
 	setVars(t, &tunnelReadPeriod, 2*time.Second) // HBEP-6's 10 s, shortened; the trigger alone is the next test
+	// TunnelOrphanGrace's 2 minutes, shortened to a few reads: the grace's own behaviour is tested
+	// on pathState's clock (tunnel_orphan_test.go), and this test keeps the package's time.
+	setVars(t, &tunnelOrphanGrace, 5*time.Second)
 	r := newTunnelRig(t)
 	from := len(logs.String())
 	host := r.f.host
