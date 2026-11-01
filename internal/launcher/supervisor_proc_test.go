@@ -211,7 +211,10 @@ func TestStartSupervisorFailures(t *testing.T) {
 		{"the controller binary cannot be started", []string{self}, func(f *ctlFixture) {
 			f.st.Controllers.Binary = f.ctl + "/no-such-binary"
 		}, 30 * time.Second, []string{"controller exited while it was being started", "start failed", "last lines of"}},
-		{"the controller exits at once", []string{self}, func(f *ctlFixture) { f.steer("always-exit", "7") },
+		// The controller exits as soon as the supervisor has recorded it. With always-exit it could
+		// be gone before the supervisor's startProc had pinned its identity, and the entry then
+		// showed "start failed" instead of its exit status (issue #130).
+		{"the controller exits at once", []string{self}, func(f *ctlFixture) { f.steer("exit-once-recorded", "7") },
 			30 * time.Second, []string{"controller exited while it was being started", "exit status 7"}},
 		// The stand-in waits for the launcher's confirmation on the handoff descriptor, as the
 		// real supervisor does, and then exits having started nothing. A stand-in that exits at
