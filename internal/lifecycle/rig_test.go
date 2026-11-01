@@ -142,8 +142,9 @@ type rig struct {
 	onAgent func(*rigAgent)
 	// errs collects agent errors; a test asserts on them when it cares.
 	errs []error
-	// noTunnels: Step does not play the path-state writer (syncTunnels), so
-	// a test sets TunnelConnected itself, or leaves it absent.
+	// noTunnels: syncAgents does not play the path-state writer
+	// (syncTunnels), so a test sets TunnelConnected itself, or leaves it
+	// absent.
 	noTunnels bool
 }
 
@@ -397,9 +398,6 @@ func (rg *rig) Step() {
 		rg.t.Fatalf("provider sync: %v", err)
 	}
 	rg.syncAgents()
-	if !rg.noTunnels {
-		rg.syncTunnels()
-	}
 	rg.reconcileAll()
 	// The leader's observer judges the Providers' and the front's heartbeats
 	// beside the reconcile loop (HBEP-8, Observers).
@@ -412,8 +410,9 @@ func (rg *rig) Step() {
 // frps's proxy list (HBEP-6, Path state): the agent starts frpc when it runs
 // the Instance, so every Instance that has not ended, on an Allocation whose
 // agent runs, has its proxy online, True with reason ProxyOnline. It writes
-// only a change, as the writer does. A test that sets the condition itself
-// sets rg.noTunnels.
+// only a change, as the writer does, and a write that fails (a test's injected
+// fault) is kept in rg.errs and tried again next round, as the writer retries.
+// A test that sets the condition itself sets rg.noTunnels.
 func (rg *rig) syncTunnels() {
 	rg.t.Helper()
 	var l v1alpha1.InstanceList
@@ -431,7 +430,7 @@ func (rg *rig) syncTunnels() {
 			Message: "frps lists the Instance's proxy as online", LastTransitionTime: metav1.NewTime(rg.clock.Now()),
 		})
 		if err := rg.c.Status().Update(rg.ctx, in); err != nil {
-			rg.t.Fatalf("set TunnelConnected on %s: %v", in.Name, err)
+			rg.errs = append(rg.errs, fmt.Errorf("path-state writer: set TunnelConnected on %s: %w", in.Name, err))
 		}
 	}
 }
@@ -481,6 +480,11 @@ func (rg *rig) syncAgents() {
 		if err := ra.agent.Step(rg.ctx); err != nil {
 			rg.errs = append(rg.errs, fmt.Errorf("agent of %s: %w", ra.alloc, err))
 		}
+	}
+	// The tunnel follows the agent: frpc starts when the agent runs the
+	// Instance (HBEP-6), so every path that moves the agents moves it too.
+	if !rg.noTunnels {
+		rg.syncTunnels()
 	}
 }
 
