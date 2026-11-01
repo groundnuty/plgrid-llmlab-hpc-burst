@@ -5,9 +5,11 @@
 | File | Object name | Partitions in the typed list |
 |---|---|---|
 | `helios.yaml` | `helios` | `plgrid` (CPU), `plgrid-gpu-gh200` |
-| `athena.yaml` | `athena` | `plgrid-gpu-a100` |
+| `athena.yaml` | `athena` | `plgrid-gpu-a100`, `plgrid-now` (conformance runs and short checks only) |
 
 Only a partition on which `holdRelease` was verified is in the typed list (HBEP-4, Platform profile schema). Every other partition is in the untyped block only.
+
+`plgrid-now` is the exception that the science agent ruled on issue #93 (comment 6557245889, 1 Nov 2026): it is listed so that the conformance harness can run on a partition where a job starts at once. Its time limit is 1 h and its QoS allows one GPU and one job per user, so it hosts no Instance, and the lifecycle controller must never plan one there. What keeps it off today is that the entry gives no `cpusPerGpu` or `memPerGpu`, so `partitionSizing` refuses it (`TestShippedAthenaNowCannotBeSized`). Sourcing either value lifts that refusal and needs the science agent's ruling first.
 
 ## What a manifest holds
 

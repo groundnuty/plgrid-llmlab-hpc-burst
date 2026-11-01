@@ -1,6 +1,7 @@
 # PlatformProfile for Athena (Cyfronet, Slurm), alpha (HBEP-4, open questions 3, 7 and 8).
 #
-# It covers the alpha partition plgrid-gpu-a100. Athena is for GPU jobs only.
+# It covers the alpha partition plgrid-gpu-a100, and plgrid-now for conformance runs and short
+# checks only (see its entry). Athena is for GPU jobs only.
 #
 # Where each value comes from (HBEP-4, open question 7). Every typed value has a
 # comment that names one of three sources:
@@ -30,6 +31,20 @@ spec:
       cpusPerGpu: 16 # facts.hardware.node_documented.value.proportional_cpus_per_gpu
       memPerGpu: 128000Mi # facts.hardware.node_documented.value.proportional_ram_per_gpu_mb, 128000 (the node's 1024000 divided by its 8 GPUs)
       imageFormat: sandbox # facts.containers.apptainer_compute_nodes.value.plgrid-gpu-a100 (S1 probe 2: a SIF fails, a sandbox runs); also facts.partitions[name=plgrid-gpu-a100].image_format
+
+    # plgrid-now is for conformance runs and short checks only, and hosts no Instance
+    # (`@hpc-burst-science-agent`, 1 Nov 2026, issue #93). Its time limit is 1 h, below what an Instance
+    # needs: HBEP-7's drain lead (drainWindow 2h10m below) plus useful serving time, and handoverMargin
+    # (30m below). The profile lists it so that the conformance harness can run there. cpusPerGpu and
+    # memPerGpu are left absent on purpose: the lifecycle controller then refuses to size an Instance on
+    # this partition (internal/lifecycle, partitionSizing), the same stance as Helios plgrid. Sourcing them
+    # (the QoS cap is cpu=16 and 125G) would lift that refusal, so it needs the science agent's ruling first.
+    # imageFormat is absent as well: probe 2 ran on plgrid-gpu-a100 only.
+    - name: plgrid-now # spec.profile.facts.partitions[name=plgrid-now].name
+      gpuModel: A100 # HBEP-4 fixes the string. facts.partitions[name=plgrid-now].gres is "gpu:a100:8", the same node type as plgrid-gpu-a100 (facts.hardware.node_documented.value.accelerator, "8x NVIDIA A100-SXM4-40GB")
+      cpuArch: x86_64 # facts.partitions[name=plgrid-now].arch
+      maxTime: 1h # facts.partitions[name=plgrid-now].max_time, "01:00:00"
+      gpusPerNode: 1 # the most GPUs one Allocation may request (PartitionProfile.gpusPerNode): facts.slurm.qos.value[name=plgrid-now].max_tres_per_user, "cpu=16,gres/gpu=1,mem=125G". The node has 8 (facts.partitions[name=plgrid-now].gres), but the QoS caps a user at one GPU, one running and one submitted job (max_jobs_per_user 1, max_submit_per_user 1)
 
   holdRelease: true # facts.slurm.hold_release.value.plgrid-gpu-a100: user_release_ok true (S1's hold check)
   lostGrace: 2m # framework default (HBEP-4, Platform profile schema, lostGrace): above the measured gap of about 2 s between queue and accounting (S7's capture)
@@ -454,6 +469,12 @@ spec:
           source: "command -v hpc-grants hpc-fs hpc-jobs hpc-jobs-history"
           date: "2026-10-30"
           note: "All four exist on the login node. Documented in https://docs.hpc.cyfronet.pl/environment/hpc-tools/. Their output was not collected (it holds grant and quota data)."
+        plgrid_now_start:
+          value: "a one-GPU test-only job on plgrid-now, 5 min limit, was estimated to start at once with 1 CPU, and with 4 CPUs and 32768M; with 16 CPUs and 128000M (the QoS cap) it was estimated to start 52 min later"
+          method: measured
+          source: "sbatch --test-only --no-requeue --partition=plgrid-now --account=<account> --nodes=1 --gres=gpu:1 --time=<5 or 2 min> [--cpus-per-task=<c> --mem=<m>M] --wrap=true; four calls on 2026-11-01 between 11:22Z and 11:27Z (issue #93)"
+          date: "2026-11-01"
+          note: "Slurm prints the estimate in local time (Europe/Warsaw, CET +0100 since 25 Oct), so an estimate equal to the probe instant converted to UTC means a start at once. A transient snapshot: 2 of the partition's 24 nodes were mixed, 2 allocated, 3 failed and 17 in a reservation, so a request that needs most of a node's CPUs and memory finds none free. The same calls showed the partition's limits again: MaxTime 01:00:00 (scontrol show partition) and, on the partition's QoS, MaxTRESPerUser cpu=16,gres/gpu=1,mem=125G, MaxJobsPerUser 1, MaxSubmitJobsPerUser 1, no MaxWall, DenyOnLimit (sacctmgr show qos), as in slurm.qos."
 
       login_node:
         os_and_arch:
