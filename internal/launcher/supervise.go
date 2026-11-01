@@ -104,8 +104,11 @@ func awaitHandoff(ctx context.Context, h io.Reader, timeout time.Duration) error
 // supervised is one process the supervisor keeps running: the controller, and the front when up
 // was given one (issue #64, frontEntry).
 type supervised struct {
-	Name   string
-	Path   string
+	Name string
+	Path string
+	// Argv0, when set, is the process's argv[0] instead of Path: frps runs /proc/self/fd/3, and
+	// ps shows this name instead.
+	Argv0  string
 	Args   []string // after argv[0]
 	Health string   // host:port that serves GET /healthz
 	// TermGrace is how long this process gets between SIGTERM and SIGKILL when the supervisor
@@ -121,8 +124,9 @@ type supervised struct {
 	// Env, when set, is the process's whole environment instead of the supervisor's (childEnv).
 	Env []string
 	// Open, when set, is called before each start. Its files are passed to the process from
-	// descriptor 3 on (exec.Cmd.ExtraFiles) and closed after the start: frps's verified binary,
-	// which Path names as /proc/self/fd/3, so the bytes run are the bytes checked (HBEP-15).
+	// descriptor 3 on (exec.Cmd.ExtraFiles) and closed after the start: frps's verified binary, a
+	// sealed copy, which Path names as /proc/self/fd/3, so the bytes run are the bytes checked
+	// (HBEP-15).
 	Open func() ([]*os.File, error)
 }
 
@@ -388,7 +392,11 @@ func (r *runner) start() (*procHandle, *exec.Cmd, error) {
 	if r.spec.Env != nil {
 		env = r.spec.Env
 	}
-	cmd := &exec.Cmd{Path: r.spec.Path, Args: append([]string{r.spec.Path}, r.spec.Args...), Env: env, Dir: r.l.dir, Stdout: lf, Stderr: lf}
+	argv0 := r.spec.Path
+	if r.spec.Argv0 != "" {
+		argv0 = r.spec.Argv0
+	}
+	cmd := &exec.Cmd{Path: r.spec.Path, Args: append([]string{argv0}, r.spec.Args...), Env: env, Dir: r.l.dir, Stdout: lf, Stderr: lf}
 	if r.spec.Open != nil {
 		files, err := r.spec.Open()
 		if err != nil {

@@ -2,10 +2,11 @@ package launcher
 
 // frps under the supervisor (HBEP-6, frps on the control-plane host; HBEP-11, Single-user host):
 // up verifies the pinned binary and writes frps's configuration, and the supervisor runs frps as
-// one more entry and restarts it when it exits, opening and verifying the binary again before
-// every start and executing that descriptor (/proc/self/fd/3). The kernel names such a process
-// after the file it ran, "3", so nothing may find frps by its command name; the launcher finds it
-// by its recorded identity (supervisor.json) and its ports.
+// one more entry and restarts it when it exits. Before every start it copies the binary into a
+// sealed memory file again, checks the copy against the pin and executes that descriptor
+// (/proc/self/fd/3). The kernel names such a process after the file it ran, "3" (argv[0] is the
+// recorded binary's path, for ps), so nothing may find frps by its command name; the launcher finds
+// it by its recorded identity (supervisor.json) and its ports.
 
 import (
 	"errors"
@@ -70,12 +71,14 @@ func (s *State) frpsEntry(l layout) *supervised {
 	return &supervised{
 		Name:   frpsEntryName,
 		Path:   execPath(), // the verified binary, passed at descriptor 3 by Open
+		Argv0:  run.Binary, // what ps shows; the file executed is still the descriptor
 		Args:   spec.Argv()[1:],
 		Health: h.FrpsWebAddr(),
 		Ports:  []int{h.FrpsBindPort(), h.FrpsTCPMuxPort(), h.FrpsWebPort()},
 		Env:    spec.Env(),
-		// Opened and checked against the pin again before every start: a binary replaced since up
-		// fails its start, and the supervisor reports it, instead of running unchecked bytes.
+		// Copied, sealed and checked against the pin again before every start: a binary replaced or
+		// rewritten since up fails its start, and the supervisor reports it, instead of running
+		// unchecked bytes.
 		Open: func() ([]*os.File, error) {
 			bin, err := ResolveFrpsFile(run.Binary, run.Version)
 			if err != nil {

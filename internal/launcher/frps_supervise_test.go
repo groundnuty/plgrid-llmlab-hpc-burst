@@ -9,8 +9,11 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv"
 )
 
 // TestSupervisedSetRunsFrps: with frps recorded, the set ends with frps's entry, whose command line
@@ -31,7 +34,7 @@ func TestSupervisedSetRunsFrps(t *testing.T) {
 		t.Fatalf("supervised set %+v", set)
 	}
 	f := set[1]
-	if f.Path != "/proc/self/fd/3" || f.Health != "127.0.0.1:29231" || !f.WaitReady || f.Open == nil {
+	if f.Path != "/proc/self/fd/3" || f.Argv0 != "/opt/frp/frps" || f.Health != "127.0.0.1:29231" || !f.WaitReady || f.Open == nil {
 		t.Errorf("frps entry %+v", f)
 	}
 	if want := []string{"-c", "/run/st/frps/frps.toml", "--strict-config=true"}; !slices.Equal(f.Args, want) {
@@ -214,4 +217,75 @@ func TestCheckEntryExactSockets(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestSupervisorRefusesAReplacedFrpsAtRestart: the pin is checked at every start, not at the first
+// alone. frps runs under the supervisor from a copy of the pinned binary; the copy is then replaced
+// by a script that would run (it sleeps), and frps is killed. Every start from then on must fail
+// on the pin, which the record states ("start failed: ... sha256 ..."), with the entry backing off
+// and no process started: two refusals in a row, so the second start is checked too. status
+// reports it. A supervisor that checked only the first start would run the script, which would
+// show as a running entry with a new PID.
+func TestSupervisorRefusesAReplacedFrpsAtRestart(t *testing.T) {
+	frps, _ := testenv.FrpBinaries(t)
+	f := newCtlFixture(t, Front{})
+	path := filepath.Join(shortDir(t), "frps")
+	copyFile(t, frps, path, 0o755)
+	f.st.Frps = &FrpsRunConfig{Binary: path, Version: DefaultFrpVersion}
+	if _, err := writeFrpsFiles(f.l.host(f.ports)); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.l.saveState(f.st); err != nil {
+		t.Fatal(err)
+	}
+	f.supervise(SuperviseOptions{BackoffMin: 20 * time.Millisecond, BackoffMax: 100 * time.Millisecond})
+	running := f.awaitEntry(frpsEntryName, "frps to run", func(e EntryRecord) bool { return e.State == entryRunning && e.Proc != nil })
+	// argv[0] is the recorded path, for ps (nil: frps exited meanwhile, which the rest allows).
+	if argv := procCmdline(running.Proc.PID); argv != nil && argv[0] != path {
+		t.Errorf("frps's argv is %q, want argv[0] %s", argv, path)
+	}
+
+	tmp := path + ".new"
+	if err := os.WriteFile(tmp, []byte("#!/bin/sh\nexec sleep 300\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		t.Fatal(err)
+	}
+	// From the rename on, no start can succeed; frps may have exited on its own before it.
+	before := f.awaitEntry(frpsEntryName, "frps's record", func(EntryRecord) bool { return true })
+	if before.Proc != nil {
+		if h, v, d := openRec(*before.Proc); v == Ours {
+			err := h.signal(syscall.SIGKILL)
+			h.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+		} else if v != Gone {
+			t.Fatalf("frps (pid %d): %v, %s", before.Proc.PID, v, d)
+		}
+	}
+	refused := func(e EntryRecord) bool {
+		return e.LastExit != nil && strings.HasPrefix(e.LastExit.Detail, "start failed: ") && strings.Contains(e.LastExit.Detail, "sha256")
+	}
+	first := f.awaitEntry(frpsEntryName, "a start refused on the pin", refused)
+	e := f.awaitEntry(frpsEntryName, "a second start refused on the pin", func(e EntryRecord) bool {
+		return refused(e) && e.LastExit.At.After(first.LastExit.At)
+	})
+	if e.State != entryBackoff || e.Proc != nil || e.Restarts != before.Restarts {
+		t.Errorf("after two refused starts: state %s, proc %+v, restarts %d (were %d)", e.State, e.Proc, e.Restarts, before.Restarts)
+	}
+	eh, problems := checkEntry(f.supervisorHandle(), os.Getpid(), e)
+	if got := strings.Join(problems, "; "); eh.Running || !strings.Contains(got, "start failed: ") || !strings.Contains(got, "sha256") {
+		t.Errorf("status reports %+v, problems %v; want not running, with the refused start", eh, problems)
+	}
+}
+
+// procCmdline is the command line of pid, split at its NUL bytes.
+func procCmdline(pid int) []string {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline")
+	if err != nil {
+		return nil
+	}
+	return strings.Split(strings.TrimSuffix(string(b), "\x00"), "\x00")
 }
