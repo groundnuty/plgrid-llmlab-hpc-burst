@@ -22,7 +22,8 @@
 #   TMPDIR                    where the tests create their state directories (about 0.6 GB at peak,
 #                             removed after each test; the shared machine's rules may name a disk).
 #
-# The tests use loopback ports 29220-29239 only. They run one at a time.
+# The tests use loopback ports 29220-29245 (two blocks of 13 from the bases 29220 and 29233) and,
+# for the frps rig, 29252-29259. They run one at a time.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 

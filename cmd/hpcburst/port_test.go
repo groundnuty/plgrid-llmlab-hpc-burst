@@ -15,13 +15,17 @@ import (
 // holder alone. The last case is the control: with the ports free, the same command starts k3s,
 // so the refusals above were due to the held ports and nothing else.
 func TestUpRefusesWhenAPortIsTaken(t *testing.T) {
-	// 29230 apiserver, 29231 https, 29232 controller manager, 29233 the agent endpoint, 29234 the
-	// front's /healthz, 29235 reserved, 29236 the lifecycle controller's /healthz, 29237 the
-	// front's ssh-mode dial-home listener (issue #64); 29238 is not reserved.
-	const base = 29230
+	// The second of the launcher tests' two bases: its block of 13, 29233-29245, is the one right
+	// after the default base's 29220-29232. 29233 apiserver, 29234 https, 29235 controller
+	// manager, 29236 the agent endpoint, 29237 the front's /healthz, 29238 reserved, 29239 the
+	// lifecycle controller's /healthz, 29240 the front's ssh-mode dial-home listener, 29241 the
+	// frps server plugin, 29242 frps's bind port, 29243 frps's tcpmux port, 29244 frps's web
+	// server, 29245 the lifecycle controller's /metrics (issue #111); 29246 is not reserved.
+	const base = 29233
 	h := newHost(t)
 	roles := map[string]int{"apiserver": base, "https": base + 1, "controller manager": base + 2, "agent endpoint": base + 3,
-		"front health": base + 4, "reserved lb": base + 5, "controller health": base + 6, "dial home": base + 7}
+		"front health": base + 4, "reserved lb": base + 5, "controller health": base + 6, "dial home": base + 7,
+		"frps plugin": base + 8, "frps bind": base + 9, "frps tcpmux": base + 10, "frps web": base + 11, "controller metrics": base + 12}
 	type holder struct{ name, network, addr string }
 	var holders []holder
 	for role, p := range roles {
@@ -57,7 +61,7 @@ func TestUpRefusesWhenAPortIsTaken(t *testing.T) {
 				t.Errorf("processes were started: %v", pids)
 			}
 			// Nothing in the whole block listens except the holder, which is this test process.
-			for _, row := range listeningInRange(t, 29220, 29239) {
+			for _, row := range listeningInRange(t, launcherPortsLo, launcherPortsHi) {
 				if !strings.Contains(row, ":"+strconv.Itoa(port)+" ") || !strings.Contains(row, strconv.Itoa(os.Getpid())) {
 					t.Errorf("an unexpected listener in the block: %s", row)
 				}
@@ -81,8 +85,8 @@ func TestUpRefusesWhenAPortIsTaken(t *testing.T) {
 	}
 
 	t.Run("control: the same command starts k3s once the ports are free", func(t *testing.T) {
-		// base+8 is outside the block: a holder there must not stop the start.
-		for _, p := range []int{base + 8} {
+		// base+13 is outside the block of 13: a holder there must not stop the start.
+		for _, p := range []int{base + 13} {
 			l, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(p))
 			if err != nil {
 				if requireIntegration() {
