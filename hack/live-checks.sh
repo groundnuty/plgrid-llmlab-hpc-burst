@@ -94,9 +94,10 @@ TABLE
 # run's (spikes/s94/README.md).
 # conformance-helios-gh200 runs under QOS now, the only way to a running job there (the normal QOS
 # starts one in weeks): the qos reaches the test as HPCBURST_CONF_QOS and the test's Provider.
-# Its 1 CPU and 1Gi are the smallest requests the request check takes (cpusPerTask >= 1, memory > 0,
-# slurm.CheckRequest) for the stand-in agent, which writes nothing to the RAM disk that -C memfs
-# gives; the test submits with --constraint=memfs, so the estimate asks for it too. Its timeout is
+# Its 1 CPU is the request check's floor (cpusPerTask >= 1, slurm.CheckRequest); its 1Gi is the
+# smallest memory recorded as accepted on this partition (S1's hold check, profiles/helios.yaml),
+# where the check itself takes any positive amount. The stand-in agent writes nothing to the RAM
+# disk that -C memfs gives. The test submits with --constraint=memfs, so the estimate asks for it too. Its timeout is
 # the sum of the test's own deadlines (30+5+3+30+8+3+3 min) plus a margin, so that a slow queue
 # fails in the test, with its message, before this cap does.
 cluster_table() {

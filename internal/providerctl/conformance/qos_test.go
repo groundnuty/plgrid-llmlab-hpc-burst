@@ -208,8 +208,12 @@ func TestConformanceRowsPassTheRequestCheck(t *testing.T) {
 			if v.Settings.QOS != wantQOS {
 				t.Errorf("the plugin's Settings.QOS = %q, the row says %q: the row's qos does not reach the Provider", v.Settings.QOS, wantQOS)
 			}
-			if got, want := clock(t, r.timeLimit), 5*time.Minute; got != want {
-				t.Errorf("time limit %s, the harness's allocTimeLimit %s is %v", r.timeLimit, allocTimeLimit, want)
+			want, err := v1alpha1.Duration(allocTimeLimit).AsDuration()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := clock(t, r.timeLimit); got != want {
+				t.Errorf("the row's time limit is %s (%v), the harness's allocTimeLimit %s is %v", r.timeLimit, got, allocTimeLimit, want)
 			}
 			req := heldRequest(s, "hb-example-0123456789ab", r.request(t, s))
 			if req.QOS != wantQOS {
