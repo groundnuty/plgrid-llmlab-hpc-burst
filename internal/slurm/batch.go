@@ -645,8 +645,9 @@ func (b *Batch) LiftHold(ctx context.Context, jobID string) error {
 // ended reports AlreadyEnded, and no scancel runs. A job neither the queue nor
 // accounting shows reports an error that wraps provider.ErrNotFound. A job
 // that ends in the instant between the read and the scancel still reports
-// Cancelled on Slurm 24.11, which stays quiet about it. A read that fails is a
-// CancelError: the job's state is unknown, and the caller retries.
+// Cancelled on Slurm 24.11, which stays quiet about it; on a Slurm that complains,
+// the scancel fails and that is a CancelError, retried. A read that fails is a
+// CancelError too: the job's state is unknown, and the caller retries.
 func (b *Batch) Cancel(ctx context.Context, jobIDs []string) []provider.CancelResult {
 	out := make([]provider.CancelResult, 0, len(jobIDs))
 	defer b.markStale()
@@ -673,19 +674,15 @@ func (b *Batch) cancelOne(ctx context.Context, id string) provider.CancelResult 
 		return provider.CancelResult{JobID: id, Outcome: provider.AlreadyEnded}
 	}
 	res, err := b.run(ctx, cancelLine(id), nil)
-	stderr := string(res.Stderr)
+	// What scancel prints and exits with says whether it worked, never what state the job was in:
+	// "already ended" and "not found" were decided above, from the job. A scancel that fails
+	// (on a Slurm that is noisy about a job that ended after the read, for one) is an error, and
+	// the caller's next pass reads the job again.
 	switch {
 	case err != nil:
 		return failed(fmt.Errorf("scancel %s: %w", id, err))
-	// Real Slurm 24.11 says nothing about a job that ended after the read, but
-	// an older or a noisier one (scancel -v) does. The job was live when it was
-	// read, so these two texts only refine a job that ended in the window.
-	case strings.Contains(stderr, "already completing or completed"):
-		return provider.CancelResult{JobID: id, Outcome: provider.AlreadyEnded}
-	case strings.Contains(stderr, "Invalid job id specified"):
-		return failed(fmt.Errorf("job %s: %w", id, provider.ErrNotFound))
-	case res.ExitCode != 0 || strings.Contains(stderr, "error"):
-		return failed(fmt.Errorf("scancel %s: exit %d: %s", id, res.ExitCode, slurmMessage(stderr)))
+	case res.ExitCode != 0 || strings.Contains(string(res.Stderr), "error"):
+		return failed(fmt.Errorf("scancel %s: exit %d: %s", id, res.ExitCode, slurmMessage(string(res.Stderr))))
 	}
 	return provider.CancelResult{JobID: id, Outcome: provider.Cancelled}
 }

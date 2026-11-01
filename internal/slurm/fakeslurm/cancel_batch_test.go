@@ -289,10 +289,11 @@ func TestACancelOfAJobThatEndsAfterTheReadIsCancelledOnAQuietSlurm(t *testing.T)
 	}
 }
 
-// The same race on a Slurm that does say so (Config.NoisyScancel): the job was
-// live at the read, ended before the scancel, and the scancel's text refines the
-// outcome to AlreadyEnded. This is the only test that runs the noisy fake.
-func TestACancelOfAJobThatEndsAfterTheReadIsAlreadyEndedOnANoisySlurm(t *testing.T) {
+// The same race on a Slurm that does say so (Config.NoisyScancel): the job was live at the read
+// and ended before the scancel, which then fails. The outcome is not read from the text of the
+// failure: it is a CancelError, and the caller's next pass reads the job, finds it ended and
+// goes on. This is the only test that runs the noisy fake.
+func TestACancelOfAJobThatEndsAfterTheReadIsAnErrorOnANoisySlurm(t *testing.T) {
 	r := newCancelRig(t, fakeslurm.Config{NoisyScancel: true})
 	id := r.submit(false)
 	r.start(id)
@@ -304,8 +305,12 @@ func TestACancelOfAJobThatEndsAfterTheReadIsAlreadyEndedOnANoisySlurm(t *testing
 		}
 		return nil
 	}
-	if res := r.cancel(id); res.Outcome != provider.AlreadyEnded || res.Err != nil {
-		t.Errorf("Cancel of a job that ended after the read, on a noisy Slurm = %+v, want AlreadyEnded", res)
+	res := r.cancel(id)
+	if res.Outcome != provider.CancelError || errors.Is(res.Err, provider.ErrNotFound) {
+		t.Errorf("Cancel of a job that ended after the read, on a noisy Slurm = %+v, want a plain CancelError", res)
+	}
+	if again := r.cancel(id); again.Outcome != provider.AlreadyEnded {
+		t.Errorf("the next Cancel = %+v, want AlreadyEnded: the job is read as ended", again)
 	}
 }
 
