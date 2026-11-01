@@ -339,16 +339,18 @@ const (
 // 2026, issue #125): warm-up is done at the first round in which no such shape
 // is slower, by its mean total time, than in the round before by more than
 // max(10% of that round's, 100 ms). One that has not settled after
-// MaxWarmUpRounds fails, as does a failed request of a fixed-length shape. A
-// shape whose length varies (the tool call) runs in every round to warm its
-// path, but neither its timings nor its errors are judged. The settled round's
+// MaxWarmUpRounds fails, as does a round with a failed request of any shape.
+// A shape whose length varies (the tool call) runs in every round to warm its
+// path, but its timings are not judged; the agent reports an error on it only
+// for a request that failed, never for its answer, which qualification's
+// tool-call smoke test judges (owner approval on #127). The settled round's
 // time per output token and time to first token are the throughput.
 func judgeWarmUp(w *agentapi.WarmUpResult, targetSessions int32) (warmUpState, string, *v1alpha1.Throughput) {
 	rounds := append([]agentapi.WarmUpRound(nil), w.Rounds...)
 	sort.Slice(rounds, func(i, j int) bool { return rounds[i].Round < rounds[j].Round })
 	for _, r := range rounds {
 		for _, q := range r.Requests {
-			if q.Error != "" && q.Shape.FixedLength() {
+			if q.Error != "" {
 				return warmUpFailed, fmt.Sprintf("warm-up round %d: a %s request failed: %s", r.Round, q.Shape, q.Error), nil
 			}
 		}

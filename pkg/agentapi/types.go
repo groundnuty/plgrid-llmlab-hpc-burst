@@ -632,7 +632,10 @@ type WarmUpResult struct {
 // Shape whose mean Total rose by more than max(10% of the round before, 100
 // ms), or that has no successful request in this round, means not settled
 // (science-agent ruling, 1 Nov 2026, issue #125). A Shape whose length varies
-// runs in every round, but neither its timings nor its errors are judged.
+// runs in every round, but its timings are not judged. A request of any Shape
+// with an Error fails warm-up; the agent sets one only for a request that
+// failed (an HTTP error, a cut stream), never for the tool call's answer,
+// which qualification's tool-call smoke test judges.
 // The Instance's throughput is the mean time per output token
 // (RequestTiming.TimePerOutputToken) and the mean time to first token over the
 // requests of the last round's ShapeConcurrent that have them; it is not

@@ -133,7 +133,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		API:    tr.client,
 		Tunnel: tr.frpc,
 		Engines: func(socket, key string, l agentapi.Launch) agent.Engine {
-			return engine.New(socket, key, engine.WithReasoning(agent.DeclaresReasoningParser(l.Command)))
+			return engine.New(socket, key, engine.WithReasoning(agent.DeclaresReasoningParser(l.Command)), engine.WithLogger(log))
 		},
 		Stager:       stager,
 		Apptainer:    apptainer,

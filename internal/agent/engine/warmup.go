@@ -76,16 +76,34 @@ func (c *Client) WarmUpRound(ctx context.Context, n int32, req agentapi.WarmUpRe
 	return round
 }
 
-// timed sends one streamed warm-up request and times it.
+// timed sends one streamed warm-up request and times it. The tool-call shape's
+// answer is not judged in warm-up (science-agent ruling, 1 Nov 2026, issue
+// #125; the owner approved it on #127): qualification's tool-call smoke test
+// judges it, with its reason codes. Its RequestTiming carries an Error only
+// for a request that failed, an HTTP error or a cut stream, like any shape's;
+// a text answer, a reply that the token limit ended before any call (on a
+// reasoning model, a reasoning-budget exhaustion) or an invalid call is only
+// logged.
 func (c *Client) timed(ctx context.Context, w warmShape) agentapi.RequestTiming {
+	t, answer := c.timedCall(ctx, w)
+	if answer != nil && c.log != nil {
+		c.log.Info("warm-up tool-call answer, not judged in warm-up", "shape", w.shape, "outcome", errorText(answer))
+	}
+	return t
+}
+
+// timedCall is timed, with the tool-call shape's answer judged apart: the
+// error is the judgement of its assembled call (judgeStreamedCalls), nil for
+// a valid call and for every other shape.
+func (c *Client) timedCall(ctx context.Context, w warmShape) (agentapi.RequestTiming, error) {
 	t := agentapi.RequestTiming{Shape: w.shape}
-	fail := func(err error) agentapi.RequestTiming {
+	fail := func(err error) (agentapi.RequestTiming, error) {
 		if ctx.Err() != nil {
 			t.Error = "cancelled"
 		} else {
 			t.Error = agentapi.TruncateUTF8(errorText(err), agentapi.MaxTimingErrorBytes)
 		}
-		return t
+		return t, nil
 	}
 	var tools []tool
 	choice, tail := "", warmUpTail
@@ -188,13 +206,10 @@ func (c *Client) timed(ctx context.Context, w warmShape) agentapi.RequestTiming 
 	}
 	t.OutputTokens = completion
 	if w.tools {
-		if err := judgeStreamedCalls(calls.assembled(), finish); err != nil {
-			t.Error = agentapi.TruncateUTF8(errorText(err), agentapi.MaxTimingErrorBytes)
-		}
-		return t
+		return t, judgeStreamedCalls(calls.assembled(), finish, completion)
 	}
 	if !w.shape.FixedLength() {
-		return t
+		return t, nil
 	}
 	if completion != w.output {
 		if completion < w.output {
@@ -203,14 +218,20 @@ func (c *Client) timed(ctx context.Context, w warmShape) agentapi.RequestTiming 
 			t.Error = fmt.Sprintf("overran: %d of %d tokens", completion, w.output)
 		}
 	}
-	return t
+	return t, nil
 }
 
 // judgeStreamedCalls judges the tool-call shape's assembled calls: at least
 // one, the stream finished with "tool_calls" (the call is complete, not cut
-// off), and every call valid (validateToolCall).
-func judgeStreamedCalls(calls []toolCall, finish string) error {
+// off), and every call valid (validateToolCall). A reply with no call that
+// the token limit ended says so: on a reasoning model it spent the budget
+// reasoning, which qualification calls ReasoningBudgetExhausted (#94, round
+// 3), not an answer that calls no tool.
+func judgeStreamedCalls(calls []toolCall, finish string, tokens int32) error {
 	if len(calls) == 0 {
+		if finish == "length" {
+			return fmt.Errorf("the reply used its whole budget of %d tokens with no tool call (finish_reason \"length\"); with a reasoning parser that is a reasoning-budget exhaustion", tokens)
+		}
 		return errors.New("the answer calls no tool")
 	}
 	if finish != "tool_calls" {

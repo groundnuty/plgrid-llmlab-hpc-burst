@@ -461,45 +461,47 @@ func TestJudgeWarmUpSettleFloor(t *testing.T) {
 }
 
 // TestJudgeWarmUpVaryingShapeIsNotJudged: the tool-call shape, whose output
-// length varies, runs in every round but is never judged (science-agent
-// ruling, 1 Nov 2026, issue #125). Its total ten times the round before's, and
-// an error in it, neither block nor fail settling. Controls show the same
-// slowdown and the same error on a fixed-length shape do.
+// length varies, runs in every round but its timings are never judged
+// (science-agent ruling, 1 Nov 2026, issue #125): a total ten times the round
+// before's does not block settling. A control shows the same slowdown on a
+// fixed-length shape does. A failed request is judged on every shape: an error
+// on the tool call fails warm-up, as one on the typical shape does (the agent
+// reports one only for an HTTP error or a cut stream, never for the answer).
 func TestJudgeWarmUpVaryingShapeIsNotJudged(t *testing.T) {
 	s := time.Second
 	r1 := withToolCall(judgeEven(1, 2*s), 400*time.Millisecond, "")
 	slow := withToolCall(judgeEven(2, 2*s), 4*s, "")
-	failed := withToolCall(judgeEven(2, 2*s), 4*s, "the reasoning spent the whole budget of 4224 tokens with no final answer")
-	for name, r2 := range map[string]agentapi.WarmUpRound{"ten times slower": slow, "failed": failed} {
-		state, msg, thr := judgeWarmUp(&agentapi.WarmUpResult{Rounds: []agentapi.WarmUpRound{r1, r2}}, 4)
-		if state != warmUpSettled || thr == nil || !strings.Contains(msg, "round 2") {
-			t.Errorf("tool call %s: state = %d (%q), want settled in round 2", name, state, msg)
-		}
+	if state, msg, thr := judgeWarmUp(&agentapi.WarmUpResult{Rounds: []agentapi.WarmUpRound{r1, slow}}, 4); state != warmUpSettled || thr == nil || !strings.Contains(msg, "round 2") {
+		t.Errorf("tool call ten times slower: state = %d (%q), want settled in round 2", state, msg)
 	}
 	// Control: the same tenfold slowdown on the typical shape does not settle.
 	ctl := withToolCall(judgeRound(2, 2*s, 20*s, 2*s, 2*s), 400*time.Millisecond, "")
 	if state, msg, _ := judgeWarmUp(&agentapi.WarmUpResult{Rounds: []agentapi.WarmUpRound{r1, ctl}}, 4); state != warmUpRunning {
 		t.Errorf("typical shape ten times slower: state = %d (%q), want running", state, msg)
 	}
-	// Control: an error on the typical shape fails warm-up.
-	bad := withToolCall(judgeEven(2, 2*s), 400*time.Millisecond, "")
-	bad.Requests[1].Error = "stopped early: 12 of 64 tokens"
-	if state, msg, _ := judgeWarmUp(&agentapi.WarmUpResult{Rounds: []agentapi.WarmUpRound{r1, bad}}, 4); state != warmUpFailed {
-		t.Errorf("typical shape failed: state = %d (%q), want failed", state, msg)
+	// A failed request fails warm-up on the tool call and on a fixed shape.
+	toolFailed := withToolCall(judgeEven(2, 2*s), 400*time.Millisecond, "stream: unexpected EOF")
+	typFailed := withToolCall(judgeEven(2, 2*s), 400*time.Millisecond, "")
+	typFailed.Requests[1].Error = "HTTP 500"
+	for name, r2 := range map[string]agentapi.WarmUpRound{"tool call": toolFailed, "typical": typFailed} {
+		if state, msg, _ := judgeWarmUp(&agentapi.WarmUpResult{Rounds: []agentapi.WarmUpRound{r1, r2}}, 4); state != warmUpFailed {
+			t.Errorf("%s request failed: state = %d (%q), want failed", name, state, msg)
+		}
 	}
 }
 
 // TestJudgeWarmUpRun94ReasoningTrace replays the two rounds of #94's
 // reasoning model (Qwen3-0.6B) that the old rule could not settle (issue #94,
 // comment 6550908687, finding 3): rounds 3 and 4, one request per sequential
-// shape. Round 3's tool call spent its whole budget reasoning (4,224 tokens);
-// short went 0.208 -> 0.253 s (+22%) and typical 0.214 -> 0.266 s (+24%). The
-// longest, long-output and concurrent figures are not in the report; they are
-// held steady here. Under the ruling the tool call is not judged and both
+// shape. Round 3's tool call spent its whole budget reasoning (4,224 tokens),
+// which the agent now logs and does not report as an error; short went
+// 0.208 -> 0.253 s (+22%) and typical 0.214 -> 0.266 s (+24%). The longest,
+// long-output and concurrent figures are not in the report; they are held
+// steady here. Under the ruling the tool call's timing is not judged and both
 // rises are under the 100 ms floor, so warm-up settles in round 4.
 func TestJudgeWarmUpRun94ReasoningTrace(t *testing.T) {
 	ms := time.Millisecond
-	r3 := withToolCall(judgeRound(3, 208*ms, 214*ms, 300*ms, 1100*ms), 9*time.Second, "the answer calls no tool")
+	r3 := withToolCall(judgeRound(3, 208*ms, 214*ms, 300*ms, 1100*ms), 9*time.Second, "")
 	r3.Requests[len(r3.Requests)-1].OutputTokens = 4224
 	r4 := withToolCall(judgeRound(4, 253*ms, 266*ms, 300*ms, 1100*ms), 600*ms, "")
 	state, msg, thr := judgeWarmUp(&agentapi.WarmUpResult{Rounds: []agentapi.WarmUpRound{r3, r4}}, 8)
