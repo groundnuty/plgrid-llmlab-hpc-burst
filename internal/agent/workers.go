@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -86,6 +87,20 @@ func (a *Agent) startWorker(in *instance, dw agentapi.DesiredWorker, instGen int
 	return w
 }
 
+// exitOrder is a test seam (export_test.go sets it) for the two events that watch posts when a worker's
+// process dies. They come from two goroutines, so which the loop handles first is a matter of scheduling;
+// a test that must see one particular order sets this to hold the leader's exit until the end of the
+// group has been handled (#189). Production never sets it, and a nil hook costs one atomic load.
+var exitOrder atomic.Pointer[exitOrderHook]
+
+type exitOrderHook struct {
+	// beforeLeaderExited runs in watch's goroutine for the leader's exit, after the leader exited and before
+	// the event is posted to the loop; it may block.
+	beforeLeaderExited func(pid int)
+	// afterGroupDone runs on the loop, after groupDone handled the end of the group.
+	afterGroupDone func(pid int)
+}
+
 // watch follows one worker process: it probes the engine until it answers
 // (starting to running), samples its health every probe interval while it
 // runs, and reports the leader's exit and, apart from it, the end of its whole
@@ -103,6 +118,9 @@ func (a *Agent) watch(in *instance, w *worker, g *procgroup.Group, logf *os.File
 			return // shutdown waits on the group itself
 		}
 		cancel()
+		if h := exitOrder.Load(); h != nil && h.beforeLeaderExited != nil {
+			h.beforeLeaderExited(g.PID())
+		}
 		a.post(func() { a.leaderExited(in, g) })
 	}()
 	go func() {
@@ -113,7 +131,12 @@ func (a *Agent) watch(in *instance, w *worker, g *procgroup.Group, logf *os.File
 			return
 		}
 		logf.Close()
-		a.post(func() { a.groupDone(in, g) })
+		a.post(func() {
+			a.groupDone(in, g)
+			if h := exitOrder.Load(); h != nil && h.afterGroupDone != nil {
+				h.afterGroupDone(g.PID())
+			}
+		})
 	}()
 	go func() {
 		defer a.wg.Done()
@@ -233,9 +256,17 @@ func (a *Agent) leaderExited(in *instance, g *procgroup.Group) {
 		return
 	}
 	w.phase = agentapi.PartExited
-	w.cleaning = true
 	w.logTail = readLogTail(engineLogPath(a.o.LogDir, w.name), a.keys)
 	a.log.Warn("worker exited without being told to", "worker", w.name, "pid", g.PID(), "exitCode", code)
+	select {
+	case <-g.Done():
+		// Every process of the group is gone already: the group's end was handled before this exit, or is
+		// queued behind it. Nothing is left to stop, and cleaning must not be set: the group's end is posted
+		// once, and a worker left cleaning counts as live for good, so no restart would ever start (#189).
+		return
+	default:
+	}
+	w.cleaning = true
 	g.Stop(a.stopGrace)
 }
 
@@ -245,14 +276,22 @@ func (a *Agent) groupDone(in *instance, g *procgroup.Group) {
 	if w == nil {
 		return
 	}
+	a.groupGone(w)
+}
+
+// groupGone is what the end of a worker's whole group means for the worker: it is no longer cleaning, and
+// one the agent was stopping is stopped. The end of a group is posted once, so whoever finds the group gone
+// while the worker is stopping has to call this: groupDone, or terminate when it begins a stop on a group
+// whose end was handled already.
+func (a *Agent) groupGone(w *worker) {
 	w.cleaning = false
 	if w.phase == agentapi.PartStopping {
 		w.phase = agentapi.PartStopped
 		if w.exitCode == nil {
-			code := g.ExitCode()
+			code := w.proc.ExitCode()
 			w.exitCode = &code
 		}
-		a.log.Info("worker stopped", "worker", w.name, "pid", g.PID(), "exitCode", *w.exitCode)
+		a.log.Info("worker stopped", "worker", w.name, "pid", w.proc.PID(), "exitCode", *w.exitCode)
 	}
 }
 
@@ -273,6 +312,16 @@ func (a *Agent) terminate(w *worker) {
 		w.stopProbe()
 	}
 	a.log.Info("stopping worker", "worker", w.name, "pid", w.proc.PID(), "grace", a.stopGrace)
+	select {
+	case <-w.proc.Done():
+		// Every process of the group is gone already. Its end was handled before this stop began, when the
+		// worker was still running and the end changed nothing, or is queued behind this call. Nothing is left
+		// to stop, and the end is not posted again: were the worker left stopping, it would count as live for
+		// good, and the leader's exit that follows would not make it stopped (#189, found by PR #197's review).
+		a.groupGone(w)
+		return
+	default:
+	}
 	w.proc.Stop(a.stopGrace)
 }
 
