@@ -103,17 +103,25 @@ func (p *pass) starting(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av ag
 	if c.WarmUp == nil || !c.WarmUp.Done {
 		return nil
 	}
-	// The tunnel gates ready too: ready needs TunnelConnected True, also while
-	// the condition is absent, before the path-state writer's first read of
-	// frps's list (HBEP-6, Path state; HBEP-7, Instance start and ready). An
-	// Instance held here fails at health.startTimeout, with TunnelNotConnected
-	// when the condition is present and not True, else StartTimeout
-	// (startTimeoutReason; `@hpc-burst-science-agent`, 1 Nov 2026). It gates
-	// the entry only, here in starting and verifying: a ready Instance whose
-	// tunnel drops stays ready, since a tunnel down is not a dead Instance and
-	// the front routes on its own probe, not on the condition (HBEP-6, The
-	// front's half; frpc in the job).
-	if !isTrue(in.Status.Conditions, v1alpha1.ConditionTunnelConnected) {
+	// The tunnel gates the first entry to ready: an Instance that has never been
+	// ready becomes ready only with TunnelConnected True, also while the
+	// condition is absent, before the path-state writer's first read of frps's
+	// list (HBEP-6, Path state; HBEP-7, Instance start and ready). One held here
+	// fails at health.startTimeout, with TunnelNotConnected when the condition is
+	// present and not True, else StartTimeout (malfunction, startTimeoutReason;
+	// `@hpc-burst-science-agent`, 1 Nov 2026), and is never counted as capacity
+	// (HBEP-6, Key restriction). ReadyTime is the test of the first entry: becomeReady
+	// sets it once, and a restart of either rung leaves it, so it is nil exactly
+	// until the Instance has been ready.
+	//
+	// The gate does not apply after the Instance has been ready
+	// (`@hpc-burst-science-agent`, 1 Nov 2026, 17:29Z): a restarted Instance
+	// returns to ready once its checks pass, whatever its TunnelConnected, and
+	// with the tunnel down it is ready and not eligible at the front, the same
+	// state as a ready Instance whose tunnel dropped. The controller restarts,
+	// ends and releases nothing on the tunnel's account (HBEP-6, The front's
+	// half); the front routes on its own probe, not on the condition.
+	if in.Status.ReadyTime == nil && !isTrue(in.Status.Conditions, v1alpha1.ConditionTunnelConnected) {
 		return nil
 	}
 	return p.becomeReady(in, alloc)
@@ -144,24 +152,46 @@ func (p *pass) startSignal(in *v1alpha1.Instance, av agentView, st settings) str
 }
 
 // malfunction handles a failure of an Instance that has not become ready yet:
-// a first start that times out fails the Instance (HBEP-7, Instance start);
+// a start that times out fails the Instance when it never was ready and either
+// it is on its first start or its tunnel is down (HBEP-7, Instance start);
 // anything else climbs the restart ladder.
+//
+// The second condition is for an Instance restarted before it was ever ready (a
+// part exited during the start, say). The tunnel gate still holds it, since it
+// has never been ready, and its deadline now runs from the restart. With the
+// tunnel present and not True it is the tunnel that holds it, so it ends with
+// TunnelNotConnected at that deadline, as on a first start, and is not sent up
+// the ladder: the controller restarts nothing on the tunnel's account (HBEP-6,
+// The front's half), and a tunnel that never connects must not make ready
+// capacity (HBEP-6, Key restriction). When the tunnel is True or absent after
+// a restart, a missed deadline is the engine's checks not finishing, and the
+// ladder climbs as it always did. After a restart of an Instance that has been
+// ready the gate is off, so startTimeout bounds the checks only and this never
+// applies.
 func (p *pass) malfunction(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, signal string, st settings) error {
-	if signal == v1alpha1.ReasonStartTimeout && in.Status.ReadyTime == nil && verificationGeneration(in) == 1 {
+	if signal == v1alpha1.ReasonStartTimeout && in.Status.ReadyTime == nil && (verificationGeneration(in) == 1 || tunnelDown(in)) {
 		reason, msg := startTimeoutReason(in, st)
 		return p.fail(in, alloc, reason, msg)
 	}
 	return p.restart(in, alloc, signal, "", st)
 }
 
-// startTimeoutReason is the end reason of a first start that timed out: when
+// tunnelDown reports whether the Instance's TunnelConnected condition is there
+// and not True (False or Unknown).
+func tunnelDown(in *v1alpha1.Instance) bool {
+	c := apimeta.FindStatusCondition(in.Status.Conditions, v1alpha1.ConditionTunnelConnected)
+	return c != nil && c.Status != metav1.ConditionTrue
+}
+
+// startTimeoutReason is the end reason of an Instance that never was ready and timed out: when
 // the Instance's TunnelConnected condition is there and not True (False,
 // ProxyOffline, or Unknown, ProxyListUnreadable) it is TunnelNotConnected,
 // otherwise StartTimeout (HBEP-7, Instance start). An absent condition keeps
 // StartTimeout until the controller writes it from frps's proxy list (#90)
 // (`@hpc-burst-science-agent`, 31 Oct 2026, for #111).
 func startTimeoutReason(in *v1alpha1.Instance, st settings) (string, string) {
-	if c := apimeta.FindStatusCondition(in.Status.Conditions, v1alpha1.ConditionTunnelConnected); c != nil && c.Status != metav1.ConditionTrue {
+	if tunnelDown(in) {
+		c := apimeta.FindStatusCondition(in.Status.Conditions, v1alpha1.ConditionTunnelConnected)
 		return v1alpha1.ReasonTunnelNotConnected, fmt.Sprintf("not ready within %s of its start instruction, and its tunnel is not connected (TunnelConnected %s, %s: %s)", st.startTimeout, c.Status, c.Reason, c.Message)
 	}
 	return v1alpha1.ReasonStartTimeout, fmt.Sprintf("not ready within %s of its start instruction", st.startTimeout)
