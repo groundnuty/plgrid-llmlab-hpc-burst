@@ -536,6 +536,18 @@ type VerifyResult struct {
 	// prompt) rendered through the engine's template. The controller fixes
 	// the longest context with it (HBEP-7, What the controller reads).
 	TemplateOverhead int32 `json:"templateOverhead,omitempty"`
+	// GenerationConfig is the model's generation defaults: the top-level keys
+	// of generation_config.json in the staged checkpoint, each value as its
+	// compact JSON text, for example {"repetition_penalty": "1.1",
+	// "temperature": "0.7"}. vLLM takes a request's sampling defaults from
+	// them; the agent's own requests set every sampling parameter they rely
+	// on, so they change no check. The controller records them in the
+	// verification record (science-agent rulings, 1 Nov 2026, issue #125).
+	// At most MaxGenerationConfigKeys keys, the first in key order, each key
+	// of at most MaxGenerationConfigKeyBytes and each value cut to
+	// MaxGenerationConfigValueBytes (TruncateUTF8). Absent when the checkpoint
+	// has no such file or it is not a JSON object.
+	GenerationConfig map[string]string `json:"generationConfig,omitempty"`
 	// Error says why verification could not run, when it could not. It is
 	// free text, cut to MaxMessageBytes (TruncateUTF8).
 	Error string `json:"error,omitempty"`

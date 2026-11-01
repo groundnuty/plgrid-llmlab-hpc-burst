@@ -115,6 +115,10 @@ func restOfReport(warm *WarmUpResult) Report {
 	}
 	start := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
 	exit := 0
+	genCfg := map[string]string{}
+	for i := range MaxGenerationConfigKeys {
+		genCfg[strings.Repeat("<", MaxGenerationConfigKeyBytes-2)+strconv.Itoa(10+i)] = strings.Repeat("<", MaxGenerationConfigValueBytes)
+	}
 	return Report{
 		Time: start,
 		Instance: &InstanceReport{
@@ -134,7 +138,7 @@ func restOfReport(warm *WarmUpResult) Report {
 			Checks: &CheckResults{
 				VerificationGeneration: 1,
 				Verify: &VerifyResult{Done: true, Files: files, EngineVersion: "0.99.0", ImageDigest: "sha256:" + strings.Repeat("ab", 32),
-					Settings: map[string]string{"max-model-len": "32768", "max-num-seqs": "256"}, Fingerprint: "fp_0123456789", TemplateOverhead: 12, Error: msg},
+					Settings: map[string]string{"max-model-len": "32768", "max-num-seqs": "256"}, Fingerprint: "fp_0123456789", TemplateOverhead: 12, Error: msg, GenerationConfig: genCfg},
 				Qualify: &QualifyResult{Done: true, Checks: []CheckOutcome{
 					{Name: CheckHealth, Passed: true, Reason: ReasonReasoningBudgetExhausted, Message: msg},
 					{Name: CheckChat, Passed: true, Reason: ReasonReasoningBudgetExhausted, Message: msg},

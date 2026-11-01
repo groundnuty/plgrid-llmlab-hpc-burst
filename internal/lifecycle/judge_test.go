@@ -1,6 +1,8 @@
 package lifecycle
 
 import (
+	"encoding/json"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -79,6 +81,29 @@ func TestJudgeVerifyPasses(t *testing.T) {
 	}
 	if len(got.NotReported) != 0 || len(got.Contradictions) != 0 || len(got.Undeclared) != 0 {
 		t.Errorf("notReported %v contradictions %v undeclared %v, want none", got.NotReported, got.Contradictions, got.Undeclared)
+	}
+}
+
+// The verification record holds the model's generation_config defaults as the
+// agent reported them (science-agent rulings, 1 Nov 2026, issue #125), on a
+// pass and on a failure, and none when the agent reported none.
+func TestJudgeVerifyRecordsTheGenerationConfig(t *testing.T) {
+	r := judgeResult()
+	r.GenerationConfig = map[string]string{"repetition_penalty": "1.1", "temperature": "0.7", "top_k": "20", "top_p": "0.8"}
+	got := judgeVerify(judgeDeclared(), r, true, judgeShapes())
+	if got.Verdict != v1alpha1.VerdictPass || !maps.Equal(got.GenerationConfig, r.GenerationConfig) {
+		t.Errorf("verdict %q, generationConfig %v, want a pass recording %v", got.Verdict, got.GenerationConfig, r.GenerationConfig)
+	}
+	b, err := json.Marshal(got)
+	if err != nil || !strings.Contains(string(b), `"generationConfig":{"repetition_penalty":"1.1"`) {
+		t.Errorf("record data %s (%v) does not carry generationConfig", b, err)
+	}
+	r.Files[0].Outcome = agentapi.FileMismatch
+	if got := judgeVerify(judgeDeclared(), r, true, judgeShapes()); got.Verdict != v1alpha1.VerdictFail || got.GenerationConfig["top_p"] != "0.8" {
+		t.Errorf("on a failed rehash: verdict %q, generationConfig %v", got.Verdict, got.GenerationConfig)
+	}
+	if got := judgeVerify(judgeDeclared(), judgeResult(), true, judgeShapes()); got.GenerationConfig != nil {
+		t.Errorf("none reported, recorded %v", got.GenerationConfig)
 	}
 }
 

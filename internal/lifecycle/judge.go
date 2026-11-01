@@ -102,12 +102,16 @@ type verificationData struct {
 	Contradictions []string          `json:"contradictions,omitempty"`
 	Fingerprint    string            `json:"fingerprint,omitempty"`
 	Overhead       int32             `json:"templateOverhead,omitempty"`
-	MaxModelLen    int32             `json:"maxModelLen,omitempty"`
-	Shapes         *agentapi.Shapes  `json:"shapes,omitempty"`
-	Rehash         rehashOutcome     `json:"rehash"`
-	Verdict        v1alpha1.Verdict  `json:"verdict"`
-	Cause          string            `json:"cause,omitempty"`
-	Message        string            `json:"message,omitempty"`
+	// GenerationConfig is the model's generation_config.json defaults as the
+	// agent read them from the staged checkpoint (VerifyResult.GenerationConfig;
+	// science-agent rulings, 1 Nov 2026, issue #125).
+	GenerationConfig map[string]string `json:"generationConfig,omitempty"`
+	MaxModelLen      int32             `json:"maxModelLen,omitempty"`
+	Shapes           *agentapi.Shapes  `json:"shapes,omitempty"`
+	Rehash           rehashOutcome     `json:"rehash"`
+	Verdict          v1alpha1.Verdict  `json:"verdict"`
+	Cause            string            `json:"cause,omitempty"`
+	Message          string            `json:"message,omitempty"`
 }
 
 type rehashOutcome struct {
@@ -127,7 +131,7 @@ type rehashOutcome struct {
 func judgeVerify(d declared, v *agentapi.VerifyResult, rehash bool, sh shapes) verificationData {
 	out := verificationData{
 		EngineVersion: v.EngineVersion, ImageDigest: v.ImageDigest, Settings: v.Settings,
-		Fingerprint: v.Fingerprint, Overhead: v.TemplateOverhead, Verdict: v1alpha1.VerdictPass,
+		Fingerprint: v.Fingerprint, Overhead: v.TemplateOverhead, GenerationConfig: v.GenerationConfig, Verdict: v1alpha1.VerdictPass,
 		Undeclared: map[string]string{},
 	}
 	failWith := func(cause, msg string) verificationData {
