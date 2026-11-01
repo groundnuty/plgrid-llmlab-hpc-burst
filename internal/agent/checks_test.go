@@ -241,3 +241,22 @@ func TestQualificationReportsLowKVCapacity(t *testing.T) {
 		t.Fatalf("KV capacity %d, want the double's 1000", q.KVCapacityTokens)
 	}
 }
+
+// The verification report carries the staged checkpoint's generation_config
+// defaults, read from the file the stager put beside the weights (issue #125,
+// item 6).
+func TestVerificationReportsTheGenerationConfig(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	dir := filepath.Join(h.stagingDir, agentapi.StagedCheckpointDir("org/model", launch("", "").Checkpoint.Revision))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "generation_config.json"), []byte(`{"repetition_penalty": 1.1, "temperature": 0.7}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.set(h.runState("", 1, 0, nil))
+	r := h.waitReport("verification done", 30*time.Second, verified(1))
+	if got := r.Instance.Checks.Verify.GenerationConfig; got["repetition_penalty"] != "1.1" || got["temperature"] != "0.7" || len(got) != 2 {
+		t.Errorf("generationConfig %v, want repetition_penalty 1.1 and temperature 0.7", got)
+	}
+}

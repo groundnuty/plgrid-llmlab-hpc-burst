@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -359,5 +360,45 @@ func TestReadLogTail(t *testing.T) {
 	}
 	if readLogTail(filepath.Join(t.TempDir(), "missing.log"), testKey) != "" {
 		t.Errorf("a missing log gives a tail")
+	}
+}
+
+// readGenerationConfig reads the staged checkpoint's generation_config.json:
+// each top-level key with its value as compact JSON text (science-agent
+// rulings, 1 Nov 2026, issue #125). The file is Qwen2.5's shape, with the
+// values #94's run saw vLLM take (repetition_penalty 1.1, finding 6). An absent
+// file or one that is not a JSON object gives none.
+func TestReadGenerationConfig(t *testing.T) {
+	dir := t.TempDir()
+	write := func(body string) {
+		if err := os.WriteFile(filepath.Join(dir, "generation_config.json"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := readGenerationConfig(dir); got != nil {
+		t.Errorf("no file: %v, want none", got)
+	}
+	write(`{"bos_token_id": 151643, "do_sample": true, "eos_token_id": [151645, 151643],
+  "repetition_penalty": 1.1, "temperature": 0.7, "top_p": 0.8, "top_k": 20, "transformers_version": "4.37.0"}`)
+	want := map[string]string{"bos_token_id": "151643", "do_sample": "true", "eos_token_id": "[151645,151643]",
+		"repetition_penalty": "1.1", "temperature": "0.7", "top_p": "0.8", "top_k": "20", "transformers_version": `"4.37.0"`}
+	if got := readGenerationConfig(dir); !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v\nwant %v", got, want)
+	}
+	write(`[1, 2]`)
+	if got := readGenerationConfig(dir); got != nil {
+		t.Errorf("not an object: %v, want none", got)
+	}
+	// Bounds: 40 keys keep the first 32 in key order; a long value is cut.
+	var b strings.Builder
+	b.WriteString("{")
+	for i := range 40 {
+		fmt.Fprintf(&b, "%q: %d,", fmt.Sprintf("k%02d", i), i)
+	}
+	fmt.Fprintf(&b, "%q: %q}", "a_long", strings.Repeat("v", 500))
+	write(b.String())
+	got := readGenerationConfig(dir)
+	if len(got) != agentapi.MaxGenerationConfigKeys || got["a_long"] == "" || len(got["a_long"]) > agentapi.MaxGenerationConfigValueBytes || got["k30"] != "30" || got["k31"] != "" {
+		t.Errorf("bounds: %d keys, a_long %d bytes, k30 %q, k31 %q", len(got), len(got["a_long"]), got["k30"], got["k31"])
 	}
 }

@@ -1,9 +1,17 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"io"
+	"maps"
+	"os"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
@@ -189,11 +197,13 @@ func (a *Agent) startVerify(in *instance, req agentapi.VerifyRequest, key procKe
 	}
 	cached := append([]agentapi.FileResult(nil), in.fileResults...)
 	launch := in.launch
+	ckptDir := in.ckptDir
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
 		res := eng.Verify(ctx)
 		res.ImageDigest = digest
+		res.GenerationConfig = readGenerationConfig(ckptDir)
 		switch {
 		case len(files) == 0:
 		case reuse:
@@ -285,4 +295,53 @@ func (a *Agent) finishWarmUp(in *instance) {
 	if in.checks != nil && in.checks.WarmUp != nil {
 		in.checks.WarmUp.Done = true
 	}
+}
+
+// generationConfigName is the checkpoint file vLLM reads a model's generation
+// defaults from (its --generation-config auto).
+const generationConfigName = "generation_config.json"
+
+// readGenerationConfig reads the staged checkpoint's generation_config.json
+// for VerifyResult.GenerationConfig: each top-level key with its value as
+// compact JSON text, at most agentapi.MaxGenerationConfigKeys keys in key
+// order, a key longer than agentapi.MaxGenerationConfigKeyBytes left out and
+// each value cut to agentapi.MaxGenerationConfigValueBytes (science-agent
+// rulings, 1 Nov 2026, issue #125). nil when the file is absent, unreadable
+// or not a JSON object: the record then holds none.
+func readGenerationConfig(dir string) map[string]string {
+	if dir == "" {
+		return nil
+	}
+	f, err := os.Open(filepath.Join(dir, generationConfigName))
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, 1<<20))
+	if err != nil {
+		return nil
+	}
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(b, &obj) != nil {
+		return nil
+	}
+	keys := slices.Sorted(maps.Keys(obj))
+	out := map[string]string{}
+	for _, k := range keys {
+		if len(out) == agentapi.MaxGenerationConfigKeys {
+			break
+		}
+		if len(k) > agentapi.MaxGenerationConfigKeyBytes || !utf8.ValidString(k) {
+			continue
+		}
+		var buf bytes.Buffer
+		if json.Compact(&buf, obj[k]) != nil {
+			continue
+		}
+		out[k] = agentapi.TruncateUTF8(buf.String(), agentapi.MaxGenerationConfigValueBytes)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

@@ -43,7 +43,6 @@ type chatRequest struct {
 	Model         string         `json:"model"`
 	Messages      []message      `json:"messages"`
 	MaxTokens     int32          `json:"max_tokens"`
-	Temperature   float64        `json:"temperature"`
 	Stream        bool           `json:"stream,omitempty"`
 	StreamOptions *streamOptions `json:"stream_options,omitempty"`
 	// IgnoreEOS, MinTokens and ReturnTokenIDs are vLLM's extensions.
@@ -52,6 +51,26 @@ type chatRequest struct {
 	ReturnTokenIDs bool   `json:"return_token_ids,omitempty"`
 	Tools          []tool `json:"tools,omitempty"`
 	ToolChoice     string `json:"tool_choice,omitempty"`
+}
+
+// MarshalJSON writes the request with every sampling parameter the agent's
+// requests rely on set explicitly: greedy decoding (temperature 0, top_p 1)
+// with no repetition, presence or frequency penalty. vLLM fills a parameter a
+// request leaves out from the model's generation_config.json (Qwen2.5 sets
+// repetition_penalty 1.1, #94 finding 6), so without these a model's defaults
+// would change a check; client traffic keeps vLLM's defaults (science-agent
+// rulings, 1 Nov 2026, issue #125). Every agent request goes through here, so
+// no call site can leave one out.
+func (r chatRequest) MarshalJSON() ([]byte, error) {
+	type plain chatRequest
+	return json.Marshal(struct {
+		plain
+		Temperature       float64 `json:"temperature"`
+		TopP              float64 `json:"top_p"`
+		RepetitionPenalty float64 `json:"repetition_penalty"`
+		PresencePenalty   float64 `json:"presence_penalty"`
+		FrequencyPenalty  float64 `json:"frequency_penalty"`
+	}{plain: plain(r), Temperature: 0, TopP: 1, RepetitionPenalty: 1, PresencePenalty: 0, FrequencyPenalty: 0})
 }
 
 type streamOptions struct {
