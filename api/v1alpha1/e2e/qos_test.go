@@ -173,7 +173,7 @@ func TestQOSListRoundTrips(t *testing.T) {
 			for i := range 9 {
 				p.Spec.QOS = append(p.Spec.QOS, v1alpha1.QOSProfile{Name: "q" + strings.Repeat("x", i)})
 			}
-		}, "qos"},
+		}, "spec.qos: Too many: 9: must have at most 8 items"},
 	}
 	for _, tc := range refused {
 		t.Run("refuse "+tc.name, func(t *testing.T) {
