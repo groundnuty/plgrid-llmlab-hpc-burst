@@ -436,10 +436,14 @@ func (g *genSampling) resolve(dir string, reasoning bool, log *slog.Logger, gen 
 	g.once.Do(func() {
 		g.config, g.doSample = readGenerationConfig(dir)
 		g.sampling = agentapi.CheckSampling(g.config, g.doSample, reasoning)
-		attrs := []any{"verificationGeneration", gen, "reasoningParser", reasoning, "greedy", g.sampling.Greedy}
-		if !g.sampling.Greedy {
-			attrs = append(attrs, "temperature", g.sampling.Temperature, "topP", g.sampling.TopP, "topK", *g.sampling.TopK, "minP", *g.sampling.MinP,
-				"repetitionPenalty", g.sampling.RepetitionPenalty, "presencePenalty", g.sampling.PresencePenalty, "frequencyPenalty", g.sampling.FrequencyPenalty)
+		sm := g.sampling
+		attrs := []any{"verificationGeneration", gen, "reasoningParser", reasoning, "greedy", sm.Greedy, "temperature", sm.Temperature, "topP", sm.TopP,
+			"repetitionPenalty", sm.RepetitionPenalty, "presencePenalty", sm.PresencePenalty, "frequencyPenalty", sm.FrequencyPenalty}
+		if sm.TopK != nil {
+			attrs = append(attrs, "topK", *sm.TopK)
+		}
+		if sm.MinP != nil {
+			attrs = append(attrs, "minP", *sm.MinP)
 		}
 		log.Info("check sampling fixed for the verification generation", attrs...)
 	})
