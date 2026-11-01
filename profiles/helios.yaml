@@ -78,8 +78,10 @@ spec:
   # jobName.maxLength is measured, not a default: the conformance run on Helios plgrid of 31 Oct 2026 (step 5,
   # a 56-character job name submitted and read back unchanged from squeue and from sacct; issue #93,
   # comment 6550844149) is its source. The schema holds job-name rules per profile, not per partition, so this
-  # value covers plgrid-gpu-gh200 too, which has not run the step. That is sound because Helios runs one Slurm
-  # configuration for all its partitions, and the read-back is the safety net against a partition-specific rename:
+  # value covers plgrid-gpu-gh200 too, which ran the same step on 1 Nov 2026 with the same result (the
+  # conformance run on Helios plgrid-gpu-gh200, TestJobNameRoundTrip; issue #93, comment 6558126530). That is
+  # sound because Helios runs one Slurm configuration for all its partitions, and the read-back is the safety
+  # net against a partition-specific rename:
   # a job whose name came back shortened is refused and cancelled (HBEP-4, Risks)
   # (`@hpc-burst-science-agent`, option (b), 1 Nov 2026).
   jobName:
