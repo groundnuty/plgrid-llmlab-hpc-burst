@@ -191,24 +191,26 @@ func TestShippedProfilesRefuseABrokenValue(t *testing.T) {
 // each partition's own QOS with them (HBEP-4, QOS limits and Platform profile
 // schema). The expected values are written out from the HBEP's table of the
 // measurements, not read from the manifest: Helios lists now (12 h, 1 job, 1
-// GPU, 72 CPUs, 122400Mi), plgrid (2000 jobs) and normal (none), and
-// plgrid-gpu-gh200's partition QOS is plgrid; Athena lists plgrid-now (1 job,
-// 1 GPU, 16 CPUs, 125Gi, no wall limit) for the partition of that name. No QOS
-// has overPartQos, so the CRD's default false comes back.
+// GPU, 72 CPUs, 122400Mi), plgrid (2000 jobs) and normal (none), and the
+// partition QOS of both plgrid and plgrid-gpu-gh200 is plgrid; Athena lists
+// plgrid (1000 jobs, the QOS of plgrid-gpu-a100) and plgrid-now (1 job, 1 GPU,
+// 16 CPUs, 125Gi, no wall limit, the QOS of the partition of that name). No QOS
+// has overPartQos, so the CRD's default false comes back. Every partition the
+// profiles list names its own QOS (PR 168's review, Opus N8).
 func TestShippedProfilesKeepTheirTypedQOS(t *testing.T) {
 	for _, tc := range []struct {
 		file         string
 		qos          string
 		partitionQOS map[string]string
-		noQOS        []string
 	}{
 		{"helios.yaml",
 			`[{"name":"now","maxWall":"12h","maxSubmitPerUser":1,"maxGpusPerUser":1,"maxCpusPerUser":72,"maxMemPerUser":"122400Mi","overPartQos":false},` +
 				`{"name":"plgrid","maxSubmitPerUser":2000,"overPartQos":false},{"name":"normal","overPartQos":false}]`,
-			map[string]string{"plgrid-gpu-gh200": "plgrid"}, []string{"plgrid"}},
+			map[string]string{"plgrid": "plgrid", "plgrid-gpu-gh200": "plgrid"}},
 		{"athena.yaml",
-			`[{"name":"plgrid-now","maxSubmitPerUser":1,"maxGpusPerUser":1,"maxCpusPerUser":16,"maxMemPerUser":"125Gi","overPartQos":false}]`,
-			map[string]string{"plgrid-now": "plgrid-now"}, []string{"plgrid-gpu-a100"}},
+			`[{"name":"plgrid","maxSubmitPerUser":1000,"overPartQos":false},` +
+				`{"name":"plgrid-now","maxSubmitPerUser":1,"maxGpusPerUser":1,"maxCpusPerUser":16,"maxMemPerUser":"125Gi","overPartQos":false}]`,
+			map[string]string{"plgrid-gpu-a100": "plgrid", "plgrid-now": "plgrid-now"}},
 	} {
 		t.Run(tc.file, func(t *testing.T) {
 			stored, err := strictCreate(t, edit(t, loadShipped(t, tc.file), uniq("qos"), "metadata", "name"))
@@ -237,11 +239,6 @@ func TestShippedProfilesKeepTheirTypedQOS(t *testing.T) {
 			for name, q := range tc.partitionQOS {
 				if seen[name] != q {
 					t.Errorf("partition %s names the QOS %q, want %q", name, seen[name], q)
-				}
-			}
-			for _, name := range tc.noQOS {
-				if q, ok := seen[name]; !ok || q != "" {
-					t.Errorf("partition %s: listed %v with QOS %q, want listed with none", name, ok, q)
 				}
 			}
 		})
