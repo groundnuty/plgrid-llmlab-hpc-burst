@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 )
 
 // The sampling parameters of the checks (HBEP-7, The allocation agent, Checks,
@@ -200,10 +201,27 @@ type GenerationConfigError struct {
 	// FileTooLarge, FileUnreadable, FileNotJSON and FileNotObject.
 	Value string `json:"value"`
 	// Want says what vLLM accepts: "a number", "an integer", or the range as
-	// vLLM's own message writes it, for example "(0, 1]". For a whole-file
-	// refusal it is FileWant.
+	// vLLM's own message writes it, for example "(0, 1]". Where this contract
+	// is stricter than vLLM it says so after the type, so that nobody mistakes
+	// the refusal for one of vLLM's: WantNumberBoolean, WantIntegerBoolean and
+	// WantIntegerPast64Bits. For a whole-file refusal it is FileWant.
 	Want string `json:"want"`
 }
+
+// The Want of a value this contract refuses although vLLM v0.32.0 would accept
+// it (PR #169 review, Opus N5; `@hpc-burst-science-agent`, 1 Nov 2026: keep
+// refusing). Python's bool is an int, so vLLM reads a JSON true and false as 1
+// and 0 and applies the key's range to them, and it takes an integer of any
+// size for top_k. The contract takes a number for each key and a 64-bit integer
+// for top_k, so it refuses these, and says here that vLLM itself would not.
+// Only a value that passes vLLM's range gets this wording: top_p false and
+// repetition_penalty false, which vLLM refuses too, are refused as "a number",
+// and so is a top_k below -1, whatever its size, by its range.
+const (
+	WantNumberBoolean     = "a number (a JSON boolean is refused here although vLLM would accept it)"
+	WantIntegerBoolean    = "an integer (a JSON boolean is refused here although vLLM would accept it)"
+	WantIntegerPast64Bits = "an integer of at most 64 bits (a larger one is refused here although vLLM would accept it)"
+)
 
 // The Value and Want of a refusal of the file as a whole (empty Param).
 const (
@@ -218,7 +236,7 @@ func (e *GenerationConfigError) Error() string {
 	if e.Param == "" {
 		return fmt.Sprintf("generation_config.json is %s (want %s)", e.Value, e.Want)
 	}
-	if e.Want == "a number" || e.Want == "an integer" {
+	if strings.HasPrefix(e.Want, "a number") || strings.HasPrefix(e.Want, "an integer") {
 		return fmt.Sprintf("generation_config.json's %s is %s, not %s", e.Param, e.Value, e.Want)
 	}
 	return fmt.Sprintf("generation_config.json's %s is %s, outside the range vLLM accepts, %s", e.Param, e.Value, e.Want)
@@ -246,7 +264,9 @@ var generationConfigRanges = []struct {
 // and nil when every one the file gives is acceptable:
 //
 //   - each value is a JSON number, and top_k an integer (no fraction, no
-//     exponent);
+//     exponent) that fits 64 bits; a JSON boolean and a top_k past 64 bits are
+//     refused although vLLM would accept them when they pass its range, and the
+//     message says so (WantNumberBoolean and its two siblings);
 //   - presence_penalty and frequency_penalty in [-2, 2];
 //   - repetition_penalty finite and above 0;
 //   - temperature in [0, 2];
@@ -268,18 +288,43 @@ func CheckGenerationConfig(values map[string]string) error {
 			continue
 		}
 		var v float64
-		if r.integer {
+		switch {
+		case text == "true" || text == "false":
+			// Python's bool is an int: vLLM reads these as 1 and 0 and applies
+			// the key's range. The contract takes a number, so it refuses them,
+			// and says vLLM would not when the range holds.
+			v = 0
+			if text == "true" {
+				v = 1
+			}
+			want := plainWant(r.integer)
+			if r.ok(v) {
+				want = WantNumberBoolean
+				if r.integer {
+					want = WantIntegerBoolean
+				}
+			}
+			return &GenerationConfigError{Param: r.key, Value: text, Want: want}
+		case r.integer:
 			n, err := strconv.ParseInt(text, 10, 64)
 			if err != nil {
-				return &GenerationConfigError{Param: r.key, Value: text, Want: "an integer"}
+				if !errors.Is(err, strconv.ErrRange) {
+					return &GenerationConfigError{Param: r.key, Value: text, Want: plainWant(true)}
+				}
+				// An integer past int64, which vLLM takes: it fails only by
+				// its sign (below -1 is outside the range).
+				if strings.HasPrefix(text, "-") {
+					return &GenerationConfigError{Param: r.key, Value: text, Want: r.want}
+				}
+				return &GenerationConfigError{Param: r.key, Value: text, Want: WantIntegerPast64Bits}
 			}
 			v = float64(n)
-		} else {
+		default:
 			// A JSON number too large for a float64 reads as infinity, as
 			// it does in Python, and then fails its range.
 			f, err := strconv.ParseFloat(text, 64)
 			if (err != nil && !errors.Is(err, strconv.ErrRange)) || !jsonNumber(text) {
-				return &GenerationConfigError{Param: r.key, Value: text, Want: "a number"}
+				return &GenerationConfigError{Param: r.key, Value: text, Want: plainWant(false)}
 			}
 			v = f
 		}
@@ -288,6 +333,14 @@ func CheckGenerationConfig(values map[string]string) error {
 		}
 	}
 	return nil
+}
+
+// plainWant is the Want of a value that is not of the key's type.
+func plainWant(integer bool) string {
+	if integer {
+		return "an integer"
+	}
+	return "a number"
 }
 
 // jsonNumber reports whether text has the form of a JSON number, so that Go's

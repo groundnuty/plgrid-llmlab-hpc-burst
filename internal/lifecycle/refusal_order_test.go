@@ -34,3 +34,18 @@ func TestARefusalIsJudgedAfterAFailedRehash(t *testing.T) {
 		t.Errorf("a refused file whose rehash held: cause %q (%s), want %s", got.Cause, got.Message, causeContradiction)
 	}
 }
+
+// A value this contract refuses although vLLM would accept it (a JSON boolean
+// whose 1 or 0 passes the range) fails verification, and the message the
+// controller records and sends in its event says so, so that nobody mistakes
+// it for an error of vLLM's (PR #169 review, Opus N5). The message is written
+// out by hand.
+func TestTheVerificationMessageSaysWhenTheContractIsStricterThanVLLM(t *testing.T) {
+	r := asTheAgentReportsARefusal(judgeResult(), &agentapi.GenerationConfigError{
+		Param: "temperature", Value: "true", Want: "a number (a JSON boolean is refused here although vLLM would accept it)"})
+	got := judgeVerify(judgeDeclared(), r, true, judgeShapes())
+	want := "generation_config.json's temperature is true, not a number (a JSON boolean is refused here although vLLM would accept it)"
+	if got.Cause != causeContradiction || got.Message != want {
+		t.Errorf("cause %q, message %q\nwant %s and %q", got.Cause, got.Message, causeContradiction, want)
+	}
+}
