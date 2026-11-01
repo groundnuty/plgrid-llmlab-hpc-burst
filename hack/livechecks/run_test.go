@@ -170,9 +170,7 @@ func TestSignalStopsTheTestAndRunsTheCleanup(t *testing.T) {
 	w.useStubGo()
 	cmd, out := w.start([]string{"STUB_TEST_MODE=sleep"}, "--run", "conformance-helios", "--yes")
 	w.waitFor("started")
-	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		t.Fatal(err)
-	}
+	w.signal(cmd, syscall.SIGTERM)
 	err := cmd.Wait()
 	w.noLeak(out.String())
 	w.noLeftoverProcess(cmd)
@@ -278,6 +276,7 @@ func TestMissingSettingsFileIsRefused(t *testing.T) {
 	w := newWorld(t)
 	cmd := w.command([]string{"HPCBURST_LIVE_SETTINGS="}, "--run", "hub-golden")
 	out, err := cmd.CombinedOutput()
+	w.noLeftoverProcess(cmd)
 	if exitCode(err) != 3 || !strings.Contains(string(out), "HPCBURST_LIVE_SETTINGS is not set") {
 		t.Errorf("exit %d:\n%s", exitCode(err), out)
 	}
@@ -399,9 +398,7 @@ func TestSignalDuringTheBuildStopsBeforeTheSlotIsTaken(t *testing.T) {
 	w.useStubGo()
 	cmd, out := w.start([]string{"STUB_GO_HOLD=1"}, "--run", "conformance-athena", "--yes")
 	w.waitFor("building")
-	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		t.Fatal(err)
-	}
+	w.signal(cmd, syscall.SIGTERM) // acknowledged by the reaper before the build is released
 	if err := os.WriteFile(filepath.Join(w.state, "release"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}

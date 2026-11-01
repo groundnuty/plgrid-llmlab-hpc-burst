@@ -27,7 +27,7 @@ func TestHealthyEngineQualifiesAndWarmsUp(t *testing.T) {
 			ctx := context.Background()
 			c := double(t, tc.modes, nil, tc.opts...)
 
-			res := c.Qualify(ctx, agentapi.QualifyRequest{Shapes: shapes, ToolCalls: true})
+			res := c.Qualify(ctx, agentapi.QualifyRequest{Shapes: shapes, ToolCalls: true}, testGreedy)
 			for _, name := range []agentapi.CheckName{agentapi.CheckHealth, agentapi.CheckChat, agentapi.CheckToolCall, agentapi.CheckCorruption, agentapi.CheckBehaviour} {
 				want := ""
 				if name == agentapi.CheckBehaviour && tc.opts != nil {
@@ -41,7 +41,7 @@ func TestHealthyEngineQualifiesAndWarmsUp(t *testing.T) {
 				t.Errorf("fingerprint %q, KV capacity %d, names %q", res.Fingerprint, res.KVCapacityTokens, res.ServedModelNames)
 			}
 
-			round := c.WarmUpRound(ctx, 1, agentapi.WarmUpRequest{Shapes: shapes, ToolCalls: true, TargetSessions: 2})
+			round := c.WarmUpRound(ctx, 1, agentapi.WarmUpRequest{Shapes: shapes, ToolCalls: true, TargetSessions: 2}, testGreedy)
 			var order []string
 			for _, q := range round.Requests {
 				order = append(order, string(q.Shape))

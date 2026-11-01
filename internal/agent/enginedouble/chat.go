@@ -5,23 +5,34 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 )
 
 // chatRequest is the part of ChatCompletionRequest the agent sends
 // (vllm/entrypoints/openai/chat_completion/protocol.py).
 type chatRequest struct {
-	Model               string          `json:"model"`
-	Messages            []message       `json:"messages"`
-	MaxTokens           *int            `json:"max_tokens"`
-	MaxCompletionTokens *int            `json:"max_completion_tokens"`
-	Temperature         *float64        `json:"temperature"`
-	Stream              bool            `json:"stream"`
-	StreamOptions       *streamOptions  `json:"stream_options"`
-	IgnoreEOS           bool            `json:"ignore_eos"`
-	MinTokens           int             `json:"min_tokens"`
-	ReturnTokenIDs      bool            `json:"return_token_ids"`
-	Tools               []tool          `json:"tools"`
-	ToolChoice          json.RawMessage `json:"tool_choice"`
+	Model               string    `json:"model"`
+	Messages            []message `json:"messages"`
+	MaxTokens           *int      `json:"max_tokens"`
+	MaxCompletionTokens *int      `json:"max_completion_tokens"`
+	Temperature         *float64  `json:"temperature"`
+	// The other sampling parameters of a vLLM chat request. The double does
+	// not sample with them; it records what arrived (RequestSampling), and
+	// a Seed makes a sampled request repeatable (answerFor).
+	TopP              *float64        `json:"top_p"`
+	TopK              *int64          `json:"top_k"`
+	MinP              *float64        `json:"min_p"`
+	RepetitionPenalty *float64        `json:"repetition_penalty"`
+	PresencePenalty   *float64        `json:"presence_penalty"`
+	FrequencyPenalty  *float64        `json:"frequency_penalty"`
+	Seed              *int64          `json:"seed"`
+	Stream            bool            `json:"stream"`
+	StreamOptions     *streamOptions  `json:"stream_options"`
+	IgnoreEOS         bool            `json:"ignore_eos"`
+	MinTokens         int             `json:"min_tokens"`
+	ReturnTokenIDs    bool            `json:"return_token_ids"`
+	Tools             []tool          `json:"tools"`
+	ToolChoice        json.RawMessage `json:"tool_choice"`
 }
 
 type streamOptions struct {
@@ -153,13 +164,24 @@ func (h *handler) maxTokensOf(req chatRequest, promptLen int) (int, error) {
 
 // chat is POST /v1/chat/completions.
 func (h *handler) chat(w http.ResponseWriter, r *http.Request) {
+	var req chatRequest
+	decodeErr := decodeBody(r, &req)
+	// Every request that decoded is recorded when it ends, a refused one too
+	// (errors-only, a 4xx), so a test counts the attempts a check made, not
+	// only the answers it got.
+	rec := LogEvent{Event: "request", Path: r.URL.Path, Stream: req.Stream, Outcome: "refused",
+		Sampling: samplingOf(req), Tail: tailOf(lastUserText(req.Messages))}
+	defer func() {
+		if decodeErr == nil && h.e.record != nil {
+			h.e.record(rec)
+		}
+	}()
 	if h.cfg.ErrorsOnly {
 		writeError(w, http.StatusInternalServerError, "InternalServerError", "the engine failed")
 		return
 	}
-	var req chatRequest
-	if err := decodeBody(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "BadRequestError", err.Error())
+	if decodeErr != nil {
+		writeError(w, http.StatusBadRequest, "BadRequestError", decodeErr.Error())
 		return
 	}
 	if len(req.Messages) == 0 {
@@ -171,11 +193,13 @@ func (h *handler) chat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, promptIDs := tokenize(renderChat(req.Messages, true, h.cfg.TemplateOverhead))
+	rec.PromptTokens = len(promptIDs)
 	max, err := h.maxTokensOf(req, len(promptIDs))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "BadRequestError", err.Error())
 		return
 	}
+	rec.MaxTokens = max
 	if req.MinTokens < 0 || req.MinTokens > max {
 		// SamplingParams._verify_args, vllm/sampling_params.py:694-701.
 		writeError(w, http.StatusBadRequest, "BadRequestError", fmt.Sprintf("min_tokens must be less than or equal to max_tokens=%d, got %d.", max, req.MinTokens))
@@ -183,13 +207,8 @@ func (h *handler) chat(w http.ResponseWriter, r *http.Request) {
 	}
 	ans := h.answerFor(req, promptIDs, max)
 
-	rec := LogEvent{Event: "request", Path: r.URL.Path, PromptTokens: len(promptIDs), MaxTokens: max, Stream: req.Stream, Outcome: "cancelled"}
+	rec.Outcome = "cancelled"
 	finish := "abort"
-	defer func() {
-		if h.e.record != nil {
-			h.e.record(rec)
-		}
-	}()
 
 	ctx := r.Context()
 	s, ok := h.e.admit(ctx, promptIDs)
@@ -245,6 +264,17 @@ func (h *handler) answerFor(req chatRequest, promptIDs []int32, limit int) answe
 	}
 	greedy := req.Temperature == nil || *req.Temperature == 0
 	p := genParams{promptIDs: promptIDs, maxTokens: limit - r, minTokens: max(0, req.MinTokens-r), ignoreEOS: req.IgnoreEOS, greedy: greedy}
+	if !greedy {
+		// A sampled request with a seed draws the same samples every time it
+		// is sent, as vLLM's seeded sampling does when its batch is invariant
+		// (the double stands for that case, not for vLLM's known limit that a
+		// seed does not guarantee reproducibility online). One without a
+		// seed draws at random.
+		p.seeded, p.seedValue = req.Seed != nil, 0
+		if req.Seed != nil {
+			p.seedValue = *req.Seed
+		}
+	}
 
 	if tc != nil {
 		pieces := argumentPieces(tc.Arguments)
@@ -260,8 +290,8 @@ func (h *handler) answerFor(req chatRequest, promptIDs []int32, limit int) answe
 		return a
 	}
 
-	if greedy {
-		p.repeat = h.e.repeatOf(repeatKey{promptSeed(promptIDs), limit, req.MinTokens, req.IgnoreEOS})
+	if p.repeatable() {
+		p.repeat = h.e.repeatOf(repeatKey{promptSeed(promptIDs), limit, req.MinTokens, req.IgnoreEOS, p.seeded, p.seedValue})
 	}
 	n, finish := r, "length"
 	if limit > r {
@@ -270,6 +300,32 @@ func (h *handler) answerFor(req chatRequest, promptIDs []int32, limit int) answe
 	}
 	words, ids := outputWords(output{tokens: h.cfg.tokens(p, n)})
 	return answer{reasoning: words[:r], reasoningIDs: ids[:r], words: words[r:], ids: ids[r:], finish: finish}
+}
+
+// samplingOf is the sampling parameters a request carried, as sent.
+func samplingOf(req chatRequest) *RequestSampling {
+	return &RequestSampling{
+		Temperature: req.Temperature, TopP: req.TopP, TopK: req.TopK, MinP: req.MinP,
+		RepetitionPenalty: req.RepetitionPenalty, PresencePenalty: req.PresencePenalty, FrequencyPenalty: req.FrequencyPenalty,
+		Seed: req.Seed,
+	}
+}
+
+// tailBytes is how much of a request's last user message the log keeps.
+const tailBytes = 120
+
+// tailOf is the last tailBytes bytes of a prompt, from a character boundary:
+// enough to tell the agent's checks apart by their fixed closing words. The
+// prompts are synthetic, so the log holds no user text.
+func tailOf(text string) string {
+	if len(text) <= tailBytes {
+		return text
+	}
+	t := text[len(text)-tailBytes:]
+	for len(t) > 0 && !utf8.RuneStart(t[0]) {
+		t = t[1:]
+	}
+	return t
 }
 
 // argumentPieces splits tool-call arguments into one piece per token, each

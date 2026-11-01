@@ -35,12 +35,6 @@ const (
 	// defaults (HBEP-7, What the controller reads).
 	defaultContextShort  = 512
 	defaultOutputLongest = 4096
-	// warmUpTolerance and warmUpFloor: warm-up is done when no fixed-length
-	// shape in a round is slower than in the round before by more than
-	// max(10% of that round's, 100 ms) (HBEP-7, Instance start; science-agent
-	// ruling, 1 Nov 2026, issue #125).
-	warmUpTolerance = 0.10
-	warmUpFloor     = 100 * time.Millisecond
 	// endingSoonLead: the ending-soon event fires when a ready Instance's
 	// drain start is less than this away and no replacement is ready.
 	endingSoonLead = time.Hour
