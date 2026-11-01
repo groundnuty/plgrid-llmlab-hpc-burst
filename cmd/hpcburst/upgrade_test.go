@@ -3,11 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -41,9 +44,16 @@ func TestUpgrade(t *testing.T) {
 	}
 
 	ctlBin, _ := fakeController(t)
+	// The front runs under the same supervisor (issue #64), here as the fake in its front role: the
+	// upgrade must start it again with the controller.
+	frontBin, frontDir := fakeFront(t)
+	frontCfg := filepath.Join(filepath.Dir(h.dir), "front.json")
+	if err := os.WriteFile(frontCfg, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	r := cli(t, h.upArgs(base, "--version", "1.35.9", "--json",
 		"--front-mode", "ssh", "--front-addr", "front.example.test", "--front-key", keyFile,
-		"--manifests", "testdata/manifests", "--controller-bin", ctlBin)...)
+		"--manifests", "testdata/manifests", "--controller-bin", ctlBin, "--front-config", frontCfg, "--front-bin", frontBin)...)
 	if r.code != exitOK {
 		t.Fatalf("up exited %d", r.code)
 	}
@@ -57,10 +67,12 @@ func TestUpgrade(t *testing.T) {
 	oldPID := st.Processes[0].PID
 	// The controllers run beside the old host: remember them, to see them replaced.
 	oldProcs := recordedProcs(t, h.dir)
-	oldRec, ok := readSupervisorRecord(t, h.dir)
-	if len(oldProcs) != 2 || oldProcs[1].Name != "supervisor" || !ok || oldRec.Entries[0].Proc == nil {
+	oldRec, ok := readSupervisorRecordN(t, h.dir, 2)
+	if len(oldProcs) != 2 || oldProcs[1].Name != "supervisor" || !ok || oldRec.Entries[0].Proc == nil ||
+		oldRec.Entries[1].Name != "front" || oldRec.Entries[1].Proc == nil {
 		t.Fatalf("before the upgrade: %+v, %+v", oldProcs, oldRec)
 	}
+	frontHealthAddr := fmt.Sprintf("127.0.0.1:%d", base+4)
 	pairBefore := readEndpointPair(t, h.dir) // created by up, for the controllers
 	c := h.clients()
 	ctx, cancel := testCtx()
@@ -179,14 +191,66 @@ func TestUpgrade(t *testing.T) {
 	if len(newProcs) != 2 || newProcs[1].Name != "supervisor" || newProcs[1].PID == oldProcs[1].PID || !running(newProcs[1].PID) {
 		t.Errorf("after the upgrade the record is %+v: the supervisor was not started again", newProcs)
 	} else {
-		newRec, ok := readSupervisorRecord(t, h.dir)
-		if !ok || newRec.Entries[0].Proc == nil || newRec.Entries[0].Proc.PID == oldRec.Entries[0].Proc.PID ||
-			!running(newRec.Entries[0].Proc.PID) || ppidOfPID(t, newRec.Entries[0].Proc.PID) != newProcs[1].PID {
+		// Both the controller and the front run again, as new children of the new supervisor, and
+		// the front answers on its own health port.
+		newRec, ok := readSupervisorRecordN(t, h.dir, 2)
+		for i := 0; ok && i < 2; i++ {
+			e, old := newRec.Entries[i], oldRec.Entries[i]
+			if e.Name != old.Name || e.Proc == nil || e.Proc.PID == old.Proc.PID || !running(e.Proc.PID) || ppidOfPID(t, e.Proc.PID) != newProcs[1].PID {
+				ok = false
+			}
+		}
+		if !ok {
 			t.Errorf("after the upgrade supervisor.json is %+v (before: %+v)", newRec, oldRec)
+		} else {
+			// The new front runs with exactly the front's command line, its configuration
+			// included (PR 134 review, N1): the fake accepts any --config path, so only the
+			// process's own argv shows the configuration was carried across.
+			pid := newRec.Entries[1].Proc.PID
+			got := strings.Split(strings.TrimRight(fileOf(fmt.Sprintf("/proc/%d/cmdline", pid)), "\x00"), "\x00")
+			want := []string{frontBin, "--config", frontCfg, "--state-dir", h.dir, "--port-base", "29220", "--health-addr", frontHealthAddr, "--mode", "ssh"}
+			if strings.Join(got, " ") != strings.Join(want, " ") {
+				t.Errorf("the front after the upgrade runs\n got %q\nwant %q", got, want)
+			}
+		}
+		waitFor(t, 30*time.Second, "the front's /healthz after the upgrade", func() bool {
+			resp, err := (&http.Client{Timeout: 3 * time.Second}).Get("http://" + frontHealthAddr + "/healthz")
+			if err != nil {
+				return false
+			}
+			resp.Body.Close()
+			return resp.StatusCode == http.StatusOK
+		})
+		// A failing usage sink makes status say the front is degraded, and nothing else: the
+		// first line stays healthy, status exits 0, no reason is added, and only the front's line
+		// says degraded (@hpc-burst-science-agent, 31 Oct 2026; HBEP-8, Usage records).
+		usageFile := filepath.Join(frontDir, "usage")
+		if err := os.WriteFile(usageFile, []byte("failing"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		sr := cli(t, h.args("status", "--no-gc-probe")...)
+		lines := strings.Split(sr.out, "\n")
+		var frontLine string
+		for _, l := range lines {
+			if strings.HasPrefix(l, "supervised front: ") {
+				frontLine = l
+			}
+		}
+		if sr.code != exitOK || lines[0] != "healthy" || strings.Contains(sr.out, "  - ") || strings.Count(sr.out, "degraded") != 1 ||
+			!strings.HasSuffix(frontLine, ", degraded: usage writes failing") {
+			t.Errorf("status with the front's usage failing (exit %d):\n%s", sr.code, sr.out)
+		}
+		if err := os.Remove(usageFile); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if running(oldProcs[1].PID) || running(oldRec.Entries[0].Proc.PID) {
-		t.Errorf("the old supervisor (pid %d) or controller (pid %d) still runs", oldProcs[1].PID, oldRec.Entries[0].Proc.PID)
+	for i, e := range oldRec.Entries {
+		if running(e.Proc.PID) {
+			t.Errorf("the old %s (pid %d, entry %d) still runs", e.Name, e.Proc.PID, i)
+		}
+	}
+	if running(oldProcs[1].PID) {
+		t.Errorf("the old supervisor (pid %d) still runs", oldProcs[1].PID)
 	}
 	// The agent endpoint's pair is kept: the agents' pin must not change under a running platform.
 	if after := readEndpointPair(t, h.dir); after.pin != pairBefore.pin || !bytes.Equal(after.cert, pairBefore.cert) || !bytes.Equal(after.key, pairBefore.key) {
@@ -375,4 +439,67 @@ func checkObjects(ctx context.Context, t *testing.T, c clients, objs []created) 
 		kept++
 	}
 	return kept
+}
+
+// TestInterruptedUpgradeKeepsTheSupervision: an upgrade killed while the new k3s starts leaves a
+// record that still names the controllers and the front (PR 134 review, B3), so status says that
+// no supervisor runs. A record without them has no such reason: once k3s is ready it would call
+// the host healthy and leave the front stopped with nothing to say so. The reason is judged
+// whatever state the new k3s is in, so the test does not wait for k3s.
+func TestInterruptedUpgradeKeepsTheSupervision(t *testing.T) {
+	const base = 29220
+	h := newHost(t)
+	ctlBin, _ := fakeController(t)
+	frontBin, _ := fakeFront(t)
+	frontCfg := filepath.Join(filepath.Dir(h.dir), "front.json")
+	if err := os.WriteFile(frontCfg, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if r := cli(t, h.upArgs(base, "--version", "1.35.9", "--controller-bin", ctlBin, "--front-config", frontCfg, "--front-bin", frontBin)...); r.code != exitOK {
+		t.Fatalf("up exited %d: %s", r.code, r.err)
+	}
+	oldK3s := readState(t, h.dir).Processes[0].PID
+	cmd := startCLI(t, h.args("upgrade", "--bin-dir", h.binDir, "--to", "1.36.5")...)
+	// The moment: the replacement's first record, naming a new k3s, is on disk and the launcher
+	// waits for that k3s to be ready.
+	var newK3s int
+	waitFor(t, 120*time.Second, "the new host's first record", func() bool {
+		b, err := os.ReadFile(filepath.Join(h.dir, "state.json"))
+		if err != nil {
+			return false
+		}
+		var s struct {
+			Version   string      `json:"version"`
+			Processes []stateProc `json:"processes"`
+		}
+		if json.Unmarshal(b, &s) != nil || len(s.Processes) == 0 || s.Processes[0].PID == oldK3s || !strings.HasPrefix(s.Version, "v1.36.5") {
+			return false
+		}
+		newK3s = s.Processes[0].PID
+		return true
+	})
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+	var raw struct {
+		Controllers *struct {
+			Binary string `json:"binary"`
+		} `json:"controllers"`
+		FrontRun *struct {
+			Binary string `json:"binary"`
+			Config string `json:"config"`
+		} `json:"front_run"`
+	}
+	parseJSON(t, fileOf(filepath.Join(h.dir, "state.json")), &raw)
+	if raw.Controllers == nil || raw.Controllers.Binary != ctlBin || raw.FrontRun == nil || raw.FrontRun.Binary != frontBin || raw.FrontRun.Config != frontCfg {
+		t.Errorf("the interrupted upgrade's record names controllers %+v and front %+v, want %s and %s with %s", raw.Controllers, raw.FrontRun, ctlBin, frontBin, frontCfg)
+	}
+	r := cli(t, h.args("status", "--json", "--no-gc-probe")...)
+	var st controllerStatus
+	parseJSON(t, r.out, &st)
+	if r.code != exitFail || !strings.Contains(strings.Join(st.Reasons, "; "), "no supervisor is recorded") {
+		t.Errorf("status after the interrupted upgrade exited %d with reasons %v; want unhealthy, no supervisor recorded", r.code, st.Reasons)
+	}
+	if !running(newK3s) {
+		t.Errorf("the new k3s (pid %d) is gone", newK3s)
+	}
 }

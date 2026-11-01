@@ -28,6 +28,13 @@ type Ports struct {
 	// A state file from before the controllers existed has neither.
 	Controller int `json:"controller,omitempty"`
 	Agent      int `json:"agent,omitempty"`
+	// FrontHealth is the front's loopback /healthz (issue #64, HBEP-5). DialHome is the front's
+	// dial-home listener in ssh mode, 127.0.0.1:base+7, where each platform's restricted key
+	// forwards (@hpc-burst-science-agent, 31 Oct 2026): reserved, never bound by the launcher. The
+	// front's client listener, and its dial-home listener in direct mode, are set in its own
+	// configuration file, not taken from this block.
+	FrontHealth int `json:"front_health,omitempty"`
+	DialHome    int `json:"dial_home,omitempty"`
 }
 
 // Base is the start of the block, the port the controllers' --port-base names. PortsFromBase puts
@@ -37,22 +44,37 @@ func (p Ports) Base() int { return p.API }
 // DefaultPortBase is the default start of the block. It is far from every k3s default.
 const DefaultPortBase = 29220
 
-// controllerPortOffset is the lifecycle controller's /healthz, relative to the base. It is the last
-// port of the block.
+// controllerPortOffset is the lifecycle controller's /healthz, relative to the base.
 const controllerPortOffset = 6
+
+// frontHealthPortOffset is the front's /healthz, relative to the base (issue #64; the parent's
+// allocation of the block's free port, 31 Oct 2026).
+const frontHealthPortOffset = 4
+
+// dialHomePortOffset is the front's ssh-mode dial-home listener, relative to the base:
+// agentapi.DialHomePortOffset (7), the last port the launcher checks; base+8 to base+11 are frps's (HBEP-6). Each platform's restricted VM
+// key permits forwards to exactly 127.0.0.1:base+3 (the agent endpoint) and 127.0.0.1:base+7, so a
+// launcher started with another base needs new restricted keys (docs/development.md, The
+// launcher, Ports).
+//
+// TODO(#64): warn at up when the base differs from the one the configured restricted keys were
+// made for. Nothing records that base yet: the step that makes the keys does not exist, so there
+// is nothing to compare with.
+const dialHomePortOffset = agentapi.DialHomePortOffset
 
 // PortsFromBase lays the first four ports out as spike S3 did (base, base+1, base+2 and base+5)
 // and adds the controllers' two: the agent endpoint at agentapi.AgentEndpointPortOffset (base+3,
 // shared with the controller through agentapi.Host) and the controller's /healthz at base+6.
-// The shared block (agentapi.Host) also holds base+4, the front's /healthz, and base+7, the
-// front's ssh dial-home listener (agentapi.DialHomePortOffset): both are issue #64's, and this
-// launcher neither checks nor binds them.
+// base+4 is the front's /healthz (frontHealthPortOffset), and base+7 the front's ssh-mode
+// dial-home listener (dialHomePortOffset). The launcher checks base..base+7; frps's ports above
+// them are not checked until the launcher starts frps.
 func PortsFromBase(base int) (Ports, error) {
-	if base < 1024 || base+controllerPortOffset > 65535 {
-		return Ports{}, fmt.Errorf("port base %d is out of range: the block base..base+%d must lie in 1024..65535", base, controllerPortOffset)
+	if base < 1024 || base+dialHomePortOffset > 65535 {
+		return Ports{}, fmt.Errorf("port base %d is out of range: the block base..base+%d must lie in 1024..65535", base, dialHomePortOffset)
 	}
 	host := agentapi.Host{PortBase: base}
-	return Ports{API: base, HTTPS: base + 1, KCM: base + 2, LB: base + 5, Controller: base + controllerPortOffset, Agent: host.AgentEndpointPort()}, nil
+	return Ports{API: base, HTTPS: base + 1, KCM: base + 2, LB: base + 5, Controller: base + controllerPortOffset, Agent: host.AgentEndpointPort(),
+		FrontHealth: base + frontHealthPortOffset, DialHome: host.DialHomePort()}, nil
 }
 
 // Expected are the ports the running k3s must hold, and no others. The controllers' ports are
@@ -62,7 +84,18 @@ func (p Ports) Expected() []int { return []int{p.API, p.HTTPS, p.KCM} }
 // All are the ports that must be free before a start: the expected ones and the reserved ones.
 // The agent endpoint's is among them, so an operator's listener on it makes up refuse.
 func (p Ports) All() []int {
-	return []int{p.API, p.HTTPS, p.KCM, p.Agent, p.LB, p.Controller}
+	return []int{p.API, p.HTTPS, p.KCM, p.Agent, p.FrontHealth, p.LB, p.Controller, p.DialHome}
+}
+
+// FrontHealthAddr is where the front serves /healthz.
+//
+// base+4 and base+7 are checked free before k3s starts but bound by the front only later, after
+// its first lists: the same window as base+3 and base+6, which the controller binds. The front's
+// client listener, and its dial-home listener in direct mode, come from its own configuration and
+// are not checked against the block. up waits for the front's /healthz (supervised.WaitReady), so a
+// port taken in that window fails up instead of leaving a front that cannot start.
+func (p Ports) FrontHealthAddr() string {
+	return net.JoinHostPort("127.0.0.1", strconv.Itoa(p.FrontHealth))
 }
 
 // ControllerAddr is where the lifecycle controller serves /healthz.
