@@ -308,3 +308,27 @@ func TestACancelOfAJobThatEndsAfterTheReadIsAlreadyEndedOnANoisySlurm(t *testing
 		t.Errorf("Cancel of a job that ended after the read, on a noisy Slurm = %+v, want AlreadyEnded", res)
 	}
 }
+
+// Another user's job is in neither this user's queue listing (squeue --me) nor
+// this user's accounting, so it is unknown to the plugin: ErrNotFound, and no
+// scancel runs. Before #199 the scancel ran and Slurm's refusal was an error.
+func TestCancelOfAnotherUsersJobIsNotFoundAndLeftAlone(t *testing.T) {
+	r := newCancelRig(t, fakeslurm.Config{})
+	other := r.plat.Login(fakeslurm.Login{User: "other-user", Env: map[string]string{"HOME": "/home/other-user", "SCRATCH": "/scratch/other-user"}})
+	res, err := other.Run(context.Background(), slurm.Command{Line: "sbatch --parsable --job-name=hb-999999999999 --no-requeue --partition=" +
+		smokePart + " --time=30 --nodes=1 --gres=gpu:1 --cpus-per-task=8 --mem=16384M --wrap=true"})
+	if err != nil || res.ExitCode != 0 {
+		t.Fatalf("the other user's sbatch: %v %d %s", err, res.ExitCode, res.Stderr)
+	}
+	id := strings.TrimSpace(string(res.Stdout))
+	got := r.cancel(id)
+	if got.Outcome != provider.CancelError || !errors.Is(got.Err, provider.ErrNotFound) {
+		t.Errorf("Cancel of another user's job = %+v, want CancelError wrapping ErrNotFound", got)
+	}
+	if n := r.plat.Count("scancel"); n != 0 {
+		t.Errorf("%d scancel calls, want 0", n)
+	}
+	if s := r.state(id); s == fakeslurm.Cancelled {
+		t.Errorf("another user's job is %s", s)
+	}
+}
