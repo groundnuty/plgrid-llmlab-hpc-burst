@@ -133,35 +133,8 @@ func TestExamplesAgreeWithTheirProfilesAndEachOther(t *testing.T) {
 		switch e.kind() {
 		case "Provider":
 			t.Run(e.label(), func(t *testing.T) {
-				ref, _, _ := unstructured.NestedString(e.obj, "spec", "platformProfileRef", "name")
-				p, ok := profs[ref]
-				if !ok {
-					t.Fatalf("spec.platformProfileRef.name %q is not a PlatformProfile in profiles/ (%s)", ref, sortedKeys(profs))
-				}
-				parts, _, _ := unstructured.NestedStringSlice(e.obj, "spec", "allowedPartitions")
-				switch p.kind {
-				case string(v1alpha1.PlatformBatch):
-					if len(parts) != 1 {
-						t.Errorf("a batch Provider allows exactly one partition in alpha (HBEP-4, open question 12); allowedPartitions is %v", parts)
-					}
-					for _, part := range parts {
-						if !p.partitions[part] {
-							t.Errorf("partition %q is not in profiles/%s (%s)", part, p.file, sortedKeys(p.partitions))
-						}
-					}
-				case string(v1alpha1.PlatformManaged):
-					if len(parts) != 0 {
-						t.Errorf("a managed Provider has no partitions; allowedPartitions is %v", parts)
-					}
-				default:
-					t.Errorf("profiles/%s has providerKind %q", p.file, p.kind)
-				}
-				qos, _, _ := unstructured.NestedString(e.obj, "spec", "qos")
-				if msg := qosProblem(qos, p); msg != "" {
+				for _, msg := range providerProblems(e, profs) {
 					t.Error(msg)
-				}
-				if lbl, _, _ := unstructured.NestedString(e.obj, "metadata", "labels", v1alpha1.LabelPlatform); lbl == "" {
-					t.Errorf("the Provider has no %s label: HBEP-3 makes the platform a label, and a managed ModelDeployment matches it", v1alpha1.LabelPlatform)
 				}
 			})
 		case "ModelDeployment":
@@ -198,11 +171,54 @@ func TestExamplesAgreeWithTheirProfilesAndEachOther(t *testing.T) {
 	}
 }
 
+// providerProblems is what the agreement test finds wrong with one example Provider against the
+// shipped profiles: its profile and partition, its qos, and its platform label. It returns the
+// problems instead of failing, so a test can run it on an invalid example (the wiring of
+// qosProblem is then under test, not only the helper).
+func providerProblems(e example, profs map[string]shippedProfile) []string {
+	var out []string
+	add := func(format string, a ...any) { out = append(out, fmt.Sprintf(format, a...)) }
+	ref, _, _ := unstructured.NestedString(e.obj, "spec", "platformProfileRef", "name")
+	p, ok := profs[ref]
+	if !ok {
+		return []string{fmt.Sprintf("spec.platformProfileRef.name %q is not a PlatformProfile in profiles/ (%s)", ref, sortedKeys(profs))}
+	}
+	parts, _, _ := unstructured.NestedStringSlice(e.obj, "spec", "allowedPartitions")
+	switch p.kind {
+	case string(v1alpha1.PlatformBatch):
+		if len(parts) != 1 {
+			add("a batch Provider allows exactly one partition in alpha (HBEP-4, open question 12); allowedPartitions is %v", parts)
+		}
+		for _, part := range parts {
+			if !p.partitions[part] {
+				add("partition %q is not in profiles/%s (%s)", part, p.file, sortedKeys(p.partitions))
+			}
+		}
+	case string(v1alpha1.PlatformManaged):
+		if len(parts) != 0 {
+			add("a managed Provider has no partitions; allowedPartitions is %v", parts)
+		}
+	default:
+		add("profiles/%s has providerKind %q", p.file, p.kind)
+	}
+	qos, _, _ := unstructured.NestedString(e.obj, "spec", "qos")
+	if msg := qosProblem(qos, p); msg != "" {
+		add("%s", msg)
+	}
+	if lbl, _, _ := unstructured.NestedString(e.obj, "metadata", "labels", v1alpha1.LabelPlatform); lbl == "" {
+		add("the Provider has no %s label: HBEP-3 makes the platform a label, and a managed ModelDeployment matches it", v1alpha1.LabelPlatform)
+	}
+	return out
+}
+
 // qosProblem says why a Provider's spec.qos cannot be used with its profile, or "" when it can or
-// is unset. The Slurm provider fails reading the profile, with the field named, when the profile's
-// qos list does not hold the Provider's (HBEP-4, Provider settings and QOS limits), so an example
-// that names an unlisted QOS would be admitted and then never ready. A profile with no qos list at
-// all lists none.
+// is unset. For a batch profile the rule is Slurm's own: ReadProfile fails, with the field named,
+// when the profile's qos list does not hold the Provider's (checkQOS, internal/slurm/profile.go:182;
+// HBEP-4, Provider settings and QOS limits), so an example that names an unlisted QOS would be
+// admitted by the API server and then never ready. A profile with no qos list lists none. For
+// llmlab.yaml the same rule is an example convention only: the managed controller never reads a
+// Provider's qos (internal/managed/controller.go:301, checkProfile, looks at the provider kind
+// alone), so a qos there would be ignored, and the examples do not carry one.
 func qosProblem(qos string, p shippedProfile) string {
 	if qos == "" || p.qos[qos] {
 		return ""
@@ -245,6 +261,49 @@ func TestExampleProviderQOSIsListedInItsProfile(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := qosProblem(tc.qos, tc.prof); (got != "") != tc.bad {
 				t.Errorf("qosProblem(%q, profiles/%s) = %q; want a problem: %v", tc.qos, tc.prof.file, got, tc.bad)
+			}
+		})
+	}
+}
+
+// The agreement check, run on a Provider it must refuse. Each case edits a copy of the shipped
+// Helios example and requires providerProblems to name the problem, so removing the qosProblem
+// call from providerProblems (or any other check in it) fails here, while the unedited example
+// passes. The helper's own controls above cannot see that removal.
+func TestProviderAgreementRefusesAnInvalidExample(t *testing.T) {
+	profs := loadProfileManifests(t)
+	var helios example
+	for _, e := range loadExamples(t) {
+		if e.file == "provider-helios-gh200.yaml" {
+			helios = e
+		}
+	}
+	if helios.obj == nil {
+		t.Fatalf("this check reads provider-helios-gh200.yaml")
+	}
+	if got := providerProblems(helios, profs); len(got) != 0 {
+		t.Fatalf("the shipped Helios example has problems: %v", got)
+	}
+	for _, tc := range []struct {
+		name string
+		path []any
+		val  any
+		want string
+	}{
+		{"a QOS the profile does not list", []any{"spec", "qos"}, "nowx", "spec.qos"},
+		{"two partitions", []any{"spec", "allowedPartitions"}, []any{"plgrid-gpu-gh200", "plgrid"}, "exactly one partition"},
+		{"a partition the profile lacks", []any{"spec", "allowedPartitions"}, []any{"plgrid-gpu-gh2000"}, "is not in profiles/"},
+		{"an unknown profile", []any{"spec", "platformProfileRef", "name"}, "heliox", "is not a PlatformProfile"},
+		{"no platform label", []any{"metadata", "labels"}, map[string]any{}, "no hpcburst"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bad := example{file: helios.file, obj: edit(t, helios.obj, tc.val, tc.path...)}
+			got := providerProblems(bad, profs)
+			if len(got) == 0 {
+				t.Fatalf("providerProblems accepts the edited example")
+			}
+			if !strings.Contains(strings.Join(got, "\n"), tc.want) {
+				t.Errorf("the problems %q do not mention %q", got, tc.want)
 			}
 		})
 	}
