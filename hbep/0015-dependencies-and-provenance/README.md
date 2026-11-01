@@ -118,7 +118,7 @@ Open questions 1 to 5 were removed with the licence policy and `build/dependenci
   - Is there a tagged release to use instead of a commit?
   - Does the imported code have `init()` functions or other side effects at import?
   - Ours: does the adopting HBEP list it under "Community software reused"?
-- **The licence jobs are disabled.** `licence-modules` and `licences` in `.github/workflows/ci.yml` carry `if: false`. The licence scripts and fixtures in `hack/` (`hack/licence*`, `hack/test_licence*.py`, `hack/test-licence-fixtures.sh`, `hack/allowed-licenses.txt`, `hack/known-zero-modules.txt`) are kept but unused. Removing them is a code matter, not this HBEP's.
+- **The licence jobs are removed.** The two disabled jobs, `licence-modules` and `licences` in `.github/workflows/ci.yml`, and the licence scripts and fixtures in `hack/` (`hack/licence*`, `hack/test_licence*.py`, `hack/test-licence-fixtures.sh`, `hack/allowed-licenses.txt`, `hack/known-zero-modules.txt`) were removed in #150.
 
 ### Pinned versions
 
@@ -182,7 +182,7 @@ The pins that a design decision rests on, as on `main` on 2026-11-01. The file i
 
 ### Test plan
 
-- **The copy check** fails for a `third_party/forked/` folder without `ORIGIN.md`, or with an `ORIGIN.md` missing a field. It is planned and does not run in CI yet. Today's four `ORIGIN.md` files name some fields differently (`Origin` beside `Upstream URL`, `Change` beside `Changes`); the PR that adds the check aligns them.
+- **The copy check** fails for a `third_party/forked/` folder without `ORIGIN.md`, or with an `ORIGIN.md` missing a field. It is planned and does not run in CI yet. The four `ORIGIN.md` files' field names were aligned in #150 (`Upstream URL`, `Commit or tag`, `SPDX licence`, `Changes`, and `Why copied rather than imported`), with no recorded value changed.
 - **The pin drift test,** `TestFrpPinsAgreeWithTheFetchScript`, runs today. It compares `hack/fetch-frp.sh`'s version and three sums with `frp-pins.txt`'s amd64 row, and it reads the script as text. A test that computed the script's values from the pins file would agree with it by construction. k3s needs no such test, because its fetch script reads the pins file.
 - **The launcher's checksum checks** have their own tests in `internal/launcher` (for example `TestResolveBinary` and `TestResolveFrpsChecksTheBytesItOpened`).
 - **The lesson ID check** is planned and does not run in CI yet. It checks that:
@@ -272,6 +272,8 @@ Sources were read on 2026-10-30, except where another date is given.
 - 2026-10-31: frp's rows, frps and frpc v0.71.1, recorded from HBEP-6 becoming implementable; the PR that adds frp creates `build/dependencies.yaml`.
 - 2026-10-31: the CI licence check is disabled by the owner's decision; the scripts stay in `hack/`.
 - 2026-11-01: implementable. The licence policy is removed (Non-goals): the allowlist, `LICENSES/`, the licence check, the dependency reviewer, the release SBOM, and open questions 1 to 5. `build/dependencies.yaml` is dropped: the pins files the code reads are the record. Added: Pinned versions, with controller-runtime held at v0.23.1 for alpha (science-agent ruling, 1 Nov 2026), and Upgrading a pinned dependency.
+- 2026-11-01: erratum: the licence jobs and the scripts in `hack/` are recorded as removed in #150, where the text said they were kept but unused.
+- 2026-11-01: erratum: the Test plan records that #150 aligned the four `ORIGIN.md` files' field names, where the text said the copy check's PR would.
 
 ## Amendments
 
