@@ -102,8 +102,8 @@ func TestUsageCountsOfAStreamWithUsage(t *testing.T) {
 	if rec.CountsSource == nil || *rec.CountsSource != "engine" {
 		t.Errorf("countsSource = %v, want engine", strStr(rec.CountsSource))
 	}
-	if !ptrIs(rec.PromptTokens, 5) || !ptrIs(rec.CompletionTokens, 7) || !ptrIs(rec.CachedTokens, 0) {
-		t.Errorf("counts prompt %v completion %v cached %v, want 5 (the request's words), 7 (the engine's tokens) and 0", ptrStr(rec.PromptTokens), ptrStr(rec.CompletionTokens), ptrStr(rec.CachedTokens))
+	if !ptrIs(rec.PromptTokens, 5) || !ptrIs(rec.CompletionTokens, 7) || rec.CachedTokens != nil {
+		t.Errorf("counts prompt %v completion %v cached %v, want 5 (the request's words), 7 (the engine's tokens) and null (the double names no cached count, as vLLM without --enable-prompt-tokens-details)", ptrStr(rec.PromptTokens), ptrStr(rec.CompletionTokens), ptrStr(rec.CachedTokens))
 	}
 	if !strings.Contains(got, `"usage"`) {
 		t.Errorf("the client's stream has no usage chunk, although it asked for one: %s", got)

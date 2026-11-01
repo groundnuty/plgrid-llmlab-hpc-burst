@@ -69,19 +69,39 @@ func (p *play) startStream() {
 	_ = http.NewResponseController(p.w).Flush()
 }
 
+// chatUsage is the usage member. Like vLLM without
+// --enable-prompt-tokens-details, it names no cached count unless the
+// behaviour sets CachedTokens.
 func (p *play) chatUsage() map[string]any {
 	n := int64(p.tokens())
-	return map[string]any{"prompt_tokens": p.prompt, "completion_tokens": n, "total_tokens": p.prompt + n,
-		"prompt_tokens_details": map[string]any{"cached_tokens": 0}}
+	u := map[string]any{"prompt_tokens": p.prompt, "completion_tokens": n, "total_tokens": p.prompt + n}
+	if p.b.CachedTokens != nil {
+		u["prompt_tokens_details"] = map[string]any{"cached_tokens": *p.b.CachedTokens}
+	}
+	return u
+}
+
+// responsesUsage is chatUsage in the Responses names.
+func (p *play) responsesUsage() map[string]any {
+	u := map[string]any{"input_tokens": p.prompt, "output_tokens": int64(p.tokens())}
+	if p.b.CachedTokens != nil {
+		u["input_tokens_details"] = map[string]any{"cached_tokens": *p.b.CachedTokens}
+	}
+	return u
 }
 
 // chatStream is a chat or completions stream: one token per chunk, a finish
-// reason, the usage chunk when asked, then [DONE].
+// reason, the usage chunk when asked, then [DONE]. With LastWithFinish the
+// last token rides in the finish chunk.
 func (p *play) chatStream(completions bool) {
 	p.startStream()
 	obj := "chat.completion.chunk"
 	if completions {
 		obj = "text_completion"
+	}
+	field := p.b.DeltaField
+	if field == "" {
+		field = "content"
 	}
 	choice := func(text string, finish any) map[string]any {
 		if completions {
@@ -89,16 +109,30 @@ func (p *play) chatStream(completions bool) {
 		}
 		delta := map[string]any{}
 		if text != "" {
-			delta["content"] = text
+			delta[field] = text
 		}
 		return map[string]any{"index": 0, "delta": delta, "finish_reason": finish}
 	}
-	for i := 0; i < p.tokens(); i++ {
+	own := p.tokens() // tokens that get a chunk of their own
+	rides := p.b.LastWithFinish && !p.b.NoFinish
+	if rides {
+		own--
+	}
+	for i := 0; i < own; i++ {
 		p.beforeToken(i)
 		p.event("", map[string]any{"id": "cmpl-1", "object": obj, "model": p.model, "choices": []any{choice(fmt.Sprintf("t%d ", i), nil)}})
 	}
 	if !p.b.NoFinish {
-		p.event("", map[string]any{"id": "cmpl-1", "object": obj, "model": p.model, "choices": []any{choice("", "stop")}})
+		text := ""
+		if rides {
+			p.beforeToken(own)
+			text = fmt.Sprintf("t%d ", own)
+		}
+		reason := p.b.FinishReason
+		if reason == "" {
+			reason = "stop"
+		}
+		p.event("", map[string]any{"id": "cmpl-1", "object": obj, "model": p.model, "choices": []any{choice(text, reason)}})
 	}
 	if p.usage {
 		p.event("", map[string]any{"id": "cmpl-1", "object": obj, "model": p.model, "choices": []any{}, "usage": p.chatUsage()})
@@ -121,8 +155,7 @@ func (p *play) responsesStream() {
 	if p.b.NoFinish {
 		return
 	}
-	n := int64(p.tokens())
-	usage := map[string]any{"input_tokens": p.prompt, "output_tokens": n, "input_tokens_details": map[string]any{"cached_tokens": 0}}
+	usage := p.responsesUsage()
 	switch p.b.ResponsesEnd {
 	case "incomplete":
 		p.event("response.incomplete", map[string]any{"type": "response.incomplete", "response": map[string]any{
@@ -147,7 +180,7 @@ func (p *play) whole(path string) {
 	case "/v1/responses":
 		writeJSON(p.w, http.StatusOK, map[string]any{"id": "resp-1", "object": "response", "status": "completed", "model": p.model,
 			"output": []any{map[string]any{"type": "message", "content": []any{map[string]any{"type": "output_text", "text": text.String()}}}},
-			"usage":  map[string]any{"input_tokens": p.prompt, "output_tokens": p.tokens(), "input_tokens_details": map[string]any{"cached_tokens": 0}}})
+			"usage":  p.responsesUsage()})
 	case "/v1/completions":
 		writeJSON(p.w, http.StatusOK, map[string]any{"id": "cmpl-1", "object": "text_completion", "model": p.model,
 			"choices": []any{map[string]any{"index": 0, "text": text.String(), "finish_reason": "stop"}}, "usage": p.chatUsage()})
