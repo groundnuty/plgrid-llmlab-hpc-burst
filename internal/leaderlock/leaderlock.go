@@ -24,38 +24,44 @@
 // and repeats the release while the Lease still names this holder, within
 // ReleaseBudget.
 //
-// Not covered: a release whose read fails. release returns before its write
-// when Lock.Get fails (leaderelection.go:315-322), and the lock cannot tell
-// the release's read from a renew's or an acquire's, so it does not retry
-// reads. The Lease then stays held until it expires, as before. Covering it
-// needs a release after the manager's Start has returned, by the code that
-// runs the manager.
+// A release whose read fails is lost in the elector: release returns before
+// its write when Lock.Get fails (leaderelection.go:315-322), and the lock
+// cannot tell the release's read from a renew's or an acquire's, so it does
+// not retry reads (issue #160). ReleaseAfterStart covers it: once a manager's
+// Start has returned from a clean, requested stop, the elector has stopped,
+// and the Lease is read again and released if it still names this holder.
 package leaderlock
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"time"
 
 	"github.com/go-logr/logr"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	coordinationv1client "k8s.io/client-go/kubernetes/typed/coordination/v1"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
-// ReleaseBudget bounds the retries of one release, after its first attempt
-// failed. A release takes a read and a write, milliseconds; the budget only
-// matters while the API server is slow. The stop graces count it: a Provider
+// ReleaseBudget bounds each of a stop's two release phases: the retries of the
+// elector's release after its first attempt failed (WithRetriedRelease), and
+// the release after Start (ReleaseAfterStart), its reads and writes together.
+// A release takes a read and a write, milliseconds; the budget only matters
+// while the API server is slow. The stop graces count both phases: a Provider
 // manager's release comes after its runnables have stopped, within the 10 s
 // that the controller's providerGrace leaves of the lifecycle manager's
 // shutdown grace (cmd/hpcburst-controller), and the lifecycle Lease's release
 // comes after that grace, within launcher.ControllerStopBudget, which the
 // supervisor's kill grace for the controller covers
-// (launcher.ControllerTermGrace). When it runs out, the Lease stays held
+// (launcher.ControllerTermGrace). When both run out, the Lease stays held
 // until it expires, as before.
-const ReleaseBudget = 2 * time.Second
+const ReleaseBudget = time.Second
 
 // releaseRetryEvery is the pause before each retry of a release.
 const releaseRetryEvery = 100 * time.Millisecond
@@ -175,4 +181,82 @@ func (l *retriedRelease) releaseOnce(ctx context.Context, ler resourcelock.Leade
 		return false, err
 	}
 	return true, nil
+}
+
+// ReleaseAfterStart wraps mgr, which leads through lock, so that a clean,
+// requested stop gives the Lease up even when the elector's own release was
+// lost (issue #160): when Start has returned nil after its context ended,
+// the elector has stopped (controller-runtime v0.23.1,
+// pkg/manager/internal.go:381-392, 545-554), and Release runs within
+// ReleaseBudget. Start's result is returned unchanged.
+//
+// An involuntary stop releases nothing: leadership lost, a runnable that
+// failed, or a stop that ran past its grace, all of which make Start return
+// an error (internal.go:382-392, 486-492, 597-604). On a lost leadership
+// controller-runtime skips the graceful shutdown (OnStoppedLeading,
+// internal.go:627-637), so the stopped manager's work may still run, and its
+// Lease must expire before another leader starts (cmd/hpcburst-controller,
+// providerGrace).
+func ReleaseAfterStart(mgr manager.Manager, lock resourcelock.Interface, log logr.Logger) manager.Manager {
+	return &releasingManager{Manager: mgr, lock: lock, log: log}
+}
+
+// ReleasesAfterStart reports whether mgr is from ReleaseAfterStart, for the
+// tests of the code that builds the managers.
+func ReleasesAfterStart(mgr manager.Manager) bool {
+	_, ok := mgr.(*releasingManager)
+	return ok
+}
+
+type releasingManager struct {
+	manager.Manager
+	lock resourcelock.Interface
+	log  logr.Logger
+}
+
+// Start implements manager.Manager.
+func (m *releasingManager) Start(ctx context.Context) error {
+	err := m.Manager.Start(ctx)
+	if err != nil || ctx.Err() == nil {
+		return err
+	}
+	rctx, cancel := context.WithTimeout(context.Background(), ReleaseBudget)
+	defer cancel()
+	if rerr := Release(rctx, m.lock); rerr != nil {
+		m.log.WithName("leader-election").Error(rerr, "the leader Lease could not be released after the manager stopped; it stays held until it expires", "lock", m.lock.Describe())
+	}
+	return nil
+}
+
+// Release gives the Lease up if it names lock's holder. It reads the Lease,
+// trying the read again every releaseRetryEvery until it succeeds or ctx
+// ends; a Lease that names another holder or none, or does not exist, needs
+// no write. Otherwise it writes client-go's release record (no holder, a 1 s
+// duration, the transitions kept; leaderelection.go:328-333) through lock
+// once, so a lock from WithRetriedRelease retries the write itself, within
+// ctx.
+func Release(ctx context.Context, lock resourcelock.Interface) error {
+	var rec *resourcelock.LeaderElectionRecord
+	for {
+		var err error
+		rec, _, err = lock.Get(ctx)
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err == nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("read the Lease to release it: %w", err)
+		case <-time.After(releaseRetryEvery):
+		}
+	}
+	if rec.HolderIdentity != lock.Identity() {
+		return nil
+	}
+	now := metav1.NewTime(time.Now())
+	return lock.Update(ctx, resourcelock.LeaderElectionRecord{
+		LeaderTransitions: rec.LeaderTransitions, LeaseDurationSeconds: 1, RenewTime: now, AcquireTime: now,
+	})
 }
