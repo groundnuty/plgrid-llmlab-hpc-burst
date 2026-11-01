@@ -196,6 +196,7 @@ func controllerOptions(workers int) controller.Options {
 		MaxConcurrentReconciles: workers,
 		RateLimiter:             workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](time.Second, maxRequeue),
 		UsePriorityQueue:        &priorityQueue,
+		SkipNameValidation:      new(true), // a second manager in one process, as in a test's -count=N
 	}
 }
 

@@ -138,3 +138,76 @@ func TestSupervisorKindSelectsProviders(t *testing.T) {
 		})
 	}
 }
+
+// barrier makes a group of fake managers whose Start, once its context ends,
+// returns only after every manager of the group has seen its own context end.
+// A supervisor that stopped them one after another would wait on the first
+// for ever (review of PR 132: N3).
+type barrier struct {
+	n       int
+	started chan struct{}
+	all     chan struct{} // closed once all n contexts have ended
+	release chan struct{} // closed by the test's cleanup, so a failed run leaves no goroutine
+	mu      sync.Mutex
+	ended   int
+}
+
+// barrierManager is a manager.Manager of which the supervisor calls only Start.
+type barrierManager struct {
+	manager.Manager
+	g *barrier
+}
+
+func (m barrierManager) Start(ctx context.Context) error {
+	m.g.started <- struct{}{}
+	<-ctx.Done()
+	m.g.mu.Lock()
+	m.g.ended++
+	if m.g.ended == m.g.n {
+		close(m.g.all)
+	}
+	m.g.mu.Unlock()
+	select {
+	case <-m.g.all:
+		return nil
+	case <-m.g.release:
+		return errors.New("example: not every manager was stopped")
+	}
+}
+
+// The supervisor stops its managers at once: each waits until all have been
+// told to stop, so only a stop that cancels them all before it waits for any
+// returns. The supervisor's stop then lasts one manager's grace, not one per
+// Provider. Managers whose contexts did not derive from Start's would be
+// stopped one after another by stopAll, and fail this.
+func TestSupervisorStopsEveryManagerAtOnce(t *testing.T) {
+	const n = 3
+	c := supWorld(t, supProfile("pp", v1alpha1.PlatformBatch), supProvider("p1", "pp"), supProvider("p2", "pp"), supProvider("p3", "pp"))
+	g := &barrier{n: n, started: make(chan struct{}, n), all: make(chan struct{}), release: make(chan struct{})}
+	t.Cleanup(func() { close(g.release) })
+	s := &Supervisor{Client: c,
+		NewManager: func(string) (manager.Manager, error) { return barrierManager{g: g}, nil },
+		Setup:      func(manager.Manager, string) error { return nil },
+		Interval:   time.Hour, MinBackoff: time.Hour, MaxBackoff: time.Hour, Log: logging.NewNopLogger(),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- s.Start(ctx) }()
+	for i := range n {
+		select {
+		case <-g.started:
+		case <-time.After(30 * time.Second):
+			t.Fatalf("%d of %d managers started within 30 s", i, n)
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Start returned %v after a clean stop", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the supervisor did not stop within 30 s: it waits for one manager before it stops the next")
+	}
+}

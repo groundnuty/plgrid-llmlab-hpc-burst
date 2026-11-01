@@ -4,11 +4,14 @@
 // controller-runtime manager with the Lease v1alpha1.LeaseLifecycle in
 // v1alpha1.ControllerNamespace.
 //
-// Not wired yet, because their packages are not on this branch: the
-// per-Provider manager supervisor (internal/providerctl, issue #59), which
-// main starts beside the lifecycle manager, and the agent API's HTTP server
-// (internal/agentserver, issue #60), which serves the lifecycle controller's
-// agentapi.Backend on loopback. Both plug in at extraRunnables.
+// Beside the lifecycle controller, in its manager, it runs the components of
+// components.go: the per-Provider manager supervisors for the batch and the
+// managed Providers (internal/providerctl, #59; internal/managed, #69), which
+// follow the lifecycle leader (HBEP-11, Controllers), and the agent API's HTTP
+// server (internal/agentserver, #60), which serves the lifecycle controller's
+// agentapi.Backend on the agent endpoint. Its log names its port base, which
+// tells two copies on one host apart. frps's server
+// plugin (#90) plugs in at extraRunnables once it merges.
 //
 // Usage (hpcburst up passes the first three and the front it recorded):
 //
@@ -20,10 +23,12 @@
 // the shared paths and ports (docs/development.md, Runtime conventions): the
 // kubeconfig is <state>/kubeconfig unless --kubeconfig says otherwise, the
 // credentials directory is Host.CredentialsDir() and the agent builds are in
-// Host.AgentBuildsDir(); #60's server will bind Host.AgentEndpointAddr().
+// Host.AgentBuildsDir(); the agent API binds Host.AgentEndpointAddr().
 //
 // It exits 0 after SIGTERM or SIGINT once the manager has stopped, 1 on a
-// failure, and 2 on a usage error.
+// failure (a Provider-manager scheme without apps/v1, and front settings that
+// agent.json would refuse, are refused before anything starts), and 2 on a
+// usage error.
 package main
 
 import (
@@ -124,20 +129,27 @@ func checkCredentialsDir(dir string) error {
 	return nil
 }
 
-// extraRunnables are the other components of the binary, added to the
-// manager beside the lifecycle controller, once their packages land:
-//   - #60's agent API server (internal/agentserver), which authenticates each
-//     agent call and then calls the lifecycle controller's Backend; it runs
-//     without leader election:
-//     agentserver.New(agentserver.Config{Lookup: agentserver.NewClientLookup(mgr.GetClient()),
-//     CredentialsDir: host.CredentialsDir(), Backend: backend, Host: host});
-//   - #59's per-Provider manager supervisor (internal/providerctl).
-//
-// Until then the Backend is built but not served, so no agent can register.
+// extraRunnables are components still to come, added to the manager after
+// mount's (components.go). The next is frps's server plugin (#90,
+// internal/frpsplugin): a Runnable without leader election that serves its
+// Handler at agentapi.FrpsPluginPath on host.FrpsPluginAddr() (base+8), with an
+// Index fed from mgr's cache of Allocations and Instances and the credential
+// files under host.CredentialsDir().
 var extraRunnables []func(mgr manager.Manager, host agentapi.Host, backend agentapi.Backend) (manager.Runnable, error)
 
-func run(ctx context.Context, f flags) error {
+func run(ctx context.Context, f flags, d deps) error {
+	scheme, err := d.providerScheme()
+	if err != nil {
+		return err
+	}
+	if err := checkScheme(scheme); err != nil {
+		return err
+	}
 	if err := checkCredentialsDir(f.host.CredentialsDir()); err != nil {
+		return err
+	}
+	front, err := frontSettings(f, d)
+	if err != nil {
 		return err
 	}
 	cfg, err := clientcmd.BuildConfigFromFlags("", f.kubeconfig)
@@ -149,6 +161,10 @@ func run(ctx context.Context, f flags) error {
 		FrontConfigured: f.frontMode != "", HealthAddr: f.healthAddr, LeaderElection: f.leaderElect, Workers: f.workers,
 	})
 	if err != nil {
+		return err
+	}
+	w := wiring{cfg: cfg, host: f.host, scheme: scheme, front: front, newPlatform: d.newPlatform, log: ctrl.Log.WithName("hpcburst-controller").WithValues("portBase", f.host.PortBase)}
+	if err := mount(mgr, w, backend); err != nil {
 		return err
 	}
 	for _, add := range extraRunnables {
@@ -177,7 +193,7 @@ func main() {
 	}, funcr.Options{LogTimestamp: true}))
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
-	if err := run(ctx, f); err != nil {
+	if err := run(ctx, f, defaultDeps()); err != nil {
 		fmt.Fprintln(os.Stderr, "hpcburst-controller:", err)
 		os.Exit(1)
 	}
