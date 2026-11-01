@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -388,5 +390,94 @@ func assertRefusedFileSendsNothing(t *testing.T, reasoning bool, file string, wa
 	}
 	if events := h.chatEvents(); len(events) != 0 {
 		t.Errorf("%d chat requests reached the engine, want none: %+v", len(events), events)
+	}
+}
+
+// The sampling of a verification generation's checks is read from the staged
+// file once per generation, and a new generation reads it again (checks.go,
+// runChecks): the controller advances the verification generation when the
+// worker restarts (HBEP-7, the alpha ladder, rung 1). This test changes the
+// staged file after generation 1, restarts the worker for generation 2 as the
+// controller does (the worker's generation and the verification generation
+// raised together, the Instance's unchanged so nothing is restaged), and reads
+// what generation 2's fingerprint request carried. A generation 2 that kept
+// generation 1's cached sampling would send the old values (PR #169 review,
+// Astra N1). The expected values are written out by hand from each file.
+func TestANewVerificationGenerationReadsTheChangedFileAgain(t *testing.T) {
+	first := `{"do_sample": true, "temperature": 0.6, "top_k": 20, "top_p": 0.95}`
+	for _, tc := range []struct {
+		name   string
+		second string
+		// want is generation 2's fingerprint request, or refused is the
+		// refusal its verification reports instead (no request is sent).
+		want    *enginedouble.RequestSampling
+		refused *agentapi.GenerationConfigError
+		config  map[string]string
+	}{
+		{"new values are sampled", `{"do_sample": true, "temperature": 0.9, "top_k": 40, "top_p": 0.8}`,
+			&enginedouble.RequestSampling{Temperature: fp(0.9), TopP: fp(0.8), TopK: ip(40), MinP: fp(0), RepetitionPenalty: fp(1), PresencePenalty: fp(0), FrequencyPenalty: fp(0), Seed: ip(1101)},
+			nil, map[string]string{"temperature": "0.9", "top_k": "40", "top_p": "0.8"}},
+		{"a value vLLM refuses is refused", `{"do_sample": true, "temperature": 2.5, "top_k": 20, "top_p": 0.95}`,
+			nil, &agentapi.GenerationConfigError{Param: "temperature", Value: "2.5", Want: "[0, 2]"}, map[string]string{"temperature": "2.5", "top_k": "20", "top_p": "0.95"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sum := sha256.Sum256([]byte(first))
+			files := append(append([]agentapi.FileDigest(nil), defaultFiles...), agentapi.FileDigest{Path: "generation_config.json", SHA256: hex.EncodeToString(sum[:])})
+			h := newHarness(t, harnessOptions{hub: map[string]string{"/org/model/resolve/" + samplingRevision + "/generation_config.json": first}})
+			h.set(withReasoning(h.runState("", 1, 0, verifyChecks(1, files))))
+			r1 := h.waitReport("verification 1", 60*time.Second, verified(1))
+			if v := r1.Instance.Checks.Verify; v.Error != "" || v.GenerationConfigRefused != nil || !reflect.DeepEqual(v.GenerationConfig, map[string]string{"temperature": "0.6", "top_k": "20", "top_p": "0.95"}) {
+				t.Fatalf("generation 1: error %q, refusal %+v, config %v", v.Error, v.GenerationConfigRefused, v.GenerationConfig)
+			}
+			pid := worker0(r1).PID
+			// The staged file changes (a restart of the worker does not restage it).
+			path := filepath.Join(h.stagingDir, agentapi.StagedCheckpointDir("org/model", samplingRevision), "generation_config.json")
+			if err := os.WriteFile(path, []byte(tc.second), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			// The worker restarts for verification generation 2. The file list
+			// is the default one: the changed file is not rehashed.
+			h.set(withReasoning(h.runState("", 1, 1, verifyChecks(2, nil))))
+			r2 := h.waitReport("verification 2 of the restarted worker", 60*time.Second, func(r agentapi.Report) bool {
+				w := worker0(r)
+				return verified(2)(r) && w.Generation == 1 && w.PID != pid
+			})
+			v := r2.Instance.Checks.Verify
+			if !reflect.DeepEqual(v.GenerationConfig, tc.config) {
+				t.Errorf("generation 2 reports the config %v, want the changed file's %v", v.GenerationConfig, tc.config)
+			}
+			if !reflect.DeepEqual(v.GenerationConfigRefused, tc.refused) {
+				t.Errorf("generation 2 reports the refusal %+v, want %+v", v.GenerationConfigRefused, tc.refused)
+			}
+			if tc.refused != nil {
+				if v.Fingerprint != "" {
+					t.Errorf("generation 2 read the engine (fingerprint %q) though its file is refused", v.Fingerprint)
+				}
+				// The agent is told to stop; once the engine has gone, its log is final.
+				h.set(agentapi.DesiredState{Action: agentapi.ActionIdle, Settings: h.runState("", 1, 1, nil).Settings})
+				h.waitReport("worker stopped", 60*time.Second, func(r agentapi.Report) bool {
+					w := worker0(r)
+					return w != nil && w.Phase == agentapi.PartStopped
+				})
+				if n := len(h.chatEvents()); n != 1 {
+					t.Errorf("%d chat requests reached the engine, want only generation 1's", n)
+				}
+				return
+			}
+			// The double logs a request as it returns, which can follow the
+			// agent's report by a moment: wait on the log for generation 2's.
+			var events []enginedouble.LogEvent
+			for deadline := time.Now().Add(20 * time.Second); len(events) < 2; time.Sleep(10 * time.Millisecond) {
+				if events = h.chatEvents(); len(events) < 2 && time.Now().After(deadline) {
+					t.Fatalf("the engine double logged %d chat requests, want generation 2's as well", len(events))
+				}
+			}
+			if len(events) != 2 {
+				t.Fatalf("%d chat requests, want one per generation", len(events))
+			}
+			if got := events[1].Sampling; got == nil || !reflect.DeepEqual(*got, *tc.want) {
+				t.Errorf("generation 2's fingerprint request carried %s, want %s", samplingText(got), samplingText(tc.want))
+			}
+		})
 	}
 }
