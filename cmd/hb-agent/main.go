@@ -121,7 +121,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		StagingDir:  job.Config.StagingDir,
 		Apptainer:   apptainer,
 		TmpDir:      runDir,
-		HubEndpoint: getenv("HF_ENDPOINT"),
+		HubEndpoint: hubEndpoint(job.Config, getenv),
 		BaseEnv:     os.Environ(),
 		Log:         stderr,
 	})
@@ -163,4 +163,15 @@ func lookTool(configured, name string) (string, error) {
 		return configured, nil
 	}
 	return exec.LookPath(name)
+}
+
+// hubEndpoint is the Hub origin the agent stages from: agent.json's, which the
+// controller writes from its own HF_ENDPOINT, or, when agent.json names none,
+// this job's HF_ENDPOINT (ruling of 1 Nov 2026 on #156: a job does not inherit
+// the control-plane host's environment). Empty means the public Hub.
+func hubEndpoint(cfg agentapi.AgentConfig, getenv func(string) string) string {
+	if cfg.HubEndpoint != "" {
+		return cfg.HubEndpoint
+	}
+	return getenv("HF_ENDPOINT")
 }

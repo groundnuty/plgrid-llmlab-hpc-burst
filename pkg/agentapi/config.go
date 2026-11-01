@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -79,6 +80,14 @@ type AgentConfig struct {
 	// DialHomeDir is the resolved absolute dial-home directory,
 	// <home>/DialHomeDir.
 	DialHomeDir string `json:"dialHomeDir"`
+
+	// HubEndpoint is the origin of the Hugging Face Hub the agent stages the
+	// checkpoint's files from: the controller's HF_ENDPOINT, which the
+	// Provider controller writes here because a job, reached over ssh, does
+	// not inherit the control-plane host's environment (ruling of 1 Nov 2026
+	// on #156). Empty, the agent uses its own HF_ENDPOINT, then the public
+	// Hub. Set, it must pass CheckHubEndpoint.
+	HubEndpoint string `json:"hubEndpoint,omitempty"`
 }
 
 // SSHForward is what the agent's ssh forward needs besides the endpoint and the
@@ -214,5 +223,36 @@ func (c AgentConfig) Validate() error {
 			bad("%s %q: want an absolute path of letters, digits and ._:=,/- with no ..", name, p)
 		}
 	}
+	if c.HubEndpoint != "" {
+		if err := CheckHubEndpoint(c.HubEndpoint); err != nil {
+			bad("hubEndpoint: %v", err)
+		}
+	}
 	return errors.Join(errs...)
+}
+
+// CheckHubEndpoint refuses a Hub origin the agent and the controller would not
+// use: it must be a scheme and a host (and port) only, https, or http for a
+// loopback host (a local Hub double), as pkg/hubfiles requires.
+func CheckHubEndpoint(origin string) error {
+	u, err := url.Parse(origin)
+	switch {
+	case err != nil:
+		return fmt.Errorf("%q is not a URL: %v", origin, err)
+	case u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || strings.Trim(u.Path, "/") != "":
+		return fmt.Errorf("%q must be a scheme and a host only", origin)
+	case u.Scheme == "https":
+		return nil
+	case u.Scheme == "http" && loopbackHost(u.Hostname()):
+		return nil
+	}
+	return fmt.Errorf("%q must be https (http only for a loopback host)", origin)
+}
+
+func loopbackHost(h string) bool {
+	if h == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
 }

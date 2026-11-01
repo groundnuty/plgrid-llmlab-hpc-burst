@@ -26,8 +26,11 @@
 // Host.AgentBuildsDir(); the agent API binds Host.AgentEndpointAddr().
 //
 // Environment: HF_ENDPOINT, when set, is the origin of the Hugging Face Hub
-// that the lifecycle controller lists checkpoints from, as hb-agent downloads
-// them from it (cmd/hb-agent); unset, it is https://huggingface.co.
+// that the lifecycle controller lists checkpoints from; it is written into
+// each Allocation's agent.json (hubEndpoint), from which hb-agent downloads
+// them, since a job does not inherit this host's environment. Unset, it is
+// https://huggingface.co. A value agentapi.CheckHubEndpoint refuses stops the
+// controller at start.
 //
 // It exits 0 after SIGTERM or SIGINT once the manager has stopped, 1 on a
 // failure (a Provider-manager scheme without apps/v1, and front settings that
@@ -161,11 +164,17 @@ func run(ctx context.Context, f flags, d deps) error {
 	if err != nil {
 		return fmt.Errorf("kubeconfig: %w", err)
 	}
-	mgr, backend, err := lifecycle.NewManager(managerOptions(f, cfg, os.Getenv))
+	opts := managerOptions(f, cfg, os.Getenv)
+	if opts.HubEndpoint != "" {
+		if err := agentapi.CheckHubEndpoint(opts.HubEndpoint); err != nil {
+			return fmt.Errorf("%s: %w", hubEndpointEnv, err)
+		}
+	}
+	mgr, backend, err := lifecycle.NewManager(opts)
 	if err != nil {
 		return err
 	}
-	w := wiring{cfg: cfg, host: f.host, scheme: scheme, front: front, newPlatform: d.newPlatform, log: ctrl.Log.WithName("hpcburst-controller").WithValues("portBase", f.host.PortBase)}
+	w := wiring{cfg: cfg, host: f.host, scheme: scheme, front: front, hubEndpoint: opts.HubEndpoint, newPlatform: d.newPlatform, log: ctrl.Log.WithName("hpcburst-controller").WithValues("portBase", f.host.PortBase)}
 	if err := mount(mgr, w, backend); err != nil {
 		return err
 	}

@@ -241,6 +241,7 @@ type wiring struct {
 	host        agentapi.Host
 	scheme      *runtime.Scheme
 	front       *providerctl.FrontSettings
+	hubEndpoint string // HF_ENDPOINT, for agent.json
 	newPlatform providerctl.PlatformFactory
 	log         logr.Logger
 }
@@ -289,6 +290,7 @@ func (w wiring) setupBatch(pm manager.Manager, provider string) error {
 		CredentialsDir: w.host.CredentialsDir(),
 		AgentBuildsDir: w.host.AgentBuildsDir(),
 		Front:          w.front,
+		HubEndpoint:    w.hubEndpoint,
 		Log:            logging.NewLogrLogger(pm.GetLogger().WithName("provider").WithValues("provider", provider)),
 		Recorder:       event.NewAPIRecorder(pm.GetEventRecorderFor(v1alpha1.FieldManagerProvider)),
 	})
