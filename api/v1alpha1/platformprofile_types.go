@@ -81,11 +81,12 @@ type PartitionProfile struct {
 	// keeps its run directory (the engine's socket) and Apptainer's build tree
 	// there. It has stagingDir's form, an absolute path or one that starts
 	// with an environment variable, but the variable is one the job sets, such
-	// as $SCRATCH_LOCAL, the node-local disk of Helios's localfs feature, so it
-	// is expanded inside the job, never on the login node. A variable that is
-	// unset or empty there stops the job before the agent starts. Absent, the
-	// job keeps the TMPDIR the scheduler gives it (science-agent ruling, 1 Nov
-	// 2026, issue #125: on Helios plgrid-gpu-gh200 that TMPDIR is on Lustre,
+	// as $MEMFS, the RAM disk of Helios's memfs feature, so it is expanded
+	// inside the job, never on the login node. A variable that is unset or
+	// empty there stops the job before the agent starts, and the job ends
+	// AllocationFailed. Absent, the job keeps the TMPDIR the scheduler gives
+	// it (HBEP-4, Submission and Platform profile schema; HBEP-7, The
+	// allocation agent: on Helios plgrid-gpu-gh200 that TMPDIR is on Lustre,
 	// near its inode quota).
 	//
 	// +optional
@@ -96,12 +97,11 @@ type PartitionProfile struct {
 	TmpDir string `json:"tmpDir,omitempty"`
 
 	// TmpDirFeature is the Slurm node feature that TmpDir needs, such as
-	// localfs, the feature that gives a Helios job its node-local disk in
-	// $SCRATCH_LOCAL. The Slurm provider then submits with
-	// --constraint=<feature>, so the job lands on a node that sets TmpDir's
-	// variable. One feature name, never a constraint expression. Absent, no
-	// constraint is added (science-agent ruling, 1 Nov 2026, issue #125). It
-	// requires TmpDir.
+	// memfs, the feature that gives a Helios job its RAM disk in $MEMFS. The
+	// Slurm provider then submits with --constraint=<feature>, so the job
+	// gets the variable TmpDir names. One feature name, never a constraint
+	// expression. Absent, no constraint is added (HBEP-4, The Slurm dialect
+	// and Platform profile schema). It requires TmpDir.
 	//
 	// +optional
 	// +kubebuilder:validation:MinLength=1

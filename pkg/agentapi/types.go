@@ -347,8 +347,8 @@ type Staging struct {
 	// be missed. On a per-job tmpfs such as Helios's $MEMFS it counts the
 	// job's bytes alone; on a shared TMPDIR such as Lustre it counts other
 	// users' too and is only an upper bound. It measures the RAM-disk budget
-	// a partition's memPerGpu includes (HBEP-4; science-agent ruling, 1 Nov
-	// 2026, issue #125).
+	// a partition's memPerGpu includes (HBEP-4, Platform profile schema;
+	// HBEP-7, The allocation agent and Test plan).
 	BuildPeakTmpBytes int64 `json:"buildPeakTmpBytes,omitempty"`
 }
 
