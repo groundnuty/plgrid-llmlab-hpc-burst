@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -146,10 +147,11 @@ func TestTunnelUnknownUIDFailsFastAsAConnectionFailure(t *testing.T) {
 	f := newTunFront(t, rig)
 	dial, _ := rig.serveDialHome(ModeSSH)
 
-	start := time.Now()
+	// errNoProxy comes only from frps's 404, never from the set-up deadline,
+	// so the error itself shows the dial failed at once.
 	_, err := f.tun.Dial(context.Background(), "00000000-0000-4000-8000-999999999999")
-	if !errors.Is(err, errNoProxy) || time.Since(start) > time.Second {
-		t.Fatalf("CONNECT for an unknown UID: %v after %s, want frps's 404 within a second", err, time.Since(start))
+	if !errors.Is(err, errNoProxy) {
+		t.Fatalf("CONNECT for an unknown UID: %v, want frps's 404", err)
 	}
 
 	f.tunDeployment(2)
@@ -182,9 +184,7 @@ func TestTunnelUnknownUIDFailsFastAsAConnectionFailure(t *testing.T) {
 	}
 	keyOfB := "ns/md-b"
 	for i := 0; i < 40 && f.router.failures(keyOfB) == 0; i++ {
-		start := time.Now()
 		status, body, id := f.chat(fmt.Sprintf("session-%d", i))
-		took := time.Since(start)
 		if status != http.StatusOK {
 			t.Fatalf("request %d: %d %s, want 200 from A after the one resend", i, status, body)
 		}
@@ -192,10 +192,12 @@ func TestTunnelUnknownUIDFailsFastAsAConnectionFailure(t *testing.T) {
 			if rec := f.record(id); rec.InstanceUID != string(a) {
 				t.Errorf("the request that met B's 404 was answered by %q, want A", rec.InstanceUID)
 			}
-			if took > 2*time.Second {
-				t.Errorf("the request that met B's 404 took %s: a 404 must fail at once, not at tunnelSetupTimeout", took)
-			}
 		}
+	}
+	// The failure logged is frps's 404, not the set-up deadline: a 404 fails
+	// at once.
+	if logs := f.logs.String(); !strings.Contains(logs, errNoProxy.Error()) || strings.Contains(logs, "no answer within tunnelSetupTimeout") {
+		t.Errorf("the logged set-up failure is not frps's 404 alone:\n%s", logs)
 	}
 	if n := f.router.failures(keyOfB); n != 1 {
 		t.Fatalf("B's failures = %d after its 404, want 1 (40 sessions never routed to B first?)", n)
@@ -217,6 +219,17 @@ func TestTunnelUnknownUIDFailsFastAsAConnectionFailure(t *testing.T) {
 // (HBEP-5, open question 5), and after the second cut set-up the client gets
 // 502 upstream_unreachable; each set-up counts toward the Instance's pause,
 // and the engine sees nothing.
+//
+// A hung frps costs a request two 5 s set-ups by design, and both count
+// toward the pause (@hpc-burst-science-agent, 1 Nov 2026). HBEP-5's open
+// question 5 allows the resend "on a fresh connection to the same one", and
+// frps is shared by every Instance, so a resend fails wherever it goes; the
+// pause and the probe then take the Instance out of routing. Do not "fix" the
+// second set-up away.
+//
+// The bounds below are a lower bound, which a deadline cannot beat, and
+// generous watchdogs; that the cut comes from tunnelSetupTimeout itself is
+// TestRunBoundsTheTunnelSetUpByTunnelSetupTimeout.
 func TestTunnelSetupDeadlineCutsAHungConnect(t *testing.T) {
 	rig := newFrpRig(t)
 	f := newTunFront(t, rig)
@@ -291,13 +304,16 @@ func TestTunnelSetupDeadlineCutsAHungConnect(t *testing.T) {
 	if d.err == nil || !strings.Contains(d.err.Error(), "tunnelSetupTimeout") {
 		t.Errorf("the Tunnel's dial to a frozen frps: %v, want the set-up deadline", d.err)
 	}
-	if d.took < 5*time.Second-50*time.Millisecond || d.took > 6*time.Second {
+	if !errors.Is(d.err, os.ErrDeadlineExceeded) && !errors.Is(d.err, context.DeadlineExceeded) {
+		t.Errorf("the Tunnel's dial to a frozen frps ended with %v, not the set-up deadline", d.err)
+	}
+	if d.took < 5*time.Second-50*time.Millisecond || d.took > 15*time.Second {
 		t.Errorf("the hung CONNECT was cut after %s, want tunnelSetupTimeout (5 s)", d.took)
 	}
 	if status != http.StatusBadGateway || !strings.Contains(body, "upstream_unreachable") {
 		t.Fatalf("through a hung CONNECT: %d %s, want 502 upstream_unreachable", status, body)
 	}
-	if took < 10*time.Second-100*time.Millisecond || took > 12*time.Second {
+	if took < 10*time.Second-100*time.Millisecond || took > 30*time.Second {
 		t.Errorf("the request took %s, want two set-ups cut at 5 s each", took)
 	}
 	if n := f.router.failures("ns/md-a"); n != 2 {
