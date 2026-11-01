@@ -7,19 +7,26 @@ import (
 	"strings"
 )
 
-// chatRequest is the part of ChatCompletionRequest the agent sends
-// (vllm/entrypoints/openai/chat_completion/protocol.py).
+// sampling is what a request of either generation endpoint says about how to
+// generate and how to answer: the fields ChatCompletionRequest
+// (vllm/entrypoints/openai/chat_completion/protocol.py) and CompletionRequest
+// (vllm/entrypoints/openai/completion/protocol.py) share, under the same names.
+type sampling struct {
+	Temperature    *float64       `json:"temperature"`
+	Stream         bool           `json:"stream"`
+	StreamOptions  *streamOptions `json:"stream_options"`
+	IgnoreEOS      bool           `json:"ignore_eos"`
+	MinTokens      int            `json:"min_tokens"`
+	ReturnTokenIDs bool           `json:"return_token_ids"`
+}
+
+// chatRequest is the part of ChatCompletionRequest the agent sends.
 type chatRequest struct {
+	sampling
 	Model               string          `json:"model"`
 	Messages            []message       `json:"messages"`
 	MaxTokens           *int            `json:"max_tokens"`
 	MaxCompletionTokens *int            `json:"max_completion_tokens"`
-	Temperature         *float64        `json:"temperature"`
-	Stream              bool            `json:"stream"`
-	StreamOptions       *streamOptions  `json:"stream_options"`
-	IgnoreEOS           bool            `json:"ignore_eos"`
-	MinTokens           int             `json:"min_tokens"`
-	ReturnTokenIDs      bool            `json:"return_token_ids"`
 	Tools               []tool          `json:"tools"`
 	ToolChoice          json.RawMessage `json:"tool_choice"`
 }
@@ -133,16 +140,17 @@ func lastUserText(msgs []message) string {
 }
 
 // maxTokensOf resolves max_tokens as vLLM does: max_completion_tokens when
-// set, else max_tokens (chat_completion/serving.py), else what remains of the
-// context after the prompt. The error message is the double's own wording of
-// a context-length overflow: the v0.32.0 source of vLLM's text was not read.
-func (h *handler) maxTokensOf(req chatRequest, promptLen int) (int, error) {
+// set (a chat request's; nil for a completions request), else max_tokens
+// (chat_completion/serving.py), else what remains of the context after the
+// prompt. The error message is the double's own wording of a context-length
+// overflow: the v0.32.0 source of vLLM's text was not read.
+func (h *handler) maxTokensOf(promptLen int, maxTokens, maxCompletionTokens *int) (int, error) {
 	max := h.cfg.MaxModelLen - promptLen
 	switch {
-	case req.MaxCompletionTokens != nil:
-		max = *req.MaxCompletionTokens
-	case req.MaxTokens != nil:
-		max = *req.MaxTokens
+	case maxCompletionTokens != nil:
+		max = *maxCompletionTokens
+	case maxTokens != nil:
+		max = *maxTokens
 	}
 	if max < 1 || promptLen+max > h.cfg.MaxModelLen {
 		return 0, fmt.Errorf("This model's maximum context length is %d tokens. However, you requested %d output tokens and your prompt contains at least %d input tokens, for a total of %d tokens. Please reduce the length of the input prompt or the number of requested output tokens.",
@@ -151,10 +159,45 @@ func (h *handler) maxTokensOf(req chatRequest, promptLen int) (int, error) {
 	return max, nil
 }
 
-// chat is POST /v1/chat/completions.
-func (h *handler) chat(w http.ResponseWriter, r *http.Request) {
+// engineFails answers 500 and says so when the errors-only mode is on: both
+// generation endpoints fail the same way.
+func (h *handler) engineFails(w http.ResponseWriter) bool {
 	if h.cfg.ErrorsOnly {
 		writeError(w, http.StatusInternalServerError, "InternalServerError", "the engine failed")
+	}
+	return h.cfg.ErrorsOnly
+}
+
+// modelExists answers 404 and returns false for a request that names a model
+// other than the served one; an absent name means the served model.
+func (h *handler) modelExists(w http.ResponseWriter, model string) bool {
+	if model != "" && model != h.cfg.ServedName {
+		writeError(w, http.StatusNotFound, "NotFoundError", fmt.Sprintf("The model `%s` does not exist.", model))
+		return false
+	}
+	return true
+}
+
+// limitFor resolves a tokenized request's output limit and checks min_tokens
+// against it, answering 400 and returning false on a bad request. Both
+// generation endpoints share it.
+func (h *handler) limitFor(w http.ResponseWriter, sp sampling, promptLen int, maxTokens, maxCompletionTokens *int) (int, bool) {
+	max, err := h.maxTokensOf(promptLen, maxTokens, maxCompletionTokens)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "BadRequestError", err.Error())
+		return 0, false
+	}
+	if sp.MinTokens < 0 || sp.MinTokens > max {
+		// SamplingParams._verify_args, vllm/sampling_params.py:694-701.
+		writeError(w, http.StatusBadRequest, "BadRequestError", fmt.Sprintf("min_tokens must be less than or equal to max_tokens=%d, got %d.", max, sp.MinTokens))
+		return 0, false
+	}
+	return max, true
+}
+
+// chat is POST /v1/chat/completions.
+func (h *handler) chat(w http.ResponseWriter, r *http.Request) {
+	if h.engineFails(w) {
 		return
 	}
 	var req chatRequest
@@ -166,24 +209,31 @@ func (h *handler) chat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "BadRequestError", "messages must not be empty")
 		return
 	}
-	if req.Model != "" && req.Model != h.cfg.ServedName {
-		writeError(w, http.StatusNotFound, "NotFoundError", fmt.Sprintf("The model `%s` does not exist.", req.Model))
+	if !h.modelExists(w, req.Model) {
 		return
 	}
 	_, promptIDs := tokenize(renderChat(req.Messages, true, h.cfg.TemplateOverhead))
-	max, err := h.maxTokensOf(req, len(promptIDs))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "BadRequestError", err.Error())
+	max, ok := h.limitFor(w, req.sampling, len(promptIDs), req.MaxTokens, req.MaxCompletionTokens)
+	if !ok {
 		return
 	}
-	if req.MinTokens < 0 || req.MinTokens > max {
-		// SamplingParams._verify_args, vllm/sampling_params.py:694-701.
-		writeError(w, http.StatusBadRequest, "BadRequestError", fmt.Sprintf("min_tokens must be less than or equal to max_tokens=%d, got %d.", max, req.MinTokens))
-		return
-	}
-	ans := h.answerFor(req, promptIDs, max)
+	ans := h.answerFor(req.sampling, h.toolCallFor(req), promptIDs, max)
+	h.run(r, promptIDs, max, ans, req.Stream, func(s *slot, u usage) (int, bool) {
+		if req.Stream {
+			return h.stream(w, r, req, ans, s, u)
+		}
+		return h.single(w, r, req, ans, s, u)
+	})
+}
 
-	rec := LogEvent{Event: "request", Path: r.URL.Path, PromptTokens: len(promptIDs), MaxTokens: max, Stream: req.Stream, Outcome: "cancelled"}
+// run takes one tokenized, validated request through the engine, whatever its
+// endpoint: it is admitted to a sequence slot, waits for its first token
+// (slow-first, never-settle), and then respond generates the tokens and writes
+// the answer, returning how many tokens it sent and whether the answer was
+// completed. run records the request in the engine's log and releases the slot
+// with the finish reason of a completed answer, "abort" otherwise.
+func (h *handler) run(r *http.Request, promptIDs []int32, limit int, ans answer, stream bool, respond func(s *slot, u usage) (int, bool)) {
+	rec := LogEvent{Event: "request", Path: r.URL.Path, PromptTokens: len(promptIDs), MaxTokens: limit, Stream: stream, Outcome: "cancelled"}
 	finish := "abort"
 	defer func() {
 		if h.e.record != nil {
@@ -197,19 +247,13 @@ func (h *handler) chat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { s.release(finish) }()
-	wait := h.e.beforeFirstToken(shapeKey{len(promptIDs), max}, ans.tokens())
+	wait := h.e.beforeFirstToken(shapeKey{len(promptIDs), limit}, ans.tokens())
 	if !sleep(ctx, wait) {
 		return
 	}
 
 	u := usage{len(promptIDs), ans.tokens(), len(promptIDs) + ans.tokens()}
-	var sent int
-	var completed bool
-	if req.Stream {
-		sent, completed = h.stream(w, r, req, ans, s, u)
-	} else {
-		sent, completed = h.single(w, r, req, ans, s, u)
-	}
+	sent, completed := respond(s, u)
 	rec.Tokens = sent
 	if completed {
 		rec.Outcome, finish = "completed", ans.finish
@@ -232,15 +276,15 @@ func (c Config) reasoningLen(max int) int {
 // vocabulary: its first tokens are the reasoning, when the model reasons, so
 // a greedy request gives the same token ids with or without the reasoning
 // modes up to where the answers part. A reply that spends all max tokens
-// reasoning has no answer and finishes with "length".
-func (h *handler) answerFor(req chatRequest, promptIDs []int32, limit int) answer {
+// reasoning has no answer and finishes with "length". tc is the tool call the
+// model makes, nil for none (a completions request has none).
+func (h *handler) answerFor(sp sampling, tc *toolCall, promptIDs []int32, limit int) answer {
 	r := h.cfg.reasoningLen(limit)
-	tc := h.toolCallFor(req)
 	if r >= limit {
 		tc = nil
 	}
-	greedy := req.Temperature == nil || *req.Temperature == 0
-	p := genParams{promptIDs: promptIDs, maxTokens: limit - r, minTokens: max(0, req.MinTokens-r), ignoreEOS: req.IgnoreEOS, greedy: greedy}
+	greedy := sp.Temperature == nil || *sp.Temperature == 0
+	p := genParams{promptIDs: promptIDs, maxTokens: limit - r, minTokens: max(0, sp.MinTokens-r), ignoreEOS: sp.IgnoreEOS, greedy: greedy}
 
 	if tc != nil {
 		pieces := argumentPieces(tc.Arguments)
@@ -257,7 +301,7 @@ func (h *handler) answerFor(req chatRequest, promptIDs []int32, limit int) answe
 	}
 
 	if greedy {
-		p.repeat = h.e.repeatOf(repeatKey{promptSeed(promptIDs), limit, req.MinTokens, req.IgnoreEOS})
+		p.repeat = h.e.repeatOf(repeatKey{promptSeed(promptIDs), limit, sp.MinTokens, sp.IgnoreEOS})
 	}
 	n, finish := r, "length"
 	if limit > r {
@@ -317,4 +361,15 @@ func (h *handler) generateTokens(r *http.Request, s *slot, n int, emit func(i in
 		}
 	}
 	return true
+}
+
+// stalls is the stall mode: after the first token (g is 0) of a stream the
+// engine hangs until the client goes away, and stalls returns true. Both
+// generation endpoints' streams call it after sending a token.
+func (h *handler) stalls(r *http.Request, g int) bool {
+	if g == 0 && h.cfg.Stall {
+		<-r.Context().Done()
+		return true
+	}
+	return false
 }

@@ -43,8 +43,14 @@ type streamChunk struct {
 
 func (s *testServer) stream(body map[string]any) streamResult {
 	s.t.Helper()
+	return s.streamAt("/v1/chat/completions", body)
+}
+
+// streamAt posts a streamed request to path and cuts the answer into events.
+func (s *testServer) streamAt(path string, body map[string]any) streamResult {
+	s.t.Helper()
 	body["stream"] = true
-	r := s.post("/v1/chat/completions", body)
+	r := s.post(path, body)
 	res := streamResult{status: r.status, header: r.header, raw: r.body}
 	if r.status != 200 {
 		return res

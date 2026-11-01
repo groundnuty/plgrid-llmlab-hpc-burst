@@ -60,7 +60,7 @@ type Config struct {
 	HealthFail         bool          // /health answers 503
 	HealthFailAfter    time.Duration // /health answers 200 until this long after the handler was made, then 503, when HealthFailAfterSet
 	HealthFailAfterSet bool
-	ErrorsOnly         bool          // chat answers 500
+	ErrorsOnly         bool          // chat and completions answer 500
 	SlowFirst          time.Duration // the first request of each shape waits this long before its first token
 	NeverSettle        int           // each request of a shape waits this percent of TokenDelay*tokens longer than the last
 	Stall              bool          // a streamed request stops after its first token and hangs

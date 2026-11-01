@@ -8,10 +8,10 @@
 // # The engine
 //
 // Handler serves the HTTP subset the agent reads: /health, /version,
-// /v1/models, /tokenize, /v1/chat/completions (streamed and not) and
-// /metrics. Each behaviour follows the vLLM v0.32.0 source named in the
-// comment of the code that implements it. Where the double is deliberately
-// simpler than vLLM, this documentation says so.
+// /v1/models, /tokenize, /v1/chat/completions and /v1/completions (each
+// streamed and not) and /metrics. Each behaviour follows the vLLM v0.32.0
+// source named in the comment of the code that implements it. Where the double
+// is deliberately simpler than vLLM, this documentation says so.
 //
 // The tokenizer is deterministic. A token is a whitespace-separated word, and
 // its id is the FNV-1a 32-bit hash of the word, modulo 100000, plus 1. The
@@ -37,6 +37,37 @@
 // vllm:num_preemptions_total stays 0 and the time-per-output-token histogram
 // observes, for each finished request, TokenDelay if it generated more than one
 // token and 0 otherwise (the mean vLLM computes, exactly, not measured).
+//
+// # Completions
+//
+// POST /v1/completions takes a prompt that is a string (any other form is a
+// 400, and so is a prompt of no tokens, as in vLLM), max_tokens, which is 16
+// when the request does not name it and the rest of the context when it is
+// null (completion/protocol.py:63), stream, stream_options.include_usage,
+// return_token_ids, and the sampling fields of the chat path (temperature,
+// min_tokens, ignore_eos). The key guard, the model name check, the token
+// counting and the generation rules above are the chat path's, except that a
+// prompt has no template: prompt_tokens is the prompt's word count, with no
+// TemplateOverhead. The reply is vLLM's CompletionResponse: object "text_completion",
+// choices[0].text (the tokens' words joined by a space), finish_reason,
+// stop_reason (null) and usage. A stream is vLLM's completion_stream_generator:
+// no role chunk, one chunk per token with that token's text, finish_reason on
+// the last token's chunk, a usage chunk with no choices when include_usage is
+// set, then data: [DONE].
+//
+// Every mode that acts on a request acts on a completions request the same way
+// (the token delay, slow-first and never-settle, stall, errors-only, kv-low,
+// early-stop, loop-above, the greedy modes, reports-nothing for the
+// fingerprint), and the counters in /metrics count it: the slow-first and
+// never-settle shapes and the greedy-repeat counts are shared with chat, since
+// they belong to the engine. Two groups of modes act differently, because they
+// are about chat by design. The tool modes (tool-malformed, tool-args-null,
+// tool-args-badtype, no-tool-call) change nothing, as a completions request
+// has no tools. The reasoning modes (reasoning-first, reasoning-forever) make
+// the model reason for the same number of tokens, with the same finish reason
+// and usage, but this endpoint has no reasoning parser, so the reasoning tokens
+// are part of choices[0].text (and of the stream's text deltas) rather than a
+// separate field.
 //
 // # Reasoning and tool calls
 //
