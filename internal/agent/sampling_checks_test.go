@@ -278,3 +278,74 @@ func TestTheFingerprintRequestIsSampledLikeTheOtherChecks(t *testing.T) {
 		t.Errorf("the fingerprint request carried %s, want %s", samplingText(got), samplingText(&want))
 	}
 }
+
+// A staged generation_config.json with a value vLLM refuses fails
+// verification for every model, greedy or sampled, before any check request
+// (HBEP-7; science-agent ruling, 1 Nov 2026, N7): vLLM applies the file's
+// values as the server's defaults and would refuse them on every request. The
+// agent reports the refusal as a struct, GenerationConfigRefused, naming the
+// key and the value; it sends the engine no chat request at all (the
+// fingerprint, qualification and warm-up included), though the desired state
+// asks for all three. The expected refusals are written out by hand from
+// vLLM's rules (temperature in [0, 2], top_k an integer).
+func TestARefusedFileFailsVerificationAndSendsNoCheckRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		reasoning bool
+		file      string
+		want      agentapi.GenerationConfigError
+		config    map[string]string
+	}{
+		{"a reasoning model with temperature 2.5", true, `{"do_sample": true, "temperature": 2.5, "top_k": 20, "top_p": 0.95}`,
+			agentapi.GenerationConfigError{Param: "temperature", Value: "2.5", Want: "[0, 2]"},
+			map[string]string{"temperature": "2.5", "top_k": "20", "top_p": "0.95"}},
+		{"a model without a parser with temperature 2.5", false, `{"do_sample": true, "temperature": 2.5, "top_k": 20, "top_p": 0.95}`,
+			agentapi.GenerationConfigError{Param: "temperature", Value: "2.5", Want: "[0, 2]"},
+			map[string]string{"temperature": "2.5", "top_k": "20", "top_p": "0.95"}},
+		{"a reasoning model with temperature \"warm\"", true, `{"temperature": "warm"}`,
+			agentapi.GenerationConfigError{Param: "temperature", Value: `"warm"`, Want: "a number"}, nil},
+		{"a model without a parser with top_k 20.0", false, `{"temperature": 0.6, "top_k": 20.0}`,
+			agentapi.GenerationConfigError{Param: "top_k", Value: "20.0", Want: "an integer"},
+			map[string]string{"temperature": "0.6"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sum := sha256.Sum256([]byte(tc.file))
+			files := append(append([]agentapi.FileDigest(nil), defaultFiles...), agentapi.FileDigest{Path: "generation_config.json", SHA256: hex.EncodeToString(sum[:])})
+			h := newHarness(t, harnessOptions{hub: map[string]string{"/org/model/resolve/" + samplingRevision + "/generation_config.json": tc.file}})
+			checks := &agentapi.Checks{
+				VerificationGeneration: 1,
+				Verify:                 &agentapi.VerifyRequest{Files: files},
+				Qualify:                &agentapi.QualifyRequest{Shapes: hShapes, ToolCalls: true},
+				WarmUp:                 &agentapi.WarmUpRequest{Shapes: hShapes, ToolCalls: true, TargetSessions: 1},
+			}
+			d := h.runState("", 1, 0, checks)
+			if tc.reasoning {
+				d = withReasoning(d)
+			}
+			h.set(d)
+			r := h.waitReport("verification", 60*time.Second, verified(1))
+			v := r.Instance.Checks.Verify
+			if !reflect.DeepEqual(v.GenerationConfigRefused, &tc.want) {
+				t.Errorf("GenerationConfigRefused %+v, want %+v", v.GenerationConfigRefused, tc.want)
+			}
+			if v.Error != "" || v.Fingerprint != "" || v.EngineVersion != "" {
+				t.Errorf("verification read the engine despite the refusal: error %q, fingerprint %q, version %q", v.Error, v.Fingerprint, v.EngineVersion)
+			}
+			if !reflect.DeepEqual(v.GenerationConfig, tc.config) {
+				t.Errorf("GenerationConfig %v, want %v", v.GenerationConfig, tc.config)
+			}
+			// The agent is told to stop; once the engine has gone, its log is final.
+			h.set(agentapi.DesiredState{Action: agentapi.ActionIdle, Settings: d.Settings})
+			last := h.waitReport("worker stopped", 60*time.Second, func(r agentapi.Report) bool {
+				w := worker0(r)
+				return w != nil && w.Phase == agentapi.PartStopped
+			})
+			if c := checksOf(last); c != nil && (c.Qualify != nil || c.WarmUp != nil) {
+				t.Errorf("a refused generation produced qualification %+v or warm-up %+v", c.Qualify, c.WarmUp)
+			}
+			if events := h.chatEvents(); len(events) != 0 {
+				t.Errorf("%d chat requests reached the engine, want none: %+v", len(events), events)
+			}
+		})
+	}
+}

@@ -1,17 +1,10 @@
 package agent
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"io"
-	"log/slog"
 	"maps"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
@@ -112,6 +105,9 @@ func (a *Agent) runChecks(in *instance, i agentapi.DesiredInstance) {
 		return
 	}
 	res := in.checks
+	if in.sampling.refused() && (c.Verify == nil || res.Verify != nil) {
+		return // the file was refused: nothing more is checked in this generation
+	}
 	switch {
 	case c.Verify != nil && res.Verify == nil:
 		a.startVerify(in, *c.Verify, key)
@@ -208,11 +204,18 @@ func (a *Agent) startVerify(in *instance, req agentapi.VerifyRequest, key procKe
 		// The sampling of this generation's checks, read from the staged file
 		// before the first request goes out: verification's own fingerprint
 		// request carries it, and the record reports the same file's values.
-		genConfig, doSample, smp := gs.resolve(ckptDir, reasoning, a.log, gen)
-		res := eng.Verify(ctx, smp)
+		// A file with a value vLLM refuses is reported and nothing is sent to
+		// the engine: no fingerprint, no qualification, no warm-up.
+		g := gs.resolve(ckptDir, reasoning, a.log, gen)
+		var res agentapi.VerifyResult
+		if g.file.refused != nil {
+			res.GenerationConfigRefused = g.file.refused
+		} else {
+			res = eng.Verify(ctx, g.sampling)
+		}
 		res.ImageDigest = digest
-		res.GenerationConfig = maps.Clone(genConfig)
-		res.DoSample = copyBool(doSample)
+		res.GenerationConfig = maps.Clone(g.file.config)
+		res.DoSample = copyBool(g.file.doSample)
 		switch {
 		case len(files) == 0:
 		case reuse:
@@ -250,8 +253,13 @@ func (a *Agent) startQualify(in *instance, req agentapi.QualifyRequest, key proc
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
-		_, _, smp := gs.resolve(ckptDir, reasoning, a.log, gen)
-		res := eng.Qualify(ctx, req, smp)
+		g := gs.resolve(ckptDir, reasoning, a.log, gen)
+		if g.file.refused != nil {
+			// No check runs against a refused file; the unit ends with no result.
+			a.post(func() { a.unitDone(in, u) })
+			return
+		}
+		res := eng.Qualify(ctx, req, g.sampling)
 		res.Done = true
 		a.post(func() {
 			if a.unitDone(in, u) {
@@ -269,8 +277,12 @@ func (a *Agent) startWarmUp(in *instance, n int32, req agentapi.WarmUpRequest, k
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
-		_, _, smp := gs.resolve(ckptDir, reasoning, a.log, gen)
-		round := eng.WarmUpRound(ctx, n, req, smp)
+		g := gs.resolve(ckptDir, reasoning, a.log, gen)
+		if g.file.refused != nil {
+			a.post(func() { a.unitDone(in, u) })
+			return
+		}
+		round := eng.WarmUpRound(ctx, n, req, g.sampling)
 		round.Round = n
 		a.post(func() {
 			if !a.unitDone(in, u) {
@@ -308,167 +320,4 @@ func (a *Agent) finishWarmUp(in *instance) {
 	if in.checks != nil && in.checks.WarmUp != nil {
 		in.checks.WarmUp.Done = true
 	}
-}
-
-// generationConfigName is the checkpoint file vLLM reads a model's generation
-// defaults from (its --generation-config auto).
-const generationConfigName = "generation_config.json"
-
-// samplingParams are the generation_config.json keys vLLM v0.32.0 takes as
-// the server's default sampling parameters, with whether each must be an
-// integer: the available_params list of ModelConfig.get_diff_sampling_param,
-// vllm/config/model.py lines 1869-1878 (HBEP-7, The verification record).
-// vLLM serves max_new_tokens as max_tokens; the record keeps the file's key.
-var samplingParams = map[string]bool{
-	"repetition_penalty": false,
-	"presence_penalty":   false,
-	"frequency_penalty":  false,
-	"temperature":        false,
-	"top_k":              true,
-	"top_p":              false,
-	"min_p":              false,
-	"max_new_tokens":     true,
-}
-
-// readGenerationConfig reads the staged checkpoint's generation_config.json
-// once, for VerifyResult.GenerationConfig and VerifyResult.DoSample.
-//
-// The map holds the sampling parameters the file sets of those vLLM applies
-// (samplingParams), each as its JSON number text, and nothing else, so no other
-// metadata the file holds (a token, a local path) enters the immutable
-// verification record (PR #138 review, Astra B2, Opus 2; HBEP-7, The
-// verification record). A value is kept only when it is a JSON number, an
-// integer for top_k and max_new_tokens, of at most
-// agentapi.MaxGenerationConfigValueBytes: a null, which vLLM skips, a value of
-// another type, and a longer number, which a cut would change, are left out.
-// The map is nil when the file is absent, unreadable, not a JSON object or sets
-// none of them: the record then holds none.
-//
-// do_sample is the file's do_sample when it is a JSON boolean, else nil: a
-// string, a number, a null or an absent key all leave it nil, which does not
-// force greedy decoding (agentapi.CheckSampling). A file that sets only
-// do_sample gives a nil map and a non-nil do_sample.
-func readGenerationConfig(dir string) (map[string]string, *bool) {
-	if dir == "" {
-		return nil, nil
-	}
-	f, err := os.Open(filepath.Join(dir, generationConfigName))
-	if err != nil {
-		return nil, nil
-	}
-	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, 1<<20))
-	if err != nil {
-		return nil, nil
-	}
-	var obj map[string]json.RawMessage
-	if json.Unmarshal(b, &obj) != nil {
-		return nil, nil
-	}
-	out := map[string]string{}
-	for k, integer := range samplingParams {
-		raw, ok := obj[k]
-		if !ok {
-			continue
-		}
-		if v, ok := samplingValue(raw, integer); ok {
-			out[k] = v
-		}
-	}
-	if len(out) == 0 {
-		out = nil
-	}
-	return out, doSampleOf(obj["do_sample"])
-}
-
-// doSampleOf returns raw as a boolean when it is a JSON true or false, else
-// nil (an absent key, a null, a string such as "false", a number).
-func doSampleOf(raw json.RawMessage) *bool {
-	if len(raw) == 0 {
-		return nil
-	}
-	var v any
-	if json.Unmarshal(raw, &v) != nil {
-		return nil
-	}
-	b, ok := v.(bool)
-	if !ok {
-		return nil
-	}
-	return &b
-}
-
-func copyBool(p *bool) *bool {
-	if p == nil {
-		return nil
-	}
-	v := *p
-	return &v
-}
-
-// genSampling is the sampling of one verification generation's checks
-// (agentapi.CheckSampling), computed once, from the staged
-// generation_config.json, by whichever check unit of the generation runs
-// first, and used by every later one: the file is read once, so the values
-// the checks send and the record reports are the same ones. A new
-// generation, and a new staging, make a new one.
-type genSampling struct {
-	once     sync.Once
-	config   map[string]string
-	doSample *bool
-	sampling agentapi.Sampling
-}
-
-// genSampling returns the instance's sampling state for its current
-// verification generation. Only the agent's loop calls it.
-func (in *instance) genSampling() *genSampling {
-	if in.sampling == nil {
-		in.sampling = &genSampling{}
-	}
-	return in.sampling
-}
-
-// resolve reads the staged file in dir on its first call and returns the
-// sampling parameters it reported (VerifyResult.GenerationConfig), its
-// do_sample, and the sampling of the generation's checks. reasoning says the
-// launch declares a reasoning parser. Safe for concurrent use.
-func (g *genSampling) resolve(dir string, reasoning bool, log *slog.Logger, gen int64) (map[string]string, *bool, agentapi.Sampling) {
-	g.once.Do(func() {
-		g.config, g.doSample = readGenerationConfig(dir)
-		g.sampling = agentapi.CheckSampling(g.config, g.doSample, reasoning)
-		sm := g.sampling
-		attrs := []any{"verificationGeneration", gen, "reasoningParser", reasoning, "greedy", sm.Greedy, "temperature", sm.Temperature, "topP", sm.TopP,
-			"repetitionPenalty", sm.RepetitionPenalty, "presencePenalty", sm.PresencePenalty, "frequencyPenalty", sm.FrequencyPenalty}
-		if sm.TopK != nil {
-			attrs = append(attrs, "topK", *sm.TopK)
-		}
-		if sm.MinP != nil {
-			attrs = append(attrs, "minP", *sm.MinP)
-		}
-		log.Info("check sampling fixed for the verification generation", attrs...)
-	})
-	return g.config, g.doSample, g.sampling
-}
-
-// samplingValue returns raw's number text when raw is a JSON number (not a
-// string that holds one), an integer when integer is set, of at most
-// MaxGenerationConfigValueBytes and within float64's or int64's range.
-func samplingValue(raw json.RawMessage, integer bool) (string, bool) {
-	var v any
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	if dec.Decode(&v) != nil {
-		return "", false
-	}
-	n, ok := v.(json.Number)
-	if !ok || len(n) > agentapi.MaxGenerationConfigValueBytes {
-		return "", false
-	}
-	var err error
-	if integer {
-		_, err = strconv.ParseInt(string(n), 10, 64)
-	} else {
-		_, err = strconv.ParseFloat(string(n), 64)
-	}
-	return string(n), err == nil
 }
