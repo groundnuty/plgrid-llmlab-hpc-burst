@@ -160,7 +160,7 @@ func run(ctx context.Context, f flags, d deps) error {
 	}
 	mgr, backend, err := lifecycle.NewManager(lifecycle.Options{
 		Config: cfg, CredentialsDir: f.host.CredentialsDir(), AgentBuildsDir: f.host.AgentBuildsDir(),
-		FrontConfigured: f.frontMode != "", HealthAddr: f.healthAddr, MetricsAddr: f.host.ControllerMetricsAddr(), LeaderElection: f.leaderElect, Workers: f.workers,
+		FrontConfigured: f.frontMode != "", HealthAddr: f.healthAddr, MetricsAddr: f.host.ControllerMetricsAddr(), Registry: d.registry, LeaderElection: f.leaderElect, Workers: f.workers,
 	})
 	if err != nil {
 		return err
