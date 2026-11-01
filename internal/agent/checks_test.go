@@ -244,14 +244,15 @@ func TestQualificationReportsLowKVCapacity(t *testing.T) {
 
 // The verification report carries the staged checkpoint's generation_config
 // defaults, read from the file the stager put beside the weights (issue #125,
-// item 6).
+// item 6): its sampling parameters only, not the token-like key or the local
+// path the file also holds (PR #138 review, Astra B2).
 func TestVerificationReportsTheGenerationConfig(t *testing.T) {
 	h := newHarness(t, harnessOptions{})
 	dir := filepath.Join(h.stagingDir, agentapi.StagedCheckpointDir("org/model", launch("", "").Checkpoint.Revision))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "generation_config.json"), []byte(`{"repetition_penalty": 1.1, "temperature": 0.7}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "generation_config.json"), []byte(`{"repetition_penalty": 1.1, "temperature": 0.7, "hf_token": "hf_0123456789abcdef", "_name_or_path": "/home/example/model"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	h.set(h.runState("", 1, 0, nil))

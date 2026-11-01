@@ -5,13 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"maps"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
@@ -301,13 +298,33 @@ func (a *Agent) finishWarmUp(in *instance) {
 // defaults from (its --generation-config auto).
 const generationConfigName = "generation_config.json"
 
+// samplingParams are the generation_config.json keys vLLM v0.32.0 takes as
+// the server's default sampling parameters, with whether each must be an
+// integer: the available_params list of ModelConfig.get_diff_sampling_param,
+// vllm/config/model.py lines 1869-1878 (HBEP-7, The verification record).
+// vLLM serves max_new_tokens as max_tokens; the record keeps the file's key.
+var samplingParams = map[string]bool{
+	"repetition_penalty": false,
+	"presence_penalty":   false,
+	"frequency_penalty":  false,
+	"temperature":        false,
+	"top_k":              true,
+	"top_p":              false,
+	"min_p":              false,
+	"max_new_tokens":     true,
+}
+
 // readGenerationConfig reads the staged checkpoint's generation_config.json
-// for VerifyResult.GenerationConfig: each top-level key with its value as
-// compact JSON text, at most agentapi.MaxGenerationConfigKeys keys in key
-// order, a key longer than agentapi.MaxGenerationConfigKeyBytes left out and
-// each value cut to agentapi.MaxGenerationConfigValueBytes (science-agent
-// rulings, 1 Nov 2026, issue #125). nil when the file is absent, unreadable
-// or not a JSON object: the record then holds none.
+// for VerifyResult.GenerationConfig: the sampling parameters it sets of those
+// vLLM applies (samplingParams), each as its JSON number text, and nothing
+// else, so no other metadata the file holds (a token, a local path) enters
+// the immutable verification record (PR #138 review, Astra B2, Opus 2;
+// HBEP-7, The verification record). A value is kept only when it is a JSON
+// number, an integer for top_k and max_new_tokens, of at most
+// agentapi.MaxGenerationConfigValueBytes: a null, which vLLM skips, a value of
+// another type, and a longer number, which a cut would change, are left out.
+// nil when the file is absent, unreadable, not a JSON object or sets none of
+// them: the record then holds none.
 func readGenerationConfig(dir string) map[string]string {
 	if dir == "" {
 		return nil
@@ -325,23 +342,41 @@ func readGenerationConfig(dir string) map[string]string {
 	if json.Unmarshal(b, &obj) != nil {
 		return nil
 	}
-	keys := slices.Sorted(maps.Keys(obj))
 	out := map[string]string{}
-	for _, k := range keys {
-		if len(out) == agentapi.MaxGenerationConfigKeys {
-			break
-		}
-		if len(k) > agentapi.MaxGenerationConfigKeyBytes || !utf8.ValidString(k) {
+	for k, integer := range samplingParams {
+		raw, ok := obj[k]
+		if !ok {
 			continue
 		}
-		var buf bytes.Buffer
-		if json.Compact(&buf, obj[k]) != nil {
-			continue
+		if v, ok := samplingValue(raw, integer); ok {
+			out[k] = v
 		}
-		out[k] = agentapi.TruncateUTF8(buf.String(), agentapi.MaxGenerationConfigValueBytes)
 	}
 	if len(out) == 0 {
 		return nil
 	}
 	return out
+}
+
+// samplingValue returns raw's number text when raw is a JSON number (not a
+// string that holds one), an integer when integer is set, of at most
+// MaxGenerationConfigValueBytes and within float64's or int64's range.
+func samplingValue(raw json.RawMessage, integer bool) (string, bool) {
+	var v any
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if dec.Decode(&v) != nil {
+		return "", false
+	}
+	n, ok := v.(json.Number)
+	if !ok || len(n) > agentapi.MaxGenerationConfigValueBytes {
+		return "", false
+	}
+	var err error
+	if integer {
+		_, err = strconv.ParseInt(string(n), 10, 64)
+	} else {
+		_, err = strconv.ParseFloat(string(n), 64)
+	}
+	return string(n), err == nil
 }

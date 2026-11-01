@@ -47,8 +47,10 @@ func worstWarmUp(rounds int) *WarmUpResult {
 // names them.
 func TestSizeBounds(t *testing.T) {
 	if MaxTargetSessions != 1024 || MaxTimingErrorBytes != 64 || MaxMessageBytes != 256 || MaxLogTailBytes != 8192 ||
+		MaxGenerationConfigKeys != 32 || MaxGenerationConfigKeyBytes != 64 || MaxGenerationConfigValueBytes != 128 ||
 		WarmUpBudgetBytes != 3145728 || MaxBodyBytes != 4194304 || MaxWarmUpRounds != 5 {
-		t.Errorf("bounds changed: %d %d %d %d %d %d", MaxTargetSessions, MaxTimingErrorBytes, MaxMessageBytes,
+		t.Errorf("bounds changed: %d %d %d %d %d %d %d %d %d %d", MaxTargetSessions, MaxTimingErrorBytes, MaxMessageBytes, MaxLogTailBytes,
+			MaxGenerationConfigKeys, MaxGenerationConfigKeyBytes, MaxGenerationConfigValueBytes,
 			WarmUpBudgetBytes, MaxBodyBytes, MaxWarmUpRounds)
 	}
 }
