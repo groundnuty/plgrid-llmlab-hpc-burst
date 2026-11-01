@@ -168,3 +168,83 @@ func TestTheRecordDataCarriesTheSampling(t *testing.T) {
 		t.Errorf("a record from before #151 reads back with sampling %+v, want none", old.Sampling)
 	}
 }
+
+// A staged generation_config.json with a value vLLM refuses fails verification
+// for every model, with the settings contradiction's cause (the stop keyed on
+// the deployment ID) and a message naming the key and the value, whether the
+// controller finds it in the numbers the agent recorded or the agent reports it
+// (a value that is not a number reaches it only that way). No check request
+// was sent, so the record holds no sampling, and it holds the refusal
+// (science-agent ruling, 1 Nov 2026, N7). The refusals are written out by hand
+// from vLLM's ranges (temperature [0, 2], top_p (0, 1]).
+func TestARefusedGenerationConfigFailsVerificationForEveryModel(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		reasoning bool
+		config    map[string]string
+		reported  *agentapi.GenerationConfigError
+		want      agentapi.GenerationConfigError
+	}{
+		{"a reasoning model, temperature 2.5 in the numbers", true, map[string]string{"temperature": "2.5", "top_k": "20", "top_p": "0.95"}, nil,
+			agentapi.GenerationConfigError{Param: "temperature", Value: "2.5", Want: "[0, 2]"}},
+		{"a model without a parser, temperature 2.5 in the numbers", false, map[string]string{"temperature": "2.5", "top_k": "20", "top_p": "0.95"}, nil,
+			agentapi.GenerationConfigError{Param: "temperature", Value: "2.5", Want: "[0, 2]"}},
+		{"a model without a parser, top_p 0", false, map[string]string{"top_p": "0"}, nil,
+			agentapi.GenerationConfigError{Param: "top_p", Value: "0", Want: "(0, 1]"}},
+		{"temperature \"warm\", reported by the agent", true, nil,
+			&agentapi.GenerationConfigError{Param: "temperature", Value: `"warm"`, Want: "a number"},
+			agentapi.GenerationConfigError{Param: "temperature", Value: `"warm"`, Want: "a number"}},
+		{"the same without a parser", false, nil,
+			&agentapi.GenerationConfigError{Param: "temperature", Value: `"warm"`, Want: "a number"},
+			agentapi.GenerationConfigError{Param: "temperature", Value: `"warm"`, Want: "a number"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, r, sh := judgeDeclared(), judgeResult(), judgeShapes()
+			if tc.reasoning {
+				d, r, sh = reasoningSpec()
+			}
+			r.GenerationConfig, r.GenerationConfigRefused = tc.config, tc.reported
+			got := judgeVerify(d, r, true, sh)
+			if got.Verdict != v1alpha1.VerdictFail || got.Cause != causeContradiction {
+				t.Fatalf("verdict %q, cause %q (%s), want a fail by %s", got.Verdict, got.Cause, got.Message, causeContradiction)
+			}
+			if !strings.Contains(got.Message, tc.want.Param) || !strings.Contains(got.Message, tc.want.Value) {
+				t.Errorf("message %q does not name %s and %s", got.Message, tc.want.Param, tc.want.Value)
+			}
+			if got.GenerationConfigRefused == nil || *got.GenerationConfigRefused != tc.want {
+				t.Errorf("the record holds the refusal %+v, want %+v", got.GenerationConfigRefused, tc.want)
+			}
+			if got.Sampling != nil {
+				t.Errorf("the record holds a sampling %+v, but no check request was sent", got.Sampling)
+			}
+			b, err := json.Marshal(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(b), `"generationConfigRefused":{"param":"`+tc.want.Param+`"`) {
+				t.Errorf("record data %s does not carry the refusal", b)
+			}
+		})
+	}
+}
+
+// A valid file passes, and a rehash mismatch is judged before the file's
+// values: a file that does not match the identity record is restaged, not
+// blamed for what it holds. A worker restart's verification (no rehash) judges
+// the values too.
+func TestTheRefusalOrderAndTheWorkerRestart(t *testing.T) {
+	d, r, sh := reasoningSpec()
+	r.GenerationConfig = qwen3File
+	if got := judgeVerify(d, r, true, sh); got.Verdict != v1alpha1.VerdictPass || got.GenerationConfigRefused != nil || got.Sampling == nil {
+		t.Errorf("a valid file: verdict %q (%s), refusal %+v, sampling %+v", got.Verdict, got.Message, got.GenerationConfigRefused, got.Sampling)
+	}
+	r.GenerationConfig = map[string]string{"temperature": "2.5"}
+	r.Files[0].Outcome = agentapi.FileMismatch
+	if got := judgeVerify(d, r, true, sh); got.Cause != causeRehash {
+		t.Errorf("a mismatching file with a refused value: cause %q, want %s", got.Cause, causeRehash)
+	}
+	r.Files[0].Outcome = agentapi.FileMatch
+	if got := judgeVerify(d, r, false, sh); got.Cause != causeContradiction || got.GenerationConfigRefused == nil {
+		t.Errorf("a worker restart's verification: cause %q, refusal %+v, want %s", got.Cause, got.GenerationConfigRefused, causeContradiction)
+	}
+}

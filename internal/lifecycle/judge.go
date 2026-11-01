@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -115,6 +116,14 @@ type verificationData struct {
 	// 2026, issue #151). A pointer: a record written before it has none, and
 	// reads as unknown, not as a sampled model at temperature 0.
 	Sampling *agentapi.Sampling `json:"sampling,omitempty"`
+	// GenerationConfigRefused is the value of the staged generation_config.json
+	// that vLLM refuses, when there is one: the agent's report
+	// (VerifyResult.GenerationConfigRefused, judged on the file's own JSON
+	// text) or the controller's own check of VerifyResult.GenerationConfig,
+	// the same agentapi.CheckGenerationConfig. Verification fails with it, for
+	// every model; no check request was sent, so Sampling is absent
+	// (science-agent ruling, 1 Nov 2026, N7).
+	GenerationConfigRefused *agentapi.GenerationConfigError `json:"generationConfigRefused,omitempty"`
 	// BehaviourContextTokens is the context, in tokens, that this
 	// generation's behaviour check runs at: agentapi.BehaviourContextTokens
 	// of the resolved shapes, the reported max-model-len, the measured
@@ -148,14 +157,19 @@ type rehashOutcome struct {
 // the reported context limit.
 func judgeVerify(d declared, v *agentapi.VerifyResult, rehash bool, sh shapes) verificationData {
 	_, reasoning := d.flags["reasoning-parser"]
-	// The sampling the checks used is recorded on every record, a failed one
-	// and a worker restart's too: verification's own fingerprint request used
-	// it either way.
-	sampling := agentapi.CheckSampling(v.GenerationConfig, v.DoSample, reasoning)
+	refusal := refusedGenerationConfig(v)
 	out := verificationData{
 		EngineVersion: v.EngineVersion, ImageDigest: v.ImageDigest, Settings: v.Settings,
-		Fingerprint: v.Fingerprint, Overhead: v.TemplateOverhead, GenerationConfig: v.GenerationConfig, Sampling: &sampling,
+		Fingerprint: v.Fingerprint, Overhead: v.TemplateOverhead, GenerationConfig: v.GenerationConfig, GenerationConfigRefused: refusal,
 		Verdict: v1alpha1.VerdictPass, Undeclared: map[string]string{},
+	}
+	if refusal == nil {
+		// The sampling the checks used is recorded on every record, a failed
+		// one and a worker restart's too: verification's own fingerprint
+		// request used it either way. A refused file sends no check request,
+		// so there is none to record.
+		sampling := agentapi.CheckSampling(v.GenerationConfig, v.DoSample, reasoning)
+		out.Sampling = &sampling
 	}
 	failWith := func(cause, msg string) verificationData {
 		out.Verdict, out.Cause, out.Message = v1alpha1.VerdictFail, cause, msg
@@ -187,6 +201,13 @@ func judgeVerify(d declared, v *agentapi.VerifyResult, rehash bool, sh shapes) v
 		if len(out.Rehash.Mismatch) > 0 {
 			return failWith(causeRehash, "checkpoint files differ from the identity record: "+strings.Join(out.Rehash.Mismatch, ", "))
 		}
+	}
+	if refusal != nil {
+		// vLLM applies the file's values as the server's defaults, so it would
+		// refuse them on every request, for any model: the settings
+		// contradiction's stop, keyed on the deployment ID, held until the
+		// serving spec changes (a new checkpoint revision is a new ID).
+		return failWith(causeContradiction, refusal.Error())
 	}
 	var missing []string
 	if v.EngineVersion == "" {
@@ -255,6 +276,21 @@ func judgeVerify(d declared, v *agentapi.VerifyResult, rehash bool, sh shapes) v
 		out.BehaviourContextTokens = agentapi.BehaviourContextTokens(resolved, mml, v.TemplateOverhead, reasoning)
 	}
 	return out
+}
+
+// refusedGenerationConfig returns the value of the staged generation_config.json
+// that vLLM refuses: the agent's report, which judged the file's own JSON text,
+// else the controller's check of the numbers the agent recorded
+// (agentapi.CheckGenerationConfig); nil when there is none.
+func refusedGenerationConfig(v *agentapi.VerifyResult) *agentapi.GenerationConfigError {
+	if v.GenerationConfigRefused != nil {
+		return v.GenerationConfigRefused
+	}
+	var ge *agentapi.GenerationConfigError
+	if err := agentapi.CheckGenerationConfig(v.GenerationConfig); errors.As(err, &ge) {
+		return ge
+	}
+	return nil
 }
 
 // sameSetting compares a reported setting with its declared value under one
