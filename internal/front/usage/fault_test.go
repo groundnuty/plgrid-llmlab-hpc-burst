@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime/pprof"
 	"strings"
 	"sync"
 	"testing"
@@ -393,9 +394,42 @@ func (f *syncGate) Sync() error {
 
 func (f *syncGate) unblock() { f.once.Do(func() { close(f.release) }) }
 
+// parkedInWrite reports whether a goroutine is parked receiving from a channel
+// with usage.(*Sink).Write as its innermost frame outside the runtime: a Write
+// waiting for its batch's outcome. It reads every goroutine's stack (debug 2,
+// the form of a test binary's time-out dump).
+func parkedInWrite() bool {
+	var b strings.Builder
+	_ = pprof.Lookup("goroutine").WriteTo(&b, 2)
+	for _, g := range strings.Split(b.String(), "\n\n") {
+		lines := strings.Split(g, "\n")
+		if !strings.Contains(lines[0], "[chan receive") {
+			continue
+		}
+		for _, l := range lines[1:] {
+			if strings.HasPrefix(l, "\t") || strings.HasPrefix(l, "runtime.") {
+				continue // a file line, or a runtime frame (GOTRACEBACK=system shows them)
+			}
+			if strings.Contains(l, "/internal/front/usage.(*Sink).Write(") {
+				return true
+			}
+			break
+		}
+	}
+	return false
+}
+
 // TestWriteReturnsOnlyAfterTheSync: with the log's sync blocked, the record is
 // in the log but its Write has not returned; once the sync is released, Write
 // returns nil.
+//
+// "Has not returned" is seen, not guessed from a wait: the Write's goroutine is
+// found parked in Write, receiving its batch's outcome (parkedInWrite). A sink
+// that reported the outcome before its sync would have sent it before the sync
+// was entered, so once the test sees the sync entered, that Write could never
+// be parked there again: the wait fails, or Write returns while the test
+// watches. (The test used to wait 200 ms of real time for a return that should
+// not come, which a slow machine could pass wrongly; PR #137 review, Astra.)
 func TestWriteReturnsOnlyAfterTheSync(t *testing.T) {
 	dir := t.TempDir()
 	f := &syncGate{entered: make(chan struct{}, 1), release: make(chan struct{})}
@@ -410,10 +444,22 @@ func TestWriteReturnsOnlyAfterTheSync(t *testing.T) {
 	if n := logLines(dir); n != 1 {
 		t.Errorf("%d lines in the log while the sync is blocked, want 1: the write comes before the sync", n)
 	}
+	deadline := time.Now().Add(20 * time.Second)
+	for !parkedInWrite() {
+		select {
+		case err := <-done:
+			t.Fatalf("Write returned %v while the sync of its record was blocked", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Write was not seen waiting for its record's sync within 20 s, and has not returned")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	select {
 	case err := <-done:
 		t.Fatalf("Write returned %v while the sync of its record was blocked", err)
-	case <-time.After(200 * time.Millisecond):
+	default:
 	}
 	f.unblock()
 	if err := receive(t, done, "Write to return once the sync is released"); err != nil {
