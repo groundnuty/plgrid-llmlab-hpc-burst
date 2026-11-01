@@ -59,12 +59,14 @@ const releaseRetryEvery = 100 * time.Millisecond
 // leaderelection.NewResourceLock builds the manager's default one (v0.23.1,
 // pkg/leaderelection/leader_election.go:66-136): a hostname_UUID identity, a
 // "leader-election" user agent and a client time-out of half the renew
-// deadline, at least 1 s. It records no events: the elector's legacy
-// leader-election events (became leader, stopped leading) carry no action,
-// so under HBEP-8 no tool may act on them, and the lifecycle Lease's lock has
-// raised none since #111 (@hpc-burst-science-agent, 1 Nov 2026). The lock
-// retries a failed release (WithRetriedRelease); log takes its retries and
-// its give-up.
+// deadline, at least 1 s. The lock retries a failed release
+// (WithRetriedRelease); log takes its retries and its give-up.
+//
+// It records no events, for the lifecycle Lease and the Provider Leases
+// alike: the elector's legacy leader-election events (became leader, stopped
+// leading) carry no action, so under HBEP-8 nothing may act on them, and
+// leadership shows in the Lease itself (`@hpc-burst-science-agent`, 1 Nov
+// 2026: the ruling for #111, extended to the Provider Leases for #131).
 func New(cfg *rest.Config, namespace, name string, renewDeadline time.Duration, log logr.Logger) (resourcelock.Interface, error) {
 	host, err := os.Hostname()
 	if err != nil {
