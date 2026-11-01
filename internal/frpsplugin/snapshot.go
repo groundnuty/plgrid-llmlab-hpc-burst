@@ -6,6 +6,8 @@ import (
 	"io/fs"
 	"slices"
 
+	corev1 "k8s.io/api/core/v1"
+
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
@@ -36,9 +38,14 @@ const (
 // allocationEnded reports whether an Allocation no longer admits a login (HBEP-6, Admission: "an
 // Allocation that exists and has not ended"): its deletion has begun, or its phase is one of the
 // four on which the lifecycle controller ends its Instances (internal/lifecycle/instances.go,
-// allocationFailed: Failed, Lost and Refused fail the Instances, Ended drains them).
+// allocationFailed: Failed, Lost and Refused fail the Instances, Ended drains them), or it has the
+// condition SubmittedAsOther True, which ends its Instances too (HBEP-7, Reconcile loop, step 5,
+// "Failed Allocations").
 func allocationEnded(a *v1alpha1.Allocation) bool {
 	if !a.DeletionTimestamp.IsZero() {
+		return true
+	}
+	if a.GetCondition(v1alpha1.ConditionSubmittedAsOther).Status == corev1.ConditionTrue {
 		return true
 	}
 	switch a.Status.AtProvider.Phase {

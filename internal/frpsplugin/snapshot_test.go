@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -58,6 +60,11 @@ func TestBuildSnapshotRules(t *testing.T) {
 	deleting := metav1.NewTime(time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC))
 	allocDeleting := testAlloc(ns, "al-del", "uid-del", running)
 	allocDeleting.DeletionTimestamp = &deleting
+	// HBEP-7, Reconcile loop, step 5: SubmittedAsOther True ends the Allocation's Instances.
+	allocAsOther := testAlloc(ns, "al-other", "uid-other", running)
+	allocAsOther.SetConditions(xpv2.Condition{Type: "SubmittedAsOther", Status: corev1.ConditionTrue, Reason: "ReadBackMismatch"})
+	allocNotOther := testAlloc(ns, "al-notother", "uid-notother", running)
+	allocNotOther.SetConditions(xpv2.Condition{Type: "SubmittedAsOther", Status: corev1.ConditionFalse, Reason: "ReadBackMismatch"})
 
 	cases := []struct {
 		name      string
@@ -107,6 +114,18 @@ func TestBuildSnapshotRules(t *testing.T) {
 			allocs: []v1alpha1.Allocation{testAlloc(ns, "al-a", "uid-a", v1alpha1.AllocationRefused)},
 			insts:  []v1alpha1.Instance{testInst(ns, "in-1", "in-uid-1", "al-a", v1alpha1.InstanceReady)},
 			files:  credFiles{"uid-a": tokA},
+		},
+		{
+			name:   "an Allocation with SubmittedAsOther True is absent although its phase is Running",
+			allocs: []v1alpha1.Allocation{allocAsOther},
+			insts:  []v1alpha1.Instance{testInst(ns, "in-1", "in-uid-1", "al-other", v1alpha1.InstanceReady)},
+			files:  credFiles{"uid-other": tokA},
+		},
+		{
+			name:   "an Allocation with SubmittedAsOther False stays listed",
+			allocs: []v1alpha1.Allocation{allocNotOther},
+			files:  credFiles{"uid-notother": tokB},
+			want:   Snapshot{Allocations: []AllocationEntry{{UID: "uid-notother", Credential: tokB}}},
 		},
 		{
 			name:   "an Allocation being deleted is absent although its phase is Running",
