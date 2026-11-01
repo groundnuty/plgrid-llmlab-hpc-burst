@@ -16,7 +16,7 @@ import (
 // contradiction's stop (keyed on the deployment ID, surviving a controller
 // restart), for a value the controller sees in the numbers the agent recorded
 // (temperature 2.5) and for one only the agent sees (temperature "warm", which
-// reaches it as GenerationConfigRefused). The Instance fails at once, with no
+// reaches it as GenerationConfigRefused), and for a file refused as a whole. The Instance fails at once, with no
 // restart (HBEP-7, Instance start; science-agent ruling, 1 Nov 2026, N7).
 func TestVerifyRefusedGenerationConfigStopsClass(t *testing.T) {
 	for _, tc := range []struct {
@@ -29,11 +29,26 @@ func TestVerifyRefusedGenerationConfigStopsClass(t *testing.T) {
 			v.GenerationConfig = map[string]string{"temperature": "2.5", "top_p": "0.95"}
 			return v
 		}, []string{`"temperature"`, `"2.5"`}},
+		// The reports below are the agent's real refused report: it never calls
+		// the engine, so EngineVersion, Settings, Fingerprint and
+		// TemplateOverhead are blank (asTheAgentReportsARefusal).
 		{"a value that is not a number, reported by the agent", func(i agentapi.DesiredInstance, r agentapi.VerifyRequest) agentapi.VerifyResult {
 			v := afake.DefaultVerify(i, r)
-			v.GenerationConfigRefused = &agentapi.GenerationConfigError{Param: "temperature", Value: `"warm"`, Want: "a number"}
-			return v
+			return *asTheAgentReportsARefusal(&v, &agentapi.GenerationConfigError{Param: "temperature", Value: `"warm"`, Want: "a number"})
 		}, []string{`"param":"temperature"`, `warm`}},
+		{"a number out of range, reported by the agent with the file's numbers", func(i agentapi.DesiredInstance, r agentapi.VerifyRequest) agentapi.VerifyResult {
+			v := afake.DefaultVerify(i, r)
+			v.GenerationConfig = map[string]string{"temperature": "2.5", "top_p": "0.95"}
+			return *asTheAgentReportsARefusal(&v, &agentapi.GenerationConfigError{Param: "temperature", Value: "2.5", Want: "[0, 2]"})
+		}, []string{`"param":"temperature"`, `"2.5"`}},
+		{"a file above 1 MiB, refused as a whole", func(i agentapi.DesiredInstance, r agentapi.VerifyRequest) agentapi.VerifyResult {
+			v := afake.DefaultVerify(i, r)
+			return *asTheAgentReportsARefusal(&v, &agentapi.GenerationConfigError{Value: "larger than 1 MiB", Want: "a JSON object of at most 1 MiB"})
+		}, []string{`"param":""`, `larger than 1 MiB`}},
+		{"a file with NaN, refused as a whole", func(i agentapi.DesiredInstance, r agentapi.VerifyRequest) agentapi.VerifyResult {
+			v := afake.DefaultVerify(i, r)
+			return *asTheAgentReportsARefusal(&v, &agentapi.GenerationConfigError{Value: "not valid JSON", Want: "a JSON object of at most 1 MiB"})
+		}, []string{`"param":""`, `not valid JSON`}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rg, in := verifRig(t, func() afake.Engine { return afake.Engine{Verify: tc.verify} })

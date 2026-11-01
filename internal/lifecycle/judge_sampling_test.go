@@ -197,13 +197,26 @@ func TestARefusedGenerationConfigFailsVerificationForEveryModel(t *testing.T) {
 		{"the same without a parser", false, nil,
 			&agentapi.GenerationConfigError{Param: "temperature", Value: `"warm"`, Want: "a number"},
 			agentapi.GenerationConfigError{Param: "temperature", Value: `"warm"`, Want: "a number"}},
+		{"a file above 1 MiB, refused as a whole", true, nil,
+			&agentapi.GenerationConfigError{Value: "larger than 1 MiB", Want: "a JSON object of at most 1 MiB"},
+			agentapi.GenerationConfigError{Value: "larger than 1 MiB", Want: "a JSON object of at most 1 MiB"}},
+		{"a file with NaN, refused as a whole, without a parser", false, nil,
+			&agentapi.GenerationConfigError{Value: "not valid JSON", Want: "a JSON object of at most 1 MiB"},
+			agentapi.GenerationConfigError{Value: "not valid JSON", Want: "a JSON object of at most 1 MiB"}},
+		{"temperature 2.5, reported by the agent with the file's numbers", true, map[string]string{"temperature": "2.5", "top_p": "0.95"},
+			&agentapi.GenerationConfigError{Param: "temperature", Value: "2.5", Want: "[0, 2]"},
+			agentapi.GenerationConfigError{Param: "temperature", Value: "2.5", Want: "[0, 2]"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d, r, sh := judgeDeclared(), judgeResult(), judgeShapes()
 			if tc.reasoning {
 				d, r, sh = reasoningSpec()
 			}
-			r.GenerationConfig, r.GenerationConfigRefused = tc.config, tc.reported
+			r.GenerationConfig = tc.config
+			if tc.reported != nil {
+				// What the agent really sends on a refusal: no engine fields.
+				asTheAgentReportsARefusal(r, tc.reported)
+			}
 			got := judgeVerify(d, r, true, sh)
 			if got.Verdict != v1alpha1.VerdictFail || got.Cause != causeContradiction {
 				t.Fatalf("verdict %q, cause %q (%s), want a fail by %s", got.Verdict, got.Cause, got.Message, causeContradiction)
@@ -231,20 +244,24 @@ func TestARefusedGenerationConfigFailsVerificationForEveryModel(t *testing.T) {
 // A valid file passes, and a rehash mismatch is judged before the file's
 // values: a file that does not match the identity record is restaged, not
 // blamed for what it holds. A worker restart's verification (no rehash) judges
-// the values too.
+// the values too. The refused cases are the agent's real report (no engine
+// fields), whose refusal is judged before the missing-required check.
 func TestTheRefusalOrderAndTheWorkerRestart(t *testing.T) {
 	d, r, sh := reasoningSpec()
 	r.GenerationConfig = qwen3File
 	if got := judgeVerify(d, r, true, sh); got.Verdict != v1alpha1.VerdictPass || got.GenerationConfigRefused != nil || got.Sampling == nil {
 		t.Errorf("a valid file: verdict %q (%s), refusal %+v, sampling %+v", got.Verdict, got.Message, got.GenerationConfigRefused, got.Sampling)
 	}
-	r.GenerationConfig = map[string]string{"temperature": "2.5"}
-	r.Files[0].Outcome = agentapi.FileMismatch
-	if got := judgeVerify(d, r, true, sh); got.Cause != causeRehash {
+	refused := func(rehash bool, outcome agentapi.FileOutcome) verificationData {
+		r := asTheAgentReportsARefusal(judgeResult(), &agentapi.GenerationConfigError{Param: "temperature", Value: "2.5", Want: "[0, 2]"})
+		r.GenerationConfig = map[string]string{"temperature": "2.5"}
+		r.Files[0].Outcome = outcome
+		return judgeVerify(d, r, rehash, sh)
+	}
+	if got := refused(true, agentapi.FileMismatch); got.Cause != causeRehash {
 		t.Errorf("a mismatching file with a refused value: cause %q, want %s", got.Cause, causeRehash)
 	}
-	r.Files[0].Outcome = agentapi.FileMatch
-	if got := judgeVerify(d, r, false, sh); got.Cause != causeContradiction || got.GenerationConfigRefused == nil {
+	if got := refused(false, agentapi.FileMatch); got.Cause != causeContradiction || got.GenerationConfigRefused == nil {
 		t.Errorf("a worker restart's verification: cause %q, refusal %+v, want %s", got.Cause, got.GenerationConfigRefused, causeContradiction)
 	}
 }
