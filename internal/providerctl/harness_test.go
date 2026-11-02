@@ -284,8 +284,10 @@ func (e *env) build() {
 	e.ctl = ctl
 }
 
-// newAlloc creates an Allocation and its credential file.
-func (e *env) newAlloc(name string) *v1alpha1.Allocation {
+// newAlloc creates an Allocation and its credential file. A mod edits the
+// Allocation before it is created, so a test can give it a field from its
+// creation (an annotation, say).
+func (e *env) newAlloc(name string, mods ...func(*v1alpha1.Allocation)) *v1alpha1.Allocation {
 	e.t.Helper()
 	a := &v1alpha1.Allocation{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS, UID: types.UID("uid-" + name),
@@ -298,6 +300,9 @@ func (e *env) newAlloc(name string) *v1alpha1.Allocation {
 				Memory: resource.MustParse("16Gi"), Nodes: 1, AgentDigest: e.digest,
 			}},
 		},
+	}
+	for _, m := range mods {
+		m(a)
 	}
 	if err := e.c.Create(e.ctx, a); err != nil {
 		e.t.Fatal(err)

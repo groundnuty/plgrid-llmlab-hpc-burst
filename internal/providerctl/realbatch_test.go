@@ -136,7 +136,7 @@ func newFakeClient(t *testing.T, providers ...string) client.Client {
 	return b.Build()
 }
 
-func (e *realEnv) newAlloc(name string, gpus int32) *v1alpha1.Allocation {
+func (e *realEnv) newAlloc(name string, gpus int32, mods ...func(*v1alpha1.Allocation)) *v1alpha1.Allocation {
 	e.t.Helper()
 	a := &v1alpha1.Allocation{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS, UID: types.UID("uid-" + e.provider + "-" + name),
@@ -148,6 +148,9 @@ func (e *realEnv) newAlloc(name string, gpus int32) *v1alpha1.Allocation {
 				Partition: gpuPart, TimeLimit: "30m", GPUs: gpus, CPUsPerTask: 8, Memory: resource.MustParse("16Gi"), Nodes: 1, AgentDigest: e.digest,
 			}},
 		},
+	}
+	for _, m := range mods {
+		m(a)
 	}
 	if err := e.c.Create(e.ctx, a); err != nil {
 		e.t.Fatal(err)

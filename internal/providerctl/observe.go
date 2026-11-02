@@ -121,7 +121,13 @@ func (e *external) observeRecorded(ctx context.Context, a *v1alpha1.Allocation, 
 		setAvailability(a)
 	}
 	if job.StartTime != nil && !prior.QueueWaitRecorded {
-		if err := e.recordQueueWait(ctx, rec.jobID, job); err != nil {
+		if a.Annotations[v1alpha1.AnnotationQueuedSuccessor] != "" {
+			// A queued-path successor pended behind its own predecessor's per-user cap, not in the
+			// scheduler's queue: that is no queue wait, and recording it would inflate the Provider's
+			// waits for every plan that reads them (HBEP-7, No-overlap mode; issue #195). The wait
+			// counts as settled, so the job can be final.
+			o.QueueWaitRecorded = true
+		} else if err := e.recordQueueWait(ctx, rec.jobID, job); err != nil {
 			errs = append(errs, err)
 		} else {
 			o.QueueWaitRecorded = true

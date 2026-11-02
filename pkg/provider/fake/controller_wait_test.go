@@ -173,3 +173,69 @@ func TestARecordedQueueWaitIsNotAddedAgainAfterItsEntryWasEvicted(t *testing.T) 
 		}
 	}
 }
+
+// A queued-path no-overlap successor records no queue wait (issue #195; HBEP-7,
+// Handover, No-overlap mode, README lines 463 to 466 and Test plan lines 599 to 605;
+// HBEP-4, Provider status, line 479): its Allocation carries
+// v1alpha1.AnnotationQueuedSuccessor from its creation, and this controller
+// skips a marked Allocation. Three jobs are submitted at 12:00:00, in the order
+// of the Allocations' names: a primary whose script waits 3 min, a marked
+// successor and an unmarked job that wait 40 min each. The Provider holds the
+// primary's wait and the unmarked job's, and no entry for the successor's job,
+// which started all the same; the unmarked job is the control that shows the
+// mark is why.
+func TestAMarkedQueuedSuccessorRecordsNoQueueWaitAndAnUnmarkedJobDoes(t *testing.T) {
+	e := newEnv(t)
+	e.batch.Enqueue(Script{QueueWait: 3 * time.Minute}, Script{QueueWait: 40 * time.Minute}, Script{QueueWait: 40 * time.Minute})
+	e.newAlloc("a1-primary", testProvider)
+	e.newAlloc("a2-successor", testProvider, func(a *v1alpha1.Allocation) {
+		a.Annotations = map[string]string{v1alpha1.AnnotationQueuedSuccessor: "Provider example-provider: maxGpusPerUser 1 of QOS example-now"}
+	})
+	e.newAlloc("a3-control", testProvider)
+	if e.alloc("a2-successor").Annotations[v1alpha1.AnnotationQueuedSuccessor] == "" {
+		t.Fatal("setup: the successor was created without its mark")
+	}
+	e.sync() // 12:00:00: all three submitted
+	e.syncAt(at(12, 4, 0))
+	e.wantPhase("a1-primary", v1alpha1.AllocationRunning) // its 30 min limit ends at 12:33:00
+	e.wantPhase("a2-successor", v1alpha1.AllocationPending)
+	e.syncAt(at(12, 41, 0))
+	jobs := map[string]string{}
+	for n, want := range map[string]v1alpha1.AllocationPhase{"a1-primary": v1alpha1.AllocationEnded, "a2-successor": v1alpha1.AllocationRunning, "a3-control": v1alpha1.AllocationRunning} {
+		jobs[n] = e.wantPhase(n, want).JobID
+	}
+	succ, _ := e.batch.Job(jobs["a2-successor"])
+	if succ.StartTime == nil || !succ.StartTime.Equal(at(12, 40, 0)) || !succ.SubmitTime.Equal(at(12, 0, 0)) {
+		t.Fatalf("setup: the successor's job %+v, want submitted 12:00:00 and started 12:40:00 (the 40 min pend)", succ)
+	}
+
+	waits := map[string]v1alpha1.QueueWait{}
+	for _, w := range e.provider().Status.QueueWaits {
+		waits[w.JobID] = w
+	}
+	if len(waits) != 2 || waits[jobs["a1-primary"]].JobID == "" || waits[jobs["a3-control"]].JobID == "" {
+		t.Fatalf("queue waits %v, want those of the primary %s and the unmarked job %s only", waitIDs(e.provider()), jobs["a1-primary"], jobs["a3-control"])
+	}
+	for n, want := range map[string]struct {
+		start time.Time
+		wait  time.Duration
+	}{"a1-primary": {at(12, 3, 0), 3 * time.Minute}, "a3-control": {at(12, 40, 0), 40 * time.Minute}} {
+		w := waits[jobs[n]]
+		if !w.SubmitTime.Time.Equal(at(12, 0, 0)) || !w.StartTime.Time.Equal(want.start) || w.Wait() != want.wait {
+			t.Errorf("%s: wait %+v, want 12:00:00 to %s (%v)", n, w, want.start.Format(time.TimeOnly), want.wait)
+		}
+	}
+	for _, n := range []string{"a1-primary", "a2-successor", "a3-control"} {
+		if !e.obs(n).QueueWaitRecorded {
+			t.Errorf("Allocation %s: queueWaitRecorded is false after its job started", n)
+		}
+	}
+
+	// Observed again, also by a restarted controller, the marked job adds nothing.
+	e.restart()
+	e.syncAt(at(12, 50, 0))
+	e.syncAt(at(14, 0, 0))
+	if got := waitIDs(e.provider()); len(got) != 2 {
+		t.Errorf("queue waits %v after a restart and the jobs' ends, want still the two", got)
+	}
+}

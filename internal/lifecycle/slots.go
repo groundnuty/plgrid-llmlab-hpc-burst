@@ -137,31 +137,49 @@ func (t *slotTable) observe(provider string, seen, listed map[string]bool, now t
 // stamped with it would lapse at once: another worker could then take the same
 // slot before this one's Allocation is created (review of PR 171, Astra B1).
 func (t *slotTable) reserve(ctx context.Context, r client.Reader, provider, key string, limit *int32, now func() time.Time) (ok bool, count int, err error) {
-	if limit == nil {
-		return true, 0, nil
+	ok, count, _, err = t.reserveFor(ctx, r, provider, key, "", limit, now)
+	return ok, count, err
+}
+
+// reserveFor is reserve that also reports whether the Allocation holder
+// (namespace/name; "" for none) still holds its slot on the Provider, from the
+// very list the count is made from: its phase is not Ended, its deletion has
+// not completed, and its spec.providerConfigRef names the Provider, as
+// listProviderAllocations reads every Allocation. The queued-successor mark
+// is judged from this answer, so the mark and the reservation agree about the
+// primary even if its Allocation ends between the pass's first observation and
+// the reservation (PR 214 review, Astra B1), and about which Provider it is on
+// (B2). With no limit and no holder nothing is listed.
+func (t *slotTable) reserveFor(ctx context.Context, r client.Reader, provider, key, holder string, limit *int32, now func() time.Time) (ok bool, count int, holds bool, err error) {
+	if limit == nil && holder == "" {
+		return true, 0, false, nil
 	}
 	l := t.slotLock(provider)
 	l.Lock()
 	defer l.Unlock()
 	seen, listed, err := t.listBounded(ctx, r, provider)
 	if err != nil {
-		return false, 0, err
+		return false, 0, false, err
+	}
+	holds = holder != "" && listed[holder]
+	if limit == nil {
+		return true, 0, holds, nil
 	}
 	at := now()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	c := t.observe(provider, seen, listed, at)
 	if t.holds(provider, key, c) {
-		return true, c.total(), nil
+		return true, c.total(), holds, nil
 	}
 	if c.total() >= int(*limit) {
-		return false, c.total(), nil
+		return false, c.total(), holds, nil
 	}
 	if t.expect[provider] == nil {
 		t.expect[provider] = map[string]time.Time{}
 	}
 	t.expect[provider][key] = at
-	return true, c.total(), nil
+	return true, c.total(), holds, nil
 }
 
 // release gives back the slot reserved for the Allocation key: its creation
@@ -204,15 +222,29 @@ func (t *slotTable) listBounded(ctx context.Context, r client.Reader, provider s
 	return listProviderAllocations(ctx, r, provider)
 }
 
+// holdsSlot reports whether the Allocation still holds a submit slot as the
+// count reads it: its phase is not Ended, or its job is still completing
+// (status.atProvider.jobCompleting). A job whose state still carries COMPLETING
+// has the phase of its base state, Ended for a cancel or a lease end, but its
+// processes and its epilog may run: the Allocation counts until the flag clears,
+// and then until its deletion completes (HBEP-7, Provisioning, Per-user limits;
+// HBEP-4, Phases, A completing job). The queued-successor mark reads it too
+// (queuedMark), so the two never disagree about a primary that has left the slot.
+// An Allocation whose deletion has completed is not listed at all.
+//
+// The Provider's controller writes jobCompleting from the same value that gates
+// the deletion finalizer, so on a deleting Allocation it is also true while
+// another job with the tag completes (internal/providerctl, completingBlocker):
+// the slot and the finalizer never disagree.
+func holdsSlot(a *v1alpha1.Allocation) bool {
+	o := &a.Status.AtProvider
+	return o.Phase != v1alpha1.AllocationEnded || o.JobCompleting
+}
+
 // listProviderAllocations lists the Allocations of every namespace whose
 // providerConfigRef names the Provider: seen holds all of them, listed those
-// whose phase is not Ended or whose job is still completing
-// (status.atProvider.jobCompleting). A deleting Allocation counts until its
-// deletion completes, and the Provider's controller keeps the finalizer of one
-// whose job is completing. The Provider's controller writes jobCompleting from
-// the same value that gates the finalizer, so on a deleting Allocation it is
-// also true while another job with the tag completes (internal/providerctl,
-// completingBlocker): the slot and the finalizer never disagree.
+// that hold a slot (holdsSlot). A deleting Allocation counts until its deletion
+// completes.
 func listProviderAllocations(ctx context.Context, r client.Reader, provider string) (seen, listed map[string]bool, err error) {
 	var al v1alpha1.AllocationList
 	if err := r.List(ctx, &al); err != nil {
@@ -226,12 +258,7 @@ func listProviderAllocations(ctx context.Context, r client.Reader, provider stri
 		}
 		k := a.Namespace + "/" + a.Name
 		seen[k] = true
-		// A job whose state still carries COMPLETING has the phase of its base
-		// state, Ended for a cancel or a lease end, but its processes and its
-		// epilog may run: the Allocation counts until the flag clears, and
-		// then until its deletion completes (HBEP-7, Provisioning, Per-user
-		// limits; HBEP-4, Phases, A completing job).
-		if o := &a.Status.AtProvider; o.Phase != v1alpha1.AllocationEnded || o.JobCompleting {
+		if holdsSlot(a) {
 			listed[k] = true
 		}
 	}
@@ -253,15 +280,23 @@ func submitLimitText(pv *providerView) string {
 // deployment's namespace. When none is free it records the Provider and its
 // limit for SubmitLimitReached and returns false.
 func (p *pass) reserveSlot(pv *providerView, name string) (bool, error) {
-	ok, n, err := p.r.slots().reserve(p.ctx, p.r.Reader, pv.name, p.key.Namespace+"/"+name, pv.limits.MaxSubmitPerUser, p.reserveTime)
+	ok, _, err := p.reserveSlotFor(pv, name, "")
+	return ok, err
+}
+
+// reserveSlotFor is reserveSlot that also reports, from the reservation's own
+// list, whether the Allocation holder (namespace/name; "" for none) still
+// holds its slot (slotTable.reserveFor).
+func (p *pass) reserveSlotFor(pv *providerView, name, holder string) (ok, holds bool, err error) {
+	ok, n, holds, err := p.r.slots().reserveFor(p.ctx, p.r.Reader, pv.name, p.key.Namespace+"/"+name, holder, pv.limits.MaxSubmitPerUser, p.reserveTime)
 	if err != nil || ok {
-		return ok, err
+		return ok, holds, err
 	}
 	if p.noSlot == nil {
 		p.noSlot = map[string]string{}
 	}
 	p.noSlot[pv.name] = fmt.Sprintf("Provider %s has %d Allocations still holding a slot, at its %s", pv.name, n, submitLimitText(pv))
-	return false, nil
+	return false, holds, nil
 }
 
 // reserveTime is the clock's time, as a pass reads it: whole seconds, UTC. A
