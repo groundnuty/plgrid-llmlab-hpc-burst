@@ -258,13 +258,13 @@ declare -A S=()
 
 # load_tables: reads the tables above into the arrays. Comment and blank lines are skipped in the loop itself:
 # piped through grep -v, a table whose every line was a comment, or a grep that failed, gave no rows without a
-# word. And every table must give at least one row. With none, the script would run on as if the table were
+# word. A last row with no newline is read too (the || [ -n "$name" ] of each loop). And every table must give at least one row. With none, the script would run on as if the table were
 # simply short: no LIVE TESTS rows is a plan of "run: (none)" with exit 0, and no OWNER GO rows drops the
 # owner's go from the rows that hold QOS now's GPU (#237). An empty table is named and load_tables returns 2,
 # which stops every mode. A table emptied on purpose needs this check changed with it.
 load_tables() {
   local name kind pkg test gates inputs contexts status n=0
-  while IFS='|' read -r name kind pkg test gates inputs contexts status; do
+  while IFS='|' read -r name kind pkg test gates inputs contexts status || [ -n "$name" ]; do
     case $name in ''|'#'*) continue ;; esac
     NAMES+=("$name"); n=$((n+1))
     KIND[$name]=$kind PKG[$name]=$pkg TEST[$name]=$test GATES[$name]=$gates INPUTS[$name]=$inputs CONTEXTS[$name]=$contexts STATUS[$name]=$status
@@ -272,7 +272,7 @@ load_tables() {
   [ "$n" -gt 0 ] || { table_empty "LIVE TESTS"; return 2; }
   local h pr pa q sl ak g c m tl tm ex sw
   n=0
-  while IFS='|' read -r name h pr pa q sl ak g c m tl tm ex sw; do
+  while IFS='|' read -r name h pr pa q sl ak g c m tl tm ex sw || [ -n "$name" ]; do
     case $name in ''|'#'*) continue ;; esac
     n=$((n+1))
     HOST[$name]=$h PROFILE[$name]=$pr PARTITION[$name]=$pa QOS[$name]=$q SLOT[$name]=$sl ACCTKEY[$name]=$ak
@@ -281,14 +281,14 @@ load_tables() {
   [ "$n" -gt 0 ] || { table_empty "CLUSTER SHAPES"; return 2; }
   local pk
   n=0
-  while IFS='|' read -r name pk; do
+  while IFS='|' read -r name pk || [ -n "$name" ]; do
     case $name in ''|'#'*) continue ;; esac
     n=$((n+1))
     STACK[$name]=${pk//,/ }
   done < <(plan_stack_table)
   [ "$n" -gt 0 ] || { table_empty "PLAN STACK"; return 2; }
   n=0
-  while IFS='|' read -r name pk; do
+  while IFS='|' read -r name pk || [ -n "$name" ]; do
     case $name in ''|'#'*) continue ;; esac
     n=$((n+1))
     ALIAS[$name]=${pk//,/ }
@@ -296,14 +296,14 @@ load_tables() {
   [ "$n" -gt 0 ] || { table_empty "ALIASES"; return 2; }
   local og_key og_min mj
   n=0
-  while IFS='|' read -r name mj; do
+  while IFS='|' read -r name mj || [ -n "$name" ]; do
     case $name in ''|'#'*) continue ;; esac
     n=$((n+1))
     MOSTJOBS[$name]=$mj
   done < <(most_jobs_table)
   [ "$n" -gt 0 ] || { table_empty "MOST JOBS"; return 2; }
   n=0
-  while IFS='|' read -r name og_key og_min; do
+  while IFS='|' read -r name og_key og_min || [ -n "$name" ]; do
     case $name in ''|'#'*) continue ;; esac
     n=$((n+1))
     OGSET[$name]=$og_key OGMIN[$name]=$og_min

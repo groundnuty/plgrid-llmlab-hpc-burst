@@ -130,7 +130,7 @@ jobs:
               # job log has every one. To show more, change the 100. One awk reads the whole log: a
               # reader that stops early (head -100) left grep and sed writing to a closed pipe, which
               # under pipefail and -e could fail this step once more than 100 tests skipped (#237).
-              awk '/^[ \t]*--- SKIP/ { sub(/^ */, ""); if (++n <= 100) print } END { if (n > 100) print "... and " (n - 100) " more in the job log" }' "$log"
+              awk '/^[[:space:]]*--- SKIP/ { sub(/^ */, ""); if (++n <= 100) print } END { if (n > 100) print "... and " (n - 100) " more in the job log" }' "$log"
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
