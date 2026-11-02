@@ -42,7 +42,12 @@ type procAPI struct {
 	exitStatus func(pid int) (syscall.WaitStatus, error)
 	// open pins a process with a pidfd; ESRCH when it is gone. send signals
 	// the process the pidfd names, whatever the PID has become since.
-	open    func(pid int) (fd int, err error)
+	// pidfd_open can also answer EINVAL for a process that is mid-exit
+	// (measured on Linux 6.8.0, issue #211); signalOne re-checks with probe.
+	open func(pid int) (fd int, err error)
+	// probe is kill(pid, 0): nil or EPERM for a PID that names a process, a
+	// zombie included, and ESRCH for one that names nothing.
+	probe   func(pid int) error
 	send    func(fd int, sig syscall.Signal) error
 	closeFd func(fd int)
 	// scanned, when set, is called with the batch shell's PID at the start of
@@ -61,6 +66,7 @@ func procAt(dir string) *procAPI {
 		row:        func(pid int) (procRow, bool, error) { return readProcRow(dir, pid) },
 		exitStatus: func(pid int) (syscall.WaitStatus, error) { return readExitStatus(dir, pid) },
 		open:       func(pid int) (int, error) { return unix.PidfdOpen(pid, 0) },
+		probe:      func(pid int) error { return syscall.Kill(pid, 0) },
 		send:       func(fd int, sig syscall.Signal) error { return unix.PidfdSendSignal(fd, sig, nil, 0) },
 		closeFd:    func(fd int) { _ = unix.Close(fd) },
 	}
