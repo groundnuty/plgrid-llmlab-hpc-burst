@@ -50,8 +50,12 @@ func (f *fakeLease) Get(context.Context) (*resourcelock.LeaderElectionRecord, []
 	return &resourcelock.LeaderElectionRecord{HolderIdentity: f.holder, LeaderTransitions: f.transitions}, nil, nil
 }
 
-func (f *fakeLease) Create(context.Context, resourcelock.LeaderElectionRecord) error {
-	return errors.New("not used")
+func (f *fakeLease) Create(_ context.Context, ler resourcelock.LeaderElectionRecord) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.holder, f.missing = ler.HolderIdentity, false
+	f.written = append(f.written, ler)
+	return nil
 }
 
 func (f *fakeLease) Update(_ context.Context, ler resourcelock.LeaderElectionRecord) error {

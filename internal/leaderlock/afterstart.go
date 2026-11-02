@@ -2,7 +2,9 @@ package leaderlock
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -21,32 +23,36 @@ const AfterStartBudget = time.Second
 
 // ReleaseAfterStart wraps mgr, which leads through lock, so that a clean,
 // requested stop gives the Lease up even when the elector's own release was
-// lost because its read failed (issue #160). The wrapper's Start runs mgr's;
-// when that returns nil after its context ended, the elector has stopped
-// (controller-runtime v0.23.1, pkg/manager/internal.go:466-472, 545-554: Start
-// waits for the elector before it returns), so nothing else uses lock, and
-// the Lease is read again and released if it still names lock's holder,
-// within AfterStartBudget. Start's result is returned unchanged, and a
-// release that fails is logged to log: the Lease then stays held until it
-// expires, as before.
+// lost because its read failed (issue #160). The wrapper's Start runs mgr's,
+// and releases the Lease after it only on positive evidence that the stop
+// was clean and complete:
 //
-// The holder check is the only gate besides Start's result: a manager that
-// never led finds another holder or none, at the cost of one read, and one
-// whose acquire was written but not yet acted on (the elector had not yet
-// started the leader runnables) gives the Lease back too.
+//   - Start returned nil after its context ended. The elector has then
+//     stopped (controller-runtime v0.23.1, pkg/manager/internal.go:466-472,
+//     545-554: Start waits for it), so nothing else uses lock.
+//   - The leadership was not lost: the elector's last renew write before it
+//     stopped succeeded (Renewals). client-go gives the leadership up only
+//     after a renew poll whose every try failed, and the first try of each
+//     poll is a write while the lease is still valid (leaderelection.go:
+//     284-301, 433-446), so a lost leadership always ends in a failed write.
+//   - Every runnable returned. With a positive grace, as every manager here
+//     has, a requested stop returns nil only when the stop procedure ended
+//     the shutdown context after every runnable group had stopped; a grace
+//     that runs out returns an error (internal.go:557-610). The one other
+//     nil, a grace reset to 0 by a lost leadership (OnStoppedLeading,
+//     internal.go:627-637) and then run out while a runnable still runs, is
+//     excluded by the evidence above (review of PR #215: B1).
 //
-// An involuntary stop releases nothing: a lost leadership, a runnable that
-// failed, or a stop that ran past its grace each make Start return an error
-// (internal.go:487-493, 597-604). client-go's elector still tries its own
-// release on those paths (leaderelection.go:303-306). One corner remains: a
-// leadership lost at the moment the stop is requested can make Start return
-// nil, since the lost leadership sets the grace to 0 (OnStoppedLeading,
-// internal.go:627-637) and a stop with no grace returns nil. The release
-// after Start then repeats only what client-go's elector itself tries on a
-// lost leadership, after the runnables were told to stop rather than before.
+// The Lease is then read again and released if it still names lock's
+// holder, within AfterStartBudget. Start's result is returned unchanged, and
+// a release that fails is logged to log: the Lease then stays held until it
+// expires, as before. Without that evidence nothing is released after Start:
+// a lost leadership, a runnable that failed, a stop past its grace, or a
+// manager that never led. client-go's elector still tries its own release on
+// those paths (leaderelection.go:303-306).
 //
 // log is named only when it logs, as in WithRetriedRelease.
-func ReleaseAfterStart(mgr manager.Manager, lock resourcelock.Interface, log logr.Logger) manager.Manager {
+func ReleaseAfterStart(mgr manager.Manager, lock *Renewals, log logr.Logger) manager.Manager {
 	return &releasingManager{Manager: mgr, lock: lock, log: log}
 }
 
@@ -59,7 +65,7 @@ func ReleasesAfterStart(mgr manager.Manager) bool {
 
 type releasingManager struct {
 	manager.Manager
-	lock resourcelock.Interface
+	lock *Renewals
 	log  logr.Logger
 }
 
@@ -71,7 +77,7 @@ type releasingManager struct {
 // cancellation (context.WithoutCancel).
 func (m *releasingManager) Start(ctx context.Context) error {
 	err := m.Manager.Start(ctx)
-	if err != nil || ctx.Err() == nil {
+	if err != nil || ctx.Err() == nil || !m.lock.ledToTheEnd() {
 		return err
 	}
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), AfterStartBudget)
@@ -79,11 +85,67 @@ func (m *releasingManager) Start(ctx context.Context) error {
 	released, rerr := releaseHeld(rctx, m.lock)
 	switch {
 	case rerr != nil:
-		m.log.WithName("leader-election").Error(rerr, "could not release the leader Lease after the manager stopped; if this manager still held it, it stays held until it expires", "lock", m.lock.Describe())
+		m.log.WithName("leader-election").Error(rerr, "could not release the leader Lease after the manager stopped; it stays held until it expires", "lock", m.lock.Describe())
 	case released:
 		m.log.WithName("leader-election").Info("released the leader Lease after the manager stopped; the elector's own release was lost", "lock", m.lock.Describe())
 	}
 	return nil
+}
+
+// TrackRenewals wraps inner, the lock a manager leads through, so that
+// ReleaseAfterStart can tell a clean stop from a lost leadership. It records
+// whether the last write that named this holder, an acquire or a renew,
+// succeeded; client-go's release record (no holder) is not counted. A write
+// cut short because its context was cancelled is not counted either: only
+// the requested stop cancels the elector's context while it writes
+// (internal.go:545-554), whereas a renew poll that runs out ends its tries
+// with DeadlineExceeded (wait.PollUntilContextTimeout). Every other call
+// passes through unchanged.
+func TrackRenewals(inner resourcelock.Interface) *Renewals {
+	return &Renewals{Interface: inner}
+}
+
+// Renewals is a lock from TrackRenewals.
+type Renewals struct {
+	resourcelock.Interface
+
+	mu sync.Mutex
+	// ok is whether the last counted write succeeded; false before any.
+	ok bool
+}
+
+// Create implements resourcelock.Interface.
+func (r *Renewals) Create(ctx context.Context, ler resourcelock.LeaderElectionRecord) error {
+	err := r.Interface.Create(ctx, ler)
+	r.wrote(ctx, ler, err)
+	return err
+}
+
+// Update implements resourcelock.Interface.
+func (r *Renewals) Update(ctx context.Context, ler resourcelock.LeaderElectionRecord) error {
+	err := r.Interface.Update(ctx, ler)
+	r.wrote(ctx, ler, err)
+	return err
+}
+
+func (r *Renewals) wrote(ctx context.Context, ler resourcelock.LeaderElectionRecord, err error) {
+	if ler.HolderIdentity == "" || ler.HolderIdentity != r.Identity() {
+		return
+	}
+	if err != nil && errors.Is(ctx.Err(), context.Canceled) {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ok = err == nil
+}
+
+// ledToTheEnd reports whether the last counted write succeeded: the manager
+// led, and had not lost the leadership when its elector stopped.
+func (r *Renewals) ledToTheEnd() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.ok
 }
 
 // releaseHeld gives the Lease up if it names lock's holder. It reads the

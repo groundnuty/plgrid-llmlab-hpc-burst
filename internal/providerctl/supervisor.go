@@ -66,10 +66,11 @@ func providerLeaseLock(cfg *rest.Config, provider string, o ManagerOptions) (res
 // when the manager is started again.
 func NewProviderManager(cfg *rest.Config, scheme *runtime.Scheme, provider string, o ManagerOptions) (manager.Manager, error) {
 	name := v1alpha1.ProviderLeaseName(provider)
-	lock, err := providerLeaseLock(cfg, provider, o)
+	inner, err := providerLeaseLock(cfg, provider, o)
 	if err != nil {
 		return nil, fmt.Errorf("provider %s: the leader Lease's lock: %w", provider, err)
 	}
+	lock := leaderlock.TrackRenewals(inner)
 	skip := true
 	mo := manager.Options{
 		Scheme:                              scheme,

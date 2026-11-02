@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr/funcr"
+	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
@@ -25,13 +27,23 @@ func stopsWhenCancelled(ctx context.Context) error {
 	return nil
 }
 
+// renew is a renew record of this holder, as the elector writes it.
+var renew = resourcelock.LeaderElectionRecord{HolderIdentity: me, LeaseDurationSeconds: 15}
+
 // runStopped runs the wrapper over a manager whose Start is start and the
 // fake Lease f behind leaderlock's retrying lock, with Start's context
 // cancelled first when cancelled is true, and returns the log and Start's
-// result.
-func runStopped(t *testing.T, f *fakeLease, cancelled bool, start func(context.Context) error) (*logs, error) {
+// result. The elector's last renew write is recorded as succeeded when led
+// is true, as failed when it is false.
+func runStopped(t *testing.T, f *fakeLease, cancelled, led bool, start func(context.Context) error) (*logs, error) {
 	t.Helper()
-	lock, l := newLock(f)
+	inner, l := newLock(f)
+	lock := TrackRenewals(inner)
+	var last error
+	if !led {
+		last = errors.New("injected: the renew timed out")
+	}
+	lock.wrote(context.Background(), renew, last)
 	mgr := ReleaseAfterStart(&fakeManager{start: start}, lock, funcr.New(l.add, funcr.Options{}))
 	if !ReleasesAfterStart(mgr) {
 		t.Fatal("ReleasesAfterStart does not recognise ReleaseAfterStart's manager")
@@ -51,7 +63,7 @@ func runStopped(t *testing.T, f *fakeLease, cancelled bool, start func(context.C
 // kept.
 func TestACleanStopReleasesALeaseTheElectorLeftHeld(t *testing.T) {
 	f := &fakeLease{holder: me, transitions: 3}
-	l, err := runStopped(t, f, true, stopsWhenCancelled)
+	l, err := runStopped(t, f, true, true, stopsWhenCancelled)
 	if err != nil {
 		t.Fatalf("Start returned %v; want nil, Start's own result", err)
 	}
@@ -69,7 +81,7 @@ func TestACleanStopReleasesALeaseTheElectorLeftHeld(t *testing.T) {
 // A read that fails after Start is tried again, and the release lands.
 func TestTheReleaseAfterStartRetriesAFailedRead(t *testing.T) {
 	f := &fakeLease{holder: me, failGets: 2}
-	if _, err := runStopped(t, f, true, stopsWhenCancelled); err != nil {
+	if _, err := runStopped(t, f, true, true, stopsWhenCancelled); err != nil {
 		t.Fatalf("Start returned %v", err)
 	}
 	if holder, updates := f.state(); holder != "" || updates != 1 {
@@ -89,7 +101,7 @@ func TestTheReleaseAfterStartLeavesALeaseItDoesNotHold(t *testing.T) {
 		{"missing", &fakeLease{missing: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			l, err := runStopped(t, tc.f, true, stopsWhenCancelled)
+			l, err := runStopped(t, tc.f, true, true, stopsWhenCancelled)
 			if err != nil {
 				t.Fatalf("Start returned %v", err)
 			}
@@ -107,7 +119,7 @@ func TestTheReleaseAfterStartLeavesALeaseItDoesNotHold(t *testing.T) {
 // returns its own nil, the failure is logged, and the Lease stays held.
 func TestTheReleaseAfterStartGivesUpWithinItsBudget(t *testing.T) {
 	f := &fakeLease{holder: me, failGets: 1 << 20}
-	l, err := runStopped(t, f, true, stopsWhenCancelled)
+	l, err := runStopped(t, f, true, true, stopsWhenCancelled)
 	if err != nil {
 		t.Fatalf("Start returned %v; want its own nil", err)
 	}
@@ -137,7 +149,7 @@ func TestAnInvoluntaryStopReleasesNothing(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &fakeLease{holder: me}
-			l, got := runStopped(t, f, tc.cancelled, func(context.Context) error { return tc.err })
+			l, got := runStopped(t, f, tc.cancelled, true, func(context.Context) error { return tc.err })
 			if !errors.Is(got, tc.err) || (tc.err == nil) != (got == nil) {
 				t.Fatalf("Start returned %v; want %v unchanged", got, tc.err)
 			}
@@ -148,5 +160,74 @@ func TestAnInvoluntaryStopReleasesNothing(t *testing.T) {
 				t.Errorf("logged %v; want nothing", l.lines)
 			}
 		})
+	}
+}
+
+// A stop that Start reports as clean (nil after the cancel) but whose
+// elector's last renew write failed may hide a lost leadership with a
+// runnable still running (review of PR #215: B1): nothing is released, and
+// the Lease is not even read.
+func TestAStopAfterAFailedRenewReleasesNothing(t *testing.T) {
+	f := &fakeLease{holder: me}
+	l, err := runStopped(t, f, true, false, stopsWhenCancelled)
+	if err != nil {
+		t.Fatalf("Start returned %v; want its own nil", err)
+	}
+	if holder, updates := f.state(); holder != me || updates != 0 || f.gets != 0 {
+		t.Fatalf("the Lease is held by %q after %d writes and %d reads; want it untouched", holder, updates, f.gets)
+	}
+	if len(l.lines) != 0 {
+		t.Errorf("logged %v; want nothing", l.lines)
+	}
+}
+
+// Renewals keeps the outcome of the last write that named this holder: an
+// acquire's or a renew's. client-go's release record (no holder), another
+// holder's record and a write cut short by a cancelled context leave it as
+// it was; a write that ran out of time counts as failed.
+func TestRenewalsKeepTheLastWriteThatNamesThisHolder(t *testing.T) {
+	f := &fakeLease{}
+	r := TrackRenewals(f)
+	if r.ledToTheEnd() {
+		t.Fatal("a lock with no write reports a leadership")
+	}
+	ctx := context.Background()
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	expired, cancel2 := context.WithDeadline(ctx, time.Now().Add(-time.Second))
+	defer cancel2()
+	other := resourcelock.LeaderElectionRecord{HolderIdentity: "host_2222", LeaseDurationSeconds: 15}
+	for i, step := range []struct {
+		what    string
+		ctx     context.Context
+		rec     resourcelock.LeaderElectionRecord
+		create  bool
+		failing int
+		want    bool
+	}{
+		{"an acquire that creates the Lease", ctx, renew, true, 0, true},
+		{"a renew that conflicts", ctx, renew, false, 1, false},
+		{"a renew that lands", ctx, renew, false, 0, true},
+		{"a renew cut short by the stop", cancelled, renew, false, 1, true},
+		{"a release that fails", ctx, release, false, 1, true},
+		{"another holder's record that fails", ctx, other, false, 1, true},
+		{"a renew whose poll ran out of time", expired, renew, false, 1, false},
+		{"a release that lands", ctx, release, false, 0, false},
+		{"another holder's record that lands", ctx, other, false, 0, false},
+		{"a renew that lands again", ctx, renew, false, 0, true},
+	} {
+		f.mu.Lock()
+		f.failing = step.failing
+		f.mu.Unlock()
+		if step.create {
+			if err := r.Create(step.ctx, step.rec); err != nil {
+				t.Fatalf("step %d, %s: Create returned %v", i, step.what, err)
+			}
+		} else {
+			_ = r.Update(step.ctx, step.rec)
+		}
+		if got := r.ledToTheEnd(); got != step.want {
+			t.Fatalf("step %d, %s: the leadership reads %v, want %v", i, step.what, got, step.want)
+		}
 	}
 }
