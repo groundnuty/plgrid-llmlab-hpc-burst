@@ -2,6 +2,7 @@ package alpha
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -20,11 +21,15 @@ const Hour = time.Hour
 // (spikes/s1-frp/README.md:288, C6; branch spike/s1-frp-dial-home).
 const minRate = 629146
 
-// jobsByTag maps the cluster's record of the run's jobs by their tags.
+// jobsByTag maps the cluster's record of the run's jobs by their tags. A tag
+// that names several jobs maps to the first by job ID; jobChecks fails the run
+// for it, so the choice never decides a pass.
 func jobsByTag(jobs []provider.Job) map[string]provider.Job {
 	m := make(map[string]provider.Job, len(jobs))
 	for _, j := range jobs {
-		m[j.Name] = j
+		if prev, ok := m[j.Name]; !ok || j.ID < prev.ID {
+			m[j.Name] = j
+		}
 	}
 	return m
 }
@@ -110,7 +115,90 @@ func ledgerChecks(row Row, tags []string, jobs []provider.Job) ([]string, map[st
 			f = append(f, "a job's time limit in the cluster's record is not the row's lease")
 		}
 	}
-	return f, by
+	return append(f, jobChecks(row, tags, jobs)...), by
+}
+
+// jobChecks judges the run's jobs by their identities and by how many were in the
+// queue at once, against the row's MostJobs: the number the runbook promises the
+// owner. A tag names one job (a held duplicate submission, or a requeue, makes
+// several under one tag, and a lookup by tag alone would see one); the run's jobs
+// together are no more than MostJobs; and no more than MostJobs of them were
+// queued or running at the same moment, a job counting from its submission to its
+// end (one with no end is still there). A job with no submission time cannot be
+// placed, so it fails the run.
+func jobChecks(row Row, tags []string, jobs []provider.Job) []string {
+	var f []string
+	perTag := map[string]int{}
+	ids := map[string]bool{}
+	var distinct []provider.Job
+	for _, j := range jobs {
+		if j.ID != "" {
+			if ids[j.ID] {
+				continue
+			}
+			ids[j.ID] = true
+		}
+		distinct = append(distinct, j)
+		perTag[j.Name]++
+	}
+	for _, tag := range tags {
+		if perTag[tag] > 1 {
+			f = append(f, "a tag names more than one job in the cluster's record")
+		}
+	}
+	if len(distinct) > row.MostJobs {
+		f = append(f, "the cluster's record has more jobs of the run than the row's maximum")
+	}
+	peak, complete := peakQueued(distinct)
+	if !complete {
+		f = append(f, "the cluster's record has no submission time for a job")
+	}
+	if peak > row.MostJobs {
+		f = append(f, "more of the run's jobs were queued or running at once than the row's maximum")
+	}
+	return f
+}
+
+// farFuture is the end of a job that has none: later than any real time.
+var farFuture = time.Date(9999, time.January, 1, 0, 0, 0, 0, time.UTC)
+
+// peakQueued is the most of the jobs queued or running at the same moment, a job
+// counting from its submission to its end (one with no end is still there). A job
+// that ended as the next was submitted did not overlap it. complete is false when
+// a job has no submission time: it cannot be placed, and the other jobs are
+// counted without it.
+func peakQueued(jobs []provider.Job) (peak int, complete bool) {
+	type edge struct {
+		at    time.Time
+		delta int
+	}
+	complete = true
+	var edges []edge
+	for _, j := range jobs {
+		if j.SubmitTime.IsZero() {
+			complete = false
+			continue
+		}
+		end := farFuture
+		if j.EndTime != nil {
+			end = *j.EndTime
+		}
+		edges = append(edges, edge{j.SubmitTime, +1}, edge{end, -1})
+	}
+	sort.Slice(edges, func(a, b int) bool {
+		if !edges[a].at.Equal(edges[b].at) {
+			return edges[a].at.Before(edges[b].at)
+		}
+		return edges[a].delta < edges[b].delta // an end before a submission at the same instant
+	})
+	live := 0
+	for _, e := range edges {
+		live += e.delta
+		if live > peak {
+			peak = live
+		}
+	}
+	return peak, complete
 }
 
 // VerifyHandover judges alpha-athena-handover.
@@ -120,8 +208,8 @@ func ledgerChecks(row Row, tags []string, jobs []provider.Job) ([]string, map[st
 //	hbep/0005-llmlab-compatible-front/README.md:450: "on Athena `plgrid-gpu-a100`, through the front, one handover cuts no request (with HBEP-7)."
 func VerifyHandover(row Row, o HandoverObs, jobs []provider.Job) []string {
 	f := append(deploymentChecks(row, o.Deployment), streamChecks(o.Streams, o.DrainStart)...)
-	if len(o.Tags) < 2 {
-		f = append(f, "fewer than two Allocations: a handover needs a predecessor and a successor")
+	if len(o.Tags) != row.MostJobs {
+		f = append(f, "a handover makes exactly two Allocations: a predecessor and a successor")
 	}
 	lf, _ := ledgerChecks(row, o.Tags, jobs)
 	f = append(f, lf...)
@@ -137,7 +225,10 @@ func VerifyHandover(row Row, o HandoverObs, jobs []provider.Job) []string {
 	if o.WorkerRestarts != 1 {
 		f = append(f, fmt.Sprintf("%d restarts at the worker rung, want 1", o.WorkerRestarts))
 	}
-	if o.Responses > 0 && o.Attributed != o.Responses {
+	// Attribution on every response (HBEP-5): no response recorded is no evidence of it.
+	if o.Responses <= 0 {
+		f = append(f, "the run recorded no response, so attribution is unchecked")
+	} else if o.Attributed != o.Responses {
 		f = append(f, "a response lacked its attribution headers")
 	}
 	return dedupe(f)
@@ -150,8 +241,12 @@ func VerifyHandover(row Row, o HandoverObs, jobs []provider.Job) []string {
 //	hbep/0007-lifecycle-controller/README.md:471: "the gap is the time from the primary's drain start until its successor is `ready`."
 func VerifyNoOverlap(row Row, o NoOverlapObs, jobs []provider.Job) []string {
 	f := append(deploymentChecks(row, o.Deployment), streamChecks(o.Streams, o.DrainStart)...)
-	if len(o.Tags) != 2 {
+	if len(o.Tags) != row.MostJobs {
 		f = append(f, "a no-overlap run makes exactly two Allocations: a predecessor and a successor")
+	}
+	// One restart at the worker rung on each alpha platform (hbep/0007-lifecycle-controller/README.md:637), Helios's included.
+	if o.WorkerRestarts != 1 {
+		f = append(f, fmt.Sprintf("%d restarts at the worker rung, want 1", o.WorkerRestarts))
 	}
 	lf, by := ledgerChecks(row, o.Tags, jobs)
 	f = append(f, lf...)
@@ -203,22 +298,24 @@ func SuccessorQueueWait(pre, suc provider.Job) (d time.Duration, ok bool) {
 // VerifyTunnelHour judges tunnel-hour-helios and tunnel-hour-athena.
 //
 //	hbep/0006-instance-reachability/README.md:354: "S1's one-hour runs pass with this wiring on Helios and on Athena, in the mode each uses, with the path rate measured."
-//	spikes/s1-frp/README.md:284 and :285 (C2, C3; branch spike/s1-frp-dial-home, 01c2ecd): every lane has "a completed stream of at least 3600 s", and no stream is cut over that hour.
+//	spikes/s1-frp/README.md:284 and :285 (C2, C3; branch spike/s1-frp-dial-home, 01c2ecd): every lane stays reachable, uncut, for at least an hour.
 //	spikes/s1-frp/README.md:288 (C6): the path rate is "ok, at least 30 s asked, at least 29 s timed at the VM's receiver", and moved bytes.
+//
+// S1's lane is one stream of 3,660 s. Behind the front a request lasts at most the
+// deployment's routing.maxRequestDuration, which the front enforces (HBEP-5), so a
+// lane here is a chain of requests, one after another on the same tunnel, each
+// within that deadline, with no pause over MaxLaneGap, spanning the hour and ending
+// before the Instance's drain start.
 func VerifyTunnelHour(row Row, o TunnelHourObs, jobs []provider.Job) []string {
 	f := deploymentChecks(row, o.Deployment)
 	if len(o.Lanes) == 0 {
-		f = append(f, "no stream was held for the hour")
+		f = append(f, "no lane was held for the hour")
 	}
-	for _, s := range o.Lanes {
-		switch {
-		case s.CutBy != "":
-			f = append(f, "a stream was cut during the hour")
-		case !s.Complete:
-			f = append(f, "a stream did not complete")
-		case s.Ended.Sub(s.Opened) < Hour:
-			f = append(f, "a stream lasted less than an hour")
-		}
+	if o.DrainStart.IsZero() {
+		f = append(f, "the Instance's drain start was not observed, so the hour cannot be placed before it")
+	}
+	for _, l := range o.Lanes {
+		f = append(f, laneChecks(l, o.DrainStart)...)
 	}
 	if o.TunnelDrops != 0 {
 		f = append(f, "the tunnel dropped during the hour")
@@ -234,17 +331,59 @@ func VerifyTunnelHour(row Row, o TunnelHourObs, jobs []provider.Job) []string {
 	}
 	lf, by := ledgerChecks(row, o.Tags, jobs)
 	f = append(f, lf...)
-	if len(o.Tags) == 0 {
-		f = append(f, "the run wrote down no job tag")
+	if len(o.Tags) != row.MostJobs {
+		f = append(f, "a tunnel run makes exactly one Allocation")
 	}
-	// The cluster's own times corroborate the lanes': a stream's clock is the
-	// scenario's, the job's start and end are the scheduler's.
+	// The cluster's own times corroborate the lanes': a request's clock is the
+	// scenario's, the job's start and end are the scheduler's. Both are required.
 	for _, tag := range o.Tags {
-		if j, ok := by[tag]; ok && j.StartTime != nil && j.EndTime != nil && j.EndTime.Sub(*j.StartTime) < Hour {
+		j, ok := by[tag]
+		switch {
+		case !ok:
+		case j.StartTime == nil || j.EndTime == nil:
+			f = append(f, "the cluster's record lacks the job's start or end time, so it cannot show the hour")
+		case j.EndTime.Sub(*j.StartTime) < Hour:
 			f = append(f, "the cluster's record shows the job ran under an hour")
 		}
 	}
 	return dedupe(f)
+}
+
+// laneChecks judges one lane of the hour.
+func laneChecks(l Lane, drainStart time.Time) []string {
+	var f []string
+	if len(l.Requests) == 0 {
+		return []string{"a lane carried no request"}
+	}
+	reqs := append([]Stream(nil), l.Requests...)
+	sort.Slice(reqs, func(a, b int) bool { return reqs[a].Opened.Before(reqs[b].Opened) })
+	var last time.Time
+	for i, s := range reqs {
+		switch {
+		case s.Opened.IsZero() || s.Ended.IsZero():
+			f = append(f, "a request has no opening or ending time")
+		case s.CutBy != "":
+			f = append(f, "a stream was cut during the hour")
+		case !s.Complete:
+			f = append(f, "a stream did not complete")
+		case s.Ended.Sub(s.Opened) > MaxRequestDuration:
+			// The front would have cut it: an observation of one means the deadline was not the deployment's.
+			f = append(f, "a request outlasted the deployment's request deadline")
+		}
+		if i > 0 && !s.Opened.IsZero() && !last.IsZero() && s.Opened.Sub(last) > MaxLaneGap {
+			f = append(f, "a lane paused for more than 10 s between two requests")
+		}
+		if s.Ended.After(last) {
+			last = s.Ended
+		}
+	}
+	if l.Span() < Hour {
+		f = append(f, "a lane lasted less than an hour")
+	}
+	if !drainStart.IsZero() && last.After(drainStart) {
+		f = append(f, "the hour ended after the Instance's drain start")
+	}
+	return f
 }
 
 // TunnelHourFlags are the observations S1's verdict prints as FLAG lines: they

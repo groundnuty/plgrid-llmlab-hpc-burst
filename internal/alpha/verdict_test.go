@@ -18,7 +18,7 @@ func at(d time.Duration) time.Time { return t0.Add(d) }
 func ptr(t time.Time) *time.Time   { return &t }
 
 func job(tag, partition string, submit, start, end time.Duration) provider.Job {
-	return provider.Job{Name: tag, Partition: partition, SubmitTime: at(submit), StartTime: ptr(at(start)), EndTime: ptr(at(end))}
+	return provider.Job{ID: "id-" + tag, Name: tag, Partition: partition, SubmitTime: at(submit), StartTime: ptr(at(start)), EndTime: ptr(at(end))}
 }
 
 // leased sets the time limit the cluster's record gives a job.
@@ -28,6 +28,8 @@ func leased(row Row, jobs ...provider.Job) []provider.Job {
 	}
 	return jobs
 }
+
+func rowOf(name string) Row { r, _ := RowByName(name); return r }
 
 func wantFailure(t *testing.T, got []string, want string) {
 	t.Helper()
@@ -76,7 +78,18 @@ func TestHandoverBoundaries(t *testing.T) {
 		}, "the successor was not ready before the predecessor ended"},
 		{"a successor never ready", func(o *HandoverObs, _ *[]provider.Job) { o.Instances[1].ReadyAt = time.Time{} }, "the successor was not ready"},
 		{"one Instance recorded", func(o *HandoverObs, _ *[]provider.Job) { o.Instances = o.Instances[:1] }, "did not record both Instances"},
-		{"one Allocation", func(o *HandoverObs, j *[]provider.Job) { o.Tags = o.Tags[:1] }, "fewer than two Allocations"},
+		{"one Allocation", func(o *HandoverObs, j *[]provider.Job) { o.Tags = o.Tags[:1] }, "exactly two Allocations"},
+		{"a third Allocation", func(o *HandoverObs, j *[]provider.Job) {
+			o.Tags = append(o.Tags, "hb-x-cccccccccccc")
+			*j = append(*j, leased(rowOf("alpha-athena-handover"), job("hb-x-cccccccccccc", "plgrid-gpu-a100", 6*time.Minute, 7*time.Minute, 20*time.Minute))...)
+		}, "more jobs of the run than the row's maximum"},
+		{"a held duplicate submission under the predecessor's tag", func(o *HandoverObs, j *[]provider.Job) {
+			dup := job(o.Tags[0], "plgrid-gpu-a100", 2*time.Minute, 2*time.Minute, 3*time.Minute)
+			dup.ID, dup.TimeLimit = "id-duplicate", rowOf("alpha-athena-handover").Lease
+			*j = append(*j, dup)
+		}, "a tag names more than one job"},
+		{"the same job listed twice is one job", func(o *HandoverObs, j *[]provider.Job) { *j = append(*j, (*j)[0]) }, ""},
+		{"no response recorded", func(o *HandoverObs, _ *[]provider.Job) { o.Responses, o.Attributed = 0, 0 }, "no response, so attribution is unchecked"},
 		{"a job missing from the cluster's record", func(o *HandoverObs, j *[]provider.Job) { *j = (*j)[:1] }, "no record of a job"},
 		{"a job on another partition", func(o *HandoverObs, j *[]provider.Job) { (*j)[1].Partition = "other" }, "another partition"},
 		{"no worker restart", func(o *HandoverObs, _ *[]provider.Job) { o.WorkerRestarts = 0 }, "0 restarts at the worker rung"},
@@ -98,7 +111,7 @@ func goodNoOverlap() (NoOverlapObs, []provider.Job) {
 		Tags:    []string{"hb-pre-aaaaaaaaaaaa", "hb-suc-bbbbbbbbbbbb"},
 		Streams: []Stream{{ID: "s", Opened: at(time.Minute), Ended: at(31 * time.Minute), Complete: true}},
 		// The drain start at 30 min, the successor ready at 50 min: a gap of 20 min.
-		DrainStart: at(30 * time.Minute), SuccessorReady: at(50 * time.Minute), NoOverlapSlotSeen: true, Deployment: row.Plan(),
+		DrainStart: at(30 * time.Minute), SuccessorReady: at(50 * time.Minute), NoOverlapSlotSeen: true, WorkerRestarts: 1, Deployment: row.Plan(),
 	}
 	return o, leased(row,
 		job(o.Tags[0], row.Partition, 0, time.Minute, 40*time.Minute),
@@ -122,6 +135,13 @@ func TestNoOverlapBoundaries(t *testing.T) {
 		{"NoOverlapSlot never shown", func(o *NoOverlapObs, _ *[]provider.Job) { o.NoOverlapSlotSeen = false }, "never showed NoOverlapSlot"},
 		{"a third Allocation", func(o *NoOverlapObs, _ *[]provider.Job) { o.Tags = append(o.Tags, "hb-x-cccccccccccc") }, "exactly two Allocations"},
 		{"one Allocation", func(o *NoOverlapObs, _ *[]provider.Job) { o.Tags = o.Tags[:1] }, "exactly two Allocations"},
+		{"no worker restart on Helios", func(o *NoOverlapObs, _ *[]provider.Job) { o.WorkerRestarts = 0 }, "0 restarts at the worker rung, want 1"},
+		{"two worker restarts on Helios", func(o *NoOverlapObs, _ *[]provider.Job) { o.WorkerRestarts = 2 }, "2 restarts at the worker rung, want 1"},
+		{"a held duplicate submission under the successor's tag", func(o *NoOverlapObs, j *[]provider.Job) {
+			dup := job(o.Tags[1], "plgrid-gpu-gh200", 6*time.Minute, 6*time.Minute, 7*time.Minute)
+			dup.ID, dup.TimeLimit = "id-duplicate", rowOf("alpha-helios-nooverlap").Lease
+			*j = append(*j, dup)
+		}, "a tag names more than one job"},
 		{"the successor starts at the predecessor's end", func(o *NoOverlapObs, j *[]provider.Job) { (*j)[1].StartTime = (*j)[0].EndTime }, ""},
 		{"the successor starts a second early", func(o *NoOverlapObs, j *[]provider.Job) {
 			(*j)[1].StartTime = ptr((*j)[0].EndTime.Add(-time.Second))
@@ -155,28 +175,60 @@ func TestTheGapAndTheQueueWaitAreWorkedOutFromTheTimes(t *testing.T) {
 	}
 }
 
-func goodTunnel() (TunnelHourObs, []provider.Job) {
-	row, _ := RowByName("tunnel-hour-athena")
-	o := TunnelHourObs{
-		Tags:  []string{"hb-t-aaaaaaaaaaaa"},
-		Lanes: []Stream{{ID: "l1", Opened: at(time.Minute), Ended: at(time.Minute + Hour), Complete: true}, {ID: "l2", Opened: at(time.Minute), Ended: at(time.Minute + Hour + 5*time.Second), Complete: true}},
-		Rate:  PathRate{Direction: "up", OK: true, AskedSeconds: 30, TimedSeconds: 29, Bytes: 1}, Deployment: row.Plan(),
+// lane is a chain of requests of 300 s, the deployment's deadline, one straight after the other from start.
+func lane(id string, start time.Duration, count int) Lane {
+	l := Lane{ID: id}
+	for i := 0; i < count; i++ {
+		o := start + time.Duration(i)*MaxRequestDuration
+		l.Requests = append(l.Requests, Stream{ID: id, Opened: at(o), Ended: at(o + MaxRequestDuration), Complete: true})
 	}
-	return o, leased(row, job(o.Tags[0], row.Partition, 0, 0, Hour+10*time.Minute))
+	return l
+}
+
+func goodTunnel() (TunnelHourObs, []provider.Job) {
+	row := rowOf("tunnel-hour-athena")
+	// Two lanes of 12 requests of exactly 5 minutes from minute 20: an hour to the second, ending at minute 80.
+	o := TunnelHourObs{
+		Tags:       []string{"hb-t-aaaaaaaaaaaa"},
+		Lanes:      []Lane{lane("l1", 20*time.Minute, 12), lane("l2", 20*time.Minute, 12)},
+		DrainStart: at(80 * time.Minute),
+		Rate:       PathRate{Direction: "up", OK: true, AskedSeconds: 30, TimedSeconds: 29, Bytes: 1}, Deployment: row.Plan(),
+	}
+	return o, leased(row, job(o.Tags[0], row.Partition, 0, 0, 85*time.Minute))
 }
 
 func TestTunnelHourBoundaries(t *testing.T) {
-	row, _ := RowByName("tunnel-hour-athena")
+	row := rowOf("tunnel-hour-athena")
+	last := func(o *TunnelHourObs) *Stream { r := o.Lanes[0].Requests; return &r[len(r)-1] }
 	cases := []struct {
 		name   string
 		mutate func(*TunnelHourObs, *[]provider.Job)
 		want   string
 	}{
-		{"exactly an hour, exactly the rate's minimums", func(*TunnelHourObs, *[]provider.Job) {}, ""},
-		{"a second short of the hour", func(o *TunnelHourObs, _ *[]provider.Job) { o.Lanes[0].Ended = o.Lanes[0].Ended.Add(-time.Second) }, "lasted less than an hour"},
-		{"no lanes", func(o *TunnelHourObs, _ *[]provider.Job) { o.Lanes = nil }, "no stream was held"},
-		{"a cut lane", func(o *TunnelHourObs, _ *[]provider.Job) { o.Lanes[1].CutBy = "tunnel" }, "cut during the hour"},
-		{"an unfinished lane", func(o *TunnelHourObs, _ *[]provider.Job) { o.Lanes[1].Complete = false }, "did not complete"},
+		{"exactly an hour, requests of exactly the deadline, the drain start at the last ending", func(*TunnelHourObs, *[]provider.Job) {}, ""},
+		{"a second short of the hour", func(o *TunnelHourObs, _ *[]provider.Job) { last(o).Ended = last(o).Ended.Add(-time.Second) }, "lasted less than an hour"},
+		{"no lanes", func(o *TunnelHourObs, _ *[]provider.Job) { o.Lanes = nil }, "no lane was held"},
+		{"a lane with no request", func(o *TunnelHourObs, _ *[]provider.Job) { o.Lanes[1].Requests = nil }, "a lane carried no request"},
+		{"a cut request", func(o *TunnelHourObs, _ *[]provider.Job) { o.Lanes[1].Requests[3].CutBy = "tunnel" }, "cut during the hour"},
+		{"an unfinished request", func(o *TunnelHourObs, _ *[]provider.Job) { o.Lanes[1].Requests[3].Complete = false }, "did not complete"},
+		// The front cuts a request at the deployment's deadline: a stream observed longer than it was not behind that deadline.
+		{"a request a second past the deployment's deadline", func(o *TunnelHourObs, _ *[]provider.Job) {
+			o.Lanes[0].Requests[2].Ended = o.Lanes[0].Requests[2].Ended.Add(time.Second)
+		}, "outlasted the deployment's request deadline"},
+		{"one stream of an hour", func(o *TunnelHourObs, _ *[]provider.Job) {
+			o.Lanes[0].Requests = []Stream{{ID: "long", Opened: at(20 * time.Minute), Ended: at(80 * time.Minute), Complete: true}}
+		}, "outlasted the deployment's request deadline"},
+		{"a pause of exactly 10 s", func(o *TunnelHourObs, _ *[]provider.Job) {
+			shift(&o.Lanes[0], 5, MaxLaneGap)
+			o.DrainStart = o.DrainStart.Add(MaxLaneGap)
+		}, ""},
+		{"a pause of 11 s", func(o *TunnelHourObs, _ *[]provider.Job) {
+			shift(&o.Lanes[0], 5, MaxLaneGap+time.Second)
+			o.DrainStart = o.DrainStart.Add(time.Minute)
+		}, "paused for more than 10 s"},
+		{"the hour ends a second after the drain start", func(o *TunnelHourObs, _ *[]provider.Job) { o.DrainStart = o.DrainStart.Add(-time.Second) }, "ended after the Instance's drain start"},
+		{"no drain start observed", func(o *TunnelHourObs, _ *[]provider.Job) { o.DrainStart = time.Time{} }, "drain start was not observed"},
+		{"a request with no ending time", func(o *TunnelHourObs, _ *[]provider.Job) { o.Lanes[0].Requests[1].Ended = time.Time{} }, "no opening or ending time"},
 		{"one tunnel drop", func(o *TunnelHourObs, _ *[]provider.Job) { o.TunnelDrops = 1 }, "dropped during the hour"},
 		{"rate not ok", func(o *TunnelHourObs, _ *[]provider.Job) { o.Rate.OK = false }, "path rate was not measured"},
 		{"rate asked for 29.9 s", func(o *TunnelHourObs, _ *[]provider.Job) { o.Rate.AskedSeconds = 29.9 }, "asked for under 30 s"},
@@ -184,8 +236,21 @@ func TestTunnelHourBoundaries(t *testing.T) {
 		{"rate moved no bytes", func(o *TunnelHourObs, _ *[]provider.Job) { o.Rate.Bytes = 0 }, "moved no bytes"},
 		{"rate in the other direction", func(o *TunnelHourObs, _ *[]provider.Job) { o.Rate.Direction = "down" }, "not in the token direction"},
 		{"the cluster shows 59 minutes", func(o *TunnelHourObs, j *[]provider.Job) { (*j)[0].EndTime = ptr(at(59 * time.Minute)) }, "ran under an hour"},
-		{"no tag", func(o *TunnelHourObs, _ *[]provider.Job) { o.Tags = nil }, "no job tag"},
+		{"the cluster shows exactly an hour", func(o *TunnelHourObs, j *[]provider.Job) { (*j)[0].EndTime = ptr(at(Hour)) }, ""},
+		// Evidence that is absent is not evidence (the scheduler's times corroborate the lanes').
+		{"no start time in the cluster's record", func(o *TunnelHourObs, j *[]provider.Job) { (*j)[0].StartTime = nil }, "lacks the job's start or end time"},
+		{"no end time in the cluster's record", func(o *TunnelHourObs, j *[]provider.Job) { (*j)[0].EndTime = nil }, "lacks the job's start or end time"},
+		{"no tag", func(o *TunnelHourObs, _ *[]provider.Job) { o.Tags = nil }, "exactly one Allocation"},
 		{"another partition", func(o *TunnelHourObs, j *[]provider.Job) { (*j)[0].Partition = "plgrid" }, "another partition"},
+		{"two tunnel jobs", func(o *TunnelHourObs, j *[]provider.Job) {
+			o.Tags = append(o.Tags, "hb-t-bbbbbbbbbbbb")
+			*j = append(*j, leased(row, job("hb-t-bbbbbbbbbbbb", row.Partition, 86*time.Minute, 86*time.Minute, 90*time.Minute))...)
+		}, "exactly one Allocation"},
+		{"two tunnel jobs in the cluster's record under one recorded tag", func(o *TunnelHourObs, j *[]provider.Job) {
+			dup := job(o.Tags[0], row.Partition, 86*time.Minute, 86*time.Minute, 90*time.Minute)
+			dup.ID, dup.TimeLimit = "id-held-duplicate", row.Lease
+			*j = append(*j, dup)
+		}, "a tag names more than one job"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -193,6 +258,55 @@ func TestTunnelHourBoundaries(t *testing.T) {
 			c.mutate(&o, &jobs)
 			wantFailure(t, VerifyTunnelHour(row, o, jobs), c.want)
 		})
+	}
+}
+
+// shift moves every request of the lane from index i on later by d.
+func shift(l *Lane, i int, d time.Duration) {
+	for k := i; k < len(l.Requests); k++ {
+		l.Requests[k].Opened, l.Requests[k].Ended = l.Requests[k].Opened.Add(d), l.Requests[k].Ended.Add(d)
+	}
+}
+
+// The most jobs in the queue at once, with a job counting from its submission to its end.
+func TestPeakQueuedCountsOverlapAtTheBoundary(t *testing.T) {
+	mk := func(submit, end time.Duration) provider.Job {
+		return provider.Job{ID: "j", SubmitTime: at(submit), EndTime: ptr(at(end))}
+	}
+	cases := []struct {
+		name string
+		jobs []provider.Job
+		want int
+	}{
+		{"none", nil, 0},
+		{"one", []provider.Job{mk(0, 10)}, 1},
+		{"one ends as the next is submitted", []provider.Job{mk(0, 10), mk(10, 20)}, 1},
+		{"one ends a minute after the next is submitted", []provider.Job{mk(0, 10), mk(9, 20)}, 2},
+		{"two overlap", []provider.Job{mk(0, 10), mk(5, 15)}, 2},
+		{"three overlap", []provider.Job{mk(0, 20), mk(5, 15), mk(6, 7)}, 3},
+		{"a job with no end is still there", []provider.Job{mk(0, 10), {SubmitTime: at(20)}, {SubmitTime: at(30)}}, 2},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			// durations in the table are minutes
+			scale := func(js []provider.Job) []provider.Job {
+				out := make([]provider.Job, len(js))
+				for i, j := range js {
+					j.SubmitTime = t0.Add(j.SubmitTime.Sub(t0) * time.Minute)
+					if j.EndTime != nil {
+						j.EndTime = ptr(t0.Add(j.EndTime.Sub(t0) * time.Minute))
+					}
+					out[i] = j
+				}
+				return out
+			}
+			if got, ok := peakQueued(scale(c.jobs)); got != c.want || !ok {
+				t.Errorf("peak %d complete %t, want %d true", got, ok, c.want)
+			}
+		})
+	}
+	if _, ok := peakQueued([]provider.Job{{ID: "x"}}); ok {
+		t.Error("a job with no submission time was counted as placed")
 	}
 }
 

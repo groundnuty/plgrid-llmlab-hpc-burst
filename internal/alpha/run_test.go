@@ -32,6 +32,9 @@ var dryCases = map[string][]dryCase{
 		{"wrong-partition", "a job ran on another partition than the row's"},
 		{"untagged", "a job tag was not written down before its submission"},
 		{"unattributed", "a response lacked its attribution headers"},
+		{"no-responses", "no response, so attribution is unchecked"},
+		{"duplicate-tag", "a tag names more than one job"},
+		{"extra-allocation", "exactly two Allocations"},
 		{"adds-helios", "the deployment does not allow exactly one Provider"},
 		{"default-lease", "the deployment's leaseLimit is not the row's shortest lease"},
 		{"short-lease", "not longer than the lead an Instance needs (PartitionTooShort)"},
@@ -51,6 +54,10 @@ var dryCases = map[string][]dryCase{
 		{"default-lease", "the deployment's leaseLimit is not the row's shortest lease"},
 		{"short-lease", "not longer than the lead an Instance needs (PartitionTooShort)"},
 		{"no-release-when-idle", "lacks ReleaseWhenIdle with a short idleLimit"},
+		{"two-restarts", "2 restarts at the worker rung, want 1"},
+		{"no-restart", "0 restarts at the worker rung, want 1"},
+		{"duplicate-tag", "a tag names more than one job"},
+		{"extra-allocation", "exactly two Allocations"},
 	},
 	"tunnel-hour-helios": tunnelCases,
 	"tunnel-hour-athena": tunnelCases,
@@ -58,8 +65,14 @@ var dryCases = map[string][]dryCase{
 
 var tunnelCases = []dryCase{
 	{"", ""},
-	{"short", "a stream lasted less than an hour"},
+	{"short", "a lane lasted less than an hour"},
 	{"cut", "a stream was cut during the hour"},
+	{"duplicate-tag", "a tag names more than one job"},
+	{"extra-allocation", "exactly one Allocation"},
+	{"past-deadline", "outlasted the deployment's request deadline"},
+	{"gap", "paused for more than 10 s"},
+	{"past-drain", "ended after the Instance's drain start"},
+	{"no-drain-start", "drain start was not observed"},
 	{"drops", "the tunnel dropped during the hour"},
 	{"no-rate", "the path rate was not measured"},
 	{"short-rate", "the path rate was asked for under 30 s, timed under 29 s, or moved no bytes"},
@@ -139,7 +152,7 @@ func TestHealthyRunsPostTheirMeasurements(t *testing.T) {
 	cases := map[string][]string{
 		"alpha-athena-handover":  {"handovers completed: 1", "restarts at the worker rung: 1", "responses with attribution: 20 of 20"},
 		"alpha-helios-nooverlap": {"gap from the drain start to the successor ready: 1m0s", "NoOverlapSlot seen: true", "queue wait once the GPU freed: 0s"},
-		"tunnel-hour-athena":     {"path rate, node to front:", "lanes held: 2, the shortest 1h1m0s", "tunnel drops: 0"},
+		"tunnel-hour-athena":     {"path rate, node to front:", "lanes held: 2, the shortest 1h0m52s, of 26 requests in all", "tunnel drops: 0"},
 	}
 	for name, wants := range cases {
 		t.Run(name, func(t *testing.T) {

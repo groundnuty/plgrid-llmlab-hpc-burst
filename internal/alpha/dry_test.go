@@ -40,9 +40,9 @@ const (
 // dryFaults lists every fault the stand-in knows, per row family. An unknown
 // name stops the run: a typo must not pass as "no fault".
 var dryFaults = map[string][]string{
-	"handover":  {"cut", "no-stream", "two-restarts", "no-restart", "no-handover", "late-successor", "wrong-partition", "untagged", "unattributed", "adds-helios", "default-lease", "short-lease"},
-	"nooverlap": {"nocap", "nogap", "noslot", "cut", "no-stream", "late-submit", "untagged", "wrong-partition", "adds-athena", "default-lease", "short-lease", "no-release-when-idle"},
-	"tunnel":    {"short", "cut", "drops", "no-rate", "short-rate", "wrong-direction", "untagged", "wrong-partition", "adds-other-cluster", "default-lease", "short-lease"},
+	"handover":  {"cut", "no-stream", "two-restarts", "no-restart", "no-handover", "late-successor", "wrong-partition", "untagged", "unattributed", "adds-helios", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "no-responses"},
+	"nooverlap": {"nocap", "nogap", "noslot", "cut", "no-stream", "late-submit", "untagged", "wrong-partition", "adds-athena", "default-lease", "short-lease", "no-release-when-idle", "duplicate-tag", "extra-allocation", "two-restarts", "no-restart"},
+	"tunnel":    {"short", "cut", "drops", "no-rate", "short-rate", "wrong-direction", "untagged", "wrong-partition", "adds-other-cluster", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "past-deadline", "gap", "past-drain", "no-drain-start"},
 }
 
 type drySteps struct {
@@ -56,6 +56,8 @@ type drySteps struct {
 	jobs  int
 	// tags in the order they were made, for the observation.
 	tags []string
+	// held are the IDs of the held duplicate submissions a fault made; they are cancelled at the end.
+	held []string
 	// untaggedAt is the 1-based position of the tag the fault "untagged" does
 	// not write down: the successor's, or the only one of a one-job run.
 	untaggedAt int
@@ -106,6 +108,9 @@ func newDrySteps(t *testing.T, cfg Config, family string) *drySteps {
 		// End whatever is left, then close: a Platform in run mode must be closed.
 		for i := 1; i <= d.jobs; i++ {
 			_ = os.WriteFile(d.gate(i), nil, 0o600)
+		}
+		for _, id := range d.held {
+			_, _ = d.sess.Run(context.Background(), slurm.Command{Line: "scancel " + id})
 		}
 		waitJobsFinished(plat)
 		if err := plat.Close(); err != nil {
@@ -187,6 +192,32 @@ func (d *drySteps) submit(tag, partition, qos string) (n int, id string) {
 	return n, id
 }
 
+// submitHeld is a second submission under a tag that already names a job, held so that it never runs: the
+// duplicate a lost reply and a retry can leave on a real cluster.
+func (d *drySteps) submitHeld(tag, partition, qos string) {
+	d.t.Helper()
+	line := fmt.Sprintf("sbatch --parsable --no-requeue --hold --job-name=%s --partition=%s --account=example-account --time=%s --gres=gpu:1 --cpus-per-task=1 --mem=1024", tag, partition, slurmTime(d.deployment().LeaseLimit))
+	if qos != "" {
+		line += " --qos=" + qos
+	}
+	res, err := d.sess.Run(context.Background(), slurm.Command{Line: line + " '--wrap=true'"})
+	if err != nil || res.ExitCode != 0 {
+		d.t.Fatalf("sbatch --hold %q: %v exit %d %s", tag, err, res.ExitCode, res.Stderr)
+	}
+	d.held = append(d.held, strings.TrimSpace(strings.SplitN(string(res.Stdout), ";", 2)[0]))
+}
+
+// extras applies the faults that add jobs the row does not allow: a held second submission under a tag, or a
+// further Allocation.
+func (d *drySteps) extras(p Plan, firstTag string) {
+	switch d.cfg.DryFault {
+	case "duplicate-tag":
+		d.submitHeld(firstTag, d.cfg.Row.Partition, d.cfg.Row.QOS)
+	case "extra-allocation":
+		d.submit(d.tag(p, "extra"), d.cfg.Row.Partition, d.cfg.Row.QOS)
+	}
+}
+
 func (d *drySteps) waitFor(what string, cond func(provider.Job) bool, id string) provider.Job {
 	d.t.Helper()
 	deadline := time.Now().Add(dryWait)
@@ -250,6 +281,7 @@ func (d *drySteps) Handover(_ context.Context, p Plan) (HandoverObs, error) {
 	n0, id0 := d.submit(tag0, d.partitionFor(false), "")
 	j0 := d.running(id0)
 	opened := *j0.StartTime
+	d.extras(p, tag0)
 	d.tick(10 * time.Minute)
 	var tag1, id1 string
 	var n1 int
@@ -297,6 +329,8 @@ func (d *drySteps) Handover(_ context.Context, p Plan) (HandoverObs, error) {
 		obs.Handovers = 0
 	case d.fault("unattributed"):
 		obs.Attributed = 19
+	case d.fault("no-responses"):
+		obs.Responses, obs.Attributed = 0, 0
 	}
 	t.Logf("stand-in handover: %d streams, %d Allocations", len(streams), len(d.tags))
 	return obs, nil
@@ -345,8 +379,14 @@ func (d *drySteps) NoOverlap(_ context.Context, p Plan) (NoOverlapObs, error) {
 		streams[0].Complete, streams[0].CutBy = false, "tunnel"
 	}
 	_ = j1
-	obs := NoOverlapObs{Tags: append([]string(nil), d.tags...), Streams: streams, DrainStart: drain, SuccessorReady: ready, NoOverlapSlotSeen: true, NoReadyTarget: 3, Deployment: d.deployment()}
+	// After the successor is up: a further Allocation under the QOS's cap would otherwise take the GPU first.
+	d.extras(p, tag0)
+	obs := NoOverlapObs{Tags: append([]string(nil), d.tags...), Streams: streams, DrainStart: drain, SuccessorReady: ready, NoOverlapSlotSeen: true, NoReadyTarget: 3, WorkerRestarts: 1, Deployment: d.deployment()}
 	switch {
+	case d.fault("two-restarts"):
+		obs.WorkerRestarts = 2
+	case d.fault("no-restart"):
+		obs.WorkerRestarts = 0
 	case d.fault("nogap"):
 		obs.SuccessorReady = drain.Add(-time.Second)
 	case d.fault("noslot"):
@@ -360,19 +400,52 @@ func (d *drySteps) TunnelHour(_ context.Context, p Plan) (TunnelHourObs, error) 
 	// The run's only job is the one the wrong-partition fault sends elsewhere.
 	n, id := d.submit(tag, d.partitionFor(true), d.cfg.Row.QOS)
 	j := d.running(id)
-	opened := *j.StartTime
-	held := 61 * time.Minute
+	started := *j.StartTime
+	d.extras(p, tag)
+	// The Instance becomes ready 20 minutes in. The drain starts a drain window before the lease ends.
+	d.tick(20 * time.Minute)
+	ready := d.now()
+	drain := started.Add(d.deployment().LeaseLimit - (MaxRequestDuration + DrainMargin))
+	// The hour is two lanes, each a chain of requests of 4 min 40 s with a second between them: 13 requests span
+	// 3,652 s. Every request is within the deployment's 5-minute deadline, which the front enforces.
+	chain := func(id string, count int) Lane {
+		l := Lane{ID: id}
+		at := ready
+		for i := 0; i < count; i++ {
+			l.Requests = append(l.Requests, Stream{ID: fmt.Sprintf("%s-%d", id, i), Opened: at, Ended: at.Add(280 * time.Second), Complete: true})
+			at = at.Add(281 * time.Second)
+			if d.fault("gap") && i == 5 {
+				at = at.Add(30 * time.Second) // a pause of 31 s between two requests
+			}
+		}
+		return l
+	}
+	count := 13
 	if d.fault("short") {
-		held = 59 * time.Minute
+		count = 12 // 3,371 s
 	}
-	d.tick(held)
-	ended := d.now()
+	lanes := []Lane{chain("lane1", count), chain("lane2", count)}
+	if d.fault("past-deadline") {
+		// One stream of 61 minutes: the front would have cut it at the deployment's 5-minute deadline.
+		lanes[0] = Lane{ID: "lane1", Requests: []Stream{{ID: "long", Opened: ready, Ended: ready.Add(61 * time.Minute), Complete: true}}}
+	}
+	end := ready
+	for _, l := range lanes {
+		for _, r := range l.Requests {
+			if r.Ended.After(end) {
+				end = r.Ended
+			}
+		}
+	}
+	if d.fault("past-drain") {
+		drain = ready.Add(30 * time.Minute) // the Instance drained in the middle of the hour
+	}
+	d.tick(end.Sub(ready))
 	d.end(n, id)
-	lane := Stream{ID: "lane1", Opened: opened, Ended: ended, Complete: true}
 	if d.fault("cut") {
-		lane.Complete, lane.CutBy = false, "tunnel"
+		lanes[0].Requests[3].Complete, lanes[0].Requests[3].CutBy = false, "tunnel"
 	}
-	obs := TunnelHourObs{Deployment: d.deployment(), Tags: append([]string(nil), d.tags...), Lanes: []Stream{lane, {ID: "lane2", Opened: opened, Ended: ended, Complete: true}},
+	obs := TunnelHourObs{Deployment: d.deployment(), Tags: append([]string(nil), d.tags...), Lanes: lanes, DrainStart: drain,
 		Rate: PathRate{Direction: "up", OK: true, AskedSeconds: 30, TimedSeconds: 30.2, Bytes: 31 << 20}}
 	switch {
 	case d.fault("drops"):
@@ -383,6 +456,8 @@ func (d *drySteps) TunnelHour(_ context.Context, p Plan) (TunnelHourObs, error) 
 		obs.Rate.TimedSeconds = 20
 	case d.fault("wrong-direction"):
 		obs.Rate.Direction = "down"
+	case d.fault("no-drain-start"):
+		obs.DrainStart = time.Time{}
 	}
 	return obs, nil
 }

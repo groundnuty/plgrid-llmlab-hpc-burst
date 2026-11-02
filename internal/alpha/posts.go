@@ -49,8 +49,8 @@ func handoverPost(row Row, o HandoverObs, failures []string) string {
 func noOverlapPost(row Row, o NoOverlapObs, failures []string, jobs []provider.Job) string {
 	var b strings.Builder
 	n, cut := inFlight(o.Streams, o.DrainStart)
-	fmt.Fprintf(&b, "%s\n%s\n- gap from the drain start to the successor ready: %s\n- streams in flight at the drain start: %d of %d; cut: %d; NoOverlapSlot seen: %t; new requests answered 503 no_ready_target: %d\n",
-		verdictLine(row, failures), deploymentLine(o.Deployment), o.Gap().Round(time.Second), n, len(o.Streams), cut, o.NoOverlapSlotSeen, o.NoReadyTarget)
+	fmt.Fprintf(&b, "%s\n%s\n- gap from the drain start to the successor ready: %s\n- streams in flight at the drain start: %d of %d; cut: %d; NoOverlapSlot seen: %t; new requests answered 503 no_ready_target: %d; restarts at the worker rung: %d\n",
+		verdictLine(row, failures), deploymentLine(o.Deployment), o.Gap().Round(time.Second), n, len(o.Streams), cut, o.NoOverlapSlotSeen, o.NoReadyTarget, o.WorkerRestarts)
 	if len(o.Tags) == 2 {
 		by := jobsByTag(jobs)
 		if w, ok := SuccessorQueueWait(by[o.Tags[0]], by[o.Tags[1]]); ok {
@@ -63,13 +63,16 @@ func noOverlapPost(row Row, o NoOverlapObs, failures []string, jobs []provider.J
 func tunnelHourPost(row Row, o TunnelHourObs, failures []string) string {
 	var b strings.Builder
 	var held time.Duration
-	for _, s := range o.Lanes {
-		if d := s.Ended.Sub(s.Opened); held == 0 || d < held {
+	requests, cut := 0, 0
+	for _, l := range o.Lanes {
+		if d := l.Span(); held == 0 || d < held {
 			held = d
 		}
+		requests += len(l.Requests)
+		cut += countCut(l.Requests)
 	}
-	fmt.Fprintf(&b, "%s\n%s\n- lanes held: %d, the shortest %s; streams cut: %d; tunnel drops: %d\n- path rate, node to front: %.0f B/s (%d bytes timed over %.1f s, asked %.0f s)\n",
-		verdictLine(row, failures), deploymentLine(o.Deployment), len(o.Lanes), held.Round(time.Second), countCut(o.Lanes), o.TunnelDrops,
+	fmt.Fprintf(&b, "%s\n%s\n- lanes held: %d, the shortest %s, of %d requests in all; requests cut: %d; tunnel drops: %d\n- path rate, node to front: %.0f B/s (%d bytes timed over %.1f s, asked %.0f s)\n",
+		verdictLine(row, failures), deploymentLine(o.Deployment), len(o.Lanes), held.Round(time.Second), requests, cut, o.TunnelDrops,
 		o.Rate.BytesPerSecond(), o.Rate.Bytes, o.Rate.TimedSeconds, o.Rate.AskedSeconds)
 	for _, fl := range TunnelHourFlags(o) {
 		fmt.Fprintf(&b, "- FLAG: %s\n", fl)

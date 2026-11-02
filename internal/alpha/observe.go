@@ -66,6 +66,9 @@ type NoOverlapObs struct {
 	// the successor Instance became ready. Their difference is the gap.
 	DrainStart     time.Time `json:"drainStart"`
 	SuccessorReady time.Time `json:"successorReady"`
+	// WorkerRestarts counts the restarts at the worker rung the run made on this
+	// platform (HBEP-7: one on each alpha platform).
+	WorkerRestarts int `json:"workerRestarts"`
 	// NoOverlapSlotSeen is true when the deployment carried the NoOverlapSlot
 	// reason between the two (HBEP-7, No-overlap mode).
 	NoOverlapSlotSeen bool `json:"noOverlapSlotSeen"`
@@ -105,11 +108,38 @@ func (p PathRate) BytesPerSecond() float64 {
 	return float64(p.Bytes) / p.TimedSeconds
 }
 
+// Lane is one lane of the hour: a chain of requests, one after the other on the
+// same tunnel, each within the deployment's request deadline (TunnelHour).
+type Lane struct {
+	ID       string   `json:"id"`
+	Requests []Stream `json:"requests"`
+}
+
+// Span is the time from the lane's first request opening to its last ending; zero
+// for a lane with no request or a request with no times.
+func (l Lane) Span() time.Duration {
+	var first, last time.Time
+	for _, r := range l.Requests {
+		if r.Opened.IsZero() || r.Ended.IsZero() {
+			return 0
+		}
+		if first.IsZero() || r.Opened.Before(first) {
+			first = r.Opened
+		}
+		if r.Ended.After(last) {
+			last = r.Ended
+		}
+	}
+	return last.Sub(first)
+}
+
 // TunnelHourObs is one hour over this wiring on one cluster (tunnel-hour-*).
 type TunnelHourObs struct {
 	Tags []string `json:"tags"`
-	// Lanes are the streams held behind frpc for the hour, one per lane.
-	Lanes []Stream `json:"lanes"`
+	// Lanes are the chains of requests held behind frpc for the hour.
+	Lanes []Lane `json:"lanes"`
+	// DrainStart is the Instance's drain start: the hour must end before it.
+	DrainStart time.Time `json:"drainStart"`
 	// Deployment is what the run's ModelDeployment held (see DeploymentSpec).
 	Deployment DeploymentSpec `json:"deployment"`
 	// TunnelDrops counts the times the Instance's TunnelConnected condition

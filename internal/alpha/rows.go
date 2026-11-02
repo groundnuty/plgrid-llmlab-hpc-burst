@@ -37,6 +37,36 @@ func Lead() time.Duration {
 // MinLease is the shortest leaseLimit that is longer than Lead, in whole minutes.
 func MinLease() time.Duration { return Lead() + time.Minute }
 
+// The hour of the tunnel rows. The front cuts a request at the deployment's
+// routing.maxRequestDuration (HBEP-5, Errors), and a deployment's deadline can
+// only shorten the front's, so a single stream cannot last an hour behind a
+// 5-minute deadline. The row therefore holds the tunnel for TunnelHour with a
+// chain of back-to-back requests on one tunnel, each within the deadline, with
+// no gap over MaxLaneGap: the tunnel carries traffic uncut for the hour, which
+// is what S1's lanes show (spikes/s1-frp/README.md:284-285), without a stream
+// the front would cut.
+const (
+	// TunnelHour is how long the chain of requests runs: S1's 3,660 s, the hour
+	// and a minute.
+	TunnelHour = 61 * time.Minute
+	// MaxLaneGap is the longest pause between two requests of a lane.
+	MaxLaneGap = 10 * time.Second
+)
+
+// TunnelLease is the leaseLimit of the tunnel rows. The hour must fit between
+// the Instance becoming ready, which can take health.startTimeout, and its drain
+// start, the drain window before the lease ends: so the lease is the start
+// timeout, the hour, the drain window (maxRequestDuration plus drainMargin), and a
+// minute, which is 2 h 17 min and longer than Lead. A shorter lease would fail the
+// row whenever the Instance starts slowly.
+func TunnelLease() time.Duration {
+	l := StartTimeout + TunnelHour + MaxRequestDuration + DrainMargin + time.Minute
+	if l < MinLease() {
+		return MinLease()
+	}
+	return l
+}
+
 // Row is one row of hack/live-checks.sh's table as the test sees it. The
 // script's cluster shapes are the same facts; hack/livechecks fails when the
 // two drift.
@@ -52,7 +82,8 @@ type Row struct {
 	// GPUs is the number of GPUs of each job.
 	GPUs int
 	// Lease is the leaseLimit of the run's deployment, and so each job's time
-	// limit. A stack row uses MinLease; the accounting rows' job is 5 minutes.
+	// limit. The handover rows use MinLease, the tunnel rows TunnelLease; the
+	// accounting rows' job is 5 minutes.
 	Lease time.Duration
 	// Budget is how long the run may take once its first job has started: the
 	// second clock of the run. The first is the wait in the queue.
@@ -61,7 +92,9 @@ type Row struct {
 	// rows that run there: the owner's shared GPU (#145). Zero for a row that
 	// holds no slot.
 	SlotHold time.Duration
-	// MostJobs is the most jobs of the run in the queue at once.
+	// MostJobs is the number of jobs of the run, and so the most of them in the
+	// queue at once: the verdicts check the cluster's own record of job identities
+	// and occupancy against it.
 	MostJobs int
 	// PostsTo names where the run's result and its slot use are posted.
 	PostsTo string
@@ -103,8 +136,8 @@ var rows = []Row{
 	{Name: "alpha-athena-handover", Cluster: "athena", Partition: "plgrid-gpu-a100", GPUs: 1, Lease: MinLease(), Budget: 150 * time.Minute, MostJobs: 2, PostsTo: "#145 and #93"},
 	// The predecessor, and the successor pending beside it in QOS now.
 	{Name: "alpha-helios-nooverlap", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: MinLease(), Budget: 200 * time.Minute, SlotHold: MinLease() + 45*time.Minute, MostJobs: 2, PostsTo: "#145 and #94"},
-	{Name: "tunnel-hour-helios", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: MinLease(), Budget: 130 * time.Minute, SlotHold: MinLease(), MostJobs: 1, PostsTo: "#145"},
-	{Name: "tunnel-hour-athena", Cluster: "athena", Partition: "plgrid-gpu-a100", GPUs: 1, Lease: MinLease(), Budget: 130 * time.Minute, MostJobs: 1, PostsTo: "#145"},
+	{Name: "tunnel-hour-helios", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: TunnelLease(), Budget: 150 * time.Minute, SlotHold: TunnelLease(), MostJobs: 1, PostsTo: "#145"},
+	{Name: "tunnel-hour-athena", Cluster: "athena", Partition: "plgrid-gpu-a100", GPUs: 1, Lease: TunnelLease(), Budget: 150 * time.Minute, MostJobs: 1, PostsTo: "#145"},
 }
 
 // accountingRows are the rows of the accounting check, which runs in
