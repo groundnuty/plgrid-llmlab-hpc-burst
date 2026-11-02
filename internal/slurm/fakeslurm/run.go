@@ -155,6 +155,12 @@ type jobRun struct {
 	dir     string // the execution's directory under JobDir
 	started time.Time
 	limit   *time.Timer
+
+	// submitDir and env are the working directory and environment the batch
+	// shell started with, kept for the steps srun runs in the job.
+	submitDir string
+	env       []string
+
 	// stopping is set when a TERM or KILL phase has begun; killing when the
 	// KILL has.
 	stopping, killing bool

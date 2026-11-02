@@ -38,10 +38,19 @@
 //     exit 2, nothing runs;
 //   - "cat > <file>" is the only redirection. It writes standard input to the
 //     file with mode 0666 &^ umask and needs the parent directory to exist;
-//   - commands: sbatch, squeue, sacct, scancel, scontrol release, printenv,
+//   - commands: sbatch, srun, squeue, sacct, scancel, scontrol release, printenv,
 //     sha256sum, umask, mkdir -p, chmod, mv -f and mv -fT, rm -f, rm -rf and test -f.
 //     Anything else is exit 127, "command not found". Options the plugin never
-//     sends are refused (exit 1), so an unexpected flag cannot pass silently.
+//     sends are refused (exit 1), so an unexpected flag cannot pass silently;
+//   - srun is "srun --overlap --jobid=<digits> [--ntasks=1] [--time=<t>]
+//     <program> [args...]", the options in any order, each in the one form
+//     shown (--jobid=<id>, never "--jobid <id>"). The program and its words
+//     follow the first word that is not an option and are not read, so
+//     "bash -s" is the program's own. --overlap and --jobid are required,
+//     --ntasks takes only 1, and any other option is refused with exit 1. The
+//     program's standard input is the Command's Stdin (a script for "bash
+//     -s"), and the call log keeps its length. See "srun" under Run mode: it
+//     runs a host process, so it needs run mode.
 //
 // Job IDs count up from 1001, or from Config.FirstJobID when it is set. Fakes
 // of different tests that run at once on one machine set it apart, so that a
@@ -106,9 +115,9 @@
 //   - sacct state.reason is "None" for a pending job, even a held one, as in
 //     S4; the hold shows in hold and priority, which both squeue and sacct
 //     carry.
-//   - Command.Timeout is ignored. A test that needs a timed-out command uses
-//     FailNext with slurm.ErrTimeout, or LostReply for one that registered the
-//     job first.
+//   - Command.Timeout is ignored, except by srun (which runs a process; see
+//     Run mode). A test that needs a timed-out command uses FailNext with
+//     slurm.ErrTimeout, or LostReply for one that registered the job first.
 //
 // # Run mode
 //
@@ -243,6 +252,41 @@
 //     job whose processes survived or could not be listed. A Platform in run
 //     mode must be closed. Timers and the grace are wall time; job states and
 //     times use the Platform's clock, so a full-stack run passes a real clock.
+//   - srun --overlap --jobid=<id> runs a step in a job of the calling Session's
+//     user that is RUNNING with a live process: the program, looked up on the
+//     PATH of the job's environment (not the test's), runs as a host process
+//     with the job's own environment (the one its batch shell got, SLURM_JOB_ID
+//     among it) and the submit directory as its working directory. Standard
+//     input is the Command's, and its standard output and error come back as
+//     the Result's, each capped at 16 MiB (a step that writes more is killed,
+//     exit 1). The exit status is the program's, or 128 plus the signal that
+//     ended it; a program that is not found is exit 127 and one that is not
+//     executable 126, as a shell says. Nothing runs in a refusal, exit 1 and
+//     "srun: error: Unable to confirm allocation for job <id>: <reason>", the
+//     reason in the words of Slurm's error table: "Invalid job id specified"
+//     (unknown or purged), "Access/permission denied" (another user's job; an
+//     unknown job is checked first, as in scancel), "Job/step already
+//     completing or completed" (ended, completing included), "Job is pending
+//     execution" (pending or held), and "job is not running" for a RUNNING
+//     job with no process to join. Outside run mode srun is refused, exit 1.
+//     The step is a process in a session of its own, as a job is, so it is
+//     not among the job's Processes, and it changes nothing of the job: not
+//     its state, not its accounting. What the program does to the job's
+//     processes (a kill by PID) is its own doing. mu is not held while the
+//     step runs, so every other command is answered meanwhile. Command.Timeout
+//     (zero is provider.CommandTimeout, 30 s, as in the transport) and the
+//     Run call's context bound it: the step and everything left in its
+//     session, its children included, get KILL, and Run returns ErrTimeout
+//     for the timeout and the error of the context for a context that ended.
+//     --time bounds it too, in RunMode.Minute (exit 1, "STEP CANCELLED DUE TO
+//     TIME LIMIT"); the job's batch shell exiting ends it (exit 1, "Job step
+//     aborted"), as a Slurm step does not outlive its job. When the program
+//     exits, whatever it left in its session is killed, and the process is
+//     reaped before Run returns, so no process of a step is left, with the
+//     limit of a job's: a process that calls setsid and whose parent has died
+//     escapes, and one that holds the step's output open is waited for two
+//     seconds, then left. A sweep that cannot tell that the processes are gone
+//     makes Run return an error that wraps slurm.ErrTransport.
 //   - The fake has no Pdeathsig: in Go it fires when the forking thread
 //     exits, not the process. A process that ends without Close leaves its
 //     jobs running, as a Slurm job outlives the login session.

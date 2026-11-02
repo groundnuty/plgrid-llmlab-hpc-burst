@@ -105,8 +105,8 @@ type Call struct {
 	// Words are the command's words with quotes stripped. "cat > f" is
 	// ["cat", ">", "f"].
 	Words []string
-	// StdinLen is the length of the standard input of a cat command; the
-	// content is never stored.
+	// StdinLen is the length of the standard input of a cat command or an
+	// srun step, the two that read it; the content is never stored.
 	StdinLen int
 	Time     time.Time
 }
@@ -232,7 +232,8 @@ func (s *Session) Generation() uint64 { return s.gen.Load() }
 func (s *Session) Reconnect() { s.gen.Add(1) }
 
 // Run implements slurm.Runner. See doc.go for the grammar. The context ends a
-// command that waits at a gate; the command's Timeout is ignored.
+// command that waits at a gate; the command's Timeout is ignored, except by
+// srun, which it and the context both bound (srun.go).
 func (s *Session) Run(ctx context.Context, cmd slurm.Command) (slurm.Result, error) {
 	p := s.p
 	p.enter()
@@ -254,7 +255,7 @@ func (s *Session) Run(ctx context.Context, cmd slurm.Command) (slurm.Result, err
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.execLine(s, cmds, cmd.Stdin)
+	return p.execLine(ctx, s, cmds, cmd)
 }
 
 func (p *Platform) enter() {
