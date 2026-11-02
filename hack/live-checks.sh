@@ -63,7 +63,7 @@
 #                                QOS now's GPU for hours (alpha-helios-nooverlap, tunnel-hour-helios) refuse without it
 #   The reach rows (issue #225) confirm that a compute node reaches the gateway's forwarded port:
 #   LIVE_PROBE_HOST, LIVE_PROBE_PORT   the forwarded port as the compute nodes see it; private, read only by the reach rows,
-#                                and never printed, logged on the screen or posted (the host a name or an address, the port 1 to 65535)
+#                                and never printed, shown on the screen or posted (the host a name or an address, the port 1 to 65535)
 #   LIVE_PROBE_LABEL             the only name of that port in public output (the text to post); letters, digits, dots,
 #                                underscores and hyphens, and it must not hold the host or the port
 # Cluster calls go through the ssh aliases helios and athena, one at a time per
@@ -148,7 +148,7 @@ TABLE
 # scheduler's acceptance of 1 CPU and 1Gi is not recorded (the conformance run used 4 CPUs and 32Gi): the estimate below,
 # sbatch --test-only, is the first check, and a rejected shape ends the row as not run (exit 3). The job runs for seconds and
 # its time limit is the harness's 5 min; the timeout of 20 min is the start wait, the job's end (5 min) and a margin
-# (reachEndWait in reach_test.go; qos_test.go compares them). The Helios row asks for -C memfs, as the Helios profile does for
+# (reachEndWait and reachCleanupWait in reach_run_test.go; qos_test.go compares them). The Helios row asks for -C memfs, as the Helios profile does for
 # every job.
 # gpu-accounting-helios (issue #194) has the same two guards as conformance-helios-gh200: it starts only when squeue --me shows
 # no job in QOS now, and its one job must start within 10 min of its acceptance (else cancelled by its tag, NOT RUN, exit 3).
