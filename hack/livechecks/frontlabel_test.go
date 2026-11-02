@@ -74,6 +74,7 @@ func TestEveryRowThatPostsNamesWhereTheFrontRanAndRefusesWithoutIt(t *testing.T)
 // package's validator.
 func TestTheFrontLabelIsHeldToOneFormByTheScriptAndThePackage(t *testing.T) {
 	long := strings.Repeat("a", 112) + " outside" // 120 bytes
+	over := strings.Repeat("a", 113) + " outside" // 121 bytes, still a valid form with its position stated
 	for _, c := range []struct {
 		name, label string
 		ok          bool
@@ -83,7 +84,7 @@ func TestTheFrontLabelIsHeldToOneFormByTheScriptAndThePackage(t *testing.T) {
 		{"the position in capitals", "Development host - OUTSIDE the network", true},
 		{"a semicolon and a hyphen", "dev host; inside - a Cyfronet-network host", true},
 		{"the longest", long, true},
-		{"one byte over", long + "x", false},
+		{"one byte over", over, false},
 		{"no position", "the development host", false},
 		{"a position inside a word", "the outsider host", false},
 		{"a position followed by a digit", "host inside2", true},
