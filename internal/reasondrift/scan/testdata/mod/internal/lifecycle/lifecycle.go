@@ -205,3 +205,7 @@ func (p *pass) discarded(in *Instance) {
 func (p *pass) nested(in *Instance) {
 	p.r.Event(in, nil, eventFailing, ident(ident(v1alpha1.ReasonC)), "m")
 }
+
+// orphan takes its reason as a parameter, and nothing calls it or uses it as a
+// value: its reasons cannot be told.
+func orphan(r Recorder, in *Instance, reason string) { r.Event(in, nil, eventFailing, reason, "m") }

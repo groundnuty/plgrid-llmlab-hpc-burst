@@ -197,7 +197,7 @@ func (s *scanner) collect(code *reasondrift.Code) {
 				// of a listed method is no wrapper: it calls one.)
 				if w, listed := s.wrappers[s.pkgDir(root)+"."+funcName(root)]; listed && root.Synthetic == "" {
 					s.seenWrappers[w.Func] = true
-					if why := s.verifyForwards(w, fn, root, cc); why != "" {
+					if why := s.verifyForwards(w, root, cc); why != "" {
 						problem(reasondrift.WrapperDoesNotForward, fn, ci.Pos(), w.Func+": "+why)
 					}
 					continue
@@ -385,10 +385,10 @@ func receiverOffset(cc *ssa.CallCommon) int {
 
 // verifyForwards checks one recorder call in a wrapper against its Forwards and
 // returns why it does not pass on what they say, or "".
-func (s *scanner) verifyForwards(w reasondrift.Wrapper, fn, root *ssa.Function, cc *ssa.CallCommon) string {
-	if fn != root {
-		return "the recorder call is inside a function literal"
-	}
+func (s *scanner) verifyForwards(w reasondrift.Wrapper, root *ssa.Function, cc *ssa.CallCommon) string {
+	// A call inside a function literal of the wrapper passes the literal's own
+	// parameters and captured variables, none of which is a parameter of the
+	// wrapper, so the checks below refuse it.
 	if len(w.Forwards) == 0 {
 		return "the wrapper lists nothing it forwards"
 	}

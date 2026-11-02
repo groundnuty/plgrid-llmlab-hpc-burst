@@ -151,7 +151,9 @@ func TestResolvesEachWayAReasonArrives(t *testing.T) {
 		// table is built by the package's initializer: both hold uses of a
 		// function that the functions of the package do not show.
 		"pass.boundAndCalled": "used as a value",
-		"tabled":              "used as a value",
+		// A function nothing calls has no caller to take its parameter from.
+		"orphan": "no call in the module reaches",
+		"tabled": "used as a value",
 	} {
 		e := emitOf(t, code, fn)
 		if e.Unresolved == "" || !strings.Contains(e.Unresolved, why) {
@@ -288,6 +290,14 @@ func builtReason(conds *[]Condition, n int) {
 }
 
 func unknownCondition(conds *[]Condition, c Condition) { SetStatusCondition(conds, c) }
+
+func setCond(conds *[]Condition, c Condition) { SetStatusCondition(conds, c) }
+
+func callSetCond(conds *[]Condition) {
+	setCond(conds, Condition{Type: v1alpha1.ConditionWatched, Reason: v1alpha1.ReasonA})
+}
+
+var setters = []func(*[]Condition, Condition){setCond}
 `
 
 // TestAWriteThatIsNotAConstantIsAProblem: any write that can reach a watched
@@ -305,6 +315,9 @@ func TestAWriteThatIsNotAConstantIsAProblem(t *testing.T) {
 		"literalReason":    reasondrift.ManagedNotConstant,
 		"builtReason":      reasondrift.ManagedUnresolved,
 		"unknownCondition": reasondrift.ManagedUnresolved,
+		// Also called with a constant, but used as a value in a table, so a list of
+		// its callers is not complete.
+		"setCond": reasondrift.ManagedUnresolved,
 	}
 	if len(byFunc) != len(want) {
 		t.Errorf("managed problems %v, want %v", byFunc, want)
