@@ -156,6 +156,11 @@ func (d *drySteps) now() time.Time         { return d.clock.Now() }
 func (d *drySteps) tick(x time.Duration)   { d.clock.Advance(x) }
 func (d *drySteps) fault(name string) bool { return d.cfg.DryFault == name }
 
+// gateWrap is the batch script of a job that runs until its release file appears.
+func (d *drySteps) gateWrap(n int) string {
+	return fmt.Sprintf("while [ ! -e %s ]; do sleep 0.02; done", d.gate(n))
+}
+
 // tag makes an Allocation's job tag the way the controller does and, unless
 // the fault says otherwise, writes it down first.
 func (d *drySteps) tag(p Plan, name string) string {
@@ -175,12 +180,11 @@ func (d *drySteps) submit(tag, partition, qos string) (n int, id string) {
 	d.t.Helper()
 	d.jobs++
 	n = d.jobs
-	wrap := fmt.Sprintf("while [ ! -e %s ]; do sleep 0.02; done", d.gate(n))
 	line := fmt.Sprintf("sbatch --parsable --no-requeue --job-name=%s --partition=%s --account=example-account --time=%s --gres=gpu:1 --cpus-per-task=1 --mem=1024 --output=%s --error=%s", tag, partition, slurmTime(d.deployment().LeaseLimit), d.out(n), d.out(n))
 	if qos != "" {
 		line += " --qos=" + qos
 	}
-	line += " '--wrap=" + wrap + "'"
+	line += " '--wrap=" + d.gateWrap(n) + "'"
 	res, err := d.sess.Run(context.Background(), slurm.Command{Line: line})
 	if err != nil || res.ExitCode != 0 {
 		d.t.Fatalf("sbatch %q: %v exit %d %s", tag, err, res.ExitCode, res.Stderr)
@@ -260,9 +264,8 @@ func (d *drySteps) submitOwner(p Plan) string {
 	d.t.Helper()
 	d.jobs++
 	n := d.jobs
-	wrap := fmt.Sprintf("while [ ! -e %s ]; do sleep 0.02; done", d.gate(n))
 	line := fmt.Sprintf("sbatch --parsable --no-requeue --job-name=owner-other-project-job --partition=%s --qos=%s --account=example-account --time=%s --gres=gpu:1 --cpus-per-task=1 --mem=1024 --output=%s --error=%s '--wrap=%s'",
-		d.cfg.Row.Partition, d.cfg.Row.QOS, slurmTime(p.PendingMax+time.Hour), d.out(n), d.out(n), wrap)
+		d.cfg.Row.Partition, d.cfg.Row.QOS, slurmTime(p.PendingMax+time.Hour), d.out(n), d.out(n), d.gateWrap(n))
 	res, err := d.sess.Run(context.Background(), slurm.Command{Line: line})
 	if err != nil || res.ExitCode != 0 {
 		d.t.Fatalf("the owner's job was not accepted: %v exit %d %s", err, res.ExitCode, res.Stderr)

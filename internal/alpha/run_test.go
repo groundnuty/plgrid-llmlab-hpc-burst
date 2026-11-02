@@ -330,6 +330,11 @@ func TestAJobPendingPastTheBoundIsCancelledByItsTag(t *testing.T) {
 				if j.State != fakeslurm.Running {
 					t.Errorf("the owner's job is %s, want it left running", j.State)
 				}
+				// It is held by a release file the cleanup writes, not by a stretch of wall-clock time (PR 230, B2): a
+				// stalled run must not find the owner's job gone and the slot free.
+				if !strings.Contains(j.Wrap, "while [ ! -e ") || !strings.Contains(j.Wrap, "release-") || strings.Contains(j.Wrap, "sleep 600") {
+					t.Errorf("the owner's job is not held on a release gate: %q", j.Wrap)
+				}
 			}
 			if ours != 1 || owners != map[bool]int{true: 1, false: 0}[c.ownerJob] {
 				t.Errorf("%d jobs of the run and %d of the owner's", ours, owners)
