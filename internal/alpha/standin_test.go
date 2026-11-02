@@ -114,16 +114,16 @@ func standInWorld(t *testing.T, row Row) world {
 	tm := row.Clock()
 	stm := stack.Timing{Lease: string(*minutes(row.Lease)), MaxRequest: tm.MaxRequestDuration.String(), DrainMargin: tm.DrainMargin.String(),
 		DrainWindow: "10m", HandoverMargin: tm.HandoverMargin.String(), StopGrace: "5s", AgentTimeout: "20s", StartTimeout: tm.StartTimeout.String()}
-	var shape stack.ClusterShape
+	// Job IDs of this process's own: the worker fault finds the job's processes by
+	// SLURM_JOB_ID, and other agents' fake clusters on this host number from 1001.
+	shape := stack.ClusterShape{FirstJobID: 10_000_000 + 8*os.Getpid()}
 	arch := stack.CPUArch()
 	prof := stack.BatchProfile(arch, stm)
 	prov := stack.BatchProvider("")
 	if row.QOS != "" {
-		shape = stack.ClusterShape{
-			Partitions: []fakeslurm.Partition{{Name: stack.Partition, GPUOnly: true, QOS: standInPartQOS}},
-			QOS: []fakeslurm.QOS{{Name: standInPartQOS, MaxSubmitPerUser: fakeslurm.Cap(2000)},
-				{Name: row.QOS, MaxSubmitPerUser: fakeslurm.Cap(1), MaxGPUsPerUser: fakeslurm.Cap(1)}},
-		}
+		shape.Partitions = []fakeslurm.Partition{{Name: stack.Partition, GPUOnly: true, QOS: standInPartQOS}}
+		shape.QOS = []fakeslurm.QOS{{Name: standInPartQOS, MaxSubmitPerUser: fakeslurm.Cap(2000)},
+			{Name: row.QOS, MaxSubmitPerUser: fakeslurm.Cap(1), MaxGPUsPerUser: fakeslurm.Cap(1)}}
 		prof.Spec.Partitions[0].QOS = standInPartQOS
 		prof.Spec.QOS = []v1alpha1.QOSProfile{{Name: standInPartQOS, MaxSubmitPerUser: stack.Ptr(int32(2000))},
 			{Name: row.QOS, MaxSubmitPerUser: stack.Ptr(int32(1)), MaxGPUsPerUser: stack.Ptr(int32(1))}}

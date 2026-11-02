@@ -44,6 +44,10 @@ type Cluster struct {
 type ClusterShape struct {
 	Partitions []fakeslurm.Partition
 	QOS        []fakeslurm.QOS
+	// FirstJobID is the first job ID the cluster gives; 0 keeps the fake's own.
+	// A run that finds its processes by SLURM_JOB_ID on this shared host sets one
+	// no other fake cluster here uses.
+	FirstJobID int
 }
 
 // StartCluster starts the fake cluster in dir, with jobEnv added to every
@@ -77,7 +81,7 @@ func StartCluster(t T, dir string, shape ClusterShape, jobEnv map[string]string)
 		shape.Partitions = []fakeslurm.Partition{{Name: Partition, GPUOnly: true}}
 	}
 	c.Plat = fakeslurm.New(slurm.RealClock, fakeslurm.Config{
-		Partitions: shape.Partitions, QOS: shape.QOS,
+		Partitions: shape.Partitions, QOS: shape.QOS, FirstJobID: shape.FirstJobID,
 		// KillWait 20 s: longer than the agent's own shutdown (the profile's
 		// 5 s stopGrace, its 10 s margin and a 5 s last report), shorter than
 		// Slurm's 30 s default. Slots stay unlimited, so no ended job's slot
