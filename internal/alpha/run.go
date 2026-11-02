@@ -10,6 +10,17 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
+// NotRun reports whether err ends the row's run as NOT RUN rather than as a failure: a
+// job pended past the first clock (ErrNotStarted) on a row that holds QOS now's one-job slot,
+// where a busy queue is not the run's fault and the slot must not be held waiting. On any other
+// row the same error is a failure.
+func NotRun(row Row, err error) bool { return row.SlotHold > 0 && errors.Is(err, ErrNotStarted) }
+
+// NotRunNote is the text of the marker (NotRunFile): the row, the wait and the fact, never a job ID or a tag.
+func NotRunNote(row Row, pendingMax time.Duration) string {
+	return fmt.Sprintf("%s: a job was still pending after %s; this run's jobs were cancelled by tag\n", row.Name, pendingMax)
+}
+
 // Run is one row from its scenario to its verdict. It hands the scenario a
 // Recorder, takes what the scenario saw, reads the cluster's own record of the
 // run's jobs, judges both, writes the record and the text to post, and closes
@@ -19,6 +30,11 @@ import (
 func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(string, ...any)) (failures []string, err error) {
 	defer func() {
 		if cerr := st.Close(ctx); cerr != nil {
+			if errors.Is(err, ErrNotStarted) {
+				// A close that failed may have left a job: that is a failure, never a NOT RUN.
+				err = fmt.Errorf("closing the steps after a job that did not start: %v (%v)", cerr, err)
+				return
+			}
 			err = errors.Join(err, fmt.Errorf("closing the steps: %w", cerr))
 		}
 	}()

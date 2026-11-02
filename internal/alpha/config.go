@@ -114,7 +114,16 @@ func ConfigFromEnv(getenv func(string) string, mine ...string) (cfg Config, skip
 				bad = append(bad, "a dry run refuses to start with live settings present ("+k+" is set)")
 			}
 		}
+		// A dry run's clock is a manual one, so its own wait is a minute unless the script names the wait it
+		// announced: the stand-in then runs that bound, and a test of the script reads the one it asked for.
 		cfg.PendingMax = time.Minute
+		if v := getenv(envPending); v != "" {
+			if d, perr := pendingFromEnv(v); perr != nil {
+				bad = append(bad, perr.Error())
+			} else {
+				cfg.PendingMax = d
+			}
+		}
 		return cfg, "", joinBad(bad)
 	}
 	if getenv(envDryFault) != "" {
@@ -148,12 +157,21 @@ func ConfigFromEnv(getenv func(string) string, mine ...string) (cfg Config, skip
 	if g := need(envGPUs); g != "" && g != strconv.Itoa(row.GPUs) {
 		bad = append(bad, "the script's GPU count differs from the row's")
 	}
-	if s, perr := strconv.Atoi(need(envPending)); perr != nil || s <= 0 {
-		bad = append(bad, envPending+" must be a positive number of seconds")
+	if d, perr := pendingFromEnv(need(envPending)); perr != nil {
+		bad = append(bad, perr.Error())
 	} else {
-		cfg.PendingMax = time.Duration(s) * time.Second
+		cfg.PendingMax = d
 	}
 	return cfg, "", joinBad(bad)
+}
+
+// pendingFromEnv reads the wait in the queue: a positive whole number of seconds.
+func pendingFromEnv(v string) (time.Duration, error) {
+	s, err := strconv.Atoi(v)
+	if err != nil || s <= 0 {
+		return 0, fmt.Errorf("%s must be a positive number of seconds", envPending)
+	}
+	return time.Duration(s) * time.Second, nil
 }
 
 func joinBad(bad []string) error {

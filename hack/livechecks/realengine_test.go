@@ -108,12 +108,13 @@ func (w *world) fakeClock() []string {
 	return []string{"LIVE_FAKE_CLOCK=" + filepath.Join(w.state, "clock")}
 }
 
-// The job waited 90 minutes in the queue, longer than its whole run budget (57 min limit plus 15). It
-// must still pass: the run's clock starts at the first state that is not PENDING.
+// The job waited 90 minutes in the queue (the operator allowed 2 hours, LIVE_PENDING_MAX_SECONDS: the default for this
+// row, in QOS now, is 30 minutes), longer than its whole run budget (57 min limit plus 15). It must still pass: the
+// run's clock starts at the first state that is not PENDING.
 func TestRealEnginePendingTimeIsNotRunTime(t *testing.T) {
 	w := newWorld(t)
 	w.useStubGo()
-	res := w.run(append(w.fakeClock(), "STUB_CLOCK_STEP=1800", "STUB_JOB_STATES=PENDING PENDING PENDING RUNNING"), "--run", "real-engine", "--yes")
+	res := w.run(append(w.fakeClock(), "STUB_CLOCK_STEP=1800", "STUB_JOB_STATES=PENDING PENDING PENDING RUNNING", "LIVE_PENDING_MAX_SECONDS=7200"), "--run", "real-engine", "--yes")
 	if res.code != 0 {
 		t.Fatalf("exit %d:\n%s", res.code, res.out)
 	}
@@ -123,16 +124,41 @@ func TestRealEnginePendingTimeIsNotRunTime(t *testing.T) {
 	}
 }
 
+// The wait in the queue of real-engine, a row in QOS now, is 30 minutes (the science agent's ruling, 2 Nov 2026), written
+// out here; a job still pending past it fails the run (not NOT RUN: this row has no skip protocol) and is cancelled. The
+// operator's own wait overrides it, exactly, even a part of a minute. The fake clock moves one step per poll of the job,
+// and the run gives up at the first poll that finds the clock more than the bound past its submission, so the polls
+// the run made are the bound read off the clock: 30 min in 60 s steps is 31 polls (30 min is not past 30 min, 31 are),
+// 10 min is 11, 90 s in 60 s steps is 2, 2 h in 1 h steps is 3. A bound a minute either way changes the count.
 func TestRealEngineJobPendingForTooLongIsCancelled(t *testing.T) {
-	w := newWorld(t)
-	w.useStubGo()
-	res := w.run(append(w.fakeClock(), "STUB_CLOCK_STEP=3600", "STUB_JOB_FOREVER=PENDING"), "--run", "real-engine", "--yes")
-	if res.code != 1 {
-		t.Fatalf("exit %d, want 1:\n%s", res.code, res.out)
-	}
-	w.contains(res, "FAIL (the job was still pending after 120 minutes; cancelling it)", "cleanup: left behind 0 (cancelled 1)")
-	if got := lines(w.stateFile("cancelled")); len(got) != 1 || got[0] != "7001" {
-		t.Errorf("cancelled %v, want the submitted job", got)
+	for _, c := range []struct {
+		name, setting, step, want string
+		polls                     int
+	}{
+		{"the default", "", "60", "FAIL (the job was still pending after 30 min; cancelling it)", 31},
+		{"a shorter wait asked for", "LIVE_PENDING_MAX_SECONDS=600", "60", "FAIL (the job was still pending after 10 min; cancelling it)", 11},
+		{"a longer wait asked for", "LIVE_PENDING_MAX_SECONDS=7200", "3600", "FAIL (the job was still pending after 120 min; cancelling it)", 3},
+		{"a part of a minute", "LIVE_PENDING_MAX_SECONDS=90", "60", "FAIL (the job was still pending after 1 min 30 s; cancelling it)", 2},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w := newWorld(t)
+			w.useStubGo()
+			env := append(w.fakeClock(), "STUB_CLOCK_STEP="+c.step, "STUB_JOB_FOREVER=PENDING")
+			if c.setting != "" {
+				env = append(env, c.setting)
+			}
+			res := w.run(env, "--run", "real-engine", "--yes")
+			if res.code != 1 {
+				t.Fatalf("exit %d, want 1:\n%s", res.code, res.out)
+			}
+			w.contains(res, c.want, "cleanup: left behind 0 (cancelled 1)")
+			if got := strings.Count(w.stateFile("events"), "squeue %T job\n"); got != c.polls {
+				t.Errorf("the run polled the job %d times before giving up, want %d", got, c.polls)
+			}
+			if got := lines(w.stateFile("cancelled")); len(got) != 1 || got[0] != "7001" {
+				t.Errorf("cancelled %v, want the submitted job", got)
+			}
+		})
 	}
 }
 
