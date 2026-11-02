@@ -73,7 +73,8 @@ func (r *rig) assertNoOrphans(steps string) {
 	for _, e := range evs {
 		if e.Reason == v1alpha1.EventReasonTunnelOrphaned {
 			orphans = append(orphans, e)
-			r.t.Logf("FINDING step (%s): %s regarding %s %s: %.300s", steps, e.Reason, e.Regarding.Kind, e.Regarding.Name, e.Note)
+			r.t.Logf("FINDING step (%s): %s regarding %s %s, raised %s, stored %s: %.300s", steps, e.Reason, e.Regarding.Kind, e.Regarding.Name,
+				ts(e.EventTime.Time), e.CreationTimestamp.UTC().Format(time.RFC3339), e.Note)
 		}
 	}
 	r.t.Logf("TunnelOrphaned check (%s): the last of %d proxies seen offline at %s; the witness %s created %s and given TunnelConnected by a read by %s; %d events listed through the marker %s, %d TunnelOrphaned",
