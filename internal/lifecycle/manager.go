@@ -22,6 +22,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -117,17 +118,25 @@ const ShutdownGrace = 30 * time.Second
 // (controller-runtime v0.23.1, pkg/cache/internal/informers.go:366-380), the
 // discovery request carries no context of the caller's, and the manager's
 // shared HTTP client has no timeout in production, so a discovery that stalls
-// holds that mutex; the cache's own stop then waits for it (:243-246) and the
-// manager's stop can use up its ShutdownGrace (PR 187 review, B3). The mapper
-// gets an HTTP client of its own with this timeout. The manager's shared
-// client keeps none: a timeout on it would cut every watch. A discovery that
-// times out fails the informer's start, which both its callers retry
-// (readiness every cacheRetry, a controller's Kind source every 10 s).
+// holds that mutex, and so does each creation queued behind it; the cache's
+// own stop waits for the mutex too (:243-246), and the manager's stop can use
+// up its ShutdownGrace (PR 187 review, B3). Two bounds follow. The mapper gets
+// an HTTP client of its own with this timeout, so a stalled discovery ends and
+// the informer's start fails, which both its callers retry (readiness every
+// cacheRetry, a controller's Kind source every 10 s); the manager's shared
+// client keeps none, since a timeout on it would cut every watch. And the
+// mapper stops mapping when the manager starts to stop (stoppableMapper), so
+// the creations queued behind a stalled discovery fail at once and the stop
+// does not wait for each of their timeouts.
 const DiscoveryTimeout = 10 * time.Second
 
+// errManagerStopping is what the mapper answers once the manager is stopping.
+var errManagerStopping = errors.New("lifecycle: the manager is stopping")
+
 // boundedMapper returns the manager's MapperProvider: controller-runtime's
-// dynamic REST mapper over an HTTP client whose requests end after timeout.
-func boundedMapper(timeout time.Duration) func(*rest.Config, *http.Client) (meta.RESTMapper, error) {
+// dynamic REST mapper over an HTTP client whose requests end after timeout,
+// and which answers RESTMapping with errManagerStopping once stop is closed.
+func boundedMapper(timeout time.Duration, stop <-chan struct{}) func(*rest.Config, *http.Client) (meta.RESTMapper, error) {
 	return func(c *rest.Config, _ *http.Client) (meta.RESTMapper, error) {
 		cfg := rest.CopyConfig(c)
 		cfg.Timeout = timeout
@@ -135,9 +144,57 @@ func boundedMapper(timeout time.Duration) func(*rest.Config, *http.Client) (meta
 		if err != nil {
 			return nil, err
 		}
-		return apiutil.NewDynamicRESTMapper(cfg, hc)
+		inner, err := apiutil.NewDynamicRESTMapper(cfg, hc)
+		if err != nil {
+			return nil, err
+		}
+		return stoppableMapper{RESTMapper: inner, stop: stop}, nil
 	}
 }
+
+// stoppableMapper stops waiting for a mapping when stop closes. The mapping
+// call itself runs on to its end on a goroutine of its own (at most
+// DiscoveryTimeout), but its caller, which may hold the informers' mutex,
+// returns at once; after stop every call fails without starting one.
+type stoppableMapper struct {
+	meta.RESTMapper
+	stop <-chan struct{}
+}
+
+func (m stoppableMapper) RESTMapping(gk schema.GroupKind, versions ...string) (*meta.RESTMapping, error) {
+	select {
+	case <-m.stop:
+		return nil, errManagerStopping
+	default:
+	}
+	type answer struct {
+		mapping *meta.RESTMapping
+		err     error
+	}
+	got := make(chan answer, 1)
+	go func() {
+		mapping, err := m.RESTMapper.RESTMapping(gk, versions...)
+		got <- answer{mapping, err}
+	}()
+	select {
+	case a := <-got:
+		return a.mapping, a.err
+	case <-m.stop:
+		return nil, errManagerStopping
+	}
+}
+
+// stopSignal closes a channel when the manager starts to stop. It runs
+// without the Lease, like readiness.
+type stopSignal struct{ ch chan struct{} }
+
+func (s stopSignal) Start(ctx context.Context) error {
+	<-ctx.Done()
+	close(s.ch)
+	return nil
+}
+
+func (s stopSignal) NeedLeaderElection() bool { return false }
 
 // leaderRenewDeadline is controller-runtime's default renew deadline
 // (v0.23.1, pkg/manager/manager.go, defaultRenewDeadline), which the lifecycle
@@ -171,6 +228,7 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 		metricsAddr = "0"
 	}
 	grace := ShutdownGrace
+	mapperStop := make(chan struct{})
 	mopts := manager.Options{
 		Scheme:                        scheme,
 		Metrics:                       metricsserver.Options{BindAddress: metricsAddr},
@@ -181,7 +239,7 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 		LeaderElectionReleaseOnCancel: true,
 		GracefulShutdownTimeout:       &grace,
 		NewCache:                      o.newCache,
-		MapperProvider:                boundedMapper(cmp.Or(o.discoveryTimeout, DiscoveryTimeout)),
+		MapperProvider:                boundedMapper(cmp.Or(o.discoveryTimeout, DiscoveryTimeout), mapperStop),
 	}
 	// With leader election off there is no Lease to read or regard, so no
 	// ObservationGap (`@hpc-burst-science-agent`, 31 Oct 2026, for #111).
@@ -196,6 +254,9 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 	mgr, err := ctrl.NewManager(o.Config, mopts)
 	if err != nil {
 		return nil, nil, fmt.Errorf("lifecycle: manager: %w", err)
+	}
+	if err := mgr.Add(stopSignal{ch: mapperStop}); err != nil {
+		return nil, nil, err
 	}
 	if err := mgr.AddHealthzCheck("ping", healthz.Ping); err != nil {
 		return nil, nil, err

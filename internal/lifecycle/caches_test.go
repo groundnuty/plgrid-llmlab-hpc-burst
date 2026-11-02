@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -365,6 +366,9 @@ type discoveryState struct {
 	gate    <-chan struct{}
 	arrived chan struct{}
 	once    sync.Once
+	// firstOnly holds the first discovery request only; later ones pass.
+	firstOnly bool
+	first     atomic.Bool
 }
 
 func isDiscoveryPath(p string) bool {
@@ -379,7 +383,7 @@ func isDiscoveryPath(p string) bool {
 }
 
 func (d *discoveryStall) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.Method == http.MethodGet && isDiscoveryPath(req.URL.Path) {
+	if req.Method == http.MethodGet && isDiscoveryPath(req.URL.Path) && (!d.firstOnly || d.first.CompareAndSwap(false, true)) {
 		d.once.Do(func() { close(d.arrived) })
 		select {
 		case <-d.gate:
@@ -390,13 +394,37 @@ func (d *discoveryStall) RoundTrip(req *http.Request) (*http.Response, error) {
 	return d.next.RoundTrip(req)
 }
 
+// TestCachesRecoverFromAStalledDiscovery: the first discovery request never answers, and the
+// others do. DiscoveryTimeout (here 2 s) ends the stalled one, the informer's start fails and is
+// tried again, and the caches check passes. Without the bound the stalled request holds the
+// informers' mutex for good and the check stays failing.
+func TestCachesRecoverFromAStalledDiscovery(t *testing.T) {
+	g := newCachesRig(t)
+	gate := make(chan struct{})
+	defer close(gate)
+	stall := &discoveryState{gate: gate, arrived: make(chan struct{}), firstOnly: true}
+	cfg := rest.CopyConfig(g.cfg)
+	cfg.WrapTransport = func(rt http.RoundTripper) http.RoundTripper { return &discoveryStall{next: rt, discoveryState: stall} }
+	g.start(t, "first discovery stalled", cfg, Options{HealthAddr: cachesStandbyAddr, LeaderElection: false, discoveryTimeout: 2 * time.Second})
+	select {
+	case <-stall.arrived:
+	case <-time.After(time.Minute):
+		t.Fatal("no discovery request reached the proxy")
+	}
+	eventually(t, time.Minute, "the caches pass after the stalled discovery timed out", func() (bool, string) {
+		caches, _ := readyzCodes(t, cachesStandbyAddr)
+		return caches == http.StatusOK, fmt.Sprintf("/readyz/caches %d", caches)
+	})
+}
+
 // TestCachesStopDuringAStalledDiscovery: a manager that stops while the REST mapper's discovery
 // request is stalled (PR 187 review, B3) returns within its grace. Creating an informer maps the
 // kind under the cache's mutex, with a request that takes no context, and the cache's own stop
-// waits for that mutex (controller-runtime v0.23.1, pkg/cache/internal/informers.go:366-380, :243);
-// DiscoveryTimeout, here shortened, ends the request, and the readiness check's Start returns on
-// the cancel without waiting for the call. A proxy in front of the API server holds the discovery
-// until the test ends.
+// waits for that mutex (controller-runtime v0.23.1, pkg/cache/internal/informers.go:366-380, :243).
+// The controller's sources queue behind the stalled creation, each to be stalled in turn, so
+// DiscoveryTimeout alone leaves the stop waiting for one timeout per queued creation: the mapper
+// also stops mapping when the manager starts to stop, and the queue drains at once. A proxy in
+// front of the API server holds the discovery until the test ends.
 func TestCachesStopDuringAStalledDiscovery(t *testing.T) {
 	g := newCachesRig(t)
 	gate := make(chan struct{})
