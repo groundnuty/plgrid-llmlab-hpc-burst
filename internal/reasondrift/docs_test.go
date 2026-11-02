@@ -50,8 +50,6 @@ func TestParsesTheRealHBEPs(t *testing.T) {
 		// The ready row pairs its reasons with its Regarding cell by position.
 		{"ready", "Ready", []string{"Instance"}},
 		{"ready", "ShapesFit", []string{"ModelDeployment"}},
-		// A reason under one type in two rows merges its kinds.
-		{"degraded", "CapacityDropped", []string{"ModelDeployment"}},
 		{"degraded", "DrainWindowShort", []string{"PlatformProfile"}},
 		{"degraded", "PathProbeFailing", []string{"Instance"}},
 		{"degraded", "TunnelOrphaned", []string{"Allocation", "Lease"}},
@@ -69,6 +67,12 @@ func TestParsesTheRealHBEPs(t *testing.T) {
 		if got := entry(t, d.Table, w.action, w.reason); !slices.Equal(got.Kinds, w.kinds) {
 			t.Errorf("%s/%s regards %v, want %v", w.action, w.reason, got.Kinds, w.kinds)
 		}
+	}
+	// CapacityDropped sits in two rows (the lifecycle controller's and the
+	// front's). Its kinds are not pinned: the erratum of #239 adds the Instance
+	// to the lifecycle row, and this test must not fail on that.
+	if e := entry(t, d.Table, "degraded", "CapacityDropped"); !slices.Contains(e.Kinds, "ModelDeployment") {
+		t.Errorf("degraded/CapacityDropped regards %v, want ModelDeployment among them", e.Kinds)
 	}
 	// RestartLoop and VerificationFailed sit under two types.
 	for _, r := range []string{"RestartLoop", "VerificationFailed"} {
