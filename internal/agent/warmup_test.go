@@ -148,6 +148,176 @@ func warmUpRequests(t *testing.T, h *harness) map[[2]int][]enginedouble.LogEvent
 	return groups
 }
 
+// warmUpShapeKeys tells the engine's four warm-up groups apart by what the agent asked for: the long-output
+// shape is the one with the longest output, and the other three ask for the typical output with the short,
+// the typical and the longest context, so their prompt lengths order them. ok is false until the engine has
+// logged all four.
+func warmUpShapeKeys(groups map[[2]int][]enginedouble.LogEvent) (keys map[agentapi.Shape][2]int, ok bool) {
+	if len(groups) != 4 {
+		return nil, false
+	}
+	var typicalOutput [][2]int
+	keys = map[agentapi.Shape][2]int{}
+	for k := range groups {
+		if k[1] == int(hShapes.OutputLongest) {
+			keys[agentapi.ShapeLongOutput] = k
+		} else {
+			typicalOutput = append(typicalOutput, k)
+		}
+	}
+	if len(keys) != 1 || len(typicalOutput) != 3 {
+		return nil, false
+	}
+	slices.SortFunc(typicalOutput, func(a, b [2]int) int { return a[0] - b[0] })
+	keys[agentapi.ShapeShort], keys[agentapi.ShapeTypical], keys[agentapi.ShapeLongest] = typicalOutput[0], typicalOutput[1], typicalOutput[2]
+	return keys, true
+}
+
+// loggedThroughRound says whether the engine's record holds every request of the first rounds rounds, one
+// by one: for each of the four shapes, the requests numbered 0 up to the end of that round. A round sends
+// one request of each shape, and the typical shape's group also holds the sessions concurrent requests. It
+// asks for the records themselves, never for how many there are: a record of a later round cannot stand in
+// for one of an earlier round that the double has not logged yet (the double logs a request when it ends,
+// after the agent has its answer).
+func loggedThroughRound(groups map[[2]int][]enginedouble.LogEvent, rounds, sessions int) bool {
+	keys, ok := warmUpShapeKeys(groups)
+	if !ok {
+		return false
+	}
+	for shape, k := range keys {
+		perRound := 1
+		if shape == agentapi.ShapeTypical {
+			perRound += sessions
+		}
+		logged := map[int]bool{}
+		for _, ev := range groups[k] {
+			logged[ev.Nth] = true
+		}
+		for n := 0; n < rounds*perRound; n++ {
+			if !logged[n] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// TestLoggedThroughRound: the wait of the slow-first test below is on the records themselves. Round 2's
+// long-output request is unlogged while a request of round 3 is, which brings the total to what two rounds
+// make (12 for 2 sessions), and the wait must not be satisfied by it.
+func TestLoggedThroughRound(t *testing.T) {
+	const sessions, perRound = 2, 3 + 3 // requests of a round: short, typical, longest, long output, 2 concurrent
+	// The keys, in any increasing prompt lengths; the engine's own counts (Nth) number each key's requests.
+	short := [2]int{25, int(hShapes.OutputTypical)}
+	typical := [2]int{73, int(hShapes.OutputTypical)}
+	longest := [2]int{4032, int(hShapes.OutputTypical)}
+	longOut := [2]int{73, int(hShapes.OutputLongest)}
+	logged := func(rounds int) map[[2]int][]enginedouble.LogEvent {
+		g := map[[2]int][]enginedouble.LogEvent{}
+		for _, k := range [][2]int{short, longest, longOut} {
+			for n := 0; n < rounds; n++ {
+				g[k] = append(g[k], enginedouble.LogEvent{Nth: n})
+			}
+		}
+		for n := 0; n < rounds*(1+sessions); n++ {
+			g[typical] = append(g[typical], enginedouble.LogEvent{Nth: n})
+		}
+		return g
+	}
+	without := func(g map[[2]int][]enginedouble.LogEvent, k [2]int, nth int) map[[2]int][]enginedouble.LogEvent {
+		var kept []enginedouble.LogEvent
+		for _, ev := range g[k] {
+			if ev.Nth != nth {
+				kept = append(kept, ev)
+			}
+		}
+		out := map[[2]int][]enginedouble.LogEvent{}
+		for kk, v := range g {
+			out[kk] = v
+		}
+		out[k] = kept
+		return out
+	}
+	total := func(g map[[2]int][]enginedouble.LogEvent) (n int) {
+		for _, v := range g {
+			n += len(v)
+		}
+		return n
+	}
+
+	two := logged(2)
+	if total(two) != 2*perRound {
+		t.Fatalf("the fixture of two rounds holds %d records, want %d", total(two), 2*perRound)
+	}
+	if !loggedThroughRound(two, 2, sessions) {
+		t.Error("two complete rounds are not logged through round 2")
+	}
+	// Round 3's short request is logged (Nth 2) while round 2's long-output request (Nth 1) is not: the
+	// total is the same as for two complete rounds.
+	delayed := without(two, longOut, 1)
+	delayed[short] = append(delayed[short], enginedouble.LogEvent{Nth: 2})
+	if total(delayed) != 2*perRound {
+		t.Fatalf("the delayed-log fixture holds %d records, want %d to match a complete two rounds", total(delayed), 2*perRound)
+	}
+	if loggedThroughRound(delayed, 2, sessions) {
+		t.Error("round 3's record stood in for round 2's unlogged long-output request")
+	}
+	for _, c := range []struct {
+		what string
+		g    map[[2]int][]enginedouble.LogEvent
+	}{
+		{"the second concurrent session of round 2 unlogged", without(two, typical, 5)},
+		{"the typical request of round 2 unlogged", without(two, typical, 3)},
+		{"a round 1 record unlogged", without(two, short, 0)},
+		{"only round 1", logged(1)},
+	} {
+		if loggedThroughRound(c.g, 2, sessions) {
+			t.Errorf("logged through round 2 with %s", c.what)
+		}
+	}
+	if !loggedThroughRound(logged(3), 2, sessions) {
+		t.Error("three complete rounds are not logged through round 2")
+	}
+	three := logged(3)
+	delete(three, longOut) // a shape the engine has not seen at all: three groups
+	if loggedThroughRound(three, 2, sessions) {
+		t.Error("logged through round 2 with a shape missing")
+	}
+}
+
+// roundHold is the state shared by the engine clients of a test that holds warm-up rounds from holdFrom
+// on (the agent asks for a client for each unit it starts, so the clients share it): such a round sends
+// nothing, and returns only when the agent cancels it. So the agent cannot run its rounds to the end by
+// itself, and only the controller's drop (a desired state without WarmUp) can end warm-up. entered is
+// closed when the first held round has been called, and released when a held round has returned.
+type roundHold struct {
+	holdFrom int32
+	entered  chan struct{}
+	released chan struct{}
+	once     sync.Once
+	back     sync.Once
+}
+
+func newRoundHold(holdFrom int32) *roundHold {
+	return &roundHold{holdFrom: holdFrom, entered: make(chan struct{}), released: make(chan struct{})}
+}
+
+// holdingEngine is the agent's engine client with the rounds roundHold names held.
+type holdingEngine struct {
+	agent.Engine
+	hold *roundHold
+}
+
+func (e holdingEngine) WarmUpRound(ctx context.Context, n int32, req agentapi.WarmUpRequest, s agentapi.Sampling) agentapi.WarmUpRound {
+	if n < e.hold.holdFrom {
+		return e.Engine.WarmUpRound(ctx, n, req, s)
+	}
+	e.hold.once.Do(func() { close(e.hold.entered) })
+	<-ctx.Done()
+	e.hold.back.Do(func() { close(e.hold.released) })
+	return agentapi.WarmUpRound{Round: n}
+}
+
 // An engine slow on the first request of each shape is slow in round 1 and not
 // in round 2, so a controller finds it settled at round 2; once the controller
 // drops warm-up from the desired state, the agent reports warm-up done.
@@ -161,14 +331,26 @@ func warmUpRequests(t *testing.T, h *harness) map[[2]int][]enginedouble.LogEvent
 // finishes before the next starts), and every request after it, round 2's among them, is not slowed.
 // What the agent reports is its rounds: round 1 and round 2, each with the shapes HBEP-7 lists, in order,
 // every request successful.
+//
+// Round 3 is held by the engine client until the agent cancels it, so the test controls what ends
+// warm-up: the agent cannot reach its fifth round by itself, the engine's log stays as it is while it is
+// read, and the "done" that follows is the agent's answer to the controller's drop, which cancels the round
+// in flight and reports Done with the two rounds that ran. The log is waited for record by record
+// (loggedThroughRound), not by how many records there are.
 func TestWarmUpSlowFirstRequestOfEachShape(t *testing.T) {
-	const slow = 400 * time.Millisecond
-	h := newHarness(t, harnessOptions{})
-	h.set(h.runState("slow-first="+slow.String(), 1, 0, warmUpChecks(1, 2)))
+	const (
+		slow     = 400 * time.Millisecond
+		sessions = 2
+	)
+	hold := newRoundHold(3)
+	h := newHarness(t, harnessOptions{engineWrap: func(e agent.Engine) agent.Engine { return holdingEngine{e, hold} }})
+	h.set(h.runState("slow-first="+slow.String(), 1, 0, warmUpChecks(1, sessions)))
 	r := h.waitReport("two warm-up rounds", 60*time.Second, warmRounds(2))
-	rounds := r.Instance.Checks.WarmUp.Rounds[:2]
+	if w := r.Instance.Checks.WarmUp; w.Done || len(w.Rounds) != 2 {
+		t.Fatalf("with round 3 held, the report shows %d rounds and done=%v, want 2 rounds and not done: the agent finished warm-up before the controller dropped it", len(w.Rounds), w.Done)
+	}
+	rounds := r.Instance.Checks.WarmUp.Rounds
 	const wantShapes = "short typical longest longOutput concurrent concurrent"
-	reported := 0
 	for i, round := range rounds {
 		if round.Round != int32(i+1) {
 			t.Errorf("report round %d is numbered %d", i+1, round.Round)
@@ -183,25 +365,15 @@ func TestWarmUpSlowFirstRequestOfEachShape(t *testing.T) {
 		if got := strings.Join(shapes, " "); got != wantShapes {
 			t.Errorf("round %d: shapes %q, want %q", round.Round, got, wantShapes)
 		}
-		reported += len(round.Requests)
 	}
 
 	// The engine's record of what it did. Its last records are written as the agent receives the answers,
-	// so the record of every request the two reported rounds made is waited for. Later rounds may have
-	// started, and add requests, which are not slowed either.
+	// so each record of the two reported rounds is waited for itself.
 	var groups map[[2]int][]enginedouble.LogEvent
-	eventually(t, 30*time.Second, "the engine's record of the requests of both reported rounds", func() bool {
+	eventually(t, 30*time.Second, "the engine's record of every request of both reported rounds", func() bool {
 		groups = warmUpRequests(t, h)
-		n := 0
-		for _, g := range groups {
-			n += len(g)
-		}
-		return n >= reported
+		return loggedThroughRound(groups, 2, sessions)
 	})
-	// Four shapes of fixed length: short, typical (with the concurrent sessions'), longest and long output.
-	if len(groups) != 4 {
-		t.Fatalf("the engine saw warm-up requests of %d shapes, want 4: %v", len(groups), groups)
-	}
 	for k, g := range groups {
 		firsts := 0
 		for _, ev := range g {
@@ -217,14 +389,19 @@ func TestWarmUpSlowFirstRequestOfEachShape(t *testing.T) {
 		if firsts != 1 {
 			t.Errorf("shape of %d prompt tokens and %d max tokens: %d requests numbered 0, want exactly the shape's first", k[0], k[1], firsts)
 		}
-		if len(g) < 2 {
-			t.Errorf("shape of %d prompt tokens and %d max tokens: %d request(s) in the log, want those of two rounds", k[0], k[1], len(g))
-		}
 	}
 
-	// The controller has judged: warm-up is dropped.
+	// The controller has judged: warm-up is dropped, with round 3 in flight (held). The agent cancels that
+	// round and reports Done with the two rounds that ran, and a report before the drop was not done.
+	eventually(t, 30*time.Second, "round 3 to be started and held", func() bool { return closed(hold.entered) })
 	h.set(h.runState("slow-first="+slow.String(), 1, 0, &agentapi.Checks{VerificationGeneration: 1}))
-	h.waitReport("warm-up done", 20*time.Second, warmDone)
+	done := h.waitReport("warm-up done", 20*time.Second, warmDone)
+	if w := done.Instance.Checks.WarmUp; len(w.Rounds) != 2 {
+		t.Errorf("warm-up done with %d rounds, want the 2 that ran before the drop (fewer than %d)", len(w.Rounds), agentapi.MaxWarmUpRounds)
+	}
+	if !closed(hold.released) {
+		t.Error("warm-up is done, but the agent did not cancel the round in flight")
+	}
 }
 
 // An engine whose latency never settles is warmed up for five rounds, and the agent stops there by itself
