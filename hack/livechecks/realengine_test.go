@@ -85,9 +85,7 @@ func TestRealEngineRunCancelsItsJobWhenInterrupted(t *testing.T) {
 	w.useStubGo()
 	cmd, out := w.start([]string{"STUB_JOB_FOREVER=1", "STUB_FOREIGN=1", "LIVE_POLL_SECONDS=1"}, "--run", "real-engine", "--yes")
 	w.waitFor("polled")
-	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		t.Fatal(err)
-	}
+	w.signal(cmd, syscall.SIGTERM)
 	err := cmd.Wait()
 	w.noLeak(out.String())
 	w.noLeftoverProcess(cmd)

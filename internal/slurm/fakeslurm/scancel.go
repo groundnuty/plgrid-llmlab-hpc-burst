@@ -2,7 +2,11 @@ package fakeslurm
 
 // Ported from spikes/s4/fakeslurm/scancel.go. Added: another user's job gives
 // "Access/permission denied", a cancelled running job frees its slot, and in
-// run mode its processes get TERM, then KILL after KillWait.
+// run mode its processes get TERM, then KILL after KillWait. Changed (#199):
+// scancel of an ended or unknown job is silent with exit 0, as real Slurm
+// 24.11's is (scancel.c, tag slurm-24-11-5-1: ESLURM_ALREADY_DONE and
+// ESLURM_INVALID_JOB_ID print nothing without -v); the old error text is
+// Config.NoisyScancel.
 
 import (
 	"strconv"
@@ -42,14 +46,23 @@ func (sh *shell) cancelOne(s string) string {
 	}
 	switch {
 	case j == nil || j.purged(sh.now, sh.p.cfg.MinJobAge):
-		return "Invalid job id specified"
+		return sh.quiet("Invalid job id specified")
 	case j.user != sh.s.user:
 		return "Access/permission denied"
 	case IsTerminal(j.state()):
-		return "Job/step already completing or completed"
+		return sh.quiet("Job/step already completing or completed")
 	}
 	if err := sh.p.endJob(j, sh.now, Cancelled, sh.p.killWait()); err != nil {
 		return err.Error()
+	}
+	return ""
+}
+
+// quiet is the text of an error that real scancel does not print: the text
+// when Config.NoisyScancel is set, else "" (nothing printed, exit 0).
+func (sh *shell) quiet(msg string) string {
+	if sh.p.cfg.NoisyScancel {
+		return msg
 	}
 	return ""
 }
