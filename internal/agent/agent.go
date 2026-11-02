@@ -306,9 +306,10 @@ func (a *Agent) offerNow() uint64 {
 	return a.rep.offer(r)
 }
 
-// snapshotKey is the snapshot without its time, to tell a change.
+// snapshotKey is the snapshot without its time and its count, to tell a change:
+// the count rises with every report, so it would make every snapshot look new.
 func snapshotKey(r agentapi.Report) []byte {
-	r.Time = time.Time{}
+	r.Time, r.Seq = time.Time{}, 0
 	b, _ := json.Marshal(r)
 	return b
 }

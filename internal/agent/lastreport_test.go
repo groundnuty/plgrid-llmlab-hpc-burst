@@ -20,8 +20,9 @@ import (
 // reached the endpoint just after the last one. The agent lets that send
 // finish, without cancelling it, and only then sends the last report, for as
 // long as finalReportTimeout; past the bound it sends the last report anyway
-// and logs a warning (science agent's ruling, 2 Nov 2026: option 2 for alpha;
-// the full fix, a sequence number on every report, is issue #221).
+// and logs a warning (science agent's ruling, 2 Nov 2026: option 2 for alpha).
+// What the wait cannot catch, a send that outlasts the bound, is caught by the
+// count on every report (issue #221): the Backend drops the older report.
 //
 // heldBackend is the double that makes the race deterministic. It holds one
 // Report at the "server": the caller's context ending makes the call return at
@@ -47,6 +48,9 @@ type heldBackend struct {
 	failure error
 	// entered carries every Report call that came in while one was held.
 	entered chan agentapi.Report
+	// lateLanded is closed when a held report, whose caller had given up, has
+	// reached the Backend after the release.
+	lateLanded chan struct{}
 	// failing, once set by failFrom, is what every other Report call returns,
 	// and failed counts them.
 	failing error
@@ -54,7 +58,7 @@ type heldBackend struct {
 }
 
 func newHeldBackend() *heldBackend {
-	return &heldBackend{holding: make(chan struct{}), release: make(chan struct{}), entered: make(chan agentapi.Report, 8)}
+	return &heldBackend{holding: make(chan struct{}), release: make(chan struct{}), entered: make(chan agentapi.Report, 8), lateLanded: make(chan struct{})}
 }
 
 // arm makes the next Report call the held one.
@@ -117,6 +121,7 @@ func (b *heldBackend) Report(ctx context.Context, c agentapi.Caller, r agentapi.
 				if err == nil {
 					b.Backend.Report(context.Background(), c, r)
 				}
+				close(b.lateLanded)
 			}()
 			return ctx.Err()
 		}
@@ -479,12 +484,12 @@ func TestLastReportWaitsForAPeriodicReportInFlight(t *testing.T) {
 	}
 }
 
-// The known limit: a periodic report held to the bound does not keep the agent
-// from sending the last report. Before the bound the last report is not sent
-// and nothing is logged; the test makes the bound come (the timer fires, which
-// completes only if the agent waits on it), and then the last report goes, at
-// the bound, with the warning. The held report can still land after it (issue
-// #221 tracks the full fix).
+// A periodic report held to the bound does not keep the agent from sending the
+// last report. Before the bound the last report is not sent and nothing is
+// logged; the test makes the bound come (the timer fires, which completes only
+// if the agent waits on it), and then the last report goes, at the bound, with
+// the warning. The held report then lands after it, and the Backend drops it
+// as older: the last report stands (issue #221).
 func TestLastReportGoesAtTheBoundWhenAPeriodicSendStaysOpen(t *testing.T) {
 	for _, via := range bothEnds {
 		t.Run(via, func(t *testing.T) {
@@ -506,6 +511,21 @@ func TestLastReportGoesAtTheBoundWhenAPeriodicSendStaysOpen(t *testing.T) {
 			}
 			if n := g.rec.count(slog.LevelInfo, agent.LogWaitingForSend); n != 1 {
 				t.Errorf("the agent logged that it waits %d times, want once", n)
+			}
+
+			// The held report reaches the Backend now, after the last one. The
+			// wait is on the double's own signal that it landed.
+			g.held.releaseHeld()
+			select {
+			case <-g.held.lateLanded:
+			case <-time.After(30 * time.Second):
+				t.Fatal("the held report never reached the Backend")
+			}
+			if p := g.phaseOfLast(t); p != agentapi.PartStopped {
+				t.Errorf("after the held report landed the endpoint's latest report says worker-0 %s, want %s: the older report overwrote the last", p, agentapi.PartStopped)
+			}
+			if n := g.h.backend.Dropped(hAllocUID); n != 1 {
+				t.Errorf("the Backend dropped %d reports, want the held one", n)
 			}
 		})
 	}

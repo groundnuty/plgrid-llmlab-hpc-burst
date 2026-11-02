@@ -192,3 +192,35 @@ func TestAResponseAboveTheLimitIsInternalNotBadRequest(t *testing.T) {
 		t.Errorf("the encoding failure was not logged:\n%s", x.logs)
 	}
 }
+
+// The count crosses the wire as "seq", and the rule holds over HTTP: the body
+// below is written by hand, not marshalled from the Go type, so a different tag
+// on the type could not hide behind a symmetric round trip. The last report
+// (seq 5) is posted, then an older one (seq 4): both are answered 204, and the
+// Backend keeps only the last (HBEP-7, Report order).
+func TestAnOlderReportIsAnswered204AndNotKeptOverTheWire(t *testing.T) {
+	x := newRig(t)
+	x.register(x.good())
+	body := func(seq int, phase string) []byte {
+		return []byte(fmt.Sprintf(`{"seq":%d,"time":"2026-11-02T12:00:00Z","instance":{"uid":"inst-uid-1","generation":1,"workers":[{"name":"worker-0","phase":%q}]}}`, seq, phase))
+	}
+	for _, r := range []struct {
+		seq   int
+		phase string
+	}{{5, "stopped"}, {4, "stopping"}} {
+		if rec := x.do(http.MethodPost, agentapi.PathReport, x.good(), body(r.seq, r.phase)); rec.Code != http.StatusNoContent {
+			t.Fatalf("report seq %d: status %d (%s), want 204", r.seq, rec.Code, rec.Body)
+		}
+	}
+	got, ok := x.backend.LastReport(uidA)
+	if !ok || got.Seq != 5 || got.Instance == nil || got.Instance.Workers[0].Phase != agentapi.PartStopped {
+		t.Errorf("the Backend holds %+v (%v), want the report counted 5, stopped", got, ok)
+	}
+	if n := x.backend.Dropped(uidA); n != 1 {
+		t.Errorf("dropped = %d, want 1", n)
+	}
+	// A body with no seq is refused with 400.
+	if rec := x.do(http.MethodPost, agentapi.PathReport, x.good(), []byte(`{"time":"2026-11-02T12:00:00Z"}`)); rec.Code != http.StatusBadRequest {
+		t.Errorf("a report with no seq: status %d (%s), want 400", rec.Code, rec.Body)
+	}
+}
