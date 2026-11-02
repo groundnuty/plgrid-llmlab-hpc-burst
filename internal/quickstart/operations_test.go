@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode"
 
 	"sigs.k8s.io/yaml"
 
@@ -499,6 +500,8 @@ var notCodeNames = map[string]string{
 	"UNREADABLE":     "a build state hpcburst status prints",
 	"WRONG":          "a build state hpcburst status prints",
 	"MISMATCH":       "a build state hpcburst status prints",
+	"KiB":            "a unit hpcburst status prints",
+	"MiB":            "a unit hpcburst status prints",
 }
 
 // degradedRanking is HBEP-7's ranking of the Degraded reasons (Events and conditions, The ranking),
@@ -511,21 +514,35 @@ var degradedRanking = []string{
 	v1alpha1.ReasonProviderUnavailable, v1alpha1.ReasonReplacementLate, v1alpha1.ReasonCapacityDropped,
 }
 
-// guideCapitalised returns every name in backticks in the guide's prose that is one capitalised
-// word, such as `Degraded` or `JobCompleting`, once each.
+// guideCapitalised returns, once each, every name in backticks in the guide's prose that is one
+// capitalised word, such as `Degraded`, and every CamelCase word inside a longer span, such as the
+// reasons of a quoted message: `SubmitLimitReached: <message> | CapacityDropped: ...`.
 func guideCapitalised(t *testing.T) []string {
 	t.Helper()
-	word := regexp.MustCompile("`([A-Z][A-Za-z0-9]*)`")
+	span := regexp.MustCompile("`([^`\n]+)`")
+	single := regexp.MustCompile(`^[A-Z][A-Za-z0-9]*$`)
+	camel := regexp.MustCompile(`^[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]*)+$`)
 	seen := map[string]bool{}
 	var out []string
+	add := func(n string) {
+		if !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
 	for _, s := range opsSegments(t) {
 		if s.fenced {
 			continue
 		}
-		for _, m := range word.FindAllStringSubmatch(s.text, -1) {
-			if !seen[m[1]] {
-				seen[m[1]] = true
-				out = append(out, m[1])
+		for _, m := range span.FindAllStringSubmatch(s.text, -1) {
+			if single.MatchString(m[1]) {
+				add(m[1])
+				continue
+			}
+			for _, w := range strings.FieldsFunc(m[1], func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }) {
+				if camel.MatchString(w) {
+					add(w)
+				}
 			}
 		}
 	}
