@@ -70,3 +70,21 @@ func HoldOf(held bool, reason string) HoldKind {
 		return HoldNone
 	}
 }
+
+// FlagCompleting is Slurm's job state flag for a job whose end state is set
+// while its processes, or its epilog, may still run (HBEP-4, Phases, A
+// completing job).
+const FlagCompleting = "COMPLETING"
+
+// StateHasFlag reports whether a state as Slurm lists it carries the flag,
+// anywhere in the list, whatever the case. Every entry is read, never the
+// first alone: SlurmPhase takes the phase from the base state, and the flags
+// are for what the phase does not say.
+func StateHasFlag(state []string, flag string) bool {
+	for _, s := range state {
+		if strings.EqualFold(s, flag) {
+			return true
+		}
+	}
+	return false
+}

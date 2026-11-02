@@ -137,7 +137,16 @@ func (b *Batch) record(j *jobRec, now time.Time) provider.Job {
 		state, reason = endState, endReason(endState)
 		e := *end
 		out.EndTime = &e
-		if !e.Add(b.cfg.MinJobAge).After(now) {
+		switch {
+		case start != nil && j.script.Epilog > 0 && now.Before(e.Add(j.script.Epilog)):
+			// Completing: the end state is set, the epilog still runs. The
+			// listing keeps the job, however old its end, and the flag stands
+			// beside the state (Slurm's purge skips a completing job, then
+			// ages it from end_time).
+			out.Completing = true
+			since := e
+			out.CompletingSince = &since
+		case !e.Add(b.cfg.MinJobAge).After(now):
 			out.Source = provider.SourceAccounting
 		}
 	case start != nil && !now.Before(*start):
@@ -169,6 +178,9 @@ func (b *Batch) record(j *jobRec, now time.Time) provider.Job {
 		out.Accounting = b.accountingOf(j, out, now)
 	}
 	out.State = []string{state}
+	if out.Completing {
+		out.State = append(out.State, provider.FlagCompleting)
+	}
 	out.Reason = reason
 	out.Hold = provider.HoldOf(held, reason)
 	phase, err := provider.SlurmPhase(out.State, held, out.Requeued)

@@ -122,7 +122,11 @@ type Batch interface {
 	EnsureFile(ctx context.Context, f File) error
 
 	// RemoveAllocationFiles removes the Allocation's directory under
-	// stagingDir, alloc/<tag>/, once its jobs are gone. Idempotent.
+	// stagingDir, alloc/<tag>/. It takes only a tag and does not look at jobs,
+	// so its caller enforces the precondition: it is called only once no job
+	// with the tag is live, a completing one included, whose processes and
+	// epilog may still run (HBEP-4, Core operations, RemoveAllocationFiles and
+	// Phases, A completing job). Idempotent.
 	RemoveAllocationFiles(ctx context.Context, tag string) error
 }
 
@@ -252,6 +256,21 @@ type Job struct {
 	// Requeued is true when the job was requeued: a restart count above 0, or
 	// a REQUEUED record in accounting.
 	Requeued bool
+	// Completing is true when the queue listing's state carries the COMPLETING
+	// flag, whatever the base state: the end state is set while processes and
+	// the epilog may still run. The phase still follows the base state, and
+	// the job is still live for the deletion finalizer, the removal of the
+	// Allocation's files, the slot count and the accounting record (HBEP-4,
+	// Phases, A completing job). Only the queue listing sets it: a record read
+	// from accounting never does, since accounting never carries the flag.
+	Completing bool
+	// CompletingSince is the listing's end_time for a completing job whose
+	// base state has ended: when its end state was set. Nil when the job is not
+	// completing, when the listing gives none, and for a base state that has not
+	// ended (RUNNING, or the PENDING of a requeue), whose end_time in the
+	// listing is a projection in the future, not a time the flag began. EndTime
+	// is not it, since a base state that has not ended has none.
+	CompletingSince *time.Time
 	// Partition, TimeLimit and GPUs are what the job was established with,
 	// for the read-back.
 	Partition string

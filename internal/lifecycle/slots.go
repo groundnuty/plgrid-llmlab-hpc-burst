@@ -18,12 +18,14 @@ import (
 // Allocations run under (maxSubmitPerUser of the QOS limits that apply,
 // v1alpha1.EffectiveQOSLimits). It counts every Allocation of that Provider, of
 // every ModelDeployment in every namespace: from its creation until its phase
-// is Ended or its deletion completes, so Submitting, SubmissionUnknown, held,
-// pending, running, Failed, Lost, Refused and deleting ones all count.
+// is Ended with its job no longer completing, or its deletion completes, so
+// Submitting, SubmissionUnknown, held, pending, running, Failed, Lost, Refused,
+// completing and deleting ones all count.
 //
 // Before it creates an Allocation, a worker reserves a slot under the
 // Provider's lock, which every worker takes. The count it checks is the listed
-// Allocations of the Provider that have not ended plus this controller's
+// Allocations of the Provider that have not ended, or whose job is still
+// completing, plus this controller's
 // creations that the list does not show yet: Kubernetes' expectations pattern
 // (ExpectCreations raises, CreationObserved lowers, ExpectationsTimeout of
 // 5 min expires; pkg/controller/controller_utils.go at v1.35.0, lines 72,
@@ -221,16 +223,27 @@ func (t *slotTable) listBounded(ctx context.Context, r client.Reader, provider s
 }
 
 // holdsSlot reports whether the Allocation still holds a submit slot as the
-// count reads it: its phase is not Ended. The queued-successor mark reads it
-// too (queuedMark), so the two never disagree about a primary that has left
-// the slot. An Allocation whose deletion has completed is not listed at all.
+// count reads it: its phase is not Ended, or its job is still completing
+// (status.atProvider.jobCompleting). A job whose state still carries COMPLETING
+// has the phase of its base state, Ended for a cancel or a lease end, but its
+// processes and its epilog may run: the Allocation counts until the flag clears,
+// and then until its deletion completes (HBEP-7, Provisioning, Per-user limits;
+// HBEP-4, Phases, A completing job). The queued-successor mark reads it too
+// (queuedMark), so the two never disagree about a primary that has left the slot.
+// An Allocation whose deletion has completed is not listed at all.
+//
+// The Provider's controller writes jobCompleting from the same value that gates
+// the deletion finalizer, so on a deleting Allocation it is also true while
+// another job with the tag completes (internal/providerctl, completingBlocker):
+// the slot and the finalizer never disagree.
 func holdsSlot(a *v1alpha1.Allocation) bool {
-	return a.Status.AtProvider.Phase != v1alpha1.AllocationEnded
+	o := &a.Status.AtProvider
+	return o.Phase != v1alpha1.AllocationEnded || o.JobCompleting
 }
 
 // listProviderAllocations lists the Allocations of every namespace whose
 // providerConfigRef names the Provider: seen holds all of them, listed those
-// whose phase is not Ended. A deleting Allocation counts until its deletion
+// that hold a slot (holdsSlot). A deleting Allocation counts until its deletion
 // completes.
 func listProviderAllocations(ctx context.Context, r client.Reader, provider string) (seen, listed map[string]bool, err error) {
 	var al v1alpha1.AllocationList
@@ -282,7 +295,7 @@ func (p *pass) reserveSlotFor(pv *providerView, name, holder string) (ok, holds 
 	if p.noSlot == nil {
 		p.noSlot = map[string]string{}
 	}
-	p.noSlot[pv.name] = fmt.Sprintf("Provider %s has %d Allocations not ended, at its %s", pv.name, n, submitLimitText(pv))
+	p.noSlot[pv.name] = fmt.Sprintf("Provider %s has %d Allocations still holding a slot, at its %s", pv.name, n, submitLimitText(pv))
 	return false, holds, nil
 }
 

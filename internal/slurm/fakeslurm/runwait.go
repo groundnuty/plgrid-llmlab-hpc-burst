@@ -53,6 +53,10 @@ func (p *Platform) wait(r *jobRun) {
 	defer p.mu.Unlock()
 	r.cleanupErr = errors.Join(r.cleanupErr, sweepErr, rmErr)
 	r.done = sweepErr == nil
+	if r.done {
+		// The processes are gone: the epilog runs from now (RunMode.Epilog).
+		r.epilogEnd = p.clock.Now().Add(p.run.Epilog)
+	}
 	p.schedule(p.clock.Now())
 }
 

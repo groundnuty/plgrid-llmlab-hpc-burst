@@ -107,7 +107,9 @@ func (b *Batch) EnsureFile(ctx context.Context, f provider.File) error {
 }
 
 // RemoveAllocationFiles implements provider.Batch: it removes alloc/<tag>/
-// under stagingDir. Idempotent.
+// under stagingDir. Idempotent. It looks at no job: the caller (providerctl's
+// observeDeleting) calls it only once no job with the tag is live, a completing
+// one included (HBEP-4, Core operations, RemoveAllocationFiles).
 func (b *Batch) RemoveAllocationFiles(ctx context.Context, tag string) error {
 	if err := CheckValue("tag", tag); err != nil || strings.Contains(tag, "/") || strings.Contains(tag, "..") {
 		return fmt.Errorf("%w: the tag is empty or unsafe", provider.ErrInvalidRequest)

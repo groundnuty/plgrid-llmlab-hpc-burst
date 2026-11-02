@@ -98,7 +98,7 @@ func TestNoOverlapModeBoundaries(t *testing.T) {
 		// holds the second slot itself, so it must not count against its own.
 		{name: "submit limit 2 leaves one slot beside the primary", qos: v1alpha1.QOSProfile{Name: "example-s2", MaxSubmitPerUser: i32(2)}},
 		{name: "submit limit 1 leaves none", qos: v1alpha1.QOSProfile{Name: "example-s1", MaxSubmitPerUser: i32(1)},
-			noOverlap: true, why: "no free submit slot for a replacement: 1 Allocations not ended, at its maxSubmitPerUser 1 of QOS example-s1"},
+			noOverlap: true, why: "no free submit slot for a replacement: 1 Allocations still holding a slot, at its maxSubmitPerUser 1 of QOS example-s1"},
 		{name: "GPU cap 2 fits one GPU and one GPU", qos: v1alpha1.QOSProfile{Name: "example-g2", MaxGPUsPerUser: i32(2)}},
 		{name: "GPU cap 1 does not", qos: v1alpha1.QOSProfile{Name: "example-g1", MaxGPUsPerUser: i32(1)},
 			noOverlap: true, queued: true, why: "need 2 GPUs, above the maxGpusPerUser 1 of QOS example-g1"},
