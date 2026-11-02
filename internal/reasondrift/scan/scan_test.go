@@ -55,6 +55,8 @@ func TestResolvesEachWayAReasonArrives(t *testing.T) {
 		{"pass.fail", []string{"B", "D"}, "failing", []string{"Instance"}},
 		// A variable set twice, captured by a closure: both values.
 		{"pass.variable", []string{"A", "C"}, "degraded", []string{"Instance"}},
+		// A closure assigns to the variable: its store counts too.
+		{"pass.assignedInClosure", []string{"A", "C"}, "degraded", []string{"Instance"}},
 		// The empty string a variable starts from is no reason.
 		{"pass.guarded", []string{"C"}, "degraded", []string{"Instance"}},
 		{"pass.fromCall", []string{"A", "B"}, "failing", []string{"Instance"}},
@@ -74,6 +76,9 @@ func TestResolvesEachWayAReasonArrives(t *testing.T) {
 	for fn, why := range map[string]string{
 		"pass.field":    "reason",
 		"pass.viaValue": "no call in the module reaches",
+		// A function used as a value has callers a static list does not hold,
+		// even though it is also called with a constant.
+		"valueAndCalled": "used as a value",
 	} {
 		e := emitOf(t, code, fn)
 		if e.Unresolved == "" || !strings.Contains(e.Unresolved, why) {

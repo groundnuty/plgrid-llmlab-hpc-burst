@@ -62,6 +62,15 @@ func (p *pass) variable(in *Instance) {
 	p.r.Event(in, nil, eventDegraded, reason, "m")
 }
 
+// assignedInClosure has a closure assign to the variable, so a store reaches it
+// from outside the function that calls Event.
+func (p *pass) assignedInClosure(in *Instance) {
+	reason := v1alpha1.ReasonA
+	set := func() { reason = v1alpha1.ReasonC }
+	set()
+	p.r.Event(in, nil, eventDegraded, reason, "m")
+}
+
 // guarded starts from the empty string, which the scan drops.
 func (p *pass) guarded(in *Instance) {
 	reason := ""
@@ -111,3 +120,15 @@ func (p *pass) viaValue(in *Instance, reason string) {
 var registry []func(*Instance, string)
 
 func (p *pass) register() { registry = append(registry, p.viaValue) }
+
+// valueAndCalled is called statically, and also used as a value below, so a
+// list of its static callers would miss the dynamic ones.
+func valueAndCalled(r Recorder, in *Instance, reason string) {
+	r.Event(in, nil, eventFailing, reason, "m")
+}
+
+func callValueAndCalled(r Recorder, in *Instance) { valueAndCalled(r, in, v1alpha1.ReasonA) }
+
+var registry2 []func(Recorder, *Instance, string)
+
+func registerFunc() { registry2 = append(registry2, valueAndCalled) }

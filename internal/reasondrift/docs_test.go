@@ -120,6 +120,20 @@ func TestParsesAWellFormedTable(t *testing.T) {
 	}
 }
 
+// TestMergesTheKindsOfARepeatedReason: a reason under one type in two rows
+// regards the kinds of both rows.
+func TestMergesTheKindsOfARepeatedReason(t *testing.T) {
+	md := strings.Replace(goodTable, "| `failing` | `WorkerRestart`, `HeartbeatMissed` |",
+		"| `ready` | `ShapesFit` | Lease | other emitter |\n| `failing` | `WorkerRestart`, `HeartbeatMissed` |", 1)
+	got, err := ParseEventTable([]byte(md))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e := entry(t, got, "ready", "ShapesFit"); !slices.Equal(e.Kinds, []string{"Lease", "ModelDeployment"}) {
+		t.Errorf("ShapesFit regards %v, want [Lease ModelDeployment]", e.Kinds)
+	}
+}
+
 // TestParseEventTableIsStrict: a table it cannot read fails the parse. It never
 // reads as empty (#237).
 func TestParseEventTableIsStrict(t *testing.T) {
