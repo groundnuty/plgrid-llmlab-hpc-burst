@@ -167,9 +167,11 @@ func TestCloseSucceedsWhenAListedProcessEndsMidExit(t *testing.T) {
 		return open(pid)
 	}
 	id := r.submit("exit 0")
-	j := r.waitFinished(id)
-	if j.CleanupErr != nil || j.State != Completed {
-		t.Errorf("job %d: state %s, cleanup error %v; want COMPLETED with none", id, j.State, j.CleanupErr)
+	// The sweep ends one way or the other: every process gone, or an error it cannot get past.
+	waitFor(t, "the sweep to end", func() bool { j := r.job(id); return j.Finished || j.CleanupErr != nil })
+	j := r.job(id)
+	if !j.Finished || j.CleanupErr != nil || j.State != Completed {
+		t.Errorf("job %d: finished %v, state %s, cleanup error %v; want finished, COMPLETED, no error", id, j.Finished, j.State, j.CleanupErr)
 	}
 	if einval.Load() != 1 {
 		t.Errorf("the opener answered EINVAL %d times, want once: the window was not driven", einval.Load())
