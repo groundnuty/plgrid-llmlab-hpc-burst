@@ -312,9 +312,13 @@ func storeFull(t *testing.T, wholeDataDir bool) {
 	if r := cli(t, h.args("status", "--no-api")...); r.code != exitOK {
 		t.Errorf("the process-only view should still be healthy (that is why the write probe exists): exit %d", r.code)
 	}
-	if r := cli(t, h.args("status")...); r.code != exitFail || !strings.Contains(r.out, "writes are failing") ||
-		!strings.Contains(r.out, hint) || strings.Contains(r.out, vol.mount) {
-		t.Errorf("text status: exit %d, want a failure that says %q and does not name %s: %q", r.code, hint, vol.mount, r.out)
+	// The text view prints the reasons as lines of their own. Only that line is held to the layout path: in
+	// the whole-data-directory variant, status's long-standing "executable:" line shows the resolved path
+	// under the volume's mount, which is not the hint's to change.
+	if r := cli(t, h.args("status")...); r.code != exitFail || !strings.Contains(r.out, "writes are failing") {
+		t.Errorf("text status: exit %d: %q", r.code, r.out)
+	} else if line := lineWith(r.out, "store full"); !strings.Contains(line, hint) || strings.Contains(line, vol.mount) {
+		t.Errorf("text status: the reason line %q does not carry %q, or names the volume's mount %s: %q", line, hint, vol.mount, r.out)
 	}
 
 	// The same status reads real storage outcomes, not a constant: give the space back (unfreeze, and raise
@@ -343,6 +347,16 @@ func storeFull(t *testing.T, wholeDataDir bool) {
 		}
 		time.Sleep(5 * time.Second)
 	}
+}
+
+// lineWith is the first line of out that contains s, or "" when none does.
+func lineWith(out, s string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, s) {
+			return line
+		}
+	}
+	return ""
 }
 
 func ptrStr(b *bool) string {
