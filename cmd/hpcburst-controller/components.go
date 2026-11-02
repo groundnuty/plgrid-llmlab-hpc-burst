@@ -27,10 +27,12 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"net"
 	"os"
 	"os/user"
 	"path/filepath"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
@@ -73,6 +75,54 @@ type deps struct {
 	// process gives each its own: the collectors' names are registered once
 	// per registry.
 	registry prometheus.Registerer
+	// listen binds an address the binary serves on: the agent endpoint, frps's
+	// plugin, the health probes and the metrics. nil means TCP (net.Listen). A
+	// test that picks its ports before the binary runs gives a listen that
+	// returns listeners it holds, so that no port is released between the pick
+	// and the bind (issue #219); one that listens for an address it does not
+	// hold fails the run.
+	listen func(addr string) (net.Listener, error)
+}
+
+// listeners binds through deps.listen and remembers each listener it bound, so
+// that run can close, at its end, what no component served to the end: a
+// listener bound before a later step of run failed is closed by no server's
+// stop. Closing one a server already closed returns an error, which is not
+// actionable.
+type listeners struct {
+	listen func(addr string) (net.Listener, error)
+
+	mu    sync.Mutex
+	bound []net.Listener
+}
+
+func newListeners(d deps) *listeners {
+	l := &listeners{listen: d.listen}
+	if l.listen == nil {
+		l.listen = func(addr string) (net.Listener, error) { return net.Listen("tcp", addr) }
+	}
+	return l
+}
+
+// Listen is deps.listen, with the listener recorded.
+func (l *listeners) Listen(addr string) (net.Listener, error) {
+	ln, err := l.listen(addr)
+	if err != nil {
+		return nil, err
+	}
+	l.mu.Lock()
+	l.bound = append(l.bound, ln)
+	l.mu.Unlock()
+	return ln, nil
+}
+
+func (l *listeners) closeAll() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, ln := range l.bound {
+		_ = ln.Close()
+	}
+	l.bound = nil
 }
 
 func (d deps) digests() (map[string]string, error) {
@@ -258,6 +308,7 @@ type wiring struct {
 	front       *providerctl.FrontSettings
 	hubEndpoint string // HF_ENDPOINT, for agent.json
 	newPlatform providerctl.PlatformFactory
+	listen      func(addr string) (net.Listener, error)
 	log         logr.Logger
 }
 
@@ -377,6 +428,7 @@ func mount(mgr manager.Manager, w wiring, backend agentapi.Backend) error {
 	srv, err := agentserver.New(agentserver.Config{
 		Lookup: agentserver.NewClientLookup(mgr.GetClient()), CredentialsDir: w.host.CredentialsDir(),
 		Backend: backend, Host: w.host, Logger: slog.New(logr.ToSlogHandler(w.log.WithName("agent-api"))),
+		Listen: w.listen,
 	})
 	if err != nil {
 		return err

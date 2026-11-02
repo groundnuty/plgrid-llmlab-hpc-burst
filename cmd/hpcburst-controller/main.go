@@ -147,9 +147,13 @@ func checkCredentialsDir(dir string) error {
 // host.FrpsPluginAddr() (base+8) with an Index fed from mgr's cache of
 // Allocations and Instances and the credential files, and adds the leader
 // component that writes each Instance's TunnelConnected condition.
-var extraRunnables = []func(mgr manager.Manager, host agentapi.Host, backend agentapi.Backend) (manager.Runnable, error){addTunnel}
+var extraRunnables = []func(mgr manager.Manager, host agentapi.Host, backend agentapi.Backend, listen func(addr string) (net.Listener, error)) (manager.Runnable, error){addTunnel}
 
 func run(ctx context.Context, f flags, d deps) error {
+	// Every endpoint the binary serves is bound through ls (components.go), and
+	// whatever is still open when run returns is closed.
+	ls := newListeners(d)
+	defer ls.closeAll()
 	scheme, err := d.providerScheme()
 	if err != nil {
 		return err
@@ -170,6 +174,7 @@ func run(ctx context.Context, f flags, d deps) error {
 	}
 	opts := managerOptions(f, cfg, os.Getenv)
 	opts.Registry = d.registry
+	opts.Listen = ls.Listen
 	if opts.HubEndpoint != "" {
 		if err := agentapi.CheckHubEndpoint(opts.HubEndpoint); err != nil {
 			return fmt.Errorf("%s: %w", hubEndpointEnv, err)
@@ -179,12 +184,12 @@ func run(ctx context.Context, f flags, d deps) error {
 	if err != nil {
 		return err
 	}
-	w := wiring{cfg: cfg, host: f.host, scheme: scheme, front: front, hubEndpoint: opts.HubEndpoint, newPlatform: d.newPlatform, log: ctrl.Log.WithName("hpcburst-controller").WithValues("portBase", f.host.PortBase)}
+	w := wiring{cfg: cfg, host: f.host, scheme: scheme, front: front, hubEndpoint: opts.HubEndpoint, newPlatform: d.newPlatform, listen: ls.Listen, log: ctrl.Log.WithName("hpcburst-controller").WithValues("portBase", f.host.PortBase)}
 	if err := mount(mgr, w, backend); err != nil {
 		return err
 	}
 	for _, add := range extraRunnables {
-		r, err := add(mgr, f.host, backend)
+		r, err := add(mgr, f.host, backend, ls.Listen)
 		if err != nil {
 			return err
 		}
