@@ -216,7 +216,10 @@ func TestEveryAlphaRowPassesItsDryRunAndEveryFaultFailsIt(t *testing.T) {
 // try again later. The row's own test is the real one, in dry mode, with the owner's job holding the one GPU of the
 // fake QOS; the owner's job is left alone. The same overrun on a row with no such slot is a failure, exit 1, with no
 // marker: NOT RUN is for the slot rows only. The default bound is the issue's 30 minutes, written out here, not read
-// from the script; a wait the operator asks for is the one named.
+// from the script; a wait the operator asks for is the one named. The dry run keeps the bound the script gives it
+// (PR 230, B1), and the test judges it by the states on the dry run's manual clock: the job still pending one second
+// before the bound, cancelled one second after it (the stand-in's two logged readings, written out per case), so a
+// bound a minute out in either direction fails the case, whatever the script announced.
 func TestAJobPendingPastTheBoundIsNotRunOnTheNowRowsAndAFailureElsewhere(t *testing.T) {
 	real := realTestBinary(t, "HPCBURST_LIVECHECKS_ALPHA_TEST", alphaPkg)
 	realDir := filepath.Join(repoRoot(t), alphaPkg)
@@ -224,11 +227,13 @@ func TestAJobPendingPastTheBoundIsNotRunOnTheNowRowsAndAFailureElsewhere(t *test
 		row, setting string
 		code         int
 		wantLine     string // "" for a failure
+		still, gone  string // the stand-in's readings of the manual clock, since the job's submission
 	}{
-		{"alpha-helios-nooverlap", "", 3, "NOT RUN (a job was still pending after 30 min in the queue and was cancelled by its tag; not a failure)"},
-		{"tunnel-hour-helios", "", 3, "NOT RUN (a job was still pending after 30 min in the queue and was cancelled by its tag; not a failure)"},
-		{"tunnel-hour-helios", "LIVE_PENDING_MAX_SECONDS=600", 3, "NOT RUN (a job was still pending after 10 min in the queue and was cancelled by its tag; not a failure)"},
-		{"tunnel-hour-athena", "", 1, ""},
+		{"alpha-helios-nooverlap", "", 3, "NOT RUN (a job was still pending after 30 min in the queue and was cancelled by its tag; not a failure)", "29m59s", "30m1s"},
+		{"tunnel-hour-helios", "", 3, "NOT RUN (a job was still pending after 30 min in the queue and was cancelled by its tag; not a failure)", "29m59s", "30m1s"},
+		{"tunnel-hour-helios", "LIVE_PENDING_MAX_SECONDS=600", 3, "NOT RUN (a job was still pending after 10 min in the queue and was cancelled by its tag; not a failure)", "9m59s", "10m1s"},
+		{"alpha-helios-nooverlap", "LIVE_PENDING_MAX_SECONDS=90", 3, "NOT RUN (a job was still pending after 1 min 30 s in the queue and was cancelled by its tag; not a failure)", "1m29s", "1m31s"},
+		{"tunnel-hour-athena", "", 1, "", "1h59m59s", "2h0m1s"},
 	} {
 		t.Run(c.row+"/"+c.setting, func(t *testing.T) {
 			t.Parallel()
@@ -242,6 +247,15 @@ func TestAJobPendingPastTheBoundIsNotRunOnTheNowRowsAndAFailureElsewhere(t *test
 			if res.code != c.code {
 				t.Fatalf("exit %d, want %d:\n%s", res.code, c.code, res.out)
 			}
+			log, _ := os.ReadFile(filepath.Join(w.out(), c.row+".log"))
+			for _, want := range []string{
+				"stand-in: the job is still pending " + c.still + " after its submission",
+				"stand-in: the run's jobs are cancelled by their tags " + c.gone + " after the job's submission",
+			} {
+				if !strings.Contains(string(log), want) {
+					t.Errorf("the dry run's log does not hold %q:\n%s", want, log)
+				}
+			}
 			markers, _ := filepath.Glob(filepath.Join(w.out(), c.row+"-*", "not-run.txt"))
 			if posts, _ := filepath.Glob(filepath.Join(w.out(), c.row+"-*", "posts.md")); len(posts) != 0 {
 				t.Errorf("a run that ended on the first clock left a text to post: %v", posts)
@@ -252,7 +266,7 @@ func TestAJobPendingPastTheBoundIsNotRunOnTheNowRowsAndAFailureElsewhere(t *test
 					t.Errorf("a row with no slot ended as NOT RUN (markers %v):\n%s", markers, res.out)
 				}
 				// It failed for the overrun, not for something else.
-				if log, _ := os.ReadFile(filepath.Join(w.out(), c.row+".log")); !strings.Contains(string(log), "was still pending when the wait in the queue ran out") {
+				if !strings.Contains(string(log), "was still pending when the wait in the queue ran out") {
 					t.Errorf("the test's log does not give the overrun as the reason:\n%s", log)
 				}
 				return

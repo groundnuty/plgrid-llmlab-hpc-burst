@@ -49,6 +49,12 @@
 # tag, the test writes not-run.txt and skips, and the script reports "<row>: NOT RUN" and exits 3. On a row that holds no
 # such slot the same overrun is a failure.
 #
+# The rule behind both: a row in a one-job slot (the cluster table's slot column), on either cluster, must have a start
+# wait of 10 min or less or a wait in the queue of 30 min or less (pending_max), and it passes the slot guard
+# (check_slot) before it runs. real-engine, which is not a test of ours to skip, has the 30 min as its wait in the queue
+# and ends as a failure when it is passed; hack/livechecks reads the table and fails, naming the row, for a slot row
+# that has neither bound, so a new row cannot miss it.
+#
 # The settings file is named by HPCBURST_LIVE_SETTINGS: KEY=VALUE lines, mode
 # 600, owned by you. Keys (none is ever printed):
 #   LIVE_OUT_DIR                 absolute path of a private directory for logs and records (always)
@@ -166,7 +172,8 @@ TABLE
 # row's other guard, the wait of LIVE_PENDING_MAX_SECONDS, applies to gpu-accounting-athena only, which has no slot.
 # conformance-helios-gh200: it starts only when squeue --me shows no job in QOS now, pending or running, whoever's (exit 3,
 # "skipped: the now slot is in use"), and each of its two jobs (step 1, step 3) must start within 10
-# min of its acceptance. Its worst case is then about 25 min: two start waits of 10 min and about
+# min of its acceptance. conformance-athena, in Athena's one-job slot (the partition plgrid-now), has the same guard and the
+# same bound, and so the same timeout (the science agent's rule of 2 Nov 2026: every slot row has a bound; see the header). Its worst case is then about 25 min: two start waits of 10 min and about
 # 5 min of running. Its timeout of 45 min is the test's own deadlines (10+5+3+10+8+3+3, the 22 min
 # after the start waits being for jobs that already run, plus 2 min for the end-of-run check for a
 # late duplicate, 44 in all) and a margin of 1 min, so a slow cleanup fails in the test, with its
@@ -176,7 +183,7 @@ cluster_table() {
 # BEGIN CLUSTER SHAPES
 conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|80|-
 conformance-helios-gh200|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|45|-C memfs|10
-conformance-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|4|32Gi|00:05:00|80|-
+conformance-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|4|32Gi|00:05:00|45|-|10
 real-engine|helios|-|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|00:57:00|75|-C memfs
 alpha-athena-handover|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|01:46:00|150|-
 alpha-helios-nooverlap|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|01:46:00|200|-C memfs
@@ -235,17 +242,26 @@ TABLE
 }
 
 # The wait in the queue, in seconds, that a queued row allows its job before the run cancels it (the first clock of
-# the run; the row's run time is the second): 2 h for a row that waits in a long queue, 30 min for a row that holds
-# QOS now's GPU for hours, the rows of the owner-go table, where our pending job stands in the owner's one-job slot
-# (issue #222, the owner's go). LIVE_PENDING_MAX_SECONDS, when set, overrides either.
+# the run; the row's run time is the second): 2 h for a row that waits in a long queue, 30 min for a row in a one-job
+# slot (the cluster table's slot column: QOS now on Helios, the partition plgrid-now on Athena), where our pending job
+# stands in the owner's way (issue #222, the owner's go; the science agent's ruling of 2 Nov 2026, which includes
+# real-engine). LIVE_PENDING_MAX_SECONDS, when set, overrides either.
 PENDING_MAX_DEFAULT=7200
 PENDING_MAX_NOW=1800
 
 # pending_max <name>: the wait in the queue, in seconds, that applies to the row.
 pending_max() {
   if [ -n "${LIVE_PENDING_MAX_SECONDS:-}" ]; then printf '%s' "$LIVE_PENDING_MAX_SECONDS"
-  elif [ -n "${OGSET[$1]:-}" ]; then printf '%s' "$PENDING_MAX_NOW"
+  elif [ "${SLOT[$1]:--}" != - ]; then printf '%s' "$PENDING_MAX_NOW"
   else printf '%s' "$PENDING_MAX_DEFAULT"; fi
+}
+
+# fmt_pending <seconds>: a wait in the queue as the operator reads it, exact: "30 min" for whole minutes, else "59 s"
+# or "1 min 30 s".
+fmt_pending() {
+  if [ $(($1 % 60)) -eq 0 ]; then printf '%d min' $(($1 / 60))
+  elif [ "$1" -lt 60 ]; then printf '%d s' "$1"
+  else printf '%d min %d s' $(($1 / 60)) $(($1 % 60)); fi
 }
 
 # The tunnel rows' lease is a parameter of the run (LIVE_TUNNEL_LEASE_MINUTES), so the owner can choose when giving
@@ -440,7 +456,7 @@ fmt_hold() { printf '%d h %02d min' $(($1 / 60)) $(($1 % 60)); }
 # owner_go_note <name>: what a row that holds QOS now's GPU says before it runs: the wait in the queue it may
 # take first, past which it is cancelled and the run is NOT RUN, and the hold once it runs.
 owner_go_note() {
-  say "$1: may pend up to $(($(pending_max "$1") / 60)) min in the queue (then it is cancelled by its tag and the run is NOT RUN), then holds QOS now's GPU for about $(fmt_hold "${OGMIN[$1]}"); the owner's go is needed (the development rule on #145)"
+  say "$1: may pend up to $(fmt_pending "$(pending_max "$1")") in the queue (then it is cancelled by its tag and the run is NOT RUN), then holds QOS now's GPU for about $(fmt_hold "${OGMIN[$1]}"); the owner's go is needed (the development rule on #145)"
 }
 
 # today_utc: the date the owner's go is compared with. LIVE_FAKE_DATE_FILE is a test seam, like LIVE_FAKE_CLOCK: a
@@ -776,7 +792,7 @@ judge() {
     if [ "${SWAIT[$n]:--}" != - ]; then
       say "$n: NOT RUN (a job did not start within ${SWAIT[$n]} min of its acceptance and was cancelled by its tag; not a failure)"
     else
-      say "$n: NOT RUN (a job was still pending after $(($(pending_max "$n") / 60)) min in the queue and was cancelled by its tag; not a failure)"
+      say "$n: NOT RUN (a job was still pending after $(fmt_pending "$(pending_max "$n")") in the queue and was cancelled by its tag; not a failure)"
     fi
     return 3
   fi
@@ -845,7 +861,7 @@ env_conformance() {
   unset HPCBURST_CONF_PENDING_MAX_SECONDS HPCBURST_ALPHA_DRY HPCBURST_ALPHA_DRY_FAULT HPCBURST_ALPHA_ROW HPCBURST_ALPHA_OUT
   case $n in
     # Only a row with no start wait: with one, the bound is the first clock and the test takes no other.
-    gpu-accounting-*|reach-*) [ "${SWAIT[$n]:--}" != - ] || export HPCBURST_CONF_PENDING_MAX_SECONDS=${LIVE_PENDING_MAX_SECONDS:-7200} ;;
+    gpu-accounting-*|reach-*) [ "${SWAIT[$n]:--}" != - ] || export HPCBURST_CONF_PENDING_MAX_SECONDS=$(pending_max "$n") ;;
   esac
   # The gateway's forwarded port reaches the reach rows only (issue #225); the host and the port are private, the label is
   # what the text to post carries.
@@ -940,11 +956,11 @@ execute_cluster() {
     alpha-*|tunnel-hour-*)
       # The test owns the two clocks of a queued run (HPCBURST_ALPHA_PENDING_MAX_SECONDS, then the row's run
       # budget); this timeout is their sum, so a long wait in the queue does not eat the run's time.
-      run_binary "$n" "$OUT/$n.test" "$(( ${TMIN[$n]} + $(pending_max "$n") / 60 ))" env_alpha
+      run_binary "$n" "$OUT/$n.test" "$(( ${TMIN[$n]} + ($(pending_max "$n") + 59) / 60 ))" env_alpha
       judge "$n" "$OUT/$n.log" "$CHILD_RC" ;;
     gpu-accounting-*|reach-*)
       # A row with a start wait has the bound as its first clock; one without has the operator's wait in the queue.
-      wait=$(( ${LIVE_PENDING_MAX_SECONDS:-7200} / 60 ))
+      wait=$(( ($(pending_max "$n") + 59) / 60 ))
       [ "${SWAIT[$n]:--}" = - ] || wait=0
       run_binary "$n" "$OUT/$n.test" "$(( ${TMIN[$n]} + wait ))" env_conformance
       judge "$n" "$OUT/$n.log" "$CHILD_RC" ;;
@@ -1047,12 +1063,13 @@ prepare_real_engine() {
 }
 
 # execute_real_engine <name>: submit, poll, fetch. The slot is held from the submit to the job's end.
-# The job's budget has two clocks: the time it may wait in the queue, and, from the first state that is not
-# PENDING, its time limit plus a margin. A wait of 40 minutes in QOS now must not eat the run's time.
+# The job's budget has two clocks: the time it may wait in the queue (pending_max: 30 min in its one-job slot, or
+# LIVE_PENDING_MAX_SECONDS; a job still pending past it is cancelled and the run fails), and, from the first state that
+# is not PENDING, its time limit plus a margin. A wait of 40 minutes in QOS now must not eat the run's time.
 execute_real_engine() {
   local n=$1 host=${HOST[$1]} w=$RE_DIR tag=$RE_TAG acct reply state last="" errs=0 st log finished
-  local submit_t run_t="" now limit_s pend_max=${LIVE_PENDING_MAX_SECONDS:-7200} margin=${LIVE_RUN_MARGIN_SECONDS:-900}
-  acct=${S[${ACCTKEY[$n]}]}
+  local submit_t run_t="" now limit_s pend_max margin=${LIVE_RUN_MARGIN_SECONDS:-900}
+  acct=${S[${ACCTKEY[$n]}]}; pend_max=$(pending_max "$n")
   # The job's name is written down before the submit. If the reply is lost, or a signal arrives, the
   # cleanup finds the job by this name and cancels it.
   printf 'hb-live-%s\n' "$tag" >"$RE_DIR/submission-tag" || { say "$n: FAIL (the submission tag could not be written)"; return 1; }
@@ -1078,7 +1095,7 @@ EOS
     now=$(now_epoch)
     if [ "$state" != PENDING ] && [ "$state" != error ] && [ -z "$run_t" ]; then run_t=$now; fi
     if [ -z "$run_t" ] && [ $((now - submit_t)) -gt "$pend_max" ]; then
-      say "$n: FAIL (the job was still pending after $((pend_max/60)) minutes; cancelling it)"; return 1
+      say "$n: FAIL (the job was still pending after $(fmt_pending "$pend_max"); cancelling it)"; return 1
     fi
     if [ -n "$run_t" ] && [ $((now - run_t)) -gt $((limit_s + margin)) ]; then
       say "$n: FAIL (the job ran past its time limit plus $((margin/60)) minutes; cancelling it)"; return 1
