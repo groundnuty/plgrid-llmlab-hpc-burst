@@ -58,8 +58,6 @@ type drySteps struct {
 	tags []string
 	// held are the IDs of the held duplicate submissions a fault made; they are cancelled at the end.
 	held []string
-	// owners are the fake cluster's numbers of the jobs the fault "pend-past-bound" plays the owner's with; they are ended at the end.
-	owners []int
 	// untaggedAt is the 1-based position of the tag the fault "untagged" does
 	// not write down: the successor's, or the only one of a one-job run.
 	untaggedAt int
@@ -113,9 +111,6 @@ func newDrySteps(t *testing.T, cfg Config, family string) *drySteps {
 		}
 		for _, id := range d.held {
 			_, _ = d.sess.Run(context.Background(), slurm.Command{Line: "scancel " + id})
-		}
-		for _, id := range d.owners {
-			_ = plat.End(id, string(fakeslurm.Cancelled))
 		}
 		waitJobsFinished(plat)
 		if err := plat.Close(); err != nil {
@@ -257,33 +252,51 @@ func (d *drySteps) pending(id string) {
 	d.waitFor("a job to pend", func(j provider.Job) bool { return j.StartTime == nil && j.EndTime == nil }, id)
 }
 
+// submitOwner is the owner's own job in the one-job QOS, from another project: it holds the QOS's one GPU until its
+// release file appears, as submit's jobs do, and the cleanup writes every release file. It is released by that gate
+// and by nothing else, so the run's job pends behind it however long the test stalls: no wall-clock window decides
+// whether the slot is busy. Its time limit outlasts the bound by an hour, so the fake clock never ends it.
+func (d *drySteps) submitOwner(p Plan) string {
+	d.t.Helper()
+	d.jobs++
+	n := d.jobs
+	wrap := fmt.Sprintf("while [ ! -e %s ]; do sleep 0.02; done", d.gate(n))
+	line := fmt.Sprintf("sbatch --parsable --no-requeue --job-name=owner-other-project-job --partition=%s --qos=%s --account=example-account --time=%s --gres=gpu:1 --cpus-per-task=1 --mem=1024 --output=%s --error=%s '--wrap=%s'",
+		d.cfg.Row.Partition, d.cfg.Row.QOS, slurmTime(p.PendingMax+time.Hour), d.out(n), d.out(n), wrap)
+	res, err := d.sess.Run(context.Background(), slurm.Command{Line: line})
+	if err != nil || res.ExitCode != 0 {
+		d.t.Fatalf("the owner's job was not accepted: %v exit %d %s", err, res.ExitCode, res.Stderr)
+	}
+	id := strings.TrimSpace(strings.SplitN(string(res.Stdout), ";", 2)[0])
+	if _, err := strconv.Atoi(id); err != nil {
+		d.t.Fatalf("sbatch printed %q", res.Stdout)
+	}
+	return id
+}
+
 // pendPastBound is the fault pend-past-bound: the run's first job cannot start, so the first clock runs out.
 // Under a one-job QOS the owner's own job holds its one GPU (the case that matters: the owner's slot is busy),
 // and the run's job pends behind it; a partition with no cap has the run's job held, which pends just the same.
-// The clock then passes the bound, and the run cancels its jobs by their tags, as the live scenario must, and
-// reports ErrNotStarted. The owner's job is not the run's to touch.
+// The fake clock then moves to one second before the bound, where the cluster still shows the job pending (the
+// run must not give up early), and one second past it, where the run cancels its jobs by their tags, as the
+// live scenario must, and reports ErrNotStarted. Both readings are logged with the time since the job's
+// submission on the fake clock, for the tests to judge against the bound they asked for, written out in them.
+// The owner's job is not the run's to touch.
 func (d *drySteps) pendPastBound(p Plan) error {
 	tag := d.tag(p, "pre")
 	var id string
 	if d.cfg.Row.QOS != "" {
-		line := fmt.Sprintf("sbatch --parsable --no-requeue --job-name=owner-other-project-job --partition=%s --qos=%s --account=example-account --time=02:00:00 --gres=gpu:1 --cpus-per-task=1 --mem=1024 '--wrap=sleep 600'", d.cfg.Row.Partition, d.cfg.Row.QOS)
-		res, err := d.sess.Run(context.Background(), slurm.Command{Line: line})
-		if err != nil || res.ExitCode != 0 {
-			d.t.Fatalf("the owner's job was not accepted: %v exit %d %s", err, res.ExitCode, res.Stderr)
-		}
-		oid := strings.TrimSpace(strings.SplitN(string(res.Stdout), ";", 2)[0])
-		n, err := strconv.Atoi(oid)
-		if err != nil {
-			d.t.Fatalf("sbatch printed %q", res.Stdout)
-		}
-		d.owners = append(d.owners, n)
-		d.running(oid)
+		d.running(d.submitOwner(p))
 		_, id = d.submit(tag, d.cfg.Row.Partition, d.cfg.Row.QOS)
 	} else {
 		id = d.submitHeld(tag, d.cfg.Row.Partition, "")
 	}
 	d.pending(id)
-	d.tick(p.PendingMax + time.Second)
+	began := d.now()
+	d.tick(p.PendingMax - time.Second)
+	d.pending(id)
+	p.Logf(pendStillPending, d.now().Sub(began))
+	d.tick(2 * time.Second)
 	jobs, err := d.batch.ListByTag(context.Background(), tag)
 	if err != nil {
 		return fmt.Errorf("listing the run's jobs by their tag: %w", err)
@@ -302,8 +315,15 @@ func (d *drySteps) pendPastBound(p Plan) error {
 	for _, jid := range ids {
 		d.waitFor("a cancelled job to end", func(j provider.Job) bool { return j.EndTime != nil }, jid)
 	}
+	p.Logf(pendCancelled, d.now().Sub(began))
 	return ErrNotStarted
 }
+
+// The two readings pendPastBound logs, each with the time since the job's submission on the fake clock.
+const (
+	pendStillPending = "stand-in: the job is still pending %s after its submission"
+	pendCancelled    = "stand-in: the run's jobs are cancelled by their tags %s after the job's submission"
+)
 
 func (d *drySteps) Ledger() Ledger              { return dryLedger{d} }
 func (d *drySteps) Close(context.Context) error { return nil }

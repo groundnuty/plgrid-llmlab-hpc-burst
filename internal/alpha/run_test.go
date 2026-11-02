@@ -9,6 +9,7 @@ package alpha
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -259,34 +260,52 @@ func TestTheChosenLeaseDecidesWhetherASlowStartCanPass(t *testing.T) {
 // a row that holds QOS now's one-job slot (the owner's slot was busy: try again later), a failure on any other
 // row (a queue that long is the operator's to read, not a pass-by). Either way no record and no text to post
 // are written, the run's own job was cancelled and never started, and the owner's job under the same QOS is
-// left running. The expected outcomes are the issue's (#222), not read from SlotHold.
+// left running. The expected outcomes are the issue's (#222), not read from SlotHold. The bound is the one the
+// case names, written out in its own units, and the states are read at the times the issue's clock gives: the
+// job still pending one second before the bound, cancelled by its tag after it, not a minute either side.
 func TestAJobPendingPastTheBoundIsCancelledByItsTag(t *testing.T) {
 	for _, c := range []struct {
-		row        string
-		wantNotRun bool
-		ownerJob   bool
+		row                    string
+		bound                  time.Duration
+		wantStill, wantCancels string // the stand-in's two readings, as the issue's clock gives them
+		wantNotRun, ownerJob   bool
 	}{
-		{"alpha-helios-nooverlap", true, true},
-		{"tunnel-hour-helios", true, true},
-		{"tunnel-hour-athena", false, false},
+		{"alpha-helios-nooverlap", 10 * time.Minute, "9m59s", "10m1s", true, true},
+		{"tunnel-hour-helios", 30 * time.Minute, "29m59s", "30m1s", true, true},
+		{"tunnel-hour-athena", time.Minute, "59s", "1m1s", false, false},
 	} {
 		t.Run(c.row, func(t *testing.T) {
 			row := rowOf(c.row)
-			cfg := Config{Row: row, Dry: true, DryFault: "pend-past-bound", Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute}
+			cfg := Config{Row: row, Dry: true, DryFault: "pend-past-bound", Out: filepath.Join(t.TempDir(), "out"), PendingMax: c.bound}
 			rec, err := NewRecorder(cfg.Out)
 			if err != nil {
 				t.Fatal(err)
 			}
 			st := newDrySteps(t, cfg, familyOf(c.row))
 			began := st.now()
-			failures, err := Run(context.Background(), cfg, st, rec, t.Logf)
+			var logged []string
+			logf := func(format string, a ...any) {
+				logged = append(logged, fmt.Sprintf(format, a...))
+				t.Logf(format, a...)
+			}
+			failures, err := Run(context.Background(), cfg, st, rec, logf)
 			if !errors.Is(err, ErrNotStarted) || len(failures) != 0 {
 				t.Fatalf("failures %v, err %v, want ErrNotStarted and no verdict", failures, err)
 			}
 			if got := NotRun(row, err); got != c.wantNotRun {
 				t.Errorf("NotRun = %t, want %t", got, c.wantNotRun)
 			}
-			// The first clock ran its length on the manual clock, and the cancel took a few seconds at most.
+			// Still pending just before the bound, cancelled just after it: the readings of the manual clock.
+			for _, want := range []string{
+				"stand-in: the job is still pending " + c.wantStill + " after its submission",
+				"stand-in: the run's jobs are cancelled by their tags " + c.wantCancels + " after the job's submission",
+			} {
+				if !containsLine(logged, want) {
+					t.Errorf("the run did not log %q; it logged:\n%s", want, strings.Join(logged, "\n"))
+				}
+			}
+			// The cluster's own record agrees: the first clock ran its length on the manual clock, and the
+			// cancel took a few seconds at most.
 			if waited := st.now().Sub(began); waited < cfg.PendingMax || waited > cfg.PendingMax+10*time.Second {
 				t.Errorf("the wait lasted %s, want the bound of %s", waited, cfg.PendingMax)
 			}
@@ -302,6 +321,9 @@ func TestAJobPendingPastTheBoundIsCancelledByItsTag(t *testing.T) {
 					if j.State != fakeslurm.Cancelled || !j.Start.IsZero() {
 						t.Errorf("the run's job is %s (started %t), want cancelled and never started", j.State, !j.Start.IsZero())
 					}
+					if pended := j.End.Sub(j.Submit); pended < c.bound || pended > c.bound+10*time.Second {
+						t.Errorf("the run's job was cancelled %s after its submission, want the bound of %s", pended, c.bound)
+					}
 					continue
 				}
 				owners++
@@ -314,6 +336,15 @@ func TestAJobPendingPastTheBoundIsCancelledByItsTag(t *testing.T) {
 			}
 		})
 	}
+}
+
+func containsLine(lines []string, want string) bool {
+	for _, l := range lines {
+		if l == want {
+			return true
+		}
+	}
+	return false
 }
 
 // notStarted is a scenario whose first job never started; its Close can fail.
