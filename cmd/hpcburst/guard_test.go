@@ -188,6 +188,14 @@ func TestGuardRemoveRefusesWithoutAHost(t *testing.T) {
 	if r := cli(t, "guard"); r.code != exitUsage || !strings.Contains(r.err, "hpcburst guard remove") {
 		t.Errorf("guard with no subcommand: exit %d, stderr %q, want the usage", r.code, r.err)
 	}
+	// The help says what the removal exposes (science agent, 2 Nov 2026).
+	for _, args := range [][]string{{"guard", "-h"}, {"guard", "remove", "-h"}, {"guard"}} {
+		r := cli(t, args...)
+		want := "Framework CRDs can then be\ndeleted, which deletes every resource of those kinds"
+		if !strings.Contains(r.err+r.out, want) {
+			t.Errorf("hpcburst %s: the help does not say what the removal exposes (%q):\n%s%s", strings.Join(args, " "), want, r.out, r.err)
+		}
+	}
 	if r := cli(t, "guard", "install"); r.code != exitUsage {
 		t.Errorf("guard install: exit %d, want a usage error: up installs the guard, and there is no other way in", r.code)
 	}
