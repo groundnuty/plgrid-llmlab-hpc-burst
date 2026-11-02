@@ -67,6 +67,11 @@ On Helios the replacement of `alpha-helios-nooverlap` is created at its planned 
 
 **The Helios Provider serves one deployment, and that deployment allows it alone.** QOS `now`'s one GPU per user makes a second deployment's primary on the Helios Provider pend behind the first, an unmarked pend that, while fewer than 20 waits are kept, could set the plan for a normal-mode deployment there (`hbep/0007-lifecycle-controller/README.md:468`, "Alpha's fence", from PR #205). So `alpha-helios-nooverlap`'s ModelDeployment names the Helios Provider and no other. The verdict fails a deployment that allows any other Provider, or none, and the dry run shows it with a deployment that also allows Athena. The other stack rows are held to their own cluster the same way, because a run that could place its Instance elsewhere measures nothing.
 
+**The run keeps to those counts with the deployment's `endTime`** (issue #245). With no queue wait observed, the lifecycle controller creates a primary's replacement at the primary's start, and a successor's own replacement long before the predecessor's drain start (HBEP-7, Handover), so without a limit a tunnel row would hold 2 jobs and a handover row 3. A deployment that ends at or before an Instance's drain start gives it no replacement (`internal/lifecycle/handover.go`).
+- **A tunnel row** creates its deployment ending at the earliest drain start its job can have, then moves the end to a minute before the Instance's own drain start once its lease end is known. The Instance drains there, a minute early, and the run records that as the drain start.
+- **The two-job rows** set the deployment's end, as soon as the successor has a lease end, to the successor's own drain start, to the second. That is where its lease drains it anyway, and the end is never at or before the predecessor's drain start.
+- This is a choice awaiting the science agent's ruling (PR body of #245).
+
 Cleanup is by tag: each Allocation's job tag is written to `job-tags.txt` before anything can submit it, and the script cancels those jobs, and only those, on every exit, a signal included.
 
 ## The shortest lease
