@@ -179,6 +179,10 @@ case $mode in
   # A submission the test could not settle: its tag is written down, nothing is queued (or the late job is
   # queued, hidden from the first reads), and in the unresolved mode the test says so in unresolved.txt.
   late) echo "hb-late-bbbbbbbbbbbb" >> "$HPCBURST_CONF_OUT/job-tags.txt"; echo "9003|hb-late-bbbbbbbbbbbb|normal|plgrid|PENDING" >> "$STUB_STATE/queue"; echo "--- PASS: $t (0.01s)"; echo PASS ;;
+  # A test stopped before it finished writes nothing about what it could not settle; the tag is all there is.
+  timed-out) echo "hb-late-bbbbbbbbbbbb" >> "$HPCBURST_CONF_OUT/job-tags.txt"; exit 124 ;;
+  sleep-late) echo "hb-late-bbbbbbbbbbbb" >> "$HPCBURST_CONF_OUT/job-tags.txt"; touch "$STUB_STATE/started"; exec sleep 3600 ;;
+  late-fail) echo "hb-late-bbbbbbbbbbbb" >> "$HPCBURST_CONF_OUT/job-tags.txt"; echo "--- FAIL: $t (0.01s)"; echo FAIL; exit 1 ;;
   unresolved-symlink) echo "hb-late-bbbbbbbbbbbb" >> "$HPCBURST_CONF_OUT/job-tags.txt"; ln -s "$HPCBURST_CONF_OUT/job-tags.txt" "$HPCBURST_CONF_OUT/unresolved.txt"; echo "--- PASS: $t (0.01s)"; echo PASS ;;
   unresolved-junk) printf '%s\n' 'not a tag; touch /tmp/x' '../../etc/passwd' > "$HPCBURST_CONF_OUT/unresolved.txt"; echo "--- PASS: $t (0.01s)"; echo PASS ;;
   late-tag) echo "hb-late-bbbbbbbbbbbb" >> "$HPCBURST_CONF_OUT/job-tags.txt"; echo "--- PASS: $t (0.01s)"; echo PASS ;;

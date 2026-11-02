@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -111,8 +112,8 @@ func TestCleanupWaitsLongerForAnUnresolvedSubmission(t *testing.T) {
 	if strings.Contains(res.out, "unresolved submission") {
 		t.Errorf("an unresolved submission was reported with no unresolved.txt:\n%s", res.out)
 	}
-	if q := w.stateFile("queue"); strings.Contains(q, "9003|") {
-		t.Errorf("a job registering after the plain window was seen without unresolved.txt; the contrast proves nothing:\n%s", q)
+	if reads := strings.TrimSpace(w.stateFile("late-reads")); reads != "3" {
+		t.Errorf("without unresolved.txt the cleanup read the queue %s times, want the plain window of 3", reads)
 	}
 }
 
@@ -189,6 +190,77 @@ func TestTheRowsTimeoutReachesTheTestBinary(t *testing.T) {
 		}
 		if argv := w.stateFile("testbin-argv-TestConformance"); !strings.Contains(argv, want) {
 			t.Errorf("%s: the test binary got %q, want it to contain %q", row, argv, want)
+		}
+	}
+}
+
+// A test that was stopped (the timeout, a signal) never got to write unresolved.txt, though its sbatch may be in
+// flight: the cleanup treats every owned tag as unresolved and waits for a late registration (PR 210's review,
+// B1: "a submission registering after a timeout or signal"). A test that failed by its own verdict, whose files
+// were written, gets the plain window.
+func TestCleanupWaitsForALateJobWhenTheTestWasStopped(t *testing.T) {
+	const wait = "cleanup: the test was stopped before it finished, so a submission in flight may still register; waited for it"
+	// The job appears at read 5: after the plain window of 3 quiet polls, inside the extended one.
+	late := quick("STUB_LATE_JOB="+lateJob, "STUB_LATE_AFTER=5")
+
+	t.Run("timed out", func(t *testing.T) {
+		w := newWorld(t)
+		w.useStubGo()
+		res := w.run(append(late, "STUB_TEST_MODE=timed-out"), "--run", "conformance-helios-gh200", "--yes")
+		w.contains(res, "FAIL (timed out)", wait, "cleanup: left behind 0 (cancelled 1)")
+		if reads := strings.TrimSpace(w.stateFile("late-reads")); reads == "3" {
+			t.Errorf("a stopped test got the plain window of 3 reads")
+		}
+		if q := w.stateFile("queue"); strings.Contains(q, "9003|") {
+			t.Errorf("the late job was left in the queue:\n%s", q)
+		}
+	})
+	t.Run("interrupted", func(t *testing.T) {
+		w := newWorld(t)
+		w.useStubGo()
+		cmd, out := w.start(append(late, "STUB_TEST_MODE=sleep-late"), "--run", "conformance-helios-gh200", "--yes")
+		w.waitFor("started")
+		w.signal(cmd, syscall.SIGTERM)
+		_ = cmd.Wait()
+		w.noLeak(out.String())
+		w.noLeftoverProcess(cmd)
+		for _, want := range []string{"FAIL (interrupted)", wait, "cleanup: left behind 0 (cancelled 1)"} {
+			if !strings.Contains(out.String(), want) {
+				t.Errorf("the output lacks %q:\n%s", want, out)
+			}
+		}
+		if q := w.stateFile("queue"); strings.Contains(q, "9003|") {
+			t.Errorf("the late job was left in the queue:\n%s", q)
+		}
+	})
+	t.Run("a test that failed by its own verdict gets the plain window", func(t *testing.T) {
+		w := newWorld(t)
+		w.useStubGo()
+		res := w.run(append(late, "STUB_TEST_MODE=late-fail"), "--run", "conformance-helios-gh200", "--yes")
+		if res.code != 1 || strings.Contains(res.out, "was stopped before it finished") {
+			t.Fatalf("exit %d, or a stop reported for a test that failed by its own verdict:\n%s", res.code, res.out)
+		}
+		// The plain window: three quiet reads and no more, so the job due at read 5 never registered.
+		if reads := strings.TrimSpace(w.stateFile("late-reads")); reads != "3" {
+			t.Errorf("the cleanup read the queue %s times, want the plain window of 3", reads)
+		}
+	})
+}
+
+// The real-engine run is not a test binary the script waits on: it polls its own job. A signal that stops it
+// is still a stop, so its cleanup waits for a late registration of the submission too.
+func TestAnInterruptedRealEngineRunWaitsForALateRegistrationToo(t *testing.T) {
+	w := newWorld(t)
+	w.useStubGo()
+	cmd, out := w.start(quick("STUB_JOB_FOREVER=1", "LIVE_POLL_SECONDS=1"), "--run", "real-engine", "--yes")
+	w.waitFor("polled")
+	w.signal(cmd, syscall.SIGTERM)
+	_ = cmd.Wait()
+	w.noLeak(out.String())
+	w.noLeftoverProcess(cmd)
+	for _, want := range []string{"cleanup: the test was stopped before it finished, so a submission in flight may still register; waited for it", "cleanup: left behind 0 (cancelled 1)"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("the output lacks %q:\n%s", want, out)
 		}
 	}
 }

@@ -24,8 +24,9 @@
 # timed out; 2 usage error or an unreadable range; 3 refused or NOT RUN (a
 # setting is missing, a file is not mode 600, the one-job slot is in use; or a
 # job of a row with a start-wait bound did not start within it and was cancelled
-# by its tag: not a failure, try again later); 4 a cluster test was not run
-# because --yes was not given.
+# by its tag: not a failure, try again later; or the scheduler rejected the
+# row's shape in the dry-run estimate, with or without --yes); 4 a cluster test
+# was not run because --yes was not given.
 #
 # NOT RUN (one protocol for every row that can be kept waiting by a long queue). A row whose cluster-table line
 # has a start wait (its last, optional column, in minutes) tells its test the bound in HPCBURST_CONF_START_WAIT.
@@ -121,8 +122,9 @@ TABLE
 # "skipped: the now slot is in use"), and each of its two jobs (step 1, step 3) must start within 10
 # min of its acceptance. Its worst case is then about 25 min: two start waits of 10 min and about
 # 5 min of running. Its timeout of 45 min is the test's own deadlines (10+5+3+10+8+3+3, the 22 min
-# after the start waits being for jobs that already run) plus a margin, so a slow cleanup fails in
-# the test, with its message, before this cap does.
+# after the start waits being for jobs that already run, plus 2 min for the end-of-run check for a
+# late duplicate, 44 in all) and a margin of 1 min, so a slow cleanup fails in the test, with its
+# message, before this cap does.
 cluster_table() {
   cat <<'TABLE'
 # BEGIN CLUSTER SHAPES
@@ -389,14 +391,21 @@ unresolved_tags() {
 # CLEAN_LEFT.
 CLEAN_LEFT=0
 CLEAN_TRIES=0
+TEST_STOPPED=0     # 1 when a test binary was stopped (timeout, signal, panic) instead of finishing
 clean_cluster() {
   [ -n "$ACTIVE_HOST" ] || return 0
-  local host=$ACTIVE_HOST now="" tags present id new again cancelled=0 left=0 readable=1 quiet=0 polls=0 sent=" " unres need
+  local host=$ACTIVE_HOST now="" tags present id new again cancelled=0 left=0 readable=1 quiet=0 polls=0 sent=" " unres need stopped
   CLEAN_TRIES=$((CLEAN_TRIES+1))
   tags=$(own_tags)
   unres=$(unresolved_tags)
   need=$CLEAN_QUIET_POLLS
   [ -z "$unres" ] || need=$((CLEAN_QUIET_POLLS+CLEAN_UNRESOLVED_POLLS))
+  # A run that was stopped (a timeout, a signal, a panic) never got to say what it could not settle: every owned
+  # tag counts as unresolved, and an interrupt at any time does too.
+  stopped=0
+  if { [ "$TEST_STOPPED" = 1 ] || [ -n "$INTERRUPTED" ]; } && { [ -n "$tags" ] || [ -n "$JOBID" ]; }; then
+    stopped=1; need=$((CLEAN_QUIET_POLLS+CLEAN_UNRESOLVED_POLLS))
+  fi
   while :; do
     polls=$((polls+1))
     now=$(queue_jobs "$host") || { readable=0; break; }
@@ -428,6 +437,7 @@ clean_cluster() {
     return 1
   fi
   [ -z "$unres" ] || say "cleanup: waited for $(printf '%s\n' "$unres" | wc -l) unresolved submission(s) the test could not settle"
+  [ "$stopped" != 1 ] || say "cleanup: the test was stopped before it finished, so a submission in flight may still register; waited for it"
   say "cleanup: left behind $left (cancelled $cancelled)"
   [ "$left" -eq 0 ] || CLEAN_LEFT=1
   ACTIVE_HOST=""
@@ -454,6 +464,9 @@ wait_child() {
     wait "$CHILD" 2>/dev/null
     CHILD_RC=130
   fi
+  # A test that ends with any status but 0 (it finished) or 1 (it failed by its own verdict) was stopped: the
+  # timeout (124), a signal, a panic. Its sbatch may be in flight, so the cleanup waits for late registrations.
+  case $CHILD_RC in 0|1) ;; *) TEST_STOPPED=1 ;; esac
   CHILD=""
 }
 
@@ -617,7 +630,7 @@ run_cluster() {
   REC_DIR="$OUT/$n-$(date -u +%Y%m%dT%H%M%SZ)-$$"
   mkdir -m 700 "$REC_DIR" || { release_run_lock; say "$n: FAIL (the record directory could not be made)"; return 1; }
   if [ "$n" = real-engine ]; then OWN_TAGS_FILE="$RE_DIR/submission-tag"; else OWN_TAGS_FILE="$REC_DIR/job-tags.txt"; fi
-  JOBID=""; CLEAN_TRIES=0; NOT_RUN=0
+  JOBID=""; CLEAN_TRIES=0; NOT_RUN=0; TEST_STOPPED=0
   ACTIVE_HOST=$host
   t0=$(date +%s)
   execute_cluster "$n" || { [ "$NOT_RUN" = 1 ] || verdict=1; }

@@ -429,3 +429,41 @@ func TestBothAmbiguousSubmissionsAreWrittenDown(t *testing.T) {
 		t.Errorf("unresolve is called %v; want once in reconcile and once in TestConformance", in)
 	}
 }
+
+// The row's start wait (the science agent's ruling, 2 Nov 2026: each step's job
+// must start within 10 minutes of its acceptance) reaches the run as
+// HPCBURST_CONF_START_WAIT, and the row's timeout is not below what the test
+// can take with it: two start waits, and the test's other deadlines on jobs that
+// already run (5 min to delete, 3 for accounting, 8 for the second job, 3 for
+// accounting, 3 for the name round trip), and the end-of-run wait for a late
+// duplicate: 44 min for the GH200 row, under its 45.
+func TestTheGH200RowsStartWaitReachesTheRunAndItsTimeoutCoversTheTest(t *testing.T) {
+	otherDeadlines := 5 + 3 + 8 + 3 + 3 + int(duplicateWait/time.Minute)
+	seen := 0
+	for _, r := range readShapeRows(t) {
+		if r.profile == "-" || r.startWait == "-" {
+			continue
+		}
+		seen++
+		t.Run(r.name, func(t *testing.T) {
+			n, err := strconv.Atoi(r.startWait)
+			if err != nil || n < 1 || n > 30 {
+				t.Fatalf("start wait %q is not whole minutes from 1 to 30", r.startWait)
+			}
+			s, _ := r.validated(t)
+			if s.startWait != time.Duration(n)*time.Minute {
+				t.Errorf("the run's startWait = %v, the row says %d min", s.startWait, n)
+			}
+			timeout, err := strconv.Atoi(r.timeout)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := 2*n + otherDeadlines; timeout < want {
+				t.Errorf("timeout %d min is below the test's own deadlines with this start wait, %d min", timeout, want)
+			}
+		})
+	}
+	if seen == 0 {
+		t.Error("no row has a start wait: the check looked at nothing")
+	}
+}
