@@ -203,6 +203,9 @@ func TestOnlyAMarkedCleanSkipOfARowWithABoundIsNotRun(t *testing.T) {
 	}{
 		{"a failure beside the marker", "conformance-helios-gh200", "not-run-fail"},
 		{"a skipped subtest beside the marker", "conformance-helios-gh200", "not-run-sub"},
+		{"a marker that is a link", "conformance-helios-gh200", "not-run-link"},
+		{"a nonzero exit beside the marker", "conformance-helios-gh200", "not-run-rc"},
+		{"a failed subtest beside the marker", "conformance-helios-gh200", "not-run-subfail"},
 		{"a skip with no marker", "conformance-helios-gh200", "skip"},
 		{"a marker from a row with no bound", "conformance-helios", "not-run"},
 		{"a marker from another row with no bound", "conformance-athena", "not-run"},

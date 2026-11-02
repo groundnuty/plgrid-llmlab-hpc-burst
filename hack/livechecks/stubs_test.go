@@ -186,6 +186,9 @@ case $mode in
   not-run) notrun; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   not-run-leave) leave; notrun; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   not-run-fail) notrun; echo "--- FAIL: $t (0.01s)"; echo FAIL; exit 1 ;;
+  not-run-link) echo "x" > "$HPCBURST_CONF_OUT/elsewhere.txt"; ln -s elsewhere.txt "$HPCBURST_CONF_OUT/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
+  not-run-rc) notrun; echo "--- SKIP: $t (0.00s)"; echo PASS; exit 1 ;;
+  not-run-subfail) notrun; echo "    --- FAIL: $t/part (0.00s)"; echo "--- SKIP: $t (0.00s)"; echo FAIL; exit 1 ;;
   not-run-sub) notrun; echo "    --- SKIP: $t/part (0.00s)"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
 esac
 `

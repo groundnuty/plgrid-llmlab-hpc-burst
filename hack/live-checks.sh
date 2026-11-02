@@ -27,6 +27,18 @@
 # by its tag: not a failure, try again later); 4 a cluster test was not run
 # because --yes was not given.
 #
+# NOT RUN (one protocol for every row that can be kept waiting by a long queue). A row whose cluster-table line
+# has a start wait (its last, optional column, in minutes) tells its test the bound in HPCBURST_CONF_START_WAIT.
+# A test that finds a job still not started at the bound cancels what it submitted by the tags it wrote down,
+# writes the line it wants to report to not-run.txt in HPCBURST_CONF_OUT (its private record directory), and
+# SKIPS at the top level (t.Skip). Nothing else: it fails nothing and exits 0. The script reads that, and only
+# that, as NOT RUN (not_run_verdict): exactly one top-level skip, no failure, no subtest skipped, exit status 0,
+# the marker a regular file in this run's own record directory, and a row with a start wait. It then runs the
+# same cleanup as for any run, prints "<row>: NOT RUN (...)" apart from PASS and FAIL, and exits 3 (below a
+# failure, above a pass), like a busy one-job slot: the run could not be done now, try again later. Every other
+# skip stays a failure, and so does a NOT RUN whose cleanup leaves a job behind. A new row opts in by giving
+# its start wait and having its test follow the protocol; no row-specific code is needed.
+#
 # The settings file is named by HPCBURST_LIVE_SETTINGS: KEY=VALUE lines, mode
 # 600, owned by you. Keys (none is ever printed):
 #   LIVE_OUT_DIR                 absolute path of a private directory for logs and records (always)
@@ -447,6 +459,16 @@ wait_child() {
 
 # ---------------------------------------------------------------- results
 
+# not_run_verdict <name> <rc> <failed> <skipped> <named result>: the NOT RUN protocol (see the header). True only for
+# a row with a start wait whose test skipped once at the top level with no failure, exit status 0 and the marker,
+# a regular file (not a link) in this run's record directory. Anything else is not a NOT RUN.
+not_run_verdict() {
+  local n=$1 rc=$2 failed=$3 skipped=$4 named=$5
+  [ "${SWAIT[$n]:--}" != - ] || return 1
+  [ "$named" = SKIP ] && [ "$rc" = 0 ] && [ "$failed" = 0 ] && [ "$skipped" = 1 ] || return 1
+  [ -n "$REC_DIR" ] && [ -f "$REC_DIR/not-run.txt" ] && [ ! -L "$REC_DIR/not-run.txt" ]
+}
+
 # judge <name> <log> <rc>: the verdict from the test's verbose log and exit status. A skip is not a pass, at
 # any level. Only counts and fixed labels reach the screen: a subtest's name can hold anything.
 judge() {
@@ -458,11 +480,7 @@ judge() {
   say "$n: tests: ${pass:-0} passed, ${fail:-0} failed, ${skip:-0} skipped"
   if [ "$rc" = 130 ]; then say "$n: FAIL (interrupted)"; return 1; fi
   if [ "$rc" = 124 ]; then say "$n: FAIL (timed out)"; return 1; fi
-  # A row with a start-wait bound ends as NOT RUN when its test skips on the bound: the test cancelled its jobs
-  # by their tags and left the marker in this run's own record directory. Only that: the one top-level skip, no
-  # failure, a clean exit, and the marker. Any other skip stays a failure.
-  if [ "$named" = SKIP ] && [ "$rc" = 0 ] && [ "${fail:-0}" = 0 ] && [ "${skip:-0}" = 1 ] && [ "${SWAIT[$n]:--}" != - ] &&
-    [ -n "$REC_DIR" ] && [ -f "$REC_DIR/not-run.txt" ] && [ ! -L "$REC_DIR/not-run.txt" ]; then
+  if not_run_verdict "$n" "$rc" "${fail:-0}" "${skip:-0}" "$named"; then
     NOT_RUN=1
     say "$n: NOT RUN (a job did not start within ${SWAIT[$n]} min of its acceptance and was cancelled by its tag; not a failure)"
     return 3
