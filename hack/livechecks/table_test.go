@@ -416,3 +416,74 @@ func TestHubGoldenInputsAreTheFilesTheTestReads(t *testing.T) {
 		}
 	}
 }
+
+// scriptTables are the tables load_tables reads, each between "# BEGIN <name>" and "# END <name>" in the script.
+var scriptTables = []string{"ALIASES", "CLUSTER SHAPES", "LIVE TESTS", "MOST JOBS", "OWNER GO", "PLAN STACK"}
+
+// commentOut returns the script with every row of the named table turned into a comment, as an edit that
+// empties the table would leave it.
+func commentOut(t *testing.T, script, name string) string {
+	t.Helper()
+	lines := strings.Split(script, "\n")
+	in, n := false, 0
+	for i, l := range lines {
+		switch {
+		case l == "# BEGIN "+name:
+			in = true
+		case l == "# END "+name:
+			in = false
+		case in && l != "" && !strings.HasPrefix(l, "#"):
+			lines[i] = "# " + l
+			n++
+		}
+	}
+	if n == 0 {
+		t.Fatalf("the script's %s table has no row to comment out", name)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// A table that loads no rows stops the script, in every mode, and names the table (#237). It once ran on as if
+// the table were short: --plan printed "run: (none)" with exit 0 when LIVE TESTS had no rows, and an empty
+// OWNER GO table would have dropped the owner's go from the rows that hold QOS now's GPU. Here each table in
+// turn has all its rows commented out.
+func TestATableThatLoadsNoRowsStopsTheScript(t *testing.T) {
+	b, err := os.ReadFile(scriptPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found []string
+	for _, m := range regexp.MustCompile(`(?m)^# BEGIN (.+)$`).FindAllStringSubmatch(string(b), -1) {
+		found = append(found, m[1])
+	}
+	sort.Strings(found)
+	if strings.Join(found, ",") != strings.Join(scriptTables, ",") {
+		t.Fatalf("the script's tables are %v; this test checks %v: a new table needs a check in load_tables and a place here", found, scriptTables)
+	}
+	for _, table := range scriptTables {
+		t.Run(table, func(t *testing.T) {
+			w := newWorld(t)
+			rng := w.commit("docs/notes.md", "changed\n")
+			// The fixture's copy of the script changes after the commit, so the range itself is untouched.
+			p := filepath.Join(w.repo, "hack", "live-checks.sh")
+			script, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			write(t, p, commentOut(t, string(script), table), 0o755)
+			want := "live-checks: the " + table + " table of this script loads no rows"
+			for _, args := range [][]string{{"--plan", rng}, {"--list"}} {
+				res := w.run(nil, args...)
+				if res.code != 2 {
+					t.Errorf("%s: exit %d, want 2:\n%s", args[0], res.code, res.out)
+				}
+				if !strings.Contains(res.out, want) {
+					t.Errorf("%s: the output does not name the empty table (%q):\n%s", args[0], want, res.out)
+				}
+				if strings.Contains(res.out, "run:") {
+					t.Errorf("%s: a script with an empty table printed a run line:\n%s", args[0], res.out)
+				}
+			}
+		})
+	}
+}
