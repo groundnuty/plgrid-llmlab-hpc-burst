@@ -255,6 +255,15 @@ func storeFull(t *testing.T, wholeDataDir bool) {
 	// refused, and the assertions below are about the state in which every write is.
 	vol.freeze()
 	t.Logf("the volume is frozen at %d of %d KiB", vol.used()>>10, vol.limit.Load()>>10)
+	// The store's own directory, as status shows it: in both variants the store lives in the volume
+	// through a link, and statfs follows it (#192). The available space is logged as the evidence that the
+	// frozen volume has no block available, which is what launcher.StoreFullHint requires.
+	storeDir := filepath.Join(h.dir, "data", "server", "db")
+	var stfs syscall.Statfs_t
+	if err := syscall.Statfs(storeDir, &stfs); err != nil {
+		t.Fatalf("statfs %s: %v", storeDir, err)
+	}
+	t.Logf("NUMBERS store full: statfs of the store directory on the frozen volume: %d bytes available (%d blocks of %d)", stfs.Bavail*uint64(stfs.Bsize), stfs.Bavail, stfs.Bsize)
 
 	// Writes are refused, even a tiny one, and by the full store; reads are not.
 	for i := 0; i < followingRefused; i++ {
@@ -280,9 +289,13 @@ func storeFull(t *testing.T, wholeDataDir bool) {
 	// status reports the write failure. The process view alone cannot see it. What its own probe meets on a
 	// frozen volume is not a quick disk-full refusal: with every write refused, journal and WAL included,
 	// SQLite blocks the probe's Patch until status's 15 s timeout (CI's first run of this test showed it:
-	// "request canceled (Client.Timeout exceeded while awaiting headers)"). So the cause text is not asserted
-	// here; status must say that writes are failing, and the correlation with the volume is proven below by
-	// giving the space back: the same status then reports writes OK.
+	// "request canceled (Client.Timeout exceeded while awaiting headers)"). So the probe's own error does not
+	// name the cause, and none is asserted from it. status must say that writes are failing, and (#192) add
+	// that the store is full, from a statfs of the store's directory: the volume is full, so the hint is in the
+	// reasons, in JSON and in text, under the path status shows (the store's directory in the state directory)
+	// and never under the volume's mount. The correlation with the volume is proven below by giving the space
+	// back: the same status then reports writes OK, and no hint while it still fails.
+	hint := "store full (no free space on " + storeDir + ")"
 	r = cli(t, h.args("status", "--json")...)
 	parseJSON(t, r.out, &rep)
 	t.Logf("NUMBERS store full: status exit %d, health %s, readyz_ok=%v, controller_manager_ok=%v, writes_ok=%v, reasons=%v",
@@ -293,11 +306,19 @@ func storeFull(t *testing.T, wholeDataDir bool) {
 	if !strings.Contains(strings.Join(rep.Reasons, ";"), "writes are failing") {
 		t.Errorf("reasons %v do not say that writes are failing", rep.Reasons)
 	}
+	if joined := strings.Join(rep.Reasons, ";"); !strings.Contains(joined, hint) || strings.Contains(joined, vol.mount) {
+		t.Errorf("JSON reasons %v do not carry %q, or name the volume's mount %s", rep.Reasons, hint, vol.mount)
+	}
 	if r := cli(t, h.args("status", "--no-api")...); r.code != exitOK {
 		t.Errorf("the process-only view should still be healthy (that is why the write probe exists): exit %d", r.code)
 	}
+	// The text view prints the reasons as lines of their own. Only that line is held to the layout path: in
+	// the whole-data-directory variant, status's long-standing "executable:" line shows the resolved path
+	// under the volume's mount, which is not the hint's to change.
 	if r := cli(t, h.args("status")...); r.code != exitFail || !strings.Contains(r.out, "writes are failing") {
 		t.Errorf("text status: exit %d: %q", r.code, r.out)
+	} else if line := lineWith(r.out, "store full"); !strings.Contains(line, hint) || strings.Contains(line, vol.mount) {
+		t.Errorf("text status: the reason line %q does not carry %q, or names the volume's mount %s: %q", line, hint, vol.mount, r.out)
 	}
 
 	// The same status reads real storage outcomes, not a constant: give the space back (unfreeze, and raise
@@ -316,11 +337,26 @@ func storeFull(t *testing.T, wholeDataDir bool) {
 		if r.code == exitOK && rep.Health == "healthy" && rep.Writes != nil && *rep.Writes {
 			break
 		}
+		// Writes may still be draining, but space is free again: a probe that fails now must not blame a
+		// full store (#192).
+		if joined := strings.Join(rep.Reasons, ";"); strings.Contains(joined, "store full") || strings.Contains(joined, "nearly full") {
+			t.Errorf("status blames a full store after the space was given back: %v", rep.Reasons)
+		}
 		if time.Now().After(deadline) {
 			t.Fatalf("status never reported writes OK after the space was given back (within %s): exit %d %+v", recoverWithin, r.code, rep)
 		}
 		time.Sleep(5 * time.Second)
 	}
+}
+
+// lineWith is the first line of out that contains s, or "" when none does.
+func lineWith(out, s string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, s) {
+			return line
+		}
+	}
+	return ""
 }
 
 func ptrStr(b *bool) string {

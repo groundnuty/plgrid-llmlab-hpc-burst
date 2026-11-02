@@ -120,7 +120,9 @@ run() { # label expected-exit-status-is-nonzero(1)/zero(0) grep-pattern
   if [ "$want" = 0 ] && [ "$rc" != 0 ]; then echo "FAIL: $label should pass"; failures=$((failures+1)); fi
   if [ "$want" = 1 ]; then
     [ "$rc" = 0 ] && { echo "FAIL: $label should fail"; failures=$((failures+1)); }
-    printf '%s\n' "$out" | grep -q -- "$pat" || { echo "FAIL: $label output lacks '$pat'"; failures=$((failures+1)); }
+    # Here-strings, not printf | grep -q: under pipefail a printf still writing when grep stops at a match dies of
+    # SIGPIPE and the check fails with the text present (plgrid-llmlab-hpc-burst #213). The same below.
+    grep -q -- "$pat" <<<"$out" || { echo "FAIL: $label output lacks '$pat'"; failures=$((failures+1)); }
   fi
 }
 failures=0
@@ -128,7 +130,7 @@ export GOFLAGS=${GOFLAGS:-} GOWORK=off
 write_app goodlib;            run "control: MIT only"                0 ""
 # A check over zero packages also exits 0, so show that the control really looked at goodlib.
 rep=$(cd "$work/app" && "$GL" report ./... --ignore example.test/app 2>/dev/null || true)
-printf '%s\n' "$rep" | grep -q '^example.test/goodlib,.*,MIT$' \
+grep -q '^example.test/goodlib,.*,MIT$' <<<"$rep" \
   && echo "-- control: report lists example.test/goodlib as MIT" \
   || { echo "FAIL: control report does not list goodlib as MIT: $rep"; failures=$((failures+1)); }
 write_app goodlib offlist;    run "off-list licence (BSD-4-Clause)"  1 "Not allowed license 'BSD-4-Clause' found for library 'example.test/offlist'"
@@ -198,7 +200,7 @@ gate_case() { # label want(0|1) pattern repo [licence-check.sh options...]
   if [ "$want" = 1 ]; then
     [ "$rc" = 0 ] && { echo "FAIL: $label should fail"; failures=$((failures+1)); }
   fi
-  printf '%s\n' "$out" | grep -q -F -- "$pat" || { echo "FAIL: $label output lacks '$pat'"; failures=$((failures+1)); }
+  grep -q -F -- "$pat" <<<"$out" || { echo "FAIL: $label output lacks '$pat'"; failures=$((failures+1)); }
 }
 BSD4="Not allowed license 'BSD-4-Clause' found for library"
 NOLIC="Did not find license for library"
@@ -254,7 +256,7 @@ gate_case "off-list dependency imported only by a test of the root module" 1 \
 # LICENSE, and exits 0. The gate must fail that run. The dangling symlink is readable by name
 # (the search finds it) and fails when opened, whoever runs the test.
 assert_last() { # label pattern: the output of the last gate_case contains the pattern
-  printf '%s\n' "$last_out" | grep -q -F -- "$2" || { echo "FAIL: $1: the output lacks '$2'"; failures=$((failures+1)); }
+  grep -q -F -- "$2" <<<"$last_out" || { echo "FAIL: $1: the output lacks '$2'"; failures=$((failures+1)); }
 }
 mksub() { # name with-dangling-licence(0|1): a module with a LICENSE at its root and a package sub/ beneath it
   local n=$1 dangling=$2 d=$libs/$1
@@ -312,7 +314,7 @@ KNOWN_ZERO_MODULES=$work/known-zero.txt gate_case "the same module listed as a k
 printf '%s\n' 'tools/tagged:' > "$work/known-zero-noreason.txt"
 rc=0; out=$(KNOWN_ZERO_MODULES=$work/known-zero-noreason.txt "$here/licence-check.sh" "$GL" "$work/r-empty" "$work/out-noreason" 2>&1) || rc=$?
 echo "-- a known-zero entry without a reason: exit $rc"
-if [ "$rc" != 2 ] || ! printf '%s\n' "$out" | grep -q "needs '<module dir>: <reason>'"; then
+if [ "$rc" != 2 ] || ! grep -q "needs '<module dir>: <reason>'" <<<"$out"; then
   echo "FAIL: an entry without a reason should be refused with exit 2"; failures=$((failures+1)); fi
 echo "-- for comparison, go-licenses' own --ignore example.test/proj, a path prefix, on the same fixtures (exit 0 = the dependency is hidden):"
 for r in sibling siblingunk beneath beneathunk; do

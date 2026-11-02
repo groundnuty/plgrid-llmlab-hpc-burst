@@ -168,7 +168,9 @@ check_module() { # module dir relative to the root
       LIST=${LIST/BSD-3-Clause,/}
       gate_run "negative control: BSD-3-Clause taken off the list (must fail)" "$permit" "$dir" ./...
       LIST=$saved
-      if [ "$grc" != 0 ] && printf '%s\n' "$gate_out" | grep -q "Not allowed license 'BSD-3-Clause'"; then
+      # grep reads a here-string, not a pipe from printf: under pipefail a printf still writing when grep -q stops at
+      # a match dies of SIGPIPE and fails the test (plgrid-llmlab-hpc-burst #213).
+      if [ "$grc" != 0 ] && grep -q "Not allowed license 'BSD-3-Clause'" <<<"$gate_out"; then
         echo "negative control: failed and named BSD-3-Clause packages, as it should"
       else
         echo "NEGATIVE CONTROL FAILED"; status=1
