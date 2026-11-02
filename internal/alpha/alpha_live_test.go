@@ -62,7 +62,7 @@ func TestAlphaAthenaHandover(t *testing.T) {
 
 // TestAlphaHeliosNoOverlap is HBEP-7's alpha criterion on Helios
 // plgrid-gpu-gh200 under QOS now: no-overlap mode with the replacement queued
-// ahead, no request cut, and the gap measured. It needs #174.
+// ahead, no request cut, and the gap measured.
 //
 //livecheck:alpha-helios-nooverlap
 func TestAlphaHeliosNoOverlap(t *testing.T) {

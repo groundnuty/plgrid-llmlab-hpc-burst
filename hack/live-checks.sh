@@ -42,7 +42,6 @@
 #   LIVE_DIALHOME_ADDR           host:port of the dial-home route, as the compute nodes see it
 #   LIVE_DIALHOME_KEY            ssh mode only: the restricted dial-home key file, mode 600
 #   LIVE_BIN_DIR                 absolute path of the directory with k3s-1.36.5/ and the pinned frp
-#   LIVE_ISSUE_174_LANDED        yes, once #174 is on main: alpha-helios-nooverlap refuses without it
 #   LIVE_OWNER_GO_HELIOS_NOW     today's UTC date (YYYY-MM-DD), once the owner has said yes to the run: the rows that hold
 #                                QOS now's GPU for hours (alpha-helios-nooverlap, tunnel-hour-helios) refuse without it
 # Cluster calls go through the ssh aliases helios and athena, one at a time per
@@ -234,7 +233,7 @@ load_settings() {
     [ "$k" != "$line" ] || continue
     v=${v%\"}; v=${v#\"}; v=${v%\'}; v=${v#\'}
     case $k in
-      LIVE_OUT_DIR|LIVE_LOCK_DIR|LIVE_BUILD_LOCK|LIVE_LLMLAB_CREDENTIALS|LIVE_LLMLAB_MODEL|LIVE_CONF_CREDENTIALS_HELIOS|LIVE_CONF_CREDENTIALS_ATHENA|ACCOUNT_HELIOS_CPU|ACCOUNT_HELIOS_GH200|ACCOUNT_ATHENA_A100|LIVE_DIALHOME_MODE|LIVE_DIALHOME_ADDR|LIVE_DIALHOME_KEY|LIVE_BIN_DIR|LIVE_ISSUE_174_LANDED|LIVE_OWNER_GO_HELIOS_NOW)
+      LIVE_OUT_DIR|LIVE_LOCK_DIR|LIVE_BUILD_LOCK|LIVE_LLMLAB_CREDENTIALS|LIVE_LLMLAB_MODEL|LIVE_CONF_CREDENTIALS_HELIOS|LIVE_CONF_CREDENTIALS_ATHENA|ACCOUNT_HELIOS_CPU|ACCOUNT_HELIOS_GH200|ACCOUNT_ATHENA_A100|LIVE_DIALHOME_MODE|LIVE_DIALHOME_ADDR|LIVE_DIALHOME_KEY|LIVE_BIN_DIR|LIVE_OWNER_GO_HELIOS_NOW)
         S[$k]=$v ;;
     esac
   done 2>/dev/null < "$HPCBURST_LIVE_SETTINGS"
@@ -295,8 +294,9 @@ check_owner_go() {
 }
 
 # check_alpha_settings <name>: what a row that runs the stack needs besides a cluster test's own settings: the
-# dial-home route (the owner provides it, HBEP-6), the directory with the pinned binaries, and for the
-# no-overlap row the word that #174 is on main. Every problem is reported.
+# dial-home route (the owner provides it, HBEP-6) and the directory with the pinned binaries. Every problem
+# is reported. #174 (no-overlap queue-wait growth) needs no setting: it is on main (#208), and so in every
+# checkout that has these rows.
 check_alpha_settings() {
   local name=$1 bad=0 mode
   alpha_need() { [ -n "${S[$1]:-}" ] || { say "live-checks: setting $1 is missing"; bad=1; return 1; }; }
@@ -311,10 +311,6 @@ check_alpha_settings() {
   alpha_need LIVE_DIALHOME_ADDR && { [[ ${S[LIVE_DIALHOME_ADDR]} =~ ^[A-Za-z0-9._-]+:[0-9]{1,5}$ ]] || { say "live-checks: LIVE_DIALHOME_ADDR must be host:port"; bad=1; }; }
   if alpha_need LIVE_BIN_DIR; then
     case ${S[LIVE_BIN_DIR]} in /*) [ -d "${S[LIVE_BIN_DIR]}" ] || { say "live-checks: LIVE_BIN_DIR is not a directory"; bad=1; } ;; *) say "live-checks: LIVE_BIN_DIR must be an absolute path"; bad=1 ;; esac
-  fi
-  if [ "$name" = alpha-helios-nooverlap ] && [ "${S[LIVE_ISSUE_174_LANDED]:-}" != yes ]; then
-    say "live-checks: setting LIVE_ISSUE_174_LANDED must be yes: $name needs #174 (no-overlap queue-wait growth), which is not marked as landed"
-    bad=1
   fi
   return $bad
 }

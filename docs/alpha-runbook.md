@@ -17,7 +17,7 @@ hack/live-checks.sh --run <row>... --yes      # the run
 |---|---|
 | `gpu-accounting-helios`, `gpu-accounting-athena` | Complete. Runs through the Provider's controller; needs no dial-home route. |
 | `alpha-athena-handover`, `alpha-helios-nooverlap`, `tunnel-hour-helios`, `tunnel-hour-athena` | The judging, the settings, the gating, the slot handling, the cleanup and the dry runs are in. The scenario that starts the stack and drives it waits for the one-host rehearsal (PR #161); until it is wired a live run fails at its first step with "the live scenario steps are not wired yet" and has used no cluster. |
-| `alpha-helios-nooverlap` | Also needs #174. The script refuses it (exit 3) until `LIVE_ISSUE_174_LANDED=yes` is set. |
+| `alpha-helios-nooverlap` | Needs #174 (no-overlap queue-wait growth), which is on main (#208), so in every checkout that has this row. It needs no setting for it; it needs the owner's go (below). |
 
 ## Settings
 
@@ -35,7 +35,6 @@ The settings file is named by `HPCBURST_LIVE_SETTINGS`: `KEY=VALUE` lines, mode 
 | `LIVE_DIALHOME_ADDR` | the four stack rows | `host:port` of the route, as the compute nodes see it |
 | `LIVE_DIALHOME_KEY` | stack rows, `ssh` mode | the restricted dial-home key file, mode 600 |
 | `LIVE_BIN_DIR` | the four stack rows | the directory with `k3s-1.36.5/` and the pinned frp (`hack/fetch-k3s.sh`, `hack/fetch-frp.sh`) |
-| `LIVE_ISSUE_174_LANDED` | `alpha-helios-nooverlap` | `yes` once #174 is on main |
 | `LIVE_OWNER_GO_HELIOS_NOW` | `alpha-helios-nooverlap`, `tunnel-hour-helios` | today's UTC date (`YYYY-MM-DD`), set only after the owner has said yes to the hold; a missing or older date is refused (exit 3) |
 
 One environment variable, not a setting: `LIVE_PENDING_MAX_SECONDS` (default 7200) is how long a job may wait in the queue before the run cancels it. Athena's `plgrid-gpu-a100` queue was estimated at a start on 13 Nov for one GPU (#145, 1 Nov 2026): set it from the estimate that `--run` prints, which is the reason it is printed first. The script's timeout for a row is the row's run time plus this wait.
@@ -108,10 +107,10 @@ hack/live-checks.sh --run alpha-athena-handover --yes
 ### `alpha-helios-nooverlap`
 
 ```
-hack/live-checks.sh --run alpha-helios-nooverlap --yes     # with LIVE_ISSUE_174_LANDED=yes
+hack/live-checks.sh --run alpha-helios-nooverlap --yes     # with LIVE_OWNER_GO_HELIOS_NOW set to today's date
 ```
 
-- **Settings:** the account, the credentials file, the four dial-home and binary settings, `LIVE_ISSUE_174_LANDED` and the owner's go, `LIVE_OWNER_GO_HELIOS_NOW`.
+- **Settings:** the account, the credentials file, the four dial-home and binary settings and the owner's go, `LIVE_OWNER_GO_HELIOS_NOW`.
 - **Duration, slot and jobs:** two Allocations in turn under QOS `now` on `plgrid-gpu-gh200`, one GPU, a 1 h 46 min lease each at most. The predecessor serves to its drain start, drains, and is released 2 minutes after its Instance ends; the successor starts when the GPU frees and the run ends when it is ready. **Holds QOS now's GPU for about 2 h 40 min; the owner's go is needed (the development rule on #145).** At most 2 jobs: the running predecessor and the pending replacement, the replacement only for the planned gap (above).
 - **Its deployment:** the Helios Provider alone, `leaseLimit` 1 h 46 min, `routing.maxRequestDuration` 5 minutes, `ReleaseWhenIdle` with a 2-minute `idleLimit` (`hbep/0007-lifecycle-controller/README.md:614`).
 - **What it does:** a stream in flight at the drain start; the replacement is queued ahead and pends until the predecessor's GPU frees.

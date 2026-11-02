@@ -111,7 +111,6 @@ func (w *world) alphaSettings(mutate func(m map[string]string)) {
 		m["LIVE_DIALHOME_MODE"] = "direct"
 		m["LIVE_DIALHOME_ADDR"] = "gateway-seed.example:29999"
 		m["LIVE_BIN_DIR"] = bin
-		m["LIVE_ISSUE_174_LANDED"] = "yes"
 		m["LIVE_OWNER_GO_HELIOS_NOW"] = time.Now().UTC().Format("2006-01-02")
 		if mutate != nil {
 			mutate(m)
@@ -230,8 +229,6 @@ func TestAlphaRowsRefuseWithoutTheirSettings(t *testing.T) {
 		{"an address with no port", "alpha-athena-handover", func(m map[string]string) { m["LIVE_DIALHOME_ADDR"] = "gateway-seed.example" }, []string{"LIVE_DIALHOME_ADDR must be host:port"}},
 		{"a binary directory that is not one", "tunnel-hour-athena", func(m map[string]string) { m["LIVE_BIN_DIR"] = "/no/such/dir" }, []string{"LIVE_BIN_DIR is not a directory"}},
 		{"a relative binary directory", "tunnel-hour-athena", func(m map[string]string) { m["LIVE_BIN_DIR"] = "bin" }, []string{"LIVE_BIN_DIR must be an absolute path"}},
-		{"no-overlap without #174", "alpha-helios-nooverlap", func(m map[string]string) { delete(m, "LIVE_ISSUE_174_LANDED") }, []string{"LIVE_ISSUE_174_LANDED must be yes", "needs #174"}},
-		{"no-overlap with #174 marked not landed", "alpha-helios-nooverlap", func(m map[string]string) { m["LIVE_ISSUE_174_LANDED"] = "no" }, []string{"LIVE_ISSUE_174_LANDED must be yes"}},
 		{"an account the shape needs", "alpha-athena-handover", func(m map[string]string) { delete(m, "ACCOUNT_ATHENA_A100") }, []string{"setting ACCOUNT_ATHENA_A100 is missing"}},
 		{"the provider's credentials", "alpha-helios-nooverlap", func(m map[string]string) { delete(m, "LIVE_CONF_CREDENTIALS_HELIOS") }, []string{"setting LIVE_CONF_CREDENTIALS_HELIOS is missing"}},
 	}
@@ -251,11 +248,10 @@ func TestAlphaRowsRefuseWithoutTheirSettings(t *testing.T) {
 	}
 }
 
-// What an alpha row needs is its own: #174 only for the no-overlap row, the dial-home route for none of the accounting rows.
+// What an alpha row needs is its own: the dial-home route for none of the accounting rows.
 func TestSettingsAreAskedOnlyOfTheRowsThatNeedThem(t *testing.T) {
 	w := newAlphaWorld(t)
 	w.alphaSettings(func(m map[string]string) {
-		delete(m, "LIVE_ISSUE_174_LANDED")
 		delete(m, "LIVE_DIALHOME_MODE")
 		delete(m, "LIVE_DIALHOME_ADDR")
 		delete(m, "LIVE_BIN_DIR")
@@ -263,13 +259,6 @@ func TestSettingsAreAskedOnlyOfTheRowsThatNeedThem(t *testing.T) {
 	for _, row := range []string{"gpu-accounting-helios", "gpu-accounting-athena"} {
 		if res := w.run(nil, "--run", row); res.code != 4 {
 			t.Errorf("%s with no dial-home route: exit %d, want 4:\n%s", row, res.code, res.out)
-		}
-	}
-	// #174 is the no-overlap row's alone.
-	w.alphaSettings(func(m map[string]string) { delete(m, "LIVE_ISSUE_174_LANDED") })
-	for _, row := range []string{"alpha-athena-handover", "tunnel-hour-helios", "tunnel-hour-athena"} {
-		if res := w.run(nil, "--run", row); res.code != 4 {
-			t.Errorf("%s without #174: exit %d, want 4:\n%s", row, res.code, res.out)
 		}
 	}
 }
