@@ -12,6 +12,10 @@ const (
 	EventReasonD       = "D"
 	ReasonTyped  Typed = "Typed"
 
+	// The condition types of the synthetic managed controller.
+	ConditionWatched = "Watched"
+	ConditionOther   = "Other"
+
 	// NotAReason is no Reason constant by its name, so the scan ignores it.
 	ConditionNotAReason = "NotAReason"
 )

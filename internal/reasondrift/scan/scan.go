@@ -56,6 +56,10 @@ type Options struct {
 	Overlay map[string][]byte
 	// Wrappers are the pass-through wrappers (reasondrift.Wrappers).
 	Wrappers []reasondrift.Wrapper
+	// ConditionSetters are the functions that write a condition, whose second
+	// argument is the condition, as {mod}-templated full names; the default is
+	// meta.SetStatusCondition.
+	ConditionSetters []string
 	// Require lists package directories that must be loaded with their
 	// syntax, so a scan that lost one fails instead of finding fewer sites.
 	Require []string
@@ -180,12 +184,20 @@ func Scan(o Options) (*reasondrift.Code, error) {
 		mod: mod, root: o.Root, fset: prog.Fset, fns: functions(prog, spkgs),
 		wrappers: map[string]reasondrift.Wrapper{}, seenWrappers: map[string]bool{},
 		callers: map[*ssa.Function][]*ssa.CallCommon{}, escaped: map[*ssa.Function]bool{},
+		callees: map[*ssa.Function][]*ssa.Function{},
 	}
 	for _, w := range o.Wrappers {
 		s.wrappers[w.Func] = w
 	}
 	s.index()
 	s.collect(code)
+	setters := o.ConditionSetters
+	if len(setters) == 0 {
+		setters = defaultSetters
+	}
+	if err := s.collectManaged(code, byDir["internal/managed"], setters); err != nil {
+		return nil, err
+	}
 	for w := range s.seenWrappers {
 		code.Wrappers = append(code.Wrappers, w)
 	}

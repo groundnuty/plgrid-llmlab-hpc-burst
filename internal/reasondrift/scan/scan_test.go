@@ -42,7 +42,10 @@ var controllerWrapper = reasondrift.Wrapper{
 // given files added or replaced under internal/lifecycle.
 func scanSynthetic(t *testing.T, files map[string]string, mutate func(*Options)) *reasondrift.Code {
 	t.Helper()
-	o := Options{Root: syntheticRoot(t), Wrappers: []reasondrift.Wrapper{kubeWrapper, controllerWrapper}}
+	o := Options{
+		Root: syntheticRoot(t), Wrappers: []reasondrift.Wrapper{kubeWrapper, controllerWrapper},
+		ConditionSetters: []string{"{mod}/internal/managed.SetStatusCondition"},
+	}
 	if len(files) > 0 {
 		o.Overlay = map[string][]byte{}
 		for name, src := range files {
@@ -239,6 +242,79 @@ type otherRecorder interface{ Event(string) }
 
 func relay(o otherRecorder, s string) { o.Event(s) }
 `
+
+// TestManagedWritesAreCollected: the reasons the synthetic managed controller
+// can write into its watched condition are found by reference, through a direct
+// write, a closure that is only called and a variable filled field by field.
+// The closure's write is an over-approximation: its two calls pass different
+// condition types, and the setter call is one, so both reasons are collected.
+func TestManagedWritesAreCollected(t *testing.T) {
+	code := scanSynthetic(t, nil, nil)
+	got := map[string]bool{}
+	for _, w := range code.ManagedWrites {
+		got[w.Type+"/"+w.Reason] = true
+	}
+	want := map[string]bool{"Watched/A": true, "Watched/B": true, "Watched/C": true, "Watched/D": true}
+	if len(got) != len(want) {
+		t.Errorf("managed writes %v, want %v", got, want)
+	}
+	for k := range want {
+		if !got[k] {
+			t.Errorf("managed writes %v lack %s", got, k)
+		}
+	}
+	if !slices.Equal(code.WatchedTypes, []string{"Watched"}) {
+		t.Errorf("watched types %v, want [Watched]", code.WatchedTypes)
+	}
+	if len(code.ManagedBad) != 1 || code.ManagedBad["A"] != "failing" {
+		t.Errorf("managed bad states %v, want A: failing", code.ManagedBad)
+	}
+}
+
+const managedWrites = `package managed
+
+import (
+	"fmt"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+)
+
+func literalReason(conds *[]Condition) {
+	SetStatusCondition(conds, Condition{Type: v1alpha1.ConditionWatched, Reason: "Literal"})
+}
+
+func builtReason(conds *[]Condition, n int) {
+	SetStatusCondition(conds, Condition{Type: v1alpha1.ConditionWatched, Reason: fmt.Sprintf("R%d", n)})
+}
+
+func unknownCondition(conds *[]Condition, c Condition) { SetStatusCondition(conds, c) }
+`
+
+// TestAWriteThatIsNotAConstantIsAProblem: any write that can reach a watched
+// condition with a reason that is a literal or built, or with a type or reason
+// the scan cannot read, fails closed.
+func TestAWriteThatIsNotAConstantIsAProblem(t *testing.T) {
+	code := scanSynthetic(t, map[string]string{"internal/managed/zz_overlay.go": managedWrites}, nil)
+	byFunc := map[string]string{}
+	for _, p := range code.Problems {
+		if p.Kind == reasondrift.ManagedNotConstant || p.Kind == reasondrift.ManagedUnresolved {
+			byFunc[p.Func] = p.Kind
+		}
+	}
+	want := map[string]string{
+		"literalReason":    reasondrift.ManagedNotConstant,
+		"builtReason":      reasondrift.ManagedUnresolved,
+		"unknownCondition": reasondrift.ManagedUnresolved,
+	}
+	if len(byFunc) != len(want) {
+		t.Errorf("managed problems %v, want %v", byFunc, want)
+	}
+	for f, k := range want {
+		if byFunc[f] != k {
+			t.Errorf("%s: problem %q, want %q (all: %v)", f, byFunc[f], k, byFunc)
+		}
+	}
+}
 
 // TestAnUnknownRecorderIsAProblem: a call to Event that is neither a sink nor
 // in a named wrapper is reported, so a new emitter path cannot go unseen. It is

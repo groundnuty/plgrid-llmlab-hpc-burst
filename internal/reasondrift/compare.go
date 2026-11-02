@@ -65,6 +65,24 @@ type Code struct {
 	// through a recorder it does not know, a wrapper that does not forward, a
 	// use of a recorder method outside the packages it loaded.
 	Problems []Problem
+	// WatchedTypes are the condition types the managed controller raises
+	// events about (internal/managed, watched).
+	WatchedTypes []string
+	// ManagedBad maps each reason that is a bad state of a watched condition to
+	// the type of its event (internal/managed, badAction).
+	ManagedBad map[string]string
+	// ManagedWrites are the reasons the code can write into a watched condition:
+	// an over-approximation of what the managed controller emits at any one
+	// moment.
+	ManagedWrites []ManagedWrite
+}
+
+// ManagedWrite is a reason written into a condition of a watched type.
+type ManagedWrite struct {
+	Reason string
+	// Type is the condition type, among WatchedTypes.
+	Type string
+	Pos  string
 }
 
 // Problem kinds.
@@ -76,6 +94,13 @@ const (
 	// WrapperDoesNotForward: a listed wrapper whose recorder call does not pass
 	// on what its Forwards say.
 	WrapperDoesNotForward = "wrapper-does-not-forward"
+	// ManagedUnresolved: a write of a condition whose type or reason cannot be
+	// resolved to constants, so it might write a watched type with a reason
+	// nobody listed.
+	ManagedUnresolved = "managed-unresolved"
+	// ManagedNotConstant: a reason written into a watched condition that is a
+	// string literal or built, not a named constant.
+	ManagedNotConstant = "managed-not-constant"
 	// EventNotConstructed: an event that is passed to a recorder or to a wrapper
 	// at a parameter that carries one is not the value of a known constructor,
 	// so its reason cannot be read.
@@ -112,6 +137,11 @@ const (
 	// recorder. It is not counted as raised, so a table row it would satisfy
 	// stays unsatisfied, and it is a mismatch of its own.
 	Unproven = "unproven"
+	// ManagedCodeOnly: the managed controller can write a reason, of the type its
+	// event would have, that HBEP-8's bullet does not list. ManagedDocOnly: the
+	// bullet lists one the code cannot write.
+	ManagedCodeOnly = "managed-code-only"
+	ManagedDocOnly  = "managed-doc-only"
 	// RankingHBEPOnly and RankingCodeOnly: a reason only HBEP-7's ranking, or
 	// only the code's, holds. RankingOrder: both hold the same reasons in a
 	// different order.
@@ -234,6 +264,7 @@ func Compare(d *Docs, c *Code) []Mismatch {
 		out = append(out, Mismatch{Kind: p.Kind, Package: p.Package, Func: p.Func, Detail: p.Detail})
 	}
 
+	out = append(out, compareManaged(d.Managed, c)...)
 	out = append(out, compareRanking(d.Ranking, c.Ranking)...)
 
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Key() < out[j].Key() })
@@ -283,6 +314,56 @@ func compareRanking(hbep, code []string) []Mismatch {
 	}
 	if len(out) == 0 && !slices.Equal(hbep, code) {
 		out = append(out, Mismatch{Kind: RankingOrder, Detail: fmt.Sprintf("HBEP-7 ranks %v, the code ranks %v", hbep, code)})
+	}
+	return out
+}
+
+// compareManaged compares HBEP-8's list of the managed controller's reasons with
+// what the code can write into the conditions it watches, and the events it
+// builds that no recorder was shown to receive. A written reason is a bad state
+// if the controller's map of bad states has it, with that map's type, and a
+// ready event otherwise: the reason it writes as a condition clears.
+func compareManaged(doc []ManagedEntry, c *Code) []Mismatch {
+	type pair struct{ action, reason string }
+	want := map[pair]bool{}
+	for _, e := range doc {
+		want[pair{e.Action, e.Reason}] = true
+	}
+	have := map[pair]string{}
+	for _, w := range c.ManagedWrites {
+		action := "ready"
+		if a, ok := c.ManagedBad[w.Reason]; ok {
+			action = a
+		}
+		have[pair{action, w.Reason}] = "written at " + w.Pos
+	}
+	// A typed event built by a constructor and not shown to reach a recorder is
+	// one the controller may raise too.
+	for _, e := range c.Emits {
+		if e.Unproven == "" || e.Unresolved != "" {
+			continue
+		}
+		for _, a := range e.Actions {
+			if a == NoAction {
+				continue
+			}
+			for _, r := range e.Reasons {
+				have[pair{a, r}] = "built at " + e.Pos
+			}
+		}
+	}
+	var out []Mismatch
+	for p, where := range have {
+		if !want[p] {
+			out = append(out, Mismatch{Kind: ManagedCodeOnly, Action: p.action, Reason: p.reason,
+				Detail: "the managed controller can raise it (" + where + "), and HBEP-8's bullet on its events does not list it as " + p.action})
+		}
+	}
+	for p := range want {
+		if _, ok := have[p]; !ok {
+			out = append(out, Mismatch{Kind: ManagedDocOnly, Action: p.action, Reason: p.reason,
+				Detail: "HBEP-8's bullet on the managed controller's events lists it as " + p.action + ", and the code cannot write it"})
+		}
 	}
 	return out
 }

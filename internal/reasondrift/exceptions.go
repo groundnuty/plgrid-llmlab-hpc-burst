@@ -67,7 +67,7 @@ var Exceptions = append(providerControllerEvents(), []Entry{
 	},
 	{
 		Kind: Unresolved, Package: "internal/managed", Func: "Controller.emitTransitions",
-		Why: "The reason of these events is the reason of the Provider condition that changed, read from status at run time, and the type comes from a map over those reasons, so no reason exists to name. HBEP-8 lists them in the bullet under the table: FileRefused, NoCredentialsFile, KeyRejected, Expired and ReadsFailing as failing, ExpiresWithinADay as degraded, and FileRead, KeyAccepted, NotExpiring and CatalogRead as ready.",
+		Why: "The reason of these events is the reason of the Provider condition that changed, read from status at run time, and the type comes from a map over those reasons, so no reason exists to name. The scan checks what it can: every reason the managed controller can write into the conditions it reads (and the keys of its map of bad states) is a named constant, listed in HBEP-8's bullet on the managed controller's events with the type its event has, and the bullet lists nothing the code cannot write. That set is what the code can write, a superset of what it raises at a given moment.",
 	},
 }...)
 

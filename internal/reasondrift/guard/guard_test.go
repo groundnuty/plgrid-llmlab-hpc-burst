@@ -345,6 +345,34 @@ func mutantRun(f func(string)) { f("X") }
 func mutantUseValue(o mutantOtherRecorder) { mutantRun(o.Event) }
 `
 
+// mutantManaged is a file added to internal/managed: two writes of a condition
+// that emitTransitions reads.
+const mutantManaged = `package managed
+
+import (
+	"fmt"
+
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+)
+
+const mutantManagedReason = "MutantManagedReason"
+
+func mutantBuiltReason(st *v1alpha1.ProviderStatus, n int) {
+	apimeta.SetStatusCondition(&st.Conditions, metav1.Condition{
+		Type: v1alpha1.ConditionCredentialsInvalid, Status: metav1.ConditionTrue, Reason: fmt.Sprintf("R%d", n),
+	})
+}
+
+func mutantNewReason(st *v1alpha1.ProviderStatus) {
+	apimeta.SetStatusCondition(&st.Conditions, metav1.Condition{
+		Type: v1alpha1.ConditionCredentialsInvalid, Status: metav1.ConditionTrue, Reason: mutantManagedReason,
+	})
+}
+`
+
 // mutantProviderctl is a file added to internal/providerctl: a new reason of the
 // Provider controller, and an event the controller's wrapper gets that no
 // constructor built.
@@ -400,6 +428,9 @@ func mutantOverlay(t *testing.T) map[string][]byte {
 		// B5: a listed wrapper that passes a reason of its own.
 		filepath.Join(root, "internal/lifecycle/events.go"): replaceOnce(t, "internal/lifecycle/events.go",
 			"rel, et, code, typ,", `rel, et, "WrongReason", typ,`),
+		// The managed controller writes a watched condition with a reason built by
+		// Sprintf, and one with a constant HBEP-8 does not list.
+		filepath.Join(root, "internal/managed/zz_mutant_overlay.go"): []byte(mutantManaged),
 		// B6: the Provider controller raises a reason of its own, and hands its
 		// recorder an event no constructor built.
 		filepath.Join(root, "internal/providerctl/zz_mutant_overlay.go"): []byte(mutantProviderctl),
@@ -432,6 +463,13 @@ func TestMutantsAreCaught(t *testing.T) {
 		keyF(reasondrift.WrapperDoesNotForward, "", lc, "KubeRecorder.Event"),
 		// B7: a call through a recorder the scan does not know.
 		keyF(reasondrift.UnknownRecorder, "", lc, "mutantRelay"),
+		// The managed controller: a built reason is unresolved, and a constant the
+		// bullet does not list is one more it can raise.
+		keyF(reasondrift.ManagedUnresolved, "", "internal/managed", "mutantBuiltReason"),
+		key(reasondrift.ManagedCodeOnly, "ready", "MutantManagedReason", "", ""),
+		// An event the managed controller builds and may raise, which the bullet
+		// does not list either (B6's constructed-and-discarded event).
+		key(reasondrift.ManagedCodeOnly, "degraded", "ConstructedMutantReason", "", ""),
 		// B6: a new reason of the Provider controller is not listed in HBEP-8 nor
 		// excepted; an event no constructor built is a problem; an event that is
 		// built and not raised is unproven, and satisfies nothing.
@@ -540,5 +578,75 @@ func TestARankingThatDiffersFails(t *testing.T) {
 	removed := mutateRanking(t, md7, "`SubmitLimitReached`, ", "")
 	if got, want := leftover(t, md8, removed, realScan(t)), []string{key(reasondrift.RankingCodeOnly, "", "SubmitLimitReached", "", "")}; !slices.Equal(got, want) {
 		t.Errorf("with a name removed: %v, want %v", got, want)
+	}
+}
+
+// mutateManaged returns HBEP-8's text with old replaced by new on the line of the
+// managed controller's bullet only: the same names appear elsewhere.
+func mutateManaged(t *testing.T, md8 []byte, old, new string) []byte {
+	t.Helper()
+	lines := strings.Split(string(md8), "\n")
+	hit := 0
+	for i, l := range lines {
+		if strings.HasPrefix(strings.TrimSpace(l), "- The managed catalog controller's events take these types too.") {
+			hit++
+			if !strings.Contains(l, old) {
+				t.Fatalf("the managed bullet does not contain %q", old)
+			}
+			lines[i] = strings.Replace(l, old, new, 1)
+		}
+	}
+	if hit != 1 {
+		t.Fatalf("%d managed bullets, want 1", hit)
+	}
+	return []byte(strings.Join(lines, "\n"))
+}
+
+// TestTheManagedBulletIsComparedWithWhatTheCodeCanWrite: the reasons the managed
+// controller can write into the conditions it watches (an over-approximation of
+// what it emits), with their types, against HBEP-8's bullet, both ways. Each
+// change to the bullet adds exactly the mismatches it causes to those of the
+// scan of the mutated tree.
+func TestTheManagedBulletIsComparedWithWhatTheCodeCanWrite(t *testing.T) {
+	md8, md7 := realDocs(t)
+	code := overlayScanned.get(t, mutantOverlay(t))
+	if overlayScanned.err != nil {
+		t.Fatal(overlayScanned.err)
+	}
+	base := leftover(t, md8, md7, code)
+	// The real tree: what the code writes is what the bullet lists.
+	if got := leftover(t, md8, md7, realScan(t)); len(got) != 0 {
+		t.Errorf("the unchanged tree leaves %v", got)
+	}
+	for _, c := range []struct {
+		name  string
+		edits [][2]string // old, new, on the managed bullet
+		added []string
+	}{
+		{"a written reason missing from the bullet",
+			[][2]string{{", `KeyAccepted`", ""}},
+			[]string{key(reasondrift.ManagedCodeOnly, "ready", "KeyAccepted", "", "")}},
+		{"a listed reason the code cannot write",
+			[][2]string{{"`NotExpiring` and `CatalogRead`", "`NotExpiring`, `CatalogRead` and `PhantomReason`"}},
+			[]string{key(reasondrift.ManagedDocOnly, "ready", "PhantomReason", "", "")}},
+		{"a reason under the wrong type",
+			[][2]string{{"`Expired` (`CredentialsExpiring`) and", "(`CredentialsExpiring`) and"}, {"`NotExpiring` and `CatalogRead`", "`NotExpiring`, `Expired` and `CatalogRead`"}},
+			[]string{key(reasondrift.ManagedCodeOnly, "failing", "Expired", "", ""), key(reasondrift.ManagedDocOnly, "ready", "Expired", "", "")}},
+	} {
+		mutated := md8
+		for _, e := range c.edits {
+			mutated = mutateManaged(t, mutated, e[0], e[1])
+		}
+		got := leftover(t, mutated, md7, code)
+		var added []string
+		for _, k := range got {
+			if !slices.Contains(base, k) {
+				added = append(added, k)
+			}
+		}
+		slices.Sort(c.added)
+		if !slices.Equal(added, c.added) {
+			t.Errorf("%s: added %v, want %v", c.name, added, c.added)
+		}
 	}
 }

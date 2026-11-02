@@ -46,7 +46,14 @@ type Docs struct {
 	Table []TableEntry
 	// Ranking is HBEP-7's ranking of the Degraded reasons, first to last.
 	Ranking []string
+	// Managed lists the reasons of the managed catalog controller's events, with
+	// their types, as HBEP-8's bullet under the table states them.
+	Managed []ManagedEntry
 }
+
+// ManagedEntry is a reason and the type of the event the managed catalog
+// controller raises with it.
+type ManagedEntry struct{ Action, Reason string }
 
 // Paths of the two HBEPs, relative to the repository root.
 const (
@@ -73,11 +80,15 @@ func ParseDocs(hbep8, hbep7 []byte) (*Docs, error) {
 	if err != nil {
 		return nil, fmt.Errorf("HBEP-8: %w", err)
 	}
+	managed, err := ParseManaged(hbep8)
+	if err != nil {
+		return nil, fmt.Errorf("HBEP-8: %w", err)
+	}
 	ranking, err := ParseRanking(hbep7)
 	if err != nil {
 		return nil, fmt.Errorf("HBEP-7: %w", err)
 	}
-	return &Docs{Table: table, Ranking: ranking}, nil
+	return &Docs{Table: table, Ranking: ranking, Managed: managed}, nil
 }
 
 // TableReasons returns the distinct reasons of the table, sorted.
@@ -254,6 +265,85 @@ func ParseObserverKinds(md []byte) ([]string, error) {
 		out = append(out, k)
 	}
 	sort.Strings(out)
+	return out, nil
+}
+
+// managedMarker starts the bullet under HBEP-8's table that lists the managed
+// catalog controller's reasons, and managedLead ends the clause that announces
+// them. The bullet is a sentence, not a table: after the lead come groups
+// separated by semicolons, each "`type` for" and a list of backticked reasons,
+// with the condition each belongs to in parentheses, and the last group may end
+// "when a failing or degraded condition clears".
+const (
+	managedMarker = "- The managed catalog controller's events take these types too."
+	managedLead   = "reasons are the condition reasons it writes: "
+)
+
+var (
+	managedGroup = regexp.MustCompile("^(?:and )?`(failing|degraded|ready)` for (.+?)(?: when a failing or degraded condition clears)?$")
+	managedList  = regexp.MustCompile("^`[A-Z][A-Za-z0-9]*`(?:(?:, and |, | and )`[A-Z][A-Za-z0-9]*`)*$")
+	managedName  = regexp.MustCompile("`([A-Z][A-Za-z0-9]*)`")
+	parenAndGap  = regexp.MustCompile(`\s*\([^()]*\)`)
+)
+
+// ParseManaged reads the bullet of HBEP-8 that lists the managed catalog
+// controller's reasons by type. It returns an error for a bullet it cannot read
+// (a missing or repeated bullet, a group that is not "`type` for" and a list, a
+// list with anything but reason names between its separators, a type twice, a
+// reason twice, an empty list), never an empty set.
+func ParseManaged(md []byte) ([]ManagedEntry, error) {
+	var bullet string
+	n := 0
+	for _, l := range strings.Split(string(md), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(l), managedMarker) {
+			bullet = strings.TrimSpace(l)
+			n++
+		}
+	}
+	if n != 1 {
+		return nil, fmt.Errorf("want one bullet that starts %q, found %d", managedMarker, n)
+	}
+	at := strings.Index(bullet, managedLead)
+	if at < 0 {
+		return nil, fmt.Errorf("the managed controller's bullet has no %q", managedLead)
+	}
+	rest := strings.TrimSpace(bullet[at+len(managedLead):])
+	if !strings.HasSuffix(rest, ".") {
+		return nil, errors.New("the managed controller's bullet does not end in a period")
+	}
+	rest = parenAndGap.ReplaceAllString(strings.TrimSuffix(rest, "."), "")
+	var out []ManagedEntry
+	seenAction, seenReason := map[string]bool{}, map[string]bool{}
+	for _, group := range strings.Split(rest, "; ") {
+		m := managedGroup.FindStringSubmatch(strings.TrimSpace(group))
+		if m == nil {
+			return nil, fmt.Errorf("the managed controller's bullet has the group %q, which is not \"`type` for\" and a list", clip(group))
+		}
+		action, list := m[1], m[2]
+		if seenAction[action] {
+			return nil, fmt.Errorf("the managed controller's bullet lists %s twice", action)
+		}
+		seenAction[action] = true
+		if !managedList.MatchString(list) {
+			return nil, fmt.Errorf("the managed controller's %s list %q is not reason names in backticks joined by commas and \"and\"", action, clip(list))
+		}
+		for _, nm := range managedName.FindAllStringSubmatch(list, -1) {
+			if seenReason[nm[1]] {
+				return nil, fmt.Errorf("the managed controller's bullet lists %s twice", nm[1])
+			}
+			seenReason[nm[1]] = true
+			out = append(out, ManagedEntry{Action: action, Reason: nm[1]})
+		}
+	}
+	if len(out) == 0 {
+		return nil, errors.New("the managed controller's bullet lists no reason")
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Action != out[j].Action {
+			return out[i].Action < out[j].Action
+		}
+		return out[i].Reason < out[j].Reason
+	})
 	return out, nil
 }
 

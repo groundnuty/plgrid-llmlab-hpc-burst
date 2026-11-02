@@ -250,3 +250,93 @@ func TestParseRankingIsStrict(t *testing.T) {
 		})
 	}
 }
+
+const goodManaged = "intro\n" +
+	"- The managed catalog controller's events take these types too. Their reasons are the condition reasons it writes: " +
+	"`failing` for `A` and `B` (`CondOne`), `C` (`CondTwo`) and `D` (`Ready`); `degraded` for `E`, `F` and `G`; " +
+	"and `ready` for `H`, `I`, `J` and `K` when a failing or degraded condition clears.\n" +
+	"more\n"
+
+// TestParsesTheManagedBullet: the expectations are written out from the bullet
+// of HBEP-8 under its reasons table, never taken from the parser.
+func TestParsesTheManagedBullet(t *testing.T) {
+	got, err := ParseManaged([]byte(goodManaged))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"A": "failing", "B": "failing", "C": "failing", "D": "failing", "E": "degraded", "F": "degraded", "G": "degraded", "H": "ready", "I": "ready", "J": "ready", "K": "ready"}
+	if len(got) != len(want) {
+		t.Fatalf("%d entries, want %d: %v", len(got), len(want), got)
+	}
+	for _, e := range got {
+		if want[e.Reason] != e.Action {
+			t.Errorf("%s is %s, want %s", e.Reason, e.Action, want[e.Reason])
+		}
+	}
+	// The real HBEP-8.
+	md8, err := os.ReadFile(filepath.Join(repoRoot(t), HBEP8Path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	real, err := ParseManaged(md8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantReal := map[string]string{
+		"FileRefused": "failing", "NoCredentialsFile": "failing", "KeyRejected": "failing", "Expired": "failing", "ReadsFailing": "failing",
+		"ExpiresWithinADay": "degraded", "CatalogEntrySkipped": "degraded", "CatalogTruncated": "degraded",
+		"FileRead": "ready", "KeyAccepted": "ready", "NotExpiring": "ready", "CatalogRead": "ready",
+	}
+	if len(real) != len(wantReal) {
+		t.Errorf("HBEP-8 lists %d managed reasons: %v, want %d", len(real), real, len(wantReal))
+	}
+	for _, e := range real {
+		if wantReal[e.Reason] != e.Action {
+			t.Errorf("HBEP-8: %s is %s, want %s", e.Reason, e.Action, wantReal[e.Reason])
+		}
+	}
+}
+
+// TestParseManagedIsStrict: a bullet it cannot read is an error, never an empty
+// set.
+func TestParseManagedIsStrict(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(string) string
+		want   string
+	}{
+		{"no bullet", func(s string) string {
+			return strings.Replace(s, "The managed catalog controller's events", "The managed events", 1)
+		}, "found 0"},
+		{"two bullets", func(s string) string { return s + s }, "found 2"},
+		{"no lead", func(s string) string {
+			return strings.Replace(s, "reasons are the condition reasons it writes: ", "reasons: ", 1)
+		}, "has no"},
+		{"no period", func(s string) string { return strings.Replace(s, "clears.", "clears", 1) }, "does not end in a period"},
+		{"a group that is not a type", func(s string) string { return strings.Replace(s, "`degraded` for", "`degraded`: ", 1) }, "not \"`type` for\""},
+		{"an unknown type", func(s string) string { return strings.Replace(s, "`degraded` for", "`broken` for", 1) }, "not \"`type` for\""},
+		{"a type twice", func(s string) string { return strings.Replace(s, "`degraded` for", "`failing` for", 1) }, "failing twice"},
+		{"a name without backticks", func(s string) string { return strings.Replace(s, "`F`", "F", 1) }, "not reason names"},
+		{"a name in lower case", func(s string) string { return strings.Replace(s, "`F`", "`f`", 1) }, "not reason names"},
+		{"a reason twice", func(s string) string { return strings.Replace(s, "`F`", "`E`", 1) }, "E twice"},
+		{"a separator that is none", func(s string) string { return strings.Replace(s, "`E`, `F`", "`E`; `F`", 1) }, "not \"`type` for\""},
+		{"an empty list", func(s string) string {
+			return strings.Replace(s, "`degraded` for `E`, `F` and `G`", "`degraded` for ", 1)
+		}, "not"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			mutated := c.mutate(goodManaged)
+			if mutated == goodManaged {
+				t.Fatal("the mutation changed nothing")
+			}
+			got, err := ParseManaged([]byte(mutated))
+			if err == nil {
+				t.Fatalf("parsed %d entries, want an error containing %q", len(got), c.want)
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("error %q lacks %q", err, c.want)
+			}
+		})
+	}
+}

@@ -26,6 +26,9 @@ type scanner struct {
 	// list does not cover.
 	callers map[*ssa.Function][]*ssa.CallCommon
 	escaped map[*ssa.Function]bool
+	// callees lists, for each function, the functions it calls statically or
+	// builds a closure of.
+	callees map[*ssa.Function][]*ssa.Function
 }
 
 // functions lists the functions that can hold a call or a use of a function:
@@ -102,6 +105,7 @@ func (s *scanner) index() {
 					cc = ci.Common()
 					if callee := cc.StaticCallee(); callee != nil {
 						s.callers[callee] = append(s.callers[callee], cc)
+						s.callees[fn] = append(s.callees[fn], callee)
 					}
 				}
 				for _, op := range in.Operands(nil) {
@@ -109,14 +113,43 @@ func (s *scanner) index() {
 					if !ok {
 						continue
 					}
+					s.callees[fn] = append(s.callees[fn], f)
 					if cc != nil && op == &cc.Value && !cc.IsInvoke() {
 						continue // the callee of a static call
+					}
+					if mc, isClosure := in.(*ssa.MakeClosure); isClosure && calledOnly(mc) {
+						continue // a closure that is only ever called, as in cond := func(...) {...}; cond(...)
 					}
 					s.escaped[f] = true
 				}
 			}
 		}
 	}
+}
+
+// calledOnly reports whether the only uses of a closure are calls of it, so its
+// callers are all static and a list of them is complete.
+func calledOnly(mc *ssa.MakeClosure) bool {
+	refs := mc.Referrers()
+	if refs == nil || len(*refs) == 0 {
+		return false
+	}
+	for _, r := range *refs {
+		ci, ok := r.(ssa.CallInstruction)
+		if !ok {
+			return false
+		}
+		cc := ci.Common()
+		if cc.IsInvoke() || cc.Value != ssa.Value(mc) {
+			return false
+		}
+		for _, a := range cc.Args {
+			if a == ssa.Value(mc) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // collect finds the emit sites among the calls of the module's functions, and
