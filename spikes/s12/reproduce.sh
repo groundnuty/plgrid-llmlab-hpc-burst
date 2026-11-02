@@ -63,13 +63,17 @@ echo "$(grep -c -P '^\tdep\t' "$R/go-version-m.txt") dependencies in the referen
 
 step "2. Download bom $BOM_VERSION and syft $SYFT_VERSION, verify sha256"
 fetch "https://github.com/kubernetes-sigs/bom/releases/download/$BOM_VERSION/bom-amd64-linux" "$W/dl-bom/bom" "$BOM_SHA256"
-# Also compare with the checksum file the release publishes (the pin above is the same value).
-curl -fsSL "https://github.com/kubernetes-sigs/bom/releases/download/$BOM_VERSION/checksums.txt" |
-  grep -q "^$BOM_SHA256  bom-amd64-linux$" || { echo "pin differs from the release's checksums.txt" >&2; exit 1; }
+# Also compare with the checksum file the release publishes (the pin above is the same value). The file is read
+# whole before grep looks at it: piped into grep -q under pipefail, curl could fail writing the rest after the
+# match and read as "pin differs" (plgrid-llmlab-hpc-burst #213). A failed download stays a failure of its own.
+sums=$(curl -fsSL "https://github.com/kubernetes-sigs/bom/releases/download/$BOM_VERSION/checksums.txt") ||
+  { echo "the release's checksums.txt could not be downloaded" >&2; exit 1; }
+grep -q "^$BOM_SHA256  bom-amd64-linux$" <<<"$sums" || { echo "pin differs from the release's checksums.txt" >&2; exit 1; }
 fetch "https://github.com/anchore/syft/releases/download/v$SYFT_VERSION/syft_${SYFT_VERSION}_linux_amd64.tar.gz" \
   "$W/dl-syft/syft.tar.gz" "$SYFT_SHA256"
-curl -fsSL "https://github.com/anchore/syft/releases/download/v$SYFT_VERSION/syft_${SYFT_VERSION}_checksums.txt" |
-  grep -q "^$SYFT_SHA256  syft_${SYFT_VERSION}_linux_amd64.tar.gz$" || { echo "pin differs from the release's checksums" >&2; exit 1; }
+sums=$(curl -fsSL "https://github.com/anchore/syft/releases/download/v$SYFT_VERSION/syft_${SYFT_VERSION}_checksums.txt") ||
+  { echo "the release's checksums could not be downloaded" >&2; exit 1; }
+grep -q "^$SYFT_SHA256  syft_${SYFT_VERSION}_linux_amd64.tar.gz$" <<<"$sums" || { echo "pin differs from the release's checksums" >&2; exit 1; }
 tar -xzf "$W/dl-syft/syft.tar.gz" -C "$W/dl-syft" syft && rm "$W/dl-syft/syft.tar.gz"
 chmod +x "$W/dl-bom/bom"
 "$W/dl-bom/bom" version 2>&1 | grep -E 'GitVersion' ; "$W/dl-syft/syft" version | grep -E '^Version'
