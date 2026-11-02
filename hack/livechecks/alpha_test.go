@@ -560,6 +560,9 @@ func TestThePendingBoundDefaultsAndOverrides(t *testing.T) {
 		{"no-overlap, a shorter wait asked for", "alpha-helios-nooverlap", "TestAlphaHeliosNoOverlap", "600", "HPCBURST_ALPHA_PENDING_MAX_SECONDS=600", "211m"},
 		{"the hour on Helios, a longer wait asked for", "tunnel-hour-helios", "TestTunnelHour", "5400", "HPCBURST_ALPHA_PENDING_MAX_SECONDS=5400", "243m"},
 		{"the hour on Athena, a shorter wait asked for", "tunnel-hour-athena", "TestTunnelHour", "600", "HPCBURST_ALPHA_PENDING_MAX_SECONDS=600", "163m"},
+		// A part of a minute rounds the timeout up, so the wait never eats the run's time: 200 + 1 + 1 = 202, 200 + 2 + 1 = 203.
+		{"no-overlap, 59 seconds asked for", "alpha-helios-nooverlap", "TestAlphaHeliosNoOverlap", "59", "HPCBURST_ALPHA_PENDING_MAX_SECONDS=59", "202m"},
+		{"no-overlap, 90 seconds asked for", "alpha-helios-nooverlap", "TestAlphaHeliosNoOverlap", "90", "HPCBURST_ALPHA_PENDING_MAX_SECONDS=90", "203m"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			w := newAlphaWorld(t)
@@ -692,15 +695,20 @@ func TestTheRowsThatHoldTheOwnersSlotForHoursNeedTheOwnersGo(t *testing.T) {
 			w.noSubmit()
 		})
 	}
-	// The pend the note states is the one the run will apply: with a wait asked for, the note says that wait.
-	t.Run("the note follows the wait asked for", func(t *testing.T) {
-		w := newAlphaWorld(t)
-		res := w.run([]string{"LIVE_PENDING_MAX_SECONDS=600"}, "--run", "alpha-helios-nooverlap")
-		if res.code != 4 {
-			t.Fatalf("exit %d, want 4:\n%s", res.code, res.out)
-		}
-		w.contains(res, "alpha-helios-nooverlap: may pend up to 10 min in the queue (then it is cancelled by its tag and the run is NOT RUN), then holds QOS now's GPU for about 2 h 40 min")
-	})
+	// The pend the note states is the one the run will apply: with a wait asked for, the note says that wait, exactly
+	// (PR 230, N2): a part of a minute is not rounded down to none.
+	for _, c := range []struct{ setting, wantWait string }{
+		{"600", "10 min"}, {"3600", "60 min"}, {"59", "59 s"}, {"90", "1 min 30 s"}, {"119", "1 min 59 s"},
+	} {
+		t.Run("the note follows the wait asked for/"+c.setting, func(t *testing.T) {
+			w := newAlphaWorld(t)
+			res := w.run([]string{"LIVE_PENDING_MAX_SECONDS=" + c.setting}, "--run", "alpha-helios-nooverlap")
+			if res.code != 4 {
+				t.Fatalf("exit %d, want 4:\n%s", res.code, res.out)
+			}
+			w.contains(res, "alpha-helios-nooverlap: may pend up to "+c.wantWait+" in the queue (then it is cancelled by its tag and the run is NOT RUN), then holds QOS now's GPU for about 2 h 40 min")
+		})
+	}
 	// The other rows hold no slot for hours: no go, and no note.
 	for _, row := range []string{"alpha-athena-handover", "tunnel-hour-athena", "gpu-accounting-helios", "gpu-accounting-athena"} {
 		t.Run(row+"/needs none", func(t *testing.T) {

@@ -4,7 +4,8 @@
 #
 #   hack/mutate-alpha.sh              # every mutant; exit 1 if one survives or does not apply
 #   hack/mutate-alpha.sh --no-script  # leave out the mutants of hack/live-checks.sh (the slow ones)
-#   hack/mutate-alpha.sh --only <regexp>  # only the mutants whose line matches (egrep), to try a new one
+#   hack/mutate-alpha.sh --only <regexp>  # only the mutants whose line matches (egrep), to try a new one; exit 2, and
+#                                         # nothing run, for an expression that is not valid or matches no mutant
 #
 # Four kinds, by the file they change:
 #   internal/alpha (a bare file name)           go test ./internal/alpha
@@ -22,6 +23,10 @@ cd "$(dirname "$0")/.."
 pkg=internal/alpha
 script_too=1; [ "${1:-}" != --no-script ] || script_too=0
 only=""; [ "${1:-}" != --only ] || only=${2:?--only needs a pattern}
+if [ -n "$only" ]; then
+  # grep exits 2 for an expression it cannot read: that must not pass for "matches nothing".
+  printf '' | grep -E -e "$only" >/dev/null 2>&1; [ $? -le 1 ] || { echo "mutate-alpha: --only: not a valid regular expression: $only" >&2; exit 2; }
+fi
 tmp=$(mktemp -d)
 declare -A saved=()
 restore() { for f in "${!saved[@]}"; do cp "${saved[$f]}" "$f"; done; rm -rf "$tmp"; }
@@ -184,5 +189,6 @@ PY
   fi
   cp "${saved[$path]}" "$path"
 done
+[ -z "$only" ] || [ "$total" -gt 0 ] || { echo "mutate-alpha: --only $only selected no mutant, so nothing was checked" >&2; exit 2; }
 echo "mutants: $total, killed $killed, survived $survived, broken $broken"
 [ "$survived" -eq 0 ] && [ "$broken" -eq 0 ]
