@@ -80,32 +80,61 @@ type rig struct {
 	// proxyEnds is when frps was first seen to list each ended Instance's
 	// proxy offline (proxyEnded), for the TunnelOrphaned window.
 	proxyEnds map[types.UID]time.Time
+	// ports are the stack's fixed listeners (stackPorts).
+	ports stackPorts
+	// tokenDelay is the engine double's token-delay mode of the served
+	// deployment: each generated token takes this long.
+	tokenDelay time.Duration
+	// dir is the test's short scratch directory.
+	dir string
+}
+
+// rigSetup is what one rehearsal stack is started with. #146's tests take
+// the zero value but for the mode; another issue's test names its own ports
+// and, when it needs them, the fake cluster's QOSes and its own objects.
+type rigSetup struct {
+	mode  string // "direct" or "ssh"
+	ports stackPorts
+	shape clusterShape
+	// objects returns the PlatformProfiles and Providers to create once the
+	// stack is up, given the rig, the host's CPU architecture and the batch
+	// Provider's credentials file; nil creates #146's profile and Provider.
+	objects func(r *rig, arch, creds string) []client.Object
 }
 
 func startRig(t *testing.T, mode string) *rig {
 	t.Helper()
+	return startRigWith(t, rigSetup{mode: mode, ports: ports146})
+}
+
+func startRigWith(t *testing.T, s rigSetup) *rig {
+	t.Helper()
 	b := requireRehearsal(t)
 	dir := shortDir(t)
-	r := &rig{t: t, b: b, hub: startHub(t)}
+	r := &rig{t: t, b: b, hub: startHub(t), ports: s.ports, tokenDelay: tokenDelay, dir: dir}
 	// The job's environment has no HF_ENDPOINT: the agent learns the Hub
 	// from agent.json, which the controller writes from its own (ruling of 1
 	// Nov 2026 on #156; step (a) checks the downloads reached the double).
-	r.cl = startCluster(t, dir, nil)
+	r.cl = startCluster(t, dir, nil, s.shape)
 	creds := filepath.Join(dir, "provider-ssh")
 	if err := r.cl.login.WriteCredentials(creds); err != nil {
 		t.Fatal(err)
 	}
-	dh := dialHome{mode: "direct", addr: dialHomeAddr}
-	if mode == "ssh" {
+	dh := dialHome{mode: "direct", addr: s.ports.dialHome}
+	if s.mode == "ssh" {
 		dh = r.startGateway(dir)
 	}
 	// The controller lists the checkpoint from the Hub double through
 	// HF_ENDPOINT, which up passes on to it.
-	r.h = startHost(t, b, dir, dh, cleanEnv("HF_ENDPOINT="+r.hub.url))
+	r.h = startHost(t, b, dir, s.ports, dh, cleanEnv("HF_ENDPOINT="+r.hub.url))
 	arch := cpuArch(t)
 	r.h.placeAgentBuild(arch)
 	r.c = kubeClient(t, r.h.state)
-	create(t, r.c, batchProfile(arch, rehearsalTiming), batchProvider(creds))
+	objs := []client.Object{batchProfile(arch, rehearsalTiming), batchProvider(creds)}
+	if s.objects != nil {
+		objs = s.objects(r, arch, creds)
+	}
+	create(t, r.c, objs...)
 	// Before the deployment exists, so the watch sees every Instance and
 	// Allocation from its first version.
 	r.startWatch()
@@ -202,6 +231,8 @@ func (r *rig) describe() string {
 // the scale to 0 (g). The replacement is ready from the start (HBEP-7: with
 // no queue wait observed it is created at the primary's start), so the
 // requests carry a conversation key the ring maps to the primary.
+//
+//livecheck:none CI's rehearsal job runs it (hack/rehearsal.sh)
 func TestRehearsalDirect(t *testing.T) {
 	r := startRig(t, "direct")
 	r.engineEnv = []v1alpha1.EnvVar{{Name: "HB_ENGINE_DOUBLE", Value: "token-delay=" + tokenDelay.String()}}
@@ -233,7 +264,7 @@ func (r *rig) startGateway(dir string) dialHome {
 	if err := os.Mkdir(gwDir, 0o700); err != nil {
 		r.t.Fatal(err)
 	}
-	gw, err := rehearsal.StartGateway(rehearsal.GatewayConfig{Dir: gwDir, AgentPort: portBase + 3, DialHomePort: portBase + 7})
+	gw, err := rehearsal.StartGateway(rehearsal.GatewayConfig{Dir: gwDir, AgentPort: r.ports.base + 3, DialHomePort: r.ports.base + 7})
 	if err != nil {
 		r.t.Fatalf("the dial-home gateway: %v", err)
 	}
@@ -276,6 +307,8 @@ func (r *rig) jobSSHForwards(jobID int) []int {
 // TestRehearsalSSH is criterion 3's ssh dial-home mode, run once: the agent
 // reaches the agent endpoint and the dial-home listener through two ssh
 // forwards to the gateway, and nothing of them outlives its job.
+//
+//livecheck:none CI's rehearsal job runs it (hack/rehearsal.sh)
 func TestRehearsalSSH(t *testing.T) {
 	r := startRig(t, "ssh")
 	in := r.stepStart()
