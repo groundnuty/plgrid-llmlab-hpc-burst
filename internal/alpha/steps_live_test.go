@@ -398,9 +398,11 @@ func (r *liveRun) lastJob(pred, succ v1alpha1.Instance) error {
 
 // guardSuccessor runs lastJob, from a goroutine, as soon as the replacement of
 // pred has a lease end: in a handover the successor may start long before the
-// steps reach it. stop ends the guard and returns its error, or one saying the
-// successor never started.
-func (r *liveRun) guardSuccessor(pred string) (stop func() error) {
+// steps reach it, and in no-overlap mode only once the predecessor is gone, so
+// pred is the predecessor as the run saw it ready, with its lease end. stop
+// ends the guard and returns its error, or one saying the successor never
+// started.
+func (r *liveRun) guardSuccessor(pred v1alpha1.Instance) (stop func() error) {
 	quit, done := make(chan struct{}), make(chan error, 1)
 	go func() {
 		for {
@@ -409,15 +411,9 @@ func (r *liveRun) guardSuccessor(pred string) (stop func() error) {
 			err := r.c.List(ctx, &l, client.InNamespace(r.w.md.Namespace))
 			cancel()
 			if err == nil {
-				var p *v1alpha1.Instance
-				for i := range l.Items {
-					if l.Items[i].Name == pred {
-						p = &l.Items[i]
-					}
-				}
 				for _, x := range l.Items {
-					if p != nil && x.Annotations[v1alpha1.AnnotationPredecessor] == pred && x.Status.LeaseEnd != nil {
-						done <- r.lastJob(*p, x)
+					if x.Annotations[v1alpha1.AnnotationPredecessor] == pred.Name && x.Status.LeaseEnd != nil {
+						done <- r.lastJob(pred, x)
 						return
 					}
 				}

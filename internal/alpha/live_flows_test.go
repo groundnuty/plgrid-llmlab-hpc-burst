@@ -274,7 +274,7 @@ func (r *liveRun) untilBefore(t time.Time, lead time.Duration, what string) {
 func (r *liveRun) Handover(ctx context.Context, p Plan) (HandoverObs, error) {
 	r.start(p)
 	pre := r.firstReady(p)
-	guard := r.guardSuccessor(pre.Name)
+	guard := r.guardSuccessor(pre)
 	key := r.fc.KeyFor(&pre)
 	rate := r.rate(key)
 	times := r.workerRestart(ctx, p, pre)
@@ -328,7 +328,7 @@ func (r *liveRun) Handover(ctx context.Context, p Plan) (HandoverObs, error) {
 func (r *liveRun) NoOverlap(ctx context.Context, p Plan) (NoOverlapObs, error) {
 	r.start(p)
 	pre := r.firstReady(p)
-	guard := r.guardSuccessor(pre.Name)
+	guard := r.guardSuccessor(pre)
 	key := r.fc.KeyFor(&pre)
 	rate := r.rate(key)
 	times := r.workerRestart(ctx, p, pre)
