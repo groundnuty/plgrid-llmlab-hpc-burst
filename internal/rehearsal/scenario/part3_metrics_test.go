@@ -403,7 +403,7 @@ func (p3 *part3) gauges(d *depRun, when string) {
 		}
 		if none {
 			r.t.Logf("FINDING: gauges %s: the pending successor %s, whose agent has not registered, has its info series but no "+
-				"hpcburst_instance_metrics_unknown sample for any engine metric (internal/lifecycle/metrics.go:240, \"if !e.hasAgent { continue }\"); "+
+				"hpcburst_instance_metrics_unknown sample for any engine metric (internal/lifecycle/metrics.go:241, \"if !e.hasAgent { continue }\"); "+
 				"HBEP-8, Unknown samples, says an Instance with no report yet, new or after a restart, has every engine metric of worker-0 "+
 				"unknown with reason stale, while its ruling on which Instances have series names only the workers of the latest report", when, x.Name)
 		}
