@@ -209,7 +209,10 @@ func (t *slotTable) listBounded(ctx context.Context, r client.Reader, provider s
 // whose phase is not Ended or whose job is still completing
 // (status.atProvider.jobCompleting). A deleting Allocation counts until its
 // deletion completes, and the Provider's controller keeps the finalizer of one
-// whose job is completing.
+// whose job is completing. The Provider's controller writes jobCompleting from
+// the same value that gates the finalizer, so on a deleting Allocation it is
+// also true while another job with the tag completes (internal/providerctl,
+// completingBlocker): the slot and the finalizer never disagree.
 func listProviderAllocations(ctx context.Context, r client.Reader, provider string) (seen, listed map[string]bool, err error) {
 	var al v1alpha1.AllocationList
 	if err := r.List(ctx, &al); err != nil {
