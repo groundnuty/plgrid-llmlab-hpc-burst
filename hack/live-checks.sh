@@ -125,6 +125,9 @@ TABLE
 LOCAL_TIMEOUT_MIN=15
 POLL_SECONDS=${LIVE_POLL_SECONDS:-60}
 CLEAN_POLL_SECONDS=${LIVE_CLEAN_POLL_SECONDS:-3}
+CLEAN_QUIET_POLLS=${LIVE_CLEAN_QUIET_POLLS:-5}          # polls in a row with no owned job before the queue counts as clear
+CLEAN_MAX_POLLS=${LIVE_CLEAN_MAX_POLLS:-40}             # at most this many polls in all
+CLEAN_UNRESOLVED_POLLS=${LIVE_CLEAN_UNRESOLVED_POLLS:-20} # more quiet polls when the test left an unresolved submission
 
 declare -a NAMES=()
 declare -A KIND PKG TEST GATES INPUTS CONTEXTS STATUS
@@ -287,12 +290,17 @@ fmt_wait() {
   printf '%dd %dh %dm\n' $((s/86400)) $((s%86400/3600)) $((s%3600/60))
 }
 
-# estimate <name>: prints the queue estimate from sbatch --test-only. Nothing from the reply but two numbers.
+# estimate <name>: prints the queue estimate from sbatch --test-only. Nothing from the reply reaches the screen
+# but a count and a label; sbatch's own text goes to <name>-estimate.log in the private output directory. Returns
+# 0 for an estimate or for none (sbatch accepted the shape and gave no start time), 2 when the scheduler REJECTED the
+# shape (sbatch exited non-zero: a site minimum, an account or partition it does not accept), 1 when the cluster
+# could not be reached. A rejection is not an unavailable estimate: the run does not go on (run_cluster).
 estimate() {
   local n=$1 acct reply rc wait_s
   acct=${S[${ACCTKEY[$n]}]}
   reply=$({ preamble ACCOUNT "$acct" SHAPE_OPTS "$(shape_opts "$n")"; cat <<'EOS'
 out=$(sbatch --test-only -A "$ACCOUNT" $SHAPE_OPTS --wrap true 2>&1); echo "rc=$?"
+echo "sbatch-text-begin"; printf '%s\n' "$out"; echo "sbatch-text-end"
 ts=$(printf '%s\n' "$out" | sed -n 's/.* to start at \([0-9T:-]*\) .*/\1/p' | head -1)
 if [ -n "$ts" ]; then
   now=$(date +%s); at=$(date -d "$ts" +%s 2>/dev/null) && echo "wait_s=$((at-now))" || echo "wait_s=unknown"
@@ -303,10 +311,14 @@ EOS
   } | remote "${HOST[$n]}") || { say "$n: queue estimate: the cluster could not be reached"; return 1; }
   rc=$(printf '%s\n' "$reply" | sed -n 's/^rc=\([0-9][0-9]*\)$/\1/p' | head -1)
   wait_s=$(printf '%s\n' "$reply" | sed -n 's/^wait_s=\(-\{0,1\}[0-9][0-9]*\)$/\1/p' | head -1)
-  if [ "${rc:-1}" = 0 ] && [ -n "$wait_s" ]; then
+  printf '%s\n' "$reply" | sed -n '/^sbatch-text-begin$/,/^sbatch-text-end$/p' >"$OUT/$n-estimate.log"
+  if [ "${rc:-1}" != 0 ]; then
+    say "$n: queue estimate: the scheduler REJECTED the shape (sbatch --test-only exit ${rc:-unknown}; its text is in the private log in the output directory)"
+    return 2
+  elif [ -n "$wait_s" ]; then
     say "$n: queue estimate: a start in about $(fmt_wait "$wait_s")"
   else
-    say "$n: queue estimate: none (sbatch --test-only gave no start time)"
+    say "$n: queue estimate: none (sbatch --test-only accepted the shape and gave no start time)"
   fi
 }
 
@@ -335,45 +347,75 @@ own_tags() {
   grep -E '^hb-[A-Za-z0-9._-]{1,60}$' "$OWN_TAGS_FILE" 2>/dev/null | sort -u || true
 }
 
+# owned_present <queue listing> <tags>: the IDs in the listing (id|name|partition lines) that this run owns,
+# one per line: a job named by one of the tags, or the job ID the run was given.
+owned_present() {
+  local now=$1 tags=$2 id name
+  while IFS='|' read -r id name _; do
+    [ -n "$id" ] || continue
+    if { [ -n "$tags" ] && printf '%s\n' "$tags" | grep -q -x -F "$name"; } || { [ -n "$JOBID" ] && [ "$id" = "$JOBID" ]; }; then echo "$id"; fi
+  done <<<"$now"
+}
+
+# unresolved_tags: the tags the test said it could not resolve (an ambiguous submission: the job may still
+# register), one per line, from unresolved.txt in the run's record directory.
+unresolved_tags() {
+  [ -n "$REC_DIR" ] && [ -f "$REC_DIR/unresolved.txt" ] && [ ! -L "$REC_DIR/unresolved.txt" ] || return 0
+  grep -E '^hb-[A-Za-z0-9._-]{1,60}$' "$REC_DIR/unresolved.txt" 2>/dev/null | sort -u || true
+}
+
 # clean_cluster: cancels what this run owns, then checks. Ownership is this run's own: the job ID it was
 # given (real-engine), and the jobs named by a tag it wrote down before submitting. A job that merely
 # appeared in the same partition is never touched: the owner's controller or a manual run does not take
-# this script's lock. The known ID is cancelled even when squeue cannot be read; the failed verification is
-# reported apart, and the EXIT trap tries once more. Idempotent; sets CLEAN_LEFT.
+# this script's lock. The owned tags are matched again on EVERY poll, not only in the first snapshot: a
+# submission whose reply was lost can register at any time, and a held job does not run out its time limit,
+# so one that registers after the first look would sit in the queue for ever. The queue counts as clear only
+# after CLEAN_QUIET_POLLS polls in a row with no owned job (bounded by CLEAN_MAX_POLLS), and a run with
+# unresolved submissions waits CLEAN_UNRESOLVED_POLLS polls more. "Left behind" is the owned jobs in the
+# last listing, so it is never 0 while one is there. The known ID is cancelled even when squeue cannot be
+# read; the failed verification is reported apart, and the EXIT trap tries once more. Idempotent; sets
+# CLEAN_LEFT.
 CLEAN_LEFT=0
 CLEAN_TRIES=0
 clean_cluster() {
   [ -n "$ACTIVE_HOST" ] || return 0
-  local host=$ACTIVE_HOST now="" ids="" tags line id name cancelled=0 left=0 try readable=1
+  local host=$ACTIVE_HOST now="" tags present id new again cancelled=0 left=0 readable=1 quiet=0 polls=0 sent=" " unres need
   CLEAN_TRIES=$((CLEAN_TRIES+1))
   tags=$(own_tags)
-  [ -z "$JOBID" ] || ids=$JOBID
-  now=$(queue_jobs "$host") || readable=0
-  if [ "$readable" = 1 ] && [ -n "$tags" ]; then
-    while IFS='|' read -r id name _; do
-      [ -n "$id" ] || continue
-      printf '%s\n' "$tags" | grep -q -x -F "$name" || continue
-      case " $ids " in *" $id "*) ;; *) ids="$ids $id" ;; esac
-    done <<<"$now"
-  fi
-  # shellcheck disable=SC2086
-  [ -z "$ids" ] || cancelled=$(cancel_ids "$host" $ids)
-  if [ "$readable" = 1 ] && [ -n "$ids" ]; then
-    # A cancelled job can show as completing for a few seconds: look again before calling it left behind.
-    for try in 1 2 3 4 5 6 7 8 9 10; do
-      now=$(queue_jobs "$host") || { readable=0; break; }
-      left=0
-      for id in $ids; do printf '%s\n' "$now" | grep -q "^${id}|" && left=$((left+1)); done
-      [ "$left" -eq 0 ] && break
-      sleep "$CLEAN_POLL_SECONDS"
-    done
-  fi
+  unres=$(unresolved_tags)
+  need=$CLEAN_QUIET_POLLS
+  [ -z "$unres" ] || need=$((CLEAN_QUIET_POLLS+CLEAN_UNRESOLVED_POLLS))
+  while :; do
+    polls=$((polls+1))
+    now=$(queue_jobs "$host") || { readable=0; break; }
+    present=$(owned_present "$now" "$tags")
+    if [ -z "$present" ]; then
+      quiet=$((quiet+1)); left=0
+    else
+      quiet=0; new=""; again=""; left=0
+      for id in $present; do
+        left=$((left+1))
+        case "$sent" in *" $id "*) again="$again $id" ;; *) new="$new $id"; sent="$sent$id " ;; esac
+      done
+      # shellcheck disable=SC2086
+      [ -z "$new" ] || cancelled=$((cancelled + $(cancel_ids "$host" $new)))
+      # A job still listed after its cancel (completing, or a cancel that failed) is cancelled again, not counted again.
+      # shellcheck disable=SC2086
+      [ -z "$again" ] || cancel_ids "$host" $again >/dev/null
+    fi
+    [ "$quiet" -lt "$need" ] || break
+    [ "$polls" -lt "$CLEAN_MAX_POLLS" ] || break
+    sleep "$CLEAN_POLL_SECONDS"
+  done
   if [ "$readable" = 0 ]; then
+    # The known ID is cancelled even though the queue cannot be read.
+    [ -z "$JOBID" ] || [ "$polls" -gt 1 ] || cancelled=$(cancel_ids "$host" "$JOBID")
     say "cleanup: the queue could not be read, so the cleanup could not look for this run's jobs by tag or confirm a cancel (cancelled $cancelled known job(s)); check the queue by hand"
     CLEAN_LEFT=1
     [ "$CLEAN_TRIES" -lt 2 ] || ACTIVE_HOST=""
     return 1
   fi
+  [ -z "$unres" ] || say "cleanup: waited for $(printf '%s\n' "$unres" | wc -l) unresolved submission(s) the test could not settle"
   say "cleanup: left behind $left (cancelled $cancelled)"
   [ "$left" -eq 0 ] || CLEAN_LEFT=1
   ACTIVE_HOST=""
@@ -535,12 +577,14 @@ release_run_lock() { [ -z "$RUN_FD" ] || { eval "exec ${RUN_FD}>&-"; RUN_FD=""; 
 # run_cluster <name>: preflight, estimate, the --yes gate, the builds, the run lock and a second look at
 # the slot, the run, the cleanup, the report. The slot's use starts after the builds.
 run_cluster() {
-  local n=$1 host=${HOST[$1]} t0 t1 verdict=0
+  local n=$1 host=${HOST[$1]} t0 t1 verdict=0 est
   local qos="" sw=""; [ "${QOS[$n]}" = - ] || qos=", qos ${QOS[$n]}"
   [ "${SWAIT[$n]:--}" = - ] || sw=", each job to start within ${SWAIT[$n]} min"
   say "$n: shape: partition ${PARTITION[$n]}$qos, ${GPUS[$n]} GPU, ${CPUS[$n]} CPU, ${MEM[$n]}, time limit ${TLIMIT[$n]}, one job, no requeue$sw"
   if [ "${SLOT[$n]}" != - ]; then check_slot "$n" || return 3; fi
-  estimate "$n" || true
+  estimate "$n"; est=$?
+  # A rejected shape would be rejected by the real submit too: the run stops, with or without --yes.
+  [ "$est" -ne 2 ] || { say "$n: not run: the shape is rejected by the scheduler"; return 3; }
   if [ "$YES" != 1 ]; then say "$n: not run: pass --yes to run it"; return 4; fi
   prepare_cluster "$n" || return 1
   [ -z "$INTERRUPTED" ] || { say "$n: FAIL (interrupted before the run started)"; return 1; }

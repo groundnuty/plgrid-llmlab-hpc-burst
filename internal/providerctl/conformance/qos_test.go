@@ -253,8 +253,8 @@ func TestGH200RowIsCheckedUnderQOSNow(t *testing.T) {
 		t.Fatal("hack/live-checks.sh has no conformance-helios-gh200 row")
 	}
 	if row.host != "helios" || row.profile != "helios" || row.partition != "plgrid-gpu-gh200" || row.qos != "now" || row.slot != "now" ||
-		row.acctKey != "ACCOUNT_HELIOS_GH200" || row.gpus != "1" || row.startWait != "10" {
-		t.Errorf("row = %+v, want Helios, profile helios, plgrid-gpu-gh200, qos now, slot now, ACCOUNT_HELIOS_GH200, 1 GPU, a start wait of 10 min", *row)
+		row.acctKey != "ACCOUNT_HELIOS_GH200" || row.gpus != "1" || row.startWait != "10" || row.timeout != "45" {
+		t.Errorf("row = %+v, want Helios, profile helios, plgrid-gpu-gh200, qos now, slot now, ACCOUNT_HELIOS_GH200, 1 GPU, a start wait of 10 min and a timeout of 45 min (the test reaches the timeout command: TestTheRowsTimeoutReachesTheTestBinary)", *row)
 	}
 	s, v := row.validated(t)
 	good := row.request(t, s)
@@ -287,74 +287,145 @@ func TestGH200RowIsCheckedUnderQOSNow(t *testing.T) {
 // The plugin refuses a request whose qos is not the Provider's, so a direct
 // submit of the live run that is written out as a literal, without the qos,
 // would be refused only when a run reaches it, with a slot in hand. Every
-// provider.SubmitRequest literal of this package's tests is therefore made by
-// heldRequest, except the one test that runs against a fake platform with a
-// Provider that sets no qos.
+// provider.SubmitRequest this package's tests build is therefore made by
+// heldRequest, except in the one test that runs against a fake platform with a
+// Provider that sets no qos. The scan covers every declaration of the package's
+// test files, package-level ones included: a composite literal of the type, of
+// a type declared as it or as an alias of it, a var of the type, and new(...)
+// of it. Its limit: a request that arrives from elsewhere (a function's result,
+// a struct field) is not seen, and the code has none today.
 func TestNoDirectSubmitIsBuiltWithoutTheQOS(t *testing.T) {
 	allowed := map[string]bool{"heldRequest": true, "TestRoundTripJobNameAgainstTheFakePlatform": true}
 	files, err := filepath.Glob("*_test.go")
 	if err != nil || len(files) == 0 {
 		t.Fatalf("no test files: %v", err)
 	}
-	literals := 0
+	builds := 0
 	for _, file := range files {
 		f, err := parser.ParseFile(token.NewFileSet(), file, nil, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, decl := range f.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok {
-				continue
+		for _, b := range submitRequestBuilds(f) {
+			builds++
+			if !allowed[b.where] {
+				t.Errorf("%s: %s builds a provider.SubmitRequest as %s; use heldRequest, which carries the Provider's qos", file, b.where, b.what)
 			}
-			ast.Inspect(fn, func(n ast.Node) bool {
-				lit, ok := n.(*ast.CompositeLit)
-				if !ok {
-					return true
-				}
-				if sel, ok := lit.Type.(*ast.SelectorExpr); ok && sel.Sel.Name == "SubmitRequest" {
-					literals++
-					if !allowed[fn.Name.Name] {
-						t.Errorf("%s: %s builds a provider.SubmitRequest literal; use heldRequest, which carries the Provider's qos", file, fn.Name.Name)
-					}
-				}
-				return true
-			})
 		}
 	}
-	if literals < 2 {
-		t.Errorf("found %d provider.SubmitRequest literals, want at least heldRequest's and the fake test's: the scan is not looking at the code", literals)
+	if builds < 2 {
+		t.Errorf("found %d provider.SubmitRequest builds, want at least heldRequest's and the fake test's: the scan is not looking at the code", builds)
 	}
 }
 
-// The row's start wait (the science agent's ruling, 2 Nov 2026: each step's job
-// must start within 10 minutes of its acceptance) reaches the run as
-// HPCBURST_CONF_START_WAIT, and the row's timeout is not below what the test
-// can take with it: two start waits and the test's other deadlines on jobs that
-// already run (5 min to delete, 3 for accounting, 8 for the second job, 3 for
-// accounting, 3 for the name round trip).
-func TestTheGH200RowsStartWaitReachesTheRunAndItsTimeoutCoversTheTest(t *testing.T) {
-	const otherDeadlines = 5 + 3 + 8 + 3 + 3
-	for _, r := range readShapeRows(t) {
-		if r.profile == "-" || r.startWait == "-" {
-			continue
+// build is one place a provider.SubmitRequest is made: where (a function's name,
+// or "package level") and what (a literal, a var, new).
+type build struct{ where, what string }
+
+// submitRequestBuilds finds them in one file. Types declared as provider.SubmitRequest, by
+// alias or by definition, count as it. (The aliases of other files of the package are not
+// followed; the package declares none.)
+func submitRequestBuilds(f *ast.File) []build {
+	names := map[string]bool{}
+	for _, d := range f.Decls {
+		if g, ok := d.(*ast.GenDecl); ok {
+			for _, sp := range g.Specs {
+				if ts, ok := sp.(*ast.TypeSpec); ok {
+					if sel, ok := ts.Type.(*ast.SelectorExpr); ok && sel.Sel.Name == "SubmitRequest" {
+						names[ts.Name.Name] = true
+					}
+				}
+			}
 		}
-		t.Run(r.name, func(t *testing.T) {
-			n, err := strconv.Atoi(r.startWait)
-			if err != nil || n < 1 || n > 30 {
-				t.Fatalf("start wait %q is not whole minutes from 1 to 30", r.startWait)
+	}
+	isType := func(e ast.Expr) bool {
+		switch x := e.(type) {
+		case *ast.SelectorExpr:
+			return x.Sel.Name == "SubmitRequest"
+		case *ast.Ident:
+			return names[x.Name]
+		}
+		return false
+	}
+	var out []build
+	for _, d := range f.Decls {
+		where := "package level"
+		if fn, ok := d.(*ast.FuncDecl); ok {
+			where = fn.Name.Name
+		}
+		ast.Inspect(d, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.CompositeLit:
+				if x.Type != nil && isType(x.Type) {
+					out = append(out, build{where, "a literal"})
+				}
+			case *ast.ValueSpec:
+				if x.Type != nil && isType(x.Type) {
+					out = append(out, build{where, "a var"})
+				}
+			case *ast.CallExpr:
+				if id, ok := x.Fun.(*ast.Ident); ok && id.Name == "new" && len(x.Args) == 1 && isType(x.Args[0]) {
+					out = append(out, build{where, "new(...)"})
+				}
 			}
-			s, _ := r.validated(t)
-			if s.startWait != time.Duration(n)*time.Minute {
-				t.Errorf("the run's startWait = %v, the row says %d min", s.startWait, n)
-			}
-			timeout, err := strconv.Atoi(r.timeout)
+			return true
+		})
+	}
+	return out
+}
+
+// The scan, shown to see what it claims to: package-level literals, aliases, defined types, vars and new(...).
+func TestTheSubmitRequestScanSeesTheShapesItClaims(t *testing.T) {
+	for name, src := range map[string]string{
+		"a package-level literal": `package x
+var r = provider.SubmitRequest{}`,
+		"an alias": `package x
+type req = provider.SubmitRequest
+func f() { _ = req{} }`,
+		"a defined type": `package x
+type req provider.SubmitRequest
+func f() { _ = &req{} }`,
+		"a var": `package x
+func f() { var r provider.SubmitRequest; _ = r }`,
+		"new": `package x
+func f() { _ = new(provider.SubmitRequest) }`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, err := parser.ParseFile(token.NewFileSet(), "x.go", src, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if want := 2*n + otherDeadlines; timeout < want {
-				t.Errorf("timeout %d min is below the test's own deadlines with this start wait, %d min", timeout, want)
+			if len(submitRequestBuilds(f)) == 0 {
+				t.Errorf("the scan does not see %s", name)
 			}
 		})
+	}
+}
+
+// hack/live-checks.sh waits longer for a submission the run could not settle only if the run says so: both
+// places that see an ambiguous outcome (the reconcile that finds the Allocation in SubmissionUnknown, and step
+// 3's direct submit) write the tag down with unresolve.
+func TestBothAmbiguousSubmissionsAreWrittenDown(t *testing.T) {
+	f, err := parser.ParseFile(token.NewFileSet(), "conformance_test.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := map[string]int{}
+	for _, d := range f.Decls {
+		fn, ok := d.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		ast.Inspect(fn, func(n ast.Node) bool {
+			if c, ok := n.(*ast.CallExpr); ok {
+				if sel, ok := c.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "unresolve" {
+					in[fn.Name.Name]++
+				}
+			}
+			return true
+		})
+	}
+	if in["reconcile"] != 1 || in["TestConformance"] != 1 {
+		t.Errorf("unresolve is called %v; want once in reconcile and once in TestConformance", in)
 	}
 }

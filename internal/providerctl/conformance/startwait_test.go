@@ -170,3 +170,61 @@ func (w *world) cancelByTag(ctx context.Context) error {
 	}
 	return fmt.Errorf("a job of this run is still live after 10 cancels")
 }
+
+// duplicateWait is how long the run gives the controller to cancel a late
+// duplicate at the end, before it calls it a failure.
+const duplicateWait = 2 * time.Minute
+
+// settleDuplicates checks, for every tag this run recorded, that at most one
+// job of the tag ever started and that none is still live. A live job of a
+// recorded tag at the end of the run is a late duplicate: an ambiguous
+// submission was retried after the in-flight window and the original registered
+// late. Production keeps HBEP-4's rules (the tag resolves it; a held job found
+// beside the recorded one is cancelled, HeldDuplicateCancelled), and the run
+// asserts that this happened, within duplicateWait, reconciling the Allocations
+// in names meanwhile (those with a job recorded: reconciling one without would
+// submit). Whatever is live after that is a failure, and the cleanup cancels
+// it by its tag.
+func (w *world) settleDuplicates(names []string, within time.Duration) {
+	w.t.Helper()
+	if w.batch == nil {
+		return
+	}
+	now, sleep := w.clock()
+	deadline := now().Add(within)
+	for {
+		live := 0
+		for _, tag := range w.p.tags {
+			jobs, err := w.batch.FindByTag(context.Background(), tag, w.began)
+			if err != nil {
+				w.t.Errorf("reading the jobs of a tag at the end of the run: %v", err)
+				return
+			}
+			started := 0
+			for _, j := range jobs {
+				if j.StartTime != nil {
+					started++
+				}
+				if j.EndTime == nil {
+					live++
+					w.jobIDs[j.ID] = true
+				}
+			}
+			if started > 1 {
+				w.t.Errorf("%d jobs of one of this run's tags started: an ambiguous submission was retried and both ran", started)
+				return
+			}
+		}
+		if live == 0 {
+			return
+		}
+		if !now().Before(deadline) {
+			w.t.Errorf("%d job(s) of this run's tags are still live at the end, %s after the last step: a late duplicate was not cancelled; the cleanup cancels them by tag", live, within)
+			return
+		}
+		for _, name := range names {
+			w.reconcile(name)
+		}
+		sleep(3 * time.Second)
+	}
+}

@@ -98,6 +98,8 @@ type private struct {
 	f   *os.File
 	// tags are the job tags written down so far, for the run's cancel by tag.
 	tags []string
+	// unresolved are the tags written to unresolved.txt so far.
+	unresolved map[string]bool
 }
 
 func newPrivate(t testing.TB, dir string) *private {
@@ -135,6 +137,34 @@ func (p *private) tag(tag string) {
 
 // jobTagsFile is the file of this run's job tags in the private directory.
 const jobTagsFile = "job-tags.txt"
+
+// unresolvedFile lists, one tag per line (mode 600), the submissions whose
+// outcome the run could not settle: an ambiguous sbatch, whose job may still
+// register. hack/live-checks.sh waits longer for them in its cleanup, and still
+// cancels by tag whatever registers.
+const unresolvedFile = "unresolved.txt"
+
+// unresolve writes the tag of a submission the run could not settle to
+// unresolved.txt, once.
+func (p *private) unresolve(tag string) {
+	if p.unresolved[tag] {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(p.dir, unresolvedFile), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		p.t.Errorf("the unresolved tag could not be recorded: %v", err)
+		return
+	}
+	defer f.Close()
+	if _, err := fmt.Fprintln(f, tag); err != nil {
+		p.t.Errorf("the unresolved tag could not be recorded: %v", err)
+		return
+	}
+	if p.unresolved == nil {
+		p.unresolved = map[string]bool{}
+	}
+	p.unresolved[tag] = true
+}
 
 func (p *private) save(name string, b []byte) {
 	_ = os.WriteFile(filepath.Join(p.dir, name), b, 0o600)
@@ -199,6 +229,11 @@ type world struct {
 	// poll replaces one reconcile and read of an Allocation in untilRuns, for a
 	// test with no controller.
 	poll func(name string) *v1alpha1.Allocation
+	// nudge replaces one reconcile pass (the controller's), for a test with no
+	// controller.
+	nudge func(name string)
+	// began is when the run began, the lower bound of its accounting reads.
+	began time.Time
 }
 
 const testNS = "conformance"
@@ -228,7 +263,7 @@ func heldRequest(s settings, tag string, params v1alpha1.BatchParameters) provid
 
 func newWorld(t *testing.T) *world {
 	s := load(t)
-	w := &world{t: t, s: s, p: newPrivate(t, s.out), jobIDs: map[string]bool{}}
+	w := &world{t: t, s: s, p: newPrivate(t, s.out), jobIDs: map[string]bool{}, began: time.Now()}
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
@@ -358,6 +393,10 @@ func (w *world) get(name string) *v1alpha1.Allocation {
 }
 
 func (w *world) reconcile(name string) {
+	if w.nudge != nil {
+		w.nudge(name)
+		return
+	}
 	_, err := w.ctl.Reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Namespace: testNS, Name: name}})
 	if err != nil {
 		w.p.log("reconcile %s: %v", name, err)
@@ -367,6 +406,9 @@ func (w *world) reconcile(name string) {
 			w.jobIDs[id] = true
 		}
 		w.p.log("%s phase %s reason %q job %s", name, a.Status.AtProvider.Phase, a.Status.AtProvider.Reason, a.Annotations[v1alpha1.AnnotationJobID])
+		if a.Status.AtProvider.Phase == v1alpha1.AllocationSubmissionUnknown {
+			w.p.unresolve(v1alpha1.JobTag(a.Namespace, a.Name, a.UID))
+		}
 	}
 }
 
@@ -528,6 +570,9 @@ func TestConformance(t *testing.T) {
 	}
 	id2, outcome, err := w.batch.Submit(ctx, heldRequest(w.s, lostTag, *b.Spec.ForProvider.Batch))
 	if err != nil || outcome != provider.Accepted {
+		if outcome == provider.Unknown {
+			w.p.unresolve(lostTag) // the job may still register: the cleanup waits for it, and cancels it by its tag
+		}
 		t.Fatalf("direct held submit: %s %v", outcome, err)
 	}
 	accepted2 := w.at()
@@ -554,6 +599,10 @@ func TestConformance(t *testing.T) {
 	// squeue and from sacct (jobname_test.go). After the counts above, since it
 	// adds one sbatch and one scancel of its own.
 	w.jobNameRoundTrip()
+
+	// No late duplicate is left: the controller cancels a held job it finds
+	// beside the recorded one (HBEP-4), and the run asserts that it did.
+	w.settleDuplicates([]string{lostName}, duplicateWait)
 
 	if w.ssh.Starts() != 1 {
 		t.Errorf("%d ssh masters were started; want 1 for the whole run", w.ssh.Starts())

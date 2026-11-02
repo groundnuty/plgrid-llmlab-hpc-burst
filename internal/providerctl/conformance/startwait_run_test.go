@@ -113,6 +113,7 @@ func TestWaitStartStopsAtTheBound(t *testing.T) {
 type stopRecorder struct {
 	testing.TB
 	failed, skipped string
+	errors          []string
 }
 
 func (r *stopRecorder) Helper() {}
@@ -124,7 +125,8 @@ func (r *stopRecorder) Skipf(f string, a ...any) {
 	r.skipped = fmt.Sprintf(f, a...)
 	runtime.Goexit()
 }
-func (r *stopRecorder) Logf(string, ...any) {}
+func (r *stopRecorder) Logf(string, ...any)       {}
+func (r *stopRecorder) Errorf(f string, a ...any) { r.errors = append(r.errors, fmt.Sprintf(f, a...)) }
 
 // ends runs fn as the test body, in a goroutine, so that Fatalf and Skipf can
 // end it.
@@ -326,7 +328,7 @@ func TestTheStepsWaitForARunningJobThroughUntilRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	viaUntilRuns := 0
+	viaUntilRuns, settles := 0, 0
 	for _, decl := range f.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Name.Name != "TestConformance" {
@@ -338,6 +340,9 @@ func TestTheStepsWaitForARunningJobThroughUntilRuns(t *testing.T) {
 				return true
 			}
 			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if ok && sel.Sel.Name == "settleDuplicates" {
+				settles++
+			}
 			if !ok || (sel.Sel.Name != "until" && sel.Sel.Name != "untilRuns") {
 				return true
 			}
@@ -361,5 +366,8 @@ func TestTheStepsWaitForARunningJobThroughUntilRuns(t *testing.T) {
 	}
 	if viaUntilRuns != 2 {
 		t.Errorf("TestConformance calls untilRuns %d times, want 2 (step 1 and step 3)", viaUntilRuns)
+	}
+	if settles != 1 {
+		t.Errorf("TestConformance calls settleDuplicates %d times, want once, after step 5", settles)
 	}
 }
