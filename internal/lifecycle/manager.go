@@ -10,7 +10,6 @@ import (
 	"io"
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/client-go/util/workqueue"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -63,15 +62,10 @@ type Options struct {
 	FrontConfigured bool
 	// HealthAddr is where /healthz and /readyz listen; "0" or empty disables.
 	HealthAddr string
-	// MetricsAddr is where /metrics is served, on loopback at the launcher's
-	// port base + 12 (HBEP-8, Metrics); "0" or empty disables it.
+	// MetricsAddr is where controller-runtime's metrics server serves
+	// /metrics, on loopback at the launcher's port base + 12 (HBEP-8,
+	// Metrics); "0" or empty disables it.
 	MetricsAddr string
-	// Listen binds HealthAddr and MetricsAddr, in NewManager; nil means TCP
-	// (net.Listen). A caller that must not release a port between picking it and
-	// binding it (a test) gives a Listen that returns a listener it already
-	// holds; NewManager takes ownership of what Listen returns, and closes it
-	// if it fails or if the manager stops (endpoints.go, issue #219).
-	Listen func(addr string) (net.Listener, error)
 	// Registry is where the engine and accounting gauges' collectors
 	// register while the manager runs; nil means controller-runtime's
 	// registry, the one its metrics server serves.
@@ -230,36 +224,20 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	listen := o.Listen
-	if listen == nil {
-		listen = listenTCP
+	health := o.HealthAddr
+	if health == "" {
+		health = "0"
 	}
-	healthLn, err := listenOptional(listen, "health probes", o.HealthAddr)
-	if err != nil {
-		return nil, nil, fmt.Errorf("lifecycle: %w", err)
+	metricsAddr := o.MetricsAddr
+	if metricsAddr == "" {
+		metricsAddr = "0"
 	}
-	metricsLn, err := listenOptional(listen, "metrics", o.MetricsAddr)
-	if err != nil {
-		closeListener(healthLn)
-		return nil, nil, fmt.Errorf("lifecycle: %w", err)
-	}
-	// The listeners are the manager's once NewManager returns it: a build that
-	// fails after binding closes them, since no Start will.
-	served := false
-	defer func() {
-		if !served {
-			closeListener(healthLn)
-			closeListener(metricsLn)
-		}
-	}()
 	grace := ShutdownGrace
 	mapperStop := make(chan struct{})
-	// controller-runtime's own metrics and health servers stay off ("0"): both
-	// endpoints are served on the listeners above (endpoints.go).
 	mopts := manager.Options{
 		Scheme:                        scheme,
-		Metrics:                       metricsserver.Options{BindAddress: "0"},
-		HealthProbeBindAddress:        "0",
+		Metrics:                       metricsserver.Options{BindAddress: metricsAddr},
+		HealthProbeBindAddress:        health,
 		LeaderElection:                o.LeaderElection,
 		LeaderElectionID:              v1alpha1.LeaseLifecycle,
 		LeaderElectionNamespace:       v1alpha1.ControllerNamespace,
@@ -287,8 +265,9 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 	if err := mgr.Add(stopSignal{ch: mapperStop}); err != nil {
 		return nil, nil, err
 	}
-	liveH := &healthz.Handler{Checks: map[string]healthz.Checker{"ping": healthz.Ping}}
-	readyH := &healthz.Handler{Checks: map[string]healthz.Checker{}}
+	if err := mgr.AddHealthzCheck("ping", healthz.Ping); err != nil {
+		return nil, nil, err
+	}
 	c := mgr.GetClient()
 	watches := lifecycleWatches(c)
 	kinds := []client.Object{&v1alpha1.ModelDeployment{}}
@@ -299,17 +278,11 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 	if err := mgr.Add(ready); err != nil {
 		return nil, nil, err
 	}
-	readyH.Checks[ReadyzCaches] = func(*http.Request) error { return ready.checkCaches() }
-	readyH.Checks[ReadyzLeading] = func(*http.Request) error { return ready.checkLeading() }
-	if healthLn != nil {
-		if err := mgr.Add(probeServer(healthLn, liveH, readyH)); err != nil {
-			return nil, nil, err
-		}
+	if err := mgr.AddReadyzCheck(ReadyzCaches, func(*http.Request) error { return ready.checkCaches() }); err != nil {
+		return nil, nil, err
 	}
-	if metricsLn != nil {
-		if err := mgr.Add(metricsServer(metricsLn)); err != nil {
-			return nil, nil, err
-		}
+	if err := mgr.AddReadyzCheck(ReadyzLeading, func(*http.Request) error { return ready.checkLeading() }); err != nil {
+		return nil, nil, err
 	}
 	clock := o.Clock
 	if clock == nil {
@@ -372,7 +345,6 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 		// elector's release read failed (issue #160).
 		mgr = leaderlock.ReleaseAfterStart(mgr, renewals, ctrl.Log)
 	}
-	served = true
 	return mgr, backend, nil
 }
 

@@ -75,12 +75,13 @@ type deps struct {
 	// process gives each its own: the collectors' names are registered once
 	// per registry.
 	registry prometheus.Registerer
-	// listen binds an address the binary serves on: the agent endpoint, frps's
-	// plugin, the health probes and the metrics. nil means TCP (net.Listen). A
-	// test that picks its ports before the binary runs gives a listen that
-	// returns listeners it holds, so that no port is released between the pick
-	// and the bind (issue #219); one that listens for an address it does not
-	// hold fails the run.
+	// listen binds an address the binary's own servers listen on: the agent
+	// endpoint and frps's plugin. nil means TCP (net.Listen). A test that picks
+	// those ports before the binary runs gives a listen that returns listeners
+	// it holds, so that no port is released between the pick and the bind
+	// (issue #219). The health probes and the metrics are bound by
+	// controller-runtime v0.23.1 from an address, with no listener to hand over
+	// (HBEP-15 pins the version), so they do not go through listen.
 	listen func(addr string) (net.Listener, error)
 }
 

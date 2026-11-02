@@ -150,8 +150,8 @@ func checkCredentialsDir(dir string) error {
 var extraRunnables = []func(mgr manager.Manager, host agentapi.Host, backend agentapi.Backend, listen func(addr string) (net.Listener, error)) (manager.Runnable, error){addTunnel}
 
 func run(ctx context.Context, f flags, d deps) error {
-	// Every endpoint the binary serves is bound through ls (components.go), and
-	// whatever is still open when run returns is closed.
+	// The agent endpoint and frps's plugin are bound through ls (components.go),
+	// and whatever it bound is closed when run returns.
 	ls := newListeners(d)
 	defer ls.closeAll()
 	scheme, err := d.providerScheme()
@@ -174,7 +174,6 @@ func run(ctx context.Context, f flags, d deps) error {
 	}
 	opts := managerOptions(f, cfg, os.Getenv)
 	opts.Registry = d.registry
-	opts.Listen = ls.Listen
 	if opts.HubEndpoint != "" {
 		if err := agentapi.CheckHubEndpoint(opts.HubEndpoint); err != nil {
 			return fmt.Errorf("%s: %w", hubEndpointEnv, err)
