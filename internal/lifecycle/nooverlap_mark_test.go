@@ -187,7 +187,8 @@ func TestAStepSevenRetryWhileThePrimaryHoldsTheSlotIsMarked(t *testing.T) {
 
 // TestTheMarkConditionReadsTheSlotCountsOwnList: the mark's condition is that the primary's
 // Allocation "still holds its slot as the slot count reads it": its phase is not Ended, its
-// deletion has not completed, and it is on the same Provider (README line 464). The mark is
+// deletion has not completed, and it is on the same Provider (README line 464). An Ended Allocation
+// whose job is still completing holds its slot too (#198; holdsSlot). The mark is
 // judged from the reservation's own list (slotTable.reserveFor), so it reads the Allocation the
 // way the count does: by its phase now, and by its immutable spec.providerConfigRef, never by the
 // mutable provider label (PR 214 review, Astra B1 and B2). The rig's primaries leave by deletion
@@ -201,18 +202,25 @@ func TestTheMarkConditionReadsTheSlotCountsOwnList(t *testing.T) {
 		ref     string  // spec.providerConfigRef.name
 		label   *string // the provider label: nil, none
 		deleted bool    // its deletion completed: the Allocation is gone
-		want    bool
+		// completing is status.atProvider.jobCompleting: the job's state still carries COMPLETING.
+		completing bool
+		want       bool
 	}{
-		{"running", v1alpha1.AllocationRunning, prov, ptrTo(prov), false, true},
-		{"pending", v1alpha1.AllocationPending, prov, ptrTo(prov), false, true},
-		{"failed, not yet released: it holds its slot as the count reads it", v1alpha1.AllocationFailed, prov, ptrTo(prov), false, true},
-		{"ended and still listed", v1alpha1.AllocationEnded, prov, ptrTo(prov), false, false},
-		{"gone: its deletion completed", v1alpha1.AllocationRunning, prov, ptrTo(prov), true, false},
-		{"running on another Provider", v1alpha1.AllocationRunning, other, ptrTo(other), false, false},
+		{"running", v1alpha1.AllocationRunning, prov, ptrTo(prov), false, false, true},
+		{"pending", v1alpha1.AllocationPending, prov, ptrTo(prov), false, false, true},
+		{"failed, not yet released: it holds its slot as the count reads it", v1alpha1.AllocationFailed, prov, ptrTo(prov), false, false, true},
+		{"ended and still listed", v1alpha1.AllocationEnded, prov, ptrTo(prov), false, false, false},
+		// #198: an Ended Allocation whose job is still COMPLETING holds its slot until the flag clears,
+		// as the count reads it (holdsSlot), so the mark reads the same.
+		{"ended, completing: it holds its slot until the flag clears", v1alpha1.AllocationEnded, prov, ptrTo(prov), false, true, true},
+		{"failed, completing", v1alpha1.AllocationFailed, prov, ptrTo(prov), false, true, true},
+		{"ended, completing, on another Provider", v1alpha1.AllocationEnded, other, ptrTo(other), false, true, false},
+		{"gone: its deletion completed", v1alpha1.AllocationRunning, prov, ptrTo(prov), true, false, false},
+		{"running on another Provider", v1alpha1.AllocationRunning, other, ptrTo(other), false, false, false},
 		// B2: the reference decides, as it does for the count.
-		{"running, its provider label is missing", v1alpha1.AllocationRunning, prov, nil, false, true},
-		{"running, its provider label names another Provider", v1alpha1.AllocationRunning, prov, ptrTo(other), false, true},
-		{"running on another Provider, its label names this one", v1alpha1.AllocationRunning, other, ptrTo(prov), false, false},
+		{"running, its provider label is missing", v1alpha1.AllocationRunning, prov, nil, false, false, true},
+		{"running, its provider label names another Provider", v1alpha1.AllocationRunning, prov, ptrTo(other), false, false, true},
+		{"running on another Provider, its label names this one", v1alpha1.AllocationRunning, other, ptrTo(prov), false, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			alloc := &v1alpha1.Allocation{
@@ -236,7 +244,7 @@ func TestTheMarkConditionReadsTheSlotCountsOwnList(t *testing.T) {
 				if err := c.Get(context.Background(), client.ObjectKeyFromObject(alloc), stored); err != nil {
 					t.Fatal(err)
 				}
-				stored.Status.AtProvider.Phase = tc.phase
+				stored.Status.AtProvider.Phase, stored.Status.AtProvider.JobCompleting = tc.phase, tc.completing
 				if err := c.Status().Update(context.Background(), stored); err != nil {
 					t.Fatal(err)
 				}

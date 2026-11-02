@@ -225,6 +225,28 @@ import (
 //     condition is never cleared, the job is not cancelled, and the phase keeps
 //     mirroring the job. A later change, such as an administrator's extension
 //     (Batch.SetTimeLimit), is a later hard end, never a mismatch.
+//   - A completing job (HBEP-4, Phases, A completing job; science-agent
+//     ruling for #198, 1 Nov 2026; Script.Epilog gives a job the flag): a job
+//     whose state carries COMPLETING takes its base state's phase at once, and
+//     the same status write sets status.atProvider.jobCompleting and the
+//     condition JobCompleting True, reason Completing, with a message naming
+//     the job, its base state and since when, from the listing's end time
+//     (never the clock, so the message is the same at every pass). A read that
+//     succeeds and shows the job without the flag, one that shows the job from
+//     accounting (the listing no longer does), and one that shows the job
+//     nowhere clear it: jobCompleting is false and the condition, if it was
+//     True, is False with reason NotCompleting; a job never seen completing
+//     has no condition. A failed read keeps the last evidence. An accounting
+//     read made for the job's counts never clears the flag: only the queue
+//     listing's own state decides. A deleting Allocation whose job completes
+//     keeps its finalizer: it does not cancel the job again, writes no
+//     accounting record and removes no files until the flag has cleared, then
+//     all three happen once. The same holds while any other job with the tag
+//     completes: one blocking job (the recorded one if it is completing, else
+//     the lowest ID) gates the finalizer and is written as jobCompleting and
+//     the condition, whose message names it when it is not the recorded job, so
+//     the slot count keeps the Allocation. Once nothing completes, the deleting
+//     pass writes jobCompleting false.
 //   - Retention: every status written mirrors status.retention.effectiveMode
 //     from spec.retentionPolicy (RetentionPolicy.EffectiveMode: Keep when unset).
 //   - Prerequisites (opt-in, the Prerequisites field): before it claims an

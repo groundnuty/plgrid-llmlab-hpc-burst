@@ -129,16 +129,20 @@ func parseJobIDs(v string) ([]int, error) {
 //
 // Whether an ended job is listed is the NotListed mode: Helios never lists it
 // (an empty answer for it by --jobs until it is purged), Athena lists it in its
-// end state until it is purged. A purged job is never listed. A job another
-// user owns is known to slurmctld, so --me --jobs=<id> for it is an empty list,
-// not the error.
+// end state until it is purged. A purged job is never listed. A completing job
+// (an end state while its processes live, run mode) is listed in both modes,
+// by --me and by --jobs, and is not purged, until its processes are gone: by
+// default squeue reports pending, running and completing jobs, and Slurm's
+// purge skips a completing job (see job.purged). Once they are gone the mode's
+// rule applies again. A job another user owns is known to slurmctld, so --me
+// --jobs=<id> for it is an empty list, not the error.
 func (p *Platform) squeueRows(user string, me bool, ids []int, now time.Time) ([]*job, bool) {
 	var rows []*job
 	listed := func(j *job) bool {
 		if j.purged(now, p.cfg.MinJobAge) || (me && j.user != user) {
 			return false
 		}
-		return !IsTerminal(j.state()) || p.cfg.NotListed == NotListedAthena
+		return !IsTerminal(j.state()) || j.completing() || p.cfg.NotListed == NotListedAthena
 	}
 	if len(ids) == 0 {
 		for _, j := range p.jobs {
@@ -212,14 +216,31 @@ func squeueJobOf(j *job, minute time.Duration) squeueJob {
 		CPUs: nv(int64(j.cpus)), CPUsPerTask: nv(int64(j.cpus)),
 		DerivedExitCode: exitCodeFor(state), EligibleTime: nvTime(e.submit), EndTime: end,
 		ExitCode: exitCodeFor(state), Flags: []string{}, Hold: prio.Number == 0 && state == Pending,
-		JobID: j.id, JobState: []string{state},
-		MemoryPerCPU: NV{}, MemoryPerNode: nv(j.memMiB), Name: j.name, NodeCount: nv(int64(j.nodes)),
+		JobID: j.id, JobState: jobState(j),
+		MemoryPerCPU: NV{}, MemoryPerNode: nv(j.memMiB), Name: j.listName(), NodeCount: nv(int64(j.nodes)),
 		Partition: j.partition, Priority: prio, QOS: "normal", Requeue: j.requeue, RestartCnt: j.restartCnt,
 		StandardError: j.errPath, StandardOutput: j.output, StartTime: start,
 		StateDescription: "", StateReason: j.stateReason(), SubmitTime: nvTime(e.submit),
 		Tasks: nv(1), TimeLimit: limitNV(j.timeLimit), TresAllocStr: alloc, TresReqStr: tresStr(j),
 		UserName: j.user,
 	}
+}
+
+// jobState is squeue's job_state: the state, and COMPLETING beside an end
+// state while the job's processes still live (run mode).
+func jobState(j *job) []string {
+	if j.completing() {
+		return []string{j.state(), Completing}
+	}
+	return []string{j.state()}
+}
+
+// stateCode is the text table's state: CG while the job completes.
+func stateCode(j *job) string {
+	if j.completing() {
+		return "CG"
+	}
+	return stateCodes[j.state()]
 }
 
 // stateCodes are squeue's short state names.
@@ -250,7 +271,7 @@ func (p *Platform) squeueText(rows []*job, now time.Time) string {
 			nodes = "example-node-1"
 		}
 		fmt.Fprintf(&b, "%8d %-9s %-12s %-10s %-2s %9s %5d %-18s %-19s %-19s\n",
-			j.id, j.partition, j.name, j.user, stateCodes[e.state], runTime(e, now), j.nodes, nodes,
+			j.id, j.partition, j.listName(), j.user, stateCode(j), runTime(e, now), j.nodes, nodes,
 			e.submit.In(p.zone).Format(textTime), start)
 	}
 	return b.String()

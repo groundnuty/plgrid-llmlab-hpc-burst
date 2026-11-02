@@ -502,6 +502,49 @@ func TestAllocationQueueWaitRecordedRoundTrips(t *testing.T) {
 	}
 }
 
+// A completing job (HBEP-4, Phases, A completing job; #198): the Provider's
+// controller writes status.atProvider.jobCompleting and the JobCompleting
+// condition in one status write, and both round-trip; false is absent.
+func TestAllocationJobCompletingRoundTrips(t *testing.T) {
+	ns := newNamespace(t)
+	a := newAllocation(ns, uniq("alloc"))
+	must(t, c.Create(bg(), a), "create")
+	got := &v1alpha1.Allocation{}
+	must(t, c.Get(bg(), objKey(a), got), "get")
+	if got.Status.AtProvider.JobCompleting {
+		t.Fatalf("a new Allocation has jobCompleting set")
+	}
+	got.Status.AtProvider.Phase = v1alpha1.AllocationEnded
+	got.Status.AtProvider.JobCompleting = true
+	got.SetConditions(xpv2.Condition{Type: v1alpha1.ConditionJobCompleting, Status: "True", Reason: v1alpha1.ReasonJobCompleting,
+		Message: "job 1001 is completing in state CANCELLED since 2026-10-30T12:02:30Z", LastTransitionTime: metav1.Now()})
+	must(t, c.Status().Update(bg(), got), "write jobCompleting and its condition")
+
+	again := &v1alpha1.Allocation{}
+	must(t, c.Get(bg(), objKey(a), again), "get")
+	if !again.Status.AtProvider.JobCompleting || again.Status.AtProvider.Phase != v1alpha1.AllocationEnded {
+		t.Errorf("after a write of true: %+v", again.Status.AtProvider)
+	}
+	cond := again.GetCondition(v1alpha1.ConditionJobCompleting)
+	if cond.Status != "True" || cond.Reason != v1alpha1.ReasonJobCompleting || !strings.Contains(cond.Message, "since 2026-10-30T12:02:30Z") {
+		t.Errorf("condition JobCompleting = %+v, want True Completing with its since", cond)
+	}
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("Allocation"))
+	must(t, c.Get(bg(), objKey(a), u), "get unstructured")
+	obs, _, _ := unstructured.NestedMap(u.Object, "status", "atProvider")
+	if obs["jobCompleting"] != true {
+		t.Errorf("status.atProvider.jobCompleting = %v; keys %v", obs["jobCompleting"], obs)
+	}
+	// A status write that leaves it out clears it: false is absent.
+	got.Status.AtProvider.JobCompleting = false
+	must(t, c.Status().Update(bg(), got), "write false")
+	must(t, c.Get(bg(), objKey(a), again), "get")
+	if again.Status.AtProvider.JobCompleting {
+		t.Errorf("jobCompleting stayed true after a write of false")
+	}
+}
+
 // A ModelDeployment keeps one start-to-ready time per accelerator class
 // (HBEP-7, Handover).
 func TestModelDeploymentStartToReady(t *testing.T) {

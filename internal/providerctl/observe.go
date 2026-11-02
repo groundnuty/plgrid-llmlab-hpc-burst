@@ -40,7 +40,22 @@ func (e *external) observeRecorded(ctx context.Context, a *v1alpha1.Allocation, 
 	refused := prior.Phase == v1alpha1.AllocationRefused
 
 	if e.final(rec.jobID, o) {
-		return e.observeFinal(ctx, a, rec, name)
+		// The final-state cache says accounting settled the job, and accounting
+		// never carries COMPLETING, so only the listing can say the flag has come
+		// back. The listing is read here (observeFinal reads it too, from the
+		// same cached read), and a recorded job that it shows with the flag is
+		// not final: the cache entry goes and the job is observed as any live
+		// one, so jobCompleting is true again and the slot held (Astra B4 on PR
+		// 217; HBEP-4, Phases, A completing job: a successful listing that shows
+		// the flag decides).
+		listed, err := e.p.ListByTag(ctx, name)
+		if err != nil {
+			return exists, e.readFailed(err)
+		}
+		if !completingIn(listed, rec.jobID) {
+			return e.observeFinal(ctx, a, rec, name)
+		}
+		e.s.finals.Delete(rec.jobID)
 	}
 	job, found, err := e.p.Observe(ctx, rec.jobID)
 	if err != nil {
@@ -155,7 +170,20 @@ func (e *external) final(id string, o *v1alpha1.AllocationObservation) bool {
 	if _, ok := e.s.finals.Load(id); !ok {
 		return false
 	}
-	return o.EndTime != nil && (o.StartTime == nil || o.QueueWaitRecorded)
+	// A stored status that still shows the flag (its clearing was never
+	// written) is read again, whatever finals says: the job is not final until
+	// the status says it is not completing.
+	return o.EndTime != nil && !o.JobCompleting && (o.StartTime == nil || o.QueueWaitRecorded)
+}
+
+// completingIn reports whether jobs list the job id with the COMPLETING flag.
+func completingIn(jobs []provider.Job, id string) bool {
+	for _, j := range jobs {
+		if j.ID == id && j.Completing {
+			return true
+		}
+	}
+	return false
 }
 
 // observeFinal observes an Allocation whose recorded job has ended for good:
@@ -228,6 +256,7 @@ func (e *external) mirror(a *v1alpha1.Allocation, prior *v1alpha1.AllocationObse
 	o.SubmitTime = mt(job.SubmitTime)
 	o.StartEstimate, o.StartTime = mtp(job.StartEstimate), mtp(job.StartTime)
 	o.HardEnd, o.EndTime = mtp(job.HardEnd), mtp(job.EndTime)
+	e.mirrorCompleting(a, id, job)
 	switch {
 	case job.Hold == provider.HoldAdmin:
 		a.SetConditions(xpv2.Condition{Type: v1alpha1.ConditionAdminHold, Status: corev1.ConditionTrue, Reason: reasonAdminHold,
@@ -237,6 +266,59 @@ func (e *external) mirror(a *v1alpha1.Allocation, prior *v1alpha1.AllocationObse
 			LastTransitionTime: *mt(e.now())})
 	}
 	setAvailability(a)
+}
+
+// mirrorCompleting writes the COMPLETING flag of the job the read showed
+// (HBEP-4, Phases, A completing job), in the same status write as the phase:
+// status.atProvider.jobCompleting and the JobCompleting condition. It runs only
+// for a read that succeeded and showed the job, so a failed read keeps the last
+// evidence (the caller restores the stored status), and a successful listing
+// that shows the job without the flag clears it, as does accounting's record of
+// a job the listing no longer shows (accounting never carries the flag).
+// Observe reads accounting only for a job the listing does not show: an
+// accounting read made for the job's counts (allocatedRead) never clears the
+// flag, since accounting's terminal state says nothing about the listing's
+// COMPLETING (spike S7: sacct said FAILED while squeue still showed it). The message names the job, its base state and since when, from the
+// listing's end_time, never from the clock, so it does not change from one pass
+// to the next.
+func (e *external) mirrorCompleting(a *v1alpha1.Allocation, id string, job provider.Job) {
+	if !job.Completing {
+		e.clearCompleting(a)
+		return
+	}
+	e.setCompleting(a, completingMessage(id, job))
+}
+
+// setCompleting records that a job is completing: the flag, and the
+// JobCompleting condition True with message.
+func (e *external) setCompleting(a *v1alpha1.Allocation, message string) {
+	a.Status.AtProvider.JobCompleting = true
+	a.SetConditions(xpv2.Condition{Type: v1alpha1.ConditionJobCompleting, Status: corev1.ConditionTrue, Reason: v1alpha1.ReasonJobCompleting,
+		Message: message, LastTransitionTime: *mt(e.now())})
+}
+
+// clearCompleting records that the job is not completing: the flag is cleared
+// and a JobCompleting condition that was True turns False. A job never seen
+// completing gets no condition.
+func (e *external) clearCompleting(a *v1alpha1.Allocation) {
+	a.Status.AtProvider.JobCompleting = false
+	if a.GetCondition(v1alpha1.ConditionJobCompleting).Status == corev1.ConditionTrue {
+		a.SetConditions(xpv2.Condition{Type: v1alpha1.ConditionJobCompleting, Status: corev1.ConditionFalse, Reason: v1alpha1.ReasonJobNotCompleting,
+			LastTransitionTime: *mt(e.now())})
+	}
+}
+
+// completingMessage is the JobCompleting condition's message while the flag
+// lasts.
+func completingMessage(id string, job provider.Job) string {
+	base := ""
+	if len(job.State) > 0 {
+		base = job.State[0]
+	}
+	if job.CompletingSince == nil {
+		return fmt.Sprintf("job %s is completing in state %s; the listing gives no time for when it ended", id, base)
+	}
+	return fmt.Sprintf("job %s is completing in state %s since %s", id, base, job.CompletingSince.UTC().Format(time.RFC3339))
 }
 
 // setAvailability maps the phase onto crossplane's Ready condition.
@@ -257,6 +339,9 @@ func setAvailability(a *v1alpha1.Allocation) {
 // Warning event, and never resubmitted.
 func (e *external) absent(a *v1alpha1.Allocation, id string, now time.Time) {
 	o := &a.Status.AtProvider
+	// Both reads succeeded and neither lists the job: it is no longer
+	// completing, whatever it was (HBEP-4, Phases, A completing job).
+	e.clearCompleting(a)
 	if o.AbsentSince == nil {
 		o.AbsentSince = mt(now)
 	}

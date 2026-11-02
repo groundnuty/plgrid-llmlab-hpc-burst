@@ -394,10 +394,29 @@ const (
 	// ConditionAdminHold: the recorded job carries an admin hold, which the
 	// provider never lifts (HBEP-4, Phases).
 	ConditionAdminHold xpv2.ConditionType = "AdminHold"
+	// ConditionJobCompleting is True while the recorded job's state carries
+	// the COMPLETING flag (status.atProvider.jobCompleting is true): its
+	// message names the job, its state and since when, taken from the queue
+	// listing's end_time, so a job stuck in COMPLETING on a bad node is
+	// visible. It is set False, with ReasonJobNotCompleting, when the flag
+	// clears, and never written for a job that was not seen completing
+	// (HBEP-4, Phases, A completing job; `@hpc-burst-science-agent`, 1 Nov
+	// 2026, for #198; proposed).
+	ConditionJobCompleting xpv2.ConditionType = "JobCompleting"
 	// ConditionSubmissionResolved is False with reason ReasonNeedsOperator
 	// when, in fallback mode, an attempt is still Unknown after the profile's
 	// unknownBound (HBEP-7, open question 11; spike S4's names).
 	ConditionSubmissionResolved xpv2.ConditionType = "SubmissionResolved"
+)
+
+// Reasons of an Allocation's JobCompleting condition.
+const (
+	// ReasonJobCompleting: the condition is True; the job's state carries
+	// COMPLETING.
+	ReasonJobCompleting xpv2.ConditionReason = "Completing"
+	// ReasonJobNotCompleting: the condition is False; the flag has cleared,
+	// or no read lists the job any more.
+	ReasonJobNotCompleting xpv2.ConditionReason = "NotCompleting"
 )
 
 // Reasons of an Allocation's SubmissionResolved condition (spike S4).
