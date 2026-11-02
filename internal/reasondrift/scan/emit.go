@@ -140,7 +140,22 @@ func (s *scanner) collect(code *reasondrift.Code) {
 				}
 				cc := ci.Common()
 				full, name := calleeName(cc)
+				// A call of a wrapper that carries an event gets an event a
+				// constructor built, or its reason is not read where it is built.
+				if w, listed := s.calledWrapper(cc); listed && fn.Synthetic == "" {
+					for _, f := range w.Forwards {
+						if f.Event && !s.builtByConstructor(cc, receiverOffset(cc)+f.Param) {
+							problem(reasondrift.EventNotConstructed, fn, ci.Pos(), fmt.Sprintf("the event passed to %s is not the value of a known constructor", w.Func))
+							break // once for the call, however many fields the wrapper reads
+						}
+					}
+				}
+				if c, ok := s.constructor(full); ok {
+					code.Emits = append(code.Emits, s.construct(fn, ci, cc, c))
+					continue
+				}
 				sk, isSink := s.sink(full)
+				er, isRecorder := s.eventRecorder(full)
 				if !emitMethods[name] && !isSink {
 					continue
 				}
@@ -158,6 +173,13 @@ func (s *scanner) collect(code *reasondrift.Code) {
 					code.Emits = append(code.Emits, s.emit(fn, ci, cc, sk))
 					continue
 				}
+				if isRecorder {
+					// The events it takes are read where they are built.
+					if !s.builtByConstructor(cc, er.event) {
+						problem(reasondrift.EventNotConstructed, fn, ci.Pos(), "the event passed to "+full+" is not the value of a known constructor")
+					}
+					continue
+				}
 				if s.callsWrapper(cc) {
 					continue
 				}
@@ -172,14 +194,149 @@ func (s *scanner) collect(code *reasondrift.Code) {
 	}
 }
 
-// callsWrapper reports whether a call is a static call of a listed wrapper.
-func (s *scanner) callsWrapper(cc *ssa.CallCommon) bool {
+// calledWrapper returns the listed wrapper a call calls statically, if any.
+func (s *scanner) calledWrapper(cc *ssa.CallCommon) (reasondrift.Wrapper, bool) {
 	f := cc.StaticCallee()
 	if f == nil || f.Synthetic != "" || f.Pkg == nil {
+		return reasondrift.Wrapper{}, false
+	}
+	w, ok := s.wrappers[s.pkgDir(f)+"."+funcName(f)]
+	return w, ok
+}
+
+// callsWrapper reports whether a call is a static call of a listed wrapper.
+func (s *scanner) callsWrapper(cc *ssa.CallCommon) bool {
+	_, ok := s.calledWrapper(cc)
+	return ok
+}
+
+// constructor and eventRecorder look a callee up, with {mod} for the module path.
+func (s *scanner) constructor(full string) (ctor, bool) {
+	c, ok := constructors[strings.ReplaceAll(full, s.mod, "{mod}")]
+	return c, ok
+}
+
+func (s *scanner) eventRecorder(full string) (eventRecorder, bool) {
+	r, ok := eventRecorders[strings.ReplaceAll(full, s.mod, "{mod}")]
+	return r, ok
+}
+
+// builtByConstructor reports whether argument i of the call (receiver
+// included) is the value of a call of a known constructor.
+func (s *scanner) builtByConstructor(cc *ssa.CallCommon, i int) bool {
+	if i < 0 || i >= len(cc.Args) {
 		return false
 	}
-	_, ok := s.wrappers[s.pkgDir(f)+"."+funcName(f)]
-	return ok
+	call, ok := unwrap(cc.Args[i]).(*ssa.Call)
+	if !ok {
+		return false
+	}
+	full, _ := calleeName(call.Common())
+	_, isCtor := s.constructor(full)
+	return isCtor
+}
+
+// construct resolves the call of a constructor to an Emit. The reasons come
+// from its arguments; the regarding kinds from the recorder or wrapper that
+// receives the value, and if none provably does, the emit is unproven.
+func (s *scanner) construct(fn *ssa.Function, ci ssa.CallInstruction, cc *ssa.CallCommon, c ctor) reasondrift.Emit {
+	e := reasondrift.Emit{Package: s.pkgDir(fn), Func: funcName(fn), Pos: s.pos(ci.Pos())}
+	if why := s.reasonsOf(&e, cc, 0, c.reason); why != "" {
+		e.Unresolved = "the reason: " + why
+		return e
+	}
+	if c.action < 0 {
+		e.Actions = []string{reasondrift.NoAction}
+	} else if why := s.actionsOf(&e, cc, 0, c.action); why != "" {
+		e.Unresolved = "the type: " + why
+		return e
+	}
+	kinds, why := s.reach(ci)
+	if why != "" {
+		e.Unproven = why
+		return e
+	}
+	e.Kinds = kinds
+	return e
+}
+
+// reach follows the value of a constructor's call to the recorder or wrapper
+// that receives it, and returns the kinds that recorder's regarding object has.
+// The value must be used only as an event argument of a recorder that takes a
+// built event, or of a listed wrapper at the parameter that carries it.
+func (s *scanner) reach(ci ssa.CallInstruction) ([]string, string) {
+	call, ok := ci.(*ssa.Call)
+	if !ok {
+		return nil, "the call is a go or defer statement"
+	}
+	refs := call.Referrers()
+	if refs == nil || len(*refs) == 0 {
+		return nil, "the event is built and its value is not used"
+	}
+	kinds := map[string]bool{}
+	for _, r := range *refs {
+		rc, ok := r.(ssa.CallInstruction)
+		if !ok {
+			return nil, fmt.Sprintf("the event is used by %T, not passed to a recorder", r)
+		}
+		regarding, why := s.receiver(rc.Common(), call)
+		if why != "" {
+			return nil, why
+		}
+		ks, why := s.resolve(regarding, kindLeaf)
+		if why != "" {
+			return nil, "the regarding object of the recorder: " + why
+		}
+		for _, k := range ks {
+			kinds[k] = true
+		}
+	}
+	return sorted(kinds), ""
+}
+
+// receiver returns the regarding argument of the call if it receives the event
+// v as a recorder or wrapper does, and why not otherwise.
+func (s *scanner) receiver(cc *ssa.CallCommon, v ssa.Value) (ssa.Value, string) {
+	pos := -1
+	for i, a := range cc.Args {
+		if unwrap(a) == v {
+			pos = i
+		}
+	}
+	if pos < 0 {
+		return nil, "the event is not an argument of the call that uses it"
+	}
+	full, _ := calleeName(cc)
+	if er, ok := s.eventRecorder(full); ok && cc.IsInvoke() {
+		if pos != er.event || er.regarding >= len(cc.Args) {
+			return nil, "the event is passed to " + full + " at an argument that does not carry it"
+		}
+		return cc.Args[er.regarding], ""
+	}
+	if w, ok := s.calledWrapper(cc); ok {
+		off := receiverOffset(cc)
+		carries := false
+		regarding := -1
+		for _, f := range w.Forwards {
+			if f.Event && off+f.Param == pos {
+				carries = true
+			}
+			if f.Arg == 0 && !f.Event && f.Of == "" && f.Field == "" {
+				regarding = off + f.Param
+			}
+		}
+		if !carries {
+			return nil, "the event is passed to " + w.Func + " at a parameter that does not carry an event"
+		}
+		if regarding < 0 || regarding >= len(cc.Args) {
+			return nil, w.Func + " forwards no regarding object"
+		}
+		return cc.Args[regarding], ""
+	}
+	if full == "" {
+		full = "a function value"
+	}
+	return nil, "the event is passed to " + full + ", which is neither a recorder nor a listed wrapper"
 }
 
 // receiverOffset is 1 for a static call of a method, whose receiver is the
@@ -369,25 +526,38 @@ func (s *scanner) sink(full string) (sink, bool) {
 func (s *scanner) emit(fn *ssa.Function, ci ssa.CallInstruction, cc *ssa.CallCommon, sk sink) reasondrift.Emit {
 	e := reasondrift.Emit{Package: s.pkgDir(fn), Func: funcName(fn), Pos: s.pos(ci.Pos())}
 	off := receiverOffset(cc)
-	arg := func(i int) (ssa.Value, bool) {
-		if off+i >= len(cc.Args) {
-			return nil, false
-		}
-		return cc.Args[off+i], true
-	}
-	fail := func(what, why string) reasondrift.Emit {
-		e.Unresolved = what + ": " + why
+	if why := s.reasonsOf(&e, cc, off, sk.reason); why != "" {
+		e.Unresolved = "the reason: " + why
 		return e
 	}
-	reasonV, ok := arg(sk.reason)
-	if !ok {
-		return fail("the reason", "the call has too few arguments")
+	if why := s.actionsOf(&e, cc, off, sk.action); why != "" {
+		e.Unresolved = "the type: " + why
+		return e
 	}
-	raw, why := s.resolve(reasonV, stringLeaf)
+	if off+sk.regarding >= len(cc.Args) {
+		e.Unresolved = "the regarding object: the call has too few arguments"
+		return e
+	}
+	kinds, why := s.resolve(cc.Args[off+sk.regarding], kindLeaf)
 	if why != "" {
-		return fail("the reason", why)
+		e.Unresolved = "the regarding object: " + why
+		return e
 	}
-	// A value that carries the mark was fed by a string literal on some path.
+	e.Kinds = kinds
+	return e
+}
+
+// reasonsOf resolves argument i (after the receiver offset) of the call to the
+// reasons of e. A value that carries the mark was fed by a string literal on
+// some path. It returns why the reasons cannot be told, or "".
+func (s *scanner) reasonsOf(e *reasondrift.Emit, cc *ssa.CallCommon, off, i int) string {
+	if off+i >= len(cc.Args) {
+		return "the call has too few arguments"
+	}
+	raw, why := s.resolve(cc.Args[off+i], stringLeaf)
+	if why != "" {
+		return why
+	}
 	seen, litSeen := map[string]bool{}, map[string]bool{}
 	for _, r := range raw {
 		c := strings.ReplaceAll(r, litMark, "")
@@ -400,39 +570,32 @@ func (s *scanner) emit(fn *ssa.Function, ci ssa.CallInstruction, cc *ssa.CallCom
 		}
 	}
 	if len(seen) == 0 {
-		return fail("the reason", "only empty strings reach it")
+		return "only empty strings reach it"
 	}
 	e.Reasons, e.LiteralReasons = sorted(seen), sorted(litSeen)
+	return ""
+}
 
-	actionV, ok := arg(sk.action)
-	if !ok {
-		return fail("the type", "the call has too few arguments")
+// actionsOf resolves argument i of the call to the types of e.
+func (s *scanner) actionsOf(e *reasondrift.Emit, cc *ssa.CallCommon, off, i int) string {
+	if off+i >= len(cc.Args) {
+		return "the call has too few arguments"
 	}
-	actions, why := s.resolve(actionV, stringLeaf)
+	raw, why := s.resolve(cc.Args[off+i], stringLeaf)
 	if why != "" {
-		return fail("the type", why)
+		return why
 	}
-	seen = map[string]bool{}
-	for _, a := range actions {
+	seen := map[string]bool{}
+	for _, a := range raw {
 		if c := strings.ReplaceAll(a, litMark, ""); c != "" {
 			seen[c] = true
 		}
 	}
 	if len(seen) == 0 {
-		return fail("the type", "only empty strings reach it")
+		return "only empty strings reach it"
 	}
 	e.Actions = sorted(seen)
-
-	regV, ok := arg(sk.regarding)
-	if !ok {
-		return fail("the regarding object", "the call has too few arguments")
-	}
-	kinds, why := s.resolve(regV, kindLeaf)
-	if why != "" {
-		return fail("the regarding object", why)
-	}
-	e.Kinds = kinds
-	return e
+	return ""
 }
 
 func sorted(m map[string]bool) []string {

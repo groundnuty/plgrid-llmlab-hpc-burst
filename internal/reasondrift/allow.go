@@ -2,8 +2,7 @@ package reasondrift
 
 // Entry allows a mismatch. A field that is empty matches any value, so an
 // Entry names the least that identifies what it allows. Why says why the
-// mismatch is allowed: an exception states a fact of the design, and an entry
-// of the debt list in guard/guard_test.go (knownDriftUntilHBEP8Erratum) states the drift the erratum will remove.
+// mismatch is allowed: an exception states a fact of the design and is by reason.
 type Entry struct {
 	Kind      string
 	Action    string
@@ -84,4 +83,9 @@ type Forward struct {
 	// of a value that is no parameter (a loop variable, say).
 	Of    string
 	Field string
+	// Event marks the wrapper's parameter Param as one that carries a built
+	// event, which every call of the wrapper must pass the value of a known
+	// constructor for (event.Normal, provider.NewManagedEvent), so that its
+	// reason is read where it is built.
+	Event bool
 }

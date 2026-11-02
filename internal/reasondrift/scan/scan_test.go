@@ -29,11 +29,20 @@ var kubeWrapper = reasondrift.Wrapper{
 	Forwards: []reasondrift.Forward{{Arg: 0, Param: 0}, {Arg: 3, Param: 3}, {Arg: 4, Param: 2}},
 }
 
+// controllerWrapper is the synthetic module's second wrapper: its parameter 1
+// carries an event, whose Reason and Action it passes to Eventf.
+var controllerWrapper = reasondrift.Wrapper{
+	Func: "internal/lifecycle.Controller.record", Why: "writes an event to Eventf",
+	Forwards: []reasondrift.Forward{
+		{Arg: 0, Param: 0}, {Arg: 3, Param: 1, Field: "Reason", Event: true}, {Arg: 4, Param: 1, Field: "Action", Event: true},
+	},
+}
+
 // scanSynthetic scans the synthetic module with its wrapper listed, and the
 // given files added or replaced under internal/lifecycle.
 func scanSynthetic(t *testing.T, files map[string]string, mutate func(*Options)) *reasondrift.Code {
 	t.Helper()
-	o := Options{Root: syntheticRoot(t), Wrappers: []reasondrift.Wrapper{kubeWrapper}}
+	o := Options{Root: syntheticRoot(t), Wrappers: []reasondrift.Wrapper{kubeWrapper, controllerWrapper}}
 	if len(files) > 0 {
 		o.Overlay = map[string][]byte{}
 		for name, src := range files {
@@ -170,12 +179,56 @@ func TestResolvesEachWayAReasonArrives(t *testing.T) {
 	if want := []string{"B", "A"}; !slices.Equal(code.Ranking, want) {
 		t.Errorf("ranking %v, want %v", code.Ranking, want)
 	}
-	// The synthetic module has no problem, and its wrapper is met, through the
-	// compiler's pointer-receiver wrapper of KubeRecorder.Event too.
-	if len(code.Problems) != 0 {
-		t.Errorf("problems %+v, want none", code.Problems)
+	// Events built by a constructor count only if the value reaches a recorder
+	// or a wrapper that carries it (B6).
+	for _, c := range []struct {
+		fn      string
+		reasons []string
+		action  string
+		kinds   []string
+		lits    []string
+	}{
+		{"Controller.direct", []string{"A"}, "degraded", []string{"Instance"}, nil},
+		{"Controller.viaVariable", []string{"B"}, "failing", []string{"Instance"}, nil},
+		{"Controller.literalReason", []string{"CtorLiteral"}, "degraded", []string{"Instance"}, []string{"CtorLiteral"}},
+	} {
+		e := emitOf(t, code, c.fn)
+		if e.Unresolved != "" || e.Unproven != "" {
+			t.Errorf("%s: unresolved %q unproven %q", c.fn, e.Unresolved, e.Unproven)
+			continue
+		}
+		if !slices.Equal(e.Reasons, c.reasons) || !slices.Equal(e.Actions, []string{c.action}) || !slices.Equal(e.Kinds, c.kinds) || !slices.Equal(e.LiteralReasons, c.lits) {
+			t.Errorf("%s: %v %v %v lits %v, want %v [%s] %v lits %v", c.fn, e.Reasons, e.Actions, e.Kinds, e.LiteralReasons, c.reasons, c.action, c.kinds, c.lits)
+		}
 	}
-	if want := []string{kubeWrapper.Func}; !slices.Equal(code.Wrappers, want) {
+	for fn, why := range map[string]string{
+		"Controller.discarded": "not used",   // built and thrown away
+		"Controller.stored":    "*ssa.Store", // handed over through a slice
+	} {
+		e := emitOf(t, code, fn)
+		if e.Unproven == "" || !strings.Contains(e.Unproven, why) || len(e.Reasons) != 1 {
+			t.Errorf("%s: unproven %q reasons %v, want an unproven emit that says %q", fn, e.Unproven, e.Reasons, why)
+		}
+	}
+	// A reason that arrives through a caller's argument is read like any other.
+	if e := emitOf(t, code, "Controller.unreadReason"); e.Unresolved != "" || !slices.Equal(e.Reasons, []string{"B"}) {
+		t.Errorf("Controller.unreadReason: %+v, want reason B", e)
+	}
+	// Two calls hand a wrapper an event that no constructor built.
+	got := problemsOf(code, reasondrift.EventNotConstructed)
+	var funcs []string
+	for _, p := range got {
+		funcs = append(funcs, p.Func)
+	}
+	if want := []string{"Controller.notBuilt", "Controller.stored"}; !slices.Equal(funcs, want) {
+		t.Errorf("event-not-constructed problems in %v, want %v", funcs, want)
+	}
+	// The synthetic module has no other problem, and its wrappers are met,
+	// through the compiler's pointer-receiver wrapper of KubeRecorder.Event too.
+	if n := len(code.Problems) - len(got); n != 0 {
+		t.Errorf("problems %+v, want only the two above", code.Problems)
+	}
+	if want := []string{controllerWrapper.Func, kubeWrapper.Func}; !slices.Equal(code.Wrappers, want) {
 		t.Errorf("wrappers met %v, want %v", code.Wrappers, want)
 	}
 }
@@ -205,15 +258,18 @@ func TestANamedWrapperIsAcceptedOnlyIfItForwards(t *testing.T) {
 	relay := reasondrift.Wrapper{Func: "internal/lifecycle.relay", Why: "x", Forwards: []reasondrift.Forward{{Arg: 0, Param: 1}}}
 	withRelay := func(o *Options) { o.Wrappers = append(o.Wrappers, relay) }
 	code := scanSynthetic(t, map[string]string{"internal/lifecycle/zz_overlay.go": unknownRecorder}, withRelay)
-	if len(code.Problems) != 0 {
-		t.Errorf("a forwarding wrapper: problems %+v, want none", code.Problems)
+	if got := problemsOf(code, reasondrift.UnknownRecorder); len(got) != 0 {
+		t.Errorf("a forwarding wrapper: unknown-recorder problems %+v, want none", got)
 	}
-	if want := []string{kubeWrapper.Func, relay.Func}; !slices.Equal(code.Wrappers, want) {
+	if got := problemsOf(code, reasondrift.WrapperDoesNotForward); len(got) != 0 {
+		t.Errorf("a forwarding wrapper: wrapper problems %+v, want none", got)
+	}
+	if want := []string{controllerWrapper.Func, kubeWrapper.Func, relay.Func}; !slices.Equal(code.Wrappers, want) {
 		t.Errorf("wrappers met %v, want %v", code.Wrappers, want)
 	}
 	// A wrapper that is listed and is not in the code is not reported as met.
 	code = scanSynthetic(t, nil, withRelay)
-	if want := []string{kubeWrapper.Func}; !slices.Equal(code.Wrappers, want) {
+	if want := []string{controllerWrapper.Func, kubeWrapper.Func}; !slices.Equal(code.Wrappers, want) {
 		t.Errorf("wrappers met %v, want %v", code.Wrappers, want)
 	}
 	// The call changes the argument: it is no longer parameter 1, unchanged.
@@ -263,25 +319,6 @@ func useValue(o otherRecorder) { run(o.Event) }
 	got := problemsOf(code, reasondrift.UnknownRecorder)
 	if len(got) != 1 || got[0].Package != "(compiler-made)" {
 		t.Fatalf("unknown-recorder problems %+v, want one in a compiler-made function", got)
-	}
-}
-
-// TestARecorderOutsideTheLoadedPackagesIsAProblem: with CheckRest, a use of a
-// recorder method in a package that the patterns leave out is reported.
-func TestARecorderOutsideTheLoadedPackagesIsAProblem(t *testing.T) {
-	other := "package other\n\ntype R interface{ Eventf() }\n\nfunc F(r R) { r.Eventf() }\n"
-	narrow := func(o *Options) {
-		o.Patterns = []string{"./api/v1alpha1", "./internal/lifecycle"}
-		o.CheckRest = true
-	}
-	code := scanSynthetic(t, map[string]string{"internal/other/other.go": other}, narrow)
-	got := problemsOf(code, reasondrift.OutsideTheScan)
-	if len(got) != 1 || got[0].Package != "internal/other" {
-		t.Fatalf("outside-the-scan problems %+v, want one in internal/other", got)
-	}
-	// Without the new package, the narrow scan has none.
-	if code = scanSynthetic(t, nil, narrow); len(problemsOf(code, reasondrift.OutsideTheScan)) != 0 {
-		t.Errorf("a narrow scan of the unchanged module: %+v", code.Problems)
 	}
 }
 

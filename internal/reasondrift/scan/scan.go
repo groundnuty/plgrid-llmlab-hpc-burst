@@ -18,12 +18,13 @@
 // import paths and struct tags) a sentinel suffix before type-checking, so the
 // value that reaches a recorder says in itself whether a literal fed it.
 //
-// What it does not read: events built by a constructor, the Provider
-// controller's through crossplane-runtime's event.Normal and event.Warning and
-// the managed catalog controller's through provider.NewManagedEvent. A
-// constructor's call raises nothing, and following the value to a recorder
-// would take a data flow through slices and fields; HBEP-8 puts neither
-// controller's reasons in its table.
+// Events built by a constructor (the Provider controller's through
+// crossplane-runtime's event.Normal and event.Warning, the managed catalog
+// controller's through provider.NewManagedEvent) raise nothing where they are
+// built. They count as emit sites only if the value is shown to reach a
+// recorder call, or a listed wrapper at the parameter that carries the event;
+// otherwise the reasons are reported as unproven, and a recorder or wrapper
+// that receives an event no constructor built is a problem.
 package scan
 
 import (
@@ -50,13 +51,6 @@ import (
 type Options struct {
 	// Root is the repository root, which holds go.mod.
 	Root string
-	// Patterns are the packages to load and read the emit sites of; the default
-	// is ./.... The packages that raise events are enough, with CheckRest set.
-	Patterns []string
-	// CheckRest looks at the rest of the module's non-test code, which is not
-	// loaded, and reports any use of a recorder method in it, so a new emitter
-	// in a package that Patterns leaves out is found.
-	CheckRest bool
 	// Overlay replaces or adds source files, by absolute path (the mutant
 	// checks add a file that emits one more reason).
 	Overlay map[string][]byte
@@ -85,6 +79,28 @@ var sinks = map[string]sink{
 	"(k8s.io/client-go/tools/internal/events.EventRecorder).Eventf": {regarding: 0, action: 4, reason: 3},
 }
 
+// ctor is a function that builds an event and raises nothing: the event is
+// raised when a recorder receives the value. reason and action count the
+// declared parameters; action -1 means the event has none (the Provider
+// controller's, through crossplane-runtime, are untyped).
+type ctor struct{ reason, action int }
+
+// constructors maps a function's full name, with {mod} for the module path, to
+// its shape. A call counts as an emit only if the value reaches a recorder.
+var constructors = map[string]ctor{
+	"github.com/crossplane/crossplane-runtime/v2/pkg/event.Normal":  {reason: 0, action: -1},
+	"github.com/crossplane/crossplane-runtime/v2/pkg/event.Warning": {reason: 0, action: -1},
+	"{mod}/pkg/provider.NewManagedEvent":                            {reason: 1, action: 0},
+}
+
+// eventRecorder is a recorder method that takes a built event: argument event
+// is the event, and regarding the object it is about.
+type eventRecorder struct{ regarding, event int }
+
+var eventRecorders = map[string]eventRecorder{
+	"(github.com/crossplane/crossplane-runtime/v2/pkg/event.Recorder).Event": {regarding: 0, event: 1},
+}
+
 // emitMethods are the method names that raise events.
 var emitMethods = map[string]bool{"Event": true, "Eventf": true, "AnnotatedEventf": true}
 
@@ -101,10 +117,8 @@ func Scan(o Options) (*reasondrift.Code, error) {
 	if err != nil {
 		return nil, err
 	}
-	patterns := o.Patterns
-	if len(patterns) == 0 {
-		patterns = []string{"./..."}
-	}
+	// Every package of the module is read, so a new emitter is found wherever it is.
+	patterns := []string{"./..."}
 	// Dependencies are type-checked from source, not read from export data:
 	// x/tools reads the export data of the Go it was released with, and CI's Go
 	// (go.mod's) and a developer's can differ. Their function bodies are cut
@@ -172,11 +186,6 @@ func Scan(o Options) (*reasondrift.Code, error) {
 	}
 	s.index()
 	s.collect(code)
-	if o.CheckRest {
-		if err := s.checkRest(code, o, byDir); err != nil {
-			return nil, err
-		}
-	}
 	for w := range s.seenWrappers {
 		code.Wrappers = append(code.Wrappers, w)
 	}
@@ -187,46 +196,6 @@ func Scan(o Options) (*reasondrift.Code, error) {
 		return a.Kind+a.Package+a.Func+a.Detail < b.Kind+b.Package+b.Func+b.Detail
 	})
 	return code, nil
-}
-
-// checkRest looks for recorder methods in the module's packages that Scan did
-// not load: it lists them with go list (names and files only), parses the files
-// of the packages not in byDir, and reports a selector named like a recorder
-// method as a problem.
-func (s *scanner) checkRest(code *reasondrift.Code, o Options, byDir map[string]*packages.Package) error {
-	all, err := packages.Load(&packages.Config{
-		Mode: packages.NeedName | packages.NeedFiles, Dir: o.Root, Env: append(os.Environ(), "CGO_ENABLED=0"),
-		Tests: false, Overlay: o.Overlay,
-	}, "./...")
-	if err != nil {
-		return fmt.Errorf("listing the module's packages: %w", err)
-	}
-	for _, p := range all {
-		dir := strings.TrimPrefix(strings.TrimPrefix(p.PkgPath, s.mod), "/")
-		if byDir[dir] != nil {
-			continue
-		}
-		for _, file := range p.GoFiles {
-			var src any
-			if b, ok := o.Overlay[file]; ok {
-				src = b
-			}
-			f, err := parser.ParseFile(token.NewFileSet(), file, src, parser.SkipObjectResolution)
-			if err != nil {
-				return fmt.Errorf("parsing %s: %w", file, err)
-			}
-			ast.Inspect(f, func(n ast.Node) bool {
-				if sel, ok := n.(*ast.SelectorExpr); ok && emitMethods[sel.Sel.Name] {
-					code.Problems = append(code.Problems, reasondrift.Problem{
-						Kind: reasondrift.OutsideTheScan, Package: dir, Func: filepath.Base(file),
-						Detail: fmt.Sprintf("%s uses %s, in a package the scan did not load: add the package to the patterns", strings.TrimPrefix(file, s.root+"/"), sel.Sel.Name),
-					})
-				}
-				return true
-			})
-		}
-	}
-	return nil
 }
 
 // inModule reports whether a package belongs to the module being scanned.

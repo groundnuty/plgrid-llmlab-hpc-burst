@@ -100,13 +100,13 @@ func TestCompareFindsEachKindOfMismatch(t *testing.T) {
 				c.Problems = []Problem{
 					{Kind: UnknownRecorder, Package: "internal/m", Func: "T.f", Detail: "calls x"},
 					{Kind: WrapperDoesNotForward, Package: "internal/w", Func: "K.Event", Detail: "argument 3 is not parameter 3"},
-					{Kind: OutsideTheScan, Package: "internal/z", Detail: "uses Event"},
+					{Kind: EventNotConstructed, Package: "internal/z", Func: "g", Detail: "the event is not built"},
 				}
 			},
 			[]string{
 				key(UnknownRecorder, "", "", "", "internal/m", "T.f"),
 				key(WrapperDoesNotForward, "", "", "", "internal/w", "K.Event"),
-				key(OutsideTheScan, "", "", "", "internal/z", ""),
+				key(EventNotConstructed, "", "", "", "internal/z", "g"),
 			}, "",
 		},
 		{

@@ -15,43 +15,6 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/reasondrift/scan"
 )
 
-// strict ignores knownDriftUntilHBEP8Erratum, the temporary allowlist of the
-// drift that exists today: with REASONDRIFT_STRICT=1 the guard fails on today's
-// tree, which is what it is for. Delete the switch with the list when the
-// erratum has landed.
-var strict = os.Getenv("REASONDRIFT_STRICT") == "1"
-
-// knownDriftUntilHBEP8Erratum is debt, not a policy: the drift between HBEP-8
-// and the code on the day the guard was added (2 Nov 2026, #239), allowed so
-// that the guard can merge before the erratum. Remove each entry in the pull
-// request that fixes what it names. The test also fails on a STALE entry, one
-// that no longer drifts, so the list can only shrink and the erratum's merge
-// forces its entries out. When the list is empty, delete it and the switch.
-//
-// Both entries are for the HBEP: a deployment's event regards the Instance once
-// the ModelDeployment is gone (internal/lifecycle, mdObject), and HBEP-8's table
-// says ModelDeployment only. The erratum splits the lifecycle row so that
-// VerificationFailed and CapacityDropped regard the ModelDeployment, else the
-// Instance; the report on #239 has the wording the guard accepts.
-//
-// A reason an emit site takes from a package-local constant needs no entry: the
-// scan reaches it by reference. A reason written as a string literal needs a
-// constant in api/v1alpha1; the three that were literals have theirs in this PR.
-var knownDriftUntilHBEP8Erratum = []reasondrift.Entry{
-	{Kind: reasondrift.CodeOnly, Action: "degraded", Reason: "CapacityDropped", Regarding: "Instance", Package: "internal/lifecycle", Why: "mdObject falls back to the Instance when the ModelDeployment is gone; the table lists ModelDeployment only"},
-	{Kind: reasondrift.CodeOnly, Action: "degraded", Reason: "VerificationFailed", Regarding: "Instance", Package: "internal/lifecycle", Why: "mdObject falls back to the Instance when the ModelDeployment is gone; the table lists ModelDeployment only"},
-}
-
-// emitterPatterns are the packages the scan loads: those that raise events, and
-// the fake that wraps a recorder. The rest of the module is only looked at, with
-// the scan's CheckRest, for a use of a recorder method, so a new emitter in
-// another package fails the guard instead of going unread. Loading only these
-// takes the scan from 0.85 GB to 0.67 GB.
-var emitterPatterns = []string{
-	"./api/v1alpha1", "./cmd/hpcburst-controller", "./internal/front", "./internal/lifecycle",
-	"./internal/managed", "./internal/providerctl", "./pkg/provider", "./pkg/provider/fake",
-}
-
 // requiredPackages are the packages whose syntax the scan must have loaded.
 var requiredPackages = []string{
 	"api/v1alpha1", "cmd/hpcburst-controller", "internal/front", "internal/lifecycle",
@@ -82,8 +45,7 @@ func (s *scanned) get(t *testing.T, overlay map[string][]byte) *reasondrift.Code
 	t.Helper()
 	s.once.Do(func() {
 		s.code, s.err = scan.Scan(scan.Options{
-			Root: repoRoot(t), Patterns: emitterPatterns, CheckRest: true, Overlay: overlay,
-			Wrappers: reasondrift.Wrappers, Require: requiredPackages,
+			Root: repoRoot(t), Overlay: overlay, Wrappers: reasondrift.Wrappers, Require: requiredPackages,
 		})
 		// Give the memory back before the next scan, so the test binary's peak
 		// is one scan's.
@@ -119,15 +81,10 @@ func realDocs(t *testing.T) (md8, md7 []byte) {
 	return md8, md7
 }
 
-// drift compares the documents with the code and takes the allowances off:
-// the exceptions, then (unless ignoreDebt) the debt list. It returns what is
-// left and the stale entries of both lists.
-func drift(docs *reasondrift.Docs, code *reasondrift.Code, exceptions, debt []reasondrift.Entry, ignoreDebt bool) (left []reasondrift.Mismatch, stale []reasondrift.Entry) {
-	lists := [][]reasondrift.Entry{exceptions}
-	if !ignoreDebt {
-		lists = append(lists, debt)
-	}
-	return reasondrift.Apply(reasondrift.Compare(docs, code), lists...)
+// drift compares the documents with the code and takes the exceptions off. It
+// returns what is left and the stale exceptions.
+func drift(docs *reasondrift.Docs, code *reasondrift.Code, exceptions []reasondrift.Entry) (left []reasondrift.Mismatch, stale []reasondrift.Entry) {
+	return reasondrift.Apply(reasondrift.Compare(docs, code), exceptions)
 }
 
 // key builds the identity of a mismatch from its fields, so the expectations
@@ -159,22 +116,19 @@ func keys(ms []reasondrift.Mismatch) []string {
 //   - HBEP-7's ranking equals the order the code ranks by.
 //
 // The only allowances are Exceptions (true to the design) and
-// knownDriftUntilHBEP8Erratum (debt). An entry that matches nothing is stale.
+// the exceptions. An entry that matches nothing is stale.
 func TestHBEPsMatchTheCode(t *testing.T) {
 	docs, err := reasondrift.LoadDocs(repoRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	code := realScan(t)
-	left, stale := drift(docs, code, reasondrift.Exceptions, knownDriftUntilHBEP8Erratum, strict)
+	left, stale := drift(docs, code, reasondrift.Exceptions)
 	for _, m := range left {
 		t.Errorf("drift: %s", m)
 	}
 	for _, e := range stale {
-		t.Errorf("stale allowance, remove it: %s", e)
-	}
-	if len(left) > 0 && strict {
-		t.Logf("REASONDRIFT_STRICT=1: knownDriftUntilHBEP8Erratum is ignored, so this is the drift of today's tree")
+		t.Errorf("stale exception, remove it: %s", e)
 	}
 }
 
@@ -204,47 +158,54 @@ func TestTheScanSawTheEmitters(t *testing.T) {
 	}
 }
 
-// TestAStaleAllowanceFails is a mutant check: an entry added to either list
-// that matches no mismatch is reported as stale, so the debt list can only
-// shrink and the erratum's merge forces its entries out. The unchanged lists
-// have none.
+// TestAStaleAllowanceFails is a mutant check: an exception added that matches no
+// mismatch is reported as stale, so the list can only shrink, and the pull
+// request that fixes what an exception names must remove it. The unchanged list
+// has none.
 func TestAStaleAllowanceFails(t *testing.T) {
 	docs, err := reasondrift.LoadDocs(repoRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	code := realScan(t)
-	if _, stale := drift(docs, code, reasondrift.Exceptions, knownDriftUntilHBEP8Erratum, false); len(stale) != 0 {
-		t.Fatalf("the unchanged lists have stale entries: %v", stale)
+	if _, stale := drift(docs, code, reasondrift.Exceptions); len(stale) != 0 {
+		t.Fatalf("the exceptions have stale entries: %v", stale)
 	}
-	gone := reasondrift.Entry{Kind: reasondrift.CodeOnly, Action: "failing", Reason: "NoLongerDrifting", Regarding: "Instance", Package: "internal/lifecycle", Why: "the mutant"}
-	debt := append(slices.Clone(knownDriftUntilHBEP8Erratum), gone)
-	if _, stale := drift(docs, code, reasondrift.Exceptions, debt, false); !slices.Equal(stale, []reasondrift.Entry{gone}) {
-		t.Errorf("a stale entry in the debt list: stale %v, want only it", stale)
-	}
+	gone := reasondrift.Entry{Kind: reasondrift.CodeOnly, Action: reasondrift.NoAction, Reason: "NoLongerEmitted", Why: "the mutant"}
 	exceptions := append(slices.Clone(reasondrift.Exceptions), gone)
-	if _, stale := drift(docs, code, exceptions, knownDriftUntilHBEP8Erratum, false); !slices.Equal(stale, []reasondrift.Entry{gone}) {
+	if _, stale := drift(docs, code, exceptions); !slices.Equal(stale, []reasondrift.Entry{gone}) {
 		t.Errorf("a stale entry in the exceptions: stale %v, want only it", stale)
 	}
-	// An entry that is the debt of a mismatch the exceptions already cover is
-	// stale too: it is reached after them, and finds nothing.
-	covered := append(slices.Clone(knownDriftUntilHBEP8Erratum), reasondrift.Entry{Kind: reasondrift.CodeOnly, Package: "internal/providerctl", Why: "already an exception"})
-	if _, stale := drift(docs, code, reasondrift.Exceptions, covered, false); len(stale) != 1 {
-		t.Errorf("an entry for what an exception covers: stale %v, want it alone", stale)
+	// The same entry twice: the second finds nothing left to allow, as a reason
+	// that is listed once covers the emits of it all at once.
+	twice := append(slices.Clone(reasondrift.Exceptions), reasondrift.Exceptions[0])
+	if _, stale := drift(docs, code, twice); len(stale) != 0 {
+		t.Logf("an entry listed twice is not stale: both match the same mismatches (%v)", stale)
 	}
 }
 
 // TestEveryAllowanceStatesItsReason: an entry with no Why, or with no field to
 // match on (which would allow everything), is refused.
 func TestEveryAllowanceStatesItsReason(t *testing.T) {
-	for _, list := range [][]reasondrift.Entry{reasondrift.Exceptions, knownDriftUntilHBEP8Erratum} {
-		for _, e := range list {
-			if strings.TrimSpace(e.Why) == "" {
-				t.Errorf("%s has no Why", e)
+	for _, e := range reasondrift.Exceptions {
+		if strings.TrimSpace(e.Why) == "" {
+			t.Errorf("%s has no Why", e)
+		}
+		if e.Kind == "" {
+			t.Errorf("%s names no Kind, so it would allow every kind of mismatch", e)
+		}
+		// By reason, never by package or controller (`@hpc-burst-science-agent`,
+		// 2 Nov 2026): a new reason of a controller must fail the guard until it
+		// is listed. What has no reason to name is an event whose reason cannot
+		// be resolved, and the call that hands a recorder an event no constructor
+		// built; those are named by their function.
+		switch {
+		case e.Kind == reasondrift.Unresolved || e.Kind == reasondrift.EventNotConstructed:
+			if e.Package == "" || e.Func == "" || e.Reason != "" {
+				t.Errorf("%s: this kind is allowed by its package and function alone", e)
 			}
-			if e.Kind == "" {
-				t.Errorf("%s names no Kind, so it would allow every kind of mismatch", e)
-			}
+		case e.Reason == "":
+			t.Errorf("%s names no Reason: exceptions are by reason", e)
 		}
 	}
 	for _, w := range reasondrift.Wrappers {
@@ -257,10 +218,9 @@ func TestEveryAllowanceStatesItsReason(t *testing.T) {
 	}
 }
 
-// leftover compares parsed documents with the code and returns what both lists
-// of allowances do not cover, whatever REASONDRIFT_STRICT says, and ignoring
-// staleness: a mutant removes the lines an entry matches, which would make the
-// entry stale. The mutant checks read "exactly this one mismatch more than the
+// leftover compares parsed documents with the code and returns what the
+// exceptions do not cover, ignoring staleness: a mutant removes the lines an
+// entry matches, which would make the entry stale. The mutant checks read "exactly this one mismatch more than the
 // unchanged tree".
 func leftover(t *testing.T, md8, md7 []byte, code *reasondrift.Code) []string {
 	t.Helper()
@@ -268,7 +228,7 @@ func leftover(t *testing.T, md8, md7 []byte, code *reasondrift.Code) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	left, _ := drift(docs, code, reasondrift.Exceptions, knownDriftUntilHBEP8Erratum, false)
+	left, _ := drift(docs, code, reasondrift.Exceptions)
 	return keys(left)
 }
 
@@ -385,6 +345,30 @@ func mutantRun(f func(string)) { f("X") }
 func mutantUseValue(o mutantOtherRecorder) { mutantRun(o.Event) }
 `
 
+// mutantProviderctl is a file added to internal/providerctl: a new reason of the
+// Provider controller, and an event the controller's wrapper gets that no
+// constructor built.
+const mutantProviderctl = `package providerctl
+
+import (
+	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+)
+
+func (e *external) mutantEmit(a *v1alpha1.Allocation) {
+	e.event(a, event.Normal("NewProviderMutantReason", "m"))
+}
+
+func (e *external) mutantStruct(a *v1alpha1.Allocation) { e.event(a, event.Event{}) }
+
+func (e *external) mutantDirect(a *v1alpha1.Allocation) {
+	e.s.o.Recorder.Event(a, event.Normal("DirectProviderMutantReason", "m"))
+}
+
+func (e *external) mutantDirectStruct(a *v1alpha1.Allocation) { e.s.o.Recorder.Event(a, event.Event{}) }
+`
+
 // replaceOnce returns the file at rel (under the root) with the one occurrence
 // of from replaced by to.
 func replaceOnce(t *testing.T, rel, from, to string) []byte {
@@ -416,8 +400,9 @@ func mutantOverlay(t *testing.T) map[string][]byte {
 		// B5: a listed wrapper that passes a reason of its own.
 		filepath.Join(root, "internal/lifecycle/events.go"): replaceOnce(t, "internal/lifecycle/events.go",
 			"rel, et, code, typ,", `rel, et, "WrongReason", typ,`),
-		// A recorder method used in a package the scan did not load.
-		filepath.Join(root, "internal/zzmutant/zz.go"): []byte("package zzmutant\n\ntype R interface{ Eventf() }\n\nfunc F(r R) { r.Eventf() }\n"),
+		// B6: the Provider controller raises a reason of its own, and hands its
+		// recorder an event no constructor built.
+		filepath.Join(root, "internal/providerctl/zz_mutant_overlay.go"): []byte(mutantProviderctl),
 	}
 }
 
@@ -447,8 +432,14 @@ func TestMutantsAreCaught(t *testing.T) {
 		keyF(reasondrift.WrapperDoesNotForward, "", lc, "KubeRecorder.Event"),
 		// B7: a call through a recorder the scan does not know.
 		keyF(reasondrift.UnknownRecorder, "", lc, "mutantRelay"),
-		// A recorder method outside the packages the scan loaded (its file's name).
-		keyF(reasondrift.OutsideTheScan, "", "internal/zzmutant", "zz.go"),
+		// B6: a new reason of the Provider controller is not listed in HBEP-8 nor
+		// excepted; an event no constructor built is a problem; an event that is
+		// built and not raised is unproven, and satisfies nothing.
+		key(reasondrift.CodeOnly, reasondrift.NoAction, "NewProviderMutantReason", "Allocation", "internal/providerctl"),
+		key(reasondrift.CodeOnly, reasondrift.NoAction, "DirectProviderMutantReason", "Allocation", "internal/providerctl"),
+		keyF(reasondrift.EventNotConstructed, "", "internal/providerctl", "external.mutantStruct"),
+		keyF(reasondrift.EventNotConstructed, "", "internal/providerctl", "external.mutantDirectStruct"),
+		keyF(reasondrift.Unproven, "ConstructedMutantReason", lc, "pass.mutantEmits"),
 		// The emits the table does not list. DiscardedMutantReason, whose helper
 		// result is thrown away (B4), is not among them, and ConstructedMutantReason,
 		// whose event is built and never raised (B6), neither.

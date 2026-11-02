@@ -39,6 +39,12 @@ type Emit struct {
 	Actions        []string
 	Kinds          []string
 	Unresolved     string
+	// Unproven is set for an event built by a constructor (event.Normal,
+	// event.Warning, provider.NewManagedEvent) whose value was not shown to
+	// reach a recorder: it is passed straight to a recorder call, or to a
+	// wrapper at the parameter that carries the event, or it is nothing that
+	// raises an event. The reasons are known; the event may never be raised.
+	Unproven string
 }
 
 // Code is what the scan of the code found.
@@ -70,9 +76,10 @@ const (
 	// WrapperDoesNotForward: a listed wrapper whose recorder call does not pass
 	// on what its Forwards say.
 	WrapperDoesNotForward = "wrapper-does-not-forward"
-	// OutsideTheScan: a use of a recorder method in a package the scan did not
-	// load.
-	OutsideTheScan = "outside-the-scan"
+	// EventNotConstructed: an event that is passed to a recorder or to a wrapper
+	// at a parameter that carries one is not the value of a known constructor,
+	// so its reason cannot be read.
+	EventNotConstructed = "event-not-constructed"
 )
 
 // Problem is something the scan met and could not accept. Compare turns each
@@ -101,6 +108,10 @@ const (
 	// Unresolved: an emit site's reason, type or regarding kind cannot be
 	// resolved to constants.
 	Unresolved = "unresolved"
+	// Unproven: an event is built by a constructor and not shown to reach a
+	// recorder. It is not counted as raised, so a table row it would satisfy
+	// stays unsatisfied, and it is a mismatch of its own.
+	Unproven = "unproven"
 	// RankingHBEPOnly and RankingCodeOnly: a reason only HBEP-7's ranking, or
 	// only the code's, holds. RankingOrder: both hold the same reasons in a
 	// different order.
@@ -165,6 +176,12 @@ func Compare(d *Docs, c *Code) []Mismatch {
 	for _, e := range c.Emits {
 		if e.Unresolved != "" {
 			out = append(out, Mismatch{Kind: Unresolved, Package: e.Package, Func: e.Func, Detail: e.Unresolved + " (" + e.Pos + ")"})
+			continue
+		}
+		if e.Unproven != "" {
+			for _, r := range e.Reasons {
+				out = append(out, Mismatch{Kind: Unproven, Reason: r, Package: e.Package, Func: e.Func, Detail: e.Unproven + " (" + e.Pos + ")"})
+			}
 			continue
 		}
 		if !slices.Contains(e.Actions, NoAction) {
