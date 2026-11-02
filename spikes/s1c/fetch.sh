@@ -66,9 +66,12 @@ if [ -n "${S1C_ENVOY:-}" ]; then verify "$S1C_ENVOY" "$ENVOY_SHA"; fi
 # binary; check them and print its sha256 (a local build, so there is no published digest).
 if [ -n "${S1C_SIM:-}" ] && [ -x "$S1C_SIM" ]; then
   echo "engine sha256 $(sha256sum "$S1C_SIM" | cut -d' ' -f1)"
-  go version -m "$S1C_SIM" | grep -q 'vcs.revision=7bda03f9fef85139617cb4f724dccafe1cf8cbbf' \
+  # Read whole, then matched: piped into grep -q under pipefail, go version -m could die of SIGPIPE after the
+  # match and read as a mismatch (plgrid-llmlab-hpc-burst #213).
+  info=$(go version -m "$S1C_SIM") || { echo "fetch: go version -m cannot read S1C_SIM" >&2; exit 1; }
+  grep -q 'vcs.revision=7bda03f9fef85139617cb4f724dccafe1cf8cbbf' <<<"$info" \
     || { echo "fetch: S1C_SIM is not built from llm-d-inference-sim 7bda03f" >&2; exit 1; }
-  go version -m "$S1C_SIM" | grep -q 'vcs.modified=true' \
+  grep -q 'vcs.modified=true' <<<"$info" \
     || echo "fetch: note: S1C_SIM has no local changes recorded; spike S2's loopback patch may be missing" >&2
 else
   echo "fetch: note: S1C_SIM is not set to an executable (spike S2's patched llm-d-inference-sim)" >&2

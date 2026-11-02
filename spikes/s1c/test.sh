@@ -24,7 +24,10 @@ echo "rebuilt s1cbench from this source"
 python3 tests/test_analysis.py
 echo "engine: sha256 $(sha256sum "$S1C_SIM" | cut -d' ' -f1)"
 go version -m "$S1C_SIM" | grep -E $'^\tmod\t|vcs.revision|vcs.modified' | sed 's/^\t/  /'
-go version -m "$S1C_SIM" | grep -q 'vcs.revision=7bda03f9fef85139617cb4f724dccafe1cf8cbbf' \
+# Read whole, then matched: piped into grep -q under pipefail, go version -m could die of SIGPIPE after the match
+# and read as a mismatch (plgrid-llmlab-hpc-burst #213).
+info=$(go version -m "$S1C_SIM") || { echo "test.sh: go version -m cannot read the engine" >&2; exit 1; }
+grep -q 'vcs.revision=7bda03f9fef85139617cb4f724dccafe1cf8cbbf' <<<"$info" \
   || { echo "test.sh: the engine is not built from llm-d-inference-sim 7bda03f" >&2; exit 1; }
 python3 s1c_selftest.py
 python3 s1c.py leftovers
