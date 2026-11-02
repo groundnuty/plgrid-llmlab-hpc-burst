@@ -61,6 +61,10 @@ const (
 	// open at the same moment.
 	ConcurrentStreams = 16
 	StreamRate        = 20.0
+	// MinLargeBody is the smallest request body that counts as large, 0.1 MB (issue
+	// #224): the hour must send such requests, among the streams, so that the upload
+	// direction carries real load and the tunnel's head-of-line pressure shows there.
+	MinLargeBody = 100_000
 	// MinIdleGap is the shortest stretch with no request open at all, where the
 	// session carries heartbeats only.
 	MinIdleGap = 2 * time.Minute

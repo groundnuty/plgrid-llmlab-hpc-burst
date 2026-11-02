@@ -101,6 +101,8 @@ func TestGPUAccounting(t *testing.T) {
 		return
 	}
 	s := load(t)
+	// The text to post names where the run ran (issue #224); refuse before any cluster is used.
+	frontLabel(t)
 	w := buildWorld(t, s, worldKit{agent: gpuAgent, dial: func(v slurm.Validated) (slurm.Runner, io.Closer, error) {
 		ssh, err := sshrunNew(s, v)
 		return ssh, ssh, err
@@ -108,8 +110,20 @@ func TestGPUAccounting(t *testing.T) {
 	gpuAccountingBody(t, w, "gpu-accounting-"+s.profile.Name)
 }
 
+// frontLabel is the label of where the front ran, from the variable the script sets; a run without a valid one is
+// refused, so the text to post can never carry a placeholder in its place.
+func frontLabel(t testing.TB) string {
+	t.Helper()
+	label := os.Getenv(alpha.EnvFrontLabel)
+	if err := alpha.ValidFrontLabel(label); err != nil {
+		t.Fatalf("the text to post cannot be written: %s: %v", alpha.EnvFrontLabel, err)
+	}
+	return label
+}
+
 func dryGPUAccounting(t *testing.T) {
 	t.Helper()
+	frontLabel(t)
 	row := os.Getenv("HPCBURST_ALPHA_ROW")
 	fault := os.Getenv("HPCBURST_ALPHA_DRY_FAULT")
 	w, _ := dryAccountingWorld(t, row, fault, os.Getenv("HPCBURST_ALPHA_OUT"))
@@ -315,7 +329,7 @@ func gpuAccountingBody(t testing.TB, w *world, rowName string) {
 	if len(failures) > 0 {
 		posts += "- failed checks: " + alpha.Summary(failures) + "\n"
 	}
-	w.p.save(alpha.PostsFile, []byte(posts))
+	w.p.save(alpha.PostsFile, []byte(alpha.InsertFrontLine(posts, frontLabel(t))))
 	w.p.save(alpha.RecordFile, []byte(fmt.Sprintf("{\"row\": %q, \"verdict\": %q, \"nodeGPUs\": %d, \"nodeSource\": %q, \"smiGPUs\": %d, \"requestedGPUs\": %d}\n", row.Name, verdict, nodeGPUs, source, smi, w.s.gpus)))
 	if len(failures) > 0 {
 		t.Fatalf("%s failed: %s", row.Name, alpha.Summary(failures))

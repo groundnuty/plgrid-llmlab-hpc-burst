@@ -178,16 +178,20 @@ func TestTheGapAndTheQueueWaitAreWorkedOutFromTheTimes(t *testing.T) {
 
 // mix is the traffic of an hour, with each ingredient adjustable at its boundary: three requests of near
 // length gap apart, a burst of concurrent streams of 2 minutes at rate tokens a second, an idle stretch, three
-// more requests like the first three, and requests of 5 minutes to the hour's end.
+// more requests like the first three, and requests of 5 minutes to the hour's end. One large request (a body of
+// body bytes, 20 s long, at 2 tokens a second) opens largeAt after the burst opens: inside the burst's 2 minutes
+// it is among the streams; a negative largeAt puts it before them, 2 minutes or more after it, after them.
 type mix struct {
 	near, gap time.Duration
 	burst     int
 	rate      float64
 	idle      time.Duration
+	body      int
+	largeAt   time.Duration
 }
 
 func goodMix() mix {
-	return mix{near: NearDeadline, gap: 0, burst: ConcurrentStreams, rate: StreamRate, idle: MinIdleGap}
+	return mix{near: NearDeadline, gap: 0, burst: ConcurrentStreams, rate: StreamRate, idle: MinIdleGap, body: MinLargeBody, largeAt: 10 * time.Second}
 }
 
 func (m mix) requests(start time.Time) []Stream {
@@ -204,6 +208,9 @@ func (m mix) requests(start time.Time) []Stream {
 	for i := 0; i < m.burst; i++ {
 		out = append(out, Stream{ID: fmt.Sprintf("c%d", i), Opened: at, Ended: at.Add(2 * time.Minute), Complete: true, Tokens: int(m.rate * 120)})
 	}
+	// The large request: among the streams by default; the tests move it to the edges of their window.
+	burstAt := at.Add(m.largeAt)
+	out = append(out, Stream{ID: "u0", Opened: burstAt, Ended: burstAt.Add(20 * time.Second), Complete: true, Tokens: 40, BodyBytes: m.body})
 	at = at.Add(2*time.Minute + m.idle)
 	run("b")
 	// Requests of the deadline's length to the end of the hour, exactly.
@@ -235,9 +242,42 @@ func goodTunnel() (TunnelHourObs, []provider.Job) {
 		Requests:   reqs,
 		Samples:    samplesEvery(ready, ready.Add(Hour), time.Minute, ready.Add(-10*time.Second)),
 		DrainStart: ready.Add(Hour), // an hour to the second, the drain starting as it ends
-		Rate:       PathRate{Direction: "up", OK: true, AskedSeconds: 30, TimedSeconds: 29, Bytes: 1, Tokens: 1, UnderLoad: true}, Deployment: row.Plan(),
+		Rates: []PathRate{
+			{Direction: DirUpload, OK: true, AskedSeconds: 30, TimedSeconds: 29, Bytes: 1, UnderLoad: true},
+			{Direction: DirDownload, OK: true, AskedSeconds: 30, TimedSeconds: 29, Bytes: 1, Tokens: 1, UnderLoad: true},
+		},
+		Deployment: row.Plan(),
 	}
 	return o, leased(row, job(o.Tags[0], row.Partition, 0, 0, 85*time.Minute))
+}
+
+// rateOf is the observation's rate of a direction, to change in place; largeOf the large request of the good mix;
+// streamsOpen the moment the good mix's 16 streams open.
+func rateOf(o *TunnelHourObs, dir string) *PathRate {
+	for i := range o.Rates {
+		if o.Rates[i].Direction == dir {
+			return &o.Rates[i]
+		}
+	}
+	panic("no rate for " + dir)
+}
+
+func largeOf(o *TunnelHourObs) *Stream {
+	for i := range o.Requests {
+		if o.Requests[i].ID == "u0" {
+			return &o.Requests[i]
+		}
+	}
+	panic("no large request")
+}
+
+func streamsOpen(o *TunnelHourObs) time.Time {
+	for _, r := range o.Requests {
+		if r.ID == "c0" {
+			return r.Opened
+		}
+	}
+	panic("no stream")
 }
 
 func TestTunnelHourBoundaries(t *testing.T) {
@@ -280,13 +320,59 @@ func TestTunnelHourBoundaries(t *testing.T) {
 		{"a hole of 3 minutes between looks", func(o *TunnelHourObs, _ *[]provider.Job) { o.Samples = append(o.Samples[:30], o.Samples[32:]...) }, "more than 2 minutes without a look"},
 		{"one look only", func(o *TunnelHourObs, _ *[]provider.Job) { o.Samples = o.Samples[:1] }, "looked at fewer than twice"},
 		{"no look", func(o *TunnelHourObs, _ *[]provider.Job) { o.Samples = nil }, "looked at fewer than twice"},
-		{"rate not ok", func(o *TunnelHourObs, _ *[]provider.Job) { o.Rate.OK = false }, "path rate was not measured"},
-		{"rate asked for 29.9 s", func(o *TunnelHourObs, _ *[]provider.Job) { o.Rate.AskedSeconds = 29.9 }, "asked for under 30 s"},
-		{"rate timed 28.9 s", func(o *TunnelHourObs, _ *[]provider.Job) { o.Rate.TimedSeconds = 28.9 }, "timed under 29 s"},
-		{"rate moved no bytes", func(o *TunnelHourObs, _ *[]provider.Job) { o.Rate.Bytes = 0 }, "moved no bytes"},
-		{"rate in the other direction", func(o *TunnelHourObs, _ *[]provider.Job) { o.Rate.Direction = "down" }, "not in the token direction"},
-		{"rate not under load", func(o *TunnelHourObs, _ *[]provider.Job) { o.Rate.UnderLoad = false }, "not measured under load"},
-		{"rate in bytes only", func(o *TunnelHourObs, _ *[]provider.Job) { o.Rate.Tokens = 0 }, "not measured under load"},
+		// The path rate, one per direction (issue #224): each is held to S1's C6; the download also moves tokens.
+		{"upload rate not ok", func(o *TunnelHourObs, _ *[]provider.Job) { rateOf(o, DirUpload).OK = false }, "the upload path rate was not measured"},
+		{"download rate not ok", func(o *TunnelHourObs, _ *[]provider.Job) { rateOf(o, DirDownload).OK = false }, "the download path rate was not measured"},
+		{"upload rate asked for 29.9 s", func(o *TunnelHourObs, _ *[]provider.Job) { rateOf(o, DirUpload).AskedSeconds = 29.9 }, "the upload path rate was asked for under 30 s"},
+		{"download rate asked for 29.9 s", func(o *TunnelHourObs, _ *[]provider.Job) { rateOf(o, DirDownload).AskedSeconds = 29.9 }, "the download path rate was asked for under 30 s"},
+		{"upload rate timed 28.9 s", func(o *TunnelHourObs, _ *[]provider.Job) { rateOf(o, DirUpload).TimedSeconds = 28.9 }, "the upload path rate was asked for under 30 s, timed under 29 s"},
+		{"download rate timed 28.9 s", func(o *TunnelHourObs, _ *[]provider.Job) { rateOf(o, DirDownload).TimedSeconds = 28.9 }, "the download path rate was asked for under 30 s, timed under 29 s"},
+		{"upload rate moved no bytes", func(o *TunnelHourObs, _ *[]provider.Job) { rateOf(o, DirUpload).Bytes = 0 }, "the upload path rate was asked for under 30 s, timed under 29 s, or moved no bytes"},
+		{"download rate moved no bytes", func(o *TunnelHourObs, _ *[]provider.Job) { rateOf(o, DirDownload).Bytes = 0 }, "the download path rate was asked for under 30 s, timed under 29 s, or moved no bytes"},
+		{"upload rate not under load", func(o *TunnelHourObs, _ *[]provider.Job) { rateOf(o, DirUpload).UnderLoad = false }, "the upload path rate was not measured under load"},
+		{"download rate not under load", func(o *TunnelHourObs, _ *[]provider.Job) { rateOf(o, DirDownload).UnderLoad = false }, "the download path rate was not measured under load"},
+		{"download rate in bytes only", func(o *TunnelHourObs, _ *[]provider.Job) { rateOf(o, DirDownload).Tokens = 0 }, "the download path rate moved no tokens"},
+		// The upload carries request bodies, not tokens: none is asked of it.
+		{"upload rate with tokens counted anyway", func(o *TunnelHourObs, _ *[]provider.Job) { rateOf(o, DirUpload).Tokens = 99 }, ""},
+		{"only the download posted", func(o *TunnelHourObs, _ *[]provider.Job) { o.Rates = []PathRate{*rateOf(o, DirDownload)} }, "the upload path rate was not posted: both directions are needed"},
+		{"only the upload posted", func(o *TunnelHourObs, _ *[]provider.Job) { o.Rates = []PathRate{*rateOf(o, DirUpload)} }, "the download path rate was not posted: both directions are needed"},
+		{"no rate posted", func(o *TunnelHourObs, _ *[]provider.Job) { o.Rates = nil }, "the upload path rate was not posted"},
+		{"two rates for one direction", func(o *TunnelHourObs, _ *[]provider.Job) { o.Rates[0].Direction = DirDownload }, "the path rates are not one per direction"},
+		{"a third rate", func(o *TunnelHourObs, _ *[]provider.Job) {
+			o.Rates = append(o.Rates, PathRate{Direction: DirUpload, OK: true})
+		}, "the path rates are not one per direction"},
+		{"the old up", func(o *TunnelHourObs, _ *[]provider.Job) { o.Rates[1].Direction = "up" }, "neither upload nor download"},
+		// The upload exercised (issue #224): a body of 0.1 MB (100,000 bytes) or more, sent while the 16 streams are open.
+		{"the largest body one byte under 0.1 MB", func(o *TunnelHourObs, _ *[]provider.Job) { largeOf(o).BodyBytes = MinLargeBody - 1 }, "no request body reached 0.1 MB"},
+		{"no body size recorded at all", func(o *TunnelHourObs, _ *[]provider.Job) { largeOf(o).BodyBytes = 0 }, "no request body reached 0.1 MB"},
+		{"a body of exactly 0.1 MB", func(o *TunnelHourObs, _ *[]provider.Job) { largeOf(o).BodyBytes = MinLargeBody }, ""},
+		{"a body of 0.4 MB is no fault", func(o *TunnelHourObs, _ *[]provider.Job) { largeOf(o).BodyBytes = 400_000 }, ""},
+		{"a body of 5 MB is no fault", func(o *TunnelHourObs, _ *[]provider.Job) { largeOf(o).BodyBytes = 5_000_000 }, ""},
+		{"the large request opens as the streams open", func(o *TunnelHourObs, _ *[]provider.Job) {
+			largeOf(o).Opened = streamsOpen(o)
+			largeOf(o).Ended = largeOf(o).Opened.Add(20 * time.Second)
+		}, ""},
+		{"the large request opens a nanosecond before the streams end", func(o *TunnelHourObs, _ *[]provider.Job) {
+			// It ends with the streams, so the idle stretch after them keeps its 2 minutes.
+			largeOf(o).Opened = streamsOpen(o).Add(2*time.Minute - time.Nanosecond)
+			largeOf(o).Ended = streamsOpen(o).Add(2 * time.Minute)
+		}, ""},
+		{"the large request opens as the streams end", func(o *TunnelHourObs, _ *[]provider.Job) {
+			largeOf(o).Opened = streamsOpen(o).Add(2 * time.Minute)
+			largeOf(o).Ended = largeOf(o).Opened.Add(20 * time.Second)
+		}, "no request of 0.1 MB or more was sent while the 16 streams were open"},
+		{"the large request ends as the streams open", func(o *TunnelHourObs, _ *[]provider.Job) {
+			largeOf(o).Ended = streamsOpen(o)
+			largeOf(o).Opened = largeOf(o).Ended.Add(-20 * time.Second)
+		}, "no request of 0.1 MB or more was sent while the 16 streams were open"},
+		{"15 streams while the large request is open", func(o *TunnelHourObs, _ *[]provider.Job) {
+			// One stream too few at every moment the large request is open: its rate is under 20 tokens a second.
+			for i := range o.Requests {
+				if o.Requests[i].ID == "c0" {
+					o.Requests[i].Tokens = 100
+				}
+			}
+		}, "the hour held no 16 concurrent streams"},
 		{"the cluster shows 59 minutes", func(o *TunnelHourObs, j *[]provider.Job) { (*j)[0].EndTime = ptr(at(59 * time.Minute)) }, "ran under an hour"},
 		{"the cluster shows exactly an hour", func(o *TunnelHourObs, j *[]provider.Job) { (*j)[0].EndTime = ptr(at(Hour)) }, ""},
 		// Evidence that is absent is not evidence (the scheduler's times corroborate the requests').
@@ -407,14 +493,19 @@ func TestASlowTunnelIsFlaggedNotFailed(t *testing.T) {
 	row, _ := RowByName("tunnel-hour-athena")
 	o, jobs := goodTunnel()
 	// 600,000 B/s is under S1's 629,146 B/s flag line and passes the verdict.
-	o.Rate = PathRate{Direction: "up", OK: true, AskedSeconds: 30, TimedSeconds: 30, Bytes: 18_000_000, Tokens: 9600, UnderLoad: true}
+	*rateOf(&o, DirDownload) = PathRate{Direction: DirDownload, OK: true, AskedSeconds: 30, TimedSeconds: 30, Bytes: 18_000_000, Tokens: 9600, UnderLoad: true}
 	wantFailure(t, VerifyTunnelHour(row, o, jobs), "")
 	if f := TunnelHourFlags(o); len(f) != 1 || !strings.Contains(f[0], "600000 B/s") {
 		t.Errorf("flags %v, want one naming 600000 B/s", f)
 	}
-	o.Rate.Bytes = 19_000_000 // 633,333 B/s
+	rateOf(&o, DirDownload).Bytes = 19_000_000 // 633,333 B/s
 	if f := TunnelHourFlags(o); len(f) != 0 {
 		t.Errorf("flags %v at 633333 B/s, want none", f)
+	}
+	// S1's flag is on the token direction: a slow upload is posted, not flagged.
+	rateOf(&o, DirUpload).Bytes = 18_000_000
+	if f := TunnelHourFlags(o); len(f) != 0 {
+		t.Errorf("flags %v for a slow upload, want none", f)
 	}
 }
 

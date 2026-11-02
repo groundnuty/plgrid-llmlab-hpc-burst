@@ -61,6 +61,12 @@
 #                                choice when giving the go; the shape, the hold note and the test follow it
 #   LIVE_OWNER_GO_HELIOS_NOW     today's UTC date (YYYY-MM-DD), once the owner has said yes to the run: the rows that hold
 #                                QOS now's GPU for hours (alpha-helios-nooverlap, tunnel-hour-helios) refuse without it
+#   LIVE_FRONT_HOST_LABEL        where the front ran, in words: the host's role and its network position, inside or outside
+#                                Cyfronet's network (issue #224). The text to post of every row that writes one (the alpha
+#                                rows, tunnel-hour-*, gpu-accounting-*) names it, because the host that runs the front
+#                                decides the path to the login nodes, and so the timings. A description, never a host name
+#                                or an address: letters, digits, spaces and , ; ( ) ' - only, at most 120 bytes, and it must
+#                                say inside or outside. A row that needs it refuses (exit 3) without a valid one.
 # Cluster calls go through the ssh aliases helios and athena, one at a time per
 # host under <LIVE_LOCK_DIR>/<host>.lock. The aliases' ssh configuration is yours.
 #
@@ -231,6 +237,21 @@ apply_tunnel_lease() {
   done
 }
 
+# The rows whose text to post names where the front ran (issue #224): the rows that write a posts.md, which hack/livechecks
+# compares with the alpha package's rows. They need LIVE_FRONT_HOST_LABEL.
+front_label_table() {
+  cat <<'TABLE'
+# BEGIN FRONT LABEL
+alpha-athena-handover
+alpha-helios-nooverlap
+tunnel-hour-helios
+tunnel-hour-athena
+gpu-accounting-helios
+gpu-accounting-athena
+# END FRONT LABEL
+TABLE
+}
+
 # A bare name that stands for several rows, one per cluster, run one after the other (issue #194).
 # name | rows.
 alias_table() {
@@ -252,7 +273,7 @@ CLEAN_UNRESOLVED_POLLS=${LIVE_CLEAN_UNRESOLVED_POLLS:-20} # more quiet polls whe
 declare -a NAMES=()
 declare -A KIND PKG TEST GATES INPUTS CONTEXTS STATUS
 declare -A HOST PROFILE PARTITION QOS SLOT ACCTKEY GPUS CPUS MEM TLIMIT TMIN EXTRA SWAIT
-declare -A STACK ALIAS OGSET OGMIN MOSTJOBS
+declare -A STACK ALIAS OGSET OGMIN MOSTJOBS FRONTLABEL
 declare -A S=()
 
 load_tables() {
@@ -286,6 +307,10 @@ load_tables() {
     [ -n "$name" ] || continue
     OGSET[$name]=$og_key OGMIN[$name]=$og_min
   done < <(owner_go_table | grep -v -e '^#' -e '^$')
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    FRONTLABEL[$name]=1
+  done < <(front_label_table | grep -v -e '^#' -e '^$')
 }
 
 say() { printf '%s\n' "$*"; }
@@ -324,7 +349,7 @@ load_settings() {
     [ "$k" != "$line" ] || continue
     v=${v%\"}; v=${v#\"}; v=${v%\'}; v=${v#\'}
     case $k in
-      LIVE_OUT_DIR|LIVE_LOCK_DIR|LIVE_BUILD_LOCK|LIVE_LLMLAB_CREDENTIALS|LIVE_LLMLAB_MODEL|LIVE_CONF_CREDENTIALS_HELIOS|LIVE_CONF_CREDENTIALS_ATHENA|ACCOUNT_HELIOS_CPU|ACCOUNT_HELIOS_GH200|ACCOUNT_ATHENA_A100|LIVE_DIALHOME_MODE|LIVE_DIALHOME_ADDR|LIVE_DIALHOME_KEY|LIVE_BIN_DIR|LIVE_OWNER_GO_HELIOS_NOW|LIVE_TUNNEL_LEASE_MINUTES)
+      LIVE_OUT_DIR|LIVE_LOCK_DIR|LIVE_BUILD_LOCK|LIVE_LLMLAB_CREDENTIALS|LIVE_LLMLAB_MODEL|LIVE_CONF_CREDENTIALS_HELIOS|LIVE_CONF_CREDENTIALS_ATHENA|ACCOUNT_HELIOS_CPU|ACCOUNT_HELIOS_GH200|ACCOUNT_ATHENA_A100|LIVE_DIALHOME_MODE|LIVE_DIALHOME_ADDR|LIVE_DIALHOME_KEY|LIVE_BIN_DIR|LIVE_OWNER_GO_HELIOS_NOW|LIVE_TUNNEL_LEASE_MINUTES|LIVE_FRONT_HOST_LABEL)
         S[$k]=$v ;;
     esac
   done 2>/dev/null < "$HPCBURST_LIVE_SETTINGS"
@@ -357,10 +382,33 @@ check_settings() {
         case $name in
           alpha-*|tunnel-hour-*) check_alpha_settings "$name" || bad=1 ;;
         esac
+        [ -z "${FRONTLABEL[$name]:-}" ] || check_front_label || bad=1
         check_owner_go "$name" || bad=1 ;;
     esac
   done
   return $bad
+}
+
+# check_front_label: the label of where the front ran (issue #224). It is a description for the text to post, so it is held
+# to a narrow form on the properties this script owns, not on what a host looks like: a length, the characters of prose (no
+# dot, colon, slash or at sign, which a host name, an address or a URL needs), and a stated network position. The refusal
+# names the setting, never its value. The alpha package holds the same rule (alpha.ValidFrontLabel); hack/livechecks
+# runs both on the same labels.
+check_front_label() {
+  local l=${S[LIVE_FRONT_HOST_LABEL]:-} lower
+  # In a variable, so that no character in the bracket is read as an escape: space, comma, semicolon, parentheses,
+  # apostrophe and, last, the hyphen.
+  local form="^[A-Za-z0-9][A-Za-z0-9 ,;()'-]*\$"
+  if [ -z "$l" ]; then say "live-checks: setting LIVE_FRONT_HOST_LABEL is missing"; return 1; fi
+  if [ "${#l}" -gt 120 ] || ! [[ $l =~ $form ]]; then
+    say "live-checks: LIVE_FRONT_HOST_LABEL may hold only letters, digits, spaces and , ; ( ) ' - (at most 120 bytes; a description, never a host name or an address)"
+    return 1
+  fi
+  lower=${l,,}
+  if ! [[ $lower =~ (^|[^a-z])(inside|outside)([^a-z]|$) ]]; then
+    say "live-checks: LIVE_FRONT_HOST_LABEL must say whether the front ran inside or outside Cyfronet's network"
+    return 1
+  fi
 }
 
 # fmt_hold <minutes>: "2 h 40 min".
@@ -722,7 +770,7 @@ env_hub() { export HPCBURST_TEST_HUB=1; }
 env_conformance() {
   local n=$1 host=${HOST[$1]} up
   up=$(printf '%s' "$host" | tr a-z A-Z)
-  unset HPCBURST_CONF_GPU_MODEL HPCBURST_CONF_CPU_ARCH HPCBURST_CONF_DATA_PARSER HPCBURST_CONF_QOS HPCBURST_CONF_START_WAIT
+  unset HPCBURST_CONF_GPU_MODEL HPCBURST_CONF_CPU_ARCH HPCBURST_CONF_DATA_PARSER HPCBURST_CONF_QOS HPCBURST_CONF_START_WAIT HPCBURST_FRONT_HOST_LABEL
   export HPCBURST_CONFORMANCE=1 HPCBURST_CONF_PROFILE=${PROFILE[$n]} HPCBURST_CONF_PARTITION=${PARTITION[$n]}
   export HPCBURST_CONF_CREDENTIALS=${S[LIVE_CONF_CREDENTIALS_$up]} HPCBURST_CONF_ACCOUNT=${S[${ACCTKEY[$n]}]}
   export HPCBURST_CONF_GPUS=${GPUS[$n]} HPCBURST_CONF_CPUS=${CPUS[$n]} HPCBURST_CONF_MEMORY=${MEM[$n]}
@@ -741,6 +789,9 @@ env_conformance() {
     # Only a row with no start wait: with one, the bound is the first clock and the test takes no other.
     gpu-accounting-*) [ "${SWAIT[$n]:--}" != - ] || export HPCBURST_CONF_PENDING_MAX_SECONDS=${LIVE_PENDING_MAX_SECONDS:-7200} ;;
   esac
+  # Where the front ran (issue #224) goes to the rows that write a text to post; the variable is not HPCBURST_CONF_*, so
+  # the accounting rows' dry runs, which drop that family, still take it.
+  [ -z "${FRONTLABEL[$n]:-}" ] || export HPCBURST_FRONT_HOST_LABEL=${S[LIVE_FRONT_HOST_LABEL]}
 }
 
 # env_alpha <name>: the environment of an alpha row's test binary (issue #194). The row's name is the gate; the
@@ -749,7 +800,7 @@ env_conformance() {
 env_alpha() {
   local n=$1 host=${HOST[$1]} up
   up=$(printf '%s' "$host" | tr a-z A-Z)
-  unset HPCBURST_ALPHA_DRY HPCBURST_ALPHA_DRY_FAULT HPCBURST_ALPHA_DRY_ROOT HPCBURST_ALPHA_LEASE_MINUTES
+  unset HPCBURST_ALPHA_DRY HPCBURST_ALPHA_DRY_FAULT HPCBURST_ALPHA_DRY_ROOT HPCBURST_ALPHA_LEASE_MINUTES HPCBURST_FRONT_HOST_LABEL
   export HPCBURST_ALPHA_ROW=$n HPCBURST_ALPHA_PROFILE=${PROFILE[$n]} HPCBURST_ALPHA_PARTITION=${PARTITION[$n]}
   export HPCBURST_ALPHA_GPUS=${GPUS[$n]} HPCBURST_ALPHA_CPUS=${CPUS[$n]} HPCBURST_ALPHA_MEMORY=${MEM[$n]}
   export HPCBURST_ALPHA_ACCOUNT=${S[${ACCTKEY[$n]}]} HPCBURST_ALPHA_CREDENTIALS=${S[LIVE_CONF_CREDENTIALS_$up]}
@@ -757,6 +808,7 @@ env_alpha() {
   export HPCBURST_ALPHA_OUT=$REC_DIR HPCBURST_ALPHA_BIN_DIR=${S[LIVE_BIN_DIR]} HPCBURST_ALPHA_BUILD_DIR=${ALPHA_BUILD_DIR:-}
   export HPCBURST_ALPHA_DIALHOME_MODE=${S[LIVE_DIALHOME_MODE]} HPCBURST_ALPHA_DIALHOME_ADDR=${S[LIVE_DIALHOME_ADDR]}
   export HPCBURST_ALPHA_PENDING_MAX_SECONDS=${LIVE_PENDING_MAX_SECONDS:-7200}
+  [ -z "${FRONTLABEL[$n]:-}" ] || export HPCBURST_FRONT_HOST_LABEL=${S[LIVE_FRONT_HOST_LABEL]}
   # A tunnel row's lease, in minutes, as the shape holds it (after LIVE_TUNNEL_LEASE_MINUTES): the test judges that value.
   case $n in
     tunnel-hour-*) local lh lm; IFS=: read -r lh lm _ <<<"${TLIMIT[$n]}"; export HPCBURST_ALPHA_LEASE_MINUTES=$((10#$lh * 60 + 10#$lm)) ;;

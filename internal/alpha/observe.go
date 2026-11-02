@@ -23,6 +23,9 @@ type Stream struct {
 	// Tokens is the number of tokens the stream delivered, for the streams of a
 	// load (the rate a stream ran at is Tokens over its length).
 	Tokens int `json:"tokens,omitempty"`
+	// BodyBytes is the size of the request body the front sent to the node, the
+	// upload direction (issue #224); zero for a request whose size was not recorded.
+	BodyBytes int `json:"bodyBytes,omitempty"`
 }
 
 // TokensPerSecond is the rate the stream delivered tokens at; zero for a stream with no length.
@@ -101,9 +104,21 @@ func (o NoOverlapObs) Gap() time.Duration {
 	return o.SuccessorReady.Sub(o.DrainStart)
 }
 
-// PathRate is S1's measurement of the tunnel's sustained rate in the token
-// direction, node to front (spikes/s1-frp, "Path rate", verdict C6).
+// The two directions of the path, named by their endpoints, from the front's side
+// (issue #224). Upload carries the front's request bodies, front to node: the
+// direction most constrained from outside Cyfronet's network. Download carries the
+// tokens, node to front: S1's token direction (spikes/s1-frp, "Path rate", verdict
+// C6), which the code named "up" before the issue named the other one; "up" is gone
+// from the record, and a rate that still says it is an unknown direction.
+const (
+	DirUpload   = "upload"
+	DirDownload = "download"
+)
+
+// PathRate is S1's measurement of the tunnel's sustained rate in one direction
+// (spikes/s1-frp, "Path rate"). A tunnel-hour run measures both.
 type PathRate struct {
+	// Direction is DirUpload (front to node) or DirDownload (node to front).
 	Direction string `json:"direction"`
 	// OK is the measurement's own success flag.
 	OK bool `json:"ok"`
@@ -112,9 +127,10 @@ type PathRate struct {
 	AskedSeconds float64 `json:"askedSeconds"`
 	TimedSeconds float64 `json:"timedSeconds"`
 	Bytes        int64   `json:"bytes"`
-	// Tokens is the number of tokens that crossed in the same time, and UnderLoad
-	// says the measurement ran while the concurrent streams were open: the rate
-	// the owner wants is the one under load.
+	// Tokens is the number of tokens that crossed in the same time (the download
+	// direction only: the upload carries request bodies), and UnderLoad says the
+	// measurement ran while the concurrent streams were open: the rate the owner
+	// wants is the one under load.
 	Tokens    int64 `json:"tokens"`
 	UnderLoad bool  `json:"underLoad"`
 }
@@ -156,7 +172,8 @@ type TunnelHourObs struct {
 	DrainStart time.Time `json:"drainStart"`
 	// Deployment is what the run's ModelDeployment held (see DeploymentSpec).
 	Deployment DeploymentSpec `json:"deployment"`
-	Rate       PathRate       `json:"rate"`
+	// Rates are the path rates, one per direction (DirUpload and DirDownload).
+	Rates []PathRate `json:"rates"`
 }
 
 // AccountingObs is the kept accounting record of one real GPU job beside the

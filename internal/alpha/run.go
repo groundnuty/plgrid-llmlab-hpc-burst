@@ -22,6 +22,10 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 			err = errors.Join(err, fmt.Errorf("closing the steps: %w", cerr))
 		}
 	}()
+	// The text to post names where the front ran; a run without a label is refused before anything is driven.
+	if lerr := ValidFrontLabel(cfg.FrontLabel); lerr != nil {
+		return nil, fmt.Errorf("the text to post cannot be written: %w", lerr)
+	}
 	plan := Plan{Row: cfg.Row, Rec: rec, PendingMax: cfg.PendingMax, Logf: logf}
 	var (
 		tags    []string
@@ -74,12 +78,12 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 		verdict = "fail"
 	}
 	if serr := rec.SaveJSON(RecordFile, map[string]any{
-		"row": cfg.Row.Name, "mode": cfg.Mode(), "verdict": verdict, "failures": failures,
+		"row": cfg.Row.Name, "mode": cfg.Mode(), "frontLabel": cfg.FrontLabel, "verdict": verdict, "failures": failures,
 		"observation": obs, "jobs": jobs, "finished": time.Now().UTC().Format(time.RFC3339),
 	}); serr != nil {
 		return failures, fmt.Errorf("the record could not be written: %w", serr)
 	}
-	if serr := rec.SaveText(PostsFile, summary(failures, jobs)); serr != nil {
+	if serr := rec.SaveText(PostsFile, InsertFrontLine(summary(failures, jobs), cfg.FrontLabel)); serr != nil {
 		return failures, fmt.Errorf("the text to post could not be written: %w", serr)
 	}
 	return failures, nil
