@@ -79,6 +79,11 @@ type job struct {
 	estimate *time.Time
 	// acctHidden hides every accounting record of the job from sacct.
 	acctHidden bool
+	// slotOwed is true from the moment a job that held a partition slot ends or
+	// is requeued until its node is free, which is when it stops completing; the
+	// slot is the job's until then, and then goes to a phantom job
+	// (Platform.settleSlots).
+	slotOwed bool
 	// listedName is the name squeue lists the job under when it is not the
 	// name the job was submitted with (Platform.RenameListed); "" for none.
 	// sacct keeps name.
@@ -117,9 +122,9 @@ const Completing = "COMPLETING"
 // RunMode.Epilog): an execution that never had a process, or whose processes
 // are gone and whose epilog has ended, is not completing. Slurm frees the
 // job's submit slot and its GPUs when it sets the flag, which is when the end
-// state is set, so a completing job is neither live nor running here: nothing
-// that counts jobs (the submit limit, the GPU cap, a partition's slots) counts
-// it.
+// state is set, so a completing job is neither live nor running here: the
+// submit limit and the GPU cap do not count it. A partition's slots still do,
+// since a node is freed only when its epilog has completed (Platform.running).
 func (j *job) completing() bool {
 	e := j.cur()
 	if e.heldCompleting && (IsTerminal(e.state) || j.requeuedPending()) {

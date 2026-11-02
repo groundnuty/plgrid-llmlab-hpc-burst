@@ -83,8 +83,10 @@
 //
 // # Modelling choices the brief left open
 //
-//   - Only a running job's end hands its slot to a phantom job. Requeueing a
-//     running job ends that execution, so it frees its slot to a phantom too.
+//   - Only a running job's end hands its slot to a phantom job, once its node
+//     is free: at once, or, for a job that is completing, when its flag clears.
+//     Requeueing a running job ends that execution, so it frees its slot to a
+//     phantom too.
 //   - scancel and scontrol release on another user's job give "Access/
 //     permission denied", exit 1.
 //   - scancel of an ended or unknown job prints nothing and exits 0, as real
@@ -211,9 +213,15 @@
 //     epilog that ends before end + MinJobAge, and the Helios shape drops the
 //     job at once. Slurm sets the flag when it sets the end state, and frees
 //     the job's submit slot and its GPUs then: a completing job is neither
-//     pending nor running, so the submit limit, the GPU cap and a partition's
-//     slots do not count it, and a pending job that was waiting on them
-//     starts while it completes.
+//     pending nor running, so the submit limit and the GPU cap do not count
+//     it, and a pending job that was waiting on them starts while it
+//     completes. A partition's slots (Partition.Slots) still count it, because
+//     Slurm frees a node only once its epilog has completed and takes no
+//     COMPLETING node for a new job (make_node_comp and make_node_idle in
+//     src/slurmctld/node_mgr.c, Slurm 24.11.5, lines 4599-4646 and 4752-4845;
+//     _pick_best_nodes in src/slurmctld/node_scheduler.c, lines 1832-1846):
+//     the slot is the completing job's until its flag clears, and then goes to
+//     a phantom job, as any ended job's slot does.
 //   - Job carries the execution's PID, Finished, its exit code or signal, when
 //     TERM and KILL were sent, and CleanupErr. Finished is true once the
 //     execution is terminal and none of its processes is left (the shell is

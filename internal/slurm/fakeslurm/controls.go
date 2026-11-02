@@ -26,15 +26,47 @@ func (p *Platform) slotsOf(partition string) int {
 	return pt.Slots
 }
 
-// running counts the platform's running jobs in a partition.
+// running counts the jobs that hold a slot of a partition: the running ones,
+// and the ended ones whose node is not free yet. Slurm frees the job's submit
+// count and its GPUs when it sets COMPLETING, but a node only once its epilog
+// has completed: make_node_comp keeps the node's completing count up and
+// make_node_idle sets it idle, and puts it back in the idle bitmap, only when
+// the count reaches 0 (src/slurmctld/node_mgr.c: Slurm 24.11.5, lines 4599-4646
+// and 4752-4845), and node selection takes no node that is COMPLETING
+// (_pick_best_nodes in src/slurmctld/node_scheduler.c: lines 1832-1846). So a
+// completing job still holds its slot here. The caller holds mu.
 func (p *Platform) running(partition string) int {
+	p.settleSlots()
 	n := 0
 	for _, j := range p.jobs {
-		if j.partition == partition && j.state() == Running {
+		if j.partition == partition && (j.state() == Running || j.slotOwed) {
 			n++
 		}
 	}
 	return n
+}
+
+// slotsTaken is the slots of a partition that are not free: the jobs holding
+// one (running) and the phantoms. The two are read in order, after the settle
+// that running makes, since Go does not order a plain read against a call in
+// one expression. The caller holds mu.
+func (p *Platform) slotsTaken(partition string) int {
+	held := p.running(partition)
+	return held + p.phantoms[partition]
+}
+
+// settleSlots hands the slot of every job whose node is free, one that has
+// ended or was requeued and no longer completes, to a phantom job of another
+// user, as an ended job's slot always goes (endJob). It is lazy: the epilog ends
+// with the platform's clock, so nothing calls it at that moment, and every
+// reader of the slots and of the phantoms settles first. The caller holds mu.
+func (p *Platform) settleSlots() {
+	for _, j := range p.jobs {
+		if j.slotOwed && !j.completing() {
+			j.slotOwed = false
+			p.phantoms[j.partition]++
+		}
+	}
 }
 
 // startJob moves a pending job to RUNNING when its partition has a free slot
@@ -45,23 +77,24 @@ func (p *Platform) startJob(j *job, now time.Time) error {
 			return err
 		}
 	}
-	if n := p.slotsOf(j.partition); n > 0 && p.running(j.partition)+p.phantoms[j.partition] >= n {
+	if n := p.slotsOf(j.partition); n > 0 && p.slotsTaken(j.partition) >= n {
 		return fmt.Errorf("job %d cannot start: all %d slots of partition %s are taken (phantom jobs hold %d; FreePhantoms releases them)",
 			j.id, n, j.partition, p.phantoms[j.partition])
 	}
 	return j.markStart(now)
 }
 
-// endJob ends a pending or running job. A running job's slot goes at once to a
-// phantom job of another user. In run mode its processes are stopped: TERM,
-// then KILL after grace, or KILL at once for no grace.
+// endJob ends a pending or running job. A running job's slot goes to a phantom
+// job of another user once its node is free: at once when the job is not
+// completing, else when it stops (settleSlots). In run mode its processes are
+// stopped: TERM, then KILL after grace, or KILL at once for no grace.
 func (p *Platform) endJob(j *job, now time.Time, state string, grace time.Duration) error {
 	wasRunning := j.state() == Running
 	if err := j.markEnd(now, state); err != nil {
 		return err
 	}
 	if wasRunning && p.slotsOf(j.partition) > 0 {
-		p.phantoms[j.partition]++
+		j.slotOwed = true
 	}
 	p.stop(j.cur().run, grace)
 	// Slurm frees the job's submit slot and its GPUs when it sets the end
@@ -76,7 +109,7 @@ func (p *Platform) endJob(j *job, now time.Time, state string, grace time.Durati
 // once they are gone.
 func (p *Platform) requeueJob(j *job, now time.Time) {
 	if j.state() == Running && p.slotsOf(j.partition) > 0 {
-		p.phantoms[j.partition]++
+		j.slotOwed = true
 	}
 	p.stop(j.cur().run, 0)
 	j.markRequeue(now)
@@ -216,6 +249,7 @@ func (p *Platform) FreePhantoms(partitions ...string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	defer p.schedule(p.clock.Now())
+	p.settleSlots() // a node whose epilog has ended is freed to a phantom first, and this frees that too
 	if len(partitions) == 0 {
 		p.phantoms = map[string]int{}
 		return
@@ -229,6 +263,7 @@ func (p *Platform) FreePhantoms(partitions ...string) {
 func (p *Platform) Phantoms(partition string) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.settleSlots()
 	return p.phantoms[partition]
 }
 

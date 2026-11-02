@@ -240,7 +240,7 @@ func (p *Platform) schedule(now time.Time) {
 		if j.state() != Pending || j.held || p.dying(j) {
 			continue
 		}
-		if n := p.slotsOf(j.partition); n > 0 && p.running(j.partition)+p.phantoms[j.partition] >= n {
+		if n := p.slotsOf(j.partition); n > 0 && p.slotsTaken(j.partition) >= n {
 			continue
 		}
 		if p.canStart(j) != nil { // the user's GPU cap under the QOS (qos.go)
