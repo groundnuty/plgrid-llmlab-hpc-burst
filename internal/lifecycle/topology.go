@@ -134,17 +134,12 @@ func (r *Reconciler) loadProviders(ctx context.Context, md *v1alpha1.ModelDeploy
 			pv.problem = fmt.Sprintf("Provider %s: %v", n, err)
 			continue
 		}
-		if len(p.Spec.AllowedPartitions) == 0 {
-			pv.problem = fmt.Sprintf("Provider %s allows no partition", n)
+		partition, err := allowedPartition(p, &prof)
+		if err != nil {
+			pv.problem = err.Error()
 			continue
 		}
-		part := p.Spec.AllowedPartitions[0]
-		idx := slices.IndexFunc(prof.Spec.Partitions, func(pp v1alpha1.PartitionProfile) bool { return pp.Name == part })
-		if idx < 0 {
-			pv.problem = fmt.Sprintf("Provider %s allows partition %s, which PlatformProfile %s does not describe", n, part, prof.Name)
-			continue
-		}
-		pv.partition = prof.Spec.Partitions[idx]
+		pv.partition = partition
 		pv.class, pv.hasClass = pv.partition.AcceleratorClass, true
 		limits, err := v1alpha1.EffectiveQOSLimits(&prof.Spec, pv.partition, p.Spec.QOS)
 		if err != nil {
@@ -164,6 +159,21 @@ func (r *Reconciler) loadProviders(ctx context.Context, md *v1alpha1.ModelDeploy
 		pv.agentDigest = digest
 	}
 	return out, nil
+}
+
+// allowedPartition returns the profile's entry for the Provider's partition,
+// the first it allows. The error says why there is none, in the words of
+// providerView.problem.
+func allowedPartition(p *v1alpha1.Provider, prof *v1alpha1.PlatformProfile) (v1alpha1.PartitionProfile, error) {
+	if len(p.Spec.AllowedPartitions) == 0 {
+		return v1alpha1.PartitionProfile{}, fmt.Errorf("Provider %s allows no partition", p.Name)
+	}
+	part := p.Spec.AllowedPartitions[0]
+	idx := slices.IndexFunc(prof.Spec.Partitions, func(pp v1alpha1.PartitionProfile) bool { return pp.Name == part })
+	if idx < 0 {
+		return v1alpha1.PartitionProfile{}, fmt.Errorf("Provider %s allows partition %s, which PlatformProfile %s does not describe", p.Name, part, prof.Name)
+	}
+	return prof.Spec.Partitions[idx], nil
 }
 
 // classes returns the accelerator classes the allowed batch partitions offer,

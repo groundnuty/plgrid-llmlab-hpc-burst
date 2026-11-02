@@ -151,7 +151,7 @@ func TestMetricsAccountingListFailureKeepsTheScrape(t *testing.T) {
 	const gpu, cpu = "hpcburst_allocation_allocated_gpu_seconds", "hpcburst_allocation_allocated_cpu_seconds"
 	scrapeBoth := func() exposition {
 		return scrapeCollectors(t,
-			&instanceCollector{inv: rg.r.inventory(), backend: rg.backend, clock: rg.clock},
+			rg.instanceCollector(always),
 			&accountingCollector{allocs: lister})
 	}
 	check := func(when, success string, series bool) {

@@ -135,9 +135,8 @@ func (p *pass) end(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, reason, ms
 	}); err != nil {
 		return err
 	}
-	// An ended Instance has no engine series (not applicable) and no
-	// heartbeat to judge.
-	p.r.inventory().drop(p.key, in.UID)
+	// An ended Instance has no engine series (not applicable: the collector
+	// lists only Instances that have not ended) and no heartbeat to judge.
 	p.mem.clear(instanceHeartbeatKey(in))
 	// The release, or the idle anchor, is made durable before the finalizer
 	// goes: once it goes, the Instance may vanish (a garbage-collected one at
@@ -455,7 +454,6 @@ func (p *pass) agent(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, st setti
 			cond(&s.Conditions, v1alpha1.ConditionAgentUnreachable, metav1.ConditionFalse, v1alpha1.ReasonReporting, "the agent reports", in.Generation, now)
 		}
 	})
-	p.r.inventory().setAgent(p.key, in.UID, alloc.UID, in.Status.Agent.AgentInstanceID, av.unreachable, st.probeInterval)
 	if err != nil {
 		return av, err
 	}

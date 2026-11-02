@@ -318,7 +318,7 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 		reg = ctrlmetrics.Registry
 	}
 	if err := mgr.Add(&collectorRegistration{reg: reg, cs: []prometheus.Collector{
-		&instanceCollector{inv: r.inventory(), backend: backend, clock: clock},
+		&instanceCollector{cache: mgr.GetClient(), backend: backend, clock: clock, serving: ready.serving},
 		&accountingCollector{allocs: mgr.GetClient()},
 	}}); err != nil {
 		return nil, nil, err
@@ -424,12 +424,21 @@ func allocationToDeployment(_ context.Context, o client.Object) []reconcile.Requ
 // instanceToDeployment maps an Instance to its controller owner, also once the
 // owner is gone, so its drain still runs.
 func instanceToDeployment(_ context.Context, o client.Object) []reconcile.Request {
-	for _, ref := range o.GetOwnerReferences() {
-		if ref.Controller != nil && *ref.Controller && ref.Kind == "ModelDeployment" {
-			return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: o.GetNamespace(), Name: ref.Name}}}
-		}
+	if name, ok := controllerDeployment(o); ok {
+		return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: o.GetNamespace(), Name: name}}}
 	}
 	return nil
+}
+
+// controllerDeployment returns the name of the ModelDeployment that is the
+// object's controller owner, if it has one.
+func controllerDeployment(o client.Object) (string, bool) {
+	for _, ref := range o.GetOwnerReferences() {
+		if ref.Controller != nil && *ref.Controller && ref.Kind == "ModelDeployment" {
+			return ref.Name, true
+		}
+	}
+	return "", false
 }
 
 // deploymentsAllowing returns every ModelDeployment that allows one of the
@@ -697,9 +706,9 @@ func checkpointSource(o Options, clock Clock) CheckpointSource {
 
 // collectorRegistration registers the lifecycle controller's collectors, the
 // engine gauges and the accounting gauges, while the manager runs, on every
-// replica (the engine gauges' inventory is empty but on the leader), and
-// unregisters them at the stop, so a manager started again in the same process
-// registers afresh.
+// replica (the engine gauges are emitted by the leader only, see
+// instanceCollector), and unregisters them at the stop, so a manager started
+// again in the same process registers afresh.
 type collectorRegistration struct {
 	reg prometheus.Registerer
 	cs  []prometheus.Collector
