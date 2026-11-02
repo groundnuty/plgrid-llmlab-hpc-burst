@@ -15,7 +15,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -33,7 +32,6 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/providerctl"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
-	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 // childEnvRunner makes the test binary a controller process; its value is the
@@ -107,11 +105,61 @@ type child struct {
 	waitErr error
 }
 
-// startChild starts a controller process with f's arguments against the fake
+// startChild starts a controller process on f's ports and waits until it is
+// serving or has exited, as startBinary does for an in-process run: a child that
+// exits having found the metrics or the health port taken (its stderr says
+// "address already in use") is started again with fresh ports, written to *f, at
+// most maxBindRetries times, each logged. avoid is the flags of the other copies
+// running.
+func startChild(t *testing.T, name string, f *flags, runnerAddr string, avoid ...flags) *child {
+	t.Helper()
+	for attempt := 0; ; attempt++ {
+		releaseAtStart(*f)
+		c := launchChild(t, name, *f, runnerAddr)
+		exited := c.awaitServing(90 * time.Second)
+		if !exited || !addrInUseText(c.log()) || attempt == maxBindRetries {
+			return c
+		}
+		t.Logf("child %s's start %d found a port of %s or %s taken; picking fresh ports and starting again (retry %d of %d)",
+			name, attempt+1, f.healthAddr, f.host.ControllerMetricsAddr(), attempt+1, maxBindRetries)
+		*f = repickPorts(t, *f, avoid...)
+	}
+}
+
+// awaitServing waits until the process has exited (true), or its health probes
+// and metrics both answer 200 (false), or timeout passes (false).
+func (c *child) awaitServing(timeout time.Duration) (exited bool) {
+	deadline := time.Now().Add(timeout)
+	answers := func(url string) bool {
+		resp, err := probeHTTP.Get(url)
+		if err != nil {
+			return false
+		}
+		resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	}
+	for time.Now().Before(deadline) {
+		if !c.running() {
+			return true
+		}
+		if answers("http://"+c.f.healthAddr+"/healthz") && answers("http://"+c.f.host.ControllerMetricsAddr()+"/metrics") {
+			return false
+		}
+		select {
+		case <-c.exited:
+			return true
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return false
+}
+
+// launchChild starts a controller process with f's arguments against the fake
 // Slurm server at runnerAddr. Its cleanup kills and reaps it if the test has
 // not, and a failed test logs the end of its stderr.
-func startChild(t *testing.T, name string, f flags, runnerAddr string) *child {
+func launchChild(t *testing.T, name string, f flags, runnerAddr string) *child {
 	t.Helper()
+	releaseAtStart(f)
 	args := childArgs(f)
 	if back, err := parse(args, io.Discard); err != nil || back != f {
 		t.Fatalf("the child's arguments %v parse to %+v (%v), not the flags %+v the test means", args, back, err, f)
@@ -235,23 +283,7 @@ func healthy(addr string) bool {
 // base whose block does not touch the first's, and another health address.
 func secondCopyFlags(t *testing.T, first flags) flags {
 	t.Helper()
-	for range 50 {
-		base := freePortBase(t)
-		if d := base - first.host.PortBase; d <= 12 && d >= -12 {
-			dropBlock(base, agentapi.FrpsPluginPortOffset, agentapi.ControllerMetricsPortOffset)
-		} else {
-			args := []string{"--state-dir", first.host.StateDir, "--port-base", strconv.Itoa(base),
-				"--health-addr", net.JoinHostPort("127.0.0.1", strconv.Itoa(freePort(t))),
-				"--front-mode", first.frontMode, "--front-addr", first.frontAddr}
-			f, err := parse(args, io.Discard)
-			if err != nil {
-				t.Fatal(err)
-			}
-			return f
-		}
-	}
-	t.Fatal("found no port base whose block is clear of the first copy's in 50 tries")
-	return flags{}
+	return repickPorts(t, first, first)
 }
 
 // noProcessesNamed fails the test for every process, other than this one, whose

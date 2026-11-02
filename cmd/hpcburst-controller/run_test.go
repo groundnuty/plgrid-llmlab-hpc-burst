@@ -201,20 +201,21 @@ func processesNaming(s string) []int {
 }
 
 // freePortBase returns a port base whose ports the binary binds are free, and
-// holds them for the binary: the agent endpoint (+3), frps's plugin (+8) and the
-// metrics (agentapi.ControllerMetricsPortOffset, +12, which #111 binds). The
-// kernel chooses the agent endpoint's port; the others are bound at the same
-// base. The listeners stay open until startBinary or startChild gives them to
-// the binary, so no stranger can take one between the pick and the bind (issue
-// #219; before it, they were released here, and the binary's own client sockets
-// to the API server took one often enough to fail a test in CI).
+// holds them: the agent endpoint (+3), which the kernel chooses, and frps's
+// plugin (+8) for the binary's own servers, listeners that startBinary or
+// startChild gives to the binary so that no stranger can take one between the
+// pick and the bind (issue #219; before it, they were released here, and the
+// binary's own client sockets to the API server took one often enough to fail a
+// test in CI); and the metrics (agentapi.ControllerMetricsPortOffset, +12, which
+// #111 binds), which controller-runtime binds from an address, held until the
+// start releases it (held_test.go).
 func freePortBase(t *testing.T) int {
 	t.Helper()
-	return holdBlock(t, []int{agentapi.FrpsPluginPortOffset, agentapi.ControllerMetricsPortOffset}, nil)
+	return holdBlock(t, []int{agentapi.FrpsPluginPortOffset}, []int{agentapi.ControllerMetricsPortOffset})
 }
 
-// freePort returns a loopback port the kernel chose, held for the binary like
-// freePortBase's (it is the health address's).
+// freePort returns a loopback port the kernel chose, held until the start releases
+// it (it is the health address's, which controller-runtime binds from an address).
 func freePort(t *testing.T) int {
 	t.Helper()
 	ln, _ := holdLoopback(t)
@@ -276,9 +277,12 @@ type binary struct {
 	cancel context.CancelFunc
 	exited chan struct{}
 	err    error
+	// retries is how many starts before this one found a port taken (startBinary).
+	retries int
 }
 
-func startBinary(t *testing.T, f flags, d deps) *binary {
+// launchBinary starts one run of the binary on f's ports, as main calls it.
+func launchBinary(t *testing.T, f flags, d deps) *binary {
 	t.Helper()
 	// The frpc builds prepareState writes are examples, not the pinned release
 	// binaries (only x86_64's is cached here, and a test must not fetch), so
@@ -287,10 +291,12 @@ func startBinary(t *testing.T, f flags, d deps) *binary {
 	if d.frpcDigests == nil {
 		d.frpcDigests = exampleFrpcDigests
 	}
-	// The run binds only the addresses the test holds, through the held
-	// listeners (held_test.go); one the test did not pick fails the run.
+	// The by-address ports are released (startBinary did so already), and the
+	// agent endpoint and the plugin are bound only through the held listeners
+	// (held_test.go); an address the test did not pick fails the run.
+	releaseAtStart(f)
 	if d.listen == nil {
-		for _, addr := range binaryAddrs(f) {
+		for _, addr := range ownAddrs(f) {
 			heldAddrs.rehold(t, addr)
 		}
 		d.listen = heldAddrs.take
@@ -303,6 +309,72 @@ func startBinary(t *testing.T, f flags, d deps) *binary {
 	}()
 	t.Cleanup(func() { b.stop(t) })
 	return b
+}
+
+// beforeLaunch, when set, runs in startBinary after the by-address ports are
+// released and before each run starts: a test puts a stranger on one of them.
+var beforeLaunch func(t *testing.T, attempt int, f flags)
+
+// startBinary starts the binary on f's ports and waits until it is serving. The
+// metrics and the health probes are bound by controller-runtime from an address
+// (held_test.go), so a stranger can take one between the release and the bind:
+// a run that then exits with "address already in use" is started again with fresh
+// ports, written to *f, at most maxBindRetries times, each logged. The returned
+// binary's retries is how many it took. A run that exits with any other error,
+// or a binary still not serving after 90 s, is returned as it is, for the test's
+// own waits to report. avoid is the flags of the other copies running, whose
+// blocks a fresh pick stays clear of.
+func startBinary(t *testing.T, f *flags, d deps, avoid ...flags) *binary {
+	t.Helper()
+	for attempt := 0; ; attempt++ {
+		releaseAtStart(*f)
+		if beforeLaunch != nil {
+			beforeLaunch(t, attempt, *f)
+		}
+		b := launchBinary(t, *f, d)
+		b.retries = attempt
+		err := b.awaitServing(90 * time.Second)
+		if !isAddrInUse(err) || attempt == maxBindRetries {
+			return b
+		}
+		t.Logf("the binary's start %d found a port of %s or %s taken (%v); picking fresh ports and starting again (retry %d of %d)",
+			attempt+1, f.healthAddr, f.host.ControllerMetricsAddr(), err, attempt+1, maxBindRetries)
+		*f = repickPorts(t, *f, avoid...)
+	}
+}
+
+// probeHTTP asks the binary's by-address endpoints. It times out: a stranger that
+// took such a port accepts into its backlog and never answers.
+var probeHTTP = &http.Client{Timeout: 2 * time.Second}
+
+// awaitServing waits until the run has returned (and returns its error), or the
+// health probes and the metrics both answer 200 (nil), or timeout passes (nil).
+func (b *binary) awaitServing(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	answers := func(url string) bool {
+		resp, err := probeHTTP.Get(url)
+		if err != nil {
+			return false
+		}
+		resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	}
+	for time.Now().Before(deadline) {
+		select {
+		case <-b.exited:
+			return b.err
+		default:
+		}
+		if answers("http://"+b.f.healthAddr+"/healthz") && answers("http://"+b.f.host.ControllerMetricsAddr()+"/metrics") {
+			return nil
+		}
+		select {
+		case <-b.exited:
+			return b.err
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return nil
 }
 
 // eventually waits until cond holds, for at most timeout. A run that returns
@@ -339,7 +411,7 @@ func (b *binary) refusal(t *testing.T) error {
 	case <-time.After(30 * time.Second):
 		t.Fatal("run did not refuse within 30 s: it started instead")
 	}
-	for _, addr := range binaryAddrs(b.f) {
+	for _, addr := range ownAddrs(b.f) {
 		if heldAddrs.wasTaken(addr) {
 			t.Errorf("the run bound %s before its refusal; nothing should have started", addr)
 		}
@@ -582,7 +654,7 @@ func TestControllerBinary(t *testing.T) {
 			}
 			return s, nil
 		}
-		b := startBinary(t, f, deps{providerScheme: noApps})
+		b := startBinary(t, &f, deps{providerScheme: noApps})
 		if err := b.refusal(t); err == nil || !strings.Contains(err.Error(), "apps/v1") || !strings.Contains(err.Error(), "ControllerRevision") {
 			t.Fatalf("run returned %v, want a refusal naming apps/v1's ControllerRevision", err)
 		}
@@ -608,7 +680,7 @@ func TestControllerBinary(t *testing.T) {
 			f, _, _ := prepareState(t, api, tc.mode, tc.addr)
 			d := tc.d
 			d.providerScheme = providerScheme
-			b := startBinary(t, f, d)
+			b := startBinary(t, &f, d)
 			if err := b.refusal(t); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("run returned %v, want a refusal naming %q", err, tc.want)
 			}
@@ -663,7 +735,7 @@ func testBinaryComponents(t *testing.T, api *apiServer) {
 
 	sl, session := newFakeSlurm()
 	var platforms sync.Map // provider name -> calls, to show which Provider the platform served
-	b := startBinary(t, f, deps{
+	b := startBinary(t, &f, deps{
 		providerScheme: providerScheme,
 		newPlatform: func(v slurm.Validated) (providerctl.Platform, io.Closer, error) {
 			platforms.Store(v.Settings.Provider, true)
@@ -887,7 +959,7 @@ func TestControllerBinaryStopDuringSubmission(t *testing.T) {
 	}
 	_, session := newFakeSlurm()
 	entered, release := make(chan struct{}, 1), make(chan struct{})
-	b := startBinary(t, f, deps{
+	b := startBinary(t, &f, deps{
 		providerScheme: providerScheme,
 		newPlatform: func(v slurm.Validated) (providerctl.Platform, io.Closer, error) {
 			batch := slurm.NewBatch(session, v.Profile, v.Settings, slurm.Options{PollInterval: time.Second, BusyInterval: 500 * time.Millisecond})
@@ -999,7 +1071,7 @@ func TestControllerBinaryProvidersFollowTheLifecycleLeader(t *testing.T) {
 	// The first copy leads lifecycle and runs the Provider.
 	fa, _, _ := prepareState(t, api, "direct", exampleFront)
 	var servedA, servedB, servedC sync.Map
-	a := startBinary(t, fa, deps{providerScheme: providerScheme, newPlatform: recordingPlatforms(session, &servedA), registry: prometheus.NewRegistry()})
+	a := startBinary(t, &fa, deps{providerScheme: providerScheme, newPlatform: recordingPlatforms(session, &servedA), registry: prometheus.NewRegistry()})
 	a.eventually(t, "the first copy leads lifecycle, holds "+provLease+" and serves the Provider", 90*time.Second, func() bool {
 		_, ok := servedA.Load(prov.Name)
 		return ok && held(ctx, c, v1alpha1.LeaseLifecycle) && held(ctx, c, provLease)
@@ -1011,7 +1083,7 @@ func TestControllerBinaryProvidersFollowTheLifecycleLeader(t *testing.T) {
 	// health endpoint answers and its agent API started. Its supervisors,
 	// added beside the agent API, have not started.
 	fb, _, _ := prepareState(t, api, "direct", exampleFront)
-	b := startBinary(t, fb, deps{providerScheme: providerScheme, newPlatform: recordingPlatforms(session, &servedB), registry: prometheus.NewRegistry()})
+	b := startBinary(t, &fb, deps{providerScheme: providerScheme, newPlatform: recordingPlatforms(session, &servedB), registry: prometheus.NewRegistry()}, fa)
 	b.eventually(t, "the second copy's health endpoint answers and its agent API and frps plugin started", 60*time.Second, func() bool {
 		resp, err := http.Get("http://" + fb.healthAddr + "/healthz")
 		if err != nil {
@@ -1068,7 +1140,7 @@ func TestControllerBinaryProvidersFollowTheLifecycleLeader(t *testing.T) {
 
 	// Without leader election the one process runs the Providers.
 	fc, _, _ := prepareState(t, api, "direct", exampleFront, "--leader-elect=false")
-	cc := startBinary(t, fc, deps{providerScheme: providerScheme, newPlatform: recordingPlatforms(session, &servedC), registry: prometheus.NewRegistry()})
+	cc := startBinary(t, &fc, deps{providerScheme: providerScheme, newPlatform: recordingPlatforms(session, &servedC), registry: prometheus.NewRegistry()})
 	cc.eventually(t, "the copy with --leader-elect=false holds "+provLease+" and serves the Provider", 90*time.Second, func() bool {
 		_, ok := servedC.Load(prov.Name)
 		return ok && held(ctx, c, provLease)

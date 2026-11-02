@@ -13,9 +13,9 @@ package main
 // from frps's own proxy list, which holds no proxy the plugin refused.
 //
 // Ports: the kernel chooses the agent endpoint's port, and freeTunnelPortBase holds the block: the
-// plugin's (+8) and the metrics' (+12) for the binary, frps's three (+9, +10, +11) until frps
-// starts; frps is started on that block, so the controller's plugin endpoint is the one frps
-// posts to. Everything binds 127.0.0.1.
+// plugin's (+8) for the binary, the metrics' (+12) until the binary starts, frps's three (+9, +10,
+// +11) until frps starts; frps is started on that block, so the controller's plugin endpoint is the
+// one frps posts to. Everything binds 127.0.0.1.
 
 import (
 	"bytes"
@@ -65,17 +65,19 @@ const (
 	tunnelNS = "tunnel-ns"
 )
 
-// freeTunnelPortBase returns a port base whose block the tunnel uses is free, and holds it: the
-// binary's ports (the agent endpoint +3, which the kernel chooses, the plugin +8 and the metrics
-// +12) for the binary, as freePortBase does (held_test.go), and frps's bind, tcpmux and web ports
-// (+9 to +11) for frps. frps is a real process that binds those three itself and cannot take a
-// listener, so they are held until startFrps releases them just before it starts frps: the
-// residual window is that start, not the test's whole run. A stranger that takes one in it fails
-// frps's start, which startFrps reports (a failed test, not a passing one).
+// freeTunnelPortBase returns a port base whose block the tunnel uses is free, and holds it, as
+// freePortBase does (held_test.go): the agent endpoint (+3, which the kernel chooses) and the plugin
+// (+8) for the binary's own servers, the metrics (+12) until the start releases it, and frps's
+// bind, tcpmux and web ports (+9 to +11) for frps. frps is a real process that binds those three
+// itself and cannot take a listener, so they are held until startFrps releases them just before it
+// starts frps: the residual window is that start, not the test's whole run. A stranger that takes
+// one in it fails frps's start, which startFrps reports (a failed test, not a passing one). The rig
+// starts the binary with launchBinary, with no retry on a taken port: once frps runs, its block
+// cannot change.
 func freeTunnelPortBase(t *testing.T) int {
 	t.Helper()
-	return holdBlock(t, []int{agentapi.FrpsPluginPortOffset, agentapi.ControllerMetricsPortOffset},
-		[]int{agentapi.FrpsBindPortOffset, agentapi.FrpsTCPMuxPortOffset, agentapi.FrpsWebPortOffset})
+	return holdBlock(t, []int{agentapi.FrpsPluginPortOffset},
+		[]int{agentapi.ControllerMetricsPortOffset, agentapi.FrpsBindPortOffset, agentapi.FrpsTCPMuxPortOffset, agentapi.FrpsWebPortOffset})
 }
 
 // condObs is one observed state of an Instance's TunnelConnected condition.
@@ -519,7 +521,7 @@ func (r *tunnelRig) pluginRefusesLogin(token string) bool {
 // are registered once per registry, and a test that runs two copies in one process (one after the
 // other, as the restart does) would fail on the second with controller-runtime's.
 func (r *tunnelRig) start() *binary {
-	return startBinary(r.t, r.f, deps{providerScheme: providerScheme, registry: prometheus.NewRegistry()})
+	return launchBinary(r.t, r.f, deps{providerScheme: providerScheme, registry: prometheus.NewRegistry()})
 }
 
 // TestTunnelWithRealFrpsAndFrpc is the path end to end: what the plugin refuses, what each state of

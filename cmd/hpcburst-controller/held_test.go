@@ -1,7 +1,6 @@
 package main
 
-// The ports the tests pick for a copy of the binary, held until it binds them
-// (issue #219).
+// The ports the tests pick for a copy of the binary (issue #219).
 //
 // A test used to take a port from a ":0" listener, close it and hand the number
 // to the binary, which bound it later. Between the close and the bind any
@@ -9,15 +8,20 @@ package main
 // connections to the API server do: a client socket's local port conflicts with
 // a bind of the same number, so the bind failed with "address already in use"
 // (TestControllerBinaryStopDuringSubmission, 2 Nov 2026, CI run 41378979337).
-// Now the test keeps the listener it picked open and gives that listener to the
-// binary: an in-process run through deps.listen (startBinary), a controller
-// process through an inherited descriptor (inheritListeners). No port the
-// binary binds is ever released before it binds it.
 //
-// The residual: frps, a real process of the tunnel tests, binds its three
-// ports itself and cannot take a listener, so those are held until just before
-// it starts (releaseForFrps), and a restart of a copy rebinds the addresses
-// its previous run closed.
+// Now the ports the binary's own servers bind, the agent endpoint (+3) and
+// frps's plugin (+8), stay held by the test as open listeners until the binary
+// takes them: an in-process run through deps.listen (launchBinary), a controller
+// process through an inherited descriptor (inheritListeners). The health probes
+// and the metrics (+12) are bound by controller-runtime from an address, with no
+// listener to hand over, so they are held until just before the start
+// (releaseAtStart) and a start that finds one taken is repeated with fresh ports,
+// at most maxBindRetries times, each logged (startBinary, startChild).
+//
+// The residuals: that last window, from the release to the bind, which the retry
+// covers; frps, a real process of the tunnel tests, which binds its three ports
+// itself and has them released just before it starts (releaseForFrps); and a
+// restart of a copy, which rebinds the addresses its previous run closed.
 
 import (
 	"errors"
@@ -132,17 +136,32 @@ func holdLoopback(t testing.TB) (net.Listener, string) {
 	return ln, heldAddrs.hold(t, ln)
 }
 
-// binaryAddrs are the four addresses a copy of the binary binds: the agent
-// endpoint, frps's plugin, the metrics and the health probes.
-func binaryAddrs(f flags) []string {
-	return []string{f.host.AgentEndpointAddr(), f.host.FrpsPluginAddr(), f.host.ControllerMetricsAddr(), f.healthAddr}
+// ownAddrs are the two addresses the binary's own servers bind, through
+// deps.listen: the agent endpoint and frps's plugin.
+func ownAddrs(f flags) []string {
+	return []string{f.host.AgentEndpointAddr(), f.host.FrpsPluginAddr()}
+}
+
+// byAddressAddrs are the two addresses controller-runtime binds from an address:
+// the metrics and the health probes.
+func byAddressAddrs(f flags) []string {
+	return []string{f.host.ControllerMetricsAddr(), f.healthAddr}
+}
+
+// releaseAtStart releases the ports the test held for the binary's by-address
+// binds, as late as it can before the run starts.
+func releaseAtStart(f flags) {
+	for _, addr := range byAddressAddrs(f) {
+		heldAddrs.drop(addr)
+	}
 }
 
 // holdBlock picks a port base whose block is free and holds it: the agent
-// endpoint (+3, which the kernel chooses), the offsets the binary binds, and the
-// offsets another process of the test binds (frps's). It returns the base. The
-// binary's are taken by startBinary or startChild; the others by
-// releaseForFrps. A base some offset of which is taken is not used.
+// endpoint (+3, which the kernel chooses), the offsets the binary's own servers
+// bind (the plugin), and the other offsets, which are released before the process
+// that binds them from an address starts (the metrics, by releaseAtStart; frps's,
+// by releaseForFrps). It returns the base. A base some offset of which is taken is
+// not used.
 func holdBlock(t testing.TB, binary, other []int) int {
 	t.Helper()
 	for range 100 {
@@ -199,7 +218,7 @@ func releaseForFrps(host agentapi.Host) {
 // run, and the listeners are what the child's deps.listen answers with.
 const childEnvListeners = "HPCBURST_TEST_CONTROLLER_LISTENERS"
 
-// inheritListeners takes the four listeners held for f and returns them as the
+// inheritListeners takes the two listeners held for f and returns them as the
 // descriptors of ExtraFiles (3, 4, ...) with the value of childEnvListeners,
 // and a function that closes the parent's copies, to call once the child has
 // started: the child's are the only ones left then, so a stopped child frees
@@ -216,7 +235,7 @@ func inheritListeners(t testing.TB, f flags) (files []*os.File, env string, clos
 			_ = ln.Close()
 		}
 	}
-	for i, addr := range binaryAddrs(f) {
+	for i, addr := range ownAddrs(f) {
 		ln, err := heldAddrs.take(addr)
 		if err != nil {
 			closeParent()
@@ -267,5 +286,40 @@ func inheritedListen(env string) (func(addr string) (net.Listener, error), error
 }
 
 // isAddrInUse reports whether err is a bind that found the address taken, as a
-// stranger's bind finds a port a test holds.
-func isAddrInUse(err error) bool { return errors.Is(err, syscall.EADDRINUSE) }
+// stranger's bind finds a port a test holds. It reads the text too: an error
+// that crossed controller-runtime's runnables, or a child's stderr, may not
+// unwrap to the errno.
+func isAddrInUse(err error) bool {
+	return err != nil && (errors.Is(err, syscall.EADDRINUSE) || addrInUseText(err.Error()))
+}
+
+func addrInUseText(s string) bool { return strings.Contains(s, "address already in use") }
+
+// maxBindRetries bounds how often a start that found the metrics or the health
+// port taken is repeated with fresh ports. Each repeat is logged.
+const maxBindRetries = 3
+
+// repickPorts returns f with a fresh port base and health address, held as the
+// first pick was, and clear of every block in avoid (another running copy's). The
+// state directory, front and the rest of f stay: they do not depend on the ports.
+func repickPorts(t testing.TB, f flags, avoid ...flags) flags {
+	t.Helper()
+	for range 50 {
+		base := holdBlock(t, []int{agentapi.FrpsPluginPortOffset}, []int{agentapi.ControllerMetricsPortOffset})
+		clear := true
+		for _, a := range avoid {
+			if d := base - a.host.PortBase; d <= agentapi.ControllerMetricsPortOffset && d >= -agentapi.ControllerMetricsPortOffset {
+				clear = false
+			}
+		}
+		if !clear {
+			dropBlock(base, agentapi.FrpsPluginPortOffset, agentapi.ControllerMetricsPortOffset)
+			continue
+		}
+		_, health := holdLoopback(t)
+		f.host.PortBase, f.healthAddr = base, health
+		return f
+	}
+	t.Fatal("found no port base whose block is clear of the other copies' in 50 tries")
+	return f
+}
