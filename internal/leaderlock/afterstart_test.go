@@ -37,6 +37,13 @@ var renew = resourcelock.LeaderElectionRecord{HolderIdentity: me, LeaseDurationS
 // is true, as failed when it is false.
 func runStopped(t *testing.T, f *fakeLease, cancelled, led bool, start func(context.Context) error) (*logs, error) {
 	t.Helper()
+	return runStoppedAfter(t, f, cancelled, led, nil, start)
+}
+
+// runStoppedAfter is runStopped with phaseOne, when set, run on the tracked
+// lock before Start: the elector's release as it reached the lock.
+func runStoppedAfter(t *testing.T, f *fakeLease, cancelled, led bool, phaseOne func(*Renewals), start func(context.Context) error) (*logs, error) {
+	t.Helper()
 	inner, l := newLock(f)
 	lock := TrackRenewals(inner)
 	var last error
@@ -44,6 +51,9 @@ func runStopped(t *testing.T, f *fakeLease, cancelled, led bool, start func(cont
 		last = errors.New("injected: the renew timed out")
 	}
 	lock.wrote(context.Background(), renew, last)
+	if phaseOne != nil {
+		phaseOne(lock)
+	}
 	mgr := ReleaseAfterStart(&fakeManager{start: start}, lock, funcr.New(l.add, funcr.Options{}))
 	if !ReleasesAfterStart(mgr) {
 		t.Fatal("ReleasesAfterStart does not recognise ReleaseAfterStart's manager")
@@ -115,7 +125,8 @@ func TestTheReleaseAfterStartLeavesALeaseItDoesNotHold(t *testing.T) {
 	}
 }
 
-// Reads that keep failing give up when AfterStartBudget runs out: Start
+// Reads that keep failing give up when the shared ReleaseBudget runs out (the
+// elector's release never reached Update, so all of it is left): Start
 // returns its own nil, the failure is logged, and the Lease stays held.
 func TestTheReleaseAfterStartGivesUpWithinItsBudget(t *testing.T) {
 	f := &fakeLease{holder: me, failGets: 1 << 20}
@@ -229,5 +240,103 @@ func TestRenewalsKeepTheLastWriteThatNamesThisHolder(t *testing.T) {
 		if got := r.ledToTheEnd(); got != step.want {
 			t.Fatalf("step %d, %s: the leadership reads %v, want %v", i, step.what, got, step.want)
 		}
+	}
+}
+
+// The stop's one ReleaseBudget is shared (review of PR #215: B2). When the
+// elector's release landed, nothing follows it after Start, not even a read.
+func TestNoReleaseAfterStartFollowsAnElectorReleaseThatLanded(t *testing.T) {
+	f := &fakeLease{holder: me}
+	l, err := runStoppedAfter(t, f, true, true, func(r *Renewals) {
+		if err := r.Update(context.Background(), release); err != nil {
+			t.Fatalf("the elector's release returned %v", err)
+		}
+	}, stopsWhenCancelled)
+	if err != nil {
+		t.Fatalf("Start returned %v", err)
+	}
+	if holder, updates := f.state(); holder != "" || updates != 1 || f.gets != 1 {
+		t.Fatalf("the Lease is held by %q after %d writes and %d reads; want the elector's one read and write, nothing after Start", holder, updates, f.gets)
+	}
+	if len(l.lines) != 0 {
+		t.Errorf("logged %v; want nothing", l.lines)
+	}
+}
+
+// An elector's release whose retries spent the shared budget leaves nothing
+// to the release after Start: it is skipped, and the skip is logged with the
+// time left, which is negative.
+func TestTheReleaseAfterStartIsSkippedOnceTheBudgetIsSpent(t *testing.T) {
+	f := &fakeLease{holder: me}
+	l, err := runStoppedAfter(t, f, true, true, func(r *Renewals) {
+		r.releaseAt, r.released = time.Now().Add(-ReleaseBudget-500*time.Millisecond), false
+	}, stopsWhenCancelled)
+	if err != nil {
+		t.Fatalf("Start returned %v", err)
+	}
+	if holder, updates := f.state(); holder != me || updates != 0 || f.gets != 0 {
+		t.Fatalf("the Lease is held by %q after %d writes and %d reads; want it untouched", holder, updates, f.gets)
+	}
+	if !l.has("the shared release budget is spent") || !l.has(`"left"="-5`) {
+		t.Errorf("the skip and the time left (about -500ms) were not logged: %v", l.lines)
+	}
+}
+
+// The release after Start gets what the elector's release left of the shared
+// budget, counted from its write, never a fresh one: with the elector's
+// release 1 s in, the read's deadline is the write's start plus
+// ReleaseBudget, not 2 s from now.
+func TestTheReleaseAfterStartGetsWhatIsLeft(t *testing.T) {
+	f := &fakeLease{holder: me}
+	var began time.Time
+	if _, err := runStoppedAfter(t, f, true, true, func(r *Renewals) {
+		began = time.Now().Add(-time.Second)
+		r.releaseAt, r.released = began, false
+	}, stopsWhenCancelled); err != nil {
+		t.Fatalf("Start returned %v", err)
+	}
+	if holder, _ := f.state(); holder != "" {
+		t.Fatalf("the Lease is held by %q; want it released within what was left", holder)
+	}
+	if want, got := began.Add(ReleaseBudget), f.readBy; got.Before(want) || got.After(want.Add(500*time.Millisecond)) {
+		t.Fatalf("the release after Start read with a deadline %s after the elector's release write; want %s, what was left, not a fresh %s", got.Sub(began), ReleaseBudget, ReleaseBudget)
+	}
+}
+
+// An elector whose release never reached Update (its read failed) used none
+// of the budget: the release after Start gets all of it.
+func TestTheReleaseAfterStartGetsTheWholeBudgetWhenTheElectorNeverWrote(t *testing.T) {
+	f := &fakeLease{holder: me}
+	before := time.Now()
+	if _, err := runStopped(t, f, true, true, stopsWhenCancelled); err != nil {
+		t.Fatalf("Start returned %v", err)
+	}
+	if got := f.readBy.Sub(before); got < ReleaseBudget || got > ReleaseBudget+500*time.Millisecond {
+		t.Fatalf("the release after Start read with a deadline %s after the stop; want the whole %s", got, ReleaseBudget)
+	}
+}
+
+// Renewals records the first release record's start and outcome: a release
+// that lands needs no release after Start; one that fails leaves what is left.
+func TestRenewalsRecordTheElectorsRelease(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		failing int
+		needed  bool
+	}{
+		{"a release that lands", 0, false},
+		{"a release that fails", 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := TrackRenewals(&fakeLease{holder: me, failing: tc.failing})
+			if left, needed := r.budgetLeft(time.Now()); !needed || left != ReleaseBudget {
+				t.Fatalf("before any release: %s left, needed %v; want all of %s, needed", left, needed, ReleaseBudget)
+			}
+			_ = r.Update(context.Background(), release)
+			left, needed := r.budgetLeft(time.Now())
+			if needed != tc.needed || (needed && (left <= 0 || left > ReleaseBudget)) {
+				t.Fatalf("%s left, needed %v; want needed %v with part of %s left", left, needed, tc.needed, ReleaseBudget)
+			}
+		})
 	}
 }

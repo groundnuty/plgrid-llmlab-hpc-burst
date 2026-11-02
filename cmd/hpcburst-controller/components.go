@@ -264,21 +264,23 @@ type wiring struct {
 // managers run inside the lifecycle manager, whose grace is
 // lifecycle.ShutdownGrace, 30 s, and the supervisor sends the controller
 // SIGKILL launcher.ControllerTermGrace (34 s) after SIGTERM: that grace, the
-// lifecycle Lease's two release phases (leaderlock.ReleaseBudget and
-// leaderlock.AfterStartBudget, 1 s each; launcher.ControllerStopBudget), and a
-// margin, so a longer outer grace would not help. At a stop the lifecycle
-// manager first stops the agent API, then the lifecycle controller and the two
-// supervisors together, and with the supervisors every Provider manager at once
+// lifecycle Lease's release budget (leaderlock.ReleaseBudget, 2 s, shared by
+// the release's two phases; launcher.ControllerStopBudget), and a margin, so a
+// longer outer grace would not help. At a stop the lifecycle manager first
+// stops the agent API, then the lifecycle controller and the two supervisors
+// together, and with the supervisors every Provider manager at once
 // (providerctl.Supervisor), each for at most providerGrace and then its own
-// Lease's two release phases, 2 s; that leaves 8 s for the lifecycle
-// controller, the caches and the health server (TestProviderGraceFitsTheStop).
-// Those 8 s hold while the API server answers in milliseconds. The budgets
-// bound the release's retries, not its first requests: client-go's first
+// Lease's release, within the same shared 2 s; that leaves 8 s for the
+// lifecycle controller, the caches and the health server
+// (TestProviderGraceFitsTheStop).
+// Those 8 s hold while the API server answers in milliseconds. The budget
+// bounds the release's retries, not its first requests: client-go's first
 // release read and write, and the retry's first read and write, run under the
 // elector's release context, the renew deadline (10 s; leaderelection.go:
 // 310-313), each request cut at the lock's client time-out (5 s). Against a
-// slow API server a Provider manager's stop can then reach 20 + 10 + 1 = 31 s,
-// past the lifecycle manager's 30 s, whose stop then returns an error (main
+// slow API server a Provider manager's stop can then reach 20 + 10 + 2 = 32 s
+// (the release after Start gets at most what the shared 2 s has left), past
+// the lifecycle manager's 30 s, whose stop then returns an error (main
 // exits 1) and makes no release after Start, the slow-request limit that
 // launcher.ControllerTermGrace notes for the lifecycle Lease's own release
 // (review of PR #215: N1). With equal graces a

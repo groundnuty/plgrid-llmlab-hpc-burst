@@ -34,12 +34,15 @@ type fakeLease struct {
 	transitions int
 	// written is every record a write that succeeded wrote.
 	written []resourcelock.LeaderElectionRecord
+	// readBy is the deadline of the last read's context; zero for none.
+	readBy time.Time
 }
 
-func (f *fakeLease) Get(context.Context) (*resourcelock.LeaderElectionRecord, []byte, error) {
+func (f *fakeLease) Get(ctx context.Context) (*resourcelock.LeaderElectionRecord, []byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.gets++
+	f.readBy, _ = ctx.Deadline()
 	if f.failGets > 0 {
 		f.failGets--
 		return nil, nil, errors.New("injected: the read timed out")

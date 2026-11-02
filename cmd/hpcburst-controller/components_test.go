@@ -251,8 +251,8 @@ func TestFrontSettingsRefusesAFileOfTwoCertificates(t *testing.T) {
 }
 
 // A Provider manager's stop fits the lifecycle manager's 30 s: its grace and
-// its Lease's two release phases, the elector's retries (issue #131) and the
-// release after Start (issue #160), leave 8 s for the rest of the lifecycle
+// its Lease's release budget, shared by the elector's retries (issue #131) and
+// the release after Start (issue #160), leave 8 s for the rest of the lifecycle
 // manager's stop (review of PR 132: N3; run_test.go stops during a
 // submission), and the supervisor's kill grace for the controller is longer
 // than the lifecycle manager's (launcher.TestControllerStopBudget; PR #159).
@@ -262,9 +262,9 @@ func TestFrontSettingsRefusesAFileOfTwoCertificates(t *testing.T) {
 // (review of PR #215: N1).
 func TestProviderGraceFitsTheStop(t *testing.T) {
 	const others = 8 * time.Second // the lifecycle controller, the caches and the health server
-	if stop := providerGrace + leaderlock.ReleaseBudget + leaderlock.AfterStartBudget; stop+others > lifecycle.ShutdownGrace {
-		t.Fatalf("a Provider manager's stop, %s (providerGrace %s and the release budgets %s and %s), leaves less than %s of the lifecycle manager's shutdown grace, %s",
-			stop, providerGrace, leaderlock.ReleaseBudget, leaderlock.AfterStartBudget, others, lifecycle.ShutdownGrace)
+	if stop := providerGrace + leaderlock.ReleaseBudget; stop+others > lifecycle.ShutdownGrace {
+		t.Fatalf("a Provider manager's stop, %s (providerGrace %s and the shared release budget %s), leaves less than %s of the lifecycle manager's shutdown grace, %s",
+			stop, providerGrace, leaderlock.ReleaseBudget, others, lifecycle.ShutdownGrace)
 	}
 	if lifecycle.ShutdownGrace >= launcher.ControllerTermGrace {
 		t.Fatalf("the lifecycle manager's shutdown grace %s is not below the supervisor's kill grace for the controller, %s", lifecycle.ShutdownGrace, launcher.ControllerTermGrace)

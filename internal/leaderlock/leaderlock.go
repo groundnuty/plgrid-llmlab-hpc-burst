@@ -45,19 +45,23 @@ import (
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 )
 
-// ReleaseBudget bounds the retries of the elector's release, after its first
-// attempt failed (WithRetriedRelease). A release takes a read and a write,
-// milliseconds; the budget only matters while the API server is slow. It is
-// the first of a stop's two release phases; the second, the release after
-// Start, has its own budget (AfterStartBudget). The stop graces count both: a
-// Provider manager's release comes after its runnables have stopped, within
-// what the controller's providerGrace leaves of the lifecycle manager's
-// shutdown grace (cmd/hpcburst-controller), and the lifecycle Lease's release
-// comes after that grace, within launcher.ControllerStopBudget, which the
-// supervisor's kill grace for the controller covers
-// (launcher.ControllerTermGrace). When both run out, the Lease stays held
-// until it expires, as before.
-const ReleaseBudget = time.Second
+// ReleaseBudget is a stop's one release budget, shared by its two phases
+// (`@hpc-burst-science-agent`, 2 Nov 2026, review of PR #215: B2). The
+// first phase retries the elector's release after its first attempt failed
+// (WithRetriedRelease), within ReleaseBudget counted from that failure. The
+// second, the release after Start (ReleaseAfterStart), runs only when the
+// first did not release, and gets only what is left of ReleaseBudget,
+// counted from the elector's release write, never a budget of its own. A
+// release takes a read and a write, milliseconds; the budget only matters
+// while the API server is slow. The stop graces count it once: a Provider
+// manager's release comes after its runnables have stopped, within what the
+// controller's providerGrace leaves of the lifecycle manager's shutdown grace
+// (cmd/hpcburst-controller), and the lifecycle Lease's release comes after
+// that grace, within launcher.ControllerStopBudget, which the supervisor's
+// kill grace for the controller covers (launcher.ControllerTermGrace). When
+// it runs out, the Lease stays held until it expires, as before; correctness
+// rests on that expiry, and the release only speeds the hand-over.
+const ReleaseBudget = 2 * time.Second
 
 // UserAgent is the user agent New adds to its lock's requests, as
 // controller-runtime adds it to its own lock's (rest.AddUserAgent).

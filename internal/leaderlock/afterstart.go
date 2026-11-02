@@ -14,13 +14,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
-// AfterStartBudget bounds the release after Start (ReleaseAfterStart): its
-// reads, its write and the write's retries together. It is the second of a
-// stop's two release phases, after the elector's own release and its retries
-// (ReleaseBudget), and the stop graces count it as they count ReleaseBudget.
-// On a stop whose elector released the Lease it costs one read.
-const AfterStartBudget = time.Second
-
 // ReleaseAfterStart wraps mgr, which leads through lock, so that a clean,
 // requested stop gives the Lease up even when the elector's own release was
 // lost because its read failed (issue #160). The wrapper's Start runs mgr's,
@@ -43,8 +36,11 @@ const AfterStartBudget = time.Second
 //     internal.go:627-637) and then run out while a runnable still runs, is
 //     excluded by the evidence above (review of PR #215: B1).
 //
-// The Lease is then read again and released if it still names lock's
-// holder, within AfterStartBudget. Start's result is returned unchanged, and
+// It runs only when the elector's own release did not land, and only within
+// what is left of the stop's shared ReleaseBudget (Renewals): it is skipped,
+// and the skip logged with the time left, once that is spent. The Lease is
+// then read again and released if it still names lock's holder, within the
+// time left. Start's result is returned unchanged, and
 // a release that fails is logged to log: the Lease then stays held until it
 // expires, as before. Without that evidence nothing is released after Start:
 // a lost leadership, a runnable that failed, a stop past its grace, or a
@@ -80,7 +76,15 @@ func (m *releasingManager) Start(ctx context.Context) error {
 	if err != nil || ctx.Err() == nil || !m.lock.ledToTheEnd() {
 		return err
 	}
-	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), AfterStartBudget)
+	left, needed := m.lock.budgetLeft(time.Now())
+	if !needed {
+		return nil // the elector's release landed
+	}
+	if left <= 0 {
+		m.log.WithName("leader-election").Info("skipped the release after the manager stopped: the shared release budget is spent; the Lease stays held until it expires", "lock", m.lock.Describe(), "left", left)
+		return nil
+	}
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), left)
 	defer cancel()
 	released, rerr := releaseHeld(rctx, m.lock)
 	switch {
@@ -93,9 +97,13 @@ func (m *releasingManager) Start(ctx context.Context) error {
 }
 
 // TrackRenewals wraps inner, the lock a manager leads through, so that
-// ReleaseAfterStart can tell a clean stop from a lost leadership. It records
-// whether the last write that named this holder, an acquire or a renew,
-// succeeded; client-go's release record (no holder) is not counted. A write
+// ReleaseAfterStart can tell a clean stop from a lost leadership, and knows
+// what is left of the stop's shared ReleaseBudget. It records whether the
+// last write that named this holder, an acquire or a renew, succeeded;
+// client-go's release record (no holder) is not counted there. It also
+// records when the elector's release first reached Update, and whether that
+// Update returned nil: the Lease released, or found naming another holder or
+// none (WithRetriedRelease). A write
 // cut short because its context was cancelled is not counted either: only
 // the requested stop cancels the elector's context while it writes
 // (internal.go:545-554), whereas a renew poll that runs out ends its tries
@@ -112,6 +120,10 @@ type Renewals struct {
 	mu sync.Mutex
 	// ok is whether the last counted write succeeded; false before any.
 	ok bool
+	// releaseAt is when the elector's release first reached Update; zero
+	// before. released is whether that Update returned nil.
+	releaseAt time.Time
+	released  bool
 }
 
 // Create implements resourcelock.Interface.
@@ -123,9 +135,49 @@ func (r *Renewals) Create(ctx context.Context, ler resourcelock.LeaderElectionRe
 
 // Update implements resourcelock.Interface.
 func (r *Renewals) Update(ctx context.Context, ler resourcelock.LeaderElectionRecord) error {
+	if isRelease(ler) {
+		return r.release(ctx, ler)
+	}
 	err := r.Interface.Update(ctx, ler)
 	r.wrote(ctx, ler, err)
 	return err
+}
+
+// release passes a release record on, and records the first one's start and
+// outcome: the elector's release, which comes before any release after Start.
+func (r *Renewals) release(ctx context.Context, ler resourcelock.LeaderElectionRecord) error {
+	r.mu.Lock()
+	first := r.releaseAt.IsZero()
+	if first {
+		r.releaseAt = time.Now()
+	}
+	r.mu.Unlock()
+	err := r.Interface.Update(ctx, ler)
+	if first {
+		r.mu.Lock()
+		r.released = err == nil
+		r.mu.Unlock()
+	}
+	return err
+}
+
+// budgetLeft reports whether a release after Start is needed, and what is
+// left of the stop's shared ReleaseBudget at now. It is not needed when the
+// elector's release returned nil. The budget is counted from the elector's
+// release write, which includes that write's first attempt, so the release
+// after Start never gets more than the retries had left; an elector whose
+// release never reached Update (its read failed) used none of it.
+func (r *Renewals) budgetLeft(now time.Time) (left time.Duration, needed bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	switch {
+	case r.released:
+		return 0, false
+	case r.releaseAt.IsZero():
+		return ReleaseBudget, true
+	default:
+		return ReleaseBudget - now.Sub(r.releaseAt), true
+	}
 }
 
 func (r *Renewals) wrote(ctx context.Context, ler resourcelock.LeaderElectionRecord, err error) {

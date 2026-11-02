@@ -5,18 +5,18 @@ import "time"
 // ControllerStopBudget is the controller's longest normal stop (issues #131, #160): the lifecycle
 // manager's graceful shutdown, lifecycle.ShutdownGrace (30 s), within which its runnables stop, the
 // Provider supervisors and their managers among them, each of which releases its provider-<name>
-// Lease; then the two phases of the lifecycle Lease's release: the elector's release, retried within
-// leaderlock.ReleaseBudget (1 s), and the release after the manager's Start has returned, for a
-// release whose read failed, within leaderlock.AfterStartBudget (1 s). A SIGKILL before the end
+// Lease; then the lifecycle Lease's release, within leaderlock.ReleaseBudget (2 s). That one budget
+// is shared by the release's two phases: the retries of the elector's release, and the release after
+// the manager's Start has returned, for a release whose read failed, which gets only what the retries
+// left (`@hpc-burst-science-agent`, 2 Nov 2026, review of PR #215: B2). A SIGKILL before the end
 // leaves that Lease held until it expires, and the next controller waits for it.
-const ControllerStopBudget = controllerShutdownGrace + controllerReleaseBudget + controllerAfterStartBudget
+const ControllerStopBudget = controllerShutdownGrace + controllerReleaseBudget
 
 // The parts of ControllerStopBudget. TestControllerStopBudget checks them against
-// lifecycle.ShutdownGrace, leaderlock.ReleaseBudget and leaderlock.AfterStartBudget.
+// lifecycle.ShutdownGrace and leaderlock.ReleaseBudget.
 const (
-	controllerShutdownGrace    = 30 * time.Second
-	controllerReleaseBudget    = 1 * time.Second
-	controllerAfterStartBudget = 1 * time.Second
+	controllerShutdownGrace = 30 * time.Second
+	controllerReleaseBudget = 2 * time.Second
 )
 
 // ControllerTermGrace is how long the supervisor lets the controller stop, from SIGTERM to
