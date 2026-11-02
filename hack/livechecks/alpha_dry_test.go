@@ -60,19 +60,8 @@ cd "@REALDIR@" || exit 3
 exec "@REAL@" "$@"
 `
 
-var builtTests = map[string]string{}
-
-// TestMain removes the directories this package built test binaries into.
-func TestMain(m *testing.M) {
-	code := m.Run()
-	for _, p := range builtTests {
-		_ = os.RemoveAll(filepath.Dir(p))
-	}
-	os.Exit(code)
-}
-
 // realTestBinary returns the compiled test of a package: the prebuilt one when its variable is set, else a
-// build in a directory of this test run (removed by TestMain).
+// build into the calling test's own temporary directory, which the testing package removes.
 func realTestBinary(t *testing.T, envName, pkg string) string {
 	t.Helper()
 	if p := os.Getenv(envName); p != "" {
@@ -81,20 +70,12 @@ func realTestBinary(t *testing.T, envName, pkg string) string {
 		}
 		return p
 	}
-	if p, ok := builtTests[pkg]; ok {
-		return p
-	}
-	dir, err := os.MkdirTemp("", "hbdry")
-	if err != nil {
-		t.Fatal(err)
-	}
-	out := filepath.Join(dir, filepath.Base(pkg)+".test")
+	out := filepath.Join(t.TempDir(), filepath.Base(pkg)+".test")
 	cmd := exec.Command("go", "test", "-c", "-o", out, "./"+pkg)
 	cmd.Dir = repoRoot(t)
 	if b, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("go test -c ./%s: %v\n%s", pkg, err, b)
 	}
-	builtTests[pkg] = out
 	return out
 }
 

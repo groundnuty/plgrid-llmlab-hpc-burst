@@ -855,14 +855,18 @@ extract_tree() {
   git -C "$ROOT" archive "$1" 2>/dev/null | tar -x --anchored --exclude=spikes --exclude=hbep -C "$2" 2>/dev/null
 }
 
-# pkg_deps <tree> <package> <context>: the tree's directories the package's tests run (relative), one per
+# pkg_deps <tree> <context> <package>...: the tree's directories the packages' tests run (relative), one per
 # line, then "embed:<path>" lines for the files they embed (paths as go list gives them, nested ones too).
-# Fails when go list fails or prints nothing: a partial listing must never read as "nothing covers this".
+# One go list call lists the closure of all the packages named. Fails when go list fails or prints nothing: a
+# partial listing must never read as "nothing covers this".
 pkg_deps() {
-  local tree root out
+  local tree root out ctx=$2 p
+  local -a targets=()
   tree=$(cd "$1" 2>/dev/null && pwd -P) || return 1
+  shift 2
+  for p in "$@"; do targets+=("./$p"); done
   # shellcheck disable=SC2086
-  out=$( ( cd "$tree" && env ${CTXENV[$3]} go list -deps -test -f '{{.Dir}}|{{join .EmbedFiles ","}}' "./$2" 2>/dev/null ) |
+  out=$( ( cd "$tree" && env ${CTXENV[$ctx]} go list -deps -test -f '{{.Dir}}|{{join .EmbedFiles ","}}' "${targets[@]}" 2>/dev/null ) |
     awk -F'|' -v root="$tree" '
       index($1, root "/") == 1 || $1 == root {
         rel = substr($1, length(root) + 2); if (rel == "") rel = "."
@@ -883,8 +887,11 @@ input_matches() {
   return 1
 }
 
-# plan_key <name> <ctx>: the key of a row's dependency closure. Rows with the same package and stack share it.
-plan_key() { printf '%s|%s|%s' "${PKG[$1]}" "${STACK[$1]:--}" "$2"; }
+# plan_key <name> <ctx>: sets PLAN_KEY, the key of a row's dependency closure. Rows with the same package and
+# stack share it. It sets a variable and forks nothing: the plan calls it for every changed file, row and
+# context, and a command substitution there failed to fork on a loaded host and silently dropped a row.
+PLAN_KEY=""
+plan_key() { PLAN_KEY="${PKG[$1]}|${STACK[$1]:--}|$2"; }
 
 plan() {
   local range=$1 base head bsha hsha files name pkg ctx side f d b reason key out
@@ -912,18 +919,23 @@ plan() {
     [ "${STATUS[$name]}" = ready ] || continue
     pkg=${PKG[$name]}
     for ctx in ${CONTEXTS[$name]//,/ }; do
-      key=$(plan_key "$name" "$ctx")
+      plan_key "$name" "$ctx"; key=$PLAN_KEY
       [ -z "${deps[$key]+x}" ] || continue
       deps[$key]=""
-      for spkg in $pkg ${STACK[$name]-}; do
-        local found=0
-        for side in base head; do
-          [ -d "$PLAN_TMP/$side/$spkg" ] || continue   # the package may be new, or deleted, in the range
-          found=1
-          out=$(pkg_deps "$PLAN_TMP/$side" "$spkg" "$ctx") || { say "live-checks: dependency discovery failed for package $spkg ($ctx) at the $side of the range; nothing is planned"; return 2; }
-          deps[$key]+="$out"$'\n'
+      # The packages of the row that exist at each end of the range (one may be new, or deleted, in it); one go
+      # list call per end lists the closure of them all.
+      local -a present=()
+      for side in base head; do
+        present=()
+        for spkg in $pkg ${STACK[$name]-}; do
+          [ -d "$PLAN_TMP/$side/$spkg" ] && present+=("$spkg")
         done
-        [ "$found" = 1 ] || { say "live-checks: package $spkg exists at neither end of the range; nothing is planned"; return 2; }
+        [ ${#present[@]} -gt 0 ] || continue
+        out=$(pkg_deps "$PLAN_TMP/$side" "$ctx" "${present[@]}") || { say "live-checks: dependency discovery failed for package $pkg ($ctx) at the $side of the range; nothing is planned"; return 2; }
+        deps[$key]+="$out"$'\n'
+      done
+      for spkg in $pkg ${STACK[$name]-}; do
+        [ -d "$PLAN_TMP/base/$spkg" ] || [ -d "$PLAN_TMP/head/$spkg" ] || { say "live-checks: package $spkg exists at neither end of the range; nothing is planned"; return 2; }
       done
       deps[$key]=$(printf '%s' "${deps[$key]}" | sort -u)
     done
@@ -939,7 +951,8 @@ plan() {
       if [ -z "$reason" ]; then
         for ctx in ${CONTEXTS[$name]//,/ }; do
           # An embedded file counts wherever it sits and whatever it is called.
-          if printf '%s\n' "${deps[$(plan_key "$name" "$ctx")]}" | grep -q -x -F "embed:$f"; then reason=$f; break; fi
+          plan_key "$name" "$ctx"
+          if printf '%s\n' "${deps[$PLAN_KEY]}" | grep -q -x -F "embed:$f"; then reason=$f; break; fi
         done
       fi
       if [ -z "$reason" ]; then
@@ -947,7 +960,8 @@ plan() {
           case $b in *.md) ;; *) reason=$pkg ;; esac
         else
           for ctx in ${CONTEXTS[$name]//,/ }; do
-            printf '%s\n' "${deps[$(plan_key "$name" "$ctx")]}" | grep -q -x -F "$d" || continue
+            plan_key "$name" "$ctx"
+            printf '%s\n' "${deps[$PLAN_KEY]}" | grep -q -x -F "$d" || continue
             case $b in
               *_test.go) ;;
               *.go|*.s|*.S|*.c|*.h|*.cc|*.cpp) reason=$d; break ;;
