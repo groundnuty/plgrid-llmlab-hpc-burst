@@ -82,62 +82,15 @@ func TestControllerBinaryHoldsItsPortsAgainstAStranger(t *testing.T) {
 	}
 
 	t.Run("the start succeeds although a stranger tried the agent endpoint and the plugin first", func(t *testing.T) {
-		f, cert, _ := prepareState(t, api, "direct", exampleFront)
-		own := ownAddrs(f)
-		for _, addr := range own {
-			// Between the pick and the bind: the stranger finds each port held.
-			ln, err := net.Listen("tcp", addr)
-			if err == nil {
-				_ = ln.Close()
-				t.Fatalf("a stranger bound %s although the test picked it: the pick does not hold the port", addr)
-			}
-			if !isAddrInUse(err) {
-				t.Fatalf("a stranger's bind of the picked %s failed with %v, want address already in use", addr, err)
-			}
-		}
-		st := newStranger(heldAddrs.take)
-		b := startBinary(t, &f, deps{providerScheme: providerScheme, registry: prometheus.NewRegistry(), listen: st.listen})
-		if b.retries != 0 {
-			t.Errorf("the start was repeated %d times, want none: no port of the by-address pair was taken", b.retries)
-		}
+		holdsOwnPorts(t, api, false)
+	})
 
-		// Each endpoint answers from the binary, not from a socket that merely accepts into a
-		// backlog: the plugin with an HTTP response, the agent endpoint with a TLS handshake to the
-		// launcher's certificate (startBinary has seen the health probes and the metrics answer).
-		b.eventually(t, "the plugin endpoint answers an HTTP request", 60*time.Second, func() bool {
-			_, ok := statusOf("http://" + f.host.FrpsPluginAddr() + agentapi.FrpsPluginPath)
-			return ok
-		})
-		b.eventually(t, "the agent endpoint completes a TLS handshake pinned to the launcher's certificate", 60*time.Second, func() bool {
-			c, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", f.host.AgentEndpointAddr(), agentapi.ClientTLSConfig(agentapi.PinOf(cert)))
-			if err != nil {
-				return false
-			}
-			_ = c.Close()
-			return true
-		})
-
-		// Both binds went through the hook, each after the stranger's failed try.
-		for _, addr := range own {
-			tried, err := st.result(addr)
-			switch {
-			case !tried:
-				t.Errorf("the binary never asked deps.listen for %s: it bound the address some other way", addr)
-			case !isAddrInUse(err):
-				t.Errorf("the stranger's bind of %s returned %v, want address already in use", addr, err)
-			}
-			if !heldAddrs.wasTaken(addr) {
-				t.Errorf("the binary did not take the listener held for %s", addr)
-			}
-		}
-		if err := b.stop(t); err != nil {
-			t.Fatalf("run returned %v after its context ended, want nil", err)
-		}
-		for _, addr := range own {
-			if listening(addr) {
-				t.Errorf("%s still accepts after the stop", addr)
-			}
-		}
+	// The same, with an incidental collision on a by-address port at the first start: the start is
+	// repeated on fresh ports and the test still passes, because it checks the run that served, on
+	// the ports it ended with. A test that required no repeat would fail on exactly the flake this
+	// change recovers from.
+	t.Run("the same when another process takes the metrics port at the first start", func(t *testing.T) {
+		holdsOwnPorts(t, api, true)
 	})
 
 	// The metrics and the health probes are bound from an address by controller-runtime. A
@@ -171,8 +124,8 @@ func TestControllerBinaryHoldsItsPortsAgainstAStranger(t *testing.T) {
 				}
 			})
 			b := startBinary(t, &f, deps{providerScheme: providerScheme, registry: prometheus.NewRegistry()})
-			if b.retries != 1 {
-				t.Fatalf("the start was repeated %d times, want 1 (run returned %v)", b.retries, b.err)
+			if b.retries < 1 {
+				t.Fatalf("the injected collision did not repeat the start (run returned %v)", b.err)
 			}
 			if f.host.PortBase == first.host.PortBase || f.healthAddr == first.healthAddr {
 				t.Errorf("the retry kept the ports of the first start (base %d, health %s)", f.host.PortBase, f.healthAddr)
@@ -253,4 +206,91 @@ func TestControllerBinaryHoldsItsPortsAgainstAStranger(t *testing.T) {
 			t.Fatalf("run returned %v, want its bind of the plugin endpoint %s to fail with address already in use", b.err, plugin)
 		}
 	})
+}
+
+// holdsOwnPorts is the positive test: a stranger tries the agent endpoint and the plugin at the moment
+// the binary is about to bind them, and the start succeeds. With collide, another process also takes
+// the metrics port at the first start, which the bounded retry recovers from (startBinary); the checks
+// are of the final run, on the final ports, whether or not a collision, the injected one or an
+// incidental one, made the start repeat.
+func holdsOwnPorts(t *testing.T, api *apiServer, collide bool) {
+	f, cert, _ := prepareState(t, api, "direct", exampleFront)
+	for _, addr := range ownAddrs(f) {
+		// Between the pick and the bind: the stranger finds each port held.
+		ln, err := net.Listen("tcp", addr)
+		if err == nil {
+			_ = ln.Close()
+			t.Fatalf("a stranger bound %s although the test picked it: the pick does not hold the port", addr)
+		}
+		if !isAddrInUse(err) {
+			t.Fatalf("a stranger's bind of the picked %s failed with %v, want address already in use", addr, err)
+		}
+	}
+	if collide {
+		var taken []net.Listener
+		beforeLaunch = func(t *testing.T, attempt int, f flags) {
+			if attempt != 0 {
+				return
+			}
+			ln, err := net.Listen("tcp", f.host.ControllerMetricsAddr())
+			if err != nil {
+				t.Fatalf("the other process could not take the released %s: %v", f.host.ControllerMetricsAddr(), err)
+			}
+			taken = append(taken, ln)
+		}
+		t.Cleanup(func() {
+			beforeLaunch = nil
+			for _, ln := range taken {
+				_ = ln.Close()
+			}
+		})
+	}
+	st := newStranger(heldAddrs.take)
+	b := startBinary(t, &f, deps{providerScheme: providerScheme, registry: prometheus.NewRegistry(), listen: st.listen})
+	if collide && b.retries < 1 {
+		t.Fatalf("the injected collision did not repeat the start (run returned %v)", b.err)
+	}
+	if b.retries > 0 {
+		t.Logf("the start was repeated %d times; checking the run that served, on its own ports", b.retries)
+	}
+	// The ports the binary ended with: f was rewritten by each repeat.
+	own := ownAddrs(f)
+
+	// Each endpoint answers from the binary, not from a socket that merely accepts into a
+	// backlog: the plugin with an HTTP response, the agent endpoint with a TLS handshake to the
+	// launcher's certificate (startBinary has seen the health probes and the metrics answer).
+	b.eventually(t, "the plugin endpoint answers an HTTP request", 60*time.Second, func() bool {
+		_, ok := statusOf("http://" + f.host.FrpsPluginAddr() + agentapi.FrpsPluginPath)
+		return ok
+	})
+	b.eventually(t, "the agent endpoint completes a TLS handshake pinned to the launcher's certificate", 60*time.Second, func() bool {
+		c, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", f.host.AgentEndpointAddr(), agentapi.ClientTLSConfig(agentapi.PinOf(cert)))
+		if err != nil {
+			return false
+		}
+		_ = c.Close()
+		return true
+	})
+
+	// Both binds of the final run went through the hook, each after the stranger's failed try.
+	for _, addr := range own {
+		tried, err := st.result(addr)
+		switch {
+		case !tried:
+			t.Errorf("the binary never asked deps.listen for %s: it bound the address some other way", addr)
+		case !isAddrInUse(err):
+			t.Errorf("the stranger's bind of %s returned %v, want address already in use", addr, err)
+		}
+		if !heldAddrs.wasTaken(addr) {
+			t.Errorf("the binary did not take the listener held for %s", addr)
+		}
+	}
+	if err := b.stop(t); err != nil {
+		t.Fatalf("run returned %v after its context ended, want nil", err)
+	}
+	for _, addr := range own {
+		if listening(addr) {
+			t.Errorf("%s still accepts after the stop", addr)
+		}
+	}
 }

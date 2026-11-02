@@ -109,14 +109,19 @@ type child struct {
 // serving or has exited, as startBinary does for an in-process run: a child that
 // exits having found the metrics or the health port taken (its stderr says
 // "address already in use") is started again with fresh ports, written to *f, at
-// most maxBindRetries times, each logged. avoid is the flags of the other copies
-// running.
+// most maxBindRetries times, each logged. A caller must check the final *f, not
+// the ports it first picked. A child that neither exits nor serves within 90 s
+// fails the test. avoid is the flags of the other copies running.
 func startChild(t *testing.T, name string, f *flags, runnerAddr string, avoid ...flags) *child {
 	t.Helper()
 	for attempt := 0; ; attempt++ {
 		releaseAtStart(*f)
 		c := launchChild(t, name, *f, runnerAddr)
-		exited := c.awaitServing(90 * time.Second)
+		served, exited := c.awaitServing(90 * time.Second)
+		if !served && !exited {
+			t.Fatalf("child %s neither exited nor served within 90 s: /healthz on %s or /metrics on %s never answered 200; the end of its stderr:\n%s",
+				name, f.healthAddr, f.host.ControllerMetricsAddr(), c.tail(30))
+		}
 		if !exited || !addrInUseText(c.log()) || attempt == maxBindRetries {
 			return c
 		}
@@ -126,9 +131,9 @@ func startChild(t *testing.T, name string, f *flags, runnerAddr string, avoid ..
 	}
 }
 
-// awaitServing waits until the process has exited (true), or its health probes
-// and metrics both answer 200 (false), or timeout passes (false).
-func (c *child) awaitServing(timeout time.Duration) (exited bool) {
+// awaitServing waits until the process has exited (exited), or its health probes
+// and metrics both answer 200 (served), or timeout passes (neither).
+func (c *child) awaitServing(timeout time.Duration) (served, exited bool) {
 	deadline := time.Now().Add(timeout)
 	answers := func(url string) bool {
 		resp, err := probeHTTP.Get(url)
@@ -140,18 +145,18 @@ func (c *child) awaitServing(timeout time.Duration) (exited bool) {
 	}
 	for time.Now().Before(deadline) {
 		if !c.running() {
-			return true
+			return false, true
 		}
 		if answers("http://"+c.f.healthAddr+"/healthz") && answers("http://"+c.f.host.ControllerMetricsAddr()+"/metrics") {
-			return false
+			return true, false
 		}
 		select {
 		case <-c.exited:
-			return true
+			return false, true
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
-	return false
+	return false, false
 }
 
 // launchChild starts a controller process with f's arguments against the fake

@@ -320,10 +320,12 @@ var beforeLaunch func(t *testing.T, attempt int, f flags)
 // (held_test.go), so a stranger can take one between the release and the bind:
 // a run that then exits with "address already in use" is started again with fresh
 // ports, written to *f, at most maxBindRetries times, each logged. The returned
-// binary's retries is how many it took. A run that exits with any other error,
-// or a binary still not serving after 90 s, is returned as it is, for the test's
-// own waits to report. avoid is the flags of the other copies running, whose
-// blocks a fresh pick stays clear of.
+// binary's retries is how many it took, so a caller that expects no collision of
+// its own must not count on none: an incidental one recovers the same way, and
+// what a test then checks is the final run, on the final *f. A run that exits with
+// any other error is returned as it is, for the test's own waits to report; one
+// that neither exits nor serves within 90 s fails the test. avoid is the flags of
+// the other copies running, whose blocks a fresh pick stays clear of.
 func startBinary(t *testing.T, f *flags, d deps, avoid ...flags) *binary {
 	t.Helper()
 	for attempt := 0; ; attempt++ {
@@ -333,7 +335,11 @@ func startBinary(t *testing.T, f *flags, d deps, avoid ...flags) *binary {
 		}
 		b := launchBinary(t, *f, d)
 		b.retries = attempt
-		err := b.awaitServing(90 * time.Second)
+		_, err := b.awaitServing(90 * time.Second)
+		if errors.Is(err, errNotServing) {
+			t.Fatalf("the binary neither exited nor served within 90 s: /healthz on %s or /metrics on %s never answered 200",
+				f.healthAddr, f.host.ControllerMetricsAddr())
+		}
 		if !isAddrInUse(err) || attempt == maxBindRetries {
 			return b
 		}
@@ -343,13 +349,18 @@ func startBinary(t *testing.T, f *flags, d deps, avoid ...flags) *binary {
 	}
 }
 
+// errNotServing is what awaitServing returns when the run neither returned nor
+// answered before the timeout, which is not the same as having served.
+var errNotServing = errors.New("the binary neither exited nor served in time")
+
 // probeHTTP asks the binary's by-address endpoints. It times out: a stranger that
 // took such a port accepts into its backlog and never answers.
 var probeHTTP = &http.Client{Timeout: 2 * time.Second}
 
-// awaitServing waits until the run has returned (and returns its error), or the
-// health probes and the metrics both answer 200 (nil), or timeout passes (nil).
-func (b *binary) awaitServing(timeout time.Duration) error {
+// awaitServing waits until the run has returned (false and its error, which is
+// nil for a clean return), or the health probes and the metrics both answer 200
+// (true, nil), or timeout passes (false and errNotServing).
+func (b *binary) awaitServing(timeout time.Duration) (served bool, err error) {
 	deadline := time.Now().Add(timeout)
 	answers := func(url string) bool {
 		resp, err := probeHTTP.Get(url)
@@ -362,19 +373,19 @@ func (b *binary) awaitServing(timeout time.Duration) error {
 	for time.Now().Before(deadline) {
 		select {
 		case <-b.exited:
-			return b.err
+			return false, b.err
 		default:
 		}
 		if answers("http://"+b.f.healthAddr+"/healthz") && answers("http://"+b.f.host.ControllerMetricsAddr()+"/metrics") {
-			return nil
+			return true, nil
 		}
 		select {
 		case <-b.exited:
-			return b.err
+			return false, b.err
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
-	return nil
+	return false, errNotServing
 }
 
 // eventually waits until cond holds, for at most timeout. A run that returns
