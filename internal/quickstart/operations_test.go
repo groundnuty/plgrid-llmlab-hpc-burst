@@ -261,7 +261,7 @@ var builtinKinds = map[string]bool{
 }
 
 // kubectlVerbs are the kubectl verbs the guide uses.
-var kubectlVerbs = map[string]bool{"get": true, "describe": true, "scale": true, "annotate": true, "delete": true}
+var kubectlVerbs = map[string]bool{"get": true, "describe": true, "scale": true, "annotate": true, "delete": true, "apply": true}
 
 // kubectlFlags are the kubectl flags the guide uses, each with the check of its value: label keys,
 // record kinds and the namespace are the framework's constants.
@@ -269,6 +269,10 @@ var kubectlFlags = map[string]func(string) bool{
 	"-o":        func(v string) bool { return v == "yaml" || v == "json" || v == "wide" || v == "name" },
 	"-n":        func(v string) bool { return v == v1alpha1.ControllerNamespace },
 	"--sort-by": func(v string) bool { return strings.HasPrefix(v, ".") },
+	"-f": func(v string) bool {
+		fi, err := os.Stat(filepath.Join(root, v))
+		return !filepath.IsAbs(v) && err == nil && fi.Mode().IsRegular()
+	},
 	"--replicas": func(v string) bool {
 		n, err := strconv.Atoi(v)
 		return err == nil && n >= 0
@@ -320,6 +324,13 @@ func checkHbk(t *testing.T, line string, words []string, crds crdNames) {
 		if !ok(val) {
 			t.Errorf("%q: %s %q is not a value the framework defines", line, name, val)
 		}
+	}
+	if words[1] == "apply" {
+		// The file names the objects: a file of this repository, which -f has checked.
+		if len(pos) != 0 || !strings.Contains(line, " -f ") {
+			t.Errorf("%q: the test checks only apply -f <file of this repository>", line)
+		}
+		return
 	}
 	if len(pos) == 0 {
 		t.Errorf("%q names no resource", line)

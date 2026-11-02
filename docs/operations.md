@@ -89,7 +89,7 @@ Any state but `ready` makes the host unhealthy. A controller that does not lead 
 
 ### The front's line
 
-`supervised front:` adds `degraded: usage writes failing` while the front's usage sink fails, and `usage state unknown` when its `/healthz` names no known state. Neither makes the host unhealthy: the front keeps serving, and `status` still exits 0 ([HBEP-8](../hbep/0008-observability-and-events/README.md), Usage records). Usage records are lost meanwhile, so check the disk under the front's `usageDir`.
+`supervised front:` adds `degraded: usage writes failing` while the front's usage sink fails, and `usage state unknown` when its `/healthz` names no known state. Neither makes the host unhealthy: the front keeps serving, and `status` still exits 0 ([HBEP-8](../hbep/0008-observability-and-events/README.md), Usage records). Usage records are lost meanwhile; `logs/front.log` says why.
 
 The last line, `front:`, is about the dial-home address, not the process. `front: absent` means no front runs under this host, which is a state, not a fault. A front that was configured and is not running is listed as a supervised process that does not run, and makes the host unhealthy.
 
@@ -129,7 +129,7 @@ A ModelDeployment with a managed source (an entry LLMLab serves) gets none of th
 ### `SpecUnsupported`
 
 - **Means:** the spec asks for something alpha does not run. The message names it: a `data-parallel-size` above 1; a `generation-config` other than `auto`, or `override-generation-config` or `hf-config-path`; an engine flag that the framework's launch sets itself; a missing `spec.workload`, or a workload value out of range; a workload shape that does not fit the declared `max-model-len`; a `leaseLimit` that does not parse; or a GPU count (`tensor-parallel-size` times `pipeline-parallel-size`) above every allowed Provider's `gpusPerNode` or QOS GPU cap.
-- **The controller** creates no Allocation for the deployment while it holds. Instances already running are left alone.
+- **The controller** creates no Allocation for the deployment while it holds, replacements included. Instances already running serve until they drain.
 - **You:** edit the spec as the message says. The next pass reads it again ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Provisioning, and What the controller reads).
 
 ### `PartitionTooShort`
@@ -177,7 +177,7 @@ A ModelDeployment with a managed source (an entry LLMLab serves) gets none of th
 
 - **Means:** a Provider's last submission attempt for an Allocation was refused by Slurm for a reason other than a full submit limit. The message carries Slurm's reason, such as a used-up grant or a limit the profile does not type.
 - **The controller:** the Provider's controller retries with backoff. The lifecycle controller does not switch Providers by itself in alpha, and nothing counts toward `RestartLoop` ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Provisioning; [HBEP-4](../hbep/0004-provider-interface/README.md), QOS limits).
-- **You:** fix what Slurm names (`hbk describe allocation <allocation>` shows the attempt), or allow another Provider in `spec.providers`.
+- **You:** fix what Slurm names; `hbk describe allocation <allocation>` shows the attempt. The next retry submits once the cause is gone.
 
 ### `NoOverlapSlot`
 
@@ -201,13 +201,13 @@ A ModelDeployment with a managed source (an entry LLMLab serves) gets none of th
   hbk describe provider <provider>
   ```
 
-  `Ready` false with `ReadsFailing` means the Provider's controller has read the platform successfully for none of the last 5 minutes; its other conditions usually say why: `CredentialsInvalid` (the credentials file or its key is readable by others, or not yours), `PathUnresolved` (HOME or the staging path is unusable on the login node), `DialectMismatch`, or `DialHomeKeyMissing` (in ssh mode, a dial-home key file is missing on the platform, and nothing is submitted). For a missing build, see [The agent builds](#the-agent-builds).
+  `Ready` false with `ReadsFailing` means the Provider's controller has read the platform successfully for none of the last 5 minutes. A stopped Provider controller cannot write that, so the lifecycle controller judges readiness by the age of `status.lastSuccessfulStatusRead`, and a stored `Ready` true can be stale. The Provider's other conditions usually say why reads fail: `CredentialsInvalid` (the credentials file or its key is readable by others, or not yours), `PathUnresolved` (HOME or the staging path is unusable on the login node), `DialectMismatch`, or `DialHomeKeyMissing` (in ssh mode, a dial-home key file is missing on the platform, and nothing is submitted). For a missing build, see [The agent builds](#the-agent-builds).
 
 ### `ReplacementLate`
 
 - **Means:** a replacement's Allocation had not started by its predecessor's drain start minus the class's start-to-ready time, so it cannot be ready before the drain starts. The message names the Instance and its drain start.
 - **The controller** emits a `degraded` event `ReplacementLate` once, and keeps the drain rule: the predecessor still drains at its hard end minus its drain window, ready replacement or not, so capacity can drop ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Handover, Lateness).
-- **You:** see why the replacement waits (`hbk describe allocation <allocation>`, and its job's reason on the cluster). The plan takes the 90th percentile of the Provider's last 20 queue waits, so a queue that has grown since leaves plans late until the waits catch up. Allowing a second Provider gives the replacement another place to go.
+- **You:** see why the replacement waits (`hbk describe allocation <allocation>`, and its job's reason on the cluster). The plan takes the 90th percentile of the Provider's last 20 queue waits (the largest, with fewer than 20), so a queue that has grown since leaves plans late until the waits catch up. Allowing a second Provider gives the replacement another place to go.
 
 ### `CapacityDropped`
 
@@ -288,7 +288,7 @@ At zero desired Instances the controller applies the shutdown case ([HBEP-7](../
 - `Keep`, the default: it is kept, its job still running, until `retentionPolicy.until`, else the deployment's `endTime`, else the job's hard end;
 - either way, a profile's `maxIdle` releases it earlier: Athena's is 30 minutes, Helios sets none.
 
-So a kept job can hold its GPU for hours after the scale-down. To end it now, delete the Allocation once it hosts no live Instance; its finalizer cancels every job with its tag. Deleting the ModelDeployment instead also releases its kept Allocations at once.
+So a kept job can hold its GPU for hours after the scale-down. To end it now, delete the Allocation once it hosts no live Instance; its finalizer cancels every job with its tag. Deleting the ModelDeployment instead releases its kept Allocations as soon as their Instances have ended.
 
 ```
 hbk delete allocation <allocation>
@@ -376,7 +376,7 @@ bin/hpcburst status --state-dir "$STATE"
 bin/hpcburst upgrade --state-dir "$STATE" --bin-dir "$BIN" --to <version>
 ```
 
-The only way back is to stop the host and restore that backup; `up` then starts the backup's release. Changes made since the upgrade are lost, and jobs submitted since are found by their tags as orphans:
+The only way back is to stop the host and restore that backup; `up` then starts the backup's release. Changes made since the upgrade are lost, and a job submitted since has no Allocation left to end it: find it by its tag on the cluster and cancel it there.
 
 ```
 bin/hpcburst down --state-dir "$STATE"
@@ -401,5 +401,9 @@ A live Allocation's numbers so far are in its `status.atProvider.accounting`. Th
 - **Never remove a finalizer by hand.** An Allocation's finalizer, `hpcburst.groundnuty.github.io/cancel-all`, is what cancels every job with its tag and writes the `acct-` record. Remove it, and the object goes while its job may run on, held by no one, with no record of its hours. An Instance's finalizer, `hpcburst.groundnuty.github.io/drain`, is what lets it drain before it goes. A deletion that waits is waiting for a job, usually a [stuck COMPLETING job](#a-stuck-completing-job) or an unresolved submission (`SubmissionResolved`): fix that instead ([HBEP-11](../hbep/0011-kubernetes-control-plane/README.md), Ownership, records and deletion).
 - **Never edit `status`.** The controllers write status and act on it: an Allocation's phase and `jobCompleting` decide its Instance's end, the slot count and the finalizer; an Instance's phase and conditions decide what the front routes to. An edit is overwritten at the next pass, or acted on before that. Change the spec, or use the one annotation meant for you, `abandon-attempt`.
 - **Never edit the annotations the controllers write** on an Allocation, such as its job ID, its submission record or its tag: they are its record of which job is its own ([HBEP-11](../hbep/0011-kubernetes-control-plane/README.md), The Allocation's record).
-- **Never delete the framework's CRDs.** That deletes every resource of their kinds, and the finalizers would cancel every job. An admission policy refuses it in alpha ([HBEP-11](../hbep/0011-kubernetes-control-plane/README.md), Risks).
+- **Never delete the framework's CRDs.** That deletes every resource of their kinds, and the finalizers would cancel every job ([HBEP-11](../hbep/0011-kubernetes-control-plane/README.md), Risks). The admission policy in `config/admission/` refuses it, but `hpcburst up --manifests config/crd` does not apply it, so apply it once yourself:
+
+  ```
+  hbk apply -f config/admission/crd-deletion-guard.yaml
+  ```
 - **Never expect `down` to stop the jobs.** It stops the host only. Scale the deployments to zero, or delete them, while the host still runs, and wait for `hbk get instances,allocations` to be empty first ([quickstart, step 7](quickstart.md#7-stop)).
