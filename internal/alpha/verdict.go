@@ -307,28 +307,31 @@ func SuccessorQueueWait(pre, suc provider.Job) (d time.Duration, ok bool) {
 // VerifyTunnelHour judges tunnel-hour-helios and tunnel-hour-athena.
 //
 //	hbep/0006-instance-reachability/README.md:354: "S1's one-hour runs pass with this wiring on Helios and on Athena, in the mode each uses, with the path rate measured."
+//	hbep/0006-instance-reachability/README.md:375: "S1's one-hour runs pass with this wiring on Helios and on Athena, with the path rate from compute node to front measured;"
 //	spikes/s1-frp/README.md:284 and :285 (C2, C3; branch spike/s1-frp-dial-home, 01c2ecd): every lane stays reachable, uncut, for at least an hour.
 //	spikes/s1-frp/README.md:288 (C6): the path rate is "ok, at least 30 s asked, at least 29 s timed at the VM's receiver", and moved bytes.
 //
-// S1's lane is one stream of 3,660 s. Behind the front a request lasts at most the
-// deployment's routing.maxRequestDuration, which the front enforces (HBEP-5), so a
-// lane here is a chain of requests, one after another on the same tunnel, each
-// within that deadline, with no pause over MaxLaneGap, spanning the hour and ending
-// before the Instance's drain start.
+// The science agent's ruling of 2 Nov 2026 reads the criterion as an hour of one
+// tunnel staying healthy under real use, not one stream an hour long (the front
+// cuts a request at the deployment's deadline). A pass needs:
+//  1. one tunnel session for the whole hour: frps's lastStartTime for the proxy
+//     the same in every sample, no frpc login between, TunnelConnected True throughout;
+//  2. traffic that tests what an hour tests: requests back to back, one about
+//     4 minutes, 16 concurrent streams at 20 tokens a second, an idle stretch
+//     of 2 minutes with heartbeats only;
+//  3. no cut: no response with cutBy, no stream_cut;
+//  4. the path rate, tokens and bytes a second from node to front, under load.
+//
+// A run in which frpc logged in again mid-hour but every request passed is no
+// pass: the session check is what fails it.
 func VerifyTunnelHour(row Row, o TunnelHourObs, jobs []provider.Job) []string {
 	f := deploymentChecks(row, o.Deployment)
-	if len(o.Lanes) == 0 {
-		f = append(f, "no lane was held for the hour")
-	}
 	if o.DrainStart.IsZero() {
 		f = append(f, "the Instance's drain start was not observed, so the hour cannot be placed before it")
 	}
-	for _, l := range o.Lanes {
-		f = append(f, laneChecks(l, o.DrainStart)...)
-	}
-	if o.TunnelDrops != 0 {
-		f = append(f, "the tunnel dropped during the hour")
-	}
+	f = append(f, requestChecks(o.Requests, o.DrainStart)...)
+	f = append(f, sessionChecks(o.Requests, o.Samples)...)
+	f = append(f, trafficChecks(o.Requests)...)
 	r := o.Rate
 	switch {
 	case !r.OK:
@@ -337,11 +340,13 @@ func VerifyTunnelHour(row Row, o TunnelHourObs, jobs []provider.Job) []string {
 		f = append(f, "the path rate is not in the token direction (node to front)")
 	case r.AskedSeconds < 30 || r.TimedSeconds < 29 || r.Bytes <= 0:
 		f = append(f, "the path rate was asked for under 30 s, timed under 29 s, or moved no bytes")
+	case !r.UnderLoad || r.Tokens <= 0:
+		f = append(f, "the path rate was not measured under load, in tokens as well as bytes")
 	}
 	lf, by := ledgerChecks(row, o.Tags, jobs)
 	f = append(f, lf...)
 	f = append(f, tagCountChecks(row, o.Tags, "a tunnel run makes exactly one Allocation")...)
-	// The cluster's own times corroborate the lanes': a request's clock is the
+	// The cluster's own times corroborate the requests': a request's clock is the
 	// scenario's, the job's start and end are the scheduler's. Both are required.
 	for _, tag := range o.Tags {
 		j, ok := by[tag]
@@ -356,20 +361,34 @@ func VerifyTunnelHour(row Row, o TunnelHourObs, jobs []provider.Job) []string {
 	return dedupe(f)
 }
 
-// laneChecks judges one lane of the hour.
-func laneChecks(l Lane, drainStart time.Time) []string {
-	var f []string
-	if len(l.Requests) == 0 {
-		return []string{"a lane carried no request"}
+// span is the time from the first request opening to the last ending; zero when
+// there is none or one has no times.
+func span(reqs []Stream) (first, last time.Time) {
+	for _, r := range reqs {
+		if r.Opened.IsZero() || r.Ended.IsZero() {
+			return time.Time{}, time.Time{}
+		}
+		if first.IsZero() || r.Opened.Before(first) {
+			first = r.Opened
+		}
+		if r.Ended.After(last) {
+			last = r.Ended
+		}
 	}
-	reqs := append([]Stream(nil), l.Requests...)
-	sort.Slice(reqs, func(a, b int) bool { return reqs[a].Opened.Before(reqs[b].Opened) })
-	var last time.Time
-	for i, s := range reqs {
+	return first, last
+}
+
+// requestChecks judges each request, and that together they cover the hour and end before the drain start.
+func requestChecks(reqs []Stream, drainStart time.Time) []string {
+	if len(reqs) == 0 {
+		return []string{"no request was made during the hour"}
+	}
+	var f []string
+	for _, s := range reqs {
 		switch {
 		case s.Opened.IsZero() || s.Ended.IsZero():
 			f = append(f, "a request has no opening or ending time")
-		case s.CutBy != "":
+		case s.CutBy != "" || s.Error == "stream_cut":
 			f = append(f, "a stream was cut during the hour")
 		case !s.Complete:
 			f = append(f, "a stream did not complete")
@@ -377,20 +396,132 @@ func laneChecks(l Lane, drainStart time.Time) []string {
 			// The front would have cut it: an observation of one means the deadline was not the deployment's.
 			f = append(f, "a request outlasted the deployment's request deadline")
 		}
-		if i > 0 && !s.Opened.IsZero() && !last.IsZero() && s.Opened.Sub(last) > MaxLaneGap {
-			f = append(f, "a lane paused for more than 10 s between two requests")
-		}
-		if s.Ended.After(last) {
-			last = s.Ended
-		}
 	}
-	if l.Span() < Hour {
-		f = append(f, "a lane lasted less than an hour")
+	first, last := span(reqs)
+	if last.Sub(first) < Hour {
+		f = append(f, "the requests lasted less than an hour")
 	}
 	if !drainStart.IsZero() && last.After(drainStart) {
 		f = append(f, "the hour ended after the Instance's drain start")
 	}
 	return f
+}
+
+// sessionChecks: one tunnel session for the whole hour. The samples must open
+// the hour (one at or before the first request) and close it (one at or after the
+// last), come no more than MaxSampleGap apart, all show the Instance's
+// TunnelConnected True, and all carry the same frps lastStartTime for its proxy:
+// a different one is a login of frpc in between, which the requests alone cannot show.
+func sessionChecks(reqs []Stream, samples []TunnelSample) []string {
+	if len(samples) < 2 {
+		return []string{"the tunnel session was looked at fewer than twice, so one session for the hour is not shown"}
+	}
+	var f []string
+	ss := append([]TunnelSample(nil), samples...)
+	sort.Slice(ss, func(a, b int) bool { return ss[a].At.Before(ss[b].At) })
+	first, last := span(reqs)
+	if !first.IsZero() {
+		if ss[0].At.After(first) {
+			f = append(f, "the tunnel session was not looked at before the first request")
+		}
+		if ss[len(ss)-1].At.Before(last) {
+			f = append(f, "the tunnel session was not looked at after the last request")
+		}
+	}
+	for i, s := range ss {
+		switch {
+		case s.At.IsZero() || s.LastStart.IsZero():
+			f = append(f, "a look at the tunnel session lacks its time or frps's lastStartTime")
+		case !s.LastStart.Equal(ss[0].LastStart):
+			f = append(f, "frps's lastStartTime for the proxy changed during the hour: frpc logged in again")
+		}
+		if !s.Connected {
+			f = append(f, "TunnelConnected was not True throughout the hour")
+		}
+		if i > 0 && s.At.Sub(ss[i-1].At) > MaxSampleGap {
+			f = append(f, "the tunnel session went more than 2 minutes without a look")
+		}
+	}
+	return f
+}
+
+// trafficChecks: the hour must have contained what tests an hour of a tunnel.
+func trafficChecks(reqs []Stream) []string {
+	var f []string
+	if longestChain(reqs) < MinChain {
+		f = append(f, "the hour held no run of requests back to back")
+	}
+	long := false
+	for _, r := range reqs {
+		if d := r.Ended.Sub(r.Opened); d >= NearDeadline && d <= MaxRequestDuration {
+			long = true
+		}
+	}
+	if !long {
+		f = append(f, "the hour held no request of about 4 minutes, near the deadline")
+	}
+	if concurrentStreams(reqs) < ConcurrentStreams {
+		f = append(f, "the hour held no 16 concurrent streams at 20 tokens a second")
+	}
+	if longestIdle(reqs) < MinIdleGap {
+		f = append(f, "the hour held no idle stretch of 2 minutes with heartbeats only")
+	}
+	return f
+}
+
+// longestChain is the most requests that follow one another with no more than MaxChainGap between.
+func longestChain(reqs []Stream) int {
+	rs := append([]Stream(nil), reqs...)
+	sort.Slice(rs, func(a, b int) bool { return rs[a].Opened.Before(rs[b].Opened) })
+	best, run := 0, 0
+	for i, r := range rs {
+		// One that starts after the last ended, within MaxChainGap: concurrent streams are not a run.
+		if gap := r.Opened.Sub(rs[max(i-1, 0)].Ended); i > 0 && gap >= 0 && gap <= MaxChainGap {
+			run++
+		} else {
+			run = 1
+		}
+		if run > best {
+			best = run
+		}
+	}
+	return best
+}
+
+// concurrentStreams is the most streams open together at one moment that each ran at StreamRate tokens a second or more.
+func concurrentStreams(reqs []Stream) int {
+	best := 0
+	for _, at := range reqs {
+		open := 0
+		for _, r := range reqs {
+			if !r.Opened.After(at.Opened) && r.Ended.After(at.Opened) && r.TokensPerSecond() >= StreamRate {
+				open++
+			}
+		}
+		if open > best {
+			best = open
+		}
+	}
+	return best
+}
+
+// longestIdle is the longest stretch between the first opening and the last ending with no request open at all.
+func longestIdle(reqs []Stream) time.Duration {
+	rs := append([]Stream(nil), reqs...)
+	sort.Slice(rs, func(a, b int) bool { return rs[a].Opened.Before(rs[b].Opened) })
+	var end time.Time
+	var best time.Duration
+	for i, r := range rs {
+		if i > 0 {
+			if gap := r.Opened.Sub(end); gap > best {
+				best = gap
+			}
+		}
+		if r.Ended.After(end) {
+			end = r.Ended
+		}
+	}
+	return best
 }
 
 // TunnelHourFlags are the observations S1's verdict prints as FLAG lines: they

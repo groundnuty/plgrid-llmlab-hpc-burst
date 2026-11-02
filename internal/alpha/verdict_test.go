@@ -5,6 +5,7 @@ package alpha
 // S1's verdict), never from running the code under test on the same input.
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -175,69 +176,120 @@ func TestTheGapAndTheQueueWaitAreWorkedOutFromTheTimes(t *testing.T) {
 	}
 }
 
-// lane is a chain of requests of 300 s, the deployment's deadline, one straight after the other from start.
-func lane(id string, start time.Duration, count int) Lane {
-	l := Lane{ID: id}
-	for i := 0; i < count; i++ {
-		o := start + time.Duration(i)*MaxRequestDuration
-		l.Requests = append(l.Requests, Stream{ID: id, Opened: at(o), Ended: at(o + MaxRequestDuration), Complete: true})
+// mix is the traffic of an hour, with each ingredient adjustable at its boundary: three requests of near
+// length gap apart, a burst of concurrent streams of 2 minutes at rate tokens a second, an idle stretch, three
+// more requests like the first three, and requests of 5 minutes to the hour's end.
+type mix struct {
+	near, gap time.Duration
+	burst     int
+	rate      float64
+	idle      time.Duration
+}
+
+func goodMix() mix {
+	return mix{near: NearDeadline, gap: 0, burst: ConcurrentStreams, rate: StreamRate, idle: MinIdleGap}
+}
+
+func (m mix) requests(start time.Time) []Stream {
+	var out []Stream
+	at := start
+	run := func(tag string) {
+		for i := 0; i < 3; i++ {
+			out = append(out, Stream{ID: fmt.Sprintf("%s%d", tag, i), Opened: at, Ended: at.Add(m.near), Complete: true})
+			at = at.Add(m.near + m.gap)
+		}
 	}
-	return l
+	run("a")
+	at = at.Add(MaxChainGap + time.Second) // the burst does not continue the run
+	for i := 0; i < m.burst; i++ {
+		out = append(out, Stream{ID: fmt.Sprintf("c%d", i), Opened: at, Ended: at.Add(2 * time.Minute), Complete: true, Tokens: int(m.rate * 120)})
+	}
+	at = at.Add(2*time.Minute + m.idle)
+	run("b")
+	// Requests of the deadline's length to the end of the hour, exactly.
+	for end := start.Add(Hour); at.Before(end); {
+		l := MaxRequestDuration
+		if end.Sub(at) < l {
+			l = end.Sub(at)
+		}
+		out = append(out, Stream{ID: "p", Opened: at, Ended: at.Add(l), Complete: true})
+		at = at.Add(l)
+	}
+	return out
+}
+
+func samplesEvery(from, to time.Time, every time.Duration, session time.Time) []TunnelSample {
+	var out []TunnelSample
+	for t := from; !t.After(to); t = t.Add(every) {
+		out = append(out, TunnelSample{At: t, LastStart: session, Connected: true})
+	}
+	return out
 }
 
 func goodTunnel() (TunnelHourObs, []provider.Job) {
 	row := rowOf("tunnel-hour-athena")
-	// Two lanes of 12 requests of exactly 5 minutes from minute 20: an hour to the second, ending at minute 80.
+	ready := at(20 * time.Minute)
+	reqs := goodMix().requests(ready)
 	o := TunnelHourObs{
 		Tags:       []string{"hb-t-aaaaaaaaaaaa"},
-		Lanes:      []Lane{lane("l1", 20*time.Minute, 12), lane("l2", 20*time.Minute, 12)},
-		DrainStart: at(80 * time.Minute),
-		Rate:       PathRate{Direction: "up", OK: true, AskedSeconds: 30, TimedSeconds: 29, Bytes: 1}, Deployment: row.Plan(),
+		Requests:   reqs,
+		Samples:    samplesEvery(ready, ready.Add(Hour), time.Minute, ready.Add(-10*time.Second)),
+		DrainStart: ready.Add(Hour), // an hour to the second, the drain starting as it ends
+		Rate:       PathRate{Direction: "up", OK: true, AskedSeconds: 30, TimedSeconds: 29, Bytes: 1, Tokens: 1, UnderLoad: true}, Deployment: row.Plan(),
 	}
 	return o, leased(row, job(o.Tags[0], row.Partition, 0, 0, 85*time.Minute))
 }
 
 func TestTunnelHourBoundaries(t *testing.T) {
 	row := rowOf("tunnel-hour-athena")
-	last := func(o *TunnelHourObs) *Stream { r := o.Lanes[0].Requests; return &r[len(r)-1] }
+	lastReq := func(o *TunnelHourObs) *Stream { return &o.Requests[len(o.Requests)-1] }
 	cases := []struct {
 		name   string
 		mutate func(*TunnelHourObs, *[]provider.Job)
 		want   string
 	}{
-		{"exactly an hour, requests of exactly the deadline, the drain start at the last ending", func(*TunnelHourObs, *[]provider.Job) {}, ""},
-		{"a second short of the hour", func(o *TunnelHourObs, _ *[]provider.Job) { last(o).Ended = last(o).Ended.Add(-time.Second) }, "lasted less than an hour"},
-		{"no lanes", func(o *TunnelHourObs, _ *[]provider.Job) { o.Lanes = nil }, "no lane was held"},
-		{"a lane with no request", func(o *TunnelHourObs, _ *[]provider.Job) { o.Lanes[1].Requests = nil }, "a lane carried no request"},
-		{"a cut request", func(o *TunnelHourObs, _ *[]provider.Job) { o.Lanes[1].Requests[3].CutBy = "tunnel" }, "cut during the hour"},
-		{"an unfinished request", func(o *TunnelHourObs, _ *[]provider.Job) { o.Lanes[1].Requests[3].Complete = false }, "did not complete"},
+		{"exactly an hour, requests of exactly the deadline, a look every minute, the drain start at the last ending", func(*TunnelHourObs, *[]provider.Job) {}, ""},
+		{"a second short of the hour", func(o *TunnelHourObs, _ *[]provider.Job) { lastReq(o).Ended = lastReq(o).Ended.Add(-time.Second) }, "lasted less than an hour"},
+		{"no request", func(o *TunnelHourObs, _ *[]provider.Job) { o.Requests = nil }, "no request was made"},
+		{"a cut request", func(o *TunnelHourObs, _ *[]provider.Job) { o.Requests[3].CutBy = "tunnel" }, "cut during the hour"},
+		{"a stream_cut answer", func(o *TunnelHourObs, _ *[]provider.Job) { o.Requests[3].Error = "stream_cut" }, "cut during the hour"},
+		{"an unfinished request", func(o *TunnelHourObs, _ *[]provider.Job) { o.Requests[3].Complete = false }, "did not complete"},
 		// The front cuts a request at the deployment's deadline: a stream observed longer than it was not behind that deadline.
 		{"a request a second past the deployment's deadline", func(o *TunnelHourObs, _ *[]provider.Job) {
-			o.Lanes[0].Requests[2].Ended = o.Lanes[0].Requests[2].Ended.Add(time.Second)
+			o.Requests[len(o.Requests)-2].Ended = o.Requests[len(o.Requests)-2].Ended.Add(time.Second)
 		}, "outlasted the deployment's request deadline"},
-		{"one stream of an hour", func(o *TunnelHourObs, _ *[]provider.Job) {
-			o.Lanes[0].Requests = []Stream{{ID: "long", Opened: at(20 * time.Minute), Ended: at(80 * time.Minute), Complete: true}}
-		}, "outlasted the deployment's request deadline"},
-		{"a pause of exactly 10 s", func(o *TunnelHourObs, _ *[]provider.Job) {
-			shift(&o.Lanes[0], 5, MaxLaneGap)
-			o.DrainStart = o.DrainStart.Add(MaxLaneGap)
-		}, ""},
-		{"a pause of 11 s", func(o *TunnelHourObs, _ *[]provider.Job) {
-			shift(&o.Lanes[0], 5, MaxLaneGap+time.Second)
-			o.DrainStart = o.DrainStart.Add(time.Minute)
-		}, "paused for more than 10 s"},
 		{"the hour ends a second after the drain start", func(o *TunnelHourObs, _ *[]provider.Job) { o.DrainStart = o.DrainStart.Add(-time.Second) }, "ended after the Instance's drain start"},
 		{"no drain start observed", func(o *TunnelHourObs, _ *[]provider.Job) { o.DrainStart = time.Time{} }, "drain start was not observed"},
-		{"a request with no ending time", func(o *TunnelHourObs, _ *[]provider.Job) { o.Lanes[0].Requests[1].Ended = time.Time{} }, "no opening or ending time"},
-		{"one tunnel drop", func(o *TunnelHourObs, _ *[]provider.Job) { o.TunnelDrops = 1 }, "dropped during the hour"},
+		{"a request with no ending time", func(o *TunnelHourObs, _ *[]provider.Job) { o.Requests[1].Ended = time.Time{} }, "no opening or ending time"},
+		// One session. A re-login of frpc mid-hour changes frps's lastStartTime for the proxy, and every request can still pass.
+		{"frpc logged in again mid-hour and every request passed", func(o *TunnelHourObs, _ *[]provider.Job) {
+			for i := 30; i < len(o.Samples); i++ {
+				o.Samples[i].LastStart = o.Samples[30].At
+			}
+		}, "lastStartTime for the proxy changed"},
+		{"a single look differs", func(o *TunnelHourObs, _ *[]provider.Job) {
+			o.Samples[45].LastStart = o.Samples[45].LastStart.Add(time.Nanosecond)
+		}, "lastStartTime for the proxy changed"},
+		{"a look with no lastStartTime", func(o *TunnelHourObs, _ *[]provider.Job) { o.Samples[7].LastStart = time.Time{} }, "lacks its time or frps's lastStartTime"},
+		{"TunnelConnected false in one look", func(o *TunnelHourObs, _ *[]provider.Job) { o.Samples[20].Connected = false }, "TunnelConnected was not True"},
+		{"the first look a second after the first request", func(o *TunnelHourObs, _ *[]provider.Job) { o.Samples[0].At = o.Samples[0].At.Add(time.Second) }, "not looked at before the first request"},
+		{"the last look a second before the last request ended", func(o *TunnelHourObs, _ *[]provider.Job) {
+			o.Samples[len(o.Samples)-1].At = o.Samples[len(o.Samples)-1].At.Add(-time.Second)
+		}, "not looked at after the last request"},
+		{"a hole of exactly 2 minutes between looks", func(o *TunnelHourObs, _ *[]provider.Job) { o.Samples = append(o.Samples[:30], o.Samples[31:]...) }, ""},
+		{"a hole of 3 minutes between looks", func(o *TunnelHourObs, _ *[]provider.Job) { o.Samples = append(o.Samples[:30], o.Samples[32:]...) }, "more than 2 minutes without a look"},
+		{"one look only", func(o *TunnelHourObs, _ *[]provider.Job) { o.Samples = o.Samples[:1] }, "looked at fewer than twice"},
+		{"no look", func(o *TunnelHourObs, _ *[]provider.Job) { o.Samples = nil }, "looked at fewer than twice"},
 		{"rate not ok", func(o *TunnelHourObs, _ *[]provider.Job) { o.Rate.OK = false }, "path rate was not measured"},
 		{"rate asked for 29.9 s", func(o *TunnelHourObs, _ *[]provider.Job) { o.Rate.AskedSeconds = 29.9 }, "asked for under 30 s"},
 		{"rate timed 28.9 s", func(o *TunnelHourObs, _ *[]provider.Job) { o.Rate.TimedSeconds = 28.9 }, "timed under 29 s"},
 		{"rate moved no bytes", func(o *TunnelHourObs, _ *[]provider.Job) { o.Rate.Bytes = 0 }, "moved no bytes"},
 		{"rate in the other direction", func(o *TunnelHourObs, _ *[]provider.Job) { o.Rate.Direction = "down" }, "not in the token direction"},
+		{"rate not under load", func(o *TunnelHourObs, _ *[]provider.Job) { o.Rate.UnderLoad = false }, "not measured under load"},
+		{"rate in bytes only", func(o *TunnelHourObs, _ *[]provider.Job) { o.Rate.Tokens = 0 }, "not measured under load"},
 		{"the cluster shows 59 minutes", func(o *TunnelHourObs, j *[]provider.Job) { (*j)[0].EndTime = ptr(at(59 * time.Minute)) }, "ran under an hour"},
 		{"the cluster shows exactly an hour", func(o *TunnelHourObs, j *[]provider.Job) { (*j)[0].EndTime = ptr(at(Hour)) }, ""},
-		// Evidence that is absent is not evidence (the scheduler's times corroborate the lanes').
+		// Evidence that is absent is not evidence (the scheduler's times corroborate the requests').
 		{"no start time in the cluster's record", func(o *TunnelHourObs, j *[]provider.Job) { (*j)[0].StartTime = nil }, "lacks the job's start or end time"},
 		{"no end time in the cluster's record", func(o *TunnelHourObs, j *[]provider.Job) { (*j)[0].EndTime = nil }, "lacks the job's start or end time"},
 		{"no tag", func(o *TunnelHourObs, _ *[]provider.Job) { o.Tags = nil }, "exactly one Allocation"},
@@ -261,10 +313,51 @@ func TestTunnelHourBoundaries(t *testing.T) {
 	}
 }
 
-// shift moves every request of the lane from index i on later by d.
-func shift(l *Lane, i int, d time.Duration) {
-	for k := i; k < len(l.Requests); k++ {
-		l.Requests[k].Opened, l.Requests[k].Ended = l.Requests[k].Opened.Add(d), l.Requests[k].Ended.Add(d)
+// The traffic of the hour, each ingredient at its boundary: requests back to back (a gap of 10 s is still back to
+// back, 11 s is not), one of about 4 minutes (240 s, no longer than the 300 s deadline), 16 concurrent streams
+// at 20 tokens a second (15 or 19.9 do not), and an idle stretch of 2 minutes (119 s is not one).
+func TestTheTrafficOfTheHourAtItsBoundaries(t *testing.T) {
+	cases := []struct {
+		name string
+		m    func(*mix)
+		want string
+	}{
+		{"as it should be", func(*mix) {}, ""},
+		{"a gap of 10 s between requests", func(m *mix) { m.gap = 10 * time.Second }, ""},
+		{"a gap of 11 s between requests", func(m *mix) { m.gap = 11 * time.Second }, "no run of requests back to back"},
+		{"requests of 239 s", func(m *mix) { m.near = 239 * time.Second }, "no request of about 4 minutes"},
+		{"requests of 300 s", func(m *mix) { m.near = 300 * time.Second }, ""},
+		{"15 concurrent streams", func(m *mix) { m.burst = 15 }, "no 16 concurrent streams"},
+		{"streams at 19.9 tokens a second", func(m *mix) { m.rate = 19.9 }, "no 16 concurrent streams"},
+		{"an idle stretch of 119 s", func(m *mix) { m.idle = 119 * time.Second }, "no idle stretch"},
+		{"an idle stretch of exactly 2 minutes", func(m *mix) { m.idle = 2 * time.Minute }, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := goodMix()
+			c.m(&m)
+			// Without the requests of the deadline's length that pad the hour: they would be a run back to back, and near the deadline, themselves.
+			var reqs []Stream
+			for _, r := range m.requests(at(20 * time.Minute)) {
+				if r.ID != "p" {
+					reqs = append(reqs, r)
+				}
+			}
+			wantFailure(t, trafficChecks(reqs), c.want)
+		})
+	}
+	// The burst's streams, side by side, are not a run back to back: without the chains there is none.
+	burstOnly := goodMix().requests(at(0))[3 : 3+ConcurrentStreams]
+	// And the runs of the good mix are exactly MinChain long, so a run of one fewer is not enough.
+	if n := longestChain(goodMix().requests(at(0))[:3]); n != MinChain {
+		t.Errorf("the good mix's first run is %d requests, want %d", n, MinChain)
+	}
+	if n := longestChain(burstOnly); n != 1 {
+		t.Errorf("a run of %d among concurrent streams, want 1", n)
+	}
+	// And the shortest idle stretch is the longest gap, not the first.
+	if g := longestIdle(goodMix().requests(at(0))); g != MinIdleGap {
+		t.Errorf("longest idle stretch %s, want %s", g, MinIdleGap)
 	}
 }
 
@@ -314,7 +407,7 @@ func TestASlowTunnelIsFlaggedNotFailed(t *testing.T) {
 	row, _ := RowByName("tunnel-hour-athena")
 	o, jobs := goodTunnel()
 	// 600,000 B/s is under S1's 629,146 B/s flag line and passes the verdict.
-	o.Rate = PathRate{Direction: "up", OK: true, AskedSeconds: 30, TimedSeconds: 30, Bytes: 18_000_000}
+	o.Rate = PathRate{Direction: "up", OK: true, AskedSeconds: 30, TimedSeconds: 30, Bytes: 18_000_000, Tokens: 9600, UnderLoad: true}
 	wantFailure(t, VerifyTunnelHour(row, o, jobs), "")
 	if f := TunnelHourFlags(o); len(f) != 1 || !strings.Contains(f[0], "600000 B/s") {
 		t.Errorf("flags %v, want one naming 600000 B/s", f)

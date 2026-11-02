@@ -18,6 +18,20 @@ type Stream struct {
 	Complete bool `json:"complete"`
 	// CutBy names what cut the stream (HBEP-5, Errors: cutBy); empty when none did.
 	CutBy string `json:"cutBy,omitempty"`
+	// Error is the error code the front answered with, if any (for example stream_cut).
+	Error string `json:"error,omitempty"`
+	// Tokens is the number of tokens the stream delivered, for the streams of a
+	// load (the rate a stream ran at is Tokens over its length).
+	Tokens int `json:"tokens,omitempty"`
+}
+
+// TokensPerSecond is the rate the stream delivered tokens at; zero for a stream with no length.
+func (s Stream) TokensPerSecond() float64 {
+	d := s.Ended.Sub(s.Opened).Seconds()
+	if d <= 0 {
+		return 0
+	}
+	return float64(s.Tokens) / d
 }
 
 // InFlightAt reports whether the stream was open at t: opened at or before it
@@ -98,6 +112,19 @@ type PathRate struct {
 	AskedSeconds float64 `json:"askedSeconds"`
 	TimedSeconds float64 `json:"timedSeconds"`
 	Bytes        int64   `json:"bytes"`
+	// Tokens is the number of tokens that crossed in the same time, and UnderLoad
+	// says the measurement ran while the concurrent streams were open: the rate
+	// the owner wants is the one under load.
+	Tokens    int64 `json:"tokens"`
+	UnderLoad bool  `json:"underLoad"`
+}
+
+// TokensPerSecond is the token rate the receiver timed; zero when nothing was timed.
+func (p PathRate) TokensPerSecond() float64 {
+	if p.TimedSeconds <= 0 {
+		return 0
+	}
+	return float64(p.Tokens) / p.TimedSeconds
 }
 
 // BytesPerSecond is the rate the receiver timed; zero when nothing was timed.
@@ -108,44 +135,28 @@ func (p PathRate) BytesPerSecond() float64 {
 	return float64(p.Bytes) / p.TimedSeconds
 }
 
-// Lane is one lane of the hour: a chain of requests, one after the other on the
-// same tunnel, each within the deployment's request deadline (TunnelHour).
-type Lane struct {
-	ID       string   `json:"id"`
-	Requests []Stream `json:"requests"`
-}
-
-// Span is the time from the lane's first request opening to its last ending; zero
-// for a lane with no request or a request with no times.
-func (l Lane) Span() time.Duration {
-	var first, last time.Time
-	for _, r := range l.Requests {
-		if r.Opened.IsZero() || r.Ended.IsZero() {
-			return 0
-		}
-		if first.IsZero() || r.Opened.Before(first) {
-			first = r.Opened
-		}
-		if r.Ended.After(last) {
-			last = r.Ended
-		}
-	}
-	return last.Sub(first)
+// TunnelSample is one look at the tunnel session of the Instance: frps's
+// lastStartTime for its proxy (it changes when frpc logs in again, whatever the
+// requests did meanwhile) and whether the Instance's TunnelConnected condition
+// was True.
+type TunnelSample struct {
+	At        time.Time `json:"at"`
+	LastStart time.Time `json:"lastStart"`
+	Connected bool      `json:"connected"`
 }
 
 // TunnelHourObs is one hour over this wiring on one cluster (tunnel-hour-*).
 type TunnelHourObs struct {
 	Tags []string `json:"tags"`
-	// Lanes are the chains of requests held behind frpc for the hour.
-	Lanes []Lane `json:"lanes"`
+	// Requests are every request of the hour, in any order.
+	Requests []Stream `json:"requests"`
+	// Samples are the looks at the tunnel session across the hour.
+	Samples []TunnelSample `json:"samples"`
 	// DrainStart is the Instance's drain start: the hour must end before it.
 	DrainStart time.Time `json:"drainStart"`
 	// Deployment is what the run's ModelDeployment held (see DeploymentSpec).
 	Deployment DeploymentSpec `json:"deployment"`
-	// TunnelDrops counts the times the Instance's TunnelConnected condition
-	// went False during the hour.
-	TunnelDrops int      `json:"tunnelDrops"`
-	Rate        PathRate `json:"rate"`
+	Rate       PathRate       `json:"rate"`
 }
 
 // AccountingObs is the kept accounting record of one real GPU job beside the

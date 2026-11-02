@@ -62,18 +62,21 @@ func noOverlapPost(row Row, o NoOverlapObs, failures []string, jobs []provider.J
 
 func tunnelHourPost(row Row, o TunnelHourObs, failures []string) string {
 	var b strings.Builder
-	var held time.Duration
-	requests, cut := 0, 0
-	for _, l := range o.Lanes {
-		if d := l.Span(); held == 0 || d < held {
-			held = d
+	first, last := span(o.Requests)
+	cut := countCut(o.Requests)
+	sessions := map[time.Time]bool{}
+	connected := 0
+	for _, s := range o.Samples {
+		sessions[s.LastStart] = true
+		if s.Connected {
+			connected++
 		}
-		requests += len(l.Requests)
-		cut += countCut(l.Requests)
 	}
-	fmt.Fprintf(&b, "%s\n%s\n- lanes held: %d, the shortest %s, of %d requests in all; requests cut: %d; tunnel drops: %d\n- path rate, node to front: %.0f B/s (%d bytes timed over %.1f s, asked %.0f s)\n",
-		verdictLine(row, failures), deploymentLine(o.Deployment), len(o.Lanes), held.Round(time.Second), requests, cut, o.TunnelDrops,
-		o.Rate.BytesPerSecond(), o.Rate.Bytes, o.Rate.TimedSeconds, o.Rate.AskedSeconds)
+	fmt.Fprintf(&b, "%s\n%s\n- the hour: %d requests over %s; longest run back to back: %d; peak streams at %.0f tokens/s or more: %d; longest idle stretch: %s; requests cut: %d\n- the tunnel session: %d distinct frps lastStartTime across %d looks (one is the pass); TunnelConnected True in %d of them\n- path rate, node to front: %.0f B/s and %.0f tokens/s under load (%d bytes, %d tokens timed over %.1f s, asked %.0f s)\n",
+		verdictLine(row, failures), deploymentLine(o.Deployment), len(o.Requests), last.Sub(first).Round(time.Second), longestChain(o.Requests),
+		StreamRate, concurrentStreams(o.Requests), longestIdle(o.Requests).Round(time.Second), cut,
+		len(sessions), len(o.Samples), connected,
+		o.Rate.BytesPerSecond(), o.Rate.TokensPerSecond(), o.Rate.Bytes, o.Rate.Tokens, o.Rate.TimedSeconds, o.Rate.AskedSeconds)
 	for _, fl := range TunnelHourFlags(o) {
 		fmt.Fprintf(&b, "- FLAG: %s\n", fl)
 	}

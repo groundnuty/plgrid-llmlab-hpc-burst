@@ -42,7 +42,7 @@ const (
 var dryFaults = map[string][]string{
 	"handover":  {"cut", "no-stream", "two-restarts", "no-restart", "no-handover", "late-successor", "wrong-partition", "untagged", "unattributed", "adds-helios", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "no-responses"},
 	"nooverlap": {"nocap", "nogap", "noslot", "cut", "no-stream", "late-submit", "untagged", "wrong-partition", "adds-athena", "default-lease", "short-lease", "no-release-when-idle", "duplicate-tag", "extra-allocation", "two-restarts", "no-restart"},
-	"tunnel":    {"short", "cut", "drops", "no-rate", "short-rate", "wrong-direction", "untagged", "wrong-partition", "adds-other-cluster", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "past-deadline", "gap", "past-drain", "no-drain-start"},
+	"tunnel":    {"short", "cut", "no-rate", "short-rate", "wrong-direction", "untagged", "wrong-partition", "adds-other-cluster", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "past-deadline", "past-drain", "no-drain-start", "stream-cut-error", "reconnect", "disconnected", "sparse-samples", "late-first-sample", "no-concurrency", "slow-streams", "no-idle-gap", "no-long-stream", "no-back-to-back", "no-load-rate"},
 }
 
 type drySteps struct {
@@ -402,60 +402,101 @@ func (d *drySteps) TunnelHour(_ context.Context, p Plan) (TunnelHourObs, error) 
 	j := d.running(id)
 	started := *j.StartTime
 	d.extras(p, tag)
-	// The Instance becomes ready 20 minutes in. The drain starts a drain window before the lease ends.
+	// The Instance becomes ready 20 minutes in, and its proxy registers with frps then. The drain starts a drain
+	// window before the lease ends.
 	d.tick(20 * time.Minute)
 	ready := d.now()
+	session := ready.Add(-10 * time.Second)
 	drain := started.Add(d.deployment().LeaseLimit - (MaxRequestDuration + DrainMargin))
-	// The hour is two lanes, each a chain of requests of 4 min 40 s with a second between them: 13 requests span
-	// 3,652 s. Every request is within the deployment's 5-minute deadline, which the front enforces.
-	chain := func(id string, count int) Lane {
-		l := Lane{ID: id}
-		at := ready
-		for i := 0; i < count; i++ {
-			l.Requests = append(l.Requests, Stream{ID: fmt.Sprintf("%s-%d", id, i), Opened: at, Ended: at.Add(280 * time.Second), Complete: true})
-			at = at.Add(281 * time.Second)
-			if d.fault("gap") && i == 5 {
-				at = at.Add(30 * time.Second) // a pause of 31 s between two requests
-			}
-		}
-		return l
+
+	// The hour, as the stack's scenario would drive it, within the 5-minute deadline: requests back to back, near
+	// the deadline; a burst of concurrent streams at 20 tokens a second; an idle stretch with heartbeats only; more
+	// requests back to back until the hour is over.
+	var reqs []Stream
+	at := ready
+	add := func(id string, length time.Duration, tokens int) Stream {
+		r := Stream{ID: id, Opened: at, Ended: at.Add(length), Complete: true, Tokens: tokens}
+		reqs = append(reqs, r)
+		return r
 	}
-	count := 13
+	length, gap := 280*time.Second, time.Second
+	if d.fault("no-long-stream") {
+		length = 200 * time.Second
+	}
+	if d.fault("no-back-to-back") {
+		gap = 30 * time.Second
+	}
+	for i := 0; i < 3; i++ {
+		add(fmt.Sprintf("a%d", i), length, 0)
+		at = at.Add(length + gap)
+	}
+	burst, rate := ConcurrentStreams, 20
+	if d.fault("no-concurrency") {
+		burst = 8
+	}
+	if d.fault("slow-streams") {
+		rate = 10
+	}
+	for i := 0; i < burst; i++ {
+		add(fmt.Sprintf("c%d", i), 120*time.Second, 120*rate)
+	}
+	at = at.Add(120 * time.Second)
+	idle := 3 * time.Minute
+	if d.fault("no-idle-gap") {
+		idle = 90 * time.Second
+	}
+	at = at.Add(idle)
+	stop := ready.Add(TunnelHour)
 	if d.fault("short") {
-		count = 12 // 3,371 s
+		stop = ready.Add(40 * time.Minute)
 	}
-	lanes := []Lane{chain("lane1", count), chain("lane2", count)}
+	for i := 0; at.Before(stop); i++ {
+		add(fmt.Sprintf("b%d", i), length, 0)
+		at = at.Add(length + gap)
+	}
 	if d.fault("past-deadline") {
-		// One stream of 61 minutes: the front would have cut it at the deployment's 5-minute deadline.
-		lanes[0] = Lane{ID: "lane1", Requests: []Stream{{ID: "long", Opened: ready, Ended: ready.Add(61 * time.Minute), Complete: true}}}
+		reqs = append(reqs, Stream{ID: "long", Opened: ready, Ended: ready.Add(61 * time.Minute), Complete: true})
 	}
-	end := ready
-	for _, l := range lanes {
-		for _, r := range l.Requests {
-			if r.Ended.After(end) {
-				end = r.Ended
-			}
-		}
+	if d.fault("cut") {
+		reqs[1].Complete, reqs[1].CutBy = false, "tunnel"
 	}
+	if d.fault("stream-cut-error") {
+		reqs[1].Error = "stream_cut"
+	}
+	_, end := span(reqs)
 	if d.fault("past-drain") {
 		drain = ready.Add(30 * time.Minute) // the Instance drained in the middle of the hour
 	}
-	d.tick(end.Sub(ready))
-	d.end(n, id)
-	if d.fault("cut") {
-		lanes[0].Requests[3].Complete, lanes[0].Requests[3].CutBy = false, "tunnel"
+
+	// A look at the session every minute, from the first request to a minute past the last.
+	var samples []TunnelSample
+	for t := ready; !t.After(end.Add(time.Minute)); t = t.Add(time.Minute) {
+		s := TunnelSample{At: t, LastStart: session, Connected: true}
+		switch {
+		case d.fault("reconnect") && !t.Before(ready.Add(30*time.Minute)):
+			s.LastStart = ready.Add(30 * time.Minute) // frpc logged in again; every request still passed
+		case d.fault("disconnected") && t.Equal(ready.Add(20*time.Minute)):
+			s.Connected = false
+		case d.fault("sparse-samples") && t.After(ready.Add(10*time.Minute)) && t.Before(ready.Add(15*time.Minute)):
+			continue
+		case d.fault("late-first-sample") && t.Equal(ready):
+			continue
+		}
+		samples = append(samples, s)
 	}
-	obs := TunnelHourObs{Deployment: d.deployment(), Tags: append([]string(nil), d.tags...), Lanes: lanes, DrainStart: drain,
-		Rate: PathRate{Direction: "up", OK: true, AskedSeconds: 30, TimedSeconds: 30.2, Bytes: 31 << 20}}
+	d.tick(end.Add(time.Minute).Sub(ready))
+	d.end(n, id)
+	obs := TunnelHourObs{Deployment: d.deployment(), Tags: append([]string(nil), d.tags...), Requests: reqs, Samples: samples, DrainStart: drain,
+		Rate: PathRate{Direction: "up", OK: true, AskedSeconds: 30, TimedSeconds: 30.2, Bytes: 31 << 20, Tokens: int64(ConcurrentStreams * rate * 30), UnderLoad: true}}
 	switch {
-	case d.fault("drops"):
-		obs.TunnelDrops = 1
 	case d.fault("no-rate"):
 		obs.Rate.OK = false
 	case d.fault("short-rate"):
 		obs.Rate.TimedSeconds = 20
 	case d.fault("wrong-direction"):
 		obs.Rate.Direction = "down"
+	case d.fault("no-load-rate"):
+		obs.Rate.UnderLoad = false
 	case d.fault("no-drain-start"):
 		obs.DrainStart = time.Time{}
 	}

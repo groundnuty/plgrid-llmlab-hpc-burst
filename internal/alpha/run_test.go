@@ -65,23 +65,33 @@ var dryCases = map[string][]dryCase{
 
 var tunnelCases = []dryCase{
 	{"", ""},
-	{"short", "a lane lasted less than an hour"},
+	{"short", "the requests lasted less than an hour"},
 	{"cut", "a stream was cut during the hour"},
-	{"duplicate-tag", "a tag names more than one job"},
-	{"extra-allocation", "exactly one Allocation"},
-	{"past-deadline", "outlasted the deployment's request deadline"},
-	{"gap", "paused for more than 10 s"},
-	{"past-drain", "ended after the Instance's drain start"},
-	{"no-drain-start", "drain start was not observed"},
-	{"drops", "the tunnel dropped during the hour"},
+	{"stream-cut-error", "a stream was cut during the hour"},
 	{"no-rate", "the path rate was not measured"},
 	{"short-rate", "the path rate was asked for under 30 s, timed under 29 s, or moved no bytes"},
 	{"wrong-direction", "the path rate is not in the token direction"},
+	{"no-load-rate", "not measured under load"},
 	{"untagged", "a job tag was not written down before its submission"},
 	{"wrong-partition", "a job ran on another partition than the row's"},
 	{"adds-other-cluster", "the deployment does not allow exactly one Provider"},
 	{"default-lease", "the deployment's leaseLimit is not the row's shortest lease"},
 	{"short-lease", "not longer than the lead an Instance needs (PartitionTooShort)"},
+	{"duplicate-tag", "a tag names more than one job"},
+	{"extra-allocation", "exactly one Allocation"},
+	{"past-deadline", "outlasted the deployment's request deadline"},
+	{"past-drain", "ended after the Instance's drain start"},
+	{"no-drain-start", "drain start was not observed"},
+	// frpc logged in again mid-hour and every request passed: only the session check can fail it.
+	{"reconnect", "lastStartTime for the proxy changed"},
+	{"disconnected", "TunnelConnected was not True"},
+	{"sparse-samples", "more than 2 minutes without a look"},
+	{"late-first-sample", "not looked at before the first request"},
+	{"no-concurrency", "no 16 concurrent streams"},
+	{"slow-streams", "no 16 concurrent streams"},
+	{"no-idle-gap", "no idle stretch"},
+	{"no-long-stream", "no request of about 4 minutes"},
+	{"no-back-to-back", "no run of requests back to back"},
 }
 
 func familyOf(row string) string {
@@ -152,7 +162,7 @@ func TestHealthyRunsPostTheirMeasurements(t *testing.T) {
 	cases := map[string][]string{
 		"alpha-athena-handover":  {"handovers completed: 1", "restarts at the worker rung: 1", "responses with attribution: 20 of 20"},
 		"alpha-helios-nooverlap": {"gap from the drain start to the successor ready: 1m0s", "NoOverlapSlot seen: true", "queue wait once the GPU freed: 0s"},
-		"tunnel-hour-athena":     {"path rate, node to front:", "lanes held: 2, the shortest 1h0m52s, of 26 requests in all", "tunnel drops: 0"},
+		"tunnel-hour-athena":     {"path rate, node to front:", "tokens/s under load", "1 distinct frps lastStartTime across 63 looks (one is the pass)", "peak streams at 20 tokens/s or more: 16", "longest idle stretch: 3m0s"},
 	}
 	for name, wants := range cases {
 		t.Run(name, func(t *testing.T) {

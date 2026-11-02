@@ -27,9 +27,8 @@ func init() {
 // alphaShape is what a row asks of the scheduler, worked out from the issue (#194),
 // HBEP-7's graduation criteria (the partitions and the QOS now), the profiles' per-GPU
 // sizes (Athena A100: 16 CPUs and 125Gi; Helios GH200: 72 CPUs, 120000M as the real-engine run
-// uses) and the lease: 1 h 46 min for the handover rows, the shortest longer than the lead (1 h 45 min with a
-// 5-minute request deadline, profiles/athena.yaml:39), and 2 h 17 min for the tunnel rows (a start of up to an
-// hour, the hour, the 15-minute drain window and a minute); not read from the script's table.
+// uses) and the lease: 1 h 46 min, the shortest longer than the lead (1 h 45 min with a 5-minute request
+// deadline, profiles/athena.yaml:39), for every stack row; not read from the script's table.
 type alphaShape struct {
 	row, test, host, shape string
 	slot                   string // the one-job slot's token, "" for none
@@ -40,8 +39,8 @@ type alphaShape struct {
 var alphaShapes = []alphaShape{
 	{"alpha-athena-handover", "TestAlphaAthenaHandover", "athena", "partition plgrid-gpu-a100, 1 GPU, 16 CPU, 125Gi, time limit 01:46:00, at most 2 jobs at once, each of this shape, no requeue", "", "SEEDACCT-a100", true},
 	{"alpha-helios-nooverlap", "TestAlphaHeliosNoOverlap", "helios", "partition plgrid-gpu-gh200, qos now, 1 GPU, 72 CPU, 120000M, time limit 01:46:00, at most 2 jobs at once, each of this shape, no requeue", "now", "SEEDACCT-gh", true},
-	{"tunnel-hour-helios", "TestTunnelHour", "helios", "partition plgrid-gpu-gh200, qos now, 1 GPU, 72 CPU, 120000M, time limit 02:17:00, one job, no requeue", "now", "SEEDACCT-gh", true},
-	{"tunnel-hour-athena", "TestTunnelHour", "athena", "partition plgrid-gpu-a100, 1 GPU, 16 CPU, 125Gi, time limit 02:17:00, one job, no requeue", "", "SEEDACCT-a100", true},
+	{"tunnel-hour-helios", "TestTunnelHour", "helios", "partition plgrid-gpu-gh200, qos now, 1 GPU, 72 CPU, 120000M, time limit 01:46:00, one job, no requeue", "now", "SEEDACCT-gh", true},
+	{"tunnel-hour-athena", "TestTunnelHour", "athena", "partition plgrid-gpu-a100, 1 GPU, 16 CPU, 125Gi, time limit 01:46:00, one job, no requeue", "", "SEEDACCT-a100", true},
 	{"gpu-accounting-helios", "TestGPUAccounting", "helios", "partition plgrid-gpu-gh200, qos now, 1 GPU, 72 CPU, 117Gi, time limit 00:05:00, one job, no requeue", "now", "SEEDACCT-gh", false},
 	{"gpu-accounting-athena", "TestGPUAccounting", "athena", "partition plgrid-gpu-a100, 1 GPU, 16 CPU, 125Gi, time limit 00:05:00, one job, no requeue", "", "SEEDACCT-a100", false},
 }
@@ -574,13 +573,13 @@ func TestTheDialHomeKeyReachesTheTestInSSHModeOnly(t *testing.T) {
 // The rows that hold QOS now's GPU, the owner's shared slot, for hours need the owner's go on top of --yes
 // (the development rule on #145). The expected hold is worked out by hand: the shortest lease, 1 h 46 min, and
 // for the no-overlap row 45 minutes more for the successor to start and become ready, 2 h 31 min, which the
-// script rounds up to ten minutes, 2 h 40 min; the hour's row holds its lease, 2 h 17 min, rounded to 2 h 20 min.
+// script rounds up to ten minutes, 2 h 40 min; the hour's row holds its lease, 1 h 46 min, rounded to 1 h 50 min.
 func TestTheRowsThatHoldTheOwnersSlotForHoursNeedTheOwnersGo(t *testing.T) {
 	today := time.Now().UTC().Format("2006-01-02")
 	yesterday := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
 	rows := []struct{ row, hold string }{
 		{"alpha-helios-nooverlap", "holds QOS now's GPU for about 2 h 40 min; the owner's go is needed (the development rule on #145)"},
-		{"tunnel-hour-helios", "holds QOS now's GPU for about 2 h 20 min; the owner's go is needed (the development rule on #145)"},
+		{"tunnel-hour-helios", "holds QOS now's GPU for about 1 h 50 min; the owner's go is needed (the development rule on #145)"},
 	}
 	for _, c := range rows {
 		for _, stale := range []struct{ name, value string }{{"missing", ""}, {"yesterday's", yesterday}, {"1", "1"}, {"yes", "yes"}} {

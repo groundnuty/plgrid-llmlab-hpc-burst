@@ -37,34 +37,42 @@ func Lead() time.Duration {
 // MinLease is the shortest leaseLimit that is longer than Lead, in whole minutes.
 func MinLease() time.Duration { return Lead() + time.Minute }
 
-// The hour of the tunnel rows. The front cuts a request at the deployment's
-// routing.maxRequestDuration (HBEP-5, Errors), and a deployment's deadline can
-// only shorten the front's, so a single stream cannot last an hour behind a
-// 5-minute deadline. The row therefore holds the tunnel for TunnelHour with a
-// chain of back-to-back requests on one tunnel, each within the deadline, with
-// no gap over MaxLaneGap: the tunnel carries traffic uncut for the hour, which
-// is what S1's lanes show (spikes/s1-frp/README.md:284-285), without a stream
-// the front would cut.
+// The hour of the tunnel rows (HBEP-6:354 and :375, ruled by the science agent on
+// 2 Nov 2026): an hour of one tunnel session staying healthy under real use, not
+// one stream an hour long. The front cuts a request at the deployment's
+// routing.maxRequestDuration (HBEP-5, Errors), so every request is within the
+// 5-minute deadline, and the hour is what the tunnel carries across them. The
+// lease is the handover rows' MinLease: the Instance must be ready within
+// LatestReady of its job's start for the hour to end before the drain start, and
+// a slower start fails the row (it can be run again).
 const (
-	// TunnelHour is how long the chain of requests runs: S1's 3,660 s, the hour
-	// and a minute.
+	// TunnelHour is how long the traffic runs, S1's 3,660 s: the hour and a minute.
 	TunnelHour = 61 * time.Minute
-	// MaxLaneGap is the longest pause between two requests of a lane.
-	MaxLaneGap = 10 * time.Second
+	// MinChain is the fewest requests in the shortest run of back-to-back
+	// requests the hour must contain, and MaxChainGap the longest pause between
+	// two requests of such a run.
+	MinChain    = 3
+	MaxChainGap = 10 * time.Second
+	// NearDeadline is the length of the longest request the hour must contain:
+	// about 4 minutes, close to the 5-minute deadline.
+	NearDeadline = 4 * time.Minute
+	// ConcurrentStreams streams of at least StreamRate tokens a second each must be
+	// open at the same moment.
+	ConcurrentStreams = 16
+	StreamRate        = 20.0
+	// MinIdleGap is the shortest stretch with no request open at all, where the
+	// session carries heartbeats only.
+	MinIdleGap = 2 * time.Minute
+	// MaxSampleGap is the longest time between two looks at the tunnel session
+	// (frps's proxy list and the Instance's TunnelConnected condition).
+	MaxSampleGap = 2 * time.Minute
 )
 
-// TunnelLease is the leaseLimit of the tunnel rows. The hour must fit between
-// the Instance becoming ready, which can take health.startTimeout, and its drain
-// start, the drain window before the lease ends: so the lease is the start
-// timeout, the hour, the drain window (maxRequestDuration plus drainMargin), and a
-// minute, which is 2 h 17 min and longer than Lead. A shorter lease would fail the
-// row whenever the Instance starts slowly.
-func TunnelLease() time.Duration {
-	l := StartTimeout + TunnelHour + MaxRequestDuration + DrainMargin + time.Minute
-	if l < MinLease() {
-		return MinLease()
-	}
-	return l
+// LatestReady is how long after its job starts the Instance may become ready for
+// the hour of traffic to end before the drain start: the lease, less the drain
+// window (maxRequestDuration plus drainMargin), less the hour.
+func LatestReady() time.Duration {
+	return MinLease() - (MaxRequestDuration + DrainMargin) - TunnelHour
 }
 
 // Row is one row of hack/live-checks.sh's table as the test sees it. The
@@ -82,8 +90,7 @@ type Row struct {
 	// GPUs is the number of GPUs of each job.
 	GPUs int
 	// Lease is the leaseLimit of the run's deployment, and so each job's time
-	// limit. The handover rows use MinLease, the tunnel rows TunnelLease; the
-	// accounting rows' job is 5 minutes.
+	// limit. The stack rows use MinLease; the accounting rows' job is 5 minutes.
 	Lease time.Duration
 	// Budget is how long the run may take once its first job has started: the
 	// second clock of the run. The first is the wait in the queue.
@@ -136,8 +143,8 @@ var rows = []Row{
 	{Name: "alpha-athena-handover", Cluster: "athena", Partition: "plgrid-gpu-a100", GPUs: 1, Lease: MinLease(), Budget: 150 * time.Minute, MostJobs: 2, PostsTo: "#145 and #93"},
 	// The predecessor, and the successor pending beside it in QOS now.
 	{Name: "alpha-helios-nooverlap", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: MinLease(), Budget: 200 * time.Minute, SlotHold: MinLease() + 45*time.Minute, MostJobs: 2, PostsTo: "#145 and #94"},
-	{Name: "tunnel-hour-helios", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: TunnelLease(), Budget: 150 * time.Minute, SlotHold: TunnelLease(), MostJobs: 1, PostsTo: "#145"},
-	{Name: "tunnel-hour-athena", Cluster: "athena", Partition: "plgrid-gpu-a100", GPUs: 1, Lease: TunnelLease(), Budget: 150 * time.Minute, MostJobs: 1, PostsTo: "#145"},
+	{Name: "tunnel-hour-helios", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: MinLease(), Budget: 130 * time.Minute, SlotHold: MinLease(), MostJobs: 1, PostsTo: "#145"},
+	{Name: "tunnel-hour-athena", Cluster: "athena", Partition: "plgrid-gpu-a100", GPUs: 1, Lease: MinLease(), Budget: 130 * time.Minute, MostJobs: 1, PostsTo: "#145"},
 }
 
 // accountingRows are the rows of the accounting check, which runs in
