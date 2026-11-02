@@ -172,12 +172,13 @@ TABLE
 # row's other guard, the wait of LIVE_PENDING_MAX_SECONDS, applies to gpu-accounting-athena only, which has no slot.
 # conformance-helios-gh200: it starts only when squeue --me shows no job in QOS now, pending or running, whoever's (exit 3,
 # "skipped: the now slot is in use"), and each of its two jobs (step 1, step 3) must start within 10
-# min of its acceptance. conformance-athena, in Athena's one-job slot (the partition plgrid-now), has the same guard and the
-# same bound, and so the same timeout (the science agent's rule of 2 Nov 2026: every slot row has a bound; see the header). Its worst case is then about 25 min: two start waits of 10 min and about
+# min of its acceptance. Its worst case is then about 25 min: two start waits of 10 min and about
 # 5 min of running. Its timeout of 45 min is the test's own deadlines (10+5+3+10+8+3+3, the 22 min
 # after the start waits being for jobs that already run, plus 2 min for the end-of-run check for a
 # late duplicate, 44 in all) and a margin of 1 min, so a slow cleanup fails in the test, with its
 # message, before this cap does.
+# conformance-athena, in Athena's one-job slot (the partition plgrid-now), has the same guard, the same start wait and so the
+# same timeout (the science agent's rule of 2 Nov 2026: every slot row has a bound; see the header).
 cluster_table() {
   cat <<'TABLE'
 # BEGIN CLUSTER SHAPES
