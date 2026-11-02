@@ -386,8 +386,8 @@ func TestOperationsStoppedOutputIsTheBinarys(t *testing.T) {
 
 // guideNames is every condition, reason, phase and mode the guide names, with the constant that
 // holds it (issue #240: every reason named is a real constant). It is the one list the HBEP-8 drift
-// guard (#239) is hooked to. A name the guide drops must leave it, and a name the guide adds must
-// join it with its constant.
+// guard (#239) will be hooked to. A name the guide drops must leave it, and a name the guide adds
+// must join it with its constant.
 var guideNames = map[string]string{
 	// ModelDeployment conditions and reasons (HBEP-7, Events and conditions).
 	"Ready":                 v1alpha1.ConditionReady,
