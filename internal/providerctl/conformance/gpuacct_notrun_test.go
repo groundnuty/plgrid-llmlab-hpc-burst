@@ -16,6 +16,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
 )
 
@@ -79,6 +80,32 @@ func TestTheAccountingRowIsNotRunWhenTheOwnersJobHoldsTheSlot(t *testing.T) {
 	for _, r := range revs.Items {
 		if strings.HasPrefix(r.Name, "acct-") {
 			t.Errorf("a NOT RUN run left the accounting record %s", r.Name)
+		}
+	}
+}
+
+// The start wait ends when the job runs or has run, never earlier and never for a job that failed: a job that
+// started inside the bound is not the bound's to cancel, however long it then takes.
+func TestTheAccountingStartWaitEndsOnAJobThatRunsOrHasRun(t *testing.T) {
+	for _, c := range []struct {
+		phase v1alpha1.AllocationPhase
+		want  bool
+	}{
+		{v1alpha1.AllocationPending, false},
+		{v1alpha1.AllocationRunning, true},
+		{v1alpha1.AllocationEnded, true},
+	} {
+		a := &v1alpha1.Allocation{Status: v1alpha1.AllocationStatus{AtProvider: v1alpha1.AllocationObservation{Phase: c.phase}}}
+		if got := accountingStarted(t, a); got != c.want {
+			t.Errorf("phase %s: started %t, want %t", c.phase, got, c.want)
+		}
+	}
+	for _, ph := range []v1alpha1.AllocationPhase{v1alpha1.AllocationFailed, v1alpha1.AllocationRefused, v1alpha1.AllocationLost} {
+		a := &v1alpha1.Allocation{Status: v1alpha1.AllocationStatus{AtProvider: v1alpha1.AllocationObservation{Phase: ph}}}
+		rec := &stopRecorder{TB: t}
+		ends(func() { accountingStarted(rec, a) })
+		if !strings.Contains(rec.failed, "not a job that ended") {
+			t.Errorf("phase %s: failed = %q, want the run to end", ph, rec.failed)
 		}
 	}
 }

@@ -38,7 +38,7 @@ The settings file is named by `HPCBURST_LIVE_SETTINGS`: `KEY=VALUE` lines, mode 
 | `LIVE_TUNNEL_LEASE_MINUTES` | optional, `tunnel-hour-*` | the tunnel rows' lease in minutes, 106 to 240; default 137 (below). The owner's choice when giving the go: the shape, the hold note, the timeout and the test follow it |
 | `LIVE_OWNER_GO_HELIOS_NOW` | `alpha-helios-nooverlap`, `tunnel-hour-helios` | today's UTC date (`YYYY-MM-DD`), set only after the owner has said yes to the hold; a missing or older date is refused (exit 3) |
 
-One environment variable, not a setting: `LIVE_PENDING_MAX_SECONDS` (default 7200) is how long a job may wait in the queue before the run cancels it. Athena's `plgrid-gpu-a100` queue was estimated at a start on 13 Nov for one GPU (#145, 1 Nov 2026): set it from the estimate that `--run` prints, which is the reason it is printed first. The script's timeout for a row is the row's run time plus this wait.
+One environment variable, not a setting: `LIVE_PENDING_MAX_SECONDS` (default 7200) is how long a job may wait in the queue before the run cancels it. Athena's `plgrid-gpu-a100` queue was estimated at a start on 13 Nov for one GPU (#145, 1 Nov 2026): set it from the estimate that `--run` prints, which is the reason it is printed first. The script's timeout for a row is the row's run time plus this wait, except `gpu-accounting-helios`, whose start-wait bound of 10 minutes is its first clock and is already in its timeout.
 
 ## The one-job slot, the jobs a run holds, and the owner's go
 
@@ -52,7 +52,7 @@ Helios QOS `now` and Athena `plgrid-now` allow one job per user, and the owner s
 | `alpha-helios-nooverlap` | 2: the running predecessor and the pending replacement | QOS `now` on `plgrid-gpu-gh200`, the owner's shared slot |
 | `tunnel-hour-helios` | 1 | QOS `now`, the shared slot |
 | `tunnel-hour-athena` | 1 | `plgrid-gpu-a100`, no slot |
-| `gpu-accounting-helios` | 1, for about 10 minutes | QOS `now`, the shared slot |
+| `gpu-accounting-helios` | 1, for about 15 minutes at most (the 10-minute start wait and the job's few minutes) | QOS `now`, the shared slot |
 | `gpu-accounting-athena` | 1 | `plgrid-gpu-a100`, no slot |
 
 On Helios the replacement of `alpha-helios-nooverlap` is created at its planned time and pends until the predecessor's job ends and frees the GPU (the partition's QOS allows 2,000 submitted jobs, QOS `now` one GPU: `hbep/0007-lifecycle-controller/README.md:463`, `:608`). So the pending replacement sits in the owner's shared slot only for the planned gap, from its planned submission to the predecessor's end, and the run never queues a third job. Under `ReleaseWhenIdle` with a 2-minute `idleLimit` the predecessor's job is released that long after its Instance ends, so it does not hold the GPU to its hard end (`:471`; the default `Keep` would).
@@ -84,7 +84,10 @@ hack/live-checks.sh --run gpu-accounting --yes
 ```
 
 - **Settings:** the account, the credentials file, `LIVE_OUT_DIR`, `LIVE_LOCK_DIR`. No dial-home route.
-- **Duration and slot:** one GPU job of 5 minutes' limit per cluster, holding its GPU for about 20 seconds; the run is about 10 minutes once the job starts. Helios uses QOS `now` (slot use of that length); Athena's `plgrid-gpu-a100` has no slot.
+- **Duration and slot:** one GPU job of 5 minutes' limit per cluster, holding its GPU for about 20 seconds; the run is about 10 minutes once the job starts. Helios uses QOS `now`: at most 15 minutes of the slot (below); Athena's `plgrid-gpu-a100` has no slot.
+- **Two guards on Helios** (the science agent's rule of 2 Nov 2026, the same two as `conformance-helios-gh200`, which run the shared functions of `hack/live-checks.sh`):
+  1. **The slot precondition.** The row starts only when `squeue --me` shows no job in QOS `now`, running or pending, the owner's or ours; otherwise it exits 3 with "skipped: the now slot is in use" before anything is built, estimated, submitted or cancelled (`check_slot`).
+  2. **The start-wait bound.** The job must start within 10 minutes of its acceptance (`HPCBURST_CONF_START_WAIT`, the 14th column of the row's shape). Past it the test cancels the job by its tag, checks that none is left, writes `not-run.txt` and skips; the script then reports `NOT RUN`, not `FAIL`, runs the same cleanup and exits 3. No accounting record is written and nothing is posted except the slot use. Try again later. The bound is the row's one clock there, so `LIVE_PENDING_MAX_SECONDS` does not apply to it; it applies to `gpu-accounting-athena`, which has no slot and no bound.
 - **What it does:** one GPU job goes through the Provider's controller. The job writes the GPUs it was given: the count of its `CUDA_VISIBLE_DEVICES`, which Slurm sets to the GPUs it gave the job (the agent forwards it for that reason, `internal/agent/apptainer.go:110`), and the count `nvidia-smi -L` lists. When the job has ended, the Allocation is deleted, which writes the kept record `acct-<UID>`; the record's `allocatedGPUs` is compared with the job's own count. The record is built from the scheduler's accounting, so it is not compared with the scheduler. `nvidia-smi` is posted and not judged: it lists the whole node where a cluster does not confine devices to the job. A 1-GPU GH200 job registered one GPU through `nvidia-smi` (`spikes/s94/results/r3/summary.json:988`), so Helios confines them; no Athena run shows it, which is why both counts are recorded. Where `CUDA_VISIBLE_DEVICES` is unset the `nvidia-smi` count is the witness, and the post says which was used.
 - **Posts:** the run's `posts.md` (the record's GPU entry, the job's count and which variable gave it, the `nvidia-smi` count, the request) and the slot use. To #145 and #93 (the conformance runs of both clusters).
 - **Pass criteria:**

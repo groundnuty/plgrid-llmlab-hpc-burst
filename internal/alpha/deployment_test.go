@@ -183,3 +183,20 @@ func TestDeploymentBoundaries(t *testing.T) {
 		})
 	}
 }
+
+// The accounting row under QOS now has the start-wait guard of conformance-helios-gh200 (the science agent's
+// rule of 2 Nov 2026: a job that has not started within 10 minutes of its acceptance is cancelled by its tag and
+// the row is NOT RUN); the rows with no slot have none, and the stack rows keep the queue wait of the operator.
+func TestOnlyTheAccountingRowOnHeliosHasAStartWait(t *testing.T) {
+	want := map[string]time.Duration{"gpu-accounting-helios": 10 * time.Minute}
+	for _, r := range append(Rows(), AccountingRows()...) {
+		if r.StartWait != want[r.Name] {
+			t.Errorf("%s: start wait %s, want %s", r.Name, r.StartWait, want[r.Name])
+		}
+	}
+	// Its budget covers the wait, the job's end and the deletion: 10 + 10 + 5 minutes, and a margin.
+	r, _ := RowByName("gpu-accounting-helios")
+	if r.Budget < r.StartWait+15*time.Minute {
+		t.Errorf("budget %s is below the start wait and the test's other deadlines, %s", r.Budget, r.StartWait+15*time.Minute)
+	}
+}

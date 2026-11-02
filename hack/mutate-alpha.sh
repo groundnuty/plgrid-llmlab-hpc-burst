@@ -1,20 +1,29 @@
 #!/usr/bin/env bash
-# Mutation check of the alpha rows' pass criteria (issue #194): each mutant changes one condition of
-# internal/alpha, and `go test ./internal/alpha` must then fail. A mutant the tests let through is a
-# check that no test depends on.
+# Mutation check of the alpha rows (issue #194): each mutant changes one condition, and the tests of what it
+# changes must then fail. A mutant the tests let through is a check that no test depends on.
 #
-#   hack/mutate-alpha.sh            # run every mutant; exit 1 if one survives or does not apply
+#   hack/mutate-alpha.sh              # every mutant; exit 1 if one survives or does not apply
+#   hack/mutate-alpha.sh --no-script  # leave out the mutants of hack/live-checks.sh (the slow ones)
 #
-# It edits files in the working tree and restores each from a copy it makes first, also on any exit,
-# so run it on a checkout with no uncommitted change to internal/alpha. Run it under a memory cap
-# (docs/development.md).
+# Three kinds, by the file they change:
+#   internal/alpha (a bare file name)           go test ./internal/alpha
+#   internal/providerctl/conformance/...        go test of that package and internal/alpha (the accounting row's half)
+#   hack/live-checks.sh                         go test of hack/livechecks, the alpha script tests only. Set
+#                                               HPCBURST_LIVECHECKS_ALPHA_TEST and HPCBURST_LIVECHECKS_CONF_TEST to prebuilt
+#                                               test binaries to spare it two builds per mutant.
+#
+# It edits files in the working tree and restores each from a copy it makes first, also on any exit, so run it
+# on a checkout with no uncommitted change to them. Run it under a memory cap (docs/development.md).
 set -u -o pipefail
 cd "$(dirname "$0")/.."
 pkg=internal/alpha
+script_too=1; [ "${1:-}" != --no-script ] || script_too=0
 tmp=$(mktemp -d)
-restore() { for f in "$tmp"/*; do [ -e "$f" ] && cp "$f" "$pkg/$(basename "$f")"; done; rm -rf "$tmp"; }
+declare -A saved=()
+restore() { for f in "${!saved[@]}"; do cp "${saved[$f]}" "$f"; done; rm -rf "$tmp"; }
 trap restore EXIT
-cp "$pkg"/verdict.go "$pkg"/observe.go "$pkg"/run.go "$pkg"/config.go "$pkg"/record.go "$pkg"/rows.go "$tmp"/
+path_of() { case $1 in */*) printf '%s' "$1" ;; *) printf '%s/%s' "$pkg" "$1" ;; esac; }
+keep() { [ -n "${saved[$1]:-}" ] || { saved[$1]="$tmp/$(printf '%s' "$1" | tr / _)"; cp "$1" "${saved[$1]}"; }; }
 
 # file @@ exact text (must occur once) @@ replacement
 mutants=(
@@ -99,14 +108,25 @@ mutants=(
   'rows.go@@lease < MinLease() || lease > MaxTunnelLease@@lease < MinLease() || lease >= MaxTunnelLease'
   'rows.go@@lease%time.Minute != 0@@false'
   'rows.go@@r.SlotHold = lease@@r.SlotHold = r.SlotHold'
-  'config.go@@(strings.HasPrefix(row.Name, "tunnel-hour-") && getenv(envDry) != "1")@@false'
+  'config.go@@(strings.HasPrefix(row.Name, "tunnel-hour-") && getenv(envDry) != "1")@@false'  'hack/live-checks.sh@@gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|30|-|10@@gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|30|-'
+  'hack/live-checks.sh@@gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|@@gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|-|'
+  'hack/live-checks.sh@@      [ "${SWAIT[$n]:--}" = - ] || wait=0@@      true'
+  'hack/live-checks.sh@@    gpu-accounting-*) [ "${SWAIT[$n]:--}" != - ] || export HPCBURST_CONF_PENDING_MAX_SECONDS@@    gpu-accounting-*) export HPCBURST_CONF_PENDING_MAX_SECONDS'
+  'internal/providerctl/conformance/gpuacct_test.go@@	if w.s.startWait > 0 {@@	if false {'
+  'internal/providerctl/conformance/gpuacct_test.go@@		cfg.QOS = []fakeslurm.QOS{{Name: r.QOS, MaxGPUsPerUser: fakeslurm.Cap(1)}}@@		cfg.QOS = nil'
+  'internal/providerctl/conformance/gpuacct_test.go@@		vars["HPCBURST_CONF_START_WAIT"] = r.StartWait.String()@@		vars["HPCBURST_CONF_PENDING_MAX_SECONDS"] = "60"'
+  'internal/providerctl/conformance/gpuacct_test.go@@	return ph == v1alpha1.AllocationRunning || ph == v1alpha1.AllocationEnded@@	return ph == v1alpha1.AllocationEnded'
+  'rows.go@@StartWait: 10 * time.Minute, @@'
 )
-
-killed=0 survived=0 broken=0
+killed=0 survived=0 broken=0 total=0
 for m in "${mutants[@]}"; do
   file=${m%%@@*}; rest=${m#*@@}; from=${rest%%@@*}; to=${rest#*@@}
-  cp "$tmp/$file" "$pkg/$file"
-  if ! python3 - "$pkg/$file" "$from" "$to" <<'PY'
+  path=$(path_of "$file")
+  case $path in hack/live-checks.sh) [ "$script_too" = 1 ] || continue ;; esac
+  total=$((total+1))
+  keep "$path"
+  cp "${saved[$path]}" "$path"
+  if ! python3 - "$path" "$from" "$to" <<'PY'
 import sys
 p, a, b = sys.argv[1:4]
 s = open(p).read()
@@ -115,12 +135,17 @@ if s.count(a) != 1:
 open(p, 'w').write(s.replace(a, b, 1))
 PY
   then echo "BROKEN   $file: the text '$from' does not occur exactly once"; broken=$((broken+1)); continue; fi
-  if go test -count=1 -timeout 120s "./$pkg" >/dev/null 2>&1; then
+  case $path in
+    hack/live-checks.sh) tests=(go test -count=1 -timeout 9m -parallel 3 -run 'AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore' ./hack/livechecks) ;;
+    internal/providerctl/*) tests=(go test -count=1 -timeout 100s ./internal/providerctl/conformance "./$pkg") ;;
+    *) tests=(go test -count=1 -timeout 120s "./$pkg") ;;
+  esac
+  if "${tests[@]}" >/dev/null 2>&1; then
     echo "SURVIVED $file: $from  ->  $to"; survived=$((survived+1))
   else
     killed=$((killed+1))
   fi
-  cp "$tmp/$file" "$pkg/$file"
+  cp "${saved[$path]}" "$path"
 done
-echo "mutants: ${#mutants[@]}, killed $killed, survived $survived, broken $broken"
+echo "mutants: $total, killed $killed, survived $survived, broken $broken"
 [ "$survived" -eq 0 ] && [ "$broken" -eq 0 ]

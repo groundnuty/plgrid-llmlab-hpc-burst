@@ -61,6 +61,23 @@ const (
 	accountingDeleteWait = 5 * time.Minute
 )
 
+// accountingNotFailed ends the run when the Allocation is in a phase from which no job ends by itself.
+func accountingNotFailed(t testing.TB, a *v1alpha1.Allocation) {
+	t.Helper()
+	if ph := a.Status.AtProvider.Phase; ph == v1alpha1.AllocationFailed || ph == v1alpha1.AllocationRefused || ph == v1alpha1.AllocationLost {
+		t.Fatalf("the Allocation is %s (reason %q), not a job that ended", ph, a.Status.AtProvider.Reason)
+	}
+}
+
+// accountingStarted is the start wait's condition: the job runs, or has already run and ended (a job of 20 seconds
+// can do both between two looks). A job that has started is not the bound's to cancel, however long it then takes.
+func accountingStarted(t testing.TB, a *v1alpha1.Allocation) bool {
+	t.Helper()
+	accountingNotFailed(t, a)
+	ph := a.Status.AtProvider.Phase
+	return ph == v1alpha1.AllocationRunning || ph == v1alpha1.AllocationEnded
+}
+
 // nodeGPUsFile is the file name in the Allocation's directory (agentapi.AllocationDir).
 const nodeGPUsFile = "node-gpus"
 
@@ -243,16 +260,8 @@ func gpuAccountingBody(t testing.TB, w *world, rowName string) {
 	// The job waits in the queue (the first clock), runs, and ends by itself. Under a one-job QOS the first
 	// clock is the start-wait bound: past it the job is cancelled by its tag and the run is NOT RUN, with no
 	// record (issue #194; startwait_test.go); else it is the wait the operator allows.
-	notFailed := func(a *v1alpha1.Allocation) {
-		if ph := a.Status.AtProvider.Phase; ph == v1alpha1.AllocationFailed || ph == v1alpha1.AllocationRefused || ph == v1alpha1.AllocationLost {
-			t.Fatalf("the Allocation is %s (reason %q), not a job that ended", ph, a.Status.AtProvider.Reason)
-		}
-	}
-	startedOrEnded := func(a *v1alpha1.Allocation) bool {
-		notFailed(a)
-		ph := a.Status.AtProvider.Phase
-		return ph == v1alpha1.AllocationRunning || ph == v1alpha1.AllocationEnded
-	}
+	notFailed := func(a *v1alpha1.Allocation) { accountingNotFailed(t, a) }
+	startedOrEnded := func(a *v1alpha1.Allocation) bool { return accountingStarted(t, a) }
 	if w.s.startWait > 0 {
 		w.untilRuns("the job", name, "the job runs", w.at(), false, startedOrEnded)
 	} else {
