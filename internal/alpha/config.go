@@ -28,13 +28,15 @@ const (
 	envMode       = "HPCBURST_ALPHA_DIALHOME_MODE"
 	envAddr       = "HPCBURST_ALPHA_DIALHOME_ADDR"
 	envKey        = "HPCBURST_ALPHA_DIALHOME_KEY"
+	envListen     = "HPCBURST_ALPHA_DIALHOME_LISTEN"
+	envProfile    = "HPCBURST_ALPHA_PROFILE"
 	envPending    = "HPCBURST_ALPHA_PENDING_MAX_SECONDS"
 	envLease      = "HPCBURST_ALPHA_LEASE_MINUTES"
 )
 
 // liveEnv are the settings only a live run has. A dry run refuses to start
 // when any is set: a dry pass must never stand for a live one.
-var liveEnv = []string{envAccount, envCreds, envHostLock, envControlDir, envBinDir, envBuildDir, envMode, envAddr, envKey}
+var liveEnv = []string{envAccount, envCreds, envHostLock, envControlDir, envBinDir, envBuildDir, envMode, envAddr, envKey, envListen}
 
 // Config is a run's settings. The account, the credentials file and the
 // dial-home key are paths and names that never reach a log.
@@ -42,6 +44,9 @@ type Config struct {
 	Row Row
 	// Dry is true for a dry run: stand-in steps over a fake Slurm in run mode.
 	Dry bool
+	// StandIn is true for a stand-in run: the live steps over the real stack on
+	// this host and a fake Slurm in run mode behind a real sshd (issue #245).
+	StandIn bool
 	// DryFault names the fault the stand-in steps inject; empty for none.
 	DryFault string
 	// Out is the record directory.
@@ -52,12 +57,20 @@ type Config struct {
 	Account, Credentials, HostLock, ControlDir string
 	BinDir, BuildDir                           string
 	DialHomeMode, DialHomeAddr, DialHomeKey    string
+	// DialHomeListen is the front's local dial-home listener in direct mode,
+	// host:port, where the owner's route arrives on this host.
+	DialHomeListen string
+	// Profile names the row's shipped platform profile (profiles/<name>.yaml).
+	Profile string
 }
 
 // Mode names the run's mode for the log, so a dry pass cannot be read as a live one.
 func (c Config) Mode() string {
 	if c.Dry {
 		return "DRY RUN: stand-in steps over a fake Slurm in run mode; nothing reached a cluster"
+	}
+	if c.StandIn {
+		return "STAND-IN RUN: the live steps over the real stack on this host and a fake Slurm in run mode; nothing reached a cluster"
 	}
 	return "LIVE RUN: a real cluster"
 }
@@ -124,6 +137,7 @@ func ConfigFromEnv(getenv func(string) string, mine ...string) (cfg Config, skip
 	cfg.HostLock, cfg.ControlDir = need(envHostLock), need(envControlDir)
 	cfg.BinDir, cfg.BuildDir = need(envBinDir), need(envBuildDir)
 	cfg.DialHomeMode, cfg.DialHomeAddr = need(envMode), need(envAddr)
+	cfg.DialHomeListen, cfg.Profile = getenv(envListen), need(envProfile)
 	switch cfg.DialHomeMode {
 	case "", "direct":
 	case "ssh":

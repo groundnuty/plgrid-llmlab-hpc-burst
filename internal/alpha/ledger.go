@@ -12,7 +12,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -66,9 +65,10 @@ func (l *BatchLedger) Jobs(ctx context.Context, tags []string) ([]provider.Job, 
 // Provider's own profile and credentials, with the run's control directory and
 // host lock: the transport the Provider's controller builds
 // (internal/providerctl/factory.go), with one call in flight per host. Its
-// master is the run's own, beside the controller's. The returned Closer stops
+// master is the run's own, beside the controller's. The returned transport
+// runs the run's own commands (the worker fault's srun) and its Close stops
 // that master.
-func SSHBatch(ctx context.Context, r client.Reader, providerName, controlDir, hostLock string) (*slurm.Batch, io.Closer, error) {
+func SSHBatch(ctx context.Context, r client.Reader, providerName, controlDir, hostLock string) (*slurm.Batch, *sshrun.SSH, error) {
 	v, err := (&slurm.ProfileReader{Reader: r}).Read(ctx, providerName)
 	if err != nil {
 		return nil, nil, fmt.Errorf("the Provider's profile and credentials: %w", err)

@@ -16,7 +16,7 @@ func liveSettings(row string) map[string]string {
 		envRow: row, envOut: "/private/out", envAccount: "SECRETACCT", envCreds: "/private/SECRETCREDS",
 		envHostLock: "/locks/host.lock", envControlDir: "/ctl", envBinDir: "/bin-dir", envBuildDir: "/build-dir",
 		envMode: "direct", envAddr: "gateway.example:29227", envPartition: r.Partition, envQOS: r.QOS,
-		envGPUs: "1", envPending: "7200",
+		envGPUs: "1", envPending: "7200", envProfile: r.Cluster, envListen: "127.0.0.1:29714",
 	}
 	if strings.HasPrefix(row, "tunnel-hour-") {
 		m[envLease] = "137"
@@ -56,6 +56,14 @@ func TestALiveRunWithItsSettingsHasAConfig(t *testing.T) {
 	if !strings.HasPrefix(cfg.Mode(), "LIVE RUN") {
 		t.Errorf("mode %q", cfg.Mode())
 	}
+	if cfg.Profile != "helios" || cfg.DialHomeListen != "127.0.0.1:29714" {
+		t.Errorf("profile %q, dial-home listener %q; want the settings'", cfg.Profile, cfg.DialHomeListen)
+	}
+	// A stand-in pass can never read as a live one.
+	cfg.StandIn = true
+	if m := cfg.Mode(); !strings.HasPrefix(m, "STAND-IN RUN") || !strings.Contains(m, "nothing reached a cluster") {
+		t.Errorf("the stand-in mode reads %q", m)
+	}
 }
 
 func TestEveryMissingSettingIsReportedAtOnce(t *testing.T) {
@@ -63,7 +71,7 @@ func TestEveryMissingSettingIsReportedAtOnce(t *testing.T) {
 	if err == nil {
 		t.Fatal("no error")
 	}
-	for _, k := range []string{envAccount, envCreds, envHostLock, envControlDir, envBinDir, envBuildDir, envMode, envAddr, envPartition, envGPUs, envPending} {
+	for _, k := range []string{envAccount, envCreds, envHostLock, envControlDir, envBinDir, envBuildDir, envMode, envAddr, envPartition, envGPUs, envPending, envProfile} {
 		if !strings.Contains(err.Error(), k+" is not set") {
 			t.Errorf("the error does not name %s: %v", k, err)
 		}

@@ -63,6 +63,9 @@ type HandoverObs struct {
 	Handovers int `json:"handovers"`
 	// WorkerRestarts counts the restarts at the worker rung the run made.
 	WorkerRestarts int `json:"workerRestarts"`
+	// WorkerRestart is the times of the run's worker-rung fault, posted (the
+	// science agent's ruling of 2 Nov 2026, condition 5); zero in a dry run.
+	WorkerRestart RestartTimes `json:"workerRestart"`
 	// Responses counts the responses the run received; Attributed those that
 	// carried HBEP-5's attribution headers.
 	Responses  int `json:"responses"`
@@ -83,6 +86,8 @@ type NoOverlapObs struct {
 	// WorkerRestarts counts the restarts at the worker rung the run made on this
 	// platform (HBEP-7: one on each alpha platform).
 	WorkerRestarts int `json:"workerRestarts"`
+	// WorkerRestart is the times of the run's worker-rung fault (as HandoverObs's).
+	WorkerRestart RestartTimes `json:"workerRestart"`
 	// NoOverlapSlotSeen is true when the deployment carried the NoOverlapSlot
 	// reason between the two (HBEP-7, No-overlap mode).
 	NoOverlapSlotSeen bool `json:"noOverlapSlotSeen"`
