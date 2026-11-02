@@ -1,6 +1,7 @@
 package livechecks
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -176,5 +177,54 @@ func TestPlanFailsWhenDependencyDiscoveryFails(t *testing.T) {
 	}
 	if !strings.Contains(res.out, "dependency discovery failed for package internal/providerctl/conformance (host) at the head of the range") {
 		t.Errorf("no fixed failure message:\n%s", res.out)
+	}
+}
+
+// The plan's lookups in a closure listing must not depend on how a pipe's reader and writer are scheduled
+// (#213). It once tested membership with printf ... | grep -q under pipefail: bash's stdout is line-buffered,
+// so printf writes the listing a line at a time, grep -q exits at the first match, and a printf still
+// writing dies of SIGPIPE, which fails the pipeline and reads as "not covered" with exit 0. Under load that
+// lost a row now and then. A listing larger than a pipe's buffer (64 KiB on Linux) makes the race certain:
+// printf cannot have written it all before grep exits. The assets here are many long-named files the agent
+// embeds, so the listing of every row that builds hb-agent is that large, and each case changes a file
+// whose line sorts early in it. The expected rows follow from the fixture's wiring (see agentEmbedders).
+func TestPlanKeepsEveryRowWhenTheClosureListingIsLarge(t *testing.T) {
+	const assets, pipeBuffer = 1500, 64 << 10
+	name := func(i int) string {
+		return fmt.Sprintf("internal/agent/assets/%s-%04d.txt", strings.Repeat("x", 120), i)
+	}
+	// The seam is only a seam while the listing is well over the buffer: printf may fill the pipe once
+	// while grep reads it, so more than twice the buffer leaves printf certainly still writing.
+	listing := 0
+	for i := 0; i < assets; i++ {
+		listing += len("embed:"+name(i)) + 1
+	}
+	if listing <= 2*pipeBuffer {
+		t.Fatalf("the embedded assets list %d bytes, not more than twice a pipe's buffer: the test would prove nothing", listing)
+	}
+	cases := []struct{ name, path, content string }{
+		// a.txt sorts before the long names, so its embed: line is near the top of the listing.
+		{"an embedded asset", "internal/agent/assets/a.txt", "changed\n"},
+		// cmd/hb-agent sorts before every embed: line; for the stack rows it is a dependency, not their package.
+		{"the agent binary's package", "cmd/hb-agent/main.go", "package main\n\nimport _ \"example.test/fx/internal/agent\"\n\nfunc main() { _ = 1 }\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			w := newWorld(t)
+			for i := 0; i < assets; i++ {
+				write(t, filepath.Join(w.repo, name(i)), "asset\n", 0o644)
+			}
+			git(t, w.repo, "add", "-A")
+			git(t, w.repo, "commit", "-q", "-m", "many embedded assets")
+			base := git(t, w.repo, "rev-parse", "HEAD")
+			head := w.commitFile(c.path, c.content)
+			res := w.run(nil, "--plan", base+".."+head)
+			if res.code != 0 {
+				t.Fatalf("exit %d:\n%s", res.code, res.out)
+			}
+			if got := runSet(t, res.out); strings.Join(got, ",") != strings.Join(agentEmbedders, ",") {
+				t.Errorf("run set %v, want %v\n%s", got, agentEmbedders, res.out)
+			}
+		})
 	}
 }
