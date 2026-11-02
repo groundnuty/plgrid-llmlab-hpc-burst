@@ -290,7 +290,7 @@ func TestAJobPendingPastTheBoundIsCancelledByItsTag(t *testing.T) {
 	} {
 		t.Run(c.row, func(t *testing.T) {
 			row := rowOf(c.row)
-			cfg := Config{Row: row, Dry: true, DryFault: "pend-past-bound", Out: filepath.Join(t.TempDir(), "out"), PendingMax: c.bound}
+			cfg := Config{Row: row, Dry: true, DryFault: "pend-past-bound", Out: filepath.Join(t.TempDir(), "out"), PendingMax: c.bound, FrontLabel: testFrontLabel}
 			rec, err := NewRecorder(cfg.Out)
 			if err != nil {
 				t.Fatal(err)
@@ -389,7 +389,7 @@ func TestACloseThatFailsTurnsANotRunIntoAFailure(t *testing.T) {
 		{"the steps fail to close", errors.New("scancel did not answer"), false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			cfg := Config{Row: row, Out: filepath.Join(t.TempDir(), "out")}
+			cfg := Config{Row: row, Out: filepath.Join(t.TempDir(), "out"), FrontLabel: testFrontLabel}
 			rec, err := NewRecorder(cfg.Out)
 			if err != nil {
 				t.Fatal(err)

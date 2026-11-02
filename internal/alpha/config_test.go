@@ -117,7 +117,7 @@ func TestADryRunNeedsNoLiveSettingAndRefusesAnyOfThem(t *testing.T) {
 // number of seconds is refused, as it is in a live run.
 func TestADryRunKeepsTheWaitInTheQueueItIsGiven(t *testing.T) {
 	dry := func(pending string) (Config, error) {
-		m := map[string]string{envRow: "alpha-helios-nooverlap", envOut: "/private/out", envDry: "1"}
+		m := map[string]string{envRow: "alpha-helios-nooverlap", envOut: "/private/out", envDry: "1", EnvFrontLabel: testFrontLabel}
 		if pending != "" {
 			m[envPending] = pending
 		}
