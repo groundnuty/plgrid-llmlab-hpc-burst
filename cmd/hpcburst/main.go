@@ -210,17 +210,22 @@ func cmdUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 // cmdGuard runs the CRD deletion guard's explicit steps. up installs the guard; the only step here
 // is its removal, which is never a side effect of down, upgrade or a restart (issue #242).
 func cmdGuard(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 || args[0] != "remove" {
-		fmt.Fprintln(stderr, "usage: hpcburst guard remove [--state-dir DIR] [--json]  (removes the CRD deletion guard that up installed; run it before you delete a framework CRD)")
-		return exitUsage
-	}
 	fs := flags("guard remove", stderr)
 	var o launcher.GuardOptions
 	var sd string
 	var asJSON bool
 	fs.StringVar(&sd, "state-dir", "", stateDirUsage)
 	fs.BoolVar(&asJSON, "json", false, "print the result as JSON")
-	if code, done := parse(fs, args[1:]); done {
+	switch {
+	case len(args) > 0 && args[0] == "remove":
+		args = args[1:]
+	case len(args) > 0 && (args[0] == "-h" || args[0] == "-help" || args[0] == "--help"):
+		args = []string{"-h"} // the flags of guard remove, and exit 0, as for the other commands
+	default:
+		fmt.Fprintln(stderr, "usage: hpcburst guard remove [--state-dir DIR] [--json]  (removes the CRD deletion guard that up installed; run it before you delete a framework CRD)")
+		return exitUsage
+	}
+	if code, done := parse(fs, args); done {
 		return code
 	}
 	var err error
