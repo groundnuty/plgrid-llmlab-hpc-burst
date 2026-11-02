@@ -27,8 +27,11 @@ func TestBackendRefusesDuplicateWorkerNames(t *testing.T) {
 	if !ok || rep.Instance == nil || len(rep.Instance.Workers) != 1 {
 		t.Fatalf("last report %+v, want an Instance report of one worker", rep)
 	}
+	// Both reports carry the next count: the refused one does not raise the
+	// count the Backend holds, so the accepted one, sent after it, is kept.
 	withWorkers := func(ws ...agentapi.WorkerReport) agentapi.Report {
 		r := rep
+		r.Seq = rep.Seq + 1
 		inst := *rep.Instance
 		inst.Workers = ws
 		r.Instance = &inst
