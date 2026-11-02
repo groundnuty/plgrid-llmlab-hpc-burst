@@ -49,8 +49,9 @@ var standInPair = Timing{MaxRequestDuration: 90 * time.Second, DrainMargin: 30 *
 
 // The tunnel row: a 75 s deadline, a 5-minute hour (traffic for 5 min 5 s),
 // requests of about a minute near it, a 30 s idle stretch, a look at least
-// every 30 s, and an 11-minute lease, so that the hour ends before the drain
-// start (LatestReady: 11 min less 1 min 45 s less 5 min 5 s, over 4 minutes).
+// every 30 s, and a 12-minute lease, so that the hour ends before the drain
+// start, which the one-job end puts a minute early (LatestReady: 12 min less
+// 1 min 45 s less 5 min 5 s, over 5 minutes).
 var standInTunnel = Timing{MaxRequestDuration: 75 * time.Second, DrainMargin: 30 * time.Second, HandoverMargin: 30 * time.Second,
 	StartTimeout: 4 * time.Minute, TunnelHour: 5*time.Minute + 5*time.Second, Hour: 5 * time.Minute, NearDeadline: time.Minute,
 	MinIdleGap: 30 * time.Second, MaxSampleGap: 30 * time.Second}
@@ -78,7 +79,7 @@ func standInRow(t *testing.T, name string) Row {
 	r.Partition, r.QOS = stack.Partition, ""
 	switch {
 	case strings.HasPrefix(name, "tunnel-hour-"):
-		r.Timing, r.Lease = standInTunnel, 11*time.Minute
+		r.Timing, r.Lease = standInTunnel, 12*time.Minute
 	default:
 		r.Timing, r.Lease = standInPair, 7*time.Minute
 	}

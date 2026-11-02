@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
@@ -304,7 +305,48 @@ func (r *liveRun) deployment(row Row) *v1alpha1.ModelDeployment {
 	if plan.ReleaseWhenIdle {
 		md.Spec.RetentionPolicy = &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionReleaseWhenIdle, IdleLimit: dur(plan.IdleLimit)}
 	}
+	if row.MostJobs == 1 {
+		// The earliest drain start any first job can have (oneJob).
+		end := metav1.NewTime(time.Now().Add(row.Lease - r.drainWindow()).Truncate(time.Second))
+		md.Spec.EndTime = &end
+	}
 	return md
+}
+
+// oneJob keeps a row of one job (MostJobs 1, the tunnel rows) to one job. With
+// no queue wait observed, the lifecycle controller creates a primary's
+// replacement at the primary's start (HBEP-7, Handover), which such a row must
+// not have: on Helios it would pend in the owner's one-job slot. A deployment
+// that ends at or before a primary's drain start gets no replacement
+// (internal/lifecycle/handover.go, replacements), so the deployment is created
+// ending at the earliest drain start its first job can have (deployment), and,
+// once the Instance's lease end is known, moved to a minute before the
+// Instance's own drain start. The Instance drains at that end, which oneJob
+// returns as its drain start.
+func (r *liveRun) oneJob(in v1alpha1.Instance) time.Time {
+	t := r.t
+	t.Helper()
+	cur := r.current(in)
+	ds, ok := DrainStartOf(&cur, r.drainWindow())
+	if !ok {
+		t.Fatal("the Instance has no lease end")
+	}
+	end := metav1.NewTime(ds.Add(-time.Minute).Truncate(time.Second))
+	var md v1alpha1.ModelDeployment
+	ctx, cancel := stack.CallCtx(t)
+	defer cancel()
+	if err := r.c.Get(ctx, client.ObjectKey{Name: r.w.md.Name, Namespace: r.w.md.Namespace}, &md); err != nil {
+		t.Fatalf("the run's deployment: %v", err)
+	}
+	if md.Spec.EndTime != nil && !end.After(md.Spec.EndTime.Time) {
+		return md.Spec.EndTime.Time
+	}
+	patch := client.MergeFrom(md.DeepCopy())
+	md.Spec.EndTime = &end
+	if err := r.c.Patch(ctx, &md, patch); err != nil {
+		t.Fatalf("move the run's deployment's end to before the drain start: %v", err)
+	}
+	return end.Time
 }
 
 func dur(d time.Duration) *v1alpha1.Duration { s := v1alpha1.Duration(d.String()); return &s }

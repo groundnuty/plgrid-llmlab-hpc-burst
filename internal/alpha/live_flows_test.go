@@ -433,6 +433,7 @@ const rateAsked = 30 * time.Second
 func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error) {
 	r.start(p)
 	in := r.firstReady(p)
+	ds := r.oneJob(in)
 	key := r.fc.KeyFor(&in)
 	rate := r.rate(key)
 	tm := r.tm
@@ -489,11 +490,13 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 	idle := time.Now().Add(tm.MinIdleGap + 15*time.Second)
 	stack.WaitFor(r.t, tm.MinIdleGap+time.Minute, "the idle stretch", func() bool { return !time.Now().Before(idle) })
 	for time.Since(first) < tm.TunnelHour {
+		if time.Now().Add(long).After(ds) {
+			p.Logf("%s: the drain start comes before the hour is over", p.Row.Name)
+			break
+		}
 		reqs = append(reqs, r.finish(r.openStream(nLong, key, tunnelBodyPad)))
 	}
 	samples := smp.end()
-	cur := r.current(in)
-	ds, _ := DrainStartOf(&cur, r.drainWindow())
 	dep := r.observedDeployment()
 	// The hour is over: the deployment goes, and with it the job, so that the
 	// cluster's record shows the job's end (the verdict needs both its times).
