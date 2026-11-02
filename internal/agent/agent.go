@@ -306,9 +306,10 @@ func (a *Agent) offerNow() uint64 {
 	return a.rep.offer(r)
 }
 
-// snapshotKey is the snapshot without its time, to tell a change.
+// snapshotKey is the snapshot without its time and its count, to tell a change:
+// the count rises with every report, so it would make every snapshot look new.
 func snapshotKey(r agentapi.Report) []byte {
-	r.Time = time.Time{}
+	r.Time, r.Seq = time.Time{}, 0
 	b, _ := json.Marshal(r)
 	return b
 }
@@ -435,6 +436,12 @@ func (b *backoff) reset() { b.cur = b.min }
 // number at or above an offer's means that offer's state reached the endpoint
 // (waitSent).
 //
+// The number is also the report's Seq (agentapi.Report.Seq): the agent
+// instance's own count of the reports it builds, which the last report takes
+// from the same counter (stamp). A report that is tried again keeps its
+// number, so the endpoint keeps only the newest it has seen, whatever order
+// the reports reach it in (issue #221).
+//
 // When the stop begins the periodic reports close (closePeriodic), and the
 // last one goes once the workers have stopped (final). A periodic send in
 // flight is let finish, never cancelled: cancelling it ends the call on the
@@ -442,11 +449,11 @@ func (b *backoff) reset() { b.cur = b.min }
 // after the last report, which would leave the endpoint holding an older state
 // (issue #220).
 //
-// The limit that stays (issue #221 tracks the full fix, a sequence number on
-// every report): the wait is bounded, so a send that hangs past the bound can
-// still overtake the last report; and a request already sent can return a
-// client timeout or a reset before the bound while the endpoint still
-// processes it, after which the last report goes and can be overwritten.
+// The wait is bounded, so a send that hangs past the bound can still reach the
+// endpoint after the last report, and so can a request already sent that
+// returned a client timeout or a reset before the bound. The endpoint drops
+// either, since its Seq is older than the last report's (issue #221); the wait
+// only keeps the common case from reaching that rule.
 type reporter struct {
 	a         *Agent
 	mu        sync.Mutex
@@ -476,6 +483,7 @@ func (r *reporter) offer(rep agentapi.Report) uint64 {
 	r.mu.Lock()
 	r.seq++
 	n := r.seq
+	rep.Seq = n
 	r.next, r.queuedSeq = &rep, n
 	r.mu.Unlock()
 	select {
@@ -595,6 +603,18 @@ func (r *reporter) send(ctx context.Context, rep agentapi.Report, periodic bool)
 		err = r.a.o.API.Report(ctx, rep)
 	}
 	return err
+}
+
+// stamp numbers rep as the next report of this agent instance, from the counter
+// the offers use, so the last report is newer than every report offered before
+// it. The caller sends the stamped report as it is, and again if it must: a
+// report tried again keeps its number.
+func (r *reporter) stamp(rep agentapi.Report) agentapi.Report {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.seq++
+	rep.Seq = r.seq
+	return rep
 }
 
 // closePeriodic closes the periodic reports, when the stop begins: no

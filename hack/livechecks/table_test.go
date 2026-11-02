@@ -416,3 +416,143 @@ func TestHubGoldenInputsAreTheFilesTheTestReads(t *testing.T) {
 		}
 	}
 }
+
+// scriptTables are the tables load_tables reads, each between "# BEGIN <name>" and "# END <name>" in the script.
+var scriptTables = []string{"ALIASES", "CLUSTER SHAPES", "FRONT LABEL", "LIVE TESTS", "MOST JOBS", "OWNER GO", "PLAN STACK"}
+
+// commentOut returns the script with every row of the named table turned into a comment, as an edit that
+// empties the table would leave it.
+func commentOut(t *testing.T, script, name string) string {
+	t.Helper()
+	lines := strings.Split(script, "\n")
+	in, n := false, 0
+	for i, l := range lines {
+		switch {
+		case l == "# BEGIN "+name:
+			in = true
+		case l == "# END "+name:
+			in = false
+		case in && l != "" && !strings.HasPrefix(l, "#"):
+			lines[i] = "# " + l
+			n++
+		}
+	}
+	if n == 0 {
+		t.Fatalf("the script's %s table has no row to comment out", name)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// A table that loads no rows stops the script, in every mode (--list, --plan, --run with and without --yes),
+// and names the table (#237). It once ran on as if
+// the table were short: --plan printed "run: (none)" with exit 0 when LIVE TESTS had no rows, and an empty
+// OWNER GO table would have dropped the owner's go from the rows that hold QOS now's GPU. Here each table in
+// turn has all its rows commented out.
+func TestATableThatLoadsNoRowsStopsTheScript(t *testing.T) {
+	b, err := os.ReadFile(scriptPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found []string
+	for _, m := range regexp.MustCompile(`(?m)^# BEGIN (.+)$`).FindAllStringSubmatch(string(b), -1) {
+		found = append(found, m[1])
+	}
+	sort.Strings(found)
+	if strings.Join(found, ",") != strings.Join(scriptTables, ",") {
+		t.Fatalf("the script's tables are %v; this test checks %v: a new table needs a check in load_tables and a place here", found, scriptTables)
+	}
+	for _, table := range scriptTables {
+		t.Run(table, func(t *testing.T) {
+			w := newWorld(t)
+			rng := w.commit("docs/notes.md", "changed\n")
+			// The fixture's copy of the script changes after the commit, so the range itself is untouched.
+			p := filepath.Join(w.repo, "hack", "live-checks.sh")
+			script, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			write(t, p, commentOut(t, string(script), table), 0o755)
+			want := "live-checks: the " + table + " table of this script loads no rows"
+			for _, args := range [][]string{{"--plan", rng}, {"--list"}, {"--run", "conformance-helios"}, {"--run", "conformance-helios", "--yes"}} {
+				mode := strings.Join(args, " ")
+				res := w.run(nil, args...)
+				if res.code != 2 {
+					t.Errorf("%s: exit %d, want 2:\n%s", mode, res.code, res.out)
+				}
+				if !strings.Contains(res.out, want) {
+					t.Errorf("%s: the output does not name the empty table (%q):\n%s", mode, want, res.out)
+				}
+				if strings.Contains(res.out, "run:") {
+					t.Errorf("%s: a script with an empty table printed a run line:\n%s", mode, res.out)
+				}
+				// It stops before anything reaches a cluster or builds.
+				for _, f := range []string{"ssh-argv", "sbatch-argv", "go-argv"} {
+					if got := w.stateFile(f); got != "" {
+						t.Errorf("%s: a script with an empty table called %s: %s", mode, f, got)
+					}
+				}
+			}
+		})
+	}
+}
+
+// unterminate returns the script with the named table's output ending in its last row, with no newline after
+// it: the "# END" marker is dropped and the command substitution strips the final newline.
+func unterminate(t *testing.T, script, name string) string {
+	t.Helper()
+	lines := strings.Split(script, "\n")
+	begin, end := -1, -1
+	for i, l := range lines {
+		switch l {
+		case "# BEGIN " + name:
+			begin = i
+		case "# END " + name:
+			end = i
+		}
+	}
+	if begin < 1 || end < begin || end+1 >= len(lines) || lines[begin-1] != "  cat <<'TABLE'" || lines[end+1] != "TABLE" {
+		t.Fatalf("the %s table is not a cat <<'TABLE' heredoc that ends with its END marker", name)
+	}
+	lines[begin-1] = "  printf '%s' \"$(sed '/^# END /d' <<'TABLE'"
+	lines[end+1] = "TABLE\n)\""
+	return strings.Join(lines, "\n")
+}
+
+// A table's last row is read even with no newline after it (#237, review). The old grep -v supplied one; a
+// bare read loop would drop that row without a word, and with a row still before it the empty-table check
+// would not see it. --list names the last row of each table it prints.
+func TestATableReadsALastRowWithNoNewline(t *testing.T) {
+	b, err := os.ReadFile(scriptPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"LIVE TESTS", "ALIASES"} {
+		t.Run(table, func(t *testing.T) {
+			rows := block(t, string(b), table)
+			if len(rows) < 2 {
+				t.Fatalf("the %s table has %d row(s); the case needs a row before the last", table, len(rows))
+			}
+			last := strings.SplitN(rows[len(rows)-1], "|", 2)[0]
+			w := newWorld(t)
+			p := filepath.Join(w.repo, "hack", "live-checks.sh")
+			script, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			write(t, p, unterminate(t, string(script), table), 0o755)
+			res := w.run(nil, "--list")
+			if res.code != 0 {
+				t.Fatalf("exit %d:\n%s", res.code, res.out)
+			}
+			listed := false
+			for _, l := range lines(res.out) {
+				if strings.HasPrefix(l, last+"  ") {
+					listed = true
+				}
+			}
+			if !listed {
+				t.Errorf("the %s table's last row, %s, is not listed:\n%s", table, last, res.out)
+			}
+		})
+	}
+}

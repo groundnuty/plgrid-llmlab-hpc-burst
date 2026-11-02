@@ -51,7 +51,8 @@ type Agent struct {
 	now     func() time.Time
 	engine  Engine
 
-	registered bool // the Backend knows the current agent instance ID
+	registered bool   // the Backend knows the current agent instance ID
+	seq        uint64 // the count of the reports built under the current agent instance ID (Report.Seq)
 	silenced   bool
 	stopping   bool // a stop was applied, and the final report is not yet sent
 	exited     bool
@@ -170,6 +171,7 @@ func (a *Agent) LastReport() (agentapi.Report, bool) {
 func (a *Agent) Requeue() {
 	a.caller.AgentInstanceID = newAgentInstanceID()
 	a.Registration.RestartCount++
+	a.seq = 0 // a new agent instance counts its reports from 1
 	a.registered = false
 	a.stopping = false
 	a.exited = false
@@ -270,6 +272,8 @@ func (a *Agent) register(ctx context.Context) error {
 
 func (a *Agent) report(ctx context.Context, now time.Time) error {
 	r := a.snapshot(now)
+	a.seq++
+	r.Seq = a.seq // the report keeps its number if it is sent again below
 	// Encode the report as the HTTP path does: one above the body limit is
 	// refused here, before any call, as the sender is told on the wire.
 	if _, err := agentapi.EncodeBody(r); err != nil {

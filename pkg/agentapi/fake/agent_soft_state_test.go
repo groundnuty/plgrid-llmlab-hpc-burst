@@ -61,7 +61,10 @@ func TestAControllerRestartGivesEveryAgentAReRegistrationAndNothingElse(t *testi
 		eq(t, nd.uid+": RestartCount is not raised by a re-registration", regs[0].Request.RestartCount, nd.count)
 		eq(t, nd.uid+": AgentInstanceID", nd.a.AgentInstanceID(), ids[nd.uid])
 		after, _ := b.LastReport(nd.uid)
-		eq(t, nd.uid+": report content", after, nd.before)
+		// The agent goes on counting its reports; nothing else in the report changed.
+		want := nd.before
+		want.Seq++
+		eq(t, nd.uid+": report content", after, want)
 		eq(t, nd.uid+": reports", len(b.Reports(nd.uid)), 4)
 		starts := nd.a.Starts()
 		eq(t, nd.uid+": no worker restarted", len(starts), 1)

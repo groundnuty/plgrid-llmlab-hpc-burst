@@ -126,7 +126,11 @@ jobs:
             echo "Skipped tests: $skips (each one is coverage that did not run)."
             if [ "$skips" != "0" ]; then
               echo '```'
-              grep -E '^\s*--- SKIP' "$log" | sed 's/^ *//' | head -100
+              # At most 100 lines, to keep the summary readable: the count above is the total, and the
+              # job log has every one. To show more, change the 100. One awk reads the whole log: a
+              # reader that stops early (head -100) left grep and sed writing to a closed pipe, which
+              # under pipefail and -e could fail this step once more than 100 tests skipped (#237).
+              awk '/^[[:space:]]*--- SKIP/ { sub(/^ */, ""); if (++n <= 100) print } END { if (n > 100) print "... and " (n - 100) " more in the job log" }' "$log"
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
@@ -228,7 +232,10 @@ jobs:
           {
             echo "### crd and envtest"
             echo '```'
-            sed -n '/^== skipped tests/,$p' "$log" | head -100
+            # At most 100 lines, to keep the summary readable; the job log has them all. To show more,
+            # change the 100. One awk reads the whole log, so no writer meets a closed pipe, which under
+            # pipefail and -e could fail this step once the list passed 100 lines (#237).
+            awk '/^== skipped tests/ { on = 1 } on && ++n <= 100 { print } END { if (n > 100) print "... and " (n - 100) " more lines in the job log" }' "$log"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"

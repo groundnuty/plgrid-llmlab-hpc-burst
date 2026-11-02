@@ -72,7 +72,7 @@ echo "testbin $t" >> "$STUB_STATE/events"
 printf '%s\n' "$*" > "$STUB_STATE/test-args-$t"
 env | grep -E '^(HPCBURST|HB_)' | sort > "$STUB_STATE/test-env-$t.$$"
 cp "$STUB_STATE/test-env-$t.$$" "$STUB_STATE/test-env-$t"
-echo "log line: host seedhost01 job 424242 key SEEDKEY dialhome gateway-seed.example"
+echo "log line: host seedhost01 job 424242 key SEEDKEY dialhome gateway-seed.example probe ${HPCBURST_CONF_PROBE_HOST:-} ${HPCBURST_CONF_PROBE_PORT:-}"
 mode=${STUB_ALPHA_MODE:-pass}
 [ -n "${HPCBURST_ALPHA_ROW:-}${HPCBURST_CONFORMANCE:-}" ] || mode=skip
 leave() {
@@ -490,7 +490,7 @@ func TestPlanNamesTheAlphaRowsWhenTheStackChanges(t *testing.T) {
 		{"a stack binary", "cmd/hpcburst-front/main.go", "package main\n\nimport _ \"example.test/fx/internal/stack\"\n\nfunc main() { _ = 1 }\n", alphaRows},
 		{"the example the rows apply", "examples/provider-athena-a100.yaml", "kind: Provider\nx: 1\n", []string{"alpha-athena-handover"}},
 		{"a package the accounting rows and conformance run, not the stack", "internal/providerctl/providerctl.go", "package providerctl\n\nimport _ \"example.test/fx/internal/slurm\"\n\nvar X = 1\n",
-			[]string{"conformance-athena", "conformance-helios", "conformance-helios-gh200", "gpu-accounting-athena", "gpu-accounting-helios"}},
+			[]string{"conformance-athena", "conformance-helios", "conformance-helios-gh200", "gpu-accounting-athena", "gpu-accounting-helios", "reach-athena", "reach-helios"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

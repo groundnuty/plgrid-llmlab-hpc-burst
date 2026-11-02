@@ -14,7 +14,7 @@ const (
 	logWaitingForSend = "a periodic report is in flight; the last report waits for it"
 	// logOpenSendAtLast is logged (Warn) when the wait reached its bound with
 	// the send still open: that send can still reach the endpoint after the
-	// last report (issue #221 tracks the full fix, a sequence number).
+	// last report, which drops it as older (issue #221).
 	logOpenSendAtLast = "sending the last report with a periodic send still open"
 )
 
@@ -40,7 +40,7 @@ func jobEndWait() time.Duration { return min(finalReportTimeout, jobEndReportBud
 // to finish (the periodic reports were closed when the stop began). A send
 // still open at the bound is logged at Warn and cancelled, which ends the call
 // here only: the last report goes anyway, and that send can still reach the
-// endpoint after it (the known limit; issue #221 tracks the full fix).
+// endpoint after it, which drops it as older (issue #221).
 //
 // When jobCtx ends during the wait, a job cancellation has arrived: what is
 // left of the wait is cut to jobEndWait, and the time of the cancellation is
@@ -85,7 +85,7 @@ func (a *Agent) sendLastReport(jobCtx context.Context, cancelRep context.CancelF
 	if termAt.IsZero() {
 		defer clampAtTerm(jobCtx, cancel)()
 	}
-	return a.rep.final(ctx, a.snapshot())
+	return a.rep.final(ctx, a.rep.stamp(a.snapshot()))
 }
 
 // clampAtTerm cancels the last report's tries jobEndReportBudget after jobCtx
@@ -116,5 +116,5 @@ func (a *Agent) sendLastReportAtJobEnd(cancelRep context.CancelFunc) error {
 	a.awaitPeriodicSend(context.Background(), cancelRep, jobEndWait())
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
-	return a.rep.send(ctx, a.snapshot(), false)
+	return a.rep.send(ctx, a.rep.stamp(a.snapshot()), false)
 }

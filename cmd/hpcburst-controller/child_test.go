@@ -15,7 +15,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -58,7 +57,14 @@ func controllerChild(args []string, runnerAddr string) int {
 	runner := &remoteRunner{addr: runnerAddr}
 	// The state directory holds prepareState's example frpc builds, so the
 	// child pins their digests, as startBinary does for an in-process run.
-	d := deps{providerScheme: providerScheme, newPlatform: remotePlatforms(runner), frpcDigests: exampleFrpcDigests}
+	// The ports were picked by the parent, which holds them until this process
+	// has started: they arrive as inherited descriptors (inheritListeners).
+	listen, err := inheritedListen(os.Getenv(childEnvListeners))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "hpcburst-controller:", err)
+		return 1
+	}
+	d := deps{providerScheme: providerScheme, newPlatform: remotePlatforms(runner), frpcDigests: exampleFrpcDigests, listen: listen}
 	if err := run(ctx, f, d); err != nil {
 		fmt.Fprintln(os.Stderr, "hpcburst-controller:", err)
 		return 1
@@ -99,11 +105,66 @@ type child struct {
 	waitErr error
 }
 
-// startChild starts a controller process with f's arguments against the fake
+// startChild starts a controller process on f's ports and waits until it is
+// serving or has exited, as startBinary does for an in-process run: a child that
+// exits having found the metrics or the health port taken (its stderr says
+// "address already in use") is started again with fresh ports, written to *f, at
+// most maxBindRetries times, each logged. A caller must check the final *f, not
+// the ports it first picked. A child that neither exits nor serves within 90 s
+// fails the test. avoid is the flags of the other copies running.
+func startChild(t *testing.T, name string, f *flags, runnerAddr string, avoid ...flags) *child {
+	t.Helper()
+	for attempt := 0; ; attempt++ {
+		releaseAtStart(*f)
+		c := launchChild(t, name, *f, runnerAddr)
+		served, exited := c.awaitServing(90 * time.Second)
+		if !served && !exited {
+			t.Fatalf("child %s neither exited nor served within 90 s: /healthz on %s or /metrics on %s never answered 200; the end of its stderr:\n%s",
+				name, f.healthAddr, f.host.ControllerMetricsAddr(), c.tail(30))
+		}
+		if !exited || !addrInUseText(c.log()) || attempt == maxBindRetries {
+			return c
+		}
+		t.Logf("child %s's start %d found a port of %s or %s taken; picking fresh ports and starting again (retry %d of %d)",
+			name, attempt+1, f.healthAddr, f.host.ControllerMetricsAddr(), attempt+1, maxBindRetries)
+		*f = repickPorts(t, *f, avoid...)
+	}
+}
+
+// awaitServing waits until the process has exited (exited), or its health probes
+// and metrics both answer 200 (served), or timeout passes (neither).
+func (c *child) awaitServing(timeout time.Duration) (served, exited bool) {
+	deadline := time.Now().Add(timeout)
+	answers := func(url string) bool {
+		resp, err := probeHTTP.Get(url)
+		if err != nil {
+			return false
+		}
+		resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	}
+	for time.Now().Before(deadline) {
+		if !c.running() {
+			return false, true
+		}
+		if answers("http://"+c.f.healthAddr+"/healthz") && answers("http://"+c.f.host.ControllerMetricsAddr()+"/metrics") {
+			return true, false
+		}
+		select {
+		case <-c.exited:
+			return false, true
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return false, false
+}
+
+// launchChild starts a controller process with f's arguments against the fake
 // Slurm server at runnerAddr. Its cleanup kills and reaps it if the test has
 // not, and a failed test logs the end of its stderr.
-func startChild(t *testing.T, name string, f flags, runnerAddr string) *child {
+func launchChild(t *testing.T, name string, f flags, runnerAddr string) *child {
 	t.Helper()
+	releaseAtStart(f)
 	args := childArgs(f)
 	if back, err := parse(args, io.Discard); err != nil || back != f {
 		t.Fatalf("the child's arguments %v parse to %+v (%v), not the flags %+v the test means", args, back, err, f)
@@ -122,7 +183,10 @@ func startChild(t *testing.T, name string, f flags, runnerAddr string) *child {
 	c.cmd = exec.Command(exe, args...)
 	// A minimal environment: the child needs the fake's address and little else,
 	// and must not inherit a signing socket or any credential.
-	c.cmd.Env = []string{childEnvRunner + "=" + runnerAddr, "PATH=" + os.Getenv("PATH"), "TMPDIR=" + os.TempDir(), "HOME=" + os.TempDir()}
+	files, listenerEnv, closeParent := inheritListeners(t, f)
+	defer closeParent() // the child holds its own descriptors once it has started
+	c.cmd.ExtraFiles = files
+	c.cmd.Env = []string{childEnvRunner + "=" + runnerAddr, childEnvListeners + "=" + listenerEnv, "PATH=" + os.Getenv("PATH"), "TMPDIR=" + os.TempDir(), "HOME=" + os.TempDir()}
 	c.cmd.Stdout, c.cmd.Stderr = logFile, logFile
 	// Pdeathsig: a -test.timeout panic skips t.Cleanup, and then the kernel
 	// ends the child.
@@ -224,21 +288,7 @@ func healthy(addr string) bool {
 // base whose block does not touch the first's, and another health address.
 func secondCopyFlags(t *testing.T, first flags) flags {
 	t.Helper()
-	for range 50 {
-		base := freePortBase(t)
-		if d := base - first.host.PortBase; d > 12 || d < -12 {
-			args := []string{"--state-dir", first.host.StateDir, "--port-base", strconv.Itoa(base),
-				"--health-addr", net.JoinHostPort("127.0.0.1", strconv.Itoa(freePort(t))),
-				"--front-mode", first.frontMode, "--front-addr", first.frontAddr}
-			f, err := parse(args, io.Discard)
-			if err != nil {
-				t.Fatal(err)
-			}
-			return f
-		}
-	}
-	t.Fatal("found no port base whose block is clear of the first copy's in 50 tries")
-	return flags{}
+	return repickPorts(t, first, first)
 }
 
 // noProcessesNamed fails the test for every process, other than this one, whose

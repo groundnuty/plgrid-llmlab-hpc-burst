@@ -141,17 +141,30 @@ func dryAccountingWorld(t *testing.T, row, fault, out string) (*world, *fakeslur
 	if !ok || !strings.HasPrefix(row, "gpu-accounting-") {
 		t.Fatalf("HPCBURST_ALPHA_ROW is %q, not a gpu-accounting row", row)
 	}
-	for _, k := range os.Environ() {
-		if strings.HasPrefix(k, "HPCBURST_CONF") {
-			t.Fatalf("a dry run refuses to start with live settings present (%s)", strings.SplitN(k, "=", 2)[0])
-		}
-	}
 	node, known := dryGPUFaults[fault]
 	if !known {
 		t.Fatalf("the dry fault %q is not one of the row's", fault)
 	}
 	if fault == "slot-held" && r.QOS == "" {
 		t.Fatalf("the dry fault slot-held needs a row under a one-job QOS")
+	}
+	return dryWorld(t, r, fault, out, dryShape{cpus: "4", memory: "8Gi"}, dryGPUAgent, map[string]string{"FAKE_NODE_CVD": node[0], "FAKE_NODE_SMI": node[1]})
+}
+
+// dryShape is the CPUs and memory the dry run's Provider asks for, as the row's shape in the script does.
+type dryShape struct{ cpus, memory string }
+
+// dryWorld is the world of a dry run over a fake Slurm in run mode: the agent stand-in is run by the fake, on this
+// machine, with jobEnv added to its environment. A dry run refuses to start when a live setting is present. The fault
+// slot-held is for a row under a one-job slot, a QOS of the job or of the partition (the profile's own for the
+// partition): the owner's other job holds it, so this run's job pends.
+func dryWorld(t *testing.T, r alpha.Row, fault, out string, shape dryShape, agent []byte, jobEnv map[string]string) (*world, *fakeslurm.Platform) {
+	t.Helper()
+	row := r.Name
+	for _, k := range os.Environ() {
+		if strings.HasPrefix(k, "HPCBURST_CONF") {
+			t.Fatalf("a dry run refuses to start with live settings present (%s)", strings.SplitN(k, "=", 2)[0])
+		}
 	}
 	if !filepath.IsAbs(out) {
 		t.Fatal("HPCBURST_ALPHA_OUT must be an absolute path")
@@ -174,7 +187,7 @@ func dryAccountingWorld(t *testing.T, row, fault, out string) (*world, *fakeslur
 	}
 	vars := map[string]string{
 		"HPCBURST_CONF_PROFILE": r.Cluster, "HPCBURST_CONF_PARTITION": r.Partition, "HPCBURST_CONF_CREDENTIALS": creds,
-		"HPCBURST_CONF_ACCOUNT": "example-account", "HPCBURST_CONF_GPUS": "1", "HPCBURST_CONF_CPUS": "4", "HPCBURST_CONF_MEMORY": "8Gi",
+		"HPCBURST_CONF_ACCOUNT": "example-account", "HPCBURST_CONF_GPUS": "1", "HPCBURST_CONF_CPUS": shape.cpus, "HPCBURST_CONF_MEMORY": shape.memory,
 		"HPCBURST_CONF_STAGING": "$SCRATCH/hpc-burst-conformance", "HPCBURST_CONF_HOST_LOCK": filepath.Join(dir, "lock"),
 		"HPCBURST_CONF_CONTROL_DIR": filepath.Join(dir, "ctl"), "HPCBURST_CONF_OUT": out, "HPCBURST_CONF_QOS": r.QOS,
 	}
@@ -191,19 +204,28 @@ func dryAccountingWorld(t *testing.T, row, fault, out string) (*world, *fakeslur
 	if r.Cluster == "athena" {
 		notListed = fakeslurm.NotListedAthena
 	}
-	run := &fakeslurm.RunMode{Root: root, Env: map[string]string{"FAKE_NODE_CVD": node[0], "FAKE_NODE_SMI": node[1]}}
+	run := &fakeslurm.RunMode{Root: root, Env: jobEnv}
 	if r.Cluster == "helios" {
 		// The shipped Helios profile makes the job's temporary directory $MEMFS (tmpDir), which
 		// a job gets by asking for the feature memfs.
 		run.JobVars = []fakeslurm.JobVar{{Name: "MEMFS", Feature: "memfs"}}
 	}
+	// A row with no QOS of its own is on a partition whose own QOS is the slot (Athena's plgrid-now): the profile names it.
+	partQOS := ""
+	if fault == "slot-held" && r.QOS == "" {
+		if partQOS = s.part.QOS; partQOS == "" {
+			t.Fatalf("the dry fault slot-held needs a one-job slot: a QOS of the row, or a QOS of the partition's own")
+		}
+	}
 	cfg := fakeslurm.Config{
 		DataParser: s.profile.Spec.JSONDataParser, NotListed: notListed,
-		Partitions: []fakeslurm.Partition{{Name: r.Partition, GPUOnly: true}}, Run: run,
+		Partitions: []fakeslurm.Partition{{Name: r.Partition, GPUOnly: true, QOS: partQOS}}, Run: run,
 	}
-	if r.QOS != "" {
-		// The QOS's cap of one GPU per user: a fixture without a cap would start a second job beside the first.
-		cfg.QOS = []fakeslurm.QOS{{Name: r.QOS, MaxGPUsPerUser: fakeslurm.Cap(1)}}
+	// The QOS's cap of one GPU per user: a fixture without a cap would start a second job beside the first.
+	for _, q := range []string{r.QOS, partQOS} {
+		if q != "" {
+			cfg.QOS = append(cfg.QOS, fakeslurm.QOS{Name: q, MaxGPUsPerUser: fakeslurm.Cap(1)})
+		}
 	}
 	plat := fakeslurm.New(slurm.RealClock, cfg)
 	t.Cleanup(func() {
@@ -223,10 +245,14 @@ func dryAccountingWorld(t *testing.T, row, fault, out string) (*world, *fakeslur
 	})
 	session := plat.Login(fakeslurm.Login{User: "example-user", Env: map[string]string{"HOME": home, "SCRATCH": scratch}})
 	if fault == "slot-held" {
-		// The owner's other project: one GPU job under the same QOS through the same login, running (a process
-		// that sleeps) until the test ends it. It takes the QOS's one GPU, so this run's job pends.
+		// The owner's other project: one GPU job under the same slot through the same login, running (a process
+		// that sleeps) until the test ends it. It takes the slot's one GPU, so this run's job pends.
+		qosFlag := ""
+		if r.QOS != "" {
+			qosFlag = " --qos=" + r.QOS
+		}
 		res, err := session.Run(context.Background(), slurm.Command{Line: "sbatch --parsable --no-requeue --job-name=owner-other-project-job --partition=" + r.Partition +
-			" --qos=" + r.QOS + " --account=example-account --time=00:30:00 --gres=gpu:1 --cpus-per-task=1 --mem=1024 '--wrap=sleep 600'"})
+			qosFlag + " --account=example-account --time=00:30:00 --gres=gpu:1 --cpus-per-task=1 --mem=1024 '--wrap=sleep 600'"})
 		if err != nil || res.ExitCode != 0 {
 			t.Fatalf("the owner's job was not accepted: %v exit %d %s", err, res.ExitCode, res.Stderr)
 		}
@@ -245,9 +271,11 @@ func dryAccountingWorld(t *testing.T, row, fault, out string) (*world, *fakeslur
 		// Registered after the fake's own cleanup, so it runs first: the sleeping job ends before Close.
 		t.Cleanup(func() { _ = plat.End(id, string(fakeslurm.Cancelled)) })
 	}
-	w := buildWorld(t, s, worldKit{agent: dryGPUAgent, dial: func(slurm.Validated) (slurm.Runner, io.Closer, error) {
+	w := buildWorld(t, s, worldKit{agent: agent, dial: func(slurm.Validated) (slurm.Runner, io.Closer, error) {
 		return session, io.NopCloser(nil), nil
 	}})
+	// The fake cluster's file system, the credentials and the key are where a dry run leaves its files.
+	w.artefacts = append(w.artefacts, dir)
 	if fault == "slot-held" {
 		ft := newFakeTime()
 		w.now, w.sleep = ft.now, ft.sleep

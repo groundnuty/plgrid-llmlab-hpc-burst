@@ -14,7 +14,7 @@ import (
 // after the value.
 func paddedReport(t *testing.T, n int) []byte {
 	t.Helper()
-	b := reportBody(t, agentapi.Report{Time: time.Unix(1, 0).UTC()})
+	b := reportBody(t, agentapi.Report{Seq: 1, Time: time.Unix(1, 0).UTC()})
 	if len(b) > n {
 		t.Fatalf("a report is %d bytes, above %d", len(b), n)
 	}
