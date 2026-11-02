@@ -87,7 +87,9 @@ func (e *external) observeDeleting(ctx context.Context, a *v1alpha1.Allocation, 
 	// accounting record and the finalizer wait for the flag to clear, which a
 	// listing without it, a job that is no longer listed, or accounting shows
 	// (HBEP-4, Phases, A completing job; HBEP-7, Deletion). It is not
-	// cancelled again: scancel would answer already completing.
+	// cancelled again: its job has ended as far as Slurm goes, so a cancel
+	// would only report AlreadyEnded (Batch.Cancel observes first, and real
+	// scancel answers such a job silently; #207).
 	if _, ok := completingJob(jobs); ok {
 		return exists, nil
 	}

@@ -47,8 +47,8 @@ func TestEpilogKeepsTheFlagAfterTheProcessesAreGoneAndPastMinJobAge(t *testing.T
 				r.clock.Advance(time.Minute) // past MinJobAge, inside the epilog
 				r.wantSqueue("end + 1 min, epilog running", id, listed, completing, "CG")
 				_, stderr, exit := r.run("scancel " + itoa(id))
-				if want := "scancel: error: Kill job error on job id " + itoa(id) + ": Job/step already completing or completed\n"; exit != 1 || stderr != want {
-					t.Errorf("scancel of the completing job: exit %d stderr %q, want exit 1 stderr %q", exit, stderr, want)
+				if exit != 0 || stderr != "" {
+					t.Errorf("scancel of the completing job: exit %d stderr %q, want exit 0 and nothing printed, as real scancel answers (#207)", exit, stderr)
 				}
 				r.clock.Advance(8*time.Minute + 59*time.Second) // 1 s short of the epilog's end
 				r.wantSqueue("epilog 1 s short of its end", id, listed, completing, "CG")
