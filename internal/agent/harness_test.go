@@ -113,6 +113,8 @@ type harnessOptions struct {
 	home string
 	// buildReportTimeout is Options.BuildReportTimeout (the default when 0).
 	buildReportTimeout time.Duration
+	// logTee, when set, also receives every record the agent logs.
+	logTee slog.Handler
 }
 
 // newHarness starts a real agent against a fake Backend behind a fake Gate,
@@ -213,7 +215,7 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 		Registration:         agentapi.RegisterRequest{RestartCount: o.restart, Node: "node-test", CPUArch: "x86_64"},
 		BaseEnv:              baseEnv,
 		Tunnel:               o.tunnel,
-		Logger:               slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		Logger:               slog.New(teeHandlers(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug}), o.logTee)),
 		ReportInterval:       200 * time.Millisecond,
 		StartupProbeInterval: 50 * time.Millisecond,
 		MinBackoff:           20 * time.Millisecond,
