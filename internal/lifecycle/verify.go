@@ -306,7 +306,8 @@ func (p *pass) verified(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, v *ag
 		return p.restart(in, alloc, signalVerifyRead, "", st, data.Message)
 	case causeContradiction, causeShape:
 		lifts := stopLifts(data.Cause, true)
-		p.r.Recorder.Event(p.mdObject(in), nil, eventDegraded, v1alpha1.ReasonVerificationFailed,
+		// The Instance caused it, so it is the event's related object (HBEP-8, Events; as for CapacityDropped).
+		p.r.Recorder.Event(p.mdObject(in), in, eventDegraded, v1alpha1.ReasonVerificationFailed,
 			fmt.Sprintf("Instance %s: %s; provisioning in its class stops until %s", in.Name, data.Message, lifts))
 		// Stop the class in this pass too: the record stops it in every later
 		// one (classBlocked), and this pass must not provision there either.

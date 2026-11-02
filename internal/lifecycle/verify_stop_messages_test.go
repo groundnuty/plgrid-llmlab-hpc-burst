@@ -31,7 +31,7 @@ const (
 // stopTexts steps the rig until the deployment's class is stopped by a failed verification and returns three texts: the
 // event of the verifying pass, the Degraded message of that pass (the first the condition shows), and the Degraded
 // message of a later pass, which is the class stop read back from the verification record.
-func stopTexts(rg *rig, md string) (event, first, later string) {
+func stopTexts(rg *rig, md string) (event RecordedEvent, first, later string) {
 	rg.t.Helper()
 	rg.until(10*time.Minute, 10*time.Second, "the class stop", func() bool {
 		c := rg.condition(md, v1alpha1.ConditionDegraded)
@@ -49,10 +49,26 @@ func stopTexts(rg *rig, md string) (event, first, later string) {
 	later = c.Message
 	for _, e := range rg.rec.Events() {
 		if e.Code == v1alpha1.ReasonVerificationFailed && strings.Contains(e.Message, "provisioning in its class stops until") {
-			event = e.Message
+			event = e
 		}
 	}
 	return event, first, later
+}
+
+// wantRelatedInstance fails unless the event names the Instance that failed verification as its related object, the
+// way CapacityDropped does (handover_test.go): HBEP-8 asks it of a deployment event that one Instance caused.
+func wantRelatedInstance(t *testing.T, rg *rig, md string, e RecordedEvent) {
+	t.Helper()
+	ins := rg.instances(md)
+	if len(ins) == 0 {
+		t.Fatal("the deployment has no Instance")
+	}
+	if e.RelatedKind != "*v1alpha1.Instance" || e.RelatedName != ins[0].Name {
+		t.Errorf("the event's related object is %s %q, want *v1alpha1.Instance %q", e.RelatedKind, e.RelatedName, ins[0].Name)
+	}
+	if e.Name != md || !e.Warning {
+		t.Errorf("the event regards %q (warning %t), want the ModelDeployment %q as a warning", e.Name, e.Warning, md)
+	}
 }
 
 // holdsOnly fails when text lacks the lifting clause or holds the other cause's.
@@ -74,10 +90,11 @@ func TestAContradictionStopSaysItEndsWhenTheServingSpecChanges(t *testing.T) {
 	rg.engine = func(string) afake.Engine { return afake.Engine{Verify: afake.VerifyMaxModelLen("16384")} }
 	rg.create(mdSpec("md"))
 	event, first, later := stopTexts(rg, "md")
-	if event == "" {
+	if event.Message == "" {
 		t.Fatal("no event said that the class stops")
 	}
-	holdsOnly(t, "the event", event, liftsOnSpec, "resolved shapes")
+	wantRelatedInstance(t, rg, "md", event)
+	holdsOnly(t, "the event", event.Message, liftsOnSpec, "resolved shapes")
 	holdsOnly(t, "the first Degraded message", first, liftsOnSpec, "resolved shapes")
 	holdsOnly(t, "the later Degraded message", later, liftsOnSpec, "resolved shapes")
 	if strings.Contains(first, "verification record") || !strings.Contains(later, "verification record") {
@@ -94,10 +111,11 @@ func TestAShapeMisfitStopSaysItEndsWhenTheSpecOrTheResolvedShapesChange(t *testi
 	md.Spec.Source.Served.Flags = nil
 	rg.create(md)
 	event, first, later := stopTexts(rg, hoMD)
-	if event == "" {
+	if event.Message == "" {
 		t.Fatal("no event said that the class stops")
 	}
-	holdsOnly(t, "the event", event, liftsOnSpecOrShape, "until "+liftsOnSpec)
+	wantRelatedInstance(t, rg, hoMD, event)
+	holdsOnly(t, "the event", event.Message, liftsOnSpecOrShape, "until "+liftsOnSpec)
 	holdsOnly(t, "the first Degraded message", first, liftsOnSpecOrShape, "until "+liftsOnSpec)
 	holdsOnly(t, "the later Degraded message", later, liftsOnSpecOrShape, "until "+liftsOnSpec)
 	if strings.Contains(first, "verification record") || !strings.Contains(later, "verification record") {
