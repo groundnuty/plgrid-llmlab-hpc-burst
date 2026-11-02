@@ -73,11 +73,46 @@ func InstallGuard(ctx context.Context, cfg *rest.Config, log io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if err := normalizeBinding(ctx, dyn, binding); err != nil {
+		return err
+	}
 	for _, o := range []*unstructured.Unstructured{policy, binding} {
 		if err := applyOne(ctx, dyn, mapper, o); err != nil {
 			return err
 		}
 		logf(log, "applied %s %s", o.GetKind(), o.GetName())
+	}
+	return nil
+}
+
+// normalizeBinding sets the policy name and the actions of a binding that exists to what the
+// manifest says, before the apply. validationActions is a set: a server-side apply adds Deny to a
+// Warn that someone put there by hand (a field of another manager), and the API server refuses the
+// pair ("must not contain both Deny and Warn"), so up would fail on a host whose binding was
+// weakened. The binding is replaced in place, never deleted, so no moment is left without it.
+func normalizeBinding(ctx context.Context, dyn dynamic.Interface, want *unstructured.Unstructured) error {
+	cur, err := dyn.Resource(guardBindingGVR).Get(ctx, want.GetName(), metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read the ValidatingAdmissionPolicyBinding %s: %w", want.GetName(), err)
+	}
+	wantName, _, _ := unstructured.NestedString(want.Object, "spec", "policyName")
+	wantActions, _, _ := unstructured.NestedStringSlice(want.Object, "spec", "validationActions")
+	gotName, _, _ := unstructured.NestedString(cur.Object, "spec", "policyName")
+	gotActions, _, _ := unstructured.NestedStringSlice(cur.Object, "spec", "validationActions")
+	if gotName == wantName && slices.Equal(gotActions, wantActions) {
+		return nil
+	}
+	if err := unstructured.SetNestedField(cur.Object, wantName, "spec", "policyName"); err != nil {
+		return err
+	}
+	if err := unstructured.SetNestedStringSlice(cur.Object, wantActions, "spec", "validationActions"); err != nil {
+		return err
+	}
+	if _, err := dyn.Resource(guardBindingGVR).Update(ctx, cur, metav1.UpdateOptions{FieldManager: fieldManager}); err != nil {
+		return fmt.Errorf("reset the ValidatingAdmissionPolicyBinding %s to the manifest's: %w", want.GetName(), err)
 	}
 	return nil
 }

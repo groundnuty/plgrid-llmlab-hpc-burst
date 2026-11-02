@@ -182,3 +182,33 @@ func TestRemoveCRDGuardRefusesWithoutAHost(t *testing.T) {
 		t.Errorf("RemoveCRDGuard with no host: %v, want %v", err, errNotRunning)
 	}
 }
+
+// A binding that someone weakened to Warn (or pointed at another policy) is set back to the
+// manifest's before the apply: server-side apply alone would add Deny to the Warn, and the API
+// server refuses the pair.
+func TestNormalizeBindingResetsWhatWasChangedByHand(t *testing.T) {
+	_, want, _ := guardObjects()
+	weak := guardObject("ValidatingAdmissionPolicyBinding", GuardName, map[string]any{"policyName": "other", "validationActions": []any{"Warn"}})
+	f, _ := guardFake(weak)
+	if err := normalizeBinding(context.Background(), f, want); err != nil {
+		t.Fatal(err)
+	}
+	st, err := checkGuard(context.Background(), f) // the policy is absent here, so only the binding's parts count
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(st.Detail, "Deny") || strings.Contains(st.Detail, "names the policy") {
+		t.Errorf("after normalizing, the binding is still wrong: %s", st.Detail)
+	}
+	// A binding that is already right is not written, and one that does not exist is left to the apply.
+	f, _ = guardFake(want)
+	var writes int
+	f.PrependReactor("update", "*", func(k8stesting.Action) (bool, runtime.Object, error) { writes++; return false, nil, nil })
+	if err := normalizeBinding(context.Background(), f, want); err != nil || writes != 0 {
+		t.Errorf("normalizing a right binding: %v, %d writes, want none", err, writes)
+	}
+	f, _ = guardFake()
+	if err := normalizeBinding(context.Background(), f, want); err != nil {
+		t.Errorf("normalizing with no binding: %v", err)
+	}
+}
