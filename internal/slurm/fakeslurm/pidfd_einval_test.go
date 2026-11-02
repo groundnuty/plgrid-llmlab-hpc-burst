@@ -30,7 +30,7 @@ func TestEINVALFromPidfdOpenIsEndedOnlyWhenTheRecheckAgrees(t *testing.T) {
 		want    string
 		wantErr string // "" for no error
 	}{
-		{"kill(0) says no such process: it ended mid-exit", &scripted{openErr: syscall.EINVAL, probeErr: syscall.ESRCH}, "open 41,probe 41", ""},
+		{"kill(0) says no such process: it ended mid-exit", &scripted{openErr: syscall.EINVAL, probeErr: syscall.ESRCH, rowNow: sameNow}, "open 41,probe 41", ""},
 		{"kill(0) finds it and its row shows a zombie", &scripted{openErr: syscall.EINVAL, rowNow: zombie}, "open 41,probe 41,row 41", ""},
 		{"kill(0) finds it, another user's, and its row shows a zombie", &scripted{openErr: syscall.EINVAL, probeErr: syscall.EPERM, rowNow: zombie}, "open 41,probe 41,row 41", ""},
 		{"kill(0) finds it and its row is live: not ended", &scripted{openErr: syscall.EINVAL, rowNow: sameNow}, "open 41,probe 41,row 41", "pidfd_open of process 41: invalid argument"},
