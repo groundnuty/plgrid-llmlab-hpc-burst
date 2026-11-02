@@ -12,7 +12,9 @@ package fakeslurm
 
 import (
 	"errors"
+	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -34,6 +36,10 @@ func TestEINVALFromPidfdOpenIsEndedOnlyWhenTheRecheckAgrees(t *testing.T) {
 		{"kill(0) finds it and its row shows a zombie", &scripted{openErr: syscall.EINVAL, rowNow: zombie}, "open 41,probe 41,row 41", ""},
 		{"kill(0) finds it, another user's, and its row shows a zombie", &scripted{openErr: syscall.EINVAL, probeErr: syscall.EPERM, rowNow: zombie}, "open 41,probe 41,row 41", ""},
 		{"kill(0) finds it and its row is live: not ended", &scripted{openErr: syscall.EINVAL, rowNow: sameNow}, "open 41,probe 41,row 41", "pidfd_open of process 41: invalid argument"},
+		// kill(0) answering EPERM means the process exists and is another user's: it is not "no such process",
+		// so it ended only if its row says so (PR 216 review, N2).
+		{"kill(0) answers EPERM and the row is a live replacement: not ended", &scripted{openErr: syscall.EINVAL, probeErr: syscall.EPERM, rowNow: sameNow}, "open 41,probe 41,row 41", "pidfd_open of process 41: invalid argument"},
+		{"kill(0) answers EPERM and the row cannot be read: not ended", &scripted{openErr: syscall.EINVAL, probeErr: syscall.EPERM, rowNow: func(int) (procRow, bool, error) { return procRow{}, false, unreadable }}, "open 41,probe 41,row 41", "pidfd_open of process 41: invalid argument (re-check: read process 41: row unreadable (scripted))"},
 		{"kill(0) cannot tell", &scripted{openErr: syscall.EINVAL, probeErr: syscall.EIO, rowNow: sameNow}, "open 41,probe 41", "pidfd_open of process 41: invalid argument (re-check: kill(41, 0): input/output error)"},
 		{"the row cannot be read", &scripted{openErr: syscall.EINVAL, rowNow: func(int) (procRow, bool, error) { return procRow{}, false, unreadable }}, "open 41,probe 41,row 41", "pidfd_open of process 41: invalid argument (re-check: read process 41: row unreadable (scripted))"},
 		// Unchanged: only EINVAL is re-checked.
@@ -53,6 +59,22 @@ func TestEINVALFromPidfdOpenIsEndedOnlyWhenTheRecheckAgrees(t *testing.T) {
 			}
 		})
 	}
+}
+
+// unallocatablePID is a positive PID that no process can have: the kernel allocates PIDs below
+// /proc/sys/kernel/pid_max, an exclusive upper bound, so pid_max itself is never allocated (PR 216
+// review, N1). A fixed number such as 1<<22 - 1 is allocatable when pid_max is 4194304.
+func unallocatablePID(t *testing.T) int {
+	t.Helper()
+	b, err := os.ReadFile("/proc/sys/kernel/pid_max")
+	if err != nil {
+		t.Fatal(err)
+	}
+	max, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || max <= 1 {
+		t.Fatalf("pid_max %q: %v", b, err)
+	}
+	return max
 }
 
 // einvalFor is a host procAPI whose opener answers EINVAL for the PIDs given and counts the answers.
@@ -147,7 +169,7 @@ func TestEINVALFromPidfdOpenWithRealProcesses(t *testing.T) {
 // listed the row.
 func TestCloseSucceedsWhenAListedProcessEndsMidExit(t *testing.T) {
 	r := newRunRigCfg(t, Config{Run: &RunMode{}, NotListed: NotListedAthena}, true)
-	const ghost = 1<<22 - 1 // a PID that no process has
+	ghost := unallocatablePID(t)
 	var leader, einval, listed atomic.Int64
 	proc := r.p.knobs.proc
 	host, open := proc.list, proc.open
