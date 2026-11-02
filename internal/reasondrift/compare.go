@@ -30,10 +30,15 @@ type Emit struct {
 	// Pos is file:line, for messages. Keys never hold it.
 	Pos string
 
-	Reasons    []string
-	Actions    []string
-	Kinds      []string
-	Unresolved string
+	Reasons []string
+	// LiteralReasons are the reasons, among Reasons, that reached the call as a
+	// string literal at a call site: the argument of the recorder call, or of
+	// the call of a function that forwards it. A reason a named constant
+	// carries is not in it, whatever package the constant is in.
+	LiteralReasons []string
+	Actions        []string
+	Kinds          []string
+	Unresolved     string
 }
 
 // Code is what the scan of the code found.
@@ -54,8 +59,11 @@ type Code struct {
 
 // Mismatch kinds.
 const (
-	// NoConstant: a reason that HBEP-8's table or HBEP-7's ranking names has no
-	// Reason constant in api/v1alpha1.
+	// NoConstant: a reason that HBEP-8's table names, and that an emit site
+	// passes as a string literal, has no Reason constant in api/v1alpha1. A
+	// reason an emit site takes from a named constant, in api/v1alpha1 or in the
+	// emitter's package, is fine (`@hpc-burst-science-agent`, 2 Nov 2026, for
+	// #239); a bare literal is not.
 	NoConstant = "no-constant"
 	// TableOnly: the table lists a reason under a type and a regarding kind
 	// that no emit site raises.
@@ -117,18 +125,26 @@ type triple struct{ action, reason, kind string }
 func Compare(d *Docs, c *Code) []Mismatch {
 	var out []Mismatch
 
-	// Every reason the documents name has a constant in api/v1alpha1.
+	// A reason of the table that an emit site passes as a string literal has a
+	// constant in api/v1alpha1.
+	// Only typed events count: the Provider controller's untyped events are no
+	// rows of the table, and write their reasons as literals.
+	literal := map[string]bool{}
+	for _, e := range c.Emits {
+		if e.Unresolved == "" && !slices.Contains(e.Actions, NoAction) {
+			for _, r := range e.LiteralReasons {
+				literal[r] = true
+			}
+		}
+	}
 	named := map[string]bool{}
 	for _, e := range d.Table {
 		named[e.Reason] = true
 	}
-	for _, r := range d.Ranking {
-		named[r] = true
-	}
 	for r := range named {
-		if len(c.Constants[r]) == 0 {
+		if literal[r] && len(c.Constants[r]) == 0 {
 			out = append(out, Mismatch{Kind: NoConstant, Reason: r,
-				Detail: "no Reason or EventReason constant in api/v1alpha1 holds this value"})
+				Detail: "an emit site passes it as a string literal, and no Reason or EventReason constant in api/v1alpha1 holds this value"})
 		}
 	}
 

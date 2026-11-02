@@ -2,6 +2,7 @@ package scan
 
 import (
 	"fmt"
+	"go/ast"
 	"go/token"
 	"go/types"
 	"sort"
@@ -26,6 +27,46 @@ type scanner struct {
 	// list does not cover.
 	callers map[*ssa.Function][]*ssa.CallCommon
 	escaped map[*ssa.Function]bool
+
+	// calls maps the position of a call's opening parenthesis to its syntax.
+	calls map[token.Pos]callSite
+}
+
+// callSite is a call expression and the type information of its package.
+type callSite struct {
+	call *ast.CallExpr
+	info *types.Info
+}
+
+// literalArg reports whether argument i of the call (counted without a
+// receiver) is written as a string literal at the call: a literal, a
+// conversion of one, or a constant expression that names no constant.
+func (s *scanner) literalArg(cc *ssa.CallCommon, i int) bool {
+	site, ok := s.calls[cc.Pos()]
+	if !ok || i < 0 || i >= len(site.call.Args) {
+		return false
+	}
+	return literalExpr(site.call.Args[i], site.info)
+}
+
+func literalExpr(e ast.Expr, info *types.Info) bool {
+	e = ast.Unparen(e)
+	if c, ok := e.(*ast.CallExpr); ok && len(c.Args) == 1 && info.Types[c.Fun].IsType() {
+		return literalExpr(c.Args[0], info)
+	}
+	if tv, ok := info.Types[e]; !ok || tv.Value == nil {
+		return false // not a constant expression
+	}
+	named := false
+	ast.Inspect(e, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok {
+			if _, isConst := info.Uses[id].(*types.Const); isConst {
+				named = true
+			}
+		}
+		return true
+	})
+	return !named
 }
 
 // functions lists the functions that can hold a call or a use of a function:
@@ -212,8 +253,12 @@ func (s *scanner) emit(fn *ssa.Function, ci ssa.CallInstruction, cc *ssa.CallCom
 	if !ok {
 		return fail("the reason", "the call has too few arguments")
 	}
-	reasons, why := s.resolve(reasonV, stringLeaf)
+	reasons, lits, why := s.resolve(reasonV, stringLeaf)
 	reasons = dropEmpty(reasons)
+	if s.literalArg(cc, sk.reason) {
+		lits = reasons
+	}
+	e.LiteralReasons = dropEmpty(lits)
 	if why == "" && len(reasons) == 0 {
 		why = "only empty strings reach it"
 	}
@@ -227,7 +272,7 @@ func (s *scanner) emit(fn *ssa.Function, ci ssa.CallInstruction, cc *ssa.CallCom
 	} else if actionV == nil {
 		e.Actions = []string{reasondrift.NoAction}
 	} else {
-		actions, why := s.resolve(actionV, stringLeaf)
+		actions, _, why := s.resolve(actionV, stringLeaf)
 		if actions = dropEmpty(actions); why == "" && len(actions) == 0 {
 			why = "only empty strings reach it"
 		}
@@ -245,7 +290,7 @@ func (s *scanner) emit(fn *ssa.Function, ci ssa.CallInstruction, cc *ssa.CallCom
 			e.Kinds = []string{reasondrift.NoKind}
 		}
 	} else {
-		kinds, why := s.resolve(regV, kindLeaf)
+		kinds, _, why := s.resolve(regV, kindLeaf)
 		if why != "" {
 			return fail("the regarding object", why)
 		}

@@ -154,3 +154,27 @@ var table = []func(Recorder, *Instance, string){tabled}
 // recorderValue hands out the recorder's method as a value, which is an emit
 // path of its own.
 func (p *pass) recorderValue() func(Object, Object, string, string, string) { return p.r.Event }
+
+// literal passes a string literal.
+func (p *pass) literal(in *Instance) { p.r.Event(in, nil, eventFailing, "Literal", "m") }
+
+// literalConversion passes a conversion of a literal.
+func (p *pass) literalConversion(in *Instance) {
+	p.r.Event(in, nil, eventFailing, string(v1alpha1.Typed("TypedLiteral")), "m")
+}
+
+// literalConcat passes a constant expression that names no constant.
+func (p *pass) literalConcat(in *Instance) { p.r.Event(in, nil, eventFailing, "Lit"+"Concat", "m") }
+
+// namedConcat passes a constant expression that names one.
+func (p *pass) namedConcat(in *Instance) {
+	p.r.Event(in, nil, eventFailing, "X"+v1alpha1.ReasonA, "m")
+}
+
+// failLit forwards its parameter; one caller writes a literal, one a constant.
+func (p *pass) failLit(in *Instance, reason string) { p.r.Event(in, nil, eventFailing, reason, "m") }
+
+func (p *pass) callFailLit(in *Instance) {
+	p.failLit(in, "ForwardedLiteral")
+	p.failLit(in, v1alpha1.ReasonA)
+}

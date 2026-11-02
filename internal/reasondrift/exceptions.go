@@ -27,7 +27,7 @@ func WrapperNames() []string {
 // states why. An entry that matches no mismatch is stale and fails the test.
 //
 // Nothing that is a drift between an HBEP and the code goes here; that is
-// KnownDrift until the erratum lands.
+// knownDriftUntilHBEP8Erratum (drift_test.go) until the erratum lands.
 var Exceptions = []Entry{
 	{
 		Kind: CodeOnly, Action: NoAction, Package: "internal/providerctl",

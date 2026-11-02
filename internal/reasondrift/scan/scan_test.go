@@ -47,21 +47,30 @@ func TestResolvesEachWayAReasonArrives(t *testing.T) {
 		reasons []string
 		action  string
 		kinds   []string
+		lits    []string // the reasons written as a string literal at a call
 	}{
-		{"pass.direct", []string{"A"}, "failing", []string{"Instance"}},
-		{"pass.local", []string{"Local"}, "failing", []string{"Instance"}},
-		{"pass.typed", []string{"Typed"}, "failing", []string{"Instance"}},
+		{"pass.direct", []string{"A"}, "failing", []string{"Instance"}, nil},
+		{"pass.local", []string{"Local"}, "failing", []string{"Instance"}, nil},
+		{"pass.typed", []string{"Typed"}, "failing", []string{"Instance"}, nil},
 		// fail forwards its parameter: the reasons are its callers' arguments.
-		{"pass.fail", []string{"B", "D"}, "failing", []string{"Instance"}},
+		{"pass.fail", []string{"B", "D"}, "failing", []string{"Instance"}, nil},
 		// A variable set twice, captured by a closure: both values.
-		{"pass.variable", []string{"A", "C"}, "degraded", []string{"Instance"}},
+		{"pass.variable", []string{"A", "C"}, "degraded", []string{"Instance"}, nil},
 		// A closure assigns to the variable: its store counts too.
-		{"pass.assignedInClosure", []string{"A", "C"}, "degraded", []string{"Instance"}},
+		{"pass.assignedInClosure", []string{"A", "C"}, "degraded", []string{"Instance"}, nil},
 		// The empty string a variable starts from is no reason.
-		{"pass.guarded", []string{"C"}, "degraded", []string{"Instance"}},
-		{"pass.fromCall", []string{"A", "B"}, "failing", []string{"Instance"}},
+		{"pass.guarded", []string{"C"}, "degraded", []string{"Instance"}, nil},
+		{"pass.fromCall", []string{"A", "B"}, "failing", []string{"Instance"}, nil},
 		// An interface-typed regarding object: the kinds converted into it.
-		{"pass.either", []string{"A"}, "degraded", []string{"Instance", "ModelDeployment"}},
+		{"pass.either", []string{"A"}, "degraded", []string{"Instance", "ModelDeployment"}, nil},
+		// A string literal, written at the call or at the call of a forwarder, is
+		// told from a named constant; a constant expression that names a
+		// constant is not a literal.
+		{"pass.literal", []string{"Literal"}, "failing", []string{"Instance"}, []string{"Literal"}},
+		{"pass.literalConversion", []string{"TypedLiteral"}, "failing", []string{"Instance"}, []string{"TypedLiteral"}},
+		{"pass.literalConcat", []string{"LitConcat"}, "failing", []string{"Instance"}, []string{"LitConcat"}},
+		{"pass.namedConcat", []string{"XA"}, "failing", []string{"Instance"}, nil},
+		{"pass.failLit", []string{"A", "ForwardedLiteral"}, "failing", []string{"Instance"}, []string{"ForwardedLiteral"}},
 	} {
 		e := emitOf(t, code, c.fn)
 		if e.Unresolved != "" {
@@ -70,6 +79,9 @@ func TestResolvesEachWayAReasonArrives(t *testing.T) {
 		}
 		if !slices.Equal(e.Reasons, c.reasons) || !slices.Equal(e.Actions, []string{c.action}) || !slices.Equal(e.Kinds, c.kinds) {
 			t.Errorf("%s: reasons %v actions %v kinds %v, want %v [%s] %v", c.fn, e.Reasons, e.Actions, e.Kinds, c.reasons, c.action, c.kinds)
+		}
+		if !slices.Equal(e.LiteralReasons, c.lits) {
+			t.Errorf("%s: literal reasons %v, want %v", c.fn, e.LiteralReasons, c.lits)
 		}
 	}
 	// What cannot be told is reported, never skipped.

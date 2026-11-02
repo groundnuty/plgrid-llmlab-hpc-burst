@@ -3,6 +3,8 @@ package reasondrift_test
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"slices"
 	"sort"
 	"strings"
@@ -13,10 +15,31 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/reasondrift/scan"
 )
 
-// strict ignores KnownDrift, the temporary allowlist of the drift that exists
-// today: with REASONDRIFT_STRICT=1 the guard fails on today's tree, which is
-// what it is for. Delete the switch with KnownDrift when the erratum has landed.
+// strict ignores knownDriftUntilHBEP8Erratum, the temporary allowlist of the
+// drift that exists today: with REASONDRIFT_STRICT=1 the guard fails on today's
+// tree, which is what it is for. Delete the switch with the list when the
+// erratum has landed.
 var strict = os.Getenv("REASONDRIFT_STRICT") == "1"
+
+// knownDriftUntilHBEP8Erratum is debt, not a policy: the drift between HBEP-8
+// and the code on the day the guard was added (2 Nov 2026, #239), allowed so
+// that the guard can merge before the erratum. Remove each entry in the pull
+// request that fixes what it names. The test also fails on a STALE entry, one
+// that no longer drifts, so the list can only shrink and the erratum's merge
+// forces its entries out. When the list is empty, delete it and the switch.
+//
+// Both entries are for the HBEP: a deployment's event regards the Instance once
+// the ModelDeployment is gone (internal/lifecycle, mdObject), and HBEP-8's table
+// says ModelDeployment only. The erratum splits the lifecycle row so that
+// VerificationFailed and CapacityDropped regard the ModelDeployment, else the
+// Instance; the report on #239 has the wording the guard accepts.
+var knownDriftUntilHBEP8Erratum = []reasondrift.Entry{
+	{Kind: reasondrift.NoConstant, Reason: "HandedOver", Why: "string literal in internal/lifecycle; the next commit names it"},
+	{Kind: reasondrift.NoConstant, Reason: "NoReplacementReady", Why: "string literal in internal/lifecycle; the next commit names it"},
+	{Kind: reasondrift.NoConstant, Reason: "Ready", Why: "string literal in internal/lifecycle; the next commit names it"},
+	{Kind: reasondrift.CodeOnly, Action: "degraded", Reason: "CapacityDropped", Regarding: "Instance", Package: "internal/lifecycle", Why: "mdObject falls back to the Instance when the ModelDeployment is gone; the table lists ModelDeployment only"},
+	{Kind: reasondrift.CodeOnly, Action: "degraded", Reason: "VerificationFailed", Regarding: "Instance", Package: "internal/lifecycle", Why: "mdObject falls back to the Instance when the ModelDeployment is gone; the table lists ModelDeployment only"},
+}
 
 // requiredPackages are the packages whose emit sites the guard reads. The scan
 // loads ./..., and fails when one of these is missing.
@@ -45,6 +68,10 @@ func scanTree(t *testing.T, overlay map[string][]byte) *reasondrift.Code {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Each scan holds the whole module's syntax and types; give it back before
+	// the next one, so the test binary's peak is one scan's.
+	runtime.GC()
+	debug.FreeOSMemory()
 	return code
 }
 
@@ -75,11 +102,15 @@ func realDocs(t *testing.T) (md8, md7 []byte) {
 	return md8, md7
 }
 
-func allowances() [][]reasondrift.Entry {
-	if strict {
-		return [][]reasondrift.Entry{reasondrift.Exceptions}
+// drift compares the documents with the code and takes the allowances off:
+// the exceptions, then (unless ignoreDebt) the debt list. It returns what is
+// left and the stale entries of both lists.
+func drift(docs *reasondrift.Docs, code *reasondrift.Code, exceptions, debt []reasondrift.Entry, ignoreDebt bool) (left []reasondrift.Mismatch, stale []reasondrift.Entry) {
+	lists := [][]reasondrift.Entry{exceptions}
+	if !ignoreDebt {
+		lists = append(lists, debt)
 	}
-	return [][]reasondrift.Entry{reasondrift.Exceptions, reasondrift.KnownDrift}
+	return reasondrift.Apply(reasondrift.Compare(docs, code), lists...)
 }
 
 // key builds the identity of a mismatch from its fields, so the expectations
@@ -105,15 +136,15 @@ func keys(ms []reasondrift.Mismatch) []string {
 //     by reference, and every one an emit site raises is in the table;
 //   - HBEP-7's ranking equals the order the code ranks by.
 //
-// The only allowances are Exceptions (true to the design) and KnownDrift (the
-// drift the erratum removes). An entry that matches nothing is stale.
+// The only allowances are Exceptions (true to the design) and
+// knownDriftUntilHBEP8Erratum (debt). An entry that matches nothing is stale.
 func TestHBEPsMatchTheCode(t *testing.T) {
 	docs, err := reasondrift.LoadDocs(repoRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	code := realScan(t)
-	left, stale := reasondrift.Apply(reasondrift.Compare(docs, code), allowances()...)
+	left, stale := drift(docs, code, reasondrift.Exceptions, knownDriftUntilHBEP8Erratum, strict)
 	for _, m := range left {
 		t.Errorf("drift: %s", m)
 	}
@@ -121,7 +152,7 @@ func TestHBEPsMatchTheCode(t *testing.T) {
 		t.Errorf("stale allowance, remove it: %s", e)
 	}
 	if len(left) > 0 && strict {
-		t.Logf("REASONDRIFT_STRICT=1: KnownDrift is ignored, so this is the drift of today's tree")
+		t.Logf("REASONDRIFT_STRICT=1: knownDriftUntilHBEP8Erratum is ignored, so this is the drift of today's tree")
 	}
 }
 
@@ -148,10 +179,40 @@ func TestTheScanSawTheEmitters(t *testing.T) {
 	}
 }
 
+// TestAStaleAllowanceFails is a mutant check: an entry added to either list
+// that matches no mismatch is reported as stale, so the debt list can only
+// shrink and the erratum's merge forces its entries out. The unchanged lists
+// have none.
+func TestAStaleAllowanceFails(t *testing.T) {
+	docs, err := reasondrift.LoadDocs(repoRoot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := realScan(t)
+	if _, stale := drift(docs, code, reasondrift.Exceptions, knownDriftUntilHBEP8Erratum, false); len(stale) != 0 {
+		t.Fatalf("the unchanged lists have stale entries: %v", stale)
+	}
+	gone := reasondrift.Entry{Kind: reasondrift.CodeOnly, Action: "failing", Reason: "NoLongerDrifting", Regarding: "Instance", Package: "internal/lifecycle", Why: "the mutant"}
+	debt := append(slices.Clone(knownDriftUntilHBEP8Erratum), gone)
+	if _, stale := drift(docs, code, reasondrift.Exceptions, debt, false); !slices.Equal(stale, []reasondrift.Entry{gone}) {
+		t.Errorf("a stale entry in the debt list: stale %v, want only it", stale)
+	}
+	exceptions := append(slices.Clone(reasondrift.Exceptions), gone)
+	if _, stale := drift(docs, code, exceptions, knownDriftUntilHBEP8Erratum, false); !slices.Equal(stale, []reasondrift.Entry{gone}) {
+		t.Errorf("a stale entry in the exceptions: stale %v, want only it", stale)
+	}
+	// An entry that is the debt of a mismatch the exceptions already cover is
+	// stale too: it is reached after them, and finds nothing.
+	covered := append(slices.Clone(knownDriftUntilHBEP8Erratum), reasondrift.Entry{Kind: reasondrift.CodeOnly, Package: "internal/providerctl", Why: "already an exception"})
+	if _, stale := drift(docs, code, reasondrift.Exceptions, covered, false); len(stale) != 1 {
+		t.Errorf("an entry for what an exception covers: stale %v, want it alone", stale)
+	}
+}
+
 // TestEveryAllowanceStatesItsReason: an entry with no Why, or with no field to
 // match on (which would allow everything), is refused.
 func TestEveryAllowanceStatesItsReason(t *testing.T) {
-	for _, list := range [][]reasondrift.Entry{reasondrift.Exceptions, reasondrift.KnownDrift} {
+	for _, list := range [][]reasondrift.Entry{reasondrift.Exceptions, knownDriftUntilHBEP8Erratum} {
 		for _, e := range list {
 			if strings.TrimSpace(e.Why) == "" {
 				t.Errorf("%s has no Why", e)
@@ -179,7 +240,7 @@ func leftover(t *testing.T, md8, md7 []byte, code *reasondrift.Code) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	left, _ := reasondrift.Apply(reasondrift.Compare(docs, code), reasondrift.Exceptions, reasondrift.KnownDrift)
+	left, _ := drift(docs, code, reasondrift.Exceptions, knownDriftUntilHBEP8Erratum, false)
 	return keys(left)
 }
 
@@ -225,19 +286,14 @@ func TestARemovedRowFails(t *testing.T) {
 	}
 }
 
-// TestAnAddedRowFails is a mutant check: a row for a reason no code emits and
-// no constant holds adds exactly the two mismatches that says.
+// TestAnAddedRowFails is a mutant check: a row for a reason no code emits adds
+// exactly the mismatch that says.
 func TestAnAddedRowFails(t *testing.T) {
 	md8, md7 := realDocs(t)
 	mutated := mutateRows(t, md8, "| `replaced` | `HandedOver`",
 		"| `replaced` | `HandedOver` (proposed in PR #88) | Instance | lifecycle controller |",
 		"| `failing` | `ReasonOfTheMutant` | Instance | lifecycle controller |")
-	want := []string{
-		key(reasondrift.NoConstant, "", "ReasonOfTheMutant", "", ""),
-		key(reasondrift.TableOnly, "failing", "ReasonOfTheMutant", "Instance", ""),
-	}
-	// HandedOver stays in the table (it is KnownDrift's), so only the two new
-	// mismatches are left.
+	want := []string{key(reasondrift.TableOnly, "failing", "ReasonOfTheMutant", "Instance", "")}
 	if got := leftover(t, mutated, md7, realScan(t)); !slices.Equal(got, want) {
 		t.Errorf("with a row added: %v, want %v", got, want)
 	}
@@ -258,23 +314,54 @@ func TestAChangedRegardingFails(t *testing.T) {
 	}
 }
 
-// TestAnAddedEmitFails is a mutant check: a new call to the lifecycle
-// Recorder with a new reason, added to internal/lifecycle through an overlay,
-// appears as exactly one mismatch.
-func TestAnAddedEmitFails(t *testing.T) {
-	src := `package lifecycle
+// mutantEmits is a file added to internal/lifecycle through an overlay: three
+// calls of the Recorder, with a reason written as a string literal, a reason a
+// package-local constant names, and a reason no table row lists.
+const mutantEmits = `package lifecycle
 
 import "github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 
-func (p *pass) mutantEmit(in *v1alpha1.Instance) {
-	p.r.Recorder.Event(in, nil, eventFailing, "ReasonOfTheMutant", "m")
+const namedMutantReason = "NamedMutantReason"
+
+func (p *pass) mutantEmits(in *v1alpha1.Instance) {
+	p.r.Recorder.Event(in, nil, eventFailing, "LiteralMutantReason", "m")
+	p.r.Recorder.Event(in, nil, eventFailing, namedMutantReason, "m")
+	p.r.Recorder.Event(in, nil, eventFailing, "UnlistedMutantReason", "m")
 }
 `
-	overlay := map[string][]byte{filepath.Join(repoRoot(t), "internal/lifecycle/zz_mutant_overlay.go"): []byte(src)}
+
+// TestEmitsAddedByAnOverlayAreCaught is a mutant check (#239): new calls of the
+// lifecycle Recorder, added through go/packages' overlay, appear as the
+// mismatches they cause and no others. One scan serves both cases.
+func TestEmitsAddedByAnOverlayAreCaught(t *testing.T) {
+	overlay := map[string][]byte{filepath.Join(repoRoot(t), "internal/lifecycle/zz_mutant_overlay.go"): []byte(mutantEmits)}
+	code := scanTree(t, overlay)
 	md8, md7 := realDocs(t)
-	want := []string{key(reasondrift.CodeOnly, "failing", "ReasonOfTheMutant", "Instance", "internal/lifecycle")}
-	if got := leftover(t, md8, md7, scanTree(t, overlay)); !slices.Equal(got, want) {
-		t.Errorf("with an emit added: %v, want %v", got, want)
+
+	// Not in the table: each is an emit the table lacks.
+	want := []string{
+		key(reasondrift.CodeOnly, "failing", "LiteralMutantReason", "Instance", "internal/lifecycle"),
+		key(reasondrift.CodeOnly, "failing", "NamedMutantReason", "Instance", "internal/lifecycle"),
+		key(reasondrift.CodeOnly, "failing", "UnlistedMutantReason", "Instance", "internal/lifecycle"),
+	}
+	slices.Sort(want)
+	if got := leftover(t, md8, md7, code); !slices.Equal(got, want) {
+		t.Errorf("with three emits added: %v, want %v", got, want)
+	}
+
+	// With rows for the first two, what is left is the literal, which has no
+	// constant in api/v1alpha1 (a constant named in the emitter's package is
+	// fine, `@hpc-burst-science-agent`, 2 Nov 2026), and the unlisted reason.
+	mutated := mutateRows(t, md8, "| `replaced` | `HandedOver`",
+		"| `replaced` | `HandedOver` | Instance | lifecycle controller |",
+		"| `failing` | `LiteralMutantReason`, `NamedMutantReason` | Instance | lifecycle controller |")
+	want = []string{
+		key(reasondrift.NoConstant, "", "LiteralMutantReason", "", ""),
+		key(reasondrift.CodeOnly, "failing", "UnlistedMutantReason", "Instance", "internal/lifecycle"),
+	}
+	slices.Sort(want)
+	if got := leftover(t, mutated, md7, code); !slices.Equal(got, want) {
+		t.Errorf("with rows for two of them: %v, want %v", got, want)
 	}
 }
 

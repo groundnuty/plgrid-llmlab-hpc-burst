@@ -61,14 +61,27 @@ func TestCompareFindsEachKindOfMismatch(t *testing.T) {
 		detail string // part of the first mismatch's Detail
 	}{
 		{
-			"a table reason with no constant",
-			func(d *Docs, c *Code) { delete(c.Constants, "Lost") },
+			"a table reason an emit site writes as a literal, with no constant",
+			func(d *Docs, c *Code) { delete(c.Constants, "Lost"); c.Emits[0].LiteralReasons = []string{"Lost"} },
 			[]string{key(NoConstant, "", "Lost", "", "", "")}, "no Reason or EventReason constant",
 		},
 		{
-			"a ranking reason with no constant",
-			func(d *Docs, c *Code) { d.Ranking = append(d.Ranking, "Extra"); c.Ranking = append(c.Ranking, "Extra") },
-			[]string{key(NoConstant, "", "Extra", "", "", "")}, "",
+			"a table reason a named constant outside api carries needs no api constant",
+			func(d *Docs, c *Code) { delete(c.Constants, "Lost") },
+			nil, "",
+		},
+		{
+			"a literal of an untyped event is no row of the table",
+			func(d *Docs, c *Code) {
+				delete(c.Constants, "Lost")
+				c.Emits = append(c.Emits, Emit{Package: "internal/p", Func: "f", Pos: "x:1", Reasons: []string{"Lost"}, LiteralReasons: []string{"Lost"}, Actions: []string{NoAction}, Kinds: []string{NoKind}})
+			},
+			[]string{key(CodeOnly, NoAction, "Lost", NoKind, "internal/p", "")}, "",
+		},
+		{
+			"a literal with a constant in api",
+			func(d *Docs, c *Code) { c.Emits[0].LiteralReasons = []string{"Lost"} },
+			nil, "",
 		},
 		{
 			"a table row no code emits",
@@ -137,7 +150,7 @@ func TestCompareFindsEachKindOfMismatch(t *testing.T) {
 			if want := slices.Clone(c.want); !slices.Equal(keysOf(got), sortedCopy(want)) {
 				t.Fatalf("mismatches %v, want %v", keysOf(got), sortedCopy(want))
 			}
-			if c.detail != "" && !strings.Contains(got[0].Detail, c.detail) {
+			if c.detail != "" && len(got) > 0 && !strings.Contains(got[0].Detail, c.detail) {
 				t.Errorf("detail %q lacks %q", got[0].Detail, c.detail)
 			}
 		})

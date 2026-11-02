@@ -149,6 +149,7 @@ func Scan(o Options) (*reasondrift.Code, error) {
 		mod: mod, root: o.Root, fset: prog.Fset, fns: functions(prog, spkgs),
 		wrappers: map[string]bool{}, seenWrappers: map[string]bool{},
 		callers: map[*ssa.Function][]*ssa.CallCommon{}, escaped: map[*ssa.Function]bool{},
+		calls: callIndex(pkgs, mod),
 	}
 	for _, w := range o.Wrappers {
 		s.wrappers[w] = true
@@ -166,6 +167,28 @@ func Scan(o Options) (*reasondrift.Code, error) {
 		return a.Pos < b.Pos
 	})
 	return code, nil
+}
+
+// callIndex finds every call expression of the module's packages by the
+// position of its opening parenthesis, which is the position go/ssa gives the
+// call instruction, so an instruction can be traced back to its arguments'
+// source text.
+func callIndex(pkgs []*packages.Package, mod string) map[token.Pos]callSite {
+	out := map[token.Pos]callSite{}
+	packages.Visit(pkgs, nil, func(p *packages.Package) {
+		if p.PkgPath != mod && !strings.HasPrefix(p.PkgPath, mod+"/") {
+			return
+		}
+		for _, f := range p.Syntax {
+			ast.Inspect(f, func(n ast.Node) bool {
+				if c, ok := n.(*ast.CallExpr); ok {
+					out[c.Lparen] = callSite{call: c, info: p.TypesInfo}
+				}
+				return true
+			})
+		}
+	})
+	return out
 }
 
 // modulePath reads the module path from the go.mod under root.

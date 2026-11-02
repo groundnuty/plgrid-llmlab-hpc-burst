@@ -59,25 +59,44 @@ func kindLeaf(v ssa.Value) ([]string, string, ssa.Value, bool) {
 	return nil, "", nil, false
 }
 
-// resolve returns the values that can reach v, sorted and without repeats, or
-// why they cannot be told: it follows phis, the parameters of functions that
-// are only called statically (to their callers' arguments) and the results of
-// static calls (to the values their functions return). Anything else, such as a
-// field, a map entry or a call through an interface, is a reason.
-func (s *scanner) resolve(v ssa.Value, leaf leafFn) ([]string, string) {
-	set := map[string]bool{}
-	if why := s.walk(v, leaf, set, map[ssa.Value]bool{}, 0); why != "" {
-		return nil, why
+// acc collects what a walk finds: the values, and those of them that arrived
+// as a string literal at a call site (see scanner.literalArg).
+type acc struct{ set, lits map[string]bool }
+
+func newAcc() *acc { return &acc{set: map[string]bool{}, lits: map[string]bool{}} }
+
+func (a *acc) merge(b *acc) {
+	for x := range b.set {
+		a.set[x] = true
 	}
-	out := make([]string, 0, len(set))
-	for x := range set {
+	for x := range b.lits {
+		a.lits[x] = true
+	}
+}
+
+func sorted(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for x := range m {
 		out = append(out, x)
 	}
 	sort.Strings(out)
-	return out, ""
+	return out
 }
 
-func (s *scanner) walk(v ssa.Value, leaf leafFn, set map[string]bool, path map[ssa.Value]bool, depth int) string {
+// resolve returns the values that can reach v, sorted and without repeats, and
+// those that arrived as a literal, or why the values cannot be told: it follows phis, the parameters of functions that
+// are only called statically (to their callers' arguments) and the results of
+// static calls (to the values their functions return). Anything else, such as a
+// field, a map entry or a call through an interface, is a reason.
+func (s *scanner) resolve(v ssa.Value, leaf leafFn) (vals, lits []string, why string) {
+	a := newAcc()
+	if why := s.walk(v, leaf, a, map[ssa.Value]bool{}, 0); why != "" {
+		return nil, nil, why
+	}
+	return sorted(a.set), sorted(a.lits), ""
+}
+
+func (s *scanner) walk(v ssa.Value, leaf leafFn, a *acc, path map[ssa.Value]bool, depth int) string {
 	if depth > maxDepth {
 		return "the trace is deeper than the scan follows"
 	}
@@ -91,17 +110,17 @@ func (s *scanner) walk(v ssa.Value, leaf leafFn, set map[string]bool, path map[s
 	switch {
 	case done:
 		for _, x := range vals {
-			set[x] = true
+			a.set[x] = true
 		}
 		return why
 	case next != nil:
-		return s.walk(next, leaf, set, path, depth+1)
+		return s.walk(next, leaf, a, path, depth+1)
 	}
 
 	switch v := v.(type) {
 	case *ssa.Phi:
 		for _, e := range v.Edges {
-			if why := s.walk(e, leaf, set, path, depth+1); why != "" {
+			if why := s.walk(e, leaf, a, path, depth+1); why != "" {
 				return why
 			}
 		}
@@ -120,9 +139,20 @@ func (s *scanner) walk(v ssa.Value, leaf leafFn, set map[string]bool, path map[s
 			if idx < 0 || idx >= len(cc.Args) {
 				return fmt.Sprintf("parameter %s of %s: a caller passes too few arguments", v.Name(), fn.Name())
 			}
-			if why := s.walk(cc.Args[idx], leaf, set, path, depth+1); why != "" {
+			sub := newAcc()
+			if why := s.walk(cc.Args[idx], leaf, sub, path, depth+1); why != "" {
 				return why
 			}
+			astIdx := idx
+			if fn.Signature.Recv() != nil {
+				astIdx--
+			}
+			if s.literalArg(cc, astIdx) {
+				for x := range sub.set {
+					sub.lits[x] = true
+				}
+			}
+			a.merge(sub)
 		}
 		return ""
 	case *ssa.UnOp:
@@ -136,25 +166,25 @@ func (s *scanner) walk(v ssa.Value, leaf leafFn, set map[string]bool, path map[s
 			return why
 		}
 		for _, val := range vals {
-			if why := s.walk(val, leaf, set, path, depth+1); why != "" {
+			if why := s.walk(val, leaf, a, path, depth+1); why != "" {
 				return why
 			}
 		}
 		return ""
 	case *ssa.Call:
-		return s.walkResult(v.Common(), 0, leaf, set, path, depth)
+		return s.walkResult(v.Common(), 0, leaf, a, path, depth)
 	case *ssa.Extract:
 		call, ok := v.Tuple.(*ssa.Call)
 		if !ok {
 			return fmt.Sprintf("a result of %T", v.Tuple)
 		}
-		return s.walkResult(call.Common(), v.Index, leaf, set, path, depth)
+		return s.walkResult(call.Common(), v.Index, leaf, a, path, depth)
 	}
 	return fmt.Sprintf("%s (%T) is not a constant, a parameter or the result of a call in the module", v.Name(), v)
 }
 
 // walkResult follows result idx of a static call to what its function returns.
-func (s *scanner) walkResult(cc *ssa.CallCommon, idx int, leaf leafFn, set map[string]bool, path map[ssa.Value]bool, depth int) string {
+func (s *scanner) walkResult(cc *ssa.CallCommon, idx int, leaf leafFn, a *acc, path map[ssa.Value]bool, depth int) string {
 	callee := cc.StaticCallee()
 	if callee == nil {
 		return fmt.Sprintf("the result of a call through %s, which is not a static call", callTarget(cc))
@@ -175,7 +205,7 @@ func (s *scanner) walkResult(cc *ssa.CallCommon, idx int, leaf leafFn, set map[s
 		if idx >= len(ret.Results) {
 			return fmt.Sprintf("result %d of %s", idx, callee.Name())
 		}
-		if why := s.walk(ret.Results[idx], leaf, set, path, depth+1); why != "" {
+		if why := s.walk(ret.Results[idx], leaf, a, path, depth+1); why != "" {
 			return why
 		}
 	}
