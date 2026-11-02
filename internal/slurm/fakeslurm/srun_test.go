@@ -295,7 +295,12 @@ func TestSrunRefusesAnotherUsersJob(t *testing.T) {
 	r := newRunRig(t, RunMode{})
 	other := r.login("other-user")
 	release := r.root + "/release"
-	own, theirs := r.holdJob(r.s, release), r.holdJob(other, release)
+	own := r.holdJob(r.s, release)
+	// The other user's job is one process that never changes (exec), so that
+	// its process list is the same before and after unless the step changed
+	// it; a shell loop's own sleeps come and go.
+	theirs := r.submitAs(other, "exec sleep 300")
+	waitFor(t, "the other user's job to run", func() bool { return r.job(theirs).PID > 0 })
 	marker := r.root + "/marker"
 	script := []byte("echo ran > " + marker + "\n")
 
