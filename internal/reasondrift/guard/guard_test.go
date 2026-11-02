@@ -38,9 +38,6 @@ var strict = os.Getenv("REASONDRIFT_STRICT") == "1"
 // scan reaches it by reference. A reason written as a string literal needs a
 // constant in api/v1alpha1; the three that were literals have theirs in this PR.
 var knownDriftUntilHBEP8Erratum = []reasondrift.Entry{
-	{Kind: reasondrift.NoConstant, Reason: "HandedOver", Why: "string literal at its call site in internal/lifecycle; the next commit names it"},
-	{Kind: reasondrift.NoConstant, Reason: "NoReplacementReady", Why: "string literal at its call site in internal/lifecycle; the next commit names it"},
-	{Kind: reasondrift.NoConstant, Reason: "Ready", Why: "string literal at its call site in internal/lifecycle; the next commit names it"},
 	{Kind: reasondrift.CodeOnly, Action: "degraded", Reason: "CapacityDropped", Regarding: "Instance", Package: "internal/lifecycle", Why: "mdObject falls back to the Instance when the ModelDeployment is gone; the table lists ModelDeployment only"},
 	{Kind: reasondrift.CodeOnly, Action: "degraded", Reason: "VerificationFailed", Regarding: "Instance", Package: "internal/lifecycle", Why: "mdObject falls back to the Instance when the ModelDeployment is gone; the table lists ModelDeployment only"},
 }

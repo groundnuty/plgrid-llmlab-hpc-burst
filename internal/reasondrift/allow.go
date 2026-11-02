@@ -3,7 +3,7 @@ package reasondrift
 // Entry allows a mismatch. A field that is empty matches any value, so an
 // Entry names the least that identifies what it allows. Why says why the
 // mismatch is allowed: an exception states a fact of the design, and an entry
-// of the debt list in drift_test.go (knownDriftUntilHBEP8Erratum) states the drift the erratum will remove.
+// of the debt list in guard/guard_test.go (knownDriftUntilHBEP8Erratum) states the drift the erratum will remove.
 type Entry struct {
 	Kind      string
 	Action    string
