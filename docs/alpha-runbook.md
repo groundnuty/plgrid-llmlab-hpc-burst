@@ -17,7 +17,7 @@ hack/live-checks.sh --run <row>... --yes      # the run
 |---|---|
 | `gpu-accounting-helios`, `gpu-accounting-athena` | Complete. Runs through the Provider's controller; needs no dial-home route. |
 | `reach-helios`, `reach-athena` | Complete (issue #225). Runs through the Provider's controller; needs the gateway's forwarded port (`LIVE_PROBE_*`, below) and runs only when the owner says that port is up. |
-| `alpha-athena-handover`, `alpha-helios-nooverlap`, `tunnel-hour-helios`, `tunnel-hour-athena` | The judging, the settings, the gating, the slot handling, the cleanup and the dry runs are in. The scenario that starts the stack and drives it waits for the one-host rehearsal (PR #161); until it is wired a live run fails at its first step with "the live scenario steps are not wired yet" and has used no cluster. |
+| `alpha-athena-handover`, `alpha-helios-nooverlap`, `tunnel-hour-helios`, `tunnel-hour-athena` | Wired (issue #245). The live steps start the whole stack on this host with `hpcburst up`, create the row's Provider and deployment, and drive them through the front, with the worker-rung fault over `srun --overlap` in the run's own job. They are proved by a stand-in run against the fake Slurm in run mode behind a real sshd (below), not yet by a cluster. A direct-mode run needs `LIVE_DIALHOME_LISTEN`; without it the run fails at its first step, naming the setting, having used no cluster. The large request bodies and the upload direction's rate of `tunnel-hour-*` come with issue #224 (PR #244). |
 | `alpha-helios-nooverlap` | Needs #174 (no-overlap queue-wait growth), which is on main (#208), so in every checkout that has this row. It needs no setting for it; it needs the owner's go (below). |
 
 ## Settings
@@ -35,6 +35,7 @@ The settings file is named by `HPCBURST_LIVE_SETTINGS`: `KEY=VALUE` lines, mode 
 | `LIVE_DIALHOME_MODE` | the four stack rows | `direct` or `ssh` (HBEP-6, Dial-home modes) |
 | `LIVE_DIALHOME_ADDR` | the four stack rows | `host:port` of the route, as the compute nodes see it |
 | `LIVE_DIALHOME_KEY` | stack rows, `ssh` mode | the restricted dial-home key file, mode 600 |
+| `LIVE_DIALHOME_LISTEN` | stack rows, `direct` mode | `host:port` of the front's dial-home listener on this host, where the owner's route arrives (the front's `dialHomeListen`, which has no default in direct mode) |
 | `LIVE_BIN_DIR` | the four stack rows | the directory with `k3s-1.36.5/` and the pinned frp (`hack/fetch-k3s.sh`, `hack/fetch-frp.sh`) |
 | `LIVE_TUNNEL_LEASE_MINUTES` | optional, `tunnel-hour-*` | the tunnel rows' lease in minutes, 106 to 240; default 137 (below). The owner's choice when giving the go: the shape, the hold note, the timeout and the test follow it |
 | `LIVE_PROBE_HOST`, `LIVE_PROBE_PORT` | `reach-*` | the gateway's forwarded port as the compute nodes see it: a host name or address (letters, digits, dots, hyphens, underscores) and a port from 1 to 65535. **Private**: they go into the job's script on the cluster and nowhere else, never on the screen, in the test's log, in a record or in a post |
@@ -183,4 +184,8 @@ hack/live-checks.sh --run tunnel-hour --yes
 
 The package tests and `hack/livechecks` run every row's own compiled test, through the script, over a fake Slurm in run mode with stand-in steps. The healthy run passes; each of 87 faults (a cut stream, no stream in flight, a second restart, a successor that starts beside its predecessor, a lane an hour short, a deployment that also allows Athena, the default lease, a lease at the lead, no `ReleaseWhenIdle`, a node with two GPUs against a record of one, and so on) fails its row with exit 1, while a node whose `nvidia-smi` lists eight GPUs to a job given one still passes, and `hack/mutate-alpha.sh` changes each criterion's condition and requires a test to fail. A dry binary refuses live settings, and the script never passes the dry switch on.
 
-They cannot show that the real controllers, front and tunnel behave: the stand-in steps report what the real scenario will report, and the criteria judge it. That is the part PR #161 supplies.
+They cannot show that the real controllers, front and tunnel behave: the stand-in steps report what the real scenario will report, and the criteria judge it.
+
+## What the stand-in run shows
+
+`TestStandInHandover`, `TestStandInNoOverlap` and `TestStandInTunnelHour` (`internal/alpha/standin_test.go`, run with `HPCBURST_ALPHA_STANDIN=1` and the rehearsal's binaries, each under `launcher.lock` and a memory cap) run the LIVE steps, the code a live run runs, against a stand-in cluster: the real `hpcburst up` on this host, the real hb-agent inside the fake Slurm's job in run mode with the engine double as its engine, the rehearsal's sshd as the login node, and the stack's frps. Each row's own verdict judges what the steps saw, through `Run`, on a scaled clock (`Row.Timing`: a lease of 7 or 11 minutes, a deadline of 75 or 90 seconds, a 5-minute hour), so a row ends within a 20-minute hold. Every live row keeps the live clock (`TestLiveRowsKeepTheLiveTiming`). The record says `STAND-IN RUN`, never `LIVE RUN`. It proves the wiring, not a cluster: a real cluster's queue, nodes, network and engine are the live run's to show.
