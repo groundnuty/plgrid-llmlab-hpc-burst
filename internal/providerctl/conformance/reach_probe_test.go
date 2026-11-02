@@ -185,31 +185,21 @@ func TestTheProbeSaysErrorWithoutTimeout(t *testing.T) {
 	}
 }
 
-// The step before the connect does its own job: a name that does not resolve is unresolved without a connect, even
-// where the connect could not tell (an address of the stand-in's kind is never tried).
+// The step before the connect does its own job: a name that the resolver cannot find is unresolved without a
+// connect, even where a connect would have worked. The resolver is a getent that finds nothing (exit 2, as the real
+// one does for an unknown name) and a listener that is there: a probe that connected would reach it.
 func TestTheProbeDoesNotConnectToAnUnresolvedName(t *testing.T) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
+	fake := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fake, "getent"), []byte("#!/bin/sh\nexit 2\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { l.Close() })
-	accepted := make(chan struct{}, 8)
-	go func() {
-		for {
-			c, err := l.Accept()
-			if err != nil {
-				return
-			}
-			accepted <- struct{}{}
-			c.Close()
-		}
-	}()
-	got, _ := runProbe(t, probeTarget{host: "no-such-gateway.invalid", port: l.Addr().(*net.TCPAddr).Port, label: "example-gateway"}, testConnectSeconds, testReadSeconds, "")
+	stub := ctltest.StartReachStub(t, ctltest.StubSilent, "127.0.0.1", 0)
+	got, _ := runProbe(t, targetOf(stub), testConnectSeconds, testReadSeconds, fake+":"+os.Getenv("PATH"))
 	if want := "outcome=unresolved answer=none\n"; got != want {
 		t.Errorf("the probe left %q, want %q", got, want)
 	}
-	if len(accepted) != 0 {
-		t.Error("the probe connected although the name did not resolve")
+	if stub.Accepted() != 0 {
+		t.Errorf("the probe connected %d time(s) although the name did not resolve", stub.Accepted())
 	}
 }
 
