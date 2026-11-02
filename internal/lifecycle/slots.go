@@ -135,31 +135,49 @@ func (t *slotTable) observe(provider string, seen, listed map[string]bool, now t
 // stamped with it would lapse at once: another worker could then take the same
 // slot before this one's Allocation is created (review of PR 171, Astra B1).
 func (t *slotTable) reserve(ctx context.Context, r client.Reader, provider, key string, limit *int32, now func() time.Time) (ok bool, count int, err error) {
-	if limit == nil {
-		return true, 0, nil
+	ok, count, _, err = t.reserveFor(ctx, r, provider, key, "", limit, now)
+	return ok, count, err
+}
+
+// reserveFor is reserve that also reports whether the Allocation holder
+// (namespace/name; "" for none) still holds its slot on the Provider, from the
+// very list the count is made from: its phase is not Ended, its deletion has
+// not completed, and its spec.providerConfigRef names the Provider, as
+// listProviderAllocations reads every Allocation. The queued-successor mark
+// is judged from this answer, so the mark and the reservation agree about the
+// primary even if its Allocation ends between the pass's first observation and
+// the reservation (PR 214 review, Astra B1), and about which Provider it is on
+// (B2). With no limit and no holder nothing is listed.
+func (t *slotTable) reserveFor(ctx context.Context, r client.Reader, provider, key, holder string, limit *int32, now func() time.Time) (ok bool, count int, holds bool, err error) {
+	if limit == nil && holder == "" {
+		return true, 0, false, nil
 	}
 	l := t.slotLock(provider)
 	l.Lock()
 	defer l.Unlock()
 	seen, listed, err := t.listBounded(ctx, r, provider)
 	if err != nil {
-		return false, 0, err
+		return false, 0, false, err
+	}
+	holds = holder != "" && listed[holder]
+	if limit == nil {
+		return true, 0, holds, nil
 	}
 	at := now()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	c := t.observe(provider, seen, listed, at)
 	if t.holds(provider, key, c) {
-		return true, c.total(), nil
+		return true, c.total(), holds, nil
 	}
 	if c.total() >= int(*limit) {
-		return false, c.total(), nil
+		return false, c.total(), holds, nil
 	}
 	if t.expect[provider] == nil {
 		t.expect[provider] = map[string]time.Time{}
 	}
 	t.expect[provider][key] = at
-	return true, c.total(), nil
+	return true, c.total(), holds, nil
 }
 
 // release gives back the slot reserved for the Allocation key: its creation
@@ -249,15 +267,23 @@ func submitLimitText(pv *providerView) string {
 // deployment's namespace. When none is free it records the Provider and its
 // limit for SubmitLimitReached and returns false.
 func (p *pass) reserveSlot(pv *providerView, name string) (bool, error) {
-	ok, n, err := p.r.slots().reserve(p.ctx, p.r.Reader, pv.name, p.key.Namespace+"/"+name, pv.limits.MaxSubmitPerUser, p.reserveTime)
+	ok, _, err := p.reserveSlotFor(pv, name, "")
+	return ok, err
+}
+
+// reserveSlotFor is reserveSlot that also reports, from the reservation's own
+// list, whether the Allocation holder (namespace/name; "" for none) still
+// holds its slot (slotTable.reserveFor).
+func (p *pass) reserveSlotFor(pv *providerView, name, holder string) (ok, holds bool, err error) {
+	ok, n, holds, err := p.r.slots().reserveFor(p.ctx, p.r.Reader, pv.name, p.key.Namespace+"/"+name, holder, pv.limits.MaxSubmitPerUser, p.reserveTime)
 	if err != nil || ok {
-		return ok, err
+		return ok, holds, err
 	}
 	if p.noSlot == nil {
 		p.noSlot = map[string]string{}
 	}
 	p.noSlot[pv.name] = fmt.Sprintf("Provider %s has %d Allocations not ended, at its %s", pv.name, n, submitLimitText(pv))
-	return false, nil
+	return false, holds, nil
 }
 
 // reserveTime is the clock's time, as a pass reads it: whole seconds, UTC. A

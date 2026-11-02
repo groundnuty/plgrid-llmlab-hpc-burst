@@ -185,56 +185,50 @@ func TestAStepSevenRetryWhileThePrimaryHoldsTheSlotIsMarked(t *testing.T) {
 	}
 }
 
-// TestTheMarkConditionReadsTheSlotCountsOwnTest: the mark's condition is that the primary's
-// Allocation "still holds its slot as the slot count reads it": its phase is not Ended, and its
-// deletion has not completed (README line 464). The rig's primaries leave by deletion, so no
-// scenario above has an Allocation that is Ended and still listed when the successor's is
-// created; this table is where that case, the Failed one that still holds its slot, and the
-// other Provider's are judged. Each case also asks the slot count itself (listProviderAllocations,
-// over a client that holds the Allocation) and requires the same answer, so the mark and the count
-// cannot part.
-func TestTheMarkConditionReadsTheSlotCountsOwnTest(t *testing.T) {
+// TestTheMarkConditionReadsTheSlotCountsOwnList: the mark's condition is that the primary's
+// Allocation "still holds its slot as the slot count reads it": its phase is not Ended, its
+// deletion has not completed, and it is on the same Provider (README line 464). The mark is
+// judged from the reservation's own list (slotTable.reserveFor), so it reads the Allocation the
+// way the count does: by its phase now, and by its immutable spec.providerConfigRef, never by the
+// mutable provider label (PR 214 review, Astra B1 and B2). The rig's primaries leave by deletion
+// and always carry the right label, so no scenario above has an Allocation that is Ended and
+// still listed, or whose label differs from its reference; this table is where those are judged.
+func TestTheMarkConditionReadsTheSlotCountsOwnList(t *testing.T) {
 	const prov, other = "example-provider", "example-other"
 	for _, tc := range []struct {
 		name    string
 		phase   v1alpha1.AllocationPhase
-		onProv  string
-		deleted bool // its deletion completed: the Allocation is gone
+		ref     string  // spec.providerConfigRef.name
+		label   *string // the provider label: nil, none
+		deleted bool    // its deletion completed: the Allocation is gone
 		want    bool
 	}{
-		{"running", v1alpha1.AllocationRunning, prov, false, true},
-		{"pending", v1alpha1.AllocationPending, prov, false, true},
-		{"failed, not yet released: it holds its slot as the count reads it", v1alpha1.AllocationFailed, prov, false, true},
-		{"ended and still listed", v1alpha1.AllocationEnded, prov, false, false},
-		{"gone: its deletion completed", v1alpha1.AllocationRunning, prov, true, false},
-		{"running on another Provider", v1alpha1.AllocationRunning, other, false, false},
+		{"running", v1alpha1.AllocationRunning, prov, ptrTo(prov), false, true},
+		{"pending", v1alpha1.AllocationPending, prov, ptrTo(prov), false, true},
+		{"failed, not yet released: it holds its slot as the count reads it", v1alpha1.AllocationFailed, prov, ptrTo(prov), false, true},
+		{"ended and still listed", v1alpha1.AllocationEnded, prov, ptrTo(prov), false, false},
+		{"gone: its deletion completed", v1alpha1.AllocationRunning, prov, ptrTo(prov), true, false},
+		{"running on another Provider", v1alpha1.AllocationRunning, other, ptrTo(other), false, false},
+		// B2: the reference decides, as it does for the count.
+		{"running, its provider label is missing", v1alpha1.AllocationRunning, prov, nil, false, true},
+		{"running, its provider label names another Provider", v1alpha1.AllocationRunning, prov, ptrTo(other), false, true},
+		{"running on another Provider, its label names this one", v1alpha1.AllocationRunning, other, ptrTo(prov), false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			primary := &v1alpha1.Instance{
-				ObjectMeta: metav1.ObjectMeta{Name: "primary", Namespace: rigNS},
-				Spec:       v1alpha1.InstanceSpec{AllocationRef: v1alpha1.ObjectReference{Name: "alloc"}},
-			}
 			alloc := &v1alpha1.Allocation{
-				ObjectMeta: metav1.ObjectMeta{Name: "alloc", Namespace: rigNS, Labels: map[string]string{v1alpha1.LabelProvider: tc.onProv}},
-				Spec:       v1alpha1.AllocationSpec{ProviderConfigReference: providerRef(tc.onProv)},
-				Status:     v1alpha1.AllocationStatus{AtProvider: v1alpha1.AllocationObservation{Phase: tc.phase}},
+				ObjectMeta: metav1.ObjectMeta{Name: "alloc", Namespace: rigNS},
+				Spec:       v1alpha1.AllocationSpec{ProviderConfigReference: providerRef(tc.ref)},
 			}
-			p := &pass{insts: []*v1alpha1.Instance{primary}, allocs: map[string]*v1alpha1.Allocation{}}
-			if !tc.deleted {
-				p.allocs[alloc.Name] = alloc
+			if tc.label != nil {
+				alloc.Labels = map[string]string{v1alpha1.LabelProvider: *tc.label}
 			}
-			pv := &providerView{name: prov}
-			if got := p.queuedMark(pv, "primary", "Provider "+prov+": maxGpusPerUser 1") != ""; got != tc.want {
-				t.Errorf("marked = %v, want %v", got, tc.want)
-			}
-			// The slot count's own reading of the same Allocation on the same Provider.
 			scheme := runtime.NewScheme()
 			if err := v1alpha1.AddToScheme(scheme); err != nil {
 				t.Fatal(err)
 			}
-			b := clientfake.NewClientBuilder().WithScheme(scheme)
+			b := clientfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.Allocation{})
 			if !tc.deleted {
-				b = b.WithObjects(alloc.DeepCopy()).WithStatusSubresource(&v1alpha1.Allocation{})
+				b = b.WithObjects(alloc.DeepCopy())
 			}
 			c := b.Build()
 			if !tc.deleted {
@@ -242,23 +236,24 @@ func TestTheMarkConditionReadsTheSlotCountsOwnTest(t *testing.T) {
 				if err := c.Get(context.Background(), client.ObjectKeyFromObject(alloc), stored); err != nil {
 					t.Fatal(err)
 				}
-				stored.Status = alloc.Status
+				stored.Status.AtProvider.Phase = tc.phase
 				if err := c.Status().Update(context.Background(), stored); err != nil {
 					t.Fatal(err)
 				}
 			}
-			_, listed, err := listProviderAllocations(context.Background(), c, prov)
-			if err != nil {
-				t.Fatal(err)
+			limit := int32(5)
+			ok, _, holds, err := newSlotTable().reserveFor(context.Background(), c, prov, rigNS+"/new", rigNS+"/alloc", &limit, time.Now)
+			if err != nil || !ok {
+				t.Fatalf("reserveFor: ok %v, %v; want a free slot", ok, err)
 			}
-			if counted := listed[rigNS+"/alloc"]; counted != tc.want {
-				t.Errorf("the slot count lists the Allocation: %v, want %v, as the mark's condition says", counted, tc.want)
+			if holds != tc.want {
+				t.Errorf("the reservation's read says the Allocation holds its slot: %v, want %v", holds, tc.want)
+			}
+			// With no limit, a holder is still read; with neither, nothing is.
+			ok, _, holds, err = newSlotTable().reserveFor(context.Background(), c, prov, rigNS+"/new", rigNS+"/alloc", nil, time.Now)
+			if err != nil || !ok || holds != tc.want {
+				t.Errorf("with no submit limit: ok %v, holds %v, %v; want ok and holds %v", ok, holds, err, tc.want)
 			}
 		})
-	}
-	// Not a no-overlap successor, or no primary named: never marked.
-	p := &pass{insts: nil, allocs: map[string]*v1alpha1.Allocation{}}
-	if p.queuedMark(&providerView{name: prov}, "primary", "") != "" || p.queuedMark(&providerView{name: prov}, "", "why") != "" {
-		t.Error("an Allocation for no successor, or with no primary named, is marked")
 	}
 }

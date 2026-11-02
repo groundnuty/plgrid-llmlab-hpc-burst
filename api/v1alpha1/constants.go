@@ -54,9 +54,11 @@ const (
 )
 
 // Annotation keys on an Allocation (HBEP-11, The Allocation's record). The
-// provider writes each with a resourceVersion precondition, except
-// AnnotationIdleSince, which the lifecycle controller writes the same way. CRD validation
-// cannot guard them: it reaches no metadata beyond the name.
+// provider writes each with a resourceVersion precondition, except two that the
+// lifecycle controller writes: AnnotationIdleSince, with the same precondition,
+// and AnnotationQueuedSuccessor, once, in the Allocation's create request, so no
+// precondition applies. CRD validation cannot guard them: it reaches no metadata
+// beyond the name.
 const (
 	// AnnotationExternalName is crossplane-runtime's external-name key. Its
 	// value is the job tag (HBEP-3).

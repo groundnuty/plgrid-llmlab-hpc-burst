@@ -103,6 +103,10 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 			return false, nil
 		}
 		if warm != nil {
+			// An Instance placed on a warm Allocation creates no Allocation, so nothing is marked: the mark
+			// is written once, in an Allocation's create request, and an existing one is never marked later
+			// (HBEP-7, Handover, No-overlap mode: "fixed at creation"). A reusable warm Allocation also
+			// means the primary has room beside it (decideOverlap), so this is not a queued-path successor.
 			if err := p.createInstance(pv, cid, pred, warm.Name, o); err != nil {
 				return false, err
 			}
@@ -115,7 +119,10 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 		}
 		// The slot is reserved before the Instance, the durable intent, so
 		// no two workers both pass the count (slots.go).
-		ok, err := p.reserveSlot(pv, name)
+		//
+		// The queued-successor mark is judged from this same read: whether the primary's Allocation
+		// still holds its slot is what the reservation's own list says (reserveSlotFor).
+		ok, holds, err := p.reserveSlotFor(pv, name, p.primaryAllocKey(o.primaryName(pred)))
 		if err != nil {
 			return false, err
 		}
@@ -126,7 +133,7 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 			p.releaseSlot(pv, name)
 			return false, err
 		}
-		return true, p.createAllocation(pv, name, params, p.queuedMark(pv, o.primaryName(pred), o.successorOf))
+		return true, p.createAllocation(pv, name, params, markValue(holds, o.successorOf))
 	}
 	return false, nil
 }
@@ -207,28 +214,36 @@ func (o placeOpts) primaryName(pred *v1alpha1.Instance) string {
 	return ""
 }
 
-// queuedMark returns the value of v1alpha1.AnnotationQueuedSuccessor for an
-// Allocation about to be created on the Provider for a no-overlap successor, or
-// a retry of one, of the named primary: successorOf (the Provider and the limit)
-// when the primary's own Allocation is on the same Provider and still holds its
-// slot, else "" (HBEP-7, Handover, No-overlap mode; issue #195). The primary is
-// the one the chain replaces, read through any failed successors: a retry names
-// it directly. It is judged when the Allocation is created, and again for a
-// Allocation created later for a pending Instance (ensureAllocation), never
-// afterwards. On the one-slot path the successor is created after the primary's
-// job left the slot, so by this condition it is not marked.
-func (p *pass) queuedMark(pv *providerView, primary, successorOf string) string {
-	if primary == "" || successorOf == "" {
+// primaryAllocKey returns the key (namespace/name) of the Allocation of the
+// named primary Instance, or "" when the name is empty or the Instance is not
+// known. It names the Allocation whose state the queued-successor mark reads.
+func (p *pass) primaryAllocKey(primary string) string {
+	if primary == "" {
 		return ""
 	}
 	for _, in := range p.insts {
-		if in.Name != primary {
-			continue
+		if in.Name == primary {
+			return p.key.Namespace + "/" + in.Spec.AllocationRef.Name
 		}
-		a := p.allocs[in.Spec.AllocationRef.Name]
-		if a != nil && a.Labels[v1alpha1.LabelProvider] == pv.name && holdsSlot(a) {
-			return successorOf
-		}
+	}
+	return ""
+}
+
+// markValue is the value of v1alpha1.AnnotationQueuedSuccessor for an Allocation
+// about to be created for a no-overlap successor, or a retry of one:
+// successorOf (the Provider and the limit) when the primary's own Allocation, on
+// the same Provider, still holds its slot, else "" (HBEP-7, Handover, No-overlap
+// mode; issue #195). holds is the reservation's own answer (reserveSlotFor), so
+// the mark follows the very list the slot count is made from, for the Provider
+// the spec names and the phase it has now, not the pass's first observation.
+// The primary is the one the chain replaces, read through any failed
+// successors: a retry names it directly. It is judged when the Allocation is
+// created, and again for one created later for a pending Instance
+// (ensureAllocation), never afterwards. On the one-slot path the successor is
+// created after the primary's job left the slot, so it is not marked.
+func markValue(holds bool, successorOf string) string {
+	if holds {
+		return successorOf
 	}
 	return ""
 }
@@ -343,7 +358,19 @@ func (p *pass) ensureAllocation(in *v1alpha1.Instance) error {
 		}
 		return nil
 	}
-	ok, err := p.reserveSlot(pv, name)
+	// A successor, or a retry of one, names the primary it replaces: the one that drained once the gap has
+	// begun, else its predecessor. The mark is judged now, as for any Allocation at its creation, from the
+	// reservation's own read.
+	holder := ""
+	successorOf := in.Annotations[annotationNoOverlapSuccessor]
+	if successorOf != "" {
+		primary := in.Annotations[annotationNoOverlapGap]
+		if primary == "" {
+			primary = in.Annotations[v1alpha1.AnnotationPredecessor]
+		}
+		holder = p.primaryAllocKey(primary)
+	}
+	ok, holds, err := p.reserveSlotFor(pv, name, holder)
 	if err != nil {
 		return err
 	}
@@ -351,13 +378,7 @@ func (p *pass) ensureAllocation(in *v1alpha1.Instance) error {
 		p.degrade(v1alpha1.ReasonSubmitLimitReached, "Instance %s waits for a submit slot for its Allocation %s: %s", in.Name, name, p.noSlot[pv.name])
 		return nil
 	}
-	// A successor, or a retry of one, names the primary it replaces: the one that drained once the gap has
-	// begun, else its predecessor. The mark is judged now, as for any Allocation at its creation.
-	primary := in.Annotations[annotationNoOverlapGap]
-	if primary == "" {
-		primary = in.Annotations[v1alpha1.AnnotationPredecessor]
-	}
-	return p.createAllocation(pv, name, params, p.queuedMark(pv, primary, in.Annotations[annotationNoOverlapSuccessor]))
+	return p.createAllocation(pv, name, params, markValue(holds, successorOf))
 }
 
 // ensureCredential writes an Allocation's credential file, 256 random bits as
