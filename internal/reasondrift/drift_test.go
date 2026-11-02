@@ -34,9 +34,6 @@ var strict = os.Getenv("REASONDRIFT_STRICT") == "1"
 // VerificationFailed and CapacityDropped regard the ModelDeployment, else the
 // Instance; the report on #239 has the wording the guard accepts.
 var knownDriftUntilHBEP8Erratum = []reasondrift.Entry{
-	{Kind: reasondrift.NoConstant, Reason: "HandedOver", Why: "string literal in internal/lifecycle; the next commit names it"},
-	{Kind: reasondrift.NoConstant, Reason: "NoReplacementReady", Why: "string literal in internal/lifecycle; the next commit names it"},
-	{Kind: reasondrift.NoConstant, Reason: "Ready", Why: "string literal in internal/lifecycle; the next commit names it"},
 	{Kind: reasondrift.CodeOnly, Action: "degraded", Reason: "CapacityDropped", Regarding: "Instance", Package: "internal/lifecycle", Why: "mdObject falls back to the Instance when the ModelDeployment is gone; the table lists ModelDeployment only"},
 	{Kind: reasondrift.CodeOnly, Action: "degraded", Reason: "VerificationFailed", Regarding: "Instance", Package: "internal/lifecycle", Why: "mdObject falls back to the Instance when the ModelDeployment is gone; the table lists ModelDeployment only"},
 }
