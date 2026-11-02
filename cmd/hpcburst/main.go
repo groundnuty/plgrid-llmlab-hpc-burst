@@ -39,7 +39,7 @@ const (
 	exitStopped   = 3
 	exitBuilds    = 4
 	envBinDir     = "HPCBURST_BIN_DIR"
-	usageSummary  = "usage: hpcburst <up|status|upgrade|restore|down> [flags]  (hpcburst <command> -h lists a command's flags)"
+	usageSummary  = "usage: hpcburst <up|status|upgrade|restore|down|guard> [flags]  (hpcburst <command> -h lists a command's flags)"
 	stateDirUsage = "state directory (default $XDG_STATE_HOME/hpcburst, or ~/.local/state/hpcburst)"
 	binDirUsage   = "directory with the pinned k3s binaries, as hack/fetch-k3s.sh lays them out (default $" + envBinDir + ", or $XDG_CACHE_HOME/hpcburst/k3s, or ~/.cache/hpcburst/k3s)"
 )
@@ -68,6 +68,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return cmdDown(ctx, args[1:], stdout, stderr)
 	case "restore":
 		return cmdRestore(args[1:], stdout, stderr)
+	case "guard":
+		return cmdGuard(ctx, args[1:], stdout, stderr)
 	case "supervise": // hidden: started by up
 		return cmdSupervise(ctx, args[1:], stdout, stderr)
 	case "-h", "-help", "--help", "help":
@@ -198,8 +200,48 @@ func cmdUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if o.ManifestsDir != "" {
 		fmt.Fprintf(stdout, "applied %d manifests from %s\n", rep.Applied, o.ManifestsDir)
 	}
+	if rep.CRDGuard {
+		fmt.Fprintf(stdout, "CRD deletion guard: installed (%s); remove it with hpcburst guard remove before you delete a framework CRD\n", launcher.GuardName)
+	}
 	printAgentBuilds(stdout, rep.AgentBuilds)
 	return done()
+}
+
+// cmdGuard runs the CRD deletion guard's explicit steps. up installs the guard; the only step here
+// is its removal, which is never a side effect of down, upgrade or a restart (issue #242).
+func cmdGuard(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || args[0] != "remove" {
+		fmt.Fprintln(stderr, "usage: hpcburst guard remove [--state-dir DIR] [--json]  (removes the CRD deletion guard that up installed; run it before you delete a framework CRD)")
+		return exitUsage
+	}
+	fs := flags("guard remove", stderr)
+	var o launcher.GuardOptions
+	var sd string
+	var asJSON bool
+	fs.StringVar(&sd, "state-dir", "", stateDirUsage)
+	fs.BoolVar(&asJSON, "json", false, "print the result as JSON")
+	if code, done := parse(fs, args[1:]); done {
+		return code
+	}
+	var err error
+	if o.StateDir, err = stateDir(sd); err != nil {
+		return fail(stderr, err)
+	}
+	o.Log = stderr
+	removed, err := launcher.RemoveCRDGuard(ctx, o)
+	if err != nil {
+		return fail(stderr, err)
+	}
+	if asJSON {
+		emitJSON(stdout, map[string]bool{"removed": removed})
+		return exitOK
+	}
+	if removed {
+		fmt.Fprintf(stdout, "CRD deletion guard removed (%s): deleting a framework CRD is allowed now, and deletes every resource of its kind; the next hpcburst up installs the guard again\n", launcher.GuardName)
+	} else {
+		fmt.Fprintln(stdout, "CRD deletion guard: already absent, nothing to remove")
+	}
+	return exitOK
 }
 
 func cmdStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -272,6 +314,7 @@ func printStatus(w io.Writer, r *launcher.StatusReport) {
 	}
 	printSupervision(w, r)
 	printAgentBuilds(w, r.AgentBuilds)
+	printCRDGuard(w, r.CRDGuard)
 	// One "front:" line. The address is where Instances dial home; the front itself is the process
 	// the supervisor runs. A host with no front process says so, with the address when one is recorded.
 	switch addr := r.Front != nil && r.Front.Set(); {
@@ -283,6 +326,19 @@ func printStatus(w io.Writer, r *launcher.StatusReport) {
 		fmt.Fprintf(w, "front: %s %s\n", r.Front.Mode, r.Front.Addr)
 	case r.Version != "":
 		fmt.Fprintln(w, "front: not recorded")
+	}
+}
+
+// printCRDGuard prints one line about the CRD deletion guard. Absent is a state, not a fault, but
+// the line says what it means: nothing stops a delete of a framework CRD.
+func printCRDGuard(w io.Writer, g *launcher.GuardState) {
+	switch {
+	case g == nil:
+		// not asked, or could not say: the reasons name the failure
+	case g.Present:
+		fmt.Fprintf(w, "CRD deletion guard: present (%s)\n", launcher.GuardName)
+	default:
+		fmt.Fprintf(w, "CRD deletion guard: ABSENT (%s): nothing stops a delete of a framework CRD, which would delete every resource of its kind; the next hpcburst up installs it\n", g.Detail)
 	}
 }
 

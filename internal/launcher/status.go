@@ -63,6 +63,11 @@ type StatusReport struct {
 	// (#158), set when controllers run. Its Checked is false when the API server was not asked
 	// (--no-api, or an unhealthy host) or could not give the profiles, and Detail says why.
 	AgentBuilds *AgentBuilds `json:"agent_builds,omitempty"`
+	// CRDGuard is the state of the CRD deletion guard (guard.go), asked of the API server: nil when
+	// it was not asked (--no-api, an unhealthy host) or could not say, in which case a reason names
+	// the failure. An absent guard is a state, not a fault, as FrontAbsent is: hosts started before
+	// the guard existed run without it until their next start (issue #242).
+	CRDGuard *GuardState `json:"crd_guard,omitempty"`
 }
 
 // StatusOptions are the inputs of Status.
@@ -241,6 +246,14 @@ func Status(ctx context.Context, o StatusOptions) (*StatusReport, error) {
 			bad("garbage collection: %v", err)
 		} else {
 			rep.GC = ptr(true)
+		}
+	}
+	// Read-only, like the readiness question: whether the guard is there, and what is missing if not.
+	if rep.Readyz != nil && *rep.Readyz {
+		if gs, err := CheckGuard(ctx, cfg); err != nil {
+			bad("the CRD deletion guard could not be checked: %v", err)
+		} else {
+			rep.CRDGuard = gs
 		}
 	}
 	// The builds are staged by the controllers, so a host without them has none to check.
