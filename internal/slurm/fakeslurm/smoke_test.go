@@ -206,8 +206,13 @@ func TestBatchOverFakeSlurm(t *testing.T) {
 	if _, listed, err := r.batch.QueueJob(ctx, id); err != nil || listed {
 		t.Errorf("QueueJob 11 s after the end = listed %v, %v, want not listed (error shape)", listed, err)
 	}
-	if res := r.batch.Cancel(ctx, []string{id}); !errors.Is(res[0].Err, provider.ErrNotFound) {
-		t.Errorf("Cancel of a purged job = %+v, want ErrNotFound", res[0])
+	// Purged from slurmctld, so scancel would say nothing at all, but accounting still shows the
+	// job ended: AlreadyEnded. A job nothing shows is ErrNotFound (#199).
+	if res := r.batch.Cancel(ctx, []string{id}); res[0].Outcome != provider.AlreadyEnded {
+		t.Errorf("Cancel of a purged job that accounting shows = %+v, want AlreadyEnded", res[0])
+	}
+	if res := r.batch.Cancel(ctx, []string{"9999"}); !errors.Is(res[0].Err, provider.ErrNotFound) {
+		t.Errorf("Cancel of an unknown job = %+v, want ErrNotFound", res[0])
 	}
 
 	// A second job, pending, is cancelled.

@@ -115,9 +115,11 @@ func (e *external) attemptReleased(a *v1alpha1.Allocation, s *v1alpha1.Submissio
 }
 
 // Delete implements managed.ExternalClient: it cancels every live job with the
-// tag that Observe found in this reconcile, each with its own result. A job
-// Slurm no longer knows has ended; any other failure is returned and the
-// finalizer stays.
+// tag that Observe found in this reconcile, each with its own result. JobCancelled
+// is raised only for a job Cancel found live (Outcome Cancelled). A job that had
+// already ended by then (AlreadyEnded), or that Slurm no longer knows, is a
+// no-op: no event, no error, and deletion goes on (#199). Any other failure is
+// returned and the finalizer stays.
 func (e *external) Delete(ctx context.Context, mg resource.Managed) (managed.ExternalDelete, error) {
 	a, ok := mg.(*v1alpha1.Allocation)
 	if !ok {
