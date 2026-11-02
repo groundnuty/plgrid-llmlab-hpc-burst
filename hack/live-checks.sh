@@ -20,6 +20,14 @@
 # prints what it would use and the queue estimate (sbatch --test-only), then
 # runs only with --yes. A skipped test is a failure, not a pass.
 #
+# rehearsal-part3 (issue #193) is a local row that runs the one-host rehearsal: the real hpcburst stack over a
+# fake Slurm on this host, no cluster and no --yes. It runs only through hack/rehearsal.sh, never the test binary on
+# its own: that script puts everything the test starts in a systemd scope and kills the scope however the run ends,
+# and a test run any other way would leave the stack's processes behind when its own clean-up is skipped (a
+# timeout panic, a signal). The builds come first, under the build lock, into a directory of the row's own; the
+# run itself takes no lock (REHEARSAL_PREBUILT=1). It needs LIVE_BIN_DIR, and lasts up to 35 minutes: the
+# test's -test.timeout of 30 minutes, then the scope's teardown. An interrupt waits for that teardown.
+#
 # Exit codes: 0 all passed; 1 a test failed, skipped, left a job behind or
 # timed out; 2 usage error or an unreadable range; 3 refused or NOT RUN (a
 # setting is missing, a file is not mode 600, the one-job slot is in use; or a
@@ -56,7 +64,8 @@
 #   LIVE_DIALHOME_MODE           direct or ssh: how the jobs reach the host (HBEP-6)
 #   LIVE_DIALHOME_ADDR           host:port of the dial-home route, as the compute nodes see it
 #   LIVE_DIALHOME_KEY            ssh mode only: the restricted dial-home key file, mode 600
-#   LIVE_BIN_DIR                 absolute path of the directory with k3s-1.36.5/ and the pinned frp
+#   LIVE_BIN_DIR                 absolute path of the directory with k3s-1.36.5/ and the pinned frp (frps, frpc); read by
+#                                the rows that run the stack and by rehearsal-part3
 #   LIVE_TUNNEL_LEASE_MINUTES    optional, the tunnel rows' lease in minutes, 106 to 240 (default 137, the shape below): the owner's
 #                                choice when giving the go; the shape, the hold note and the test follow it
 #   LIVE_OWNER_GO_HELIOS_NOW     today's UTC date (YYYY-MM-DD), once the owner has said yes to the run: the rows that hold
@@ -102,6 +111,7 @@ live_table() {
 # BEGIN LIVE TESTS
 llmlab-smoke|local|internal/front|^TestLLMLabThroughTheFront$|HPCBURST_LLMLAB_CREDENTIALS|-|host|ready
 hub-golden|local|pkg/hubfiles|^TestGoldenHub$|HPCBURST_TEST_HUB|spikes/s7/checkpoints.env,spikes/s7/results/run1/hub,spikes/s7/results/run1/hash-*.jsonl|host|ready
+rehearsal-part3|local|internal/rehearsal/scenario|^TestRehearsalPart3$|HPCBURST_REHEARSAL|hack/rehearsal.sh,config/crd|host|ready
 conformance-helios|cluster|internal/providerctl/conformance|^TestConformance$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host|ready
 conformance-helios-gh200|cluster|internal/providerctl/conformance|^TestConformance$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host|ready
 conformance-athena|cluster|internal/providerctl/conformance|^TestConformance$|HPCBURST_CONFORMANCE|profiles/athena.yaml|host|ready
@@ -164,7 +174,9 @@ TABLE
 
 # The rows that run the whole stack (the controllers, the front, frps and the agent) take the dependency
 # closure of these packages too, in each of their build contexts, so --plan names them when a stack package
-# changes: the thin test package alone would show none of it. name | packages (comma separated).
+# changes: the thin test package alone would show none of it. name | packages (comma separated). The
+# rehearsal row (issue #193) builds exactly these packages and runs the binaries (prepare_rehearsal below;
+# hack/livechecks compares them with the go build line of hack/rehearsal.sh).
 plan_stack_table() {
   cat <<'TABLE'
 # BEGIN PLAN STACK
@@ -172,6 +184,7 @@ alpha-athena-handover|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cm
 alpha-helios-nooverlap|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 tunnel-hour-helios|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 tunnel-hour-athena|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
+rehearsal-part3|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 # END PLAN STACK
 TABLE
 }
@@ -342,6 +355,7 @@ check_settings() {
     case $name in
       llmlab-smoke) need LIVE_LLMLAB_CREDENTIALS && { private_file LIVE_LLMLAB_CREDENTIALS "${S[LIVE_LLMLAB_CREDENTIALS]}" || bad=1; } ;;
       hub-golden) ;;
+      rehearsal-part3) check_rehearsal_settings || bad=1 ;;
       *)
         [ "${KIND[$name]}" = cluster ] || continue
         need LIVE_LOCK_DIR && { [ -d "${S[LIVE_LOCK_DIR]}" ] || { say "live-checks: LIVE_LOCK_DIR is not a directory"; bad=1; }; }
@@ -386,6 +400,23 @@ check_owner_go() {
   [ "${2:-}" = quiet ] || owner_go_note "$name"
   say "live-checks: setting $key must hold today's UTC date ($today) once the owner has said yes to this hold; it is missing or from another day"
   return 1
+}
+
+# check_rehearsal_settings: what the rehearsal row needs (issue #193): the directory with the pinned k3s and frp. It
+# must be absolute, because the test runs in its package directory, and it must hold what hack/rehearsal.sh and the
+# test look for, so that a missing binary refuses the row (exit 3) before the builds instead of failing a long run.
+# Every problem is reported.
+check_rehearsal_settings() {
+  local bad=0 d f
+  [ -n "${S[LIVE_BIN_DIR]:-}" ] || { say "live-checks: setting LIVE_BIN_DIR is missing"; return 1; }
+  d=${S[LIVE_BIN_DIR]}
+  case $d in /*) ;; *) say "live-checks: LIVE_BIN_DIR must be an absolute path"; return 1 ;; esac
+  [ -d "$d" ] || { say "live-checks: LIVE_BIN_DIR is not a directory"; return 1; }
+  [ -f "$d/k3s-1.36.5/k3s" ] && [ -x "$d/k3s-1.36.5/k3s" ] || { say "live-checks: LIVE_BIN_DIR has no executable k3s-1.36.5/k3s (hack/fetch-k3s.sh)"; bad=1; }
+  for f in frps frpc; do
+    [ -f "$d/$f" ] && [ -x "$d/$f" ] || { say "live-checks: LIVE_BIN_DIR has no executable $f (hack/fetch-frp.sh)"; bad=1; }
+  done
+  return $bad
 }
 
 # check_alpha_settings <name>: what a row that runs the stack needs besides a cluster test's own settings: the
@@ -629,14 +660,15 @@ on_exit() {
   exit "$rc"
 }
 
-# wait_child: waits for CHILD; a signal to this script stops it. Sets CHILD_RC.
+# wait_child [steps]: waits for CHILD; a signal to this script stops it: TERM, then KILL after steps of 0.2 s
+# (default 50, ten seconds). Sets CHILD_RC.
 wait_child() {
   local i
   CHILD_RC=0
   wait "$CHILD" || CHILD_RC=$?
   if [ -n "$INTERRUPTED" ]; then
     kill -TERM "$CHILD" 2>/dev/null
-    for i in $(seq 1 50); do kill -0 "$CHILD" 2>/dev/null || break; sleep 0.2; done
+    for i in $(seq 1 "${1:-50}"); do kill -0 "$CHILD" 2>/dev/null || break; sleep 0.2; done
     kill -KILL "$CHILD" 2>/dev/null
     wait "$CHILD" 2>/dev/null
     CHILD_RC=130
@@ -768,10 +800,60 @@ env_alpha() {
 
 run_local() { # <name>
   local n=$1 bin="$OUT/$1.test" setup
+  case $n in rehearsal-part3) run_rehearsal "$n"; return ;; esac
   case $n in llmlab-smoke) setup=env_llmlab ;; hub-golden) setup=env_hub ;; esac
   build_test_binary "$n" "$bin" || return 1
   [ -z "$INTERRUPTED" ] || { say "$n: FAIL (interrupted before the run started)"; return 1; }
   run_binary "$n" "$bin" "$LOCAL_TIMEOUT_MIN" "$setup"
+  judge "$n" "$OUT/$n.log" "$CHILD_RC"
+}
+
+# The one-host rehearsal (issue #193). Its test binary is never run on its own: hack/rehearsal.sh runs it in a
+# systemd scope that it stops however the run ends, and a plain run would leave k3s and the other processes of
+# the stack behind whenever the test's own clean-up is skipped. LOCAL_TIMEOUT_MIN (15) is the rehearsal's own
+# target and would end a normal run, so the row has its own: rehearsal.sh gives the test REHEARSAL_TIMEOUT (its
+# waits give up two minutes before it), and this script's timeout leaves the scope's teardown (up to a minute
+# of SIGKILLs) and a margin after it. An interrupt gets as long as that teardown before the KILL.
+REHEARSAL_TEST_TIMEOUT_MIN=30
+REHEARSAL_RUN_TIMEOUT_MIN=35
+REHEARSAL_STOP_STEPS=450
+
+# prepare_rehearsal <name>: builds what hack/rehearsal.sh runs, the stack's binaries (the row's plan-stack
+# packages: hack/livechecks compares them with the script's own build line) and the row's test binary, under
+# the build lock and into one directory of the row's own that every run overwrites (REHEARSAL_DIR). The run
+# itself then takes no lock (REHEARSAL_PREBUILT=1): a build lock held for a run of half an hour would stop every
+# build on the host.
+REHEARSAL_DIR=""
+prepare_rehearsal() {
+  local n=$1 w="$OUT/$1-bin" p
+  local -a pkgs=()
+  for p in ${STACK[$n]}; do pkgs+=("./$p"); done
+  mkdir -p -m 700 "$w" || { say "$n: FAIL (the build directory could not be made)"; return 1; }
+  say "$n: building the stack's binaries and the test binary"
+  ( cd "$ROOT" &&
+    with_build_lock go build -o "$w/" "${pkgs[@]}" &&
+    with_build_lock go test -c -o "$w/rehearsal.test" "./${PKG[$n]}" ) >"$OUT/$n-build.log" 2>&1 ||
+    { say "$n: FAIL (a build step failed; see the build log in the output directory)"; return 1; }
+  REHEARSAL_DIR=$w
+}
+
+# run_rehearsal <name>: the builds, then hack/rehearsal.sh with the row's -run pattern, its output in the row's log,
+# and the verdict from that log like any local row's. The directory of the pinned k3s and frp is LIVE_BIN_DIR. Every
+# REHEARSAL_ variable that the run depends on is set here, so the caller's shell cannot redirect the run; the
+# caller's HPCBURST_TEST_ROOT_K3S, HPCBURST_SSHD and REHEARSAL_MEMORY_MAX pass through (rehearsal.sh's header).
+run_rehearsal() {
+  local n=$1
+  prepare_rehearsal "$n" || return 1
+  [ -z "$INTERRUPTED" ] || { say "$n: FAIL (interrupted before the run started)"; return 1; }
+  (
+    [ -z "$RUN_FD" ] || eval "exec ${RUN_FD}>&-"
+    export HPCBURST_BIN_DIR=${S[LIVE_BIN_DIR]} HPCBURST_FRP_DIR=${S[LIVE_BIN_DIR]}
+    export REHEARSAL_RUN=${TEST[$n]} REHEARSAL_OUT=$REHEARSAL_DIR REHEARSAL_PREBUILT=1 REHEARSAL_TIMEOUT=${REHEARSAL_TEST_TIMEOUT_MIN}m
+    cd "$ROOT" || exit 1
+    exec timeout "${REHEARSAL_RUN_TIMEOUT_MIN}m" "$ROOT/hack/rehearsal.sh"
+  ) >"$OUT/$n.log" 2>&1 &
+  CHILD=$!
+  wait_child "$REHEARSAL_STOP_STEPS"
   judge "$n" "$OUT/$n.log" "$CHILD_RC"
 }
 
