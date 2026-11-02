@@ -234,6 +234,20 @@ type world struct {
 	nudge func(name string)
 	// began is when the run began, the lower bound of its accounting reads.
 	began time.Time
+	// timeLimit is the time limit of the Allocations newAlloc makes; empty is allocTimeLimit. The reach rows set
+	// their own, shorter one (reachTimeLimit).
+	timeLimit string
+	// artefacts are the directories a dry run leaves its files in (the agent builds, the credentials, the fake
+	// cluster's file system), which targetLeaks searches.
+	artefacts []string
+}
+
+// limit is the time limit of the Allocations newAlloc makes.
+func (w *world) limit() string {
+	if w.timeLimit != "" {
+		return w.timeLimit
+	}
+	return allocTimeLimit
 }
 
 const testNS = "conformance"
@@ -311,9 +325,11 @@ func buildWorld(t *testing.T, s settings, kit worldKit) *world {
 	if err := os.WriteFile(filepath.Join(builds, agentapi.AgentBuildName(s.part.CPUArch)), agent, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	w.artefacts = append(w.artefacts, builds)
 	certPEM, certPin := ctltest.Cert(t)
 	frpcDigest := ctltest.Frpc(t, builds, s.part.CPUArch)
 	w.credDir = t.TempDir()
+	w.artefacts = append(w.artefacts, w.credDir)
 
 	ctl, err := providerctl.New(w.c, w.c, scheme, providerctl.Options{
 		Provider: prov.Name,
@@ -388,7 +404,7 @@ func (w *world) newAlloc(name string) *v1alpha1.Allocation {
 			ProviderConfigReference: &xpv2.ProviderConfigReference{Kind: v1alpha1.ProviderConfigKind, Name: "conformance"},
 			ManagementPolicies:      v1alpha1.DefaultManagementPolicies(),
 			ForProvider: v1alpha1.AllocationParameters{Batch: &v1alpha1.BatchParameters{
-				Partition: w.s.partition, TimeLimit: allocTimeLimit, GPUs: w.s.gpus, CPUsPerTask: w.s.cpus, Memory: w.s.memory, Nodes: 1, AgentDigest: w.digest,
+				Partition: w.s.partition, TimeLimit: v1alpha1.Duration(w.limit()), GPUs: w.s.gpus, CPUsPerTask: w.s.cpus, Memory: w.s.memory, Nodes: 1, AgentDigest: w.digest,
 			}},
 		},
 	}

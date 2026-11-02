@@ -33,8 +33,16 @@ const dryWrapper = `#!/bin/bash
 echo "testbin dry" >> "$STUB_STATE/events"
 fault=${STUB_DRY_FAULT:-}
 if [ -n "${HPCBURST_CONFORMANCE:-}" ]; then
-  # the accounting rows: the row is named by the platform, the record directory is the run's
-  export HPCBURST_ALPHA_ROW="gpu-accounting-$HPCBURST_CONF_PROFILE" HPCBURST_ALPHA_OUT="$HPCBURST_CONF_OUT"
+  # the conformance package's rows: the row is named by the platform, the record directory is the run's. The reach
+  # rows (issue #225) keep the gateway's settings, which are what the test points its probe at (the stand-in the
+  # caller started); they go under the dry names, and every live setting goes.
+  case " $* " in
+    *" -test.run ^TestReach$ "*)
+      export HPCBURST_ALPHA_ROW="reach-$HPCBURST_CONF_PROFILE" HPCBURST_ALPHA_PROBE_HOST="$HPCBURST_CONF_PROBE_HOST" \
+        HPCBURST_ALPHA_PROBE_PORT="$HPCBURST_CONF_PROBE_PORT" HPCBURST_ALPHA_PROBE_LABEL="$HPCBURST_CONF_PROBE_LABEL" ;;
+    *) export HPCBURST_ALPHA_ROW="gpu-accounting-$HPCBURST_CONF_PROFILE" ;;
+  esac
+  export HPCBURST_ALPHA_OUT="$HPCBURST_CONF_OUT"
   unset $(env | sed -n 's/^\(HPCBURST_CONF[A-Z_]*\)=.*/\1/p')
 else
   unset HPCBURST_ALPHA_ACCOUNT HPCBURST_ALPHA_CREDENTIALS HPCBURST_ALPHA_HOST_LOCK HPCBURST_ALPHA_CONTROL_DIR HPCBURST_ALPHA_BIN_DIR \

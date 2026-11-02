@@ -55,6 +55,11 @@ type Config struct {
 	// LongPollTimeout is how long a poll waits for a change; 0 is
 	// agentapi.LongPollTimeout.
 	LongPollTimeout time.Duration
+	// Listen binds the Host's agent endpoint address, in Start; nil means TCP.
+	// A caller that must not release a port between picking it and binding it
+	// (a test) gives a Listen that returns a listener it already holds. Start
+	// hands what it returns to Serve, which owns it.
+	Listen func(addr string) (net.Listener, error)
 }
 
 // Server is the agent API's HTTP server. It is safe for concurrent use.
@@ -68,7 +73,8 @@ type Server struct {
 	longPoll     time.Duration
 
 	// addr is where Start listens: the Host's agent endpoint address.
-	addr string
+	addr   string
+	listen func(addr string) (net.Listener, error)
 }
 
 // New validates cfg and returns a Server.
@@ -104,6 +110,7 @@ func New(cfg Config) (*Server, error) {
 		pollInterval: cfg.PollInterval,
 		longPoll:     cfg.LongPollTimeout,
 		addr:         cfg.Host.AgentEndpointAddr(),
+		listen:       cfg.Listen,
 	}
 	if s.log == nil {
 		s.log = slog.Default()
@@ -132,8 +139,14 @@ func (s *Server) Start(ctx context.Context) error {
 	if err := checkLoopback(s.addr); err != nil {
 		return fmt.Errorf("agentserver: %w", err)
 	}
-	var lc net.ListenConfig
-	ln, err := lc.Listen(ctx, "tcp", s.addr)
+	listen := s.listen
+	if listen == nil {
+		listen = func(addr string) (net.Listener, error) {
+			var lc net.ListenConfig
+			return lc.Listen(ctx, "tcp", addr)
+		}
+	}
+	ln, err := listen(s.addr)
 	if err != nil {
 		return fmt.Errorf("agentserver: %w", err)
 	}

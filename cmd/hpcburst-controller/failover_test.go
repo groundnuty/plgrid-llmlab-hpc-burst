@@ -192,7 +192,7 @@ func newFailoverRig(t *testing.T, beforeRun bool) *failoverRig {
 
 	var digest string
 	r.fa, _, digest = prepareState(t, api, "direct", exampleFront)
-	r.a = startChild(t, "A", r.fa, srvA.Addr())
+	r.a = startChild(t, "A", &r.fa, srvA.Addr())
 	waitFor(t, "the first copy leads lifecycle and holds "+r.provLease, failoverWait, func() bool {
 		return held(ctx, c, v1alpha1.LeaseLifecycle) && held(ctx, c, r.provLease)
 	}, r.a)
@@ -200,7 +200,7 @@ func newFailoverRig(t *testing.T, beforeRun bool) *failoverRig {
 	r.provA, _ = holder(ctx, c, r.provLease)
 
 	r.fb = secondCopyFlags(t, r.fa)
-	r.b = startChild(t, "B", r.fb, srvB.Addr())
+	r.b = startChild(t, "B", &r.fb, srvB.Addr(), r.fa)
 	waitFor(t, "the second copy's health endpoint answers and its agent API started", failoverWait, func() bool {
 		return healthy(r.fb.healthAddr) && strings.Contains(r.b.log(), componentLine("component starting", r.fb.host.PortBase, "agent-api"))
 	}, r.a, r.b)

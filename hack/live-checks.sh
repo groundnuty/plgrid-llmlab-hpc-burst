@@ -21,7 +21,8 @@
 # runs only with --yes. A skipped test is a failure, not a pass.
 #
 # Exit codes: 0 all passed; 1 a test failed, skipped, left a job behind or
-# timed out; 2 usage error or an unreadable range; 3 refused or NOT RUN (a
+# timed out; 2 usage error, an unreadable range or a table of this script
+# that loads no rows; 3 refused or NOT RUN (a
 # setting is missing, a file is not mode 600, the one-job slot is in use; or a
 # job of a row with a start-wait bound did not start within it and was cancelled
 # by its tag, or a row that holds QOS now's GPU for hours was still pending after its wait in the queue (below)
@@ -69,6 +70,11 @@
 #                                choice when giving the go; the shape, the hold note and the test follow it
 #   LIVE_OWNER_GO_HELIOS_NOW     today's UTC date (YYYY-MM-DD), once the owner has said yes to the run: the rows that hold
 #                                QOS now's GPU for hours (alpha-helios-nooverlap, tunnel-hour-helios) refuse without it
+#   The reach rows (issue #225) confirm that a compute node reaches the gateway's forwarded port:
+#   LIVE_PROBE_HOST, LIVE_PROBE_PORT   the forwarded port as the compute nodes see it; private, read only by the reach rows,
+#                                and never printed, shown on the screen or posted (the host a name or an address, the port 1 to 65535)
+#   LIVE_PROBE_LABEL             the only name of that port in public output (the text to post); letters, digits, dots,
+#                                underscores and hyphens, and it must not hold the host or the port
 # Cluster calls go through the ssh aliases helios and athena, one at a time per
 # host under <LIVE_LOCK_DIR>/<host>.lock. The aliases' ssh configuration is yours.
 #
@@ -120,6 +126,8 @@ tunnel-hour-helios|cluster|internal/alpha|^TestTunnelHour$|HPCBURST_ALPHA_ROW|pr
 tunnel-hour-athena|cluster|internal/alpha|^TestTunnelHour$|HPCBURST_ALPHA_ROW|profiles/athena.yaml|host|ready
 gpu-accounting-helios|cluster|internal/providerctl/conformance|^TestGPUAccounting$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host|ready
 gpu-accounting-athena|cluster|internal/providerctl/conformance|^TestGPUAccounting$|HPCBURST_CONFORMANCE|profiles/athena.yaml|host|ready
+reach-helios|cluster|internal/providerctl/conformance|^TestReach$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host|ready
+reach-athena|cluster|internal/providerctl/conformance|^TestReach$|HPCBURST_CONFORMANCE|profiles/athena.yaml|host|ready
 rehearsal|cluster|-|-|-|-|-|pending
 # END LIVE TESTS
 TABLE
@@ -142,6 +150,16 @@ TABLE
 # smallest memory recorded as accepted on this partition (S1's hold check, profiles/helios.yaml),
 # where the check itself takes any positive amount. The stand-in agent writes nothing to the RAM
 # disk that -C memfs gives. The test submits with --constraint=memfs, so the estimate asks for it too.
+# reach-helios and reach-athena (issue #225) run one job of the smallest shape the request check accepts (1 GPU, the partition
+# demands one; 1 CPU, cpusPerTask >= 1; 1Gi, as on conformance-helios-gh200), which tries a TCP connect to the gateway's forwarded
+# port and writes down what answered. Each is under the one-job slot (QOS now on Helios, the partition plgrid-now on Athena, the
+# same A100 nodes as plgrid-gpu-a100, so the same network path) with the slot guard and a start wait of 10 min. On Athena the
+# scheduler's acceptance of 1 CPU and 1Gi is not recorded (the conformance run used 4 CPUs and 32Gi): the estimate below,
+# sbatch --test-only, is the first check, and a rejected shape ends the row as not run (exit 3). The job runs for seconds and
+# has its own time limit of 2 min (reachTimeLimit in reach_run_test.go, not the harness's 5 min: a stalled job holds the one-job
+# slot that long at most); the timeout of 20 min is the start wait, the job's end (2 min and a minute) and a margin
+# (reachEndWait and reachCleanupWait there; qos_test.go compares them). The Helios row asks for -C memfs, as the Helios profile does for
+# every job.
 # gpu-accounting-helios (issue #194) has the same two guards as conformance-helios-gh200: it starts only when squeue --me shows
 # no job in QOS now, and its one job must start within 10 min of its acceptance (else cancelled by its tag, NOT RUN, exit 3).
 # Its timeout of 30 min is that wait, the job's few minutes, the deletion that writes the kept record, and a margin. The
@@ -166,6 +184,8 @@ tunnel-hour-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1
 tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|02:17:00|152|-
 gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|30|-|10
 gpu-accounting-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|00:05:00|25|-
+reach-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:02:00|20|-C memfs|10
+reach-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|1|1Gi|00:02:00|20|-|10
 # END CLUSTER SHAPES
 TABLE
 }
@@ -195,6 +215,8 @@ tunnel-hour-helios|1
 tunnel-hour-athena|1
 gpu-accounting-helios|1
 gpu-accounting-athena|1
+reach-helios|1
+reach-athena|1
 # END MOST JOBS
 TABLE
 }
@@ -260,6 +282,7 @@ alias_table() {
 # BEGIN ALIASES
 tunnel-hour|tunnel-hour-helios,tunnel-hour-athena
 gpu-accounting|gpu-accounting-helios,gpu-accounting-athena
+reach|reach-helios,reach-athena
 # END ALIASES
 TABLE
 }
@@ -277,38 +300,63 @@ declare -A HOST PROFILE PARTITION QOS SLOT ACCTKEY GPUS CPUS MEM TLIMIT TMIN EXT
 declare -A STACK ALIAS OGSET OGMIN MOSTJOBS
 declare -A S=()
 
+# load_tables: reads the tables above into the arrays. Comment and blank lines are skipped in the loop itself:
+# piped through grep -v, a table whose every line was a comment, or a grep that failed, gave no rows without a
+# word. A last row with no newline is read too (the || [ -n "$name" ] of each loop). And every table must give at least one row. With none, the script would run on as if the table were
+# simply short: no LIVE TESTS rows is a plan of "run: (none)" with exit 0, and no OWNER GO rows drops the
+# owner's go from the rows that hold QOS now's GPU (#237). An empty table is named and load_tables returns 2,
+# which stops every mode. A table emptied on purpose needs this check changed with it.
 load_tables() {
-  local name kind pkg test gates inputs contexts status
-  while IFS='|' read -r name kind pkg test gates inputs contexts status; do
-    [ -n "$name" ] || continue
-    NAMES+=("$name")
+  local name kind pkg test gates inputs contexts status n=0
+  while IFS='|' read -r name kind pkg test gates inputs contexts status || [ -n "$name" ]; do
+    case $name in ''|'#'*) continue ;; esac
+    NAMES+=("$name"); n=$((n+1))
     KIND[$name]=$kind PKG[$name]=$pkg TEST[$name]=$test GATES[$name]=$gates INPUTS[$name]=$inputs CONTEXTS[$name]=$contexts STATUS[$name]=$status
-  done < <(live_table | grep -v -e '^#' -e '^$')
+  done < <(live_table)
+  [ "$n" -gt 0 ] || { table_empty "LIVE TESTS"; return 2; }
   local h pr pa q sl ak g c m tl tm ex sw
-  while IFS='|' read -r name h pr pa q sl ak g c m tl tm ex sw; do
-    [ -n "$name" ] || continue
+  n=0
+  while IFS='|' read -r name h pr pa q sl ak g c m tl tm ex sw || [ -n "$name" ]; do
+    case $name in ''|'#'*) continue ;; esac
+    n=$((n+1))
     HOST[$name]=$h PROFILE[$name]=$pr PARTITION[$name]=$pa QOS[$name]=$q SLOT[$name]=$sl ACCTKEY[$name]=$ak
     GPUS[$name]=$g CPUS[$name]=$c MEM[$name]=$m TLIMIT[$name]=$tl TMIN[$name]=$tm EXTRA[$name]=$ex SWAIT[$name]=${sw:--}
-  done < <(cluster_table | grep -v -e '^#' -e '^$')
+  done < <(cluster_table)
+  [ "$n" -gt 0 ] || { table_empty "CLUSTER SHAPES"; return 2; }
   local pk
-  while IFS='|' read -r name pk; do
-    [ -n "$name" ] || continue
+  n=0
+  while IFS='|' read -r name pk || [ -n "$name" ]; do
+    case $name in ''|'#'*) continue ;; esac
+    n=$((n+1))
     STACK[$name]=${pk//,/ }
-  done < <(plan_stack_table | grep -v -e '^#' -e '^$')
-  while IFS='|' read -r name pk; do
-    [ -n "$name" ] || continue
+  done < <(plan_stack_table)
+  [ "$n" -gt 0 ] || { table_empty "PLAN STACK"; return 2; }
+  n=0
+  while IFS='|' read -r name pk || [ -n "$name" ]; do
+    case $name in ''|'#'*) continue ;; esac
+    n=$((n+1))
     ALIAS[$name]=${pk//,/ }
-  done < <(alias_table | grep -v -e '^#' -e '^$')
+  done < <(alias_table)
+  [ "$n" -gt 0 ] || { table_empty "ALIASES"; return 2; }
   local og_key og_min mj
-  while IFS='|' read -r name mj; do
-    [ -n "$name" ] || continue
+  n=0
+  while IFS='|' read -r name mj || [ -n "$name" ]; do
+    case $name in ''|'#'*) continue ;; esac
+    n=$((n+1))
     MOSTJOBS[$name]=$mj
-  done < <(most_jobs_table | grep -v -e '^#' -e '^$')
-  while IFS='|' read -r name og_key og_min; do
-    [ -n "$name" ] || continue
+  done < <(most_jobs_table)
+  [ "$n" -gt 0 ] || { table_empty "MOST JOBS"; return 2; }
+  n=0
+  while IFS='|' read -r name og_key og_min || [ -n "$name" ]; do
+    case $name in ''|'#'*) continue ;; esac
+    n=$((n+1))
     OGSET[$name]=$og_key OGMIN[$name]=$og_min
-  done < <(owner_go_table | grep -v -e '^#' -e '^$')
+  done < <(owner_go_table)
+  [ "$n" -gt 0 ] || { table_empty "OWNER GO"; return 2; }
 }
+
+# table_empty <name>: says that the table between "# BEGIN <name>" and "# END <name>" gave no rows.
+table_empty() { say "live-checks: the $1 table of this script loads no rows, so nothing is listed, planned or run"; }
 
 say() { printf '%s\n' "$*"; }
 usage() {
@@ -346,7 +394,7 @@ load_settings() {
     [ "$k" != "$line" ] || continue
     v=${v%\"}; v=${v#\"}; v=${v%\'}; v=${v#\'}
     case $k in
-      LIVE_OUT_DIR|LIVE_LOCK_DIR|LIVE_BUILD_LOCK|LIVE_LLMLAB_CREDENTIALS|LIVE_LLMLAB_MODEL|LIVE_CONF_CREDENTIALS_HELIOS|LIVE_CONF_CREDENTIALS_ATHENA|ACCOUNT_HELIOS_CPU|ACCOUNT_HELIOS_GH200|ACCOUNT_ATHENA_A100|LIVE_DIALHOME_MODE|LIVE_DIALHOME_ADDR|LIVE_DIALHOME_KEY|LIVE_BIN_DIR|LIVE_OWNER_GO_HELIOS_NOW|LIVE_TUNNEL_LEASE_MINUTES)
+      LIVE_OUT_DIR|LIVE_LOCK_DIR|LIVE_BUILD_LOCK|LIVE_LLMLAB_CREDENTIALS|LIVE_LLMLAB_MODEL|LIVE_CONF_CREDENTIALS_HELIOS|LIVE_CONF_CREDENTIALS_ATHENA|ACCOUNT_HELIOS_CPU|ACCOUNT_HELIOS_GH200|ACCOUNT_ATHENA_A100|LIVE_DIALHOME_MODE|LIVE_DIALHOME_ADDR|LIVE_DIALHOME_KEY|LIVE_BIN_DIR|LIVE_OWNER_GO_HELIOS_NOW|LIVE_TUNNEL_LEASE_MINUTES|LIVE_PROBE_HOST|LIVE_PROBE_PORT|LIVE_PROBE_LABEL)
         S[$k]=$v ;;
     esac
   done 2>/dev/null < "$HPCBURST_LIVE_SETTINGS"
@@ -378,6 +426,7 @@ check_settings() {
         fi
         case $name in
           alpha-*|tunnel-hour-*) check_alpha_settings "$name" || bad=1 ;;
+          reach-*) check_reach_settings || bad=1 ;;
         esac
         check_owner_go "$name" || bad=1 ;;
     esac
@@ -409,6 +458,28 @@ check_owner_go() {
   [ "${2:-}" = quiet ] || owner_go_note "$name"
   say "live-checks: setting $key must hold today's UTC date ($today) once the owner has said yes to this hold; it is missing or from another day"
   return 1
+}
+
+# check_reach_settings: what a reach row needs besides a cluster test's own settings (issue #225): the gateway's forwarded
+# port, which is private (host and port), and the label that stands for it in public output. Every problem is reported by
+# the setting's name, never by its value. The values go into the job's script and the label into the text to post, so they
+# are held to a narrow form here, before anything is built or submitted; and a label that holds the host or the port would
+# post it, so it is refused.
+check_reach_settings() {
+  local bad=0 host port label lc hc flat_l flat_h
+  reach_need() { [ -n "${S[$1]:-}" ] || { say "live-checks: setting $1 is missing"; bad=1; return 1; }; }
+  reach_need LIVE_PROBE_HOST && { [[ ${S[LIVE_PROBE_HOST]} =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$ ]] || { say "live-checks: LIVE_PROBE_HOST must be a host name or an address (letters, digits, dots, hyphens, underscores)"; bad=1; }; }
+  reach_need LIVE_PROBE_PORT && { [[ ${S[LIVE_PROBE_PORT]} =~ ^[1-9][0-9]{0,4}$ ]] && [ "${S[LIVE_PROBE_PORT]}" -le 65535 ] || { say "live-checks: LIVE_PROBE_PORT must be a port number from 1 to 65535"; bad=1; }; }
+  reach_need LIVE_PROBE_LABEL && { [[ ${S[LIVE_PROBE_LABEL]} =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$ ]] || { say "live-checks: LIVE_PROBE_LABEL must be 1 to 40 letters, digits, dots, underscores or hyphens"; bad=1; }; }
+  host=${S[LIVE_PROBE_HOST]:-}; port=${S[LIVE_PROBE_PORT]:-}; label=${S[LIVE_PROBE_LABEL]:-}
+  # A name is the same name in any case, with or without the root dot, and with its dots, hyphens and underscores
+  # run together: the label holds the host in any of those spellings, or the port, among other characters or not
+  # (GATEWAY.PRIVATE.EXAMPLE for gateway.private.example is the host, posted).
+  lc=${label,,}; hc=${host,,}; hc=${hc%.}
+  flat_l=${lc//[._-]/}; flat_h=${hc//[._-]/}
+  if [ -n "$hc" ] && [ -n "$lc" ] && { [[ $lc == *"$hc"* ]] || [[ $flat_l == *"$flat_h"* ]]; }; then say "live-checks: LIVE_PROBE_LABEL holds the host; the label is what is posted, so it must not"; bad=1; fi
+  if [ -n "$port" ] && [ -n "$lc" ] && { [[ $lc == *"$port"* ]] || [[ $flat_l == *"$port"* ]]; }; then say "live-checks: LIVE_PROBE_LABEL holds the port; the label is what is posted, so it must not"; bad=1; fi
+  return $bad
 }
 
 # check_alpha_settings <name>: what a row that runs the stack needs besides a cluster test's own settings: the
@@ -451,6 +522,12 @@ remote() {
 # preamble <var> <value>...: assignments for the head of a remote script, quoted.
 preamble() { local k; while [ $# -ge 2 ]; do k=$1; printf '%s=%q\n' "$k" "$2"; shift 2; done; }
 
+# has_line <text> <line>: whether the line is one of the text's lines, exactly. A string test and no pipeline:
+# under pipefail, printf ... | grep -q failed whenever grep stopped at a match while printf was still writing
+# (bash writes its standard output a line at a time), and the SIGPIPE that killed printf read as "no match",
+# silently (#213).
+has_line() { case $'\n'$1$'\n' in *$'\n'"$2"$'\n'*) return 0 ;; esac; return 1; }
+
 # queue_jobs <host>: the user's hb- jobs, one "id|name|partition" per line.
 # Returns 1 when squeue could not be read, so an unreadable queue is never taken for an empty one.
 queue_jobs() { # id|name|partition lines
@@ -462,7 +539,7 @@ printf '%s\n' "$out" | grep '|hb-' || true
 EOS
   ) || return 1
   # The marker line, wherever it sits: a login banner can come before it.
-  printf '%s\n' "$reply" | grep -q -x 'squeue=ok' || return 1
+  has_line "$reply" 'squeue=ok' || return 1
   printf '%s\n' "$reply" | sed -n '/^squeue=ok$/,$p' | tail -n +2 | grep -E '^[0-9][0-9_+]*\|hb-[A-Za-z0-9._-]*\|[A-Za-z0-9._-]+$' || true
 }
 
@@ -567,7 +644,7 @@ owned_present() {
   local now=$1 tags=$2 id name
   while IFS='|' read -r id name _; do
     [ -n "$id" ] || continue
-    if { [ -n "$tags" ] && printf '%s\n' "$tags" | grep -q -x -F "$name"; } || { [ -n "$JOBID" ] && [ "$id" = "$JOBID" ]; }; then echo "$id"; fi
+    if { [ -n "$tags" ] && has_line "$tags" "$name"; } || { [ -n "$JOBID" ] && [ "$id" = "$JOBID" ]; }; then echo "$id"; fi
   done <<<"$now"
 }
 
@@ -751,6 +828,7 @@ env_conformance() {
   local n=$1 host=${HOST[$1]} up
   up=$(printf '%s' "$host" | tr a-z A-Z)
   unset HPCBURST_CONF_GPU_MODEL HPCBURST_CONF_CPU_ARCH HPCBURST_CONF_DATA_PARSER HPCBURST_CONF_QOS HPCBURST_CONF_START_WAIT
+  unset HPCBURST_CONF_PROBE_HOST HPCBURST_CONF_PROBE_PORT HPCBURST_CONF_PROBE_LABEL HPCBURST_ALPHA_PROBE_HOST HPCBURST_ALPHA_PROBE_PORT HPCBURST_ALPHA_PROBE_LABEL
   export HPCBURST_CONFORMANCE=1 HPCBURST_CONF_PROFILE=${PROFILE[$n]} HPCBURST_CONF_PARTITION=${PARTITION[$n]}
   export HPCBURST_CONF_CREDENTIALS=${S[LIVE_CONF_CREDENTIALS_$up]} HPCBURST_CONF_ACCOUNT=${S[${ACCTKEY[$n]}]}
   export HPCBURST_CONF_GPUS=${GPUS[$n]} HPCBURST_CONF_CPUS=${CPUS[$n]} HPCBURST_CONF_MEMORY=${MEM[$n]}
@@ -767,7 +845,12 @@ env_conformance() {
   unset HPCBURST_CONF_PENDING_MAX_SECONDS HPCBURST_ALPHA_DRY HPCBURST_ALPHA_DRY_FAULT HPCBURST_ALPHA_ROW HPCBURST_ALPHA_OUT
   case $n in
     # Only a row with no start wait: with one, the bound is the first clock and the test takes no other.
-    gpu-accounting-*) [ "${SWAIT[$n]:--}" != - ] || export HPCBURST_CONF_PENDING_MAX_SECONDS=${LIVE_PENDING_MAX_SECONDS:-7200} ;;
+    gpu-accounting-*|reach-*) [ "${SWAIT[$n]:--}" != - ] || export HPCBURST_CONF_PENDING_MAX_SECONDS=${LIVE_PENDING_MAX_SECONDS:-7200} ;;
+  esac
+  # The gateway's forwarded port reaches the reach rows only (issue #225); the host and the port are private, the label is
+  # what the text to post carries.
+  case $n in
+    reach-*) export HPCBURST_CONF_PROBE_HOST=${S[LIVE_PROBE_HOST]} HPCBURST_CONF_PROBE_PORT=${S[LIVE_PROBE_PORT]} HPCBURST_CONF_PROBE_LABEL=${S[LIVE_PROBE_LABEL]} ;;
   esac
 }
 
@@ -859,7 +942,7 @@ execute_cluster() {
       # budget); this timeout is their sum, so a long wait in the queue does not eat the run's time.
       run_binary "$n" "$OUT/$n.test" "$(( ${TMIN[$n]} + $(pending_max "$n") / 60 ))" env_alpha
       judge "$n" "$OUT/$n.log" "$CHILD_RC" ;;
-    gpu-accounting-*)
+    gpu-accounting-*|reach-*)
       # A row with a start wait has the bound as its first clock; one without has the operator's wait in the queue.
       wait=$(( ${LIVE_PENDING_MAX_SECONDS:-7200} / 60 ))
       [ "${SWAIT[$n]:--}" = - ] || wait=0
@@ -1096,13 +1179,25 @@ input_matches() {
 
 # plan_key <name> <ctx>: sets PLAN_KEY, the key of a row's dependency closure. Rows with the same package and
 # stack share it. It sets a variable and forks nothing: the plan calls it for every changed file, row and
-# context, and a command substitution there failed to fork on a loaded host and silently dropped a row.
+# context.
 PLAN_KEY=""
 plan_key() { PLAN_KEY="${PKG[$1]}|${STACK[$1]:--}|$2"; }
 
+# PLAN_IN holds one entry per closure key and line of that closure ("<key><newline><line>"), so the plan
+# tests membership with a variable lookup and runs no pipeline for it. It once tested it with
+# printf ... | grep -q under pipefail: bash writes its standard output a line at a time, grep -q exits at the
+# first match, and a printf still writing died of SIGPIPE. bash reports no death by SIGPIPE, so the failed
+# pipeline read as "not covered" and the row was dropped with exit 0: now and then under load, and every
+# time once a listing outgrew the pipe's buffer (#213).
+declare -A PLAN_IN=()
+
+# plan_has <key> <line>: whether the line is in the closure of the key.
+plan_has() { [ -n "${PLAN_IN[$1$'\n'$2]+x}" ]; }
+
 plan() {
-  local range=$1 base head bsha hsha files name pkg ctx side f d b reason key out
-  local -A deps=() reasons=() hit=()
+  local range=$1 base head bsha hsha files name pkg ctx side f d b reason key out l
+  local -A keys=() reasons=() reason_seen=() hit=()
+  local -a lines=()
   case $range in *..*) ;; *) say "live-checks: --plan needs <base>..<head>"; return 2 ;; esac
   base=${range%%..*}; head=${range##*..}
   bsha=$(git -C "$ROOT" rev-parse --verify --quiet "${base}^{commit}" 2>/dev/null) &&
@@ -1127,8 +1222,8 @@ plan() {
     pkg=${PKG[$name]}
     for ctx in ${CONTEXTS[$name]//,/ }; do
       plan_key "$name" "$ctx"; key=$PLAN_KEY
-      [ -z "${deps[$key]+x}" ] || continue
-      deps[$key]=""
+      [ -z "${keys[$key]+x}" ] || continue
+      keys[$key]=1
       # The packages of the row that exist at each end of the range (one may be new, or deleted, in it); one go
       # list call per end lists the closure of them all.
       local -a present=()
@@ -1139,17 +1234,22 @@ plan() {
         done
         [ ${#present[@]} -gt 0 ] || continue
         out=$(pkg_deps "$PLAN_TMP/$side" "$ctx" "${present[@]}") || { say "live-checks: dependency discovery failed for package $pkg ($ctx) at the $side of the range; nothing is planned"; return 2; }
-        deps[$key]+="$out"$'\n'
+        # Read without a pipeline, and whole: a listing that cannot be read fails the plan as a failed
+        # discovery does.
+        mapfile -t lines <<<"$out" && [ ${#lines[@]} -gt 0 ] || { say "live-checks: the closure of package $pkg ($ctx) at the $side of the range could not be read; nothing is planned"; return 2; }
+        for l in "${lines[@]}"; do PLAN_IN[$key$'\n'$l]=1; done
       done
       for spkg in $pkg ${STACK[$name]-}; do
         [ -d "$PLAN_TMP/base/$spkg" ] || [ -d "$PLAN_TMP/head/$spkg" ] || { say "live-checks: package $spkg exists at neither end of the range; nothing is planned"; return 2; }
       done
-      deps[$key]=$(printf '%s' "${deps[$key]}" | sort -u)
     done
   done
 
   for f in "${changed[@]}"; do
-    d=$(dirname "$f"); b=$(basename "$f")
+    # The file's directory and name as dirname and basename give them (a file at the root is in "."),
+    # without forking.
+    case $f in */*) d=${f%/*} ;; *) d=. ;; esac
+    b=${f##*/}
     for name in "${NAMES[@]}"; do
       [ "${STATUS[$name]}" = ready ] || continue
       pkg=${PKG[$name]}; reason=""
@@ -1159,7 +1259,7 @@ plan() {
         for ctx in ${CONTEXTS[$name]//,/ }; do
           # An embedded file counts wherever it sits and whatever it is called.
           plan_key "$name" "$ctx"
-          if printf '%s\n' "${deps[$PLAN_KEY]}" | grep -q -x -F "embed:$f"; then reason=$f; break; fi
+          if plan_has "$PLAN_KEY" "embed:$f"; then reason=$f; break; fi
         done
       fi
       if [ -z "$reason" ]; then
@@ -1168,7 +1268,7 @@ plan() {
         else
           for ctx in ${CONTEXTS[$name]//,/ }; do
             plan_key "$name" "$ctx"
-            printf '%s\n' "${deps[$PLAN_KEY]}" | grep -q -x -F "$d" || continue
+            plan_has "$PLAN_KEY" "$d" || continue
             case $b in
               *_test.go) ;;
               *.go|*.s|*.S|*.c|*.h|*.cc|*.cpp) reason=$d; break ;;
@@ -1178,7 +1278,10 @@ plan() {
       fi
       [ -n "$reason" ] || continue
       hit[$name]=1
-      printf '%s' "${reasons[$name]:-}" | grep -q -x -F "$reason" || reasons[$name]="${reasons[$name]:-}$reason"$'\n'
+      if [ -z "${reason_seen[$name$'\n'$reason]+x}" ]; then
+        reason_seen[$name$'\n'$reason]=1
+        reasons[$name]="${reasons[$name]:-}$reason"$'\n'
+      fi
     done
   done
   local run="" none="" r shown
@@ -1217,7 +1320,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$MODE" ] || usage 2
-load_tables
+load_tables || exit 2
 
 case $MODE in
   list)

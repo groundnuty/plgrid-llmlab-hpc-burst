@@ -168,6 +168,9 @@ type fakeHost struct {
 	// request. A non-zero status with a body is served as JSON.
 	profilesStatus int
 	profilesBody   string
+	// writeStatus, when not 0, is the status the write probe's patch is answered with, with a Status
+	// body: 504, the answer of an API server whose store blocks (#192). The default succeeds.
+	writeStatus int
 }
 
 const fakeK3sPID = 4242
@@ -198,6 +201,11 @@ func newFakeHost(t *testing.T) *fakeHost {
 			fmt.Fprint(w, h.profilesBody)
 		case r.Method == http.MethodPatch && r.URL.Path == "/api/v1/namespaces/kube-system/configmaps/hpcburst-launcher-probe":
 			w.Header().Set("Content-Type", "application/json")
+			if h.writeStatus != 0 {
+				w.WriteHeader(h.writeStatus)
+				fmt.Fprintf(w, `{"kind":"Status","apiVersion":"v1","status":"Failure","message":"the server was unable to return a response in the time allotted, but may still be processing the request (patch configmaps hpcburst-launcher-probe)","reason":"Timeout","code":%d}`, h.writeStatus)
+				return
+			}
 			fmt.Fprint(w, `{"kind":"ConfigMap","apiVersion":"v1","metadata":{"name":"hpcburst-launcher-probe","namespace":"kube-system"}}`)
 		default:
 			http.NotFound(w, r)

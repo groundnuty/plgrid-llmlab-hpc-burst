@@ -1,6 +1,10 @@
 package agent
 
-import "time"
+import (
+	"time"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
+)
 
 // FrpcEnvForTest is frpcEnv, for the tests outside the package.
 var FrpcEnvForTest = frpcEnv
@@ -38,3 +42,6 @@ func QueuedReportForTest(a *Agent) bool {
 
 // PeriodicClosedForTest says whether a's periodic reports have closed: the stop has begun.
 func PeriodicClosedForTest(a *Agent) bool { return a.rep.closed() }
+
+// SnapshotKeyForTest is snapshotKey: the snapshot without what changes with every report.
+func SnapshotKeyForTest(r agentapi.Report) []byte { return snapshotKey(r) }

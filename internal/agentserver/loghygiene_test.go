@@ -39,7 +39,7 @@ func TestNoSecretReachesALog(t *testing.T) {
 	if resp, body := x.do(http.MethodGet, agentapi.PathDesired, x.good(), nil); resp.StatusCode != http.StatusOK || !strings.Contains(string(body), hubToken) {
 		t.Fatalf("desired: status %d; the Hub token must reach the agent (%s)", resp.StatusCode, body)
 	}
-	report := agentapi.Report{Time: time.Unix(1, 0).UTC(), Instance: &agentapi.InstanceReport{UID: "inst-uid-1", Key: instanceKey}}
+	report := agentapi.Report{Seq: 1, Time: time.Unix(1, 0).UTC(), Instance: &agentapi.InstanceReport{UID: "inst-uid-1", Key: instanceKey}}
 	if resp, body := x.do(http.MethodPost, agentapi.PathReport, x.good(), reportBody(t, report)); resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("report: status %d (%s)", resp.StatusCode, body)
 	}
