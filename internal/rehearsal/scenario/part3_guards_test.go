@@ -389,18 +389,21 @@ func TestRestartReadProblems(t *testing.T) {
 		}
 	}
 	reads := [][]sample{gaugeFixture(), staleFixture("u"), gaugeFixture()}
-	if p, stale, fresh := restartReadProblems(reads, "u"); len(p) != 0 || stale != 1 || fresh != 2 {
-		t.Fatalf("fresh, stale, fresh: %v, %d stale, %d fresh", p, stale, fresh)
+	if p, stale, fresh, unserved := restartReadProblems(append(reads, nil), "u"); len(p) != 0 || stale != 1 || fresh != 2 || unserved != 1 {
+		t.Fatalf("fresh, stale, fresh, none: %v, %d stale, %d fresh, %d unserved", p, stale, fresh, unserved)
 	}
-	if p, _, _ := restartReadProblems([][]sample{gaugeFixture(), neither}, "u"); len(p) == 0 {
+	if p, _, _, _ := restartReadProblems([][]sample{gaugeFixture(), neither}, "u"); len(p) == 0 {
 		t.Errorf("a read with a gauge neither known nor unknown: restartReadProblems found nothing")
 	}
 	both := append(gaugeFixture(), sample{name: "hpcburst_instance_metrics_unknown", value: 1, labels: map[string]string{"instance_uid": "u", "worker": "worker-0", "metric": gKV, "reason": "stale"}})
-	if p, _, _ := restartReadProblems([][]sample{both}, "u"); len(p) == 0 {
+	if p, _, _, _ := restartReadProblems([][]sample{both}, "u"); len(p) == 0 {
 		t.Errorf("a read with a gauge both known and unknown: restartReadProblems found nothing")
 	}
 	reported := append(gaugeFixture(), sample{name: gPrefixHit, value: 0, labels: map[string]string{"instance_uid": "u", "worker": "worker-0"}})
-	if p, _, _ := restartReadProblems([][]sample{reported}, "u"); len(p) == 0 {
+	if p, _, _, _ := restartReadProblems([][]sample{reported}, "u"); len(p) == 0 {
 		t.Errorf("a read with an unexported gauge at 0: restartReadProblems found nothing")
+	}
+	if p, _, _, _ := restartReadProblems([][]sample{gaugeFixture()[1:]}, "u"); len(p) == 0 {
+		t.Errorf("a read with gauges and no info series: restartReadProblems found nothing")
 	}
 }

@@ -485,14 +485,24 @@ func (s *restartScraper) end() [][]sample {
 }
 
 // restartReadProblems holds every read of an Instance's gauges across a
-// controller restart to HBEP-8: each engine gauge of worker-0 is either known
-// or absent with exactly one unknown sample, never both and never neither,
-// whatever the controller knows at that read; a gauge the engine does not
-// export is never known. It counts the reads that showed the gauges stale (no
-// report yet, as after a restart) and fresh.
-func restartReadProblems(reads [][]sample, uid string) (problems []string, stale, fresh int) {
+// controller restart to HBEP-8: in a read that has the Instance's info series,
+// each engine gauge of worker-0 is either known or absent with exactly one
+// unknown sample, never both and never neither, whatever the controller knows
+// at that read; a gauge the engine does not export is never known. It counts
+// the reads that showed the gauges stale (no report yet, as after a restart)
+// and fresh, and the reads with no series of the Instance at all (unserved:
+// a controller that does not know the Instance yet), which hold no gauge
+// sample either.
+func restartReadProblems(reads [][]sample, uid string) (problems []string, stale, fresh, unserved int) {
 	w := map[string]string{"instance_uid": uid, "worker": "worker-0"}
 	for i, ss := range reads {
+		if len(find(ss, "hpcburst_instance_info", map[string]string{"instance_uid": uid})) == 0 {
+			unserved++
+			if len(ss) != 0 {
+				problems = append(problems, fmt.Sprintf("read %d: %d samples of the Instance with no info series", i, len(ss)))
+			}
+			continue
+		}
 		allStale, allKnown := true, true
 		for _, g := range engineGauges {
 			var present []sample
@@ -523,5 +533,5 @@ func restartReadProblems(reads [][]sample, uid string) (problems []string, stale
 			fresh++
 		}
 	}
-	return problems, stale, fresh
+	return problems, stale, fresh, unserved
 }
