@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -32,11 +33,13 @@ func statusWithFailingWrites(t *testing.T, storeDir bool) (*fakeHost, *StatusRep
 // TestStatusFailingWriteWithSpaceFreeHasNoStoreFullHint (#192): the write probe fails, but the store's
 // file system has room, so the reason is the one status always gave and does not blame the disk. The
 // free space is the real statfs of a real directory, and the test first shows that directory has room
-// far above the threshold: on a nearly full disk it would otherwise prove nothing.
+// far from zero blocks: on a nearly full disk it would otherwise prove nothing.
 func TestStatusFailingWriteWithSpaceFreeHasNoStoreFullHint(t *testing.T) {
+	const room = 1 << 20
 	h, rep := statusWithFailingWrites(t, true)
-	if free, err := freeSpace(h.l.sqliteDir()); err != nil || free < 100*noSpaceBelow {
-		t.Fatalf("the store directory %s has %d bytes free (%v), too few to show that a failing probe on a disk with room gets no hint", h.l.sqliteDir(), free, err)
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(h.l.sqliteDir(), &st); err != nil || st.Bavail*uint64(st.Bsize) < room {
+		t.Fatalf("the store directory %s has %d blocks of %d bytes available (%v), under %d bytes: too few to show that a failing probe on a disk with room gets no hint", h.l.sqliteDir(), st.Bavail, st.Bsize, err, room)
 	}
 	joined := strings.Join(rep.Reasons, "\n")
 	if !strings.Contains(joined, "writes are failing: ") {

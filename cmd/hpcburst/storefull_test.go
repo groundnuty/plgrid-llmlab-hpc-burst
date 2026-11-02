@@ -256,8 +256,8 @@ func storeFull(t *testing.T, wholeDataDir bool) {
 	vol.freeze()
 	t.Logf("the volume is frozen at %d of %d KiB", vol.used()>>10, vol.limit.Load()>>10)
 	// The store's own directory, as status shows it: in both variants the store lives in the volume
-	// through a link, and statfs follows it (#192). The free bytes are logged as the evidence for the
-	// threshold launcher.StoreFullHint uses.
+	// through a link, and statfs follows it (#192). The available space is logged as the evidence that the
+	// frozen volume has no block available, which is what launcher.StoreFullHint requires.
 	storeDir := filepath.Join(h.dir, "data", "server", "db")
 	var stfs syscall.Statfs_t
 	if err := syscall.Statfs(storeDir, &stfs); err != nil {
