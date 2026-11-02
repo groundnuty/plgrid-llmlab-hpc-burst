@@ -301,9 +301,13 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 	}
 	// The CRD deletion guard goes in on every start, whatever --manifests named (HBEP-11; issue
 	// #242), and after the manifests, which may have applied the CRDs it protects.
+	// up returns only once the API server refuses a delete of a framework CRD, if there is one: admission
+	// learns of the guard after the apply (WaitGuardEnforced).
 	if cfg, err := restConfig(l.kubeconfig(), ports, 30*time.Second); err != nil {
 		return abort("CRD deletion guard", err)
 	} else if err := InstallGuard(ctx, cfg, o.Log); err != nil {
+		return abort("CRD deletion guard", err)
+	} else if err := WaitGuardEnforced(ctx, cfg, o.Log); err != nil {
 		return abort("CRD deletion guard", err)
 	}
 	rep.CRDGuard = true

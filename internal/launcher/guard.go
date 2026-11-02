@@ -15,8 +15,10 @@ package launcher
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -24,9 +26,11 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/retry"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/config/admission"
 )
@@ -63,7 +67,9 @@ func guardObjects() (policy, binding *unstructured.Unstructured, err error) {
 	return policy, binding, nil
 }
 
-// InstallGuard applies the guard with server-side apply, policy first, so repeating it is safe.
+// InstallGuard makes the guard exist and be the manifest's, and applies it with server-side apply,
+// policy first, so repeating it is safe. Objects that exist already are set to the manifest's spec
+// first (resetSpecs); only then does the apply create what is missing.
 func InstallGuard(ctx context.Context, cfg *rest.Config, log io.Writer) error {
 	policy, binding, err := guardObjects()
 	if err != nil {
@@ -73,7 +79,7 @@ func InstallGuard(ctx context.Context, cfg *rest.Config, log io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := normalizeBinding(ctx, dyn, binding); err != nil {
+	if err := resetSpecs(ctx, dyn, policy, binding); err != nil {
 		return err
 	}
 	for _, o := range []*unstructured.Unstructured{policy, binding} {
@@ -85,36 +91,107 @@ func InstallGuard(ctx context.Context, cfg *rest.Config, log io.Writer) error {
 	return nil
 }
 
-// normalizeBinding sets the policy name and the actions of a binding that exists to what the
-// manifest says, before the apply. validationActions is a set: a server-side apply adds Deny to a
-// Warn that someone put there by hand (a field of another manager), and the API server refuses the
-// pair ("must not contain both Deny and Warn"), so up would fail on a host whose binding was
-// weakened. The binding is replaced in place, never deleted, so no moment is left without it.
-func normalizeBinding(ctx context.Context, dyn dynamic.Interface, want *unstructured.Unstructured) error {
-	cur, err := dyn.Resource(guardBindingGVR).Get(ctx, want.GetName(), metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("read the ValidatingAdmissionPolicyBinding %s: %w", want.GetName(), err)
-	}
-	wantName, _, _ := unstructured.NestedString(want.Object, "spec", "policyName")
-	wantActions, _, _ := unstructured.NestedStringSlice(want.Object, "spec", "validationActions")
-	gotName, _, _ := unstructured.NestedString(cur.Object, "spec", "policyName")
-	gotActions, _, _ := unstructured.NestedStringSlice(cur.Object, "spec", "validationActions")
-	if gotName == wantName && slices.Equal(gotActions, wantActions) {
-		return nil
-	}
-	if err := unstructured.SetNestedField(cur.Object, wantName, "spec", "policyName"); err != nil {
-		return err
-	}
-	if err := unstructured.SetNestedStringSlice(cur.Object, wantActions, "spec", "validationActions"); err != nil {
-		return err
-	}
-	if _, err := dyn.Resource(guardBindingGVR).Update(ctx, cur, metav1.UpdateOptions{FieldManager: fieldManager}); err != nil {
-		return fmt.Errorf("reset the ValidatingAdmissionPolicyBinding %s to the manifest's: %w", want.GetName(), err)
+// resetSpecs replaces the spec of each guard object that exists with the manifest's, whole, before the
+// apply, so that what was added by hand does not survive a start. Server-side apply alone keeps a field
+// the manifest does not mention when another manager owns it: a Warn in validationActions, a set that
+// then holds Deny beside it and is refused ("must not contain both Deny and Warn"), or a
+// matchResources.objectSelector that the CRDs do not satisfy, which leaves a binding that up reports and
+// status finds, and that matches nothing. The objects are replaced in place, never deleted, so no moment
+// is left without them. A conflicting write (the policy's status controller writes too) is retried.
+func resetSpecs(ctx context.Context, dyn dynamic.Interface, objs ...*unstructured.Unstructured) error {
+	for _, want := range objs {
+		gvr := guardBindingGVR
+		if want.GetKind() == "ValidatingAdmissionPolicy" {
+			gvr = guardPolicyGVR
+		}
+		spec, _, err := unstructured.NestedMap(want.Object, "spec")
+		if err != nil {
+			return fmt.Errorf("the manifest's %s %s: %w", want.GetKind(), want.GetName(), err)
+		}
+		err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			cur, err := dyn.Resource(gvr).Get(ctx, want.GetName(), metav1.GetOptions{})
+			if apierrors.IsNotFound(err) {
+				return nil // the apply creates it
+			}
+			if err != nil {
+				return err
+			}
+			if got, _, _ := unstructured.NestedMap(cur.Object, "spec"); reflect.DeepEqual(got, spec) {
+				return nil
+			}
+			if err := unstructured.SetNestedMap(cur.Object, runtime.DeepCopyJSON(spec), "spec"); err != nil {
+				return err
+			}
+			_, err = dyn.Resource(gvr).Update(ctx, cur, metav1.UpdateOptions{FieldManager: fieldManager})
+			return err
+		})
+		if err != nil {
+			return fmt.Errorf("set the %s %s to the manifest's: %w", want.GetKind(), want.GetName(), err)
+		}
 	}
 	return nil
+}
+
+// FrameworkGroup is the API group of the framework's CRDs, which the guard protects: the group the
+// manifest's rule names. A test compares the two.
+const FrameworkGroup = "hpcburst.groundnuty.github.io"
+
+// guardEnforcementTimeout bounds WaitGuardEnforced.
+const guardEnforcementTimeout = 60 * time.Second
+
+var crdGVR = schemaGVR("apiextensions.k8s.io", "v1", "customresourcedefinitions")
+
+// WaitGuardEnforced returns once the API server refuses a delete of a framework CRD, so that a delete
+// right after up is refused. Admission learns of a policy and its binding after the objects exist, and
+// the apply returns before that. The proof is a server-side dry-run delete of one framework CRD, which
+// runs admission and removes nothing, and its refusal must be the guard's own. It is bounded, with an
+// error naming the CRD if the API server never refuses. With no framework CRD yet there is nothing to
+// delete and nothing to probe, and it says so and returns.
+func WaitGuardEnforced(ctx context.Context, cfg *rest.Config, log io.Writer) error {
+	dyn, _, err := newApplier(cfg)
+	if err != nil {
+		return err
+	}
+	return waitGuardEnforced(ctx, dyn, guardEnforcementTimeout, 100*time.Millisecond, log)
+}
+
+func waitGuardEnforced(ctx context.Context, dyn dynamic.Interface, timeout, interval time.Duration, log io.Writer) error {
+	list, err := dyn.Resource(crdGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("list the CustomResourceDefinitions to probe the guard with: %w", err)
+	}
+	var names []string
+	for _, o := range list.Items {
+		if g, _, _ := unstructured.NestedString(o.Object, "spec", "group"); g == FrameworkGroup {
+			names = append(names, o.GetName())
+		}
+	}
+	if len(names) == 0 {
+		logf(log, "no CustomResourceDefinition of %s exists yet, so there is nothing to probe the guard with; it protects them once they exist", FrameworkGroup)
+		return nil
+	}
+	slices.Sort(names)
+	name := names[0]
+	deadline := time.Now().Add(timeout)
+	var last error
+	for {
+		err := dyn.Resource(crdGVR).Delete(ctx, name, metav1.DeleteOptions{DryRun: []string{metav1.DryRunAll}})
+		if apierrors.IsForbidden(err) && strings.Contains(err.Error(), "refusing to delete the custom resource definition "+name) {
+			logf(log, "the API server refuses deleting %s: the guard is enforced", name)
+			return nil
+		}
+		last = err
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			if last == nil {
+				last = errors.New("the dry-run delete was accepted")
+			}
+			return fmt.Errorf("the guard was applied, but the API server still did not refuse a delete of the custom resource definition %s after %s (%v)", name, timeout, last)
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(interval):
+		}
+	}
 }
 
 // RemoveGuard deletes the binding, then the policy. An object that is already gone is not an
@@ -166,11 +243,24 @@ func CheckGuard(ctx context.Context, cfg *rest.Config) (*GuardState, error) {
 }
 
 func checkGuard(ctx context.Context, dyn dynamic.Interface) (*GuardState, error) {
+	wantPolicy, wantBinding, err := guardObjects()
+	if err != nil {
+		return nil, err
+	}
 	var missing []string
-	if _, err := dyn.Resource(guardPolicyGVR).Get(ctx, GuardName, metav1.GetOptions{}); apierrors.IsNotFound(err) {
+	p, err := dyn.Resource(guardPolicyGVR).Get(ctx, GuardName, metav1.GetOptions{})
+	switch {
+	case apierrors.IsNotFound(err):
 		missing = append(missing, "the ValidatingAdmissionPolicy "+GuardName+" is not there")
-	} else if err != nil {
+	case err != nil:
 		return nil, fmt.Errorf("read the ValidatingAdmissionPolicy %s: %w", GuardName, err)
+	default:
+		// The server fills defaults in the nested parts of a policy, so only its top-level fields are
+		// compared: one the manifest does not set (matchConditions, paramKind, variables) can switch the
+		// policy off.
+		if extra := extraKeys(p, wantPolicy); len(extra) > 0 {
+			missing = append(missing, fmt.Sprintf("the policy has spec fields the manifest does not set (%s), which can switch it off", strings.Join(extra, ", ")))
+		}
 	}
 	b, err := dyn.Resource(guardBindingGVR).Get(ctx, GuardName, metav1.GetOptions{})
 	switch {
@@ -182,14 +272,33 @@ func checkGuard(ctx context.Context, dyn dynamic.Interface) (*GuardState, error)
 		if name, _, _ := unstructured.NestedString(b.Object, "spec", "policyName"); name != GuardName {
 			missing = append(missing, fmt.Sprintf("the binding names the policy %q, want %q", name, GuardName))
 		}
-		if actions, _, _ := unstructured.NestedStringSlice(b.Object, "spec", "validationActions"); !slices.Contains(actions, "Deny") {
-			missing = append(missing, fmt.Sprintf("the binding's validationActions %v do not include Deny", actions))
+		if actions, _, _ := unstructured.NestedStringSlice(b.Object, "spec", "validationActions"); !slices.Equal(actions, []string{"Deny"}) {
+			missing = append(missing, fmt.Sprintf("the binding's validationActions %v are not just Deny", actions))
+		}
+		// The binding's spec is the manifest's, whole: a match filter or a parameter reference narrows it,
+		// and a filter the CRDs do not satisfy leaves a binding that exists and matches nothing.
+		if extra := extraKeys(b, wantBinding); len(extra) > 0 {
+			missing = append(missing, fmt.Sprintf("the binding has spec fields the manifest does not set (%s), which can narrow it to nothing", strings.Join(extra, ", ")))
 		}
 	}
 	if len(missing) > 0 {
 		return &GuardState{Detail: strings.Join(missing, "; ")}, nil
 	}
 	return &GuardState{Present: true}, nil
+}
+
+// extraKeys names the top-level spec fields of got that want does not have, sorted.
+func extraKeys(got, want *unstructured.Unstructured) []string {
+	g, _, _ := unstructured.NestedMap(got.Object, "spec")
+	w, _, _ := unstructured.NestedMap(want.Object, "spec")
+	var extra []string
+	for k := range g {
+		if _, ok := w[k]; !ok {
+			extra = append(extra, "spec."+k)
+		}
+	}
+	slices.Sort(extra)
+	return extra
 }
 
 // GuardOptions are the inputs of RemoveCRDGuard.

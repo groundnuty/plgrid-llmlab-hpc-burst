@@ -248,14 +248,6 @@ func Status(ctx context.Context, o StatusOptions) (*StatusReport, error) {
 			rep.GC = ptr(true)
 		}
 	}
-	// Read-only, like the readiness question: whether the guard is there, and what is missing if not.
-	if rep.Readyz != nil && *rep.Readyz {
-		if gs, err := CheckGuard(ctx, cfg); err != nil {
-			bad("the CRD deletion guard could not be checked: %v", err)
-		} else {
-			rep.CRDGuard = gs
-		}
-	}
 	// The builds are staged by the controllers, so a host without them has none to check.
 	if st.Controllers != nil {
 		checkBuildsInStatus(ctx, cfg, l.host(st.Ports).AgentBuildsDir(), rep, bad)
@@ -270,7 +262,24 @@ func Status(ctx context.Context, o StatusOptions) (*StatusReport, error) {
 		}
 	}
 	final()
+	// Last, so that it is asked only of a host that is healthy after every other check.
+	statusGuard(ctx, cfg, rep, bad)
 	return rep, nil
+}
+
+// statusGuard sets rep.CRDGuard from the API server, and only for a host judged healthy by every other
+// check: an unhealthy host is not asked, and reports nothing, as the ruling says (`@hpc-burst-science-agent`,
+// 2 Nov 2026, for #242). An absent guard changes nothing about the host's health; a failure to ask does.
+func statusGuard(ctx context.Context, cfg *rest.Config, rep *StatusReport, bad func(string, ...any)) {
+	if rep.Health != Healthy || rep.Readyz == nil || !*rep.Readyz {
+		return
+	}
+	gs, err := CheckGuard(ctx, cfg)
+	if err != nil {
+		bad("the CRD deletion guard could not be checked: %v", err)
+		return
+	}
+	rep.CRDGuard = gs
 }
 
 // checkBuildsInStatus sets rep.AgentBuilds from the API server's PlatformProfiles, and makes every
