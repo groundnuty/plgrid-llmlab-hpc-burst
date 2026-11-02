@@ -12,7 +12,7 @@ import (
 // The pass criteria. Each function returns the failed checks as fixed labels
 // (no job ID, host or account can be in one) and nothing when the run passes.
 // Each check quotes the criterion it enforces, with the file and line at main's
-// 84341d8 (2 Nov 2026); docs/alpha-runbook.md lists the same quotes.
+// 9dce393 (2 Nov 2026); docs/alpha-runbook.md lists the same quotes.
 
 // Hour is S1's stream length: "a completed stream of at least 3600 s".
 const Hour = time.Hour
