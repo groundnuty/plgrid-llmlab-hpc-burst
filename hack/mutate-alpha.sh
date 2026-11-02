@@ -93,7 +93,13 @@ mutants=(
   'verdict.go@@gap >= 0 && gap <= MaxChainGap@@gap > 0 && gap <= MaxChainGap'
   'verdict.go@@gap >= 0 && gap <= MaxChainGap@@gap >= 0 && gap < MaxChainGap'
   'verdict.go@@case !r.UnderLoad || r.Tokens <= 0:@@case !r.UnderLoad && r.Tokens <= 0:'
-  'rows.go@@return MinLease() - (MaxRequestDuration + DrainMargin) - TunnelHour@@return MinLease() - (MaxRequestDuration + DrainMargin) + TunnelHour'
+  'rows.go@@return lease - (MaxRequestDuration + DrainMargin) - TunnelHour@@return lease - (MaxRequestDuration + DrainMargin) + TunnelHour'
+  'rows.go@@if measured < ShortLeaseRule {@@if measured <= ShortLeaseRule {'
+  'rows.go@@lease < MinLease() || lease > MaxTunnelLease@@lease <= MinLease() || lease > MaxTunnelLease'
+  'rows.go@@lease < MinLease() || lease > MaxTunnelLease@@lease < MinLease() || lease >= MaxTunnelLease'
+  'rows.go@@lease%time.Minute != 0@@false'
+  'rows.go@@r.SlotHold = lease@@r.SlotHold = r.SlotHold'
+  'config.go@@(strings.HasPrefix(row.Name, "tunnel-hour-") && getenv(envDry) != "1")@@false'
 )
 
 killed=0 survived=0 broken=0

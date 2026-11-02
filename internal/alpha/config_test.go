@@ -18,6 +18,9 @@ func liveSettings(row string) map[string]string {
 		envMode: "direct", envAddr: "gateway.example:29227", envPartition: r.Partition, envQOS: r.QOS,
 		envGPUs: "1", envPending: "7200",
 	}
+	if strings.HasPrefix(row, "tunnel-hour-") {
+		m[envLease] = "137"
+	}
 	return m
 }
 
@@ -164,5 +167,42 @@ func TestTheRecordDirectoryMustBePrivate(t *testing.T) {
 	}
 	if fi, _ := os.Stat(fresh); fi.Mode().Perm() != 0o700 {
 		t.Errorf("a new directory has mode %v", fi.Mode().Perm())
+	}
+}
+
+// A tunnel row's lease is the owner's choice (LIVE_TUNNEL_LEASE_MINUTES, passed as HPCBURST_ALPHA_LEASE_MINUTES): the
+// live run needs it, the dry run may leave it out, and only a tunnel row takes one.
+func TestATunnelRowTakesItsLeaseFromTheSettings(t *testing.T) {
+	m := liveSettings("tunnel-hour-helios")
+	cfg, _, err := ConfigFromEnv(env(m), "tunnel-hour-helios")
+	if err != nil || cfg.Row.Lease != 137*time.Minute || cfg.Row.SlotHold != 137*time.Minute || cfg.Row.Plan().LeaseLimit != 137*time.Minute {
+		t.Fatalf("137: %+v %v", cfg.Row, err)
+	}
+	m[envLease] = "106"
+	cfg, _, err = ConfigFromEnv(env(m), "tunnel-hour-helios")
+	if err != nil || cfg.Row.Lease != MinLease() || cfg.Row.SlotHold != MinLease() || cfg.Row.Plan().LeaseLimit != MinLease() {
+		t.Fatalf("106: %+v %v", cfg.Row, err)
+	}
+	for name, v := range map[string]string{"under the shortest": "105", "over the longest": "241", "text": "2h17m", "empty": ""} {
+		m := liveSettings("tunnel-hour-athena")
+		m[envLease] = v
+		if _, _, err := ConfigFromEnv(env(m), "tunnel-hour-athena"); err == nil || !strings.Contains(err.Error(), envLease) {
+			t.Errorf("%s (%q): err %v, want one naming %s", name, v, err, envLease)
+		}
+	}
+	// Another row refuses one rather than ignoring it.
+	m = liveSettings("alpha-athena-handover")
+	m[envLease] = "137"
+	if _, _, err := ConfigFromEnv(env(m), "alpha-athena-handover"); err == nil || !strings.Contains(err.Error(), "only a tunnel row takes a lease") {
+		t.Errorf("a handover row with a lease: err %v", err)
+	}
+	// A dry run takes the row's default, or the value.
+	dry := map[string]string{envRow: "tunnel-hour-helios", envOut: "/o", envDry: "1"}
+	if cfg, _, err := ConfigFromEnv(env(dry), "tunnel-hour-helios"); err != nil || cfg.Row.Lease != DefaultTunnelLease() {
+		t.Errorf("dry default: %v %v", cfg.Row.Lease, err)
+	}
+	dry[envLease] = "106"
+	if cfg, _, err := ConfigFromEnv(env(dry), "tunnel-hour-helios"); err != nil || cfg.Row.Lease != MinLease() {
+		t.Errorf("dry 106: %v %v", cfg.Row.Lease, err)
 	}
 }

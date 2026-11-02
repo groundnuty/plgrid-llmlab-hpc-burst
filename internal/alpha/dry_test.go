@@ -42,7 +42,7 @@ const (
 var dryFaults = map[string][]string{
 	"handover":  {"cut", "no-stream", "two-restarts", "no-restart", "no-handover", "late-successor", "wrong-partition", "untagged", "unattributed", "adds-helios", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "no-responses"},
 	"nooverlap": {"nocap", "nogap", "noslot", "cut", "no-stream", "late-submit", "untagged", "wrong-partition", "adds-athena", "default-lease", "short-lease", "no-release-when-idle", "duplicate-tag", "extra-allocation", "two-restarts", "no-restart"},
-	"tunnel":    {"short", "cut", "no-rate", "short-rate", "wrong-direction", "untagged", "wrong-partition", "adds-other-cluster", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "past-deadline", "past-drain", "no-drain-start", "stream-cut-error", "reconnect", "disconnected", "sparse-samples", "late-first-sample", "no-concurrency", "slow-streams", "no-idle-gap", "no-long-stream", "no-back-to-back", "no-load-rate"},
+	"tunnel":    {"short", "cut", "no-rate", "short-rate", "wrong-direction", "untagged", "wrong-partition", "adds-other-cluster", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "past-deadline", "past-drain", "no-drain-start", "stream-cut-error", "reconnect", "disconnected", "sparse-samples", "late-first-sample", "no-concurrency", "slow-streams", "no-idle-gap", "no-long-stream", "no-back-to-back", "no-load-rate", "slow-start"},
 }
 
 type drySteps struct {
@@ -402,9 +402,13 @@ func (d *drySteps) TunnelHour(_ context.Context, p Plan) (TunnelHourObs, error) 
 	j := d.running(id)
 	started := *j.StartTime
 	d.extras(p, tag)
-	// The Instance becomes ready 20 minutes in, and its proxy registers with frps then. The drain starts a drain
-	// window before the lease ends.
-	d.tick(20 * time.Minute)
+	// The Instance becomes ready 20 minutes in, and its proxy registers with frps then (35 minutes under the
+	// slow-start variant). The drain starts a drain window before the lease ends.
+	startToReady := 20 * time.Minute
+	if d.fault("slow-start") {
+		startToReady = 35 * time.Minute
+	}
+	d.tick(startToReady)
 	ready := d.now()
 	session := ready.Add(-10 * time.Second)
 	drain := started.Add(d.deployment().LeaseLimit - (MaxRequestDuration + DrainMargin))

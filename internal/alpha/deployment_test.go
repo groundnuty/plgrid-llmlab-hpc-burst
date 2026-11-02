@@ -3,6 +3,7 @@ package alpha
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -60,25 +61,87 @@ func TestTheShortestLeaseIsJustAboveThePartitionTooShortMinimum(t *testing.T) {
 		})
 	}
 	for _, r := range Rows() {
-		if r.Lease != MinLease() {
-			t.Errorf("%s: lease %s, want the shortest, %s", r.Name, r.Lease, MinLease())
+		want := MinLease()
+		if strings.HasPrefix(r.Name, "tunnel-hour-") {
+			want = DefaultTunnelLease()
+		}
+		if r.Lease != want {
+			t.Errorf("%s: lease %s, want %s", r.Name, r.Lease, want)
 		}
 	}
 }
 
-// The tunnel rows keep the short lease (the science agent's ruling of 2 Nov 2026), so the hour of traffic has room
-// only if the Instance is ready within LatestReady of its job's start: by hand, 1 h 46 min of lease, less the
-// 15-minute drain window (5 min + 10 min), less the 61 minutes of traffic, is 30 minutes. A slower start fails the
-// row with "the hour ended after the Instance's drain start", and the row can be run again.
-func TestTheTunnelHourFitsIfTheInstanceIsReadyWithinThirtyMinutes(t *testing.T) {
-	if LatestReady() != 30*time.Minute {
-		t.Errorf("latest ready %s, want 30m0s", LatestReady())
+// The tunnel rows' lease is chosen by the GH200 measurement (issue #94, comment 6557821833): the second real-engine
+// run's job started at 11:42:26Z and its first Instance had qualified and warmed up by 12:06:05Z, which by hand is
+// 23 min 39 s. That is over the 20 minutes under which the short lease is kept, so the default is the lease that
+// holds a start of up to health.startTimeout: 1 h + 61 min + the 15-minute drain window + 1 minute, 2 h 17 min, by hand.
+func TestTheTunnelLeaseFollowsTheMeasurement(t *testing.T) {
+	start := time.Date(2026, 11, 1, 11, 42, 26, 0, time.UTC)
+	ready := time.Date(2026, 11, 1, 12, 6, 5, 0, time.UTC)
+	if got := ready.Sub(start); got != MeasuredStartToReady {
+		t.Errorf("the measurement is %s in the posts and %s in the code", got, MeasuredStartToReady)
 	}
-	for _, name := range []string{"tunnel-hour-helios", "tunnel-hour-athena"} {
-		r, _ := RowByName(name)
-		if r.Lease != MinLease() {
-			t.Errorf("%s: lease %s, want the short lease %s", name, r.Lease, MinLease())
+	if MeasuredStartToReady != 23*time.Minute+39*time.Second {
+		t.Errorf("the measurement is %s, want 23m39s by hand", MeasuredStartToReady)
+	}
+	if TunnelLease() != 137*time.Minute || DefaultTunnelLease() != 137*time.Minute {
+		t.Errorf("tunnel lease %s, default %s, want 2h17m0s", TunnelLease(), DefaultTunnelLease())
+	}
+	// The rule at its boundary.
+	for _, c := range []struct {
+		measured time.Duration
+		want     time.Duration
+	}{
+		{19*time.Minute + 59*time.Second, MinLease()},
+		{20 * time.Minute, TunnelLease()},
+		{23*time.Minute + 39*time.Second, TunnelLease()},
+	} {
+		if got := tunnelLeaseFor(c.measured); got != c.want {
+			t.Errorf("a measured %s gives a lease of %s, want %s", c.measured, got, c.want)
 		}
+	}
+	// What each lease allows: by hand, the lease less the 15-minute drain window less the 61 minutes of traffic.
+	if LatestReady(TunnelLease()) != 61*time.Minute || LatestReady(MinLease()) != 30*time.Minute {
+		t.Errorf("latest ready %s under the default and %s under the short lease, want 1h1m0s and 30m0s", LatestReady(TunnelLease()), LatestReady(MinLease()))
+	}
+	if LatestReady(TunnelLease()) < MeasuredStartToReady {
+		t.Error("the default lease does not hold the measured start")
+	}
+}
+
+func TestTheOwnerMayChooseAnotherTunnelLease(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		row   string
+		lease time.Duration
+		ok    bool
+	}{
+		{"the short lease", "tunnel-hour-helios", MinLease(), true},
+		{"a minute under the short lease", "tunnel-hour-helios", MinLease() - time.Minute, false},
+		{"the longest allowed", "tunnel-hour-athena", MaxTunnelLease, true},
+		{"a minute over the longest", "tunnel-hour-athena", MaxTunnelLease + time.Minute, false},
+		{"a part of a minute", "tunnel-hour-helios", MinLease() + time.Second, false},
+		{"a handover row", "alpha-athena-handover", MinLease(), false},
+		{"a no-overlap row", "alpha-helios-nooverlap", MinLease(), false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r, _ := RowByName(c.row)
+			got, err := WithTunnelLease(r, c.lease)
+			if (err == nil) != c.ok {
+				t.Fatalf("err %v, want ok %t", err, c.ok)
+			}
+			if c.ok {
+				if got.Lease != c.lease || got.Plan().LeaseLimit != c.lease {
+					t.Errorf("lease %s, plan %s, want %s", got.Lease, got.Plan().LeaseLimit, c.lease)
+				}
+				// The slot hold follows the lease on Helios, and a row with no slot has none.
+				if wantHold := map[bool]time.Duration{true: c.lease, false: 0}[r.QOS != ""]; got.SlotHold != wantHold {
+					t.Errorf("slot hold %s, want %s", got.SlotHold, wantHold)
+				}
+			} else if got.Lease != r.Lease {
+				t.Errorf("a refused lease changed the row to %s", got.Lease)
+			}
+		})
 	}
 }
 
@@ -99,8 +162,8 @@ func TestDeploymentBoundaries(t *testing.T) {
 		{"a lease a minute below the lead", "alpha-athena-handover", func(d *DeploymentSpec) { d.LeaseLimit = Lead() - time.Minute }, "not longer than the lead"},
 		{"the shortest lease", "alpha-athena-handover", func(d *DeploymentSpec) { d.LeaseLimit = Lead() + time.Minute }, ""},
 		{"a lease a minute over the shortest", "alpha-athena-handover", func(d *DeploymentSpec) { d.LeaseLimit = MinLease() + time.Minute }, "not the row's shortest lease"},
-		{"a longer lease on a tunnel row", "tunnel-hour-athena", func(d *DeploymentSpec) { d.LeaseLimit = 2*time.Hour + 17*time.Minute }, "not the row's shortest lease"},
-		{"the short lease on a tunnel row", "tunnel-hour-athena", func(d *DeploymentSpec) { d.LeaseLimit = MinLease() }, ""},
+		{"the short lease on a tunnel row, which is not its default", "tunnel-hour-athena", func(d *DeploymentSpec) { d.LeaseLimit = MinLease() }, "not the row's shortest lease"},
+		{"the tunnel lease on a tunnel row", "tunnel-hour-athena", func(d *DeploymentSpec) { d.LeaseLimit = TunnelLease() }, ""},
 		{"a shorter request deadline than the row's", "tunnel-hour-athena", func(d *DeploymentSpec) { d.MaxRequestDuration = 4 * time.Minute }, "maxRequestDuration is not the row's"},
 		{"the default drain window's request deadline", "tunnel-hour-athena", func(d *DeploymentSpec) { d.MaxRequestDuration = 2 * time.Hour }, "maxRequestDuration is not the row's"},
 		{"no ReleaseWhenIdle", "alpha-helios-nooverlap", func(d *DeploymentSpec) { d.ReleaseWhenIdle = false }, "lacks ReleaseWhenIdle"},

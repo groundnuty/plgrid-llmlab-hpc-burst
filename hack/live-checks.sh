@@ -42,6 +42,8 @@
 #   LIVE_DIALHOME_ADDR           host:port of the dial-home route, as the compute nodes see it
 #   LIVE_DIALHOME_KEY            ssh mode only: the restricted dial-home key file, mode 600
 #   LIVE_BIN_DIR                 absolute path of the directory with k3s-1.36.5/ and the pinned frp
+#   LIVE_TUNNEL_LEASE_MINUTES    optional, the tunnel rows' lease in minutes, 106 to 240 (default 137, the shape below): the owner's
+#                                choice when giving the go; the shape, the hold note and the test follow it
 #   LIVE_OWNER_GO_HELIOS_NOW     today's UTC date (YYYY-MM-DD), once the owner has said yes to the run: the rows that hold
 #                                QOS now's GPU for hours (alpha-helios-nooverlap, tunnel-hour-helios) refuse without it
 # Cluster calls go through the ssh aliases helios and athena, one at a time per
@@ -112,8 +114,8 @@ conformance-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|4
 real-engine|helios|-|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|00:57:00|75|-C memfs
 alpha-athena-handover|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|01:46:00|150|-
 alpha-helios-nooverlap|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|01:46:00|200|-C memfs
-tunnel-hour-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|01:46:00|130|-C memfs
-tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|01:46:00|130|-
+tunnel-hour-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|02:17:00|152|-C memfs
+tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|02:17:00|152|-
 gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|25|-
 gpu-accounting-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|00:05:00|25|-
 # END CLUSTER SHAPES
@@ -157,9 +159,36 @@ owner_go_table() {
   cat <<'TABLE'
 # BEGIN OWNER GO
 alpha-helios-nooverlap|LIVE_OWNER_GO_HELIOS_NOW|160
-tunnel-hour-helios|LIVE_OWNER_GO_HELIOS_NOW|110
+tunnel-hour-helios|LIVE_OWNER_GO_HELIOS_NOW|140
 # END OWNER GO
 TABLE
+}
+
+# The tunnel rows' lease is a parameter of the run (LIVE_TUNNEL_LEASE_MINUTES), so the owner can choose when giving
+# the go. The shape rows above hold the default, 2 h 17 min (the GH200 measurement of start to ready, 23 min 39 s,
+# is over the 20 minutes under which the short lease, 1 h 46 min, would be kept; internal/alpha, rows.go). The
+# shortest is the lead an Instance needs plus a minute (HBEP-7; internal/lifecycle/timelimit.go), 106 minutes.
+TUNNEL_LEASE_MIN=106
+TUNNEL_LEASE_MAX=240
+
+# apply_tunnel_lease: validates the setting and makes the shape, the timeout and the hold of the tunnel rows
+# follow it; run before the settings are checked, so that a refusal quotes the hold it is about. Returns 1 for
+# a value that is not whole minutes in range.
+apply_tunnel_lease() {
+  local v=${S[LIVE_TUNNEL_LEASE_MINUTES]:-} name
+  [ -n "$v" ] || return 0
+  if ! [[ $v =~ ^[0-9]+$ ]] || [ "$v" -lt "$TUNNEL_LEASE_MIN" ] || [ "$v" -gt "$TUNNEL_LEASE_MAX" ]; then
+    say "live-checks: LIVE_TUNNEL_LEASE_MINUTES must be whole minutes from $TUNNEL_LEASE_MIN to $TUNNEL_LEASE_MAX"
+    return 1
+  fi
+  for name in "${NAMES[@]}"; do
+    case $name in
+      tunnel-hour-*)
+        TLIMIT[$name]=$(printf '%02d:%02d:00' $((v / 60)) $((v % 60)))
+        TMIN[$name]=$((v + 15))
+        [ -z "${OGSET[$name]:-}" ] || OGMIN[$name]=$(((v + 9) / 10 * 10)) ;;
+    esac
+  done
 }
 
 # A bare name that stands for several rows, one per cluster, run one after the other (issue #194).
@@ -252,7 +281,7 @@ load_settings() {
     [ "$k" != "$line" ] || continue
     v=${v%\"}; v=${v#\"}; v=${v%\'}; v=${v#\'}
     case $k in
-      LIVE_OUT_DIR|LIVE_LOCK_DIR|LIVE_BUILD_LOCK|LIVE_LLMLAB_CREDENTIALS|LIVE_LLMLAB_MODEL|LIVE_CONF_CREDENTIALS_HELIOS|LIVE_CONF_CREDENTIALS_ATHENA|ACCOUNT_HELIOS_CPU|ACCOUNT_HELIOS_GH200|ACCOUNT_ATHENA_A100|LIVE_DIALHOME_MODE|LIVE_DIALHOME_ADDR|LIVE_DIALHOME_KEY|LIVE_BIN_DIR|LIVE_OWNER_GO_HELIOS_NOW)
+      LIVE_OUT_DIR|LIVE_LOCK_DIR|LIVE_BUILD_LOCK|LIVE_LLMLAB_CREDENTIALS|LIVE_LLMLAB_MODEL|LIVE_CONF_CREDENTIALS_HELIOS|LIVE_CONF_CREDENTIALS_ATHENA|ACCOUNT_HELIOS_CPU|ACCOUNT_HELIOS_GH200|ACCOUNT_ATHENA_A100|LIVE_DIALHOME_MODE|LIVE_DIALHOME_ADDR|LIVE_DIALHOME_KEY|LIVE_BIN_DIR|LIVE_OWNER_GO_HELIOS_NOW|LIVE_TUNNEL_LEASE_MINUTES)
         S[$k]=$v ;;
     esac
   done 2>/dev/null < "$HPCBURST_LIVE_SETTINGS"
@@ -608,7 +637,7 @@ env_conformance() {
 env_alpha() {
   local n=$1 host=${HOST[$1]} up
   up=$(printf '%s' "$host" | tr a-z A-Z)
-  unset HPCBURST_ALPHA_DRY HPCBURST_ALPHA_DRY_FAULT HPCBURST_ALPHA_DRY_ROOT
+  unset HPCBURST_ALPHA_DRY HPCBURST_ALPHA_DRY_FAULT HPCBURST_ALPHA_DRY_ROOT HPCBURST_ALPHA_LEASE_MINUTES
   export HPCBURST_ALPHA_ROW=$n HPCBURST_ALPHA_PROFILE=${PROFILE[$n]} HPCBURST_ALPHA_PARTITION=${PARTITION[$n]}
   export HPCBURST_ALPHA_GPUS=${GPUS[$n]} HPCBURST_ALPHA_CPUS=${CPUS[$n]} HPCBURST_ALPHA_MEMORY=${MEM[$n]}
   export HPCBURST_ALPHA_ACCOUNT=${S[${ACCTKEY[$n]}]} HPCBURST_ALPHA_CREDENTIALS=${S[LIVE_CONF_CREDENTIALS_$up]}
@@ -616,6 +645,10 @@ env_alpha() {
   export HPCBURST_ALPHA_OUT=$REC_DIR HPCBURST_ALPHA_BIN_DIR=${S[LIVE_BIN_DIR]} HPCBURST_ALPHA_BUILD_DIR=${ALPHA_BUILD_DIR:-}
   export HPCBURST_ALPHA_DIALHOME_MODE=${S[LIVE_DIALHOME_MODE]} HPCBURST_ALPHA_DIALHOME_ADDR=${S[LIVE_DIALHOME_ADDR]}
   export HPCBURST_ALPHA_PENDING_MAX_SECONDS=${LIVE_PENDING_MAX_SECONDS:-7200}
+  # A tunnel row's lease, in minutes, as the shape holds it (after LIVE_TUNNEL_LEASE_MINUTES): the test judges that value.
+  case $n in
+    tunnel-hour-*) local lh lm; IFS=: read -r lh lm _ <<<"${TLIMIT[$n]}"; export HPCBURST_ALPHA_LEASE_MINUTES=$((10#$lh * 60 + 10#$lm)) ;;
+  esac
   unset HPCBURST_ALPHA_QOS HPCBURST_ALPHA_DIALHOME_KEY
   [ "${QOS[$n]}" = - ] || export HPCBURST_ALPHA_QOS=${QOS[$n]}
   [ "${S[LIVE_DIALHOME_MODE]}" != ssh ] || export HPCBURST_ALPHA_DIALHOME_KEY=${S[LIVE_DIALHOME_KEY]}
@@ -1063,6 +1096,7 @@ for name in "${REQUESTED[@]}"; do
   [ "${STATUS[$name]}" = ready ] || { say "live-checks: $name is pending and cannot run yet"; exit 2; }
 done
 load_settings || exit 3
+case " ${REQUESTED[*]} " in *" tunnel-hour-"*) apply_tunnel_lease || exit 3 ;; esac
 check_settings "${REQUESTED[@]}" || exit 3
 OUT=${S[LIVE_OUT_DIR]}
 # Everything private is mode 600 (directories 700), and a tool's own diagnostics, which can name a path,

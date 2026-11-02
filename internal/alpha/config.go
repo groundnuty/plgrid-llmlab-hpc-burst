@@ -29,6 +29,7 @@ const (
 	envAddr       = "HPCBURST_ALPHA_DIALHOME_ADDR"
 	envKey        = "HPCBURST_ALPHA_DIALHOME_KEY"
 	envPending    = "HPCBURST_ALPHA_PENDING_MAX_SECONDS"
+	envLease      = "HPCBURST_ALPHA_LEASE_MINUTES"
 )
 
 // liveEnv are the settings only a live run has. A dry run refuses to start
@@ -84,6 +85,18 @@ func ConfigFromEnv(getenv func(string) string, mine ...string) (cfg Config, skip
 	cfg.Row = row
 	cfg.Out = getenv(envOut)
 	var bad []string
+	// A tunnel row's lease is the owner's choice, in whole minutes: the script always passes it for a live run.
+	// A dry run may leave it out, for the row's default.
+	if v := getenv(envLease); v != "" || (strings.HasPrefix(row.Name, "tunnel-hour-") && getenv(envDry) != "1") {
+		m, err := strconv.Atoi(v)
+		if err != nil {
+			bad = append(bad, envLease+" must be a whole number of minutes")
+		} else if r, err := WithTunnelLease(row, time.Duration(m)*time.Minute); err != nil {
+			bad = append(bad, envLease+": "+err.Error())
+		} else {
+			cfg.Row = r
+		}
+	}
 	if !filepath.IsAbs(cfg.Out) {
 		bad = append(bad, envOut+" must be an absolute path")
 	}

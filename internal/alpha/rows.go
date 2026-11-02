@@ -1,6 +1,10 @@
 package alpha
 
-import "time"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
 
 // The deployment timing every stack row applies: the shortest that still shows
 // a handover. An Allocation whose time limit is not longer than the lead an
@@ -41,10 +45,7 @@ func MinLease() time.Duration { return Lead() + time.Minute }
 // 2 Nov 2026): an hour of one tunnel session staying healthy under real use, not
 // one stream an hour long. The front cuts a request at the deployment's
 // routing.maxRequestDuration (HBEP-5, Errors), so every request is within the
-// 5-minute deadline, and the hour is what the tunnel carries across them. The
-// lease is the handover rows' MinLease: the Instance must be ready within
-// LatestReady of its job's start for the hour to end before the drain start, and
-// a slower start fails the row (it can be run again).
+// 5-minute deadline, and the hour is what the tunnel carries across them.
 const (
 	// TunnelHour is how long the traffic runs, S1's 3,660 s: the hour and a minute.
 	TunnelHour = 61 * time.Minute
@@ -68,11 +69,73 @@ const (
 	MaxSampleGap = 2 * time.Minute
 )
 
+// The tunnel rows' lease. The hour of traffic must end before the drain start,
+// a drain window (maxRequestDuration plus drainMargin) before the lease ends, so
+// the Instance must be ready within LatestReady(lease) of its job's start. The
+// science agent's rule (2 Nov 2026): take GH200's measured start-to-ready with the
+// cold SIF build included, and keep the shortest lease (MinLease) if it is under
+// 20 minutes, else TunnelLease. The measurement is the second real-engine run on
+// Helios GH200 (issue #94, comment 6557821833, cold build, empty image cache, a
+// slow Hub): the job started at 11:42:26Z and its first Instance was ready,
+// qualification and warm-up done, at 12:06:05Z, 23 min 39 s later. That is over
+// 20 minutes, so the default is TunnelLease. It is a parameter of the run
+// (LIVE_TUNNEL_LEASE_MINUTES), so the owner can choose the other value when
+// giving the go.
+const (
+	// MeasuredStartToReady is that measurement, 11:42:26Z to 12:06:05Z.
+	MeasuredStartToReady = 23*time.Minute + 39*time.Second
+	// ShortLeaseRule is the measurement under which the short lease is kept.
+	ShortLeaseRule = 20 * time.Minute
+	// MaxTunnelLease is the longest lease the owner may choose for a tunnel row:
+	// a few hours at most (the science agent), not the 12 h maxWall of QOS now.
+	MaxTunnelLease = 4 * time.Hour
+)
+
+// TunnelLease is the default lease of the tunnel rows: the Instance may take the
+// whole health.startTimeout to become ready, then the hour of traffic, then the
+// drain window, and a minute: 2 h 17 min. It is the longest case the profile
+// allows, and the measurement above says a start can take half the short lease.
+func TunnelLease() time.Duration {
+	l := StartTimeout + TunnelHour + MaxRequestDuration + DrainMargin + time.Minute
+	if l < MinLease() {
+		return MinLease()
+	}
+	return l
+}
+
+// DefaultTunnelLease is the lease the measurement chooses: MinLease when the
+// measured start-to-ready is under ShortLeaseRule, else TunnelLease.
+func DefaultTunnelLease() time.Duration { return tunnelLeaseFor(MeasuredStartToReady) }
+
+// tunnelLeaseFor is the rule: under ShortLeaseRule, the shortest lease; else TunnelLease.
+func tunnelLeaseFor(measured time.Duration) time.Duration {
+	if measured < ShortLeaseRule {
+		return MinLease()
+	}
+	return TunnelLease()
+}
+
 // LatestReady is how long after its job starts the Instance may become ready for
-// the hour of traffic to end before the drain start: the lease, less the drain
-// window (maxRequestDuration plus drainMargin), less the hour.
-func LatestReady() time.Duration {
-	return MinLease() - (MaxRequestDuration + DrainMargin) - TunnelHour
+// the hour of traffic to end before the drain start, under the lease.
+func LatestReady(lease time.Duration) time.Duration {
+	return lease - (MaxRequestDuration + DrainMargin) - TunnelHour
+}
+
+// WithTunnelLease is the row with another lease, for the owner's choice. Only a
+// tunnel row takes one, in whole minutes, from MinLease (the lead plus a minute) to
+// MaxTunnelLease; the row's slot hold follows the lease.
+func WithTunnelLease(r Row, lease time.Duration) (Row, error) {
+	if !strings.HasPrefix(r.Name, "tunnel-hour-") {
+		return r, fmt.Errorf("only a tunnel row takes a lease of its own")
+	}
+	if lease%time.Minute != 0 || lease < MinLease() || lease > MaxTunnelLease {
+		return r, fmt.Errorf("a tunnel lease is whole minutes from %s to %s", MinLease(), MaxTunnelLease)
+	}
+	r.Lease = lease
+	if r.SlotHold > 0 {
+		r.SlotHold = lease
+	}
+	return r, nil
 }
 
 // Row is one row of hack/live-checks.sh's table as the test sees it. The
@@ -90,7 +153,8 @@ type Row struct {
 	// GPUs is the number of GPUs of each job.
 	GPUs int
 	// Lease is the leaseLimit of the run's deployment, and so each job's time
-	// limit. The stack rows use MinLease; the accounting rows' job is 5 minutes.
+	// limit. The handover rows use MinLease; the tunnel rows DefaultTunnelLease,
+	// which the owner may change (WithTunnelLease); the accounting rows' job is 5 minutes.
 	Lease time.Duration
 	// Budget is how long the run may take once its first job has started: the
 	// second clock of the run. The first is the wait in the queue.
@@ -143,8 +207,8 @@ var rows = []Row{
 	{Name: "alpha-athena-handover", Cluster: "athena", Partition: "plgrid-gpu-a100", GPUs: 1, Lease: MinLease(), Budget: 150 * time.Minute, MostJobs: 2, PostsTo: "#145 and #93"},
 	// The predecessor, and the successor pending beside it in QOS now.
 	{Name: "alpha-helios-nooverlap", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: MinLease(), Budget: 200 * time.Minute, SlotHold: MinLease() + 45*time.Minute, MostJobs: 2, PostsTo: "#145 and #94"},
-	{Name: "tunnel-hour-helios", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: MinLease(), Budget: 130 * time.Minute, SlotHold: MinLease(), MostJobs: 1, PostsTo: "#145"},
-	{Name: "tunnel-hour-athena", Cluster: "athena", Partition: "plgrid-gpu-a100", GPUs: 1, Lease: MinLease(), Budget: 130 * time.Minute, MostJobs: 1, PostsTo: "#145"},
+	{Name: "tunnel-hour-helios", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: DefaultTunnelLease(), Budget: 150 * time.Minute, SlotHold: DefaultTunnelLease(), MostJobs: 1, PostsTo: "#145"},
+	{Name: "tunnel-hour-athena", Cluster: "athena", Partition: "plgrid-gpu-a100", GPUs: 1, Lease: DefaultTunnelLease(), Budget: 150 * time.Minute, MostJobs: 1, PostsTo: "#145"},
 }
 
 // accountingRows are the rows of the accounting check, which runs in

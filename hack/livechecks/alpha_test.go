@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"syscall"
@@ -27,8 +28,9 @@ func init() {
 // alphaShape is what a row asks of the scheduler, worked out from the issue (#194),
 // HBEP-7's graduation criteria (the partitions and the QOS now), the profiles' per-GPU
 // sizes (Athena A100: 16 CPUs and 125Gi; Helios GH200: 72 CPUs, 120000M as the real-engine run
-// uses) and the lease: 1 h 46 min, the shortest longer than the lead (1 h 45 min with a 5-minute request
-// deadline, profiles/athena.yaml:39), for every stack row; not read from the script's table.
+// uses) and the lease: 1 h 46 min for the handover rows, the shortest longer than the lead (1 h 45 min with a
+// 5-minute request deadline, profiles/athena.yaml:39), and 2 h 17 min for the tunnel rows (a start of up to an
+// hour, the hour, the 15-minute drain window and a minute, by default); not read from the script's table.
 type alphaShape struct {
 	row, test, host, shape string
 	slot                   string // the one-job slot's token, "" for none
@@ -39,8 +41,8 @@ type alphaShape struct {
 var alphaShapes = []alphaShape{
 	{"alpha-athena-handover", "TestAlphaAthenaHandover", "athena", "partition plgrid-gpu-a100, 1 GPU, 16 CPU, 125Gi, time limit 01:46:00, at most 2 jobs at once, each of this shape, no requeue", "", "SEEDACCT-a100", true},
 	{"alpha-helios-nooverlap", "TestAlphaHeliosNoOverlap", "helios", "partition plgrid-gpu-gh200, qos now, 1 GPU, 72 CPU, 120000M, time limit 01:46:00, at most 2 jobs at once, each of this shape, no requeue", "now", "SEEDACCT-gh", true},
-	{"tunnel-hour-helios", "TestTunnelHour", "helios", "partition plgrid-gpu-gh200, qos now, 1 GPU, 72 CPU, 120000M, time limit 01:46:00, one job, no requeue", "now", "SEEDACCT-gh", true},
-	{"tunnel-hour-athena", "TestTunnelHour", "athena", "partition plgrid-gpu-a100, 1 GPU, 16 CPU, 125Gi, time limit 01:46:00, one job, no requeue", "", "SEEDACCT-a100", true},
+	{"tunnel-hour-helios", "TestTunnelHour", "helios", "partition plgrid-gpu-gh200, qos now, 1 GPU, 72 CPU, 120000M, time limit 02:17:00, one job, no requeue", "now", "SEEDACCT-gh", true},
+	{"tunnel-hour-athena", "TestTunnelHour", "athena", "partition plgrid-gpu-a100, 1 GPU, 16 CPU, 125Gi, time limit 02:17:00, one job, no requeue", "", "SEEDACCT-a100", true},
 	{"gpu-accounting-helios", "TestGPUAccounting", "helios", "partition plgrid-gpu-gh200, qos now, 1 GPU, 72 CPU, 117Gi, time limit 00:05:00, one job, no requeue", "now", "SEEDACCT-gh", false},
 	{"gpu-accounting-athena", "TestGPUAccounting", "athena", "partition plgrid-gpu-a100, 1 GPU, 16 CPU, 125Gi, time limit 00:05:00, one job, no requeue", "", "SEEDACCT-a100", false},
 }
@@ -573,13 +575,14 @@ func TestTheDialHomeKeyReachesTheTestInSSHModeOnly(t *testing.T) {
 // The rows that hold QOS now's GPU, the owner's shared slot, for hours need the owner's go on top of --yes
 // (the development rule on #145). The expected hold is worked out by hand: the shortest lease, 1 h 46 min, and
 // for the no-overlap row 45 minutes more for the successor to start and become ready, 2 h 31 min, which the
-// script rounds up to ten minutes, 2 h 40 min; the hour's row holds its lease, 1 h 46 min, rounded to 1 h 50 min.
+// script rounds up to ten minutes, 2 h 40 min; the hour's row holds its lease, by default 2 h 17 min (the GH200 measurement of 23 min 39 s is over the 20 minutes
+// under which the short lease would be kept), rounded to 2 h 20 min.
 func TestTheRowsThatHoldTheOwnersSlotForHoursNeedTheOwnersGo(t *testing.T) {
 	today := time.Now().UTC().Format("2006-01-02")
 	yesterday := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
 	rows := []struct{ row, hold string }{
 		{"alpha-helios-nooverlap", "holds QOS now's GPU for about 2 h 40 min; the owner's go is needed (the development rule on #145)"},
-		{"tunnel-hour-helios", "holds QOS now's GPU for about 1 h 50 min; the owner's go is needed (the development rule on #145)"},
+		{"tunnel-hour-helios", "holds QOS now's GPU for about 2 h 20 min; the owner's go is needed (the development rule on #145)"},
 	}
 	for _, c := range rows {
 		for _, stale := range []struct{ name, value string }{{"missing", ""}, {"yesterday's", yesterday}, {"1", "1"}, {"yes", "yes"}} {
@@ -730,6 +733,99 @@ func TestTheScriptsMostJobsAreThePackagesRows(t *testing.T) {
 	for _, r := range append(alpha.Rows(), alpha.AccountingRows()...) {
 		if got[r.Name] != fmt.Sprint(r.MostJobs) {
 			t.Errorf("%s: the script allows %q jobs at once, the package's row %d", r.Name, got[r.Name], r.MostJobs)
+		}
+	}
+}
+
+// The tunnel rows' lease is the owner's choice, given with the go: LIVE_TUNNEL_LEASE_MINUTES, 106 (the lead an
+// Instance needs plus a minute) to 240. The shape, the hold note, the timeout and the test's environment follow
+// it. The expected values are by hand: 106 minutes is 01:46:00, a hold of 1 h 50 min once rounded up to ten
+// minutes, and a timeout of 106 + 15 + the 120 minutes of the queue wait + 1 = 242; the default 137 minutes is 02:17:00,
+// 2 h 20 min and 137 + 15 + 120 + 1 = 273.
+func TestTheTunnelLeaseIsTheOwnersChoice(t *testing.T) {
+	for _, c := range []struct {
+		name, setting, limit, hold, timeout, env string
+	}{
+		{"the default", "", "02:17:00", "2 h 20 min", "273m", "HPCBURST_ALPHA_LEASE_MINUTES=137"},
+		{"the short lease", "106", "01:46:00", "1 h 50 min", "242m", "HPCBURST_ALPHA_LEASE_MINUTES=106"},
+		{"the longest", "240", "04:00:00", "4 h 00 min", "376m", "HPCBURST_ALPHA_LEASE_MINUTES=240"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w := newAlphaWorld(t)
+			w.alphaSettings(func(m map[string]string) {
+				if c.setting != "" {
+					m["LIVE_TUNNEL_LEASE_MINUTES"] = c.setting
+				}
+			})
+			res := w.run(nil, "--run", "tunnel-hour-helios")
+			if res.code != 4 {
+				t.Fatalf("exit %d, want 4:\n%s", res.code, res.out)
+			}
+			w.contains(res, "time limit "+c.limit, "holds QOS now's GPU for about "+c.hold+"; the owner's go is needed (the development rule on #145)")
+			res = w.run(nil, "--run", "tunnel-hour-helios", "--yes")
+			if res.code != 0 {
+				t.Fatalf("exit %d:\n%s", res.code, res.out)
+			}
+			if env := w.stateFile("test-env-TestTunnelHour"); !strings.Contains(env, c.env) {
+				t.Errorf("the test did not get %s:\n%s", c.env, env)
+			}
+			if args := w.stateFile("test-args-TestTunnelHour"); !strings.Contains(args, "-test.timeout "+strings.TrimSuffix(c.timeout, "m")+"m") {
+				t.Errorf("the test ran with %q, want -test.timeout %s", args, c.timeout)
+			}
+		})
+	}
+	t.Run("a refusal quotes the hold the lease gives", func(t *testing.T) {
+		w := newAlphaWorld(t)
+		w.alphaSettings(func(m map[string]string) {
+			m["LIVE_TUNNEL_LEASE_MINUTES"] = "106"
+			delete(m, "LIVE_OWNER_GO_HELIOS_NOW")
+		})
+		res := w.run(nil, "--run", "tunnel-hour-helios", "--yes")
+		if res.code != 3 {
+			t.Fatalf("exit %d, want 3:\n%s", res.code, res.out)
+		}
+		w.contains(res, "holds QOS now's GPU for about 1 h 50 min")
+	})
+	for _, v := range []string{"105", "241", "abc", "1h46", "106.5", "-106"} {
+		t.Run("refused: "+v, func(t *testing.T) {
+			w := newAlphaWorld(t)
+			w.alphaSettings(func(m map[string]string) { m["LIVE_TUNNEL_LEASE_MINUTES"] = v })
+			res := w.run(nil, "--run", "tunnel-hour-athena", "--yes")
+			if res.code != 3 {
+				t.Fatalf("exit %d, want 3:\n%s", res.code, res.out)
+			}
+			w.contains(res, "LIVE_TUNNEL_LEASE_MINUTES must be whole minutes from 106 to 240")
+			if w.stateFile("go-argv") != "" || w.stateFile("sbatch-argv") != "" {
+				t.Errorf("a refused run built or called the cluster")
+			}
+		})
+	}
+	t.Run("the other rows ignore it", func(t *testing.T) {
+		w := newAlphaWorld(t)
+		w.alphaSettings(func(m map[string]string) { m["LIVE_TUNNEL_LEASE_MINUTES"] = "abc" })
+		res := w.run([]string{"HPCBURST_ALPHA_LEASE_MINUTES=999"}, "--run", "alpha-athena-handover", "--yes")
+		if res.code != 0 {
+			t.Fatalf("exit %d:\n%s", res.code, res.out)
+		}
+		if env := w.stateFile("test-env-TestAlphaAthenaHandover"); strings.Contains(env, "LEASE_MINUTES") {
+			t.Errorf("a lease reached a row that takes none:\n%s", env)
+		}
+	})
+}
+
+// The script's bounds for the lease are the package's.
+func TestTheScriptsLeaseBoundsArethePackagesBounds(t *testing.T) {
+	b, err := os.ReadFile(scriptPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]time.Duration{"TUNNEL_LEASE_MIN": alpha.MinLease(), "TUNNEL_LEASE_MAX": alpha.MaxTunnelLease} {
+		m := regexp.MustCompile(`(?m)^` + name + `=(\d+)$`).FindSubmatch(b)
+		if m == nil {
+			t.Fatalf("the script has no %s", name)
+		}
+		if got := string(m[1]); got != fmt.Sprint(int(want/time.Minute)) {
+			t.Errorf("%s = %s minutes, the package's bound is %d", name, got, int(want/time.Minute))
 		}
 	}
 }

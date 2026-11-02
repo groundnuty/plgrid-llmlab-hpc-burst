@@ -210,3 +210,44 @@ type closing struct {
 }
 
 func (c *closing) Close(context.Context) error { c.closed = true; return nil }
+
+// The lease the owner chooses is the lease the run uses, judged and posted. With the short lease the hour (61 min)
+// must end before the drain start, 91 minutes in: an Instance ready at 20 minutes passes, one ready at 35 minutes
+// does not (81 + 15 = 96 minutes after the job starts is past it); with the default lease both pass.
+func TestTheChosenLeaseDecidesWhetherASlowStartCanPass(t *testing.T) {
+	base := rowOf("tunnel-hour-athena")
+	short, err := WithTunnelLease(base, MinLease())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name  string
+		row   Row
+		fault string
+		want  string // "" for a pass
+	}{
+		{"default lease, ready at 20 min", base, "", ""},
+		{"default lease, ready at 35 min", base, "slow-start", ""},
+		{"short lease, ready at 20 min", short, "", ""},
+		{"short lease, ready at 35 min", short, "slow-start", "the hour ended after the Instance's drain start"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := Config{Row: c.row, Dry: true, DryFault: c.fault, Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute}
+			rec, err := NewRecorder(cfg.Out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			failures, err := Run(context.Background(), cfg, newDrySteps(t, cfg, "tunnel"), rec, t.Logf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.want == "" && len(failures) != 0 || c.want != "" && !strings.Contains(Summary(failures), c.want) {
+				t.Errorf("failed checks %q, want %q", Summary(failures), c.want)
+			}
+			posts, _ := os.ReadFile(filepath.Join(cfg.Out, PostsFile))
+			if want := "leaseLimit " + c.row.Lease.String(); !strings.Contains(string(posts), want) {
+				t.Errorf("the text to post lacks %q:\n%s", want, posts)
+			}
+		})
+	}
+}
