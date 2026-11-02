@@ -139,6 +139,24 @@ func TestBackendForgetClearsTheCountsAndNumberingGoesOn(t *testing.T) {
 	eq(t, "dropped", b.Dropped(allocUID), 1)
 }
 
+// The counts last from the Backend's start: Forget clears them, so after it the
+// Backend holds no count, and a report counted below the old one is kept.
+func TestBackendForgetClearsTheCounts(t *testing.T) {
+	b := registered(t, agent1)
+	if err := b.Report(bgndCtx, caller(agent1), stoppedAt(50, agentapi.PartRunning)); err != nil {
+		t.Fatal(err)
+	}
+	b.Forget()
+	if _, err := b.Register(bgndCtx, caller(agent1), agentapi.RegisterRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Report(bgndCtx, caller(agent1), stoppedAt(10, agentapi.PartStopped)); err != nil {
+		t.Fatal(err)
+	}
+	eq(t, "the phase the Backend holds", phaseOfLast(t, b), agentapi.PartStopped)
+	eq(t, "dropped", b.Dropped(allocUID), 0)
+}
+
 // The held count rises only when a report is kept: one the Backend refused,
 // and the agent sends again with its number, is not taken for an old one.
 func TestBackendDoesNotCountAReportItRefused(t *testing.T) {

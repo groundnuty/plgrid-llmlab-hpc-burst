@@ -276,6 +276,27 @@ func TestTheLateReportOfAFirstExecutionDoesNotReplaceTheSecondsAndIsNotAnsweredN
 	}
 }
 
+// A report from an agent instance that never registered is answered not
+// registered, before anything else is decided, though another instance of the
+// Allocation is registered and current: it is not accepted and dropped, which
+// would leave that agent unregistered and silent.
+func TestAReportFromAnInstanceThatNeverRegisteredIsAnsweredNotRegistered(t *testing.T) {
+	o := newOrderRig(t)
+	before, at, _ := o.kept(t)
+	stranger := o.caller
+	stranger.AgentInstanceID = strings.Repeat("12", 16)
+	var ae *agentapi.Error
+	for _, seq := range []uint64{o.base.Seq + 50, 0} {
+		o.rg.clock.Advance(time.Second)
+		if err := o.rg.backend.Report(o.rg.ctx, stranger, o.report(seq, "unix:/stranger", "")); !errors.As(err, &ae) || ae.Code != agentapi.CodeNotRegistered {
+			t.Fatalf("a report counted %d from an instance that never registered: %v, want NotRegistered", seq, err)
+		}
+	}
+	if ep, atAfter, _ := o.kept(t); ep != before || !atAfter.Equal(at) {
+		t.Errorf("the Backend holds %q received at %s, want %q received at %s", ep, atAfter, before, at)
+	}
+}
+
 // The instance a report comes from can stop being the current one while the
 // report is being taken: the comparison is made again where it is stored, so a
 // report that has become another instance's late one is dropped.
