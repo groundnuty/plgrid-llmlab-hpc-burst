@@ -80,7 +80,7 @@ var _ tunnelCache = cache.Cache(nil)
 // a leader component (`component.leader`) starts only in the copy that leads
 // the lifecycle Lease, a plain one in every copy. frps need not run when this
 // starts; the reads then say Unknown until it does.
-func addTunnel(mgr manager.Manager, host agentapi.Host, _ agentapi.Backend) (manager.Runnable, error) {
+func addTunnel(mgr manager.Manager, host agentapi.Host, _ agentapi.Backend, listen func(addr string) (net.Listener, error)) (manager.Runnable, error) {
 	reader, err := frpsplugin.NewHostReader(host)
 	if err != nil {
 		return nil, err
@@ -109,7 +109,8 @@ func addTunnel(mgr manager.Manager, host agentapi.Host, _ agentapi.Backend) (man
 	feedLog := named("frps-plugin", "addr", host.FrpsPluginAddr())
 	server := &pluginServer{
 		addr: host.FrpsPluginAddr(), handler: handler, log: feedLog,
-		feed: &pluginFeed{cache: mgr.GetCache(), reader: mgr.GetClient(), index: index, credDir: host.CredentialsDir(), log: feedLog},
+		listen: func(context.Context) (net.Listener, error) { return listen(host.FrpsPluginAddr()) },
+		feed:   &pluginFeed{cache: mgr.GetCache(), reader: mgr.GetClient(), index: index, credDir: host.CredentialsDir(), log: feedLog},
 	}
 	return component{name: "frps-plugin", log: feedLog, start: server.start}, nil
 }
