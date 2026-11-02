@@ -62,16 +62,16 @@ func (e *external) observeDeleting(ctx context.Context, a *v1alpha1.Allocation, 
 			return exists, err
 		}
 	}
-	// The reads succeeded, so what they show of the recorded job's flag is
-	// written: a job that the delete cancelled shows COMPLETING while its
-	// processes and epilog run, and a deletion that stalls on a job stuck in
-	// COMPLETING must say so (HBEP-4, Risks, and Test plan, the alpha
-	// conformance step). This and the absentSince anchor are the only status a
-	// deleting pass writes; the phase and the rest stay as the last live pass
-	// left them.
-	if rec.jobID != "" {
-		e.mirrorDeletingCompleting(a, rec.jobID, jobs)
-	}
+	// The reads succeeded, so what they show of the flag is written, and the
+	// same value gates everything below: one job decides, the recorded one if it
+	// is completing, else the lowest ID among the others with the tag. A job that
+	// the delete cancelled shows COMPLETING while its processes and epilog run,
+	// and a deletion that stalls on a job stuck in COMPLETING must say so, and
+	// say which job (HBEP-4, Risks, and Test plan, the alpha conformance step).
+	// This and the absentSince anchor are the only status a deleting pass writes;
+	// the phase and the rest stay as the last live pass left them.
+	blocker, blocked := completingBlocker(jobs, rec.jobID)
+	e.mirrorBlocker(a, rec.jobID, blocker, blocked)
 	e.toCancel = nil
 	for _, j := range jobs {
 		if j.EndTime == nil {
@@ -89,8 +89,10 @@ func (e *external) observeDeleting(ctx context.Context, a *v1alpha1.Allocation, 
 	// (HBEP-4, Phases, A completing job; HBEP-7, Deletion). It is not
 	// cancelled again: its job has ended as far as Slurm goes, so a cancel
 	// would only report AlreadyEnded (Batch.Cancel observes first, and real
-	// scancel answers such a job silently; #207).
-	if _, ok := completingJob(jobs); ok {
+	// scancel answers such a job silently; #207). The status the pass just
+	// wrote says the same (jobCompleting, which the lifecycle controller's slot
+	// count reads), so the finalizer and the slot never disagree.
+	if blocked {
 		return exists, nil
 	}
 	if needsResolution(rec) && !e.attemptReleased(a, rec.sub, now) {
@@ -113,28 +115,53 @@ func (e *external) observeDeleting(ctx context.Context, a *v1alpha1.Allocation, 
 	return missing, nil
 }
 
-// mirrorDeletingCompleting writes status.atProvider.jobCompleting and the
-// JobCompleting condition from the deleting pass's reads: the recorded job's
-// flag if a read lists it, cleared if both reads succeeded and neither does.
-func (e *external) mirrorDeletingCompleting(a *v1alpha1.Allocation, id string, jobs []provider.Job) {
-	for _, j := range jobs {
-		if j.ID == id {
-			e.mirrorCompleting(a, id, j)
-			return
+// completingBlocker is the one predicate that says a job with the tag is live
+// because its state carries COMPLETING, for a deleting Allocation: the recorded
+// job if it is completing, else the lowest ID among the other jobs with the tag
+// that are (jobs are sorted by ID, the recorded job read by ID may follow them).
+// Its answer gates the finalizer, the files and the accounting record, and is
+// written as status.atProvider.jobCompleting and the JobCompleting condition
+// (mirrorBlocker), which the lifecycle controller's slot count reads, so a
+// completing duplicate holds the slot as well as the finalizer (Astra B2 on PR
+// 217). The live path does not use it: a duplicate there is a held job, cancelled
+// before its hold is lifted, which never ran (HBEP-4, Adoption and cancel;
+// science agent, 2 Nov 2026). Extending it to the live path means passing it the
+// tagged jobs there, which observeRecorded already lists for its duplicates
+// check (ListByTag, from the cached listing), and calling mirrorBlocker with its
+// answer: no second rule.
+func completingBlocker(jobs []provider.Job, recorded string) (provider.Job, bool) {
+	first := -1
+	for i, j := range jobs {
+		switch {
+		case !j.Completing:
+		case j.ID == recorded:
+			return j, true
+		case first < 0:
+			first = i
 		}
 	}
-	e.clearCompleting(a)
+	if first < 0 {
+		return provider.Job{}, false
+	}
+	return jobs[first], true
 }
 
-// completingJob returns the ID of the first job among jobs that carries the
-// COMPLETING flag, in the order given (by job ID).
-func completingJob(jobs []provider.Job) (string, bool) {
-	for _, j := range jobs {
-		if j.Completing {
-			return j.ID, true
+// mirrorBlocker writes completingBlocker's answer into the status, from a pass
+// whose reads succeeded: the flag and the JobCompleting condition for the
+// blocking job, naming it when it is not the recorded one, or the flag cleared.
+func (e *external) mirrorBlocker(a *v1alpha1.Allocation, recorded string, blocker provider.Job, blocked bool) {
+	switch {
+	case !blocked:
+		e.clearCompleting(a)
+	case blocker.ID == recorded:
+		e.mirrorCompleting(a, recorded, blocker)
+	default:
+		why := "it carries the tag and no job is recorded"
+		if recorded != "" {
+			why = "it carries the tag but is not the recorded job " + recorded
 		}
+		e.setCompleting(a, completingMessage(blocker.ID, blocker)+"; "+why)
 	}
-	return "", false
 }
 
 func hasJob(jobs []provider.Job, id string) bool {

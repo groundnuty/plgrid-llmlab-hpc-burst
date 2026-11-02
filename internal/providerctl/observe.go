@@ -40,7 +40,22 @@ func (e *external) observeRecorded(ctx context.Context, a *v1alpha1.Allocation, 
 	refused := prior.Phase == v1alpha1.AllocationRefused
 
 	if e.final(rec.jobID, o) {
-		return e.observeFinal(ctx, a, rec, name)
+		// The final-state cache says accounting settled the job, and accounting
+		// never carries COMPLETING, so only the listing can say the flag has come
+		// back. The listing is read here (observeFinal reads it too, from the
+		// same cached read), and a recorded job that it shows with the flag is
+		// not final: the cache entry goes and the job is observed as any live
+		// one, so jobCompleting is true again and the slot held (Astra B4 on PR
+		// 217; HBEP-4, Phases, A completing job: a successful listing that shows
+		// the flag decides).
+		listed, err := e.p.ListByTag(ctx, name)
+		if err != nil {
+			return exists, e.readFailed(err)
+		}
+		if !completingIn(listed, rec.jobID) {
+			return e.observeFinal(ctx, a, rec, name)
+		}
+		e.s.finals.Delete(rec.jobID)
 	}
 	job, found, err := e.p.Observe(ctx, rec.jobID)
 	if err != nil {
@@ -155,6 +170,16 @@ func (e *external) final(id string, o *v1alpha1.AllocationObservation) bool {
 	return o.EndTime != nil && !o.JobCompleting && (o.StartTime == nil || o.QueueWaitRecorded)
 }
 
+// completingIn reports whether jobs list the job id with the COMPLETING flag.
+func completingIn(jobs []provider.Job, id string) bool {
+	for _, j := range jobs {
+		if j.ID == id && j.Completing {
+			return true
+		}
+	}
+	return false
+}
+
 // observeFinal observes an Allocation whose recorded job has ended for good:
 // the job is not read again, but the tag still is, from the cached queue
 // listing, so a late registration of an older attempt is still cancelled while
@@ -255,9 +280,15 @@ func (e *external) mirrorCompleting(a *v1alpha1.Allocation, id string, job provi
 		e.clearCompleting(a)
 		return
 	}
+	e.setCompleting(a, completingMessage(id, job))
+}
+
+// setCompleting records that a job is completing: the flag, and the
+// JobCompleting condition True with message.
+func (e *external) setCompleting(a *v1alpha1.Allocation, message string) {
 	a.Status.AtProvider.JobCompleting = true
 	a.SetConditions(xpv2.Condition{Type: v1alpha1.ConditionJobCompleting, Status: corev1.ConditionTrue, Reason: v1alpha1.ReasonJobCompleting,
-		Message: completingMessage(id, job), LastTransitionTime: *mt(e.now())})
+		Message: message, LastTransitionTime: *mt(e.now())})
 }
 
 // clearCompleting records that the job is not completing: the flag is cleared
