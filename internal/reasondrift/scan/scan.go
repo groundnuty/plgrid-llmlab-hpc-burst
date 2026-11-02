@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/constant"
+	"go/parser"
 	"go/token"
 	"go/types"
 	"os"
@@ -25,7 +26,6 @@ import (
 
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"
-	"golang.org/x/tools/go/ssa/ssautil"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/reasondrift"
 )
@@ -100,10 +100,11 @@ func Scan(o Options) (*reasondrift.Code, error) {
 	cfg := &packages.Config{
 		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports | packages.NeedDeps |
 			packages.NeedTypes | packages.NeedTypesSizes | packages.NeedSyntax | packages.NeedTypesInfo,
-		Dir:     o.Root,
-		Env:     append(os.Environ(), "CGO_ENABLED=0"),
-		Tests:   false,
-		Overlay: o.Overlay,
+		Dir:       o.Root,
+		Env:       append(os.Environ(), "CGO_ENABLED=0"),
+		Tests:     false,
+		Overlay:   o.Overlay,
+		ParseFile: parseFile(o.Root),
 	}
 	pkgs, err := packages.Load(cfg, patterns...)
 	if err != nil {
@@ -112,6 +113,11 @@ func Scan(o Options) (*reasondrift.Code, error) {
 	var bad []string
 	packages.Visit(pkgs, nil, func(p *packages.Package) {
 		for _, e := range p.Errors {
+			// A dependency whose function bodies were cut off imports packages
+			// only its bodies used; that is the one error to expect there.
+			if !inModule(p, mod) && strings.HasSuffix(e.Msg, "and not used") && strings.Contains(e.Msg, "imported") {
+				continue
+			}
 			bad = append(bad, e.Error())
 		}
 	})
@@ -143,8 +149,7 @@ func Scan(o Options) (*reasondrift.Code, error) {
 		return nil, err
 	}
 
-	prog, spkgs := ssautil.Packages(pkgs, ssa.InstantiateGenerics)
-	prog.Build()
+	prog, spkgs := buildSSA(pkgs)
 	s := &scanner{
 		mod: mod, root: o.Root, fset: prog.Fset, fns: functions(prog, spkgs),
 		wrappers: map[string]bool{}, seenWrappers: map[string]bool{},
@@ -167,6 +172,90 @@ func Scan(o Options) (*reasondrift.Code, error) {
 		return a.Pos < b.Pos
 	})
 	return code, nil
+}
+
+// inModule reports whether a package belongs to the module being scanned.
+func inModule(p *packages.Package, mod string) bool {
+	return p.PkgPath == mod || strings.HasPrefix(p.PkgPath, mod+"/")
+}
+
+// parseFile parses a Go file and cuts the function bodies off the files outside
+// root, which are the dependencies: only their declarations matter here, and
+// their bodies are most of what type-checking holds in memory. An init function
+// keeps an empty body, since it must have one.
+func parseFile(root string) func(*token.FileSet, string, []byte) (*ast.File, error) {
+	return func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
+		f, err := parser.ParseFile(fset, filename, src, parser.SkipObjectResolution)
+		if err != nil || strings.HasPrefix(filename, root+string(filepath.Separator)) {
+			return f, err
+		}
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || isGeneric(fd) {
+				continue // a generic function must have its body
+			}
+			if fd.Recv == nil && fd.Name.Name == "init" {
+				fd.Body = &ast.BlockStmt{}
+			} else {
+				fd.Body = nil
+			}
+		}
+		return f, nil
+	}
+}
+
+// isGeneric reports whether a function, or a method of a generic type, is
+// generic: go/types refuses one without a body.
+func isGeneric(fd *ast.FuncDecl) bool {
+	if fd.Type.TypeParams != nil {
+		return true
+	}
+	if fd.Recv == nil || len(fd.Recv.List) == 0 {
+		return false
+	}
+	switch ast.Unparen(fd.Recv.List[0].Type).(type) {
+	case *ast.IndexExpr, *ast.IndexListExpr:
+		return true
+	case *ast.StarExpr:
+		switch ast.Unparen(fd.Recv.List[0].Type.(*ast.StarExpr).X).(type) {
+		case *ast.IndexExpr, *ast.IndexListExpr:
+			return true
+		}
+	}
+	return false
+}
+
+// buildSSA builds the SSA form of the loaded root packages. ssautil.Packages
+// would skip a package that imports one with a type error, and a dependency
+// whose bodies were cut off has the unused-import errors Scan lets pass; so the
+// packages are created here, dependencies first, from their types, and only the
+// roots with their syntax.
+func buildSSA(roots []*packages.Package) (*ssa.Program, []*ssa.Package) {
+	isRoot := map[*packages.Package]bool{}
+	for _, r := range roots {
+		isRoot[r] = true
+	}
+	var prog *ssa.Program
+	if len(roots) > 0 {
+		prog = ssa.NewProgram(roots[0].Fset, ssa.InstantiateGenerics)
+	}
+	var spkgs []*ssa.Package
+	packages.Visit(roots, nil, func(p *packages.Package) {
+		if p.Types == nil || p.Fset == nil {
+			return
+		}
+		var files []*ast.File
+		var info *types.Info
+		if isRoot[p] {
+			files, info = p.Syntax, p.TypesInfo
+		}
+		sp := prog.CreatePackage(p.Types, files, info, true)
+		if isRoot[p] {
+			spkgs = append(spkgs, sp)
+		}
+	})
+	prog.Build()
+	return prog, spkgs
 }
 
 // callIndex finds every call expression of the module's packages by the

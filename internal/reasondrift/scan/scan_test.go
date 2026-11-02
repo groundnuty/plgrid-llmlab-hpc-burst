@@ -180,6 +180,16 @@ func TestATypeErrorFails(t *testing.T) {
 	}
 }
 
+// TestAnUnusedImportInTheModuleFails: the unused-import errors the scan lets
+// pass are those of dependencies, whose function bodies it cuts off. The
+// module's own packages get no such allowance.
+func TestAnUnusedImportInTheModuleFails(t *testing.T) {
+	_, err := Scan(Options{Root: syntheticRoot(t), Overlay: overlay(t, "package lifecycle\n\nimport \"fmt\"\n")})
+	if err == nil || !strings.Contains(err.Error(), "imported and not used") {
+		t.Fatalf("error %v, want one that says an import is not used", err)
+	}
+}
+
 // TestAMissingRequiredPackageFails: a scan that loaded fewer packages than the
 // caller needs fails.
 func TestAMissingRequiredPackageFails(t *testing.T) {
