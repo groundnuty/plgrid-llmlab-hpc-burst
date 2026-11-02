@@ -24,6 +24,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/config/admission"
@@ -87,18 +89,18 @@ func RemoveGuard(ctx context.Context, cfg *rest.Config, log io.Writer) (removed 
 	if err != nil {
 		return false, err
 	}
+	return removeGuard(ctx, dyn, log)
+}
+
+func removeGuard(ctx context.Context, dyn dynamic.Interface, log io.Writer) (removed bool, err error) {
 	for _, step := range []struct {
 		kind string
-		del  func() error
+		gvr  schema.GroupVersionResource
 	}{
-		{"ValidatingAdmissionPolicyBinding", func() error {
-			return dyn.Resource(guardBindingGVR).Delete(ctx, GuardName, metav1.DeleteOptions{})
-		}},
-		{"ValidatingAdmissionPolicy", func() error {
-			return dyn.Resource(guardPolicyGVR).Delete(ctx, GuardName, metav1.DeleteOptions{})
-		}},
+		{"ValidatingAdmissionPolicyBinding", guardBindingGVR},
+		{"ValidatingAdmissionPolicy", guardPolicyGVR},
 	} {
-		switch err := step.del(); {
+		switch err := dyn.Resource(step.gvr).Delete(ctx, GuardName, metav1.DeleteOptions{}); {
 		case err == nil:
 			removed = true
 			logf(log, "deleted %s %s", step.kind, GuardName)
@@ -125,6 +127,10 @@ func CheckGuard(ctx context.Context, cfg *rest.Config) (*GuardState, error) {
 	if err != nil {
 		return nil, err
 	}
+	return checkGuard(ctx, dyn)
+}
+
+func checkGuard(ctx context.Context, dyn dynamic.Interface) (*GuardState, error) {
 	var missing []string
 	if _, err := dyn.Resource(guardPolicyGVR).Get(ctx, GuardName, metav1.GetOptions{}); apierrors.IsNotFound(err) {
 		missing = append(missing, "the ValidatingAdmissionPolicy "+GuardName+" is not there")
