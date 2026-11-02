@@ -79,6 +79,10 @@ type job struct {
 	estimate *time.Time
 	// acctHidden hides every accounting record of the job from sacct.
 	acctHidden bool
+	// listedName is the name squeue lists the job under when it is not the
+	// name the job was submitted with (Platform.RenameListed); "" for none.
+	// sacct keeps name.
+	listedName string
 	// env is the submitting login's environment, which sbatch exports to
 	// the job by default (run mode).
 	env map[string]string
@@ -93,6 +97,15 @@ func (j *job) cur() *execution { return j.execs[len(j.execs)-1] }
 
 // state is the latest execution's state.
 func (j *job) state() string { return j.cur().state }
+
+// listName is the name squeue shows for the job: the one it was submitted with,
+// unless RenameListed changed what the listing says.
+func (j *job) listName() string {
+	if j.listedName != "" {
+		return j.listedName
+	}
+	return j.name
+}
 
 // Completing is Slurm's flag for a job whose end state is set while some of
 // its processes still live: squeue lists the pair, ["CANCELLED",

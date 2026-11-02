@@ -217,7 +217,7 @@ func squeueJobOf(j *job, minute time.Duration) squeueJob {
 		DerivedExitCode: exitCodeFor(state), EligibleTime: nvTime(e.submit), EndTime: end,
 		ExitCode: exitCodeFor(state), Flags: []string{}, Hold: prio.Number == 0 && state == Pending,
 		JobID: j.id, JobState: jobState(j),
-		MemoryPerCPU: NV{}, MemoryPerNode: nv(j.memMiB), Name: j.name, NodeCount: nv(int64(j.nodes)),
+		MemoryPerCPU: NV{}, MemoryPerNode: nv(j.memMiB), Name: j.listName(), NodeCount: nv(int64(j.nodes)),
 		Partition: j.partition, Priority: prio, QOS: "normal", Requeue: j.requeue, RestartCnt: j.restartCnt,
 		StandardError: j.errPath, StandardOutput: j.output, StartTime: start,
 		StateDescription: "", StateReason: j.stateReason(), SubmitTime: nvTime(e.submit),
@@ -271,7 +271,7 @@ func (p *Platform) squeueText(rows []*job, now time.Time) string {
 			nodes = "example-node-1"
 		}
 		fmt.Fprintf(&b, "%8d %-9s %-12s %-10s %-2s %9s %5d %-18s %-19s %-19s\n",
-			j.id, j.partition, j.name, j.user, stateCode(j), runTime(e, now), j.nodes, nodes,
+			j.id, j.partition, j.listName(), j.user, stateCode(j), runTime(e, now), j.nodes, nodes,
 			e.submit.In(p.zone).Format(textTime), start)
 	}
 	return b.String()
