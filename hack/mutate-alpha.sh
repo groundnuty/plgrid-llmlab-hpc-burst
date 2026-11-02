@@ -124,6 +124,14 @@ mutants=(
   'ledger.go@@if live == 0 && len(errs) == 0 {@@if live == 0 {'
   'ledger.go@@case v1alpha1.AllocationHeld, v1alpha1.AllocationPending, v1alpha1.AllocationRunning:@@case v1alpha1.AllocationHeld, v1alpha1.AllocationPending:'
   'config.go@@	if c.StandIn {@@	if false {'
+  # issue #245: the deployment ends that keep the stack rows to their job counts.
+  'jobcount.go@@return created.Add(lease - drainWindow).Truncate(time.Second)@@return created.Add(lease).Truncate(time.Second)'
+  'jobcount.go@@return drainStart.Add(-time.Minute).Truncate(time.Second)@@return drainStart.Truncate(time.Second)'
+  'jobcount.go@@end := succDrainStart.Truncate(time.Second)@@end := succDrainStart'
+  'jobcount.go@@if !end.After(predDrainStart) {@@if end.Before(predDrainStart) {'
+  'jobcount.go@@if row.MostJobs == 1 && pendingMax+time.Minute > row.Lease-drainWindow {@@if row.MostJobs == 1 && pendingMax > row.Lease-drainWindow {'
+  'jobcount.go@@if row.MostJobs == 1 && pendingMax+time.Minute > row.Lease-drainWindow {@@if pendingMax+time.Minute > row.Lease-drainWindow {'
+  'jobcount.go@@pendingMax+time.Minute > row.Lease-drainWindow@@pendingMax+time.Minute >= row.Lease-drainWindow'
   # issue #245: a row is judged on its own clock (Row.Clock), and the zero Timing is the live one.
   'verdict.go@@case d.LeaseLimit <= tm.Lead():@@case d.LeaseLimit <= Lead():'
   'verdict.go@@if last.Sub(first) < tm.Hour {@@if last.Sub(first) < Hour {'

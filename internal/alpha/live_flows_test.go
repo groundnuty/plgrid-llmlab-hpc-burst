@@ -349,6 +349,7 @@ func (r *liveRun) NoOverlap(ctx context.Context, p Plan) (NoOverlapObs, error) {
 	// The successor starts once the predecessor's job ends and frees the GPU, then becomes ready.
 	succ, ok := r.successorOf(pre.Name, time.Until(pre.Status.LeaseEnd.Time)+p.PendingMax+r.tm.StartTimeout+5*time.Minute)
 	noReady := pr.end()
+	p.Logf("%s: the gap prober's replies by status and code: %v", p.Row.Name, pr.replies)
 	if err := guard(); err != nil {
 		p.Logf("%s: %v", p.Row.Name, err)
 	}
@@ -373,10 +374,12 @@ func (r *liveRun) NoOverlap(ctx context.Context, p Plan) (NoOverlapObs, error) {
 type prober struct {
 	stop, done chan struct{}
 	noReady    int
+	// replies counts every reply by its status and the front's error code, for the log.
+	replies map[string]int
 }
 
 func (r *liveRun) startProber(from time.Time) *prober {
-	pr := &prober{stop: make(chan struct{}), done: make(chan struct{})}
+	pr := &prober{stop: make(chan struct{}), done: make(chan struct{}), replies: map[string]int{}}
 	go func() {
 		defer close(pr.done)
 		select {
@@ -389,6 +392,7 @@ func (r *liveRun) startProber(from time.Time) *prober {
 			if rp.Header != nil {
 				r.keep(rp.Header)
 			}
+			pr.replies[fmt.Sprintf("%d %s", rp.Status, stack.ErrorOf(rp.Body).Code)]++
 			if rp.Status == http.StatusServiceUnavailable && stack.ErrorOf(rp.Body).Code == "no_ready_target" {
 				pr.noReady++
 			}
@@ -513,7 +517,7 @@ const rateAsked = 30 * time.Second
 func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error) {
 	r.start(p)
 	in := r.firstReady(p)
-	ds := r.oneJob(in)
+	ds := r.oneEnd
 	key := r.fc.KeyFor(&in)
 	rate := r.rate(key)
 	tm := r.tm

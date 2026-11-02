@@ -77,6 +77,14 @@ func liveSteps(t *testing.T, cfg Config) Steps {
 	if err != nil {
 		return failedSteps{err}
 	}
+	maxReq := v1alpha1.Duration(cfg.Row.Clock().MaxRequestDuration.String())
+	dw, err := v1alpha1.InstanceDrainWindow(w.profile, &v1alpha1.Routing{MaxRequestDuration: &maxReq})
+	if err == nil {
+		err = CheckQueueWait(cfg.Row, cfg.PendingMax, dw)
+	}
+	if err != nil {
+		return failedSteps{err}
+	}
 	return newLiveRun(t, cfg, w)
 }
 
@@ -183,6 +191,9 @@ type liveRun struct {
 	fc    *stack.Client
 	batch *slurm.Batch
 	tr    *sshrun.SSH
+
+	// oneEnd is a row of one job's deployment end, its Instance's drain start (oneJob).
+	oneEnd time.Time
 
 	mu      sync.Mutex
 	tagErrs []error
@@ -306,11 +317,22 @@ func (r *liveRun) deployment(row Row) *v1alpha1.ModelDeployment {
 		md.Spec.RetentionPolicy = &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionReleaseWhenIdle, IdleLimit: dur(plan.IdleLimit)}
 	}
 	if row.MostJobs == 1 {
-		// The earliest drain start any first job can have (oneJob).
-		end := metav1.NewTime(time.Now().Add(row.Lease - r.drainWindow()).Truncate(time.Second))
+		end := metav1.NewTime(FirstEndOfOne(time.Now(), row.Lease, r.controllerWindow()))
 		md.Spec.EndTime = &end
 	}
 	return md
+}
+
+// controllerWindow is the drain window as the controller and the front work
+// it out (v1alpha1.InstanceDrainWindow): the deployment's end must meet the
+// controller's drain start to the second.
+func (r *liveRun) controllerWindow() time.Duration {
+	maxReq := v1alpha1.Duration(r.tm.MaxRequestDuration.String())
+	dw, err := v1alpha1.InstanceDrainWindow(r.w.profile, &v1alpha1.Routing{MaxRequestDuration: &maxReq})
+	if err != nil {
+		r.t.Fatalf("the drain window: %v", err)
+	}
+	return dw
 }
 
 // oneJob keeps a row of one job (MostJobs 1, the tunnel rows) to one job. With
@@ -326,12 +348,11 @@ func (r *liveRun) deployment(row Row) *v1alpha1.ModelDeployment {
 func (r *liveRun) oneJob(in v1alpha1.Instance) time.Time {
 	t := r.t
 	t.Helper()
-	cur := r.current(in)
-	ds, ok := DrainStartOf(&cur, r.drainWindow())
+	ds, ok := DrainStartOf(&in, r.controllerWindow())
 	if !ok {
 		t.Fatal("the Instance has no lease end")
 	}
-	end, err := r.endAt(ds.Add(-time.Minute))
+	end, err := r.endAt(EndOfOne(ds))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,22 +392,17 @@ func (r *liveRun) endAt(t time.Time) (time.Time, error) {
 // this runs.
 func (r *liveRun) lastJob(pred, succ v1alpha1.Instance) error {
 	maxReq := v1alpha1.Duration(r.tm.MaxRequestDuration.String())
-	routing := &v1alpha1.Routing{MaxRequestDuration: &maxReq}
-	dw, err := v1alpha1.InstanceDrainWindow(r.w.profile, routing)
+	dw, err := v1alpha1.InstanceDrainWindow(r.w.profile, &v1alpha1.Routing{MaxRequestDuration: &maxReq})
 	if err != nil {
 		return fmt.Errorf("the successor's drain window: %w", err)
 	}
 	if pred.Status.LeaseEnd == nil {
 		return errors.New("the predecessor has no lease end, so the deployment's end cannot be placed after its drain start")
 	}
-	dsPred, err := v1alpha1.DrainStart(pred.Status.LeaseEnd.Time, r.w.profile, routing)
+	dsPred := pred.Status.LeaseEnd.Add(-dw)
+	at, err := EndOfTwo(dsPred, succ.Status.LeaseEnd.Add(-dw))
 	if err != nil {
 		return err
-	}
-	at := succ.Status.LeaseEnd.Add(-dw)
-	if !at.Truncate(time.Second).After(dsPred) {
-		// An end at or before the predecessor's drain start would stop its handover.
-		return fmt.Errorf("the successor's drain start %s is not after the predecessor's %s: the deployment keeps no end", at.UTC().Format(time.RFC3339), dsPred.UTC().Format(time.RFC3339))
 	}
 	end, err := r.endAt(at)
 	if err == nil {
@@ -500,6 +516,21 @@ func (r *liveRun) readyWait() time.Duration {
 // first Instance (no predecessor) to be ready and registered at the front.
 func (r *liveRun) firstReady(p Plan) v1alpha1.Instance {
 	r.firstJobStarted(p)
+	if p.Row.MostJobs == 1 {
+		// At once: the deployment's first end holds only until a job that
+		// waited the whole PendingMax could have moved it (CheckQueueWait).
+		var first v1alpha1.Instance
+		stack.WaitFor(r.t, stack.WaitDeadline, "the first Instance's lease end", func() bool {
+			for _, x := range r.instances() {
+				if x.Annotations[v1alpha1.AnnotationPredecessor] == "" && x.Status.LeaseEnd != nil {
+					first = x
+					return true
+				}
+			}
+			return false
+		})
+		r.oneEnd = r.oneJob(first)
+	}
 	var in v1alpha1.Instance
 	stack.WaitFor(r.t, r.readyWait(), "the first Instance to be ready and registered at the front", func() bool {
 		for _, x := range r.instances() {

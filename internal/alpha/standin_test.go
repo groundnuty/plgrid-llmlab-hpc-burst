@@ -76,15 +76,17 @@ func standInRow(t *testing.T, name string) Row {
 	if !ok {
 		t.Fatalf("no row %s", name)
 	}
+	// A row under a QOS (Helios's now) runs under the stand-in's one-GPU QOS.
+	qos := r.QOS
 	r.Partition, r.QOS = stack.Partition, ""
+	if qos != "" {
+		r.QOS = standInQOS
+	}
 	switch {
 	case strings.HasPrefix(name, "tunnel-hour-"):
 		r.Timing, r.Lease = standInTunnel, 12*time.Minute
 	default:
 		r.Timing, r.Lease = standInPair, 7*time.Minute
-	}
-	if name == "alpha-helios-nooverlap" {
-		r.QOS = standInQOS
 	}
 	return r
 }
@@ -197,3 +199,9 @@ func TestStandInNoOverlap(t *testing.T) { runStandIn(t, "alpha-helios-nooverlap"
 //
 //livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
 func TestStandInTunnelHour(t *testing.T) { runStandIn(t, "tunnel-hour-athena") }
+
+// TestStandInTunnelHourHelios is tunnel-hour-helios's live steps over the
+// stand-in, under its one-GPU QOS: one job in the slot, no replacement.
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInTunnelHourHelios(t *testing.T) { runStandIn(t, "tunnel-hour-helios") }

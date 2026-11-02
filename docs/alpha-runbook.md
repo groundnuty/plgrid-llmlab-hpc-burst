@@ -69,6 +69,8 @@ On Helios the replacement of `alpha-helios-nooverlap` is created at its planned 
 
 **The run keeps to those counts with the deployment's `endTime`** (issue #245). With no queue wait observed, the lifecycle controller creates a primary's replacement at the primary's start, and a successor's own replacement long before the predecessor's drain start (HBEP-7, Handover), so without a limit a tunnel row would hold 2 jobs and a handover row 3. A deployment that ends at or before an Instance's drain start gives it no replacement (`internal/lifecycle/handover.go`).
 - **A tunnel row** creates its deployment ending at the earliest drain start its job can have, then moves the end to a minute before the Instance's own drain start once its lease end is known. The Instance drains there, a minute early, and the run records that as the drain start.
+  - The first end also bounds the queue wait. `LIVE_PENDING_MAX_SECONDS` must end at least a minute before it: the lease less the 15-minute drain window, which is 2 h 2 min at the default lease, so the default of 2 h fits.
+  - A longer wait is refused at the first step with that reason. On a queue estimated in days, choose a longer lease, up to 240 minutes, or wait for a shorter estimate.
 - **The two-job rows** set the deployment's end, as soon as the successor has a lease end, to the successor's own drain start, to the second. That is where its lease drains it anyway, and the end is never at or before the predecessor's drain start.
 - This is a choice awaiting the science agent's ruling (PR body of #245).
 
