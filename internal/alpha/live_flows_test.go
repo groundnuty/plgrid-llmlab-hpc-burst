@@ -392,8 +392,14 @@ func (r *liveRun) startProber(from time.Time) *prober {
 			if rp.Header != nil {
 				r.keep(rp.Header)
 			}
-			pr.replies[fmt.Sprintf("%d %s", rp.Status, stack.ErrorOf(rp.Body).Code)]++
-			if rp.Status == http.StatusServiceUnavailable && stack.ErrorOf(rp.Body).Code == "no_ready_target" {
+			e := stack.ErrorOf(rp.Body)
+			detail := ""
+			if e.Detail != nil {
+				detail = *e.Detail
+			}
+			pr.replies[fmt.Sprintf("%d %s/%s", rp.Status, e.Code, detail)]++
+			// HBEP-5, Errors: attached, with no eligible target, is 503 model_inactive with detail no_ready_target.
+			if rp.Status == http.StatusServiceUnavailable && e.Code == "model_inactive" && detail == "no_ready_target" {
 				pr.noReady++
 			}
 			select {
