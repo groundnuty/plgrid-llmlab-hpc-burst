@@ -105,7 +105,7 @@ mutants=(
   'verdict.go@@if !s.Connected {@@if s.Connected {'
   'verdict.go@@s.At.Sub(ss[i-1].At) > MaxSampleGap@@s.At.Sub(ss[i-1].At) >= MaxSampleGap'
   'verdict.go@@if ss[0].At.After(first) {@@if false {'
-  'verdict.go@@if ss[len(ss)-1].At.Before(last) {@@if false {'
+  'verdict.go@@if ss[len(ss)-1].At.Before(last) {@@if false && ss[len(ss)-1].At.Before(last) {'
   'verdict.go@@case s.At.IsZero() || s.LastStart.IsZero():@@case s.At.IsZero() && s.LastStart.IsZero():'
   'verdict.go@@if longestChain(reqs) < MinChain {@@if longestChain(reqs) <= MinChain {'
   'verdict.go@@d >= NearDeadline && d <= MaxRequestDuration@@d > NearDeadline && d <= MaxRequestDuration'
@@ -117,8 +117,8 @@ mutants=(
   'verdict.go@@case !r.UnderLoad:@@case r.UnderLoad:'
   'verdict.go@@case dir == DirDownload && r.Tokens <= 0:@@case dir == DirDownload && r.Tokens < 0:'
   'verdict.go@@case dir == DirDownload && r.Tokens <= 0:@@case r.Tokens <= 0:'
-  'verdict.go@@case !found:@@case false:'
-  'verdict.go@@if dir != DirUpload && dir != DirDownload {@@if false {'
+  'verdict.go@@case !found:@@case false && !found:'
+  'verdict.go@@if dir != DirUpload && dir != DirDownload {@@if false && dir != DirUpload && dir != DirDownload {'
   'verdict.go@@if largestBody(reqs) < MinLargeBody {@@if largestBody(reqs) <= MinLargeBody {'
   'verdict.go@@} else if largeAmongStreams(reqs) == 0 {@@} else if false {'
   'verdict.go@@if r.BodyBytes >= MinLargeBody {@@if r.BodyBytes > MinLargeBody {'
@@ -185,7 +185,6 @@ unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
   'hack/live-checks.sh@@    FRONT_ROLES+=("$name")@@    :'
   'hack/live-checks.sh@@[ "$n" -gt 0 ] || { table_empty "FRONT ROLES"; return 2; }@@true'
   'hack/live-checks.sh@@[ "$n" -gt 0 ] || { table_empty "FRONT LABEL"; return 2; }@@true'
-  'hack/live-checks.sh@@  unset HPCBURST_FRONT_HOST_LABEL@@  :'
   'hack/live-checks.sh@@[ -z "${FRONTLABEL[$1]:-}" ] || export HPCBURST_FRONT_HOST_LABEL=${S[LIVE_FRONT_HOST_LABEL]}@@true'
   'hack/live-checks.sh@@still take it.
   export_front_label "$n"@@still take it.'
@@ -250,7 +249,7 @@ PY
       case $path in
         internal/providerctl/*) compile_tests internal/providerctl/conformance "$tmp/conf.test" && compile_tests "$pkg" "$tmp/pkg.test" ;;
         *) compile_tests "$pkg" "$tmp/pkg.test" ;;
-      esac || { echo "BROKEN   $file: the mutant does not compile: $cerr"; broken=$((broken+1)); cp "${saved[$path]}" "$path"; continue; } ;;
+      esac || { echo "BROKEN   $file: $from  ->  $to: the mutant does not compile: $cerr"; broken=$((broken+1)); cp "${saved[$path]}" "$path"; continue; } ;;
   esac
   case $path in
     hack/live-checks.sh) tests=(go test -count=1 -timeout 9m -parallel 3 -run 'AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|FrontLabel|FrontRan|LabelReaches|Reach|FrontRoles|ATableThat' ./hack/livechecks) ;;

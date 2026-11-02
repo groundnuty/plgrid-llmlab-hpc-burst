@@ -501,9 +501,9 @@ check_front_label() {
 }
 
 # export_front_label <name>: where the front ran (issue #224) goes to the test of a row that writes a text to post, as the
-# settings give it, and to no other: a value the caller's shell holds never reaches a test, so it is dropped first.
+# settings give it, and to no other. A value the caller's shell holds never reaches a test: the script drops it once, right
+# after it reads the settings (the unset before the run's checks).
 export_front_label() {
-  unset HPCBURST_FRONT_HOST_LABEL
   [ -z "${FRONTLABEL[$1]:-}" ] || export HPCBURST_FRONT_HOST_LABEL=${S[LIVE_FRONT_HOST_LABEL]}
 }
 
