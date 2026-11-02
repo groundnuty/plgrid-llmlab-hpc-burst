@@ -42,6 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/leaderlock"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -248,12 +249,14 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 	// With leader election off there is no Lease to read or regard, so no
 	// ObservationGap (`@hpc-burst-science-agent`, 31 Oct 2026, for #111).
 	var lock *gapLock
+	var renewals *leaderlock.Renewals
 	if o.LeaderElection {
 		if lock, err = newGapLock(o.Config, leaderRenewDeadline); err != nil {
 			return nil, nil, fmt.Errorf("lifecycle: the lifecycle Lease's lock: %w", err)
 		}
 		lock.onObserve = o.onLeaseRead
-		mopts.LeaderElectionResourceLockInterface = lock
+		renewals = leaderlock.TrackRenewals(lock)
+		mopts.LeaderElectionResourceLockInterface = renewals
 	}
 	mgr, err := ctrl.NewManager(o.Config, mopts)
 	if err != nil {
@@ -336,6 +339,11 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 		Complete(r)
 	if err != nil {
 		return nil, nil, fmt.Errorf("lifecycle: controller: %w", err)
+	}
+	if renewals != nil {
+		// A clean stop releases the lifecycle Lease after Start even when the
+		// elector's release read failed (issue #160).
+		mgr = leaderlock.ReleaseAfterStart(mgr, renewals, ctrl.Log)
 	}
 	return mgr, backend, nil
 }

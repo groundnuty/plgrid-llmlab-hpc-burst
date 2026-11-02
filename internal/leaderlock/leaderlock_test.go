@@ -28,21 +28,37 @@ type fakeLease struct {
 	failGets  int // the next reads that fail
 	updates   int
 	gets      int
+	// missing makes every read find no Lease.
+	missing bool
+	// transitions is the Lease's leaderTransitions.
+	transitions int
+	// written is every record a write that succeeded wrote.
+	written []resourcelock.LeaderElectionRecord
+	// readBy is the deadline of the last read's context; zero for none.
+	readBy time.Time
 }
 
-func (f *fakeLease) Get(context.Context) (*resourcelock.LeaderElectionRecord, []byte, error) {
+func (f *fakeLease) Get(ctx context.Context) (*resourcelock.LeaderElectionRecord, []byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.gets++
+	f.readBy, _ = ctx.Deadline()
 	if f.failGets > 0 {
 		f.failGets--
 		return nil, nil, errors.New("injected: the read timed out")
 	}
-	return &resourcelock.LeaderElectionRecord{HolderIdentity: f.holder}, nil, nil
+	if f.missing {
+		return nil, nil, apierrors.NewNotFound(schema.GroupResource{Group: "coordination.k8s.io", Resource: "leases"}, "lease")
+	}
+	return &resourcelock.LeaderElectionRecord{HolderIdentity: f.holder, LeaderTransitions: f.transitions}, nil, nil
 }
 
-func (f *fakeLease) Create(context.Context, resourcelock.LeaderElectionRecord) error {
-	return errors.New("not used")
+func (f *fakeLease) Create(_ context.Context, ler resourcelock.LeaderElectionRecord) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.holder, f.missing = ler.HolderIdentity, false
+	f.written = append(f.written, ler)
+	return nil
 }
 
 func (f *fakeLease) Update(_ context.Context, ler resourcelock.LeaderElectionRecord) error {
@@ -57,6 +73,7 @@ func (f *fakeLease) Update(_ context.Context, ler resourcelock.LeaderElectionRec
 		return apierrors.NewConflict(schema.GroupResource{Group: "coordination.k8s.io", Resource: "leases"}, "lease", errors.New("the object has been modified"))
 	}
 	f.holder = ler.HolderIdentity
+	f.written = append(f.written, ler)
 	return nil
 }
 
