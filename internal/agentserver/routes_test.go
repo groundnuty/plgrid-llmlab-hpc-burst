@@ -77,7 +77,7 @@ func TestRegisterAnswers200WithTheBackendsResponse(t *testing.T) {
 func TestReportAnswers204AndTheBackendHoldsTheReport(t *testing.T) {
 	x := newRig(t)
 	x.register(x.good())
-	sent := agentapi.Report{Time: time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC), Instance: &agentapi.InstanceReport{UID: "inst-uid-1", Generation: 3}}
+	sent := agentapi.Report{Seq: 1, Time: time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC), Instance: &agentapi.InstanceReport{UID: "inst-uid-1", Generation: 3}}
 
 	rec := x.do(http.MethodPost, agentapi.PathReport, x.good(), reportBody(t, sent))
 	if rec.Code != http.StatusNoContent || rec.Body.Len() != 0 {
@@ -115,7 +115,7 @@ func TestANotRegisteredAgentGets409WithThatCode(t *testing.T) {
 		body         []byte
 	}{
 		{http.MethodGet, agentapi.PathDesired, nil},
-		{http.MethodPost, agentapi.PathReport, reportBody(t, agentapi.Report{Time: time.Unix(1, 0).UTC()})},
+		{http.MethodPost, agentapi.PathReport, reportBody(t, agentapi.Report{Seq: 1, Time: time.Unix(1, 0).UTC()})},
 	} {
 		rec := x.do(c.method, c.path, x.good(), c.body)
 		if rec.Code != http.StatusConflict {
@@ -190,5 +190,45 @@ func TestAResponseAboveTheLimitIsInternalNotBadRequest(t *testing.T) {
 	wantError(t, rec, agentapi.CodeInternal)
 	if !strings.Contains(x.logs.String(), "above the") {
 		t.Errorf("the encoding failure was not logged:\n%s", x.logs)
+	}
+}
+
+// The count crosses the wire as "seq", and the rule holds over HTTP: the body
+// below is written by hand, not marshalled from the Go type, so a different tag
+// on the type could not hide behind a symmetric round trip. The last report
+// (seq 5) is posted, then an older one (seq 4): both are answered 204, and the
+// Backend keeps only the last (HBEP-7, Report order).
+func TestAnOlderReportIsAnswered204AndNotKeptOverTheWire(t *testing.T) {
+	x := newRig(t)
+	x.register(x.good())
+	body := func(seq int, phase string) []byte {
+		return []byte(fmt.Sprintf(`{"seq":%d,"time":"2026-11-02T12:00:00Z","instance":{"uid":"inst-uid-1","generation":1,"workers":[{"name":"worker-0","phase":%q}]}}`, seq, phase))
+	}
+	for _, r := range []struct {
+		seq   int
+		phase string
+	}{{5, "stopped"}, {4, "stopping"}} {
+		if rec := x.do(http.MethodPost, agentapi.PathReport, x.good(), body(r.seq, r.phase)); rec.Code != http.StatusNoContent {
+			t.Fatalf("report seq %d: status %d (%s), want 204", r.seq, rec.Code, rec.Body)
+		}
+	}
+	got, ok := x.backend.LastReport(uidA)
+	if !ok || got.Seq != 5 || got.Instance == nil || got.Instance.Workers[0].Phase != agentapi.PartStopped {
+		t.Errorf("the Backend holds %+v (%v), want the report counted 5, stopped", got, ok)
+	}
+	if n := x.backend.Dropped(uidA); n != 1 {
+		t.Errorf("dropped = %d, want 1", n)
+	}
+	// An agent built before the count sends no seq: its reports are kept, in
+	// arrival order, as before (HBEP-7, Compatibility and upgrades).
+	for _, phase := range []string{"running", "stopped"} {
+		unnumbered := []byte(fmt.Sprintf(`{"time":"2026-11-02T12:00:00Z","instance":{"uid":"inst-uid-1","generation":1,"workers":[{"name":"worker-0","phase":%q}]}}`, phase))
+		if rec := x.do(http.MethodPost, agentapi.PathReport, x.good(), unnumbered); rec.Code != http.StatusNoContent {
+			t.Fatalf("a report with no seq, %s: status %d (%s), want 204", phase, rec.Code, rec.Body)
+		}
+	}
+	got, _ = x.backend.LastReport(uidA)
+	if got.Seq != 0 || got.Instance == nil || got.Instance.Workers[0].Phase != agentapi.PartStopped {
+		t.Errorf("after two unnumbered reports the Backend holds %+v, want the second, in arrival order", got)
 	}
 }

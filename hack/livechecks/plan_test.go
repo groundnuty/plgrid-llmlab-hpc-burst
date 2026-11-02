@@ -1,6 +1,7 @@
 package livechecks
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -39,13 +40,13 @@ func TestPlanMapsChangedFilesToTheLiveTestsThatRunThem(t *testing.T) {
 		{"docs only", "docs/notes.md", "changed\n", nil},
 		{"a readme inside a live package", "internal/front/README.md", "changed\n", nil},
 		{"a package that nothing live imports", "unrelated/unrelated.go", "package unrelated\n\nvar X = 1\n", nil},
-		{"a dependency only: slurm", "internal/slurm/slurm.go", "package slurm\n\nvar X = 1\n", []string{"conformance-athena", "conformance-helios", "conformance-helios-gh200", "gpu-accounting-athena", "gpu-accounting-helios"}},
+		{"a dependency only: slurm", "internal/slurm/slurm.go", "package slurm\n\nvar X = 1\n", []string{"conformance-athena", "conformance-helios", "conformance-helios-gh200", "gpu-accounting-athena", "gpu-accounting-helios", "reach-athena", "reach-helios"}},
 		{"a dependency of one test: pkg/provider", "pkg/provider/provider.go", "package provider\n\nvar X = 1\n", []string{"llmlab-smoke"}},
 		{"a holding package", "internal/front/front.go", "package front\n\nimport _ \"example.test/fx/pkg/provider\"\n\nvar X = 1\n", []string{"llmlab-smoke"}},
 		{"a test file of the holding package", "internal/front/front_test.go", "package front\n\nimport \"testing\"\n\nfunc TestLLMLabThroughTheFront(t *testing.T) { _ = 1 }\n", []string{"llmlab-smoke"}},
 		{"a test file of a dependency", "internal/slurm/slurm_test.go", "package slurm\n\nimport \"testing\"\n\nfunc TestSlurm(t *testing.T) { _ = 1 }\n", nil},
-		{"go.mod", "go.mod", fixtureGoMod + "\n// a comment\n", []string{"alpha-athena-handover", "alpha-helios-nooverlap", "conformance-athena", "conformance-helios", "conformance-helios-gh200", "gpu-accounting-athena", "gpu-accounting-helios", "hub-golden", "llmlab-smoke", "real-engine", "rehearsal-part3", "tunnel-hour-athena", "tunnel-hour-helios"}},
-		{"a profile read whole by the runs on that platform", "profiles/helios.yaml", "name: helios\nx: 1\n", []string{"alpha-helios-nooverlap", "conformance-helios", "conformance-helios-gh200", "gpu-accounting-helios", "tunnel-hour-helios"}},
+		{"go.mod", "go.mod", fixtureGoMod + "\n// a comment\n", []string{"alpha-athena-handover", "alpha-helios-nooverlap", "conformance-athena", "conformance-helios", "conformance-helios-gh200", "gpu-accounting-athena", "gpu-accounting-helios", "hub-golden", "llmlab-smoke", "reach-athena", "reach-helios", "real-engine", "rehearsal-part3", "tunnel-hour-athena", "tunnel-hour-helios"}},
+		{"a profile read whole by the runs on that platform", "profiles/helios.yaml", "name: helios\nx: 1\n", []string{"alpha-helios-nooverlap", "conformance-helios", "conformance-helios-gh200", "gpu-accounting-helios", "reach-helios", "tunnel-hour-helios"}},
 		{"the real-engine job script", "spikes/s94/job.sh", "#!/bin/bash\n# changed\n", []string{"real-engine"}},
 		{"a file the agent embeds", "internal/agent/data.txt", "changed\n", agentEmbedders},
 		{"a file the agent does not embed", "internal/agent/notes.txt", "changed\n", nil},
@@ -179,5 +180,54 @@ func TestPlanFailsWhenDependencyDiscoveryFails(t *testing.T) {
 	}
 	if !strings.Contains(res.out, "dependency discovery failed for package internal/providerctl/conformance (host) at the head of the range") {
 		t.Errorf("no fixed failure message:\n%s", res.out)
+	}
+}
+
+// The plan's lookups in a closure listing must not depend on how a pipe's reader and writer are scheduled
+// (#213). It once tested membership with printf ... | grep -q under pipefail: bash's stdout is line-buffered,
+// so printf writes the listing a line at a time, grep -q exits at the first match, and a printf still
+// writing dies of SIGPIPE, which fails the pipeline and reads as "not covered" with exit 0. Under load that
+// lost a row now and then. A listing larger than a pipe's buffer (64 KiB on Linux) makes the race certain:
+// printf cannot have written it all before grep exits. The assets here are many long-named files the agent
+// embeds, so the listing of every row that builds hb-agent is that large, and each case changes a file
+// whose line sorts early in it. The expected rows follow from the fixture's wiring (see agentEmbedders).
+func TestPlanKeepsEveryRowWhenTheClosureListingIsLarge(t *testing.T) {
+	const assets, pipeBuffer = 1500, 64 << 10
+	name := func(i int) string {
+		return fmt.Sprintf("internal/agent/assets/%s-%04d.txt", strings.Repeat("x", 120), i)
+	}
+	// The seam is only a seam while the listing is well over the buffer: printf may fill the pipe once
+	// while grep reads it, so more than twice the buffer leaves printf certainly still writing.
+	listing := 0
+	for i := 0; i < assets; i++ {
+		listing += len("embed:"+name(i)) + 1
+	}
+	if listing <= 2*pipeBuffer {
+		t.Fatalf("the embedded assets list %d bytes, not more than twice a pipe's buffer: the test would prove nothing", listing)
+	}
+	cases := []struct{ name, path, content string }{
+		// a.txt sorts before the long names, so its embed: line is near the top of the listing.
+		{"an embedded asset", "internal/agent/assets/a.txt", "changed\n"},
+		// cmd/hb-agent sorts before every embed: line; for the stack rows it is a dependency, not their package.
+		{"the agent binary's package", "cmd/hb-agent/main.go", "package main\n\nimport _ \"example.test/fx/internal/agent\"\n\nfunc main() { _ = 1 }\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			w := newWorld(t)
+			for i := 0; i < assets; i++ {
+				write(t, filepath.Join(w.repo, name(i)), "asset\n", 0o644)
+			}
+			git(t, w.repo, "add", "-A")
+			git(t, w.repo, "commit", "-q", "-m", "many embedded assets")
+			base := git(t, w.repo, "rev-parse", "HEAD")
+			head := w.commitFile(c.path, c.content)
+			res := w.run(nil, "--plan", base+".."+head)
+			if res.code != 0 {
+				t.Fatalf("exit %d:\n%s", res.code, res.out)
+			}
+			if got := runSet(t, res.out); strings.Join(got, ",") != strings.Join(agentEmbedders, ",") {
+				t.Errorf("run set %v, want %v\n%s", got, agentEmbedders, res.out)
+			}
+		})
 	}
 }

@@ -50,7 +50,7 @@ func TestBackendRefusesAnAgentInstanceIDOfAnotherForm(t *testing.T) {
 	if _, err := b.Desired(bgndCtx, caller(good)); err != nil {
 		t.Errorf("Desired with a pinned-form ID: %v", err)
 	}
-	if err := b.Report(bgndCtx, caller(good), agentapi.Report{Time: t0}); err != nil {
+	if err := b.Report(bgndCtx, caller(good), agentapi.Report{Seq: 1, Time: t0}); err != nil {
 		t.Errorf("Report with a pinned-form ID: %v", err)
 	}
 }
@@ -66,7 +66,7 @@ func TestBackendRefusesAReportWhoseKeyIsNotOfThePinnedForm(t *testing.T) {
 		"a trailing newline": strings.Repeat("a", 64) + "\n",
 	}
 	withKey := func(key string) agentapi.Report {
-		return agentapi.Report{Time: t0, Instance: &agentapi.InstanceReport{UID: "inst-uid-1", Key: key}}
+		return agentapi.Report{Seq: 1, Time: t0, Instance: &agentapi.InstanceReport{UID: "inst-uid-1", Key: key}}
 	}
 	for name, key := range bad {
 		t.Run(name, func(t *testing.T) {
@@ -89,11 +89,14 @@ func TestBackendRefusesAReportWhoseKeyIsNotOfThePinnedForm(t *testing.T) {
 	if _, err := b.Register(bgndCtx, caller(agent1), agentapi.RegisterRequest{}); err != nil {
 		t.Fatal(err)
 	}
+	var seq uint64
 	for name, rep := range map[string]agentapi.Report{
 		"a pinned-form key": withKey(strings.Repeat("0123456789abcdef", 4)),
 		"no key":            withKey(""),
 		"no Instance":       {Time: t0},
 	} {
+		seq++ // one agent instance: each report is newer than the last
+		rep.Seq = seq
 		if err := b.Report(bgndCtx, caller(agent1), rep); err != nil {
 			t.Errorf("Report with %s: %v", name, err)
 		}

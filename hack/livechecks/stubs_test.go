@@ -174,6 +174,9 @@ case $mode in
   fail) echo "--- FAIL: $t (0.01s)"; echo FAIL; exit 1 ;;
   leave-fail) leave; echo "--- FAIL: $t (0.01s)"; echo FAIL; exit 1 ;;
   leave-pass) leave; echo "--- PASS: $t (0.01s)"; echo PASS ;;
+  # The left job's tag and STUB_MANY_TAGS more that sort after it (hb-z...), so the owned tags are a long list
+  # with the queued job's tag at its top.
+  leave-many-tags) leave; seq -f "hb-$(printf 'z%.0s' $(seq 1 55))-%04g" 1 "$STUB_MANY_TAGS" >> "$HPCBURST_CONF_OUT/job-tags.txt"; echo "--- PASS: $t (0.01s)"; echo PASS ;;
   skip-sub) echo "=== RUN   $t"; echo "    --- SKIP: $t/part (0.00s)"; echo "--- PASS: $t (0.01s)"; echo PASS ;;
   fail-sub) echo "    --- FAIL: $t/SEEDKEY-424242 (0.00s)"; echo "--- FAIL: $t (0.01s)"; echo FAIL; exit 1 ;;
   sleep) leave; touch "$STUB_STATE/started"; exec sleep 3600 ;;

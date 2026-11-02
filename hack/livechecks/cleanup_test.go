@@ -11,6 +11,7 @@ package livechecks
 // from the issue, not read from the script.
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -262,5 +263,71 @@ func TestAnInterruptedRealEngineRunWaitsForALateRegistrationToo(t *testing.T) {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("the output lacks %q:\n%s", want, out)
 		}
+	}
+}
+
+// The listing seam of #213. Under pipefail, printf ... | grep -q failed whenever grep stopped at a match while
+// printf was still writing (bash writes its standard output a line at a time), and the failure read as "no
+// match". A text over twice a pipe's buffer (64 KiB on Linux), with the line sought near its top, makes that
+// certain: printf may fill the pipe once while grep reads it, and still has more to write when grep exits.
+const pipeSeam = 2 * (64 << 10)
+
+// An owned job still queued is never reported as gone, however many tags the run owns. The cleanup matches
+// the listing against the owned tags on every poll, and "left behind" counts the owned jobs in the LAST
+// listing. Here the run owns 3,001 tags, the queued job's tag sorts first, and scancel leaves the job in the
+// queue, so it is listed on every poll, the last one included. Matched as not owned, it would be reported
+// as "left behind 0" with the job still queued.
+func TestCleanupCountsAnOwnedJobAmongManyTags(t *testing.T) {
+	const tags = 3000
+	if size := tags * (len("hb-"+strings.Repeat("z", 55)+"-0000") + 1); size <= pipeSeam {
+		t.Fatalf("the owned tags list %d bytes, not over twice a pipe's buffer: the test would prove nothing", size)
+	}
+	w := newWorld(t)
+	w.useStubGo()
+	res := w.run(quick("STUB_TEST_MODE=leave-many-tags", fmt.Sprintf("STUB_MANY_TAGS=%d", tags), "STUB_SCANCEL_KEEP=1"), "--run", "conformance-helios", "--yes")
+	if res.code != 1 {
+		t.Fatalf("exit %d, want 1 (an owned job is still queued):\n%s", res.code, res.out)
+	}
+	w.contains(res, "cleanup: left behind 1 (cancelled 1)", "a job was left behind")
+	if strings.Contains(res.out, "left behind 0") {
+		t.Errorf("the cleanup said 0 while the owned job was listed:\n%s", res.out)
+	}
+	// Listed on every poll, the job keeps the cleanup polling to its bound (LIVE_CLEAN_MAX_POLLS in quick).
+	if reads := strings.TrimSpace(w.stateFile("late-reads")); reads != "12" {
+		t.Errorf("the cleanup read the queue %s times after the test, want all 12 polls", reads)
+	}
+	if !strings.Contains(w.stateFile("queue"), "9001|hb-leftover-") {
+		t.Errorf("the job left the queue, so the last listing did not hold it and the test proves nothing")
+	}
+}
+
+// A long queue is read, not taken for an unreadable one. queue_jobs looks for its marker line, squeue=ok, at
+// the top of the reply; the listing after it (other runs' and the owner's hb- jobs) must not make the queue
+// read as unreadable, which fails the run before it starts.
+func TestALongQueueIsReadNotTakenForUnreadable(t *testing.T) {
+	const foreign = 3000
+	var queue strings.Builder
+	reply := 0 // the reply lists each job as id|name|partition
+	for i := 0; i < foreign; i++ {
+		id, name := 20000+i, fmt.Sprintf("hb-controller-%s%04d", strings.Repeat("y", 40), i)
+		fmt.Fprintf(&queue, "%d|%s|normal|plgrid|RUNNING\n", id, name)
+		reply += len(fmt.Sprintf("%d|%s|plgrid\n", id, name))
+	}
+	if reply <= pipeSeam {
+		t.Fatalf("the queue's reply is %d bytes, not over twice a pipe's buffer: the test would prove nothing", reply)
+	}
+	w := newWorld(t)
+	w.useStubGo()
+	write(t, filepath.Join(w.state, "queue"), queue.String(), 0o644)
+	res := w.run(quick(), "--run", "conformance-helios", "--yes")
+	if res.code != 0 {
+		t.Fatalf("exit %d, want 0 (the queue was readable):\n%s", res.code, res.out)
+	}
+	w.contains(res, "conformance-helios: PASS", "cleanup: left behind 0 (cancelled 0)")
+	if strings.Contains(res.out, "could not be read") {
+		t.Errorf("a readable queue was reported as unreadable:\n%s", res.out)
+	}
+	if c := w.stateFile("cancelled"); c != "" {
+		t.Errorf("jobs that are not this run's were cancelled: %q", c)
 	}
 }

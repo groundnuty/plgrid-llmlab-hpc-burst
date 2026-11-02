@@ -222,7 +222,14 @@ func Status(ctx context.Context, o StatusOptions) (*StatusReport, error) {
 	if rep.Readyz != nil && *rep.Readyz {
 		if err := writeProbe(ctx, cfg, 15*time.Second); err != nil {
 			rep.Writes = ptr(false)
-			bad("writes are failing: %v", err)
+			// A full store blocks writes instead of refusing them, so the error alone does not point at
+			// the disk (#192). The store is checked at its own directory, which a link may send to
+			// another volume than the rest of the data directory.
+			if hint := StoreFullHint(l.sqliteDir()); hint != "" {
+				bad("writes are failing: %v; %s", err, hint)
+			} else {
+				bad("writes are failing: %v", err)
+			}
 		} else {
 			rep.Writes = ptr(true)
 		}
