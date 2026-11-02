@@ -526,15 +526,21 @@ func LargeRequests(reqs []Stream) []Stream {
 	return out
 }
 
-// largeAmongStreams counts the large requests that were open at a moment when at least ConcurrentStreams streams,
-// each at StreamRate or more, were open too.
+// largeAmongStreams counts the large requests whose upload (the body, from its first byte to its last) was in progress
+// at a moment when at least ConcurrentStreams streams, each at StreamRate or more, were open too. It is the upload
+// interval that counts (PR 244, B2): a 100,000-byte body can be sent before the streams open, and its response then stay
+// open across their start; the request was open among the streams, and its body was not. A request whose upload interval
+// is not recorded is not counted.
 func largeAmongStreams(reqs []Stream) int {
 	n := 0
 	for _, l := range LargeRequests(reqs) {
-		// The moments that matter are the large request's opening and each stream's opening inside it.
-		at := []time.Time{l.Opened}
+		if !l.UploadRecorded() {
+			continue
+		}
+		// The moments that matter are the upload's start and each stream's opening inside it.
+		at := []time.Time{l.BodyStart}
 		for _, r := range reqs {
-			if isStream(r) && r.Opened.After(l.Opened) && r.Opened.Before(l.Ended) {
+			if isStream(r) && r.Opened.After(l.BodyStart) && r.Opened.Before(l.BodyEnd) {
 				at = append(at, r.Opened)
 			}
 		}

@@ -210,7 +210,8 @@ func (m mix) requests(start time.Time) []Stream {
 	}
 	// The large request: among the streams by default; the tests move it to the edges of their window.
 	burstAt := at.Add(m.largeAt)
-	out = append(out, Stream{ID: "u0", Opened: burstAt, Ended: burstAt.Add(20 * time.Second), Complete: true, Tokens: 40, BodyBytes: m.body})
+	out = append(out, Stream{ID: "u0", Opened: burstAt, Ended: burstAt.Add(20 * time.Second), Complete: true, Tokens: 40, BodyBytes: m.body,
+		BodyStart: burstAt, BodyEnd: burstAt.Add(20 * time.Second)})
 	at = at.Add(2*time.Minute + m.idle)
 	run("b")
 	// Requests of the deadline's length to the end of the hour, exactly.
@@ -269,6 +270,12 @@ func largeOf(o *TunnelHourObs) *Stream {
 		}
 	}
 	panic("no large request")
+}
+
+// moveLarge puts the large request, and its upload with it, between two times: the body takes the whole request.
+func moveLarge(o *TunnelHourObs, opened, ended time.Time) {
+	l := largeOf(o)
+	l.Opened, l.Ended, l.BodyStart, l.BodyEnd = opened, ended, opened, ended
 }
 
 func streamsOpen(o *TunnelHourObs) time.Time {
@@ -349,21 +356,47 @@ func TestTunnelHourBoundaries(t *testing.T) {
 		{"a body of 0.4 MB is no fault", func(o *TunnelHourObs, _ *[]provider.Job) { largeOf(o).BodyBytes = 400_000 }, ""},
 		{"a body of 5 MB is no fault", func(o *TunnelHourObs, _ *[]provider.Job) { largeOf(o).BodyBytes = 5_000_000 }, ""},
 		{"the large request opens as the streams open", func(o *TunnelHourObs, _ *[]provider.Job) {
-			largeOf(o).Opened = streamsOpen(o)
-			largeOf(o).Ended = largeOf(o).Opened.Add(20 * time.Second)
+			moveLarge(o, streamsOpen(o), streamsOpen(o).Add(20*time.Second))
 		}, ""},
 		{"the large request opens a nanosecond before the streams end", func(o *TunnelHourObs, _ *[]provider.Job) {
 			// It ends with the streams, so the idle stretch after them keeps its 2 minutes.
-			largeOf(o).Opened = streamsOpen(o).Add(2*time.Minute - time.Nanosecond)
-			largeOf(o).Ended = streamsOpen(o).Add(2 * time.Minute)
+			moveLarge(o, streamsOpen(o).Add(2*time.Minute-time.Nanosecond), streamsOpen(o).Add(2*time.Minute))
 		}, ""},
 		{"the large request opens as the streams end", func(o *TunnelHourObs, _ *[]provider.Job) {
-			largeOf(o).Opened = streamsOpen(o).Add(2 * time.Minute)
-			largeOf(o).Ended = largeOf(o).Opened.Add(20 * time.Second)
+			moveLarge(o, streamsOpen(o).Add(2*time.Minute), streamsOpen(o).Add(2*time.Minute+20*time.Second))
 		}, "no request of 0.1 MB or more was sent while the 16 streams were open"},
 		{"the large request ends as the streams open", func(o *TunnelHourObs, _ *[]provider.Job) {
-			largeOf(o).Ended = streamsOpen(o)
-			largeOf(o).Opened = largeOf(o).Ended.Add(-20 * time.Second)
+			moveLarge(o, streamsOpen(o).Add(-20*time.Second), streamsOpen(o))
+		}, "no request of 0.1 MB or more was sent while the 16 streams were open"},
+		// The upload interval, not the request's own (PR 244, B2). A body can be sent before the streams open and its
+		// response stay open across their start: the request is open among the streams, the upload was not.
+		{"the body is sent before the streams open and the response stays open across their start", func(o *TunnelHourObs, _ *[]provider.Job) {
+			l := largeOf(o)
+			l.Opened, l.BodyStart = streamsOpen(o).Add(-30*time.Second), streamsOpen(o).Add(-30*time.Second)
+			l.BodyEnd, l.Ended = streamsOpen(o).Add(-10*time.Second), streamsOpen(o).Add(30*time.Second)
+		}, "no request of 0.1 MB or more was sent while the 16 streams were open"},
+		{"the body ends as the streams open, the response goes on", func(o *TunnelHourObs, _ *[]provider.Job) {
+			l := largeOf(o)
+			l.Opened, l.BodyStart = streamsOpen(o).Add(-30*time.Second), streamsOpen(o).Add(-30*time.Second)
+			l.BodyEnd, l.Ended = streamsOpen(o), streamsOpen(o).Add(30*time.Second)
+		}, "no request of 0.1 MB or more was sent while the 16 streams were open"},
+		{"the body is still being sent as the streams open", func(o *TunnelHourObs, _ *[]provider.Job) {
+			l := largeOf(o)
+			l.Opened, l.BodyStart = streamsOpen(o).Add(-30*time.Second), streamsOpen(o).Add(-30*time.Second)
+			l.BodyEnd, l.Ended = streamsOpen(o).Add(time.Nanosecond), streamsOpen(o).Add(30*time.Second)
+		}, ""},
+		{"the body is sent after the streams opened and the request was opened before them", func(o *TunnelHourObs, _ *[]provider.Job) {
+			l := largeOf(o)
+			l.Opened = streamsOpen(o).Add(-30 * time.Second)
+			l.BodyStart, l.BodyEnd, l.Ended = streamsOpen(o).Add(10*time.Second), streamsOpen(o).Add(20*time.Second), streamsOpen(o).Add(40*time.Second)
+		}, ""},
+		{"no upload interval recorded", func(o *TunnelHourObs, _ *[]provider.Job) {
+			largeOf(o).BodyStart, largeOf(o).BodyEnd = time.Time{}, time.Time{}
+		}, "no request of 0.1 MB or more was sent while the 16 streams were open"},
+		{"no upload start recorded", func(o *TunnelHourObs, _ *[]provider.Job) { largeOf(o).BodyStart = time.Time{} }, "no request of 0.1 MB or more was sent while the 16 streams were open"},
+		{"no upload end recorded", func(o *TunnelHourObs, _ *[]provider.Job) { largeOf(o).BodyEnd = time.Time{} }, "no request of 0.1 MB or more was sent while the 16 streams were open"},
+		{"an upload that ends before it starts", func(o *TunnelHourObs, _ *[]provider.Job) {
+			largeOf(o).BodyStart, largeOf(o).BodyEnd = largeOf(o).BodyEnd, largeOf(o).BodyStart
 		}, "no request of 0.1 MB or more was sent while the 16 streams were open"},
 		{"15 streams while the large request is open", func(o *TunnelHourObs, _ *[]provider.Job) {
 			// One stream too few at every moment the large request is open: its rate is under 20 tokens a second.

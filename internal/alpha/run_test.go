@@ -79,6 +79,7 @@ var tunnelCases = []dryCase{
 	{"upload-not-under-load", "the upload path rate was not measured under load"},
 	{"no-large", "no request body reached 0.1 MB, so the upload direction was not exercised"},
 	{"large-apart", "no request of 0.1 MB or more was sent while the 16 streams were open"},
+	{"response-overlap", "no request of 0.1 MB or more was sent while the 16 streams were open"},
 	{"untagged", "a job tag was not written down before its submission"},
 	{"wrong-partition", "a job ran on another partition than the row's"},
 	{"adds-other-cluster", "the deployment does not allow exactly one Provider"},

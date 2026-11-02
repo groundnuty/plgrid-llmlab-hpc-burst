@@ -26,6 +26,17 @@ type Stream struct {
 	// BodyBytes is the size of the request body the front sent to the node, the
 	// upload direction (issue #224); zero for a request whose size was not recorded.
 	BodyBytes int `json:"bodyBytes,omitempty"`
+	// BodyStart and BodyEnd are the first byte of that body and its last, as the front sent them: the upload interval
+	// (PR 244, B2 of the review). A request's response can stay open long after its body was sent, so Opened and Ended
+	// say nothing about when the upload ran; a large request whose interval is not recorded (both zero, or an end that
+	// is not after the start) is not counted as sent while the streams were open.
+	BodyStart time.Time `json:"bodyStart,omitzero"`
+	BodyEnd   time.Time `json:"bodyEnd,omitzero"`
+}
+
+// UploadRecorded reports whether the upload interval is recorded: a start, and an end after it.
+func (s Stream) UploadRecorded() bool {
+	return !s.BodyStart.IsZero() && s.BodyEnd.After(s.BodyStart)
 }
 
 // TokensPerSecond is the rate the stream delivered tokens at; zero for a stream with no length.
