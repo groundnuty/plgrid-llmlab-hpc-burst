@@ -60,12 +60,12 @@ func (r *rig) replacementReady(p *v1alpha1.Instance) v1alpha1.Instance {
 	r.t.Helper()
 	var repl v1alpha1.Instance
 	waitFor(r.t, waitDeadline, "the primary and its replacement to be ready and registered at the front", func() bool {
-		if reg, known := registered(p); !known || !reg {
+		if reg, known := r.registered(p); !known || !reg {
 			return false
 		}
 		for _, in := range r.instances() {
 			if in.Annotations[v1alpha1.AnnotationPredecessor] == p.Name && in.Status.Phase == v1alpha1.InstanceReady {
-				if reg, known := registered(&in); known && reg {
+				if reg, known := r.registered(&in); known && reg {
 					repl = in
 					return true
 				}
@@ -121,8 +121,8 @@ func (r *rig) checkStream(step string, s streamed, in *v1alpha1.Instance, tokens
 		r.t.Errorf("step (%s) stream's record: stream %v, finish %v, cut by %v; want a stream finished by length, uncut", step, row.Stream, row.Finish, row.CutBy)
 	case row.CompletionTokens == nil || *row.CompletionTokens != int64(tokens):
 		r.t.Errorf("step (%s) stream's record has %v completion tokens, want %d", step, row.CompletionTokens, tokens)
-	case time.Duration(row.DurationMs)*time.Millisecond < time.Duration(tokens)*tokenDelay:
-		r.t.Errorf("step (%s) stream took %d ms, below %d tokens at %s", step, row.DurationMs, tokens, tokenDelay)
+	case time.Duration(row.DurationMs)*time.Millisecond < time.Duration(tokens)*r.tokenDelay:
+		r.t.Errorf("step (%s) stream took %d ms, below %d tokens at %s", step, row.DurationMs, tokens, r.tokenDelay)
 	}
 	return row
 }

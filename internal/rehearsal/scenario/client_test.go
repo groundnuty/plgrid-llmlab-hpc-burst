@@ -45,7 +45,7 @@ func (r *rig) requestCtx() (context.Context, context.CancelFunc) {
 func (r *rig) send(path, body, key string) reply {
 	ctx, cancel := r.requestCtx()
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+clientAddr+path, strings.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+r.ports.client+path, strings.NewReader(body))
 	if err != nil {
 		return reply{err: err}
 	}
@@ -66,6 +66,11 @@ func (r *rig) send(path, body, key string) reply {
 // chatBody is a chat request for the plain model name. minTokens equal to
 // maxTokens fixes the output length (the engine double's doc).
 func chatBody(maxTokens, minTokens int, stream bool) string {
+	return chatBodyFor(model, maxTokens, minTokens, stream)
+}
+
+// chatBodyFor is chatBody for another model name.
+func chatBodyFor(model string, maxTokens, minTokens int, stream bool) string {
 	b := `{"model":"` + model + `","messages":[{"role":"user","content":"hello"}],"max_tokens":` + strconv.Itoa(maxTokens)
 	if minTokens > 0 {
 		b += `,"min_tokens":` + strconv.Itoa(minTokens)
@@ -140,7 +145,7 @@ func (r *rig) startStream(body, key string) (first <-chan struct{}, done <-chan 
 		defer once()
 		ctx, cancel := r.requestCtx()
 		defer cancel()
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+clientAddr+"/v1/chat/completions", strings.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+r.ports.client+"/v1/chat/completions", strings.NewReader(body))
 		if err != nil {
 			out.err = err
 			return
@@ -179,8 +184,8 @@ func (r *rig) startStream(body, key string) (first <-chan struct{}, done <-chan 
 }
 
 // frontHealth reads the front's /healthz (base+4).
-func frontHealth() (map[string]any, bool) {
-	resp, err := (&http.Client{Timeout: 3 * time.Second}).Get(fmt.Sprintf("http://127.0.0.1:%d/healthz", portBase+4))
+func (r *rig) frontHealth() (map[string]any, bool) {
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Get(r.ports.url(4, "/healthz"))
 	if err != nil {
 		return nil, false
 	}
@@ -196,8 +201,8 @@ func frontHealth() (map[string]any, bool) {
 // transport registered, which an Instance needs to be eligible (HBEP-6, The
 // front's half), from /healthz's probe.instances; known is false when the
 // front does not report the Instance.
-func registered(in *v1alpha1.Instance) (reg, known bool) {
-	h, ok := frontHealth()
+func (r *rig) registered(in *v1alpha1.Instance) (reg, known bool) {
+	h, ok := r.frontHealth()
 	if !ok {
 		return false, false
 	}
@@ -212,8 +217,8 @@ func registered(in *v1alpha1.Instance) (reg, known bool) {
 }
 
 // frontCounter sums a counter's samples on the front's /metrics (base+4).
-func frontCounter(name string) (float64, bool) {
-	resp, err := (&http.Client{Timeout: 3 * time.Second}).Get(fmt.Sprintf("http://127.0.0.1:%d/metrics", portBase+4))
+func (r *rig) frontCounter(name string) (float64, bool) {
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Get(r.ports.url(4, "/metrics"))
 	if err != nil {
 		return 0, false
 	}

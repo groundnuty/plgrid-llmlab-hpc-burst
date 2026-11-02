@@ -48,10 +48,23 @@ type allocObservation struct {
 	deleted bool
 }
 
+// mdObservation is one ModelDeployment version as the watch delivered it:
+// its Degraded and Ready conditions, "" when absent.
+type mdObservation struct {
+	at              time.Time
+	name            string
+	degraded        metav1.ConditionStatus
+	degradedReason  string
+	degradedMessage string
+	ready           metav1.ConditionStatus
+	readyReason     string
+}
+
 type recorder struct {
 	mu     sync.Mutex
 	obs    []observation
 	allocs []allocObservation
+	mds    []mdObservation
 }
 
 // startWatch records every version of the namespace's Instances and
@@ -70,7 +83,7 @@ func (r *rig) startWatch() {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	r.t.Cleanup(func() { cancel(); wg.Wait() })
-	wg.Add(2)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		follow(ctx, wc, &v1alpha1.InstanceList{}, func(t watch.EventType, o client.Object) {
@@ -84,6 +97,14 @@ func (r *rig) startWatch() {
 		follow(ctx, wc, &v1alpha1.AllocationList{}, func(t watch.EventType, o client.Object) {
 			if a, ok := o.(*v1alpha1.Allocation); ok {
 				rec.addAlloc(a, t == watch.Deleted)
+			}
+		})
+	}()
+	go func() {
+		defer wg.Done()
+		follow(ctx, wc, &v1alpha1.ModelDeploymentList{}, func(_ watch.EventType, o client.Object) {
+			if md, ok := o.(*v1alpha1.ModelDeployment); ok {
+				rec.addMD(md)
 			}
 		})
 	}()
@@ -141,6 +162,33 @@ func (rec *recorder) add(in *v1alpha1.Instance, deleted bool) {
 	rec.mu.Lock()
 	rec.obs = append(rec.obs, o)
 	rec.mu.Unlock()
+}
+
+func (rec *recorder) addMD(md *v1alpha1.ModelDeployment) {
+	o := mdObservation{at: time.Now(), name: md.Name}
+	if c := meta.FindStatusCondition(md.Status.Conditions, v1alpha1.ConditionDegraded); c != nil {
+		o.degraded, o.degradedReason, o.degradedMessage = c.Status, c.Reason, c.Message
+	}
+	if c := meta.FindStatusCondition(md.Status.Conditions, v1alpha1.ConditionReady); c != nil {
+		o.ready, o.readyReason = c.Status, c.Reason
+	}
+	rec.mu.Lock()
+	rec.mds = append(rec.mds, o)
+	rec.mu.Unlock()
+}
+
+// deployment returns every observation of the named ModelDeployment, in the
+// order received.
+func (rec *recorder) deployment(name string) []mdObservation {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	var out []mdObservation
+	for _, o := range rec.mds {
+		if o.name == name {
+			out = append(out, o)
+		}
+	}
+	return out
 }
 
 func (rec *recorder) addAlloc(a *v1alpha1.Allocation, deleted bool) {
