@@ -17,6 +17,9 @@ package main
 // collection. Its binaries are internal/testenv's pinned ones, and its ports,
 // like every other port of this test, are chosen by the kernel. On a machine
 // where other agents test, run it under the shared envtest lock.
+//
+// The ports the binary binds are held by the test until the binary takes them:
+// held_test.go, issue #219.
 
 import (
 	"bytes"
@@ -197,59 +200,24 @@ func processesNaming(s string) []int {
 	return pids
 }
 
-// freePortBase returns a port base whose ports the binary binds are free: the
-// agent endpoint (+3), frps's plugin (+8) and the metrics
-// (agentapi.ControllerMetricsPortOffset, +12, which #111 binds). The kernel
-// chooses the agent endpoint's port; the others are checked, and all are
-// released just before the binary binds them.
-//
-// The binary binds these ports, the health address and the LLMLab double's
-// port (freePort) from an address, not from a listener a test could hand
-// over, so another process can take one between its release here and the
-// bind (review of PR 132: N5). The risk is accepted: the bind then fails and
-// run returns an error, a failed test rather than a passing one, and a
-// refusal's check that nothing listens fails if a stranger listens there.
+// freePortBase returns a port base whose ports the binary binds are free, and
+// holds them for the binary: the agent endpoint (+3), frps's plugin (+8) and the
+// metrics (agentapi.ControllerMetricsPortOffset, +12, which #111 binds). The
+// kernel chooses the agent endpoint's port; the others are bound at the same
+// base. The listeners stay open until startBinary or startChild gives them to
+// the binary, so no stranger can take one between the pick and the bind (issue
+// #219; before it, they were released here, and the binary's own client sockets
+// to the API server took one often enough to fail a test in CI).
 func freePortBase(t *testing.T) int {
 	t.Helper()
-	for range 100 {
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		base := ln.Addr().(*net.TCPAddr).Port - agentapi.AgentEndpointPortOffset
-		held := []net.Listener{ln}
-		ok := base >= 1024 && base+agentapi.ControllerMetricsPortOffset <= 65535
-		for _, off := range []int{agentapi.FrpsPluginPortOffset, agentapi.ControllerMetricsPortOffset} {
-			if !ok {
-				break
-			}
-			l, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(base+off)))
-			if err != nil {
-				ok = false
-				break
-			}
-			held = append(held, l)
-		}
-		for _, l := range held {
-			_ = l.Close()
-		}
-		if ok {
-			return base
-		}
-	}
-	t.Fatal("found no port base with free agent, plugin and metrics ports in 100 tries")
-	return 0
+	return holdBlock(t, []int{agentapi.FrpsPluginPortOffset, agentapi.ControllerMetricsPortOffset}, nil)
 }
 
-// freePort returns a loopback port the kernel chose, released (see
-// freePortBase for the residual risk).
+// freePort returns a loopback port the kernel chose, held for the binary like
+// freePortBase's (it is the health address's).
 func freePort(t *testing.T) int {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
+	ln, _ := holdLoopback(t)
 	return ln.Addr().(*net.TCPAddr).Port
 }
 
@@ -319,6 +287,14 @@ func startBinary(t *testing.T, f flags, d deps) *binary {
 	if d.frpcDigests == nil {
 		d.frpcDigests = exampleFrpcDigests
 	}
+	// The run binds only the addresses the test holds, through the held
+	// listeners (held_test.go); one the test did not pick fails the run.
+	if d.listen == nil {
+		for _, addr := range binaryAddrs(f) {
+			heldAddrs.rehold(t, addr)
+		}
+		d.listen = heldAddrs.take
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	b := &binary{f: f, cancel: cancel, exited: make(chan struct{})}
 	go func() {
@@ -352,8 +328,10 @@ func (b *binary) eventually(t *testing.T, what string, timeout time.Duration, co
 }
 
 // refusal waits for a run that must refuse to start and returns its error. A
-// run still going after 30 s started instead, which fails the test, and
-// nothing the run binds may listen after a refusal.
+// run still going after 30 s started instead, which fails the test, and a
+// refusal comes before the run binds anything: the test holds each address the
+// run would bind, so a dial would succeed whether the run bound it or not, and
+// what shows that nothing started is that the run took none of the listeners.
 func (b *binary) refusal(t *testing.T) error {
 	t.Helper()
 	select {
@@ -361,9 +339,9 @@ func (b *binary) refusal(t *testing.T) error {
 	case <-time.After(30 * time.Second):
 		t.Fatal("run did not refuse within 30 s: it started instead")
 	}
-	for _, addr := range []string{b.f.host.AgentEndpointAddr(), b.f.healthAddr} {
-		if listening(addr) {
-			t.Errorf("%s listens after the refusal; nothing should have started", addr)
+	for _, addr := range binaryAddrs(b.f) {
+		if heldAddrs.wasTaken(addr) {
+			t.Errorf("the run bound %s before its refusal; nothing should have started", addr)
 		}
 	}
 	return b.err
@@ -655,9 +633,12 @@ func testBinaryComponents(t *testing.T, api *apiServer) {
 	profile := batchProfile("wiring-slurm")
 	x86Prov := batchProvider("wiring-batch", profile.Name, partX86, sshCreds)
 	gh200Prov := batchProvider("wiring-gh200", profile.Name, partGH200, sshCreds)
-	gwPort := freePort(t)
+	gwLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
 	gwKey := "example-key-wiring-0001"
-	gw := llmlabtest.Start(t, llmlabtest.Options{PortLo: gwPort, PortHi: gwPort, Keys: []string{gwKey}})
+	gw := llmlabtest.Start(t, llmlabtest.Options{Listener: gwLn, Keys: []string{gwKey}})
 	gw.SetModels(llmlabtest.Model{ID: "example-27b", Revision: "2026-09"})
 	mcreds, err := provider.ManagedCredentials{Key: gwKey, BaseURL: gw.BaseURL()}.Encode()
 	if err != nil {

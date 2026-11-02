@@ -12,22 +12,20 @@ package main
 // whatever it did. The refusals are read from frpc's own log, which carries the plugin's reason, and
 // from frps's own proxy list, which holds no proxy the plugin refused.
 //
-// Ports: the kernel chooses the agent endpoint's port, and freeTunnelPortBase checks that the
-// plugin's (+8), frps's three (+9, +10, +11) and the metrics' (+12) are free; frps is started on
-// that block, so the controller's plugin endpoint is the one frps posts to. Everything binds
-// 127.0.0.1.
+// Ports: the kernel chooses the agent endpoint's port, and freeTunnelPortBase holds the block: the
+// plugin's (+8) and the metrics' (+12) for the binary, frps's three (+9, +10, +11) until frps
+// starts; frps is started on that block, so the controller's plugin endpoint is the one frps
+// posts to. Everything binds 127.0.0.1.
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -67,42 +65,17 @@ const (
 	tunnelNS = "tunnel-ns"
 )
 
-// freeTunnelPortBase returns a port base whose block the tunnel uses is free: the agent endpoint
-// (+3, which the kernel chooses), the plugin (+8), frps's bind, tcpmux and web ports (+9 to +11) and the
-// metrics (+12). The ports are released just before the binary and frps bind them; freePortBase
-// explains the residual risk, which is the same here (run or frps then fails to bind: a failed
-// test, not a passing one).
+// freeTunnelPortBase returns a port base whose block the tunnel uses is free, and holds it: the
+// binary's ports (the agent endpoint +3, which the kernel chooses, the plugin +8 and the metrics
+// +12) for the binary, as freePortBase does (held_test.go), and frps's bind, tcpmux and web ports
+// (+9 to +11) for frps. frps is a real process that binds those three itself and cannot take a
+// listener, so they are held until startFrps releases them just before it starts frps: the
+// residual window is that start, not the test's whole run. A stranger that takes one in it fails
+// frps's start, which startFrps reports (a failed test, not a passing one).
 func freeTunnelPortBase(t *testing.T) int {
 	t.Helper()
-	offsets := []int{agentapi.FrpsPluginPortOffset, agentapi.FrpsBindPortOffset, agentapi.FrpsTCPMuxPortOffset, agentapi.FrpsWebPortOffset, agentapi.ControllerMetricsPortOffset}
-	for range 100 {
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		base := ln.Addr().(*net.TCPAddr).Port - agentapi.AgentEndpointPortOffset
-		held := []net.Listener{ln}
-		ok := base >= 1024 && base+agentapi.ControllerMetricsPortOffset <= 65535
-		for _, off := range offsets {
-			if !ok {
-				break
-			}
-			l, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(base+off)))
-			if err != nil {
-				ok = false
-				break
-			}
-			held = append(held, l)
-		}
-		for _, l := range held {
-			_ = l.Close()
-		}
-		if ok {
-			return base
-		}
-	}
-	t.Fatal("found no port base with a free tunnel block in 100 tries")
-	return 0
+	return holdBlock(t, []int{agentapi.FrpsPluginPortOffset, agentapi.ControllerMetricsPortOffset},
+		[]int{agentapi.FrpsBindPortOffset, agentapi.FrpsTCPMuxPortOffset, agentapi.FrpsWebPortOffset})
 }
 
 // condObs is one observed state of an Instance's TunnelConnected condition.
@@ -251,6 +224,7 @@ func (r *tunnelRig) startFrps() {
 	if err != nil {
 		r.t.Fatal(err)
 	}
+	releaseForFrps(host)
 	proc, err := launcher.StartFrps(launcher.FrpsSpec{Bin: r.frpsBin, Config: cfg, Log: launcher.FrpsLogFile(host), Dir: host.StateDir})
 	if err != nil {
 		r.t.Fatal(err)
@@ -572,7 +546,7 @@ func TestTunnelWithRealFrpsAndFrpc(t *testing.T) {
 	// frps is not running: the binary starts and stays up, the plugin listens, and every Instance's
 	// condition is Unknown, since the list cannot be read (HBEP-6: never False, never True).
 	b := r.start()
-	b.eventually(t, "the plugin endpoint listens", 60*time.Second, func() bool { return listening(host.FrpsPluginAddr()) })
+	b.eventually(t, "the plugin endpoint is bound", 60*time.Second, func() bool { return heldAddrs.wasTaken(host.FrpsPluginAddr()) })
 	for _, in := range []*v1alpha1.Instance{a1, a2, b1} {
 		r.waitCond(b, in, statusUnknown, reasonUnreadable)
 	}

@@ -33,6 +33,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/providerctl"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 // childEnvRunner makes the test binary a controller process; its value is the
@@ -58,7 +59,14 @@ func controllerChild(args []string, runnerAddr string) int {
 	runner := &remoteRunner{addr: runnerAddr}
 	// The state directory holds prepareState's example frpc builds, so the
 	// child pins their digests, as startBinary does for an in-process run.
-	d := deps{providerScheme: providerScheme, newPlatform: remotePlatforms(runner), frpcDigests: exampleFrpcDigests}
+	// The ports were picked by the parent, which holds them until this process
+	// has started: they arrive as inherited descriptors (inheritListeners).
+	listen, err := inheritedListen(os.Getenv(childEnvListeners))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "hpcburst-controller:", err)
+		return 1
+	}
+	d := deps{providerScheme: providerScheme, newPlatform: remotePlatforms(runner), frpcDigests: exampleFrpcDigests, listen: listen}
 	if err := run(ctx, f, d); err != nil {
 		fmt.Fprintln(os.Stderr, "hpcburst-controller:", err)
 		return 1
@@ -122,7 +130,10 @@ func startChild(t *testing.T, name string, f flags, runnerAddr string) *child {
 	c.cmd = exec.Command(exe, args...)
 	// A minimal environment: the child needs the fake's address and little else,
 	// and must not inherit a signing socket or any credential.
-	c.cmd.Env = []string{childEnvRunner + "=" + runnerAddr, "PATH=" + os.Getenv("PATH"), "TMPDIR=" + os.TempDir(), "HOME=" + os.TempDir()}
+	files, listenerEnv, closeParent := inheritListeners(t, f)
+	defer closeParent() // the child holds its own descriptors once it has started
+	c.cmd.ExtraFiles = files
+	c.cmd.Env = []string{childEnvRunner + "=" + runnerAddr, childEnvListeners + "=" + listenerEnv, "PATH=" + os.Getenv("PATH"), "TMPDIR=" + os.TempDir(), "HOME=" + os.TempDir()}
 	c.cmd.Stdout, c.cmd.Stderr = logFile, logFile
 	// Pdeathsig: a -test.timeout panic skips t.Cleanup, and then the kernel
 	// ends the child.
@@ -226,7 +237,9 @@ func secondCopyFlags(t *testing.T, first flags) flags {
 	t.Helper()
 	for range 50 {
 		base := freePortBase(t)
-		if d := base - first.host.PortBase; d > 12 || d < -12 {
+		if d := base - first.host.PortBase; d <= 12 && d >= -12 {
+			dropBlock(base, agentapi.FrpsPluginPortOffset, agentapi.ControllerMetricsPortOffset)
+		} else {
 			args := []string{"--state-dir", first.host.StateDir, "--port-base", strconv.Itoa(base),
 				"--health-addr", net.JoinHostPort("127.0.0.1", strconv.Itoa(freePort(t))),
 				"--front-mode", first.frontMode, "--front-addr", first.frontAddr}
