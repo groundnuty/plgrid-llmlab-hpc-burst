@@ -320,7 +320,10 @@ func SuccessorQueueWait(pre, suc provider.Job) (d time.Duration, ok bool) {
 //     4 minutes, 16 concurrent streams at 20 tokens a second, an idle stretch
 //     of 2 minutes with heartbeats only;
 //  3. no cut: no response with cutBy, no stream_cut;
-//  4. the path rate, tokens and bytes a second from node to front, under load.
+//  4. the path rate in both directions, upload (front to node) and download
+//     (node to front, in tokens as well as bytes), each under load (issue #224);
+//  5. the upload exercised: request bodies of 0.1 MB or more, sent while the 16
+//     streams were open.
 //
 // A run in which frpc logged in again mid-hour but every request passed is no
 // pass: the session check is what fails it.
@@ -332,17 +335,7 @@ func VerifyTunnelHour(row Row, o TunnelHourObs, jobs []provider.Job) []string {
 	f = append(f, requestChecks(o.Requests, o.DrainStart)...)
 	f = append(f, sessionChecks(o.Requests, o.Samples)...)
 	f = append(f, trafficChecks(o.Requests)...)
-	r := o.Rate
-	switch {
-	case !r.OK:
-		f = append(f, "the path rate was not measured")
-	case r.Direction != "up":
-		f = append(f, "the path rate is not in the token direction (node to front)")
-	case r.AskedSeconds < 30 || r.TimedSeconds < 29 || r.Bytes <= 0:
-		f = append(f, "the path rate was asked for under 30 s, timed under 29 s, or moved no bytes")
-	case !r.UnderLoad || r.Tokens <= 0:
-		f = append(f, "the path rate was not measured under load, in tokens as well as bytes")
-	}
+	f = append(f, rateChecks(o.Rates)...)
 	lf, by := ledgerChecks(row, o.Tags, jobs)
 	f = append(f, lf...)
 	f = append(f, tagCountChecks(row, o.Tags, "a tunnel run makes exactly one Allocation")...)
@@ -359,6 +352,43 @@ func VerifyTunnelHour(row Row, o TunnelHourObs, jobs []provider.Job) []string {
 		}
 	}
 	return dedupe(f)
+}
+
+// rateChecks: the path rate is measured in both directions, one rate each, upload
+// (front to node) and download (node to front), as S1's C6 asks of the token
+// direction: ok, at least 30 s asked, at least 29 s timed, bytes moved, measured
+// under load; the download also moves tokens (issue #224).
+func rateChecks(rates []PathRate) []string {
+	var f []string
+	by := map[string]PathRate{}
+	for _, r := range rates {
+		if _, dup := by[r.Direction]; dup {
+			f = append(f, "the path rates are not one per direction (upload and download)")
+			continue
+		}
+		by[r.Direction] = r
+	}
+	for dir := range by {
+		if dir != DirUpload && dir != DirDownload {
+			f = append(f, "a path rate names a direction that is neither upload nor download")
+		}
+	}
+	for _, dir := range []string{DirUpload, DirDownload} {
+		r, found := by[dir]
+		switch {
+		case !found:
+			f = append(f, "the "+dir+" path rate was not posted: both directions are needed")
+		case !r.OK:
+			f = append(f, "the "+dir+" path rate was not measured")
+		case r.AskedSeconds < 30 || r.TimedSeconds < 29 || r.Bytes <= 0:
+			f = append(f, "the "+dir+" path rate was asked for under 30 s, timed under 29 s, or moved no bytes")
+		case !r.UnderLoad:
+			f = append(f, "the "+dir+" path rate was not measured under load")
+		case dir == DirDownload && r.Tokens <= 0:
+			f = append(f, "the download path rate moved no tokens")
+		}
+	}
+	return f
 }
 
 // span is the time from the first request opening to the last ending; zero when
@@ -466,7 +496,68 @@ func trafficChecks(reqs []Stream) []string {
 	if longestIdle(reqs) < MinIdleGap {
 		f = append(f, "the hour held no idle stretch of 2 minutes with heartbeats only")
 	}
+	// The upload direction (issue #224): large request bodies, sent while the 16 streams were open, so that the
+	// shared tunnel's head-of-line pressure is exercised in the direction the front's request bodies take.
+	if largestBody(reqs) < MinLargeBody {
+		f = append(f, "no request body reached 0.1 MB, so the upload direction was not exercised")
+	} else if largeAmongStreams(reqs) == 0 {
+		f = append(f, "no request of 0.1 MB or more was sent while the 16 streams were open")
+	}
 	return f
+}
+
+// largestBody is the largest request body any request sent, in bytes.
+func largestBody(reqs []Stream) int {
+	best := 0
+	for _, r := range reqs {
+		best = max(best, r.BodyBytes)
+	}
+	return best
+}
+
+// LargeRequests is the requests with a body of MinLargeBody or more.
+func LargeRequests(reqs []Stream) []Stream {
+	var out []Stream
+	for _, r := range reqs {
+		if r.BodyBytes >= MinLargeBody {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// largeAmongStreams counts the large requests whose upload (the body, from its first byte to its last) was in progress
+// at a moment when at least ConcurrentStreams streams, each at StreamRate or more, were open too. It is the upload
+// interval that counts (PR 244, B2): a 100,000-byte body can be sent before the streams open, and its response then stay
+// open across their start; the request was open among the streams, and its body was not. A request whose upload interval
+// is not recorded is not counted.
+func largeAmongStreams(reqs []Stream) int {
+	n := 0
+	for _, l := range LargeRequests(reqs) {
+		if !l.UploadRecorded() {
+			continue
+		}
+		// The moments that matter are the upload's start and each stream's opening inside it.
+		at := []time.Time{l.BodyStart}
+		for _, r := range reqs {
+			if isStream(r) && r.Opened.After(l.BodyStart) && r.Opened.Before(l.BodyEnd) {
+				at = append(at, r.Opened)
+			}
+		}
+		for _, t := range at {
+			open := 0
+			for _, r := range reqs {
+				if isStream(r) && !r.Opened.After(t) && r.Ended.After(t) {
+					open++
+				}
+			}
+			if open >= ConcurrentStreams {
+				n++
+				break
+			}
+		}
+	}
+	return n
 }
 
 // longestChain is the most requests that follow one another with no more than MaxChainGap between.
@@ -488,13 +579,16 @@ func longestChain(reqs []Stream) int {
 	return best
 }
 
+// isStream: a request that ran at StreamRate tokens a second or more is one of the streams the hour's load is made of.
+func isStream(r Stream) bool { return r.TokensPerSecond() >= StreamRate }
+
 // concurrentStreams is the most streams open together at one moment that each ran at StreamRate tokens a second or more.
 func concurrentStreams(reqs []Stream) int {
 	best := 0
 	for _, at := range reqs {
 		open := 0
 		for _, r := range reqs {
-			if !r.Opened.After(at.Opened) && r.Ended.After(at.Opened) && r.TokensPerSecond() >= StreamRate {
+			if !r.Opened.After(at.Opened) && r.Ended.After(at.Opened) && isStream(r) {
 				open++
 			}
 		}
@@ -527,8 +621,11 @@ func longestIdle(reqs []Stream) time.Duration {
 // TunnelHourFlags are the observations S1's verdict prints as FLAG lines: they
 // are posted with the result and do not fail it.
 func TunnelHourFlags(o TunnelHourObs) []string {
-	if bps := o.Rate.BytesPerSecond(); o.Rate.OK && bps > 0 && bps < minRate {
-		return []string{fmt.Sprintf("path rate %.0f B/s is under 629146 B/s (6 MiB window over 10 s)", bps)}
+	// S1's flag is on the token direction, node to front (C6); the upload has no flag.
+	for _, r := range o.Rates {
+		if bps := r.BytesPerSecond(); r.Direction == DirDownload && r.OK && bps > 0 && bps < minRate {
+			return []string{fmt.Sprintf("download path rate %.0f B/s is under 629146 B/s (6 MiB window over 10 s)", bps)}
+		}
 	}
 	return nil
 }

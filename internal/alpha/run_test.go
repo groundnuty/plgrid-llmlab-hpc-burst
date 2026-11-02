@@ -68,10 +68,18 @@ var tunnelCases = []dryCase{
 	{"short", "the requests lasted less than an hour"},
 	{"cut", "a stream was cut during the hour"},
 	{"stream-cut-error", "a stream was cut during the hour"},
-	{"no-rate", "the path rate was not measured"},
-	{"short-rate", "the path rate was asked for under 30 s, timed under 29 s, or moved no bytes"},
-	{"wrong-direction", "the path rate is not in the token direction"},
-	{"no-load-rate", "not measured under load"},
+	{"no-rate", "the upload path rate was not measured"},
+	{"short-rate", "the download path rate was asked for under 30 s, timed under 29 s, or moved no bytes"},
+	// Two rates that say the same direction: one per direction is the rule, and the upload is then missing.
+	{"wrong-direction", "the path rates are not one per direction"},
+	{"no-load-rate", "the download path rate was not measured under load"},
+	// The upload direction (issue #224): a rate for each, request bodies of 0.1 MB or more, sent among the streams.
+	{"no-upload-rate", "the upload path rate was not posted: both directions are needed"},
+	{"no-download-rate", "the download path rate was not posted: both directions are needed"},
+	{"upload-not-under-load", "the upload path rate was not measured under load"},
+	{"no-large", "no request body reached 0.1 MB, so the upload direction was not exercised"},
+	{"large-apart", "no request of 0.1 MB or more was sent while the 16 streams were open"},
+	{"response-overlap", "no request of 0.1 MB or more was sent while the 16 streams were open"},
 	{"untagged", "a job tag was not written down before its submission"},
 	{"wrong-partition", "a job ran on another partition than the row's"},
 	{"adds-other-cluster", "the deployment does not allow exactly one Provider"},
@@ -116,7 +124,7 @@ func TestDryRunsOfEveryRowAndEveryFault(t *testing.T) {
 				name = row.Name + "/healthy"
 			}
 			t.Run(name, func(t *testing.T) {
-				cfg := Config{Row: row, Dry: true, DryFault: c.fault, Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute}
+				cfg := Config{Row: row, Dry: true, DryFault: c.fault, Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute, FrontLabel: testFrontLabel}
 				rec, err := NewRecorder(cfg.Out)
 				if err != nil {
 					t.Fatal(err)
@@ -162,12 +170,18 @@ func TestHealthyRunsPostTheirMeasurements(t *testing.T) {
 	cases := map[string][]string{
 		"alpha-athena-handover":  {"handovers completed: 1", "restarts at the worker rung: 1", "responses with attribution: 20 of 20"},
 		"alpha-helios-nooverlap": {"gap from the drain start to the successor ready: 1m0s", "NoOverlapSlot seen: true", "queue wait once the GPU freed: 0s"},
-		"tunnel-hour-athena":     {"path rate, node to front:", "tokens/s under load", "1 distinct frps lastStartTime across 63 looks (one is the pass)", "peak streams at 20 tokens/s or more: 16", "longest idle stretch: 3m0s"},
+		"tunnel-hour-athena": {
+			// The stand-in's rates worked out by hand: upload 24 MiB over 30.1 s, download 31 MiB over 30.2 s and 16 streams at
+			// 20 tokens a second over 30 s (9,600 tokens). The stand-in sends four large bodies of 100,000 to 400,000 bytes
+			// inside the burst's streams.
+			"path rate, upload (front to node): 836074 B/s under load (25165824 bytes timed over 30.1 s, asked 30 s)",
+			"path rate, download (node to front): 1076353 B/s and 318 tokens/s under load (32505856 bytes, 9600 tokens timed over 30.2 s, asked 30 s)",
+			"large requests (a body of 0.1 MB or more): 4, bodies of 100000 to 400000 bytes; 4 of them sent while the 16 streams were open", "1 distinct frps lastStartTime across 63 looks (one is the pass)", "peak streams at 20 tokens/s or more: 16", "longest idle stretch: 3m0s"},
 	}
 	for name, wants := range cases {
 		t.Run(name, func(t *testing.T) {
 			row, _ := RowByName(name)
-			cfg := Config{Row: row, Dry: true, Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute}
+			cfg := Config{Row: row, Dry: true, Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute, FrontLabel: testFrontLabel}
 			rec, err := NewRecorder(cfg.Out)
 			if err != nil {
 				t.Fatal(err)
@@ -189,7 +203,7 @@ func TestHealthyRunsPostTheirMeasurements(t *testing.T) {
 // and the steps are closed either way.
 func TestAScenarioErrorFailsTheRunAndClosesTheSteps(t *testing.T) {
 	row, _ := RowByName("alpha-athena-handover")
-	cfg := Config{Row: row, Out: filepath.Join(t.TempDir(), "out")}
+	cfg := Config{Row: row, Out: filepath.Join(t.TempDir(), "out"), FrontLabel: testFrontLabel}
 	rec, err := NewRecorder(cfg.Out)
 	if err != nil {
 		t.Fatal(err)
@@ -232,7 +246,7 @@ func TestTheChosenLeaseDecidesWhetherASlowStartCanPass(t *testing.T) {
 		{"short lease, ready at 35 min", short, "slow-start", "the hour ended after the Instance's drain start"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			cfg := Config{Row: c.row, Dry: true, DryFault: c.fault, Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute}
+			cfg := Config{Row: c.row, Dry: true, DryFault: c.fault, Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute, FrontLabel: testFrontLabel}
 			rec, err := NewRecorder(cfg.Out)
 			if err != nil {
 				t.Fatal(err)

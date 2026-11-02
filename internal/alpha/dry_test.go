@@ -42,7 +42,7 @@ const (
 var dryFaults = map[string][]string{
 	"handover":  {"cut", "no-stream", "two-restarts", "no-restart", "no-handover", "late-successor", "wrong-partition", "untagged", "unattributed", "adds-helios", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "no-responses"},
 	"nooverlap": {"nocap", "nogap", "noslot", "cut", "no-stream", "late-submit", "untagged", "wrong-partition", "adds-athena", "default-lease", "short-lease", "no-release-when-idle", "duplicate-tag", "extra-allocation", "two-restarts", "no-restart"},
-	"tunnel":    {"short", "cut", "no-rate", "short-rate", "wrong-direction", "untagged", "wrong-partition", "adds-other-cluster", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "past-deadline", "past-drain", "no-drain-start", "stream-cut-error", "reconnect", "disconnected", "sparse-samples", "late-first-sample", "no-concurrency", "slow-streams", "no-idle-gap", "no-long-stream", "no-back-to-back", "no-load-rate", "slow-start"},
+	"tunnel":    {"short", "cut", "no-rate", "short-rate", "wrong-direction", "untagged", "wrong-partition", "adds-other-cluster", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "past-deadline", "past-drain", "no-drain-start", "stream-cut-error", "reconnect", "disconnected", "sparse-samples", "late-first-sample", "no-concurrency", "slow-streams", "no-idle-gap", "no-long-stream", "no-back-to-back", "no-load-rate", "slow-start", "no-large", "large-apart", "response-overlap", "no-upload-rate", "no-download-rate", "upload-not-under-load"},
 }
 
 type drySteps struct {
@@ -444,6 +444,31 @@ func (d *drySteps) TunnelHour(_ context.Context, p Plan) (TunnelHourObs, error) 
 	for i := 0; i < burst; i++ {
 		add(fmt.Sprintf("c%d", i), 120*time.Second, 120*rate)
 	}
+	// Large request bodies (issue #224), 0.1 to 0.4 MB, sent while the burst's streams are open: each opens and ends
+	// strictly inside the burst's 120 s (at 5, 30, 55 and 80 s, 10 s long: 15 s apart, so they are not a run back to
+	// back), at 4 tokens a second, so none is a stream. The body goes in the first 5 s of each request, the response
+	// takes the other 5. The fault no-large sends bodies under 0.1 MB, the largest one byte under; large-apart sends
+	// them in the first request's time, long before the streams; response-overlap (PR 244, B2) sends each body before the
+	// streams open and keeps its response open across their start, so the request is open among the streams and its
+	// upload was not.
+	bodies := []int{MinLargeBody, 200_000, 300_000, 400_000}
+	if d.fault("no-large") {
+		bodies = []int{20_000, 40_000, 80_000, MinLargeBody - 1}
+	}
+	for i, body := range bodies {
+		openAt := at.Add(time.Duration(5+25*i) * time.Second)
+		if d.fault("large-apart") {
+			openAt = ready.Add(time.Duration(30+40*i) * time.Second)
+		}
+		u := Stream{ID: fmt.Sprintf("u%d", i), Opened: openAt, Ended: openAt.Add(10 * time.Second), Complete: true, Tokens: 40, BodyBytes: body,
+			BodyStart: openAt, BodyEnd: openAt.Add(5 * time.Second)}
+		if d.fault("response-overlap") {
+			// The body is gone 6 s before the streams open and the response ends 40 s after they did.
+			u.Opened, u.Ended = at.Add(-time.Duration(30+10*i)*time.Second), at.Add(40*time.Second)
+			u.BodyStart, u.BodyEnd = u.Opened, at.Add(-6*time.Second)
+		}
+		reqs = append(reqs, u)
+	}
 	at = at.Add(120 * time.Second)
 	idle := 3 * time.Minute
 	if d.fault("no-idle-gap") {
@@ -466,6 +491,29 @@ func (d *drySteps) TunnelHour(_ context.Context, p Plan) (TunnelHourObs, error) 
 	}
 	if d.fault("stream-cut-error") {
 		reqs[1].Error = "stream_cut"
+	}
+	// The path rate of each direction, measured with the streams open: the upload carries the request bodies, the
+	// download the tokens (S1's token direction, the 16 streams at their rate over the 30 s asked).
+	up := PathRate{Direction: DirUpload, OK: true, AskedSeconds: 30, TimedSeconds: 30.1, Bytes: 24 << 20, UnderLoad: true}
+	down := PathRate{Direction: DirDownload, OK: true, AskedSeconds: 30, TimedSeconds: 30.2, Bytes: 31 << 20, Tokens: int64(ConcurrentStreams * rate * 30), UnderLoad: true}
+	switch {
+	case d.fault("no-rate"):
+		up.OK, down.OK = false, false
+	case d.fault("short-rate"):
+		down.TimedSeconds = 20
+	case d.fault("wrong-direction"):
+		up.Direction = DirDownload
+	case d.fault("no-load-rate"):
+		down.UnderLoad = false
+	case d.fault("upload-not-under-load"):
+		up.UnderLoad = false
+	}
+	rates := []PathRate{up, down}
+	switch {
+	case d.fault("no-upload-rate"):
+		rates = []PathRate{down}
+	case d.fault("no-download-rate"):
+		rates = []PathRate{up}
 	}
 	_, end := span(reqs)
 	if d.fault("past-drain") {
@@ -491,16 +539,8 @@ func (d *drySteps) TunnelHour(_ context.Context, p Plan) (TunnelHourObs, error) 
 	d.tick(end.Add(time.Minute).Sub(ready))
 	d.end(n, id)
 	obs := TunnelHourObs{Deployment: d.deployment(), Tags: append([]string(nil), d.tags...), Requests: reqs, Samples: samples, DrainStart: drain,
-		Rate: PathRate{Direction: "up", OK: true, AskedSeconds: 30, TimedSeconds: 30.2, Bytes: 31 << 20, Tokens: int64(ConcurrentStreams * rate * 30), UnderLoad: true}}
+		Rates: rates}
 	switch {
-	case d.fault("no-rate"):
-		obs.Rate.OK = false
-	case d.fault("short-rate"):
-		obs.Rate.TimedSeconds = 20
-	case d.fault("wrong-direction"):
-		obs.Rate.Direction = "down"
-	case d.fault("no-load-rate"):
-		obs.Rate.UnderLoad = false
 	case d.fault("no-drain-start"):
 		obs.DrainStart = time.Time{}
 	}

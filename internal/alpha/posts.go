@@ -72,13 +72,54 @@ func tunnelHourPost(row Row, o TunnelHourObs, failures []string) string {
 			connected++
 		}
 	}
-	fmt.Fprintf(&b, "%s\n%s\n- the hour: %d requests over %s; longest run back to back: %d; peak streams at %.0f tokens/s or more: %d; longest idle stretch: %s; requests cut: %d\n- the tunnel session: %d distinct frps lastStartTime across %d looks (one is the pass); TunnelConnected True in %d of them\n- path rate, node to front: %.0f B/s and %.0f tokens/s under load (%d bytes, %d tokens timed over %.1f s, asked %.0f s)\n",
+	fmt.Fprintf(&b, "%s\n%s\n- the hour: %d requests over %s; longest run back to back: %d; peak streams at %.0f tokens/s or more: %d; longest idle stretch: %s; requests cut: %d\n- the tunnel session: %d distinct frps lastStartTime across %d looks (one is the pass); TunnelConnected True in %d of them\n%s",
 		verdictLine(row, failures), deploymentLine(o.Deployment), len(o.Requests), last.Sub(first).Round(time.Second), longestChain(o.Requests),
 		StreamRate, concurrentStreams(o.Requests), longestIdle(o.Requests).Round(time.Second), cut,
-		len(sessions), len(o.Samples), connected,
-		o.Rate.BytesPerSecond(), o.Rate.TokensPerSecond(), o.Rate.Bytes, o.Rate.Tokens, o.Rate.TimedSeconds, o.Rate.AskedSeconds)
+		len(sessions), len(o.Samples), connected, largeLine(o.Requests)+rateLines(o.Rates))
 	for _, fl := range TunnelHourFlags(o) {
 		fmt.Fprintf(&b, "- FLAG: %s\n", fl)
+	}
+	return b.String()
+}
+
+// largeLine: how many requests had a body of 0.1 MB or more, the range of the bodies, and how many of them were
+// sent while the 16 streams were open (issue #224).
+func largeLine(reqs []Stream) string {
+	large := LargeRequests(reqs)
+	if len(large) == 0 {
+		return "- large requests (a body of 0.1 MB or more): none; largest body sent: " + fmt.Sprint(largestBody(reqs)) + " bytes\n"
+	}
+	lo, hi := large[0].BodyBytes, large[0].BodyBytes
+	for _, r := range large {
+		lo, hi = min(lo, r.BodyBytes), max(hi, r.BodyBytes)
+	}
+	return fmt.Sprintf("- large requests (a body of 0.1 MB or more): %d, bodies of %d to %d bytes; %d of them sent while the %d streams were open\n", len(large), lo, hi, largeAmongStreams(reqs), ConcurrentStreams)
+}
+
+// rateLines: the path rate of each direction, separately, upload first (issue #224). The download is the token
+// direction, with S1's tokens a second; a direction that was not measured says so.
+func rateLines(rates []PathRate) string {
+	var b strings.Builder
+	for _, dir := range []string{DirUpload, DirDownload} {
+		label := "download (node to front)"
+		if dir == DirUpload {
+			label = "upload (front to node)"
+		}
+		var r *PathRate
+		for i := range rates {
+			if rates[i].Direction == dir {
+				r = &rates[i]
+				break
+			}
+		}
+		switch {
+		case r == nil:
+			fmt.Fprintf(&b, "- path rate, %s: not posted\n", label)
+		case dir == DirDownload:
+			fmt.Fprintf(&b, "- path rate, %s: %.0f B/s and %.0f tokens/s under load (%d bytes, %d tokens timed over %.1f s, asked %.0f s)\n", label, r.BytesPerSecond(), r.TokensPerSecond(), r.Bytes, r.Tokens, r.TimedSeconds, r.AskedSeconds)
+		default:
+			fmt.Fprintf(&b, "- path rate, %s: %.0f B/s under load (%d bytes timed over %.1f s, asked %.0f s)\n", label, r.BytesPerSecond(), r.Bytes, r.TimedSeconds, r.AskedSeconds)
+		}
 	}
 	return b.String()
 }
