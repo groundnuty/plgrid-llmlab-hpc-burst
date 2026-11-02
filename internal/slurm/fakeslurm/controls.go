@@ -204,10 +204,10 @@ func (p *Platform) HoldCompleting(id int, on bool) error {
 }
 
 // RenameListed makes squeue list the job under name while sacct keeps the name
-// the job was submitted with: the two sources disagree about the job's name, as
-// they do when a rewrite (a job_submit plugin, an administrator's scontrol
-// update) has reached slurmctld but not slurmdbd. The job is found by its ID in
-// both, and by its submitted name in accounting only. An empty name undoes it.
+// the job was submitted with: a fixture for two sources that disagree about the
+// job's name, which the plugin must not let hide the queue's evidence. The job
+// is found by its ID in both, and by its submitted name in accounting only. An
+// empty name undoes it.
 func (p *Platform) RenameListed(id int, name string) error {
 	return p.withJob(id, func(j *job, _ time.Time) error { j.listedName = name; return nil })
 }
