@@ -58,23 +58,27 @@ func (b *seqRecorder) recorded() []seqCall {
 	return append([]seqCall(nil), b.calls...)
 }
 
-// runUntilStopped runs the Instance to a worker running, stops the agent by
-// instruction, and waits for it to exit.
-func runUntilStopped(t *testing.T, o harnessOptions) *harness {
+// runUntilStopped runs the Instance to a worker running, ends the agent, by
+// instruction or with its job, and waits for it to exit.
+func runUntilStopped(t *testing.T, o harnessOptions, via string) *harness {
 	t.Helper()
 	h := newHarness(t, o)
 	d := h.runState("", 1, 0, nil)
 	h.set(d)
 	h.waitReport("worker-0 running", 20*time.Second, running)
-	h.set(agentapi.DesiredState{Action: agentapi.ActionStop, Settings: d.Settings})
+	if via == byJobEnd {
+		h.cancel()
+	} else {
+		h.set(agentapi.DesiredState{Action: agentapi.ActionStop, Settings: d.Settings})
+	}
 	select {
 	case err := <-h.done:
 		h.done <- err // for the clean-up's wait
-		if err != nil {
-			t.Fatalf("Run returned %v after a stop", err)
+		if via == byInstruction && err != nil || via == byJobEnd && !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run returned %v after a stop by %s", err, via)
 		}
 	case <-time.After(30 * time.Second):
-		t.Fatal("the agent did not exit after a stop")
+		t.Fatalf("the agent did not exit after a stop by %s", via)
 	}
 	return h
 }
@@ -83,26 +87,30 @@ func runUntilStopped(t *testing.T, o harnessOptions) *harness {
 // every report before it. Between two calls the count may jump, since a
 // snapshot superseded before it was sent still took a number.
 func TestTheAgentCountsItsReportsAndTheLastIsTheNewest(t *testing.T) {
-	rec := &seqRecorder{}
-	h := runUntilStopped(t, harnessOptions{backendWrap: func(b agentapi.Backend) agentapi.Backend { rec.Backend = b; return rec }})
-	calls := rec.recorded()
-	if len(calls) < 3 {
-		t.Fatalf("%d reports reached the Backend, want at least 3", len(calls))
-	}
-	if calls[0].seq == 0 {
-		t.Errorf("the first report carries no count")
-	}
-	for i := 1; i < len(calls); i++ {
-		if calls[i].seq <= calls[i-1].seq {
-			t.Errorf("report %d is counted %d, after %d: the count must rise with every report", i+1, calls[i].seq, calls[i-1].seq)
-		}
-	}
-	last := calls[len(calls)-1]
-	if last.phase != agentapi.PartStopped {
-		t.Errorf("the last report says worker-0 %q, want %q", last.phase, agentapi.PartStopped)
-	}
-	if n := h.backend.Dropped(hAllocUID); n != 0 {
-		t.Errorf("the Backend dropped %d reports of an agent that sent them in order", n)
+	for _, via := range bothEnds {
+		t.Run(via, func(t *testing.T) {
+			rec := &seqRecorder{}
+			h := runUntilStopped(t, harnessOptions{backendWrap: func(b agentapi.Backend) agentapi.Backend { rec.Backend = b; return rec }}, via)
+			calls := rec.recorded()
+			if len(calls) < 3 {
+				t.Fatalf("%d reports reached the Backend, want at least 3", len(calls))
+			}
+			if calls[0].seq == 0 {
+				t.Errorf("the first report carries no count")
+			}
+			for i := 1; i < len(calls); i++ {
+				if calls[i].seq <= calls[i-1].seq {
+					t.Errorf("report %d is counted %d, after %d: the count must rise with every report", i+1, calls[i].seq, calls[i-1].seq)
+				}
+			}
+			last := calls[len(calls)-1]
+			if last.phase != agentapi.PartStopped {
+				t.Errorf("the last report says worker-0 %q, want %q", last.phase, agentapi.PartStopped)
+			}
+			if n := h.backend.Dropped(hAllocUID); n != 0 {
+				t.Errorf("the Backend dropped %d reports of an agent that sent them in order", n)
+			}
+		})
 	}
 }
 
@@ -128,7 +136,7 @@ func TestAReportTriedAgainKeepsItsNumber(t *testing.T) {
 				}
 				return nil
 			}
-			runUntilStopped(t, harnessOptions{backendWrap: func(b agentapi.Backend) agentapi.Backend { rec.Backend = b; return rec }})
+			runUntilStopped(t, harnessOptions{backendWrap: func(b agentapi.Backend) agentapi.Backend { rec.Backend = b; return rec }}, byInstruction)
 			var lastSeqs []uint64
 			var before uint64
 			for _, c := range rec.recorded() {
