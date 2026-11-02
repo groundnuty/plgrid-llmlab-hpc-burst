@@ -494,6 +494,7 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 	samples := smp.end()
 	cur := r.current(in)
 	ds, _ := DrainStartOf(&cur, r.drainWindow())
+	dep := r.observedDeployment()
 	// The hour is over: the deployment goes, and with it the job, so that the
 	// cluster's record shows the job's end (the verdict needs both its times).
 	r.endDeployment(ctx, p)
@@ -502,5 +503,5 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 		return TunnelHourObs{}, err
 	}
 	p.Logf("%s: %d requests over %s; path rate %.0f B/s, %.0f tokens/s", p.Row.Name, len(reqs), time.Since(first).Round(time.Second), pr.BytesPerSecond(), pr.TokensPerSecond())
-	return TunnelHourObs{Tags: tags, Requests: reqs, Samples: samples, DrainStart: ds, Deployment: r.observedDeployment(), Rate: pr}, nil
+	return TunnelHourObs{Tags: tags, Requests: reqs, Samples: samples, DrainStart: ds, Deployment: dep, Rate: pr}, nil
 }
