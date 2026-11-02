@@ -182,6 +182,17 @@ func runStandIn(t *testing.T, name string) {
 	}
 }
 
-func TestStandInHandover(t *testing.T)   { runStandIn(t, "alpha-athena-handover") }
-func TestStandInNoOverlap(t *testing.T)  { runStandIn(t, "alpha-helios-nooverlap") }
+// TestStandInHandover is alpha-athena-handover's live steps over the stand-in.
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInHandover(t *testing.T) { runStandIn(t, "alpha-athena-handover") }
+
+// TestStandInNoOverlap is alpha-helios-nooverlap's live steps over the stand-in.
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
+func TestStandInNoOverlap(t *testing.T) { runStandIn(t, "alpha-helios-nooverlap") }
+
+// TestStandInTunnelHour is tunnel-hour-athena's live steps over the stand-in.
+//
+//livecheck:none a stand-in on this host, no cluster: run by hand with HPCBURST_ALPHA_STANDIN=1
 func TestStandInTunnelHour(t *testing.T) { runStandIn(t, "tunnel-hour-athena") }
