@@ -47,6 +47,10 @@ const (
 // this (qos_test.go compares them).
 const reachEndWait = 5 * time.Minute
 
+// reachCleanupWait is what the script's timeout leaves after the job's end for the read-back and the end-of-run
+// cleanup (cancel by tag, removal of the staging directory); qos_test.go compares it with the rows' timeouts.
+const reachCleanupWait = 3 * time.Minute
+
 // reachFile is the file in the Allocation's directory (agentapi.AllocationDir) that holds the result.
 const reachFile = "reach"
 

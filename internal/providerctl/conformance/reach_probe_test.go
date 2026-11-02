@@ -28,7 +28,7 @@ import (
 // uses reachConnectSeconds and reachReadSeconds. The full-queue stand-in costs the connect limit.
 const (
 	testConnectSeconds = 2
-	testReadSeconds    = 1
+	testReadSeconds    = 2
 )
 
 // runProbe runs the probe script for the target with the given limits, as bash script dir, and returns the line it

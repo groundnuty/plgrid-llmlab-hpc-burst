@@ -469,6 +469,11 @@ func TestTheGH200RowsStartWaitReachesTheRunAndItsTimeoutCoversTheTest(t *testing
 				// The accounting row has one job: its start wait, then its end wait and the deletion (gpuacct_test.go).
 				want = n + int((accountingEndWait+accountingDeleteWait)/time.Minute)
 			}
+			if strings.HasPrefix(r.name, "reach-") {
+				// The reach row has one job: its start wait, then its end wait, and the read-back and the cleanup after it
+				// (reach_run_test.go).
+				want = n + int((reachEndWait+reachCleanupWait)/time.Minute)
+			}
 			if timeout < want {
 				t.Errorf("timeout %d min is below the test's own deadlines with this start wait, %d min", timeout, want)
 			}
