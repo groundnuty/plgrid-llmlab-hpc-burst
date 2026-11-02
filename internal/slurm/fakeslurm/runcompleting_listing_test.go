@@ -10,7 +10,10 @@ package fakeslurm
 // ages a finished one from its end_time (_list_find_job_old, job_mgr.c, 24.11);
 // scancel gets ESLURM_ALREADY_DONE ("Job/step already completing or
 // completed") and scontrol release ESLURM_JOB_FINISHED ("Job has already
-// finished") for it, as for a completed one (slurm_errno.c). The clock is
+// finished") for it, as for a completed one (slurm_errno.c). Real scancel
+// prints that error only when noisy (#199, Config.NoisyScancel); these rigs
+// set NoisyScancel so that its answer tells a completing job from a purged
+// one ("Invalid job id specified"), which a silent exit 0 would not. The clock is
 // manual, so MinJobAge passes only when a test says so; every wait is on the
 // job's own state, never a sleep.
 
@@ -43,12 +46,13 @@ var endWays = []endWay{
 
 // newCompletingRig is a run-mode platform in the given NotListed mode whose
 // KillWait is far off, so a job that ignores TERM keeps its processes until
-// the test releases them.
+// the test releases them. Its scancel is noisy (Config.NoisyScancel), so an
+// ended job's answer names why.
 func newCompletingRig(t *testing.T, mode NotListedMode) *runRig {
 	t.Helper()
 	return newRunRigCfg(t, Config{
 		Run:       &RunMode{KillWait: 10 * time.Minute, Minute: 50 * time.Millisecond},
-		NotListed: mode, MinJobAge: completingMinAge,
+		NotListed: mode, MinJobAge: completingMinAge, NoisyScancel: true,
 	}, true)
 }
 
