@@ -88,7 +88,7 @@ func ptr[T any](v T) *T { return &v }
 // start from the spec alone (drainStartOf) rather than with the helper the
 // controller and the front share.
 type timing struct {
-	lease, maxRequest, drainMargin, drainWindow, stopGrace, agentTimeout string
+	lease, maxRequest, drainMargin, drainWindow, stopGrace, agentTimeout, startTimeout string
 }
 
 func batchProfile(arch string, tm timing) *v1alpha1.PlatformProfile {
@@ -99,7 +99,7 @@ func batchProfile(arch string, tm timing) *v1alpha1.PlatformProfile {
 			InflightWindow: dur("5m"), StagingDir: "$SCRATCH/stage",
 			DrainMargin: dur(tm.drainMargin), DrainWindow: dur(tm.drainWindow), HandoverMargin: dur("0s"),
 			Restart: &v1alpha1.RestartPolicy{StopGrace: dur(tm.stopGrace)},
-			Health:  &v1alpha1.HealthThresholds{AgentTimeout: dur(tm.agentTimeout)},
+			Health:  &v1alpha1.HealthThresholds{AgentTimeout: dur(tm.agentTimeout), StartTimeout: dur(tm.startTimeout)},
 			Partitions: []v1alpha1.PartitionProfile{{
 				Name: partition, AcceleratorClass: v1alpha1.AcceleratorClass{GPUModel: "example-gpu", CPUArch: arch},
 				MaxTime: dur("30m"), GPUsPerNode: ptr(int32(1)), CPUsPerGPU: ptr(int32(2)),

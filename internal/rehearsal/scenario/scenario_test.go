@@ -25,8 +25,13 @@ import (
 // and steps (b), (d), (e) and (f) fit before the primary's drain start, after
 // step (a)'s tunnel hold (about 45 s) and the 30 s frpc backoff that the hold
 // leaves for step (e); the agent's stop grace is short, so scancel's TERM
-// finishes before the fake's KillWait.
-var rehearsalTiming = timing{lease: "7m", maxRequest: "90s", drainMargin: "30s", drainWindow: "10m", stopGrace: "5s", agentTimeout: "20s"}
+// finishes before the fake's KillWait. health.startTimeout is 4 min, not its
+// 1 h default: HBEP-7 (Provisioning, A partition too short) skips a Provider
+// whose time limit, here the 7 min leaseLimit, is not longer than the lead,
+// the drain window plus handoverMargin plus health.startTimeout, so the lead
+// is 2 min + 0 s + 4 min = 6 min. An Instance of the rehearsal is ready in
+// under a minute.
+var rehearsalTiming = timing{lease: "7m", maxRequest: "90s", drainMargin: "30s", drainWindow: "10m", stopGrace: "5s", agentTimeout: "20s", startTimeout: "4m"}
 
 // rehearsalAgentTimeout is rehearsalTiming's agentTimeout: how long a
 // controller waits for a silent agent before it judges it unreachable.
