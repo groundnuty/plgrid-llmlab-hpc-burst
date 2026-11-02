@@ -201,6 +201,23 @@ func peakQueued(jobs []provider.Job) (peak int, complete bool) {
 	return peak, complete
 }
 
+// restartChecks: "on each alpha platform, Helios `plgrid-gpu-gh200` and Athena `plgrid-gpu-a100`, one restart at
+// the worker rung" (hbep/0007-lifecycle-controller/README.md:637).
+func restartChecks(n int) []string {
+	if n != 1 {
+		return []string{fmt.Sprintf("%d restarts at the worker rung, want 1", n)}
+	}
+	return nil
+}
+
+// tagCountChecks: the run made as many Allocations as the row's jobs, no more and no fewer.
+func tagCountChecks(row Row, tags []string, label string) []string {
+	if len(tags) != row.MostJobs {
+		return []string{label}
+	}
+	return nil
+}
+
 // VerifyHandover judges alpha-athena-handover.
 //
 //	hbep/0007-lifecycle-controller/README.md:635: "on Athena `plgrid-gpu-a100`, one deployment completes one handover end to end through the front with no request cut;"
@@ -208,9 +225,7 @@ func peakQueued(jobs []provider.Job) (peak int, complete bool) {
 //	hbep/0005-llmlab-compatible-front/README.md:450: "on Athena `plgrid-gpu-a100`, through the front, one handover cuts no request (with HBEP-7)."
 func VerifyHandover(row Row, o HandoverObs, jobs []provider.Job) []string {
 	f := append(deploymentChecks(row, o.Deployment), streamChecks(o.Streams, o.DrainStart)...)
-	if len(o.Tags) != row.MostJobs {
-		f = append(f, "a handover makes exactly two Allocations: a predecessor and a successor")
-	}
+	f = append(f, tagCountChecks(row, o.Tags, "a handover makes exactly two Allocations: a predecessor and a successor")...)
 	lf, _ := ledgerChecks(row, o.Tags, jobs)
 	f = append(f, lf...)
 	if o.Handovers != 1 {
@@ -222,9 +237,7 @@ func VerifyHandover(row Row, o HandoverObs, jobs []provider.Job) []string {
 		// A handover is make-before-break: the successor is ready before the predecessor ends.
 		f = append(f, "the successor was not ready before the predecessor ended")
 	}
-	if o.WorkerRestarts != 1 {
-		f = append(f, fmt.Sprintf("%d restarts at the worker rung, want 1", o.WorkerRestarts))
-	}
+	f = append(f, restartChecks(o.WorkerRestarts)...)
 	// Attribution on every response (HBEP-5): no response recorded is no evidence of it.
 	if o.Responses <= 0 {
 		f = append(f, "the run recorded no response, so attribution is unchecked")
@@ -241,13 +254,9 @@ func VerifyHandover(row Row, o HandoverObs, jobs []provider.Job) []string {
 //	hbep/0007-lifecycle-controller/README.md:471: "the gap is the time from the primary's drain start until its successor is `ready`."
 func VerifyNoOverlap(row Row, o NoOverlapObs, jobs []provider.Job) []string {
 	f := append(deploymentChecks(row, o.Deployment), streamChecks(o.Streams, o.DrainStart)...)
-	if len(o.Tags) != row.MostJobs {
-		f = append(f, "a no-overlap run makes exactly two Allocations: a predecessor and a successor")
-	}
+	f = append(f, tagCountChecks(row, o.Tags, "a no-overlap run makes exactly two Allocations: a predecessor and a successor")...)
 	// One restart at the worker rung on each alpha platform (hbep/0007-lifecycle-controller/README.md:637), Helios's included.
-	if o.WorkerRestarts != 1 {
-		f = append(f, fmt.Sprintf("%d restarts at the worker rung, want 1", o.WorkerRestarts))
-	}
+	f = append(f, restartChecks(o.WorkerRestarts)...)
 	lf, by := ledgerChecks(row, o.Tags, jobs)
 	f = append(f, lf...)
 	if o.Gap() <= 0 {
@@ -331,9 +340,7 @@ func VerifyTunnelHour(row Row, o TunnelHourObs, jobs []provider.Job) []string {
 	}
 	lf, by := ledgerChecks(row, o.Tags, jobs)
 	f = append(f, lf...)
-	if len(o.Tags) != row.MostJobs {
-		f = append(f, "a tunnel run makes exactly one Allocation")
-	}
+	f = append(f, tagCountChecks(row, o.Tags, "a tunnel run makes exactly one Allocation")...)
 	// The cluster's own times corroborate the lanes': a request's clock is the
 	// scenario's, the job's start and end are the scheduler's. Both are required.
 	for _, tag := range o.Tags {

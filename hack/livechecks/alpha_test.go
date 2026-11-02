@@ -27,8 +27,9 @@ func init() {
 // alphaShape is what a row asks of the scheduler, worked out from the issue (#194),
 // HBEP-7's graduation criteria (the partitions and the QOS now), the profiles' per-GPU
 // sizes (Athena A100: 16 CPUs and 125Gi; Helios GH200: 72 CPUs, 120000M as the real-engine run
-// uses) and the shortest lease that is longer than the lead (1 h 45 min with a 5-minute request deadline,
-// profiles/athena.yaml:39), 1 h 46 min; not read from the script's table.
+// uses) and the lease: 1 h 46 min for the handover rows, the shortest longer than the lead (1 h 45 min with a
+// 5-minute request deadline, profiles/athena.yaml:39), and 2 h 17 min for the tunnel rows (a start of up to an
+// hour, the hour, the 15-minute drain window and a minute); not read from the script's table.
 type alphaShape struct {
 	row, test, host, shape string
 	slot                   string // the one-job slot's token, "" for none
@@ -37,10 +38,10 @@ type alphaShape struct {
 }
 
 var alphaShapes = []alphaShape{
-	{"alpha-athena-handover", "TestAlphaAthenaHandover", "athena", "partition plgrid-gpu-a100, 1 GPU, 16 CPU, 125Gi, time limit 01:46:00, one job, no requeue", "", "SEEDACCT-a100", true},
-	{"alpha-helios-nooverlap", "TestAlphaHeliosNoOverlap", "helios", "partition plgrid-gpu-gh200, qos now, 1 GPU, 72 CPU, 120000M, time limit 01:46:00, one job, no requeue", "now", "SEEDACCT-gh", true},
-	{"tunnel-hour-helios", "TestTunnelHour", "helios", "partition plgrid-gpu-gh200, qos now, 1 GPU, 72 CPU, 120000M, time limit 01:46:00, one job, no requeue", "now", "SEEDACCT-gh", true},
-	{"tunnel-hour-athena", "TestTunnelHour", "athena", "partition plgrid-gpu-a100, 1 GPU, 16 CPU, 125Gi, time limit 01:46:00, one job, no requeue", "", "SEEDACCT-a100", true},
+	{"alpha-athena-handover", "TestAlphaAthenaHandover", "athena", "partition plgrid-gpu-a100, 1 GPU, 16 CPU, 125Gi, time limit 01:46:00, at most 2 jobs at once, each of this shape, no requeue", "", "SEEDACCT-a100", true},
+	{"alpha-helios-nooverlap", "TestAlphaHeliosNoOverlap", "helios", "partition plgrid-gpu-gh200, qos now, 1 GPU, 72 CPU, 120000M, time limit 01:46:00, at most 2 jobs at once, each of this shape, no requeue", "now", "SEEDACCT-gh", true},
+	{"tunnel-hour-helios", "TestTunnelHour", "helios", "partition plgrid-gpu-gh200, qos now, 1 GPU, 72 CPU, 120000M, time limit 02:17:00, one job, no requeue", "now", "SEEDACCT-gh", true},
+	{"tunnel-hour-athena", "TestTunnelHour", "athena", "partition plgrid-gpu-a100, 1 GPU, 16 CPU, 125Gi, time limit 02:17:00, one job, no requeue", "", "SEEDACCT-a100", true},
 	{"gpu-accounting-helios", "TestGPUAccounting", "helios", "partition plgrid-gpu-gh200, qos now, 1 GPU, 72 CPU, 117Gi, time limit 00:05:00, one job, no requeue", "now", "SEEDACCT-gh", false},
 	{"gpu-accounting-athena", "TestGPUAccounting", "athena", "partition plgrid-gpu-a100, 1 GPU, 16 CPU, 125Gi, time limit 00:05:00, one job, no requeue", "", "SEEDACCT-a100", false},
 }
@@ -52,7 +53,8 @@ echo "go $1" >> "$STUB_STATE/events"
 out=""; prev=""
 for a in "$@"; do [ "$prev" = -o ] && out=$a; prev=$a; done
 case "$1" in
-  build) mkdir -p "$out" && for b in hpcburst hpcburst-controller hpcburst-front; do echo binary > "$out/$b"; done ;;
+  build) mkdir -p "$out" && for b in hpcburst hpcburst-controller hpcburst-front; do echo binary > "$out/$b"; done
+         [ -z "${STUB_ROLL_AT_BUILD:-}" ] || echo "$STUB_NEXT_DATE" > "$LIVE_FAKE_DATE_FILE" ;;
   test) mkdir -p "$(dirname "$out")"; cp "$STUB_STATE/testbin.sh" "$out"; chmod +x "$out" ;;
 esac
 `
@@ -83,6 +85,7 @@ case $mode in
   skip) echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   fail) echo "--- FAIL: $t (0.01s)"; echo FAIL; exit 1 ;;
   leave-late) leave; echo "--- PASS: $t (0.01s)"; echo PASS ;;
+  midnight) echo "--- PASS: $t (0.01s)"; echo PASS; echo "$STUB_NEXT_DATE" > "$LIVE_FAKE_DATE_FILE" ;;
   sleep) leave; touch "$STUB_STATE/started"; exec sleep 3600 ;;
 esac
 `
@@ -571,13 +574,13 @@ func TestTheDialHomeKeyReachesTheTestInSSHModeOnly(t *testing.T) {
 // The rows that hold QOS now's GPU, the owner's shared slot, for hours need the owner's go on top of --yes
 // (the development rule on #145). The expected hold is worked out by hand: the shortest lease, 1 h 46 min, and
 // for the no-overlap row 45 minutes more for the successor to start and become ready, 2 h 31 min, which the
-// script rounds up to ten minutes, 2 h 40 min; the hour's row holds the lease, 1 h 46 min, rounded to 1 h 50 min.
+// script rounds up to ten minutes, 2 h 40 min; the hour's row holds its lease, 2 h 17 min, rounded to 2 h 20 min.
 func TestTheRowsThatHoldTheOwnersSlotForHoursNeedTheOwnersGo(t *testing.T) {
 	today := time.Now().UTC().Format("2006-01-02")
 	yesterday := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
 	rows := []struct{ row, hold string }{
 		{"alpha-helios-nooverlap", "holds QOS now's GPU for about 2 h 40 min; the owner's go is needed (the development rule on #145)"},
-		{"tunnel-hour-helios", "holds QOS now's GPU for about 1 h 50 min; the owner's go is needed (the development rule on #145)"},
+		{"tunnel-hour-helios", "holds QOS now's GPU for about 2 h 20 min; the owner's go is needed (the development rule on #145)"},
 	}
 	for _, c := range rows {
 		for _, stale := range []struct{ name, value string }{{"missing", ""}, {"yesterday's", yesterday}, {"1", "1"}, {"yes", "yes"}} {
@@ -656,6 +659,78 @@ func TestTheScriptsSlotHoldIsThePackagesRoundedUp(t *testing.T) {
 			if min != fmt.Sprint(rounded) {
 				t.Errorf("%s: the script holds %s minutes, the package's %s rounds up to %d", r.Name, min, r.SlotHold, rounded)
 			}
+		}
+	}
+}
+
+// The owner's go is read again just before each protected row, not once at the start: an earlier row that runs
+// past UTC midnight, or a build that does, leaves the go of another day. The date comes from a file the test
+// changes (LIVE_FAKE_DATE_FILE, read each time), so the run crosses midnight between two rows.
+func TestTheOwnersGoIsReadAgainBeforeEachProtectedRow(t *testing.T) {
+	today := time.Now().UTC().Format("2006-01-02")
+	tomorrow := time.Now().UTC().AddDate(0, 0, 1).Format("2006-01-02")
+	withDate := func(t *testing.T, extra ...string) (*world, []string) {
+		w := newAlphaWorld(t)
+		f := filepath.Join(w.dir, "today")
+		write(t, f, today+"\n", 0o644)
+		return w, append([]string{"LIVE_FAKE_DATE_FILE=" + f, "STUB_NEXT_DATE=" + tomorrow}, extra...)
+	}
+	t.Run("the control: the date stays", func(t *testing.T) {
+		w, env := withDate(t)
+		res := w.run(env, "--run", "alpha-athena-handover", "tunnel-hour-helios", "--yes")
+		if res.code != 0 || strings.Count(w.stateFile("events"), "testbin ") != 2 {
+			t.Fatalf("exit %d, test runs %d, want 0 and 2:\n%s", res.code, strings.Count(w.stateFile("events"), "testbin "), res.out)
+		}
+	})
+	t.Run("between two rows", func(t *testing.T) {
+		w, env := withDate(t, "STUB_ALPHA_MODE=midnight")
+		res := w.run(env, "--run", "alpha-athena-handover", "tunnel-hour-helios", "--yes")
+		if res.code != 3 {
+			t.Fatalf("exit %d, want 3:\n%s", res.code, res.out)
+		}
+		w.contains(res, "alpha-athena-handover: PASS", "setting LIVE_OWNER_GO_HELIOS_NOW must hold today's UTC date ("+tomorrow+")")
+		if n := strings.Count(w.stateFile("events"), "testbin "); n != 1 {
+			t.Errorf("%d test runs, want only the first row's", n)
+		}
+		// The refused row built nothing: only the first row's two go calls.
+		if g := lines(w.stateFile("go-argv")); len(g) != 2 {
+			t.Errorf("go was called %d times, want the first row's 2: %v", len(g), g)
+		}
+	})
+	t.Run("during the row's own builds", func(t *testing.T) {
+		w, env := withDate(t, "STUB_ROLL_AT_BUILD=1")
+		res := w.run(env, "--run", "alpha-helios-nooverlap", "--yes")
+		if res.code != 3 {
+			t.Fatalf("exit %d, want 3:\n%s", res.code, res.out)
+		}
+		w.contains(res, "setting LIVE_OWNER_GO_HELIOS_NOW must hold today's UTC date ("+tomorrow+")")
+		if strings.Contains(w.stateFile("events"), "testbin ") {
+			t.Errorf("the test binary ran with yesterday's go")
+		}
+		// Built, estimated, but nothing submitted and nothing cancelled.
+		if argv := lines(w.stateFile("sbatch-argv")); len(argv) != 1 || !strings.Contains(argv[0], "--test-only") {
+			t.Errorf("sbatch calls %v, want only the estimate", argv)
+		}
+	})
+}
+
+// The script's most jobs and the package's are one fact each.
+func TestTheScriptsMostJobsAreThePackagesRows(t *testing.T) {
+	b, err := os.ReadFile(scriptPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, l := range block(t, string(b), "MOST JOBS") {
+		f := strings.Split(l, "|")
+		if len(f) != 2 {
+			t.Fatalf("most-jobs row %q has %d fields, want 2", l, len(f))
+		}
+		got[f[0]] = f[1]
+	}
+	for _, r := range append(alpha.Rows(), alpha.AccountingRows()...) {
+		if got[r.Name] != fmt.Sprint(r.MostJobs) {
+			t.Errorf("%s: the script allows %q jobs at once, the package's row %d", r.Name, got[r.Name], r.MostJobs)
 		}
 	}
 }

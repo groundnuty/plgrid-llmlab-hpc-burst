@@ -112,8 +112,8 @@ conformance-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|4
 real-engine|helios|-|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|00:57:00|75|-C memfs
 alpha-athena-handover|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|01:46:00|150|-
 alpha-helios-nooverlap|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|01:46:00|200|-C memfs
-tunnel-hour-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|01:46:00|130|-C memfs
-tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|01:46:00|130|-
+tunnel-hour-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|02:17:00|150|-C memfs
+tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|02:17:00|150|-
 gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|25|-
 gpu-accounting-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|00:05:00|25|-
 # END CLUSTER SHAPES
@@ -134,6 +134,21 @@ tunnel-hour-athena|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/h
 TABLE
 }
 
+# The most jobs of a row in the queue at once, printed with its shape (a row not listed has one). The alpha
+# package's Row.MostJobs is the same fact; hack/livechecks compares them. name | jobs.
+most_jobs_table() {
+  cat <<'TABLE'
+# BEGIN MOST JOBS
+alpha-athena-handover|2
+alpha-helios-nooverlap|2
+tunnel-hour-helios|1
+tunnel-hour-athena|1
+gpu-accounting-helios|1
+gpu-accounting-athena|1
+# END MOST JOBS
+TABLE
+}
+
 # The rows that hold QOS now's one GPU, the owner's shared slot, for hours need the owner's go at run time, on top
 # of --yes (the development rule on #145). The setting must hold today's UTC date, so a go given for an earlier
 # run does not stand for this one. name | setting | minutes the run holds the slot (the package's
@@ -142,7 +157,7 @@ owner_go_table() {
   cat <<'TABLE'
 # BEGIN OWNER GO
 alpha-helios-nooverlap|LIVE_OWNER_GO_HELIOS_NOW|160
-tunnel-hour-helios|LIVE_OWNER_GO_HELIOS_NOW|110
+tunnel-hour-helios|LIVE_OWNER_GO_HELIOS_NOW|140
 # END OWNER GO
 TABLE
 }
@@ -165,7 +180,7 @@ CLEAN_POLL_SECONDS=${LIVE_CLEAN_POLL_SECONDS:-3}
 declare -a NAMES=()
 declare -A KIND PKG TEST GATES INPUTS CONTEXTS STATUS
 declare -A HOST PROFILE PARTITION QOS SLOT ACCTKEY GPUS CPUS MEM TLIMIT TMIN EXTRA
-declare -A STACK ALIAS OGSET OGMIN
+declare -A STACK ALIAS OGSET OGMIN MOSTJOBS
 declare -A S=()
 
 load_tables() {
@@ -190,7 +205,11 @@ load_tables() {
     [ -n "$name" ] || continue
     ALIAS[$name]=${pk//,/ }
   done < <(alias_table | grep -v -e '^#' -e '^$')
-  local og_key og_min
+  local og_key og_min mj
+  while IFS='|' read -r name mj; do
+    [ -n "$name" ] || continue
+    MOSTJOBS[$name]=$mj
+  done < <(most_jobs_table | grep -v -e '^#' -e '^$')
   while IFS='|' read -r name og_key og_min; do
     [ -n "$name" ] || continue
     OGSET[$name]=$og_key OGMIN[$name]=$og_min
@@ -280,15 +299,19 @@ owner_go_note() {
   say "$1: holds QOS now's GPU for about $(fmt_hold "${OGMIN[$1]}"); the owner's go is needed (the development rule on #145)"
 }
 
-# check_owner_go <name>: refuses (the caller counts it) a row in the owner-go table unless its setting holds
-# today's UTC date. The note is printed either way the run goes, so the hold is read before it starts.
+# today_utc: the date the owner's go is compared with. LIVE_FAKE_DATE_FILE is a test seam, like LIVE_FAKE_CLOCK: a
+# file holding the date, read each time, so a test can roll the date over between two rows.
+today_utc() { if [ -n "${LIVE_FAKE_DATE_FILE:-}" ]; then cat "$LIVE_FAKE_DATE_FILE"; else date -u +%F; fi; }
+
+# check_owner_go <name> [quiet]: refuses (the caller counts it) a row in the owner-go table unless its setting holds
+# today's UTC date. Unless quiet, it prints the note of the hold first, so the hold is read before a refusal.
 check_owner_go() {
   local name=$1 key today
   key=${OGSET[$name]:-}
   [ -n "$key" ] || return 0
-  today=$(date -u +%F)
+  today=$(today_utc)
   [ "${S[$key]:-}" = "$today" ] && return 0
-  owner_go_note "$name"
+  [ "${2:-}" = quiet ] || owner_go_note "$name"
   say "live-checks: setting $key must hold today's UTC date ($today) once the owner has said yes to this hold; it is missing or from another day"
   return 1
 }
@@ -676,13 +699,19 @@ release_run_lock() { [ -z "$RUN_FD" ] || { eval "exec ${RUN_FD}>&-"; RUN_FD=""; 
 run_cluster() {
   local n=$1 host=${HOST[$1]} t0 t1 verdict=0
   local qos=""; [ "${QOS[$n]}" = - ] || qos=", qos ${QOS[$n]}"
-  say "$n: shape: partition ${PARTITION[$n]}$qos, ${GPUS[$n]} GPU, ${CPUS[$n]} CPU, ${MEM[$n]}, time limit ${TLIMIT[$n]}, one job, no requeue"
+  local jobs="one job"
+  [ "${MOSTJOBS[$n]:-1}" -le 1 ] || jobs="at most ${MOSTJOBS[$n]} jobs at once, each of this shape"
+  say "$n: shape: partition ${PARTITION[$n]}$qos, ${GPUS[$n]} GPU, ${CPUS[$n]} CPU, ${MEM[$n]}, time limit ${TLIMIT[$n]}, $jobs, no requeue"
   [ -z "${OGSET[$n]:-}" ] || owner_go_note "$n"
+  # The go is read again just before each protected row, here and again after its builds, below: a date that
+  # rolled over while an earlier row ran or this row built is a go for another day.
+  [ -z "${OGSET[$n]:-}" ] || check_owner_go "$n" quiet || return 3
   if [ "${SLOT[$n]}" != - ]; then check_slot "$n" || return 3; fi
   estimate "$n" || true
   if [ "$YES" != 1 ]; then say "$n: not run: pass --yes to run it"; return 4; fi
   prepare_cluster "$n" || return 1
   [ -z "$INTERRUPTED" ] || { say "$n: FAIL (interrupted before the run started)"; return 1; }
+  [ -z "${OGSET[$n]:-}" ] || check_owner_go "$n" quiet || return 3
   # One live run per host at a time, slot or not: the cleanup below is only safe if no other run is here.
   exec {RUN_FD}>"${S[LIVE_LOCK_DIR]}/$host-live.lock"
   flock -n "$RUN_FD" || { release_run_lock; refuse "$n: another live run holds this host's run lock"; return 3; }
