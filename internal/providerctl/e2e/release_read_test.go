@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -266,4 +267,62 @@ func TestProviderManagerKeepsTheLeaseAfterAStopPastItsGrace(t *testing.T) {
 	l := startLeading(t, name, mgr)
 	l.cancel()
 	keepsTheLease(t, name, l, f, "failed waiting for all runnables to end within grace period")
+}
+
+// TestProviderManagerKeepsTheLeaseAfterALeadershipLostWhileDraining (review
+// of PR #215: B1): a Provider manager is asked to stop while one of its
+// runnables keeps running. While it drains, every request of its lock fails,
+// so its renews fail until it gives the leadership up, and its elector's
+// release read fails too. The lost leadership resets controller-runtime's
+// grace to 0 (OnStoppedLeading, internal.go:627-637), so at the old deadline
+// Start returns nil with the runnable still running. The API server answers
+// again by then, so a release after Start would free the Lease while the
+// runnable runs; none may follow, and the Lease keeps naming the manager.
+func TestProviderManagerKeepsTheLeaseAfterALeadershipLostWhileDraining(t *testing.T) {
+	const provider = "release-read-drain"
+	name := v1alpha1.ProviderLeaseName(provider)
+	f := releaseReadFaults(t, name)
+	o := readTimings
+	// The grace outlasts the lost leadership (a renew deadline of 3 s and the
+	// release read) many times over, so the leadership is lost while the
+	// manager still drains.
+	o.GracefulShutdownTimeout = 15 * time.Second
+	mgr, err := providerctl.NewProviderManager(f.Config(cfg), scheme(), provider, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hold := make(chan struct{})
+	var returned atomic.Bool
+	t.Cleanup(func() { close(hold) })
+	if err := mgr.Add(manager.RunnableFunc(func(context.Context) error {
+		<-hold // still running when Start returns; the cleanup lets it go
+		returned.Store(true)
+		return nil
+	})); err != nil {
+		t.Fatal(err)
+	}
+	l := startLeading(t, name, mgr)
+	l.cancel()
+	f.Set(leasefault.All)
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		if _, unmarked := f.Failed(); unmarked > 0 {
+			break // the elector lost the leadership and its release read failed
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the elector's release read did not fail within 30 s of the failing renews (requests %+v)", f.Requests())
+		}
+	}
+	f.Set(leasefault.None)
+	if err := l.result(t); err != nil {
+		t.Fatalf("the manager returned %v; this test needs controller-runtime's nil after a leadership lost while draining", err)
+	}
+	if returned.Load() {
+		t.Fatal("the held runnable returned before Start did; this test needs it still running")
+	}
+	if n := f.MarkedAfterReleaseRead(); n != 0 {
+		t.Fatalf("%d requests for the Lease came after the elector's release read; want none, no release after Start (requests %+v)", n, f.Requests())
+	}
+	if holder := leaseHolder(t, name); holder != l.holder {
+		t.Fatalf("the Lease's holder is %q; want the manager that lost its leadership with a runnable still running, %q, until it expires", holder, l.holder)
+	}
 }
