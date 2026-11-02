@@ -251,7 +251,8 @@ func (p3 *part3) checkDrainStream(d *depRun) {
 	if !rs.Before(d.ds) || !d.ds.Before(re) {
 		r.t.Errorf("%s: no stream in flight at the drain start %s: its record runs %s to %s", d.name, d.ds.UTC().Format(time.RFC3339), row.StartTime, row.EndTime)
 	}
-	r.t.Logf("%s: the drain-start stream ran %s to %s, %s past the drain start, uncut", d.name, row.StartTime, row.EndTime, re.Sub(d.ds).Round(100*time.Millisecond))
+	r.t.Logf("%s: the drain-start stream ran %s to %s, %s past the drain start; finish %s, cut by %s", d.name, row.StartTime, row.EndTime,
+		re.Sub(d.ds).Round(100*time.Millisecond), derefS(row.Finish), derefS(row.CutBy))
 }
 
 // minGapProbes is the fewest requests that must fall inside a gap: a gap

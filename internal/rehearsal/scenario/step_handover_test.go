@@ -95,6 +95,14 @@ func waitState(t *testing.T, d time.Duration, what string, cond func() (bool, st
 	}
 }
 
+// strOrNil prints a record's optional string.
+func strOrNil(p *string) string {
+	if p == nil {
+		return "null"
+	}
+	return *p
+}
+
 func parseRecordTime(s string) time.Time {
 	t, _ := time.Parse(time.RFC3339Nano, s)
 	return t
@@ -118,7 +126,7 @@ func (r *rig) checkStream(step string, s streamed, in *v1alpha1.Instance, tokens
 	case row.InstanceUID != string(in.UID):
 		r.t.Errorf("step (%s) stream went to %s (%s), not %s", step, row.Instance, row.InstanceUID, in.Name)
 	case !row.Stream || row.Finish == nil || *row.Finish != "length" || row.CutBy != nil:
-		r.t.Errorf("step (%s) stream's record: stream %v, finish %v, cut by %v; want a stream finished by length, uncut", step, row.Stream, row.Finish, row.CutBy)
+		r.t.Errorf("step (%s) stream's record: stream %v, finish %s, cut by %s; want a stream finished by length, uncut", step, row.Stream, strOrNil(row.Finish), strOrNil(row.CutBy))
 	case row.CompletionTokens == nil || *row.CompletionTokens != int64(tokens):
 		r.t.Errorf("step (%s) stream's record has %v completion tokens, want %d", step, row.CompletionTokens, tokens)
 	case time.Duration(row.DurationMs)*time.Millisecond < time.Duration(tokens)*r.tokenDelay:
