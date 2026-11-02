@@ -157,25 +157,26 @@ A past project served models on several Slurm clusters behind its own fronts. It
 
 The API refuses a new event without `action` or `reason`, with either over 128 characters, or with a note over 1,024 ([`pkg/apis/core/validation/events.go`, lines 35–38 and 172–186](https://github.com/k3s-io/kubernetes/blob/v1.36.5-k3s1/pkg/apis/core/validation/events.go#L35-L38), in the Kubernetes that k3s v1.36.5+k3s1 builds, [`go.mod`, line 64](https://github.com/k3s-io/k3s/blob/v1.36.5%2Bk3s1/go.mod#L64); accessed 2026-10-31). So each emitter cuts its note to 1,024 bytes.
 
-**Reasons in alpha.** The reason strings are the contracts' (`api/v1alpha1/conditions.go`), plus those marked proposed:
+**Reasons in alpha.** Every reason below is on `main`: a constant of the contracts (`api/v1alpha1`) or a named constant of the emitting package. #239's drift guard checks this table against the code's emit sites, both ways:
 
 | Type | Reasons | Regarding | Emitter |
 |---|---|---|---|
-| `started` | `AgentRegistered` (proposed in PR #88) | Instance | lifecycle controller |
-| `ready` | `Ready` (proposed in PR #88); `ShapesFit` (proposed in PR #88) | Instance; ModelDeployment | lifecycle controller |
-| `degraded` | `ReplacementLate`, `RestartLoop`, `VerificationFailed`, `IdentityUnresolved`, `CapacityDropped` | ModelDeployment | lifecycle controller |
-| `degraded` | `CapacityDropped`, `CountsDrift` (proposed in PR #95) | ModelDeployment | front |
+| `started` | `AgentRegistered` | Instance | lifecycle controller |
+| `ready` | `Ready`; `ShapesFit` | Instance; ModelDeployment | lifecycle controller |
+| `degraded` | `ReplacementLate`, `RestartLoop`, `IdentityUnresolved` | ModelDeployment | lifecycle controller |
+| `degraded` | `VerificationFailed`, `CapacityDropped` | ModelDeployment, else the Instance once the ModelDeployment is gone | lifecycle controller |
+| `degraded` | `CapacityDropped`, `CountsDrift` | ModelDeployment | front |
 | `degraded` | `DrainWindowShort` | PlatformProfile | front |
-| `degraded` | `PathProbeFailing` (proposed, HBEP-6) | Instance | front |
-| `degraded` | `TunnelOrphaned` (proposed, HBEP-6) | the Allocation whose credential admitted the tunnel, else the `lifecycle` `Lease` | lifecycle controller |
-| `degraded` | `ObservationGap` (proposed) | the emitter's own `Lease` | the lifecycle controller and the front, at start |
+| `degraded` | `PathProbeFailing` | Instance | front |
+| `degraded` | `TunnelOrphaned` | the Allocation whose credential admitted the tunnel, else the `lifecycle` `Lease` | lifecycle controller |
+| `degraded` | `ObservationGap` | the emitter's own `Lease` | the lifecycle controller and the front, at start |
 | `failing` | `WorkerRestart`, `InstanceRestart`, `RestartLoop`, `RegistrationTimeout`, `StartTimeout`, `TunnelNotConnected`, `QualificationFailed`, `VerificationFailed`, `AllocationFailed`, `AllocationLost`, `AllocationRefused`, `Requeued`, `SubmittedAsOther`, `AllocationEndedEarly` | Instance | lifecycle controller |
-| `failing` | `HeartbeatMissed` (proposed) | the stale observer's resource (Observers) | the component that judges it |
-| `failing` | `UsageWriteFailed` (proposed) | the front's `Lease` | front |
-| `replaced` | `HandedOver` (proposed in PR #88) | Instance | lifecycle controller |
-| `ending-soon` | `NoReplacementReady` (proposed in PR #88) | Instance | lifecycle controller |
+| `failing` | `HeartbeatMissed` | the stale observer's resource (Observers) | the component that judges it |
+| `failing` | `UsageWriteFailed` | the front's `Lease` | front |
+| `replaced` | `HandedOver` | Instance | lifecycle controller |
+| `ending-soon` | `NoReplacementReady` | Instance | lifecycle controller |
 
-- An event about a deployment caused by one Instance regards the ModelDeployment, with the Instance in `related`.
+- An event about a deployment caused by one Instance regards the ModelDeployment, with the Instance in `related`. Once the ModelDeployment is gone, it regards the Instance instead (`mdObject`, `internal/lifecycle/verify.go`), since nothing else is left to attach it to.
 - The managed catalog controller's events take these types too. Their reasons are the condition reasons it writes: `failing` for `FileRefused` and `NoCredentialsFile` (`CredentialsInvalid`), `KeyRejected` (`CredentialsRejected`), `Expired` (`CredentialsExpiring`) and `ReadsFailing` (`Ready`); `degraded` for `ExpiresWithinADay`, `CatalogEntrySkipped` and `CatalogTruncated`; and `ready` for `FileRead`, `KeyAccepted`, `NotExpiring` and `CatalogRead` when a failing or degraded condition clears.
 - The Provider controller's events are HBEP-4's diagnostics, untyped in alpha (open question 14).
 
@@ -337,7 +338,7 @@ Alpha counts **allocated** time, from the scheduler's accounting: elapsed time t
 What the code must change to match this HBEP, as read on 31 Oct 2026. Items marked done are on `main`:
 - **PR #88, the lifecycle controller:** in its fix round: `ending-soon` emitted as `Normal`; `CapacityDropped` regarding the ModelDeployment, with the Instance in `related` (a `related` parameter on `Recorder`); the `reasons.go` comment; notes cut to 1,024 bytes. After #88 (#111): the observer events (`AgentUnreachable`, `HeartbeatMissed`, `ObservationGap`) and the metrics server at base + 12, with the 1 Nov 2026 rulings: a never-read Provider judged by its `creationTimestamp`, no event for an absent front `Lease`, no `ObservationGap` under `--leader-elect=false`, and the series of every Instance not ended; also, from PR #142, `hpcburst_collector_success{collector="accounting"}` in place of the invalid metric a failed Allocation list emits today, and `stale` for each desired worker of an Instance with no report yet. The controller's `/readyz` already needs synced caches and leadership on `main` (`internal/lifecycle/manager.go`, `readiness`). In #90's wiring: `providerctl.Options.Recorder` set, since it defaults to a no-op recorder.
 - **The front:** done in PR #95: the reason is the code alone; `coordination.k8s.io/v1` is registered; the usage sink syncs before it returns and its failures are not sticky. Still on `main`, fixed in PR #117 (#112): notes are not cut to 1,024 bytes, `UsageWriteFailed` regards a ModelDeployment, and there is no `/metrics`, no daily file, no `/healthz` `usage` block and no `front` `Lease`. In #90's front part: HBEP-6's probe and `PathProbeFailing`.
-- **The launcher:** done in PR #134 (#64's front supervision): `hpcburst status` reads the front's `/healthz` and shows "degraded: usage writes failing". Still to come, in no PR yet: reading the lifecycle controller's `/readyz` and showing an absent front.
+- **The launcher:** done in PR #134 (#64's front supervision): `hpcburst status` reads the front's `/healthz` and shows "degraded: usage writes failing". Done in PR #187 (#147): reading the lifecycle controller's `/readyz` (`internal/launcher/readyz.go`) and showing an absent front (`StatusReport.FrontAbsent`).
 - **The managed catalog controller:** done in PR #116 (#114): HBEP-8's types, the `ready` events, and the hourly gate with the skip cap. The hourly summary's note (`SkippedSummaryNote`, `pkg/provider/managedstatus.go`) carries a count only; naming the remaining entries comes with its next change.
 - **`agentapi.Health`:** done in PR #115 (#110): the four new fields, the sum and maximum, the non-finite rule and the time-per-output-token pair. Not yet built: an engine that lacks a series entirely is not detected, so a missing contributor still gives a partial total (`internal/agent/engine/metrics.go`). No effect in alpha, which runs one engine per Instance (HBEP-7).
 - **The Slurm plugin:** in PR #118 (#113), at its fix round: `tres.allocated`, the accounting read and the `acct-<UID>` record; a requeued job's hours unknown, not summed; the status write throttled; and the delete rule above (a failed tag lookup keeps the finalizer).
@@ -508,6 +509,7 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - 2026-11-01: `hpcburst status` shows the front as absent only when none is configured (ruling for #147, with HBEP-11's amendment of the same day).
 - 2026-11-01: the controller's `/readyz` reads by its two named checks, so a standby shows "not leading" (HBEP-11's amendment of the same day, for #147).
 - 2026-11-01: the `acct-` record waits until the last job no longer carries `COMPLETING` (HBEP-4's amendment of the same day, for #198).
+- 2026-11-02: the Reasons table split for the Instance fallback of `VerificationFailed` and `CapacityDropped`, its "proposed" marks dropped, and the launcher's `/readyz` item marked done (from #239's drift guard and #241's guide).
 
 ## Amendments
 
@@ -532,3 +534,4 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - **2026-11-01: an absent front in `hpcburst status`** (science-agent ruling for #147). The front is shown absent only when the host has no front configured; a configured front with no `Lease` is unhealthy. An absent front `Lease` still raises no event. Before, any absent front `Lease` was shown as an absent front, which could hide a front that failed to start.
 - **2026-11-01: a standby's readiness** (science-agent ruling for #147, with HBEP-11's amendment of the same day). `/readyz` still fails on a copy that does not lead. Its two named checks show why: `caches` passes and `leading` fails, so `hpcburst status` shows "not leading". Before, the text left a standby's state for after alpha.
 - **2026-11-01: the kept record waits for a completing job** (Provider accounting, The kept record; Test plan). Made with HBEP-4's amendment of the same day, for #198, from PR #200's review round. The `acct-` record is written once the Allocation's last job has ended and no longer carries `COMPLETING`, since a completing job is live and keeps the finalizer; the `lostGrace` wait for the final read starts only then. A job stuck in `COMPLETING` blocks deletion, HBEP-4's known risk. The accounting test waits for the flag in both of HBEP-4's listing shapes. Before, "has ended" read as the base state alone, and the text said the record never blocks deletion.
+- **2026-11-02: the Reasons table against the code** (Events; Code that differs). An amendment, settled in its PR's review, from #239's drift guard and #241's operator guide. The lifecycle controller's `degraded` row is split. `VerificationFailed` and `CapacityDropped` regard the ModelDeployment, else the Instance once the ModelDeployment is gone, as the code has done since #88; the text did not say so. Every reason in the table is on `main`, so the "proposed" marks are dropped, and the table is now checked against the code's emit sites. The launcher's `/readyz` and absent-front item is marked done by PR #187.
