@@ -155,7 +155,7 @@ open(p, 'w').write(s.replace(a, b, 1))
 PY
   then echo "BROKEN   $file: the text '$from' does not occur exactly once"; broken=$((broken+1)); continue; fi
   case $path in
-    hack/live-checks.sh) tests=(go test -count=1 -timeout 9m -parallel 3 -run 'AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound' ./hack/livechecks) ;;
+    hack/live-checks.sh) tests=(go test -count=1 -timeout 9m -parallel 3 -run 'AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun' ./hack/livechecks) ;;
     "$pkg"/alpha_live_test.go)
       # The dry runs of the script run the alpha test binary: build it from the mutated file, to one fixed path.
       tests=(bash -c 'go test -c -o "$1" ./internal/alpha && HPCBURST_LIVECHECKS_ALPHA_TEST=$1 go test -count=1 -timeout 9m -run PendingPastTheBound ./hack/livechecks' _ "$tmp/alpha-mutant.test") ;;
