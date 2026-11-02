@@ -26,8 +26,12 @@ const (
 	// DefaultStartupProbeInterval is how often a starting worker is probed
 	// until its engine answers.
 	DefaultStartupProbeInterval = 2 * time.Second
-	// finalReportTimeout bounds the tries of the last report after a stop.
+	// finalReportTimeout bounds the tries of the last report after a stop, and
+	// the wait before them for a periodic send in flight (awaitPeriodicSend).
 	finalReportTimeout = 30 * time.Second
+	// jobEndReportBudget is what the agent, ended with its job, has for that
+	// wait and the last report together.
+	jobEndReportBudget = 5 * time.Second
 	// DefaultBuildReportTimeout applies when Options.BuildReportTimeout is 0.
 	DefaultBuildReportTimeout = 30 * time.Second
 )
@@ -229,15 +233,16 @@ func (a *Agent) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			// No periodic send starts from here, not even while the workers
+			// use their stop grace; the one in flight is waited for after.
+			a.rep.closePeriodic()
 			cancelLoop()
 			a.shutdown()
-			cancelRep()
-			<-a.rep.done
-			sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			if err := a.rep.send(sctx, a.snapshot()); err != nil {
+			// The job has little time left: the wait for a periodic send in
+			// flight and the last report share the 5 s this path always had.
+			if err := a.sendLastReportAtJobEnd(cancelRep); err != nil {
 				a.log.Warn("last report not sent", "err", err)
 			}
-			cancel()
 			a.wg.Wait()
 			return ctx.Err()
 		case d := <-a.desiredCh:
@@ -253,9 +258,7 @@ func (a *Agent) Run(ctx context.Context) error {
 		if a.stopping && (a.inst == nil || !a.inst.anyLive()) {
 			a.log.Info("stopped on instruction; sending the last report")
 			cancelLoop()
-			cancelRep()
-			<-a.rep.done
-			err := a.rep.final(a.snapshot(), finalReportTimeout)
+			err := a.sendLastReport(ctx, cancelRep)
 			a.wg.Wait()
 			if err != nil {
 				a.log.Warn("last report not sent", "err", err)
@@ -404,11 +407,15 @@ type backoff struct{ min, max, cur time.Duration }
 
 func newBackoff(minD, maxD time.Duration) *backoff { return &backoff{min: minD, max: maxD, cur: minD} }
 
-func (b *backoff) wait(ctx context.Context) {
+func (b *backoff) wait(ctx context.Context) { b.waitOrStop(ctx, nil) }
+
+// waitOrStop is wait that also ends when stop is closed (a nil stop never is).
+func (b *backoff) waitOrStop(ctx context.Context, stop <-chan struct{}) {
 	t := time.NewTimer(b.cur)
 	defer t.Stop()
 	select {
 	case <-ctx.Done():
+	case <-stop:
 	case <-t.C:
 	}
 	b.cur = min(2*b.cur, b.max)
@@ -427,6 +434,19 @@ func (b *backoff) reset() { b.cur = b.min }
 // sent, and carries everything the older one did that still holds, so a sent
 // number at or above an offer's means that offer's state reached the endpoint
 // (waitSent).
+//
+// When the stop begins the periodic reports close (closePeriodic), and the
+// last one goes once the workers have stopped (final). A periodic send in
+// flight is let finish, never cancelled: cancelling it ends the call on the
+// agent's side only, and a request that has left can still reach the endpoint
+// after the last report, which would leave the endpoint holding an older state
+// (issue #220).
+//
+// The limit that stays (issue #221 tracks the full fix, a sequence number on
+// every report): the wait is bounded, so a send that hangs past the bound can
+// still overtake the last report; and a request already sent can return a
+// client timeout or a reset before the bound while the endpoint still
+// processes it, after which the last report goes and can be overwritten.
 type reporter struct {
 	a         *Agent
 	mu        sync.Mutex
@@ -437,10 +457,17 @@ type reporter struct {
 	sentCh    chan struct{} // closed, and replaced, when sent rises
 	kick      chan struct{}
 	done      chan struct{} // closed when run returns
+	// stopped is set by closePeriodic, and stop is closed with it; inflight
+	// says run has taken a report and its send has not returned. Both are
+	// guarded by mu, so that a report is taken either before the stop, and then
+	// seen as in flight, or not at all.
+	stopped  bool
+	stop     chan struct{}
+	inflight bool
 }
 
 func newReporter(a *Agent) *reporter {
-	return &reporter{a: a, kick: make(chan struct{}, 1), done: make(chan struct{}), sentCh: make(chan struct{})}
+	return &reporter{a: a, kick: make(chan struct{}, 1), done: make(chan struct{}), sentCh: make(chan struct{}), stop: make(chan struct{})}
 }
 
 // offer queues rep, superseding any snapshot not yet sent, and returns its
@@ -458,11 +485,17 @@ func (r *reporter) offer(rep agentapi.Report) uint64 {
 	return n
 }
 
+// take hands run the next report to send, or nil: none is queued, or the
+// periodic reports have stopped.
 func (r *reporter) take() (*agentapi.Report, uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.stopped {
+		return nil, 0
+	}
 	n, seq := r.next, r.queuedSeq
 	r.next = nil
+	r.inflight = n != nil
 	return n, seq
 }
 
@@ -470,6 +503,7 @@ func (r *reporter) take() (*agentapi.Report, uint64) {
 func (r *reporter) markSent(seq uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.inflight = false
 	if seq > r.sent {
 		r.sent = seq
 		close(r.sentCh)
@@ -506,6 +540,8 @@ func (r *reporter) run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-r.stop:
+			return
 		case <-r.kick:
 		}
 		for {
@@ -513,17 +549,25 @@ func (r *reporter) run(ctx context.Context) {
 			if rep == nil {
 				break
 			}
-			if err := r.send(ctx, *rep); err != nil {
+			if err := r.send(ctx, *rep, true); err != nil {
+				r.mu.Lock()
+				r.inflight = false
 				if ctx.Err() != nil {
+					r.mu.Unlock()
 					return
 				}
-				r.a.log.Warn("report failed; retrying", "code", codeOf(err), "err", err)
-				r.mu.Lock()
+				if r.stopped {
+					// The last report supersedes it: no retry.
+					r.mu.Unlock()
+					r.a.log.Warn("report failed during the stop; not retried, the last report supersedes it", "code", codeOf(err), "err", err)
+					return
+				}
 				if r.next == nil { // keep the failed one unless a newer came
 					r.next, r.queuedSeq = rep, seq
 				}
 				r.mu.Unlock()
-				b.wait(ctx)
+				r.a.log.Warn("report failed; retrying", "code", codeOf(err), "err", err)
+				b.waitOrStop(ctx, r.stop)
 				continue
 			}
 			r.markSent(seq)
@@ -532,14 +576,19 @@ func (r *reporter) run(ctx context.Context) {
 	}
 }
 
-// send sends one report, registering again at once after CodeNotRegistered.
-func (r *reporter) send(ctx context.Context, rep agentapi.Report) error {
+// send sends one report, registering again at once after CodeNotRegistered. A
+// periodic report that gets that answer once the periodic reports have closed
+// is not sent again: the last report supersedes it.
+func (r *reporter) send(ctx context.Context, rep agentapi.Report, periodic bool) error {
 	if err := r.a.ensureRegistered(ctx); err != nil {
 		return err
 	}
 	err := r.a.o.API.Report(ctx, rep)
 	if codeOf(err) == agentapi.CodeNotRegistered {
 		r.a.forget()
+		if periodic && r.closed() {
+			return err
+		}
 		if err := r.a.ensureRegistered(ctx); err != nil {
 			return err
 		}
@@ -548,16 +597,41 @@ func (r *reporter) send(ctx context.Context, rep agentapi.Report) error {
 	return err
 }
 
-// final sends the last report, retrying until it is sent or the timeout
-// passes. Any report still queued is superseded by it. run must have
-// returned, so no older report can land after it.
-func (r *reporter) final(rep agentapi.Report, timeout time.Duration) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	r.take()
+// closePeriodic closes the periodic reports, when the stop begins: no
+// periodic send starts after it, a queued report is dropped, and one that
+// fails now is not retried. It does not wait for the send in flight and does
+// not cancel it (see reporter); the last report supersedes them all.
+func (r *reporter) closePeriodic() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.stopped {
+		r.stopped = true
+		close(r.stop)
+	}
+}
+
+// closed says whether the periodic reports have closed.
+func (r *reporter) closed() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.stopped
+}
+
+// sendOpen says whether run has a send in flight.
+func (r *reporter) sendOpen() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.inflight
+}
+
+// final sends the last report, retrying until it is sent or ctx ends. The
+// periodic reports must have closed and the wait for the send in flight have
+// ended (awaitPeriodicSend): no periodic report starts after it, and the one
+// still open at the bound is the known limit (see reporter).
+func (r *reporter) final(ctx context.Context, rep agentapi.Report) error {
 	b := newBackoff(r.a.o.MinBackoff, r.a.o.MaxBackoff)
 	for {
-		err := r.send(ctx, rep)
+		err := r.send(ctx, rep, false)
 		if err == nil || ctx.Err() != nil {
 			return err
 		}
