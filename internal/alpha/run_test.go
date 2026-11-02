@@ -8,11 +8,14 @@ package alpha
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
 )
 
 type dryCase struct {
@@ -249,5 +252,116 @@ func TestTheChosenLeaseDecidesWhetherASlowStartCanPass(t *testing.T) {
 				t.Errorf("the text to post lacks %q:\n%s", want, posts)
 			}
 		})
+	}
+}
+
+// A job that pends past the first clock is cancelled by its tag and the run ends without a verdict: NOT RUN on
+// a row that holds QOS now's one-job slot (the owner's slot was busy: try again later), a failure on any other
+// row (a queue that long is the operator's to read, not a pass-by). Either way no record and no text to post
+// are written, the run's own job was cancelled and never started, and the owner's job under the same QOS is
+// left running. The expected outcomes are the issue's (#222), not read from SlotHold.
+func TestAJobPendingPastTheBoundIsCancelledByItsTag(t *testing.T) {
+	for _, c := range []struct {
+		row        string
+		wantNotRun bool
+		ownerJob   bool
+	}{
+		{"alpha-helios-nooverlap", true, true},
+		{"tunnel-hour-helios", true, true},
+		{"tunnel-hour-athena", false, false},
+	} {
+		t.Run(c.row, func(t *testing.T) {
+			row := rowOf(c.row)
+			cfg := Config{Row: row, Dry: true, DryFault: "pend-past-bound", Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute}
+			rec, err := NewRecorder(cfg.Out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			st := newDrySteps(t, cfg, familyOf(c.row))
+			began := st.now()
+			failures, err := Run(context.Background(), cfg, st, rec, t.Logf)
+			if !errors.Is(err, ErrNotStarted) || len(failures) != 0 {
+				t.Fatalf("failures %v, err %v, want ErrNotStarted and no verdict", failures, err)
+			}
+			if got := NotRun(row, err); got != c.wantNotRun {
+				t.Errorf("NotRun = %t, want %t", got, c.wantNotRun)
+			}
+			// The first clock ran its length on the manual clock, and the cancel took a few seconds at most.
+			if waited := st.now().Sub(began); waited < cfg.PendingMax || waited > cfg.PendingMax+10*time.Second {
+				t.Errorf("the wait lasted %s, want the bound of %s", waited, cfg.PendingMax)
+			}
+			for _, f := range []string{RecordFile, PostsFile} {
+				if _, err := os.Stat(filepath.Join(cfg.Out, f)); err == nil {
+					t.Errorf("a run that ended on the first clock wrote %s", f)
+				}
+			}
+			var ours, owners int
+			for _, j := range st.plat.Jobs() {
+				if strings.HasPrefix(j.Name, "hb-") {
+					ours++
+					if j.State != fakeslurm.Cancelled || !j.Start.IsZero() {
+						t.Errorf("the run's job is %s (started %t), want cancelled and never started", j.State, !j.Start.IsZero())
+					}
+					continue
+				}
+				owners++
+				if j.State != fakeslurm.Running {
+					t.Errorf("the owner's job is %s, want it left running", j.State)
+				}
+			}
+			if ours != 1 || owners != map[bool]int{true: 1, false: 0}[c.ownerJob] {
+				t.Errorf("%d jobs of the run and %d of the owner's", ours, owners)
+			}
+		})
+	}
+}
+
+// notStarted is a scenario whose first job never started; its Close can fail.
+type notStarted struct {
+	notWired
+	closeErr error
+}
+
+func (notStarted) NoOverlap(context.Context, Plan) (NoOverlapObs, error) {
+	return NoOverlapObs{}, ErrNotStarted
+}
+func (n notStarted) Close(context.Context) error { return n.closeErr }
+
+// A close that failed may have left a job behind: the run is then a failure, not a NOT RUN.
+func TestACloseThatFailsTurnsANotRunIntoAFailure(t *testing.T) {
+	row := rowOf("alpha-helios-nooverlap")
+	for _, c := range []struct {
+		name       string
+		closeErr   error
+		wantNotRun bool
+	}{
+		{"the steps close cleanly", nil, true},
+		{"the steps fail to close", errors.New("scancel did not answer"), false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := Config{Row: row, Out: filepath.Join(t.TempDir(), "out")}
+			rec, err := NewRecorder(cfg.Out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = Run(context.Background(), cfg, notStarted{closeErr: c.closeErr}, rec, t.Logf)
+			if err == nil {
+				t.Fatal("the run returned no error")
+			}
+			if got := NotRun(row, err); got != c.wantNotRun {
+				t.Errorf("NotRun(%v) = %t, want %t", err, got, c.wantNotRun)
+			}
+		})
+	}
+}
+
+// The marker names the row and the wait, and no job: the script prints and posts around it.
+func TestTheNotRunNoteNamesNoJob(t *testing.T) {
+	note := NotRunNote(rowOf("tunnel-hour-helios"), 30*time.Minute)
+	if want := "tunnel-hour-helios: a job was still pending after 30m0s;"; !strings.Contains(note, want) {
+		t.Errorf("note %q lacks %q", note, want)
+	}
+	if strings.Contains(note, "hb-") {
+		t.Errorf("the note names a tag: %q", note)
 	}
 }
