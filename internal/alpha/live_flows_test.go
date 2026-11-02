@@ -202,6 +202,7 @@ func (r *liveRun) untilBefore(t time.Time, lead time.Duration, what string) {
 func (r *liveRun) Handover(ctx context.Context, p Plan) (HandoverObs, error) {
 	r.start(p)
 	pre := r.firstReady(p)
+	guard := r.guardSuccessor(pre.Name)
 	key := r.fc.KeyFor(&pre)
 	rate := r.rate(key)
 	times := r.workerRestart(ctx, p, pre, key)
@@ -230,6 +231,9 @@ func (r *liveRun) Handover(ctx context.Context, p Plan) (HandoverObs, error) {
 		_, ended := r.watch.First(pre.UID, time.Time{}, func(o stack.Observation) bool { return o.Phase == v1alpha1.InstanceEnded })
 		return ended
 	})
+	if err := guard(); err != nil {
+		p.Logf("%s: %v", p.Row.Name, err)
+	}
 	tags, err := r.runTags()
 	if err != nil {
 		return HandoverObs{}, err
@@ -252,6 +256,7 @@ func (r *liveRun) Handover(ctx context.Context, p Plan) (HandoverObs, error) {
 func (r *liveRun) NoOverlap(ctx context.Context, p Plan) (NoOverlapObs, error) {
 	r.start(p)
 	pre := r.firstReady(p)
+	guard := r.guardSuccessor(pre.Name)
 	key := r.fc.KeyFor(&pre)
 	rate := r.rate(key)
 	times := r.workerRestart(ctx, p, pre, key)
@@ -272,6 +277,9 @@ func (r *liveRun) NoOverlap(ctx context.Context, p Plan) (NoOverlapObs, error) {
 	// The successor starts once the predecessor's job ends and frees the GPU, then becomes ready.
 	succ, ok := r.successorOf(pre.Name, time.Until(pre.Status.LeaseEnd.Time)+p.PendingMax+r.tm.StartTimeout+5*time.Minute)
 	noReady := pr.end()
+	if err := guard(); err != nil {
+		p.Logf("%s: %v", p.Row.Name, err)
+	}
 	streams := []Stream{r.finish(s)}
 	if !ok {
 		p.Logf("%s: the successor was not ready in time", p.Row.Name)

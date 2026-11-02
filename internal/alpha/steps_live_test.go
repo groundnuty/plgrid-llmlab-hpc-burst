@@ -331,22 +331,94 @@ func (r *liveRun) oneJob(in v1alpha1.Instance) time.Time {
 	if !ok {
 		t.Fatal("the Instance has no lease end")
 	}
-	end := metav1.NewTime(ds.Add(-time.Minute).Truncate(time.Second))
+	end, err := r.endAt(ds.Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return end
+}
+
+// endAt sets the run's deployment's end to t, and returns the end it has. It
+// never fails the test itself: the successor guard calls it from its goroutine.
+func (r *liveRun) endAt(t time.Time) (time.Time, error) {
+	end := metav1.NewTime(t.Truncate(time.Second))
 	var md v1alpha1.ModelDeployment
-	ctx, cancel := stack.CallCtx(t)
+	ctx, cancel := context.WithTimeout(context.Background(), stack.APICallTimeout)
 	defer cancel()
 	if err := r.c.Get(ctx, client.ObjectKey{Name: r.w.md.Name, Namespace: r.w.md.Namespace}, &md); err != nil {
-		t.Fatalf("the run's deployment: %v", err)
+		return time.Time{}, fmt.Errorf("the run's deployment: %w", err)
 	}
-	if md.Spec.EndTime != nil && !end.After(md.Spec.EndTime.Time) {
-		return md.Spec.EndTime.Time
+	if md.Spec.EndTime != nil && md.Spec.EndTime.Equal(&end) {
+		return end.Time, nil
 	}
 	patch := client.MergeFrom(md.DeepCopy())
 	md.Spec.EndTime = &end
 	if err := r.c.Patch(ctx, &md, patch); err != nil {
-		t.Fatalf("move the run's deployment's end to before the drain start: %v", err)
+		return time.Time{}, fmt.Errorf("set the run's deployment's end: %w", err)
 	}
-	return end.Time
+	return end.Time, nil
+}
+
+// lastJob keeps a row of two jobs to two: once the successor has a lease end,
+// the deployment ends at the successor's own drain start, where its lease
+// drains it anyway, so the lifecycle controller plans it no replacement
+// (internal/lifecycle/handover.go). The drain start is the controller's own
+// (v1alpha1.InstanceDrainWindow), to the second: a later end would let the
+// replacement through, an earlier one could fall before the predecessor's
+// drain start and stop its handover. The successor's replacement would come
+// health.startTimeout and a minute, less the class's start-to-ready time and
+// any queue wait, after the successor's start (replacementTime), long after
+// this runs.
+func (r *liveRun) lastJob(succ v1alpha1.Instance) error {
+	maxReq := v1alpha1.Duration(r.tm.MaxRequestDuration.String())
+	dw, err := v1alpha1.InstanceDrainWindow(r.w.profile, &v1alpha1.Routing{MaxRequestDuration: &maxReq})
+	if err != nil {
+		return fmt.Errorf("the successor's drain window: %w", err)
+	}
+	_, err = r.endAt(succ.Status.LeaseEnd.Add(-dw))
+	return err
+}
+
+// guardSuccessor runs lastJob, from a goroutine, as soon as the replacement of
+// pred has a lease end: in a handover the successor may start long before the
+// steps reach it. stop ends the guard and returns its error, or one saying the
+// successor never started.
+func (r *liveRun) guardSuccessor(pred string) (stop func() error) {
+	quit, done := make(chan struct{}), make(chan error, 1)
+	go func() {
+		for {
+			var l v1alpha1.InstanceList
+			ctx, cancel := context.WithTimeout(context.Background(), stack.APICallTimeout)
+			err := r.c.List(ctx, &l, client.InNamespace(r.w.md.Namespace))
+			cancel()
+			if err == nil {
+				for _, x := range l.Items {
+					if x.Annotations[v1alpha1.AnnotationPredecessor] == pred && x.Status.LeaseEnd != nil {
+						done <- r.lastJob(x)
+						return
+					}
+				}
+			}
+			select {
+			case <-quit:
+				done <- errors.New("the successor never started, so the run's deployment kept no end")
+				return
+			case <-time.After(time.Second):
+			}
+		}
+	}()
+	var once sync.Once
+	var result error
+	stop = func() error {
+		once.Do(func() {
+			close(quit)
+			result = <-done
+		})
+		return result
+	}
+	// A step that fails before it stops the guard: the guard stops at the end of the test.
+	r.t.Cleanup(func() { _ = stop() })
+	return stop
 }
 
 func dur(d time.Duration) *v1alpha1.Duration { s := v1alpha1.Duration(d.String()); return &s }
@@ -431,7 +503,10 @@ func (r *liveRun) successorOf(pred string, d time.Duration) (v1alpha1.Instance, 
 	deadline, _ := stack.BoundedDeadline(r.t, d)
 	for time.Now().Before(deadline) {
 		for _, x := range r.instances() {
-			if x.Annotations[v1alpha1.AnnotationPredecessor] == pred && x.Status.Phase == v1alpha1.InstanceReady {
+			if x.Annotations[v1alpha1.AnnotationPredecessor] != pred {
+				continue
+			}
+			if x.Status.Phase == v1alpha1.InstanceReady {
 				if reg, known := stack.Registered(r.h.Ports, &x); known && reg {
 					return x, true
 				}
