@@ -126,6 +126,27 @@ func (r *cgRig) wantCleared(what string, phase v1alpha1.AllocationPhase) {
 	}
 }
 
+// wantShapeAtClearance checks that a deletion fixture is the shape it names at
+// the moment the flag clears on the platform, before the controller reads
+// again: Athena's listing still shows the job in its base state without the
+// flag (it is purged at MinJobAge, which minJobAgeFor makes outlast the test),
+// Helios's no longer shows it. A fixture that cannot show this proves nothing
+// for the shape (HBEP-4, Test plan; Opus O1 on PR 217). The read is the real
+// Batch's, past its cache.
+func (r *cgRig) wantShapeAtClearance(mode fakeslurm.NotListedMode, base string) {
+	r.t.Helper()
+	q, listed, err := r.batch.QueueJob(r.ctx, r.id)
+	if err != nil {
+		r.t.Fatalf("the listing at clearance: %v", err)
+	}
+	switch {
+	case mode == fakeslurm.NotListedAthena && (!listed || q.Completing || q.EndTime == nil || len(q.State) != 1 || q.State[0] != base):
+		r.t.Fatalf("Athena shape at clearance: listed %v, %+v; want the job listed in [%s], no flag, with an end time", listed, q, base)
+	case mode == fakeslurm.NotListedHelios && listed:
+		r.t.Fatalf("Helios shape at clearance: the job is still listed (%+v); want it dropped", q)
+	}
+}
+
 var bothShapes = []struct {
 	name string
 	mode fakeslurm.NotListedMode
@@ -292,7 +313,7 @@ func TestAJobWhoseStoredStatusIsCompletingIsNotFinal(t *testing.T) {
 func TestAccountingSayingTerminalDoesNotClearTheFlagWhileTheListingShowsIt(t *testing.T) {
 	for _, shape := range bothShapes {
 		t.Run(shape.name, func(t *testing.T) {
-			r := startCGRig(t, shape.mode, 10*time.Minute)
+			r := startCGRig(t, shape.mode, minJobAgeFor(shape.mode))
 			r.clock.Set(at(12, 2, 30))
 			endJob(t, r.sl, r.id, fakeslurm.Failed)
 			if err := r.sl.HoldCompleting(r.n, true); err != nil {
@@ -305,7 +326,7 @@ func TestAccountingSayingTerminalDoesNotClearTheFlagWhileTheListingShowsIt(t *te
 			}
 			reads := r.sl.Count("sacct")
 			for i := 0; i < 3; i++ {
-				r.clock.Advance(10 * time.Minute) // past the accounting refresh and MinJobAge
+				r.clock.Advance(10 * time.Minute) // past the accounting refresh
 				r.run("alloc-a", 1)
 				r.wantCompleting("accounting says FAILED", v1alpha1.AllocationFailed, "FAILED", "2026-10-30T12:02:30Z")
 			}
@@ -327,10 +348,13 @@ func TestAccountingSayingTerminalDoesNotClearTheFlagWhileTheListingShowsIt(t *te
 					t.Fatalf("pass %d: %d file removals while the listing shows the flag, want 0", i, n)
 				}
 			}
-			// The listing stops showing the flag: everything follows, once.
+			// The listing stops showing the flag: everything follows, once. In
+			// the Athena shape the job is still listed, without the flag, and
+			// that alone clears it; in the Helios shape the job is dropped.
 			if err := r.sl.HoldCompleting(r.n, false); err != nil {
 				t.Fatal(err)
 			}
+			r.wantShapeAtClearance(shape.mode, "FAILED")
 			r.clock.Advance(10 * time.Second)
 			r.run("alloc-a", 3)
 			if !r.gone("alloc-a") {
@@ -348,7 +372,9 @@ func TestAccountingSayingTerminalDoesNotClearTheFlagWhileTheListingShowsIt(t *te
 // All the protections of HBEP-4's Test plan, "A completing job, in both shapes",
 // in every case and both shapes, while the flag lasts: the Allocation is deleted
 // and keeps its finalizer and its files and has no acct- record, however many
-// passes run past MinJobAge; a listing that fails for longer than lostGrace
+// passes run (past MinJobAge in the Helios shape; the Athena shape's MinJobAge
+// is 2 hours, so its job is still listed, without the flag, when the flag
+// clears: wantShapeAtClearance); a listing that fails for longer than lostGrace
 // clears nothing and the job is never Lost; nothing is cancelled again. (The
 // slot count is HBEP-7's, tested in internal/lifecycle.) Once the flag clears,
 // the files and the finalizer go and exactly one record is written. The cases
@@ -372,7 +398,7 @@ func TestCompletingJobHoldsTheProtectionsUntilTheFlagClears(t *testing.T) {
 		} {
 			t.Run(shape.name+"/"+c.name, func(t *testing.T) {
 				f := &lineFaults{}
-				r := newCGRig(t, shape.mode, 10*time.Minute, withLineFaults(f))
+				r := newCGRig(t, shape.mode, minJobAgeFor(shape.mode), withLineFaults(f))
 				if c.requeue {
 					r.clock.Set(at(12, 2, 30))
 					if err := r.sl.Requeue(r.n); err != nil {
@@ -412,7 +438,7 @@ func TestCompletingJobHoldsTheProtectionsUntilTheFlagClears(t *testing.T) {
 						t.Fatalf("%s: %d more scancel calls for a completing job, want 0", what, n)
 					}
 				}
-				for i := 0; i < 3; i++ { // past MinJobAge and past lostGrace
+				for i := 0; i < 3; i++ { // past lostGrace (and, in the Helios shape, MinJobAge)
 					r.clock.Advance(10 * time.Minute)
 					r.run("alloc-a", 2)
 					hold("successful listings")
@@ -439,6 +465,14 @@ func TestCompletingJobHoldsTheProtectionsUntilTheFlagClears(t *testing.T) {
 				if err := r.sl.HoldCompleting(r.n, false); err != nil {
 					t.Fatal(err)
 				}
+				// The clearance is the shape's own: Athena lists the job in its
+				// base state without the flag (the requeued job was cancelled), so
+				// the release comes from that listing and not from absence.
+				base := c.state
+				if c.requeue {
+					base = fakeslurm.Cancelled
+				}
+				r.wantShapeAtClearance(shape.mode, base)
 				r.clock.Advance(10 * time.Second)
 				r.run("alloc-a", 3)
 				if !r.gone("alloc-a") {

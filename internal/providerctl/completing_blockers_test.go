@@ -34,6 +34,7 @@ func TestACompletingDuplicateHoldsTheDeletedAllocationAndItsSlot(t *testing.T) {
 		t.Run(shape.name, func(t *testing.T) {
 			r := newCGRig(t, shape.mode, minJobAgeFor(shape.mode))
 			tag := jobTag(r.realEnv, "alloc-a")
+			head := head(r.realEnv, "alloc-a", "1001", "1002") // the Allocation is gone when the record is checked
 			dup := r.sl.OutsideJob("user-a", tag, gpuPart, "", 1)
 			if dup != 1002 {
 				t.Fatalf("precondition: the duplicate is job %d, want 1002", dup)
@@ -89,7 +90,7 @@ func TestACompletingDuplicateHoldsTheDeletedAllocationAndItsSlot(t *testing.T) {
 			}
 			// One record, from the recorded job's final state (8 CPUs, 1 GPU, 90 s
 			// from 12:01:00 to 12:02:30), naming both jobs of the tag.
-			r.wantRecord("alloc-a", head(r.realEnv, "alloc-a", "1001", "1002")+`,"allocatedCPUs":8,"allocatedGPUs":1,"elapsedSeconds":90,`+
+			r.wantRecord("alloc-a", head+`,"allocatedCPUs":8,"allocatedGPUs":1,"elapsedSeconds":90,`+
 				`"startTime":"2026-10-30T12:01:00Z","endTime":"2026-10-30T12:02:30Z","basis":"allocated"}`)
 		})
 	}
