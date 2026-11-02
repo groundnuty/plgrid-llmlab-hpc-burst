@@ -118,6 +118,24 @@ func (r *liveRun) whyGone(in v1alpha1.Instance, killed time.Time) {
 	}
 }
 
+// keyNow is a conversation key the front's ring maps to the Instance now, as
+// stack's KeyFor finds one, but false rather than a failed test when none of
+// its candidates does or a reply is not a 200: an Instance coming back from a
+// restart, or paused, is not on the ring yet.
+func (r *liveRun) keyNow(in *v1alpha1.Instance) (string, bool) {
+	for i := 0; i < 64; i++ {
+		key := fmt.Sprintf("rehearsal-conversation-%d", i)
+		rp := r.fc.Send("/v1/chat/completions", stack.ChatBody(r.fc.Model, 1, 0, false, ""), key)
+		if rp.Err != nil || rp.Status != http.StatusOK {
+			return "", false
+		}
+		if rp.Header.Get("Hpcburst-Instance-Uid") == string(in.UID) {
+			return key, true
+		}
+	}
+	return "", false
+}
+
 // lookup reads an Instance again from the API; false when it is gone.
 func (r *liveRun) lookup(in v1alpha1.Instance) (v1alpha1.Instance, bool) {
 	var x v1alpha1.Instance
@@ -168,7 +186,7 @@ func (r *liveRun) ourJob(ctx context.Context, in v1alpha1.Instance) string {
 // workerRestart is the worker-rung fault: it kills the engine of the
 // Instance's job on its node, by PID, and waits for the stack to restart the
 // worker and for the Instance to serve the key again (HBEP-7:637).
-func (r *liveRun) workerRestart(ctx context.Context, p Plan, in v1alpha1.Instance, key string) RestartTimes {
+func (r *liveRun) workerRestart(ctx context.Context, p Plan, in v1alpha1.Instance) RestartTimes {
 	t := r.t
 	t.Helper()
 	before := len(r.current(in).Status.Restarts)
@@ -211,7 +229,14 @@ func (r *liveRun) workerRestart(ctx context.Context, p Plan, in v1alpha1.Instanc
 		if len(now.Status.Restarts) <= before || now.Status.Phase != v1alpha1.InstanceReady {
 			return false
 		}
-		rp := r.fc.Send("/v1/chat/completions", stack.ChatBody(r.fc.Model, 1, 0, false, ""), key)
+		// The key the run chose may map to a replacement that has since joined
+		// the front's ring: serving is shown with a key that maps to this
+		// Instance now (the rehearsal's step (d) chooses its key the same way).
+		k, ok := r.keyNow(&now)
+		if !ok {
+			return false
+		}
+		rp := r.fc.Send("/v1/chat/completions", stack.ChatBody(r.fc.Model, 1, 0, false, ""), k)
 		if rp.Header != nil {
 			r.keep(rp.Header)
 		}
@@ -252,7 +277,7 @@ func (r *liveRun) Handover(ctx context.Context, p Plan) (HandoverObs, error) {
 	guard := r.guardSuccessor(pre.Name)
 	key := r.fc.KeyFor(&pre)
 	rate := r.rate(key)
-	times := r.workerRestart(ctx, p, pre, key)
+	times := r.workerRestart(ctx, p, pre)
 	pre = r.current(pre)
 	ds, ok := DrainStartOf(&pre, r.drainWindow())
 	if !ok {
@@ -306,7 +331,7 @@ func (r *liveRun) NoOverlap(ctx context.Context, p Plan) (NoOverlapObs, error) {
 	guard := r.guardSuccessor(pre.Name)
 	key := r.fc.KeyFor(&pre)
 	rate := r.rate(key)
-	times := r.workerRestart(ctx, p, pre, key)
+	times := r.workerRestart(ctx, p, pre)
 	pre = r.current(pre)
 	ds, ok := DrainStartOf(&pre, r.drainWindow())
 	if !ok {
