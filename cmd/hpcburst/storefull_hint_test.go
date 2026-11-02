@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -10,89 +11,84 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/launcher"
 )
 
-// TestStoreFullHintOnACapVolume (#192) shows the hint's judgement on a real volume, #190's size-limited
-// file system, with no k3s behind it. status asks for the hint only after its write probe failed, so each
-// case below is a probe that failed: an empty volume gets no hint; a volume with a few blocks left, under
-// 64 KiB, gets none either, because the probe may have failed for another reason and the disk is not
-// full (Astra's review of PR #229); a volume with no block available, filled to its limit and frozen,
-// gets "store full" under the path it was asked about; and once space is given back the hint is gone.
-// The path is shown as given, so a link to the volume is named by the link and never by the mount it
-// leads to, as status shows the store's directory in the state directory. TestStoreFull checks the same
-// hint in status's reasons on k3s.
+// TestStoreFullHintOnACapVolume (#192) shows the hint's three bands on a real volume, #190's
+// size-limited file system, with no k3s behind it. status asks for the hint only after its write probe
+// failed or timed out, so each state below is a failed probe on a volume in that state. The volume is
+// filled step by step, and at each step statfs's own count of the available blocks is checked before the
+// hint is: plenty free, then 17 blocks (68 KiB), then exactly 16 blocks (64 KiB, the boundary): no hint,
+// the probe failed for another reason; 15 blocks (60 KiB) and a single block (4 KiB): "store nearly
+// full" with the free space; no block available, after the volume refused a write and was frozen: "store
+// full". Once space is given back the hint is gone. The path is shown as given, so a link to the volume
+// is named by the link and never by the mount it leads to, as status shows the store's directory in the
+// state directory. TestStoreFull checks the full band in status's reasons on k3s.
 func TestStoreFullHintOnACapVolume(t *testing.T) {
 	const (
-		limit     = 2 << 20
-		remainder = 32 << 10 // 8 blocks: some space left, well under the 64 KiB an earlier threshold used
+		limit = 2 << 20
+		block = 4096
 	)
 	v := newCapVolume(t, limit)
 	link := filepath.Join(shortTmp(t, false), "db")
 	if err := os.Symlink(v.mount, link); err != nil {
 		t.Fatal(err)
 	}
-	// available is statfs's Bavail of the link, the blocks an unprivileged process can still take, and
-	// the bytes they come to.
-	available := func() (blocks uint64, bytes int64) {
+	// available is statfs's Bavail of the link: the blocks an unprivileged process can still take.
+	available := func() uint64 {
 		t.Helper()
 		var st syscall.Statfs_t
 		if err := syscall.Statfs(link, &st); err != nil {
 			t.Fatal(err)
 		}
-		return st.Bavail, int64(st.Bavail) * int64(st.Bsize)
+		if st.Bsize != block {
+			t.Fatalf("the volume reports a block size of %d, the test counts blocks of %d", st.Bsize, block)
+		}
+		return st.Bavail
 	}
-	if got := launcher.StoreFullHint(link); got != "" {
-		t.Fatalf("an empty volume got the hint %q", got)
-	}
-
 	f, err := os.Create(filepath.Join(v.mount, "store"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	block := make([]byte, 4096)
-	write := func(what string) bool { // false once the volume refuses with ENOSPC
+	data := make([]byte, block)
+	// fillTo writes one block at a time until exactly want blocks are available. A volume that has fewer,
+	// or that refuses a write on the way, fails the test: the bands are checked at the states named.
+	fillTo := func(want uint64) {
 		t.Helper()
-		if _, err := f.Write(block); err != nil {
-			if !errors.Is(err, syscall.ENOSPC) {
-				t.Fatalf("%s: %v", what, err)
+		for i := 0; i < 2*limit/block; i++ {
+			switch got := available(); {
+			case got == want:
+				return
+			case got < want:
+				t.Fatalf("the volume has %d blocks available, fewer than the %d the step needs", got, want)
 			}
-			return false
+			if _, err := f.Write(data); err != nil {
+				t.Fatalf("filling the volume down to %d blocks available (%d now): %v", want, available(), err)
+			}
 		}
-		return true
+		t.Fatalf("the volume never came down to %d blocks available (%d now)", want, available())
+	}
+	check := func(wantBlocks uint64, want string) {
+		t.Helper()
+		fillTo(wantBlocks)
+		if got := launcher.StoreFullHint(link); got != want {
+			t.Errorf("with %d blocks (%d KiB) available: hint %q, want %q", wantBlocks, wantBlocks*block>>10, got, want)
+		}
 	}
 
-	// Fill until 8 blocks are left: positive, and under 64 KiB.
-	for i := 0; i < 2*limit/len(block); i++ {
-		if _, bytes := available(); bytes <= remainder {
-			break
-		}
-		if !write("filling the volume down to its remainder") {
-			t.Fatal("the volume refused a write before it had the remainder left")
-		}
-	}
-	blocks, bytes := available()
-	if blocks == 0 || bytes > remainder {
-		t.Fatalf("the volume has %d blocks (%d bytes) available, want a positive remainder of at most %d bytes", blocks, bytes, remainder)
-	}
-	if got := launcher.StoreFullHint(link); got != "" {
-		t.Errorf("a volume with %d blocks (%d bytes) left got the hint %q, but the disk is not full", blocks, bytes, got)
-	}
+	check(limit/block, "") // an empty volume
+	check(17, "")
+	check(16, "") // exactly 64 KiB: the boundary is not nearly full
+	check(15, fmt.Sprintf("store nearly full (60 KiB free on %s)", link))
+	check(1, fmt.Sprintf("store nearly full (4 KiB free on %s)", link))
 
-	// Fill the rest: no block is available, and the volume is frozen, as a full store is.
-	for i := 0; i < 2*limit/len(block); i++ {
-		if !write("filling the volume") {
-			break
-		}
-	}
-	if v.enospc.Load() == 0 {
-		t.Fatal("the volume never reached its limit")
+	// No block left: the volume refuses the next write, and is frozen, as a full store is.
+	fillTo(0)
+	if _, err := f.Write(data); !errors.Is(err, syscall.ENOSPC) {
+		t.Fatalf("a write to a volume with no block available: %v, want ENOSPC", err)
 	}
 	v.freeze()
-	if blocks, _ := available(); blocks != 0 {
-		t.Fatalf("the full volume has %d blocks available, want none", blocks)
-	}
-	want := "store full (no free space on " + link + ")"
-	if got := launcher.StoreFullHint(link); got != want {
-		t.Errorf("a full volume: hint %q, want %q", got, want)
+	full := fmt.Sprintf("store full (no free space on %s)", link)
+	if got := launcher.StoreFullHint(link); got != full {
+		t.Errorf("a full volume: hint %q, want %q", got, full)
 	}
 
 	v.unfreeze()

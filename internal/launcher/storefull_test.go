@@ -33,9 +33,9 @@ func statusWithFailingWrites(t *testing.T, storeDir bool) (*fakeHost, *StatusRep
 // TestStatusFailingWriteWithSpaceFreeHasNoStoreFullHint (#192): the write probe fails, but the store's
 // file system has room, so the reason is the one status always gave and does not blame the disk. The
 // free space is the real statfs of a real directory, and the test first shows that directory has room
-// far from zero blocks: on a nearly full disk it would otherwise prove nothing.
+// far above the nearly-full band: on a nearly full disk it would otherwise prove nothing.
 func TestStatusFailingWriteWithSpaceFreeHasNoStoreFullHint(t *testing.T) {
-	const room = 1 << 20
+	const room = 16 * nearlyFullBelow
 	h, rep := statusWithFailingWrites(t, true)
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(h.l.sqliteDir(), &st); err != nil || st.Bavail*uint64(st.Bsize) < room {
@@ -45,7 +45,7 @@ func TestStatusFailingWriteWithSpaceFreeHasNoStoreFullHint(t *testing.T) {
 	if !strings.Contains(joined, "writes are failing: ") {
 		t.Errorf("reasons %q do not say that writes are failing", joined)
 	}
-	for _, hint := range []string{"store full", "no free space", "free space"} {
+	for _, hint := range []string{"store full", "nearly full", "no free space", "KiB free", "free space"} {
 		if strings.Contains(joined, hint) {
 			t.Errorf("reasons %q carry %q although the file system has room", joined, hint)
 		}
@@ -64,7 +64,9 @@ func TestStatusSaysWhenTheFreeSpaceCannotBeRead(t *testing.T) {
 	if !strings.Contains(joined, "writes are failing: ") {
 		t.Errorf("reasons %q lost the write failure", joined)
 	}
-	if strings.Contains(joined, "store full") {
-		t.Errorf("reasons %q call the store full, which the unreadable statfs does not show", joined)
+	for _, claim := range []string{"store full", "nearly full"} {
+		if strings.Contains(joined, claim) {
+			t.Errorf("reasons %q say %q, which the unreadable statfs does not show", joined, claim)
+		}
 	}
 }

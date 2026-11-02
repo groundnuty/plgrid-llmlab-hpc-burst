@@ -339,7 +339,7 @@ func storeFull(t *testing.T, wholeDataDir bool) {
 		}
 		// Writes may still be draining, but space is free again: a probe that fails now must not blame a
 		// full store (#192).
-		if joined := strings.Join(rep.Reasons, ";"); strings.Contains(joined, "store full") {
+		if joined := strings.Join(rep.Reasons, ";"); strings.Contains(joined, "store full") || strings.Contains(joined, "nearly full") {
 			t.Errorf("status blames a full store after the space was given back: %v", rep.Reasons)
 		}
 		if time.Now().After(deadline) {
