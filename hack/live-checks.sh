@@ -62,12 +62,15 @@
 #                                choice when giving the go; the shape, the hold note and the test follow it
 #   LIVE_OWNER_GO_HELIOS_NOW     today's UTC date (YYYY-MM-DD), once the owner has said yes to the run: the rows that hold
 #                                QOS now's GPU for hours (alpha-helios-nooverlap, tunnel-hour-helios) refuse without it
-#   LIVE_FRONT_HOST_LABEL        where the front ran, in words: the host's role and its network position, inside or outside
-#                                Cyfronet's network (issue #224). The text to post of every row that writes one (the alpha
-#                                rows, tunnel-hour-*, gpu-accounting-*) names it, because the host that runs the front
-#                                decides the path to the login nodes, and so the timings. A description, never a host name
-#                                or an address: letters, digits, spaces and , ; ( ) ' - only, at most 120 bytes, and it must
-#                                say inside or outside. A row that needs it refuses (exit 3) without a valid one.
+#   LIVE_FRONT_HOST_LABEL        where the front ran, in three parts (issue #224): a ROLE from a fixed list (the FRONT ROLES
+#                                table below), a comma and a space, a POSITION that is exactly inside or outside Cyfronet
+#                                (or Cyfronet's network), and an optional NOTE in parentheses. The text to post of every row
+#                                that writes one (the alpha rows, tunnel-hour-*, gpu-accounting-*) names it, because the host
+#                                that runs the front decides the path to the login nodes, and so the timings. The note holds
+#                                words of letters and numbers with a unit (3.4 ms, 40 MB/s) and , ; ' - only: no word with a
+#                                digit in it, no dotted name or address, no colon. At most 120 bytes. A row that needs it
+#                                refuses (exit 3) without a valid one. Example: the development host, outside Cyfronet
+#                                (3.4 ms to the Helios login, behind a gateway)
 #   The reach rows (issue #225) confirm that a compute node reaches the gateway's forwarded port:
 #   LIVE_PROBE_HOST, LIVE_PROBE_PORT   the forwarded port as the compute nodes see it; private, read only by the reach rows,
 #                                and never printed, shown on the screen or posted (the host a name or an address, the port 1 to 65535)
@@ -274,6 +277,18 @@ gpu-accounting-athena
 TABLE
 }
 
+# The roles a front host label may name, the first of its three parts (issue #224). The list is this script's and the alpha
+# package's (alpha.FrontRoles; hack/livechecks compares them): a role is added by a change in both, never by the setting.
+front_role_table() {
+  cat <<'TABLE'
+# BEGIN FRONT ROLES
+the development host
+a Cyfronet-network host
+a cloud host
+# END FRONT ROLES
+TABLE
+}
+
 # A bare name that stands for several rows, one per cluster, run one after the other (issue #194).
 # name | rows.
 alias_table() {
@@ -297,6 +312,7 @@ declare -a NAMES=()
 declare -A KIND PKG TEST GATES INPUTS CONTEXTS STATUS
 declare -A HOST PROFILE PARTITION QOS SLOT ACCTKEY GPUS CPUS MEM TLIMIT TMIN EXTRA SWAIT
 declare -A STACK ALIAS OGSET OGMIN MOSTJOBS FRONTLABEL
+declare -a FRONT_ROLES=()
 declare -A S=()
 
 # load_tables: reads the tables above into the arrays. Comment and blank lines are skipped in the loop itself:
@@ -359,6 +375,13 @@ load_tables() {
     FRONTLABEL[$name]=1
   done < <(front_label_table)
   [ "$n" -gt 0 ] || { table_empty "FRONT LABEL"; return 2; }
+  n=0
+  while IFS= read -r name || [ -n "$name" ]; do
+    case $name in ''|'#'*) continue ;; esac
+    n=$((n+1))
+    FRONT_ROLES+=("$name")
+  done < <(front_role_table)
+  [ "$n" -gt 0 ] || { table_empty "FRONT ROLES"; return 2; }
 }
 
 # table_empty <name>: says that the table between "# BEGIN <name>" and "# END <name>" gave no rows.
@@ -442,23 +465,37 @@ check_settings() {
 }
 
 # check_front_label: the label of where the front ran (issue #224). It is a description for the text to post, so it is held
-# to a narrow form on the properties this script owns, not on what a host looks like: a length, the characters of prose (no
-# dot, colon, slash or at sign, which a host name, an address or a URL needs), and a stated network position. The refusal
-# names the setting, never its value. The alpha package holds the same rule (alpha.ValidFrontLabel); hack/livechecks
-# runs both on the same labels.
+# to a form on the properties this script owns, not on what a host looks like: ROLE ", " POSITION [ " (" NOTE ")" ], with the
+# role from the FRONT ROLES table, the position exactly inside or outside Cyfronet (or Cyfronet's network), and a note of
+# words of letters and numbers with a unit only (no word with a digit in it, no dotted name or address, no colon), at most
+# 120 bytes in all. The refusal names the setting and the part that is wrong, never its value. The alpha package holds the same
+# rule (alpha.ValidFrontLabel); hack/livechecks runs both on the same labels. The C locale makes the length count bytes and the
+# letters ASCII, as the package's do.
 check_front_label() {
-  local l=${S[LIVE_FRONT_HOST_LABEL]:-} lower
-  # In a variable, so that no character in the bracket is read as an escape: space, comma, semicolon, parentheses,
-  # apostrophe and, last, the hyphen.
-  local form="^[A-Za-z0-9][A-Za-z0-9 ,;()'-]*\$"
+  local LC_ALL=C
+  local l=${S[LIVE_FRONT_HOST_LABEL]:-} role rest="" pos note="" has_note="" have_role="" have_pos=""
+  # In variables, so that no character is read as an escape: the apostrophe and the hyphen of a word, and the unit's slash.
+  local word="[A-Za-z]+(['-][A-Za-z]+)*" qty="[0-9]+(\\.[0-9]+)? ?(ms|s|MB/s|Mb/s|%)" item note_re
+  item="($qty|$word)"; note_re="^$item([,;]? $item)*\$"
   if [ -z "$l" ]; then say "live-checks: setting LIVE_FRONT_HOST_LABEL is missing"; return 1; fi
-  if [ "${#l}" -gt 120 ] || ! [[ $l =~ $form ]]; then
-    say "live-checks: LIVE_FRONT_HOST_LABEL may hold only letters, digits, spaces and , ; ( ) ' - (at most 120 bytes; a description, never a host name or an address)"
+  if [ "${#l}" -gt 120 ]; then say "live-checks: LIVE_FRONT_HOST_LABEL is longer than 120 bytes"; return 1; fi
+  for role in "${FRONT_ROLES[@]}"; do
+    case $l in "$role, "*) rest=${l#"$role, "}; have_role=1; break ;; esac
+  done
+  if [ -z "$have_role" ]; then
+    say "live-checks: LIVE_FRONT_HOST_LABEL must begin with a role, then a comma and a space: one of $(IFS=';'; printf '%s' "${FRONT_ROLES[*]}")"
     return 1
   fi
-  lower=${l,,}
-  if ! [[ $lower =~ (^|[^a-z])(inside|outside)([^a-z]|$) ]]; then
-    say "live-checks: LIVE_FRONT_HOST_LABEL must say whether the front ran inside or outside Cyfronet's network"
+  for pos in "inside Cyfronet's network" "outside Cyfronet's network" "inside Cyfronet" "outside Cyfronet"; do
+    if [ "$rest" = "$pos" ]; then have_pos=1; break; fi
+    case $rest in "$pos ("*")") have_pos=1; has_note=1; note=${rest#"$pos ("}; note=${note%")"}; break ;; esac
+  done
+  if [ -z "$have_pos" ]; then
+    say "live-checks: LIVE_FRONT_HOST_LABEL must say inside or outside Cyfronet (or Cyfronet's network) after its role, then at most a note in parentheses"
+    return 1
+  fi
+  if [ -n "$has_note" ] && ! [[ $note =~ $note_re ]]; then
+    say "live-checks: the note of LIVE_FRONT_HOST_LABEL may hold only words of letters, numbers with a unit (3.4 ms, 40 MB/s) and , ; ' - (no word with a digit in it, no dotted name or address, no colon)"
     return 1
   fi
 }
@@ -1382,6 +1419,9 @@ for name in "${REQUESTED[@]}"; do
   [ "${STATUS[$name]}" = ready ] || { say "live-checks: $name is pending and cannot run yet"; exit 2; }
 done
 load_settings || exit 3
+# The label comes from the settings, to the rows that post it (export_front_label); one that the caller's shell holds goes to
+# no row, so a row that writes no text through the front (the science agent's ruling 1, 2 Nov 2026) never takes one.
+unset HPCBURST_FRONT_HOST_LABEL
 case " ${REQUESTED[*]} " in *" tunnel-hour-"*) apply_tunnel_lease || exit 3 ;; esac
 check_settings "${REQUESTED[@]}" || exit 3
 OUT=${S[LIVE_OUT_DIR]}

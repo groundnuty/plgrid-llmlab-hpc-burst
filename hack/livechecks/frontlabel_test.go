@@ -8,6 +8,7 @@ package livechecks
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -15,8 +16,8 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/alpha"
 )
 
-// exampleFrontLabel is the label of the worlds' settings: a role and a position, with an apostrophe, as a real one has.
-const exampleFrontLabel = "an example development host (outside Cyfronet's network)"
+// exampleFrontLabel is the label of the worlds' settings: a role, a position and a note, with an apostrophe, as a real one has.
+const exampleFrontLabel = "the development host, outside Cyfronet's network (3.4 ms to an example login)"
 
 // labelledRows are the rows whose text to post names where the front ran: the rows that write a posts.md.
 var labelledRows = []string{"alpha-athena-handover", "alpha-helios-nooverlap", "tunnel-hour-helios", "tunnel-hour-athena", "gpu-accounting-helios", "gpu-accounting-athena"}
@@ -69,56 +70,118 @@ func TestEveryRowThatPostsNamesWhereTheFrontRanAndRefusesWithoutIt(t *testing.T)
 	}
 }
 
-// The script and the package hold the label to one form. Each label is written out here with the verdict of both: the
-// script's (a row run without --yes reaches the estimate, exit 4, or is refused, exit 3, naming the setting) and the
-// package's validator.
+// The script and the package hold the label to one form (PR 244, B1: a role from the fixed list, a position exactly inside
+// or outside Cyfronet, an optional note of words and numbers with a unit). Each label is written out here with the verdict
+// of both: the script's (a row run without --yes reaches the estimate, exit 4, or is refused, exit 3, naming the setting
+// and the part that is wrong) and the package's validator. The refusal of each part has its own cases, behind a valid role
+// and position where the part is the note, so that a check that stops working is caught by its own case. The key phrases
+// are the same in both: begin with a role, inside or outside Cyfronet, may hold only, longer than 120 bytes.
 func TestTheFrontLabelIsHeldToOneFormByTheScriptAndThePackage(t *testing.T) {
-	long := strings.Repeat("a", 112) + " outside" // 120 bytes
-	over := strings.Repeat("a", 113) + " outside" // 121 bytes, still a valid form with its position stated
+	const (
+		role, pos       = "the development host", "outside Cyfronet"
+		noRole, noPos   = "begin with a role", "inside or outside Cyfronet"
+		noNote, tooLong = "may hold only", "longer than 120 bytes"
+		stem            = "the development host, outside Cyfronet"
+	)
+	// 120 and 121 bytes, each valid in every other respect: a role, a position and a note of letters only.
+	long := stem + " (" + strings.Repeat("a", 120-len(stem)-3) + ")"
+	over := stem + " (" + strings.Repeat("a", 120-len(stem)-2) + ")"
 	for _, c := range []struct {
-		name, label string
-		ok          bool
+		name, label, want string // want is a key phrase of the refusal, "" for a label both accept
 	}{
-		{"a role outside", "the development host, outside Cyfronet's network", true},
-		{"a role inside", "a Cyfronet-network host (inside the network)", true},
-		{"the position in capitals", "Development host - OUTSIDE the network", true},
-		{"a semicolon and a hyphen", "dev host; inside - a Cyfronet-network host", true},
-		{"the longest", long, true},
-		{"one byte over", over, false},
-		{"no position", "the development host", false},
-		{"a position inside a word", "the outsider host", false},
-		{"a position followed by a digit", "host inside2", true},
-		{"a host name", "dev1.example.org, outside the network", false},
-		{"an IPv4 address", "192.0.2.1 outside", false},
-		{"an IPv6 address", "2001:db8::1 outside", false},
-		{"a URL", "https://front.example outside", false},
-		{"a user and host", "me@front outside", false},
-		{"a path", "/srv/front outside", false},
-		{"a backslash", `the host\ outside`, false},
-		{"a leading space", " outside the network", false},
-		{"a dollar sign", "the host $HOME outside", false},
+		{"a role outside", "the development host, outside Cyfronet's network", ""},
+		{"a role inside", "a Cyfronet-network host, inside Cyfronet's network", ""},
+		{"the shorter position", "a cloud host, inside Cyfronet", ""},
+		{"the science agent's example", "the development host, outside Cyfronet (3.4 ms to the Helios login, behind a gateway)", ""},
+		{"a rate in the note", "the development host, outside Cyfronet's network (40 MB/s, 5% loss)", ""},
+		{"an apostrophe and a hyphen in the note", "a cloud host, outside Cyfronet (behind the owner's gateway; a two-hop path)", ""},
+		{"the longest", long, ""},
+		{"one byte over", over, tooLong},
+		{"inside alone", "inside", noRole},
+		{"a short host name and a position", "gw-01, outside", noRole},
+		{"a short host name joined to the position", "gw-01-outside", noRole},
+		{"a host name in the role's place", "dev1.example.org, outside Cyfronet", noRole},
+		{"a position and a note, no role", "outside Cyfronet (gw.example)", noRole},
+		{"an address in a note, no role", "outside (10.0.0.1)", noRole},
+		{"a word with a digit in a note, no role", "outside (node7)", noRole},
+		{"a role not on the list", "the other host, outside Cyfronet", noRole},
+		{"the role without its comma", "the development host outside Cyfronet", noRole},
+		{"a role alone", "the development host", noRole},
+		{"a leading space", " the development host, outside Cyfronet", noRole},
+		{"a position inside a word", "the development host, the outsider host", noPos},
+		{"a position that is the end of a word", "the development host, xoutside Cyfronet", noPos},
+		{"a note that is not closed", "the development host, outside Cyfronet (a gateway", noPos},
+		{"text after the note", "the development host, outside Cyfronet (a gateway) more", noPos},
+		{"a role and a comma", "the development host, ", noPos},
+		{"no position", "the development host, a few hops away", noPos},
+		{"a capital position", "the development host, OUTSIDE Cyfronet", noPos},
+		{"a position joined to a digit", "the development host, inside2 Cyfronet", noPos},
+		{"the position without Cyfronet", "the development host, outside", noPos},
+		{"another network", "the development host, outside Example's network", noPos},
+		{"a note with no position", "the development host, (outside Cyfronet)", noPos},
+		{"a second parenthesis", role + ", " + pos + " (a) (b)", noNote},
+		{"a dotted name", role + ", " + pos + " (gw.example)", noNote},
+		{"an address", role + ", " + pos + " (10.0.0.1)", noNote},
+		{"a name with a digit", role + ", " + pos + " (node7)", noNote},
+		{"a hyphenated name with digits", role + ", " + pos + " (gw-01)", noNote},
+		{"a digit after a word", role + ", " + pos + " (behind gw1)", noNote},
+		{"a colon", role + ", " + pos + " (host: front)", noNote},
+		{"an IPv6 address", role + ", " + pos + " (2001:db8::1)", noNote},
+		{"a bare number", role + ", " + pos + " (7)", noNote},
+		{"a number with a unit it is not given", role + ", " + pos + " (3.4 parsecs)", noNote},
+		{"a dotted number with no unit", role + ", " + pos + " (3.4)", noNote},
+		{"an empty note", role + ", " + pos + " ()", noNote},
+		{"a slash", role + ", " + pos + " (a/b)", noNote},
+		{"an at sign", role + ", " + pos + " (me@front)", noNote},
+		{"a URL", role + ", " + pos + " (https://front.example)", noNote},
+		{"a backslash", role + ", " + pos + ` (a\b)`, noNote},
+		{"a dollar sign", role + ", " + pos + " (a $HOME b)", noNote},
+		// A letter the bash range [A-Za-z] could take in another locale: both must refuse it.
+		{"a non-ASCII letter", role + ", " + pos + " (caf\u00e9)", noNote},
+		{"a trailing comma in the note", role + ", " + pos + " (a gateway,)", noNote},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if got := alpha.ValidFrontLabel(c.label) == nil; got != c.ok {
-				t.Errorf("the package's verdict on %q is %t, want %t", c.label, got, c.ok)
+			pkgErr := alpha.ValidFrontLabel(c.label)
+			if (pkgErr == nil) != (c.want == "") || (pkgErr != nil && !strings.Contains(pkgErr.Error(), c.want)) {
+				t.Errorf("the package's verdict on %q is %v, want a refusal that says %q (empty: none)", c.label, pkgErr, c.want)
 			}
 			w := newAlphaWorld(t)
 			w.alphaSettings(func(m map[string]string) { m["LIVE_FRONT_HOST_LABEL"] = c.label })
 			res := w.run(nil, "--run", "tunnel-hour-athena")
 			want := 4
-			if !c.ok {
+			if c.want != "" {
 				want = 3
 			}
 			if res.code != want {
 				t.Fatalf("the script's exit on %q is %d, want %d:\n%s", c.label, res.code, want, res.out)
 			}
-			if !c.ok {
-				w.contains(res, "LIVE_FRONT_HOST_LABEL")
-				if strings.Contains(res.out, c.label) {
+			if c.want != "" {
+				w.contains(res, "LIVE_FRONT_HOST_LABEL", c.want)
+				// The refusal names the roles that are allowed, so a label that is one of them is in it; nothing else may be.
+				if !slices.Contains(alpha.FrontRoles, c.label) && strings.Contains(res.out, c.label) {
 					t.Errorf("the refusal repeats the label:\n%s", res.out)
 				}
 			}
 		})
+	}
+}
+
+// The roles the script allows are the package's: a role added in one place and not the other would be a label one of them
+// refuses. Both lists are read here, the script's from its table.
+func TestTheFrontRolesTableIsThePackagesList(t *testing.T) {
+	b, err := os.ReadFile(scriptPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := block(t, string(b), "FRONT ROLES")
+	if strings.Join(got, "|") != strings.Join(alpha.FrontRoles, "|") {
+		t.Errorf("the script's roles are %v, the package's %v", got, alpha.FrontRoles)
+	}
+	// A role is a thing a note's words cannot be mistaken for, and it ends no label by itself.
+	for _, r := range got {
+		if strings.ContainsAny(r, "(),;:@/\\.0123456789") {
+			t.Errorf("the role %q holds a character a host name or an address needs", r)
+		}
 	}
 }
 
@@ -165,13 +228,29 @@ func TestTheLabelReachesOnlyTheRowsThatPostIt(t *testing.T) {
 			}
 		})
 	}
-	t.Run("conformance-athena", func(t *testing.T) {
-		w := newAlphaWorld(t)
-		if res := w.run([]string{"HPCBURST_FRONT_HOST_LABEL=" + inherited}, "--run", "conformance-athena", "--yes"); res.code != 0 {
-			t.Fatalf("exit %d:\n%s", res.code, res.out)
-		}
-		if env := w.stateFile("test-env-TestConformance"); strings.Contains(env, "HPCBURST_FRONT_HOST_LABEL") {
-			t.Errorf("a label reached a row that writes no text to post:\n%s", env)
-		}
-	})
+	// The science agent's ruling 1 (2 Nov 2026): no label on the reach, conformance or real-engine rows. They do not
+	// measure through the front (the reach rows have LIVE_PROBE_LABEL). The script gives them none, whatever the caller's
+	// shell holds, and it does not refuse them for want of one.
+	for _, row := range []string{"conformance-athena", "conformance-helios-gh200", "reach-helios", "reach-athena", "real-engine"} {
+		t.Run(row, func(t *testing.T) {
+			var w *world
+			if row == "real-engine" || strings.HasPrefix(row, "conformance-") {
+				w = newWorld(t)
+				w.useStubGo()
+			} else {
+				w = newReachWorld(t)
+				w.reachSettings(func(m map[string]string) { delete(m, "LIVE_FRONT_HOST_LABEL") })
+			}
+			res := w.run([]string{"HPCBURST_FRONT_HOST_LABEL=" + inherited}, "--run", row, "--yes")
+			if res.code != 0 {
+				t.Fatalf("%s with no label set: exit %d, want 0:\n%s", row, res.code, res.out)
+			}
+			files, _ := filepath.Glob(filepath.Join(w.state, "test-env-*"))
+			for _, f := range files {
+				if b, _ := os.ReadFile(f); strings.Contains(string(b), "HPCBURST_FRONT_HOST_LABEL") {
+					t.Errorf("a label reached %s, a row that writes no text through the front:\n%s", filepath.Base(f), b)
+				}
+			}
+		})
+	}
 }

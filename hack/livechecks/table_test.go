@@ -418,7 +418,7 @@ func TestHubGoldenInputsAreTheFilesTheTestReads(t *testing.T) {
 }
 
 // scriptTables are the tables load_tables reads, each between "# BEGIN <name>" and "# END <name>" in the script.
-var scriptTables = []string{"ALIASES", "CLUSTER SHAPES", "FRONT LABEL", "LIVE TESTS", "MOST JOBS", "OWNER GO", "PLAN STACK"}
+var scriptTables = []string{"ALIASES", "CLUSTER SHAPES", "FRONT LABEL", "FRONT ROLES", "LIVE TESTS", "MOST JOBS", "OWNER GO", "PLAN STACK"}
 
 // commentOut returns the script with every row of the named table turned into a comment, as an edit that
 // empties the table would leave it.

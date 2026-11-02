@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -13,50 +14,95 @@ import (
 // finds it in a text to post has found what was passed in, not a constant the code writes by itself.
 const testFrontLabel = "the development host, outside Cyfronet's network"
 
+// The label is a role from the fixed list, a position that is exactly inside or outside Cyfronet, and an optional note
+// (PR 244, B1). Each case names the part it is about; a refusal says which part is wrong, in the words in want, and never
+// repeats the label.
 func TestAFrontLabelStatesARoleAndAPositionAndNothingThatNamesAHost(t *testing.T) {
+	const (
+		role, pos       = "the development host", "outside Cyfronet"
+		noRole, noPos   = "begin with a role", "inside or outside Cyfronet"
+		noNote, tooLong = "may hold only", "longer than 120 bytes"
+		unset, okLabel  = "is not set", ""
+		stem            = "the development host, outside Cyfronet"
+	)
+	// 120 and 121 bytes, each valid in every other respect: a role, a position and a note of letters only.
+	atLimit := stem + " (" + strings.Repeat("a", MaxFrontLabel-len(stem)-3) + ")"
 	for _, c := range []struct {
-		name, label string
-		ok          bool
+		name, label, want string // want is a phrase of the refusal, "" for a label that is accepted
 	}{
-		{"a role outside", "the development host, outside Cyfronet's network", true},
-		{"a role inside", "a Cyfronet-network host (inside the network)", true},
-		{"the position in capitals", "Development host - OUTSIDE the network", true},
-		{"empty", "", false},
-		{"no position", "the development host", false},
-		{"a host name", "dev1.example.org, outside the network", false},
-		{"an IPv4 address", "192.0.2.1 outside", false},
-		{"an IPv6 address", "2001:db8::1 outside", false},
-		{"a URL", "https://front.example outside", false},
-		{"a user and host", "me@front outside", false},
-		{"a path", "/srv/front outside", false},
-		{"a newline", "outside the network\nand more", false},
-		{"a leading space", " outside the network", false},
-		{"the longest", strings.Repeat("a", MaxFrontLabel-8) + " outside", true},
-		{"one byte over", strings.Repeat("a", MaxFrontLabel-7) + " outside", false},
+		// What is accepted.
+		{"a role outside", "the development host, outside Cyfronet's network", okLabel},
+		{"a role inside", "a Cyfronet-network host, inside Cyfronet's network", okLabel},
+		{"the shorter position", "a cloud host, inside Cyfronet", okLabel},
+		{"the science agent's example", "the development host, outside Cyfronet (3.4 ms to the Helios login, behind a gateway)", okLabel},
+		{"a rate in the note", "the development host, outside Cyfronet's network (40 MB/s, 5% loss)", okLabel},
+		{"an apostrophe and a hyphen in the note", "a cloud host, outside Cyfronet (behind the owner's gateway; a two-hop path)", okLabel},
+		{"the longest", atLimit, okLabel},
+		// No role from the list.
+		{"inside alone", "inside", noRole},
+		{"a short host name and a position", "gw-01, outside", noRole},
+		{"a short host name joined to the position", "gw-01-outside", noRole},
+		{"a host name in the role's place", "dev1.example.org, outside Cyfronet", noRole},
+		{"a position and a note, no role", "outside Cyfronet (gw.example)", noRole},
+		{"an address in a note, no role", "outside (10.0.0.1)", noRole},
+		{"a word with a digit in a note, no role", "outside (node7)", noRole},
+		{"a role not on the list", "the other host, outside Cyfronet", noRole},
+		{"the role without its comma", "the development host outside Cyfronet", noRole},
+		{"a leading space", " the development host, outside Cyfronet", noRole},
+		{"a role alone", "the development host", noRole},
+		// No position, or not exactly inside or outside Cyfronet.
+		{"a newline", "the development host, outside Cyfronet\nand more", noPos},
+		{"a role and a comma", "the development host, ", noPos},
+		{"no position", "the development host, a few hops away", noPos},
+		{"a capital position", "the development host, OUTSIDE Cyfronet", noPos},
+		{"a position that is the end of a word", "the development host, xoutside Cyfronet", noPos},
+		{"a note that is not closed", "the development host, outside Cyfronet (a gateway", noPos},
+		{"text after the note", "the development host, outside Cyfronet (a gateway) more", noPos},
+		{"a position joined to a digit", "the development host, inside2 Cyfronet", noPos},
+		{"the position without Cyfronet", "the development host, outside", noPos},
+		{"another network", "the development host, outside Example's network", noPos},
+		{"a note with no position", "the development host, (outside Cyfronet)", noPos},
+		// The note: each refusal behind a valid role and position, so that only the note can be at fault.
+		{"a second parenthesis", role + ", " + pos + " (a) (b)", noNote},
+		{"a dotted name", role + ", " + pos + " (gw.example)", noNote},
+		{"an address", role + ", " + pos + " (10.0.0.1)", noNote},
+		{"a name with a digit", role + ", " + pos + " (node7)", noNote},
+		{"a hyphenated name with digits", role + ", " + pos + " (gw-01)", noNote},
+		{"a digit after a word", role + ", " + pos + " (behind gw1)", noNote},
+		{"a colon", role + ", " + pos + " (host: front)", noNote},
+		{"an IPv6 address", role + ", " + pos + " (2001:db8::1)", noNote},
+		{"a bare number", role + ", " + pos + " (7)", noNote},
+		{"a number with a unit it is not given", role + ", " + pos + " (3.4 parsecs)", noNote},
+		{"a dotted number with no unit", role + ", " + pos + " (3.4)", noNote},
+		{"an empty note", role + ", " + pos + " ()", noNote},
+		{"a slash", role + ", " + pos + " (a/b)", noNote},
+		{"an at sign", role + ", " + pos + " (me@front)", noNote},
+		{"a URL", role + ", " + pos + " (https://front.example)", noNote},
+		{"a non-ASCII letter", role + ", " + pos + " (caf\u00e9)", noNote},
+		{"a trailing comma in the note", role + ", " + pos + " (a gateway,)", noNote},
+		// The whole.
+		{"empty", "", unset},
+		{"one byte over", stem + " (" + strings.Repeat("a", MaxFrontLabel-len(stem)-2) + ")", tooLong},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			err := ValidFrontLabel(c.label)
-			if (err == nil) != c.ok {
-				t.Fatalf("ValidFrontLabel(%q) = %v, want ok %t", c.label, err, c.ok)
+			if c.want == "" {
+				if err != nil {
+					t.Fatalf("ValidFrontLabel(%q) = %v, want it accepted", c.label, err)
+				}
+				return
 			}
-			if err != nil && c.label != "" && strings.Contains(err.Error(), c.label) {
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("ValidFrontLabel(%q) = %v, want a refusal that says %q", c.label, err, c.want)
+			}
+			// The refusal names the roles that are allowed, so a label that is one of them is in it; nothing else may be.
+			if c.label != "" && !slices.Contains(FrontRoles, c.label) && strings.Contains(err.Error(), c.label) {
 				t.Errorf("the refusal repeats the label: %v", err)
 			}
 		})
 	}
-}
-
-// Each refusal says what is wrong, in its own words.
-func TestEachFrontLabelRefusalSaysWhatIsWrong(t *testing.T) {
-	for label, want := range map[string]string{
-		"":                                    "is not set",
-		"the development host":                "inside or outside",
-		"dev1.example.org, outside":           "only letters",
-		strings.Repeat("a", 113) + " outside": "longer than",
-	} {
-		if err := ValidFrontLabel(label); err == nil || !strings.Contains(err.Error(), want) {
-			t.Errorf("ValidFrontLabel(%q) = %v, want a refusal that says %q", label, err, want)
-		}
+	if len(atLimit) != MaxFrontLabel {
+		t.Errorf("the longest label is %d bytes, want %d", len(atLimit), MaxFrontLabel)
 	}
 }
 

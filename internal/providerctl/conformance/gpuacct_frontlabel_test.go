@@ -3,6 +3,7 @@ package conformance
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -13,7 +14,7 @@ import (
 // (issue #224): the label the script passes, on the line after the verdict. The label is written here, not in the
 // code, so finding it in the text proves it went through.
 func TestTheAccountingTextNamesWhereTheFrontRan(t *testing.T) {
-	const label = "an example host (inside the network)"
+	const label = "a cloud host, inside Cyfronet"
 	t.Setenv(alpha.EnvFrontLabel, label)
 	out := filepath.Join(t.TempDir(), "out")
 	if err := os.Mkdir(out, 0o700); err != nil {
@@ -40,11 +41,12 @@ func TestAnAccountingRunWithoutAFrontLabelIsRefused(t *testing.T) {
 		if !strings.Contains(rec.failed, alpha.EnvFrontLabel) {
 			t.Errorf("label %q: failure %q, want one naming %s", label, rec.failed, alpha.EnvFrontLabel)
 		}
-		if label != "" && strings.Contains(rec.failed, label) {
+		// The refusal names the roles that are allowed, so a label that is one of them is in it; nothing else may be.
+		if label != "" && !slices.Contains(alpha.FrontRoles, label) && strings.Contains(rec.failed, label) {
 			t.Errorf("label %q: the refusal repeats it: %s", label, rec.failed)
 		}
 	}
-	t.Setenv(alpha.EnvFrontLabel, "a host (outside the network)")
+	t.Setenv(alpha.EnvFrontLabel, "a cloud host, outside Cyfronet's network")
 	rec := &stopRecorder{TB: t}
 	ends(func() { frontLabel(rec) })
 	if rec.failed != "" {
