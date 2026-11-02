@@ -359,10 +359,12 @@ func (p3 *part3) checkGap(d *depRun) {
 		return t.Sub(d.ds).Round(100 * time.Millisecond).String()
 	}
 	r.t.Logf("GAP %s: %d requests in the gap, all 503 no_ready_target; first 503 %s after the drain start, first served by the successor %s after it; "+
-		"the controller: drain recorded %s, successor ready %s (%s); the fake: predecessor's job ended %s, successor's started %s (%s queue wait after the GPU or slot freed)",
+		"the controller: drain recorded %s, successor ready %s (%s); the fake: predecessor's job ended %s, successor's started %s (%s queue wait after the GPU or slot freed); "+
+		"the engine gate held the successor's engine start from %s to %s (%s after the drain start)",
 		d.name, rep.inGap, since(rep.first503), since(rep.firstSucc),
 		began.UTC().Format(time.RFC3339), in.succReady.UTC().Format(time.RFC3339), in.succReady.Sub(began).Round(time.Second),
-		pj.End.UTC().Format(time.RFC3339Nano), sj.Start.UTC().Format(time.RFC3339Nano), sj.Start.Sub(pj.End).Round(100*time.Millisecond))
+		pj.End.UTC().Format(time.RFC3339Nano), sj.Start.UTC().Format(time.RFC3339Nano), sj.Start.Sub(pj.End).Round(100*time.Millisecond),
+		ts(d.gateHeld), ts(d.gateReleased), since(d.gateHeld))
 }
 
 // wantForProbe is what a probe's reply must carry: an Instance's attribution
