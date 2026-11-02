@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
 // SSHConfig is a Slurm Provider's credentials: the ssh client configuration
@@ -37,10 +39,7 @@ var sshKeywords = map[string]bool{
 	"userknownhostsfile": true, "stricthostkeychecking": true, "identitiesonly": true,
 }
 
-var (
-	hostNameForm = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$`)
-	userNameForm = regexp.MustCompile(`^[a-z_][a-z0-9_.-]*$`)
-)
+var hostNameForm = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$`)
 
 // ParseSSHConfig parses a credentials file in ssh_config form: one keyword and
 // value per line ("Keyword value" or "Keyword=value"), "#" comments, at most
@@ -81,7 +80,7 @@ func ParseSSHConfig(b []byte, home string) (SSHConfig, error) {
 			}
 			c.HostName = val
 		case "user":
-			if !userNameForm.MatchString(val) {
+			if !agentapi.ValidUserName(val) {
 				errs = append(errs, fmt.Sprintf("line %d: User is not a user name", n))
 			}
 			c.User = val

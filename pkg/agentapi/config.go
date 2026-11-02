@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -79,6 +80,14 @@ type AgentConfig struct {
 	// DialHomeDir is the resolved absolute dial-home directory,
 	// <home>/DialHomeDir.
 	DialHomeDir string `json:"dialHomeDir"`
+
+	// HubEndpoint is the origin of the Hugging Face Hub the agent stages the
+	// checkpoint's files from: the controller's HF_ENDPOINT, which the
+	// Provider controller writes here because a job, reached over ssh, does
+	// not inherit the control-plane host's environment (ruling of 1 Nov 2026
+	// on #156). Empty, the agent uses its own HF_ENDPOINT, then the public
+	// Hub. Set, it must pass CheckHubEndpoint.
+	HubEndpoint string `json:"hubEndpoint,omitempty"`
 }
 
 // SSHForward is what the agent's ssh forward needs besides the endpoint and the
@@ -143,16 +152,22 @@ var (
 	// pinForm is 64 lowercase hex characters: a certificate pin, and the
 	// SHA-256 digest of a staged binary (FrpcDigest).
 	pinForm = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	// userForm is a portable user name, as POSIX allows them: letters of
-	// either case, digits, '.', '_' and '-', with no leading '-', and here
-	// also no leading digit and at most 32 characters, the limit of Linux's
-	// useradd. The ssh user is the one who runs the controller
-	// (user.Current), whose name may have capitals, as on the development
-	// VM; every such name is still safe in an ssh argument and a shell word
-	// (decision of `@hpc-burst-code-agent`, confirmed by
-	// `@hpc-burst-science-agent`, 1 Nov 2026; review of PR 132: B2).
+	// userForm is ValidUserName's form.
 	userForm = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]{0,31}$`)
 )
+
+// ValidUserName reports whether name is a portable user name, as POSIX allows
+// them: letters of either case, digits, '.', '_' and '-', with no leading '-',
+// and here also no leading digit and at most 32 characters, the limit of
+// Linux's useradd. Every such name is safe in an ssh argument and a shell
+// word. It is the one rule for every user name the framework puts into ssh:
+// agent.json's dial-home user, who runs the controller (user.Current) and may
+// have capitals, as on the development VM (decision of
+// `@hpc-burst-code-agent`, confirmed by `@hpc-burst-science-agent`, 1 Nov
+// 2026; review of PR 132: B2), and a batch Provider's cluster login in its
+// credentials file (internal/slurm, ParseSSHConfig; the same ruling extended
+// to it for issue #146, 1 Nov 2026).
+func ValidUserName(name string) bool { return userForm.MatchString(name) }
 
 // Validate returns every problem with c, joined.
 func (c AgentConfig) Validate() error {
@@ -179,7 +194,7 @@ func (c AgentConfig) Validate() error {
 		if c.SSH == nil {
 			bad("ssh mode needs ssh.user, ssh.agentPort and ssh.dialHomePort")
 		} else {
-			if !userForm.MatchString(c.SSH.User) {
+			if !ValidUserName(c.SSH.User) {
 				bad("ssh.user %q is not a user name", c.SSH.User)
 			}
 			if c.SSH.AgentPort < 1 || c.SSH.AgentPort > 65535 {
@@ -208,5 +223,36 @@ func (c AgentConfig) Validate() error {
 			bad("%s %q: want an absolute path of letters, digits and ._:=,/- with no ..", name, p)
 		}
 	}
+	if c.HubEndpoint != "" {
+		if err := CheckHubEndpoint(c.HubEndpoint); err != nil {
+			bad("hubEndpoint: %v", err)
+		}
+	}
 	return errors.Join(errs...)
+}
+
+// CheckHubEndpoint refuses a Hub origin the agent and the controller would not
+// use: it must be a scheme and a host (and port) only, https, or http for a
+// loopback host (a local Hub double), as pkg/hubfiles requires.
+func CheckHubEndpoint(origin string) error {
+	u, err := url.Parse(origin)
+	switch {
+	case err != nil:
+		return fmt.Errorf("%q is not a URL: %v", origin, err)
+	case u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || strings.Trim(u.Path, "/") != "":
+		return fmt.Errorf("%q must be a scheme and a host only", origin)
+	case u.Scheme == "https":
+		return nil
+	case u.Scheme == "http" && loopbackHost(u.Hostname()):
+		return nil
+	}
+	return fmt.Errorf("%q must be https (http only for a loopback host)", origin)
+}
+
+func loopbackHost(h string) bool {
+	if h == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
 }

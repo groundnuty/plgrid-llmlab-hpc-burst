@@ -19,7 +19,7 @@ const (
 
 // LogEvent is one line of the engine's log (HB_ENGINE_DOUBLE_LOG). A test
 // decodes the lines with it. Event is "start" (Argv, Env, PID), "admitted"
-// (PromptTokens, MaxTokens, Stream: a chat request has a slot and is about to wait, if
+// (PromptTokens, MaxTokens, Stream: a chat or completions request has a slot and is about to wait, if
 // the modes make it, and generate; written at once, so a test can tell that a
 // request is in flight), "request" (Path, PromptTokens, MaxTokens, Stream,
 // Outcome, Tokens, InjectedNS, Nth, Sampling, Tail: written when the request ends) or empty for the
@@ -59,13 +59,13 @@ type LogEvent struct {
 	Nth int `json:"nth,omitempty"`
 	// Sampling holds the sampling parameters the request carried, each
 	// absent when the request left it out; Tail is the last 120 bytes of its
-	// last user message, which tells the agent's checks apart by their
+	// prompt text (a chat request's last user message), which tells the agent's checks apart by their
 	// closing words.
 	Sampling *RequestSampling `json:"sampling,omitempty"`
 	Tail     string           `json:"tail,omitempty"`
 }
 
-// RequestSampling is the sampling parameters of one chat request as the
+// RequestSampling is the sampling parameters of one chat or completions request as the
 // engine received them. A parameter the request did not set is nil, never
 // zero: a temperature of 0 and a missing temperature differ, and so do a seed
 // of 0 and no seed. A test asserts what reached the engine from these.

@@ -8,31 +8,39 @@ import (
 	"unicode/utf8"
 )
 
-// chatRequest is the part of ChatCompletionRequest the agent sends
-// (vllm/entrypoints/openai/chat_completion/protocol.py).
+// sampling is what a request of either generation endpoint says about how to
+// generate and how to answer: the fields ChatCompletionRequest
+// (vllm/entrypoints/openai/chat_completion/protocol.py) and CompletionRequest
+// (vllm/entrypoints/openai/completion/protocol.py) share, under the same names.
+type sampling struct {
+	Temperature *float64 `json:"temperature"`
+	// The other sampling parameters of a vLLM request, which both
+	// endpoints take under these names. The double does not sample with
+	// them; it records what arrived (RequestSampling), and a Seed makes a
+	// sampled request repeatable (answerFor).
+	TopP              *float64       `json:"top_p"`
+	TopK              *int64         `json:"top_k"`
+	MinP              *float64       `json:"min_p"`
+	RepetitionPenalty *float64       `json:"repetition_penalty"`
+	PresencePenalty   *float64       `json:"presence_penalty"`
+	FrequencyPenalty  *float64       `json:"frequency_penalty"`
+	Seed              *int64         `json:"seed"`
+	Stream            bool           `json:"stream"`
+	StreamOptions     *streamOptions `json:"stream_options"`
+	IgnoreEOS         bool           `json:"ignore_eos"`
+	MinTokens         int            `json:"min_tokens"`
+	ReturnTokenIDs    bool           `json:"return_token_ids"`
+}
+
+// chatRequest is the part of ChatCompletionRequest the agent sends.
 type chatRequest struct {
-	Model               string    `json:"model"`
-	Messages            []message `json:"messages"`
-	MaxTokens           *int      `json:"max_tokens"`
-	MaxCompletionTokens *int      `json:"max_completion_tokens"`
-	Temperature         *float64  `json:"temperature"`
-	// The other sampling parameters of a vLLM chat request. The double does
-	// not sample with them; it records what arrived (RequestSampling), and
-	// a Seed makes a sampled request repeatable (answerFor).
-	TopP              *float64        `json:"top_p"`
-	TopK              *int64          `json:"top_k"`
-	MinP              *float64        `json:"min_p"`
-	RepetitionPenalty *float64        `json:"repetition_penalty"`
-	PresencePenalty   *float64        `json:"presence_penalty"`
-	FrequencyPenalty  *float64        `json:"frequency_penalty"`
-	Seed              *int64          `json:"seed"`
-	Stream            bool            `json:"stream"`
-	StreamOptions     *streamOptions  `json:"stream_options"`
-	IgnoreEOS         bool            `json:"ignore_eos"`
-	MinTokens         int             `json:"min_tokens"`
-	ReturnTokenIDs    bool            `json:"return_token_ids"`
-	Tools             []tool          `json:"tools"`
-	ToolChoice        json.RawMessage `json:"tool_choice"`
+	sampling
+	Model               string          `json:"model"`
+	Messages            []message       `json:"messages"`
+	MaxTokens           *int            `json:"max_tokens"`
+	MaxCompletionTokens *int            `json:"max_completion_tokens"`
+	Tools               []tool          `json:"tools"`
+	ToolChoice          json.RawMessage `json:"tool_choice"`
 }
 
 type streamOptions struct {
@@ -144,16 +152,17 @@ func lastUserText(msgs []message) string {
 }
 
 // maxTokensOf resolves max_tokens as vLLM does: max_completion_tokens when
-// set, else max_tokens (chat_completion/serving.py), else what remains of the
-// context after the prompt. The error message is the double's own wording of
-// a context-length overflow: the v0.32.0 source of vLLM's text was not read.
-func (h *handler) maxTokensOf(req chatRequest, promptLen int) (int, error) {
+// set (a chat request's; nil for a completions request), else max_tokens
+// (chat_completion/serving.py), else what remains of the context after the
+// prompt. The error message is the double's own wording of a context-length
+// overflow: the v0.32.0 source of vLLM's text was not read.
+func (h *handler) maxTokensOf(promptLen int, maxTokens, maxCompletionTokens *int) (int, error) {
 	max := h.cfg.MaxModelLen - promptLen
 	switch {
-	case req.MaxCompletionTokens != nil:
-		max = *req.MaxCompletionTokens
-	case req.MaxTokens != nil:
-		max = *req.MaxTokens
+	case maxCompletionTokens != nil:
+		max = *maxCompletionTokens
+	case maxTokens != nil:
+		max = *maxTokens
 	}
 	if max < 1 || promptLen+max > h.cfg.MaxModelLen {
 		return 0, fmt.Errorf("This model's maximum context length is %d tokens. However, you requested %d output tokens and your prompt contains at least %d input tokens, for a total of %d tokens. Please reduce the length of the input prompt or the number of requested output tokens.",
@@ -162,22 +171,72 @@ func (h *handler) maxTokensOf(req chatRequest, promptLen int) (int, error) {
 	return max, nil
 }
 
+// requestRecord is the "request" LogEvent of a generation request of either
+// endpoint, made as soon as its body is decoded: the Outcome is "refused"
+// until run takes the request, with the sampling parameters the request
+// carried and the tail of its prompt text.
+func requestRecord(r *http.Request, sp sampling, prompt string) *LogEvent {
+	return &LogEvent{Event: "request", Path: r.URL.Path, Stream: sp.Stream, Outcome: "refused",
+		Sampling: samplingOf(sp), Tail: tailOf(prompt)}
+}
+
+// recordEnd writes rec to the engine's log when a request ends, if its body
+// decoded. Every request that decoded is recorded, a refused one too
+// (errors-only, a 4xx), so a test counts the attempts a check made, not only
+// the answers it got.
+func (h *handler) recordEnd(decoded bool, rec *LogEvent) {
+	if decoded && h.e.record != nil {
+		h.e.record(*rec)
+	}
+}
+
+// engineFails answers 500 and says so when the errors-only mode is on: both
+// generation endpoints fail the same way.
+func (h *handler) engineFails(w http.ResponseWriter) bool {
+	if h.cfg.ErrorsOnly {
+		writeError(w, http.StatusInternalServerError, "InternalServerError", "the engine failed")
+	}
+	return h.cfg.ErrorsOnly
+}
+
+// modelExists answers 404 and returns false for a request that names a model
+// other than the served one; an absent name means the served model.
+func (h *handler) modelExists(w http.ResponseWriter, model string) bool {
+	if model != "" && model != h.cfg.ServedName {
+		writeError(w, http.StatusNotFound, "NotFoundError", fmt.Sprintf("The model `%s` does not exist.", model))
+		return false
+	}
+	return true
+}
+
+// limitFor resolves a tokenized request's output limit and checks min_tokens
+// against it, answering 400 and returning false on a bad request. Both
+// generation endpoints share it. The limit it returns is the resolved one
+// whenever it resolved, a min_tokens refusal included, so the record of a
+// refused request carries it; it is 0 when the limit did not resolve.
+func (h *handler) limitFor(w http.ResponseWriter, sp sampling, promptLen int, maxTokens, maxCompletionTokens *int) (int, bool) {
+	max, err := h.maxTokensOf(promptLen, maxTokens, maxCompletionTokens)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "BadRequestError", err.Error())
+		return 0, false
+	}
+	if sp.MinTokens < 0 || sp.MinTokens > max {
+		// SamplingParams._verify_args, vllm/sampling_params.py:694-701.
+		writeError(w, http.StatusBadRequest, "BadRequestError", fmt.Sprintf("min_tokens must be less than or equal to max_tokens=%d, got %d.", max, sp.MinTokens))
+		return max, false
+	}
+	return max, true
+}
+
 // chat is POST /v1/chat/completions.
 func (h *handler) chat(w http.ResponseWriter, r *http.Request) {
 	var req chatRequest
 	decodeErr := decodeBody(r, &req)
-	// Every request that decoded is recorded when it ends, a refused one too
-	// (errors-only, a 4xx), so a test counts the attempts a check made, not
-	// only the answers it got.
-	rec := LogEvent{Event: "request", Path: r.URL.Path, Stream: req.Stream, Outcome: "refused",
-		Sampling: samplingOf(req), Tail: tailOf(lastUserText(req.Messages))}
-	defer func() {
-		if decodeErr == nil && h.e.record != nil {
-			h.e.record(rec)
-		}
-	}()
-	if h.cfg.ErrorsOnly {
-		writeError(w, http.StatusInternalServerError, "InternalServerError", "the engine failed")
+	rec := requestRecord(r, req.sampling, lastUserText(req.Messages))
+	defer h.recordEnd(decodeErr == nil, rec)
+	// The errors-only mode answers 500 to any body, after the decode, so
+	// the record of a refused request carries what it asked for.
+	if h.engineFails(w) {
 		return
 	}
 	if decodeErr != nil {
@@ -188,25 +247,34 @@ func (h *handler) chat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "BadRequestError", "messages must not be empty")
 		return
 	}
-	if req.Model != "" && req.Model != h.cfg.ServedName {
-		writeError(w, http.StatusNotFound, "NotFoundError", fmt.Sprintf("The model `%s` does not exist.", req.Model))
+	if !h.modelExists(w, req.Model) {
 		return
 	}
 	_, promptIDs := tokenize(renderChat(req.Messages, true, h.cfg.TemplateOverhead))
 	rec.PromptTokens = len(promptIDs)
-	max, err := h.maxTokensOf(req, len(promptIDs))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "BadRequestError", err.Error())
-		return
-	}
+	max, ok := h.limitFor(w, req.sampling, len(promptIDs), req.MaxTokens, req.MaxCompletionTokens)
 	rec.MaxTokens = max
-	if req.MinTokens < 0 || req.MinTokens > max {
-		// SamplingParams._verify_args, vllm/sampling_params.py:694-701.
-		writeError(w, http.StatusBadRequest, "BadRequestError", fmt.Sprintf("min_tokens must be less than or equal to max_tokens=%d, got %d.", max, req.MinTokens))
+	if !ok {
 		return
 	}
-	ans := h.answerFor(req, promptIDs, max)
+	ans := h.answerFor(req.sampling, h.toolCallFor(req), promptIDs, max)
+	h.run(r, rec, promptIDs, max, ans, req.Stream, func(s *slot, u usage) (int, bool) {
+		if req.Stream {
+			return h.stream(w, r, req, ans, s, u)
+		}
+		return h.single(w, r, req, ans, s, u)
+	})
+}
 
+// run takes one tokenized, validated request through the engine, whatever its
+// endpoint: it is admitted to a sequence slot, waits for its first token
+// (slow-first, never-settle), and then respond generates the tokens and writes
+// the answer, returning how many tokens it sent and whether the answer was
+// completed. run fills in rec, the request's record, which the endpoint writes
+// to the engine's log when the request ends (recordEnd): from here on the
+// Outcome is "cancelled" unless the answer completes. run releases the slot
+// with the finish reason of a completed answer, "abort" otherwise.
+func (h *handler) run(r *http.Request, rec *LogEvent, promptIDs []int32, limit int, ans answer, stream bool, respond func(s *slot, u usage) (int, bool)) {
 	rec.Outcome = "cancelled"
 	finish := "abort"
 
@@ -217,22 +285,16 @@ func (h *handler) chat(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { s.release(finish) }()
 	if h.e.record != nil {
-		h.e.record(LogEvent{Event: "admitted", PromptTokens: len(promptIDs), MaxTokens: max, Stream: req.Stream})
+		h.e.record(LogEvent{Event: "admitted", PromptTokens: len(promptIDs), MaxTokens: limit, Stream: stream})
 	}
-	wait, nth := h.e.beforeFirstToken(shapeKey{len(promptIDs), max}, ans.tokens())
+	wait, nth := h.e.beforeFirstToken(shapeKey{len(promptIDs), limit}, ans.tokens())
 	rec.InjectedNS, rec.Nth = wait.Nanoseconds(), nth
 	if !sleep(ctx, wait) {
 		return
 	}
 
 	u := usage{len(promptIDs), ans.tokens(), len(promptIDs) + ans.tokens()}
-	var sent int
-	var completed bool
-	if req.Stream {
-		sent, completed = h.stream(w, r, req, ans, s, u)
-	} else {
-		sent, completed = h.single(w, r, req, ans, s, u)
-	}
+	sent, completed := respond(s, u)
 	rec.Tokens = sent
 	if completed {
 		rec.Outcome, finish = "completed", ans.finish
@@ -255,24 +317,24 @@ func (c Config) reasoningLen(max int) int {
 // vocabulary: its first tokens are the reasoning, when the model reasons, so
 // a greedy request gives the same token ids with or without the reasoning
 // modes up to where the answers part. A reply that spends all max tokens
-// reasoning has no answer and finishes with "length".
-func (h *handler) answerFor(req chatRequest, promptIDs []int32, limit int) answer {
+// reasoning has no answer and finishes with "length". tc is the tool call the
+// model makes, nil for none (a completions request has none).
+func (h *handler) answerFor(sp sampling, tc *toolCall, promptIDs []int32, limit int) answer {
 	r := h.cfg.reasoningLen(limit)
-	tc := h.toolCallFor(req)
 	if r >= limit {
 		tc = nil
 	}
-	greedy := req.Temperature == nil || *req.Temperature == 0
-	p := genParams{promptIDs: promptIDs, maxTokens: limit - r, minTokens: max(0, req.MinTokens-r), ignoreEOS: req.IgnoreEOS, greedy: greedy}
+	greedy := sp.Temperature == nil || *sp.Temperature == 0
+	p := genParams{promptIDs: promptIDs, maxTokens: limit - r, minTokens: max(0, sp.MinTokens-r), ignoreEOS: sp.IgnoreEOS, greedy: greedy}
 	if !greedy {
 		// A sampled request with a seed draws the same samples every time it
 		// is sent, as vLLM's seeded sampling does when its batch is invariant
 		// (the double stands for that case, not for vLLM's known limit that a
 		// seed does not guarantee reproducibility online). One without a
 		// seed draws at random.
-		p.seeded, p.seedValue = req.Seed != nil, 0
-		if req.Seed != nil {
-			p.seedValue = *req.Seed
+		p.seeded, p.seedValue = sp.Seed != nil, 0
+		if sp.Seed != nil {
+			p.seedValue = *sp.Seed
 		}
 	}
 
@@ -291,7 +353,7 @@ func (h *handler) answerFor(req chatRequest, promptIDs []int32, limit int) answe
 	}
 
 	if p.repeatable() {
-		p.repeat = h.e.repeatOf(repeatKey{promptSeed(promptIDs), limit, req.MinTokens, req.IgnoreEOS, p.seeded, p.seedValue})
+		p.repeat = h.e.repeatOf(repeatKey{promptSeed(promptIDs), limit, sp.MinTokens, sp.IgnoreEOS, p.seeded, p.seedValue})
 	}
 	n, finish := r, "length"
 	if limit > r {
@@ -303,15 +365,16 @@ func (h *handler) answerFor(req chatRequest, promptIDs []int32, limit int) answe
 }
 
 // samplingOf is the sampling parameters a request carried, as sent.
-func samplingOf(req chatRequest) *RequestSampling {
+func samplingOf(sp sampling) *RequestSampling {
 	return &RequestSampling{
-		Temperature: req.Temperature, TopP: req.TopP, TopK: req.TopK, MinP: req.MinP,
-		RepetitionPenalty: req.RepetitionPenalty, PresencePenalty: req.PresencePenalty, FrequencyPenalty: req.FrequencyPenalty,
-		Seed: req.Seed,
+		Temperature: sp.Temperature, TopP: sp.TopP, TopK: sp.TopK, MinP: sp.MinP,
+		RepetitionPenalty: sp.RepetitionPenalty, PresencePenalty: sp.PresencePenalty, FrequencyPenalty: sp.FrequencyPenalty,
+		Seed: sp.Seed,
 	}
 }
 
-// tailBytes is how much of a request's last user message the log keeps.
+// tailBytes is how much of a request's prompt text (a chat request's last
+// user message, a completions request's prompt) the log keeps.
 const tailBytes = 120
 
 // tailOf is the last tailBytes bytes of a prompt, from a character boundary:
@@ -377,4 +440,15 @@ func (h *handler) generateTokens(r *http.Request, s *slot, n int, emit func(i in
 		}
 	}
 	return true
+}
+
+// stalls is the stall mode: after the first token (g is 0) of a stream the
+// engine hangs until the client goes away, and stalls returns true. Both
+// generation endpoints' streams call it after sending a token.
+func (h *handler) stalls(r *http.Request, g int) bool {
+	if g == 0 && h.cfg.Stall {
+		<-r.Context().Done()
+		return true
+	}
+	return false
 }

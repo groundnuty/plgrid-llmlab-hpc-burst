@@ -28,6 +28,13 @@
 // lifecycle controller serves /metrics at Host.ControllerMetricsAddr(), on
 // loopback at the port base + 12 (HBEP-8, Metrics).
 //
+// Environment: HF_ENDPOINT, when set, is the origin of the Hugging Face Hub
+// that the lifecycle controller lists checkpoints from; it is written into
+// each Allocation's agent.json (hubEndpoint), from which hb-agent downloads
+// them, since a job does not inherit this host's environment. Unset, it is
+// https://huggingface.co. A value agentapi.CheckHubEndpoint refuses stops the
+// controller at start.
+//
 // It exits 0 after SIGTERM or SIGINT once the manager has stopped, 1 on a
 // failure (a Provider-manager scheme without apps/v1, and front settings that
 // agent.json would refuse, are refused before anything starts), and 2 on a
@@ -47,6 +54,7 @@ import (
 	"syscall"
 
 	"github.com/go-logr/logr/funcr"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -160,14 +168,18 @@ func run(ctx context.Context, f flags, d deps) error {
 	if err != nil {
 		return fmt.Errorf("kubeconfig: %w", err)
 	}
-	mgr, backend, err := lifecycle.NewManager(lifecycle.Options{
-		Config: cfg, CredentialsDir: f.host.CredentialsDir(), AgentBuildsDir: f.host.AgentBuildsDir(),
-		FrontConfigured: f.frontMode != "", HealthAddr: f.healthAddr, MetricsAddr: f.host.ControllerMetricsAddr(), Registry: d.registry, LeaderElection: f.leaderElect, Workers: f.workers,
-	})
+	opts := managerOptions(f, cfg, os.Getenv)
+	opts.Registry = d.registry
+	if opts.HubEndpoint != "" {
+		if err := agentapi.CheckHubEndpoint(opts.HubEndpoint); err != nil {
+			return fmt.Errorf("%s: %w", hubEndpointEnv, err)
+		}
+	}
+	mgr, backend, err := lifecycle.NewManager(opts)
 	if err != nil {
 		return err
 	}
-	w := wiring{cfg: cfg, host: f.host, scheme: scheme, front: front, newPlatform: d.newPlatform, log: ctrl.Log.WithName("hpcburst-controller").WithValues("portBase", f.host.PortBase)}
+	w := wiring{cfg: cfg, host: f.host, scheme: scheme, front: front, hubEndpoint: opts.HubEndpoint, newPlatform: d.newPlatform, log: ctrl.Log.WithName("hpcburst-controller").WithValues("portBase", f.host.PortBase)}
 	if err := mount(mgr, w, backend); err != nil {
 		return err
 	}
@@ -200,5 +212,18 @@ func main() {
 	if err := run(ctx, f, defaultDeps()); err != nil {
 		fmt.Fprintln(os.Stderr, "hpcburst-controller:", err)
 		os.Exit(1)
+	}
+}
+
+// hubEndpointEnv names the Hub's origin, as for hb-agent.
+const hubEndpointEnv = "HF_ENDPOINT"
+
+// managerOptions are the lifecycle manager's options from the flags and the
+// environment; the caller adds the metrics registry.
+func managerOptions(f flags, cfg *rest.Config, getenv func(string) string) lifecycle.Options {
+	return lifecycle.Options{
+		Config: cfg, CredentialsDir: f.host.CredentialsDir(), AgentBuildsDir: f.host.AgentBuildsDir(),
+		FrontConfigured: f.frontMode != "", HealthAddr: f.healthAddr, MetricsAddr: f.host.ControllerMetricsAddr(),
+		LeaderElection: f.leaderElect, Workers: f.workers, HubEndpoint: getenv(hubEndpointEnv),
 	}
 }

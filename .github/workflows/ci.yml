@@ -398,3 +398,72 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
+
+  # The one-host alpha rehearsal (issue #146): the whole stack on this runner, the real hpcburst
+  # up (k3s, the controller, frps and the front) over a fake Slurm cluster in run mode, reached
+  # over a real sshd, with the real hb-agent in the fake job. hack/rehearsal.sh builds the four
+  # binaries and runs it. It is not one of the required checks: a failure here is a finding to
+  # read, not a block on merging.
+  rehearsal:
+    name: rehearsal
+    runs-on: ubuntu-24.04
+    # Compiling the four binaries and the test from scratch, then a run whose -test.timeout is 30
+    # minutes (hack/rehearsal.sh; the target is under 15). The job must outlive that, so that the
+    # test's own waits give up and its clean-up runs before the job is cancelled.
+    timeout-minutes: 45
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # The rehearsal's hpcburst up starts k3s 1.36.5 only.
+      - name: Fetch the pinned k3s binary
+        run: |
+          echo "HPCBURST_BIN_DIR=$RUNNER_TEMP/k3s-bin" >> "$GITHUB_ENV"
+          bash hack/fetch-k3s.sh "$RUNNER_TEMP/k3s-bin" 1.36.5
+
+      - name: Fetch the pinned frp binaries
+        run: |
+          bash hack/fetch-frp.sh "$RUNNER_TEMP/frp"
+          echo "HPCBURST_FRP_DIR=$RUNNER_TEMP/frp" >> "$GITHUB_ENV"
+
+      # The fake login node and the ssh dial-home run OpenSSH's sshd as this user, in inetd mode,
+      # with no service and no root, as for the go job's tunnel tests.
+      - name: Provide OpenSSH's sshd for the login node
+        run: |
+          if ! test -x /usr/sbin/sshd; then
+            printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
+            sudo chmod 755 /usr/sbin/policy-rc.d
+            sudo apt-get update -q
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server
+            sudo rm -f /usr/sbin/policy-rc.d
+          fi
+          sudo systemctl disable --now ssh.socket ssh.service 2> /dev/null || true
+          /usr/sbin/sshd -V 2>&1 | head -1
+          echo "HPCBURST_SSHD=/usr/sbin/sshd" >> "$GITHUB_ENV"
+
+      # hack/rehearsal.sh runs the test in a transient systemd user scope, which it stops however
+      # the run ends, so nothing the test started outlives it. A hosted runner's user has no
+      # systemd user manager until lingering starts one.
+      - name: Start a systemd user manager for this user
+        run: |
+          if ! dpkg -s dbus-user-session > /dev/null 2>&1; then
+            sudo apt-get update -q
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q dbus-user-session
+          fi
+          sudo loginctl enable-linger "$(id -un)"
+          rt="/run/user/$(id -u)"
+          timeout 60 sh -c "until test -S '$rt/systemd/private' && test -S '$rt/bus'; do sleep 1; done"
+          echo "XDG_RUNTIME_DIR=$rt" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=$rt/bus" >> "$GITHUB_ENV"
+          XDG_RUNTIME_DIR="$rt" DBUS_SESSION_BUS_ADDRESS="unix:path=$rt/bus" systemd-run --user --scope -q true
+
+      - name: hack/rehearsal.sh
+        run: REHEARSAL_OUT="$RUNNER_TEMP/rehearsal" bash hack/rehearsal.sh

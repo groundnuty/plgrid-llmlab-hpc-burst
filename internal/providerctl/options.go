@@ -111,6 +111,12 @@ type Options struct {
 	// Front is the front and agent-endpoint settings; nil means no front is
 	// configured, and nothing is submitted.
 	Front *FrontSettings
+	// HubEndpoint is the Hugging Face Hub origin written into each
+	// Allocation's agent.json, the controller's HF_ENDPOINT; "" writes none,
+	// and the agent then uses its own HF_ENDPOINT or the public Hub. A job
+	// does not inherit the control-plane host's environment (ruling of 1 Nov
+	// 2026 on #156).
+	HubEndpoint string
 	// PollInterval and BusyInterval are the reconcile intervals: 30 s, and
 	// 5 s while an attempt is unresolved, a job is held, or the Allocation is
 	// being deleted (HBEP-4, Transport, Poll rate).
