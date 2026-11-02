@@ -15,7 +15,7 @@ alias hbk='KUBECONFIG="$STATE/kubeconfig" "$BIN/k3s-1.36.5/k3s" kubectl'
 ## Where to look
 
 - **The host:** `hpcburst status` (next section). It answers for k3s, the controllers, the front, frps and the agent builds, never for a deployment.
-- **A deployment:** its conditions, which are the level truth (HBEP-11). `hbk describe` prints them with the object's recent events:
+- **A deployment:** its conditions, which are the level truth (HBEP-11). Describing an object prints them with its recent events:
 
   ```
   hbk get modeldeployments
@@ -70,7 +70,7 @@ The first line is the verdict: `healthy`, `unhealthy` or `stopped`. Below it, on
 | `supervisor pid <n>: running=` | the process that keeps the controllers, the front and frps running and restarts any that exits |
 | `supervised controller:`, `supervised front:`, `supervised frps:` | one line per supervised process: whether it runs, its PID, its state (`starting`, `running`, `backoff` after an exit, `stopped`), its restart count, its `/healthz`, the controller's readiness, and its last exit with code and time |
 | `agent builds (<dir>):` | one line per CPU architecture that an applied PlatformProfile's partitions have, with the agent and frpc builds (below) |
-| `front:` | the recorded dial-home mode and address (`ssh <front-host>`), `absent` when `up` was given no `--front-config`, or `not recorded` |
+| `front:` | the recorded dial-home mode and address (`ssh <front-host>`), `absent` when the host was started without `hpcburst up --front-config`, or `not recorded` |
 
 `controllers: none (no controller binary was found when the host started)` replaces the supervisor's lines when `up` found no `hpcburst-controller` beside itself. That host runs k3s only.
 
@@ -112,7 +112,7 @@ hack/build-agents.sh "$STATE/agent-builds"
 hack/fetch-frp.sh --agent-builds "$STATE/agent-builds"
 ```
 
-The line reads `not checked` with the cause when the API server was not asked (`--no-api`, or an unhealthy host). A Provider whose partition has no build also shows on the deployment, as `ProviderUnavailable`.
+The line reads `not checked` with the cause when the API server was not asked (`hpcburst status --no-api`, or an unhealthy host). A Provider whose partition has no build also shows on the deployment, as `ProviderUnavailable`.
 
 ## Why a ModelDeployment is degraded
 
@@ -294,7 +294,7 @@ So a kept job can hold its GPU for hours after the scale-down. To end it now, de
 hbk delete allocation <allocation>
 ```
 
-Scale back up with `--replicas=1`. A new Instance goes through the whole start again.
+Scale back up with `hbk scale modeldeployment <name> --replicas=1`. A new Instance goes through the whole start again.
 
 ### A stuck COMPLETING job
 
@@ -339,7 +339,7 @@ Check, in this order:
 
 1. `hpcburst status`: the `front:` line shows the mode and address the record holds, `supervised frps:` must run and hold its ports, and the controller must be `ready`, since its process admits frpc's logins. While it is down, a reconnecting frpc is refused and retries.
 2. `TunnelConnected` with `ProxyListUnreadable` means the controller could not read frps's proxy list, which it reads from frps's web port: check the `supervised frps:` line and `logs/frps.log`.
-3. In `ssh` mode, the Provider's `DialHomeKeyMissing` (`hbk describe provider <provider>`): the key files must be in `~/.hpcburst/dial-home` on the cluster. The restricted key's lines name the launcher's port block, so a host started with another `--port-base` needs new keys ([quickstart, Alpha's limits](quickstart.md#alphas-limits)).
+3. In `ssh` mode, the Provider's `DialHomeKeyMissing` (`hbk describe provider <provider>`): the key files must be in `~/.hpcburst/dial-home` on the cluster. The restricted key's lines name the launcher's port block, so a host started with another `hpcburst up --port-base` needs new keys ([quickstart, Alpha's limits](quickstart.md#alphas-limits)).
 4. In `direct` mode, `dialHomeListen` in the front's configuration must be reachable from the compute nodes, not only from your machine.
 
 ### A controller restart
@@ -358,7 +358,7 @@ A `restarts` count that keeps rising is a crash loop: `logs/controller.log` in t
 
 `hpcburst down` stops the supervisor, which stops the controllers, the front and frps, then k3s, and confirms that nothing of theirs still listens. It removes the host's record and kubeconfigs, and keeps the data directory, the record of the k3s release that wrote the store, and the agent endpoint's certificate, whose pin the running agents hold. It does not call the clusters: jobs keep running to their hard ends. While the host is down no front serves requests, and the tunnels drop until frps returns.
 
-To run a new build of the framework, stop the host, rebuild, and start it with **the same flags as before**, since `down` forgot them. Without `--front-mode` and `--front-addr` every deployment shows `FrontNotConfigured`; with another `--port-base` the agents' restricted keys and recorded ports no longer match. `--manifests config/crd` applies the CRDs again with server-side apply, which is safe to repeat.
+To run a new build of the framework, stop the host, rebuild, and start it with **the same flags as before**, since `down` forgot them. Without `hpcburst up --front-mode` and `--front-addr` every deployment shows `FrontNotConfigured`; with another `--port-base` the agents' restricted keys and recorded ports no longer match. `--manifests config/crd` applies the CRDs again with server-side apply, which is safe to repeat.
 
 ```
 bin/hpcburst down --state-dir "$STATE"
@@ -383,7 +383,7 @@ bin/hpcburst down --state-dir "$STATE"
 bin/hpcburst restore --state-dir "$STATE" --backup <backup>
 ```
 
-`down` and `upgrade` wait `--grace` (40 s by default) after SIGTERM before SIGKILL, and refuse a grace too short for the front to flush its usage records.
+`hpcburst down --grace` and `hpcburst upgrade --grace` set how long each waits after SIGTERM before SIGKILL, 40 s by default; both refuse a grace too short for the front to flush its usage records.
 
 ### Where the accounting records are
 
