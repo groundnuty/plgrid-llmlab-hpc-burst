@@ -60,6 +60,9 @@ type harness struct {
 	clientKey string
 	snap      inventory.Snapshot
 	uid       int
+	// start is the harness clock's time at setup: t0 on the fake clock, the
+	// wall clock's reading on a real one. The default lease end counts from it.
+	start time.Time
 	// The client server and its base context, for a test that stops it.
 	srv        *http.Server
 	base       context.Context
@@ -89,7 +92,7 @@ func newHarnessOn(t *testing.T, real clock.Clock, edit func(*Config)) *harness {
 		fake = clock.NewFake(t0)
 		clk = fake
 	}
-	h := &harness{t: t, clk: fake, dir: dir, host: agentapi.Host{StateDir: filepath.Join(dir, "state"), PortBase: 29220},
+	h := &harness{t: t, clk: fake, start: clk.Now(), dir: dir, host: agentapi.Host{StateDir: filepath.Join(dir, "state"), PortBase: 29220},
 		trans: NewStaticTransports(), rec: &MemoryRecorder{}, logs: &syncBuffer{}, clientKey: "client-key-for-tests-0001"}
 	keysPath := filepath.Join(dir, "client-keys.json")
 	writeMode600(t, keysPath, fmt.Sprintf(`{"keys":[{"id":"tester","key":%q}]}`, h.clientKey))
@@ -225,7 +228,7 @@ func (h *harness) md(name string) *v1alpha1.ModelDeployment {
 // instanceOpts are an Instance's optional settings.
 type instanceOpts struct {
 	phase      v1alpha1.InstancePhase // default ready
-	leaseEnd   time.Time              // default t0 + 48 h
+	leaseEnd   time.Time              // default 48 h after the harness clock's start: t0 + 48 h on the fake clock
 	noLeaseEnd bool
 	maxNumSeqs int32 // default 256
 	deployID   string
@@ -255,7 +258,7 @@ func (h *harness) instance(mdName, name, providerName string, e *enginetest.Engi
 	if !o.noLeaseEnd {
 		le := o.leaseEnd
 		if le.IsZero() {
-			le = t0.Add(48 * time.Hour)
+			le = h.start.Add(48 * time.Hour)
 		}
 		inst.Status.LeaseEnd = &metav1.Time{Time: le}
 	}
