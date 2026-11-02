@@ -45,16 +45,17 @@ func TestConfigRefusesUnknownAndMissing(t *testing.T) {
 	dir := t.TempDir()
 	unknown := filepath.Join(dir, "u.json")
 	writeMode600(t, unknown, `{"dialHomeListen":"127.0.0.1:9000","clientKeysFile":"/k","usageDir":"/u","idleTimout":"1m"}`)
-	if _, err := LoadConfig(unknown); err == nil || !strings.Contains(err.Error(), "idleTimout") {
+	_, err := LoadConfig(unknown)
+	if err == nil || !names(err, unknown, "idleTimout") {
 		t.Errorf("a misspelt setting must be refused, got %v", err)
 	}
 	missing := filepath.Join(dir, "m.json")
 	writeMode600(t, missing, `{}`)
-	_, err := LoadConfig(missing)
+	_, err = LoadConfig(missing)
 	// dialHomeListen is not among them: its default depends on the mode
 	// (DialHomeAddr, tested in dialhome_test.go).
 	for _, want := range []string{"clientKeysFile", "usageDir"} {
-		if err == nil || !strings.Contains(err.Error(), want) {
+		if err == nil || !names(err, missing, want) {
 			t.Errorf("missing %s not named in %v", want, err)
 		}
 	}
@@ -82,7 +83,7 @@ func TestClientKeysFile(t *testing.T) {
 	if err := os.Chmod(open, 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ReadClientKeys(open); err == nil || !strings.Contains(err.Error(), "0600") {
+	if _, err := ReadClientKeys(open); err == nil || !names(err, open, "0600") {
 		t.Errorf("a group-readable keys file must be refused, got %v", err)
 	}
 	link := filepath.Join(dir, "link.json")
@@ -118,13 +119,23 @@ func TestClientKeysFile(t *testing.T) {
 	}
 }
 
-// secretsShownBy returns the secrets that err's text shows once the path of the file it names is
-// taken out, as the path is written and as Go quotes it. The path comes from TMPDIR and the
-// test's directory names, which can hold any string, a secret's text included, so it is not
-// evidence that an error shows a key (issue #209).
-func secretsShownBy(err error, path string, secrets ...string) []string {
+// withoutPath is err's text with the path of the file it names taken out, as the path is written
+// and as Go quotes it (%q escapes a quote, a backslash and a newline). The path comes from TMPDIR
+// and the test's directory names, which can hold any string: a key's text, a field's name, a mode.
+// It is not evidence about what the error says (issue #209).
+func withoutPath(err error, path string) string {
 	text := strings.ReplaceAll(err.Error(), strconv.Quote(path), "")
-	text = strings.ReplaceAll(text, path, "")
+	return strings.ReplaceAll(text, path, "")
+}
+
+// names says whether err says want (a field, a setting, a mode) apart from the file's path.
+func names(err error, path, want string) bool {
+	return err != nil && strings.Contains(withoutPath(err, path), want)
+}
+
+// secretsShownBy returns the secrets that err's text shows apart from the file's path.
+func secretsShownBy(err error, path string, secrets ...string) []string {
+	text := withoutPath(err, path)
 	var shown []string
 	for _, s := range secrets {
 		if strings.Contains(text, s) {
@@ -135,26 +146,52 @@ func secretsShownBy(err error, path string, secrets ...string) []string {
 }
 
 // The control for the check above: a path with a secret's text in it is not a leak, and a key in
-// the message is, in either form the path can take.
+// the message is, in either form the path can take. The escaped path has a quote, a backslash and
+// a newline, which %q writes differently from the path itself, so only removing the quoted form
+// takes it out.
 func TestSecretsShownByIgnoresThePathAndSeesAKey(t *testing.T) {
-	path := "/tmp/k195/k1/dup-key.json"
+	plain := "/tmp/k195/k1/dup-key.json"
+	escaped := "/tmp/k195/k1/a\"b\\c\nd.json"
 	for _, tc := range []struct {
 		name string
+		path string
 		err  string
 		want []string
 	}{
-		{"the path alone", "client keys file " + path + " holds no key", nil},
-		{"the path quoted", "open " + strconv.Quote(path) + ": no such file", nil},
-		{"a key beside the path", "client keys file " + path + `: entry "a" repeats the key k1`, []string{"k1"}},
-		{"another key beside the path", "client keys file " + path + `: the key is k2`, []string{"k2"}},
-		{"a key and no path", `entry "a" repeats the key k1`, []string{"k1"}},
+		{"the path alone", plain, "client keys file " + plain + " holds no key", nil},
+		{"the path quoted", plain, "open " + strconv.Quote(plain) + ": no such file", nil},
+		{"a key beside the path", plain, "client keys file " + plain + `: entry "a" repeats the key k1`, []string{"k1"}},
+		{"another key beside the path", plain, "client keys file " + plain + `: the key is k2`, []string{"k2"}},
+		{"a key and no path", plain, `entry "a" repeats the key k1`, []string{"k1"}},
+		{"an escaped path quoted", escaped, "open " + strconv.Quote(escaped) + ": no such file", nil},
+		{"an escaped path quoted and another key", escaped, "open " + strconv.Quote(escaped) + ": entry repeats the key k2", []string{"k2"}},
+		{"an escaped path quoted and the key its path holds", escaped, "open " + strconv.Quote(escaped) + ": entry repeats the key k1", []string{"k1"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := secretsShownBy(errors.New(tc.err), path, "k1", "k2")
+			got := secretsShownBy(errors.New(tc.err), tc.path, "k1", "k2")
 			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
 				t.Errorf("secretsShownBy(%q) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+// The same for the diagnostics the other tests look for (issue #209, review of PR 218): a field's
+// name, a setting or a mode in the path is not the error naming it.
+func TestNamesIgnoresThePath(t *testing.T) {
+	path := "/tmp/idleTimout-0600/clientKeysFile/usageDir/x.json"
+	silent := errors.New("front configuration " + path + ": unreadable")
+	said := errors.New("front configuration " + path + `: json: unknown field "idleTimout"`)
+	for _, w := range []string{"idleTimout", "0600", "clientKeysFile", "usageDir"} {
+		if names(silent, path, w) {
+			t.Errorf("an error that says nothing but the path is taken to name %q", w)
+		}
+	}
+	if !names(said, path, "idleTimout") {
+		t.Error("an error that names the unknown field is not taken to name it")
+	}
+	if names(said, path, "0600") || names(nil, path, "idleTimout") {
+		t.Error("names accepts a diagnostic the error lacks, or a nil error")
 	}
 }
 
@@ -210,7 +247,7 @@ func TestConfigTunnelSettings(t *testing.T) {
 	writeMode600(t, bad, `{"clientKeysFile":"/k","usageDir":"/u","tunnelSetupTimeout":"-1s","probeFailures":-1,"frpsMuxAddr":"nowhere"}`)
 	_, err = LoadConfig(bad)
 	for _, want := range []string{"tunnelSetupTimeout", "probeFailures", "frpsMuxAddr"} {
-		if err == nil || !strings.Contains(err.Error(), want) {
+		if err == nil || !names(err, bad, want) {
 			t.Errorf("a bad %s not named in %v", want, err)
 		}
 	}
