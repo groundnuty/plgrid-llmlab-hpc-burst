@@ -159,6 +159,18 @@ func TestParseEventTableIsStrict(t *testing.T) {
 			b := strings.Index(s, "- bullet")
 			return s[:a] + "\n" + s[b:]
 		}, "no row"},
+		{"table that goes on after a blank line", func(s string) string {
+			return strings.Replace(s, "\n\n- bullet", "\n\n| `failing` | `NeverEmitted` | Instance | x |\n\n- bullet", 1)
+		}, "goes on after a blank line"},
+		{"row of the table far below it", func(s string) string {
+			return s + "\nSome text.\n\n| `failing` | `NeverEmitted` | Instance | x |\n"
+		}, "lies outside it"},
+		{"row of the table above it", func(s string) string {
+			return "| `failing` | `NeverEmitted` | Instance | x |\n\n" + s
+		}, "lies outside it"},
+		{"observers table that goes on after a blank line", func(s string) string {
+			return s + "\n| Three | c | `failing`, `HeartbeatMissed`, regarding the Provider | z |\n"
+		}, "goes on after a blank line"},
 		{"short row", func(s string) string { return strings.Replace(s, rowReady, "| `ready` | `Ready` | Instance |", 1) }, "3 cells"},
 		{"unknown type", func(s string) string { return strings.Replace(s, "| `ready` |", "| `readyish` |", 1) }, "the type"},
 		{"type without backticks", func(s string) string { return strings.Replace(s, "| `ready` |", "| ready |", 1) }, "the type"},

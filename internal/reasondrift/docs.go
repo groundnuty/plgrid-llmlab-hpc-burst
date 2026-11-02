@@ -106,7 +106,10 @@ var (
 	reasonToken   = regexp.MustCompile("^`([A-Z][A-Za-z0-9]*)`$")
 	kindWord      = regexp.MustCompile(`\b(` + strings.Join(Kinds, "|") + `)\b`)
 	separatorCell = regexp.MustCompile(`^:?-{3,}:?$`)
-	rankingName   = regexp.MustCompile("^`([A-Z][A-Za-z0-9]*)`")
+	// reasonsRow is the shape of a row of the reasons table: its first cell is
+	// one of HBEP-8's six types in backticks.
+	reasonsRow  = regexp.MustCompile("^\\|\\s*`(" + strings.Join(Actions, "|") + ")`\\s*\\|")
+	rankingName = regexp.MustCompile("^`([A-Z][A-Za-z0-9]*)`")
 )
 
 // wantReasonsHeader is the header HBEP-8's reasons table must have.
@@ -122,9 +125,16 @@ var wantReasonsHeader = []string{"Type", "Reasons", "Regarding", "Emitter"}
 // Observers table's "Event when stale" column, where HBEP-8 states them.
 func ParseEventTable(md []byte) ([]TableEntry, error) {
 	lines := strings.Split(string(md), "\n")
-	header, rows, err := tableAfter(lines, reasonsMarker)
+	header, rows, start, end, err := tableAfter(lines, reasonsMarker)
 	if err != nil {
 		return nil, fmt.Errorf("the reasons table: %w", err)
+	}
+	// No other line of the document is a row of this table: a row cut off from
+	// it, or a second copy, would be left out of the parse.
+	for i, l := range lines {
+		if (i < start || i >= end) && reasonsRow.MatchString(strings.TrimSpace(l)) {
+			return nil, fmt.Errorf("line %d looks like a row of the reasons table and lies outside it: %q", i+1, clip(strings.TrimSpace(l)))
+		}
 	}
 	if !slices.Equal(header, wantReasonsHeader) {
 		return nil, fmt.Errorf("the reasons table's header is %q, want %q", header, wantReasonsHeader)
@@ -214,7 +224,7 @@ func ParseEventTable(md []byte) ([]TableEntry, error) {
 // "Event when stale" column regards, sorted. Every row must raise
 // HeartbeatMissed and name a kind.
 func ParseObserverKinds(md []byte) ([]string, error) {
-	header, rows, err := tableAfter(strings.Split(string(md), "\n"), observersMarker)
+	header, rows, _, _, err := tableAfter(strings.Split(string(md), "\n"), observersMarker)
 	if err != nil {
 		return nil, fmt.Errorf("the Observers table: %w", err)
 	}
@@ -307,23 +317,25 @@ func clip(s string) string {
 }
 
 // tableAfter finds the one line that contains marker and returns the header
-// and rows of the Markdown table that follows it, within the next three lines.
-// Every row's cells are trimmed. The table needs a separator line after its
-// header and at least one row.
-func tableAfter(lines []string, marker string) (header []string, rows [][]string, err error) {
+// and rows of the Markdown table that follows it, within the next three lines,
+// and the span of lines [start, end) the table occupies. Every row's cells are
+// trimmed. The table needs a separator line after its header and at least one
+// row. A table that is interrupted by a blank line and goes on is refused: the
+// rows after the break would be silently left out.
+func tableAfter(lines []string, marker string) (header []string, rows [][]string, start, end int, err error) {
 	at := -1
 	for i, l := range lines {
 		if strings.Contains(l, marker) {
 			if at >= 0 {
-				return nil, nil, fmt.Errorf("%q appears more than once", marker)
+				return nil, nil, 0, 0, fmt.Errorf("%q appears more than once", marker)
 			}
 			at = i
 		}
 	}
 	if at < 0 {
-		return nil, nil, fmt.Errorf("no line contains %q", marker)
+		return nil, nil, 0, 0, fmt.Errorf("no line contains %q", marker)
 	}
-	start := -1
+	start = -1
 	for i := at + 1; i < len(lines) && i <= at+3; i++ {
 		if strings.HasPrefix(strings.TrimSpace(lines[i]), "|") {
 			start = i
@@ -331,28 +343,35 @@ func tableAfter(lines []string, marker string) (header []string, rows [][]string
 		}
 	}
 	if start < 0 {
-		return nil, nil, fmt.Errorf("no table within three lines after %q", marker)
+		return nil, nil, 0, 0, fmt.Errorf("no table within three lines after %q", marker)
 	}
 	header = splitRow(lines[start])
 	if start+1 >= len(lines) {
-		return nil, nil, errors.New("the table ends after its header")
+		return nil, nil, 0, 0, errors.New("the table ends after its header")
 	}
 	sep := splitRow(lines[start+1])
 	if len(sep) != len(header) {
-		return nil, nil, fmt.Errorf("the separator line has %d cells, the header %d", len(sep), len(header))
+		return nil, nil, 0, 0, fmt.Errorf("the separator line has %d cells, the header %d", len(sep), len(header))
 	}
 	for _, c := range sep {
 		if !separatorCell.MatchString(c) {
-			return nil, nil, fmt.Errorf("the separator line has the cell %q", c)
+			return nil, nil, 0, 0, fmt.Errorf("the separator line has the cell %q", c)
 		}
 	}
-	for i := start + 2; i < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[i]), "|"); i++ {
-		rows = append(rows, splitRow(lines[i]))
+	end = start + 2
+	for ; end < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[end]), "|"); end++ {
+		rows = append(rows, splitRow(lines[end]))
 	}
 	if len(rows) == 0 {
-		return nil, nil, errors.New("the table has no row")
+		return nil, nil, 0, 0, errors.New("the table has no row")
 	}
-	return header, rows, nil
+	// A blank line, then more table rows, is a table that goes on after a break.
+	for i := end; i < len(lines) && strings.TrimSpace(lines[i]) == ""; i++ {
+		if i+1 < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[i+1]), "|") {
+			return nil, nil, 0, 0, fmt.Errorf("line %d: the table goes on after a blank line, and its rows would be left out", i+2)
+		}
+	}
+	return header, rows, start, end, nil
 }
 
 func splitRow(line string) []string {
