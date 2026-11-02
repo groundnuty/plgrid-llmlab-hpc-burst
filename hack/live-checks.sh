@@ -411,6 +411,13 @@ check_front_label() {
   fi
 }
 
+# export_front_label <name>: where the front ran (issue #224) goes to the test of a row that writes a text to post, as the
+# settings give it, and to no other: a value the caller's shell holds never reaches a test, so it is dropped first.
+export_front_label() {
+  unset HPCBURST_FRONT_HOST_LABEL
+  [ -z "${FRONTLABEL[$1]:-}" ] || export HPCBURST_FRONT_HOST_LABEL=${S[LIVE_FRONT_HOST_LABEL]}
+}
+
 # fmt_hold <minutes>: "2 h 40 min".
 fmt_hold() { printf '%d h %02d min' $(($1 / 60)) $(($1 % 60)); }
 
@@ -770,7 +777,7 @@ env_hub() { export HPCBURST_TEST_HUB=1; }
 env_conformance() {
   local n=$1 host=${HOST[$1]} up
   up=$(printf '%s' "$host" | tr a-z A-Z)
-  unset HPCBURST_CONF_GPU_MODEL HPCBURST_CONF_CPU_ARCH HPCBURST_CONF_DATA_PARSER HPCBURST_CONF_QOS HPCBURST_CONF_START_WAIT HPCBURST_FRONT_HOST_LABEL
+  unset HPCBURST_CONF_GPU_MODEL HPCBURST_CONF_CPU_ARCH HPCBURST_CONF_DATA_PARSER HPCBURST_CONF_QOS HPCBURST_CONF_START_WAIT
   export HPCBURST_CONFORMANCE=1 HPCBURST_CONF_PROFILE=${PROFILE[$n]} HPCBURST_CONF_PARTITION=${PARTITION[$n]}
   export HPCBURST_CONF_CREDENTIALS=${S[LIVE_CONF_CREDENTIALS_$up]} HPCBURST_CONF_ACCOUNT=${S[${ACCTKEY[$n]}]}
   export HPCBURST_CONF_GPUS=${GPUS[$n]} HPCBURST_CONF_CPUS=${CPUS[$n]} HPCBURST_CONF_MEMORY=${MEM[$n]}
@@ -789,9 +796,9 @@ env_conformance() {
     # Only a row with no start wait: with one, the bound is the first clock and the test takes no other.
     gpu-accounting-*) [ "${SWAIT[$n]:--}" != - ] || export HPCBURST_CONF_PENDING_MAX_SECONDS=${LIVE_PENDING_MAX_SECONDS:-7200} ;;
   esac
-  # Where the front ran (issue #224) goes to the rows that write a text to post; the variable is not HPCBURST_CONF_*, so
-  # the accounting rows' dry runs, which drop that family, still take it.
-  [ -z "${FRONTLABEL[$n]:-}" ] || export HPCBURST_FRONT_HOST_LABEL=${S[LIVE_FRONT_HOST_LABEL]}
+  # Where the front ran (issue #224): the variable is not HPCBURST_CONF_*, so the accounting rows' dry runs, which drop that
+  # family, still take it.
+  export_front_label "$n"
 }
 
 # env_alpha <name>: the environment of an alpha row's test binary (issue #194). The row's name is the gate; the
@@ -800,7 +807,7 @@ env_conformance() {
 env_alpha() {
   local n=$1 host=${HOST[$1]} up
   up=$(printf '%s' "$host" | tr a-z A-Z)
-  unset HPCBURST_ALPHA_DRY HPCBURST_ALPHA_DRY_FAULT HPCBURST_ALPHA_DRY_ROOT HPCBURST_ALPHA_LEASE_MINUTES HPCBURST_FRONT_HOST_LABEL
+  unset HPCBURST_ALPHA_DRY HPCBURST_ALPHA_DRY_FAULT HPCBURST_ALPHA_DRY_ROOT HPCBURST_ALPHA_LEASE_MINUTES
   export HPCBURST_ALPHA_ROW=$n HPCBURST_ALPHA_PROFILE=${PROFILE[$n]} HPCBURST_ALPHA_PARTITION=${PARTITION[$n]}
   export HPCBURST_ALPHA_GPUS=${GPUS[$n]} HPCBURST_ALPHA_CPUS=${CPUS[$n]} HPCBURST_ALPHA_MEMORY=${MEM[$n]}
   export HPCBURST_ALPHA_ACCOUNT=${S[${ACCTKEY[$n]}]} HPCBURST_ALPHA_CREDENTIALS=${S[LIVE_CONF_CREDENTIALS_$up]}
@@ -808,7 +815,7 @@ env_alpha() {
   export HPCBURST_ALPHA_OUT=$REC_DIR HPCBURST_ALPHA_BIN_DIR=${S[LIVE_BIN_DIR]} HPCBURST_ALPHA_BUILD_DIR=${ALPHA_BUILD_DIR:-}
   export HPCBURST_ALPHA_DIALHOME_MODE=${S[LIVE_DIALHOME_MODE]} HPCBURST_ALPHA_DIALHOME_ADDR=${S[LIVE_DIALHOME_ADDR]}
   export HPCBURST_ALPHA_PENDING_MAX_SECONDS=${LIVE_PENDING_MAX_SECONDS:-7200}
-  [ -z "${FRONTLABEL[$n]:-}" ] || export HPCBURST_FRONT_HOST_LABEL=${S[LIVE_FRONT_HOST_LABEL]}
+  export_front_label "$n"
   # A tunnel row's lease, in minutes, as the shape holds it (after LIVE_TUNNEL_LEASE_MINUTES): the test judges that value.
   case $n in
     tunnel-hour-*) local lh lm; IFS=: read -r lh lm _ <<<"${TLIMIT[$n]}"; export HPCBURST_ALPHA_LEASE_MINUTES=$((10#$lh * 60 + 10#$lm)) ;;

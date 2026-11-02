@@ -374,9 +374,9 @@ func rateChecks(rates []PathRate) []string {
 		}
 	}
 	for _, dir := range []string{DirUpload, DirDownload} {
-		r, ok := by[dir]
+		r, found := by[dir]
 		switch {
-		case !ok:
+		case !found:
 			f = append(f, "the "+dir+" path rate was not posted: both directions are needed")
 		case !r.OK:
 			f = append(f, "the "+dir+" path rate was not measured")
@@ -534,14 +534,14 @@ func largeAmongStreams(reqs []Stream) int {
 		// The moments that matter are the large request's opening and each stream's opening inside it.
 		at := []time.Time{l.Opened}
 		for _, r := range reqs {
-			if r.TokensPerSecond() >= StreamRate && r.Opened.After(l.Opened) && r.Opened.Before(l.Ended) {
+			if isStream(r) && r.Opened.After(l.Opened) && r.Opened.Before(l.Ended) {
 				at = append(at, r.Opened)
 			}
 		}
 		for _, t := range at {
 			open := 0
 			for _, r := range reqs {
-				if r.TokensPerSecond() >= StreamRate && !r.Opened.After(t) && r.Ended.After(t) {
+				if isStream(r) && !r.Opened.After(t) && r.Ended.After(t) {
 					open++
 				}
 			}
@@ -573,13 +573,16 @@ func longestChain(reqs []Stream) int {
 	return best
 }
 
+// isStream: a request that ran at StreamRate tokens a second or more is one of the streams the hour's load is made of.
+func isStream(r Stream) bool { return r.TokensPerSecond() >= StreamRate }
+
 // concurrentStreams is the most streams open together at one moment that each ran at StreamRate tokens a second or more.
 func concurrentStreams(reqs []Stream) int {
 	best := 0
 	for _, at := range reqs {
 		open := 0
 		for _, r := range reqs {
-			if !r.Opened.After(at.Opened) && r.Ended.After(at.Opened) && r.TokensPerSecond() >= StreamRate {
+			if !r.Opened.After(at.Opened) && r.Ended.After(at.Opened) && isStream(r) {
 				open++
 			}
 		}

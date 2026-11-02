@@ -51,9 +51,6 @@ func FrontLine(label string) string { return "- front ran on: " + label }
 // InsertFrontLine puts the front line right after the first line of a text to post (the verdict line), so that
 // every row's text names it in the same place.
 func InsertFrontLine(text, label string) string {
-	first, rest, found := strings.Cut(text, "\n")
-	if !found {
-		return first + "\n" + FrontLine(label) + "\n"
-	}
+	first, rest, _ := strings.Cut(text, "\n")
 	return first + "\n" + FrontLine(label) + "\n" + rest
 }

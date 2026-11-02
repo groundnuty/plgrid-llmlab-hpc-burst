@@ -46,6 +46,20 @@ func TestAFrontLabelStatesARoleAndAPositionAndNothingThatNamesAHost(t *testing.T
 	}
 }
 
+// Each refusal says what is wrong, in its own words.
+func TestEachFrontLabelRefusalSaysWhatIsWrong(t *testing.T) {
+	for label, want := range map[string]string{
+		"":                                    "is not set",
+		"the development host":                "inside or outside",
+		"dev1.example.org, outside":           "only letters",
+		strings.Repeat("a", 113) + " outside": "longer than",
+	} {
+		if err := ValidFrontLabel(label); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("ValidFrontLabel(%q) = %v, want a refusal that says %q", label, err, want)
+		}
+	}
+}
+
 // The line goes right after the verdict line, whatever the row's text is, and the text keeps every other line.
 func TestTheFrontLineSitsAfterTheVerdictLine(t *testing.T) {
 	got := InsertFrontLine("row: PASS (posts to #145)\n- a\n- b\n", testFrontLabel)

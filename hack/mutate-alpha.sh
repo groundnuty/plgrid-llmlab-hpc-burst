@@ -45,7 +45,7 @@ mutants=(
   'verdict.go@@case j.StartTime == nil || j.EndTime == nil:@@case j.StartTime == nil && j.EndTime == nil:'
   'verdict.go@@case j.EndTime.Sub(*j.StartTime) < Hour:@@case j.EndTime.Sub(*j.StartTime) <= Hour:'
   'verdict.go@@case !r.OK:@@case r.OK:'
-  'verdict.go@@case r.Direction != "up":@@case r.Direction == "up":'
+  'verdict.go@@if _, dup := by[r.Direction]; dup {@@if false {'
   'verdict.go@@r.AskedSeconds < 30@@r.AskedSeconds < 29'
   'verdict.go@@r.TimedSeconds < 29@@r.TimedSeconds < 28'
   'verdict.go@@r.Bytes <= 0:@@r.Bytes < 0:'
@@ -101,7 +101,43 @@ mutants=(
   'verdict.go@@r.TokensPerSecond() >= StreamRate@@r.TokensPerSecond() > StreamRate'
   'verdict.go@@gap >= 0 && gap <= MaxChainGap@@gap > 0 && gap <= MaxChainGap'
   'verdict.go@@gap >= 0 && gap <= MaxChainGap@@gap >= 0 && gap < MaxChainGap'
-  'verdict.go@@case !r.UnderLoad || r.Tokens <= 0:@@case !r.UnderLoad && r.Tokens <= 0:'
+  'verdict.go@@case !r.UnderLoad:@@case r.UnderLoad:'
+  'verdict.go@@case dir == DirDownload && r.Tokens <= 0:@@case dir == DirDownload && r.Tokens < 0:'
+  'verdict.go@@case dir == DirDownload && r.Tokens <= 0:@@case r.Tokens <= 0:'
+  'verdict.go@@case !found:@@case false:'
+  'verdict.go@@if dir != DirUpload && dir != DirDownload {@@if false {'
+  'verdict.go@@if largestBody(reqs) < MinLargeBody {@@if largestBody(reqs) <= MinLargeBody {'
+  'verdict.go@@} else if largeAmongStreams(reqs) == 0 {@@} else if false {'
+  'verdict.go@@if r.BodyBytes >= MinLargeBody {@@if r.BodyBytes > MinLargeBody {'
+  'verdict.go@@if open >= ConcurrentStreams {@@if open > ConcurrentStreams {'
+  'verdict.go@@r.Opened.After(l.Opened) && r.Opened.Before(l.Ended)@@r.Opened.After(l.Opened)'
+  'verdict.go@@isStream(r) && !r.Opened.After(t) && r.Ended.After(t)@@isStream(r) && !r.Opened.After(t) && !r.Ended.Before(t)'
+  'verdict.go@@r.Direction == DirDownload && r.OK && bps > 0 && bps < minRate@@r.OK && bps > 0 && bps < minRate'
+  'frontlabel.go@@case len(label) > MaxFrontLabel:@@case len(label) >= MaxFrontLabel:'
+  'frontlabel.go@@case !frontLabelRE.MatchString(label):@@case false:'
+  'frontlabel.go@@case !positionRE.MatchString(label):@@case false:'
+  'frontlabel.go@@case label == "":@@case false:'
+  'frontlabel.go@@return first + "\n" + FrontLine(label) + "\n" + rest@@return first + "\n" + rest'
+  'run.go@@if lerr := ValidFrontLabel(cfg.FrontLabel); lerr != nil {@@if false {'
+  'run.go@@InsertFrontLine(summary(failures, jobs), cfg.FrontLabel)@@summary(failures, jobs)'
+  'run.go@@"frontLabel": cfg.FrontLabel, @@'
+  'config.go@@bad = append(bad, EnvFrontLabel+": "+err.Error())@@_ = err'
+  'config.go@@cfg.FrontLabel = getenv(EnvFrontLabel)@@cfg.FrontLabel = ""'
+  'internal/providerctl/conformance/gpuacct_test.go@@w.p.save(alpha.PostsFile, []byte(alpha.InsertFrontLine(posts, frontLabel(t))))@@w.p.save(alpha.PostsFile, []byte(posts))'
+  'internal/providerctl/conformance/gpuacct_test.go@@if err := alpha.ValidFrontLabel(label); err != nil {@@if false {'
+  'hack/live-checks.sh@@[ -z "${FRONTLABEL[$name]:-}" ] || check_front_label || bad=1@@true'
+  'hack/live-checks.sh@@if [ -z "$l" ]; then say "live-checks: setting LIVE_FRONT_HOST_LABEL is missing"; return 1; fi@@:'
+  'hack/live-checks.sh@@[ "${#l}" -gt 120 ]@@[ "${#l}" -gt 121 ]'
+  'hack/live-checks.sh@@A-Za-z0-9 ,;()@@A-Za-z0-9 ,;().'
+  'hack/live-checks.sh@@if ! [[ $lower =~ (^|[^a-z])(inside|outside)([^a-z]|$) ]]; then@@if false; then'
+  'hack/live-checks.sh@@  unset HPCBURST_FRONT_HOST_LABEL@@  :'
+  'hack/live-checks.sh@@[ -z "${FRONTLABEL[$1]:-}" ] || export HPCBURST_FRONT_HOST_LABEL=${S[LIVE_FRONT_HOST_LABEL]}@@true'
+  'hack/live-checks.sh@@still take it.
+  export_front_label "$n"@@still take it.'
+  'hack/live-checks.sh@@LIVE_PENDING_MAX_SECONDS:-7200}
+  export_front_label "$n"@@LIVE_PENDING_MAX_SECONDS:-7200}'
+  'hack/live-checks.sh@@gpu-accounting-athena
+# END FRONT LABEL@@# END FRONT LABEL'
   'rows.go@@return lease - (MaxRequestDuration + DrainMargin) - TunnelHour@@return lease - (MaxRequestDuration + DrainMargin) + TunnelHour'
   'rows.go@@if measured < ShortLeaseRule {@@if measured <= ShortLeaseRule {'
   'rows.go@@lease < MinLease() || lease > MaxTunnelLease@@lease <= MinLease() || lease > MaxTunnelLease'
@@ -136,7 +172,7 @@ open(p, 'w').write(s.replace(a, b, 1))
 PY
   then echo "BROKEN   $file: the text '$from' does not occur exactly once"; broken=$((broken+1)); continue; fi
   case $path in
-    hack/live-checks.sh) tests=(go test -count=1 -timeout 9m -parallel 3 -run 'AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore' ./hack/livechecks) ;;
+    hack/live-checks.sh) tests=(go test -count=1 -timeout 9m -parallel 3 -run 'AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|FrontLabel|FrontRan|LabelReaches' ./hack/livechecks) ;;
     internal/providerctl/*) tests=(go test -count=1 -timeout 100s ./internal/providerctl/conformance "./$pkg") ;;
     *) tests=(go test -count=1 -timeout 120s "./$pkg") ;;
   esac
