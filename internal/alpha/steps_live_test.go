@@ -184,7 +184,6 @@ type liveRun struct {
 	tr    *sshrun.SSH
 
 	mu      sync.Mutex
-	order   []string // the run's job tags, in the order their Allocations appeared
 	tagErrs []error
 	replies []http.Header
 }
@@ -272,17 +271,25 @@ func (r *liveRun) tag(a *v1alpha1.Allocation) {
 	}
 	if err := r.tags.Tag(tg); err != nil {
 		r.tagErrs = append(r.tagErrs, err)
-		return
 	}
-	r.order = append(r.order, tg)
 }
 
-// runTags are the run's job tags in the order their Allocations appeared, or
-// the error of a tag that could not be written down.
+// runTags are the job tags of every Allocation the watch saw, in the order
+// they first appeared, written down or not (Run fails a run with a tag that
+// was not), or the error of a tag that could not be written down.
 func (r *liveRun) runTags() ([]string, error) {
+	seen := map[string]bool{}
+	var tags []string
+	for _, o := range r.watch.Allocations() {
+		tg := v1alpha1.JobTag(o.Allocation.Namespace, o.Allocation.Name, o.Allocation.UID)
+		if !seen[tg] {
+			seen[tg] = true
+			tags = append(tags, tg)
+		}
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]string(nil), r.order...), errors.Join(r.tagErrs...)
+	return tags, errors.Join(r.tagErrs...)
 }
 
 // deployment is the world's deployment with the row's plan applied: the row's
@@ -335,17 +342,33 @@ func (r *liveRun) drainWindow() time.Duration {
 	return DrainWindow(r.tm.MaxRequestDuration, margin, get(r.w.profile.DrainWindow))
 }
 
-// readyWait is how long the run waits for an Instance to become ready: the
-// queue wait it allows, health.startTimeout, and a margin.
-func (r *liveRun) readyWait(p Plan) time.Duration {
-	return p.PendingMax + r.tm.StartTimeout + 5*time.Minute
+// firstJobStarted is the run's first clock (Plan.PendingMax): the first
+// Allocation's job must start within it of the deployment's creation. Past it
+// the run ends, and Close cancels the jobs by their tags; on a shared one-job
+// slot that is the owner's GPU waiting.
+func (r *liveRun) firstJobStarted(p Plan) {
+	stack.WaitFor(r.t, p.PendingMax, "the run's first job to start within the queue wait the run allows (HPCBURST_ALPHA_PENDING_MAX_SECONDS); the run ends and its jobs are cancelled", func() bool {
+		for _, o := range r.watch.Allocations() {
+			if o.Allocation.Status.AtProvider.StartTime != nil {
+				return true
+			}
+		}
+		return false
+	})
 }
 
-// firstReady waits for the deployment's first Instance (no predecessor) to be
-// ready and registered at the front.
+// readyWait is how long the run waits, once its first job runs, for the
+// Instance to become ready: health.startTimeout, and a margin.
+func (r *liveRun) readyWait() time.Duration {
+	return r.tm.StartTimeout + 5*time.Minute
+}
+
+// firstReady waits for the first job to start, then for the deployment's
+// first Instance (no predecessor) to be ready and registered at the front.
 func (r *liveRun) firstReady(p Plan) v1alpha1.Instance {
+	r.firstJobStarted(p)
 	var in v1alpha1.Instance
-	stack.WaitFor(r.t, r.readyWait(p), "the first Instance to be ready and registered at the front", func() bool {
+	stack.WaitFor(r.t, r.readyWait(), "the first Instance to be ready and registered at the front", func() bool {
 		for _, x := range r.instances() {
 			if x.Annotations[v1alpha1.AnnotationPredecessor] == "" && x.Status.Phase == v1alpha1.InstanceReady {
 				if reg, known := stack.Registered(r.h.Ports, &x); known && reg {

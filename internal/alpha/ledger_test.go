@@ -339,3 +339,36 @@ func TestBatchLedgerWithoutAClientIsNamed(t *testing.T) {
 		t.Errorf("a ledger with no Finder returned %v, want ErrNoLedger", err)
 	}
 }
+
+// Close runs on every exit of Run, a run past its deadline included, so it ends
+// the run's jobs on a time of its own: here the run's context is already over,
+// and the run's job, which the fake shows running, must end cancelled.
+func TestCloseEndsTheRunsJobsUnderADeadContext(t *testing.T) {
+	s := startStandIn(t)
+	tag := "hb-run-1-gggg"
+	id := s.submit(tag, 7)
+	s.waitJob("to run", id, func(j fakeslurm.Job) bool { return j.State == "RUNNING" })
+	t.Cleanup(func() { _ = os.WriteFile(s.release(tag), nil, 0o600) })
+	ctx, cancelMake := context.WithTimeout(context.Background(), time.Minute)
+	b, tr, err := SSHBatch(ctx, s.apiWith(), standInProvider, s.ctl, filepath.Join(s.dir, "host.lock"))
+	cancelMake()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := NewRecorder(filepath.Join(t.TempDir(), "out"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rec.Tag(tag); err != nil {
+		t.Fatal(err)
+	}
+	r := &liveRun{t: t, batch: b, tr: tr, tags: rec}
+	dead, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := r.Close(dead); err != nil {
+		t.Fatalf("Close under a dead context: %v", err)
+	}
+	if j := s.job(id); j.State != "CANCELLED" {
+		t.Errorf("the run's job is %s after Close, want CANCELLED", j.State)
+	}
+}

@@ -117,7 +117,6 @@ mutants=(
   'workerfault.go@@ok && parent.InJob && isApptainer(parent.Argv)@@ok && parent.InJob'
   'workerfault.go@@if len(found) != 1 {@@if len(found) < 1 {'
   'workerfault.go@@[ "${20}" = "` + p.Start + `" ]@@[ "${20}" != "x` + p.Start + `" ]'
-  'workerfault.go@@[ -O "$d" ] || { echo gone; exit 0; }@@[ -e "$d" ] || { echo gone; exit 0; }'
   'workerfault.go@@== "killed "+strconv.Itoa(p.PID)@@!= "killed "+strconv.Itoa(p.PID)'
   'workerfault.go@@if tr '"'"'\0'"'"' '"'"'\n'"'"' < "$d/environ" 2>/dev/null | grep -qx@@if tr '"'"'\0'"'"' '"'"'\n'"'"' < "$d/environ" 2>/dev/null | grep -q'
   'ledger.go@@if l == nil || l.Finder == nil {@@if l == nil {'

@@ -449,7 +449,9 @@ func (r *liveRun) TunnelHour(ctx context.Context, p Plan) (TunnelHourObs, error)
 	if err != nil {
 		return TunnelHourObs{}, err
 	}
-	nRate, err := r.tokensFor(rateAsked+time.Second, rate)
+	// Sized for 34 s: the measured rate includes the time to the first token,
+	// and the receiver must time at least 29 s of the 30 asked.
+	nRate, err := r.tokensFor(rateAsked+4*time.Second, rate)
 	if err != nil {
 		return TunnelHourObs{}, err
 	}
