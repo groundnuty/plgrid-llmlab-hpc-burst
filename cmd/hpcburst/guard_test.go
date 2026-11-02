@@ -23,6 +23,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 var (
@@ -38,6 +39,7 @@ const (
 
 // guardStatus is the part of status --json this test reads.
 type guardStatus struct {
+	Health   string `json:"health"`
 	CRDGuard *struct {
 		Present bool   `json:"present"`
 		Detail  string `json:"detail"`
@@ -70,15 +72,15 @@ func TestUpInstallsTheCRDGuardAndGuardRemoveRemovesIt(t *testing.T) {
 	ctx, cancel := testCtx()
 	defer cancel()
 
-	// A guard is not necessarily enforced the instant it exists: wait, on observable state, until a
-	// server-side dry-run delete of a framework CRD is refused. A policy the API server never
-	// evaluated would time this out, so it fails loudly.
+	// up returns only once the guard is enforced (WaitGuardEnforced), so a delete RIGHT after it is
+	// refused: no polling here, since a wait of the test's own would hide a window in which up had
+	// returned and the API server still accepted the delete (review of PR 250: B2).
 	dryRun := func(name string) error {
 		return cl.dyn.Resource(crdGVR).Delete(ctx, name, metav1.DeleteOptions{DryRun: []string{metav1.DryRunAll}})
 	}
-	waitFor(t, 90*time.Second, "a dry-run delete of a framework CRD to be refused", func() bool {
-		return apierrors.IsForbidden(dryRun(frameworkCRD))
-	})
+	if err := dryRun(frameworkCRD); !apierrors.IsForbidden(err) {
+		t.Fatalf("a dry-run delete of %s right after up returned: %v, want Forbidden: up returned before the guard was enforced", frameworkCRD, err)
+	}
 
 	// A real delete of every framework CRD is refused with the guard's own reason, and each CRD is
 	// still there, with no deletion under way.
@@ -102,15 +104,19 @@ func TestUpInstallsTheCRDGuardAndGuardRemoveRemovesIt(t *testing.T) {
 		sr := cli(t, h.args("status", "--json", "--no-gc-probe")...)
 		parseJSON(t, sr.out, &js)
 		if js.CRDGuard == nil || js.CRDGuard.Present != present || !strings.Contains(js.CRDGuard.Detail, detail) {
-			t.Errorf("status --json crd_guard = %+v, want present %v with detail containing %q (exit %d)", js.CRDGuard, present, detail, sr.code)
+			t.Errorf("status --json crd_guard = %+v, want present %v with detail containing %q", js.CRDGuard, present, detail)
+		}
+		// An absent guard is a state, not a fault: the host stays healthy and status exits 0 (review of PR 250, nit).
+		if sr.code != exitOK || js.Health != "healthy" {
+			t.Errorf("status with the guard present=%v: exit %d, health %q, want exit 0 and healthy", present, sr.code, js.Health)
 		}
 		text := cli(t, h.args("status", "--no-gc-probe")...)
 		word := "CRD deletion guard: present"
 		if !present {
 			word = "CRD deletion guard: ABSENT"
 		}
-		if !strings.Contains(text.out, word) {
-			t.Errorf("status text lacks %q:\n%s", word, text.out)
+		if !strings.Contains(text.out, word) || text.code != exitOK {
+			t.Errorf("status text (exit %d) lacks %q:\n%s", text.code, word, text.out)
 		}
 	}
 	wantGuard(true, "")
@@ -120,6 +126,30 @@ func TestUpInstallsTheCRDGuardAndGuardRemoveRemovesIt(t *testing.T) {
 	if noAPI.CRDGuard != nil {
 		t.Errorf("status --no-api reports the guard as %+v, want nothing: it did not ask", noAPI.CRDGuard)
 	}
+
+	// ---- a match filter added by hand leaves a binding that exists and matches nothing (review of PR 250: B1) ----
+	// The delete really goes through, status says absent, and a restart sets the binding back to the
+	// manifest's spec: a delete right after up is refused.
+	_, err := cl.dyn.Resource(bindingGVR).Patch(ctx, guardObject, types.MergePatchType,
+		[]byte(`{"spec":{"matchResources":{"objectSelector":{"matchLabels":{"example":"never"}},"namespaceSelector":{"matchLabels":{"example":"never"}}}}}`), metav1.PatchOptions{})
+	if err != nil {
+		t.Fatalf("add a selector to the binding by hand: %v", err)
+	}
+	wantGuard(false, "spec.matchResources")
+	waitFor(t, 90*time.Second, "a dry-run delete of a framework CRD to be allowed with a selector on the binding", func() bool {
+		return dryRun(frameworkCRD) == nil
+	})
+	if d := cli(t, h.args("down")...); d.code != exitOK {
+		t.Fatalf("down exited %d: %s", d.code, d.err)
+	}
+	if u := cli(t, h.upArgs(base, "--json")...); u.code != exitOK {
+		t.Fatalf("up over the filtered binding exited %d: %s", u.code, u.err)
+	}
+	cl = h.clients()
+	if err := dryRun(frameworkCRD); !apierrors.IsForbidden(err) {
+		t.Fatalf("a dry-run delete right after up over a filtered binding: %v, want Forbidden", err)
+	}
+	wantGuard(true, "")
 
 	// ---- the old by-hand removal deletes only the binding; status must see that ----
 	if err := cl.dyn.Resource(bindingGVR).Delete(ctx, guardObject, metav1.DeleteOptions{}); err != nil {
@@ -138,9 +168,9 @@ func TestUpInstallsTheCRDGuardAndGuardRemoveRemovesIt(t *testing.T) {
 		t.Fatalf("second up exited %d: %s", u.code, u.err)
 	}
 	cl = h.clients()
-	waitFor(t, 90*time.Second, "a dry-run delete of a framework CRD to be refused after the restart", func() bool {
-		return apierrors.IsForbidden(dryRun(frameworkCRD))
-	})
+	if err := dryRun(frameworkCRD); !apierrors.IsForbidden(err) {
+		t.Fatalf("a dry-run delete right after the second up: %v, want Forbidden", err)
+	}
 	wantGuard(true, "")
 
 	// ---- guard remove: the explicit step that lets a delete through ----

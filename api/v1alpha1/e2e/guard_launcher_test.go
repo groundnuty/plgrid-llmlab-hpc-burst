@@ -25,7 +25,10 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/launcher"
 )
 
-var bindingGVR = schema.GroupVersionResource{Group: "admissionregistration.k8s.io", Version: "v1", Resource: "validatingadmissionpolicybindings"}
+var (
+	bindingGVR = schema.GroupVersionResource{Group: "admissionregistration.k8s.io", Version: "v1", Resource: "validatingadmissionpolicybindings"}
+	policyGVR  = schema.GroupVersionResource{Group: "admissionregistration.k8s.io", Version: "v1", Resource: "validatingadmissionpolicies"}
+)
 
 func TestLauncherInstallsChecksAndRemovesTheGuard(t *testing.T) {
 	const ours = "providers.hpcburst.groundnuty.github.io"
@@ -78,21 +81,46 @@ func TestLauncherInstallsChecksAndRemovesTheGuard(t *testing.T) {
 		t.Fatalf("CheckGuard after the install: %+v, %v, want present", state, err)
 	}
 
-	// A binding that does not deny is not a guard: CheckGuard says absent, and the API server
-	// agrees by accepting the delete.
-	_, err = bindings.Patch(bg(), launcher.GuardName, types.MergePatchType, []byte(`{"spec":{"validationActions":["Warn"]}}`), metav1.PatchOptions{})
-	must(t, err, "weaken the binding to Warn")
-	if state, err := launcher.CheckGuard(bg(), cfg); err != nil || state.Present || !strings.Contains(state.Detail, "Deny") {
-		t.Errorf("CheckGuard with a Warn binding: %+v, %v, want absent naming Deny", state, err)
+	// Immediately after the install, once WaitGuardEnforced has returned, one delete (no polling) is
+	// refused: the wait is what makes up's return mean enforcement (review of PR 250: B2).
+	must(t, launcher.WaitGuardEnforced(bg(), cfg, io.Discard), "wait for the guard to be enforced")
+	if err := dryRunDelete(ours); !apierrors.IsForbidden(err) {
+		t.Fatalf("a delete right after WaitGuardEnforced: %v, want Forbidden", err)
 	}
-	eventually(t, 60*time.Second, "a Warn binding to let the delete through", func() (bool, error) {
-		return dryRunDelete(ours) == nil, nil
-	})
-	// Installing again puts Deny back.
-	must(t, launcher.InstallGuard(bg(), cfg, io.Discard), "install over the weakened binding")
-	eventually(t, 60*time.Second, "the reinstalled guard to refuse again", func() (bool, error) {
-		return apierrors.IsForbidden(dryRunDelete(ours)), nil
-	})
+
+	// What is added to the guard by hand does not survive an install (review of PR 250: B1). Each
+	// change below really lets the delete through (the control: the API server accepts it), CheckGuard
+	// says absent, and the install sets the objects to the manifest's spec whole, after which one
+	// immediate delete is refused. Server-side apply alone keeps a field that another manager owns and
+	// the manifest does not mention.
+	policies := dyn.Resource(policyGVR)
+	for _, tc := range []struct {
+		name  string
+		res   dynamic.NamespaceableResourceInterface
+		patch string
+	}{
+		{"a binding that only warns", bindings, `{"spec":{"validationActions":["Warn"]}}`},
+		{"a binding with an objectSelector no CRD satisfies (and a namespaceSelector)", bindings,
+			`{"spec":{"matchResources":{"objectSelector":{"matchLabels":{"example":"never"}},"namespaceSelector":{"matchLabels":{"example":"never"}}}}}`},
+		{"a policy with a match condition that is never true", policies, `{"spec":{"matchConditions":[{"name":"never","expression":"false"}]}}`},
+	} {
+		_, err := tc.res.Patch(bg(), launcher.GuardName, types.MergePatchType, []byte(tc.patch), metav1.PatchOptions{})
+		must(t, err, "weaken the guard: "+tc.name)
+		if state, err := launcher.CheckGuard(bg(), cfg); err != nil || state.Present || state.Detail == "" {
+			t.Errorf("%s: CheckGuard = %+v, %v, want absent with a detail", tc.name, state, err)
+		}
+		eventually(t, 60*time.Second, tc.name+" to let the delete through", func() (bool, error) {
+			return dryRunDelete(ours) == nil, nil
+		})
+		must(t, launcher.InstallGuard(bg(), cfg, io.Discard), "install over "+tc.name)
+		must(t, launcher.WaitGuardEnforced(bg(), cfg, io.Discard), "wait after installing over "+tc.name)
+		if err := dryRunDelete(ours); !apierrors.IsForbidden(err) {
+			t.Errorf("%s: a delete right after the reinstall: %v, want Forbidden", tc.name, err)
+		}
+		if state, err := launcher.CheckGuard(bg(), cfg); err != nil || !state.Present {
+			t.Errorf("%s: CheckGuard after the reinstall = %+v, %v, want present", tc.name, state, err)
+		}
+	}
 
 	// The old by-hand step deleted only the binding: the policy is still there, and CheckGuard,
 	// which would be fooled by a look at the policy alone, says absent.
