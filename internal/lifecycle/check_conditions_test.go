@@ -99,6 +99,49 @@ func TestAnInstanceWithItsChecksPendingAsFalseStillGetsReady(t *testing.T) {
 	}
 }
 
+// A check that runs again after a restart is Unknown with the reason of the restart (api/v1alpha1/conditions.go,
+// ReasonWorkerRestart and ReasonInstanceRestart), for the checks the restart repeats: a worker restart repeats
+// verification and warm-up and keeps Qualified; a whole-Instance restart repeats all three. The Instance is held at the
+// restart (the first Step in which a condition carries the reason), and goes on to ready with all three True.
+func TestACheckRunningAgainAfterARestartIsUnknownWithTheRestartsReason(t *testing.T) {
+	// The ladder's first rung is the worker's, the second the whole Instance's; one attempt per rung, as health_test.go
+	// sets it, so that the second crash climbs.
+	rg := newRig(t, withProfile(func(p *v1alpha1.PlatformProfileSpec) {
+		p.Restart = &v1alpha1.RestartPolicy{AttemptsPerRung: ptrTo(int32(1))}
+	}))
+	rg.create(mdSpec("md"))
+	in, alloc := startReady(rg)
+	for _, tc := range []struct {
+		reason            string
+		qualifiedRepeated bool
+	}{{v1alpha1.ReasonWorkerRestart, false}, {v1alpha1.ReasonInstanceRestart, true}} {
+		rg.agentOf(alloc).agent.CrashWorker(healthWorker, 1)
+		var held *v1alpha1.Instance
+		verifRunUntil(rg, 3*time.Minute, "the "+tc.reason, func() bool {
+			got := rg.instance(in.Name)
+			if conditionReason(got, v1alpha1.ConditionVerified) == tc.reason {
+				held = got
+				return true
+			}
+			return false
+		})
+		wantCheck(t, "at the "+tc.reason, held, v1alpha1.ConditionVerified, metav1.ConditionUnknown, tc.reason)
+		wantCheck(t, "at the "+tc.reason, held, v1alpha1.ConditionWarmedUp, metav1.ConditionUnknown, tc.reason)
+		if tc.qualifiedRepeated {
+			wantCheck(t, "at the "+tc.reason, held, v1alpha1.ConditionQualified, metav1.ConditionUnknown, tc.reason)
+		} else {
+			wantCheck(t, "at the "+tc.reason, held, v1alpha1.ConditionQualified, metav1.ConditionTrue, v1alpha1.ReasonPassed)
+		}
+		if held.Status.Phase == v1alpha1.InstanceReady {
+			t.Errorf("at the %s the Instance is still ready", tc.reason)
+		}
+		verifRunUntil(rg, 10*time.Minute, "ready after the "+tc.reason, func() bool { return rg.readyCount("md") == 1 })
+		for _, c := range checkConditions {
+			wantCheck(t, "ready after the "+tc.reason, rg.instance(in.Name), c, metav1.ConditionTrue, v1alpha1.ReasonPassed)
+		}
+	}
+}
+
 // isTrue, the one reader of the three: only True is true.
 func TestOnlyTrueCountsAsATrueCheck(t *testing.T) {
 	for _, tc := range []struct {
