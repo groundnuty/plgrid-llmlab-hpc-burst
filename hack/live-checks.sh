@@ -428,6 +428,12 @@ remote() {
 # preamble <var> <value>...: assignments for the head of a remote script, quoted.
 preamble() { local k; while [ $# -ge 2 ]; do k=$1; printf '%s=%q\n' "$k" "$2"; shift 2; done; }
 
+# has_line <text> <line>: whether the line is one of the text's lines, exactly. A string test and no pipeline:
+# under pipefail, printf ... | grep -q failed whenever grep stopped at a match while printf was still writing
+# (bash writes its standard output a line at a time), and the SIGPIPE that killed printf read as "no match",
+# silently (#213).
+has_line() { case $'\n'$1$'\n' in *$'\n'"$2"$'\n'*) return 0 ;; esac; return 1; }
+
 # queue_jobs <host>: the user's hb- jobs, one "id|name|partition" per line.
 # Returns 1 when squeue could not be read, so an unreadable queue is never taken for an empty one.
 queue_jobs() { # id|name|partition lines
@@ -439,7 +445,7 @@ printf '%s\n' "$out" | grep '|hb-' || true
 EOS
   ) || return 1
   # The marker line, wherever it sits: a login banner can come before it.
-  printf '%s\n' "$reply" | grep -q -x 'squeue=ok' || return 1
+  has_line "$reply" 'squeue=ok' || return 1
   printf '%s\n' "$reply" | sed -n '/^squeue=ok$/,$p' | tail -n +2 | grep -E '^[0-9][0-9_+]*\|hb-[A-Za-z0-9._-]*\|[A-Za-z0-9._-]+$' || true
 }
 
@@ -544,7 +550,7 @@ owned_present() {
   local now=$1 tags=$2 id name
   while IFS='|' read -r id name _; do
     [ -n "$id" ] || continue
-    if { [ -n "$tags" ] && printf '%s\n' "$tags" | grep -q -x -F "$name"; } || { [ -n "$JOBID" ] && [ "$id" = "$JOBID" ]; }; then echo "$id"; fi
+    if { [ -n "$tags" ] && has_line "$tags" "$name"; } || { [ -n "$JOBID" ] && [ "$id" = "$JOBID" ]; }; then echo "$id"; fi
   done <<<"$now"
 }
 
