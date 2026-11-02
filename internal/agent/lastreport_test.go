@@ -40,6 +40,9 @@ type heldBackend struct {
 	// the test released it: the agent let it finish, or it did not.
 	cancelledAtRelease bool
 	released           bool
+	// failure, when set at release, is what the held call returns: the server
+	// does not take the report.
+	failure error
 	// entered carries every Report call that came in while one was held.
 	entered chan agentapi.Report
 }
@@ -64,13 +67,17 @@ func (b *heldBackend) open() bool {
 
 // releaseHeld lets the held report land. It does nothing when none is held or
 // it was released.
-func (b *heldBackend) releaseHeld() {
+func (b *heldBackend) releaseHeld() { b.releaseWith(nil) }
+
+// releaseWith ends the hold: with err nil the report lands, otherwise the call
+// fails with err and nothing lands.
+func (b *heldBackend) releaseWith(err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !b.held || b.released {
 		return
 	}
-	b.released = true
+	b.released, b.failure = true, err
 	b.cancelledAtRelease = b.heldCtx.Err() != nil
 	b.held = false
 	close(b.release)
@@ -86,13 +93,24 @@ func (b *heldBackend) Report(ctx context.Context, c agentapi.Caller, r agentapi.
 		b.mu.Unlock()
 		select {
 		case <-release:
+			b.mu.Lock()
+			err := b.failure
+			b.mu.Unlock()
+			if err != nil {
+				return err
+			}
 			return b.Backend.Report(ctx, c, r)
 		case <-ctx.Done():
 			// The caller gave up; the request had left, so the server takes it
 			// when it can.
 			go func() {
 				<-release
-				b.Backend.Report(context.Background(), c, r)
+				b.mu.Lock()
+				err := b.failure
+				b.mu.Unlock()
+				if err == nil {
+					b.Backend.Report(context.Background(), c, r)
+				}
 			}()
 			return ctx.Err()
 		}
@@ -365,6 +383,33 @@ func TestLastReportGoesWhenAPeriodicSendStaysOpen(t *testing.T) {
 			}
 			if n := g.rec.count(slog.LevelInfo, agent.LogWaitingForSend); n != 1 {
 				t.Errorf("the agent logged that it waits %d times, want once", n)
+			}
+		})
+	}
+}
+
+// A periodic report that fails while the stop waits for it is not retried: the
+// last report supersedes it, so only the last report lands after the hold.
+func TestAPeriodicReportThatFailsDuringTheStopIsNotRetried(t *testing.T) {
+	for _, via := range bothEnds {
+		t.Run(via, func(t *testing.T) {
+			g := newLastReportRig(t)
+			g.end(via)
+			select {
+			case r := <-g.held.entered:
+				t.Fatalf("a report came in at the endpoint while a periodic report was held there: worker-0 %+v", worker0(r))
+			case <-g.rec.seen(agent.LogWaitingForSend):
+			case <-time.After(30 * time.Second):
+				t.Fatal("the agent neither sent the last report nor said it waits for the periodic one")
+			}
+			g.held.releaseWith(errors.New("read: connection reset by peer"))
+			g.waitRun(t, via)
+			reps := g.h.backend.Reports(hAllocUID)
+			if len(reps) != g.landed+1 {
+				t.Fatalf("%d reports landed after the hold began, want only the last one", len(reps)-g.landed)
+			}
+			if p := g.phaseOfLast(t); p != agentapi.PartStopped {
+				t.Errorf("the endpoint's latest report says worker-0 %s, want %s", p, agentapi.PartStopped)
 			}
 		})
 	}
