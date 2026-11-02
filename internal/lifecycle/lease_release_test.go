@@ -38,23 +38,38 @@ func TestLifecycleManagerReleasesItsLeaseOnEveryStop(t *testing.T) {
 		stopRounds = 200
 		stopLimit  = 40 * time.Second // the shutdown grace, 30 s, and the release
 	)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	cfg, cl := leaseControlPlane(t, ctx)
+	creds, builds := t.TempDir(), t.TempDir()
+	for round := 0; round < stopRounds && !t.Failed(); round++ {
+		stopRound(t, ctx, cl, round, round%2 == 1, Options{
+			CredentialsDir: creds, AgentBuildsDir: builds, LeaderElection: true,
+			Checkpoints: &stubSource{}, Registry: prometheus.NewRegistry(),
+		}, cfg, stopLimit)
+	}
+}
+
+// leaseControlPlane starts a control plane with the test CRDs and the
+// controller namespace on the lifecycle package's envtest block, stopped when
+// the test ends, and returns its config and a client.
+func leaseControlPlane(t *testing.T, ctx context.Context) (*rest.Config, client.Client) {
+	t.Helper()
 	if os.Getenv("HPCBURST_TESTENV_PORT_BASE") == "" {
 		t.Setenv("HPCBURST_TESTENV_PORT_BASE", managerPortBase)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-	defer cancel()
 	cp, err := testenv.Start(ctx, t.TempDir(), testenv.Options{BeforeControllerManager: installTestCRDs})
 	if err != nil {
 		t.Fatalf("start the control plane: %v", err)
 	}
-	defer func() {
+	t.Cleanup(func() {
 		if err := cp.Stop(); err != nil {
 			t.Errorf("stop the control plane: %v", err)
 		}
 		if err := cp.AssertAllDead(); err != nil {
 			t.Errorf("leftover process: %v", err)
 		}
-	}()
+	})
 	s, err := Scheme()
 	if err != nil {
 		t.Fatal(err)
@@ -66,13 +81,7 @@ func TestLifecycleManagerReleasesItsLeaseOnEveryStop(t *testing.T) {
 	if err := cl.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: v1alpha1.ControllerNamespace}}); err != nil {
 		t.Fatal(err)
 	}
-	creds, builds := t.TempDir(), t.TempDir()
-	for round := 0; round < stopRounds && !t.Failed(); round++ {
-		stopRound(t, ctx, cl, round, round%2 == 1, Options{
-			CredentialsDir: creds, AgentBuildsDir: builds, LeaderElection: true,
-			Checkpoints: &stubSource{}, Registry: prometheus.NewRegistry(),
-		}, cp.Config, stopLimit)
-	}
+	return cp.Config, cl
 }
 
 // stopRound runs one round of TestLifecycleManagerReleasesItsLeaseOnEveryStop

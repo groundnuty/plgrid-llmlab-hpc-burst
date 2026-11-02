@@ -26,9 +26,11 @@ package leasefault
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"k8s.io/client-go/rest"
 
@@ -68,7 +70,20 @@ const (
 type Request struct {
 	Method string
 	Marked bool
+	// Failed: the request was failed by the Mode, without reaching the API
+	// server.
 	Failed bool
+	// Conflict: the request was answered with an injected 409 Conflict,
+	// without reaching the API server (ConflictNextReleaseWrite).
+	Conflict bool
+	// Sent: the request was passed on to the API server; Status is its
+	// answer's status code, 0 when it returned no answer.
+	Sent   bool
+	Status int
+	// At is when the request reached the transport, Done when the transport
+	// returned it, after any delay (SetDelay). A request whose context ended
+	// during the delay is returned then, not sent.
+	At, Done time.Time
 }
 
 // Faults fails requests of the lock for one Lease in its Mode, and records
@@ -76,9 +91,11 @@ type Request struct {
 type Faults struct {
 	path string
 
-	mu       sync.Mutex
-	mode     Mode
-	requests []Request
+	mu        sync.Mutex
+	mode      Mode
+	delay     time.Duration
+	conflicts int
+	requests  []Request
 }
 
 // New returns Faults for the Lease name in namespace, failing nothing yet.
@@ -91,6 +108,28 @@ func (f *Faults) Set(m Mode) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.mode = m
+}
+
+// SetDelay holds every later request of the lock for d before the
+// transport passes it on, fails it or answers it: the API server's latency as
+// the lock sees it. A request whose context ends during the hold returns its
+// context's error and is never sent, so a write cut by its deadline is never
+// committed.
+func (f *Faults) SetDelay(d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.delay = d
+}
+
+// ConflictNextReleaseWrite answers the next write of the lock whose context
+// is not marked, the elector's release write (it writes with the context of
+// client-go's release, leaderelection.go:311), with a 409 Conflict, as the
+// API server answers a write whose resourceVersion a later write has passed.
+// The write is not sent, so the Lease keeps naming its holder.
+func (f *Faults) ConflictNextReleaseWrite() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.conflicts++
 }
 
 // Config returns a copy of cfg whose transport goes through f, after any
@@ -149,19 +188,31 @@ func (f *Faults) MarkedAfterReleaseRead() int {
 	return n
 }
 
-// fail records the request and reports whether it fails.
-func (f *Faults) fail(req *http.Request) bool {
+// arrive records the request and returns its index, its hold and what to do
+// with it.
+func (f *Faults) arrive(req *http.Request) (i int, delay time.Duration, fail, conflict bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	r := Request{Method: req.Method, Marked: Marked(req.Context())}
+	r := Request{Method: req.Method, Marked: Marked(req.Context()), At: time.Now()}
 	switch f.mode {
 	case ReleaseRead:
 		r.Failed = r.Method == http.MethodGet && !r.Marked
 	case All:
 		r.Failed = true
 	}
+	if !r.Failed && f.conflicts > 0 && r.Method == http.MethodPut && !r.Marked {
+		f.conflicts--
+		r.Conflict = true
+	}
 	f.requests = append(f.requests, r)
-	return r.Failed
+	return len(f.requests) - 1, f.delay, r.Failed, r.Conflict
+}
+
+// done records how the request at i ended.
+func (f *Faults) done(i int, sent bool, status int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.requests[i].Sent, f.requests[i].Status, f.requests[i].Done = sent, status, time.Now()
 }
 
 type transport struct {
@@ -169,12 +220,54 @@ type transport struct {
 	next http.RoundTripper
 }
 
+// conflictStatus is the body of the API server's answer to a write whose
+// resourceVersion is stale, which client-go decodes into a Conflict error.
+const conflictStatus = `{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure","message":"leasefault: injected conflict","reason":"Conflict","code":409}`
+
 // RoundTrip implements http.RoundTripper. A failed request returns an error
 // that client-go does not retry: it retries a GET only on a reset connection,
 // a probable EOF or a lost HTTP/2 connection (rest/request.go:1064-1076).
 func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.URL.Path == t.f.path && strings.HasSuffix(req.Header.Get("User-Agent"), "/"+leaderlock.UserAgent) && t.f.fail(req) {
-		return nil, fmt.Errorf("leasefault: injected failure of %s %s", req.Method, req.URL.Path)
+	if req.URL.Path != t.f.path || !strings.HasSuffix(req.Header.Get("User-Agent"), "/"+leaderlock.UserAgent) {
+		return t.next.RoundTrip(req)
 	}
-	return t.next.RoundTrip(req)
+	i, delay, fail, conflict := t.f.arrive(req)
+	// A request that is not passed on still has its body closed, as a
+	// RoundTripper must.
+	unsent := func(status int) {
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
+		t.f.done(i, false, status)
+	}
+	if delay > 0 {
+		hold := time.NewTimer(delay)
+		select {
+		case <-hold.C:
+		case <-req.Context().Done():
+			hold.Stop()
+			unsent(0)
+			return nil, req.Context().Err()
+		}
+	}
+	switch {
+	case fail:
+		unsent(0)
+		return nil, fmt.Errorf("leasefault: injected failure of %s %s", req.Method, req.URL.Path)
+	case conflict:
+		unsent(http.StatusConflict)
+		return &http.Response{
+			Status: "409 Conflict", StatusCode: http.StatusConflict, Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1,
+			Header:  http.Header{"Content-Type": []string{"application/json"}},
+			Body:    io.NopCloser(strings.NewReader(conflictStatus)),
+			Request: req,
+		}, nil
+	}
+	resp, err := t.next.RoundTrip(req)
+	status := 0
+	if resp != nil {
+		status = resp.StatusCode
+	}
+	t.f.done(i, true, status)
+	return resp, err
 }
