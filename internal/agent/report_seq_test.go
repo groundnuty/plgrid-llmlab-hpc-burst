@@ -120,23 +120,28 @@ func TestTheAgentCountsItsReportsAndTheLastIsTheNewest(t *testing.T) {
 // report is the one made to fail here, twice, then accepted.
 func TestAReportTriedAgainKeepsItsNumber(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		err  error
+		name     string
+		err      error
+		via      string
+		failures int // the last report fails this many times, then is accepted
 	}{
-		{"after a failed send", errors.New("read: connection reset by peer")},
-		{"after not registered", agentapi.Errorf(agentapi.CodeNotRegistered, "agent instance is not registered")},
+		// At the end of the job the last report is one try, and a resend after
+		// not registered: it can fail once and still be sent.
+		{"after a failed send", errors.New("read: connection reset by peer"), byInstruction, 2},
+		{"after not registered", agentapi.Errorf(agentapi.CodeNotRegistered, "agent instance is not registered"), byInstruction, 2},
+		{"after not registered, at the end of the job", agentapi.Errorf(agentapi.CodeNotRegistered, "agent instance is not registered"), byJobEnd, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var failed int
 			rec := &seqRecorder{}
 			rec.failWhile = func(r agentapi.Report) error {
-				if w := worker0(r); w != nil && w.Phase == agentapi.PartStopped && failed < 2 {
+				if w := worker0(r); w != nil && w.Phase == agentapi.PartStopped && failed < tc.failures {
 					failed++
 					return tc.err
 				}
 				return nil
 			}
-			runUntilStopped(t, harnessOptions{backendWrap: func(b agentapi.Backend) agentapi.Backend { rec.Backend = b; return rec }}, byInstruction)
+			runUntilStopped(t, harnessOptions{backendWrap: func(b agentapi.Backend) agentapi.Backend { rec.Backend = b; return rec }}, tc.via)
 			var lastSeqs []uint64
 			var before uint64
 			for _, c := range rec.recorded() {
@@ -146,11 +151,14 @@ func TestAReportTriedAgainKeepsItsNumber(t *testing.T) {
 					before = c.seq
 				}
 			}
-			if len(lastSeqs) != 3 {
-				t.Fatalf("the last report was sent %d times, want 3 (two refused, one accepted)", len(lastSeqs))
+			if len(lastSeqs) != tc.failures+1 {
+				t.Fatalf("the last report was sent %d times, want %d (%d refused, one accepted)", len(lastSeqs), tc.failures+1, tc.failures)
 			}
-			if lastSeqs[0] != lastSeqs[1] || lastSeqs[1] != lastSeqs[2] {
-				t.Errorf("the last report was counted %v over its tries, want one number", lastSeqs)
+			for _, seq := range lastSeqs[1:] {
+				if seq != lastSeqs[0] {
+					t.Errorf("the last report was counted %v over its tries, want one number", lastSeqs)
+					break
+				}
 			}
 			if lastSeqs[0] <= before {
 				t.Errorf("the last report is counted %d, not above the %d of the newest report before it", lastSeqs[0], before)

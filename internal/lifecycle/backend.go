@@ -153,10 +153,14 @@ func (b *Backend) registered(c agentapi.Caller) bool {
 // a report only from the agent instance currently registered for the
 // Allocation, and only if its Seq is newer than the last kept from that
 // instance (admit; HBEP-7, Report order). Any other report is answered as
-// accepted, and has no effect at all: no key written, no sample taken, no
-// receipt time refreshed, no pass enqueued. The count held for the instance
-// rises only when a report is kept, so one that was refused is kept when the
-// agent sends it again.
+// accepted. One dropped by the first decision, before the key's write, has no
+// effect at all: no key written, no sample taken, no receipt time refreshed, no
+// pass enqueued. One that loses to a newer report, or to another instance's
+// registration, while its key is being written is dropped at the store, and its
+// key may already be on disk: it is the Instance's key, the same in every
+// report, so that is harmless. The count held for the instance rises only when
+// a report is kept, so one that was refused is kept when the agent sends it
+// again.
 func (b *Backend) Report(ctx context.Context, c agentapi.Caller, r agentapi.Report) error {
 	if err := b.serving(); err != nil {
 		return err
@@ -177,7 +181,6 @@ func (b *Backend) Report(ctx context.Context, c agentapi.Caller, r agentapi.Repo
 			return err
 		}
 	}
-	now := b.Clock.Now()
 	if r.Instance != nil && r.Instance.Key != "" {
 		if err := b.storeKey(ctx, c, r.Instance.UID, r.Instance.Key); err != nil {
 			return err
@@ -190,6 +193,9 @@ func (b *Backend) Report(ctx context.Context, c agentapi.Caller, r agentapi.Repo
 		b.mu.Unlock()
 		return v.refusal(c)
 	}
+	// The receipt time is read here, with the report kept: read before the key's
+	// write, it could be older than the time of a report kept meanwhile.
+	now := b.Clock.Now()
 	s := b.state(c)
 	if r.Seq != 0 {
 		s.regs[c.AgentInstanceID].seq = r.Seq

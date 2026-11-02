@@ -168,15 +168,22 @@ func TestAnOlderReportThatIsStillBeingTakenDoesNotReplaceANewerOne(t *testing.T)
 	}
 }
 
-// gateReader holds the first List it sees after it is armed until released.
+// gateReader holds the first List it sees after it is armed until released, and
+// fails the next List with the error set by failNext.
 type gateReader struct {
 	client.Reader
 	armed   atomic.Bool
 	entered chan struct{}
 	release chan struct{}
+	fail    atomic.Pointer[error]
 }
 
+func (g *gateReader) failNext(err error) { g.fail.Store(&err) }
+
 func (g *gateReader) List(ctx context.Context, l client.ObjectList, opts ...client.ListOption) error {
+	if e := g.fail.Swap(nil); e != nil {
+		return *e
+	}
 	if g.armed.Swap(false) {
 		close(g.entered)
 		<-g.release
@@ -399,16 +406,137 @@ func TestAReportDelayedAcrossAControllerRestartIsAnsweredNotRegisteredAndNumberi
 	if _, err := o.rg.backend.Register(o.rg.ctx, o.caller, agentapi.RegisterRequest{}); err != nil {
 		t.Fatal(err)
 	}
+	// The counts are gone: a report counted below the one kept before the restart
+	// is kept too, and the numbering of the agent goes on from the delayed one.
 	for _, step := range []struct {
 		seq  uint64
 		ep   string
 		want string
-	}{{s + 1, "unix:/delayed", "unix:/delayed"}, {s + 2, "unix:/next", "unix:/next"}, {s + 1, "unix:/older", "unix:/next"}} {
+	}{{s - 5, "unix:/below", "unix:/below"}, {s + 1, "unix:/delayed", "unix:/delayed"}, {s + 2, "unix:/next", "unix:/next"}, {s + 1, "unix:/older", "unix:/next"}} {
 		if err := o.rg.backend.Report(o.rg.ctx, o.caller, o.report(step.seq, step.ep, "")); err != nil {
 			t.Fatal(err)
 		}
 		if ep, _, _ := o.kept(t); ep != step.want {
 			t.Fatalf("after %s counted %d the Backend holds %q, want %q", step.ep, step.seq, ep, step.want)
 		}
+	}
+}
+
+// The receipt time is taken where the report is kept, not before its key is
+// written: a report that stalls in the key's write and is then kept must not
+// carry a time older than that of a report kept meanwhile (the time of the
+// held report is the one the AgentUnreachable deadline reads).
+func TestTheReceiptTimeOfAReportThatWaitedForItsKeyIsNotOlderThanTheOneKeptMeanwhile(t *testing.T) {
+	o := newOrderRig(t)
+	gate := &gateReader{Reader: o.rg.backend.Reader, entered: make(chan struct{}), release: make(chan struct{})}
+	o.rg.backend.Reader = gate
+	s := o.base.Seq + 5
+	key := strings.Repeat("a1b2c3d4e5f60789", 4)
+
+	gate.armed.Store(true)
+	done := make(chan error, 1)
+	go func() { done <- o.rg.backend.Report(o.rg.ctx, o.caller, o.report(s+1, "unix:/stalled", key)) }()
+	select {
+	case <-gate.entered: // it has the time it arrived at, and waits to write its key
+	case <-time.After(30 * time.Second):
+		t.Fatal("the report never reached the key's write")
+	}
+	o.rg.clock.Advance(time.Second)
+	if err := o.rg.backend.Report(o.rg.ctx, o.caller, o.report(s, "unix:/kept-meanwhile", "")); err != nil {
+		t.Fatal(err)
+	}
+	_, atMeanwhile, _ := o.kept(t)
+	close(gate.release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("the stalled report: %v, want it kept", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the stalled report did not return")
+	}
+	ep, at, _ := o.kept(t)
+	if ep != "unix:/stalled" {
+		t.Fatalf("the Backend holds %q, want the stalled report, which is the newer", ep)
+	}
+	if at.Before(atMeanwhile) {
+		t.Errorf("the report kept last carries the time %s, older than %s of the one kept before it", at, atMeanwhile)
+	}
+}
+
+// A report refused because its key could not be stored leaves the count
+// unchanged (HBEP-7's own example of a refusal): the agent sends it again with
+// its number, and it is kept.
+func TestAReportRefusedForItsKeyIsKeptWhenSentAgain(t *testing.T) {
+	o := newOrderRig(t)
+	gate := &gateReader{Reader: o.rg.backend.Reader, entered: make(chan struct{}), release: make(chan struct{})}
+	o.rg.backend.Reader = gate
+	s := o.base.Seq + 20
+	key := strings.Repeat("0a1b2c3d4e5f6a7b", 4)
+	before, _, _ := o.kept(t)
+
+	gate.failNext(errors.New("the API server is not reachable"))
+	err := o.rg.backend.Report(o.rg.ctx, o.caller, o.report(s, "unix:/refused", key))
+	if err == nil || !strings.Contains(err.Error(), "the API server is not reachable") {
+		t.Fatalf("a report whose key cannot be stored: %v, want the refusal", err)
+	}
+	if ep, _, _ := o.kept(t); ep != before {
+		t.Fatalf("the refused report was kept: the Backend holds %q, want %q", ep, before)
+	}
+	if err := o.rg.backend.Report(o.rg.ctx, o.caller, o.report(s, "unix:/again", key)); err != nil {
+		t.Fatal(err)
+	}
+	if ep, _, _ := o.kept(t); ep != "unix:/again" {
+		t.Errorf("the Backend holds %q, want the report sent again with the same number, unix:/again", ep)
+	}
+}
+
+// The instance a report counts as current is the one with the highest restart
+// count, the later registration on a tie, whatever the order of registration: a
+// second execution that registers before the delayed re-registration of the
+// first is still the current one. The fake Backend makes the same choice, and
+// its own test runs the same registrations (pkg/agentapi/fake).
+func TestTheHigherRestartCountIsCurrentWhateverTheRegistrationOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		secondRegistersFirst bool  // the second execution (the other ID) registers before the rig's agent
+		firstRC, laterRC     int32 // restart counts of the first and of the later registration
+		laterIsCurrent       bool
+	}{
+		{"the second execution registers first, the first's delayed re-registration after", true, 1, 0, false},
+		{"the first registers first, the second after", false, 0, 1, true},
+		{"the same restart count: the later registration", false, 0, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := newOrderRig(t)
+			o.rg.restartController() // a controller restart: both register again
+			a := o.caller            // the rig's agent
+			b := a
+			b.AgentInstanceID = strings.Repeat("be", 16)
+			first, later := a, b
+			if tc.secondRegistersFirst {
+				first, later = b, a
+			}
+			if _, err := o.rg.backend.Register(o.rg.ctx, first, agentapi.RegisterRequest{RestartCount: tc.firstRC}); err != nil {
+				t.Fatal(err)
+			}
+			o.rg.clock.Advance(time.Second)
+			if _, err := o.rg.backend.Register(o.rg.ctx, later, agentapi.RegisterRequest{RestartCount: tc.laterRC}); err != nil {
+				t.Fatal(err)
+			}
+			cur, other := first, later
+			if tc.laterIsCurrent {
+				cur, other = later, first
+			}
+			if err := o.rg.backend.Report(o.rg.ctx, cur, o.report(1, "unix:/current", "")); err != nil {
+				t.Fatal(err)
+			}
+			if err := o.rg.backend.Report(o.rg.ctx, other, o.report(500, "unix:/other", "")); err != nil {
+				t.Fatalf("the other instance's report: %v, want it accepted", err)
+			}
+			if ep, _, from := o.kept(t); ep != "unix:/current" || from != cur.AgentInstanceID {
+				t.Errorf("the Backend holds %q from %q, want the current instance's report from %q", ep, from, cur.AgentInstanceID)
+			}
+		})
 	}
 }

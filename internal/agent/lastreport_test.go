@@ -48,9 +48,11 @@ type heldBackend struct {
 	failure error
 	// entered carries every Report call that came in while one was held.
 	entered chan agentapi.Report
-	// lateLanded is closed when a held report, whose caller had given up, has
-	// reached the Backend after the release.
+	// lateLanded is closed when the held report has reached the Backend after
+	// the release, whether its caller waited for the release or had given up
+	// (the two can both be ready when the held call first looks).
 	lateLanded chan struct{}
+	lateOnce   sync.Once
 	// failing, once set by failFrom, is what every other Report call returns,
 	// and failed counts them.
 	failing error
@@ -109,6 +111,7 @@ func (b *heldBackend) Report(ctx context.Context, c agentapi.Caller, r agentapi.
 			if err != nil {
 				return err
 			}
+			defer b.lateOnce.Do(func() { close(b.lateLanded) })
 			return b.Backend.Report(ctx, c, r)
 		case <-ctx.Done():
 			// The caller gave up; the request had left, so the server takes it
@@ -121,7 +124,7 @@ func (b *heldBackend) Report(ctx context.Context, c agentapi.Caller, r agentapi.
 				if err == nil {
 					b.Backend.Report(context.Background(), c, r)
 				}
-				close(b.lateLanded)
+				b.lateOnce.Do(func() { close(b.lateLanded) })
 			}()
 			return ctx.Err()
 		}

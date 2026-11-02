@@ -213,3 +213,49 @@ func TestFakeAgentCountsItsReportsAndRestartsAtOneWhenRequeued(t *testing.T) {
 	eq(t, "reports kept", len(b.Reports(allocUID)), 5)
 	eq(t, "dropped", b.Dropped(allocUID), 0)
 }
+
+// The current instance is the one with the highest restart count, the later
+// registration on a tie, whatever the order of registration, as the lifecycle
+// controller's Backend picks it (the same registrations are run against it in
+// internal/lifecycle). A second execution that registers before the delayed
+// re-registration of the first is still the current one: picked by arrival, the
+// Backend would keep the first's reports and drop every one of the second's.
+func TestBackendKeepsTheInstanceWithTheHigherRestartCountWhateverTheRegistrationOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		secondRegistersFirst bool  // agent2, the second execution, registers before agent1
+		firstRC, laterRC     int32 // restart counts of the first and of the later registration
+		laterIsCurrent       bool
+	}{
+		{"the second execution registers first, the first's delayed re-registration after", true, 1, 0, false},
+		{"the first registers first, the second after", false, 0, 1, true},
+		{"the same restart count: the later registration", false, 0, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := fake.NewBackend()
+			first, later := agent1, agent2
+			if tc.secondRegistersFirst {
+				first, later = agent2, agent1
+			}
+			if _, err := b.Register(bgndCtx, caller(first), agentapi.RegisterRequest{RestartCount: tc.firstRC}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := b.Register(bgndCtx, caller(later), agentapi.RegisterRequest{RestartCount: tc.laterRC}); err != nil {
+				t.Fatal(err)
+			}
+			cur, other := first, later
+			if tc.laterIsCurrent {
+				cur, other = later, first
+			}
+			if err := b.Report(bgndCtx, caller(cur), stoppedAt(1, agentapi.PartStopped)); err != nil {
+				t.Fatal(err)
+			}
+			if err := b.Report(bgndCtx, caller(other), stoppedAt(500, agentapi.PartExited)); err != nil {
+				t.Fatalf("the other instance's report: %v, want it accepted", err)
+			}
+			eq(t, "the phase the Backend holds", phaseOfLast(t, b), agentapi.PartStopped)
+			eq(t, "reports kept", len(b.Reports(allocUID)), 1)
+			eq(t, "dropped", b.Dropped(allocUID), 1)
+		})
+	}
+}

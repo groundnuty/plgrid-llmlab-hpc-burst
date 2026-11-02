@@ -190,7 +190,8 @@ func (b *Backend) Desired(_ context.Context, c agentapi.Caller) (agentapi.Desire
 // Report appends the report to the Allocation's list, as the lifecycle
 // controller's Backend keeps it (HBEP-7, Report order). For a registered agent
 // (CodeNotRegistered is answered first) it keeps a report only from the agent
-// instance registered last for the Allocation, and only if agentapi.KeepsReport
+// instance currently registered for the Allocation (currentInstance), and only
+// if agentapi.KeepsReport
 // says so for its Seq and the Seq of the last report kept from that instance.
 // Any other report is answered as accepted, counted by Dropped and not kept. The
 // count held for the instance rises only when a report is kept.
@@ -203,9 +204,8 @@ func (b *Backend) Report(_ context.Context, c agentapi.Caller, r agentapi.Report
 	if !b.registered(c) {
 		return notRegistered(c)
 	}
-	regs := b.regs[c.AllocationUID]
 	k := seqKey{c.AllocationUID, c.AgentInstanceID}
-	if regs[len(regs)-1].Caller.AgentInstanceID != c.AgentInstanceID || !agentapi.KeepsReport(r.Seq, b.seqs[k]) {
+	if b.currentInstance(c.AllocationUID) != c.AgentInstanceID || !agentapi.KeepsReport(r.Seq, b.seqs[k]) {
 		b.dropped[c.AllocationUID]++
 		return nil
 	}
@@ -219,6 +219,24 @@ func (b *Backend) Report(_ context.Context, c agentapi.Caller, r agentapi.Report
 	}
 	b.reports[c.AllocationUID] = append(b.reports[c.AllocationUID], cloneReport(r))
 	return nil
+}
+
+// currentInstance returns the agent instance ID the Backend keeps reports from
+// for the Allocation: the registration with the highest restart count, the later
+// one on a tie. That is the choice of the lifecycle controller's Backend and of
+// its passes (regLess: restart count, then registration time, then ID), with the
+// order of registration standing for the time, since this Backend has no clock;
+// a second execution registers with a higher restart count whatever the order
+// of the registrations. The caller holds b.mu.
+func (b *Backend) currentInstance(allocUID string) string {
+	var cur string
+	var best int32
+	for i, r := range b.regs[allocUID] {
+		if i == 0 || r.Request.RestartCount >= best {
+			cur, best = r.Caller.AgentInstanceID, r.Request.RestartCount
+		}
+	}
+	return cur
 }
 
 // begin counts a call, rejects a caller that names no Allocation or whose agent
