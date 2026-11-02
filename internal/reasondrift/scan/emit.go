@@ -2,7 +2,6 @@ package scan
 
 import (
 	"fmt"
-	"go/ast"
 	"go/token"
 	"go/types"
 	"sort"
@@ -19,52 +18,14 @@ type scanner struct {
 	fset      *token.FileSet
 	fns       []*ssa.Function
 
-	wrappers     map[string]bool // named in Options
-	seenWrappers map[string]bool // met in the code
+	wrappers     map[string]reasondrift.Wrapper // named in Options
+	seenWrappers map[string]bool                // met in the code
 
 	// callers lists the static calls of each function of the module, and
 	// escaped the functions that are used as a value, which a static caller
 	// list does not cover.
 	callers map[*ssa.Function][]*ssa.CallCommon
 	escaped map[*ssa.Function]bool
-
-	// calls maps the position of a call's opening parenthesis to its syntax.
-	calls map[token.Pos]callSite
-}
-
-// callSite is a call expression and the type information of its package.
-type callSite struct {
-	call *ast.CallExpr
-	info *types.Info
-}
-
-// literalArg reports whether argument i of the call (counted without a
-// receiver) is written as a string literal at the call: a literal, a
-// conversion of one, or a constant expression that names no constant.
-func (s *scanner) literalArg(cc *ssa.CallCommon, i int) bool {
-	site, ok := s.calls[cc.Pos()]
-	if !ok || i < 0 || i >= len(site.call.Args) {
-		return false
-	}
-	return literalExpr(site.call.Args[i], site.info)
-}
-
-func literalExpr(e ast.Expr, info *types.Info) bool {
-	// A conversion of a constant is a constant expression, so it needs no case
-	// of its own.
-	if tv, ok := info.Types[ast.Unparen(e)]; !ok || tv.Value == nil {
-		return false // not a constant expression
-	}
-	named := false
-	ast.Inspect(e, func(n ast.Node) bool {
-		if id, ok := n.(*ast.Ident); ok {
-			if _, isConst := info.Uses[id].(*types.Const); isConst {
-				named = true
-			}
-		}
-		return true
-	})
-	return !named
 }
 
 // functions lists the functions that can hold a call or a use of a function:
@@ -158,10 +119,19 @@ func (s *scanner) index() {
 	}
 }
 
-// collect finds the emit sites among the calls of the module's functions.
-func (s *scanner) collect(code *reasondrift.Code) error {
-	var unknown []string
+// collect finds the emit sites among the calls of the module's functions, and
+// reports what it cannot accept as problems.
+func (s *scanner) collect(code *reasondrift.Code) {
+	problem := func(kind string, fn *ssa.Function, pos token.Pos, detail string) {
+		code.Problems = append(code.Problems, reasondrift.Problem{
+			Kind: kind, Package: s.pkgDir(fn), Func: funcName(fn), Detail: detail + " (" + s.pos(pos) + ")",
+		})
+	}
 	for _, fn := range s.fns {
+		root := fn
+		for root.Parent() != nil {
+			root = root.Parent()
+		}
 		for _, b := range fn.Blocks {
 			for _, in := range b.Instrs {
 				ci, ok := in.(ssa.CallInstruction)
@@ -170,38 +140,213 @@ func (s *scanner) collect(code *reasondrift.Code) error {
 				}
 				cc := ci.Common()
 				full, name := calleeName(cc)
-				if !emitMethods[name] && !s.isSink(full) {
-					continue
-				}
-				here := s.pkgDir(fn) + "." + funcName(fn)
-				if s.wrappers[here] {
-					s.seenWrappers[here] = true
-					continue
-				}
 				sk, isSink := s.sink(full)
-				if !isSink && fn.Synthetic != "" {
-					// A compiler-made wrapper only forwards its arguments to the
-					// method it wraps; the calls of the wrapper are what count.
+				if !emitMethods[name] && !isSink {
 					continue
 				}
-				if !isSink {
-					unknown = append(unknown, fmt.Sprintf("%s calls %s (%s)", here, full, s.pos(ci.Pos())))
+				// A call in a listed wrapper is accepted if it passes on what the
+				// wrapper's Forwards say. (The compiler's pointer-receiver wrapper
+				// of a listed method is no wrapper: it calls one.)
+				if w, listed := s.wrappers[s.pkgDir(root)+"."+funcName(root)]; listed && root.Synthetic == "" {
+					s.seenWrappers[w.Func] = true
+					if why := s.verifyForwards(w, fn, root, cc); why != "" {
+						problem(reasondrift.WrapperDoesNotForward, fn, ci.Pos(), w.Func+": "+why)
+					}
 					continue
 				}
-				code.Emits = append(code.Emits, s.emit(fn, ci, cc, sk))
+				if isSink {
+					code.Emits = append(code.Emits, s.emit(fn, ci, cc, sk))
+					continue
+				}
+				if s.callsWrapper(cc) {
+					continue
+				}
+				what := "calls " + full
+				if full == "" {
+					what = "calls a method named " + name + " through a value"
+				}
+				problem(reasondrift.UnknownRecorder, fn, ci.Pos(),
+					what+"; add it to sinks, or list the function that holds the call as a wrapper")
 			}
 		}
 	}
-	if len(unknown) > 0 {
-		sort.Strings(unknown)
-		return fmt.Errorf("a call raises an event through a method the scan does not know; add it to sinks, or name its caller a wrapper:\n  %s",
-			strings.Join(unknown, "\n  "))
+}
+
+// callsWrapper reports whether a call is a static call of a listed wrapper.
+func (s *scanner) callsWrapper(cc *ssa.CallCommon) bool {
+	f := cc.StaticCallee()
+	if f == nil || f.Synthetic != "" || f.Pkg == nil {
+		return false
 	}
-	return nil
+	_, ok := s.wrappers[s.pkgDir(f)+"."+funcName(f)]
+	return ok
+}
+
+// receiverOffset is 1 for a static call of a method, whose receiver is the
+// first of the call's arguments, and 0 otherwise.
+func receiverOffset(cc *ssa.CallCommon) int {
+	if !cc.IsInvoke() {
+		if f := cc.StaticCallee(); f != nil && f.Signature.Recv() != nil {
+			return 1
+		}
+	}
+	return 0
+}
+
+// verifyForwards checks one recorder call in a wrapper against its Forwards and
+// returns why it does not pass on what they say, or "".
+func (s *scanner) verifyForwards(w reasondrift.Wrapper, fn, root *ssa.Function, cc *ssa.CallCommon) string {
+	if fn != root {
+		return "the recorder call is inside a function literal"
+	}
+	if len(w.Forwards) == 0 {
+		return "the wrapper lists nothing it forwards"
+	}
+	off := receiverOffset(cc)
+	skip := 0
+	if root.Signature.Recv() != nil {
+		skip = 1
+	}
+	for _, f := range w.Forwards {
+		if off+f.Arg >= len(cc.Args) {
+			return fmt.Sprintf("the call has no argument %d", f.Arg)
+		}
+		arg := unwrap(cc.Args[off+f.Arg])
+		base, typeName, field, isField := fieldOf(arg)
+		var param *ssa.Parameter
+		if f.Of == "" {
+			if skip+f.Param >= len(root.Params) {
+				return fmt.Sprintf("the wrapper has no parameter %d", f.Param)
+			}
+			param = root.Params[skip+f.Param]
+		}
+		switch {
+		case f.Of != "":
+			if !isField || typeName != f.Of || field != f.Field {
+				return fmt.Sprintf("argument %d is not the %s of a %s", f.Arg, f.Field, f.Of)
+			}
+		case f.Field != "":
+			if !isField || field != f.Field || !isParam(base, param) {
+				return fmt.Sprintf("argument %d is not the %s of parameter %d", f.Arg, f.Field, f.Param)
+			}
+		default:
+			if !isParam(arg, param) {
+				return fmt.Sprintf("argument %d is not parameter %d, unchanged", f.Arg, f.Param)
+			}
+		}
+	}
+	return ""
+}
+
+// isParam reports whether v is the parameter p, unchanged: p itself, or p read
+// back from the slot go/ssa spilled it to because its address is taken (a
+// struct parameter whose fields are read is one). A slot that anything else is
+// stored into, or whose address goes anywhere but a field read, is not p.
+func isParam(v ssa.Value, p *ssa.Parameter) bool {
+	v = unwrap(v)
+	if v == ssa.Value(p) {
+		return true
+	}
+	switch x := v.(type) {
+	case *ssa.UnOp:
+		if a, ok := x.X.(*ssa.Alloc); ok && x.Op == token.MUL {
+			return spillOf(a, p)
+		}
+	case *ssa.Alloc:
+		return spillOf(x, p)
+	}
+	return false
+}
+
+func spillOf(a *ssa.Alloc, p *ssa.Parameter) bool {
+	refs := a.Referrers()
+	if refs == nil {
+		return false
+	}
+	stores := 0
+	for _, r := range *refs {
+		switch r := r.(type) {
+		case *ssa.Store:
+			if r.Addr != ssa.Value(a) || r.Val != ssa.Value(p) {
+				return false
+			}
+			stores++
+		case *ssa.UnOp:
+			if r.Op != token.MUL {
+				return false
+			}
+		case *ssa.FieldAddr:
+			frefs := r.Referrers()
+			if frefs == nil {
+				return false
+			}
+			for _, fr := range *frefs {
+				switch fr := fr.(type) {
+				case *ssa.UnOp, *ssa.DebugRef:
+					_ = fr
+				default:
+					return false // a store into the field, or its address passed on
+				}
+			}
+		case *ssa.DebugRef:
+		default:
+			return false
+		}
+	}
+	return stores == 1
+}
+
+// unwrap strips the conversions that change a value's type and not the value.
+func unwrap(v ssa.Value) ssa.Value {
+	for {
+		switch x := v.(type) {
+		case *ssa.ChangeInterface:
+			v = x.X
+		case *ssa.MakeInterface:
+			v = x.X
+		case *ssa.ChangeType:
+			v = x.X
+		case *ssa.Convert:
+			v = x.X
+		default:
+			return v
+		}
+	}
+}
+
+// fieldOf reads a field selection: the struct value (or pointer) it selects
+// from, that struct type's name, and the field's name.
+func fieldOf(v ssa.Value) (base ssa.Value, typeName, field string, ok bool) {
+	var x ssa.Value
+	var idx int
+	switch v := v.(type) {
+	case *ssa.Field:
+		x, idx = v.X, v.Field
+	case *ssa.UnOp:
+		fa, isAddr := v.X.(*ssa.FieldAddr)
+		if v.Op != token.MUL || !isAddr {
+			return nil, "", "", false
+		}
+		x, idx = fa.X, fa.Field
+	default:
+		return nil, "", "", false
+	}
+	t := x.Type()
+	if p, isPtr := t.Underlying().(*types.Pointer); isPtr {
+		t = p.Elem()
+	}
+	st, isStruct := t.Underlying().(*types.Struct)
+	if !isStruct || idx >= st.NumFields() {
+		return nil, "", "", false
+	}
+	if n, isNamed := t.(*types.Named); isNamed {
+		typeName = n.Obj().Name()
+	}
+	return x, typeName, st.Field(idx).Name(), true
 }
 
 // calleeName returns the full name and the bare name of the function a call
-// reaches, when it can be named.
+// reaches, when it can be named. A call through a function value has neither.
 func calleeName(cc *ssa.CallCommon) (full, name string) {
 	if cc.IsInvoke() {
 		return cc.Method.FullName(), cc.Method.Name()
@@ -220,24 +365,11 @@ func (s *scanner) sink(full string) (sink, bool) {
 	return sk, ok
 }
 
-func (s *scanner) isSink(full string) bool {
-	_, ok := s.sink(full)
-	return ok
-}
-
 // emit resolves one call of a sink to an Emit.
 func (s *scanner) emit(fn *ssa.Function, ci ssa.CallInstruction, cc *ssa.CallCommon, sk sink) reasondrift.Emit {
 	e := reasondrift.Emit{Package: s.pkgDir(fn), Func: funcName(fn), Pos: s.pos(ci.Pos())}
-	off := 0
-	if !cc.IsInvoke() {
-		if f := cc.StaticCallee(); f != nil && f.Signature.Recv() != nil {
-			off = 1
-		}
-	}
+	off := receiverOffset(cc)
 	arg := func(i int) (ssa.Value, bool) {
-		if i < 0 {
-			return nil, true
-		}
 		if off+i >= len(cc.Args) {
 			return nil, false
 		}
@@ -251,59 +383,64 @@ func (s *scanner) emit(fn *ssa.Function, ci ssa.CallInstruction, cc *ssa.CallCom
 	if !ok {
 		return fail("the reason", "the call has too few arguments")
 	}
-	reasons, lits, why := s.resolve(reasonV, stringLeaf)
-	reasons = dropEmpty(reasons)
-	if s.literalArg(cc, sk.reason) {
-		lits = reasons
-	}
-	e.LiteralReasons = dropEmpty(lits)
-	if why == "" && len(reasons) == 0 {
-		why = "only empty strings reach it"
-	}
+	raw, why := s.resolve(reasonV, stringLeaf)
 	if why != "" {
 		return fail("the reason", why)
 	}
-	e.Reasons = reasons
+	// A value that carries the mark was fed by a string literal on some path.
+	seen, litSeen := map[string]bool{}, map[string]bool{}
+	for _, r := range raw {
+		c := strings.ReplaceAll(r, litMark, "")
+		if c == "" {
+			continue // the empty string is no reason
+		}
+		seen[c] = true
+		if strings.Contains(r, litMark) {
+			litSeen[c] = true
+		}
+	}
+	if len(seen) == 0 {
+		return fail("the reason", "only empty strings reach it")
+	}
+	e.Reasons, e.LiteralReasons = sorted(seen), sorted(litSeen)
 
-	if actionV, ok := arg(sk.action); !ok {
+	actionV, ok := arg(sk.action)
+	if !ok {
 		return fail("the type", "the call has too few arguments")
-	} else if actionV == nil {
-		e.Actions = []string{reasondrift.NoAction}
-	} else {
-		actions, _, why := s.resolve(actionV, stringLeaf)
-		if actions = dropEmpty(actions); why == "" && len(actions) == 0 {
-			why = "only empty strings reach it"
-		}
-		if why != "" {
-			return fail("the type", why)
-		}
-		e.Actions = actions
 	}
+	actions, why := s.resolve(actionV, stringLeaf)
+	if why != "" {
+		return fail("the type", why)
+	}
+	seen = map[string]bool{}
+	for _, a := range actions {
+		if c := strings.ReplaceAll(a, litMark, ""); c != "" {
+			seen[c] = true
+		}
+	}
+	if len(seen) == 0 {
+		return fail("the type", "only empty strings reach it")
+	}
+	e.Actions = sorted(seen)
 
-	if regV, ok := arg(sk.regarding); !ok {
+	regV, ok := arg(sk.regarding)
+	if !ok {
 		return fail("the regarding object", "the call has too few arguments")
-	} else if regV == nil {
-		e.Kinds = sk.kinds
-		if len(e.Kinds) == 0 {
-			e.Kinds = []string{reasondrift.NoKind}
-		}
-	} else {
-		kinds, _, why := s.resolve(regV, kindLeaf)
-		if why != "" {
-			return fail("the regarding object", why)
-		}
-		e.Kinds = kinds
 	}
+	kinds, why := s.resolve(regV, kindLeaf)
+	if why != "" {
+		return fail("the regarding object", why)
+	}
+	e.Kinds = kinds
 	return e
 }
 
-func dropEmpty(in []string) []string {
-	var out []string
-	for _, s := range in {
-		if s != "" {
-			out = append(out, s)
-		}
+func sorted(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for x := range m {
+		out = append(out, x)
 	}
+	sort.Strings(out)
 	return out
 }
 

@@ -178,3 +178,30 @@ func (p *pass) callFailLit(in *Instance) {
 	p.failLit(in, "ForwardedLiteral")
 	p.failLit(in, v1alpha1.ReasonA)
 }
+
+// viaVariable writes a literal into a variable first.
+func (p *pass) viaVariable(in *Instance) {
+	reason := "ViaVariable"
+	p.r.Event(in, nil, eventFailing, reason, "m")
+}
+
+func literalReturn() string { return "ViaReturn" }
+
+// viaReturn gets a literal from a function's result.
+func (p *pass) viaReturn(in *Instance) { p.r.Event(in, nil, eventFailing, literalReturn(), "m") }
+
+// ident returns its argument. Its callers pass different reasons, and each call
+// of it has the result of its own argument.
+func ident(r string) string { return r }
+
+// discarded calls ident twice and emits only the second call's result.
+func (p *pass) discarded(in *Instance) {
+	_ = ident(v1alpha1.ReasonA)
+	p.r.Event(in, nil, eventFailing, ident(v1alpha1.ReasonB), "m")
+}
+
+// nested calls the helper on the result of the helper: the helper's parameter
+// is reached twice, once for each call.
+func (p *pass) nested(in *Instance) {
+	p.r.Event(in, nil, eventFailing, ident(ident(v1alpha1.ReasonC)), "m")
+}

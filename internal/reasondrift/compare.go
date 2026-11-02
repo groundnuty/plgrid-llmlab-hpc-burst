@@ -55,16 +55,43 @@ type Code struct {
 	// (Wrapper.Func): a function whose Event or Eventf call forwards the
 	// arguments it was called with.
 	Wrappers []string
+	// Problems are what the scan could not accept: a call that raises an event
+	// through a recorder it does not know, a wrapper that does not forward, a
+	// use of a recorder method outside the packages it loaded.
+	Problems []Problem
+}
+
+// Problem kinds.
+const (
+	// UnknownRecorder: a call of a method named Event, Eventf or AnnotatedEventf
+	// that is neither a sink nor in a listed wrapper, or such a method taken as
+	// a value.
+	UnknownRecorder = "unknown-recorder"
+	// WrapperDoesNotForward: a listed wrapper whose recorder call does not pass
+	// on what its Forwards say.
+	WrapperDoesNotForward = "wrapper-does-not-forward"
+	// OutsideTheScan: a use of a recorder method in a package the scan did not
+	// load.
+	OutsideTheScan = "outside-the-scan"
+)
+
+// Problem is something the scan met and could not accept. Compare turns each
+// into a Mismatch, so the allowances can name it and nothing hides it.
+type Problem struct {
+	Kind    string
+	Package string
+	Func    string
+	Detail  string
 }
 
 // Mismatch kinds.
 const (
-	// NoConstant: a reason that HBEP-8's table names, and that an emit site
-	// passes as a string literal, has no Reason constant in api/v1alpha1. A
-	// reason an emit site takes from a named constant, in api/v1alpha1 or in the
-	// emitter's package, is fine (`@hpc-burst-science-agent`, 2 Nov 2026, for
-	// #239); a bare literal is not.
-	NoConstant = "no-constant"
+	// Literal: an emit site of a typed event passes its reason as a string
+	// literal, or assembles it with one, on some path. A reason must come from a
+	// named constant, in api/v1alpha1 or in the emitter's package
+	// (`@hpc-burst-science-agent`, 2 Nov 2026, for #239): the constant is the
+	// contract, and a literal that happens to match one is not a reference to it.
+	Literal = "literal"
 	// TableOnly: the table lists a reason under a type and a regarding kind
 	// that no emit site raises.
 	TableOnly = "table-only"
@@ -125,29 +152,6 @@ type triple struct{ action, reason, kind string }
 func Compare(d *Docs, c *Code) []Mismatch {
 	var out []Mismatch
 
-	// A reason of the table that an emit site passes as a string literal has a
-	// constant in api/v1alpha1.
-	// Only typed events count: the Provider controller's untyped events are no
-	// rows of the table, and write their reasons as literals.
-	literal := map[string]bool{}
-	for _, e := range c.Emits {
-		if e.Unresolved == "" && !slices.Contains(e.Actions, NoAction) {
-			for _, r := range e.LiteralReasons {
-				literal[r] = true
-			}
-		}
-	}
-	named := map[string]bool{}
-	for _, e := range d.Table {
-		named[e.Reason] = true
-	}
-	for r := range named {
-		if literal[r] && len(c.Constants[r]) == 0 {
-			out = append(out, Mismatch{Kind: NoConstant, Reason: r,
-				Detail: "an emit site passes it as a string literal, and no Reason or EventReason constant in api/v1alpha1 holds this value"})
-		}
-	}
-
 	// Events: the table's (type, reason, kind) triples against the emit sites'.
 	table := map[triple]bool{}
 	for _, e := range d.Table {
@@ -162,6 +166,15 @@ func Compare(d *Docs, c *Code) []Mismatch {
 		if e.Unresolved != "" {
 			out = append(out, Mismatch{Kind: Unresolved, Package: e.Package, Func: e.Func, Detail: e.Unresolved + " (" + e.Pos + ")"})
 			continue
+		}
+		if !slices.Contains(e.Actions, NoAction) {
+			for _, r := range e.LiteralReasons {
+				detail := "a string literal reaches the recorder at " + e.Pos
+				if names := c.Constants[r]; len(names) > 0 {
+					detail += "; use api/v1alpha1." + names[0]
+				}
+				out = append(out, Mismatch{Kind: Literal, Reason: r, Package: e.Package, Func: e.Func, Detail: detail})
+			}
 		}
 		for _, r := range e.Reasons {
 			for _, a := range e.Actions {
@@ -200,10 +213,16 @@ func Compare(d *Docs, c *Code) []Mismatch {
 		}
 	}
 
+	for _, p := range c.Problems {
+		out = append(out, Mismatch{Kind: p.Kind, Package: p.Package, Func: p.Func, Detail: p.Detail})
+	}
+
 	out = append(out, compareRanking(d.Ranking, c.Ranking)...)
 
-	sort.Slice(out, func(i, j int) bool { return out[i].Key() < out[j].Key() })
-	return out
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Key() < out[j].Key() })
+	// One mismatch per identity: several emit sites of one function that write
+	// the same literal are one finding.
+	return slices.CompactFunc(out, func(a, b Mismatch) bool { return a.Key() == b.Key() })
 }
 
 func distinct(ts []triple) []triple {

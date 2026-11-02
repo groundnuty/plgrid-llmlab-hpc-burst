@@ -42,11 +42,20 @@ var knownDriftUntilHBEP8Erratum = []reasondrift.Entry{
 	{Kind: reasondrift.CodeOnly, Action: "degraded", Reason: "VerificationFailed", Regarding: "Instance", Package: "internal/lifecycle", Why: "mdObject falls back to the Instance when the ModelDeployment is gone; the table lists ModelDeployment only"},
 }
 
-// requiredPackages are the packages whose emit sites the guard reads. The scan
-// loads ./..., and fails when one of these is missing.
+// emitterPatterns are the packages the scan loads: those that raise events, and
+// the fake that wraps a recorder. The rest of the module is only looked at, with
+// the scan's CheckRest, for a use of a recorder method, so a new emitter in
+// another package fails the guard instead of going unread. Loading only these
+// takes the scan from 0.85 GB to 0.67 GB.
+var emitterPatterns = []string{
+	"./api/v1alpha1", "./cmd/hpcburst-controller", "./internal/front", "./internal/lifecycle",
+	"./internal/managed", "./internal/providerctl", "./pkg/provider", "./pkg/provider/fake",
+}
+
+// requiredPackages are the packages whose syntax the scan must have loaded.
 var requiredPackages = []string{
 	"api/v1alpha1", "cmd/hpcburst-controller", "internal/front", "internal/lifecycle",
-	"internal/managed", "internal/providerctl", "pkg/provider",
+	"internal/managed", "internal/providerctl", "pkg/provider", "pkg/provider/fake",
 }
 
 func repoRoot(t *testing.T) string {
@@ -73,7 +82,8 @@ func (s *scanned) get(t *testing.T, overlay map[string][]byte) *reasondrift.Code
 	t.Helper()
 	s.once.Do(func() {
 		s.code, s.err = scan.Scan(scan.Options{
-			Root: repoRoot(t), Overlay: overlay, Wrappers: reasondrift.WrapperNames(), Require: requiredPackages,
+			Root: repoRoot(t), Patterns: emitterPatterns, CheckRest: true, Overlay: overlay,
+			Wrappers: reasondrift.Wrappers, Require: requiredPackages,
 		})
 		// Give the memory back before the next scan, so the test binary's peak
 		// is one scan's.
@@ -85,8 +95,7 @@ func (s *scanned) get(t *testing.T, overlay map[string][]byte) *reasondrift.Code
 
 var (
 	realScanned    scanned // the unchanged tree
-	overlayScanned scanned // the tree with the mutants of TestEmitsAddedByAnOverlayAreCaught
-	unknownScanned scanned // the tree with an emit through a recorder the scan does not know
+	overlayScanned scanned // the tree with the mutants of TestMutantsAreCaught
 )
 
 func realScan(t *testing.T) *reasondrift.Code {
@@ -125,6 +134,11 @@ func drift(docs *reasondrift.Docs, code *reasondrift.Code, exceptions, debt []re
 // below do not count separators.
 func key(kind, action, reason, regarding, pkg string) string {
 	return reasondrift.Mismatch{Kind: kind, Action: action, Reason: reason, Regarding: regarding, Package: pkg}.Key()
+}
+
+// keyF is key for a mismatch that names a function.
+func keyF(kind, reason, pkg, fn string) string {
+	return reasondrift.Mismatch{Kind: kind, Reason: reason, Package: pkg, Func: fn}.Key()
 }
 
 func keys(ms []reasondrift.Mismatch) []string {
@@ -172,7 +186,10 @@ func TestTheScanSawTheEmitters(t *testing.T) {
 	for _, e := range code.Emits {
 		perPkg[e.Package]++
 	}
-	for _, pkg := range []string{"internal/lifecycle", "internal/front", "cmd/hpcburst-controller", "pkg/provider", "internal/providerctl", "internal/managed"} {
+	// The three packages that raise typed events. (The Provider controller's
+	// and the managed controller's events are built by constructors, which the
+	// scan does not read.)
+	for _, pkg := range []string{"internal/lifecycle", "internal/front", "cmd/hpcburst-controller"} {
 		if perPkg[pkg] == 0 {
 			t.Errorf("no emit site found in %s; found %v", pkg, perPkg)
 		}
@@ -233,6 +250,9 @@ func TestEveryAllowanceStatesItsReason(t *testing.T) {
 	for _, w := range reasondrift.Wrappers {
 		if strings.TrimSpace(w.Why) == "" {
 			t.Errorf("wrapper %s has no Why", w.Func)
+		}
+		if len(w.Forwards) == 0 {
+			t.Errorf("wrapper %s lists nothing it forwards, so the scan would accept anything it passes on", w.Func)
 		}
 	}
 }
@@ -322,97 +342,178 @@ func TestAChangedRegardingFails(t *testing.T) {
 	}
 }
 
-// mutantEmits is a file added to internal/lifecycle through an overlay: three
-// calls of the Recorder, with a reason written as a string literal, a reason a
-// package-local constant names, and a reason no table row lists.
+// mutantEmits is a file added to internal/lifecycle through an overlay. It holds
+// the emits and the other code that each blocking finding of the review of
+// #246 is about: a reason written as a string literal, a package-local
+// constant, a literal put in a variable or returned by a function, a helper's
+// discarded and emitted results, a constructor that is called and discarded,
+// and a recorder the scan does not know, called and taken as a value.
 const mutantEmits = `package lifecycle
 
-import "github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+import (
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
+)
 
-const namedMutantReason = "NamedMutantReason"
+const (
+	namedMutantReason     = "NamedMutantReason"
+	discardedMutantReason = "DiscardedMutantReason"
+)
+
+func mutantIdent(r string) string { return r }
+
+func mutantLiteralReturn() string { return "ViaReturnMutantReason" }
 
 func (p *pass) mutantEmits(in *v1alpha1.Instance) {
 	p.r.Recorder.Event(in, nil, eventFailing, "LiteralMutantReason", "m")
 	p.r.Recorder.Event(in, nil, eventFailing, namedMutantReason, "m")
 	p.r.Recorder.Event(in, nil, eventFailing, "UnlistedMutantReason", "m")
+	reason := "ViaVariableMutantReason"
+	p.r.Recorder.Event(in, nil, eventFailing, reason, "m")
+	p.r.Recorder.Event(in, nil, eventFailing, mutantLiteralReturn(), "m")
+	_ = mutantIdent(discardedMutantReason)
+	p.r.Recorder.Event(in, nil, eventFailing, mutantIdent(namedMutantReason), "m")
+	_ = provider.NewManagedEvent("degraded", "ConstructedMutantReason", "m")
 }
+
+type mutantOtherRecorder interface{ Event(string) }
+
+func mutantRelay(o mutantOtherRecorder) { o.Event("X") }
+
+func mutantRun(f func(string)) { f("X") }
+
+func mutantUseValue(o mutantOtherRecorder) { mutantRun(o.Event) }
 `
 
-// frontRouterWithALiteral is internal/front/router.go with the one emit that
-// takes CountsDrift from the package-local constant reasonCountsDrift changed to
-// write the string literal instead.
-func frontRouterWithALiteral(t *testing.T) []byte {
+// replaceOnce returns the file at rel (under the root) with the one occurrence
+// of from replaced by to.
+func replaceOnce(t *testing.T, rel, from, to string) []byte {
 	t.Helper()
-	src, err := os.ReadFile(filepath.Join(repoRoot(t), "internal/front/router.go"))
+	src, err := os.ReadFile(filepath.Join(repoRoot(t), rel))
 	if err != nil {
 		t.Fatal(err)
 	}
-	const from, to = "eventDegraded, reasonCountsDrift, msg)", `eventDegraded, "CountsDrift", msg)`
 	if n := strings.Count(string(src), from); n != 1 {
-		t.Fatalf("internal/front/router.go has %d emits of reasonCountsDrift, want 1", n)
+		t.Fatalf("%s has %d occurrences of %q, want 1", rel, n, from)
 	}
 	return []byte(strings.Replace(string(src), from, to, 1))
 }
 
-// TestEmitsAddedByAnOverlayAreCaught is a mutant check (#239): new calls of the
-// lifecycle Recorder, and an emit whose package-local constant is replaced by
-// the same string literal, added through go/packages' overlay, appear as the
-// mismatches they cause and no others. One scan serves both cases.
-func TestEmitsAddedByAnOverlayAreCaught(t *testing.T) {
+// mutantOverlay is every change the mutant checks make to the tree, so one scan
+// of the changed tree serves them all.
+func mutantOverlay(t *testing.T) map[string][]byte {
 	root := repoRoot(t)
-	overlay := map[string][]byte{
+	return map[string][]byte{
 		filepath.Join(root, "internal/lifecycle/zz_mutant_overlay.go"): []byte(mutantEmits),
-		filepath.Join(root, "internal/front/router.go"):                frontRouterWithALiteral(t),
+		// B1: the three call sites that were literals are literals again, though
+		// api/v1alpha1 holds a constant with the same value.
+		filepath.Join(root, "internal/lifecycle/verify.go"): replaceOnce(t, "internal/lifecycle/verify.go",
+			"eventReady, v1alpha1.EventReasonReady, ", `eventReady, "Ready", `),
+		// A package-local constant of the front is replaced by its literal, which
+		// api/v1alpha1 has no constant for.
+		filepath.Join(root, "internal/front/router.go"): replaceOnce(t, "internal/front/router.go",
+			"eventDegraded, reasonCountsDrift, msg)", `eventDegraded, "CountsDrift", msg)`),
+		// B5: a listed wrapper that passes a reason of its own.
+		filepath.Join(root, "internal/lifecycle/events.go"): replaceOnce(t, "internal/lifecycle/events.go",
+			"rel, et, code, typ,", `rel, et, "WrongReason", typ,`),
+		// A recorder method used in a package the scan did not load.
+		filepath.Join(root, "internal/zzmutant/zz.go"): []byte("package zzmutant\n\ntype R interface{ Eventf() }\n\nfunc F(r R) { r.Eventf() }\n"),
 	}
-	code := overlayScanned.get(t, overlay)
+}
+
+// TestMutantsAreCaught is the mutant check of the blocking findings of the
+// review of #246 and of the original ones (#239): the changed tree is scanned
+// once, and the mismatches are exactly those the changes cause, for the
+// documents as they are and for documents with rows added.
+func TestMutantsAreCaught(t *testing.T) {
+	code := overlayScanned.get(t, mutantOverlay(t))
 	if overlayScanned.err != nil {
 		t.Fatal(overlayScanned.err)
 	}
 	md8, md7 := realDocs(t)
+	const lc = "internal/lifecycle"
 
-	// A reason the front took from a named constant is fine, and the same
-	// reason written as a literal needs a constant in api/v1alpha1: CountsDrift
-	// has none, so it is drift. (Without the change, the unchanged tree is the
-	// baseline: TestTheUnchangedTreeIsTheBaselineOfTheMutants.)
-	countsDrift := key(reasondrift.NoConstant, "", "CountsDrift", "", "")
-
-	// Not in the table: each new emit is one the table lacks.
-	want := []string{
-		countsDrift,
-		key(reasondrift.CodeOnly, "failing", "LiteralMutantReason", "Instance", "internal/lifecycle"),
-		key(reasondrift.CodeOnly, "failing", "NamedMutantReason", "Instance", "internal/lifecycle"),
-		key(reasondrift.CodeOnly, "failing", "UnlistedMutantReason", "Instance", "internal/lifecycle"),
+	// What the changes cause, whatever the documents say.
+	always := []string{
+		// B1: a literal where the constant exists, and where none does.
+		keyF(reasondrift.Literal, "Ready", lc, "pass.becomeReady"),
+		keyF(reasondrift.Literal, "CountsDrift", "internal/front", "Router.drift"),
+		// B2: a literal at the call, in a variable and in a result.
+		keyF(reasondrift.Literal, "LiteralMutantReason", lc, "pass.mutantEmits"),
+		keyF(reasondrift.Literal, "UnlistedMutantReason", lc, "pass.mutantEmits"),
+		keyF(reasondrift.Literal, "ViaVariableMutantReason", lc, "pass.mutantEmits"),
+		keyF(reasondrift.Literal, "ViaReturnMutantReason", lc, "pass.mutantEmits"),
+		// B5: a wrapper that does not pass its reason on.
+		keyF(reasondrift.WrapperDoesNotForward, "", lc, "KubeRecorder.Event"),
+		// B7: a call through a recorder the scan does not know.
+		keyF(reasondrift.UnknownRecorder, "", lc, "mutantRelay"),
+		// A recorder method outside the packages the scan loaded (its file's name).
+		keyF(reasondrift.OutsideTheScan, "", "internal/zzmutant", "zz.go"),
+		// The emits the table does not list. DiscardedMutantReason, whose helper
+		// result is thrown away (B4), is not among them, and ConstructedMutantReason,
+		// whose event is built and never raised (B6), neither.
+		key(reasondrift.CodeOnly, "failing", "UnlistedMutantReason", "Instance", lc),
+		key(reasondrift.CodeOnly, "failing", "ViaVariableMutantReason", "Instance", lc),
+		key(reasondrift.CodeOnly, "failing", "ViaReturnMutantReason", "Instance", lc),
 	}
+	listed := []string{
+		key(reasondrift.CodeOnly, "failing", "LiteralMutantReason", "Instance", lc),
+		key(reasondrift.CodeOnly, "failing", "NamedMutantReason", "Instance", lc),
+	}
+	// B7 also leaves one in a function the compiler made, whose name is not ours
+	// to spell: the wrapper of the method value.
+	compilerMade := func(got []string) ([]string, int) {
+		var rest []string
+		n := 0
+		for _, k := range got {
+			if strings.HasPrefix(k, reasondrift.UnknownRecorder+"|") && strings.Contains(k, "|(compiler-made)|") {
+				n++
+				continue
+			}
+			rest = append(rest, k)
+		}
+		return rest, n
+	}
+
+	got, n := compilerMade(leftover(t, md8, md7, code))
+	want := slices.Concat(always, listed)
 	slices.Sort(want)
-	if got := leftover(t, md8, md7, code); !slices.Equal(got, want) {
-		t.Errorf("with three emits added and a constant replaced by a literal: %v, want %v", got, want)
+	if !slices.Equal(got, want) || n != 1 {
+		t.Errorf("with the changes: %v and %d compiler-made, want %v and 1", got, n, want)
 	}
 
-	// With rows for the first two, what is left is the literal, which has no
-	// constant in api/v1alpha1 (a constant named in the emitter's package is
-	// fine, `@hpc-burst-science-agent`, 2 Nov 2026), and the unlisted reason.
+	// With rows for the first two, the code-only ones go, and a row for an event
+	// that is only built (B6) is not satisfied by it.
 	mutated := mutateRows(t, md8, "| `replaced` | `HandedOver`",
 		"| `replaced` | `HandedOver` | Instance | lifecycle controller |",
-		"| `failing` | `LiteralMutantReason`, `NamedMutantReason` | Instance | lifecycle controller |")
-	want = []string{
-		countsDrift,
-		key(reasondrift.NoConstant, "", "LiteralMutantReason", "", ""),
-		key(reasondrift.CodeOnly, "failing", "UnlistedMutantReason", "Instance", "internal/lifecycle"),
-	}
+		"| `failing` | `LiteralMutantReason`, `NamedMutantReason` | Instance | lifecycle controller |",
+		"| `degraded` | `ConstructedMutantReason` | Provider | managed catalog controller |")
+	got, n = compilerMade(leftover(t, mutated, md7, code))
+	want = slices.Concat(always, []string{key(reasondrift.TableOnly, "degraded", "ConstructedMutantReason", "Provider", "")})
 	slices.Sort(want)
-	if got := leftover(t, mutated, md7, code); !slices.Equal(got, want) {
-		t.Errorf("with rows for two of them: %v, want %v", got, want)
+	if !slices.Equal(got, want) || n != 1 {
+		t.Errorf("with rows for three of the reasons: %v and %d compiler-made, want %v and 1", got, n, want)
 	}
 }
 
-// TestAnEmitThroughAnUnknownRecorderFails: a call to Event through a recorder
-// the scan does not know fails the scan itself.
-func TestAnEmitThroughAnUnknownRecorderFails(t *testing.T) {
-	src := "package lifecycle\n\ntype mutantRecorder interface{ Event(string) }\n\nfunc mutantRelay(m mutantRecorder) { m.Event(\"X\") }\n"
-	overlay := map[string][]byte{filepath.Join(repoRoot(t), "internal/lifecycle/zz_mutant_overlay.go"): []byte(src)}
-	unknownScanned.get(t, overlay)
-	if err := unknownScanned.err; err == nil || !strings.Contains(err.Error(), "mutantRelay") {
-		t.Errorf("error %v, want one that names mutantRelay", err)
+// TestAnInterruptedTableFails (B3) breaks the table of HBEP-8 with a blank line
+// and goes on with a row of it, and puts a row of it far from the table: the
+// parser reads neither as a shorter table.
+func TestAnInterruptedTableFails(t *testing.T) {
+	md8, md7 := realDocs(t)
+	if _, err := reasondrift.ParseDocs(md8, md7); err != nil {
+		t.Fatal(err)
+	}
+	last := "| `ending-soon` | `NoReplacementReady` (proposed in PR #88) | Instance | lifecycle controller |"
+	for name, mutated := range map[string][]byte{
+		"a blank line, then a row": mutateRows(t, md8, "| `ending-soon` | `NoReplacementReady`",
+			last, "", "| `failing` | `NeverEmitted` | Instance | lifecycle controller |"),
+		"a row after text, far below": mutateRows(t, md8, "| `ending-soon` | `NoReplacementReady`",
+			last, "", "Some text.", "", "| `failing` | `NeverEmitted` | Instance | lifecycle controller |"),
+	} {
+		if docs, err := reasondrift.ParseDocs(mutated, md7); err == nil {
+			t.Errorf("%s: parsed %d entries, want an error", name, len(docs.Table))
+		}
 	}
 }
 

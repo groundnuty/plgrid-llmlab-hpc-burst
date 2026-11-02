@@ -1,14 +1,29 @@
 // Package scan reads the code side of the drift guard (#239): the reason
-// constants of api/v1alpha1, the code's Degraded ranking and every emit site
-// of the module's non-test code.
+// constants of api/v1alpha1, the code's Degraded ranking and every emit site of
+// the module's non-test code.
 //
 // Emit sites are found by reference. go/packages type-checks the module, go/ssa
 // builds its functions, and each call to a recorder is resolved to the
 // constants that reach its reason, type and regarding arguments, through
-// variables, parameters and results. The scan fails closed: a package that does
-// not type-check, a call to a method named Event or Eventf that is neither a
-// known sink nor a named wrapper, and an argument that does not resolve to
-// constants are all reported, never skipped.
+// variables, parameters and results, one call site at a time. The scan fails
+// closed: packages that do not type-check and a missing required package are
+// errors, and a call to a method named Event, Eventf or AnnotatedEventf that is
+// neither a known sink nor a verified wrapper, a wrapper that does not forward,
+// a recorder method taken as a value, an argument that does not resolve and a
+// use of a recorder outside the packages loaded are all reported, never skipped.
+//
+// A reason must come from a named constant. To tell that from a string literal
+// after go/ssa has folded both into the same constant, the loader gives every
+// string literal of the module's non-test code (outside constant declarations,
+// import paths and struct tags) a sentinel suffix before type-checking, so the
+// value that reaches a recorder says in itself whether a literal fed it.
+//
+// What it does not read: events built by a constructor, the Provider
+// controller's through crossplane-runtime's event.Normal and event.Warning and
+// the managed catalog controller's through provider.NewManagedEvent. A
+// constructor's call raises nothing, and following the value to a recorder
+// would take a data flow through slices and fields; HBEP-8 puts neither
+// controller's reasons in its table.
 package scan
 
 import (
@@ -22,6 +37,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"golang.org/x/tools/go/packages"
@@ -34,32 +50,32 @@ import (
 type Options struct {
 	// Root is the repository root, which holds go.mod.
 	Root string
-	// Patterns are the packages to load; the default is ./..., so a new
-	// emitter package is covered without a change here.
+	// Patterns are the packages to load and read the emit sites of; the default
+	// is ./.... The packages that raise events are enough, with CheckRest set.
 	Patterns []string
+	// CheckRest looks at the rest of the module's non-test code, which is not
+	// loaded, and reports any use of a recorder method in it, so a new emitter
+	// in a package that Patterns leaves out is found.
+	CheckRest bool
 	// Overlay replaces or adds source files, by absolute path (the mutant
 	// checks add a file that emits one more reason).
 	Overlay map[string][]byte
-	// Wrappers are the pass-through wrappers (reasondrift.Wrapper.Func).
-	Wrappers []string
+	// Wrappers are the pass-through wrappers (reasondrift.Wrappers).
+	Wrappers []reasondrift.Wrapper
 	// Require lists package directories that must be loaded with their
 	// syntax, so a scan that lost one fails instead of finding fewer sites.
 	Require []string
 }
 
-// sink is a function or method that raises an event. The indexes count the
-// declared parameters, the receiver left out; a negative index means the call
-// has no such argument.
+// sink is a method that raises an event. The indexes count the declared
+// parameters, the receiver left out.
 type sink struct {
 	reason, action, regarding int
-	// kinds are the regarding kinds of a sink that takes no regarding
-	// argument.
-	kinds []string
 }
 
 // sinks maps a callee's full name, with {mod} for the module path, to its
-// shape. Every recorder of the module is here. A call to any other method
-// named Event or Eventf fails the scan.
+// shape. Every recorder that takes a reason and a type is here. A call to any
+// other method named Event, Eventf or AnnotatedEventf fails the scan.
 var sinks = map[string]sink{
 	// The lifecycle controller's recorder, which cmd/hpcburst-controller also uses.
 	"({mod}/internal/lifecycle.Recorder).Event": {regarding: 0, action: 2, reason: 3},
@@ -67,21 +83,17 @@ var sinks = map[string]sink{
 	"({mod}/internal/front.Recorder).Event": {regarding: 0, action: 2, reason: 3},
 	// client-go's events.k8s.io recorder, called directly.
 	"(k8s.io/client-go/tools/internal/events.EventRecorder).Eventf": {regarding: 0, action: 4, reason: 3},
-	// The managed catalog controller's events regard its Provider
-	// (internal/managed, record).
-	"{mod}/pkg/provider.NewManagedEvent": {regarding: -1, action: 0, reason: 1, kinds: []string{"Provider"}},
-	// The Provider controller's events go through crossplane-runtime's
-	// recorder, which writes no action, and name no regarding kind here.
-	"github.com/crossplane/crossplane-runtime/v2/pkg/event.Normal":  {regarding: -1, action: -1, reason: 0},
-	"github.com/crossplane/crossplane-runtime/v2/pkg/event.Warning": {regarding: -1, action: -1, reason: 0},
 }
 
-// emitMethods are the method names that raise events. A call to one that is no
-// sink fails the scan.
+// emitMethods are the method names that raise events.
 var emitMethods = map[string]bool{"Event": true, "Eventf": true, "AnnotatedEventf": true}
 
 // maxDepth bounds the walk from an argument to the constants behind it.
 const maxDepth = 12
+
+// litMark is the suffix the loader gives every string literal of the module's
+// code. No reason contains a NUL.
+const litMark = "\x00literal\x00"
 
 // Scan loads the module and returns what the code does.
 func Scan(o Options) (*reasondrift.Code, error) {
@@ -126,7 +138,7 @@ func Scan(o Options) (*reasondrift.Code, error) {
 		if len(bad) > 8 {
 			bad = append(bad[:8], fmt.Sprintf("... and %d more", len(bad)-8))
 		}
-		return nil, fmt.Errorf("the packages do not type-check, so the emit sites cannot be read:\n  %s", strings.Join(bad, "\n  "))
+		return nil, fmt.Errorf("the packages do not type-check, so the emit sites cannot be read (the scan marks the string literals of the module's code, which a constant expression over a literal can notice):\n  %s", strings.Join(bad, "\n  "))
 	}
 	byDir := map[string]*packages.Package{}
 	for _, p := range pkgs {
@@ -152,26 +164,69 @@ func Scan(o Options) (*reasondrift.Code, error) {
 	prog, spkgs := buildSSA(pkgs)
 	s := &scanner{
 		mod: mod, root: o.Root, fset: prog.Fset, fns: functions(prog, spkgs),
-		wrappers: map[string]bool{}, seenWrappers: map[string]bool{},
+		wrappers: map[string]reasondrift.Wrapper{}, seenWrappers: map[string]bool{},
 		callers: map[*ssa.Function][]*ssa.CallCommon{}, escaped: map[*ssa.Function]bool{},
-		calls: callIndex(pkgs, mod),
 	}
 	for _, w := range o.Wrappers {
-		s.wrappers[w] = true
+		s.wrappers[w.Func] = w
 	}
 	s.index()
-	if err := s.collect(code); err != nil {
-		return nil, err
+	s.collect(code)
+	if o.CheckRest {
+		if err := s.checkRest(code, o, byDir); err != nil {
+			return nil, err
+		}
 	}
 	for w := range s.seenWrappers {
 		code.Wrappers = append(code.Wrappers, w)
 	}
 	sort.Strings(code.Wrappers)
-	sort.Slice(code.Emits, func(i, j int) bool {
-		a, b := code.Emits[i], code.Emits[j]
-		return a.Pos < b.Pos
+	sort.Slice(code.Emits, func(i, j int) bool { return code.Emits[i].Pos < code.Emits[j].Pos })
+	sort.SliceStable(code.Problems, func(i, j int) bool {
+		a, b := code.Problems[i], code.Problems[j]
+		return a.Kind+a.Package+a.Func+a.Detail < b.Kind+b.Package+b.Func+b.Detail
 	})
 	return code, nil
+}
+
+// checkRest looks for recorder methods in the module's packages that Scan did
+// not load: it lists them with go list (names and files only), parses the files
+// of the packages not in byDir, and reports a selector named like a recorder
+// method as a problem.
+func (s *scanner) checkRest(code *reasondrift.Code, o Options, byDir map[string]*packages.Package) error {
+	all, err := packages.Load(&packages.Config{
+		Mode: packages.NeedName | packages.NeedFiles, Dir: o.Root, Env: append(os.Environ(), "CGO_ENABLED=0"),
+		Tests: false, Overlay: o.Overlay,
+	}, "./...")
+	if err != nil {
+		return fmt.Errorf("listing the module's packages: %w", err)
+	}
+	for _, p := range all {
+		dir := strings.TrimPrefix(strings.TrimPrefix(p.PkgPath, s.mod), "/")
+		if byDir[dir] != nil {
+			continue
+		}
+		for _, file := range p.GoFiles {
+			var src any
+			if b, ok := o.Overlay[file]; ok {
+				src = b
+			}
+			f, err := parser.ParseFile(token.NewFileSet(), file, src, parser.SkipObjectResolution)
+			if err != nil {
+				return fmt.Errorf("parsing %s: %w", file, err)
+			}
+			ast.Inspect(f, func(n ast.Node) bool {
+				if sel, ok := n.(*ast.SelectorExpr); ok && emitMethods[sel.Sel.Name] {
+					code.Problems = append(code.Problems, reasondrift.Problem{
+						Kind: reasondrift.OutsideTheScan, Package: dir, Func: filepath.Base(file),
+						Detail: fmt.Sprintf("%s uses %s, in a package the scan did not load: add the package to the patterns", strings.TrimPrefix(file, s.root+"/"), sel.Sel.Name),
+					})
+				}
+				return true
+			})
+		}
+	}
+	return nil
 }
 
 // inModule reports whether a package belongs to the module being scanned.
@@ -179,15 +234,22 @@ func inModule(p *packages.Package, mod string) bool {
 	return p.PkgPath == mod || strings.HasPrefix(p.PkgPath, mod+"/")
 }
 
-// parseFile parses a Go file and cuts the function bodies off the files outside
-// root, which are the dependencies: only their declarations matter here, and
-// their bodies are most of what type-checking holds in memory. An init function
-// keeps an empty body, since it must have one.
+// parseFile parses a Go file. In the module's own files every string literal
+// that is not in a constant declaration, an import or a struct tag gets the
+// suffix litMark, so that a value that reaches a recorder says whether a
+// literal fed it. In the files outside root, which are the dependencies, it
+// cuts the function bodies off: only their declarations matter here, and their
+// bodies are most of what type-checking holds in memory. An init function keeps
+// an empty body, since it must have one, and a generic function keeps its own.
 func parseFile(root string) func(*token.FileSet, string, []byte) (*ast.File, error) {
 	return func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
 		f, err := parser.ParseFile(fset, filename, src, parser.SkipObjectResolution)
-		if err != nil || strings.HasPrefix(filename, root+string(filepath.Separator)) {
+		if err != nil {
 			return f, err
+		}
+		if strings.HasPrefix(filename, root+string(filepath.Separator)) {
+			markLiterals(f)
+			return f, nil
 		}
 		for _, d := range f.Decls {
 			fd, ok := d.(*ast.FuncDecl)
@@ -204,6 +266,34 @@ func parseFile(root string) func(*token.FileSet, string, []byte) (*ast.File, err
 	}
 }
 
+// markLiterals appends litMark to the value of each string literal of f, except
+// those in a constant declaration (the declaration of a named constant is where
+// a literal belongs), in an import and in a struct tag.
+func markLiterals(f *ast.File) {
+	tags := map[*ast.BasicLit]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		if fld, ok := n.(*ast.Field); ok && fld.Tag != nil {
+			tags[fld.Tag] = true
+		}
+		return true
+	})
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.GenDecl:
+			if n.Tok == token.CONST || n.Tok == token.IMPORT {
+				return false
+			}
+		case *ast.BasicLit:
+			if n.Kind == token.STRING && !tags[n] {
+				if v, err := strconv.Unquote(n.Value); err == nil {
+					n.Value = strconv.Quote(v + litMark)
+				}
+			}
+		}
+		return true
+	})
+}
+
 // isGeneric reports whether a function, or a method of a generic type, is
 // generic: go/types refuses one without a body.
 func isGeneric(fd *ast.FuncDecl) bool {
@@ -213,14 +303,13 @@ func isGeneric(fd *ast.FuncDecl) bool {
 	if fd.Recv == nil || len(fd.Recv.List) == 0 {
 		return false
 	}
-	switch ast.Unparen(fd.Recv.List[0].Type).(type) {
+	t := ast.Unparen(fd.Recv.List[0].Type)
+	if star, ok := t.(*ast.StarExpr); ok {
+		t = ast.Unparen(star.X)
+	}
+	switch t.(type) {
 	case *ast.IndexExpr, *ast.IndexListExpr:
 		return true
-	case *ast.StarExpr:
-		switch ast.Unparen(fd.Recv.List[0].Type.(*ast.StarExpr).X).(type) {
-		case *ast.IndexExpr, *ast.IndexListExpr:
-			return true
-		}
 	}
 	return false
 }
@@ -256,28 +345,6 @@ func buildSSA(roots []*packages.Package) (*ssa.Program, []*ssa.Package) {
 	})
 	prog.Build()
 	return prog, spkgs
-}
-
-// callIndex finds every call expression of the module's packages by the
-// position of its opening parenthesis, which is the position go/ssa gives the
-// call instruction, so an instruction can be traced back to its arguments'
-// source text.
-func callIndex(pkgs []*packages.Package, mod string) map[token.Pos]callSite {
-	out := map[token.Pos]callSite{}
-	packages.Visit(pkgs, nil, func(p *packages.Package) {
-		if p.PkgPath != mod && !strings.HasPrefix(p.PkgPath, mod+"/") {
-			return
-		}
-		for _, f := range p.Syntax {
-			ast.Inspect(f, func(n ast.Node) bool {
-				if c, ok := n.(*ast.CallExpr); ok {
-					out[c.Lparen] = callSite{call: c, info: p.TypesInfo}
-				}
-				return true
-			})
-		}
-	})
-	return out
 }
 
 // modulePath reads the module path from the go.mod under root.
@@ -350,7 +417,9 @@ func degradedOrder(p *packages.Package) ([]string, error) {
 						if !ok || tv.Value == nil || tv.Value.Kind() != constant.String {
 							return nil, fmt.Errorf("an element of degradedOrder is not a string constant: %s", p.Fset.Position(el.Pos()))
 						}
-						out = append(out, constant.StringVal(tv.Value))
+						// The ranking is compared by its names; a literal in it is no
+						// reason's contract, so the mark is only taken off.
+						out = append(out, strings.ReplaceAll(constant.StringVal(tv.Value), litMark, ""))
 					}
 					if len(out) == 0 {
 						return nil, errors.New("degradedOrder is empty")

@@ -6,7 +6,6 @@ import (
 	"go/token"
 	"go/types"
 	"slices"
-	"sort"
 
 	"golang.org/x/tools/go/ssa"
 )
@@ -59,78 +58,76 @@ func kindLeaf(v ssa.Value) ([]string, string, ssa.Value, bool) {
 	return nil, "", nil, false
 }
 
-// acc collects what a walk finds: the values, and those of them that arrived
-// as a string literal at a call site (see scanner.literalArg).
-type acc struct{ set, lits map[string]bool }
-
-func newAcc() *acc { return &acc{set: map[string]bool{}, lits: map[string]bool{}} }
-
-func (a *acc) merge(b *acc) {
-	for x := range b.set {
-		a.set[x] = true
-	}
-	for x := range b.lits {
-		a.lits[x] = true
-	}
+// frame is a call being followed into: the callee, the arguments of that call
+// and the frame the call was made in. A parameter met while following the
+// callee's results is the call's own argument, not the union of every caller's.
+type frame struct {
+	fn   *ssa.Function
+	args []ssa.Value
+	up   *frame
 }
 
-func sorted(m map[string]bool) []string {
-	out := make([]string, 0, len(m))
-	for x := range m {
-		out = append(out, x)
-	}
-	sort.Strings(out)
-	return out
+// key identifies a value in the context it is reached in: the same value
+// reached through two calls is two walks, and neither is a loop.
+type key struct {
+	v   ssa.Value
+	ctx *frame
 }
 
-// resolve returns the values that can reach v, sorted and without repeats, and
-// those that arrived as a literal, or why the values cannot be told: it follows phis, the parameters of functions that
-// are only called statically (to their callers' arguments) and the results of
-// static calls (to the values their functions return). Anything else, such as a
-// field, a map entry or a call through an interface, is a reason.
-func (s *scanner) resolve(v ssa.Value, leaf leafFn) (vals, lits []string, why string) {
-	a := newAcc()
-	if why := s.walk(v, leaf, a, map[ssa.Value]bool{}, 0); why != "" {
-		return nil, nil, why
+// resolve returns the values that can reach v, sorted and without repeats, or
+// why they cannot be told: it follows phis, the parameters of functions only
+// called statically (to their callers' arguments), and the results of static
+// calls (to the values their functions return, for the arguments of that call
+// alone). Anything else, such as a field, a map entry or a call through an
+// interface, is a reason.
+func (s *scanner) resolve(v ssa.Value, leaf leafFn) ([]string, string) {
+	set := map[string]bool{}
+	if why := s.walk(v, leaf, set, map[key]bool{}, nil, 0); why != "" {
+		return nil, why
 	}
-	return sorted(a.set), sorted(a.lits), ""
+	return sorted(set), ""
 }
 
-func (s *scanner) walk(v ssa.Value, leaf leafFn, a *acc, path map[ssa.Value]bool, depth int) string {
+func (s *scanner) walk(v ssa.Value, leaf leafFn, set map[string]bool, path map[key]bool, ctx *frame, depth int) string {
 	if depth > maxDepth {
 		return "the trace is deeper than the scan follows"
 	}
-	if path[v] {
+	k := key{v, ctx}
+	if path[k] {
 		return "" // a loop through a phi adds nothing new
 	}
-	path[v] = true
-	defer delete(path, v)
+	path[k] = true
+	defer delete(path, k)
 
 	vals, why, next, done := leaf(v)
 	switch {
 	case done:
 		for _, x := range vals {
-			a.set[x] = true
+			set[x] = true
 		}
 		return why
 	case next != nil:
-		return s.walk(next, leaf, a, path, depth+1)
+		return s.walk(next, leaf, set, path, ctx, depth+1)
 	}
 
 	switch v := v.(type) {
 	case *ssa.Phi:
 		for _, e := range v.Edges {
-			if why := s.walk(e, leaf, a, path, depth+1); why != "" {
+			if why := s.walk(e, leaf, set, path, ctx, depth+1); why != "" {
 				return why
 			}
 		}
 		return ""
 	case *ssa.Parameter:
 		fn := v.Parent()
+		idx := slices.Index(fn.Params, v)
+		// Followed into a call of this function: the call's own argument.
+		if ctx != nil && ctx.fn == fn && idx >= 0 && idx < len(ctx.args) {
+			return s.walk(ctx.args[idx], leaf, set, path, ctx.up, depth+1)
+		}
 		if s.escaped[fn] {
 			return fmt.Sprintf("parameter %s of %s, which is used as a value, so its callers are not all known", v.Name(), fn.Name())
 		}
-		idx := slices.Index(fn.Params, v)
 		callers := s.callers[fn]
 		if len(callers) == 0 {
 			return fmt.Sprintf("parameter %s of %s, which no call in the module reaches", v.Name(), fn.Name())
@@ -139,20 +136,9 @@ func (s *scanner) walk(v ssa.Value, leaf leafFn, a *acc, path map[ssa.Value]bool
 			if idx < 0 || idx >= len(cc.Args) {
 				return fmt.Sprintf("parameter %s of %s: a caller passes too few arguments", v.Name(), fn.Name())
 			}
-			sub := newAcc()
-			if why := s.walk(cc.Args[idx], leaf, sub, path, depth+1); why != "" {
+			if why := s.walk(cc.Args[idx], leaf, set, path, nil, depth+1); why != "" {
 				return why
 			}
-			astIdx := idx
-			if fn.Signature.Recv() != nil {
-				astIdx--
-			}
-			if s.literalArg(cc, astIdx) {
-				for x := range sub.set {
-					sub.lits[x] = true
-				}
-			}
-			a.merge(sub)
 		}
 		return ""
 	case *ssa.UnOp:
@@ -166,25 +152,26 @@ func (s *scanner) walk(v ssa.Value, leaf leafFn, a *acc, path map[ssa.Value]bool
 			return why
 		}
 		for _, val := range vals {
-			if why := s.walk(val, leaf, a, path, depth+1); why != "" {
+			if why := s.walk(val, leaf, set, path, ctx, depth+1); why != "" {
 				return why
 			}
 		}
 		return ""
 	case *ssa.Call:
-		return s.walkResult(v.Common(), 0, leaf, a, path, depth)
+		return s.walkResult(v.Common(), 0, leaf, set, path, ctx, depth)
 	case *ssa.Extract:
 		call, ok := v.Tuple.(*ssa.Call)
 		if !ok {
 			return fmt.Sprintf("a result of %T", v.Tuple)
 		}
-		return s.walkResult(call.Common(), v.Index, leaf, a, path, depth)
+		return s.walkResult(call.Common(), v.Index, leaf, set, path, ctx, depth)
 	}
 	return fmt.Sprintf("%s (%T) is not a constant, a parameter or the result of a call in the module", v.Name(), v)
 }
 
-// walkResult follows result idx of a static call to what its function returns.
-func (s *scanner) walkResult(cc *ssa.CallCommon, idx int, leaf leafFn, a *acc, path map[ssa.Value]bool, depth int) string {
+// walkResult follows result idx of a static call to what its function returns
+// for the arguments of that call.
+func (s *scanner) walkResult(cc *ssa.CallCommon, idx int, leaf leafFn, set map[string]bool, path map[key]bool, ctx *frame, depth int) string {
 	callee := cc.StaticCallee()
 	if callee == nil {
 		return fmt.Sprintf("the result of a call through %s, which is not a static call", callTarget(cc))
@@ -192,6 +179,7 @@ func (s *scanner) walkResult(cc *ssa.CallCommon, idx int, leaf leafFn, a *acc, p
 	if len(callee.Blocks) == 0 {
 		return fmt.Sprintf("the result of %s, which has no body in the module", callee.Name())
 	}
+	in := &frame{fn: callee, args: cc.Args, up: ctx}
 	found := false
 	for _, b := range callee.Blocks {
 		if len(b.Instrs) == 0 {
@@ -205,7 +193,7 @@ func (s *scanner) walkResult(cc *ssa.CallCommon, idx int, leaf leafFn, a *acc, p
 		if idx >= len(ret.Results) {
 			return fmt.Sprintf("result %d of %s", idx, callee.Name())
 		}
-		if why := s.walk(ret.Results[idx], leaf, a, path, depth+1); why != "" {
+		if why := s.walk(ret.Results[idx], leaf, set, path, in, depth+1); why != "" {
 			return why
 		}
 	}

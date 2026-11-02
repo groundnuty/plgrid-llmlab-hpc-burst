@@ -1,6 +1,7 @@
 package scan
 
 import (
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -21,6 +22,34 @@ func syntheticRoot(t *testing.T) string {
 	return root
 }
 
+// kubeWrapper is the synthetic module's wrapper: KubeRecorder.Event passes its
+// regarding object, its code and its type to Eventf as arguments 0, 3 and 4.
+var kubeWrapper = reasondrift.Wrapper{
+	Func: "internal/lifecycle.KubeRecorder.Event", Why: "forwards to Eventf",
+	Forwards: []reasondrift.Forward{{Arg: 0, Param: 0}, {Arg: 3, Param: 3}, {Arg: 4, Param: 2}},
+}
+
+// scanSynthetic scans the synthetic module with its wrapper listed, and the
+// given files added or replaced under internal/lifecycle.
+func scanSynthetic(t *testing.T, files map[string]string, mutate func(*Options)) *reasondrift.Code {
+	t.Helper()
+	o := Options{Root: syntheticRoot(t), Wrappers: []reasondrift.Wrapper{kubeWrapper}}
+	if len(files) > 0 {
+		o.Overlay = map[string][]byte{}
+		for name, src := range files {
+			o.Overlay[filepath.Join(syntheticRoot(t), name)] = []byte(src)
+		}
+	}
+	if mutate != nil {
+		mutate(&o)
+	}
+	code, err := Scan(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return code
+}
+
 func emitOf(t *testing.T, code *reasondrift.Code, fn string) reasondrift.Emit {
 	t.Helper()
 	var found []reasondrift.Emit
@@ -35,19 +64,26 @@ func emitOf(t *testing.T, code *reasondrift.Code, fn string) reasondrift.Emit {
 	return found[0]
 }
 
+func problemsOf(code *reasondrift.Code, kind string) []reasondrift.Problem {
+	var out []reasondrift.Problem
+	for _, p := range code.Problems {
+		if p.Kind == kind {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // TestResolvesEachWayAReasonArrives: the expectations are written out from the
 // source of testdata/mod/internal/lifecycle/lifecycle.go.
 func TestResolvesEachWayAReasonArrives(t *testing.T) {
-	code, err := Scan(Options{Root: syntheticRoot(t)})
-	if err != nil {
-		t.Fatal(err)
-	}
+	code := scanSynthetic(t, nil, nil)
 	for _, c := range []struct {
 		fn      string
 		reasons []string
 		action  string
 		kinds   []string
-		lits    []string // the reasons written as a string literal at a call
+		lits    []string // the reasons a string literal fed
 	}{
 		{"pass.direct", []string{"A"}, "failing", []string{"Instance"}, nil},
 		{"pass.local", []string{"Local"}, "failing", []string{"Instance"}, nil},
@@ -63,14 +99,21 @@ func TestResolvesEachWayAReasonArrives(t *testing.T) {
 		{"pass.fromCall", []string{"A", "B"}, "failing", []string{"Instance"}, nil},
 		// An interface-typed regarding object: the kinds converted into it.
 		{"pass.either", []string{"A"}, "degraded", []string{"Instance", "ModelDeployment"}, nil},
-		// A string literal, written at the call or at the call of a forwarder, is
-		// told from a named constant; a constant expression that names a
-		// constant is not a literal.
+		// A string literal is told from a named constant wherever it comes from:
+		// the call, a conversion, a constant expression with a literal in it, a
+		// variable it was put in, a function's result, a forwarder's caller.
 		{"pass.literal", []string{"Literal"}, "failing", []string{"Instance"}, []string{"Literal"}},
 		{"pass.literalConversion", []string{"TypedLiteral"}, "failing", []string{"Instance"}, []string{"TypedLiteral"}},
 		{"pass.literalConcat", []string{"LitConcat"}, "failing", []string{"Instance"}, []string{"LitConcat"}},
-		{"pass.namedConcat", []string{"XA"}, "failing", []string{"Instance"}, nil},
+		{"pass.namedConcat", []string{"XA"}, "failing", []string{"Instance"}, []string{"XA"}},
+		{"pass.viaVariable", []string{"ViaVariable"}, "failing", []string{"Instance"}, []string{"ViaVariable"}},
+		{"pass.viaReturn", []string{"ViaReturn"}, "failing", []string{"Instance"}, []string{"ViaReturn"}},
 		{"pass.failLit", []string{"A", "ForwardedLiteral"}, "failing", []string{"Instance"}, []string{"ForwardedLiteral"}},
+		// A helper's result is that of the call, not of every call: ident(A) is
+		// discarded and ident(B) is emitted.
+		{"pass.discarded", []string{"B"}, "failing", []string{"Instance"}, nil},
+		// The same helper reached twice in one walk, through nested calls.
+		{"pass.nested", []string{"C"}, "failing", []string{"Instance"}, nil},
 	} {
 		e := emitOf(t, code, c.fn)
 		if e.Unresolved != "" {
@@ -127,48 +170,125 @@ func TestResolvesEachWayAReasonArrives(t *testing.T) {
 	if want := []string{"B", "A"}; !slices.Equal(code.Ranking, want) {
 		t.Errorf("ranking %v, want %v", code.Ranking, want)
 	}
-}
-
-// overlay adds one file to the synthetic lifecycle package.
-func overlay(t *testing.T, src string) map[string][]byte {
-	t.Helper()
-	return map[string][]byte{filepath.Join(syntheticRoot(t), "internal/lifecycle/zz_overlay.go"): []byte(src)}
+	// The synthetic module has no problem, and its wrapper is met, through the
+	// compiler's pointer-receiver wrapper of KubeRecorder.Event too.
+	if len(code.Problems) != 0 {
+		t.Errorf("problems %+v, want none", code.Problems)
+	}
+	if want := []string{kubeWrapper.Func}; !slices.Equal(code.Wrappers, want) {
+		t.Errorf("wrappers met %v, want %v", code.Wrappers, want)
+	}
 }
 
 const unknownRecorder = `package lifecycle
 
 type otherRecorder interface{ Event(string) }
 
-func relay(o otherRecorder) { o.Event("X") }
+func relay(o otherRecorder, s string) { o.Event(s) }
 `
 
-// TestAnUnknownRecorderFails: a call to Event that is neither a sink nor in a
-// named wrapper fails the scan, so a new emitter path cannot go unseen.
-func TestAnUnknownRecorderFails(t *testing.T) {
-	_, err := Scan(Options{Root: syntheticRoot(t), Overlay: overlay(t, unknownRecorder)})
-	if err == nil || !strings.Contains(err.Error(), "does not know") || !strings.Contains(err.Error(), "internal/lifecycle.relay") {
-		t.Fatalf("error %v, want one that names internal/lifecycle.relay as unknown", err)
+// TestAnUnknownRecorderIsAProblem: a call to Event that is neither a sink nor
+// in a named wrapper is reported, so a new emitter path cannot go unseen. It is
+// a problem in the result, not an error, so that one scan can carry several.
+func TestAnUnknownRecorderIsAProblem(t *testing.T) {
+	code := scanSynthetic(t, map[string]string{"internal/lifecycle/zz_overlay.go": unknownRecorder}, nil)
+	got := problemsOf(code, reasondrift.UnknownRecorder)
+	if len(got) != 1 || got[0].Func != "relay" || got[0].Package != "internal/lifecycle" {
+		t.Fatalf("unknown-recorder problems %+v, want one in internal/lifecycle relay", got)
 	}
 }
 
-// TestANamedWrapperIsSkippedAndSeen: the same call inside a named wrapper is no
-// emit site, and the scan reports the wrapper as met.
-func TestANamedWrapperIsSkippedAndSeen(t *testing.T) {
-	code, err := Scan(Options{Root: syntheticRoot(t), Overlay: overlay(t, unknownRecorder), Wrappers: []string{"internal/lifecycle.relay"}})
+// TestANamedWrapperIsAcceptedOnlyIfItForwards: the same call inside a listed
+// wrapper is no problem when it passes on what the wrapper's Forwards say, and
+// is one when it does not.
+func TestANamedWrapperIsAcceptedOnlyIfItForwards(t *testing.T) {
+	relay := reasondrift.Wrapper{Func: "internal/lifecycle.relay", Why: "x", Forwards: []reasondrift.Forward{{Arg: 0, Param: 1}}}
+	withRelay := func(o *Options) { o.Wrappers = append(o.Wrappers, relay) }
+	code := scanSynthetic(t, map[string]string{"internal/lifecycle/zz_overlay.go": unknownRecorder}, withRelay)
+	if len(code.Problems) != 0 {
+		t.Errorf("a forwarding wrapper: problems %+v, want none", code.Problems)
+	}
+	if want := []string{kubeWrapper.Func, relay.Func}; !slices.Equal(code.Wrappers, want) {
+		t.Errorf("wrappers met %v, want %v", code.Wrappers, want)
+	}
+	// A wrapper that is listed and is not in the code is not reported as met.
+	code = scanSynthetic(t, nil, withRelay)
+	if want := []string{kubeWrapper.Func}; !slices.Equal(code.Wrappers, want) {
+		t.Errorf("wrappers met %v, want %v", code.Wrappers, want)
+	}
+	// The call changes the argument: it is no longer parameter 1, unchanged.
+	changed := strings.Replace(unknownRecorder, "o.Event(s)", `o.Event(s + "!")`, 1)
+	code = scanSynthetic(t, map[string]string{"internal/lifecycle/zz_overlay.go": changed}, withRelay)
+	if got := problemsOf(code, reasondrift.WrapperDoesNotForward); len(got) != 1 || !strings.Contains(got[0].Detail, "not parameter 1") {
+		t.Errorf("a wrapper that changes its argument: %+v, want one problem that says so", got)
+	}
+}
+
+// TestAWrapperThatChangesTheReasonIsAProblem: KubeRecorder.Event passing a
+// reason of its own to Eventf is found, though the wrapper is listed.
+func TestAWrapperThatChangesTheReasonIsAProblem(t *testing.T) {
+	src, err := readFile(filepath.Join(syntheticRoot(t), "internal/lifecycle/kube.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"internal/lifecycle.relay"}; !slices.Equal(code.Wrappers, want) {
-		t.Errorf("wrappers seen %v, want %v", code.Wrappers, want)
+	for name, mutated := range map[string]string{
+		"a reason of its own":     strings.Replace(src, "code, typ, message", `"WrongReason", typ, message`, 1),
+		"the type of its own":     strings.Replace(src, "code, typ, message", `code, "other", message`, 1),
+		"in a function literal":   strings.Replace(src, "k.R.Eventf(regarding, related, \"Normal\", code, typ, message)", "func() { k.R.Eventf(regarding, related, \"Normal\", code, typ, message) }()", 1),
+		"another regarding value": strings.Replace(src, "Eventf(regarding, related,", "Eventf(related, related,", 1),
+	} {
+		if mutated == src {
+			t.Fatalf("%s: the mutation changed nothing", name)
+		}
+		code := scanSynthetic(t, map[string]string{"internal/lifecycle/kube.go": mutated}, nil)
+		if got := problemsOf(code, reasondrift.WrapperDoesNotForward); len(got) != 1 {
+			t.Errorf("a wrapper with %s: wrapper problems %+v, want one", name, got)
+		}
 	}
-	// And a wrapper that is named but not in the code is not reported as met.
-	code, err = Scan(Options{Root: syntheticRoot(t), Wrappers: []string{"internal/lifecycle.relay"}})
-	if err != nil {
-		t.Fatal(err)
+}
+
+// TestAMethodValueOfAnUnknownRecorderIsAProblem: passing the method of a
+// recorder the scan does not know as a value leaves a dynamic call with no name
+// and a wrapper the compiler makes; the wrapper's call is reported.
+func TestAMethodValueOfAnUnknownRecorderIsAProblem(t *testing.T) {
+	src := `package lifecycle
+
+type otherRecorder interface{ Event(string) }
+
+func run(f func(string)) { f("X") }
+
+func useValue(o otherRecorder) { run(o.Event) }
+`
+	code := scanSynthetic(t, map[string]string{"internal/lifecycle/zz_overlay.go": src}, nil)
+	got := problemsOf(code, reasondrift.UnknownRecorder)
+	if len(got) != 1 || got[0].Package != "(compiler-made)" {
+		t.Fatalf("unknown-recorder problems %+v, want one in a compiler-made function", got)
 	}
-	if len(code.Wrappers) != 0 {
-		t.Errorf("wrappers seen %v, want none", code.Wrappers)
+}
+
+// TestARecorderOutsideTheLoadedPackagesIsAProblem: with CheckRest, a use of a
+// recorder method in a package that the patterns leave out is reported.
+func TestARecorderOutsideTheLoadedPackagesIsAProblem(t *testing.T) {
+	other := "package other\n\ntype R interface{ Eventf() }\n\nfunc F(r R) { r.Eventf() }\n"
+	narrow := func(o *Options) {
+		o.Patterns = []string{"./api/v1alpha1", "./internal/lifecycle"}
+		o.CheckRest = true
 	}
+	code := scanSynthetic(t, map[string]string{"internal/other/other.go": other}, narrow)
+	got := problemsOf(code, reasondrift.OutsideTheScan)
+	if len(got) != 1 || got[0].Package != "internal/other" {
+		t.Fatalf("outside-the-scan problems %+v, want one in internal/other", got)
+	}
+	// Without the new package, the narrow scan has none.
+	if code = scanSynthetic(t, nil, narrow); len(problemsOf(code, reasondrift.OutsideTheScan)) != 0 {
+		t.Errorf("a narrow scan of the unchanged module: %+v", code.Problems)
+	}
+}
+
+// overlay adds one file to the synthetic lifecycle package.
+func overlay(t *testing.T, src string) map[string][]byte {
+	t.Helper()
+	return map[string][]byte{filepath.Join(syntheticRoot(t), "internal/lifecycle/zz_overlay.go"): []byte(src)}
 }
 
 // TestATypeErrorFails: packages that do not type-check fail the scan; they do
@@ -197,4 +317,9 @@ func TestAMissingRequiredPackageFails(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "internal/front") {
 		t.Fatalf("error %v, want one that names internal/front", err)
 	}
+}
+
+func readFile(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	return string(b), err
 }
