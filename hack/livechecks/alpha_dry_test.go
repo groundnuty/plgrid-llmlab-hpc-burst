@@ -90,6 +90,8 @@ type dryRow struct {
 	faults        []string
 	// passing are variants of the stand-in that must still pass the row.
 	passing []string
+	// notRun are variants that must end NOT RUN: exit 3, the line, the marker, no text to post.
+	notRun []string
 }
 
 var handoverFaults = []string{"cut", "no-stream", "two-restarts", "no-restart", "no-handover", "late-successor", "wrong-partition", "untagged", "unattributed", "adds-helios", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "no-responses"}
@@ -107,12 +109,12 @@ const (
 )
 
 var dryRows = []dryRow{
-	{"alpha-athena-handover", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", handoverFaults, nil},
-	{"alpha-helios-nooverlap", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", noOverlapFaults, nil},
-	{"tunnel-hour-helios", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", tunnelFaults, nil},
-	{"tunnel-hour-athena", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", tunnelFaults, nil},
-	{"gpu-accounting-helios", confPkg, "HPCBURST_LIVECHECKS_CONF_TEST", accountingFaults, accountingPassing},
-	{"gpu-accounting-athena", confPkg, "HPCBURST_LIVECHECKS_CONF_TEST", accountingFaults, accountingPassing},
+	{"alpha-athena-handover", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", handoverFaults, nil, nil},
+	{"alpha-helios-nooverlap", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", noOverlapFaults, nil, nil},
+	{"tunnel-hour-helios", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", tunnelFaults, nil, nil},
+	{"tunnel-hour-athena", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", tunnelFaults, nil, nil},
+	{"gpu-accounting-helios", confPkg, "HPCBURST_LIVECHECKS_CONF_TEST", accountingFaults, accountingPassing, []string{"slot-held"}},
+	{"gpu-accounting-athena", confPkg, "HPCBURST_LIVECHECKS_CONF_TEST", accountingFaults, accountingPassing, nil},
 }
 
 func containsString(list []string, s string) bool {
@@ -148,18 +150,32 @@ func TestEveryAlphaRowPassesItsDryRunAndEveryFaultFailsIt(t *testing.T) {
 				shape = s
 			}
 		}
-		for _, fault := range append(append([]string{""}, d.passing...), d.faults...) {
+		for _, fault := range append(append(append([]string{""}, d.passing...), d.notRun...), d.faults...) {
 			name := d.row + "/healthy"
 			if fault != "" {
 				name = d.row + "/" + fault
 			}
 			passes := fault == "" || containsString(d.passing, fault)
+			notRun := containsString(d.notRun, fault)
 			t.Run(name, func(t *testing.T) {
 				t.Parallel()
 				w := newAlphaWorld(t)
 				w.installDry(dryWrapper, real, realDir)
 				res := w.run([]string{"STUB_DRY_FAULT=" + fault}, "--run", d.row, "--yes")
-				if passes {
+				if notRun {
+					// NOT RUN, not a failure and not a pass: the owner's job holds the slot, this run's job was
+					// cancelled by its tag at the start-wait bound, and nothing was judged or posted.
+					if res.code != 3 {
+						t.Fatalf("exit %d, want 3:\n%s", res.code, res.out)
+					}
+					w.contains(res, d.row+": tests: 0 passed, 0 failed, 1 skipped", d.row+": NOT RUN (a job did not start within 10 min of its acceptance and was cancelled by its tag; not a failure)", "cleanup: left behind 0")
+					if strings.Contains(res.out, d.row+": FAIL") || strings.Contains(res.out, d.row+": PASS") {
+						t.Errorf("a NOT RUN run was also reported as a pass or a failure:\n%s", res.out)
+					}
+					if m, _ := filepath.Glob(filepath.Join(w.out(), d.row+"-*", "posts.md")); len(m) != 0 {
+						t.Errorf("a NOT RUN run left a text to post: %v", m)
+					}
+				} else if passes {
 					if res.code != 0 {
 						t.Fatalf("exit %d:\n%s", res.code, res.out)
 					}

@@ -21,9 +21,24 @@
 # runs only with --yes. A skipped test is a failure, not a pass.
 #
 # Exit codes: 0 all passed; 1 a test failed, skipped, left a job behind or
-# timed out; 2 usage error or an unreadable range; 3 refused (a setting is
-# missing, a file is not mode 600, the one-job slot is busy); 4 a cluster test
+# timed out; 2 usage error or an unreadable range; 3 refused or NOT RUN (a
+# setting is missing, a file is not mode 600, the one-job slot is in use; or a
+# job of a row with a start-wait bound did not start within it and was cancelled
+# by its tag: not a failure, try again later; or the scheduler rejected the
+# row's shape in the dry-run estimate, with or without --yes); 4 a cluster test
 # was not run because --yes was not given.
+#
+# NOT RUN (one protocol for every row that can be kept waiting by a long queue). A row whose cluster-table line
+# has a start wait (its last, optional column, in minutes) tells its test the bound in HPCBURST_CONF_START_WAIT.
+# A test that finds a job still not started at the bound cancels what it submitted by the tags it wrote down,
+# writes the line it wants to report to not-run.txt in HPCBURST_CONF_OUT (its private record directory), and
+# SKIPS at the top level (t.Skip). Nothing else: it fails nothing and exits 0. The script reads that, and only
+# that, as NOT RUN (not_run_verdict): exactly one top-level skip, no failure, no subtest skipped, exit status 0,
+# the marker a regular file in this run's own record directory, and a row with a start wait. It then runs the
+# same cleanup as for any run, prints "<row>: NOT RUN (...)" apart from PASS and FAIL, and exits 3 (below a
+# failure, above a pass), like a busy one-job slot: the run could not be done now, try again later. Every other
+# skip stays a failure, and so does a NOT RUN whose cleanup leaves a job behind. A new row opts in by giving
+# its start wait and having its test follow the protocol; no row-specific code is needed.
 #
 # The settings file is named by HPCBURST_LIVE_SETTINGS: KEY=VALUE lines, mode
 # 600, owned by you. Keys (none is ever printed):
@@ -88,6 +103,7 @@ live_table() {
 llmlab-smoke|local|internal/front|^TestLLMLabThroughTheFront$|HPCBURST_LLMLAB_CREDENTIALS|-|host|ready
 hub-golden|local|pkg/hubfiles|^TestGoldenHub$|HPCBURST_TEST_HUB|spikes/s7/checkpoints.env,spikes/s7/results/run1/hub,spikes/s7/results/run1/hash-*.jsonl|host|ready
 conformance-helios|cluster|internal/providerctl/conformance|^TestConformance$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host|ready
+conformance-helios-gh200|cluster|internal/providerctl/conformance|^TestConformance$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host|ready
 conformance-athena|cluster|internal/providerctl/conformance|^TestConformance$|HPCBURST_CONFORMANCE|profiles/athena.yaml|host|ready
 real-engine|cluster|cmd/hb-agent|^TestRealEngine$|HB_REAL_ENGINE_PLAN|spikes/s94/job.sh|host,linux-arm64|ready
 alpha-athena-handover|cluster|internal/alpha|^TestAlphaAthenaHandover$|HPCBURST_ALPHA_ROW|profiles/athena.yaml,examples/provider-athena-a100.yaml|host|ready
@@ -102,21 +118,45 @@ TABLE
 }
 
 # What a cluster test asks of the scheduler. name | host | profile | partition |
-# qos | slot | account key | GPUs | CPUs | memory | time limit | timeout (min) | extra.
+# qos | slot | account key | GPUs | CPUs | memory | time limit | timeout (min) | extra |
+# start wait (min). The last column is optional: a row without it, or with -, has none.
 # slot is the token that marks the one-job slot in squeue's QOS or partition column.
-# The conformance time limit is the harness's own (TimeLimit "5m", conformance_test.go);
-# the real-engine one is the documented run's (spikes/s94/README.md).
+# The start wait bounds how long each step's job may wait to start, from its acceptance: past it
+# the test cancels its jobs by their tags and the row ends as NOT RUN (exit 3), not as a failure
+# (HPCBURST_CONF_START_WAIT, conformance_test.go). A row with a one-job slot and a long queue
+# should have one, so that a busy queue does not hold the slot for hours.
+# The conformance time limit is the harness's own (allocTimeLimit "5m", conformance_test.go;
+# TestConformanceRowsPassTheRequestCheck compares them); the real-engine one is the documented
+# run's (spikes/s94/README.md).
+# conformance-helios-gh200 runs under QOS now, the only way to a running job there (the normal QOS
+# starts one in weeks): the qos reaches the test as HPCBURST_CONF_QOS and the test's Provider.
+# Its 1 CPU is the request check's floor (cpusPerTask >= 1, slurm.CheckRequest); its 1Gi is the
+# smallest memory recorded as accepted on this partition (S1's hold check, profiles/helios.yaml),
+# where the check itself takes any positive amount. The stand-in agent writes nothing to the RAM
+# disk that -C memfs gives. The test submits with --constraint=memfs, so the estimate asks for it too.
+# gpu-accounting-helios (issue #194) has the same two guards as conformance-helios-gh200: it starts only when squeue --me shows
+# no job in QOS now, and its one job must start within 10 min of its acceptance (else cancelled by its tag, NOT RUN, exit 3).
+# Its timeout of 30 min is that wait, the job's few minutes, the deletion that writes the kept record, and a margin. The
+# row's other guard, the wait of LIVE_PENDING_MAX_SECONDS, applies to gpu-accounting-athena only, which has no slot.
+# conformance-helios-gh200: it starts only when squeue --me shows no job in QOS now, pending or running, whoever's (exit 3,
+# "skipped: the now slot is in use"), and each of its two jobs (step 1, step 3) must start within 10
+# min of its acceptance. Its worst case is then about 25 min: two start waits of 10 min and about
+# 5 min of running. Its timeout of 45 min is the test's own deadlines (10+5+3+10+8+3+3, the 22 min
+# after the start waits being for jobs that already run, plus 2 min for the end-of-run check for a
+# late duplicate, 44 in all) and a margin of 1 min, so a slow cleanup fails in the test, with its
+# message, before this cap does.
 cluster_table() {
   cat <<'TABLE'
 # BEGIN CLUSTER SHAPES
 conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|80|-
+conformance-helios-gh200|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|45|-C memfs|10
 conformance-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|4|32Gi|00:05:00|80|-
 real-engine|helios|-|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|00:57:00|75|-C memfs
 alpha-athena-handover|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|01:46:00|150|-
 alpha-helios-nooverlap|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|01:46:00|200|-C memfs
 tunnel-hour-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|02:17:00|152|-C memfs
 tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|02:17:00|152|-
-gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|25|-
+gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|30|-|10
 gpu-accounting-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|00:05:00|25|-
 # END CLUSTER SHAPES
 TABLE
@@ -205,10 +245,13 @@ TABLE
 LOCAL_TIMEOUT_MIN=15
 POLL_SECONDS=${LIVE_POLL_SECONDS:-60}
 CLEAN_POLL_SECONDS=${LIVE_CLEAN_POLL_SECONDS:-3}
+CLEAN_QUIET_POLLS=${LIVE_CLEAN_QUIET_POLLS:-5}          # polls in a row with no owned job before the queue counts as clear
+CLEAN_MAX_POLLS=${LIVE_CLEAN_MAX_POLLS:-40}             # at most this many polls in all
+CLEAN_UNRESOLVED_POLLS=${LIVE_CLEAN_UNRESOLVED_POLLS:-20} # more quiet polls when the test left an unresolved submission
 
 declare -a NAMES=()
 declare -A KIND PKG TEST GATES INPUTS CONTEXTS STATUS
-declare -A HOST PROFILE PARTITION QOS SLOT ACCTKEY GPUS CPUS MEM TLIMIT TMIN EXTRA
+declare -A HOST PROFILE PARTITION QOS SLOT ACCTKEY GPUS CPUS MEM TLIMIT TMIN EXTRA SWAIT
 declare -A STACK ALIAS OGSET OGMIN MOSTJOBS
 declare -A S=()
 
@@ -219,11 +262,11 @@ load_tables() {
     NAMES+=("$name")
     KIND[$name]=$kind PKG[$name]=$pkg TEST[$name]=$test GATES[$name]=$gates INPUTS[$name]=$inputs CONTEXTS[$name]=$contexts STATUS[$name]=$status
   done < <(live_table | grep -v -e '^#' -e '^$')
-  local h pr pa q sl ak g c m tl tm ex
-  while IFS='|' read -r name h pr pa q sl ak g c m tl tm ex; do
+  local h pr pa q sl ak g c m tl tm ex sw
+  while IFS='|' read -r name h pr pa q sl ak g c m tl tm ex sw; do
     [ -n "$name" ] || continue
     HOST[$name]=$h PROFILE[$name]=$pr PARTITION[$name]=$pa QOS[$name]=$q SLOT[$name]=$sl ACCTKEY[$name]=$ak
-    GPUS[$name]=$g CPUS[$name]=$c MEM[$name]=$m TLIMIT[$name]=$tl TMIN[$name]=$tm EXTRA[$name]=$ex
+    GPUS[$name]=$g CPUS[$name]=$c MEM[$name]=$m TLIMIT[$name]=$tl TMIN[$name]=$tm EXTRA[$name]=$ex SWAIT[$name]=${sw:--}
   done < <(cluster_table | grep -v -e '^#' -e '^$')
   local pk
   while IFS='|' read -r name pk; do
@@ -438,12 +481,17 @@ fmt_wait() {
   printf '%dd %dh %dm\n' $((s/86400)) $((s%86400/3600)) $((s%3600/60))
 }
 
-# estimate <name>: prints the queue estimate from sbatch --test-only. Nothing from the reply but two numbers.
+# estimate <name>: prints the queue estimate from sbatch --test-only. Nothing from the reply reaches the screen
+# but a count and a label; sbatch's own text goes to <name>-estimate.log in the private output directory. Returns
+# 0 for an estimate or for none (sbatch accepted the shape and gave no start time), 2 when the scheduler REJECTED the
+# shape (sbatch exited non-zero: a site minimum, an account or partition it does not accept), 1 when the cluster
+# could not be reached. A rejection is not an unavailable estimate: the run does not go on (run_cluster).
 estimate() {
   local n=$1 acct reply rc wait_s
   acct=${S[${ACCTKEY[$n]}]}
   reply=$({ preamble ACCOUNT "$acct" SHAPE_OPTS "$(shape_opts "$n")"; cat <<'EOS'
 out=$(sbatch --test-only -A "$ACCOUNT" $SHAPE_OPTS --wrap true 2>&1); echo "rc=$?"
+echo "sbatch-text-begin"; printf '%s\n' "$out"; echo "sbatch-text-end"
 ts=$(printf '%s\n' "$out" | sed -n 's/.* to start at \([0-9T:-]*\) .*/\1/p' | head -1)
 if [ -n "$ts" ]; then
   now=$(date +%s); at=$(date -d "$ts" +%s 2>/dev/null) && echo "wait_s=$((at-now))" || echo "wait_s=unknown"
@@ -454,10 +502,14 @@ EOS
   } | remote "${HOST[$n]}") || { say "$n: queue estimate: the cluster could not be reached"; return 1; }
   rc=$(printf '%s\n' "$reply" | sed -n 's/^rc=\([0-9][0-9]*\)$/\1/p' | head -1)
   wait_s=$(printf '%s\n' "$reply" | sed -n 's/^wait_s=\(-\{0,1\}[0-9][0-9]*\)$/\1/p' | head -1)
-  if [ "${rc:-1}" = 0 ] && [ -n "$wait_s" ]; then
+  printf '%s\n' "$reply" | sed -n '/^sbatch-text-begin$/,/^sbatch-text-end$/p' >"$OUT/$n-estimate.log"
+  if [ "${rc:-1}" != 0 ]; then
+    say "$n: queue estimate: the scheduler REJECTED the shape (sbatch --test-only exit ${rc:-unknown}; its text is in the private log in the output directory)"
+    return 2
+  elif [ -n "$wait_s" ]; then
     say "$n: queue estimate: a start in about $(fmt_wait "$wait_s")"
   else
-    say "$n: queue estimate: none (sbatch --test-only gave no start time)"
+    say "$n: queue estimate: none (sbatch --test-only accepted the shape and gave no start time)"
   fi
 }
 
@@ -486,45 +538,83 @@ own_tags() {
   grep -E '^hb-[A-Za-z0-9._-]{1,60}$' "$OWN_TAGS_FILE" 2>/dev/null | sort -u || true
 }
 
+# owned_present <queue listing> <tags>: the IDs in the listing (id|name|partition lines) that this run owns,
+# one per line: a job named by one of the tags, or the job ID the run was given.
+owned_present() {
+  local now=$1 tags=$2 id name
+  while IFS='|' read -r id name _; do
+    [ -n "$id" ] || continue
+    if { [ -n "$tags" ] && printf '%s\n' "$tags" | grep -q -x -F "$name"; } || { [ -n "$JOBID" ] && [ "$id" = "$JOBID" ]; }; then echo "$id"; fi
+  done <<<"$now"
+}
+
+# unresolved_tags: the tags the test said it could not resolve (an ambiguous submission: the job may still
+# register), one per line, from unresolved.txt in the run's record directory.
+unresolved_tags() {
+  [ -n "$REC_DIR" ] && [ -f "$REC_DIR/unresolved.txt" ] && [ ! -L "$REC_DIR/unresolved.txt" ] || return 0
+  grep -E '^hb-[A-Za-z0-9._-]{1,60}$' "$REC_DIR/unresolved.txt" 2>/dev/null | sort -u || true
+}
+
 # clean_cluster: cancels what this run owns, then checks. Ownership is this run's own: the job ID it was
 # given (real-engine), and the jobs named by a tag it wrote down before submitting. A job that merely
 # appeared in the same partition is never touched: the owner's controller or a manual run does not take
-# this script's lock. The known ID is cancelled even when squeue cannot be read; the failed verification is
-# reported apart, and the EXIT trap tries once more. Idempotent; sets CLEAN_LEFT.
+# this script's lock. The owned tags are matched again on EVERY poll, not only in the first snapshot: a
+# submission whose reply was lost can register at any time, and a held job does not run out its time limit,
+# so one that registers after the first look would sit in the queue for ever. The queue counts as clear only
+# after CLEAN_QUIET_POLLS polls in a row with no owned job (bounded by CLEAN_MAX_POLLS), and a run with
+# unresolved submissions waits CLEAN_UNRESOLVED_POLLS polls more. "Left behind" is the owned jobs in the
+# last listing, so it is never 0 while one is there. The known ID is cancelled even when squeue cannot be
+# read; the failed verification is reported apart, and the EXIT trap tries once more. Idempotent; sets
+# CLEAN_LEFT.
 CLEAN_LEFT=0
 CLEAN_TRIES=0
+TEST_STOPPED=0     # 1 when a test binary was stopped (timeout, signal, panic) instead of finishing
 clean_cluster() {
   [ -n "$ACTIVE_HOST" ] || return 0
-  local host=$ACTIVE_HOST now="" ids="" tags line id name cancelled=0 left=0 try readable=1
+  local host=$ACTIVE_HOST now="" tags present id new again cancelled=0 left=0 readable=1 quiet=0 polls=0 sent=" " unres need stopped
   CLEAN_TRIES=$((CLEAN_TRIES+1))
   tags=$(own_tags)
-  [ -z "$JOBID" ] || ids=$JOBID
-  now=$(queue_jobs "$host") || readable=0
-  if [ "$readable" = 1 ] && [ -n "$tags" ]; then
-    while IFS='|' read -r id name _; do
-      [ -n "$id" ] || continue
-      printf '%s\n' "$tags" | grep -q -x -F "$name" || continue
-      case " $ids " in *" $id "*) ;; *) ids="$ids $id" ;; esac
-    done <<<"$now"
+  unres=$(unresolved_tags)
+  need=$CLEAN_QUIET_POLLS
+  [ -z "$unres" ] || need=$((CLEAN_QUIET_POLLS+CLEAN_UNRESOLVED_POLLS))
+  # A run that was stopped (a timeout, a signal, a panic) never got to say what it could not settle: every owned
+  # tag counts as unresolved, and an interrupt at any time does too.
+  stopped=0
+  if { [ "$TEST_STOPPED" = 1 ] || [ -n "$INTERRUPTED" ]; } && { [ -n "$tags" ] || [ -n "$JOBID" ]; }; then
+    stopped=1; need=$((CLEAN_QUIET_POLLS+CLEAN_UNRESOLVED_POLLS))
   fi
-  # shellcheck disable=SC2086
-  [ -z "$ids" ] || cancelled=$(cancel_ids "$host" $ids)
-  if [ "$readable" = 1 ] && [ -n "$ids" ]; then
-    # A cancelled job can show as completing for a few seconds: look again before calling it left behind.
-    for try in 1 2 3 4 5 6 7 8 9 10; do
-      now=$(queue_jobs "$host") || { readable=0; break; }
-      left=0
-      for id in $ids; do printf '%s\n' "$now" | grep -q "^${id}|" && left=$((left+1)); done
-      [ "$left" -eq 0 ] && break
-      sleep "$CLEAN_POLL_SECONDS"
-    done
-  fi
+  while :; do
+    polls=$((polls+1))
+    now=$(queue_jobs "$host") || { readable=0; break; }
+    present=$(owned_present "$now" "$tags")
+    if [ -z "$present" ]; then
+      quiet=$((quiet+1)); left=0
+    else
+      quiet=0; new=""; again=""; left=0
+      for id in $present; do
+        left=$((left+1))
+        case "$sent" in *" $id "*) again="$again $id" ;; *) new="$new $id"; sent="$sent$id " ;; esac
+      done
+      # shellcheck disable=SC2086
+      [ -z "$new" ] || cancelled=$((cancelled + $(cancel_ids "$host" $new)))
+      # A job still listed after its cancel (completing, or a cancel that failed) is cancelled again, not counted again.
+      # shellcheck disable=SC2086
+      [ -z "$again" ] || cancel_ids "$host" $again >/dev/null
+    fi
+    [ "$quiet" -lt "$need" ] || break
+    [ "$polls" -lt "$CLEAN_MAX_POLLS" ] || break
+    sleep "$CLEAN_POLL_SECONDS"
+  done
   if [ "$readable" = 0 ]; then
+    # The known ID is cancelled even though the queue cannot be read.
+    [ -z "$JOBID" ] || [ "$polls" -gt 1 ] || cancelled=$(cancel_ids "$host" "$JOBID")
     say "cleanup: the queue could not be read, so the cleanup could not look for this run's jobs by tag or confirm a cancel (cancelled $cancelled known job(s)); check the queue by hand"
     CLEAN_LEFT=1
     [ "$CLEAN_TRIES" -lt 2 ] || ACTIVE_HOST=""
     return 1
   fi
+  [ -z "$unres" ] || say "cleanup: waited for $(printf '%s\n' "$unres" | wc -l) unresolved submission(s) the test could not settle"
+  [ "$stopped" != 1 ] || say "cleanup: the test was stopped before it finished, so a submission in flight may still register; waited for it"
   say "cleanup: left behind $left (cancelled $cancelled)"
   [ "$left" -eq 0 ] || CLEAN_LEFT=1
   ACTIVE_HOST=""
@@ -551,10 +641,23 @@ wait_child() {
     wait "$CHILD" 2>/dev/null
     CHILD_RC=130
   fi
+  # A test that ends with any status but 0 (it finished) or 1 (it failed by its own verdict) was stopped: the
+  # timeout (124), a signal, a panic. Its sbatch may be in flight, so the cleanup waits for late registrations.
+  case $CHILD_RC in 0|1) ;; *) TEST_STOPPED=1 ;; esac
   CHILD=""
 }
 
 # ---------------------------------------------------------------- results
+
+# not_run_verdict <name> <rc> <failed> <skipped> <named result>: the NOT RUN protocol (see the header). True only for
+# a row with a start wait whose test skipped once at the top level with no failure, exit status 0 and the marker,
+# a regular file (not a link) in this run's record directory. Anything else is not a NOT RUN.
+not_run_verdict() {
+  local n=$1 rc=$2 failed=$3 skipped=$4 named=$5
+  [ "${SWAIT[$n]:--}" != - ] || return 1
+  [ "$named" = SKIP ] && [ "$rc" = 0 ] && [ "$failed" = 0 ] && [ "$skipped" = 1 ] || return 1
+  [ -n "$REC_DIR" ] && [ -f "$REC_DIR/not-run.txt" ] && [ ! -L "$REC_DIR/not-run.txt" ]
+}
 
 # judge <name> <log> <rc>: the verdict from the test's verbose log and exit status. A skip is not a pass, at
 # any level. Only counts and fixed labels reach the screen: a subtest's name can hold anything.
@@ -567,6 +670,11 @@ judge() {
   say "$n: tests: ${pass:-0} passed, ${fail:-0} failed, ${skip:-0} skipped"
   if [ "$rc" = 130 ]; then say "$n: FAIL (interrupted)"; return 1; fi
   if [ "$rc" = 124 ]; then say "$n: FAIL (timed out)"; return 1; fi
+  if not_run_verdict "$n" "$rc" "${fail:-0}" "${skip:-0}" "$named"; then
+    NOT_RUN=1
+    say "$n: NOT RUN (a job did not start within ${SWAIT[$n]} min of its acceptance and was cancelled by its tag; not a failure)"
+    return 3
+  fi
   if [ "$named" = SKIP ]; then say "$n: FAIL (skipped: its gate was not met, so nothing ran)"; return 1; fi
   if [ "${skip:-0}" != 0 ]; then say "$n: FAIL (a subtest was skipped, so part of the run did not happen)"; return 1; fi
   if [ "$rc" = 0 ] && [ "$named" = PASS ] && [ "${fail:-0}" = 0 ]; then say "$n: PASS"; return 0; fi
@@ -579,6 +687,7 @@ judge() {
 
 CONTROL_DIR=""
 REC_DIR=""
+NOT_RUN=0          # 1 when the run's test stopped on the row's start-wait bound
 
 # with_build_lock <command>...: runs the command under the shared build lock when LIVE_BUILD_LOCK names one.
 # Only builds take it; a test binary never runs while it is held.
@@ -613,7 +722,7 @@ env_hub() { export HPCBURST_TEST_HUB=1; }
 env_conformance() {
   local n=$1 host=${HOST[$1]} up
   up=$(printf '%s' "$host" | tr a-z A-Z)
-  unset HPCBURST_CONF_GPU_MODEL HPCBURST_CONF_CPU_ARCH HPCBURST_CONF_DATA_PARSER
+  unset HPCBURST_CONF_GPU_MODEL HPCBURST_CONF_CPU_ARCH HPCBURST_CONF_DATA_PARSER HPCBURST_CONF_QOS HPCBURST_CONF_START_WAIT
   export HPCBURST_CONFORMANCE=1 HPCBURST_CONF_PROFILE=${PROFILE[$n]} HPCBURST_CONF_PARTITION=${PARTITION[$n]}
   export HPCBURST_CONF_CREDENTIALS=${S[LIVE_CONF_CREDENTIALS_$up]} HPCBURST_CONF_ACCOUNT=${S[${ACCTKEY[$n]}]}
   export HPCBURST_CONF_GPUS=${GPUS[$n]} HPCBURST_CONF_CPUS=${CPUS[$n]} HPCBURST_CONF_MEMORY=${MEM[$n]}
@@ -621,13 +730,16 @@ env_conformance() {
   export HPCBURST_CONF_STAGING='$SCRATCH/hpc-burst-conformance'
   export HPCBURST_CONF_HOST_LOCK=${S[LIVE_LOCK_DIR]}/$host.lock HPCBURST_CONF_CONTROL_DIR=$CONTROL_DIR
   export HPCBURST_CONF_OUT=$REC_DIR
-  # A GPU row that waits in a queue, and under a QOS (gpu-accounting-*; issue #194): the test's own
-  # pending clock, which the script's timeout takes in (execute_cluster).
-  unset HPCBURST_CONF_QOS HPCBURST_CONF_PENDING_MAX_SECONDS HPCBURST_ALPHA_DRY HPCBURST_ALPHA_DRY_FAULT HPCBURST_ALPHA_ROW HPCBURST_ALPHA_OUT
+  # Unset above, so a value inherited from the caller's shell never reaches a row that names none.
+  [ "${QOS[$n]}" = - ] || export HPCBURST_CONF_QOS=${QOS[$n]}
+  [ "${SWAIT[$n]:--}" = - ] || export HPCBURST_CONF_START_WAIT=${SWAIT[$n]}m
+  # The accounting rows (issue #194) wait in a queue with a first clock of their own, which the script's timeout
+  # takes in (execute_cluster): the wait the operator allows, or, under QOS now, the start-wait bound above.
+  # The dry switch and the alpha record never reach a conformance run.
+  unset HPCBURST_CONF_PENDING_MAX_SECONDS HPCBURST_ALPHA_DRY HPCBURST_ALPHA_DRY_FAULT HPCBURST_ALPHA_ROW HPCBURST_ALPHA_OUT
   case $n in
-    gpu-accounting-*)
-      [ "${QOS[$n]}" = - ] || export HPCBURST_CONF_QOS=${QOS[$n]}
-      export HPCBURST_CONF_PENDING_MAX_SECONDS=${LIVE_PENDING_MAX_SECONDS:-7200} ;;
+    # Only a row with no start wait: with one, the bound is the first clock and the test takes no other.
+    gpu-accounting-*) [ "${SWAIT[$n]:--}" != - ] || export HPCBURST_CONF_PENDING_MAX_SECONDS=${LIVE_PENDING_MAX_SECONDS:-7200} ;;
   esac
 }
 
@@ -677,7 +789,8 @@ check_slot() {
   case $held in
     0) return 0 ;;
     unknown) refuse "$n: the slot could not be read, so it is taken as busy"; return 3 ;;
-    *) refuse "$n: the one-job slot (${SLOT[$n]}) already holds $held job(s) of yours; not queuing behind it"; return 3 ;;
+    *) say "$n: skipped: the ${SLOT[$n]} slot is in use"
+       refuse "$n: the one-job slot (${SLOT[$n]}) already holds $held job(s) of yours; not queuing behind it"; return 3 ;;
   esac
 }
 
@@ -719,7 +832,10 @@ execute_cluster() {
       run_binary "$n" "$OUT/$n.test" "$(( ${TMIN[$n]} + ${LIVE_PENDING_MAX_SECONDS:-7200} / 60 ))" env_alpha
       judge "$n" "$OUT/$n.log" "$CHILD_RC" ;;
     gpu-accounting-*)
-      run_binary "$n" "$OUT/$n.test" "$(( ${TMIN[$n]} + ${LIVE_PENDING_MAX_SECONDS:-7200} / 60 ))" env_conformance
+      # A row with a start wait has the bound as its first clock; one without has the operator's wait in the queue.
+      wait=$(( ${LIVE_PENDING_MAX_SECONDS:-7200} / 60 ))
+      [ "${SWAIT[$n]:--}" = - ] || wait=0
+      run_binary "$n" "$OUT/$n.test" "$(( ${TMIN[$n]} + wait ))" env_conformance
       judge "$n" "$OUT/$n.log" "$CHILD_RC" ;;
     *) run_binary "$n" "$OUT/$n.test" "${TMIN[$n]}" env_conformance; judge "$n" "$OUT/$n.log" "$CHILD_RC" ;;
   esac
@@ -730,17 +846,20 @@ release_run_lock() { [ -z "$RUN_FD" ] || { eval "exec ${RUN_FD}>&-"; RUN_FD=""; 
 # run_cluster <name>: preflight, estimate, the --yes gate, the builds, the run lock and a second look at
 # the slot, the run, the cleanup, the report. The slot's use starts after the builds.
 run_cluster() {
-  local n=$1 host=${HOST[$1]} t0 t1 verdict=0
-  local qos=""; [ "${QOS[$n]}" = - ] || qos=", qos ${QOS[$n]}"
+  local n=$1 host=${HOST[$1]} t0 t1 verdict=0 est
+  local qos="" sw=""; [ "${QOS[$n]}" = - ] || qos=", qos ${QOS[$n]}"
+  [ "${SWAIT[$n]:--}" = - ] || sw=", each job to start within ${SWAIT[$n]} min"
   local jobs="one job"
   [ "${MOSTJOBS[$n]:-1}" -le 1 ] || jobs="at most ${MOSTJOBS[$n]} jobs at once, each of this shape"
-  say "$n: shape: partition ${PARTITION[$n]}$qos, ${GPUS[$n]} GPU, ${CPUS[$n]} CPU, ${MEM[$n]}, time limit ${TLIMIT[$n]}, $jobs, no requeue"
+  say "$n: shape: partition ${PARTITION[$n]}$qos, ${GPUS[$n]} GPU, ${CPUS[$n]} CPU, ${MEM[$n]}, time limit ${TLIMIT[$n]}, $jobs, no requeue$sw"
   [ -z "${OGSET[$n]:-}" ] || owner_go_note "$n"
   # The go is read again just before each protected row, here and again after its builds, below: a date that
   # rolled over while an earlier row ran or this row built is a go for another day.
   [ -z "${OGSET[$n]:-}" ] || check_owner_go "$n" quiet || return 3
   if [ "${SLOT[$n]}" != - ]; then check_slot "$n" || return 3; fi
-  estimate "$n" || true
+  estimate "$n"; est=$?
+  # A rejected shape would be rejected by the real submit too: the run stops, with or without --yes.
+  [ "$est" -ne 2 ] || { say "$n: not run: the shape is rejected by the scheduler"; return 3; }
   if [ "$YES" != 1 ]; then say "$n: not run: pass --yes to run it"; return 4; fi
   prepare_cluster "$n" || return 1
   [ -z "$INTERRUPTED" ] || { say "$n: FAIL (interrupted before the run started)"; return 1; }
@@ -756,15 +875,17 @@ run_cluster() {
   REC_DIR="$OUT/$n-$(date -u +%Y%m%dT%H%M%SZ)-$$"
   mkdir -m 700 "$REC_DIR" || { release_run_lock; say "$n: FAIL (the record directory could not be made)"; return 1; }
   if [ "$n" = real-engine ]; then OWN_TAGS_FILE="$RE_DIR/submission-tag"; else OWN_TAGS_FILE="$REC_DIR/job-tags.txt"; fi
-  JOBID=""; CLEAN_TRIES=0
+  JOBID=""; CLEAN_TRIES=0; NOT_RUN=0; TEST_STOPPED=0
   ACTIVE_HOST=$host
   t0=$(date +%s)
-  execute_cluster "$n" || verdict=1
+  execute_cluster "$n" || { [ "$NOT_RUN" = 1 ] || verdict=1; }
   clean_cluster || true
   t1=$(date +%s)
   slot_report "$n" "$t0" "$t1"
   [ "$CLEAN_LEFT" -eq 0 ] || verdict=1
   release_run_lock
+  # Not run, with nothing left behind: exit 3, below a failure.
+  [ "$verdict" -ne 0 ] || [ "$NOT_RUN" != 1 ] || verdict=3
   return $verdict
 }
 

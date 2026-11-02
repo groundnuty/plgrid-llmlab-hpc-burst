@@ -163,6 +163,11 @@ type Row struct {
 	// rows that run there: the owner's shared GPU (#145). Zero for a row that
 	// holds no slot.
 	SlotHold time.Duration
+	// StartWait bounds how long a job of the run may wait to start, from its
+	// acceptance, for the rows under a one-job QOS that guard the owner's slot with
+	// it (the science agent, 2 Nov 2026; HPCBURST_CONF_START_WAIT): past it the
+	// run cancels its jobs by their tags and is NOT RUN. Zero: no bound.
+	StartWait time.Duration
 	// MostJobs is the number of jobs of the run, and so the most of them in the
 	// queue at once: the verdicts check the cluster's own record of job identities
 	// and occupancy against it.
@@ -215,7 +220,7 @@ var rows = []Row{
 // internal/providerctl/conformance (a GPU job through the Provider's controller,
 // no stack and no dial-home route). Lease and Budget are the job's.
 var accountingRows = []Row{
-	{Name: "gpu-accounting-helios", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: 5 * time.Minute, Budget: 25 * time.Minute, SlotHold: 10 * time.Minute, MostJobs: 1, PostsTo: "#145 and #93"},
+	{Name: "gpu-accounting-helios", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: 5 * time.Minute, Budget: 30 * time.Minute, SlotHold: 15 * time.Minute, StartWait: 10 * time.Minute, MostJobs: 1, PostsTo: "#145 and #93"},
 	{Name: "gpu-accounting-athena", Cluster: "athena", Partition: "plgrid-gpu-a100", GPUs: 1, Lease: 5 * time.Minute, Budget: 25 * time.Minute, MostJobs: 1, PostsTo: "#145 and #93"},
 }
 

@@ -37,16 +37,23 @@ var retired = []string{"HPCBURST_CONF_GPU_MODEL", "HPCBURST_CONF_CPU_ARCH", "HPC
 // settings is one run's inputs.
 type settings struct {
 	creds, account, partition, staging, lock, control, out string
+	// qos is the Provider's qos (HPCBURST_CONF_QOS), or "" for none: the Provider
+	// sends no --qos, and every request the run submits agrees (heldRequest).
+	qos string
+	// startWait, when it is above zero, bounds each step's wait for its job to
+	// start (HPCBURST_CONF_START_WAIT, startwait_test.go). Zero: the steps'
+	// own deadlines of 30 minutes.
+	startWait time.Duration
 	// runStaging is this run's own staging directory, below staging
 	// (newRunStaging); the profile's stagingDir is it, and it is removed when the
 	// run ends.
 	runStaging string
 	gpus, cpus int32
 	memory     resource.Quantity
-	// qos is the QOS the Provider submits under; "" for the association's default.
 	// pendingMax is how long a job may wait in the queue before the run gives up
-	// (HPCBURST_CONF_PENDING_MAX_SECONDS; 30 min when unset).
-	qos        string
+	// (HPCBURST_CONF_PENDING_MAX_SECONDS; 30 min when unset). The accounting rows
+	// on a row with no start wait use it; startWait, when set, is the bound that
+	// makes a run NOT RUN instead.
 	pendingMax time.Duration
 
 	// profile is the shipped PlatformProfile, whole, with its stagingDir
@@ -98,6 +105,9 @@ func loadProfile(dir, name, partition, staging string) (*v1alpha1.PlatformProfil
 
 // readSettings reads the run's settings from env, a lookup that returns "" for
 // an unset name. Every missing or malformed setting is reported at once.
+// HPCBURST_CONF_QOS and HPCBURST_CONF_START_WAIT are the optional settings; a
+// qos must be one the profile lists in its qos (the Provider's own check, run
+// here before any call).
 func readSettings(env func(string) string) (settings, error) {
 	var problems []string
 	get := func(k string) string {
@@ -122,6 +132,7 @@ func readSettings(env func(string) string) (settings, error) {
 		creds: get("HPCBURST_CONF_CREDENTIALS"), account: get("HPCBURST_CONF_ACCOUNT"), partition: get("HPCBURST_CONF_PARTITION"),
 		staging: get("HPCBURST_CONF_STAGING"), lock: get("HPCBURST_CONF_HOST_LOCK"), control: get("HPCBURST_CONF_CONTROL_DIR"),
 		out: get("HPCBURST_CONF_OUT"), gpus: num("HPCBURST_CONF_GPUS"), cpus: num("HPCBURST_CONF_CPUS"),
+		qos: env("HPCBURST_CONF_QOS"),
 	}
 	if m := get("HPCBURST_CONF_MEMORY"); m != "" {
 		q, err := resource.ParseQuantity(m)
@@ -135,7 +146,7 @@ func readSettings(env func(string) string) (settings, error) {
 			problems = append(problems, k+" is not read any more: the profile holds it; unset it")
 		}
 	}
-	s.qos, s.pendingMax = env("HPCBURST_CONF_QOS"), 30*time.Minute
+	s.pendingMax = 30 * time.Minute
 	if v := env("HPCBURST_CONF_PENDING_MAX_SECONDS"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n <= 0 {
@@ -143,6 +154,13 @@ func readSettings(env func(string) string) (settings, error) {
 		} else {
 			s.pendingMax = time.Duration(n) * time.Second
 		}
+	}
+	if v := env("HPCBURST_CONF_START_WAIT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < time.Minute || d > maxStartWait {
+			problems = append(problems, "HPCBURST_CONF_START_WAIT is not a duration from 1m to "+maxStartWait.String()+", for example 10m")
+		}
+		s.startWait = d
 	}
 	profile := get("HPCBURST_CONF_PROFILE")
 	if len(problems) > 0 {
@@ -156,6 +174,15 @@ func readSettings(env func(string) string) (settings, error) {
 	pp, part, err := loadProfile(profilesDir(), profile, s.partition, s.runStaging)
 	if err != nil {
 		return s, err
+	}
+	if s.qos != "" {
+		if _, ok := v1alpha1.FindQOS(&pp.Spec, s.qos); !ok {
+			var listed []string
+			for _, q := range pp.Spec.QOS {
+				listed = append(listed, q.Name)
+			}
+			return s, fmt.Errorf("HPCBURST_CONF_QOS %q is not a qos profile %q lists; it lists %s", s.qos, profile, strings.Join(listed, ", "))
+		}
 	}
 	s.profile, s.part = pp, part
 	return s, nil

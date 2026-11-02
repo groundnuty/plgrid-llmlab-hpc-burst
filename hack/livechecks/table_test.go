@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -87,8 +88,14 @@ func readShapeNames(t *testing.T) []string {
 	var names []string
 	for _, l := range block(t, string(b), "CLUSTER SHAPES") {
 		f := strings.Split(l, "|")
-		if len(f) != 13 {
-			t.Fatalf("shape row %q has %d fields, want 13", l, len(f))
+		// 13 fields, and an optional 14th: the start wait in minutes (whole, 1 to 30) or -.
+		if len(f) != 13 && len(f) != 14 {
+			t.Fatalf("shape row %q has %d fields, want 13 or 14", l, len(f))
+		}
+		if len(f) == 14 {
+			if n, err := strconv.Atoi(f[13]); f[13] != "-" && (err != nil || n < 1 || n > 30) {
+				t.Fatalf("shape row %q: start wait %q is neither - nor whole minutes from 1 to 30", f[0], f[13])
+			}
 		}
 		names = append(names, f[0])
 	}

@@ -18,9 +18,16 @@ import (
 // observation to write. A failure leaves it false and is returned, so the next
 // pass retries; the Allocation's own status write still happens. A wait that is
 // already in the Provider's status (the Allocation's write failed after the
-// Provider's succeeded) is not added again and costs no write.
+// Provider's succeeded) is not added again and costs no write. An Allocation
+// that carries v1alpha1.AnnotationQueuedSuccessor records no wait at all.
 func (c *Controller) recordQueueWait(ctx context.Context, s *allocState, id string, job provider.Job, found bool) error {
 	if !found || job.StartTime == nil || s.prior.QueueWaitRecorded {
+		return nil
+	}
+	if s.a.Annotations[v1alpha1.AnnotationQueuedSuccessor] != "" {
+		// A queued-path successor pended behind its own predecessor's per-user cap, not in the scheduler's
+		// queue: no queue wait is recorded for it, and the wait counts as settled (issue #195).
+		s.obs.QueueWaitRecorded = true
 		return nil
 	}
 	var prov v1alpha1.Provider

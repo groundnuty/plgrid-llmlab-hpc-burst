@@ -1,0 +1,84 @@
+package conformance
+
+// The accounting row on Helios under QOS now has the start-wait guard of
+// conformance-helios-gh200 (issue #194; the science agent, 2 Nov 2026): when
+// the owner's other job holds the one GPU, this run's job pends, and at the
+// bound of 10 minutes it is cancelled by its tag and the run is NOT RUN, with
+// no kept accounting record. The row's Athena twin has no slot and no bound.
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	appsv1 "k8s.io/api/apps/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
+)
+
+func TestTheAccountingRowIsNotRunWhenTheOwnersJobHoldsTheSlot(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "out")
+	if err := os.Mkdir(out, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	w, plat := dryAccountingWorld(t, "gpu-accounting-helios", "slot-held", out)
+	rec := &stopRecorder{TB: t}
+	w.t = rec
+	began := w.at()
+	ends(func() { gpuAccountingBody(rec, w, "gpu-accounting-helios") })
+
+	if rec.failed != "" {
+		t.Fatalf("the run failed: %s", rec.failed)
+	}
+	if !strings.HasPrefix(rec.skipped, "NOT RUN: the job: a job did not start within 10m0s of its acceptance") {
+		t.Fatalf("skipped = %q, want a NOT RUN with the bound", rec.skipped)
+	}
+	// The bound, on the fake clock: 10 minutes and no more than the cancel's few seconds.
+	if waited := w.at().Sub(began); waited < 10*time.Minute || waited > 11*time.Minute {
+		t.Errorf("the wait lasted %s, want the bound of 10m", waited)
+	}
+	// This run's job was cancelled and never started; the owner's was not touched.
+	var ours, owners int
+	for _, j := range plat.Jobs() {
+		switch {
+		case strings.HasPrefix(j.Name, "hb-"):
+			ours++
+			if j.State != fakeslurm.Cancelled || !j.Start.IsZero() {
+				t.Errorf("this run's job is %s (started %v), want cancelled and never started", j.State, !j.Start.IsZero())
+			}
+		default:
+			owners++
+			if j.State != fakeslurm.Running {
+				t.Errorf("the owner's job is %s, want it left running", j.State)
+			}
+		}
+	}
+	if ours != 1 || owners != 1 {
+		t.Errorf("%d jobs of this run and %d of the owner's, want 1 and 1", ours, owners)
+	}
+	// The marker is there, with no job ID or tag; and no accounting record, no posts and no record file were written.
+	raw, err := os.ReadFile(filepath.Join(out, notRunFile))
+	if err != nil {
+		t.Fatalf("no marker: %v", err)
+	}
+	if strings.Contains(string(raw), "hb-") {
+		t.Errorf("the marker names a tag: %s", raw)
+	}
+	for _, f := range []string{"posts.md", "record.json"} {
+		if _, err := os.Stat(filepath.Join(out, f)); err == nil {
+			t.Errorf("a NOT RUN run wrote %s", f)
+		}
+	}
+	var revs appsv1.ControllerRevisionList
+	if err := w.c.List(t.Context(), &revs, client.InNamespace(testNS)); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range revs.Items {
+		if strings.HasPrefix(r.Name, "acct-") {
+			t.Errorf("a NOT RUN run left the accounting record %s", r.Name)
+		}
+	}
+}

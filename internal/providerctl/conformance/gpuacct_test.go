@@ -23,6 +23,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -52,6 +53,14 @@ var gpuAgent = []byte("#!/bin/sh\n" +
 // environment's FAKE_NODE_CVD and FAKE_NODE_SMI.
 var dryGPUAgent = []byte("#!/bin/sh\nprintf 'cvd=%s smi=%s\\n' \"$FAKE_NODE_CVD\" \"$FAKE_NODE_SMI\" > \"$1/node-gpus\"\nsleep 2\nexit 0\n")
 
+// The accounting row's own deadlines, after its start wait: the job ends (it runs 20 s), and the deleted
+// Allocation lets go of its finalizer once the kept record is written. hack/live-checks.sh's timeout for the
+// row covers the start wait and these (qos_test.go compares them).
+const (
+	accountingEndWait    = 10 * time.Minute
+	accountingDeleteWait = 5 * time.Minute
+)
+
 // nodeGPUsFile is the file name in the Allocation's directory (agentapi.AllocationDir).
 const nodeGPUsFile = "node-gpus"
 
@@ -62,6 +71,8 @@ const nodeGPUsFile = "node-gpus"
 var dryGPUFaults = map[string][2]string{
 	"": {"1", "1"}, "node-two": {"2", "2"}, "node-none": {"-", "0"},
 	"smi-whole-node": {"1", "8"}, "cvd-unset": {"-", "1"},
+	// slot-held is a healthy node whose job cannot start (dryAccountingWorld).
+	"slot-held": {"1", "1"},
 }
 
 // TestGPUAccounting is the run on one platform.
@@ -83,6 +94,18 @@ func TestGPUAccounting(t *testing.T) {
 func dryGPUAccounting(t *testing.T) {
 	t.Helper()
 	row := os.Getenv("HPCBURST_ALPHA_ROW")
+	fault := os.Getenv("HPCBURST_ALPHA_DRY_FAULT")
+	w, _ := dryAccountingWorld(t, row, fault, os.Getenv("HPCBURST_ALPHA_OUT"))
+	gpuAccountingBody(t, w, row)
+}
+
+// dryAccountingWorld is the world of a dry run of an accounting row over a fake Slurm in run mode, and the fake.
+// The settings are the row's, as the script would pass them. The faults are the node's (dryGPUFaults) and
+// slot-held: the owner's other job holds QOS now's one GPU, so this run's job pends past the start-wait bound,
+// on a clock that moves only when the wait sleeps, so that the bound is reached at once and the job can never
+// have started. The other runs wait on the real clock, for a job that starts in seconds.
+func dryAccountingWorld(t *testing.T, row, fault, out string) (*world, *fakeslurm.Platform) {
+	t.Helper()
 	r, ok := alpha.RowByName(row)
 	if !ok || !strings.HasPrefix(row, "gpu-accounting-") {
 		t.Fatalf("HPCBURST_ALPHA_ROW is %q, not a gpu-accounting row", row)
@@ -92,11 +115,13 @@ func dryGPUAccounting(t *testing.T) {
 			t.Fatalf("a dry run refuses to start with live settings present (%s)", strings.SplitN(k, "=", 2)[0])
 		}
 	}
-	node, known := dryGPUFaults[os.Getenv("HPCBURST_ALPHA_DRY_FAULT")]
+	node, known := dryGPUFaults[fault]
 	if !known {
-		t.Fatalf("the dry fault %q is not one of the row's", os.Getenv("HPCBURST_ALPHA_DRY_FAULT"))
+		t.Fatalf("the dry fault %q is not one of the row's", fault)
 	}
-	out := os.Getenv("HPCBURST_ALPHA_OUT")
+	if fault == "slot-held" && r.QOS == "" {
+		t.Fatalf("the dry fault slot-held needs a row under a one-job QOS")
+	}
 	if !filepath.IsAbs(out) {
 		t.Fatal("HPCBURST_ALPHA_OUT must be an absolute path")
 	}
@@ -121,7 +146,11 @@ func dryGPUAccounting(t *testing.T) {
 		"HPCBURST_CONF_ACCOUNT": "example-account", "HPCBURST_CONF_GPUS": "1", "HPCBURST_CONF_CPUS": "4", "HPCBURST_CONF_MEMORY": "8Gi",
 		"HPCBURST_CONF_STAGING": "$SCRATCH/hpc-burst-conformance", "HPCBURST_CONF_HOST_LOCK": filepath.Join(dir, "lock"),
 		"HPCBURST_CONF_CONTROL_DIR": filepath.Join(dir, "ctl"), "HPCBURST_CONF_OUT": out, "HPCBURST_CONF_QOS": r.QOS,
-		"HPCBURST_CONF_PENDING_MAX_SECONDS": "60",
+	}
+	if r.StartWait > 0 {
+		vars["HPCBURST_CONF_START_WAIT"] = r.StartWait.String()
+	} else {
+		vars["HPCBURST_CONF_PENDING_MAX_SECONDS"] = "60"
 	}
 	s, err := readSettings(env(vars))
 	if err != nil {
@@ -137,10 +166,15 @@ func dryGPUAccounting(t *testing.T) {
 		// a job gets by asking for the feature memfs.
 		run.JobVars = []fakeslurm.JobVar{{Name: "MEMFS", Feature: "memfs"}}
 	}
-	plat := fakeslurm.New(slurm.RealClock, fakeslurm.Config{
+	cfg := fakeslurm.Config{
 		DataParser: s.profile.Spec.JSONDataParser, NotListed: notListed,
 		Partitions: []fakeslurm.Partition{{Name: r.Partition, GPUOnly: true}}, Run: run,
-	})
+	}
+	if r.QOS != "" {
+		// The QOS's cap of one GPU per user: a fixture without a cap would start a second job beside the first.
+		cfg.QOS = []fakeslurm.QOS{{Name: r.QOS, MaxGPUsPerUser: fakeslurm.Cap(1)}}
+	}
+	plat := fakeslurm.New(slurm.RealClock, cfg)
 	t.Cleanup(func() {
 		// Close must not meet a process in the middle of exiting: wait until every job's processes are gone.
 		for deadline := time.Now().Add(time.Minute); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
@@ -157,14 +191,41 @@ func dryGPUAccounting(t *testing.T) {
 		}
 	})
 	session := plat.Login(fakeslurm.Login{User: "example-user", Env: map[string]string{"HOME": home, "SCRATCH": scratch}})
+	if fault == "slot-held" {
+		// The owner's other project: one GPU job under the same QOS through the same login, running (a process
+		// that sleeps) until the test ends it. It takes the QOS's one GPU, so this run's job pends.
+		res, err := session.Run(context.Background(), slurm.Command{Line: "sbatch --parsable --no-requeue --job-name=owner-other-project-job --partition=" + r.Partition +
+			" --qos=" + r.QOS + " --account=example-account --time=00:30:00 --gres=gpu:1 --cpus-per-task=1 --mem=1024 '--wrap=sleep 600'"})
+		if err != nil || res.ExitCode != 0 {
+			t.Fatalf("the owner's job was not accepted: %v exit %d %s", err, res.ExitCode, res.Stderr)
+		}
+		id, err := strconv.Atoi(strings.TrimSpace(strings.SplitN(string(res.Stdout), ";", 2)[0]))
+		if err != nil {
+			t.Fatalf("sbatch printed %q", res.Stdout)
+		}
+		for deadline := time.Now().Add(time.Minute); ; time.Sleep(20 * time.Millisecond) {
+			if j, ok := plat.Job(id); ok && j.State == fakeslurm.Running {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("the owner's job did not start on the fake")
+			}
+		}
+		// Registered after the fake's own cleanup, so it runs first: the sleeping job ends before Close.
+		t.Cleanup(func() { _ = plat.End(id, string(fakeslurm.Cancelled)) })
+	}
 	w := buildWorld(t, s, worldKit{agent: dryGPUAgent, dial: func(slurm.Validated) (slurm.Runner, io.Closer, error) {
 		return session, io.NopCloser(nil), nil
 	}})
-	gpuAccountingBody(t, w, row)
+	if fault == "slot-held" {
+		ft := newFakeTime()
+		w.now, w.sleep = ft.now, ft.sleep
+	}
+	return w, plat
 }
 
 // gpuAccountingBody is the run, live or dry.
-func gpuAccountingBody(t *testing.T, w *world, rowName string) {
+func gpuAccountingBody(t testing.TB, w *world, rowName string) {
 	t.Helper()
 	ctx := context.Background()
 	row, ok := alpha.RowByName(rowName)
@@ -179,11 +240,26 @@ func gpuAccountingBody(t *testing.T, w *world, rowName string) {
 	a := w.newAlloc(name)
 	tag := v1alpha1.JobTag(a.Namespace, a.Name, a.UID)
 	uid := a.UID
-	// The job waits in the queue (the first clock), runs, and ends by itself.
-	w.until(name, "the job ends", w.s.pendingMax+10*time.Minute, func(a *v1alpha1.Allocation) bool {
+	// The job waits in the queue (the first clock), runs, and ends by itself. Under a one-job QOS the first
+	// clock is the start-wait bound: past it the job is cancelled by its tag and the run is NOT RUN, with no
+	// record (issue #194; startwait_test.go); else it is the wait the operator allows.
+	notFailed := func(a *v1alpha1.Allocation) {
 		if ph := a.Status.AtProvider.Phase; ph == v1alpha1.AllocationFailed || ph == v1alpha1.AllocationRefused || ph == v1alpha1.AllocationLost {
 			t.Fatalf("the Allocation is %s (reason %q), not a job that ended", ph, a.Status.AtProvider.Reason)
 		}
+	}
+	startedOrEnded := func(a *v1alpha1.Allocation) bool {
+		notFailed(a)
+		ph := a.Status.AtProvider.Phase
+		return ph == v1alpha1.AllocationRunning || ph == v1alpha1.AllocationEnded
+	}
+	if w.s.startWait > 0 {
+		w.untilRuns("the job", name, "the job runs", w.at(), false, startedOrEnded)
+	} else {
+		w.until(name, "the job starts", w.s.pendingMax, startedOrEnded)
+	}
+	w.until(name, "the job ends", accountingEndWait, func(a *v1alpha1.Allocation) bool {
+		notFailed(a)
 		return a.Status.AtProvider.Phase == v1alpha1.AllocationEnded
 	})
 	cvd, smi := w.nodeGPUs(ctx, tag)
@@ -195,7 +271,7 @@ func gpuAccountingBody(t *testing.T, w *world, rowName string) {
 	if err := w.c.Delete(ctx, w.get(name)); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(5 * time.Minute)
+	deadline := time.Now().Add(accountingDeleteWait)
 	for w.get(name) != nil && time.Now().Before(deadline) {
 		w.reconcile(name)
 		time.Sleep(2 * time.Second)

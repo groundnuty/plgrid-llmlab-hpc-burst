@@ -43,7 +43,7 @@ var alphaShapes = []alphaShape{
 	{"alpha-helios-nooverlap", "TestAlphaHeliosNoOverlap", "helios", "partition plgrid-gpu-gh200, qos now, 1 GPU, 72 CPU, 120000M, time limit 01:46:00, at most 2 jobs at once, each of this shape, no requeue", "now", "SEEDACCT-gh", true},
 	{"tunnel-hour-helios", "TestTunnelHour", "helios", "partition plgrid-gpu-gh200, qos now, 1 GPU, 72 CPU, 120000M, time limit 02:17:00, one job, no requeue", "now", "SEEDACCT-gh", true},
 	{"tunnel-hour-athena", "TestTunnelHour", "athena", "partition plgrid-gpu-a100, 1 GPU, 16 CPU, 125Gi, time limit 02:17:00, one job, no requeue", "", "SEEDACCT-a100", true},
-	{"gpu-accounting-helios", "TestGPUAccounting", "helios", "partition plgrid-gpu-gh200, qos now, 1 GPU, 72 CPU, 117Gi, time limit 00:05:00, one job, no requeue", "now", "SEEDACCT-gh", false},
+	{"gpu-accounting-helios", "TestGPUAccounting", "helios", "partition plgrid-gpu-gh200, qos now, 1 GPU, 72 CPU, 117Gi, time limit 00:05:00, one job, no requeue, each job to start within 10 min", "now", "SEEDACCT-gh", false},
 	{"gpu-accounting-athena", "TestGPUAccounting", "athena", "partition plgrid-gpu-a100, 1 GPU, 16 CPU, 125Gi, time limit 00:05:00, one job, no requeue", "", "SEEDACCT-a100", false},
 }
 
@@ -87,6 +87,8 @@ case $mode in
   fail) echo "--- FAIL: $t (0.01s)"; echo FAIL; exit 1 ;;
   leave-late) leave; echo "--- PASS: $t (0.01s)"; echo PASS ;;
   midnight) echo "--- PASS: $t (0.01s)"; echo PASS; echo "$STUB_NEXT_DATE" > "$LIVE_FAKE_DATE_FILE" ;;
+  late-hidden) echo "hb-late-bbbbbbbbbbbb" >> "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/job-tags.txt"; echo "9003|hb-late-bbbbbbbbbbbb|normal|plgrid|PENDING" >> "$STUB_STATE/queue"; echo "--- PASS: $t (0.01s)"; echo PASS ;;
+  not-run) echo "step: a job did not start within the start-wait bound of 10m0s; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   sleep) leave; touch "$STUB_STATE/started"; exec sleep 3600 ;;
 esac
 `
@@ -185,6 +187,22 @@ func TestTheScriptsShapesAreThePackagesRows(t *testing.T) {
 		}
 		if tl := time.Duration(h)*time.Hour + time.Duration(m)*time.Minute + time.Duration(s)*time.Second; tl != r.Lease {
 			t.Errorf("%s: the shape's time limit %s is not the lease %s the run plans (the controller's Allocation time limit is the leaseLimit)", r.Name, tl, r.Lease)
+		}
+		// The optional 14th column is the start wait in minutes: the package's StartWait, and none where it has none.
+		wantWait := ""
+		if r.StartWait > 0 {
+			wantWait = fmt.Sprint(int(r.StartWait / time.Minute))
+		}
+		if gotWait := func() string {
+			if len(f) > 13 && f[13] != "-" {
+				return f[13]
+			}
+			return ""
+		}(); gotWait != wantWait {
+			t.Errorf("%s: the shape's start wait is %q minutes, the package's row has %q", r.Name, gotWait, wantWait)
+		}
+		if tm := fmt.Sprint(int(r.Budget / time.Minute)); r.StartWait > 0 && f[11] != tm {
+			t.Errorf("%s: the shape's timeout is %s minutes, the package's budget %s", r.Name, f[11], tm)
 		}
 	}
 }
@@ -471,7 +489,7 @@ func TestPlanNamesTheAlphaRowsWhenTheStackChanges(t *testing.T) {
 		{"a stack binary", "cmd/hpcburst-front/main.go", "package main\n\nimport _ \"example.test/fx/internal/stack\"\n\nfunc main() { _ = 1 }\n", alphaRows},
 		{"the example the rows apply", "examples/provider-athena-a100.yaml", "kind: Provider\nx: 1\n", []string{"alpha-athena-handover"}},
 		{"a package the accounting rows and conformance run, not the stack", "internal/providerctl/providerctl.go", "package providerctl\n\nimport _ \"example.test/fx/internal/slurm\"\n\nvar X = 1\n",
-			[]string{"conformance-athena", "conformance-helios", "gpu-accounting-athena", "gpu-accounting-helios"}},
+			[]string{"conformance-athena", "conformance-helios", "conformance-helios-gh200", "gpu-accounting-athena", "gpu-accounting-helios"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -500,6 +518,8 @@ func TestTheTimeoutIsTheRunTimePlusTheWaitInTheQueue(t *testing.T) {
 	for _, c := range []struct{ row, test, want string }{
 		{"alpha-athena-handover", "TestAlphaAthenaHandover", "-test.timeout 161m"}, // 150 + 600/60 + 1
 		{"gpu-accounting-athena", "TestGPUAccounting", "-test.timeout 36m"},        // 25 + 600/60 + 1
+		// Under a start-wait bound the bound is the first clock: 30 + 0 + 1, whatever the wait the operator allows.
+		{"gpu-accounting-helios", "TestGPUAccounting", "-test.timeout 31m"},
 	} {
 		t.Run(c.row, func(t *testing.T) {
 			w := newAlphaWorld(t)
@@ -509,7 +529,13 @@ func TestTheTimeoutIsTheRunTimePlusTheWaitInTheQueue(t *testing.T) {
 			if args := w.stateFile("test-args-" + c.test); !strings.Contains(args, c.want) {
 				t.Errorf("the test binary ran with %q, want %q", args, c.want)
 			}
-			if env := w.stateFile("test-env-" + c.test); !strings.Contains(env, "PENDING_MAX_SECONDS=600") {
+			env := w.stateFile("test-env-" + c.test)
+			if c.row == "gpu-accounting-helios" {
+				// The bound is its first clock; the operator's wait is not passed on, and does not lengthen the timeout.
+				if !strings.Contains(env, "HPCBURST_CONF_START_WAIT=10m") || strings.Contains(env, "PENDING_MAX_SECONDS") {
+					t.Errorf("the test did not get the start-wait bound alone as its first clock:\n%s", env)
+				}
+			} else if !strings.Contains(env, "PENDING_MAX_SECONDS=600") {
 				t.Errorf("the test did not get the wait as its first clock:\n%s", env)
 			}
 		})
@@ -531,18 +557,26 @@ func TestTheAccountingRowsGetTheirQOSAndNoDryEnvironment(t *testing.T) {
 			t.Errorf("%s reached a live accounting run:\n%s", bad, env)
 		}
 	}
-	for _, want := range []string{"HPCBURST_CONF_QOS=now", "HPCBURST_CONF_PENDING_MAX_SECONDS=7200", "HPCBURST_CONF_PARTITION=plgrid-gpu-gh200", "HPCBURST_CONF_GPUS=1"} {
+	for _, want := range []string{"HPCBURST_CONF_QOS=now", "HPCBURST_CONF_START_WAIT=10m", "HPCBURST_CONF_PARTITION=plgrid-gpu-gh200", "HPCBURST_CONF_GPUS=1"} {
 		if !strings.Contains(env, want) {
 			t.Errorf("the test did not get %s:\n%s", want, env)
 		}
+	}
+	// The bound is its one clock: the wait in the queue the operator allows is the Athena row's.
+	if strings.Contains(env, "HPCBURST_CONF_PENDING_MAX_SECONDS") {
+		t.Errorf("a row with a start wait got a second clock:\n%s", env)
 	}
 	// A row with no QOS gets none.
 	w2 := newAlphaWorld(t)
 	if res := w2.run(nil, "--run", "gpu-accounting-athena", "--yes"); res.code != 0 {
 		t.Fatalf("exit %d:\n%s", res.code, res.out)
 	}
-	if env := w2.stateFile("test-env-TestGPUAccounting"); strings.Contains(env, "HPCBURST_CONF_QOS") {
-		t.Errorf("a QOS reached a row that has none:\n%s", env)
+	env2 := w2.stateFile("test-env-TestGPUAccounting")
+	if strings.Contains(env2, "HPCBURST_CONF_QOS") || strings.Contains(env2, "HPCBURST_CONF_START_WAIT") {
+		t.Errorf("a QOS or a start wait reached a row that has none:\n%s", env2)
+	}
+	if !strings.Contains(env2, "HPCBURST_CONF_PENDING_MAX_SECONDS=7200") {
+		t.Errorf("the row with no start wait did not get the wait in the queue:\n%s", env2)
 	}
 }
 
