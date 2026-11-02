@@ -47,11 +47,18 @@ bin/hpcburst status --state-dir "$STATE" --json
 bin/hpcburst status --state-dir "$STATE" --no-api
 ```
 
-On a state directory where nothing was started, it prints this and exits 3:
+On a state directory that does not exist, it prints this and exits 3:
 
 ```text
 stopped
   - no state directory: nothing was started here
+```
+
+On a directory that exists but holds no record of a start, such as one after `hpcburst down`, the reason differs, and the exit code is 3 too:
+
+```text
+stopped
+  - no launcher record: no host is running from this state directory
 ```
 
 ### The lines, in the order they print
@@ -66,7 +73,7 @@ The first line is the verdict: `healthy`, `unhealthy` or `stopped`. Below it, on
 | `executable:` | the binary k3s runs. It must be under its own data directory: a user-level k3s on a machine with a system k3s can run root's files instead ([HBEP-11](../hbep/0011-kubernetes-control-plane/README.md), Single-user host) |
 | `event TTL:` | how long the API server keeps events: `168h`, or `1h (default; restart to apply 168h)` on a host an earlier release started. That host is still healthy |
 | `RSS <n> MiB` | k3s's resident memory |
-| `apiserver /readyz:`, `controller manager /healthz:`, `write probe:`, `garbage-collector probe:` | the four API checks, `true` or `false` (absent under `--no-api`). The write probe writes an object; the garbage-collector probe makes an owner and a dependent and waits up to a minute for the dependent to go |
+| `apiserver /readyz:`, `controller manager /healthz:`, `write probe:`, `garbage-collector probe:` | the four API checks, `true` or `false` (absent under `hpcburst status --no-api`). The write probe writes an object; the garbage-collector probe makes an owner and a dependent and waits up to a minute for the dependent to go |
 | `supervisor pid <n>: running=` | the process that keeps the controllers, the front and frps running and restarts any that exits |
 | `supervised controller:`, `supervised front:`, `supervised frps:` | one line per supervised process: whether it runs, its PID, its state (`starting`, `running`, `backoff` after an exit, `stopped`), its restart count, its `/healthz`, the controller's readiness, and its last exit with code and time |
 | `agent builds (<dir>):` | one line per CPU architecture that an applied PlatformProfile's partitions have, with the agent and frpc builds (below) |
@@ -76,32 +83,37 @@ The first line is the verdict: `healthy`, `unhealthy` or `stopped`. Below it, on
 
 ### The controller's readiness
 
-The `supervised controller:` line ends with `readiness:` and one of four states. `status` reads the lifecycle controller's two named checks, `/readyz/caches` and `/readyz/leading`, by status code only ([HBEP-11](../hbep/0011-kubernetes-control-plane/README.md), Single-user host; [HBEP-8](../hbep/0008-observability-and-events/README.md), Observers):
+Once the controller's `/healthz` answers, the `supervised controller:` line ends with `readiness:` and one of five states. `status` reads the lifecycle controller's two named checks, `/readyz/caches` and `/readyz/leading`, by status code only ([HBEP-11](../hbep/0011-kubernetes-control-plane/README.md), Single-user host; [HBEP-8](../hbep/0008-observability-and-events/README.md), Observers; `internal/launcher/readyz.go`):
 
 | State | Means | What to do |
 |---|---|---|
 | `ready` | both checks pass: its caches have synced and it leads its `Lease` | nothing |
 | `starting` | its caches have not synced yet | wait; it follows every start and restart |
-| `not leading` | its caches have synced, and another copy holds the `lifecycle` `Lease` in `hpcburst-system` | wait for the other copy's `Lease` to expire; if it stays, look for a stale controller process that an earlier launcher left running |
+| `not leading` | its caches have synced, and this copy has not been elected leader of the `lifecycle` `Lease` in `hpcburst-system`. That alone does not show that another copy holds the `Lease` | wait a `Lease` duration, as after a restart; if it stays, read the `Lease`'s `spec.holderIdentity` (below): a holder other than this controller is another copy, such as a stale one an earlier launcher left running |
 | `starting, or not leading its Lease: /readyz does not say which` | a controller from before the split check answered its aggregate `/readyz` with an error | rebuild `bin/` and restart the host (Down and up across an upgrade) |
+| `not read` | the readiness paths could not be read at all; the reason line names the error | read `logs/controller.log` in the state directory |
 
 Any state but `ready` makes the host unhealthy. A controller that does not lead cannot act, since alpha runs one replica.
 
+```
+hbk get lease lifecycle -n hpcburst-system -o yaml
+```
+
 ### The front's line
 
-`supervised front:` adds `degraded: usage writes failing` while the front's usage sink fails, and `usage state unknown` when its `/healthz` names no known state. Neither makes the host unhealthy: the front keeps serving, and `status` still exits 0 ([HBEP-8](../hbep/0008-observability-and-events/README.md), Usage records). Usage records are lost meanwhile; `logs/front.log` says why.
+`supervised front:` adds `degraded: usage writes failing` while the front's `/healthz` states its usage sink as failing: usage records are being lost, and `logs/front.log` says why. It adds `usage state unknown` when the `/healthz` body has no usage member, or one with a state HBEP-8 does not name (`internal/launcher/status_controllers.go`); that says nothing about whether records are written. Neither makes the host unhealthy: the front keeps serving, and `status` still exits 0 ([HBEP-8](../hbep/0008-observability-and-events/README.md), Usage records).
 
 The last line, `front:`, is about the dial-home address, not the process. `front: absent` means no front runs under this host, which is a state, not a fault. A front that was configured and is not running is listed as a supervised process that does not run, and makes the host unhealthy.
 
 ### Store-full hints
 
-When the write probe fails, `status` checks the free space of the store's own directory, `data/server/db` under the state directory, because k3s's SQLite store waits rather than failing a write when its disk is full, so the probe times out with an error that says nothing about the disk (#192). The reason line then ends with one of:
+When the write probe fails, `status` adds a hint about the disk, because k3s's SQLite store waits rather than failing a write when its disk is full, so the probe times out with an error that says nothing about the disk (#192). The hint reads the free space of the store's own directory, `data/server/db` under the state directory: the blocks an unprivileged process may take, compared with 64 KiB, the launcher's threshold for "nearly full" (`internal/launcher/storefull.go`). The reason line then ends with one of:
 
 - `store full (no free space on <dir>)`: no block is left for an unprivileged process;
-- `store nearly full (<n> KiB free on <dir>)`: under 64 KiB, which SQLite cannot commit into;
+- `store nearly full (<n> KiB free on <dir>)`: less than 64 KiB is left;
 - `the free space on <dir> is unknown: <error>`: the space could not be read.
 
-With no hint, the probe failed for another reason. Free space on that volume; nothing new is submitted while writes fail, and running jobs keep running to their hard ends ([HBEP-11](../hbep/0011-kubernetes-control-plane/README.md), Operational readiness 5). A write that reported an error may still have been stored, so check what you applied before you apply it again.
+The hint points at the disk; it does not prove the disk is the cause, and its absence does not rule the store out: with more than 64 KiB free, the probe failed for a reason the hint does not see, and `logs/k3s.log` is the next place to look. When the disk is full, free space on that volume; nothing new is submitted while writes fail, and running jobs keep running to their hard ends ([HBEP-11](../hbep/0011-kubernetes-control-plane/README.md), Operational readiness 5). A write that reported an error may still have been stored, so check what you applied before you apply it again.
 
 ### The agent builds
 
@@ -128,9 +140,9 @@ A ModelDeployment with a managed source (an entry LLMLab serves) gets none of th
 
 ### `SpecUnsupported`
 
-- **Means:** the spec asks for something alpha does not run. The message names it: a `data-parallel-size` above 1; a `generation-config` other than `auto`, or `override-generation-config` or `hf-config-path`; an engine flag that the framework's launch sets itself; a missing `spec.workload`, or a workload value out of range; a workload shape that does not fit the declared `max-model-len`; a `leaseLimit` that does not parse; or a GPU count (`tensor-parallel-size` times `pipeline-parallel-size`) above every allowed Provider's `gpusPerNode` or QOS GPU cap.
+- **Means:** the spec asks for something alpha does not run. The message names it: a `data-parallel-size` above 1; a `generation-config` other than `auto`, or `override-generation-config` or `hf-config-path`; an engine flag that the framework's launch sets itself; a missing `spec.workload`, or a workload value out of range; a workload shape that does not fit the declared `max-model-len`; a `leaseLimit` that does not parse; or a GPU count (`tensor-parallel-size` times `pipeline-parallel-size`) above the `gpusPerNode` or QOS GPU cap of every allowed Provider that is usable and not too short. A Provider that is unusable, or `PartitionTooShort`, does not count (`internal/lifecycle/handover.go`, `noProvider`).
 - **The controller** creates no Allocation for the deployment while it holds, replacements included. Instances already running serve until they drain.
-- **You:** edit the spec as the message says. The next pass reads it again ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Provisioning, and What the controller reads).
+- **You:** edit the spec as the message says. For a GPU count, making a Provider that fits usable again also clears it, with no spec edit. The next pass reads it again ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Provisioning, and What the controller reads).
 
 ### `PartitionTooShort`
 
@@ -171,7 +183,7 @@ A ModelDeployment with a managed source (an entry LLMLab serves) gets none of th
 
 - **Means:** three Instances in a row in one accelerator class ended failed, any end but `Drained`, since an Instance of that class was last ready, and the last three fell within the profile's `restart.window`. A refused submission ends no Instance, so it never counts.
 - **The controller** pauses provisioning in that class: `restart.backoff`, doubled for each failure beyond the third, at most `restart.window`. The message names when the pause ends, and a `degraded` event `RestartLoop` fires once per streak ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Health and restarts, Restart and provisioning loops).
-- **You:** find why the Instances failed: each ended Instance's end reason, in `hbk get instances` and `hbk describe instance <instance>`, with the table under [The Instance](#the-instance). The pause lifts by itself; a fault that persists starts the next streak.
+- **You:** find why the Instances failed: each ended Instance's end reason, in `hbk get instances` and `hbk describe instance <instance>`, with the table under [The Instance](#the-instance). The pause lifts by itself. The streak lasts until an Instance of the class becomes ready again, so a fault that persists adds to the same streak: a further failure within `restart.window` of the two before it pauses the class again, for twice as long, up to `restart.window` (`internal/lifecycle/health.go`, `classStreak` and `loopPaused`).
 
 ### `SubmissionRejected`
 
@@ -182,8 +194,15 @@ A ModelDeployment with a managed source (an entry LLMLab serves) gets none of th
 ### `NoOverlapSlot`
 
 - **Means:** a primary Instance reached its drain start with no replacement beside it, because no allowed Provider could run the replacement at the same time: no submit slot, or the two would exceed the QOS's per-user GPU, CPU or memory cap. Helios's QOS `now`, one GPU per user, is the case. It holds from the drain start until the successor is ready, while fewer Instances are ready than desired.
-- **The controller** plans this gap: the primary drains as usual and no request in flight is cut. The successor is created at its planned time and pends until the predecessor's job frees the GPU, or, under a submit limit of 1, is created once the slot is free. Meanwhile the front answers the model's new requests with 503, `Retry-After: 30` and `model_inactive`. `ReplacementLate` is not set in this mode ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Handover, No-overlap mode).
-- **You:** nothing is broken. To shorten the gap, set `retentionPolicy` to `ReleaseWhenIdle` with a short `idleLimit`, so the drained primary's job frees its GPU soon after its Instance ends. Under the default `Keep` it holds the GPU to its hard end. In alpha the Helios Provider serves one deployment, and that deployment allows the Helios Provider alone.
+- **The controller** plans this gap: the primary drains as usual and no request in flight is cut. The successor is created at its planned time and pends until the predecessor's job frees the GPU, or, under a submit limit of 1, is created once the slot is free. Meanwhile the front sends the model's new requests to any target still eligible, another ready Instance or a managed entry of the same model; only when none is eligible does it answer 503 with `Retry-After: 30` and `model_inactive` (`internal/front/route.go`). `ReplacementLate` is not set in this mode ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Handover, No-overlap mode).
+- **You:** nothing is broken. The gap lasts until the drained primary's job frees its GPU. Under the default `Keep` that job holds it to its hard end, or to the policy's `until` or the deployment's `endTime`. Each Allocation keeps the retention policy it was created with, a copy of the deployment's, and retention reads that copy (`internal/lifecycle/provision.go`, `retention.go`), so editing the deployment changes only Allocations created after the edit. To shorten the current gap, act on the predecessor's Allocation, the drained Instance's `spec.allocationRef.name`, once that Instance has ended: delete it, which cancels its job at once, or switch it to release when idle:
+
+  ```
+  hbk delete allocation <allocation>
+  hbk patch allocation <allocation> --type=merge -p '{"spec":{"retentionPolicy":{"mode":"ReleaseWhenIdle","idleLimit":"2m","until":null}}}'
+  ```
+
+  For later gaps, set the same `retentionPolicy` on the deployment. In alpha the Helios Provider serves one deployment, and that deployment allows the Helios Provider alone.
 
 ### `SubmitLimitReached`
 
@@ -207,7 +226,7 @@ A ModelDeployment with a managed source (an entry LLMLab serves) gets none of th
 
 - **Means:** a replacement's Allocation had not started by its predecessor's drain start minus the class's start-to-ready time, so it cannot be ready before the drain starts. The message names the Instance and its drain start.
 - **The controller** emits a `degraded` event `ReplacementLate` once, and keeps the drain rule: the predecessor still drains at its hard end minus its drain window, ready replacement or not, so capacity can drop ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Handover, Lateness).
-- **You:** see why the replacement waits (`hbk describe allocation <allocation>`, and its job's reason on the cluster). The plan takes the 90th percentile of the Provider's last 20 queue waits (the largest, with fewer than 20), so a queue that has grown since leaves plans late until the waits catch up. Allowing a second Provider gives the replacement another place to go.
+- **You:** see why the replacement waits (`hbk describe allocation <allocation>`, and its job's reason on the cluster). The plan takes the 90th percentile of the Provider's last 20 queue waits (the largest, with fewer than 20), so a queue that has grown since leaves plans late until the waits catch up. Allowing another Provider helps only replacements not created yet: a replacement that already exists stays on its Provider (`internal/lifecycle/handover.go`, `replacements`; `nooverlap.go`).
 
 ### `CapacityDropped`
 
@@ -221,10 +240,11 @@ An Instance moves through `pending`, `starting`, `verifying`, `ready`, `draining
 
 | Condition | Reasons | What it says |
 |---|---|---|
-| `Verified`, `Qualified`, `WarmedUp` | `Pending`, `Passed`, `Failed`, `WorkerRestart`, `InstanceRestart` | each check: not run yet, passed, failed, or running again after a restart |
-| `Healthy` | `Healthy`, `ProbeFailing`, `ErrorsOnly`, `NoProgress`, `PartExited` | the malfunction signal the restart ladder acts on ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Health and restarts). An Instance that fails gets `Healthy` false with its end reason |
+| `Verified` | `Pending`, `Passed`, `Failed`, `WorkerRestart`, `InstanceRestart` | false with `Pending` from the agent's registration until checked; true with `Passed`; false with `Failed` when a verification fails; false with the restart's reason while it verifies again after a restart |
+| `Qualified`, `WarmedUp` | `Pending`, `Passed`, `WorkerRestart`, `InstanceRestart` | false with `Pending` until checked; true with `Passed`. A worker restart resets `WarmedUp` only, a whole-Instance restart both. A failed check writes neither: the Instance ends with `QualificationFailed`, in `status.endReason` and on `Healthy` (`internal/lifecycle/verify.go`, `health.go`) |
+| `Healthy` | `Healthy`, `ProbeFailing`, `ErrorsOnly`, `NoProgress`, `PartExited` and other signals | true with `Healthy` once ready; false with the signal behind a restart ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Health and restarts), or with the end reason of an Instance that failed |
 | `AgentUnreachable` | `ReportsMissing`, `Reporting` | no report from the agent for `health.agentTimeout`. The front routes no new request to it, and nothing restarts on that basis alone |
-| `TunnelConnected` | `ProxyOnline`, `ProxyOffline`, `ProxyListUnreadable` | whether frps lists the Instance's proxy online. An Instance becomes ready only with it true ([HBEP-6](../hbep/0006-instance-reachability/README.md), Path state) |
+| `TunnelConnected` | `ProxyOnline`, `ProxyOffline`, `ProxyListUnreadable` | whether frps lists the Instance's proxy online. It gates only an Instance's first entry to `ready`: an Instance that has been ready returns to `ready` after a restart whatever it says. The front does not route on it, but on its own probe of the path ([HBEP-6](../hbep/0006-instance-reachability/README.md), Path state; `internal/lifecycle/verify.go`; `internal/front/inventory/build.go`) |
 
 Before each restart the controller emits a `failing` event `WorkerRestart` or `InstanceRestart`, which names the signal and says that requests in flight were cut. The ladder restarts the worker, then the whole Instance, each `restart.attemptsPerRung` times within `restart.window`, then gives up on the Allocation.
 
@@ -253,23 +273,25 @@ An Allocation is one Slurm job, found by its tag. Its phase is in `status.atProv
 
 | Condition | Reasons | Means | The controller | You |
 |---|---|---|---|---|
-| `JobCompleting` | `Completing`, `NotCompleting` | the job's state carries Slurm's `COMPLETING` flag: it ended or was cancelled, and its nodes are still cleaning up. The message names the job, its base state and since when | keeps the job live until the flag clears: the Allocation keeps its finalizer and its submit slot, and its `acct-` record waits | normally nothing: the flag lasts seconds. If it stays, see [A stuck COMPLETING job](#a-stuck-completing-job) |
+| `JobCompleting` | `Completing`, `NotCompleting` | the job's state carries Slurm's `COMPLETING` flag. On a job whose base state has ended (`CANCELLED`, `COMPLETED`, `FAILED`, `TIMEOUT`, `NODE_FAIL` and the like) its nodes are still cleaning up; the flag can also show on a `RUNNING` job, and on a requeued job that is `PENDING` again. The message names the job and its base state, and for an ended job since when | keeps the job live until the flag clears: the Allocation keeps its finalizer and its submit slot, and its `acct-` record waits | normally nothing: the flag lasts seconds. If it stays, see [A stuck COMPLETING job](#a-stuck-completing-job) |
 | `AdminHold` | `JobHeldAdmin`, `NotHeldByAdmin` | an administrator holds the job; its phase is `Held` | never lifts an admin hold; the Instance stays `pending` | ask the site why, or delete the Allocation: its finalizer cancels the job, and the controller submits a new Allocation of the same name for the waiting Instance |
 | `SubmittedAsOther` | `ReadBackMismatch` | the first read of the established job found another partition, time limit or GPU count than requested; the message names each field with both values | the lifecycle controller ends the Instance with `SubmittedAsOther` and deletes the Allocation; the condition is never cleared | compare the site's rewrite with the profile, and correct the profile or the Provider |
 | `SubmissionResolved` | `NeedsOperator`, `Resolved` | only in fallback mode (a profile with `holdRelease: false`; the shipped profiles hold): a submission attempt is still unknown after the profile's `unknownBound` | submits nothing new for the Allocation until the attempt resolves | follow the message: check the cluster for jobs named with the Allocation's tag, then record your decision as the message says (below) |
 
 A `Refused` Allocation whose `status.atProvider.reason` is `JobRenamed` was stored under another name than its tag, as on a site that shortens job names; the Provider's controller cancels that job ([HBEP-4](../hbep/0004-provider-interface/README.md), The Slurm dialect).
 
-For `NeedsOperator`, look for the tag on the cluster, then set the annotation with the attempt number the message gives ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), open question 11):
+For `NeedsOperator`, look for the tag on the cluster, then set the annotation with the attempt number the message gives ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), open question 11). `sacct` starts at midnight unless given a start time, so give it one that covers the attempt:
 
 ```cluster
 squeue --me --name=<tag>
-sacct --name=<tag>
+sacct -X --name=<tag> -S now-7days
 ```
 
 ```
-hbk annotate allocation <allocation> hpcburst.groundnuty.github.io/abandon-attempt=<attempt>
+hbk annotate allocation <allocation> hpcburst.groundnuty.github.io/abandon-attempt=<attempt> --overwrite
 ```
+
+Keep `--overwrite`. The Provider's controller leaves the annotation in place after it acts on it (`internal/providerctl/external.go`), so a later attempt of the same Allocation needs a new value; without `--overwrite` kubectl refuses to change it, and the attempt stays unresolved, with `NeedsOperator` and the Allocation's finalizer.
 
 ## Common procedures
 
@@ -288,7 +310,7 @@ At zero desired Instances the controller applies the shutdown case ([HBEP-7](../
 - `Keep`, the default: it is kept, its job still running, until `retentionPolicy.until`, else the deployment's `endTime`, else the job's hard end;
 - either way, a profile's `maxIdle` releases it earlier: Athena's is 30 minutes, Helios sets none.
 
-So a kept job can hold its GPU for hours after the scale-down. To end it now, delete the Allocation once it hosts no live Instance; its finalizer cancels every job with its tag. Deleting the ModelDeployment instead releases its kept Allocations as soon as their Instances have ended.
+So a kept job can hold its GPU for hours after the scale-down. To end it now, delete the Allocation once it hosts no live Instance; its finalizer cancels every job with its tag. Deleting the ModelDeployment instead releases its kept Allocations once their Instances have ended, except one whose own `retentionPolicy.until` is set: that date still holds (`internal/lifecycle/retention.go`, `keepUntil`).
 
 ```
 hbk delete allocation <allocation>
@@ -307,7 +329,7 @@ squeue --me --states=COMPLETING
 scontrol show job <job-id>
 ```
 
-Slurm itself sends the kill again after `KillWait` plus twice `MessageTimeout`. Cancelling a completing job does nothing, since Slurm answers that it has already ended. A node that does not finish its cleanup is the site's to fix: report the job and its node to the cluster's administrators. Once the flag clears, the finalizer completes, the record is written and the slot frees, with no action on the host.
+Slurm itself sends the kill again after `KillWait` plus twice `MessageTimeout`. Cancelling a completing job whose base state has ended does nothing, since Slurm answers that it has already ended ([HBEP-4](../hbep/0004-provider-interface/README.md), Phases, A completing job). A job that carries the flag and has no end time yet, such as a `RUNNING` one, is still cancelled when its Allocation is deleted, and the deletion then waits for its flag (`internal/providerctl/delete.go`). A node that does not finish its cleanup is the site's to fix: report the job and its node to the cluster's administrators. Once the flag clears, the finalizer completes, the record is written and the slot frees, with no action on the host.
 
 ### A Provider refusing for a full slot
 
@@ -325,7 +347,7 @@ The deployment shows `SubmitLimitReached`. Either Slurm refused a submission, an
    hbk get allocations -l hpcburst.groundnuty.github.io/provider=<provider>
    ```
 
-3. Then wait, or reduce the demand. The controller retries after the Rejected backoff, and nothing fails meanwhile. A group limit (`QOSGrpSubmitJobsLimit`, `AssocGrpSubmitJobsLimit`) is shared with the other users of the QOS or the grant, and clears as their jobs end. To need fewer slots, lower `spec.instances`, or allow another Provider in `spec.providers`. A kept Allocation with no Instance holds a slot too ([Stopping a deployment](#stopping-a-deployment)).
+3. Then wait, or reduce the demand. The controller retries after the Rejected backoff, and nothing fails meanwhile. A group limit (`QOSGrpSubmitJobsLimit`, `AssocGrpSubmitJobsLimit`) is shared with the other users of the QOS or the grant, and clears as their jobs end. To need fewer slots, lower `spec.instances`; allowing another Provider in `spec.providers` helps Instances whose Allocation is not created yet, since a refused Allocation stays on its Provider. A kept Allocation with no Instance holds a slot too ([Stopping a deployment](#stopping-a-deployment)).
 
 ### A tunnel that won't connect
 
@@ -333,7 +355,7 @@ Jobs reach the host over the dial-home route you chose at `up`, and each Instanc
 
 - the Instance ends with `RegistrationTimeout`, and its Provider has `DialHomeUnreachable` true: the agent never reached the host;
 - the Instance ends with `TunnelNotConnected`: the agent registered, but its proxy never came online in frps;
-- a ready Instance's `TunnelConnected` turns false: the front stops sending it new requests and nothing restarts. frpc reconnects by itself.
+- a ready Instance's tunnel drops: the front's own probe of the path fails, the front stops sending it new requests, and nothing restarts. The front emits a `degraded` event `PathProbeFailing` when the probe fails while `TunnelConnected` is still true; `TunnelConnected` turns false once frps lists the proxy offline. frpc reconnects by itself.
 
 Check, in this order:
 
@@ -344,7 +366,7 @@ Check, in this order:
 
 ### A controller restart
 
-The supervisor restarts the controller when it exits, so a restart needs nothing from you. `hpcburst status` counts it on the `supervised controller:` line, with the last exit's detail, code and time. While it starts, its readiness reads `starting`, then `not leading` until it holds the `lifecycle` `Lease`, then `ready`.
+The supervisor restarts the controller when it exits, so a restart needs nothing from you. `hpcburst status` counts it on the `supervised controller:` line, with the last exit's detail, code and time. While it starts, its readiness reads `starting`, then `not leading` until it is elected leader of the `lifecycle` `Lease`, which can take a `Lease` duration after the old process's last renewal, then `ready`.
 
 The restarted controller re-lists every object and continues from what it observes; nothing it needs is held only in memory ([HBEP-11](../hbep/0011-kubernetes-control-plane/README.md), Operational readiness 2). On taking its `Lease` it emits one `degraded` event `ObservationGap`, regarding the `Lease`, whose message names when the gap began; transitions missed meanwhile are not replayed, and the conditions are the truth ([HBEP-8](../hbep/0008-observability-and-events/README.md), Gaps after a restart). The agents register again within a poll, and no `AgentUnreachable` is judged until then. Established tunnels stay up. Events that repeat at most once an hour, such as `HeartbeatMissed`, fire once more.
 
@@ -376,18 +398,29 @@ bin/hpcburst status --state-dir "$STATE"
 bin/hpcburst upgrade --state-dir "$STATE" --bin-dir "$BIN" --to <version>
 ```
 
-The only way back is to stop the host and restore that backup; `up` then starts the backup's release. Changes made since the upgrade are lost, and a job submitted since has no Allocation left to end it: find it by its tag on the cluster and cancel it there.
+The only way back is to stop the host and restore that backup; `up`, with the same flags as before, then starts the backup's release. Changes made since the upgrade are lost:
 
 ```
 bin/hpcburst down --state-dir "$STATE"
 bin/hpcburst restore --state-dir "$STATE" --backup <backup>
 ```
 
+Some jobs on the clusters may now have no Allocation to end them. Find them by tag, never by submission time: an Allocation the backup holds looks its tag up and adopts a job of that tag even when it was submitted after the upgrade (`internal/providerctl/external.go`, `establish`), so cancelling every recent job can cancel one the restored store still owns. A job's name is its Allocation's tag: `hb-`, the first 40 characters of the Allocation's name, a hyphen and 12 hex characters of a hash that includes the Allocation's UID (`api/v1alpha1/records.go`). The tag is also the Allocation's `crossplane.io/external-name` annotation. With the restored host up, list the restored tags, list the jobs on each cluster, and cancel only an `hb-` job whose name is not among the tags. Do this only on a login from which no other hpcburst host submits, since its jobs carry `hb-` names too:
+
+```
+hbk get allocations -o jsonpath='{range .items[*]}{.metadata.annotations.crossplane\.io/external-name}{"\n"}{end}'
+```
+
+```cluster
+squeue --me --noheader --format="%i %j"
+scancel <job-id>
+```
+
 `hpcburst down --grace` and `hpcburst upgrade --grace` set how long each waits after SIGTERM before SIGKILL, 40 s by default; both refuse a grace too short for the front to flush its usage records.
 
 ### Where the accounting records are
 
-When an Allocation's last job has ended and no longer carries `COMPLETING`, the Provider's controller writes one record that outlives the Allocation: a ControllerRevision named `acct-<Allocation UID>` in the Allocation's namespace ([HBEP-8](../hbep/0008-observability-and-events/README.md), Provider accounting). It holds the Provider, the partition, the tag, the job IDs, `allocatedCPUs`, `allocatedGPUs`, `elapsedSeconds`, the start and end times, `basis: allocated`, and `unknown`, the fields that could not be read. It is written once and never changed.
+The Provider's controller writes one record per Allocation that outlives it: a ControllerRevision named `acct-<Allocation UID>` in the Allocation's namespace ([HBEP-8](../hbep/0008-observability-and-events/README.md), Provider accounting). It writes it while it deletes the Allocation, once no job with the Allocation's tag is live, a completing one included, and before the finalizer goes (`internal/providerctl/delete.go`). When the recorded job's final accounting read is missing or keeps failing, it waits up to the profile's `lostGrace` (2 minutes in the shipped profiles), then writes what it knows (`internal/providerctl/accounting.go`). So a record appears only once its Allocation is being deleted: released by the controller, by retention or by you, never while it is kept. It holds the Provider, the partition, the tag, the job IDs, `allocatedCPUs`, `allocatedGPUs`, `elapsedSeconds`, the start and end times, `basis: allocated`, and `unknown`, the fields that could not be read. It is written once and never changed.
 
 ```
 hbk get controllerrevisions -l hpcburst.groundnuty.github.io/record=accounting
