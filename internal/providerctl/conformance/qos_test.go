@@ -193,6 +193,12 @@ func clock(t *testing.T, text string) time.Duration {
 	return d
 }
 
+// notAConformanceRun is a row of the script that TestConformance does not run: the alpha rows of issue #194, whose
+// leases are the deployments' (the accounting rows run through this harness and keep its 5-minute Allocations).
+func notAConformanceRun(name string) bool {
+	return strings.HasPrefix(name, "alpha-") || strings.HasPrefix(name, "tunnel-hour-")
+}
+
 // Every conformance row of the script is a request the plugin accepts: its
 // Provider passes ProfileReader (the qos is listed in the profile), its
 // qos is the one the row names, and the harness's own request for its GPUs,
@@ -201,8 +207,8 @@ func clock(t *testing.T, text string) time.Duration {
 func TestConformanceRowsPassTheRequestCheck(t *testing.T) {
 	seen := 0
 	for _, r := range readShapeRows(t) {
-		if r.profile == "-" {
-			continue // real-engine: not a conformance run
+		if r.profile == "-" || notAConformanceRun(r.name) {
+			continue // real-engine, and the alpha rows (issue #194): not conformance runs, with leases of their own
 		}
 		seen++
 		t.Run(r.name, func(t *testing.T) {
@@ -441,7 +447,7 @@ func TestTheGH200RowsStartWaitReachesTheRunAndItsTimeoutCoversTheTest(t *testing
 	otherDeadlines := 5 + 3 + 8 + 3 + 3 + int(duplicateWait/time.Minute)
 	seen := 0
 	for _, r := range readShapeRows(t) {
-		if r.profile == "-" || r.startWait == "-" {
+		if r.profile == "-" || r.startWait == "-" || notAConformanceRun(r.name) {
 			continue
 		}
 		seen++
@@ -458,7 +464,12 @@ func TestTheGH200RowsStartWaitReachesTheRunAndItsTimeoutCoversTheTest(t *testing
 			if err != nil {
 				t.Fatal(err)
 			}
-			if want := 2*n + otherDeadlines; timeout < want {
+			want := 2*n + otherDeadlines
+			if strings.HasPrefix(r.name, "gpu-accounting-") {
+				// The accounting row has one job: its start wait, then its end wait and the deletion (gpuacct_test.go).
+				want = n + int((accountingEndWait+accountingDeleteWait)/time.Minute)
+			}
+			if timeout < want {
 				t.Errorf("timeout %d min is below the test's own deadlines with this start wait, %d min", timeout, want)
 			}
 		})

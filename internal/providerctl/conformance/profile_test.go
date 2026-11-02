@@ -50,6 +50,11 @@ type settings struct {
 	runStaging string
 	gpus, cpus int32
 	memory     resource.Quantity
+	// pendingMax is how long a job may wait in the queue before the run gives up
+	// (HPCBURST_CONF_PENDING_MAX_SECONDS; 30 min when unset). The accounting rows
+	// on a row with no start wait use it; startWait, when set, is the bound that
+	// makes a run NOT RUN instead.
+	pendingMax time.Duration
 
 	// profile is the shipped PlatformProfile, whole, with its stagingDir
 	// replaced by staging; part is the entry of the partition under test.
@@ -139,6 +144,15 @@ func readSettings(env func(string) string) (settings, error) {
 	for _, k := range retired {
 		if env(k) != "" {
 			problems = append(problems, k+" is not read any more: the profile holds it; unset it")
+		}
+	}
+	s.pendingMax = 30 * time.Minute
+	if v := env("HPCBURST_CONF_PENDING_MAX_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			problems = append(problems, "HPCBURST_CONF_PENDING_MAX_SECONDS is not a positive number")
+		} else {
+			s.pendingMax = time.Duration(n) * time.Second
 		}
 	}
 	if v := env("HPCBURST_CONF_START_WAIT"); v != "" {

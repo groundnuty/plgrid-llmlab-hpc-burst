@@ -51,6 +51,16 @@
 #                                the ssh credentials files of the conformance runs, mode 600
 #   ACCOUNT_HELIOS_CPU, ACCOUNT_HELIOS_GH200, ACCOUNT_ATHENA_A100
 #                                the grant account of each job kind
+#   The alpha rows (issue #194; docs/alpha-runbook.md) also read, for the rows that run the stack
+#   (alpha-*, tunnel-hour-*):
+#   LIVE_DIALHOME_MODE           direct or ssh: how the jobs reach the host (HBEP-6)
+#   LIVE_DIALHOME_ADDR           host:port of the dial-home route, as the compute nodes see it
+#   LIVE_DIALHOME_KEY            ssh mode only: the restricted dial-home key file, mode 600
+#   LIVE_BIN_DIR                 absolute path of the directory with k3s-1.36.5/ and the pinned frp
+#   LIVE_TUNNEL_LEASE_MINUTES    optional, the tunnel rows' lease in minutes, 106 to 240 (default 137, the shape below): the owner's
+#                                choice when giving the go; the shape, the hold note and the test follow it
+#   LIVE_OWNER_GO_HELIOS_NOW     today's UTC date (YYYY-MM-DD), once the owner has said yes to the run: the rows that hold
+#                                QOS now's GPU for hours (alpha-helios-nooverlap, tunnel-hour-helios) refuse without it
 # Cluster calls go through the ssh aliases helios and athena, one at a time per
 # host under <LIVE_LOCK_DIR>/<host>.lock. The aliases' ssh configuration is yours.
 #
@@ -96,6 +106,12 @@ conformance-helios|cluster|internal/providerctl/conformance|^TestConformance$|HP
 conformance-helios-gh200|cluster|internal/providerctl/conformance|^TestConformance$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host|ready
 conformance-athena|cluster|internal/providerctl/conformance|^TestConformance$|HPCBURST_CONFORMANCE|profiles/athena.yaml|host|ready
 real-engine|cluster|cmd/hb-agent|^TestRealEngine$|HB_REAL_ENGINE_PLAN|spikes/s94/job.sh|host,linux-arm64|ready
+alpha-athena-handover|cluster|internal/alpha|^TestAlphaAthenaHandover$|HPCBURST_ALPHA_ROW|profiles/athena.yaml,examples/provider-athena-a100.yaml|host|ready
+alpha-helios-nooverlap|cluster|internal/alpha|^TestAlphaHeliosNoOverlap$|HPCBURST_ALPHA_ROW|profiles/helios.yaml,examples/provider-helios-gh200.yaml|host,linux-arm64|ready
+tunnel-hour-helios|cluster|internal/alpha|^TestTunnelHour$|HPCBURST_ALPHA_ROW|profiles/helios.yaml|host,linux-arm64|ready
+tunnel-hour-athena|cluster|internal/alpha|^TestTunnelHour$|HPCBURST_ALPHA_ROW|profiles/athena.yaml|host|ready
+gpu-accounting-helios|cluster|internal/providerctl/conformance|^TestGPUAccounting$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host|ready
+gpu-accounting-athena|cluster|internal/providerctl/conformance|^TestGPUAccounting$|HPCBURST_CONFORMANCE|profiles/athena.yaml|host|ready
 rehearsal|cluster|-|-|-|-|-|pending
 # END LIVE TESTS
 TABLE
@@ -118,7 +134,11 @@ TABLE
 # smallest memory recorded as accepted on this partition (S1's hold check, profiles/helios.yaml),
 # where the check itself takes any positive amount. The stand-in agent writes nothing to the RAM
 # disk that -C memfs gives. The test submits with --constraint=memfs, so the estimate asks for it too.
-# It starts only when squeue --me shows no job in QOS now, pending or running, whoever's (exit 3,
+# gpu-accounting-helios (issue #194) has the same two guards as conformance-helios-gh200: it starts only when squeue --me shows
+# no job in QOS now, and its one job must start within 10 min of its acceptance (else cancelled by its tag, NOT RUN, exit 3).
+# Its timeout of 30 min is that wait, the job's few minutes, the deletion that writes the kept record, and a margin. The
+# row's other guard, the wait of LIVE_PENDING_MAX_SECONDS, applies to gpu-accounting-athena only, which has no slot.
+# conformance-helios-gh200: it starts only when squeue --me shows no job in QOS now, pending or running, whoever's (exit 3,
 # "skipped: the now slot is in use"), and each of its two jobs (step 1, step 3) must start within 10
 # min of its acceptance. Its worst case is then about 25 min: two start waits of 10 min and about
 # 5 min of running. Its timeout of 45 min is the test's own deadlines (10+5+3+10+8+3+3, the 22 min
@@ -132,7 +152,93 @@ conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|
 conformance-helios-gh200|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|45|-C memfs|10
 conformance-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|4|32Gi|00:05:00|80|-
 real-engine|helios|-|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|00:57:00|75|-C memfs
+alpha-athena-handover|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|01:46:00|150|-
+alpha-helios-nooverlap|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|01:46:00|200|-C memfs
+tunnel-hour-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|02:17:00|152|-C memfs
+tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|02:17:00|152|-
+gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|30|-|10
+gpu-accounting-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|00:05:00|25|-
 # END CLUSTER SHAPES
+TABLE
+}
+
+# The rows that run the whole stack (the controllers, the front, frps and the agent) take the dependency
+# closure of these packages too, in each of their build contexts, so --plan names them when a stack package
+# changes: the thin test package alone would show none of it. name | packages (comma separated).
+plan_stack_table() {
+  cat <<'TABLE'
+# BEGIN PLAN STACK
+alpha-athena-handover|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
+alpha-helios-nooverlap|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
+tunnel-hour-helios|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
+tunnel-hour-athena|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
+# END PLAN STACK
+TABLE
+}
+
+# The most jobs of a row in the queue at once, printed with its shape (a row not listed has one). The alpha
+# package's Row.MostJobs is the same fact; hack/livechecks compares them. name | jobs.
+most_jobs_table() {
+  cat <<'TABLE'
+# BEGIN MOST JOBS
+alpha-athena-handover|2
+alpha-helios-nooverlap|2
+tunnel-hour-helios|1
+tunnel-hour-athena|1
+gpu-accounting-helios|1
+gpu-accounting-athena|1
+# END MOST JOBS
+TABLE
+}
+
+# The rows that hold QOS now's one GPU, the owner's shared slot, for hours need the owner's go at run time, on top
+# of --yes (the development rule on #145). The setting must hold today's UTC date, so a go given for an earlier
+# run does not stand for this one. name | setting | minutes the run holds the slot (the package's
+# Row.SlotHold, rounded up to ten minutes; hack/livechecks compares them).
+owner_go_table() {
+  cat <<'TABLE'
+# BEGIN OWNER GO
+alpha-helios-nooverlap|LIVE_OWNER_GO_HELIOS_NOW|160
+tunnel-hour-helios|LIVE_OWNER_GO_HELIOS_NOW|140
+# END OWNER GO
+TABLE
+}
+
+# The tunnel rows' lease is a parameter of the run (LIVE_TUNNEL_LEASE_MINUTES), so the owner can choose when giving
+# the go. The shape rows above hold the default, 2 h 17 min (the GH200 measurement of start to ready, 23 min 39 s,
+# is over the 20 minutes under which the short lease, 1 h 46 min, would be kept; internal/alpha, rows.go). The
+# shortest is the lead an Instance needs plus a minute (HBEP-7; internal/lifecycle/timelimit.go), 106 minutes.
+TUNNEL_LEASE_MIN=106
+TUNNEL_LEASE_MAX=240
+
+# apply_tunnel_lease: validates the setting and makes the shape, the timeout and the hold of the tunnel rows
+# follow it; run before the settings are checked, so that a refusal quotes the hold it is about. Returns 1 for
+# a value that is not whole minutes in range.
+apply_tunnel_lease() {
+  local v=${S[LIVE_TUNNEL_LEASE_MINUTES]:-} name
+  [ -n "$v" ] || return 0
+  if ! [[ $v =~ ^[0-9]+$ ]] || [ "$v" -lt "$TUNNEL_LEASE_MIN" ] || [ "$v" -gt "$TUNNEL_LEASE_MAX" ]; then
+    say "live-checks: LIVE_TUNNEL_LEASE_MINUTES must be whole minutes from $TUNNEL_LEASE_MIN to $TUNNEL_LEASE_MAX"
+    return 1
+  fi
+  for name in "${NAMES[@]}"; do
+    case $name in
+      tunnel-hour-*)
+        TLIMIT[$name]=$(printf '%02d:%02d:00' $((v / 60)) $((v % 60)))
+        TMIN[$name]=$((v + 15))
+        [ -z "${OGSET[$name]:-}" ] || OGMIN[$name]=$(((v + 9) / 10 * 10)) ;;
+    esac
+  done
+}
+
+# A bare name that stands for several rows, one per cluster, run one after the other (issue #194).
+# name | rows.
+alias_table() {
+  cat <<'TABLE'
+# BEGIN ALIASES
+tunnel-hour|tunnel-hour-helios,tunnel-hour-athena
+gpu-accounting|gpu-accounting-helios,gpu-accounting-athena
+# END ALIASES
 TABLE
 }
 
@@ -146,6 +252,7 @@ CLEAN_UNRESOLVED_POLLS=${LIVE_CLEAN_UNRESOLVED_POLLS:-20} # more quiet polls whe
 declare -a NAMES=()
 declare -A KIND PKG TEST GATES INPUTS CONTEXTS STATUS
 declare -A HOST PROFILE PARTITION QOS SLOT ACCTKEY GPUS CPUS MEM TLIMIT TMIN EXTRA SWAIT
+declare -A STACK ALIAS OGSET OGMIN MOSTJOBS
 declare -A S=()
 
 load_tables() {
@@ -161,6 +268,24 @@ load_tables() {
     HOST[$name]=$h PROFILE[$name]=$pr PARTITION[$name]=$pa QOS[$name]=$q SLOT[$name]=$sl ACCTKEY[$name]=$ak
     GPUS[$name]=$g CPUS[$name]=$c MEM[$name]=$m TLIMIT[$name]=$tl TMIN[$name]=$tm EXTRA[$name]=$ex SWAIT[$name]=${sw:--}
   done < <(cluster_table | grep -v -e '^#' -e '^$')
+  local pk
+  while IFS='|' read -r name pk; do
+    [ -n "$name" ] || continue
+    STACK[$name]=${pk//,/ }
+  done < <(plan_stack_table | grep -v -e '^#' -e '^$')
+  while IFS='|' read -r name pk; do
+    [ -n "$name" ] || continue
+    ALIAS[$name]=${pk//,/ }
+  done < <(alias_table | grep -v -e '^#' -e '^$')
+  local og_key og_min mj
+  while IFS='|' read -r name mj; do
+    [ -n "$name" ] || continue
+    MOSTJOBS[$name]=$mj
+  done < <(most_jobs_table | grep -v -e '^#' -e '^$')
+  while IFS='|' read -r name og_key og_min; do
+    [ -n "$name" ] || continue
+    OGSET[$name]=$og_key OGMIN[$name]=$og_min
+  done < <(owner_go_table | grep -v -e '^#' -e '^$')
 }
 
 say() { printf '%s\n' "$*"; }
@@ -168,7 +293,8 @@ usage() {
   cat <<'USAGE'
 usage: hack/live-checks.sh --list
        hack/live-checks.sh --plan <base>..<head>      which live tests cover the range; runs nothing
-       hack/live-checks.sh --run <name>... [--yes]    runs only the named tests (a cluster test needs --yes)
+       hack/live-checks.sh --run <name>... [--yes]    runs only the named tests (a cluster test needs --yes);
+                                                      tunnel-hour and gpu-accounting stand for their two rows
 Settings: HPCBURST_LIVE_SETTINGS names a mode-600 KEY=VALUE file; the keys are listed in this script's header.
 Exit: 0 passed; 1 failed, skipped or left a job; 2 usage; 3 refused; 4 cluster test not run (no --yes).
 USAGE
@@ -198,7 +324,7 @@ load_settings() {
     [ "$k" != "$line" ] || continue
     v=${v%\"}; v=${v#\"}; v=${v%\'}; v=${v#\'}
     case $k in
-      LIVE_OUT_DIR|LIVE_LOCK_DIR|LIVE_BUILD_LOCK|LIVE_LLMLAB_CREDENTIALS|LIVE_LLMLAB_MODEL|LIVE_CONF_CREDENTIALS_HELIOS|LIVE_CONF_CREDENTIALS_ATHENA|ACCOUNT_HELIOS_CPU|ACCOUNT_HELIOS_GH200|ACCOUNT_ATHENA_A100)
+      LIVE_OUT_DIR|LIVE_LOCK_DIR|LIVE_BUILD_LOCK|LIVE_LLMLAB_CREDENTIALS|LIVE_LLMLAB_MODEL|LIVE_CONF_CREDENTIALS_HELIOS|LIVE_CONF_CREDENTIALS_ATHENA|ACCOUNT_HELIOS_CPU|ACCOUNT_HELIOS_GH200|ACCOUNT_ATHENA_A100|LIVE_DIALHOME_MODE|LIVE_DIALHOME_ADDR|LIVE_DIALHOME_KEY|LIVE_BIN_DIR|LIVE_OWNER_GO_HELIOS_NOW|LIVE_TUNNEL_LEASE_MINUTES)
         S[$k]=$v ;;
     esac
   done 2>/dev/null < "$HPCBURST_LIVE_SETTINGS"
@@ -227,9 +353,60 @@ check_settings() {
         if [ "${PROFILE[$name]}" != - ]; then
           key=LIVE_CONF_CREDENTIALS_$(printf '%s' "${HOST[$name]}" | tr a-z A-Z)
           need "$key" && { private_file "$key" "${S[$key]}" || bad=1; }
-        fi ;;
+        fi
+        case $name in
+          alpha-*|tunnel-hour-*) check_alpha_settings "$name" || bad=1 ;;
+        esac
+        check_owner_go "$name" || bad=1 ;;
     esac
   done
+  return $bad
+}
+
+# fmt_hold <minutes>: "2 h 40 min".
+fmt_hold() { printf '%d h %02d min' $(($1 / 60)) $(($1 % 60)); }
+
+# owner_go_note <name>: what a row that holds QOS now's GPU says before it runs.
+owner_go_note() {
+  say "$1: holds QOS now's GPU for about $(fmt_hold "${OGMIN[$1]}"); the owner's go is needed (the development rule on #145)"
+}
+
+# today_utc: the date the owner's go is compared with. LIVE_FAKE_DATE_FILE is a test seam, like LIVE_FAKE_CLOCK: a
+# file holding the date, read each time, so a test can roll the date over between two rows.
+today_utc() { if [ -n "${LIVE_FAKE_DATE_FILE:-}" ]; then cat "$LIVE_FAKE_DATE_FILE"; else date -u +%F; fi; }
+
+# check_owner_go <name> [quiet]: refuses (the caller counts it) a row in the owner-go table unless its setting holds
+# today's UTC date. Unless quiet, it prints the note of the hold first, so the hold is read before a refusal.
+check_owner_go() {
+  local name=$1 key today
+  key=${OGSET[$name]:-}
+  [ -n "$key" ] || return 0
+  today=$(today_utc)
+  [ "${S[$key]:-}" = "$today" ] && return 0
+  [ "${2:-}" = quiet ] || owner_go_note "$name"
+  say "live-checks: setting $key must hold today's UTC date ($today) once the owner has said yes to this hold; it is missing or from another day"
+  return 1
+}
+
+# check_alpha_settings <name>: what a row that runs the stack needs besides a cluster test's own settings: the
+# dial-home route (the owner provides it, HBEP-6) and the directory with the pinned binaries. Every problem
+# is reported. #174 (no-overlap queue-wait growth) needs no setting: it is on main (#208), and so in every
+# checkout that has these rows.
+check_alpha_settings() {
+  local name=$1 bad=0 mode
+  alpha_need() { [ -n "${S[$1]:-}" ] || { say "live-checks: setting $1 is missing"; bad=1; return 1; }; }
+  if alpha_need LIVE_DIALHOME_MODE; then
+    mode=${S[LIVE_DIALHOME_MODE]}
+    case $mode in
+      direct) ;;
+      ssh) alpha_need LIVE_DIALHOME_KEY && { private_file LIVE_DIALHOME_KEY "${S[LIVE_DIALHOME_KEY]}" || bad=1; } ;;
+      *) say "live-checks: LIVE_DIALHOME_MODE must be direct or ssh"; bad=1 ;;
+    esac
+  fi
+  alpha_need LIVE_DIALHOME_ADDR && { [[ ${S[LIVE_DIALHOME_ADDR]} =~ ^[A-Za-z0-9._-]+:[0-9]{1,5}$ ]] || { say "live-checks: LIVE_DIALHOME_ADDR must be host:port"; bad=1; }; }
+  if alpha_need LIVE_BIN_DIR; then
+    case ${S[LIVE_BIN_DIR]} in /*) [ -d "${S[LIVE_BIN_DIR]}" ] || { say "live-checks: LIVE_BIN_DIR is not a directory"; bad=1; } ;; *) say "live-checks: LIVE_BIN_DIR must be an absolute path"; bad=1 ;; esac
+  fi
   return $bad
 }
 
@@ -556,6 +733,37 @@ env_conformance() {
   # Unset above, so a value inherited from the caller's shell never reaches a row that names none.
   [ "${QOS[$n]}" = - ] || export HPCBURST_CONF_QOS=${QOS[$n]}
   [ "${SWAIT[$n]:--}" = - ] || export HPCBURST_CONF_START_WAIT=${SWAIT[$n]}m
+  # The accounting rows (issue #194) wait in a queue with a first clock of their own, which the script's timeout
+  # takes in (execute_cluster): the wait the operator allows, or, under QOS now, the start-wait bound above.
+  # The dry switch and the alpha record never reach a conformance run.
+  unset HPCBURST_CONF_PENDING_MAX_SECONDS HPCBURST_ALPHA_DRY HPCBURST_ALPHA_DRY_FAULT HPCBURST_ALPHA_ROW HPCBURST_ALPHA_OUT
+  case $n in
+    # Only a row with no start wait: with one, the bound is the first clock and the test takes no other.
+    gpu-accounting-*) [ "${SWAIT[$n]:--}" != - ] || export HPCBURST_CONF_PENDING_MAX_SECONDS=${LIVE_PENDING_MAX_SECONDS:-7200} ;;
+  esac
+}
+
+# env_alpha <name>: the environment of an alpha row's test binary (issue #194). The row's name is the gate; the
+# test refuses a name that is not its own. The dry switch is unset here, always: a run that this script starts
+# is never a dry run, so a dry pass can never stand for a live one.
+env_alpha() {
+  local n=$1 host=${HOST[$1]} up
+  up=$(printf '%s' "$host" | tr a-z A-Z)
+  unset HPCBURST_ALPHA_DRY HPCBURST_ALPHA_DRY_FAULT HPCBURST_ALPHA_DRY_ROOT HPCBURST_ALPHA_LEASE_MINUTES
+  export HPCBURST_ALPHA_ROW=$n HPCBURST_ALPHA_PROFILE=${PROFILE[$n]} HPCBURST_ALPHA_PARTITION=${PARTITION[$n]}
+  export HPCBURST_ALPHA_GPUS=${GPUS[$n]} HPCBURST_ALPHA_CPUS=${CPUS[$n]} HPCBURST_ALPHA_MEMORY=${MEM[$n]}
+  export HPCBURST_ALPHA_ACCOUNT=${S[${ACCTKEY[$n]}]} HPCBURST_ALPHA_CREDENTIALS=${S[LIVE_CONF_CREDENTIALS_$up]}
+  export HPCBURST_ALPHA_HOST_LOCK=${S[LIVE_LOCK_DIR]}/$host.lock HPCBURST_ALPHA_CONTROL_DIR=$CONTROL_DIR
+  export HPCBURST_ALPHA_OUT=$REC_DIR HPCBURST_ALPHA_BIN_DIR=${S[LIVE_BIN_DIR]} HPCBURST_ALPHA_BUILD_DIR=${ALPHA_BUILD_DIR:-}
+  export HPCBURST_ALPHA_DIALHOME_MODE=${S[LIVE_DIALHOME_MODE]} HPCBURST_ALPHA_DIALHOME_ADDR=${S[LIVE_DIALHOME_ADDR]}
+  export HPCBURST_ALPHA_PENDING_MAX_SECONDS=${LIVE_PENDING_MAX_SECONDS:-7200}
+  # A tunnel row's lease, in minutes, as the shape holds it (after LIVE_TUNNEL_LEASE_MINUTES): the test judges that value.
+  case $n in
+    tunnel-hour-*) local lh lm; IFS=: read -r lh lm _ <<<"${TLIMIT[$n]}"; export HPCBURST_ALPHA_LEASE_MINUTES=$((10#$lh * 60 + 10#$lm)) ;;
+  esac
+  unset HPCBURST_ALPHA_QOS HPCBURST_ALPHA_DIALHOME_KEY
+  [ "${QOS[$n]}" = - ] || export HPCBURST_ALPHA_QOS=${QOS[$n]}
+  [ "${S[LIVE_DIALHOME_MODE]}" != ssh ] || export HPCBURST_ALPHA_DIALHOME_KEY=${S[LIVE_DIALHOME_KEY]}
 }
 
 run_local() { # <name>
@@ -591,14 +799,44 @@ check_slot() {
 prepare_cluster() {
   case $1 in
     real-engine) prepare_real_engine "$1" ;;
+    alpha-*|tunnel-hour-*) prepare_alpha "$1" ;;
     *) build_test_binary "$1" "$OUT/$1.test" ;;
   esac
+}
+
+# prepare_alpha <name>: the test binary, the three host binaries of the stack, and the agent and frpc builds of
+# the controller's agent-builds directory, all before the slot is taken. The test finds them through
+# HPCBURST_ALPHA_BUILD_DIR. Nothing here holds the slot.
+ALPHA_BUILD_DIR=""
+prepare_alpha() {
+  local n=$1 w
+  w="$OUT/$n-build-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  mkdir -m 700 "$w" && mkdir "$w/bin" "$w/agent-builds" || { say "$n: FAIL (the build directory could not be made)"; return 1; }
+  say "$n: building the test binary, the host binaries and the agent builds"
+  ( cd "$ROOT" &&
+    with_build_lock go test -c -o "$OUT/$n.test" "./${PKG[$n]}" &&
+    with_build_lock go build -o "$w/bin/" ./cmd/hpcburst ./cmd/hpcburst-controller ./cmd/hpcburst-front &&
+    with_build_lock hack/build-agents.sh "$w/agent-builds" &&
+    hack/fetch-frp.sh --agent-builds "$w/agent-builds" ) >"$OUT/$n-build.log" 2>&1 ||
+    { say "$n: FAIL (a build step failed; see the build log in the output directory)"; return 1; }
+  ALPHA_BUILD_DIR=$w
 }
 
 execute_cluster() {
   local n=$1
   case $n in
     real-engine) execute_real_engine "$n" ;;
+    alpha-*|tunnel-hour-*)
+      # The test owns the two clocks of a queued run (HPCBURST_ALPHA_PENDING_MAX_SECONDS, then the row's run
+      # budget); this timeout is their sum, so a long wait in the queue does not eat the run's time.
+      run_binary "$n" "$OUT/$n.test" "$(( ${TMIN[$n]} + ${LIVE_PENDING_MAX_SECONDS:-7200} / 60 ))" env_alpha
+      judge "$n" "$OUT/$n.log" "$CHILD_RC" ;;
+    gpu-accounting-*)
+      # A row with a start wait has the bound as its first clock; one without has the operator's wait in the queue.
+      wait=$(( ${LIVE_PENDING_MAX_SECONDS:-7200} / 60 ))
+      [ "${SWAIT[$n]:--}" = - ] || wait=0
+      run_binary "$n" "$OUT/$n.test" "$(( ${TMIN[$n]} + wait ))" env_conformance
+      judge "$n" "$OUT/$n.log" "$CHILD_RC" ;;
     *) run_binary "$n" "$OUT/$n.test" "${TMIN[$n]}" env_conformance; judge "$n" "$OUT/$n.log" "$CHILD_RC" ;;
   esac
 }
@@ -611,7 +849,13 @@ run_cluster() {
   local n=$1 host=${HOST[$1]} t0 t1 verdict=0 est
   local qos="" sw=""; [ "${QOS[$n]}" = - ] || qos=", qos ${QOS[$n]}"
   [ "${SWAIT[$n]:--}" = - ] || sw=", each job to start within ${SWAIT[$n]} min"
-  say "$n: shape: partition ${PARTITION[$n]}$qos, ${GPUS[$n]} GPU, ${CPUS[$n]} CPU, ${MEM[$n]}, time limit ${TLIMIT[$n]}, one job, no requeue$sw"
+  local jobs="one job"
+  [ "${MOSTJOBS[$n]:-1}" -le 1 ] || jobs="at most ${MOSTJOBS[$n]} jobs at once, each of this shape"
+  say "$n: shape: partition ${PARTITION[$n]}$qos, ${GPUS[$n]} GPU, ${CPUS[$n]} CPU, ${MEM[$n]}, time limit ${TLIMIT[$n]}, $jobs, no requeue$sw"
+  [ -z "${OGSET[$n]:-}" ] || owner_go_note "$n"
+  # The go is read again just before each protected row, here and again after its builds, below: a date that
+  # rolled over while an earlier row ran or this row built is a go for another day.
+  [ -z "${OGSET[$n]:-}" ] || check_owner_go "$n" quiet || return 3
   if [ "${SLOT[$n]}" != - ]; then check_slot "$n" || return 3; fi
   estimate "$n"; est=$?
   # A rejected shape would be rejected by the real submit too: the run stops, with or without --yes.
@@ -619,6 +863,7 @@ run_cluster() {
   if [ "$YES" != 1 ]; then say "$n: not run: pass --yes to run it"; return 4; fi
   prepare_cluster "$n" || return 1
   [ -z "$INTERRUPTED" ] || { say "$n: FAIL (interrupted before the run started)"; return 1; }
+  [ -z "${OGSET[$n]:-}" ] || check_owner_go "$n" quiet || return 3
   # One live run per host at a time, slot or not: the cleanup below is only safe if no other run is here.
   exec {RUN_FD}>"${S[LIVE_LOCK_DIR]}/$host-live.lock"
   flock -n "$RUN_FD" || { release_run_lock; refuse "$n: another live run holds this host's run lock"; return 3; }
@@ -789,14 +1034,18 @@ extract_tree() {
   git -C "$ROOT" archive "$1" 2>/dev/null | tar -x --anchored --exclude=spikes --exclude=hbep -C "$2" 2>/dev/null
 }
 
-# pkg_deps <tree> <package> <context>: the tree's directories the package's tests run (relative), one per
+# pkg_deps <tree> <context> <package>...: the tree's directories the packages' tests run (relative), one per
 # line, then "embed:<path>" lines for the files they embed (paths as go list gives them, nested ones too).
-# Fails when go list fails or prints nothing: a partial listing must never read as "nothing covers this".
+# One go list call lists the closure of all the packages named. Fails when go list fails or prints nothing: a
+# partial listing must never read as "nothing covers this".
 pkg_deps() {
-  local tree root out
+  local tree root out ctx=$2 p
+  local -a targets=()
   tree=$(cd "$1" 2>/dev/null && pwd -P) || return 1
+  shift 2
+  for p in "$@"; do targets+=("./$p"); done
   # shellcheck disable=SC2086
-  out=$( ( cd "$tree" && env ${CTXENV[$3]} go list -deps -test -f '{{.Dir}}|{{join .EmbedFiles ","}}' "./$2" 2>/dev/null ) |
+  out=$( ( cd "$tree" && env ${CTXENV[$ctx]} go list -deps -test -f '{{.Dir}}|{{join .EmbedFiles ","}}' "${targets[@]}" 2>/dev/null ) |
     awk -F'|' -v root="$tree" '
       index($1, root "/") == 1 || $1 == root {
         rel = substr($1, length(root) + 2); if (rel == "") rel = "."
@@ -817,6 +1066,12 @@ input_matches() {
   return 1
 }
 
+# plan_key <name> <ctx>: sets PLAN_KEY, the key of a row's dependency closure. Rows with the same package and
+# stack share it. It sets a variable and forks nothing: the plan calls it for every changed file, row and
+# context, and a command substitution there failed to fork on a loaded host and silently dropped a row.
+PLAN_KEY=""
+plan_key() { PLAN_KEY="${PKG[$1]}|${STACK[$1]:--}|$2"; }
+
 plan() {
   local range=$1 base head bsha hsha files name pkg ctx side f d b reason key out
   local -A deps=() reasons=() hit=()
@@ -836,20 +1091,31 @@ plan() {
   mkdir "$PLAN_TMP/base" "$PLAN_TMP/head"
   extract_tree "$bsha" "$PLAN_TMP/base" && extract_tree "$hsha" "$PLAN_TMP/head" || { say "live-checks: the range's trees could not be read"; return 2; }
 
-  # The closure at both ends of the range: a file deleted by the range was a dependency at its base.
+  # The closure at both ends of the range: a file deleted by the range was a dependency at its base. A row
+  # that runs the stack adds the closure of the stack's packages (plan_stack_table), per build context.
+  local spkg
   for name in "${NAMES[@]}"; do
     [ "${STATUS[$name]}" = ready ] || continue
     pkg=${PKG[$name]}
     for ctx in ${CONTEXTS[$name]//,/ }; do
-      key="$pkg|$ctx"
+      plan_key "$name" "$ctx"; key=$PLAN_KEY
       [ -z "${deps[$key]+x}" ] || continue
       deps[$key]=""
+      # The packages of the row that exist at each end of the range (one may be new, or deleted, in it); one go
+      # list call per end lists the closure of them all.
+      local -a present=()
       for side in base head; do
-        [ -d "$PLAN_TMP/$side/$pkg" ] || continue   # the package may be new, or deleted, in the range
-        out=$(pkg_deps "$PLAN_TMP/$side" "$pkg" "$ctx") || { say "live-checks: dependency discovery failed for package $pkg ($ctx) at the $side of the range; nothing is planned"; return 2; }
+        present=()
+        for spkg in $pkg ${STACK[$name]-}; do
+          [ -d "$PLAN_TMP/$side/$spkg" ] && present+=("$spkg")
+        done
+        [ ${#present[@]} -gt 0 ] || continue
+        out=$(pkg_deps "$PLAN_TMP/$side" "$ctx" "${present[@]}") || { say "live-checks: dependency discovery failed for package $pkg ($ctx) at the $side of the range; nothing is planned"; return 2; }
         deps[$key]+="$out"$'\n'
       done
-      [ -n "${deps[$key]}" ] || { say "live-checks: package $pkg exists at neither end of the range; nothing is planned"; return 2; }
+      for spkg in $pkg ${STACK[$name]-}; do
+        [ -d "$PLAN_TMP/base/$spkg" ] || [ -d "$PLAN_TMP/head/$spkg" ] || { say "live-checks: package $spkg exists at neither end of the range; nothing is planned"; return 2; }
+      done
       deps[$key]=$(printf '%s' "${deps[$key]}" | sort -u)
     done
   done
@@ -864,7 +1130,8 @@ plan() {
       if [ -z "$reason" ]; then
         for ctx in ${CONTEXTS[$name]//,/ }; do
           # An embedded file counts wherever it sits and whatever it is called.
-          if printf '%s\n' "${deps[$pkg|$ctx]}" | grep -q -x -F "embed:$f"; then reason=$f; break; fi
+          plan_key "$name" "$ctx"
+          if printf '%s\n' "${deps[$PLAN_KEY]}" | grep -q -x -F "embed:$f"; then reason=$f; break; fi
         done
       fi
       if [ -z "$reason" ]; then
@@ -872,7 +1139,8 @@ plan() {
           case $b in *.md) ;; *) reason=$pkg ;; esac
         else
           for ctx in ${CONTEXTS[$name]//,/ }; do
-            printf '%s\n' "${deps[$pkg|$ctx]}" | grep -q -x -F "$d" || continue
+            plan_key "$name" "$ctx"
+            printf '%s\n' "${deps[$PLAN_KEY]}" | grep -q -x -F "$d" || continue
             case $b in
               *_test.go) ;;
               *.go|*.s|*.S|*.c|*.h|*.cc|*.cpp) reason=$d; break ;;
@@ -926,17 +1194,30 @@ load_tables
 case $MODE in
   list)
     for name in "${NAMES[@]}"; do say "$name  ${KIND[$name]}  ${STATUS[$name]}  gate ${GATES[$name]}"; done
+    for name in "${!ALIAS[@]}"; do say "$name  alias  runs ${ALIAS[$name]// /, } in turn"; done | sort
     exit 0 ;;
   plan) plan "$RANGE"; exit $? ;;
 esac
 
 # --run
 [ ${#REQUESTED[@]} -gt 0 ] || { say "live-checks: --run needs at least one test name"; exit 2; }
+# A bare name for a row per cluster (tunnel-hour, gpu-accounting) stands for its rows, run one after the other.
+declare -a EXPANDED=()
+for name in "${REQUESTED[@]}"; do
+  if [ -n "${ALIAS[$name]+x}" ]; then
+    # shellcheck disable=SC2206
+    EXPANDED+=(${ALIAS[$name]})
+  else
+    EXPANDED+=("$name")
+  fi
+done
+REQUESTED=("${EXPANDED[@]}")
 for name in "${REQUESTED[@]}"; do
   [ -n "${KIND[$name]+x}" ] || { say "live-checks: unknown test (see --list)"; exit 2; }
   [ "${STATUS[$name]}" = ready ] || { say "live-checks: $name is pending and cannot run yet"; exit 2; }
 done
 load_settings || exit 3
+case " ${REQUESTED[*]} " in *" tunnel-hour-"*) apply_tunnel_lease || exit 3 ;; esac
 check_settings "${REQUESTED[@]}" || exit 3
 OUT=${S[LIVE_OUT_DIR]}
 # Everything private is mode 600 (directories 700), and a tool's own diagnostics, which can name a path,
