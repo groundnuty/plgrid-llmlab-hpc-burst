@@ -36,6 +36,7 @@ func TestAFrontLabelStatesARoleAndAPositionAndNothingThatNamesAHost(t *testing.T
 		{"the shorter position", "a cloud host, inside Cyfronet", okLabel},
 		{"the science agent's example", "the development host, outside Cyfronet (3.4 ms to the Helios login, behind a gateway)", okLabel},
 		{"a rate in the note", "the development host, outside Cyfronet's network (40 MB/s, 5% loss)", okLabel},
+		{"each unit of a number", "the development host, outside Cyfronet (3.4 ms; 2 s; 40 Mb/s; 7%; 7 %)", okLabel},
 		{"an apostrophe and a hyphen in the note", "a cloud host, outside Cyfronet (behind the owner's gateway; a two-hop path)", okLabel},
 		{"the longest", atLimit, okLabel},
 		// No role from the list.
@@ -80,6 +81,7 @@ func TestAFrontLabelStatesARoleAndAPositionAndNothingThatNamesAHost(t *testing.T
 		{"a URL", role + ", " + pos + " (https://front.example)", noNote},
 		{"a non-ASCII letter", role + ", " + pos + " (caf\u00e9)", noNote},
 		{"a trailing comma in the note", role + ", " + pos + " (a gateway,)", noNote},
+		{"a word with a digit and a unit run together", role + ", " + pos + " (gw1ms)", noNote},
 		// The whole.
 		{"empty", "", unset},
 		{"one byte over", stem + " (" + strings.Repeat("a", MaxFrontLabel-len(stem)-2) + ")", tooLong},

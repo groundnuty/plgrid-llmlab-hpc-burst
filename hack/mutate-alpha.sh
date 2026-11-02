@@ -5,6 +5,12 @@
 #   hack/mutate-alpha.sh              # every mutant; exit 1 if one survives or does not apply
 #   hack/mutate-alpha.sh --no-script  # leave out the mutants of hack/live-checks.sh (the slow ones)
 #
+# A mutant ends as KILLED (a test fails), SURVIVED (every test passes) or BROKEN: its text does not occur exactly once, or
+# the Go file it changes no longer compiles. A mutant that does not compile fails to build the tests, and that is not a test
+# failing, so it is reported as BROKEN, never as killed; the run fails for a survivor and for a broken mutant alike. The
+# compile is its own step, to one fixed test-binary path per package, and the binary then runs: so MUTATE_ALPHA_BUILD_LOCK,
+# a lock file, is taken (flock -o) around each compile only, never around a test run.
+#
 # Three kinds, by the file they change:
 #   internal/alpha (a bare file name)           go test ./internal/alpha
 #   internal/providerctl/conformance/...        go test of that package and internal/alpha (the accounting row's half)
@@ -15,7 +21,7 @@
 # It edits files in the working tree and restores each from a copy it makes first, also on any exit, so run it
 # on a checkout with no uncommitted change to them. Run it under a memory cap (docs/development.md).
 set -u -o pipefail
-cd "$(dirname "$0")/.."
+cd "${MUTATE_ALPHA_ROOT:-$(dirname "$0")/..}" || exit 2   # the tree to mutate; the tests of this script point it at a throwaway module
 pkg=internal/alpha
 script_too=1; [ "${1:-}" != --no-script ] || script_too=0
 tmp=$(mktemp -d)
@@ -24,6 +30,13 @@ restore() { for f in "${!saved[@]}"; do cp "${saved[$f]}" "$f"; done; rm -rf "$t
 trap restore EXIT
 path_of() { case $1 in */*) printf '%s' "$1" ;; *) printf '%s/%s' "$pkg" "$1" ;; esac; }
 keep() { [ -n "${saved[$1]:-}" ] || { saved[$1]="$tmp/$(printf '%s' "$1" | tr / _)"; cp "$1" "${saved[$1]}"; }; }
+build() { if [ -n "${MUTATE_ALPHA_BUILD_LOCK:-}" ]; then flock -o "$MUTATE_ALPHA_BUILD_LOCK" "$@"; else "$@"; fi; }
+# compile_tests <package> <binary>: the package's test binary, to one fixed path, under the build lock; on failure its first
+# lines are left in $cerr.
+compile_tests() {
+  build go test -c -o "$2" "./$1" 2>"$tmp/compile.err" && return 0
+  cerr=$(head -n 3 "$tmp/compile.err" | tr '\n' ' '); return 1
+}
 
 # file @@ exact text (must occur once) @@ replacement
 mutants=(
@@ -110,26 +123,68 @@ mutants=(
   'verdict.go@@} else if largeAmongStreams(reqs) == 0 {@@} else if false {'
   'verdict.go@@if r.BodyBytes >= MinLargeBody {@@if r.BodyBytes > MinLargeBody {'
   'verdict.go@@if open >= ConcurrentStreams {@@if open > ConcurrentStreams {'
-  'verdict.go@@r.Opened.After(l.Opened) && r.Opened.Before(l.Ended)@@r.Opened.After(l.Opened)'
+  'verdict.go@@r.Opened.After(l.BodyStart) && r.Opened.Before(l.BodyEnd)@@r.Opened.After(l.Opened) && r.Opened.Before(l.Ended)'
+  'verdict.go@@r.Opened.After(l.BodyStart) && r.Opened.Before(l.BodyEnd)@@r.Opened.After(l.BodyStart) && !r.Opened.After(l.BodyEnd)'
+  'verdict.go@@at := []time.Time{l.BodyStart}@@at := []time.Time{l.Opened}'
+  'verdict.go@@if !l.UploadRecorded() {@@if false {'
+  'observe.go@@return !s.BodyStart.IsZero() && s.BodyEnd.After(s.BodyStart)@@return !s.BodyStart.IsZero()'
+  'observe.go@@return !s.BodyStart.IsZero() && s.BodyEnd.After(s.BodyStart)@@return s.BodyEnd.After(s.BodyStart)'
+  'observe.go@@return !s.BodyStart.IsZero() && s.BodyEnd.After(s.BodyStart)@@return !s.BodyStart.IsZero() && !s.BodyEnd.IsZero()'
   'verdict.go@@isStream(r) && !r.Opened.After(t) && r.Ended.After(t)@@isStream(r) && !r.Opened.After(t) && !r.Ended.Before(t)'
   'verdict.go@@r.Direction == DirDownload && r.OK && bps > 0 && bps < minRate@@r.OK && bps > 0 && bps < minRate'
-  'frontlabel.go@@case len(label) > MaxFrontLabel:@@case len(label) >= MaxFrontLabel:'
-  'frontlabel.go@@case !frontLabelRE.MatchString(label):@@case false:'
-  'frontlabel.go@@case !positionRE.MatchString(label):@@case false:'
-  'frontlabel.go@@case label == "":@@case false:'
+  'frontlabel.go@@if label == "" {@@if false {'
+  'frontlabel.go@@if len(label) > MaxFrontLabel {@@if len(label) >= MaxFrontLabel {'
+  'frontlabel.go@@if len(label) > MaxFrontLabel {@@if len(label) > MaxFrontLabel+1 {'
+  'frontlabel.go@@if !ok {@@if !ok && false {'
+  'frontlabel.go@@strings.CutPrefix(label, r+", ")@@strings.CutPrefix(label, r)'
+  'frontlabel.go@@if m == nil {@@if m == nil && false {'
+  'frontlabel.go@@if m[1] != "" && !noteRE.MatchString(m[2]) {@@if false {'
+  'frontlabel.go@@if m[1] != "" && !noteRE.MatchString(m[2]) {@@if m[1] == "" && !noteRE.MatchString(m[2]) {'
+  'frontlabel.go@@positionRE = regexp.MustCompile(`^(?:inside|outside) Cyfronet@@positionRE = regexp.MustCompile(`(?:inside|outside) Cyfronet'
+  'frontlabel.go@@Cyfronet(?:'"'"'s network)?( \((.*)\))?$@@Cyfronet(?:'"'"'s network)( \((.*)\))?$'
+  'frontlabel.go@@Cyfronet(?:'"'"'s network)?( \((.*)\))?$@@Cyfronet(?:'"'"'s network)?( \((.*)\))$'
+  'frontlabel.go@@[A-Za-z]+(?:@@[A-Za-z0-9]+(?:'
+  'frontlabel.go@@[A-Za-z]+(?:@@[A-Za-z.]+(?:'
+  'frontlabel.go@@[A-Za-z]+(?:@@[A-Za-z:]+(?:'
+  'frontlabel.go@@(?:ms|s|MB/s|Mb/s|%)@@(?:ms|s|MB/s|Mb/s|%)?'
+  'frontlabel.go@@(?:ms|s|MB/s|Mb/s|%)@@(?:s|MB/s|Mb/s|%)'
+  'frontlabel.go@@(?:ms|s|MB/s|Mb/s|%)@@(?:ms|MB/s|Mb/s|%)'
+  'frontlabel.go@@(?:ms|s|MB/s|Mb/s|%)@@(?:ms|s|MB/s|%)'
+  'frontlabel.go@@(?:ms|s|MB/s|Mb/s|%)@@(?:ms|s|MB/s|Mb/s)'
+  'frontlabel.go@@(?:\.[0-9]+)? ?(?:@@(?:\.[0-9]+) ?(?:'
+  'frontlabel.go@@(?:[,;]? @@(?:[,;:]? '
+  'frontlabel.go@@(?:[,;]? @@(?:[,;]?'
   'frontlabel.go@@return first + "\n" + FrontLine(label) + "\n" + rest@@return first + "\n" + rest'
-  'run.go@@if lerr := ValidFrontLabel(cfg.FrontLabel); lerr != nil {@@if false {'
+  'run.go@@if lerr := ValidFrontLabel(cfg.FrontLabel); lerr != nil {@@if lerr := ValidFrontLabel(cfg.FrontLabel); false && lerr != nil {'
   'run.go@@InsertFrontLine(summary(failures, jobs), cfg.FrontLabel)@@summary(failures, jobs)'
   'run.go@@"frontLabel": cfg.FrontLabel, @@'
   'config.go@@bad = append(bad, EnvFrontLabel+": "+err.Error())@@_ = err'
   'config.go@@cfg.FrontLabel = getenv(EnvFrontLabel)@@cfg.FrontLabel = ""'
   'internal/providerctl/conformance/gpuacct_test.go@@w.p.save(alpha.PostsFile, []byte(alpha.InsertFrontLine(posts, frontLabel(t))))@@w.p.save(alpha.PostsFile, []byte(posts))'
-  'internal/providerctl/conformance/gpuacct_test.go@@if err := alpha.ValidFrontLabel(label); err != nil {@@if false {'
+  'internal/providerctl/conformance/gpuacct_test.go@@if err := alpha.ValidFrontLabel(label); err != nil {@@if err := alpha.ValidFrontLabel(label); false && err != nil {'
   'hack/live-checks.sh@@[ -z "${FRONTLABEL[$name]:-}" ] || check_front_label || bad=1@@true'
   'hack/live-checks.sh@@if [ -z "$l" ]; then say "live-checks: setting LIVE_FRONT_HOST_LABEL is missing"; return 1; fi@@:'
   'hack/live-checks.sh@@[ "${#l}" -gt 120 ]@@[ "${#l}" -gt 121 ]'
-  'hack/live-checks.sh@@A-Za-z0-9 ,;()@@A-Za-z0-9 ,;().'
-  'hack/live-checks.sh@@if ! [[ $lower =~ (^|[^a-z])(inside|outside)([^a-z]|$) ]]; then@@if false; then'
+  'hack/live-checks.sh@@if [ -z "$have_role" ]; then@@if false; then'
+  'hack/live-checks.sh@@if [ -z "$have_pos" ]; then@@if false; then'
+  'hack/live-checks.sh@@case $l in "$role, "*) rest=${l#"$role, "};@@case $l in "$role"*) rest=${l#"$role, "};'
+  'hack/live-checks.sh@@case $rest in "$pos ("*")") have_pos=1;@@case $rest in "$pos ("*) have_pos=1;'
+  'hack/live-checks.sh@@if [ -n "$has_note" ] && ! [[ $note =~ $note_re ]]; then@@if false; then'
+  'hack/live-checks.sh@@if [ -n "$has_note" ] && ! [[ $note =~ $note_re ]]; then@@if [ -z "$has_note" ] && ! [[ $note =~ $note_re ]]; then'
+  'hack/live-checks.sh@@word="[A-Za-z]+(@@word="[A-Za-z0-9]+('
+  'hack/live-checks.sh@@word="[A-Za-z]+(@@word="[A-Za-z.]+('
+  'hack/live-checks.sh@@word="[A-Za-z]+(@@word="[A-Za-z:]+('
+  'hack/live-checks.sh@@(ms|s|MB/s|Mb/s|%)@@(ms|s|MB/s|Mb/s|%)?'
+  'hack/live-checks.sh@@(ms|s|MB/s|Mb/s|%)@@(s|MB/s|Mb/s|%)'
+  'hack/live-checks.sh@@(ms|s|MB/s|Mb/s|%)@@(ms|s|MB/s|%)'
+  'hack/live-checks.sh@@(ms|s|MB/s|Mb/s|%)@@(ms|s|MB/s|Mb/s)'
+  'hack/live-checks.sh@@note_re="^$item([,;]? $item)*\$"@@note_re="^$item([,;:]? $item)*\$"'
+  'hack/live-checks.sh@@note_re="^$item([,;]? $item)*\$"@@note_re="^$item([,;]?$item)*\$"'
+  'hack/live-checks.sh@@never takes one.
+unset HPCBURST_FRONT_HOST_LABEL@@never takes one.'
+  'hack/live-checks.sh@@    FRONT_ROLES+=("$name")@@    :'
+  'hack/live-checks.sh@@[ "$n" -gt 0 ] || { table_empty "FRONT ROLES"; return 2; }@@true'
+  'hack/live-checks.sh@@[ "$n" -gt 0 ] || { table_empty "FRONT LABEL"; return 2; }@@true'
   'hack/live-checks.sh@@  unset HPCBURST_FRONT_HOST_LABEL@@  :'
   'hack/live-checks.sh@@[ -z "${FRONTLABEL[$1]:-}" ] || export HPCBURST_FRONT_HOST_LABEL=${S[LIVE_FRONT_HOST_LABEL]}@@true'
   'hack/live-checks.sh@@still take it.
@@ -169,6 +224,9 @@ mutants=(
   'internal/providerctl/conformance/reach_run_test.go@@	if plat != nil {@@	if false {'
   'internal/providerctl/conformance/testdata/reach-probe.sh@@  SSH-) echo ssh; exit 0 ;;@@  SSX-) echo ssh; exit 0 ;;'
 )
+# The mutants of a test of this script: a file with one mutant per line, in place of the list above.
+[ -z "${MUTATE_ALPHA_MUTANTS:-}" ] || mapfile -t mutants < "$MUTATE_ALPHA_MUTANTS"
+here=$PWD
 killed=0 survived=0 broken=0 total=0
 for m in "${mutants[@]}"; do
   file=${m%%@@*}; rest=${m#*@@}; from=${rest%%@@*}; to=${rest#*@@}
@@ -187,9 +245,17 @@ open(p, 'w').write(s.replace(a, b, 1))
 PY
   then echo "BROKEN   $file: the text '$from' does not occur exactly once"; broken=$((broken+1)); continue; fi
   case $path in
-    hack/live-checks.sh) tests=(go test -count=1 -timeout 9m -parallel 3 -run 'AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|FrontLabel|FrontRan|LabelReaches|Reach' ./hack/livechecks) ;;
-    internal/providerctl/*) tests=(go test -count=1 -timeout 300s ./internal/providerctl/conformance "./$pkg") ;;
-    *) tests=(go test -count=1 -timeout 120s "./$pkg") ;;
+    *.go|internal/providerctl/*)
+      cerr=""
+      case $path in
+        internal/providerctl/*) compile_tests internal/providerctl/conformance "$tmp/conf.test" && compile_tests "$pkg" "$tmp/pkg.test" ;;
+        *) compile_tests "$pkg" "$tmp/pkg.test" ;;
+      esac || { echo "BROKEN   $file: the mutant does not compile: $cerr"; broken=$((broken+1)); cp "${saved[$path]}" "$path"; continue; } ;;
+  esac
+  case $path in
+    hack/live-checks.sh) tests=(go test -count=1 -timeout 9m -parallel 3 -run 'AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|FrontLabel|FrontRan|LabelReaches|Reach|FrontRoles|ATableThat' ./hack/livechecks) ;;
+    internal/providerctl/*) tests=(bash -c 'cd "$1/internal/providerctl/conformance" && "$2" -test.count=1 -test.timeout 300s && cd "$1/$3" && "$4" -test.count=1 -test.timeout 300s' _ "$here" "$tmp/conf.test" "$pkg" "$tmp/pkg.test") ;;
+    *) tests=(bash -c 'cd "$1/$2" && "$3" -test.count=1 -test.timeout 120s' _ "$here" "$pkg" "$tmp/pkg.test") ;;
   esac
   if "${tests[@]}" >/dev/null 2>&1; then
     echo "SURVIVED $file: $from  ->  $to"; survived=$((survived+1))

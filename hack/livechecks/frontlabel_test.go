@@ -94,6 +94,7 @@ func TestTheFrontLabelIsHeldToOneFormByTheScriptAndThePackage(t *testing.T) {
 		{"the shorter position", "a cloud host, inside Cyfronet", ""},
 		{"the science agent's example", "the development host, outside Cyfronet (3.4 ms to the Helios login, behind a gateway)", ""},
 		{"a rate in the note", "the development host, outside Cyfronet's network (40 MB/s, 5% loss)", ""},
+		{"each unit of a number", "the development host, outside Cyfronet (3.4 ms; 2 s; 40 Mb/s; 7%; 7 %)", ""},
 		{"an apostrophe and a hyphen in the note", "a cloud host, outside Cyfronet (behind the owner's gateway; a two-hop path)", ""},
 		{"the longest", long, ""},
 		{"one byte over", over, tooLong},
@@ -139,6 +140,7 @@ func TestTheFrontLabelIsHeldToOneFormByTheScriptAndThePackage(t *testing.T) {
 		// A letter the bash range [A-Za-z] could take in another locale: both must refuse it.
 		{"a non-ASCII letter", role + ", " + pos + " (caf\u00e9)", noNote},
 		{"a trailing comma in the note", role + ", " + pos + " (a gateway,)", noNote},
+		{"a word with a digit and a unit run together", role + ", " + pos + " (gw1ms)", noNote},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			pkgErr := alpha.ValidFrontLabel(c.label)
