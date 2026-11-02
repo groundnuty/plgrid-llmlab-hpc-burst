@@ -20,5 +20,12 @@ spec:
   # Alpha allows exactly one partition per Provider (HBEP-4, open question 12).
   allowedPartitions:
     - plgrid-gpu-gh200
+  # The Slurm QOS the jobs are submitted under. On Helios, now limits each job to 12 hours and the
+  # sum of your running jobs to one GPU, 72 CPUs and 122400Mi of memory (profiles/helios.yaml, qos;
+  # HBEP-4, QOS limits). The profile lists it, so the controller sizes an Allocation within those
+  # limits. Its own limit of one submitted job does not bind on this partition, whose QOS, plgrid,
+  # allows 2000 first, so more jobs can queue, but they wait while one GPU is in use: a quick start
+  # is not promised. Remove the line to use your association's default QOS.
+  qos: now
   credentialsRef:
     file: /home/<user>/.config/hpcburst/credentials/helios-gh200.ssh
