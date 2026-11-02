@@ -47,17 +47,19 @@ type UpOptions struct {
 
 // UpReport is the outcome of a start.
 type UpReport struct {
-	Version    string   `json:"version"`
-	StateDir   string   `json:"state_dir"`
-	Kubeconfig string   `json:"kubeconfig"`
-	Ports      Ports    `json:"ports"`
-	PID        int      `json:"pid"`
-	ReadyzMS   int64    `json:"readyz_ms"`
-	ReadyMS    int64    `json:"ready_ms"`
-	RSSMiB     float64  `json:"rss_mib"`
-	Applied    int      `json:"manifests_applied"`
-	Front      Front    `json:"front"`
-	Warnings   []string `json:"warnings,omitempty"`
+	Version    string  `json:"version"`
+	StateDir   string  `json:"state_dir"`
+	Kubeconfig string  `json:"kubeconfig"`
+	Ports      Ports   `json:"ports"`
+	PID        int     `json:"pid"`
+	ReadyzMS   int64   `json:"readyz_ms"`
+	ReadyMS    int64   `json:"ready_ms"`
+	RSSMiB     float64 `json:"rss_mib"`
+	Applied    int     `json:"manifests_applied"`
+	// CRDGuard is true when up installed the CRD deletion guard (guard.go); it does so on every start.
+	CRDGuard bool     `json:"crd_guard"`
+	Front    Front    `json:"front"`
+	Warnings []string `json:"warnings,omitempty"`
 	// SupervisorPID and ControllerBin are set when controllers run; ControllerHealth is the
 	// address of the lifecycle controller's /healthz.
 	SupervisorPID    int    `json:"supervisor_pid,omitempty"`
@@ -297,6 +299,18 @@ func Up(ctx context.Context, o UpOptions) (*UpReport, error) {
 			return abort("manifests", err)
 		}
 	}
+	// The CRD deletion guard goes in on every start, whatever --manifests named (HBEP-11; issue
+	// #242), and after the manifests, which may have applied the CRDs it protects.
+	// up returns only once the API server refuses a delete of a framework CRD, if there is one: admission
+	// learns of the guard after the apply (WaitGuardEnforced).
+	if cfg, err := restConfig(l.kubeconfig(), ports, 30*time.Second); err != nil {
+		return abort("CRD deletion guard", err)
+	} else if err := InstallGuard(ctx, cfg, o.Log); err != nil {
+		return abort("CRD deletion guard", err)
+	} else if err := WaitGuardEnforced(ctx, cfg, o.Log); err != nil {
+		return abort("CRD deletion guard", err)
+	}
+	rep.CRDGuard = true
 	if ctrlBin == "" {
 		rep.Warnings = append(rep.Warnings, noControllerWarning)
 		logf(o.Log, "%s", noControllerWarning)
