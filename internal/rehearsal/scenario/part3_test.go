@@ -102,6 +102,9 @@ func part3Shape() clusterShape {
 			{Name: queuedDep.qos, MaxSubmitPerUser: fakeslurm.Cap(1), MaxGPUsPerUser: fakeslurm.Cap(1)},
 			{Name: oneSlotDep.qos, MaxSubmitPerUser: fakeslurm.Cap(1), MaxGPUsPerUser: fakeslurm.Cap(1)},
 		},
+		// The no-overlap phase holds each successor at its engine's start
+		// until its gap has been probed (waitSuccessors).
+		engineGate: true,
 	}
 }
 
@@ -338,13 +341,17 @@ func (p3 *part3) waitPrimary(d *depRun) {
 }
 
 // atLeastBefore fails unless the deployment's drain start is at least lead
-// away: what follows must end before it (the brief's lease of 7 minutes).
+// away: what follows must end before it (the brief's lease of 7 minutes). It
+// logs the headroom left, so that a slow runner's failure here can be told
+// from a product's.
 func (p3 *part3) atLeastBefore(d *depRun, what string, lead time.Duration) {
 	p3.t.Helper()
-	if left := time.Until(d.ds); left < lead {
+	left := time.Until(d.ds)
+	if left < lead {
 		p3.t.Fatalf("%s would start %s before %s's drain start %s, under the %s it needs; the run is too slow for the 7 min lease",
 			what, left.Round(time.Second), d.name, d.ds.UTC().Format(time.RFC3339), lead)
 	}
+	p3.t.Logf("HEADROOM %s: %s before %s's drain start, %s needed, %s to spare", what, left.Round(time.Second), d.name, lead, (left - lead).Round(time.Second))
 }
 
 // longStreamAcrossRestart is items 1 and 4: the Test plan's 7,000-token
@@ -360,13 +367,17 @@ func (p3 *part3) longStreamAcrossRestart(d *depRun) {
 	for _, p := range problems {
 		p3.t.Errorf("the primary's gauges across the controller restart: %s", p)
 	}
+	// No count of stale reads is required: a report can reach the new
+	// controller before its first pass, and then no read shows them stale.
+	// Every unknown sample a read holds must carry stale (or not_reported, on
+	// a gauge the engine does not export): restartReadProblems.
 	if fresh == 0 {
 		p3.t.Errorf("the primary's gauges across the controller restart: none of %d reads showed them fresh", len(reads))
 	}
-	p3.t.Logf("the primary's gauges across the controller restart: %d reads, %d stale (no report yet since the restart), %d fresh, %d with no series of the Instance; none with a gauge neither known nor unknown",
+	p3.t.Logf("the primary's gauges across the controller restart: %d reads, %d stale (no report yet since the restart), %d fresh, %d with no series of the Instance; none with a gauge neither known nor unknown, and every unknown sample stale",
 		len(reads), stale, fresh, unserved)
 	if unserved > 0 {
-		p3.t.Logf("FINDING: for %d reads (250 ms apart) while the new controller took the Lease, its /metrics had no series of the live primary at all, "+
+		p3.t.Logf("FINDING (#249): for %d reads (250 ms apart) while the new controller took the Lease, its /metrics had no series of the live primary at all, "+
 			"neither its info series nor its gauges nor their unknown samples (internal/lifecycle/metrics.go:239, Collect over an inventory that only "+
 			"the leader's passes fill): HBEP-8 gives every Instance not ended its info series, and after a controller restart each engine metric "+
 			"unknown with reason stale until the agent's next report (Test plan); a share-of-unknown query reads 0/0 there", unserved)

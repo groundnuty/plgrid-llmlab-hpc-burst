@@ -43,7 +43,14 @@ func (r *rig) requestCtx() (context.Context, context.CancelFunc) {
 // send posts body to the front's client listener with the client key and,
 // when key is set, the x-session-id conversation key.
 func (r *rig) send(path, body, key string) reply {
-	ctx, cancel := r.requestCtx()
+	return r.sendCtx(context.Background(), path, body, key)
+}
+
+// sendCtx is send, also ended when parent ends: a background sender's stop
+// cancels the request it has in flight.
+func (r *rig) sendCtx(parent context.Context, path, body, key string) reply {
+	d, _ := boundedDeadline(r.t, requestTimeout)
+	ctx, cancel := context.WithDeadline(parent, d)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+r.ports.client+path, strings.NewReader(body))
 	if err != nil {

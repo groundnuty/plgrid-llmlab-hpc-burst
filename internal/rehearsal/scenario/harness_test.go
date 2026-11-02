@@ -400,6 +400,12 @@ type cluster struct {
 	home    string // the cluster user's HOME
 	scratch string
 	fakes   string // the engine double's fake apptainer
+	// cmds records every command the controller ran on the cluster, with
+	// the slot holders just before it (cmdlog_test.go).
+	cmds *cmdLog
+	// gate holds engine starts while armed; nil unless the shape asks for
+	// it (enginegate_test.go).
+	gate *engineGate
 }
 
 // clusterUser is the fake cluster's own user, never this host's.
@@ -410,6 +416,9 @@ const clusterUser = "example-user"
 type clusterShape struct {
 	partitions []fakeslurm.Partition
 	qos        []fakeslurm.QOS
+	// engineGate puts the engine gate (enginegate_test.go) in front of the
+	// jobs' apptainer; it holds nothing until armed.
+	engineGate bool
 }
 
 func (s clusterShape) partitionsOrDefault() []fakeslurm.Partition {
@@ -441,6 +450,11 @@ func startCluster(t *testing.T, dir string, jobEnv map[string]string, shape clus
 		// No GPU on this host: the agent's GPU probe only warns without one.
 		"HPCBURST_NVIDIA_SMI": filepath.Join(c.fakes, "no-nvidia-smi"),
 	}
+	if shape.engineGate {
+		var wrapper string
+		c.gate, wrapper = installEngineGate(t, dir, c.fakes)
+		env["HPCBURST_APPTAINER"] = wrapper
+	}
 	for k, v := range jobEnv {
 		env[k] = v
 	}
@@ -458,8 +472,9 @@ func startCluster(t *testing.T, dir string, jobEnv map[string]string, shape clus
 			t.Errorf("the fake cluster's Close: %v", err)
 		}
 	})
+	c.cmds = &cmdLog{plat: c.plat}
 	login, err := rehearsal.StartLoginNode(rehearsal.LoginConfig{
-		Dir: filepath.Join(dir, "ln"), Platform: c.plat,
+		Dir: filepath.Join(dir, "ln"), Platform: c.plat, Around: c.cmds.around,
 		Login: fakeslurm.Login{User: clusterUser, Env: map[string]string{"HOME": c.home, "SCRATCH": c.scratch}},
 	})
 	if err != nil {

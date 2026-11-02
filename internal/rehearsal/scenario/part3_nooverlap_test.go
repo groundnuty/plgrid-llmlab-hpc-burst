@@ -4,17 +4,23 @@ package scenario_test
 // no-overlap handover end to end over the real tunnel, on the queued path and
 // the one-slot path at once. A stream is in flight at each primary's drain
 // start and runs to its end uncut; paced requests through each gap get 503
-// no_ready_target; NoOverlapSlot holds from the drain start until the
+// no_ready_target, and the engine gate holds each successor until enough of
+// them have been answered; NoOverlapSlot holds from the drain start until the
 // successor is ready; the gap is measured; the one-slot path never has two
-// live jobs; and the queued successor pends on the GPU cap.
+// live jobs, read at each sbatch the controller sent; and the queued
+// successor pends on the GPU cap.
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
@@ -33,11 +39,18 @@ type depRun struct {
 	succJob   int
 	stream    <-chan streamed // the stream in flight at the drain start
 	probes    []probe
+	// gateJob is the successor's job the engine gate held, from gateHeld
+	// (its engine start reached the gate) until gateReleased, once
+	// gateReplies requests had been answered in the gap.
+	gateJob                int
+	gateHeld, gateReleased time.Time
+	gateReplies            int
 }
 
-// probe is one paced request of the gap prober.
+// probe is one paced request of the gap prober, and when it was sent.
 type probe struct {
 	model string
+	sent  time.Time
 	rp    reply
 }
 
@@ -45,23 +58,29 @@ type probe struct {
 // stopped, and keeps every reply. It never fails the test itself: the replies
 // are judged after (gapProblems).
 type prober struct {
-	stop chan struct{}
-	done chan struct{}
-	mu   sync.Mutex
-	got  []probe
+	stop   chan struct{}
+	done   chan struct{}
+	cancel context.CancelFunc
+	once   sync.Once
+	mu     sync.Mutex
+	got    []probe
 }
 
 const probeEvery = time.Second
 
+// startProber starts the prober; the test's clean-up stops it, so a test that
+// fails part-way sends nothing after it.
 func (p3 *part3) startProber(models ...string) *prober {
-	pr := &prober{stop: make(chan struct{}), done: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	pr := &prober{stop: make(chan struct{}), done: make(chan struct{}), cancel: cancel}
 	go func() {
 		defer close(pr.done)
 		for {
 			for _, m := range models {
-				rp := p3.send("/v1/chat/completions", chatBodyFor(m, 1, 0, false), "")
+				sent := time.Now()
+				rp := p3.sendCtx(ctx, "/v1/chat/completions", chatBodyFor(m, 1, 0, false), "")
 				pr.mu.Lock()
-				pr.got = append(pr.got, probe{model: m, rp: rp})
+				pr.got = append(pr.got, probe{model: m, sent: sent, rp: rp})
 				pr.mu.Unlock()
 			}
 			select {
@@ -71,7 +90,18 @@ func (p3 *part3) startProber(models ...string) *prober {
 			}
 		}
 	}()
+	p3.t.Cleanup(pr.halt)
 	return pr
+}
+
+// halt stops the prober and cancels a request in flight; it is safe to call
+// again.
+func (pr *prober) halt() {
+	pr.once.Do(func() {
+		close(pr.stop)
+		pr.cancel()
+		<-pr.done
+	})
 }
 
 // replies is a copy of the replies so far.
@@ -81,78 +111,21 @@ func (pr *prober) replies() []probe {
 	return slices.Clone(pr.got)
 }
 
-// end stops the prober and returns every reply; a request in flight ends
-// within requestTimeout.
+// end stops the prober once its round in flight is answered and returns
+// every reply.
 func (pr *prober) end() []probe {
-	close(pr.stop)
-	<-pr.done
+	pr.once.Do(func() {
+		close(pr.stop)
+		<-pr.done
+		pr.cancel()
+	})
 	return pr.replies()
 }
 
-// jobSampler records the jobs of one partition every 100 ms: the most live
-// jobs seen at once, and for each job the last time it was seen holding its
-// slot (pending, running, or ended and still completing). A sample is a lower
-// bound on when a job left its slot, so a check against it never fails a
-// correct controller.
-type jobSampler struct {
-	stop, done chan struct{}
-	mu         sync.Mutex
-	samples    int
-	maxLive    int
-	maxLiveAt  time.Time
-	maxLiveIDs []int
-	lastLive   map[int]time.Time
-}
-
-func (p3 *part3) startJobSampler(partition string) *jobSampler {
-	s := &jobSampler{stop: make(chan struct{}), done: make(chan struct{}), lastLive: map[int]time.Time{}}
-	go func() {
-		defer close(s.done)
-		for {
-			at := time.Now()
-			var live []int
-			for _, j := range p3.cl.plat.Jobs() {
-				if j.Partition == partition && holdsSlot(j) {
-					live = append(live, j.ID)
-				}
-			}
-			s.mu.Lock()
-			s.samples++
-			for _, id := range live {
-				s.lastLive[id] = at
-			}
-			if len(live) > s.maxLive {
-				s.maxLive, s.maxLiveAt, s.maxLiveIDs = len(live), at, live
-			}
-			s.mu.Unlock()
-			select {
-			case <-s.stop:
-				return
-			case <-time.After(100 * time.Millisecond):
-			}
-		}
-	}()
-	return s
-}
-
-func (s *jobSampler) end() {
-	close(s.stop)
-	<-s.done
-}
-
-// holdsSlot reports whether a job holds its partition's submit slot as HBEP-7
-// counts it for the one-slot path: pending (held or not), running, or ended
-// and still completing.
-func holdsSlot(j fakeslurm.Job) bool {
-	switch j.State {
-	case "PENDING", "RUNNING":
-		return true
-	}
-	return j.Completing || !j.Finished
-}
-
 // noOverlap is item 5: both deployments' handovers, from a stream started
-// streamLead before each drain start to each successor's ready.
+// streamLead before each drain start to each successor's ready. The engine
+// gate is armed throughout, so each successor's engine waits at its start
+// until minGapProbes requests have been answered in its gap (waitSuccessors).
 func (p3 *part3) noOverlap() {
 	r := p3.rig
 	r.t.Helper()
@@ -170,7 +143,13 @@ func (p3 *part3) noOverlap() {
 			}
 		}
 	}
-	smp := p3.startJobSampler(oneSlotDep.partition)
+	gate := r.cl.gate
+	if gate == nil {
+		r.t.Fatal("the no-overlap phase needs the engine gate (clusterShape.engineGate)")
+	}
+	if err := gate.arm(); err != nil {
+		r.t.Fatalf("arm the engine gate: %v", err)
+	}
 	pr := p3.startProber(models...)
 	for _, d := range order {
 		waitFor(r.t, time.Until(d.ds)+time.Minute, "the drain start of "+d.name+" minus the stream's lead", func() bool {
@@ -181,11 +160,11 @@ func (p3 *part3) noOverlap() {
 		d.stream = done
 		r.t.Logf("%s: a %d-token stream started %s before the drain start", d.name, longTokens, time.Until(d.ds).Round(100*time.Millisecond))
 	}
-	for _, d := range p3.deps {
-		p3.waitSuccessor(d, pr)
+	p3.waitSuccessors(pr)
+	if err := gate.open(); err != nil {
+		r.t.Fatalf("open the engine gate: %v", err)
 	}
 	probes := pr.end()
-	smp.end()
 	for _, d := range p3.deps {
 		for _, pb := range probes {
 			if pb.model == d.model {
@@ -196,42 +175,125 @@ func (p3 *part3) noOverlap() {
 		p3.checkGap(d)
 		p3.checkNoOverlapSlot(d)
 		if d.oneSlot {
-			p3.checkOneSlot(d, smp)
+			p3.checkOneSlot(d)
 		} else {
 			p3.checkQueuedHandover(d)
 		}
 	}
 }
 
-// waitSuccessor waits until the primary's successor is ready, registered at
+// waitSuccessors releases each successor from the engine gate once its
+// engine start is held there and minGapProbes requests sent after its
+// deployment's drain start (and gapSlack) have been answered with the gap's
+// 503 (releaseGate); then waits until each successor is ready, registered at
 // the front, and has served one of the prober's requests.
-func (p3 *part3) waitSuccessor(d *depRun, pr *prober) {
+func (p3 *part3) waitSuccessors(pr *prober) {
 	r := p3.rig
 	r.t.Helper()
-	waitState(r.t, waitDeadline+2*time.Minute, "the successor of "+d.primary.Name+" to serve through the front", func() (bool, string) {
-		var succ *v1alpha1.Instance
-		for _, in := range p3.instancesOf(d.name) {
-			if in.Annotations[v1alpha1.AnnotationPredecessor] == d.primary.Name && in.Status.Phase == v1alpha1.InstanceReady {
-				in := in
-				succ = &in
+	waitState(r.t, waitDeadline+2*time.Minute, "each successor to be held at the engine gate through its gap, then to serve", func() (bool, string) {
+		replies := pr.replies()
+		var waiting []string
+		for _, d := range p3.deps {
+			if d.succ != nil {
+				continue
+			}
+			if d.gateReleased.IsZero() {
+				if w := p3.releaseGate(d, replies); w != "" {
+					waiting = append(waiting, w)
+					continue
+				}
+			}
+			if w := p3.successorServes(d, replies); w != "" {
+				waiting = append(waiting, w)
 			}
 		}
-		if succ == nil {
-			return false, r.describe()
-		}
-		if reg, known := r.registered(succ); !known || !reg {
-			return false, "the successor " + succ.Name + " is ready but not registered at the front"
-		}
-		for _, pb := range pr.replies() {
-			if pb.model == d.model && pb.rp.status == http.StatusOK && pb.rp.header.Get("Hpcburst-Instance-Uid") == string(succ.UID) {
-				d.succ, d.succAlloc = succ, succ.Spec.AllocationRef.Name
-				d.succJob = jobIDOf(r.t, succ)
-				return true, ""
-			}
-		}
-		return false, "the successor " + succ.Name + " has served no probe yet"
+		return len(waiting) == 0, strings.Join(waiting, "; ")
 	})
-	r.t.Logf("%s: successor %s serves on job %d", d.name, d.succ.Name, d.succJob)
+	for _, d := range p3.deps {
+		if d.succJob != d.gateJob {
+			r.t.Errorf("%s: the successor runs on job %d, but the engine gate held job %d", d.name, d.succJob, d.gateJob)
+		}
+		r.t.Logf("%s: successor %s serves on job %d; the engine gate held it from %s to %s, released once %d requests had been answered in the gap",
+			d.name, d.succ.Name, d.succJob, ts(d.gateHeld), ts(d.gateReleased), d.gateReplies)
+	}
+}
+
+// releaseGate releases the deployment's successor from the engine gate once
+// its engine start is held there and enough of the gap has been probed; it
+// returns what it still waits for, "" once released.
+func (p3 *part3) releaseGate(d *depRun, replies []probe) string {
+	r := p3.rig
+	r.t.Helper()
+	held, err := r.cl.gate.heldJobs()
+	if err != nil {
+		r.t.Fatalf("the engine gate: %v", err)
+	}
+	job := 0
+	for _, id := range held {
+		if j, ok := r.cl.plat.Job(id); ok && id != d.primaryJob && j.Partition == d.partition {
+			job = id
+		}
+	}
+	if job == 0 {
+		return d.name + ": no successor's engine start is held at the gate yet"
+	}
+	n := gapReplies(replies, d.model, d.ds.Add(gapSlack))
+	if n < minGapProbes {
+		return fmt.Sprintf("%s: the successor's job %d is held at the engine gate; %d of %d requests answered in the gap", d.name, job, n, minGapProbes)
+	}
+	at, _ := r.cl.gate.held(job)
+	if err := r.cl.gate.release(job); err != nil {
+		r.t.Fatalf("release job %d from the engine gate: %v", job, err)
+	}
+	d.gateJob, d.gateHeld, d.gateReleased, d.gateReplies = job, at, time.Now(), n
+	return ""
+}
+
+// gapReplies counts the model's requests sent at or after from that the front
+// answered with the gap's 503: model_inactive, no_ready_target, Retry-After
+// 30, from the front (HBEP-7, No-overlap mode; HBEP-5, Errors).
+func gapReplies(replies []probe, model string, from time.Time) int {
+	n := 0
+	for _, pb := range replies {
+		if pb.model != model || pb.sent.Before(from) || pb.rp.err != nil || pb.rp.status != http.StatusServiceUnavailable {
+			continue
+		}
+		e := errorOf(pb.rp.body)
+		if pb.rp.header.Get(hdrEmitter) == "front" && e.Code == "model_inactive" && derefS(e.Detail) == "no_ready_target" &&
+			pb.rp.header.Get("Retry-After") == "30" {
+			n++
+		}
+	}
+	return n
+}
+
+// successorServes records the deployment's successor once it is ready,
+// registered at the front, and has served one of the prober's requests; it
+// returns what it still waits for, "" once it serves.
+func (p3 *part3) successorServes(d *depRun, replies []probe) string {
+	r := p3.rig
+	r.t.Helper()
+	var succ *v1alpha1.Instance
+	for _, in := range p3.instancesOf(d.name) {
+		if in.Annotations[v1alpha1.AnnotationPredecessor] == d.primary.Name && in.Status.Phase == v1alpha1.InstanceReady {
+			in := in
+			succ = &in
+		}
+	}
+	if succ == nil {
+		return d.name + ": its successor is not ready yet"
+	}
+	if reg, known := r.registered(succ); !known || !reg {
+		return d.name + ": the successor " + succ.Name + " is ready but not registered at the front"
+	}
+	for _, pb := range replies {
+		if pb.model == d.model && pb.rp.status == http.StatusOK && pb.rp.header.Get("Hpcburst-Instance-Uid") == string(succ.UID) {
+			d.succ, d.succAlloc = succ, succ.Spec.AllocationRef.Name
+			d.succJob = jobIDOf(r.t, succ)
+			return ""
+		}
+	}
+	return d.name + ": the successor " + succ.Name + " has served no probe yet"
 }
 
 // checkDrainStream: the stream in flight at the drain start ran to its end,
@@ -439,16 +501,18 @@ func (p3 *part3) checkNoOverlapSlot(d *depRun) {
 	})
 }
 
-// noOverlapSlotProblems: the deployment never shows NoOverlapSlot before the
-// drain start; it shows it before the successor is ready, and on every
-// version from its first until the successor is first seen ready; and it
+// noOverlapSlotProblems: the deployment is never Degraded True with reason
+// NoOverlapSlot before the drain start; it is before the successor is ready,
+// and on every version from the first until the successor is first seen
+// ready (a NoOverlapSlot reason on a Degraded that is not True does not
+// count); and it
 // never shows ReplacementLate, in its reason or its message, which lists every
 // reason that applies (HBEP-7, No-overlap mode and Events and conditions).
 func noOverlapSlotProblems(obs []mdObservation, drainStart, succReady time.Time) []string {
 	var out []string
 	first := -1
 	for i, o := range obs {
-		slot := o.degradedReason == v1alpha1.ReasonNoOverlapSlot
+		slot := o.degraded == metav1.ConditionTrue && o.degradedReason == v1alpha1.ReasonNoOverlapSlot
 		if o.degradedReason == v1alpha1.ReasonReplacementLate || hasWord(o.degradedMessage, v1alpha1.ReasonReplacementLate) {
 			out = append(out, fmt.Sprintf("Degraded at %s names ReplacementLate (%s: %.200s): the gap is planned in no-overlap mode", ts(o.at), o.degradedReason, o.degradedMessage))
 		}
@@ -464,7 +528,7 @@ func noOverlapSlotProblems(obs []mdObservation, drainStart, succReady time.Time)
 	}
 	switch {
 	case first < 0:
-		out = append(out, "Degraded never showed NoOverlapSlot")
+		out = append(out, "Degraded was never True with reason NoOverlapSlot")
 	case !obs[first].at.Before(succReady):
 		out = append(out, fmt.Sprintf("NoOverlapSlot first seen at %s, not before the successor was ready at %s", ts(obs[first].at), ts(succReady)))
 	}
@@ -492,20 +556,18 @@ func (p3 *part3) checkQueuedHandover(d *depRun) {
 	}
 }
 
-// checkOneSlot is the one-slot path's own half: never two live jobs in its
-// partition; the successor submitted only after the predecessor's job had
-// left the slot, and every submission accepted (a refused one is a try while
-// the slot was taken); and its Allocation not marked.
-func (p3 *part3) checkOneSlot(d *depRun, smp *jobSampler) {
+// checkOneSlot is the one-slot path's own half, read from the login node's
+// record of the controller's commands (cmdlog_test.go): never two live jobs
+// in its partition, judged at each sbatch; every submission accepted (a
+// refused one is a try while the slot was taken); the successor submitted
+// and its Allocation first seen only after the predecessor's job had left the
+// slot; and its Allocation not marked.
+func (p3 *part3) checkOneSlot(d *depRun) {
 	r := p3.rig
 	r.t.Helper()
-	smp.mu.Lock()
-	maxLive, at, ids, samples, lastLive := smp.maxLive, smp.maxLiveAt, smp.maxLiveIDs, smp.samples, smp.lastLive[d.primaryJob]
-	smp.mu.Unlock()
-	if maxLive > 1 {
-		r.t.Errorf("%s: %d live jobs %v at once at %s on the one-slot path", d.name, maxLive, ids, ts(at))
-	}
-	for _, p := range oneSlotProblems(r.cl.plat.Calls(), r.cl.plat.Jobs(), d.partition, d.succJob, lastLive) {
+	atts := r.cl.cmds.submissions(d.partition)
+	lastLive, cmds := r.cl.cmds.lastHeld(d.partition, d.primaryJob)
+	for _, p := range oneSlotProblems(r.cl.plat.Calls(), r.cl.plat.Jobs(), atts, d.partition, d.succJob, lastLive) {
 		r.t.Errorf("%s: %s", d.name, p)
 	}
 	var a v1alpha1.Allocation
@@ -513,10 +575,14 @@ func (p3 *part3) checkOneSlot(d *depRun, smp *jobSampler) {
 		r.t.Errorf("%s: the one-slot successor's Allocation %s carries the queued-successor mark %q", d.name, d.succAlloc, a.Annotations[v1alpha1.AnnotationQueuedSuccessor])
 	}
 	if aw, ok := p3.allocFirstSeen(d.succAlloc); ok && !aw.After(lastLive) {
-		r.t.Errorf("%s: the successor's Allocation %s was first seen at %s, while the predecessor's job %d still held the slot (seen at %s)", d.name, d.succAlloc, ts(aw), d.primaryJob, ts(lastLive))
+		r.t.Errorf("%s: the successor's Allocation %s was first seen at %s, while the predecessor's job %d still held the slot (at the command of %s)", d.name, d.succAlloc, ts(aw), d.primaryJob, ts(lastLive))
 	}
-	r.t.Logf("%s: %d samples of the partition's jobs, at most %d live at once; the predecessor's job %d last seen holding the slot at %s",
-		d.name, samples, maxLive, d.primaryJob, ts(lastLive))
+	held := 0
+	for _, x := range atts {
+		held = max(held, len(x.holders))
+	}
+	r.t.Logf("%s: %d sbatch attempts on the partition, each read with the slot's holders just before it ran (at most %d other job held it then); %d commands recorded; the predecessor's job %d last held the slot at the command of %s",
+		d.name, len(atts), held, cmds, d.primaryJob, ts(lastLive))
 }
 
 // allocFirstSeen is when the watch first saw the named Allocation.
@@ -529,40 +595,70 @@ func (p3 *part3) allocFirstSeen(name string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-// oneSlotProblems reads the fake's call log and jobs: every sbatch to the
-// partition registered a job (none was refused for the slot); jobs' lives,
-// from submission to end, never overlap; and the successor's job was
-// submitted after the predecessor's job was last seen holding the slot.
-func oneSlotProblems(calls []fakeslurm.Call, jobs []fakeslurm.Job, partition string, succJob int, predLastLive time.Time) []string {
+// oneSlotProblems holds the one-slot partition to HBEP-7 from the fake's
+// call log and jobs and the login node's record of each sbatch attempt:
+//   - every sbatch was accepted: each attempt exited 0 and printed a job ID,
+//     and no name was submitted more times than it has jobs (a refused try
+//     retried under the same tag);
+//   - no job was submitted while another held the slot: just before each
+//     accepted sbatch ran, no job of the partition was pending, running or
+//     completing. Only an sbatch adds a slot holder, and a holder only ever
+//     leaves (no job of the partition is requeued, which is checked), so the
+//     state before each sbatch is the most jobs the partition ever held: two
+//     live jobs at any moment would show at the sbatch that made the second;
+//   - every job of the partition came from a recorded attempt;
+//   - the successor's job was submitted after the predecessor's job was last
+//     seen holding the slot.
+func oneSlotProblems(calls []fakeslurm.Call, jobs []fakeslurm.Job, attempts []submitAttempt, partition string, succJob int, predLastLive time.Time) []string {
 	var out []string
-	names := map[string]bool{}
+	jobsOf := map[string]int{}
 	var mine []fakeslurm.Job
 	for _, j := range jobs {
 		if j.Partition == partition {
-			names[j.Name] = true
+			jobsOf[j.Name]++
 			mine = append(mine, j)
+			if j.RestartCount > 0 {
+				out = append(out, fmt.Sprintf("job %d was requeued (%d restarts): a requeue adds a slot holder no sbatch shows", j.ID, j.RestartCount))
+			}
 		}
 	}
+	callsOf := map[string]int{}
+	var names []string
 	for _, c := range calls {
 		if len(c.Words) == 0 || c.Words[0] != "sbatch" || !slices.Contains(c.Words, "--partition="+partition) {
 			continue
 		}
 		name := ""
 		for _, w := range c.Words {
-			if len(w) > len("--job-name=") && w[:len("--job-name=")] == "--job-name=" {
-				name = w[len("--job-name="):]
+			if v, ok := strings.CutPrefix(w, "--job-name="); ok {
+				name = v
 			}
 		}
-		if !names[name] {
-			out = append(out, fmt.Sprintf("an sbatch at %s for %q registered no job: refused while the slot was taken", ts(c.Time), name))
+		if callsOf[name] == 0 {
+			names = append(names, name)
+		}
+		callsOf[name]++
+	}
+	for _, n := range names {
+		if callsOf[n] > jobsOf[n] {
+			out = append(out, fmt.Sprintf("%d sbatch calls for %q registered %d jobs: a submission was refused while the slot was taken", callsOf[n], n, jobsOf[n]))
 		}
 	}
-	sort.Slice(mine, func(i, j int) bool { return mine[i].Submit.Before(mine[j].Submit) })
-	for i := 1; i < len(mine); i++ {
-		prev, cur := mine[i-1], mine[i]
-		if prev.End.IsZero() || cur.Submit.Before(prev.End) {
-			out = append(out, fmt.Sprintf("job %d was submitted at %s while job %d (ended %s) was live", cur.ID, ts(cur.Submit), prev.ID, ts(prev.End)))
+	accepted := 0
+	for _, a := range attempts {
+		switch {
+		case a.err != "" || a.exit != 0 || a.jobID == 0:
+			out = append(out, fmt.Sprintf("the sbatch at %s for %q was refused: exit %d, job %d, %s", ts(a.at), a.name, a.exit, a.jobID, a.err))
+		case len(a.holders) > 0:
+			accepted++
+			out = append(out, fmt.Sprintf("the sbatch at %s for %q registered job %d while job %v held the slot (pending, running or completing): two live jobs on the one-slot path",
+				ts(a.at), a.name, a.jobID, a.holders))
+		default:
+			accepted++
 		}
+	}
+	if accepted != len(mine) {
+		out = append(out, fmt.Sprintf("the partition has %d jobs, and %d accepted sbatch attempts were recorded: a submission went unrecorded", len(mine), accepted))
 	}
 	for _, j := range mine {
 		if j.ID == succJob && !j.Submit.After(predLastLive) {

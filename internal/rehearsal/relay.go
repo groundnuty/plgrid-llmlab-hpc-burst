@@ -91,6 +91,7 @@ func relayClient(sock string) int {
 type relayServer struct {
 	ln     net.Listener
 	sess   *fakeslurm.Session
+	around func(line string, run func() (slurm.Result, error)) (slurm.Result, error) // LoginConfig.Around; nil runs the command alone
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -104,13 +105,13 @@ type relayServer struct {
 // started and did not finish.
 const readTimeout = 60 * time.Second
 
-func startRelay(sock string, sess *fakeslurm.Session) (*relayServer, error) {
+func startRelay(sock string, sess *fakeslurm.Session, around func(string, func() (slurm.Result, error)) (slurm.Result, error)) (*relayServer, error) {
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		return nil, fmt.Errorf("listen on the relay socket: %w", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	r := &relayServer{ln: ln, sess: sess, ctx: ctx, cancel: cancel, conns: map[net.Conn]struct{}{}}
+	r := &relayServer{ln: ln, sess: sess, around: around, ctx: ctx, cancel: cancel, conns: map[net.Conn]struct{}{}}
 	r.wg.Add(1)
 	go r.accept()
 	return r, nil
@@ -154,7 +155,13 @@ func (r *relayServer) handle(c net.Conn) {
 	if len(q.stdin) > 0 {
 		stdin = q.stdin
 	}
-	res, err := r.sess.Run(r.ctx, slurm.Command{Line: q.line, Stdin: stdin})
+	run := func() (slurm.Result, error) { return r.sess.Run(r.ctx, slurm.Command{Line: q.line, Stdin: stdin}) }
+	var res slurm.Result
+	if r.around != nil {
+		res, err = r.around(q.line, run)
+	} else {
+		res, err = run()
+	}
 	_ = writeReply(c, toReply(res, err))
 }
 

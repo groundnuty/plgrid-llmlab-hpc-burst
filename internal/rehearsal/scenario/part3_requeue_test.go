@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
 )
 
 // hbep3Tag is an Allocation's job tag computed from HBEP-3 (Allocation and
@@ -139,8 +140,9 @@ type requeueResult struct {
 // requeue is item 3: the fake requeues the queued successor's job, which then
 // returns to a user hold. The Instance ends Requeued; no scontrol release of
 // the job follows; the Allocation is deleted and its finalizer cancels the
-// job; and a new Allocation hosts the replacement, which carries the same
-// deployment ID under its own tag.
+// job inside the deletion (finalizerCancelProblems); and a new Allocation
+// hosts the replacement, which carries the same deployment ID under its own
+// tag.
 func (p3 *part3) requeue(d *depRun) {
 	r := p3.rig
 	r.t.Helper()
@@ -188,20 +190,28 @@ func (p3 *part3) requeue(d *depRun) {
 		r.t.Errorf("%s: job %d has restart count %d and %d executions after the requeue", d.name, d.succJob, j.RestartCount, j.Executions)
 	}
 	want := strconv.Itoa(d.succJob)
-	cancelled := false
 	for _, c := range r.cl.plat.Calls() {
 		if c.Time.Before(at) || len(c.Words) == 0 || !slices.Contains(c.Words, want) {
 			continue
 		}
-		switch {
-		case c.Words[0] == "scontrol" && slices.Contains(c.Words, "release"):
+		if c.Words[0] == "scontrol" && slices.Contains(c.Words, "release") {
 			r.t.Errorf("%s: the requeued job %d's hold was lifted again at %s (HBEP-3: never lifted again)", d.name, d.succJob, ts(c.Time))
-		case c.Words[0] == "scancel":
-			cancelled = true
 		}
 	}
-	if !cancelled {
-		r.t.Errorf("%s: no scancel of the requeued job %d after the requeue: the finalizer did not cancel it", d.name, d.succJob)
+	var deletion, deletedSeen time.Time
+	for _, o := range r.watch.allocations() {
+		if o.uid != a.UID {
+			continue
+		}
+		if deletion.IsZero() && !o.deletion.IsZero() {
+			deletion = o.deletion
+		}
+		if o.deleted && deletedSeen.IsZero() {
+			deletedSeen = o.at
+		}
+	}
+	for _, p := range finalizerCancelProblems(r.cl.plat.Calls(), d.succJob, at, deletion, deletedSeen) {
+		r.t.Errorf("%s: %s", d.name, p)
 	}
 	var ri v1alpha1.Instance
 	waitFor(r.t, waitDeadline, "the replacement's Instance on the new Allocation "+repl.Name, func() bool {
@@ -214,6 +224,38 @@ func (p3 *part3) requeue(d *depRun) {
 		return false
 	})
 	p3.checkIdentity(d, &ri)
-	r.t.Logf("%s: the requeue of job %d failed Instance %s (%s); Allocation %s deleted and its job cancelled; replacement %s on the new Allocation %s",
-		d.name, d.succJob, in.Name, o.endReason, a.Name, ri.Name, repl.Name)
+	r.t.Logf("%s: the requeue of job %d failed Instance %s (%s); Allocation %s deleted (deletionTimestamp %s, gone by %s) and its job cancelled inside that window; replacement %s on the new Allocation %s",
+		d.name, d.succJob, in.Name, o.endReason, a.Name, deletion.UTC().Format(time.RFC3339), ts(deletedSeen), ri.Name, repl.Name)
+}
+
+// finalizerCancelProblems: the requeued job was cancelled by its
+// Allocation's deletion finalizer. Some scancel of the job falls between the
+// Allocation's deletionTimestamp and the watch's DELETED of it (the finalizer
+// is removed only once the job is cancelled), and none falls between the
+// requeue and the deletionTimestamp (a cancel before the deletion is not the
+// finalizer's). The deletionTimestamp is cut to the second, so it is a lower
+// bound on the deletion: a cancel up to a second before the delete request
+// would still pass.
+func finalizerCancelProblems(calls []fakeslurm.Call, job int, requeueAt, deletion, deletedSeen time.Time) []string {
+	if deletion.IsZero() || deletedSeen.IsZero() {
+		return []string{fmt.Sprintf("the watch saw no deletionTimestamp (%v) or no DELETED (%v) of the requeued job %d's Allocation", !deletion.IsZero(), !deletedSeen.IsZero(), job)}
+	}
+	var out []string
+	want := strconv.Itoa(job)
+	inside := 0
+	for _, c := range calls {
+		if len(c.Words) == 0 || c.Words[0] != "scancel" || !slices.Contains(c.Words, want) || c.Time.Before(requeueAt) {
+			continue
+		}
+		switch {
+		case c.Time.Before(deletion):
+			out = append(out, fmt.Sprintf("job %d was cancelled at %s, before its Allocation's deletionTimestamp %s: not by the deletion's finalizer", job, ts(c.Time), ts(deletion)))
+		case !c.Time.After(deletedSeen):
+			inside++
+		}
+	}
+	if inside == 0 {
+		out = append(out, fmt.Sprintf("no scancel of job %d between its Allocation's deletionTimestamp %s and its DELETED (seen %s): the finalizer did not cancel it", job, ts(deletion), ts(deletedSeen)))
+	}
+	return out
 }

@@ -125,6 +125,10 @@ func TestNoOverlapSlotProblems(t *testing.T) {
 			return o
 		},
 		"never NoOverlapSlot": func(o []mdObservation) []mdObservation { return append(o[:2], o[4]) },
+		"NoOverlapSlot as the reason of a Degraded that is False": func(o []mdObservation) []mdObservation {
+			o[2].degraded, o[3].degraded = "False", "False"
+			return o
+		},
 		"NoOverlapSlot only after the successor is ready": func(o []mdObservation) []mdObservation {
 			return []mdObservation{o[0], {at: ds.Add(90 * time.Second), degraded: "True", degradedReason: v1alpha1.ReasonNoOverlapSlot}}
 		},
@@ -235,23 +239,55 @@ func TestOneSlotProblems(t *testing.T) {
 	sb := func(s int, name string) fakeslurm.Call {
 		return fakeslurm.Call{Words: []string{"sbatch", "--parsable", "--job-name=" + name, "--no-requeue", "--hold", "--partition=one"}, Time: at(s)}
 	}
-	calls := []fakeslurm.Call{sb(0, "hb-a"), sb(400, "hb-b")}
-	jobs := []fakeslurm.Job{
-		{ID: 1, Name: "hb-a", Partition: "one", Submit: at(0), End: at(380)},
-		{ID: 2, Name: "hb-b", Partition: "one", Submit: at(400)},
+	fixture := func() ([]fakeslurm.Call, []fakeslurm.Job, []submitAttempt) {
+		return []fakeslurm.Call{sb(0, "hb-a"), sb(400, "hb-b")},
+			[]fakeslurm.Job{
+				{ID: 1, Name: "hb-a", Partition: "one", Submit: at(0), End: at(380), Finished: true},
+				{ID: 2, Name: "hb-b", Partition: "one", Submit: at(400)},
+			},
+			[]submitAttempt{
+				{at: at(0), name: "hb-a", partition: "one", jobID: 1},
+				{at: at(400), name: "hb-b", partition: "one", jobID: 2},
+			}
 	}
-	if p := oneSlotProblems(calls, jobs, "one", 2, at(390)); len(p) != 0 {
+	calls, jobs, atts := fixture()
+	if p := oneSlotProblems(calls, jobs, atts, "one", 2, at(390)); len(p) != 0 {
 		t.Fatalf("a correct one-slot history: %v", p)
 	}
-	if p := oneSlotProblems(append(calls, sb(200, "hb-c")), jobs, "one", 2, at(390)); len(p) == 0 {
-		t.Errorf("a refused sbatch while the slot was held: oneSlotProblems found nothing")
-	}
-	early := []fakeslurm.Job{jobs[0], {ID: 2, Name: "hb-b", Partition: "one", Submit: at(300)}}
-	if p := oneSlotProblems(calls, early, "one", 2, at(390)); len(p) == 0 {
-		t.Errorf("a successor submitted while the predecessor ran: oneSlotProblems found nothing")
-	}
-	if p := oneSlotProblems(calls, jobs, "one", 2, at(401)); len(p) == 0 {
-		t.Errorf("a successor submitted while the predecessor still completed: oneSlotProblems found nothing")
+	for name, breakIt := range map[string]func(c *[]fakeslurm.Call, j *[]fakeslurm.Job, a *[]submitAttempt){
+		// Review of PR #247: a refused try retried under the same tag.
+		"a refused sbatch at 200 retried under the same tag hb-b": func(c *[]fakeslurm.Call, _ *[]fakeslurm.Job, _ *[]submitAttempt) {
+			*c = append(*c, sb(200, "hb-b"))
+		},
+		"a refused sbatch under another tag": func(c *[]fakeslurm.Call, _ *[]fakeslurm.Job, _ *[]submitAttempt) {
+			*c = append(*c, sb(200, "hb-c"))
+		},
+		"an attempt that exited 1": func(_ *[]fakeslurm.Call, _ *[]fakeslurm.Job, a *[]submitAttempt) {
+			*a = append(*a, submitAttempt{at: at(200), name: "hb-b", partition: "one", exit: 1})
+		},
+		"an attempt the runner failed": func(_ *[]fakeslurm.Call, _ *[]fakeslurm.Job, a *[]submitAttempt) {
+			*a = append(*a, submitAttempt{at: at(200), name: "hb-b", partition: "one", err: "command timed out"})
+		},
+		// Review of PR #247: the predecessor ended at 380 and completed until
+		// 410; a sample at 390 saw it last, the sbatch at 400 still did.
+		"a successor submitted while the predecessor still completed": func(_ *[]fakeslurm.Call, _ *[]fakeslurm.Job, a *[]submitAttempt) {
+			(*a)[1].holders = []int{1}
+		},
+		"the successor submitted before the predecessor was last seen holding the slot": func(_ *[]fakeslurm.Call, j *[]fakeslurm.Job, _ *[]submitAttempt) {
+			(*j)[1].Submit = at(300)
+		},
+		"a requeued job, whose new execution no sbatch shows": func(_ *[]fakeslurm.Call, j *[]fakeslurm.Job, _ *[]submitAttempt) {
+			(*j)[0].RestartCount = 1
+		},
+		"a job no recorded attempt registered": func(_ *[]fakeslurm.Call, _ *[]fakeslurm.Job, a *[]submitAttempt) {
+			*a = (*a)[:1]
+		},
+	} {
+		c, j, a := fixture()
+		breakIt(&c, &j, &a)
+		if p := oneSlotProblems(c, j, a, "one", 2, at(390)); len(p) == 0 {
+			t.Errorf("%s: oneSlotProblems found nothing", name)
+		}
 	}
 }
 
@@ -406,4 +442,37 @@ func TestRestartReadProblems(t *testing.T) {
 	if p, _, _, _ := restartReadProblems([][]sample{gaugeFixture()[1:]}, "u"); len(p) == 0 {
 		t.Errorf("a read with gauges and no info series: restartReadProblems found nothing")
 	}
+	// A stale read whose unexported gauges say not_reported is correct too.
+	if p, stale, fresh, _ := restartReadProblems([][]sample{gaugeFixture(), withReason(staleFixture("u"), "not_reported", notReported)}, "u"); len(p) != 0 || stale != 0 || fresh != 1 {
+		t.Errorf("fresh, then stale with not_reported on the unexported gauges: %v, %d stale, %d fresh", p, stale, fresh)
+	}
+	// Review of PR #247: the reads of the probe, a fresh read and then the
+	// stale read with another reason.
+	exported := map[string]bool{}
+	for _, g := range engineGauges {
+		exported[g] = !notReported[g]
+	}
+	all := map[string]bool{}
+	for _, g := range engineGauges {
+		all[g] = true
+	}
+	for name, read := range map[string][]sample{
+		"not_reported on the exported gauges": withReason(staleFixture("u"), "not_reported", exported),
+		"agent_unreachable on every gauge":    withReason(staleFixture("u"), "agent_unreachable", all),
+		"no reason on one gauge":              withReason(staleFixture("u"), "", map[string]bool{gRunning: true}),
+	} {
+		if p, _, _, _ := restartReadProblems([][]sample{gaugeFixture(), read}, "u"); len(p) == 0 {
+			t.Errorf("a fresh read, then %s: restartReadProblems found nothing", name)
+		}
+	}
+}
+
+// withReason sets the reason of the unknown samples of the named gauges.
+func withReason(ss []sample, reason string, gauges map[string]bool) []sample {
+	for i := range ss {
+		if ss[i].name == "hpcburst_instance_metrics_unknown" && gauges[ss[i].labels["metric"]] {
+			ss[i].labels["reason"] = reason
+		}
+	}
+	return ss
 }

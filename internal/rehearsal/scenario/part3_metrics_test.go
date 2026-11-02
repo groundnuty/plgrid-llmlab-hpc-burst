@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -402,7 +403,7 @@ func (p3 *part3) gauges(d *depRun, when string) {
 			r.t.Errorf("gauges %s, pending successor %s: %s", when, x.Name, p)
 		}
 		if none {
-			r.t.Logf("FINDING: gauges %s: the pending successor %s, whose agent has not registered, has its info series but no "+
+			r.t.Logf("FINDING (#249): gauges %s: the pending successor %s, whose agent has not registered, has its info series but no "+
 				"hpcburst_instance_metrics_unknown sample for any engine metric (internal/lifecycle/metrics.go:241, \"if !e.hasAgent { continue }\"); "+
 				"HBEP-8, Unknown samples, says an Instance with no report yet, new or after a restart, has every engine metric of worker-0 "+
 				"unknown with reason stale, while its ruling on which Instances have series names only the workers of the latest report", when, x.Name)
@@ -450,11 +451,15 @@ func pendingGaugeProblems(ss []sample, v gaugeView) (problems []string, none boo
 // (f)'s restart and keeps the primary's samples of each read that answered.
 type restartScraper struct {
 	stop, done chan struct{}
+	once       sync.Once
 	reads      [][]sample
 }
 
+// startRestartScraper starts the scraper; the test's clean-up stops it, so a
+// test that fails part-way reads nothing after it.
 func (p3 *part3) startRestartScraper(uid string) *restartScraper {
 	s := &restartScraper{stop: make(chan struct{}), done: make(chan struct{})}
+	p3.t.Cleanup(s.halt)
 	url := p3.ports.url(12, "/metrics")
 	go func() {
 		defer close(s.done)
@@ -478,9 +483,16 @@ func (p3 *part3) startRestartScraper(uid string) *restartScraper {
 	return s
 }
 
+// halt stops the scraper; it is safe to call again.
+func (s *restartScraper) halt() {
+	s.once.Do(func() {
+		close(s.stop)
+		<-s.done
+	})
+}
+
 func (s *restartScraper) end() [][]sample {
-	close(s.stop)
-	<-s.done
+	s.halt()
 	return s.reads
 }
 
@@ -488,7 +500,11 @@ func (s *restartScraper) end() [][]sample {
 // controller restart to HBEP-8: in a read that has the Instance's info series,
 // each engine gauge of worker-0 is either known or absent with exactly one
 // unknown sample, never both and never neither, whatever the controller knows
-// at that read; a gauge the engine does not export is never known. It counts
+// at that read; a gauge the engine does not export is never known. An unknown
+// sample carries stale (no report yet since the restart), or not_reported on
+// a gauge the engine does not export; any other reason is a problem, and
+// agent_unreachable never fits here, since step (f) fails when the agent is
+// judged unreachable (HBEP-8, Unknown samples; Test plan). It counts
 // the reads that showed the gauges stale (no report yet, as after a restart)
 // and fresh, and the reads with no series of the Instance at all (unserved:
 // a controller that does not know the Instance yet), which hold no gauge
@@ -513,6 +529,13 @@ func restartReadProblems(reads [][]sample, uid string) (problems []string, stale
 			switch {
 			case len(unknown) == 1 && len(present) == 0:
 				reason := unknown[0].labels["reason"]
+				if reason != "stale" && (reason != "not_reported" || !notReported[g]) {
+					want := "stale"
+					if notReported[g] {
+						want = "stale or not_reported"
+					}
+					problems = append(problems, fmt.Sprintf("read %d: %s is unknown with reason %q, want %s", i, g, reason, want))
+				}
 				if reason != "not_reported" || !notReported[g] {
 					allKnown = false
 				}

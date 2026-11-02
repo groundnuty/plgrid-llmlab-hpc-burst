@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"fmt"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -108,19 +109,23 @@ func parseRecordTime(s string) time.Time {
 	return t
 }
 
-// checkStream holds a long stream to the issue: it reached the Instance and
-// ended with its finish reason and [DONE], never stream_cut; its record names
-// the Instance, has all its tokens, no cut, and took at least tokens times
+// checkStream holds a long stream to the issue: the client received all its
+// tokens of content, its one finish reason, length, its usage and [DONE],
+// never stream_cut (sseParse, streamProblems); its record names the
+// Instance, has all its tokens, no cut, and took at least tokens times
 // tokenDelay.
 func (r *rig) checkStream(step string, s streamed, in *v1alpha1.Instance, tokens int) usageRow {
 	r.t.Helper()
 	if s.err != nil || s.status != 200 {
 		r.t.Fatalf("step (%s) stream: %d %v: %.300s", step, s.status, s.err, s.body)
 	}
-	if done, finished := sseDone(s.body); !done || !finished || bytes.Contains(s.body, []byte("stream_cut")) {
-		r.t.Errorf("step (%s) stream: [DONE] %v, a finish reason %v, stream_cut %v; its end: %.300s", step, done, finished,
+	got := sseParse(s.body)
+	if p := streamProblems(got, tokens); len(p) > 0 || bytes.Contains(s.body, []byte("stream_cut")) {
+		r.t.Errorf("step (%s) stream as the client received it: %s; stream_cut %v; its end: %.300s", step, strings.Join(p, "; "),
 			bytes.Contains(s.body, []byte("stream_cut")), s.body[max(0, len(s.body)-300):])
 	}
+	r.t.Logf("step (%s) stream: the client received %d tokens of content in %d events, finish %q, usage %d, [DONE] %v",
+		step, got.words, got.chunks, got.finishes, got.usageTokens, got.done)
 	row := r.rowOf(s.id)
 	switch {
 	case row.InstanceUID != string(in.UID):
