@@ -2,8 +2,10 @@ package front
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -90,19 +92,69 @@ func TestClientKeysFile(t *testing.T) {
 	if _, err := ReadClientKeys(link); err == nil {
 		t.Error("a symlinked keys file must be refused")
 	}
+	// The invalid files are in a directory called k1, the first key below, so the path of every
+	// file holds a key's text whatever TMPDIR is: an error names its file, and that must not look
+	// like a key shown (issue #209). The check takes the path out of the error first.
+	secretDir := filepath.Join(dir, "k1")
+	if err := os.Mkdir(secretDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	for name, body := range map[string]string{
 		"dup id":  `{"keys":[{"id":"a","key":"k1"},{"id":"a","key":"k2"}]}`,
 		"dup key": `{"keys":[{"id":"a","key":"k1"},{"id":"b","key":"k1"}]}`,
 		"empty":   `{"keys":[]}`,
 		"no key":  `{"keys":[{"id":"a","key":""}]}`,
 	} {
-		p := filepath.Join(dir, strings.ReplaceAll(name, " ", "-")+".json")
+		p := filepath.Join(secretDir, strings.ReplaceAll(name, " ", "-")+".json")
 		writeMode600(t, p, body)
-		if _, err := ReadClientKeys(p); err == nil {
+		_, err := ReadClientKeys(p)
+		if err == nil {
 			t.Errorf("%s: accepted", name)
-		} else if strings.Contains(err.Error(), "k1") {
-			t.Errorf("%s: the error shows a key: %v", name, err)
+			continue
 		}
+		if shown := secretsShownBy(err, p, "k1", "k2"); len(shown) > 0 {
+			t.Errorf("%s: the error shows the key %q: %v", name, shown, err)
+		}
+	}
+}
+
+// secretsShownBy returns the secrets that err's text shows once the path of the file it names is
+// taken out, as the path is written and as Go quotes it. The path comes from TMPDIR and the
+// test's directory names, which can hold any string, a secret's text included, so it is not
+// evidence that an error shows a key (issue #209).
+func secretsShownBy(err error, path string, secrets ...string) []string {
+	text := strings.ReplaceAll(err.Error(), strconv.Quote(path), "")
+	text = strings.ReplaceAll(text, path, "")
+	var shown []string
+	for _, s := range secrets {
+		if strings.Contains(text, s) {
+			shown = append(shown, s)
+		}
+	}
+	return shown
+}
+
+// The control for the check above: a path with a secret's text in it is not a leak, and a key in
+// the message is, in either form the path can take.
+func TestSecretsShownByIgnoresThePathAndSeesAKey(t *testing.T) {
+	path := "/tmp/k195/k1/dup-key.json"
+	for _, tc := range []struct {
+		name string
+		err  string
+		want []string
+	}{
+		{"the path alone", "client keys file " + path + " holds no key", nil},
+		{"the path quoted", "open " + strconv.Quote(path) + ": no such file", nil},
+		{"a key beside the path", "client keys file " + path + `: entry "a" repeats the key k1`, []string{"k1"}},
+		{"another key beside the path", "client keys file " + path + `: the key is k2`, []string{"k2"}},
+		{"a key and no path", `entry "a" repeats the key k1`, []string{"k1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := secretsShownBy(errors.New(tc.err), path, "k1", "k2")
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Errorf("secretsShownBy(%q) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }
 
