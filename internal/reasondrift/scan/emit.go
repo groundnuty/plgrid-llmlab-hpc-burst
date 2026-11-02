@@ -50,11 +50,9 @@ func (s *scanner) literalArg(cc *ssa.CallCommon, i int) bool {
 }
 
 func literalExpr(e ast.Expr, info *types.Info) bool {
-	e = ast.Unparen(e)
-	if c, ok := e.(*ast.CallExpr); ok && len(c.Args) == 1 && info.Types[c.Fun].IsType() {
-		return literalExpr(c.Args[0], info)
-	}
-	if tv, ok := info.Types[e]; !ok || tv.Value == nil {
+	// A conversion of a constant is a constant expression, so it needs no case
+	// of its own.
+	if tv, ok := info.Types[ast.Unparen(e)]; !ok || tv.Value == nil {
 		return false // not a constant expression
 	}
 	named := false
