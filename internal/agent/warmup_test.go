@@ -132,23 +132,98 @@ func TestWarmUpRoundSendsTheWorkloadShapes(t *testing.T) {
 	}
 }
 
+// warmUpRequests returns the engine's chat request records of the agent's warm-up requests that
+// completed, grouped by shape (prompt tokens and max tokens, the key of slow-first and never-settle). The
+// typical shape's group also holds the concurrent sessions' requests, which have the same key. A request
+// the double did not complete may not have reached the point where it decides its wait.
+func warmUpRequests(t *testing.T, h *harness) map[[2]int][]enginedouble.LogEvent {
+	t.Helper()
+	groups := map[[2]int][]enginedouble.LogEvent{}
+	for _, ev := range engineEvents(t, h) {
+		if ev.Event == "request" && ev.Path == "/v1/chat/completions" && ev.Outcome == "completed" && requestCheck(ev.Tail) == "warmUp" {
+			k := [2]int{ev.PromptTokens, ev.MaxTokens}
+			groups[k] = append(groups[k], ev)
+		}
+	}
+	return groups
+}
+
 // An engine slow on the first request of each shape is slow in round 1 and not
 // in round 2, so a controller finds it settled at round 2; once the controller
 // drops warm-up from the desired state, the agent reports warm-up done.
+//
+// That the engine was slow on the first request of each shape, and on no other, is shown from what the
+// engine double injected (its log, as TestWarmUpNeverSettlingStopsAfterFiveRounds shows its premise),
+// never from the wall-clock latencies the agent measured: a loaded machine skews those by hundreds of
+// milliseconds either way, and a comparison of round 1 with round 2 fails although the double behaved as
+// configured (#234). The double numbers each request in its shape (Nth) and decides its wait before it
+// answers, so the request numbered 0 is the shape's first, which the agent sends in round 1 (a round
+// finishes before the next starts), and every request after it, round 2's among them, is not slowed.
+// What the agent reports is its rounds: round 1 and round 2, each with the shapes HBEP-7 lists, in order,
+// every request successful.
 func TestWarmUpSlowFirstRequestOfEachShape(t *testing.T) {
 	const slow = 400 * time.Millisecond
 	h := newHarness(t, harnessOptions{})
-	h.set(h.runState("slow-first=400ms", 1, 0, warmUpChecks(1, 2)))
+	h.set(h.runState("slow-first="+slow.String(), 1, 0, warmUpChecks(1, 2)))
 	r := h.waitReport("two warm-up rounds", 60*time.Second, warmRounds(2))
-	rounds := r.Instance.Checks.WarmUp.Rounds
-	for _, s := range []agentapi.Shape{agentapi.ShapeShort, agentapi.ShapeTypical, agentapi.ShapeLongest, agentapi.ShapeLongOutput} {
-		r1, r2 := firstOf(t, rounds[0], s), firstOf(t, rounds[1], s)
-		if r1-r2 < slow*3/4 {
-			t.Errorf("%s: round 1 took %s and round 2 %s; the cold first request did not show", s, r1, r2)
+	rounds := r.Instance.Checks.WarmUp.Rounds[:2]
+	const wantShapes = "short typical longest longOutput concurrent concurrent"
+	reported := 0
+	for i, round := range rounds {
+		if round.Round != int32(i+1) {
+			t.Errorf("report round %d is numbered %d", i+1, round.Round)
+		}
+		var shapes []string
+		for _, q := range round.Requests {
+			shapes = append(shapes, string(q.Shape))
+			if q.Error != "" {
+				t.Errorf("round %d: the %s request failed: %s", round.Round, q.Shape, q.Error)
+			}
+		}
+		if got := strings.Join(shapes, " "); got != wantShapes {
+			t.Errorf("round %d: shapes %q, want %q", round.Round, got, wantShapes)
+		}
+		reported += len(round.Requests)
+	}
+
+	// The engine's record of what it did. Its last records are written as the agent receives the answers,
+	// so the record of every request the two reported rounds made is waited for. Later rounds may have
+	// started, and add requests, which are not slowed either.
+	var groups map[[2]int][]enginedouble.LogEvent
+	eventually(t, 30*time.Second, "the engine's record of the requests of both reported rounds", func() bool {
+		groups = warmUpRequests(t, h)
+		n := 0
+		for _, g := range groups {
+			n += len(g)
+		}
+		return n >= reported
+	})
+	// Four shapes of fixed length: short, typical (with the concurrent sessions'), longest and long output.
+	if len(groups) != 4 {
+		t.Fatalf("the engine saw warm-up requests of %d shapes, want 4: %v", len(groups), groups)
+	}
+	for k, g := range groups {
+		firsts := 0
+		for _, ev := range g {
+			want := time.Duration(0)
+			if ev.Nth == 0 {
+				firsts++
+				want = slow
+			}
+			if got := time.Duration(ev.InjectedNS); got != want {
+				t.Errorf("shape of %d prompt tokens and %d max tokens: request number %d was made to wait %v, want %v", k[0], k[1], ev.Nth, got, want)
+			}
+		}
+		if firsts != 1 {
+			t.Errorf("shape of %d prompt tokens and %d max tokens: %d requests numbered 0, want exactly the shape's first", k[0], k[1], firsts)
+		}
+		if len(g) < 2 {
+			t.Errorf("shape of %d prompt tokens and %d max tokens: %d request(s) in the log, want those of two rounds", k[0], k[1], len(g))
 		}
 	}
+
 	// The controller has judged: warm-up is dropped.
-	h.set(h.runState("slow-first=400ms", 1, 0, &agentapi.Checks{VerificationGeneration: 1}))
+	h.set(h.runState("slow-first="+slow.String(), 1, 0, &agentapi.Checks{VerificationGeneration: 1}))
 	h.waitReport("warm-up done", 20*time.Second, warmDone)
 }
 
