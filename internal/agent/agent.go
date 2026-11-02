@@ -26,8 +26,12 @@ const (
 	// DefaultStartupProbeInterval is how often a starting worker is probed
 	// until its engine answers.
 	DefaultStartupProbeInterval = 2 * time.Second
-	// finalReportTimeout bounds the tries of the last report after a stop.
+	// finalReportTimeout bounds the tries of the last report after a stop, and
+	// the wait before them for a periodic send in flight (finalWaitBound).
 	finalReportTimeout = 30 * time.Second
+	// jobEndReportBudget is what the agent, ended with its job, has for that
+	// wait and the last report together.
+	jobEndReportBudget = 5 * time.Second
 	// DefaultBuildReportTimeout applies when Options.BuildReportTimeout is 0.
 	DefaultBuildReportTimeout = 30 * time.Second
 )
@@ -231,9 +235,11 @@ func (a *Agent) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			cancelLoop()
 			a.shutdown()
-			cancelRep()
-			<-a.rep.done
-			sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			// The job has little time left: the wait for a periodic send in
+			// flight and the last report share the 5 s this path always had.
+			deadline := time.Now().Add(jobEndReportBudget)
+			a.endPeriodicReports(min(finalWaitBound(), jobEndReportBudget/2), cancelRep)
+			sctx, cancel := context.WithDeadline(context.Background(), deadline)
 			if err := a.rep.send(sctx, a.snapshot()); err != nil {
 				a.log.Warn("last report not sent", "err", err)
 			}
@@ -253,8 +259,7 @@ func (a *Agent) Run(ctx context.Context) error {
 		if a.stopping && (a.inst == nil || !a.inst.anyLive()) {
 			a.log.Info("stopped on instruction; sending the last report")
 			cancelLoop()
-			cancelRep()
-			<-a.rep.done
+			a.endPeriodicReports(finalWaitBound(), cancelRep)
 			err := a.rep.final(a.snapshot(), finalReportTimeout)
 			a.wg.Wait()
 			if err != nil {
@@ -263,6 +268,19 @@ func (a *Agent) Run(ctx context.Context) error {
 			return nil
 		}
 	}
+}
+
+// endPeriodicReports ends the periodic reports before the last one: it lets a
+// send in flight finish, for up to wait (reporter.quiesce). With the send still
+// open at the bound it says so and cancels it, which ends the call here only:
+// the last report goes anyway, and that send can still reach the endpoint
+// after it (the known limit; issue #221 tracks the full fix).
+func (a *Agent) endPeriodicReports(wait time.Duration, cancelRep context.CancelFunc) {
+	if a.rep.quiesce(wait) {
+		return
+	}
+	a.log.Warn(logOpenSendAtLast, "wait", wait)
+	cancelRep()
 }
 
 // post queues work for the loop goroutine. It never blocks the caller past
@@ -404,11 +422,15 @@ type backoff struct{ min, max, cur time.Duration }
 
 func newBackoff(minD, maxD time.Duration) *backoff { return &backoff{min: minD, max: maxD, cur: minD} }
 
-func (b *backoff) wait(ctx context.Context) {
+func (b *backoff) wait(ctx context.Context) { b.waitOrStop(ctx, nil) }
+
+// waitOrStop is wait that also ends when stop is closed (a nil stop never is).
+func (b *backoff) waitOrStop(ctx context.Context, stop <-chan struct{}) {
 	t := time.NewTimer(b.cur)
 	defer t.Stop()
 	select {
 	case <-ctx.Done():
+	case <-stop:
 	case <-t.C:
 	}
 	b.cur = min(2*b.cur, b.max)
@@ -427,6 +449,12 @@ func (b *backoff) reset() { b.cur = b.min }
 // sent, and carries everything the older one did that still holds, so a sent
 // number at or above an offer's means that offer's state reached the endpoint
 // (waitSent).
+//
+// At the end of the agent's work the periodic reports stop (quiesce) and the
+// last one goes (final). A periodic send in flight is let finish, never
+// cancelled: cancelling it ends the call on the agent's side only, and a
+// request that has left can still reach the endpoint after the last report,
+// which would leave the endpoint holding an older state (issue #220).
 type reporter struct {
 	a         *Agent
 	mu        sync.Mutex
@@ -437,10 +465,17 @@ type reporter struct {
 	sentCh    chan struct{} // closed, and replaced, when sent rises
 	kick      chan struct{}
 	done      chan struct{} // closed when run returns
+	// stopped is set by quiesce, and stop is closed with it; inflight says
+	// run has taken a report and its send has not returned. Both are guarded
+	// by mu, so that a report is taken either before the stop, and then seen
+	// as in flight, or not at all.
+	stopped  bool
+	stop     chan struct{}
+	inflight bool
 }
 
 func newReporter(a *Agent) *reporter {
-	return &reporter{a: a, kick: make(chan struct{}, 1), done: make(chan struct{}), sentCh: make(chan struct{})}
+	return &reporter{a: a, kick: make(chan struct{}, 1), done: make(chan struct{}), sentCh: make(chan struct{}), stop: make(chan struct{})}
 }
 
 // offer queues rep, superseding any snapshot not yet sent, and returns its
@@ -458,11 +493,17 @@ func (r *reporter) offer(rep agentapi.Report) uint64 {
 	return n
 }
 
+// take hands run the next report to send, or nil: none is queued, or the
+// periodic reports have stopped.
 func (r *reporter) take() (*agentapi.Report, uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.stopped {
+		return nil, 0
+	}
 	n, seq := r.next, r.queuedSeq
 	r.next = nil
+	r.inflight = n != nil
 	return n, seq
 }
 
@@ -470,6 +511,7 @@ func (r *reporter) take() (*agentapi.Report, uint64) {
 func (r *reporter) markSent(seq uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.inflight = false
 	if seq > r.sent {
 		r.sent = seq
 		close(r.sentCh)
@@ -506,6 +548,8 @@ func (r *reporter) run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-r.stop:
+			return
 		case <-r.kick:
 		}
 		for {
@@ -514,16 +558,24 @@ func (r *reporter) run(ctx context.Context) {
 				break
 			}
 			if err := r.send(ctx, *rep); err != nil {
+				r.mu.Lock()
+				r.inflight = false
 				if ctx.Err() != nil {
+					r.mu.Unlock()
 					return
 				}
-				r.a.log.Warn("report failed; retrying", "code", codeOf(err), "err", err)
-				r.mu.Lock()
+				if r.stopped {
+					// The last report supersedes it: no retry.
+					r.mu.Unlock()
+					r.a.log.Warn("report failed during the stop; not retried, the last report supersedes it", "code", codeOf(err), "err", err)
+					return
+				}
 				if r.next == nil { // keep the failed one unless a newer came
 					r.next, r.queuedSeq = rep, seq
 				}
 				r.mu.Unlock()
-				b.wait(ctx)
+				r.a.log.Warn("report failed; retrying", "code", codeOf(err), "err", err)
+				b.waitOrStop(ctx, r.stop)
 				continue
 			}
 			r.markSent(seq)
@@ -548,13 +600,39 @@ func (r *reporter) send(ctx context.Context, rep agentapi.Report) error {
 	return err
 }
 
+// quiesce stops the periodic reports and waits up to wait for the send in
+// flight, if any, to finish; it says whether run has returned. No periodic
+// send starts after it, a queued report is dropped, and one that fails now is
+// not retried: the last report supersedes them. The send in flight is not
+// cancelled (see reporter).
+func (r *reporter) quiesce(wait time.Duration) bool {
+	r.mu.Lock()
+	if !r.stopped {
+		r.stopped = true
+		close(r.stop)
+	}
+	inflight := r.inflight
+	r.mu.Unlock()
+	if inflight {
+		r.a.log.Info(logWaitingForSend, "wait", wait)
+	}
+	t := time.NewTimer(wait)
+	defer t.Stop()
+	select {
+	case <-r.done:
+		return true
+	case <-t.C:
+		return false
+	}
+}
+
 // final sends the last report, retrying until it is sent or the timeout
-// passes. Any report still queued is superseded by it. run must have
-// returned, so no older report can land after it.
+// passes. quiesce must have been called, and have returned true or reached its
+// bound: no periodic report is sent after it, and the one in flight at the
+// bound is the known limit (issue #221).
 func (r *reporter) final(rep agentapi.Report, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	r.take()
 	b := newBackoff(r.a.o.MinBackoff, r.a.o.MaxBackoff)
 	for {
 		err := r.send(ctx, rep)
