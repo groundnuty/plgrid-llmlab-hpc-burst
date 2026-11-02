@@ -89,6 +89,43 @@ func (r *liveRun) tokensFor(d time.Duration, rate float64) (int, error) {
 	return n, nil
 }
 
+// whyGone logs what the API recorded of an Instance that went away: its last
+// version's conditions, the events about it and about the deployment, and the
+// times that decide a drain, each from the kill.
+func (r *liveRun) whyGone(in v1alpha1.Instance, killed time.Time) {
+	t := r.t
+	obs := r.watch.Of(in.UID)
+	last := obs[len(obs)-1]
+	x := last.Instance
+	t.Logf("gone: last seen %s at kill%+s, end reason %q, restarts %d, endTime %v", last.Phase, last.At.Sub(killed).Round(time.Second), last.EndReason, last.Restarts, x.Status.EndTime)
+	for _, c := range x.Status.Conditions {
+		t.Logf("gone: condition %s=%s (%s): %.300s", c.Type, c.Status, c.Reason, c.Message)
+	}
+	for _, name := range []string{in.Name, r.w.md.Name} {
+		for _, e := range stack.EventsFor(t, r.c, name) {
+			t.Logf("gone: event on %s at kill%+s: %s: %.300s", name, e.EventTime.Sub(killed).Round(time.Second), e.Reason, e.Message)
+		}
+	}
+	for _, d := range r.watch.Deployments() {
+		if d.Spec.EndTime != nil {
+			t.Logf("gone: the deployment's endTime is kill%+s", d.Spec.EndTime.Sub(killed).Round(time.Second))
+			break
+		}
+	}
+	if x.Status.LeaseEnd != nil {
+		ds, _ := v1alpha1.DrainStart(x.Status.LeaseEnd.Time, r.w.profile, &v1alpha1.Routing{MaxRequestDuration: dur(r.tm.MaxRequestDuration)})
+		t.Logf("gone: its lease end is kill%+s, its drain start kill%+s", x.Status.LeaseEnd.Sub(killed).Round(time.Second), ds.Sub(killed).Round(time.Second))
+	}
+}
+
+// lookup reads an Instance again from the API; false when it is gone.
+func (r *liveRun) lookup(in v1alpha1.Instance) (v1alpha1.Instance, bool) {
+	var x v1alpha1.Instance
+	ctx, cancel := stack.CallCtx(r.t)
+	defer cancel()
+	return x, r.c.Get(ctx, client.ObjectKeyFromObject(&in), &x) == nil
+}
+
 // current reads an Instance again from the API.
 func (r *liveRun) current(in v1alpha1.Instance) v1alpha1.Instance {
 	var x v1alpha1.Instance
@@ -153,6 +190,12 @@ func (r *liveRun) workerRestart(ctx context.Context, p Plan, in v1alpha1.Instanc
 		t.Fatalf("worker fault: %v", err)
 	}
 	r.ourJob(ctx, in) // again, right before the kill
+	for _, x := range r.instances() {
+		if x.Annotations[v1alpha1.AnnotationPredecessor] == in.Name {
+			reg, known := stack.Registered(r.h.Ports, &x)
+			p.Logf("%s: at the kill, the replacement %s is %s, registered %v (known %v)", p.Row.Name, x.Name, x.Status.Phase, reg, known)
+		}
+	}
 	res, err = r.tr.Run(ctx, slurm.Command{Line: line, Stdin: []byte(KillScript(eng)), Timeout: srunTimeout})
 	if err != nil || res.ExitCode != 0 || !Killed(res.Stdout, eng) {
 		t.Fatalf("worker fault: the srun step that kills the engine did not (exit %d, transport error %v, said %q)", res.ExitCode, err != nil, res.Stdout)
@@ -160,7 +203,11 @@ func (r *liveRun) workerRestart(ctx context.Context, p Plan, in v1alpha1.Instanc
 	times := RestartTimes{Killed: time.Now()}
 	p.Logf("%s: killed the engine of the run's job by its PID (command digest %s)", p.Row.Name, CommandDigest(eng.Argv))
 	stack.WaitFor(t, r.tm.StartTimeout+5*time.Minute, "the worker restart and the Instance serving the key again", func() bool {
-		now := r.current(in)
+		now, ok := r.lookup(in)
+		if !ok {
+			r.whyGone(in, times.Killed)
+			t.Fatalf("worker fault: Instance %s is gone", in.Name)
+		}
 		if len(now.Status.Restarts) <= before || now.Status.Phase != v1alpha1.InstanceReady {
 			return false
 		}

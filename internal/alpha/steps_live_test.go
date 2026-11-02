@@ -369,13 +369,30 @@ func (r *liveRun) endAt(t time.Time) (time.Time, error) {
 // health.startTimeout and a minute, less the class's start-to-ready time and
 // any queue wait, after the successor's start (replacementTime), long after
 // this runs.
-func (r *liveRun) lastJob(succ v1alpha1.Instance) error {
+func (r *liveRun) lastJob(pred, succ v1alpha1.Instance) error {
 	maxReq := v1alpha1.Duration(r.tm.MaxRequestDuration.String())
-	dw, err := v1alpha1.InstanceDrainWindow(r.w.profile, &v1alpha1.Routing{MaxRequestDuration: &maxReq})
+	routing := &v1alpha1.Routing{MaxRequestDuration: &maxReq}
+	dw, err := v1alpha1.InstanceDrainWindow(r.w.profile, routing)
 	if err != nil {
 		return fmt.Errorf("the successor's drain window: %w", err)
 	}
-	_, err = r.endAt(succ.Status.LeaseEnd.Add(-dw))
+	if pred.Status.LeaseEnd == nil {
+		return errors.New("the predecessor has no lease end, so the deployment's end cannot be placed after its drain start")
+	}
+	dsPred, err := v1alpha1.DrainStart(pred.Status.LeaseEnd.Time, r.w.profile, routing)
+	if err != nil {
+		return err
+	}
+	at := succ.Status.LeaseEnd.Add(-dw)
+	if !at.Truncate(time.Second).After(dsPred) {
+		// An end at or before the predecessor's drain start would stop its handover.
+		return fmt.Errorf("the successor's drain start %s is not after the predecessor's %s: the deployment keeps no end", at.UTC().Format(time.RFC3339), dsPred.UTC().Format(time.RFC3339))
+	}
+	end, err := r.endAt(at)
+	if err == nil {
+		r.t.Logf("the successor's lease ends in %s; the deployment now ends in %s, at its drain start, %s after the predecessor's",
+			time.Until(succ.Status.LeaseEnd.Time).Round(time.Second), time.Until(end).Round(time.Second), end.Sub(dsPred))
+	}
 	return err
 }
 
@@ -392,9 +409,15 @@ func (r *liveRun) guardSuccessor(pred string) (stop func() error) {
 			err := r.c.List(ctx, &l, client.InNamespace(r.w.md.Namespace))
 			cancel()
 			if err == nil {
+				var p *v1alpha1.Instance
+				for i := range l.Items {
+					if l.Items[i].Name == pred {
+						p = &l.Items[i]
+					}
+				}
 				for _, x := range l.Items {
-					if x.Annotations[v1alpha1.AnnotationPredecessor] == pred && x.Status.LeaseEnd != nil {
-						done <- r.lastJob(x)
+					if p != nil && x.Annotations[v1alpha1.AnnotationPredecessor] == pred && x.Status.LeaseEnd != nil {
+						done <- r.lastJob(*p, x)
 						return
 					}
 				}
