@@ -197,14 +197,21 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 // lowest job ID. Only a recorded job's hold is ever lifted, so a live job that
 // is not held, or one that ran, proves a lost record. jobs are sorted by job
 // ID. Ported from spike S4's choose.
+//
+// A completing job is one that ran (HBEP-4, Phases, A completing job; #198's
+// final rule: "Adoption ranks a completing job as 'a job that ran'"), whatever
+// its base state: a requeued one is PENDING with the flag, has no end time, and
+// would otherwise rank as live and unheld, so a lower ID would beat a job that
+// is running. It is therefore never in the first class, and is in the second
+// even when it has no start time to show.
 func choose(jobs []provider.Job) provider.Job {
 	for _, j := range jobs {
-		if j.EndTime == nil && !j.Held() {
+		if j.EndTime == nil && !j.Held() && !j.Completing {
 			return j
 		}
 	}
 	for _, j := range jobs {
-		if j.StartTime != nil {
+		if j.StartTime != nil || j.Completing {
 			return j
 		}
 	}
