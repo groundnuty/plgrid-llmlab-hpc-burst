@@ -169,6 +169,9 @@ func (a *Agent) converge() {
 		a.idle()
 	case agentapi.ActionStop:
 		a.stopping = true
+		// The stop has begun: no periodic report starts from here, even while
+		// the workers use their stop grace (issue #220).
+		a.rep.closePeriodic()
 		a.idle()
 	}
 	a.serveTunnel(serve)
