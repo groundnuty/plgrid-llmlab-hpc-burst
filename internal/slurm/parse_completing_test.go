@@ -4,11 +4,13 @@ package slurm
 // science-agent ruling for #198, 1 Nov 2026): the queue listing's job_state is
 // a list, the base state then flags, and every entry is read. The phase
 // follows the base state; the flag sets Job.Completing, with the listing's
-// end_time as CompletingSince; accounting never sets it. Expected values are
+// end_time as CompletingSince for a base state that has ended; accounting never
+// sets it. Expected values are
 // written out by hand: 1793351853 is 2026-10-30T09:17:33Z (worked out with
 // date -u -d @1793351853, never with this package).
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -16,6 +18,11 @@ import (
 
 func TestQueueCompletingFlag(t *testing.T) {
 	end := at(2026, 10, 30, 9, 17, 33)
+	// since says whether CompletingSince is the listing's end_time: only for a
+	// base state that has ended. A RUNNING job's end_time is its projected end
+	// and a requeued PENDING job's a projected start plus the time limit, both
+	// in the future (job_mgr.c pack_job, Slurm 24.11.5, lines 10328-10347), so
+	// neither says since when and "since" must not lie in the future.
 	cases := []struct {
 		name       string
 		state      []string
@@ -23,18 +30,19 @@ func TestQueueCompletingFlag(t *testing.T) {
 		phase      v1alpha1.AllocationPhase
 		requeued   bool
 		completing bool
+		since      bool
 	}{
-		{"CANCELLED with the flag", []string{"CANCELLED", "COMPLETING"}, 0, v1alpha1.AllocationEnded, false, true},
-		{"FAILED with the flag", []string{"FAILED", "COMPLETING"}, 0, v1alpha1.AllocationFailed, false, true},
-		{"TIMEOUT with the flag", []string{"TIMEOUT", "COMPLETING"}, 0, v1alpha1.AllocationEnded, false, true},
-		{"COMPLETED with the flag", []string{"COMPLETED", "COMPLETING"}, 0, v1alpha1.AllocationEnded, false, true},
-		{"NODE_FAIL with the flag", []string{"NODE_FAIL", "COMPLETING"}, 0, v1alpha1.AllocationFailed, false, true},
-		{"flag in lower case", []string{"cancelled", "completing"}, 0, v1alpha1.AllocationEnded, false, true},
-		{"flag after another flag", []string{"CANCELLED", "REQUEUE_HOLD", "COMPLETING"}, 0, v1alpha1.AllocationEnded, false, true},
-		{"RUNNING with the flag, whatever the base state", []string{"RUNNING", "COMPLETING"}, 0, v1alpha1.AllocationRunning, false, true},
-		{"PENDING with the flag after a requeue stays Failed", []string{"PENDING", "COMPLETING"}, 1, v1alpha1.AllocationFailed, true, true},
-		{"CANCELLED without the flag", []string{"CANCELLED"}, 0, v1alpha1.AllocationEnded, false, false},
-		{"another flag is not the flag", []string{"CANCELLED", "REQUEUE_HOLD"}, 0, v1alpha1.AllocationEnded, false, false},
+		{"CANCELLED with the flag", []string{"CANCELLED", "COMPLETING"}, 0, v1alpha1.AllocationEnded, false, true, true},
+		{"FAILED with the flag", []string{"FAILED", "COMPLETING"}, 0, v1alpha1.AllocationFailed, false, true, true},
+		{"TIMEOUT with the flag", []string{"TIMEOUT", "COMPLETING"}, 0, v1alpha1.AllocationEnded, false, true, true},
+		{"COMPLETED with the flag", []string{"COMPLETED", "COMPLETING"}, 0, v1alpha1.AllocationEnded, false, true, true},
+		{"NODE_FAIL with the flag", []string{"NODE_FAIL", "COMPLETING"}, 0, v1alpha1.AllocationFailed, false, true, true},
+		{"flag in lower case", []string{"cancelled", "completing"}, 0, v1alpha1.AllocationEnded, false, true, true},
+		{"flag after another flag", []string{"CANCELLED", "REQUEUE_HOLD", "COMPLETING"}, 0, v1alpha1.AllocationEnded, false, true, true},
+		{"RUNNING with the flag, whatever the base state, has no since: its end_time is the projected end", []string{"RUNNING", "COMPLETING"}, 0, v1alpha1.AllocationRunning, false, true, false},
+		{"PENDING with the flag after a requeue stays Failed and has no since: its end_time is a projection", []string{"PENDING", "COMPLETING"}, 1, v1alpha1.AllocationFailed, true, true, false},
+		{"CANCELLED without the flag", []string{"CANCELLED"}, 0, v1alpha1.AllocationEnded, false, false, false},
+		{"another flag is not the flag", []string{"CANCELLED", "REQUEUE_HOLD"}, 0, v1alpha1.AllocationEnded, false, false, false},
 	}
 	for _, v := range dialects {
 		for _, c := range cases {
@@ -48,13 +56,36 @@ func TestQueueCompletingFlag(t *testing.T) {
 				if j.Phase != c.phase || j.Requeued != c.requeued || j.Completing != c.completing {
 					t.Errorf("phase %s, Requeued %v, Completing %v; want %s, %v, %v", j.Phase, j.Requeued, j.Completing, c.phase, c.requeued, c.completing)
 				}
-				if c.completing && !sameTime(j.CompletingSince, &end) {
+				if c.since && !sameTime(j.CompletingSince, &end) {
 					t.Errorf("CompletingSince %s, want %s", timeText(j.CompletingSince), timeText(&end))
 				}
-				if !c.completing && j.CompletingSince != nil {
-					t.Errorf("CompletingSince %s with no flag, want nil", timeText(j.CompletingSince))
+				if !c.since && j.CompletingSince != nil {
+					t.Errorf("CompletingSince %s, want nil", timeText(j.CompletingSince))
 				}
 			})
+		}
+	}
+}
+
+// A state list with the flag FIRST is not a list Slurm emits (the data_parser
+// gives the base state, then the flags), and the plugin does not guess: the
+// first entry is the base state, COMPLETING is not one, so the job's read fails
+// with an unknown base state. A failed read keeps the last evidence, so the
+// failure is closed: the flag is neither lost nor invented from it. Pinned so a
+// change to the parse is a decision (Opus nit on PR 217).
+func TestQueueFlagFirstFailsClosed(t *testing.T) {
+	for _, v := range dialects {
+		doc := onlyJob(t, readTestdata(t, v, "squeue-running.json"), 4242, func(j map[string]any) {
+			j["job_state"] = toAny("COMPLETING", "CANCELLED")
+			j["end_time"] = triple(true, 1793351853)
+		})
+		recs, _, err := parseQueue(doc, v)
+		if err != nil {
+			t.Fatalf("%s: parseQueue: %v", v, err)
+		}
+		_, err = recs[0].job(v)
+		if err == nil || !strings.Contains(err.Error(), `unknown Slurm base state "COMPLETING"`) {
+			t.Errorf("%s: job read with the flag first: %v, want an error naming the unknown base state COMPLETING", v, err)
 		}
 	}
 }

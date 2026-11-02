@@ -187,7 +187,8 @@ func TestCompletingJobGivesItsPhaseAtOnceWithJobCompleting(t *testing.T) {
 // with a restart count of 1 (HBEP-4, Phases: the requeued job is PENDING with
 // the flag while its nodes clean up), stays Failed with reason Requeued by the
 // requeue rule, with the flag recorded: completing is the flag, whatever the
-// base state. The listing gives no end_time for it, so the condition says so.
+// base state. The listing gives no end time for it that says when it ended
+// (a PENDING job's is a projection), so the condition says so.
 func TestRequeuedCompletingJobStaysFailedAndIsCompleting(t *testing.T) {
 	for _, shape := range bothShapes {
 		t.Run(shape.name, func(t *testing.T) {
@@ -205,7 +206,7 @@ func TestRequeuedCompletingJobStaysFailedAndIsCompleting(t *testing.T) {
 				t.Errorf("phase %s reason %q requeued %v jobCompleting %v restarts %d; want Failed, Requeued, true, true, 1", o.Phase, o.Reason, o.Requeued, o.JobCompleting, o.RestartCount)
 			}
 			c := a.GetCondition(v1alpha1.ConditionJobCompleting)
-			if want := "job 1001 is completing in state PENDING; the listing gives no end_time"; c.Status != corev1.ConditionTrue || c.Message != want {
+			if want := "job 1001 is completing in state PENDING; the listing gives no time for when it ended"; c.Status != corev1.ConditionTrue || c.Message != want {
 				t.Errorf("condition JobCompleting %s %q, want True %q", c.Status, c.Message, want)
 			}
 		})

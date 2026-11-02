@@ -239,7 +239,7 @@ func TestQOSEffectiveZeroLimits(t *testing.T) {
 		wantText   string
 	}{
 		{"maxGpusPerUser 0", v1alpha1.QOSProfile{Name: "example-now", MaxGPUsPerUser: i32(0)}, v1alpha1.ReasonSpecUnsupported, "maxGpusPerUser 0 of QOS example-now on Provider " + rigProvider},
-		{"maxSubmitPerUser 0", v1alpha1.QOSProfile{Name: "example-now", MaxSubmitPerUser: i32(0)}, v1alpha1.ReasonSubmitLimitReached, "Provider " + rigProvider + " has 0 Allocations not ended, at its maxSubmitPerUser 0 of QOS example-now"},
+		{"maxSubmitPerUser 0", v1alpha1.QOSProfile{Name: "example-now", MaxSubmitPerUser: i32(0)}, v1alpha1.ReasonSubmitLimitReached, "Provider " + rigProvider + " has 0 Allocations still holding a slot, at its maxSubmitPerUser 0 of QOS example-now"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rg := newRig(t, qosOpts([]v1alpha1.QOSProfile{tc.qos}, "", "example-now")...)

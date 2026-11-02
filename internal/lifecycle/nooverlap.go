@@ -25,7 +25,8 @@ import (
 //     ends.
 //   - One-slot path: no slot is free. The successor is not submitted early;
 //     step 7 creates it once the predecessor's job has left the slot (phase
-//     Ended, or deletion complete), which the slot reservation decides.
+//     Ended with its job no longer completing, jobCompleting false, or
+//     deletion complete), which the slot reservation decides.
 //   - One rule for NoOverlapSlot: it shows from the primary's drain start,
 //     in the mode, until a successor is ready, and at no other time. The
 //     deployment has Degraded NoOverlapSlot, naming the Provider and the
@@ -183,7 +184,7 @@ func (p *pass) slotFor(pv *providerView, skip []string) (bool, string, error) {
 	if n+1 <= int(*lim) {
 		return true, "", nil
 	}
-	return false, fmt.Sprintf("Provider %s has no free submit slot for a replacement: %d Allocations not ended, at its %s", pv.name, n, submitLimitText(pv)), nil
+	return false, fmt.Sprintf("Provider %s has no free submit slot for a replacement: %d Allocations still holding a slot, at its %s", pv.name, n, submitLimitText(pv)), nil
 }
 
 // capsExceeded returns why the predecessor's Allocation (pred) and its

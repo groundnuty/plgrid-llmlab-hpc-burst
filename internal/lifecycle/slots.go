@@ -24,7 +24,8 @@ import (
 //
 // Before it creates an Allocation, a worker reserves a slot under the
 // Provider's lock, which every worker takes. The count it checks is the listed
-// Allocations of the Provider that have not ended plus this controller's
+// Allocations of the Provider that have not ended, or whose job is still
+// completing, plus this controller's
 // creations that the list does not show yet: Kubernetes' expectations pattern
 // (ExpectCreations raises, CreationObserved lowers, ExpectationsTimeout of
 // 5 min expires; pkg/controller/controller_utils.go at v1.35.0, lines 72,
@@ -256,7 +257,7 @@ func (p *pass) reserveSlot(pv *providerView, name string) (bool, error) {
 	if p.noSlot == nil {
 		p.noSlot = map[string]string{}
 	}
-	p.noSlot[pv.name] = fmt.Sprintf("Provider %s has %d Allocations not ended, at its %s", pv.name, n, submitLimitText(pv))
+	p.noSlot[pv.name] = fmt.Sprintf("Provider %s has %d Allocations still holding a slot, at its %s", pv.name, n, submitLimitText(pv))
 	return false, nil
 }
 

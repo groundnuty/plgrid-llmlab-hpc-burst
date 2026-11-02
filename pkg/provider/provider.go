@@ -264,10 +264,12 @@ type Job struct {
 	// Phases, A completing job). Only the queue listing sets it: a record read
 	// from accounting never does, since accounting never carries the flag.
 	Completing bool
-	// CompletingSince is the listing's end_time for a completing job: when its
-	// end state was set. Nil when the job is not completing or the listing
-	// gives none. EndTime is not it, since a base state that has not ended has
-	// none.
+	// CompletingSince is the listing's end_time for a completing job whose
+	// base state has ended: when its end state was set. Nil when the job is not
+	// completing, when the listing gives none, and for a base state that has not
+	// ended (RUNNING, or the PENDING of a requeue), whose end_time in the
+	// listing is a projection in the future, not a time the flag began. EndTime
+	// is not it, since a base state that has not ended has none.
 	CompletingSince *time.Time
 	// Partition, TimeLimit and GPUs are what the job was established with,
 	// for the read-back.

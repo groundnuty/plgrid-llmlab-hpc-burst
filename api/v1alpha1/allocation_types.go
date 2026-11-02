@@ -432,15 +432,18 @@ type AllocationObservation struct {
 	// delayed; until the flag clears the job is still live for the deletion
 	// finalizer, for the removal of the Allocation's files, for the lifecycle
 	// controller's slot count and for the accounting record, which is written
-	// once, after it has cleared. The flag clears when a successful listing
-	// shows the job without it, or no longer shows the job at all and
-	// accounting gives the final state, which never carries the flag. An
-	// accounting read alone does not clear it: while the listing still shows
-	// the job with COMPLETING, accounting's terminal state does not count
-	// (spike S7 saw sacct say FAILED while squeue still showed COMPLETING). A
-	// failed read keeps the last value. It is written in the same status write
-	// as the phase, and
-	// ConditionJobCompleting says since when. A job stuck in COMPLETING on a bad
+	// once, after it has cleared. The flag clears when a successful queue
+	// listing shows the job without it, or does not list the job at all; in
+	// the second case the job is read from accounting, whose state never
+	// carries the flag. The listing alone decides: an accounting read does
+	// not clear it, since while the listing still shows the job with
+	// COMPLETING, accounting's terminal state does not count (spike S7 saw
+	// sacct say FAILED while squeue still showed COMPLETING). A failed read
+	// keeps the last value. It is written in the same status write as the
+	// phase, and ConditionJobCompleting says since when. On a deleting
+	// Allocation it is also true while another job with the tag completes,
+	// since the finalizer and the slot wait for that job as well, and the
+	// condition's message then names it. A job stuck in COMPLETING on a bad
 	// node holds its Allocation until it clears: a known risk, visible here
 	// (HBEP-4, Phases, A completing job; `@hpc-burst-science-agent`, 1 Nov
 	// 2026, for #198; proposed).

@@ -452,14 +452,24 @@ func (q queueRecord) job(parser string) (provider.Job, error) {
 	if held {
 		j.Hold = provider.HoldOf(true, q.StateReason)
 	}
-	// The COMPLETING flag, in any position of job_state, whatever the base
-	// state (HBEP-4, Phases, A completing job). Only the queue listing carries
-	// it: the accounting reader below never sets it. The listing's end_time is
-	// when the end state was set, kept whatever the base state, since EndTime
-	// stays nil for one that has not ended.
+	// The COMPLETING flag, in any position of job_state after the base state,
+	// whatever the base state (HBEP-4, Phases, A completing job). Only the queue
+	// listing carries it: the accounting reader below never sets it. The
+	// listing's end_time is when the end state was set, but only for a base
+	// state that has ended: for a RUNNING job it is the projected end, and for
+	// a PENDING one (a requeue that still cleans up) a projected start plus the
+	// time limit, both in the future, so "since" is taken from end_time for an
+	// end state alone. slurmctld packs the actual end_time only for a job whose
+	// base state is past PENDING and the projection for the rest (pack_job in
+	// src/slurmctld/job_mgr.c: Slurm 24.11.5, lines 10328-10347, with
+	// IS_JOB_STARTED in src/common/slurm_protocol_defs.h, line 109), and the
+	// RUNNING state's value is the same field. EndTime stays nil for a base state
+	// that has not ended.
 	if q.JobState.has(provider.FlagCompleting) {
 		j.Completing = true
-		j.CompletingSince = q.EndTime.epoch()
+		if isTerminalBase(base) {
+			j.CompletingSince = q.EndTime.epoch()
+		}
 	}
 	if t := q.SubmitTime.epoch(); t != nil {
 		j.SubmitTime = *t

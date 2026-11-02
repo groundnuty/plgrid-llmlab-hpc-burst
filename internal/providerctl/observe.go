@@ -310,7 +310,7 @@ func completingMessage(id string, job provider.Job) string {
 		base = job.State[0]
 	}
 	if job.CompletingSince == nil {
-		return fmt.Sprintf("job %s is completing in state %s; the listing gives no end_time", id, base)
+		return fmt.Sprintf("job %s is completing in state %s; the listing gives no time for when it ended", id, base)
 	}
 	return fmt.Sprintf("job %s is completing in state %s since %s", id, base, job.CompletingSince.UTC().Format(time.RFC3339))
 }
