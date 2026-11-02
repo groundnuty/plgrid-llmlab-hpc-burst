@@ -227,12 +227,13 @@ var accountingRows = []Row{
 // reachRows are the rows of the reach check (issue #225), which runs in
 // internal/providerctl/conformance: one minimal job on a compute node of each alpha
 // platform that tries a TCP connect to the gateway's forwarded port. Lease and Budget
-// are the job's; the Athena row is on the one-job partition plgrid-now (the same A100
+// are the job's (a time limit of two minutes: the probe ends in seconds, and a stalled job
+// must not hold the owner's slot longer); the Athena row is on the one-job partition plgrid-now (the same A100
 // nodes as plgrid-gpu-a100, so the same network path; `@hpc-burst-science-agent`,
 // 2 Nov 2026), whose own QOS applies, so it names none.
 var reachRows = []Row{
-	{Name: "reach-helios", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: 5 * time.Minute, Budget: 20 * time.Minute, SlotHold: 15 * time.Minute, StartWait: 10 * time.Minute, MostJobs: 1, PostsTo: "#225 and #145"},
-	{Name: "reach-athena", Cluster: "athena", Partition: "plgrid-now", GPUs: 1, Lease: 5 * time.Minute, Budget: 20 * time.Minute, SlotHold: 15 * time.Minute, StartWait: 10 * time.Minute, MostJobs: 1, PostsTo: "#225 and #145"},
+	{Name: "reach-helios", Cluster: "helios", Partition: "plgrid-gpu-gh200", QOS: "now", GPUs: 1, Lease: 2 * time.Minute, Budget: 20 * time.Minute, SlotHold: 13 * time.Minute, StartWait: 10 * time.Minute, MostJobs: 1, PostsTo: "#225 and #145"},
+	{Name: "reach-athena", Cluster: "athena", Partition: "plgrid-now", GPUs: 1, Lease: 2 * time.Minute, Budget: 20 * time.Minute, SlotHold: 13 * time.Minute, StartWait: 10 * time.Minute, MostJobs: 1, PostsTo: "#225 and #145"},
 }
 
 // Rows returns a copy of the stack rows: the ones this package runs.

@@ -5,6 +5,7 @@ package ctltest
 // outcome the test asserts is one the probe's own commands saw: a stub that always connected would prove nothing.
 
 import (
+	"bytes"
 	"crypto/tls"
 	"io"
 	"log"
@@ -29,6 +30,12 @@ const (
 	StubData ReachKind = "data"
 	// StubSilent accepts the connection and says nothing, whatever it is sent.
 	StubSilent ReachKind = "silent"
+	// StubBinary sends control and escape bytes, a NUL and bytes above 0x7f, then a few thousand more, as soon as the
+	// connection is made.
+	StubBinary ReachKind = "binary"
+	// StubHostile sends what starts like an SSH banner and goes on with an escape sequence, a line break, shell
+	// metacharacters, HostileMarker and a megabyte with no end of line.
+	StubHostile ReachKind = "hostile"
 	// StubRefused is a port nothing listens on: the connect is refused.
 	StubRefused ReachKind = "refused"
 	// StubTimeout is a listener whose accept queue is full and never drained, so the kernel drops every further SYN
@@ -37,6 +44,9 @@ const (
 	// StubUnresolved is a name under .invalid (RFC 6761), which never resolves.
 	StubUnresolved ReachKind = "unresolved"
 )
+
+// HostileMarker is a word StubHostile and StubBinary send, which no text a test posts or records may hold.
+const HostileMarker = "evil-marker"
 
 // ReachStub is a running stand-in: the host and port a probe is told to connect to.
 type ReachStub struct {
@@ -91,7 +101,7 @@ func StartReachStub(t testing.TB, kind ReachKind, host string, port int) ReachSt
 		return startFullQueue(t, host, port)
 	case StubTLS:
 		return startTLS(t, host, port)
-	case StubSSH, StubData, StubSilent:
+	case StubSSH, StubData, StubSilent, StubBinary, StubHostile:
 		return startPlain(t, kind, host, port)
 	}
 	t.Fatalf("unknown stub kind %q", kind)
@@ -142,6 +152,12 @@ func startPlain(t testing.TB, kind ReachKind, host string, port int) ReachStub {
 					_, _ = io.WriteString(c, "SSH-2.0-ExampleGateway_1.0\r\n")
 				case StubData:
 					_, _ = io.WriteString(c, "220 example gateway ready\r\n")
+				case StubBinary:
+					_, _ = io.WriteString(c, "\x00\xff\x1b[2J\x1b]0;"+HostileMarker+"\x07\x08\x7f")
+					_, _ = c.Write(bytes.Repeat([]byte{0x01, 0x1b, 0xfe, 0x00, 0x0d}, 2048))
+				case StubHostile:
+					_, _ = io.WriteString(c, "SSH-2.0-\x1b[31m"+HostileMarker+"\r\n$(touch /tmp/"+HostileMarker+")`id`;|&\n")
+					_, _ = c.Write(bytes.Repeat([]byte("A"), 1<<20))
 				}
 				_, _ = io.Copy(io.Discard, c) // until the probe closes
 			}()

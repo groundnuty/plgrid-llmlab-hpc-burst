@@ -77,6 +77,10 @@ func TestTheProbeSeesEachOutcomeOnARealSocket(t *testing.T) {
 		{ctltest.StubTLS, "outcome=reachable answer=tls\n", true},
 		{ctltest.StubData, "outcome=reachable answer=data\n", true},
 		{ctltest.StubSilent, "outcome=reachable answer=silent\n", true},
+		// What a hostile gateway sends never leaves the shell: control and escape bytes are "data", and a banner that
+		// starts like SSH's and goes on with escapes, a line break and a megabyte is "ssh", and nothing more.
+		{ctltest.StubBinary, "outcome=reachable answer=data\n", true},
+		{ctltest.StubHostile, "outcome=reachable answer=ssh\n", true},
 		{ctltest.StubRefused, "outcome=refused answer=none\n", false},
 		{ctltest.StubTimeout, "outcome=timeout answer=none\n", false},
 		{ctltest.StubUnresolved, "outcome=unresolved answer=none\n", false},
@@ -139,13 +143,21 @@ func TestTheProbeTellsPlainHTTPAndAClosedConnectionFromTLS(t *testing.T) {
 }
 
 // The outcomes that the network's own text decides cannot be had from a loopback socket, so the connect is given a
-// bash that fails with a text a kernel gives. The probe's other commands, and its interpreter, are the real ones.
-func TestTheProbeClassifiesTheConnectErrorsNoSocketCanMake(t *testing.T) {
+// bash that fails with the text a kernel gives (failingBash: the shell's two lines, the second naming the target).
+// The probe's other commands, and its interpreter, are the real ones. Every reason is tried on a plain address and on
+// hostile names, each spelling another reason: the outcome is the reason's, never the target's (review of PR 235,
+// B4: refused.gateway.example with "No route to host" was read as refused). A getent that finds every name lets the
+// hostile names reach the connect.
+func TestTheProbeClassifiesTheConnectErrorsFromTheReasonAlone(t *testing.T) {
 	fake := t.TempDir()
-	if err := os.WriteFile(filepath.Join(fake, "bash"), []byte("#!/bin/sh\necho \"bash: connect: $FAKE_TEXT\" >&2\necho \"bash: line 1: /dev/tcp/example.invalid/9: $FAKE_TEXT\" >&2\nexit 1\n"), 0o700); err != nil {
-		t.Fatal(err)
+	for name, body := range map[string]string{"bash": failingBash, "getent": "#!/bin/sh\nexit 0\n"} {
+		if err := os.WriteFile(filepath.Join(fake, name), []byte(body), 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
-	for _, tc := range []struct{ text, want string }{
+	hosts := []string{"127.0.0.1", "refused.gateway.example", "connection-refused.example", "name-or-service-not-known.example",
+		"no-route-to-host.example", "network-is-unreachable.example", "unreachable", "temporary-failure-in-name-resolution.example", "permission-denied.example"}
+	for _, tc := range []struct{ reason, want string }{
 		{"No route to host", "outcome=unreachable answer=none\n"},
 		{"Network is unreachable", "outcome=unreachable answer=none\n"},
 		{"Connection refused", "outcome=refused answer=none\n"},
@@ -153,17 +165,18 @@ func TestTheProbeClassifiesTheConnectErrorsNoSocketCanMake(t *testing.T) {
 		{"Temporary failure in name resolution", "outcome=unresolved answer=none\n"},
 		{"Permission denied", "outcome=error answer=none\n"},
 	} {
-		t.Run(tc.text, func(t *testing.T) {
-			t.Setenv("FAKE_TEXT", tc.text)
-			// A literal address resolves, so the failure is the connect's. The real tools stay on the PATH behind the fake.
-			got, printed := runProbe(t, probeTarget{host: "127.0.0.1", port: 9, label: "example-gateway"}, testConnectSeconds, testReadSeconds, fake+":"+os.Getenv("PATH"))
-			if got != tc.want {
-				t.Errorf("the probe left %q, want %q", got, tc.want)
-			}
-			if printed != "" {
-				t.Errorf("the probe printed %q, want nothing", printed)
-			}
-		})
+		for _, host := range hosts {
+			t.Run(tc.reason+"/"+host, func(t *testing.T) {
+				t.Setenv("FAKE_REASON", tc.reason)
+				got, printed := runProbe(t, probeTarget{host: host, port: 9, label: "example-gateway"}, testConnectSeconds, testReadSeconds, fake+":"+os.Getenv("PATH"))
+				if got != tc.want {
+					t.Errorf("the probe left %q for the reason %q on the host %q, want %q", got, tc.reason, host, tc.want)
+				}
+				if printed != "" {
+					t.Errorf("the probe printed %q, want nothing", printed)
+				}
+			})
+		}
 	}
 }
 
@@ -293,6 +306,7 @@ func TestReadProbeTarget(t *testing.T) {
 		m[k] = v
 		return m
 	}
+	// The host and the port are in the label of no good set of settings, whatever the spelling.
 	p, err := readProbeTarget(get(good), "P_")
 	if err != nil || p != (probeTarget{host: "gw-seed.example", port: 40123, label: "example-gateway"}) {
 		t.Fatalf("the good settings: %+v, %v", p, err)
@@ -316,6 +330,17 @@ func TestReadProbeTarget(t *testing.T) {
 		{"a label over 40 characters", with("P_LABEL", strings.Repeat("a", 41)), "P_LABEL must be"},
 		{"a label that holds the host", with("P_LABEL", "the-gw-seed.example-one"), "P_LABEL holds the host"},
 		{"a label that holds the port", with("P_LABEL", "gateway-40123"), "P_LABEL holds the port"},
+		// The same name in other spellings is still the name (review of PR 235, B1).
+		{"a label that is the host in capitals", with("P_LABEL", "GW-SEED.EXAMPLE"), "P_LABEL holds the host"},
+		{"a label that holds the host in capitals among other characters", with("P_LABEL", "via-Gw-Seed.Example-1"), "P_LABEL holds the host"},
+		{"a host with the root dot and a label without it", func() map[string]string {
+			m := with("P_HOST", "gw-seed.example.")
+			m["P_LABEL"] = "gw-seed.example"
+			return m
+		}(), "P_LABEL holds the host"},
+		{"a label that spells the host with other separators", with("P_LABEL", "gw_seed-example"), "P_LABEL holds the host"},
+		{"a label that runs the host together", with("P_LABEL", "gwseedexample"), "P_LABEL holds the host"},
+		{"a label that holds the port between separators", with("P_LABEL", "gateway-401-23"), "P_LABEL holds the port"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := readProbeTarget(get(tc.m), "P_")
@@ -417,4 +442,31 @@ func TestADryRunConnectsOnlyToTheLoopbackOrAnInvalidName(t *testing.T) {
 func sumOf(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
+}
+
+// labelHolds, on its own: what a public label gives away, in any case and with any separators, and what it does not.
+func TestALabelHoldsTheHostAndThePortInAnySpelling(t *testing.T) {
+	for _, tc := range []struct {
+		label, host string
+		port        int
+		want        string
+	}{
+		{"example-gateway", "gw-seed.example", 40123, ""},
+		{"gateway.private.example", "gateway.private.example", 40123, "host"},
+		{"GATEWAY.PRIVATE.EXAMPLE", "gateway.private.example", 40123, "host"},
+		{"gateway.private.example", "GATEWAY.PRIVATE.EXAMPLE.", 40123, "host"},
+		{"gateway.private.example.", "gateway.private.example", 40123, "host"},
+		{"Gateway-Private-Example", "gateway.private.example", 40123, "host"},
+		{"a-gatewayprivateexample-b", "gateway.private.example", 40123, "host"},
+		{"10-1-2-3", "10.1.2.3", 40123, "host"},
+		{"gateway", "gateway.private.example", 40123, ""}, // a part of the host is not the host
+		{"x40123x", "gw.example", 40123, "port"},
+		{"40-123", "gw.example", 40123, "port"},
+		{"4012", "gw.example", 40123, ""},
+		{"example-gateway", "gw.example", 0, ""},
+	} {
+		if got := labelHolds(tc.label, tc.host, tc.port); got != tc.want {
+			t.Errorf("labelHolds(%q, %q, %d) = %q, want %q", tc.label, tc.host, tc.port, got, tc.want)
+		}
+	}
 }

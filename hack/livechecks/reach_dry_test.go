@@ -33,20 +33,47 @@ cd "@REALDIR@" || exit 3
 exec "@REAL@" "$@"
 `
 
-// reachCase is a stand-in and what the row must make of it, written out from the probe's header.
+// reachCase is a stand-in and what the row must make of it, written out from the probe's header. A fault is the node's:
+// a bash that fails its connect as a kernel does, which no loopback socket can make (no-route, connect-error).
 type reachCase struct {
 	kind    ctltest.ReachKind
+	fault   string
 	outcome string
 	passes  bool
 }
 
 var reachCases = []reachCase{
-	{ctltest.StubSSH, "reachable", true},
-	{ctltest.StubTLS, "reachable", true},
-	{ctltest.StubSilent, "reachable", true},
-	{ctltest.StubRefused, "refused", false},
-	{ctltest.StubTimeout, "timeout", false},
-	{ctltest.StubUnresolved, "unresolved", false},
+	{ctltest.StubSSH, "", "reachable", true},
+	{ctltest.StubTLS, "", "reachable", true},
+	{ctltest.StubSilent, "", "reachable", true},
+	// What a hostile gateway sends passes the row and reaches no post.
+	{ctltest.StubBinary, "", "reachable", true},
+	{ctltest.StubHostile, "", "reachable", true},
+	{ctltest.StubRefused, "", "refused", false},
+	{ctltest.StubTimeout, "", "timeout", false},
+	{ctltest.StubUnresolved, "", "unresolved", false},
+	{ctltest.StubSSH, "no-route", "unreachable", false},
+	{ctltest.StubSSH, "connect-error", "error", false},
+}
+
+// postsAreClean fails when the text to post holds anything but plain printable ASCII and line ends, is longer than a few
+// lines can be, or holds a word or a metacharacter that a hostile gateway sent.
+func postsAreClean(t *testing.T, posts string) {
+	t.Helper()
+	if len(posts) > 1024 {
+		t.Errorf("the text to post is %d bytes, more than a few lines of fixed words can be", len(posts))
+	}
+	for i := 0; i < len(posts); i++ {
+		if c := posts[i]; c != '\n' && (c < 0x20 || c > 0x7e) {
+			t.Errorf("the text to post holds the byte %#x at %d", c, i)
+			break
+		}
+	}
+	for _, bad := range []string{ctltest.HostileMarker, "$(", "`", "\x1b"} {
+		if strings.Contains(posts, bad) {
+			t.Errorf("the text to post holds %q", bad)
+		}
+	}
 }
 
 // reachDryWorld is a world whose settings name the stand-in as the gateway, and whose test binary is the dry one.
@@ -98,11 +125,15 @@ func TestEveryReachRowReportsEachOutcomeThroughTheScript(t *testing.T) {
 	realDir := filepath.Join(repoRoot(t), confPkg)
 	for i, s := range reachShapes {
 		for j, c := range reachCases {
-			t.Run(s.row+"/"+string(c.kind), func(t *testing.T) {
+			name := string(c.kind)
+			if c.fault != "" {
+				name = c.outcome + "-from-the-node"
+			}
+			t.Run(s.row+"/"+name, func(t *testing.T) {
 				t.Parallel()
 				stub := ctltest.StartReachStub(t, c.kind, "127.77."+strconv.Itoa(i+1)+"."+strconv.Itoa(j+1), 0)
 				w := reachDryWorld(t, real, realDir, stub, reachSeedLabel)
-				res := w.run(nil, "--run", s.row, "--yes")
+				res := w.run([]string{"STUB_DRY_FAULT=" + c.fault}, "--run", s.row, "--yes")
 				wantCode, verdict := 1, "FAIL"
 				counts := s.row + ": tests: 0 passed, 1 failed, 0 skipped"
 				if c.passes {
@@ -128,11 +159,21 @@ func TestEveryReachRowReportsEachOutcomeThroughTheScript(t *testing.T) {
 						t.Errorf("the text to post lacks %q:\n%s", want, posts)
 					}
 				}
-				// The target is on the screen nowhere, and in no file of the run.
+				postsAreClean(t, posts)
+				// The target is on the screen nowhere, and in no file of the run's record directory.
 				w.noTarget(stub, c.kind, res.out)
 				log, _ := os.ReadFile(filepath.Join(w.out(), s.row+".log"))
 				if !strings.Contains(string(log), "DRY RUN") {
 					t.Errorf("the test's log does not say it was a dry run:\n%s", log)
+				}
+				// The dry binary searched the files of its fake cluster, its agent builds and the scheduler's copies for the
+				// target when it ended (the job's output and error files, the staging; the review of PR 235, B2), found it
+				// in none but the job's script, and says how many it looked at, so that a search of nothing shows.
+				m := regexp.MustCompile(`(\d+) file\(s\) and scheduler record\(s\) of the fake cluster, the agent builds and the records searched for the target; 0 hold it outside the job's script`).FindStringSubmatch(string(log))
+				if m == nil {
+					t.Errorf("the test's log does not say it searched for the target:\n%s", log)
+				} else if n, _ := strconv.Atoi(m[1]); n < 15 {
+					t.Errorf("the dry binary searched %d file(s) and record(s), too few for the search to mean anything", n)
 				}
 			})
 		}

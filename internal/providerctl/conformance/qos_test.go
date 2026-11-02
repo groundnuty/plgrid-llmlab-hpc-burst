@@ -91,6 +91,14 @@ type shapeRow struct {
 	name, host, profile, partition, qos, slot, acctKey, gpus, cpus, memory, timeLimit, timeout, extra, startWait string
 }
 
+// allocLimit is the time limit of the row's Allocation: the harness's, or the reach rows' own, shorter one.
+func (r shapeRow) allocLimit() string {
+	if strings.HasPrefix(r.name, "reach-") {
+		return reachTimeLimit
+	}
+	return allocTimeLimit
+}
+
 func readShapeRows(t *testing.T) []shapeRow {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "hack", "live-checks.sh"))
@@ -171,7 +179,7 @@ func (r shapeRow) validated(t *testing.T) (settings, slurm.Validated) {
 
 func (r shapeRow) request(t *testing.T, s settings) (params v1alpha1.BatchParameters) {
 	t.Helper()
-	return v1alpha1.BatchParameters{Partition: s.partition, TimeLimit: v1alpha1.Duration(allocTimeLimit), GPUs: s.gpus, CPUsPerTask: s.cpus,
+	return v1alpha1.BatchParameters{Partition: s.partition, TimeLimit: v1alpha1.Duration(r.allocLimit()), GPUs: s.gpus, CPUsPerTask: s.cpus,
 		Memory: s.memory, Nodes: 1, AgentDigest: strings.Repeat("a", 64)}
 }
 
@@ -220,12 +228,12 @@ func TestConformanceRowsPassTheRequestCheck(t *testing.T) {
 			if v.Settings.QOS != wantQOS {
 				t.Errorf("the plugin's Settings.QOS = %q, the row says %q: the row's qos does not reach the Provider", v.Settings.QOS, wantQOS)
 			}
-			want, err := v1alpha1.Duration(allocTimeLimit).AsDuration()
+			want, err := v1alpha1.Duration(r.allocLimit()).AsDuration()
 			if err != nil {
 				t.Fatal(err)
 			}
 			if got := clock(t, r.timeLimit); got != want {
-				t.Errorf("the row's time limit is %s (%v), the harness's allocTimeLimit %s is %v", r.timeLimit, got, allocTimeLimit, want)
+				t.Errorf("the row's time limit is %s (%v), the harness's %s is %v", r.timeLimit, got, r.allocLimit(), want)
 			}
 			req := heldRequest(s, "hb-example-0123456789ab", r.request(t, s))
 			if req.QOS != wantQOS {

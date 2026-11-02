@@ -30,15 +30,15 @@ func init() {
 }
 
 // reachShape is what a reach row asks of the scheduler, worked out from the issue (#225: the smallest shape the
-// request check accepts, 5 minutes, a start wait of 10) and the platforms (the partitions and the QOS now of
+// request check accepts, 2 minutes, a start wait of 10) and the platforms (the partitions and the QOS now of
 // Helios's GH200 nodes and Athena's one-job partition plgrid-now); not read from the script's table.
 type reachShape struct {
 	row, host, shape, slot, account string
 }
 
 var reachShapes = []reachShape{
-	{"reach-helios", "helios", "partition plgrid-gpu-gh200, qos now, 1 GPU, 1 CPU, 1Gi, time limit 00:05:00, one job, no requeue, each job to start within 10 min", "now", "SEEDACCT-gh"},
-	{"reach-athena", "athena", "partition plgrid-now, 1 GPU, 1 CPU, 1Gi, time limit 00:05:00, one job, no requeue, each job to start within 10 min", "plgrid-now", "SEEDACCT-a100"},
+	{"reach-helios", "helios", "partition plgrid-gpu-gh200, qos now, 1 GPU, 1 CPU, 1Gi, time limit 00:02:00, one job, no requeue, each job to start within 10 min", "now", "SEEDACCT-gh"},
+	{"reach-athena", "athena", "partition plgrid-now, 1 GPU, 1 CPU, 1Gi, time limit 00:02:00, one job, no requeue, each job to start within 10 min", "plgrid-now", "SEEDACCT-a100"},
 }
 
 // reachSettings adds the gateway's forwarded port to the world's settings file.
@@ -99,11 +99,11 @@ func TestTheScriptsReachShapesAreThePackagesRows(t *testing.T) {
 			qos = "-"
 		}
 		// name | host | profile | partition | qos | slot | account key | GPUs | CPUs | memory | time limit | timeout | extra | start wait
-		if f[1] != r.Cluster || f[2] != r.Cluster || f[3] != r.Partition || f[4] != qos || f[7] != "1" || f[8] != "1" || f[9] != "1Gi" || f[10] != "00:05:00" || len(f) != 14 || f[13] != "10" {
-			t.Errorf("%s: shape %v differs from #225's (the partition and QOS of the package's row %+v; 1 GPU, 1 CPU, 1Gi, 5 min, a start wait of 10)", r.Name, f, r)
+		if f[1] != r.Cluster || f[2] != r.Cluster || f[3] != r.Partition || f[4] != qos || f[7] != "1" || f[8] != "1" || f[9] != "1Gi" || f[10] != "00:02:00" || len(f) != 14 || f[13] != "10" {
+			t.Errorf("%s: shape %v differs from #225's (the partition and QOS of the package's row %+v; 1 GPU, 1 CPU, 1Gi, 2 min, a start wait of 10)", r.Name, f, r)
 		}
-		if r.Lease != 5*time.Minute || r.StartWait != 10*time.Minute || r.MostJobs != 1 {
-			t.Errorf("%s: the package's row %+v is not one job of 5 minutes with a start wait of 10", r.Name, r)
+		if r.Lease != 2*time.Minute || r.StartWait != 10*time.Minute || r.MostJobs != 1 {
+			t.Errorf("%s: the package's row %+v is not one job of 2 minutes with a start wait of 10", r.Name, r)
 		}
 		if f[11] != fmt.Sprint(int(r.Budget/time.Minute)) {
 			t.Errorf("%s: the shape's timeout is %s minutes, the package's budget %s", r.Name, f[11], r.Budget)
@@ -131,8 +131,8 @@ func TestEveryReachRowRunsOnlyWithYesAndPrintsItsShapeAndEstimate(t *testing.T) 
 			if len(argv) != 1 || !strings.Contains(argv[0], "--test-only") || !strings.Contains(argv[0], "-A "+s.account) {
 				t.Errorf("want exactly the estimate, for the row's account; got %v", argv)
 			}
-			if !strings.Contains(argv[0], "--no-requeue") || !strings.Contains(argv[0], "-t 00:05:00") {
-				t.Errorf("the estimate is not for the row's job (no requeue, 5 minutes): %s", argv[0])
+			if !strings.Contains(argv[0], "--no-requeue") || !strings.Contains(argv[0], "-t 00:02:00") {
+				t.Errorf("the estimate is not for the row's job (no requeue, 2 minutes): %s", argv[0])
 			}
 			if _, err := os.Stat(filepath.Join(w.state, "test-env-TestReach")); err == nil {
 				t.Error("the test binary ran without --yes")
@@ -144,8 +144,8 @@ func TestEveryReachRowRunsOnlyWithYesAndPrintsItsShapeAndEstimate(t *testing.T) 
 // The estimate asks for the row's own shape: the memfs constraint on Helios, and nothing of the other row's.
 func TestTheReachEstimatesAskForTheirOwnShapes(t *testing.T) {
 	for _, c := range []struct{ row, want, notWant string }{
-		{"reach-helios", "-p plgrid-gpu-gh200 -q now -N 1 --ntasks=1 -c 1 --mem=1024M --gres=gpu:1 -t 00:05:00 -C memfs --no-requeue", "plgrid-now"},
-		{"reach-athena", "-p plgrid-now -N 1 --ntasks=1 -c 1 --mem=1024M --gres=gpu:1 -t 00:05:00 --no-requeue", "-q "},
+		{"reach-helios", "-p plgrid-gpu-gh200 -q now -N 1 --ntasks=1 -c 1 --mem=1024M --gres=gpu:1 -t 00:02:00 -C memfs --no-requeue", "plgrid-now"},
+		{"reach-athena", "-p plgrid-now -N 1 --ntasks=1 -c 1 --mem=1024M --gres=gpu:1 -t 00:02:00 --no-requeue", "-q "},
 	} {
 		t.Run(c.row, func(t *testing.T) {
 			w := newReachWorld(t)
@@ -185,6 +185,16 @@ func TestReachRowsRefuseWithoutTheirSettings(t *testing.T) {
 		{"a label over 40 characters", func(m map[string]string) { m["LIVE_PROBE_LABEL"] = strings.Repeat("g", 41) }, []string{"LIVE_PROBE_LABEL must be 1 to 40 letters"}},
 		{"a label that holds the host", func(m map[string]string) { m["LIVE_PROBE_LABEL"] = "via-" + reachSeedHost }, []string{"LIVE_PROBE_LABEL holds the host"}},
 		{"a label that holds the port", func(m map[string]string) { m["LIVE_PROBE_LABEL"] = "gateway-" + reachSeedPort }, []string{"LIVE_PROBE_LABEL holds the port"}},
+		// The same name in other spellings is still the name (the review of PR 235, B1).
+		{"a label that is the host in capitals", func(m map[string]string) { m["LIVE_PROBE_LABEL"] = strings.ToUpper(reachSeedHost) }, []string{"LIVE_PROBE_LABEL holds the host"}},
+		{"a label that holds the host in capitals among other characters", func(m map[string]string) { m["LIVE_PROBE_LABEL"] = "via-" + strings.ToUpper(reachSeedHost) + "-1" }, []string{"LIVE_PROBE_LABEL holds the host"}},
+		{"a host with the root dot, a label without it", func(m map[string]string) {
+			m["LIVE_PROBE_HOST"] = reachSeedHost + "."
+			m["LIVE_PROBE_LABEL"] = reachSeedHost
+		}, []string{"LIVE_PROBE_LABEL holds the host"}},
+		{"a label that spells the host with other separators", func(m map[string]string) { m["LIVE_PROBE_LABEL"] = "reach_seed-example" }, []string{"LIVE_PROBE_LABEL holds the host"}},
+		{"a label that runs the host together", func(m map[string]string) { m["LIVE_PROBE_LABEL"] = "reachseedexample" }, []string{"LIVE_PROBE_LABEL holds the host"}},
+		{"a label that holds the port between separators", func(m map[string]string) { m["LIVE_PROBE_LABEL"] = "gateway-403-21" }, []string{"LIVE_PROBE_LABEL holds the port"}},
 	}
 	for _, s := range reachShapes {
 		for _, c := range cases {

@@ -147,8 +147,9 @@ TABLE
 # same A100 nodes as plgrid-gpu-a100, so the same network path) with the slot guard and a start wait of 10 min. On Athena the
 # scheduler's acceptance of 1 CPU and 1Gi is not recorded (the conformance run used 4 CPUs and 32Gi): the estimate below,
 # sbatch --test-only, is the first check, and a rejected shape ends the row as not run (exit 3). The job runs for seconds and
-# its time limit is the harness's 5 min; the timeout of 20 min is the start wait, the job's end (5 min) and a margin
-# (reachEndWait and reachCleanupWait in reach_run_test.go; qos_test.go compares them). The Helios row asks for -C memfs, as the Helios profile does for
+# has its own time limit of 2 min (reachTimeLimit in reach_run_test.go, not the harness's 5 min: a stalled job holds the one-job
+# slot that long at most); the timeout of 20 min is the start wait, the job's end (2 min and a minute) and a margin
+# (reachEndWait and reachCleanupWait there; qos_test.go compares them). The Helios row asks for -C memfs, as the Helios profile does for
 # every job.
 # gpu-accounting-helios (issue #194) has the same two guards as conformance-helios-gh200: it starts only when squeue --me shows
 # no job in QOS now, and its one job must start within 10 min of its acceptance (else cancelled by its tag, NOT RUN, exit 3).
@@ -174,8 +175,8 @@ tunnel-hour-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1
 tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|02:17:00|152|-
 gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|30|-|10
 gpu-accounting-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|00:05:00|25|-
-reach-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:05:00|20|-C memfs|10
-reach-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|1|1Gi|00:05:00|20|-|10
+reach-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|1|1Gi|00:02:00|20|-C memfs|10
+reach-athena|athena|athena|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|1|1Gi|00:02:00|20|-|10
 # END CLUSTER SHAPES
 TABLE
 }
@@ -416,14 +417,19 @@ check_owner_go() {
 # are held to a narrow form here, before anything is built or submitted; and a label that holds the host or the port would
 # post it, so it is refused.
 check_reach_settings() {
-  local bad=0 host port label
+  local bad=0 host port label lc hc flat_l flat_h
   reach_need() { [ -n "${S[$1]:-}" ] || { say "live-checks: setting $1 is missing"; bad=1; return 1; }; }
   reach_need LIVE_PROBE_HOST && { [[ ${S[LIVE_PROBE_HOST]} =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$ ]] || { say "live-checks: LIVE_PROBE_HOST must be a host name or an address (letters, digits, dots, hyphens, underscores)"; bad=1; }; }
   reach_need LIVE_PROBE_PORT && { [[ ${S[LIVE_PROBE_PORT]} =~ ^[1-9][0-9]{0,4}$ ]] && [ "${S[LIVE_PROBE_PORT]}" -le 65535 ] || { say "live-checks: LIVE_PROBE_PORT must be a port number from 1 to 65535"; bad=1; }; }
   reach_need LIVE_PROBE_LABEL && { [[ ${S[LIVE_PROBE_LABEL]} =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$ ]] || { say "live-checks: LIVE_PROBE_LABEL must be 1 to 40 letters, digits, dots, underscores or hyphens"; bad=1; }; }
   host=${S[LIVE_PROBE_HOST]:-}; port=${S[LIVE_PROBE_PORT]:-}; label=${S[LIVE_PROBE_LABEL]:-}
-  if [ -n "$host" ] && [ -n "$label" ] && [[ $label == *"$host"* ]]; then say "live-checks: LIVE_PROBE_LABEL holds the host; the label is what is posted, so it must not"; bad=1; fi
-  if [ -n "$port" ] && [ -n "$label" ] && [[ $label == *"$port"* ]]; then say "live-checks: LIVE_PROBE_LABEL holds the port; the label is what is posted, so it must not"; bad=1; fi
+  # A name is the same name in any case, with or without the root dot, and with its dots, hyphens and underscores
+  # run together: the label holds the host in any of those spellings, or the port, among other characters or not
+  # (GATEWAY.PRIVATE.EXAMPLE for gateway.private.example is the host, posted).
+  lc=${label,,}; hc=${host,,}; hc=${hc%.}
+  flat_l=${lc//[._-]/}; flat_h=${hc//[._-]/}
+  if [ -n "$hc" ] && [ -n "$lc" ] && { [[ $lc == *"$hc"* ]] || [[ $flat_l == *"$flat_h"* ]]; }; then say "live-checks: LIVE_PROBE_LABEL holds the host; the label is what is posted, so it must not"; bad=1; fi
+  if [ -n "$port" ] && [ -n "$lc" ] && { [[ $lc == *"$port"* ]] || [[ $flat_l == *"$port"* ]]; }; then say "live-checks: LIVE_PROBE_LABEL holds the port; the label is what is posted, so it must not"; bad=1; fi
   return $bad
 }
 

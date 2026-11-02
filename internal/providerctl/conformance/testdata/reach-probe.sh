@@ -42,12 +42,16 @@ if command -v getent >/dev/null 2>&1; then
   timeout 10 getent ahosts "$host" >/dev/null 2>&1 || finish unresolved none
 fi
 
-# The connect. Nothing the shell says about it is kept: the text is read here and dropped, because it names the host.
+# The connect. Nothing the shell says about it is kept: the text is read here and dropped, because it names the host. The
+# outcome is read from the reasons alone: the text after the last ": " of each line (bash's "connect: Connection refused",
+# "/dev/tcp/HOST/PORT: No route to host"). A host holds no colon and no space, so no part of the target's name can be in a
+# reason, and a host called refused.gateway.example does not turn a "No route to host" into a refusal.
 err=$(H=$host P=$port timeout "$connect_s" bash -c 'exec 3<>"/dev/tcp/$H/$P"' 2>&1); rc=$?
 if [ "$rc" -eq 124 ]; then
   finish timeout none
 elif [ "$rc" -ne 0 ]; then
-  case $err in
+  reasons=$(printf '%s\n' "$err" | sed -n 's/^.*: //p')
+  case $reasons in
     *[Rr]efused*) finish refused none ;;
     *"Name or service not known"*|*"Temporary failure in name resolution"*|*"lookup failed"*|*"Unknown host"*) finish unresolved none ;;
     *"No route"*|*"unreachable"*|*"Network is down"*) finish unreachable none ;;

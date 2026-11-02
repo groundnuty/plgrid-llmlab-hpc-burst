@@ -21,7 +21,9 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -30,6 +32,7 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/alpha"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
 )
 
 //go:embed testdata/reach-probe.sh
@@ -42,10 +45,15 @@ const (
 	reachReadSeconds    = 3
 )
 
-// reachEndWait is how long the job may take after it has started: its time limit, the harness's 5 minutes. The
-// probe itself ends in under half a minute. hack/live-checks.sh's timeout for the rows covers the start wait and
-// this (qos_test.go compares them).
-const reachEndWait = 5 * time.Minute
+// reachTimeLimit is the reach job's time limit. The probe ends in under half a minute (a resolver wait of 10 s, a
+// connect of 5 s and two reads of 3 s), so a job that stalls holds the owner's one-job slot for at most two
+// minutes, not the harness's five (issue #225; the review of PR 235). hack/live-checks.sh's shape carries it as
+// 00:02:00 (TestConformanceRowsPassTheRequestCheck compares them) and the rows' Lease is the same.
+const reachTimeLimit = "2m"
+
+// reachEndWait is how long the job may take after it has started: its time limit and a minute for the scheduler to
+// close it. hack/live-checks.sh's timeout for the rows covers the start wait and this (qos_test.go compares them).
+const reachEndWait = 3 * time.Minute
 
 // reachCleanupWait is what the script's timeout leaves after the job's end for the read-back and the end-of-run
 // cleanup (cancel by tag, removal of the staging directory); qos_test.go compares it with the rows' timeouts.
@@ -100,16 +108,32 @@ func readProbeTarget(get func(string) string, prefix string) (probeTarget, error
 	} else {
 		p.label = v
 	}
-	if p.host != "" && p.label != "" && strings.Contains(p.label, p.host) {
-		bad = append(bad, prefix+"LABEL holds the host; the label is what is posted")
-	}
-	if p.port != 0 && p.label != "" && strings.Contains(p.label, strconv.Itoa(p.port)) {
-		bad = append(bad, prefix+"LABEL holds the port; the label is what is posted")
+	if p.host != "" && p.label != "" {
+		if holds := labelHolds(p.label, p.host, p.port); holds != "" {
+			bad = append(bad, prefix+"LABEL holds the "+holds+"; the label is what is posted")
+		}
 	}
 	if len(bad) > 0 {
 		return probeTarget{}, fmt.Errorf("%s", strings.Join(bad, "; "))
 	}
 	return p, nil
+}
+
+// labelHolds names what a public label would give away, "host" or "port" (the host first), or "" for neither. A name
+// is the same name in any case, with or without the DNS root dot, and with its dots, hyphens and underscores run
+// together, so the label holds the host in any of those spellings, among other characters or not
+// (GATEWAY.PRIVATE.EXAMPLE for gateway.private.example); the port is its digits, also with those characters between.
+// hack/live-checks.sh's check_reach_settings is the same rule.
+func labelHolds(label, host string, port int) string {
+	flat := strings.NewReplacer(".", "", "-", "", "_", "")
+	l, h := strings.ToLower(label), strings.TrimSuffix(strings.ToLower(host), ".")
+	if h != "" && (strings.Contains(l, h) || strings.Contains(flat.Replace(l), flat.Replace(h))) {
+		return "host"
+	}
+	if p := strconv.Itoa(port); port != 0 && (strings.Contains(l, p) || strings.Contains(flat.Replace(l), p)) {
+		return "port"
+	}
+	return ""
 }
 
 // reachClientHello is a TLS ClientHello that a TLS 1.2 or 1.3 server answers with a TLS record (a ServerHello or an
@@ -259,6 +283,7 @@ func reachBody(t testing.TB, w *world, rowName string, target probeTarget) {
 		t.Fatalf("%s is not a reach row", rowName)
 	}
 	name := "reach"
+	w.timeLimit = reachTimeLimit
 	a := w.newAlloc(name)
 	tag := v1alpha1.JobTag(a.Namespace, a.Name, a.UID)
 	// The job waits in the queue (the first clock), runs, and ends by itself. The rows have a start-wait bound: past
@@ -290,6 +315,27 @@ func reachBody(t testing.TB, w *world, rowName string, target probeTarget) {
 	t.Logf("%s passed; the text to post is in %s", row.Name, alpha.PostsFile)
 }
 
+// failingBash stands for bash in a connect that fails: the two lines bash prints, with the reason in FAKE_REASON and
+// the target (H and P, as the probe passes them) in the second.
+const failingBash = "#!/bin/sh\necho \"bash: connect: $FAKE_REASON\" >&2\necho \"bash: line 1: /dev/tcp/$H/$P: $FAKE_REASON\" >&2\nexit 1\n"
+
+// connectFailureEnv is the job environment of a node whose connect fails the way a kernel makes it fail where no
+// loopback socket can: bash is replaced, on the job's PATH, by a script that prints what bash prints for a failed
+// /dev/tcp connect (the shell's own two lines, the second naming the target) with the given reason and exits 1.
+// Nothing else of the node is faked: the probe, its interpreter and its other commands are the real ones, and so is
+// the name's resolution before the connect. The dry faults no-route and connect-error use it.
+func connectFailureEnv(t testing.TB, reason string) map[string]string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "bash"), []byte(failingBash), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return map[string]string{"PATH": dir + ":" + os.Getenv("PATH"), "FAKE_REASON": reason}
+}
+
+// The dry faults of a reach row that are the node's, and the reason each gives the connect.
+var dryReachNodeFaults = map[string]string{"no-route": "No route to host", "connect-error": "Permission denied"}
+
 // loopbackOnly reports whether a probe target is an address of the loopback network: a dry run connects only to
 // those (the stand-ins) or to a name under .invalid.
 func loopbackOnly(host string) bool {
@@ -312,9 +358,15 @@ func dryReach(t *testing.T) {
 	if !ok || !strings.HasPrefix(row, "reach-") {
 		t.Fatalf("HPCBURST_ALPHA_ROW is %q, not a reach row", row)
 	}
-	// The faults of this row are the stand-ins' (the caller starts them); the one the world has is the owner's job.
-	if fault != "" && fault != "slot-held" {
+	// The stand-ins are the caller's (it starts them); the faults of this row are the owner's job holding the slot
+	// and a node whose connect fails as no loopback socket can make it.
+	reason, nodeFault := dryReachNodeFaults[fault]
+	if fault != "" && fault != "slot-held" && !nodeFault {
 		t.Fatalf("the dry fault %q is not one of the row's", fault)
+	}
+	var jobEnv map[string]string
+	if nodeFault {
+		jobEnv = connectFailureEnv(t, reason)
 	}
 	target, err := readProbeTarget(os.Getenv, dryProbePrefix)
 	if err != nil {
@@ -323,6 +375,68 @@ func dryReach(t *testing.T) {
 	if !loopbackOnly(target.host) {
 		t.Fatal("a dry run connects only to a loopback address or a name under .invalid")
 	}
-	w, _ := dryWorld(t, r, fault, os.Getenv("HPCBURST_ALPHA_OUT"), dryShape{cpus: "1", memory: "1Gi"}, target.agent(reachConnectSeconds, reachReadSeconds), nil)
+	payload := target.agent(reachConnectSeconds, reachReadSeconds)
+	w, plat := dryWorld(t, r, fault, os.Getenv("HPCBURST_ALPHA_OUT"), dryShape{cpus: "1", memory: "1Gi"}, payload, jobEnv)
+	// The target is in the job's script and nowhere else: not in the job's output and error files, the staging, the
+	// agent builds, the scheduler's copies, the records. The search runs when the test ends, before the harness's
+	// own cleanup removes the staging (cleanups run last in, first out), and a failed run is searched too. It says
+	// how many it looked at, so that a search of nothing shows.
+	t.Cleanup(func() {
+		leaks, scanned := w.targetLeaks(target, payload, plat)
+		t.Logf("%s: %d file(s) and scheduler record(s) of the fake cluster, the agent builds and the records searched for the target; %d hold it outside the job's script", row, scanned, len(leaks))
+		for _, l := range leaks {
+			t.Errorf("the target is in %s", l)
+		}
+	})
 	reachBody(t, w, row, target)
+}
+
+// targetLeaks searches what a dry run left for the target and returns where it is, never what is there: every file
+// under the world's artefact directories and the record directory (the agent builds, the credentials, the fake
+// cluster's file system with the staging and each job's output and error files, the records), and the scheduler's own
+// copies of what was submitted (the job's name, script and output paths). The only place the target belongs is the
+// job's script, the probe the run staged: a file whose bytes are exactly payload is that, and is skipped. The host is
+// searched as it is; the port as a number of its own, and only from 1024 on, because a smaller one (the unresolved
+// stand-in's 9) is a number that files hold for other reasons. It also returns how many it looked at.
+func (w *world) targetLeaks(target probeTarget, payload []byte, plat *fakeslurm.Platform) (leaks []string, scanned int) {
+	w.t.Helper()
+	var port *regexp.Regexp
+	if target.port >= 1024 {
+		port = regexp.MustCompile(`\b` + strconv.Itoa(target.port) + `\b`)
+	}
+	holds := func(b []byte) bool {
+		return bytes.Contains(b, []byte(target.host)) || (port != nil && port.Match(b))
+	}
+	for _, dir := range append(append([]string(nil), w.artefacts...), w.p.dir) {
+		err := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+			b, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			scanned++
+			if !bytes.Equal(b, payload) && holds(b) {
+				rel, _ := filepath.Rel(dir, p)
+				leaks = append(leaks, filepath.Base(dir)+"/"+rel)
+			}
+			return nil
+		})
+		if err != nil {
+			w.t.Fatalf("the files of the run could not be searched: %v", err)
+		}
+	}
+	if plat != nil {
+		for _, j := range plat.Jobs() {
+			for field, text := range map[string]string{"name": j.Name, "script": j.Wrap, "output path": j.Output, "error path": j.Error} {
+				scanned++
+				if holds([]byte(text)) {
+					leaks = append(leaks, fmt.Sprintf("the scheduler's record of job %d (%s)", j.ID, field))
+				}
+			}
+		}
+	}
+	sort.Strings(leaks)
+	return leaks, scanned
 }

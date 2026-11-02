@@ -260,6 +260,8 @@ func dryWorld(t *testing.T, r alpha.Row, fault, out string, shape dryShape, agen
 	w := buildWorld(t, s, worldKit{agent: agent, dial: func(slurm.Validated) (slurm.Runner, io.Closer, error) {
 		return session, io.NopCloser(nil), nil
 	}})
+	// The fake cluster's file system, the credentials and the key are where a dry run leaves its files.
+	w.artefacts = append(w.artefacts, dir)
 	if fault == "slot-held" {
 		ft := newFakeTime()
 		w.now, w.sleep = ft.now, ft.sleep
