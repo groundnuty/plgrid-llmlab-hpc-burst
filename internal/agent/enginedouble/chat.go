@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 )
 
 // sampling is what a request of either generation endpoint says about how to
@@ -12,12 +13,23 @@ import (
 // (vllm/entrypoints/openai/chat_completion/protocol.py) and CompletionRequest
 // (vllm/entrypoints/openai/completion/protocol.py) share, under the same names.
 type sampling struct {
-	Temperature    *float64       `json:"temperature"`
-	Stream         bool           `json:"stream"`
-	StreamOptions  *streamOptions `json:"stream_options"`
-	IgnoreEOS      bool           `json:"ignore_eos"`
-	MinTokens      int            `json:"min_tokens"`
-	ReturnTokenIDs bool           `json:"return_token_ids"`
+	Temperature *float64 `json:"temperature"`
+	// The other sampling parameters of a vLLM request, which both
+	// endpoints take under these names. The double does not sample with
+	// them; it records what arrived (RequestSampling), and a Seed makes a
+	// sampled request repeatable (answerFor).
+	TopP              *float64       `json:"top_p"`
+	TopK              *int64         `json:"top_k"`
+	MinP              *float64       `json:"min_p"`
+	RepetitionPenalty *float64       `json:"repetition_penalty"`
+	PresencePenalty   *float64       `json:"presence_penalty"`
+	FrequencyPenalty  *float64       `json:"frequency_penalty"`
+	Seed              *int64         `json:"seed"`
+	Stream            bool           `json:"stream"`
+	StreamOptions     *streamOptions `json:"stream_options"`
+	IgnoreEOS         bool           `json:"ignore_eos"`
+	MinTokens         int            `json:"min_tokens"`
+	ReturnTokenIDs    bool           `json:"return_token_ids"`
 }
 
 // chatRequest is the part of ChatCompletionRequest the agent sends.
@@ -159,6 +171,25 @@ func (h *handler) maxTokensOf(promptLen int, maxTokens, maxCompletionTokens *int
 	return max, nil
 }
 
+// requestRecord is the "request" LogEvent of a generation request of either
+// endpoint, made as soon as its body is decoded: the Outcome is "refused"
+// until run takes the request, with the sampling parameters the request
+// carried and the tail of its prompt text.
+func requestRecord(r *http.Request, sp sampling, prompt string) *LogEvent {
+	return &LogEvent{Event: "request", Path: r.URL.Path, Stream: sp.Stream, Outcome: "refused",
+		Sampling: samplingOf(sp), Tail: tailOf(prompt)}
+}
+
+// recordEnd writes rec to the engine's log when a request ends, if its body
+// decoded. Every request that decoded is recorded, a refused one too
+// (errors-only, a 4xx), so a test counts the attempts a check made, not only
+// the answers it got.
+func (h *handler) recordEnd(decoded bool, rec *LogEvent) {
+	if decoded && h.e.record != nil {
+		h.e.record(*rec)
+	}
+}
+
 // engineFails answers 500 and says so when the errors-only mode is on: both
 // generation endpoints fail the same way.
 func (h *handler) engineFails(w http.ResponseWriter) bool {
@@ -180,7 +211,9 @@ func (h *handler) modelExists(w http.ResponseWriter, model string) bool {
 
 // limitFor resolves a tokenized request's output limit and checks min_tokens
 // against it, answering 400 and returning false on a bad request. Both
-// generation endpoints share it.
+// generation endpoints share it. The limit it returns is the resolved one
+// whenever it resolved, a min_tokens refusal included, so the record of a
+// refused request carries it; it is 0 when the limit did not resolve.
 func (h *handler) limitFor(w http.ResponseWriter, sp sampling, promptLen int, maxTokens, maxCompletionTokens *int) (int, bool) {
 	max, err := h.maxTokensOf(promptLen, maxTokens, maxCompletionTokens)
 	if err != nil {
@@ -190,19 +223,24 @@ func (h *handler) limitFor(w http.ResponseWriter, sp sampling, promptLen int, ma
 	if sp.MinTokens < 0 || sp.MinTokens > max {
 		// SamplingParams._verify_args, vllm/sampling_params.py:694-701.
 		writeError(w, http.StatusBadRequest, "BadRequestError", fmt.Sprintf("min_tokens must be less than or equal to max_tokens=%d, got %d.", max, sp.MinTokens))
-		return 0, false
+		return max, false
 	}
 	return max, true
 }
 
 // chat is POST /v1/chat/completions.
 func (h *handler) chat(w http.ResponseWriter, r *http.Request) {
+	var req chatRequest
+	decodeErr := decodeBody(r, &req)
+	rec := requestRecord(r, req.sampling, lastUserText(req.Messages))
+	defer h.recordEnd(decodeErr == nil, rec)
+	// The errors-only mode answers 500 to any body, after the decode, so
+	// the record of a refused request carries what it asked for.
 	if h.engineFails(w) {
 		return
 	}
-	var req chatRequest
-	if err := decodeBody(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "BadRequestError", err.Error())
+	if decodeErr != nil {
+		writeError(w, http.StatusBadRequest, "BadRequestError", decodeErr.Error())
 		return
 	}
 	if len(req.Messages) == 0 {
@@ -213,12 +251,14 @@ func (h *handler) chat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, promptIDs := tokenize(renderChat(req.Messages, true, h.cfg.TemplateOverhead))
+	rec.PromptTokens = len(promptIDs)
 	max, ok := h.limitFor(w, req.sampling, len(promptIDs), req.MaxTokens, req.MaxCompletionTokens)
+	rec.MaxTokens = max
 	if !ok {
 		return
 	}
 	ans := h.answerFor(req.sampling, h.toolCallFor(req), promptIDs, max)
-	h.run(r, promptIDs, max, ans, req.Stream, func(s *slot, u usage) (int, bool) {
+	h.run(r, rec, promptIDs, max, ans, req.Stream, func(s *slot, u usage) (int, bool) {
 		if req.Stream {
 			return h.stream(w, r, req, ans, s, u)
 		}
@@ -230,16 +270,13 @@ func (h *handler) chat(w http.ResponseWriter, r *http.Request) {
 // endpoint: it is admitted to a sequence slot, waits for its first token
 // (slow-first, never-settle), and then respond generates the tokens and writes
 // the answer, returning how many tokens it sent and whether the answer was
-// completed. run records the request in the engine's log and releases the slot
+// completed. run fills in rec, the request's record, which the endpoint writes
+// to the engine's log when the request ends (recordEnd): from here on the
+// Outcome is "cancelled" unless the answer completes. run releases the slot
 // with the finish reason of a completed answer, "abort" otherwise.
-func (h *handler) run(r *http.Request, promptIDs []int32, limit int, ans answer, stream bool, respond func(s *slot, u usage) (int, bool)) {
-	rec := LogEvent{Event: "request", Path: r.URL.Path, PromptTokens: len(promptIDs), MaxTokens: limit, Stream: stream, Outcome: "cancelled"}
+func (h *handler) run(r *http.Request, rec *LogEvent, promptIDs []int32, limit int, ans answer, stream bool, respond func(s *slot, u usage) (int, bool)) {
+	rec.Outcome = "cancelled"
 	finish := "abort"
-	defer func() {
-		if h.e.record != nil {
-			h.e.record(rec)
-		}
-	}()
 
 	ctx := r.Context()
 	s, ok := h.e.admit(ctx, promptIDs)
@@ -289,6 +326,17 @@ func (h *handler) answerFor(sp sampling, tc *toolCall, promptIDs []int32, limit 
 	}
 	greedy := sp.Temperature == nil || *sp.Temperature == 0
 	p := genParams{promptIDs: promptIDs, maxTokens: limit - r, minTokens: max(0, sp.MinTokens-r), ignoreEOS: sp.IgnoreEOS, greedy: greedy}
+	if !greedy {
+		// A sampled request with a seed draws the same samples every time it
+		// is sent, as vLLM's seeded sampling does when its batch is invariant
+		// (the double stands for that case, not for vLLM's known limit that a
+		// seed does not guarantee reproducibility online). One without a
+		// seed draws at random.
+		p.seeded, p.seedValue = sp.Seed != nil, 0
+		if sp.Seed != nil {
+			p.seedValue = *sp.Seed
+		}
+	}
 
 	if tc != nil {
 		pieces := argumentPieces(tc.Arguments)
@@ -304,8 +352,8 @@ func (h *handler) answerFor(sp sampling, tc *toolCall, promptIDs []int32, limit 
 		return a
 	}
 
-	if greedy {
-		p.repeat = h.e.repeatOf(repeatKey{promptSeed(promptIDs), limit, sp.MinTokens, sp.IgnoreEOS})
+	if p.repeatable() {
+		p.repeat = h.e.repeatOf(repeatKey{promptSeed(promptIDs), limit, sp.MinTokens, sp.IgnoreEOS, p.seeded, p.seedValue})
 	}
 	n, finish := r, "length"
 	if limit > r {
@@ -314,6 +362,33 @@ func (h *handler) answerFor(sp sampling, tc *toolCall, promptIDs []int32, limit 
 	}
 	words, ids := outputWords(output{tokens: h.cfg.tokens(p, n)})
 	return answer{reasoning: words[:r], reasoningIDs: ids[:r], words: words[r:], ids: ids[r:], finish: finish}
+}
+
+// samplingOf is the sampling parameters a request carried, as sent.
+func samplingOf(sp sampling) *RequestSampling {
+	return &RequestSampling{
+		Temperature: sp.Temperature, TopP: sp.TopP, TopK: sp.TopK, MinP: sp.MinP,
+		RepetitionPenalty: sp.RepetitionPenalty, PresencePenalty: sp.PresencePenalty, FrequencyPenalty: sp.FrequencyPenalty,
+		Seed: sp.Seed,
+	}
+}
+
+// tailBytes is how much of a request's prompt text (a chat request's last
+// user message, a completions request's prompt) the log keeps.
+const tailBytes = 120
+
+// tailOf is the last tailBytes bytes of a prompt, from a character boundary:
+// enough to tell the agent's checks apart by their fixed closing words. The
+// prompts are synthetic, so the log holds no user text.
+func tailOf(text string) string {
+	if len(text) <= tailBytes {
+		return text
+	}
+	t := text[len(text)-tailBytes:]
+	for len(t) > 0 && !utf8.RuneStart(t[0]) {
+		t = t[1:]
+	}
+	return t
 }
 
 // argumentPieces splits tool-call arguments into one piece per token, each

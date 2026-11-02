@@ -182,7 +182,17 @@ var crossplaneKeys = []string{
 var _ managed.CriticalAnnotationUpdater = criticalAnnotationUpdater{}
 
 // UpdateCriticalAnnotations implements managed.CriticalAnnotationUpdater.
+//
+// The update answers with the stored object, status included, which would
+// discard what this reconcile has put in the Allocation's status so far; the
+// status is kept, so that the display a Create sets from its outcome (showRejected,
+// showAttempt) reaches the status write that crossplane-runtime makes next,
+// and a stale display, a full slot's reason after another refusal, does not.
 func (u criticalAnnotationUpdater) UpdateCriticalAnnotations(ctx context.Context, o client.Object) error {
+	var status *v1alpha1.AllocationStatus
+	if a, ok := o.(*v1alpha1.Allocation); ok {
+		status = a.Status.DeepCopy()
+	}
 	crit := map[string]string{}
 	for _, k := range crossplaneKeys {
 		if v, ok := o.GetAnnotations()[k]; ok {
@@ -201,6 +211,9 @@ func (u criticalAnnotationUpdater) UpdateCriticalAnnotations(ctx context.Context
 	})
 	if err != nil {
 		return fmt.Errorf("cannot update critical annotations: %w", err)
+	}
+	if status != nil {
+		o.(*v1alpha1.Allocation).Status = *status
 	}
 	return nil
 }

@@ -45,6 +45,9 @@ type Partition struct {
 	OneJobPerUser bool
 	// Slots is the most jobs the partition runs at once; 0 is unlimited.
 	Slots int
+	// QOS is the partition's own QOS (listed in Config.QOS): every job on the
+	// partition counts against it, and its limits come before the job QOS's.
+	QOS string
 }
 
 // Config configures a Platform. The zero value is a v0.0.42 cluster in the
@@ -71,6 +74,20 @@ type Config struct {
 	// SqueueDesc lists squeue jobs by descending job ID, to show that a reader
 	// sorts by ID itself.
 	SqueueDesc bool
+	// QOS lists the cluster's QOSes with their per-user limits (qos.go). Empty
+	// means no QOS is modelled: --qos is accepted with any name and no QOS
+	// limit applies.
+	QOS []QOS
+	// DefaultQOS is the QOS of a job that sends no --qos: the association's
+	// default. Empty means none.
+	DefaultQOS string
+	// NoisyScancel makes scancel of an ended or unknown job print the error
+	// the fake printed before #199 ("scancel: error: Kill job error on job id
+	// N: Invalid job id specified", or "...Job/step already completing or
+	// completed") and exit 1. Real Slurm 24.11 prints nothing and exits 0 for
+	// both; the default is the real behaviour. The option stands for a Slurm
+	// that is noisy, such as one run with -v.
+	NoisyScancel bool
 	// Run, when set, puts the platform in run mode (doc.go, Run mode): the
 	// file system is a real directory, and each job's --wrap runs as a local
 	// process. A Platform in run mode must be closed.
@@ -109,6 +126,7 @@ type Platform struct {
 	faulted  []Fault
 	rules    []*faultRule
 	script   []SubmitStep
+	late     []lateJob
 	gates    map[string][]*Gate
 
 	inflight, maxInflight int

@@ -37,8 +37,14 @@ func (p *Platform) running(partition string) int {
 	return n
 }
 
-// startJob moves a pending job to RUNNING when its partition has a free slot.
+// startJob moves a pending job to RUNNING when its partition has a free slot
+// and the user's GPU cap, if the QOS sets one, allows it (canStart).
 func (p *Platform) startJob(j *job, now time.Time) error {
+	if !j.held && j.state() == Pending {
+		if err := p.canStart(j); err != nil {
+			return err
+		}
+	}
 	if n := p.slotsOf(j.partition); n > 0 && p.running(j.partition)+p.phantoms[j.partition] >= n {
 		return fmt.Errorf("job %d cannot start: all %d slots of partition %s are taken (phantom jobs hold %d; FreePhantoms releases them)",
 			j.id, n, j.partition, p.phantoms[j.partition])

@@ -26,6 +26,7 @@ type scripted struct {
 	listings [][]procRow
 	listErr  error
 	openErr  error // from open
+	probeErr error // from probe, kill(pid, 0)
 	rowNow   func(pid int) (procRow, bool, error)
 	sendErr  error
 	lists    int
@@ -46,6 +47,10 @@ func (s *scripted) api() *procAPI {
 		open: func(pid int) (int, error) {
 			s.events = append(s.events, fmt.Sprintf("open %d", pid))
 			return pid + 1000, s.openErr
+		},
+		probe: func(pid int) error {
+			s.events = append(s.events, fmt.Sprintf("probe %d", pid))
+			return s.probeErr
 		},
 		send: func(fd int, sig syscall.Signal) error {
 			s.events = append(s.events, fmt.Sprintf("send %d %d", fd, int(sig)))

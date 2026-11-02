@@ -255,9 +255,9 @@ type SubmissionRecord struct {
 	// nothing fails. Empty for any other refusal, a policy refusal for another
 	// limit included, and for every other state. The Provider's controller
 	// writes it with the state, in one record, so the lifecycle controller
-	// never sees a Rejected state without its code: the fake controller
-	// (pkg/provider/fake) does today, the Slurm provider's from #151's
-	// provider change.
+	// never sees a Rejected state without its code. The fake controller
+	// (pkg/provider/fake) and the Slurm provider's controller both write it
+	// so.
 	//
 	// +optional
 	// +kubebuilder:validation:Enum=SubmitLimitReached
@@ -424,13 +424,15 @@ type AllocationObservation struct {
 	// +listType=set
 	Duplicates []string `json:"duplicates,omitempty"`
 
-	// QueueWaitRecorded is true once the Provider's controller has added the
-	// recorded job's queue wait to the Provider's status (HBEP-4, Provider
-	// status). It is set only after that write succeeded, so a failed write
-	// is retried at the next observe; and it keeps a re-observed job from
-	// adding its wait again after the entry has left the 20 the Provider
-	// keeps. The wait is the job record's StartTime minus its SubmitTime, from
-	// whichever source Observe read.
+	// QueueWaitRecorded is true once the Provider's controller has settled the
+	// recorded job's queue wait (HBEP-4, Provider status): it has added the
+	// wait to the Provider's status, or the Allocation carries
+	// AnnotationQueuedSuccessor and no wait is recorded for it. It is set only
+	// after that write succeeded, so a failed write is retried at the next
+	// observe; and it keeps a re-observed job from adding its wait again after
+	// the entry has left the 20 the Provider keeps. The wait is the job
+	// record's StartTime minus its SubmitTime, from whichever source Observe
+	// read.
 	//
 	// +optional
 	QueueWaitRecorded bool `json:"queueWaitRecorded,omitempty"`

@@ -463,8 +463,34 @@ func checkRequest(req provider.SubmitRequest, profile provider.Profile, settings
 		return s, refuse("gpus %d is negative", p.GPUs)
 	case p.GPUs == 0 && part.GPUModel != "none":
 		return s, refuse("partition %q is a GPU partition (%s) and the request has no GPU", part.Name, part.GPUModel)
-	case part.GPUsPerNode != nil && p.GPUs > *part.GPUsPerNode:
-		return s, refuse("gpus %d is above gpusPerNode %d of partition %q", p.GPUs, *part.GPUsPerNode, part.Name)
+	}
+	// The QOS comes before the limits it sets: the flag is checked against the
+	// safe pattern, and the limits are those that apply on the partition under
+	// it (HBEP-4, QOS limits). One source feeds both, so a request cannot name
+	// a QOS other than the one whose limits were checked.
+	if req.QOS != settings.QOS {
+		return s, refuse("qos %q is not the Provider's qos %q", req.QOS, settings.QOS)
+	}
+	if req.QOS != "" {
+		if err := CheckValue("qos", req.QOS); err != nil {
+			return s, refuse("%v", err)
+		}
+	}
+	s.qos = req.QOS
+	limits, err := v1alpha1.EffectiveQOSLimits(&profile.Spec, part, settings.QOS)
+	if err != nil {
+		return s, refuse("%v", err)
+	}
+	// A submit limit of 0 allows no job at all (`@hpc-burst-science-agent`,
+	// 1 Nov 2026: an effective 0 means the Provider cannot host). Slurm would
+	// refuse every submission with a reason that reads as a full slot, one that
+	// never clears, so the request is refused here, before any call, as a GPU
+	// cap of 0 is below (checkGPUs).
+	if m := limits.MaxSubmitPerUser; m != nil && *m < 1 {
+		return s, refuse("maxSubmitPerUser is %d under qos %q: no job can be submitted there", *m, limits.From[v1alpha1.LimitMaxSubmitPerUser])
+	}
+	if err := checkGPUs(p.GPUs, part, limits); err != nil {
+		return s, err
 	}
 	s.gpus = p.GPUs
 	limit, err := p.TimeLimit.AsDuration()
@@ -474,18 +500,15 @@ func checkRequest(req provider.SubmitRequest, profile provider.Profile, settings
 	case limit <= 0 || limit%time.Minute != 0:
 		return s, refuse("time limit %q is not a positive whole number of minutes", p.TimeLimit)
 	}
-	if part.MaxTime != nil {
-		max, err := part.MaxTime.AsDuration()
-		if err != nil {
-			return s, refuse("the profile's maxTime of partition %q is not a duration", part.Name)
-		}
-		if limit > max {
-			return s, refuse("time limit %q is above maxTime %s of partition %q", p.TimeLimit, max, part.Name)
-		}
+	if err := checkTimeLimit(limit, p.TimeLimit, part, limits); err != nil {
+		return s, err
 	}
 	s.minutes = int64(limit / time.Minute)
 	if p.CPUsPerTask < 1 {
 		return s, refuse("cpusPerTask %d is below 1", p.CPUsPerTask)
+	}
+	if m := limits.MaxCPUsPerUser; m != nil && p.CPUsPerTask > *m {
+		return s, refuse("cpusPerTask %d is above maxCpusPerUser %d of qos %q", p.CPUsPerTask, *m, limits.From[v1alpha1.LimitMaxCPUsPerUser])
 	}
 	s.cpusPerTask = p.CPUsPerTask
 	// Memory 0 is refused although the CRD admits it: Slurm reads --mem=0 as
@@ -495,6 +518,15 @@ func checkRequest(req provider.SubmitRequest, profile provider.Profile, settings
 		return s, refuse("memory is not positive; --mem=0 would take the whole node")
 	}
 	s.memMiB = (mem + (1<<20 - 1)) >> 20
+	if m := limits.MaxMemPerUser; m != nil {
+		// Compared in the whole MiB that go to Slurm, rounded up, against the
+		// cap in whole MiB, rounded down: a job never gets less than it asked
+		// for, and never more than the cap.
+		if capMiB := m.Value() >> 20; s.memMiB > capMiB {
+			return s, refuse("memory %s (%d MiB) is above maxMemPerUser %s (%d MiB) of qos %q",
+				p.Memory.String(), s.memMiB, m.String(), capMiB, limits.From[v1alpha1.LimitMaxMemPerUser])
+		}
+	}
 	if p.Nodes > 1 {
 		return s, refuse("nodes %d: alpha Allocations are single-node", p.Nodes)
 	}
@@ -598,34 +630,79 @@ func (b *Batch) LiftHold(ctx context.Context, jobID string) error {
 	return fmt.Errorf("scontrol release %s: exit %d: %s", jobID, res.ExitCode, slurmMessage(stderr))
 }
 
-// Cancel implements provider.Batch: scancel per job, one result per job, in
-// order. An ended job reports AlreadyEnded; a job ID Slurm no longer knows
-// reports an error that wraps provider.ErrNotFound.
+// Cancel implements provider.Batch: one result per job, in order. The outcome
+// comes from the job's state, read just before the scancel, never from what
+// scancel prints. Real Slurm 24.11's scancel prints nothing and exits 0 for a
+// job that has ended and for a job it does not know (ESLURM_ALREADY_DONE and
+// ESLURM_INVALID_JOB_ID, scancel.c in tag slurm-24-11-5-1), so its output
+// cannot tell either from a cancel (#199). The state is read here, fresh and
+// past the cache, and not taken from the caller's listing, which may be a poll
+// interval old. It is read before the scancel, not after: the question is
+// whether the job was live when it was cancelled, and a read after could only
+// infer that from the final state, which a job cancelled by someone else shares.
+//
+// A job live at that read is cancelled and reports Cancelled. A job that has
+// ended reports AlreadyEnded, and no scancel runs. A job neither the queue nor
+// accounting shows reports an error that wraps provider.ErrNotFound. A job
+// that ends in the instant between the read and the scancel still reports
+// Cancelled on Slurm 24.11, which stays quiet about it; on a Slurm that complains,
+// the scancel fails and that is a CancelError, retried. A read that fails is a
+// CancelError too: the job's state is unknown, and the caller retries.
 func (b *Batch) Cancel(ctx context.Context, jobIDs []string) []provider.CancelResult {
 	out := make([]provider.CancelResult, 0, len(jobIDs))
 	defer b.markStale()
 	for _, id := range jobIDs {
-		if err := checkJobID(id); err != nil {
-			out = append(out, provider.CancelResult{JobID: id, Outcome: provider.CancelError, Err: err})
-			continue
-		}
-		res, err := b.run(ctx, cancelLine(id), nil)
-		stderr := string(res.Stderr)
-		switch {
-		case err != nil:
-			out = append(out, provider.CancelResult{JobID: id, Outcome: provider.CancelError, Err: fmt.Errorf("scancel %s: %w", id, err)})
-		case strings.Contains(stderr, "already completing or completed"):
-			out = append(out, provider.CancelResult{JobID: id, Outcome: provider.AlreadyEnded})
-		case strings.Contains(stderr, "Invalid job id specified"):
-			out = append(out, provider.CancelResult{JobID: id, Outcome: provider.CancelError, Err: fmt.Errorf("job %s: %w", id, provider.ErrNotFound)})
-		case res.ExitCode != 0 || strings.Contains(stderr, "error"):
-			out = append(out, provider.CancelResult{JobID: id, Outcome: provider.CancelError,
-				Err: fmt.Errorf("scancel %s: exit %d: %s", id, res.ExitCode, slurmMessage(stderr))})
-		default:
-			out = append(out, provider.CancelResult{JobID: id, Outcome: provider.Cancelled})
-		}
+		out = append(out, b.cancelOne(ctx, id))
 	}
 	return out
+}
+
+func (b *Batch) cancelOne(ctx context.Context, id string) provider.CancelResult {
+	failed := func(err error) provider.CancelResult {
+		return provider.CancelResult{JobID: id, Outcome: provider.CancelError, Err: err}
+	}
+	if err := checkJobID(id); err != nil {
+		return failed(err)
+	}
+	live, notFound, err := b.liveBeforeCancel(ctx, id)
+	switch {
+	case err != nil:
+		return failed(fmt.Errorf("cancel job %s: read its state: %w", id, err))
+	case notFound:
+		return failed(fmt.Errorf("job %s: %w", id, provider.ErrNotFound))
+	case !live:
+		return provider.CancelResult{JobID: id, Outcome: provider.AlreadyEnded}
+	}
+	res, err := b.run(ctx, cancelLine(id), nil)
+	// What scancel prints and exits with says whether it worked, never what state the job was in:
+	// "already ended" and "not found" were decided above, from the job. A scancel that fails
+	// (on a Slurm that is noisy about a job that ended after the read, for one) is an error, and
+	// the caller's next pass reads the job again.
+	switch {
+	case err != nil:
+		return failed(fmt.Errorf("scancel %s: %w", id, err))
+	case res.ExitCode != 0 || strings.Contains(string(res.Stderr), "error"):
+		return failed(fmt.Errorf("scancel %s: exit %d: %s", id, res.ExitCode, slurmMessage(string(res.Stderr))))
+	}
+	return provider.CancelResult{JobID: id, Outcome: provider.Cancelled}
+}
+
+// liveBeforeCancel reads the job once, fresh: from the queue (squeue --me
+// --jobs=<id>), else from accounting. live is true for a job with no end time;
+// notFound is true when both reads succeeded and neither shows the job.
+func (b *Batch) liveBeforeCancel(ctx context.Context, id string) (live, notFound bool, err error) {
+	job, listed, err := b.QueueJob(ctx, id)
+	if err != nil {
+		return false, false, err
+	}
+	if listed {
+		return job.EndTime == nil, false, nil
+	}
+	job, found, err := b.ReadAccounting(ctx, id)
+	if err != nil {
+		return false, false, err
+	}
+	return found && job.EndTime == nil, !found, nil
 }
 
 var varPrefix = regexp.MustCompile(`^\$([A-Za-z_][A-Za-z0-9_]*)`)

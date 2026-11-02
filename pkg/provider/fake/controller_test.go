@@ -71,7 +71,7 @@ func newEnv(t *testing.T, opts ...func(*clientfake.ClientBuilder) *clientfake.Cl
 		ctl: &Controller{Client: c, Provider: testProvider, Batch: batch, Clock: clock}}
 }
 
-func (e *env) newAlloc(name, providerName string) *v1alpha1.Allocation {
+func (e *env) newAlloc(name, providerName string, mods ...func(*v1alpha1.Allocation)) *v1alpha1.Allocation {
 	e.t.Helper()
 	a := &v1alpha1.Allocation{
 		ObjectMeta: metav1.ObjectMeta{
@@ -85,6 +85,9 @@ func (e *env) newAlloc(name, providerName string) *v1alpha1.Allocation {
 				Memory: resource.MustParse("16Gi"), AgentDigest: strings.Repeat("a", 64),
 			}},
 		},
+	}
+	for _, m := range mods {
+		m(a)
 	}
 	if err := e.c.Create(context.Background(), a); err != nil {
 		e.t.Fatal(err)

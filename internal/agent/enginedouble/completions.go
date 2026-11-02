@@ -10,9 +10,10 @@ import (
 
 // completionRequest is the part of CompletionRequest
 // (vllm/entrypoints/openai/completion/protocol.py) the double reads: a prompt
-// that is a string, and the sampling fields the chat path accepts, under the
-// same names. The double does not read the other fields (n, echo, stop,
-// logprobs, suffix); it ignores them.
+// that is a string, and the sampling fields the chat path accepts (seed and
+// the recorded parameters included), under the same names. The double does
+// not read the other fields (n, echo, stop, logprobs, suffix); it ignores
+// them.
 type completionRequest struct {
 	sampling
 	Model     string          `json:"model"`
@@ -51,24 +52,30 @@ func promptText(raw json.RawMessage) (string, error) {
 // so the reasoning tokens are part of choices[0].text, where chat reports
 // them as message.reasoning.
 func (h *handler) completion(w http.ResponseWriter, r *http.Request) {
+	dflt := defaultCompletionMaxTokens
+	req := completionRequest{MaxTokens: &dflt} // null in the body clears it; an absent field keeps it
+	decodeErr := decodeBody(r, &req)
+	prompt, promptErr := promptText(req.Prompt) // "" when the prompt is not a string
+	// The record is the chat path's: a request that decoded is recorded when
+	// it ends, a refused one too, and errors-only answers after the decode.
+	rec := requestRecord(r, req.sampling, prompt)
+	defer h.recordEnd(decodeErr == nil, rec)
 	if h.engineFails(w) {
 		return
 	}
-	dflt := defaultCompletionMaxTokens
-	req := completionRequest{MaxTokens: &dflt} // null in the body clears it; an absent field keeps it
-	if err := decodeBody(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "BadRequestError", err.Error())
+	if decodeErr != nil {
+		writeError(w, http.StatusBadRequest, "BadRequestError", decodeErr.Error())
 		return
 	}
-	prompt, err := promptText(req.Prompt)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "BadRequestError", err.Error())
+	if promptErr != nil {
+		writeError(w, http.StatusBadRequest, "BadRequestError", promptErr.Error())
 		return
 	}
 	if !h.modelExists(w, req.Model) {
 		return
 	}
 	_, promptIDs := tokenize(prompt)
+	rec.PromptTokens = len(promptIDs)
 	if len(promptIDs) == 0 {
 		// vLLM refuses a prompt of no tokens (v1/engine/input_processor.py,
 		// _validate_prompt_len). Chat cannot meet this: its template adds tokens.
@@ -76,11 +83,12 @@ func (h *handler) completion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	max, ok := h.limitFor(w, req.sampling, len(promptIDs), req.MaxTokens, nil)
+	rec.MaxTokens = max
 	if !ok {
 		return
 	}
 	ans := h.answerFor(req.sampling, nil, promptIDs, max)
-	h.run(r, promptIDs, max, ans, req.Stream, func(s *slot, u usage) (int, bool) {
+	h.run(r, rec, promptIDs, max, ans, req.Stream, func(s *slot, u usage) (int, bool) {
 		if req.Stream {
 			return h.completionStream(w, r, req, ans, s, u)
 		}

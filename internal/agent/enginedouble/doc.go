@@ -25,8 +25,13 @@
 // Generation follows the prompt's token ids. A greedy request (temperature 0
 // or absent) gives the same output every time, as a walk over the vocabulary
 // whose odd step varies from token to token: no output repeats one token
-// next to itself, and no output is periodic. A sampled request seeds the walk
-// at random. With min_tokens at or above max_tokens, an output has exactly
+// next to itself, and no output is periodic. A sampled request (temperature
+// above 0) with a seed gives the same output every time too, a function of the
+// prompt and the seed: the double stands for vLLM's seeded sampling in the
+// case where it is reproducible (a batch-invariant engine), not for the known
+// limit that a seed does not guarantee reproducibility online. The
+// greedy-repeat and greedy-diverge modes act on these requests as on greedy
+// ones. A sampled request without a seed seeds the walk at random. With min_tokens at or above max_tokens, an output has exactly
 // max_tokens tokens and finish reason "length". Otherwise it stops naturally
 // after max(NaturalLen, min_tokens) tokens, or at max_tokens if that comes
 // first. ignore_eos does not change that: vLLM merges the server's default
@@ -45,10 +50,12 @@
 // when the request does not name it and the rest of the context when it is
 // null (completion/protocol.py:63), stream, stream_options.include_usage,
 // return_token_ids, and the sampling fields of the chat path (temperature,
-// min_tokens, ignore_eos). The key guard, the model name check, the token
-// counting and the generation rules above are the chat path's, except that a
-// prompt has no template: prompt_tokens is the prompt's word count, with no
-// TemplateOverhead. The reply is vLLM's CompletionResponse: object "text_completion",
+// min_tokens, ignore_eos, seed, and top_p, top_k, min_p and the three
+// penalties, which are recorded and not sampled with). The key guard, the
+// model name check, the token counting and the generation rules above are the
+// chat path's, a seeded sampled request's repeatable output included, except
+// that a prompt has no template: prompt_tokens is the prompt's word count,
+// with no TemplateOverhead. The reply is vLLM's CompletionResponse: object "text_completion",
 // choices[0].text (the tokens' words joined by a space), finish_reason,
 // stop_reason (null) and usage. A stream is vLLM's completion_stream_generator:
 // no role chunk, one chunk per token with that token's text, finish_reason on
@@ -68,6 +75,18 @@
 // and usage, but this endpoint has no reasoning parser, so the reasoning tokens
 // are part of choices[0].text (and of the stream's text deltas) rather than a
 // separate field.
+//
+// # What reached the engine
+//
+// Each chat or completions request is recorded when it ends, as a
+// LogEvent (the "request" line of HB_ENGINE_DOUBLE_LOG, or the callback of
+// HandlerRecording), with the sampling parameters it carried (RequestSampling:
+// temperature, top_p, top_k, min_p, the three penalties and seed, each nil
+// when the request left it out) and the last 120 bytes of its prompt text
+// (Tail): a chat request's last user message, a completions request's
+// prompt. A request the double refuses (the errors-only mode, a 4xx)
+// is recorded too, with the Outcome "refused", so a test counts the attempts
+// a check made. A body that does not decode is not recorded.
 //
 // # Reasoning and tool calls
 //

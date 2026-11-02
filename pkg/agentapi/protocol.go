@@ -80,6 +80,13 @@ const (
 	MaxGenerationConfigKeyBytes   = 64
 	MaxGenerationConfigValueBytes = 128
 
+	// MaxGenerationConfigFileBytes is the largest generation_config.json the
+	// agent reads: a real one is a few hundred bytes. A present file above it,
+	// or one the agent cannot read or parse as a JSON object, is not read as
+	// absent: it is refused as a whole (GenerationConfigError with an empty
+	// Param; PR #169 review, Astra B1). The refusal's Want names this size.
+	MaxGenerationConfigFileBytes = 1 << 20
+
 	// WarmUpBudgetBytes is the most the warm-up results of one report take, at
 	// the admission bounds: MaxWarmUpRounds rounds of 4 + 1 + MaxTargetSessions
 	// timings, each as long as JSON can make it. The rest of a report fits the

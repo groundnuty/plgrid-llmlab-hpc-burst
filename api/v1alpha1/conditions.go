@@ -80,9 +80,13 @@ const (
 	// Providers in its selection, even when their labels match, and sets no
 	// condition for them (HBEP-7, Reconcile loop, step 1; HBEP-5).
 	ReasonProviderUnavailable = "ProviderUnavailable"
-	// ReasonSpecUnsupported: a data-parallel-size above 1, or a workload shape
-	// that does not fit the declared context limit. No Allocation is created.
-	// A reason on Degraded (`@hpc-burst-science-agent`, 31 Oct 2026).
+	// ReasonSpecUnsupported: a data-parallel-size above 1, a workload shape
+	// that does not fit the declared context limit, a generation-config other
+	// than auto, an override-generation-config or an hf-config-path (each
+	// changes which generation config vLLM applies, in a way the checks do not
+	// model). No Allocation is created. A reason on Degraded
+	// (`@hpc-burst-science-agent`, 31 Oct 2026; the generation-config flags,
+	// 1 Nov 2026).
 	ReasonSpecUnsupported = "SpecUnsupported"
 	// ReasonFrontNotConfigured: no front address and dial-home mode are
 	// configured, so no Allocation is submitted (HBEP-11, Single-user host:

@@ -82,6 +82,18 @@ func signalOne(api *procAPI, r procRow, sig syscall.Signal) error {
 	if errors.Is(err, syscall.ESRCH) {
 		return nil // it ended since the listing
 	}
+	if errors.Is(err, syscall.EINVAL) {
+		// A process that exits between the listing and the pidfd can answer EINVAL, not ESRCH, on
+		// this kernel (6.8.0: 499 of 1.46 million polls of exiting processes, issue #211). EINVAL is
+		// taken as "ended" only when a re-check agrees; a live process that gets EINVAL is an error.
+		gone, cerr := endedSince(api, r.pid)
+		switch {
+		case cerr != nil:
+			return fmt.Errorf("pidfd_open of process %d: %w (re-check: %v)", r.pid, err, cerr)
+		case gone:
+			return nil
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("pidfd_open of process %d: %w", r.pid, err)
 	}
@@ -97,6 +109,24 @@ func signalOne(api *procAPI, r procRow, sig syscall.Signal) error {
 		return fmt.Errorf("signal %v to process %d: %w", sig, r.pid, err)
 	}
 	return nil
+}
+
+// endedSince re-checks a listed process after pidfd_open answered EINVAL: it has
+// ended when kill(pid, 0) says no such process, or when its row shows it is not
+// live, as a zombie's does. A process that kill(0) finds and whose row is live
+// has not ended, and a re-check that cannot be made is an error.
+func endedSince(api *procAPI, pid int) (bool, error) {
+	switch err := api.probe(pid); {
+	case errors.Is(err, syscall.ESRCH):
+		return true, nil
+	case err != nil && !errors.Is(err, syscall.EPERM):
+		return false, fmt.Errorf("kill(%d, 0): %w", pid, err)
+	}
+	_, live, err := api.row(pid)
+	if err != nil {
+		return false, fmt.Errorf("read process %d: %w", pid, err)
+	}
+	return !live, nil
 }
 
 // sweepSession kills every process left in the job's session until none is

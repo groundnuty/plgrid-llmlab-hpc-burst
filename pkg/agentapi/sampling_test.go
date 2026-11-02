@@ -223,3 +223,121 @@ func TestGenerationConfigRefusedRoundTrips(t *testing.T) {
 		t.Errorf("an absent refusal is on the wire: %s", b)
 	}
 }
+
+// A refusal of the file as a whole has an empty Param, and its message names
+// the file in words, so an empty key never prints as a blank one (PR #169
+// review, Astra B1 and Opus N3; `@hpc-burst-science-agent` accepted the empty
+// Param on two conditions, 1 Nov 2026). The messages are written out by hand.
+func TestAWholeFileRefusalNamesTheFile(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  string
+	}{
+		{FileTooLarge, "generation_config.json is larger than 1 MiB (want a JSON object of at most 1 MiB)"},
+		{FileUnreadable, "generation_config.json is unreadable (want a JSON object of at most 1 MiB)"},
+		{FileNotJSON, "generation_config.json is not valid JSON (want a JSON object of at most 1 MiB)"},
+		{FileNotObject, "generation_config.json is not a JSON object (want a JSON object of at most 1 MiB)"},
+	} {
+		e := &GenerationConfigError{Value: tc.value, Want: FileWant}
+		if got := e.Error(); got != tc.want {
+			t.Errorf("message %q, want %q", got, tc.want)
+		}
+	}
+	// The wire form keeps the empty param, and it reads back to the same message.
+	b, err := json.Marshal(VerifyResult{Done: true, GenerationConfigRefused: &GenerationConfigError{Value: "not valid JSON", Want: "a JSON object of at most 1 MiB"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"done":true,"generationConfigRefused":{"param":"","value":"not valid JSON","want":"a JSON object of at most 1 MiB"}}`; string(b) != want {
+		t.Errorf("wire form %s, want %s", b, want)
+	}
+	var back VerifyResult
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.GenerationConfigRefused == nil || back.GenerationConfigRefused.Error() != "generation_config.json is not valid JSON (want a JSON object of at most 1 MiB)" {
+		t.Errorf("read back %+v", back.GenerationConfigRefused)
+	}
+	// The limit and the words that name it agree, written out by hand.
+	if MaxGenerationConfigFileBytes != 1048576 || FileWant != "a JSON object of at most 1 MiB" || FileTooLarge != "larger than 1 MiB" {
+		t.Errorf("limit %d, want %q, too-large %q", MaxGenerationConfigFileBytes, FileWant, FileTooLarge)
+	}
+}
+
+// The other half of the empty-Param rule: every refusal of one key names the
+// key, in Param and in the message, for every value the check refuses.
+func TestEveryPerKeyRefusalNamesItsKey(t *testing.T) {
+	for _, key := range []string{"presence_penalty", "frequency_penalty", "repetition_penalty", "temperature", "top_p", "top_k", "min_p"} {
+		for _, text := range []string{`"warm"`, "1e400", "-1e400", "[1]", "{}", "2.5", "-3", "null1"} {
+			err := CheckGenerationConfig(map[string]string{key: text})
+			var ge *GenerationConfigError
+			if err == nil {
+				continue // an accepted value
+			}
+			if !errors.As(err, &ge) {
+				t.Fatalf("%s %s: %v is not a GenerationConfigError", key, text, err)
+			}
+			if ge.Param != key || !strings.Contains(err.Error(), key) {
+				t.Errorf("%s %s: param %q, message %q: a per-key refusal names its key", key, text, ge.Param, err.Error())
+			}
+		}
+	}
+}
+
+// Where the contract is stricter than vLLM v0.32.0 it refuses, and the message
+// says the value is refused although vLLM would accept it, so that nobody
+// mistakes it for a vLLM error (PR #169 review, Opus N5;
+// `@hpc-burst-science-agent`, 1 Nov 2026: keep refusing). Python's bool is an
+// int, so vLLM reads true and false as 1 and 0 and applies the key's range, and
+// it takes a top_k of any size. The accepting wording appears only when vLLM
+// really would accept the value, i.e. the 0 or 1 passes the key's range, or a
+// top_k past int64 is positive; otherwise the refusal is the plain one, and a
+// top_k below -1 is refused by its range whatever its size. The messages are
+// written out by hand.
+func TestWhereTheContractIsStricterThanVLLMTheMessageSaysSo(t *testing.T) {
+	const (
+		numberNote  = " (a JSON boolean is refused here although vLLM would accept it)"
+		integerNote = " (a JSON boolean is refused here although vLLM would accept it)"
+		bigNote     = " (a larger one is refused here although vLLM would accept it)"
+		topKRange   = "0 (disable), -1 (disable) or at least 1"
+	)
+	for _, tc := range []struct {
+		name, key, text string
+		want            string // the whole message; "" accepts
+	}{
+		// A boolean whose 1 or 0 passes the range: vLLM accepts it.
+		{"temperature true", "temperature", "true", "generation_config.json's temperature is true, not a number" + numberNote},
+		{"temperature false", "temperature", "false", "generation_config.json's temperature is false, not a number" + numberNote},
+		{"top_p true", "top_p", "true", "generation_config.json's top_p is true, not a number" + numberNote},
+		{"min_p false", "min_p", "false", "generation_config.json's min_p is false, not a number" + numberNote},
+		{"min_p true", "min_p", "true", "generation_config.json's min_p is true, not a number" + numberNote},
+		{"presence_penalty true", "presence_penalty", "true", "generation_config.json's presence_penalty is true, not a number" + numberNote},
+		{"frequency_penalty false", "frequency_penalty", "false", "generation_config.json's frequency_penalty is false, not a number" + numberNote},
+		{"repetition_penalty true", "repetition_penalty", "true", "generation_config.json's repetition_penalty is true, not a number" + numberNote},
+		{"top_k true", "top_k", "true", "generation_config.json's top_k is true, not an integer" + integerNote},
+		{"top_k false", "top_k", "false", "generation_config.json's top_k is false, not an integer" + integerNote},
+		// A boolean whose 0 fails the range: vLLM refuses it too, so it is a plain refusal.
+		{"top_p false", "top_p", "false", "generation_config.json's top_p is false, not a number"},
+		{"repetition_penalty false", "repetition_penalty", "false", "generation_config.json's repetition_penalty is false, not a number"},
+		// A top_k past int64.
+		{"top_k just past int64", "top_k", "9223372036854775808", "generation_config.json's top_k is 9223372036854775808, not an integer of at most 64 bits" + bigNote},
+		{"top_k 20 digits", "top_k", "99999999999999999999", "generation_config.json's top_k is 99999999999999999999, not an integer of at most 64 bits" + bigNote},
+		{"top_k just below int64", "top_k", "-9223372036854775809", "generation_config.json's top_k is -9223372036854775809, outside the range vLLM accepts, " + topKRange},
+		{"top_k int64 max", "top_k", "9223372036854775807", ""},
+		// The plain refusals keep their wording.
+		{"top_k 2.5", "top_k", "2.5", "generation_config.json's top_k is 2.5, not an integer"},
+		{"temperature a string", "temperature", `"true"`, `generation_config.json's temperature is "true", not a number`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := CheckGenerationConfig(map[string]string{tc.key: tc.text})
+			switch {
+			case tc.want == "" && err != nil:
+				t.Errorf("CheckGenerationConfig = %q, want nil", err)
+			case tc.want != "" && err == nil:
+				t.Errorf("CheckGenerationConfig = nil, want %q", tc.want)
+			case tc.want != "" && err.Error() != tc.want:
+				t.Errorf("CheckGenerationConfig = %q\nwant %q", err.Error(), tc.want)
+			}
+		})
+	}
+}

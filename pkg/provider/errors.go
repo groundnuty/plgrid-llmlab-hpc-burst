@@ -20,8 +20,7 @@ var (
 	// unsafe value, a partition the Provider does not allow or the profile
 	// does not list, no GPU on a GPU partition, more GPUs than gpusPerNode, a
 	// time limit above maxTime or not in whole minutes, a path outside the
-	// staging directory; and, from #151's provider change, the QOS bounds
-	// (Batch.Submit).
+	// staging directory; and the QOS bounds (Batch.Submit).
 	ErrInvalidRequest = errors.New("request refused before any call")
 	// ErrDialectMismatch: a reply's data_parser, without its "data_parser/"
 	// prefix, differs from the profile's jsonDataParser. The reply is not

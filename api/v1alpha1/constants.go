@@ -54,9 +54,11 @@ const (
 )
 
 // Annotation keys on an Allocation (HBEP-11, The Allocation's record). The
-// provider writes each with a resourceVersion precondition, except
-// AnnotationIdleSince, which the lifecycle controller writes the same way. CRD validation
-// cannot guard them: it reaches no metadata beyond the name.
+// provider writes each with a resourceVersion precondition, except two that the
+// lifecycle controller writes: AnnotationIdleSince, with the same precondition,
+// and AnnotationQueuedSuccessor, once, in the Allocation's create request, so no
+// precondition applies. CRD validation cannot guard them: it reaches no metadata
+// beyond the name.
 const (
 	// AnnotationExternalName is crossplane-runtime's external-name key. Its
 	// value is the job tag (HBEP-3).
@@ -91,6 +93,19 @@ const (
 	// maxIdle (HBEP-7, Retention). Its one writer is the lifecycle
 	// controller, unlike the annotations above (IdleSince, SetIdleSince).
 	AnnotationIdleSince = Group + "/idle-since"
+
+	// AnnotationQueuedSuccessor is the queued-successor mark, on an
+	// Allocation created for a no-overlap successor of a primary, or for a
+	// retry of one, whose own Allocation on the same Provider still holds its
+	// slot (HBEP-7, Handover, No-overlap mode; HBEP-11, Ownership). The
+	// successor pends behind the per-user cap that primary holds, not in the
+	// scheduler's queue. Its one writer is the lifecycle controller, which
+	// writes it once, in the Allocation's create request (value: the Provider
+	// and the limit), and never changes or removes it: it is fixed at
+	// creation, and no recorder sees the Allocation unmarked. The Provider's
+	// controller only reads it: a marked Allocation adds no queue wait, and
+	// its queueWaitRecorded is set all the same (HBEP-4, Provider status).
+	AnnotationQueuedSuccessor = Group + "/queued-successor"
 )
 
 // Annotation keys on an Instance, written by the lifecycle controller with a

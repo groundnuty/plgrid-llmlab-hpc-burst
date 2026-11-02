@@ -86,7 +86,7 @@ func (r *ProfileReader) Read(ctx context.Context, name string) (Validated, error
 	}
 
 	v := Validated{Settings: provider.Settings{
-		Provider: prov.Name, Account: prov.Spec.Account, Grant: prov.Spec.Grant, Labels: prov.Labels,
+		Provider: prov.Name, Account: prov.Spec.Account, Grant: prov.Spec.Grant, QOS: prov.Spec.QOS, Labels: prov.Labels,
 	}}
 	if ref := prov.Spec.CredentialsRef; ref != nil {
 		v.Settings.CredentialsFile = ref.File
@@ -99,6 +99,12 @@ func (r *ProfileReader) Read(ctx context.Context, name string) (Validated, error
 	if prov.Spec.Account != "" {
 		if err := CheckValue("account", prov.Spec.Account); err != nil {
 			bad("provider.spec.account", "%v", err)
+		}
+	}
+	if prov.Spec.QOS != "" {
+		// The flag goes into a command, so it is held to the safe pattern.
+		if err := CheckValue("qos", prov.Spec.QOS); err != nil {
+			bad("provider.spec.qos", "%v", err)
 		}
 	}
 
@@ -115,6 +121,7 @@ func (r *ProfileReader) Read(ctx context.Context, name string) (Validated, error
 					found = true
 					v.Profile.Partition = p
 					checkPartition(fmt.Sprintf("spec.partitions[%d]", i), p, bad)
+					checkPartitionQOS(fmt.Sprintf("spec.partitions[%d]", i), s, p, bad)
 				}
 			}
 			if !found {
@@ -122,6 +129,7 @@ func (r *ProfileReader) Read(ctx context.Context, name string) (Validated, error
 			}
 		}
 		checkProfile(s, bad)
+		checkQOS(s, v.Settings.QOS, bad)
 	}
 
 	ssh, credErr := r.readCredentials(prov, bad)
@@ -152,6 +160,38 @@ func checkPartition(field string, p v1alpha1.PartitionProfile, bad func(string, 
 	}
 	if err := checkTmpDir(p); err != nil {
 		bad(field+".tmpDir", "%v", err)
+	}
+}
+
+// checkPartitionQOS checks that the partition's own qos, when it has one, is
+// listed in the profile's qos, so the plan knows every limit it names (HBEP-4,
+// Core operations, ReadProfile). The CRD's rule says the same; it is checked
+// again so that a stored object is never trusted blindly.
+func checkPartitionQOS(field string, s v1alpha1.PlatformProfileSpec, p v1alpha1.PartitionProfile, bad func(string, string, ...any)) {
+	if p.QOS == "" {
+		return
+	}
+	if _, ok := v1alpha1.FindQOS(&s, p.QOS); !ok {
+		bad(field+".qos", "%q is not listed in the profile's qos", p.QOS)
+	}
+}
+
+// checkQOS checks the Provider's qos, when it sets one, against the profile's
+// qos list (HBEP-4, Core operations, ReadProfile), and the wall limits in the
+// list, which the time limit reads.
+func checkQOS(s v1alpha1.PlatformProfileSpec, jobQOS string, bad func(string, string, ...any)) {
+	if jobQOS != "" {
+		if _, ok := v1alpha1.FindQOS(&s, jobQOS); !ok {
+			bad("provider.spec.qos", "%q is not listed in the profile's qos", jobQOS)
+		}
+	}
+	for i, q := range s.QOS {
+		if q.MaxWall == nil {
+			continue
+		}
+		if d, err := q.MaxWall.AsDuration(); err != nil || d <= 0 {
+			bad(fmt.Sprintf("spec.qos[%d].maxWall", i), "is not a positive duration")
+		}
 	}
 }
 

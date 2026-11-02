@@ -199,6 +199,10 @@ func (p *pass) tombstone(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) erro
 	if alloc != nil || !in.DeletionTimestamp.IsZero() {
 		return nil
 	}
+	// A gap's carrier stays until its successor exists (holdsGap).
+	if p.holdsGap(in) {
+		return nil
+	}
 	// A failed Instance stays for restart.window after its end: its EndTime
 	// dates the class's failure streak (HBEP-7, Restart and provisioning loops).
 	if failedEnd(in) && p.md != nil {
@@ -487,8 +491,19 @@ func (p *pass) drainStart(in *v1alpha1.Instance, pv *providerView) (time.Time, b
 }
 
 // draining ends a draining Instance when its agent reports no running request,
-// or at its hard end (HBEP-7, Handover, Draining).
+// or at its hard end (HBEP-7, Handover, Draining). A drain at the drain start
+// with no replacement ready records the no-overlap mode when it holds
+// (markNoOverlap); that record never holds the drain back, and an error in it
+// is returned after the drain's own step.
 func (p *pass) draining(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av agentView) error {
+	markErr := p.markNoOverlap(in)
+	if err := p.drainStep(in, alloc, av); err != nil {
+		return errors.Join(markErr, err)
+	}
+	return markErr
+}
+
+func (p *pass) drainStep(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av agentView) error {
 	if in.Status.LeaseEnd != nil {
 		if !p.now.Before(in.Status.LeaseEnd.Time) {
 			return p.end(in, alloc, v1alpha1.ReasonDrained, "the hard end came", false)
