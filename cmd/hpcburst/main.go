@@ -208,7 +208,7 @@ func cmdStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	var sd string
 	var asJSON bool
 	fs.StringVar(&sd, "state-dir", "", stateDirUsage)
-	fs.BoolVar(&o.NoAPI, "no-api", false, "check only the processes and the sockets they hold; do not ask the API (no /readyz, no write or garbage-collector probe)")
+	fs.BoolVar(&o.NoAPI, "no-api", false, "check the processes, the sockets they hold and the supervised processes' own health ports (/healthz, and the controller's /readyz); do not ask the API server (no apiserver /readyz, no controller manager /healthz, no write or garbage-collector probe)")
 	fs.BoolVar(&o.NoGCProbe, "no-gc-probe", false, "skip the garbage-collector probe (an owner and a dependent ConfigMap; the dependent must go within a minute)")
 	fs.BoolVar(&asJSON, "json", false, "print the report as JSON")
 	if code, done := parse(fs, args); done {
@@ -272,9 +272,16 @@ func printStatus(w io.Writer, r *launcher.StatusReport) {
 	}
 	printSupervision(w, r)
 	printAgentBuilds(w, r.AgentBuilds)
-	if r.Front != nil && r.Front.Set() {
+	// One "front:" line. The address is where Instances dial home; the front itself is the process
+	// the supervisor runs. A host with no front process says so, with the address when one is recorded.
+	switch addr := r.Front != nil && r.Front.Set(); {
+	case r.FrontAbsent && addr:
+		fmt.Fprintf(w, "front: absent (no front runs here; the recorded address is %s %s)\n", r.Front.Mode, r.Front.Addr)
+	case r.FrontAbsent:
+		fmt.Fprintln(w, "front: absent")
+	case addr:
 		fmt.Fprintf(w, "front: %s %s\n", r.Front.Mode, r.Front.Addr)
-	} else if r.Version != "" {
+	case r.Version != "":
 		fmt.Fprintln(w, "front: not recorded")
 	}
 }

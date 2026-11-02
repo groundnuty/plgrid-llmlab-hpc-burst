@@ -148,7 +148,7 @@ func (s *State) supervisedSet(l layout) ([]supervised, error) {
 	if s.Front.Set() {
 		args = append(args, "--front-mode", s.Front.Mode, "--front-addr", s.Front.Addr)
 	}
-	set := []supervised{{Name: "controller", Path: s.Controllers.Binary, Args: args, Health: health, TermGrace: controllerTermGrace}}
+	set := []supervised{{Name: controllerEntryName, Path: s.Controllers.Binary, Args: args, Health: health, TermGrace: controllerTermGrace}}
 	front, err := s.frontEntry(l)
 	if err != nil {
 		return nil, err

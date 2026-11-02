@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -17,15 +18,19 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	toolscache "k8s.io/client-go/tools/cache"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -77,6 +82,9 @@ type Options struct {
 	// newCache, when set, builds the manager's cache: a test holds the
 	// caches' sync with it.
 	newCache cache.NewCacheFunc
+	// discoveryTimeout, when set, replaces DiscoveryTimeout: a test shortens
+	// the bound on a stalled discovery request.
+	discoveryTimeout time.Duration
 	// onLeaseRead, when set, runs after each read of the lifecycle Lease
 	// that the start's ObservationGap counts: a test waits on it to know the
 	// elector has read a Lease another copy holds.
@@ -103,6 +111,90 @@ func Scheme() (*runtime.Scheme, error) {
 // stop budget (launcher.ControllerStopBudget) can name it. The lifecycle
 // Lease's release comes after it.
 const ShutdownGrace = 30 * time.Second
+
+// DiscoveryTimeout bounds one request of the REST mapper's discovery (the
+// group and resource lists it asks the API server for the first time a kind is
+// used). Creating an informer maps its kind while holding the informers' mutex
+// (controller-runtime v0.23.1, pkg/cache/internal/informers.go:366-380), the
+// discovery request carries no context of the caller's, and the manager's
+// shared HTTP client has no timeout in production, so a discovery that stalls
+// holds that mutex, and so does each creation queued behind it; the cache's
+// own stop waits for the mutex too (:243-246), and the manager's stop can use
+// up its ShutdownGrace (PR 187 review, B3). Two bounds follow. The mapper gets
+// an HTTP client of its own with this timeout, so a stalled discovery ends and
+// the informer's start fails, which both its callers retry (readiness every
+// cacheRetry, a controller's Kind source every 10 s); the manager's shared
+// client keeps none, since a timeout on it would cut every watch. And the
+// mapper stops mapping when the manager starts to stop (stoppableMapper), so
+// the creations queued behind a stalled discovery fail at once and the stop
+// does not wait for each of their timeouts.
+const DiscoveryTimeout = 10 * time.Second
+
+// errManagerStopping is what the mapper answers once the manager is stopping.
+var errManagerStopping = errors.New("lifecycle: the manager is stopping")
+
+// boundedMapper returns the manager's MapperProvider: controller-runtime's
+// dynamic REST mapper over an HTTP client whose requests end after timeout,
+// and which answers RESTMapping with errManagerStopping once stop is closed.
+func boundedMapper(timeout time.Duration, stop <-chan struct{}) func(*rest.Config, *http.Client) (meta.RESTMapper, error) {
+	return func(c *rest.Config, _ *http.Client) (meta.RESTMapper, error) {
+		cfg := rest.CopyConfig(c)
+		cfg.Timeout = timeout
+		hc, err := rest.HTTPClientFor(cfg)
+		if err != nil {
+			return nil, err
+		}
+		inner, err := apiutil.NewDynamicRESTMapper(cfg, hc)
+		if err != nil {
+			return nil, err
+		}
+		return stoppableMapper{RESTMapper: inner, stop: stop}, nil
+	}
+}
+
+// stoppableMapper stops waiting for a mapping when stop closes. The mapping
+// call itself runs on to its end on a goroutine of its own (at most
+// DiscoveryTimeout), but its caller, which may hold the informers' mutex,
+// returns at once; after stop every call fails without starting one.
+type stoppableMapper struct {
+	meta.RESTMapper
+	stop <-chan struct{}
+}
+
+func (m stoppableMapper) RESTMapping(gk schema.GroupKind, versions ...string) (*meta.RESTMapping, error) {
+	select {
+	case <-m.stop:
+		return nil, errManagerStopping
+	default:
+	}
+	type answer struct {
+		mapping *meta.RESTMapping
+		err     error
+	}
+	got := make(chan answer, 1)
+	go func() {
+		mapping, err := m.RESTMapper.RESTMapping(gk, versions...)
+		got <- answer{mapping, err}
+	}()
+	select {
+	case a := <-got:
+		return a.mapping, a.err
+	case <-m.stop:
+		return nil, errManagerStopping
+	}
+}
+
+// stopSignal closes a channel when the manager starts to stop. It runs
+// without the Lease, like readiness.
+type stopSignal struct{ ch chan struct{} }
+
+func (s stopSignal) Start(ctx context.Context) error {
+	<-ctx.Done()
+	close(s.ch)
+	return nil
+}
+
+func (s stopSignal) NeedLeaderElection() bool { return false }
 
 // leaderRenewDeadline is controller-runtime's default renew deadline
 // (v0.23.1, pkg/manager/manager.go, defaultRenewDeadline), which the lifecycle
@@ -136,6 +228,7 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 		metricsAddr = "0"
 	}
 	grace := ShutdownGrace
+	mapperStop := make(chan struct{})
 	mopts := manager.Options{
 		Scheme:                        scheme,
 		Metrics:                       metricsserver.Options{BindAddress: metricsAddr},
@@ -146,6 +239,7 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 		LeaderElectionReleaseOnCancel: true,
 		GracefulShutdownTimeout:       &grace,
 		NewCache:                      o.newCache,
+		MapperProvider:                boundedMapper(cmp.Or(o.discoveryTimeout, DiscoveryTimeout), mapperStop),
 	}
 	// With leader election off there is no Lease to read or regard, so no
 	// ObservationGap (`@hpc-burst-science-agent`, 31 Oct 2026, for #111).
@@ -161,14 +255,26 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("lifecycle: manager: %w", err)
 	}
+	if err := mgr.Add(stopSignal{ch: mapperStop}); err != nil {
+		return nil, nil, err
+	}
 	if err := mgr.AddHealthzCheck("ping", healthz.Ping); err != nil {
 		return nil, nil, err
 	}
-	ready := &readiness{mgr: mgr}
+	c := mgr.GetClient()
+	watches := lifecycleWatches(c)
+	kinds := []client.Object{&v1alpha1.ModelDeployment{}}
+	for _, w := range watches {
+		kinds = append(kinds, w.obj)
+	}
+	ready := &readiness{cache: mgr.GetCache(), elected: mgr.Elected(), leaderElection: o.LeaderElection, kinds: kinds}
 	if err := mgr.Add(ready); err != nil {
 		return nil, nil, err
 	}
-	if err := mgr.AddReadyzCheck("serving", func(*http.Request) error { return ready.check() }); err != nil {
+	if err := mgr.AddReadyzCheck(ReadyzCaches, func(*http.Request) error { return ready.checkCaches() }); err != nil {
+		return nil, nil, err
+	}
+	if err := mgr.AddReadyzCheck(ReadyzLeading, func(*http.Request) error { return ready.checkLeading() }); err != nil {
 		return nil, nil, err
 	}
 	clock := o.Clock
@@ -217,26 +323,13 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 	if workers <= 0 {
 		workers = DefaultWorkers
 	}
-	c := mgr.GetClient()
-	err = ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		Named("lifecycle").
-		For(&v1alpha1.ModelDeployment{}).
-		Watches(&v1alpha1.Allocation{}, handler.EnqueueRequestsFromMapFunc(allocationToDeployment)).
-		Watches(&v1alpha1.Instance{}, handler.EnqueueRequestsFromMapFunc(instanceToDeployment)).
-		Watches(&v1alpha1.Provider{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, o client.Object) []reconcile.Request {
-			return deploymentsAllowing(ctx, c, map[string]bool{o.GetName(): true})
-		})).
-		Watches(&v1alpha1.PlatformProfile{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, o client.Object) []reconcile.Request {
-			return deploymentsOnProfile(ctx, c, o.GetName())
-		})).
-		// An identity record that changes re-evaluates a collision with it
-		// (HBEP-3): every deployment of its namespace is enqueued.
-		Watches(&appsv1.ControllerRevision{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, o client.Object) []reconcile.Request {
-			if o.GetLabels()[v1alpha1.LabelRecord] != v1alpha1.RecordIdentity {
-				return nil
-			}
-			return deploymentsInNamespace(ctx, c, o.GetNamespace())
-		})).
+		For(&v1alpha1.ModelDeployment{})
+	for _, w := range watches {
+		b = b.Watches(w.obj, w.handler)
+	}
+	err = b.
 		WatchesRawSource(source.Channel(events, &handler.TypedEnqueueRequestForObject[*v1alpha1.ModelDeployment]{})).
 		WithOptions(controllerOptions(workers)).
 		Complete(r)
@@ -244,6 +337,39 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 		return nil, nil, fmt.Errorf("lifecycle: controller: %w", err)
 	}
 	return mgr, backend, nil
+}
+
+// lifecycleWatch is a kind the lifecycle controller watches besides the
+// ModelDeployments it is For, and the handler that maps it to deployments.
+type lifecycleWatch struct {
+	obj     client.Object
+	handler handler.EventHandler
+}
+
+// lifecycleWatches are the controller's Watches. One list serves both the
+// builder in NewManager and the readiness check "caches", which starts the
+// informers of these kinds, and of ModelDeployment, before the controller is
+// elected (readiness.Start); a kind added to the controller is therefore added
+// to the check at the same line.
+func lifecycleWatches(c client.Client) []lifecycleWatch {
+	return []lifecycleWatch{
+		{&v1alpha1.Allocation{}, handler.EnqueueRequestsFromMapFunc(allocationToDeployment)},
+		{&v1alpha1.Instance{}, handler.EnqueueRequestsFromMapFunc(instanceToDeployment)},
+		{&v1alpha1.Provider{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, o client.Object) []reconcile.Request {
+			return deploymentsAllowing(ctx, c, map[string]bool{o.GetName(): true})
+		})},
+		{&v1alpha1.PlatformProfile{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, o client.Object) []reconcile.Request {
+			return deploymentsOnProfile(ctx, c, o.GetName())
+		})},
+		// An identity record that changes re-evaluates a collision with it
+		// (HBEP-3): every deployment of its namespace is enqueued.
+		{&appsv1.ControllerRevision{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, o client.Object) []reconcile.Request {
+			if o.GetLabels()[v1alpha1.LabelRecord] != v1alpha1.RecordIdentity {
+				return nil
+			}
+			return deploymentsInNamespace(ctx, c, o.GetNamespace())
+		})},
+	}
 }
 
 // controllerOptions are the lifecycle controller's work-queue options.
@@ -360,36 +486,149 @@ func deploymentsOnProfile(ctx context.Context, c client.Client, profile string) 
 	return deploymentsAllowing(ctx, c, set)
 }
 
-// readiness tracks whether the controller serves agents: it leads, and its
-// caches are synced. It runs only on the leader, so /readyz fails until the
-// caches have synced and the Lease is held (`@hpc-burst-science-agent`, 31 Oct
-// 2026, for #111: leading counts). Alpha runs one controller; a standby
-// replica after alpha would need a readiness state of its own, since this one
-// would call it not ready.
+// The names of the lifecycle controller's two readiness checks, each served on
+// its own at /readyz/<name> besides the aggregate /readyz. They are an
+// interface: `hpcburst status` reads them by status code to say "starting" or
+// "not leading" (internal/launcher, readyz.go), and HBEP-11 names them. A
+// controller older than the split registered the one check "serving", which
+// the launcher does not know to tell the two apart.
+const (
+	// ReadyzCaches passes once the informers of every kind the controller
+	// watches have synced. It does not depend on the Lease.
+	ReadyzCaches = "caches"
+	// ReadyzLeading passes while the controller leads its Lease, and always
+	// under --leader-elect=false (`@hpc-burst-science-agent`, 1 Nov 2026, #147).
+	ReadyzLeading = "leading"
+)
+
+// cacheRetry is the wait between two tries to start an informer that the API
+// server cannot serve yet (a CRD not installed): controller-runtime's own
+// Kind source retries in the same way. The check stays failing meanwhile.
+const cacheRetry = 2 * time.Second
+
+// readiness tracks whether the controller serves agents, as two facts that
+// /readyz reports on their own so that a failing one can be told from the
+// other: its caches have synced, and it leads (`@hpc-burst-science-agent`,
+// 31 Oct 2026, for #111: leading counts; 1 Nov 2026, #147: told apart).
+//
+// It is not a leader-election runnable. The manager starts such a runnable
+// only once the Lease is held, and then "caches" could not be told from
+// "leading". It starts with the other runnables after the manager's caches
+// have started (controller-runtime v0.23.1, pkg/manager/internal.go:
+// Caches.Start, then Others.Start, then the leader election). The caches hold
+// no informer yet by then: the controller's sources start them only on being
+// elected, and WaitForCacheSync with none is vacuously true. So it starts the
+// informer of each kind the controller watches itself (the shared cache hands
+// the controller the same ones later) and waits for each of those informers:
+// "caches" is true only when the controller could read what it watches
+// (`@hpc-burst-science-agent`, 1 Nov 2026, #147: eager start accepted).
+//
+// Alpha runs one controller; a standby replica after alpha would need a
+// readiness state of its own, since this one would call it not ready.
 type readiness struct {
-	mgr manager.Manager
-	ok  atomic.Bool
+	cache cache.Cache
+	// elected is the manager's Elected channel: closed once the Lease is held,
+	// or at once without leader election (pkg/manager/internal.go:476-480
+	// without, :620-625 with).
+	elected        <-chan struct{}
+	leaderElection bool
+	kinds          []client.Object
+	// retry is the wait between two tries to start an informer; zero means
+	// cacheRetry.
+	retry  time.Duration
+	synced atomic.Bool
 }
 
 func (r *readiness) Start(ctx context.Context) error {
-	if !r.mgr.GetCache().WaitForCacheSync(ctx) {
-		return errors.New("lifecycle: caches did not sync")
+	defer r.synced.Store(false)
+	// Start every kind's informer without waiting, then wait for each of these informers itself:
+	// controller-runtime v0.23.1's cache.WaitForCacheSync waits only for the informers that exist,
+	// so on its own it passes with none of ours started or synced, and it would also wait for
+	// informers the controller does not watch. Starting them all first lets the six sync together.
+	var synced []toolscache.InformerSynced
+	for _, k := range r.kinds {
+		inf, ok := r.startInformer(ctx, k)
+		if !ok {
+			return nil // a stop, not a failure of the controller
+		}
+		synced = append(synced, inf.HasSynced)
 	}
-	r.ok.Store(true)
+	if !toolscache.WaitForCacheSync(ctx.Done(), synced...) {
+		return nil // the manager is stopping
+	}
+	r.synced.Store(true)
 	<-ctx.Done()
-	r.ok.Store(false)
 	return nil
 }
 
-func (r *readiness) NeedLeaderElection() bool { return true }
+// startInformer returns the cache's informer for k without waiting for it to sync, trying again
+// while the API server cannot serve the kind. It reports false when ctx ends first, also while
+// GetInformer itself is stuck: it maps the kind through the REST mapper, whose discovery request
+// does not take ctx (DiscoveryTimeout), so the call runs on a goroutine of its own and a stop does
+// not wait for it.
+func (r *readiness) startInformer(ctx context.Context, k client.Object) (cache.Informer, bool) {
+	retry := r.retry
+	if retry == 0 {
+		retry = cacheRetry
+	}
+	type answer struct {
+		inf cache.Informer
+		err error
+	}
+	for {
+		got := make(chan answer, 1)
+		go func() {
+			inf, err := r.cache.GetInformer(ctx, k, cache.BlockUntilSynced(false))
+			got <- answer{inf, err}
+		}()
+		select {
+		case a := <-got:
+			if a.err == nil {
+				return a.inf, true
+			}
+		case <-ctx.Done():
+			return nil, false
+		}
+		select {
+		case <-time.After(retry):
+		case <-ctx.Done():
+			return nil, false
+		}
+	}
+}
 
-func (r *readiness) serving() bool { return r.ok.Load() }
+// NeedLeaderElection is false: see readiness.
+func (r *readiness) NeedLeaderElection() bool { return false }
 
-func (r *readiness) check() error {
-	if !r.ok.Load() {
-		return errors.New("not leading, or caches not synced")
+func (r *readiness) isElected() bool {
+	select {
+	case <-r.elected:
+		return true
+	default:
+		return false
+	}
+}
+
+// serving is what the Backend answers agents by: the caches have synced and
+// the controller is elected, with or without leader election.
+func (r *readiness) serving() bool { return r.synced.Load() && r.isElected() }
+
+// checkCaches is the readiness check ReadyzCaches.
+func (r *readiness) checkCaches() error {
+	if !r.synced.Load() {
+		return errors.New("caches not synced")
 	}
 	return nil
+}
+
+// checkLeading is the readiness check ReadyzLeading. Without leader election
+// there is no Lease to lead, so it passes, even before Elected closes
+// (`@hpc-burst-science-agent`, 1 Nov 2026, #147).
+func (r *readiness) checkLeading() error {
+	if !r.leaderElection || r.isElected() {
+		return nil
+	}
+	return errors.New("not leading its Lease")
 }
 
 // agentBuilds hands out the SHA-256 of each agent build, read once per file.

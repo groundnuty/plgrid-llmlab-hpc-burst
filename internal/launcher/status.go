@@ -42,6 +42,12 @@ type StatusReport struct {
 	Writes     *bool        `json:"writes_ok,omitempty"`
 	GC         *bool        `json:"gc_ok,omitempty"` // the garbage-collector probe
 	Front      *Front       `json:"front,omitempty"`
+	// FrontAbsent is true when no front runs under this host's supervisor: the record holds no
+	// front configuration, because up was given no --front-config (HBEP-8, Observers: "the front
+	// was not started or not configured"). That is a state, not a fault: the host stays healthy.
+	// A front that is configured and not running is not absent: its entry is listed with
+	// Running false, and the host is unhealthy. Front, the dial-home address, is a separate matter.
+	FrontAbsent bool `json:"front_absent,omitempty"`
 	// EventTTL is how long the API server keeps an Event, from the launcher's own record of the
 	// arguments it started k3s with (State.EventTTL; HBEP-8, Retention), never from the API server.
 	// EventTTLDefault is true when the record has none, as it has not after a start by an earlier
@@ -62,8 +68,10 @@ type StatusReport struct {
 // StatusOptions are the inputs of Status.
 type StatusOptions struct {
 	StateDir string
-	// NoAPI skips the questions asked of the API (/readyz, the controller manager's /healthz,
-	// the write probe and the garbage-collector probe); the process and socket checks always run.
+	// NoAPI skips the questions asked of the API server (its /readyz, the controller manager's
+	// /healthz, the write probe and the garbage-collector probe). The process and socket checks
+	// always run, and so do the questions asked of the supervised processes' own health ports:
+	// their /healthz and the lifecycle controller's /readyz.
 	NoAPI bool
 	// NoGCProbe skips the garbage-collector probe only.
 	NoGCProbe bool
@@ -102,6 +110,7 @@ func Status(ctx context.Context, o StatusOptions) (*StatusReport, error) {
 		return rep, nil
 	}
 	rep.Version, rep.StartedAt, rep.Ports, rep.Front = st.Version, &st.StartedAt, &st.Ports, &st.Front
+	rep.FrontAbsent = st.FrontRun == nil
 	if rep.EventTTL = st.EventTTL; rep.EventTTL == "" {
 		rep.EventTTL, rep.EventTTLDefault = apiserverEventTTL, true
 	}
