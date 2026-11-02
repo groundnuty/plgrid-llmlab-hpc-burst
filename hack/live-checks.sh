@@ -483,6 +483,12 @@ remote() {
 # preamble <var> <value>...: assignments for the head of a remote script, quoted.
 preamble() { local k; while [ $# -ge 2 ]; do k=$1; printf '%s=%q\n' "$k" "$2"; shift 2; done; }
 
+# has_line <text> <line>: whether the line is one of the text's lines, exactly. A string test and no pipeline:
+# under pipefail, printf ... | grep -q failed whenever grep stopped at a match while printf was still writing
+# (bash writes its standard output a line at a time), and the SIGPIPE that killed printf read as "no match",
+# silently (#213).
+has_line() { case $'\n'$1$'\n' in *$'\n'"$2"$'\n'*) return 0 ;; esac; return 1; }
+
 # queue_jobs <host>: the user's hb- jobs, one "id|name|partition" per line.
 # Returns 1 when squeue could not be read, so an unreadable queue is never taken for an empty one.
 queue_jobs() { # id|name|partition lines
@@ -494,7 +500,7 @@ printf '%s\n' "$out" | grep '|hb-' || true
 EOS
   ) || return 1
   # The marker line, wherever it sits: a login banner can come before it.
-  printf '%s\n' "$reply" | grep -q -x 'squeue=ok' || return 1
+  has_line "$reply" 'squeue=ok' || return 1
   printf '%s\n' "$reply" | sed -n '/^squeue=ok$/,$p' | tail -n +2 | grep -E '^[0-9][0-9_+]*\|hb-[A-Za-z0-9._-]*\|[A-Za-z0-9._-]+$' || true
 }
 
@@ -599,7 +605,7 @@ owned_present() {
   local now=$1 tags=$2 id name
   while IFS='|' read -r id name _; do
     [ -n "$id" ] || continue
-    if { [ -n "$tags" ] && printf '%s\n' "$tags" | grep -q -x -F "$name"; } || { [ -n "$JOBID" ] && [ "$id" = "$JOBID" ]; }; then echo "$id"; fi
+    if { [ -n "$tags" ] && has_line "$tags" "$name"; } || { [ -n "$JOBID" ] && [ "$id" = "$JOBID" ]; }; then echo "$id"; fi
   done <<<"$now"
 }
 
@@ -1127,13 +1133,25 @@ input_matches() {
 
 # plan_key <name> <ctx>: sets PLAN_KEY, the key of a row's dependency closure. Rows with the same package and
 # stack share it. It sets a variable and forks nothing: the plan calls it for every changed file, row and
-# context, and a command substitution there failed to fork on a loaded host and silently dropped a row.
+# context.
 PLAN_KEY=""
 plan_key() { PLAN_KEY="${PKG[$1]}|${STACK[$1]:--}|$2"; }
 
+# PLAN_IN holds one entry per closure key and line of that closure ("<key><newline><line>"), so the plan
+# tests membership with a variable lookup and runs no pipeline for it. It once tested it with
+# printf ... | grep -q under pipefail: bash writes its standard output a line at a time, grep -q exits at the
+# first match, and a printf still writing died of SIGPIPE. bash reports no death by SIGPIPE, so the failed
+# pipeline read as "not covered" and the row was dropped with exit 0: now and then under load, and every
+# time once a listing outgrew the pipe's buffer (#213).
+declare -A PLAN_IN=()
+
+# plan_has <key> <line>: whether the line is in the closure of the key.
+plan_has() { [ -n "${PLAN_IN[$1$'\n'$2]+x}" ]; }
+
 plan() {
-  local range=$1 base head bsha hsha files name pkg ctx side f d b reason key out
-  local -A deps=() reasons=() hit=()
+  local range=$1 base head bsha hsha files name pkg ctx side f d b reason key out l
+  local -A keys=() reasons=() reason_seen=() hit=()
+  local -a lines=()
   case $range in *..*) ;; *) say "live-checks: --plan needs <base>..<head>"; return 2 ;; esac
   base=${range%%..*}; head=${range##*..}
   bsha=$(git -C "$ROOT" rev-parse --verify --quiet "${base}^{commit}" 2>/dev/null) &&
@@ -1158,8 +1176,8 @@ plan() {
     pkg=${PKG[$name]}
     for ctx in ${CONTEXTS[$name]//,/ }; do
       plan_key "$name" "$ctx"; key=$PLAN_KEY
-      [ -z "${deps[$key]+x}" ] || continue
-      deps[$key]=""
+      [ -z "${keys[$key]+x}" ] || continue
+      keys[$key]=1
       # The packages of the row that exist at each end of the range (one may be new, or deleted, in it); one go
       # list call per end lists the closure of them all.
       local -a present=()
@@ -1170,17 +1188,22 @@ plan() {
         done
         [ ${#present[@]} -gt 0 ] || continue
         out=$(pkg_deps "$PLAN_TMP/$side" "$ctx" "${present[@]}") || { say "live-checks: dependency discovery failed for package $pkg ($ctx) at the $side of the range; nothing is planned"; return 2; }
-        deps[$key]+="$out"$'\n'
+        # Read without a pipeline, and whole: a listing that cannot be read fails the plan as a failed
+        # discovery does.
+        mapfile -t lines <<<"$out" && [ ${#lines[@]} -gt 0 ] || { say "live-checks: the closure of package $pkg ($ctx) at the $side of the range could not be read; nothing is planned"; return 2; }
+        for l in "${lines[@]}"; do PLAN_IN[$key$'\n'$l]=1; done
       done
       for spkg in $pkg ${STACK[$name]-}; do
         [ -d "$PLAN_TMP/base/$spkg" ] || [ -d "$PLAN_TMP/head/$spkg" ] || { say "live-checks: package $spkg exists at neither end of the range; nothing is planned"; return 2; }
       done
-      deps[$key]=$(printf '%s' "${deps[$key]}" | sort -u)
     done
   done
 
   for f in "${changed[@]}"; do
-    d=$(dirname "$f"); b=$(basename "$f")
+    # The file's directory and name as dirname and basename give them (a file at the root is in "."),
+    # without forking.
+    case $f in */*) d=${f%/*} ;; *) d=. ;; esac
+    b=${f##*/}
     for name in "${NAMES[@]}"; do
       [ "${STATUS[$name]}" = ready ] || continue
       pkg=${PKG[$name]}; reason=""
@@ -1190,7 +1213,7 @@ plan() {
         for ctx in ${CONTEXTS[$name]//,/ }; do
           # An embedded file counts wherever it sits and whatever it is called.
           plan_key "$name" "$ctx"
-          if printf '%s\n' "${deps[$PLAN_KEY]}" | grep -q -x -F "embed:$f"; then reason=$f; break; fi
+          if plan_has "$PLAN_KEY" "embed:$f"; then reason=$f; break; fi
         done
       fi
       if [ -z "$reason" ]; then
@@ -1199,7 +1222,7 @@ plan() {
         else
           for ctx in ${CONTEXTS[$name]//,/ }; do
             plan_key "$name" "$ctx"
-            printf '%s\n' "${deps[$PLAN_KEY]}" | grep -q -x -F "$d" || continue
+            plan_has "$PLAN_KEY" "$d" || continue
             case $b in
               *_test.go) ;;
               *.go|*.s|*.S|*.c|*.h|*.cc|*.cpp) reason=$d; break ;;
@@ -1209,7 +1232,10 @@ plan() {
       fi
       [ -n "$reason" ] || continue
       hit[$name]=1
-      printf '%s' "${reasons[$name]:-}" | grep -q -x -F "$reason" || reasons[$name]="${reasons[$name]:-}$reason"$'\n'
+      if [ -z "${reason_seen[$name$'\n'$reason]+x}" ]; then
+        reason_seen[$name$'\n'$reason]=1
+        reasons[$name]="${reasons[$name]:-}$reason"$'\n'
+      fi
     done
   done
   local run="" none="" r shown

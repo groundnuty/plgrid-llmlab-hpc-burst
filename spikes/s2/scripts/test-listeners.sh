@@ -26,7 +26,12 @@ reset() { for p in "${pids[@]}"; do killtree "$p"; done; pids=(); rm -rf "$RUN";
 spawn_listener() { python3 -I -c "$LISTEN" "$2" "$3" & rec "$1" $!; sleep 0.5; }
 verdict() { "$HERE/stack.sh" check-listeners none > "$T/out" 2>&1; echo $?; }
 
-for port in 19890 19891 19892 19893; do ss -H -ltn "sport = :$port" | grep -q . && { echo "port $port is in use; aborting"; exit 2; }; done
+# The listing is read whole, then matched: piped into grep -q under pipefail, ss could die of SIGPIPE after the
+# match and a port in use read as free (plgrid-llmlab-hpc-burst #213).
+for port in 19890 19891 19892 19893; do
+  listing=$(ss -H -ltn "sport = :$port") || { echo "ss cannot list port $port; aborting"; exit 2; }
+  grep -q . <<<"$listing" && { echo "port $port is in use; aborting"; exit 2; }
+done
 
 spawn_listener sim0 127.0.0.1 19890
 check "a loopback listener passes" test "$(verdict)" = 0
