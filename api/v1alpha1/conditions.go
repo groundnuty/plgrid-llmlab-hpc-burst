@@ -341,26 +341,6 @@ const EventReasonShapesFit = "ShapesFit"
 // carries it (`@hpc-burst-science-agent`, 1 Nov 2026, for #167).
 const EventReasonTunnelOrphaned = "TunnelOrphaned"
 
-// EventReasonHandedOver is the replaced event the lifecycle controller raises
-// on an Instance whose drain start has been reached, when another Instance
-// serves in its place (HBEP-7, Handover; HBEP-8, Reasons in alpha). It was a
-// string literal at its call site; it is a constant by `@hpc-burst-science-agent`'s
-// ruling of 2 Nov 2026, for #239.
-const EventReasonHandedOver = "HandedOver"
-
-// EventReasonNoReplacementReady is the ending-soon event the lifecycle
-// controller raises on a ready Instance whose drain start is less than an hour
-// away while no replacement is ready (HBEP-7, Events and conditions; HBEP-8,
-// Reasons in alpha). A constant by the same ruling as EventReasonHandedOver.
-const EventReasonNoReplacementReady = "NoReplacementReady"
-
-// EventReasonReady is the ready event the lifecycle controller raises on an
-// Instance once it is verified, qualified and warmed up, and the front routes
-// to it (HBEP-7, Instance start; HBEP-8, Reasons in alpha). It was a string
-// literal at its call site like the two above, and is a constant for the same
-// reason, added with them for #239.
-const EventReasonReady = "Ready"
-
 // Reasons of a managed Provider's conditions (HBEP-4, Managed provider in
 // alpha; HBEP-11, Credentials), so the lifecycle controller and the front can
 // match them exactly. The managed Provider's controller (#69) writes all nine.

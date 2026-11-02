@@ -28,12 +28,21 @@ var strict = os.Getenv("REASONDRIFT_STRICT") == "1"
 // that no longer drifts, so the list can only shrink and the erratum's merge
 // forces its entries out. When the list is empty, delete it and the switch.
 //
-// Both entries are for the HBEP: a deployment's event regards the Instance once
-// the ModelDeployment is gone (internal/lifecycle, mdObject), and HBEP-8's table
-// says ModelDeployment only. The erratum splits the lifecycle row so that
-// VerificationFailed and CapacityDropped regard the ModelDeployment, else the
-// Instance; the report on #239 has the wording the guard accepts.
+// The two code-only entries are for the HBEP: a deployment's event regards the
+// Instance once the ModelDeployment is gone (internal/lifecycle, mdObject), and
+// HBEP-8's table says ModelDeployment only. The erratum splits the lifecycle row
+// so that VerificationFailed and CapacityDropped regard the ModelDeployment,
+// else the Instance; the report on #239 has the wording the guard accepts.
+//
+// The three no-constant entries are for the code: reasons written as string
+// literals at their call sites in internal/lifecycle. The contracts PR after
+// #239 adds their constants to api/v1alpha1, uses them there and removes these
+// entries. (Builders do not edit api/.) A reason an emit site takes from a
+// package-local constant needs no entry: the scan reaches it by reference.
 var knownDriftUntilHBEP8Erratum = []reasondrift.Entry{
+	{Kind: reasondrift.NoConstant, Reason: "HandedOver", Why: "string literal at its call site in internal/lifecycle; the contracts PR after #239 adds the constant"},
+	{Kind: reasondrift.NoConstant, Reason: "NoReplacementReady", Why: "string literal at its call site in internal/lifecycle; the contracts PR after #239 adds the constant"},
+	{Kind: reasondrift.NoConstant, Reason: "Ready", Why: "string literal at its call site in internal/lifecycle; the contracts PR after #239 adds the constant"},
 	{Kind: reasondrift.CodeOnly, Action: "degraded", Reason: "CapacityDropped", Regarding: "Instance", Package: "internal/lifecycle", Why: "mdObject falls back to the Instance when the ModelDeployment is gone; the table lists ModelDeployment only"},
 	{Kind: reasondrift.CodeOnly, Action: "degraded", Reason: "VerificationFailed", Regarding: "Instance", Package: "internal/lifecycle", Why: "mdObject falls back to the Instance when the ModelDeployment is gone; the table lists ModelDeployment only"},
 }
@@ -327,23 +336,51 @@ func (p *pass) mutantEmits(in *v1alpha1.Instance) {
 }
 `
 
+// frontRouterWithALiteral is internal/front/router.go with the one emit that
+// takes CountsDrift from the package-local constant reasonCountsDrift changed to
+// write the string literal instead.
+func frontRouterWithALiteral(t *testing.T) []byte {
+	t.Helper()
+	src, err := os.ReadFile(filepath.Join(repoRoot(t), "internal/front/router.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const from, to = "eventDegraded, reasonCountsDrift, msg)", `eventDegraded, "CountsDrift", msg)`
+	if n := strings.Count(string(src), from); n != 1 {
+		t.Fatalf("internal/front/router.go has %d emits of reasonCountsDrift, want 1", n)
+	}
+	return []byte(strings.Replace(string(src), from, to, 1))
+}
+
 // TestEmitsAddedByAnOverlayAreCaught is a mutant check (#239): new calls of the
-// lifecycle Recorder, added through go/packages' overlay, appear as the
+// lifecycle Recorder, and an emit whose package-local constant is replaced by
+// the same string literal, added through go/packages' overlay, appear as the
 // mismatches they cause and no others. One scan serves both cases.
 func TestEmitsAddedByAnOverlayAreCaught(t *testing.T) {
-	overlay := map[string][]byte{filepath.Join(repoRoot(t), "internal/lifecycle/zz_mutant_overlay.go"): []byte(mutantEmits)}
+	root := repoRoot(t)
+	overlay := map[string][]byte{
+		filepath.Join(root, "internal/lifecycle/zz_mutant_overlay.go"): []byte(mutantEmits),
+		filepath.Join(root, "internal/front/router.go"):                frontRouterWithALiteral(t),
+	}
 	code := scanTree(t, overlay)
 	md8, md7 := realDocs(t)
 
-	// Not in the table: each is an emit the table lacks.
+	// A reason the front took from a named constant is fine, and the same
+	// reason written as a literal needs a constant in api/v1alpha1: CountsDrift
+	// has none, so it is drift. (Without the change, the unchanged tree is the
+	// baseline: TestTheUnchangedTreeIsTheBaselineOfTheMutants.)
+	countsDrift := key(reasondrift.NoConstant, "", "CountsDrift", "", "")
+
+	// Not in the table: each new emit is one the table lacks.
 	want := []string{
+		countsDrift,
 		key(reasondrift.CodeOnly, "failing", "LiteralMutantReason", "Instance", "internal/lifecycle"),
 		key(reasondrift.CodeOnly, "failing", "NamedMutantReason", "Instance", "internal/lifecycle"),
 		key(reasondrift.CodeOnly, "failing", "UnlistedMutantReason", "Instance", "internal/lifecycle"),
 	}
 	slices.Sort(want)
 	if got := leftover(t, md8, md7, code); !slices.Equal(got, want) {
-		t.Errorf("with three emits added: %v, want %v", got, want)
+		t.Errorf("with three emits added and a constant replaced by a literal: %v, want %v", got, want)
 	}
 
 	// With rows for the first two, what is left is the literal, which has no
@@ -353,6 +390,7 @@ func TestEmitsAddedByAnOverlayAreCaught(t *testing.T) {
 		"| `replaced` | `HandedOver` | Instance | lifecycle controller |",
 		"| `failing` | `LiteralMutantReason`, `NamedMutantReason` | Instance | lifecycle controller |")
 	want = []string{
+		countsDrift,
 		key(reasondrift.NoConstant, "", "LiteralMutantReason", "", ""),
 		key(reasondrift.CodeOnly, "failing", "UnlistedMutantReason", "Instance", "internal/lifecycle"),
 	}

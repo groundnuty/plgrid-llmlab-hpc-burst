@@ -302,7 +302,7 @@ func (p *pass) endingSoon(in *v1alpha1.Instance, pv *providerView) {
 		return
 	}
 	if p.mem.once("ending-soon/" + string(in.UID)) {
-		p.r.Recorder.Event(in, nil, eventEndingSoon, v1alpha1.EventReasonNoReplacementReady,
+		p.r.Recorder.Event(in, nil, eventEndingSoon, "NoReplacementReady",
 			fmt.Sprintf("drain start at %s is less than %s away and no replacement is ready", ds.UTC().Format(time.RFC3339), endingSoonLead))
 	}
 }
