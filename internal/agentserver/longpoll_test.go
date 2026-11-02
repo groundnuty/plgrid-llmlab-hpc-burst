@@ -235,7 +235,7 @@ func TestLongPollsOfManyAgentsAreIndependent(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	start := time.Now()
-	rec := x.do(http.MethodPost, agentapi.PathReport, b, reportBody(t, agentapi.Report{Time: time.Now()}))
+	rec := x.do(http.MethodPost, agentapi.PathReport, b, reportBody(t, agentapi.Report{Seq: 1, Time: time.Now()}))
 	if rec.Code != http.StatusNoContent || time.Since(start) > time.Second {
 		t.Fatalf("B's report: %d after %s, while A's poll waits", rec.Code, time.Since(start))
 	}

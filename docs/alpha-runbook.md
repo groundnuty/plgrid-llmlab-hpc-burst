@@ -9,13 +9,14 @@ hack/live-checks.sh --run <row>...            # shape and queue estimate, then "
 hack/live-checks.sh --run <row>... --yes      # the run
 ```
 
-`tunnel-hour` and `gpu-accounting` are aliases: each stands for its `-helios` and `-athena` rows, run one after the other. A skipped row counts as a failure, and so does a test that cannot start for lack of a setting.
+`tunnel-hour`, `gpu-accounting` and `reach` are aliases: each stands for its `-helios` and `-athena` rows, run one after the other. A skipped row counts as a failure, and so does a test that cannot start for lack of a setting.
 
 ## State of the wiring
 
 | Row | State |
 |---|---|
 | `gpu-accounting-helios`, `gpu-accounting-athena` | Complete. Runs through the Provider's controller; needs no dial-home route. |
+| `reach-helios`, `reach-athena` | Complete (issue #225). Runs through the Provider's controller; needs the gateway's forwarded port (`LIVE_PROBE_*`, below) and runs only when the owner says that port is up. |
 | `alpha-athena-handover`, `alpha-helios-nooverlap`, `tunnel-hour-helios`, `tunnel-hour-athena` | The judging, the settings, the gating, the slot handling, the cleanup and the dry runs are in. The scenario that starts the stack and drives it waits for the one-host rehearsal (PR #161); until it is wired a live run fails at its first step with "the live scenario steps are not wired yet" and has used no cluster. |
 | `alpha-helios-nooverlap` | Needs #174 (no-overlap queue-wait growth), which is on main (#208), so in every checkout that has this row. It needs no setting for it; it needs the owner's go (below). |
 
@@ -36,6 +37,8 @@ The settings file is named by `HPCBURST_LIVE_SETTINGS`: `KEY=VALUE` lines, mode 
 | `LIVE_DIALHOME_KEY` | stack rows, `ssh` mode | the restricted dial-home key file, mode 600 |
 | `LIVE_BIN_DIR` | the four stack rows | the directory with `k3s-1.36.5/` and the pinned frp (`hack/fetch-k3s.sh`, `hack/fetch-frp.sh`) |
 | `LIVE_TUNNEL_LEASE_MINUTES` | optional, `tunnel-hour-*` | the tunnel rows' lease in minutes, 106 to 240; default 137 (below). The owner's choice when giving the go: the shape, the hold note, the timeout and the test follow it |
+| `LIVE_PROBE_HOST`, `LIVE_PROBE_PORT` | `reach-*` | the gateway's forwarded port as the compute nodes see it: a host name or address (letters, digits, dots, hyphens, underscores) and a port from 1 to 65535. **Private**: they go into the job's script on the cluster and nowhere else, never on the screen, in the test's log, in a record or in a post |
+| `LIVE_PROBE_LABEL` | `reach-*` | the only name of that port in public output (`posts.md`): 1 to 40 letters, digits, dots, underscores or hyphens. It must not hold the host or the port, in any case, with or without the root dot, and with the dots, hyphens and underscores run together or changed (`GATEWAY.PRIVATE.EXAMPLE` holds `gateway.private.example`) |
 | `LIVE_OWNER_GO_HELIOS_NOW` | `alpha-helios-nooverlap`, `tunnel-hour-helios` | today's UTC date (`YYYY-MM-DD`), set only after the owner has said yes to the hold; a missing or older date is refused (exit 3) |
 
 One environment variable, not a setting: `LIVE_PENDING_MAX_SECONDS` (default 7200) is how long a job may wait in the queue before the run cancels it. Athena's `plgrid-gpu-a100` queue was estimated at a start on 13 Nov for one GPU (#145, 1 Nov 2026): set it from the estimate that `--run` prints, which is the reason it is printed first. The script's timeout for a row is the row's run time plus this wait, except `gpu-accounting-helios`, whose start-wait bound of 10 minutes is its first clock and is already in its timeout.
@@ -54,6 +57,8 @@ Helios QOS `now` and Athena `plgrid-now` allow one job per user, and the owner s
 | `tunnel-hour-athena` | 1 | `plgrid-gpu-a100`, no slot |
 | `gpu-accounting-helios` | 1, for about 15 minutes at most (the 10-minute start wait and the job's few minutes) | QOS `now`, the shared slot |
 | `gpu-accounting-athena` | 1 | `plgrid-gpu-a100`, no slot |
+| `reach-helios` | 1, for about 13 minutes at most (the 10-minute start wait and a job of seconds, with a 2-minute limit) | QOS `now`, the shared slot |
+| `reach-athena` | 1, for about 13 minutes at most | `plgrid-now`, the one-job partition, the shared slot |
 
 On Helios the replacement of `alpha-helios-nooverlap` is created at its planned time and pends until the predecessor's job ends and frees the GPU (the partition's QOS allows 2,000 submitted jobs, QOS `now` one GPU: `hbep/0007-lifecycle-controller/README.md:463`, `:608`). So the pending replacement sits in the owner's shared slot only for the planned gap, from its planned submission to the predecessor's end, and the run never queues a third job. Under `ReleaseWhenIdle` with a 2-minute `idleLimit` the predecessor's job is released that long after its Instance ends, so it does not hold the GPU to its hard end (`:471`; the default `Keep` would).
 
@@ -94,6 +99,22 @@ hack/live-checks.sh --run gpu-accounting --yes
   - `hbep/0008-observability-and-events/README.md:395`: "the Test plan passes, and the kept accounting record's GPU entry is checked once on a real GPU job on each alpha partition;"
   - `hbep/0008-observability-and-events/README.md:331`: the kept record holds "`allocatedGPUs`" and "`basis: allocated`".
   - Checked: the record's partition is the row's; its basis is `allocated`; the job asked for and saw at least one GPU (a CPU job would agree at 0); the record's GPU entry equals the count the job was given, which equals the request; an unknown entry fails.
+
+### `reach-helios`, `reach-athena`
+
+```
+hack/live-checks.sh --run reach --yes
+```
+
+Issue #225. Alpha's live runs stay on the development host, and the owner sets up the gateway's forwarded port (#145, 2 Nov 2026). These rows confirm that port from the compute nodes: a minimal job on each platform tries a TCP connect to it and writes down what came of it. **Run nothing until the owner says the forwarded port is up.**
+
+- **Settings:** the account, the credentials file, `LIVE_OUT_DIR`, `LIVE_LOCK_DIR`, and `LIVE_PROBE_HOST`, `LIVE_PROBE_PORT`, `LIVE_PROBE_LABEL`. No dial-home route. A missing or unusable probe setting refuses the row (exit 3), naming the setting and never its value.
+- **Where:** Helios `plgrid-gpu-gh200` under QOS `now` (its normal QOS estimates weeks; GH200 nodes, not Helios CPU, because alpha's Helios Instances run there), and Athena's one-job partition `plgrid-now`, which has the same A100 nodes as `plgrid-gpu-a100` and so the same network path (`@hpc-burst-science-agent`, 2 Nov 2026). The post names the partition and the QOS used; on `plgrid-now` no `--qos` is sent and the partition's own QOS applies.
+- **Shape:** one job with `--no-requeue`, 1 GPU (the partitions are GPU-only), 1 CPU and 1Gi, the smallest the request check accepts (`slurm.CheckRequest`; `TestConformanceRowsPassTheRequestCheck` runs it on both rows), a time limit of 2 minutes of their own (the probe ends in under half a minute, so a stalled job holds the slot for 2 minutes, not the harness's 5; review of PR 235), and `-C memfs` on Helios, as the Helios profile asks of every job. The scheduler's acceptance of 1 CPU and 1Gi on Athena is not recorded (the conformance run there used 4 CPUs and 32Gi), so the row's own estimate (`sbatch --test-only`) is the first check: a rejected shape ends the row as not run (exit 3), with or without `--yes`.
+- **Two guards, on both rows** (the same two as `gpu-accounting-helios`): the slot precondition (`check_slot`: a job of yours already in the slot refuses the run, exit 3, before anything is built or estimated) and the start-wait bound of 10 minutes (past it the job is cancelled by its tag and the row is `NOT RUN`, exit 3, with no text to post). The job runs for seconds, so a run holds the slot for about 13 minutes at most, the start wait included.
+- **What the job does** (`internal/providerctl/conformance/testdata/reach-probe.sh`, S1 step 0's method from issue #18): it resolves the name, tries a TCP connect with a 5-second limit (bash's `/dev/tcp` inside `timeout`), and, if that succeeds, asks what answers on a second connection: an SSH server speaks first (3-second read); a silent one is sent a TLS ClientHello and read for a TLS record. It reads the connect's failure from its reason alone (the text after the last `: `), never from the target's name. It writes one line of fixed words into the Allocation's directory and nothing else, and its output and error stay empty: the outcome (`reachable`, `refused`, `timeout`, `unresolved`, `unreachable`, `error`) and, for `reachable`, the answer (`ssh`, `tls`, `data`, `silent`, `unknown`). The test reads the line back by its sha256 against the lines the probe can write, so no byte that the other side sent reaches the test, the record or a post.
+- **Pass criteria:** `reachable`, with any answer. `refused`, `timeout`, `unresolved`, `unreachable` and `error` fail the row (exit 1) and still write `posts.md`, because each is a finding that the owner needs: refused is an open network with nothing listening, timeout a filtered or dropped path, unresolved a name the node cannot resolve, unreachable an ICMP "no route". An answer proves only that something answers there, not that it is the gateway: on 31 Oct an SSH banner was taken for the VM's sshd while the host key was a gateway's (lesson L-17.7), and the post says so.
+- **Posts:** the run's `posts.md` (the verdict, the label, the outcome and what answered, the partition and QOS used, the shape) and the slot use. To #225 and #145. It carries the label and never the host or the port.
 
 ### `alpha-athena-handover`
 
@@ -154,7 +175,7 @@ hack/live-checks.sh --run tunnel-hour --yes
 ## Before the first real run
 
 1. `hack/live-checks.sh --list` and `--plan origin/main..HEAD` name the rows; `--run <row>` (no `--yes`) prints the shape and the estimate, or the settings it lacks.
-2. Run `gpu-accounting` first: short, no route needed, and it is the only row fully wired.
+2. Run `gpu-accounting` first: short, no route needed, and fully wired. `reach` is as short and needs the owner's word that the forwarded port is up.
 3. Set `LIVE_PENDING_MAX_SECONDS` from the estimate before a queued run.
 4. Post each result where the row says, with its slot use. The text of `posts.md` is private until you copy it; it holds counts, durations and fixed labels, never a host, account or job ID.
 

@@ -94,8 +94,14 @@ type Rewriting struct {
 // Options configure a Server.
 type Options struct {
 	// PortLo and PortHi are the loopback port range, inclusive, that the
-	// Server binds the first free port of. Required.
+	// Server binds the first free port of. Required unless Listener is set.
 	PortLo, PortHi int
+	// Listener, when set, is what the Server serves on, instead of binding a
+	// port of the range; the Server takes ownership of it and closes it. A test
+	// that must hand the address to another process before the Server starts
+	// binds the port itself and keeps it held until then, so that no stranger
+	// can take it in between (issue #219).
+	Listener net.Listener
 	// Now is the Server's clock. Nil is time.Now. The Server calls it from its
 	// handler goroutines, some of them while it holds its own lock, so it must
 	// be safe for concurrent use and must never call a method of the Server.
@@ -184,9 +190,12 @@ func Start(t testing.TB, opts Options) *Server {
 
 // New starts a Server. The caller closes it.
 func New(opts Options) (*Server, error) {
-	ln, err := Listen(opts.PortLo, opts.PortHi)
-	if err != nil {
-		return nil, err
+	ln := opts.Listener
+	if ln == nil {
+		var err error
+		if ln, err = Listen(opts.PortLo, opts.PortHi); err != nil {
+			return nil, err
+		}
 	}
 	now := opts.Now
 	if now == nil {

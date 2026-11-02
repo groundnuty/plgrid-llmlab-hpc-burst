@@ -42,6 +42,11 @@ type Backend struct {
 	desired map[string]agentapi.DesiredState
 	regs    map[string][]Registration
 	reports map[string][]agentapi.Report
+	// seqs is the Seq of the last report kept from each agent instance, and
+	// dropped counts the reports a Report call answered as accepted and did not
+	// keep, per Allocation (agentapi.KeepsReport).
+	seqs    map[seqKey]uint64
+	dropped map[string]int
 	fail    map[string][]error
 	calls   map[string]int
 }
@@ -54,6 +59,8 @@ func NewBackend() *Backend {
 		desired: map[string]agentapi.DesiredState{},
 		regs:    map[string][]Registration{},
 		reports: map[string][]agentapi.Report{},
+		seqs:    map[seqKey]uint64{},
+		dropped: map[string]int{},
 		fail:    map[string][]error{},
 		calls:   map[string]int{},
 	}
@@ -69,12 +76,26 @@ func (b *Backend) SetDesired(allocUID string, d agentapi.DesiredState) {
 	b.desired[allocUID] = cloneDesired(d)
 }
 
-// Forget drops every registration, as a controller restart does. The reports
-// recorded so far stay, for inspection.
+// Forget drops every registration and the report counts held for the agent
+// instances, as a controller restart does. The reports recorded so far stay, for
+// inspection.
 func (b *Backend) Forget() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	clear(b.regs)
+	clear(b.seqs)
+}
+
+// seqKey names an agent instance of an Allocation.
+type seqKey struct{ allocUID, agentInstanceID string }
+
+// Dropped returns how many reports for the Allocation a Report call answered as
+// accepted without keeping them, being older than the newest kept from the same
+// agent instance, or repeats of it.
+func (b *Backend) Dropped(allocUID string) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.dropped[allocUID]
 }
 
 // FailNext makes the next call of the method (MethodRegister, MethodDesired or
@@ -166,23 +187,56 @@ func (b *Backend) Desired(_ context.Context, c agentapi.Caller) (agentapi.Desire
 	return cloneDesired(d).WithVersion(), nil
 }
 
-// Report appends the report to the Allocation's list.
+// Report appends the report to the Allocation's list, as the lifecycle
+// controller's Backend keeps it (HBEP-7, Report order). For a registered agent
+// (CodeNotRegistered is answered first) it keeps a report only from the agent
+// instance currently registered for the Allocation (currentInstance), and only
+// if agentapi.KeepsReport
+// says so for its Seq and the Seq of the last report kept from that instance.
+// Any other report is answered as accepted, counted by Dropped and not kept. The
+// count held for the instance rises only when a report is kept.
 func (b *Backend) Report(_ context.Context, c agentapi.Caller, r agentapi.Report) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if err := b.begin(MethodReport, c); err != nil {
 		return err
 	}
+	if !b.registered(c) {
+		return notRegistered(c)
+	}
+	k := seqKey{c.AllocationUID, c.AgentInstanceID}
+	if b.currentInstance(c.AllocationUID) != c.AgentInstanceID || !agentapi.KeepsReport(r.Seq, b.seqs[k]) {
+		b.dropped[c.AllocationUID]++
+		return nil
+	}
 	if r.Instance != nil && r.Instance.Key != "" {
 		if err := agentapi.CheckKey([]byte(r.Instance.Key)); err != nil {
 			return agentapi.Errorf(agentapi.CodeBadRequest, "%s: the instance key: %v", MethodReport, err)
 		}
 	}
-	if !b.registered(c) {
-		return notRegistered(c)
+	if r.Seq != 0 {
+		b.seqs[k] = r.Seq
 	}
 	b.reports[c.AllocationUID] = append(b.reports[c.AllocationUID], cloneReport(r))
 	return nil
+}
+
+// currentInstance returns the agent instance ID the Backend keeps reports from
+// for the Allocation: the registration with the highest restart count, the later
+// one on a tie. That is the choice of the lifecycle controller's Backend and of
+// its passes (regLess: restart count, then registration time, then ID), with the
+// order of registration standing for the time, since this Backend has no clock;
+// a second execution registers with a higher restart count whatever the order
+// of the registrations. The caller holds b.mu.
+func (b *Backend) currentInstance(allocUID string) string {
+	var cur string
+	var best int32
+	for i, r := range b.regs[allocUID] {
+		if i == 0 || r.Request.RestartCount >= best {
+			cur, best = r.Caller.AgentInstanceID, r.Request.RestartCount
+		}
+	}
+	return cur
 }
 
 // begin counts a call, rejects a caller that names no Allocation or whose agent
