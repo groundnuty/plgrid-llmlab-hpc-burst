@@ -28,10 +28,14 @@ type scanner struct {
 	escaped map[*ssa.Function]bool
 }
 
-// functions lists the functions the module's packages declare: package-level
-// functions, methods, and the function literals inside them. Compiler-made
-// wrappers and thunks are left out.
-func functions(spkgs []*ssa.Package) []*ssa.Function {
+// functions lists the functions that can hold a call or a use of a function:
+// every function of the module's packages, with their methods and function
+// literals, and the compiler-made ones that can be reached from them (a
+// package's initializer, which runs its variable initializers; the wrapper of
+// a method value; the wrappers of promoted methods). A function of another
+// package has no body here, as only the module's packages are built from
+// syntax.
+func functions(prog *ssa.Program, spkgs []*ssa.Package) []*ssa.Function {
 	seen := map[*ssa.Function]bool{}
 	var out []*ssa.Function
 	var add func(f *ssa.Function)
@@ -40,18 +44,19 @@ func functions(spkgs []*ssa.Package) []*ssa.Function {
 			return
 		}
 		seen[f] = true
-		if f.Synthetic != "" {
-			return
+		if len(f.Blocks) > 0 {
+			out = append(out, f)
 		}
-		out = append(out, f)
 		for _, a := range f.AnonFuncs {
 			add(a)
 		}
 	}
+	ours := map[*ssa.Package]bool{}
 	for _, p := range spkgs {
 		if p == nil {
 			continue
 		}
+		ours[p] = true
 		for _, m := range p.Members {
 			switch m := m.(type) {
 			case *ssa.Function:
@@ -60,7 +65,7 @@ func functions(spkgs []*ssa.Package) []*ssa.Function {
 				for _, t := range []types.Type{m.Type(), types.NewPointer(m.Type())} {
 					ms := p.Prog.MethodSets.MethodSet(t)
 					for i := 0; i < ms.Len(); i++ {
-						if f := p.Prog.MethodValue(ms.At(i)); f != nil && f.Pkg == p {
+						if f := p.Prog.MethodValue(ms.At(i)); f != nil && (f.Pkg == p || f.Pkg == nil) {
 							add(f)
 						}
 					}
@@ -68,6 +73,21 @@ func functions(spkgs []*ssa.Package) []*ssa.Function {
 			}
 		}
 	}
+	// The compiler-made functions an instruction refers to: the wrapper a method
+	// value is built from (MakeClosure), whose call of the method no function of
+	// the package shows.
+	for i := 0; i < len(out); i++ {
+		for _, b := range out[i].Blocks {
+			for _, in := range b.Instrs {
+				for _, op := range in.Operands(nil) {
+					if f, ok := (*op).(*ssa.Function); ok && f.Synthetic != "" && (f.Pkg == nil || ours[f.Pkg]) {
+						add(f)
+					}
+				}
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].String() < out[j].String() })
 	return out
 }
 
@@ -120,6 +140,11 @@ func (s *scanner) collect(code *reasondrift.Code) error {
 					continue
 				}
 				sk, isSink := s.sink(full)
+				if !isSink && fn.Synthetic != "" {
+					// A compiler-made wrapper only forwards its arguments to the
+					// method it wraps; the calls of the wrapper are what count.
+					continue
+				}
 				if !isSink {
 					unknown = append(unknown, fmt.Sprintf("%s calls %s (%s)", here, full, s.pos(ci.Pos())))
 					continue
@@ -242,6 +267,9 @@ func dropEmpty(in []string) []string {
 // pkgDir returns the directory of the function's package, relative to the
 // module root.
 func (s *scanner) pkgDir(fn *ssa.Function) string {
+	if fn.Pkg == nil {
+		return "(compiler-made)"
+	}
 	return strings.TrimPrefix(strings.TrimPrefix(fn.Pkg.Pkg.Path(), s.mod), "/")
 }
 
@@ -251,6 +279,9 @@ func (s *scanner) pkgDir(fn *ssa.Function) string {
 func funcName(fn *ssa.Function) string {
 	for fn.Parent() != nil {
 		fn = fn.Parent()
+	}
+	if fn.Synthetic != "" && fn.Signature.Recv() == nil && fn.Pkg == nil {
+		return fn.String()
 	}
 	if recv := fn.Signature.Recv(); recv != nil {
 		t := recv.Type()

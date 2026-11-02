@@ -74,16 +74,33 @@ func TestResolvesEachWayAReasonArrives(t *testing.T) {
 	}
 	// What cannot be told is reported, never skipped.
 	for fn, why := range map[string]string{
-		"pass.field":    "reason",
-		"pass.viaValue": "no call in the module reaches",
+		"pass.field": "reason",
+		// A method value is called through a wrapper the compiler makes.
+		"pass.viaValue": "used as a value",
 		// A function used as a value has callers a static list does not hold,
 		// even though it is also called with a constant.
 		"valueAndCalled": "used as a value",
+		// A method value is a wrapper that calls the method, and a package-level
+		// table is built by the package's initializer: both hold uses of a
+		// function that the functions of the package do not show.
+		"pass.boundAndCalled": "used as a value",
+		"tabled":              "used as a value",
 	} {
 		e := emitOf(t, code, fn)
 		if e.Unresolved == "" || !strings.Contains(e.Unresolved, why) {
 			t.Errorf("%s: unresolved %q, want a message containing %q", fn, e.Unresolved, why)
 		}
+	}
+	// The recorder's method as a value is an emit through a wrapper the
+	// compiler makes, so it is reported, not skipped.
+	var wrapped []reasondrift.Emit
+	for _, e := range code.Emits {
+		if e.Package == "(compiler-made)" {
+			wrapped = append(wrapped, e)
+		}
+	}
+	if len(wrapped) != 1 || wrapped[0].Unresolved == "" {
+		t.Errorf("emits through a compiler-made wrapper: %+v, want one, unresolved", wrapped)
 	}
 	// The constants are those named Reason... or EventReason..., typed or not.
 	wantConsts := map[string][]string{"A": {"ReasonA"}, "B": {"ReasonB"}, "C": {"ReasonC"}, "D": {"EventReasonD"}, "Typed": {"ReasonTyped"}}

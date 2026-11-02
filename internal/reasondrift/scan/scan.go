@@ -78,7 +78,7 @@ var sinks = map[string]sink{
 
 // emitMethods are the method names that raise events. A call to one that is no
 // sink fails the scan.
-var emitMethods = map[string]bool{"Event": true, "Eventf": true}
+var emitMethods = map[string]bool{"Event": true, "Eventf": true, "AnnotatedEventf": true}
 
 // maxDepth bounds the walk from an argument to the constants behind it.
 const maxDepth = 12
@@ -145,9 +145,8 @@ func Scan(o Options) (*reasondrift.Code, error) {
 
 	prog, spkgs := ssautil.Packages(pkgs, ssa.InstantiateGenerics)
 	prog.Build()
-	fns := functions(spkgs)
 	s := &scanner{
-		mod: mod, root: o.Root, fset: prog.Fset, fns: fns,
+		mod: mod, root: o.Root, fset: prog.Fset, fns: functions(prog, spkgs),
 		wrappers: map[string]bool{}, seenWrappers: map[string]bool{},
 		callers: map[*ssa.Function][]*ssa.CallCommon{}, escaped: map[*ssa.Function]bool{},
 	}

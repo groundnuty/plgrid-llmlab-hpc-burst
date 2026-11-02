@@ -132,3 +132,25 @@ func callValueAndCalled(r Recorder, in *Instance) { valueAndCalled(r, in, v1alph
 var registry2 []func(Recorder, *Instance, string)
 
 func registerFunc() { registry2 = append(registry2, valueAndCalled) }
+
+// boundAndCalled is called directly, and its method value is stored too.
+func (p *pass) boundAndCalled(in *Instance, reason string) {
+	p.r.Event(in, nil, eventFailing, reason, "m")
+}
+
+func (p *pass) callBound(in *Instance) { p.boundAndCalled(in, v1alpha1.ReasonA) }
+
+var bound func(*Instance, string)
+
+func (p *pass) storeBound() { bound = p.boundAndCalled }
+
+// tabled is called directly, and a package-level table holds it.
+func tabled(r Recorder, in *Instance, reason string) { r.Event(in, nil, eventFailing, reason, "m") }
+
+func callTabled(r Recorder, in *Instance) { tabled(r, in, v1alpha1.ReasonA) }
+
+var table = []func(Recorder, *Instance, string){tabled}
+
+// recorderValue hands out the recorder's method as a value, which is an emit
+// path of its own.
+func (p *pass) recorderValue() func(Object, Object, string, string, string) { return p.r.Event }
