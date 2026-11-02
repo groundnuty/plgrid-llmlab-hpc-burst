@@ -43,6 +43,10 @@
 //     Anything else is exit 127, "command not found". Options the plugin never
 //     sends are refused (exit 1), so an unexpected flag cannot pass silently.
 //
+// Job IDs count up from 1001, or from Config.FirstJobID when it is set. Fakes
+// of different tests that run at once on one machine set it apart, so that a
+// job found by its ID (SLURM_JOB_ID, in run mode) is never another Platform's.
+//
 // # Call log
 //
 // One rule: a simple command is logged when it actually begins to run on the
