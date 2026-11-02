@@ -203,6 +203,69 @@ func TestEveryAlphaRowPassesItsDryRunAndEveryFaultFailsIt(t *testing.T) {
 	}
 }
 
+// A job of a row that holds QOS now's GPU for hours that is still pending when the wait in the queue runs out is
+// cancelled by its tag and the row is NOT RUN, exit 3 (issue #222, using #210's protocol): the owner's slot was busy,
+// try again later. The row's own test is the real one, in dry mode, with the owner's job holding the one GPU of the
+// fake QOS; the owner's job is left alone. The same overrun on a row with no such slot is a failure, exit 1, with no
+// marker: NOT RUN is for the slot rows only. The default bound is the issue's 30 minutes, written out here, not read
+// from the script; a wait the operator asks for is the one named.
+func TestAJobPendingPastTheBoundIsNotRunOnTheNowRowsAndAFailureElsewhere(t *testing.T) {
+	real := realTestBinary(t, "HPCBURST_LIVECHECKS_ALPHA_TEST", alphaPkg)
+	realDir := filepath.Join(repoRoot(t), alphaPkg)
+	for _, c := range []struct {
+		row, setting string
+		code         int
+		wantLine     string // "" for a failure
+	}{
+		{"alpha-helios-nooverlap", "", 3, "NOT RUN (a job was still pending after 30 min in the queue and was cancelled by its tag; not a failure)"},
+		{"tunnel-hour-helios", "", 3, "NOT RUN (a job was still pending after 30 min in the queue and was cancelled by its tag; not a failure)"},
+		{"tunnel-hour-helios", "LIVE_PENDING_MAX_SECONDS=600", 3, "NOT RUN (a job was still pending after 10 min in the queue and was cancelled by its tag; not a failure)"},
+		{"tunnel-hour-athena", "", 1, ""},
+	} {
+		t.Run(c.row+"/"+c.setting, func(t *testing.T) {
+			t.Parallel()
+			w := newAlphaWorld(t)
+			w.installDry(dryWrapper, real, realDir)
+			env := []string{"STUB_DRY_FAULT=pend-past-bound"}
+			if c.setting != "" {
+				env = append(env, c.setting)
+			}
+			res := w.run(env, "--run", c.row, "--yes")
+			if res.code != c.code {
+				t.Fatalf("exit %d, want %d:\n%s", res.code, c.code, res.out)
+			}
+			markers, _ := filepath.Glob(filepath.Join(w.out(), c.row+"-*", "not-run.txt"))
+			if posts, _ := filepath.Glob(filepath.Join(w.out(), c.row+"-*", "posts.md")); len(posts) != 0 {
+				t.Errorf("a run that ended on the first clock left a text to post: %v", posts)
+			}
+			if c.wantLine == "" {
+				w.contains(res, c.row+": FAIL", "cleanup: left behind 0")
+				if strings.Contains(res.out, "NOT RUN") || len(markers) != 0 {
+					t.Errorf("a row with no slot ended as NOT RUN (markers %v):\n%s", markers, res.out)
+				}
+				// It failed for the overrun, not for something else.
+				if log, _ := os.ReadFile(filepath.Join(w.out(), c.row+".log")); !strings.Contains(string(log), "was still pending when the wait in the queue ran out") {
+					t.Errorf("the test's log does not give the overrun as the reason:\n%s", log)
+				}
+				return
+			}
+			w.contains(res, c.row+": tests: 0 passed, 0 failed, 1 skipped", c.row+": "+c.wantLine, "cleanup: left behind 0")
+			if strings.Contains(res.out, c.row+": FAIL") || strings.Contains(res.out, c.row+": PASS") {
+				t.Errorf("a NOT RUN run was also reported as a pass or a failure:\n%s", res.out)
+			}
+			if len(markers) != 1 {
+				t.Fatalf("want one not-run marker, found %v", markers)
+			}
+			if fi, err := os.Stat(markers[0]); err != nil || fi.Mode().Perm() != 0o600 {
+				t.Errorf("the marker: %v mode %v, want a file of mode 600", err, fi)
+			}
+			if b, _ := os.ReadFile(markers[0]); strings.Contains(string(b), "hb-") {
+				t.Errorf("the marker names a tag: %s", b)
+			}
+		})
+	}
+}
+
 // The dry switch is guarded from both sides. A dry binary refuses live settings, so a dry pass cannot
 // stand for a live one; and the script never turns the switch on, so a live run is never a dry one.
 func TestADryBinaryRefusesLiveSettings(t *testing.T) {
