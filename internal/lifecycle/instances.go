@@ -112,6 +112,19 @@ func (p *pass) allocationFailed(in *v1alpha1.Instance, alloc *v1alpha1.Allocatio
 	return true, p.fail(in, alloc, v1alpha1.ReasonAllocationEndedEarly, fmt.Sprintf("Allocation %s ended before its hard end", alloc.Name))
 }
 
+// failCheck ends an Instance whose qualification or warm-up failed (typ is the failing condition): the condition
+// is written Failed, status False (api/v1alpha1/conditions.go, ReasonFailed), and the Instance ends with
+// QualificationFailed. A failed verification writes its own condition where the verdict is recorded (verified).
+func (p *pass) failCheck(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, typ, msg string) error {
+	now := metav1.NewTime(p.now)
+	if err := p.setStatus(in, func(s *v1alpha1.InstanceStatus) {
+		cond(&s.Conditions, typ, metav1.ConditionFalse, v1alpha1.ReasonFailed, msg, in.Generation, now)
+	}); err != nil {
+		return err
+	}
+	return p.fail(in, alloc, v1alpha1.ReasonQualificationFailed, msg)
+}
+
 // fail ends a failing Instance with a failing event and releases its
 // Allocation at once, since nothing on it serves (HBEP-7, Release).
 func (p *pass) fail(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, reason, msg string) error {
@@ -312,7 +325,9 @@ func (p *pass) pending(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) error 
 		s.JobID, s.Node = alloc.Annotations[v1alpha1.AnnotationJobID], reg.node
 		s.StartInstructionTime = &now
 		for _, c := range []string{v1alpha1.ConditionVerified, v1alpha1.ConditionQualified, v1alpha1.ConditionWarmedUp} {
-			cond(&s.Conditions, c, metav1.ConditionFalse, v1alpha1.ReasonPending, "not yet checked", in.Generation, now)
+			// Unknown, Kubernetes' "not yet checked" (api/v1alpha1/conditions.go, ReasonPending). Every reader of these three
+			// conditions asks for True (isTrue), so Unknown and False gate the same.
+			cond(&s.Conditions, c, metav1.ConditionUnknown, v1alpha1.ReasonPending, "not yet checked", in.Generation, now)
 		}
 		cond(&s.Conditions, v1alpha1.ConditionAgentUnreachable, metav1.ConditionFalse, v1alpha1.ReasonReporting, "the agent registered", in.Generation, now)
 	}); err != nil {

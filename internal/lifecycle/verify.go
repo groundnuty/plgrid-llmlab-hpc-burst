@@ -68,7 +68,7 @@ func (p *pass) starting(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av ag
 		}
 		pass, msg := judgeQualify(c.Qualify, sh, p.modelName(in))
 		if !pass {
-			return p.fail(in, alloc, v1alpha1.ReasonQualificationFailed, msg)
+			return p.failCheck(in, alloc, v1alpha1.ConditionQualified, msg)
 		}
 		if err := p.setStatus(in, func(s *v1alpha1.InstanceStatus) {
 			cond(&s.Conditions, v1alpha1.ConditionQualified, metav1.ConditionTrue, v1alpha1.ReasonPassed, msg, in.Generation, now)
@@ -83,7 +83,7 @@ func (p *pass) starting(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av ag
 		state, msg, tp := judgeWarmUp(c.WarmUp, sh.targetSessions)
 		switch state {
 		case warmUpFailed:
-			return p.fail(in, alloc, v1alpha1.ReasonQualificationFailed, msg)
+			return p.failCheck(in, alloc, v1alpha1.ConditionWarmedUp, msg)
 		case warmUpRunning:
 			return nil
 		}
@@ -305,13 +305,14 @@ func (p *pass) verified(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, v *ag
 		// PR 88).
 		return p.restart(in, alloc, signalVerifyRead, "", st, data.Message)
 	case causeContradiction, causeShape:
+		lifts := stopLifts(data.Cause, true)
 		p.r.Recorder.Event(p.mdObject(in), nil, eventDegraded, v1alpha1.ReasonVerificationFailed,
-			fmt.Sprintf("Instance %s: %s; provisioning in its class stops until the serving spec changes", in.Name, data.Message))
+			fmt.Sprintf("Instance %s: %s; provisioning in its class stops until %s", in.Name, data.Message, lifts))
 		// Stop the class in this pass too: the record stops it in every later
 		// one (classBlocked), and this pass must not provision there either.
 		if pv := p.pvOf(in.Labels); pv != nil && pv.hasClass && p.ids[pv.class] != nil && string(p.ids[pv.class].id) == string(in.Spec.DeploymentID) {
 			p.ids[pv.class].blocked = "verification record " + name + ": " + data.Message
-			p.degrade(v1alpha1.ReasonVerificationFailed, "provisioning in class %s/%s is stopped until the serving spec changes: %s", pv.class.GPUModel, pv.class.CPUArch, data.Message)
+			p.degrade(v1alpha1.ReasonVerificationFailed, "provisioning in class %s/%s is stopped until %s: %s", pv.class.GPUModel, pv.class.CPUArch, lifts, data.Message)
 		}
 	}
 	return p.fail(in, alloc, v1alpha1.ReasonVerificationFailed, data.Message)
@@ -453,14 +454,16 @@ func (r *Reconciler) earlierRehashFailure(ctx context.Context, in *v1alpha1.Inst
 // record holds, so a workload edit that makes them fit lifts the stop, with
 // one event, and an edit to another misfit keeps it, with an event naming the
 // new shape.
-func (r *Reconciler) classBlocked(ctx context.Context, md *v1alpha1.ModelDeployment, id v1alpha1.FullDeploymentID, sh shapes) (string, error) {
+//
+// It also returns what lifts the stop, for the condition's message (stopLifts).
+func (r *Reconciler) classBlocked(ctx context.Context, md *v1alpha1.ModelDeployment, id v1alpha1.FullDeploymentID, sh shapes) (blocked, lifts string, err error) {
 	var list appsv1.ControllerRevisionList
 	if err := r.Reader.List(ctx, &list, client.InNamespace(md.Namespace), client.MatchingLabels{
 		v1alpha1.LabelRecord:          v1alpha1.RecordVerification,
 		v1alpha1.LabelDeploymentID:    id.Display(),
 		v1alpha1.LabelModelDeployment: v1alpha1.LabelValue(md.Name),
 	}); err != nil {
-		return "", fmt.Errorf("list verification records: %w", err)
+		return "", "", fmt.Errorf("list verification records: %w", err)
 	}
 	sort.Slice(list.Items, func(i, j int) bool { return list.Items[i].Name < list.Items[j].Name })
 	key := shapesKey(sh)
@@ -472,17 +475,18 @@ func (r *Reconciler) classBlocked(ctx context.Context, md *v1alpha1.ModelDeploym
 		}
 		switch d.Cause {
 		case causeContradiction:
-			return fmt.Sprintf("verification record %s: %s", name, d.Message), nil
+			return fmt.Sprintf("verification record %s: %s", name, d.Message), stopLifts(causeContradiction, true), nil
 		case causeShape:
 			if d.MaxModelLen < 1 {
-				return fmt.Sprintf("verification record %s: %s", name, d.Message), nil
+				// No context limit to test the workload against: the shapes cannot lift this stop.
+				return fmt.Sprintf("verification record %s: %s", name, d.Message), stopLifts(causeShape, false), nil
 			}
 			if _, err := sh.resolved(d.MaxModelLen, d.Overhead); err != nil {
 				if r.memory().once("shape-stop/" + name + "/" + key) {
 					r.Recorder.Event(md, nil, eventDegraded, v1alpha1.ReasonVerificationFailed,
 						fmt.Sprintf("the workload's shapes do not fit the context limit %d that verification record %s found: %v", d.MaxModelLen, name, err))
 				}
-				return fmt.Sprintf("verification record %s found max-model-len %d and a template overhead of %d, and the workload does not fit: %v", name, d.MaxModelLen, d.Overhead, err), nil
+				return fmt.Sprintf("verification record %s found max-model-len %d and a template overhead of %d, and the workload does not fit: %v", name, d.MaxModelLen, d.Overhead, err), stopLifts(causeShape, true), nil
 			}
 			if r.memory().once("shape-lift/" + name + "/" + key) {
 				r.Recorder.Event(md, nil, eventReady, v1alpha1.EventReasonShapesFit,
@@ -490,7 +494,19 @@ func (r *Reconciler) classBlocked(ctx context.Context, md *v1alpha1.ModelDeploym
 			}
 		}
 	}
-	return "", nil
+	return "", "", nil
+}
+
+// stopLifts says what lifts a class's verification stop, for the messages of its event and of
+// ModelDeployment's Degraded condition (api/v1alpha1/conditions.go, ReasonVerificationFailed). A settings
+// contradiction stops the class until the serving spec changes. A shape misfit stops it until the spec or the
+// workload's resolved shapes change (science-agent ruling, 31 Oct 2026), unless the record holds no context limit
+// to test the shapes against (shapesTestable false): then only a new spec lifts it, and the message says so.
+func stopLifts(cause string, shapesTestable bool) string {
+	if cause == causeShape && shapesTestable {
+		return "the serving spec or the workload's resolved shapes change"
+	}
+	return "the serving spec changes"
 }
 
 // shapesKey identifies a workload's shapes, defaults applied, for the shape
