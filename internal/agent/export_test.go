@@ -21,9 +21,20 @@ const (
 	LogOpenSendAtLast = logOpenSendAtLast
 )
 
-// SetFinalWaitForTest shortens the bound of the last report's wait for a periodic send in flight and returns
-// the function that restores it.
-func SetFinalWaitForTest(d time.Duration) (reset func()) {
-	finalWaitOverride.Store(int64(d))
-	return func() { finalWaitOverride.Store(0) }
+// SetTimerForTest replaces the timers of the waits at the agent's end (the wait for a periodic send in flight,
+// and the cut of the last report's tries at a job cancellation), so that a test controls the progress of time. It
+// returns the function that restores the real ones.
+func SetTimerForTest(f func(d time.Duration) (<-chan time.Time, func())) (reset func()) {
+	timerHook.Store(&f)
+	return func() { timerHook.Store(nil) }
 }
+
+// QueuedReportForTest says whether a periodic report waits in a's reporter, not yet taken to be sent.
+func QueuedReportForTest(a *Agent) bool {
+	a.rep.mu.Lock()
+	defer a.rep.mu.Unlock()
+	return a.rep.next != nil
+}
+
+// PeriodicClosedForTest says whether a's periodic reports have closed: the stop has begun.
+func PeriodicClosedForTest(a *Agent) bool { return a.rep.closed() }
