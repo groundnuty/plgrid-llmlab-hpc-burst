@@ -21,7 +21,8 @@
 # runs only with --yes. A skipped test is a failure, not a pass.
 #
 # Exit codes: 0 all passed; 1 a test failed, skipped, left a job behind or
-# timed out; 2 usage error or an unreadable range; 3 refused or NOT RUN (a
+# timed out; 2 usage error, an unreadable range or a table of this script
+# that loads no rows; 3 refused or NOT RUN (a
 # setting is missing, a file is not mode 600, the one-job slot is in use; or a
 # job of a row with a start-wait bound did not start within it and was cancelled
 # by its tag: not a failure, try again later; or the scheduler rejected the
@@ -255,38 +256,63 @@ declare -A HOST PROFILE PARTITION QOS SLOT ACCTKEY GPUS CPUS MEM TLIMIT TMIN EXT
 declare -A STACK ALIAS OGSET OGMIN MOSTJOBS
 declare -A S=()
 
+# load_tables: reads the tables above into the arrays. Comment and blank lines are skipped in the loop itself:
+# piped through grep -v, a table whose every line was a comment, or a grep that failed, gave no rows without a
+# word. A last row with no newline is read too (the || [ -n "$name" ] of each loop). And every table must give at least one row. With none, the script would run on as if the table were
+# simply short: no LIVE TESTS rows is a plan of "run: (none)" with exit 0, and no OWNER GO rows drops the
+# owner's go from the rows that hold QOS now's GPU (#237). An empty table is named and load_tables returns 2,
+# which stops every mode. A table emptied on purpose needs this check changed with it.
 load_tables() {
-  local name kind pkg test gates inputs contexts status
-  while IFS='|' read -r name kind pkg test gates inputs contexts status; do
-    [ -n "$name" ] || continue
-    NAMES+=("$name")
+  local name kind pkg test gates inputs contexts status n=0
+  while IFS='|' read -r name kind pkg test gates inputs contexts status || [ -n "$name" ]; do
+    case $name in ''|'#'*) continue ;; esac
+    NAMES+=("$name"); n=$((n+1))
     KIND[$name]=$kind PKG[$name]=$pkg TEST[$name]=$test GATES[$name]=$gates INPUTS[$name]=$inputs CONTEXTS[$name]=$contexts STATUS[$name]=$status
-  done < <(live_table | grep -v -e '^#' -e '^$')
+  done < <(live_table)
+  [ "$n" -gt 0 ] || { table_empty "LIVE TESTS"; return 2; }
   local h pr pa q sl ak g c m tl tm ex sw
-  while IFS='|' read -r name h pr pa q sl ak g c m tl tm ex sw; do
-    [ -n "$name" ] || continue
+  n=0
+  while IFS='|' read -r name h pr pa q sl ak g c m tl tm ex sw || [ -n "$name" ]; do
+    case $name in ''|'#'*) continue ;; esac
+    n=$((n+1))
     HOST[$name]=$h PROFILE[$name]=$pr PARTITION[$name]=$pa QOS[$name]=$q SLOT[$name]=$sl ACCTKEY[$name]=$ak
     GPUS[$name]=$g CPUS[$name]=$c MEM[$name]=$m TLIMIT[$name]=$tl TMIN[$name]=$tm EXTRA[$name]=$ex SWAIT[$name]=${sw:--}
-  done < <(cluster_table | grep -v -e '^#' -e '^$')
+  done < <(cluster_table)
+  [ "$n" -gt 0 ] || { table_empty "CLUSTER SHAPES"; return 2; }
   local pk
-  while IFS='|' read -r name pk; do
-    [ -n "$name" ] || continue
+  n=0
+  while IFS='|' read -r name pk || [ -n "$name" ]; do
+    case $name in ''|'#'*) continue ;; esac
+    n=$((n+1))
     STACK[$name]=${pk//,/ }
-  done < <(plan_stack_table | grep -v -e '^#' -e '^$')
-  while IFS='|' read -r name pk; do
-    [ -n "$name" ] || continue
+  done < <(plan_stack_table)
+  [ "$n" -gt 0 ] || { table_empty "PLAN STACK"; return 2; }
+  n=0
+  while IFS='|' read -r name pk || [ -n "$name" ]; do
+    case $name in ''|'#'*) continue ;; esac
+    n=$((n+1))
     ALIAS[$name]=${pk//,/ }
-  done < <(alias_table | grep -v -e '^#' -e '^$')
+  done < <(alias_table)
+  [ "$n" -gt 0 ] || { table_empty "ALIASES"; return 2; }
   local og_key og_min mj
-  while IFS='|' read -r name mj; do
-    [ -n "$name" ] || continue
+  n=0
+  while IFS='|' read -r name mj || [ -n "$name" ]; do
+    case $name in ''|'#'*) continue ;; esac
+    n=$((n+1))
     MOSTJOBS[$name]=$mj
-  done < <(most_jobs_table | grep -v -e '^#' -e '^$')
-  while IFS='|' read -r name og_key og_min; do
-    [ -n "$name" ] || continue
+  done < <(most_jobs_table)
+  [ "$n" -gt 0 ] || { table_empty "MOST JOBS"; return 2; }
+  n=0
+  while IFS='|' read -r name og_key og_min || [ -n "$name" ]; do
+    case $name in ''|'#'*) continue ;; esac
+    n=$((n+1))
     OGSET[$name]=$og_key OGMIN[$name]=$og_min
-  done < <(owner_go_table | grep -v -e '^#' -e '^$')
+  done < <(owner_go_table)
+  [ "$n" -gt 0 ] || { table_empty "OWNER GO"; return 2; }
 }
+
+# table_empty <name>: says that the table between "# BEGIN <name>" and "# END <name>" gave no rows.
+table_empty() { say "live-checks: the $1 table of this script loads no rows, so nothing is listed, planned or run"; }
 
 say() { printf '%s\n' "$*"; }
 usage() {
@@ -1215,7 +1241,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$MODE" ] || usage 2
-load_tables
+load_tables || exit 2
 
 case $MODE in
   list)
