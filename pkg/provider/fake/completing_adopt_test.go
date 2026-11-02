@@ -19,7 +19,9 @@ func TestPickAdoptedRanksACompletingJobAsOneThatRan(t *testing.T) {
 	requeuedCG := func(id string) provider.Job {
 		return provider.Job{ID: id, State: []string{"PENDING", "COMPLETING"}, Completing: true, Requeued: true, RestartCount: 1}
 	}
-	running := func(id string) provider.Job { return provider.Job{ID: id, State: []string{"RUNNING"}, StartTime: &start} }
+	running := func(id string) provider.Job {
+		return provider.Job{ID: id, State: []string{"RUNNING"}, StartTime: &start}
+	}
 	pending := func(id string) provider.Job { return provider.Job{ID: id, State: []string{"PENDING"}} }
 	held := func(id string) provider.Job {
 		return provider.Job{ID: id, State: []string{"PENDING"}, Hold: provider.HoldUser}
