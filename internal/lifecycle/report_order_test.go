@@ -204,24 +204,124 @@ func TestBackendDoesNotCountAReportItRefused(t *testing.T) {
 	}
 }
 
-// A report with no count is refused as a bad request, not dropped without a
-// word, and the report held stays.
-func TestBackendRefusesAReportWithNoCount(t *testing.T) {
+// An agent staged before the count existed sends no Seq (0), and keeps running
+// across a controller upgrade (HBEP-7, Compatibility and upgrades): the new
+// controller has just started, the agent registers again, and its reports are
+// kept in arrival order, each replacing the one before and refreshing the time
+// it was received.
+func TestAnOldAgentWithANewControllerIsKeptInArrivalOrder(t *testing.T) {
 	o := newOrderRig(t)
-	before, _, _ := o.kept(t)
-	var ae *agentapi.Error
-	if err := o.rg.backend.Report(o.rg.ctx, o.caller, o.report(0, "unix:/nocount", "")); !errors.As(err, &ae) || ae.Code != agentapi.CodeBadRequest {
-		t.Fatalf("a report with no count: %v, want BadRequest", err)
+	o.rg.restartController()
+	o.rg.backend.Enqueue = func(types.NamespacedName) { o.enqueue.Add(1) }
+	if _, err := o.rg.backend.Register(o.rg.ctx, o.caller, agentapi.RegisterRequest{}); err != nil {
+		t.Fatal(err)
 	}
-	if ep, _, _ := o.kept(t); ep != before {
-		t.Errorf("the Backend holds %q after the refusal, want %q", ep, before)
+	var prev time.Time
+	for _, ep := range []string{"unix:/first", "unix:/second", "unix:/third"} {
+		o.rg.clock.Advance(time.Second)
+		if err := o.rg.backend.Report(o.rg.ctx, o.caller, o.report(0, ep, "")); err != nil {
+			t.Fatalf("an unnumbered report: %v, want it kept", err)
+		}
+		got, at, _ := o.kept(t)
+		if got != ep || !at.After(prev) {
+			t.Fatalf("after %s the Backend holds %q received at %s (the one before %s), want it kept and its receipt time refreshed", ep, got, at, prev)
+		}
+		prev = at
+	}
+}
+
+// A first execution's report arrives late, after a second execution has
+// registered and reported, and its count is higher than the second's. The
+// controller keeps one report slot per Allocation, so a kept late report would
+// replace the second execution's. It is answered as accepted and dropped, as
+// are its unnumbered ones, and never as not registered, which would make that
+// agent register again and look like a third execution. The second execution is
+// still told apart at its registration.
+func TestTheLateReportOfAFirstExecutionDoesNotReplaceTheSecondsAndIsNotAnsweredNotRegistered(t *testing.T) {
+	o := newOrderRig(t)
+	first := o.caller
+	if err := o.rg.backend.Report(o.rg.ctx, first, o.report(o.base.Seq+100, "unix:/first-execution", "")); err != nil {
+		t.Fatal(err)
+	}
+	o.rg.clock.Advance(time.Second)
+	second := first
+	second.AgentInstanceID = strings.Repeat("cd", 16)
+	if _, err := o.rg.backend.Register(o.rg.ctx, second, agentapi.RegisterRequest{RestartCount: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(o.rg.backend.registrations(o.alloc.UID)); got != 2 {
+		t.Fatalf("%d registrations, want the first execution's and the second's", got)
+	}
+	if err := o.rg.backend.Report(o.rg.ctx, second, o.report(1, "unix:/second-execution", "")); err != nil {
+		t.Fatal(err)
+	}
+	_, atSecond, _ := o.kept(t)
+	passes := o.enqueue.Load()
+
+	o.rg.clock.Advance(time.Second)
+	for _, seq := range []uint64{o.base.Seq + 500, 0} {
+		if err := o.rg.backend.Report(o.rg.ctx, first, o.report(seq, "unix:/late", "")); err != nil {
+			t.Fatalf("the first execution's late report counted %d: %v, want it accepted, not answered not registered", seq, err)
+		}
+	}
+	ep, at, from := o.kept(t)
+	if ep != "unix:/second-execution" || from != second.AgentInstanceID || !at.Equal(atSecond) {
+		t.Fatalf("the Backend holds %q from %q received at %s, want the second execution's report received at %s", ep, from, at, atSecond)
+	}
+	if n := o.enqueue.Load(); n != passes {
+		t.Errorf("a dropped report enqueued %d passes, want none", n-passes)
+	}
+	if got := len(o.rg.backend.registrations(o.alloc.UID)); got != 2 {
+		t.Errorf("%d registrations after the late report, want the same two", got)
+	}
+}
+
+// The instance a report comes from can stop being the current one while the
+// report is being taken: the comparison is made again where it is stored, so a
+// report that has become another instance's late one is dropped.
+func TestAReportOfAnInstanceThatStopsBeingCurrentWhileItIsBeingTakenIsDropped(t *testing.T) {
+	o := newOrderRig(t)
+	gate := &gateReader{Reader: o.rg.backend.Reader, entered: make(chan struct{}), release: make(chan struct{})}
+	o.rg.backend.Reader = gate
+	key := strings.Repeat("0f1e2d3c4b5a6978", 4)
+
+	gate.armed.Store(true)
+	done := make(chan error, 1)
+	go func() {
+		done <- o.rg.backend.Report(o.rg.ctx, o.caller, o.report(o.base.Seq+5, "unix:/first-execution", key))
+	}()
+	select {
+	case <-gate.entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the report never reached the key's write")
+	}
+	o.rg.clock.Advance(time.Second)
+	second := o.caller
+	second.AgentInstanceID = strings.Repeat("ef", 16)
+	if _, err := o.rg.backend.Register(o.rg.ctx, second, agentapi.RegisterRequest{RestartCount: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.rg.backend.Report(o.rg.ctx, second, o.report(1, "unix:/second-execution", "")); err != nil {
+		t.Fatal(err)
+	}
+	close(gate.release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("the first execution's report: %v, want it accepted", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the report did not return")
+	}
+	if ep, _, from := o.kept(t); ep != "unix:/second-execution" || from != second.AgentInstanceID {
+		t.Errorf("the Backend holds %q from %q, want the second execution's report", ep, from)
 	}
 }
 
 // The count is per agent instance, and kept with the registration. A
-// registration again with the same ID changes nothing, so the count stays; a
-// new agent instance ID, counting from 1, is kept though the instance before
-// it reached a higher count; and the first instance's count is still its own.
+// registration again with the same ID changes nothing, so the count stays; and
+// a second execution, registered later, counts from 1 and is kept though the
+// first reached a higher count.
 func TestBackendCountsPerAgentInstance(t *testing.T) {
 	o := newOrderRig(t)
 	s := o.base.Seq + 30
@@ -238,9 +338,10 @@ func TestBackendCountsPerAgentInstance(t *testing.T) {
 		t.Fatalf("after a registration again the Backend holds %q, want unix:/first: the count must stay", ep)
 	}
 
+	o.rg.clock.Advance(time.Second)
 	second := o.caller
 	second.AgentInstanceID = strings.Repeat("ab", 16)
-	if _, err := o.rg.backend.Register(o.rg.ctx, second, agentapi.RegisterRequest{}); err != nil {
+	if _, err := o.rg.backend.Register(o.rg.ctx, second, agentapi.RegisterRequest{RestartCount: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if err := o.rg.backend.Report(o.rg.ctx, second, o.report(1, "unix:/second-instance", "")); err != nil {
@@ -250,17 +351,19 @@ func TestBackendCountsPerAgentInstance(t *testing.T) {
 	if ep != "unix:/second-instance" || from != second.AgentInstanceID {
 		t.Fatalf("the Backend holds %q from %q, want the new instance's first report", ep, from)
 	}
-	if err := o.rg.backend.Report(o.rg.ctx, second, o.report(1, "unix:/second-repeat", "")); err != nil {
+	if err := o.rg.backend.Report(o.rg.ctx, second, o.report(1, "unix:/second-resend", "")); err != nil {
 		t.Fatal(err)
 	}
 	if ep, _, _ := o.kept(t); ep != "unix:/second-instance" {
-		t.Errorf("a repeat of the new instance's count was kept: %q", ep)
+		t.Errorf("a resend of the new instance's count was kept: %q", ep)
 	}
 }
 
 // The counts are in memory, like registrations: a controller that restarts
-// holds none, and the agent registers again and goes on with its own count.
-func TestAControllerRestartClearsTheHeldCounts(t *testing.T) {
+// holds none. A report delayed across the restart is answered not registered
+// until the agent registers again; the agent sends it again, it is kept, and
+// the numbering goes on: the next report is kept and an older one is dropped.
+func TestAReportDelayedAcrossAControllerRestartIsAnsweredNotRegisteredAndNumberingGoesOn(t *testing.T) {
 	o := newOrderRig(t)
 	s := o.base.Seq + 40
 	if err := o.rg.backend.Report(o.rg.ctx, o.caller, o.report(s, "unix:/before", "")); err != nil {
@@ -268,16 +371,23 @@ func TestAControllerRestartClearsTheHeldCounts(t *testing.T) {
 	}
 	o.rg.restartController()
 	var ae *agentapi.Error
-	if err := o.rg.backend.Report(o.rg.ctx, o.caller, o.report(s+1, "unix:/x", "")); !errors.As(err, &ae) || ae.Code != agentapi.CodeNotRegistered {
+	delayed := o.report(s+1, "unix:/delayed", "")
+	if err := o.rg.backend.Report(o.rg.ctx, o.caller, delayed); !errors.As(err, &ae) || ae.Code != agentapi.CodeNotRegistered {
 		t.Fatalf("a report after the restart: %v, want NotRegistered", err)
 	}
 	if _, err := o.rg.backend.Register(o.rg.ctx, o.caller, agentapi.RegisterRequest{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := o.rg.backend.Report(o.rg.ctx, o.caller, o.report(1, "unix:/after", "")); err != nil {
-		t.Fatal(err)
-	}
-	if ep, _, _ := o.kept(t); ep != "unix:/after" {
-		t.Errorf("the Backend holds %q, want unix:/after: a restarted controller holds no count", ep)
+	for _, step := range []struct {
+		seq  uint64
+		ep   string
+		want string
+	}{{s + 1, "unix:/delayed", "unix:/delayed"}, {s + 2, "unix:/next", "unix:/next"}, {s + 1, "unix:/older", "unix:/next"}} {
+		if err := o.rg.backend.Report(o.rg.ctx, o.caller, o.report(step.seq, step.ep, "")); err != nil {
+			t.Fatal(err)
+		}
+		if ep, _, _ := o.kept(t); ep != step.want {
+			t.Fatalf("after %s counted %d the Backend holds %q, want %q", step.ep, step.seq, ep, step.want)
+		}
 	}
 }

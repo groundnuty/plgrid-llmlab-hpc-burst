@@ -26,9 +26,9 @@ type registration struct {
 	cpuArch         string
 	gpus            []agentapi.GPU
 	at              time.Time
-	// seq is the Seq of the newest report kept from this agent instance, 0
-	// while none was: a report is kept only if it is newer (agentapi.ReportIsNewer).
-	// It lives and dies with the registration, in memory.
+	// seq is the Seq of the last report kept from this agent instance, 0 while
+	// none was numbered: a numbered report is kept only if it is newer
+	// (agentapi.KeepsReport). It lives and dies with the registration, in memory.
 	seq uint64
 }
 
@@ -149,27 +149,26 @@ func (b *Backend) registered(c agentapi.Caller) bool {
 // Report takes the caller's latest full snapshot. The Instance's key, sent
 // until the controller says it is stored, is written to its mode-600 file.
 //
-// Only a report newer than the newest kept from the same agent instance is
-// kept (agentapi.ReportIsNewer, HBEP-7, Report order). An older one, or a
-// repeat, is answered as accepted and has no other effect: no key written, no
-// sample taken, no pass enqueued. The count held for the instance rises only
-// when the report is kept, so one that was refused is not taken for an old one
-// when the agent sends it again.
+// For a registered agent (CodeNotRegistered is answered first) the Backend keeps
+// a report only from the agent instance currently registered for the
+// Allocation, and only if its Seq is newer than the last kept from that
+// instance (admit; HBEP-7, Report order). Any other report is answered as
+// accepted, and has no effect at all: no key written, no sample taken, no
+// receipt time refreshed, no pass enqueued. The count held for the instance
+// rises only when a report is kept, so one that was refused is kept when the
+// agent sends it again.
 func (b *Backend) Report(ctx context.Context, c agentapi.Caller, r agentapi.Report) error {
 	if err := b.serving(); err != nil {
 		return err
 	}
-	if !b.registered(c) {
-		return agentapi.Errorf(agentapi.CodeNotRegistered, "agent instance %s is not registered", c.AgentInstanceID)
-	}
-	if err := agentapi.CheckSeq(r.Seq); err != nil {
-		return agentapi.Errorf(agentapi.CodeBadRequest, "%v", err)
-	}
-	// Early, so that an old report writes no key; checked again where the
-	// report is kept, since another report of the same agent can be kept in
-	// between.
-	if !b.newerThanKept(c, r.Seq) {
-		return nil
+	// Early, so that a report that is not kept writes no key. It is decided
+	// again where the report is stored: the key's write, a file write, runs
+	// outside the lock, and another report of the agent can be kept meanwhile.
+	b.mu.Lock()
+	v := b.admit(c, r.Seq)
+	b.mu.Unlock()
+	if err := v.refusal(c); err != nil || v != admitKeep {
+		return err
 	}
 	// Before anything is stored: a refused report has no effect, and the
 	// earlier one stays the latest.
@@ -185,18 +184,16 @@ func (b *Backend) Report(ctx context.Context, c agentapi.Caller, r agentapi.Repo
 		}
 		r.Instance.Key = "" // never kept beyond its file
 	}
+	// The decision and the store are one step under the lock.
 	b.mu.Lock()
+	if v := b.admit(c, r.Seq); v != admitKeep {
+		b.mu.Unlock()
+		return v.refusal(c)
+	}
 	s := b.state(c)
-	reg, ok := s.regs[c.AgentInstanceID]
-	if !ok {
-		b.mu.Unlock()
-		return agentapi.Errorf(agentapi.CodeNotRegistered, "agent instance %s is not registered", c.AgentInstanceID)
+	if r.Seq != 0 {
+		s.regs[c.AgentInstanceID].seq = r.Seq
 	}
-	if !agentapi.ReportIsNewer(r.Seq, reg.seq) {
-		b.mu.Unlock()
-		return nil
-	}
-	reg.seq = r.Seq
 	rc := r
 	s.report, s.reportAt, s.reportFrom = &rc, now, c.AgentInstanceID
 	if r.Instance != nil {
@@ -211,17 +208,49 @@ func (b *Backend) Report(ctx context.Context, c agentapi.Caller, r agentapi.Repo
 	return nil
 }
 
-// newerThanKept says whether a report counted seq is newer than the newest kept
-// from the caller's agent instance.
-func (b *Backend) newerThanKept(c agentapi.Caller, seq uint64) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+// admission is what Report does with a report.
+type admission int
+
+const (
+	admitKeep          admission = iota // keep it
+	admitDrop                           // answer it as accepted and drop it
+	admitNotRegistered                  // the agent instance is not registered
+)
+
+// refusal is the error Report answers with: CodeNotRegistered for an agent
+// instance that is not registered, nil for a report kept or dropped.
+func (v admission) refusal(c agentapi.Caller) error {
+	if v == admitNotRegistered {
+		return agentapi.Errorf(agentapi.CodeNotRegistered, "agent instance %s is not registered", c.AgentInstanceID)
+	}
+	return nil
+}
+
+// admit decides what Report does with a report from c counted seq. The caller
+// holds b.mu. An agent instance that is not registered is not registered, first.
+// Another instance than the one currently registered for the Allocation, the
+// newest registration (regLess), is dropped: a first execution's late report
+// must neither replace a second one's nor be answered not registered, which
+// would make that agent register again and look like a third execution. From
+// the current instance a report is kept if agentapi.KeepsReport says so.
+func (b *Backend) admit(c agentapi.Caller, seq uint64) admission {
 	s, ok := b.agents[c.AllocationUID]
 	if !ok {
-		return true
+		return admitNotRegistered
 	}
 	reg, ok := s.regs[c.AgentInstanceID]
-	return !ok || agentapi.ReportIsNewer(seq, reg.seq)
+	if !ok {
+		return admitNotRegistered
+	}
+	for _, other := range s.regs {
+		if regLess(*reg, *other) {
+			return admitDrop
+		}
+	}
+	if !agentapi.KeepsReport(seq, reg.seq) {
+		return admitDrop
+	}
+	return admitKeep
 }
 
 // checkWorkerNames refuses a report in which two workers share a name. A

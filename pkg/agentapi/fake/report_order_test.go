@@ -69,42 +69,74 @@ func TestBackendDropsARepeatOfTheHeldCount(t *testing.T) {
 	eq(t, "dropped", b.Dropped(allocUID), 1)
 }
 
-// The count is per agent instance: a restarted agent, with a new instance ID
-// counting from 1, is kept, though the instance before it reached 100.
-func TestBackendKeepsAnAgentInstanceThatCountsFromOneAgain(t *testing.T) {
-	b := registered(t, agent1, agent2)
-	if err := b.Report(bgndCtx, caller(agent1), stoppedAt(100, agentapi.PartStopped)); err != nil {
+// A second execution registers and reports; the first execution's late report,
+// with a much higher count, arrives. The Backend keeps the second execution's
+// report, and answers the late one as accepted: not as not registered, which
+// would make that agent register again and look like a third execution. The
+// count is per agent instance: the second counts from 1 and is kept though the
+// first reached 100.
+func TestBackendDropsTheLateReportOfAFirstExecution(t *testing.T) {
+	b := registered(t, agent1)
+	if err := b.Report(bgndCtx, caller(agent1), stoppedAt(100, agentapi.PartRunning)); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Report(bgndCtx, caller(agent2), stoppedAt(1, agentapi.PartRunning)); err != nil {
+	if _, err := b.Register(bgndCtx, caller(agent2), agentapi.RegisterRequest{RestartCount: 1}); err != nil {
 		t.Fatal(err)
 	}
-	eq(t, "the phase the Backend holds", phaseOfLast(t, b), agentapi.PartRunning)
+	if err := b.Report(bgndCtx, caller(agent2), stoppedAt(1, agentapi.PartStopped)); err != nil {
+		t.Fatal(err)
+	}
+	eq(t, "dropped before the late report", b.Dropped(allocUID), 0)
+
+	for _, seq := range []uint64{500, 0} { // numbered, and unnumbered
+		if err := b.Report(bgndCtx, caller(agent1), stoppedAt(seq, agentapi.PartExited)); err != nil {
+			t.Fatalf("the first execution's late report counted %d: %v, want it accepted", seq, err)
+		}
+	}
+	eq(t, "the phase the Backend holds", phaseOfLast(t, b), agentapi.PartStopped)
 	eq(t, "reports kept", len(b.Reports(allocUID)), 2)
-	eq(t, "dropped", b.Dropped(allocUID), 0)
-	// And the first instance's count is its own: 100 stays held for it.
-	if err := b.Report(bgndCtx, caller(agent1), stoppedAt(99, agentapi.PartExited)); err != nil {
+	eq(t, "dropped", b.Dropped(allocUID), 2)
+	eq(t, "registrations: the late report registered nobody", len(b.Registrations(allocUID)), 2)
+}
+
+// A report from an agent instance that is not registered is answered not
+// registered, before anything else is decided.
+func TestBackendAnswersNotRegisteredBeforeItComparesCounts(t *testing.T) {
+	b := registered(t, agent1)
+	if err := b.Report(bgndCtx, caller(agent1), stoppedAt(5, agentapi.PartRunning)); err != nil {
 		t.Fatal(err)
 	}
-	eq(t, "dropped after an older report of the first instance", b.Dropped(allocUID), 1)
+	wantCode(t, "Report from an instance that never registered", b.Report(bgndCtx, caller(agent2), stoppedAt(1, agentapi.PartStopped)), agentapi.CodeNotRegistered)
+	eq(t, "dropped", b.Dropped(allocUID), 0)
 }
 
 // The counts are in memory, like registrations: Forget, which stands for a
-// controller restart, clears them with the registrations.
-func TestBackendForgetClearsTheCounts(t *testing.T) {
+// controller restart, clears them with the registrations. A report delayed
+// across the restart is answered not registered until the agent registers
+// again, and its numbering goes on: the report sent again is kept, and an older
+// one is dropped.
+func TestBackendForgetClearsTheCountsAndNumberingGoesOn(t *testing.T) {
 	b := registered(t, agent1)
 	if err := b.Report(bgndCtx, caller(agent1), stoppedAt(50, agentapi.PartRunning)); err != nil {
 		t.Fatal(err)
 	}
 	b.Forget()
+	delayed := stoppedAt(51, agentapi.PartStopping)
+	wantCode(t, "the delayed report", b.Report(bgndCtx, caller(agent1), delayed), agentapi.CodeNotRegistered)
 	if _, err := b.Register(bgndCtx, caller(agent1), agentapi.RegisterRequest{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Report(bgndCtx, caller(agent1), stoppedAt(2, agentapi.PartStopped)); err != nil {
+	if err := b.Report(bgndCtx, caller(agent1), delayed); err != nil { // the agent sends it again
+		t.Fatal(err)
+	}
+	if err := b.Report(bgndCtx, caller(agent1), stoppedAt(52, agentapi.PartStopped)); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Report(bgndCtx, caller(agent1), stoppedAt(51, agentapi.PartExited)); err != nil {
 		t.Fatal(err)
 	}
 	eq(t, "the phase the Backend holds", phaseOfLast(t, b), agentapi.PartStopped)
-	eq(t, "dropped", b.Dropped(allocUID), 0)
+	eq(t, "dropped", b.Dropped(allocUID), 1)
 }
 
 // The held count rises only when a report is kept: one the Backend refused,
@@ -122,11 +154,18 @@ func TestBackendDoesNotCountAReportItRefused(t *testing.T) {
 	eq(t, "dropped", b.Dropped(allocUID), 0)
 }
 
-// A report with no count is refused, and not kept.
-func TestBackendRefusesAReportWithNoCount(t *testing.T) {
+// An agent built before the count existed sends no Seq (0): its reports are
+// kept in arrival order, as before, and they leave the count held for the
+// instance alone.
+func TestBackendKeepsUnnumberedReportsInArrivalOrder(t *testing.T) {
 	b := registered(t, agent1)
-	wantCode(t, "Report", b.Report(bgndCtx, caller(agent1), stoppedAt(0, agentapi.PartRunning)), agentapi.CodeBadRequest)
-	eq(t, "reports kept", len(b.Reports(allocUID)), 0)
+	for _, phase := range []agentapi.PartPhase{agentapi.PartRunning, agentapi.PartStopped} {
+		if err := b.Report(bgndCtx, caller(agent1), stoppedAt(0, phase)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	eq(t, "reports kept", len(b.Reports(allocUID)), 2)
+	eq(t, "the phase the Backend holds", phaseOfLast(t, b), agentapi.PartStopped)
 	eq(t, "dropped", b.Dropped(allocUID), 0)
 }
 

@@ -7,9 +7,9 @@ import (
 )
 
 // The rule that keeps the newest report (HBEP-7, Report order). The cases are
-// the ones a backend meets: the first report, a newer one, an older one and a
-// repeat.
-func TestReportIsNewerOnlyWhenItsCountIsAboveTheHeldOne(t *testing.T) {
+// the ones a backend meets: the first report, a newer one, an older one, a
+// resend, and the unnumbered reports of an agent built before the count.
+func TestKeepsReportOnlyWhenItsCountIsAboveTheHeldOneOrThereIsNone(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		seq, held uint64
@@ -18,24 +18,14 @@ func TestReportIsNewerOnlyWhenItsCountIsAboveTheHeldOne(t *testing.T) {
 		{"the first report, none held", 1, 0, true},
 		{"the next report", 6, 5, true},
 		{"a gap in the counts: reports superseded before they were sent", 9, 5, true},
-		{"a repeat of the held report", 5, 5, false},
+		{"a resend of the held report", 5, 5, false},
 		{"an older report", 4, 5, false},
 		{"a restarted instance counts from 1 against its own 0", 1, 0, true},
+		{"an unnumbered report, none held", 0, 0, true},
+		{"an unnumbered report, a count held: arrival order, as before", 0, 5, true},
 	} {
-		if got := ReportIsNewer(tc.seq, tc.held); got != tc.want {
-			t.Errorf("%s: ReportIsNewer(%d, %d) = %v, want %v", tc.name, tc.seq, tc.held, got, tc.want)
-		}
-	}
-}
-
-// A report with no count is refused, not dropped without a word.
-func TestCheckSeqRefusesAReportWithNoCount(t *testing.T) {
-	if err := CheckSeq(0); err == nil {
-		t.Error("CheckSeq(0) accepted a report with no count")
-	}
-	for _, seq := range []uint64{1, 2, 1 << 40} {
-		if err := CheckSeq(seq); err != nil {
-			t.Errorf("CheckSeq(%d) = %v, want nil", seq, err)
+		if got := KeepsReport(tc.seq, tc.held); got != tc.want {
+			t.Errorf("%s: KeepsReport(%d, %d) = %v, want %v", tc.name, tc.seq, tc.held, got, tc.want)
 		}
 	}
 }

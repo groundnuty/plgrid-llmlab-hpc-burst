@@ -219,8 +219,16 @@ func TestAnOlderReportIsAnswered204AndNotKeptOverTheWire(t *testing.T) {
 	if n := x.backend.Dropped(uidA); n != 1 {
 		t.Errorf("dropped = %d, want 1", n)
 	}
-	// A body with no seq is refused with 400.
-	if rec := x.do(http.MethodPost, agentapi.PathReport, x.good(), []byte(`{"time":"2026-11-02T12:00:00Z"}`)); rec.Code != http.StatusBadRequest {
-		t.Errorf("a report with no seq: status %d (%s), want 400", rec.Code, rec.Body)
+	// An agent built before the count sends no seq: its reports are kept, in
+	// arrival order, as before (HBEP-7, Compatibility and upgrades).
+	for _, phase := range []string{"running", "stopped"} {
+		unnumbered := []byte(fmt.Sprintf(`{"time":"2026-11-02T12:00:00Z","instance":{"uid":"inst-uid-1","generation":1,"workers":[{"name":"worker-0","phase":%q}]}}`, phase))
+		if rec := x.do(http.MethodPost, agentapi.PathReport, x.good(), unnumbered); rec.Code != http.StatusNoContent {
+			t.Fatalf("a report with no seq, %s: status %d (%s), want 204", phase, rec.Code, rec.Body)
+		}
+	}
+	got, _ = x.backend.LastReport(uidA)
+	if got.Seq != 0 || got.Instance == nil || got.Instance.Workers[0].Phase != agentapi.PartStopped {
+		t.Errorf("after two unnumbered reports the Backend holds %+v, want the second, in arrival order", got)
 	}
 }

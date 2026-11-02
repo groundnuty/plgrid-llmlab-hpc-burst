@@ -42,9 +42,9 @@ type Backend struct {
 	desired map[string]agentapi.DesiredState
 	regs    map[string][]Registration
 	reports map[string][]agentapi.Report
-	// seqs is the Seq of the newest report kept from each agent instance, and
+	// seqs is the Seq of the last report kept from each agent instance, and
 	// dropped counts the reports a Report call answered as accepted and did not
-	// keep, per Allocation (agentapi.ReportIsNewer).
+	// keep, per Allocation (agentapi.KeepsReport).
 	seqs    map[seqKey]uint64
 	dropped map[string]int
 	fail    map[string][]error
@@ -187,34 +187,36 @@ func (b *Backend) Desired(_ context.Context, c agentapi.Caller) (agentapi.Desire
 	return cloneDesired(d).WithVersion(), nil
 }
 
-// Report appends the report to the Allocation's list, if it is newer than the
-// newest kept from the same agent instance (agentapi.ReportIsNewer); an older
-// one, or a repeat, is answered as accepted, counted by Dropped and not kept. A
-// report without a Seq is refused. The count held for the instance rises only
-// when a report is kept.
+// Report appends the report to the Allocation's list, as the lifecycle
+// controller's Backend keeps it (HBEP-7, Report order). For a registered agent
+// (CodeNotRegistered is answered first) it keeps a report only from the agent
+// instance registered last for the Allocation, and only if agentapi.KeepsReport
+// says so for its Seq and the Seq of the last report kept from that instance.
+// Any other report is answered as accepted, counted by Dropped and not kept. The
+// count held for the instance rises only when a report is kept.
 func (b *Backend) Report(_ context.Context, c agentapi.Caller, r agentapi.Report) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if err := b.begin(MethodReport, c); err != nil {
 		return err
 	}
+	if !b.registered(c) {
+		return notRegistered(c)
+	}
+	regs := b.regs[c.AllocationUID]
+	k := seqKey{c.AllocationUID, c.AgentInstanceID}
+	if regs[len(regs)-1].Caller.AgentInstanceID != c.AgentInstanceID || !agentapi.KeepsReport(r.Seq, b.seqs[k]) {
+		b.dropped[c.AllocationUID]++
+		return nil
+	}
 	if r.Instance != nil && r.Instance.Key != "" {
 		if err := agentapi.CheckKey([]byte(r.Instance.Key)); err != nil {
 			return agentapi.Errorf(agentapi.CodeBadRequest, "%s: the instance key: %v", MethodReport, err)
 		}
 	}
-	if !b.registered(c) {
-		return notRegistered(c)
+	if r.Seq != 0 {
+		b.seqs[k] = r.Seq
 	}
-	if err := agentapi.CheckSeq(r.Seq); err != nil {
-		return agentapi.Errorf(agentapi.CodeBadRequest, "%s: %v", MethodReport, err)
-	}
-	k := seqKey{c.AllocationUID, c.AgentInstanceID}
-	if !agentapi.ReportIsNewer(r.Seq, b.seqs[k]) {
-		b.dropped[c.AllocationUID]++
-		return nil
-	}
-	b.seqs[k] = r.Seq
 	b.reports[c.AllocationUID] = append(b.reports[c.AllocationUID], cloneReport(r))
 	return nil
 }

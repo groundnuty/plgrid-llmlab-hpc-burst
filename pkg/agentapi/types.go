@@ -285,13 +285,16 @@ type WarmUpRequest struct {
 // ReportInterval and at every change (HBEP-7, Reports). It is never a delta.
 type Report struct {
 	// Seq is the agent instance's own count of the reports it builds: 1 for
-	// its first report, one more for each report after it, periodic and last
-	// alike (HBEP-7, Report order). A report that is tried again keeps its
-	// number. The Backend keeps a report only if its Seq is newer than the
-	// newest it holds for that agent instance (ReportIsNewer), so the last
-	// report the agent built stands whatever order the reports arrive in. A
-	// new agent instance counts from 1. The field is required: CheckSeq
-	// refuses a report without it.
+	// its first report, a higher number for each report after it, fixed when
+	// the report is built and kept when it is tried again; the periodic
+	// reports and both last-report paths draw from the one count, and gaps are
+	// allowed (HBEP-7, Report order). The Backend keeps a report only from the
+	// agent instance currently registered for the Allocation, and only if its
+	// Seq is newer than the last it kept from that instance (KeepsReport), so
+	// the last report the agent built stands whatever order the reports arrive
+	// in. A new agent instance counts from 1. 0 is no count: an agent built
+	// before the count existed sends none, and its reports are kept in arrival
+	// order, as before.
 	Seq uint64 `json:"seq"`
 	// Time is when the agent took the snapshot, by its own clock.
 	Time time.Time `json:"time"`

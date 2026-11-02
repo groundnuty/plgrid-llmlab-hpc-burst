@@ -86,7 +86,8 @@ func TestBackendForgetDropsEveryRegistration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := b.Report(bgndCtx, caller(agent1), agentapi.Report{Seq: 1, Time: t0}); err != nil {
+	// agent2 registered last: it is the instance the Backend keeps reports from.
+	if err := b.Report(bgndCtx, caller(agent2), agentapi.Report{Seq: 1, Time: t0}); err != nil {
 		t.Fatal(err)
 	}
 

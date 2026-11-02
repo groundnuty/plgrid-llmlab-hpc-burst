@@ -133,14 +133,28 @@
 // Reports can reach the Backend out of the order the agent built them: a
 // periodic report already sent when the agent stops can arrive after its last
 // report. So every Report carries Seq, the agent instance's own count of the
-// reports it builds, from 1, periodic and last alike. A Backend keeps a report
-// only if its Seq is newer than the newest it holds for that agent instance ID
-// (ReportIsNewer), and answers an older one, or a repeat, as accepted without
-// keeping it; it takes no other effect from it. It raises the count it holds
-// only when it keeps a report, so a report it refused is not taken for an old
-// one when the agent sends it again. A new agent instance ID starts its own
-// count. The held counts are in memory, like registrations: a restart clears
-// them. A Report with no Seq is refused (CheckSeq).
+// reports it builds, from 1, fixed when the report is built and kept when it is
+// tried again; periodic and last reports draw from the one count. The Backend
+// decides, for a registered agent (CodeNotRegistered is answered first):
+//
+//   - it keeps a report only from the agent instance ID currently registered
+//     for the Allocation. A report from any other instance, such as a first
+//     execution's late last report after a second execution registered, is
+//     answered as accepted and dropped, never as not registered, so that agent
+//     does not register again and look like a third execution;
+//   - from that instance it keeps a report whose Seq is greater than the last
+//     it kept (KeepsReport). An older report, or a resend of the held one after a
+//     lost response, is answered as accepted and dropped: it replaces nothing,
+//     refreshes no receipt time and takes no other effect. A report it refused
+//     leaves the held count unchanged, so the agent's retry is kept;
+//   - a report with Seq 0 comes from an agent built before the count existed,
+//     and is kept in arrival order, as before, subject to the first rule;
+//   - the comparison and the store are one step under one lock.
+//
+// A new agent instance ID starts its own count. The held counts are in memory,
+// like registrations: a restart clears them, so the newest report stands among
+// those received since the Backend started, and a report delayed across a
+// restart is answered not registered until the agent registers again.
 //
 // What must survive a restart is the controller's judgement, which it writes
 // to the API: the Instance's phase, conditions, end reason and end time,

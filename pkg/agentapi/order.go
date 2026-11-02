@@ -1,22 +1,12 @@
 package agentapi
 
-import "fmt"
-
-// ReportIsNewer says whether a report counted seq is newer than the newest a
-// Backend holds for the same agent instance ID: held, which is 0 while it holds
-// none (HBEP-7, Report order). A Backend keeps a report only if it is, and
-// answers an older one, or a repeat of the same number, as accepted without
-// keeping it: the agent never retries it. The held count is raised only when a
-// report is kept, so a report that was refused and is tried again, with its
-// number, is not taken for an old one.
-func ReportIsNewer(seq, held uint64) bool { return seq > held }
-
-// CheckSeq refuses a report that carries no count. Counts start at 1; a report
-// without one would never be newer than the 0 a Backend starts from, and would
-// be dropped without a word.
-func CheckSeq(seq uint64) error {
-	if seq == 0 {
-		return fmt.Errorf("the report carries no seq: an agent counts its reports from 1")
-	}
-	return nil
-}
+// KeepsReport says whether a Backend keeps a report counted seq from the agent
+// instance it holds the count held for: the Seq of the last report it kept from
+// that instance, 0 while it has kept none (HBEP-7, Report order). It keeps a
+// numbered report only if it is newer than the held count. An older one, or a
+// resend of the held one, is answered as accepted without being kept, so the
+// agent never retries it. A report counted 0 comes from an agent built before
+// the count existed, which counts from 1 when it has one: it is kept, in arrival
+// order, as before. A Backend raises the held count only to the Seq of a report
+// it kept, so a report it refused is kept when the agent sends it again.
+func KeepsReport(seq, held uint64) bool { return seq == 0 || seq > held }
